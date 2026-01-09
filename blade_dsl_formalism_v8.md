@@ -10,7 +10,142 @@ We introduce *arity polymorphism*—distinct from the rank polymorphism of APL, 
 
 The (r!)^d speedup from product symmetry over d-dimensional grids is well-known in the tensor literature. Our contribution is a *programming language design* that preserves this structure: dimensional currying prevents accidental flattening that would lose (r!)^(d-1) speedup, and the combinator algebra enables compositional exploitation of symmetry.
 
----
+## Table of Contents
+
+1. [Introduction](#1-introduction)
+   - [1.1 What Problem Does Blade-DSL Solve?](#11-what-problem-does-blade-dsl-solve)
+   - [1.2 What Makes Blade-DSL Different?](#12-what-makes-blade-dsl-different)
+   - [1.3 Target Applications and Scale](#13-target-applications-and-scale)
+   - [1.4 How Does It Compare to NumPy/xarray/Dask?](#14-how-does-it-compare-to-numpyxarraydask)
+
+2. [Computational Paradigms: S/T and T/S](#2-computational-paradigms-st-and-ts)
+   - [2.1 Two Orientations Toward Array Computation](#21-two-orientations-toward-array-computation)
+   - [2.2 Historical Context](#22-historical-context)
+   - [2.3 Formal Characterization](#23-formal-characterization)
+   - [2.4 The Duality Theorem](#24-the-duality-theorem)
+   - [2.5 Non-Trivial T/S Combinators](#25-non-trivial-ts-combinators)
+   - [2.6 The Fundamental Duality: Fusion and Factorization](#26-the-fundamental-duality-fusion-and-factorization)
+   - [2.7 Why S/T Enables Symmetry Exploitation](#27-why-st-enables-symmetry-exploitation)
+   - [2.8 Linguistic Parallel](#28-linguistic-parallel)
+   - [2.9 S/T as Mathematical Prerequisite: Syntactic Impossibility](#29-st-as-mathematical-prerequisite-syntactic-impossibility)
+   - [2.10 S/T as Mathematical Prerequisite: The Necessity Theorems](#210-st-as-mathematical-prerequisite-the-necessity-theorems)
+
+3. [Preliminaries](#3-preliminaries)
+   - [3.1 Notation](#31-notation)
+   - [3.2 Arrays](#32-arrays)
+   - [3.3 Extents](#33-extents)
+   - [3.4 Index Types](#34-index-types)
+   - [3.5 Array Types](#35-array-types)
+   - [3.6 Array Expressions](#36-array-expressions)
+   - [3.7 Array Combinators](#37-array-combinators)
+   - [3.8 Array Combinator Laws](#38-array-combinator-laws)
+
+4. [Functions](#4-functions)
+   - [4.1 Function Signatures](#41-function-signatures)
+   - [4.2 Function Syntax](#42-function-syntax)
+   - [4.3 Commutativity Groups](#43-commutativity-groups)
+
+5. [Loop Objects](#5-loop-objects)
+   - [5.1 The Core Abstraction](#51-the-core-abstraction)
+   - [5.2 S-Dimensions and T-Dimensions](#52-s-dimensions-and-t-dimensions)
+   - [5.3 Method Loop Structure](#53-method-loop-structure)
+   - [5.4 Object Loop Structure](#54-object-loop-structure)
+   - [5.5 Partial Application Semantics](#55-partial-application-semantics)
+   - [5.6 The Structural Trinity: Formal Necessity Proofs](#56-the-structural-trinity-formal-necessity-proofs)
+
+6. [Arity Polymorphism](#6-arity-polymorphism)
+   - [6.1 Distinction from Rank Polymorphism](#61-distinction-from-rank-polymorphism)
+   - [6.2 Why Arity Polymorphism Matters](#62-why-arity-polymorphism-matters)
+   - [6.3 Arity and Commutativity](#63-arity-and-commutativity)
+   - [6.4 Arity-Polymorphic Syntax](#64-arity-polymorphic-syntax)
+   - [6.5 Formal Treatment](#65-formal-treatment)
+   - [6.6 Comparison to Related Work](#66-comparison-to-related-work)
+
+7. [Dimensional Currying](#7-dimensional-currying)
+   - [7.1 The Core Idea](#71-the-core-idea)
+   - [7.2 Type-Level Encoding](#72-type-level-encoding)
+   - [7.3 Cache Optimality by Construction](#73-cache-optimality-by-construction)
+   - [7.4 Distinction from Slicing](#74-distinction-from-slicing)
+   - [7.5 Enabling the Combinator Algebra](#75-enabling-the-combinator-algebra)
+   - [7.6 Symmetry Integration](#76-symmetry-integration)
+   - [7.7 Sparse Tensor Compatibility](#77-sparse-tensor-compatibility)
+
+8. [Combinator Algebra](#8-combinator-algebra)
+   - [8.1 Core Combinators](#81-core-combinators)
+   - [8.2 Parallel Combinators](#82-parallel-combinators)
+   - [8.3 Collection Combinators](#83-collection-combinators)
+   - [8.4 Evaluation](#84-evaluation)
+   - [8.5 Combinator Laws](#85-combinator-laws)
+   - [8.6 Composition Combinators and the Duality Theorem](#86-composition-combinators-and-the-duality-theorem)
+   - [8.7 Additional Combinator Identities](#87-additional-combinator-identities)
+   - [8.8 Zero Elements and Control Flow](#88-zero-elements-and-control-flow)
+
+9. [Symmetry System](#9-symmetry-system)
+   - [9.1 Symmetry/Commutativity States](#91-symmetrycommutativity-states)
+   - [9.2 State Computation](#92-state-computation)
+   - [9.3 Output Symmetry Inference via Lowering](#93-output-symmetry-inference-via-lowering)
+   - [9.4 The Symmetry Transformation (Lowering in Action)](#94-the-symmetry-transformation-lowering-in-action)
+
+10. [Triangular Iteration](#10-triangular-iteration)
+    - [10.1 Cumulative Bound Computation](#101-cumulative-bound-computation)
+    - [10.2 Left-Justified Indexing](#102-left-justified-indexing)
+    - [10.3 Index Mapping for Access](#103-index-mapping-for-access)
+    - [10.4 Complexity Analysis](#104-complexity-analysis)
+    - [10.5 Product Symmetry Theorem](#105-product-symmetry-theorem)
+
+11. [Type System](#11-type-system)
+    - [11.1 Judgments](#111-judgments)
+    - [11.2 Array Rules](#112-array-rules)
+    - [11.3 Function Rules](#113-function-rules)
+    - [11.4 Loop Object Rules](#114-loop-object-rules)
+    - [11.5 Application Rules](#115-application-rules)
+    - [11.6 Combinator Rules](#116-combinator-rules)
+
+12. [Operational Semantics](#12-operational-semantics)
+    - [12.1 Evaluation Model](#121-evaluation-model)
+    - [12.2 Loop Level Types](#122-loop-level-types)
+    - [12.3 Fusion Analysis](#123-fusion-analysis)
+    - [12.4 Compute Semantics](#124-compute-semantics)
+
+13. [Concrete Syntax](#13-concrete-syntax)
+    - [13.1 Array Declaration](#131-array-declaration)
+    - [13.2 Function Declaration](#132-function-declaration)
+    - [13.3 Loop Construction and Application](#133-loop-construction-and-application)
+    - [13.4 Combinators](#134-combinators)
+    - [13.5 Tuple Syntax](#135-tuple-syntax)
+    - [13.6 Poly-Indexing Syntax](#136-poly-indexing-syntax)
+
+14. [Open Design Questions](#14-open-design-questions)
+    - [14.1 Error Handling](#141-error-handling)
+    - [14.2 Additional Considerations](#142-additional-considerations)
+
+15. [Future Work](#15-future-work)
+    - [15.1 Automatic Differentiation](#151-automatic-differentiation)
+    - [15.2 Stencils and Halo Exchange](#152-stencils-and-halo-exchange)
+    - [15.3 Domain Decomposition for Distributed Computation](#153-domain-decomposition-for-distributed-computation)
+    - [15.4 Triangular File Format](#154-triangular-file-format)
+    - [15.5 Domain Decomposition Summary](#155-domain-decomposition-summary)
+    - [15.6 Remaining Open Questions](#156-remaining-open-questions)
+    - [15.7 Tree Structures](#157-tree-structures)
+
+16. [Related Work](#16-related-work)
+    - [16.1 Array Languages and Rank Polymorphism](#161-array-languages-and-rank-polymorphism)
+    - [16.2 Loop Abstractions and Scheduling](#162-loop-abstractions-and-scheduling)
+    - [16.3 Parallel Loop Constructs](#163-parallel-loop-constructs)
+    - [16.4 Multi-Dimensional Homomorphisms](#164-multi-dimensional-homomorphisms)
+    - [16.5 Tensor Compilers](#165-tensor-compilers)
+    - [16.6 Scientific Python Ecosystem](#166-scientific-python-ecosystem)
+    - [16.7 Sparse and Masked Array Systems](#167-sparse-and-masked-array-systems)
+    - [16.8 Novelty and Impact Assessment](#168-novelty-and-impact-assessment)
+
+17. [Conclusion](#17-conclusion)
+    - [17.1 Theoretical Contributions](#171-theoretical-contributions)
+    - [17.2 Language Design](#172-language-design)
+    - [17.3 Implementation Status](#173-implementation-status)
+    - [17.4 Significance](#174-significance)
+
+**Appendices:** [A. Notation Summary](#appendix-a-notation-summary) · [B. Glossary](#appendix-b-glossary)
+
 
 ## 1. Introduction
 
