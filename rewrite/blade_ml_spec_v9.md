@@ -2,7 +2,7 @@
 
 **Version**: Draft 0.2  
 **Status**: Design specification  
-**Prerequisites**: Blade formalism v8.17+
+**Prerequisites**: Blade formalism v9+
 
 ---
 
@@ -53,6 +53,11 @@
 - [13. Future Work](#future-work)
     - [13.1 P1 Features (Not Yet Specified)](#p1-features-not-yet-specified)
     - [13.2 Open Questions](#open-questions)
+- [14. Reynolds Operator Applications](#reynolds-operator-applications)
+    - [14.1 Symmetric Message Passing](#symmetric-message-passing)
+    - [14.2 CG Tensor Product Speedup Analysis](#cg-tensor-product-speedup-analysis)
+    - [14.3 Higher-Order Interactions](#higher-order-interactions)
+    - [14.4 Antisymmetric Applications](#antisymmetric-applications)
 - [Appendix A: Summary of Constructs](#appendix-a-summary-of-constructs)
     - [A.1 Syntax Extensions](#a1-syntax-extensions)
     - [A.2 Types](#a2-types)
@@ -782,6 +787,73 @@ function equivariant_conv(
 
 1. **Sparse tensor products**: Compile-time path pruning based on weight structure?
 2. **Memory layout**: Block-contiguous vs m-contiguous for different operations?
+
+---
+
+## 14. Reynolds Operator Applications
+
+The Reynolds operator (see Formalism §6.4) enables additional optimizations in equivariant ML beyond identity commutativity.
+
+### 14.1 Symmetric Message Passing
+
+Undirected edge computations have natural Reynolds structure:
+
+```blade
+let symmetric_message = lambda(feat_i, feat_j) -> lambda(a, b) ->
+    interaction(feat_i[a], feat_j[b]) + interaction(feat_j[a], feat_i[b])
+where reynolds([feat_i, feat_j])
+```
+
+Benefits: 2× iteration savings (triangular), additional 2× if arrays identical at call site.
+
+### 14.2 CG Tensor Product Speedup Analysis
+
+The CG tensor product structure is:
+
+```
+output[m_out] = Σ_{m1 + m2 = m_out} cg[m1, m2, m_out] * in1[m1] * in2[m2]
+```
+
+CG coefficients satisfy exchange symmetry when L1 = L2:
+
+```
+cg[m1, m2, m_out] = ±cg[m2, m1, m_out]
+```
+
+**Speedup analysis:**
+
+| Configuration | Speedup | Mechanism |
+|---------------|---------|-----------|
+| General (diff arrays, diff L) | 1× | No symmetry |
+| Same spec, diff arrays | ~2× | Block pair identity |
+| Self-TP, same-block, CG sym | 4× | Mult identity × CG identity |
+| Self-TP, same-block, CG antisym | 0 | Vanishes |
+
+**Overall: 2×–4× for typical self-tensor-products.**
+
+### 14.3 Higher-Order Interactions
+
+For n-way interactions, Reynolds provides dramatic speedups:
+
+| Arity | Reynolds Only | Reynolds + Identity |
+|-------|---------------|---------------------|
+| n=2 | 2× | 4× |
+| n=3 | 6× | 36× |
+| n=4 | 24× | 576× |
+
+### 14.4 Antisymmetric Applications
+
+Antisymmetric Reynolds applies to cross-product-like computations:
+
+```blade
+let cross_like = lambda(A, B, C) -> lambda(i, j, k) ->
+    f(A[i], B[j], C[k]) - f(A[i], C[j], B[k]) 
+  - f(B[i], A[j], C[k]) + f(B[i], C[j], A[k])
+  + f(C[i], A[j], B[k]) - f(C[i], B[j], A[k])
+where reynolds([A, B, C], Antisymmetric)
+```
+
+Properties: Diagonal terms vanish, transpose terms negated.
 
 ---
 

@@ -1,7 +1,7 @@
 # Blade-DSL: Extensions and Future Work
 
 **Status**: Planned extensions, not yet implemented  
-**Parent Document**: Blade Formalism v8.19
+**Parent Document**: Blade Formalism v9
 
 This document describes planned extensions to Blade-DSL, organized by implementation complexity. These are separated from the core formalism to distinguish stable specification from speculative design.
 

@@ -1,4 +1,4 @@
-# Blade-DSL: A Formal Specification
+# Blade-DSL: A Formal Specification (v9)
 
 ## Abstract
 
@@ -64,6 +64,7 @@ We establish that three features form an inseparable **Structural Trinity**: *lo
     - [6.1 Function Signatures](#function-signatures)
     - [6.2 Function Syntax](#function-syntax)
     - [6.3 Commutativity Groups](#commutativity-groups)
+    - [6.4 Reynolds Operators](#reynolds-operators)
 - [7. Core Operations](#core-operations)
     - [7.1 Arithmetic Operations](#arithmetic-operations)
     - [7.2 Geometric Primitives](#geometric-primitives)
@@ -83,6 +84,9 @@ We establish that three features form an inseparable **Structural Trinity**: *lo
     - [9.5 Partial Application Semantics](#partial-application-semantics)
     - [9.6 The Structural Trinity: Formal Necessity Proofs](#the-structural-trinity-formal-necessity-proofs)
     - [9.7 Uniqueness of method_for and object_for](#uniqueness-of-method_for-and-object_for)
+    - [9.8 Virtual Arrays](#virtual-arrays)
+    - [9.9 For-Loop Syntax](#for-loop-syntax)
+    - [9.10 Deprecation of `<@(i,j)>` Syntax](#deprecation-of-ij-syntax)
 - [10. Arity Polymorphism](#arity-polymorphism)
     - [10.1 Distinction from Rank Polymorphism](#distinction-from-rank-polymorphism)
     - [10.2 Why Arity Polymorphism Matters](#why-arity-polymorphism-matters)
@@ -2481,6 +2485,89 @@ fn f(a, b, c, d) where comm(a, b, c)
 
 yields c = ⟨1, 1, 1, 4⟩.
 
+### 6.4 Reynolds Operators
+
+The `where reynolds(S)` annotation declares that a kernel has Reynolds structure—it computes a symmetric sum over permutations of array arguments.
+
+#### 6.4.1 Definition
+
+From invariant theory, the Reynolds operator averages over a group action:
+
+```
+R(f)(A₁, ..., Aₙ)[i₁, ..., iₙ] = ⊕_{σ ∈ Sₙ} f(A_{σ(1)}[i₁], ..., A_{σ(n)}[iₙ])
+```
+
+where ⊕ is a symmetric aggregation (sum, product, max, etc.).
+
+**Key property**: Reynolds kernels produce index-symmetric output even when arrays are distinct. The symmetry comes from kernel structure, not array identity.
+
+#### 6.4.2 Syntax
+
+```blade
+let K = lambda(A, B) -> lambda(i, j) ->
+    f(A[i], B[j]) + f(B[i], A[j])
+where reynolds([A, B])
+```
+
+The argument lists which array parameters participate in the symmetry.
+
+#### 6.4.3 Symmetric vs Antisymmetric
+
+**Symmetric** (default): Sum over permutations.
+
+```blade
+let sym_K = lambda(A, B) -> lambda(i, j) ->
+    f(A[i], B[j]) + f(B[i], A[j])
+where reynolds([A, B])
+// sym_K[i,j] = sym_K[j,i]
+```
+
+**Antisymmetric**: Alternating sum (signed by permutation parity).
+
+```blade
+let antisym_K = lambda(A, B) -> lambda(i, j) ->
+    f(A[i], B[j]) - f(B[i], A[j])
+where reynolds([A, B], Antisymmetric)
+// antisym_K[i,j] = -antisym_K[j,i], antisym_K[i,i] = 0
+```
+
+#### 6.4.4 Interaction with Identity Commutativity
+
+When a Reynolds kernel is called with identical arrays, both optimizations combine:
+
+| Source | Effect | Speedup |
+|--------|--------|---------|
+| Reynolds alone | Triangular iteration | n!× |
+| Identity alone | Term collapse | n!× |
+| Both | Triangular + collapse | (n!)²× |
+
+```blade
+let K = lambda(A, B) -> lambda(i, j) ->
+    f(A[i], B[j]) + f(B[i], A[j])
+where reynolds([A, B])
+
+K(X, Y)  // Reynolds: 2× (triangular iteration)
+K(X, X)  // Reynolds + Identity: 4× (triangular + term collapse)
+```
+
+#### 6.4.5 Partial Symmetry
+
+Only some arrays may participate:
+
+```blade
+let K = lambda(A, B, C) -> lambda(i, j, k) ->
+    g(A[i], B[j], C[k]) + g(B[i], A[j], C[k])
+where reynolds([A, B])  // C does not participate
+```
+
+Output is symmetric in (i, j) but not in k.
+
+#### 6.4.6 Semantics
+
+**Production**: The compiler trusts the annotation and emits triangular iteration. False annotations yield undefined behavior.
+
+**Debug**: The compiler may verify by sampling random index tuples and checking permutation invariance.
+
 ------------------------------------------------------------------------
 
 ## 7. Core Operations
@@ -3312,6 +3399,175 @@ By Theorem 9.26, only all-arrays and kernel-only curryings enable detection. Mix
 
 *Proof:* By Theorems 9.15 and 9.16. The design space is exhausted by enumeration. ∎
 
+### 9.8 Virtual Arrays
+
+A **virtual array** is a type-level construct describing an iteration pattern without allocating storage. Virtual arrays have `Unit` element type—they exist purely to emit indices.
+
+```blade
+range<I>              // iterate I in standard order
+reverse<I>            // iterate I in reverse order
+blocked<I, K>         // iterate I in K-sized cache blocks
+neighbors_of<I>       // iterate adjacent positions in I
+where<I>(mask)        // iterate I where mask is true
+```
+
+**Key property**: Virtual arrays are types, not values. They erase completely in code generation—no runtime representation, no allocation, just loop structure.
+
+#### 9.8.1 Semantics
+
+An index type `I` specifies extent, structure, and enumeration order. `range<I>` lifts an index type into something `method_for` can consume:
+
+```blade
+range<Idx<N>>         // emits 0, 1, 2, ..., N-1
+range<SymIdx<2, N>>   // emits (0,0), (0,1), (1,1), (0,2), ...
+range<BoundedIdx<k,N>> // emits 0, 1, ..., N-k-1
+```
+
+Semantically: `range<I> = λi:I. i`
+
+#### 9.8.2 Composition with Real Arrays
+
+Virtual arrays compose with real arrays in `method_for`:
+
+```blade
+// Indices only
+method_for(range<SymIdx<2, N>>) <@> lambda(i, j) -> f(i, j)
+
+// Indices with arrays
+method_for(range<SymIdx<2, N>>, A, B) <@> lambda(i, j, a, b) -> f(i, j, a, b)
+
+// Custom traversal
+method_for(blocked<SymIdx<2, N>, 32>, A, A) where comm <@> lambda(i, j, a, b) -> a * b
+```
+
+### 9.9 For-Loop Syntax
+
+The `for` construct provides clean syntax over `method_for` and `object_for`. Despite familiar appearance, it constructs iteration objects—not imperative control flow.
+
+#### 9.9.1 Core Structure
+
+```
+for <source> [where <clauses>] <@> <source>
+```
+
+One side has a kernel, the other has an array/index specification. Two dual forms:
+
+```blade
+// method_for style: arrays/indices left, kernel right
+for (A, B) in I <@> lambda(i, j, a, b) -> f(i, j, a, b)
+
+// object_for style: kernel left, arrays/indices right  
+for lambda(i, j, a, b) -> f(i, j, a, b) <@> (A, B) in I
+```
+
+#### 9.9.2 Forms
+
+**Index iteration only**:
+```blade
+for SymIdx<2, N> <@> lambda(i, j) -> i * j
+```
+Desugars to: `method_for(range<SymIdx<2, N>>) <@> lambda(i, j) -> i * j`
+
+**Value iteration only**:
+```blade
+for (A, B) <@> lambda(a, b) -> a * b
+```
+Desugars to: `method_for(A, B) <@> lambda(a, b) -> a * b`
+
+**Both indices and values**:
+```blade
+for (A, B) in SymIdx<2,N> <@> lambda(i, j, a, b) -> f(i, j, a, b)
+```
+Desugars to: `method_for(range<SymIdx<2,N>>, A, B) <@> lambda(i, j, a, b) -> f(i, j, a, b)`
+
+**Arity-polymorphic** (two packs for indices and values):
+```blade
+for args in SymIdx<arity(args), N> where poly(args), comm(args)
+<@> lambda(is, xs) -> f(is, xs)
+```
+
+#### 9.9.3 Let-Binding
+
+Both forms produce iteration objects that can be let-bound:
+
+**method_for style** (arrays bound, awaits kernel):
+```blade
+let loop = for (A, A) in SymIdx<2,N> where comm
+loop <@> lambda(i, j, a, b) -> f(i, j, a, b)
+```
+
+**object_for style** (kernel bound, awaits arrays):
+```blade
+let op = for lambda(a, b) where comm -> a * b
+op <@> (X, X)
+op <@> (Y, Z)  // reuse with different arrays
+```
+
+**Arity-polymorphic kernels**:
+```blade
+let moment = for lambda(is, xs) where poly(is, xs), comm(xs) -> product(xs)
+let cov = moment <@> (data, data)
+let coskew = moment <@> (data, data, data)
+let cokurt = moment <@> (data, data, data, data)
+```
+
+#### 9.9.4 Custom Traversal
+
+```blade
+// Reversed
+for (A, A) in reverse<SymIdx<2, N>> where comm <@> lambda(i, j, a, b) -> a * b
+
+// Cache-blocked
+for (A, A) in blocked<SymIdx<2, N>, 64> where comm <@> lambda(i, j, a, b) -> a * b
+
+// Sparse
+let valid = where<Idx<N>, Idx<M>>(mask)
+for (data) in valid <@> lambda(i, j, x) -> process(i, j, x)
+```
+
+#### 9.9.5 Summary Table
+
+| Want | method_for style | object_for style |
+|------|------------------|------------------|
+| Indices only | `for I <@> lambda(i,j) -> ...` | `for lambda(i,j) -> ... <@> I` |
+| Values only | `for (A,B) <@> lambda(a,b) -> ...` | `for lambda(a,b) -> ... <@> (A,B)` |
+| Custom traversal | `for (A,B) in I <@> lambda(a,b) -> ...` | `for lambda(a,b) -> ... <@> (A,B) in I` |
+| Values + indices | `for (A,B) in I <@> lambda(i,j,a,b) -> ...` | `for lambda(i,j,a,b) -> ... <@> (A,B) in I` |
+| Poly + indices | `for args in I <@> lambda(is, xs) -> ...` | `for lambda(is, xs) -> ... <@> args in I` |
+
+### 9.10 Deprecation of `<@(i,j)>` Syntax
+
+The indexed application syntax `<@(i,j)>` is **deprecated** in favor of explicit `range<I>` with standard `<@>`.
+
+#### 9.10.1 Rationale
+
+`<@(i,j)>` implicitly injected index names into kernel scope:
+
+```blade
+// OLD: indices magically appear in scope
+method_for(A, B) <@(i, j)> lambda(a, b) -> f(i, j, a, b)
+```
+
+With virtual arrays, indices are explicit values:
+
+```blade
+// NEW: indices are explicit values from range<I>
+method_for(range<I>, A, B) <@> lambda(i, j, a, b) -> f(i, j, a, b)
+```
+
+#### 9.10.2 Migration
+
+| Old syntax | New syntax |
+|------------|------------|
+| `method_for(A) <@(i)> lambda(a) -> f(i, a)` | `method_for(range<I>, A) <@> lambda(i, a) -> f(i, a)` |
+| `method_for(A, B) <@(i, j)> lambda(a, b) -> ...` | `method_for(range<I>, A, B) <@> lambda(i, j, a, b) -> ...` |
+
+#### 9.10.3 Benefits
+
+1. **Uniform `<@>`**: Only one application operator
+2. **Explicit iteration structure**: `range<I>` makes index type visible
+3. **Composable**: Indices are values, can be transformed
+4. **No magic**: Kernel signature explicitly declares what it receives
 
 ------------------------------------------------------------------------
 
@@ -5227,12 +5483,71 @@ impl Measurable for Circle {
 
 ### 17.15 Loop Construction and Application
 
+#### Core Constructs
+
 ```blade
 let <loop> = method_for(<A₁>, ..., <Aₙ>)
 let <loop> = object_for(<f>)
 
 let <comp> = <loop> <@> <f>
 let <comp> = <loop> <@> (<A₁>, ..., <Aₙ>)
+```
+
+#### For-Loop Syntax
+
+The `for` keyword provides clean dual syntax over `method_for`/`object_for`:
+
+```blade
+// method_for style (arrays/indices left, kernel right)
+for (A, B) <@> lambda(a, b) -> a * b
+for (A, B) in SymIdx<2,N> <@> lambda(i, j, a, b) -> f(i, j, a, b)
+for SymIdx<2,N> <@> lambda(i, j) -> i * j
+
+// object_for style (kernel left, arrays/indices right)
+for lambda(a, b) -> a * b <@> (A, B)
+for lambda(i, j, a, b) -> f(i, j, a, b) <@> (A, B) in SymIdx<2,N>
+for lambda(i, j) -> i * j <@> SymIdx<2,N>
+```
+
+#### Let-Bound Loops
+
+```blade
+// Bind arrays, await kernel
+let loop = for (A, A) in SymIdx<2,N> where comm
+loop <@> lambda(i, j, a, b) -> a * b
+
+// Bind kernel, await arrays  
+let op = for lambda(a, b) where comm -> a * b
+op <@> (X, X)
+op <@> (Y, Z)
+
+// Arity-polymorphic
+let moment = for lambda(is, xs) where poly(is, xs), comm(xs) -> product(xs)
+let cov = moment <@> (data, data)
+let coskew = moment <@> (data, data, data)
+```
+
+#### Virtual Arrays
+
+```blade
+range<I>              // standard iteration over index type I
+reverse<I>            // reverse order
+blocked<I, K>         // K-sized cache blocks
+where<I>(mask)        // sparse iteration where mask is true
+```
+
+#### Deprecated: `<@(i,j)>` Syntax
+
+The indexed application `<@(i,j)>` is deprecated. Use explicit `range<I>`:
+
+```blade
+// OLD (deprecated)
+method_for(A) <@(i)> lambda(a) -> f(i, a)
+
+// NEW
+method_for(range<I>, A) <@> lambda(i, a) -> f(i, a)
+// or
+for (A) in I <@> lambda(i, a) -> f(i, a)
 ```
 
 ### 17.16 Combinators

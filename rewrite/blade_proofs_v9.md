@@ -1,7 +1,7 @@
 # Blade-DSL: Formal Theorems and Proofs
 
 **Status**: Mathematical foundations for the Blade formalism  
-**Parent Document**: Blade Formalism v8.19
+**Parent Document**: Blade Formalism v9
 
 This document contains the formal theorems, lemmas, corollaries, and their proofs that establish Blade's mathematical foundations. Section numbering matches the parent formalism for easy cross-reference.
 
