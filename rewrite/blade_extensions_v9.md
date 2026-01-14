@@ -9,21 +9,21 @@ This document describes planned extensions to Blade-DSL, organized by implementa
 
 ## Table of Contents
 
-- [1. Overview](#overview)
-- [2. Near-Term Extensions](#near-term-extensions)
-    - [2.1 Open Design Questions](#open-design-questions)
-    - [2.2 Automatic Differentiation](#automatic-differentiation)
-    - [2.3 Tree Structures](#tree-structures)
-    - [2.4 Graph Types via Trace Indices](#graph-types-via-trace-indices)
-    - [2.5 Equivariance Extensions](#equivariance-extensions)
-    - [2.6 Domain Decomposition](#domain-decomposition)
-    - [2.7 Triangular File Format](#triangular-file-format)
-    - [2.8 Domain Decomposition Summary](#domain-decomposition-summary)
-- [3. Research Directions](#research-directions)
-    - [3.1 Stencils and Halo Exchange](#stencils-and-halo-exchange)
-    - [3.2 Advanced Integration Topics](#advanced-integration-topics)
-    - [3.3 ML Library Integration](#ml-library-integration)
-    - [3.4 Remaining Open Questions](#remaining-open-questions)
+- [1. Overview](#1-overview)
+- [2. Near-Term Extensions](#2-near-term-extensions)
+    - [2.1 Open Design Questions](#21-open-design-questions)
+    - [2.2 Automatic Differentiation](#22-automatic-differentiation)
+    - [2.3 Tree Structures](#23-tree-structures)
+    - [2.4 Graph Types via Trace Indices](#24-graph-types-via-trace-indices)
+    - [2.5 Equivariance Extensions](#25-equivariance-extensions)
+    - [2.6 Domain Decomposition](#26-domain-decomposition)
+    - [2.7 Triangular File Format](#27-triangular-file-format)
+    - [2.8 Domain Decomposition Summary](#28-domain-decomposition-summary)
+- [3. Research Directions](#3-research-directions)
+    - [3.1 Stencils and Halo Exchange](#31-stencils-and-halo-exchange)
+    - [3.2 Advanced Integration Topics](#32-advanced-integration-topics)
+    - [3.3 ML Library Integration](#33-ml-library-integration)
+    - [3.4 Remaining Open Questions](#34-remaining-open-questions)
 
 ---
 
