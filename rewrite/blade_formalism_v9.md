@@ -12,166 +12,164 @@ We establish that three features form an inseparable **Structural Trinity**: *lo
 
 ## Table of Contents
 
-- [1. Introduction](#introduction)
-    - [1.1 What Problem Does Blade-DSL Solve?](#what-problem-does-blade-dsl-solve)
-    - [1.2 What Makes Blade-DSL Different?](#what-makes-blade-dsl-different)
-    - [1.3 Target Applications and Scale](#target-applications-and-scale)
-    - [1.4 Relationship to Existing Array Languages](#relationship-to-existing-array-languages)
-- [2. Computational Paradigms: S/T and T/S](#computational-paradigms-st-and-ts)
-    - [2.1 Two Orientations Toward Array Computation](#two-orientations-toward-array-computation)
-    - [2.2 Historical Context](#historical-context)
-    - [2.3 Formal Characterization](#formal-characterization)
-    - [2.4 The Duality Theorem](#the-duality-theorem)
-    - [2.5 Non-Trivial T/S Combinators](#non-trivial-ts-combinators)
-    - [2.6 The Fundamental Duality: Fusion and Factorization](#the-fundamental-duality-fusion-and-factorization)
-    - [2.7 The Double Metamorphism](#the-double-metamorphism)
-    - [2.8 Why S/T Enables Symmetry Exploitation](#why-st-enables-symmetry-exploitation)
-    - [2.9 Linguistic Parallel](#linguistic-parallel)
-    - [2.10 S/T as Mathematical Prerequisite: Syntactic Impossibility](#st-as-mathematical-prerequisite-syntactic-impossibility)
-    - [2.11 S/T as Mathematical Prerequisite: The Necessity Theorems](#st-as-mathematical-prerequisite-the-necessity-theorems)
-- [3. Preliminaries](#preliminaries)
-    - [3.1 Notation](#notation)
-    - [3.2 Arrays](#arrays)
-    - [3.3 Extents](#extents)
-    - [3.4 Value Types and Promotion](#value-types-and-promotion)
-    - [3.5 Array Expressions](#array-expressions)
-    - [3.6 Array Combinators](#array-combinators)
-    - [3.7 Array Combinator Laws](#array-combinator-laws)
-- [4. Index Types](#index-types)
-    - [4.1 Design Principles](#design-principles)
-    - [4.2 Base Index Types](#base-index-types)
-    - [4.3 Dependent Index Types](#dependent-index-types)
-    - [4.4 Compound Index Semantics](#compound-index-semantics)
-    - [4.5 Sparse Index Types](#sparse-index-types)
-    - [4.6 Generalized Dependent Index Types](#generalized-dependent-index-types)
-    - [4.7 Index Transforms](#index-transforms)
-    - [4.8 Files as Type Providers](#files-as-type-providers)
-    - [4.9 Symmetry and Index Types](#symmetry-and-index-types)
-    - [4.10 Currying by Index](#currying-by-index)
-    - [4.11 Declaration Syntax](#declaration-syntax)
-    - [4.12 Bounded Index Types](#bounded-index-types)
-    - [4.13 Symmetric Index Types](#symmetric-index-types)
-    - [4.14 Nested and Mixed Symmetry](#nested-and-mixed-symmetry)
-    - [4.15 User-Defined Index Types](#user-defined-index-types)
-    - [4.16 Index Type Summary](#index-type-summary)
-- [5. Array Types](#array-types)
-    - [5.1 Abstract vs Concrete Array Types](#abstract-vs-concrete-array-types)
-    - [5.2 Array Type Identity](#array-type-identity)
-    - [5.3 Arrays as Functions](#arrays-as-functions)
-    - [5.4 Poly-Indexing](#poly-indexing)
-    - [5.5 Lambda Indices](#lambda-indices)
-- [6. Functions](#functions)
-    - [6.1 Function Signatures](#function-signatures)
-    - [6.2 Function Syntax](#function-syntax)
-    - [6.3 Commutativity Groups](#commutativity-groups)
-    - [6.4 Reynolds Operators](#reynolds-operators)
-- [7. Core Operations](#core-operations)
-    - [7.1 Arithmetic Operations](#arithmetic-operations)
-    - [7.2 Geometric Primitives](#geometric-primitives)
-    - [7.3 Reductions](#reductions)
-    - [7.4 Operation Symmetry Summary](#operation-symmetry-summary)
-- [8. Equivariance System](#equivariance-system)
-    - [8.1 Relationship to Index Types](#relationship-to-index-types)
-    - [8.2 Annotation Syntax](#annotation-syntax)
-    - [8.3 Type Inference](#type-inference)
-    - [8.4 Error Detection](#error-detection)
-    - [8.5 Domain Libraries](#domain-libraries)
-- [9. Loop Objects](#loop-objects)
-    - [9.1 The Core Abstraction](#the-core-abstraction)
-    - [9.2 S-Dimensions and T-Dimensions](#s-dimensions-and-t-dimensions)
-    - [9.3 Method Loop Structure](#method-loop-structure)
-    - [9.4 Object Loop Structure](#object-loop-structure)
-    - [9.5 Partial Application Semantics](#partial-application-semantics)
-    - [9.6 The Structural Trinity: Formal Necessity Proofs](#the-structural-trinity-formal-necessity-proofs)
-    - [9.7 Uniqueness of method_for and object_for](#uniqueness-of-method_for-and-object_for)
-    - [9.8 Virtual Arrays](#virtual-arrays)
-    - [9.9 For-Loop Syntax](#for-loop-syntax)
-    - [9.10 Deprecation of `<@(i,j)>` Syntax](#deprecation-of-ij-syntax)
-- [10. Arity Polymorphism](#arity-polymorphism)
-    - [10.1 Distinction from Rank Polymorphism](#distinction-from-rank-polymorphism)
-    - [10.2 Why Arity Polymorphism Matters](#why-arity-polymorphism-matters)
-    - [10.3 Arity and Commutativity](#arity-and-commutativity)
-    - [10.4 Arity-Polymorphic Syntax](#arity-polymorphic-syntax)
-    - [10.5 Formal Treatment](#formal-treatment)
-    - [10.6 Comparison to Related Work](#comparison-to-related-work)
-- [11. Dimensional Currying](#dimensional-currying)
-    - [11.1 The Core Idea](#the-core-idea)
-    - [11.2 Type-Level Encoding](#type-level-encoding)
-    - [11.3 Cache Optimality by Construction](#cache-optimality-by-construction)
-    - [11.4 Distinction from Slicing](#distinction-from-slicing)
-    - [11.5 Enabling the Combinator Algebra](#enabling-the-combinator-algebra)
-    - [11.6 Symmetry Integration](#symmetry-integration)
-    - [11.7 Sparse Tensor Compatibility](#sparse-tensor-compatibility)
-- [12. Combinator Algebra](#combinator-algebra)
-    - [12.1 Core Combinators](#core-combinators)
-    - [12.2 Parallel Combinators](#parallel-combinators)
-    - [12.3 Collection Combinators](#collection-combinators)
-    - [12.4 Evaluation](#evaluation)
-    - [12.5 Combinator Laws](#combinator-laws)
-    - [12.6 Composition Combinators and the Duality Theorem](#composition-combinators-and-the-duality-theorem)
-    - [12.7 The Rank-0 Convergence Theorem](#the-rank-0-convergence-theorem)
-    - [12.8 Additional Combinator Identities](#additional-combinator-identities)
-    - [12.9 Zero Elements and Control Flow](#zero-elements-and-control-flow)
-- [13. Symmetry System](#symmetry-system)
-    - [13.1 Symmetry/Commutativity States](#symmetrycommutativity-states)
-    - [13.2 State Computation](#state-computation)
-    - [13.3 Output Symmetry Inference via Lowering](#output-symmetry-inference-via-lowering)
-    - [13.4 The Symmetry Transformation (Lowering in Action)](#the-symmetry-transformation-lowering-in-action)
-- [14. Triangular Iteration](#triangular-iteration)
-    - [14.1 Cumulative Bound Computation](#cumulative-bound-computation)
-    - [14.2 Left-Justified Indexing](#left-justified-indexing)
-    - [14.3 Index Mapping for Access](#index-mapping-for-access)
-    - [14.4 Complexity Analysis](#complexity-analysis)
-    - [14.5 Product Symmetry Theorem](#product-symmetry-theorem)
-- [15. Type System](#type-system)
-    - [15.1 Judgments](#judgments)
-    - [15.2 Array Rules](#array-rules)
-    - [15.3 Function Rules](#function-rules)
-    - [15.4 Loop Object Rules](#loop-object-rules)
-    - [15.5 Application Rules](#application-rules)
-    - [15.6 Combinator Rules](#combinator-rules)
-- [16. Operational Semantics](#operational-semantics)
-    - [16.1 Evaluation Model](#evaluation-model)
-    - [16.2 Loop Level Types](#loop-level-types)
-    - [16.3 Fusion Analysis](#fusion-analysis)
-    - [16.4 Compute Semantics](#compute-semantics)
-- [17. Concrete Syntax](#concrete-syntax)
-    - [17.1 Array Declaration](#array-declaration)
-    - [17.2 Array Literals](#array-literals)
-    - [17.3 Function Declaration](#function-declaration)
-    - [17.4 Lambda Expressions](#lambda-expressions)
-    - [17.5 Static Values and Functions](#static-values-and-functions)
-    - [17.6 Type-Returning vs Value-Returning Functions](#type-returning-vs-value-returning-functions)
-    - [17.7 Mutability and Borrowing](#mutability-and-borrowing)
-    - [17.8 Boolean Operators and Comparisons](#boolean-operators-and-comparisons)
-    - [17.9 Fused Assignment Operators](#fused-assignment-operators)
-    - [17.10 Conditionals and Pattern Matching](#conditionals-and-pattern-matching)
-    - [17.11 Tuple Syntax](#tuple-syntax)
-    - [17.12 Sum Types (Variants)](#sum-types-variants)
-    - [17.13 Structs](#structs)
-    - [17.14 Interfaces](#interfaces)
-    - [17.15 Loop Construction and Application](#loop-construction-and-application)
-    - [17.16 Combinators](#combinators)
-    - [17.17 Poly-Indexing Syntax](#poly-indexing-syntax)
-    - [17.18 Pseudo-Native Mathematics](#pseudo-native-mathematics)
-    - [17.19 Named Infix Operators](#named-infix-operators)
-    - [17.20 Enumerated Iteration](#enumerated-iteration)
-- [18. Future Work](#future-work)
-- [19. Related Work](#related-work)
-    - [19.1 Array Languages and Rank Polymorphism](#array-languages-and-rank-polymorphism)
-    - [19.2 Loop Abstractions and Scheduling](#loop-abstractions-and-scheduling)
-    - [19.3 Parallel Loop Constructs](#parallel-loop-constructs)
-    - [19.4 Multi-Dimensional Homomorphisms](#multi-dimensional-homomorphisms)
-    - [19.5 Tensor Compilers](#tensor-compilers)
-    - [19.6 Scientific Python Ecosystem](#scientific-python-ecosystem)
-    - [19.7 Sparse and Masked Array Systems](#sparse-and-masked-array-systems)
-    - [19.8 Novelty and Impact Assessment](#novelty-and-impact-assessment)
-- [20. Conclusion](#conclusion)
-    - [20.1 Summary of Results](#summary-of-results)
-    - [20.2 What We Proved](#what-we-proved)
-    - [20.3 Blade's Canonicity](#blades-canonicity)
-    - [20.4 Metaprogramming Isomorphism](#metaprogramming-isomorphism)
-    - [20.5 Final Statement](#final-statement)
+- [1. Introduction](#1-introduction)
+    - [1.1 What Problem Does Blade-DSL Solve?](#11-what-problem-does-blade-dsl-solve)
+    - [1.2 What Makes Blade-DSL Different?](#12-what-makes-blade-dsl-different)
+    - [1.3 Target Applications and Scale](#13-target-applications-and-scale)
+    - [1.4 Relationship to Existing Array Languages](#14-relationship-to-existing-array-languages)
+- [2. Computational Paradigms: S/T and T/S](#2-computational-paradigms-st-and-ts)
+    - [2.1 Two Orientations Toward Array Computation](#21-two-orientations-toward-array-computation)
+    - [2.2 Historical Context](#22-historical-context)
+    - [2.3 Formal Characterization](#23-formal-characterization)
+    - [2.4 The Duality Theorem](#24-the-duality-theorem)
+    - [2.5 Non-Trivial T/S Combinators](#25-non-trivial-ts-combinators)
+    - [2.6 The Fundamental Duality: Fusion and Factorization](#26-the-fundamental-duality-fusion-and-factorization)
+    - [2.7 The Double Metamorphism](#27-the-double-metamorphism)
+    - [2.8 Why S/T Enables Symmetry Exploitation](#28-why-st-enables-symmetry-exploitation)
+    - [2.9 Linguistic Parallel](#29-linguistic-parallel)
+    - [2.10 S/T as Mathematical Prerequisite: Syntactic Impossibility](#210-st-as-mathematical-prerequisite-syntactic-impossibility)
+    - [2.11 S/T as Mathematical Prerequisite: The Necessity Theorems](#211-st-as-mathematical-prerequisite-the-necessity-theorems)
+- [3. Preliminaries](#3-preliminaries)
+    - [3.1 Notation](#31-notation)
+    - [3.2 Arrays](#32-arrays)
+    - [3.3 Extents](#33-extents)
+    - [3.4 Value Types and Promotion](#34-value-types-and-promotion)
+    - [3.5 Array Expressions](#35-array-expressions)
+    - [3.6 Array Combinators](#36-array-combinators)
+    - [3.7 Array Combinator Laws](#37-array-combinator-laws)
+- [4. Index Types](#4-index-types)
+    - [4.1 Design Principles](#41-design-principles)
+    - [4.2 Base Index Types](#42-base-index-types)
+    - [4.3 Dependent Index Types](#43-dependent-index-types)
+    - [4.4 Compound Index Semantics](#44-compound-index-semantics)
+    - [4.5 Sparse Index Types](#45-sparse-index-types)
+    - [4.6 Generalized Dependent Index Types](#46-generalized-dependent-index-types)
+    - [4.7 Index Transforms](#47-index-transforms)
+    - [4.8 Files as Type Providers](#48-files-as-type-providers)
+    - [4.9 Symmetry and Index Types](#49-symmetry-and-index-types)
+    - [4.10 Currying by Index](#410-currying-by-index)
+    - [4.11 Declaration Syntax](#411-declaration-syntax)
+    - [4.12 Bounded Index Types](#412-bounded-index-types)
+    - [4.13 Symmetric Index Types](#413-symmetric-index-types)
+    - [4.14 Nested and Mixed Symmetry](#414-nested-and-mixed-symmetry)
+    - [4.15 User-Defined Index Types](#415-user-defined-index-types)
+    - [4.16 Index Type Summary](#416-index-type-summary)
+- [5. Array Types](#5-array-types)
+    - [5.1 Abstract vs Concrete Array Types](#51-abstract-vs-concrete-array-types)
+    - [5.2 Array Type Identity](#52-array-type-identity)
+    - [5.3 Arrays as Functions](#53-arrays-as-functions)
+    - [5.4 Poly-Indexing](#54-poly-indexing)
+    - [5.5 Lambda Indices](#55-lambda-indices)
+- [6. Functions](#6-functions)
+    - [6.1 Function Signatures](#61-function-signatures)
+    - [6.2 Function Syntax](#62-function-syntax)
+    - [6.3 Commutativity Groups](#63-commutativity-groups)
+    - [6.4 Reynolds Operators](#64-reynolds-operators)
+- [7. Core Operations](#7-core-operations)
+    - [7.1 Arithmetic Operations](#71-arithmetic-operations)
+    - [7.2 Geometric Primitives](#72-geometric-primitives)
+    - [7.3 Reductions](#73-reductions)
+    - [7.4 Operation Symmetry Summary](#74-operation-symmetry-summary)
+- [8. Equivariance System](#8-equivariance-system)
+    - [8.1 Relationship to Index Types](#81-relationship-to-index-types)
+    - [8.2 Annotation Syntax](#82-annotation-syntax)
+    - [8.3 Type Inference](#83-type-inference)
+    - [8.4 Error Detection](#84-error-detection)
+    - [8.5 Domain Libraries](#85-domain-libraries)
+- [9. Loop Objects](#9-loop-objects)
+    - [9.1 The Core Abstraction](#91-the-core-abstraction)
+    - [9.2 S-Dimensions and T-Dimensions](#92-s-dimensions-and-t-dimensions)
+    - [9.3 Method Loop Structure](#93-method-loop-structure)
+    - [9.4 Object Loop Structure](#94-object-loop-structure)
+    - [9.5 Partial Application Semantics](#95-partial-application-semantics)
+    - [9.6 The Structural Trinity: Formal Necessity Proofs](#96-the-structural-trinity-formal-necessity-proofs)
+    - [9.7 Uniqueness of method_for and object_for](#97-uniqueness-of-method_for-and-object_for)
+    - [9.8 Virtual Arrays](#98-virtual-arrays)
+    - [9.9 For-Loop Syntax](#99-for-loop-syntax)
+- [10. Arity Polymorphism](#10-arity-polymorphism)
+    - [10.1 Distinction from Rank Polymorphism](#101-distinction-from-rank-polymorphism)
+    - [10.2 Why Arity Polymorphism Matters](#102-why-arity-polymorphism-matters)
+    - [10.3 Arity and Commutativity](#103-arity-and-commutativity)
+    - [10.4 Arity-Polymorphic Syntax](#104-arity-polymorphic-syntax)
+    - [10.5 Formal Treatment](#105-formal-treatment)
+    - [10.6 Comparison to Related Work](#106-comparison-to-related-work)
+- [11. Dimensional Currying](#11-dimensional-currying)
+    - [11.1 The Core Idea](#111-the-core-idea)
+    - [11.2 Type-Level Encoding](#112-type-level-encoding)
+    - [11.3 Cache Optimality by Construction](#113-cache-optimality-by-construction)
+    - [11.4 Distinction from Slicing](#114-distinction-from-slicing)
+    - [11.5 Enabling the Combinator Algebra](#115-enabling-the-combinator-algebra)
+    - [11.6 Symmetry Integration](#116-symmetry-integration)
+    - [11.7 Sparse Tensor Compatibility](#117-sparse-tensor-compatibility)
+- [12. Combinator Algebra](#12-combinator-algebra)
+    - [12.1 Core Combinators](#121-core-combinators)
+    - [12.2 Parallel Combinators](#122-parallel-combinators)
+    - [12.3 Collection Combinators](#123-collection-combinators)
+    - [12.4 Evaluation](#124-evaluation)
+    - [12.5 Combinator Laws](#125-combinator-laws)
+    - [12.6 Composition Combinators and the Duality Theorem](#126-composition-combinators-and-the-duality-theorem)
+    - [12.7 The Rank-0 Convergence Theorem](#127-the-rank-0-convergence-theorem)
+    - [12.8 Additional Combinator Identities](#128-additional-combinator-identities)
+    - [12.9 Zero Elements and Control Flow](#129-zero-elements-and-control-flow)
+- [13. Symmetry System](#13-symmetry-system)
+    - [13.1 Symmetry/Commutativity States](#131-symmetrycommutativity-states)
+    - [13.2 State Computation](#132-state-computation)
+    - [13.3 Output Symmetry Inference via Lowering](#133-output-symmetry-inference-via-lowering)
+    - [13.4 The Symmetry Transformation (Lowering in Action)](#134-the-symmetry-transformation-lowering-in-action)
+- [14. Triangular Iteration](#14-triangular-iteration)
+    - [14.1 Cumulative Bound Computation](#141-cumulative-bound-computation)
+    - [14.2 Left-Justified Indexing](#142-left-justified-indexing)
+    - [14.3 Index Mapping for Access](#143-index-mapping-for-access)
+    - [14.4 Complexity Analysis](#144-complexity-analysis)
+    - [14.5 Product Symmetry Theorem](#145-product-symmetry-theorem)
+- [15. Type System](#15-type-system)
+    - [15.1 Judgments](#151-judgments)
+    - [15.2 Array Rules](#152-array-rules)
+    - [15.3 Function Rules](#153-function-rules)
+    - [15.4 Loop Object Rules](#154-loop-object-rules)
+    - [15.5 Application Rules](#155-application-rules)
+    - [15.6 Combinator Rules](#156-combinator-rules)
+- [16. Operational Semantics](#16-operational-semantics)
+    - [16.1 Evaluation Model](#161-evaluation-model)
+    - [16.2 Loop Level Types](#162-loop-level-types)
+    - [16.3 Fusion Analysis](#163-fusion-analysis)
+    - [16.4 Compute Semantics](#164-compute-semantics)
+- [17. Concrete Syntax](#17-concrete-syntax)
+    - [17.1 Array Declaration](#171-array-declaration)
+    - [17.2 Array Literals](#172-array-literals)
+    - [17.3 Function Declaration](#173-function-declaration)
+    - [17.4 Lambda Expressions](#174-lambda-expressions)
+    - [17.5 Static Values and Functions](#175-static-values-and-functions)
+    - [17.6 Type-Returning vs Value-Returning Functions](#176-type-returning-vs-value-returning-functions)
+    - [17.7 Mutability and Borrowing](#177-mutability-and-borrowing)
+    - [17.8 Boolean Operators and Comparisons](#178-boolean-operators-and-comparisons)
+    - [17.9 Fused Assignment Operators](#179-fused-assignment-operators)
+    - [17.10 Conditionals and Pattern Matching](#1710-conditionals-and-pattern-matching)
+    - [17.11 Tuple Syntax](#1711-tuple-syntax)
+    - [17.12 Sum Types (Variants)](#1712-sum-types-variants)
+    - [17.13 Structs](#1713-structs)
+    - [17.14 Interfaces](#1714-interfaces)
+    - [17.15 Loop Construction and Application](#1715-loop-construction-and-application)
+    - [17.16 Combinators](#1716-combinators)
+    - [17.17 Poly-Indexing Syntax](#1717-poly-indexing-syntax)
+    - [17.18 Pseudo-Native Mathematics](#1718-pseudo-native-mathematics)
+    - [17.19 Named Infix Operators](#1719-named-infix-operators)
+- [18. Future Work](#18-future-work)
+- [19. Related Work](#19-related-work)
+    - [19.1 Array Languages and Rank Polymorphism](#191-array-languages-and-rank-polymorphism)
+    - [19.2 Loop Abstractions and Scheduling](#192-loop-abstractions-and-scheduling)
+    - [19.3 Parallel Loop Constructs](#193-parallel-loop-constructs)
+    - [19.4 Multi-Dimensional Homomorphisms](#194-multi-dimensional-homomorphisms)
+    - [19.5 Tensor Compilers](#195-tensor-compilers)
+    - [19.6 Scientific Python Ecosystem](#196-scientific-python-ecosystem)
+    - [19.7 Sparse and Masked Array Systems](#197-sparse-and-masked-array-systems)
+    - [19.8 Novelty and Impact Assessment](#198-novelty-and-impact-assessment)
+- [20. Conclusion](#20-conclusion)
+    - [20.1 Summary of Results](#201-summary-of-results)
+    - [20.2 What We Proved](#202-what-we-proved)
+    - [20.3 Blade's Canonicity](#203-blades-canonicity)
+    - [20.4 Metaprogramming Isomorphism](#204-metaprogramming-isomorphism)
+    - [20.5 Final Statement](#205-final-statement)
 - [Appendix A: Notation Summary](#appendix-a-notation-summary)
 - [Appendix B: Glossary](#appendix-b-glossary)
 
@@ -3535,40 +3533,6 @@ for (data) in valid <@> lambda(i, j, x) -> process(i, j, x)
 | Values + indices | `for (A,B) in I <@> lambda(i,j,a,b) -> ...` | `for lambda(i,j,a,b) -> ... <@> (A,B) in I` |
 | Poly + indices | `for args in I <@> lambda(is, xs) -> ...` | `for lambda(is, xs) -> ... <@> args in I` |
 
-### 9.10 Deprecation of `<@(i,j)>` Syntax
-
-The indexed application syntax `<@(i,j)>` is **deprecated** in favor of explicit `range<I>` with standard `<@>`.
-
-#### 9.10.1 Rationale
-
-`<@(i,j)>` implicitly injected index names into kernel scope:
-
-```blade
-// OLD: indices magically appear in scope
-method_for(A, B) <@(i, j)> lambda(a, b) -> f(i, j, a, b)
-```
-
-With virtual arrays, indices are explicit values:
-
-```blade
-// NEW: indices are explicit values from range<I>
-method_for(range<I>, A, B) <@> lambda(i, j, a, b) -> f(i, j, a, b)
-```
-
-#### 9.10.2 Migration
-
-| Old syntax | New syntax |
-|------------|------------|
-| `method_for(A) <@(i)> lambda(a) -> f(i, a)` | `method_for(range<I>, A) <@> lambda(i, a) -> f(i, a)` |
-| `method_for(A, B) <@(i, j)> lambda(a, b) -> ...` | `method_for(range<I>, A, B) <@> lambda(i, j, a, b) -> ...` |
-
-#### 9.10.3 Benefits
-
-1. **Uniform `<@>`**: Only one application operator
-2. **Explicit iteration structure**: `range<I>` makes index type visible
-3. **Composable**: Indices are values, can be transformed
-4. **No magic**: Kernel signature explicitly declares what it receives
-
 ------------------------------------------------------------------------
 
 ## 10. Arity Polymorphism
@@ -5536,20 +5500,6 @@ blocked<I, K>         // K-sized cache blocks
 where<I>(mask)        // sparse iteration where mask is true
 ```
 
-#### Deprecated: `<@(i,j)>` Syntax
-
-The indexed application `<@(i,j)>` is deprecated. Use explicit `range<I>`:
-
-```blade
-// OLD (deprecated)
-method_for(A) <@(i)> lambda(a) -> f(i, a)
-
-// NEW
-method_for(range<I>, A) <@> lambda(i, a) -> f(i, a)
-// or
-for (A) in I <@> lambda(i, a) -> f(i, a)
-```
-
 ### 17.16 Combinators
 
 ```blade
@@ -5792,32 +5742,6 @@ let rho = ((2 * L1o) :tp: (3 * L2e)) + (1 * L0e)
 
 Named infixes provide domain-specific notation without requiring language-level operator extensions.
 
-### 17.20 Enumerated Iteration
-
-The `<@(indices...)>` syntax provides index access during iteration:
-
-```blade
-method_for(A) <@(i, j, k)> lambda(val) ->
-    // i, j, k are the iteration indices
-    // val is the array element at that position
-    f(i, j, k, val)
-```
-
-The number of index bindings must match the iteration depth, which is determined by the array's index type and the kernel's expected rank.
-
-**Examples:**
-
-```blade
-// Access both index and value
-method_for(A : Array<Float like Idx<n>, Idx<m>>) <@(i, j)> lambda(val) ->
-    if i == j then val else 0.0
-
-// Use indices for position-dependent computation
-method_for(grid) <@(lat, lon, time)> lambda(temp) ->
-    weight(lat) * temp
-```
-
-This differs from standard `<@>` which only provides the element value, not its position.
 
 
 ## 18. Future Work
