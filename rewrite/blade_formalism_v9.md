@@ -93,6 +93,9 @@ We establish that three features form an inseparable **Structural Trinity**: *lo
     - [10.4 Arity-Polymorphic Syntax](#104-arity-polymorphic-syntax)
     - [10.5 Formal Treatment](#105-formal-treatment)
     - [10.6 Comparison to Related Work](#106-comparison-to-related-work)
+    - [10.7 Poly-Pack Semantics](#107-poly-pack-semantics)
+    - [10.8 Kernel Signatures (T-World)](#108-kernel-signatures-t-world)
+    - [10.9 Type Deduction Workflow](#109-type-deduction-workflow)
 - [11. Dimensional Currying](#11-dimensional-currying)
     - [11.1 The Core Idea](#111-the-core-idea)
     - [11.2 Type-Level Encoding](#112-type-level-encoding)
@@ -3874,6 +3877,237 @@ The output type contains r (from counting inputs), n\^r (type-level exponentiati
 4.  Triangular iteration eligibility
 
 This combination is novel: treating arity as a first-class dimension of variation, with automatic symmetry inference based on which arrays occupy commutative positions.
+
+### 10.7 Poly-Pack Semantics
+
+A `poly` argument represents multiple arrays passed at the call site but treated as a unified pack in the function definition.
+
+#### 10.7.1 Identity Groups
+
+Within a poly-pack, neighboring identical arrays form identity groups. The `comm` constraint applies symmetry only within identity groups.
+
+**Example:** `moment(A, A, B)` with `poly(a, b), comm(a)`
+
+- Group 1: `(A, A)` — arity 2, same identity, `comm` applies
+- Group 2: `(B)` — arity 1, no symmetry
+
+**Note:** Only neighboring arguments satisfy identity. `poly(A, B, A)` forms three groups of arity 1 each, not two groups.
+
+#### 10.7.2 Call Site vs Definition Site
+
+**At the call site:**
+```blade
+comoment(A, A, A)     // Three copies of A
+moment(A, A, B)       // Two copies of A, one copy of B
+```
+
+**At the definition site:**
+```blade
+function comoment(a) where poly(a), comm(a)
+function moment(a, b) where poly(a), poly(b), comm(a)
+```
+
+### 10.8 Kernel Signatures (T-World)
+
+Kernels live entirely in T-world—they see slices, not full arrays. S-dim construction happens at the loop object application site, not in the kernel signature.
+
+#### 10.8.1 The Poly Type
+
+The `Poly<T^k>` type represents a poly-pack of rank-k array slices:
+
+```blade
+function kernel(a: Poly<T^k>) -> T^m
+where poly(a), comm(a)
+```
+
+Where:
+- `Poly<T^k>` — a poly-pack of rank-k slices with element type T
+- `T^m` — output is rank-m with same element type
+- `poly(a)` — declares a as a poly-pack (variable arity)
+- `comm(a)` — declares kernel is commutative over pack elements
+
+The kernel knows nothing about S-dims. It receives T-dimensional slices and returns T-dimensional output.
+
+#### 10.8.2 Examples
+
+**Scalar kernel (T-rank 0 output):**
+```blade
+function comoment(a: Poly<T^1>) -> T
+where poly(a), comm(a) =
+    prod(a)
+```
+Takes rank-1 slices (vectors), returns scalar.
+
+**Vector kernel (T-rank 1 output):**
+```blade
+function outer_product(a: Poly<T^1>) -> T^1
+where poly(a), comm(a) =
+    outer(a)
+```
+Takes rank-1 slices, returns rank-1.
+
+**Matrix kernel (T-rank 2 input):**
+```blade
+function matrix_moment(a: Poly<T^2>) -> T
+where poly(a), comm(a) =
+    sum(elementwise_prod(a))
+```
+Takes rank-2 slices (matrices), returns scalar.
+
+#### 10.8.3 S-Dims Are Deduced at Call Site
+
+The kernel signature specifies only the T-rank (what slices it consumes). S-dims emerge from the loop object application:
+
+```blade
+// Kernel: lives in T-world, sees vectors
+function comoment(a: Poly<T^1>) -> T
+where poly(a), comm(a) = prod(a)
+
+// Application: S-dims deduced here
+object_for(comoment) <@> (A, A, B)
+// A : Array<Float like Idx<M>, Idx<N>, Idx<Time>>
+// B : Array<Float like Idx<P>, Idx<Time>>
+//
+// T-dims: Idx<Time> (consumed by kernel)
+// S-dims: deduced from identity groups + comm
+```
+
+This separation ensures kernels cannot accidentally depend on iteration structure.
+
+#### 10.8.4 Type Checking
+
+**Kernel validation:**
+1. `Poly<T^k>` specifies T-rank k—kernel receives rank-k slices
+2. Return type `T^m` specifies output T-rank
+3. `comm` annotation is metadata for the loop object, not the kernel itself
+
+**At application site:**
+1. Input arrays must have compatible T-dims (last k indices)
+2. S-dims are everything before T-dims
+3. Identity grouping + comm determines symmetric vs rectangular iteration
+
+### 10.9 Type Deduction Workflow
+
+This section specifies how output types are deduced when applying arity-polymorphic loop objects to arrays. Blade combines three operations that are separate (or impossible) in other systems: core/broadcast separation, S-dim concatenation, and symmetry exploitation.
+
+#### 10.9.1 The Deduction Steps
+
+**Given:**
+```blade
+function kernel(a: Poly<T^k>) -> T^m
+where poly(a), comm(a)
+
+object_for(kernel) <@> (A₁, A₂, ..., Aₙ)
+```
+
+**Step 1: Match T-dims.** The kernel expects `T^k` (rank-k slices). For each input:
+- T-dims: last k indices (consumed by kernel)
+- S-dims: first (r - k) indices (iteration structure)
+
+All inputs must have compatible T-dims.
+
+**Step 2: Partition into identity groups.** Scan inputs left-to-right, group neighboring identical arrays:
+```
+(A, A, B, B, B, C) → [(A, A), (B, B, B), (C)]
+                      arity 2  arity 3    arity 1
+```
+
+**Step 3: Build S-dims per group.** For each group with arity r:
+
+| Condition | S-dim contribution |
+|-----------|-------------------|
+| `comm` + arity > 1 | `SymIdx<r, extent>` for each S-dim |
+| No `comm` or arity = 1 | `Idx<extent>` for each S-dim |
+
+**Step 4: Concatenate S-dims.** Concatenate all groups' contributions in order. This is concatenation, not NumPy-style broadcasting.
+
+**Step 5: Get T-dims from kernel output.** The kernel returns `T^m`. If m = 0, no T-dims in output.
+
+**Step 6: Construct output type.** `Array<V like S-dims..., T-dims...>`
+
+#### 10.9.2 Complete Example
+
+**Inputs:**
+```blade
+SST:      Array<Float like Idx<Lat>, Idx<Lon>, Idx<Time>>
+Salinity: Array<Float like Idx<Lat>, Idx<Lon>, Idx<Depth>, Idx<Time>>
+```
+
+**Kernel:** `comoment(a: Poly<T^1>) -> T` takes rank-1 slices, returns scalar.
+
+**Application:** `object_for(comoment) <@> (SST, SST, Salinity)`
+
+1. **T-dims (k=1):** Both have `Idx<Time>` ✓
+2. **Groups:** `[(SST, SST), (Salinity)]` → arity 2, arity 1
+3. **S-dims:** Group 1: `SymIdx<2, Lat>, SymIdx<2, Lon>`; Group 2: `Idx<Lat>, Idx<Lon>, Idx<Depth>`
+4. **Concatenate:** `SymIdx<2, Lat>, SymIdx<2, Lon>, Idx<Lat>, Idx<Lon>, Idx<Depth>`
+5. **Output:** `Array<Float like SymIdx<2, Lat>, SymIdx<2, Lon>, Idx<Lat>, Idx<Lon>, Idx<Depth>>`
+
+**Interpretation:** "For each symmetric pair of (lat, lon) points in SST, and each (lat, lon, depth) point in Salinity, compute the comoment of the three time series."
+
+#### 10.9.3 Comparison to Other Systems
+
+| Feature | NumPy | xarray | Blade |
+|---------|-------|--------|-------|
+| T-dim separation | No | `input_core_dims` | Kernel signature |
+| S-dim handling | Broadcast (align) | Broadcast (by name) | Concatenate |
+| Symmetry | No | No | `comm` + identity |
+| "All pairs" | Manual loops | Manual rename | Automatic |
+
+NumPy broadcasts by right-aligning dimensions. xarray's `apply_ufunc` separates core dims but broadcasts by name alignment. Neither supports automatic symmetry detection or S-dim concatenation.
+
+#### 10.9.4 The PolyS Type Function
+
+`Poly<T^k>` is a static type function computing output types. Grouping by syntactic identity happens at the call site.
+
+**Syntactic identity:** Determined by variable name:
+```blade
+(A, A, B)    // A, A identical → can form SymIdx<2, ...>
+(A, C, B)    // A, C different (even if C aliases A) → no symmetry
+```
+
+**Call site grouping:** Only consecutive identical arguments form groups:
+```blade
+(A, A, B)       → groups = ((A, 2), (B, 1))
+(A, B, A)       → groups = ((A, 1), (B, 1), (A, 1))  // not grouped!
+```
+
+**The PolyS function:**
+```blade
+static type PolyS<k, comm>(groups) =
+    let (head, tail) = groups
+    match head with
+    | () -> ()
+    | (arg, arity) ->
+        let s = match (comm, arity > 1) with
+            | (true, true) -> SymIdx<arity, SIndices<arg, k>...>
+            | _ -> Repeat<arity, SIndices<arg, k>>
+        (s..., PolyS<k, comm>(tail)...)
+```
+
+Where `SIndices<A, k>` extracts all but the last k indices from A's type.
+
+#### 10.9.5 Additional Examples
+
+**Self-covariance:**
+```blade
+object_for(cov) <@> (A, A)  // A : Array<Float like Idx<N>, Idx<Time>>
+// Output: Array<Float like SymIdx<2, N>>
+```
+
+**No commutativity:**
+```blade
+function asym(a: Poly<T^1>) -> T where poly(a)  // no comm
+object_for(asym) <@> (A, A, A)
+// Output: Array<Float like Idx<N>, Idx<N>, Idx<N>>  // full n³
+```
+
+**Product symmetry:**
+```blade
+object_for(comoment) <@> (A, A, A)  // A : Array<Float like Idx<M>, Idx<N>>
+// Output: Array<Float like SymIdx<3, M>, SymIdx<3, N>>
+// Speedup: (3!)² = 36×
+```
 
 ------------------------------------------------------------------------
 
