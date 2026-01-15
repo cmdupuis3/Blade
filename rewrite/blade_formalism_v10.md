@@ -4652,7 +4652,7 @@ The choice combinator selects between computations:
 (<|>) : Computation α × Computation α → Computation α
 ```
 
-**Semantics**: `c₁ <|> c₂` produces the result of `c₁` if non-zero, otherwise falls back to `c₂`.
+**Semantics**: `c₁ <\|> c₂` produces the result of `c₁` if non-zero, otherwise falls back to `c₂`.
 
 #### Choice Laws
 
@@ -4688,12 +4688,12 @@ guard(p, guard(q, c))       ≡  guard(p && q, c)
 
 #### MonadPlus Structure
 
-With `zero` and `<|>`, computations form a **MonadPlus**:
+With `zero` and `<\|>`, computations form a **MonadPlus**:
 
 | MonadPlus operation | Blade equivalent |
 |---------------------|------------------|
 | `mzero` | `M <@> zero` |
-| `mplus` | `<|>` |
+| `mplus` | `<\|>` |
 
 The required laws are satisfied:
 
@@ -4709,7 +4709,7 @@ m `mplus` mzero    ≡  m                             (right identity)
   -------------| Concept | Syntax | Role | Preserves |
 |---------|--------|------|-----------|
 | Zero array tuple | `()` / `method_for()` | Identity for `<*>`, arity recursion base | T-dimensions from kernel |
-| Zero function | `zero` | Annihilator for `>>=`, identity for `<|>` | S-dimensions from arrays |
+| Zero function | `zero` | Annihilator for `>>=`, identity for `<\|>` | S-dimensions from arrays |
 
 ------------------------------------------------------------------------
 
@@ -5055,7 +5055,7 @@ r' = S.dims + f.ORank
 
 ### 16.1 Evaluation Model
 
-Computations are *lazy*—they build a computation graph until `|> compute` is applied.
+Computations are *lazy*—they build a computation graph until `\|> compute` is applied.
 
 ```blade
 data CompGraph =
@@ -5126,7 +5126,7 @@ This ensures loops only fuse when they have identical structure at each level, i
 
 ### 16.4 Compute Semantics
 
-The `|> compute` combinator triggers evaluation of the computation graph:
+The `\|> compute` combinator triggers evaluation of the computation graph:
 
 ```
 compute : CompGraph → Value
@@ -5876,7 +5876,7 @@ Pseudo-native syntax appears inside kernels:
 ```blade
 let result = method_for(A, A) <@> lambda(a, b) -> {
     a * b    // element-wise at whatever rank a, b have after currying
-} where comm(a, b) |> compute
+} where comm(a, b) \|> compute
 ```
 
 The S/T structure (`method_for`, `comm`, `compute`) is explicit at the top level. Inside the kernel body, pseudo-native operations are concise and readable.
@@ -6029,7 +6029,7 @@ All systems in this section operate under **T/S (collection-first)** orientation
 | **Poly-indexing (§10.4, §17.6)** | 7.5 | 8.5 | Variable-length anonymous index tuples enabling rank-polymorphic operations. Natural extension of arity polymorphism to indices. |
 | **Combinator lifting (§9.6.4)** | 7.5 | 8.5 | `method_for(<&>)` and `object_for(>>)` extend duality to combinators. Enables dynamic kernel construction. |
 | **Left-justified triangular iteration** | 7.5 | 8.5 | Chooses orientation where iterator position = storage position, eliminating offset calculation on writes. |
-| **MonadPlus structure (§12.8)** | 7.0 | 7.5 | Computations form MonadPlus with `zero` and `<|>`. Enables algebraic reasoning about conditional/fallback computation patterns. |
+| **MonadPlus structure (§12.8)** | 7.0 | 7.5 | Computations form MonadPlus with `zero` and `<\|>`. Enables algebraic reasoning about conditional/fallback computation patterns. |
 | **Dependent index types (§4)** | 6.2 | 7.5 | Index types depend on file metadata or runtime arrays. Tagged indices for staggered grids. |
 | **CompoundIdx with currying (§4.4)** | 7.0 | 8.0 | Curryable `N → N → ...` signature and typed wildcard partial indexing are novel. |
 | **Overall (features)** | **8.8** | **9.0** | Coherent feature set where each component enables the others. |
@@ -6177,8 +6177,8 @@ There is no simpler design with the same capability.
 | `@>>` | Compose within MethodLoop (apply-then-compose) |
 | `<*>` | Array product (MethodLoop concatenation) |
 | `<$>` | Functor map |
-| `<|>` | Choice combinator (MonadPlus, computation-level) |
-| `<|:>` | Array fallback combinator (first non-null allocation) |
+| `<\|>` | Choice combinator (MonadPlus, computation-level) |
+| `<\|:>` | Array fallback combinator (first non-null allocation) |
 | Tuple(...) | Product type, stays bundled in kernel |
 | AlignedExpr | Wrapped zip + stencil metadata, unpacks to separate args |
 | zip | Array tuple combinator (n-ary, produces Tuple elements) |
@@ -6197,7 +6197,7 @@ There is no simpler design with the same capability.
 | sequence | Collect computations |
 | replicate | Repeat computation |
 | fold | Fold combinator over array tuples |
-| `|> compute` | Execute computation or materialize ArrayExpr |
+| `\|> compute` | Execute computation or materialize ArrayExpr |
 | comm(...) | Declare commutativity group |
 | poly(args) | Declare arity-polymorphic kernel |
 | arity | In-scope total argument count |
