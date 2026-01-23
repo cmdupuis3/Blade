@@ -46,12 +46,13 @@ True
 Match statements are much more flexible. They can serve as switch statements.
 
 ```F#
-let test2 = 
+let test2(a: Nat) = 
     match a with
     | 1 -> True
     | 2 -> False
     | 3 -> False
     | _ -> True
+test2(2)
 ```
 ```
 False
