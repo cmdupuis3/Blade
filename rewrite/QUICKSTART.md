@@ -46,12 +46,13 @@ True
 Match statements are much more flexible. They can serve as switch statements.
 
 ```F#
-let test2(a: Nat) = 
+let test2(a: Nat) = {
     match a with
     | 1 -> True
     | 2 -> False
     | 3 -> False
     | _ -> True
+}
 test2(2)
 ```
 ```
@@ -181,8 +182,9 @@ So now what? We have an `Array`, but we want to do something with it.
 We can define a function with `function`:
 
 ```F#
-function add1(array: T^2) -> T^2 =
+function add1(array: T^2) -> T^2 = {
    array + 1
+}
 ```
 
 This function takes a 2D array, adds one to it, and returns the result, which is a 2D array.
@@ -199,8 +201,9 @@ Function scopes in Blade work intuitively: a variable defined outside the scope 
 
 ```F#
 let mut a = 2
-function tryToChange(a: mut T^0) = 
+function tryToChange(a: mut T^0) = {
     a = a + 10
+}
 tryToChange(a)
 a
 ```
@@ -212,8 +215,9 @@ The opposite is `const`, which tells the compiler that this value can never chan
 
 ```F#
 let const a = 2
-function tryToChange(a: T^0) = 
+function tryToChange(a: T^0) = {
     a + 10
+}
 a = tryToChange(a)
 a
 ```
@@ -225,8 +229,9 @@ The middle case is regular `let`, which allows a to change in the scope it lives
 
 ```F#
 let a = 2
-function tryToChange(a: T^0) = 
+function tryToChange(a: T^0) = {
     a = a + 10
+}
 tryToChange(a)
 a
 ```
@@ -236,8 +241,9 @@ Error!
 (but this is okay)
 ```F#
 let a = 2
-function tryToChange(a: T^0) = 
+function tryToChange(a: T^0) = {
     a + 10
+}
 a = tryToChange(a)
 a
 ```
@@ -284,8 +290,9 @@ But, Blade functions don't add two arrays elementwise just because. Blade functi
 Let's build our own constrained wrapper for primitive `+`:
 
 ```F#
-let add(a: T^0, b: T^0) -> T^0 =
+let add(a: T^0, b: T^0) -> T^0 = {
     a + b
+}
 ```
 
 This works the same way we usually expect it to. There's no iteration here to confuse us.
@@ -514,15 +521,17 @@ A loop object is kind of a strange thing. It is a nest of loops... but we don't 
 To finish a computation, we need `<@>`, a special function we can call the "apply" combinator.
 
 ```F#
-let result1 = 
+let result1 = {
     object_for(func) 
     <@> (A, B, C) 
     |> compute
+}
 
-let result2 = 
+let result2 = {
     method_for(A, B, C) 
     <@> func 
     |> compute
+}
 
 result1 == result2
 ```
@@ -574,8 +583,9 @@ We need a way to declare functions such that the compiler knows commutativity is
 
 ```F#
 function covariance(a: T^1, b: T^1) 
-where comm(a, b) =
+where comm(a, b) = {
     (a - mean(a)) * (b - mean(b))
+}
 ```
 
 Here, we annotate that commutativity applies for arguments `a` and `b` by using the `where comm()` clause. If two copies of the same argument are passed to `covariance`, we know we have product symmetry. How much depends on the arrays, but in the case of multiple copies of the same array, we take the maximum. The result type will be also be deduced: commutativity optimization results in symmetric output tensors.
@@ -590,11 +600,13 @@ let array1: Array3D = ...
 let array2: Array2D = ...
 
 function kernel1(a: T^1, b: T^1)
-where comm(a, b) = 
+where comm(a, b) = {
     a*b - (a+b)
+}
 
-function kernel2(c: T^1, d: T^0) =
+function kernel2(c: T^1, d: T^0) = {
     (c - d) / (max(c) - d)
+}
 ```
 
 Looking at the type signatures of results:
@@ -621,16 +633,18 @@ Like at the end of Section 7, many functions in Blade can return different types
 
 ```F#
 function comoment_prod(A: Poly<T^1>)
-where comm(A) -> T^1 =
+where comm(A) -> T^1 = {
     match arity with
     | 0 -> zero // recursion terminator; keyword "zero" means identity
     | _ ->
         let head, tail = A
         (head - mean(head)) * comoment_prod(tail)
+}
 
 function comoment_generator(A: Poly<T^1>)
-where comm(A) -> T^0 =
+where comm(A) -> T^0 = {
     mean(comoment_prod(A))
+}
 ```
 
 (We annotate `comm` here twice just to be on the safe side, but only the second one is necessary in this specific case.)

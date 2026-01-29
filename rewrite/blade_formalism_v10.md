@@ -37,23 +37,25 @@ We establish that three features form an inseparable **Structural Trinity**: *lo
     - [3.5 Array Expressions](#35-array-expressions)
     - [3.6 Array Combinators](#36-array-combinators)
     - [3.7 Array Combinator Laws](#37-array-combinator-laws)
+    - [3.8 Binding Forms](#38-binding-forms)
 - [4. Index Types](#4-index-types)
     - [4.1 Design Principles](#41-design-principles)
-    - [4.2 Base Index Types](#42-base-index-types)
-    - [4.3 Dependent Index Types](#43-dependent-index-types)
-    - [4.4 Compound Index Semantics](#44-compound-index-semantics)
-    - [4.5 Sparse Index Types](#45-sparse-index-types)
-    - [4.6 Generalized Dependent Index Types](#46-generalized-dependent-index-types)
-    - [4.7 Index Transforms](#47-index-transforms)
-    - [4.8 Files as Type Providers](#48-files-as-type-providers)
-    - [4.9 Symmetry and Index Types](#49-symmetry-and-index-types)
-    - [4.10 Currying by Index](#410-currying-by-index)
-    - [4.11 Declaration Syntax](#411-declaration-syntax)
-    - [4.12 Bounded Index Types](#412-bounded-index-types)
-    - [4.13 Symmetric Index Types](#413-symmetric-index-types)
-    - [4.14 Nested and Mixed Symmetry](#414-nested-and-mixed-symmetry)
-    - [4.15 User-Defined Index Types](#415-user-defined-index-types)
-    - [4.16 Index Type Summary](#416-index-type-summary)
+    - [4.2 Index Types as Arity-Polymorphic Functions](#42-index-types-as-arity-polymorphic-functions)
+    - [4.3 Base Index Types](#43-base-index-types)
+    - [4.4 Dependent Index Types](#44-dependent-index-types)
+    - [4.5 Compound Index Semantics](#45-compound-index-semantics)
+    - [4.6 Sparse Index Types](#46-sparse-index-types)
+    - [4.7 Generalized Dependent Index Types](#47-generalized-dependent-index-types)
+    - [4.8 Index Transforms](#48-index-transforms)
+    - [4.9 Files as Type Providers](#49-files-as-type-providers)
+    - [4.10 Symmetry and Index Types](#410-symmetry-and-index-types)
+    - [4.11 Currying by Index](#411-currying-by-index)
+    - [4.12 Declaration Syntax](#412-declaration-syntax)
+    - [4.13 Bounded Index Types](#413-bounded-index-types)
+    - [4.14 Symmetric Index Types](#414-symmetric-index-types)
+    - [4.15 Nested and Mixed Symmetry](#415-nested-and-mixed-symmetry)
+    - [4.16 User-Defined Index Types](#416-user-defined-index-types)
+    - [4.17 Index Type Summary](#417-index-type-summary)
 - [5. Array Types](#5-array-types)
     - [5.1 Abstract vs Concrete Array Types](#51-abstract-vs-concrete-array-types)
     - [5.2 Array Type Identity](#52-array-type-identity)
@@ -65,6 +67,7 @@ We establish that three features form an inseparable **Structural Trinity**: *lo
     - [6.2 Function Syntax](#62-function-syntax)
     - [6.3 Commutativity Groups](#63-commutativity-groups)
     - [6.4 Reynolds Operators](#64-reynolds-operators)
+    - [6.5 Static Functions and Type-Level Computation](#65-static-functions-and-type-level-computation)
 - [7. Core Operations](#7-core-operations)
     - [7.1 Arithmetic Operations](#71-arithmetic-operations)
     - [7.2 Geometric Primitives](#72-geometric-primitives)
@@ -125,6 +128,7 @@ We establish that three features form an inseparable **Structural Trinity**: *lo
     - [14.3 Index Mapping for Access](#143-index-mapping-for-access)
     - [14.4 Complexity Analysis](#144-complexity-analysis)
     - [14.5 Product Symmetry Theorem](#145-product-symmetry-theorem)
+    - [14.6 Partial Product Symmetry](#146-partial-product-symmetry)
 - [15. Type System](#15-type-system)
     - [15.1 Judgments](#151-judgments)
     - [15.2 Array Rules](#152-array-rules)
@@ -138,6 +142,7 @@ We establish that three features form an inseparable **Structural Trinity**: *lo
     - [16.3 Fusion Analysis](#163-fusion-analysis)
     - [16.4 Compute Semantics](#164-compute-semantics)
 - [17. Concrete Syntax](#17-concrete-syntax)
+    - [17.0 Syntax Fundamentals](#170-syntax-fundamentals)
     - [17.1 Array Declaration](#171-array-declaration)
     - [17.2 Array Literals](#172-array-literals)
     - [17.3 Function Declaration](#173-function-declaration)
@@ -175,6 +180,7 @@ We establish that three features form an inseparable **Structural Trinity**: *lo
     - [20.5 Final Statement](#205-final-statement)
 - [Appendix A: Notation Summary](#appendix-a-notation-summary)
 - [Appendix B: Glossary](#appendix-b-glossary)
+
 
 ## 1. Introduction
 
@@ -373,19 +379,19 @@ The iteration structure exists as a value *before* any kernel is applied.
 
 ### 2.4 The Duality Theorem
 
-**Theorem 2.1 (S/T Completeness):** Any T/S computation can be expressed in S/T form.
+<a id="theorem-2-1"></a>**Theorem 2.1 (S/T Completeness):** Any T/S computation can be expressed in S/T form.
 
 *Proof sketch:* Given a T/S computation `f(A₁, ..., Aₙ) → B`, construct `L = method_for(A₁, ..., Aₙ)` and `K = λ(a₁, ..., aₙ). f_pointwise(...)`. Then `L <@> K` produces B. *(Full proof in Blade Proofs document.)*
 
-**Lemma 2.2 (T-Dimension Relationality):** T-dimensions are defined *relationally* as "dimensions consumed from each array by the kernel"—they depend on both kernel and array signatures.
+<a id="lemma-2-2"></a>**Lemma 2.2 (T-Dimension Relationality):** T-dimensions are defined *relationally* as "dimensions consumed from each array by the kernel"—they depend on both kernel and array signatures.
 
-**Lemma 2.2b (S-Dimension Determinability):** Given input arrays and kernel signature, S-dimensions are fully determined.
+<a id="lemma-2-2b"></a>**Lemma 2.2b (S-Dimension Determinability):** Given input arrays and kernel signature, S-dimensions are fully determined.
 
-**Theorem 2.3 (Iteration Object Impossibility in T/S):** No T/S system admits iteration objects.
+<a id="theorem-2-3"></a>**Theorem 2.3 (Iteration Object Impossibility in T/S):** No T/S system admits iteration objects.
 
 *Proof sketch:* T-dimensions are relational (Lemma 2.2). Without knowing the kernel, iteration structure cannot be determined independently. *(Full proof in Blade Proofs document.)*
 
-**Corollary 2.4:** T/S partial evaluation does not yield first-class iteration objects.
+<a id="corollary-2-4"></a>**Corollary 2.4:** T/S partial evaluation does not yield first-class iteration objects.
 
 ### 2.5 Non-Trivial T/S Combinators
 
@@ -581,15 +587,15 @@ T/S asks: "What does the operation do to the data?" S/T asks: "What structure do
 
 The following theorems establish that certain constructs are syntactically impossible in fixed-text programs. Full proofs are in the **Blade Proofs** document.
 
-**Theorem 2.5 (Cumulative Bound Dependency)**: In left-justified triangular iteration of arity r, the bound expression for loop k requires all k preceding index variables.
+<a id="theorem-2-5"></a>**Theorem 2.5 (Cumulative Bound Dependency)**: In left-justified triangular iteration of arity r, the bound expression for loop k requires all k preceding index variables.
 
-**Theorem 2.6 (Lexical Nesting Requirement)**: Expressing arity-r triangular iteration requires r textually nested loop constructs.
+<a id="theorem-2-6"></a>**Theorem 2.6 (Lexical Nesting Requirement)**: Expressing arity-r triangular iteration requires r textually nested loop constructs.
 
-**Theorem 2.7 (Fixed-Text Impossibility)**: No fixed textual program can express triangular iteration for arbitrary arity r.
+<a id="theorem-2-7"></a>**Theorem 2.7 (Fixed-Text Impossibility)**: No fixed textual program can express triangular iteration for arbitrary arity r.
 
-**Theorem 2.8 (Recursion Obscures Structure)**: Recursive encoding makes loop structure implicit and uninspectable.
+<a id="theorem-2-8"></a>**Theorem 2.8 (Recursion Obscures Structure)**: Recursive encoding makes loop structure implicit and uninspectable.
 
-**Theorem 2.9 (Reification Necessity)**: Loop structures for N-ary triangular iteration must be first-class runtime values.
+<a id="theorem-2-9"></a>**Theorem 2.9 (Reification Necessity)**: Loop structures for N-ary triangular iteration must be first-class runtime values.
 
 ### 2.11 S/T as Mathematical Prerequisite: The Necessity Theorems
 
@@ -633,7 +639,7 @@ Each step is a proven implication. The cascade shows that T/S orientation is not
 
 #### 2.10.4 Index Anonymity Requires Runtime Reification
 
-**Theorem 2.10 (Index Anonymity Requires Runtime Reification):**
+<a id="theorem-2-10"></a>**Theorem 2.10 (Index Anonymity Requires Runtime Reification):**
 
 Let L be a language supporting:
 
@@ -659,7 +665,7 @@ Computing SymcomState requires comparing arrays for identity (a runtime property
 
 **Symmetry Tower**: Blade's type structure forms a hierarchy where each level's types are parameterized by values from the level below. The key observation is that type equality at each level reduces to value comparisons: `Idx<n> = Idx<m>` iff `n = m`. This runtime dependency propagates upward through the tower.
 
-**Lemma 2.10.1 (Symmetry Tower Recursion Forces Runtime):**
+<a id="lemma-2-10-1"></a>**Lemma 2.10.1 (Symmetry Tower Recursion Forces Runtime):**
 
 Blade's symmetry structure forms a tower:
 
@@ -675,7 +681,7 @@ The tower tops out at Level 4 (combinators), which compose Level 3 objects to pr
 
 Combinator composition (`<&>`, `@>>`, `>>@`, `<*>`) is recursive: `compose(compose(L1, L2), L3)` requires evaluating inner compositions first, each demanding runtime information. The runtime requirement is incurred at every AST node, not once. Therefore, combinator expressions cannot be compile-time evaluated. ∎
 
-**Lemma 2.10.2 (Runtime Selection Requires Runtime Values):**
+<a id="lemma-2-10-2"></a>**Lemma 2.10.2 (Runtime Selection Requires Runtime Values):**
 
 A value is first-class if it can be stored, passed, returned, and selected conditionally at runtime. Compile-time code generation (templates, macros, staging) produces code, not values—after compilation, only execution results exist.
 
@@ -685,11 +691,11 @@ This argument is independent of metalevel count. Even infinite compile-time meta
 
 **By [Lemma 2.10.1](#lemma-2-10-1)**, requirements (3) and (4) make symcomState construction runtime-dependent. **By [Lemma 2.10.2](#lemma-2-10-2)**, first-class loop objects require runtime representation independently. Therefore, L must represent loop structures as first-class runtime values. ∎
 
-**Corollary 2.10.1 (Index Anonymity):**
+<a id="corollary-2-10-1"></a>**Corollary 2.10.1 (Index Anonymity):**
 
 Runtime reification enables index anonymity. With variable arity, the index count varies. Named identifiers are fixed at compile time—a kernel with `i, j, k` cannot handle arity 4. Runtime loop structures provide uniform access: `args[k]`, `let (head, tail) = args`, `indices[k]`. The same kernel body works for all arities. ∎
 
-**Corollary 2.10.2 (S/T Necessity):**
+<a id="corollary-2-10-2"></a>**Corollary 2.10.2 (S/T Necessity):**
 
 A system with first-class runtime loop structures treats iteration as primary: loops exist before kernels, can be manipulated independently, and provide anonymous index access. This is S/T orientation by definition. ∎
 
@@ -724,7 +730,7 @@ The preceding subsections establish that S/T is *necessary*. We now prove a stro
 
 Triangular iteration depends on Level 2 (commutativity)—a *code property*, not data.
 
-**Theorem 2.12 (Runtime Symmetry Induces Branching):**
+<a id="theorem-2-12"></a>**Theorem 2.12 (Runtime Symmetry Induces Branching):**
 
 Runtime symmetry tracking induces O(n^r / r!) conditional branches.
 
@@ -739,7 +745,7 @@ for i₁ in 0..n:
 
 These branches execute O(n^r / r!) times. Branch misprediction prevents unrolling and blocks vectorization. This is not zero-cost. ∎
 
-**Theorem 2.13 (Type-Level Symmetry Eliminates Branching):**
+<a id="theorem-2-13"></a>**Theorem 2.13 (Type-Level Symmetry Eliminates Branching):**
 
 Compile-time symmetry tracking generates unconditional code.
 
@@ -754,7 +760,7 @@ for i₁ in 0..n:
 
 The iteration strategy is selected once at compile time. No runtime branches. ∎
 
-**Theorem 2.14 (Metaprogramming Rebuilds S/T):**
+<a id="theorem-2-14"></a>**Theorem 2.14 (Metaprogramming Rebuilds S/T):**
 
 Any metaprogramming approach achieving zero-cost factorial speedup implements S/T.
 
@@ -784,7 +790,7 @@ auto compose(Kernel<Comm1> k1, Kernel<Comm2> k2) {
 
 This rebuilds Blade's commutativity type system inside C++ templates. ∎
 
-**Theorem 2.15 (S/T Inevitability):**
+<a id="theorem-2-15"></a>**Theorem 2.15 (S/T Inevitability):**
 
 Zero-cost `(r!)^d` speedup requires:
 
@@ -814,9 +820,9 @@ Requirements (1)-(3) constitute S/T orientation. ∎
 
 Options 1 and 2 are isomorphic (Theorem 2.14). Option 3 sacrifices zero-cost (Theorem 2.12). **No fourth option exists.**
 
-**Corollary 2.15.1:** T/S cannot achieve zero-cost factorial speedup. Any attempt to add this capability to T/S rebuilds S/T (via metaprogramming, staging, or embedded DSL).
+<a id="corollary-2-15-1"></a>**Corollary 2.15.1:** T/S cannot achieve zero-cost factorial speedup. Any attempt to add this capability to T/S rebuilds S/T (via metaprogramming, staging, or embedded DSL).
 
-**Corollary 2.15.2:** S/T is not a design choice—it is mathematically inevitable for zero-cost symmetric tensor computation.
+<a id="corollary-2-15-2"></a>**Corollary 2.15.2:** S/T is not a design choice—it is mathematically inevitable for zero-cost symmetric tensor computation.
 
 
 ------------------------------------------------------------------------
@@ -957,6 +963,76 @@ function add(a: A^0, b: A^0) -> A^0    // same element type required
 function pair(a: A^0, b: B^0) -> (A, B) // different types allowed
 function scale(s: A^0, v: B^1) -> cast<A,B>^1  // promotion applies
 ```
+
+#### 3.4.4 Units of Measure
+
+Units of measure are annotations on primitive types, not types themselves:
+
+```blade
+// Base Units
+Unit meters
+Unit seconds
+Unit kg
+
+// Derived Units
+Unit velocity = meters / seconds
+Unit momentum = kg * velocity
+
+// Usage with primitives
+Float<meters>                   // length
+Float<velocity>                 // speed
+Int<kg>                         // integer mass (unusual but valid)
+```
+
+**Unit arithmetic**:
+- `meters / seconds` → velocity
+- `meters * meters` → meters²
+- `meters + meters` → meters
+- `meters + seconds` → compile error (unit mismatch)
+
+#### 3.4.5 Bounded Primitive Types
+
+Primitives can have optional bounds. Bounds are runtime-checked:
+
+```blade
+Float<min=0>                    // non-negative
+Float<min=0, max=1>             // probability
+Int<min=0>                      // non-negative integer
+```
+
+Combined with units:
+
+```blade
+Float<meters, min=0>            // non-negative length
+Float<kelvin, min=0>            // temperature (≥ absolute zero)
+type Salinity = Float<psu, min=0>
+type Probability = Float<min=0, max=1>
+```
+
+#### 3.4.6 Mutually Constrained Types
+
+Types can be mutually constrained using `and...where` syntax. Constraints are runtime-checked at assignment.
+
+```blade
+type V1: Float<velocity>
+and V2: Float<velocity>
+where Mass1 * V1 + Mass2 * V2 = TotalMomentum
+```
+
+**Joint assignment required**: Mutually constrained types must be assigned together in a single statement. This gives the compiler a single verification point:
+
+```blade
+// Correct: joint assignment, constraint checked once
+let v1, v2 = compute_velocities()
+
+// Error: V1 and V2 must be assigned together
+let v1 = compute_velocity1()
+let v2 = compute_velocity2()
+```
+
+**Use cases**: Conservation laws, resource allocation, portfolio balancing.
+
+**Semantics**: Mutual assertion, not mutual solving. The program must produce values satisfying the constraint. If violated at runtime, the program crashes.
 
 ### 3.5 Array Expressions
 
@@ -1151,7 +1227,7 @@ transpose : ArrayExpr<T,r,σ> × Perm → ArrayExpr<T,r,σ'>
                   σ' = permute(σ, Perm)
 ```
 
-**Semantics**: `transpose(A, [1,0,2])(i)(j)(k) = A(j)(i)(k)`
+**Semantics**: `transpose(A, [1,0,2])(i, j, k) = A(j, i, k)`
 
 Transpose produces a new array with reordered memory layout upon materialization. This is a "hard" transpose—actual data rearrangement, not a view.
 
@@ -1163,7 +1239,7 @@ Extracts elements where specified dimensions have equal indices:
 diag : ArrayExpr<T,r,σ> × (Dim, Dim) → ArrayExpr<T,r-1,σ'>
 ```
 
-**Semantics**: `diag(A, (0,1))(i)(k) = A(i)(i)(k)`
+**Semantics**: `diag(A, (0,1))(i, k) = A(i, i, k)`
 
 Reduces rank by collapsing two dimensions into one.
 
@@ -1231,7 +1307,7 @@ zip(A) ≡ Tuple(A)                               (singleton wraps in tuple)
 
 ```
 stack(A)[0] ≡ A                                 (singleton)
-stack(A, B, C)(i) ≡ [A, B, C][i]               (indexing selects array)
+stack(A, B, C)(i) ≡ (A, B, C)[i]               (indexing selects array)
 ```
 
 **Transpose:**
@@ -1266,6 +1342,39 @@ reverse(reverse(A, d), d) ≡ A                   (involution)
 
 ------------------------------------------------------------------------
 
+### 3.8 Binding Forms
+
+Three binding forms distinguished by mutability:
+
+| Syntax | Mutable in scope | Can pass to `mut` param |
+|--------|------------------|-------------------------|
+| `let const x = 2` | No | No |
+| `let x = 2` | Yes | No |
+| `let mut x = 2` | Yes | Yes |
+
+- `let const`: Compile-time constant, fully immutable
+- `let`: Mutable locally, but protected from mutation by callees
+- `let mut`: Mutable locally, and can be passed to functions expecting `mut` parameters
+
+```blade
+let x = 2
+x = x + 1              // ok, mutable in scope
+
+let mut y = 2  
+y = y + 1              // ok, mutable in scope
+
+let const z = 2
+z = z + 1              // error: const is immutable
+
+function incr(a: mut T^0) = a = a + 1
+
+incr(x)                // error: x is not mut
+incr(y)                // ok: y is mut
+incr(z)                // error: z is const
+```
+
+The `mut` modifier on parameters indicates the function may mutate the caller's binding. All parameters are passed by reference; `mut` controls whether mutation is allowed.
+
 ## 4. Index Types
 
 ### 4.1 Design Principles
@@ -1280,7 +1389,78 @@ The index type system follows these core principles:
 
 **Dimensions vs Index Types**: Dimensions (coordinate values like latitudes or timestamps) are ordinary 1D arrays. Index types determine iteration and storage structure. The association between a dimension array and the data arrays it describes is a user-level convention, not enforced by the type system. This separation keeps the core type system simple while allowing flexible metadata handling.
 
-### 4.2 Base Index Types
+### 4.2 Index Types as Arity-Polymorphic Functions
+
+All index types share a common curried signature:
+
+```
+IndexType<r> : N → N → ... → N   (r positions)
+```
+
+An index type defines a bijection between valid r-tuples and contiguous storage offsets. This unifies:
+
+- **Domain**: Valid r-tuples satisfying the type's constraint
+- **Cardinality**: Size of the domain  
+- **Storage bijection**: Maps valid tuples ↔ offsets [0, cardinality)
+- **Enumeration**: Iteration traverses the domain in offset order
+
+| Index Type | Arity | Domain | Bijection |
+|------------|-------|--------|-----------|
+| `Idx<N>` | 1 | {i : 0 ≤ i < N} | i ↦ i |
+| `SymIdx<2,N>` | 2 | {(i,j) : i ≤ j < N} | (i,j) ↦ j(j+1)/2 + i |
+| `FullSymIdx<3,N>` | 3 | {(i,j,k) : i ≤ j ≤ k < N} | tetrahedral |
+| `<Idx<N>, Idx<M>>` | 2 | {(i,j) : i < N, j < M} | (i,j) ↦ i×M + j |
+| `CompoundIdx<I,J,mask>` | 2 | {(i,j) : mask[i,j]} | hash of valid pairs |
+
+**Currying and Uncurrying**: All index types support currying uniformly. Fixing one coordinate yields a dependent remainder type:
+
+```blade
+let A: Array<Float, SymIdx<2,N>>
+A(i)       // : Array<Float, BoundedIdx<i,N>>
+
+let B: Array<Float, CompoundIdx<Idx<lat>, Idx<lon>, mask>>
+```
+
+**Indexing syntax**: Arrays use `()` for indexing because arrays are functions:
+
+```blade
+// Array indexing with ()
+A(i)           // single index
+A(i, j)        // multi-index (tuple syntax)
+A(i)(j)(k)     // curried indexing
+A(i, j, k)     // equivalent to A(i)(j)(k)
+
+// Poly-tuple access with []
+args[k]        // access k-th element of poly-tuple
+```
+
+The `[]` syntax is reserved for poly-tuple structural access only, not array indexing. This distinction reflects that arrays are mathematical functions (applied with `()`), while poly-tuples are structural containers (accessed with `[]`).
+B(i)       // : Array<Float, FilteredIdx<Idx<lon>, mask[i,_]>>
+```
+
+For constrained/hashed index types, the slice is rehashed to a new contiguous range. The type transformation rule is compile-time determinable; only the bounds are runtime values.
+
+**Tuple indexing**: Since currying works uniformly, uncurrying is syntactic sugar. These are equivalent:
+
+```blade
+A(i)(j)(k)    // fully curried
+A(i, j, k)    // uncurried tuple syntax
+A(i, j)(k)    // partial uncurrying
+```
+
+This gives "native" multi-dimensional indexing for all array types:
+
+```blade
+let M: Array<Float, Idx<N>, Idx<M>>
+M(i, j)       // element access
+
+let S: Array<Float, SymIdx<2, N>>
+S(i, j)       // symmetric matrix element (i ≤ j automatically handled)
+```
+
+The tuple form `A(i, j)` is preferred for clarity when accessing elements; the curried form `A(i)` for when partial application is intended.
+
+### 4.3 Base Index Types
 
 | Type | Type Signature | Description | Hashable |
 |------|----------------|-------------|----------|
@@ -1294,7 +1474,7 @@ The index type system follows these core principles:
 **Float indices are forbidden**: Floating-point values are not safely hashable due to precision issues. Coordinate values (latitudes, times, etc.) are stored as separate 1D arrays, not as index types.
 
 
-#### 4.2.1 Structural Matching (Duck Typing)
+#### 4.3.1 Structural Matching (Duck Typing)
 
 Index types are structurally matched. Two index types are equal if:
 
@@ -1314,7 +1494,7 @@ era5_temp + merra_temp  // OK if indices structurally equal
 ```
 
 
-#### 4.2.2 Tagged Index Types
+#### 4.3.2 Tagged Index Types
 
 All index types may carry user-defined tags for type-level distinction:
 
@@ -1341,7 +1521,7 @@ Idx<3, odd>     // tag is the enum value 'odd'
 
 **Type equality requires tag equality**: `Idx<721, LatPosition.Center> != Idx<721, LatPosition.Left>` and `Idx<3, even> != Idx<3, odd>`. Untagged indices are compatible only with other untagged indices of the same extent.
 
-### 4.3 Dependent Index Types
+### 4.4 Dependent Index Types
 
 Certain index types depend on runtime arrays:
 
@@ -1363,7 +1543,7 @@ let ocean_temp: Array<Float like CompoundIdx<ocean_mask>, Idx<8760>>
 
 Unlike simple index types with signature `N`, a `CompoundIdx` has signature `N -> N -> ...` matching the rank of its mask. This preserves currying through the compound structure.
 
-### 4.4 Compound Index Semantics
+### 4.5 Compound Index Semantics
 
 For a k-dimensional mask, `CompoundIdx<mask>` has type `N → N → ... → N` (k arrows), preserving currying through the compound structure.
 
@@ -1400,11 +1580,11 @@ ocean_temp((_, lon))          // → Array<Float like N, Idx<8760>>  (valid lats
 
 This is **O(n)** where n = number of valid combinations in the mask. The cost is unavoidable—we must enumerate which positions remain valid after fixing some coordinates. The resulting curried index identity derives from (original mask hash, fixed coordinate values).
 
-### 4.5 Sparse Index Types
+### 4.6 Sparse Index Types
 
 `SparseIdx` represents indices where only a subset of combinations are valid. Unlike `CompoundIdx` which derives validity from a mask array, `SparseIdx` explicitly enumerates valid entries.
 
-#### 4.5.1 Declaration
+#### 4.6.1 Declaration
 
 ```blade
 // Sparse index over explicitly listed entries
@@ -1415,7 +1595,7 @@ static cg_entries = [(−1, 0, −1), (−1, 1, 0), (0, −1, −1), (0, 0, 0), 
 type CGIdx = SparseIdx<cg_entries>
 ```
 
-#### 4.5.2 Storage Semantics
+#### 4.6.2 Storage Semantics
 
 Sparse indices initialize as empty hash tables and expand on indexing:
 
@@ -1435,7 +1615,7 @@ A((i, j, k))          // error if (i,j,k) not in entries
 - All indices must be present (no partial indexing without wildcards)
 - Wildcards allowed: `A((i, _, k))` returns all entries matching pattern
 
-#### 4.5.3 Iteration
+#### 4.6.3 Iteration
 
 Iteration visits only valid entries:
 
@@ -1446,7 +1626,7 @@ method_for(A : Array<T like SparseIdx<entries>>) <@> f
 
 The iteration count is `|entries|`, not `|I₁| × |I₂| × ... × |Iₙ|`.
 
-#### 4.5.4 Applications
+#### 4.6.4 Applications
 
 **Clebsch-Gordan coefficients**: Only entries where m₁ + m₂ = m_out are nonzero:
 
@@ -1467,7 +1647,7 @@ type EdgeIdx = SparseIdx<edges>
 let weights: Array<Float like EdgeIdx>
 ```
 
-### 4.6 Generalized Dependent Index Types
+### 4.7 Generalized Dependent Index Types
 
 `DepIdx<I, f>` generalizes dependent indexing where the inner index type depends on the outer index value:
 
@@ -1478,7 +1658,7 @@ type DepIdx<I : IndexType, f : I -> IndexType> : IndexType
 // Total extent is sum of |f(i)| for all i in I
 ```
 
-#### 4.6.1 Definition
+#### 4.7.1 Definition
 
 ```blade
 type DepIdx<I, f> where
@@ -1494,7 +1674,7 @@ type DepIdx<I, f> where
     static function from_offset(n : Nat) : (I, f(n)) = ...
 ```
 
-#### 4.6.2 Examples
+#### 4.7.2 Examples
 
 **Ragged arrays** (variable-length inner dimension):
 
@@ -1525,7 +1705,7 @@ type IrrepsIdx<spec> = DepIdx<
 ```
 
 
-### 4.7 Index Transforms
+### 4.8 Index Transforms
 
 All structural transforms are explicit:
 
@@ -1538,7 +1718,7 @@ All structural transforms are explicit:
 
 No implicit conversions occur. Mismatched indices produce type errors.
 
-### 4.8 Files as Type Providers
+### 4.9 Files as Type Providers
 
 File metadata provides index types at compile time:
 
@@ -1556,7 +1736,7 @@ The compile step reads file metadata to instantiate types. Runtime reads actual 
 2.  Metadata inspection is cheap
 3.  The structure (not values) determines types
 
-### 4.9 Symmetry and Index Types
+### 4.10 Symmetry and Index Types
 
 Symmetry is encoded directly in index types rather than as separate metadata. A symmetric matrix uses `SymIdx<n>` rather than two `Idx<n>` with a symmetry annotation:
 
@@ -1577,7 +1757,7 @@ The index type itself determines storage layout and iteration pattern:
 
 **Indexing semantics**: For `SymIdx`-indexed arrays, `cov(3, 1)` and `cov(1, 3)` access the same storage location. The index type handles canonicalization transparently.
 
-**Currying**: Symmetric index types curry to dependent bounded types (see §4.11):
+**Currying**: Symmetric index types curry to dependent bounded types (see §4.12):
 
 ``` blade
 let cov: Array<Float like SymIdx<1000>>
@@ -1586,16 +1766,16 @@ cov(i)    // : Array<Float like BoundedIdx<i, 1000>>  — slice of length (1000 
 
 **Inference**: The symmetry system (§13) infers appropriate symmetric index types from kernel commutativity and array identity. When `method_for(A, A)` is applied with a commutative kernel, the output type is `SymIdx<n>` rather than `(Idx<n>, Idx<n>)`.
 
-### 4.10 Currying by Index
+### 4.11 Currying by Index
 
 Arrays curry by index type only:
 
 ```blade
 let A: Array<Float like Idx<100>, Idx<200>, Idx<300>>
 
-A(i)       // Array<Float like Idx<200>, Idx<300>>
-A(i)(j)    // Array<Float like Idx<300>>
-A(i)(j)(k) // Float
+A(i)         // Array<Float like Idx<200>, Idx<300>>
+A(i, j)      // Array<Float like Idx<300>>
+A(i, j, k)   // Float
 ```
 
 Index arithmetic works for contiguous integer indices:
@@ -1604,7 +1784,7 @@ Index arithmetic works for contiguous integer indices:
 A(i + 1)   // valid for Idx<n>
 ```
 
-### 4.11 Declaration Syntax
+### 4.12 Declaration Syntax
 
 **Type declarations with `type` keyword:**
 
@@ -1658,7 +1838,7 @@ let matrix: Array<Float like Idx<n>, Idx<n>>
 
 **Notes:** - File-derived arrays get types from type providers (deferred) - `type` for type aliases and definitions - `let` for value bindings
 
-### 4.12 Bounded Index Types
+### 4.13 Bounded Index Types
 
 The `BoundedIdx` type generalizes `Idx` to support dependent bounds, particularly for currying symmetric indices:
 
@@ -1693,11 +1873,11 @@ S(i)    // : Array<Float like BoundedIdx<i, n>>  — lower bound is i, upper bou
 
 This avoids template metaprogramming explosion while preserving type safety at the Blade level.
 
-### 4.13 Symmetric Index Types
+### 4.14 Symmetric Index Types
 
 Symmetric index types encode symmetry directly in the index structure, with explicit rank parameters.
 
-#### 4.13.1 SymIdx: Sorted Index Tuples
+#### 4.14.1 SymIdx: Sorted Index Tuples
 
 `SymIdx<r, n>` represents r indices from 0..n-1, sorted in non-decreasing order:
 
@@ -1745,7 +1925,7 @@ S(i)(j)    // : Array<Float like BoundedIdx<j, n>>
 S(i)(j)(k) // : Float
 ```
 
-#### 4.13.2 AntisymIdx: Strictly Ordered Index Tuples
+#### 4.14.2 AntisymIdx: Strictly Ordered Index Tuples
 
 `AntisymIdx<r, n>` represents r indices in strictly increasing order:
 
@@ -1776,7 +1956,7 @@ AntisymIdx<3, n>    // Antisymmetric triples (e.g., Levi-Civita)
                     // Cardinality: C(n, 3)
 ```
 
-#### 4.13.3 HermitianIdx: Complex Symmetric
+#### 4.14.3 HermitianIdx: Complex Symmetric
 
 `HermitianIdx<n>` represents indices for Hermitian matrices where A[i,j] = conj(A[j,i]):
 
@@ -1789,7 +1969,7 @@ type HermitianIdx<n> : IndexType where
     canonical : (i : Idx<n>, j : Idx<n>) -> (HermitianIdx<n>, needs_conj : Bool)
 ```
 
-#### 4.13.4 Summary
+#### 4.14.4 Summary
 
 | Type | Constraint | Cardinality | Use case |
 |------|------------|-------------|----------|
@@ -1799,9 +1979,9 @@ type HermitianIdx<n> : IndexType where
 
 
 
-### 4.14 Nested and Mixed Symmetry
+### 4.15 Nested and Mixed Symmetry
 
-#### 4.12.1 Product Index (Compound Index Types)
+#### 4.15.1 Product Index (Compound Index Types)
 
 Independent indices with no symmetry relationship use angle bracket syntax:
 
@@ -1833,7 +2013,7 @@ for (A, B) in <Idx<lat>, Idx<lon>> <@> lambda(i, j, a, b) -> ...
 for range<latLonIdx> <@> lambda(i, j) -> f(lat(i), lon(j))
 ```
 
-#### 4.12.2 Nested Symmetric (Wreath Product)
+#### 4.15.2 Nested Symmetric (Wreath Product)
 
 Symmetric structure at multiple levels — symmetric pairs of symmetric pairs:
 
@@ -1856,7 +2036,7 @@ components : NestedSymIdx<n> → (Idx<n>, Idx<n>, Idx<n>, Idx<n>)
 
 **Application**: Fourth-order elasticity tensors with major and minor symmetries.
 
-#### 4.12.3 Mixed Symmetry (Riemann Tensor)
+#### 4.15.3 Mixed Symmetry (Riemann Tensor)
 
 ``` blade
 // Riemann tensor: antisym(0,1), antisym(2,3), sym((0,1),(2,3))
@@ -1869,7 +2049,7 @@ type RiemannIdx<n>
 // For n=4: 6 × 7 / 2 = 21 (not 256)
 ```
 
-#### 4.12.4 Equivariant Index Types (Foundation)
+#### 4.15.4 Equivariant Index Types (Foundation)
 
 For machine learning applications requiring equivariance under geometric transformations, index types can carry group representation annotations:
 
@@ -1912,9 +2092,9 @@ let distances: Array<Float like SymIdx<N>>
 
 **Scope**: This section defines the index type foundations for equivariant computation. The full equivariance verification system—including group declarations, representation constructors, automatic equivariance checking, and integration with kernels—is specified in §8 (Equivariance System).
 
-### 4.15 User-Defined Index Types
+### 4.16 User-Defined Index Types
 
-#### 4.15.1 Three-Tier System
+#### 4.16.1 Three-Tier System
 
 | Tier | Capability | Safety | Use Case |
 |------|------------|--------|----------|
@@ -1923,7 +2103,7 @@ let distances: Array<Float like SymIdx<N>>
 | **Unsafe**          Custom `canonical` + `transform` functions          User responsibility      Exotic symmetries
   ---------------------------------------------------------------------------------------------------------------------------------
 
-#### 4.15.2 Compositional Building Blocks
+#### 4.16.2 Compositional Building Blocks
 
 Rather than arbitrary user-defined index types, most complex symmetries can be expressed compositionally:
 
@@ -1944,7 +2124,7 @@ The compiler knows how to:
 - Generate iteration patterns
 - Optimize access patterns
 
-#### 4.15.3 Unsafe Escape Hatch
+#### 4.16.3 Unsafe Escape Hatch
 
 For truly exotic symmetries not expressible compositionally:
 
@@ -2003,11 +2183,11 @@ transform<T : Signed>(val : T, swapped : Bool) =
 
 Access semantics: - `A(2, 5)` → `canonical(2, 5) = Some(2, 5)` → fetch `storage[to_flat(2, 5)]` - `A(5, 2)` → `canonical(5, 2) = Some(2, 5)` with swap → fetch and negate - `A(3, 3)` → `canonical(3, 3) = None` → return zero
 
-#### 4.15.4 Recommendation
+#### 4.16.4 Recommendation
 
 Use compositional building blocks for most cases. Reserve `unsafe indextype` for genuinely novel symmetry structures that cannot be expressed through composition of built-in types.
 
-### 4.16 Index Type Summary
+### 4.17 Index Type Summary
 
 | Type | Components | Cardinality | Use Case |
 |------|------------|-------------|----------|
@@ -2088,7 +2268,7 @@ The symmetry vector σ describes *which positions are interchangeable* without s
 
 **Concrete types: `Array<T like I₁, ..., Iₙ>`**
 
-Used for data declarations. Symmetry is encoded directly in index types (see §4.16):
+Used for data declarations. Symmetry is encoded directly in index types (see §4.17):
 
 ``` blade
 // Non-symmetric matrix — two independent indices
@@ -2227,11 +2407,11 @@ A(i)(j)(k) = ...                      : T
 **Key insight:** The array doesn't care *how* you compute the index—only *what* value it resolves to. Any expression producing a valid index is a valid index:
 
 ```blade
-A(42)                     -- literal
-A(i + 1)                  -- arithmetic
-A(f(x))                   -- function result
-A(if c then i else j)     -- conditional
-A(stencil_offset(k))      -- computed offset
+A(42)                     // literal
+A(i + 1)                  // arithmetic
+A(f(x))                   // function result
+A(if c then i else j)     // conditional
+A(stencil_offset(k))      // computed offset
 ```
 
 **Compound indices** are tuples applied as a single unit:
@@ -2323,15 +2503,15 @@ function trace(A)
 {
     let out = 0
     for i in 0..extent(A, 0) {
-        let indices = replicate(i, rank(A))  -- (i, i, i, ...) 
+        let indices = replicate(i, rank(A))  // (i, i, i, ...) 
         out = out + A(indices)
     }
     out
 }
 
-trace(matrix)    -- sum of M[i,i]
-trace(tensor3)   -- sum of T[i,i,i]
-trace(tensor4)   -- sum of T[i,i,i,i]
+trace(matrix)    // sum of M[i,i]
+trace(tensor3)   // sum of T[i,i,i]
+trace(tensor4)   // sum of T[i,i,i,i]
 ```
 
 **Example: Rank-polymorphic iteration**
@@ -2434,14 +2614,115 @@ where
         { extent: expr, symm: k, name: "mode" },
         ...
     )
--> T_out^r_out               // optional return type annotation
-{
-    // kernel body
-    expr                      // final expression is the return value
-}
+-> T_out^r_out               // return type annotation (after constraints)
+= expr                       // function body (final expression is return value)
 ```
 
-**Return value**: The final expression in the body is the return value. The optional `-> Type` annotation is checked against the inferred type.
+**Return type annotation**: Placed after `where` clause, before `=`. This ordering is required because the return type may depend on constraints—for example, `comm(a, b)` can produce `SymIdx` output types. The annotation is checked against the inferred type.
+
+For arity-polymorphic functions, explicit return types clarify the rank transformation:
+
+```blade
+function comoment_prod(a: Poly<T^1>)
+where comm(a) -> T^1 =
+    match arity with
+    | 0 -> zero
+    | _ -> let head :: tail = a
+           (head - mean(head)) * comoment_prod(tail)
+
+function comoment(a: Poly<T^1>)
+where comm(a) -> T^0 =
+    mean(comoment_prod(a))
+```
+
+Here `-> T^1` and `-> T^0` make explicit that `comoment_prod` returns a rank-1 array (deviation products per sample) while `comoment` returns a scalar (the mean).
+
+#### 6.2.1 Lambda Syntax
+
+Lambda expressions use the `lambda` keyword:
+
+```blade
+lambda(a, b) -> a + b
+lambda(i: Int, x: Float) -> x * i         // with type annotations
+lambda(a: T^1) -> a |> sum                // rank-annotated parameter
+```
+
+Parameters can optionally include type annotations. Iteration depth and argument matching follow from existing semantics.
+
+**Lambda `where` clauses**: Lambdas support `where` clause syntax parallel to function declarations:
+
+```blade
+let f = lambda(x, y) where comm(x, y) -> x * y
+let g = lambda(a, b) where comm(a, b) -> T^0 = sum(a * b)  // with return type
+```
+
+**Type inference**: Lambda parameters can omit type annotations when inferrable from context:
+
+```blade
+lambda(x, y) -> x * y    // types inferred from usage
+```
+
+Array-typed parameters still require explicit rank annotations.
+
+**Capture restrictions**: Lambdas can capture scalars and `let const` bindings, but not arrays or virtual arrays.
+
+Allowed:
+
+```blade
+let const scale = 2.0
+let threshold = 0.5
+method_for(A) <@> lambda(a) -> if a > threshold then a * scale else 0
+```
+
+Disallowed:
+
+```blade
+let weights = loadWeights()
+method_for(A) <@> lambda(a) -> a * weights(i)   // error: captures array
+```
+
+**Rationale**: Array captures would introduce implicit iteration dependencies. All array data must flow through explicit loop construction (`method_for`, `zip`), preserving S/T discipline.
+
+Correct form:
+
+```blade
+method_for(zip(A, weights)) <@> lambda((a, w)) -> a * w
+```
+
+#### 6.2.2 Sectioned Binary Operators
+
+Binary operators can be sectioned using parentheses:
+
+```blade
+(+) (a, b)    // a + b
+(/) (a, b)    // a / b
+(*)           // the multiplication function
+```
+
+Partial application via currying (trailing arguments):
+
+```blade
+(/) x         // waiting for second arg: y -> x / y
+y |> (/) x    // x / y
+```
+
+#### 6.2.3 Wildcard Partial Application
+
+A single `_` marks a missing argument for partial application:
+
+```blade
+// Valid: single wildcard
+(/) (_, 2)        // x -> x / 2
+(/) (2, _)        // x -> 2 / x
+f(_, y, z)        // x -> f(x, y, z)
+f(x, _, z)        // y -> f(x, y, z)
+
+// Error: multiple wildcards
+f(_, _)           // error: use lambda(a, b) -> f(a, b)
+f(_, g(_))        // error: use lambda(a, b) -> f(a, g(b))
+```
+
+**Rationale**: Counting wildcards is error-prone. Single wildcard handles the common case; lambda handles complex cases.
 
 ### 6.3 Commutativity Groups
 
@@ -2463,94 +2744,178 @@ yields c = ⟨1, 1, 1, 4⟩.
 
 ### 6.4 Reynolds Operators
 
-The `where reynolds(S)` annotation declares that a kernel has Reynolds structure—it computes a symmetric sum over permutations of array arguments.
+The `reynolds` combinator wraps a kernel to symmetrize or antisymmetrize its output over permutations of arguments.
 
 #### 6.4.1 Definition
 
 From invariant theory, the Reynolds operator averages over a group action:
 
 ```
-R(f)(A₁, ..., Aₙ)[i₁, ..., iₙ] = ⊕_{σ ∈ Sₙ} f(A_{σ(1)}[i₁], ..., A_{σ(n)}[iₙ])
+reynolds(g)(x₁, ..., xₙ) = Σ_{σ ∈ Sₙ} g(x_{σ(1)}, ..., x_{σ(n)})
+reynolds(g, Antisymmetric)(x₁, ..., xₙ) = Σ_{σ ∈ Sₙ} sign(σ) · g(x_{σ(1)}, ..., x_{σ(n)})
 ```
 
-where ⊕ is a symmetric aggregation (sum, product, max, etc.).
-
-**Key property**: Reynolds kernels produce index-symmetric output even when arrays are distinct. The symmetry comes from kernel structure, not array identity.
+**Key property**: Reynolds produces index-symmetric output even when arrays are distinct. The symmetry comes from the combinator, not array identity.
 
 #### 6.4.2 Syntax
 
+Reynolds is a combinator that wraps a kernel, not an annotation on the kernel definition:
+
 ```blade
-let K = lambda(A, B) -> lambda(i, j) ->
-    f(A[i], B[j]) + f(B[i], A[j])
-where reynolds([A, B])
+// Non-commutative kernel
+let g = lambda(x, y) -> x / y
+
+// Reynolds wraps the kernel
+let result = L <@> reynolds(g)                  // computes g(x,y) + g(y,x)
+let result = L <@> reynolds(g, Antisymmetric)   // computes g(x,y) - g(y,x)
 ```
 
-The argument lists which array parameters participate in the symmetry.
+The kernel `g` itself remains non-commutative; `reynolds(g)` creates a new commutative kernel.
 
 #### 6.4.3 Symmetric vs Antisymmetric
 
 **Symmetric** (default): Sum over permutations.
 
 ```blade
-let sym_K = lambda(A, B) -> lambda(i, j) ->
-    f(A[i], B[j]) + f(B[i], A[j])
-where reynolds([A, B])
-// sym_K[i,j] = sym_K[j,i]
+let g = lambda(x, y) -> f(x, y)
+L <@> reynolds(g)
+// result(i, j) = f(A(i), B(j)) + f(A(j), B(i))
+// result(i, j) = result(j, i)
 ```
 
 **Antisymmetric**: Alternating sum (signed by permutation parity).
 
 ```blade
-let antisym_K = lambda(A, B) -> lambda(i, j) ->
-    f(A[i], B[j]) - f(B[i], A[j])
-where reynolds([A, B], Antisymmetric)
-// antisym_K[i,j] = -antisym_K[j,i], antisym_K[i,i] = 0
+let g = lambda(x, y) -> f(x, y)
+L <@> reynolds(g, Antisymmetric)
+// result(i, j) = f(A(i), B(j)) - f(A(j), B(i))
+// result(i, j) = -result(j, i), result(i, i) = 0
 ```
+
+**Context-sensitive keywords**: `Symmetric` and `Antisymmetric` are only recognized inside `reynolds(...)`, allowing them as variable names elsewhere.
 
 #### 6.4.4 Interaction with Identity Commutativity
 
-When a Reynolds kernel is called with identical arrays, both optimizations combine:
+When Reynolds is combined with identical arrays, both optimizations apply:
 
 | Source | Effect | Speedup |
 |--------|--------|---------|
-| Reynolds alone | Triangular iteration | n!× |
-| Identity alone | Term collapse | n!× |
+| `reynolds(g)` alone | Triangular iteration | n!× |
+| `comm` + identical arrays | Term collapse | n!× |
 | Both | Triangular + collapse | (n!)²× |
 
 ```blade
-let K = lambda(A, B) -> lambda(i, j) ->
-    f(A[i], B[j]) + f(B[i], A[j])
-where reynolds([A, B])
+let g = lambda(x, y) -> x / y
 
-K(X, Y)  // Reynolds: 2× (triangular iteration)
-K(X, X)  // Reynolds + Identity: 4× (triangular + term collapse)
+// Different arrays: Reynolds provides 2× speedup
+method_for(A, B) <@> reynolds(g)
+
+// Identical arrays: 4× = 2×(reynolds) × 2×(identity)
+method_for(A, A) <@> reynolds(g)
 ```
 
 #### 6.4.5 Partial Symmetry
 
-Only some arrays may participate:
+Reynolds can apply to a subset of arguments:
 
 ```blade
-let K = lambda(A, B, C) -> lambda(i, j, k) ->
-    g(A[i], B[j], C[k]) + g(B[i], A[j], C[k])
-where reynolds([A, B])  // C does not participate
+let g = lambda(x, y, z) -> f(x, y, z)
+L <@> reynolds(g, positions=[0, 1])  // symmetrize over first two only
+// result symmetric in (i, j) but not in k
 ```
-
-Output is symmetric in (i, j) but not in k.
 
 #### 6.4.6 Semantics
 
-**Production**: The compiler trusts the annotation and emits triangular iteration. False annotations yield undefined behavior.
+**Optimization**: The compiler iterates triangularly over output indices (n!× speedup), computing `g` once per canonical tuple and applying symmetry.
 
-**Debug**: The compiler may verify by sampling random index tuples and checking permutation invariance.
+**Verification**: In debug mode, the compiler may verify by sampling random index tuples and checking permutation invariance.
 
 ------------------------------------------------------------------------
+
+### 6.5 Static Functions and Type-Level Computation
+
+`static function` declarations can be used in type-level computation. This enables dependent-style programming without requiring totality proofs.
+
+```blade
+let const n = 100
+static function triangle(k) = k * (k + 1) / 2
+
+type SymIdx = Idx<triangle(n)>    // static function in type position
+```
+
+**Rules:**
+
+- `static function`: May only capture `let const` values; callable at compile time
+- `let const` values: May be computed from literals, other `let const` values, and `static function` applications
+
+```blade
+let const a = 10
+let const b = 20
+static function sym_elements(d, rank) = binomial(d + rank - 1, rank)
+
+let const cov_size = sym_elements(a, 2)            // const
+type CovMatrix = Array<Float like Idx<cov_size>>   // valid
+```
+
+**Comparison to other approaches:**
+
+| Approach | Annotation | Requirements |
+|----------|------------|--------------|
+| Idris/Agda | Any total function | Totality proofs required |
+| C++ `constexpr` | Explicit marking | Syntactic restrictions, no totality |
+| Blade `static` | Explicit marking | Must depend only on `const`/`static`, no termination proofs |
+
+This keeps type-level computation accessible without descending into proof-assistant complexity.
 
 ## 7. Core Operations
 
 Blade wraps primitive operations in `object_for` to enable symmetry inference and equivariance tracking.
 
 ### 7.1 Arithmetic Operations
+
+#### 7.1.1 Binary Operator Syntax
+
+Two forms for binary operations on arrays:
+
+| Syntax | Iteration | Result rank (for two rank-2 arrays) |
+|--------|-----------|-------------------------------------|
+| `A + B` | Co-iteration (zip) | 2 (elementwise) |
+| `A [+] B` | Cross-iteration (outer) | 4 (outer product) |
+
+**Complete operator set:**
+
+| Elementwise | Outer Product | Operation |
+|-------------|---------------|-----------|
+| `+` | `[+]` | Addition |
+| `-` | `[-]` | Subtraction |
+| `*` | `[*]` | Multiplication |
+| `/` | `[/]` | Division |
+| `%` | `[%]` | Modulo |
+| `^` | `[^]` | Power |
+| `==` | `[==]` | Equality |
+| `!=` | `[!=]` | Inequality |
+| `<` | `[<]` | Less than |
+| `<=` | `[<=]` | Less or equal |
+| `>` | `[>]` | Greater than |
+| `>=` | `[>=]` | Greater or equal |
+| `&&` | `[&&]` | Logical and |
+| `\|\|` | `[\|\|]` | Logical or |
+
+**Desugaring:**
+
+```blade
+A + B      =  method_for(zip(A, B)) <@> lambda((a, b)) -> a + b
+A [+] B    =  method_for(A, B) <@> (+)
+```
+
+- Bare operators (`+`, `-`, `*`, `/`) are elementwise — familiar NumPy-like behavior
+- Bracketed operators (`[+]`, `[-]`, `[*]`, `[/]`) are Blade-native outer product
+- `(+)` remains the scalar kernel, used when passing to combinators
+- All three collapse to identical behavior at rank 0
+
+The compiler infers commutativity for bracketed ops: `A [*] A` compiles to triangular iteration automatically.
+
+#### 7.1.2 Symmetry Annotations
 
 Primitive arithmetic carries symmetry annotations that enable automatic `comm`/`antisymm` inference:
 
@@ -2952,19 +3317,19 @@ The bound for loop k is `bound_k = n - Σ_{m=0}^{k-1} i_m`.
 
 #### 9.6.2 The Trinity Theorems
 
-**Theorem 9.1 (Arity Polymorphism Requires Loop Reification)**: A system with arity-polymorphic kernels—where arity r determines r-deep nested iteration with cumulative bounds—must have first-class loop representations.
+<a id="theorem-9-1"></a>**Theorem 9.1 (Arity Polymorphism Requires Loop Reification)**: A system with arity-polymorphic kernels—where arity r determines r-deep nested iteration with cumulative bounds—must have first-class loop representations.
 
 *Proof*: An arity-polymorphic kernel:
 
 ```blade
-function moment(args) where poly(args), comm(args)
+function moment(args) where comm(args)
 ```
 
 when applied to r arrays requires r-deep nested iteration with left-justified bounds and triangular optimization from commutativity.
 
 By [Theorem 2.7](#theorem-2-7), no fixed textual program expresses this for arbitrary r. The loop structure must be generated dynamically based on r AND represented as a manipulable value for commutativity analysis and bound computation. This is precisely loop reification. ∎
 
-**Theorem 9.2 (Arity Polymorphism Requires Dimensional Currying)**: A system where arity r determines output rank r must have arrays-as-functions typing.
+<a id="theorem-9-2"></a>**Theorem 9.2 (Arity Polymorphism Requires Dimensional Currying)**: A system where arity r determines output rank r must have arrays-as-functions typing.
 
 *Proof*: An arity-polymorphic kernel produces output whose rank equals the input arity:
 
@@ -2982,7 +3347,7 @@ Output : N^r → T    (r-ary function type)
 
 This is the curried array type. Without dimensional currying, each arity requires a separate, unrelated output type (`T[n][n]`, `T[n][n][n]`, etc.) with no polymorphic relationship. ∎
 
-**Theorem 9.3 (Loop Reification Requires Dimensional Currying with Dependent Index Types)**: Left-justified triangular iteration produces arrays whose index type extents depend on bound index values, requiring dimensional currying with dependent index types.
+<a id="theorem-9-3"></a>**Theorem 9.3 (Loop Reification Requires Dimensional Currying with Dependent Index Types)**: Left-justified triangular iteration produces arrays whose index type extents depend on bound index values, requiring dimensional currying with dependent index types.
 
 *Proof*: In left-justified triangular iteration of arity r over extent n:
 
@@ -3017,7 +3382,7 @@ The return type's leading extent depends on the argument value.
 
 Without dependent index types, left-justified triangular arrays cannot be correctly typed—the system cannot verify that `Output(i₀)(i₁)` is in-bounds when the bound depends on `i₀`. ∎
 
-**Theorem 9.4 (Dimensional Currying Requires Loop Reification for Bound Computation)**: Computing the dependent extent `n - Σ_{m<k} i_m` requires access to the loop structure.
+<a id="theorem-9-4"></a>**Theorem 9.4 (Dimensional Currying Requires Loop Reification for Bound Computation)**: Computing the dependent extent `n - Σ_{m<k} i_m` requires access to the loop structure.
 
 *Proof*: The extent of `Output[i₀][i₁]...[i_{k-1}]` is `n - i₀ - i₁ - ... - i_{k-1}`.
 
@@ -3025,7 +3390,7 @@ To compute this extent, the system must know: 1. Which indices have been bound (
 
 This information constitutes the loop structure—specifically, which level of the nested iteration we're at and what index values have been fixed. This is loop reification: the loop state must exist as an inspectable value to compute dependent bounds. ∎
 
-**Theorem 9.5 (Dimensional Currying Requires Arity Polymorphism)**: Dimensional currying for multi-array computations requires arity polymorphism.
+<a id="theorem-9-5"></a>**Theorem 9.5 (Dimensional Currying Requires Arity Polymorphism)**: Dimensional currying for multi-array computations requires arity polymorphism.
 
 *Proof*: Consider the typing judgment:
 
@@ -3044,7 +3409,7 @@ Therefore, dimensional currying with variable output rank requires arity polymor
 
 **Remark (Symmetry Independence)**: This argument does not depend on symmetry. Symmetry determines σ (which dimensions are interchangeable) and enables triangular iteration, but the rank `r` is determined by arity alone. Commutativity provides the *option* for dependent triangular bounds; arity polymorphism is required regardless.
 
-**Theorem 9.6 (Loop Reification Requires Arity Polymorphism)**: Loop reification with monoidal composition requires arity polymorphism.
+<a id="theorem-9-6"></a>**Theorem 9.6 (Loop Reification Requires Arity Polymorphism)**: Loop reification with monoidal composition requires arity polymorphism.
 
 *Proof*: Loop objects support the `<*>` combinator:
 
@@ -3065,7 +3430,7 @@ Therefore, closure under `<*>` entails arity polymorphism. By [Theorem 2.3](#the
 
 #### 9.6.3 The Inseparability Theorem
 
-**Theorem 9.7 (Trinity Inseparability)**: Loop reification, arity polymorphism, and dimensional currying are mutually necessary. Removing any one makes the other two inexpressible.
+<a id="theorem-9-7"></a>**Theorem 9.7 (Trinity Inseparability)**: Loop reification, arity polymorphism, and dimensional currying are mutually necessary. Removing any one makes the other two inexpressible.
 
 *Proof*: We show each feature requires the other two:
 
@@ -3096,7 +3461,7 @@ Loop Reification ←→ Dimensional Currying
 
 Each edge represents a necessity proof (Theorems 5.1-5.4). ∎
 
-**Corollary 9.8 (Unified Contribution)**: The three features constitute a single, indivisible contribution to programming language theory. Claims of novelty apply to the trinity as a whole, not to individual components.
+<a id="corollary-9-8"></a>**Corollary 9.8 (Unified Contribution)**: The three features constitute a single, indivisible contribution to programming language theory. Claims of novelty apply to the trinity as a whole, not to individual components.
 
 #### 9.6.4 The Symmetry Tower and Lowering Homomorphisms
 
@@ -3129,7 +3494,7 @@ An arity-n function f has symmetry H ∈ Sym₂(n) when:
 ∀σ ∈ H : f(x_{σ(1)}, ..., x_{σ(n)}) = f(x₁, ..., xₙ)
 ```
 
-**Theorem 9.9 (Lowering `lower₂₁`: Commutativity → Array Symmetry)**:
+<a id="theorem-9-9"></a>**Theorem 9.9 (Lowering `lower₂₁`: Commutativity → Array Symmetry)**:
 
 Let `f : Tⁿ → T` have symmetry H ≤ Sₙ. Let `A : I → T` be an array. Define:
 
@@ -3149,11 +3514,11 @@ Out[i_{σ(1)}, ..., i_{σ(n)}]
   = Out[i₁, ..., iₙ]                      ∎
 ```
 
-**Corollary 9.10**: The map `lower₂₁ : Sym₂(n) → Sym₁(n)` defined by `lower₂₁(H) = H` is an isomorphism when all array arguments are identical.
+<a id="corollary-9-10"></a>**Corollary 9.10**: The map `lower₂₁ : Sym₂(n) → Sym₁(n)` defined by `lower₂₁(H) = H` is an isomorphism when all array arguments are identical.
 
 *Proof*: When all arrays are identical (A₁ = ... = Aₙ = A), every permutation σ satisfies A_{σ(j)} = Aⱼ, so Stab = Sₙ. Thus H ∩ Stab = H ∩ Sₙ = H. The map lower₂₁(H) = H is trivially injective. For surjectivity: any symmetry group G ≤ Sₙ acting on array indices arises from the commutative function f(x₁,...,xₙ) = symmetric combination with symmetry G. ∎
 
-**Theorem 9.11 (Lowering with Distinct Arrays)**:
+<a id="theorem-9-11"></a>**Theorem 9.11 (Lowering with Distinct Arrays)**:
 
 Let `f : Tⁿ → T` have symmetry H ≤ Sₙ. Let `A₁, ..., Aₙ : I → T` be arrays. Define:
 
@@ -3188,15 +3553,15 @@ Therefore:
   = Out[i₁, ..., iₙ]  ∎
 ```
 
-**Corollary 9.12**: - All arrays identical ⟹ Stab = Sₙ ⟹ `lower₂₁(H) = H` (full transfer) - All arrays distinct ⟹ Stab = {id} ⟹ `lower₂₁(H) = {id}` (no transfer)
+<a id="corollary-9-12"></a>**Corollary 9.12**: - All arrays identical ⟹ Stab = Sₙ ⟹ `lower₂₁(H) = H` (full transfer) - All arrays distinct ⟹ Stab = {id} ⟹ `lower₂₁(H) = {id}` (no transfer)
 
-**Theorem 9.13 (Lowering `lower₁₀`: Array Symmetry → Identity)**:
+<a id="theorem-9-13"></a>**Theorem 9.13 (Lowering `lower₁₀`: Array Symmetry → Identity)**:
 
 The map `lower₁₀ : Sym₁(r) → Sym₀` sending every permutation to identity is the unique homomorphism to the trivial group.
 
 *Interpretation*: Reading elements from a symmetric array "consumes" the symmetry. The permutation σ ∈ Sym₁(r) guarantees `A(σ(i)) = A(i)`, but both sides denote the same element—this is just Level 0 identity.
 
-**Theorem 9.14 (Input Symmetry Does Not Propagate)**:
+<a id="theorem-9-14"></a>**Theorem 9.14 (Input Symmetry Does Not Propagate)**:
 
 Let `f : T² → T` have trivial symmetry (non-commutative). Let `A : I² → T` have symmetry S₁₂. Define `Out[i,j] = f(A[i,0], A[j,1])`.
 
@@ -3213,7 +3578,7 @@ Then Out has trivial symmetry.
 
 Symmetry at level N lowers to level N-1 when objects are applied. Since `lower₁₀` is trivial, input array symmetry vanishes into element identity. Since `lower₂₁` is an isomorphism (for identical arrays), function commutativity transfers to output array symmetry. Both phenomena—input symmetry "quashing" and output symmetry "generation"—are instances of the same lowering structure.
 
-**Theorem 9.15 (Trinity Implements Lowering)**:
+<a id="theorem-9-15"></a>**Theorem 9.15 (Trinity Implements Lowering)**:
 
 The Structural Trinity provides the machinery to compute and exploit `lower₂₁`:
 
@@ -3258,8 +3623,8 @@ method_for(>>) : [f, g, h, ...] → f >> g >> h >> ...
 This is precisely `fold` — lifting a binary combinator to n-ary. Associativity of `<&>` and `>>` makes this well-defined (parenthesization doesn't matter).
 
 ```blade
-object_for(<&>)(f) = λg. f <&> g     -- curried: build parallel composition incrementally
-object_for(>>)(f) = λg. f >> g       -- curried: build pipeline incrementally
+object_for(<&>)(f) = λg. f <&> g     // curried: build parallel composition incrementally
+object_for(>>)(f) = λg. f >> g       // curried: build pipeline incrementally
 ```
 
 **Dynamic Kernel Construction**:
@@ -3305,34 +3670,34 @@ Curry(S) = λ(remaining). nested_for(all)
 
 #### 9.7.2 Triangular Validity
 
-**Lemma 9.21 (Triangular Validity):** Triangular iteration is valid iff:
+<a id="lemma-9-21"></a>**Lemma 9.21 (Triangular Validity):** Triangular iteration is valid iff:
 
 1. Arrays identical: `A₁ = A₂ = ... = Aᵣ`
 2. Kernel commutative: `f(x_σ(1), ..., x_σ(r)) = f(x₁, ..., xᵣ)` for all σ ∈ Sᵣ
 
 *Proof:* If both hold, all `r!` permutations of an index tuple produce the same result—compute one representative per equivalence class. If either fails, permuting arguments changes results. ∎
 
-**Lemma 9.22 (Disjoint Sources):** Condition (1) depends only on arrays. Condition (2) depends only on the kernel. No information flows between them.
+<a id="lemma-9-22"></a>**Lemma 9.22 (Disjoint Sources):** Condition (1) depends only on arrays. Condition (2) depends only on the kernel. No information flows between them.
 
 *Proof:* Array identity is a relation over array references. Commutativity is a property of the function definition. These are syntactically and semantically disjoint. ∎
 
 #### 9.7.3 Detection Under Currying
 
-**Lemma 9.23 (Identity Detection):** Identity `A₁ = ... = Aᵣ` is detectable iff all arrays are bound.
+<a id="lemma-9-23"></a>**Lemma 9.23 (Identity Detection):** Identity `A₁ = ... = Aᵣ` is detectable iff all arrays are bound.
 
 *Proof:* Identity is a relation over the complete tuple. Missing any `Aₖ` leaves identity undetermined—the missing array could be identical to the others or distinct. ∎
 
-**Lemma 9.24 (Commutativity Detection):** Commutativity is detectable iff `f` is bound.
+<a id="lemma-9-24"></a>**Lemma 9.24 (Commutativity Detection):** Commutativity is detectable iff `f` is bound.
 
 *Proof:* Commutativity is a property of the kernel alone. Without `f`, no commutativity information exists. ∎
 
-**Lemma 9.25 (No Cross-Information):** Arrays provide no commutativity information. The kernel provides no identity information.
+<a id="lemma-9-25"></a>**Lemma 9.25 (No Cross-Information):** Arrays provide no commutativity information. The kernel provides no identity information.
 
 *Proof:* By Lemma 9.22, the two conditions have disjoint sources. ∎
 
 #### 9.7.4 The Two Maximal Curryings
 
-**Theorem 9.26 (Two Maximal Curryings):** The only curryings enabling symmetry detection with no redundancy are:
+<a id="theorem-9-26"></a>**Theorem 9.26 (Two Maximal Curryings):** The only curryings enabling symmetry detection with no redundancy are:
 
 1. `Curry({A₁, ..., Aᵣ})` — all arrays, no kernel
 2. `Curry({f})` — kernel only
@@ -3351,7 +3716,7 @@ Curry(S) = λ(remaining). nested_for(all)
 
 #### 9.7.5 Composable Partial Specification
 
-**Theorem 9.27 (Composable Partial Specification):** `method_for` and `object_for` are the unique maximal partial specifications of `nested_for` that:
+<a id="theorem-9-27"></a>**Theorem 9.27 (Composable Partial Specification):** `method_for` and `object_for` are the unique maximal partial specifications of `nested_for` that:
 
 1. Enable symmetry detection before full application
 2. Admit closed composition (`<*>`, `>>@`)
@@ -3367,9 +3732,9 @@ Composition requires partial specifications that combine before full application
 
 By Theorem 9.26, only all-arrays and kernel-only curryings enable detection. Mixed specifications cannot determine whether composition preserves triangular eligibility—they lack complete information for either condition. ∎
 
-**Corollary 9.28 (nested_for Doesn't Compose):** `nested_for` achieves factorial speedup but cannot combine with other loops, pipeline kernels, or fuse parallel computations. Composition requires the `method_for`/`object_for` decomposition.
+<a id="corollary-9-28"></a>**Corollary 9.28 (nested_for Doesn't Compose):** `nested_for` achieves factorial speedup but cannot combine with other loops, pipeline kernels, or fuse parallel computations. Composition requires the `method_for`/`object_for` decomposition.
 
-**Theorem 9.29 (Uniqueness):** For composable symmetric tensor computation with `(r!)^d` speedup:
+<a id="theorem-9-29"></a>**Theorem 9.29 (Uniqueness):** For composable symmetric tensor computation with `(r!)^d` speedup:
 
 1. `nested_for` achieves speedup (fully specified, terminal)
 2. `method_for`/`object_for` are the unique composable partial specifications
@@ -3379,7 +3744,7 @@ By Theorem 9.26, only all-arrays and kernel-only curryings enable detection. Mix
 
 ### 9.8 Virtual Arrays
 
-A **virtual array** is a type-level construct describing an iteration pattern without allocating storage. Virtual arrays have `Unit` element type—they exist purely to emit indices.
+A **virtual array** is a type-level construct describing an iteration pattern without allocating storage. Virtual arrays have `Void` element type—they exist purely to emit indices.
 
 ```blade
 range<I>              // iterate I in standard order
@@ -3418,6 +3783,14 @@ method_for(blocked<SymIdx<2, N>, 32>, A, A) where comm <@> lambda(i, j, a, b) ->
 ```
 
 ### 9.9 For-Loop Syntax
+
+The `in` clause in `for` loops only accepts **virtual arrays** (`range<I>`, `reverse<I>`, `blocked<I,K>`, etc.), not raw index types:
+
+```blade
+for (A, B) in range<Idx<N>> <@> ...      // correct
+for (A, B) in reverse<Idx<N>> <@> ...    // correct
+for (A, B) in Idx<N> <@> ...             // error: Idx<N> is not a virtual array
+```
 
 The `for` construct provides clean syntax over `method_for` and `object_for`. Despite familiar appearance, it constructs iteration objects—not imperative control flow.
 
@@ -3459,7 +3832,7 @@ Desugars to: `method_for(range<SymIdx<2,N>>, A, B) <@> lambda(i, j, a, b) -> f(i
 
 **Arity-polymorphic** (two packs for indices and values):
 ```blade
-for args in SymIdx<arity(args), N> where poly(args), comm(args)
+for args in SymIdx<arity(args), N> where comm(args)
 <@> lambda(is, xs) -> f(is, xs)
 ```
 
@@ -3482,7 +3855,7 @@ op <@> (Y, Z)  // reuse with different arrays
 
 **Arity-polymorphic kernels**:
 ```blade
-let moment = for lambda(is, xs) where poly(is, xs), comm(xs) -> product(xs)
+let moment = for lambda(is, xs) where comm(xs) -> product(xs)
 let cov = moment <@> (data, data)
 let coskew = moment <@> (data, data, data)
 let cokurt = moment <@> (data, data, data, data)
@@ -3596,7 +3969,7 @@ For kernels that operate on any number of arguments:
 
 ```blade
 function product(args)
-where poly(args), comm(args)
+where comm(args)
 {
     let (head, tail) = args
     head * product(tail)    // base case automatic: product(()) = 1
@@ -3663,7 +4036,7 @@ for k in 0..arity {               // exclusive upper bound: k ∈ [0, arity)
 
 ```blade
 function product(args)
-where poly(args), comm(args)
+where comm(args)
 {
     let (head, tail) = args
     head * product(tail)    // base case automatic: product(()) = 1
@@ -3676,7 +4049,7 @@ No explicit base case needed — `f(())` returns identity element for `f`.
 
 ```blade
 function weighted_sum(args, weights: T^1)
-where poly(args), comm(args)
+where comm(args)
 {
     let out = 0
     for k in 0..arity {
@@ -3690,7 +4063,7 @@ where poly(args), comm(args)
 
 | Feature | Syntax |
 |---------|--------|
-| Arity-polymorphic declaration | `where poly(args)` or `where poly(data, weights)` |
+| Arity-polymorphic declaration | `args: Poly<T^r>` or `data: Poly<T^r>, weights: Poly<T^r>` |
 | Destructure | `let (head, tail) = args` |
 | Index | `args[k]` |
 | Count | `arity` |
@@ -3861,8 +4234,8 @@ moment(A, A, B)       // Two copies of A, one copy of B
 
 **At the definition site:**
 ```blade
-function comoment(a) where poly(a), comm(a)
-function moment(a, b) where poly(a), poly(b), comm(a)
+function comoment(a) where comm(a)
+function moment(a, b) where comm(a)
 ```
 
 ### 10.8 Kernel Signatures (T-World)
@@ -3875,7 +4248,7 @@ The `Poly<T^k>` type represents a poly-pack of rank-k array slices:
 
 ```blade
 function kernel(a: Poly<T^k>) -> T^m
-where poly(a), comm(a)
+where comm(a)
 ```
 
 Where:
@@ -3890,24 +4263,24 @@ The kernel knows nothing about S-dims. It receives T-dimensional slices and retu
 
 **Scalar kernel (T-rank 0 output):**
 ```blade
-function comoment(a: Poly<T^1>) -> T
-where poly(a), comm(a) =
+function comoment(a: Poly<T^1>)
+where comm(a) -> T =
     prod(a)
 ```
 Takes rank-1 slices (vectors), returns scalar.
 
 **Vector kernel (T-rank 1 output):**
 ```blade
-function outer_product(a: Poly<T^1>) -> T^1
-where poly(a), comm(a) =
+function outer_product(a: Poly<T^1>)
+where comm(a) -> T^1 =
     outer(a)
 ```
 Takes rank-1 slices, returns rank-1.
 
 **Matrix kernel (T-rank 2 input):**
 ```blade
-function matrix_moment(a: Poly<T^2>) -> T
-where poly(a), comm(a) =
+function matrix_moment(a: Poly<T^2>)
+where comm(a) -> T =
     sum(elementwise_prod(a))
 ```
 Takes rank-2 slices (matrices), returns scalar.
@@ -3918,8 +4291,8 @@ The kernel signature specifies only the T-rank (what slices it consumes). S-dims
 
 ```blade
 // Kernel: lives in T-world, sees vectors
-function comoment(a: Poly<T^1>) -> T
-where poly(a), comm(a) = prod(a)
+function comoment(a: Poly<T^1>)
+where comm(a) -> T = prod(a)
 
 // Application: S-dims deduced here
 object_for(comoment) <@> (A, A, B)
@@ -3953,7 +4326,7 @@ This section specifies how output types are deduced when applying arity-polymorp
 **Given:**
 ```blade
 function kernel(a: Poly<T^k>) -> T^m
-where poly(a), comm(a)
+where comm(a)
 
 object_for(kernel) <@> (A₁, A₂, ..., Aₙ)
 ```
@@ -4055,7 +4428,7 @@ object_for(cov) <@> (A, A)  // A : Array<Float like Idx<N>, Idx<Time>>
 
 **No commutativity:**
 ```blade
-function asym(a: Poly<T^1>) -> T where poly(a)  // no comm
+function asym(a: Poly<T^1>) -> T  // no comm
 object_for(asym) <@> (A, A, A)
 // Output: Array<Float like Idx<N>, Idx<N>, Idx<N>>  // full n³
 ```
@@ -4446,7 +4819,7 @@ let result = (loop <@> demean) @>> (loop <@> variance) |> compute
 
 The `>>@` and `@>>` combinators satisfy a fundamental duality:
 
-**Theorem 12.1 (Compose-Apply Duality)**:
+<a id="theorem-12-1"></a>**Theorem 12.1 (Compose-Apply Duality)**:
 
 ```blade
 (object_for(f) >>@ object_for(g)) <@> A  ≡  (mloop <@> f) @>> (mloop <@> g)
@@ -4475,7 +4848,7 @@ object_for(id) >>@ o  ≡  o  ≡  o >>@ object_for(id)
 
 The `method_for`/`object_for` duality has a deeper consequence: at rank-0, the two constructions collapse to identical semantics.
 
-**Theorem 12.2 (Rank-0 Convergence):** For any rank-0 function `f : T^0 → T^0 → T^0`:
+<a id="theorem-12-2"></a>**Theorem 12.2 (Rank-0 Convergence):** For any rank-0 function `f : T^0 → T^0 → T^0`:
 
 ```blade
 object_for(f) <@> (A, B)  ≡  method_for(A, B) <@> f
@@ -4506,14 +4879,14 @@ data-cata → data-homo → data-ana
 
 Both curryings, when completed, specify this same linear chain. The only difference was *which part* they committed first—but with no index dynamics, the order of commitment doesn't matter. ∎
 
-**Corollary 12.3 (Idempotence):** Wrapping rank-0 values is idempotent:
+<a id="corollary-12-3"></a>**Corollary 12.3 (Idempotence):** Wrapping rank-0 values is idempotent:
 
 ```blade
 object_for(object_for(f)) ≡ object_for(f)
 method_for(method_for(A)) ≡ method_for(A)    // A rank-0
 ```
 
-**Corollary 12.4 (Pseudo-Native Foundation):** `A + B` requires no commitment to `object_for` or `method_for`—both interpretations are equivalent for rank-0 `(+)`. This is the mathematical foundation for pseudo-native syntax.
+<a id="corollary-12-4"></a>**Corollary 12.4 (Pseudo-Native Foundation):** `A + B` requires no commitment to `object_for` or `method_for`—both interpretations are equivalent for rank-0 `(+)`. This is the mathematical foundation for pseudo-native syntax.
 
 #### Connection to the Duality Theorems
 
@@ -4632,6 +5005,21 @@ M <@> zero            // produces array of zeros with shape from M's S-dimension
 object_for(zero) <@> (A, A)   // symmetric matrix of zeros
 ```
 
+#### Zero as Monoid Identity
+
+In arity-polymorphic recursion, `zero` serves as the **monoid identity** for the base case. The compiler infers the appropriate identity based on the operation context:
+
+```blade
+function comoment_prod(a: Poly<T^1>)
+where comm(a) -> T^1 =
+    match arity with
+    | 0 -> zero                              // multiplicative identity (1)
+    | _ -> let head :: tail = a
+           (head - mean(head)) * comoment_prod(tail)
+```
+
+Here `zero` resolves to `1` (multiplicative identity) because it's used with `*`. For additive contexts, `zero` would resolve to `0`.
+
 #### Zero Function Laws
 
 ```blade
@@ -4693,7 +5081,7 @@ With `zero` and `<|>`, computations form a **MonadPlus**:
 | MonadPlus operation | Blade equivalent |
 |---------------------|------------------|
 | `mzero` | `M <@> zero` |
-| `mplus` | `<\|>` |
+| `mplus` | `<|>` |
 
 The required laws are satisfied:
 
@@ -4747,9 +5135,15 @@ state(i, j) =
 
 ### 13.3 Output Symmetry Inference via Lowering
 
-Output symmetry inference is the computational realization of the lowering homomorphism `lower₂₁` (Theorems 7.9-7.12).
+Output symmetry inference is the computational realization of the lowering homomorphism `lower₂₁` (Theorems 9.9-9.11).
 
-**Theoretical basis**: Function commutativity (Level 2 symmetry) lowers to array index symmetry (Level 1) when applied to identical arrays. The homomorphism `lower₂₁(H) = H ∩ Stab(A₁,...,Aₙ)` precisely characterizes which symmetries transfer ([Theorem 9.14](#theorem-9-14)).
+**Theoretical basis**: Function commutativity (Level 2 symmetry) lowers to array index symmetry (Level 1) via the homomorphism `lower₂₁(H) = H ∩ Stab(A₁,...,Aₙ)`. The stabilizer `Stab` determines which symmetries transfer:
+
+- **Identical arrays**: `Stab = Sₙ`, so `H ∩ Stab = H` (full symmetry transfers)
+- **Shared index spaces**: `Stab` computed per-dimension; partial symmetry transfers for shared dimensions
+- **Distinct index spaces**: `Stab = {id}`, so `H ∩ Stab = {id}` (no symmetry transfers)
+
+See §14.6 for the per-dimension application (partial product symmetry).
 
 **Algorithm**:
 
@@ -4800,7 +5194,7 @@ Function Commutativity →  [apply to arrays] → lower₂₁ (iso if identical)
 
 -   **Input symmetry quashing** ([Theorem 9.13](#theorem-9-13)): Input array symmetry is consumed when elements are read, because `lower₁₀` is trivial—all index permutations become element identity.
 
--   **Output symmetry generation** ([Corollary 9.12](#corollary-9-12)): Function commutativity transfers to output array symmetry via `lower₂₁`, which is an isomorphism when arrays are identical.
+-   **Output symmetry generation** ([Corollary 9.12](#corollary-9-12)): Function commutativity transfers to output array symmetry via `lower₂₁`. The transfer is complete when arrays are identical; partial when index spaces are shared; trivial when index spaces are distinct.
 
 Both phenomena are instances of the same lowering structure—they differ only in which homomorphism applies.
 
@@ -4962,6 +5356,114 @@ This is exponentially better than the r! speedup from flattening to 1D.
 | r=4, d=4 (cokurtosis, 4D) | 331,776× |
 
 **Design implication**: The Product Symmetry Theorem is not merely a performance result—it is the *forcing function* behind the Structural Trinity. Dimensional currying exists because flattening forfeits (r!)^(d-1). Arity polymorphism exists because r varies across computations. Loop reification exists to represent the product-of-simplices iteration space as a composable value. The (r!)^d speedup is the prize; the Trinity is what's required to claim it.
+
+### 14.6 Partial Product Symmetry
+
+Product symmetry generalizes beyond identical arrays. The key insight: **commutativity is the license, shared index spaces are the payoff**. Array identity is sufficient but not necessary—any shared index space enables triangular iteration in that dimension.
+
+#### 14.6.1 Theoretical Basis
+
+Theorem 9.11 established that output symmetry is `H ∩ Stab(A₁,...,Aₙ)` where `Stab` is the stabilizer subgroup. For identical arrays, `Stab = Sₙ`, giving full symmetry. But the theorem applies generally:
+
+- **Per-dimension stabilizer**: For multi-dimensional arrays, we can compute `Stab` independently for each dimension based on which arrays share that index space
+- **Partial symmetry**: When some dimensions are shared and others aren't, we get symmetry (and triangular iteration) only in the shared dimensions
+
+#### 14.6.2 Examples
+
+**Full product symmetry** (same array, all dims shared):
+
+```blade
+let A: Array<Float, Idx<M>, Idx<N>, Idx<T>>
+kernel(a: T^1, b: T^1) where comm(a, b) = ...
+kernel(A, A)
+// Output: Array<Float, SymIdx<2, M>, SymIdx<2, N>>
+// Speedup: 4× (2× per shared dimension)
+```
+
+**Partial product symmetry** (different arrays, some dims shared):
+
+```blade
+let A: Array<Float, Idx<M>, Idx<T>>
+let B: Array<Float, Idx<M>, Idx<N>, Idx<T>>
+kernel(a: T^1, b: T^1) where comm(a, b) = ...
+kernel(A, B)
+// M is shared: both arrays indexed by Idx<M>
+// N is not shared: only B has it
+// Output: Array<Float, SymIdx<2, M>, Idx<N>>
+// Speedup: 2× (from M only)
+```
+
+**No shared dimensions** (commutativity alone):
+
+```blade
+let A: Array<Float, Idx<M>, Idx<T>>
+let B: Array<Float, Idx<N>, Idx<T>>
+kernel(a: T^1, b: T^1) where comm(a, b) = ...
+kernel(A, B)
+// No shared S-dimension index spaces
+// Output: Array<Float, Idx<M>, Idx<N>>
+// Speedup: 1× (commutativity doesn't help with different index spaces)
+```
+
+#### 14.6.3 Summary
+
+| Situation | Symmetry | Speedup |
+|-----------|----------|---------|
+| Same array, all dims | Full product symmetry | 2^d |
+| Different arrays, some dims shared | Partial product symmetry | 2^(d_shared) |
+| Different arrays, no dims shared | Commutativity only | 1× |
+
+#### 14.6.4 Detection Heuristics
+
+The compiler uses these heuristics to detect product symmetry:
+
+1. **Array identity** (fast path): If arrays are identical, full product symmetry applies. This is a cheap pointer comparison.
+
+2. **Named index type matching**: For non-identical arrays, compare named index types across argument positions. Shared names (e.g., both have `Idx<M>`) indicate shared index spaces.
+
+3. **Structural matching**: For anonymous index types, fall back to structural comparison (same extent, same tags).
+
+Array identity remains the primary heuristic—it's fast and covers the common case (self-covariance, self-correlation, etc.). Partial symmetry detection is a secondary optimization for cross-array computations.
+
+#### 14.6.5 Dimension Alignment Errors
+
+When shared index spaces cannot be aligned in the iteration order, the compiler emits an error. This extends the principle from §11.3: "Non-optimal iteration order becomes a type error."
+
+**Case 1: Transposed dimensions (same rank)**
+
+```blade
+let A: Array<Float, Idx<M>, Idx<N>, Idx<T>>
+let B: Array<Float, Idx<N>, Idx<M>, Idx<T>>  // M, N transposed
+kernel(a: T^1, b: T^1) where comm(a, b) = ...
+kernel(A, B)  // error
+```
+
+```
+Error: Shared dimensions (M, N) not aligned - product symmetry unavailable.
+  A: Idx<M>, Idx<N>, Idx<T>
+  B: Idx<N>, Idx<M>, Idx<T>
+Fix: kernel(A, transpose(B, [1, 0, 2]))
+```
+
+**Case 2: Split dimensions (different ranks)**
+
+```blade
+let C: Array<Float, Idx<P>, Idx<Q>>
+let D: Array<Float, Idx<P>>
+kernel(c: T^1, d: T^1) where comm(c, d) = ...
+kernel(C, D)  // error: Q splits shared dimension P
+```
+
+```
+Error: Shared dimension P not aligned - Q intervenes in iteration order.
+  C: Idx<P>, Idx<Q>
+  D: Idx<P>
+Fix: kernel(D, C) to align P dimensions.
+```
+
+**Common principle**: Shared dimensions must be adjacent in the iteration nesting to enable triangular iteration. When commutativity is declared but structure prevents the optimization, this is an error—the user's stated intent (commutativity) conflicts with the structure they provided.
+
+**Suppression**: If the suboptimal iteration is intentional, use `#[allow(unaligned_symmetry)]` to suppress the error.
 
 ------------------------------------------------------------------------
 
@@ -5146,6 +5648,70 @@ compute(Guard(p, g)) = if p then compute(g) else zero
 
 ## 17. Concrete Syntax
 
+### 17.0 Syntax Fundamentals
+
+#### Statement Separation
+
+Newlines serve as statement separators at the top level and in blocks, with delimiter-aware suppression:
+
+| Context | Newline behavior |
+|---------|------------------|
+| Inside `()`, `[]`, `{}` | Ignored (whitespace) |
+| Top-level declarations | Separator between declarations |
+| Inside blocks | Separator between statements |
+| After inline body | Terminates the expression |
+
+Additional rules:
+- Consecutive newlines collapse to one
+- Semicolons (`;`) are optional explicit terminators
+- Leading newlines after `{` or `(` are ignored
+
+```blade
+// Multiline expression inside parens - newlines ignored
+let result = method_for(
+    A,
+    B,
+    C
+) <@> kernel
+
+// Block with newline-separated statements
+{
+    let x = 1
+    let y = 2
+    x + y
+}
+
+// Explicit semicolons work but aren't required
+let a = 1; let b = 2
+```
+
+#### Inline vs Block Bodies
+
+Function and lambda bodies support two forms:
+
+```blade
+// Inline body: single expression after = or ->
+function square(x) = x * x
+lambda(x) -> x * x
+
+// Block body: statement sequence in braces
+function complex(x) = {
+    let y = x * 2
+    let z = y + 1
+    z * z
+}
+lambda(x) -> {
+    let y = x * 2
+    y * y
+}
+```
+
+Rules:
+- After `=` (function) or `->` (lambda), parser checks for `{`
+- If `{` present: parse as block (multiple statements, explicit scope)
+- Otherwise: parse as inline expression (single expression until newline)
+- Block's final expression is the return value
+
 ### 17.1 Array Declaration
 
 **Type aliases with `type` keyword:**
@@ -5174,7 +5740,7 @@ let block: Array<Float like SymIdx<2, I>, SymIdx<2, K>>
 let matrix: Array<Float like Idx<n>, Idx<n>>
 ```
 
-**Symmetric index types** (see §4.13):
+**Symmetric index types** (see §4.14):
 
 | Type | Storage | Meaning |
 |------|---------|---------|
@@ -5200,7 +5766,7 @@ No separate `List` type—arrays with static size suffice for scientific computi
 ### 17.3 Function Declaration
 
 ```blade
-function <name>(
+function <n>(
     <arg1>: <T1>^<r1>,
     ...
     <argN>: <TN>^<rN>
@@ -5212,16 +5778,34 @@ where
         { extent: <expr>, symm: <k>, name: "<dim>" },
         ...
     )
--> <T>^<r>                   // optional return type check
-{
-    <body>
-    <expr>                   // final expression is return value
-}
+-> <T>^<r>                   // optional return type annotation
+= <body>                     // inline expression or { block }
 ```
 
 **Parallelism semantics**: `omp(a: 2, b: 1)` means "parallelize 2 levels of S-dimension loops from array a, and 1 level from array b." Since array arguments are bound in order, their S-dimension loops nest in that order—a's loops are outermost, making them natural parallelization targets. The `omp` clause can be substituted with other backends (e.g., `acc` for OpenACC).
 
 **T-dimension semantics**: Each T-dimension is specified as a record with `extent` (size expression), `symm` (symmetry class), and `name` (optional label). Dimensions with the same `symm` value are interchangeable.
+
+#### Nested Function Declarations
+
+`function` declarations inside blocks desugar to `let const` bindings of lambdas:
+
+```blade
+// This:
+{
+    function helper(x)
+    where comm(x) -> Float = x * x
+    helper(data)
+}
+
+// Desugars to:
+{
+    let const helper = lambda(x) where comm(x) -> x * x
+    helper(data)
+}
+```
+
+This allows readable local helper definitions without polluting module scope. The `let const` binding ensures the function cannot be reassigned.
 
 ### 17.4 Lambda Expressions
 
@@ -5478,12 +6062,18 @@ let point = (3.0, 4.0)         // type is (Float, Float)
 **Tuple access** is only through destructuring—no positional index syntax:
 
 ```blade
-// Destructuring
-let a, b, c = t
+// Fixed destructuring (must match arity exactly)
+let a, b, c = t                // t must be a 3-tuple
 
 // Partial destructuring with wildcards
 let x, _, _ = t                // only need first element
 let _, y, _ = t                // only need second element
+
+// Head/tail destructuring (for poly-tuples)
+let head :: tail = t           // head = first element, tail = rest as tuple
+let h :: t = (a, b, c)         // h = a, t = (b, c)
+let h :: t = (a, b)            // h = a, t = (b,) — single-element tuple
+let h :: t = (a,)              // h = a, t = ()   — empty tuple
 
 // In function returns
 function divmod(a : Int, b : Int) -> (Int, Int) {
@@ -5496,6 +6086,21 @@ function distance(p : (Float, Float)) -> Float {
     let x, y = p
     sqrt(x*x + y*y)
 }
+```
+
+**Fixed vs head/tail destructuring:**
+- `let a, b, c = tuple` — arity must match exactly; error if tuple has different length
+- `let head :: tail = tuple` — splits into first element + remaining tuple; works for any arity ≥ 1
+
+The `::` syntax is used in arity-polymorphic recursion:
+
+```blade
+function prod(a: Poly<T^1>)
+where comm(a) -> T^1 =
+    match arity with
+    | 0 -> zero
+    | _ -> let head :: tail = a
+           head * prod(tail)
 ```
 
 **Parsing rules:**
@@ -5519,7 +6124,7 @@ type IrrepSpec = (Nat, Parity, Nat)
 **Usage in object_for path:**
 
 ```blade
-object_for(f) <@> ()       // zero arrays - Unit case
+object_for(f) <@> ()       // zero arrays - Void case
 object_for(f) <@> A        // one array - Ref case  
 object_for(f) <@> (A, B)   // two arrays - Tuple case
 object_for(f) <@> (A, B, C) // three arrays - Tuple case
@@ -5671,7 +6276,7 @@ op <@> (X, X)
 op <@> (Y, Z)
 
 // Arity-polymorphic
-let moment = for lambda(is, xs) where poly(is, xs), comm(xs) -> product(xs)
+let moment = for lambda(is, xs) where comm(xs) -> product(xs)
 let cov = moment <@> (data, data)
 let coskew = moment <@> (data, data, data)
 ```
@@ -5732,9 +6337,9 @@ A(indices)     -- indices : Tuple of indices, length = rank(A)
 **Index tuple construction:**
 
 ```blade
-let indices = (i, j, k)              -- explicit tuple
-let indices = replicate(i, rank(A)) -- replicated index (e.g., diagonal)
-let indices = all_indices(A)        -- iterator over all valid tuples
+let indices = (i, j, k)              // explicit tuple
+let indices = replicate(i, rank(A)) // replicated index (e.g., diagonal)
+let indices = all_indices(A)        // iterator over all valid tuples
 ```
 
 **Rank-polymorphic iteration:**
@@ -6029,9 +6634,9 @@ All systems in this section operate under **T/S (collection-first)** orientation
 | **Poly-indexing (§10.4, §17.6)** | 7.5 | 8.5 | Variable-length anonymous index tuples enabling rank-polymorphic operations. Natural extension of arity polymorphism to indices. |
 | **Combinator lifting (§9.6.4)** | 7.5 | 8.5 | `method_for(<&>)` and `object_for(>>)` extend duality to combinators. Enables dynamic kernel construction. |
 | **Left-justified triangular iteration** | 7.5 | 8.5 | Chooses orientation where iterator position = storage position, eliminating offset calculation on writes. |
-| **MonadPlus structure (§12.8)** | 7.0 | 7.5 | Computations form MonadPlus with `zero` and `<\|>`. Enables algebraic reasoning about conditional/fallback computation patterns. |
+| **MonadPlus structure (§12.8)** | 7.0 | 7.5 | Computations form MonadPlus with `zero` and `<|>`. Enables algebraic reasoning about conditional/fallback computation patterns. |
 | **Dependent index types (§4)** | 6.2 | 7.5 | Index types depend on file metadata or runtime arrays. Tagged indices for staggered grids. |
-| **CompoundIdx with currying (§4.4)** | 7.0 | 8.0 | Curryable `N → N → ...` signature and typed wildcard partial indexing are novel. |
+| **CompoundIdx with currying (§4.5)** | 7.0 | 8.0 | Curryable `N → N → ...` signature and typed wildcard partial indexing are novel. |
 | **Overall (features)** | **8.8** | **9.0** | Coherent feature set where each component enables the others. |
 
 #### Theorems and Proofs
@@ -6047,7 +6652,7 @@ All systems in this section operate under **T/S (collection-first)** orientation
 | **Trinity Theorems (Thms 7.1–7.6)** | 9.0 | 9.0 | Six theorems proving pairwise dependencies between Trinity components. Full cycle established. |
 | **Trinity Inseparability (Thm 9.7)** | 9.5 | 9.5 | Loop reification, arity polymorphism, and dimensional currying are mutually necessary. Full dependency cycle. |
 | **Symmetry Lowering (Thms 7.9–7.15)** | 8.5 | 8.5 | Homomorphism tower (Level 2 → 1 → 0) unifies output symmetry generation and input symmetry quashing. |
-| **Product Symmetry Theorem (§14.5)** | 6.5 | 9.0 | Math is standard combinatorics. Contribution: recognizing it as PL design constraint. |
+| **Product Symmetry Theorem (§14.6)** | 6.5 | 9.0 | Math is standard combinatorics. Contribution: recognizing it as PL design constraint. |
 | **Compose-Apply Duality (Thm 12.1)** | 7.0 | 7.5 | Compose-then-apply equals apply-then-compose. Clean algebraic result. |
 | **Variadic Insufficiency (§10.6.1)** | 8.0 | 8.0 | Variadic typing has fixed output type; Blade requires arity-dependent output type. |
 | **Overall (theorems)** | **9.0** | **9.2** | Multiple independent impossibility proofs converge on S/T necessity. Trinity inseparability via complete cycle. |
@@ -6117,7 +6722,7 @@ Parts I (§9.7) and II (§2.11) force specific design requirements:
 | Dependent bounds | Triangular iteration | Loop reification, symcomState |
 | Symmetry propagation | Composition | Inference through `<@>`, `<*>`, `>>@` |
 
-**Theorem 20.1 (Blade Necessity and Uniqueness):**
+<a id="theorem-20-1"></a>**Theorem 20.1 (Blade Necessity and Uniqueness):**
 
 For zero-cost `(r!)^d` speedup:
 
@@ -6177,8 +6782,8 @@ There is no simpler design with the same capability.
 | `@>>` | Compose within MethodLoop (apply-then-compose) |
 | `<*>` | Array product (MethodLoop concatenation) |
 | `<$>` | Functor map |
-| `<\|>` | Choice combinator (MonadPlus, computation-level) |
-| `<\|:>` | Array fallback combinator (first non-null allocation) |
+| `<|>` | Choice combinator (MonadPlus, computation-level) |
+| `<|:>` | Array fallback combinator (first non-null allocation) |
 | Tuple(...) | Product type, stays bundled in kernel |
 | AlignedExpr | Wrapped zip + stencil metadata, unpacks to separate args |
 | zip | Array tuple combinator (n-ary, produces Tuple elements) |
@@ -6197,7 +6802,7 @@ There is no simpler design with the same capability.
 | sequence | Collect computations |
 | replicate | Repeat computation |
 | fold | Fold combinator over array tuples |
-| `\|> compute` | Execute computation or materialize ArrayExpr |
+| `|> compute` | Execute computation or materialize ArrayExpr |
 | comm(...) | Declare commutativity group |
 | poly(args) | Declare arity-polymorphic kernel |
 | arity | In-scope total argument count |
