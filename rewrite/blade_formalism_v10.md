@@ -6364,6 +6364,97 @@ let Point { x, y } = p
 let p2 = Point { x = 3.0, ..p }  // keeps p.y
 ```
 
+#### 17.13.1 Dependent Records
+
+Struct fields can depend on earlier fields for their types or bounds. This creates **dependent records** where later field types are computed from earlier field values.
+
+```blade
+// Field l_out's bounds depend on l1 and l2
+struct CGPath {
+    l1: Nat<angular_momentum>,
+    l2: Nat<angular_momentum>,
+    l_out: Nat<angular_momentum, min=abs(l1 - l2), max=l1 + l2>
+}
+
+// Field m's bounds depend on field L
+struct SphericalComponent<L> {
+    mult: Nat,
+    m: Int<m_component, min=-L, max=L>
+}
+```
+
+**Semantics**: Field order matters. Each field can reference fields declared above it. The struct is well-formed if all field constraints are satisfiable.
+
+**Construction**: All fields assigned together; constraints checked once at construction.
+
+```blade
+let path = CGPath { l1 = 1, l2 = 2, l_out = 2 }  // valid: |1-2| <= 2 <= 1+2
+let path = CGPath { l1 = 1, l2 = 2, l_out = 5 }  // error: 5 > 1+2
+```
+
+#### 17.13.2 Constrained Records
+
+A struct can have a `where` clause constraining relationships between fields:
+
+```blade
+// CG index with sum constraint
+struct CGIndex<L1, L2, LOut> {
+    m1: Int<m_component, min=-L1, max=L1>,
+    m2: Int<m_component, min=-L2, max=L2>,
+    m_out: Int<m_component, min=-LOut, max=LOut>
+} where m1 + m2 == m_out
+```
+
+The `where` clause expresses constraints that aren't captured by bounds alone. Here, each field has independent bounds, but the values must also satisfy `m1 + m2 == m_out`.
+
+**Construction**: Constraint checked at construction time.
+
+```blade
+let idx = CGIndex<1,1,2> { m1 = 1, m2 = 0, m_out = 1 }  // valid: 1+0=1
+let idx = CGIndex<1,1,2> { m1 = 1, m2 = 1, m_out = 1 }  // error: 1+1≠1
+```
+
+#### 17.13.3 Mutually Constrained Records
+
+Separate struct instances can be mutually constrained using `and...where` syntax:
+
+```blade
+struct Particle {
+    pos: Float<meters>,
+    vel: Float<velocity>,
+    mass: Float<kg>
+}
+
+type P1 = Particle
+and P2 = Particle
+where P1.vel * P1.mass + P2.vel * P2.mass == TotalMomentum
+```
+
+**Joint assignment required**: Mutually constrained records must be assigned together.
+
+```blade
+// Correct: joint assignment
+let p1, p2 = compute_collision_result()
+
+// Error: P1 and P2 must be assigned together
+let p1 = Particle { pos = 0.0, vel = 1.0, mass = 1.0 }
+let p2 = Particle { pos = 1.0, vel = -1.0, mass = 1.0 }
+```
+
+**Combining all three**: Dependent fields, internal constraints, and mutual constraints can all appear together:
+
+```blade
+struct OrbitalState {
+    r: Float<meters, min=0>,
+    v: Float<velocity>,
+    energy: Float<joules>
+} where energy == 0.5 * mass * v * v - G * M * mass / r
+
+type State1 = OrbitalState
+and State2 = OrbitalState  
+where State1.energy + State2.energy == TotalEnergy
+```
+
 ### 17.14 Interfaces
 
 Interfaces define method signatures. No implementation, no data.
