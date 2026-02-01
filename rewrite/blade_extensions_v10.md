@@ -52,8 +52,8 @@ Blade computations are differentiable when their kernels are differentiable. Bot
 We extend the type system with differentiated computation types:
 
 ```
-DComp[τ, δτ]    -- Computation with tangent type δτ (forward mode)
-GComp[τ, ∇τ]    -- Computation with gradient type ∇τ (reverse mode)
+DComp[τ, δτ]    // Computation with tangent type δτ (forward mode)
+GComp[τ, ∇τ]    // Computation with gradient type ∇τ (reverse mode)
 ```
 
 **Definition**: A computation `c : Comp[τ]` is differentiable if its kernel is a differentiable function.
@@ -298,24 +298,24 @@ For arrays, the index type is a product: `Idx<n₁> × Idx<n₂> × ... × Idx<n
 For trees, the index type is a *path*: a variable-length sequence of child selections:
 
 ```
-Array index: (i, j, k)           -- fixed length 3
-Tree path:   (p₀, p₁, ..., pₖ)   -- variable length
+Array index: (i, j, k)           // fixed length 3
+Tree path:   (p₀, p₁, ..., pₖ)   // variable length
 ```
 
 #### 2.3.2 Tree Shape as Index Type
 
 Just as `Idx<n>` defines valid array positions, a **tree shape** defines valid paths:
 
-```
+```blade
 Shape = Node(children: List<Shape>) | Leaf
 
 example_shape = Node([
-    Node([Leaf, Leaf]),           -- path (0,) has 2 children
-    Node([Leaf, Leaf, Leaf]),     -- path (1,) has 3 children  
+    Node([Leaf, Leaf]),           // path (0,) has 2 children
+    Node([Leaf, Leaf, Leaf]),     // path (1,) has 3 children  
 ])
 
 T : Tree<Float, example_shape>
--- valid paths: (0,0), (0,1), (1,0), (1,1), (1,2)
+// valid paths: (0,0), (0,1), (1,0), (1,1), (1,2)
 ```
 
 The shape IS the index type—it defines what paths are valid.
@@ -355,9 +355,9 @@ This is O(k) where k is path length—just arithmetic, no pointer chasing.
 
 Currying works for trees via partial paths:
 
-```
-T[(0,)]        -- returns TreeView at child 0
-T[(0,)][(1,)]  -- same as T[(0,1)]
+```blade
+T[(0,)]        // returns TreeView at child 0
+T[(0,)][(1,)]  // same as T[(0,1)]
 ```
 
 The subtree operation in the bijection supports this:
@@ -372,9 +372,9 @@ Currying returns a view: a pointer offset plus the sub-shape metadata.
 
 A **symmetric tree** has commutative children—swapping children at any node doesn't change the value:
 
-```
+```blade
 SymmetricTree<Float, shape>
-T[(0, 1)] == T[(1, 0)]  -- if children are interchangeable
+T[(0, 1)] == T[(1, 0)]  // if children are interchangeable
 ```
 
 This is analogous to symmetric arrays where `A[i,j] == A[j,i]`.
@@ -395,9 +395,9 @@ For symmetric trees: - Storage can be reduced (only store canonical orderings) -
 
 **Poly-indexing unifies access:**
 
-```
-x[indices]  -- works for any structure
-            -- indices is a path/tuple appropriate to the structure
+```blade
+x[indices]  // works for any structure
+            // indices is a path/tuple appropriate to the structure
 ```
 
 #### 2.3.7 Performance Characteristics
