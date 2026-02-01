@@ -1,4 +1,4 @@
-# Blade-DSL: A Formal Specification (v9)
+# Blade-DSL: A Formal Specification (v10)
 
 ## Abstract
 
@@ -56,6 +56,7 @@ We establish that three features form an inseparable **Structural Trinity**: *lo
     - [4.15 Nested and Mixed Symmetry](#415-nested-and-mixed-symmetry)
     - [4.16 User-Defined Index Types](#416-user-defined-index-types)
     - [4.17 Index Type Summary](#417-index-type-summary)
+    - [4.18 Index Values and Nominal Typing](#418-index-values-and-nominal-typing)
 - [5. Array Types](#5-array-types)
     - [5.1 Abstract vs Concrete Array Types](#51-abstract-vs-concrete-array-types)
     - [5.2 Array Type Identity](#52-array-type-identity)
@@ -481,6 +482,21 @@ The `<@>` operator connects them: a loop object from `method_for` is applied to 
 **Connection to index anonymity:**
 
 In T/S, the kernel explicitly names indices (`A(i, j)`). In S/T, the kernel receives values without naming indices (`fun(a, b). ...`). This is possible because the fused loop object handles both iteration *and* indexing internally. The kernel does not need to know how values are accessed; that is encapsulated in the loop object.
+
+#### Loop-Indexing Fusion as Primitive
+
+The S/T paradigm rests on a fundamental isomorphism:
+
+```
+Array<T, I, J> ≅ I → J → T
+```
+
+Arrays are isomorphic to curried functions from indices to values. This *loop-indexing fusion* is what makes the "one fused concept" above coherent. Without it:
+- Iteration and indexing would remain separate operations
+- Virtual arrays (`I → _`) would be meaningless
+- The method_for/object_for duality could not exist
+
+See §12.8.5 and the Proofs document §2.5 for the formal treatment.
 
 ### 2.7 The Double Metamorphism
 
@@ -1419,7 +1435,10 @@ let A: Array<Float, SymIdx<2,N>>
 A(i)       // : Array<Float, BoundedIdx<i,N>>
 
 let B: Array<Float, CompoundIdx<Idx<lat>, Idx<lon>, mask>>
+B(i)       // : Array<Float, FilteredIdx<Idx<lon>, mask[i,_]>>
 ```
+
+For constrained/hashed index types, the slice is rehashed to a new contiguous range. The type transformation rule is compile-time determinable; only the bounds are runtime values.
 
 **Indexing syntax**: Arrays use `()` for indexing because arrays are functions:
 
@@ -1435,10 +1454,6 @@ args[k]        // access k-th element of poly-tuple
 ```
 
 The `[]` syntax is reserved for poly-tuple structural access only, not array indexing. This distinction reflects that arrays are mathematical functions (applied with `()`), while poly-tuples are structural containers (accessed with `[]`).
-B(i)       // : Array<Float, FilteredIdx<Idx<lon>, mask[i,_]>>
-```
-
-For constrained/hashed index types, the slice is rehashed to a new contiguous range. The type transformation rule is compile-time determinable; only the bounds are runtime values.
 
 **Tuple indexing**: Since currying works uniformly, uncurrying is syntactic sugar. These are equivalent:
 
@@ -1494,9 +1509,33 @@ era5_temp + merra_temp  // OK if indices structurally equal
 ```
 
 
-#### 4.3.2 Tagged Index Types
+#### 4.3.2 Named Index Types
 
-All index types may carry user-defined tags for type-level distinction:
+Index types may be given names via typedef, creating both type-level distinction and unit identity:
+
+```blade
+type LatIdx = Idx<360>
+type LonIdx = Idx<360>
+type TimeIdx = Idx<8760>
+```
+
+Named index types serve two purposes:
+
+1. **Type-level distinction**: `LatIdx` and `LonIdx` are different types even though both are `Idx<360>`
+2. **Unit identity**: Values emitted from `LatIdx` iteration carry unit `LatIdx`, distinct from `LonIdx` (see §4.18)
+
+**Type equality requires name equality**:
+
+```blade
+Array<Float, LatIdx> ≠ Array<Float, LonIdx>   // Different types
+Array<Float, LatIdx> = Array<Float, LatIdx>   // Same type
+```
+
+**Anonymous index types**: Each occurrence of an anonymous index type (e.g., `Idx<360>` without a typedef) generates a fresh identity, preventing accidental mixing.
+
+#### 4.3.3 Tagged Index Types
+
+Index types may also carry user-defined tags for finer-grained distinction within the same extent:
 
 ```blade
 Idx<n, Tag>
@@ -1520,6 +1559,18 @@ Idx<3, odd>     // tag is the enum value 'odd'
 ```
 
 **Type equality requires tag equality**: `Idx<721, LatPosition.Center> != Idx<721, LatPosition.Left>` and `Idx<3, even> != Idx<3, odd>`. Untagged indices are compatible only with other untagged indices of the same extent.
+
+**Staggered grid support** (for Arakawa grids) can use either approach:
+
+```blade
+// Named types (recommended for clarity)
+type LatCenter = Idx<360>
+type LatEdge = Idx<361>
+
+// Or tagged types (when extents match)
+Idx<721, LatPosition.Center>
+Idx<721, LatPosition.Left>
+```
 
 ### 4.4 Dependent Index Types
 
@@ -2100,8 +2151,7 @@ let distances: Array<Float like SymIdx<N>>
 |------|------------|--------|----------|
 | **Built-in** | `Idx`, `SymIdx`, `AntisymIdx`, `FullSymIdx`, ... | Fully verified | Common symmetry patterns |
 | **Compositional** | Products, nesting with `Sym<I,I>`, `Antisym<I,I>` | Derived from built-ins | Complex but regular structures |
-| **Unsafe**          Custom `canonical` + `transform` functions          User responsibility      Exotic symmetries
-  ---------------------------------------------------------------------------------------------------------------------------------
+| **Unsafe** | Custom `canonical` + `transform` functions | User responsibility | Exotic symmetries |
 
 #### 4.16.2 Compositional Building Blocks
 
@@ -2194,18 +2244,12 @@ Use compositional building blocks for most cases. Reserve `unsafe indextype` for
 | `Idx<n>` | 1 | n | Dense dimension |
 | `SymIdx<n>` | 2 | n(n+1)/2 | Symmetric matrices |
 | `AntisymIdx<n>` | 2 | n(n-1)/2 | Antisymmetric matrices |
-| `HermitianIdx<n>`        2                    n²                     Hermitian matrices (complex)
-
-  `FullSymIdx<k, n>`       k                    C(n+k-1, k)            Higher-order symmetric tensors
-
-  `FullAntisymIdx<k, n>`   k                    C(n, k)                Exterior algebra
-
-  `NestedSymIdx<n>`        4                    S(S+1)/2               Nested symmetry (elasticity)
-
-  `RiemannIdx<n>`          4                    A(A+1)/2               Mixed symmetry (curvature)
-
-  `BoundedIdx<l, u>`       1                    u - l                  Dependent slices (see below)
-  -----------------------------------------------------------------------------------------------------
+| `HermitianIdx<n>` | 2 | n² | Hermitian matrices (complex) |
+| `FullSymIdx<k, n>` | k | C(n+k-1, k) | Higher-order symmetric tensors |
+| `FullAntisymIdx<k, n>` | k | C(n, k) | Exterior algebra |
+| `NestedSymIdx<n>` | 4 | S(S+1)/2 | Nested symmetry (elasticity) |
+| `RiemannIdx<n>` | 4 | A(A+1)/2 | Mixed symmetry (curvature) |
+| `BoundedIdx<l, u>` | 1 | u - l | Dependent slices (see below) |
 
 **Note on BoundedIdx**: `BoundedIdx<l, u>` is not directly declared by users. It arises from partial indexing of symmetric index types:
 
@@ -2225,6 +2269,71 @@ All symmetric index types share the property that they:
 3. Track any necessary transformation (e.g., sign for antisymmetric, conjugation for Hermitian)
 4. Map to appropriate storage layout
 5. Curry to dependent `BoundedIdx` types that erase to runtime bounds
+
+### 4.18 Index Values and Nominal Typing
+
+Index *values* (emitted during iteration) carry their source index type as a *unit*, enabling compile-time prevention of index misuse.
+
+#### 4.18.1 Index Values as Unit-Tagged Naturals
+
+When an index type emits values during iteration, those values are tagged with their source:
+
+```blade
+type LatIdx = Idx<360>
+type LonIdx = Idx<360>   // Same cardinality, different type
+
+method_for(range<LatIdx>) <@> lambda(i) -> ...
+// i : Nat<LatIdx>  — carries unit LatIdx
+
+method_for(range<LonIdx>) <@> lambda(j) -> ...
+// j : Nat<LonIdx>  — carries unit LonIdx
+```
+
+Two index values with different units are incompatible, even if numerically equal.
+
+#### 4.18.2 Array Indexing with Unit Checking
+
+Array indexing requires unit compatibility at every call site:
+
+```blade
+A : Array<T, LatIdx>
+i : Nat<LatIdx>
+j : Nat<LonIdx>
+
+A(i)    // OK: units match
+A(j)    // Type error: A expects LatIdx, j has unit LonIdx
+```
+
+#### 4.18.3 Index Literals and Arithmetic
+
+Literals acquire units from context; arithmetic preserves units:
+
+```blade
+let i: Nat<LatIdx> = 10    // 10 has unit LatIdx
+A(10)                       // Error: untyped literal
+A(10 : Nat<LatIdx>)         // OK: explicit unit
+
+i + j       // Error: incompatible units (LatIdx vs LonIdx)
+i + (5 : Nat<LatIdx>)       // OK: Nat<LatIdx>
+```
+
+#### 4.18.4 Bounds Safety
+
+With nominal typing, out-of-bounds access is impossible by construction:
+
+1. Index types define valid ranges
+2. Emitted indices are always in range (by iterator construction)
+3. Array indexing requires matching units
+4. Therefore `A(i)` where `i : Nat<I>` and `A : Array<T, I>` is always valid
+
+#### 4.18.5 Relation to Units of Measure
+
+Index types as units parallel physical units (see §3.4.4):
+
+| Physical | Index |
+|----------|-------|
+| `Float<meters>` | `Nat<LatIdx>` |
+| `Float<meters> + Float<seconds>` = error | `A(i)` with mismatched unit = error |
 
 ## 5. Array Types
 
@@ -2664,29 +2773,24 @@ lambda(x, y) -> x * y    // types inferred from usage
 
 Array-typed parameters still require explicit rank annotations.
 
-**Capture restrictions**: Lambdas can capture scalars and `let const` bindings, but not arrays or virtual arrays.
-
-Allowed:
+**Array captures**: Lambdas may capture arrays from enclosing scope. Safety is enforced via nominal index typing (§4.18)—captured arrays can only be indexed by indices with matching units:
 
 ```blade
-let const scale = 2.0
-let threshold = 0.5
-method_for(A) <@> lambda(a) -> if a > threshold then a * scale else 0
+let A: Array<Float, LatIdx>
+let B: Array<Float, LonIdx>
+
+method_for(range<LatIdx>) <@> lambda(i) -> 
+    A(i) * 2.0    // OK: i : Nat<LatIdx>, A expects LatIdx
+    
+method_for(range<LatIdx>) <@> lambda(i) -> 
+    B(i)          // Error: i : Nat<LatIdx>, B expects LonIdx
 ```
 
-Disallowed:
+**Non-indexed captures** require no unit checking:
 
 ```blade
-let weights = loadWeights()
-method_for(A) <@> lambda(a) -> a * weights(i)   // error: captures array
-```
-
-**Rationale**: Array captures would introduce implicit iteration dependencies. All array data must flow through explicit loop construction (`method_for`, `zip`), preserving S/T discipline.
-
-Correct form:
-
-```blade
-method_for(zip(A, weights)) <@> lambda((a, w)) -> a * w
+let scalar: Float = 2.0
+method_for(range<LatIdx>) <@> lambda(i) -> A(i) * scalar  // OK
 ```
 
 #### 6.2.2 Sectioned Binary Operators
@@ -3650,9 +3754,67 @@ This extends the S/T philosophy to kernel construction itself:
 |-------|-------------|
 | 3 | `method_for(<&>)([stats...])` — build combinator structure from list |
 | 2 | `method_for(A, A, A)` — build iteration structure from arrays |
-| 1 | Triangular storage — physical realization of symmetry |-------------------------------------------------------------------
+| 1 | Triangular storage — physical realization of symmetry |
 
 Structure is built top-down; data flows bottom-up. The entire computation is *shaped* before any data is touched.
+
+#### 9.6.6 Symmetry Raising Homomorphisms
+
+While lowering transfers symmetry *downward* when structure is applied, **raising** transfers symmetry *upward* when structure is constructed. Raising is the dual of lowering—it derives higher-level symmetry from lower-level facts.
+
+**Definition (Raising Homomorphisms)**:
+
+| Homomorphism | Domain | Codomain | Structure |
+|--------------|--------|----------|-----------|
+| `raise₀₁` | Sym₀ (identity) | Sym₁(r) | Identity → array symmetry |
+| `raise₁₂` | Sym₁(r) | Sym₂(r) | Array symmetry → function commutativity |
+
+**Intuition**: Lowering asks "given this symmetry, what can I exploit?" Raising asks "given this structure, what symmetry emerges?"
+
+##### Raising `raise₀₁`: Identity → Array Symmetry
+
+**Theorem 9.16 (Raising `raise₀₁`)**: Let `A : I → T` be an array, `f : T² → U` a commutative binary operation. For `Out[i, j] = f(A[i], A[j])` where both indices access the *same* array:
+
+1. If `I` has a named index type (unit), Out is indexed by `(Nat<I>, Nat<I>)`
+2. If `f` is commutative, then `Out[i, j] = Out[j, i]`, so Out has symmetry S₂
+
+The identity `A == A` (Level 0) **raises** to output symmetry (Level 1) when combined with commutativity.
+
+**Theorem 9.17 (Shared Index Spaces)**: `raise₀₁` requires identity (`A == A`) in addition to shared index spaces. Shared units alone are insufficient for symmetry.
+
+##### Raising `raise₁₂`: Array Symmetry → Function Commutativity
+
+**Theorem 9.18 (Raising `raise₁₂`)**: Let `S : SymIdx<2, I> → T` be a symmetric array. Then `f(i, j) = S(i, j)` is commutative: `f(i, j) = f(j, i)`.
+
+A symmetric array **is** a commutative function. Storage symmetry (Level 1) raises to access commutativity (Level 2).
+
+**Corollary 9.19**: Let `S` be symmetric, `g : T → U` any function. Then `h(i, j) = g(S(i, j))` is commutative.
+
+**Theorem 9.20 (Deduced Commutativity)**: Let `S : SymIdx<2, I> → T` be symmetric, `A : I → U` any array, `*` commutative. Then `kernel(i, j) = S(i, j) * A(i) * A(j)` is commutative in `(i, j)`.
+
+##### The Raising-Lowering Duality
+
+| Aspect | Lowering (S/T) | Raising (T/S) |
+|--------|----------------|---------------|
+| Direction | Level 2 → Level 1 → Level 0 | Level 0 → Level 1 → Level 2 |
+| Input | Declared symmetry | Observed identity/structure |
+| Output | Iteration strategy | Discovered symmetry |
+| Typical use | Optimization | Deduction |
+
+**Theorem 9.21 (Raising is T/S)**: True symmetry raising—discovering structure from unstructured computation—is a T/S concept. In S/T systems, structure is declared before computation, so "raising" reduces to early detection of lowering conditions.
+
+**Corollary 9.22**: In S/T systems, raising is subsumed by nominal index typing, identity detection, and commutativity checking.
+
+##### Complete Symmetry Homomorphism Structure
+
+| Homomorphism | Direction | Condition | Effect |
+|--------------|-----------|-----------|--------|
+| `lower₂₁` | 2 → 1 | Commutativity declared | Triangular iteration |
+| `lower₁₀` | 1 → 0 | Array accessed | Symmetry consumed |
+| `raise₀₁` | 0 → 1 | Identity + same unit + comm op | Output symmetry |
+| `raise₁₂` | 1 → 2 | Symmetric array accessed | Commutativity propagates |
+
+Lowering realizes declared structure; raising discovers emergent structure. Blade (S/T) subsumes raising by making structure explicit in the type system.
 
 ### 9.7 Uniqueness of method_for and object_for
 
@@ -4503,10 +4665,8 @@ Traditional array languages hope the compiler discovers good loop order. With di
 | Semantics | Data subset | Function application |
 | Memory | View into original (may have stride) | Pointer to contiguous subarray |
 | Cache behavior | Depends on slice dimensions | Guaranteed optimal |
-| Type | Same array type, different shape       Different type (reduced rank)
-
-  Composition      Ad-hoc                                 Enables combinator algebra
-  -----------------------------------------------------------------------------------------------
+| Type | Same array type, different shape | Different type (reduced rank) |
+| Composition | Ad-hoc | Enables combinator algebra |
 
 **Example**:
 
@@ -5081,7 +5241,7 @@ With `zero` and `<|>`, computations form a **MonadPlus**:
 | MonadPlus operation | Blade equivalent |
 |---------------------|------------------|
 | `mzero` | `M <@> zero` |
-| `mplus` | `<|>` |
+| `mplus` | `<\|>` |
 
 The required laws are satisfied:
 
@@ -5094,10 +5254,10 @@ m `mplus` mzero    ≡  m                             (right identity)
 
 #### Zero Element Summary
 
-  -------------| Concept | Syntax | Role | Preserves |
+| Concept | Syntax | Role | Preserves |
 |---------|--------|------|-----------|
 | Zero array tuple | `()` / `method_for()` | Identity for `<*>`, arity recursion base | T-dimensions from kernel |
-| Zero function | `zero` | Annihilator for `>>=`, identity for `<|>` | S-dimensions from arrays |
+| Zero function | `zero` | Annihilator for `>>=`, identity for `<\|>` | S-dimensions from arrays |
 
 ------------------------------------------------------------------------
 
@@ -6607,14 +6767,10 @@ All systems in this section operate under **T/S (collection-first)** orientation
 | Type signature | None (runtime) | `N -> N -> ...` (compile-time, k-ary) |
 | Identity check | O(n) array comparison | O(1) whole-mask hash |
 | Coordinate lookup | O(n) or O(log n) search | O(1) hash lookup |
-| Partial indexing    `.sel(lat=x)` runtime filter   `arr[(lat, _)]` compile-time typed
-
-  Currying            No (flat structure)            Yes (wildcard `_` preserves currying)
-
-  Storage             Tuple-of-arrays + data         Contiguous data + hash tables
-
-  Cache order         Not enforced                   Enforced (can't skip dimensions)
-  ------------------------------------------------------------------------------------------
+| Partial indexing | `.sel(lat=x)` runtime filter | `arr[(lat, _)]` compile-time typed |
+| Currying | No (flat structure) | Yes (wildcard `_` preserves currying) |
+| Storage | Tuple-of-arrays + data | Contiguous data + hash tables |
+| Cache order | Not enforced | Enforced (can't skip dimensions) |
 
 **Dex index types**: Sophisticated typed indices with arrays as memoized functions. However, Dex focuses on dense iteration patterns with no mask-derived sparse index types, no curryable compound indices (`N -> N -> ...`), and no wildcard partial indexing.
 
@@ -6634,7 +6790,7 @@ All systems in this section operate under **T/S (collection-first)** orientation
 | **Poly-indexing (§10.4, §17.6)** | 7.5 | 8.5 | Variable-length anonymous index tuples enabling rank-polymorphic operations. Natural extension of arity polymorphism to indices. |
 | **Combinator lifting (§9.6.4)** | 7.5 | 8.5 | `method_for(<&>)` and `object_for(>>)` extend duality to combinators. Enables dynamic kernel construction. |
 | **Left-justified triangular iteration** | 7.5 | 8.5 | Chooses orientation where iterator position = storage position, eliminating offset calculation on writes. |
-| **MonadPlus structure (§12.8)** | 7.0 | 7.5 | Computations form MonadPlus with `zero` and `<|>`. Enables algebraic reasoning about conditional/fallback computation patterns. |
+| **MonadPlus structure (§12.8)** | 7.0 | 7.5 | Computations form MonadPlus with `zero` and `<\|>`. Enables algebraic reasoning about conditional/fallback computation patterns. |
 | **Dependent index types (§4)** | 6.2 | 7.5 | Index types depend on file metadata or runtime arrays. Tagged indices for staggered grids. |
 | **CompoundIdx with currying (§4.5)** | 7.0 | 8.0 | Curryable `N → N → ...` signature and typed wildcard partial indexing are novel. |
 | **Overall (features)** | **8.8** | **9.0** | Coherent feature set where each component enables the others. |
@@ -6773,7 +6929,7 @@ There is no simpler design with the same capability.
 | method_for | S-first loop constructor |
 | object_for | Function-first loop constructor |
 | () | Zero array tuple (identity for `<*>`) |
-| zero | Zero function (identity for `<|>`, annihilator for `>>=`) |
+| zero | Zero function (identity for `<\|>`, annihilator for `>>=`) |
 | `<@>` | Application combinator |
 | `>>=` | Monadic bind |
 | `<&>` | Parallel composition |
@@ -6782,8 +6938,8 @@ There is no simpler design with the same capability.
 | `@>>` | Compose within MethodLoop (apply-then-compose) |
 | `<*>` | Array product (MethodLoop concatenation) |
 | `<$>` | Functor map |
-| `<|>` | Choice combinator (MonadPlus, computation-level) |
-| `<|:>` | Array fallback combinator (first non-null allocation) |
+| `<\|>` | Choice combinator (MonadPlus, computation-level) |
+| `<\|:>` | Array fallback combinator (first non-null allocation) |
 | Tuple(...) | Product type, stays bundled in kernel |
 | AlignedExpr | Wrapped zip + stencil metadata, unpacks to separate args |
 | zip | Array tuple combinator (n-ary, produces Tuple elements) |
@@ -6802,7 +6958,7 @@ There is no simpler design with the same capability.
 | sequence | Collect computations |
 | replicate | Repeat computation |
 | fold | Fold combinator over array tuples |
-| `|> compute` | Execute computation or materialize ArrayExpr |
+| `\|> compute` | Execute computation or materialize ArrayExpr |
 | comm(...) | Declare commutativity group |
 | poly(args) | Declare arity-polymorphic kernel |
 | arity | In-scope total argument count |
