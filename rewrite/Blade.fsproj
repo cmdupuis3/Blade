@@ -1,0 +1,22 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <OutputType>Exe</OutputType>
+    <TargetFramework>net7.0</TargetFramework>
+    <RootNamespace>Blade</RootNamespace>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <Compile Include="Ast.fs" />
+    <Compile Include="Lexer.fs" />
+    <Compile Include="Parser.fs" />
+    <Compile Include="IR.fs" />
+    <Compile Include="NetcdfProvider.fs" />
+    <Compile Include="TypedAst.fs" />
+    <Compile Include="TypeCheck.fs" />
+    <Compile Include="Lowering.fs" />
+    <Compile Include="CodeGen.fs" />
+    <Compile Include="Main.fs" />
+  </ItemGroup>
+
+</Project>
