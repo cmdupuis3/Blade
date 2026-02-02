@@ -1,7 +1,7 @@
 # Blade-DSL: Extensions and Future Work
 
 **Status**: Planned extensions, not yet implemented  
-**Parent Document**: Blade Formalism v9
+**Parent Document**: Blade Formalism v10
 
 This document describes planned extensions to Blade-DSL, organized by implementation complexity. These are separated from the core formalism to distinguish stable specification from speculative design.
 
@@ -26,9 +26,6 @@ This document describes planned extensions to Blade-DSL, organized by implementa
     - [3.4 Remaining Open Questions](#34-remaining-open-questions)
 
 ---
-
-
-
 
 ## 1. Overview
 
@@ -55,8 +52,8 @@ Blade computations are differentiable when their kernels are differentiable. Bot
 We extend the type system with differentiated computation types:
 
 ```
-DComp[τ, δτ]    -- Computation with tangent type δτ (forward mode)
-GComp[τ, ∇τ]    -- Computation with gradient type ∇τ (reverse mode)
+DComp[τ, δτ]    // Computation with tangent type δτ (forward mode)
+GComp[τ, ∇τ]    // Computation with gradient type ∇τ (reverse mode)
 ```
 
 **Definition**: A computation `c : Comp[τ]` is differentiable if its kernel is a differentiable function.
@@ -83,7 +80,7 @@ forward : Comp[τ] → δInput → DComp[τ, δτ]
 forward (loop <@> k) δA = loop <@> (forward_kernel k δA)
 ```
 
-The loop structure is preserved---only the kernel is differentiated. At each iteration point:
+The loop structure is preserved—only the kernel is differentiated. At each iteration point:
 
 ```
 output(i) = f(A(i), B(i))
@@ -108,24 +105,22 @@ reverse : Comp[τ] → ∇Output → GComp[τ, ∇Input]
 Γ ⊢ reverse c ∇O : GComp[τ, ∇Input]
 ```
 
-**Cost**: O(I(n,r)) regardless of input dimension---the standard reverse-mode advantage.
+**Cost**: O(I(n,r)) regardless of input dimension—the standard reverse-mode advantage.
 
-**Tape storage**: For triangular iteration, the tape has C(n+r-1, r) entries instead of n\^r. The same r! reduction applies to memory for intermediate storage.
+**Tape storage**: For triangular iteration, the tape has C(n+r-1, r) entries instead of n^r. The same r! reduction applies to memory for intermediate storage.
 
 #### 2.2.4 Symmetric Gradient Accumulation
 
 For triangular iteration over symmetric computations, gradients accumulate symmetrically:
 
-```
+```cpp
 // For method_for(A, A) with commutativity
 for (auto (i, j) in loop.triangular_indices()) {
     float g_out = grad_out[tri_idx(i, j)];
     
-```
-// Gradient flows to BOTH indices (same underlying array)
-grad_A(i) += ∂f/∂arg0(A(i), A(j)) * g_out;
-grad_A(j) += ∂f/∂arg1(A(i), A(j)) * g_out;
-```
+    // Gradient flows to BOTH indices (same underlying array)
+    grad_A(i) += ∂f/∂arg0(A(i), A(j)) * g_out;
+    grad_A(j) += ∂f/∂arg1(A(i), A(j)) * g_out;
 }
 ```
 
@@ -147,7 +142,7 @@ Then ∂O/∂A has symmetry in its first three indices (corresponding to output 
 
 By commutativity, ∂k/∂a = ∂k/∂b = ∂k/∂c at symmetric points. The Jacobian inherits the output symmetry in its first r indices. □
 
-**Corollary (Gradient Speedup)**: Computing gradients of symmetric computations benefits from the same r! (or (r!)\^d for product symmetry) speedup as the forward computation.
+**Corollary (Gradient Speedup)**: Computing gradients of symmetric computations benefits from the same r! (or (r!)^d for product symmetry) speedup as the forward computation.
 
 #### 2.2.6 AD Through Combinators
 
@@ -206,7 +201,7 @@ forward (A <|:> B) = (forward A) <|:> (forward B)
 reverse (A <|:> B) = was_A_used ? reverse A : reverse B
 ```
 
-For sparse patterns, this means gradients are naturally sparse---they flow only to allocated slices.
+For sparse patterns, this means gradients are naturally sparse—they flow only to allocated slices.
 
 #### 2.2.8 AD and Arity Polymorphism
 
@@ -232,7 +227,7 @@ For `stencil(A, offsets) <@> k`, the backward pass must:
 1.  Compute local gradients at each stencil position
 2.  Scatter-add gradients back to source positions (inverse of gather)
 
-This is well-understood for rectangular iteration but requires care with triangular bounds---gradients from symmetric stencil positions may need symmetric accumulation.
+This is well-understood for rectangular iteration but requires care with triangular bounds—gradients from symmetric stencil positions may need symmetric accumulation.
 
 #### 2.2.10 AD and Domain Decomposition
 
@@ -268,25 +263,18 @@ record : Comp[τ] → (τ, Tape)
 replay : Tape → ∇Output → ∇Input
 ```
 
-For triangular iteration, the tape has C(n+r-1, r) entries---the same r! reduction.
+For triangular iteration, the tape has C(n+r-1, r) entries—the same r! reduction.
 
 #### 2.2.12 Summary
 
-  -----------------------------------------------------------------------------------
-  Aspect                  Standard AD                  Blade AD
-  ----------------------- ---------------------------- ------------------------------
-  Iteration pattern       Dense (all elements)         Triangular (unique elements)
-
-  Gradient accumulation   Standard indexing            Symmetric accumulation
-
-  Forward speedup         1×                           r! (triangular forward)
-
-  Backward speedup        1×                           r! (triangular backward)
-
-  Tape storage            O(n\^r)                      O(n\^r / r!)
-
-  Jacobian structure      Dense                        Inherits output symmetry
-  -----------------------------------------------------------------------------------
+| Aspect | Standard AD | Blade AD |
+|--------|-------------|----------|
+| Iteration pattern | Dense (all elements) | Triangular (unique elements) |
+| Gradient accumulation | Standard indexing | Symmetric accumulation |
+| Forward speedup | 1× | r! (triangular forward) |
+| Backward speedup | 1× | r! (triangular backward) |
+| Tape storage | O(n^r) | O(n^r / r!) |
+| Jacobian structure | Dense | Inherits output symmetry |
 
 **Status**: Theoretical framework established. Implementation requires:
 
@@ -303,34 +291,34 @@ Arrays and trees are points on a spectrum of indexed data structures. This secti
 
 An array is a tree where: 1. All paths have the same depth (fixed rank) 2. All nodes at the same depth have the same branching factor (extents)
 
-**Trees relax both constraints:** 1. Variable depth---paths can terminate at different levels 2. Variable branching---each node can have different numbers of children
+**Trees relax both constraints:** 1. Variable depth—paths can terminate at different levels 2. Variable branching—each node can have different numbers of children
 
 For arrays, the index type is a product: `Idx<n₁> × Idx<n₂> × ... × Idx<nᵣ>`
 
 For trees, the index type is a *path*: a variable-length sequence of child selections:
 
 ```
-Array index: (i, j, k)           -- fixed length 3
-Tree path:   (p₀, p₁, ..., pₖ)   -- variable length
+Array index: (i, j, k)           // fixed length 3
+Tree path:   (p₀, p₁, ..., pₖ)   // variable length
 ```
 
 #### 2.3.2 Tree Shape as Index Type
 
 Just as `Idx<n>` defines valid array positions, a **tree shape** defines valid paths:
 
-```
+```blade
 Shape = Node(children: List<Shape>) | Leaf
 
 example_shape = Node([
-    Node([Leaf, Leaf]),           -- path (0,) has 2 children
-    Node([Leaf, Leaf, Leaf]),     -- path (1,) has 3 children  
+    Node([Leaf, Leaf]),           // path (0,) has 2 children
+    Node([Leaf, Leaf, Leaf]),     // path (1,) has 3 children  
 ])
 
 T : Tree<Float, example_shape>
--- valid paths: (0,0), (0,1), (1,0), (1,1), (1,2)
+// valid paths: (0,0), (0,1), (1,0), (1,1), (1,2)
 ```
 
-The shape IS the index type---it defines what paths are valid.
+The shape IS the index type—it defines what paths are valid.
 
 #### 2.3.3 Flat Storage with Bijection
 
@@ -361,15 +349,15 @@ Tree:           Storage:
 offset = Σ (sizes of skipped subtrees) + Σ (local offsets)
 ```
 
-This is O(k) where k is path length---just arithmetic, no pointer chasing.
+This is O(k) where k is path length—just arithmetic, no pointer chasing.
 
 #### 2.3.4 Dimensional Currying for Trees
 
 Currying works for trees via partial paths:
 
-```
-T[(0,)]        -- returns TreeView at child 0
-T[(0,)][(1,)]  -- same as T[(0,1)]
+```blade
+T[(0,)]        // returns TreeView at child 0
+T[(0,)][(1,)]  // same as T[(0,1)]
 ```
 
 The subtree operation in the bijection supports this:
@@ -382,11 +370,11 @@ Currying returns a view: a pointer offset plus the sub-shape metadata.
 
 #### 2.3.5 Symmetric Trees
 
-A **symmetric tree** has commutative children---swapping children at any node doesn't change the value:
+A **symmetric tree** has commutative children—swapping children at any node doesn't change the value:
 
-```
+```blade
 SymmetricTree<Float, shape>
-T[(0, 1)] == T[(1, 0)]  -- if children are interchangeable
+T[(0, 1)] == T[(1, 0)]  // if children are interchangeable
 ```
 
 This is analogous to symmetric arrays where `A[i,j] == A[j,i]`.
@@ -395,21 +383,21 @@ For symmetric trees: - Storage can be reduced (only store canonical orderings) -
 
 #### 2.3.6 Unification: Arrays and Trees
 
-  Structure      Depth      Branching               Index Type
-  -------------- ---------- ----------------------- ---------------------------
-  Vector         1          n                       `Idx<n>`
-  Matrix         2          n × m                   `Idx<n> × Idx<m>`
-  Tensor         r          n₁ × ... × nᵣ           `Idx<n₁> × ... × Idx<nᵣ>`
-  Ragged array   r          Variable per position   `RaggedIdx`
-  Tree           Variable   Variable per node       `TreeIdx<shape>`
+| Structure | Depth | Branching | Index Type |
+|-----------|-------|-----------|------------|
+| Vector | 1 | n | `Idx<n>` |
+| Matrix | 2 | n × m | `Idx<n> × Idx<m>` |
+| Tensor | r | n₁ × ... × nᵣ | `Idx<n₁> × ... × Idx<nᵣ>` |
+| Ragged array | r | Variable per position | `RaggedIdx` |
+| Tree | Variable | Variable per node | `TreeIdx<shape>` |
 
 **The common abstraction:** - All are functions from some index domain to values - All support dimensional currying (partial indexing) - All can have symmetry (commutative indices/children) - All can be stored with a bijection to flat memory
 
 **Poly-indexing unifies access:**
 
-```
-x[indices]  -- works for any structure
-            -- indices is a path/tuple appropriate to the structure
+```blade
+x[indices]  // works for any structure
+            // indices is a path/tuple appropriate to the structure
 ```
 
 #### 2.3.7 Performance Characteristics
@@ -417,7 +405,7 @@ x[indices]  -- works for any structure
 **Array access:**
 
 ```
-A[i₁, i₂, ..., iáµ£] → offset = Σ iₖ × strideₖ
+A[i₁, i₂, ..., iᵣ] → offset = Σ iₖ × strideₖ
 ```
 
 -   O(r) multiplications and additions
@@ -436,19 +424,14 @@ T[(p₁, p₂, ..., pₖ)] → offset = Σ (subtree_size[pⱼ] for skipped child
 
 **Comparison with pointer-based trees:**
 
-  ---------------------------------------------------------------------------------------
-  Operation                 Pointer Tree              Flat Tree with Bijection
-  ------------------------- ------------------------- -----------------------------------
-  Access path of length k   O(k) pointer chases       O(k) arithmetic + 1 access
+| Operation | Pointer Tree | Flat Tree with Bijection |
+|-----------|--------------|--------------------------|
+| Access path of length k | O(k) pointer chases | O(k) arithmetic + 1 access |
+| Cache behavior | k cache misses (random) | 1 cache miss (predictable) |
+| Memory overhead | 2-3 pointers per node | Subtree size table |
+| Insertion | O(1) at position | O(n) rebuild |
 
-  Cache behavior            k cache misses (random)   1 cache miss (predictable)
-
-  Memory overhead           2-3 pointers per node     Subtree size table
-
-  Insertion                 O(1) at position          O(n) rebuild
-  ---------------------------------------------------------------------------------------
-
-Flat trees with bijection excel for static or rarely-modified structures with frequent access---exactly the case for scientific data.
+Flat trees with bijection excel for static or rarely-modified structures with frequent access—exactly the case for scientific data.
 
 #### 2.3.8 Open Questions for Trees
 
@@ -616,7 +599,7 @@ Unlike `Idx<n>` where iteration count is known statically, graph traversal has:
 - Cycles allowing repeated visits to the same index  
 - Termination policies (max steps, convergence, stochastic break)
 
-This extends the for-loop semantics from §17.21:
+This extends the for-loop semantics from §9.9:
 
 ```blade
 // Bounded (deterministic) — output is Array
@@ -647,11 +630,11 @@ For petabyte-scale computation, the iteration space must be partitioned into blo
 
 The iteration space for an n-ary symmetric operation over d-dimensional arrays is a **product of d simplices**:
 
-Δ?\^(n-1)₀ × Δ?\^(n-1)₁ × ⋯ × Δ?\^(n-1)\_{d-1}
+Δ^(n-1)₀ × Δ^(n-1)₁ × ⋯ × Δ^(n-1)_{d-1}
 
-where each simplex Δ?\^(n-1)\_j is the region satisfying i₁ ≤ i₂ ≤ ⋯ ≤ iₙ for spatial dimension j.
+where each simplex Δ^(n-1)_j is the region satisfying i₁ ≤ i₂ ≤ ⋯ ≤ iₙ for spatial dimension j.
 
-**Flattening observation**: If array indices are linearized (e.g., for storage or single-loop iteration), different dimensions cycle at different rates. The valid region in flattened index space exhibits a fractal pattern of "holes"---triangular gaps nested at multiple scales, with nesting depth d. This is an artifact of flattening, not an intrinsic property of the iteration space.
+**Flattening observation**: If array indices are linearized (e.g., for storage or single-loop iteration), different dimensions cycle at different rates. The valid region in flattened index space exhibits a fractal pattern of "holes"—triangular gaps nested at multiple scales, with nesting depth d. This is an artifact of flattening, not an intrinsic property of the iteration space.
 
 **Native representation**: In the natural product-of-simplices space, there are no holes. Each factor is a complete simplex.
 
@@ -663,18 +646,18 @@ where each simplex Δ?\^(n-1)\_j is the region satisfying i₁ ≤ i₂ ≤ ⋯ 
 
 #### 2.5.2 Simplex Subdivision
 
-For a single n-simplex with extent m, subdivision proceeds by halving all n axes simultaneously, creating 2\^n cells. Each cell is labeled by an n-tuple (L,H)\^n indicating low/high half membership.
+For a single n-simplex with extent m, subdivision proceeds by halving all n axes simultaneously, creating 2^n cells. Each cell is labeled by an n-tuple (L,H)^n indicating low/high half membership.
 
-**Valid cells**: A cell is valid iff its pattern has the form L\^a H\^b (a copies of L followed by b copies of H). Once an index is in the high half, all subsequent indices must also be high due to the ordering constraint.
+**Valid cells**: A cell is valid iff its pattern has the form L^a H^b (a copies of L followed by b copies of H). Once an index is in the high half, all subsequent indices must also be high due to the ordering constraint.
 
-**Count**: Exactly (n+1) valid cells out of 2\^n.
+**Count**: Exactly (n+1) valid cells out of 2^n.
 
-  Arity   Valid cells              Invalid cells
-  ------- ------------------------ ---------------
-  n=2     3 (LL, LH, HH)           1 (HL)
-  n=3     4 (LLL, LLH, LHH, HHH)   4
-  n=4     5                        11
-  n       n+1                      2\^n ∑ (n+1)
+| Arity | Valid cells | Invalid cells |
+|-------|-------------|---------------|
+| n=2 | 3 (LL, LH, HH) | 1 (HL) |
+| n=3 | 4 (LLL, LLH, LHH, HHH) | 4 |
+| n=4 | 5 | 11 |
+| n | n+1 | 2^n − (n+1) |
 
 Each valid cell is itself an n-simplex with extent m/2, enabling recursive subdivision.
 
@@ -683,20 +666,20 @@ Each valid cell is itself an n-simplex with extent m/2, enabling recursive subdi
 For the full iteration space (product of d simplices), decomposition proceeds independently per factor:
 
 1.  Each of d simplices subdivides into (n+1) valid children
-2.  The Cartesian product yields (n+1)\^d child blocks
+2.  The Cartesian product yields (n+1)^d child blocks
 3.  Every child block is itself a product of d smaller simplices
 
-**Key property**: All (n+1)\^d combinations are valid. No exclusion logic is needed because the decomposition respects the native product-of-simplices structure.
+**Key property**: All (n+1)^d combinations are valid. No exclusion logic is needed because the decomposition respects the native product-of-simplices structure.
 
 **At depth k**:
 
-  Metric                       Formula
-  ---------------------------- -------------------------------------
-  Total blocks                 (n+1)\^(kd)
-  Block extent per dimension   extent\[j\] / 2\^k
-  Elements per block           ∏\_j C(extent\[j\]/2\^k + n ∑ 1, n)
+| Metric | Formula |
+|--------|---------|
+| Total blocks | (n+1)^(kd) |
+| Block extent per dimension | extent[j] / 2^k |
+| Elements per block | ∏_j C(extent[j]/2^k + n − 1, n) |
 
-**Maximum depth**: Limited by ⌊log₂(min_j extent\[j\] / n)⌋ to ensure blocks remain meaningful.
+**Maximum depth**: Limited by ⌊log₂(min_j extent[j] / n)⌋ to ensure blocks remain meaningful.
 
 #### 2.5.4 Block Addressing
 
@@ -712,12 +695,12 @@ Each path is a sequence of length k (depth), with elements in {0, 1, ..., n} rep
 
 #### 2.5.5 Mixed Symmetry
 
-Not all dimensions require the same symmetry. A symmetry vector **s** = (s₀, s₁, ..., s\_{d-1}) specifies arity per dimension:
+Not all dimensions require the same symmetry. A symmetry vector **s** = (s₀, s₁, ..., s_{d-1}) specifies arity per dimension:
 
 -   s_j = 1: No symmetry (rectangular, 2 children per level)
 -   s_j \> 1: s_j-way symmetry (s_j + 1 children per level)
 
-**Branching factor**: ∏\_{j=0}\^{d-1} (2 if s_j=1, else s_j+1)
+**Branching factor**: ∏_{j=0}^{d-1} (2 if s_j=1, else s_j+1)
 
 #### 2.5.6 Distributed Execution
 
@@ -727,7 +710,7 @@ The decomposition supports Bulk Synchronous Parallel (BSP) execution:
 2.  **Compute**: Workers process blocks independently (embarrassingly parallel)
 3.  **Reduce**: Aggregate via tree reduction
 
-**Load balance**: Perfect by construction---all blocks have identical structure and element count.
+**Load balance**: Perfect by construction—all blocks have identical structure and element count.
 
 ### 2.7 Triangular File Format
 
@@ -735,7 +718,7 @@ A triangular-native storage format enables efficient I/O for symmetric tensors.
 
 #### 2.6.1 Design Goals
 
-1.  **No redundancy**: Store only unique elements ((n!)\^d savings)
+1.  **No redundancy**: Store only unique elements ((n!)^d savings)
 2.  **Block-aligned**: Each decomposition block maps to one storage chunk
 3.  **Parallel I/O**: Workers read/write independent chunks
 4.  **Self-describing**: Metadata encodes symmetry and decomposition
@@ -784,14 +767,14 @@ This enables out-of-core construction for datasets larger than available memory.
 
 ### 2.8 Domain Decomposition Summary
 
-  Property           Native Decomposition
-  ------------------ --------------------------------
-  Iteration space    Product of d n-simplices
-  Branching factor   (n+1)\^d per level
-  Block structure    Uniform (all blocks identical)
-  Exclusion logic    None (all combinations valid)
-  Load balance       Perfect by construction
-  I/O alignment      One block = one chunk
+| Property | Native Decomposition |
+|----------|----------------------|
+| Iteration space | Product of d n-simplices |
+| Branching factor | (n+1)^d per level |
+| Block structure | Uniform (all blocks identical) |
+| Exclusion logic | None (all combinations valid) |
+| Load balance | Perfect by construction |
+| I/O alignment | One block = one chunk |
 
 The native-space approach is preferred because it eliminates exclusion logic while preserving self-similarity and perfect load balance.
 
@@ -801,7 +784,7 @@ These extensions require significant research and implementation effort, involvi
 
 ### 3.1 Stencils and Halo Exchange
 
-The core stencil machinery (`shift`, `align`, `stencil` sugar) is defined in §2.6. The remaining work involves:
+The core stencil machinery (`shift`, `align`, `stencil` sugar) is defined in §3.6. The remaining work involves:
 
 **Chunking interaction**: For cache-friendly 2D+ stencils, arrays should be chunked so that stencil neighborhoods fit in cache. The `AlignedExpr` type carries stencil metadata that can inform chunk sizing.
 
@@ -836,7 +819,7 @@ Building on the near-term extensions, these topics require additional research:
 
 Integrating Blade's symmetric tensor capabilities with machine learning frameworks:
 
-**Equivariant neural network layers**: Using §18.1.4 foundations to build E(3)-equivariant layers compatible with PyTorch/JAX.
+**Equivariant neural network layers**: Using §8 (Equivariance System) foundations to build E(3)-equivariant layers compatible with PyTorch/JAX.
 
 **Automatic kernel generation**: Deriving equivariant kernels from scalar operations with verified transformation properties.
 
@@ -850,4 +833,3 @@ Integrating Blade's symmetric tensor capabilities with machine learning framewor
 - Fault tolerance and checkpointing for long-running computations
 
 ---
-
