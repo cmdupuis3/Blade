@@ -303,21 +303,15 @@ What happens when we add a 2D array to a scalar?
 let mySum = add(A, 10)
 ```
 
-Blade will see that the second argument is a single element. Yay! It matches the type signature of `+`!
+Blade will see that the second argument is a single element. It matches the type signature of `+`! But `A` does not. Then... we'll *make* it fit. Blade constructs two for-loops over `A`. That iterates `A` down to `T^0`. 
 
-But `A` does not >:\(
-
-Then... we'll *make* it fit. Blade constructs two for-loops over `A`. That iterates `A` down to `T^0`. Blade is now happy. 
-
-Two for-loops is also what you might do in (naive) Python, C, Fortran, etc. But then...
-
-If we have...
+Two for-loops is also what you might do in (naive) Python, C, Fortran, etc. But then, if we have...
 
 ```F#
 let mySum = add(A, B)
 ```
 
-Blade is unhappy again. There is another 2D array `B` where there should be a `T^0` element. So then, we iterate over them too!
+There is another 2D array `B` where there should be a `T^0` element. So then, we iterate over `B`'s dimensions too!
 
 ---
 
@@ -353,7 +347,7 @@ method_for(A, B) <@> add // A [+] B
 
 There's a lot happening here, but the important thing is that whereas before, Blade saw four dimensions and decided to iterate over all of them separately, `zip` reduced the rank of the array that Blade sees before it tries to iterate.
 
-So what could possibly be the benefit of `[+]`?
+So what could possibly be the benefit of bracketed operators like `[+]`?
 
 ## 6. Comoments: The Motivating Problem
 
