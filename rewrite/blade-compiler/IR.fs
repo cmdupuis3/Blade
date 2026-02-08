@@ -23,6 +23,7 @@ type ElemType =
     | ETComplex128
     | ETBool
     | ETUnit
+    | ETString
 
 /// Symmetry class for index types
 type SymmetryClass =
@@ -98,6 +99,7 @@ and IRType =
     | IRTUnit
     | IRTPoly of baseType: IRType * arityVar: string  // Arity-polymorphic type
     | IRTNat of int option  // Type-level natural number (None = variable)
+    | IRTNamed of string    // Named type (struct, sum type, etc.)
     | IRTInfer of int       // Unresolved type variable (id for unification)
 
 /// Kind of loop object with arity tracking
@@ -151,6 +153,8 @@ and IRExpr =
     | IRTupleProj of IRExpr * int
     | IRTupleCons of head: IRExpr * tail: IRExpr
     | IRTupleDecons of tuple: IRExpr
+    | IRFieldAccess of obj: IRExpr * field: string  // Struct field access: obj.field
+    | IRStructLit of typeName: string * fields: (string * IRExpr) list  // Struct literal: T { f1 = e1, ... }
     | IRIf of cond: IRExpr * thenBr: IRExpr * elseBr: IRExpr
     | IRMatch of scrutinee: IRExpr * cases: IRMatchCase list
     | IRLet of IRId * value: IRExpr * body: IRExpr
@@ -184,7 +188,7 @@ and IRExpr =
     | IRRange of IRIndexType
     | IRVirtualReverse of IRIndexType
     | IRBlocked of IRIndexType * blockSize: IRExpr
-    | IRArity of int option  // None = unresolved, Some n = bound to n at call site
+    | IRArity of resolved: int option * paramName: string  // None = unresolved (use paramName), Some n = bound
     | IRNth
     | IRZero
     | IRRank of array: IRExpr
@@ -258,7 +262,7 @@ and IRPattern =
     | IRPatLit of IRLit
     | IRPatTuple of IRPattern list
     | IRPatCons of IRPattern * IRPattern
-    | IRPatVariant of tag: int * IRPattern option
+    | IRPatVariant of name: string * tag: int * IRPattern option
 
 and BoundaryMode =
     | BndShrink
@@ -781,24 +785,27 @@ let deduceOutputType
                     commGroups |> List.exists (fun cg -> 
                         indices |> List.forall (fun i -> List.contains i cg))
                 
-                // Get S-dims from first member (all should have same structure)
-                match groupMembers with
-                | [] -> []
-                | (_, arrTy, numSDims) :: _ ->
-                    let sDimIndices = arrTy.IndexTypes |> List.take (min numSDims arrTy.IndexTypes.Length)
-                    sDimIndices |> List.map (fun idx ->
-                        if inCommGroup && arity > 1 then
-                            // Use SymIdx with appropriate arity
+                if inCommGroup && arity > 1 then
+                    // Commutative group: create symmetric index with higher arity
+                    // Takes S-dims from first member, uses arity = group size
+                    match groupMembers with
+                    | [] -> []
+                    | (_, arrTy, numSDims) :: _ ->
+                        let sDimIndices = arrTy.IndexTypes |> List.take (min numSDims arrTy.IndexTypes.Length)
+                        sDimIndices |> List.map (fun idx ->
                             { idx with 
                                 Arity = arity
                                 Symmetry = SymSymmetric
-                                Id = builder.FreshId() }
-                        else
-                            // Use regular Idx (arity 1)
+                                Id = builder.FreshId() })
+                else
+                    // Non-commutative: each member contributes its own S-dims
+                    groupMembers |> List.collect (fun (_, arrTy, numSDims) ->
+                        let sDimIndices = arrTy.IndexTypes |> List.take (min numSDims arrTy.IndexTypes.Length)
+                        sDimIndices |> List.map (fun idx ->
                             { idx with 
                                 Arity = 1
                                 Symmetry = SymNone
-                                Id = builder.FreshId() }))
+                                Id = builder.FreshId() })))
         
         // Step 4: Build T-dims from kernel output
         let outputTDims = 
@@ -908,12 +915,16 @@ type LoopIndexBinding = {
     ArityComponent: int
     /// Extent as IRExpr (for flexible code gen)
     Extent: IRExpr
-    /// Lower bound as IRExpr (IRLit 0 or IRVar for triangular)
-    LowerBound: IRExpr
+    /// List of prior level indices to subtract from bound (empty = no subtraction)
+    BoundDependencies: int list
     /// Whether this loop level is parallelized
     IsParallel: bool
     /// Symcom state at this level
     State: SymcomState
+    /// Element type of the array (for explicit typing)
+    ArrayElemType: ElemType
+    /// Total rank of the array being indexed
+    ArrayRank: int
 }
 
 /// Complete information needed to generate a loop nest
@@ -924,6 +935,8 @@ type LoopNestCodeGen = {
     KernelExpr: IRExpr
     /// Kernel parameter info (for building element access expressions)
     KernelParams: IRParam list
+    /// Captured variables from outer scope
+    Captures: CaptureInfo list
     /// Output variable name
     OutputName: string
     /// Output type
@@ -979,20 +992,39 @@ let buildLoopNestCodeGen
         | _ -> ([], [], [], [])
     
     // Extract kernel info
-    let (kernelParams, kernelBody, commGroups) =
+    let (kernelParams, kernelBody, commGroups, captures) =
         match info.Kernel with
-        | IRLambda lInfo -> (lInfo.Params, lInfo.Body, lInfo.CommGroups)
-        | IRReynolds (IRLambda lInfo, _) -> (lInfo.Params, lInfo.Body, lInfo.CommGroups)
-        | _ -> ([], IRLit IRLitUnit, [])
+        | IRLambda lInfo -> (lInfo.Params, lInfo.Body, lInfo.CommGroups, lInfo.Captures)
+        | IRReynolds (IRLambda lInfo, _) -> (lInfo.Params, lInfo.Body, lInfo.CommGroups, lInfo.Captures)
+        | _ -> ([], IRLit IRLitUnit, [], [])
     
     // Build loop level structure
     let loopLevels = buildLoopLevelStructure arrayTypes sDimsPerArray
     let triangularLevels = info.TriangularLevels
     let symcomStates = info.SymcomStates
     
+    // Compute the iminMap - for each level, where does its bound dependency come from?
+    // This mirrors the original parser.fs logic
+    let iminMap = 
+        loopLevels |> List.mapi (fun globalIdx level ->
+            let state = if globalIdx < symcomStates.Length then symcomStates.[globalIdx] else SCNeither
+            match state with
+            | SCNeither -> globalIdx  // Self - no dependency
+            | SCSymmetric -> globalIdx - 1  // Previous level (same array, prior dim)
+            | SCCommutative -> globalIdx - 1  // Previous level (different array, same dim position)
+            | SCBoth -> globalIdx - 1  // Previous level
+        )
+    
+    // Compute dependency path for each level - all indices that need to be subtracted
+    let rec dependencyPath (level: int) : int list =
+        if level < 0 || level >= iminMap.Length then []
+        elif iminMap.[level] = level then []  // Self-referential, no dependencies
+        else iminMap.[level] :: dependencyPath iminMap.[level]
+    
+    let boundDependencies = loopLevels |> List.mapi (fun i _ -> dependencyPath i)
+    
     // Generate index names and track prior indices for triangular bounds
     let mutable bindings = []
-    let mutable priorIndexIds : IRId list = []
     
     // Map array position to param
     let paramByArrayPos = 
@@ -1001,25 +1033,23 @@ let buildLoopNestCodeGen
     for levelInfo in loopLevels do
         let level = levelInfo.GlobalLevelIndex
         let indexName = sprintf "__i%d" level
-        let indexId = builder.FreshId()
         let arrayPos = levelInfo.ArrayIndex
         let arrName = if arrayPos < arrayNames.Length then arrayNames.[arrayPos] else sprintf "arr%d" arrayPos
+        
+        // Get array type info for this position
+        let arrType = if arrayPos < arrayTypes.Length then Some arrayTypes.[arrayPos] else None
+        let elemType = arrType |> Option.map (fun t -> t.ElemType) |> Option.defaultValue ETFloat64
+        let arrRank = arrType |> Option.map (fun t -> t.IndexTypes.Length) |> Option.defaultValue 1
         
         // Get corresponding kernel param
         let param = Map.tryFind arrayPos paramByArrayPos
         let paramName = param |> Option.map (fun p -> p.Name) |> Option.defaultValue (sprintf "p%d" arrayPos)
         let paramVarId = param |> Option.map (fun p -> p.VarId) |> Option.defaultValue -1
         
-        // Lower bound for triangular iteration
+        // Get the dependency path for this level's bound
+        let deps = if level < boundDependencies.Length then boundDependencies.[level] else []
         let isTriangular = level < triangularLevels.Length && triangularLevels.[level]
         let state = if level < symcomStates.Length then symcomStates.[level] else SCNeither
-        
-        let lowerBound =
-            if isTriangular && not priorIndexIds.IsEmpty then
-                // Triangular: start from prior index
-                IRVar (List.head priorIndexIds)
-            else
-                IRLit (IRLitInt 0L)
         
         // Parallelism: typically outermost non-triangular loop
         let isParallel = level = 0 && not isTriangular
@@ -1034,13 +1064,14 @@ let buildLoopNestCodeGen
             DimIndex = levelInfo.LocalDimIndex
             ArityComponent = levelInfo.ArityIndex
             Extent = levelInfo.IndexSpace.Extent
-            LowerBound = lowerBound
+            BoundDependencies = deps  // List of prior levels to subtract
             IsParallel = isParallel
             State = state
+            ArrayElemType = elemType
+            ArrayRank = arrRank
         }
         
         bindings <- bindings @ [binding]
-        priorIndexIds <- indexId :: priorIndexIds
     
     let outputSymmVec = buildSymmVec info.OutputType
     
@@ -1048,6 +1079,7 @@ let buildLoopNestCodeGen
         Bindings = bindings
         KernelExpr = kernelBody
         KernelParams = kernelParams
+        Captures = captures
         OutputName = outputName
         OutputType = info.OutputType
         OutputSymmVec = outputSymmVec
@@ -1069,6 +1101,7 @@ let rec ppIRType = function
     | IRTScalar ETComplex128 -> "Complex128"
     | IRTScalar ETBool -> "Bool"
     | IRTScalar ETUnit -> "Unit"
+    | IRTScalar ETString -> "String"
     | IRTArray arr ->
         let indices = arr.IndexTypes |> List.map ppIndexType |> String.concat ", "
         sprintf "Array<%s like %s>" (ppElemType arr.ElemType) indices
@@ -1085,6 +1118,7 @@ let rec ppIRType = function
     | IRTPoly (base', var) -> sprintf "Poly<%s, %s>" (ppIRType base') var
     | IRTNat (Some n) -> sprintf "Nat<%d>" n
     | IRTNat None -> "Nat<?>"
+    | IRTNamed name -> name  // Named types print as themselves
     | IRTInfer id -> sprintf "T?%d" id
 
 and ppIndexType (idx: IRIndexType) =
@@ -1110,6 +1144,7 @@ and ppElemType = function
     | ETComplex128 -> "Complex128"
     | ETBool -> "Bool"
     | ETUnit -> "Unit"
+    | ETString -> "String"
 
 /// Build a map from IRIndexType.Id -> type name from a module's IRTDIndexType defs
 let indexNameMap (modul: IRModule) : Map<IRId, string> =
@@ -1251,8 +1286,8 @@ let rec ppIRExprWithNames (names: Map<int, string>) indent expr =
         sprintf "zip(%s)" (arrs |> List.map pp |> String.concat ", ")
     | IRStack arrs ->
         sprintf "stack(%s)" (arrs |> List.map pp |> String.concat ", ")
-    | IRArity None -> "arity"
-    | IRArity (Some n) -> sprintf "arity(=%d)" n
+    | IRArity (None, name) -> sprintf "arity(%s)" name
+    | IRArity (Some n, name) -> sprintf "arity(%s=%d)" name n
     | IRNth -> "nth"
     | IRZero -> "zero"
     | IRRank arr -> sprintf "rank(%s)" (pp arr)

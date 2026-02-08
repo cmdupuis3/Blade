@@ -32,6 +32,7 @@ type LoweringEnv = {
     Builder: IRBuilder
     OuterScope: Map<string, VarInfo>
     InPolyContext: bool
+    PolyParamNames: string list  // Names of Poly<> parameters in current context
     CurrentCommGroups: int list list
 }
 
@@ -43,6 +44,7 @@ let emptyEnv () = {
     Builder = IRBuilder()
     OuterScope = Map.empty
     InPolyContext = false
+    PolyParamNames = []
     CurrentCommGroups = []
 }
 
@@ -180,13 +182,39 @@ let rec patternBindings (pat: Pattern) : string list =
     | PatGuarded (p, _) -> patternBindings p
     | PatTyped (p, _) -> patternBindings p
 
-let inferTypeFromExpr (expr: IRExpr) : IRType option =
+let rec inferTypeFromExpr (expr: IRExpr) : IRType option =
     match expr with
     | IRArrayLit (_, arrTy) -> Some (IRTArray arrTy)
     | IRLit (IRLitInt _) -> Some (IRTScalar ETInt64)
     | IRLit (IRLitFloat _) -> Some (IRTScalar ETFloat64)
     | IRLit (IRLitBool _) -> Some (IRTScalar ETBool)
     | IRLit IRLitUnit -> Some IRTUnit
+    | IRStructLit (typeName, _) -> Some (IRTNamed typeName)  // Struct literal has named type
+    | IRBinOp (_, op, left, right) ->
+        // For comparison/logical ops, result is bool
+        match op with
+        | IREq | IRNeq | IRLt | IRLe | IRGt | IRGe | IRAnd | IROr -> 
+            Some (IRTScalar ETBool)
+        | _ ->
+            // For arithmetic, try left first, then right, default to Float64
+            match inferTypeFromExpr left with
+            | Some t -> Some t
+            | None -> 
+                match inferTypeFromExpr right with
+                | Some t -> Some t
+                | None -> Some (IRTScalar ETFloat64)  // Default for arithmetic
+    | IRUnaryOp (op, operand) ->
+        match op with
+        | IRNot -> Some (IRTScalar ETBool)
+        | IRNeg -> inferTypeFromExpr operand
+    | IRIf (_, thenBr, _) ->
+        inferTypeFromExpr thenBr
+    | IRCompute inner ->
+        // Compute unwraps to the inner type
+        inferTypeFromExpr inner
+    | IRApplyCombinator info ->
+        // Apply combinator has OutputType already computed
+        Some info.OutputType
     | IRMethodFor info -> 
         Some (IRTLoop { Kind = LKMethod; Arity = Some info.Arrays.Length; 
                         ArrayTypes = info.ArrayTypes |> List.map IRTArray; KernelType = None })
@@ -195,8 +223,75 @@ let inferTypeFromExpr (expr: IRExpr) : IRType option =
                         ArrayTypes = []; KernelType = Some (IRTUnit) })
     | IRLambda info ->
         let argTypes = info.Params |> List.map (fun p -> p.Type)
-        Some (IRTFunc (argTypes, IRTUnit))
+        let retType = inferTypeFromExpr info.Body |> Option.defaultValue (IRTScalar ETFloat64)
+        Some (IRTFunc (argTypes, retType))
+    | IRTuple exprs ->
+        let elemTypes = exprs |> List.choose inferTypeFromExpr
+        if elemTypes.Length = exprs.Length then Some (IRTTuple elemTypes)
+        else None
+    | IRTupleProj (e, i) ->
+        match inferTypeFromExpr e with
+        | Some (IRTTuple ts) when i < ts.Length -> Some ts.[i]
+        | _ -> None
+    | IRMatch (scrutinee, cases) ->
+        // Match expression type is the type of the first case body
+        // If the body is just a variable (pattern binding), use scrutinee type
+        match cases with
+        | [] -> None
+        | case :: _ -> 
+            match inferTypeFromExpr case.Body with
+            | Some t -> Some t
+            | None -> 
+                // If body type unknown (e.g., just a pattern var), try scrutinee type
+                inferTypeFromExpr scrutinee
+    | IRFieldAccess (obj, fieldName) ->
+        // For field access, we'd need to know the struct type
+        // For now, just return None and let it be inferred elsewhere
+        None
+    | IRVar _ -> None  // Would need type environment to resolve
+    | IRApp (IRObjectFor objInfo, args) ->
+        // For object_for application, compute output array type
+        // OutputRank determines the result dimensions
+        let rank = objInfo.OutputRank
+        let idx = { Id = 0; Arity = 1; Extent = IRLit (IRLitInt 0L); Symmetry = SymNone; Tag = None; Kind = SDimension; Dependencies = [] }
+        let indexTypes = List.replicate rank idx
+        Some (IRTArray { ElemType = ETFloat64; IndexTypes = indexTypes; IsVirtual = false; Identity = None })
+    | IRApp (func, _) ->
+        // For function application, infer from function return type
+        match inferTypeFromExpr func with
+        | Some (IRTFunc (_, ret)) -> Some ret
+        | _ -> None
     | _ -> None
+
+/// Infer type from expression, with environment lookup for variables
+let rec inferTypeFromExprWithEnv (env: LoweringEnv) (expr: IRExpr) : IRType option =
+    match expr with
+    | IRVar id ->
+        // Look up variable type from environment
+        match lookupVarById id env with
+        | Some info -> info.Type
+        | None -> None
+    | IRMatch (scrutinee, cases) ->
+        // Match expression type - try case body, then scrutinee, using env
+        match cases with
+        | [] -> None
+        | case :: _ -> 
+            match inferTypeFromExprWithEnv env case.Body with
+            | Some t -> Some t
+            | None -> inferTypeFromExprWithEnv env scrutinee
+    | IRBinOp (_, op, left, right) ->
+        // For arithmetic, try to infer from operands with env
+        match op with
+        | IREq | IRNeq | IRLt | IRLe | IRGt | IRGe | IRAnd | IROr -> 
+            Some (IRTScalar ETBool)
+        | _ ->
+            match inferTypeFromExprWithEnv env left with
+            | Some t -> Some t
+            | None -> 
+                match inferTypeFromExprWithEnv env right with
+                | Some t -> Some t
+                | None -> Some (IRTScalar ETFloat64)
+    | _ -> inferTypeFromExpr expr
 
 let rec extendEnvWithPatternBindings env (pat: Pattern) (value: IRExpr) : LoweringEnv * (string * IRId) list =
     match pat with
@@ -326,7 +421,7 @@ let rec lowerTypeExpr env (ty: TypeExpr) : IRType =
     | TyComplex128 -> IRTScalar ETComplex128
     | TyBool -> IRTScalar ETBool
     | TyUnit -> IRTUnit
-    | TyString -> IRTScalar ETInt64
+    | TyString -> IRTScalar ETString
     | TyChar -> IRTScalar ETInt32
     
     | TyNamed (name, args) ->
@@ -336,6 +431,7 @@ let rec lowerTypeExpr env (ty: TypeExpr) : IRType =
         | "Float" | "Float32" -> IRTScalar ETFloat32
         | "Float64" | "Double" -> IRTScalar ETFloat64
         | "Bool" -> IRTScalar ETBool
+        | "String" -> IRTScalar ETString
         | "T" -> IRTScalar ETFloat64
         | "Poly" ->
             match args with
@@ -362,7 +458,7 @@ let rec lowerTypeExpr env (ty: TypeExpr) : IRType =
         let rank = 
             match rankExpr with
             | ExprLit (LitInt n) -> int n
-            | ExprArity -> 
+            | ExprArity _ -> 
                 // At definition time, arity is unknown - use placeholder
                 // At instantiation time, this will be replaced with actual value
                 0  // Placeholder - will be recomputed at instantiation
@@ -507,7 +603,7 @@ and lowerExpr env (expr: Expr) : IRExpr =
         IRPolyIndex (tup, idx)
     | ExprField (obj, field) ->
         let o = lowerExpr env obj
-        IRApp (IRParam (field, 0), [o])
+        IRFieldAccess (o, field)
     | ExprLambda (parms, whereClause, body) ->
         lowerLambda env parms whereClause body
     | ExprLet (binding, body) ->
@@ -563,16 +659,21 @@ and lowerExpr env (expr: Expr) : IRExpr =
         IRReplicate (lowerExpr env count, lowerExpr env body)
     | ExprTyped (e, _) ->
         lowerExpr env e
-    | ExprArity -> 
-        // arity is unresolved at definition time, bound at call site
-        if env.InPolyContext then IRArity None
-        else failwith "arity keyword used outside of arity-polymorphic context"
+    | ExprArity paramName -> 
+        // arity(param) is only valid for Poly<> parameters
+        if env.InPolyContext then 
+            if List.contains paramName env.PolyParamNames then
+                IRArity (None, paramName)
+            else
+                failwith (sprintf "arity(%s): '%s' is not a Poly<> parameter" paramName paramName)
+        else 
+            failwith "arity() is only valid inside functions with Poly<> parameters"
     | ExprNth -> IRNth
     | ExprZero -> IRZero
     | ExprRank e -> IRRank (lowerExpr env e)
     | ExprStruct (name, fields) ->
-        // For now, lower struct to tuple of field values
-        IRTuple (fields |> List.map (fun (_, e) -> lowerExpr env e))
+        // Generate struct literal with field names
+        IRStructLit (name, fields |> List.map (fun (fname, e) -> fname, lowerExpr env e))
     | ExprSection op ->
         lowerSection env op
     | ExprPartialApp (op, arg, isLeft) ->
@@ -610,9 +711,10 @@ and lowerLambda env parms (whereClause: WhereClause option) body =
     let mutable paramEnv = scopeEnv
     let paramInfos = parms |> List.mapi (fun i p ->
         let id = env.Builder.FreshId()
+        // Use explicit type if provided, otherwise create inference placeholder
         let ty = match p.Type with 
                  | Some t -> lowerTypeExpr env t 
-                 | None -> env.Builder.FreshInferType()  // Infer from context
+                 | None -> env.Builder.FreshInferType()
         paramEnv <- bindVarSimple p.Name id paramEnv
         { Name = p.Name; Type = ty; Index = i; VarId = id })
     
@@ -726,22 +828,87 @@ and lowerBinOp env mode op l r leftExpr rightExpr =
     // Convert AST mode to IR mode
     let irMode = match mode with Elementwise -> IRElementwise | Outer -> IROuter
     
+    // Helper to check if an IR expression represents an array
+    let isArrayExpr (expr: IRExpr) =
+        match expr with
+        | IRArrayLit _ -> true
+        | IRVar id ->
+            // Look up in environment to check type
+            env.Variables |> Map.exists (fun _ info -> 
+                info.Id = id && 
+                match info.Type with 
+                | Some (IRTArray _) -> true 
+                | _ -> false)
+        | _ -> false
+    
+    // Helper to desugar outer mode (cross-iteration) to object_for
+    let desugarOuter irOp isCommutative =
+        let xParam = { Name = "_x"; Type = IRTUnit; Index = 0; VarId = env.Builder.FreshId() }
+        let yParam = { Name = "_y"; Type = IRTUnit; Index = 1; VarId = env.Builder.FreshId() }
+        let kernelBody = IRBinOp (IRElementwise, irOp, IRVar xParam.VarId, IRVar yParam.VarId)
+        let kernel = IRLambda {
+            Params = [xParam; yParam]
+            Body = kernelBody
+            Captures = []
+            IsCommutative = isCommutative
+            CommGroups = if isCommutative then [[0; 1]] else []
+        }
+        let objFor = IRObjectFor {
+            Kernel = kernel
+            CommGroups = if isCommutative then [[0; 1]] else []
+            InputRanks = [1; 1]  // Cross-iteration: each array contributes 1 loop level
+            OutputRank = 2       // Result is 2D (outer product)
+        }
+        IRApp (objFor, [IRTuple [l; r]])
+    
+    // Helper to desugar elementwise array ops (co-iteration) to object_for
+    let desugarElementwise irOp isCommutative =
+        let xParam = { Name = "_x"; Type = IRTUnit; Index = 0; VarId = env.Builder.FreshId() }
+        let yParam = { Name = "_y"; Type = IRTUnit; Index = 1; VarId = env.Builder.FreshId() }
+        let kernelBody = IRBinOp (IRElementwise, irOp, IRVar xParam.VarId, IRVar yParam.VarId)
+        let kernel = IRLambda {
+            Params = [xParam; yParam]
+            Body = kernelBody
+            Captures = []
+            IsCommutative = isCommutative
+            CommGroups = if isCommutative then [[0; 1]] else []
+        }
+        let objFor = IRObjectFor {
+            Kernel = kernel
+            CommGroups = if isCommutative then [[0; 1]] else []
+            InputRanks = [0; 0]  // Co-iteration: kernel receives scalars from same position
+            OutputRank = 1       // Result preserves rank (elementwise)
+        }
+        IRApp (objFor, [IRTuple [l; r]])
+    
+    // Check if both operands are arrays for elementwise mode
+    let bothArrays = isArrayExpr l && isArrayExpr r
+    
+    // Helper to generate the right form based on mode and operand types
+    let genBinOp irOp isCommutative =
+        if mode = Outer then 
+            desugarOuter irOp isCommutative
+        else if bothArrays then
+            desugarElementwise irOp isCommutative
+        else 
+            IRBinOp (irMode, irOp, l, r)
+    
     match op with
-    // Arithmetic and comparison ops - affected by mode
-    | OpAdd -> IRBinOp (irMode, IRAdd, l, r)
-    | OpSub -> IRBinOp (irMode, IRSub, l, r)
-    | OpMul -> IRBinOp (irMode, IRMul, l, r)
-    | OpDiv -> IRBinOp (irMode, IRDiv, l, r)
-    | OpMod -> IRBinOp (irMode, IRMod, l, r)
-    | OpCaret -> IRBinOp (irMode, IRCaret, l, r)
-    | OpEq -> IRBinOp (irMode, IREq, l, r)
-    | OpNeq -> IRBinOp (irMode, IRNeq, l, r)
-    | OpLt -> IRBinOp (irMode, IRLt, l, r)
-    | OpLe -> IRBinOp (irMode, IRLe, l, r)
-    | OpGt -> IRBinOp (irMode, IRGt, l, r)
-    | OpGe -> IRBinOp (irMode, IRGe, l, r)
-    | OpAnd -> IRBinOp (irMode, IRAnd, l, r)
-    | OpOr -> IRBinOp (irMode, IROr, l, r)
+    // Arithmetic and comparison ops
+    | OpAdd -> genBinOp IRAdd true
+    | OpSub -> genBinOp IRSub false
+    | OpMul -> genBinOp IRMul true
+    | OpDiv -> genBinOp IRDiv false
+    | OpMod -> genBinOp IRMod false
+    | OpCaret -> genBinOp IRCaret false
+    | OpEq -> genBinOp IREq true
+    | OpNeq -> genBinOp IRNeq true
+    | OpLt -> genBinOp IRLt false
+    | OpLe -> genBinOp IRLe false
+    | OpGt -> genBinOp IRGt false
+    | OpGe -> genBinOp IRGe false
+    | OpAnd -> genBinOp IRAnd true
+    | OpOr -> genBinOp IROr true
     
     | OpApply ->
         // Resolve loop to get method_for info (handles variable references)
@@ -816,8 +983,8 @@ and lowerBinOp env mode op l r leftExpr rightExpr =
         let outputType = deduceOutputType arrayTypes identities commGroups sDimsPerArray kernelOutputRank env.Builder
         
         IRApplyCombinator {
-            Loop = l
-            Kernel = r  // Keep original (may include IRReynolds wrapper)
+            Loop = resolvedLoop  // Store resolved loop for code generation
+            Kernel = if hasReynolds then IRReynolds(resolvedInnerKernel, isAntisym) else resolvedKernel
             SymcomStates = states
             TriangularLevels = triangularLevels
             SDimsPerArray = sDimsPerArray
@@ -887,31 +1054,47 @@ and extractLoopInfo env expr : ArrayIdentity list * IRArrayType list * int list 
 and lowerSection env op =
     let aId = env.Builder.FreshId()
     let bId = env.Builder.FreshId()
-    let body = 
+    let (irOp, isComm) = 
         match op with
-        | OpAdd -> IRBinOp(IRElementwise, IRAdd, IRVar aId, IRVar bId)
-        | OpSub -> IRBinOp(IRElementwise, IRSub, IRVar aId, IRVar bId)
-        | OpMul -> IRBinOp(IRElementwise, IRMul, IRVar aId, IRVar bId)
-        | OpDiv -> IRBinOp(IRElementwise, IRDiv, IRVar aId, IRVar bId)
-        | _ -> IRBinOp(IRElementwise, IRAdd, IRVar aId, IRVar bId)
+        | OpAdd -> (IRAdd, true)
+        | OpSub -> (IRSub, false)
+        | OpMul -> (IRMul, true)
+        | OpDiv -> (IRDiv, false)
+        | OpMod -> (IRMod, false)
+        | OpCaret -> (IRCaret, false)
+        | OpEq -> (IREq, true)
+        | OpNeq -> (IRNeq, true)
+        | OpLt -> (IRLt, false)
+        | OpLe -> (IRLe, false)
+        | OpGt -> (IRGt, false)
+        | OpGe -> (IRGe, false)
+        | OpAnd -> (IRAnd, true)
+        | OpOr -> (IROr, true)
+        | _ -> (IRAdd, true)  // Default fallback
+    let body = IRBinOp(IRElementwise, irOp, IRVar aId, IRVar bId)
     IRLambda {
         Params = [{ Name = "a"; Type = IRTScalar ETFloat64; Index = 0; VarId = aId }
                   { Name = "b"; Type = IRTScalar ETFloat64; Index = 1; VarId = bId }]
         Body = body
         Captures = []
-        IsCommutative = false
-        CommGroups = []
+        IsCommutative = isComm
+        CommGroups = if isComm then [[0; 1]] else []
     }
 
 /// Lower partial application
 and lowerPartialApp env op arg isLeft =
     let argExpr = lowerExpr env arg
     let paramId = env.Builder.FreshId()
+    let irOp = match op with
+               | OpAdd -> IRAdd | OpSub -> IRSub
+               | OpMul -> IRMul | OpDiv -> IRDiv
+               | OpMod -> IRMod | OpCaret -> IRCaret
+               | OpEq -> IREq | OpNeq -> IRNeq
+               | OpLt -> IRLt | OpLe -> IRLe
+               | OpGt -> IRGt | OpGe -> IRGe
+               | OpAnd -> IRAnd | OpOr -> IROr
+               | _ -> IRAdd
     let body =
-        let irOp = match op with
-                   | OpAdd -> IRAdd | OpSub -> IRSub
-                   | OpMul -> IRMul | OpDiv -> IRDiv
-                   | _ -> IRAdd
         if isLeft then IRBinOp (IRElementwise, irOp, argExpr, IRVar paramId)
         else IRBinOp (IRElementwise, irOp, IRVar paramId, argExpr)
     IRLambda {
@@ -987,31 +1170,49 @@ and lowerLiteral lit =
     | LitUnit -> IRLit IRLitUnit
 
 and lowerMatchCase env (case: MatchCase) : IRMatchCase =
-    let pat = lowerPattern env case.Pattern
-    let guard = case.Guard |> Option.map (lowerExpr env)
-    let body = lowerExpr env case.Body
+    // First, extend environment with pattern bindings
+    let (pat, env') = lowerPatternWithEnv env case.Pattern
+    let guard = case.Guard |> Option.map (lowerExpr env')
+    let body = lowerExpr env' case.Body
     { Pattern = pat; Guard = guard; Body = body }
 
-and lowerPattern env (pat: Pattern) : IRPattern =
+and lowerPatternWithEnv env (pat: Pattern) : IRPattern * LoweringEnv =
     match pat with
-    | PatWildcard -> IRPatWild
+    | PatWildcard -> IRPatWild, env
     | PatVar name ->
         let id = env.Builder.FreshId()
-        IRPatVar id
+        let env' = bindVarSimple name id env
+        IRPatVar id, env'
     | PatLit lit ->
-        match lit with
-        | LitInt n -> IRPatLit (IRLitInt n)
-        | LitFloat f -> IRPatLit (IRLitFloat f)
-        | LitBool b -> IRPatLit (IRLitBool b)
-        | _ -> IRPatWild
+        let irLit = 
+            match lit with
+            | LitInt n -> IRLitInt n
+            | LitFloat f -> IRLitFloat f
+            | LitBool b -> IRLitBool b
+            | _ -> IRLitUnit
+        IRPatLit irLit, env
     | PatTuple pats ->
-        IRPatTuple (pats |> List.map (lowerPattern env))
+        let mutable env' = env
+        let irPats = pats |> List.map (fun p ->
+            let (irP, newEnv) = lowerPatternWithEnv env' p
+            env' <- newEnv
+            irP)
+        IRPatTuple irPats, env'
     | PatCons (head, tail) ->
-        IRPatCons (lowerPattern env head, lowerPattern env tail)
+        let (irHead, env1) = lowerPatternWithEnv env head
+        let (irTail, env2) = lowerPatternWithEnv env1 tail
+        IRPatCons (irHead, irTail), env2
     | PatVariant (name, innerOpt) ->
-        let inner = innerOpt |> Option.map (lowerPattern env)
-        IRPatVariant (0, inner)
-    | _ -> IRPatWild
+        match innerOpt with
+        | Some inner ->
+            let (irInner, env') = lowerPatternWithEnv env inner
+            IRPatVariant (name, 0, Some irInner), env'
+        | None ->
+            IRPatVariant (name, 0, None), env
+    | _ -> IRPatWild, env
+
+and lowerPattern env (pat: Pattern) : IRPattern =
+    fst (lowerPatternWithEnv env pat)
 
 and lowerBlock env stmts exprOpt =
     match stmts, exprOpt with
@@ -1052,14 +1253,13 @@ and lowerBlock env stmts exprOpt =
 let lowerFuncDecl env (decl: FunctionDecl) : IRFuncDef =
     let id = env.Builder.FreshId()
     
-    // Check if any parameter has Poly type
-    let polyParam = decl.Params |> List.tryFind (fun p ->
+    // Collect all parameters with Poly type
+    let polyParamNames = decl.Params |> List.choose (fun p ->
         match p.Type with
-        | Some (TyPoly _) -> true
-        | _ -> false)
+        | Some (TyPoly _) -> Some p.Name
+        | _ -> None)
     
-    let isArityPoly = polyParam.IsSome
-    let arityParamName = polyParam |> Option.map (fun p -> p.Name)
+    let isArityPoly = not polyParamNames.IsEmpty
     
     // Extract commutativity from where clause
     let commGroups = 
@@ -1080,23 +1280,26 @@ let lowerFuncDecl env (decl: FunctionDecl) : IRFuncDef =
         | None -> []
     
     // Build parameter environment with proper types for irank inference
-    // Set InPolyContext if this function has Poly parameters
-    let mutable paramEnv = { env with CurrentCommGroups = commGroups; InPolyContext = isArityPoly }
+    // Set InPolyContext and PolyParamNames if this function has Poly parameters
+    let mutable paramEnv = { env with CurrentCommGroups = commGroups; InPolyContext = isArityPoly; PolyParamNames = polyParamNames }
     let params2 = decl.Params |> List.mapi (fun i p ->
         let paramId = env.Builder.FreshId()
+        // Use explicit type if provided, otherwise create inference placeholder
         let ty = match p.Type with 
                  | Some t -> lowerTypeExpr env t 
-                 | None -> env.Builder.FreshInferType()  // Infer from context
+                 | None -> env.Builder.FreshInferType()
         let identity = AIDParameter (p.Name, i)
         paramEnv <- bindVarWithType p.Name paramId (Some identity) ty paramEnv
         { Name = p.Name; Type = ty; Index = i; VarId = paramId })
     
+    let body2 = lowerExpr paramEnv decl.Body
+    
+    // Infer return type from body if not explicitly specified
     let retTy = 
         match decl.ReturnType with
-        | Some t -> lowerTypeExpr paramEnv t  // Use paramEnv so arity is in scope for return type
-        | None -> env.Builder.FreshInferType()  // Infer from body
-    
-    let body2 = lowerExpr paramEnv decl.Body
+        | Some t -> lowerTypeExpr paramEnv t
+        | None -> 
+            inferTypeFromExpr body2 |> Option.defaultValue (IRTScalar ETFloat64)
     
     {
         Id = id
@@ -1108,7 +1311,7 @@ let lowerFuncDecl env (decl: FunctionDecl) : IRFuncDef =
         Commutativity = if commGroups.IsEmpty then None else Some commGroups
         Parallelism = parallelism
         IsArityPoly = isArityPoly
-        ArityParam = arityParamName
+        ArityParam = polyParamNames |> List.tryHead
     }
 
 /// Lower a binding, potentially producing multiple IR bindings for pattern destructuring
@@ -1121,7 +1324,7 @@ let lowerBindingWithEnv env (binding: Binding) : IRBinding list * (string * IRId
     | PatVar name ->
         let id = env.Builder.FreshId()
         let ty = declaredTy |> Option.defaultWith (fun () -> 
-            inferTypeFromExpr value |> Option.defaultValue IRTUnit)
+            inferTypeFromExprWithEnv env value |> Option.defaultValue IRTUnit)
         let bd = {
             Id = id
             Name = name
@@ -1136,7 +1339,7 @@ let lowerBindingWithEnv env (binding: Binding) : IRBinding list * (string * IRId
         // First, create a binding for the whole tuple
         let tupleId = env.Builder.FreshId()
         let tupleTy = declaredTy |> Option.defaultWith (fun () ->
-            inferTypeFromExpr value |> Option.defaultValue IRTUnit)
+            inferTypeFromExprWithEnv env value |> Option.defaultValue IRTUnit)
         let tupleBd = {
             Id = tupleId
             Name = sprintf "_tuple_%d" tupleId
@@ -1147,11 +1350,13 @@ let lowerBindingWithEnv env (binding: Binding) : IRBinding list * (string * IRId
         }
         
         // Then create bindings for each element
-        let rec extractPatBindings (pat: Pattern) (proj: IRExpr) : IRBinding list * (string * IRId * IRType * IRExpr) list =
+        let rec extractPatBindings (pat: Pattern) (proj: IRExpr) (projTy: IRType option) : IRBinding list * (string * IRId * IRType * IRExpr) list =
             match pat with
             | PatVar name ->
                 let id = env.Builder.FreshId()
-                let ty = IRTUnit  // Will be inferred from usage
+                // Use projected type if available, otherwise infer from expression
+                let ty = projTy |> Option.defaultWith (fun () ->
+                    inferTypeFromExpr proj |> Option.defaultValue (IRTScalar ETFloat64))
                 let bd = {
                     Id = id
                     Name = name
@@ -1166,7 +1371,12 @@ let lowerBindingWithEnv env (binding: Binding) : IRBinding list * (string * IRId
                 let mutable bds = []
                 let mutable envUpdates = []
                 for i, p in List.indexed innerPats do
-                    let (bs, us) = extractPatBindings p (IRTupleProj(proj, i))
+                    // Get element type from tuple type if available
+                    let elemTy = 
+                        match projTy with
+                        | Some (IRTTuple ts) when i < ts.Length -> Some ts.[i]
+                        | _ -> None
+                    let (bs, us) = extractPatBindings p (IRTupleProj(proj, i)) elemTy
                     bds <- bds @ bs
                     envUpdates <- envUpdates @ us
                 bds, envUpdates
@@ -1174,11 +1384,115 @@ let lowerBindingWithEnv env (binding: Binding) : IRBinding list * (string * IRId
         
         let mutable allBindings = [tupleBd]
         let mutable allEnvUpdates = []
+        // Get element types from the tuple type
+        let elemTypes = 
+            match tupleTy with
+            | IRTTuple ts -> ts
+            | _ -> []
         for i, p in List.indexed pats do
             let proj = IRTupleProj(IRVar tupleId, i)
-            let (bs, us) = extractPatBindings p proj
+            let elemTy = if i < elemTypes.Length then Some elemTypes.[i] else None
+            let (bs, us) = extractPatBindings p proj elemTy
             allBindings <- allBindings @ bs
             allEnvUpdates <- allEnvUpdates @ us
+        
+        allBindings, allEnvUpdates
+    
+    | PatCons (headPat, tailPat) ->
+        // Cons pattern: (head :: tail) - treat as tuple destructure for lists/tuples
+        // First, create a binding for the whole value
+        let consId = env.Builder.FreshId()
+        let consTy = declaredTy |> Option.defaultWith (fun () ->
+            inferTypeFromExprWithEnv env value |> Option.defaultValue IRTUnit)
+        let consBd = {
+            Id = consId
+            Name = sprintf "_cons_%d" consId
+            Type = consTy
+            Value = value
+            IsConst = binding.Mutability = BindConst
+            IsMutable = binding.Mutability = BindMut
+        }
+        
+        // Get element types from the tuple type
+        let elemTypes = 
+            match consTy with
+            | IRTTuple ts -> ts
+            | _ -> []
+        
+        // Helper to create bindings for a pattern
+        let rec extractConsBindings (pat: Pattern) (proj: IRExpr) (projTy: IRType option) : IRBinding list * (string * IRId * IRType * IRExpr) list =
+            match pat with
+            | PatVar name ->
+                let id = env.Builder.FreshId()
+                let ty = projTy |> Option.defaultWith (fun () ->
+                    inferTypeFromExpr proj |> Option.defaultValue (IRTScalar ETFloat64))
+                let bd = {
+                    Id = id
+                    Name = name
+                    Type = ty
+                    Value = proj
+                    IsConst = binding.Mutability = BindConst
+                    IsMutable = binding.Mutability = BindMut
+                }
+                [bd], [(name, id, ty, proj)]
+            | PatWildcard -> [], []
+            | _ -> [], []
+        
+        let mutable allBindings = [consBd]
+        let mutable allEnvUpdates = []
+        
+        // Head is element 0
+        let headProj = IRTupleProj(IRVar consId, 0)
+        let headTy = if elemTypes.Length > 0 then Some elemTypes.[0] else None
+        let (headBds, headUs) = extractConsBindings headPat headProj headTy
+        allBindings <- allBindings @ headBds
+        allEnvUpdates <- allEnvUpdates @ headUs
+        
+        // Tail is element 1
+        let tailProj = IRTupleProj(IRVar consId, 1)
+        let tailTy = if elemTypes.Length > 1 then Some elemTypes.[1] else None
+        let (tailBds, tailUs) = extractConsBindings tailPat tailProj tailTy
+        allBindings <- allBindings @ tailBds
+        allEnvUpdates <- allEnvUpdates @ tailUs
+        
+        allBindings, allEnvUpdates
+    
+    | PatStruct (typeName, fields) ->
+        // First, create a binding for the whole struct
+        let structId = env.Builder.FreshId()
+        let structTy = declaredTy |> Option.defaultWith (fun () ->
+            inferTypeFromExprWithEnv env value |> Option.defaultValue IRTUnit)
+        let structBd = {
+            Id = structId
+            Name = sprintf "_struct_%d" structId
+            Type = structTy
+            Value = value
+            IsConst = binding.Mutability = BindConst
+            IsMutable = binding.Mutability = BindMut
+        }
+        
+        // Then create bindings for each field
+        // Field types would need struct type definitions - default to double for now
+        let mutable allBindings = [structBd]
+        let mutable allEnvUpdates = []
+        for (fieldName, pat) in fields do
+            match pat with
+            | PatVar varName ->
+                let id = env.Builder.FreshId()
+                let ty = IRTScalar ETFloat64  // Default field type
+                let proj = IRFieldAccess(IRVar structId, fieldName)
+                let bd = {
+                    Id = id
+                    Name = varName
+                    Type = ty
+                    Value = proj
+                    IsConst = binding.Mutability = BindConst
+                    IsMutable = binding.Mutability = BindMut
+                }
+                allBindings <- allBindings @ [bd]
+                allEnvUpdates <- allEnvUpdates @ [(varName, id, ty, proj)]
+            | PatWildcard -> ()
+            | _ -> ()  // Nested patterns not fully supported
         
         allBindings, allEnvUpdates
     
@@ -1187,7 +1501,7 @@ let lowerBindingWithEnv env (binding: Binding) : IRBinding list * (string * IRId
         let id = env.Builder.FreshId()
         let name = sprintf "binding_%d" id
         let ty = declaredTy |> Option.defaultWith (fun () ->
-            inferTypeFromExpr value |> Option.defaultValue IRTUnit)
+            inferTypeFromExprWithEnv env value |> Option.defaultValue (IRTScalar ETFloat64))
         let bd = {
             Id = id
             Name = name
@@ -1329,11 +1643,13 @@ open Blade.TypedAst
 type TypedLowerEnv = {
     Variables: Map<string, IRId>
     Builder: IRBuilder
+    PolyParamNames: string list
 }
 
 let emptyTypedEnv () : TypedLowerEnv = {
     Variables = Map.empty
     Builder = IRBuilder()
+    PolyParamNames = []
 }
 
 let bindTypedVar name id (env: TypedLowerEnv) : TypedLowerEnv =
@@ -1379,7 +1695,7 @@ let rec lowerTypedExpr (env: TypedLowerEnv) (texpr: TypedExpr) : IRExpr =
     
     | TExprField (obj, field, _) ->
         let o = lowerTypedExpr env obj
-        IRApp (IRParam (field, 0), [o])
+        IRFieldAccess (o, field)
     
     | TExprLambda info ->
         lowerTypedLambda env info
@@ -1477,14 +1793,14 @@ let rec lowerTypedExpr (env: TypedLowerEnv) (texpr: TypedExpr) : IRExpr =
     | TExprReynolds (kernel, isAntisym) ->
         IRReynolds (lowerTypedExpr env kernel, isAntisym)
     
-    | TExprArity ->
-        IRArity None
+    | TExprArity paramName ->
+        IRArity (None, paramName)
     
     | TExprRank e ->
         IRRank (lowerTypedExpr env e)
     
-    | TExprStruct (_, fields) ->
-        IRTuple (fields |> List.map (fun (_, e) -> lowerTypedExpr env e))
+    | TExprStruct (typeName, fields) ->
+        IRStructLit (typeName, fields |> List.map (fun (fname, e) -> fname, lowerTypedExpr env e))
 
 /// Lower a typed lambda
 and lowerTypedLambda env (info: TypedLambdaInfo) : IRExpr =
@@ -1532,7 +1848,7 @@ and lowerTypedPattern (pat: TypedPattern) : IRPattern =
     | TPatTuple pats -> IRPatTuple (pats |> List.map lowerTypedPattern)
     | TPatCons (h, t) -> IRPatCons (lowerTypedPattern h, lowerTypedPattern t)
     | TPatVariant (tag, payload) -> 
-        IRPatVariant (hash tag, payload |> Option.map lowerTypedPattern)
+        IRPatVariant (tag, hash tag, payload |> Option.map lowerTypedPattern)
     | TPatStruct (_, fields) ->
         IRPatTuple (fields |> List.map (fun (_, p) -> lowerTypedPattern p))
     | TPatGuarded (p, _) -> lowerTypedPattern p

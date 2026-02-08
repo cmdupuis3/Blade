@@ -451,8 +451,9 @@ let rec inferExpr (env: TypeEnv) (expr: Expr) : TypeResult<TypedExpr> =
         inferExpr env e |> Result.bind (fun tE ->
             Ok (mkTyped (TExprRank tE) (IRTScalar ETInt64)))
     
-    | ExprArity ->
-        Ok (mkTyped TExprArity (IRTScalar ETInt64))
+    | ExprArity paramName ->
+        // TODO: validate paramName is a Poly<> parameter in scope
+        Ok (mkTyped (TExprArity paramName) (IRTScalar ETInt64))
     
     | ExprPure e ->
         inferExpr env e |> Result.bind (fun tE ->

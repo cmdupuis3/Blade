@@ -235,7 +235,7 @@ and Expr =
     // Type annotation
     | ExprTyped of Expr * TypeExpr
     // Arity special forms
-    | ExprArity                            // arity keyword
+    | ExprArity of Ident                      // arity(paramName) - only valid for Poly<> params
     | ExprNth                              // nth keyword (recursion depth)
     | ExprZero                             // zero keyword
     | ExprRank of Expr                     // rank(A) - get rank of array

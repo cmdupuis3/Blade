@@ -180,7 +180,7 @@ and TypedExprKind =
     | TExprReynolds of kernel: TypedExpr * isAntisymmetric: bool
     
     // Arity special forms
-    | TExprArity
+    | TExprArity of paramName: string
     | TExprRank of TypedExpr
     
     // Struct construction

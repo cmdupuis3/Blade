@@ -22,6 +22,7 @@ type TokenKind =
     | TokKeyword of Keyword
     // Operators
     | TokOp of string
+    | TokNamedInfix of string  // :name: syntax for custom infix operators
     // Punctuation
     | TokLParen        // (
     | TokRParen        // )
@@ -580,6 +581,24 @@ let scanToken (state: LexerState) =
             advance state |> ignore
             advance state |> ignore
             emit state startLine startCol TokColonColon
+        | Some c when Char.IsLetter(c) || c = '_' ->
+            // Potential named infix: :name:
+            advance state |> ignore  // consume first ':'
+            let nameStart = state.Pos
+            // Collect the identifier
+            while state.Pos < state.Source.Length && 
+                  (let ch = state.Source.[state.Pos] in Char.IsLetterOrDigit(ch) || ch = '_') do
+                advance state |> ignore
+            let name = state.Source.Substring(nameStart, state.Pos - nameStart)
+            // Check for closing ':'
+            match peek state with
+            | Some ':' ->
+                advance state |> ignore  // consume closing ':'
+                emit state startLine startCol (TokNamedInfix name)
+            | _ ->
+                // Not a named infix, emit colon and let identifier be re-lexed
+                // This is tricky - we've consumed too much. For now, error.
+                emit state startLine startCol (TokError (sprintf "Expected ':' after :%s" name))
         | _ ->
             advance state |> ignore
             emit state startLine startCol TokColon

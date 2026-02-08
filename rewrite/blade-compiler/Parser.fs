@@ -304,7 +304,20 @@ let parseRankExpr (tokens: Token list) : ParseResult<Expr> =
     | Some (TokInt n) -> 
         success (ExprLit (LitInt n)) (advance tokens)
     | Some (TokKeyword KwArity) -> 
-        success ExprArity (advance tokens)
+        let afterArity = advance tokens
+        match peek afterArity with
+        | Some TokLParen ->
+            advance afterArity |> fun afterLParen ->
+            match peek afterLParen with
+            | Some (TokIdent paramName) ->
+                advance afterLParen |> expect TokRParen >>= fun _ remaining ->
+                success (ExprArity paramName) remaining
+            | _ ->
+                let line, col = currentPos afterLParen
+                error "Expected parameter name in arity()" line col
+        | _ ->
+            let line, col = currentPos afterArity
+            error "arity requires parameter name: arity(paramName)" line col
     | Some (TokIdent name) -> 
         success (ExprVar name) (advance tokens)
     | Some t ->
@@ -586,12 +599,26 @@ and parseInlineOrBlock (tokens: Token list) : ParseResult<Expr> =
         success expr remaining
 
 and parseAssignment (tokens: Token list) : ParseResult<Expr> =
-    parsePipeline tokens >>= fun left rest ->
+    parseNamedInfix tokens >>= fun left rest ->
     match peek rest with
     | Some (TokOp "=") ->
         advance rest |> parseAssignment >>= fun right remaining ->
         success (ExprAssign (left, right)) remaining
     | _ -> success left rest
+
+/// Named infix operators: a :name: b -> name(a, b)
+/// Lowest precedence, left-associative
+and parseNamedInfix (tokens: Token list) : ParseResult<Expr> =
+    parsePipeline tokens >>= fun left rest ->
+    let rec loop acc toks =
+        match peek toks with
+        | Some (TokNamedInfix name) ->
+            advance toks |> parsePipeline >>= fun right remaining ->
+            // Desugar :name: to function application: name(a, b)
+            let call = ExprApp (ExprVar name, [acc; right])
+            loop call remaining
+        | _ -> success acc toks
+    loop left rest
 
 and parsePipeline (tokens: Token list) : ParseResult<Expr> =
     parseChoice tokens >>= fun left rest ->
@@ -823,8 +850,22 @@ and parsePrimary (tokens: Token list) : ParseResult<Expr> =
         | _ ->
             success (ExprVar name) afterName
     
-    // Arity keywords (before other keywords)
-    | Some (TokKeyword KwArity) -> success ExprArity (advance tokens)
+    // Arity - requires arity(paramName) syntax
+    | Some (TokKeyword KwArity) -> 
+        let afterArity = advance tokens
+        match peek afterArity with
+        | Some TokLParen ->
+            advance afterArity |> fun afterLParen ->
+            match peek afterLParen with
+            | Some (TokIdent paramName) ->
+                advance afterLParen |> expect TokRParen >>= fun _ remaining ->
+                success (ExprArity paramName) remaining
+            | _ ->
+                let line, col = currentPos afterLParen
+                error "Expected parameter name in arity()" line col
+        | _ ->
+            let line, col = currentPos afterArity
+            error "arity requires parameter name: arity(paramName)" line col
     | Some (TokKeyword KwNth) -> success ExprNth (advance tokens)
     | Some (TokKeyword KwZero) -> success ExprZero (advance tokens)
     
@@ -987,8 +1028,9 @@ and parseLambda (tokens: Token list) : ParseResult<Expr> =
         parseBlock (advance afterArrow) >>= fun body remaining ->
         success (ExprLambda (parms, whereClause, body)) remaining
     | _ ->
-        // Inline body - but DON'T consume newline since lambda may be part of larger expr
-        parseExprImpl afterArrow >>= fun body remaining ->
+        // Inline body - parse at Apply precedence level so |> isn't consumed
+        // This means: lambda(x) -> a <@> b |> compute parses as (lambda(x) -> a <@> b) |> compute
+        parseApply afterArrow >>= fun body remaining ->
         success (ExprLambda (parms, whereClause, body)) remaining
 
 and parseLambdaParam (tokens: Token list) : ParseResult<LambdaParam> =
@@ -1189,6 +1231,30 @@ and parseParenExpr (tokens: Token list) : ParseResult<Expr> =
     match peek tokens with
     | Some TokRParen ->
         success (ExprTuple []) (advance tokens)
+    // Check for operator section: (+), (*), etc.
+    | Some (TokOp op) ->
+        let afterOp = advance tokens
+        match peek afterOp with
+        | Some TokRParen ->
+            // It's a section like (+) or (*)
+            match stringToBinOp op with
+            | Some binOp -> success (ExprSection binOp) (advance afterOp)
+            | None -> 
+                let line, col = currentPos tokens
+                error (sprintf "Unknown operator in section: %s" op) line col
+        | _ ->
+            // Not a section, parse as normal expression
+            parseExprImpl tokens >>= fun first afterFirst ->
+            match peek afterFirst with
+            | Some TokRParen ->
+                success first (advance afterFirst)
+            | Some TokComma ->
+                advance afterFirst |> sepBy parseExprImpl TokComma >>= fun rest afterRest ->
+                expect TokRParen afterRest >>= fun _ remaining ->
+                success (ExprTuple (first :: rest)) remaining
+            | _ ->
+                let line, col = currentPos afterFirst
+                error "Expected ')' or ',' in parenthesized expression" line col
     | _ ->
         parseExprImpl tokens >>= fun first afterFirst ->
         match peek afterFirst with
@@ -1201,6 +1267,25 @@ and parseParenExpr (tokens: Token list) : ParseResult<Expr> =
         | _ ->
             let line, col = currentPos afterFirst
             error "Expected ')' or ',' in parenthesized expression" line col
+
+/// Convert operator string to BinOp
+and stringToBinOp (op: string) : BinOp option =
+    match op with
+    | "+" -> Some OpAdd
+    | "-" -> Some OpSub
+    | "*" -> Some OpMul
+    | "/" -> Some OpDiv
+    | "%" -> Some OpMod
+    | "^" -> Some OpCaret
+    | "==" -> Some OpEq
+    | "!=" -> Some OpNeq
+    | "<" -> Some OpLt
+    | "<=" -> Some OpLe
+    | ">" -> Some OpGt
+    | ">=" -> Some OpGe
+    | "&&" -> Some OpAnd
+    | "||" -> Some OpOr
+    | _ -> None
 
 and parseBlock (tokens: Token list) : ParseResult<Expr> =
     let rec loop stmts toks =
