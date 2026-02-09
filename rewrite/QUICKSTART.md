@@ -95,7 +95,7 @@ let array: EarthArray = readArray("file_with_array_inside.nc")
 
 What did we just assign to `array`? We don't know exactly from this code, but we *can* say that `array` is an `EarthArray`, and we know what shape it's supposed to have.
 
-## 3. Currying and Tuples
+## 3. Tuples and Currying
 
 The other main collection type in Blade is the tuple. Tuples are constructed with a comma-separated series in parentheses:
 
@@ -119,7 +119,7 @@ tail == (b, c)
 True
 ```
 
-The idea of destructuring a collection one element at a time is called "currying". It also applies to function arguments and array indexing. Indexing into Blade can be done in a curried form, or an uncurried form.
+The idea of destructuring a collection one element at a time is called "currying". It also applies to function arguments and array indexing. Indexing into arrays in Blade can be done in a curried form, or an uncurried form.
 
 ```F#
 let view1 = A(i)(j)(k) // curried
@@ -130,18 +130,21 @@ Currying has implications for type signatures; a curried function is a function 
 
 ```F#
 function myFunc(a:T^0, b: T^0, c: U^0, d: U^0) -> T^0 = ...
+myFunc
 ```
 ```
 T^0 -> T^0 -> U^0 -> U^0 -> T^0
 ```
 ```F#
 function myFuncA = myFunc(5)
+myFuncA
 ```
 ```
 T^0 -> U^0 -> U^0 -> T^0
 ```
 ```F#
 function myFuncAB = myFuncA(3)
+myFuncAB
 ```
 ```
 U^0 -> U^0 -> T^0
@@ -149,12 +152,12 @@ U^0 -> U^0 -> T^0
 
 ...and so on.
 
-With array indexing, currying generally means that you have to index *in order*. The only way to index into a different dimension than the first is to transpose the array. Transposition can be expensive in some cases, but it is the price we pay for dimensional currying, which is what guarantees cache-optimal iteration.
+With array indexing, currying means you have to index *in order*. The only way to index into a different dimension than the first is to transpose the array. Transposition can be expensive in some cases, but it is the price we pay for dimensional currying, which is what guarantees cache-optimal iteration.
 
 
 ## 4. Function Basics
 
-In Blade, we have two parallel type systems, *abstract types* and *concrete types*. `EarthArray` is a concrete type. We know because we defined it ourselves, there's no mystery about what it means. It's a 180 x 360 `Array` of `Float` values.
+In Blade, we have two parallel type systems, *abstract types* and *concrete types*. `EarthArray` is a concrete type. We know because we defined it ourselves; it's a 180 x 360 `Array` of `Float` values.
 
 But functions in Blade don't see all these details. They're on a need-to-know basis. They only know about abstract types.
 
@@ -582,7 +585,7 @@ where comm(a, b) = {
 }
 ```
 
-Here, we annotate that commutativity applies for arguments `a` and `b` by using the `where comm()` clause. If two copies of the same argument are passed to `covariance`, we know we have product symmetry. How much depends on the arrays, but in the case of multiple copies of the same array, we take the maximum. The result type will be also be deduced: commutativity optimization results in symmetric output tensors.
+Here, we annotate that commutativity applies for arguments `a` and `b` by using the `where comm()` clause. This marks `covariance` as a function that could have product symmetry. How much depends on the arrays, but in the case of multiple copies of the same array, we take the maximum. The result type will be also be deduced: commutativity optimization results in symmetric output tensors.
 
 When a loop combinator is completed with `<@>`, the nested loop structure is determined by comparing the ranks of input arrays to the ranks of kernels.
 
@@ -612,7 +615,7 @@ let k2Reverse = kernel2(array2, array1)
 ```
 ```
 k1Forward: Array<Float like SymIdx<2, M>, Idx<N>>
-k1Reverse: // Err! Need to commute (a, b) for max speedup!
+k1Reverse: // Error! Need to commute (a, b) for max speedup!
 k2Forward: Array<Float like SymIdx<2, M>, SymIdx<2, N>>
 k2Reverse: Array<Float like SymIdx<2, M>, Idx<N>, Idx<P>>
 ```
@@ -628,10 +631,10 @@ Like at the end of Section 7, many functions in Blade can return different types
 ```F#
 function comoment_prod(A: Poly<T^1>)
 where comm(A) -> T^1 = {
-    match arity with
-    | 0 -> zero // recursion terminator; keyword "zero" means identity
+    match arity(A) with
+    | 0 -> 1 // recursion terminator; we just want identity here
     | _ ->
-        let head, tail = A
+        let head :: tail = A
         (head - mean(head)) * comoment_prod(tail)
 }
 
@@ -643,9 +646,7 @@ where comm(A) -> T^0 = {
 
 (We annotate `comm` here twice just to be on the safe side, but only the second one is necessary in this specific case.)
 
-This is an arity-polymorphic comoment-generating function; we can call it with any number of arrays and know that we will get a valid and efficiently calculated comoment tensor.
-
-You can declare an arity-polymorphic function using the `Poly<T^_>` format. The `_` denotes a wildcard in the rank position, meaning we could have a tuple of arrays of different or unknown rank. We constrain it here to 1D arrays by providing the rank: `Poly<T^1>`.
+This is an arity-polymorphic comoment generating function; we can call it with any number of arrays and know that we will get a valid and efficiently calculated comoment tensor.
 
 ```F#
 type Array2D = Array<Float like Idx<X>, Idx<T>>
@@ -672,10 +673,10 @@ Primitive types in Blade can be annotated with units of measure.
 ```F#
 Unit meters
 Unit seconds
-Unit velocity = meters / seconds
+Unit mps = meters / seconds
 type Distance = Float<meters>
 type Time = Float<seconds>
-type Speed = Float<meters / seconds>
+type Speed = Float<mps>
 ```
 
 Blade will check units of measure in computations to ensure correctness. Units of measure ensure that only valid calculations between units are possible.
