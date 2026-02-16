@@ -363,6 +363,12 @@ and parseTypeAtom (tokens: Token list) : ParseResult<TypeExpr> =
     | Some (TokKeyword KwSymIdx) ->
         parseIndexType tokens
     
+    | Some (TokKeyword KwAntisymIdx) ->
+        parseIndexType tokens
+    
+    | Some (TokKeyword KwHermitianIdx) ->
+        parseIndexType tokens
+    
     | Some TokLParen ->
         // Tuple type or parenthesized
         advance tokens |> sepBy parseTypeExpr TokComma >>= fun types afterTypes ->
@@ -372,18 +378,25 @@ and parseTypeAtom (tokens: Token list) : ParseResult<TypeExpr> =
         | _ -> success (TyTuple types) remaining
     
     | Some (TokIdent name) ->
-        // Named type, possibly with type args or abstract array rank (T^r)
         let afterName = advance tokens
         match peek afterName with
+        | Some (TokOp "^") ->
+            // The caret is the syntactic marker for type variables.
+            // T^0 = scalar type var, T^2 = rank-2 array type var, T^r = variable-rank
+            advance afterName |> parseRankExpr >>= fun rankExpr remaining ->
+            match rankExpr with
+            | ExprLit (LitInt n) ->
+                success (TyVar (name, Some (int n))) remaining
+            | _ ->
+                // Non-literal rank (T^r where r is a variable)
+                success (TyAbstractArray (TyVar (name, None), rankExpr, None)) remaining
         | Some (TokOp "<") ->
+            // Parameterized type: Array<T>, MyStruct<Int>, etc.
             advance afterName |> sepBy parseTypeExpr TokComma >>= fun args afterArgs ->
             expect (TokOp ">") afterArgs >>= fun _ remaining ->
             success (TyNamed (name, args)) remaining
-        | Some (TokOp "^") ->
-            // Abstract array type: T^r or T^arity
-            advance afterName |> parseRankExpr >>= fun rankExpr remaining ->
-            success (TyAbstractArray (TyNamed (name, []), rankExpr, None)) remaining
         | _ ->
+            // Bare name without caret: always a named type / type constructor
             success (TyNamed (name, [])) afterName
     
     | Some kind ->
@@ -412,9 +425,24 @@ and parseIndexType (tokens: Token list) : ParseResult<TypeExpr> =
         let arity = match arityLit with LitInt n -> int n | _ -> 2
         success (TySymIdx (arity, extent)) remaining
     
+    | Some (TokKeyword KwAntisymIdx) ->
+        advance tokens |> expect (TokOp "<") >>= fun _ afterLt ->
+        parseLiteral afterLt >>= fun arityLit afterArity ->
+        expect TokComma afterArity >>= fun _ afterComma ->
+        parseSimpleExpr afterComma >>= fun extent afterExtent ->
+        expect (TokOp ">") afterExtent >>= fun _ remaining ->
+        let arity = match arityLit with LitInt n -> int n | _ -> 2
+        success (TyAntisymIdx (arity, extent)) remaining
+    
+    | Some (TokKeyword KwHermitianIdx) ->
+        advance tokens |> expect (TokOp "<") >>= fun _ afterLt ->
+        parseSimpleExpr afterLt >>= fun extent afterExtent ->
+        expect (TokOp ">") afterExtent >>= fun _ remaining ->
+        success (TyHermitianIdx extent) remaining
+    
     | Some kind ->
         let line, col = currentPos tokens
-        error (sprintf "Expected index type (Idx or SymIdx) but got %A" kind) line col
+        error (sprintf "Expected index type (Idx, SymIdx, AntisymIdx, or HermitianIdx) but got %A" kind) line col
     
     | None ->
         error "Expected index type but got EOF" 0 0
@@ -604,6 +632,19 @@ and parseAssignment (tokens: Token list) : ParseResult<Expr> =
     | Some (TokOp "=") ->
         advance rest |> parseAssignment >>= fun right remaining ->
         success (ExprAssign (left, right)) remaining
+    // Compound assignment: desugar x += y to x = x + y
+    | Some (TokOp "+=") ->
+        advance rest |> parseAssignment >>= fun right remaining ->
+        success (ExprAssign (left, ExprBinOp (Elementwise, OpAdd, left, right))) remaining
+    | Some (TokOp "-=") ->
+        advance rest |> parseAssignment >>= fun right remaining ->
+        success (ExprAssign (left, ExprBinOp (Elementwise, OpSub, left, right))) remaining
+    | Some (TokOp "*=") ->
+        advance rest |> parseAssignment >>= fun right remaining ->
+        success (ExprAssign (left, ExprBinOp (Elementwise, OpMul, left, right))) remaining
+    | Some (TokOp "/=") ->
+        advance rest |> parseAssignment >>= fun right remaining ->
+        success (ExprAssign (left, ExprBinOp (Elementwise, OpDiv, left, right))) remaining
     | _ -> success left rest
 
 /// Named infix operators: a :name: b -> name(a, b)
@@ -1293,11 +1334,11 @@ and parseBlock (tokens: Token list) : ParseResult<Expr> =
         match peek toks with
         | Some TokRBrace ->
             // End of block - last expression (if any) is the return value
+            // stmts is in reverse order (most recent first), so head = last statement
             let (statements, finalExpr) = 
-                match List.rev stmts with
-                | [] -> [], None
+                match stmts with
                 | StmtExpr e :: rest -> List.rev rest, Some e
-                | all -> all, None
+                | all -> List.rev all, None
             success (ExprBlock (statements, finalExpr)) (advance toks)
         | Some TokSemi ->
             // Explicit semicolon - skip it
@@ -1599,7 +1640,14 @@ let parseStructDecl (tokens: Token list) : ParseResult<Decl> =
                     error "Expected ',' or '}' in struct" line col
         
         loop [] afterBrace >>= fun fields remaining ->
-        success (DeclType (TyDeclStruct (name, typeParams, fields))) remaining
+        // Parse optional where constraint
+        let remaining = skipNL remaining
+        match peek remaining with
+        | Some (TokKeyword KwWhere) ->
+            parseExpr (advance remaining) >>= fun constraintExpr afterConstraint ->
+            success (DeclType (TyDeclStruct (name, typeParams, fields, Some constraintExpr))) afterConstraint
+        | _ ->
+            success (DeclType (TyDeclStruct (name, typeParams, fields, None))) remaining
     | _ ->
         let line, col = currentPos tokens
         error "Expected struct name" line col
@@ -1698,22 +1746,119 @@ let parseQualifiedName (tokens: Token list) : ParseResult<QualifiedName> =
         let line, col = currentPos tokens
         error "Expected module name" line col
 
+// ============================================================================
+// Unit of Measure Declarations
+// ============================================================================
+
+/// Parse a unit expression: meters / seconds, kg * velocity, meters^2
+let rec parseUnitExpr (tokens: Token list) : ParseResult<UnitExpr> =
+    parseUnitTerm tokens >>= fun left rest ->
+    parseUnitExprTail left rest
+
+and parseUnitExprTail (left: UnitExpr) (tokens: Token list) : ParseResult<UnitExpr> =
+    match peek tokens with
+    | Some (TokOp "*") ->
+        parseUnitTerm (advance tokens) >>= fun right rest ->
+        parseUnitExprTail (UnitMul (left, right)) rest
+    | Some (TokOp "/") ->
+        parseUnitTerm (advance tokens) >>= fun right rest ->
+        parseUnitExprTail (UnitDiv (left, right)) rest
+    | _ -> success left tokens
+
+and parseUnitTerm (tokens: Token list) : ParseResult<UnitExpr> =
+    parseUnitAtom tokens >>= fun atom rest ->
+    match peek rest with
+    | Some (TokOp "^") ->
+        let afterCaret = advance rest
+        match peek afterCaret with
+        | Some (TokInt n) -> success (UnitPow (atom, int n)) (advance afterCaret)
+        | _ ->
+            let line, col = currentPos afterCaret
+            error "Expected integer exponent after '^' in unit expression" line col
+    | _ -> success atom rest
+
+and parseUnitAtom (tokens: Token list) : ParseResult<UnitExpr> =
+    match peek tokens with
+    | Some (TokIdent name) -> success (UnitNamed name) (advance tokens)
+    | Some TokLParen ->
+        parseUnitExpr (advance tokens) >>= fun expr afterExpr ->
+        expect TokRParen afterExpr >>= fun _ remaining ->
+        success expr remaining
+    | _ ->
+        let line, col = currentPos tokens
+        error "Expected unit name or '(' in unit expression" line col
+
+/// Parse a unit declaration: Unit meters  or  Unit velocity = meters / seconds
+let parseUnitDecl (tokens: Token list) : ParseResult<Decl> =
+    expectIdent tokens >>= fun name afterName ->
+    match peek afterName with
+    | Some (TokOp "=") ->
+        parseUnitExpr (advance afterName) >>= fun expr remaining ->
+        success (DeclUnit { Name = name; Definition = Some (UnitDerived expr) }) remaining
+    | _ ->
+        success (DeclUnit { Name = name; Definition = None }) afterName
+
 let parseDecl (tokens: Token list) : ParseResult<Decl> =
     match peek tokens with
     | Some (TokKeyword KwImport) ->
         // import Providers.NetCDF as NetCDF
+        // import Math
         parseQualifiedName (advance tokens) >>= fun qname afterName ->
         match peek afterName with
         | Some (TokKeyword KwAs) ->
             expectIdent (advance afterName) >>= fun alias remaining ->
-            success (DeclImport (qname, Some alias)) remaining
+            success (DeclImport (qname, ImportQualified (Some alias))) remaining
         | _ ->
             // import Providers.NetCDF  (no alias — use last segment)
-            success (DeclImport (qname, None)) afterName
+            success (DeclImport (qname, ImportQualified None)) afterName
+    | Some (TokKeyword KwFrom) ->
+        // from Math import pi, e
+        parseQualifiedName (advance tokens) >>= fun qname afterName ->
+        match peek afterName with
+        | Some (TokKeyword KwImport) ->
+            let rec parseNames acc toks =
+                match expectIdent toks with
+                | Ok (name, rest) ->
+                    match peek rest with
+                    | Some TokComma -> parseNames (name :: acc) (advance rest)
+                    | _ -> success (List.rev (name :: acc)) rest
+                | Error e -> error e.Message e.Line e.Col
+            parseNames [] (advance afterName) >>= fun names remaining ->
+            success (DeclImport (qname, ImportSelective names)) remaining
+        | _ ->
+            let line, col = currentPos afterName
+            error "Expected 'import' after 'from <module>'" line col
     | Some (TokKeyword KwFunction) ->
         parseFunctionDecl (advance tokens)
     | Some (TokKeyword KwLet) ->
-        parseTopLevelLet (advance tokens)
+        let afterLet = advance tokens
+        match peek afterLet with
+        | Some (TokKeyword KwStatic) ->
+            // let static x = ... → DeclStatic
+            parseTopLevelLet (advance afterLet) >>= fun decl remaining ->
+            match decl with
+            | DeclLet binding ->
+                success (DeclStatic { binding with Mutability = BindConst }) remaining
+            | other -> success other remaining
+        | _ ->
+            parseTopLevelLet afterLet
+    | Some (TokKeyword KwStatic) ->
+        let afterStatic = advance tokens
+        match peek afterStatic with
+        | Some (TokKeyword KwFunction) ->
+            // static function f(...) = ... → DeclFunction with IsStatic = true
+            parseFunctionDecl (advance afterStatic) >>= fun decl remaining ->
+            match decl with
+            | DeclFunction f ->
+                success (DeclFunction { f with IsStatic = true }) remaining
+            | other -> success other remaining
+        | _ ->
+            // static x = ... → DeclStatic (backward compat)
+            parseTopLevelLet afterStatic >>= fun decl remaining ->
+            match decl with
+            | DeclLet binding ->
+                success (DeclStatic { binding with Mutability = BindConst }) remaining
+            | other -> success other remaining
     | Some (TokKeyword KwType) ->
         parseTypeDecl (advance tokens)
     | Some (TokKeyword KwStruct) ->
@@ -1722,6 +1867,8 @@ let parseDecl (tokens: Token list) : ParseResult<Decl> =
         parseInterfaceDecl (advance tokens)
     | Some (TokKeyword KwImpl) ->
         parseImplDecl (advance tokens)
+    | Some (TokKeyword KwUnit) ->
+        parseUnitDecl (advance tokens)
     | Some kind ->
         let line, col = currentPos tokens
         error (sprintf "Expected declaration but got %A" kind) line col
@@ -1766,6 +1913,26 @@ let parseProgram (source: string) : Result<Program, ParseError> =
     match parseModule tokens with
     | Ok (modul, _) -> Ok { Modules = [modul] }
     | Error e -> Error e
+
+/// Parse multiple source files into a single Program.
+/// Each entry is (fileName, sourceCode). If a source has a `module` declaration,
+/// that name is used; otherwise the fileName (sans extension) becomes the module name.
+let parseMultiSource (sources: (string * string) list) : Result<Program, ParseError> =
+    let rec go acc remaining =
+        match remaining with
+        | [] -> Ok { Modules = List.rev acc }
+        | (fileName, source) :: rest ->
+            let tokens = tokenizeWithNewlines source
+            match parseModule tokens with
+            | Ok (modul, _) ->
+                // If module name is "Main" (default) and fileName is provided, use fileName
+                let modul' =
+                    if modul.Name = ["Main"] && fileName <> "" && fileName <> "Main" then
+                        { modul with Name = [fileName] }
+                    else modul
+                go (modul' :: acc) rest
+            | Error e -> Error { e with Message = sprintf "[%s] %s" fileName e.Message }
+    go [] sources
 
 // ============================================================================
 // Initialize Forward Reference

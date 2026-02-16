@@ -124,19 +124,21 @@ type TypeExpr =
     | TyNamed of Ident * TypeExpr list
     // Array type: Array<T like I1, I2, ...>
     | TyArray of elemType: TypeExpr * indexTypes: TypeExpr list
-    // Abstract array type: T^r or T^r(sigma) where r can be an expression (e.g., arity)
+    // Abstract array type: Float64^r or similar where element type is concrete
+    // For type variable arities (T^r), use TyVar with arity instead
     | TyAbstractArray of elemType: TypeExpr * rank: Expr * symmetry: int list option
     // Function type: (T1, T2, ...) -> R
     | TyFunc of args: TypeExpr list * ret: TypeExpr
     // Tuple type: (T1, T2, ...)
     | TyTuple of TypeExpr list
-    // Type variable (for polymorphism)
-    | TyVar of Ident
+    // Type variable (for parametric polymorphism)
+    // Ident is a single uppercase letter (T, U, V, ...)
+    // int option is the arity: None or Some 0 = scalar, Some k = rank-k array
+    | TyVar of Ident * int option
     // Index types
     | TyIdx of extent: Expr
     | TySymIdx of arity: int * extent: Expr
     | TyAntisymIdx of arity: int * extent: Expr
-    | TyFullSymIdx of arity: int * extent: Expr
     | TyBoundedIdx of lower: Expr * upper: Expr
     | TyCompoundIdx of mask: Expr
     | TyEquivIdx of dim: Expr * group: TypeExpr * rep: TypeExpr
@@ -321,8 +323,8 @@ type TypeDecl =
     | TyDeclAlias of name: Ident * typeParams: Ident list * body: TypeExpr
     // sum type (enum/variant)
     | TyDeclSum of name: Ident * typeParams: Ident list * variants: VariantDecl list
-    // struct
-    | TyDeclStruct of name: Ident * typeParams: Ident list * fields: FieldDecl list
+    // struct (with optional where invariant)
+    | TyDeclStruct of name: Ident * typeParams: Ident list * fields: FieldDecl list * invariant: Expr option
 
 and VariantDecl = {
     Name: Ident
@@ -368,6 +370,11 @@ and UnitExpr =
     | UnitDiv of UnitExpr * UnitExpr
     | UnitPow of UnitExpr * int
 
+/// How names from an imported module are brought into scope
+type ImportStyle =
+    | ImportQualified of Ident option    // import Math / import Math as M → qualified access
+    | ImportSelective of Ident list       // from Math import pi, e → unqualified access
+
 // Top-level declarations
 type Decl =
     | DeclFunction of FunctionDecl
@@ -377,7 +384,7 @@ type Decl =
     | DeclUnit of UnitDecl
     | DeclLet of Binding
     | DeclStatic of Binding              // static x = ...
-    | DeclImport of QualifiedName * Ident option  // import A.B.C as X
+    | DeclImport of QualifiedName * ImportStyle  // import A.B.C as X / from A import x, y
 
 // ============================================================================
 // Module Structure

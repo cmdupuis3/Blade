@@ -17,6 +17,23 @@ open Blade.Lowering
 open Blade.CodeGen
 open Blade.NetcdfProvider
 
+// Import test definitions
+open Blade.Tests.Basic
+open Blade.Tests.Loops
+open Blade.Tests.Symmetry
+open Blade.Tests.Reynolds
+open Blade.Tests.Arity
+open Blade.Tests.Functions
+open Blade.Tests.Structs
+open Blade.Tests.SumTypes
+open Blade.Tests.Interfaces
+open Blade.Tests.Modules
+open Blade.Tests.Guards
+open Blade.Tests.Bracketed
+open Blade.Tests.IndexTypes
+open Blade.Tests.Mutability
+open Blade.Tests.Static
+open Blade.Tests.Units
 // Aliases for cleaner code
 type Process = System.Diagnostics.Process
 type ProcessStartInfo = System.Diagnostics.ProcessStartInfo
@@ -107,11 +124,16 @@ let parseActualValues (output: string) : Map<string, string> =
         else None)
     |> Map.ofArray
 
-/// Compare a float with tolerance
+/// Compare a float with combined absolute + relative tolerance
 let floatEquals (expected: float) (actual: float) (tolerance: float) : bool =
     if Double.IsNaN(expected) && Double.IsNaN(actual) then true
     elif Double.IsInfinity(expected) || Double.IsInfinity(actual) then expected = actual
-    else abs(expected - actual) <= tolerance
+    else
+        let diff = abs(expected - actual)
+        // Absolute tolerance for values near zero, relative tolerance otherwise
+        let scale = max (abs expected) (abs actual)
+        if scale < 1e-12 then diff <= tolerance
+        else diff / scale <= tolerance
 
 /// Parse a float from string
 let tryParseFloat (s: string) : float option =
@@ -146,7 +168,7 @@ let checkExpectedValues (expected: ExpectedValue list) (output: string) : Result
                     | Some actualStr ->
                         match tryParseFloat actualStr with
                         | Some actualVal when floatEquals expectedVal actualVal tolerance -> None
-                        | Some actualVal -> Some (sprintf "%s: expected %g, got %g" name expectedVal actualVal)
+                        | Some actualVal -> Some (sprintf "%s: expected %.17g, got %.17g (diff=%.3e)" name expectedVal actualVal (abs(expectedVal - actualVal)))
                         | None -> Some (sprintf "%s: could not parse '%s' as float" name actualStr)
                     | None -> Some (sprintf "%s: not found in output" name)
                     
@@ -287,786 +309,16 @@ let testComparePipelines source =
 // Test Cases
 // ============================================================================
 
-let test1_basicExpr = """
-let x = 1 + 2 * 3
-// EXPECT: x = 7
-"""
-
-let test2_lambda = """
-let f = lambda(a, b) -> a + b
-"""
-
-let test3_ifThenElse = """
-let result = if true then 42 else 0
-// EXPECT: result = 42
-"""
-
-let test4_methodFor = """
-let A = [1.0, 2.0, 3.0]
-let L = method_for(A, A)
-"""
-
-let test5_objectFor = """
-let kernel = lambda(x: Float64, y: Float64) -> x * y
-let O = object_for(kernel)
-"""
-
-let test6_apply = """
-let A = [1.0, 2.0, 3.0]
-let L = method_for(A, A)
-let f = lambda(x, y) -> x * y
-let result = L <@> f
-"""
-
-let test7_arrayLit = """
-let arr1d = [1.0, 2.0, 3.0]
-let arr2d = [[1.0, 2.0], [3.0, 4.0]]
-// EXPECT: arr1d = [1, 2, 3]
-"""
-
-let test8_triangularIteration = """
-// Same array used twice with commutative kernel - enables triangular iteration
-let A = [1.0, 2.0, 3.0, 4.0, 5.0]
-let L = method_for(A, A)
-let f = lambda(x, y) where comm(x, y) -> x * y
-let result = L <@> f |> compute
-// With comm(x,y), symmetric 5x5 matrix stored as left-justified triangular
-// Row-major order: row0=[1,2,3,4,5], row1=[4,6,8,10], row2=[9,12,15], row3=[16,20], row4=[25]
-// EXPECT: result = [1.0, 2.0, 3.0, 4.0, 5.0, 4.0, 6.0, 8.0, 10.0, 9.0, 12.0, 15.0, 16.0, 20.0, 25.0]
-"""
-
-let test9_loopObjectReuse = """
-let A = [1.0, 2.0, 3.0]
-let B = [4.0, 5.0, 6.0]
-let L = method_for(A, B)
-let sum = lambda(x, y) -> x + y
-let prod = lambda(x, y) -> x * y
-let sumResult = L <@> sum
-let prodResult = L <@> prod
-"""
-
-let test10_scalarCaptureInKernel = """
-// Scalars CAN be captured by lambdas (only arrays are forbidden)
-let scale = 2.5
-let offset = 1.0
-let A = [1.0, 2.0, 3.0]
-let B = [4.0, 5.0, 6.0]
-let L = method_for(A, B)
-let f = lambda(x, y) -> (x + y) * scale + offset
-let result = L <@> f |> compute
-"""
-
-let test11_objectForWithArrays = """
-let kernel = lambda(a, b) -> a * b + 1.0
-let O = object_for(kernel)
-let A = [1.0, 2.0, 3.0]
-let B = [4.0, 5.0, 6.0]
-"""
-
-let test12_nestedArray = """
-let matrix = [[1.0, 2.0, 3.0], [4.0, 5.0, 6.0], [7.0, 8.0, 9.0]]
-"""
-
-let test13_functionDecl = """
-function add(a: Float64, b: Float64) -> Float64 = a + b
-"""
-
-let test14_functionWithWhere = """
-// Function with array parameters - extents passed alongside arrays
-function covariance(A: Array<Float64 like Idx<n>>, B: Array<Float64 like Idx<n>>) 
-  where comm(A, B) -> Float64 = 
-  method_for(A, B) <@> lambda(x, y) -> x * y |> compute
-"""
-
-let test15_precedenceTest = """
-// Test that * binds tighter than +
-let x = 1 + 2 * 3
-let y = (1 + 2) * 3
-// EXPECT: x = 7
-// EXPECT: y = 9
-"""
-
-let test16_combinators = """
-let A = [1.0, 2.0]
-let B = [3.0, 4.0]
-let L1 = method_for(A, A)
-let L2 = method_for(B, B)
-let f = lambda(x, y) -> x + y
-// Parallel composition
-let parallel = (L1 <@> f) <&> (L2 <@> f)
-"""
-
-let test17_symmetryDemonstration = """
-// Case 1: Different arrays, no symmetry -> speedup = 1
-let A = [1.0, 2.0, 3.0]
-let B = [4.0, 5.0, 6.0]
-let L1 = method_for(A, B)
-let f1 = lambda(x, y) -> x * y
-let r1 = L1 <@> f1
-
-// Case 2: Same array twice WITH comm -> triangular iteration, speedup = 2
-let C = [1.0, 2.0, 3.0]
-let L2 = method_for(C, C)
-let f2 = lambda(x, y) where comm(x, y) -> x * y
-let r2 = L2 <@> f2
-
-// Case 3: Same array three times with comm (gives 6x speedup)
-let D = [1.0, 2.0, 3.0]
-let L3 = method_for(D, D, D)
-let f3 = lambda(x, y, z) where comm(x, y, z) -> x * y * z
-let r3 = L3 <@> f3
-"""
-
-let test18_matchExpr = """
-let x = 5
-let result = match x with
-  | 0 -> 0
-  | 1 -> 1
-  | n -> n * 2
-// EXPECT: result = 10
-"""
-
-let test19_matchWithGuard = """
-let x = 10
-let result = match x with
-  | n if n > 5 -> n * 2
-  | n if n > 0 -> n
-  | _ -> 0
-// EXPECT: result = 20
-"""
-
-let test20_tupleDestructure = """
-let pair = (1, 2)
-let (a, b) = pair
-let sum = a + b
-// EXPECT: sum = 3
-"""
-
-let test21_compute = """
-let A = [1.0, 2.0, 3.0]
-let L = method_for(A, A)
-let f = lambda(x, y) -> x * y
-let result = L <@> f |> compute
-// result is 3x3 matrix: [[1*1, 1*2, 1*3], [2*1, 2*2, 2*3], [3*1, 3*2, 3*3]]
-// EXPECT: result = [1, 2, 3, 2, 4, 6, 3, 6, 9]
-"""
-
-let test22_pureAndBind = """
-let x = pure(42)
-let f = lambda(n) -> n * 2
-let result = x >>= f
-"""
-
-let test23_kernelWithTypes = """
-// Kernel with explicit types - inline syntax
-function vectorDot(a: Array<Float64 like Idx<n>>, b: Array<Float64 like Idx<n>>) -> Float64 = 
-  method_for(a, b) <@> lambda(x: Float64, y: Float64) -> x * y |> compute
-"""
-
-let test24_nonScalarKernel = """
-// Kernel that operates on 1D slices (irank = 1 for each input)
-let matrix = [[1.0, 2.0], [3.0, 4.0]]
-let O = object_for(lambda(row: Array<Float64 like Idx<2>>) -> row)
-"""
-
-let test25_functionCapture = """
-// Lambdas CAN capture functions from environment
-// Scalar params inferred, return type inferred
-function square(x) = x * x
-let A = [1.0, 2.0, 3.0]
-let L = method_for(A, A)
-let f = lambda(x, y) where comm(x, y) -> square(x) + square(y)
-let result = L <@> f
-"""
-
-let test26_arrayCaptureRejected = """
-// Lambdas CANNOT capture arrays - this should fail
-let A = [1.0, 2.0, 3.0]
-let bad = lambda(x) -> x + A
-"""
-
-let test27_reynoldsSymmetric = """
-// Reynolds combinator wraps a non-commutative kernel
-// g(x,y) = x/y is NOT commutative, but reynolds(g) computes g(x,y) + g(y,x)
-// Provides 2× speedup from triangular iteration on output
-let A = [1.0, 2.0, 3.0]
-let B = [4.0, 5.0, 6.0]
-let L = method_for(A, B)
-let g = lambda(x, y) -> x / y
-let result = L <@> reynolds(g)
-"""
-
-let test28_reynoldsAntisymmetric = """
-// Reynolds with Antisymmetric computes g(x,y) - g(y,x)
-// Result is antisymmetric: f(x,y) = -f(y,x)
-let A = [1.0, 2.0, 3.0]
-let B = [4.0, 5.0, 6.0]
-let L = method_for(A, B)
-let g = lambda(x, y) -> x / y
-let result = L <@> reynolds(g, Antisymmetric)
-"""
-
-let test29_reynoldsPlusIdentity = """
-// Reynolds + identical arrays gives (n!)² speedup
-// g(x,y) = x^y is NOT commutative, reynolds(g) computes x^y + y^x
-// Same array twice: 2× from identity × 2× from Reynolds = 4×
-let A = [1.0, 2.0, 3.0]
-let L = method_for(A, A)
-let g = lambda(x, y) where comm(x, y) -> x^y
-let result = L <@> reynolds(g)
-"""
-
-let test30_reynoldsThreeWay = """
-// Reynolds with 3 parameters: 3! = 6× speedup
-// g(x,y,z) = x²yz is NOT commutative
-// reynolds(g) sums over all 6 permutations of S₃
-let A = [1.0, 2.0, 3.0]
-let B = [4.0, 5.0, 6.0]
-let C = [7.0, 8.0, 9.0]
-let L = method_for(A, B, C)
-let g = lambda(x, y, z) -> x * x * y * z
-let result = L <@> reynolds(g)
-"""
-
-let test31_polyType = """
-// Poly<T^r> type parsing
-function comoment(args: Poly<T^0>)
-where comm(args)
--> T^0
-= args[0]
-"""
-
-let test32_rankIntrinsic = """
-// rank() intrinsic
-let A = [[1.0, 2.0], [3.0, 4.0]]
-let r = rank(A)
-"""
-
-let test33_consDestructure = """
-// :: destructuring pattern
-let t = (1, 2, 3)
-let head :: tail = t
-"""
-
-let test34_arityKeyword = """
-// arity(param) - get arity of a Poly<> parameter
-// Returns the number of elements in the poly pack at call site
-function firstOrDefault(args: Poly<T^0>, fallback: T^0) -> T^0
-= if arity(args) == 1 then args[0] else fallback
-"""
-
-let test34b_multiPolyArity = """
-// Multiple Poly<> parameters - each has its own arity
-// Useful for zip-like operations that need to know both sizes
-function selectLarger(xs: Poly<T^0>, ys: Poly<T^0>) -> T^0
-= if arity(xs) >= arity(ys) then xs[0] else ys[0]
-"""
-
-let test35_arityReturnType = """
-// T^arity(param) in return type - rank depends on poly pack size
-function identity(args: Poly<T^1>) -> T^arity(args)
-= args[0]
-"""
-
-let test36_outputTypeDeduction = """
-// Output type should be SymIdx when comm + same array
-let A = [1.0, 2.0, 3.0]
-let L = method_for(A, A)
-let f = lambda(x, y) where comm(x, y) -> x * y
-let result = L <@> f
-// result should have type Array<Float like SymIdx<2, 3>>
-"""
-
-let test37_outputTypeDifferentArrays = """
-// Output type should be Idx, Idx when different arrays (no symmetry)
-let A = [1.0, 2.0, 3.0]
-let B = [4.0, 5.0, 6.0]
-let L = method_for(A, B)
-let f = lambda(x, y) where comm(x, y) -> x * y
-let result = L <@> f
-// result should have type Array<Float like Idx<3>, Idx<3>>
-"""
-
-let test38_outputTypeThreeWay = """
-// Output type for 3-way same array: SymIdx<3, n>
-let A = [1.0, 2.0, 3.0]
-let L = method_for(A, A, A)
-let f = lambda(x, y, z) where comm(x, y, z) -> x * y * z
-let result = L <@> f
-// result should have type Array<Float like SymIdx<3, 3>>
-"""
-
-let test39_outputTypeMixed = """
-// Mixed: (A, A, B) -> SymIdx<2, n>, Idx<n>
-let A = [1.0, 2.0, 3.0]
-let B = [4.0, 5.0, 6.0]
-let L = method_for(A, A, B)
-let f = lambda(x, y, z) where comm(x, y, z) -> x * y * z
-let result = L <@> f
-// result should have type Array<Float like SymIdx<2, 3>, Idx<3>>
-"""
-
-let test40_outputTypeNoComm = """
-// Without comm: Idx, Idx even with same array
-let A = [1.0, 2.0, 3.0]
-let L = method_for(A, A)
-let f = lambda(x, y) -> x * y
-let result = L <@> f
-// result should have type Array<Float like Idx<3>, Idx<3>>
-"""
-
-let test41_partialComm = """
-// Partial comm: only (x,y) are commutative, not z
-let A = [1.0, 2.0, 3.0]
-let B = [4.0, 5.0, 6.0]
-let L = method_for(A, A, B)
-let f = lambda(x, y, z) where comm(x, y) -> x * y * z
-let result = L <@> f
-// result: SymIdx<2, 3> for A,A; Idx<3> for B (z not in comm group)
-"""
-
-let test42_distinctCommGroups = """
-// Two distinct comm groups
-let A = [1.0, 2.0, 3.0]
-let B = [4.0, 5.0, 6.0]
-let L = method_for(A, A, B, B)
-let f = lambda(x, y, z, w) where comm(x, y), comm(z, w) -> x * y * z * w
-let result = L <@> f
-// result: SymIdx<2, 3> for A,A; SymIdx<2, 3> for B,B
-"""
-
-let test43_nestedFunction = """
-// Nested function in block
-let result = {
-    function helper(x) -> Int = x * 2
-    let y = helper(5)
-    y + 1
-}
-"""
-
-let test44_multilineBlock = """
-// Multi-line block with pipelines
-let A = [1.0, 2.0, 3.0]
-let result = {
-    let L = method_for(A, A)
-    let f = lambda(x, y) where comm(x, y) -> x * y
-    L <@> f
-}
-"""
-
-let test26_arrayCaptureRejected_orig = """
-// Lambdas CANNOT capture arrays - this should fail
-let A = [1.0, 2.0, 3.0]
-let bad = lambda(x) -> x + A
-"""
 
 // ============================================================================
-// Struct Tests
+// Test Collections
 // ============================================================================
-
-let test45_structDecl = """
-// Basic struct declaration and construction
-struct Point {
-    x: Float64,
-    y: Float64
-}
-let p = Point { x = 1.0, y = 2.0 }
-"""
-
-let test46_structFieldAccess = """
-// Struct field access
-struct Vector3 {
-    x: Float64,
-    y: Float64,
-    z: Float64
-}
-let v = Vector3 { x = 1.0, y = 2.0, z = 3.0 }
-let sum = v.x + v.y + v.z
-// EXPECT: sum = 6
-"""
-
-let test47_structPattern = """
-// Struct destructuring in pattern
-struct Pair {
-    first: Int,
-    second: Int
-}
-let p = Pair { first = 10, second = 20 }
-let Pair { first, second } = p
-let total = first + second
-// EXPECT: total = 30
-"""
-
-// ============================================================================
-// Sum Type Tests
-// ============================================================================
-
-let test48_sumTypeSimple = """
-// Simple sum type (enum-like)
-type Direction = North | South | East | West
-let d = North
-"""
-
-let test49_sumTypeWithData = """
-// Sum type with payload
-type Option = Some : Int | None
-let x = Some(42)
-let y = None
-"""
-
-let test50_sumTypeMatch = """
-// Pattern matching on sum type
-type Result = Ok : Int | Err : String
-let r = Ok(100)
-let value = match r with
-    | Ok(n) -> n
-    | Err(msg) -> 0
-"""
-
-// ============================================================================
-// Interface and Impl Tests
-// ============================================================================
-
-let test51_interfaceDecl = """
-// Interface declaration
-interface Measurable {
-    function area(self) -> Float64
-}
-struct Circle {
-    radius: Float64
-}
-"""
-
-let test52_implDecl = """
-// Interface implementation
-interface Scalable {
-    function scale(self, factor: Float64) -> Float64
-}
-struct Box {
-    width: Float64,
-    height: Float64
-}
-impl Scalable for Box {
-    function scale(self, factor: Float64) -> Float64 = self.width * self.height * factor
-}
-"""
-
-// ============================================================================
-// Module Tests
-// ============================================================================
-
-let test53_moduleDecl = """
-module Math.Geometry
-
-let pi = 3.14159
-function circleArea(r: Float64) -> Float64 = pi * r * r
-"""
-
-let test54_moduleWithImport = """
-module Main
-
-let x = 42
-let y = x * 2
-// EXPECT: y = 84
-"""
-
-// ============================================================================
-// Extended Guard Tests
-// ============================================================================
-
-let test55_guardWithAnd = """
-// Guard with && operator
-let x = 15
-let result = match x with
-    | n if n > 10 && n < 20 -> n
-    | _ -> 0
-// EXPECT: result = 15
-"""
-
-let test56_guardWithOr = """
-// Guard with || operator
-let x = 5
-let result = match x with
-    | n if n < 0 || n > 100 -> 0
-    | n -> n * 2
-// EXPECT: result = 10
-"""
-
-let test57_guardComplex = """
-// Complex guard with multiple conditions
-let x = 50
-let y = 30
-let result = match (x, y) with
-    | (a, b) if a > 0 && b > 0 && a + b < 100 -> a + b
-    | (a, b) if a < 0 || b < 0 -> 0
-    | _ -> 999
-// EXPECT: result = 80
-"""
-
-let test58_guardNested = """
-// Nested match with guards
-let x = 10
-let y = 20
-let outer = match x with
-    | n if n > 5 -> match y with
-        | m if m > 15 -> n + m
-        | _ -> n
-    | _ -> 0
-// EXPECT: outer = 30
-"""
-
-// ============================================================================
-// Bracketed (Outer Product) Operator Tests
-// ============================================================================
-
-let test59_bracketedArithmetic = """
-// Bracketed arithmetic operators for outer product
-let A = [1.0, 2.0, 3.0]
-let B = [10.0, 20.0]
-let added = A [+] B
-let multiplied = A [*] B
-let powered = A [^] B
-// added is 3x2: [[11,21], [12,22], [13,23]]
-// EXPECT: added = [11, 21, 12, 22, 13, 23]
-// multiplied is 3x2: [[10,20], [20,40], [30,60]]
-// EXPECT: multiplied = [10, 20, 20, 40, 30, 60]
-"""
-
-let test60_bracketedComparison = """
-// Bracketed comparison operators
-let A = [1, 2, 3, 4, 5]
-let B = [3, 3, 3]
-let less_than = A [<] B
-let equal = A [==] B
-let greater_eq = A [>=] B
-"""
-
-let test61_bracketedLogical = """
-// Bracketed logical operators
-let P = [true, false, true]
-let Q = [true, true, false]
-let and_result = P [&&] Q
-let or_result = P [||] Q
-"""
-
-let test62_bracketedMixed = """
-// Mixed bracketed operators in same expression
-let A = [1.0, 2.0]
-let B = [3.0, 4.0]
-let C = [5.0, 6.0]
-// Outer products with different operators
-let outer_mul = A [*] B
-let outer_add = A [+] C
-"""
-
-let test63_elementwiseArrayOps = """
-// Elementwise operations on arrays (co-iteration)
-let A = [1.0, 2.0, 3.0]
-let B = [10.0, 20.0, 30.0]
-let sum = A + B           // elementwise: [11.0, 22.0, 33.0]
-let diff = A - B          // elementwise: [-9.0, -18.0, -27.0]
-let prod = A * B          // elementwise: [10.0, 40.0, 90.0]
-let quot = B / A          // elementwise: [10.0, 10.0, 10.0]
-// EXPECT: sum = [11, 22, 33]
-// EXPECT: prod = [10, 40, 90]
-"""
-
-let test64_openmpParallel = """
-// Test that OpenMP parallel loops compile and run
-// Uses a larger array to potentially benefit from parallelism
-let A = [1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0, 9.0, 10.0]
-let B = [10.0, 20.0, 30.0, 40.0, 50.0, 60.0, 70.0, 80.0, 90.0, 100.0]
-
-// Outer product creates 10x10 = 100 iterations - should parallelize
-let outer = A [*] B
-
-// The outer loop should have #pragma omp parallel for
-"""
-
-let test65_openmpSymmetric = """
-// Test OpenMP with symmetric/triangular iteration
-// Triangular loops should NOT have parallel on outermost loop
-let A = [1.0, 2.0, 3.0, 4.0, 5.0]
-
-// Symmetric kernel on same array - triangular iteration
-let loop = method_for(A, A)
-let kernel = lambda(x, y) where comm(x, y) -> x * y
-let result = loop <@> kernel |> compute
-
-// With comm, outer loop is triangular (i <= j), so no parallel on it
-"""
-
-let test66_openmpNested = """
-// Test nested parallel regions with multiple arrays
-let A = [1.0, 2.0, 3.0, 4.0, 5.0]
-let B = [10.0, 20.0, 30.0, 40.0, 50.0]
-let C = [100.0, 200.0, 300.0, 400.0, 500.0]
-
-// Three-way outer product: 5x5x5 = 125 iterations
-let loop = method_for(A, B, C)
-let kernel = lambda(a, b, c) -> a + b + c
-let result = loop <@> kernel |> compute
-
-// Outermost loop should be parallel
-"""
-
-let test67_operatorSection = """
-// Test first-class operator sections: (+), (*), etc.
-// Use operator section directly as a kernel
-let A = [1.0, 2.0, 3.0]
-let B = [10.0, 20.0, 30.0]
-
-// Apply (+) as a kernel to method_for - creates pairwise sums
-let loop = method_for(A, B)
-let sums = loop <@> (+) |> compute
-
-// Apply (*) as a kernel - creates pairwise products  
-let prods = loop <@> (*) |> compute
-
-// Inline usage - pairwise differences
-let result = method_for(A, B) <@> (-) |> compute
-"""
-
-let test68_namedInfix = """
-// Test named infix operator PARSING: a :name: b -> name(a, b)
-// Note: Full runtime requires lambda variable calling which is a separate feature
-
-// Verify the lexer recognizes :name: tokens
-// and the parser desugars to function application
-
-// For now, demonstrate with scalars (no function call needed)
-let a = 3.0
-let b = 4.0
-let c = a + b
-
-// The :name: syntax works at parse level but full test 
-// needs lambda-in-variable calling support (future work)
-"""
-
-// ============================================================================
-// Test Categories
-// ============================================================================
-
-/// Basic language constructs
-let basicTests = [
-    ("Basic Expression", test1_basicExpr)
-    ("Lambda", test2_lambda)
-    ("If-Then-Else", test3_ifThenElse)
-    ("Array Literals", test7_arrayLit)
-    ("Nested Array", test12_nestedArray)
-    ("Precedence Test", test15_precedenceTest)
-    ("Match Expression", test18_matchExpr)
-    ("Match With Guard", test19_matchWithGuard)
-    ("Tuple Destructure", test20_tupleDestructure)
-    ("Cons Destructure", test33_consDestructure)
-    ("Nested Function", test43_nestedFunction)
-    ("Multi-line Block", test44_multilineBlock)
-]
-
-/// Loop objects and application
-let loopTests = [
-    ("Method For", test4_methodFor)
-    ("Object For", test5_objectFor)
-    ("Apply Combinator", test6_apply)
-    ("Loop Object Reuse", test9_loopObjectReuse)
-    ("Object For With Arrays", test11_objectForWithArrays)
-    ("Combinators", test16_combinators)
-    ("Compute", test21_compute)
-    ("Pure and Bind", test22_pureAndBind)
-]
-
-/// Symmetry and triangular iteration
-let symmetryTests = [
-    ("Triangular Iteration", test8_triangularIteration)
-    ("Symmetry Demonstration", test17_symmetryDemonstration)
-    ("Output Type: Same Array + Comm", test36_outputTypeDeduction)
-    ("Output Type: Different Arrays", test37_outputTypeDifferentArrays)
-    ("Output Type: Three-Way Same", test38_outputTypeThreeWay)
-    ("Output Type: Mixed (A,A,B)", test39_outputTypeMixed)
-    ("Output Type: No Comm", test40_outputTypeNoComm)
-    ("Output Type: Partial Comm", test41_partialComm)
-    ("Output Type: Distinct Comm Groups", test42_distinctCommGroups)
-]
-
-/// Reynolds operator tests
-let reynoldsTests = [
-    ("Reynolds Symmetric", test27_reynoldsSymmetric)
-    ("Reynolds Antisymmetric", test28_reynoldsAntisymmetric)
-    ("Reynolds Plus Identity", test29_reynoldsPlusIdentity)
-    ("Reynolds Three-Way", test30_reynoldsThreeWay)
-]
-
-/// Arity polymorphism tests
-let arityTests = [
-    ("Poly Type", test31_polyType)
-    ("Rank Intrinsic", test32_rankIntrinsic)
-    ("Arity Keyword", test34_arityKeyword)
-    ("Multi Poly Arity", test34b_multiPolyArity)
-    ("Arity Return Type", test35_arityReturnType)
-]
-
-/// Functions and captures
-let functionTests = [
-    ("Function Declaration", test13_functionDecl)
-    ("Function With Where Clause", test14_functionWithWhere)
-    ("Kernel With Types", test23_kernelWithTypes)
-    ("Non-Scalar Kernel", test24_nonScalarKernel)
-    ("Scalar Capture In Kernel", test10_scalarCaptureInKernel)
-    ("Function Capture", test25_functionCapture)
-]
-
-/// Struct tests
-let structTests = [
-    ("Struct Declaration", test45_structDecl)
-    ("Struct Field Access", test46_structFieldAccess)
-    ("Struct Pattern", test47_structPattern)
-]
-
-/// Sum type tests
-let sumTypeTests = [
-    ("Sum Type Simple", test48_sumTypeSimple)
-    ("Sum Type With Data", test49_sumTypeWithData)
-    ("Sum Type Match", test50_sumTypeMatch)
-]
-
-/// Interface and impl tests
-let interfaceTests = [
-    ("Interface Declaration", test51_interfaceDecl)
-    ("Impl Declaration", test52_implDecl)
-]
-
-/// Module tests
-let moduleTests = [
-    ("Module Declaration", test53_moduleDecl)
-    ("Module With Declarations", test54_moduleWithImport)
-]
-
-/// Extended guard tests
-let guardTests = [
-    ("Guard With &&", test55_guardWithAnd)
-    ("Guard With ||", test56_guardWithOr)
-    ("Guard Complex", test57_guardComplex)
-    ("Guard Nested", test58_guardNested)
-]
-
-/// Bracketed (outer product) operator tests
-let bracketedTests = [
-    ("Bracketed Arithmetic", test59_bracketedArithmetic)
-    ("Bracketed Comparison", test60_bracketedComparison)
-    ("Bracketed Logical", test61_bracketedLogical)
-    ("Bracketed Mixed", test62_bracketedMixed)
-    ("Elementwise Array Ops", test63_elementwiseArrayOps)
-    ("OpenMP Parallel", test64_openmpParallel)
-    ("OpenMP Symmetric", test65_openmpSymmetric)
-    ("OpenMP Nested", test66_openmpNested)
-    ("Operator Section", test67_operatorSection)
-    ("Named Infix", test68_namedInfix)
-]
 
 /// All tests combined
 let allTests = 
     basicTests @ loopTests @ symmetryTests @ reynoldsTests @ arityTests @ functionTests 
     @ structTests @ sumTypeTests @ interfaceTests @ moduleTests @ guardTests @ bracketedTests
+    @ indexTypeTests @ mutabilityTests @ staticTests @ unitTests
 
 // ============================================================================
 // Test Runner
@@ -1329,6 +581,108 @@ let runTestCategory name tests =
         printfn "\nAll tests passed!"
         0
 
+/// Run multi-file module tests (IR-only)
+let runMultiFileTests (name: string) (tests: (string * (string * string) list) list) =
+    printHeader (sprintf "Blade-DSL: %s Tests (Multi-File)" name)
+    printfn "Running %d tests...\n" (List.length tests)
+    
+    let mutable passed = 0
+    let mutable failed = 0
+    
+    for (testName, sources) in tests do
+        printSubHeader testName
+        match lowerMultiSource sources with
+        | Ok ir ->
+            printfn "Lower: OK (%d modules)" ir.Modules.Length
+            for m in ir.Modules do
+                printfn "  Module: %s — %d functions, %d bindings" m.Name m.Functions.Length m.Bindings.Length
+            passed <- passed + 1
+        | Error e ->
+            printfn "FAILED: %s" e
+            failed <- failed + 1
+    
+    printHeader "Test Summary"
+    printfn "Passed: %d" passed
+    printfn "Failed: %d" failed
+    printfn "Total:  %d" (passed + failed)
+    if failed > 0 then 1 else 0
+
+/// Run multi-file module tests with full C++ pipeline
+let runMultiFileTestsFull (name: string) (tests: (string * (string * string) list) list) (outputDir: string) =
+    printHeader (sprintf "Blade-DSL: %s Tests (Multi-File, Full C++ Pipeline)" name)
+    
+    let gppAvailable = checkGppAvailable ()
+    if not gppAvailable then
+        printfn "WARNING: g++ not available.\n"
+    
+    if not (Directory.Exists outputDir) then
+        Directory.CreateDirectory outputDir |> ignore
+    
+    // Write runtime header file once
+    let headerFile = Path.Combine(outputDir, "nested_array_utilities.hpp")
+    File.WriteAllText(headerFile, CodeGen.genRuntimeHeader ())
+    
+    let mutable passed = 0
+    let mutable failed = 0
+    let mutable skipped = 0
+    
+    for (testName, sources) in tests do
+        printSubHeader testName
+        match lowerMultiSource sources with
+        | Error e ->
+            printfn "FAILED (lower): %s" e
+            failed <- failed + 1
+        | Ok ir ->
+            let safeName = sanitizeFileName testName
+            let cppFile = Path.Combine(outputDir, safeName + ".cpp")
+            try
+                let cppCode = CodeGen.genSelfContainedProgramFromIR ir testName
+                File.WriteAllText(cppFile, cppCode)
+                printfn "Generated: %s" cppFile
+                
+                if gppAvailable then
+                    match compileCpp cppFile outputDir with
+                    | Error e ->
+                        printfn "FAILED (compile): %s" e
+                        failed <- failed + 1
+                    | Ok exeFile ->
+                        match runExecutable exeFile with
+                        | Ok (0, output) ->
+                            // Parse expected values from the LAST source (Main module)
+                            let mainSource = sources |> List.last |> snd
+                            let expectedValues = parseExpectedValues mainSource
+                            if expectedValues.IsEmpty then
+                                printfn "PASSED (no EXPECT)"
+                                passed <- passed + 1
+                            else
+                                match checkExpectedValues expectedValues output with
+                                | Ok () ->
+                                    printfn "PASSED"
+                                    passed <- passed + 1
+                                | Error msgs ->
+                                    printfn "FAILED (values):"
+                                    for msg in msgs do printfn "  %s" msg
+                                    failed <- failed + 1
+                        | Ok (code, output) ->
+                            printfn "FAILED (exit code %d): %s" code output
+                            failed <- failed + 1
+                        | Error e ->
+                            printfn "FAILED (run): %s" e
+                            failed <- failed + 1
+                else
+                    printfn "SKIPPED (no g++)"
+                    skipped <- skipped + 1
+            with ex ->
+                printfn "FAILED (gen): %s" ex.Message
+                failed <- failed + 1
+    
+    printHeader "Test Summary"
+    printfn "Passed: %d" passed
+    printfn "Failed: %d" failed
+    if skipped > 0 then printfn "Skipped: %d" skipped
+    printfn "Total:  %d" (passed + failed + skipped)
+    if failed > 0 then 1 else 0
+
 /// Run test category with full C++ compilation and execution
 let runTestCategoryFull (name: string) (tests: (string * string) list) (outputDir: string) =
     printHeader (sprintf "Blade-DSL: %s Tests (Full C++ Pipeline)" name)
@@ -1530,6 +884,76 @@ let runTypeCheckOnly name tests =
         printfn "\nAll tests passed!"
         0
 
+/// Run tests that are expected to fail at type checking.
+/// A test passes if type checking produces an Error.
+let runExpectedErrorTests name tests =
+    printHeader (sprintf "Blade-DSL: %s Tests (Expected Errors)" name)
+    printfn "Running %d tests that should fail type checking...\n" (List.length tests)
+
+    let mutable passed = 0
+    let mutable failed = 0
+
+    for (testName, source) in tests do
+        printSubHeader testName
+        match testTypeCheck source with
+        | Error msg ->
+            printfn "PASSED (correctly rejected: %s)" msg
+            passed <- passed + 1
+        | Ok _ ->
+            printfn "FAILED (should have been rejected but was accepted)"
+            failed <- failed + 1
+
+    printHeader "Test Summary"
+    printfn "Passed: %d" passed
+    printfn "Failed: %d" failed
+    printfn "Total:  %d" (passed + failed)
+
+    if failed > 0 then
+        printfn "\nSome tests failed."
+        1
+    else
+        printfn "\nAll tests passed!"
+        0
+
+/// Run tests that should abort at runtime (constraint violations, etc.)
+let runAbortTests (name: string) (tests: (string * string) list) (outputDir: string) =
+    printHeader (sprintf "Blade-DSL: %s Tests (Expected Runtime Abort)" name)
+    printfn "Running %d tests that should abort at runtime...\n" (List.length tests)
+
+    if not (Directory.Exists outputDir) then
+        Directory.CreateDirectory outputDir |> ignore
+    let headerFile = Path.Combine(outputDir, "nested_array_utilities.hpp")
+    File.WriteAllText(headerFile, CodeGen.genRuntimeHeader ())
+
+    let gppAvailable = checkGppAvailable ()
+    if not gppAvailable then
+        printfn "WARNING: g++ not available, cannot run abort tests.\n"
+        1
+    else
+
+    let mutable passed = 0
+    let mutable failed = 0
+
+    for (testName, source) in tests do
+        printSubHeader testName
+        let result = runFullTest testName source outputDir true
+        match result.RunResult with
+        | Ok (0, _) ->
+            printfn "FAILED (should have aborted but exited normally)"
+            failed <- failed + 1
+        | Ok (code, _) ->
+            printfn "PASSED (aborted as expected, exit code %d)" code
+            passed <- passed + 1
+        | Error e ->
+            printfn "FAILED (error: %s)" e
+            failed <- failed + 1
+
+    printHeader "Test Summary"
+    printfn "Passed: %d" passed
+    printfn "Failed: %d" failed
+    printfn "Total:  %d" (passed + failed)
+    if failed > 0 then 1 else 0
+
 /// Compare both pipelines on all tests
 let runPipelineComparison () =
     printHeader "Pipeline Comparison: Old vs New"
@@ -1574,7 +998,9 @@ let runPipelineComparison () =
         0
 
 let runAllTests () =
-    runTestCategory "All" allTests
+    let r1 = runTestCategory "All" allTests
+    let r2 = runMultiFileTests "Multi-File Modules" multiFileTests
+    if r1 = 0 && r2 = 0 then 0 else 1
 
 let runAllTestsWithTypeCheck () =
     runTestCategoryWithTypeCheck "All" allTests
@@ -1699,7 +1125,7 @@ let runArrayCaptureTest () =
     
     printfn "This test verifies that lambdas cannot capture arrays.\n"
     
-    let source = test26_arrayCaptureRejected
+    let source = Blade.Tests.Functions.test26_arrayCaptureRejected
     printfn "Source:\n%s" source
     
     try
@@ -1787,7 +1213,7 @@ let runNetcdfTests () =
     // Helper to find structs by name
     let findStruct name (m: IRModule) =
         m.Types |> List.tryPick (function
-            | IRTDStruct (n, fields) when n = name -> Some fields
+            | IRTDStruct (n, fields, _) when n = name -> Some fields
             | _ -> None)
 
     check "Module name is 'sample'"
@@ -2025,7 +1451,7 @@ let runNetcdfTests () =
                 | IRTDIndexType (name, idx) ->
                     let ext = match idx.Extent with IRLit (IRLitInt n) -> sprintf "%d" n | _ -> "?"
                     printfn "      type %s = Idx<%s>" name ext
-                | IRTDStruct (name, fields) ->
+                | IRTDStruct (name, fields, _) ->
                     printfn "      struct %s = {" name
                     for (fname, ftype) in fields do
                         printfn "        %s: %s" fname (ppIRTypeIn names ftype)
@@ -2062,7 +1488,7 @@ let sample = NetCDF.load("sample.nc")
         
         check "Import has correct qualified name"
             (match decls.[0] with 
-             | DeclImport (["Providers"; "NetCDF"], Some "NetCDF") -> true 
+             | DeclImport (["Providers"; "NetCDF"], ImportQualified (Some "NetCDF")) -> true 
              | _ -> false)
             (sprintf "got %A" decls.[0])
 
@@ -2085,7 +1511,7 @@ let sample = NetCDF.load("sample.nc")
                     | IRTDIndexType (name, idx) ->
                         let ext = match idx.Extent with IRLit (IRLitInt n) -> sprintf "%d" n | _ -> "?"
                         printfn "    type %s = Idx<%s>" name ext
-                    | IRTDStruct (name, fields) ->
+                    | IRTDStruct (name, fields, _) ->
                         printfn "    struct %s = {" name
                         for (fname, ftype) in fields do
                             printfn "      %s: %s" fname (ppIRTypeIn names ftype)
@@ -2097,16 +1523,16 @@ let sample = NetCDF.load("sample.nc")
                 check "Provider produced index types"
                     (idxTypes.Length >= 3) (sprintf "got %A" idxTypes)
 
-                let hasVarsStruct = modul.Types |> List.exists (function IRTDStruct ("vars", _) -> true | _ -> false)
+                let hasVarsStruct = modul.Types |> List.exists (function IRTDStruct ("vars", _, _) -> true | _ -> false)
                 check "Provider produced vars struct" hasVarsStruct ""
 
-                let hasDimsStruct = modul.Types |> List.exists (function IRTDStruct ("dims", _) -> true | _ -> false)
+                let hasDimsStruct = modul.Types |> List.exists (function IRTDStruct ("dims", _, _) -> true | _ -> false)
                 check "Provider produced dims struct" hasDimsStruct ""
 
                 // Verify vars struct has field A
                 let varAExists =
                     modul.Types |> List.exists (function
-                        | IRTDStruct ("vars", fields) ->
+                        | IRTDStruct ("vars", fields, _) ->
                             fields |> List.exists (fun (n, _) -> n = "A")
                         | _ -> false)
                 check "vars struct has field A" varAExists ""
@@ -2329,6 +1755,9 @@ let printUsage () =
     printfn "  --modules     Module tests"
     printfn "  --guards      Guard expression tests"
     printfn "  --bracketed   Bracketed (outer product) operator tests"
+    printfn "  --indextypes  Index type tests (AntisymIdx, HermitianIdx)"
+    printfn "  --static      Static evaluation tests"
+    printfn "  --units       Unit of measure tests"
     printfn ""
     printfn "Full Pipeline Tests (IR + C++ compile + run):"
     printfn "  --full        Run ALL tests with full C++ pipeline"
@@ -2372,14 +1801,25 @@ let main args =
     | [| "--sumtypes" |] -> runTestCategory "Sum Types" sumTypeTests
     | [| "--interfaces" |] -> runTestCategory "Interfaces" interfaceTests
     | [| "--modules" |] -> runTestCategory "Modules" moduleTests
+    | [| "--multi-file" |] -> runMultiFileTests "Multi-File Modules" multiFileTests
+    | [| "--full-multi-file" |] -> runMultiFileTestsFull "Multi-File Modules" multiFileTests "./generated_cpp_tests"
     | [| "--guards" |] -> runTestCategory "Guards" guardTests
     | [| "--bracketed" |] -> runTestCategory "Bracketed Ops" bracketedTests
+    | [| "--indextypes" |] -> runTestCategory "Index Types" indexTypeTests
+    | [| "--static" |] -> runTestCategory "Static Eval" staticTests
+    | [| "--units" |] -> runTestCategory "Units" unitTests
     
     // Full pipeline tests (IR + C++ compile + run)
     | [| "--full" |] -> runAllTestsFull ()
     | [| "--full-basic" |] -> runTestCategoryFull "Basic" basicTests "./generated_cpp_tests"
     | [| "--full-loops" |] -> runTestCategoryFull "Loops" loopTests "./generated_cpp_tests"
     | [| "--full-symmetry" |] -> runTestCategoryFull "Symmetry" symmetryTests "./generated_cpp_tests"
+    | [| "--full-structs" |] ->
+        let r1 = runTestCategoryFull "Structs" structTests "./generated_cpp_tests"
+        let r2 = runAbortTests "Struct Constraints" structAbortTests "./generated_cpp_tests"
+        if r1 = 0 && r2 = 0 then 0 else 1
+    | [| "--full-static" |] -> runTestCategoryFull "Static Eval" staticTests "./generated_cpp_tests"
+    | [| "--full-units" |] -> runTestCategoryFull "Units" unitTests "./generated_cpp_tests"
     
     // Generate-only tests (no compilation, useful when g++ is broken)
     | [| "--gen" |] -> runAllTestsGenOnly ()
@@ -2400,6 +1840,12 @@ let main args =
     | [| "--typecheck" |] -> runAllTestsWithTypeCheck ()
     | [| "--tc-only" |] -> runTypeCheckOnly "All" allTests
     | [| "--compare" |] -> runPipelineComparison ()
+    
+    // Mutability tests
+    | [| "--mutability" |] ->
+        let r1 = runTestCategoryWithTypeCheck "Mutability" mutabilityTests
+        let r2 = runExpectedErrorTests "Mutability" mutabilityErrorTests
+        if r1 = 0 && r2 = 0 then 0 else 1
     
     | [| "--help" |] -> printUsage (); 0
     | _ -> printUsage (); 1

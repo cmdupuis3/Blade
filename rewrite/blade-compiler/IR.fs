@@ -69,6 +69,61 @@ type DimensionKind =
     | SDimension   // Spatial dimension - participates in symmetry
     | TDimension   // Temporal dimension - does not participate in symmetry
 
+/// Unit of measure signature: product of base units with integer exponents
+/// e.g. velocity = {meters: 1, seconds: -1}
+/// Dimensionless = empty map
+type UnitSig = Map<string, int>
+
+/// Unit arithmetic: dimensionless (empty map)
+let unitDimensionless : UnitSig = Map.empty
+
+/// Normalize: remove zero-exponent entries
+let unitNormalize (u: UnitSig) : UnitSig =
+    u |> Map.filter (fun _ exp -> exp <> 0)
+
+/// Unit multiplication: add exponents
+let unitMul (a: UnitSig) (b: UnitSig) : UnitSig =
+    let merged =
+        Map.fold (fun acc k v ->
+            let existing = Map.tryFind k acc |> Option.defaultValue 0
+            Map.add k (existing + v) acc) a b
+    unitNormalize merged
+
+/// Unit division: subtract exponents
+let unitDiv (a: UnitSig) (b: UnitSig) : UnitSig =
+    let merged =
+        Map.fold (fun acc k v ->
+            let existing = Map.tryFind k acc |> Option.defaultValue 0
+            Map.add k (existing - v) acc) a b
+    unitNormalize merged
+
+/// Unit power: scale all exponents
+let unitPow (u: UnitSig) (n: int) : UnitSig =
+    if n = 0 then unitDimensionless
+    else u |> Map.map (fun _ exp -> exp * n) |> unitNormalize
+
+/// Check if two unit signatures are compatible (equal)
+let unitCompatible (a: UnitSig) (b: UnitSig) : bool =
+    unitNormalize a = unitNormalize b
+
+/// Pretty-print a unit signature
+let ppUnitSig (u: UnitSig) : string =
+    if Map.isEmpty u then "dimensionless"
+    else
+        let pos = u |> Map.filter (fun _ e -> e > 0) |> Map.toList
+        let neg = u |> Map.filter (fun _ e -> e < 0) |> Map.toList
+        let ppTerm (name, exp) =
+            if exp = 1 then name
+            elif exp = -1 then name
+            else sprintf "%s^%d" name exp
+        let posStr = pos |> List.map ppTerm |> String.concat " * "
+        let negStr = neg |> List.map (fun (n, e) -> ppTerm (n, -e)) |> String.concat " * "
+        match pos, neg with
+        | [], [] -> "dimensionless"
+        | _, [] -> posStr
+        | [], _ -> sprintf "1 / (%s)" negStr
+        | _, _ -> sprintf "%s / %s" posStr (if neg.Length > 1 then sprintf "(%s)" negStr else negStr)
+
 /// Index type in IR - represents a single dimension's structure
 type IRIndexType = {
     Id: IRId
@@ -101,6 +156,7 @@ and IRType =
     | IRTNat of int option  // Type-level natural number (None = variable)
     | IRTNamed of string    // Named type (struct, sum type, etc.)
     | IRTInfer of int       // Unresolved type variable (id for unification)
+    | IRTUnitAnnotated of IRType * UnitSig  // Type with unit-of-measure annotation
 
 /// Kind of loop object with arity tracking
 and LoopType = {
@@ -274,6 +330,18 @@ and AlignSpec = {
     Offsets: (int * int) list
     Boundary: BoundaryMode
 }
+
+/// Strip unit annotation from a type, returning the bare type
+let rec stripUnits (ty: IRType) : IRType =
+    match ty with
+    | IRTUnitAnnotated (inner, _) -> stripUnits inner
+    | _ -> ty
+
+/// Extract unit signature from a type, if present
+let getUnits (ty: IRType) : UnitSig option =
+    match ty with
+    | IRTUnitAnnotated (_, units) -> Some units
+    | _ -> None
 
 // ============================================================================
 // Loop Structure (For Code Generation)
@@ -511,7 +579,7 @@ let computeAllSymcomStates
             sameIdentity identities.[i] identities.[j]
         
         let countSymmetricGroup (level: LoopLevelInfo) =
-            if level.IndexSpace.Symmetry <> SymSymmetric then 1
+            if level.IndexSpace.Symmetry <> SymSymmetric && level.IndexSpace.Symmetry <> SymAntisymmetric then 1
             else
                 let mutable count = 1
                 let mutable idx = level.GlobalLevelIndex - 1
@@ -552,7 +620,8 @@ let computeAllSymcomStates
                     level.ArrayIndex = priorLevel.ArrayIndex &&
                     level.LocalDimIndex = priorLevel.LocalDimIndex &&
                     level.ArityIndex = priorLevel.ArityIndex + 1 &&
-                    level.IndexSpace.Symmetry = SymSymmetric
+                    (level.IndexSpace.Symmetry = SymSymmetric ||
+                     level.IndexSpace.Symmetry = SymAntisymmetric)
                 
                 let isCommutative =
                     inSameCommGroup level.ArrayIndex priorLevel.ArrayIndex &&
@@ -675,9 +744,17 @@ type IRFuncDef = {
 }
 
 /// Type definition in IR
+/// Constraint information for structs with where clauses
+type StructConstraintInfo = {
+    /// The lowered constraint expression (e.g., m1 + m2 == m_out)
+    Expr: IRExpr
+    /// Mapping from field names to the IRVar IDs used in the constraint expr
+    FieldBindings: (string * IRId) list
+}
+
 type IRTypeDef =
     | IRTDAlias of name: string * ty: IRType
-    | IRTDStruct of name: string * fields: (string * IRType) list
+    | IRTDStruct of name: string * fields: (string * IRType) list * invariant: StructConstraintInfo option
     | IRTDVariant of name: string * variants: (string * IRType option) list
     | IRTDIndexType of name: string * idx: IRIndexType
       // Named index type declaration, e.g. "type lat = Idx<180>"
@@ -701,6 +778,9 @@ type IRModule = {
     Types: IRTypeDef list
     Functions: IRFuncDef list
     Bindings: IRBinding list
+    /// Diagnostics: static function usage tracking (function name → usage kind)
+    /// "compile-time" | "runtime" | "both" | "unused"
+    StaticFunctionUsage: Map<string, string>
 }
 
 /// IR Program
@@ -896,6 +976,12 @@ let buildLoopNest (info: ApplyInfo) (builder: IRBuilder) : LoopNest =
 // and kernel parameters to facilitate code generation.
 
 /// Binding between a loop index and its corresponding array/parameter
+/// What kind of element access to generate for a loop level
+type VirtualKind =
+    | RealArray           // Normal: elem = arr[i]
+    | VirtualRange        // range<I>: elem = i
+    | VirtualReverse      // reverse<I>: elem = (n - 1 - i)
+
 type LoopIndexBinding = {
     /// Loop level index (0, 1, 2, ...)
     Level: int
@@ -917,6 +1003,8 @@ type LoopIndexBinding = {
     Extent: IRExpr
     /// List of prior level indices to subtract from bound (empty = no subtraction)
     BoundDependencies: int list
+    /// Extra offset to subtract from bound (1 for antisymmetric strict i < j)
+    StrictOffset: int
     /// Whether this loop level is parallelized
     IsParallel: bool
     /// Symcom state at this level
@@ -925,6 +1013,8 @@ type LoopIndexBinding = {
     ArrayElemType: ElemType
     /// Total rank of the array being indexed
     ArrayRank: int
+    /// Virtual array kind (range, reverse, or real)
+    Virtual: VirtualKind
 }
 
 /// Complete information needed to generate a loop nest
@@ -1041,6 +1131,15 @@ let buildLoopNestCodeGen
         let elemType = arrType |> Option.map (fun t -> t.ElemType) |> Option.defaultValue ETFloat64
         let arrRank = arrType |> Option.map (fun t -> t.IndexTypes.Length) |> Option.defaultValue 1
         
+        // Detect virtual array kind from the array expression
+        let virtualKind =
+            if arrayPos < arrays.Length then
+                match arrays.[arrayPos] with
+                | IRRange _ -> VirtualRange
+                | IRVirtualReverse _ -> VirtualReverse
+                | _ -> RealArray
+            else RealArray
+        
         // Get corresponding kernel param
         let param = Map.tryFind arrayPos paramByArrayPos
         let paramName = param |> Option.map (fun p -> p.Name) |> Option.defaultValue (sprintf "p%d" arrayPos)
@@ -1054,6 +1153,11 @@ let buildLoopNestCodeGen
         // Parallelism: typically outermost non-triangular loop
         let isParallel = level = 0 && not isTriangular
         
+        // For antisymmetric indices, strict bound i < j means subtract 1 extra
+        let strictOffset =
+            if isTriangular && levelInfo.IndexSpace.Symmetry = SymAntisymmetric then 1
+            else 0
+        
         let binding = {
             Level = level
             IndexName = indexName
@@ -1065,10 +1169,12 @@ let buildLoopNestCodeGen
             ArityComponent = levelInfo.ArityIndex
             Extent = levelInfo.IndexSpace.Extent
             BoundDependencies = deps  // List of prior levels to subtract
+            StrictOffset = strictOffset
             IsParallel = isParallel
             State = state
             ArrayElemType = elemType
             ArrayRank = arrRank
+            Virtual = virtualKind
         }
         
         bindings <- bindings @ [binding]
@@ -1120,6 +1226,7 @@ let rec ppIRType = function
     | IRTNat None -> "Nat<?>"
     | IRTNamed name -> name  // Named types print as themselves
     | IRTInfer id -> sprintf "T?%d" id
+    | IRTUnitAnnotated (inner, units) -> sprintf "%s<%s>" (ppIRType inner) (ppUnitSig units)
 
 and ppIndexType (idx: IRIndexType) =
     // Inline extent printing since ppIRExpr is defined later

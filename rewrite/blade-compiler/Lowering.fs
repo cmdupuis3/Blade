@@ -8,6 +8,7 @@
 
 module Blade.Lowering
 
+open System
 open Blade.Ast
 open Blade.IR
 
@@ -24,6 +25,25 @@ type VarInfo = {
     Value: IRExpr option
 }
 
+/// What a module exports to importers
+type ModuleExport = {
+    Variables: Map<string, VarInfo>
+    Functions: Map<string, IRId>
+    Types: Map<string, IRType>
+    StructDefs: Map<string, (string * IRType) list>
+    UnitDefs: Map<string, IR.UnitSig>
+    StaticValues: Map<string, StaticEval.StaticValue>
+    StaticFunctions: Map<string, StaticEval.StaticFuncDef>
+}
+
+/// Tracks how static functions are used: compile-time, runtime, or both.
+/// Useful for IDE diagnostics (e.g. "this static function is only ever called at runtime").
+[<Flags>]
+type StaticUsage =
+    | Unused       = 0
+    | CompileTime  = 1   // called with all-static args → evaluated at compile time
+    | RunTime      = 2   // called with runtime args → emitted as normal function call
+
 type LoweringEnv = {
     Variables: Map<string, VarInfo>
     Types: Map<string, IRType>
@@ -34,6 +54,15 @@ type LoweringEnv = {
     InPolyContext: bool
     PolyParamNames: string list  // Names of Poly<> parameters in current context
     CurrentCommGroups: int list list
+    Interfaces: Map<string, InterfaceDecl>           // interface name -> decl
+    ImplMethods: Map<string * string, IRId>           // (typeName, methodName) -> funcId
+    StructDefs: Map<string, (string * IRType) list>   // structName -> fields
+    StaticValues: Map<string, StaticEval.StaticValue>  // name -> compile-time value
+    StaticFunctions: Map<string, StaticEval.StaticFuncDef>  // name -> static function def
+    StaticUsageTracker: ref<Map<string, StaticUsage>>  // accumulated usage per static function
+    UnitDefs: Map<string, IR.UnitSig>  // unit name -> canonical signature
+    ModuleExports: Map<string, ModuleExport>  // moduleName -> exports from already-lowered modules
+    ImportedModules: Map<string, string>  // alias -> full module name (for qualified name resolution)
 }
 
 let emptyEnv () = {
@@ -46,9 +75,26 @@ let emptyEnv () = {
     InPolyContext = false
     PolyParamNames = []
     CurrentCommGroups = []
+    Interfaces = Map.empty
+    ImplMethods = Map.empty
+    StructDefs = Map.empty
+    StaticValues = Map.empty
+    StaticFunctions = Map.empty
+    StaticUsageTracker = ref Map.empty
+    UnitDefs = Map.empty
+    ModuleExports = Map.empty
+    ImportedModules = Map.empty
 }
 
-let bindVar name info env =
+/// Record a usage of a static function
+let trackStaticUsage (env: LoweringEnv) (name: string) (usage: StaticUsage) =
+    let current = 
+        match Map.tryFind name env.StaticUsageTracker.Value with
+        | Some u -> u
+        | Option.None -> StaticUsage.Unused
+    env.StaticUsageTracker.Value <- Map.add name (current ||| usage) env.StaticUsageTracker.Value
+
+let bindVar name info (env: LoweringEnv) : LoweringEnv =
     { env with Variables = Map.add name info env.Variables }
 
 let bindVarSimple name id env =
@@ -291,6 +337,20 @@ let rec inferTypeFromExprWithEnv (env: LoweringEnv) (expr: IRExpr) : IRType opti
                 match inferTypeFromExprWithEnv env right with
                 | Some t -> Some t
                 | None -> Some (IRTScalar ETFloat64)
+    | IRFieldAccess (obj, fieldName) ->
+        // Resolve field type by looking up object's struct type
+        match inferTypeFromExprWithEnv env obj with
+        | Some (IRTNamed typeName) ->
+            match Map.tryFind typeName env.StructDefs with
+            | Some fields ->
+                fields |> List.tryFind (fun (n, _) -> n = fieldName) |> Option.map snd
+            | None -> None
+        | _ -> None
+    | IRApp (func, _) ->
+        // Resolve function return type via env
+        match inferTypeFromExprWithEnv env func with
+        | Some (IRTFunc (_, ret)) -> Some ret
+        | _ -> inferTypeFromExpr expr
     | _ -> inferTypeFromExpr expr
 
 let rec extendEnvWithPatternBindings env (pat: Pattern) (value: IRExpr) : LoweringEnv * (string * IRId) list =
@@ -403,6 +463,27 @@ let getArrayType env (arr: Expr) : IRArrayType =
     | ExprArrayLit elems ->
         let loweredElems = elems |> List.map (fun _ -> IRLit (IRLitFloat 0.0))
         inferArrayLitType loweredElems
+    | ExprRange ty | ExprReverse ty ->
+        // Build index type inline (lowerIndexType not yet available here)
+        let idx = match ty with
+                  | TyIdx extent ->
+                      let ext = match extent with
+                                | ExprLit (LitInt n) -> IRLit (IRLitInt (int64 n))
+                                | ExprVar name -> IRParam (name, 0)
+                                | _ -> IRLit (IRLitInt 0L)
+                      { Id = 0; Arity = 1; Extent = ext; Symmetry = SymNone; Tag = None; Kind = SDimension; Dependencies = [] }
+                  | _ -> { Id = 0; Arity = 1; Extent = IRLit (IRLitInt 0L); Symmetry = SymNone; Tag = None; Kind = SDimension; Dependencies = [] }
+        { ElemType = ETInt64; IndexTypes = [idx]; IsVirtual = true; Identity = None }
+    | ExprBlocked (ty, _) ->
+        let idx = match ty with
+                  | TyIdx extent ->
+                      let ext = match extent with
+                                | ExprLit (LitInt n) -> IRLit (IRLitInt (int64 n))
+                                | ExprVar name -> IRParam (name, 0)
+                                | _ -> IRLit (IRLitInt 0L)
+                      { Id = 0; Arity = 1; Extent = ext; Symmetry = SymNone; Tag = None; Kind = SDimension; Dependencies = [] }
+                  | _ -> { Id = 0; Arity = 1; Extent = IRLit (IRLitInt 0L); Symmetry = SymNone; Tag = None; Kind = SDimension; Dependencies = [] }
+        { ElemType = ETInt64; IndexTypes = [idx]; IsVirtual = true; Identity = None }
     | _ ->
         // Expression result - infer rank 0 (scalar result)
         { ElemType = ETFloat64; IndexTypes = []; IsVirtual = false; Identity = None }
@@ -410,6 +491,53 @@ let getArrayType env (arr: Expr) : IRArrayType =
 // ============================================================================
 // Type Lowering
 // ============================================================================
+
+/// Extract the type name from a TypeExpr (for impl dispatch)
+let extractTypeName (ty: TypeExpr) : string option =
+    match ty with
+    | TyNamed (name, _) -> Some name
+    | _ -> None
+
+/// Try to determine the named type of an expression from the environment
+let tryResolveObjTypeName (env: LoweringEnv) (expr: Expr) : string option =
+    match expr with
+    | ExprVar name ->
+        match lookupVar name env with
+        | Some info ->
+            match info.Type with
+            | Some (IRTNamed typeName) -> Some typeName
+            | _ -> None
+        | None -> None
+    | _ -> None
+
+/// Convert a compile-time static value to an IR expression
+let rec staticValueToIR (v: StaticEval.StaticValue) : IRExpr =
+    match v with
+    | StaticEval.SVInt n -> IRLit (IRLitInt n)
+    | StaticEval.SVFloat f -> IRLit (IRLitFloat f)
+    | StaticEval.SVBool b -> IRLit (IRLitBool b)
+    | StaticEval.SVString _ -> IRLit IRLitUnit  // strings not in IR literals yet
+    | StaticEval.SVUnit -> IRLit IRLitUnit
+    | StaticEval.SVTuple vs -> IRTuple (vs |> List.map staticValueToIR)
+
+/// Resolve a UnitExpr AST node to a canonical UnitSig using the unit environment
+let rec resolveUnitExpr (units: Map<string, IR.UnitSig>) (expr: UnitExpr) : Result<IR.UnitSig, string> =
+    match expr with
+    | UnitNamed name ->
+        match Map.tryFind name units with
+        | Some sig' -> Ok sig'
+        | None -> Error (sprintf "Unknown unit '%s'" name)
+    | UnitMul (a, b) ->
+        resolveUnitExpr units a |> Result.bind (fun sa ->
+        resolveUnitExpr units b |> Result.map (fun sb ->
+            IR.unitMul sa sb))
+    | UnitDiv (a, b) ->
+        resolveUnitExpr units a |> Result.bind (fun sa ->
+        resolveUnitExpr units b |> Result.map (fun sb ->
+            IR.unitDiv sa sb))
+    | UnitPow (a, n) ->
+        resolveUnitExpr units a |> Result.map (fun sa ->
+            IR.unitPow sa n)
 
 let rec lowerTypeExpr env (ty: TypeExpr) : IRType =
     match ty with
@@ -425,11 +553,21 @@ let rec lowerTypeExpr env (ty: TypeExpr) : IRType =
     | TyChar -> IRTScalar ETInt32
     
     | TyNamed (name, args) ->
+        // Helper: try to resolve a type arg as a unit annotation
+        let tryResolveUnitArg baseType =
+            match args with
+            | [TyNamed (unitName, [])] ->
+                match Map.tryFind unitName env.UnitDefs with
+                | Some unitSig -> IRTUnitAnnotated (baseType, unitSig)
+                | None -> baseType
+            | _ -> baseType
         match name with
-        | "Int" | "Int32" -> IRTScalar ETInt32
-        | "Int64" -> IRTScalar ETInt64
-        | "Float" | "Float32" -> IRTScalar ETFloat32
-        | "Float64" | "Double" -> IRTScalar ETFloat64
+        | "Int" | "Int32" -> tryResolveUnitArg (IRTScalar ETInt32)
+        | "Int64" -> tryResolveUnitArg (IRTScalar ETInt64)
+        | "Float" | "Float64" | "Double" -> tryResolveUnitArg (IRTScalar ETFloat64)
+        | "Float32" -> tryResolveUnitArg (IRTScalar ETFloat32)
+        | "Complex64" -> tryResolveUnitArg (IRTScalar ETComplex64)
+        | "Complex128" | "Complex" -> tryResolveUnitArg (IRTScalar ETComplex128)
         | "Bool" -> IRTScalar ETBool
         | "String" -> IRTScalar ETString
         | "T" -> IRTScalar ETFloat64
@@ -481,7 +619,7 @@ let rec lowerTypeExpr env (ty: TypeExpr) : IRType =
     | TyTuple tys ->
         IRTTuple (tys |> List.map (lowerTypeExpr env))
     
-    | TyVar _ -> IRTScalar ETFloat64
+    | TyVar (_, _) -> IRTScalar ETFloat64  // Type vars default to Float64 in direct lowering path
     
     | TyIdx extent ->
         let extExpr = lowerExpr env extent
@@ -496,11 +634,6 @@ let rec lowerTypeExpr env (ty: TypeExpr) : IRType =
     | TyAntisymIdx (arity, extent) ->
         let extExpr = lowerExpr env extent
         let idx = { Id = 0; Arity = arity; Extent = extExpr; Symmetry = SymAntisymmetric; Tag = None; Kind = SDimension; Dependencies = [] }
-        IRTArray { ElemType = ETFloat64; IndexTypes = [idx]; IsVirtual = false; Identity = None }
-    
-    | TyFullSymIdx (arity, extent) ->
-        let extExpr = lowerExpr env extent
-        let idx = { Id = 0; Arity = arity; Extent = extExpr; Symmetry = SymSymmetric; Tag = Some "full"; Kind = SDimension; Dependencies = [] }
         IRTArray { ElemType = ETFloat64; IndexTypes = [idx]; IsVirtual = false; Identity = None }
     
     | TyBoundedIdx (lower, upper) ->
@@ -521,6 +654,7 @@ let rec lowerTypeExpr env (ty: TypeExpr) : IRType =
 and lowerElemType env ty =
     match lowerTypeExpr env ty with
     | IRTScalar et -> et
+    | IRTUnitAnnotated (IRTScalar et, _) -> et
     | _ -> ETFloat64
 
 and lowerIndexType env id ty : IRIndexType =
@@ -531,15 +665,13 @@ and lowerIndexType env id ty : IRIndexType =
         { Id = id; Arity = arity; Extent = lowerExpr env extent; Symmetry = SymSymmetric; Tag = None; Kind = SDimension; Dependencies = [] }
     | TyAntisymIdx (arity, extent) ->
         { Id = id; Arity = arity; Extent = lowerExpr env extent; Symmetry = SymAntisymmetric; Tag = None; Kind = SDimension; Dependencies = [] }
-    | TyFullSymIdx (arity, extent) ->
-        { Id = id; Arity = arity; Extent = lowerExpr env extent; Symmetry = SymSymmetric; Tag = Some "full"; Kind = SDimension; Dependencies = [] }
     | TyHermitianIdx extent ->
         { Id = id; Arity = 2; Extent = lowerExpr env extent; Symmetry = SymHermitian; Tag = None; Kind = SDimension; Dependencies = [] }
     | TyNamed (name, args) ->
         let extent = 
             match args with
             | [TyNamed (n, [])] -> IRParam (n, 0)
-            | [TyVar n] -> IRParam (n, 0)
+            | [TyVar (n, _)] -> IRParam (n, 0)
             | _ -> IRLit (IRLitInt 0L)
         { Id = id; Arity = 1; Extent = extent; Symmetry = SymNone; Tag = Some name; Kind = SDimension; Dependencies = [] }
     | _ ->
@@ -553,6 +685,10 @@ and lowerExpr env (expr: Expr) : IRExpr =
     match expr with
     | ExprLit lit -> lowerLiteral lit
     | ExprVar name ->
+        // Check static values first — compile-time constants become IR literals
+        match Map.tryFind name env.StaticValues with
+        | Some sv -> staticValueToIR sv
+        | None ->
         match lookupVar name env with
         | Some info -> IRVar info.Id
         | None -> 
@@ -560,6 +696,8 @@ and lowerExpr env (expr: Expr) : IRExpr =
             | Some info -> IRVar info.Id
             | None -> IRParam (name, 0)
     | ExprQualified names ->
+        // Note: the parser produces ExprField for dot-access (A.B), not ExprQualified.
+        // This path exists only as a safety net; module resolution goes through ExprField.
         IRParam (String.concat "." names, 0)
     | ExprBinOp (mode, op, left, right) ->
         let l = lowerExpr env left
@@ -570,6 +708,39 @@ and lowerExpr env (expr: Expr) : IRExpr =
         match op with
         | OpNeg -> IRUnaryOp (IRNeg, e)
         | OpNot -> IRUnaryOp (IRNot, e)
+    | ExprApp (ExprVar fname, args) when Map.containsKey fname env.StaticFunctions ->
+        // Try compile-time evaluation of static function call
+        let staticEnv = { StaticEval.Values = env.StaticValues
+                          StaticEval.Functions = env.StaticFunctions
+                          StaticEval.CalledFunctions = ref Set.empty }
+        match StaticEval.evalExpr staticEnv StaticEval.maxSteps expr with
+        | Ok sv ->
+            trackStaticUsage env fname StaticUsage.CompileTime
+            staticValueToIR sv
+        | Error _ ->
+            // Args not all static — fall through to runtime call
+            trackStaticUsage env fname StaticUsage.RunTime
+            let f = lowerExpr env (ExprVar fname)
+            let as' = args |> List.map (lowerExpr env)
+            IRApp (f, as')
+    | ExprApp (ExprField (obj, method), args) ->
+        // Check if this is an impl method call: obj.method(args) → TypeName__method(obj, args)
+        match tryResolveObjTypeName env obj with
+        | Some typeName ->
+            match Map.tryFind (typeName, method) env.ImplMethods with
+            | Some funcId ->
+                let o = lowerExpr env obj
+                let as' = args |> List.map (lowerExpr env)
+                IRApp (IRVar funcId, o :: as')
+            | None ->
+                // Not an impl method — fall through to field access + app
+                let f = lowerExpr env (ExprField (obj, method))
+                let as' = args |> List.map (lowerExpr env)
+                IRApp (f, as')
+        | None ->
+            let f = lowerExpr env (ExprField (obj, method))
+            let as' = args |> List.map (lowerExpr env)
+            IRApp (f, as')
     | ExprApp (func, args) ->
         let f = lowerExpr env func
         let as' = args |> List.map (lowerExpr env)
@@ -601,6 +772,24 @@ and lowerExpr env (expr: Expr) : IRExpr =
         let idx = lowerExpr env index
         // Use dynamic poly-pack indexing
         IRPolyIndex (tup, idx)
+    | ExprField (ExprVar modAlias, name) when Map.containsKey modAlias env.ImportedModules ->
+        // Module-qualified access: e.g. Math.pi, MathLib.double
+        let fullModName = env.ImportedModules.[modAlias]
+        match Map.tryFind fullModName env.ModuleExports with
+        | Some exports ->
+            match Map.tryFind name exports.Variables with
+            | Some varInfo -> IRVar varInfo.Id
+            | None ->
+                match Map.tryFind name exports.Functions with
+                | Some funcId -> IRVar funcId
+                | None ->
+                    match Map.tryFind name exports.StaticValues with
+                    | Some sv -> staticValueToIR sv
+                    | None ->
+                        eprintfn "Warning: '%s.%s' not found in module exports" modAlias name
+                        IRParam (sprintf "%s.%s" modAlias name, 0)
+        | None ->
+            IRParam (sprintf "%s.%s" modAlias name, 0)
     | ExprField (obj, field) ->
         let o = lowerExpr env obj
         IRFieldAccess (o, field)
@@ -912,24 +1101,45 @@ and lowerBinOp env mode op l r leftExpr rightExpr =
     
     | OpApply ->
         // Resolve loop to get method_for info (handles variable references)
-        let resolvedLoop = resolveToMethodFor env l
+        let resolvedLeft = resolveToMethodFor env l
         
-        // Extract loop info from resolved loop
-        let (identities, arrayTypes, sDimsPerArray) = 
-            match resolvedLoop with
-            | IRMethodFor mfInfo -> 
-                (mfInfo.Identities, mfInfo.ArrayTypes, mfInfo.SDimsPerArray)
-            | _ -> 
-                // Fallback to extracting from AST
-                extractLoopInfo env leftExpr
-        
-        // If no loop info from left, try right (for object_for case)
-        let (identities, arrayTypes, sDimsPerArray) =
-            if identities.IsEmpty then extractArrayInfoFromTuple env rightExpr
-            else (identities, arrayTypes, sDimsPerArray)
-        
-        // Resolve kernel to get lambda info (handles variable references)
-        let resolvedKernel = resolveToLambda env r
+        // Check if this is an object_for application (kernel-first, arrays-right).
+        // If so, normalize to method_for path: build synthetic MethodFor from arrays,
+        // pull kernel from the ObjectFor. This gives both paths the same codegen.
+        let (resolvedLoop, resolvedKernel, identities, arrayTypes, sDimsPerArray) =
+            match resolvedLeft with
+            | IRObjectFor objInfo ->
+                // Arrays come from the right side
+                let (ids, aTypes, sDims) = extractArrayInfoFromTuple env rightExpr
+                // Extract lowered array IR expressions from right side
+                let arrayExprs =
+                    match r with
+                    | IRTuple elems -> elems
+                    | _ -> [r]  // single array
+                // Build a synthetic MethodFor
+                let totalSDims = List.sum sDims
+                let mfInfo : MethodForInfo = {
+                    Arrays = arrayExprs
+                    Identities = ids
+                    ArrayTypes = aTypes
+                    SDimsPerArray = sDims
+                    TotalSDims = totalSDims
+                }
+                // Kernel comes from the object_for, not from right side
+                let kernel = resolveToLambda env objInfo.Kernel
+                (IRMethodFor mfInfo, kernel, ids, aTypes, sDims)
+            | IRMethodFor mfInfo ->
+                // Normal method_for path: kernel comes from right side
+                let kernel = resolveToLambda env r
+                (resolvedLeft, kernel, mfInfo.Identities, mfInfo.ArrayTypes, mfInfo.SDimsPerArray)
+            | _ ->
+                // Fallback: try to extract from AST
+                let (ids, aTypes, sDims) = extractLoopInfo env leftExpr
+                let (ids, aTypes, sDims) =
+                    if ids.IsEmpty then extractArrayInfoFromTuple env rightExpr
+                    else (ids, aTypes, sDims)
+                let kernel = resolveToLambda env r
+                (resolvedLeft, kernel, ids, aTypes, sDims)
         
         // Extract kernel info for irank computation
         let kernelInputRanks = 
@@ -950,9 +1160,9 @@ and lowerBinOp env mode op l r leftExpr rightExpr =
         
         // Check if kernel is wrapped in IRReynolds
         let (innerKernel, hasReynolds, isAntisym) =
-            match r with
+            match resolvedKernel with
             | IRReynolds (k, antisym) -> (k, true, antisym)
-            | _ -> (r, false, false)
+            | _ -> (resolvedKernel, false, false)
         
         // Resolve inner kernel if it's a variable reference
         let resolvedInnerKernel = resolveToLambda env innerKernel
@@ -983,7 +1193,7 @@ and lowerBinOp env mode op l r leftExpr rightExpr =
         let outputType = deduceOutputType arrayTypes identities commGroups sDimsPerArray kernelOutputRank env.Builder
         
         IRApplyCombinator {
-            Loop = resolvedLoop  // Store resolved loop for code generation
+            Loop = resolvedLoop  // Always IRMethodFor after normalization
             Kernel = if hasReynolds then IRReynolds(resolvedInnerKernel, isAntisym) else resolvedKernel
             SymcomStates = states
             TriangularLevels = triangularLevels
@@ -1331,7 +1541,7 @@ let lowerBindingWithEnv env (binding: Binding) : IRBinding list * (string * IRId
             Type = ty
             Value = value
             IsConst = binding.Mutability = BindConst
-            IsMutable = binding.Mutability = BindMut
+            IsMutable = (binding.Mutability <> BindConst)
         }
         [bd], [(name, id, ty, value)]
     
@@ -1346,7 +1556,7 @@ let lowerBindingWithEnv env (binding: Binding) : IRBinding list * (string * IRId
             Type = tupleTy
             Value = value
             IsConst = binding.Mutability = BindConst
-            IsMutable = binding.Mutability = BindMut
+            IsMutable = (binding.Mutability <> BindConst)
         }
         
         // Then create bindings for each element
@@ -1363,7 +1573,7 @@ let lowerBindingWithEnv env (binding: Binding) : IRBinding list * (string * IRId
                     Type = ty
                     Value = proj
                     IsConst = binding.Mutability = BindConst
-                    IsMutable = binding.Mutability = BindMut
+                    IsMutable = (binding.Mutability <> BindConst)
                 }
                 [bd], [(name, id, ty, proj)]
             | PatWildcard -> [], []
@@ -1410,7 +1620,7 @@ let lowerBindingWithEnv env (binding: Binding) : IRBinding list * (string * IRId
             Type = consTy
             Value = value
             IsConst = binding.Mutability = BindConst
-            IsMutable = binding.Mutability = BindMut
+            IsMutable = (binding.Mutability <> BindConst)
         }
         
         // Get element types from the tuple type
@@ -1432,7 +1642,7 @@ let lowerBindingWithEnv env (binding: Binding) : IRBinding list * (string * IRId
                     Type = ty
                     Value = proj
                     IsConst = binding.Mutability = BindConst
-                    IsMutable = binding.Mutability = BindMut
+                    IsMutable = (binding.Mutability <> BindConst)
                 }
                 [bd], [(name, id, ty, proj)]
             | PatWildcard -> [], []
@@ -1468,7 +1678,7 @@ let lowerBindingWithEnv env (binding: Binding) : IRBinding list * (string * IRId
             Type = structTy
             Value = value
             IsConst = binding.Mutability = BindConst
-            IsMutable = binding.Mutability = BindMut
+            IsMutable = (binding.Mutability <> BindConst)
         }
         
         // Then create bindings for each field
@@ -1487,7 +1697,7 @@ let lowerBindingWithEnv env (binding: Binding) : IRBinding list * (string * IRId
                     Type = ty
                     Value = proj
                     IsConst = binding.Mutability = BindConst
-                    IsMutable = binding.Mutability = BindMut
+                    IsMutable = (binding.Mutability <> BindConst)
                 }
                 allBindings <- allBindings @ [bd]
                 allEnvUpdates <- allEnvUpdates @ [(varName, id, ty, proj)]
@@ -1508,7 +1718,7 @@ let lowerBindingWithEnv env (binding: Binding) : IRBinding list * (string * IRId
             Type = ty
             Value = value
             IsConst = binding.Mutability = BindConst
-            IsMutable = binding.Mutability = BindMut
+            IsMutable = (binding.Mutability <> BindConst)
         }
         [bd], [(name, id, ty, value)]
 
@@ -1520,26 +1730,62 @@ let lowerBinding env (binding: Binding) : IRBinding =
 /// Returns bindings list and environment updates for pattern destructuring
 let lowerDeclWithEnv env (decl: Decl) : (Choice<IRFuncDef, IRBinding list, IRTypeDef> * (string * IRId * IRType * IRExpr) list) option =
     match decl with
+    | DeclFunction fd when fd.IsStatic ->
+        // Dual emit: static functions are available at compile time AND emitted as runtime functions
+        Some (Choice1Of3 (lowerFuncDecl env fd), [])
     | DeclFunction fd ->
         Some (Choice1Of3 (lowerFuncDecl env fd), [])
     | DeclLet binding ->
         let (bindings, envUpdates) = lowerBindingWithEnv env binding
         Some (Choice2Of3 bindings, envUpdates)
     | DeclStatic binding ->
-        let (bindings, envUpdates) = lowerBindingWithEnv env binding
-        Some (Choice2Of3 bindings, envUpdates)
+        // Static values are pre-evaluated — emit as constant bindings with literal values
+        match binding.Pattern with
+        | PatVar name ->
+            match Map.tryFind name env.StaticValues with
+            | Some sv ->
+                let irValue = staticValueToIR sv
+                let id = env.Builder.FreshId()
+                let ty = match sv with
+                         | StaticEval.SVInt _ -> IRTScalar ETInt64
+                         | StaticEval.SVFloat _ -> IRTScalar ETFloat64
+                         | StaticEval.SVBool _ -> IRTScalar ETBool
+                         | _ -> IRTUnit
+                let bd = { Id = id; Name = name; Type = ty; Value = irValue; IsConst = true; IsMutable = false }
+                Some (Choice2Of3 [bd], [(name, id, ty, irValue)])
+            | None ->
+                // Fallback: lower as normal binding
+                let (bindings, envUpdates) = lowerBindingWithEnv env binding
+                Some (Choice2Of3 bindings, envUpdates)
+        | _ ->
+            let (bindings, envUpdates) = lowerBindingWithEnv env binding
+            Some (Choice2Of3 bindings, envUpdates)
     | DeclType td ->
         match td with
         | TyDeclAlias (name, _, body) ->
             Some (Choice3Of3 (IRTDAlias (name, lowerTypeExpr env body)), [])
-        | TyDeclStruct (name, _, fields) ->
+        | TyDeclStruct (name, _, fields, invariant) ->
             let fields2 = fields |> List.map (fun f -> f.Name, lowerTypeExpr env f.Type)
-            Some (Choice3Of3 (IRTDStruct (name, fields2)), [])
+            let constraintInfo =
+                match invariant with
+                | Some constraintExpr ->
+                    // Create a synthetic environment with field names bound to fresh IDs
+                    let fieldBindings = fields |> List.map (fun f ->
+                        let id = env.Builder.FreshId()
+                        (f.Name, id))
+                    let constraintEnv = 
+                        fieldBindings |> List.fold (fun e (fname, fid) ->
+                            bindVarSimple fname fid e) env
+                    let loweredExpr = lowerExpr constraintEnv constraintExpr
+                    Some { Expr = loweredExpr; FieldBindings = fieldBindings }
+                | None -> None
+            Some (Choice3Of3 (IRTDStruct (name, fields2, constraintInfo)), [])
         | TyDeclSum (name, _, variants) ->
             let variants2 = variants |> List.map (fun v -> 
                 v.Name, v.Data |> Option.map (lowerTypeExpr env))
             Some (Choice3Of3 (IRTDVariant (name, variants2)), [])
     | DeclImport _ -> None  // Handled specially in lowerModule
+    | DeclUnit _ -> None    // Handled specially in lowerModule (registers unit)
     | _ -> None
 
 /// Check if a let binding is a provider load call: let x = Provider.load("path")
@@ -1572,18 +1818,119 @@ let dispatchProviderLoad
     | None ->
         failwithf "Unknown provider: %s" provAlias
 
-let lowerModule env (modul: ModuleDecl) : IRModule =
-    let mutable currentEnv = env
+let lowerModule env (modul: ModuleDecl) : IRModule * ModuleExport =
+    // Phase 0: Resolve all static values and functions
+    let mutable currentEnv = 
+        match StaticEval.resolveStatics modul.Decls with
+        | Ok staticEnv ->
+            // Seed usage tracker: functions called during static evaluation are compile-time uses
+            let tracker = ref Map.empty
+            for fname in staticEnv.CalledFunctions.Value do
+                tracker.Value <- Map.add fname StaticUsage.CompileTime tracker.Value
+            { env with 
+                StaticValues = staticEnv.Values
+                StaticFunctions = staticEnv.Functions
+                StaticUsageTracker = tracker }
+        | Error msg ->
+            eprintfn "Static evaluation error: %s" msg
+            env
     let mutable funcs = []
     let mutable bindings = []
     let mutable types = []
     
     for locDecl in modul.Decls do
         match locDecl.Value with
-        // Handle imports: register provider in environment
-        | DeclImport (qname, aliasOpt) ->
-            let alias = aliasOpt |> Option.defaultValue (List.last qname)
-            currentEnv <- { currentEnv with Providers = Map.add alias qname currentEnv.Providers }
+        // Handle imports: resolve module or provider
+        | DeclImport (qname, style) ->
+            let fullName = String.concat "." qname
+            
+            match style with
+            | ImportQualified aliasOpt ->
+                let alias = aliasOpt |> Option.defaultValue (List.last qname)
+                
+                // Check if this is an already-lowered module
+                match Map.tryFind fullName currentEnv.ModuleExports with
+                | Some exports ->
+                    // Register the module alias for qualified name resolution
+                    currentEnv <- { currentEnv with ImportedModules = Map.add alias fullName currentEnv.ImportedModules }
+                    
+                    // Import all exported variables, functions, types, units, statics
+                    // into the current env under qualified names (alias.name)
+                    for kv in exports.Variables do
+                        let qualName = sprintf "%s.%s" alias kv.Key
+                        currentEnv <- { currentEnv with Variables = Map.add qualName kv.Value currentEnv.Variables }
+                    for kv in exports.Functions do
+                        currentEnv <- { currentEnv with Functions = Map.add (sprintf "%s.%s" alias kv.Key) kv.Value currentEnv.Functions }
+                    for kv in exports.Types do
+                        currentEnv <- { currentEnv with Types = Map.add (sprintf "%s.%s" alias kv.Key) kv.Value currentEnv.Types }
+                    for kv in exports.StructDefs do
+                        currentEnv <- { currentEnv with StructDefs = Map.add kv.Key kv.Value currentEnv.StructDefs }
+                    for kv in exports.UnitDefs do
+                        currentEnv <- { currentEnv with UnitDefs = Map.add kv.Key kv.Value currentEnv.UnitDefs }
+                    for kv in exports.StaticValues do
+                        currentEnv <- { currentEnv with StaticValues = Map.add (sprintf "%s.%s" alias kv.Key) kv.Value currentEnv.StaticValues }
+                    for kv in exports.StaticFunctions do
+                        currentEnv <- { currentEnv with StaticFunctions = Map.add (sprintf "%s.%s" alias kv.Key) kv.Value currentEnv.StaticFunctions }
+                | None ->
+                    // Fall back to provider import
+                    currentEnv <- { currentEnv with Providers = Map.add alias qname currentEnv.Providers }
+            
+            | ImportSelective names ->
+                // from Math import pi, e → bring specific names into scope unqualified
+                match Map.tryFind fullName currentEnv.ModuleExports with
+                | Some exports ->
+                    for name in names do
+                        // Import variable
+                        match Map.tryFind name exports.Variables with
+                        | Some varInfo ->
+                            currentEnv <- { currentEnv with Variables = Map.add name varInfo currentEnv.Variables }
+                        | None -> ()
+                        // Import function
+                        match Map.tryFind name exports.Functions with
+                        | Some funcId ->
+                            currentEnv <- { currentEnv with Functions = Map.add name funcId currentEnv.Functions }
+                        | None -> ()
+                        // Import type
+                        match Map.tryFind name exports.Types with
+                        | Some ty ->
+                            currentEnv <- { currentEnv with Types = Map.add name ty currentEnv.Types }
+                        | None -> ()
+                        // Import static value
+                        match Map.tryFind name exports.StaticValues with
+                        | Some sv ->
+                            currentEnv <- { currentEnv with StaticValues = Map.add name sv currentEnv.StaticValues }
+                        | None -> ()
+                        // Import static function
+                        match Map.tryFind name exports.StaticFunctions with
+                        | Some sf ->
+                            currentEnv <- { currentEnv with StaticFunctions = Map.add name sf currentEnv.StaticFunctions }
+                        | None -> ()
+                        // Import struct def
+                        match Map.tryFind name exports.StructDefs with
+                        | Some fields ->
+                            currentEnv <- { currentEnv with StructDefs = Map.add name fields currentEnv.StructDefs }
+                        | None -> ()
+                        // Import unit def
+                        match Map.tryFind name exports.UnitDefs with
+                        | Some unitSig ->
+                            currentEnv <- { currentEnv with UnitDefs = Map.add name unitSig currentEnv.UnitDefs }
+                        | None -> ()
+                | None ->
+                    eprintfn "Warning: module '%s' not found for selective import" fullName
+
+        // Handle unit declarations: register unit in environment
+        | DeclUnit unitDecl ->
+            let sig' =
+                match unitDecl.Definition with
+                | None | Some UnitBase ->
+                    Map.ofList [(unitDecl.Name, 1)]
+                | Some (UnitDerived expr) ->
+                    match resolveUnitExpr currentEnv.UnitDefs expr with
+                    | Ok resolved -> resolved
+                    | Error msg ->
+                        eprintfn "Unit error: %s" msg
+                        Map.ofList [(unitDecl.Name, 1)]
+            currentEnv <- { currentEnv with UnitDefs = Map.add unitDecl.Name sig' currentEnv.UnitDefs }
 
         // Handle let bindings that are provider load calls
         | DeclLet binding when (tryMatchProviderCall currentEnv binding).IsSome ->
@@ -1603,12 +1950,41 @@ let lowerModule env (modul: ModuleDecl) : IRModule =
                     currentEnv <- bindType name idxType currentEnv
                 | _ -> ()
 
+        // Handle interface declarations: register in environment
+        | DeclInterface ifaceDecl ->
+            currentEnv <- { currentEnv with Interfaces = Map.add ifaceDecl.Name ifaceDecl currentEnv.Interfaces }
+
+        // Handle impl blocks: monomorphize methods as top-level functions
+        | DeclImpl implDecl ->
+            match extractTypeName implDecl.ForType with
+            | Some typeName ->
+                for method in implDecl.Methods do
+                    let mangledName = sprintf "%s__%s" typeName method.Name
+                    // Ensure self has the concrete type
+                    let typedParams = method.Params |> List.map (fun p ->
+                        if p.Name = "self" && p.Type.IsNone then
+                            { p with Type = Some implDecl.ForType }
+                        else p)
+                    let modifiedDecl = { method with Name = mangledName; Params = typedParams }
+                    let fd = lowerFuncDecl currentEnv modifiedDecl
+                    funcs <- funcs @ [fd]
+                    let funcType = IRTFunc (fd.Params |> List.map (fun p -> p.Type), fd.RetType)
+                    currentEnv <- { currentEnv with
+                                        Functions = Map.add mangledName fd.Id currentEnv.Functions
+                                        ImplMethods = Map.add (typeName, method.Name) fd.Id currentEnv.ImplMethods }
+                    currentEnv <- bindVarWithType mangledName fd.Id None funcType currentEnv
+            | None ->
+                () // Non-named type in impl — skip
+
         // Normal declarations
         | _ ->
             match lowerDeclWithEnv currentEnv locDecl.Value with
             | Some (Choice1Of3 fd, _) ->
                 funcs <- funcs @ [fd]
+                // Register in both Functions map (for name resolution) and Variables (for type inference)
+                let funcType = IRTFunc (fd.Params |> List.map (fun p -> p.Type), fd.RetType)
                 currentEnv <- { currentEnv with Functions = Map.add fd.Name fd.Id currentEnv.Functions }
+                currentEnv <- bindVarWithType fd.Name fd.Id None funcType currentEnv
             | Some (Choice2Of3 bds, envUpdates) ->
                 bindings <- bindings @ bds
                 for (name, id, ty, value) in envUpdates do
@@ -1616,18 +1992,62 @@ let lowerModule env (modul: ModuleDecl) : IRModule =
                     currentEnv <- bindVarWithValue name id (Some identity) (Some ty) value currentEnv
             | Some (Choice3Of3 td, _) ->
                 types <- types @ [td]
+                // Register struct in environment for type resolution and field access
+                match td with
+                | IRTDStruct (name, fields, _) ->
+                    currentEnv <- { currentEnv with StructDefs = Map.add name fields currentEnv.StructDefs }
+                    currentEnv <- bindType name (IRTNamed name) currentEnv
+                | _ -> ()
             | None -> ()
     
-    {
+    // Build static function usage report
+    let usageReport =
+        currentEnv.StaticFunctions |> Map.map (fun name _ ->
+            match Map.tryFind name currentEnv.StaticUsageTracker.Value with
+            | Some u when u = (StaticUsage.CompileTime ||| StaticUsage.RunTime) -> "both"
+            | Some u when u = StaticUsage.CompileTime -> "compile-time"
+            | Some u when u = StaticUsage.RunTime -> "runtime"
+            | _ -> "unused")
+
+    // Extract exports: only variables/functions/types defined in THIS module
+    // (exclude anything imported from other modules)
+    let exportVars =
+        currentEnv.Variables
+        |> Map.filter (fun name _ -> not (name.Contains(".")))  // exclude qualified imports
+    let exportFuncs =
+        currentEnv.Functions
+        |> Map.filter (fun name _ -> not (name.Contains(".")))
+    let moduleExport : ModuleExport = {
+        Variables = exportVars
+        Functions = exportFuncs
+        Types = currentEnv.Types |> Map.filter (fun name _ -> not (name.Contains(".")))
+        StructDefs = currentEnv.StructDefs
+        UnitDefs = currentEnv.UnitDefs
+        StaticValues = currentEnv.StaticValues |> Map.filter (fun name _ -> not (name.Contains(".")))
+        StaticFunctions = currentEnv.StaticFunctions |> Map.filter (fun name _ -> not (name.Contains(".")))
+    }
+
+    let irModule = {
         Name = String.concat "." modul.Name
         Types = types
         Functions = funcs
         Bindings = bindings
+        StaticFunctionUsage = usageReport
     }
+    (irModule, moduleExport)
 
 let lowerProgram (program: Program) : IRProgram =
     let env = emptyEnv()
-    let modules = program.Modules |> List.map (lowerModule env)
+    let mutable currentExports = Map.empty : Map<string, ModuleExport>
+    let mutable modules = []
+    
+    for modul in program.Modules do
+        let envWithExports = { env with ModuleExports = currentExports }
+        let (irModule, exports) = lowerModule envWithExports modul
+        let moduleName = String.concat "." modul.Name
+        currentExports <- Map.add moduleName exports currentExports
+        modules <- modules @ [irModule]
+    
     { Modules = modules }
 
 // ============================================================================
@@ -1642,14 +2062,34 @@ open Blade.TypedAst
 /// Environment for typed lowering (simplified - no type inference needed)
 type TypedLowerEnv = {
     Variables: Map<string, IRId>
+    Functions: Map<string, IRId>
     Builder: IRBuilder
     PolyParamNames: string list
+    StaticValues: Map<string, StaticEval.StaticValue>
+    StaticFunctions: Map<string, StaticEval.StaticFuncDef>
+    StaticUsageTracker: ref<Map<string, StaticUsage>>
+    UnitDefs: Map<string, UnitSig>
+    StructDefs: Map<string, (string * IRType) list>
+    ImplMethods: Map<string * string, IRId>
+    Interfaces: Map<string, InterfaceDecl>
+    ModuleExports: Map<string, ModuleExport>
+    ImportedModules: Map<string, string>
 }
 
 let emptyTypedEnv () : TypedLowerEnv = {
     Variables = Map.empty
+    Functions = Map.empty
     Builder = IRBuilder()
     PolyParamNames = []
+    StaticValues = Map.empty
+    StaticFunctions = Map.empty
+    StaticUsageTracker = ref Map.empty
+    UnitDefs = Map.empty
+    StructDefs = Map.empty
+    ImplMethods = Map.empty
+    Interfaces = Map.empty
+    ModuleExports = Map.empty
+    ImportedModules = Map.empty
 }
 
 let bindTypedVar name id (env: TypedLowerEnv) : TypedLowerEnv =
@@ -1902,6 +2342,89 @@ and lowerTypedBinOp env mode op l r leftExpr rightExpr =
     | OpCompose -> IRCompose (l, r)
     | OpCons -> IRTupleCons (l, r)
 
+/// Create a minimal LoweringEnv from a TypedLowerEnv, for reusing
+/// lowerTypeExpr and lowerExpr on raw AST nodes (e.g., struct constraints, type decls)
+let bridgeEnv (env: TypedLowerEnv) : LoweringEnv =
+    // Convert typed variable bindings to VarInfo bindings
+    let vars = env.Variables |> Map.map (fun _name id ->
+        { Id = id; Identity = None; IsMutable = false; Type = None; Value = None } : VarInfo)
+    { Variables = vars; Types = Map.empty; Functions = env.Functions
+      Providers = Map.empty; Builder = env.Builder; OuterScope = Map.empty
+      InPolyContext = not env.PolyParamNames.IsEmpty
+      PolyParamNames = env.PolyParamNames; CurrentCommGroups = []
+      Interfaces = env.Interfaces; ImplMethods = env.ImplMethods; StructDefs = env.StructDefs
+      StaticValues = env.StaticValues; StaticFunctions = env.StaticFunctions
+      StaticUsageTracker = env.StaticUsageTracker; UnitDefs = env.UnitDefs
+      ModuleExports = env.ModuleExports; ImportedModules = env.ImportedModules }
+
+/// Lower a TypedFunctionDecl to IRFuncDef
+let lowerTypedFuncDecl (env: TypedLowerEnv) (decl: TypedFunctionDecl) : IRFuncDef * TypedLowerEnv =
+    // Check for arity polymorphism by inspecting param types
+    let polyParamNames = decl.Params |> List.choose (fun p ->
+        match p.Type with
+        | IRTPoly _ -> Some p.Name
+        | _ -> None)
+    let isArityPoly = not polyParamNames.IsEmpty
+
+    // Extract parallelism from where clause
+    let parallelism =
+        match decl.WhereClause with
+        | Some wc ->
+            wc.Parallelism |> List.choose (fun (name, level) ->
+                decl.Params |> List.tryFindIndex (fun p -> p.Name = name)
+                |> Option.map (fun idx -> (idx, level)))
+        | None -> []
+
+    // Bind parameters in environment for body lowering
+    let mutable paramEnv = { env with PolyParamNames = polyParamNames }
+    let irParams = decl.Params |> List.map (fun p ->
+        paramEnv <- bindTypedVar p.Name p.VarId paramEnv
+        { Name = p.Name; Type = p.Type; Index = p.Index; VarId = p.VarId } : IRParam)
+
+    let body = lowerTypedExpr paramEnv decl.Body
+
+    let funcDef : IRFuncDef = {
+        Id = decl.FuncId
+        Name = decl.Name
+        Params = irParams
+        RetType = decl.ReturnType
+        Body = body
+        IsStatic = decl.IsStatic
+        Commutativity = if decl.CommGroups.IsEmpty then None else Some decl.CommGroups
+        Parallelism = parallelism
+        IsArityPoly = isArityPoly
+        ArityParam = polyParamNames |> List.tryHead
+    }
+
+    let env' = bindTypedVar decl.Name decl.FuncId env
+    (funcDef, env')
+
+/// Lower a raw TypeDecl (from TDeclType) using the typed environment's builder
+let lowerTypeDeclFromTyped (env: TypedLowerEnv) (td: TypeDecl) : IRTypeDef option =
+    let bEnv = bridgeEnv env
+    match td with
+    | TyDeclAlias (name, _, body) ->
+        Some (IRTDAlias (name, lowerTypeExpr bEnv body))
+    | TyDeclStruct (name, _, fields, invariant) ->
+        let fields2 = fields |> List.map (fun f -> f.Name, lowerTypeExpr bEnv f.Type)
+        let constraintInfo =
+            match invariant with
+            | Some constraintExpr ->
+                let fieldBindings = fields |> List.map (fun f ->
+                    let id = env.Builder.FreshId()
+                    (f.Name, id))
+                let constraintEnv =
+                    fieldBindings |> List.fold (fun e (fname, fid) ->
+                        bindVarSimple fname fid e) bEnv
+                let loweredExpr = lowerExpr constraintEnv constraintExpr
+                Some { Expr = loweredExpr; FieldBindings = fieldBindings }
+            | None -> None
+        Some (IRTDStruct (name, fields2, constraintInfo))
+    | TyDeclSum (name, _, variants) ->
+        let variants2 = variants |> List.map (fun v ->
+            v.Name, v.Data |> Option.map (lowerTypeExpr bEnv))
+        Some (IRTDVariant (name, variants2))
+
 /// Lower a typed binding
 let lowerTypedBinding (env: TypedLowerEnv) (binding: TypedBinding) : IRBinding * TypedLowerEnv =
     let value = lowerTypedExpr env binding.Value
@@ -1924,43 +2447,231 @@ let lowerTypedDecl (env: TypedLowerEnv) (decl: TypedDecl) : (Choice<IRFuncDef, I
         (Some (Choice2Of3 irBinding), env')
     
     | TDeclFunction funcDecl ->
-        // Simplified - would need full implementation
-        (None, env)
+        let (funcDef, env') = lowerTypedFuncDecl env funcDecl
+        (Some (Choice1Of3 funcDef), env')
+    
+    | TDeclStatic binding ->
+        // Static values: use pre-evaluated value if available, else lower normally
+        match Map.tryFind binding.Name env.StaticValues with
+        | Some sv ->
+            let irValue = staticValueToIR sv
+            let id = env.Builder.FreshId()
+            let ty = match sv with
+                     | StaticEval.SVInt _ -> IRTScalar ETInt64
+                     | StaticEval.SVFloat _ -> IRTScalar ETFloat64
+                     | StaticEval.SVBool _ -> IRTScalar ETBool
+                     | _ -> IRTUnit
+            let bd = { Id = id; Name = binding.Name; Type = ty; Value = irValue; IsConst = true; IsMutable = false }
+            let env' = bindTypedVar binding.Name id env
+            (Some (Choice2Of3 bd), env')
+        | None ->
+            // Fallback: lower as normal binding
+            let (irBinding, env') = lowerTypedBinding env binding
+            (Some (Choice2Of3 irBinding), env')
     
     | TDeclType td ->
+        match lowerTypeDeclFromTyped env td with
+        | Some irTd -> (Some (Choice3Of3 irTd), env)
+        | None -> (None, env)
+    
+    | TDeclUnit unitDecl ->
+        // Register unit in environment (same logic as untyped pipeline)
+        let sig' =
+            match unitDecl.Definition with
+            | None | Some UnitBase ->
+                Map.ofList [(unitDecl.Name, 1)]
+            | Some (UnitDerived expr) ->
+                match resolveUnitExpr env.UnitDefs expr with
+                | Ok resolved -> resolved
+                | Error msg ->
+                    eprintfn "Unit error: %s" msg
+                    Map.ofList [(unitDecl.Name, 1)]
+        let env' = { env with UnitDefs = Map.add unitDecl.Name sig' env.UnitDefs }
+        (None, env')
+    
+    | TDeclImport _ ->
+        // Handled specially in lowerTypedModule (needs module export threading)
         (None, env)
     
-    | TDeclInterface _ ->
-        (None, env)
+    | TDeclInterface ifaceDecl ->
+        let env' = { env with Interfaces = Map.add ifaceDecl.Name ifaceDecl env.Interfaces }
+        (None, env')
     
     | TDeclImpl _ ->
+        // Handled specially in lowerTypedModule (needs to emit multiple functions)
         (None, env)
 
 /// Lower a typed module
-let lowerTypedModule (env: TypedLowerEnv) (modul: TypedModule) : IRModule =
-    let mutable currentEnv = env
+let lowerTypedModule (env: TypedLowerEnv) (modul: TypedModule) (rawDecls: Located<Decl> list option) : IRModule * ModuleExport =
+    // Phase 0: Resolve static values/functions from raw declarations
+    let mutable currentEnv = 
+        match rawDecls with
+        | Some decls ->
+            match StaticEval.resolveStatics decls with
+            | Ok staticEnv ->
+                let tracker = ref Map.empty
+                for fname in staticEnv.CalledFunctions.Value do
+                    tracker.Value <- Map.add fname StaticUsage.CompileTime tracker.Value
+                { env with 
+                    StaticValues = staticEnv.Values
+                    StaticFunctions = staticEnv.Functions
+                    StaticUsageTracker = tracker }
+            | Error _ -> env
+        | None -> env
+    
+    let mutable funcs = []
     let mutable bindings = []
+    let mutable types = []
     
     for decl in modul.Decls do
-        match lowerTypedDecl currentEnv decl with
-        | (Some (Choice2Of3 bd), env') ->
-            bindings <- bindings @ [bd]
-            currentEnv <- env'
-        | (_, env') ->
-            currentEnv <- env'
+        match decl with
+        // Handle imports: resolve module exports
+        | TDeclImport (qname, style) ->
+            let fullName = String.concat "." qname
+            match style with
+            | ImportQualified aliasOpt ->
+                let alias = aliasOpt |> Option.defaultValue (List.last qname)
+                match Map.tryFind fullName currentEnv.ModuleExports with
+                | Some exports ->
+                    currentEnv <- { currentEnv with ImportedModules = Map.add alias fullName currentEnv.ImportedModules }
+                    for kv in exports.Variables do
+                        let qualName = sprintf "%s.%s" alias kv.Key
+                        currentEnv <- bindTypedVar qualName kv.Value.Id currentEnv
+                    for kv in exports.Functions do
+                        currentEnv <- { currentEnv with Functions = Map.add (sprintf "%s.%s" alias kv.Key) kv.Value currentEnv.Functions }
+                    for kv in exports.StructDefs do
+                        currentEnv <- { currentEnv with StructDefs = Map.add kv.Key kv.Value currentEnv.StructDefs }
+                    for kv in exports.UnitDefs do
+                        currentEnv <- { currentEnv with UnitDefs = Map.add kv.Key kv.Value currentEnv.UnitDefs }
+                    for kv in exports.StaticValues do
+                        currentEnv <- { currentEnv with StaticValues = Map.add (sprintf "%s.%s" alias kv.Key) kv.Value currentEnv.StaticValues }
+                    for kv in exports.StaticFunctions do
+                        currentEnv <- { currentEnv with StaticFunctions = Map.add (sprintf "%s.%s" alias kv.Key) kv.Value currentEnv.StaticFunctions }
+                | None ->
+                    eprintfn "Warning: module '%s' not found in typed pipeline" fullName
+            | ImportSelective names ->
+                match Map.tryFind fullName currentEnv.ModuleExports with
+                | Some exports ->
+                    for name in names do
+                        match Map.tryFind name exports.Variables with
+                        | Some varInfo -> currentEnv <- bindTypedVar name varInfo.Id currentEnv
+                        | None -> ()
+                        match Map.tryFind name exports.Functions with
+                        | Some funcId -> currentEnv <- { currentEnv with Functions = Map.add name funcId currentEnv.Functions }
+                        | None -> ()
+                        match Map.tryFind name exports.StaticValues with
+                        | Some sv -> currentEnv <- { currentEnv with StaticValues = Map.add name sv currentEnv.StaticValues }
+                        | None -> ()
+                        match Map.tryFind name exports.StaticFunctions with
+                        | Some sf -> currentEnv <- { currentEnv with StaticFunctions = Map.add name sf currentEnv.StaticFunctions }
+                        | None -> ()
+                        match Map.tryFind name exports.StructDefs with
+                        | Some fields -> currentEnv <- { currentEnv with StructDefs = Map.add name fields currentEnv.StructDefs }
+                        | None -> ()
+                        match Map.tryFind name exports.UnitDefs with
+                        | Some unitSig -> currentEnv <- { currentEnv with UnitDefs = Map.add name unitSig currentEnv.UnitDefs }
+                        | None -> ()
+                | None ->
+                    eprintfn "Warning: module '%s' not found for selective import in typed pipeline" fullName
+        
+        // Handle impl blocks: monomorphize methods
+        | TDeclImpl implDecl ->
+            match extractTypeName implDecl.ForType with
+            | Some typeName ->
+                for method in implDecl.Methods do
+                    let mangledName = sprintf "%s__%s" typeName method.Name
+                    let typedParams = method.Params |> List.map (fun p ->
+                        if p.Name = "self" && p.Type.IsNone then
+                            { p with Type = Some implDecl.ForType }
+                        else p)
+                    let modifiedDecl = { method with Name = mangledName; Params = typedParams }
+                    let lEnv = bridgeEnv currentEnv
+                    let fd = lowerFuncDecl lEnv modifiedDecl
+                    funcs <- funcs @ [fd]
+                    currentEnv <- { currentEnv with
+                                        Functions = Map.add mangledName fd.Id currentEnv.Functions
+                                        ImplMethods = Map.add (typeName, method.Name) fd.Id currentEnv.ImplMethods }
+                    currentEnv <- bindTypedVar mangledName fd.Id currentEnv
+            | None -> ()
+        
+        // All other declarations go through lowerTypedDecl
+        | _ ->
+            match lowerTypedDecl currentEnv decl with
+            | (Some (Choice1Of3 fd), env') ->
+                funcs <- funcs @ [fd]
+                currentEnv <- env'
+                // Register function in env for subsequent declarations
+                currentEnv <- { currentEnv with Functions = Map.add fd.Name fd.Id currentEnv.Functions }
+                currentEnv <- bindTypedVar fd.Name fd.Id currentEnv
+            | (Some (Choice2Of3 bd), env') ->
+                bindings <- bindings @ [bd]
+                currentEnv <- env'
+            | (Some (Choice3Of3 td), env') ->
+                types <- types @ [td]
+                currentEnv <- env'
+                // Register structs in environment
+                match td with
+                | IRTDStruct (name, fields, _) ->
+                    currentEnv <- { currentEnv with StructDefs = Map.add name fields currentEnv.StructDefs }
+                | _ -> ()
+            | (None, env') ->
+                currentEnv <- env'
     
-    {
-        Name = modul.Name |> Option.map (String.concat ".") |> Option.defaultValue ""
-        Types = []
-        Functions = []
-        Bindings = bindings
+    // Build static function usage report
+    let usageReport =
+        currentEnv.StaticFunctions |> Map.map (fun name _ ->
+            match Map.tryFind name currentEnv.StaticUsageTracker.Value with
+            | Some u when u = (StaticUsage.CompileTime ||| StaticUsage.RunTime) -> "both"
+            | Some u when u = StaticUsage.CompileTime -> "compile-time"
+            | Some u when u = StaticUsage.RunTime -> "runtime"
+            | _ -> "unused")
+    
+    // Build exports
+    let exportVars =
+        currentEnv.Variables
+        |> Map.filter (fun name _ -> not (name.Contains(".")))
+        |> Map.map (fun name id -> { Id = id; Identity = None; IsMutable = false; Type = None; Value = None } : VarInfo)
+    let exportFuncs =
+        currentEnv.Functions
+        |> Map.filter (fun name _ -> not (name.Contains(".")))
+    let moduleExport : ModuleExport = {
+        Variables = exportVars
+        Functions = exportFuncs
+        Types = Map.empty
+        StructDefs = currentEnv.StructDefs
+        UnitDefs = currentEnv.UnitDefs
+        StaticValues = currentEnv.StaticValues |> Map.filter (fun name _ -> not (name.Contains(".")))
+        StaticFunctions = currentEnv.StaticFunctions |> Map.filter (fun name _ -> not (name.Contains(".")))
     }
+    
+    let irModule = {
+        Name = modul.Name |> Option.map (String.concat ".") |> Option.defaultValue ""
+        Types = types
+        Functions = funcs
+        Bindings = bindings
+        StaticFunctionUsage = usageReport
+    }
+    (irModule, moduleExport)
 
-/// Lower a typed program
-let lowerTypedProgram (program: TypedProgram) : IRProgram =
+/// Lower a typed program (with optional raw program for static evaluation)
+let lowerTypedProgram (program: TypedProgram) (rawProgram: Program option) : IRProgram =
     let env = emptyTypedEnv()
-    let modules = program.Modules |> List.map (lowerTypedModule env)
-    { Modules = modules }
+    let mutable currentExports = Map.empty<string, ModuleExport>
+    let mutable irModules = []
+    
+    let rawModules = 
+        match rawProgram with
+        | Some p -> p.Modules |> List.map (fun m -> Some m.Decls)
+        | None -> program.Modules |> List.map (fun _ -> None)
+    
+    for (tmod, rawDecls) in List.zip program.Modules rawModules do
+        let moduleName = tmod.Name |> Option.map (String.concat ".") |> Option.defaultValue ""
+        let envWithExports = { env with ModuleExports = currentExports }
+        let (irModule, exports) = lowerTypedModule envWithExports tmod rawDecls
+        currentExports <- Map.add moduleName exports currentExports
+        irModules <- irModules @ [irModule]
+    
+    { Modules = irModules }
 
 // ============================================================================
 // Convenience function for testing
@@ -1971,12 +2682,18 @@ let lower (source: string) : Result<IRProgram, string> =
     | Ok program -> Ok (lowerProgram program)
     | Error e -> Error (sprintf "Parse error at %d:%d: %s" e.Line e.Col e.Message)
 
+/// Lower multiple source files into a single IR program with cross-module imports
+let lowerMultiSource (sources: (string * string) list) : Result<IRProgram, string> =
+    match Blade.Parser.parseMultiSource sources with
+    | Ok program -> Ok (lowerProgram program)
+    | Error e -> Error (sprintf "Parse error at %d:%d: %s" e.Line e.Col e.Message)
+
 /// New pipeline: Parse -> TypeCheck -> Lower
 let lowerWithTypeCheck (source: string) : Result<IRProgram, string> =
     match Blade.Parser.parseProgram source with
     | Ok program ->
         match Blade.TypeCheck.typeCheck program with
-        | Ok typedProgram -> Ok (lowerTypedProgram typedProgram)
+        | Ok typedProgram -> Ok (lowerTypedProgram typedProgram (Some program))
         | Error e -> 
             match e with
             | Blade.TypeCheck.UnboundVariable name -> Error (sprintf "Unbound variable: %s" name)

@@ -76,13 +76,14 @@ and Keyword =
     | KwFalse
     | KwIn
     | KwImport
+    | KwFrom
     | KwAs
     | KwUnit
     | KwArray
     | KwIdx
     | KwSymIdx
     | KwAntisymIdx
-    | KwFullSymIdx
+    | KwHermitianIdx
     | KwBoundedIdx
     | KwCompoundIdx
     | KwMethodFor
@@ -150,13 +151,14 @@ let keywords =
       "false", KwFalse
       "in", KwIn
       "import", KwImport
+      "from", KwFrom
       "as", KwAs
       "Unit", KwUnit
       "Array", KwArray
       "Idx", KwIdx
       "SymIdx", KwSymIdx
       "AntisymIdx", KwAntisymIdx
-      "FullSymIdx", KwFullSymIdx
+      "HermitianIdx", KwHermitianIdx
       "BoundedIdx", KwBoundedIdx
       "CompoundIdx", KwCompoundIdx
       "method_for", KwMethodFor
@@ -194,6 +196,7 @@ let operators =
     [ "<@>"; ">>="; "<&>"; "<&!>"; "<*>"; "<$>"; "<|>"; "<|:>"
       ">>@"; "@>>"; "::"; "->"; "=>"; ".."; "=="
       "!="; "<="; ">="; "&&"; "||"
+      "+="; "-="; "*="; "/="
       "|>"; "<-"
       "+"; "-"; "*"; "/"; "%"; "="; "<"; ">"; "!"; "^" ]
     |> List.sortByDescending String.length  // Match longer operators first

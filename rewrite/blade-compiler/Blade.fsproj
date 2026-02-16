@@ -11,11 +11,28 @@
     <Compile Include="Lexer.fs" />
     <Compile Include="Parser.fs" />
     <Compile Include="IR.fs" />
-    <Compile Include="NetcdfProvider.fs" />
+    <Compile Include="providers/NetcdfProvider.fs" />
     <Compile Include="TypedAst.fs" />
+    <Compile Include="StaticEval.fs" />
     <Compile Include="TypeCheck.fs" />
     <Compile Include="Lowering.fs" />
     <Compile Include="CodeGen.fs" />
+    <Compile Include="tests/Test_Basic.fs" />
+    <Compile Include="tests/Test_Loops.fs" />
+    <Compile Include="tests/Test_Symmetry.fs" />
+    <Compile Include="tests/Test_Reynolds.fs" />
+    <Compile Include="tests/Test_Arity.fs" />
+    <Compile Include="tests/Test_Functions.fs" />
+    <Compile Include="tests/Test_Structs.fs" />
+    <Compile Include="tests/Test_SumTypes.fs" />
+    <Compile Include="tests/Test_Interfaces.fs" />
+    <Compile Include="tests/Test_Modules.fs" />
+    <Compile Include="tests/Test_Guards.fs" />
+    <Compile Include="tests/Test_Bracketed.fs" />
+    <Compile Include="tests/Test_IndexTypes.fs" />
+    <Compile Include="tests/Test_Mutability.fs" />
+    <Compile Include="tests/Test_Static.fs" />
+    <Compile Include="tests/Test_Units.fs" />
     <Compile Include="Main.fs" />
   </ItemGroup>
 

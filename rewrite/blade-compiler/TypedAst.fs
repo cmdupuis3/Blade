@@ -230,12 +230,14 @@ type TypedBinding = {
 
 type TypedFunctionDecl = {
     Name: string
+    FuncId: IRId
     TypeParams: string list
     Params: TypedParam list
     ReturnType: IRType
     WhereClause: WhereClause option
     Body: TypedExpr
     CommGroups: int list list
+    IsStatic: bool
 }
 
 type TypedDecl =
@@ -244,6 +246,9 @@ type TypedDecl =
     | TDeclType of TypeDecl          // Type declarations don't need annotation
     | TDeclInterface of InterfaceDecl
     | TDeclImpl of ImplDecl
+    | TDeclStatic of TypedBinding
+    | TDeclUnit of UnitDecl
+    | TDeclImport of QualifiedName * ImportStyle
 
 // ============================================================================
 // Typed Module and Program

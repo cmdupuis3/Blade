@@ -20,6 +20,8 @@ type CodeGenContext = {
     StaticDecls: string list
     /// Counter for generating unique names
     mutable NextTempId: int
+    /// Set of struct type names that have where constraints (need validate() calls)
+    ConstrainedStructs: Set<string>
 }
 
 let emptyContext () = {
@@ -27,14 +29,34 @@ let emptyContext () = {
     Indent = 0
     StaticDecls = []
     NextTempId = 0
+    ConstrainedStructs = Set.empty
 }
 
 let indent ctx = { ctx with Indent = ctx.Indent + 1 }
 let dedent ctx = { ctx with Indent = max 0 (ctx.Indent - 1) }
 let indentStr ctx = String.replicate ctx.Indent "    "
 
+/// C++ reserved words and built-in type names that cannot be used as identifiers
+let cppReservedWords = Set.ofList [
+    // Types that conflict with Blade names
+    "double"; "float"; "int"; "long"; "short"; "char"; "bool"; "void"; "auto"
+    "signed"; "unsigned"; "const"; "volatile"; "static"; "extern"; "register"
+    // Keywords
+    "class"; "struct"; "enum"; "union"; "namespace"; "template"; "typename"
+    "virtual"; "override"; "final"; "public"; "private"; "protected"
+    "new"; "delete"; "this"; "return"; "if"; "else"; "for"; "while"; "do"
+    "switch"; "case"; "break"; "continue"; "goto"; "default"; "try"; "catch"; "throw"
+    "sizeof"; "alignof"; "decltype"; "typedef"; "using"; "operator"
+    "true"; "false"; "nullptr"; "inline"; "constexpr"; "mutable"
+]
+
+/// Sanitize a name to avoid C++ reserved word conflicts
+let sanitizeCppName (name: string) : string =
+    if Set.contains name cppReservedWords then name + "_"
+    else name
+
 let addVarName id name ctx = 
-    { ctx with VarNames = Map.add id name ctx.VarNames }
+    { ctx with VarNames = Map.add id (sanitizeCppName name) ctx.VarNames }
 
 let freshTemp ctx prefix =
     let id = ctx.NextTempId
@@ -156,6 +178,7 @@ let rec irTypeToCpp = function
     | IRTNat _ -> "size_t"
     | IRTNamed name -> name  // Named types (structs, etc.) use their name directly
     | IRTInfer _ -> "auto"  // Genuinely untyped - let C++ deduce
+    | IRTUnitAnnotated (inner, _) -> irTypeToCpp inner  // Units erase at codegen
 
 /// Convert inferred type to C++ - never returns void for value types
 let inferredTypeToCpp (ty: IRType) : string =
@@ -493,6 +516,18 @@ let exprToCppCtx (ctx: CodeGenContext) (expr: IRExpr) : string =
 /// For left-justified iteration, the actual array index is the sum of this index
 /// and all prior dependency indices (to recover the original non-left-justified index)
 let genElementBinding (binding: LoopIndexBinding) : string =
+    match binding.Virtual with
+    | VirtualRange ->
+        // range<I>: kernel param gets the loop index directly
+        sprintf "auto %s = %s;" binding.ParamName binding.IndexName
+    | VirtualReverse ->
+        // reverse<I>: kernel param gets (extent - 1 - i)
+        let extentStr =
+            match binding.Extent with
+            | IRLit (IRLitInt n) -> sprintf "%d" n
+            | _ -> sprintf "%s_extents[%d]" binding.ArrayName binding.DimIndex
+        sprintf "auto %s = (%s - 1 - %s);" binding.ParamName extentStr binding.IndexName
+    | RealArray ->
     // After indexing once, rank decreases by 1
     let resultRank = binding.ArrayRank - 1
     let elemTypeStr = elemTypeToCpp binding.ArrayElemType
@@ -519,19 +554,25 @@ let genElementBinding (binding: LoopIndexBinding) : string =
 let genForLoopHeader (binding: LoopIndexBinding) : string =
     let pragma = if binding.IsParallel then "#pragma omp parallel for\n    " else ""
     let extentStr = 
-        match binding.Extent with
-        | IRParam (name, _) -> sprintf "%s_extents[%d]" binding.ArrayName binding.DimIndex
-        | IRLit (IRLitInt n) -> sprintf "%d" n
-        | _ -> sprintf "%s_extents[%d]" binding.ArrayName binding.DimIndex
+        match binding.Virtual with
+        | VirtualRange | VirtualReverse ->
+            // Virtual array: use literal extent directly
+            match binding.Extent with
+            | IRLit (IRLitInt n) -> sprintf "%d" n
+            | _ -> sprintf "%s_extents[%d]" binding.ArrayName binding.DimIndex
+        | RealArray ->
+            match binding.Extent with
+            | IRParam (name, _) -> sprintf "%s_extents[%d]" binding.ArrayName binding.DimIndex
+            | IRLit (IRLitInt n) -> sprintf "%d" n
+            | _ -> sprintf "%s_extents[%d]" binding.ArrayName binding.DimIndex
     
     // Compute bound subtraction from dependencies
     let subtraction =
-        if binding.BoundDependencies.IsEmpty then ""
+        if binding.BoundDependencies.IsEmpty && binding.StrictOffset = 0 then ""
         else 
-            binding.BoundDependencies 
-            |> List.map (sprintf "__i%d")
-            |> String.concat " - "
-            |> sprintf " - %s"
+            let depParts = binding.BoundDependencies |> List.map (sprintf "__i%d")
+            let offsetParts = if binding.StrictOffset > 0 then [sprintf "%d" binding.StrictOffset] else []
+            depParts @ offsetParts |> String.concat " - " |> sprintf " - %s"
     
     sprintf "%sfor (size_t %s = 0; %s < %s%s; %s++) {" 
         pragma
@@ -546,8 +587,13 @@ let genKernelBody (codeGen: LoopNestCodeGen) : string =
     // Build name map: param VarId -> element binding name
     let nameMap = 
         codeGen.Bindings 
-        |> List.fold (fun acc b -> 
-            Map.add b.ParamVarId (sprintf "%s__%s" b.ArrayName b.IndexName) acc
+        |> List.fold (fun acc b ->
+            match b.Virtual with
+            | VirtualRange | VirtualReverse ->
+                // Virtual arrays bind to param name directly
+                Map.add b.ParamVarId b.ParamName acc
+            | RealArray ->
+                Map.add b.ParamVarId (sprintf "%s__%s" b.ArrayName b.IndexName) acc
         ) Map.empty
     
     // Add captured variables to name map
@@ -690,6 +736,7 @@ let genIncludes () : string list =
      "#include <complex>"
      "#include <tuple>"
      "#include <iostream>"
+     "#include <iomanip>"
      "#include <chrono>"
      "// Note: OpenMP disabled for portability"
      "// #include <omp.h>"
@@ -844,6 +891,65 @@ namespace nested_array_utilities {
         }
     }
 
+
+    // =========================================================================
+    // Antisymmetric array support
+    // =========================================================================
+
+    // Allocate antisymmetric array: strict i < j, so n-1 elements in first row,
+    // n-2 in second, etc. Total: n(n-1)/2
+    // Same nested pointer structure as symmetric but with -1 offset at each level.
+    template<typename TYPE, const size_t DEPTH = 0>
+    constexpr TYPE allocate_antisym(const size_t extents[], const size_t lastIndex = 0) {
+        typedef typename std::remove_pointer<TYPE>::type DTYPE;
+        TYPE array;
+
+        if constexpr (DEPTH == 0) {
+            // Outermost: full extent (rows)
+            array = new DTYPE[extents[DEPTH]];
+            if constexpr (std::is_pointer<DTYPE>::value) {
+                for (size_t i = 0; i < extents[DEPTH]; i++) {
+                    array[i] = allocate_antisym<DTYPE, DEPTH + 1>(extents, i + 1);
+                }
+            }
+        } else {
+            // Inner: strict bound, extent - lastIndex elements
+            size_t len = (extents[DEPTH] > lastIndex) ? extents[DEPTH] - lastIndex : 0;
+            array = new DTYPE[len];
+            if constexpr (std::is_pointer<DTYPE>::value) {
+                for (size_t i = 0; i < len; i++) {
+                    array[i] = allocate_antisym<DTYPE, DEPTH + 1>(extents, i + lastIndex);
+                }
+            }
+        }
+        return array;
+    }
+
+    // =========================================================================
+    // Index canonicalization wrappers
+    // =========================================================================
+
+    // Symmetric canonicalization: (i,j) -> (min(i,j), max(i,j))
+    inline void sym_canonical(size_t i, size_t j, size_t& ci, size_t& cj) {
+        ci = (i <= j) ? i : j;
+        cj = (i <= j) ? j : i;
+    }
+
+    // Antisymmetric canonicalization: (i,j) -> (min(i,j), max(i,j)), sign = +1 or -1
+    // Returns -1 if swapped (odd permutation), +1 if not
+    inline int antisym_canonical(size_t i, size_t j, size_t& ci, size_t& cj) {
+        if (i < j) { ci = i; cj = j; return 1; }
+        else if (i > j) { ci = j; cj = i; return -1; }
+        else { ci = i; cj = j; return 0; }  // diagonal: value is zero
+    }
+
+    // Hermitian canonicalization: (i,j) -> (min(i,j), max(i,j)), needs_conj flag
+    // For Hermitian: A(i,j) = conj(A(j,i)), so access with j<i needs conjugation
+    inline bool hermitian_canonical(size_t i, size_t j, size_t& ci, size_t& cj) {
+        if (i <= j) { ci = i; cj = j; return false; }  // no conjugation needed
+        else { ci = j; cj = i; return true; }           // needs conjugation
+    }
+
 } // namespace nested_array_utilities
 
 using namespace nested_array_utilities;
@@ -990,6 +1096,65 @@ namespace nested_array_utilities {
         }
     }
 
+
+    // =========================================================================
+    // Antisymmetric array support
+    // =========================================================================
+
+    // Allocate antisymmetric array: strict i < j, so n-1 elements in first row,
+    // n-2 in second, etc. Total: n(n-1)/2
+    // Same nested pointer structure as symmetric but with -1 offset at each level.
+    template<typename TYPE, const size_t DEPTH = 0>
+    constexpr TYPE allocate_antisym(const size_t extents[], const size_t lastIndex = 0) {
+        typedef typename std::remove_pointer<TYPE>::type DTYPE;
+        TYPE array;
+
+        if constexpr (DEPTH == 0) {
+            // Outermost: full extent (rows)
+            array = new DTYPE[extents[DEPTH]];
+            if constexpr (std::is_pointer<DTYPE>::value) {
+                for (size_t i = 0; i < extents[DEPTH]; i++) {
+                    array[i] = allocate_antisym<DTYPE, DEPTH + 1>(extents, i + 1);
+                }
+            }
+        } else {
+            // Inner: strict bound, extent - lastIndex elements
+            size_t len = (extents[DEPTH] > lastIndex) ? extents[DEPTH] - lastIndex : 0;
+            array = new DTYPE[len];
+            if constexpr (std::is_pointer<DTYPE>::value) {
+                for (size_t i = 0; i < len; i++) {
+                    array[i] = allocate_antisym<DTYPE, DEPTH + 1>(extents, i + lastIndex);
+                }
+            }
+        }
+        return array;
+    }
+
+    // =========================================================================
+    // Index canonicalization wrappers
+    // =========================================================================
+
+    // Symmetric canonicalization: (i,j) -> (min(i,j), max(i,j))
+    inline void sym_canonical(size_t i, size_t j, size_t& ci, size_t& cj) {
+        ci = (i <= j) ? i : j;
+        cj = (i <= j) ? j : i;
+    }
+
+    // Antisymmetric canonicalization: (i,j) -> (min(i,j), max(i,j)), sign = +1 or -1
+    // Returns -1 if swapped (odd permutation), +1 if not
+    inline int antisym_canonical(size_t i, size_t j, size_t& ci, size_t& cj) {
+        if (i < j) { ci = i; cj = j; return 1; }
+        else if (i > j) { ci = j; cj = i; return -1; }
+        else { ci = i; cj = j; return 0; }  // diagonal: value is zero
+    }
+
+    // Hermitian canonicalization: (i,j) -> (min(i,j), max(i,j)), needs_conj flag
+    // For Hermitian: A(i,j) = conj(A(j,i)), so access with j<i needs conjugation
+    inline bool hermitian_canonical(size_t i, size_t j, size_t& ci, size_t& cj) {
+        if (i <= j) { ci = i; cj = j; return false; }  // no conjugation needed
+        else { ci = j; cj = i; return true; }           // needs conjugation
+    }
+
 } // namespace nested_array_utilities
 
 using namespace nested_array_utilities;
@@ -1005,6 +1170,7 @@ let genIncludesExternal () : string list =
      "#include <variant>"
      "#include <string>"
      "#include <iostream>"
+     "#include <iomanip>"
      "#include <chrono>"
      "#include <set>"
      "#include <omp.h>"
@@ -1026,6 +1192,7 @@ let genIncludesEmbedded () : string list =
      "#include <variant>"
      "#include <string>"
      "#include <iostream>"
+     "#include <iomanip>"
      "#include <chrono>"
      "#include <set>"
      "#include <omp.h>"
@@ -1157,6 +1324,9 @@ let genApplyCombinator (ctx: CodeGenContext) (name: string) (info: ApplyInfo) (b
                 match arr with
                 | IRVar id -> 
                     Map.tryFind id ctx.VarNames |> Option.defaultValue (sprintf "arr%d" i)
+                | IRRange _ -> sprintf "__range%d" i
+                | IRVirtualReverse _ -> sprintf "__rev%d" i
+                | IRBlocked _ -> sprintf "__blk%d" i
                 | _ -> sprintf "arr%d" i)
         | _ -> []
     
@@ -1192,10 +1362,19 @@ let genApplyCombinator (ctx: CodeGenContext) (name: string) (info: ApplyInfo) (b
         let extentsName = sprintf "%s_extents" name
         let extentsDecl = sprintf "%ssize_t* %s = new size_t[%d];" ind extentsName outputRank
         
-        // Fill extents from input arrays
+        // Fill extents from input arrays (virtual arrays use literal extents)
         let extentsFill = 
             codeGen.Bindings |> List.mapi (fun i b ->
-                sprintf "%s%s[%d] = %s_extents[%d];" ind extentsName i b.ArrayName b.DimIndex)
+                match b.Virtual with
+                | VirtualRange | VirtualReverse ->
+                    // Virtual array: use extent from index type directly
+                    let extStr =
+                        match b.Extent with
+                        | IRLit (IRLitInt n) -> sprintf "%d" n
+                        | _ -> sprintf "/* unknown virtual extent */"
+                    sprintf "%s%s[%d] = %s;" ind extentsName i extStr
+                | RealArray ->
+                    sprintf "%s%s[%d] = %s_extents[%d];" ind extentsName i b.ArrayName b.DimIndex)
         
         // Generate allocation
         let allocDecl = sprintf "%spromote<%s, %d>::type %s;" ind outputElemType outputRank name
@@ -1355,7 +1534,17 @@ let genBinding (ctx: CodeGenContext) (binding: IRBinding) (builder: IRBuilder) :
         let ctx' = addVarName binding.Id name ctx
         (code, ctx')
     
-    | IRTuple _ | IRTupleProj _ | IRFieldAccess _ | IRStructLit _ | IRLit _ | IRBinOp _ | IRUnaryOp _ | IRIf _ | IRVar _ | IRApp _ | IRParam _ | IRMatch _ ->
+    | IRStructLit (typeName, _) ->
+        // Struct construction - emit binding then validate() if constrained
+        let code = genScalarBinding ctx name binding.Value binding.Type
+        let validateCode =
+            if ctx.ConstrainedStructs.Contains typeName then
+                [sprintf "%s%s.validate();" ind name]
+            else []
+        let ctx' = addVarName binding.Id name ctx
+        (code @ validateCode, ctx')
+    
+    | IRTuple _ | IRTupleProj _ | IRFieldAccess _ | IRLit _ | IRBinOp _ | IRUnaryOp _ | IRIf _ | IRVar _ | IRApp _ | IRParam _ | IRMatch _ ->
         // Scalar expressions including tuples, field access, and match
         let code = genScalarBinding ctx name binding.Value binding.Type
         let ctx' = addVarName binding.Id name ctx
@@ -1370,8 +1559,31 @@ let genBinding (ctx: CodeGenContext) (binding: IRBinding) (builder: IRBuilder) :
 // ============================================================================
 
 /// Generate C++ code for a function definition
+/// Unroll an IRLet chain into a list of (varId, name, valueExpr) statements and a final return expression.
+/// e.g., IRLet(id1, v1, IRLet(id2, v2, body)) → statements=[(id1,v1), (id2,v2)], return=body
+let rec unrollLetChain (expr: IRExpr) : (IRId * IRExpr) list * IRExpr =
+    match expr with
+    | IRLet (id, value, body) ->
+        let (rest, final) = unrollLetChain body
+        ((id, value) :: rest, final)
+    | _ -> ([], expr)
+
+/// Generate a function body as a list of C++ statements.
+/// Unrolls IRLet chains into sequential variable declarations with a final return.
+let genFuncBody (names: Map<IRId, string>) (indent: string) (body: IRExpr) : string list =
+    let (lets, retExpr) = unrollLetChain body
+    let mutable currentNames = names
+    let stmts = lets |> List.collect (fun (id, value) ->
+        let varName = sprintf "__v%d" id
+        let valStr = exprToCpp currentNames value
+        currentNames <- Map.add id varName currentNames
+        [sprintf "%sauto %s = %s;" indent varName valStr])
+    let retStr = exprToCpp currentNames retExpr
+    stmts @ [sprintf "%sreturn %s;" indent retStr]
+
 let genFuncDef (ctx: CodeGenContext) (funcDef: IRFuncDef) : string list * CodeGenContext =
     let ind = indentStr ctx
+    let bodyInd = ind + "    "
     
     // For each array parameter, also generate an extents parameter
     let paramList = 
@@ -1393,30 +1605,61 @@ let genFuncDef (ctx: CodeGenContext) (funcDef: IRFuncDef) : string list * CodeGe
         | IRTUnit | IRTInfer _ -> inferredTypeToCpp (inferExprType funcDef.Body)
         | t -> irTypeToCpp t
     
-    // Compute free variables that need to be captured
-    let paramIds = funcDef.Params |> List.map (fun p -> p.VarId) |> Set.ofList
-    let freeVars = Set.difference (collectVarRefs funcDef.Body) paramIds
-    
-    // Generate capture list with variable names from context (capture by reference)
-    let captureList = 
-        freeVars 
-        |> Set.toList 
-        |> List.choose (fun id -> Map.tryFind id ctx.VarNames)
-        |> List.distinct
-        |> List.map (sprintf "&%s")
-        |> String.concat ", "
-    
-    // Build name map with params ON TOP OF module-level names from context
+    // Build name map with params on top of module-level names
     let bodyNames = funcDef.Params |> List.fold (fun m p -> Map.add p.VarId p.Name m) ctx.VarNames
-    let bodyStr = exprToCpp bodyNames funcDef.Body
-    let code = [sprintf "%sauto %s = [%s](%s) -> %s { return %s; };" ind funcDef.Name captureList paramList retType bodyStr]
+    
+    // Generate proper C++ function
+    let safeName = sanitizeCppName funcDef.Name
+    let bodyStmts = genFuncBody bodyNames bodyInd funcDef.Body
+    let code =
+        [sprintf "%s%s %s(%s) {" ind retType safeName paramList]
+        @ bodyStmts
+        @ [sprintf "%s}" ind]
+    
     let ctx' = addVarName funcDef.Id funcDef.Name ctx
     (code, ctx')
 
-/// Generate C++ code for an entire IR module
-let genModule (modul: IRModule) (builder: IRBuilder) : string list =
+/// Generate a function as a C++ lambda (for functions that capture module-level bindings)
+let genFuncDefAsLambda (ctx: CodeGenContext) (funcDef: IRFuncDef) : string list * CodeGenContext =
+    let ind = indentStr ctx
+    
+    let paramList = 
+        funcDef.Params 
+        |> List.collect (fun p -> 
+            match p.Type with
+            | IRTArray arr ->
+                [sprintf "%s %s" (irTypeToCpp p.Type) p.Name
+                 sprintf "const size_t* %s_extents" p.Name]
+            | _ ->
+                [sprintf "%s %s" (irTypeToCpp p.Type) p.Name])
+        |> String.concat ", "
+    
+    let retType = 
+        match funcDef.RetType with
+        | IRTUnit | IRTInfer _ -> inferredTypeToCpp (inferExprType funcDef.Body)
+        | t -> irTypeToCpp t
+    
+    let bodyNames = funcDef.Params |> List.fold (fun m p -> Map.add p.VarId p.Name m) ctx.VarNames
+    let bodyStr = exprToCpp bodyNames funcDef.Body
+    let safeName = sanitizeCppName funcDef.Name
+    let code = [sprintf "%sauto %s = [&](%s) -> %s { return %s; };" ind safeName paramList retType bodyStr]
+    let ctx' = addVarName funcDef.Id funcDef.Name ctx
+    (code, ctx')
+
+/// Generate C++ code for an entire IR module.
+/// Returns (functionDefs, bindingCode) — functions go outside main(), bindings inside.
+let genModule (modul: IRModule) (builder: IRBuilder) : string list * string list =
     let mutable ctx = emptyContext ()
-    let mutable allCode = []
+    let mutable funcCode = []
+    let mutable bindCode = []
+    
+    // Collect constrained struct names from type definitions
+    let constrainedNames = 
+        modul.Types |> List.choose (function
+            | IRTDStruct (name, _, Some _) -> Some name
+            | _ -> None)
+        |> Set.ofList
+    ctx <- { ctx with ConstrainedStructs = constrainedNames }
     
     // First pass: register ALL names (both bindings and functions) in context
     for binding in modul.Bindings do
@@ -1435,26 +1678,39 @@ let genModule (modul: IRModule) (builder: IRBuilder) : string list =
         match item with
         | Choice1Of2 binding ->
             let (code, ctx') = genBinding ctx binding builder
-            allCode <- allCode @ code @ [""]
+            bindCode <- bindCode @ code @ [""]
             ctx <- ctx'
         | Choice2Of2 funcDef ->
-            let (code, ctx') = genFuncDef ctx funcDef
-            allCode <- allCode @ code @ [""]
-            ctx <- ctx'
+            // Check if function has free variables (references to module bindings)
+            let paramIds = funcDef.Params |> List.map (fun p -> p.VarId) |> Set.ofList
+            let freeVars = Set.difference (collectVarRefs funcDef.Body) paramIds
+            let hasFreeVars = freeVars |> Set.exists (fun id -> Map.containsKey id ctx.VarNames)
+            
+            if hasFreeVars then
+                // Generate as C++ lambda inside main() (captures module bindings)
+                let (code, ctx') = genFuncDefAsLambda ctx funcDef
+                bindCode <- bindCode @ code @ [""]
+                ctx <- ctx'
+            else
+                // Pure function — generate at file scope
+                let (code, ctx') = genFuncDef ctx funcDef
+                funcCode <- funcCode @ code @ [""]
+                ctx <- ctx'
     
-    allCode
+    (funcCode, bindCode)
 
 /// Generate a complete C++ program with main() from an IR module
 let genMainProgram (modul: IRModule) (testName: string) : string =
     let builder = IRBuilder()
     
     let includes = genIncludes ()
-    let bodyCode = genModule modul builder
+    let (funcDefs, bindCode) = genModule modul builder
     
-    let bodyIndented = bodyCode |> List.map (fun s -> "    " + s)
+    let bodyIndented = bindCode |> List.map (fun s -> "    " + s)
     
     let mainFunc = 
         ["int main() {"
+         "    cout << std::setprecision(15);"
          "    auto start = TIME;"
          ""]
         @ bodyIndented
@@ -1465,28 +1721,50 @@ let genMainProgram (modul: IRModule) (testName: string) : string =
            "    return 0;"
            "}"]
     
-    (includes @ mainFunc) |> String.concat "\n"
+    (includes @ [""] @ funcDefs @ mainFunc) |> String.concat "\n"
 
 /// Generate a complete C++ program from an IR program (all modules)
 let genProgramFromIR (program: IRProgram) (testName: string) : string =
-    // For now, just use the first module
     match program.Modules with
     | [] -> "// Empty program\nint main() { return 0; }\n"
-    | modul :: _ -> genMainProgram modul testName
+    | [modul] -> genMainProgram modul testName
+    | modules ->
+        let merged = {
+            Name = "merged"
+            Types = modules |> List.collect (fun m -> m.Types)
+            Functions = modules |> List.collect (fun m -> m.Functions)
+            Bindings = modules |> List.collect (fun m -> m.Bindings)
+            StaticFunctionUsage = Map.empty
+        }
+        genMainProgram merged testName
 
 /// Generate C++ struct definition from IRTDStruct
-let genStructDef (name: string) (fields: (string * IRType) list) : string list =
+let genStructDef (name: string) (fields: (string * IRType) list) (invariant: StructConstraintInfo option) : string list =
     let fieldLines = fields |> List.map (fun (fname, fty) ->
         sprintf "    %s %s;" (irTypeToCpp fty) fname)
+    let validateLines =
+        match invariant with
+        | Some info ->
+            // Build name map: IRVar IDs in invariant -> field names
+            let nameMap = info.FieldBindings |> List.fold (fun m (fname, fid) -> Map.add fid fname m) Map.empty
+            let constraintStr = exprToCpp nameMap info.Expr
+            ["    void validate() const {"
+             sprintf "        if (!(%s)) {" constraintStr
+             sprintf "            std::cerr << \"Constraint violation in %s\" << std::endl;" name
+             "            std::abort();"
+             "        }"
+             "    }"]
+        | None -> []
     [sprintf "struct %s {" name]
     @ fieldLines
+    @ validateLines
     @ ["};"
        ""]
 
 /// Generate type definitions for a module
 let genTypeDefs (modul: IRModule) : string list =
     modul.Types |> List.collect (function
-        | IRTDStruct (name, fields) -> genStructDef name fields
+        | IRTDStruct (name, fields, invariant) -> genStructDef name fields invariant
         | IRTDVariant (name, variants) ->
             // Check if any variant has data
             let hasData = variants |> List.exists (fun (_, d) -> d.IsSome)
@@ -1610,9 +1888,9 @@ let genSelfContainedProgram (modul: IRModule) (testName: string) : string =
     
     let includes = genIncludesExternal ()
     let typeDefs = genTypeDefs modul
-    let bodyCode = genModule modul builder
+    let (funcDefs, bindCode) = genModule modul builder
     
-    let bodyIndented = bodyCode |> List.map (fun s -> "    " + s)
+    let bodyIndented = bindCode |> List.map (fun s -> "    " + s)
     
     // Generate print statements for all bindings
     // Only print bindings that generate actual printable C++ variables
@@ -1639,7 +1917,7 @@ let genSelfContainedProgram (modul: IRModule) (testName: string) : string =
                 | _ -> false
             
             if isPrintable then
-                match b.Type with
+                match IR.stripUnits b.Type with
                 | IRTScalar (ETFloat64 | ETFloat32 | ETInt64 | ETInt32 | ETBool) ->
                     genPrintScalar b.Name
                 | IRTArray arrType ->
@@ -1662,6 +1940,7 @@ let genSelfContainedProgram (modul: IRModule) (testName: string) : string =
     
     let mainFunc = 
         ["int main() {"
+         "    cout << std::setprecision(15);"
          "    auto start = TIME;"
          ""]
         @ bodyIndented
@@ -1676,7 +1955,7 @@ let genSelfContainedProgram (modul: IRModule) (testName: string) : string =
            "    return 0;"
            "}"]
     
-    (includes @ typeDefs @ mainFunc) |> String.concat "\n"
+    (includes @ typeDefs @ [""] @ funcDefs @ mainFunc) |> String.concat "\n"
 
 /// Generate a C++ program with external runtime header
 /// Returns (mainFileContent, headerFileContent)
@@ -1685,9 +1964,9 @@ let genProgramWithExternalRuntime (modul: IRModule) (testName: string) : string 
     
     let includes = genIncludesExternal ()
     let typeDefs = genTypeDefs modul
-    let bodyCode = genModule modul builder
+    let (funcDefs, bindCode) = genModule modul builder
     
-    let bodyIndented = bodyCode |> List.map (fun s -> "    " + s)
+    let bodyIndented = bindCode |> List.map (fun s -> "    " + s)
     
     // Generate print statements for all bindings
     let printCode = 
@@ -1709,7 +1988,7 @@ let genProgramWithExternalRuntime (modul: IRModule) (testName: string) : string 
                 | _ -> false
             
             if isPrintable then
-                match b.Type with
+                match IR.stripUnits b.Type with
                 | IRTScalar (ETFloat64 | ETFloat32 | ETInt64 | ETInt32 | ETBool) ->
                     genPrintScalar b.Name
                 | IRTArray arrType ->
@@ -1732,6 +2011,7 @@ let genProgramWithExternalRuntime (modul: IRModule) (testName: string) : string 
     
     let mainFunc = 
         ["int main() {"
+         "    cout << std::setprecision(15);"
          "    auto start = TIME;"
          ""]
         @ bodyIndented
@@ -1746,7 +2026,7 @@ let genProgramWithExternalRuntime (modul: IRModule) (testName: string) : string 
            "    return 0;"
            "}"]
     
-    let mainFile = (includes @ typeDefs @ mainFunc) |> String.concat "\n"
+    let mainFile = (includes @ typeDefs @ [""] @ funcDefs @ mainFunc) |> String.concat "\n"
     let headerFile = genRuntimeHeader ()
     (mainFile, headerFile)
 
@@ -1754,7 +2034,19 @@ let genProgramWithExternalRuntime (modul: IRModule) (testName: string) : string 
 let genSelfContainedProgramFromIR (program: IRProgram) (testName: string) : string =
     match program.Modules with
     | [] -> "// Empty program\nint main() { return 0; }\n"
-    | modul :: _ -> genSelfContainedProgram modul testName
+    | [modul] -> genSelfContainedProgram modul testName
+    | modules ->
+        // Multi-module: merge all modules into one for code generation
+        // Functions and bindings from earlier modules come first
+        let merged = {
+            Name = "merged"
+            Types = modules |> List.collect (fun m -> m.Types)
+            Functions = modules |> List.collect (fun m -> m.Functions)
+            Bindings = modules |> List.collect (fun m -> m.Bindings)
+            StaticFunctionUsage = modules |> List.fold (fun acc m -> 
+                Map.fold (fun a k v -> Map.add k v a) acc m.StaticFunctionUsage) Map.empty
+        }
+        genSelfContainedProgram merged testName
 
 // ============================================================================
 // Verification Helpers
@@ -1821,6 +2113,7 @@ let genTestProgram (modul: IRModule) (testName: string) : string =
     
     let mainFunc = 
         ["int main() {"
+         "    cout << std::setprecision(15);"
          "    auto start = TIME;"
          ""]
         @ codeIndented
