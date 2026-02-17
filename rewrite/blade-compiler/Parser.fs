@@ -1853,12 +1853,8 @@ let parseDecl (tokens: Token list) : ParseResult<Decl> =
                 success (DeclFunction { f with IsStatic = true }) remaining
             | other -> success other remaining
         | _ ->
-            // static x = ... → DeclStatic (backward compat)
-            parseTopLevelLet afterStatic >>= fun decl remaining ->
-            match decl with
-            | DeclLet binding ->
-                success (DeclStatic { binding with Mutability = BindConst }) remaining
-            | other -> success other remaining
+            let (line, col) = currentPos afterStatic
+            error "Expected 'function' after 'static'. For static values, use 'let static x = ...'" line col
     | Some (TokKeyword KwType) ->
         parseTypeDecl (advance tokens)
     | Some (TokKeyword KwStruct) ->
@@ -1879,6 +1875,62 @@ let parseDecl (tokens: Token list) : ParseResult<Decl> =
 // Module and Program Parsing
 // ============================================================================
 
+/// Skip tokens until we find a declaration-starting keyword or EOF.
+/// Used for parser error recovery.
+let rec skipToNextDecl (tokens: Token list) : Token list =
+    let tokens = skipNL tokens
+    match peek tokens with
+    | Some TokEOF | None -> tokens
+    | Some (TokKeyword KwLet) | Some (TokKeyword KwFunction) | Some (TokKeyword KwType)
+    | Some (TokKeyword KwStruct) | Some (TokKeyword KwInterface) | Some (TokKeyword KwImpl)
+    | Some (TokKeyword KwUnit) | Some (TokKeyword KwImport) | Some (TokKeyword KwFrom)
+    | Some (TokKeyword KwStatic) | Some (TokKeyword KwModule) ->
+        tokens
+    | _ -> skipToNextDecl (advance tokens)
+
+/// Parse a module, accumulating errors and recovering at declaration boundaries.
+/// Returns the module (with successfully parsed declarations) and any parse errors.
+let parseModuleRecovering (tokens: Token list) : (ModuleDecl * ParseError list) * Token list =
+    let tokens = skipNL tokens
+    
+    // Check for optional module declaration
+    let moduleName, afterModule =
+        match peek tokens with
+        | Some (TokKeyword KwModule) ->
+            match parseQualifiedName (advance tokens) with
+            | Ok (name, rest) -> (name, skipNL rest)
+            | Error _ -> (["Main"], tokens)
+        | _ -> (["Main"], tokens)
+    
+    let mutable decls = []
+    let mutable errors = []
+    let mutable toks = afterModule
+    
+    let mutable cont = true
+    while cont do
+        toks <- skipNL toks
+        match peek toks with
+        | Some TokEOF | None ->
+            cont <- false
+        | _ ->
+            let (startLine, startCol) = currentPos toks
+            match parseDecl toks with
+            | Ok (decl, remaining) ->
+                let (endLine, endCol) = currentPos remaining
+                let span = { StartLine = startLine; StartCol = startCol
+                             EndLine = endLine; EndCol = endCol; File = None }
+                let located = { Value = decl; Span = span }
+                decls <- located :: decls
+                toks <- remaining
+            | Error e ->
+                errors <- e :: errors
+                // Skip to next declaration boundary
+                toks <- skipToNextDecl (advance toks)
+    
+    let modul = { Name = moduleName; Imports = []; Decls = List.rev decls }
+    ((modul, List.rev errors), toks)
+
+/// Non-recovering version for backward compatibility
 let parseModule (tokens: Token list) : ParseResult<ModuleDecl> =
     let tokens = skipNL tokens
     
@@ -1897,8 +1949,12 @@ let parseModule (tokens: Token list) : ParseResult<ModuleDecl> =
         | Some TokEOF | None ->
             success (List.rev decls) toks
         | _ ->
+            let (startLine, startCol) = currentPos toks
             parseDecl toks >>= fun decl remaining ->
-            let located = { Value = decl; Span = noSpan }
+            let (endLine, endCol) = currentPos remaining
+            let span = { StartLine = startLine; StartCol = startCol
+                         EndLine = endLine; EndCol = endCol; File = None }
+            let located = { Value = decl; Span = span }
             loop (located :: decls) remaining
     
     loop [] afterModule >>= fun decls remaining ->
@@ -1913,6 +1969,12 @@ let parseProgram (source: string) : Result<Program, ParseError> =
     match parseModule tokens with
     | Ok (modul, _) -> Ok { Modules = [modul] }
     | Error e -> Error e
+
+/// Parse with error recovery. Returns program (possibly partial) + all errors.
+let parseProgramRecovering (source: string) : Program * ParseError list =
+    let tokens = tokenizeWithNewlines source
+    let ((modul, errors), _) = parseModuleRecovering tokens
+    ({ Modules = [modul] }, errors)
 
 /// Parse multiple source files into a single Program.
 /// Each entry is (fileName, sourceCode). If a source has a `module` declaration,

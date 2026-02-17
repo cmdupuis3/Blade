@@ -20,14 +20,7 @@ open Blade.IR
 // Source Location (for error reporting and IDE support)
 // ============================================================================
 
-type Span = {
-    StartLine: int
-    StartCol: int
-    EndLine: int
-    EndCol: int
-}
-
-let noSpan = { StartLine = 0; StartCol = 0; EndLine = 0; EndCol = 0 }
+// Span and noSpan are inherited from Blade.Ast via 'open'
 
 // ============================================================================
 // Typed Variable Information

@@ -79,14 +79,12 @@ let force = mass * accel
 """
 
 let test76_unitMismatchAdd = """
-// Adding incompatible units produces a warning on stderr
-// (The compiler warns but still compiles — units are advisory for now)
+// Adding incompatible units is a type error
 Unit meters
 Unit seconds
 let dist: Float<meters> = 10.0
 let time: Float<seconds> = 5.0
 let bad = dist + time
-// EXPECT: bad = 15
 """
 
 /// Unit of measure tests
@@ -99,5 +97,9 @@ let unitTests = [
     ("Unit Division", test73_unitDivision)
     ("Unit With Static Function", test74_unitWithStaticFunction)
     ("Unit Complex", test75_unitComplex)
+]
+
+/// Negative tests: should fail type checking
+let unitErrorTests = [
     ("Unit Mismatch Add", test76_unitMismatchAdd)
 ]

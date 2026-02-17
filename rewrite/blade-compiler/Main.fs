@@ -243,17 +243,10 @@ let testTypeCheck source =
                         printfn "    let %s : %s" binding.Name (ppIRType binding.Type)
                     | _ -> ()
             Ok typedProgram
-        | Error e ->
-            let msg = 
-                match e with
-                | UnboundVariable name -> sprintf "Unbound variable: %s" name
-                | TypeMismatch (exp, act) -> sprintf "Type mismatch: expected %A, got %A" exp act
-                | ArityMismatch (exp, act) -> sprintf "Arity mismatch: expected %d, got %d" exp act
-                | InvalidArrayCapture name -> sprintf "Lambda cannot capture array '%s'" name
-                | InvalidApplication ty -> sprintf "Cannot apply non-function type: %A" ty
-                | PatternTypeMismatch (pat, ty) -> sprintf "Pattern %s doesn't match type %A" pat ty
-                | Other msg -> msg
-            printfn "TypeCheck: ERROR - %s" msg
+        | Error errors ->
+            for err in errors do
+                printfn "TypeCheck: ERROR - %s" (formatCompileError err)
+            let msg = errors |> List.map formatCompileError |> String.concat "\n"
             Error msg
     | Error e ->
         printfn "Parse: ERROR at %d:%d - %s" e.Line e.Col e.Message
@@ -1807,7 +1800,10 @@ let main args =
     | [| "--bracketed" |] -> runTestCategory "Bracketed Ops" bracketedTests
     | [| "--indextypes" |] -> runTestCategory "Index Types" indexTypeTests
     | [| "--static" |] -> runTestCategory "Static Eval" staticTests
-    | [| "--units" |] -> runTestCategory "Units" unitTests
+    | [| "--units" |] ->
+        let r1 = runTestCategory "Units" unitTests
+        let r2 = runExpectedErrorTests "Units" unitErrorTests
+        if r1 = 0 && r2 = 0 then 0 else 1
     
     // Full pipeline tests (IR + C++ compile + run)
     | [| "--full" |] -> runAllTestsFull ()

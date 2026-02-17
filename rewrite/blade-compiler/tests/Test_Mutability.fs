@@ -38,17 +38,17 @@ let result = {
 """
 
 let test_static_read = """
-static PI = 3.14159
+let static PI = 3.14159
 let y = PI * 2.0
 """
 
 let test_static_function = """
-static twice = lambda(x) -> x * 2.0
+let static twice = lambda(x) -> x * 2.0
 let y = twice(21.0)
 """
 
 let test_mixed_bindings = """
-static N = 100
+let static N = 100
 let result = {
     let x = N + 1
     let mut y = N + 2
@@ -73,7 +73,7 @@ let result = {
 // ============================================================================
 
 let test_static_assign_error = """
-static x = 1
+let static x = 1
 let result = {
     x = 2
     x
@@ -81,7 +81,7 @@ let result = {
 """
 
 let test_static_compound_assign_error = """
-static x = 10
+let static x = 10
 let result = {
     x += 1
     x
@@ -89,7 +89,7 @@ let result = {
 """
 
 let test_static_function_reassign_error = """
-static f = lambda(x) -> x + 1
+let static f = lambda(x) -> x + 1
 let result = {
     f = lambda(x) -> x + 2
     f(1)

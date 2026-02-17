@@ -2694,11 +2694,7 @@ let lowerWithTypeCheck (source: string) : Result<IRProgram, string> =
     | Ok program ->
         match Blade.TypeCheck.typeCheck program with
         | Ok typedProgram -> Ok (lowerTypedProgram typedProgram (Some program))
-        | Error e -> 
-            match e with
-            | Blade.TypeCheck.UnboundVariable name -> Error (sprintf "Unbound variable: %s" name)
-            | Blade.TypeCheck.TypeMismatch (exp, act) -> Error (sprintf "Type mismatch: expected %A, got %A" exp act)
-            | Blade.TypeCheck.InvalidArrayCapture name -> Error (sprintf "Lambda cannot capture array '%s'" name)
-            | Blade.TypeCheck.Other msg -> Error msg
-            | _ -> Error "Type checking failed"
+        | Error errors -> 
+            let msgs = errors |> List.map Blade.TypeCheck.formatCompileError
+            Error (String.concat "\n" msgs)
     | Error e -> Error (sprintf "Parse error at %d:%d: %s" e.Line e.Col e.Message)

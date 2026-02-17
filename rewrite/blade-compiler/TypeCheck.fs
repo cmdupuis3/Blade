@@ -12,7 +12,7 @@
 //   - Explicit errors for all unhandled forms (no silent fallthrough)
 //
 // Public API (consumed by Lowering.fs and Main.fs):
-//   - typeCheck : Program -> TypeResult<TypedProgram>
+//   - typeCheck : Program -> Result<TypedProgram, CompileError list>
 //   - TypeError union: UnboundVariable | TypeMismatch | ArityMismatch
 //                      | InvalidArrayCapture | InvalidApplication
 //                      | PatternTypeMismatch | Other
@@ -35,6 +35,13 @@ type TypeError =
     | InvalidApplication of funcType: IRType
     | PatternTypeMismatch of pattern: string * expected: IRType
     | Other of string
+
+/// A compile error with source location and context stack
+type CompileError = {
+    Error: TypeError
+    Span: Span
+    Context: string list  // e.g., ["in function 'foo'"; "in let binding 'x'"]
+}
 
 type TypeResult<'T> = Result<'T, TypeError>
 
@@ -327,6 +334,8 @@ type TypeEnv = {
     ImplMethods: Map<string * string, IRId * IRType>
     /// Unit name -> canonical UnitSig
     Units: Map<string, IR.UnitSig>
+    /// Context stack for error reporting, e.g. ["in function 'foo'"]
+    Context: string list
 }
 
 let emptyEnv () = {
@@ -341,7 +350,45 @@ let emptyEnv () = {
     Interfaces = Map.empty
     ImplMethods = Map.empty
     Units = Map.empty
+    Context = []
 }
+
+/// Push a context frame onto the environment
+let pushContext (ctx: string) (env: TypeEnv) : TypeEnv =
+    { env with Context = ctx :: env.Context }
+
+/// Wrap a TypeError with span and context into a CompileError
+let locateError (span: Span) (env: TypeEnv) (err: TypeError) : CompileError =
+    { Error = err; Span = span; Context = env.Context }
+
+/// Format a TypeError as a human-readable string
+let formatTypeError (err: TypeError) : string =
+    match err with
+    | UnboundVariable name -> sprintf "Unbound variable: %s" name
+    | TypeMismatch (exp, act) -> sprintf "Type mismatch: expected %A, got %A" exp act
+    | ArityMismatch (exp, act) -> sprintf "Arity mismatch: expected %d args, got %d" exp act
+    | InvalidArrayCapture name -> sprintf "Lambda cannot capture array '%s'" name
+    | InvalidApplication funcTy -> sprintf "Cannot apply non-function type: %A" funcTy
+    | PatternTypeMismatch (pat, ty) -> sprintf "Pattern '%s' incompatible with type %A" pat ty
+    | Other msg -> msg
+
+/// Format a CompileError with location and context
+let formatCompileError (err: CompileError) : string =
+    let loc =
+        if err.Span.StartLine > 0 then
+            match err.Span.File with
+            | Some f -> sprintf "%s:%d:%d" f err.Span.StartLine err.Span.StartCol
+            | None -> sprintf "%d:%d" err.Span.StartLine err.Span.StartCol
+        else ""
+    let msg = formatTypeError err.Error
+    let context =
+        err.Context
+        |> List.rev
+        |> List.map (sprintf "  %s")
+        |> String.concat "\n"
+    if loc = "" && context = "" then msg
+    elif context = "" then sprintf "%s: %s" loc msg
+    else sprintf "%s: %s\n%s" loc msg context
 
 let bindVar name info env =
     { env with Variables = Map.add name info env.Variables }
@@ -1234,10 +1281,10 @@ and inferBinOp env mode op left right : TypeResult<TypedExpr> =
         // Arithmetic, comparison, logical
         inferExpr env left |> Result.bind (fun tL ->
         inferExpr env right |> Result.bind (fun tR ->
-            let resTy = inferArithType mode op tL.Type tR.Type
-            Ok (mkTyped (TExprBinOp (mode, op, tL, tR)) resTy)))
+            inferArithType mode op tL.Type tR.Type |> Result.map (fun resTy ->
+                mkTyped (TExprBinOp (mode, op, tL, tR)) resTy)))
 
-and inferArithType mode op leftTy rightTy =
+and inferArithType mode op leftTy rightTy : TypeResult<IRType> =
     match op with
     | OpEq | OpNeq | OpLt | OpLe | OpGt | OpGe ->
         // Comparisons require compatible units
@@ -1245,10 +1292,9 @@ and inferArithType mode op leftTy rightTy =
         let rUnits = IR.getUnits rightTy
         match lUnits, rUnits with
         | Some lu, Some ru when not (IR.unitCompatible lu ru) ->
-            eprintfn "Unit mismatch in comparison: %s vs %s" (IR.ppUnitSig lu) (IR.ppUnitSig ru)
-        | _ -> ()
-        IRTScalar ETBool
-    | OpAnd | OpOr -> IRTScalar ETBool
+            Error (Other (sprintf "Unit mismatch in comparison: %s vs %s" (IR.ppUnitSig lu) (IR.ppUnitSig ru)))
+        | _ -> Ok (IRTScalar ETBool)
+    | OpAnd | OpOr -> Ok (IRTScalar ETBool)
     | _ ->
         // Extract unit annotations if present
         let lUnits = IR.getUnits leftTy
@@ -1273,26 +1319,25 @@ and inferArithType mode op leftTy rightTy =
             // Addition/subtraction: units must match
             match lUnits, rUnits with
             | Some lu, Some ru ->
-                if IR.unitCompatible lu ru then IRTUnitAnnotated (bareResult, lu)
+                if IR.unitCompatible lu ru then Ok (IRTUnitAnnotated (bareResult, lu))
                 else
-                    eprintfn "Unit mismatch in %s: %s vs %s"
+                    Error (Other (sprintf "Unit mismatch in %s: %s vs %s"
                         (if op = OpAdd then "addition" else "subtraction")
-                        (IR.ppUnitSig lu) (IR.ppUnitSig ru)
-                    IRTUnitAnnotated (bareResult, lu)  // keep left units, report error
-            | Some u, None | None, Some u -> IRTUnitAnnotated (bareResult, u)
-            | None, None -> bareResult
+                        (IR.ppUnitSig lu) (IR.ppUnitSig ru)))
+            | Some u, None | None, Some u -> Ok (IRTUnitAnnotated (bareResult, u))
+            | None, None -> Ok bareResult
         | OpMul ->
             match lUnits, rUnits with
-            | Some lu, Some ru -> IRTUnitAnnotated (bareResult, IR.unitMul lu ru)
-            | Some u, None | None, Some u -> IRTUnitAnnotated (bareResult, u)
-            | None, None -> bareResult
+            | Some lu, Some ru -> Ok (IRTUnitAnnotated (bareResult, IR.unitMul lu ru))
+            | Some u, None | None, Some u -> Ok (IRTUnitAnnotated (bareResult, u))
+            | None, None -> Ok bareResult
         | OpDiv | OpMod ->
             match lUnits, rUnits with
-            | Some lu, Some ru -> IRTUnitAnnotated (bareResult, IR.unitDiv lu ru)
-            | Some u, None -> IRTUnitAnnotated (bareResult, u)
-            | None, Some u -> IRTUnitAnnotated (bareResult, IR.unitDiv IR.unitDimensionless u)
-            | None, None -> bareResult
-        | _ -> bareResult
+            | Some lu, Some ru -> Ok (IRTUnitAnnotated (bareResult, IR.unitDiv lu ru))
+            | Some u, None -> Ok (IRTUnitAnnotated (bareResult, u))
+            | None, Some u -> Ok (IRTUnitAnnotated (bareResult, IR.unitDiv IR.unitDimensionless u))
+            | None, None -> Ok bareResult
+        | _ -> Ok bareResult
 
 // ============================================================================
 // 10b. <@> Application with Symmetry Analysis
@@ -1710,6 +1755,13 @@ and checkDecl (env: TypeEnv) (decl: Decl) : TypeResult<TypedDecl * TypeEnv> =
                         bindVarSimple n (env.Builder.FreshId()) (env.Subst.Fresh()) e) env'
                     patternNames t |> List.fold (fun e n ->
                         bindVarSimple n (env.Builder.FreshId()) (env.Subst.Fresh()) e) e1
+                | PatStruct (_, fieldPats) ->
+                    fieldPats |> List.fold (fun e (fieldName, pat) ->
+                        match pat with
+                        | PatVar n ->
+                            bindVarSimple n (env.Builder.FreshId()) (env.Subst.Fresh()) e
+                        | _ -> patternNames pat |> List.fold (fun e2 n ->
+                            bindVarSimple n (env.Builder.FreshId()) (env.Subst.Fresh()) e2) e) env'
                 | _ -> env'
 
             let tb : TypedBinding = {
@@ -1882,24 +1934,76 @@ and registerTypeDecl (env: TypeEnv) (typeDecl: TypeDecl) : TypeEnv =
 // 12. Module and Program
 // ============================================================================
 
-let checkModule (env: TypeEnv) (modul: ModuleDecl) : TypeResult<TypedModule> =
-    let rec go (env: TypeEnv) (decls: Located<Decl> list) (acc: TypedDecl list) =
-        match decls with
-        | [] -> Ok (List.rev acc, env)
-        | d :: rest ->
-            let decl : Decl = d.Value
-            checkDecl env decl |> Result.bind (fun (td, env') -> go env' rest (td :: acc))
-    go env modul.Decls [] |> Result.map (fun (tDecls, _) ->
-        { Name = Some modul.Name; Decls = tDecls })
+let checkModule (env: TypeEnv) (modul: ModuleDecl) : TypedModule * CompileError list =
+    // Pre-pass: register static functions and static values with placeholder types
+    // so forward references and mutual recursion resolve correctly.
+    let preEnv =
+        modul.Decls |> List.fold (fun (e: TypeEnv) locDecl ->
+            match locDecl.Value with
+            | DeclFunction funcDecl when funcDecl.IsStatic ->
+                let paramTypes = funcDecl.Params |> List.map (fun p ->
+                    match p.Type with Some t -> lowerTypeExpr e t | None -> e.Subst.Fresh())
+                let retType = match funcDecl.ReturnType with
+                              | Some t -> lowerTypeExpr e t
+                              | None -> e.Subst.Fresh()
+                let funcType = IRTFunc (paramTypes, retType)
+                let funcVarId = e.Builder.FreshId()
+                bindVarSimple funcDecl.Name funcVarId funcType e
+            | DeclStatic binding ->
+                let name = match binding.Pattern with PatVar n -> n | _ -> "_"
+                let varId = e.Builder.FreshId()
+                bindVarSimple name varId (e.Subst.Fresh()) e
+            | _ -> e) env
+    
+    let mutable currentEnv = preEnv
+    let mutable decls = []
+    let mutable errors = []
+    
+    for d in modul.Decls do
+        let declName =
+            match d.Value with
+            | DeclLet b -> sprintf "in let binding '%s'" (match b.Pattern with PatVar n -> n | _ -> "_")
+            | DeclStatic b -> sprintf "in static binding '%s'" (match b.Pattern with PatVar n -> n | _ -> "_")
+            | DeclFunction f -> sprintf "in function '%s'" f.Name
+            | DeclType td ->
+                match td with
+                | TyDeclAlias (n, _, _) | TyDeclStruct (n, _, _, _) | TyDeclSum (n, _, _) -> sprintf "in type '%s'" n
+            | DeclInterface i -> sprintf "in interface '%s'" i.Name
+            | DeclImpl impl -> sprintf "in impl for '%A'" impl.ForType
+            | DeclImport (qn, _) -> sprintf "in import '%s'" (String.concat "." qn)
+            | DeclUnit u -> sprintf "in unit '%s'" u.Name
+        let envWithCtx = pushContext declName currentEnv
+        match checkDecl envWithCtx d.Value with
+        | Ok (td, env') ->
+            decls <- td :: decls
+            // Carry forward env' but restore original context (don't nest)
+            currentEnv <- { env' with Context = currentEnv.Context }
+        | Error err ->
+            let ce = locateError d.Span currentEnv err
+            errors <- ce :: errors
+            // Continue with pre-failure env — the failed decl is skipped
+    
+    let typedModule = { Name = Some modul.Name; Decls = List.rev decls }
+    (typedModule, List.rev errors)
 
-let checkProgram (program: Program) : TypeResult<TypedProgram> =
+let checkProgram (program: Program) : TypedProgram * CompileError list =
     let env = emptyEnv ()
-    program.Modules |> List.map (checkModule env) |> sequenceResults
-    |> Result.map (fun ms -> { Modules = ms })
+    let mutable modules = []
+    let mutable allErrors = []
+    for modul in program.Modules do
+        let (tm, errs) = checkModule env modul
+        modules <- tm :: modules
+        allErrors <- allErrors @ errs
+    ({ Modules = List.rev modules }, allErrors)
 
 // ============================================================================
 // 13. Public Entry Point
 // ============================================================================
 
-let typeCheck (program: Program) : TypeResult<TypedProgram> =
-    checkProgram program
+/// Type check a program. Returns the (possibly partial) typed program
+/// and a list of compile errors. If the error list is empty, the program
+/// is fully type-checked.
+let typeCheck (program: Program) : Result<TypedProgram, CompileError list> =
+    let (tp, errors) = checkProgram program
+    if errors.IsEmpty then Ok tp
+    else Error errors
