@@ -34,6 +34,14 @@ function identity(args: Poly<T^1>) -> T^arity(args)
 = args[0]
 """
 
+let test36_polyCallSite = """
+// Poly function with actual call site — triggers monomorphization
+function polySum(args: Poly<T^0>) -> T^0
+= args[0] + args[1]
+
+let result = polySum(3.0, 4.0)
+"""
+
 /// Arity polymorphism tests
 let arityTests = [
     ("Poly Type", test31_polyType)
@@ -41,4 +49,5 @@ let arityTests = [
     ("Arity Keyword", test34_arityKeyword)
     ("Multi Poly Arity", test34b_multiPolyArity)
     ("Arity Return Type", test35_arityReturnType)
+    ("Poly Call Site", test36_polyCallSite)
 ]

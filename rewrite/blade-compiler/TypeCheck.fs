@@ -516,9 +516,9 @@ let lowerExtentExpr (env: TypeEnv) (expr: Expr) : IRExpr =
     | Some n -> IRLit (IRLitInt n)
     | None ->
         match expr with
-        | ExprVar name -> IRParam (name, 0)
+        | ExprVar name -> IRParam (name, 0, IRTNat None)
         | ExprLit (LitInt n) -> IRLit (IRLitInt n)
-        | _ -> IRParam ("?", 0)
+        | _ -> IRParam ("?", 0, IRTNat None)
 
 // ============================================================================
 // 4. AST TypeExpr -> IRType (with extent preservation)
@@ -599,7 +599,7 @@ let rec lowerTypeExpr (env: TypeEnv) (ty: TypeExpr) : IRType =
                 else
                     let elem = lowerElemType env elemTy
                     let indices = [0 .. r - 1] |> List.map (fun _ ->
-                        { Id = env.Builder.FreshId(); Arity = 1; Extent = IRParam ("n", 0)
+                        { Id = env.Builder.FreshId(); Arity = 1; Extent = IRParam ("n", 0, IRTNat None)
                           Symmetry = SymNone; Tag = None; Kind = SDimension; Dependencies = [] })
                     IRTArray { ElemType = elem; IndexTypes = indices
                                IsVirtual = false; Identity = None }
@@ -655,7 +655,7 @@ let rec lowerTypeExpr (env: TypeEnv) (ty: TypeExpr) : IRType =
         IRTArray { ElemType = ETFloat64; IndexTypes = [idx]; IsVirtual = false; Identity = None }
 
     | TyCompoundIdx _mask ->
-        let idx = { Id = env.Builder.FreshId(); Arity = 1; Extent = IRParam ("compound", 0)
+        let idx = { Id = env.Builder.FreshId(); Arity = 1; Extent = IRParam ("compound", 0, IRTNat None)
                     Symmetry = SymNone; Tag = None; Kind = SDimension; Dependencies = [] }
         IRTArray { ElemType = ETFloat64; IndexTypes = [idx]; IsVirtual = false; Identity = None }
 
@@ -663,7 +663,7 @@ let rec lowerTypeExpr (env: TypeEnv) (ty: TypeExpr) : IRType =
     | TyConstrained (inner, _) -> lowerTypeExpr env inner
     | TyDependentIdx (_param, bodyTy) -> lowerTypeExpr env bodyTy
     | TyEquivIdx (_dim, _group, _rep) ->
-        let idx = { Id = env.Builder.FreshId(); Arity = 1; Extent = IRParam ("equiv", 0)
+        let idx = { Id = env.Builder.FreshId(); Arity = 1; Extent = IRParam ("equiv", 0, IRTNat None)
                     Symmetry = SymNone; Tag = None; Kind = SDimension; Dependencies = [] }
         IRTArray { ElemType = ETFloat64; IndexTypes = [idx]; IsVirtual = false; Identity = None }
 
@@ -692,10 +692,10 @@ and lowerIndexType env (_position: int) (ty: TypeExpr) : IRIndexType =
         match lookupTypeDef name env with
         | Some (TDIIndexType (_, idx)) -> { idx with Id = id }
         | _ ->
-            { Id = id; Arity = 1; Extent = IRParam (name, 0); Symmetry = SymNone
+            { Id = id; Arity = 1; Extent = IRParam (name, 0, IRTNat None); Symmetry = SymNone
               Tag = Some name; Kind = SDimension; Dependencies = [] }
     | _ ->
-        { Id = id; Arity = 1; Extent = IRParam ("?", 0); Symmetry = SymNone
+        { Id = id; Arity = 1; Extent = IRParam ("?", 0, IRTNat None); Symmetry = SymNone
           Tag = None; Kind = SDimension; Dependencies = [] }
 
 // ============================================================================
@@ -762,7 +762,10 @@ let rec collectFreeVars (bound: Set<string>) (expr: Expr) : Set<string> =
     | ExprAssign (l, r) -> Set.union (collectFreeVars bound l) (collectFreeVars bound r)
     | ExprFor (src, _, kernelOpt) ->
         let srcFree = match src with
-                      | ForArrays (arrs, _) -> arrs |> List.map (collectFreeVars bound) |> Set.unionMany
+                      | ForArrays (arrs, inOpt) -> 
+                          let arrFree = arrs |> List.map (collectFreeVars bound) |> Set.unionMany
+                          let inFree = inOpt |> Option.map (collectFreeVars bound) |> Option.defaultValue Set.empty
+                          Set.union arrFree inFree
                       | ForKernel k -> collectFreeVars bound k
         let kFree = kernelOpt |> Option.map (collectFreeVars bound) |> Option.defaultValue Set.empty
         Set.union srcFree kFree
@@ -844,14 +847,14 @@ let getArrayType (env: TypeEnv) (expr: Expr) : IRArrayType =
             | _ ->
                 { ElemType = ETFloat64
                   IndexTypes = [{ Id = env.Builder.FreshId(); Arity = 1
-                                  Extent = IRParam(name + "_n", 0)
+                                  Extent = IRParam(name + "_n", 0, IRTNat None)
                                   Symmetry = SymNone; Tag = None; Kind = SDimension
                                   Dependencies = [] }]
                   IsVirtual = false; Identity = Some (AIDVariable name) }
         | None ->
             { ElemType = ETFloat64
               IndexTypes = [{ Id = env.Builder.FreshId(); Arity = 1
-                              Extent = IRParam(name + "_n", 0)
+                              Extent = IRParam(name + "_n", 0, IRTNat None)
                               Symmetry = SymNone; Tag = None; Kind = SDimension
                               Dependencies = [] }]
               IsVirtual = false; Identity = Some (AIDVariable name) }
@@ -1170,11 +1173,11 @@ let rec inferExpr (env: TypeEnv) (expr: Expr) : TypeResult<TypedExpr> =
     | ExprSequence exprs ->
         exprs |> List.map (inferExpr env) |> sequenceResults |> Result.bind (fun tExprs ->
             let ty = if tExprs.IsEmpty then IRTUnit else (List.last tExprs).Type
-            Ok (mkTyped (TExprTuple tExprs) ty))
+            Ok (mkTyped (TExprSequence tExprs) ty))
     | ExprReplicate (count, body) ->
         inferExpr env count |> Result.bind (fun tC ->
         inferExpr env body |> Result.bind (fun tB ->
-            Ok (mkTyped (TExprTuple [tC; tB]) tB.Type)))
+            Ok (mkTyped (TExprReplicate (tC, tB)) tB.Type)))
 
     // ---- Reynolds ----
     | ExprReynolds (kernel, isAntisym) ->
@@ -1200,12 +1203,12 @@ let rec inferExpr (env: TypeEnv) (expr: Expr) : TypeResult<TypedExpr> =
     | ExprStruct (name, fields) -> inferStructConstruction env name fields
 
     // ---- Sectioned operators ----
-    | ExprSection _op ->
+    | ExprSection op ->
         let paramTy = env.Subst.Fresh()
-        Ok (mkTyped (TExprLit LitUnit) (IRTFunc ([paramTy; paramTy], paramTy)))
-    | ExprPartialApp (_op, arg, _isLeft) ->
+        Ok (mkTyped (TExprSection op) (IRTFunc ([paramTy; paramTy], paramTy)))
+    | ExprPartialApp (op, arg, isLeft) ->
         inferExpr env arg |> Result.bind (fun tArg ->
-            Ok (mkTyped (TExprApp (mkTyped (TExprLit LitUnit) (IRTFunc ([tArg.Type], tArg.Type)), [tArg]))
+            Ok (mkTyped (TExprPartialApp (op, tArg, isLeft))
                         (IRTFunc ([tArg.Type], tArg.Type))))
 
     // ---- Assignment ----
@@ -1225,17 +1228,17 @@ let rec inferExpr (env: TypeEnv) (expr: Expr) : TypeResult<TypedExpr> =
             | Some e -> Error e
             | None ->
                 let _ = unify env.Subst tL.Type tR.Type
-                Ok (mkTyped (TExprLit LitUnit) IRTUnit)))
+                Ok (mkTyped (TExprAssign (tL, tR)) IRTUnit)))
 
     // ---- For expression ----
     | ExprFor (source, _constraints, kernelOpt) ->
         inferForExpr env source kernelOpt
 
     // ---- Align ----
-    | ExprAlign (exprs, _spec) ->
+    | ExprAlign (exprs, spec) ->
         exprs |> List.map (inferExpr env) |> sequenceResults |> Result.bind (fun tExprs ->
             let ty = if tExprs.IsEmpty then IRTUnit else tExprs.[0].Type
-            Ok (mkTyped (TExprZip tExprs) ty))
+            Ok (mkTyped (TExprAlign (tExprs, spec)) ty))
 
 // ============================================================================
 // 10a. Binary Operation Inference
@@ -1359,11 +1362,31 @@ and inferApply (env: TypeEnv) (tLeft: TypedExpr) (tRight: TypedExpr) : TypeResul
 
     match rL.Kind, rR.Kind with
     | TExprMethodFor mfInfo, TExprLambda lambdaInfo ->
-        buildApplyInfo env mfInfo lambdaInfo tLeft tRight false
+        buildApplyInfo env mfInfo lambdaInfo tLeft tRight false false
+
+    | TExprMethodFor mfInfo, TExprSection op ->
+        // Synthesize a TypedLambdaInfo from the operator section
+        let aId = env.Builder.FreshId()
+        let bId = env.Builder.FreshId()
+        let isComm = match op with
+                     | OpAdd | OpMul | OpEq | OpNeq | OpAnd | OpOr -> true
+                     | _ -> false
+        let paramTy = IRTScalar ETFloat64
+        let lambdaInfo : TypedLambdaInfo = {
+            Params = [{ Name = "a"; Type = paramTy; Index = 0; VarId = aId }
+                      { Name = "b"; Type = paramTy; Index = 1; VarId = bId }]
+            Body = mkTyped (TExprBinOp (Elementwise, op,
+                      mkTyped (TExprVar ("a", aId, None)) paramTy,
+                      mkTyped (TExprVar ("b", bId, None)) paramTy)) paramTy
+            ReturnType = paramTy
+            CommGroups = if isComm then [[0; 1]] else []
+            Captures = []; IsCommutative = isComm
+        }
+        buildApplyInfo env mfInfo lambdaInfo tLeft tRight false false
 
     | TExprMethodFor mfInfo, TExprReynolds (innerKernel, isAntisym) ->
         match innerKernel.Kind with
-        | TExprLambda li -> buildApplyInfo env mfInfo li tLeft tRight isAntisym
+        | TExprLambda li -> buildApplyInfo env mfInfo li tLeft tRight true isAntisym
         | _ -> buildGenericApply env tLeft tRight
 
     // object_for normalization: build synthetic MethodFor from right-side arrays
@@ -1387,16 +1410,17 @@ and inferApply (env: TypeEnv) (tLeft: TypedExpr) (tRight: TypedExpr) : TypeResul
         let mfInfo : TypedMethodForInfo = {
             Arrays = arrayExprs; Identities = identities; ArrayTypes = arrayTypes
             SDimsPerArray = sDimsPerArray; TotalSDims = totalSDims
+            SharedIndexType = None
         }
         let syntheticLoop = mkTyped (TExprMethodFor mfInfo) tLeft.Type
         // Resolve kernel from the object_for
         let resolvedKernel = resolveTypedExpr env objInfo.Kernel
         match resolvedKernel.Kind with
         | TExprLambda lambdaInfo ->
-            buildApplyInfo env mfInfo lambdaInfo syntheticLoop objInfo.Kernel false
+            buildApplyInfo env mfInfo lambdaInfo syntheticLoop objInfo.Kernel false false
         | TExprReynolds (innerK, isAntisym) ->
             match innerK.Kind with
-            | TExprLambda li -> buildApplyInfo env mfInfo li syntheticLoop objInfo.Kernel isAntisym
+            | TExprLambda li -> buildApplyInfo env mfInfo li syntheticLoop objInfo.Kernel true isAntisym
             | _ -> buildGenericApply env syntheticLoop objInfo.Kernel
         | _ -> buildGenericApply env syntheticLoop objInfo.Kernel
 
@@ -1404,7 +1428,8 @@ and inferApply (env: TypeEnv) (tLeft: TypedExpr) (tRight: TypedExpr) : TypeResul
 
 and buildApplyInfo (env: TypeEnv) (mfInfo: TypedMethodForInfo)
     (lambdaInfo: TypedLambdaInfo)
-    (tLoop: TypedExpr) (tKernel: TypedExpr) (hasReynolds: bool)
+    (tLoop: TypedExpr) (tKernel: TypedExpr)
+    (isReynolds: bool) (isAntisym: bool)
     : TypeResult<TypedExpr> =
 
     let identities = mfInfo.Identities
@@ -1420,21 +1445,51 @@ and buildApplyInfo (env: TypeEnv) (mfInfo: TypedMethodForInfo)
     let states = computeAllSymcomStates identities arrayTypes commGroups sDimsPerArray
     let triLevels = computeTriangularLevels arrayTypes identities commGroups sDimsPerArray
     let speedup = computePartialProductSpeedup arrayTypes identities commGroups sDimsPerArray
-    let outputType = deduceOutputType arrayTypes identities commGroups sDimsPerArray kernelOutputRank env.Builder
+    
+    // Infer output element type from kernel return type, falling back to input arrays
+    let outputElemType =
+        let resolved = env.Subst.Resolve(lambdaInfo.ReturnType)
+        match resolved with
+        | IRTScalar et -> et
+        | IRTArray arr -> arr.ElemType
+        | IRTUnitAnnotated (IRTScalar et, _) -> et
+        | _ ->
+            // Fall back to common element type of input arrays
+            arrayTypes |> List.tryPick (fun at -> Some at.ElemType)
+            |> Option.defaultValue ETFloat64
+    let outputType = deduceOutputType arrayTypes identities commGroups sDimsPerArray kernelOutputRank outputElemType env.Builder
 
     let reynoldsSpeedup =
-        if hasReynolds then
+        if isReynolds then
             let r = identities.Length
             if r > 1 then factorial r else 1L
         else 1L
 
+    // Store RESOLVED forms so Lowering produces IRMethodFor/IRLambda (not IRVar)
+    let resolvedLoop = mkTyped (TExprMethodFor mfInfo) tLoop.Type
+    let resolvedKernel =
+        let lambdaExpr = mkTyped (TExprLambda lambdaInfo) tKernel.Type
+        if isReynolds then mkTyped (TExprReynolds (lambdaExpr, isAntisym)) tKernel.Type
+        else lambdaExpr
+
+    let isCoIter = mfInfo.SharedIndexType.IsSome
+    // For co-iteration, output type is array with shared index (not outer product)
+    let outputType =
+        if isCoIter then
+            match mfInfo.SharedIndexType with
+            | Some sharedIdx ->
+                IRTArray { ElemType = outputElemType; IndexTypes = [sharedIdx]
+                           IsVirtual = false; Identity = None }
+            | None -> outputType
+        else outputType
     let info : TypedApplyInfo = {
-        Loop = tLoop; Kernel = tKernel
+        Loop = resolvedLoop; Kernel = resolvedKernel
         SymcomStates = states; TriangularLevels = triLevels
         SDimsPerArray = sDimsPerArray
         KernelInputRanks = kernelInputRanks; KernelOutputRank = kernelOutputRank
         SpeedupFactor = speedup; ReynoldsSpeedup = reynoldsSpeedup
-        HasReynolds = hasReynolds; OutputType = outputType
+        HasReynolds = isReynolds; OutputType = outputType
+        IsCoIteration = isCoIter
     }
     Ok (mkTyped (TExprApply info) outputType)
 
@@ -1446,6 +1501,7 @@ and buildGenericApply (env: TypeEnv) (tLeft: TypedExpr) (tRight: TypedExpr) : Ty
         KernelInputRanks = []; KernelOutputRank = 0
         SpeedupFactor = 1L; ReynoldsSpeedup = 1L
         HasReynolds = false; OutputType = IRTUnit
+        IsCoIteration = false
     }
     Ok (mkTyped (TExprApply info) IRTUnit)
 
@@ -1489,7 +1545,7 @@ and inferLambda env parms whereClause body : TypeResult<TypedExpr> =
         let varId = env.Builder.FreshId()
         let ty = match p.Type with
                  | Some t -> lowerTypeExpr env t
-                 | None -> IRTScalar ETFloat64  // Default for kernel params
+                 | None -> env.Subst.Fresh()  // Infer from usage
         paramEnv <- bindVarSimple p.Name varId ty paramEnv
         { Name = p.Name; Type = ty; Index = i; VarId = varId } : TypedParam)
 
@@ -1593,6 +1649,7 @@ and inferMatch env scrutinee cases : TypeResult<TypedExpr> =
 and inferBlock env stmts finalExpr : TypeResult<TypedExpr> =
     let mutable curEnv = env
     let mutable err : TypeError option = None
+    let mutable typedStmts : TypedStmt list = []
 
     for stmt in stmts do
         if err.IsNone then
@@ -1615,6 +1672,12 @@ and inferBlock env stmts finalExpr : TypeResult<TypedExpr> =
                                           | _ -> env.Subst.Fresh()
                                 curEnv <- bindVarSimple n (curEnv.Builder.FreshId()) eTy curEnv)
                     | _ -> ()
+                    let tb : TypedBinding = {
+                        Name = name; VarId = varId; Type = tValue.Type
+                        Identity = identity; IsMutable = (assign <> ReadOnly); Value = tValue
+                        SubBindings = []
+                    }
+                    typedStmts <- typedStmts @ [TStmtLet tb]
                 | Error e -> err <- Some e
             | StmtAssign (lhs, _, rhs) ->
                 match inferExpr curEnv lhs, inferExpr curEnv rhs with
@@ -1627,35 +1690,39 @@ and inferBlock env stmts finalExpr : TypeResult<TypedExpr> =
                             err <- Some (Other (sprintf "Cannot assign to '%s': static bindings are immutable" name))
                         | _ ->
                             let _ = unify curEnv.Subst tL.Type tR.Type
-                            ()
+                            typedStmts <- typedStmts @ [TStmtAssign (tL, tR)]
                     | _ ->
                         let _ = unify curEnv.Subst tL.Type tR.Type
-                        ()
+                        typedStmts <- typedStmts @ [TStmtAssign (tL, tR)]
                 | Error e, _ | _, Error e -> err <- Some e
             | StmtExpr e ->
                 match inferExpr curEnv e with
+                | Ok tE -> typedStmts <- typedStmts @ [TStmtExpr tE]
                 | Error e -> err <- Some e
-                | _ -> ()
 
     match err with
     | Some e -> Error e
     | None ->
         match finalExpr with
         | Some e -> inferExpr curEnv e |> Result.map (fun tF ->
-            mkTyped tF.Kind tF.Type)
-        | None -> Ok (mkTyped (TExprLit LitUnit) IRTUnit)
+            mkTyped (TExprBlock (typedStmts, Some tF)) tF.Type)
+        | None -> Ok (mkTyped (TExprBlock (typedStmts, None)) IRTUnit)
 
 and inferMethodFor env arrays : TypeResult<TypedExpr> =
     arrays |> List.map (inferExpr env) |> sequenceResults |> Result.bind (fun tArrays ->
         let identities = arrays |> List.map (fun arr ->
             match arr with ExprVar name -> AIDVariable name | _ -> AIDLiteral (env.Builder.FreshId()))
-        let arrayTypes = arrays |> List.map (getArrayType env)
+        let arrayTypes = tArrays |> List.mapi (fun i ta ->
+            match ta.Type with
+            | IRTArray at -> at
+            | _ -> getArrayType env arrays.[i])
         let sDimsPerArray = computeSDimsPerArray arrayTypes
         let totalSDims = List.sum sDimsPerArray
 
         let info : TypedMethodForInfo = {
             Arrays = tArrays; Identities = identities; ArrayTypes = arrayTypes
             SDimsPerArray = sDimsPerArray; TotalSDims = totalSDims
+            SharedIndexType = None
         }
         let loopTy = IRTLoop {
             Kind = LKMethod; Arity = Some arrays.Length
@@ -1701,7 +1768,88 @@ and inferStructConstruction env name fields : TypeResult<TypedExpr> =
 
 and inferForExpr env source kernelOpt : TypeResult<TypedExpr> =
     match source with
-    | ForArrays (arrays, _idxTyOpt) ->
+    | ForArrays (arrays, Some inClause) ->
+        // Co-iteration: for (A, B) in range<Idx<N>> <@> lambda(a, b) -> ...
+        // All arrays share the iteration space from the in-clause
+        arrays |> List.map (inferExpr env) |> sequenceResults |> Result.bind (fun tArrays ->
+        inferExpr env inClause |> Result.bind (fun tVirtual ->
+            // Extract the shared index type from the virtual array
+            let sharedIdx =
+                match tVirtual.Type with
+                | IRTArray at when at.IndexTypes.Length > 0 -> at.IndexTypes.[0]
+                | _ -> { Id = env.Builder.FreshId(); Arity = 1
+                         Extent = IRLit (IRLitInt 1L); Symmetry = SymNone
+                         Tag = None; Kind = SDimension; Dependencies = [] }
+            
+            let identities = arrays |> List.map (fun arr ->
+                match arr with ExprVar name -> AIDVariable name | _ -> AIDLiteral (env.Builder.FreshId()))
+            // For co-iteration, all arrays use the shared index type
+            let arrayTypes = tArrays |> List.mapi (fun i ta ->
+                match ta.Type with
+                | IRTArray at -> at
+                | _ -> getArrayType env arrays.[i])
+            let sDimsPerArray = arrayTypes |> List.map (fun _ -> 1)  // Each contributes 1 s-dim (shared)
+            let totalSDims = sDimsPerArray |> List.sum
+
+            let mfInfo : TypedMethodForInfo = {
+                Arrays = tArrays; Identities = identities; ArrayTypes = arrayTypes
+                SDimsPerArray = sDimsPerArray; TotalSDims = totalSDims
+                SharedIndexType = Some sharedIdx
+            }
+            let loopTy = IRTLoop {
+                Kind = LKMethod; Arity = Some arrays.Length
+                ArrayTypes = arrayTypes |> List.map IRTArray; KernelType = None
+            }
+            let tLoop = mkTyped (TExprMethodFor mfInfo) loopTy
+            
+            match kernelOpt with
+            | Some kernel ->
+                // Infer the kernel and build co-iteration ApplyInfo directly
+                inferExpr env kernel |> Result.bind (fun tK ->
+                    let resolvedKernel = resolveTypedExpr env tK
+                    match resolvedKernel.Kind with
+                    | TExprLambda lambdaInfo ->
+                        // Infer element type: prefer kernel return type, fall back to arrays
+                        let elemType =
+                            let resolved = env.Subst.Resolve(lambdaInfo.ReturnType)
+                            match resolved with
+                            | IRTScalar et -> et
+                            | IRTArray arr -> arr.ElemType
+                            | IRTUnitAnnotated (IRTScalar et, _) -> et
+                            | _ ->
+                                match arrayTypes with
+                                | at :: _ -> at.ElemType
+                                | [] -> ETFloat64
+                        // Output type: array with shared index structure
+                        let kernelOutputRank = 0  // scalar kernel for now
+                        let outputType = IRTArray {
+                            ElemType = elemType
+                            IndexTypes = [sharedIdx]
+                            IsVirtual = false; Identity = None
+                        }
+                        // Note: SymcomStates/TriangularLevels/SpeedupFactor are unused
+                        // by the co-iteration codegen path — it derives loop structure
+                        // directly from SharedIndexType
+                        let info : TypedApplyInfo = {
+                            Loop = mkTyped (TExprMethodFor mfInfo) loopTy
+                            Kernel = resolvedKernel
+                            SymcomStates = List.replicate totalSDims SCNeither
+                            TriangularLevels = List.replicate totalSDims false
+                            SDimsPerArray = sDimsPerArray
+                            KernelInputRanks = lambdaInfo.Params |> List.map (fun _ -> 0)
+                            KernelOutputRank = kernelOutputRank
+                            SpeedupFactor = 1L; ReynoldsSpeedup = 1L
+                            HasReynolds = false; OutputType = outputType
+                            IsCoIteration = true
+                        }
+                        Ok (mkTyped (TExprApply info) outputType)
+                    | _ ->
+                        // Fallback: treat as generic apply
+                        inferApply env tLoop tK)
+            | None -> Ok tLoop))
+    
+    | ForArrays (arrays, None) ->
+        // No in-clause: equivalent to method_for(arrays)
         inferMethodFor env arrays |> Result.bind (fun tLoop ->
             match kernelOpt with
             | Some kernel -> inferExpr env kernel |> Result.bind (fun tK -> inferApply env tLoop tK)
@@ -1736,7 +1884,8 @@ and checkDecl (env: TypeEnv) (decl: Decl) : TypeResult<TypedDecl * TypeEnv> =
                 | Some s -> bindVarPoly name varId tValue.Type identity assign (Some tValue) s env
                 | None -> bindVarFull name varId tValue.Type identity assign (Some tValue) env
 
-            // Handle destructuring at top level
+            // Handle destructuring at top level — collect sub-bindings for Lowering
+            let mutable subBindings : (string * IRId * IRType) list = []
             let env' =
                 match binding.Pattern with
                 | PatTuple pats ->
@@ -1744,36 +1893,71 @@ and checkDecl (env: TypeEnv) (decl: Decl) : TypeResult<TypedDecl * TypeEnv> =
                     |> List.fold (fun e (i, p) ->
                         match p with
                         | PatVar n ->
-                            let eTy = match tValue.Type with
-                                      | IRTTuple ts when i < ts.Length -> ts.[i]
+                            let eTy = match env.Subst.Resolve(tValue.Type) with
+                                      | IRTTuple ts when i < ts.Length -> env.Subst.Resolve(ts.[i])
                                       | _ -> env.Subst.Fresh()
-                            bindVarSimple n (env.Builder.FreshId()) eTy e
+                            let subId = env.Builder.FreshId()
+                            subBindings <- subBindings @ [(n, subId, eTy)]
+                            bindVarSimple n subId eTy e
                         | _ -> patternNames p |> List.fold (fun e2 n ->
-                            bindVarSimple n (env.Builder.FreshId()) (env.Subst.Fresh()) e2) e) env'
+                            let subId = env.Builder.FreshId()
+                            let eTy = env.Subst.Fresh()
+                            subBindings <- subBindings @ [(n, subId, eTy)]
+                            bindVarSimple n subId eTy e2) e) env'
                 | PatCons (h, t) ->
                     let e1 = patternNames h |> List.fold (fun e n ->
-                        bindVarSimple n (env.Builder.FreshId()) (env.Subst.Fresh()) e) env'
+                        let subId = env.Builder.FreshId()
+                        let eTy = env.Subst.Fresh()
+                        subBindings <- subBindings @ [(n, subId, eTy)]
+                        bindVarSimple n subId eTy e) env'
                     patternNames t |> List.fold (fun e n ->
-                        bindVarSimple n (env.Builder.FreshId()) (env.Subst.Fresh()) e) e1
-                | PatStruct (_, fieldPats) ->
+                        let subId = env.Builder.FreshId()
+                        let eTy = env.Subst.Fresh()
+                        subBindings <- subBindings @ [(n, subId, eTy)]
+                        bindVarSimple n subId eTy e) e1
+                | PatStruct (structName, fieldPats) ->
+                    // Look up struct field types from the type definition
+                    let structFields =
+                        match env.Subst.Resolve(tValue.Type) with
+                        | IRTNamed sName ->
+                            match Map.tryFind sName env.TypeDefs with
+                            | Some (TDIStruct (_, _, fields)) -> fields
+                            | _ -> []
+                        | _ -> []
+                    let fieldTypeMap = Map.ofList structFields
                     fieldPats |> List.fold (fun e (fieldName, pat) ->
                         match pat with
                         | PatVar n ->
-                            bindVarSimple n (env.Builder.FreshId()) (env.Subst.Fresh()) e
+                            let subId = env.Builder.FreshId()
+                            let eTy = Map.tryFind fieldName fieldTypeMap
+                                      |> Option.defaultWith (fun () -> env.Subst.Fresh())
+                            subBindings <- subBindings @ [(n, subId, eTy)]
+                            bindVarSimple n subId eTy e
                         | _ -> patternNames pat |> List.fold (fun e2 n ->
-                            bindVarSimple n (env.Builder.FreshId()) (env.Subst.Fresh()) e2) e) env'
+                            let subId = env.Builder.FreshId()
+                            let eTy = env.Subst.Fresh()
+                            subBindings <- subBindings @ [(n, subId, eTy)]
+                            bindVarSimple n subId eTy e2) e) env'
                 | _ -> env'
 
             let tb : TypedBinding = {
-                Name = name; VarId = varId; Type = tValue.Type
+                Name = name; VarId = varId; Type = env.Subst.Resolve(tValue.Type)
                 Identity = identity; IsMutable = (assign <> ReadOnly); Value = tValue
+                SubBindings = subBindings |> List.map (fun (n, id, ty) -> (n, id, env.Subst.Resolve ty))
             }
             Ok (TDeclLet tb, env'))
 
     | DeclStatic binding ->
         inferExpr env binding.Value |> Result.bind (fun tValue ->
             let name = match binding.Pattern with PatVar n -> n | _ -> "_"
-            let varId = env.Builder.FreshId()
+            // Reuse pre-pass varId if this static was already pre-registered
+            let varId =
+                match lookupVar name env with
+                | Some existing ->
+                    // Unify pre-pass type with inferred type so forward references resolve
+                    let _ = unify env.Subst existing.Type tValue.Type
+                    existing.VarId
+                | None -> env.Builder.FreshId()
             // Static bindings are ReadOnly and generalizable
             let scheme =
                 let s = generalize env.Subst env.Variables tValue.Type
@@ -1783,8 +1967,9 @@ and checkDecl (env: TypeEnv) (decl: Decl) : TypeResult<TypedDecl * TypeEnv> =
                 | Some s -> bindVarPoly name varId tValue.Type None ReadOnly (Some tValue) s env
                 | None -> bindVarFull name varId tValue.Type None ReadOnly (Some tValue) env
             let tb : TypedBinding = {
-                Name = name; VarId = varId; Type = tValue.Type
+                Name = name; VarId = varId; Type = env.Subst.Resolve(tValue.Type)
                 Identity = None; IsMutable = false; Value = tValue
+                SubBindings = []
             }
             Ok (TDeclStatic tb, env'))
 
@@ -1792,7 +1977,28 @@ and checkDecl (env: TypeEnv) (decl: Decl) : TypeResult<TypedDecl * TypeEnv> =
 
     | DeclType typeDecl ->
         let env' = registerTypeDecl env typeDecl
-        Ok (TDeclType typeDecl, env')
+        let ttd =
+            match typeDecl with
+            | TyDeclAlias (name, typeParams, body) ->
+                TTDAlias (name, typeParams, lowerTypeExpr env' body)
+            | TyDeclStruct (name, typeParams, fields, invariant) ->
+                let resolvedFields = fields |> List.map (fun f -> (f.Name, lowerTypeExpr env' f.Type))
+                let tInvariant =
+                    invariant |> Option.bind (fun expr ->
+                        // Bind field names for invariant checking
+                        let mutable invEnv = env'
+                        for f in fields do
+                            let fId = invEnv.Builder.FreshId()
+                            invEnv <- bindVarSimple f.Name fId (lowerTypeExpr env' f.Type) invEnv
+                        match inferExpr invEnv expr with
+                        | Ok tE -> Some tE
+                        | Error _ -> None)
+                TTDStruct (name, typeParams, resolvedFields, tInvariant)
+            | TyDeclSum (name, typeParams, variants) ->
+                let resolvedVariants = variants |> List.map (fun v ->
+                    (v.Name, v.Data |> Option.map (lowerTypeExpr env')))
+                TTDVariant (name, typeParams, resolvedVariants)
+        Ok (TDeclType ttd, env')
 
     | DeclInterface ifaceDecl -> 
         let env' = { env with Interfaces = Map.add ifaceDecl.Name ifaceDecl env.Interfaces }
@@ -1805,59 +2011,84 @@ and checkDecl (env: TypeEnv) (decl: Decl) : TypeResult<TypedDecl * TypeEnv> =
             | _ -> None
         match typeName with
         | Some tName ->
-            // Validate interface exists
+            // Register all mangled method names first (enables mutual recursion within impl block)
+            let mutable env' = env
+            let methodIds = implDecl.Methods |> List.map (fun method ->
+                let mangledName = sprintf "%s__%s" tName method.Name
+                let selfType = IRTNamed tName
+                let paramTypes = method.Params |> List.map (fun p ->
+                    if p.Name = "self" && p.Type.IsNone then selfType
+                    else match p.Type with Some t -> lowerTypeExpr env' t | None -> IRTScalar ETFloat64)
+                let retType = match method.ReturnType with
+                              | Some t -> lowerTypeExpr env' t
+                              | None -> env'.Subst.Fresh()
+                let funcType = IRTFunc (paramTypes, retType)
+                let funcVarId = env'.Builder.FreshId()
+                env' <- bindVarSimple mangledName funcVarId funcType env'
+                env' <- { env' with ImplMethods = Map.add (tName, method.Name) (funcVarId, funcType) env'.ImplMethods }
+                (mangledName, funcVarId, paramTypes, retType))
+
+            // Validate interface if specified
             match Map.tryFind implDecl.Interface env.Interfaces with
             | Some ifaceDecl ->
-                // Check each impl method has a matching signature in the interface
-                let mutable env' = env
-                for method in implDecl.Methods do
-                    let ifaceMethod = ifaceDecl.Methods |> List.tryFind (fun m -> m.Name = method.Name)
-                    match ifaceMethod with
-                    | None ->
-                        // Method not in interface — allow as an extension method for now
-                        ()
-                    | Some _ ->
-                        // Signature validation could be stricter, but for now just check name exists
-                        ()
-                    // Register the monomorphized method as a function
-                    let mangledName = sprintf "%s__%s" tName method.Name
-                    let selfType = IRTNamed tName
-                    let paramTypes = method.Params |> List.map (fun p ->
-                        if p.Name = "self" && p.Type.IsNone then selfType
-                        else match p.Type with Some t -> lowerTypeExpr env' t | None -> IRTScalar ETFloat64)
-                    let retType = match method.ReturnType with
-                                  | Some t -> lowerTypeExpr env' t
-                                  | None -> env'.Subst.Fresh()
-                    let funcType = IRTFunc (paramTypes, retType)
-                    let funcVarId = env'.Builder.FreshId()
-                    env' <- bindVarSimple mangledName funcVarId funcType env'
-                    env' <- { env' with ImplMethods = Map.add (tName, method.Name) (funcVarId, funcType) env'.ImplMethods }
-                // Verify all interface methods are implemented
                 let missing = ifaceDecl.Methods |> List.filter (fun ifaceMethod ->
                     not (implDecl.Methods |> List.exists (fun m -> m.Name = ifaceMethod.Name)))
                 match missing with
-                | [] -> Ok (TDeclImpl implDecl, env')
-                | _ ->
+                | _ :: _ ->
                     let names = missing |> List.map (fun m -> m.Name) |> String.concat ", "
                     Error (Other (sprintf "impl %s for %s is missing required methods: %s" implDecl.Interface tName names))
-            | None ->
-                // Interface not found — register methods anyway (allows standalone impls)
-                let mutable env' = env
-                for method in implDecl.Methods do
-                    let mangledName = sprintf "%s__%s" tName method.Name
-                    let selfType = IRTNamed tName
-                    let paramTypes = method.Params |> List.map (fun p ->
-                        if p.Name = "self" && p.Type.IsNone then selfType
-                        else match p.Type with Some t -> lowerTypeExpr env' t | None -> IRTScalar ETFloat64)
-                    let retType = match method.ReturnType with
-                                  | Some t -> lowerTypeExpr env' t
-                                  | None -> env'.Subst.Fresh()
-                    let funcType = IRTFunc (paramTypes, retType)
-                    let funcVarId = env'.Builder.FreshId()
-                    env' <- bindVarSimple mangledName funcVarId funcType env'
-                    env' <- { env' with ImplMethods = Map.add (tName, method.Name) (funcVarId, funcType) env'.ImplMethods }
-                Ok (TDeclImpl implDecl, env')
-        | None -> Ok (TDeclImpl implDecl, env)
+                | [] -> Ok ()
+            | None -> Ok ()
+            |> Result.bind (fun () ->
+                // Type-check each method body
+                let selfType = IRTNamed tName
+                let mutable typedMethods = []
+                let mutable methodErr = None
+                for (method, (mangledName, funcVarId, paramTypes, retType)) in List.zip implDecl.Methods methodIds do
+                    if methodErr.IsNone then
+                        let savedScope = env'.Subst.PushTypeVarScope()
+                        let mutable bodyEnv = enterScope env'
+                        let typedParams = method.Params |> List.mapi (fun i p ->
+                            let varId = env'.Builder.FreshId()
+                            let ty =
+                                if p.Name = "self" && p.Type.IsNone then selfType
+                                else paramTypes.[i]
+                            bodyEnv <- bindVarSimple p.Name varId ty bodyEnv
+                            { Name = p.Name; Type = ty; Index = i; VarId = varId } : TypedParam)
+                        match inferExpr bodyEnv method.Body with
+                        | Ok tBody ->
+                            let _ = unify env'.Subst tBody.Type retType
+                            let commGroups =
+                                extractCommGroups
+                                    (method.Params |> List.map (fun p -> { Name = p.Name; Type = p.Type } : LambdaParam))
+                                    method.WhereClause
+                            let tf : TypedFunctionDecl = {
+                                Name = mangledName; FuncId = funcVarId
+                                TypeParams = method.TypeParams
+                                Params = typedParams; ReturnType = tBody.Type
+                                WhereClause = method.WhereClause; Body = tBody
+                                CommGroups = commGroups; IsStatic = false
+                            }
+                            typedMethods <- typedMethods @ [tf]
+                        | Error e -> methodErr <- Some e
+                        env'.Subst.PopTypeVarScope(savedScope)
+                match methodErr with
+                | Some e -> Error e
+                | None ->
+                    let timpl : TypedImplDecl = {
+                        ForType = implDecl.ForType
+                        TypeName = tName
+                        Methods = typedMethods
+                    }
+                    Ok (TDeclImpl timpl, env'))
+        | None ->
+            // Can't resolve type name — pass through with empty methods
+            let timpl : TypedImplDecl = {
+                ForType = implDecl.ForType
+                TypeName = "_"
+                Methods = []
+            }
+            Ok (TDeclImpl timpl, env)
     | DeclUnit unitDecl ->
         let env' = registerUnit env unitDecl
         Ok (TDeclUnit unitDecl, env')
@@ -1874,12 +2105,17 @@ and checkFunctionDecl (env: TypeEnv) (funcDecl: FunctionDecl) : TypeResult<Typed
     prescanTypeVarNames env allAnnotations
 
     let paramTypes = funcDecl.Params |> List.map (fun p ->
-        match p.Type with Some t -> lowerTypeExpr env t | None -> IRTScalar ETFloat64)
+        match p.Type with Some t -> lowerTypeExpr env t | None -> env.Subst.Fresh())
     let retType = match funcDecl.ReturnType with
                   | Some t -> lowerTypeExpr env t
                   | None -> env.Subst.Fresh()
     let funcType = IRTFunc (paramTypes, retType)
-    let funcVarId = env.Builder.FreshId()
+    // Reuse pre-pass varId if this function was already pre-registered (static functions)
+    // This ensures other functions' bodies reference the same varId
+    let funcVarId =
+        match lookupVar funcDecl.Name env with
+        | Some existing -> existing.VarId
+        | None -> env.Builder.FreshId()
     // Register function BEFORE body (enables recursion)
     let envWithFunc = bindVarSimple funcDecl.Name funcVarId funcType env
 
@@ -1896,10 +2132,12 @@ and checkFunctionDecl (env: TypeEnv) (funcDecl: FunctionDecl) : TypeResult<Typed
                 extractCommGroups
                     (funcDecl.Params |> List.map (fun p -> { Name = p.Name; Type = p.Type } : LambdaParam))
                     funcDecl.WhereClause
+            let resolvedParams = typedParams |> List.map (fun p ->
+                { p with Type = env.Subst.Resolve(p.Type) } : TypedParam)
             let tf : TypedFunctionDecl = {
                 Name = funcDecl.Name; FuncId = funcVarId
                 TypeParams = funcDecl.TypeParams
-                Params = typedParams; ReturnType = tBody.Type
+                Params = resolvedParams; ReturnType = env.Subst.Resolve(retType)
                 WhereClause = funcDecl.WhereClause; Body = tBody
                 CommGroups = commGroups; IsStatic = funcDecl.IsStatic
             }
@@ -1929,6 +2167,182 @@ and registerTypeDecl (env: TypeEnv) (typeDecl: TypeDecl) : TypeEnv =
         let env' = registerTypeDef name (TDIVariant (name, typeParams, variantTypes)) env
         variants |> List.fold (fun e v ->
             registerVariantTag v.Name name (v.Data |> Option.map (lowerTypeExpr env)) e) env'
+
+// ============================================================================
+// 11b. Zonking — Final Type Resolution
+// ============================================================================
+// After type checking, some IRTInfer nodes may remain in the typed AST.
+// These are either (a) solved but unresolved (the substitution knows the answer
+// but nobody called Resolve on that particular node), or (b) genuinely ambiguous
+// (no constraints were generated). Zonking walks the entire typed AST, resolves
+// every type through the substitution, and defaults any remaining unknowns to
+// Float64. After zonking, no IRTInfer should remain in the program.
+
+/// Finalize a type: resolve through substitution, default unsolved to Float64.
+let rec zonkType (subst: Subst) (ty: IRType) : IRType =
+    let resolved = subst.Resolve ty
+    match resolved with
+    | IRTInfer _ -> IRTScalar ETFloat64  // Unsolved — default
+    | IRTScalar _ | IRTUnit | IRTNat _ | IRTNamed _ -> resolved
+    | IRTArray arr ->
+        IRTArray { arr with IndexTypes = arr.IndexTypes |> List.map (zonkIndexType subst) }
+    | IRTTuple ts -> IRTTuple (ts |> List.map (zonkType subst))
+    | IRTFunc (args, ret) -> IRTFunc (args |> List.map (zonkType subst), zonkType subst ret)
+    | IRTComputation t -> IRTComputation (zonkType subst t)
+    | IRTLoop lt ->
+        IRTLoop { lt with
+                    ArrayTypes = lt.ArrayTypes |> List.map (zonkType subst)
+                    KernelType = lt.KernelType |> Option.map (zonkType subst) }
+    | IRTPoly (base', var) -> IRTPoly (zonkType subst base', var)
+    | IRTUnitAnnotated (inner, units) -> IRTUnitAnnotated (zonkType subst inner, units)
+
+and zonkIndexType (subst: Subst) (idx: IRIndexType) : IRIndexType = idx  // Extents are IRExpr, not IRType
+
+/// Zonk a TypedParam
+let zonkParam (subst: Subst) (p: TypedParam) : TypedParam =
+    { p with Type = zonkType subst p.Type }
+
+/// Zonk a TypedVarInfo
+let zonkVarInfo (subst: Subst) (v: TypedVarInfo) : TypedVarInfo =
+    { v with Type = zonkType subst v.Type }
+
+/// Zonk all types in a TypedExpr tree (bottom-up)
+let rec zonkExpr (subst: Subst) (expr: TypedExpr) : TypedExpr =
+    let z = zonkExpr subst
+    let zs = List.map z
+    let zt = zonkType subst
+    let kind =
+        match expr.Kind with
+        // Leaves
+        | TExprLit _ | TExprVar _ | TExprQualified _
+        | TExprArity _ | TExprRange _ | TExprReverse _
+        | TExprSection _ -> expr.Kind
+        // Unary expr
+        | TExprUnaryOp (op, e) -> TExprUnaryOp (op, z e)
+        | TExprPure e -> TExprPure (z e)
+        | TExprCompute e -> TExprCompute (z e)
+        | TExprRank e -> TExprRank (z e)
+        | TExprReynolds (k, a) -> TExprReynolds (z k, a)
+        // Binary expr
+        | TExprBinOp (m, op, l, r) -> TExprBinOp (m, op, z l, z r)
+        | TExprBind (a, b) -> TExprBind (z a, z b)
+        | TExprParallel (a, b) -> TExprParallel (z a, z b)
+        | TExprChoice (a, b) -> TExprChoice (z a, z b)
+        | TExprCompose (a, b) -> TExprCompose (z a, z b)
+        | TExprGuard (c, b) -> TExprGuard (z c, z b)
+        | TExprReplicate (c, b) -> TExprReplicate (z c, z b)
+        | TExprAssign (l, r) -> TExprAssign (z l, z r)
+        | TExprPartialApp (op, arg, isL) -> TExprPartialApp (op, z arg, isL)
+        // Ternary
+        | TExprIf (c, t, e) -> TExprIf (z c, z t, z e)
+        // Indexing
+        | TExprApp (f, args) -> TExprApp (z f, zs args)
+        | TExprTupleIndex (t, i) -> TExprTupleIndex (z t, z i)
+        | TExprIndex (arr, idxs, id) -> TExprIndex (z arr, zs idxs, id)
+        | TExprField (obj, fld, idx) -> TExprField (z obj, fld, idx)
+        // Collections
+        | TExprTuple es -> TExprTuple (zs es)
+        | TExprArrayLit (es, arrTy) -> TExprArrayLit (zs es, arrTy)
+        | TExprZip es -> TExprZip (zs es)
+        | TExprStack es -> TExprStack (zs es)
+        | TExprSequence es -> TExprSequence (zs es)
+        | TExprAlign (es, sp) -> TExprAlign (zs es, sp)
+        | TExprBlocked (it, bs) -> TExprBlocked (it, z bs)
+        // Structured
+        | TExprLet (name, vid, value, body) -> TExprLet (name, vid, z value, z body)
+        | TExprMatch (scr, cases) ->
+            TExprMatch (z scr, cases |> List.map (zonkMatchCase subst))
+        | TExprLambda info -> TExprLambda (zonkLambdaInfo subst info)
+        | TExprStruct (tn, flds) -> TExprStruct (tn, flds |> List.map (fun (n, e) -> (n, z e)))
+        | TExprBlock (stmts, final) ->
+            TExprBlock (stmts |> List.map (zonkStmt subst), final |> Option.map z)
+        // Loop constructs
+        | TExprMethodFor info ->
+            TExprMethodFor { info with
+                                Arrays = zs info.Arrays
+                                ArrayTypes = info.ArrayTypes |> List.map (fun at ->
+                                    { at with IndexTypes = at.IndexTypes |> List.map (zonkIndexType subst) }) }
+        | TExprObjectFor info ->
+            TExprObjectFor { info with Kernel = z info.Kernel }
+        | TExprApply info ->
+            TExprApply { info with
+                            Loop = z info.Loop
+                            Kernel = z info.Kernel
+                            OutputType = zt info.OutputType }
+    { expr with Kind = kind; Type = zt expr.Type }
+
+and zonkMatchCase (subst: Subst) (case: TypedMatchCase) : TypedMatchCase =
+    { Pattern = zonkPattern subst case.Pattern
+      Guard = case.Guard |> Option.map (zonkExpr subst)
+      Body = zonkExpr subst case.Body }
+
+and zonkPattern (subst: Subst) (pat: TypedPattern) : TypedPattern =
+    let zt = zonkType subst
+    let kind =
+        match pat.Kind with
+        | TPatWild | TPatLit _ -> pat.Kind
+        | TPatVar (n, id) -> TPatVar (n, id)
+        | TPatTuple ps -> TPatTuple (ps |> List.map (zonkPattern subst))
+        | TPatCons (h, t) -> TPatCons (zonkPattern subst h, zonkPattern subst t)
+        | TPatVariant (tag, payload) -> TPatVariant (tag, payload |> Option.map (zonkPattern subst))
+        | TPatStruct (tn, flds) -> TPatStruct (tn, flds |> List.map (fun (n, p) -> (n, zonkPattern subst p)))
+        | TPatGuarded (p, e) -> TPatGuarded (zonkPattern subst p, zonkExpr subst e)
+    { Kind = kind
+      Type = zt pat.Type
+      Bindings = pat.Bindings |> List.map (fun (n, id, ty) -> (n, id, zt ty)) }
+
+and zonkStmt (subst: Subst) (stmt: TypedStmt) : TypedStmt =
+    match stmt with
+    | TStmtLet b -> TStmtLet (zonkBinding subst b)
+    | TStmtAssign (l, r) -> TStmtAssign (zonkExpr subst l, zonkExpr subst r)
+    | TStmtExpr e -> TStmtExpr (zonkExpr subst e)
+
+and zonkBinding (subst: Subst) (b: TypedBinding) : TypedBinding =
+    let zt = zonkType subst
+    { b with
+        Type = zt b.Type
+        Value = zonkExpr subst b.Value
+        SubBindings = b.SubBindings |> List.map (fun (n, id, ty) -> (n, id, zt ty)) }
+
+and zonkLambdaInfo (subst: Subst) (info: TypedLambdaInfo) : TypedLambdaInfo =
+    { info with
+        Params = info.Params |> List.map (zonkParam subst)
+        Body = zonkExpr subst info.Body
+        ReturnType = zonkType subst info.ReturnType
+        Captures = info.Captures |> List.map (zonkVarInfo subst) }
+
+/// Zonk a TypedFunctionDecl
+let zonkFunctionDecl (subst: Subst) (decl: TypedFunctionDecl) : TypedFunctionDecl =
+    { decl with
+        Params = decl.Params |> List.map (zonkParam subst)
+        ReturnType = zonkType subst decl.ReturnType
+        Body = zonkExpr subst decl.Body }
+
+/// Zonk a TypedTypeDef
+let zonkTypeDef (subst: Subst) (td: TypedTypeDef) : TypedTypeDef =
+    let zt = zonkType subst
+    match td with
+    | TTDAlias (n, tp, ty) -> TTDAlias (n, tp, zt ty)
+    | TTDStruct (n, tp, flds, inv) ->
+        TTDStruct (n, tp, flds |> List.map (fun (fn, ft) -> (fn, zt ft)),
+                   inv |> Option.map (zonkExpr subst))
+    | TTDVariant (n, tp, vs) ->
+        TTDVariant (n, tp, vs |> List.map (fun (vn, vt) -> (vn, vt |> Option.map zt)))
+
+/// Zonk a TypedDecl
+let zonkDecl (subst: Subst) (decl: TypedDecl) : TypedDecl =
+    match decl with
+    | TDeclLet b -> TDeclLet (zonkBinding subst b)
+    | TDeclStatic b -> TDeclStatic (zonkBinding subst b)
+    | TDeclFunction fd -> TDeclFunction (zonkFunctionDecl subst fd)
+    | TDeclType td -> TDeclType (zonkTypeDef subst td)
+    | TDeclImpl impl ->
+        TDeclImpl { impl with Methods = impl.Methods |> List.map (zonkFunctionDecl subst) }
+    | TDeclInterface _ | TDeclUnit _ | TDeclImport _ -> decl
+
+/// Zonk an entire TypedModule
+let zonkModule (subst: Subst) (modul: TypedModule) : TypedModule =
+    { modul with Decls = modul.Decls |> List.map (zonkDecl subst) }
 
 // ============================================================================
 // 12. Module and Program
@@ -1984,7 +2398,9 @@ let checkModule (env: TypeEnv) (modul: ModuleDecl) : TypedModule * CompileError 
             // Continue with pre-failure env — the failed decl is skipped
     
     let typedModule = { Name = Some modul.Name; Decls = List.rev decls }
-    (typedModule, List.rev errors)
+    // Zonk: resolve all IRTInfer through the substitution, default unsolved to Float64
+    let zonked = zonkModule currentEnv.Subst typedModule
+    (zonked, List.rev errors)
 
 let checkProgram (program: Program) : TypedProgram * CompileError list =
     let env = emptyEnv ()

@@ -195,15 +195,15 @@ and IRUnaryOp =
 /// IR Expressions - SSA-like representation
 and IRExpr =
     | IRLit of IRLit
-    | IRVar of IRId
-    | IRParam of name: string * idx: int
+    | IRVar of id: IRId * ty: IRType
+    | IRParam of name: string * idx: int * ty: IRType
     | IRBinOp of IRBinOpMode * IRBinOp * IRExpr * IRExpr
     | IRUnaryOp of IRUnaryOp * IRExpr
     | IRArrayLit of IRExpr list * IRArrayType
     | IRIndex of array: IRExpr * index: IRExpr list * identity: ArrayIdentity option
     | IRSlice of array: IRExpr * dim: int * start: IRExpr * stop: IRExpr
     | IRCurry of array: IRExpr * index: IRExpr * resultRank: int
-    | IRApp of func: IRExpr * args: IRExpr list
+    | IRApp of func: IRExpr * args: IRExpr list * retType: IRType
     | IRLambda of LambdaInfo
     | IRTuple of IRExpr list
     | IRTupleProj of IRExpr * int
@@ -274,6 +274,7 @@ and MethodForInfo = {
     ArrayTypes: IRArrayType list
     SDimsPerArray: int list
     TotalSDims: int
+    SharedIndexType: IRIndexType option  // For co-iteration: shared index space from 'in' clause
 }
 
 /// Information about an object_for construction
@@ -297,6 +298,7 @@ and ApplyInfo = {
     ReynoldsSpeedup: int64        // Additional speedup from Reynolds (n!× for triangular)
     HasReynolds: bool              // Whether kernel has Reynolds annotation
     OutputType: IRType             // Deduced output array type
+    IsCoIteration: bool            // True for 'for ... in' co-iteration
 }
 
 and IRParam = {
@@ -404,8 +406,8 @@ let indexSpacesMatch (a: IndexSpaceInfo) (b: IndexSpaceInfo) : bool =
         | Some tagA, Some tagB -> tagA = tagB
         | None, None ->
             match a.Extent, b.Extent with
-            | IRVar idA, IRVar idB -> idA = idB
-            | IRParam (nA, _), IRParam (nB, _) -> nA = nB
+            | IRVar (idA, _), IRVar (idB, _) -> idA = idB
+            | IRParam (nA, _, _), IRParam (nB, _, _) -> nA = nB
             | IRLit (IRLitInt nA), IRLit (IRLitInt nB) -> nA = nB
             | _ -> false
         | _ -> false
@@ -723,7 +725,7 @@ let computeTriangularBound
     | SCSymmetric | SCCommutative | SCBoth ->
         match priorIndices with
         | [] -> IRLit (IRLitInt 0L)
-        | lastIdx :: _ -> IRVar lastIdx
+        | lastIdx :: _ -> IRVar (lastIdx, IRTScalar ETInt64)
 
 // ============================================================================
 // IR Declarations
@@ -805,7 +807,7 @@ type IRBuilder() =
     member _.Reset() = 
         nextId <- 0
         nextInferId <- 0
-    member this.MkVar() = IRVar (this.FreshId())
+    member this.MkVar(ty) = IRVar (this.FreshId(), ty)
     
     member _.FreshInferType() = 
         let id = nextInferId
@@ -828,6 +830,7 @@ let deduceOutputType
     (commGroups: int list list)
     (sDimsPerArray: int list)
     (kernelOutputRank: int)
+    (elemType: ElemType)
     (builder: IRBuilder) : IRType =
     
     if arrayTypes.IsEmpty then IRTUnit
@@ -904,10 +907,10 @@ let deduceOutputType
         let allDims = outputSDims @ outputTDims
         
         if allDims.IsEmpty then
-            IRTScalar ETFloat64  // Scalar output
+            IRTScalar elemType  // Scalar output
         else
             IRTArray { 
-                ElemType = ETFloat64
+                ElemType = elemType
                 IndexTypes = allDims
                 IsVirtual = false
                 Identity = None 
@@ -935,8 +938,17 @@ let buildLoopNest (info: ApplyInfo) (builder: IRBuilder) : LoopNest =
     let triangularLevels = computeTriangularLevels arrayTypes identities commGroups sDimsPerArray
     let speedup = computePartialProductSpeedup arrayTypes identities commGroups sDimsPerArray
     
-    // Deduce output type
-    let outputType = deduceOutputType arrayTypes identities commGroups sDimsPerArray info.KernelOutputRank builder
+    // Deduce output type - infer element type from kernel/arrays
+    let elemType =
+        match info.Kernel with
+        | IRLambda lInfo ->
+            lInfo.Params |> List.tryPick (fun p ->
+                match p.Type with IRTScalar et -> Some et | IRTArray arr -> Some arr.ElemType | _ -> None)
+            |> Option.defaultValue ETFloat64
+        | _ ->
+            arrayTypes |> List.tryPick (fun at -> Some at.ElemType)
+            |> Option.defaultValue ETFloat64
+    let outputType = deduceOutputType arrayTypes identities commGroups sDimsPerArray info.KernelOutputRank elemType builder
     
     let mutable levels = []
     let mutable priorIndices = []
@@ -982,12 +994,9 @@ type VirtualKind =
     | VirtualRange        // range<I>: elem = i
     | VirtualReverse      // reverse<I>: elem = (n - 1 - i)
 
-type LoopIndexBinding = {
-    /// Loop level index (0, 1, 2, ...)
-    Level: int
-    /// Generated index variable name ("__i0", "__i1", ...)
-    IndexName: string
-    /// Which input array this index iterates over (0-based)
+/// Per-array element peeling info at a loop level
+type ElementBinding = {
+    /// Which input array this element comes from (0-based)
     ArrayPosition: int
     /// Name of the array expression (for code gen)
     ArrayName: string
@@ -999,8 +1008,26 @@ type LoopIndexBinding = {
     DimIndex: int
     /// For SymIdx: which arity component (0, 1, 2, ...)
     ArityComponent: int
+    /// Element type of the array (for explicit typing)
+    ArrayElemType: ElemType
+    /// Total rank of the array being indexed
+    ArrayRank: int
+    /// Virtual array kind (range, reverse, or real)
+    Virtual: VirtualKind
+}
+
+/// A single loop level: how to iterate + what to peel
+type LoopIndexBinding = {
+    /// Loop level index (0, 1, 2, ...)
+    Level: int
+    /// Generated index variable name ("__i0", "__i1", ...)
+    IndexName: string
     /// Extent as IRExpr (for flexible code gen)
     Extent: IRExpr
+    /// Array name for non-literal extent lookup (e.g. "A" → "A_extents[dim]")
+    ExtentArrayRef: string
+    /// Dimension index for non-literal extent lookup
+    ExtentDimRef: int
     /// List of prior level indices to subtract from bound (empty = no subtraction)
     BoundDependencies: int list
     /// Extra offset to subtract from bound (1 for antisymmetric strict i < j)
@@ -1009,12 +1036,8 @@ type LoopIndexBinding = {
     IsParallel: bool
     /// Symcom state at this level
     State: SymcomState
-    /// Element type of the array (for explicit typing)
-    ArrayElemType: ElemType
-    /// Total rank of the array being indexed
-    ArrayRank: int
-    /// Virtual array kind (range, reverse, or real)
-    Virtual: VirtualKind
+    /// Element bindings at this level (1 for outer product, N for co-iteration)
+    Elements: ElementBinding list
 }
 
 /// Complete information needed to generate a loop nest
@@ -1088,50 +1111,17 @@ let buildLoopNestCodeGen
         | IRReynolds (IRLambda lInfo, _) -> (lInfo.Params, lInfo.Body, lInfo.CommGroups, lInfo.Captures)
         | _ -> ([], IRLit IRLitUnit, [], [])
     
-    // Build loop level structure
-    let loopLevels = buildLoopLevelStructure arrayTypes sDimsPerArray
-    let triangularLevels = info.TriangularLevels
-    let symcomStates = info.SymcomStates
-    
-    // Compute the iminMap - for each level, where does its bound dependency come from?
-    // This mirrors the original parser.fs logic
-    let iminMap = 
-        loopLevels |> List.mapi (fun globalIdx level ->
-            let state = if globalIdx < symcomStates.Length then symcomStates.[globalIdx] else SCNeither
-            match state with
-            | SCNeither -> globalIdx  // Self - no dependency
-            | SCSymmetric -> globalIdx - 1  // Previous level (same array, prior dim)
-            | SCCommutative -> globalIdx - 1  // Previous level (different array, same dim position)
-            | SCBoth -> globalIdx - 1  // Previous level
-        )
-    
-    // Compute dependency path for each level - all indices that need to be subtracted
-    let rec dependencyPath (level: int) : int list =
-        if level < 0 || level >= iminMap.Length then []
-        elif iminMap.[level] = level then []  // Self-referential, no dependencies
-        else iminMap.[level] :: dependencyPath iminMap.[level]
-    
-    let boundDependencies = loopLevels |> List.mapi (fun i _ -> dependencyPath i)
-    
-    // Generate index names and track prior indices for triangular bounds
-    let mutable bindings = []
-    
-    // Map array position to param
+    // Map array position to kernel param
     let paramByArrayPos = 
         kernelParams |> List.mapi (fun i p -> (i, p)) |> Map.ofList
     
-    for levelInfo in loopLevels do
-        let level = levelInfo.GlobalLevelIndex
-        let indexName = sprintf "__i%d" level
-        let arrayPos = levelInfo.ArrayIndex
+    // Helper: create an ElementBinding for an array at a given arity component
+    let mkElement (arrayPos: int) (arityComponent: int) (dimIndex: int) =
         let arrName = if arrayPos < arrayNames.Length then arrayNames.[arrayPos] else sprintf "arr%d" arrayPos
-        
-        // Get array type info for this position
         let arrType = if arrayPos < arrayTypes.Length then Some arrayTypes.[arrayPos] else None
         let elemType = arrType |> Option.map (fun t -> t.ElemType) |> Option.defaultValue ETFloat64
-        let arrRank = arrType |> Option.map (fun t -> t.IndexTypes.Length) |> Option.defaultValue 1
-        
-        // Detect virtual array kind from the array expression
+        let arrRank = arrType |> Option.map (fun t -> t.IndexTypes |> List.sumBy (fun i -> i.Arity))
+                              |> Option.defaultValue 1
         let virtualKind =
             if arrayPos < arrays.Length then
                 match arrays.[arrayPos] with
@@ -1139,45 +1129,117 @@ let buildLoopNestCodeGen
                 | IRVirtualReverse _ -> VirtualReverse
                 | _ -> RealArray
             else RealArray
-        
-        // Get corresponding kernel param
         let param = Map.tryFind arrayPos paramByArrayPos
         let paramName = param |> Option.map (fun p -> p.Name) |> Option.defaultValue (sprintf "p%d" arrayPos)
         let paramVarId = param |> Option.map (fun p -> p.VarId) |> Option.defaultValue -1
-        
-        // Get the dependency path for this level's bound
-        let deps = if level < boundDependencies.Length then boundDependencies.[level] else []
-        let isTriangular = level < triangularLevels.Length && triangularLevels.[level]
-        let state = if level < symcomStates.Length then symcomStates.[level] else SCNeither
-        
-        // Parallelism: typically outermost non-triangular loop
-        let isParallel = level = 0 && not isTriangular
-        
-        // For antisymmetric indices, strict bound i < j means subtract 1 extra
-        let strictOffset =
-            if isTriangular && levelInfo.IndexSpace.Symmetry = SymAntisymmetric then 1
-            else 0
-        
-        let binding = {
-            Level = level
-            IndexName = indexName
+        {
             ArrayPosition = arrayPos
             ArrayName = arrName
             ParamName = paramName
             ParamVarId = paramVarId
-            DimIndex = levelInfo.LocalDimIndex
-            ArityComponent = levelInfo.ArityIndex
-            Extent = levelInfo.IndexSpace.Extent
-            BoundDependencies = deps  // List of prior levels to subtract
-            StrictOffset = strictOffset
-            IsParallel = isParallel
-            State = state
+            DimIndex = dimIndex
+            ArityComponent = arityComponent
             ArrayElemType = elemType
             ArrayRank = arrRank
             Virtual = virtualKind
         }
-        
-        bindings <- bindings @ [binding]
+    
+    let bindings =
+        if info.IsCoIteration then
+            // Co-iteration: build levels from shared index type, all arrays peel at every level
+            let sharedIdx =
+                match info.Loop with
+                | IRMethodFor mf -> mf.SharedIndexType
+                | _ -> None
+            match sharedIdx with
+            | Some idx ->
+                let numLevels = idx.Arity
+                let isSymmetric = idx.Symmetry = SymSymmetric
+                let isAntisymmetric = idx.Symmetry = SymAntisymmetric
+                let isTriangular = isSymmetric || isAntisymmetric
+                
+                [0 .. numLevels - 1] |> List.map (fun level ->
+                    let indexName = sprintf "__i%d" level
+                    let deps = if isTriangular && level > 0 then [0 .. level - 1] else []
+                    let strictOffset =
+                        if isTriangular && isAntisymmetric then level
+                        else 0
+                    let isParallel = level = 0 && not isTriangular
+                    let state =
+                        if isTriangular && level > 0 then SCSymmetric
+                        else SCNeither
+                    // Reference first real array for extent lookups
+                    let refArrayName = if arrayNames.Length > 0 then arrayNames.[0] else "arr0"
+                    // All arrays peel at this level
+                    let elements =
+                        [0 .. arrayNames.Length - 1] |> List.map (fun arrIdx ->
+                            mkElement arrIdx level level)
+                    {
+                        Level = level
+                        IndexName = indexName
+                        Extent = idx.Extent
+                        ExtentArrayRef = refArrayName
+                        ExtentDimRef = 0  // Shared index: all dims have same extent
+                        BoundDependencies = deps
+                        StrictOffset = strictOffset
+                        IsParallel = isParallel
+                        State = state
+                        Elements = elements
+                    })
+            | None -> []  // Should not happen
+        else
+            // Outer product: one element per level
+            let loopLevels = buildLoopLevelStructure arrayTypes sDimsPerArray
+            let triangularLevels = info.TriangularLevels
+            let symcomStates = info.SymcomStates
+            
+            // Compute the iminMap
+            let iminMap = 
+                loopLevels |> List.mapi (fun globalIdx level ->
+                    let state = if globalIdx < symcomStates.Length then symcomStates.[globalIdx] else SCNeither
+                    match state with
+                    | SCNeither -> globalIdx
+                    | SCSymmetric -> globalIdx - 1
+                    | SCCommutative -> globalIdx - 1
+                    | SCBoth -> globalIdx - 1
+                )
+            
+            // Compute dependency path for each level
+            let rec dependencyPath (level: int) : int list =
+                if level < 0 || level >= iminMap.Length then []
+                elif iminMap.[level] = level then []
+                else iminMap.[level] :: dependencyPath iminMap.[level]
+            
+            let boundDependencies = loopLevels |> List.mapi (fun i _ -> dependencyPath i)
+            
+            loopLevels |> List.map (fun levelInfo ->
+                let level = levelInfo.GlobalLevelIndex
+                let indexName = sprintf "__i%d" level
+                let arrayPos = levelInfo.ArrayIndex
+                let arrName = if arrayPos < arrayNames.Length then arrayNames.[arrayPos] else sprintf "arr%d" arrayPos
+                
+                let deps = if level < boundDependencies.Length then boundDependencies.[level] else []
+                let isTriangular = level < triangularLevels.Length && triangularLevels.[level]
+                let state = if level < symcomStates.Length then symcomStates.[level] else SCNeither
+                let isParallel = level = 0 && not isTriangular
+                let strictOffset =
+                    if isTriangular && levelInfo.IndexSpace.Symmetry = SymAntisymmetric then 1
+                    else 0
+                
+                let element = mkElement arrayPos levelInfo.ArityIndex levelInfo.LocalDimIndex
+                
+                {
+                    Level = level
+                    IndexName = indexName
+                    Extent = levelInfo.IndexSpace.Extent
+                    ExtentArrayRef = arrName
+                    ExtentDimRef = levelInfo.LocalDimIndex
+                    BoundDependencies = deps
+                    StrictOffset = strictOffset
+                    IsParallel = isParallel
+                    State = state
+                    Elements = [element]
+                })
     
     let outputSymmVec = buildSymmVec info.OutputType
     
@@ -1193,6 +1255,228 @@ let buildLoopNestCodeGen
         SpeedupFactor = info.SpeedupFactor
         HasReynolds = info.HasReynolds
     }
+
+// ============================================================================
+// Expression Mapping (bottom-up rewriter)
+// ============================================================================
+
+/// Apply f to every sub-expression bottom-up, then to the root.
+/// f should return the expression unchanged for cases it doesn't handle.
+let rec mapIRExpr (f: IRExpr -> IRExpr) (expr: IRExpr) : IRExpr =
+    let m = mapIRExpr f
+    let ms = List.map m
+    let mapped =
+        match expr with
+        // Leaves
+        | IRLit _ | IRVar _ | IRParam _ | IRNth | IRZero
+        | IRRange _ | IRVirtualReverse _ | IRArity _ -> expr
+        // Unary
+        | IRUnaryOp (op, e) -> IRUnaryOp (op, m e)
+        | IRTupleProj (e, i) -> IRTupleProj (m e, i)
+        | IRTupleDecons e -> IRTupleDecons (m e)
+        | IRFieldAccess (e, fld) -> IRFieldAccess (m e, fld)
+        | IRPure e -> IRPure (m e)
+        | IRCompute e -> IRCompute (m e)
+        | IRReynolds (e, a) -> IRReynolds (m e, a)
+        | IRTranspose (e, p) -> IRTranspose (m e, p)
+        | IRReverse (e, d) -> IRReverse (m e, d)
+        | IRDiag e -> IRDiag (m e)
+        | IRRank e -> IRRank (m e)
+        | IRExtent (e, d) -> IRExtent (m e, d)
+        | IRAssign (id, v) -> IRAssign (id, m v)
+        // Binary
+        | IRBinOp (mode, op, l, r) -> IRBinOp (mode, op, m l, m r)
+        | IRTupleCons (h, t) -> IRTupleCons (m h, m t)
+        | IRBind (c, k) -> IRBind (m c, m k)
+        | IRParallel (a, b, d) -> IRParallel (m a, m b, d)
+        | IRFusion (a, b) -> IRFusion (m a, m b)
+        | IRChoice (a, b) -> IRChoice (m a, m b)
+        | IRArrayProduct (a, b) -> IRArrayProduct (m a, m b)
+        | IRComposeObj (a, b) -> IRComposeObj (m a, m b)
+        | IRComposeMeth (a, b) -> IRComposeMeth (m a, m b)
+        | IRCompose (a, b) -> IRCompose (m a, m b)
+        | IRFunctorMap (fn, c) -> IRFunctorMap (m fn, m c)
+        | IRGuard (c, b) -> IRGuard (m c, m b)
+        | IRReplicate (c, b) -> IRReplicate (m c, m b)
+        | IRPolyIndex (p, i) -> IRPolyIndex (m p, m i)
+        // Ternary
+        | IRIf (c, t, e) -> IRIf (m c, m t, m e)
+        | IRSlice (arr, d, s, e) -> IRSlice (m arr, d, m s, m e)
+        | IRSubset (arr, d, s, l) -> IRSubset (m arr, d, m s, m l)
+        | IRShift (arr, d, off, bm) -> IRShift (m arr, d, m off, bm)
+        // 1 + list
+        | IRIndex (arr, idxs, id) -> IRIndex (m arr, ms idxs, id)
+        | IRApp (fn, args, rt) -> IRApp (m fn, ms args, rt)
+        | IRCurry (arr, idx, r) -> IRCurry (m arr, m idx, r)
+        // Lists
+        | IRArrayLit (es, ty) -> IRArrayLit (ms es, ty)
+        | IRTuple es -> IRTuple (ms es)
+        | IRSequence es -> IRSequence (ms es)
+        | IRZip es -> IRZip (ms es)
+        | IRAlign (es, sp) -> IRAlign (ms es, sp)
+        | IRStack es -> IRStack (ms es)
+        | IRJoin (es, d) -> IRJoin (ms es, d)
+        // Structured
+        | IRLet (id, v, b) -> IRLet (id, m v, m b)
+        | IRStructLit (tn, flds) -> IRStructLit (tn, flds |> List.map (fun (n, e) -> (n, m e)))
+        | IRBlocked (it, bs) -> IRBlocked (it, m bs)
+        | IRMatch (scr, cases) ->
+            IRMatch (m scr, cases |> List.map (fun c ->
+                { c with Guard = c.Guard |> Option.map m; Body = m c.Body }))
+        | IRLambda info ->
+            IRLambda { info with Body = m info.Body }
+        | IRMethodFor info ->
+            IRMethodFor { info with Arrays = ms info.Arrays }
+        | IRObjectFor info ->
+            IRObjectFor { info with Kernel = m info.Kernel }
+        | IRApplyCombinator info ->
+            IRApplyCombinator { info with Loop = m info.Loop; Kernel = m info.Kernel }
+    f mapped
+
+// ============================================================================
+// Arity Monomorphization
+// ============================================================================
+
+/// Collect all call sites to arity-polymorphic functions.
+/// Returns list of (funcId, concreteArity) pairs.
+let collectPolyCallSites (polyFuncIds: Set<IRId>) (expr: IRExpr) : (IRId * int) list =
+    let results = System.Collections.Generic.List<_>()
+    let walk e =
+        match e with
+        | IRApp (IRVar (funcId, _), args, _) when polyFuncIds.Contains funcId ->
+            results.Add((funcId, args.Length))
+        | _ -> ()
+        e  // don't transform, just inspect
+    mapIRExpr walk expr |> ignore
+    results |> Seq.toList
+
+/// Create a monomorphized copy of a poly function for a specific arity.
+/// Expands the Poly<T> param into N individual params and rewrites body.
+let specializeFunction (func: IRFuncDef) (arity: int) (builder: IRBuilder) : IRFuncDef =
+    // Find the Poly param
+    let polyParamIdx =
+        func.Params |> List.tryFindIndex (fun p ->
+            match p.Type with IRTPoly _ -> true | _ -> false)
+    match polyParamIdx with
+    | None -> func  // Not actually poly — shouldn't happen
+    | Some pidx ->
+        let polyParam = func.Params.[pidx]
+        let baseType =
+            match polyParam.Type with
+            | IRTPoly (bt, _) -> bt
+            | _ -> IRTScalar ETFloat64
+
+        // Generate N new params to replace the single Poly param
+        let newParams =
+            List.init arity (fun i ->
+                { Name = sprintf "%s_%d" polyParam.Name i
+                  Type = baseType
+                  Index = pidx + i
+                  VarId = builder.FreshId() } : IRParam)
+
+        // Build full expanded param list (non-poly params keep their positions)
+        let before = func.Params |> List.take pidx
+        let after = func.Params |> List.skip (pidx + 1)
+        // Re-index the trailing params
+        let afterReindexed =
+            after |> List.mapi (fun i p -> { p with Index = pidx + arity + i })
+        let expandedParams = before @ newParams @ afterReindexed
+
+        // Rewrite body: replace IRPolyIndex and IRArity
+        let rewrite e =
+            match e with
+            | IRPolyIndex (IRVar (id, _), IRLit (IRLitInt k)) when id = polyParam.VarId ->
+                let idx = int k
+                if idx >= 0 && idx < arity then
+                    IRVar (newParams.[idx].VarId, baseType)
+                else e  // out of range — leave as-is (will error at C++)
+            | IRPolyIndex (IRVar (id, _), _) when id = polyParam.VarId ->
+                // Dynamic index — can't monomorphize, leave as-is
+                // (future: generate switch statement)
+                e
+            | IRArity (None, name) when name = polyParam.Name ->
+                IRLit (IRLitInt (int64 arity))
+            | IRArity (_, name) when name = polyParam.Name ->
+                IRLit (IRLitInt (int64 arity))
+            | _ -> e
+        let newBody = mapIRExpr rewrite func.Body
+
+        // Resolve return type
+        let newRetType =
+            match func.RetType with
+            | IRTPoly (bt, _) -> bt
+            | other -> other
+
+        // Expand commutativity groups if present
+        // If the poly param was in a comm group, expand it to cover all new params
+        let newComm =
+            func.Commutativity |> Option.map (fun groups ->
+                groups |> List.map (fun group ->
+                    group |> List.collect (fun idx ->
+                        if idx = pidx then List.init arity (fun i -> pidx + i)
+                        else [if idx > pidx then idx + arity - 1 else idx])))
+
+        { Id = builder.FreshId()
+          Name = sprintf "%s_arity%d" func.Name arity
+          Params = expandedParams
+          RetType = newRetType
+          Body = newBody
+          IsStatic = func.IsStatic
+          Commutativity = newComm
+          Parallelism = func.Parallelism  // May need expansion too
+          IsArityPoly = false
+          ArityParam = None }
+
+/// Monomorphize all arity-polymorphic functions in an IR module.
+/// Collects call sites, generates specialized versions, rewrites calls.
+let monomorphizeModule (modul: IRModule) (builder: IRBuilder) : IRModule =
+    // 1. Identify poly functions
+    let polyFuncs =
+        modul.Functions |> List.filter (fun f -> f.IsArityPoly)
+    if polyFuncs.IsEmpty then modul  // Nothing to do
+    else
+    let polyFuncIds = polyFuncs |> List.map (fun f -> f.Id) |> Set.ofList
+    let polyFuncMap = polyFuncs |> List.map (fun f -> (f.Id, f)) |> Map.ofList
+
+    // 2. Collect all call sites with concrete arities
+    let callSitesFromFuncs =
+        modul.Functions |> List.collect (fun f -> collectPolyCallSites polyFuncIds f.Body)
+    let callSitesFromBindings =
+        modul.Bindings |> List.collect (fun b -> collectPolyCallSites polyFuncIds b.Value)
+    let uniqueCallSites =
+        (callSitesFromFuncs @ callSitesFromBindings) |> List.distinct
+
+    // 3. Generate specialized functions
+    let specializations =
+        uniqueCallSites |> List.map (fun (funcId, arity) ->
+            let origFunc = polyFuncMap.[funcId]
+            let spec = specializeFunction origFunc arity builder
+            ((funcId, arity), spec))
+    let specMap = specializations |> Map.ofList
+
+    // 4. Build rewrite function for call sites
+    let rewriteCallSite e =
+        match e with
+        | IRApp (IRVar (funcId, fty), args, _) when polyFuncIds.Contains funcId ->
+            let arity = args.Length
+            match Map.tryFind (funcId, arity) specMap with
+            | Some spec -> IRApp (IRVar (spec.Id, fty), args, spec.RetType)
+            | None -> e  // No specialization found — leave as-is
+        | _ -> e
+
+    // 5. Rewrite all expressions in module
+    let newFunctions =
+        modul.Functions
+        |> List.filter (fun f -> not f.IsArityPoly)  // Remove original poly funcs
+        |> List.map (fun f -> { f with Body = mapIRExpr rewriteCallSite f.Body })
+    let newBindings =
+        modul.Bindings
+        |> List.map (fun b -> { b with Value = mapIRExpr rewriteCallSite b.Value })
+    let specFuncs = specializations |> List.map snd
+
+    { modul with
+        Functions = newFunctions @ specFuncs
+        Bindings = newBindings }
 
 // ============================================================================
 // Pretty Printing
@@ -1233,8 +1517,8 @@ and ppIndexType (idx: IRIndexType) =
     let extentStr = 
         match idx.Extent with
         | IRLit (IRLitInt n) -> sprintf "%d" n
-        | IRVar id -> sprintf "v%d" id
-        | IRParam (name, _) -> name
+        | IRVar (id, _) -> sprintf "v%d" id
+        | IRParam (name, _, _) -> name
         | _ -> "?"
     match idx.Symmetry with
     | SymNone -> sprintf "Idx<%s>" extentStr
@@ -1275,8 +1559,8 @@ and ppIndexTypeIn (names: Map<IRId, string>) (idx: IRIndexType) =
         | None ->
             match idx.Extent with
             | IRLit (IRLitInt n) -> sprintf "%d" n
-            | IRVar id -> sprintf "v%d" id
-            | IRParam (name, _) -> name
+            | IRVar (id, _) -> sprintf "v%d" id
+            | IRParam (name, _, _) -> name
             | _ -> "?"
     match idx.Symmetry with
     | SymNone -> sprintf "Idx<%s>" extentStr
@@ -1317,7 +1601,7 @@ let ppUnaryOp = function
     | IRNot -> "!"
 
 /// Pretty print IR expressions with optional name mapping for variables
-let rec ppIRExprWithNames (names: Map<int, string>) indent expr =
+let rec ppIRExprWithNames (names: Map<int, string>) indent (expr: IRExpr) =
     let pp = ppIRExprWithNames names 0
     let ind = String.replicate indent "  "
     match expr with
@@ -1325,11 +1609,11 @@ let rec ppIRExprWithNames (names: Map<int, string>) indent expr =
     | IRLit (IRLitFloat f) -> sprintf "%f" f
     | IRLit (IRLitBool b) -> if b then "true" else "false"
     | IRLit IRLitUnit -> "()"
-    | IRVar id -> 
+    | IRVar (id, _) -> 
         match Map.tryFind id names with
         | Some name -> name
         | None -> sprintf "v%d" id
-    | IRParam (name, _) -> name
+    | IRParam (name, _, _) -> name
     | IRBinOp (mode, op, a, b) ->
         sprintf "(%s %s %s)" (pp a) (ppBinOpWithMode mode op) (pp b)
     | IRUnaryOp (op, a) ->
@@ -1381,7 +1665,7 @@ let rec ppIRExprWithNames (names: Map<int, string>) indent expr =
         sprintf "%s(%s)" (pp arr) (idxs |> List.map pp |> String.concat ", ")
     | IRCurry (arr, idx, rank) ->
         sprintf "%s(%s) [->rank %d]" (pp arr) (pp idx) rank
-    | IRApp (f, args) ->
+    | IRApp (f, args, _) ->
         sprintf "%s(%s)" (pp f) (args |> List.map pp |> String.concat ", ")
     | IRLambda info ->
         let ps = info.Params |> List.map (fun p -> sprintf "%s:%s" p.Name (ppIRType p.Type)) |> String.concat ", "

@@ -941,6 +941,28 @@ and parsePrimary (tokens: Token list) : ParseResult<Expr> =
     | Some (TokKeyword KwMethodFor) ->
         parseMethodFor (advance tokens)
     
+    // for (A, B) in virtualArray — co-iteration construct
+    | Some (TokKeyword KwFor) ->
+        let afterFor = advance tokens
+        match peek afterFor with
+        | Some TokLParen ->
+            // Parse array list: (A, B, C)
+            advance afterFor |> sepBy parseExprImpl TokComma >>= fun arrays afterArrays ->
+            expect TokRParen afterArrays >>= fun _ afterRParen ->
+            // Check for 'in' clause
+            match peek afterRParen with
+            | Some (TokKeyword KwIn) ->
+                // Parse virtual array expression at arrayProduct level (stops before <@>)
+                parseArrayProduct (advance afterRParen) >>= fun inExpr afterIn ->
+                success (ExprFor (ForArrays (arrays, Some inExpr), [], None)) afterIn
+            | _ ->
+                // No in-clause: equivalent to method_for(A, B)
+                success (ExprFor (ForArrays (arrays, None), [], None)) afterRParen
+        | _ ->
+            // for lambda(...) → ForKernel
+            parseExprImpl afterFor >>= fun kernel remaining ->
+            success (ExprFor (ForKernel kernel, [], None)) remaining
+    
     // object_for
     | Some (TokKeyword KwObjectFor) ->
         parseObjectFor (advance tokens)

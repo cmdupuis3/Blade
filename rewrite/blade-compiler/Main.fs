@@ -42,9 +42,11 @@ type ProcessStartInfo = System.Diagnostics.ProcessStartInfo
 // Test Utilities
 // ============================================================================
 
+let compilerVersion = "0.13.3"
+
 let printHeader title =
     printfn "\n%s" (String.replicate 70 "=")
-    printfn "  %s" title
+    printfn "  %s (v%s)" title compilerVersion
     printfn "%s\n" (String.replicate 70 "=")
 
 let printSubHeader title =
@@ -356,9 +358,17 @@ let compileCpp (cppFile: string) (outputDir: string) : Result<string, string> =
         psi.CreateNoWindow <- true
         
         use proc = Process.Start(psi)
-        let stdout = proc.StandardOutput.ReadToEnd()
-        let stderr = proc.StandardError.ReadToEnd()
-        proc.WaitForExit(60000) |> ignore  // 60 second timeout
+        // Read both streams asynchronously to prevent pipe deadlocks
+        let stdoutTask = proc.StandardOutput.ReadToEndAsync()
+        let stderrTask = proc.StandardError.ReadToEndAsync()
+        
+        if not (proc.WaitForExit(60000)) then
+            try proc.Kill() with _ -> ()
+            Error "Compilation timed out after 60s"
+        else
+        
+        let stdout = stdoutTask.Result
+        let stderr = stderrTask.Result
         
         // Combine all output
         let allOutput = 
@@ -388,12 +398,18 @@ let runExecutable (exeFile: string) : Result<int * string, string> =
         psi.WorkingDirectory <- Path.GetDirectoryName(exeFullPath)
         
         use proc = Process.Start(psi)
-        let stdout = proc.StandardOutput.ReadToEnd()
-        let stderr = proc.StandardError.ReadToEnd()
-        proc.WaitForExit(30000) |> ignore  // 30 second timeout
+        // Read both streams asynchronously to avoid deadlocks
+        let stdoutTask = proc.StandardOutput.ReadToEndAsync()
+        let stderrTask = proc.StandardError.ReadToEndAsync()
         
-        let output = if String.IsNullOrEmpty(stderr) then stdout else stdout + "\n[stderr]: " + stderr
-        Ok (proc.ExitCode, output)
+        if proc.WaitForExit(30000) then
+            let stdout = stdoutTask.Result
+            let stderr = stderrTask.Result
+            let output = if String.IsNullOrEmpty(stderr) then stdout else stdout + "\n[stderr]: " + stderr
+            Ok (proc.ExitCode, output)
+        else
+            try proc.Kill() with _ -> ()
+            Error "Execution timed out after 30s"
     with ex ->
         Error (sprintf "Execution exception: %s" ex.Message)
 
@@ -506,10 +522,10 @@ let printFullTestResult (result: FullTestResult) (verbose: bool) (showFullError:
         
         match result.CompileResult with
         | Error e when e <> "Skipped" && e <> "IR failed" -> 
-            if showFullError then
-                printfn "    Compile Error:\n%s" e
-            else
-                printfn "    Output: %s" (e.Split('\n').[0])
+            printfn "    Compile Error:\n%s" e
+            match result.CppFile with
+            | Some f -> printfn "    Generated: %s" f
+            | None -> ()
         | _ -> ()
         
         match result.RunResult with
@@ -703,8 +719,16 @@ let runTestCategoryFull (name: string) (tests: (string * string) list) (outputDi
     
     printfn "Running %d tests...\n" (List.length tests)
     
+    let mutable testIdx = 0
     let results = tests |> List.map (fun (testName, source) ->
-        runFullTest testName source outputDir gppAvailable)
+        testIdx <- testIdx + 1
+        eprintf "[%d/%d] %s... " testIdx (List.length tests) testName
+        Console.Error.Flush()
+        let result = runFullTest testName source outputDir gppAvailable
+        let status = match result.CompileResult with Ok _ -> "ok" | Error e when e = "IR failed" -> "IR fail" | Error _ -> "compile fail"
+        eprintfn "%s" status
+        Console.Error.Flush()
+        result)
     
     // Find first compile failure to show full error
     let firstCompileFailure = 
@@ -1082,9 +1106,12 @@ let result = L <@> f
                     
                     printfn "\nLoop Bindings:"
                     for binding in codeGen.Bindings do
-                        printfn "  Level %d: %s iterates %s[%d] (param %s)" 
-                            binding.Level binding.IndexName binding.ArrayName 
-                            binding.DimIndex binding.ParamName
+                        let elemStr = 
+                            binding.Elements 
+                            |> List.map (fun e -> sprintf "%s[%d] (param %s)" e.ArrayName e.DimIndex e.ParamName)
+                            |> String.concat ", "
+                        printfn "  Level %d: %s iterates %s" 
+                            binding.Level binding.IndexName elemStr
                         let extentStr = ppIRExprWithNames Map.empty 0 binding.Extent
                         let depsStr = 
                             if binding.BoundDependencies.IsEmpty then "none"

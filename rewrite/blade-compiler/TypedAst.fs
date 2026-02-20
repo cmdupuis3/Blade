@@ -64,6 +64,7 @@ and TypedMethodForInfo = {
     ArrayTypes: IRArrayType list
     SDimsPerArray: int list
     TotalSDims: int
+    SharedIndexType: IRIndexType option  // For co-iteration: shared index space from 'in' clause
 }
 
 // ============================================================================
@@ -93,7 +94,17 @@ and TypedApplyInfo = {
     ReynoldsSpeedup: int64
     HasReynolds: bool
     OutputType: IRType
+    IsCoIteration: bool
 }
+
+// ============================================================================
+// Typed Statements (for blocks)
+// ============================================================================
+
+and TypedStmt =
+    | TStmtLet of TypedBinding
+    | TStmtAssign of lhs: TypedExpr * rhs: TypedExpr
+    | TStmtExpr of TypedExpr
 
 // ============================================================================
 // Typed Expressions
@@ -181,6 +192,27 @@ and TypedExprKind =
     
     // Index expression (array indexing result)
     | TExprIndex of array: TypedExpr * indices: TypedExpr list * identity: ArrayIdentity option
+    
+    // Block expression (preserves statement structure for IDE support)
+    | TExprBlock of stmts: TypedStmt list * finalExpr: TypedExpr option
+    
+    // Assignment expression
+    | TExprAssign of lhs: TypedExpr * rhs: TypedExpr
+    
+    // Sequence (evaluated in order, result is last)
+    | TExprSequence of TypedExpr list
+    
+    // Replicate
+    | TExprReplicate of count: TypedExpr * body: TypedExpr
+    
+    // Alignment
+    | TExprAlign of exprs: TypedExpr list * spec: Ast.AlignSpec option
+    
+    // Sectioned operator (e.g., (+) becomes a lambda)
+    | TExprSection of BinOp
+    
+    // Partial application of operator (e.g., (+ 3) or (3 +))
+    | TExprPartialApp of op: BinOp * arg: TypedExpr * isLeft: bool
 
 // ============================================================================
 // Typed Pattern Matching
@@ -212,16 +244,18 @@ and TypedPatternKind =
 // Typed Declarations
 // ============================================================================
 
-type TypedBinding = {
+and TypedBinding = {
     Name: string
     VarId: IRId
     Type: IRType
     Identity: ArrayIdentity option
     IsMutable: bool
     Value: TypedExpr
+    /// Destructured sub-bindings: (name, varId, type) for PatTuple/PatCons/PatStruct
+    SubBindings: (string * IRId * IRType) list
 }
 
-type TypedFunctionDecl = {
+and TypedFunctionDecl = {
     Name: string
     FuncId: IRId
     TypeParams: string list
@@ -233,12 +267,35 @@ type TypedFunctionDecl = {
     IsStatic: bool
 }
 
-type TypedDecl =
+// ============================================================================
+// Typed Type Definitions (resolved from raw TypeDecl)
+// ============================================================================
+
+and TypedTypeDef =
+    | TTDAlias of name: string * typeParams: string list * resolved: IRType
+    | TTDStruct of name: string * typeParams: string list * fields: (string * IRType) list * invariant: TypedExpr option
+    | TTDVariant of name: string * typeParams: string list * variants: (string * IRType option) list
+
+// ============================================================================
+// Typed Impl Declaration
+// ============================================================================
+
+and TypedImplDecl = {
+    ForType: TypeExpr
+    TypeName: string
+    Methods: TypedFunctionDecl list
+}
+
+// ============================================================================
+// Typed Declarations
+// ============================================================================
+
+and TypedDecl =
     | TDeclLet of TypedBinding
     | TDeclFunction of TypedFunctionDecl
-    | TDeclType of TypeDecl          // Type declarations don't need annotation
+    | TDeclType of TypedTypeDef
     | TDeclInterface of InterfaceDecl
-    | TDeclImpl of ImplDecl
+    | TDeclImpl of TypedImplDecl
     | TDeclStatic of TypedBinding
     | TDeclUnit of UnitDecl
     | TDeclImport of QualifiedName * ImportStyle

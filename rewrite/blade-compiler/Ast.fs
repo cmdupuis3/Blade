@@ -252,7 +252,7 @@ and Expr =
     | ExprFor of source: ForSource * whereClauses: Constraint list * kernel: Expr option
     
 and ForSource =
-    | ForArrays of arrays: Expr list * indexType: TypeExpr option  // (A, B) in I
+    | ForArrays of arrays: Expr list * inClause: Expr option  // (A, B) [in virtualArray]
     | ForKernel of kernel: Expr  // lambda(...) -> ...
 
 and LambdaParam = {

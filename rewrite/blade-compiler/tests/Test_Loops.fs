@@ -98,6 +98,23 @@ let f = lambda(a, i) -> a + i
 let result = L <@> f
 """
 
+// Co-iteration: elementwise product via shared index space
+let test80_coIterBasic = """
+// Co-iteration: for (A, B) in range<Idx<N>> produces elementwise result
+let A = [1.0, 2.0, 3.0]
+let B = [4.0, 5.0, 6.0]
+let result = for (A, B) in range<Idx<3>> <@> lambda(a, b) -> a * b
+"""
+
+// Co-iteration: three-way elementwise operation
+let test81_coIter3Way = """
+// Three-way co-iteration
+let A = [1.0, 2.0, 3.0]
+let B = [4.0, 5.0, 6.0]
+let C = [7.0, 8.0, 9.0]
+let result = for (A, B, C) in range<Idx<3>> <@> lambda(a, b, c) -> a * b + c
+"""
+
 /// Loop objects and application
 let loopTests = [
     ("Method For", test4_methodFor)
@@ -113,4 +130,6 @@ let loopTests = [
     ("Range Basic", test77_rangeBasic)
     ("Reverse Basic", test78_reverseBasic)
     ("Range With Array", test79_rangeWithArray)
+    ("CoIter Basic", test80_coIterBasic)
+    ("CoIter 3-Way", test81_coIter3Way)
 ]
