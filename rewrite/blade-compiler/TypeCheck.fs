@@ -1263,9 +1263,15 @@ and inferBinOp env mode op left right : TypeResult<TypedExpr> =
             inferApply env tL tR))
 
     | OpBind ->
+        // >>= : Computation α × (α → Computation β) → Computation β
+        // Result type is the return type of the continuation
         inferExpr env left |> Result.bind (fun tL ->
         inferExpr env right |> Result.bind (fun tR ->
-            Ok (mkTyped (TExprBind (tL, tR)) (env.Subst.Fresh()))))
+            let resultType =
+                match tR.Type with
+                | IRTFunc (_, retType) -> retType  // k : α → β, result is β
+                | _ -> tR.Type  // If not a function, use right's type directly
+            Ok (mkTyped (TExprBind (tL, tR)) resultType)))
 
     | OpParallel ->
         inferExpr env left |> Result.bind (fun tL ->
@@ -1338,7 +1344,26 @@ and inferBinOp env mode op left right : TypeResult<TypedExpr> =
             let _ = unify env.Subst tL.Type tR.Type
             Ok (mkTyped (TExprChoice (tL, tR)) tL.Type)))
 
-    | OpComposeObj | OpComposeMeth | OpCompose ->
+    | OpComposeMeth ->
+        // @>> : Computation α × Computation β → Computation β
+        // Result type is the right side's type
+        inferExpr env left |> Result.bind (fun tL ->
+        inferExpr env right |> Result.bind (fun tR ->
+            Ok (mkTyped (TExprCompose (op, tL, tR)) tR.Type)))
+
+    | OpComposeObj ->
+        // >>@ : ObjectLoop × ObjectLoop → ObjectLoop
+        // Preserve as loop type so inferApply can handle application
+        inferExpr env left |> Result.bind (fun tL ->
+        inferExpr env right |> Result.bind (fun tR ->
+            // Result type: preserve right side's loop type (since g determines output shape)
+            let resultType = 
+                match tR.Type with
+                | IRTLoop _ -> tR.Type
+                | _ -> tL.Type
+            Ok (mkTyped (TExprCompose (OpComposeObj, tL, tR)) resultType)))
+
+    | OpCompose ->
         inferExpr env left |> Result.bind (fun tL ->
         inferExpr env right |> Result.bind (fun tR ->
             // f >> g : (A → B) >> (B → C) = (A → C)
@@ -1348,20 +1373,20 @@ and inferBinOp env mode op left right : TypeResult<TypedExpr> =
                 match gArgs with
                 | [gArg] -> 
                     let _ = unify env.Subst fRet gArg
-                    Ok (mkTyped (TExprCompose (tL, tR)) (IRTFunc (fArgs, gRet)))
+                    Ok (mkTyped (TExprCompose (op, tL, tR)) (IRTFunc (fArgs, gRet)))
                 | _ ->
                     // Multi-arg g: unify f's return (should be tuple) with g's args as tuple
                     let _ = unify env.Subst fRet (IRTTuple gArgs)
-                    Ok (mkTyped (TExprCompose (tL, tR)) (IRTFunc (fArgs, gRet)))
+                    Ok (mkTyped (TExprCompose (op, tL, tR)) (IRTFunc (fArgs, gRet)))
             | IRTFunc _, _ ->
                 eprintfn "Warning: right side of >> should be a function"
-                Ok (mkTyped (TExprCompose (tL, tR)) tR.Type)
+                Ok (mkTyped (TExprCompose (op, tL, tR)) tR.Type)
             | _, IRTFunc (gArgs, gRet) ->
                 // f might be a fresh/unresolved type — permissive
-                Ok (mkTyped (TExprCompose (tL, tR)) (IRTFunc (gArgs, gRet)))
+                Ok (mkTyped (TExprCompose (op, tL, tR)) (IRTFunc (gArgs, gRet)))
             | _ ->
                 // Both unresolved — permissive, return fresh
-                Ok (mkTyped (TExprCompose (tL, tR)) (env.Subst.Fresh()))))
+                Ok (mkTyped (TExprCompose (op, tL, tR)) (env.Subst.Fresh()))))
 
     | OpCons ->
         inferExpr env left |> Result.bind (fun tL ->
@@ -1520,6 +1545,11 @@ and inferApply (env: TypeEnv) (tLeft: TypedExpr) (tRight: TypedExpr) : TypeResul
                     mkTyped (TExprFunctorMap (f, acc)) outputType
                 let result : TypedExpr = funcs |> List.rev |> List.fold applyFmap comp
                 Ok result
+            | OpChoice | OpFallback ->
+                // object_for(<|>) <@> (c1, c2, ...) → left-fold producing TExprChoice
+                let folder (acc: TypedExpr) (elem: TypedExpr) : TypedExpr =
+                    mkTyped (TExprChoice (acc, elem)) acc.Type
+                Ok (elems |> List.tail |> List.fold folder (List.head elems))
             | _ ->
                 // Standard left-associative fold: (((c1 op c2) op c3) op ...)
                 let folder (acc: TypedExpr) (elem: TypedExpr) =
@@ -1569,6 +1599,26 @@ and inferApply (env: TypeEnv) (tLeft: TypedExpr) (tRight: TypedExpr) : TypeResul
             | TExprLambda li -> buildApplyInfo env mfInfo li syntheticLoop objInfo.Kernel true isAntisym
             | _ -> buildGenericApply env syntheticLoop objInfo.Kernel
         | _ -> buildGenericApply env syntheticLoop objInfo.Kernel
+
+    // Composed ObjectLoop: (o1 >>@ o2) <@> A
+    | TExprCompose (OpComposeObj, _, _), _ ->
+        let arrayExprs = match rR.Kind with
+                         | TExprTuple elems -> elems
+                         | _ -> [tRight]
+        let outputType =
+            match arrayExprs with
+            | first :: _ -> first.Type
+            | [] -> IRTUnit
+        let info : TypedApplyInfo = {
+            Loop = tLeft; Kernel = tRight
+            SymcomStates = []; TriangularLevels = []
+            SDimsPerArray = []
+            KernelInputRanks = []; KernelOutputRank = 0
+            SpeedupFactor = 1L; ReynoldsSpeedup = 1L
+            HasReynolds = false; OutputType = outputType
+            IsCoIteration = false
+        }
+        Ok (mkTyped (TExprApply info) outputType)
 
     | _ -> buildGenericApply env tLeft tRight
 
@@ -2415,7 +2465,7 @@ let rec zonkExpr (subst: Subst) (expr: TypedExpr) : TypedExpr =
         | TExprFusion (a, b) -> TExprFusion (z a, z b)
         | TExprFunctorMap (f, c) -> TExprFunctorMap (z f, z c)
         | TExprChoice (a, b) -> TExprChoice (z a, z b)
-        | TExprCompose (a, b) -> TExprCompose (z a, z b)
+        | TExprCompose (op, a, b) -> TExprCompose (op, z a, z b)
         | TExprGuard (c, b) -> TExprGuard (z c, z b)
         | TExprReplicate (c, b) -> TExprReplicate (z c, z b)
         | TExprAssign (l, r) -> TExprAssign (z l, z r)

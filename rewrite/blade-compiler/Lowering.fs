@@ -246,8 +246,13 @@ let rec lowerTypedExpr (env: TypedLowerEnv) (texpr: TypedExpr) : IRExpr =
     | TExprChoice (l, r) ->
         IRChoice (lowerTypedExpr env l, lowerTypedExpr env r)
     
-    | TExprCompose (l, r) ->
-        IRCompose (lowerTypedExpr env l, lowerTypedExpr env r)
+    | TExprCompose (op, l, r) ->
+        let lIR = lowerTypedExpr env l
+        let rIR = lowerTypedExpr env r
+        match op with
+        | OpComposeObj -> IRComposeObj (lIR, rIR)
+        | OpComposeMeth -> IRComposeMeth (lIR, rIR)
+        | _ -> IRCompose (lIR, rIR)
     
     | TExprRange indexType ->
         IRRange indexType

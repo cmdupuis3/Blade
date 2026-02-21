@@ -648,8 +648,16 @@ let scanToken (state: LexerState) =
         true
     
     | Some '@' ->
-        advance state |> ignore
-        emit state startLine startCol TokAt
+        // Check for @>> operator before treating @ as standalone
+        match peekN state 1, peekN state 2 with
+        | Some '>', Some '>' ->
+            advance state |> ignore  // @
+            advance state |> ignore  // >
+            advance state |> ignore  // >
+            emit state startLine startCol (TokOp "@>>")
+        | _ ->
+            advance state |> ignore
+            emit state startLine startCol TokAt
         true
     
     | Some '#' ->

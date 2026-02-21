@@ -72,6 +72,7 @@ let test22_pureAndBind = """
 let x = pure(42)
 let f = lambda(n) -> n * 2
 let result = x >>= f
+// EXPECT: result = 84
 """
 
 let test77_rangeBasic = """
@@ -346,6 +347,89 @@ let result = object_for(<$>) <@> (twice, c) |> compute
 // EXPECT: result = [22.0, 24.0, 26.0]
 """
 
+let test104_choiceScalar = """
+let x = 5.0 <|> 3.0
+let y = 0.0 <|> 7.0
+// EXPECT: x = 5.0
+// EXPECT: y = 7.0
+"""
+
+let test105_choiceKernel = """
+let A = [1.0, 2.0, 3.0]
+let L = method_for(A)
+let f = lambda(x) -> { (x - 2.0) <|> 99.0 }
+let result = L <@> f |> compute
+// EXPECT: result = [-1.0, 99.0, 1.0]
+"""
+
+let test106_choiceComputation = """
+let A = [1.0, 2.0, 3.0]
+let L = method_for(A)
+let f = lambda(x) -> x - 1.0
+let g = lambda(x) -> x + 10.0
+let result = (L <@> f) <|> (L <@> g) |> compute
+// EXPECT: result = [11.0, 1.0, 2.0]
+"""
+
+let test107_objectForChoice = """
+let A = [1.0, 2.0, 3.0]
+let L = method_for(A)
+let f = lambda(x) -> x - 1.0
+let g = lambda(x) -> x + 10.0
+let c1 = L <@> f
+let c2 = L <@> g
+let result = object_for(<|>) <@> (c1, c2) |> compute
+// EXPECT: result = [11.0, 1.0, 2.0]
+"""
+
+let test108_composeObjBasic = """
+let A = [1.0, 2.0, 3.0]
+let f = lambda(x) -> x + 1.0
+let g = lambda(x) -> x * 2.0
+let p = object_for(f) >>@ object_for(g)
+let result = p <@> A |> compute
+// EXPECT: result = [4.0, 6.0, 8.0]
+"""
+
+let test109_composeMethBasic = """
+let A = [1.0, 2.0, 3.0]
+let L = method_for(A)
+let f = lambda(x) -> x + 1.0
+let g = lambda(x) -> x * 2.0
+let c1 = L <@> f
+let c2 = L <@> g
+let result = c1 @>> c2 |> compute
+// EXPECT: result = [4.0, 6.0, 8.0]
+"""
+
+let test110_dualityTheorem = """
+let A = [1.0, 2.0, 3.0]
+let f = lambda(x) -> x + 1.0
+let g = lambda(x) -> x * 3.0
+let lhs = (object_for(f) >>@ object_for(g)) <@> A |> compute
+let L = method_for(A)
+let rhs = (L <@> f) @>> (L <@> g) |> compute
+// EXPECT: lhs = [6.0, 9.0, 12.0]
+// EXPECT: rhs = [6.0, 9.0, 12.0]
+"""
+
+let test111_bindComputation = """
+let A = [1.0, 2.0, 3.0]
+let c1 = method_for(A) <@> lambda(x) -> x + 1.0
+let k = lambda(arr) -> method_for(arr) <@> lambda(y) -> y * 2.0
+let result = (c1 >>= k) |> compute
+// EXPECT: result = [4.0, 6.0, 8.0]
+"""
+
+let test112_bindChained = """
+let A = [1.0, 2.0, 3.0]
+let c1 = method_for(A) <@> lambda(x) -> x + 1.0
+let k1 = lambda(arr) -> method_for(arr) <@> lambda(y) -> y * 2.0
+let k2 = lambda(arr) -> method_for(arr) <@> lambda(z) -> z - 1.0
+let result = (c1 >>= k1 >>= k2) |> compute
+// EXPECT: result = [3.0, 5.0, 7.0]
+"""
+
 /// Loop objects and application
 let loopTests = [
     ("Method For", test4_methodFor)
@@ -385,4 +469,13 @@ let loopTests = [
     ("Functor Map Chain", test101_functorMapChain)
     ("Functor Map Deferred", test102_functorMapDeferred)
     ("Object For Functor Map", test103_objectForFunctorMap)
+    ("Choice Scalar", test104_choiceScalar)
+    ("Choice Kernel", test105_choiceKernel)
+    ("Choice Computation", test106_choiceComputation)
+    ("Object For Choice", test107_objectForChoice)
+    ("Compose Obj Basic", test108_composeObjBasic)
+    ("Compose Meth Basic", test109_composeMethBasic)
+    ("Duality Theorem", test110_dualityTheorem)
+    ("Bind Computation", test111_bindComputation)
+    ("Bind Chained", test112_bindChained)
 ]

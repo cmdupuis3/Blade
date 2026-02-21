@@ -1311,6 +1311,7 @@ and parseObjectFor (tokens: Token list) : ParseResult<Expr> =
                 | "<*>" -> Some OpArrayProd
                 | "<@>" -> Some OpApply
                 | "<$>" -> Some OpFunctor
+                | "<|>" -> Some OpChoice
                 | ">>=" -> Some OpBind
                 | _ -> stringToBinOp op  // fall back to scalar ops (+, *, etc.)
             match binOp with

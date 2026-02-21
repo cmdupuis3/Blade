@@ -168,7 +168,7 @@ and TypedExprKind =
     | TExprFusion of TypedExpr * TypedExpr
     | TExprFunctorMap of func: TypedExpr * comp: TypedExpr
     | TExprChoice of TypedExpr * TypedExpr
-    | TExprCompose of TypedExpr * TypedExpr
+    | TExprCompose of BinOp * TypedExpr * TypedExpr
     
     // Virtual arrays
     | TExprRange of indexType: IRIndexType
