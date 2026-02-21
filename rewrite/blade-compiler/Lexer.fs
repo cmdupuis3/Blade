@@ -194,8 +194,8 @@ let keywords =
 
 let operators = 
     [ "<@>"; ">>="; "<&>"; "<&!>"; "<*>"; "<$>"; "<|>"; "<|:>"
-      ">>@"; "@>>"; "::"; "->"; "=>"; ".."; "=="
-      "!="; "<="; ">="; "&&"; "||"
+      ">>@"; "@>>"; "|@>"; "::"; "->"; "=>"; ".."; "=="
+      "!="; "<="; ">="; "&&"; "||"; ">>"
       "+="; "-="; "*="; "/="
       "|>"; "<-"
       "+"; "-"; "*"; "/"; "%"; "="; "<"; ">"; "!"; "^" ]
@@ -620,6 +620,11 @@ let scanToken (state: LexerState) =
     
     | Some '|' ->
         match peekN state 1 with
+        | Some '@' when peekN state 2 = Some '>' ->
+            advance state |> ignore  // |
+            advance state |> ignore  // @
+            advance state |> ignore  // >
+            emit state startLine startCol (TokOp "|@>")
         | Some '>' ->
             advance state |> ignore
             advance state |> ignore

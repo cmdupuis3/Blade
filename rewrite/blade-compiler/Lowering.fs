@@ -95,6 +95,8 @@ type TypedLowerEnv = {
     Interfaces: Map<string, InterfaceDecl>
     ModuleExports: Map<string, ModuleExport>
     ImportedModules: Map<string, string>
+    /// Provider alias -> qualified provider name (e.g. "NetCDF" -> ["Providers"; "NetCDF"])
+    ProviderAliases: Map<string, string list>
 }
 
 let emptyTypedEnv () : TypedLowerEnv = {
@@ -111,6 +113,7 @@ let emptyTypedEnv () : TypedLowerEnv = {
     Interfaces = Map.empty
     ModuleExports = Map.empty
     ImportedModules = Map.empty
+    ProviderAliases = Map.empty
 }
 
 let bindTypedVar name id (env: TypedLowerEnv) : TypedLowerEnv =
@@ -234,6 +237,9 @@ let rec lowerTypedExpr (env: TypedLowerEnv) (texpr: TypedExpr) : IRExpr =
     | TExprParallel (l, r) ->
         IRParallel (lowerTypedExpr env l, lowerTypedExpr env r, None)
     
+    | TExprFusion (l, r) ->
+        IRFusion (lowerTypedExpr env l, lowerTypedExpr env r)
+    
     | TExprChoice (l, r) ->
         IRChoice (lowerTypedExpr env l, lowerTypedExpr env r)
     
@@ -284,12 +290,7 @@ let rec lowerTypedExpr (env: TypedLowerEnv) (texpr: TypedExpr) : IRExpr =
         lowerTypedBlock env stmts finalExpr
     
     | TExprAssign (lhs, rhs) ->
-        match lhs.Kind with
-        | TExprVar (_, varId, _) ->
-            IRAssign (varId, lowerTypedExpr env rhs)
-        | _ ->
-            // Non-variable assignment (e.g., array element) — lower as expression
-            lowerTypedExpr env rhs
+        IRAssign (lowerTypedExpr env lhs, lowerTypedExpr env rhs)
     
     | TExprSequence exprs ->
         IRSequence (exprs |> List.map (lowerTypedExpr env))
@@ -374,15 +375,11 @@ and lowerTypedBlock env (stmts: TypedStmt list) (finalExpr: TypedExpr option) : 
             let body = lowerTypedBlock env' rest finalExpr
             IRLet (binding.VarId, value, body)
         | TStmtAssign (lhs, rhs) ->
-            match lhs.Kind with
-            | TExprVar (_, varId, _) ->
-                let value = lowerTypedExpr env rhs
-                let rest' = lowerTypedBlock env rest finalExpr
-                IRLet (varId, value, rest')
-            | _ ->
-                // Non-variable LHS — lower rhs for side effects, continue
-                let _ = lowerTypedExpr env rhs
-                lowerTypedBlock env rest finalExpr
+            let target = lowerTypedExpr env lhs
+            let value = lowerTypedExpr env rhs
+            let rest' = lowerTypedBlock env rest finalExpr
+            let dummyId = env.Builder.FreshId()
+            IRLet (dummyId, IRAssign (target, value), rest')
         | TStmtExpr e ->
             let lowered = lowerTypedExpr env e
             let rest' = lowerTypedBlock env rest finalExpr
@@ -525,7 +522,19 @@ and lowerTypedBinOp env mode op l r leftExpr rightExpr resultType =
     | OpBind -> IRBind (l, r)
     | OpParallel -> IRParallel (l, r, None)
     | OpFusion -> IRFusion (l, r)
-    | OpArrayProd -> IRArrayProduct (l, r)
+    | OpArrayProd ->
+        // <*> : merge two method_for array lists into one
+        match l, r with
+        | IRMethodFor m1, IRMethodFor m2 ->
+            IRMethodFor {
+                Arrays = m1.Arrays @ m2.Arrays
+                Identities = m1.Identities @ m2.Identities
+                ArrayTypes = m1.ArrayTypes @ m2.ArrayTypes
+                SDimsPerArray = m1.SDimsPerArray @ m2.SDimsPerArray
+                TotalSDims = m1.TotalSDims + m2.TotalSDims
+                SharedIndexType = None
+            }
+        | _ -> IRArrayProduct (l, r)  // fallback for non-method_for operands
     | OpFunctor -> IRFunctorMap (l, r)
     | OpChoice -> IRChoice (l, r)
     | OpFallback -> IRChoice (l, r)
@@ -585,10 +594,19 @@ let lowerTypedTypeDef (env: TypedLowerEnv) (ttd: TypedTypeDef) : IRTypeDef =
         let constraintInfo =
             match invariant with
             | Some texpr ->
-                let fieldBindings = fields |> List.map (fun (fname, _) ->
-                    let id = env.Builder.FreshId()
-                    (fname, id))
                 let loweredExpr = lowerTypedExpr env texpr
+                // Extract field name -> VarId from the typed expression
+                // The type checker bound field names to VarIds; those ids persist in the lowered IR
+                let fieldNames = fields |> List.map fst |> Set.ofList
+                let rec collectTypedVars (te: TypedExpr) : (string * IRId) list =
+                    match te.Kind with
+                    | TExprVar (name, varId, _) when Set.contains name fieldNames -> [(name, varId)]
+                    | TExprBinOp (_, _, l, r) -> collectTypedVars l @ collectTypedVars r
+                    | TExprUnaryOp (_, e) -> collectTypedVars e
+                    | TExprIf (c, t, e) -> collectTypedVars c @ collectTypedVars t @ collectTypedVars e
+                    | TExprApp (f, args) -> collectTypedVars f @ (args |> List.collect collectTypedVars)
+                    | _ -> []
+                let fieldBindings = collectTypedVars texpr |> List.distinctBy fst
                 Some { Expr = loweredExpr; FieldBindings = fieldBindings }
             | None -> None
         IRTDStruct (name, fields, constraintInfo)
@@ -679,6 +697,35 @@ let lowerTypedDecl (env: TypedLowerEnv) (decl: TypedDecl) : (Choice<IRFuncDef, I
         // Handled in lowerTypedModule for proper function list accumulation
         ([], env)
 
+/// Check if a typed expression is a provider call (e.g. NetCDF.load("path"))
+let isProviderCall (env: TypedLowerEnv) (texpr: TypedExpr) : bool =
+    match texpr.Kind with
+    | TExprApp ({ Kind = TExprField ({ Kind = TExprVar (alias, _, _) }, "load", _) }, [arg]) ->
+        Map.containsKey alias env.ProviderAliases
+        && (match arg.Kind with TExprLit (LitString _) -> true | _ -> false)
+    | _ -> false
+
+/// Try to invoke a provider for a binding value. Returns types, binding, and updated env.
+let tryInvokeProvider (env: TypedLowerEnv) (binding: TypedBinding) : (IRTypeDef list * IRBinding * TypedLowerEnv) option =
+    match binding.Value.Kind with
+    | TExprApp ({ Kind = TExprField ({ Kind = TExprVar (alias, _, _) }, "load", _) }, [arg]) ->
+        match Map.tryFind alias env.ProviderAliases, arg.Kind with
+        | Some qname, TExprLit (LitString path) when qname = ["Providers"; "NetCDF"] ->
+            let providerModule = Blade.NetcdfProvider.loadAsModule env.Builder binding.Name path
+            // The binding value becomes unit (types are injected separately)
+            let bd = {
+                Id = binding.VarId
+                Name = binding.Name
+                Type = IRTUnit
+                Value = IRLit IRLitUnit
+                IsConst = true
+                IsMutable = false
+            }
+            let env' = bindTypedVar binding.Name binding.VarId env
+            Some (providerModule.Types, bd, env')
+        | _ -> None
+    | _ -> None
+
 /// Lower a typed module
 let lowerTypedModule (env: TypedLowerEnv) (modul: TypedModule) (rawDecls: Located<Decl> list option) : IRModule * ModuleExport =
     // Phase 0: Resolve static values/functions from raw declarations
@@ -726,7 +773,11 @@ let lowerTypedModule (env: TypedLowerEnv) (modul: TypedModule) (rawDecls: Locate
                     for kv in exports.StaticFunctions do
                         currentEnv <- { currentEnv with StaticFunctions = Map.add (sprintf "%s.%s" alias kv.Key) kv.Value currentEnv.StaticFunctions }
                 | None ->
-                    eprintfn "Warning: module '%s' not found in typed pipeline" fullName
+                    // Check if this is a provider import (e.g. Providers.NetCDF)
+                    if qname.Length >= 2 && qname.[0] = "Providers" then
+                        currentEnv <- { currentEnv with ProviderAliases = Map.add alias qname currentEnv.ProviderAliases }
+                    else
+                        eprintfn "Warning: module '%s' not found in typed pipeline" fullName
             | ImportSelective names ->
                 match Map.tryFind fullName currentEnv.ModuleExports with
                 | Some exports ->
@@ -764,6 +815,36 @@ let lowerTypedModule (env: TypedLowerEnv) (modul: TypedModule) (rawDecls: Locate
                 currentEnv <- bindTypedVar method.Name fd.Id currentEnv
         
         // All other declarations go through lowerTypedDecl
+        // But first check for provider calls (e.g. let sample = NetCDF.load("sample.nc"))
+        | TDeclLet binding when isProviderCall currentEnv binding.Value ->
+            match tryInvokeProvider currentEnv binding with
+            | Some (providerTypes, bd, env') ->
+                types <- types @ providerTypes
+                for td in providerTypes do
+                    match td with
+                    | IRTDStruct (name, fields, _) ->
+                        currentEnv <- { currentEnv with StructDefs = Map.add name fields currentEnv.StructDefs }
+                    | _ -> ()
+                bindings <- bindings @ [bd]
+                currentEnv <- env'
+            | None ->
+                // Provider invocation failed — fall through to normal lowering
+                let (items, env') = lowerTypedDecl currentEnv (TDeclLet binding)
+                currentEnv <- env'
+                for item in items do
+                    match item with
+                    | Choice1Of3 fd ->
+                        funcs <- funcs @ [fd]
+                        currentEnv <- { currentEnv with Functions = Map.add fd.Name fd.Id currentEnv.Functions }
+                        currentEnv <- bindTypedVar fd.Name fd.Id currentEnv
+                    | Choice2Of3 bd -> bindings <- bindings @ [bd]
+                    | Choice3Of3 td ->
+                        types <- types @ [td]
+                        match td with
+                        | IRTDStruct (name, fields, _) ->
+                            currentEnv <- { currentEnv with StructDefs = Map.add name fields currentEnv.StructDefs }
+                        | _ -> ()
+
         | _ ->
             let (items, env') = lowerTypedDecl currentEnv decl
             currentEnv <- env'
@@ -819,8 +900,8 @@ let lowerTypedModule (env: TypedLowerEnv) (modul: TypedModule) (rawDecls: Locate
     (irModule, moduleExport)
 
 /// Lower a typed program (with optional raw program for static evaluation)
-let lowerTypedProgram (program: TypedProgram) (rawProgram: Program option) : IRProgram =
-    let env = emptyTypedEnv()
+let lowerTypedProgram (program: TypedProgram) (rawProgram: Program option) (builder: IRBuilder) : IRProgram =
+    let env = { emptyTypedEnv() with Builder = builder }
     let mutable currentExports = Map.empty<string, ModuleExport>
     let mutable irModules = []
     
@@ -849,7 +930,7 @@ let lower (source: string) : Result<IRProgram, string> =
     match Blade.Parser.parseProgram source with
     | Ok program ->
         match Blade.TypeCheck.typeCheck program with
-        | Ok typedProgram -> Ok (lowerTypedProgram typedProgram (Some program))
+        | Ok (typedProgram, builder) -> Ok (lowerTypedProgram typedProgram (Some program) builder)
         | Error errors -> 
             let msgs = errors |> List.map Blade.TypeCheck.formatCompileError
             Error (String.concat "\n" msgs)
@@ -860,7 +941,7 @@ let lowerMultiSource (sources: (string * string) list) : Result<IRProgram, strin
     match Blade.Parser.parseMultiSource sources with
     | Ok program ->
         match Blade.TypeCheck.typeCheck program with
-        | Ok typedProgram -> Ok (lowerTypedProgram typedProgram (Some program))
+        | Ok (typedProgram, builder) -> Ok (lowerTypedProgram typedProgram (Some program) builder)
         | Error errors ->
             let msgs = errors |> List.map Blade.TypeCheck.formatCompileError
             Error (String.concat "\n" msgs)

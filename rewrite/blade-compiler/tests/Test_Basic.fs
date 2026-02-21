@@ -78,7 +78,7 @@ let A = [1.0, 2.0, 3.0]
 let result = {
     let L = method_for(A, A)
     let f = lambda(x, y) where comm(x, y) -> x * y
-    L <@> f
+    L <@> f |> compute
 }
 """
 

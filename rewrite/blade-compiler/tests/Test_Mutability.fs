@@ -97,6 +97,29 @@ let result = {
 """
 
 // ============================================================================
+// Array element and struct field assignment
+// ============================================================================
+
+let test_array_element_assign = """
+// EXPECT: result = 10
+let result = {
+    let A = [1.0, 2.0, 3.0]
+    A(0) = 10.0
+    A(0)
+}
+"""
+
+let test_struct_field_assign = """
+// EXPECT: result = 3
+struct Point { x: Float, y: Float }
+let p = Point { x = 1.0, y = 2.0 }
+let result = {
+    p.x = 3.0
+    p.x
+}
+"""
+
+// ============================================================================
 // Test collections
 // ============================================================================
 
@@ -110,6 +133,8 @@ let mutabilityTests = [
     ("Static function", test_static_function)
     ("Mixed bindings", test_mixed_bindings)
     ("Compound assign", test_compound_assign)
+    ("Array element assign", test_array_element_assign)
+    ("Struct field assign", test_struct_field_assign)
 ]
 
 /// Tests that should fail with a type error

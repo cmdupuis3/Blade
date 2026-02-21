@@ -17,19 +17,22 @@ let A = [1.0, 2.0, 3.0]
 let B = [4.0, 5.0, 6.0]
 let L1 = method_for(A, B)
 let f1 = lambda(x, y) -> x * y
-let r1 = L1 <@> f1
+let r1 = L1 <@> f1 |> compute
+// EXPECT: r1 = [4.0, 5.0, 6.0, 8.0, 10.0, 12.0, 12.0, 15.0, 18.0]
 
 // Case 2: Same array twice WITH comm -> triangular iteration, speedup = 2
 let C = [1.0, 2.0, 3.0]
 let L2 = method_for(C, C)
 let f2 = lambda(x, y) where comm(x, y) -> x * y
-let r2 = L2 <@> f2
+let r2 = L2 <@> f2 |> compute
+// EXPECT: r2 = [1.0, 2.0, 3.0, 4.0, 6.0, 9.0]
 
 // Case 3: Same array three times with comm (gives 6x speedup)
 let D = [1.0, 2.0, 3.0]
 let L3 = method_for(D, D, D)
 let f3 = lambda(x, y, z) where comm(x, y, z) -> x * y * z
-let r3 = L3 <@> f3
+let r3 = L3 <@> f3 |> compute
+// Rank 3 — TODO(CG-3): EXPECT blocked
 """
 
 let test36_outputTypeDeduction = """
@@ -37,8 +40,9 @@ let test36_outputTypeDeduction = """
 let A = [1.0, 2.0, 3.0]
 let L = method_for(A, A)
 let f = lambda(x, y) where comm(x, y) -> x * y
-let result = L <@> f
-// result should have type Array<Float like SymIdx<2, 3>>
+let result = L <@> f |> compute
+// Triangular: row0=[1*1, 1*2, 1*3], row1=[2*2, 2*3], row2=[3*3]
+// EXPECT: result = [1.0, 2.0, 3.0, 4.0, 6.0, 9.0]
 """
 
 let test37_outputTypeDifferentArrays = """
@@ -47,36 +51,42 @@ let A = [1.0, 2.0, 3.0]
 let B = [4.0, 5.0, 6.0]
 let L = method_for(A, B)
 let f = lambda(x, y) where comm(x, y) -> x * y
-let result = L <@> f
-// result should have type Array<Float like Idx<3>, Idx<3>>
+let result = L <@> f |> compute
+// Full 3x3: row0=[1*4, 1*5, 1*6], row1=[2*4, 2*5, 2*6], row2=[3*4, 3*5, 3*6]
+// EXPECT: result = [4.0, 5.0, 6.0, 8.0, 10.0, 12.0, 12.0, 15.0, 18.0]
 """
 
 let test38_outputTypeThreeWay = """
-// Output type for 3-way same array: SymIdx<3, n>
+// Output type for 3-way same array: SymIdx<3, 3>
 let A = [1.0, 2.0, 3.0]
 let L = method_for(A, A, A)
 let f = lambda(x, y, z) where comm(x, y, z) -> x * y * z
-let result = L <@> f
-// result should have type Array<Float like SymIdx<3, 3>>
+let result = L <@> f |> compute
+// Triangular rank-3: combinations (i<=j<=k)
+// (0,0,0)=1, (0,0,1)=2, (0,0,2)=3, (0,1,1)=4, (0,1,2)=6, (0,2,2)=9
+// (1,1,1)=8, (1,1,2)=12, (1,2,2)=18, (2,2,2)=27
+// TODO(CG-3): EXPECT blocked — rank-3 print not implemented
 """
 
 let test39_outputTypeMixed = """
-// Mixed: (A, A, B) -> SymIdx<2, n>, Idx<n>
+// Mixed: (A, A, B) -> SymIdx<2, 3>, Idx<3>
 let A = [1.0, 2.0, 3.0]
 let B = [4.0, 5.0, 6.0]
 let L = method_for(A, A, B)
 let f = lambda(x, y, z) where comm(x, y, z) -> x * y * z
-let result = L <@> f
-// result should have type Array<Float like SymIdx<2, 3>, Idx<3>>
+let result = L <@> f |> compute
+// Triangular on A,A (i<=j), full on B (k=0..2)
+// TODO(CG-3): EXPECT blocked — rank-3 print not implemented
 """
 
 let test40_outputTypeNoComm = """
-// Without comm: Idx, Idx even with same array
+// Without comm: Idx, Idx even with same array — full rectangular
 let A = [1.0, 2.0, 3.0]
 let L = method_for(A, A)
 let f = lambda(x, y) -> x * y
-let result = L <@> f
-// result should have type Array<Float like Idx<3>, Idx<3>>
+let result = L <@> f |> compute
+// Full 3x3: row0=[1*1, 1*2, 1*3], row1=[2*1, 2*2, 2*3], row2=[3*1, 3*2, 3*3]
+// EXPECT: result = [1.0, 2.0, 3.0, 2.0, 4.0, 6.0, 3.0, 6.0, 9.0]
 """
 
 let test41_partialComm = """
@@ -85,8 +95,9 @@ let A = [1.0, 2.0, 3.0]
 let B = [4.0, 5.0, 6.0]
 let L = method_for(A, A, B)
 let f = lambda(x, y, z) where comm(x, y) -> x * y * z
-let result = L <@> f
-// result: SymIdx<2, 3> for A,A; Idx<3> for B (z not in comm group)
+let result = L <@> f |> compute
+// SymIdx<2, 3> for A,A pair; Idx<3> for B (z not in comm group)
+// TODO(CG-3): EXPECT blocked — rank-3 print not implemented
 """
 
 let test42_distinctCommGroups = """
@@ -95,8 +106,9 @@ let A = [1.0, 2.0, 3.0]
 let B = [4.0, 5.0, 6.0]
 let L = method_for(A, A, B, B)
 let f = lambda(x, y, z, w) where comm(x, y), comm(z, w) -> x * y * z * w
-let result = L <@> f
-// result: SymIdx<2, 3> for A,A; SymIdx<2, 3> for B,B
+let result = L <@> f |> compute
+// SymIdx<2, 3> for A,A; SymIdx<2, 3> for B,B
+// TODO(CG-3): EXPECT blocked — rank-4 print not implemented
 """
 
 /// Symmetry and triangular iteration

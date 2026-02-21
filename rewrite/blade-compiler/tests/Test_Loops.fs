@@ -78,7 +78,7 @@ let test77_rangeBasic = """
 // range<Idx<5>> produces virtual array [0, 1, 2, 3, 4]
 let R = method_for(range<Idx<5>>)
 let f = lambda(i) -> i * 2.0
-let result = R <@> f
+let result = R <@> f |> compute
 // EXPECT: result = [0, 2, 4, 6, 8]
 """
 
@@ -86,7 +86,7 @@ let test78_reverseBasic = """
 // reverse<Idx<5>> produces virtual array [4, 3, 2, 1, 0]
 let R = method_for(reverse<Idx<5>>)
 let f = lambda(i) -> i * 1.0
-let result = R <@> f
+let result = R <@> f |> compute
 // EXPECT: result = [4, 3, 2, 1, 0]
 """
 
@@ -115,6 +115,197 @@ let C = [7.0, 8.0, 9.0]
 let result = for (A, B, C) in range<Idx<3>> <@> lambda(a, b, c) -> a * b + c
 """
 
+let test82_composeBasic = """
+function double(x) -> Int = x * 2
+function add_one(x) -> Int = x + 1
+let f = double >> add_one
+let result = f(5)
+// EXPECT: result = 11
+"""
+
+let test83_composeChain = """
+function inc(x) -> Float64 = x + 1.0
+function triple(x) -> Float64 = x * 3.0
+function negate(x) -> Float64 = 0.0 - x
+let g = inc >> triple >> negate
+let result = g(2.0)
+// EXPECT: result = -9.0
+"""
+
+let test84_parallelBasic = """
+let A = [1.0, 2.0, 3.0]
+let L = method_for(A)
+let f = lambda(x) -> x + 10.0
+let g = lambda(x) -> x * 2.0
+let (sums, prods) = (L <@> f) <&> (L <@> g) |> compute
+// EXPECT: sums = [11.0, 12.0, 13.0]
+// EXPECT: prods = [2.0, 4.0, 6.0]
+"""
+
+let test85_fusionBasic = """
+let A = [1.0, 2.0, 3.0]
+let L = method_for(A)
+let f = lambda(x) -> x + 10.0
+let g = lambda(x) -> x * 2.0
+let (sums, prods) = (L <@> f) <&!> (L <@> g) |> compute
+// EXPECT: sums = [11.0, 12.0, 13.0]
+// EXPECT: prods = [2.0, 4.0, 6.0]
+"""
+
+let test86_parallel3Way = """
+let A = [1.0, 2.0, 3.0]
+let L = method_for(A)
+let f = lambda(x) -> x + 10.0
+let g = lambda(x) -> x * 2.0
+let h = lambda(x) -> x * x
+let (inner, squares) = (L <@> f) <&> (L <@> g) <&> (L <@> h) |> compute
+let (sums, prods) = inner
+// EXPECT: sums = [11.0, 12.0, 13.0]
+// EXPECT: prods = [2.0, 4.0, 6.0]
+// EXPECT: squares = [1.0, 4.0, 9.0]
+"""
+
+let test87_fusion3Way = """
+let A = [1.0, 2.0, 3.0]
+let L = method_for(A)
+let f = lambda(x) -> x + 10.0
+let g = lambda(x) -> x * 2.0
+let h = lambda(x) -> x * x
+let (inner, squares) = (L <@> f) <&!> (L <@> g) <&!> (L <@> h) |> compute
+let (sums, prods) = inner
+// EXPECT: sums = [11.0, 12.0, 13.0]
+// EXPECT: prods = [2.0, 4.0, 6.0]
+// EXPECT: squares = [1.0, 4.0, 9.0]
+"""
+
+let test88_arrayProductBasic = """
+let A = [1.0, 2.0, 3.0]
+let B = [4.0, 5.0, 6.0]
+let L = method_for(A) <*> method_for(B)
+let result = L <@> lambda(x, y) -> x + y |> compute
+// EXPECT: result = [5, 6, 7, 6, 7, 8, 7, 8, 9]
+"""
+
+let test89_arrayProductSymmetric = """
+let A = [1.0, 2.0, 3.0]
+let L = method_for(A) <*> method_for(A)
+let result = L <@> lambda(x, y) where comm(x, y) -> x + y |> compute
+// EXPECT: result = [2, 3, 4, 4, 5, 6]
+"""
+
+let test90_arrayProduct3Way = """
+let A = [1.0, 2.0]
+let B = [10.0, 20.0]
+let C = [100.0, 200.0]
+let L = method_for(A) <*> method_for(B) <*> method_for(C)
+let result = L <@> lambda(x, y, z) -> x + y + z |> compute
+// EXPECT: result = [111, 211, 121, 221, 112, 212, 122, 222]
+"""
+
+let test91_objectForParallel = """
+let A = [1.0, 2.0, 3.0]
+let L = method_for(A)
+let f = lambda(x) -> x + 10.0
+let g = lambda(x) -> x * 2.0
+let c1 = L <@> f
+let c2 = L <@> g
+let (sums, prods) = c1 <&> c2 |> compute
+// EXPECT: sums = [11.0, 12.0, 13.0]
+// EXPECT: prods = [2.0, 4.0, 6.0]
+"""
+
+let test92_objectForFusion = """
+let A = [1.0, 2.0, 3.0]
+let L = method_for(A)
+let f = lambda(x) -> x + 10.0
+let g = lambda(x) -> x * 2.0
+let c1 = L <@> f
+let c2 = L <@> g
+let (sums, prods) = c1 <&!> c2 |> compute
+// EXPECT: sums = [11.0, 12.0, 13.0]
+// EXPECT: prods = [2.0, 4.0, 6.0]
+"""
+
+let test93_objectForArrayProduct = """
+let A = [1.0, 2.0, 3.0]
+let B = [4.0, 5.0]
+let L = method_for(A) <*> method_for(B)
+let result = L <@> lambda(x, y) -> x * y |> compute
+// EXPECT: result = [4, 5, 8, 10, 12, 15]
+"""
+
+let test94_objectForCombParallel = """
+let A = [1.0, 2.0, 3.0]
+let L = method_for(A)
+let c1 = L <@> lambda(x) -> x + 10.0
+let c2 = L <@> lambda(x) -> x * 2.0
+let c3 = L <@> lambda(x) -> x * x
+let (inner, squares) = object_for(<&>) <@> (c1, c2, c3) |> compute
+let (sums, prods) = inner
+// EXPECT: sums = [11.0, 12.0, 13.0]
+// EXPECT: prods = [2.0, 4.0, 6.0]
+// EXPECT: squares = [1.0, 4.0, 9.0]
+"""
+
+let test95_objectForCombFusion = """
+let A = [1.0, 2.0, 3.0]
+let L = method_for(A)
+let c1 = L <@> lambda(x) -> x + 10.0
+let c2 = L <@> lambda(x) -> x * 2.0
+let c3 = L <@> lambda(x) -> x * x
+let (inner, squares) = object_for(<&!>) <@> (c1, c2, c3) |> compute
+let (sums, prods) = inner
+// EXPECT: sums = [11.0, 12.0, 13.0]
+// EXPECT: prods = [2.0, 4.0, 6.0]
+// EXPECT: squares = [1.0, 4.0, 9.0]
+"""
+
+let test96_objectForCombApply = """
+let A = [1.0, 2.0, 3.0]
+let L = method_for(A)
+let f = lambda(x) -> x + 10.0
+let g = lambda(x) -> x * 2.0
+let (c1, c2) = object_for(<@>) <@> ((L, f), (L, g))
+let (sums, prods) = c1 <&> c2 |> compute
+// EXPECT: sums = [11.0, 12.0, 13.0]
+// EXPECT: prods = [2.0, 4.0, 6.0]
+"""
+
+let test97_objectForCombApply3Way = """
+let A = [1.0, 2.0, 3.0]
+let L = method_for(A)
+let f = lambda(x) -> x + 10.0
+let g = lambda(x) -> x * 2.0
+let h = lambda(x) -> x * x
+let (c1, c2, c3) = object_for(<@>) <@> ((L, f), (L, g), (L, h))
+let (inner, squares) = object_for(<&>) <@> (c1, c2, c3) |> compute
+let (sums, prods) = inner
+// EXPECT: sums = [11.0, 12.0, 13.0]
+// EXPECT: prods = [2.0, 4.0, 6.0]
+// EXPECT: squares = [1.0, 4.0, 9.0]
+"""
+
+let test98_pipeApplyBasic = """
+let A = [1.0, 2.0, 3.0]
+let L = method_for(A)
+let f = lambda(x) -> x + 10.0
+let result = f |@> L |> compute
+// EXPECT: result = [11.0, 12.0, 13.0]
+"""
+
+let test99_pipeApplyChain = """
+let A = [1.0, 2.0, 3.0]
+let L = method_for(A)
+let f = lambda(x) -> x + 10.0
+let g = lambda(x) -> x * 2.0
+let h = lambda(x) -> x * x
+let (inner, squares) = ((L, f), (L, g), (L, h)) |@> object_for(<@>) |@> object_for(<&>) |> compute
+let (sums, prods) = inner
+// EXPECT: sums = [11.0, 12.0, 13.0]
+// EXPECT: prods = [2.0, 4.0, 6.0]
+// EXPECT: squares = [1.0, 4.0, 9.0]
+"""
+
 /// Loop objects and application
 let loopTests = [
     ("Method For", test4_methodFor)
@@ -132,4 +323,22 @@ let loopTests = [
     ("Range With Array", test79_rangeWithArray)
     ("CoIter Basic", test80_coIterBasic)
     ("CoIter 3-Way", test81_coIter3Way)
+    ("Compose Basic", test82_composeBasic)
+    ("Compose Chain", test83_composeChain)
+    ("Parallel Basic", test84_parallelBasic)
+    ("Fusion Basic", test85_fusionBasic)
+    ("Parallel 3-Way", test86_parallel3Way)
+    ("Fusion 3-Way", test87_fusion3Way)
+    ("Array Product Basic", test88_arrayProductBasic)
+    ("Array Product Symmetric", test89_arrayProductSymmetric)
+    ("Array Product 3-Way", test90_arrayProduct3Way)
+    ("Object For Parallel", test91_objectForParallel)
+    ("Object For Fusion", test92_objectForFusion)
+    ("Object For Array Product", test93_objectForArrayProduct)
+    ("Object For Comb Parallel", test94_objectForCombParallel)
+    ("Object For Comb Fusion", test95_objectForCombFusion)
+    ("Object For Comb Apply", test96_objectForCombApply)
+    ("Object For Comb Apply 3-Way", test97_objectForCombApply3Way)
+    ("Pipe Apply Basic", test98_pipeApplyBasic)
+    ("Pipe Apply Chain", test99_pipeApplyChain)
 ]

@@ -250,7 +250,7 @@ and IRExpr =
     | IRRank of array: IRExpr
     | IRPolyIndex of pack: IRExpr * index: IRExpr  // Dynamic poly-pack indexing: args[k]
     | IRExtent of array: IRExpr * dim: int
-    | IRAssign of target: IRId * value: IRExpr
+    | IRAssign of target: IRExpr * value: IRExpr
 
 /// Lambda with proper capture tracking
 and LambdaInfo = {
@@ -333,6 +333,13 @@ and AlignSpec = {
     Boundary: BoundaryMode
 }
 
+/// Active pattern for assignment target (lvalue) classification
+let (|LVVar|LVIndex|LVField|LVOther|) = function
+    | IRVar (id, _)              -> LVVar id
+    | IRIndex (arr, indices, _)  -> LVIndex (arr, indices)
+    | IRFieldAccess (obj, field) -> LVField (obj, field)
+    | e                          -> LVOther e
+
 /// Strip unit annotation from a type, returning the bare type
 let rec stripUnits (ty: IRType) : IRType =
     match ty with
@@ -405,10 +412,14 @@ let indexSpacesMatch (a: IndexSpaceInfo) (b: IndexSpaceInfo) : bool =
         match a.Tag, b.Tag with
         | Some tagA, Some tagB -> tagA = tagB
         | None, None ->
+            // Only match on named references (variables or parameters),
+            // not on anonymous literal extents. Two arrays that happen to
+            // have the same length don't share an index space.
+            // See §14.6: "commutativity is the license, shared index spaces
+            // are the payoff" — shared means same named type, not same extent.
             match a.Extent, b.Extent with
             | IRVar (idA, _), IRVar (idB, _) -> idA = idB
             | IRParam (nA, _, _), IRParam (nB, _, _) -> nA = nB
-            | IRLit (IRLitInt nA), IRLit (IRLitInt nB) -> nA = nB
             | _ -> false
         | _ -> false
 
@@ -1283,7 +1294,7 @@ let rec mapIRExpr (f: IRExpr -> IRExpr) (expr: IRExpr) : IRExpr =
         | IRDiag e -> IRDiag (m e)
         | IRRank e -> IRRank (m e)
         | IRExtent (e, d) -> IRExtent (m e, d)
-        | IRAssign (id, v) -> IRAssign (id, m v)
+        | IRAssign (t, v) -> IRAssign (m t, m v)
         // Binary
         | IRBinOp (mode, op, l, r) -> IRBinOp (mode, op, m l, m r)
         | IRTupleCons (h, t) -> IRTupleCons (m h, m t)
@@ -1691,10 +1702,20 @@ let rec ppIRExprWithNames (names: Map<int, string>) indent (expr: IRExpr) =
         sprintf "(%s >>@ %s)" (pp f) (pp g)
     | IRComposeMeth (f, g) ->
         sprintf "(%s @>> %s)" (pp f) (pp g)
-    | IRAssign (id, v) ->
-        match Map.tryFind id names with
-        | Some name -> sprintf "%s <- %s" name (pp v)
-        | None -> sprintf "v%d <- %s" id (pp v)
+    | IRAssign (target, v) ->
+        let targetStr =
+            match target with
+            | LVVar id ->
+                match Map.tryFind id names with
+                | Some name -> name
+                | None -> sprintf "v%d" id
+            | LVIndex (arr, idxs) ->
+                let arrStr = pp arr
+                let idxStr = idxs |> List.map pp |> String.concat ", "
+                sprintf "%s[%s]" arrStr idxStr
+            | LVField (obj, f) -> sprintf "%s.%s" (pp obj) f
+            | LVOther e -> pp e
+        sprintf "%s <- %s" targetStr (pp v)
     | _ -> "<expr>"
 
 /// Default pretty printer (no name context)

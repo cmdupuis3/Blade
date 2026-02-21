@@ -69,6 +69,21 @@ let expectIdent (tokens: Token list) : ParseResult<string> =
         | _ -> error (sprintf "Expected identifier but got %A" t.Kind) t.Line t.Col
     | [] -> error "Expected identifier but got EOF" 0 0
 
+/// Expect a closing > for type parameters.
+/// Handles >> (compose token) by splitting: consume one > and leave one >.
+/// This is the standard approach used by Rust, Java 7+, and C# to resolve
+/// the ambiguity between >> (shift/compose) and >> (two type closes).
+let expectGt (tokens: Token list) : ParseResult<unit> =
+    match tokens with
+    | t :: rest when t.Kind = TokOp ">" ->
+        Ok ((), rest)
+    | t :: rest when t.Kind = TokOp ">>" ->
+        // Split >>: consume first >, leave second > with adjusted position
+        let remainingGt = { t with Kind = TokOp ">"; Col = t.Col + 1; Length = 1 }
+        Ok ((), remainingGt :: rest)
+    | t :: _ -> error (sprintf "Expected '>' but got %A" t.Kind) t.Line t.Col
+    | [] -> error "Expected '>' but got EOF" 0 0
+
 // Bind operator for chaining parsers
 let (>>=) (result: ParseResult<'a>) (f: 'a -> Token list -> ParseResult<'b>) : ParseResult<'b> =
     match result with
@@ -344,17 +359,17 @@ and parseTypeAtom (tokens: Token list) : ParseResult<TypeExpr> =
         | Some (TokKeyword KwLike) ->
             // After 'like', only expect index types (Idx or SymIdx)
             advance afterElem |> sepBy parseIndexType TokComma >>= fun indexTypes afterIndices ->
-            expect (TokOp ">") afterIndices >>= fun _ remaining ->
+            expectGt afterIndices >>= fun _ remaining ->
             success (TyArray (elemType, indexTypes)) remaining
         | _ ->
-            expect (TokOp ">") afterElem >>= fun _ remaining ->
+            expectGt afterElem >>= fun _ remaining ->
             success (TyArray (elemType, [])) remaining
     
     | Some (TokKeyword KwPoly) ->
         // Poly<T^r> - arity-polymorphic pack type
         advance tokens |> expect (TokOp "<") >>= fun _ afterLt ->
         parseTypeExpr afterLt >>= fun innerType afterInner ->
-        expect (TokOp ">") afterInner >>= fun _ remaining ->
+        expectGt afterInner >>= fun _ remaining ->
         success (TyPoly innerType) remaining
     
     | Some (TokKeyword KwIdx) ->
@@ -393,7 +408,7 @@ and parseTypeAtom (tokens: Token list) : ParseResult<TypeExpr> =
         | Some (TokOp "<") ->
             // Parameterized type: Array<T>, MyStruct<Int>, etc.
             advance afterName |> sepBy parseTypeExpr TokComma >>= fun args afterArgs ->
-            expect (TokOp ">") afterArgs >>= fun _ remaining ->
+            expectGt afterArgs >>= fun _ remaining ->
             success (TyNamed (name, args)) remaining
         | _ ->
             // Bare name without caret: always a named type / type constructor
@@ -413,7 +428,7 @@ and parseIndexType (tokens: Token list) : ParseResult<TypeExpr> =
     | Some (TokKeyword KwIdx) ->
         advance tokens |> expect (TokOp "<") >>= fun _ afterLt ->
         parseSimpleExpr afterLt >>= fun extent afterExtent ->
-        expect (TokOp ">") afterExtent >>= fun _ remaining ->
+        expectGt afterExtent >>= fun _ remaining ->
         success (TyIdx extent) remaining
     
     | Some (TokKeyword KwSymIdx) ->
@@ -421,7 +436,7 @@ and parseIndexType (tokens: Token list) : ParseResult<TypeExpr> =
         parseLiteral afterLt >>= fun arityLit afterArity ->
         expect TokComma afterArity >>= fun _ afterComma ->
         parseSimpleExpr afterComma >>= fun extent afterExtent ->
-        expect (TokOp ">") afterExtent >>= fun _ remaining ->
+        expectGt afterExtent >>= fun _ remaining ->
         let arity = match arityLit with LitInt n -> int n | _ -> 2
         success (TySymIdx (arity, extent)) remaining
     
@@ -430,14 +445,14 @@ and parseIndexType (tokens: Token list) : ParseResult<TypeExpr> =
         parseLiteral afterLt >>= fun arityLit afterArity ->
         expect TokComma afterArity >>= fun _ afterComma ->
         parseSimpleExpr afterComma >>= fun extent afterExtent ->
-        expect (TokOp ">") afterExtent >>= fun _ remaining ->
+        expectGt afterExtent >>= fun _ remaining ->
         let arity = match arityLit with LitInt n -> int n | _ -> 2
         success (TyAntisymIdx (arity, extent)) remaining
     
     | Some (TokKeyword KwHermitianIdx) ->
         advance tokens |> expect (TokOp "<") >>= fun _ afterLt ->
         parseSimpleExpr afterLt >>= fun extent afterExtent ->
-        expect (TokOp ">") afterExtent >>= fun _ remaining ->
+        expectGt afterExtent >>= fun _ remaining ->
         success (TyHermitianIdx extent) remaining
     
     | Some kind ->
@@ -670,6 +685,10 @@ and parsePipeline (tokens: Token list) : ParseResult<Expr> =
             match right with
             | ExprVar "compute" -> loop (ExprCompute acc) remaining
             | _ -> loop (ExprApp (right, [acc])) remaining
+        | Some (TokOp "|@>") ->
+            // Pipe-apply: a |@> b  desugars to  b <@> a
+            advance toks |> parseChoice >>= fun right remaining ->
+            loop (ExprBinOp (Elementwise, OpApply, right, acc)) remaining
         | _ -> success acc toks
     loop left rest
 
@@ -693,12 +712,6 @@ and parseParallel (tokens: Token list) : ParseResult<Expr> =
         | _ -> success acc toks
     loop left rest
 
-// Helper to check for >> (two consecutive > tokens)
-and isComposeOp (tokens: Token list) =
-    match tokens with
-    | t1 :: t2 :: _ when t1.Kind = TokOp ">" && t2.Kind = TokOp ">" -> true
-    | _ -> false
-
 and parseBind (tokens: Token list) : ParseResult<Expr> =
     parseApply tokens >>= fun left rest ->
     let rec loop acc toks =
@@ -706,11 +719,9 @@ and parseBind (tokens: Token list) : ParseResult<Expr> =
         | Some (BindOp op) ->
             advance toks |> parseApply >>= fun right remaining ->
             loop (ExprBinOp (Elementwise, op, acc, right)) remaining
-        // Handle >> as two consecutive > tokens (classic compose)
-        | Some (TokOp ">") when isComposeOp toks ->
-            // Consume both > tokens
-            let afterCompose = advance (advance toks)
-            parseApply afterCompose >>= fun right remaining ->
+        // >> is now a single token from the lexer
+        | Some (TokOp ">>") ->
+            advance toks |> parseApply >>= fun right remaining ->
             loop (ExprBinOp (Elementwise, OpCompose, acc, right)) remaining
         | _ -> success acc toks
     loop left rest
@@ -1033,14 +1044,14 @@ and parsePrimary (tokens: Token list) : ParseResult<Expr> =
     | Some (TokKeyword KwRange) ->
         advance tokens |> expect (TokOp "<") >>= fun _ afterLt ->
         parseTypeExpr afterLt >>= fun ty afterTy ->
-        expect (TokOp ">") afterTy >>= fun _ remaining ->
+        expectGt afterTy >>= fun _ remaining ->
         success (ExprRange ty) remaining
     
     // reverse<T>
     | Some (TokKeyword KwReverse) ->
         advance tokens |> expect (TokOp "<") >>= fun _ afterLt ->
         parseTypeExpr afterLt >>= fun ty afterTy ->
-        expect (TokOp ">") afterTy >>= fun _ remaining ->
+        expectGt afterTy >>= fun _ remaining ->
         success (ExprReverse ty) remaining
     
     // Parenthesized expression or tuple
@@ -1286,9 +1297,36 @@ and parseMethodFor (tokens: Token list) : ParseResult<Expr> =
 
 and parseObjectFor (tokens: Token list) : ParseResult<Expr> =
     expect TokLParen tokens >>= fun _ afterLParen ->
-    parseExprImpl afterLParen >>= fun kernel afterKernel ->
-    expect TokRParen afterKernel >>= fun _ remaining ->
-    success (ExprObjectFor kernel) remaining
+    // Check for combinator section: object_for(<&>), object_for(<&!>), object_for(<*>), etc.
+    match peek afterLParen with
+    | Some (TokOp op) ->
+        let afterOp = advance afterLParen
+        match peek afterOp with
+        | Some TokRParen ->
+            // It's a combinator/operator section
+            let binOp = 
+                match op with
+                | "<&>" -> Some OpParallel
+                | "<&!>" -> Some OpFusion
+                | "<*>" -> Some OpArrayProd
+                | "<@>" -> Some OpApply
+                | "<$>" -> Some OpFunctor
+                | ">>=" -> Some OpBind
+                | _ -> stringToBinOp op  // fall back to scalar ops (+, *, etc.)
+            match binOp with
+            | Some b -> success (ExprObjectFor (ExprSection b)) (advance afterOp)
+            | None ->
+                let line, col = currentPos afterLParen
+                error (sprintf "Unknown operator in object_for: %s" op) line col
+        | _ ->
+            // Not a section — fall back to normal expression parsing
+            parseExprImpl afterLParen >>= fun kernel afterKernel ->
+            expect TokRParen afterKernel >>= fun _ remaining ->
+            success (ExprObjectFor kernel) remaining
+    | _ ->
+        parseExprImpl afterLParen >>= fun kernel afterKernel ->
+        expect TokRParen afterKernel >>= fun _ remaining ->
+        success (ExprObjectFor kernel) remaining
 
 and parseParenExpr (tokens: Token list) : ParseResult<Expr> =
     match peek tokens with
@@ -1555,8 +1593,18 @@ let parseTypeParams (tokens: Token list) : Ident list * Token list =
                 match peek afterName with
                 | Some TokComma -> loop (name :: acc) (advance afterName)
                 | Some (TokOp ">") -> (List.rev (name :: acc), advance afterName)
+                | Some (TokOp ">>") ->
+                    // Split >>: consume one >, leave one >
+                    match afterName with
+                    | t :: rest -> (List.rev (name :: acc), { t with Kind = TokOp ">"; Col = t.Col + 1; Length = 1 } :: rest)
+                    | _ -> (List.rev (name :: acc), afterName)
                 | _ -> (List.rev (name :: acc), afterName)
             | Some (TokOp ">") -> (List.rev acc, advance toks)
+            | Some (TokOp ">>") ->
+                // Split >>: consume one >, leave one >
+                match toks with
+                | t :: rest -> (List.rev acc, { t with Kind = TokOp ">"; Col = t.Col + 1; Length = 1 } :: rest)
+                | _ -> (List.rev acc, toks)
             | _ -> (List.rev acc, toks)
         loop [] (advance tokens)
     | _ -> ([], tokens)

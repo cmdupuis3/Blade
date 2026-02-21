@@ -42,7 +42,7 @@ type ProcessStartInfo = System.Diagnostics.ProcessStartInfo
 // Test Utilities
 // ============================================================================
 
-let compilerVersion = "0.13.3"
+let compilerVersion = "0.14.0"
 
 let printHeader title =
     printfn "\n%s" (String.replicate 70 "=")
@@ -233,7 +233,7 @@ let testTypeCheck source =
     | Ok program ->
         printfn "Parse: OK"
         match typeCheck program with
-        | Ok typedProgram ->
+        | Ok (typedProgram, _builder) ->
             printfn "TypeCheck: OK (%d modules)" typedProgram.Modules.Length
             for m in typedProgram.Modules do
                 let moduleName = m.Name |> Option.map (String.concat ".") |> Option.defaultValue "<anonymous>"
@@ -719,16 +719,32 @@ let runTestCategoryFull (name: string) (tests: (string * string) list) (outputDi
     
     printfn "Running %d tests...\n" (List.length tests)
     
-    let mutable testIdx = 0
-    let results = tests |> List.map (fun (testName, source) ->
-        testIdx <- testIdx + 1
-        eprintf "[%d/%d] %s... " testIdx (List.length tests) testName
-        Console.Error.Flush()
-        let result = runFullTest testName source outputDir gppAvailable
-        let status = match result.CompileResult with Ok _ -> "ok" | Error e when e = "IR failed" -> "IR fail" | Error _ -> "compile fail"
-        eprintfn "%s" status
-        Console.Error.Flush()
-        result)
+    let testArray = tests |> Array.ofList
+    let total = testArray.Length
+    
+    let results = 
+        // Ordered output buffer: collect results and print in original order
+        let resultBuffer = System.Collections.Concurrent.ConcurrentDictionary<int, string>()
+        let mutable nextToPrint = 0
+        let printLock = obj()
+        
+        testArray
+        |> Array.Parallel.mapi (fun idx (testName, source) ->
+            let result = runFullTest testName source outputDir gppAvailable
+            let status = match result.CompileResult with Ok _ -> "ok" | Error e when e = "IR failed" -> "IR fail" | Error _ -> "compile fail"
+            let line = sprintf "[%d/%d] %s... %s" (idx + 1) total testName status
+            
+            // Buffer this result and flush any sequential completions
+            resultBuffer.[idx] <- line
+            lock printLock (fun () ->
+                while resultBuffer.ContainsKey(nextToPrint) do
+                    let msg = resultBuffer.[nextToPrint]
+                    resultBuffer.TryRemove(nextToPrint) |> ignore
+                    eprintfn "%s" msg
+                    nextToPrint <- nextToPrint + 1)
+            
+            result)
+        |> Array.toList
     
     // Find first compile failure to show full error
     let firstCompileFailure = 

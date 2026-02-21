@@ -317,6 +317,14 @@ type TypeDefInfo =
     | TDIVariant of name: string * typeParams: string list * variants: (string * IRType option) list
     | TDIIndexType of name: string * idx: IRIndexType
 
+/// Exported bindings from a type-checked module, for cross-module imports
+type TypeModuleExport = {
+    Variables: Map<string, VarInfo>
+    TypeDefs: Map<string, TypeDefInfo>
+    VariantTags: Map<string, string * IRType option>
+    Units: Map<string, IR.UnitSig>
+}
+
 /// Type checking environment
 type TypeEnv = {
     Variables: Map<string, VarInfo>
@@ -336,6 +344,8 @@ type TypeEnv = {
     Units: Map<string, IR.UnitSig>
     /// Context stack for error reporting, e.g. ["in function 'foo'"]
     Context: string list
+    /// Exports from previously type-checked modules
+    ModuleExports: Map<string, TypeModuleExport>
 }
 
 let emptyEnv () = {
@@ -351,6 +361,7 @@ let emptyEnv () = {
     ImplMethods = Map.empty
     Units = Map.empty
     Context = []
+    ModuleExports = Map.empty
 }
 
 /// Push a context frame onto the environment
@@ -390,7 +401,7 @@ let formatCompileError (err: CompileError) : string =
     elif context = "" then sprintf "%s: %s" loc msg
     else sprintf "%s: %s\n%s" loc msg context
 
-let bindVar name info env =
+let bindVar name info (env: TypeEnv) =
     { env with Variables = Map.add name info env.Variables }
 
 let bindVarSimple name varId ty env =
@@ -423,10 +434,10 @@ let assignOfBindingMut = function
 let enterScope env =
     { env with OuterScope = Map.foldBack Map.add env.Variables env.OuterScope }
 
-let registerTypeDef name info env =
+let registerTypeDef name info (env: TypeEnv) =
     { env with TypeDefs = Map.add name info env.TypeDefs }
 
-let registerVariantTag tag parentName payload env =
+let registerVariantTag tag parentName payload (env: TypeEnv) =
     { env with VariantTags = Map.add tag (parentName, payload) env.VariantTags }
 
 /// Resolve a UnitExpr AST node to a canonical UnitSig
@@ -1256,10 +1267,55 @@ and inferBinOp env mode op left right : TypeResult<TypedExpr> =
         inferExpr env right |> Result.bind (fun tR ->
             Ok (mkTyped (TExprBind (tL, tR)) (env.Subst.Fresh()))))
 
-    | OpParallel | OpFusion ->
+    | OpParallel ->
         inferExpr env left |> Result.bind (fun tL ->
         inferExpr env right |> Result.bind (fun tR ->
             Ok (mkTyped (TExprParallel (tL, tR)) (IRTTuple [tL.Type; tR.Type]))))
+
+    | OpFusion ->
+        inferExpr env left |> Result.bind (fun tL ->
+        inferExpr env right |> Result.bind (fun tR ->
+            Ok (mkTyped (TExprFusion (tL, tR)) (IRTTuple [tL.Type; tR.Type]))))
+
+    | OpArrayProd ->
+        // <*> : MethodLoop × MethodLoop → MethodLoop (concatenate array lists)
+        inferExpr env left |> Result.bind (fun tL ->
+        inferExpr env right |> Result.bind (fun tR ->
+            // Resolve both sides to find TExprMethodFor
+            let rL = resolveTypedExpr env tL
+            let rR = resolveTypedExpr env tR
+            match rL.Kind, rR.Kind with
+            | TExprMethodFor m1, TExprMethodFor m2 ->
+                // Merge into single TExprMethodFor with concatenated arrays
+                let merged : TypedMethodForInfo = {
+                    Arrays = m1.Arrays @ m2.Arrays
+                    Identities = m1.Identities @ m2.Identities
+                    ArrayTypes = m1.ArrayTypes @ m2.ArrayTypes
+                    SDimsPerArray = m1.SDimsPerArray @ m2.SDimsPerArray
+                    TotalSDims = m1.TotalSDims + m2.TotalSDims
+                    SharedIndexType = None
+                }
+                let loopTy = IRTLoop {
+                    Kind = LKMethod
+                    Arity = Some (m1.Arrays.Length + m2.Arrays.Length)
+                    ArrayTypes = (m1.ArrayTypes @ m2.ArrayTypes) |> List.map IRTArray
+                    KernelType = None
+                }
+                Ok (mkTyped (TExprMethodFor merged) loopTy)
+            | _ ->
+                // Fallback: produce BinOp for non-method_for operands
+                let arity =
+                    match tL.Type, tR.Type with
+                    | IRTLoop l1, IRTLoop l2 -> 
+                        match l1.Arity, l2.Arity with
+                        | Some a, Some b -> Some (a + b)
+                        | _ -> None
+                    | _ -> None
+                let loopTy = IRTLoop {
+                    Kind = LKMethod; Arity = arity
+                    ArrayTypes = []; KernelType = None
+                }
+                Ok (mkTyped (TExprBinOp (mode, op, tL, tR)) loopTy)))
 
     | OpChoice | OpFallback ->
         inferExpr env left |> Result.bind (fun tL ->
@@ -1270,7 +1326,27 @@ and inferBinOp env mode op left right : TypeResult<TypedExpr> =
     | OpComposeObj | OpComposeMeth | OpCompose ->
         inferExpr env left |> Result.bind (fun tL ->
         inferExpr env right |> Result.bind (fun tR ->
-            Ok (mkTyped (TExprCompose (tL, tR)) tR.Type)))
+            // f >> g : (A → B) >> (B → C) = (A → C)
+            match env.Subst.Resolve(tL.Type), env.Subst.Resolve(tR.Type) with
+            | IRTFunc (fArgs, fRet), IRTFunc (gArgs, gRet) ->
+                // Unify f's return type with g's parameter type(s)
+                match gArgs with
+                | [gArg] -> 
+                    let _ = unify env.Subst fRet gArg
+                    Ok (mkTyped (TExprCompose (tL, tR)) (IRTFunc (fArgs, gRet)))
+                | _ ->
+                    // Multi-arg g: unify f's return (should be tuple) with g's args as tuple
+                    let _ = unify env.Subst fRet (IRTTuple gArgs)
+                    Ok (mkTyped (TExprCompose (tL, tR)) (IRTFunc (fArgs, gRet)))
+            | IRTFunc _, _ ->
+                eprintfn "Warning: right side of >> should be a function"
+                Ok (mkTyped (TExprCompose (tL, tR)) tR.Type)
+            | _, IRTFunc (gArgs, gRet) ->
+                // f might be a fresh/unresolved type — permissive
+                Ok (mkTyped (TExprCompose (tL, tR)) (IRTFunc (gArgs, gRet)))
+            | _ ->
+                // Both unresolved — permissive, return fresh
+                Ok (mkTyped (TExprCompose (tL, tR)) (env.Subst.Fresh()))))
 
     | OpCons ->
         inferExpr env left |> Result.bind (fun tL ->
@@ -1388,6 +1464,46 @@ and inferApply (env: TypeEnv) (tLeft: TypedExpr) (tRight: TypedExpr) : TypeResul
         match innerKernel.Kind with
         | TExprLambda li -> buildApplyInfo env mfInfo li tLeft tRight true isAntisym
         | _ -> buildGenericApply env tLeft tRight
+
+    // object_for(<combinator>) <@> (c1, c2, ...) → left-fold or map+combine
+    | TExprObjectFor objInfo, _ when
+        (match objInfo.Kernel.Kind with TExprSection _ -> true | _ -> false) ->
+        let op = match objInfo.Kernel.Kind with TExprSection op -> op | _ -> OpAdd
+        // Extract elements from right side
+        let elems = match rR.Kind with
+                    | TExprTuple es -> es
+                    | _ -> [tRight]
+        if elems.Length < 2 then
+            Error (Other "object_for(<combinator>) requires at least 2 arguments")
+        else
+            match op with
+            | OpApply ->
+                // object_for(<@>) <@> ((L1, f1), (L2, f2), ...)
+                // Apply <@> to each (loop, kernel) pair, return tuple of computations
+                let pairs = elems |> List.map (fun e ->
+                    match e.Kind with
+                    | TExprTuple [loop; kernel] -> Ok (loop, kernel)
+                    | _ -> Error (Other "object_for(<@>) expects (loop, kernel) pairs"))
+                pairs |> sequenceResults |> Result.bind (fun pairList ->
+                    pairList |> List.map (fun (loop, kernel) -> inferApply env loop kernel)
+                    |> sequenceResults
+                    |> Result.map (fun computations ->
+                        let types = computations |> List.map (fun c -> c.Type)
+                        mkTyped (TExprTuple computations) (IRTTuple types)))
+            | _ ->
+                // Standard left-associative fold: (((c1 op c2) op c3) op ...)
+                let folder (acc: TypedExpr) (elem: TypedExpr) =
+                    let resTy = 
+                        match op with
+                        | OpParallel | OpFusion -> IRTTuple [acc.Type; elem.Type]
+                        | _ -> acc.Type
+                    let kind =
+                        match op with
+                        | OpParallel -> TExprParallel (acc, elem)
+                        | OpFusion -> TExprFusion (acc, elem)
+                        | _ -> TExprBinOp (Elementwise, op, acc, elem)
+                    mkTyped kind resTy
+                Ok (elems |> List.tail |> List.fold folder (List.head elems))
 
     // object_for normalization: build synthetic MethodFor from right-side arrays
     | TExprObjectFor objInfo, _ ->
@@ -2092,7 +2208,46 @@ and checkDecl (env: TypeEnv) (decl: Decl) : TypeResult<TypedDecl * TypeEnv> =
     | DeclUnit unitDecl ->
         let env' = registerUnit env unitDecl
         Ok (TDeclUnit unitDecl, env')
-    | DeclImport (qname, style) -> Ok (TDeclImport (qname, style), env)
+    | DeclImport (qname, style) ->
+        let fullName = String.concat "." qname
+        let env' =
+            match Map.tryFind fullName env.ModuleExports with
+            | Some exports ->
+                match style with
+                | ImportQualified aliasOpt ->
+                    let alias = aliasOpt |> Option.defaultValue (List.last qname)
+                    // Register all exported variables as alias.name
+                    let mutable e = env
+                    for kv in exports.Variables do
+                        let qualName = sprintf "%s.%s" alias kv.Key
+                        e <- bindVar qualName kv.Value e
+                    for kv in exports.TypeDefs do
+                        e <- registerTypeDef kv.Key kv.Value e
+                    for kv in exports.VariantTags do
+                        e <- { e with VariantTags = Map.add kv.Key kv.Value e.VariantTags }
+                    for kv in exports.Units do
+                        e <- { e with Units = Map.add kv.Key kv.Value e.Units }
+                    e
+                | ImportSelective names ->
+                    let mutable e = env
+                    for name in names do
+                        match Map.tryFind name exports.Variables with
+                        | Some vi -> e <- bindVar name vi e
+                        | None -> ()
+                        match Map.tryFind name exports.TypeDefs with
+                        | Some tdi -> e <- registerTypeDef name tdi e
+                        | None -> ()
+                    e
+            | None ->
+                // Provider or unknown module — bind alias as opaque so references type-check
+                // (actual types resolved during lowering when provider runs)
+                match style with
+                | ImportQualified aliasOpt ->
+                    let alias = aliasOpt |> Option.defaultValue (List.last qname)
+                    let varId = env.Builder.FreshId()
+                    bindVarSimple alias varId (IRTNamed (fullName)) env
+                | ImportSelective _ -> env
+        Ok (TDeclImport (qname, style), env')
 
 and checkFunctionDecl (env: TypeEnv) (funcDecl: FunctionDecl) : TypeResult<TypedDecl * TypeEnv> =
     // Fresh type variable scope for this function's type annotations.
@@ -2227,6 +2382,7 @@ let rec zonkExpr (subst: Subst) (expr: TypedExpr) : TypedExpr =
         | TExprBinOp (m, op, l, r) -> TExprBinOp (m, op, z l, z r)
         | TExprBind (a, b) -> TExprBind (z a, z b)
         | TExprParallel (a, b) -> TExprParallel (z a, z b)
+        | TExprFusion (a, b) -> TExprFusion (z a, z b)
         | TExprChoice (a, b) -> TExprChoice (z a, z b)
         | TExprCompose (a, b) -> TExprCompose (z a, z b)
         | TExprGuard (c, b) -> TExprGuard (z c, z b)
@@ -2348,7 +2504,7 @@ let zonkModule (subst: Subst) (modul: TypedModule) : TypedModule =
 // 12. Module and Program
 // ============================================================================
 
-let checkModule (env: TypeEnv) (modul: ModuleDecl) : TypedModule * CompileError list =
+let checkModule (env: TypeEnv) (modul: ModuleDecl) : TypedModule * TypeEnv * CompileError list =
     // Pre-pass: register static functions and static values with placeholder types
     // so forward references and mutual recursion resolve correctly.
     let preEnv =
@@ -2400,17 +2556,28 @@ let checkModule (env: TypeEnv) (modul: ModuleDecl) : TypedModule * CompileError 
     let typedModule = { Name = Some modul.Name; Decls = List.rev decls }
     // Zonk: resolve all IRTInfer through the substitution, default unsolved to Float64
     let zonked = zonkModule currentEnv.Subst typedModule
-    (zonked, List.rev errors)
+    (zonked, currentEnv, List.rev errors)
 
-let checkProgram (program: Program) : TypedProgram * CompileError list =
+let checkProgram (program: Program) : TypedProgram * IRBuilder * CompileError list =
     let env = emptyEnv ()
     let mutable modules = []
     let mutable allErrors = []
+    let mutable moduleExports = Map.empty<string, TypeModuleExport>
     for modul in program.Modules do
-        let (tm, errs) = checkModule env modul
+        let envWithExports = { env with ModuleExports = moduleExports }
+        let (tm, finalEnv, errs) = checkModule envWithExports modul
         modules <- tm :: modules
         allErrors <- allErrors @ errs
-    ({ Modules = List.rev modules }, allErrors)
+        // Build export from this module's checked environment
+        let moduleName = modul.Name |> String.concat "."
+        let export : TypeModuleExport = {
+            Variables = finalEnv.Variables |> Map.filter (fun k _ -> not (k.Contains(".")))
+            TypeDefs = finalEnv.TypeDefs |> Map.filter (fun k _ -> not (k.Contains(".")))
+            VariantTags = finalEnv.VariantTags
+            Units = finalEnv.Units
+        }
+        moduleExports <- Map.add moduleName export moduleExports
+    ({ Modules = List.rev modules }, env.Builder, allErrors)
 
 // ============================================================================
 // 13. Public Entry Point
@@ -2419,7 +2586,7 @@ let checkProgram (program: Program) : TypedProgram * CompileError list =
 /// Type check a program. Returns the (possibly partial) typed program
 /// and a list of compile errors. If the error list is empty, the program
 /// is fully type-checked.
-let typeCheck (program: Program) : Result<TypedProgram, CompileError list> =
-    let (tp, errors) = checkProgram program
-    if errors.IsEmpty then Ok tp
+let typeCheck (program: Program) : Result<TypedProgram * IRBuilder, CompileError list> =
+    let (tp, builder, errors) = checkProgram program
+    if errors.IsEmpty then Ok (tp, builder)
     else Error errors

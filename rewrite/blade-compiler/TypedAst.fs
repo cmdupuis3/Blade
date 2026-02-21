@@ -165,6 +165,7 @@ and TypedExprKind =
     // Other combinators (simpler, no symmetry analysis needed)
     | TExprBind of TypedExpr * TypedExpr
     | TExprParallel of TypedExpr * TypedExpr
+    | TExprFusion of TypedExpr * TypedExpr
     | TExprChoice of TypedExpr * TypedExpr
     | TExprCompose of TypedExpr * TypedExpr
     
