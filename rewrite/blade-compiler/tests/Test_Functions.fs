@@ -32,6 +32,8 @@ let B = [4.0, 5.0, 6.0]
 let L = method_for(A, B)
 let f = lambda(x, y) -> (x + y) * scale + offset
 let result = L <@> f |> compute
+// result[i][j] = (A[i]+B[j])*2.5 + 1
+// EXPECT: result = [13.5, 16, 18.5, 16, 18.5, 21, 18.5, 21, 23.5]
 """
 
 let test25_functionCapture = """

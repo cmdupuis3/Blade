@@ -88,6 +88,8 @@ and collectStmtNames (stmt: Stmt) : Set<string> =
     | StmtLet binding -> collectFreeNames binding.Value
     | StmtAssign (lhs, _, rhs) -> Set.union (collectFreeNames lhs) (collectFreeNames rhs)
     | StmtExpr e -> collectFreeNames e
+    | StmtForIn (_, range, body) ->
+        Set.union (collectFreeNames range) (body |> List.map collectStmtNames |> Set.unionMany)
 
 /// Topological sort: given a map of name → dependencies, return an evaluation order.
 /// Returns Error with cycle members if a cycle exists.
@@ -292,6 +294,8 @@ and evalBlock env fuel (stmts: Stmt list) (finalExpr: Expr option) : Result<Stat
             evalBlock env fuel rest finalExpr)
     | StmtAssign _ :: rest ->
         evalBlock env fuel rest finalExpr
+    | StmtForIn _ :: rest ->
+        evalBlock env fuel rest finalExpr  // Skip for-in loops in static eval
 
 /// Built-in static functions (abs, min, max, length, etc.)
 and evalBuiltin env fuel (name: string) (args: Expr list) : Result<StaticValue, string> =

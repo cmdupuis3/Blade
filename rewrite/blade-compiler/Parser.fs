@@ -783,11 +783,19 @@ and parseComparison (tokens: Token list) : ParseResult<Expr> =
     | _ -> success left rest
 
 and parseCons (tokens: Token list) : ParseResult<Expr> =
-    parseAdditive tokens >>= fun left rest ->
+    parseDotDot tokens >>= fun left rest ->
     match peek rest with
     | Some TokColonColon ->
-        advance rest |> parseCons >>= fun right remaining ->
+        advance rest |> parseDotDot >>= fun right remaining ->
         success (ExprBinOp (Elementwise, OpCons, left, right)) remaining
+    | _ -> success left rest
+
+and parseDotDot (tokens: Token list) : ParseResult<Expr> =
+    parseAdditive tokens >>= fun left rest ->
+    match peek rest with
+    | Some TokDotDot ->
+        advance rest |> parseAdditive >>= fun right remaining ->
+        success (ExprDotDot (left, right)) remaining
     | _ -> success left rest
 
 and parseAdditive (tokens: Token list) : ParseResult<Expr> =
@@ -1414,6 +1422,37 @@ and parseBlock (tokens: Token list) : ParseResult<Expr> =
             advance toks |> parseNestedFunction >>= fun stmt remaining ->
             let remaining = skipTerminator remaining
             loop (stmt :: stmts) remaining
+        | Some (TokKeyword KwFor) ->
+            // Check for imperative for-in loop: for IDENT in EXPR { STMTS }
+            let afterFor = advance toks
+            match peek afterFor with
+            | Some (TokIdent varName) ->
+                let afterIdent = advance afterFor
+                match peek afterIdent with
+                | Some (TokKeyword KwIn) ->
+                    // Parse range expression
+                    let afterIn = advance afterIdent
+                    parseExprImpl afterIn >>= fun rangeExpr afterRange ->
+                    let afterRange = skipNL afterRange
+                    match peek afterRange with
+                    | Some TokLBrace ->
+                        // Parse body as block of statements
+                        advance afterRange |> parseForInBody >>= fun bodyStmts remaining ->
+                        let remaining = skipTerminator remaining
+                        loop (StmtForIn (varName, rangeExpr, bodyStmts) :: stmts) remaining
+                    | _ ->
+                        let line, col = currentPos afterRange
+                        error "Expected '{' after for-in range expression" line col
+                | _ ->
+                    // Not a for-in, fall through to expression parser
+                    parseExprImpl toks >>= fun expr remaining ->
+                    let remaining = skipTerminator remaining
+                    loop (StmtExpr expr :: stmts) remaining
+            | _ ->
+                // Not a for-in, fall through to expression parser
+                parseExprImpl toks >>= fun expr remaining ->
+                let remaining = skipTerminator remaining
+                loop (StmtExpr expr :: stmts) remaining
         | Some _ ->
             parseExprImpl toks >>= fun expr remaining ->
             let remaining = skipTerminator remaining
@@ -1427,6 +1466,28 @@ and skipTerminator toks =
     | Some TokNewline -> advance toks
     | Some TokSemi -> advance toks
     | _ -> toks
+
+/// Parse the body of a for-in loop: { stmt; stmt; ... }
+and parseForInBody (tokens: Token list) : ParseResult<Stmt list> =
+    let rec loop stmts toks =
+        let toks = skipNL toks
+        match peek toks with
+        | Some TokRBrace ->
+            success (List.rev stmts) (advance toks)
+        | Some TokSemi ->
+            loop stmts (advance toks)
+        | Some (TokKeyword KwLet) ->
+            advance toks |> parseLetStmt >>= fun stmt remaining ->
+            let remaining = skipTerminator remaining
+            loop (stmt :: stmts) remaining
+        | Some _ ->
+            // Parse expression (includes assignments via parseAssignment)
+            parseExprImpl toks >>= fun expr remaining ->
+            let remaining = skipTerminator remaining
+            loop (StmtExpr expr :: stmts) remaining
+        | None ->
+            error "Unexpected EOF in for-in body" 0 0
+    loop [] tokens
 
 and parseNestedFunction (tokens: Token list) : ParseResult<Stmt> =
     // Parse: function name(params) where ... -> Type = body

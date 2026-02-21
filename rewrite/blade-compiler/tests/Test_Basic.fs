@@ -22,6 +22,7 @@ let arr2d = [[1.0, 2.0], [3.0, 4.0]]
 
 let test12_nestedArray = """
 let matrix = [[1.0, 2.0, 3.0], [4.0, 5.0, 6.0], [7.0, 8.0, 9.0]]
+// EXPECT: matrix = [1, 2, 3, 4, 5, 6, 7, 8, 9]
 """
 
 let test15_precedenceTest = """
@@ -70,6 +71,7 @@ let result = {
     let y = helper(5)
     y + 1
 }
+// EXPECT: result = 11
 """
 
 let test44_multilineBlock = """
@@ -80,6 +82,8 @@ let result = {
     let f = lambda(x, y) where comm(x, y) -> x * y
     L <@> f |> compute
 }
+// Triangular: [1*1, 1*2, 1*3, 2*2, 2*3, 3*3]
+// EXPECT: result = [1, 2, 3, 4, 6, 9]
 """
 
 /// Basic language constructs

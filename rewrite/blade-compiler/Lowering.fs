@@ -219,6 +219,10 @@ let rec lowerTypedExpr (env: TypedLowerEnv) (texpr: TypedExpr) : IRExpr =
         IRApplyCombinator {
             Loop = lowerTypedExpr env info.Loop
             Kernel = lowerTypedExpr env info.Kernel
+            Arrays = info.Arrays |> List.map (lowerTypedExpr env)
+            Identities = info.Identities
+            ArrayTypes = info.ArrayTypes
+            SharedIndexType = info.SharedIndexType
             SymcomStates = info.SymcomStates
             TriangularLevels = info.TriangularLevels
             SDimsPerArray = info.SDimsPerArray
@@ -255,7 +259,26 @@ let rec lowerTypedExpr (env: TypedLowerEnv) (texpr: TypedExpr) : IRExpr =
         | _ -> IRCompose (lIR, rIR)
     
     | TExprRange indexType ->
-        IRRange indexType
+        IRRange (indexType, None)
+
+    | TExprDotDot (lo, hi) ->
+        let loIR = lowerTypedExpr env lo
+        let hiIR = lowerTypedExpr env hi
+        let extentExpr = IRBinOp (IRElementwise, IRSub, hiIR, loIR)
+        let idx = {
+            Id = env.Builder.FreshId()
+            Arity = 1
+            Extent = extentExpr
+            Symmetry = SymNone
+            Tag = Some "__anon"
+            Kind = SDimension
+            Dependencies = []
+        }
+        let offset =
+            match loIR with
+            | IRLit (IRLitInt 0L) -> None
+            | _ -> Some loIR
+        IRRange (idx, offset)
     
     | TExprReverse indexType ->
         IRVirtualReverse indexType
@@ -277,6 +300,15 @@ let rec lowerTypedExpr (env: TypedLowerEnv) (texpr: TypedExpr) : IRExpr =
     
     | TExprGuard (cond, body) ->
         IRGuard (lowerTypedExpr env cond, lowerTypedExpr env body)
+    
+    | TExprZero ->
+        // Lower to type-appropriate zero literal based on resolved type
+        match texpr.Type with
+        | IRTScalar ETInt32 | IRTScalar ETInt64 -> IRLit (IRLitInt 0L)
+        | IRTScalar ETBool -> IRLit (IRLitBool false)
+        | IRTScalar ETFloat32 | IRTScalar ETFloat64 -> IRLit (IRLitFloat 0.0)
+        | IRTInfer _ -> IRLit (IRLitFloat 0.0)  // unresolved defaults to float
+        | _ -> IRZero  // fallback
     
     | TExprReynolds (kernel, isAntisym) ->
         IRReynolds (lowerTypedExpr env kernel, isAntisym)
@@ -301,10 +333,20 @@ let rec lowerTypedExpr (env: TypedLowerEnv) (texpr: TypedExpr) : IRExpr =
         IRAssign (lowerTypedExpr env lhs, lowerTypedExpr env rhs)
     
     | TExprSequence exprs ->
-        IRSequence (exprs |> List.map (lowerTypedExpr env))
+        // sequence(c1, c2, ..., cn) → IRSequence (flat n-ary parallel)
+        let lowered = exprs |> List.map (lowerTypedExpr env)
+        match lowered with
+        | [] -> IRLit IRLitUnit
+        | [single] -> single
+        | _ -> IRSequence lowered
     
     | TExprReplicate (count, body) ->
-        IRReplicate (lowerTypedExpr env count, lowerTypedExpr env body)
+        let loweredBody = lowerTypedExpr env body
+        let n =
+            match count.Kind with
+            | TExprLit (LitInt v) -> int v
+            | _ -> 1  // fallback (TypeCheck should have caught this)
+        IRSequence (List.replicate n loweredBody)
     
     | TExprAlign (exprs, specOpt) ->
         let spec =
@@ -394,6 +436,14 @@ and lowerTypedBlock env (stmts: TypedStmt list) (finalExpr: TypedExpr option) : 
             // Wrap in IRLet with a dummy id to preserve side effects
             let dummyId = env.Builder.FreshId()
             IRLet (dummyId, lowered, rest')
+        | TStmtForIn (varName, varId, lo, hi, bodyStmts) ->
+            let loIR = lowerTypedExpr env lo
+            let hiIR = lowerTypedExpr env hi
+            let innerEnv = bindTypedVar varName varId env
+            let bodyIR = lowerTypedBlock innerEnv bodyStmts None
+            let rest' = lowerTypedBlock env rest finalExpr
+            let dummyId = env.Builder.FreshId()
+            IRLet (dummyId, IRForRange (varId, loIR, hiIR, bodyIR), rest')
 
 /// Convert AST boundary mode to IR boundary mode
 and lowerBndMode (mode: Ast.BoundaryMode) : IR.BoundaryMode =
@@ -515,6 +565,7 @@ and lowerTypedBinOp env mode op l r leftExpr rightExpr resultType =
         IRApplyCombinator {
             Loop = l
             Kernel = r
+            Arrays = []; Identities = []; ArrayTypes = []; SharedIndexType = None
             SymcomStates = []
             TriangularLevels = []
             SDimsPerArray = []
@@ -642,10 +693,18 @@ let lowerTypedDecl (env: TypedLowerEnv) (decl: TypedDecl) : (Choice<IRFuncDef, I
         let (irBinding, env') = lowerTypedBinding env binding
         // Emit sub-bindings for destructured patterns (tuple, cons, struct)
         let isStruct = match binding.Type with IRTNamed _ -> true | _ -> false
+        // Determine if this is a flat destructuring (pattern count = flat leaf count != structural count)
+        let isFlat =
+            match binding.Type with
+            | IRTTuple ts ->
+                let structCount = ts.Length
+                let flatCount = IR.flattenTupleLeaves binding.Type |> List.length
+                binding.SubBindings.Length = flatCount && binding.SubBindings.Length <> structCount
+            | _ -> false
         let subIRBindings = binding.SubBindings |> List.mapi (fun i (name, subId, subTy) ->
             let projExpr = 
                 if isStruct then IRFieldAccess (IRVar (binding.VarId, binding.Type), name)
-                else IRTupleProj (IRVar (binding.VarId, binding.Type), i)
+                else IRTupleProj (IRVar (binding.VarId, binding.Type), i, isFlat)
             let env' = bindTypedVar name subId env'
             { Id = subId; Name = name; Type = subTy; Value = projExpr; IsConst = true; IsMutable = false })
         let env'' = binding.SubBindings |> List.fold (fun e (name, subId, _) -> bindTypedVar name subId e) env'

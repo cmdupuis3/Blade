@@ -83,8 +83,12 @@ and TypedObjectForInfo = {
 // ============================================================================
 
 and TypedApplyInfo = {
-    Loop: TypedExpr
+    Loop: TypedExpr                         // Provenance: TExprMethodFor or TExprObjectFor
     Kernel: TypedExpr
+    Arrays: TypedExpr list                  // The actual array expressions
+    Identities: ArrayIdentity list          // Array identity tracking (for symmetry)
+    ArrayTypes: IRArrayType list            // Array type info
+    SharedIndexType: IRIndexType option     // For co-iteration (zip)
     SymcomStates: SymcomState list
     TriangularLevels: bool list
     SDimsPerArray: int list
@@ -105,6 +109,7 @@ and TypedStmt =
     | TStmtLet of TypedBinding
     | TStmtAssign of lhs: TypedExpr * rhs: TypedExpr
     | TStmtExpr of TypedExpr
+    | TStmtForIn of varName: string * varId: IRId * lo: TypedExpr * hi: TypedExpr * body: TypedStmt list
 
 // ============================================================================
 // Typed Expressions
@@ -172,6 +177,7 @@ and TypedExprKind =
     
     // Virtual arrays
     | TExprRange of indexType: IRIndexType
+    | TExprDotDot of lo: TypedExpr * hi: TypedExpr
     | TExprReverse of indexType: IRIndexType
     | TExprBlocked of indexType: IRIndexType * blockSize: TypedExpr
     
@@ -183,6 +189,7 @@ and TypedExprKind =
     | TExprPure of TypedExpr
     | TExprCompute of TypedExpr
     | TExprGuard of cond: TypedExpr * body: TypedExpr
+    | TExprZero
     | TExprReynolds of kernel: TypedExpr * isAntisymmetric: bool
     
     // Arity special forms

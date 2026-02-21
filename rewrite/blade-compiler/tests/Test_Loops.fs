@@ -159,8 +159,7 @@ let L = method_for(A)
 let f = lambda(x) -> x + 10.0
 let g = lambda(x) -> x * 2.0
 let h = lambda(x) -> x * x
-let (inner, squares) = (L <@> f) <&> (L <@> g) <&> (L <@> h) |> compute
-let (sums, prods) = inner
+let (sums, prods, squares) = (L <@> f) <&> (L <@> g) <&> (L <@> h) |> compute
 // EXPECT: sums = [11.0, 12.0, 13.0]
 // EXPECT: prods = [2.0, 4.0, 6.0]
 // EXPECT: squares = [1.0, 4.0, 9.0]
@@ -172,8 +171,7 @@ let L = method_for(A)
 let f = lambda(x) -> x + 10.0
 let g = lambda(x) -> x * 2.0
 let h = lambda(x) -> x * x
-let (inner, squares) = (L <@> f) <&!> (L <@> g) <&!> (L <@> h) |> compute
-let (sums, prods) = inner
+let (sums, prods, squares) = (L <@> f) <&!> (L <@> g) <&!> (L <@> h) |> compute
 // EXPECT: sums = [11.0, 12.0, 13.0]
 // EXPECT: prods = [2.0, 4.0, 6.0]
 // EXPECT: squares = [1.0, 4.0, 9.0]
@@ -241,8 +239,7 @@ let L = method_for(A)
 let c1 = L <@> lambda(x) -> x + 10.0
 let c2 = L <@> lambda(x) -> x * 2.0
 let c3 = L <@> lambda(x) -> x * x
-let (inner, squares) = object_for(<&>) <@> (c1, c2, c3) |> compute
-let (sums, prods) = inner
+let (sums, prods, squares) = object_for(<&>) <@> (c1, c2, c3) |> compute
 // EXPECT: sums = [11.0, 12.0, 13.0]
 // EXPECT: prods = [2.0, 4.0, 6.0]
 // EXPECT: squares = [1.0, 4.0, 9.0]
@@ -254,8 +251,7 @@ let L = method_for(A)
 let c1 = L <@> lambda(x) -> x + 10.0
 let c2 = L <@> lambda(x) -> x * 2.0
 let c3 = L <@> lambda(x) -> x * x
-let (inner, squares) = object_for(<&!>) <@> (c1, c2, c3) |> compute
-let (sums, prods) = inner
+let (sums, prods, squares) = object_for(<&!>) <@> (c1, c2, c3) |> compute
 // EXPECT: sums = [11.0, 12.0, 13.0]
 // EXPECT: prods = [2.0, 4.0, 6.0]
 // EXPECT: squares = [1.0, 4.0, 9.0]
@@ -279,8 +275,7 @@ let f = lambda(x) -> x + 10.0
 let g = lambda(x) -> x * 2.0
 let h = lambda(x) -> x * x
 let (c1, c2, c3) = object_for(<@>) <@> ((L, f), (L, g), (L, h))
-let (inner, squares) = object_for(<&>) <@> (c1, c2, c3) |> compute
-let (sums, prods) = inner
+let (sums, prods, squares) = object_for(<&>) <@> (c1, c2, c3) |> compute
 // EXPECT: sums = [11.0, 12.0, 13.0]
 // EXPECT: prods = [2.0, 4.0, 6.0]
 // EXPECT: squares = [1.0, 4.0, 9.0]
@@ -300,8 +295,7 @@ let L = method_for(A)
 let f = lambda(x) -> x + 10.0
 let g = lambda(x) -> x * 2.0
 let h = lambda(x) -> x * x
-let (inner, squares) = ((L, f), (L, g), (L, h)) |@> object_for(<@>) |@> object_for(<&>) |> compute
-let (sums, prods) = inner
+let (sums, prods, squares) = ((L, f), (L, g), (L, h)) |@> object_for(<@>) |@> object_for(<&>) |> compute
 // EXPECT: sums = [11.0, 12.0, 13.0]
 // EXPECT: prods = [2.0, 4.0, 6.0]
 // EXPECT: squares = [1.0, 4.0, 9.0]
@@ -430,6 +424,79 @@ let result = (c1 >>= k1 >>= k2) |> compute
 // EXPECT: result = [3.0, 5.0, 7.0]
 """
 
+let test113_zipBasic = """
+// zip(A, B) used inside method_for — co-iteration producing elementwise result
+let A = [1.0, 2.0, 3.0]
+let B = [10.0, 20.0, 30.0]
+let L = method_for(zip(A, B))
+let f = lambda(a, b) -> a + b
+let result = L <@> f |> compute
+// EXPECT: result = [11, 22, 33]
+"""
+
+let test114_zipThreeWay = """
+// Three-way zip — co-iteration over three arrays
+let A = [1.0, 2.0, 3.0]
+let B = [10.0, 20.0, 30.0]
+let C = [100.0, 200.0, 300.0]
+let L = method_for(zip(A, B, C))
+let f = lambda(a, b, c) -> a + b + c
+let result = L <@> f |> compute
+// EXPECT: result = [111, 222, 333]
+"""
+
+let test115_zipProduct = """
+// zip used with multiplicative kernel
+let A = [2.0, 3.0, 4.0]
+let B = [5.0, 6.0, 7.0]
+let L = method_for(zip(A, B))
+let f = lambda(a, b) -> a * b
+let result = L <@> f |> compute
+// EXPECT: result = [10, 18, 28]
+"""
+
+let test116_zipIndirect = """
+// zip bound to a variable, then passed to method_for
+let A = [1.0, 2.0, 3.0]
+let B = [4.0, 5.0, 6.0]
+let Z = zip(A, B)
+let L = method_for(Z)
+let f = lambda(a, b) -> a * b
+let result = L <@> f |> compute
+// EXPECT: result = [4, 10, 18]
+"""
+
+let test117_zipObjectFor = """
+// object_for(f) <@> zip(A, B) — kernel-first with co-iteration
+let A = [1.0, 2.0, 3.0]
+let B = [10.0, 20.0, 30.0]
+let f = lambda(a, b) -> a + b
+let O = object_for(f)
+let result = O <@> zip(A, B) |> compute
+// EXPECT: result = [11, 22, 33]
+"""
+
+let test118_zipObjectForProduct = """
+// object_for with zip and multiplicative kernel
+let A = [2.0, 3.0, 4.0]
+let B = [5.0, 6.0, 7.0]
+let f = lambda(a, b) -> a * b
+let O = object_for(f)
+let result = O <@> zip(A, B) |> compute
+// EXPECT: result = [10, 18, 28]
+"""
+
+let test119_zipObjectForThreeWay = """
+// Three-way zip through object_for
+let A = [1.0, 2.0, 3.0]
+let B = [10.0, 20.0, 30.0]
+let C = [100.0, 200.0, 300.0]
+let f = lambda(a, b, c) -> a + b + c
+let O = object_for(f)
+let result = O <@> zip(A, B, C) |> compute
+// EXPECT: result = [111, 222, 333]
+"""
+
 /// Loop objects and application
 let loopTests = [
     ("Method For", test4_methodFor)
@@ -478,4 +545,11 @@ let loopTests = [
     ("Duality Theorem", test110_dualityTheorem)
     ("Bind Computation", test111_bindComputation)
     ("Bind Chained", test112_bindChained)
+    ("Zip Basic", test113_zipBasic)
+    ("Zip Three-Way", test114_zipThreeWay)
+    ("Zip Product", test115_zipProduct)
+    ("Zip Indirect", test116_zipIndirect)
+    ("Zip ObjectFor", test117_zipObjectFor)
+    ("Zip ObjectFor Product", test118_zipObjectForProduct)
+    ("Zip ObjectFor Three-Way", test119_zipObjectForThreeWay)
 ]

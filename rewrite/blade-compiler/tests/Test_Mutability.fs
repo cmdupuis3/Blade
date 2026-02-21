@@ -10,6 +10,7 @@ let result = {
     x = x + 1
     x
 }
+// EXPECT: result = 2
 """
 
 let test_let_assign_block = """
@@ -18,6 +19,7 @@ let result = {
     x = x + 5
     x
 }
+// EXPECT: result = 15
 """
 
 let test_let_mut_assign = """
@@ -26,6 +28,7 @@ let result = {
     x = x + 1
     x
 }
+// EXPECT: result = 2
 """
 
 let test_let_mut_in_block = """
@@ -35,16 +38,19 @@ let result = {
     x += 5
     x
 }
+// EXPECT: result = 15
 """
 
 let test_static_read = """
 let static PI = 3.14159
 let y = PI * 2.0
+// EXPECT: y = 6.28318
 """
 
 let test_static_function = """
 let static twice = lambda(x) -> x * 2.0
 let y = twice(21.0)
+// EXPECT: y = 42
 """
 
 let test_mixed_bindings = """
@@ -56,6 +62,7 @@ let result = {
     y = y + 1
     x + y
 }
+// EXPECT: result = 205
 """
 
 let test_compound_assign = """
@@ -66,6 +73,7 @@ let result = {
     x *= 3
     x
 }
+// EXPECT: result = 39
 """
 
 // ============================================================================

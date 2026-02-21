@@ -42,6 +42,7 @@ struct Balanced {
 } where a + b == total
 let x = Balanced { a = 3, b = 7, total = 10 }
 let result = x.total
+// EXPECT: result = 10
 """
 
 let test49_structConstraintArith = """
@@ -52,6 +53,7 @@ struct Ratio {
 } where den != 0.0
 let r = Ratio { num = 3.14, den = 2.0 }
 let half = r.num / r.den
+// EXPECT: half = 1.57
 """
 
 let test50_structConstraintInvalid = """

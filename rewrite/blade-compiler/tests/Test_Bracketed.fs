@@ -38,6 +38,8 @@ let C = [5.0, 6.0]
 // Outer products with different operators
 let outer_mul = A [*] B
 let outer_add = A [+] C
+// EXPECT: outer_mul = [3, 4, 6, 8]
+// EXPECT: outer_add = [6, 7, 7, 8]
 """
 
 let test63_elementwiseArrayOps = """
@@ -49,7 +51,9 @@ let diff = A - B          // elementwise: [-9.0, -18.0, -27.0]
 let prod = A * B          // elementwise: [10.0, 40.0, 90.0]
 let quot = B / A          // elementwise: [10.0, 10.0, 10.0]
 // EXPECT: sum = [11, 22, 33]
+// EXPECT: diff = [-9, -18, -27]
 // EXPECT: prod = [10, 40, 90]
+// EXPECT: quot = [10, 10, 10]
 """
 
 let test64_openmpParallel = """
@@ -75,6 +79,8 @@ let kernel = lambda(x, y) where comm(x, y) -> x * y
 let result = loop <@> kernel |> compute
 
 // With comm, outer loop is triangular (i <= j), so no parallel on it
+// Triangular: [1*1,1*2,1*3,1*4,1*5, 2*2,2*3,2*4,2*5, 3*3,3*4,3*5, 4*4,4*5, 5*5]
+// EXPECT: result = [1, 2, 3, 4, 5, 4, 6, 8, 10, 9, 12, 15, 16, 20, 25]
 """
 
 let test66_openmpNested = """
@@ -100,12 +106,15 @@ let B = [10.0, 20.0, 30.0]
 // Apply (+) as a kernel to method_for - creates pairwise sums
 let loop = method_for(A, B)
 let sums = loop <@> (+) |> compute
+// EXPECT: sums = [11, 21, 31, 12, 22, 32, 13, 23, 33]
 
 // Apply (*) as a kernel - creates pairwise products  
 let prods = loop <@> (*) |> compute
+// EXPECT: prods = [10, 20, 30, 20, 40, 60, 30, 60, 90]
 
 // Inline usage - pairwise differences
 let result = method_for(A, B) <@> (-) |> compute
+// EXPECT: result = [-9, -19, -29, -8, -18, -28, -7, -17, -27]
 """
 
 let test68_namedInfix = """

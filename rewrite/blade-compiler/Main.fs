@@ -312,7 +312,7 @@ let testComparePipelines source =
 /// All tests combined
 let allTests = 
     basicTests @ loopTests @ symmetryTests @ reynoldsTests @ arityTests @ functionTests 
-    @ structTests @ sumTypeTests @ interfaceTests @ moduleTests @ guardTests @ bracketedTests
+    @ structTests @ sumTypeTests @ interfaceTests @ moduleTests @ guardTests @ guardCombinatorTests @ zeroCombinatorTests @ sequenceCombinatorTests @ tupleViewTests @ replicateTests @ anonRangeTests @ forInTests @ bracketedTests
     @ indexTypeTests @ mutabilityTests @ staticTests @ unitTests
 
 // ============================================================================

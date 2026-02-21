@@ -220,6 +220,7 @@ and Expr =
     | ExprObjectFor of kernel: Expr
     // Virtual arrays
     | ExprRange of TypeExpr                // range<I>
+    | ExprDotDot of lo: Expr * hi: Expr  // a..b — anonymous range sugar
     | ExprReverse of TypeExpr              // reverse<I>
     | ExprBlocked of TypeExpr * Expr       // blocked<I, K>
     // Zip and align
@@ -285,6 +286,7 @@ and Stmt =
     | StmtLet of Binding
     | StmtAssign of lhs: Expr * op: AssignOp * rhs: Expr
     | StmtExpr of Expr
+    | StmtForIn of varName: string * range: Expr * body: Stmt list
 
 and Binding = {
     Mutability: BindingMut

@@ -206,7 +206,7 @@ and IRExpr =
     | IRApp of func: IRExpr * args: IRExpr list * retType: IRType
     | IRLambda of LambdaInfo
     | IRTuple of IRExpr list
-    | IRTupleProj of IRExpr * int
+    | IRTupleProj of IRExpr * int * bool  // expr, index, isFlat (true=flat leaf index, false=structural type index)
     | IRTupleCons of head: IRExpr * tail: IRExpr
     | IRTupleDecons of tuple: IRExpr
     | IRFieldAccess of obj: IRExpr * field: string  // Struct field access: obj.field
@@ -241,7 +241,7 @@ and IRExpr =
     | IRDiag of array: IRExpr
     | IRJoin of arrays: IRExpr list * dim: int
     | IRSubset of array: IRExpr * dim: int * start: IRExpr * length: IRExpr
-    | IRRange of IRIndexType
+    | IRRange of IRIndexType * offset: IRExpr option
     | IRVirtualReverse of IRIndexType
     | IRBlocked of IRIndexType * blockSize: IRExpr
     | IRArity of resolved: int option * paramName: string  // None = unresolved (use paramName), Some n = bound
@@ -251,6 +251,7 @@ and IRExpr =
     | IRPolyIndex of pack: IRExpr * index: IRExpr  // Dynamic poly-pack indexing: args[k]
     | IRExtent of array: IRExpr * dim: int
     | IRAssign of target: IRExpr * value: IRExpr
+    | IRForRange of varId: IRId * lo: IRExpr * hi: IRExpr * body: IRExpr
 
 /// Lambda with proper capture tracking
 and LambdaInfo = {
@@ -287,8 +288,12 @@ and ObjectForInfo = {
 
 /// Information about combinator application (<@>)
 and ApplyInfo = {
-    Loop: IRExpr
+    Loop: IRExpr                            // Provenance: IRMethodFor or IRObjectFor
     Kernel: IRExpr
+    Arrays: IRExpr list                     // The actual array expressions
+    Identities: ArrayIdentity list          // Array identity tracking (for symmetry)
+    ArrayTypes: IRArrayType list            // Array type info
+    SharedIndexType: IRIndexType option     // For co-iteration (zip)
     SymcomStates: SymcomState list
     TriangularLevels: bool list
     SDimsPerArray: int list
@@ -351,6 +356,26 @@ let getUnits (ty: IRType) : UnitSig option =
     match ty with
     | IRTUnitAnnotated (_, units) -> Some units
     | _ -> None
+
+/// Flatten nested tuple types: ((α, β), γ) → (α, β, γ)
+/// Makes left-folded tuples syntactically equivalent to flat tuples.
+let rec flattenTupleType (ty: IRType) : IRType =
+    match ty with
+    | IRTTuple ts ->
+        let flattened =
+            ts |> List.collect (fun t ->
+                match flattenTupleType t with
+                | IRTTuple inner -> inner
+                | other -> [other])
+        IRTTuple flattened
+    | _ -> ty
+
+/// Extract the flat leaf types from a potentially nested tuple.
+/// ((α, β), γ) → [α; β; γ]
+let rec flattenTupleLeaves (ty: IRType) : IRType list =
+    match ty with
+    | IRTTuple ts -> ts |> List.collect flattenTupleLeaves
+    | _ -> [ty]
 
 // ============================================================================
 // Loop Structure (For Code Generation)
@@ -929,15 +954,8 @@ let deduceOutputType
 
 /// Build a loop nest from ApplyInfo
 let buildLoopNest (info: ApplyInfo) (builder: IRBuilder) : LoopNest =
-    let arrayTypes = 
-        match info.Loop with
-        | IRMethodFor mfInfo -> mfInfo.ArrayTypes
-        | _ -> []
-    
-    let identities = 
-        match info.Loop with
-        | IRMethodFor mfInfo -> mfInfo.Identities
-        | _ -> []
+    let arrayTypes = info.ArrayTypes
+    let identities = info.Identities
     
     let commGroups = 
         match info.Kernel with
@@ -1002,7 +1020,7 @@ let buildLoopNest (info: ApplyInfo) (builder: IRBuilder) : LoopNest =
 /// What kind of element access to generate for a loop level
 type VirtualKind =
     | RealArray           // Normal: elem = arr[i]
-    | VirtualRange        // range<I>: elem = i
+    | VirtualRange of offset: IRExpr option  // range<I>: elem = i + offset
     | VirtualReverse      // reverse<I>: elem = (n - 1 - i)
 
 /// Per-array element peeling info at a loop level
@@ -1073,6 +1091,8 @@ type LoopNestCodeGen = {
     SpeedupFactor: int64
     /// Whether kernel has Reynolds operator
     HasReynolds: bool
+    /// Whether Reynolds is antisymmetric (sign alternates with permutation parity)
+    IsAntisymmetric: bool
 }
 
 /// Build symmetry vector from output type
@@ -1108,19 +1128,18 @@ let buildLoopNestCodeGen
     (outputName: string)
     (builder: IRBuilder) : LoopNestCodeGen =
     
-    // Extract method_for info
-    let (arrays, identities, arrayTypes, sDimsPerArray) =
-        match info.Loop with
-        | IRMethodFor mfInfo -> 
-            (mfInfo.Arrays, mfInfo.Identities, mfInfo.ArrayTypes, mfInfo.SDimsPerArray)
-        | _ -> ([], [], [], [])
+    // Use explicit array info from ApplyInfo (not extracted from Loop)
+    let arrays = info.Arrays
+    let identities = info.Identities
+    let arrayTypes = info.ArrayTypes
+    let sDimsPerArray = info.SDimsPerArray
     
     // Extract kernel info
-    let (kernelParams, kernelBody, commGroups, captures) =
+    let (kernelParams, kernelBody, commGroups, captures, isAntisymmetric) =
         match info.Kernel with
-        | IRLambda lInfo -> (lInfo.Params, lInfo.Body, lInfo.CommGroups, lInfo.Captures)
-        | IRReynolds (IRLambda lInfo, _) -> (lInfo.Params, lInfo.Body, lInfo.CommGroups, lInfo.Captures)
-        | _ -> ([], IRLit IRLitUnit, [], [])
+        | IRLambda lInfo -> (lInfo.Params, lInfo.Body, lInfo.CommGroups, lInfo.Captures, false)
+        | IRReynolds (IRLambda lInfo, isAnti) -> (lInfo.Params, lInfo.Body, lInfo.CommGroups, lInfo.Captures, isAnti)
+        | _ -> ([], IRLit IRLitUnit, [], [], false)
     
     // Map array position to kernel param
     let paramByArrayPos = 
@@ -1136,7 +1155,7 @@ let buildLoopNestCodeGen
         let virtualKind =
             if arrayPos < arrays.Length then
                 match arrays.[arrayPos] with
-                | IRRange _ -> VirtualRange
+                | IRRange (_, offset) -> VirtualRange offset
                 | IRVirtualReverse _ -> VirtualReverse
                 | _ -> RealArray
             else RealArray
@@ -1158,10 +1177,7 @@ let buildLoopNestCodeGen
     let bindings =
         if info.IsCoIteration then
             // Co-iteration: build levels from shared index type, all arrays peel at every level
-            let sharedIdx =
-                match info.Loop with
-                | IRMethodFor mf -> mf.SharedIndexType
-                | _ -> None
+            let sharedIdx = info.SharedIndexType
             match sharedIdx with
             | Some idx ->
                 let numLevels = idx.Arity
@@ -1265,6 +1281,7 @@ let buildLoopNestCodeGen
         InputArrayNames = arrayNames
         SpeedupFactor = info.SpeedupFactor
         HasReynolds = info.HasReynolds
+        IsAntisymmetric = isAntisymmetric
     }
 
 // ============================================================================
@@ -1283,7 +1300,7 @@ let rec mapIRExpr (f: IRExpr -> IRExpr) (expr: IRExpr) : IRExpr =
         | IRRange _ | IRVirtualReverse _ | IRArity _ -> expr
         // Unary
         | IRUnaryOp (op, e) -> IRUnaryOp (op, m e)
-        | IRTupleProj (e, i) -> IRTupleProj (m e, i)
+        | IRTupleProj (e, i, flat) -> IRTupleProj (m e, i, flat)
         | IRTupleDecons e -> IRTupleDecons (m e)
         | IRFieldAccess (e, fld) -> IRFieldAccess (m e, fld)
         | IRPure e -> IRPure (m e)
@@ -1295,6 +1312,7 @@ let rec mapIRExpr (f: IRExpr -> IRExpr) (expr: IRExpr) : IRExpr =
         | IRRank e -> IRRank (m e)
         | IRExtent (e, d) -> IRExtent (m e, d)
         | IRAssign (t, v) -> IRAssign (m t, m v)
+        | IRForRange (vid, lo, hi, body) -> IRForRange (vid, m lo, m hi, m body)
         // Binary
         | IRBinOp (mode, op, l, r) -> IRBinOp (mode, op, m l, m r)
         | IRTupleCons (h, t) -> IRTupleCons (m h, m t)
@@ -1341,7 +1359,7 @@ let rec mapIRExpr (f: IRExpr -> IRExpr) (expr: IRExpr) : IRExpr =
         | IRObjectFor info ->
             IRObjectFor { info with Kernel = m info.Kernel }
         | IRApplyCombinator info ->
-            IRApplyCombinator { info with Loop = m info.Loop; Kernel = m info.Kernel }
+            IRApplyCombinator { info with Loop = m info.Loop; Kernel = m info.Kernel; Arrays = ms info.Arrays }
     f mapped
 
 // ============================================================================
@@ -1411,6 +1429,30 @@ let specializeFunction (func: IRFuncDef) (arity: int) (builder: IRBuilder) : IRF
                 IRLit (IRLitInt (int64 arity))
             | _ -> e
         let newBody = mapIRExpr rewrite func.Body
+
+        // Second pass: unroll IRForRange with literal bounds
+        // This handles `for k in 0..arity(args)` after arity is resolved
+        let rec unrollForRanges expr =
+            match expr with
+            | IRLet (id, IRForRange (vid, IRLit (IRLitInt lo), IRLit (IRLitInt hi), body), rest) ->
+                // Unroll: replace the for-range with N copies of body
+                let restUnrolled = unrollForRanges rest
+                let indices = [ int lo .. int hi - 1 ] |> List.rev
+                indices |> List.fold (fun acc k ->
+                    // Substitute loop variable with literal k in body
+                    let substBody =
+                        mapIRExpr (fun e ->
+                            match e with
+                            | IRVar (varId, _) when varId = vid -> IRLit (IRLitInt (int64 k))
+                            | _ -> e) body
+                    // Re-run the poly index rewrite on the substituted body
+                    let substBody2 = mapIRExpr rewrite substBody
+                    let dummyId = builder.FreshId()
+                    IRLet (dummyId, unrollForRanges substBody2, acc)
+                ) restUnrolled
+            | IRLet (id, v, b) -> IRLet (id, unrollForRanges v, unrollForRanges b)
+            | _ -> expr
+        let newBody = unrollForRanges newBody
 
         // Resolve return type
         let newRetType =
@@ -1631,7 +1673,7 @@ let rec ppIRExprWithNames (names: Map<int, string>) indent (expr: IRExpr) =
         sprintf "(%s%s)" (ppUnaryOp op) (pp a)
     | IRTuple es ->
         sprintf "(%s)" (es |> List.map pp |> String.concat ", ")
-    | IRTupleProj (e, i) ->
+    | IRTupleProj (e, i, _) ->
         sprintf "%s.%d" (pp e) i
     | IRIf (c, t, e) ->
         sprintf "if %s then %s else %s" (pp c) (pp t) (pp e)
@@ -1716,6 +1758,9 @@ let rec ppIRExprWithNames (names: Map<int, string>) indent (expr: IRExpr) =
             | LVField (obj, f) -> sprintf "%s.%s" (pp obj) f
             | LVOther e -> pp e
         sprintf "%s <- %s" targetStr (pp v)
+    | IRForRange (vid, lo, hi, body) ->
+        let varName = Map.tryFind vid names |> Option.defaultValue (sprintf "v%d" vid)
+        sprintf "for %s in %s..%s { %s }" varName (pp lo) (pp hi) (pp body)
     | _ -> "<expr>"
 
 /// Default pretty printer (no name context)
