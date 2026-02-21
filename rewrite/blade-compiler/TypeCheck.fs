@@ -1277,6 +1277,21 @@ and inferBinOp env mode op left right : TypeResult<TypedExpr> =
         inferExpr env right |> Result.bind (fun tR ->
             Ok (mkTyped (TExprFusion (tL, tR)) (IRTTuple [tL.Type; tR.Type]))))
 
+    | OpFunctor ->
+        // <$> : (α → β) × Computation α → Computation β
+        // f <$> c  transforms the result of computation c by applying f
+        inferExpr env left |> Result.bind (fun tF ->
+        inferExpr env right |> Result.bind (fun tC ->
+            // Output type: same array shape, element type from f's return
+            let outputType =
+                match tF.Type, tC.Type with
+                | IRTFunc (_, IRTScalar et), IRTArray arr ->
+                    // Array with updated element type
+                    IRTArray { arr with ElemType = et }
+                | IRTFunc (_, retTy), _ -> retTy
+                | _ -> tC.Type  // fallback: preserve computation type
+            Ok (mkTyped (TExprFunctorMap (tF, tC)) outputType)))
+
     | OpArrayProd ->
         // <*> : MethodLoop × MethodLoop → MethodLoop (concatenate array lists)
         inferExpr env left |> Result.bind (fun tL ->
@@ -1490,6 +1505,21 @@ and inferApply (env: TypeEnv) (tLeft: TypedExpr) (tRight: TypedExpr) : TypeResul
                     |> Result.map (fun computations ->
                         let types = computations |> List.map (fun c -> c.Type)
                         mkTyped (TExprTuple computations) (IRTTuple types)))
+            | OpFunctor ->
+                // object_for(<$>) <@> (f, c)  or  (f1, f2, ..., c)
+                // Right-fold: f1 <$> (f2 <$> (... <$> c))
+                let funcs : TypedExpr list = elems |> List.take (elems.Length - 1)
+                let comp : TypedExpr = elems |> List.last
+                let applyFmap (acc: TypedExpr) (f: TypedExpr) : TypedExpr =
+                    let outputType =
+                        match f.Type, acc.Type with
+                        | IRTFunc (_, IRTScalar et), IRTArray arr ->
+                            IRTArray { arr with ElemType = et }
+                        | IRTFunc (_, retTy), _ -> retTy
+                        | _ -> acc.Type
+                    mkTyped (TExprFunctorMap (f, acc)) outputType
+                let result : TypedExpr = funcs |> List.rev |> List.fold applyFmap comp
+                Ok result
             | _ ->
                 // Standard left-associative fold: (((c1 op c2) op c3) op ...)
                 let folder (acc: TypedExpr) (elem: TypedExpr) =
@@ -2383,6 +2413,7 @@ let rec zonkExpr (subst: Subst) (expr: TypedExpr) : TypedExpr =
         | TExprBind (a, b) -> TExprBind (z a, z b)
         | TExprParallel (a, b) -> TExprParallel (z a, z b)
         | TExprFusion (a, b) -> TExprFusion (z a, z b)
+        | TExprFunctorMap (f, c) -> TExprFunctorMap (z f, z c)
         | TExprChoice (a, b) -> TExprChoice (z a, z b)
         | TExprCompose (a, b) -> TExprCompose (z a, z b)
         | TExprGuard (c, b) -> TExprGuard (z c, z b)

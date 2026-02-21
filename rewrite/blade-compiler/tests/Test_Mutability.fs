@@ -130,7 +130,7 @@ let mutabilityTests = [
     ("Let mut assign", test_let_mut_assign)
     ("Let mut in block", test_let_mut_in_block)
     ("Static read", test_static_read)
-    ("Static function", test_static_function)
+    ("Static lambda", test_static_function)
     ("Mixed bindings", test_mixed_bindings)
     ("Compound assign", test_compound_assign)
     ("Array element assign", test_array_element_assign)

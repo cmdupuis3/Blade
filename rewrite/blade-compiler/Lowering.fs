@@ -240,6 +240,9 @@ let rec lowerTypedExpr (env: TypedLowerEnv) (texpr: TypedExpr) : IRExpr =
     | TExprFusion (l, r) ->
         IRFusion (lowerTypedExpr env l, lowerTypedExpr env r)
     
+    | TExprFunctorMap (f, c) ->
+        IRFunctorMap (lowerTypedExpr env f, lowerTypedExpr env c)
+    
     | TExprChoice (l, r) ->
         IRChoice (lowerTypedExpr env l, lowerTypedExpr env r)
     

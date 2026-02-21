@@ -306,6 +306,46 @@ let (sums, prods) = inner
 // EXPECT: squares = [1.0, 4.0, 9.0]
 """
 
+let test100_functorMapBasic = """
+let A = [1.0, 2.0, 3.0]
+let L = method_for(A)
+let f = lambda(x) -> x + 10.0
+let twice = lambda(x) -> x * 2.0
+let result = twice <$> (L <@> f) |> compute
+// EXPECT: result = [22.0, 24.0, 26.0]
+"""
+
+let test101_functorMapChain = """
+let A = [1.0, 2.0, 3.0]
+let L = method_for(A)
+let f = lambda(x) -> x * x
+let add1 = lambda(x) -> x + 1.0
+let twice = lambda(x) -> x * 2.0
+let result = twice <$> (add1 <$> (L <@> f)) |> compute
+// EXPECT: result = [4.0, 10.0, 20.0]
+"""
+
+let test102_functorMapDeferred = """
+let A = [1.0, 2.0, 3.0]
+let L = method_for(A)
+let f = lambda(x) -> x + 10.0
+let negate = lambda(x) -> 0.0 - x
+let c = L <@> f
+let mapped = negate <$> c
+let result = mapped |> compute
+// EXPECT: result = [-11.0, -12.0, -13.0]
+"""
+
+let test103_objectForFunctorMap = """
+let A = [1.0, 2.0, 3.0]
+let L = method_for(A)
+let f = lambda(x) -> x + 10.0
+let twice = lambda(x) -> x * 2.0
+let c = L <@> f
+let result = object_for(<$>) <@> (twice, c) |> compute
+// EXPECT: result = [22.0, 24.0, 26.0]
+"""
+
 /// Loop objects and application
 let loopTests = [
     ("Method For", test4_methodFor)
@@ -341,4 +381,8 @@ let loopTests = [
     ("Object For Comb Apply 3-Way", test97_objectForCombApply3Way)
     ("Pipe Apply Basic", test98_pipeApplyBasic)
     ("Pipe Apply Chain", test99_pipeApplyChain)
+    ("Functor Map Basic", test100_functorMapBasic)
+    ("Functor Map Chain", test101_functorMapChain)
+    ("Functor Map Deferred", test102_functorMapDeferred)
+    ("Object For Functor Map", test103_objectForFunctorMap)
 ]

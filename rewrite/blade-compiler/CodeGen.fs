@@ -172,6 +172,11 @@ let rec inferExprType (expr: IRExpr) : IRType =
     | IRFieldAccess (obj, field) ->
         // Would need struct type info to resolve; return unit as placeholder
         IRTUnit
+    | IRFunctorMap (f, c) ->
+        // f <$> c: return type is f's return type
+        match inferExprType f with
+        | IRTFunc (_, retTy) -> retTy
+        | _ -> inferExprType c  // fallback: preserve computation type
     | _ -> IRTUnit  // Remaining cases: loop objects, combinators — not runtime values
 
 // ============================================================================
@@ -646,7 +651,7 @@ let genForLoopHeader (binding: LoopIndexBinding) : string =
 
 /// Generate complete loop nest as C++ code
 /// Tracks peeled names across levels and generates element bindings for all arrays at each level
-let genLoopNest (codeGen: LoopNestCodeGen) (indent: int) : string list =
+let genLoopNest (codeGen: LoopNestCodeGen) (outerNames: Map<int, string>) (indent: int) : string list =
     let ind n = String.replicate n "    "
     let mutable lines = []
     let mutable depth = indent
@@ -680,7 +685,8 @@ let genLoopNest (codeGen: LoopNestCodeGen) (indent: int) : string list =
                 paramFinalNames <- Map.add elem.ParamVarId newName paramFinalNames
     
     // Build name map for kernel body from final peeled names
-    let nameMap = paramFinalNames
+    // Start from outer scope, then overlay kernel params (kernel params take priority)
+    let nameMap = paramFinalNames |> Map.fold (fun acc k v -> Map.add k v acc) outerNames
     let nameMap =
         codeGen.Captures
         |> List.fold (fun acc c -> Map.add c.Id c.Name acc) nameMap
@@ -785,7 +791,7 @@ let genFunction (codeGen: LoopNestCodeGen) (funcName: string) : string list =
          sprintf "    %s) {" funcParams]
     
     // Body with loop nest
-    let body = genLoopNest codeGen 1
+    let body = genLoopNest codeGen Map.empty 1
     
     // Close
     let close = ["}"]
@@ -1449,14 +1455,14 @@ let genApplyCombinator (ctx: CodeGenContext) (name: string) (info: ApplyInfo) (b
                             ind name outputElemType outputRank symmVecName extentsName
         
         // Generate loop nest
-        let loopCode = genLoopNest codeGen ctx.Indent
+        let loopCode = genLoopNest codeGen ctx.VarNames ctx.Indent
         
         // Combine all
         [symmVecDecl; ""; extentsDecl] @ extentsFill @ [""; allocDecl; allocInit; ""] @ loopCode
 
 /// Generate a fused loop nest with multiple kernel assignments
 /// All kernels share the same loop structure (bindings), only differ in kernel expr and output
-let genFusedLoopNest (codeGen: LoopNestCodeGen) (extraKernels: (string * IRExpr * IRParam list * CaptureInfo list) list) (indent: int) : string list =
+let genFusedLoopNest (codeGen: LoopNestCodeGen) (extraKernels: (string * IRExpr * IRParam list * CaptureInfo list) list) (outerNames: Map<int, string>) (indent: int) : string list =
     let ind n = String.replicate n "    "
     let mutable lines = []
     let mutable depth = indent
@@ -1490,7 +1496,8 @@ let genFusedLoopNest (codeGen: LoopNestCodeGen) (extraKernels: (string * IRExpr 
         |> String.concat ""
     
     // First kernel assignment
-    let nameMap0 = codeGen.Captures |> List.fold (fun acc c -> Map.add c.Id c.Name acc) paramFinalNames
+    let nameMap0 = paramFinalNames |> Map.fold (fun acc k v -> Map.add k v acc) outerNames
+    let nameMap0 = codeGen.Captures |> List.fold (fun acc c -> Map.add c.Id c.Name acc) nameMap0
     let kernelStr0 = exprToCpp nameMap0 codeGen.KernelExpr
     lines <- lines @ [ind depth + sprintf "%s%s = %s;" codeGen.OutputName outputIdx kernelStr0]
     
@@ -1509,7 +1516,7 @@ let genFusedLoopNest (codeGen: LoopNestCodeGen) (extraKernels: (string * IRExpr 
                 | None -> None)
             |> List.choose id
             |> Map.ofList
-        let nameMap = extraParamMap
+        let nameMap = extraParamMap |> Map.fold (fun acc k v -> Map.add k v acc) outerNames
         let nameMap = captures |> List.fold (fun acc c -> Map.add c.Id c.Name acc) nameMap
         let kernelStr = exprToCpp nameMap kernelExpr
         lines <- lines @ [ind depth + sprintf "%s%s = %s;" outName outputIdx kernelStr]
@@ -1582,7 +1589,7 @@ let genFusedApply (ctx: CodeGenContext) (nameL: string) (nameR: string) (infoL: 
             sprintf "%s%s = allocate<typename promote<%s, %d>::type, %s>(%s);" ind nameR outputElemTypeR outputRankR symmVecNameR extentsName ]
         
         // Generate fused loop nest with both kernel assignments
-        let loopCode = genFusedLoopNest codeGenL [(nameR, kernelBodyR, kernelParamsR, capturesR)] ctx.Indent
+        let loopCode = genFusedLoopNest codeGenL [(nameR, kernelBodyR, kernelParamsR, capturesR)] ctx.VarNames ctx.Indent
         
         [symmVecDeclL; symmVecDeclR; ""; extentsDecl] @ extentsFill @ [""] @ allocL @ allocR @ [""] @ loopCode
 
@@ -1853,7 +1860,7 @@ let genFusionTree (ctx: CodeGenContext) (name: string) (expr: IRExpr) (builder: 
                 [symmVecDecl] @ [extentsDecl] @ extentsFill @ [allocDecl; allocInit]) |> List.concat
             
             // Generate single fused loop nest
-            let loopCode = genFusedLoopNest codeGenPrimary extraKernels ctx.Indent
+            let loopCode = genFusedLoopNest codeGenPrimary extraKernels ctx.VarNames ctx.Indent
             
             // Build named pair tree with intermediate variables
             let (pairCode, _, childrenMap) = buildNamedPairTree ind name expr leafNames
@@ -1884,19 +1891,96 @@ let rec genBinding (ctx: CodeGenContext) (binding: IRBinding) (builder: IRBuilde
         let ctx' = { ctx' with DeferredComputations = Map.add binding.Id binding.Value ctx'.DeferredComputations }
         ([sprintf "%s// %s = <deferred computation combinator>" ind name], ctx')
     
+    | IRFunctorMap _ ->
+        // Defer: functor map not materialized until |> compute
+        let ctx' = addVarName binding.Id name ctx
+        let ctx' = { ctx' with DeferredComputations = Map.add binding.Id binding.Value ctx'.DeferredComputations }
+        ([sprintf "%s// %s = <deferred functor map>" ind name], ctx')
+    
     | IRCompute inner ->
         // Compute unwraps - handle the inner expression
-        // First, resolve IRVar references to deferred computations
-        let resolved =
-            match inner with
-            | IRVar (id, ty) ->
+        // Recursive resolver: peels IRFunctorMap wrappers and resolves IRVar through deferred
+        // Returns (innerExpr, wrapperFunctions) where wrappers are outermost-first
+        let rec resolveComputation (expr: IRExpr) (wrappers: IRExpr list) : IRExpr * IRExpr list =
+            match expr with
+            | IRVar (id, _) ->
                 match Map.tryFind id ctx.DeferredComputations with
-                | Some deferred -> deferred
-                | None -> inner
-            | _ -> inner
+                | Some deferred -> resolveComputation deferred wrappers
+                | None -> (expr, wrappers)
+            | IRFunctorMap (f, inner) ->
+                resolveComputation inner (f :: wrappers)
+            | _ -> (expr, wrappers)
+        
+        let (resolved, functorWrappers) = resolveComputation inner []
+        
+        // Compose functor wrappers into ApplyInfo kernel if present
+        // f <$> (L <@> g) → L <@> (f ∘ g)
+        // Wraps kernel body: λparams → f(g(params))
+        let applyFunctorWrappers (info: ApplyInfo) (wrappers: IRExpr list) : ApplyInfo =
+            if wrappers.IsEmpty then info
+            else
+                // Beta-reduce: substitute wrapper's parameter with inner body
+                // f <$> (L <@> g) where f = λx → h(x)
+                // becomes L <@> λparams → h(g(params))
+                let betaReduce (wrapper: IRExpr) (body: IRExpr) : IRExpr =
+                    match wrapper with
+                    | IRLambda wInfo when wInfo.Params.Length = 1 ->
+                        // Substitute param VarId with body expression
+                        let paramId = wInfo.Params.[0].VarId
+                        let rec subst (expr: IRExpr) =
+                            match expr with
+                            | IRVar (id, _) when id = paramId -> body
+                            | IRVar _ | IRLit _ | IRParam _ -> expr
+                            | IRBinOp (m, op, l, r) -> IRBinOp (m, op, subst l, subst r)
+                            | IRUnaryOp (op, e) -> IRUnaryOp (op, subst e)
+                            | IRIf (c, t, e) -> IRIf (subst c, subst t, subst e)
+                            | IRApp (f, args, rt) -> IRApp (subst f, args |> List.map subst, rt)
+                            | IRIndex (a, idxs, ty) -> IRIndex (subst a, idxs |> List.map subst, ty)
+                            | IRTuple es -> IRTuple (es |> List.map subst)
+                            | IRTupleProj (e, i) -> IRTupleProj (subst e, i)
+                            | IRFieldAccess (e, f) -> IRFieldAccess (subst e, f)
+                            | IRLet (id, v, b) -> IRLet (id, subst v, subst b)
+                            | _ -> expr  // For complex nodes, leave as-is
+                        subst wInfo.Body
+                    | _ ->
+                        // Can't beta-reduce, fall back to IRApp (IIFE in C++)
+                        let retTy = match wrapper with
+                                    | IRLambda li -> inferExprType li.Body
+                                    | _ -> IRTScalar ETFloat64
+                        IRApp (wrapper, [body], retTy)
+                
+                let wrappedKernel =
+                    match info.Kernel with
+                    | IRLambda lInfo ->
+                        // Apply wrappers innermost first (list is already innermost-first from peeling)
+                        let wrappedBody =
+                            wrappers |> List.fold (fun body wrapper ->
+                                betaReduce wrapper body
+                            ) lInfo.Body
+                        IRLambda { lInfo with Body = wrappedBody }
+                    | IRReynolds (IRLambda lInfo, isAnti) ->
+                        let wrappedBody =
+                            wrappers |> List.fold (fun body wrapper ->
+                                betaReduce wrapper body
+                            ) lInfo.Body
+                        IRReynolds (IRLambda { lInfo with Body = wrappedBody }, isAnti)
+                    | other -> other
+                // Update output type from outermost wrapper's return type
+                let newOutputType =
+                    match wrappers |> List.tryHead with
+                    | Some (IRLambda li) -> inferExprType li.Body
+                    | _ -> info.OutputType
+                // If output is an array, update the element type
+                let adjustedOutputType =
+                    match info.OutputType, newOutputType with
+                    | IRTArray arr, IRTScalar et -> IRTArray { arr with ElemType = et }
+                    | _ -> newOutputType
+                { info with Kernel = wrappedKernel; OutputType = adjustedOutputType }
+        
         match resolved with
         | IRApplyCombinator info ->
-            let code = genApplyCombinator ctx name info builder
+            let info' = applyFunctorWrappers info functorWrappers
+            let code = genApplyCombinator ctx name info' builder
             let ctx' = addVarName binding.Id name ctx
             (code, ctx')
         
@@ -2040,7 +2124,7 @@ let rec genBinding (ctx: CodeGenContext) (binding: IRBinding) (builder: IRBuilde
         match binding.Value with
         | IRTuple elems when elems |> List.forall (fun e ->
             match e with
-            | IRApplyCombinator _ | IRParallel _ | IRFusion _ -> true
+            | IRApplyCombinator _ | IRParallel _ | IRFusion _ | IRFunctorMap _ -> true
             | IRVar (id, _) -> Map.containsKey id ctx.DeferredComputations
             | _ -> false) ->
             // All elements are computations — defer the whole tuple
@@ -2462,9 +2546,17 @@ let computeDeferredIds (bindings: IRBinding list) : Set<int> =
     for b in bindings do
         match b.Value with
         | IRApplyCombinator _ | IRParallel _ | IRFusion _ -> ids <- Set.add b.Id ids
+        | IRFunctorMap (_, inner) ->
+            // Deferred if inner is deferred
+            let innerDeferred = 
+                match inner with
+                | IRApplyCombinator _ | IRParallel _ | IRFusion _ | IRFunctorMap _ -> true
+                | IRVar (id, _) -> Set.contains id ids
+                | _ -> false
+            if innerDeferred then ids <- Set.add b.Id ids
         | IRTuple elems when elems |> List.forall (fun e ->
             match e with
-            | IRApplyCombinator _ | IRParallel _ | IRFusion _ -> true
+            | IRApplyCombinator _ | IRParallel _ | IRFusion _ | IRFunctorMap _ -> true
             | IRVar (id, _) -> Set.contains id ids
             | _ -> false) -> ids <- Set.add b.Id ids
         | IRTupleProj (IRVar (pid, _), _) when Set.contains pid ids -> ids <- Set.add b.Id ids
@@ -2499,6 +2591,7 @@ let genSelfContainedProgram (modul: IRModule) (testName: string) : string =
                 | IRCompute (IRParallel _) -> true   // generates pair of arrays
                 | IRCompute (IRFusion _) -> true      // generates pair of arrays
                 | IRCompute (IRVar _) -> true         // resolves deferred at codegen time
+                | IRCompute (IRFunctorMap _) -> true  // functor map over computation
                 // These don't generate runtime variables
                 | IRCompute _ | IRMethodFor _ | IRObjectFor _ | IRLambda _ -> false
                 // Simple values are printable
@@ -2577,6 +2670,7 @@ let genProgramWithExternalRuntime (modul: IRModule) (testName: string) : string 
                 | IRCompute (IRParallel _) -> true
                 | IRCompute (IRFusion _) -> true
                 | IRCompute (IRVar _) -> true  // resolves deferred at codegen time
+                | IRCompute (IRFunctorMap _) -> true  // functor map over computation
                 | IRCompute _ | IRMethodFor _ | IRObjectFor _ | IRLambda _ -> false
                 | _ -> true
             

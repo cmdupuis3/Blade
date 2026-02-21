@@ -166,6 +166,7 @@ and TypedExprKind =
     | TExprBind of TypedExpr * TypedExpr
     | TExprParallel of TypedExpr * TypedExpr
     | TExprFusion of TypedExpr * TypedExpr
+    | TExprFunctorMap of func: TypedExpr * comp: TypedExpr
     | TExprChoice of TypedExpr * TypedExpr
     | TExprCompose of TypedExpr * TypedExpr
     

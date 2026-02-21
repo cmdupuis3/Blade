@@ -1142,7 +1142,7 @@ let result = L <@> f
                     printfn "Speedup: %dx" codeGen.SpeedupFactor
                     
                     printfn "\n=== Generated C++ Code ==="
-                    let cppLines = genLoopNest codeGen 0
+                    let cppLines = genLoopNest codeGen Map.empty 0
                     for line in cppLines do
                         printfn "%s" line
                     
