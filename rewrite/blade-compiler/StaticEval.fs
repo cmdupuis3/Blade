@@ -30,8 +30,6 @@ type StaticEnv = {
     CalledFunctions: ref<Set<string>>
 }
 
-let emptyStaticEnv = { Values = Map.empty; Functions = Map.empty; CalledFunctions = ref Set.empty }
-
 // ============================================================================
 // Dependency Analysis
 // ============================================================================

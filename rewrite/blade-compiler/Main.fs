@@ -460,7 +460,9 @@ let runFullTest (testName: string) (source: string) (outputDir: string) (compile
             let cppFile = Path.Combine(outputDir, safeName + ".cpp")
             
             try
-                let cppCode = CodeGen.genSelfContainedProgramFromIR ir testName
+                let (cppCode, codegenWarnings) = CodeGen.genSelfContainedProgramFromIR ir testName
+                for w in codegenWarnings do
+                    printfn "  [CodeGen Warning] %s" w
                 File.WriteAllText(cppFile, cppCode)
                 
                 // Step 3: Compile
@@ -645,7 +647,9 @@ let runMultiFileTestsFull (name: string) (tests: (string * (string * string) lis
             let safeName = sanitizeFileName testName
             let cppFile = Path.Combine(outputDir, safeName + ".cpp")
             try
-                let cppCode = CodeGen.genSelfContainedProgramFromIR ir testName
+                let (cppCode, codegenWarnings) = CodeGen.genSelfContainedProgramFromIR ir testName
+                for w in codegenWarnings do
+                    printfn "  [CodeGen Warning] %s" w
                 File.WriteAllText(cppFile, cppCode)
                 printfn "Generated: %s" cppFile
                 
@@ -837,7 +841,9 @@ let runTestCategoryGenOnly (name: string) (tests: (string * string) list) (outpu
             let safeName = sanitizeFileName testName
             let cppFile = Path.Combine(outputDir, safeName + ".cpp")
             try
-                let cppCode = CodeGen.genSelfContainedProgramFromIR ir testName
+                let (cppCode, codegenWarnings) = CodeGen.genSelfContainedProgramFromIR ir testName
+                for w in codegenWarnings do
+                    printfn "  [CodeGen Warning] %s" w
                 File.WriteAllText(cppFile, cppCode)
                 printfn "  [IR:OK] [Gen:OK] %s -> %s" testName (Path.GetFileName cppFile)
                 generated <- generated + 1
@@ -1628,7 +1634,9 @@ let generateCppForTest (testName: string) (source: string) (outputDir: string) :
     match lower source with
     | Ok ir ->
         // Generate self-contained C++ program (no external dependencies)
-        let cppCode = CodeGen.genSelfContainedProgramFromIR ir testName
+        let (cppCode, codegenWarnings) = CodeGen.genSelfContainedProgramFromIR ir testName
+        for w in codegenWarnings do
+            printfn "  [CodeGen Warning] %s" w
         
         // Sanitize test name for filename
         let safeName = testName.Replace(" ", "_").Replace(":", "").Replace("/", "_")
@@ -1755,7 +1763,9 @@ let result = L <@> f
     match lower source with
     | Ok ir ->
         printfn "\n=== Generated Self-Contained C++ Program ===\n"
-        let cppCode = CodeGen.genSelfContainedProgramFromIR ir "TriangularTest"
+        let (cppCode, codegenWarnings) = CodeGen.genSelfContainedProgramFromIR ir "TriangularTest"
+        for w in codegenWarnings do
+            printfn "  [CodeGen Warning] %s" w
         printfn "%s" cppCode
         
         // Also show with external runtime for comparison

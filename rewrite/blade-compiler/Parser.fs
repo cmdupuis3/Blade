@@ -36,14 +36,6 @@ let peek (tokens: Token list) =
     | [] -> None
 
 /// Peek, skipping any leading newlines
-let peekSkipNL (tokens: Token list) =
-    let rec skip toks =
-        match toks with
-        | t :: rest when t.Kind = TokNewline -> skip rest
-        | t :: _ -> Some t.Kind
-        | [] -> None
-    skip tokens
-
 let advance (tokens: Token list) =
     match tokens with
     | _ :: rest -> rest
@@ -383,6 +375,10 @@ and parseTypeAtom (tokens: Token list) : ParseResult<TypeExpr> =
     
     | Some (TokKeyword KwHermitianIdx) ->
         parseIndexType tokens
+    
+    | Some (TokKeyword KwVoid) ->
+        // Void type (the unit type — no value)
+        success (TyNamed ("Void", [])) (advance tokens)
     
     | Some TokLParen ->
         // Tuple type or parenthesized
@@ -2101,12 +2097,6 @@ let parseProgram (source: string) : Result<Program, ParseError> =
     match parseModule tokens with
     | Ok (modul, _) -> Ok { Modules = [modul] }
     | Error e -> Error e
-
-/// Parse with error recovery. Returns program (possibly partial) + all errors.
-let parseProgramRecovering (source: string) : Program * ParseError list =
-    let tokens = tokenizeWithNewlines source
-    let ((modul, errors), _) = parseModuleRecovering tokens
-    ({ Modules = [modul] }, errors)
 
 /// Parse multiple source files into a single Program.
 /// Each entry is (fileName, sourceCode). If a source has a `module` declaration,

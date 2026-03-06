@@ -19,6 +19,7 @@ let A = [1.0, 2.0, 3.0]
 let L = method_for(A, A)
 let f = lambda(x, y) where comm(x, y) -> x * y
 let result = L <@> f |> compute
+// EXPECT: result = [1, 2, 3, 4, 6, 9]
 """
 
 let test_antisym_parse_type = """
@@ -48,6 +49,7 @@ let B = [4.0, 5.0, 6.0]
 let L = method_for(A, B)
 let f = lambda(x, y) -> x * y
 let result = L <@> f |> compute
+// EXPECT: result = [4, 5, 6, 8, 10, 12, 12, 15, 18]
 """
 
 // ============================================================================

@@ -234,9 +234,6 @@ type TypeScheme = {
     Body: IRType               // The type (resolved), with quantified vars still as IRTInfer
 }
 
-/// Monomorphic scheme (no quantified variables).
-let monoScheme (ty: IRType) : TypeScheme =
-    { QuantifiedVars = []; Body = ty }
 
 /// Collect free (unresolved) inference variable IDs in a type.
 let rec freeInferVars (subst: Subst) (ty: IRType) : Set<int> =
@@ -408,9 +405,6 @@ let bindVarSimple name varId ty env =
     bindVar name { VarId = varId; Type = ty; Identity = None
                    Assign = ReadOnly; TypedValue = None; Scheme = None } env
 
-let bindVarWithIdentity name varId ty identity env =
-    bindVar name { VarId = varId; Type = ty; Identity = Some identity
-                   Assign = ReadOnly; TypedValue = None; Scheme = None } env
 
 let bindVarFull name varId ty identity assign typedValue env =
     bindVar name { VarId = varId; Type = ty; Identity = identity
@@ -565,6 +559,7 @@ let rec lowerTypeExpr (env: TypeEnv) (ty: TypeExpr) : IRType =
         | "Complex64" -> tryResolveUnitArg (IRTScalar ETComplex64) args
         | "Complex128" -> tryResolveUnitArg (IRTScalar ETComplex128) args
         | "Bool" -> IRTScalar ETBool
+        | "Void" -> IRTUnit
         | "Nat" -> IRTNat None
         | "Poly" ->
             match args with
@@ -1637,7 +1632,7 @@ and inferApply (env: TypeEnv) (tLeft: TypedExpr) (tRight: TypedExpr) : TypeResul
         let resolvedInner = resolveTypedExpr env innerKernel
         match resolvedInner.Kind with
         | TExprLambda li -> buildApplyInfo env mfInfo.Arrays mfInfo.Identities mfInfo.ArrayTypes mfInfo.SDimsPerArray mfInfo.SharedIndexType li tLeft tRight true isAntisym
-        | _ -> buildGenericApply env tLeft tRight
+        | _ -> Error (Other "reynolds() requires a lambda kernel, but the inner expression could not be resolved to a lambda")
 
     | TExprMethodFor mfInfo, TExprZero ->
         // M <@> zero: synthesize a lambda that returns 0 for each index point
@@ -1785,10 +1780,11 @@ and inferApply (env: TypeEnv) (tLeft: TypedExpr) (tRight: TypedExpr) : TypeResul
         | TExprLambda lambdaInfo ->
             buildApplyInfo env flatArrays identities arrayTypes sDimsPerArray sharedIdx lambdaInfo tLeft objInfo.Kernel false false
         | TExprReynolds (innerK, isAntisym) ->
-            match innerK.Kind with
+            let resolvedInnerK = resolveTypedExpr env innerK
+            match resolvedInnerK.Kind with
             | TExprLambda li ->
                 buildApplyInfo env flatArrays identities arrayTypes sDimsPerArray sharedIdx li tLeft objInfo.Kernel true isAntisym
-            | _ -> buildGenericApply env tLeft objInfo.Kernel
+            | _ -> Error (Other "reynolds() requires a lambda kernel, but the inner expression could not be resolved to a lambda")
         | TExprZero ->
             // object_for(zero) <@> arrays: synthesize zero-returning lambda
             let elemType =
@@ -1813,7 +1809,7 @@ and inferApply (env: TypeEnv) (tLeft: TypedExpr) (tRight: TypedExpr) : TypeResul
                 Captures = []; IsCommutative = true
             }
             buildApplyInfo env flatArrays identities arrayTypes sDimsPerArray sharedIdx lambdaInfo tLeft (mkTyped (TExprLambda lambdaInfo) (IRTScalar elemType)) false false
-        | _ -> buildGenericApply env tLeft objInfo.Kernel
+        | _ -> Error (Other (sprintf "object_for kernel must be a lambda, reynolds, or zero, but got %A" (resolvedKernel.Kind.GetType().Name)))
 
     // Composed ObjectLoop: (o1 >>@ o2) <@> A
     | TExprCompose (OpComposeObj, _, _), _ ->
@@ -1842,7 +1838,12 @@ and inferApply (env: TypeEnv) (tLeft: TypedExpr) (tRight: TypedExpr) : TypeResul
         }
         Ok (mkTyped (TExprApply info) outputType)
 
-    | _ -> buildGenericApply env tLeft tRight
+    | _ ->
+        let leftDesc = 
+            match rL.Kind with
+            | TExprVar (name, _, _) -> sprintf "variable '%s'" name
+            | _ -> sprintf "%A" (rL.Kind.GetType().Name)
+        Error (Other (sprintf "<@> requires method_for or object_for on the left side, but got %s" leftDesc))
 
 and buildApplyInfo (env: TypeEnv)
     (arrays: TypedExpr list) (identities: ArrayIdentity list)
@@ -1911,19 +1912,6 @@ and buildApplyInfo (env: TypeEnv)
         IsCoIteration = isCoIter
     }
     Ok (mkTyped (TExprApply info) outputType)
-
-and buildGenericApply (env: TypeEnv) (tLeft: TypedExpr) (tRight: TypedExpr) : TypeResult<TypedExpr> =
-    let info : TypedApplyInfo = {
-        Loop = tLeft; Kernel = tRight
-        Arrays = []; Identities = []; ArrayTypes = []; SharedIndexType = None
-        SymcomStates = []; TriangularLevels = []
-        SDimsPerArray = []
-        KernelInputRanks = []; KernelOutputRank = 0
-        SpeedupFactor = 1L; ReynoldsSpeedup = 1L
-        HasReynolds = false; OutputType = IRTUnit
-        IsCoIteration = false
-    }
-    Ok (mkTyped (TExprApply info) IRTUnit)
 
 // ============================================================================
 // 10c. Lambda, Let, Match, Block, MethodFor, ObjectFor, Struct, For

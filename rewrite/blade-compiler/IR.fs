@@ -424,11 +424,6 @@ type IndexSpaceInfo = {
     SourceArity: int
 }
 
-/// Extract index space info from an array type
-let extractIndexSpaces (arrType: IRArrayType) : IndexSpaceInfo list =
-    arrType.IndexTypes |> List.map (fun idx ->
-        { Tag = idx.Tag; Extent = idx.Extent; Symmetry = idx.Symmetry; 
-          Kind = idx.Kind; SourceArity = idx.Arity })
 
 /// Check if two index spaces are "shared" (same logical index space)
 let indexSpacesMatch (a: IndexSpaceInfo) (b: IndexSpaceInfo) : bool =
@@ -529,50 +524,6 @@ let partitionIntoIdentityGroups (identities: ArrayIdentity list) : IdentityGroup
 // ============================================================================
 
 /// Extract input ranks from a lambda's parameter types
-/// irank(f, i) = rank of the i-th parameter type
-let extractKernelInputRanks (kernel: IRExpr) : int list =
-    match kernel with
-    | IRLambda info ->
-        info.Params |> List.map (fun p ->
-            match p.Type with
-            | IRTArray arr -> arr.IndexTypes.Length
-            | IRTScalar _ -> 0
-            | IRTUnit -> 0
-            | _ -> 0)
-    | _ -> []
-
-/// Extract output rank from a lambda's return type or infer from body
-/// orank(f) = rank of kernel's output (T-dimensions)
-let extractKernelOutputRank (kernel: IRExpr) : int =
-    match kernel with
-    | IRLambda info ->
-        // Try to infer from body expression
-        let rec inferRank expr =
-            match expr with
-            | IRArrayLit (_, arrTy) -> arrTy.IndexTypes.Length
-            | IRIndex (_, _, _) -> 0  // Scalar indexing result
-            | IRBinOp (mode, _, _, _) ->
-                match mode with
-                | IROuter -> 1  // Outer product adds dimension (simplified)
-                | IRElementwise -> 0  // Elementwise ops preserve rank 0
-            | IRLet (_, _, body) -> inferRank body
-            | IRIf (_, thenBr, _) -> inferRank thenBr
-            | _ -> 0
-        inferRank info.Body
-    | _ -> 0
-
-/// Compute S-dimensions per array given array ranks and kernel input ranks
-/// SDims[i] = rank(array[i]) - irank(kernel, i)
-let computeSDimsWithKernel (arrayTypes: IRArrayType list) (kernelInputRanks: int list) : int list =
-    if kernelInputRanks.IsEmpty then
-        // No kernel info - assume scalar kernel (irank = 0 for all)
-        computeSDimsPerArray arrayTypes
-    else
-        (arrayTypes, kernelInputRanks) ||> List.map2 (fun arr irank ->
-            let arrayRank = arr.IndexTypes 
-                            |> List.filter (fun idx -> idx.Kind = SDimension) 
-                            |> List.sumBy (fun idx -> idx.Arity)
-            max 0 (arrayRank - irank))
 
 // ============================================================================
 // Consolidated Symmetry Analysis (Section 13.1-13.2, 14.5-14.6)
@@ -1543,7 +1494,7 @@ let rec ppIRType = function
     | IRTScalar ETComplex64 -> "Complex64"
     | IRTScalar ETComplex128 -> "Complex128"
     | IRTScalar ETBool -> "Bool"
-    | IRTScalar ETUnit -> "Unit"
+    | IRTScalar ETUnit -> "Void"
     | IRTScalar ETString -> "String"
     | IRTArray arr ->
         let indices = arr.IndexTypes |> List.map ppIndexType |> String.concat ", "
@@ -1557,7 +1508,7 @@ let rec ppIRType = function
         | LKMethod -> sprintf "MethodLoop<%d>" (lt.Arity |> Option.defaultValue 0)
         | LKObject -> sprintf "ObjectLoop<%d>" (lt.Arity |> Option.defaultValue 0)
     | IRTComputation t -> sprintf "Computation<%s>" (ppIRType t)
-    | IRTUnit -> "Unit"
+    | IRTUnit -> "Void"
     | IRTPoly (base', var) -> sprintf "Poly<%s, %s>" (ppIRType base') var
     | IRTNat (Some n) -> sprintf "Nat<%d>" n
     | IRTNat None -> "Nat<?>"
@@ -1587,7 +1538,7 @@ and ppElemType = function
     | ETComplex64 -> "Complex64"
     | ETComplex128 -> "Complex128"
     | ETBool -> "Bool"
-    | ETUnit -> "Unit"
+    | ETUnit -> "Void"
     | ETString -> "String"
 
 /// Build a map from IRIndexType.Id -> type name from a module's IRTDIndexType defs
@@ -1766,16 +1717,3 @@ let rec ppIRExprWithNames (names: Map<int, string>) indent (expr: IRExpr) =
 /// Default pretty printer (no name context)
 let ppIRExpr indent expr = ppIRExprWithNames Map.empty indent expr
 
-/// Pretty print a loop nest
-let ppLoopNest (nest: LoopNest) =
-    let levels = 
-        nest.Levels |> List.map (fun l ->
-            sprintf "  for v%d in [%s..%s] [%s, par=%b]"
-                l.Index
-                (ppIRExpr 0 l.LowerBound)
-                (ppIRExpr 0 l.Extent)
-                (ppSymcomState l.State)
-                l.Parallel)
-        |> String.concat "\n"
-    sprintf "LoopNest (speedup=%dx):\n%s\n  body: %s" 
-        nest.SpeedupFactor levels (ppIRExpr 2 nest.Kernel)

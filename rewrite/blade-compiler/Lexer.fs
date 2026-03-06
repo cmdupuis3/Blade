@@ -36,8 +36,7 @@ type TokenKind =
     | TokColonColon    // ::
     | TokDot           // .
     | TokDotDot        // ..
-    | TokArrow         // ->
-    | TokFatArrow      // =>
+
     | TokPipe          // |
     | TokUnderscore    // _
     | TokAt            // @
@@ -68,43 +67,31 @@ and Keyword =
     | KwWith
     | KwWhere
     | KwComm
-    | KwAntisymm
     | KwReynolds
-    | KwOmp
-    | KwTdim
     | KwTrue
     | KwFalse
     | KwIn
     | KwImport
     | KwFrom
     | KwAs
+    | KwVoid
     | KwUnit
     | KwArray
     | KwIdx
     | KwSymIdx
     | KwAntisymIdx
     | KwHermitianIdx
-    | KwBoundedIdx
-    | KwCompoundIdx
     | KwMethodFor
     | KwObjectFor
     | KwRange
     | KwReverse
-    | KwBlocked
     | KwPure
     | KwCompute
     | KwGuard
     | KwSequence
     | KwReplicate
     | KwZip
-    | KwAlign
     | KwStack
-    | KwTranspose
-    | KwDiag
-    | KwJoin
-    | KwSubset
-    | KwSplit
-    | KwShift
     | KwArity
     | KwNth
     | KwZero
@@ -143,43 +130,31 @@ let keywords =
       "with", KwWith
       "where", KwWhere
       "comm", KwComm
-      "antisymm", KwAntisymm
       "reynolds", KwReynolds
-      "omp", KwOmp
-      "tdim", KwTdim
       "true", KwTrue
       "false", KwFalse
       "in", KwIn
       "import", KwImport
       "from", KwFrom
       "as", KwAs
+      "Void", KwVoid
       "Unit", KwUnit
       "Array", KwArray
       "Idx", KwIdx
       "SymIdx", KwSymIdx
       "AntisymIdx", KwAntisymIdx
       "HermitianIdx", KwHermitianIdx
-      "BoundedIdx", KwBoundedIdx
-      "CompoundIdx", KwCompoundIdx
       "method_for", KwMethodFor
       "object_for", KwObjectFor
       "range", KwRange
       "reverse", KwReverse
-      "blocked", KwBlocked
       "pure", KwPure
       "compute", KwCompute
       "guard", KwGuard
       "sequence", KwSequence
       "replicate", KwReplicate
       "zip", KwZip
-      "align", KwAlign
       "stack", KwStack
-      "transpose", KwTranspose
-      "diag", KwDiag
-      "join", KwJoin
-      "subset", KwSubset
-      "split", KwSplit
-      "shift", KwShift
       "arity", KwArity
       "nth", KwNth
       "zero", KwZero

@@ -43,7 +43,8 @@ function square(x) = x * x
 let A = [1.0, 2.0, 3.0]
 let L = method_for(A, A)
 let f = lambda(x, y) where comm(x, y) -> square(x) + square(y)
-let result = L <@> f
+let result = L <@> f |> compute
+// EXPECT: result = [2, 5, 10, 8, 13, 18]
 """
 
 let test26_arrayCaptureRejected = """

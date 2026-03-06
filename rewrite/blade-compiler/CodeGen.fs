@@ -29,7 +29,27 @@ type CodeGenContext = {
     /// Computations (L <@> f) are only materialized when |> compute forces them.
     /// Combinators like <&!> look through variables to find the original ApplyInfo for fusion.
     DeferredComputations: Map<IRId, IRExpr>
+    /// Accumulated code generation warnings (unsupported IR nodes, fallbacks, etc.)
+    Warnings: string list ref
 }
+
+/// Module-level expression warnings collector.
+/// exprToCpp is pure (returns string) so it can't use CodeGenContext directly.
+/// This collects warnings from exprToCpp calls and is synced into CodeGenContext.
+let exprWarnings : string list ref = ref []
+
+/// Record an expression-level warning and return a C++ expression that causes a compile error.
+let exprError (msg: string) : string =
+    exprWarnings.Value <- exprWarnings.Value @ [msg]
+    sprintf "BLADE_CODEGEN_ERROR_%s" (msg.Replace(" ", "_").Replace("'", "").Replace("(", "").Replace(")", "").Replace(",", "").Replace(":", "").Replace("\"", "").ToUpper())
+
+/// Check if an expression is unit/void-typed (should not generate a value)
+let isUnitExpr (expr: IRExpr) : bool =
+    match expr with
+    | IRLit IRLitUnit -> true
+    | IRAssign _ -> true
+    | IRForRange _ -> true
+    | _ -> false
 
 let emptyContext () = {
     VarNames = Map.empty
@@ -39,11 +59,17 @@ let emptyContext () = {
     ConstrainedStructs = Set.empty
     TupleChildren = Map.empty
     DeferredComputations = Map.empty
+    Warnings = ref []
 }
 
 let indent ctx = { ctx with Indent = ctx.Indent + 1 }
-let dedent ctx = { ctx with Indent = max 0 (ctx.Indent - 1) }
 let indentStr ctx = String.replicate ctx.Indent "    "
+
+/// Record a codegen warning and return a C++ #error directive.
+/// This ensures the generated C++ will not compile silently.
+let codegenError (ctx: CodeGenContext) (ind: string) (msg: string) : string list =
+    ctx.Warnings.Value <- ctx.Warnings.Value @ [msg]
+    [sprintf "%s#error \"Blade codegen: %s\"" ind (msg.Replace("\"", "'"))]
 
 /// C++ reserved words and built-in type names that cannot be used as identifiers
 let cppReservedWords = Set.ofList [
@@ -67,10 +93,6 @@ let sanitizeCppName (name: string) : string =
 let addVarName id name ctx = 
     { ctx with VarNames = Map.add id (sanitizeCppName name) ctx.VarNames }
 
-let freshTemp ctx prefix =
-    let id = ctx.NextTempId
-    ctx.NextTempId <- ctx.NextTempId + 1
-    sprintf "%s_%d" prefix id
 
 // ============================================================================
 // Type Inference Helper (for code generation)
@@ -245,8 +267,8 @@ let rec irTypeToCpp = function
     | IRTUnit -> "void"
     | IRTLoop lt ->
         match lt.Kind with
-        | LKMethod -> "/* MethodLoop */"
-        | LKObject -> "/* ObjectLoop */"
+        | LKMethod -> "BLADE_ERROR_METHOD_LOOP_TYPE"
+        | LKObject -> "BLADE_ERROR_OBJECT_LOOP_TYPE"
     | IRTComputation t -> irTypeToCpp t  // Computation<T> erases to T at runtime
     | IRTPoly (base', arityVar) -> 
         // After monomorphization, IRTPoly should not reach codegen.
@@ -255,7 +277,9 @@ let rec irTypeToCpp = function
     | IRTNat _ -> "size_t"
     | IRTNamed "String" -> "std::string"  // Blade String → C++ std::string
     | IRTNamed name -> name  // Named types (structs, etc.) use their name directly
-    | IRTInfer n -> sprintf "/* UNRESOLVED_TYPE_%d */" n  // Bug: should not reach codegen
+    | IRTInfer n ->
+        exprWarnings.Value <- exprWarnings.Value @ [sprintf "unresolved type variable _%d reached codegen" n]
+        sprintf "BLADE_UNRESOLVED_TYPE_%d" n
     | IRTUnitAnnotated (inner, _) -> irTypeToCpp inner  // Units erase at codegen
 
 
@@ -283,7 +307,7 @@ let rec exprToCppSimple (names: Map<IRId, string>) (expr: IRExpr) : string =
     | IRLit (IRLitInt n) -> sprintf "%dL" n
     | IRLit (IRLitFloat f) -> sprintf "%g" f
     | IRLit (IRLitBool b) -> if b then "true" else "false"
-    | IRLit IRLitUnit -> "()"
+    | IRLit IRLitUnit -> "((void)0)"
     | IRVar (id, _) -> Map.tryFind id names |> Option.defaultValue (sprintf "__v%d" id)
     | IRParam (name, _, _) -> name
     | IRBinOp (_, op, l, r) ->
@@ -294,7 +318,7 @@ let rec exprToCppSimple (names: Map<IRId, string>) (expr: IRExpr) : string =
     | IRUnaryOp (op, e) -> sprintf "%s(%s)" (unaryOpToCpp op) (exprToCppSimple names e)
     | IRGuard (cond, body) ->
         sprintf "(%s ? %s : 0.0)" (exprToCppSimple names cond) (exprToCppSimple names body)
-    | _ -> "/* unsupported expr */"
+    | other -> sprintf "BLADE_UNSUPPORTED_EXPR_%s" (other.GetType().Name.ToUpper())
 
 /// Generate inline combinator application as an IIFE expression
 /// This is used when L <@> f appears in expression context (not as a top-level binding)
@@ -322,7 +346,7 @@ and genApplyCombinatorExpr (names: Map<IRId, string>) (info: ApplyInfo) : string
                 let names' = lInfo.Params |> List.fold (fun m p -> Map.add p.VarId p.Name m) names
                 exprToCppSimple names' lInfo.Body
             (paramNames, bodyStr)
-        | _ -> ([], "0")
+        | _ -> ([], exprError "kernel is not a lambda in inline combinator expression")
     
     let (paramNames, kernelBody) = kernelExpr
     
@@ -346,7 +370,7 @@ and genApplyCombinatorExpr (names: Map<IRId, string>) (info: ApplyInfo) : string
             elemTypeStr arr1 elemTypeStr p1 arr1 arr2 elemTypeStr p2 arr2 kernelBody
     else
         // Fallback - can't generate inline code
-        sprintf "/* inline combinator not supported for %d arrays */" arrayNames.Length
+        exprError (sprintf "inline combinator not supported for %d arrays" arrayNames.Length)
 
 /// Convert IRLit to C++ literal string
 let litToCpp (lit: IRLit) : string =
@@ -354,7 +378,7 @@ let litToCpp (lit: IRLit) : string =
     | IRLitInt n -> sprintf "%dL" n
     | IRLitFloat f -> sprintf "%g" f
     | IRLitBool b -> if b then "true" else "false"
-    | IRLitUnit -> "()"
+    | IRLitUnit -> "((void)0)"  // Valid C++ no-op; should be elided by callers
 
 /// Convert IRExpr to C++ expression string
 let rec exprToCpp (names: Map<IRId, string>) (expr: IRExpr) : string =
@@ -418,26 +442,34 @@ let rec exprToCpp (names: Map<IRId, string>) (expr: IRExpr) : string =
         sprintf "%s(%s)" (exprToCpp names func) (args |> List.map (exprToCpp names) |> String.concat ", ")
     | IRLet (id, value, body) ->
         // For inline let expressions, we need statement context
-        let valStr = exprToCpp names value
         let names' = Map.add id (sprintf "__v%d" id) names
-        match body with
-        | IRLit IRLitUnit ->
-            sprintf "([&]() { auto __v%d = %s; }())" id valStr
-        | _ ->
-            let bodyStr = exprToCpp names' body
-            sprintf "([&]() { auto __v%d = %s; return %s; }())" id valStr bodyStr
+        if isUnitExpr value then
+            // Unit-valued binding: skip the auto declaration
+            if isUnitExpr body then
+                "((void)0)"
+            else
+                exprToCpp names' body
+        else
+            let valStr = exprToCpp names value
+            match body with
+            | IRLit IRLitUnit ->
+                sprintf "([&]() { auto __v%d = %s; }())" id valStr
+            | _ ->
+                let bodyStr = exprToCpp names' body
+                sprintf "([&]() { auto __v%d = %s; return %s; }())" id valStr bodyStr
     | IRLambda info ->
         // Generate C++ lambda
         let paramList = info.Params |> List.map (fun p -> sprintf "%s %s" (irTypeToCpp p.Type) p.Name) |> String.concat ", "
         let names' = info.Params |> List.fold (fun m p -> Map.add p.VarId p.Name m) names
-        let bodyStr = exprToCpp names' info.Body
-        sprintf "[&](%s) { return %s; }" paramList bodyStr
-    | IRMethodFor _ -> "0 /* loop object */"  // Loop objects are compile-time only
-    | IRObjectFor _ -> "0 /* loop object */"  // Loop objects are compile-time only
+        if isUnitExpr info.Body then
+            sprintf "[&](%s) { }" paramList
+        else
+            let bodyStr = exprToCpp names' info.Body
+            sprintf "[&](%s) { return %s; }" paramList bodyStr
+    | IRMethodFor _ -> exprError "loop object used as value"
+    | IRObjectFor _ -> exprError "loop object used as value"
     | IRApplyCombinator _ -> 
-        // Combinator applications are lazy - they don't generate code until compute is called
-        // Return a placeholder that will cause a compile error if used directly
-        "/* unevaluated computation - use |> compute to evaluate */"
+        exprError "unevaluated computation used as value - use |> compute"
     | IRCompute inner -> 
         // compute forces evaluation of a lazy computation
         match inner with
@@ -459,14 +491,14 @@ let rec exprToCpp (names: Map<IRId, string>) (expr: IRExpr) : string =
         sprintf "%s(%s)" (exprToCpp names cont) (exprToCpp names comp)
     | IRReynolds (kernel, isAntisym) ->
         // Reynolds operator wraps kernel
-        sprintf "/* reynolds(%s, antisym=%b) */" (exprToCpp names kernel) isAntisym
+        exprError "reynolds wrapper in expression position"
     | IRZip arrs ->
         // In expression context (e.g. inside a kernel body), zip produces a tuple
         sprintf "std::make_tuple(%s)" (arrs |> List.map (exprToCpp names) |> String.concat ", ")
     | IRStack arrs ->
-        sprintf "/* stack(%s) */" (arrs |> List.map (exprToCpp names) |> String.concat ", ")
+        exprError "stack not yet implemented in codegen"
     | IRSlice (arr, dim, start, stop) ->
-        sprintf "/* slice(%s, dim=%d, %s:%s) */" (exprToCpp names arr) dim (exprToCpp names start) (exprToCpp names stop)
+        exprError "slice not yet implemented in codegen"
     | IRCurry (arr, idx, resultRank) ->
         sprintf "%s[%s]" (exprToCpp names arr) (exprToCpp names idx)
     | IRTupleCons (head, tail) ->
@@ -478,7 +510,7 @@ let rec exprToCpp (names: Map<IRId, string>) (expr: IRExpr) : string =
         let scrut = exprToCpp names scrutinee
         let rec genCase (cases: IRMatchCase list) : string =
             match cases with
-            | [] -> "0 /* no match */"
+            | [] -> "([&]() -> double { std::cerr << \"Blade: non-exhaustive match\" << std::endl; std::abort(); return 0; }())"
             | [case] ->
                 // Last case - assume it matches (wildcard or variable)
                 match case.Pattern with
@@ -494,7 +526,7 @@ let rec exprToCpp (names: Map<IRId, string>) (expr: IRExpr) : string =
                 | IRPatLit lit ->
                     let litStr = litToCpp lit
                     let bodyStr = exprToCpp names case.Body
-                    sprintf "(%s == %s ? %s : 0 /* no match */)" scrut litStr bodyStr
+                    sprintf "(%s == %s ? %s : ([&]() -> double { std::cerr << \"Blade: non-exhaustive match\" << std::endl; std::abort(); return 0; }()))" scrut litStr bodyStr
                 | _ ->
                     exprToCpp names case.Body
             | case :: rest ->
@@ -594,7 +626,7 @@ let rec exprToCpp (names: Map<IRId, string>) (expr: IRExpr) : string =
                     // Unsupported pattern - fallback
                     sprintf "(true ? %s : %s)" (exprToCpp names case.Body) restStr
         genCase cases
-    | IRNth -> "/* nth */"
+    | IRNth -> exprError "nth keyword not supported in expression position"
     | IRZero -> "0"
     | IRPolyIndex (pack, idx) ->
         // For static index, use std::get; otherwise runtime indexing
@@ -602,9 +634,9 @@ let rec exprToCpp (names: Map<IRId, string>) (expr: IRExpr) : string =
         | IRLit (IRLitInt n) -> sprintf "std::get<%d>(%s)" n (exprToCpp names pack)
         | _ -> sprintf "%s[%s]" (exprToCpp names pack) (exprToCpp names idx)
     | IRParallel (a, b, _) ->
-        sprintf "/* parallel(%s, %s) */" (exprToCpp names a) (exprToCpp names b)
+        exprError "parallel combinator in expression position"
     | IRFusion (a, b) ->
-        sprintf "/* fusion(%s, %s) */" (exprToCpp names a) (exprToCpp names b)
+        exprError "fusion combinator in expression position"
     | IRChoice (a, b) ->
         let aStr = exprToCpp names a
         let bStr = exprToCpp names b
@@ -625,13 +657,13 @@ let rec exprToCpp (names: Map<IRId, string>) (expr: IRExpr) : string =
         let gStr = exprToCpp names g
         sprintf "[&](auto... __args) { return %s(%s(__args...)); }" gStr fStr
     | IRComposeObj (f, g) ->
-        sprintf "/* compose_obj(%s, %s) */" (exprToCpp names f) (exprToCpp names g)
+        exprError "compose_obj in expression position"
     | IRComposeMeth (f, g) ->
-        sprintf "/* compose_meth(%s, %s) */" (exprToCpp names f) (exprToCpp names g)
+        exprError "compose_meth in expression position"
     | IRArrayProduct (a, b) ->
-        sprintf "/* array_product(%s, %s) */" (exprToCpp names a) (exprToCpp names b)
+        exprError "array_product in expression position"
     | IRFunctorMap (f, c) ->
-        sprintf "/* fmap(%s, %s) */" (exprToCpp names f) (exprToCpp names c)
+        exprError "functor_map in expression position"
     | IRAssign (target, value) ->
         let targetStr =
             match target with
@@ -641,14 +673,11 @@ let rec exprToCpp (names: Map<IRId, string>) (expr: IRExpr) : string =
                 let idxStr = idxs |> List.map (fun i -> sprintf "[%s]" (exprToCpp names i)) |> String.concat ""
                 sprintf "%s%s" arrStr idxStr
             | LVField (obj, f) -> sprintf "%s.%s" (exprToCpp names obj) f
-            | LVOther e -> sprintf "/* INVALID_ASSIGN_TARGET: %s */" (exprToCpp names e)
+            | LVOther e -> exprError "invalid assignment target"
         sprintf "%s = %s" targetStr (exprToCpp names value)
     | IRForRange (vid, lo, hi, body) ->
-        let loStr = exprToCpp names lo
-        let hiStr = exprToCpp names hi
-        let varName = sprintf "__k%d" vid
-        sprintf "/* for %s in %s..%s { ... } */" varName loStr hiStr
-    | _ -> "/* unsupported expr */"
+        exprError "for-range loop in expression position"
+    | other -> exprError (sprintf "unsupported IR node: %s" (other.GetType().Name))
 
 /// Convert IRExpr to C++ with an additional variable binding
 and exprToCppWithVar (names: Map<IRId, string>) (varId: IRId) (varName: string) (expr: IRExpr) : string =
@@ -734,6 +763,160 @@ let genForLoopHeader (binding: LoopIndexBinding) : string =
 
 /// Generate complete loop nest as C++ code
 /// Tracks peeled names across levels and generates element bindings for all arrays at each level
+/// Generate all permutations of a list of integers
+let rec permutations (items: int list) : int list list =
+    match items with
+    | [] -> [[]]
+    | _ ->
+        items |> List.collect (fun x ->
+            let rest = items |> List.filter (fun i -> i <> x)
+            permutations rest |> List.map (fun p -> x :: p))
+
+/// Count inversions to get permutation sign (+1 for even, -1 for odd)
+
+/// Is this binary operation commutative? (a op b) = (b op a)
+let isCommutativeOp (op: IRBinOp) : bool =
+    match op with
+    | IRAdd | IRMul | IREq | IRNeq | IRAnd | IROr -> true
+    | _ -> false
+
+/// Is this binary operation associative? (a op b) op c = a op (b op c)
+/// Only ops that are BOTH commutative and associative get flattened.
+let isAssociativeOp (op: IRBinOp) : bool =
+    match op with
+    | IRAdd | IRMul | IRAnd | IROr -> true
+    | _ -> false
+
+/// Flatten nested applications of the same commutative+associative op into a list of operands.
+/// E.g. (a * b) * c → [a; b; c]
+let rec flattenAssocOp (mode: IRBinOpMode) (op: IRBinOp) (expr: IRExpr) : IRExpr list =
+    match expr with
+    | IRBinOp (m, o, l, r) when o = op && m = mode ->
+        flattenAssocOp mode op l @ flattenAssocOp mode op r
+    | _ -> [expr]
+
+/// Generate a canonical string key for an IR expression under a given name mapping.
+/// Commutative binary operations have their children sorted by canonical key,
+/// and associative+commutative chains are flattened and sorted, so that e.g.
+/// (a * b) * c and c * (b * a) produce the same key.
+/// Used for Reynolds permutation deduplication.
+let rec canonicalKey (nameMap: Map<int, string>) (expr: IRExpr) : string =
+    match expr with
+    | IRVar (id, _) ->
+        Map.tryFind id nameMap |> Option.defaultValue (sprintf "v%d" id)
+    | IRLit lit ->
+        match lit with
+        | IRLitInt n -> string n
+        | IRLitFloat f -> sprintf "%g" f
+        | IRLitBool b -> if b then "true" else "false"
+        | IRLitUnit -> "()"
+    | IRBinOp (mode, op, l, r) when isCommutativeOp op && isAssociativeOp op ->
+        // Flatten the entire chain, canonicalize each operand, sort
+        let operands = flattenAssocOp mode op expr
+        let keys = operands |> List.map (canonicalKey nameMap) |> List.sort
+        sprintf "(%A/%A %s)" mode op (keys |> String.concat " ")
+    | IRBinOp (mode, op, l, r) when isCommutativeOp op ->
+        // Commutative but not associative (==, !=): sort the two children
+        let lk = canonicalKey nameMap l
+        let rk = canonicalKey nameMap r
+        let children = [lk; rk] |> List.sort
+        sprintf "(%A/%A %s %s)" mode op children.[0] children.[1]
+    | IRBinOp (mode, op, l, r) ->
+        sprintf "(%A/%A %s %s)" mode op (canonicalKey nameMap l) (canonicalKey nameMap r)
+    | IRUnaryOp (op, inner) ->
+        sprintf "(u%A %s)" op (canonicalKey nameMap inner)
+    | IRApp (func, args, _) ->
+        let fk = canonicalKey nameMap func
+        let ak = args |> List.map (canonicalKey nameMap) |> String.concat ","
+        sprintf "(call %s [%s])" fk ak
+    | IRIf (cond, thn, els) ->
+        sprintf "(if %s %s %s)" (canonicalKey nameMap cond) (canonicalKey nameMap thn) (canonicalKey nameMap els)
+    | IRLet (id, value, body) ->
+        sprintf "(let v%d=%s in %s)" id (canonicalKey nameMap value) (canonicalKey nameMap body)
+    | IRTupleProj (tup, idx, _) ->
+        sprintf "(proj %d %s)" idx (canonicalKey nameMap tup)
+    | IRTuple elems ->
+        let ek = elems |> List.map (canonicalKey nameMap) |> String.concat ","
+        sprintf "(tuple %s)" ek
+    | _ ->
+        // Fallback: use a unique representation that won't accidentally match
+        sprintf "(opaque %A)" (expr.GetType().Name)
+let permSign (perm: int list) : int =
+    let mutable inv = 0
+    for i in 0 .. perm.Length - 2 do
+        for j in i + 1 .. perm.Length - 1 do
+            if perm.[i] > perm.[j] then inv <- inv + 1
+    if inv % 2 = 0 then 1 else -1
+
+/// Generate the kernel expression string, applying Reynolds permutation sum if needed.
+/// For non-Reynolds kernels, just returns `exprToCpp nameMap kernelExpr`.
+/// For Reynolds kernels, generates the sum over all permutations of the kernel parameters.
+let genKernelExprWithReynolds
+    (kernelExpr: IRExpr)
+    (kernelParams: IRParam list)
+    (hasReynolds: bool)
+    (isAntisymmetric: bool)
+    (nameMap: Map<int, string>)
+    (paramFinalNames: Map<int, string>) : string =
+    if hasReynolds && kernelParams.Length >= 2 then
+        let n = kernelParams.Length
+        let paramCppNames =
+            kernelParams |> List.map (fun p ->
+                Map.tryFind p.VarId paramFinalNames
+                |> Option.defaultValue (sprintf "__p%d" p.VarId))
+        let allPerms = permutations [0 .. n - 1]
+        // For each permutation, generate:
+        //   - canonical key (for grouping — commutative ops normalized)
+        //   - C++ expression (for actual emission)
+        //   - sign
+        let permData =
+            allPerms |> List.map (fun perm ->
+                let permNameMap =
+                    kernelParams |> List.mapi (fun i p ->
+                        (p.VarId, paramCppNames.[perm.[i]]))
+                    |> List.fold (fun acc (vid, name) -> Map.add vid name acc) nameMap
+                let sign = permSign perm
+                let key = canonicalKey permNameMap kernelExpr
+                let cppExpr = exprToCpp permNameMap kernelExpr
+                (key, sign, cppExpr))
+        // Group by canonical key to deduplicate equivalent permutations.
+        // For symmetric Reynolds: identical keys accumulate multiplicity.
+        // For antisymmetric Reynolds: identical keys accumulate net sign (may cancel to 0).
+        let grouped =
+            permData
+            |> List.groupBy (fun (key, _, _) -> key)
+            |> List.choose (fun (_key, group) ->
+                let representativeCpp = let (_, _, cpp) = group.Head in cpp
+                if isAntisymmetric then
+                    let netSign = group |> List.sumBy (fun (_, s, _) -> s)
+                    if netSign = 0 then None
+                    else Some (netSign, representativeCpp)
+                else
+                    Some (group.Length, representativeCpp))
+        // Build the sum expression with multiplicity coefficients
+        let formatTerm coeff expr =
+            match isAntisymmetric with
+            | true ->
+                if abs coeff = 1 then
+                    if coeff > 0 then expr else sprintf "(-%s)" expr
+                else sprintf "(%d * %s)" coeff expr
+            | false ->
+                if coeff = 1 then expr else sprintf "(%d * %s)" coeff expr
+        let sumExpr =
+            grouped |> List.mapi (fun i (coeff, expr) ->
+                let term = formatTerm coeff expr
+                if i = 0 then term
+                elif isAntisymmetric && coeff < 0 then
+                    sprintf " - %s" (formatTerm (abs coeff) expr)
+                else sprintf " + %s" term)
+            |> String.concat ""
+        if grouped.IsEmpty then
+            "0.0"  // Complete cancellation (e.g. antisymmetrization of symmetric kernel)
+        else
+            sprintf "(%s)" sumExpr
+    else
+        exprToCpp nameMap kernelExpr
+
 let genLoopNest (codeGen: LoopNestCodeGen) (outerNames: Map<int, string>) (indent: int) : string list =
     let ind n = String.replicate n "    "
     let mutable lines = []
@@ -780,70 +963,8 @@ let genLoopNest (codeGen: LoopNestCodeGen) (outerNames: Map<int, string>) (inden
         |> List.map (fun b -> sprintf "[%s]" b.IndexName)
         |> String.concat ""
     
-    if codeGen.HasReynolds && codeGen.KernelParams.Length >= 2 then
-        // Reynolds operator: sum kernel over all permutations of parameters
-        let n = codeGen.KernelParams.Length
-        let kParams = codeGen.KernelParams
-        
-        // Get the C++ name for each parameter position
-        let paramCppNames = 
-            kParams |> List.map (fun p ->
-                Map.tryFind p.VarId paramFinalNames 
-                |> Option.defaultValue (sprintf "__p%d" p.VarId))
-        
-        // Generate all permutations of [0..n-1]
-        let rec permutations (items: int list) : int list list =
-            match items with
-            | [] -> [[]]
-            | _ ->
-                items |> List.collect (fun x ->
-                    let rest = items |> List.filter (fun i -> i <> x)
-                    permutations rest |> List.map (fun p -> x :: p))
-        
-        // Count inversions to get permutation sign
-        let permSign (perm: int list) : int =
-            let mutable inv = 0
-            for i in 0 .. perm.Length - 2 do
-                for j in i + 1 .. perm.Length - 1 do
-                    if perm.[i] > perm.[j] then inv <- inv + 1
-            if inv % 2 = 0 then 1 else -1
-        
-        let allPerms = permutations [0 .. n - 1]
-        
-        // For each permutation, build a name map with swapped parameters
-        // and generate the kernel expression string
-        let permExprs = 
-            allPerms |> List.map (fun perm ->
-                // For permutation π, param[i] gets the name of paramCppNames[π[i]]
-                let permNameMap =
-                    kParams |> List.mapi (fun i p ->
-                        (p.VarId, paramCppNames.[perm.[i]]))
-                    |> List.fold (fun acc (vid, name) -> Map.add vid name acc) nameMap
-                let sign = permSign perm
-                let expr = exprToCpp permNameMap codeGen.KernelExpr
-                (sign, expr))
-        
-        // Build the sum expression
-        let sumExpr =
-            if codeGen.IsAntisymmetric then
-                // Alternating sum: sign(π) * g(x_π)
-                permExprs |> List.mapi (fun i (sign, expr) ->
-                    if i = 0 then
-                        if sign = 1 then expr else sprintf "(-%s)" expr
-                    else
-                        if sign = 1 then sprintf " + %s" expr else sprintf " - %s" expr)
-                |> String.concat ""
-            else
-                // Symmetric sum: Σ g(x_π)
-                permExprs |> List.mapi (fun i (_, expr) ->
-                    if i = 0 then expr else sprintf " + %s" expr)
-                |> String.concat ""
-        
-        let sumExpr = sprintf "(%s)" sumExpr
-        lines <- lines @ [ind depth + sprintf "%s%s = %s;" codeGen.OutputName outputIdx sumExpr]
-    else
-        let kernelStr = exprToCpp nameMap codeGen.KernelExpr
-        lines <- lines @ [ind depth + sprintf "%s%s = %s;" codeGen.OutputName outputIdx kernelStr]
+    let kernelStr = genKernelExprWithReynolds codeGen.KernelExpr codeGen.KernelParams codeGen.HasReynolds codeGen.IsAntisymmetric nameMap paramFinalNames
+    lines <- lines @ [ind depth + sprintf "%s%s = %s;" codeGen.OutputName outputIdx kernelStr]
     
     // Close all loops
     for _ in codeGen.Bindings do
@@ -852,9 +973,6 @@ let genLoopNest (codeGen: LoopNestCodeGen) (outerNames: Map<int, string>) (inden
     
     lines
 
-/// Check if a binding has triangular bounds (has dependencies to subtract)
-let isTriangularBound (binding: LoopIndexBinding) : bool =
-    not binding.BoundDependencies.IsEmpty
 
 // ============================================================================
 // Symmetry Vector Generation
@@ -868,25 +986,11 @@ let genSymmVecDecl (name: string) (symmVec: int list) : string =
         let values = symmVec |> List.map string |> String.concat ", "
         sprintf "static constexpr const size_t %s[%d] = {%s};" name symmVec.Length values
 
-/// Generate C++ static constexpr array for extents
-let genExtentsDecl (name: string) (extents: int list) : string =
-    if extents.IsEmpty then
-        sprintf "static constexpr const size_t %s[0] = {};" name
-    else
-        let values = extents |> List.map string |> String.concat ", "
-        sprintf "static constexpr const size_t %s[%d] = {%s};" name extents.Length values
 
 // ============================================================================
 // Array Allocation Generation
 // ============================================================================
 
-/// Generate allocation call using promote<T, rank>::type pattern
-let genAllocate (varName: string) (elemType: string) (rank: int) (symmVecName: string) (extentsName: string) : string list =
-    [
-        sprintf "promote<%s, %d>::type %s;" elemType rank varName
-        sprintf "%s = allocate<typename promote<%s, %d>::type, %s>(%s);" 
-            varName elemType rank symmVecName extentsName
-    ]
 
 // ============================================================================
 // Function Template Generation
@@ -969,211 +1073,6 @@ let genIncludes () : string list =
      ""]
 
 /// Generate the runtime library as an embedded string (for self-contained output)
-let genEmbeddedRuntime () : string =
-    """
-// ============================================================================
-// Embedded Runtime: nested_array_utilities
-// ============================================================================
-
-#include <algorithm>
-#include <cstddef>
-#include <type_traits>
-
-namespace nested_array_utilities {
-
-    template<typename TYPE>
-    constexpr const size_t get_rank() {
-        if constexpr (std::is_pointer<TYPE>::value) {
-            return 1 + get_rank<typename std::remove_pointer<TYPE>::type>();
-        } else {
-            return 0;
-        }
-    }
-
-    template<typename TYPE, const size_t rank, const size_t depth = 0>
-    constexpr auto promote_impl() {
-        if constexpr (depth < rank) {
-            return promote_impl<typename std::add_pointer<TYPE>::type, rank, depth + 1>();
-        } else if constexpr (depth == rank) {
-            TYPE dummy = {0};
-            return dummy;
-        } else {
-            return;
-        }
-    }
-
-    template<typename TYPE, const size_t rank, const size_t depth = 0>
-    class promote {
-    public:
-        typedef decltype(promote_impl<TYPE, rank>()) type;
-    };
-
-    template<typename TYPE, const size_t SYMM[] = nullptr, const size_t DEPTH = 0>
-    constexpr TYPE allocate(const size_t extents[], const size_t lastIndex = 0) {
-        typedef typename std::remove_pointer<TYPE>::type DTYPE;
-        TYPE array;
-
-        if constexpr ((bool)SYMM && DEPTH > 0 && SYMM[DEPTH-1] == SYMM[DEPTH]) {
-            array = new DTYPE[extents[DEPTH] - lastIndex];
-            if constexpr (std::is_pointer<DTYPE>::value) {
-                for (size_t i = 0; i < extents[DEPTH] - lastIndex; i++) {
-                    if constexpr ((bool)SYMM && SYMM[DEPTH] == SYMM[DEPTH + 1]) {
-                        array[i] = allocate<DTYPE, SYMM, DEPTH + 1>(extents, i + lastIndex);
-                    } else {
-                        array[i] = allocate<DTYPE, SYMM, DEPTH + 1>(extents);
-                    }
-                }
-            }
-        } else {
-            array = new DTYPE[extents[DEPTH]];
-            if constexpr (std::is_pointer<DTYPE>::value) {
-                for (size_t i = 0; i < extents[DEPTH]; i++) {
-                    if constexpr ((bool)SYMM && SYMM[DEPTH] == SYMM[DEPTH + 1]) {
-                        array[i] = allocate<DTYPE, SYMM, DEPTH + 1>(extents, i);
-                    } else {
-                        array[i] = allocate<DTYPE, SYMM, DEPTH + 1>(extents);
-                    }
-                }
-            }
-        }
-        return array;
-    }
-
-    template<typename TYPE, const size_t SYMM[] = nullptr, const size_t DEPTH = 0>
-    constexpr void fill_random(TYPE array_in, const size_t extents[], int mod_in, size_t lastIndex = 0) {
-        typedef typename std::remove_pointer<TYPE>::type DTYPE;
-
-        if constexpr ((bool)SYMM && DEPTH > 0 && SYMM[DEPTH - 1] == SYMM[DEPTH]) {
-            if constexpr (std::is_pointer<DTYPE>::value) {
-                for (size_t i = 0; i < extents[DEPTH] - lastIndex; i++) {
-                    if constexpr ((bool)SYMM && SYMM[DEPTH] == SYMM[DEPTH + 1]) {
-                        fill_random<DTYPE, SYMM, DEPTH + 1>(array_in[i], extents, mod_in, i + lastIndex);
-                    } else {
-                        fill_random<DTYPE, SYMM, DEPTH + 1>(array_in[i], extents, mod_in);
-                    }
-                }
-            } else {
-                for (size_t i = 0; i < extents[DEPTH] - lastIndex; i++) {
-                    array_in[i] = rand() % mod_in;
-                }
-            }
-        } else {
-            if constexpr (std::is_pointer<DTYPE>::value) {
-                for (size_t i = 0; i < extents[DEPTH]; i++) {
-                    if constexpr ((bool)SYMM && SYMM[DEPTH] == SYMM[DEPTH + 1]) {
-                        fill_random<DTYPE, SYMM, DEPTH + 1>(array_in[i], extents, mod_in, i);
-                    } else {
-                        fill_random<DTYPE, SYMM, DEPTH + 1>(array_in[i], extents, mod_in);
-                    }
-                }
-            } else {
-                for (size_t i = 0; i < extents[DEPTH]; i++) {
-                    array_in[i] = rand() % mod_in;
-                }
-            }
-        }
-    }
-
-    template<typename TYPE, const size_t SYMM[] = nullptr, const size_t DEPTH = 0>
-    constexpr void fill_value(TYPE array_in, const size_t extents[], 
-                              typename std::remove_pointer<TYPE>::type value, size_t lastIndex = 0) {
-        typedef typename std::remove_pointer<TYPE>::type DTYPE;
-
-        if constexpr ((bool)SYMM && DEPTH > 0 && SYMM[DEPTH - 1] == SYMM[DEPTH]) {
-            if constexpr (std::is_pointer<DTYPE>::value) {
-                for (size_t i = 0; i < extents[DEPTH] - lastIndex; i++) {
-                    if constexpr ((bool)SYMM && SYMM[DEPTH] == SYMM[DEPTH + 1]) {
-                        fill_value<DTYPE, SYMM, DEPTH + 1>(array_in[i], extents, value, i + lastIndex);
-                    } else {
-                        fill_value<DTYPE, SYMM, DEPTH + 1>(array_in[i], extents, value);
-                    }
-                }
-            } else {
-                for (size_t i = 0; i < extents[DEPTH] - lastIndex; i++) {
-                    array_in[i] = value;
-                }
-            }
-        } else {
-            if constexpr (std::is_pointer<DTYPE>::value) {
-                for (size_t i = 0; i < extents[DEPTH]; i++) {
-                    if constexpr ((bool)SYMM && SYMM[DEPTH] == SYMM[DEPTH + 1]) {
-                        fill_value<DTYPE, SYMM, DEPTH + 1>(array_in[i], extents, value, i);
-                    } else {
-                        fill_value<DTYPE, SYMM, DEPTH + 1>(array_in[i], extents, value);
-                    }
-                }
-            } else {
-                for (size_t i = 0; i < extents[DEPTH]; i++) {
-                    array_in[i] = value;
-                }
-            }
-        }
-    }
-
-
-    // =========================================================================
-    // Antisymmetric array support
-    // =========================================================================
-
-    // Allocate antisymmetric array: strict i < j, so n-1 elements in first row,
-    // n-2 in second, etc. Total: n(n-1)/2
-    // Same nested pointer structure as symmetric but with -1 offset at each level.
-    template<typename TYPE, const size_t DEPTH = 0>
-    constexpr TYPE allocate_antisym(const size_t extents[], const size_t lastIndex = 0) {
-        typedef typename std::remove_pointer<TYPE>::type DTYPE;
-        TYPE array;
-
-        if constexpr (DEPTH == 0) {
-            // Outermost: full extent (rows)
-            array = new DTYPE[extents[DEPTH]];
-            if constexpr (std::is_pointer<DTYPE>::value) {
-                for (size_t i = 0; i < extents[DEPTH]; i++) {
-                    array[i] = allocate_antisym<DTYPE, DEPTH + 1>(extents, i + 1);
-                }
-            }
-        } else {
-            // Inner: strict bound, extent - lastIndex elements
-            size_t len = (extents[DEPTH] > lastIndex) ? extents[DEPTH] - lastIndex : 0;
-            array = new DTYPE[len];
-            if constexpr (std::is_pointer<DTYPE>::value) {
-                for (size_t i = 0; i < len; i++) {
-                    array[i] = allocate_antisym<DTYPE, DEPTH + 1>(extents, i + lastIndex);
-                }
-            }
-        }
-        return array;
-    }
-
-    // =========================================================================
-    // Index canonicalization wrappers
-    // =========================================================================
-
-    // Symmetric canonicalization: (i,j) -> (min(i,j), max(i,j))
-    inline void sym_canonical(size_t i, size_t j, size_t& ci, size_t& cj) {
-        ci = (i <= j) ? i : j;
-        cj = (i <= j) ? j : i;
-    }
-
-    // Antisymmetric canonicalization: (i,j) -> (min(i,j), max(i,j)), sign = +1 or -1
-    // Returns -1 if swapped (odd permutation), +1 if not
-    inline int antisym_canonical(size_t i, size_t j, size_t& ci, size_t& cj) {
-        if (i < j) { ci = i; cj = j; return 1; }
-        else if (i > j) { ci = j; cj = i; return -1; }
-        else { ci = i; cj = j; return 0; }  // diagonal: value is zero
-    }
-
-    // Hermitian canonicalization: (i,j) -> (min(i,j), max(i,j)), needs_conj flag
-    // For Hermitian: A(i,j) = conj(A(j,i)), so access with j<i needs conjugation
-    inline bool hermitian_canonical(size_t i, size_t j, size_t& ci, size_t& cj) {
-        if (i <= j) { ci = i; cj = j; return false; }  // no conjugation needed
-        else { ci = j; cj = i; return true; }           // needs conjugation
-    }
-
-} // namespace nested_array_utilities
-
-using namespace nested_array_utilities;
-"""
-
 /// Generate the runtime header file content (for separate file)
 let genRuntimeHeader () : string =
     """#pragma once
@@ -1402,29 +1301,6 @@ let genIncludesExternal () : string list =
      "#define TIME_DIFF std::chrono::duration_cast<std::chrono::nanoseconds>(end - start).count()"
      ""]
 
-/// Generate includes with embedded runtime (self-contained)
-let genIncludesEmbedded () : string list =
-    ["#include <cstdint>"
-     "#include <cstdlib>"
-     "#include <cmath>"
-     "#include <complex>"
-     "#include <functional>"
-     "#include <tuple>"
-     "#include <variant>"
-     "#include <string>"
-     "#include <iostream>"
-     "#include <iomanip>"
-     "#include <chrono>"
-     "#include <set>"
-     "#include <omp.h>"
-     "using std::cout;"
-     "using std::endl;"
-     ""
-     "#define TIME std::chrono::high_resolution_clock::now()"
-     "#define TIME_DIFF std::chrono::duration_cast<std::chrono::nanoseconds>(end - start).count()"
-     ""
-     genEmbeddedRuntime ()
-     ""]
 
 // ============================================================================
 // Full Program Generation
@@ -1524,9 +1400,11 @@ let genScalarBinding (ctx: CodeGenContext) (name: string) (value: IRExpr) (ty: I
     let resolvedTy = match ty with IRTInfer _ -> inferExprType value | t -> t
     match resolvedTy with
     | IRTUnit ->
-        // Unit-typed binding: emit expression as statement, no variable declaration
-        let valueStr = exprToCppCtx ctx value
-        [sprintf "%s%s;" ind valueStr]
+        // Unit-typed binding: only emit if value has side effects
+        if isUnitExpr value then []
+        else
+            let valueStr = exprToCppCtx ctx value
+            [sprintf "%s%s;" ind valueStr]
     | _ ->
         let cppType = irTypeToCpp resolvedTy
         let valueStr = exprToCppCtx ctx value
@@ -1591,7 +1469,7 @@ let genApplyCombinator (ctx: CodeGenContext) (name: string) (info: ApplyInfo) (b
             | _ -> sprintf "arr%d" i)
     
     if arrayNames.IsEmpty then
-        [sprintf "%s// Cannot generate code: no arrays in method_for" ind]
+        codegenError ctx ind (sprintf "no arrays in method_for for '%s' — kernel cannot be applied" name)
     else
         // Build LoopNestCodeGen (handles both outer product and co-iteration)
         let codeGen = buildLoopNestCodeGen info arrayNames name builder
@@ -1642,9 +1520,10 @@ let genApplyCombinator (ctx: CodeGenContext) (name: string) (info: ApplyInfo) (b
         // Combine all
         [symmVecDecl; ""; extentsDecl] @ extentsFill @ [""; allocDecl; allocInit; ""] @ loopCode
 
-/// Generate a fused loop nest with multiple kernel assignments
-/// All kernels share the same loop structure (bindings), only differ in kernel expr and output
-let genFusedLoopNest (codeGen: LoopNestCodeGen) (extraKernels: (string * IRExpr * IRParam list * CaptureInfo list) list) (outerNames: Map<int, string>) (indent: int) : string list =
+/// Generate a fused loop nest with multiple kernel assignments.
+/// All kernels share the same loop structure (bindings), only differ in kernel expr and output.
+/// Each extra kernel tuple: (outName, kernelExpr, params, captures, hasReynolds, isAntisymmetric)
+let genFusedLoopNest (codeGen: LoopNestCodeGen) (extraKernels: (string * IRExpr * IRParam list * CaptureInfo list * bool * bool) list) (outerNames: Map<int, string>) (indent: int) : string list =
     let ind n = String.replicate n "    "
     let mutable lines = []
     let mutable depth = indent
@@ -1677,19 +1556,18 @@ let genFusedLoopNest (codeGen: LoopNestCodeGen) (extraKernels: (string * IRExpr 
         |> List.map (fun b -> sprintf "[%s]" b.IndexName)
         |> String.concat ""
     
-    // First kernel assignment
+    // First kernel assignment (uses primary LoopNestCodeGen's Reynolds info)
     let nameMap0 = paramFinalNames |> Map.fold (fun acc k v -> Map.add k v acc) outerNames
     let nameMap0 = codeGen.Captures |> List.fold (fun acc c -> Map.add c.Id c.Name acc) nameMap0
-    let kernelStr0 = exprToCpp nameMap0 codeGen.KernelExpr
+    let kernelStr0 = genKernelExprWithReynolds codeGen.KernelExpr codeGen.KernelParams codeGen.HasReynolds codeGen.IsAntisymmetric nameMap0 paramFinalNames
     lines <- lines @ [ind depth + sprintf "%s%s = %s;" codeGen.OutputName outputIdx kernelStr0]
     
     // Additional kernel assignments
     // Each extra kernel has its own param VarIds that need mapping to the same peeled names.
     // We bridge via position: primary param[i].VarId → peeledName, extra param[i].VarId → same peeledName.
-    for (outName, kernelExpr, extraParams, captures) in extraKernels do
-        let extraParamMap =
+    for (outName, kernelExpr, extraParams, captures, hasReynolds, isAntisym) in extraKernels do
+        let extraParamFinalNames =
             extraParams |> List.mapi (fun i p ->
-                // Find the primary param at same position and copy its peeled name
                 match codeGen.KernelParams |> List.tryItem i with
                 | Some primaryParam ->
                     match Map.tryFind primaryParam.VarId paramFinalNames with
@@ -1698,9 +1576,9 @@ let genFusedLoopNest (codeGen: LoopNestCodeGen) (extraKernels: (string * IRExpr 
                 | None -> None)
             |> List.choose id
             |> Map.ofList
-        let nameMap = extraParamMap |> Map.fold (fun acc k v -> Map.add k v acc) outerNames
+        let nameMap = extraParamFinalNames |> Map.fold (fun acc k v -> Map.add k v acc) outerNames
         let nameMap = captures |> List.fold (fun acc c -> Map.add c.Id c.Name acc) nameMap
-        let kernelStr = exprToCpp nameMap kernelExpr
+        let kernelStr = genKernelExprWithReynolds kernelExpr extraParams hasReynolds isAntisym nameMap extraParamFinalNames
         lines <- lines @ [ind depth + sprintf "%s%s = %s;" outName outputIdx kernelStr]
     
     // Close all loops
@@ -1710,67 +1588,6 @@ let genFusedLoopNest (codeGen: LoopNestCodeGen) (extraKernels: (string * IRExpr 
     
     lines
 
-/// Generate code for mandatory fusion (<&!>) of two apply combinators
-let genFusedApply (ctx: CodeGenContext) (nameL: string) (nameR: string) (infoL: ApplyInfo) (infoR: ApplyInfo) (builder: IRBuilder) : string list =
-    let ind = indentStr ctx
-    
-    // Extract array names from the first (shared) loop
-    let arrayNames = 
-        infoL.Arrays |> List.mapi (fun i arr ->
-            match arr with
-            | IRVar (id, _) -> 
-                Map.tryFind id ctx.VarNames |> Option.defaultValue (sprintf "arr%d" i)
-            | IRRange _ -> sprintf "__range%d" i
-            | IRVirtualReverse _ -> sprintf "__rev%d" i
-            | IRBlocked _ -> sprintf "__blk%d" i
-            | _ -> sprintf "arr%d" i)
-    
-    if arrayNames.IsEmpty then
-        [sprintf "%s// Cannot generate fused code: no arrays in method_for" ind]
-    else
-        // Build LoopNestCodeGen for left side (provides loop structure)
-        let codeGenL = buildLoopNestCodeGen infoL arrayNames nameL builder
-        
-        // Extract right kernel info
-        let (kernelParamsR, kernelBodyR, _commGroupsR, capturesR) =
-            match infoR.Kernel with
-            | IRLambda lInfo -> (lInfo.Params, lInfo.Body, lInfo.CommGroups, lInfo.Captures)
-            | IRReynolds (IRLambda lInfo, _) -> (lInfo.Params, lInfo.Body, lInfo.CommGroups, lInfo.Captures)
-            | _ -> ([], IRLit IRLitUnit, [], [])
-        
-        // Build LoopNestCodeGen for right side (for its output type/allocation info)
-        let codeGenR = buildLoopNestCodeGen infoR arrayNames nameR builder
-        
-        // Generate allocations for both outputs (they share the same extents)
-        let symmVecNameL = sprintf "%s_symm" nameL
-        let symmVecDeclL = genSymmVecDecl symmVecNameL codeGenL.OutputSymmVec
-        let symmVecNameR = sprintf "%s_symm" nameR
-        let symmVecDeclR = genSymmVecDecl symmVecNameR codeGenR.OutputSymmVec
-
-        let outputRankL = match codeGenL.OutputType with IRTArray arr -> arrayRank arr | _ -> 0
-        let outputElemTypeL = match codeGenL.OutputType with IRTArray arr -> elemTypeToCpp arr.ElemType | IRTScalar et -> elemTypeToCpp et | t -> irTypeToCpp t
-        let outputRankR = match codeGenR.OutputType with IRTArray arr -> arrayRank arr | _ -> 0
-        let outputElemTypeR = match codeGenR.OutputType with IRTArray arr -> elemTypeToCpp arr.ElemType | IRTScalar et -> elemTypeToCpp et | t -> irTypeToCpp t
-        
-        let extentsName = sprintf "%s_extents" nameL
-        let extentsDecl = sprintf "%ssize_t* %s = new size_t[%d];" ind extentsName outputRankL
-        let extentsFill = 
-            codeGenL.Bindings |> List.mapi (fun i b ->
-                match b.Extent with
-                | IRLit (IRLitInt n) -> sprintf "%s%s[%d] = %d;" ind extentsName i n
-                | _ -> sprintf "%s%s[%d] = %s_extents[%d];" ind extentsName i b.ExtentArrayRef b.ExtentDimRef)
-        
-        let allocL = [
-            sprintf "%spromote<%s, %d>::type %s;" ind outputElemTypeL outputRankL nameL
-            sprintf "%s%s = allocate<typename promote<%s, %d>::type, %s>(%s);" ind nameL outputElemTypeL outputRankL symmVecNameL extentsName ]
-        let allocR = [
-            sprintf "%spromote<%s, %d>::type %s;" ind outputElemTypeR outputRankR nameR
-            sprintf "%s%s = allocate<typename promote<%s, %d>::type, %s>(%s);" ind nameR outputElemTypeR outputRankR symmVecNameR extentsName ]
-        
-        // Generate fused loop nest with both kernel assignments
-        let loopCode = genFusedLoopNest codeGenL [(nameR, kernelBodyR, kernelParamsR, capturesR)] ctx.VarNames ctx.Indent
-        
-        [symmVecDeclL; symmVecDeclR; ""; extentsDecl] @ extentsFill @ [""] @ allocL @ allocR @ [""] @ loopCode
 
 /// Generate C++ code for inline object_for application (e.g., A [+] B)
 let genObjectForApplication (ctx: CodeGenContext) (name: string) (objInfo: ObjectForInfo) (arrays: IRExpr list) (builder: IRBuilder) : string list =
@@ -1850,7 +1667,7 @@ let genObjectForApplication (ctx: CodeGenContext) (name: string) (objInfo: Objec
         
     | _ ->
         // Unsupported configuration
-        [sprintf "%s// Unsupported object_for configuration for %s" ind name]
+        codegenError ctx ind (sprintf "unsupported object_for configuration for '%s'" name)
 
 // ============================================================================
 // Binding Generation
@@ -1902,22 +1719,21 @@ let rec genParallelTree (ctx: CodeGenContext) (name: string) (expr: IRExpr) (bui
     | _ ->
         // Multiple leaves — generate each, assemble flat tuple
         let leafNames = leaves |> List.mapi (fun i _ -> sprintf "%s_%d" name i)
-        let mutable allCode = []
-        let mutable childMap = Map.empty
-        for (leaf, leafName) in List.zip leaves leafNames do
-            match leaf with
-            | IRApplyCombinator info ->
-                let code = genApplyCombinator ctx leafName info builder
-                allCode <- allCode @ code @ [""]
-            | IRVar (id, _) ->
-                let existingName = Map.tryFind id ctx.VarNames |> Option.defaultValue leafName
-                if existingName <> leafName then
-                    allCode <- allCode @ [sprintf "%sauto& %s = %s;" ind leafName existingName; ""]
-            | _ ->
-                let code = genScalarBinding ctx leafName leaf (inferExprType leaf)
-                allCode <- allCode @ code @ [""]
+        let allCode =
+            (leaves, leafNames) ||> List.map2 (fun leaf leafName ->
+                match leaf with
+                | IRApplyCombinator info ->
+                    genApplyCombinator ctx leafName info builder @ [""]
+                | IRVar (id, _) ->
+                    let existingName = Map.tryFind id ctx.VarNames |> Option.defaultValue leafName
+                    if existingName <> leafName then
+                        [sprintf "%sauto& %s = %s;" ind leafName existingName; ""]
+                    else []
+                | _ ->
+                    genScalarBinding ctx leafName leaf (inferExprType leaf) @ [""])
+            |> List.concat
         let tupleLine = sprintf "%sauto %s = std::make_tuple(%s);" ind name (leafNames |> String.concat ", ")
-        childMap <- Map.add name leafNames childMap
+        let childMap = Map.ofList [name, leafNames]
         (allCode @ [tupleLine], name, childMap)
 
 /// Collect all leaf expressions from a fusion tree in left-to-right order.
@@ -1937,7 +1753,7 @@ let rec buildPairTree (expr: IRExpr) (names: string list) : string * string list
     | _ ->
         match names with
         | n :: rest -> (n, rest)
-        | [] -> ("/* error: no name */", [])
+        | [] -> (exprError "internal: no names left in buildPairTree", [])
 
 /// Generate code for N-way mandatory fusion (<&!>).
 /// Collects all leaf ApplyCombinators, generates a single fused loop nest,
@@ -1945,34 +1761,6 @@ let rec buildPairTree (expr: IRExpr) (names: string list) : string * string list
 /// Build named pair tree from an IRExpr tree structure and a list of leaf names.
 /// Generates named intermediate std::make_pair variables for each internal node.
 /// Uses __p_ prefix for intermediates to avoid collision with leaf names.
-/// Returns (code_lines, root_name, tupleChildrenMap).
-let buildNamedPairTree (ind: string) (name: string) (expr: IRExpr) (leafNames: string list) : string list * string * Map<string, string list> =
-    let mutable leafIdx = 0
-    let mutable pairIdx = 0
-    let rec build (e: IRExpr) : string list * string * Map<string, string list> =
-        match e with
-        | IRFusion (left, right) ->
-            let (codeL, resultL, mapL) = build left
-            let (codeR, resultR, mapR) = build right
-            let pairName = sprintf "%s__p%d" name pairIdx
-            pairIdx <- pairIdx + 1
-            let pairLine = sprintf "%sauto %s = std::make_pair(%s, %s);" ind pairName resultL resultR
-            let combined = Map.fold (fun acc k v -> Map.add k v acc) mapL mapR
-            let combined = Map.add pairName [resultL; resultR] combined
-            (codeL @ codeR @ [pairLine], pairName, combined)
-        | _ ->
-            let leafName = if leafIdx < leafNames.Length then leafNames.[leafIdx] else sprintf "leaf_%d" leafIdx
-            leafIdx <- leafIdx + 1
-            ([], leafName, Map.empty)
-    let (code, rootPairName, childrenMap) = build expr
-    // Alias the root pair to the binding name
-    let aliasLine = sprintf "%sauto %s = %s;" ind name rootPairName
-    let childrenMap = Map.add name (Map.find rootPairName childrenMap) childrenMap
-    (code @ [aliasLine], name, childrenMap)
-
-/// Generate code for N-way mandatory fusion (<&!>).
-/// Collects all leaf ApplyCombinators, generates a single fused loop nest,
-/// then builds named pair tree for the result.
 /// Returns (code_lines, result_name, tupleChildrenMap).
 let genFusionTree (ctx: CodeGenContext) (name: string) (expr: IRExpr) (builder: IRBuilder) : string list * string * Map<string, string list> =
     let ind = indentStr ctx
@@ -2016,7 +1804,7 @@ let genFusionTree (ctx: CodeGenContext) (name: string) (expr: IRExpr) (builder: 
                 | _ -> sprintf "arr%d" i)
         
         if arrayNames.IsEmpty then
-            ([sprintf "%s// Cannot generate fused code: no arrays in method_for" ind], name, Map.empty)
+            (codegenError ctx ind (sprintf "no arrays in method_for for parallel/sequence '%s'" name), name, Map.empty)
         else
             // Build primary LoopNestCodeGen
             let codeGenPrimary = buildLoopNestCodeGen primaryInfo arrayNames primaryName builder
@@ -2024,12 +1812,12 @@ let genFusionTree (ctx: CodeGenContext) (name: string) (expr: IRExpr) (builder: 
             // Extract kernel info for all additional leaves
             let extraKernels = 
                 (List.tail infos, List.tail leafNames) ||> List.map2 (fun info outName ->
-                    let (kParams, kBody, _commGroups, captures) =
+                    let (kParams, kBody, _commGroups, captures, hasReynolds, isAntisym) =
                         match info.Kernel with
-                        | IRLambda lInfo -> (lInfo.Params, lInfo.Body, lInfo.CommGroups, lInfo.Captures)
-                        | IRReynolds (IRLambda lInfo, _) -> (lInfo.Params, lInfo.Body, lInfo.CommGroups, lInfo.Captures)
-                        | _ -> ([], IRLit IRLitUnit, [], [])
-                    (outName, kBody, kParams, captures))
+                        | IRLambda lInfo -> (lInfo.Params, lInfo.Body, lInfo.CommGroups, lInfo.Captures, false, false)
+                        | IRReynolds (IRLambda lInfo, isAnti) -> (lInfo.Params, lInfo.Body, lInfo.CommGroups, lInfo.Captures, true, isAnti)
+                        | _ -> ([], IRLit IRLitUnit, [], [], false, false)
+                    (outName, kBody, kParams, captures, hasReynolds, isAntisym))
             
             // Generate symm vec + extents + allocation for each output
             let allCodeGens = infos |> List.mapi (fun i info ->
@@ -2590,21 +2378,20 @@ let rec genBinding (ctx: CodeGenContext) (binding: IRBinding) (builder: IRBuilde
             // to prevent one child's output from contaminating another's array resolution.
             let n = elems.Length
             let childNames = elems |> List.mapi (fun i _ -> sprintf "%s_%d" name i)
-            let mutable allCode = []
-            let mutable mergedVarNames = ctx.VarNames
-            for (elem, childName) in List.zip elems childNames do
-                // Apply functor wrappers to each element
-                let wrappedElem =
-                    if functorWrappers.IsEmpty then elem
-                    else functorWrappers |> List.fold (fun acc w -> IRFunctorMap(w, acc)) elem
-                let childType =
-                    match wrappedElem with
-                    | IRApplyCombinator info -> info.OutputType
-                    | _ -> inferExprType wrappedElem
-                let childBinding = { Id = builder.FreshId(); Name = childName; Type = childType; Value = IRCompute wrappedElem; IsConst = true; IsMutable = false }
-                let (code, newCtx) = genBinding ctx childBinding builder
-                mergedVarNames <- Map.fold (fun acc k v -> Map.add k v acc) mergedVarNames newCtx.VarNames
-                allCode <- allCode @ code @ [""]
+            let (allCode, mergedVarNames) =
+                (elems, childNames) ||> List.map2 (fun elem childName ->
+                    let wrappedElem =
+                        if functorWrappers.IsEmpty then elem
+                        else functorWrappers |> List.fold (fun acc w -> IRFunctorMap(w, acc)) elem
+                    let childType =
+                        match wrappedElem with
+                        | IRApplyCombinator info -> info.OutputType
+                        | _ -> inferExprType wrappedElem
+                    let childBinding = { Id = builder.FreshId(); Name = childName; Type = childType; Value = IRCompute wrappedElem; IsConst = true; IsMutable = false }
+                    genBinding ctx childBinding builder)
+                |> List.fold (fun (accCode, accNames) (code, newCtx) ->
+                    (accCode @ code @ [""], Map.fold (fun a k v -> Map.add k v a) accNames newCtx.VarNames)
+                ) ([], ctx.VarNames)
             // Determine child element type and rank
             let childType = inferExprType (List.head elems)
             let (childElemType, childRank) =
@@ -2689,7 +2476,11 @@ let rec genBinding (ctx: CodeGenContext) (binding: IRBinding) (builder: IRBuilde
         // Build std::function type: std::function<RetType(P1Type, P2Type, ...)>
         let paramTypeList = info.Params |> List.map (fun p -> irTypeToCpp p.Type) |> String.concat ", "
         let funcType = sprintf "std::function<%s(%s)>" retType paramTypeList
-        let code = [sprintf "%s%s %s = [&](%s) -> %s { return %s; };" ind funcType name paramList retType bodyStr]
+        let code =
+            if isUnitExpr info.Body then
+                [sprintf "%s%s %s = [&](%s) { %s; };" ind funcType name paramList bodyStr]
+            else
+                [sprintf "%s%s %s = [&](%s) -> %s { return %s; };" ind funcType name paramList retType bodyStr]
         let ctx' = addVarName binding.Id name ctx
         // Also store IR for bind (>>=) continuation resolution
         let ctx' = { ctx' with DeferredComputations = Map.add binding.Id binding.Value ctx'.DeferredComputations }
@@ -2873,23 +2664,22 @@ let rec genBinding (ctx: CodeGenContext) (binding: IRBinding) (builder: IRBuilde
     | IRLet _ ->
         // Block expression: unroll the IRLet chain into sequential bindings
         let (lets, finalExpr) = unrollLetChain binding.Value
-        let mutable currentCtx = ctx
-        let mutable allCode = []
-        for (id, value) in lets do
-            let tempName = sprintf "__v%d" id
-            let tempBinding = {
-                Id = id; Name = tempName; Type = inferExprType value
-                Value = value; IsConst = true; IsMutable = false
-            }
-            let (code, ctx') = genBinding currentCtx tempBinding builder
-            allCode <- allCode @ code
-            currentCtx <- ctx'
+        let (allCode, foldCtx) =
+            lets |> List.fold (fun (accCode, accCtx) (id, value) ->
+                let tempName = sprintf "__v%d" id
+                let tempBinding = {
+                    Id = id; Name = tempName; Type = inferExprType value
+                    Value = value; IsConst = true; IsMutable = false
+                }
+                let (code, ctx') = genBinding accCtx tempBinding builder
+                (accCode @ code, ctx')
+            ) ([], ctx)
         // Generate the final named binding
         let finalBinding = {
             Id = binding.Id; Name = name; Type = binding.Type
             Value = finalExpr; IsConst = binding.IsConst; IsMutable = binding.IsMutable
         }
-        let (finalCode, finalCtx) = genBinding currentCtx finalBinding builder
+        let (finalCode, finalCtx) = genBinding foldCtx finalBinding builder
         (allCode @ finalCode, finalCtx)
 
     | IRAssign _ ->
@@ -2906,17 +2696,16 @@ let rec genBinding (ctx: CodeGenContext) (binding: IRBinding) (builder: IRBuilde
         let innerCtx = addVarName vid varName ctx
         // Unroll the body IRLet chain into statements
         let (bodyLets, _bodyFinal) = unrollLetChain body
-        let mutable currentCtx = innerCtx
-        let mutable bodyCode = []
-        for (id, value) in bodyLets do
-            let tempName = sprintf "__v%d" id
-            let tempBinding = {
-                Id = id; Name = tempName; Type = inferExprType value
-                Value = value; IsConst = true; IsMutable = false
-            }
-            let (code, ctx') = genBinding { currentCtx with Indent = ctx.Indent + 1 } tempBinding builder
-            bodyCode <- bodyCode @ code
-            currentCtx <- { ctx' with Indent = ctx.Indent }
+        let (bodyCode, _) =
+            bodyLets |> List.fold (fun (accCode, accCtx) (id, value) ->
+                let tempName = sprintf "__v%d" id
+                let tempBinding = {
+                    Id = id; Name = tempName; Type = inferExprType value
+                    Value = value; IsConst = true; IsMutable = false
+                }
+                let (code, ctx') = genBinding { accCtx with Indent = ctx.Indent + 1 } tempBinding builder
+                (accCode @ code, { ctx' with Indent = ctx.Indent })
+            ) ([], innerCtx)
         let code =
             [sprintf "%sfor (size_t %s = %s; %s < %s; %s++) {" ind varName loStr varName hiStr varName]
             @ bodyCode
@@ -2924,9 +2713,10 @@ let rec genBinding (ctx: CodeGenContext) (binding: IRBinding) (builder: IRBuilde
         let ctx' = addVarName binding.Id name ctx
         (code, ctx')
     
-    | _ ->
+    | other ->
         let ctx' = addVarName binding.Id name ctx
-        ([sprintf "%s// %s = <unsupported expression>" ind name], ctx')
+        let nodeType = other.GetType().Name
+        (codegenError ctx ind (sprintf "unsupported expression for binding '%s' (IR node: %s)" name nodeType), ctx')
 
 // ============================================================================
 // Module Generation
@@ -2988,12 +2778,23 @@ let genFuncBody (names: Map<IRId, string>) (indent: string) (body: IRExpr) : str
             // Skip unit literals (side effects already emitted)
             currentNames <- Map.add id varName currentNames
             []
+        | IRMethodFor _ | IRObjectFor _ ->
+            // Loop objects are compile-time only — they're resolved when <@> is processed
+            currentNames <- Map.add id varName currentNames
+            []
+        | IRApplyCombinator _ ->
+            // Unevaluated computations — deferred until |> compute forces them
+            currentNames <- Map.add id varName currentNames
+            []
         | _ ->
             let valStr = exprToCpp currentNames value
             currentNames <- Map.add id varName currentNames
             [sprintf "%sauto %s = %s;" indent varName valStr])
-    let retStr = exprToCpp currentNames retExpr
-    stmts @ [sprintf "%sreturn %s;" indent retStr]
+    if isUnitExpr retExpr then
+        stmts  // Void function: no return statement needed
+    else
+        let retStr = exprToCpp currentNames retExpr
+        stmts @ [sprintf "%sreturn %s;" indent retStr]
 
 let genFuncDef (ctx: CodeGenContext) (funcDef: IRFuncDef) : string list * CodeGenContext =
     let ind = indentStr ctx
@@ -3065,16 +2866,18 @@ let genFuncDefAsLambda (ctx: CodeGenContext) (funcDef: IRFuncDef) : string list 
             | _ -> [irTypeToCpp p.Type])
         |> String.concat ", "
     let funcType = sprintf "std::function<%s(%s)>" retType paramTypeList
-    let code = [sprintf "%s%s %s = [&](%s) -> %s { return %s; };" ind funcType safeName paramList retType bodyStr]
+    let code =
+        if isUnitExpr funcDef.Body then
+            [sprintf "%s%s %s = [&](%s) { %s; };" ind funcType safeName paramList bodyStr]
+        else
+            [sprintf "%s%s %s = [&](%s) -> %s { return %s; };" ind funcType safeName paramList retType bodyStr]
     let ctx' = addVarName funcDef.Id funcDef.Name ctx
     (code, ctx')
 
 /// Generate C++ code for an entire IR module.
 /// Returns (functionDefs, bindingCode) — functions go outside main(), bindings inside.
 let genModule (modul: IRModule) (builder: IRBuilder) : string list * string list =
-    let mutable ctx = emptyContext ()
-    let mutable funcCode = []
-    let mutable bindCode = []
+    let ctx0 = emptyContext ()
     
     // Collect constrained struct names from type definitions
     let constrainedNames = 
@@ -3082,13 +2885,13 @@ let genModule (modul: IRModule) (builder: IRBuilder) : string list * string list
             | IRTDStruct (name, _, Some _) -> Some name
             | _ -> None)
         |> Set.ofList
-    ctx <- { ctx with ConstrainedStructs = constrainedNames }
+    let ctx0 = { ctx0 with ConstrainedStructs = constrainedNames }
     
     // First pass: register ALL names (both bindings and functions) in context
-    for binding in modul.Bindings do
-        ctx <- addVarName binding.Id binding.Name ctx
-    for funcDef in modul.Functions do
-        ctx <- addVarName funcDef.Id funcDef.Name ctx
+    let ctx0 =
+        modul.Bindings |> List.fold (fun c b -> addVarName b.Id b.Name c) ctx0
+    let ctx0 =
+        modul.Functions |> List.fold (fun c f -> addVarName f.Id f.Name c) ctx0
     
     // Build a combined list of items with their "order" based on ID
     // Lower IDs were created earlier in the source
@@ -3101,103 +2904,59 @@ let genModule (modul: IRModule) (builder: IRBuilder) : string list * string list
     
     // Generate in ID order (approximates source order)
     // First, collect file-scope functions to generate forward declarations
-    let fileScopeFuncs = ResizeArray<IRFuncDef>()
-    for (_, item) in allItems do
-        match item with
-        | Choice2Of2 funcDef ->
-            let paramIds = funcDef.Params |> List.map (fun p -> p.VarId) |> Set.ofList
-            // Exclude self-reference AND other function IDs from free var check
-            let freeVars = Set.difference (collectVarRefs funcDef.Body) (Set.union paramIds funcIds)
-            let hasFreeVars = freeVars |> Set.exists (fun id -> Map.containsKey id ctx.VarNames)
-            if not hasFreeVars then fileScopeFuncs.Add(funcDef)
-        | _ -> ()
+    let hasFreeVarsCheck (funcDef: IRFuncDef) (c: CodeGenContext) =
+        let paramIds = funcDef.Params |> List.map (fun p -> p.VarId) |> Set.ofList
+        let freeVars = Set.difference (collectVarRefs funcDef.Body) (Set.union paramIds funcIds)
+        freeVars |> Set.exists (fun id -> Map.containsKey id c.VarNames)
+    
+    let fileScopeFuncs =
+        allItems |> List.choose (fun (_, item) ->
+            match item with
+            | Choice2Of2 funcDef when not (hasFreeVarsCheck funcDef ctx0) -> Some funcDef
+            | _ -> None)
     
     // Generate forward declarations for all file-scope functions
-    for funcDef in fileScopeFuncs do
-        let paramList = 
-            funcDef.Params 
-            |> List.collect (fun p -> 
-                match p.Type with
-                | IRTArray _ ->
-                    [sprintf "%s %s" (irTypeToCpp p.Type) p.Name
-                     sprintf "const size_t* %s_extents" p.Name]
-                | _ ->
-                    [sprintf "%s %s" (irTypeToCpp p.Type) p.Name])
-            |> String.concat ", "
-        let retType = 
-            match funcDef.RetType with
-            | IRTInfer _ -> irTypeToCpp (inferExprType funcDef.Body)
-            | t -> irTypeToCpp t
-        let safeName = sanitizeCppName funcDef.Name
-        funcCode <- funcCode @ [sprintf "%s %s(%s);" retType safeName paramList]
-    if fileScopeFuncs.Count > 0 then funcCode <- funcCode @ [""]
+    let forwardDecls =
+        fileScopeFuncs |> List.map (fun funcDef ->
+            let paramList = 
+                funcDef.Params 
+                |> List.collect (fun p -> 
+                    match p.Type with
+                    | IRTArray _ ->
+                        [sprintf "%s %s" (irTypeToCpp p.Type) p.Name
+                         sprintf "const size_t* %s_extents" p.Name]
+                    | _ ->
+                        [sprintf "%s %s" (irTypeToCpp p.Type) p.Name])
+                |> String.concat ", "
+            let retType = 
+                match funcDef.RetType with
+                | IRTInfer _ -> irTypeToCpp (inferExprType funcDef.Body)
+                | t -> irTypeToCpp t
+            let safeName = sanitizeCppName funcDef.Name
+            sprintf "%s %s(%s);" retType safeName paramList)
+    let forwardDecls = if forwardDecls.IsEmpty then [] else forwardDecls @ [""]
     
-    for (_, item) in allItems do
-        match item with
-        | Choice1Of2 binding ->
-            let (code, ctx') = genBinding ctx binding builder
-            bindCode <- bindCode @ code @ [""]
-            ctx <- ctx'
-        | Choice2Of2 funcDef ->
-            // Check if function has free variables (references to module bindings)
-            let paramIds = funcDef.Params |> List.map (fun p -> p.VarId) |> Set.ofList
-            // Exclude self-reference AND other function IDs from free var check
-            let freeVars = Set.difference (collectVarRefs funcDef.Body) (Set.union paramIds funcIds)
-            let hasFreeVars = freeVars |> Set.exists (fun id -> Map.containsKey id ctx.VarNames)
-            
-            if hasFreeVars then
-                // Generate as C++ lambda inside main() (captures module bindings)
-                let (code, ctx') = genFuncDefAsLambda ctx funcDef
-                bindCode <- bindCode @ code @ [""]
-                ctx <- ctx'
-            else
-                // Pure function — generate at file scope
-                let (code, ctx') = genFuncDef ctx funcDef
-                funcCode <- funcCode @ code @ [""]
-                ctx <- ctx'
+    let (funcCode, bindCode, finalCtx) =
+        allItems |> List.fold (fun (fc, bc, c) (_, item) ->
+            match item with
+            | Choice1Of2 binding ->
+                let (code, c') = genBinding c binding builder
+                (fc, bc @ code @ [""], c')
+            | Choice2Of2 funcDef ->
+                if hasFreeVarsCheck funcDef c then
+                    let (code, c') = genFuncDefAsLambda c funcDef
+                    (fc, bc @ code @ [""], c')
+                else
+                    let (code, c') = genFuncDef c funcDef
+                    (fc @ code @ [""], bc, c')
+        ) (forwardDecls, [], ctx0)
+    
+    // Merge context warnings into module-level collector
+    exprWarnings.Value <- exprWarnings.Value @ finalCtx.Warnings.Value
     
     (funcCode, bindCode)
 
 /// Generate a complete C++ program with main() from an IR module
-let genMainProgram (modul: IRModule) (testName: string) : string =
-    let builder = IRBuilder()
-    
-    let includes = genIncludes ()
-    let (funcDefs, bindCode) = genModule modul builder
-    
-    let bodyIndented = bindCode |> List.map (fun s -> "    " + s)
-    
-    let mainFunc = 
-        ["int main() {"
-         "    cout << std::setprecision(15);"
-         "    auto start = TIME;"
-         ""]
-        @ bodyIndented
-        @ [""
-           "    auto end = TIME;"
-           "    double elapsed = 1e-9 * TIME_DIFF;"
-           sprintf "    cout << \"%s completed in \" << elapsed << \"s\" << endl;" testName
-           "    return 0;"
-           "}"]
-    
-    (includes @ [""] @ funcDefs @ mainFunc) |> String.concat "\n"
-
-/// Generate a complete C++ program from an IR program (all modules)
-let genProgramFromIR (program: IRProgram) (testName: string) : string =
-    match program.Modules with
-    | [] -> "// Empty program\nint main() { return 0; }\n"
-    | [modul] -> genMainProgram modul testName
-    | modules ->
-        let merged = {
-            Name = "merged"
-            Types = modules |> List.collect (fun m -> m.Types)
-            Functions = modules |> List.collect (fun m -> m.Functions)
-            Bindings = modules |> List.collect (fun m -> m.Bindings)
-            StaticFunctionUsage = Map.empty
-        }
-        genMainProgram merged testName
-
-/// Generate C++ struct definition from IRTDStruct
 let genStructDef (name: string) (fields: (string * IRType) list) (invariant: StructConstraintInfo option) : string list =
     let fieldLines = fields |> List.map (fun (fname, fty) ->
         sprintf "    %s %s;" (irTypeToCpp fty) fname)
@@ -3267,45 +3026,55 @@ let genPrintScalar (name: string) : string list =
 /// Generate code to print an array value (flattened for easy parsing)
 let genPrintArrayFlat (name: string) (rank: int) : string list =
     let firstVar = sprintf "%s__first" name
-    if rank = 1 then
-        [
+    if rank < 1 then
+        [sprintf "    cout << \"%s = <rank-0>\" << endl;" name]
+    elif rank <= 3 then
+        // Ranks 1-3: flat comma-separated output
+        let loopVars = [| "i"; "j"; "k" |]
+        let opens = [
             sprintf "    cout << \"%s = [\";" name
-            sprintf "    for (size_t i = 0; i < %s_extents[0]; i++) {" name
-            sprintf "        if (i > 0) cout << \", \";"
-            sprintf "        cout << %s[i];" name
-            "    }"
-            sprintf "    cout << \"]\" << endl;"
-        ]
-    elif rank = 2 then
+            sprintf "    bool %s = true;" firstVar ]
+        let loops =
+            [ for d in 0 .. rank - 1 ->
+                sprintf "    %sfor (size_t %s = 0; %s < %s_extents[%d]; %s++) {"
+                    (String.replicate d "    ") loopVars.[d] loopVars.[d] name d loopVars.[d] ]
+        let inner =
+            let ind = "    " + String.replicate rank "    "
+            let idx = loopVars.[0..rank-1] |> Array.map (sprintf "[%s]") |> String.concat ""
+            [ sprintf "%sif (!%s) cout << \", \";" ind firstVar
+              sprintf "%s%s = false;" ind firstVar
+              sprintf "%scout << %s%s;" ind name idx ]
+        let closes =
+            [ for d in rank - 1 .. -1 .. 0 ->
+                sprintf "    %s}" (String.replicate d "    ") ]
+        let finish = [ sprintf "    cout << \"]\" << endl;" ]
+        opens @ loops @ inner @ closes @ finish
+    elif rank = 4 then
+        // Rank 4: 2D grid of 2D blocks
+        // Print as: name[i][j] = [ row0; row1; ... ] for each (i,j)
         [
-            sprintf "    cout << \"%s = [\";" name
-            sprintf "    bool %s = true;" firstVar
+            sprintf "    cout << \"%s (\" << %s_extents[0] << \"x\" << %s_extents[1] << \"x\" << %s_extents[2] << \"x\" << %s_extents[3] << \"):\" << endl;"
+                name name name name name
             sprintf "    for (size_t i = 0; i < %s_extents[0]; i++) {" name
             sprintf "        for (size_t j = 0; j < %s_extents[1]; j++) {" name
-            sprintf "            if (!%s) cout << \", \";" firstVar
-            sprintf "            %s = false;" firstVar
-            sprintf "            cout << %s[i][j];" name
-            "        }"
-            "    }"
-            sprintf "    cout << \"]\" << endl;"
-        ]
-    elif rank = 3 then
-        [
-            sprintf "    cout << \"%s = [\";" name
-            sprintf "    bool %s = true;" firstVar
-            sprintf "    for (size_t i = 0; i < %s_extents[0]; i++) {" name
-            sprintf "        for (size_t j = 0; j < %s_extents[1]; j++) {" name
+            sprintf "            cout << \"  %s[\" << i << \"][\" << j << \"] = [\";" name
+            sprintf "            bool %s = true;" firstVar
             sprintf "            for (size_t k = 0; k < %s_extents[2]; k++) {" name
-            sprintf "                if (!%s) cout << \", \";" firstVar
-            sprintf "                %s = false;" firstVar
-            sprintf "                cout << %s[i][j][k];" name
+            sprintf "                for (size_t l = 0; l < %s_extents[3]; l++) {" name
+            sprintf "                    if (!%s) cout << \", \";" firstVar
+            sprintf "                    %s = false;" firstVar
+            sprintf "                    cout << %s[i][j][k][l];" name
+            "                }"
             "            }"
+            sprintf "            cout << \"]\" << endl;"
             "        }"
             "    }"
-            sprintf "    cout << \"]\" << endl;"
         ]
     else
-        [sprintf "    // Print not implemented for rank %d arrays" rank]
+        // Rank 5+: just print total size and first few elements
+        [
+            sprintf "    cout << \"%s = <rank-%d array>\" << endl;" name rank
+        ]
 
 /// Generate print loop for triangular arrays (left-justified)
 let genPrintArrayTriangular (name: string) (rank: int) : string list =
@@ -3338,46 +3107,152 @@ let genPrintArrayTriangular (name: string) (rank: int) : string list =
             "    }"
             sprintf "    cout << \"]\" << endl;"
         ]
+    elif rank = 4 then
+        // 2D grid of 2D triangular blocks
+        [
+            sprintf "    cout << \"%s (triangular rank-4):\" << endl;" name
+            sprintf "    for (size_t i = 0; i < %s_extents[0]; i++) {" name
+            sprintf "        for (size_t j = 0; j < %s_extents[1] - i; j++) {" name
+            sprintf "            cout << \"  %s[\" << i << \"][\" << j << \"] = [\";" name
+            sprintf "            bool %s = true;" firstVar
+            sprintf "            for (size_t k = 0; k < %s_extents[2] - i - j; k++) {" name
+            sprintf "                for (size_t l = 0; l < %s_extents[3] - i - j - k; l++) {" name
+            sprintf "                    if (!%s) cout << \", \";" firstVar
+            sprintf "                    %s = false;" firstVar
+            sprintf "                    cout << %s[i][j][k][l];" name
+            "                }"
+            "            }"
+            sprintf "            cout << \"]\" << endl;"
+            "        }"
+            "    }"
+        ]
     else
         genPrintArrayFlat name rank  // Fall back for other ranks
 
 /// Compute which binding IDs are deferred (no C++ code generated).
 /// A binding is deferred if it's a computation that hasn't been materialized via |> compute.
 let computeDeferredIds (bindings: IRBinding list) : Set<int> =
-    let mutable ids = Set.empty
-    let isDeferred e =
+    let isDeferred (ids: Set<int>) (e: IRExpr) =
         match e with
         | IRApplyCombinator _ | IRParallel _ | IRFusion _ | IRFunctorMap _ | IRChoice _ | IRComposeObj _ | IRComposeMeth _ | IRBind _ | IRZip _ | IRSequence _ -> true
         | IRVar (id, _) -> Set.contains id ids
         | _ -> false
-    for b in bindings do
-        match b.Value with
-        | IRApplyCombinator _ | IRParallel _ | IRFusion _ -> ids <- Set.add b.Id ids
-        | IRZip _ -> ids <- Set.add b.Id ids  // zip is lazy, absorbed by method_for
-        | IRComposeObj _ -> ids <- Set.add b.Id ids  // ObjectLoop composition, deferred until <@>
-        | IRBind (comp, _) ->
-            if isDeferred comp then ids <- Set.add b.Id ids
-        | IRComposeMeth (left, right) ->
-            if isDeferred left || isDeferred right then ids <- Set.add b.Id ids
-        | IRFunctorMap (_, inner) ->
-            if isDeferred inner then ids <- Set.add b.Id ids
-        | IRChoice (left, right) ->
-            if isDeferred left || isDeferred right then ids <- Set.add b.Id ids
-        | IRGuard (_, body) ->
-            let rec leafIsDeferred e =
-                match e with
-                | IRGuard (_, inner) -> leafIsDeferred inner
-                | _ -> isDeferred e
-            if leafIsDeferred body then ids <- Set.add b.Id ids
-        | IRSequence elems ->
-            if elems |> List.exists isDeferred then ids <- Set.add b.Id ids
-        | IRTuple elems when elems |> List.forall isDeferred -> ids <- Set.add b.Id ids
-        | IRTupleProj (IRVar (pid, _), _, _) when Set.contains pid ids -> ids <- Set.add b.Id ids
-        | IRVar (srcId, _) when Set.contains srcId ids -> ids <- Set.add b.Id ids
-        | _ -> ()
-    ids
+    bindings |> List.fold (fun ids b ->
+        let shouldDefer =
+            match b.Value with
+            | IRApplyCombinator _ | IRParallel _ | IRFusion _ -> true
+            | IRZip _ -> true
+            | IRComposeObj _ -> true
+            | IRBind (comp, _) -> isDeferred ids comp
+            | IRComposeMeth (left, right) -> isDeferred ids left || isDeferred ids right
+            | IRFunctorMap (_, inner) -> isDeferred ids inner
+            | IRChoice (left, right) -> isDeferred ids left || isDeferred ids right
+            | IRGuard (_, body) ->
+                let rec leafIsDeferred e =
+                    match e with
+                    | IRGuard (_, inner) -> leafIsDeferred inner
+                    | _ -> isDeferred ids e
+                leafIsDeferred body
+            | IRSequence elems -> elems |> List.exists (isDeferred ids)
+            | IRTuple elems -> elems |> List.forall (isDeferred ids)
+            | IRTupleProj (IRVar (pid, _), _, _) -> Set.contains pid ids
+            | IRVar (srcId, _) -> Set.contains srcId ids
+            | _ -> false
+        if shouldDefer then Set.add b.Id ids else ids
+    ) Set.empty
+
+let genPrintStatements (modul: IRModule) : string list =
+    let deferredIds = computeDeferredIds modul.Bindings
+    modul.Bindings |> List.collect (fun b ->
+        let isPrintable = 
+            if Set.contains b.Id deferredIds then false
+            else
+            match b.Value with
+            | IRCompute (IRApplyCombinator _) -> true
+            | IRCompute (IRParallel _) -> true
+            | IRCompute (IRFusion _) -> true
+            | IRCompute (IRVar _) -> true
+            | IRCompute (IRFunctorMap _) -> true
+            | IRCompute (IRChoice _) -> true
+            | IRCompute (IRComposeMeth _) -> true
+            | IRCompute (IRBind _) -> true
+            | IRCompute (IRGuard _) -> true
+            | IRCompute (IRSequence _) -> true
+            | IRCompute _ | IRMethodFor _ | IRObjectFor _ | IRLambda _ -> false
+            | _ -> true
+        
+        let hasSymmetry =
+            match IR.stripUnits b.Type with
+            | IRTArray arr ->
+                arr.IndexTypes |> List.exists (fun idx ->
+                    idx.Symmetry = SymSymmetric || idx.Symmetry = SymAntisymmetric)
+            | _ -> false
+        
+        if isPrintable then
+            match IR.stripUnits b.Type with
+            | IRTScalar (ETFloat64 | ETFloat32 | ETInt64 | ETInt32 | ETBool) ->
+                genPrintScalar b.Name
+            | IRTArray arrType ->
+                let rank = arrayRank arrType
+                if hasSymmetry && rank >= 2 && rank <= 4 then
+                    genPrintArrayTriangular b.Name rank
+                else
+                    genPrintArrayFlat b.Name rank
+            | IRTTuple _ -> []
+            | IRTNamed _ -> []
+            | IRTUnit -> []
+            | _ -> []
+        else []
+    )
+
+/// Assemble the main() function wrapper around binding code and print statements.
+let genMainWrapper (testName: string) (bodyIndented: string list) (printCode: string list) : string list =
+    ["int main() {"
+     "    cout << std::setprecision(15);"
+     "    auto start = TIME;"
+     ""]
+    @ bodyIndented
+    @ [""
+       "    auto end = TIME;"
+       "    double elapsed = 1e-9 * TIME_DIFF;"
+       sprintf "    cout << \"%s completed in \" << elapsed << \"s\" << endl;" testName
+       ""
+       "    // Print results for verification"]
+    @ printCode
+    @ [""
+       "    return 0;"
+       "}"]
 
 /// Generate a C++ program (uses external runtime header)
+/// Generate print statements for all bindings in a module.
+/// Shared by genSelfContainedProgram and genProgramWithExternalRuntime.
+let genMainProgram (modul: IRModule) (testName: string) : string =
+    let builder = IRBuilder()
+    
+    let includes = genIncludes ()
+    let (funcDefs, bindCode) = genModule modul builder
+    
+    let bodyIndented = bindCode |> List.map (fun s -> "    " + s)
+    let mainFunc = genMainWrapper testName bodyIndented []
+    
+    (includes @ [""] @ funcDefs @ mainFunc) |> String.concat "\n"
+
+/// Generate a complete C++ program from an IR program (all modules)
+let genProgramFromIR (program: IRProgram) (testName: string) : string =
+    match program.Modules with
+    | [] -> "// Empty program\nint main() { return 0; }\n"
+    | [modul] -> genMainProgram modul testName
+    | modules ->
+        let merged = {
+            Name = "merged"
+            Types = modules |> List.collect (fun m -> m.Types)
+            Functions = modules |> List.collect (fun m -> m.Functions)
+            Bindings = modules |> List.collect (fun m -> m.Bindings)
+            StaticFunctionUsage = Map.empty
+        }
+        genMainProgram merged testName
+
+/// Generate C++ struct definition from IRTDStruct
 let genSelfContainedProgram (modul: IRModule) (testName: string) : string =
     let builder = IRBuilder()
     
@@ -3386,81 +3261,8 @@ let genSelfContainedProgram (modul: IRModule) (testName: string) : string =
     let (funcDefs, bindCode) = genModule modul builder
     
     let bodyIndented = bindCode |> List.map (fun s -> "    " + s)
-    
-    // Generate print statements for all bindings
-    // Only print bindings that generate actual printable C++ variables
-    // Determine which bindings are deferred (no C++ code generated)
-    let deferredIds = computeDeferredIds modul.Bindings
-
-    let printCode = 
-        modul.Bindings |> List.collect (fun b ->
-            // Determine if this binding generates a printable variable
-            let isPrintable = 
-                if Set.contains b.Id deferredIds then false
-                else
-                match b.Value with
-                // These generate actual arrays via IRCompute
-                | IRCompute (IRApplyCombinator _) -> true
-                | IRCompute (IRParallel _) -> true   // generates pair of arrays
-                | IRCompute (IRFusion _) -> true      // generates pair of arrays
-                | IRCompute (IRVar _) -> true         // resolves deferred at codegen time
-                | IRCompute (IRFunctorMap _) -> true  // functor map over computation
-                | IRCompute (IRChoice _) -> true      // choice between computations
-                | IRCompute (IRComposeMeth _) -> true // @>> sequential composition
-                | IRCompute (IRBind _) -> true       // >>= monadic bind
-                | IRCompute (IRGuard _) -> true      // guard(p, c) conditional computation
-                | IRCompute (IRSequence _) -> true   // sequence(c1, ..., cn) flat parallel
-                // These don't generate runtime variables
-                | IRCompute _ | IRMethodFor _ | IRObjectFor _ | IRLambda _ -> false
-                // Simple values are printable
-                | _ -> true
-            
-            // Check if result has symmetry (triangular storage)
-            let hasSymmetry =
-                match IR.stripUnits b.Type with
-                | IRTArray arr ->
-                    arr.IndexTypes |> List.exists (fun idx ->
-                        idx.Symmetry = SymSymmetric || idx.Symmetry = SymAntisymmetric)
-                | _ -> false
-            
-            if isPrintable then
-                match IR.stripUnits b.Type with
-                | IRTScalar (ETFloat64 | ETFloat32 | ETInt64 | ETInt32 | ETBool) ->
-                    genPrintScalar b.Name
-                | IRTArray arrType ->
-                    let rank = arrayRank arrType
-                    if hasSymmetry && (rank = 2 || rank = 3) then
-                        genPrintArrayTriangular b.Name rank
-                    else
-                        genPrintArrayFlat b.Name rank
-                | IRTTuple _ ->
-                    // For tuples, skip for now
-                    []
-                | IRTNamed _ ->
-                    // For structs, skip for now
-                    []
-                | IRTUnit ->
-                    []
-                | _ -> []
-            else []
-        )
-    
-    let mainFunc = 
-        ["int main() {"
-         "    cout << std::setprecision(15);"
-         "    auto start = TIME;"
-         ""]
-        @ bodyIndented
-        @ [""
-           "    auto end = TIME;"
-           "    double elapsed = 1e-9 * TIME_DIFF;"
-           sprintf "    cout << \"%s completed in \" << elapsed << \"s\" << endl;" testName
-           ""
-           "    // Print results for verification"]
-        @ printCode
-        @ [""
-           "    return 0;"
-           "}"]
+    let printCode = genPrintStatements modul
+    let mainFunc = genMainWrapper testName bodyIndented printCode
     
     (includes @ typeDefs @ [""] @ funcDefs @ mainFunc) |> String.concat "\n"
 
@@ -3474,175 +3276,31 @@ let genProgramWithExternalRuntime (modul: IRModule) (testName: string) : string 
     let (funcDefs, bindCode) = genModule modul builder
     
     let bodyIndented = bindCode |> List.map (fun s -> "    " + s)
-    
-    // Generate print statements for all bindings
-    let deferredIds = computeDeferredIds modul.Bindings
-    let printCode = 
-        modul.Bindings |> List.collect (fun b ->
-            let isPrintable = 
-                if Set.contains b.Id deferredIds then false
-                else
-                match b.Value with
-                | IRCompute (IRApplyCombinator _) -> true
-                | IRCompute (IRParallel _) -> true
-                | IRCompute (IRFusion _) -> true
-                | IRCompute (IRVar _) -> true  // resolves deferred at codegen time
-                | IRCompute (IRFunctorMap _) -> true  // functor map over computation
-                | IRCompute (IRChoice _) -> true      // choice between computations
-                | IRCompute (IRComposeMeth _) -> true // @>> sequential composition
-                | IRCompute (IRBind _) -> true       // >>= monadic bind
-                | IRCompute (IRGuard _) -> true      // guard(p, c) conditional computation
-                | IRCompute (IRSequence _) -> true   // sequence(c1, ..., cn) flat parallel
-                | IRCompute _ | IRMethodFor _ | IRObjectFor _ | IRLambda _ -> false
-                | _ -> true
-            
-            // Check if result has symmetry (triangular storage)
-            let hasSymmetry =
-                match IR.stripUnits b.Type with
-                | IRTArray arr ->
-                    arr.IndexTypes |> List.exists (fun idx ->
-                        idx.Symmetry = SymSymmetric || idx.Symmetry = SymAntisymmetric)
-                | _ -> false
-            
-            if isPrintable then
-                match IR.stripUnits b.Type with
-                | IRTScalar (ETFloat64 | ETFloat32 | ETInt64 | ETInt32 | ETBool) ->
-                    genPrintScalar b.Name
-                | IRTArray arrType ->
-                    let rank = arrayRank arrType
-                    if hasSymmetry && (rank = 2 || rank = 3) then
-                        genPrintArrayTriangular b.Name rank
-                    else
-                        genPrintArrayFlat b.Name rank
-                | IRTTuple _ ->
-                    // For tuples, skip for now
-                    []
-                | IRTNamed _ ->
-                    // For structs, skip for now
-                    []
-                | IRTUnit ->
-                    []
-                | _ -> []
-            else []
-        )
-    
-    let mainFunc = 
-        ["int main() {"
-         "    cout << std::setprecision(15);"
-         "    auto start = TIME;"
-         ""]
-        @ bodyIndented
-        @ [""
-           "    auto end = TIME;"
-           "    double elapsed = 1e-9 * TIME_DIFF;"
-           sprintf "    cout << \"%s completed in \" << elapsed << \"s\" << endl;" testName
-           ""
-           "    // Print results for verification"]
-        @ printCode
-        @ [""
-           "    return 0;"
-           "}"]
+    let printCode = genPrintStatements modul
+    let mainFunc = genMainWrapper testName bodyIndented printCode
     
     let mainFile = (includes @ typeDefs @ [""] @ funcDefs @ mainFunc) |> String.concat "\n"
     let headerFile = genRuntimeHeader ()
     (mainFile, headerFile)
 
 /// Generate a self-contained C++ program from an IR program
-let genSelfContainedProgramFromIR (program: IRProgram) (testName: string) : string =
-    match program.Modules with
-    | [] -> "// Empty program\nint main() { return 0; }\n"
-    | [modul] -> genSelfContainedProgram modul testName
-    | modules ->
-        // Multi-module: merge all modules into one for code generation
-        // Functions and bindings from earlier modules come first
-        let merged = {
-            Name = "merged"
-            Types = modules |> List.collect (fun m -> m.Types)
-            Functions = modules |> List.collect (fun m -> m.Functions)
-            Bindings = modules |> List.collect (fun m -> m.Bindings)
-            StaticFunctionUsage = modules |> List.fold (fun acc m -> 
-                Map.fold (fun a k v -> Map.add k v a) acc m.StaticFunctionUsage) Map.empty
-        }
-        genSelfContainedProgram merged testName
-
-// ============================================================================
-// Verification Helpers
-// ============================================================================
-
-/// Generate C++ code that prints array values for verification
-let genPrintArray (ctx: CodeGenContext) (name: string) (arrType: IRArrayType) : string list =
-    let ind = indentStr ctx
-    let rank = arrayRank arrType
-    
-    if rank = 1 then
-        [
-            sprintf "%scout << \"%s = [\";" ind name
-            sprintf "%sfor (size_t i = 0; i < %s_extents[0]; i++) {" ind name
-            sprintf "%s    if (i > 0) cout << \", \";" ind
-            sprintf "%s    cout << %s[i];" ind name
-            sprintf "%s}" ind
-            sprintf "%scout << \"]\" << endl;" ind
-        ]
-    elif rank = 2 then
-        [
-            sprintf "%scout << \"%s = [\" << endl;" ind name
-            sprintf "%sfor (size_t i = 0; i < %s_extents[0]; i++) {" ind name
-            sprintf "%s    cout << \"  [\";" ind
-            sprintf "%s    for (size_t j = 0; j < %s_extents[1]; j++) {" ind name
-            sprintf "%s        if (j > 0) cout << \", \";" ind
-            sprintf "%s        cout << %s[i][j];" ind name
-            sprintf "%s    }" ind
-            sprintf "%s    cout << \"]\" << endl;" ind
-            sprintf "%s}" ind
-            sprintf "%scout << \"]\" << endl;" ind
-        ]
-    else
-        [sprintf "%s// Print not implemented for rank %d arrays" ind rank]
-
-/// Generate a test program that prints results
-let genTestProgram (modul: IRModule) (testName: string) : string =
-    let builder = IRBuilder()
-    let mutable ctx = emptyContext ()
-    
-    let includes = genIncludes ()
-    
-    // Collect array bindings to print at the end
-    let mutable arrayBindings = []
-    let mutable allCode = []
-    
-    for binding in modul.Bindings do
-        let (code, ctx') = genBinding ctx binding builder
-        allCode <- allCode @ code @ [""]
-        ctx <- ctx'
-        
-        // Track array bindings for printing
-        match binding.Type with
-        | IRTArray arrType -> arrayBindings <- arrayBindings @ [(binding.Name, arrType)]
-        | _ -> ()
-    
-    // Generate print code for arrays
-    let printCode = 
-        arrayBindings |> List.collect (fun (name, arrType) ->
-            genPrintArray ctx name arrType @ [""])
-    
-    let codeIndented = allCode |> List.map (fun s -> "    " + s)
-    let printIndented = printCode |> List.map (fun s -> "    " + s)
-    
-    let mainFunc = 
-        ["int main() {"
-         "    cout << std::setprecision(15);"
-         "    auto start = TIME;"
-         ""]
-        @ codeIndented
-        @ [""
-           "    auto end = TIME;"
-           "    double elapsed = 1e-9 * TIME_DIFF;"
-           sprintf "    cout << \"%s completed in \" << elapsed << \"s\" << endl;" testName
-           ""
-           "    // Print results"]
-        @ printIndented
-        @ [""
-           "    return 0;"
-           "}"]
-    
-    (includes @ mainFunc) |> String.concat "\n"
+let genSelfContainedProgramFromIR (program: IRProgram) (testName: string) : string * string list =
+    // Reset module-level expression warnings
+    exprWarnings.Value <- []
+    let code =
+        match program.Modules with
+        | [] -> "// Empty program\nint main() { return 0; }\n"
+        | [modul] -> genSelfContainedProgram modul testName
+        | modules ->
+            // Multi-module: merge all modules into one for code generation
+            // Functions and bindings from earlier modules come first
+            let merged = {
+                Name = "merged"
+                Types = modules |> List.collect (fun m -> m.Types)
+                Functions = modules |> List.collect (fun m -> m.Functions)
+                Bindings = modules |> List.collect (fun m -> m.Bindings)
+                StaticFunctionUsage = modules |> List.fold (fun acc m -> 
+                    Map.fold (fun a k v -> Map.add k v a) acc m.StaticFunctionUsage) Map.empty
+            }
+            genSelfContainedProgram merged testName
+    (code, exprWarnings.Value)
