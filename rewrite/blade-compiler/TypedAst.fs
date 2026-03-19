@@ -245,7 +245,7 @@ and TypedPatternKind =
     | TPatLit of Literal
     | TPatTuple of TypedPattern list
     | TPatCons of TypedPattern * TypedPattern
-    | TPatVariant of tag: string * payload: TypedPattern option
+    | TPatVariant of tag: string * payload: TypedPattern option * isEnum: bool
     | TPatStruct of typeName: string * fields: (string * TypedPattern) list
     | TPatGuarded of TypedPattern * TypedExpr
 
