@@ -214,10 +214,10 @@ a
 12
 ```
 
-The opposite is `const`, which tells the compiler that this value can never change. This means that reassigning the variable in its scope will error.
+The opposite is `static`, which tells the compiler that this value can never change. This means that reassigning the variable in its scope will error.
 
 ```F#
-let const a = 2
+let static a = 2
 function tryToChange(a: T^0) = {
     a + 10
 }
