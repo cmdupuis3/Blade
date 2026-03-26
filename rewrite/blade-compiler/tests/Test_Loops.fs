@@ -14,7 +14,8 @@ let test6_apply = """
 let A = [1.0, 2.0, 3.0]
 let L = method_for(A, A)
 let f = lambda(x, y) -> x * y
-let result = L <@> f
+let result = L <@> f |> compute
+// EXPECT: result = [1, 2, 3, 2, 4, 6, 3, 6, 9]
 """
 
 let test9_loopObjectReuse = """
@@ -23,8 +24,10 @@ let B = [4.0, 5.0, 6.0]
 let L = method_for(A, B)
 let sum = lambda(x, y) -> x + y
 let prod = lambda(x, y) -> x * y
-let sumResult = L <@> sum
-let prodResult = L <@> prod
+let sumResult = L <@> sum |> compute
+let prodResult = L <@> prod |> compute
+// EXPECT: sumResult = [5, 6, 7, 6, 7, 8, 7, 8, 9]
+// EXPECT: prodResult = [4, 5, 6, 8, 10, 12, 12, 15, 18]
 """
 
 let test11_objectForWithArrays = """
@@ -39,14 +42,16 @@ let A = [1.0, 2.0, 3.0]
 let B = [4.0, 5.0, 6.0]
 let f = lambda(x, y) -> x + y
 let O = object_for(f)
-let result = O <@> (A, B)
+let result = O <@> (A, B) |> compute
+// EXPECT: result = [5, 6, 7, 6, 7, 8, 7, 8, 9]
 """
 
 let test24_objectForComm = """
 let A = [1.0, 2.0, 3.0]
 let f = lambda(x, y) where comm(x, y) -> x * y
 let O = object_for(f)
-let result = O <@> (A, A)
+let result = O <@> (A, A) |> compute
+// EXPECT: result = [1, 2, 3, 4, 6, 9]
 """
 
 let test16_combinators = """
@@ -96,7 +101,8 @@ let test79_rangeWithArray = """
 let A = [10.0, 20.0, 30.0]
 let L = method_for(A, range<Idx<3>>)
 let f = lambda(a, i) -> a + i
-let result = L <@> f
+let result = L <@> f |> compute
+// EXPECT: result = [10, 11, 12, 20, 21, 22, 30, 31, 32]
 """
 
 // Co-iteration: elementwise product via shared index space
@@ -104,7 +110,8 @@ let test80_coIterBasic = """
 // Co-iteration: for (A, B) in range<Idx<N>> produces elementwise result
 let A = [1.0, 2.0, 3.0]
 let B = [4.0, 5.0, 6.0]
-let result = for (A, B) in range<Idx<3>> <@> lambda(a, b) -> a * b
+let result = for (A, B) in range<Idx<3>> <@> lambda(a, b) -> a * b |> compute
+// EXPECT: result = [4, 10, 18]
 """
 
 // Co-iteration: three-way elementwise operation
@@ -113,7 +120,8 @@ let test81_coIter3Way = """
 let A = [1.0, 2.0, 3.0]
 let B = [4.0, 5.0, 6.0]
 let C = [7.0, 8.0, 9.0]
-let result = for (A, B, C) in range<Idx<3>> <@> lambda(a, b, c) -> a * b + c
+let result = for (A, B, C) in range<Idx<3>> <@> lambda(a, b, c) -> a * b + c |> compute
+// EXPECT: result = [11, 18, 27]
 """
 
 let test82_composeBasic = """
@@ -497,6 +505,29 @@ let result = O <@> zip(A, B, C) |> compute
 // EXPECT: result = [111, 222, 333]
 """
 
+// ============================================================================
+// Pipe precedence: verify |> compute binds outside lambda body
+// ============================================================================
+
+let test120_pipePrecedenceInline = """
+// Inline: L <@> lambda(...) -> body |> compute
+// Should parse as (L <@> (lambda(...) -> body)) |> compute
+let A = [1.0, 2.0, 3.0]
+let B = [4.0, 5.0, 6.0]
+let result = method_for(A, B) <@> lambda(x, y) -> x + y |> compute
+// EXPECT: result = [5, 6, 7, 6, 7, 8, 7, 8, 9]
+"""
+
+let test121_pipePrecedenceMultiline = """
+// Multiline combinator chain: operators on new lines trigger implicit continuation
+let A = [1.0, 2.0, 3.0]
+let B = [4.0, 5.0, 6.0]
+let result = method_for(A, B)
+    <@> lambda(x, y) -> x + y
+    |> compute
+// EXPECT: result = [5, 6, 7, 6, 7, 8, 7, 8, 9]
+"""
+
 /// Loop objects and application
 let loopTests = [
     ("Method For", test4_methodFor)
@@ -552,4 +583,6 @@ let loopTests = [
     ("Zip ObjectFor", test117_zipObjectFor)
     ("Zip ObjectFor Product", test118_zipObjectForProduct)
     ("Zip ObjectFor Three-Way", test119_zipObjectForThreeWay)
+    ("Pipe Precedence Inline", test120_pipePrecedenceInline)
+    ("Pipe Precedence Multiline", test121_pipePrecedenceMultiline)
 ]

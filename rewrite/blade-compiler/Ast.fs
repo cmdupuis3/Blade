@@ -242,6 +242,9 @@ and Expr =
     | ExprNth                              // nth keyword (recursion depth)
     | ExprZero                             // zero keyword
     | ExprRank of Expr                     // rank(A) - get rank of array
+    | ExprMask of array: Expr * pred: Expr // mask(A, pred) - filter array by predicate
+    | ExprIntersect of Expr * Expr         // intersect(A, B) - elements in both
+    | ExprUnion of Expr * Expr             // union(A, B) - elements in either
     // Struct construction
     | ExprStruct of Ident * (Ident * Expr) list  // Point { x = 1, y = 2 }
     // Sectioned operators

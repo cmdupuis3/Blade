@@ -30,13 +30,15 @@ let result = match (x, y) with
 """
 
 let test58_guardNested = """
-// Nested match with guards
+// Nested match with guards (multi-line match body requires braces)
 let x = 10
 let y = 20
 let outer = match x with
-    | n if n > 5 -> match y with
+    | n if n > 5 -> {
+        match y with
         | m if m > 15 -> n + m
         | _ -> n
+    }
     | _ -> 0
 // EXPECT: outer = 30
 """

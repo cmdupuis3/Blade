@@ -86,6 +86,32 @@ let result = {
 // EXPECT: result = [1, 2, 3, 4, 6, 9]
 """
 
+let test120_booleanBasic = """
+// Boolean literals: True/False (capitalized) and true/false (lowercase)
+let a = True
+let b = False
+let c = true
+let d = false
+let e = a && c
+let f = b || d
+// EXPECT: a = true
+// EXPECT: b = false
+// EXPECT: c = true
+// EXPECT: d = false
+// EXPECT: e = true
+// EXPECT: f = false
+"""
+
+let test121_booleanCompare = """
+// Boolean from comparison and if/else
+let x = 3 > 2
+let y = 1 == 2
+let z = if x then 42 else 0
+// EXPECT: x = true
+// EXPECT: y = false
+// EXPECT: z = 42
+"""
+
 /// Basic language constructs
 let basicTests = [
     ("Basic Expression", test1_basicExpr)
@@ -100,4 +126,6 @@ let basicTests = [
     ("Cons Destructure", test33_consDestructure)
     ("Nested Function", test43_nestedFunction)
     ("Multi-line Block", test44_multilineBlock)
+    ("Boolean Basic", test120_booleanBasic)
+    ("Boolean Compare", test121_booleanCompare)
 ]

@@ -156,8 +156,26 @@ let rec occursIn (id: int) (ty: IRType) : bool =
     | IRTUnitAnnotated (inner, _) -> occursIn id inner
     | _ -> false
 
+/// Walk an inference variable chain to find the leaf variable bound to a
+/// concrete scalar (or unbound).  Returns its id so we can rebind it to
+/// the promoted type.  Returns None if the type is not an inference chain.
+let rec findLeafInferScalar (subst: Subst) (ty: IRType) : int option =
+    match ty with
+    | IRTInfer id ->
+        match subst.TryFind id with
+        | Some (IRTInfer _ as next) -> findLeafInferScalar subst next
+        | Some (IRTScalar _) -> Some id   // bound to concrete scalar — rebindable
+        | None -> Some id                  // unbound — bindable
+        | _ -> None                        // bound to non-scalar — leave alone
+    | _ -> None
+
 /// Unify two types, updating the substitution. Returns error on failure.
+/// Numeric promotion: when two different numeric scalars meet, the
+/// inference variable (if any) is rebound to the promoted type so that
+/// downstream IR and codegen see the correct wider type.
 let rec unify (subst: Subst) (t1: IRType) (t2: IRType) : TypeResult<unit> =
+    let orig1 = t1
+    let orig2 = t2
     let t1 = subst.Resolve t1
     let t2 = subst.Resolve t2
     match t1, t2 with
@@ -179,13 +197,17 @@ let rec unify (subst: Subst) (t1: IRType) (t2: IRType) : TypeResult<unit> =
             | _ ->
                 subst.Bind(id, ty); Ok ()
     | IRTScalar e1, IRTScalar e2 when e1 = e2 -> Ok ()
-    // Numeric promotion (common in scientific code)
-    | IRTScalar ETInt64, IRTScalar ETFloat64
-    | IRTScalar ETFloat64, IRTScalar ETInt64 -> Ok ()
-    | IRTScalar ETInt32, IRTScalar ETFloat64
-    | IRTScalar ETFloat64, IRTScalar ETInt32 -> Ok ()
-    | IRTScalar ETInt32, IRTScalar ETInt64
-    | IRTScalar ETInt64, IRTScalar ETInt32 -> Ok ()
+    // Numeric promotion per §3.4.2
+    | IRTScalar e1, IRTScalar e2 ->
+        match promoteElemType e1 e2 with
+        | Some promoted ->
+            let promotedTy = IRTScalar promoted
+            // Rebind any inference variable in the original chain to the promoted type
+            findLeafInferScalar subst orig1 |> Option.iter (fun id -> subst.Bind(id, promotedTy))
+            findLeafInferScalar subst orig2 |> Option.iter (fun id -> subst.Bind(id, promotedTy))
+            Ok ()
+        | None ->
+            Error (TypeMismatch (t1, t2))
     | IRTArray a1, IRTArray a2 ->
         // Arrays: rank must match.
         if a1.IndexTypes.Length <> a2.IndexTypes.Length then
@@ -431,6 +453,13 @@ let enterScope env =
 let registerTypeDef name info (env: TypeEnv) =
     { env with TypeDefs = Map.add name info env.TypeDefs }
 
+
+/// Check if a variant type is a pure enum (all constructors have no data)
+let isEnumType (env: TypeEnv) (parentName: string) : bool =
+    match Map.tryFind parentName env.TypeDefs with
+    | Some (TDIVariant (_, _, variants)) -> variants |> List.forall (fun (_, d) -> d.IsNone)
+    | _ -> false
+
 let registerVariantTag tag parentName payload (env: TypeEnv) =
     { env with VariantTags = Map.add tag (parentName, payload) env.VariantTags }
 
@@ -674,10 +703,24 @@ let rec lowerTypeExpr (env: TypeEnv) (ty: TypeExpr) : IRType =
         IRTArray { ElemType = ETFloat64; IndexTypes = [idx]; IsVirtual = false; Identity = None }
 
 and lowerElemType env ty =
-    match lowerTypeExpr env ty with
-    | IRTScalar et -> et
-    | IRTUnitAnnotated (IRTScalar et, _) -> et
-    | _ -> ETFloat64
+    // Check if this is an index type used as an element type (foreign key)
+    match ty with
+    | TyNamed (name, []) ->
+        match lookupTypeDef name env with
+        | Some (TDIIndexType _) -> ETIndexRef name
+        | _ ->
+            match lowerTypeExpr env ty with
+            | IRTScalar et -> et
+            | IRTUnitAnnotated (IRTScalar et, _) -> et
+            | _ -> ETFloat64
+    | TyIdx _ | TySymIdx _ | TyAntisymIdx _ | TyHermitianIdx _ ->
+        // Raw index type syntax in element position (e.g., Array<Idx<3> like ...>)
+        ETInt64
+    | _ ->
+        match lowerTypeExpr env ty with
+        | IRTScalar et -> et
+        | IRTUnitAnnotated (IRTScalar et, _) -> et
+        | _ -> ETFloat64
 
 and lowerIndexType env (_position: int) (ty: TypeExpr) : IRIndexType =
     let id = env.Builder.FreshId()
@@ -771,6 +814,9 @@ let rec collectFreeVars (bound: Set<string>) (expr: Expr) : Set<string> =
     | ExprObjectFor kernel -> collectFreeVars bound kernel
     | ExprPure e | ExprCompute e | ExprRank e -> collectFreeVars bound e
     | ExprGuard (c, b) -> Set.union (collectFreeVars bound c) (collectFreeVars bound b)
+    | ExprMask (a, p) -> Set.union (collectFreeVars bound a) (collectFreeVars bound p)
+    | ExprIntersect (a, b) -> Set.union (collectFreeVars bound a) (collectFreeVars bound b)
+    | ExprUnion (a, b) -> Set.union (collectFreeVars bound a) (collectFreeVars bound b)
     | ExprReynolds (k, _) -> collectFreeVars bound k
     | ExprField (e, _) -> collectFreeVars bound e
     | ExprTupleIndex (t, i) -> Set.union (collectFreeVars bound t) (collectFreeVars bound i)
@@ -914,9 +960,22 @@ let rec checkPattern (env: TypeEnv) (expected: IRType) (pat: Pattern)
         Ok { Kind = TPatWild; Type = expected; Bindings = [] }
 
     | PatVar name ->
-        let varId = env.Builder.FreshId()
-        Ok { Kind = TPatVar (name, varId); Type = expected
-             Bindings = [(name, varId, expected)] }
+        // Check if this name is a registered variant tag (enum constructor without data).
+        // The parser can't distinguish `| North -> ...` (variant match) from `| x -> ...` (variable binding)
+        // because it doesn't have type information. We resolve the ambiguity here.
+        match Map.tryFind name env.VariantTags with
+        | Some (parentName, None) ->
+            // This is a no-payload variant constructor — treat as PatVariant
+            checkPattern env expected (PatVariant (name, None))
+        | Some (parentName, Some _) ->
+            // Variant with payload but used without — treat as variable (may shadow)
+            let varId = env.Builder.FreshId()
+            Ok { Kind = TPatVar (name, varId); Type = expected
+                 Bindings = [(name, varId, expected)] }
+        | None ->
+            let varId = env.Builder.FreshId()
+            Ok { Kind = TPatVar (name, varId); Type = expected
+                 Bindings = [(name, varId, expected)] }
 
     | PatLit lit ->
         let litTy = inferLiteralType lit
@@ -950,19 +1009,20 @@ let rec checkPattern (env: TypeEnv) (expected: IRType) (pat: Pattern)
     | PatVariant (tag, payloadPat) ->
         match Map.tryFind tag env.VariantTags with
         | Some (parentName, payloadTy) ->
+            let isEnum = isEnumType env parentName
             match payloadPat, payloadTy with
             | Some p, Some ty ->
                 checkPattern env ty p |> Result.map (fun tPayload ->
-                    { Kind = TPatVariant (tag, Some tPayload)
+                    { Kind = TPatVariant (tag, Some tPayload, isEnum)
                       Type = IRTNamed parentName
                       Bindings = tPayload.Bindings })
             | None, None ->
-                Ok { Kind = TPatVariant (tag, None)
+                Ok { Kind = TPatVariant (tag, None, isEnum)
                      Type = IRTNamed parentName; Bindings = [] }
             | Some p, None ->
                 Error (PatternTypeMismatch (sprintf "%s(...)" tag, expected))
             | None, Some _ ->
-                Ok { Kind = TPatVariant (tag, None)
+                Ok { Kind = TPatVariant (tag, None, isEnum)
                      Type = IRTNamed parentName; Bindings = [] }
         | None ->
             // Unknown variant tag: allow it, bind any payload
@@ -970,10 +1030,10 @@ let rec checkPattern (env: TypeEnv) (expected: IRType) (pat: Pattern)
             | Some p ->
                 let payTy = env.Subst.Fresh()
                 checkPattern env payTy p |> Result.map (fun tPayload ->
-                    { Kind = TPatVariant (tag, Some tPayload); Type = expected
+                    { Kind = TPatVariant (tag, Some tPayload, false); Type = expected
                       Bindings = tPayload.Bindings })
             | None ->
-                Ok { Kind = TPatVariant (tag, None); Type = expected; Bindings = [] }
+                Ok { Kind = TPatVariant (tag, None, false); Type = expected; Bindings = [] }
 
     | PatStruct (typeName, fieldPats) ->
         let fieldTypes =
@@ -1240,6 +1300,52 @@ let rec inferExpr (env: TypeEnv) (expr: Expr) : TypeResult<TypedExpr> =
         inferExpr env cond |> Result.bind (fun tC ->
         inferExpr env body |> Result.bind (fun tB ->
             Ok (mkTyped (TExprGuard (tC, tB)) tB.Type)))
+    
+    // mask(array, pred) — filter array by predicate, producing compacted array
+    | ExprMask (array, pred) ->
+        inferExpr env array |> Result.bind (fun tArr ->
+        inferExpr env pred |> Result.bind (fun tPred ->
+            match env.Subst.Resolve(tArr.Type) with
+            | IRTArray arrTy ->
+                // Result: 1D array with same element type, runtime-opaque extent
+                let resultIdx = {
+                    Id = env.Builder.FreshId(); Arity = 1
+                    Extent = IRParam ("__masked", 0, IRTNat None)
+                    Symmetry = SymNone; Tag = None
+                    Kind = SDimension; Dependencies = []
+                }
+                let resultType = IRTArray {
+                    ElemType = arrTy.ElemType
+                    IndexTypes = [resultIdx]
+                    IsVirtual = false; Identity = None
+                }
+                Ok (mkTyped (TExprMask (tArr, tPred)) resultType)
+            | _ ->
+                Error (Other "mask() requires an array as first argument")))
+
+    // intersect(A, B) / union(A, B) — set operations on arrays
+    | ExprIntersect (a, b) | ExprUnion (a, b) ->
+        let isIntersect = match expr with ExprIntersect _ -> true | _ -> false
+        inferExpr env a |> Result.bind (fun tA ->
+        inferExpr env b |> Result.bind (fun tB ->
+            match env.Subst.Resolve(tA.Type) with
+            | IRTArray arrTy ->
+                let resultIdx = {
+                    Id = env.Builder.FreshId(); Arity = 1
+                    Extent = IRParam ((if isIntersect then "__isect" else "__union"), 0, IRTNat None)
+                    Symmetry = SymNone; Tag = None
+                    Kind = SDimension; Dependencies = []
+                }
+                let resultType = IRTArray {
+                    ElemType = arrTy.ElemType
+                    IndexTypes = [resultIdx]
+                    IsVirtual = false; Identity = None
+                }
+                let texpr = if isIntersect then TExprIntersect (tA, tB) else TExprUnion (tA, tB)
+                Ok (mkTyped texpr resultType)
+            | _ ->
+                Error (Other (sprintf "%s() requires arrays as arguments" (if isIntersect then "intersect" else "union")))))
+
     | ExprSequence exprs ->
         exprs |> List.map (inferExpr env) |> sequenceResults |> Result.bind (fun tExprs ->
             match tExprs with
@@ -1832,6 +1938,7 @@ and inferApply (env: TypeEnv) (tLeft: TypedExpr) (tRight: TypedExpr) : TypeResul
             SymcomStates = []; TriangularLevels = []
             SDimsPerArray = []
             KernelInputRanks = []; KernelOutputRank = 0
+            KernelTDims = []
             SpeedupFactor = 1L; ReynoldsSpeedup = 1L
             HasReynolds = false; OutputType = outputType
             IsCoIteration = false
@@ -1859,7 +1966,17 @@ and buildApplyInfo (env: TypeEnv)
     let kernelInputRanks =
         lambdaInfo.Params |> List.map (fun p ->
             match p.Type with IRTArray arr -> arr.IndexTypes.Length | _ -> 0)
-    let kernelOutputRank = 0
+
+    // Infer T-dimensions from the kernel's resolved return type (§9.2).
+    // If the kernel returns an array, its index types become T-dimensions
+    // in the output. If it returns a scalar, there are no T-dimensions.
+    let (kernelTDims, kernelOutputRank) =
+        let resolved = env.Subst.Resolve(lambdaInfo.ReturnType)
+        match resolved with
+        | IRTArray arr ->
+            let tDims = arr.IndexTypes |> List.map (fun idx -> { idx with Kind = TDimension })
+            (tDims, tDims.Length)
+        | _ -> ([], 0)
 
     let states = computeAllSymcomStates identities arrayTypes commGroups sDimsPerArray
     let triLevels = computeTriangularLevels arrayTypes identities commGroups sDimsPerArray
@@ -1876,7 +1993,7 @@ and buildApplyInfo (env: TypeEnv)
             // Fall back to common element type of input arrays
             arrayTypes |> List.tryPick (fun at -> Some at.ElemType)
             |> Option.defaultValue ETFloat64
-    let outputType = deduceOutputType arrayTypes identities commGroups sDimsPerArray kernelOutputRank outputElemType env.Builder
+    let outputType = deduceOutputType arrayTypes identities commGroups sDimsPerArray kernelTDims outputElemType env.Builder
 
     let reynoldsSpeedup =
         if isReynolds then
@@ -1907,6 +2024,7 @@ and buildApplyInfo (env: TypeEnv)
         SymcomStates = states; TriangularLevels = triLevels
         SDimsPerArray = sDimsPerArray
         KernelInputRanks = kernelInputRanks; KernelOutputRank = kernelOutputRank
+        KernelTDims = kernelTDims
         SpeedupFactor = speedup; ReynoldsSpeedup = reynoldsSpeedup
         HasReynolds = isReynolds; OutputType = outputType
         IsCoIteration = isCoIter
@@ -1962,7 +2080,6 @@ and inferLambda env parms whereClause body : TypeResult<TypedExpr> =
     let captures = buildCaptures scopeEnv freeVars
 
     let result =
-        validateNoArrayCaptures captures |> Result.bind (fun () ->
         inferExpr paramEnv body |> Result.bind (fun tBody ->
             let info : TypedLambdaInfo = {
                 Params = typedParams; Body = tBody; ReturnType = tBody.Type
@@ -1970,7 +2087,7 @@ and inferLambda env parms whereClause body : TypeResult<TypedExpr> =
                 IsCommutative = not (List.isEmpty commGroups)
             }
             let funcTy = IRTFunc (typedParams |> List.map (fun p -> p.Type), tBody.Type)
-            Ok (mkTyped (TExprLambda info) funcTy)))
+            Ok (mkTyped (TExprLambda info) funcTy))
 
     env.Subst.PopTypeVarScope(savedScope)
     result
@@ -2354,11 +2471,18 @@ and inferForExpr env source kernelOpt : TypeResult<TypedExpr> =
                                 match arrayTypes with
                                 | at :: _ -> at.ElemType
                                 | [] -> ETFloat64
-                        // Output type: array with shared index structure
-                        let kernelOutputRank = 0  // scalar kernel for now
+                        // Output type: array with shared index structure + kernel T-dims
+                        let (kernelTDims, kernelOutputRank) =
+                            let resolved = env.Subst.Resolve(lambdaInfo.ReturnType)
+                            match resolved with
+                            | IRTArray arr ->
+                                let tDims = arr.IndexTypes |> List.map (fun idx -> { idx with Kind = TDimension })
+                                (tDims, tDims.Length)
+                            | _ -> ([], 0)
+                        let outputIndexTypes = [sharedIdx] @ (kernelTDims |> List.map (fun idx -> { idx with Id = env.Builder.FreshId() }))
                         let outputType = IRTArray {
                             ElemType = elemType
-                            IndexTypes = [sharedIdx]
+                            IndexTypes = outputIndexTypes
                             IsVirtual = false; Identity = None
                         }
                         // Note: SymcomStates/TriangularLevels/SpeedupFactor are unused
@@ -2374,6 +2498,7 @@ and inferForExpr env source kernelOpt : TypeResult<TypedExpr> =
                             SDimsPerArray = sDimsPerArray
                             KernelInputRanks = lambdaInfo.Params |> List.map (fun _ -> 0)
                             KernelOutputRank = kernelOutputRank
+                            KernelTDims = kernelTDims
                             SpeedupFactor = 1L; ReynoldsSpeedup = 1L
                             HasReynolds = false; OutputType = outputType
                             IsCoIteration = true
@@ -2822,6 +2947,9 @@ let rec zonkExpr (subst: Subst) (expr: TypedExpr) : TypedExpr =
         | TExprChoice (a, b) -> TExprChoice (z a, z b)
         | TExprCompose (op, a, b) -> TExprCompose (op, z a, z b)
         | TExprGuard (c, b) -> TExprGuard (z c, z b)
+        | TExprMask (a, p) -> TExprMask (z a, z p)
+        | TExprIntersect (a, b) -> TExprIntersect (z a, z b)
+        | TExprUnion (a, b) -> TExprUnion (z a, z b)
         | TExprZero -> TExprZero
         | TExprReplicate (c, b) -> TExprReplicate (z c, z b)
         | TExprAssign (l, r) -> TExprAssign (z l, z r)
@@ -2881,7 +3009,7 @@ and zonkPattern (subst: Subst) (pat: TypedPattern) : TypedPattern =
         | TPatVar (n, id) -> TPatVar (n, id)
         | TPatTuple ps -> TPatTuple (ps |> List.map (zonkPattern subst))
         | TPatCons (h, t) -> TPatCons (zonkPattern subst h, zonkPattern subst t)
-        | TPatVariant (tag, payload) -> TPatVariant (tag, payload |> Option.map (zonkPattern subst))
+        | TPatVariant (tag, payload, isEnum) -> TPatVariant (tag, payload |> Option.map (zonkPattern subst), isEnum)
         | TPatStruct (tn, flds) -> TPatStruct (tn, flds |> List.map (fun (n, p) -> (n, zonkPattern subst p)))
         | TPatGuarded (p, e) -> TPatGuarded (zonkPattern subst p, zonkExpr subst e)
     { Kind = kind

@@ -7,10 +7,12 @@ module Blade.Tests.IndexTypes
 let test_antisym_iteration = """
 // AntisymIdx iteration should use strict i < j bounds
 // For n=4: pairs are (0,1),(0,2),(0,3),(1,2),(1,3),(2,3) = 6 elements
+// But with i<=j: (0,0),(0,1),(0,2),(0,3),(1,1),...,(3,3) = 10 elements
 let A = [1.0, 2.0, 3.0, 4.0]
 let L = method_for(A, A)
 let f = lambda(x, y) where comm(x, y) -> x - y
-let result = L <@> f
+let result = L <@> f |> compute
+// EXPECT: result = [0, -1, -2, -3, 0, -1, -2, 0, -1, 0]
 """
 
 let test_antisym_type_in_kernel = """
@@ -62,6 +64,8 @@ function f(x: Float64) -> Float64 = {
     let y = x * 2.0
     y + 1.0
 }
+let r = f(5.0)
+// EXPECT: r = 11
 """
 
 let test_block_return_with_loop = """

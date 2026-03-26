@@ -24,6 +24,24 @@ type ElemType =
     | ETBool
     | ETUnit
     | ETString
+    | ETIndexRef of string  // Foreign key: integer tagged with an index type name
+
+/// Compute the promoted element type for two numeric types per §3.4.2.
+/// Returns None if the types are incompatible for promotion.
+let promoteElemType (a: ElemType) (b: ElemType) : ElemType option =
+    if a = b then Some a
+    else
+        match a, b with
+        | ETInt32, ETInt64   | ETInt64, ETInt32   -> Some ETInt64
+        | ETInt32, ETFloat32 | ETFloat32, ETInt32 -> Some ETFloat32
+        | ETInt32, ETFloat64 | ETFloat64, ETInt32 -> Some ETFloat64
+        | ETInt64, ETFloat32 | ETFloat32, ETInt64 -> Some ETFloat64
+        | ETInt64, ETFloat64 | ETFloat64, ETInt64 -> Some ETFloat64
+        | ETFloat32, ETFloat64 | ETFloat64, ETFloat32 -> Some ETFloat64
+        // Index refs promote with integers, preserving the tag
+        | ETIndexRef name, ETInt64 | ETInt64, ETIndexRef name -> Some (ETIndexRef name)
+        | ETIndexRef name, ETInt32 | ETInt32, ETIndexRef name -> Some (ETIndexRef name)
+        | _ -> None
 
 /// Symmetry class for index types
 type SymmetryClass =
@@ -232,6 +250,9 @@ and IRExpr =
     | IRGuard of cond: IRExpr * body: IRExpr
     | IRSequence of IRExpr list
     | IRReplicate of count: IRExpr * body: IRExpr
+    | IRMask of array: IRExpr * pred: IRExpr  // mask(array, pred) - filter array by predicate
+    | IRIntersect of IRExpr * IRExpr          // intersect(A, B) - elements in both
+    | IRUnion of IRExpr * IRExpr              // union(A, B) - elements in either
     | IRZip of IRExpr list
     | IRAlign of arrays: IRExpr list * spec: AlignSpec
     | IRStack of IRExpr list
@@ -299,8 +320,9 @@ and ApplyInfo = {
     SDimsPerArray: int list
     KernelInputRanks: int list
     KernelOutputRank: int
+    KernelTDims: IRIndexType list           // T-dimension index types from kernel return type
     SpeedupFactor: int64
-    ReynoldsSpeedup: int64        // Additional speedup from Reynolds (n!× for triangular)
+    ReynoldsSpeedup: int64        // Reynolds permutation count (n!); actual terms may be fewer after dedup
     HasReynolds: bool              // Whether kernel has Reynolds annotation
     OutputType: IRType             // Deduced output array type
     IsCoIteration: bool            // True for 'for ... in' co-iteration
@@ -325,7 +347,7 @@ and IRPattern =
     | IRPatLit of IRLit
     | IRPatTuple of IRPattern list
     | IRPatCons of IRPattern * IRPattern
-    | IRPatVariant of name: string * tag: int * IRPattern option
+    | IRPatVariant of name: string * tag: int * IRPattern option * isEnum: bool
 
 and BoundaryMode =
     | BndShrink
@@ -816,7 +838,7 @@ let deduceOutputType
     (identities: ArrayIdentity list) 
     (commGroups: int list list)
     (sDimsPerArray: int list)
-    (kernelOutputRank: int)
+    (kernelTDims: IRIndexType list)
     (elemType: ElemType)
     (builder: IRBuilder) : IRType =
     
@@ -877,18 +899,10 @@ let deduceOutputType
                                 Symmetry = SymNone
                                 Id = builder.FreshId() })))
         
-        // Step 4: Build T-dims from kernel output
+        // Step 4: T-dims from kernel output (passed in with real extents)
         let outputTDims = 
-            if kernelOutputRank > 0 then
-                [0..kernelOutputRank-1] |> List.map (fun i ->
-                    { Id = builder.FreshId()
-                      Arity = 1
-                      Extent = IRLit (IRLitInt 0L)  // Placeholder - real extent from kernel
-                      Symmetry = SymNone
-                      Tag = None
-                      Kind = TDimension
-                      Dependencies = [] })
-            else []
+            kernelTDims |> List.map (fun idx ->
+                { idx with Kind = TDimension; Id = builder.FreshId() })
         
         // Combine S-dims and T-dims
         let allDims = outputSDims @ outputTDims
@@ -918,28 +932,60 @@ let buildLoopNest (info: ApplyInfo) (builder: IRBuilder) : LoopNest =
     let triangularLevels = computeTriangularLevels arrayTypes identities commGroups sDimsPerArray
     let speedup = computePartialProductSpeedup arrayTypes identities commGroups sDimsPerArray
     
-    // Deduce output type - infer element type from kernel/arrays
-    let elemType =
+    // Deduce output type - infer element type and T-dims from kernel/arrays
+    let (elemType, kernelTDims) =
         match info.Kernel with
         | IRLambda lInfo ->
-            lInfo.Params |> List.tryPick (fun p ->
-                match p.Type with IRTScalar et -> Some et | IRTArray arr -> Some arr.ElemType | _ -> None)
-            |> Option.defaultValue ETFloat64
+            let et =
+                lInfo.Params |> List.tryPick (fun p ->
+                    match p.Type with IRTScalar et -> Some et | IRTArray arr -> Some arr.ElemType | _ -> None)
+                |> Option.defaultValue ETFloat64
+            // T-dims come from the kernel's return type if it's an array
+            let tDims =
+                match info.KernelTDims with
+                | _ :: _ -> info.KernelTDims  // Already computed (from TypeCheck)
+                | [] -> []
+            (et, tDims)
         | _ ->
-            arrayTypes |> List.tryPick (fun at -> Some at.ElemType)
-            |> Option.defaultValue ETFloat64
-    let outputType = deduceOutputType arrayTypes identities commGroups sDimsPerArray info.KernelOutputRank elemType builder
+            let et =
+                arrayTypes |> List.tryPick (fun at -> Some at.ElemType)
+                |> Option.defaultValue ETFloat64
+            (et, info.KernelTDims)
+    let outputType = deduceOutputType arrayTypes identities commGroups sDimsPerArray kernelTDims elemType builder
     
+    // Compute symcom states for group-scoped dependency tracking
+    let symcomStates = computeAllSymcomStates identities arrayTypes commGroups sDimsPerArray
+
+    // iminMap: each level points to its immediate dependency within the same
+    // triangular group, or to itself if it starts a new group (no dependency).
+    let iminMap =
+        loopLevels |> List.mapi (fun globalIdx _level ->
+            let state = if globalIdx < symcomStates.Length then symcomStates.[globalIdx] else SCNeither
+            match state with
+            | SCNeither -> globalIdx
+            | SCSymmetric | SCCommutative | SCBoth -> globalIdx - 1)
+
+    // dependencyPath: chase the imin chain to collect all levels this one depends on.
+    let rec dependencyPath (level: int) : int list =
+        if level < 0 || level >= iminMap.Length then []
+        elif iminMap.[level] = level then []
+        else iminMap.[level] :: dependencyPath iminMap.[level]
+
+    let boundDependencies = loopLevels |> List.mapi (fun i _ -> dependencyPath i)
+
+    // Assign fresh IRIds to each level, then map level indices to IRIds for BoundDependencies
+    let levelIds = loopLevels |> List.map (fun _ -> builder.FreshId())
+
     let mutable levels = []
-    let mutable priorIndices = []
-    
+
     for levelInfo in loopLevels do
         let i = levelInfo.GlobalLevelIndex
         let canTriangulate = if i < triangularLevels.Length then triangularLevels.[i] else false
-        let idx = builder.FreshId()
+        let idx = levelIds.[i]
         let extent = levelInfo.IndexSpace.Extent
         let state = if canTriangulate then SCCommutative else SCNeither
-        let lowerBound = computeTriangularBound i priorIndices extent state
+        let deps = boundDependencies.[i] |> List.map (fun li -> levelIds.[li])
+        let lowerBound = computeTriangularBound i deps extent state
         
         let level = {
             Index = idx
@@ -947,11 +993,10 @@ let buildLoopNest (info: ApplyInfo) (builder: IRBuilder) : LoopNest =
             LowerBound = lowerBound
             State = state
             Parallel = i = 0
-            BoundDependencies = priorIndices
+            BoundDependencies = deps
         }
         
         levels <- levels @ [level]
-        priorIndices <- idx :: priorIndices
     
     {
         Levels = levels
@@ -1278,6 +1323,9 @@ let rec mapIRExpr (f: IRExpr -> IRExpr) (expr: IRExpr) : IRExpr =
         | IRFunctorMap (fn, c) -> IRFunctorMap (m fn, m c)
         | IRGuard (c, b) -> IRGuard (m c, m b)
         | IRReplicate (c, b) -> IRReplicate (m c, m b)
+        | IRMask (a, p) -> IRMask (m a, m p)
+        | IRIntersect (a, b) -> IRIntersect (m a, m b)
+        | IRUnion (a, b) -> IRUnion (m a, m b)
         | IRPolyIndex (p, i) -> IRPolyIndex (m p, m i)
         // Ternary
         | IRIf (c, t, e) -> IRIf (m c, m t, m e)
@@ -1362,15 +1410,37 @@ let specializeFunction (func: IRFuncDef) (arity: int) (builder: IRBuilder) : IRF
             after |> List.mapi (fun i p -> { p with Index = pidx + arity + i })
         let expandedParams = before @ newParams @ afterReindexed
 
+        // Collect all VarIds that are transitive let-aliases of the poly param.
+        // Walk top-down so that aliases-of-aliases are discovered before their uses.
+        let collectLetAliases (rootId: IRId) (expr: IRExpr) : Set<IRId> =
+            let mutable aliases = Set.singleton rootId
+            let rec walk expr =
+                match expr with
+                | IRLet (id, IRVar (srcId, _), body) ->
+                    if Set.contains srcId aliases then
+                        aliases <- Set.add id aliases
+                    walk body
+                | IRLet (_, value, body) -> walk value; walk body
+                | IRLambda info -> walk info.Body
+                | IRIf (c, t, e) -> walk c; walk t; walk e
+                | IRMatch (s, cases) -> walk s; cases |> List.iter (fun c -> walk c.Body)
+                | IRBinOp (_, _, l, r) -> walk l; walk r
+                | IRForRange (_, lo, hi, body) -> walk lo; walk hi; walk body
+                | _ -> ()
+            walk expr
+            aliases
+
+        let polyAliases = collectLetAliases polyParam.VarId func.Body
+
         // Rewrite body: replace IRPolyIndex and IRArity
         let rewrite e =
             match e with
-            | IRPolyIndex (IRVar (id, _), IRLit (IRLitInt k)) when id = polyParam.VarId ->
+            | IRPolyIndex (IRVar (id, _), IRLit (IRLitInt k)) when Set.contains id polyAliases ->
                 let idx = int k
                 if idx >= 0 && idx < arity then
                     IRVar (newParams.[idx].VarId, baseType)
                 else e  // out of range — leave as-is (will error at C++)
-            | IRPolyIndex (IRVar (id, _), _) when id = polyParam.VarId ->
+            | IRPolyIndex (IRVar (id, _), _) when Set.contains id polyAliases ->
                 // Dynamic index — can't monomorphize, leave as-is
                 // (future: generate switch statement)
                 e
@@ -1496,6 +1566,7 @@ let rec ppIRType = function
     | IRTScalar ETBool -> "Bool"
     | IRTScalar ETUnit -> "Void"
     | IRTScalar ETString -> "String"
+    | IRTScalar (ETIndexRef name) -> name
     | IRTArray arr ->
         let indices = arr.IndexTypes |> List.map ppIndexType |> String.concat ", "
         sprintf "Array<%s like %s>" (ppElemType arr.ElemType) indices
@@ -1540,6 +1611,7 @@ and ppElemType = function
     | ETBool -> "Bool"
     | ETUnit -> "Void"
     | ETString -> "String"
+    | ETIndexRef name -> name
 
 /// Build a map from IRIndexType.Id -> type name from a module's IRTDIndexType defs
 let indexNameMap (modul: IRModule) : Map<IRId, string> =
@@ -1643,7 +1715,7 @@ let rec ppIRExprWithNames (names: Map<int, string>) indent (expr: IRExpr) =
     | IRApplyCombinator info ->
         let states = info.SymcomStates |> List.map ppSymcomState |> String.concat ", "
         let triLevels = info.TriangularLevels |> List.map string |> String.concat ","
-        let reynoldsStr = if info.HasReynolds then sprintf ", reynolds=%dx" info.ReynoldsSpeedup else ""
+        let reynoldsStr = if info.HasReynolds then sprintf ", reynolds=%d perms" info.ReynoldsSpeedup else ""
         let outputStr = 
             match info.OutputType with
             | IRTUnit -> ""
@@ -1717,3 +1789,311 @@ let rec ppIRExprWithNames (names: Map<int, string>) indent (expr: IRExpr) =
 /// Default pretty printer (no name context)
 let ppIRExpr indent expr = ppIRExprWithNames Map.empty indent expr
 
+
+// ============================================================================
+// IR Validator — catches malformed IR between lowering and codegen
+// ============================================================================
+
+/// Collect all variable IDs referenced in an expression (for scope validation)
+let rec collectVarRefsIR (expr: IRExpr) : Set<IRId> =
+    match expr with
+    | IRVar (id, _) -> Set.singleton id
+    | IRLit _ | IRParam _ | IRNth | IRZero -> Set.empty
+    | IRBinOp (_, _, l, r) -> Set.union (collectVarRefsIR l) (collectVarRefsIR r)
+    | IRUnaryOp (_, e) -> collectVarRefsIR e
+    | IRIf (c, t, e) -> Set.unionMany [collectVarRefsIR c; collectVarRefsIR t; collectVarRefsIR e]
+    | IRLet (_, v, b) -> Set.union (collectVarRefsIR v) (collectVarRefsIR b)
+    | IRLambda info ->
+        let paramIds = info.Params |> List.map (fun p -> p.VarId) |> Set.ofList
+        Set.difference (collectVarRefsIR info.Body) paramIds
+    | IRApp (f, args, _) -> Set.unionMany (collectVarRefsIR f :: List.map collectVarRefsIR args)
+    | IRTuple es -> Set.unionMany (List.map collectVarRefsIR es)
+    | IRTupleProj (e, _, _) -> collectVarRefsIR e
+    | IRArrayLit (es, _) -> Set.unionMany (List.map collectVarRefsIR es)
+    | IRIndex (arr, idxs, _) -> Set.unionMany (collectVarRefsIR arr :: List.map collectVarRefsIR idxs)
+    | IRFieldAccess (obj, _) -> collectVarRefsIR obj
+    | IRStructLit (_, fields) -> Set.unionMany (fields |> List.map (snd >> collectVarRefsIR))
+    | IRCompute inner -> collectVarRefsIR inner
+    | IRReynolds (inner, _) -> collectVarRefsIR inner
+    | IRMethodFor info -> Set.unionMany (List.map collectVarRefsIR info.Arrays)
+    | IRObjectFor info -> collectVarRefsIR info.Kernel
+    | IRApplyCombinator info ->
+        Set.unionMany [collectVarRefsIR info.Loop; collectVarRefsIR info.Kernel; Set.unionMany (List.map collectVarRefsIR info.Arrays)]
+    | IRMatch (scrut, cases) ->
+        Set.union (collectVarRefsIR scrut) (cases |> List.map (fun c -> collectVarRefsIR c.Body) |> Set.unionMany)
+    | IRAssign (t, v) -> Set.union (collectVarRefsIR t) (collectVarRefsIR v)
+    | IRForRange (vid, lo, hi, body) ->
+        Set.unionMany [collectVarRefsIR lo; collectVarRefsIR hi; Set.remove vid (collectVarRefsIR body)]
+    | IRGuard (c, b) -> Set.union (collectVarRefsIR c) (collectVarRefsIR b)
+    | IRMask (a, p) -> Set.union (collectVarRefsIR a) (collectVarRefsIR p)
+    | IRIntersect (a, b) -> Set.union (collectVarRefsIR a) (collectVarRefsIR b)
+    | IRUnion (a, b) -> Set.union (collectVarRefsIR a) (collectVarRefsIR b)
+    | IRSequence es -> Set.unionMany (List.map collectVarRefsIR es)
+    | IRParallel (a, b, _) -> Set.union (collectVarRefsIR a) (collectVarRefsIR b)
+    | IRFusion (a, b) -> Set.union (collectVarRefsIR a) (collectVarRefsIR b)
+    | IRChoice (a, b) -> Set.union (collectVarRefsIR a) (collectVarRefsIR b)
+    | IRBind (c, k) -> Set.union (collectVarRefsIR c) (collectVarRefsIR k)
+    | IRFunctorMap (f, c) -> Set.union (collectVarRefsIR f) (collectVarRefsIR c)
+    | IRPure e -> collectVarRefsIR e
+    | _ -> Set.empty
+
+/// Validation error with context
+type IRValidationError = {
+    Message: string
+    Context: string  // e.g. "in binding 'result'" or "in function 'covariance'"
+}
+
+/// Recursively collect all types from an IRExpr tree
+let rec collectTypesInExpr (expr: IRExpr) : IRType list =
+    let rec go e =
+        match e with
+        | IRVar (_, ty) -> [ty]
+        | IRLit _ -> []
+        | IRParam (_, _, ty) -> [ty]
+        | IRBinOp (_, _, l, r) -> go l @ go r
+        | IRUnaryOp (_, inner) -> go inner
+        | IRIf (c, t, e) -> go c @ go t @ go e
+        | IRLet (_, v, b) -> go v @ go b
+        | IRApp (f, args, retTy) -> [retTy] @ go f @ (args |> List.collect go)
+        | IRLambda info ->
+            (info.Params |> List.map (fun p -> p.Type)) @ go info.Body
+        | IRTuple elems -> elems |> List.collect go
+        | IRTupleProj (e, _, _) -> go e
+        | IRArrayLit (elems, arrTy) -> [IRTArray arrTy] @ (elems |> List.collect go)
+        | IRIndex (arr, idxs, _) -> go arr @ (idxs |> List.collect go)
+        | IRFieldAccess (obj, _) -> go obj
+        | IRStructLit (_, fields) -> fields |> List.collect (snd >> go)
+        | IRMatch (scrut, cases) ->
+            go scrut @ (cases |> List.collect (fun c ->
+                go c.Body @ (c.Guard |> Option.map go |> Option.defaultValue [])))
+        | IRCompute inner -> go inner
+        | IRReynolds (inner, _) -> go inner
+        | IRMethodFor info -> info.Arrays |> List.collect go
+        | IRObjectFor info -> go info.Kernel
+        | IRApplyCombinator info ->
+            [info.OutputType] @ go info.Loop @ go info.Kernel @ (info.Arrays |> List.collect go)
+        | IRParallel (a, b, _) -> go a @ go b
+        | IRFusion (a, b) -> go a @ go b
+        | IRChoice (a, b) -> go a @ go b
+        | IRGuard (c, b) -> go c @ go b
+        | IRSequence elems -> elems |> List.collect go
+        | IRAssign (t, v) -> go t @ go v
+        | IRForRange (_, lo, hi, body) -> go lo @ go hi @ go body
+        | IRBind (comp, cont) -> go comp @ go cont
+        | IRFunctorMap (f, c) -> go f @ go c
+        | IRPure e -> go e
+        | _ -> []
+    go expr
+
+/// Check if a type contains any unresolved IRTInfer
+let rec containsInfer (ty: IRType) : int option =
+    match ty with
+    | IRTInfer id -> Some id
+    | IRTArray arr ->
+        arr.IndexTypes |> List.tryPick (fun _ -> None)
+        |> Option.orElse (containsInfer (IRTScalar arr.ElemType) |> Option.bind (fun _ -> None))
+    | IRTTuple ts -> ts |> List.tryPick containsInfer
+    | IRTFunc (args, ret) -> (args @ [ret]) |> List.tryPick containsInfer
+    | IRTComputation inner -> containsInfer inner
+    | IRTUnitAnnotated (inner, _) -> containsInfer inner
+    | IRTPoly (inner, _) -> containsInfer inner
+    | _ -> None
+
+/// Collect all VarIds defined (brought into scope) by an expression
+let rec collectDefinedIds (expr: IRExpr) : Set<IRId> =
+    match expr with
+    | IRLet (id, value, body) -> Set.add id (Set.union (collectDefinedIds value) (collectDefinedIds body))
+    | IRLambda info ->
+        let paramIds = info.Params |> List.map (fun p -> p.VarId) |> Set.ofList
+        Set.union paramIds (collectDefinedIds info.Body)
+    | IRForRange (vid, lo, hi, body) ->
+        Set.add vid (Set.unionMany [collectDefinedIds lo; collectDefinedIds hi; collectDefinedIds body])
+    | IRMatch (scrut, cases) ->
+        let caseIds = cases |> List.collect (fun c ->
+            let patIds = collectPatternIds c.Pattern
+            Set.toList patIds)
+        Set.union (collectDefinedIds scrut) (Set.ofList caseIds)
+    | _ -> Set.empty
+
+/// Collect VarIds bound by a pattern
+and collectPatternIds (pat: IRPattern) : Set<IRId> =
+    match pat with
+    | IRPatVar id -> Set.singleton id
+    | IRPatTuple pats -> pats |> List.map collectPatternIds |> Set.unionMany
+    | IRPatCons (h, t) -> Set.union (collectPatternIds h) (collectPatternIds t)
+    | IRPatVariant (_, _, Some inner, _) -> collectPatternIds inner
+    | _ -> Set.empty
+
+/// Validate a single IRModule, returning a list of errors
+let validateModule (modul: IRModule) : IRValidationError list =
+    let errors = ResizeArray<IRValidationError>()
+    let addError ctx msg = errors.Add({ Message = msg; Context = ctx })
+    
+    // Track all defined IDs (bindings + functions define names in scope)
+    let moduleIds =
+        let bindIds = modul.Bindings |> List.map (fun b -> b.Id) |> Set.ofList
+        let funcIds = modul.Functions |> List.map (fun f -> f.Id) |> Set.ofList
+        Set.union bindIds funcIds
+    
+    // --- Check 1: No unresolved IRTInfer in binding types ---
+    for b in modul.Bindings do
+        let ctx = sprintf "in binding '%s'" b.Name
+        match containsInfer b.Type with
+        | Some id -> addError ctx (sprintf "unresolved type variable T?%d in declared type" id)
+        | None -> ()
+        // Also check types inside the expression tree
+        for ty in collectTypesInExpr b.Value do
+            match containsInfer ty with
+            | Some id -> addError ctx (sprintf "unresolved type variable T?%d in expression" id)
+            | None -> ()
+    
+    // --- Check 1b: No unresolved IRTInfer in function types ---
+    for f in modul.Functions do
+        let ctx = sprintf "in function '%s'" f.Name
+        match containsInfer f.RetType with
+        | Some id -> addError ctx (sprintf "unresolved type variable T?%d in return type" id)
+        | None -> ()
+        for p in f.Params do
+            match containsInfer p.Type with
+            | Some id -> addError ctx (sprintf "unresolved type variable T?%d in param '%s'" id p.Name)
+            | None -> ()
+        for ty in collectTypesInExpr f.Body do
+            match containsInfer ty with
+            | Some id -> addError ctx (sprintf "unresolved type variable T?%d in body" id)
+            | None -> ()
+    
+    // --- Check 2: No dangling VarId references ---
+    // Walk the expression tree, threading scope through lets, lambdas, matches, for-ranges
+    let rec checkScope (scope: Set<IRId>) (ctx: string) (expr: IRExpr) =
+        match expr with
+        | IRVar (id, _) ->
+            if not (Set.contains id scope) then
+                addError ctx (sprintf "dangling VarId reference: v%d" id)
+        | IRLet (id, value, body) ->
+            checkScope scope ctx value
+            checkScope (Set.add id scope) ctx body
+        | IRLambda info ->
+            let paramIds = info.Params |> List.map (fun p -> p.VarId) |> Set.ofList
+            checkScope (Set.union scope paramIds) ctx info.Body
+        | IRForRange (vid, lo, hi, body) ->
+            checkScope scope ctx lo
+            checkScope scope ctx hi
+            checkScope (Set.add vid scope) ctx body
+        | IRMatch (scrut, cases) ->
+            checkScope scope ctx scrut
+            for c in cases do
+                let patIds = collectPatternIds c.Pattern
+                let caseScope = Set.union scope patIds
+                c.Guard |> Option.iter (checkScope caseScope ctx)
+                checkScope caseScope ctx c.Body
+        | IRApp (f, args, _) ->
+            checkScope scope ctx f
+            args |> List.iter (checkScope scope ctx)
+        | IRBinOp (_, _, l, r) -> checkScope scope ctx l; checkScope scope ctx r
+        | IRUnaryOp (_, e) -> checkScope scope ctx e
+        | IRIf (c, t, e) -> checkScope scope ctx c; checkScope scope ctx t; checkScope scope ctx e
+        | IRTuple es -> es |> List.iter (checkScope scope ctx)
+        | IRTupleProj (e, _, _) -> checkScope scope ctx e
+        | IRArrayLit (es, _) -> es |> List.iter (checkScope scope ctx)
+        | IRIndex (arr, idxs, _) -> checkScope scope ctx arr; idxs |> List.iter (checkScope scope ctx)
+        | IRFieldAccess (obj, _) -> checkScope scope ctx obj
+        | IRStructLit (_, fields) -> fields |> List.iter (fun (_, e) -> checkScope scope ctx e)
+        | IRCompute inner -> checkScope scope ctx inner
+        | IRReynolds (inner, _) -> checkScope scope ctx inner
+        | IRMethodFor info -> info.Arrays |> List.iter (checkScope scope ctx)
+        | IRObjectFor info -> checkScope scope ctx info.Kernel
+        | IRApplyCombinator info ->
+            checkScope scope ctx info.Loop
+            checkScope scope ctx info.Kernel
+            info.Arrays |> List.iter (checkScope scope ctx)
+        | IRParallel (a, b, _) -> checkScope scope ctx a; checkScope scope ctx b
+        | IRFusion (a, b) -> checkScope scope ctx a; checkScope scope ctx b
+        | IRChoice (a, b) -> checkScope scope ctx a; checkScope scope ctx b
+        | IRBind (c, k) -> checkScope scope ctx c; checkScope scope ctx k
+        | IRFunctorMap (f, c) -> checkScope scope ctx f; checkScope scope ctx c
+        | IRGuard (c, b) -> checkScope scope ctx c; checkScope scope ctx b
+        | IRSequence es -> es |> List.iter (checkScope scope ctx)
+        | IRPure e -> checkScope scope ctx e
+        | IRAssign (t, v) -> checkScope scope ctx t; checkScope scope ctx v
+        | _ -> ()  // Literals, params, etc. — no var refs
+    
+    let mutable cumulativeScope = moduleIds
+    for b in modul.Bindings do
+        let ctx = sprintf "in binding '%s'" b.Name
+        checkScope cumulativeScope ctx b.Value
+        cumulativeScope <- Set.add b.Id cumulativeScope
+    
+    for f in modul.Functions do
+        let ctx = sprintf "in function '%s'" f.Name
+        let paramIds = f.Params |> List.map (fun p -> p.VarId) |> Set.ofList
+        let funcScope = Set.union moduleIds paramIds
+        checkScope funcScope ctx f.Body
+    
+    // --- Check 3: ApplyInfo consistency ---
+    let rec checkApplyInfo (ctx: string) (expr: IRExpr) =
+        match expr with
+        | IRApplyCombinator info ->
+            if info.Arrays.Length <> info.ArrayTypes.Length then
+                addError ctx (sprintf "ApplyInfo: Arrays.Length=%d != ArrayTypes.Length=%d" info.Arrays.Length info.ArrayTypes.Length)
+            if info.Arrays.Length <> info.Identities.Length then
+                addError ctx (sprintf "ApplyInfo: Arrays.Length=%d != Identities.Length=%d" info.Arrays.Length info.Identities.Length)
+            if info.SDimsPerArray.Length <> info.Arrays.Length && info.SDimsPerArray.Length <> 0 then
+                addError ctx (sprintf "ApplyInfo: SDimsPerArray.Length=%d != Arrays.Length=%d" info.SDimsPerArray.Length info.Arrays.Length)
+            // Check kernel param count vs input ranks
+            match info.Kernel with
+            | IRLambda lInfo | IRReynolds (IRLambda lInfo, _) ->
+                if lInfo.Params.Length <> info.KernelInputRanks.Length then
+                    addError ctx (sprintf "ApplyInfo: kernel params=%d != KernelInputRanks.Length=%d" lInfo.Params.Length info.KernelInputRanks.Length)
+                // Verify CommGroup indices are in range
+                for cg in lInfo.CommGroups do
+                    for idx in cg do
+                        if idx < 0 || idx >= lInfo.Params.Length then
+                            addError ctx (sprintf "CommGroup index %d out of range [0, %d)" idx lInfo.Params.Length)
+            | _ -> ()
+        | _ -> ()
+        // Recurse into sub-expressions
+        match expr with
+        | IRLet (_, v, b) -> checkApplyInfo ctx v; checkApplyInfo ctx b
+        | IRCompute inner -> checkApplyInfo ctx inner
+        | IRParallel (a, b, _) -> checkApplyInfo ctx a; checkApplyInfo ctx b
+        | IRFusion (a, b) -> checkApplyInfo ctx a; checkApplyInfo ctx b
+        | IRChoice (a, b) -> checkApplyInfo ctx a; checkApplyInfo ctx b
+        | IRBind (c, k) -> checkApplyInfo ctx c; checkApplyInfo ctx k
+        | IRFunctorMap (f, c) -> checkApplyInfo ctx f; checkApplyInfo ctx c
+        | IRGuard (_, b) -> checkApplyInfo ctx b
+        | IRSequence elems -> elems |> List.iter (checkApplyInfo ctx)
+        | _ -> ()
+    
+    for b in modul.Bindings do
+        checkApplyInfo (sprintf "in binding '%s'" b.Name) b.Value
+    for f in modul.Functions do
+        checkApplyInfo (sprintf "in function '%s'" f.Name) f.Body
+    
+    // --- Check 4: No empty match arms ---
+    let rec checkEmptyMatch (ctx: string) (expr: IRExpr) =
+        match expr with
+        | IRMatch (_, []) -> addError ctx "empty match expression (no cases)"
+        | _ -> ()
+        match expr with
+        | IRLet (_, v, b) -> checkEmptyMatch ctx v; checkEmptyMatch ctx b
+        | IRIf (c, t, e) -> checkEmptyMatch ctx c; checkEmptyMatch ctx t; checkEmptyMatch ctx e
+        | IRMatch (s, cases) ->
+            checkEmptyMatch ctx s
+            cases |> List.iter (fun c -> checkEmptyMatch ctx c.Body)
+        | IRCompute inner -> checkEmptyMatch ctx inner
+        | _ -> ()
+    
+    for b in modul.Bindings do
+        checkEmptyMatch (sprintf "in binding '%s'" b.Name) b.Value
+    
+    errors |> Seq.toList
+
+/// Validate an entire IR program
+let validateIR (program: IRProgram) : Result<IRProgram, string list> =
+    let allErrors =
+        program.Modules |> List.collect validateModule
+    if allErrors.IsEmpty then
+        Ok program
+    else
+        let messages = allErrors |> List.map (fun e -> sprintf "[IR Validation] %s: %s" e.Context e.Message)
+        Error messages

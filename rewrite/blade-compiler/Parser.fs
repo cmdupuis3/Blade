@@ -47,6 +47,28 @@ let rec skipNL (tokens: Token list) =
     | t :: rest when t.Kind = TokNewline -> skipNL rest
     | _ -> tokens
 
+/// Is this token an infix combinator operator that can never start a statement?
+/// Used for implicit line continuation: if a line starts with one of these,
+/// it's a continuation of the previous expression.
+let isCombinatorOp (kind: TokenKind) : bool =
+    match kind with
+    | TokOp "|>" | TokOp "|@>"
+    | TokOp "<@>" | TokOp "<$>"
+    | TokOp "<&>" | TokOp "<&!>"
+    | TokOp "<|>" | TokOp "<|:>"
+    | TokOp ">>=" | TokOp ">>@" | TokOp "@>>" | TokOp ">>"
+    | TokOp "<*>" -> true
+    | _ -> false
+
+/// Peek past newlines, but only if the next non-newline token is a combinator operator.
+/// Returns the peeked token kind and the token list with newlines skipped.
+/// If the next non-newline token is NOT a combinator, returns the original stream unchanged.
+let peekContinuation (tokens: Token list) : TokenKind option * Token list =
+    let skipped = skipNL tokens
+    match skipped with
+    | t :: _ when isCombinatorOp t.Kind -> (Some t.Kind, skipped)
+    | _ -> (peek tokens, tokens)
+
 let expect kind (tokens: Token list) : ParseResult<Token> =
     match tokens with
     | t :: rest when t.Kind = kind -> Ok (t, rest)
@@ -675,15 +697,16 @@ and parseNamedInfix (tokens: Token list) : ParseResult<Expr> =
 and parsePipeline (tokens: Token list) : ParseResult<Expr> =
     parseChoice tokens >>= fun left rest ->
     let rec loop acc toks =
-        match peek toks with
+        let (peeked, toks') = peekContinuation toks
+        match peeked with
         | Some (TokOp "|>") ->
-            advance toks |> parseChoice >>= fun right remaining ->
+            advance toks' |> parseChoice >>= fun right remaining ->
             match right with
             | ExprVar "compute" -> loop (ExprCompute acc) remaining
             | _ -> loop (ExprApp (right, [acc])) remaining
         | Some (TokOp "|@>") ->
             // Pipe-apply: a |@> b  desugars to  b <@> a
-            advance toks |> parseChoice >>= fun right remaining ->
+            advance toks' |> parseChoice >>= fun right remaining ->
             loop (ExprBinOp (Elementwise, OpApply, right, acc)) remaining
         | _ -> success acc toks
     loop left rest
@@ -691,9 +714,10 @@ and parsePipeline (tokens: Token list) : ParseResult<Expr> =
 and parseChoice (tokens: Token list) : ParseResult<Expr> =
     parseParallel tokens >>= fun left rest ->
     let rec loop acc toks =
-        match peek toks with
+        let (peeked, toks') = peekContinuation toks
+        match peeked with
         | Some (ChoiceOp op) ->
-            advance toks |> parseParallel >>= fun right remaining ->
+            advance toks' |> parseParallel >>= fun right remaining ->
             loop (ExprBinOp (Elementwise, op, acc, right)) remaining
         | _ -> success acc toks
     loop left rest
@@ -701,9 +725,10 @@ and parseChoice (tokens: Token list) : ParseResult<Expr> =
 and parseParallel (tokens: Token list) : ParseResult<Expr> =
     parseBind tokens >>= fun left rest ->
     let rec loop acc toks =
-        match peek toks with
+        let (peeked, toks') = peekContinuation toks
+        match peeked with
         | Some (ParallelOp op) ->
-            advance toks |> parseBind >>= fun right remaining ->
+            advance toks' |> parseBind >>= fun right remaining ->
             loop (ExprBinOp (Elementwise, op, acc, right)) remaining
         | _ -> success acc toks
     loop left rest
@@ -711,13 +736,14 @@ and parseParallel (tokens: Token list) : ParseResult<Expr> =
 and parseBind (tokens: Token list) : ParseResult<Expr> =
     parseApply tokens >>= fun left rest ->
     let rec loop acc toks =
-        match peek toks with
+        let (peeked, toks') = peekContinuation toks
+        match peeked with
         | Some (BindOp op) ->
-            advance toks |> parseApply >>= fun right remaining ->
+            advance toks' |> parseApply >>= fun right remaining ->
             loop (ExprBinOp (Elementwise, op, acc, right)) remaining
         // >> is now a single token from the lexer
         | Some (TokOp ">>") ->
-            advance toks |> parseApply >>= fun right remaining ->
+            advance toks' |> parseApply >>= fun right remaining ->
             loop (ExprBinOp (Elementwise, OpCompose, acc, right)) remaining
         | _ -> success acc toks
     loop left rest
@@ -725,9 +751,10 @@ and parseBind (tokens: Token list) : ParseResult<Expr> =
 and parseApply (tokens: Token list) : ParseResult<Expr> =
     parseArrayProduct tokens >>= fun left rest ->
     let rec loop acc toks =
-        match peek toks with
+        let (peeked, toks') = peekContinuation toks
+        match peeked with
         | Some (ApplyOp op) ->
-            advance toks |> parseArrayProduct >>= fun right remaining ->
+            advance toks' |> parseArrayProduct >>= fun right remaining ->
             loop (ExprBinOp (Elementwise, op, acc, right)) remaining
         | _ -> success acc toks
     loop left rest
@@ -735,9 +762,10 @@ and parseApply (tokens: Token list) : ParseResult<Expr> =
 and parseArrayProduct (tokens: Token list) : ParseResult<Expr> =
     parseOr tokens >>= fun left rest ->
     let rec loop acc toks =
-        match peek toks with
+        let (peeked, toks') = peekContinuation toks
+        match peeked with
         | Some (ArrayProductOp op) ->
-            advance toks |> parseOr >>= fun right remaining ->
+            advance toks' |> parseOr >>= fun right remaining ->
             loop (ExprBinOp (Elementwise, op, acc, right)) remaining
         | _ -> success acc toks
     loop left rest
@@ -1021,6 +1049,33 @@ and parsePrimary (tokens: Token list) : ParseResult<Expr> =
         expect TokRParen afterBody >>= fun _ remaining ->
         success (ExprGuard (cond, body)) remaining
     
+    // mask(array, pred)
+    | Some (TokKeyword KwMask) ->
+        advance tokens |> expect TokLParen >>= fun _ afterLParen ->
+        parseExprImpl afterLParen >>= fun arr afterArr ->
+        expect TokComma afterArr >>= fun _ afterComma ->
+        parseExprImpl afterComma >>= fun pred afterPred ->
+        expect TokRParen afterPred >>= fun _ remaining ->
+        success (ExprMask (arr, pred)) remaining
+    
+    // intersect(A, B)
+    | Some (TokKeyword KwIntersect) ->
+        advance tokens |> expect TokLParen >>= fun _ afterLParen ->
+        parseExprImpl afterLParen >>= fun a afterA ->
+        expect TokComma afterA >>= fun _ afterComma ->
+        parseExprImpl afterComma >>= fun b afterB ->
+        expect TokRParen afterB >>= fun _ remaining ->
+        success (ExprIntersect (a, b)) remaining
+    
+    // union(A, B)
+    | Some (TokKeyword KwUnion) ->
+        advance tokens |> expect TokLParen >>= fun _ afterLParen ->
+        parseExprImpl afterLParen >>= fun a afterA ->
+        expect TokComma afterA >>= fun _ afterComma ->
+        parseExprImpl afterComma >>= fun b afterB ->
+        expect TokRParen afterB >>= fun _ remaining ->
+        success (ExprUnion (a, b)) remaining
+    
     // pure(expr)
     | Some (TokKeyword KwPure) ->
         advance tokens |> expect TokLParen >>= fun _ afterLParen ->
@@ -1181,11 +1236,13 @@ and parseMatchCase (tokens: Token list) : ParseResult<MatchCase> =
             // Parse guard expression, propagate errors
             advance afterPat |> parseGuardExpr >>= fun guard afterGuard ->
             expect (TokOp "->") afterGuard >>= fun _ afterArrow ->
-            parseExprImpl afterArrow >>= fun body remaining ->
+            // Use parseBody: inline expressions stop at newline,
+            // multi-line bodies (e.g. nested match) require braces
+            parseBody afterArrow >>= fun body remaining ->
             success { Pattern = pat; Guard = Some guard; Body = body } remaining
         | _ ->
             expect (TokOp "->") afterPat >>= fun _ afterArrow ->
-            parseExprImpl afterArrow >>= fun body remaining ->
+            parseBody afterArrow >>= fun body remaining ->
             success { Pattern = pat; Guard = None; Body = body } remaining
     | _ ->
         let line, col = currentPos tokens

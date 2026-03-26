@@ -57,15 +57,15 @@ let quot = B / A          // elementwise: [10.0, 10.0, 10.0]
 """
 
 let test64_openmpParallel = """
-// Test that OpenMP parallel loops compile and run
-// Uses a larger array to potentially benefit from parallelism
-let A = [1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0, 9.0, 10.0]
-let B = [10.0, 20.0, 30.0, 40.0, 50.0, 60.0, 70.0, 80.0, 90.0, 100.0]
-
-// Outer product creates 10x10 = 100 iterations - should parallelize
-let outer = A [*] B
-
-// The outer loop should have #pragma omp parallel for
+// OpenMP correctness: rectangular outer product gets #pragma omp parallel for.
+// Verify results match hand-computed values — if OMP has a race condition, values will be wrong.
+let A = [1.0, 2.0, 3.0, 4.0, 5.0]
+let B = [10.0, 20.0, 30.0, 40.0, 50.0]
+let L = method_for(A, B)
+let f = lambda(x, y) -> x * y
+let result = L <@> f |> compute
+// 5×5 rectangular = 25 elements, outermost loop gets OMP
+// EXPECT: result = [10, 20, 30, 40, 50, 20, 40, 60, 80, 100, 30, 60, 90, 120, 150, 40, 80, 120, 160, 200, 50, 100, 150, 200, 250]
 """
 
 let test65_openmpSymmetric = """
@@ -84,17 +84,15 @@ let result = loop <@> kernel |> compute
 """
 
 let test66_openmpNested = """
-// Test nested parallel regions with multiple arrays
-let A = [1.0, 2.0, 3.0, 4.0, 5.0]
-let B = [10.0, 20.0, 30.0, 40.0, 50.0]
-let C = [100.0, 200.0, 300.0, 400.0, 500.0]
-
-// Three-way outer product: 5x5x5 = 125 iterations
+// 3-way outer product: outermost loop gets OMP
+let A = [1.0, 2.0, 3.0]
+let B = [10.0, 20.0]
+let C = [100.0, 200.0, 300.0]
 let loop = method_for(A, B, C)
 let kernel = lambda(a, b, c) -> a + b + c
 let result = loop <@> kernel |> compute
-
-// Outermost loop should be parallel
+// 3×2×3 = 18 elements
+// EXPECT: result = [111, 211, 311, 121, 221, 321, 112, 212, 312, 122, 222, 322, 113, 213, 313, 123, 223, 323]
 """
 
 let test67_operatorSection = """

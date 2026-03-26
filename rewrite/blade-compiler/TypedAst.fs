@@ -94,6 +94,7 @@ and TypedApplyInfo = {
     SDimsPerArray: int list
     KernelInputRanks: int list
     KernelOutputRank: int
+    KernelTDims: IRIndexType list           // T-dimension index types from kernel return type
     SpeedupFactor: int64
     ReynoldsSpeedup: int64
     HasReynolds: bool
@@ -195,6 +196,11 @@ and TypedExprKind =
     // Arity special forms
     | TExprArity of paramName: string
     | TExprRank of TypedExpr
+    
+    // Filtered array
+    | TExprMask of array: TypedExpr * pred: TypedExpr
+    | TExprIntersect of TypedExpr * TypedExpr
+    | TExprUnion of TypedExpr * TypedExpr
     
     // Struct construction
     | TExprStruct of typeName: string * fields: (string * TypedExpr) list

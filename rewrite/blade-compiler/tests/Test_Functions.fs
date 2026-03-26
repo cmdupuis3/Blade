@@ -2,6 +2,8 @@ module Blade.Tests.Functions
 
 let test13_functionDecl = """
 function add(a: Float64, b: Float64) -> Float64 = a + b
+let r = add(3.0, 4.0)
+// EXPECT: r = 7
 """
 
 let test14_functionWithWhere = """
@@ -24,7 +26,7 @@ let O = object_for(lambda(row: Array<Float64 like Idx<2>>) -> row)
 """
 
 let test10_scalarCaptureInKernel = """
-// Scalars CAN be captured by lambdas (only arrays are forbidden)
+// Scalars and arrays can be captured by lambdas
 let scale = 2.5
 let offset = 1.0
 let A = [1.0, 2.0, 3.0]
@@ -48,7 +50,8 @@ let result = L <@> f |> compute
 """
 
 let test26_arrayCaptureRejected = """
-// Lambdas CANNOT capture arrays - this should fail
+// Array captures in lambdas are now allowed (restriction removed for SQL-like features)
+// This test is retained as a historical note; see Test_Sqlish.fs for capture tests
 let A = [1.0, 2.0, 3.0]
 let bad = lambda(x) -> x + A
 """

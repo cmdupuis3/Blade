@@ -96,6 +96,9 @@ and Keyword =
     | KwNth
     | KwZero
     | KwRank
+    | KwMask
+    | KwIntersect
+    | KwUnion
     | KwLike
     | KwPoly
 
@@ -133,6 +136,8 @@ let keywords =
       "reynolds", KwReynolds
       "true", KwTrue
       "false", KwFalse
+      "True", KwTrue
+      "False", KwFalse
       "in", KwIn
       "import", KwImport
       "from", KwFrom
@@ -159,6 +164,9 @@ let keywords =
       "nth", KwNth
       "zero", KwZero
       "rank", KwRank
+      "mask", KwMask
+      "intersect", KwIntersect
+      "union", KwUnion
       "like", KwLike
       "Poly", KwPoly ]
     |> Map.ofList

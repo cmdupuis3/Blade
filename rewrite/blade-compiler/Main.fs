@@ -34,6 +34,7 @@ open Blade.Tests.IndexTypes
 open Blade.Tests.Mutability
 open Blade.Tests.Static
 open Blade.Tests.Units
+open Blade.Tests.Sqlish
 // Aliases for cleaner code
 type Process = System.Diagnostics.Process
 type ProcessStartInfo = System.Diagnostics.ProcessStartInfo
@@ -59,6 +60,7 @@ let printSubHeader title =
 /// Expected value for a variable
 type ExpectedValue =
     | ExpectedScalar of string * float
+    | ExpectedBool of string * bool
     | ExpectedArray1D of string * float list
     | ExpectedArray2D of string * float list list
 
@@ -70,12 +72,15 @@ let parseExpectedValues (source: string) : ExpectedValue list =
     let lines = source.Split([|'\n'; '\r'|], StringSplitOptions.RemoveEmptyEntries)
     
     let parseFloatList (s: string) : float list =
-        s.Trim().TrimStart('[').TrimEnd(']').Split(',')
-        |> Array.map (fun x -> 
-            match Double.TryParse(x.Trim()) with
-            | true, v -> v
-            | false, _ -> 0.0)
-        |> Array.toList
+        let inner = s.Trim().TrimStart('[').TrimEnd(']').Trim()
+        if String.IsNullOrWhiteSpace(inner) then []
+        else
+            inner.Split(',')
+            |> Array.map (fun x -> 
+                match Double.TryParse(x.Trim()) with
+                | true, v -> v
+                | false, _ -> 0.0)
+            |> Array.toList
     
     let parse2DList (s: string) : float list list =
         // Simple parser for [[a,b],[c,d]] format
@@ -104,6 +109,10 @@ let parseExpectedValues (source: string) : ExpectedValue list =
                     Some (ExpectedArray2D (name, parse2DList value))
                 elif value.StartsWith("[") then
                     Some (ExpectedArray1D (name, parseFloatList value))
+                elif value.ToLower() = "true" then
+                    Some (ExpectedBool (name, true))
+                elif value.ToLower() = "false" then
+                    Some (ExpectedBool (name, false))
                 else
                     match Double.TryParse(value) with
                     | true, v -> Some (ExpectedScalar (name, v))
@@ -171,7 +180,29 @@ let checkExpectedValues (expected: ExpectedValue list) (output: string) : Result
                         match tryParseFloat actualStr with
                         | Some actualVal when floatEquals expectedVal actualVal tolerance -> None
                         | Some actualVal -> Some (sprintf "%s: expected %.17g, got %.17g (diff=%.3e)" name expectedVal actualVal (abs(expectedVal - actualVal)))
-                        | None -> Some (sprintf "%s: could not parse '%s' as float" name actualStr)
+                        | None ->
+                            // boolalpha: true→1, false→0
+                            match actualStr.Trim().ToLower() with
+                            | "true" when floatEquals expectedVal 1.0 tolerance -> None
+                            | "false" when floatEquals expectedVal 0.0 tolerance -> None
+                            | "true" -> Some (sprintf "%s: expected %.17g, got true (1)" name expectedVal)
+                            | "false" -> Some (sprintf "%s: expected %.17g, got false (0)" name expectedVal)
+                            | _ -> Some (sprintf "%s: could not parse '%s' as float" name actualStr)
+                    | None -> Some (sprintf "%s: not found in output" name)
+                    
+                | ExpectedBool (name, expectedVal) ->
+                    match actual.TryFind name with
+                    | Some actualStr ->
+                        let lower = actualStr.Trim().ToLower()
+                        let matches =
+                            match lower with
+                            | "true" -> expectedVal = true
+                            | "false" -> expectedVal = false
+                            | "1" -> expectedVal = true
+                            | "0" -> expectedVal = false
+                            | _ -> false
+                        if matches then None
+                        else Some (sprintf "%s: expected %b, got %s" name expectedVal actualStr)
                     | None -> Some (sprintf "%s: not found in output" name)
                     
                 | ExpectedArray1D (name, expectedVals) ->
@@ -314,6 +345,7 @@ let allTests =
     basicTests @ loopTests @ symmetryTests @ reynoldsTests @ arityTests @ functionTests 
     @ structTests @ sumTypeTests @ interfaceTests @ moduleTests @ guardTests @ guardCombinatorTests @ zeroCombinatorTests @ sequenceCombinatorTests @ tupleViewTests @ replicateTests @ anonRangeTests @ forInTests @ bracketedTests
     @ indexTypeTests @ mutabilityTests @ staticTests @ unitTests
+    @ foreignKeyTests @ maskTests @ setOpTests
 
 // ============================================================================
 // Test Runner
@@ -450,6 +482,15 @@ let runFullTest (testName: string) (source: string) (outputDir: string) (compile
           CppFile = None; CompileResult = Error "IR failed"; RunResult = Error "IR failed";
           ValueCheckResult = Error ["IR failed"]; HasExpectedValues = not expectedValues.IsEmpty }
     | Ok ir ->
+        // Step 1b: Validate IR
+        match IR.validateIR ir with
+        | Error validationErrors ->
+            for e in validationErrors do
+                printfn "  %s" e
+            { TestName = testName; IRResult = Error (validationErrors |> String.concat "; "); CppGenerated = false; 
+              CppFile = None; CompileResult = Error "IR validation failed"; RunResult = Error "IR validation failed";
+              ValueCheckResult = Error ["IR validation failed"]; HasExpectedValues = not expectedValues.IsEmpty }
+        | Ok ir ->
         if not compileAndRun then
             { TestName = testName; IRResult = Ok ir; CppGenerated = false;
               CppFile = None; CompileResult = Error "Skipped"; RunResult = Error "Skipped";
@@ -644,6 +685,13 @@ let runMultiFileTestsFull (name: string) (tests: (string * (string * string) lis
             printfn "FAILED (lower): %s" e
             failed <- failed + 1
         | Ok ir ->
+            match IR.validateIR ir with
+            | Error validationErrors ->
+                printfn "FAILED (IR validation):"
+                for e in validationErrors do
+                    printfn "  %s" e
+                failed <- failed + 1
+            | Ok ir ->
             let safeName = sanitizeFileName testName
             let cppFile = Path.Combine(outputDir, safeName + ".cpp")
             try
@@ -837,6 +885,13 @@ let runTestCategoryGenOnly (name: string) (tests: (string * string) list) (outpu
             printfn "    Error: %s" e
             irFailed <- irFailed + 1
         | Ok ir ->
+            match IR.validateIR ir with
+            | Error validationErrors ->
+                printfn "  [IR:FAIL] %s (validation)" testName
+                for e in validationErrors do
+                    printfn "    %s" e
+                irFailed <- irFailed + 1
+            | Ok ir ->
             irPassed <- irPassed + 1
             let safeName = sanitizeFileName testName
             let cppFile = Path.Combine(outputDir, safeName + ".cpp")
@@ -1783,118 +1838,189 @@ let result = L <@> f
 // ============================================================================
 
 let printUsage () =
-    printfn "Blade-DSL Compiler Test Suite"
+    printfn "Blade Compiler v0.14.0"
     printfn ""
-    printfn "Usage: dotnet run [option]"
+    printfn "Usage: blade <command> [options]"
     printfn ""
-    printfn "IR-Only Tests (fast, no compilation):"
-    printfn "  (none)        Run all tests (IR only)"
-    printfn "  --basic       Basic language constructs"
-    printfn "  --loops       Loop objects and application"
-    printfn "  --symmetry    Symmetry and triangular iteration"
-    printfn "  --reynolds    Reynolds operator tests"
-    printfn "  --arity       Arity polymorphism tests"
-    printfn "  --functions   Functions and captures"
-    printfn "  --structs     Struct tests"
-    printfn "  --sumtypes    Sum type tests"
-    printfn "  --interfaces  Interface and impl tests"
-    printfn "  --modules     Module tests"
-    printfn "  --guards      Guard expression tests"
-    printfn "  --bracketed   Bracketed (outer product) operator tests"
-    printfn "  --indextypes  Index type tests (AntisymIdx, HermitianIdx)"
-    printfn "  --static      Static evaluation tests"
-    printfn "  --units       Unit of measure tests"
+    printfn "Commands:"
+    printfn "  compile <file.edgi> [-o output]   Compile to C++ (and optionally to executable)"
+    printfn "  run <file.edgi>                   Compile and run a Blade program"
+    printfn "  check <file.edgi>                 Type-check only (no code generation)"
+    printfn "  emit <file.edgi> [-o output.cpp]  Emit C++ source without compiling"
+    printfn "  test                              Run full test suite (IR + C++ + run)"
+    printfn "  test --ir-only                    Run IR-only tests (fast, no C++ compilation)"
     printfn ""
-    printfn "Full Pipeline Tests (IR + C++ compile + run):"
-    printfn "  --full        Run ALL tests with full C++ pipeline"
-    printfn "  --full-basic  Basic tests with full pipeline"
-    printfn "  --full-loops  Loop tests with full pipeline"
-    printfn "  --full-symmetry Symmetry tests with full pipeline"
+    printfn "Options:"
+    printfn "  -o <path>      Output file path"
+    printfn "  --no-omp       Disable OpenMP"
+    printfn "  --verbose      Show IR and generated C++"
+    printfn "  --help         Show this help"
     printfn ""
-    printfn "Generate-Only Tests (no compilation - use if g++ broken):"
-    printfn "  --gen         Generate C++ for all tests (no compile)"
-    printfn "  --gen-basic   Generate C++ for basic tests"
-    printfn "  --gen-loops   Generate C++ for loop tests"
-    printfn "  --gen-symmetry Generate C++ for symmetry tests"
-    printfn ""
-    printfn "C++ Generation Tests:"
-    printfn "  --codegen     Single example C++ generation"
-    printfn "  --codegen-all Generate C++ for generable tests"
-    printfn "  --codegen-compile Generate, compile, and run"
-    printfn ""
-    printfn "Type Checking Pipeline:"
-    printfn "  --typecheck   All tests with TypeCheck pipeline"
-    printfn "  --tc-only     Type checking only (no lowering)"
-    printfn "  --compare     Compare old vs new pipeline"
-    printfn ""
-    printfn "Other:"
-    printfn "  --capture     Array capture rejection test"
-    printfn "  --netcdf      NetCDF provider tests"
-    printfn "  --help        Show this help"
+    printfn "Examples:"
+    printfn "  blade run myprogram.edgi"
+    printfn "  blade emit myprogram.edgi -o myprogram.cpp"
+    printfn "  blade compile myprogram.edgi -o myprogram"
+    printfn "  blade test"
+
+/// Compile a .edgi file to C++ source string
+let compileFile (filePath: string) (verbose: bool) : Result<string * string list, string> =
+    if not (File.Exists filePath) then
+        Error (sprintf "File not found: %s" filePath)
+    else
+        let source = File.ReadAllText(filePath)
+        let testName = Path.GetFileNameWithoutExtension(filePath)
+        match lower source with
+        | Error e -> Error e
+        | Ok ir ->
+            match IR.validateIR ir with
+            | Error errs -> Error (errs |> String.concat "\n")
+            | Ok ir ->
+                let (cppCode, warnings) = CodeGen.genSelfContainedProgramFromIR ir testName
+                if verbose then
+                    for w in warnings do
+                        eprintfn "[Warning] %s" w
+                Ok (cppCode, warnings)
+
+/// Compile a .edgi file to an executable
+let compileToExe (filePath: string) (outputPath: string option) (verbose: bool) : Result<string, string> =
+    match compileFile filePath verbose with
+    | Error e -> Error e
+    | Ok (cppCode, warnings) ->
+        let baseName = Path.GetFileNameWithoutExtension(filePath)
+        let dir = Path.GetDirectoryName(Path.GetFullPath(filePath))
+        let dir = if String.IsNullOrEmpty dir then "." else dir
+        let cppFile = Path.Combine(dir, baseName + ".cpp")
+        File.WriteAllText(cppFile, cppCode)
+        if verbose then
+            eprintfn "[Emit] %s" cppFile
+        match compileCpp cppFile dir with
+        | Error e ->
+            Error (sprintf "C++ compilation failed:\n%s" e)
+        | Ok exePath ->
+            // If user specified output path, move the exe there
+            let finalPath =
+                match outputPath with
+                | Some out ->
+                    let outFull = Path.GetFullPath(out)
+                    if exePath <> outFull then
+                        try File.Copy(exePath, outFull, true) with _ -> ()
+                    outFull
+                | None -> exePath
+            // Clean up intermediate .cpp
+            if not verbose then
+                try File.Delete(cppFile) with _ -> ()
+            if verbose then
+                eprintfn "[Compile] %s" finalPath
+            Ok finalPath
+
+/// Run a .edgi file: compile and execute
+let runFile (filePath: string) (verbose: bool) : int =
+    match compileToExe filePath None verbose with
+    | Error e ->
+        eprintfn "Error: %s" e
+        1
+    | Ok exePath ->
+        match runExecutable exePath with
+        | Error e ->
+            eprintfn "Runtime error: %s" e
+            1
+        | Ok (exitCode, output) ->
+            printf "%s" output
+            exitCode
+
+/// Type-check a file without generating code
+let checkFile (filePath: string) : int =
+    if not (File.Exists filePath) then
+        eprintfn "File not found: %s" filePath
+        1
+    else
+        let source = File.ReadAllText(filePath)
+        match Blade.Parser.parseProgram source with
+        | Error e ->
+            eprintfn "Parse error at %d:%d: %s" e.Line e.Col e.Message
+            1
+        | Ok program ->
+            match Blade.TypeCheck.typeCheck program with
+            | Error errors ->
+                for e in errors do
+                    eprintfn "%s" (Blade.TypeCheck.formatCompileError e)
+                1
+            | Ok _ ->
+                printfn "OK"
+                0
+
+/// Emit C++ source to file or stdout
+let emitFile (filePath: string) (outputPath: string option) (verbose: bool) : int =
+    match compileFile filePath verbose with
+    | Error e ->
+        eprintfn "Error: %s" e
+        1
+    | Ok (cppCode, _) ->
+        match outputPath with
+        | Some outPath ->
+            File.WriteAllText(outPath, cppCode)
+            if verbose then
+                eprintfn "[Emit] %s" outPath
+            0
+        | None ->
+            printf "%s" cppCode
+            0
 
 [<EntryPoint>]
 let main args =
     match args with
-    // IR-only tests
-    | [||] -> runAllTests ()
-    | [| "--basic" |] -> runTestCategory "Basic" basicTests
-    | [| "--loops" |] -> runTestCategory "Loops" loopTests
-    | [| "--symmetry" |] -> runTestCategory "Symmetry" symmetryTests
-    | [| "--reynolds" |] -> runTestCategory "Reynolds" reynoldsTests
-    | [| "--arity" |] -> runTestCategory "Arity Polymorphism" arityTests
-    | [| "--functions" |] -> runTestCategory "Functions" functionTests
-    | [| "--structs" |] -> runTestCategory "Structs" structTests
-    | [| "--sumtypes" |] -> runTestCategory "Sum Types" sumTypeTests
-    | [| "--interfaces" |] -> runTestCategory "Interfaces" interfaceTests
-    | [| "--modules" |] -> runTestCategory "Modules" moduleTests
-    | [| "--multi-file" |] -> runMultiFileTests "Multi-File Modules" multiFileTests
-    | [| "--full-multi-file" |] -> runMultiFileTestsFull "Multi-File Modules" multiFileTests "./generated_cpp_tests"
-    | [| "--guards" |] -> runTestCategory "Guards" guardTests
-    | [| "--bracketed" |] -> runTestCategory "Bracketed Ops" bracketedTests
-    | [| "--indextypes" |] -> runTestCategory "Index Types" indexTypeTests
-    | [| "--static" |] -> runTestCategory "Static Eval" staticTests
-    | [| "--units" |] ->
-        let r1 = runTestCategory "Units" unitTests
-        let r2 = runExpectedErrorTests "Units" unitErrorTests
-        if r1 = 0 && r2 = 0 then 0 else 1
+    // ---- User-facing commands ----
+    | [| "run"; file |] -> runFile file false
+    | [| "run"; file; "--verbose" |] -> runFile file true
     
-    // Full pipeline tests (IR + C++ compile + run)
+    | [| "compile"; file |] ->
+        match compileToExe file None false with
+        | Ok path -> printfn "%s" path; 0
+        | Error e -> eprintfn "Error: %s" e; 1
+    | [| "compile"; file; "-o"; output |] ->
+        match compileToExe file (Some output) false with
+        | Ok path -> printfn "%s" path; 0
+        | Error e -> eprintfn "Error: %s" e; 1
+    
+    | [| "emit"; file |] -> emitFile file None false
+    | [| "emit"; file; "-o"; output |] -> emitFile file (Some output) false
+    | [| "emit"; file; "--verbose" |] -> emitFile file None true
+    | [| "emit"; file; "-o"; output; "--verbose" |] -> emitFile file (Some output) true
+    
+    | [| "check"; file |] -> checkFile file
+    
+    // ---- Test commands ----
+    | [| "test" |] -> runAllTestsFull ()
+    | [| "test"; "--ir-only" |] -> runAllTests ()
+    | [| "test"; "--gen" |] -> runAllTestsGenOnly ()
+    | [| "test"; cat |] ->
+        // Test a specific category: blade test basic, blade test loops, etc.
+        let categoryTests =
+            match cat.ToLower().TrimStart('-') with
+            | "basic" -> Some ("Basic", basicTests)
+            | "loops" -> Some ("Loops", loopTests)
+            | "symmetry" -> Some ("Symmetry", symmetryTests)
+            | "reynolds" -> Some ("Reynolds", reynoldsTests)
+            | "arity" -> Some ("Arity", arityTests)
+            | "functions" -> Some ("Functions", functionTests)
+            | "structs" -> Some ("Structs", structTests)
+            | "sumtypes" -> Some ("Sum Types", sumTypeTests)
+            | "interfaces" -> Some ("Interfaces", interfaceTests)
+            | "modules" -> Some ("Modules", moduleTests)
+            | "guards" -> Some ("Guards", guardTests)
+            | "bracketed" -> Some ("Bracketed", bracketedTests)
+            | "indextypes" -> Some ("Index Types", indexTypeTests)
+            | "static" -> Some ("Static", staticTests)
+            | "units" -> Some ("Units", unitTests)
+            | "mutability" -> Some ("Mutability", mutabilityTests)
+            | "sqlish" | "sql" -> Some ("SQL-ish", foreignKeyTests @ maskTests @ setOpTests)
+            | _ -> None
+        match categoryTests with
+        | Some (name, tests) -> runTestCategoryFull name tests "./generated_cpp_tests"
+        | None -> eprintfn "Unknown test category: %s" cat; 1
+    
+    // ---- Legacy flags (backward compat) ----
+    | [||] -> runAllTestsFull ()
     | [| "--full" |] -> runAllTestsFull ()
-    | [| "--full-basic" |] -> runTestCategoryFull "Basic" basicTests "./generated_cpp_tests"
-    | [| "--full-loops" |] -> runTestCategoryFull "Loops" loopTests "./generated_cpp_tests"
-    | [| "--full-symmetry" |] -> runTestCategoryFull "Symmetry" symmetryTests "./generated_cpp_tests"
-    | [| "--full-structs" |] ->
-        let r1 = runTestCategoryFull "Structs" structTests "./generated_cpp_tests"
-        let r2 = runAbortTests "Struct Constraints" structAbortTests "./generated_cpp_tests"
-        if r1 = 0 && r2 = 0 then 0 else 1
-    | [| "--full-static" |] -> runTestCategoryFull "Static Eval" staticTests "./generated_cpp_tests"
-    | [| "--full-units" |] -> runTestCategoryFull "Units" unitTests "./generated_cpp_tests"
-    
-    // Generate-only tests (no compilation, useful when g++ is broken)
-    | [| "--gen" |] -> runAllTestsGenOnly ()
-    | [| "--gen-basic" |] -> runTestCategoryGenOnly "Basic" basicTests "./generated_cpp_tests"
-    | [| "--gen-loops" |] -> runTestCategoryGenOnly "Loops" loopTests "./generated_cpp_tests"
-    | [| "--gen-symmetry" |] -> runTestCategoryGenOnly "Symmetry" symmetryTests "./generated_cpp_tests"
-    
-    // C++ generation tests
-    | [| "--codegen" |] -> runEnhancedCodeGenTest ()
-    | [| "--codegen-all" |] -> runCppGeneration "./generated_cpp"
-    | [| "--codegen-compile" |] -> runCppGenerationWithCompile "./generated_cpp"
-    
-    // Special tests
-    | [| "--capture" |] -> runArrayCaptureTest ()
-    | [| "--netcdf" |] -> runNetcdfTests ()
-    
-    // TypeCheck pipeline
-    | [| "--typecheck" |] -> runAllTestsWithTypeCheck ()
-    | [| "--tc-only" |] -> runTypeCheckOnly "All" allTests
-    | [| "--compare" |] -> runPipelineComparison ()
-    
-    // Mutability tests
-    | [| "--mutability" |] ->
-        let r1 = runTestCategoryWithTypeCheck "Mutability" mutabilityTests
-        let r2 = runExpectedErrorTests "Mutability" mutabilityErrorTests
-        if r1 = 0 && r2 = 0 then 0 else 1
-    
     | [| "--help" |] -> printUsage (); 0
     | _ -> printUsage (); 1

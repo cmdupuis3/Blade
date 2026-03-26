@@ -33,6 +33,7 @@
     <Compile Include="tests/Test_Mutability.fs" />
     <Compile Include="tests/Test_Static.fs" />
     <Compile Include="tests/Test_Units.fs" />
+    <Compile Include="tests/Test_Sqlish.fs" />
     <Compile Include="Main.fs" />
   </ItemGroup>
 

@@ -32,7 +32,7 @@ let D = [1.0, 2.0, 3.0]
 let L3 = method_for(D, D, D)
 let f3 = lambda(x, y, z) where comm(x, y, z) -> x * y * z
 let r3 = L3 <@> f3 |> compute
-// Rank 3 — TODO(CG-3): EXPECT blocked
+// EXPECT: r3 = [1, 2, 3, 4, 6, 9, 8, 12, 18, 27]
 """
 
 let test36_outputTypeDeduction = """
@@ -63,9 +63,7 @@ let L = method_for(A, A, A)
 let f = lambda(x, y, z) where comm(x, y, z) -> x * y * z
 let result = L <@> f |> compute
 // Triangular rank-3: combinations (i<=j<=k)
-// (0,0,0)=1, (0,0,1)=2, (0,0,2)=3, (0,1,1)=4, (0,1,2)=6, (0,2,2)=9
-// (1,1,1)=8, (1,1,2)=12, (1,2,2)=18, (2,2,2)=27
-// TODO(CG-3): EXPECT blocked — rank-3 print not implemented
+// EXPECT: result = [1, 2, 3, 4, 6, 9, 8, 12, 18, 27]
 """
 
 let test39_outputTypeMixed = """
@@ -76,7 +74,7 @@ let L = method_for(A, A, B)
 let f = lambda(x, y, z) where comm(x, y, z) -> x * y * z
 let result = L <@> f |> compute
 // Triangular on A,A (i<=j), full on B (k=0..2)
-// TODO(CG-3): EXPECT blocked — rank-3 print not implemented
+// EXPECT: result = [4, 5, 6, 8, 10, 12, 12, 15, 18, 16, 20, 24, 24, 30, 36, 36, 45, 54]
 """
 
 let test40_outputTypeNoComm = """
@@ -97,7 +95,7 @@ let L = method_for(A, A, B)
 let f = lambda(x, y, z) where comm(x, y) -> x * y * z
 let result = L <@> f |> compute
 // SymIdx<2, 3> for A,A pair; Idx<3> for B (z not in comm group)
-// TODO(CG-3): EXPECT blocked — rank-3 print not implemented
+// EXPECT: result = [4, 5, 6, 8, 10, 12, 12, 15, 18, 16, 20, 24, 24, 30, 36, 36, 45, 54]
 """
 
 let test42_distinctCommGroups = """
@@ -107,8 +105,8 @@ let B = [4.0, 5.0, 6.0]
 let L = method_for(A, A, B, B)
 let f = lambda(x, y, z, w) where comm(x, y), comm(z, w) -> x * y * z * w
 let result = L <@> f |> compute
-// SymIdx<2, 3> for A,A; SymIdx<2, 3> for B,B
-// TODO(CG-3): EXPECT blocked — rank-4 print not implemented
+// SymIdx<2, 3> for A,A; SymIdx<2, 3> for B,B — two independent triangular pairs
+// EXPECT: result = [16, 20, 24, 25, 30, 36, 32, 40, 48, 50, 60, 72, 48, 60, 72, 75, 90, 108, 64, 80, 96, 100, 120, 144, 96, 120, 144, 150, 180, 216, 144, 180, 216, 225, 270, 324]
 """
 
 /// Symmetry and triangular iteration

@@ -228,6 +228,7 @@ let rec lowerTypedExpr (env: TypedLowerEnv) (texpr: TypedExpr) : IRExpr =
             SDimsPerArray = info.SDimsPerArray
             KernelInputRanks = info.KernelInputRanks
             KernelOutputRank = info.KernelOutputRank
+            KernelTDims = info.KernelTDims
             SpeedupFactor = info.SpeedupFactor
             ReynoldsSpeedup = info.ReynoldsSpeedup
             HasReynolds = info.HasReynolds
@@ -300,6 +301,15 @@ let rec lowerTypedExpr (env: TypedLowerEnv) (texpr: TypedExpr) : IRExpr =
     
     | TExprGuard (cond, body) ->
         IRGuard (lowerTypedExpr env cond, lowerTypedExpr env body)
+    
+    | TExprMask (array, pred) ->
+        IRMask (lowerTypedExpr env array, lowerTypedExpr env pred)
+    
+    | TExprIntersect (a, b) ->
+        IRIntersect (lowerTypedExpr env a, lowerTypedExpr env b)
+    
+    | TExprUnion (a, b) ->
+        IRUnion (lowerTypedExpr env a, lowerTypedExpr env b)
     
     | TExprZero ->
         // Lower to type-appropriate zero literal based on resolved type
@@ -406,8 +416,8 @@ and lowerTypedPattern (pat: TypedPattern) : IRPattern =
     | TPatLit lit -> IRPatLit (lowerLiteralToIRLit lit)
     | TPatTuple pats -> IRPatTuple (pats |> List.map lowerTypedPattern)
     | TPatCons (h, t) -> IRPatCons (lowerTypedPattern h, lowerTypedPattern t)
-    | TPatVariant (tag, payload) -> 
-        IRPatVariant (tag, hash tag, payload |> Option.map lowerTypedPattern)
+    | TPatVariant (tag, payload, isEnum) -> 
+        IRPatVariant (tag, hash tag, payload |> Option.map lowerTypedPattern, isEnum)
     | TPatStruct (_, fields) ->
         IRPatTuple (fields |> List.map (fun (_, p) -> lowerTypedPattern p))
     | TPatGuarded (p, _) -> lowerTypedPattern p
@@ -571,6 +581,7 @@ and lowerTypedBinOp env mode op l r leftExpr rightExpr resultType =
             SDimsPerArray = []
             KernelInputRanks = []
             KernelOutputRank = 0
+            KernelTDims = []
             SpeedupFactor = 1L
             ReynoldsSpeedup = 1L
             HasReynolds = false
