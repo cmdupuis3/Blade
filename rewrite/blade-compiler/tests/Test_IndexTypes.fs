@@ -55,6 +55,43 @@ let result = L <@> f |> compute
 """
 
 // ============================================================================
+// DepIdx Round 1 — parse + typecheck only.
+// Iteration codegen is deferred to a later round; these tests confirm the
+// surface syntax parses and types lower without error. The function body
+// returns a constant to avoid exercising any iteration path.
+// ============================================================================
+
+let test_depidx_parse_lambda = """
+// DepIdx<outer, lambda(i) -> body>: explicit lambda form
+function f(A: Array<Float64 like DepIdx<Idx<3>, lambda(i) -> Idx<3>>>) -> Float64 = {
+    0.0
+}
+"""
+
+let test_depidx_parse_eta = """
+// DepIdx<outer, func>: eta-reduced form. Desugars at parse time to the
+// lambda form. Round 1 lowers to a placeholder dynamic extent regardless;
+// this test only confirms the surface form parses.
+function tri_extent(i: Idx<3>) -> Idx<3> = i
+function g(A: Array<Float64 like DepIdx<Idx<3>, tri_extent>>) -> Float64 = {
+    0.0
+}
+"""
+
+// ============================================================================
+// RaggedIdx Round 1 — parse + typecheck only.
+// ============================================================================
+
+let test_raggedidx_parse = """
+// RaggedIdx<lengths>: externally parameterized via a lengths array.
+// The lengths array's outer index implicitly defines RaggedIdx's outer.
+let lens = [2, 3, 1]
+function h(A: Array<Float64 like RaggedIdx<lens>>) -> Float64 = {
+    0.0
+}
+"""
+
+// ============================================================================
 // Block expression return value tests
 // ============================================================================
 
@@ -89,4 +126,7 @@ let indexTypeTests = [
     ("AntisymIdx Parse Type", test_antisym_parse_type)
     ("HermitianIdx Parse Type", test_hermitian_parse_type)
     ("HermitianIdx Rectangular", test_hermitian_rectangular)
+    ("DepIdx Parse Lambda", test_depidx_parse_lambda)
+    ("DepIdx Parse Eta", test_depidx_parse_eta)
+    ("RaggedIdx Parse", test_raggedidx_parse)
 ]
