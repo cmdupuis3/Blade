@@ -124,6 +124,16 @@ let b = rt_result
 // EXPECT: b = 10
 """
 
+let test_staticAnnotated = """
+// Static value with explicit type annotation. Verifies that bidirectional
+// type checking flows through `let static` bindings — the annotation must
+// be lowered and the value checked against it, the same way regular let
+// bindings work. Previously this annotation was silently dropped.
+let static n: Int64 = 100
+let x = n
+// EXPECT: x = 100
+"""
+
 /// Static evaluation tests
 let staticTests = [
     ("Static Value", test57_staticValue)
@@ -137,4 +147,5 @@ let staticTests = [
     ("Static Forward Reference", test65_staticForwardRef)
     ("Static Match", test66_staticMatch)
     ("Static Function Dual Use", test67_staticFunctionDualUse)
+    ("Static Annotated", test_staticAnnotated)
 ]
