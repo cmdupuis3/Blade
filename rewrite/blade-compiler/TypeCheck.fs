@@ -273,6 +273,7 @@ let rec freeInferVars (subst: Subst) (ty: IRType) : Set<int> =
             (lt.ArrayTypes |> List.map (freeInferVars subst) |> Set.unionMany)
             (lt.KernelType |> Option.map (freeInferVars subst) |> Option.defaultValue Set.empty)
     | IRTUnitAnnotated (inner, _) -> freeInferVars subst inner
+    | IRTGroupKeys _ -> Set.empty
 
 /// Instantiate a type scheme: replace each quantified variable with a fresh
 /// inference variable, so each use site gets independent type constraints.
@@ -335,6 +336,7 @@ type TypeDefInfo =
     | TDIStruct of name: string * typeParams: string list * fields: (string * IRType) list
     | TDIVariant of name: string * typeParams: string list * variants: (string * IRType option) list
     | TDIIndexType of name: string * idx: IRIndexType
+    | TDIEnumIdx of name: string * idx: IRIndexType * values: int64 list
 
 /// Exported bindings from a type-checked module, for cross-module imports
 type TypeModuleExport = {
@@ -602,6 +604,9 @@ let rec lowerTypeExpr (env: TypeEnv) (ty: TypeExpr) : IRType =
             | Some (TDIIndexType (_, idx)) ->
                 IRTArray { ElemType = ETFloat64; IndexTypes = [idx]
                            IsVirtual = false; Identity = None }
+            | Some (TDIEnumIdx (_, idx, _)) ->
+                IRTArray { ElemType = ETFloat64; IndexTypes = [idx]
+                           IsVirtual = false; Identity = None }
             | None ->
                 // If this name is in the type variable scope (introduced by T^k
                 // elsewhere in this declaration), bare T means T^0 (scalar).
@@ -694,9 +699,26 @@ let rec lowerTypeExpr (env: TypeEnv) (ty: TypeExpr) : IRType =
                     Symmetry = SymNone; Tag = None; Kind = SDimension; Dependencies = [] }
         IRTArray { ElemType = ETFloat64; IndexTypes = [idx]; IsVirtual = false; Identity = None }
 
+    | TyEnumIdx valuesExpr ->
+        let nValues =
+            match valuesExpr with
+            | ExprArrayLit elems -> int64 elems.Length
+            | _ -> 0L
+        let idx = { Id = env.Builder.FreshId(); Arity = 1; Extent = IRLit (IRLitInt nValues)
+                    Symmetry = SymNone; Tag = None; Kind = SDimension; Dependencies = [] }
+        IRTArray { ElemType = ETFloat64; IndexTypes = [idx]; IsVirtual = false; Identity = None }
+
+    | TyDepIdx _ | TyRaggedIdx _ ->
+        // DepIdx/RaggedIdx in non-index position. Defensive fallback matching
+        // the shape used for TyCompoundIdx, TyEquivIdx, etc. — wrap in a
+        // single-index Array so the IR shape is consistent. Real iteration
+        // happens via lowerIndexType, which produces an arity-2 IRIndexType
+        // with the right Dependencies and Tag.
+        let idx = lowerIndexType env 0 ty
+        IRTArray { ElemType = ETFloat64; IndexTypes = [idx]; IsVirtual = false; Identity = None }
+
     | TyPoly inner -> IRTPoly (lowerTypeExpr env inner, "r")
     | TyConstrained (inner, _) -> lowerTypeExpr env inner
-    | TyDependentIdx (_param, bodyTy) -> lowerTypeExpr env bodyTy
     | TyEquivIdx (_dim, _group, _rep) ->
         let idx = { Id = env.Builder.FreshId(); Arity = 1; Extent = IRParam ("equiv", 0, IRTNat None)
                     Symmetry = SymNone; Tag = None; Kind = SDimension; Dependencies = [] }
@@ -708,12 +730,13 @@ and lowerElemType env ty =
     | TyNamed (name, []) ->
         match lookupTypeDef name env with
         | Some (TDIIndexType _) -> ETIndexRef name
+        | Some (TDIEnumIdx _) -> ETIndexRef name
         | _ ->
             match lowerTypeExpr env ty with
             | IRTScalar et -> et
             | IRTUnitAnnotated (IRTScalar et, _) -> et
             | _ -> ETFloat64
-    | TyIdx _ | TySymIdx _ | TyAntisymIdx _ | TyHermitianIdx _ ->
+    | TyIdx _ | TySymIdx _ | TyAntisymIdx _ | TyHermitianIdx _ | TyEnumIdx _ ->
         // Raw index type syntax in element position (e.g., Array<Idx<3> like ...>)
         ETInt64
     | _ ->
@@ -737,9 +760,46 @@ and lowerIndexType env (_position: int) (ty: TypeExpr) : IRIndexType =
     | TyHermitianIdx extent ->
         { Id = id; Arity = 2; Extent = lowerExtentExpr env extent
           Symmetry = SymHermitian; Tag = None; Kind = SDimension; Dependencies = [] }
+    | TyEnumIdx valuesExpr ->
+        // EnumIdx: extent = number of values in the array literal
+        let nValues =
+            match valuesExpr with
+            | ExprArrayLit elems -> int64 elems.Length
+            | _ -> 0L
+        { Id = id; Arity = 1; Extent = IRLit (IRLitInt nValues); Symmetry = SymNone
+          Tag = None; Kind = SDimension; Dependencies = [] }
+    | TyDepIdx (outerTy, _paramName, _bodyTy) ->
+        // DepIdx<outer, lambda(i) -> body>: arity-2 dependent index.
+        // Round 1 scaffolding: lower the outer to extract its extent and
+        // record an outer-id dependency, but use a placeholder dynamic extent
+        // for the inner. Round 2 will substitute the param into the body
+        // expression and lower the result properly.
+        //
+        // Structurally similar to SymIdx<2, n> with Symmetry = SymNone:
+        // arity-2, one IRIndexType record, Dependencies refers to the outer
+        // index slot. The codegen iteration path is shared with SymIdx but
+        // needs generalization beyond `extent − sum_of_deps` arithmetic
+        // (Round 2 work).
+        let outerIdx = lowerIndexType env _position outerTy
+        { Id = id; Arity = 2; Extent = IRParam ("__depidx_inner", 0, IRTNat None)
+          Symmetry = SymNone; Tag = Some "__depidx"
+          Kind = SDimension; Dependencies = [outerIdx.Id] }
+    | TyRaggedIdx _lengthsExpr ->
+        // RaggedIdx<lengths>: arity-2 dependent index, externally parameterized.
+        // The lengths expression is a value-level array; its extent provides
+        // the outer dimension implicitly. Round 1 scaffolding records the
+        // structure; Round 2 will produce the inner-extent expression
+        // referencing lengths[outer_id].
+        //
+        // Tag distinguishes from DepIdx so codegen can dispatch on the
+        // origin (function vs runtime data) when generalized.
+        { Id = id; Arity = 2; Extent = IRParam ("__raggedidx_inner", 0, IRTNat None)
+          Symmetry = SymNone; Tag = Some "__raggedidx"
+          Kind = SDimension; Dependencies = [] }
     | TyNamed (name, _) ->
         match lookupTypeDef name env with
         | Some (TDIIndexType (_, idx)) -> { idx with Id = id }
+        | Some (TDIEnumIdx (_, idx, _)) -> { idx with Id = id }
         | _ ->
             { Id = id; Arity = 1; Extent = IRParam (name, 0, IRTNat None); Symmetry = SymNone
               Tag = Some name; Kind = SDimension; Dependencies = [] }
@@ -817,6 +877,11 @@ let rec collectFreeVars (bound: Set<string>) (expr: Expr) : Set<string> =
     | ExprMask (a, p) -> Set.union (collectFreeVars bound a) (collectFreeVars bound p)
     | ExprIntersect (a, b) -> Set.union (collectFreeVars bound a) (collectFreeVars bound b)
     | ExprUnion (a, b) -> Set.union (collectFreeVars bound a) (collectFreeVars bound b)
+    | ExprGroupBy (v, k) -> Set.union (collectFreeVars bound v) (collectFreeVars bound k)
+    | ExprGroupKeys k -> collectFreeVars bound k
+    | ExprSort (a, k) -> Set.union (collectFreeVars bound a) (collectFreeVars bound k)
+    | ExprReduce (a, k) -> Set.union (collectFreeVars bound a) (collectFreeVars bound k)
+    | ExprExtents a -> collectFreeVars bound a
     | ExprReynolds (k, _) -> collectFreeVars bound k
     | ExprField (e, _) -> collectFreeVars bound e
     | ExprTupleIndex (t, i) -> Set.union (collectFreeVars bound t) (collectFreeVars bound i)
@@ -1345,6 +1410,186 @@ let rec inferExpr (env: TypeEnv) (expr: Expr) : TypeResult<TypedExpr> =
                 Ok (mkTyped texpr resultType)
             | _ ->
                 Error (Other (sprintf "%s() requires arrays as arguments" (if isIntersect then "intersect" else "union")))))
+
+    // group_keys(keys) — build CSR grouping structure from key array
+    // Returns GroupKeys type carrying outer index type and source index type
+    | ExprGroupKeys keys ->
+        inferExpr env keys |> Result.bind (fun tKeys ->
+            match env.Subst.Resolve(tKeys.Type) with
+            | IRTArray arrTy ->
+                // Source index: from the key array's index types
+                let sourceIdx =
+                    if arrTy.IndexTypes.Length > 0 then arrTy.IndexTypes.[0]
+                    else {
+                        Id = env.Builder.FreshId(); Arity = 1
+                        Extent = IRParam ("__src", 0, IRTNat None)
+                        Symmetry = SymNone; Tag = None
+                        Kind = SDimension; Dependencies = []
+                    }
+                // Outer index: number of groups
+                // If element type is ETIndexRef, we know the target extent statically
+                let (outerIdx, enumValues) =
+                    match arrTy.ElemType with
+                    | ETIndexRef name ->
+                        // Semi-static: look up target index type for extent
+                        match lookupTypeDef name env with
+                        | Some (TDIIndexType (_, idx)) ->
+                            ({ idx with Id = env.Builder.FreshId(); Tag = Some name }, None)
+                        | Some (TDIEnumIdx (_, idx, values)) ->
+                            ({ idx with Id = env.Builder.FreshId(); Tag = Some name }, Some values)
+                        | _ ->
+                            ({ Id = env.Builder.FreshId(); Arity = 1
+                               Extent = IRParam ("__ngroups", 0, IRTNat None)
+                               Symmetry = SymNone; Tag = None
+                               Kind = SDimension; Dependencies = [] }, None)
+                    | _ ->
+                        // Dynamic: number of groups unknown until runtime
+                        ({ Id = env.Builder.FreshId(); Arity = 1
+                           Extent = IRParam ("__ngroups", 0, IRTNat None)
+                           Symmetry = SymNone; Tag = None
+                           Kind = SDimension; Dependencies = [] }, None)
+                let gkType = IRTGroupKeys (outerIdx, sourceIdx, enumValues)
+                Ok (mkTyped (TExprGroupKeys tKeys) gkType)
+            | _ ->
+                Error (Other "group_keys() requires an array argument"))
+
+    // group_by(values, grouping) — apply GroupKeys to a values array
+    // Result: rank-2 array (groups × members), with GroupIdx
+    // Tags ("__group_outer", "__group_member") signal to codegen to use ragged peel.
+    | ExprGroupBy (values, grouping) ->
+        inferExpr env values |> Result.bind (fun tVals ->
+        inferExpr env grouping |> Result.bind (fun tGrouping ->
+            match env.Subst.Resolve(tVals.Type) with
+            | IRTArray arrTy ->
+                // Extract group structure from GroupKeys type, or fall back for raw key arrays
+                let (outerIdx, memberIdx) =
+                    match env.Subst.Resolve(tGrouping.Type) with
+                    | IRTGroupKeys (outer, _, _) ->
+                        let member_ = {
+                            Id = env.Builder.FreshId(); Arity = 1
+                            Extent = IRParam ("__groupsz", 0, IRTNat None)
+                            Symmetry = SymNone; Tag = Some "__group_member"
+                            Kind = SDimension; Dependencies = []
+                        }
+                        ({ outer with Id = env.Builder.FreshId(); Tag = Some "__group_outer" }, member_)
+                    | _ ->
+                        // Fallback: treat second arg as raw key array (backward compat)
+                        let outer = {
+                            Id = env.Builder.FreshId(); Arity = 1
+                            Extent = IRParam ("__ngroups", 0, IRTNat None)
+                            Symmetry = SymNone; Tag = Some "__group_outer"
+                            Kind = SDimension; Dependencies = []
+                        }
+                        let member_ = {
+                            Id = env.Builder.FreshId(); Arity = 1
+                            Extent = IRParam ("__groupsz", 0, IRTNat None)
+                            Symmetry = SymNone; Tag = Some "__group_member"
+                            Kind = SDimension; Dependencies = []
+                        }
+                        (outer, member_)
+                let resultType = IRTArray {
+                    ElemType = arrTy.ElemType
+                    IndexTypes = [outerIdx; memberIdx]
+                    IsVirtual = false; Identity = None
+                }
+                Ok (mkTyped (TExprGroupBy (tVals, tGrouping)) resultType)
+            | _ ->
+                Error (Other "group_by() requires an array as first argument")))
+
+    // sort(array, key) — stable sort by ascending key.
+    // Phase 1 (current): eager materialization. Result is a new physical array
+    // with the same element type and extent as the input, indexed by a fresh
+    // anonymous index (mask-style). The order property is NOT tracked in the
+    // type system yet — that's deferred to a future "key map chain" subsystem.
+    //
+    // The eventual direction is lazy: sort produces a chain handle recording
+    // (key_fn, permutation), with materialization deferred to first access.
+    // Rationale: deferring evaluation preserves optimization headroom — the
+    // compiler can analyze chains of operations before any layout is committed,
+    // enabling sort-skip, merge-style joins, and other rearrangements.
+    // Caching strategies are downstream of those analyses, not a substitute.
+    | ExprSort (array, key) ->
+        inferExpr env array |> Result.bind (fun tArr ->
+        inferExpr env key |> Result.bind (fun tKey ->
+            match env.Subst.Resolve(tArr.Type) with
+            | IRTArray arrTy when arrTy.IndexTypes.Length = 1 ->
+                let srcIdx = arrTy.IndexTypes.[0]
+                // Fresh anonymous index, same extent as source. Sort doesn't
+                // change length, so the static extent (when known) propagates.
+                let resultIdx = {
+                    Id = env.Builder.FreshId(); Arity = 1
+                    Extent = srcIdx.Extent
+                    Symmetry = SymNone; Tag = None
+                    Kind = SDimension; Dependencies = []
+                }
+                let resultType = IRTArray {
+                    ElemType = arrTy.ElemType
+                    IndexTypes = [resultIdx]
+                    IsVirtual = false; Identity = None
+                }
+                Ok (mkTyped (TExprSort (tArr, tKey)) resultType)
+            | IRTArray _ ->
+                Error (Other "sort() requires a rank-1 array (multi-rank sort not yet supported)")
+            | _ ->
+                Error (Other "sort() requires an array as first argument")))
+
+    // reduce(array, kernel) — T/S reduction primitive.
+    // Consumes the innermost dimension via a binary kernel. For rank-1 input,
+    // produces a scalar of the element type. Multi-rank reduction is deferred.
+    //
+    // Empty-array policy (post-extents integration):
+    //   - If extent is statically known to be 0  → typecheck error (caller bug)
+    //   - If extent is statically known to be > 0 → typecheck OK; codegen emits
+    //                                              standard loop without guard
+    //   - If extent is dynamic                   → typecheck OK; codegen adds
+    //                                              a runtime guard that aborts
+    //                                              cleanly on empty
+    //
+    // A 3-arg form `reduce(arr, op, init)` for well-defined empty handling
+    // (returning init) is a future addition for the dynamic case if a use
+    // case demands silently-handled empties.
+    | ExprReduce (array, kernel) ->
+        inferExpr env array |> Result.bind (fun tArr ->
+        inferExpr env kernel |> Result.bind (fun tKernel ->
+            match env.Subst.Resolve(tArr.Type) with
+            | IRTArray arrTy when arrTy.IndexTypes.Length = 1 ->
+                // Static guarantee: reject if we can prove the extent is 0.
+                match tryEvalIntIR arrTy.IndexTypes.[0].Extent with
+                | Some n when n <= 0L ->
+                    Error (Other (sprintf "reduce() rejects statically empty arrays (extent = %d). Empty input has no defined reduction without an identity; a 3-arg form `reduce(arr, op, init)` is the planned solution." n))
+                | _ ->
+                    let resultType = IRTScalar arrTy.ElemType
+                    Ok (mkTyped (TExprReduce (tArr, tKernel)) resultType)
+            | IRTArray _ ->
+                Error (Other "reduce() currently supports only rank-1 arrays (multi-rank reduction over the innermost dimension is deferred)")
+            | _ ->
+                Error (Other "reduce() requires an array as first argument")))
+
+    // extents(array) — extent(s) along each dimension as Int64.
+    // Rank-1 → scalar Int64 (the single dim's extent).
+    // Rank-N → tuple (Int64, Int64, ..., Int64) of length N (one per dim,
+    //          outermost first).
+    // The codegen prefers a static literal when the index type's extent
+    // expression is statically evaluable (extends to literal arithmetic via
+    // tryEvalIntIR), matching rank()'s static-when-possible behavior.
+    //
+    // Future direction: a homogeneous List<Int64> collection type would be a
+    // more natural return type for the multi-rank case. Tuples work because
+    // all components share Int64, but they're heterogeneous in the type
+    // system. Switching to List when one becomes available is a future-
+    // compat note, not a blocker.
+    | ExprExtents array ->
+        inferExpr env array |> Result.bind (fun tArr ->
+            match env.Subst.Resolve(tArr.Type) with
+            | IRTArray arrTy when arrTy.IndexTypes.Length = 1 ->
+                Ok (mkTyped (TExprExtents tArr) (IRTScalar ETInt64))
+            | IRTArray arrTy ->
+                // Multi-rank: tuple of Int64s, one per dimension
+                let n = arrTy.IndexTypes.Length
+                let tupleTy = IRTTuple (List.replicate n (IRTScalar ETInt64))
+                Ok (mkTyped (TExprExtents tArr) tupleTy)
+            | _ ->
+                Error (Other "extents() requires an array as argument"))
 
     | ExprSequence exprs ->
         exprs |> List.map (inferExpr env) |> sequenceResults |> Result.bind (fun tExprs ->
@@ -2092,24 +2337,134 @@ and inferLambda env parms whereClause body : TypeResult<TypedExpr> =
     env.Subst.PopTypeVarScope(savedScope)
     result
 
+// ---- Bidirectional checking ----
+//
+// checkExpr drives an expression to a known target type, pushing the
+// expectation into literal/constructor positions. For everything else it
+// falls through to inferExpr + unify, which preserves the existing single-
+// pass behavior. Currently used by inferLetBinding when an annotation is
+// present; same machinery would suit function arg checking later.
+//
+// Strict policy:
+//  - Element count mismatch on Idx<N> against an array literal: error
+//  - Heterogeneous numeric literals against a typed array: each element
+//    is checked individually; promotion is not applied across elements
+//  - No 0/false coercion, no float/int silent narrowing
+//
+and checkExpr (env: TypeEnv) (expected: IRType) (expr: Expr) : TypeResult<TypedExpr> =
+    let resolved = env.Subst.Resolve expected
+    match expr, resolved with
+
+    // Numeric/scalar literals retype to the expected scalar (numbers stay numbers,
+    // bools stay bools — no implicit 0<->false). The literal carries its source-
+    // level value but its IRType matches the annotation.
+    | ExprLit (LitInt _ as lit), IRTScalar et ->
+        match et with
+        | ETInt32 | ETInt64 | ETIndexRef _ ->
+            Ok (mkTyped (TExprLit lit) (IRTScalar et))
+        | _ ->
+            Error (TypeMismatch (resolved, IRTScalar ETInt64))
+    | ExprLit (LitFloat _ as lit), IRTScalar et ->
+        match et with
+        | ETFloat32 | ETFloat64 -> Ok (mkTyped (TExprLit lit) (IRTScalar et))
+        | _ -> Error (TypeMismatch (resolved, IRTScalar ETFloat64))
+    | ExprLit (LitBool _ as lit), IRTScalar ETBool ->
+        Ok (mkTyped (TExprLit lit) (IRTScalar ETBool))
+
+    // Array literal: extract per-rank shape from the annotation and recurse.
+    // Outer index supplies the literal's length; inner index types form the
+    // element annotation. Elements are checked individually against this.
+    | ExprArrayLit elems, IRTArray arrTy when not arrTy.IndexTypes.IsEmpty ->
+        let outerIdx = arrTy.IndexTypes.Head
+        let innerIdxs = arrTy.IndexTypes.Tail
+        // Length check: if extent is a literal, the count must match.
+        let lengthOk =
+            match outerIdx.Extent with
+            | IRLit (IRLitInt n) -> int n = elems.Length
+            | _ -> true  // dynamic / parametric extent: no static check
+        if not lengthOk then
+            let expectedN =
+                match outerIdx.Extent with IRLit (IRLitInt n) -> int n | _ -> -1
+            Error (Other (sprintf "Array literal has %d elements, but annotation expects %d" elems.Length expectedN))
+        else
+            // Build the element annotation: scalar if no inner index types,
+            // otherwise an array with the remaining index types.
+            let elemAnnot =
+                if innerIdxs.IsEmpty then IRTScalar arrTy.ElemType
+                else IRTArray { arrTy with IndexTypes = innerIdxs }
+            elems |> List.map (checkExpr env elemAnnot) |> sequenceResults
+            |> Result.map (fun tElems ->
+                mkTyped (TExprArrayLit (tElems, arrTy)) (IRTArray arrTy))
+
+    // Tuple literal: zip components against expected component types.
+    | ExprTuple exprs, IRTTuple ts when exprs.Length = ts.Length ->
+        List.zip exprs ts |> List.map (fun (e, t) -> checkExpr env t e) |> sequenceResults
+        |> Result.map (fun tExprs ->
+            mkTyped (TExprTuple tExprs) (IRTTuple (tExprs |> List.map (fun e -> e.Type))))
+
+    // Default: synthesize, then unify. This is the path that handles variables,
+    // function calls, complex expressions, and any case the special-cases miss.
+    | _ ->
+        inferExpr env expr |> Result.bind (fun tE ->
+            match unify env.Subst tE.Type expected with
+            | Ok () -> Ok tE
+            | Error _ -> Error (TypeMismatch (expected, tE.Type)))
+
+// ---- Shared helpers for both let paths (let-as-expression and top-level DeclLet) ----
+//
+// inferLetBinding (let-as-expression in function bodies and blocks) and
+// checkDecl/DeclLet (top-level let declarations) share their annotation handling
+// and PatVar binding logic. Extracting them here keeps the two paths in sync;
+// we previously had a bug where one path was updated for bidirectional checking
+// and the other wasn't, silently regressing every top-level annotated let.
+//
+// The two paths still diverge afterward — the expression-form recurses into a
+// body, the top-level builds a TypedBinding record and surfaces destructured
+// sub-vars to Lowering — so we don't try to unify them entirely.
+
+/// Resolve the value of a let binding: with annotation, drive the value via
+/// bidirectional checking and store the annotation as the canonical type;
+/// without, plain synthesis.
+and inferLetBindingValue (env: TypeEnv) (binding: Binding) : TypeResult<TypedExpr> =
+    match binding.Type with
+    | Some annot ->
+        let annotTy = lowerTypeExpr env annot
+        checkExpr env annotTy binding.Value |> Result.map (fun tv ->
+            // Prefer the annotation as the canonical type — it can be more
+            // specific than what the value synthesized to.
+            { tv with Type = annotTy })
+    | None -> inferExpr env binding.Value
+
+/// Bind the primary name of a let binding (single name or placeholder) with
+/// let-generalization. Only ReadOnly bindings are generalized — assignable
+/// bindings could be reassigned, making the original scheme unsound.
+/// For destructuring patterns (tuple/cons/struct), the caller passes name="_"
+/// and identity=None; the returned env then needs further extension with the
+/// pattern's sub-names by the caller (which differs by path).
+and bindLetPatVar (env: TypeEnv) (name: string) (identity: ArrayIdentity option)
+                  (assign: Assignability) (tValue: TypedExpr) : IRId * TypeEnv =
+    let varId = env.Builder.FreshId()
+    let scheme =
+        if assign <> ReadOnly then None
+        else
+            let s = generalize env.Subst env.Variables tValue.Type
+            if s.QuantifiedVars.IsEmpty then None else Some s
+    let env' =
+        match scheme with
+        | Some s -> bindVarPoly name varId tValue.Type identity assign (Some tValue) s env
+        | None -> bindVarFull name varId tValue.Type identity assign (Some tValue) env
+    (varId, env')
+
 and inferLetBinding env binding body : TypeResult<TypedExpr> =
-    inferExpr env binding.Value |> Result.bind (fun tValue ->
+    // Bidirectional checking pushes annotations into literal/constructor
+    // positions — see inferLetBindingValue. Then dispatch on the binding
+    // pattern to bind names into the body's environment.
+    let valueResult = inferLetBindingValue env binding
+    valueResult |> Result.bind (fun tValue ->
         let assign = assignOfBindingMut binding.Mutability
         match binding.Pattern with
         | PatVar name ->
-            let varId = env.Builder.FreshId()
-            let identity = Some (AIDVariable name)
-            // Let-generalization: only static (ReadOnly) bindings are generalized.
-            // Assignable bindings could be reassigned, making the original scheme unsound.
-            let scheme =
-                if assign <> ReadOnly then None
-                else
-                    let s = generalize env.Subst env.Variables tValue.Type
-                    if s.QuantifiedVars.IsEmpty then None else Some s
-            let env' =
-                match scheme with
-                | Some s -> bindVarPoly name varId tValue.Type identity assign (Some tValue) s env
-                | None -> bindVarFull name varId tValue.Type identity assign (Some tValue) env
+            let (varId, env') = bindLetPatVar env name (Some (AIDVariable name)) assign tValue
             inferExpr env' body |> Result.map (fun tBody ->
                 mkTyped (TExprLet (name, varId, tValue, tBody)) tBody.Type)
 
@@ -2528,22 +2883,15 @@ and inferForExpr env source kernelOpt : TypeResult<TypedExpr> =
 and checkDecl (env: TypeEnv) (decl: Decl) : TypeResult<TypedDecl * TypeEnv> =
     match decl with
     | DeclLet binding ->
-        inferExpr env binding.Value |> Result.bind (fun tValue ->
+        // Top-level let: shares value-resolution and primary-name binding with
+        // inferLetBinding (the let-as-expression form). Diverges from there in
+        // that we surface destructured sub-vars to Lowering and wrap in a
+        // TypedBinding rather than recursing into a body expression.
+        inferLetBindingValue env binding |> Result.bind (fun tValue ->
             let name = match binding.Pattern with PatVar n -> n | _ -> "_"
-            let varId = env.Builder.FreshId()
             let identity = match binding.Pattern with PatVar n -> Some (AIDVariable n) | _ -> None
             let assign = assignOfBindingMut binding.Mutability
-
-            // Only static (ReadOnly) bindings are generalized.
-            let scheme =
-                if assign <> ReadOnly then None
-                else
-                    let s = generalize env.Subst env.Variables tValue.Type
-                    if s.QuantifiedVars.IsEmpty then None else Some s
-            let env' =
-                match scheme with
-                | Some s -> bindVarPoly name varId tValue.Type identity assign (Some tValue) s env
-                | None -> bindVarFull name varId tValue.Type identity assign (Some tValue) env
+            let (varId, env') = bindLetPatVar env name identity assign tValue
 
             // Handle destructuring at top level — collect sub-bindings for Lowering
             let mutable subBindings : (string * IRId * IRType) list = []
@@ -2623,13 +2971,18 @@ and checkDecl (env: TypeEnv) (decl: Decl) : TypeResult<TypedDecl * TypeEnv> =
             Ok (TDeclLet tb, env'))
 
     | DeclStatic binding ->
-        inferExpr env binding.Value |> Result.bind (fun tValue ->
+        // Use the shared annotation handler so `let static` bindings enforce
+        // their type annotations the same way regular lets do. Without this,
+        // an annotation like `let static x: Float<meters> = 100.0` was
+        // silently dropped — the binding would carry the synthesized type
+        // instead.
+        inferLetBindingValue env binding |> Result.bind (fun tValue ->
             let name = match binding.Pattern with PatVar n -> n | _ -> "_"
             // Reuse pre-pass varId if this static was already pre-registered
             let varId =
                 match lookupVar name env with
                 | Some existing ->
-                    // Unify pre-pass type with inferred type so forward references resolve
+                    // Unify pre-pass type with checked type so forward references resolve
                     let _ = unify env.Subst existing.Type tValue.Type
                     existing.VarId
                 | None -> env.Builder.FreshId()
@@ -2655,7 +3008,19 @@ and checkDecl (env: TypeEnv) (decl: Decl) : TypeResult<TypedDecl * TypeEnv> =
         let ttd =
             match typeDecl with
             | TyDeclAlias (name, typeParams, body) ->
-                TTDAlias (name, typeParams, lowerTypeExpr env' body)
+                // Distinguish index-type aliases (Idx, SymIdx, ..., EnumIdx) from
+                // ordinary type aliases. Both register in env.TypeDefs the same
+                // way; the typed-AST distinction is what survives into Lowering
+                // and CodeGen, where index aliases need different rendering than
+                // generic IRType aliases (using Name = int64_t; rather than a
+                // promote<>-based template expansion).
+                match Map.tryFind name env'.TypeDefs with
+                | Some (TDIIndexType (_, idx)) ->
+                    TTDIndexType (name, idx)
+                | Some (TDIEnumIdx (_, idx, values)) ->
+                    TTDEnumIdx (name, idx, values)
+                | _ ->
+                    TTDAlias (name, typeParams, lowerTypeExpr env' body)
             | TyDeclStruct (name, typeParams, fields, invariant) ->
                 let resolvedFields = fields |> List.map (fun f -> (f.Name, lowerTypeExpr env' f.Type))
                 let tInvariant =
@@ -2865,9 +3230,29 @@ and registerTypeDecl (env: TypeEnv) (typeDecl: TypeDecl) : TypeEnv =
     | TyDeclAlias (name, _typeParams, body) ->
         let defInfo =
             match body with
-            | TyIdx _ | TySymIdx _ | TyAntisymIdx _ | TyHermitianIdx _ | TyBoundedIdx _ ->
+            | TyIdx _ | TySymIdx _ | TyAntisymIdx _ | TyHermitianIdx _ | TyBoundedIdx _
+            | TyDepIdx _ | TyRaggedIdx _ ->
                 let idx = lowerIndexType env 0 body
                 TDIIndexType (name, { idx with Tag = Some name })
+            | TyEnumIdx valuesExpr ->
+                // Static-evaluate the array literal to extract int64 values
+                let values =
+                    match valuesExpr with
+                    | ExprArrayLit elems ->
+                        elems |> List.choose (fun e ->
+                            match e with
+                            | ExprLit (LitInt n) -> Some n
+                            | ExprUnaryOp (OpNeg, ExprLit (LitInt n)) -> Some (-n)
+                            | _ -> None)
+                    | _ -> []
+                let extent = int64 values.Length
+                let idx = {
+                    Id = env.Builder.FreshId(); Arity = 1
+                    Extent = IRLit (IRLitInt extent)
+                    Symmetry = SymNone; Tag = Some name
+                    Kind = SDimension; Dependencies = []
+                }
+                TDIEnumIdx (name, idx, values)
             | _ -> TDIAlias (lowerTypeExpr env body)
         registerTypeDef name defInfo env
 
@@ -2909,6 +3294,7 @@ let rec zonkType (subst: Subst) (ty: IRType) : IRType =
                     KernelType = lt.KernelType |> Option.map (zonkType subst) }
     | IRTPoly (base', var) -> IRTPoly (zonkType subst base', var)
     | IRTUnitAnnotated (inner, units) -> IRTUnitAnnotated (zonkType subst inner, units)
+    | IRTGroupKeys (outer, source, enumValues) -> IRTGroupKeys (zonkIndexType subst outer, zonkIndexType subst source, enumValues)
 
 and zonkIndexType (subst: Subst) (idx: IRIndexType) : IRIndexType = idx  // Extents are IRExpr, not IRType
 
@@ -2950,6 +3336,11 @@ let rec zonkExpr (subst: Subst) (expr: TypedExpr) : TypedExpr =
         | TExprMask (a, p) -> TExprMask (z a, z p)
         | TExprIntersect (a, b) -> TExprIntersect (z a, z b)
         | TExprUnion (a, b) -> TExprUnion (z a, z b)
+        | TExprGroupBy (v, k) -> TExprGroupBy (z v, z k)
+        | TExprGroupKeys k -> TExprGroupKeys (z k)
+        | TExprSort (a, k) -> TExprSort (z a, z k)
+        | TExprReduce (a, k) -> TExprReduce (z a, z k)
+        | TExprExtents a -> TExprExtents (z a)
         | TExprZero -> TExprZero
         | TExprReplicate (c, b) -> TExprReplicate (z c, z b)
         | TExprAssign (l, r) -> TExprAssign (z l, z r)
@@ -3055,6 +3446,10 @@ let zonkTypeDef (subst: Subst) (td: TypedTypeDef) : TypedTypeDef =
                    inv |> Option.map (zonkExpr subst))
     | TTDVariant (n, tp, vs) ->
         TTDVariant (n, tp, vs |> List.map (fun (vn, vt) -> (vn, vt |> Option.map zt)))
+    | TTDIndexType _ | TTDEnumIdx _ ->
+        // Index aliases carry concrete extents (literal int) and (for EnumIdx)
+        // concrete value lists. No inference variables to resolve, pass through.
+        td
 
 /// Zonk a TypedDecl
 let zonkDecl (subst: Subst) (decl: TypedDecl) : TypedDecl =
