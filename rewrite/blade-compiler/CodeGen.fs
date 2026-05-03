@@ -159,6 +159,7 @@ let rec collectVarRefs (expr: IRExpr) : Set<IRId> =
     | IRReduce (arr, kernel) ->
         Set.union (collectVarRefs arr) (collectVarRefs kernel)
     | IRExtent (arr, _) -> collectVarRefs arr
+    | IRRaggedLookup l -> collectVarRefs l
     | IRSequence exprs ->
         Set.unionMany (List.map collectVarRefs exprs)
     | _ -> Set.empty
@@ -237,6 +238,7 @@ let rec inferExprType (expr: IRExpr) : IRType =
     | IRNth -> IRTScalar ETInt64
     | IRRank _ -> IRTScalar ETInt64
     | IRExtent _ -> IRTScalar ETInt64
+    | IRRaggedLookup _ -> IRTScalar ETInt64
     | IRRange _ -> IRTScalar ETInt64
     | IRFieldAccess (obj, field) ->
         // Would need struct type info to resolve; return unit as placeholder

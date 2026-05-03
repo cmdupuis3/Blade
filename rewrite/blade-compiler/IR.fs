@@ -278,6 +278,18 @@ and IRExpr =
     | IRRank of array: IRExpr
     | IRPolyIndex of pack: IRExpr * index: IRExpr  // Dynamic poly-pack indexing: args[k]
     | IRExtent of array: IRExpr * dim: int
+    // Ragged-extent marker: at the position this appears as an IRIndexType's
+    // Extent, the codegen emits a lookup into the lengths array using the
+    // current iteration's flat outer position. The lengths array is shaped
+    // to match the prior index dimensions (e.g., Array<Nat like Idx<M>, Idx<N>>
+    // for `Idx<M>, Idx<N>, RaggedIdx<lengths>`); the codegen handles the
+    // flat-position computation internally so the user doesn't need to expose
+    // the flattening at the type level.
+    //
+    // Distinct from IRExtent (which queries an array's extent metadata):
+    // IRRaggedLookup reads a value from the lengths array at the current
+    // iteration's logical position.
+    | IRRaggedLookup of lengths: IRExpr
     | IRAssign of target: IRExpr * value: IRExpr
     | IRForRange of varId: IRId * lo: IRExpr * hi: IRExpr * body: IRExpr
 
@@ -1320,6 +1332,7 @@ let rec mapIRExpr (f: IRExpr -> IRExpr) (expr: IRExpr) : IRExpr =
         | IRDiag e -> IRDiag (m e)
         | IRRank e -> IRRank (m e)
         | IRExtent (e, d) -> IRExtent (m e, d)
+        | IRRaggedLookup l -> IRRaggedLookup (m l)
         | IRAssign (t, v) -> IRAssign (m t, m v)
         | IRForRange (vid, lo, hi, body) -> IRForRange (vid, m lo, m hi, m body)
         // Binary
@@ -1881,6 +1894,7 @@ let rec collectVarRefsIR (expr: IRExpr) : Set<IRId> =
     | IRSort (a, k) -> Set.union (collectVarRefsIR a) (collectVarRefsIR k)
     | IRReduce (a, k) -> Set.union (collectVarRefsIR a) (collectVarRefsIR k)
     | IRExtent (a, _) -> collectVarRefsIR a
+    | IRRaggedLookup l -> collectVarRefsIR l
     | IRSequence es -> Set.unionMany (List.map collectVarRefsIR es)
     | IRParallel (a, b, _) -> Set.union (collectVarRefsIR a) (collectVarRefsIR b)
     | IRFusion (a, b) -> Set.union (collectVarRefsIR a) (collectVarRefsIR b)

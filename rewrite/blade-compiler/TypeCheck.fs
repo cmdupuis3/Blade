@@ -556,6 +556,44 @@ let lowerExtentExpr (env: TypeEnv) (expr: Expr) : IRExpr =
         | ExprLit (LitInt n) -> IRLit (IRLitInt n)
         | _ -> IRParam ("?", 0, IRTNat None)
 
+/// Lower an extent expression with one bound parameter substituted for an IR
+/// expression. Used by DepIdx to substitute the lambda parameter (the outer
+/// index variable) into the inner extent expression. Walks the AST recursively
+/// so binary-op extents like `n - i` lower correctly.
+///
+/// This is more general than `lowerExtentExpr`, which falls through to a `?`
+/// placeholder for anything beyond ExprLit and ExprVar. For DepIdx the inner
+/// extent expression is consumed directly at the iteration-bound emission
+/// site, so the expression structure must survive.
+let rec substituteAndLowerExtent (env: TypeEnv) (paramName: Ident) (subst: IRExpr) (expr: Expr) : IRExpr =
+    match expr with
+    | ExprVar n when n = paramName -> subst
+    | _ ->
+        match evalConstExpr env expr with
+        | Some k -> IRLit (IRLitInt k)
+        | None ->
+            match expr with
+            | ExprVar name -> IRParam (name, 0, IRTNat None)
+            | ExprLit (LitInt n) -> IRLit (IRLitInt n)
+            | ExprBinOp (_mode, op, l, r) ->
+                let l' = substituteAndLowerExtent env paramName subst l
+                let r' = substituteAndLowerExtent env paramName subst r
+                let irOpOpt =
+                    match op with
+                    | OpAdd -> Some IRAdd
+                    | OpSub -> Some IRSub
+                    | OpMul -> Some IRMul
+                    | OpDiv -> Some IRDiv
+                    | OpMod -> Some IRMod
+                    | _ -> None
+                match irOpOpt with
+                | Some irOp -> IRBinOp (IRElementwise, irOp, l', r')
+                | None -> IRParam ("?", 0, IRTNat None)
+            | ExprUnaryOp (OpNeg, e) ->
+                IRUnaryOp (IRNeg, substituteAndLowerExtent env paramName subst e)
+            | _ ->
+                IRParam ("?", 0, IRTNat None)
+
 // ============================================================================
 // 4. AST TypeExpr -> IRType (with extent preservation)
 // ============================================================================
@@ -617,8 +655,35 @@ let rec lowerTypeExpr (env: TypeEnv) (ty: TypeExpr) : IRType =
 
     | TyArray (elemTy, indexTys) ->
         let elem = lowerElemType env elemTy
-        let indices = indexTys |> List.mapi (fun i ity -> lowerIndexType env i ity)
-        IRTArray { ElemType = elem; IndexTypes = indices; IsVirtual = false; Identity = None }
+        // RaggedIdx requires at least one prior index in the index list to
+        // iterate over. A 1-D Array<T like RaggedIdx<lens>> is malformed:
+        // there's no prior position to provide the iteration that drives the
+        // lengths-array lookup. The check is structural — first index can't
+        // be a RaggedIdx.
+        let firstIsRagged =
+            match indexTys with
+            | TyRaggedIdx _ :: _ -> true
+            | _ -> false
+        if firstIsRagged then
+            // Produce a degenerate IRTArray; the actual error reporting site
+            // is the typechecker proper, not lowering. The placeholder lets
+            // downstream lowering proceed to surface a clearer diagnostic
+            // when the type appears in a function signature or let binding.
+            // Emit a Tag that downstream phases can detect for error reporting.
+            let placeholderIdx = {
+                Id = env.Builder.FreshId(); Arity = 1
+                Extent = IRParam ("__error_ragged_no_prior", 0, IRTNat None)
+                Symmetry = SymNone
+                Tag = Some "__error_ragged_no_prior"
+                Kind = SDimension; Dependencies = []
+            }
+            IRTArray { ElemType = elem; IndexTypes = [placeholderIdx]; IsVirtual = false; Identity = None }
+        else
+            // Index types are normally one IRIndexType per surface index, but
+            // dependent forms like DepIdx produce TWO records (outer + inner with
+            // Dependencies linking them). lowerIndexTypeList handles the expansion.
+            let indices = indexTys |> List.mapi (fun i ity -> lowerIndexTypeList env i ity) |> List.concat
+            IRTArray { ElemType = elem; IndexTypes = indices; IsVirtual = false; Identity = None }
 
     | TyAbstractArray (elemTy, rankExpr, _symmOpt) ->
         match evalConstExpr env rankExpr with
@@ -761,7 +826,6 @@ and lowerIndexType env (_position: int) (ty: TypeExpr) : IRIndexType =
         { Id = id; Arity = 2; Extent = lowerExtentExpr env extent
           Symmetry = SymHermitian; Tag = None; Kind = SDimension; Dependencies = [] }
     | TyEnumIdx valuesExpr ->
-        // EnumIdx: extent = number of values in the array literal
         let nValues =
             match valuesExpr with
             | ExprArrayLit elems -> int64 elems.Length
@@ -769,30 +833,17 @@ and lowerIndexType env (_position: int) (ty: TypeExpr) : IRIndexType =
         { Id = id; Arity = 1; Extent = IRLit (IRLitInt nValues); Symmetry = SymNone
           Tag = None; Kind = SDimension; Dependencies = [] }
     | TyDepIdx (outerTy, _paramName, _bodyTy) ->
-        // DepIdx<outer, lambda(i) -> body>: arity-2 dependent index.
-        // Round 1 scaffolding: lower the outer to extract its extent and
-        // record an outer-id dependency, but use a placeholder dynamic extent
-        // for the inner. Round 2 will substitute the param into the body
-        // expression and lower the result properly.
-        //
-        // Structurally similar to SymIdx<2, n> with Symmetry = SymNone:
-        // arity-2, one IRIndexType record, Dependencies refers to the outer
-        // index slot. The codegen iteration path is shared with SymIdx but
-        // needs generalization beyond `extent − sum_of_deps` arithmetic
-        // (Round 2 work).
+        // Single-slot context (e.g., type alias, range): return a placeholder
+        // inner-only record. Two-record expansion happens at the array-index-
+        // list construction site (lowerIndexTypeList). Single-slot use of
+        // DepIdx is suspect — code paths that need the full DepIdx structure
+        // (iteration, etc.) should route through lowerIndexTypeList instead.
         let outerIdx = lowerIndexType env _position outerTy
         { Id = id; Arity = 2; Extent = IRParam ("__depidx_inner", 0, IRTNat None)
           Symmetry = SymNone; Tag = Some "__depidx"
           Kind = SDimension; Dependencies = [outerIdx.Id] }
     | TyRaggedIdx _lengthsExpr ->
-        // RaggedIdx<lengths>: arity-2 dependent index, externally parameterized.
-        // The lengths expression is a value-level array; its extent provides
-        // the outer dimension implicitly. Round 1 scaffolding records the
-        // structure; Round 2 will produce the inner-extent expression
-        // referencing lengths[outer_id].
-        //
-        // Tag distinguishes from DepIdx so codegen can dispatch on the
-        // origin (function vs runtime data) when generalized.
+        // Same shape as TyDepIdx: placeholder for single-slot use.
         { Id = id; Arity = 2; Extent = IRParam ("__raggedidx_inner", 0, IRTNat None)
           Symmetry = SymNone; Tag = Some "__raggedidx"
           Kind = SDimension; Dependencies = [] }
@@ -806,6 +857,72 @@ and lowerIndexType env (_position: int) (ty: TypeExpr) : IRIndexType =
     | _ ->
         { Id = id; Arity = 1; Extent = IRParam ("?", 0, IRTNat None); Symmetry = SymNone
           Tag = None; Kind = SDimension; Dependencies = [] }
+
+/// Lower an index type to a list of IRIndexType records. Most types produce a
+/// single-element list; dependent forms (DepIdx, RaggedIdx) produce two records
+/// — outer + inner with Dependencies linking them.
+///
+/// Used at array-index-list construction sites where a multi-record expansion
+/// is meaningful. Single-slot contexts (range, type alias) use lowerIndexType
+/// directly and get a placeholder for dependent forms.
+and lowerIndexTypeList (env: TypeEnv) (position: int) (ty: TypeExpr) : IRIndexType list =
+    match ty with
+    | TyDepIdx (outerTy, paramName, bodyTy) ->
+        // Lower outer first to get its Id; that Id is the dependency target
+        // for the inner extent's reference to the lambda parameter.
+        let outerIdx = lowerIndexType env position outerTy
+        let outerWithTag = { outerIdx with Tag = Some "__depidx_outer" }
+        // Extract the inner extent expression. Body shape is `Idx<expr>` for
+        // the lambda form; eta-reduced forms produce a TyNamed body that
+        // doesn't yet resolve cleanly (see Round 2 limitations comment in
+        // the parser). For non-Idx bodies we emit a placeholder; the lambda
+        // form is the path that produces a real Extent.
+        let bodyExtentExpr =
+            match bodyTy with
+            | TyIdx e -> Some e
+            | _ -> None
+        let outerVarRef = IRVar (outerWithTag.Id, IRTScalar ETInt64)
+        let innerExtent =
+            match bodyExtentExpr with
+            | Some e -> substituteAndLowerExtent env paramName outerVarRef e
+            | None -> IRParam ("__depidx_inner", 0, IRTNat None)
+        let innerIdx = {
+            Id = env.Builder.FreshId()
+            Arity = 1
+            Extent = innerExtent
+            Symmetry = SymNone
+            Tag = Some "__depidx_inner"
+            Kind = SDimension
+            Dependencies = [outerWithTag.Id]
+        }
+        [outerWithTag; innerIdx]
+    | TyRaggedIdx lengthsExpr ->
+        // RaggedIdx contributes a SINGLE record. Its inner extent is a
+        // per-iteration lookup into the lengths array, indexed by the
+        // current outer iteration's flat position. The lengths array's
+        // shape conceptually mirrors the prior index dimensions of the
+        // enclosing array (e.g., for Idx<M>, Idx<N>, RaggedIdx<lens>,
+        // lens is internally M*N elements); the codegen handles the
+        // flat-position computation so the user-facing type stays clean.
+        //
+        // RaggedIdx is "open" — it does NOT declare its own outer position;
+        // it references the iteration over the prior index types in the
+        // enclosing Array's index list. A 1-D `Array<T like RaggedIdx<lens>>`
+        // is malformed (no prior index to iterate); RaggedIdx requires at
+        // least one prior index. The malformedness check happens at the
+        // TyArray level (see lowerTypeExpr), not here, since this function
+        // doesn't see the surrounding context.
+        let lengthsIR = lowerExtentExpr env lengthsExpr
+        [{
+            Id = env.Builder.FreshId()
+            Arity = 1
+            Extent = IRRaggedLookup lengthsIR
+            Symmetry = SymNone
+            Tag = Some "__raggedidx"
+            Kind = SDimension
+            Dependencies = []  // populated by the codegen iteration as needed
+        }]
+    | _ -> [lowerIndexType env position ty]
 
 // ============================================================================
 // 5. Capture Analysis

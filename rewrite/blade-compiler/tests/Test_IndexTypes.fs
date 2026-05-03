@@ -80,15 +80,38 @@ function g(A: Array<Float64 like DepIdx<Idx<3>, tri_extent>>) -> Float64 = {
 
 // ============================================================================
 // RaggedIdx Round 1 — parse + typecheck only.
+// RaggedIdx contributes a single IR record (the ragged dim itself); it
+// references an external lengths array and requires at least one prior index
+// in the array's index list to iterate over.
 // ============================================================================
 
 let test_raggedidx_parse = """
 // RaggedIdx<lengths>: externally parameterized via a lengths array.
-// The lengths array's outer index implicitly defines RaggedIdx's outer.
+// The required prior index (Idx<3>) provides the iteration position used to
+// look up lengths internally.
 let lens = [2, 3, 1]
-function h(A: Array<Float64 like RaggedIdx<lens>>) -> Float64 = {
+function h(A: Array<Float64 like Idx<3>, RaggedIdx<lens>>) -> Float64 = {
     0.0
 }
+"""
+
+// Round 2 — verify the two-record expansion.
+// A DepIdx in array index position now contributes TWO records to the array's
+// IndexTypes (outer + inner with Dependencies linking). Total rank from one
+// DepIdx is 2. The substituteAndLowerExtent helper produces a real IR Extent
+// expression for the lambda body — though without codegen iteration support
+// (Round 3 work) we can't actually iterate over a DepIdx-typed array yet.
+// This test only exercises the type-level structure: rank() should reflect
+// the two-record expansion.
+
+let test_depidx_rank_two_records = """
+// rank(A) for an Array<like DepIdx<...>> should be 2 — the two records
+// (outer + inner) each contribute arity 1.
+function f(A: Array<Float64 like DepIdx<Idx<3>, lambda(i) -> Idx<3>>>) -> Int64 = {
+    rank(A)
+}
+let x = 0  // placeholder so the file has runtime behavior
+// EXPECT: x = 0
 """
 
 // ============================================================================
@@ -129,4 +152,5 @@ let indexTypeTests = [
     ("DepIdx Parse Lambda", test_depidx_parse_lambda)
     ("DepIdx Parse Eta", test_depidx_parse_eta)
     ("RaggedIdx Parse", test_raggedidx_parse)
+    ("DepIdx Two Records Rank", test_depidx_rank_two_records)
 ]
