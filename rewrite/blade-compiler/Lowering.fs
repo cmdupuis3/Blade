@@ -311,6 +311,33 @@ let rec lowerTypedExpr (env: TypedLowerEnv) (texpr: TypedExpr) : IRExpr =
     | TExprUnion (a, b) ->
         IRUnion (lowerTypedExpr env a, lowerTypedExpr env b)
     
+    | TExprGroupBy (values, grouping) ->
+        IRGroupBy (lowerTypedExpr env values, lowerTypedExpr env grouping)
+    
+    | TExprGroupKeys keys ->
+        IRGroupKeys (lowerTypedExpr env keys)
+    
+    | TExprSort (array, key) ->
+        IRSort (lowerTypedExpr env array, lowerTypedExpr env key)
+    
+    | TExprReduce (array, kernel) ->
+        IRReduce (lowerTypedExpr env array, lowerTypedExpr env kernel)
+    
+    | TExprExtents array ->
+        // Rank-1: emit a single IRExtent (arr, 0).
+        // Rank-N: emit a tuple of IRExtent (arr, i) for i in 0..N-1.
+        let arr' = lowerTypedExpr env array
+        match array.Type with
+        | IRTArray arrTy when arrTy.IndexTypes.Length = 1 ->
+            IRExtent (arr', 0)
+        | IRTArray arrTy ->
+            let n = arrTy.IndexTypes.Length
+            IRTuple (List.init n (fun i -> IRExtent (arr', i)))
+        | _ ->
+            // Typecheck should have rejected — fall back to a degenerate form
+            // rather than crash; downstream IR validator will catch oddities.
+            IRExtent (arr', 0)
+    
     | TExprZero ->
         // Lower to type-appropriate zero literal based on resolved type
         match texpr.Type with
@@ -660,6 +687,12 @@ let lowerTypedTypeDef (env: TypedLowerEnv) (ttd: TypedTypeDef) : IRTypeDef =
     match ttd with
     | TTDAlias (name, _, resolved) ->
         IRTDAlias (name, resolved)
+    | TTDIndexType (name, idx) ->
+        // Map to IRTDIndexType so CodeGen.genTypeDefs emits a typedef
+        // (using Name = int64_t;) and ETIndexRef Name renders as the alias.
+        IRTDIndexType (name, idx)
+    | TTDEnumIdx (name, idx, values) ->
+        IRTDEnumIdx (name, idx, values)
     | TTDStruct (name, _, fields, invariant) ->
         let constraintInfo =
             match invariant with
