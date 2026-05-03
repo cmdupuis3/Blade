@@ -81,6 +81,9 @@ and Keyword =
     | KwSymIdx
     | KwAntisymIdx
     | KwHermitianIdx
+    | KwEnumIdx
+    | KwDepIdx
+    | KwRaggedIdx
     | KwMethodFor
     | KwObjectFor
     | KwRange
@@ -99,6 +102,11 @@ and Keyword =
     | KwMask
     | KwIntersect
     | KwUnion
+    | KwGroupBy
+    | KwGroupKeys
+    | KwSort
+    | KwReduce
+    | KwExtents
     | KwLike
     | KwPoly
 
@@ -149,6 +157,9 @@ let keywords =
       "SymIdx", KwSymIdx
       "AntisymIdx", KwAntisymIdx
       "HermitianIdx", KwHermitianIdx
+      "EnumIdx", KwEnumIdx
+      "DepIdx", KwDepIdx
+      "RaggedIdx", KwRaggedIdx
       "method_for", KwMethodFor
       "object_for", KwObjectFor
       "range", KwRange
@@ -167,6 +178,11 @@ let keywords =
       "mask", KwMask
       "intersect", KwIntersect
       "union", KwUnion
+      "group_by", KwGroupBy
+      "group_keys", KwGroupKeys
+      "sort", KwSort
+      "reduce", KwReduce
+      "extents", KwExtents
       "like", KwLike
       "Poly", KwPoly ]
     |> Map.ofList
