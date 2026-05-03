@@ -345,7 +345,7 @@ let allTests =
     basicTests @ loopTests @ symmetryTests @ reynoldsTests @ arityTests @ functionTests 
     @ structTests @ sumTypeTests @ interfaceTests @ moduleTests @ guardTests @ guardCombinatorTests @ zeroCombinatorTests @ sequenceCombinatorTests @ tupleViewTests @ replicateTests @ anonRangeTests @ forInTests @ bracketedTests
     @ indexTypeTests @ mutabilityTests @ staticTests @ unitTests
-    @ foreignKeyTests @ maskTests @ setOpTests
+    @ foreignKeyTests @ maskTests @ setOpTests @ groupByTests @ sortTests @ reduceTests @ extentsTests @ extentsMultiRankTests @ regressionTests @ sqlCombinedTests
 
 // ============================================================================
 // Test Runner
@@ -2013,7 +2013,7 @@ let main args =
             | "static" -> Some ("Static", staticTests)
             | "units" -> Some ("Units", unitTests)
             | "mutability" -> Some ("Mutability", mutabilityTests)
-            | "sqlish" | "sql" -> Some ("SQL-ish", foreignKeyTests @ maskTests @ setOpTests)
+            | "sqlish" | "sql" -> Some ("SQL-ish", foreignKeyTests @ maskTests @ setOpTests @ groupByTests @ sortTests @ reduceTests @ extentsTests @ extentsMultiRankTests @ regressionTests @ sqlCombinedTests)
             | _ -> None
         match categoryTests with
         | Some (name, tests) -> runTestCategoryFull name tests "./generated_cpp_tests"
