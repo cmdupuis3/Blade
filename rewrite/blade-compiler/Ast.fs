@@ -143,7 +143,15 @@ type TypeExpr =
     | TyCompoundIdx of mask: Expr
     | TyEquivIdx of dim: Expr * group: TypeExpr * rep: TypeExpr
     | TyHermitianIdx of extent: Expr
-    | TyDependentIdx of param: Ident * body: TypeExpr  // (i: Idx<n>) -> Idx<n - i>
+    | TyEnumIdx of values: Expr  // EnumIdx<[v1, v2, ...]> — dependent on static array
+    // DepIdx<outer, lambda(param) -> body> — function-parameterized inner extent.
+    // The eta-reduced surface form `DepIdx<outer, func>` is desugared to the
+    // lambda form at parse time, so all DepIdx values land here.
+    | TyDepIdx of outer: TypeExpr * param: Ident * body: TypeExpr
+    // RaggedIdx<lengths> — externally parameterized inner extent. The lengths
+    // expression is an array (or a name resolving to an array); its outer
+    // index implicitly defines RaggedIdx's outer index.
+    | TyRaggedIdx of lengths: Expr
     // With constraints
     | TyConstrained of TypeExpr * Constraint list
     // Poly type for arity polymorphism
@@ -245,6 +253,11 @@ and Expr =
     | ExprMask of array: Expr * pred: Expr // mask(A, pred) - filter array by predicate
     | ExprIntersect of Expr * Expr         // intersect(A, B) - elements in both
     | ExprUnion of Expr * Expr             // union(A, B) - elements in either
+    | ExprGroupBy of values: Expr * grouping: Expr  // group_by(vals, gk) - apply grouping to values
+    | ExprGroupKeys of keys: Expr                  // group_keys(keys) - build CSR grouping structure
+    | ExprSort of array: Expr * key: Expr          // sort(A, key) - sort array by key function (stable)
+    | ExprReduce of array: Expr * kernel: Expr     // reduce(A, op) - reduce innermost dim by binary kernel
+    | ExprExtents of array: Expr                   // extents(A) - innermost dim extent (rank-1 only for now)
     // Struct construction
     | ExprStruct of Ident * (Ident * Expr) list  // Point { x = 1, y = 2 }
     // Sectioned operators
