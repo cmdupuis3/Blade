@@ -300,6 +300,11 @@ and parseSimplePrimary (tokens: Token list) : ParseResult<Expr> =
         advance tokens |> parseSimpleExpr >>= fun expr afterExpr ->
         expect TokRParen afterExpr >>= fun _ remaining ->
         success expr remaining
+    | Some TokLBracket ->
+        // Array literal inside simple expression context (e.g., EnumIdx<[1, 2, 3]>)
+        advance tokens |> sepBy parseSimpleExpr TokComma >>= fun elems afterElems ->
+        expect TokRBracket afterElems >>= fun _ remaining ->
+        success (ExprArrayLit elems) remaining
     | Some kind ->
         let line, col = currentPos tokens
         error (sprintf "Expected simple expression but got %A" kind) line col
@@ -398,6 +403,9 @@ and parseTypeAtom (tokens: Token list) : ParseResult<TypeExpr> =
     | Some (TokKeyword KwHermitianIdx) ->
         parseIndexType tokens
     
+    | Some (TokKeyword KwEnumIdx) ->
+        parseIndexType tokens
+    
     | Some (TokKeyword KwVoid) ->
         // Void type (the unit type — no value)
         success (TyNamed ("Void", [])) (advance tokens)
@@ -473,9 +481,85 @@ and parseIndexType (tokens: Token list) : ParseResult<TypeExpr> =
         expectGt afterExtent >>= fun _ remaining ->
         success (TyHermitianIdx extent) remaining
     
+    | Some (TokKeyword KwEnumIdx) ->
+        advance tokens |> expect (TokOp "<") >>= fun _ afterLt ->
+        parseSimpleExpr afterLt >>= fun values afterValues ->
+        expectGt afterValues >>= fun _ remaining ->
+        success (TyEnumIdx values) remaining
+
+    // DepIdx<outer, lambda(i) -> body> | DepIdx<outer, func>
+    // Both forms produce TyDepIdx(outer, param, body); the eta-reduced form
+    // is desugared to a lambda whose body is `func(<param>)`.
+    | Some (TokKeyword KwDepIdx) ->
+        advance tokens |> expect (TokOp "<") >>= fun _ afterLt ->
+        parseIndexType afterLt >>= fun outer afterOuter ->
+        expect TokComma afterOuter >>= fun _ afterComma ->
+        // The body position can be either `lambda(i) -> Idx<...>` or a bare
+        // function name. We peek to decide.
+        match peek afterComma with
+        | Some (TokKeyword KwLambda) ->
+            // Lambda form. Parse `lambda(name) -> idxBody`. Body is an index
+            // type expression, not a general type expression.
+            let afterLambda = advance afterComma
+            expect TokLParen afterLambda >>= fun _ afterLParen ->
+            match peek afterLParen with
+            | Some (TokIdent paramName) ->
+                let afterName = advance afterLParen
+                expect TokRParen afterName >>= fun _ afterRParen ->
+                expect (TokOp "->") afterRParen >>= fun _ afterArrow ->
+                parseIndexType afterArrow >>= fun bodyTy afterBody ->
+                expectGt afterBody >>= fun _ remaining ->
+                success (TyDepIdx (outer, paramName, bodyTy)) remaining
+            | _ ->
+                let line, col = currentPos afterLParen
+                error "DepIdx lambda: expected single parameter name" line col
+        | Some (TokIdent funcName) ->
+            // Eta-reduced form: `DepIdx<outer, func>`.
+            // Desugar to `DepIdx<outer, lambda(__d_i) -> func(__d_i)>` by
+            // synthesizing a body that is the named function applied to the
+            // parameter. We use a fresh parameter name to avoid collisions.
+            // Note: the body produced here is itself a TypeExpr — but the
+            // result of `func(i)` is conceptually an index type, not a value.
+            // We represent it as TyNamed(func, [paramRef]) so lowering can
+            // resolve it through the type-def lookup path.
+            let afterName = advance afterComma
+            expectGt afterName >>= fun _ remaining ->
+            let paramName = "__d_i"
+            // Synthesized body: TyNamed referring to a function-valued type.
+            // The lowering layer will need to recognize and reduce this; for
+            // Round 1 scaffolding, we emit it as a TyNamed with a fresh
+            // expr-level reference and let lowering produce a placeholder
+            // dynamic extent. Real evaluation lands in Round 2.
+            let bodyTy = TyNamed (funcName, [TyNamed (paramName, [])])
+            success (TyDepIdx (outer, paramName, bodyTy)) remaining
+        | _ ->
+            let line, col = currentPos afterComma
+            error "DepIdx: expected lambda or function name as second argument" line col
+
+    // RaggedIdx<lengths> — externally parameterized via a lengths array.
+    | Some (TokKeyword KwRaggedIdx) ->
+        advance tokens |> expect (TokOp "<") >>= fun _ afterLt ->
+        parseSimpleExpr afterLt >>= fun lengthsExpr afterLengths ->
+        expectGt afterLengths >>= fun _ remaining ->
+        success (TyRaggedIdx lengthsExpr) remaining
+    
+    | Some (TokIdent name) ->
+        // Named index type alias (e.g. type RegionIdx = Idx<3>; ...like RegionIdx).
+        // Resolved at typecheck via lowerIndexType / TyNamed lookup against
+        // TDIIndexType or TDIEnumIdx.
+        let afterName = advance tokens
+        match peek afterName with
+        | Some (TokOp "<") ->
+            // Parameterized named type: still acceptable here.
+            advance afterName |> sepBy parseTypeExpr TokComma >>= fun args afterArgs ->
+            expectGt afterArgs >>= fun _ remaining ->
+            success (TyNamed (name, args)) remaining
+        | _ ->
+            success (TyNamed (name, [])) afterName
+    
     | Some kind ->
         let line, col = currentPos tokens
-        error (sprintf "Expected index type (Idx, SymIdx, AntisymIdx, or HermitianIdx) but got %A" kind) line col
+        error (sprintf "Expected index type (Idx, SymIdx, AntisymIdx, HermitianIdx, EnumIdx, DepIdx, RaggedIdx, or a named index type alias) but got %A" kind) line col
     
     | None ->
         error "Expected index type but got EOF" 0 0
@@ -1075,6 +1159,55 @@ and parsePrimary (tokens: Token list) : ParseResult<Expr> =
         parseExprImpl afterComma >>= fun b afterB ->
         expect TokRParen afterB >>= fun _ remaining ->
         success (ExprUnion (a, b)) remaining
+    
+    // group_by(values, keys)
+    | Some (TokKeyword KwGroupBy) ->
+        advance tokens |> expect TokLParen >>= fun _ afterLParen ->
+        parseExprImpl afterLParen >>= fun vals afterVals ->
+        expect TokComma afterVals >>= fun _ afterComma ->
+        parseExprImpl afterComma >>= fun keys afterKeys ->
+        expect TokRParen afterKeys >>= fun _ remaining ->
+        success (ExprGroupBy (vals, keys)) remaining
+    
+    // group_keys(keys)
+    | Some (TokKeyword KwGroupKeys) ->
+        advance tokens |> expect TokLParen >>= fun _ afterLParen ->
+        parseExprImpl afterLParen >>= fun keys afterKeys ->
+        expect TokRParen afterKeys >>= fun _ remaining ->
+        success (ExprGroupKeys keys) remaining
+    
+    // sort(array, key) — stable sort by ascending key
+    | Some (TokKeyword KwSort) ->
+        advance tokens |> expect TokLParen >>= fun _ afterLParen ->
+        parseExprImpl afterLParen >>= fun array afterArr ->
+        expect TokComma afterArr >>= fun _ afterComma ->
+        parseExprImpl afterComma >>= fun key afterKey ->
+        expect TokRParen afterKey >>= fun _ remaining ->
+        success (ExprSort (array, key)) remaining
+    
+    // reduce(array, op) — fold innermost dim by binary kernel.
+    // The kernel is optional; if omitted, defaults to (+).
+    // Accept operator sections like (+) the same way object_for does.
+    | Some (TokKeyword KwReduce) ->
+        advance tokens |> expect TokLParen >>= fun _ afterLParen ->
+        parseExprImpl afterLParen >>= fun array afterArr ->
+        match peek afterArr with
+        | Some TokRParen ->
+            // 1-arg form: reduce(arr) ≡ reduce(arr, (+))
+            expect TokRParen afterArr >>= fun _ remaining ->
+            success (ExprReduce (array, ExprSection OpAdd)) remaining
+        | _ ->
+            expect TokComma afterArr >>= fun _ afterComma ->
+            parseExprImpl afterComma >>= fun op afterOp ->
+            expect TokRParen afterOp >>= fun _ remaining ->
+            success (ExprReduce (array, op)) remaining
+
+    // extents(array) — innermost-dim extent. Rank-1 returns scalar Int64.
+    | Some (TokKeyword KwExtents) ->
+        advance tokens |> expect TokLParen >>= fun _ afterLParen ->
+        parseExprImpl afterLParen >>= fun array afterArr ->
+        expect TokRParen afterArr >>= fun _ remaining ->
+        success (ExprExtents array) remaining
     
     // pure(expr)
     | Some (TokKeyword KwPure) ->
