@@ -123,7 +123,11 @@ let guardCombinatorTests = [
     ("Guard Variable False", test123_guardVariableFalse)
     ("Guard Computation", test124_guardComputation)
     ("Guard Expression False", test125_guardExpressionFalse)
-    ("Guard Nested", test126_guardNested)
+    // "Guard Nested" → "Guard Nested True" to disambiguate from the match-form
+    // "Guard Nested" in guardTests. The previous shared name caused both tests
+    // to write to the same Guard_Nested.cpp file under parallel execution; the
+    // winner was non-deterministic and one validation would fail.
+    ("Guard Nested True", test126_guardNested)
     ("Guard Nested False", test127_guardNestedFalse)
 ]
 
