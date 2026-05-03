@@ -175,6 +175,9 @@ and IRType =
     | IRTNamed of string    // Named type (struct, sum type, etc.)
     | IRTInfer of int       // Unresolved type variable (id for unification)
     | IRTUnitAnnotated of IRType * UnitSig  // Type with unit-of-measure annotation
+    | IRTGroupKeys of outerIdx: IRIndexType * sourceIdx: IRIndexType * enumValues: int64 list option
+      // GroupKeys: CSR structure mapping sourceIdx → groups indexed by outerIdx.
+      // enumValues: if keys are EnumIdx, carries the actual key values for reverse lookup.
 
 /// Kind of loop object with arity tracking
 and LoopType = {
@@ -253,6 +256,10 @@ and IRExpr =
     | IRMask of array: IRExpr * pred: IRExpr  // mask(array, pred) - filter array by predicate
     | IRIntersect of IRExpr * IRExpr          // intersect(A, B) - elements in both
     | IRUnion of IRExpr * IRExpr              // union(A, B) - elements in either
+    | IRGroupBy of values: IRExpr * grouping: IRExpr  // group_by(vals, gk) - apply grouping
+    | IRGroupKeys of keys: IRExpr                    // group_keys(keys) - build CSR structure
+    | IRSort of array: IRExpr * key: IRExpr          // sort(arr, key) - stable ascending sort by key
+    | IRReduce of array: IRExpr * kernel: IRExpr     // reduce(arr, op) - fold innermost dim by kernel
     | IRZip of IRExpr list
     | IRAlign of arrays: IRExpr list * spec: AlignSpec
     | IRStack of IRExpr list
@@ -768,6 +775,7 @@ type IRTypeDef =
     | IRTDStruct of name: string * fields: (string * IRType) list * invariant: StructConstraintInfo option
     | IRTDVariant of name: string * variants: (string * IRType option) list
     | IRTDIndexType of name: string * idx: IRIndexType
+    | IRTDEnumIdx of name: string * idx: IRIndexType * values: int64 list
       // Named index type declaration, e.g. "type lat = Idx<180>"
       // Provides nominal identity: two arrays sharing module.lat
       // have the same index space.  Future: schemas can supply these
@@ -898,6 +906,11 @@ let deduceOutputType
                                 Arity = 1
                                 Symmetry = SymNone
                                 Id = builder.FreshId() })))
+            // Drop indices tagged "__group_member" — these are the ragged inner
+            // dimension of a grouped array, consumed implicitly by the kernel
+            // (which receives a sub-array per outer iteration). The output rank
+            // matches only the outer (group-id) dimension.
+            |> List.filter (fun idx -> idx.Tag <> Some "__group_member")
         
         // Step 4: T-dims from kernel output (passed in with real extents)
         let outputTDims = 
@@ -1326,6 +1339,10 @@ let rec mapIRExpr (f: IRExpr -> IRExpr) (expr: IRExpr) : IRExpr =
         | IRMask (a, p) -> IRMask (m a, m p)
         | IRIntersect (a, b) -> IRIntersect (m a, m b)
         | IRUnion (a, b) -> IRUnion (m a, m b)
+        | IRGroupBy (v, k) -> IRGroupBy (m v, m k)
+        | IRGroupKeys k -> IRGroupKeys (m k)
+        | IRSort (a, k) -> IRSort (m a, m k)
+        | IRReduce (a, k) -> IRReduce (m a, m k)
         | IRPolyIndex (p, i) -> IRPolyIndex (m p, m i)
         // Ternary
         | IRIf (c, t, e) -> IRIf (m c, m t, m e)
@@ -1586,6 +1603,7 @@ let rec ppIRType = function
     | IRTNamed name -> name  // Named types print as themselves
     | IRTInfer id -> sprintf "T?%d" id
     | IRTUnitAnnotated (inner, units) -> sprintf "%s<%s>" (ppIRType inner) (ppUnitSig units)
+    | IRTGroupKeys (outerIdx, sourceIdx, _) -> sprintf "GroupKeys<%s, %s>" (ppIndexType outerIdx) (ppIndexType sourceIdx)
 
 and ppIndexType (idx: IRIndexType) =
     // Inline extent printing since ppIRExpr is defined later
@@ -1618,6 +1636,7 @@ let indexNameMap (modul: IRModule) : Map<IRId, string> =
     modul.Types
     |> List.choose (function
         | IRTDIndexType (name, idx) -> Some (idx.Id, name)
+        | IRTDEnumIdx (name, idx, _) -> Some (idx.Id, name)
         | _ -> None)
     |> Map.ofList
 
@@ -1795,6 +1814,35 @@ let ppIRExpr indent expr = ppIRExprWithNames Map.empty indent expr
 // ============================================================================
 
 /// Collect all variable IDs referenced in an expression (for scope validation)
+/// Attempt to statically evaluate an IRExpr to an int64. Used for resolving
+/// extent expressions to compile-time literals when possible. Handles literal
+/// integer arithmetic (the common case for derived index extents like
+/// `Idx<n+1>`); anything more general (variable references, function calls,
+/// runtime-dependent expressions) returns None.
+///
+/// This is intentionally narrow — a full static evaluator over IR would be a
+/// much larger undertaking (and StaticEval.fs already provides one over the
+/// surface AST). The use cases right now are extent inspection in extents()
+/// and reduce()'s non-emptiness check, both of which only need arithmetic
+/// over int literals.
+let rec tryEvalIntIR (expr: IRExpr) : int64 option =
+    match expr with
+    | IRLit (IRLitInt n) -> Some n
+    | IRBinOp (_, op, l, r) ->
+        match tryEvalIntIR l, tryEvalIntIR r with
+        | Some lv, Some rv ->
+            match op with
+            | IRAdd -> Some (lv + rv)
+            | IRSub -> Some (lv - rv)
+            | IRMul -> Some (lv * rv)
+            | IRDiv when rv <> 0L -> Some (lv / rv)
+            | IRMod when rv <> 0L -> Some (lv % rv)
+            | _ -> None
+        | _ -> None
+    | IRUnaryOp (IRNeg, e) ->
+        tryEvalIntIR e |> Option.map (fun n -> -n)
+    | _ -> None
+
 let rec collectVarRefsIR (expr: IRExpr) : Set<IRId> =
     match expr with
     | IRVar (id, _) -> Set.singleton id
@@ -1828,6 +1876,11 @@ let rec collectVarRefsIR (expr: IRExpr) : Set<IRId> =
     | IRMask (a, p) -> Set.union (collectVarRefsIR a) (collectVarRefsIR p)
     | IRIntersect (a, b) -> Set.union (collectVarRefsIR a) (collectVarRefsIR b)
     | IRUnion (a, b) -> Set.union (collectVarRefsIR a) (collectVarRefsIR b)
+    | IRGroupBy (v, k) -> Set.union (collectVarRefsIR v) (collectVarRefsIR k)
+    | IRGroupKeys k -> collectVarRefsIR k
+    | IRSort (a, k) -> Set.union (collectVarRefsIR a) (collectVarRefsIR k)
+    | IRReduce (a, k) -> Set.union (collectVarRefsIR a) (collectVarRefsIR k)
+    | IRExtent (a, _) -> collectVarRefsIR a
     | IRSequence es -> Set.unionMany (List.map collectVarRefsIR es)
     | IRParallel (a, b, _) -> Set.union (collectVarRefsIR a) (collectVarRefsIR b)
     | IRFusion (a, b) -> Set.union (collectVarRefsIR a) (collectVarRefsIR b)
@@ -2002,6 +2055,8 @@ let validateModule (modul: IRModule) : IRValidationError list =
         | IRReynolds (inner, _) -> checkScope scope ctx inner
         | IRMethodFor info -> info.Arrays |> List.iter (checkScope scope ctx)
         | IRObjectFor info -> checkScope scope ctx info.Kernel
+        | IRSort (a, k) -> checkScope scope ctx a; checkScope scope ctx k
+        | IRReduce (a, k) -> checkScope scope ctx a; checkScope scope ctx k
         | IRApplyCombinator info ->
             checkScope scope ctx info.Loop
             checkScope scope ctx info.Kernel
