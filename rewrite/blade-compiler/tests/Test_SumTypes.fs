@@ -68,6 +68,41 @@ let sum = va + vb
 // EXPECT: sum = 25
 """
 
+let test_phaseD_sumEnumArray = """
+// Phase D probe: Array of enum-like sum type (no payload variants).
+// Tests construction via ArrayLit, bracket-indexing into the array,
+// and match dispatch on the indexed result. Match for enum-style
+// variants compiles to `==` comparisons on the underlying enum int.
+type Status = Pending | Active | Completed
+let states: Array<Status like Idx<3>> = [Pending, Active, Completed]
+let v = match states[1] with
+    | Pending -> 1
+    | Active -> 2
+    | Completed -> 3
+// EXPECT: v = 2
+"""
+
+let test_phaseD_sumPayloadArray = """
+// Phase D probe: Array of sum type with data-bearing variants. Match
+// dispatch uses std::holds_alternative + std::get<>::value on the
+// indexed array element. Tests both Yes(n) extraction and No fallback
+// across distinct array elements.
+type Maybe = Yes : Int | No
+let arr: Array<Maybe like Idx<3>> = [Yes(10), No, Yes(30)]
+let v0 = match arr[0] with
+    | Yes(n) -> n
+    | No -> 0
+let v1 = match arr[1] with
+    | Yes(n) -> n
+    | No -> 0
+let v2 = match arr[2] with
+    | Yes(n) -> n
+    | No -> 0
+// EXPECT: v0 = 10
+// EXPECT: v1 = 0
+// EXPECT: v2 = 30
+"""
+
 /// Sum type tests
 let sumTypeTests = [
     ("Sum Type Simple", test48_sumTypeSimple)
@@ -75,4 +110,6 @@ let sumTypeTests = [
     ("Sum Type Match", test50_sumTypeMatch)
     ("Sum Type None", test50b_sumTypeNone)
     ("Sum Type Nested", test50c_sumTypeNested)
+    ("Phase D: Sum Enum Array", test_phaseD_sumEnumArray)
+    ("Phase D: Sum Payload Array", test_phaseD_sumPayloadArray)
 ]

@@ -72,8 +72,14 @@ let test_depidx_parse_eta = """
 // DepIdx<outer, func>: eta-reduced form. Desugars at parse time to the
 // lambda form. Round 1 lowers to a placeholder dynamic extent regardless;
 // this test only confirms the surface form parses.
-function tri_extent(i: Idx<3>) -> Idx<3> = i
-function g(A: Array<Float64 like DepIdx<Idx<3>, tri_extent>>) -> Float64 = {
+//
+// Per the index-type role validator: the named extent function must be a
+// static function (its result feeds a DepIdx body, which is a static-context
+// position), with aliased index parameters (anonymous index types are not
+// permitted as static-fn params).
+type TriIdx = Idx<3>
+static function tri_extent(i: TriIdx) -> TriIdx = i
+function g(A: Array<Float64 like DepIdx<TriIdx, tri_extent>>) -> Float64 = {
     0.0
 }
 """
@@ -114,6 +120,193 @@ let x = 0  // placeholder so the file has runtime behavior
 // EXPECT: x = 0
 """
 
+// Round 2 Phase 2 — ragged literal allocation and printing.
+// A nested array literal with uneven inner lengths is now typed as a
+// RaggedIdx-typed array. Codegen emits offsets table, flat backing buffer,
+// and row-pointer table. The print loop walks the structure using the
+// offsets to produce the correct flat output.
+
+let test_ragged_literal_basic = """
+// Ragged literal: rows of differing lengths. The literal allocates as
+// RaggedIdx-typed; print emits the flat sequence of values.
+let r = [[1.0, 2.0, 3.0], [4.0, 5.0], [6.0, 7.0, 8.0, 9.0]]
+// EXPECT: r = [1, 2, 3, 4, 5, 6, 7, 8, 9]
+"""
+
+// Ragged literal direct indexing: with the row-pointer setup, r(i)(j) works
+// as nested C++ indexing on the heterogeneous-length rows. This test exercises
+// element access without involving combinator iteration (which still requires
+// the kernel-param typing fix that's a separate workstream).
+
+let test_ragged_literal_indexing = """
+// Direct index access into a ragged literal. The row-pointer table makes
+// r(i)(j) generate r[i][j] in C++, which works correctly because each r[i]
+// points into the flat buffer at the right offset.
+let r = [[1.0, 2.0, 3.0], [4.0, 5.0], [6.0, 7.0, 8.0, 9.0]]
+let a = r(0)(2)
+let b = r(1)(0)
+let c = r(2)(3)
+// EXPECT: a = 3
+// EXPECT: b = 4
+// EXPECT: c = 9
+"""
+
+let test_ragged_literal_row_then_elem = """
+// Bind a row to an intermediate variable, then index into it. Tests that the
+// row binding holds a usable pointer and that subsequent indexing through it
+// produces correct values.
+let r = [[10.0, 20.0, 30.0], [40.0, 50.0], [60.0, 70.0, 80.0, 90.0]]
+let row1 = r(1)
+let v = row1(0)
+let w = row1(1)
+// EXPECT: v = 40
+// EXPECT: w = 50
+"""
+
+// Combinator iteration over a ragged literal. Routes through the generalized
+// tryRaggedPeel codegen path: outer loop over rows, sub-array binding for the
+// kernel param, kernel body produces one scalar per row.
+//
+// The kernel's `g(0)` references work via the IRApp→IRIndex rewrite already
+// used by group_by aggregation. The kernel param's type stays unconstrained
+// at typecheck (a fresh type variable) — the codegen path handles it
+// regardless. Output is rectangular `Array<Float64 like Idx<3>>`.
+
+let test_ragged_method_for_first_elem = """
+// method_for over a ragged literal. Kernel returns the first element of each
+// row.
+let r = [[1.0, 2.0, 3.0], [4.0, 5.0], [6.0, 7.0, 8.0, 9.0]]
+let firsts = method_for(r) <@> lambda(g) -> g(0) |> compute
+// EXPECT: firsts = [1, 4, 6]
+"""
+
+// ============================================================================
+// RaggedIdx<_> — opaque-extent variant for kernel-parameter typing.
+// Round 3 (Leg 1): a kernel parameter typed `Array<T like RaggedIdx<_>>`
+// represents a sub-array peeled from a parent ragged at iteration time.
+// The `_` is a wildcard for "extent supplied by surrounding context"; only
+// the raggedness is part of the kernel-param type. Without this annotation,
+// the kernel param has a fresh type variable and operations like reduce(g),
+// extents(g) cannot typecheck. With the annotation, those operations
+// typecheck normally, and codegen produces correct C++ via the existing
+// tryRaggedPeel sub-array binding (which also emits the per-row _extents
+// the kernel body needs to read).
+// ============================================================================
+
+let test_raggedidx_opaque_parse = """
+// Parse + typecheck smoke for the wildcard form. Body is constant; this
+// only exercises the surface syntax and type lowering.
+let r = [[1.0, 2.0, 3.0], [4.0, 5.0]]
+let firsts = method_for(r) <@> lambda(g: Array<Float64 like RaggedIdx<_>>) -> 0.0 |> compute
+// EXPECT: firsts = [0, 0]
+"""
+
+let test_raggedidx_opaque_reduce = """
+// Reduce each row of a ragged literal. With the typed kernel param, reduce(g)
+// typechecks because g is rank-1; codegen renders the inline IIFE against
+// the sub-array binding's _extents, producing per-row sums.
+let r = [[1.0, 2.0, 3.0], [4.0, 5.0], [6.0, 7.0, 8.0, 9.0]]
+let sums = method_for(r) <@> lambda(g: Array<Float64 like RaggedIdx<_>>) -> reduce(g, (+)) |> compute
+// EXPECT: sums = [6, 9, 30]
+"""
+
+let test_raggedidx_opaque_extents = """
+// extents(g) for a typed rank-1 kernel param falls through to the runtime
+// read against the sub-array binding's _extents[0], which carries the row
+// length the parent ragged supplied at the peel point.
+let r = [[1.0, 2.0, 3.0], [4.0, 5.0], [6.0, 7.0, 8.0, 9.0]]
+let sizes = method_for(r) <@> lambda(g: Array<Float64 like RaggedIdx<_>>) -> extents(g) |> compute
+// EXPECT: sizes = [3, 2, 4]
+"""
+
+let test_raggedidx_opaque_indexing = """
+// Direct indexing on a typed kernel param. With the annotation, g(0) is
+// TExprIndex at typecheck (since g is a rank-1 array type) — distinct from
+// the unannotated path where g(0) became TExprApp and was rewritten to
+// IRIndex post-hoc. Both should produce equivalent output.
+let r = [[10.0, 20.0, 30.0], [40.0, 50.0], [60.0, 70.0]]
+let firsts = method_for(r) <@> lambda(g: Array<Float64 like RaggedIdx<_>>) -> g(0) |> compute
+// EXPECT: firsts = [10, 40, 60]
+"""
+
+// ============================================================================
+// Function parameters with ragged types (Leg 2).
+// A function declared `f(A: Array<... RaggedIdx<...>>)` must receive `A_lens`
+// alongside `A_extents` at the C++ calling convention. With those companion
+// arrays in scope inside the body, tryRaggedPeel handles iteration via the
+// usual `A_lens[__g]` / `A_extents[0]` machinery — the same path that
+// already worked for ragged literals.
+//
+// Both surface forms are exercised:
+//   - Closed `RaggedIdx<lens>`: type-level reference to a named lens binding.
+//     Currently decorative — no runtime check that the caller's lens equals
+//     the named binding. Enforcement is deferred to a materialization round.
+//   - Opaque `RaggedIdx<_>`:    the universal ragged spelling for any context.
+//
+// Both produce identical C++ at the call site; the named form's enforcement
+// is the only future-different bit.
+// ============================================================================
+
+let test_raggedidx_func_param_closed_smoke = """
+// Function decl with closed RaggedIdx<lens> param. Body is constant — only
+// verifies the decl signature emits properly and the call site passes the
+// companion arrays.
+let lens = [3, 2, 4]
+function h(A: Array<Float64 like Idx<3>, RaggedIdx<lens>>) -> Float64 = 0.0
+let r = [[1.0, 2.0, 3.0], [4.0, 5.0], [6.0, 7.0, 8.0, 9.0]]
+let result = h(r)
+// EXPECT: result = 0
+"""
+
+let test_raggedidx_func_param_opaque_smoke = """
+// Function decl with opaque RaggedIdx<_> param. Same as above but with the
+// opaque form, which is the recommended spelling for ragged function params
+// until named-form enforcement lands.
+function h(A: Array<Float64 like Idx<3>, RaggedIdx<_>>) -> Float64 = 0.0
+let r = [[1.0, 2.0, 3.0], [4.0, 5.0], [6.0, 7.0, 8.0, 9.0]]
+let result = h(r)
+// EXPECT: result = 0
+"""
+
+let test_raggedidx_func_param_closed_total = """
+// Function takes a ragged input, returns the total sum of all elements.
+// Body uses tryRaggedPeel via method_for(A) inside the function — A_lens
+// and A_extents must both be in scope, which only happens if the calling
+// convention plumbing is correct.
+let lens = [3, 2, 4]
+function totalSum(A: Array<Float64 like Idx<3>, RaggedIdx<lens>>) -> Float64 = {
+    let row_sums = method_for(A) <@> lambda(g: Array<Float64 like RaggedIdx<_>>) -> reduce(g, (+)) |> compute
+    reduce(row_sums, (+))
+}
+let r = [[1.0, 2.0, 3.0], [4.0, 5.0], [6.0, 7.0, 8.0, 9.0]]
+let result = totalSum(r)
+// EXPECT: result = 45
+"""
+
+let test_raggedidx_func_param_opaque_total = """
+// Same as above, opaque form. The ragged structural logic is identical;
+// only the type-level annotation differs.
+function totalSum(A: Array<Float64 like Idx<3>, RaggedIdx<_>>) -> Float64 = {
+    let row_sums = method_for(A) <@> lambda(g: Array<Float64 like RaggedIdx<_>>) -> reduce(g, (+)) |> compute
+    reduce(row_sums, (+))
+}
+let r = [[1.0, 2.0, 3.0], [4.0, 5.0], [6.0, 7.0, 8.0, 9.0]]
+let result = totalSum(r)
+// EXPECT: result = 45
+"""
+
+let test_func_param_plain_array_call = """
+// Latent-bug regression: a function with a plain (non-ragged) array param
+// is now actually callable. Previously the decl emitted `const size_t*`
+// extents companions, but the call site didn't pass them, producing a
+// "too few arguments" C++ error. Argument-driven companion-passing fixes
+// both ragged and non-ragged calls.
+function arraySum(A: Array<Float64 like Idx<3>>) -> Float64 = reduce(A, (+))
+let A = [1.0, 2.0, 3.0]
+let result = arraySum(A)
+// EXPECT: result = 6
+"""
+
 // ============================================================================
 // Block expression return value tests
 // ============================================================================
@@ -137,8 +330,124 @@ function g(A: Array<Float64 like Idx<n>>) -> Float64 = {
 """
 
 // ============================================================================
-// Test Collections
+// DepIdx Leg 3 — construction codegen and iteration through __depidx_inner.
+// Triangular form: DepIdx<Idx<3>, lambda(i) -> Idx<3 - i>> gives row lengths
+// [3, 2, 1] computed at codegen time from the formula. The literal must
+// match those lens; mismatches surface as a codegen-time error.
+// Once allocated, the runtime layout (`_lens`/`_offsets`/flat backing)
+// matches a ragged array, so iteration flows through the same paths.
 // ============================================================================
+
+let test_depidx_triangular_literal = """
+// Triangular literal: lens computed from the formula 3-i = [3, 2, 1].
+// Print walks the offsets table to produce a flat sequence, identical
+// in shape to the ragged literal print.
+let r: Array<Float64 like DepIdx<Idx<3>, lambda(i) -> Idx<3 - i>>> = [
+    [1.0, 2.0, 3.0],
+    [4.0, 5.0],
+    [6.0]
+]
+// EXPECT: r = [1, 2, 3, 4, 5, 6]
+"""
+
+let test_depidx_inline_per_row_reduce = """
+// Inline method_for over a DepIdx-allocated array. The kernel param uses
+// the opaque RaggedIdx<_> type — the peel logic recognizes both
+// __depidx_inner and __raggedidx_opaque tags as 'has runtime-shape inner
+// extent' and uses the same loop structure.
+let r: Array<Float64 like DepIdx<Idx<3>, lambda(i) -> Idx<3 - i>>> = [
+    [1.0, 2.0, 3.0],
+    [4.0, 5.0],
+    [6.0]
+]
+let row_sums = method_for(r) <@> lambda(g: Array<Float64 like RaggedIdx<_>>) -> reduce(g, (+)) |> compute
+let total = reduce(row_sums, (+))
+// EXPECT: total = 21
+"""
+
+let test_depidx_func_param_total = """
+// Function takes a DepIdx-typed parameter, computes per-row reductions in
+// the body, then totals them. Exercises the calling convention (lens
+// companion passed at the call site), the function-body let-binding of
+// method_for output (Leg 2 fix), and the per-row peel through the
+// __depidx_inner tag.
+function totalSum(A: Array<Float64 like DepIdx<Idx<3>, lambda(i) -> Idx<3 - i>>>) -> Float64 = {
+    let row_sums = method_for(A) <@> lambda(g: Array<Float64 like RaggedIdx<_>>) -> reduce(g, (+)) |> compute
+    reduce(row_sums, (+))
+}
+let r: Array<Float64 like DepIdx<Idx<3>, lambda(i) -> Idx<3 - i>>> = [
+    [1.0, 2.0, 3.0],
+    [4.0, 5.0],
+    [6.0]
+]
+let total = totalSum(r)
+// EXPECT: total = 21
+"""
+
+// ============================================================================
+// Index types as standalone value types. The validator (IndexTypeValidator.fs)
+// enforces:
+//   - regular function params/returns: forbidden
+//   - struct fields: forbidden
+//   - let-binding annotations: forbidden
+//   - static fn params: aliased + statically-evaluable only
+//   - static fn returns: statically-evaluable (anon or aliased)
+//   - tuple elements in static-context: statically-evaluable
+//   - array element types: aliased only (foreign keys)
+// ============================================================================
+
+let test_idx_value_static_fn_return_anon = """
+// Anonymous index type as static-fn return: permitted.
+static function pivot() -> Idx<5> = 2
+let p = pivot()
+// EXPECT: p = 2
+"""
+
+let test_idx_value_static_fn_param_aliased = """
+// Aliased index type as static-fn parameter: permitted.
+type StationIdx = Idx<6>
+static function next_station(s: StationIdx) -> StationIdx = s
+let s = next_station(3)
+// EXPECT: s = 3
+"""
+
+let test_idx_value_static_tuple_destructuring = """
+// Static tuple containing index types in `let static` destructuring:
+// permitted because the tuple is in static-context.
+type StationIdx = Idx<6>
+static function lookup_pair() -> (StationIdx, Idx<3>) = (4, 1)
+let static (a, b) = lookup_pair()
+let r = a + b
+// EXPECT: r = 5
+"""
+
+let test_idx_value_alias_runtime_smoke = """
+// Aliasing a runtime-evaluable index type at the alias-body position is
+// permitted by the validator (alias bodies accept any index type, runtime
+// or static). End-to-end test: declare the alias, use it as the second
+// index in a 2-D ragged array, index into the array, verify the value.
+let lens: Array<Int64 like Idx<3>> = [3, 2, 1]
+type Ragged3 = RaggedIdx<lens>
+let r: Array<Float64 like Idx<3>, Ragged3> = [[1.0, 2.0, 3.0], [4.0, 5.0], [6.0]]
+let v = r(0)(0)
+// EXPECT: v = 1
+"""
+
+let test_idx_value_alias_depidx = """
+// DepIdx aliasing — the multi-record case. The unaliased form expands to
+// two IRIndexType records (outer + inner with Dependencies linking them);
+// the alias must re-expand at the use site rather than retrieve a
+// single-record placeholder. lowerIndexTypeList catches TyNamed → DepIdx
+// body and recurses on the body.
+type Tri3 = DepIdx<Idx<3>, lambda(i) -> Idx<3 - i>>
+let r: Array<Float64 like Tri3> = [
+    [1.0, 2.0, 3.0],
+    [4.0, 5.0],
+    [6.0]
+]
+// EXPECT: r = [1, 2, 3, 4, 5, 6]
+"""
+
 
 /// Index type tests (AntisymIdx, HermitianIdx)
 let indexTypeTests = [
@@ -153,4 +462,25 @@ let indexTypeTests = [
     ("DepIdx Parse Eta", test_depidx_parse_eta)
     ("RaggedIdx Parse", test_raggedidx_parse)
     ("DepIdx Two Records Rank", test_depidx_rank_two_records)
+    ("Ragged Literal Basic", test_ragged_literal_basic)
+    ("Ragged Literal Indexing", test_ragged_literal_indexing)
+    ("Ragged Literal Row Then Elem", test_ragged_literal_row_then_elem)
+    ("Ragged Method For First Elem", test_ragged_method_for_first_elem)
+    ("RaggedIdx Opaque Parse", test_raggedidx_opaque_parse)
+    ("RaggedIdx Opaque Reduce", test_raggedidx_opaque_reduce)
+    ("RaggedIdx Opaque Extents", test_raggedidx_opaque_extents)
+    ("RaggedIdx Opaque Indexing", test_raggedidx_opaque_indexing)
+    ("RaggedIdx Func Param Closed Smoke", test_raggedidx_func_param_closed_smoke)
+    ("RaggedIdx Func Param Opaque Smoke", test_raggedidx_func_param_opaque_smoke)
+    ("RaggedIdx Func Param Closed Total", test_raggedidx_func_param_closed_total)
+    ("RaggedIdx Func Param Opaque Total", test_raggedidx_func_param_opaque_total)
+    ("Func Param Plain Array Call", test_func_param_plain_array_call)
+    ("DepIdx Triangular Literal", test_depidx_triangular_literal)
+    ("DepIdx Inline Per Row Reduce", test_depidx_inline_per_row_reduce)
+    ("DepIdx Func Param Total", test_depidx_func_param_total)
+    ("Idx Value Static Fn Return Anon", test_idx_value_static_fn_return_anon)
+    ("Idx Value Static Fn Param Aliased", test_idx_value_static_fn_param_aliased)
+    ("Idx Value Static Tuple Destructuring", test_idx_value_static_tuple_destructuring)
+    ("Idx Value Alias Runtime Smoke", test_idx_value_alias_runtime_smoke)
+    ("Idx Value Alias DepIdx", test_idx_value_alias_depidx)
 ]

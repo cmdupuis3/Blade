@@ -35,6 +35,7 @@ open Blade.Tests.Mutability
 open Blade.Tests.Static
 open Blade.Tests.Units
 open Blade.Tests.Sqlish
+open Blade.Tests.InferenceProbes
 // Aliases for cleaner code
 type Process = System.Diagnostics.Process
 type ProcessStartInfo = System.Diagnostics.ProcessStartInfo
@@ -346,6 +347,7 @@ let allTests =
     @ structTests @ sumTypeTests @ interfaceTests @ moduleTests @ guardTests @ guardCombinatorTests @ zeroCombinatorTests @ sequenceCombinatorTests @ tupleViewTests @ replicateTests @ anonRangeTests @ forInTests @ bracketedTests
     @ indexTypeTests @ mutabilityTests @ staticTests @ unitTests
     @ foreignKeyTests @ maskTests @ setOpTests @ groupByTests @ sortTests @ reduceTests @ extentsTests @ extentsMultiRankTests @ regressionTests @ sqlCombinedTests
+    @ inferenceProbes
 
 // ============================================================================
 // Test Runner
@@ -380,8 +382,20 @@ let compileCpp (cppFile: string) (outputDir: string) : Result<string, string> =
         
         // Enable OpenMP for parallel loops
         let ompFlag = "-fopenmp"
-        
-        let args = sprintf "-std=c++17 -O2 %s -o \"%s\" \"%s\"" ompFlag exeFullPath cppFullPath
+
+        // Backstop the Blade type system: any implicit float→integer narrowing
+        // conversion in generated C++ should be a hard error, not a silent
+        // truncation. Probe E's silent miscompile (Float64 → Int64) is exactly
+        // this pattern.
+        //
+        // -Wnarrowing only catches brace-init narrowing (`int x{1.5};`); we
+        //   need assignment-style coverage too (`int x = 1.5;`).
+        // -Wfloat-conversion catches both, but only for float-vs-integer.
+        // -Wconversion is broader but flags many legitimate cases (size_t loop
+        //   counters compared with int literals, etc.) so we don't enable it.
+        let safetyFlags = "-Werror=float-conversion -Werror=narrowing"
+
+        let args = sprintf "-std=c++17 -O2 %s %s -o \"%s\" \"%s\"" ompFlag safetyFlags exeFullPath cppFullPath
         
         let psi = ProcessStartInfo("g++", args)
         psi.RedirectStandardOutput <- true
@@ -673,6 +687,8 @@ let runMultiFileTestsFull (name: string) (tests: (string * (string * string) lis
     // Write runtime header file once
     let headerFile = Path.Combine(outputDir, "nested_array_utilities.hpp")
     File.WriteAllText(headerFile, CodeGen.genRuntimeHeader ())
+    let arrayTypesHeaderFile = Path.Combine(outputDir, "nested_array_types.hpp")
+    File.WriteAllText(arrayTypesHeaderFile, CodeGen.genRuntimeArrayTypesHeader ())
     
     let mutable passed = 0
     let mutable failed = 0
@@ -768,6 +784,8 @@ let runTestCategoryFull (name: string) (tests: (string * string) list) (outputDi
     // Write runtime header file once
     let headerFile = Path.Combine(outputDir, "nested_array_utilities.hpp")
     File.WriteAllText(headerFile, CodeGen.genRuntimeHeader ())
+    let arrayTypesHeaderFile = Path.Combine(outputDir, "nested_array_types.hpp")
+    File.WriteAllText(arrayTypesHeaderFile, CodeGen.genRuntimeArrayTypesHeader ())
     
     printfn "Running %d tests...\n" (List.length tests)
     
@@ -871,6 +889,8 @@ let runTestCategoryGenOnly (name: string) (tests: (string * string) list) (outpu
     // Write runtime header file once
     let headerFile = Path.Combine(outputDir, "nested_array_utilities.hpp")
     File.WriteAllText(headerFile, CodeGen.genRuntimeHeader ())
+    let arrayTypesHeaderFile = Path.Combine(outputDir, "nested_array_types.hpp")
+    File.WriteAllText(arrayTypesHeaderFile, CodeGen.genRuntimeArrayTypesHeader ())
     
     printfn "Generating C++ for %d tests to %s...\n" (List.length tests) (Path.GetFullPath outputDir)
     
@@ -1018,6 +1038,8 @@ let runAbortTests (name: string) (tests: (string * string) list) (outputDir: str
         Directory.CreateDirectory outputDir |> ignore
     let headerFile = Path.Combine(outputDir, "nested_array_utilities.hpp")
     File.WriteAllText(headerFile, CodeGen.genRuntimeHeader ())
+    let arrayTypesHeaderFile = Path.Combine(outputDir, "nested_array_types.hpp")
+    File.WriteAllText(arrayTypesHeaderFile, CodeGen.genRuntimeArrayTypesHeader ())
 
     let gppAvailable = checkGppAvailable ()
     if not gppAvailable then
@@ -1373,7 +1395,7 @@ let runNetcdfTests () =
     match varAType with
     | Some (IRTArray arr) ->
         check "A element type is Float64"
-            (arr.ElemType = ETFloat64) (sprintf "got %A" arr.ElemType)
+            (arr.ElemType = IRTScalar ETFloat64) (sprintf "got %A" arr.ElemType)
         check "A has 3 index types"
             (arr.IndexTypes.Length = 3) (sprintf "got %d" arr.IndexTypes.Length)
         check "A index types have no tags"
@@ -1433,7 +1455,7 @@ let runNetcdfTests () =
     check "temperature is Float64, pressure is Float32"
         (match vars2.Value.[0] |> snd, vars2.Value.[1] |> snd with
          | IRTArray a1, IRTArray a2 ->
-             a1.ElemType = ETFloat64 && a2.ElemType = ETFloat32
+             a1.ElemType = IRTScalar ETFloat64 && a2.ElemType = IRTScalar ETFloat32
          | _ -> false) ""
 
     // ---------------------------------------------------------------

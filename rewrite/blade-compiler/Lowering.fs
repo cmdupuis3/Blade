@@ -556,8 +556,22 @@ and lowerTypedBinOp env mode op l r leftExpr rightExpr resultType =
                    | OpEq -> IREq | OpNeq -> IRNeq
                    | OpLt -> IRLt | OpLe -> IRLe | OpGt -> IRGt | OpGe -> IRGe
                    | OpAnd -> IRAnd | OpOr -> IROr | _ -> IRAdd
-        let elemTypeL = match leftExpr.Type with IRTArray a -> a.ElemType | _ -> ETFloat64
-        let elemTypeR = match rightExpr.Type with IRTArray a -> a.ElemType | _ -> ETFloat64
+        // S3 tag: relic. Default to Float64 if elem type isn't a primitive.
+        // Lambda params for arithmetic ops require concrete scalar types;
+        // if the array's elem type isn't a primitive (e.g., struct or
+        // unresolved infer), the codegen would fail downstream. Preserving
+        // current default behavior; a stricter error here would be a
+        // separate cleanup.
+        let elemTypeL =
+            match leftExpr.Type with
+            | IRTArray a ->
+                match a.ElemType with PrimElem et -> et | _ -> ETFloat64
+            | _ -> ETFloat64
+        let elemTypeR =
+            match rightExpr.Type with
+            | IRTArray a ->
+                match a.ElemType with PrimElem et -> et | _ -> ETFloat64
+            | _ -> ETFloat64
         let aId = env.Builder.FreshId()
         let bId = env.Builder.FreshId()
         let body = IRBinOp(IRElementwise, irOp, IRVar (aId, IRTScalar elemTypeL), IRVar (bId, IRTScalar elemTypeR))
@@ -760,21 +774,57 @@ let lowerTypedDecl (env: TypedLowerEnv) (decl: TypedDecl) : (Choice<IRFuncDef, I
     
     | TDeclStatic binding ->
         // Static values: use pre-evaluated value if available, else lower normally
-        match Map.tryFind binding.Name env.StaticValues with
-        | Some sv ->
-            let irValue = staticValueToIR sv
-            let ty = match sv with
-                     | StaticEval.SVInt _ -> IRTScalar ETInt64
-                     | StaticEval.SVFloat _ -> IRTScalar ETFloat64
-                     | StaticEval.SVBool _ -> IRTScalar ETBool
-                     | _ -> IRTUnit
-            let bd = { Id = binding.VarId; Name = binding.Name; Type = ty; Value = irValue; IsConst = true; IsMutable = false }
-            let env' = bindTypedVar binding.Name binding.VarId env
-            ([Choice2Of3 bd], env')
-        | None ->
-            // Fallback: lower as normal binding
-            let (irBinding, env') = lowerTypedBinding env binding
-            ([Choice2Of3 irBinding], env')
+        let (primary, env') =
+            match Map.tryFind binding.Name env.StaticValues with
+            | Some sv ->
+                let irValue = staticValueToIR sv
+                let ty = match sv with
+                         | StaticEval.SVInt _ -> IRTScalar ETInt64
+                         | StaticEval.SVFloat _ -> IRTScalar ETFloat64
+                         | StaticEval.SVBool _ -> IRTScalar ETBool
+                         | _ -> IRTUnit
+                let bd = { Id = binding.VarId; Name = binding.Name; Type = ty; Value = irValue; IsConst = true; IsMutable = false }
+                let env' = bindTypedVar binding.Name binding.VarId env
+                (bd, env')
+            | None ->
+                // Fallback: lower as normal binding
+                let (irBinding, env') = lowerTypedBinding env binding
+                (irBinding, env')
+
+        // Emit sub-bindings for destructured patterns. The static evaluator's
+        // bindPattern (StaticEval.fs) has already populated env.StaticValues
+        // with each sub-name → value mapping for tuple destructuring; prefer
+        // those direct constants. Fall back to tuple projection of the
+        // primary binding for shapes the static evaluator didn't reach.
+        let isStruct = match binding.Type with IRTNamed _ -> true | _ -> false
+        let isFlat =
+            match binding.Type with
+            | IRTTuple ts ->
+                let structCount = ts.Length
+                let flatCount = IR.flattenTupleLeaves binding.Type |> List.length
+                binding.SubBindings.Length = flatCount && binding.SubBindings.Length <> structCount
+            | _ -> false
+        let (subIRBindings, envFinal) =
+            binding.SubBindings |> List.mapi (fun i (name, subId, subTy) -> (i, name, subId, subTy))
+            |> List.fold (fun (acc, e) (i, name, subId, subTy) ->
+                let bd =
+                    match Map.tryFind name env.StaticValues with
+                    | Some sv ->
+                        // Direct static constant — preferred path for statically-
+                        // evaluated tuple destructuring.
+                        let irValue = staticValueToIR sv
+                        { Id = subId; Name = name; Type = subTy; Value = irValue
+                          IsConst = true; IsMutable = false }
+                    | None ->
+                        // Projection fallback — same shape as TDeclLet's branch.
+                        let projExpr =
+                            if isStruct then IRFieldAccess (IRVar (binding.VarId, binding.Type), name)
+                            else IRTupleProj (IRVar (binding.VarId, binding.Type), i, isFlat)
+                        { Id = subId; Name = name; Type = subTy; Value = projExpr
+                          IsConst = true; IsMutable = false }
+                (acc @ [bd], bindTypedVar name subId e)
+            ) ([], env')
+        ([Choice2Of3 primary] @ (subIRBindings |> List.map Choice2Of3), envFinal)
     
     | TDeclType ttd ->
         let irTd = lowerTypedTypeDef env ttd
@@ -1027,6 +1077,10 @@ let lowerTypedProgram (program: TypedProgram) (rawProgram: Program option) (buil
         let (irModule, exports) = lowerTypedModule envWithExports tmod rawDecls
         // Monomorphize arity-polymorphic functions before codegen
         let irModule = IR.monomorphizeModule irModule env.Builder
+        // Lift inline forms (mask/sort/intersect/union/group_by/group_keys
+        // appearing in non-let-RHS positions) into auto-let bindings so
+        // codegen sees the canonical "let-bound" pattern uniformly.
+        let irModule = IR.liftInlineFormsModule irModule env.Builder
         currentExports <- Map.add moduleName exports currentExports
         irModules <- irModules @ [irModule]
     

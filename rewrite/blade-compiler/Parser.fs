@@ -406,6 +406,16 @@ and parseTypeAtom (tokens: Token list) : ParseResult<TypeExpr> =
     | Some (TokKeyword KwEnumIdx) ->
         parseIndexType tokens
     
+    | Some (TokKeyword KwDepIdx) ->
+        // DepIdx in standalone position (alias body, fn return, etc).
+        // Inside `Array<T like ...>` this is reached via sepBy parseIndexType
+        // directly; this dispatch makes the type writable everywhere.
+        parseIndexType tokens
+    
+    | Some (TokKeyword KwRaggedIdx) ->
+        // RaggedIdx in standalone position. Same rationale as KwDepIdx above.
+        parseIndexType tokens
+    
     | Some (TokKeyword KwVoid) ->
         // Void type (the unit type — no value)
         success (TyNamed ("Void", [])) (advance tokens)
@@ -537,11 +547,33 @@ and parseIndexType (tokens: Token list) : ParseResult<TypeExpr> =
             error "DepIdx: expected lambda or function name as second argument" line col
 
     // RaggedIdx<lengths> — externally parameterized via a lengths array.
+    // RaggedIdx<_>      — opaque-extent variant. Used in kernel-parameter
+    // types (`lambda(g: Array<T like RaggedIdx<_>>) -> ...`) where the
+    // extent is supplied by the peel context, not declared up front.
+    //
+    // Context-sensitivity: `_` only means "opaque extent" when it's the SOLE
+    // argument to RaggedIdx — i.e., immediately followed by the closing `>`
+    // (or `>>`, which expectGt splits). Any other position (`_ + 1`, `_, x`,
+    // a leading `_` in an identifier, etc.) is left for the lengths-expr
+    // parser to handle. This conservative two-token lookahead prevents the
+    // wildcard from accidentally swallowing a piece of a real expression.
     | Some (TokKeyword KwRaggedIdx) ->
         advance tokens |> expect (TokOp "<") >>= fun _ afterLt ->
-        parseSimpleExpr afterLt >>= fun lengthsExpr afterLengths ->
-        expectGt afterLengths >>= fun _ remaining ->
-        success (TyRaggedIdx lengthsExpr) remaining
+        // Two-token lookahead: TokUnderscore immediately followed by `>` or `>>`.
+        let isOpaqueWildcard =
+            match afterLt with
+            | t1 :: t2 :: _ when
+                t1.Kind = TokUnderscore &&
+                (t2.Kind = TokOp ">" || t2.Kind = TokOp ">>") -> true
+            | _ -> false
+        if isOpaqueWildcard then
+            let afterUnderscore = advance afterLt
+            expectGt afterUnderscore >>= fun _ remaining ->
+            success TyRaggedIdxOpaque remaining
+        else
+            parseSimpleExpr afterLt >>= fun lengthsExpr afterLengths ->
+            expectGt afterLengths >>= fun _ remaining ->
+            success (TyRaggedIdx lengthsExpr) remaining
     
     | Some (TokIdent name) ->
         // Named index type alias (e.g. type RegionIdx = Idx<3>; ...like RegionIdx).

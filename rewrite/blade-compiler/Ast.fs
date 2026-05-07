@@ -152,6 +152,12 @@ type TypeExpr =
     // expression is an array (or a name resolving to an array); its outer
     // index implicitly defines RaggedIdx's outer index.
     | TyRaggedIdx of lengths: Expr
+    // RaggedIdx<_> — opaque-extent variant. The inner extent is supplied by
+    // the surrounding context (typically a kernel-parameter type whose extent
+    // is filled in at the peel point of a parent ragged array). Distinct from
+    // TyRaggedIdx because it carries no lengths expression — there is nothing
+    // to look up; the extent is whatever the loop binding provides.
+    | TyRaggedIdxOpaque
     // With constraints
     | TyConstrained of TypeExpr * Constraint list
     // Poly type for arity polymorphism

@@ -153,9 +153,13 @@ type IRIndexType = {
     Dependencies: IRId list  // Dependencies on outer loop indices (for triangular iteration)
 }
 
-/// Array type in IR with identity tracking
+/// Array type in IR with identity tracking.
+/// ElemType is a full IRType (post-Phase B2): primitives are wrapped as
+/// IRTScalar, structs/sums appear as IRTNamed, inference variables as
+/// IRTInfer, etc. Active patterns (PrimElem, AnyPrimElem, NamedElem, etc.)
+/// project the IRType into role-specific shapes for consumers.
 and IRArrayType = {
-    ElemType: ElemType
+    ElemType: IRType
     IndexTypes: IRIndexType list
     IsVirtual: bool          // Virtual array (range, reverse, etc.)
     Identity: ArrayIdentity option  // For tracking array identity
@@ -290,6 +294,21 @@ and IRExpr =
     // IRRaggedLookup reads a value from the lengths array at the current
     // iteration's logical position.
     | IRRaggedLookup of lengths: IRExpr
+    // Opaque-extent marker: appears as an IRIndexType's Extent when the
+    // extent is determined by surrounding context rather than declared up
+    // front. The canonical use is a kernel-parameter type `RaggedIdx<_>`
+    // (or any future "context-supplied extent" variant), where at the peel
+    // point the kernel param is bound to a sub-array whose `_extents[0]`
+    // carries the actual length.
+    //
+    // Distinct from IRRaggedLookup (which carries a specific lengths
+    // expression to read from): IROpaqueExtent carries no data — the
+    // ExtentArrayRef on the loop binding tells codegen where to read the
+    // concrete extent from (typically the sub-array's own _extents).
+    //
+    // Should not normally reach codegen for direct rendering; the loop
+    // builder reads it indirectly via the binding's ExtentArrayRef path.
+    | IROpaqueExtent
     | IRAssign of target: IRExpr * value: IRExpr
     | IRForRange of varId: IRId * lo: IRExpr * hi: IRExpr * body: IRExpr
 
@@ -386,6 +405,116 @@ let (|LVVar|LVIndex|LVField|LVOther|) = function
     | IRFieldAccess (obj, field) -> LVField (obj, field)
     | e                          -> LVOther e
 
+// ============================================================================
+// Element-type active patterns
+// ============================================================================
+//
+// These patterns project an IRType into the role of "array element type."
+// `IRArrayType.ElemType` is `IRType` (post-Phase B2), so consumers can be
+// rewritten to use feature-scoped patterns rather than ad-hoc match arms.
+//
+// Design philosophy: each pattern represents one "concern" (primitives,
+// inference variables, named types, function values, etc.). A site that
+// only handles primitives uses `PrimElem` or `AnyPrimElem`; the pattern
+// fails to match for any other case, so silent fallthroughs are caught
+// at compile time rather than producing wrong-typed values.
+
+/// Strict primitive element. Doesn't match through unit annotation.
+let (|PrimElem|_|) (ty: IRType) =
+    match ty with
+    | IRTScalar et -> Some et
+    | _ -> None
+
+/// Primitive element, optionally unit-annotated. Workhorse for read sites
+/// that just want the primitive and don't care whether units are attached.
+let (|AnyPrimElem|_|) (ty: IRType) =
+    match ty with
+    | IRTScalar et -> Some et
+    | IRTUnitAnnotated (IRTScalar et, _) -> Some et
+    | _ -> None
+
+/// Unit-annotated primitive: returns both the elem type and the unit
+/// signature. For unit-aware sites that need to track or propagate units.
+let (|UnitPrimElem|_|) (ty: IRType) =
+    match ty with
+    | IRTUnitAnnotated (IRTScalar et, units) -> Some (et, units)
+    | _ -> None
+
+/// Inference variable in element position. After Phase B2, this becomes
+/// the natural representation for "kernel param's elem type, deferred
+/// until <@> unifies it with the source array's per-row type."
+let (|InferElem|_|) (ty: IRType) =
+    match ty with
+    | IRTInfer id -> Some id
+    | _ -> None
+
+/// Named (struct or sum) elem type. Future Phase D enables codegen support
+/// for arrays of user-defined types; this pattern is the dispatch site.
+let (|NamedElem|_|) (ty: IRType) =
+    match ty with
+    | IRTNamed name -> Some name
+    | _ -> None
+
+/// Function-valued elem type. Reflects the array-function duality: in
+/// Blade, an Array<T like Idx<n>> is conceptually a function `Idx<n> -> T`,
+/// so functions in elem position (arrays of functions) are structurally
+/// natural. Codegen support for these is future work.
+let (|FuncElem|_|) (ty: IRType) =
+    match ty with
+    | IRTFunc (args, ret) -> Some (args, ret)
+    | _ -> None
+
+/// Array-valued elem type. Nested arrays. Currently the parser accepts
+/// `Array<Array<T like Idx<N>> like Idx<M>>` but `lowerElemType` silently
+/// demotes the inner array to ETFloat64. After Phase B2, this pattern
+/// fires correctly and codegen needs to handle nested-array elem types
+/// (the C++ promote<T,k> template handles this transparently per design).
+let (|ArrayElem|_|) (ty: IRType) =
+    match ty with
+    | IRTArray arr -> Some arr
+    | _ -> None
+
+/// Tuple elem type. Arrays of tuples. Useful for structured records that
+/// don't have a named type definition.
+let (|TupleElem|_|) (ty: IRType) =
+    match ty with
+    | IRTTuple ts -> Some ts
+    | _ -> None
+
+/// Pre-specialization parameter-pack type (`Poly<T^r>`). IRTPoly carries
+/// a base type and an arity variable; `specializeFunction` expands it
+/// into `r` individual parameters of the base type at compile time. So
+/// a Poly is semantically a tuple of base types, not a container — it
+/// has no value-level representation outside the function-parameter
+/// position where specialization handles it.
+///
+/// Consequently, `Poly` in element position (`Array<Poly<T^k> like ...>`)
+/// has unclear semantics: parameter packs are resolved at specialization
+/// time, but array elements are accessed at runtime. Sites that match
+/// `PolyElem` should emit an explicit "not implemented" error rather
+/// than silently doing the wrong thing.
+///
+/// The future direction (if/when Poly elements get coherent semantics)
+/// is likely to desugar to nested arrays, sharing the codepath with Q3.
+let (|PolyElem|_|) (ty: IRType) =
+    match ty with
+    | IRTPoly (inner, var) -> Some (inner, var)
+    | _ -> None
+
+/// Elem types that aren't valid as array elements. These represent
+/// runtime structures or compile-time-only constructs that have no
+/// value-level meaning:
+///   - IRTLoop: a loop object, not a value
+///   - IRTComputation: deferred-computation wrapper
+///   - IRTGroupKeys: opaque runtime CSR structure
+let (|InvalidElem|_|) (ty: IRType) =
+    match ty with
+    | IRTLoop _
+    | IRTComputation _
+    | IRTGroupKeys _ -> Some ()
+    | _ -> None
+
+
 /// Strip unit annotation from a type, returning the bare type
 let rec stripUnits (ty: IRType) : IRType =
     match ty with
@@ -422,35 +551,11 @@ let rec flattenTupleLeaves (ty: IRType) : IRType list =
 // Loop Structure (For Code Generation)
 // ============================================================================
 
-/// A single level of a loop nest
-type LoopLevel = {
-    Index: IRId
-    Extent: IRExpr
-    LowerBound: IRExpr
-    State: SymcomState
-    Parallel: bool
-    BoundDependencies: IRId list
-}
-
-/// Complete loop nest specification
-type LoopNest = {
-    Levels: LoopLevel list
-    Kernel: IRExpr
-    OutputType: IRType
-    Commutativity: int list list
-    SpeedupFactor: int64
-}
-
-/// Computation graph node
-type CompNode =
-    | CNLeaf of LoopNest
-    | CNParallel of CompNode * CompNode * fusionDepth: int
-    | CNBind of CompNode * continuation: IRExpr
-    | CNPure of IRExpr
-    | CNChoice of CompNode * CompNode
-    | CNGuard of cond: IRExpr * body: CompNode
-    | CNFused of LoopNest * kernels: IRExpr list
-    | CNSequence of CompNode list
+// (LoopLevel, LoopNest, and CompNode types removed in Phase B6: dead code
+// from a prior architecture replaced by LoopNestCodeGen / buildLoopNestCodeGen.
+// The `buildLoopNest` function that produced LoopNest was also unused and
+// has been removed. Removing this block also eliminated the S3-tagged
+// ETFloat64 fallbacks in the elem-type derivation it contained.)
 
 // ============================================================================
 // Index Space Matching (for Partial Product Symmetry)
@@ -577,14 +682,7 @@ let factorial n =
         | n -> f (acc * int64 n) (n - 1)
     f 1L n
 
-/// Per-loop-level symmetry info for partial product symmetry
-type LoopLevelSymmetry = {
-    LevelIndex: int
-    ArrayIndex: int
-    SharedWithLevels: int list
-    CanTriangulate: bool
-    TriangularArity: int
-}
+// (LoopLevelSymmetry type removed in Phase B6: defined but never referenced.)
 
 /// Compute SymcomState for all loop levels
 /// 
@@ -859,7 +957,7 @@ let deduceOutputType
     (commGroups: int list list)
     (sDimsPerArray: int list)
     (kernelTDims: IRIndexType list)
-    (elemType: ElemType)
+    (elemType: IRType)
     (builder: IRBuilder) : IRType =
     
     if arrayTypes.IsEmpty then IRTUnit
@@ -918,11 +1016,31 @@ let deduceOutputType
                                 Arity = 1
                                 Symmetry = SymNone
                                 Id = builder.FreshId() })))
-            // Drop indices tagged "__group_member" — these are the ragged inner
-            // dimension of a grouped array, consumed implicitly by the kernel
-            // (which receives a sub-array per outer iteration). The output rank
-            // matches only the outer (group-id) dimension.
-            |> List.filter (fun idx -> idx.Tag <> Some "__group_member")
+            // Drop indices tagged as "consumed by the kernel" — these inner
+            // dimensions are not part of the output iteration structure;
+            // the kernel implicitly receives a sub-array along them and
+            // produces a per-outer-iteration result.
+            //
+            //   - __group_member        : ragged inner of group_by output
+            //   - __raggedidx          : closed RaggedIdx<lens>
+            //   - __raggedidx_inline   : ragged literal's inferred inner
+            //   - __raggedidx_opaque   : opaque RaggedIdx<_>
+            //   - __depidx_inner       : DepIdx inner (formula-driven extent)
+            //
+            // Without this filter, the output type retains the consumed dim,
+            // making subsequent operations (e.g., reduce(method_for_result))
+            // see a multi-rank array where there should be one outer dim.
+            // Print-path code historically compensated by special-casing
+            // ragged outputs to rank-1, but that only worked when no further
+            // type-querying operation was applied.
+            |> List.filter (fun idx ->
+                match idx.Tag with
+                | Some "__group_member"
+                | Some "__raggedidx"
+                | Some "__raggedidx_inline"
+                | Some "__raggedidx_opaque"
+                | Some "__depidx_inner" -> false
+                | _ -> true)
         
         // Step 4: T-dims from kernel output (passed in with real extents)
         let outputTDims = 
@@ -933,7 +1051,9 @@ let deduceOutputType
         let allDims = outputSDims @ outputTDims
         
         if allDims.IsEmpty then
-            IRTScalar elemType  // Scalar output
+            // Rank-0 output: just the element type itself.
+            // After Phase B2, elemType is already IRType so no IRTScalar wrap.
+            elemType
         else
             IRTArray { 
                 ElemType = elemType
@@ -942,94 +1062,6 @@ let deduceOutputType
                 Identity = None 
             }
 
-/// Build a loop nest from ApplyInfo
-let buildLoopNest (info: ApplyInfo) (builder: IRBuilder) : LoopNest =
-    let arrayTypes = info.ArrayTypes
-    let identities = info.Identities
-    
-    let commGroups = 
-        match info.Kernel with
-        | IRLambda lInfo -> lInfo.CommGroups
-        | _ -> []
-    
-    let sDimsPerArray = info.SDimsPerArray
-    let loopLevels = buildLoopLevelStructure arrayTypes sDimsPerArray
-    let triangularLevels = computeTriangularLevels arrayTypes identities commGroups sDimsPerArray
-    let speedup = computePartialProductSpeedup arrayTypes identities commGroups sDimsPerArray
-    
-    // Deduce output type - infer element type and T-dims from kernel/arrays
-    let (elemType, kernelTDims) =
-        match info.Kernel with
-        | IRLambda lInfo ->
-            let et =
-                lInfo.Params |> List.tryPick (fun p ->
-                    match p.Type with IRTScalar et -> Some et | IRTArray arr -> Some arr.ElemType | _ -> None)
-                |> Option.defaultValue ETFloat64
-            // T-dims come from the kernel's return type if it's an array
-            let tDims =
-                match info.KernelTDims with
-                | _ :: _ -> info.KernelTDims  // Already computed (from TypeCheck)
-                | [] -> []
-            (et, tDims)
-        | _ ->
-            let et =
-                arrayTypes |> List.tryPick (fun at -> Some at.ElemType)
-                |> Option.defaultValue ETFloat64
-            (et, info.KernelTDims)
-    let outputType = deduceOutputType arrayTypes identities commGroups sDimsPerArray kernelTDims elemType builder
-    
-    // Compute symcom states for group-scoped dependency tracking
-    let symcomStates = computeAllSymcomStates identities arrayTypes commGroups sDimsPerArray
-
-    // iminMap: each level points to its immediate dependency within the same
-    // triangular group, or to itself if it starts a new group (no dependency).
-    let iminMap =
-        loopLevels |> List.mapi (fun globalIdx _level ->
-            let state = if globalIdx < symcomStates.Length then symcomStates.[globalIdx] else SCNeither
-            match state with
-            | SCNeither -> globalIdx
-            | SCSymmetric | SCCommutative | SCBoth -> globalIdx - 1)
-
-    // dependencyPath: chase the imin chain to collect all levels this one depends on.
-    let rec dependencyPath (level: int) : int list =
-        if level < 0 || level >= iminMap.Length then []
-        elif iminMap.[level] = level then []
-        else iminMap.[level] :: dependencyPath iminMap.[level]
-
-    let boundDependencies = loopLevels |> List.mapi (fun i _ -> dependencyPath i)
-
-    // Assign fresh IRIds to each level, then map level indices to IRIds for BoundDependencies
-    let levelIds = loopLevels |> List.map (fun _ -> builder.FreshId())
-
-    let mutable levels = []
-
-    for levelInfo in loopLevels do
-        let i = levelInfo.GlobalLevelIndex
-        let canTriangulate = if i < triangularLevels.Length then triangularLevels.[i] else false
-        let idx = levelIds.[i]
-        let extent = levelInfo.IndexSpace.Extent
-        let state = if canTriangulate then SCCommutative else SCNeither
-        let deps = boundDependencies.[i] |> List.map (fun li -> levelIds.[li])
-        let lowerBound = computeTriangularBound i deps extent state
-        
-        let level = {
-            Index = idx
-            Extent = extent
-            LowerBound = lowerBound
-            State = state
-            Parallel = i = 0
-            BoundDependencies = deps
-        }
-        
-        levels <- levels @ [level]
-    
-    {
-        Levels = levels
-        Kernel = info.Kernel
-        OutputType = outputType
-        Commutativity = commGroups
-        SpeedupFactor = speedup
-    }
 
 // ============================================================================
 // Code Generation Structures
@@ -1058,8 +1090,9 @@ type ElementBinding = {
     DimIndex: int
     /// For SymIdx: which arity component (0, 1, 2, ...)
     ArityComponent: int
-    /// Element type of the array (for explicit typing)
-    ArrayElemType: ElemType
+    /// Element type of the array (for explicit typing).
+    /// IRType to align with IRArrayType.ElemType (Phase B2).
+    ArrayElemType: IRType
     /// Total rank of the array being indexed
     ArrayRank: int
     /// Virtual array kind (range, reverse, or real)
@@ -1170,7 +1203,7 @@ let buildLoopNestCodeGen
     let mkElement (arrayPos: int) (arityComponent: int) (dimIndex: int) =
         let arrName = if arrayPos < arrayNames.Length then arrayNames.[arrayPos] else sprintf "arr%d" arrayPos
         let arrType = if arrayPos < arrayTypes.Length then Some arrayTypes.[arrayPos] else None
-        let elemType = arrType |> Option.map (fun t -> t.ElemType) |> Option.defaultValue ETFloat64
+        let elemType = arrType |> Option.map (fun t -> t.ElemType) |> Option.defaultValue (IRTScalar ETFloat64)
         let arrRank = arrType |> Option.map (fun t -> t.IndexTypes |> List.sumBy (fun i -> i.Arity))
                               |> Option.defaultValue 1
         let virtualKind =
@@ -1318,7 +1351,8 @@ let rec mapIRExpr (f: IRExpr -> IRExpr) (expr: IRExpr) : IRExpr =
         match expr with
         // Leaves
         | IRLit _ | IRVar _ | IRParam _ | IRNth | IRZero
-        | IRRange _ | IRVirtualReverse _ | IRArity _ -> expr
+        | IRRange _ | IRVirtualReverse _ | IRArity _
+        | IROpaqueExtent -> expr
         // Unary
         | IRUnaryOp (op, e) -> IRUnaryOp (op, m e)
         | IRTupleProj (e, i, flat) -> IRTupleProj (m e, i, flat)
@@ -1531,6 +1565,440 @@ let specializeFunction (func: IRFuncDef) (arity: int) (builder: IRBuilder) : IRF
           IsArityPoly = false
           ArityParam = None }
 
+// ============================================================================
+// Inline-Form Lifting Pass
+// ============================================================================
+//
+// Some IR forms (IRMask, IRSort, IRIntersect, IRUnion, IRGroupBy, IRGroupKeys)
+// represent operations whose codegen requires a *named binding*: the loop body
+// references the result by name (e.g., `m_extents[0]`, `m[i]`), and the
+// codegen for the form itself emits multi-statement setup (size computation,
+// allocation, fill loop). When these forms appear inline as a sub-expression
+// — say `reduce(mask(g, pred), op)` — the IIFE wrapping `reduce` would need
+// to inline-emit the entire mask setup as statements before reducing, and
+// every other site that consumes an array (IRExtent, IRIndex, IRApp, ...)
+// would need parallel handling.
+//
+// Rather than adding bespoke inline-materialization to each consumer, this
+// pass normalizes the IR: any inline-form occurrence in a non-let-RHS position
+// is rewritten to a fresh `IRLet(tmp, form, parent(IRVar(tmp, ty)))`. Codegen
+// then sees only the canonical pattern `let tmp = mask(...)` and emits its
+// existing genBinding path.
+//
+// The blessed positions (no rewrite) are:
+//   - The value side of an IRLet (already named)
+//   - The Arrays list of IRMethodFor / IRApplyCombinator (handled by their
+//     own auto-materialize at codegen)
+//
+// Everywhere else (IRReduce.array, IRExtent.array, IRIndex.array, IRApp args,
+// etc.), the rewrite fires.
+
+/// Minimal type inferrer for the lift pass. Only handles cases that show up
+/// as the result of an inline form (mask/sort/etc preserve their argument's
+/// type). Falls back to IRTUnit for shapes the lift pass doesn't expect to
+/// hit; if a fallback ever fires in practice, the resulting IRVar's type
+/// would be wrong and a downstream codegen step would surface it.
+/// Map from struct name to its fields, used by liftInferType for IRFieldAccess
+/// resolution. Built once at the entry to liftInlineFormsModule and threaded
+/// through. A mutable cell because liftExpr is recursive over many cases and
+/// passing through every signature would be noisy; the map is set at module-
+/// entry and read-only thereafter.
+let private structFieldsCache : System.Collections.Generic.Dictionary<string, (string * IRType) list> =
+    System.Collections.Generic.Dictionary<string, (string * IRType) list>()
+
+let setStructFieldsCache (types: IRTypeDef list) =
+    structFieldsCache.Clear()
+    for td in types do
+        match td with
+        | IRTDStruct (name, fields, _) -> structFieldsCache.[name] <- fields
+        | _ -> ()
+
+let tryLookupFieldType (objType: IRType) (fieldName: string) : IRType option =
+    match objType with
+    | IRTNamed structName ->
+        match structFieldsCache.TryGetValue(structName) with
+        | true, fields ->
+            fields |> List.tryFind (fun (n, _) -> n = fieldName) |> Option.map snd
+        | false, _ -> None
+    | _ -> None
+
+let rec liftInferType (expr: IRExpr) : IRType =
+    match expr with
+    | IRVar (_, ty) -> ty
+    | IRParam (_, _, ty) -> ty
+    | IRApp (_, _, retTy) -> retTy
+    | IRArrayLit (_, arrTy) -> IRTArray arrTy
+    | IRMask (arr, _) -> liftInferType arr
+    | IRSort (arr, _) -> liftInferType arr
+    | IRIntersect (a, _) -> liftInferType a
+    | IRUnion (a, _) -> liftInferType a
+    | IRGroupBy (v, _) -> liftInferType v  // Approximation; codegen recomputes
+    | IRGroupKeys _ -> IRTUnit  // GroupKeys is opaque
+    | IRLet (_, _, body) -> liftInferType body
+    | IRIndex (arr, idxs, _) ->
+        match liftInferType arr with
+        | IRTArray a when idxs.Length >= a.IndexTypes.Length -> a.ElemType
+        | IRTArray a -> IRTArray { a with IndexTypes = a.IndexTypes |> List.skip idxs.Length }
+        | t -> t
+    | IRTupleProj (e, i, _) ->
+        match liftInferType e with
+        | IRTTuple ts when i < ts.Length -> ts.[i]
+        | t -> t
+    | IRFieldAccess (obj, field) ->
+        // Phase D / companion-array gap: resolve field type via the struct
+        // definitions map. Returns IRTUnit if the obj isn't an IRTNamed
+        // struct (typecheck rejects this; the IRTUnit fallback is for
+        // robustness against malformed IR — codegen surfaces the issue).
+        match tryLookupFieldType (liftInferType obj) field with
+        | Some ty -> ty
+        | None -> IRTUnit
+    | IRCompute e -> liftInferType e
+    | IRPure e -> liftInferType e
+    | IRApplyCombinator info -> info.OutputType
+    | IRIf (_, t, _) -> liftInferType t
+    | IRMatch (_, c :: _) -> liftInferType c.Body
+    | IRMatch (_, []) -> IRTUnit
+    | _ -> IRTUnit
+
+/// Predicate: is this an inline form that needs lifting when in a non-blessed
+/// position? Note: we deliberately exclude IRReduce — reduce's codegen
+/// handles inline forms via IIFE (when the array is named) and the array
+/// argument to reduce IS what we lift, not reduce itself.
+let isInlineForm (e: IRExpr) : bool =
+    match e with
+    | IRMask _ | IRSort _ | IRIntersect _ | IRUnion _
+    | IRGroupBy _ | IRGroupKeys _ -> true
+    | _ -> false
+
+/// Path B / Phase D: peel any IRLet chain that descendant lifts produced.
+/// When a sub-expression's lift wraps it in `IRLet(id, v, IRLet(...,inner))`,
+/// the chain shouldn't be visible to the parent context (e.g., an outer
+/// IRArrayLit's element list, or a struct field value). Peeling pulls the
+/// chain out as a list of bindings; the caller's wrapLets re-wraps them at
+/// the appropriate enclosing level.
+///
+/// Without peeling, lifts produced by descendant calls would appear as
+/// siblings of other elements in multi-child contexts, breaking codegen
+/// (e.g., the genArrayLiteral walker treats IRLet as a leaf and emits an
+/// IIFE that doesn't know how to render an IRArrayLit inline).
+let peelLetChain (e: IRExpr) : (IRId * IRType * IRExpr) list * IRExpr =
+    let rec loop acc e =
+        match e with
+        | IRLet (id, v, body) -> loop (acc @ [(id, liftInferType v, v)]) body
+        | _ -> (acc, e)
+    loop [] e
+
+/// Predicate: is this an IRFieldAccess whose result type is an array? Such
+/// accesses need to be hoisted to a let-RHS so codegen can synthesize the
+/// companion `_extents` (and `_lens` for ragged) array — without a let-RHS
+/// drain point, the field access expression `t.samples` produces a pointer
+/// but no shape information, breaking any consumer that expects an extents
+/// sibling (kernel args, reduce, method_for, etc.).
+let private isArrayFieldAccess (e: IRExpr) : bool =
+    match e with
+    | IRFieldAccess _ ->
+        match liftInferType e with
+        | IRTArray _ -> true
+        | _ -> false
+    | _ -> false
+
+/// Lift a single child if it's an inline form. Returns either ([], child)
+/// for the no-rewrite case, or ([(id, ty, child)], IRVar(id, ty)) for the
+/// lifted case.
+///
+/// Path B / Phase D: also peels any IRLet chain the descendant produced,
+/// so the chain bindings hoist alongside any new lift binding to the
+/// caller's wrap point.
+let liftChild (builder: IRBuilder) (child: IRExpr) : (IRId * IRType * IRExpr) list * IRExpr =
+    let (peeled, inner) = peelLetChain child
+    if isInlineForm inner then
+        let id = builder.FreshId()
+        let ty = liftInferType inner
+        (peeled @ [(id, ty, inner)], IRVar (id, ty))
+    elif isArrayFieldAccess inner then
+        // Phase D: hoist `t.samples` (when samples is array-typed) into a
+        // let-RHS so codegen can synthesize `<bound_name>_extents`.
+        let id = builder.FreshId()
+        let ty = liftInferType inner
+        (peeled @ [(id, ty, inner)], IRVar (id, ty))
+    else
+        (peeled, inner)
+
+/// Like `liftChild`, but additionally lifts IRArrayLit. Used at sites
+/// where an inline IRArrayLit can't render (struct field values, function
+/// args). NOT used at IRArrayLit element positions — there, the inner
+/// IRArrayLit must remain so the genArrayLiteral walker sees full nesting
+/// depth (otherwise dims and per-leaf indexing break).
+let liftChildIncludingArrayLit (builder: IRBuilder) (child: IRExpr) : (IRId * IRType * IRExpr) list * IRExpr =
+    let (peeled, inner) = peelLetChain child
+    match inner with
+    | IRArrayLit (_, arrTy) ->
+        let id = builder.FreshId()
+        let ty = IRTArray arrTy
+        (peeled @ [(id, ty, inner)], IRVar (id, ty))
+    | e when isInlineForm e ->
+        let id = builder.FreshId()
+        let ty = liftInferType e
+        (peeled @ [(id, ty, e)], IRVar (id, ty))
+    | e when isArrayFieldAccess e ->
+        // Phase D: same hoisting as liftChild, so struct field values and
+        // function args carrying `t.samples` get the same treatment.
+        let id = builder.FreshId()
+        let ty = liftInferType e
+        (peeled @ [(id, ty, e)], IRVar (id, ty))
+    | e -> (peeled, e)
+
+/// Lift a list of children, accumulating bindings.
+let liftChildren (builder: IRBuilder) (children: IRExpr list) : (IRId * IRType * IRExpr) list * IRExpr list =
+    children |> List.fold (fun (binds, acc) child ->
+        let (b, c) = liftChild builder child
+        (binds @ b, acc @ [c])) ([], [])
+
+/// Wrap an expression with a sequence of let-bindings (innermost first).
+let wrapLets (bindings: (IRId * IRType * IRExpr) list) (body: IRExpr) : IRExpr =
+    List.foldBack (fun (id, _, v) acc -> IRLet (id, v, acc)) bindings body
+
+/// Walk an expression bottom-up, hoisting any inline form found in a
+/// non-blessed child position into a fresh IRLet wrapping the parent.
+///
+/// Note: when an inline form is itself the IRLet-RHS, we leave it alone
+/// (that's the canonical position). When it's nested inside IRMethodFor's
+/// or IRApplyCombinator's Arrays list, we also leave it — codegen's
+/// auto-materialize handles those positions.
+let rec liftExpr (builder: IRBuilder) (expr: IRExpr) : IRExpr =
+    match expr with
+    // Leaves: nothing to do
+    | IRLit _ | IRVar _ | IRParam _ | IRNth | IRZero
+    | IRRange _ | IRVirtualReverse _ | IRArity _
+    | IROpaqueExtent -> expr
+
+    // Blessed positions: don't lift the value's top-level inline form; do
+    // descend into both sides for nested cases.
+    | IRLet (id, value, body) ->
+        IRLet (id, liftExpr builder value, liftExpr builder body)
+
+    // The inline forms themselves: descend into their sub-expressions
+    // (which may contain further nested inline forms), but DO NOT lift
+    // them at this point — the parent's child slot will lift them if
+    // needed.
+    | IRMask (a, p) -> IRMask (liftExpr builder a, liftExpr builder p)
+    | IRSort (a, k) -> IRSort (liftExpr builder a, liftExpr builder k)
+    | IRIntersect (a, b) -> IRIntersect (liftExpr builder a, liftExpr builder b)
+    | IRUnion (a, b) -> IRUnion (liftExpr builder a, liftExpr builder b)
+    | IRGroupBy (v, k) -> IRGroupBy (liftExpr builder v, liftExpr builder k)
+    | IRGroupKeys k -> IRGroupKeys (liftExpr builder k)
+
+    // Single-child consumers where the array slot can hold an inline form
+    | IRReduce (arr, kernel) ->
+        let arr' = liftExpr builder arr
+        let kernel' = liftExpr builder kernel
+        let (binds, arrFinal) = liftChild builder arr'
+        wrapLets binds (IRReduce (arrFinal, kernel'))
+    | IRExtent (arr, dim) ->
+        let arr' = liftExpr builder arr
+        let (binds, arrFinal) = liftChild builder arr'
+        wrapLets binds (IRExtent (arrFinal, dim))
+    | IRIndex (arr, idxs, identity) ->
+        let arr' = liftExpr builder arr
+        let idxs' = idxs |> List.map (liftExpr builder)
+        let (binds, arrFinal) = liftChild builder arr'
+        wrapLets binds (IRIndex (arrFinal, idxs', identity))
+    | IRSlice (arr, dim, s, e) ->
+        let arr' = liftExpr builder arr
+        let s' = liftExpr builder s
+        let e' = liftExpr builder e
+        let (binds, arrFinal) = liftChild builder arr'
+        wrapLets binds (IRSlice (arrFinal, dim, s', e'))
+    | IRSubset (arr, dim, s, l) ->
+        let arr' = liftExpr builder arr
+        let s' = liftExpr builder s
+        let l' = liftExpr builder l
+        let (binds, arrFinal) = liftChild builder arr'
+        wrapLets binds (IRSubset (arrFinal, dim, s', l'))
+    | IRCurry (arr, idx, r) ->
+        let arr' = liftExpr builder arr
+        let idx' = liftExpr builder idx
+        let (binds, arrFinal) = liftChild builder arr'
+        wrapLets binds (IRCurry (arrFinal, idx', r))
+    | IRTranspose (arr, p) ->
+        let arr' = liftExpr builder arr
+        let (binds, arrFinal) = liftChild builder arr'
+        wrapLets binds (IRTranspose (arrFinal, p))
+    | IRReverse (arr, d) ->
+        let arr' = liftExpr builder arr
+        let (binds, arrFinal) = liftChild builder arr'
+        wrapLets binds (IRReverse (arrFinal, d))
+    | IRDiag arr ->
+        let arr' = liftExpr builder arr
+        let (binds, arrFinal) = liftChild builder arr'
+        wrapLets binds (IRDiag arrFinal)
+    | IRRank arr ->
+        let arr' = liftExpr builder arr
+        let (binds, arrFinal) = liftChild builder arr'
+        wrapLets binds (IRRank arrFinal)
+    | IRShift (arr, d, off, bm) ->
+        let arr' = liftExpr builder arr
+        let off' = liftExpr builder off
+        let (binds, arrFinal) = liftChild builder arr'
+        wrapLets binds (IRShift (arrFinal, d, off', bm))
+
+    // Multi-child consumers (any arg can be an inline form)
+    | IRApp (fn, args, retTy) ->
+        // Phase D: function args may contain inline IRArrayLit (e.g.,
+        // `f([1.0, 2.0, 3.0])`) which can't render inline. Use the
+        // extended helper that lifts both inline forms and IRArrayLit.
+        let fn' = liftExpr builder fn
+        let args' = args |> List.map (liftExpr builder)
+        let (binds, argsFinal) =
+            args' |> List.fold (fun (accB, accA) a ->
+                let (b, a') = liftChildIncludingArrayLit builder a
+                (accB @ b, accA @ [a'])) ([], [])
+        wrapLets binds (IRApp (fn', argsFinal, retTy))
+    | IRJoin (arrs, dim) ->
+        let arrs' = arrs |> List.map (liftExpr builder)
+        let (binds, arrsFinal) = liftChildren builder arrs'
+        wrapLets binds (IRJoin (arrsFinal, dim))
+    | IRStack arrs ->
+        let arrs' = arrs |> List.map (liftExpr builder)
+        let (binds, arrsFinal) = liftChildren builder arrs'
+        wrapLets binds (IRStack arrsFinal)
+    | IRZip arrs ->
+        let arrs' = arrs |> List.map (liftExpr builder)
+        let (binds, arrsFinal) = liftChildren builder arrs'
+        wrapLets binds (IRZip arrsFinal)
+    | IRAlign (arrs, sp) ->
+        let arrs' = arrs |> List.map (liftExpr builder)
+        let (binds, arrsFinal) = liftChildren builder arrs'
+        wrapLets binds (IRAlign (arrsFinal, sp))
+    | IRTuple es ->
+        let es' = es |> List.map (liftExpr builder)
+        let (binds, esFinal) = liftChildren builder es'
+        wrapLets binds (IRTuple esFinal)
+    | IRArrayLit (es, ty) ->
+        // Path B / Phase D: peel any IRLet chains from element results
+        // (descendant lifts) and re-wrap them at THIS level. Don't lift the
+        // peeled inner expressions further — IRArrayLit elements must
+        // remain as the genArrayLiteral walker expects (nested IRArrayLit
+        // for multi-dim, scalar leaves at the bottom). Replacing an inner
+        // IRArrayLit with an IRVar would shorten computeArrayDims to just
+        // this level and break extents/print/walker.
+        let es' = es |> List.map (liftExpr builder)
+        let (binds, esPeeled) = es' |> List.fold (fun (accB, accE) e ->
+            let (b, e') = peelLetChain e
+            (accB @ b, accE @ [e'])) ([], [])
+        wrapLets binds (IRArrayLit (esPeeled, ty))
+
+    // BinOps: array-typed binops can have inline forms on either side.
+    | IRBinOp (mode, op, l, r) ->
+        let l' = liftExpr builder l
+        let r' = liftExpr builder r
+        let (lBinds, lFinal) = liftChild builder l'
+        let (rBinds, rFinal) = liftChild builder r'
+        wrapLets (lBinds @ rBinds) (IRBinOp (mode, op, lFinal, rFinal))
+    | IRUnaryOp (op, e) ->
+        let e' = liftExpr builder e
+        let (binds, eFinal) = liftChild builder e'
+        wrapLets binds (IRUnaryOp (op, eFinal))
+
+    // Pass-through traversals (no lift at this level; descend into sub-expressions)
+    | IRTupleProj (e, i, fl) -> IRTupleProj (liftExpr builder e, i, fl)
+    | IRTupleCons (h, t) -> IRTupleCons (liftExpr builder h, liftExpr builder t)
+    | IRTupleDecons e -> IRTupleDecons (liftExpr builder e)
+    | IRFieldAccess (e, f) -> IRFieldAccess (liftExpr builder e, f)
+    | IRStructLit (n, flds) ->
+        // Phase D / nested element types: descend into each field expression,
+        // then lift IRArrayLit and inline-form values into auto-let bindings.
+        // Array literals are statement-level constructs (allocation; rendered
+        // by genArrayLiteral, not exprToCpp), so they cannot appear inline as
+        // struct field values. The auto-let pattern moves the literal to a
+        // let-RHS where genArrayLiteral handles it; the field value becomes
+        // an IRVar reference. liftChildIncludingArrayLit also peels any
+        // IRLet chains the descent produced (so they hoist past this struct
+        // lit to the next drain point).
+        let flds' = flds |> List.map (fun (fn, fe) -> (fn, liftExpr builder fe))
+        let (binds, fldsLifted) =
+            flds' |> List.fold (fun (accBinds, accFlds) (fn, fe) ->
+                let (b, fe') = liftChildIncludingArrayLit builder fe
+                (accBinds @ b, accFlds @ [(fn, fe')])) ([], [])
+        wrapLets binds (IRStructLit (n, fldsLifted))
+    | IRIf (c, t, e) -> IRIf (liftExpr builder c, liftExpr builder t, liftExpr builder e)
+    | IRMatch (scr, cases) ->
+        IRMatch (liftExpr builder scr, cases |> List.map (fun c ->
+            { c with Guard = c.Guard |> Option.map (liftExpr builder)
+                     Body = liftExpr builder c.Body }))
+    | IRSequence es -> IRSequence (es |> List.map (liftExpr builder))
+    | IRGuard (c, b) -> IRGuard (liftExpr builder c, liftExpr builder b)
+    | IRReplicate (c, b) -> IRReplicate (liftExpr builder c, liftExpr builder b)
+    | IRPure e -> IRPure (liftExpr builder e)
+    | IRCompute e -> IRCompute (liftExpr builder e)
+    | IRReynolds (e, a) -> IRReynolds (liftExpr builder e, a)
+    | IRBind (c, k) -> IRBind (liftExpr builder c, liftExpr builder k)
+    | IRParallel (a, b, d) -> IRParallel (liftExpr builder a, liftExpr builder b, d)
+    | IRFusion (a, b) -> IRFusion (liftExpr builder a, liftExpr builder b)
+    | IRChoice (a, b) -> IRChoice (liftExpr builder a, liftExpr builder b)
+    | IRArrayProduct (a, b) -> IRArrayProduct (liftExpr builder a, liftExpr builder b)
+    | IRComposeObj (a, b) -> IRComposeObj (liftExpr builder a, liftExpr builder b)
+    | IRComposeMeth (a, b) -> IRComposeMeth (liftExpr builder a, liftExpr builder b)
+    | IRCompose (a, b) -> IRCompose (liftExpr builder a, liftExpr builder b)
+    | IRFunctorMap (fn, c) -> IRFunctorMap (liftExpr builder fn, liftExpr builder c)
+    | IRPolyIndex (p, i) -> IRPolyIndex (liftExpr builder p, liftExpr builder i)
+    | IRRaggedLookup l -> IRRaggedLookup (liftExpr builder l)
+    | IRAssign (t, v) -> IRAssign (t, liftExpr builder v)
+    | IRForRange (vid, lo, hi, body) ->
+        IRForRange (vid, liftExpr builder lo, liftExpr builder hi, liftExpr builder body)
+    | IRBlocked (it, bs) -> IRBlocked (it, liftExpr builder bs)
+
+    // Lambdas: descend into body
+    | IRLambda info ->
+        IRLambda { info with Body = liftExpr builder info.Body }
+
+    // Loop forms: their auto-materialize handles top-level Arrays for
+    // inline forms. We still descend into the kernels and any nested
+    // expressions, AND lift any array-typed IRFieldAccess in Arrays so
+    // codegen can find the companion `_extents` (auto-materialize doesn't
+    // synthesize extents from struct field types).
+    | IRMethodFor info ->
+        let arrays' = info.Arrays |> List.map (liftExpr builder)
+        let (binds, arraysFinal) =
+            arrays' |> List.fold (fun (accB, accA) a ->
+                let (peeled, inner) = peelLetChain a
+                if isArrayFieldAccess inner then
+                    let id = builder.FreshId()
+                    let ty = liftInferType inner
+                    (accB @ peeled @ [(id, ty, inner)], accA @ [IRVar (id, ty)])
+                else
+                    (accB @ peeled, accA @ [inner])) ([], [])
+        wrapLets binds (IRMethodFor { info with Arrays = arraysFinal })
+    | IRObjectFor info ->
+        IRObjectFor { info with Kernel = liftExpr builder info.Kernel }
+    | IRApplyCombinator info ->
+        let loop' = liftExpr builder info.Loop
+        let kernel' = liftExpr builder info.Kernel
+        let arrays' = info.Arrays |> List.map (liftExpr builder)
+        let (binds, arraysFinal) =
+            arrays' |> List.fold (fun (accB, accA) a ->
+                let (peeled, inner) = peelLetChain a
+                if isArrayFieldAccess inner then
+                    let id = builder.FreshId()
+                    let ty = liftInferType inner
+                    (accB @ peeled @ [(id, ty, inner)], accA @ [IRVar (id, ty)])
+                else
+                    (accB @ peeled, accA @ [inner])) ([], [])
+        wrapLets binds (IRApplyCombinator { info with Loop = loop'; Kernel = kernel'; Arrays = arraysFinal })
+
+/// Lift inline forms across an entire IR module's bindings and functions.
+let liftInlineFormsModule (modul: IRModule) (builder: IRBuilder) : IRModule =
+    // Phase D / companion-array gap: populate the struct fields cache so
+    // liftInferType can resolve IRFieldAccess result types. Required for
+    // hoisting array-typed field accesses to let-RHS so codegen can
+    // synthesize their _extents companions.
+    setStructFieldsCache modul.Types
+    let liftedBindings =
+        modul.Bindings |> List.map (fun b -> { b with Value = liftExpr builder b.Value })
+    let liftedFunctions =
+        modul.Functions |> List.map (fun f -> { f with Body = liftExpr builder f.Body })
+    { modul with Bindings = liftedBindings; Functions = liftedFunctions }
+
 /// Monomorphize all arity-polymorphic functions in an IR module.
 /// Collects call sites, generates specialized versions, rewrites calls.
 let monomorphizeModule (modul: IRModule) (builder: IRBuilder) : IRModule =
@@ -1599,7 +2067,7 @@ let rec ppIRType = function
     | IRTScalar (ETIndexRef name) -> name
     | IRTArray arr ->
         let indices = arr.IndexTypes |> List.map ppIndexType |> String.concat ", "
-        sprintf "Array<%s like %s>" (ppElemType arr.ElemType) indices
+        sprintf "Array<%s like %s>" (ppIRType arr.ElemType) indices
     | IRTTuple ts ->
         sprintf "(%s)" (ts |> List.map ppIRType |> String.concat ", ")
     | IRTFunc (args, ret) ->
@@ -1632,17 +2100,9 @@ and ppIndexType (idx: IRIndexType) =
     | SymAntisymmetric -> sprintf "AntisymIdx<%d, %s>" idx.Arity extentStr
     | SymHermitian -> sprintf "HermitianIdx<%s>" extentStr
 
-and ppElemType = function
-    | ETInt32 -> "Int32"
-    | ETInt64 -> "Int64"
-    | ETFloat32 -> "Float32"
-    | ETFloat64 -> "Float64"
-    | ETComplex64 -> "Complex64"
-    | ETComplex128 -> "Complex128"
-    | ETBool -> "Bool"
-    | ETUnit -> "Void"
-    | ETString -> "String"
-    | ETIndexRef name -> name
+// (ppElemType removed in Phase B6: unused after ppIRType was made recursive
+// over IRType in Phase B2. The primitive-only printer is no longer needed
+// since elem types are now full IRTypes printed by ppIRType.)
 
 /// Build a map from IRIndexType.Id -> type name from a module's IRTDIndexType defs
 let indexNameMap (modul: IRModule) : Map<IRId, string> =
@@ -1657,7 +2117,7 @@ let indexNameMap (modul: IRModule) : Map<IRId, string> =
 let rec ppIRTypeIn (names: Map<IRId, string>) = function
     | IRTArray arr ->
         let indices = arr.IndexTypes |> List.map (ppIndexTypeIn names) |> String.concat ", "
-        sprintf "Array<%s, %s>" (ppElemType arr.ElemType) indices
+        sprintf "Array<%s, %s>" (ppIRTypeIn names arr.ElemType) indices
     | other -> ppIRType other
 
 and ppIndexTypeIn (names: Map<IRId, string>) (idx: IRIndexType) =
@@ -1859,7 +2319,7 @@ let rec tryEvalIntIR (expr: IRExpr) : int64 option =
 let rec collectVarRefsIR (expr: IRExpr) : Set<IRId> =
     match expr with
     | IRVar (id, _) -> Set.singleton id
-    | IRLit _ | IRParam _ | IRNth | IRZero -> Set.empty
+    | IRLit _ | IRParam _ | IRNth | IRZero | IROpaqueExtent -> Set.empty
     | IRBinOp (_, _, l, r) -> Set.union (collectVarRefsIR l) (collectVarRefsIR r)
     | IRUnaryOp (_, e) -> collectVarRefsIR e
     | IRIf (c, t, e) -> Set.unionMany [collectVarRefsIR c; collectVarRefsIR t; collectVarRefsIR e]
@@ -1957,8 +2417,12 @@ let rec containsInfer (ty: IRType) : int option =
     match ty with
     | IRTInfer id -> Some id
     | IRTArray arr ->
-        arr.IndexTypes |> List.tryPick (fun _ -> None)
-        |> Option.orElse (containsInfer (IRTScalar arr.ElemType) |> Option.bind (fun _ -> None))
+        // Phase B2: ElemType is IRType, so recurse directly. Also check
+        // index extents — they're IRExpr not IRType so a separate walk
+        // would be needed; for now we check elem type only (consistent
+        // with prior behavior, which never actually walked index types
+        // due to the bug fixed in S1).
+        containsInfer arr.ElemType
     | IRTTuple ts -> ts |> List.tryPick containsInfer
     | IRTFunc (args, ret) -> (args @ [ret]) |> List.tryPick containsInfer
     | IRTComputation inner -> containsInfer inner

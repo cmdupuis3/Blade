@@ -124,11 +124,15 @@ type Subst() =
             | Some ty' -> this.Resolve ty'
             | None -> ty
         | IRTArray arr ->
-            // Rank-0 collapse: an array with no index types is just its element
+            // Rank-0 collapse: an array with no index types is just its element.
+            // arr.ElemType is IRType post-B2, so return it directly (the
+            // element might be a primitive scalar, struct, or other).
             if arr.IndexTypes.IsEmpty then
-                IRTScalar arr.ElemType
+                this.Resolve arr.ElemType
             else
-                IRTArray { arr with IndexTypes = arr.IndexTypes |> List.map this.ResolveIdx }
+                IRTArray { arr with
+                            ElemType = this.Resolve arr.ElemType
+                            IndexTypes = arr.IndexTypes |> List.map this.ResolveIdx }
         | IRTTuple ts -> IRTTuple (ts |> List.map this.Resolve)
         | IRTFunc (args, ret) -> IRTFunc (args |> List.map this.Resolve, this.Resolve ret)
         | IRTComputation t -> IRTComputation (this.Resolve t)
@@ -197,15 +201,36 @@ let rec unify (subst: Subst) (t1: IRType) (t2: IRType) : TypeResult<unit> =
             | _ ->
                 subst.Bind(id, ty); Ok ()
     | IRTScalar e1, IRTScalar e2 when e1 = e2 -> Ok ()
-    // Numeric promotion per §3.4.2
+    // Scalar unification.
+    //
+    // Phase 2 (post-Gap-2.5): two concrete-and-different primitives are a
+    // real type error. Pre-fix, we accepted them via `promoteElemType` and
+    // returned Ok, which silently lifted promotion to "type compatibility."
+    // That made Probe E (Int64-annotated kernel param against Float64 source)
+    // type-check — the C++ then truncated values silently.
+    //
+    // The promotion rebind path stays alive when at least one side is an
+    // inference variable: that's the legitimate use (a fresh literal type
+    // gets pinned to the wider type a context requires). When both sides
+    // are concrete, promotion would rewrite types without binding anything,
+    // which is the silent-acceptance failure mode.
     | IRTScalar e1, IRTScalar e2 ->
         match promoteElemType e1 e2 with
         | Some promoted ->
-            let promotedTy = IRTScalar promoted
-            // Rebind any inference variable in the original chain to the promoted type
-            findLeafInferScalar subst orig1 |> Option.iter (fun id -> subst.Bind(id, promotedTy))
-            findLeafInferScalar subst orig2 |> Option.iter (fun id -> subst.Bind(id, promotedTy))
-            Ok ()
+            let leaf1 = findLeafInferScalar subst orig1
+            let leaf2 = findLeafInferScalar subst orig2
+            match leaf1, leaf2 with
+            | None, None ->
+                // Both concrete, neither is an inference variable being pinned.
+                // The promoteElemType call was just suggesting a "compatible
+                // wider type" — which is a value-promotion fact (used by binop
+                // result-type inference), not a type-equality fact. Refuse.
+                Error (TypeMismatch (t1, t2))
+            | _ ->
+                let promotedTy = IRTScalar promoted
+                leaf1 |> Option.iter (fun id -> subst.Bind(id, promotedTy))
+                leaf2 |> Option.iter (fun id -> subst.Bind(id, promotedTy))
+                Ok ()
         | None ->
             Error (TypeMismatch (t1, t2))
     | IRTArray a1, IRTArray a2 ->
@@ -217,17 +242,35 @@ let rec unify (subst: Subst) (t1: IRType) (t2: IRType) : TypeResult<unit> =
             // symmetry classes must be compatible.
             // NOTE: We intentionally do NOT compare extents here — extents are
             // runtime values in C++, not compile-time template parameters.
+            //
+            // Synthetic tags (those starting with "__") are internal structural
+            // markers like "__raggedidx_inline", "__depidx_inner", "__group_member",
+            // "__error_ragged_no_prior". These represent kinds of dimensions, not
+            // nominal names, and must not be compared as "named index types are
+            // nominative." Only user-named tags get the nominative treatment.
+            let isSyntheticTag (t: string) = t.StartsWith("__")
             let indexMismatch =
                 List.zip a1.IndexTypes a2.IndexTypes |> List.tryFind (fun (i1, i2) ->
-                    // Named index types are nominative: lat != lon even if both Idx<180>
+                    // User-named index types are nominative: lat != lon even if both Idx<180>.
+                    // Synthetic tags (starting with __) are structural and should not gate
+                    // unification — they're set by lowering for internal bookkeeping.
                     match i1.Tag, i2.Tag with
-                    | Some t1, Some t2 when t1 <> t2 -> true
+                    | Some t1, Some t2 when t1 <> t2
+                                            && not (isSyntheticTag t1)
+                                            && not (isSyntheticTag t2) -> true
                     | _ ->
                         // Symmetry class must be compatible
                         i1.Symmetry <> i2.Symmetry && i1.Symmetry <> SymNone && i2.Symmetry <> SymNone)
             match indexMismatch with
             | Some _ -> Error (TypeMismatch (t1, t2))
-            | None -> Ok ()
+            | None ->
+                // Phase B5: recursive elem-type unification.
+                // ElemType is IRType post-B2, so this falls through to the
+                // existing unify logic. Inference vars bind; primitives
+                // promote where compatible (IRTScalar e1, IRTScalar e2);
+                // genuine mismatches error out (catching the silent
+                // miscompile that Probe E demonstrated).
+                unify subst a1.ElemType a2.ElemType
     | IRTTuple ts1, IRTTuple ts2 when ts1.Length = ts2.Length ->
         List.zip ts1 ts2 |> List.fold (fun acc (a, b) ->
             acc |> Result.bind (fun () -> unify subst a b)) (Ok ())
@@ -262,7 +305,12 @@ let rec freeInferVars (subst: Subst) (ty: IRType) : Set<int> =
     match subst.Resolve ty with
     | IRTInfer id -> Set.singleton id
     | IRTScalar _ | IRTUnit | IRTNamed _ | IRTNat _ -> Set.empty
-    | IRTArray _arr -> Set.empty  // ElemType is concrete; index extents are IRExpr not IRType
+    | IRTArray arr ->
+        // Phase B2: ElemType is IRType, so it can carry inference variables.
+        // Recurse into it. Index extents are still IRExpr (not IRType), so
+        // they don't contribute to free type variables — extent inference
+        // uses a separate mechanism.
+        freeInferVars subst arr.ElemType
     | IRTTuple ts -> ts |> List.map (freeInferVars subst) |> Set.unionMany
     | IRTFunc (args, ret) ->
         Set.unionMany (freeInferVars subst ret :: (args |> List.map (freeInferVars subst)))
@@ -303,7 +351,10 @@ let instantiate (subst: Subst) (scheme: TypeScheme) : IRType =
                 IRTLoop { lt with
                             ArrayTypes = lt.ArrayTypes |> List.map replace
                             KernelType = lt.KernelType |> Option.map replace }
-            | _ -> ty  // IRTScalar, IRTUnit, IRTNamed, IRTNat, IRTArray (concrete elem types)
+            | IRTArray arr ->
+                // Phase B2: ElemType is IRType, may contain bound type variables.
+                IRTArray { arr with ElemType = replace arr.ElemType }
+            | _ -> ty  // IRTScalar, IRTUnit, IRTNamed, IRTNat (no inference vars to replace)
         replace scheme.Body
 
 // ============================================================================
@@ -335,7 +386,7 @@ type TypeDefInfo =
     | TDIAlias of IRType
     | TDIStruct of name: string * typeParams: string list * fields: (string * IRType) list
     | TDIVariant of name: string * typeParams: string list * variants: (string * IRType option) list
-    | TDIIndexType of name: string * idx: IRIndexType
+    | TDIIndexType of name: string * idx: IRIndexType * body: TypeExpr
     | TDIEnumIdx of name: string * idx: IRIndexType * values: int64 list
 
 /// Exported bindings from a type-checked module, for cross-module imports
@@ -639,12 +690,15 @@ let rec lowerTypeExpr (env: TypeEnv) (ty: TypeExpr) : IRType =
             | Some (TDIAlias resolvedTy) -> resolvedTy
             | Some (TDIStruct (n, _, _)) -> IRTNamed n
             | Some (TDIVariant (n, _, _)) -> IRTNamed n
-            | Some (TDIIndexType (_, idx)) ->
-                IRTArray { ElemType = ETFloat64; IndexTypes = [idx]
-                           IsVirtual = false; Identity = None }
-            | Some (TDIEnumIdx (_, idx, _)) ->
-                IRTArray { ElemType = ETFloat64; IndexTypes = [idx]
-                           IsVirtual = false; Identity = None }
+            | Some (TDIIndexType _) ->
+                // Aliased index type as a standalone type expression (function
+                // param, struct field, let-binding annotation): produce the
+                // value-level "tagged integer" shape, matching lowerElemType:894.
+                // The nominative tag carries through codegen so the C++ type
+                // is `<name>` (resolved via `using <name> = int64_t;`).
+                IRTScalar (ETIndexRef name)
+            | Some (TDIEnumIdx _) ->
+                IRTScalar (ETIndexRef name)
             | None ->
                 // If this name is in the type variable scope (introduced by T^k
                 // elsewhere in this declaration), bare T means T^0 (scalar).
@@ -659,7 +713,13 @@ let rec lowerTypeExpr (env: TypeEnv) (ty: TypeExpr) : IRType =
         // iterate over. A 1-D Array<T like RaggedIdx<lens>> is malformed:
         // there's no prior position to provide the iteration that drives the
         // lengths-array lookup. The check is structural — first index can't
-        // be a RaggedIdx.
+        // be a closed RaggedIdx.
+        //
+        // The opaque variant `RaggedIdx<_>` is exempted: it's specifically
+        // designed for kernel-parameter types (`g: Array<T like RaggedIdx<_>>`)
+        // representing a sub-array peeled from a parent ragged. There is no
+        // lengths array to look up; the extent is supplied by the loop
+        // binding's ExtentArrayRef at the peel point.
         let firstIsRagged =
             match indexTys with
             | TyRaggedIdx _ :: _ -> true
@@ -683,7 +743,37 @@ let rec lowerTypeExpr (env: TypeEnv) (ty: TypeExpr) : IRType =
             // dependent forms like DepIdx produce TWO records (outer + inner with
             // Dependencies linking them). lowerIndexTypeList handles the expansion.
             let indices = indexTys |> List.mapi (fun i ity -> lowerIndexTypeList env i ity) |> List.concat
-            IRTArray { ElemType = elem; IndexTypes = indices; IsVirtual = false; Identity = None }
+            // Phase D / nested-array normalization: when the element type
+            // itself lowers to an IRTArray (i.e., the user wrote
+            // `Array<Array<T like Idx<n>> like Idx<m>>` syntax), flatten
+            // into the equivalent multi-Idx form
+            // `Array<T like Idx<m>, Idx<n>>`. The two surface forms have
+            // identical runtime behavior: indexing once peels one IndexType,
+            // storage layout is `T**` either way, and all downstream
+            // rank-N machinery (genArrayLiteral, print loops, the recursive
+            // walker, etc.) keys off IndexTypes count rather than nesting
+            // depth.
+            //
+            // Without this normalization, the inner-as-IRTArray form
+            // produces a type with `arrayRank = 1` (counting only the outer
+            // IndexTypes) but a literal whose `computeArrayDims` recurses
+            // to depth 2. The mismatch malforms `extents[1] = {n, m}` (one
+            // slot, two values) and breaks allocation since `allocate<>`
+            // only sees the outer extent.
+            //
+            // Limited to the explicit `TyArray (TyArray, _)` syntactic
+            // case at the user-facing surface; other producers of IRTArray
+            // (e.g., function-return inference) don't compose nested
+            // arrays at the type level. Inner record's Identity / IsVirtual
+            // fields are reset on the flattened wrapper since the original
+            // inner-array identity has been absorbed.
+            match elem with
+            | IRTArray inner ->
+                IRTArray { ElemType = inner.ElemType
+                           IndexTypes = indices @ inner.IndexTypes
+                           IsVirtual = false; Identity = None }
+            | _ ->
+                IRTArray { ElemType = elem; IndexTypes = indices; IsVirtual = false; Identity = None }
 
     | TyAbstractArray (elemTy, rankExpr, _symmOpt) ->
         match evalConstExpr env rankExpr with
@@ -715,8 +805,8 @@ let rec lowerTypeExpr (env: TypeEnv) (ty: TypeExpr) : IRType =
                 // Can't resolve arity statically — create unconstrained type var
                 env.Subst.LookupOrCreateTypeVar(name)
             | _ ->
-                let elem = lowerElemType env elemTy
-                IRTScalar elem  // Rank-polymorphic fallback
+                // Phase B2: lowerElemType returns IRType; return directly.
+                lowerElemType env elemTy  // Rank-polymorphic fallback
 
     | TyFunc (args, ret) ->
         IRTFunc (args |> List.map (lowerTypeExpr env), lowerTypeExpr env ret)
@@ -729,86 +819,91 @@ let rec lowerTypeExpr (env: TypeEnv) (ty: TypeExpr) : IRType =
         let arity = arityOpt |> Option.defaultValue 0
         env.Subst.LookupOrCreateTypeVar(name, arity, env.Builder)
 
-    | TyIdx extent ->
-        let ext = lowerExtentExpr env extent
-        let idx = { Id = env.Builder.FreshId(); Arity = 1; Extent = ext
-                    Symmetry = SymNone; Tag = None; Kind = SDimension; Dependencies = [] }
-        IRTArray { ElemType = ETFloat64; IndexTypes = [idx]; IsVirtual = false; Identity = None }
+    // Index types as standalone type expressions denote VALUE TYPES (the type
+    // of an index value), NOT array types. An anonymous Idx<n> in a value
+    // position (function parameter, struct field, let-binding annotation,
+    // tuple element) represents an integer in [0, n) that compiles to a loop
+    // bound at codegen time; it is not a Float-array indexed by Idx<n>.
+    //
+    // The current shape (IRTScalar ETInt64) for arity-1 cases mirrors the
+    // existing lowerElemType:895-897 precedent and matches the runtime
+    // story. Aliased index types (`type RegionIdx = Idx<n>`; `i: RegionIdx`)
+    // continue to route through TyNamed -> ETIndexRef name preserving
+    // nominative identity.
+    //
+    // KNOWN GAP — higher-arity / dependent cases below (TySymIdx, TyAntisymIdx,
+    // TyHermitianIdx, TyCompoundIdx, TyDepIdx | TyRaggedIdx | TyRaggedIdxOpaque,
+    // TyEquivIdx) preserve the legacy IRTArray-with-Float64 shape pending a
+    // formalism design pass. A SymIdx<r, n> as a value-level type could be
+    // an ordered r-tuple of integers under a sort constraint, a type error,
+    // or something else; the formalism doesn't currently say. No test
+    // exercises these paths; the wrong shape is a dead-code latent bug.
+    | TyIdx _ -> IRTScalar ETInt64
 
     | TySymIdx (arity, extent) ->
         let ext = lowerExtentExpr env extent
         let idx = { Id = env.Builder.FreshId(); Arity = arity; Extent = ext
                     Symmetry = SymSymmetric; Tag = None; Kind = SDimension; Dependencies = [] }
-        IRTArray { ElemType = ETFloat64; IndexTypes = [idx]; IsVirtual = false; Identity = None }
+        IRTArray { ElemType = IRTScalar ETFloat64; IndexTypes = [idx]; IsVirtual = false; Identity = None }
 
     | TyAntisymIdx (arity, extent) ->
         let ext = lowerExtentExpr env extent
         let idx = { Id = env.Builder.FreshId(); Arity = arity; Extent = ext
                     Symmetry = SymAntisymmetric; Tag = None; Kind = SDimension; Dependencies = [] }
-        IRTArray { ElemType = ETFloat64; IndexTypes = [idx]; IsVirtual = false; Identity = None }
+        IRTArray { ElemType = IRTScalar ETFloat64; IndexTypes = [idx]; IsVirtual = false; Identity = None }
 
     | TyHermitianIdx extent ->
         let ext = lowerExtentExpr env extent
         let idx = { Id = env.Builder.FreshId(); Arity = 2; Extent = ext
                     Symmetry = SymHermitian; Tag = None; Kind = SDimension; Dependencies = [] }
-        IRTArray { ElemType = ETFloat64; IndexTypes = [idx]; IsVirtual = false; Identity = None }
+        IRTArray { ElemType = IRTScalar ETFloat64; IndexTypes = [idx]; IsVirtual = false; Identity = None }
 
-    | TyBoundedIdx (lower, upper) ->
-        let hi = lowerExtentExpr env upper
-        let idx = { Id = env.Builder.FreshId(); Arity = 1; Extent = hi
-                    Symmetry = SymNone; Tag = None; Kind = SDimension; Dependencies = [] }
-        IRTArray { ElemType = ETFloat64; IndexTypes = [idx]; IsVirtual = false; Identity = None }
+    | TyBoundedIdx _ -> IRTScalar ETInt64
 
     | TyCompoundIdx _mask ->
         let idx = { Id = env.Builder.FreshId(); Arity = 1; Extent = IRParam ("compound", 0, IRTNat None)
                     Symmetry = SymNone; Tag = None; Kind = SDimension; Dependencies = [] }
-        IRTArray { ElemType = ETFloat64; IndexTypes = [idx]; IsVirtual = false; Identity = None }
+        IRTArray { ElemType = IRTScalar ETFloat64; IndexTypes = [idx]; IsVirtual = false; Identity = None }
 
-    | TyEnumIdx valuesExpr ->
-        let nValues =
-            match valuesExpr with
-            | ExprArrayLit elems -> int64 elems.Length
-            | _ -> 0L
-        let idx = { Id = env.Builder.FreshId(); Arity = 1; Extent = IRLit (IRLitInt nValues)
-                    Symmetry = SymNone; Tag = None; Kind = SDimension; Dependencies = [] }
-        IRTArray { ElemType = ETFloat64; IndexTypes = [idx]; IsVirtual = false; Identity = None }
+    | TyEnumIdx _ -> IRTScalar ETInt64
 
-    | TyDepIdx _ | TyRaggedIdx _ ->
+    | TyDepIdx _ | TyRaggedIdx _ | TyRaggedIdxOpaque ->
         // DepIdx/RaggedIdx in non-index position. Defensive fallback matching
         // the shape used for TyCompoundIdx, TyEquivIdx, etc. — wrap in a
         // single-index Array so the IR shape is consistent. Real iteration
         // happens via lowerIndexType, which produces an arity-2 IRIndexType
         // with the right Dependencies and Tag.
         let idx = lowerIndexType env 0 ty
-        IRTArray { ElemType = ETFloat64; IndexTypes = [idx]; IsVirtual = false; Identity = None }
+        IRTArray { ElemType = IRTScalar ETFloat64; IndexTypes = [idx]; IsVirtual = false; Identity = None }
 
     | TyPoly inner -> IRTPoly (lowerTypeExpr env inner, "r")
     | TyConstrained (inner, _) -> lowerTypeExpr env inner
     | TyEquivIdx (_dim, _group, _rep) ->
         let idx = { Id = env.Builder.FreshId(); Arity = 1; Extent = IRParam ("equiv", 0, IRTNat None)
                     Symmetry = SymNone; Tag = None; Kind = SDimension; Dependencies = [] }
-        IRTArray { ElemType = ETFloat64; IndexTypes = [idx]; IsVirtual = false; Identity = None }
+        IRTArray { ElemType = IRTScalar ETFloat64; IndexTypes = [idx]; IsVirtual = false; Identity = None }
 
-and lowerElemType env ty =
-    // Check if this is an index type used as an element type (foreign key)
+and lowerElemType env ty : IRType =
+    // Phase B2: returns IRType directly. Primitives become IRTScalar et;
+    // index types in element position (foreign-key syntax) become
+    // IRTScalar (ETIndexRef name); user-defined types pass through as
+    // IRTNamed; nested arrays pass through as IRTArray; etc.
+    //
+    // S4 fix: previously this function silently demoted struct-element
+    // and nested-array types to ETFloat64. Now they propagate as their
+    // actual IRType, unblocking the type system. (Codegen support for
+    // non-primitive element types is future Phase D work.)
     match ty with
     | TyNamed (name, []) ->
         match lookupTypeDef name env with
-        | Some (TDIIndexType _) -> ETIndexRef name
-        | Some (TDIEnumIdx _) -> ETIndexRef name
-        | _ ->
-            match lowerTypeExpr env ty with
-            | IRTScalar et -> et
-            | IRTUnitAnnotated (IRTScalar et, _) -> et
-            | _ -> ETFloat64
+        | Some (TDIIndexType _) -> IRTScalar (ETIndexRef name)
+        | Some (TDIEnumIdx _) -> IRTScalar (ETIndexRef name)
+        | _ -> lowerTypeExpr env ty   // struct, sum, alias, type variable, etc.
     | TyIdx _ | TySymIdx _ | TyAntisymIdx _ | TyHermitianIdx _ | TyEnumIdx _ ->
         // Raw index type syntax in element position (e.g., Array<Idx<3> like ...>)
-        ETInt64
+        IRTScalar ETInt64
     | _ ->
-        match lowerTypeExpr env ty with
-        | IRTScalar et -> et
-        | IRTUnitAnnotated (IRTScalar et, _) -> et
-        | _ -> ETFloat64
+        lowerTypeExpr env ty
 
 and lowerIndexType env (_position: int) (ty: TypeExpr) : IRIndexType =
     let id = env.Builder.FreshId()
@@ -842,14 +937,31 @@ and lowerIndexType env (_position: int) (ty: TypeExpr) : IRIndexType =
         { Id = id; Arity = 2; Extent = IRParam ("__depidx_inner", 0, IRTNat None)
           Symmetry = SymNone; Tag = Some "__depidx"
           Kind = SDimension; Dependencies = [outerIdx.Id] }
-    | TyRaggedIdx _lengthsExpr ->
-        // Same shape as TyDepIdx: placeholder for single-slot use.
-        { Id = id; Arity = 2; Extent = IRParam ("__raggedidx_inner", 0, IRTNat None)
+    | TyRaggedIdx lengthsExpr ->
+        // Single-record shape matching lowerIndexTypeList's unaliased TyRaggedIdx
+        // case (line ~1004). Earlier this branch returned an arity-2 placeholder
+        // copied from the TyDepIdx shape, which produced wrong-rank arrays when
+        // used through a type alias (`type R = RaggedIdx<lens>` then `Array<...
+        // R>`). The structural tag `__raggedidx` is preserved so codegen
+        // predicates (isRaggedArrayType etc.) keep detecting the ragged form
+        // through alias indirection.
+        let lengthsIR = lowerExtentExpr env lengthsExpr
+        { Id = id; Arity = 1; Extent = IRRaggedLookup lengthsIR
           Symmetry = SymNone; Tag = Some "__raggedidx"
+          Kind = SDimension; Dependencies = [] }
+    | TyRaggedIdxOpaque ->
+        // Opaque-extent variant: rank-1, no lengths array, no outer position.
+        // Used in kernel-parameter types where the extent is supplied by the
+        // peel context. The Extent is a sentinel (IROpaqueExtent) rather than
+        // a placeholder IRParam, so codegen can distinguish "extent unknown
+        // because we haven't computed it yet" (IRParam) from "extent supplied
+        // by surrounding loop binding" (IROpaqueExtent).
+        { Id = id; Arity = 1; Extent = IROpaqueExtent
+          Symmetry = SymNone; Tag = Some "__raggedidx_opaque"
           Kind = SDimension; Dependencies = [] }
     | TyNamed (name, _) ->
         match lookupTypeDef name env with
-        | Some (TDIIndexType (_, idx)) -> { idx with Id = id }
+        | Some (TDIIndexType (_, idx, _)) -> { idx with Id = id }
         | Some (TDIEnumIdx (_, idx, _)) -> { idx with Id = id }
         | _ ->
             { Id = id; Arity = 1; Extent = IRParam (name, 0, IRTNat None); Symmetry = SymNone
@@ -922,6 +1034,44 @@ and lowerIndexTypeList (env: TypeEnv) (position: int) (ty: TypeExpr) : IRIndexTy
             Kind = SDimension
             Dependencies = []  // populated by the codegen iteration as needed
         }]
+    | TyRaggedIdxOpaque ->
+        // Opaque-extent variant — used in kernel-parameter types where the
+        // extent is supplied by the surrounding peel context, not declared
+        // up front. Single-record like the closed form, but the Extent is
+        // IROpaqueExtent (a marker, no payload) and the Tag distinguishes it
+        // from the closed form for downstream codegen routing.
+        [{
+            Id = env.Builder.FreshId()
+            Arity = 1
+            Extent = IROpaqueExtent
+            Symmetry = SymNone
+            Tag = Some "__raggedidx_opaque"
+            Kind = SDimension
+            Dependencies = []
+        }]
+    | TyNamed (n, _) ->
+        // For DepIdx aliases, recurse on the stored body so the multi-record
+        // expansion runs at the use site. The catch-all path below would
+        // retrieve the single-record placeholder that lowerIndexType stored
+        // at registration time, which is structurally wrong for DepIdx
+        // (genuinely two records: outer + inner with Dependencies linking).
+        //
+        // Other aliases (TyIdx, TySymIdx, TyRaggedIdx, etc.) are
+        // structurally one record, so the stored idx is correct and the
+        // catch-all retrieval works fine. We deliberately don't recurse on
+        // those because static aliases have their alias name baked into
+        // the stored idx's Tag (used as nominative identity for foreign
+        // keys via ETIndexRef); re-walking would lose that.
+        //
+        // Chained aliases like `type B = A` where `type A = DepIdx<...>`
+        // are not handled here — B's body in env is TyNamed("A"), and
+        // registerTypeDecl currently routes that to TDIAlias, not
+        // TDIIndexType. No test pressure yet.
+        match lookupTypeDef n env with
+        | Some (TDIIndexType (_, _, (TyDepIdx _ as body))) ->
+            lowerIndexTypeList env position body
+        | _ ->
+            [lowerIndexType env position ty]
     | _ -> [lowerIndexType env position ty]
 
 // ============================================================================
@@ -1065,24 +1215,78 @@ let extractCommGroups (parms: LambdaParam list) (whereClause: WhereClause option
 // 7. Array Type Utilities
 // ============================================================================
 
-let inferElemType (exprs: TypedExpr list) : ElemType =
-    if List.isEmpty exprs then ETFloat64
-    else match exprs.[0].Type with IRTScalar et -> et | IRTArray arr -> arr.ElemType | _ -> ETFloat64
+let inferElemType (exprs: TypedExpr list) : IRType =
+    // S3 tag: relic for empty literal — defaults to Float64. Acceptable
+    // because empty literals are rank-0 placeholders with no useful elem
+    // type to infer. For non-empty: extract from the first expr's type.
+    if List.isEmpty exprs then IRTScalar ETFloat64
+    else
+        match exprs.[0].Type with
+        | IRTArray arr -> arr.ElemType  // Already IRType
+        | IRTScalar _ as t -> t          // Pass through
+        | t -> t                          // Other types (Named, Tuple, etc.) — propagate
 
 let inferArrayLitType (builder: IRBuilder) (exprs: TypedExpr list) : IRArrayType =
     let elemType = inferElemType exprs
-    let rec getShape (es: TypedExpr list) : int list =
-        match es with
-        | [] -> [0]
+
+    // Check for ragged structure at the second level. A ragged literal is one
+    // where outer entries are themselves arrays whose lengths differ. When
+    // detected, produce a RaggedIdx-typed result instead of a rectangular one.
+    //
+    // Note: we only check at the immediate inner level. Deeper raggedness
+    // (rank-3+ with internal raggedness) is not yet supported; such literals
+    // will produce wrong-shape output but no compile error.
+    let isRaggedAtSecondLevel =
+        match exprs with
+        | [] -> false
         | first :: _ ->
             match first.Kind with
-            | TExprArrayLit (inner, _) -> List.length es :: getShape inner
-            | _ -> [List.length es]
-    let shape = getShape exprs
-    let indexTypes = shape |> List.map (fun extent ->
-        { Id = builder.FreshId(); Arity = 1; Extent = IRLit (IRLitInt (int64 extent))
-          Symmetry = SymNone; Tag = None; Kind = SDimension; Dependencies = [] })
-    { ElemType = elemType; IndexTypes = indexTypes; IsVirtual = false; Identity = None }
+            | TExprArrayLit _ ->
+                let innerLengths =
+                    exprs |> List.map (fun e ->
+                        match e.Kind with
+                        | TExprArrayLit (inner, _) -> Some inner.Length
+                        | _ -> None)
+                // Ragged when lengths exist for all entries and differ
+                match innerLengths |> List.choose id with
+                | [] -> false
+                | first :: rest -> rest |> List.exists (fun n -> n <> first)
+            | _ -> false
+
+    if isRaggedAtSecondLevel then
+        // Build a RaggedIdx-typed array. Outer index has extent = number of
+        // entries (rectangular at outer level). Inner index is RaggedIdx with
+        // an IRRaggedLookup whose lengths reference is synthesized from the
+        // literal's actual sub-array lengths (computed at codegen time).
+        let n = List.length exprs
+        let outerIdx = {
+            Id = builder.FreshId(); Arity = 1; Extent = IRLit (IRLitInt (int64 n))
+            Symmetry = SymNone; Tag = None; Kind = SDimension; Dependencies = []
+        }
+        // The lengths reference is a synthetic IRParam — codegen recognizes
+        // this and emits the lengths array inline from the literal structure.
+        // The "__inline_lens" name is a sentinel that the codegen detects.
+        let innerIdx = {
+            Id = builder.FreshId(); Arity = 1
+            Extent = IRRaggedLookup (IRParam ("__inline_lens", 0, IRTNat None))
+            Symmetry = SymNone; Tag = Some "__raggedidx_inline"
+            Kind = SDimension; Dependencies = []
+        }
+        { ElemType = elemType; IndexTypes = [outerIdx; innerIdx]; IsVirtual = false; Identity = None }
+    else
+        // Rectangular: existing behavior — first sub-array's length defines all rows.
+        let rec getShape (es: TypedExpr list) : int list =
+            match es with
+            | [] -> [0]
+            | first :: _ ->
+                match first.Kind with
+                | TExprArrayLit (inner, _) -> List.length es :: getShape inner
+                | _ -> [List.length es]
+        let shape = getShape exprs
+        let indexTypes = shape |> List.map (fun extent ->
+            { Id = builder.FreshId(); Arity = 1; Extent = IRLit (IRLitInt (int64 extent))
+              Symmetry = SymNone; Tag = None; Kind = SDimension; Dependencies = [] })
+        { ElemType = elemType; IndexTypes = indexTypes; IsVirtual = false; Identity = None }
 
 let getArrayType (env: TypeEnv) (expr: Expr) : IRArrayType =
     match expr with
@@ -1092,21 +1296,21 @@ let getArrayType (env: TypeEnv) (expr: Expr) : IRArrayType =
             match info.Type with
             | IRTArray arrTy -> arrTy
             | _ ->
-                { ElemType = ETFloat64
+                { ElemType = IRTScalar ETFloat64
                   IndexTypes = [{ Id = env.Builder.FreshId(); Arity = 1
                                   Extent = IRParam(name + "_n", 0, IRTNat None)
                                   Symmetry = SymNone; Tag = None; Kind = SDimension
                                   Dependencies = [] }]
                   IsVirtual = false; Identity = Some (AIDVariable name) }
         | None ->
-            { ElemType = ETFloat64
+            { ElemType = IRTScalar ETFloat64
               IndexTypes = [{ Id = env.Builder.FreshId(); Arity = 1
                               Extent = IRParam(name + "_n", 0, IRTNat None)
                               Symmetry = SymNone; Tag = None; Kind = SDimension
                               Dependencies = [] }]
               IsVirtual = false; Identity = Some (AIDVariable name) }
     | _ ->
-        { ElemType = ETFloat64; IndexTypes = []; IsVirtual = false; Identity = None }
+        { ElemType = IRTScalar ETFloat64; IndexTypes = []; IsVirtual = false; Identity = None }
 
 // ============================================================================
 // 8. Helpers
@@ -1246,6 +1450,60 @@ let rec checkPattern (env: TypeEnv) (expected: IRType) (pat: Pattern)
 // 10. Expression Type Inference (every Expr variant handled explicitly)
 // ============================================================================
 
+/// Phase C helper: drive type inference for special forms (extents, mask,
+/// sort, intersect, union, group_keys, group_by) when the array argument
+/// is unresolved (typically an unannotated kernel parameter).
+///
+/// The pre-Phase-C pattern was "inspect resolved type, reject if not an
+/// IRTArray." That fails with `requires array` when the argument is an
+/// unbound IRTInfer — even though the special form could provide the
+/// constraint that determines what the inference variable should be.
+///
+/// This helper inverts the pattern: if the argument is unresolved,
+/// synthesize a fresh IRTArray (rank 1, fresh elem type, fresh anonymous
+/// index) and unify the argument with it. Subsequent uses of the argument
+/// then see the array shape via substitution. If the argument is already
+/// concrete-but-not-an-array, that's a real type error.
+///
+/// Centralizing this logic here (rather than duplicating across each
+/// special form) keeps the inference machinery aggregated high in the IR
+/// stream — useful for IDE/language-server tools that want to expose
+/// statically evaluable types without triggering deep code paths.
+///
+/// Returns the resolved IRArrayType. The synthesized index has Tag=None
+/// (matched as "synthetic" by unify, so it doesn't fail nominal checks
+/// against real source-array tags).
+let requireArrayArg (env: TypeEnv) (tArr: TypedExpr) (opName: string) : TypeResult<IRArrayType> =
+    let resolved = env.Subst.Resolve(tArr.Type)
+    match resolved with
+    | IRTArray arrTy -> Ok arrTy
+    | IRTInfer _ ->
+        let freshIdx = {
+            Id = env.Builder.FreshId()
+            Arity = 1
+            Extent = IRParam (sprintf "__%s_inferred_n" opName, 0, IRTNat None)
+            Symmetry = SymNone
+            Tag = None
+            Kind = SDimension
+            Dependencies = []
+        }
+        let freshElem = env.Builder.FreshInferType()
+        let freshArrType = {
+            ElemType = freshElem
+            IndexTypes = [freshIdx]
+            IsVirtual = false
+            Identity = None
+        }
+        unify env.Subst tArr.Type (IRTArray freshArrType)
+        |> Result.bind (fun () ->
+            // Re-resolve in case unification refined the elem type via
+            // some other constraint already in the substitution.
+            match env.Subst.Resolve(tArr.Type) with
+            | IRTArray a -> Ok a
+            | _ -> Error (Other (sprintf "%s(): failed to bind array type after unification" opName)))
+    | _ ->
+        Error (Other (sprintf "%s() requires an array as argument" opName))
+
 let rec inferExpr (env: TypeEnv) (expr: Expr) : TypeResult<TypedExpr> =
     match expr with
     // ---- Literals ----
@@ -1327,7 +1585,9 @@ let rec inferExpr (env: TypeEnv) (expr: Expr) : TypeResult<TypedExpr> =
             | IRTArray arrTy when tArgs.Length <= arrTy.IndexTypes.Length ->
                 let identity = match tFunc.Kind with TExprVar (_, _, id) -> id | _ -> None
                 if tArgs.Length = arrTy.IndexTypes.Length then
-                    Ok (mkTyped (TExprIndex (tFunc, tArgs, identity)) (IRTScalar arrTy.ElemType))
+                    // arrTy.ElemType is IRType post-B2; return directly
+                    // (no IRTScalar wrap — that was the closed-enum era).
+                    Ok (mkTyped (TExprIndex (tFunc, tArgs, identity)) arrTy.ElemType)
                 else
                     let remaining = arrTy.IndexTypes |> List.skip tArgs.Length
                     Ok (mkTyped (TExprIndex (tFunc, tArgs, identity))
@@ -1338,11 +1598,37 @@ let rec inferExpr (env: TypeEnv) (expr: Expr) : TypeResult<TypedExpr> =
                 let retTy = env.Subst.Fresh()
                 Ok (mkTyped (TExprApp (tFunc, tArgs)) retTy)))
 
-    // ---- Poly-tuple indexing: args[k] ----
+    // ---- Poly-tuple indexing OR array indexing (brackets) ----
+    // `e[i]` is parsed as ExprTupleIndex regardless of e's type. Disambiguate
+    // here: if e resolves to an IRTArray, this is conventional array
+    // indexing and we route to TExprIndex (matching the function-call form
+    // `e(i)` which goes through ExprApp's array branch at line 1518). If e
+    // is a poly-pack (any other shape), keep TExprTupleIndex for IRPolyIndex
+    // codegen.
+    //
+    // Pre-fix: arrays of named types (Phase D) would always render as
+    // `std::get<n>(arr)` since no test before Phase D exercised bracket-
+    // indexed reads on a real array.
     | ExprTupleIndex (tuple, index) ->
         inferExpr env tuple |> Result.bind (fun tT ->
         inferExpr env index |> Result.bind (fun tI ->
-            Ok (mkTyped (TExprTupleIndex (tT, tI)) (env.Subst.Fresh()))))
+            match env.Subst.Resolve(tT.Type) with
+            | IRTArray arrTy ->
+                // One bracket = one index dimension. Mirrors ExprApp's
+                // tArgs.Length <= arrTy.IndexTypes.Length check.
+                let identity = match tT.Kind with TExprVar (_, _, id) -> id | _ -> None
+                if 1 = arrTy.IndexTypes.Length then
+                    Ok (mkTyped (TExprIndex (tT, [tI], identity)) arrTy.ElemType)
+                elif 1 < arrTy.IndexTypes.Length then
+                    let remaining = arrTy.IndexTypes |> List.skip 1
+                    Ok (mkTyped (TExprIndex (tT, [tI], identity))
+                                (IRTArray { arrTy with IndexTypes = remaining }))
+                else
+                    Error (Other "array indexing: too many indices for array rank")
+            | _ ->
+                // Poly-pack / tuple indexing: result type is fresh — codegen
+                // resolves via std::get based on flat-leaf paths.
+                Ok (mkTyped (TExprTupleIndex (tT, tI)) (env.Subst.Fresh()))))
 
     // ---- Field access ----
     | ExprField (obj, field) ->
@@ -1398,7 +1684,7 @@ let rec inferExpr (env: TypeEnv) (expr: Expr) : TypeResult<TypedExpr> =
     // ---- Virtual arrays ----
     | ExprRange idxTy ->
         let idx = lowerIndexType env 0 idxTy
-        let arrTy = { ElemType = ETInt64; IndexTypes = [idx]; IsVirtual = true; Identity = None }
+        let arrTy = { ElemType = IRTScalar ETInt64; IndexTypes = [idx]; IsVirtual = true; Identity = None }
         Ok (mkTyped (TExprRange idx) (IRTArray arrTy))
     | ExprDotDot (lo, hi) ->
         inferExpr env lo |> Result.bind (fun tLo ->
@@ -1418,16 +1704,16 @@ let rec inferExpr (env: TypeEnv) (expr: Expr) : TypeResult<TypedExpr> =
                 Kind = SDimension
                 Dependencies = []
             }
-            let arrTy = { ElemType = ETInt64; IndexTypes = [idx]; IsVirtual = true; Identity = None }
+            let arrTy = { ElemType = IRTScalar ETInt64; IndexTypes = [idx]; IsVirtual = true; Identity = None }
             Ok (mkTyped (TExprDotDot (tLo, tHi)) (IRTArray arrTy))))
     | ExprReverse idxTy ->
         let idx = lowerIndexType env 0 idxTy
-        let arrTy = { ElemType = ETInt64; IndexTypes = [idx]; IsVirtual = true; Identity = None }
+        let arrTy = { ElemType = IRTScalar ETInt64; IndexTypes = [idx]; IsVirtual = true; Identity = None }
         Ok (mkTyped (TExprReverse idx) (IRTArray arrTy))
     | ExprBlocked (idxTy, blockSize) ->
         let idx = lowerIndexType env 0 idxTy
         inferExpr env blockSize |> Result.bind (fun tBS ->
-            let arrTy = { ElemType = ETInt64; IndexTypes = [idx]; IsVirtual = true; Identity = None }
+            let arrTy = { ElemType = IRTScalar ETInt64; IndexTypes = [idx]; IsVirtual = true; Identity = None }
             Ok (mkTyped (TExprBlocked (idx, tBS)) (IRTArray arrTy)))
 
     // ---- Zip / Stack ----
@@ -1444,11 +1730,11 @@ let rec inferExpr (env: TypeEnv) (expr: Expr) : TypeResult<TypedExpr> =
                 // All inputs are arrays — build proper zip type
                 let minRank = arrayTypes |> List.map (fun at -> at.IndexTypes.Length) |> List.min
                 let sharedIndices = arrayTypes.[0].IndexTypes |> List.take minRank
-                // Element types: for rank-equal arrays, scalar elem; for higher-rank, remaining slice
+                // Element types: for rank-equal arrays, the elem itself; for higher-rank, remaining slice
                 let elemTypes =
                     arrayTypes |> List.map (fun at ->
                         let extra = at.IndexTypes |> List.skip minRank
-                        if extra.IsEmpty then IRTScalar at.ElemType
+                        if extra.IsEmpty then at.ElemType
                         else IRTArray { at with IndexTypes = extra })
                 let tupleElemType =
                     match elemTypes with
@@ -1457,7 +1743,7 @@ let rec inferExpr (env: TypeEnv) (expr: Expr) : TypeResult<TypedExpr> =
                 // Infer a shared ElemType tag for the IRArrayType wrapper
                 // We use ETFloat64 as placeholder since the real element is a tuple
                 let zipArrayType = IRTArray {
-                    ElemType = ETFloat64  // placeholder; real element is the tuple
+                    ElemType = IRTScalar ETFloat64  // placeholder; real element is the tuple
                     IndexTypes = sharedIndices
                     IsVirtual = false; Identity = None
                 }
@@ -1487,8 +1773,7 @@ let rec inferExpr (env: TypeEnv) (expr: Expr) : TypeResult<TypedExpr> =
     | ExprMask (array, pred) ->
         inferExpr env array |> Result.bind (fun tArr ->
         inferExpr env pred |> Result.bind (fun tPred ->
-            match env.Subst.Resolve(tArr.Type) with
-            | IRTArray arrTy ->
+            requireArrayArg env tArr "mask" |> Result.bind (fun arrTy ->
                 // Result: 1D array with same element type, runtime-opaque extent
                 let resultIdx = {
                     Id = env.Builder.FreshId(); Arity = 1
@@ -1501,39 +1786,37 @@ let rec inferExpr (env: TypeEnv) (expr: Expr) : TypeResult<TypedExpr> =
                     IndexTypes = [resultIdx]
                     IsVirtual = false; Identity = None
                 }
-                Ok (mkTyped (TExprMask (tArr, tPred)) resultType)
-            | _ ->
-                Error (Other "mask() requires an array as first argument")))
+                Ok (mkTyped (TExprMask (tArr, tPred)) resultType))))
 
     // intersect(A, B) / union(A, B) — set operations on arrays
     | ExprIntersect (a, b) | ExprUnion (a, b) ->
         let isIntersect = match expr with ExprIntersect _ -> true | _ -> false
+        let opName = if isIntersect then "intersect" else "union"
         inferExpr env a |> Result.bind (fun tA ->
         inferExpr env b |> Result.bind (fun tB ->
-            match env.Subst.Resolve(tA.Type) with
-            | IRTArray arrTy ->
-                let resultIdx = {
-                    Id = env.Builder.FreshId(); Arity = 1
-                    Extent = IRParam ((if isIntersect then "__isect" else "__union"), 0, IRTNat None)
-                    Symmetry = SymNone; Tag = None
-                    Kind = SDimension; Dependencies = []
-                }
-                let resultType = IRTArray {
-                    ElemType = arrTy.ElemType
-                    IndexTypes = [resultIdx]
-                    IsVirtual = false; Identity = None
-                }
-                let texpr = if isIntersect then TExprIntersect (tA, tB) else TExprUnion (tA, tB)
-                Ok (mkTyped texpr resultType)
-            | _ ->
-                Error (Other (sprintf "%s() requires arrays as arguments" (if isIntersect then "intersect" else "union")))))
+            requireArrayArg env tA opName |> Result.bind (fun arrTy ->
+                // Drive inference for the second array too — both should be
+                // arrays of compatible elem type.
+                requireArrayArg env tB opName |> Result.bind (fun _arrTyB ->
+                    let resultIdx = {
+                        Id = env.Builder.FreshId(); Arity = 1
+                        Extent = IRParam ((if isIntersect then "__isect" else "__union"), 0, IRTNat None)
+                        Symmetry = SymNone; Tag = None
+                        Kind = SDimension; Dependencies = []
+                    }
+                    let resultType = IRTArray {
+                        ElemType = arrTy.ElemType
+                        IndexTypes = [resultIdx]
+                        IsVirtual = false; Identity = None
+                    }
+                    let texpr = if isIntersect then TExprIntersect (tA, tB) else TExprUnion (tA, tB)
+                    Ok (mkTyped texpr resultType)))))
 
     // group_keys(keys) — build CSR grouping structure from key array
     // Returns GroupKeys type carrying outer index type and source index type
     | ExprGroupKeys keys ->
         inferExpr env keys |> Result.bind (fun tKeys ->
-            match env.Subst.Resolve(tKeys.Type) with
-            | IRTArray arrTy ->
+            requireArrayArg env tKeys "group_keys" |> Result.bind (fun arrTy ->
                 // Source index: from the key array's index types
                 let sourceIdx =
                     if arrTy.IndexTypes.Length > 0 then arrTy.IndexTypes.[0]
@@ -1543,14 +1826,15 @@ let rec inferExpr (env: TypeEnv) (expr: Expr) : TypeResult<TypedExpr> =
                         Symmetry = SymNone; Tag = None
                         Kind = SDimension; Dependencies = []
                     }
-                // Outer index: number of groups
-                // If element type is ETIndexRef, we know the target extent statically
+                // Outer index: number of groups.
+                // If element type is ETIndexRef, we know the target extent statically.
+                // arr.ElemType is IRType (Phase B2); ETIndexRef wrapped in IRTScalar.
                 let (outerIdx, enumValues) =
                     match arrTy.ElemType with
-                    | ETIndexRef name ->
+                    | IRTScalar (ETIndexRef name) ->
                         // Semi-static: look up target index type for extent
                         match lookupTypeDef name env with
-                        | Some (TDIIndexType (_, idx)) ->
+                        | Some (TDIIndexType (_, idx, _)) ->
                             ({ idx with Id = env.Builder.FreshId(); Tag = Some name }, None)
                         | Some (TDIEnumIdx (_, idx, values)) ->
                             ({ idx with Id = env.Builder.FreshId(); Tag = Some name }, Some values)
@@ -1566,9 +1850,7 @@ let rec inferExpr (env: TypeEnv) (expr: Expr) : TypeResult<TypedExpr> =
                            Symmetry = SymNone; Tag = None
                            Kind = SDimension; Dependencies = [] }, None)
                 let gkType = IRTGroupKeys (outerIdx, sourceIdx, enumValues)
-                Ok (mkTyped (TExprGroupKeys tKeys) gkType)
-            | _ ->
-                Error (Other "group_keys() requires an array argument"))
+                Ok (mkTyped (TExprGroupKeys tKeys) gkType)))
 
     // group_by(values, grouping) — apply GroupKeys to a values array
     // Result: rank-2 array (groups × members), with GroupIdx
@@ -1576,8 +1858,7 @@ let rec inferExpr (env: TypeEnv) (expr: Expr) : TypeResult<TypedExpr> =
     | ExprGroupBy (values, grouping) ->
         inferExpr env values |> Result.bind (fun tVals ->
         inferExpr env grouping |> Result.bind (fun tGrouping ->
-            match env.Subst.Resolve(tVals.Type) with
-            | IRTArray arrTy ->
+            requireArrayArg env tVals "group_by" |> Result.bind (fun arrTy ->
                 // Extract group structure from GroupKeys type, or fall back for raw key arrays
                 let (outerIdx, memberIdx) =
                     match env.Subst.Resolve(tGrouping.Type) with
@@ -1609,9 +1890,7 @@ let rec inferExpr (env: TypeEnv) (expr: Expr) : TypeResult<TypedExpr> =
                     IndexTypes = [outerIdx; memberIdx]
                     IsVirtual = false; Identity = None
                 }
-                Ok (mkTyped (TExprGroupBy (tVals, tGrouping)) resultType)
-            | _ ->
-                Error (Other "group_by() requires an array as first argument")))
+                Ok (mkTyped (TExprGroupBy (tVals, tGrouping)) resultType))))
 
     // sort(array, key) — stable sort by ascending key.
     // Phase 1 (current): eager materialization. Result is a new physical array
@@ -1628,27 +1907,25 @@ let rec inferExpr (env: TypeEnv) (expr: Expr) : TypeResult<TypedExpr> =
     | ExprSort (array, key) ->
         inferExpr env array |> Result.bind (fun tArr ->
         inferExpr env key |> Result.bind (fun tKey ->
-            match env.Subst.Resolve(tArr.Type) with
-            | IRTArray arrTy when arrTy.IndexTypes.Length = 1 ->
-                let srcIdx = arrTy.IndexTypes.[0]
-                // Fresh anonymous index, same extent as source. Sort doesn't
-                // change length, so the static extent (when known) propagates.
-                let resultIdx = {
-                    Id = env.Builder.FreshId(); Arity = 1
-                    Extent = srcIdx.Extent
-                    Symmetry = SymNone; Tag = None
-                    Kind = SDimension; Dependencies = []
-                }
-                let resultType = IRTArray {
-                    ElemType = arrTy.ElemType
-                    IndexTypes = [resultIdx]
-                    IsVirtual = false; Identity = None
-                }
-                Ok (mkTyped (TExprSort (tArr, tKey)) resultType)
-            | IRTArray _ ->
-                Error (Other "sort() requires a rank-1 array (multi-rank sort not yet supported)")
-            | _ ->
-                Error (Other "sort() requires an array as first argument")))
+            requireArrayArg env tArr "sort" |> Result.bind (fun arrTy ->
+                if arrTy.IndexTypes.Length <> 1 then
+                    Error (Other "sort() requires a rank-1 array (multi-rank sort not yet supported)")
+                else
+                    let srcIdx = arrTy.IndexTypes.[0]
+                    // Fresh anonymous index, same extent as source. Sort doesn't
+                    // change length, so the static extent (when known) propagates.
+                    let resultIdx = {
+                        Id = env.Builder.FreshId(); Arity = 1
+                        Extent = srcIdx.Extent
+                        Symmetry = SymNone; Tag = None
+                        Kind = SDimension; Dependencies = []
+                    }
+                    let resultType = IRTArray {
+                        ElemType = arrTy.ElemType
+                        IndexTypes = [resultIdx]
+                        IsVirtual = false; Identity = None
+                    }
+                    Ok (mkTyped (TExprSort (tArr, tKey)) resultType))))
 
     // reduce(array, kernel) — T/S reduction primitive.
     // Consumes the innermost dimension via a binary kernel. For rank-1 input,
@@ -1668,6 +1945,90 @@ let rec inferExpr (env: TypeEnv) (expr: Expr) : TypeResult<TypedExpr> =
     | ExprReduce (array, kernel) ->
         inferExpr env array |> Result.bind (fun tArr ->
         inferExpr env kernel |> Result.bind (fun tKernel ->
+            // Drive type inference for unannotated kernel parameters: when
+            // the array argument's resolved type is an unconstrained
+            // inference variable (e.g., `lambda(g) -> reduce(g, (+))` with
+            // no type annotation on `g`), bind it to a fresh rank-1 array.
+            //
+            // Element type is deduced from the kernel's first argument
+            // type:
+            //   1. If the kernel resolves to `IRTFunc (paramTys, _)` and
+            //      `paramTys.[0]` resolves to a concrete `IRTScalar et`,
+            //      use `et`. Catches typed-arg kernels like
+            //      `lambda(x: Int64, y: Int64) -> x + y` and untyped
+            //      lambdas whose body has unified the params with a
+            //      concrete elem type via literals or other constraints.
+            //   2. Otherwise default to Float64. Operator sections like
+            //      `(+)` always have fresh type variables for args, so
+            //      they hit this path — which matches what
+            //      lowerTypedSection emits in the IR (sections are
+            //      hardcoded to Float64). Untyped lambdas with
+            //      uninferable bodies also fall through here.
+            //
+            // The unification only fires when the resolved array type is
+            // genuinely unconstrained; concrete non-array types fall
+            // through to the existing error path. For non-Float64 source
+            // data with a section kernel, an explicit annotation on the
+            // kernel parameter is still required.
+            // Phase B2: ElemType field is IRType. Helper returns IRType
+            // directly; primitives are wrapped as IRTScalar at the
+            // resolution point.
+            //
+            // Phase 2 (post-Gap-2.5): with strict scalar unify, we cannot
+            // pin elem type to whatever the kernel's declared param type is —
+            // operator sections like `(+)` have hardcoded Float64 in their
+            // lowering, which would make `reduce(int_array, (+))` fail.
+            // So when the kernel is a section default (or when its first
+            // arg type is itself unresolved), we return a fresh inference
+            // variable that gets pinned later by buildApplyInfo's
+            // kernel-param unification against the actual source's per-row
+            // type.
+            //
+            // We DO use a concrete kernel-arg type when the kernel was
+            // declared with an explicit annotation (e.g., a user-written
+            // `lambda(x: Int64) -> ...`). That's a real constraint from
+            // the user; if it conflicts with the source array, that's a
+            // genuine type error worth surfacing.
+            let deduceElemFromKernel () : IRType =
+                // Heuristic: if the kernel's first param is unresolved
+                // (still an IRTInfer), the user didn't annotate it — so
+                // we return that same inference variable (not a fresh one)
+                // so subsequent inference flows through it: when
+                // buildApplyInfo unifies the reduce's per-row type with
+                // the source's elem type, the kernel's param type gets
+                // pinned at the same time. If we returned a fresh var,
+                // the section's existing T-var would never bind, leaving
+                // an unresolved type variable in the kernel's lowered
+                // form. If the first param IS concrete (annotated), we
+                // pin to that and let unification surface mismatches.
+                match env.Subst.Resolve(tKernel.Type) with
+                | IRTFunc (paramTys, _) when not paramTys.IsEmpty ->
+                    let resolved = env.Subst.Resolve(paramTys.[0])
+                    match resolved with
+                    | IRTScalar _ -> resolved          // annotated: pin to user's type
+                    | IRTInfer _ -> resolved           // unresolved: defer via the same var
+                    | _ -> env.Builder.FreshInferType()
+                | _ -> env.Builder.FreshInferType()
+            (match env.Subst.Resolve(tArr.Type) with
+             | IRTInfer _ ->
+                let elemType = deduceElemFromKernel ()
+                let freshIdx = {
+                    Id = env.Builder.FreshId()
+                    Arity = 1
+                    Extent = IRParam ("__inferred_n", 0, IRTNat None)
+                    Symmetry = SymNone
+                    Tag = None
+                    Kind = SDimension
+                    Dependencies = []
+                }
+                let freshArr = IRTArray {
+                    ElemType = elemType
+                    IndexTypes = [freshIdx]
+                    IsVirtual = false
+                    Identity = None
+                }
+                unify env.Subst tArr.Type freshArr |> ignore
+             | _ -> ())
             match env.Subst.Resolve(tArr.Type) with
             | IRTArray arrTy when arrTy.IndexTypes.Length = 1 ->
                 // Static guarantee: reject if we can prove the extent is 0.
@@ -1675,7 +2036,8 @@ let rec inferExpr (env: TypeEnv) (expr: Expr) : TypeResult<TypedExpr> =
                 | Some n when n <= 0L ->
                     Error (Other (sprintf "reduce() rejects statically empty arrays (extent = %d). Empty input has no defined reduction without an identity; a 3-arg form `reduce(arr, op, init)` is the planned solution." n))
                 | _ ->
-                    let resultType = IRTScalar arrTy.ElemType
+                    // arrTy.ElemType is IRType post-B2; return directly.
+                    let resultType = arrTy.ElemType
                     Ok (mkTyped (TExprReduce (tArr, tKernel)) resultType)
             | IRTArray _ ->
                 Error (Other "reduce() currently supports only rank-1 arrays (multi-rank reduction over the innermost dimension is deferred)")
@@ -1697,16 +2059,14 @@ let rec inferExpr (env: TypeEnv) (expr: Expr) : TypeResult<TypedExpr> =
     // compat note, not a blocker.
     | ExprExtents array ->
         inferExpr env array |> Result.bind (fun tArr ->
-            match env.Subst.Resolve(tArr.Type) with
-            | IRTArray arrTy when arrTy.IndexTypes.Length = 1 ->
-                Ok (mkTyped (TExprExtents tArr) (IRTScalar ETInt64))
-            | IRTArray arrTy ->
-                // Multi-rank: tuple of Int64s, one per dimension
-                let n = arrTy.IndexTypes.Length
-                let tupleTy = IRTTuple (List.replicate n (IRTScalar ETInt64))
-                Ok (mkTyped (TExprExtents tArr) tupleTy)
-            | _ ->
-                Error (Other "extents() requires an array as argument"))
+            requireArrayArg env tArr "extents" |> Result.bind (fun arrTy ->
+                if arrTy.IndexTypes.Length = 1 then
+                    Ok (mkTyped (TExprExtents tArr) (IRTScalar ETInt64))
+                else
+                    // Multi-rank: tuple of Int64s, one per dimension
+                    let n = arrTy.IndexTypes.Length
+                    let tupleTy = IRTTuple (List.replicate n (IRTScalar ETInt64))
+                    Ok (mkTyped (TExprExtents tArr) tupleTy)))
 
     | ExprSequence exprs ->
         exprs |> List.map (inferExpr env) |> sequenceResults |> Result.bind (fun tExprs ->
@@ -1740,10 +2100,12 @@ let rec inferExpr (env: TypeEnv) (expr: Expr) : TypeResult<TypedExpr> =
                             IRTArray { arrTy with IndexTypes = seqIdx :: arrTy.IndexTypes }
                         | IRTScalar et ->
                             // Scalar elements: simple array Idx<N> → scalar
-                            IRTArray { ElemType = et; IndexTypes = [seqIdx]; IsVirtual = false; Identity = None }
+                            IRTArray { ElemType = IRTScalar et; IndexTypes = [seqIdx]; IsVirtual = false; Identity = None }
                         | _ ->
-                            // Fallback: treat as array of whatever
-                            IRTArray { ElemType = ETFloat64; IndexTypes = [seqIdx]; IsVirtual = false; Identity = None }
+                            // S3 tag: relic. Fallback to Float64 array for non-array,
+                            // non-scalar resolved types — should arguably be a typecheck
+                            // error, but preserving prior behavior.
+                            IRTArray { ElemType = IRTScalar ETFloat64; IndexTypes = [seqIdx]; IsVirtual = false; Identity = None }
                     Ok (mkTyped (TExprSequence tExprs) resultType)))
     | ExprReplicate (count, body) ->
         inferExpr env count |> Result.bind (fun tC ->
@@ -1776,9 +2138,10 @@ let rec inferExpr (env: TypeEnv) (expr: Expr) : TypeResult<TypedExpr> =
                     | IRTArray arrTy ->
                         IRTArray { arrTy with IndexTypes = seqIdx :: arrTy.IndexTypes }
                     | IRTScalar et ->
-                        IRTArray { ElemType = et; IndexTypes = [seqIdx]; IsVirtual = false; Identity = None }
+                        IRTArray { ElemType = IRTScalar et; IndexTypes = [seqIdx]; IsVirtual = false; Identity = None }
                     | _ ->
-                        IRTArray { ElemType = ETFloat64; IndexTypes = [seqIdx]; IsVirtual = false; Identity = None }
+                        // S3 tag: relic. Same as sequence fallback above.
+                        IRTArray { ElemType = IRTScalar ETFloat64; IndexTypes = [seqIdx]; IsVirtual = false; Identity = None }
                 Ok (mkTyped (TExprReplicate (tC, tB)) resultType)
             | _ ->
                 Error (Other (sprintf "replicate count must be >= 1, got %A" n))))
@@ -1888,8 +2251,9 @@ and inferBinOp env mode op left right : TypeResult<TypedExpr> =
             let outputType =
                 match tF.Type, tC.Type with
                 | IRTFunc (_, IRTScalar et), IRTArray arr ->
-                    // Array with updated element type
-                    IRTArray { arr with ElemType = et }
+                    // Array with updated element type. Wrap et as IRTScalar
+                    // since arr.ElemType is IRType post-B2.
+                    IRTArray { arr with ElemType = IRTScalar et }
                 | IRTFunc (_, retTy), _ -> retTy
                 | _ -> tC.Type  // fallback: preserve computation type
             Ok (mkTyped (TExprFunctorMap (tF, tC)) outputType)))
@@ -2104,11 +2468,20 @@ and inferApply (env: TypeEnv) (tLeft: TypedExpr) (tRight: TypedExpr) : TypeResul
 
     | TExprMethodFor mfInfo, TExprZero ->
         // M <@> zero: synthesize a lambda that returns 0 for each index point
-        // Infer element type from first array, default to Float64
-        let elemType =
+        // Infer element type from first array, default to Float64.
+        // Phase B2: at.ElemType is IRType. We extract the primitive scalar
+        // for the literal-choice match below; non-primitive elem types
+        // (struct/named) fall through to Float64 — S3 tag: relic, this
+        // path semantically requires a primitive-typed array anyway since
+        // `zero` produces literal 0/false values.
+        let elemTypeIR =
             mfInfo.ArrayTypes |> List.tryHead
             |> Option.map (fun at -> at.ElemType)
-            |> Option.defaultValue ETFloat64
+            |> Option.defaultValue (IRTScalar ETFloat64)
+        let elemType =
+            match elemTypeIR with
+            | AnyPrimElem et -> et
+            | _ -> ETFloat64
         let paramTy = IRTScalar elemType
         let zeroLit =
             match elemType with
@@ -2164,7 +2537,7 @@ and inferApply (env: TypeEnv) (tLeft: TypedExpr) (tRight: TypedExpr) : TypeResul
                     let outputType =
                         match f.Type, acc.Type with
                         | IRTFunc (_, IRTScalar et), IRTArray arr ->
-                            IRTArray { arr with ElemType = et }
+                            IRTArray { arr with ElemType = IRTScalar et }
                         | IRTFunc (_, retTy), _ -> retTy
                         | _ -> acc.Type
                     mkTyped (TExprFunctorMap (f, acc)) outputType
@@ -2220,7 +2593,7 @@ and inferApply (env: TypeEnv) (tLeft: TypedExpr) (tRight: TypedExpr) : TypeResul
                 let arrTypes = arrays |> List.map (fun a ->
                     match a.Type with
                     | IRTArray at -> at
-                    | _ -> { ElemType = ETFloat64; IndexTypes = []; IsVirtual = false; Identity = None })
+                    | _ -> { ElemType = IRTScalar ETFloat64; IndexTypes = []; IsVirtual = false; Identity = None })
                 let allCoIter = isCoIterGroup |> List.forall id
                 let idx =
                     if allCoIter then
@@ -2237,7 +2610,7 @@ and inferApply (env: TypeEnv) (tLeft: TypedExpr) (tRight: TypedExpr) : TypeResul
         let arrayTypes = flatArrays |> List.map (fun arr ->
             match arr.Type with
             | IRTArray at -> at
-            | _ -> { ElemType = ETFloat64; IndexTypes = []; IsVirtual = false; Identity = None })
+            | _ -> { ElemType = IRTScalar ETFloat64; IndexTypes = []; IsVirtual = false; Identity = None })
         let sDimsPerArray =
             if sharedIdx.IsSome then arrayTypes |> List.map (fun _ -> 1)
             else computeSDimsPerArray arrayTypes
@@ -2255,10 +2628,15 @@ and inferApply (env: TypeEnv) (tLeft: TypedExpr) (tRight: TypedExpr) : TypeResul
             | _ -> Error (Other "reynolds() requires a lambda kernel, but the inner expression could not be resolved to a lambda")
         | TExprZero ->
             // object_for(zero) <@> arrays: synthesize zero-returning lambda
-            let elemType =
+            // Phase B2: at.ElemType is IRType; extract primitive for literal choice.
+            let elemTypeIR =
                 arrayTypes |> List.tryHead
                 |> Option.map (fun at -> at.ElemType)
-                |> Option.defaultValue ETFloat64
+                |> Option.defaultValue (IRTScalar ETFloat64)
+            let elemType =
+                match elemTypeIR with
+                | AnyPrimElem et -> et
+                | _ -> ETFloat64
             let paramTy = IRTScalar elemType
             let zeroLit =
                 match elemType with
@@ -2295,7 +2673,7 @@ and inferApply (env: TypeEnv) (tLeft: TypedExpr) (tRight: TypedExpr) : TypeResul
             ArrayTypes = arrayExprs |> List.map (fun a ->
                 match a.Type with
                 | IRTArray at -> at
-                | _ -> { ElemType = ETFloat64; IndexTypes = []; IsVirtual = false; Identity = None })
+                | _ -> { ElemType = IRTScalar ETFloat64; IndexTypes = []; IsVirtual = false; Identity = None })
             SharedIndexType = None
             SymcomStates = []; TriangularLevels = []
             SDimsPerArray = []
@@ -2325,9 +2703,19 @@ and buildApplyInfo (env: TypeEnv)
 
     let commGroups = lambdaInfo.CommGroups
 
+    // Phase 2 (Gap 2.5 fix): resolve param types through Subst before
+    // reading rank. A kernel param may have started as IRTInfer at lambda
+    // creation but been refined during the kernel body's typecheck (e.g.,
+    // reduce's kernel-arg deduction synthesizes a rank-1 IRTArray binding).
+    // If we read p.Type directly here, we'd see the stale IRTInfer and
+    // compute kRank = 0, which makes perRowType think the kernel takes a
+    // scalar — leading to a shape mismatch when we later unify against
+    // the real rank-N source per-row type.
+    let resolvedParamTypes =
+        lambdaInfo.Params |> List.map (fun p -> env.Subst.Resolve p.Type)
     let kernelInputRanks =
-        lambdaInfo.Params |> List.map (fun p ->
-            match p.Type with IRTArray arr -> arr.IndexTypes.Length | _ -> 0)
+        resolvedParamTypes |> List.map (fun t ->
+            match t with IRTArray arr -> arr.IndexTypes.Length | _ -> 0)
 
     // Infer T-dimensions from the kernel's resolved return type (§9.2).
     // If the kernel returns an array, its index types become T-dimensions
@@ -2343,55 +2731,101 @@ and buildApplyInfo (env: TypeEnv)
     let states = computeAllSymcomStates identities arrayTypes commGroups sDimsPerArray
     let triLevels = computeTriangularLevels arrayTypes identities commGroups sDimsPerArray
     let speedup = computePartialProductSpeedup arrayTypes identities commGroups sDimsPerArray
-    
-    // Infer output element type from kernel return type, falling back to input arrays
-    let outputElemType =
-        let resolved = env.Subst.Resolve(lambdaInfo.ReturnType)
-        match resolved with
-        | IRTScalar et -> et
-        | IRTArray arr -> arr.ElemType
-        | IRTUnitAnnotated (IRTScalar et, _) -> et
-        | _ ->
-            // Fall back to common element type of input arrays
-            arrayTypes |> List.tryPick (fun at -> Some at.ElemType)
-            |> Option.defaultValue ETFloat64
-    let outputType = deduceOutputType arrayTypes identities commGroups sDimsPerArray kernelTDims outputElemType env.Builder
 
-    let reynoldsSpeedup =
-        if isReynolds then
-            let r = identities.Length
-            if r > 1 then factorial r else 1L
-        else 1L
+    // Phase 2 (Gap 2.5 fix): unify each kernel parameter with the source
+    // array's per-row type. This catches mismatches like a String-typed
+    // kernel param applied to a Float64 array, which previously silently
+    // miscompiled because elem types weren't compared.
+    //
+    // Per-row type computation: for a source array of rank R and a
+    // kernel param of rank K (K = 0 for scalar params, K = N for an
+    // Array<T like ...N indices...> param), the kernel sees the array
+    // sliced at the outer R-K dims. So the per-row type is:
+    //   - kRank = 0:     the array's elem type itself (a scalar value)
+    //   - kRank = R:     the whole array (degenerate, but allowed)
+    //   - 0 < kRank < R: an array with the inner kRank dims preserved
+    //
+    // We zip params with arrays. Unification failures here are real
+    // type errors and propagate out as TypeMismatch. Length mismatches
+    // (arity errors) are caught earlier at the kernel-arity check, so
+    // a defensive zip is sufficient.
+    let perRowType (arrTy: IRArrayType) (kRank: int) : IRType =
+        let r = arrTy.IndexTypes.Length
+        if kRank <= 0 then
+            arrTy.ElemType  // Scalar kernel param sees one element per iter.
+        elif kRank >= r then
+            IRTArray arrTy  // Kernel wants the whole array (degenerate).
+        else
+            let nOuter = r - kRank
+            let innerDims = arrTy.IndexTypes |> List.skip nOuter
+            IRTArray { arrTy with IndexTypes = innerDims }
 
-    // Store RESOLVED kernel so Lowering produces IRLambda (not IRVar)
-    let resolvedKernel =
-        let lambdaExpr = mkTyped (TExprLambda lambdaInfo) tKernel.Type
-        if isReynolds then mkTyped (TExprReynolds (lambdaExpr, isAntisym)) tKernel.Type
-        else lambdaExpr
+    let kernelParamUnifyResult =
+        if lambdaInfo.Params.Length = arrayTypes.Length then
+            // Use resolved types so the unify call sees the same shape we used
+            // to compute kRank. (Reading param.Type directly could be stale.)
+            (List.zip3 resolvedParamTypes arrayTypes kernelInputRanks)
+            |> List.fold (fun acc (paramTy, arrTy, kRank) ->
+                acc |> Result.bind (fun () ->
+                    let row = perRowType arrTy kRank
+                    unify env.Subst paramTy row))
+                (Ok ())
+        else
+            Ok ()  // Arity mismatch handled elsewhere; don't double-report.
 
-    let isCoIter = sharedIndexType.IsSome
-    // For co-iteration, output type is array with shared index (not outer product)
-    let outputType =
-        if isCoIter then
-            match sharedIndexType with
-            | Some sharedIdx ->
-                IRTArray { ElemType = outputElemType; IndexTypes = [sharedIdx]
-                           IsVirtual = false; Identity = None }
-            | None -> outputType
-        else outputType
-    let info : TypedApplyInfo = {
-        Loop = tLoop; Kernel = resolvedKernel
-        Arrays = arrays; Identities = identities
-        ArrayTypes = arrayTypes; SharedIndexType = sharedIndexType
-        SymcomStates = states; TriangularLevels = triLevels
-        SDimsPerArray = sDimsPerArray
-        KernelInputRanks = kernelInputRanks; KernelOutputRank = kernelOutputRank
-        KernelTDims = kernelTDims
-        SpeedupFactor = speedup; ReynoldsSpeedup = reynoldsSpeedup
-        HasReynolds = isReynolds; OutputType = outputType
-        IsCoIteration = isCoIter
-    }
-    Ok (mkTyped (TExprApply info) outputType)
+    match kernelParamUnifyResult with
+    | Error e -> Error e
+    | Ok () ->
+        // Infer output element type from kernel return type, falling back to input arrays.
+        // Returns IRType (Phase B2). Primitives are wrapped IRTScalar.
+        let outputElemType =
+            let resolved = env.Subst.Resolve(lambdaInfo.ReturnType)
+            match resolved with
+            | IRTScalar _ as t -> t                                // pass through
+            | IRTArray arr -> arr.ElemType                         // already IRType
+            | IRTUnitAnnotated (IRTScalar _, _) as t -> t          // preserve unit annotation
+            | _ ->
+                // S3 tag: relic. Fall back to common element type of input arrays.
+                // The input arrays' elem types are already IRType post-B2.
+                arrayTypes |> List.tryPick (fun at -> Some at.ElemType)
+                |> Option.defaultValue (IRTScalar ETFloat64)
+        let outputType = deduceOutputType arrayTypes identities commGroups sDimsPerArray kernelTDims outputElemType env.Builder
+
+        let reynoldsSpeedup =
+            if isReynolds then
+                let r = identities.Length
+                if r > 1 then factorial r else 1L
+            else 1L
+
+        // Store RESOLVED kernel so Lowering produces IRLambda (not IRVar)
+        let resolvedKernel =
+            let lambdaExpr = mkTyped (TExprLambda lambdaInfo) tKernel.Type
+            if isReynolds then mkTyped (TExprReynolds (lambdaExpr, isAntisym)) tKernel.Type
+            else lambdaExpr
+
+        let isCoIter = sharedIndexType.IsSome
+        // For co-iteration, output type is array with shared index (not outer product)
+        let outputType =
+            if isCoIter then
+                match sharedIndexType with
+                | Some sharedIdx ->
+                    IRTArray { ElemType = outputElemType; IndexTypes = [sharedIdx]
+                               IsVirtual = false; Identity = None }
+                | None -> outputType
+            else outputType
+        let info : TypedApplyInfo = {
+            Loop = tLoop; Kernel = resolvedKernel
+            Arrays = arrays; Identities = identities
+            ArrayTypes = arrayTypes; SharedIndexType = sharedIndexType
+            SymcomStates = states; TriangularLevels = triLevels
+            SDimsPerArray = sDimsPerArray
+            KernelInputRanks = kernelInputRanks; KernelOutputRank = kernelOutputRank
+            KernelTDims = kernelTDims
+            SpeedupFactor = speedup; ReynoldsSpeedup = reynoldsSpeedup
+            HasReynolds = isReynolds; OutputType = outputType
+            IsCoIteration = isCoIter
+        }
+        Ok (mkTyped (TExprApply info) outputType)
 
 // ============================================================================
 // 10c. Lambda, Let, Match, Block, MethodFor, ObjectFor, Struct, For
@@ -2504,10 +2938,11 @@ and checkExpr (env: TypeEnv) (expected: IRType) (expr: Expr) : TypeResult<TypedE
                 match outerIdx.Extent with IRLit (IRLitInt n) -> int n | _ -> -1
             Error (Other (sprintf "Array literal has %d elements, but annotation expects %d" elems.Length expectedN))
         else
-            // Build the element annotation: scalar if no inner index types,
-            // otherwise an array with the remaining index types.
+            // Build the element annotation: just the elem type if no inner
+            // index types, otherwise an array with the remaining index types.
+            // arrTy.ElemType is IRType post-B2.
             let elemAnnot =
-                if innerIdxs.IsEmpty then IRTScalar arrTy.ElemType
+                if innerIdxs.IsEmpty then arrTy.ElemType
                 else IRTArray { arrTy with IndexTypes = innerIdxs }
             elems |> List.map (checkExpr env elemAnnot) |> sequenceResults
             |> Result.map (fun tElems ->
@@ -2814,7 +3249,7 @@ and inferMethodFor env arrays : TypeResult<TypedExpr> =
                 let arrayTypes = zipExprs |> List.map (fun te ->
                     match te.Type with
                     | IRTArray at -> at
-                    | _ -> { ElemType = ETFloat64; IndexTypes = []; IsVirtual = false; Identity = None })
+                    | _ -> { ElemType = IRTScalar ETFloat64; IndexTypes = []; IsVirtual = false; Identity = None })
                 let minRank = arrayTypes |> List.map (fun at -> at.IndexTypes.Length) |> List.min
                 let sharedIdx =
                     if minRank > 0 then Some arrayTypes.[0].IndexTypes.[0]
@@ -2932,17 +3367,18 @@ and inferForExpr env source kernelOpt : TypeResult<TypedExpr> =
                     let resolvedKernel = resolveTypedExpr env tK
                     match resolvedKernel.Kind with
                     | TExprLambda lambdaInfo ->
-                        // Infer element type: prefer kernel return type, fall back to arrays
+                        // Infer element type: prefer kernel return type, fall back to arrays.
+                        // Phase B2: returns IRType.
                         let elemType =
                             let resolved = env.Subst.Resolve(lambdaInfo.ReturnType)
                             match resolved with
-                            | IRTScalar et -> et
+                            | IRTScalar _ as t -> t
                             | IRTArray arr -> arr.ElemType
-                            | IRTUnitAnnotated (IRTScalar et, _) -> et
+                            | IRTUnitAnnotated (IRTScalar _, _) as t -> t
                             | _ ->
                                 match arrayTypes with
                                 | at :: _ -> at.ElemType
-                                | [] -> ETFloat64
+                                | [] -> IRTScalar ETFloat64
                         // Output type: array with shared index structure + kernel T-dims
                         let (kernelTDims, kernelOutputRank) =
                             let resolved = env.Subst.Resolve(lambdaInfo.ReturnType)
@@ -3111,12 +3547,47 @@ and checkDecl (env: TypeEnv) (decl: Decl) : TypeResult<TypedDecl * TypeEnv> =
                 match scheme with
                 | Some s -> bindVarPoly name varId tValue.Type None ReadOnly (Some tValue) s env
                 | None -> bindVarFull name varId tValue.Type None ReadOnly (Some tValue) env
+
+            // Tuple destructuring for `let static (a, b) = expr`. Mirrors the
+            // PatTuple branch of DeclLet — sub-bindings become individually
+            // resolvable names downstream. PatCons / PatStruct destructuring
+            // for static bindings is not yet covered (no test pressure yet).
+            let mutable subBindings : (string * IRId * IRType) list = []
+            let env'' =
+                match binding.Pattern with
+                | PatTuple pats ->
+                    let resolvedTy = env.Subst.Resolve(tValue.Type)
+                    let typeList =
+                        match resolvedTy with
+                        | IRTTuple ts ->
+                            if pats.Length = ts.Length then ts
+                            else
+                                let flat = IR.flattenTupleLeaves resolvedTy
+                                if pats.Length = flat.Length then flat else ts
+                        | _ -> []
+                    pats |> List.mapi (fun i p -> (i, p))
+                    |> List.fold (fun e (i, p) ->
+                        match p with
+                        | PatVar n ->
+                            let eTy =
+                                if i < typeList.Length then env.Subst.Resolve(typeList.[i])
+                                else env.Subst.Fresh()
+                            let subId = env.Builder.FreshId()
+                            subBindings <- subBindings @ [(n, subId, eTy)]
+                            bindVarSimple n subId eTy e
+                        | _ -> patternNames p |> List.fold (fun e2 n ->
+                            let subId = env.Builder.FreshId()
+                            let eTy = env.Subst.Fresh()
+                            subBindings <- subBindings @ [(n, subId, eTy)]
+                            bindVarSimple n subId eTy e2) e) env'
+                | _ -> env'
+
             let tb : TypedBinding = {
                 Name = name; VarId = varId; Type = env.Subst.Resolve(tValue.Type)
                 Identity = None; IsMutable = false; Value = tValue
-                SubBindings = []
+                SubBindings = subBindings |> List.map (fun (n, id, ty) -> (n, id, env.Subst.Resolve ty))
             }
-            Ok (TDeclStatic tb, env'))
+            Ok (TDeclStatic tb, env''))
 
     | DeclFunction funcDecl -> checkFunctionDecl env funcDecl
 
@@ -3132,7 +3603,7 @@ and checkDecl (env: TypeEnv) (decl: Decl) : TypeResult<TypedDecl * TypeEnv> =
                 // generic IRType aliases (using Name = int64_t; rather than a
                 // promote<>-based template expansion).
                 match Map.tryFind name env'.TypeDefs with
-                | Some (TDIIndexType (_, idx)) ->
+                | Some (TDIIndexType (_, idx, _)) ->
                     TTDIndexType (name, idx)
                 | Some (TDIEnumIdx (_, idx, values)) ->
                     TTDEnumIdx (name, idx, values)
@@ -3347,10 +3818,27 @@ and registerTypeDecl (env: TypeEnv) (typeDecl: TypeDecl) : TypeEnv =
     | TyDeclAlias (name, _typeParams, body) ->
         let defInfo =
             match body with
-            | TyIdx _ | TySymIdx _ | TyAntisymIdx _ | TyHermitianIdx _ | TyBoundedIdx _
-            | TyDepIdx _ | TyRaggedIdx _ ->
+            | TyIdx _ | TySymIdx _ | TyAntisymIdx _ | TyHermitianIdx _ | TyBoundedIdx _ ->
+                // Static index types: override Tag with the alias name. The
+                // alias name is the nominative identity used by ETIndexRef in
+                // foreign-key element types — codegen renders these aliases
+                // directly (e.g. `using StationIdx = int64_t;`).
                 let idx = lowerIndexType env 0 body
-                TDIIndexType (name, { idx with Tag = Some name })
+                TDIIndexType (name, { idx with Tag = Some name }, body)
+            | TyDepIdx _ | TyRaggedIdx _ | TyRaggedIdxOpaque ->
+                // Runtime index types: preserve the structural Tag set by
+                // lowerIndexType (`__raggedidx`, `__depidx_inner`, etc.).
+                // Codegen predicates like isRaggedArrayType match on these
+                // strings; overriding with the alias name would break ragged
+                // detection through alias indirection. The alias name still
+                // appears in the cpp output via the standalone typedef path.
+                //
+                // The body is stored alongside the placeholder idx so that
+                // lowerIndexTypeList can re-walk the original AST for types
+                // (notably TyDepIdx) whose correct expansion is multi-record
+                // and can't fit in lowerIndexType's single-record signature.
+                let idx = lowerIndexType env 0 body
+                TDIIndexType (name, idx, body)
             | TyEnumIdx valuesExpr ->
                 // Static-evaluate the array literal to extract int64 values
                 let values =
@@ -3401,7 +3889,10 @@ let rec zonkType (subst: Subst) (ty: IRType) : IRType =
     | IRTInfer _ -> IRTScalar ETFloat64  // Unsolved — default
     | IRTScalar _ | IRTUnit | IRTNat _ | IRTNamed _ -> resolved
     | IRTArray arr ->
-        IRTArray { arr with IndexTypes = arr.IndexTypes |> List.map (zonkIndexType subst) }
+        // Phase B2: ElemType is IRType — must zonk it too.
+        IRTArray { arr with
+                    ElemType = zonkType subst arr.ElemType
+                    IndexTypes = arr.IndexTypes |> List.map (zonkIndexType subst) }
     | IRTTuple ts -> IRTTuple (ts |> List.map (zonkType subst))
     | IRTFunc (args, ret) -> IRTFunc (args |> List.map (zonkType subst), zonkType subst ret)
     | IRTComputation t -> IRTComputation (zonkType subst t)
@@ -3669,7 +4160,19 @@ let checkProgram (program: Program) : TypedProgram * IRBuilder * CompileError li
 /// Type check a program. Returns the (possibly partial) typed program
 /// and a list of compile errors. If the error list is empty, the program
 /// is fully type-checked.
+///
+/// Pre-pass: IndexTypeValidator enforces the rules for where index types may
+/// appear in declaration-level type expressions. Validation errors abort
+/// compilation early — once an AST passes validation, downstream lowering
+/// can assume index types only appear in their permitted positions.
 let typeCheck (program: Program) : Result<TypedProgram * IRBuilder, CompileError list> =
-    let (tp, builder, errors) = checkProgram program
-    if errors.IsEmpty then Ok (tp, builder)
-    else Error errors
+    let validationErrors = IndexTypeValidator.validateProgram program
+    if not validationErrors.IsEmpty then
+        let compileErrors =
+            validationErrors |> List.map (fun e ->
+                { Error = Other e.Message; Span = e.Span; Context = [e.DeclName] })
+        Error compileErrors
+    else
+        let (tp, builder, errors) = checkProgram program
+        if errors.IsEmpty then Ok (tp, builder)
+        else Error errors

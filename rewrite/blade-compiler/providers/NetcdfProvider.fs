@@ -208,7 +208,7 @@ let ncVarToArrayType (dimMap: Map<string, IRIndexType>) (var: NcVar) : IRArrayTy
             | Some idx -> idx
             | None -> failwithf "Dimension '%s' not found in module" dim.Name)
     {
-        ElemType = ncTypeToElemType var.TypeCode
+        ElemType = IRTScalar (ncTypeToElemType var.TypeCode)
         IndexTypes = indexTypes
         IsVirtual = false
         Identity = Some (AIDVariable var.Name)
@@ -265,7 +265,7 @@ let ncFileToModule
         file.Dims |> List.map (fun dim ->
             let idx = dimMap.[dim.Name]
             let arrType = IRTArray {
-                ElemType = ETInt64
+                ElemType = IRTScalar ETInt64
                 IndexTypes = [idx]
                 IsVirtual = false
                 Identity = Some (AIDVariable dim.Name)
@@ -321,8 +321,16 @@ module CppNetcdf =
     /// Generate C++ code to open a NetCDF file and read a variable
     let genReadVar (filePath: string) (varName: string) (cppVarName: string) (arrType: IRArrayType) : string list =
         let rank = arrType.IndexTypes.Length
-        let elemCpp =
+        // Phase B2: arrType.ElemType is IRType. NetCDF only supports
+        // primitive numeric types, so extract the primitive ElemType
+        // for the dispatch. Non-primitive elements are unsupported in
+        // this provider — they'd require new NetCDF type machinery.
+        let primElem =
             match arrType.ElemType with
+            | IRTScalar et -> et
+            | _ -> ETFloat64  // S3 tag: relic. NetCDF doesn't support compound elem types yet.
+        let elemCpp =
+            match primElem with
             | ETFloat32 -> "float"
             | ETFloat64 -> "double"
             | ETInt32   -> "int"
@@ -350,7 +358,7 @@ module CppNetcdf =
                  |> List.mapi (fun i _ -> sprintf "%s_extent_%d" cppVarName i)
                  |> String.concat " * ")
             sprintf "nc_get_var_%s(%s_ncid, %s_varid, %s_flat);"
-                (match arrType.ElemType with
+                (match primElem with
                  | ETFloat32 -> "float"
                  | ETFloat64 -> "double"
                  | ETInt32 -> "int"
@@ -363,15 +371,20 @@ module CppNetcdf =
     /// Generate C++ code to write a variable to a NetCDF file.
     /// dimNames provides the dimension names from the module's IRTDIndexType defs.
     let genWriteVar (filePath: string) (varName: string) (cppVarName: string) (arrType: IRArrayType) (dimNames: string list) : string list =
-        let elemCpp =
+        // Phase B2: same extraction as genReadVar.
+        let primElem =
             match arrType.ElemType with
+            | IRTScalar et -> et
+            | _ -> ETFloat64  // S3 tag: relic. NetCDF compound types unsupported.
+        let elemCpp =
+            match primElem with
             | ETFloat32 -> "float"
             | ETFloat64 -> "double"
             | ETInt32   -> "int"
             | ETInt64   -> "long long"
             | _         -> "double"
 
-        let ncType = elemTypeToNcMacro arrType.ElemType
+        let ncType = elemTypeToNcMacro primElem
         let rank = arrType.IndexTypes.Length
 
         let dimDefs =
@@ -399,7 +412,7 @@ module CppNetcdf =
                 cppVarName varName ncType rank cppVarName cppVarName
             sprintf "nc_enddef(%s_ncid);" cppVarName
             sprintf "nc_put_var_%s(%s_ncid, %s_varid, %s_flat);"
-                (match arrType.ElemType with
+                (match primElem with
                  | ETFloat32 -> "float"
                  | ETFloat64 -> "double"
                  | ETInt32 -> "int"

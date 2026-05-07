@@ -278,6 +278,63 @@ let result = method_for(grouped) <@> lambda(g) -> g(0) |> compute
 // EXPECT: result = [20.0, 25.0, 30.0]
 """
 
+// Phase 4 completion: per-group reduction kernels, exercising the ragged peel
+// path that Leg 1 generalized. The peel emits sub-array `_extents` for the
+// kernel param, so any combinator that consults extents (reduce, etc.) finds
+// the right metadata at runtime.
+//
+// Note on kernel param annotation: kernels that pass `g` as an array argument
+// (rather than just calling `g(args)`) require an explicit `RaggedIdx<_>`
+// annotation. The reason is that operations like `reduce(g, ...)` inspect
+// the argument's resolved type but don't drive type inference, so an
+// unannotated `g` remains a type variable and the operation rejects it.
+// `g(0)` works without annotation because the calling syntax structurally
+// forces `g` to be an array. The opaque `RaggedIdx<_>` annotation is the
+// canonical way to type a kernel parameter that receives a runtime-shape
+// sub-array — which was its design purpose in Leg 1.
+
+let test_groupby_reduce_per_group = """
+// Per-group sum via reduce. The peel binds g to a sub-array sized by the
+// group; reduce iterates that sub-array using its emitted _extents.
+let region = [0, 1, 2, 0, 1, 2]
+let temps = [20.0, 25.0, 30.0, 22.0, 27.0, 32.0]
+let gk = group_keys(region)
+let grouped = group_by(temps, gk)
+let result = method_for(grouped) <@> lambda(g: Array<Float64 like RaggedIdx<_>>) -> reduce(g, (+)) |> compute
+// EXPECT: result = [42, 52, 62]
+"""
+
+let test_groupby_reduce_unannotated = """
+// Same per-group sum without an explicit kernel-param annotation. Works
+// because reduce's typecheck drives inference for unconstrained kernel
+// parameters: it deduces an element type from the kernel's first arg
+// (concrete IRTScalar wins; otherwise defaults to Float64), then unifies
+// the array arg with a fresh rank-1 array of that elem type. For section
+// kernels like (+) the args are fresh type variables, so this falls
+// through to the Float64 default — matching what section lowering already
+// emits in the IR. For non-Float64 data with a section kernel, an
+// explicit annotation on the kernel param is still required.
+let region = [0, 1, 2, 0, 1, 2]
+let temps = [20.0, 25.0, 30.0, 22.0, 27.0, 32.0]
+let gk = group_keys(region)
+let grouped = group_by(temps, gk)
+let result = method_for(grouped) <@> lambda(g) -> reduce(g, (+)) |> compute
+// EXPECT: result = [42, 52, 62]
+"""
+
+let test_groupby_mixed_kernel = """
+// Kernel mixing direct indexing with a reduce call. Confirms the peel's
+// kernel rewriter (g(args) -> IRIndex) doesn't break the reduce(g, ...)
+// path: only g(args) shapes get rewritten, not g passed as an array.
+let region = [0, 1, 2, 0, 1, 2]
+let temps = [20.0, 25.0, 30.0, 22.0, 27.0, 32.0]
+let gk = group_keys(region)
+let grouped = group_by(temps, gk)
+let result = method_for(grouped) <@> lambda(g: Array<Float64 like RaggedIdx<_>>) -> g(0) + reduce(g, (+)) |> compute
+// First elements [20, 25, 30] + sums [42, 52, 62] = [62, 77, 92]
+// EXPECT: result = [62, 77, 92]
+"""
+
 // ============================================================================
 // Phase 5: sort — Sorted Iteration (NOT YET IMPLEMENTED)
 // ============================================================================
@@ -355,6 +412,9 @@ let groupByTests = [
     ("GroupBy Idx Sum Two", test_groupby_idx_sum_two)
     ("GroupBy Idx Annotated", test_groupby_idx_annotated)
     ("GroupBy Enum First", test_groupby_enum_first)
+    ("GroupBy Reduce Per Group", test_groupby_reduce_per_group)
+    ("GroupBy Reduce Unannotated", test_groupby_reduce_unannotated)
+    ("GroupBy Mixed Kernel", test_groupby_mixed_kernel)
 ]
 
 /// Phase 5: sort
