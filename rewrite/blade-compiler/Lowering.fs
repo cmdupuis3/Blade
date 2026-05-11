@@ -192,6 +192,13 @@ let rec lowerTypedExpr (env: TypedLowerEnv) (texpr: TypedExpr) : IRExpr =
     | TExprTuple exprs ->
         IRTuple (exprs |> List.map (lowerTypedExpr env))
     
+    | TExprComplexLit (re, im) ->
+        // Lower to IRComplex, NOT IRTuple. Complex is a scalar at IR
+        // level — flattening to a tuple of floats here would let
+        // downstream code (array lowering, codegen) reshape it as part
+        // of the surrounding rank, producing wrong-rank arrays.
+        IRComplex (lowerTypedExpr env re, lowerTypedExpr env im)
+    
     | TExprArrayLit (elems, arrTy) ->
         let es = elems |> List.map (lowerTypedExpr env)
         IRArrayLit (es, arrTy)
@@ -341,7 +348,7 @@ let rec lowerTypedExpr (env: TypedLowerEnv) (texpr: TypedExpr) : IRExpr =
     | TExprZero ->
         // Lower to type-appropriate zero literal based on resolved type
         match texpr.Type with
-        | IRTScalar ETInt32 | IRTScalar ETInt64 -> IRLit (IRLitInt 0L)
+        | IRTScalar ETInt32 | IRTScalar ETInt64 | IRTScalar (ETAnonIdx _) | IRTScalar (ETIndexRef _) -> IRLit (IRLitInt 0L)
         | IRTScalar ETBool -> IRLit (IRLitBool false)
         | IRTScalar ETFloat32 | IRTScalar ETFloat64 -> IRLit (IRLitFloat 0.0)
         | IRTInfer _ -> IRLit (IRLitFloat 0.0)  // unresolved defaults to float
@@ -431,7 +438,7 @@ and lowerLiteralToIRLit lit : IRLit =
     | LitInt n -> IRLitInt n
     | LitFloat f -> IRLitFloat f
     | LitBool b -> IRLitBool b
-    | LitString _ -> IRLitInt 0L
+    | LitString s -> IRLitString s
     | LitChar c -> IRLitInt (int64 c)
     | LitUnit -> IRLitUnit
 
@@ -1075,8 +1082,16 @@ let lowerTypedProgram (program: TypedProgram) (rawProgram: Program option) (buil
         let moduleName = tmod.Name |> Option.map (String.concat ".") |> Option.defaultValue ""
         let envWithExports = { env with ModuleExports = currentExports }
         let (irModule, exports) = lowerTypedModule envWithExports tmod rawDecls
-        // Monomorphize arity-polymorphic functions before codegen
+        // Monomorphize arity-polymorphic functions first: Poly<T^N> packs
+        // get expanded into N concrete params per call site. After this,
+        // every function has a fixed param count matching its call sites.
         let irModule = IR.monomorphizeModule irModule env.Builder
+        // HM monomorphization: substitute function-boundary type variables
+        // (e.g., `T` in `Array<T like Idx<n>>`, or `T` extracted from
+        // `Poly<T^N>`'s base type) with concrete types learned from each
+        // call site. Runs after Poly so per-param/per-arg unification is
+        // straightforward — each pack has already been expanded.
+        let irModule = IR.monomorphizeHMFunctions irModule env.Builder
         // Lift inline forms (mask/sort/intersect/union/group_by/group_keys
         // appearing in non-let-RHS positions) into auto-let bindings so
         // codegen sees the canonical "let-bound" pattern uniformly.

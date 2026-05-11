@@ -13,36 +13,6 @@ open System
 /// Unique identifier for IR values
 type IRId = int
 
-/// Element types for arrays
-type ElemType =
-    | ETInt32
-    | ETInt64
-    | ETFloat32
-    | ETFloat64
-    | ETComplex64
-    | ETComplex128
-    | ETBool
-    | ETUnit
-    | ETString
-    | ETIndexRef of string  // Foreign key: integer tagged with an index type name
-
-/// Compute the promoted element type for two numeric types per §3.4.2.
-/// Returns None if the types are incompatible for promotion.
-let promoteElemType (a: ElemType) (b: ElemType) : ElemType option =
-    if a = b then Some a
-    else
-        match a, b with
-        | ETInt32, ETInt64   | ETInt64, ETInt32   -> Some ETInt64
-        | ETInt32, ETFloat32 | ETFloat32, ETInt32 -> Some ETFloat32
-        | ETInt32, ETFloat64 | ETFloat64, ETInt32 -> Some ETFloat64
-        | ETInt64, ETFloat32 | ETFloat32, ETInt64 -> Some ETFloat64
-        | ETInt64, ETFloat64 | ETFloat64, ETInt64 -> Some ETFloat64
-        | ETFloat32, ETFloat64 | ETFloat64, ETFloat32 -> Some ETFloat64
-        // Index refs promote with integers, preserving the tag
-        | ETIndexRef name, ETInt64 | ETInt64, ETIndexRef name -> Some (ETIndexRef name)
-        | ETIndexRef name, ETInt32 | ETInt32, ETIndexRef name -> Some (ETIndexRef name)
-        | _ -> None
-
 /// Symmetry class for index types
 type SymmetryClass =
     | SymNone          // No symmetry (dense)
@@ -142,8 +112,58 @@ let ppUnitSig (u: UnitSig) : string =
         | [], _ -> sprintf "1 / (%s)" negStr
         | _, _ -> sprintf "%s / %s" posStr (if neg.Length > 1 then sprintf "(%s)" negStr else negStr)
 
+/// Value carried by an EnumIdx alias declaration. The values list can be
+/// either all-int or all-string (mixed lists are rejected at typecheck time).
+/// The chosen kind determines the underlying runtime representation: an
+/// all-int EnumIdx lowers to int64_t in C++; an all-string EnumIdx lowers to
+/// std::string. Both kinds support the same SQL-like operations (group_keys,
+/// group_by); only the comparison op in the Case 2 reverse-lookup dispatch
+/// differs. Defined before the mutual block because IRType.IRTGroupKeys
+/// carries an EnumValue list option.
+type EnumValue =
+    | EVInt of int64
+    | EVString of string
+
+/// Element types for arrays
+type ElemType =
+    | ETInt32
+    | ETInt64
+    | ETFloat32
+    | ETFloat64
+    | ETComplex64
+    | ETComplex128
+    | ETBool
+    | ETUnit
+    | ETString
+    | ETIndexRef of string  // Foreign key: integer tagged with an index type name
+    // Anonymous index type at type level. Source forms like
+    // `let static (a, b): (StationIdx, Idx<3>) = ...` previously had
+    // `b: ETInt64` (the runtime backing) which let arithmetic on `b`
+    // typecheck even though `b` is conceptually an index value.
+    // ETAnonIdx preserves "this is an anonymous index, not just an int"
+    // through the IR so inferArithType can reject arithmetic on it
+    // (matching the rule for named index types, ETIndexRef). Collapsed
+    // to int64_t at codegen time.
+    //
+    // Anonymous index types are NOMINALLY typed: each TyIdx occurrence
+    // produces its own fresh nominal type, identified by `nominalId`.
+    // Two `Idx<3>`s in different declaration sites are DIFFERENT types
+    // even though their extents match — extent equality alone does not
+    // drive unification, just like with named index types where
+    // `type X = Idx<6>` and `type Y = Idx<6>` are distinct.
+    //
+    // The `extent` payload is preserved for diagnostics and pretty-
+    // printing (the user wrote `Idx<3>`, we should be able to display
+    // that). For unification, F# structural equality compares both the
+    // id and the extent — but since the id is unique per occurrence,
+    // two ETAnonIdx never collide unless they came from the same source
+    // node. Practical extents: literal `Idx<3>` -> IRLit IRLitInt 3,
+    // statically-bound `Idx<n>` -> resolved via evalConstExpr,
+    // runtime parametric `Idx<n>` -> IRParam.
+    | ETAnonIdx of nominalId: int * extent: IRExpr
+
 /// Index type in IR - represents a single dimension's structure
-type IRIndexType = {
+and IRIndexType = {
     Id: IRId
     Arity: int               // Number of index components (1 for Idx, 2 for SymIdx<2>, etc.)
     Extent: IRExpr           // Size expression (may depend on outer indices)
@@ -179,7 +199,7 @@ and IRType =
     | IRTNamed of string    // Named type (struct, sum type, etc.)
     | IRTInfer of int       // Unresolved type variable (id for unification)
     | IRTUnitAnnotated of IRType * UnitSig  // Type with unit-of-measure annotation
-    | IRTGroupKeys of outerIdx: IRIndexType * sourceIdx: IRIndexType * enumValues: int64 list option
+    | IRTGroupKeys of outerIdx: IRIndexType * sourceIdx: IRIndexType * enumValues: EnumValue list option
       // GroupKeys: CSR structure mapping sourceIdx → groups indexed by outerIdx.
       // enumValues: if keys are EnumIdx, carries the actual key values for reverse lookup.
 
@@ -200,6 +220,7 @@ and IRLit =
     | IRLitInt of int64
     | IRLitFloat of float
     | IRLitBool of bool
+    | IRLitString of string
     | IRLitUnit
 
 /// Binary operations
@@ -231,6 +252,14 @@ and IRExpr =
     | IRApp of func: IRExpr * args: IRExpr list * retType: IRType
     | IRLambda of LambdaInfo
     | IRTuple of IRExpr list
+    // Complex literal construction: std::complex<double>(re, im) at codegen.
+    // Distinct from IRTuple to preserve scalar nature — Complex is a scalar
+    // throughout the IR; the tuple-shaped surface syntax is consumed
+    // entirely between Parser and TypeCheck. Components are arbitrary
+    // float-typed IRExpr (matching what checkExpr accepts), not just
+    // literal floats; this supports both `(1.0, 0.0): Complex128` and
+    // `(x, y): Complex128` for x, y: Float64.
+    | IRComplex of re: IRExpr * im: IRExpr
     | IRTupleProj of IRExpr * int * bool  // expr, index, isFlat (true=flat leaf index, false=structural type index)
     | IRTupleCons of head: IRExpr * tail: IRExpr
     | IRTupleDecons of tuple: IRExpr
@@ -397,6 +426,31 @@ and AlignSpec = {
     Offsets: (int * int) list
     Boundary: BoundaryMode
 }
+
+/// Compute the promoted element type for two numeric types per §3.4.2.
+/// Returns None if the types are incompatible for promotion. Defined here
+/// (after the mutual recursion block) because ElemType now references
+/// IRExpr (via ETAnonIdx) and must be inside the block. ETAnonIdx isn't
+/// in the promotion table — arithmetic on anonymous index types is
+/// rejected upstream in inferArithType, so promotion never reaches them.
+let promoteElemType (a: ElemType) (b: ElemType) : ElemType option =
+    if a = b then Some a
+    else
+        match a, b with
+        | ETInt32, ETInt64   | ETInt64, ETInt32   -> Some ETInt64
+        | ETInt32, ETFloat32 | ETFloat32, ETInt32 -> Some ETFloat32
+        | ETInt32, ETFloat64 | ETFloat64, ETInt32 -> Some ETFloat64
+        | ETInt64, ETFloat32 | ETFloat32, ETInt64 -> Some ETFloat64
+        | ETInt64, ETFloat64 | ETFloat64, ETInt64 -> Some ETFloat64
+        | ETFloat32, ETFloat64 | ETFloat64, ETFloat32 -> Some ETFloat64
+        // Index refs promote with integers, preserving the tag
+        | ETIndexRef name, ETInt64 | ETInt64, ETIndexRef name -> Some (ETIndexRef name)
+        | ETIndexRef name, ETInt32 | ETInt32, ETIndexRef name -> Some (ETIndexRef name)
+        // String-valued EnumIdx aliases: same promotion rule. The
+        // distinguishing happens at the `using <name> = ...` emission site;
+        // here we just preserve the tag.
+        | ETIndexRef name, ETString | ETString, ETIndexRef name -> Some (ETIndexRef name)
+        | _ -> None
 
 /// Active pattern for assignment target (lvalue) classification
 let (|LVVar|LVIndex|LVField|LVOther|) = function
@@ -885,11 +939,24 @@ type IRTypeDef =
     | IRTDStruct of name: string * fields: (string * IRType) list * invariant: StructConstraintInfo option
     | IRTDVariant of name: string * variants: (string * IRType option) list
     | IRTDIndexType of name: string * idx: IRIndexType
-    | IRTDEnumIdx of name: string * idx: IRIndexType * values: int64 list
+    | IRTDEnumIdx of name: string * idx: IRIndexType * values: EnumValue list
       // Named index type declaration, e.g. "type lat = Idx<180>"
       // Provides nominal identity: two arrays sharing module.lat
       // have the same index space.  Future: schemas can supply these
       // so that multiple files share the same nominal types.
+
+/// Helpers for EnumValue lists. allInt/allString classify a values list;
+/// underlyingElemType produces the corresponding ElemType for codegen
+/// (used for both the `using <name> = ...;` alias and the reverse-lookup
+/// comparison op).
+module EnumValue =
+    let allInt (vs: EnumValue list) =
+        vs |> List.forall (function EVInt _ -> true | _ -> false)
+    let allString (vs: EnumValue list) =
+        vs |> List.forall (function EVString _ -> true | _ -> false)
+    let underlyingElemType (vs: EnumValue list) : ElemType =
+        if allString vs && not vs.IsEmpty then ETString
+        else ETInt64  // empty or all-int both default to int64
 
 /// Top-level binding
 type IRBinding = {
@@ -1403,6 +1470,7 @@ let rec mapIRExpr (f: IRExpr -> IRExpr) (expr: IRExpr) : IRExpr =
         // Lists
         | IRArrayLit (es, ty) -> IRArrayLit (ms es, ty)
         | IRTuple es -> IRTuple (ms es)
+        | IRComplex (re, im) -> IRComplex (m re, m im)
         | IRSequence es -> IRSequence (ms es)
         | IRZip es -> IRZip (ms es)
         | IRAlign (es, sp) -> IRAlign (ms es, sp)
@@ -1426,56 +1494,554 @@ let rec mapIRExpr (f: IRExpr -> IRExpr) (expr: IRExpr) : IRExpr =
     f mapped
 
 // ============================================================================
-// Arity Monomorphization
+// HM Type Substitution
 // ============================================================================
+//
+// Substitutes IRTInfer occurrences with concrete types throughout types and
+// expressions. Pure structural substitution — no rewrites, no expansion.
+// This is the substrate shared between HM monomorphization and (eventually,
+// in the unified architecture) Poly's type-substitution step.
 
-/// Collect all call sites to arity-polymorphic functions.
-/// Returns list of (funcId, concreteArity) pairs.
-let collectPolyCallSites (polyFuncIds: Set<IRId>) (expr: IRExpr) : (IRId * int) list =
+/// Substitute IRTInfer occurrences in a type, recursing into compound types.
+/// Bindings is a map from type-var ID to concrete type. Type vars not in
+/// the map are left as IRTInfer.
+let rec substTypeInIRType (bindings: Map<int, IRType>) (ty: IRType) : IRType =
+    match ty with
+    | IRTInfer n when bindings.ContainsKey n -> bindings.[n]
+    | IRTArray arr ->
+        IRTArray { arr with ElemType = substTypeInIRType bindings arr.ElemType }
+    | IRTTuple ts -> IRTTuple (ts |> List.map (substTypeInIRType bindings))
+    | IRTFunc (args, ret) ->
+        IRTFunc (args |> List.map (substTypeInIRType bindings), substTypeInIRType bindings ret)
+    | IRTComputation t -> IRTComputation (substTypeInIRType bindings t)
+    | IRTPoly (base', var) -> IRTPoly (substTypeInIRType bindings base', var)
+    | IRTUnitAnnotated (inner, units) -> IRTUnitAnnotated (substTypeInIRType bindings inner, units)
+    | _ -> ty
+
+/// Substitute types in an IRExpr at all type-bearing positions. Uses
+/// mapIRExpr for structural traversal; the per-node callback only updates
+/// fields that carry types directly (IRVar.ty, IRApp.retType, IRLambda
+/// param types, etc.).
+let substTypeInIRExpr (bindings: Map<int, IRType>) (expr: IRExpr) : IRExpr =
+    let st = substTypeInIRType bindings
+    let substInNode e =
+        match e with
+        | IRVar (id, ty) -> IRVar (id, st ty)
+        | IRParam (n, i, ty) -> IRParam (n, i, st ty)
+        | IRApp (fn, args, retType) -> IRApp (fn, args, st retType)
+        | IRArrayLit (elems, aty) ->
+            IRArrayLit (elems, { aty with ElemType = st aty.ElemType })
+        | IRLambda info ->
+            IRLambda { info with
+                        Params = info.Params |> List.map (fun p -> { p with Type = st p.Type }) }
+        | IRMethodFor info ->
+            IRMethodFor { info with
+                            ArrayTypes = info.ArrayTypes
+                                         |> List.map (fun aty -> { aty with ElemType = st aty.ElemType }) }
+        | IRApplyCombinator info ->
+            // ApplyInfo carries three type-bearing pieces that must be
+            // substituted in lockstep with the rest of the expression
+            // tree: ArrayTypes (each has an ElemType that may be a type
+            // variable referencing the surrounding function's T) and
+            // OutputType (the deduced result-array type, often a fresh
+            // IRTArray whose ElemType is the same T). Skipping these
+            // leaves stale IRTInfer in spec function bodies, which the
+            // IR validator flags as "unresolved type variable in body"
+            // for the HM specialization.
+            IRApplyCombinator { info with
+                                  ArrayTypes = info.ArrayTypes
+                                               |> List.map (fun aty ->
+                                                    { aty with ElemType = st aty.ElemType })
+                                  OutputType = st info.OutputType }
+        | _ -> e
+    mapIRExpr substInNode expr
+
+/// Get the type of an IRExpr where determinable from the node directly.
+/// Used at HM call sites to extract arg types for unification against
+/// param types. Returns None for nodes whose type isn't carried locally.
+let exprTypeIfKnown (expr: IRExpr) : IRType option =
+    match expr with
+    | IRVar (_, ty) -> Some ty
+    | IRParam (_, _, ty) -> Some ty
+    | IRApp (_, _, retType) -> Some retType
+    | IRArrayLit (_, aty) -> Some (IRTArray aty)
+    | IRLit (IRLitInt _) -> Some (IRTScalar ETInt64)
+    | IRLit (IRLitFloat _) -> Some (IRTScalar ETFloat64)
+    | IRLit (IRLitBool _) -> Some (IRTScalar ETBool)
+    | IRLit (IRLitString _) -> Some (IRTScalar ETString)
+    | IRFieldAccess _ | IRIndex _ | IRBinOp _ | IRUnaryOp _ ->
+        // These nodes' types aren't carried locally. Leaving as None means
+        // call sites with such args fall back to the function's declared
+        // type-var positions; they'll be substituted with whatever else
+        // unification provides.
+        None
+    | _ -> None
+
+/// Unify a parameter type against an argument type, accumulating
+/// (typeVarId, concreteType) bindings. Walks pairs structurally:
+/// IRTArray vs IRTArray pairs ElemType, IRTTuple pairs elementwise,
+/// IRTFunc pairs args and ret. An IRTInfer on the param side absorbs
+/// whatever's on the arg side. This is one-sided (not full unification)
+/// because at HM call sites the arg type is fully concrete.
+let rec unifyParamWithArg (paramTy: IRType) (argTy: IRType) (acc: Map<int, IRType>) : Map<int, IRType> =
+    match paramTy, argTy with
+    | IRTInfer n, t when not (acc.ContainsKey n) -> Map.add n t acc
+    | IRTInfer n, t when acc.[n] = t -> acc  // Consistent reuse — fine
+    | IRTInfer _, _ -> acc  // Inconsistent — leave as-is; the IR validator will catch it
+    | IRTArray pa, IRTArray aa ->
+        unifyParamWithArg pa.ElemType aa.ElemType acc
+    | IRTTuple pts, IRTTuple ats when pts.Length = ats.Length ->
+        List.zip pts ats |> List.fold (fun m (p, a) -> unifyParamWithArg p a m) acc
+    | IRTFunc (pas, pr), IRTFunc (aas, ar) when pas.Length = aas.Length ->
+        let acc' = List.zip pas aas |> List.fold (fun m (p, a) -> unifyParamWithArg p a m) acc
+        unifyParamWithArg pr ar acc'
+    | IRTComputation pt, IRTComputation at -> unifyParamWithArg pt at acc
+    | IRTPoly (pb, _), IRTPoly (ab, _) -> unifyParamWithArg pb ab acc
+    | IRTUnitAnnotated (pi, _), IRTUnitAnnotated (ai, _) -> unifyParamWithArg pi ai acc
+    | _ -> acc  // Concrete types or unhandled compound — no bindings learned
+
+/// Walk a type collecting all IRTInfer IDs found inside (recursively).
+let rec collectInferIds (ty: IRType) : Set<int> =
+    match ty with
+    | IRTInfer n -> Set.singleton n
+    | IRTArray arr -> collectInferIds arr.ElemType
+    | IRTTuple ts -> ts |> List.fold (fun s t -> Set.union s (collectInferIds t)) Set.empty
+    | IRTFunc (args, ret) ->
+        let argIds = args |> List.fold (fun s t -> Set.union s (collectInferIds t)) Set.empty
+        Set.union argIds (collectInferIds ret)
+    | IRTComputation t -> collectInferIds t
+    | IRTPoly (b, _) -> collectInferIds b
+    | IRTUnitAnnotated (i, _) -> collectInferIds i
+    | _ -> Set.empty
+
+/// Does this function carry any unresolved type variables in its declared
+/// signature (params or return type)? Boundary criterion for HM
+/// monomorphization — only such functions need specialization.
+let hasTypeVarsInSignature (func: IRFuncDef) : bool =
+    let paramIds =
+        func.Params |> List.fold (fun s p -> Set.union s (collectInferIds p.Type)) Set.empty
+    let retIds = collectInferIds func.RetType
+    not (Set.isEmpty paramIds && Set.isEmpty retIds)
+
+// ============================================================================
+// HM Monomorphization
+// ============================================================================
+//
+// Generates specialized copies of functions with free type variables in
+// their signatures, one per unique call-site type pattern. Sibling pass
+// to the existing Arity (Poly) monomorphization. Runs before Poly so that
+// type-substitution happens at the abstract signature level, then Poly
+// expands param packs against concrete element types.
+//
+// Architecture mirrors monomorphizeModule's 5-phase shape: identify,
+// collect call sites with bindings, specialize, build rewrite map,
+// rewrite all expressions. The key difference vs Poly: SpecRequest carries
+// (typeVarId → concreteType) bindings rather than a single arity int.
+
+/// Collect call sites of HM-polymorphic functions.
+/// Returns list of (funcId, sortedBindings) pairs. Bindings are sorted
+/// by ID to give a canonical key for deduplication across call sites.
+let collectHMCallSites (hmFuncMap: Map<IRId, IRFuncDef>) (expr: IRExpr) : (IRId * (int * IRType) list) list =
     let results = System.Collections.Generic.List<_>()
     let walk e =
         match e with
-        | IRApp (IRVar (funcId, _), args, _) when polyFuncIds.Contains funcId ->
-            results.Add((funcId, args.Length))
+        | IRApp (IRVar (funcId, _), args, _) when hmFuncMap.ContainsKey funcId ->
+            let func = hmFuncMap.[funcId]
+            // Pair each param with its corresponding arg, unifying types
+            let bindings =
+                if args.Length <> func.Params.Length then Map.empty
+                else
+                    List.zip func.Params args
+                    |> List.fold (fun acc (p, arg) ->
+                        match exprTypeIfKnown arg with
+                        | Some argTy -> unifyParamWithArg p.Type argTy acc
+                        | None -> acc) Map.empty
+            // Convert to sorted list for canonical comparison
+            let sortedBindings =
+                bindings |> Map.toList |> List.sortBy fst
+            results.Add((funcId, sortedBindings))
         | _ -> ()
-        e  // don't transform, just inspect
+        e
     mapIRExpr walk expr |> ignore
     results |> Seq.toList
 
-/// Create a monomorphized copy of a poly function for a specific arity.
-/// Expands the Poly<T> param into N individual params and rewrites body.
-let specializeFunction (func: IRFuncDef) (arity: int) (builder: IRBuilder) : IRFuncDef =
-    // Find the Poly param
-    let polyParamIdx =
-        func.Params |> List.tryFindIndex (fun p ->
-            match p.Type with IRTPoly _ -> true | _ -> false)
-    match polyParamIdx with
-    | None -> func  // Not actually poly — shouldn't happen
-    | Some pidx ->
-        let polyParam = func.Params.[pidx]
-        let baseType =
-            match polyParam.Type with
-            | IRTPoly (bt, _) -> bt
-            | _ -> IRTScalar ETFloat64
+/// Generate a specialized copy of a function for a given set of type-var
+/// bindings. Substitutes types throughout params, return, and body, and
+/// mangles the name to encode the binding pattern.
+let specializeHMFunction (func: IRFuncDef) (bindings: Map<int, IRType>) (builder: IRBuilder) : IRFuncDef =
+    let newParams =
+        func.Params |> List.map (fun p ->
+            { p with Type = substTypeInIRType bindings p.Type
+                     VarId = builder.FreshId() })
+    let newRetType = substTypeInIRType bindings func.RetType
+    // Rewrite body: substitute types AND remap old param VarIds to new ones
+    let varIdRemap =
+        List.zip func.Params newParams
+        |> List.map (fun (oldP, newP) -> (oldP.VarId, newP.VarId))
+        |> Map.ofList
+    let bodyWithTypes = substTypeInIRExpr bindings func.Body
+    let bodyRewritten =
+        mapIRExpr (fun e ->
+            match e with
+            | IRVar (id, ty) when varIdRemap.ContainsKey id -> IRVar (varIdRemap.[id], ty)
+            | _ -> e) bodyWithTypes
+    // Name-mangle by binding signature: f__T_double__U_int64 etc.
+    let mangleType ty =
+        match ty with
+        | IRTScalar ETFloat64 -> "double"
+        | IRTScalar ETFloat32 -> "float"
+        | IRTScalar ETInt64 -> "int64"
+        | IRTScalar ETInt32 -> "int32"
+        | IRTScalar ETBool -> "bool"
+        | IRTScalar ETString -> "string"
+        | IRTScalar ETComplex64 -> "c64"
+        | IRTScalar ETComplex128 -> "c128"
+        | IRTScalar (ETAnonIdx _) -> "anonidx"
+        | IRTScalar (ETIndexRef n) -> n
+        | IRTNamed n -> n
+        | _ -> "T"  // Fallback for compound types — rare in practice
+    let suffix =
+        bindings
+        |> Map.toList
+        |> List.sortBy fst
+        |> List.map (fun (id, ty) -> sprintf "_%d_%s" id (mangleType ty))
+        |> String.concat ""
+    { func with
+        Id = builder.FreshId()
+        Name = sprintf "%s_HM%s" func.Name suffix
+        Params = newParams
+        RetType = newRetType
+        Body = bodyRewritten }
 
-        // Generate N new params to replace the single Poly param
-        let newParams =
-            List.init arity (fun i ->
-                { Name = sprintf "%s_%d" polyParam.Name i
-                  Type = baseType
-                  Index = pidx + i
-                  VarId = builder.FreshId() } : IRParam)
+/// Driver: monomorphize all HM-polymorphic functions in a module.
+///
+/// This is an *iterative* fixpoint algorithm, not single-pass. The reason
+/// is that specialization can expose new concrete types: when we specialize
+/// `twiceId(x: T) -> T = id(id(x))` with `T → Int64`, the substitution
+/// makes the inner `id(x)` call's arg type concrete (Int64), which then
+/// licenses specializing `id` itself with `T → Int64`. A single pass would
+/// see `id(x)`'s arg as `IRTInfer 10001` (still abstract before substitution)
+/// and either skip the binding or produce a useless self-binding spec.
+/// The loop runs until no new (funcId, bindings) keys appear.
+///
+/// The algorithm also (a) substitutes call-site-learned type bindings into
+/// the binding's *declared type* (`IRBinding.Type`), since TypeCheck leaves
+/// it as `IRTInfer N` when the call site's return type was polymorphic;
+/// and (b) substitutes types throughout each spec function's body so that
+/// post-specialization their bodies are free of `IRTInfer`.
+let monomorphizeHMFunctions (modul: IRModule) (builder: IRBuilder) : IRModule =
+    // 1. Identify functions with type vars in signature
+    let hmFuncs = modul.Functions |> List.filter hasTypeVarsInSignature
+    if hmFuncs.IsEmpty then modul
+    else
+    let hmFuncMap = hmFuncs |> List.map (fun f -> (f.Id, f)) |> Map.ofList
+    let hmFuncIdSet = hmFuncs |> List.map (fun f -> f.Id) |> Set.ofList
 
-        // Build full expanded param list (non-poly params keep their positions)
-        let before = func.Params |> List.take pidx
-        let after = func.Params |> List.skip (pidx + 1)
-        // Re-index the trailing params
-        let afterReindexed =
-            after |> List.mapi (fun i p -> { p with Index = pidx + arity + i })
-        let expandedParams = before @ newParams @ afterReindexed
+    // 2. Iterate to fixpoint: each round may discover new specializations
+    //    by inspecting both the original module's expressions AND the bodies
+    //    of specs generated in earlier rounds (those bodies may contain HM
+    //    calls whose arg types only became concrete after substitution).
+    let mutable specMap : Map<IRId * (int * IRType) list, IRFuncDef> = Map.empty
+    let mutable changed = true
+    let mutable iterationGuard = 0
+    let MAX_ITERATIONS = 16  // pathological safety net; real programs converge in 2-3
+    while changed && iterationGuard < MAX_ITERATIONS do
+        changed <- false
+        iterationGuard <- iterationGuard + 1
 
-        // Collect all VarIds that are transitive let-aliases of the poly param.
-        // Walk top-down so that aliases-of-aliases are discovered before their uses.
+        // Sources of call sites: original module + already-generated specs.
+        // Spec bodies need scanning because an outer spec's body, after type
+        // substitution, may contain HM calls with newly-concrete arg types.
+        let sitesFromFuncs =
+            modul.Functions |> List.collect (fun f -> collectHMCallSites hmFuncMap f.Body)
+        let sitesFromBindings =
+            modul.Bindings |> List.collect (fun b -> collectHMCallSites hmFuncMap b.Value)
+        let sitesFromSpecs =
+            specMap |> Map.toList
+                    |> List.collect (fun (_, spec) -> collectHMCallSites hmFuncMap spec.Body)
+        let uniqueSites =
+            (sitesFromFuncs @ sitesFromBindings @ sitesFromSpecs) |> List.distinct
+
+        for (funcId, sortedBindings) in uniqueSites do
+            let key = (funcId, sortedBindings)
+            // Only generate specs whose bindings are entirely concrete.
+            // A self-binding like (10001, IRTInfer 10002) means the call
+            // site was inside a still-abstract context (e.g. the original
+            // body of `twiceId` before its own specialization). Such a
+            // spec would carry unresolved IRTInfer through to the
+            // validator. The fixpoint will revisit this call site after
+            // the surrounding spec is generated and its body's types
+            // become concrete; at that point the bindings are fully
+            // concrete and we generate the real spec.
+            let allConcrete =
+                sortedBindings |> List.forall (fun (_, v) ->
+                    match v with IRTInfer _ -> false | _ -> true)
+            if allConcrete && not (Map.containsKey key specMap) then
+                let origFunc = hmFuncMap.[funcId]
+                let bindingMap = sortedBindings |> Map.ofList
+                let spec = specializeHMFunction origFunc bindingMap builder
+                specMap <- Map.add key spec specMap
+                changed <- true
+
+    // 3. Build the call-site rewriter using the now-frozen specMap.
+    //    Same logic as before, but operating against a complete spec map.
+    let rewriteCallSite e =
+        match e with
+        | IRApp (IRVar (funcId, _), args, _) when hmFuncMap.ContainsKey funcId ->
+            let func = hmFuncMap.[funcId]
+            let bindings =
+                if args.Length <> func.Params.Length then Map.empty
+                else
+                    List.zip func.Params args
+                    |> List.fold (fun acc (p, arg) ->
+                        match exprTypeIfKnown arg with
+                        | Some argTy -> unifyParamWithArg p.Type argTy acc
+                        | None -> acc) Map.empty
+            let sortedBindings = bindings |> Map.toList |> List.sortBy fst
+            match Map.tryFind (funcId, sortedBindings) specMap with
+            | Some spec ->
+                IRApp (IRVar (spec.Id, IRTFunc (spec.Params |> List.map (fun p -> p.Type), spec.RetType)),
+                       args, spec.RetType)
+            | None -> e
+        | _ -> e
+
+    // 4. Build a *global*, conflict-free type-var binding map for the
+    //    whole module. The motivation: a downstream binding like
+    //    `let r = result(0)` references the same IRTInfer N as the
+    //    upstream `let result = arr_id(xs)` (because TypeCheck propagates
+    //    the function's polymorphic return type through to dependents
+    //    without generalizing top-level functions). Per-binding-local
+    //    substitution wouldn't fix r.Type because r.Value contains no
+    //    HM call directly. A global union does, with the caveat that we
+    //    must detect conflicts: if the same ID is bound to different
+    //    concrete types at different call sites (which can happen when
+    //    a polymorphic function is used with multiple types in one
+    //    program), we drop that ID from the global map and let the
+    //    per-call-site rewrite still produce the right specs — the
+    //    binding type for any individual `let r = f(...)` will still
+    //    get its concrete substitution via the per-binding fallback.
+    let collectAllBindingsFromExpr (expr: IRExpr) : (int * IRType) list =
+        collectHMCallSites hmFuncMap expr
+        |> List.collect (fun (_, sortedBindings) ->
+            sortedBindings |> List.choose (fun (k, v) ->
+                match v with
+                | IRTInfer _ -> None  // self-binding; ignore
+                | _ -> Some (k, v)))
+    let allObservedBindings : (int * IRType) list =
+        let fromFns =
+            modul.Functions |> List.collect (fun f -> collectAllBindingsFromExpr f.Body)
+        let fromBindings =
+            modul.Bindings |> List.collect (fun b -> collectAllBindingsFromExpr b.Value)
+        let fromSpecs =
+            specMap |> Map.toList
+                    |> List.collect (fun (_, s) -> collectAllBindingsFromExpr s.Body)
+        fromFns @ fromBindings @ fromSpecs
+    // Group by ID; keep only IDs whose observations all agree.
+    let globalBindings : Map<int, IRType> =
+        allObservedBindings
+        |> List.groupBy fst
+        |> List.choose (fun (id, pairs) ->
+            let distinctTypes = pairs |> List.map snd |> List.distinct
+            match distinctTypes with
+            | [singleTy] -> Some (id, singleTy)
+            | _ -> None)  // conflict — leave alone, per-call-site rewrite handles each
+        |> Map.ofList
+
+    // Per-binding-local fallback: useful when a call sits *directly* in
+    // a binding's value (the existing simple case) and there's no
+    // conflict from elsewhere. Same construction as before, but only
+    // applied when global bindings don't already cover the IDs in
+    // the binding's declared type.
+    let unionBindingsFromExpr (expr: IRExpr) : Map<int, IRType> =
+        collectAllBindingsFromExpr expr
+        |> List.fold (fun acc (k, v) ->
+            match Map.tryFind k acc with
+            | Some _ -> acc
+            | None -> Map.add k v acc) Map.empty
+
+    // 5. Rewrite all expressions; substitute binding declared types
+    //    using the union of (global, per-binding-local) bindings;
+    //    also substitute types and rewrite call sites inside spec bodies.
+    //    Local bindings layer on top of global — local wins for IDs in
+    //    conflict at the global level (each call site is locally
+    //    consistent even when globally inconsistent).
+    let mergeBindings (local: Map<int, IRType>) : Map<int, IRType> =
+        local |> Map.fold (fun acc k v -> Map.add k v acc) globalBindings
+    let newFunctions =
+        modul.Functions
+        |> List.filter (fun f -> not (Set.contains f.Id hmFuncIdSet))
+        |> List.map (fun f ->
+            let bindings = mergeBindings (unionBindingsFromExpr f.Body)
+            let bodyWithRewrittenCalls = mapIRExpr rewriteCallSite f.Body
+            let bodyWithSubstitutedTypes = substTypeInIRExpr bindings bodyWithRewrittenCalls
+            { f with Body = bodyWithSubstitutedTypes
+                     RetType = substTypeInIRType bindings f.RetType
+                     Params = f.Params |> List.map (fun p ->
+                                { p with Type = substTypeInIRType bindings p.Type }) })
+    let newBindings =
+        modul.Bindings
+        |> List.map (fun b ->
+            let bindings = mergeBindings (unionBindingsFromExpr b.Value)
+            let newType = substTypeInIRType bindings b.Type
+            let valueWithRewrittenCalls = mapIRExpr rewriteCallSite b.Value
+            let valueWithSubstitutedTypes = substTypeInIRExpr bindings valueWithRewrittenCalls
+            { b with Type = newType; Value = valueWithSubstitutedTypes })
+    // Spec function bodies need the same treatment as ordinary function
+    // bodies: their inner HM calls (e.g. `id(id(x))` inside `twiceId`'s spec)
+    // must be rewritten to point at the inner specs, and any residual
+    // IRTInfer in their expression-tree types substituted out.
+    let specFuncs =
+        specMap
+        |> Map.toList
+        |> List.map (fun (_, spec) ->
+            let bindings = mergeBindings (unionBindingsFromExpr spec.Body)
+            let bodyWithRewrittenCalls = mapIRExpr rewriteCallSite spec.Body
+            let bodyWithSubstitutedTypes = substTypeInIRExpr bindings bodyWithRewrittenCalls
+            { spec with Body = bodyWithSubstitutedTypes
+                        RetType = substTypeInIRType bindings spec.RetType
+                        Params = spec.Params |> List.map (fun p ->
+                                   { p with Type = substTypeInIRType bindings p.Type }) })
+
+    { modul with
+        Functions = newFunctions @ specFuncs
+        Bindings = newBindings }
+
+// ============================================================================
+// Arity Monomorphization
+// ============================================================================
+
+/// Locate every Poly param's index in a function, in declaration order.
+/// Each Poly pack is independent — different slots may have different
+/// concrete arities at any given call site. Returns [] for non-Poly
+/// functions.
+let findPolyParamIndices (func: IRFuncDef) : int list =
+    func.Params
+    |> List.mapi (fun i p ->
+        match p.Type with
+        | IRTPoly _ -> Some i
+        | _ -> None)
+    |> List.choose id
+
+/// Compute the concrete pack arity for a call to an arity-polymorphic
+/// function, returning one arity per Poly slot (in declaration order). Each
+/// pack stands independently — `pairSum((1.0, 2.0), (3.0, 4.0, 5.0))` is a
+/// valid call with arities [2; 3]. Three call shapes are recognized:
+///
+/// (a) Variadic — only when the function has a single Poly param and no
+///     free params. Every positional arg is a pack element. Returns
+///     [args.Length].
+///
+/// (b) Single-Poly tuple-as-pack — single Poly param accompanied by free
+///     params. The pack is a tuple at the Poly slot; free args follow in
+///     their normal positions. Returns [tuple.Length].
+///
+/// (c) Multi-Poly tuple-as-pack — every Poly slot receives a tuple, each
+///     with its own (potentially different) arity. Free args occupy non-
+///     Poly positions. Returns [size_slot_0; size_slot_1; ...].
+///
+/// Returns None for unsupported shapes (mismatched arg count, non-tuple at
+/// a required Poly slot).
+let computePolyArity (func: IRFuncDef) (args: IRExpr list) : int list option =
+    let polyIndices = findPolyParamIndices func
+    match polyIndices with
+    | [] -> None
+    | [pidx] when func.Params.Length = 1 ->
+        // Variadic — args are the pack elements directly
+        Some [args.Length]
+    | _ ->
+        // Tuple-as-pack at every Poly slot. args.Length must equal the
+        // formal arity (no variadic spreading when free params or multiple
+        // packs are involved).
+        if args.Length <> func.Params.Length then None
+        else
+            let perSlot =
+                polyIndices |> List.map (fun pidx ->
+                    match List.item pidx args with
+                    | IRTuple elems -> Some elems.Length
+                    | _ -> None)
+            if perSlot |> List.forall Option.isSome then
+                Some (perSlot |> List.map Option.get)
+            else None
+
+/// Rewrite a call's arg list to match the specialized function's expanded
+/// param list. Variadic single-Poly leaves args flat; tuple-as-pack (single
+/// or multi) expands each tuple at its Poly slot. Each pack expands
+/// independently — different slots can yield different numbers of elements.
+let flattenAtPolyPosition (func: IRFuncDef) (args: IRExpr list) : IRExpr list =
+    let polyIndices = findPolyParamIndices func
+    match polyIndices with
+    | [] -> args
+    | [_] when func.Params.Length = 1 -> args  // variadic — already flat
+    | _ ->
+        if args.Length <> func.Params.Length then args
+        else
+            let polySet = Set.ofList polyIndices
+            args |> List.mapi (fun i a ->
+                if Set.contains i polySet then
+                    match a with
+                    | IRTuple elems -> elems
+                    | _ -> [a]  // shouldn't happen post-computePolyArity
+                else
+                    [a])
+            |> List.concat
+
+/// Collect all call sites to arity-polymorphic functions.
+/// Returns list of (funcId, arities) pairs where arities is the per-slot
+/// arity list. Unsupported call shapes are silently skipped — they surface
+/// as type errors downstream rather than producing wrong-arity specs.
+let collectPolyCallSites (polyFuncMap: Map<IRId, IRFuncDef>) (expr: IRExpr) : (IRId * int list) list =
+    let results = System.Collections.Generic.List<_>()
+    let walk e =
+        match e with
+        | IRApp (IRVar (funcId, _), args, _) when Map.containsKey funcId polyFuncMap ->
+            let func = polyFuncMap.[funcId]
+            match computePolyArity func args with
+            | Some arities -> results.Add((funcId, arities))
+            | None -> ()
+        | _ -> ()
+        e
+    mapIRExpr walk expr |> ignore
+    results |> Seq.toList
+
+/// Create a monomorphized copy of a poly function for a list of slot arities.
+/// `arities` carries one arity per Poly slot, in declaration order — packs
+/// are independent, so different slots may have different sizes.
+let specializeFunction (func: IRFuncDef) (arities: int list) (builder: IRBuilder) : IRFuncDef =
+    let polyIndices = findPolyParamIndices func
+    if List.isEmpty polyIndices then func  // Not actually poly — shouldn't happen
+    elif List.length arities <> List.length polyIndices then func  // arity-count mismatch
+    else
+        // Per-slot info: original param, base type, the N_slot new params
+        // (where N_slot is that slot's arity).
+        let slotInfo =
+            List.zip polyIndices arities
+            |> List.map (fun (pidx, slotArity) ->
+                let polyParam = func.Params.[pidx]
+                let baseType =
+                    match polyParam.Type with
+                    | IRTPoly (bt, _) -> bt
+                    | _ -> IRTScalar ETFloat64
+                let newParams =
+                    List.init slotArity (fun i ->
+                        { Name = sprintf "%s_%d" polyParam.Name i
+                          Type = baseType
+                          Index = 0  // recomputed below
+                          VarId = builder.FreshId() } : IRParam)
+                (pidx, polyParam, baseType, newParams))
+
+        // Expand param list: walk original, replace each Poly slot with its
+        // (slot-specific number of) new params. Reindex flat.
+        let polySet = polyIndices |> Set.ofList
+        let slotByIdx = slotInfo |> List.map (fun (i, _, _, np) -> (i, np)) |> Map.ofList
+        let expandedParams =
+            func.Params
+            |> List.mapi (fun i p ->
+                if Set.contains i polySet then slotByIdx.[i]
+                else [p])
+            |> List.concat
+            |> List.mapi (fun newIdx p -> { p with Index = newIdx })
+
+        // Collect transitive let-aliases of each Poly param's VarId.
         let collectLetAliases (rootId: IRId) (expr: IRExpr) : Set<IRId> =
             let mutable aliases = Set.singleton rootId
             let rec walk expr =
@@ -1494,43 +2060,62 @@ let specializeFunction (func: IRFuncDef) (arity: int) (builder: IRBuilder) : IRF
             walk expr
             aliases
 
-        let polyAliases = collectLetAliases polyParam.VarId func.Body
+        // Map alias VarId → slot index, so the IRPolyIndex rewrite knows
+        // which newParams set to draw from for a given xs/ys/zs reference.
+        let aliasToSlot =
+            slotInfo
+            |> List.mapi (fun slotIdx (_, polyParam, _, _) ->
+                let aliases = collectLetAliases polyParam.VarId func.Body
+                aliases |> Set.toList |> List.map (fun aid -> (aid, slotIdx)))
+            |> List.concat
+            |> Map.ofList
 
-        // Rewrite body: replace IRPolyIndex and IRArity
+        // Map param name → slot index, for the IRArity intrinsic. `arity(xs)`
+        // resolves to slot 0's arity; `arity(ys)` to slot 1's, etc.
+        let paramNameToSlot =
+            slotInfo
+            |> List.mapi (fun slotIdx (_, p, _, _) -> (p.Name, slotIdx))
+            |> Map.ofList
+
+        // Per-slot data indexed by slot, used during body rewrite.
+        let newParamsBySlot =
+            slotInfo |> List.map (fun (_, _, _, np) -> np) |> List.toArray
+        let baseTypeBySlot =
+            slotInfo |> List.map (fun (_, _, bt, _) -> bt) |> List.toArray
+        let aritiesArr = arities |> List.toArray
+
+        // Rewrite body: replace IRPolyIndex (per-slot lookup) and IRArity
+        // (per-slot arity literal). Each Poly slot is handled independently.
         let rewrite e =
             match e with
-            | IRPolyIndex (IRVar (id, _), IRLit (IRLitInt k)) when Set.contains id polyAliases ->
-                let idx = int k
-                if idx >= 0 && idx < arity then
-                    IRVar (newParams.[idx].VarId, baseType)
-                else e  // out of range — leave as-is (will error at C++)
-            | IRPolyIndex (IRVar (id, _), _) when Set.contains id polyAliases ->
-                // Dynamic index — can't monomorphize, leave as-is
-                // (future: generate switch statement)
-                e
-            | IRArity (None, name) when name = polyParam.Name ->
-                IRLit (IRLitInt (int64 arity))
-            | IRArity (_, name) when name = polyParam.Name ->
-                IRLit (IRLitInt (int64 arity))
+            | IRPolyIndex (IRVar (id, _), IRLit (IRLitInt k)) when Map.containsKey id aliasToSlot ->
+                let slotIdx = aliasToSlot.[id]
+                let slotArity = aritiesArr.[slotIdx]
+                let kInt = int k
+                if kInt >= 0 && kInt < slotArity then
+                    IRVar (newParamsBySlot.[slotIdx].[kInt].VarId, baseTypeBySlot.[slotIdx])
+                else e
+            | IRPolyIndex (IRVar (id, _), _) when Map.containsKey id aliasToSlot ->
+                e  // Dynamic index — can't monomorphize, leave as-is
+            | IRArity (_, name) when Map.containsKey name paramNameToSlot ->
+                let slotIdx = paramNameToSlot.[name]
+                IRLit (IRLitInt (int64 aritiesArr.[slotIdx]))
             | _ -> e
         let newBody = mapIRExpr rewrite func.Body
 
-        // Second pass: unroll IRForRange with literal bounds
-        // This handles `for k in 0..arity(args)` after arity is resolved
+        // Second pass: unroll IRForRange with literal bounds. This handles
+        // `for k in 0..arity(args)` after arity is resolved.
         let rec unrollForRanges expr =
             match expr with
             | IRLet (id, IRForRange (vid, IRLit (IRLitInt lo), IRLit (IRLitInt hi), body), rest) ->
-                // Unroll: replace the for-range with N copies of body
                 let restUnrolled = unrollForRanges rest
                 let indices = [ int lo .. int hi - 1 ] |> List.rev
                 indices |> List.fold (fun acc k ->
-                    // Substitute loop variable with literal k in body
                     let substBody =
                         mapIRExpr (fun e ->
                             match e with
                             | IRVar (varId, _) when varId = vid -> IRLit (IRLitInt (int64 k))
                             | _ -> e) body
-                    // Re-run the poly index rewrite on the substituted body
                     let substBody2 = mapIRExpr rewrite substBody
                     let dummyId = builder.FreshId()
                     IRLet (dummyId, unrollForRanges substBody2, acc)
@@ -1539,29 +2124,51 @@ let specializeFunction (func: IRFuncDef) (arity: int) (builder: IRBuilder) : IRF
             | _ -> expr
         let newBody = unrollForRanges newBody
 
-        // Resolve return type
         let newRetType =
             match func.RetType with
             | IRTPoly (bt, _) -> bt
             | other -> other
 
-        // Expand commutativity groups if present
-        // If the poly param was in a comm group, expand it to cover all new params
+        // Commutativity group expansion: each original index maps to a
+        // (newStart, span) in the expanded list. For a Poly slot, span =
+        // that slot's arity; for a free param, span = 1.
+        let origToNew =
+            let mutable acc = []
+            let mutable cur = 0
+            for i in 0 .. func.Params.Length - 1 do
+                let span =
+                    if Set.contains i polySet then
+                        // Look up this slot's arity. polyIndices is in order,
+                        // so its position in the list is the slot index.
+                        let slotIdx = polyIndices |> List.findIndex (fun x -> x = i)
+                        aritiesArr.[slotIdx]
+                    else 1
+                acc <- (i, (cur, span)) :: acc
+                cur <- cur + span
+            acc |> List.rev |> Map.ofList
+
         let newComm =
             func.Commutativity |> Option.map (fun groups ->
                 groups |> List.map (fun group ->
                     group |> List.collect (fun idx ->
-                        if idx = pidx then List.init arity (fun i -> pidx + i)
-                        else [if idx > pidx then idx + arity - 1 else idx])))
+                        match Map.tryFind idx origToNew with
+                        | Some (start, span) ->
+                            if span = 1 then [start]
+                            else List.init span (fun i -> start + i)
+                        | None -> [idx])))
+
+        // Mangled name encodes every slot's arity, so different shapes get
+        // distinct specializations. `pairSum_arity_2_3` for arities [2; 3].
+        let arityTag = arities |> List.map string |> String.concat "_"
 
         { Id = builder.FreshId()
-          Name = sprintf "%s_arity%d" func.Name arity
+          Name = sprintf "%s_arity_%s" func.Name arityTag
           Params = expandedParams
           RetType = newRetType
           Body = newBody
           IsStatic = func.IsStatic
           Commutativity = newComm
-          Parallelism = func.Parallelism  // May need expansion too
+          Parallelism = func.Parallelism
           IsArityPoly = false
           ArityParam = None }
 
@@ -1874,6 +2481,13 @@ let rec liftExpr (builder: IRBuilder) (expr: IRExpr) : IRExpr =
         let es' = es |> List.map (liftExpr builder)
         let (binds, esFinal) = liftChildren builder es'
         wrapLets binds (IRTuple esFinal)
+    | IRComplex (re, im) ->
+        let re' = liftExpr builder re
+        let im' = liftExpr builder im
+        let (binds, esFinal) = liftChildren builder [re'; im']
+        match esFinal with
+        | [reF; imF] -> wrapLets binds (IRComplex (reF, imF))
+        | _ -> wrapLets binds (IRComplex (re', im'))  // unreachable; defensive
     | IRArrayLit (es, ty) ->
         // Path B / Phase D: peel any IRLet chains from element results
         // (descendant lifts) and re-wrap them at THIS level. Don't lift the
@@ -2012,9 +2626,9 @@ let monomorphizeModule (modul: IRModule) (builder: IRBuilder) : IRModule =
 
     // 2. Collect all call sites with concrete arities
     let callSitesFromFuncs =
-        modul.Functions |> List.collect (fun f -> collectPolyCallSites polyFuncIds f.Body)
+        modul.Functions |> List.collect (fun f -> collectPolyCallSites polyFuncMap f.Body)
     let callSitesFromBindings =
-        modul.Bindings |> List.collect (fun b -> collectPolyCallSites polyFuncIds b.Value)
+        modul.Bindings |> List.collect (fun b -> collectPolyCallSites polyFuncMap b.Value)
     let uniqueCallSites =
         (callSitesFromFuncs @ callSitesFromBindings) |> List.distinct
 
@@ -2026,14 +2640,22 @@ let monomorphizeModule (modul: IRModule) (builder: IRBuilder) : IRModule =
             ((funcId, arity), spec))
     let specMap = specializations |> Map.ofList
 
-    // 4. Build rewrite function for call sites
+    // 4. Build rewrite function for call sites. The arity comes from
+    //    computePolyArity (shape-aware: variadic vs tuple-as-pack), and the
+    //    args are flattened at the Poly slot so they line up with the
+    //    specialization's expanded param list.
     let rewriteCallSite e =
         match e with
         | IRApp (IRVar (funcId, fty), args, _) when polyFuncIds.Contains funcId ->
-            let arity = args.Length
-            match Map.tryFind (funcId, arity) specMap with
-            | Some spec -> IRApp (IRVar (spec.Id, fty), args, spec.RetType)
-            | None -> e  // No specialization found — leave as-is
+            let func = polyFuncMap.[funcId]
+            match computePolyArity func args with
+            | Some arity ->
+                match Map.tryFind (funcId, arity) specMap with
+                | Some spec ->
+                    let flatArgs = flattenAtPolyPosition func args
+                    IRApp (IRVar (spec.Id, fty), flatArgs, spec.RetType)
+                | None -> e
+            | None -> e
         | _ -> e
 
     // 5. Rewrite all expressions in module
@@ -2065,6 +2687,13 @@ let rec ppIRType = function
     | IRTScalar ETUnit -> "Void"
     | IRTScalar ETString -> "String"
     | IRTScalar (ETIndexRef name) -> name
+    | IRTScalar (ETAnonIdx (_, extent)) ->
+        let extentStr =
+            match extent with
+            | IRLit (IRLitInt n) -> string n
+            | IRParam (name, _, _) -> name
+            | _ -> "?"
+        sprintf "Idx<%s>" extentStr
     | IRTArray arr ->
         let indices = arr.IndexTypes |> List.map ppIndexType |> String.concat ", "
         sprintf "Array<%s like %s>" (ppIRType arr.ElemType) indices
@@ -2176,6 +2805,7 @@ let rec ppIRExprWithNames (names: Map<int, string>) indent (expr: IRExpr) =
     | IRLit (IRLitInt n) -> sprintf "%d" n
     | IRLit (IRLitFloat f) -> sprintf "%f" f
     | IRLit (IRLitBool b) -> if b then "true" else "false"
+    | IRLit (IRLitString s) -> sprintf "\"%s\"" s
     | IRLit IRLitUnit -> "()"
     | IRVar (id, _) -> 
         match Map.tryFind id names with
@@ -2188,6 +2818,8 @@ let rec ppIRExprWithNames (names: Map<int, string>) indent (expr: IRExpr) =
         sprintf "(%s%s)" (ppUnaryOp op) (pp a)
     | IRTuple es ->
         sprintf "(%s)" (es |> List.map pp |> String.concat ", ")
+    | IRComplex (re, im) ->
+        sprintf "complex(%s, %s)" (pp re) (pp im)
     | IRTupleProj (e, i, _) ->
         sprintf "%s.%d" (pp e) i
     | IRIf (c, t, e) ->
@@ -2329,6 +2961,7 @@ let rec collectVarRefsIR (expr: IRExpr) : Set<IRId> =
         Set.difference (collectVarRefsIR info.Body) paramIds
     | IRApp (f, args, _) -> Set.unionMany (collectVarRefsIR f :: List.map collectVarRefsIR args)
     | IRTuple es -> Set.unionMany (List.map collectVarRefsIR es)
+    | IRComplex (re, im) -> Set.union (collectVarRefsIR re) (collectVarRefsIR im)
     | IRTupleProj (e, _, _) -> collectVarRefsIR e
     | IRArrayLit (es, _) -> Set.unionMany (List.map collectVarRefsIR es)
     | IRIndex (arr, idxs, _) -> Set.unionMany (collectVarRefsIR arr :: List.map collectVarRefsIR idxs)
@@ -2385,6 +3018,7 @@ let rec collectTypesInExpr (expr: IRExpr) : IRType list =
         | IRLambda info ->
             (info.Params |> List.map (fun p -> p.Type)) @ go info.Body
         | IRTuple elems -> elems |> List.collect go
+        | IRComplex (re, im) -> go re @ go im
         | IRTupleProj (e, _, _) -> go e
         | IRArrayLit (elems, arrTy) -> [IRTArray arrTy] @ (elems |> List.collect go)
         | IRIndex (arr, idxs, _) -> go arr @ (idxs |> List.collect go)
@@ -2456,15 +3090,21 @@ and collectPatternIds (pat: IRPattern) : Set<IRId> =
     | _ -> Set.empty
 
 /// Validate a single IRModule, returning a list of errors
-let validateModule (modul: IRModule) : IRValidationError list =
+let validateModule (externalIds: Set<IRId>) (modul: IRModule) : IRValidationError list =
     let errors = ResizeArray<IRValidationError>()
     let addError ctx msg = errors.Add({ Message = msg; Context = ctx })
     
-    // Track all defined IDs (bindings + functions define names in scope)
+    // Track all defined IDs (bindings + functions define names in scope).
+    // External Ids come from other modules visible via imports; the IR-level
+    // validator can't cheaply distinguish "imported and used" from "unrelated
+    // module's Id that happens to match" without import metadata in IRModule,
+    // so we accept all program Ids as in-scope. False negatives (an
+    // accidental cross-module reference) would require a TypeCheck/Lowering
+    // bug to manifest, which would likely surface elsewhere.
     let moduleIds =
         let bindIds = modul.Bindings |> List.map (fun b -> b.Id) |> Set.ofList
         let funcIds = modul.Functions |> List.map (fun f -> f.Id) |> Set.ofList
-        Set.union bindIds funcIds
+        Set.unionMany [bindIds; funcIds; externalIds]
     
     // --- Check 1: No unresolved IRTInfer in binding types ---
     for b in modul.Bindings do
@@ -2524,6 +3164,7 @@ let validateModule (modul: IRModule) : IRValidationError list =
         | IRUnaryOp (_, e) -> checkScope scope ctx e
         | IRIf (c, t, e) -> checkScope scope ctx c; checkScope scope ctx t; checkScope scope ctx e
         | IRTuple es -> es |> List.iter (checkScope scope ctx)
+        | IRComplex (re, im) -> checkScope scope ctx re; checkScope scope ctx im
         | IRTupleProj (e, _, _) -> checkScope scope ctx e
         | IRArrayLit (es, _) -> es |> List.iter (checkScope scope ctx)
         | IRIndex (arr, idxs, _) -> checkScope scope ctx arr; idxs |> List.iter (checkScope scope ctx)
@@ -2621,10 +3262,18 @@ let validateModule (modul: IRModule) : IRValidationError list =
     
     errors |> Seq.toList
 
-/// Validate an entire IR program
+/// Validate an entire IR program.
+/// Pre-collects all defined Ids across modules so cross-module references
+/// (selective imports of values/functions) don't appear dangling within
+/// individual module validation passes.
 let validateIR (program: IRProgram) : Result<IRProgram, string list> =
+    let allIds =
+        program.Modules |> List.collect (fun m ->
+            (m.Bindings |> List.map (fun b -> b.Id)) @
+            (m.Functions |> List.map (fun f -> f.Id)))
+        |> Set.ofList
     let allErrors =
-        program.Modules |> List.collect validateModule
+        program.Modules |> List.collect (validateModule allIds)
     if allErrors.IsEmpty then
         Ok program
     else

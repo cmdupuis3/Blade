@@ -69,7 +69,7 @@ let sum = va + vb
 """
 
 let test_phaseD_sumEnumArray = """
-// Phase D probe: Array of enum-like sum type (no payload variants).
+// Array of enum-like sum type (no payload variants).
 // Tests construction via ArrayLit, bracket-indexing into the array,
 // and match dispatch on the indexed result. Match for enum-style
 // variants compiles to `==` comparisons on the underlying enum int.
@@ -83,7 +83,7 @@ let v = match states[1] with
 """
 
 let test_phaseD_sumPayloadArray = """
-// Phase D probe: Array of sum type with data-bearing variants. Match
+// Array of sum type with data-bearing variants. Match
 // dispatch uses std::holds_alternative + std::get<>::value on the
 // indexed array element. Tests both Yes(n) extraction and No fallback
 // across distinct array elements.
@@ -110,6 +110,6 @@ let sumTypeTests = [
     ("Sum Type Match", test50_sumTypeMatch)
     ("Sum Type None", test50b_sumTypeNone)
     ("Sum Type Nested", test50c_sumTypeNested)
-    ("Phase D: Sum Enum Array", test_phaseD_sumEnumArray)
-    ("Phase D: Sum Payload Array", test_phaseD_sumPayloadArray)
+    ("Sum Type Array (Enum)", test_phaseD_sumEnumArray)
+    ("Sum Type Array (Payload)", test_phaseD_sumPayloadArray)
 ]

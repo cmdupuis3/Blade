@@ -112,6 +112,58 @@ let z = if x then 42 else 0
 // EXPECT: z = 42
 """
 
+let test122_stringScalar = """
+// String scalar literals + equality. Exercises IRLitString lowering,
+// litToCpp emission as std::string("..."), and string == comparison
+// (which lowers to C++ std::string operator==).
+let s = "hello"
+let same = if s == "hello" then 42 else 0
+let diff = if s == "world" then 1 else 0
+// EXPECT: same = 42
+// EXPECT: diff = 0
+"""
+
+let test123_stringArray = """
+// String array literal — exercises the per-element genArrayLiteral
+// path (extractLiteralValues silently returns [] for strings, so the
+// fast scalar path falls through). Each element renders via litToCpp.
+let words = ["forest", "urban", "farmland"]
+let count = if words(0) == "forest" then 1 else 0
+let count2 = count + (if words(1) == "urban" then 1 else 0)
+let count3 = count2 + (if words(2) == "farmland" then 1 else 0)
+// EXPECT: count3 = 3
+"""
+
+let test124_stringMatch = """
+// Match expression on string scrutinee. Each IRPatLit with an
+// IRLitString lowers via litToCpp to a `scrut == std::string("...")`
+// guard, chained as nested ternaries by the match codegen.
+let s = "urban"
+let code = match s with
+  | "forest" -> 1
+  | "urban" -> 2
+  | "farmland" -> 3
+  | _ -> 0
+let s2 = "ocean"
+let code2 = match s2 with
+  | "forest" -> 1
+  | "urban" -> 2
+  | _ -> 99
+// EXPECT: code = 2
+// EXPECT: code2 = 99
+"""
+
+let test125_stringDirectExpect = """
+// Exercises the harness's ExpectedString and ExpectedArray1DString variants
+// directly. cout emits strings without quotes (`s = hello`, not `s = "hello"`),
+// so the harness strips the quotes from the EXPECT line before comparing.
+// Array elements are split on `, ` from the printed form `[a, b, c]`.
+let greeting = "hello"
+let words = ["forest", "urban", "farmland"]
+// EXPECT: greeting = "hello"
+// EXPECT: words = ["forest", "urban", "farmland"]
+"""
+
 /// Basic language constructs
 let basicTests = [
     ("Basic Expression", test1_basicExpr)
@@ -128,4 +180,8 @@ let basicTests = [
     ("Multi-line Block", test44_multilineBlock)
     ("Boolean Basic", test120_booleanBasic)
     ("Boolean Compare", test121_booleanCompare)
+    ("String Scalar", test122_stringScalar)
+    ("String Array", test123_stringArray)
+    ("String Match", test124_stringMatch)
+    ("String Direct Expect", test125_stringDirectExpect)
 ]

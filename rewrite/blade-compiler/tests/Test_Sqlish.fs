@@ -278,6 +278,23 @@ let result = method_for(grouped) <@> lambda(g) -> g(0) |> compute
 // EXPECT: result = [20.0, 25.0, 30.0]
 """
 
+let test_groupby_enum_string = """
+// String-valued EnumIdx — same shape as test_groupby_enum_first but the keys
+// are strings. Exercises Layer 2 of string support: the `using LandType`
+// alias resolves to std::string, the keys array stores std::string elements,
+// and the Case 2 reverse-lookup dispatch generates `__v == "forest"`-style
+// comparisons (efficient because std::string::operator== accepts const char*
+// without allocating a temporary).
+type LandType = EnumIdx<["forest", "urban", "farmland"]>
+type StationIdx = Idx<6>
+let codes: Array<LandType like StationIdx> = ["forest", "urban", "farmland", "forest", "urban", "farmland"]
+let temps: Array<Float64 like StationIdx> = [20.0, 25.0, 30.0, 22.0, 27.0, 32.0]
+let gk = group_keys(codes)
+let grouped = group_by(temps, gk)
+let result = method_for(grouped) <@> lambda(g) -> g(0) |> compute
+// EXPECT: result = [20.0, 25.0, 30.0]
+"""
+
 // Phase 4 completion: per-group reduction kernels, exercising the ragged peel
 // path that Leg 1 generalized. The peel emits sub-array `_extents` for the
 // kernel param, so any combinator that consults extents (reduce, etc.) finds
@@ -335,6 +352,31 @@ let result = method_for(grouped) <@> lambda(g: Array<Float64 like RaggedIdx<_>>)
 // EXPECT: result = [62, 77, 92]
 """
 
+let test_groupby_sparse_keys_dynamic = """
+// Sparse keys without annotation — Case 3 hash-based dispatch. The keys
+// 101, 205, 307 occupy a sparse range; an earlier max-scan implementation
+// would have allocated 308 buckets (almost all empty). Hash discovery
+// produces 3 buckets in first-occurrence order.
+let codes = [101, 205, 307, 101, 205, 307]
+let temps = [20.0, 25.0, 30.0, 22.0, 27.0, 32.0]
+let gk = group_keys(codes)
+let grouped = group_by(temps, gk)
+let result = method_for(grouped) <@> lambda(g) -> g(0) |> compute
+// EXPECT: result = [20.0, 25.0, 30.0]
+"""
+
+let test_groupby_sparse_keys_reduce = """
+// Per-group sum on sparse keys without annotation. Verifies the hash-
+// based ngroups, offsets, and permutation correctly partition values
+// for reduction.
+let codes = [101, 205, 307, 101, 205, 307]
+let temps = [20.0, 25.0, 30.0, 22.0, 27.0, 32.0]
+let gk = group_keys(codes)
+let grouped = group_by(temps, gk)
+let result = method_for(grouped) <@> lambda(g: Array<Float64 like RaggedIdx<_>>) -> reduce(g, (+)) |> compute
+// EXPECT: result = [42, 52, 62]
+"""
+
 // ============================================================================
 // Phase 5: sort — Sorted Iteration (NOT YET IMPLEMENTED)
 // ============================================================================
@@ -368,6 +410,80 @@ let hot = mask(temps, lambda(t) -> t > 25.0)
 let sorted = sort(hot, lambda(t) -> -t)
 let result = method_for(sorted) <@> lambda(t) -> t |> compute
 // EXPECT: result = [32.0, 30.0, 27.0]
+"""
+
+// ============================================================================
+// v24d-1 fallback regression guards. These four cases originally exercised
+// the type-recovery pathways that two CodeGen fallbacks defended against:
+//   - The IRFieldAccess scan fallback (CodeGen.fs:260) that searched all
+//     structs by field name when obj's type wasn't IRTNamed
+//   - The auto-fallback (CodeGen.fs:2208) that emitted `auto x = expr` for
+//     shape-bearing IRTUnit bindings
+//
+// Both fallbacks were removed after instrumentation showed neither fired
+// across the full test corpus including these four probes. They remain
+// here as regression guards — if a future change to typechecking or
+// lowering ever leaks IRTUnit / non-IRTNamed types through to codegen for
+// these patterns, these probes will fail and surface the regression
+// instead of the codegen silently recovering.
+// ============================================================================
+
+let test_v24d_probe_1_poly_struct_field = """
+// Probe 1: field access on a struct returned from a function call. Tests
+// that the function-return path preserves struct identity (IRTNamed)
+// through to the field access. Originally framed around polymorphism, but
+// Blade's Poly<T^N> system is for arity polymorphism, not type generics —
+// the function-call indirection alone is the relevant test surface here.
+struct PointType {
+    x: Float64,
+    y: Float64
+}
+function ident(p: PointType) -> PointType = p
+let p = ident(PointType { x = 3.0, y = 4.0 })
+let r = p.x
+// EXPECT: r = 3
+"""
+
+let test_v24d_probe_2_mask_then_field = """
+// Probe 2: chained mask -> indexing -> field access on a struct array. The
+// mask operation might lose struct identity in its result type; subsequent
+// field access on the indexed element could land in the IRFieldAccess
+// scan fallback (now removed).
+struct Pair {
+    a: Float64,
+    b: Float64
+}
+let pairs: Array<Pair like Idx<3>> = [
+    Pair { a = 1.0, b = 10.0 },
+    Pair { a = 2.0, b = 20.0 },
+    Pair { a = 3.0, b = 30.0 }
+]
+let m = mask(pairs, lambda(p) -> p.a > 1.5)
+let elem = m(0)
+let r = elem.a
+// EXPECT: r = 2
+"""
+
+let test_v24d_probe_3_unannotated_mask = """
+// Probe 3: unannotated binding whose RHS is a mask result. If the
+// mask-returning expression's type doesn't flow back to the binding but
+// the codegen sees a wrapper-shaped RHS, the auto-fallback (now removed)
+// would have fired.
+let arr: Array<Float64 like Idx<4>> = [1.0, 2.0, 3.0, 4.0]
+let m = mask(arr, lambda(x) -> x > 1.5)
+let r = m(0)
+// EXPECT: r = 2
+"""
+
+let test_v24d_probe_4_unannotated_sort = """
+// Probe 4: unannotated binding whose RHS is a sort result. Same shape as
+// probe 3 but exercising the IRSort path through producesWrapperShape.
+// `sort` takes a key-extractor lambda (returns the sort key for each
+// element), not a comparator.
+let arr: Array<Float64 like Idx<4>> = [3.0, 1.0, 4.0, 2.0]
+let s = sort(arr, lambda(x) -> x)
+let r = s(0)
+// EXPECT: r = 1
 """
 
 // ============================================================================
@@ -412,9 +528,12 @@ let groupByTests = [
     ("GroupBy Idx Sum Two", test_groupby_idx_sum_two)
     ("GroupBy Idx Annotated", test_groupby_idx_annotated)
     ("GroupBy Enum First", test_groupby_enum_first)
+    ("GroupBy Enum String", test_groupby_enum_string)
     ("GroupBy Reduce Per Group", test_groupby_reduce_per_group)
     ("GroupBy Reduce Unannotated", test_groupby_reduce_unannotated)
     ("GroupBy Mixed Kernel", test_groupby_mixed_kernel)
+    ("GroupBy Sparse Keys Dynamic", test_groupby_sparse_keys_dynamic)
+    ("GroupBy Sparse Keys Reduce", test_groupby_sparse_keys_reduce)
 ]
 
 /// Phase 5: sort
@@ -608,6 +727,17 @@ let sqlCombinedTests = [
     ("SQL Select-Where-OrderBy", test_sql_select_where_orderby)
 ]
 
+/// Type-recovery regression guards — exercise pathways that two removed
+/// CodeGen fallbacks once defended (IRFieldAccess scan + auto-fallback for
+/// shape-bearing IRTUnit bindings). Should continue to typecheck and produce
+/// verifiable values. If any start failing, the type pipeline has regressed.
+let v24dProbes = [
+    ("Type Recovery: Poly Struct Field", test_v24d_probe_1_poly_struct_field)
+    ("Type Recovery: Mask Then Field", test_v24d_probe_2_mask_then_field)
+    ("Type Recovery: Unannotated Mask", test_v24d_probe_3_unannotated_mask)
+    ("Type Recovery: Unannotated Sort", test_v24d_probe_4_unannotated_sort)
+]
+
 /// All SQL-ish tests
 let sqlishTests =
-    foreignKeyTests @ maskTests @ setOpTests @ groupByTests @ sortTests @ reduceTests @ extentsTests @ extentsMultiRankTests @ regressionTests @ sqlCombinedTests
+    foreignKeyTests @ maskTests @ setOpTests @ groupByTests @ sortTests @ reduceTests @ extentsTests @ extentsMultiRankTests @ regressionTests @ sqlCombinedTests @ v24dProbes

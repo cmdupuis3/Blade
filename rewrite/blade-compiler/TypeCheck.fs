@@ -56,6 +56,12 @@ type Subst() =
     let mutable typeVarScope : Map<string, IRType * int> = Map.empty
     let mutable arityConstraints : Map<int, int> = Map.empty
     let mutable knownTypeVarNames : Set<string> = Set.empty
+    /// IDs of type variables that are HM-polymorphic at a function boundary.
+    /// Such IDs are preserved by zonking (not defaulted to Float64) so the
+    /// IR-phase HM monomorphization pass can substitute them at call sites.
+    /// Populated lazily as LookupOrCreateTypeVar produces fresh IDs for
+    /// names that prescanTypeVarNames previously registered.
+    let mutable polymorphicIds : Set<int> = Set.empty
 
     member _.Fresh() =
         let id = nextId
@@ -79,6 +85,14 @@ type Subst() =
                 | IRTInfer id -> arityConstraints <- Map.add id arity arityConstraints
                 | _ -> ()
             typeVarScope <- Map.add key (tv, arity) typeVarScope
+            // If this name was registered by prescanTypeVarNames, the fresh
+            // ID is a function-boundary HM type variable. Track it so zonk
+            // doesn't default it to Float64 — IR-phase HM monomorphization
+            // will substitute it at call sites.
+            if Set.contains name knownTypeVarNames then
+                match tv with
+                | IRTInfer id -> polymorphicIds <- Set.add id polymorphicIds
+                | _ -> ()
             tv
 
     member this.LookupOrCreateTypeVar(name: string) : IRType =
@@ -88,7 +102,14 @@ type Subst() =
         | None ->
             let tv = this.Fresh()
             typeVarScope <- Map.add key (tv, 0) typeVarScope
+            if Set.contains name knownTypeVarNames then
+                match tv with
+                | IRTInfer id -> polymorphicIds <- Set.add id polymorphicIds
+                | _ -> ()
             tv
+
+    member _.IsPolymorphicId(id: int) : bool =
+        Set.contains id polymorphicIds
 
     member _.GetArityConstraint(id: int) : int option =
         Map.tryFind id arityConstraints
@@ -387,7 +408,7 @@ type TypeDefInfo =
     | TDIStruct of name: string * typeParams: string list * fields: (string * IRType) list
     | TDIVariant of name: string * typeParams: string list * variants: (string * IRType option) list
     | TDIIndexType of name: string * idx: IRIndexType * body: TypeExpr
-    | TDIEnumIdx of name: string * idx: IRIndexType * values: int64 list
+    | TDIEnumIdx of name: string * idx: IRIndexType * values: IR.EnumValue list * body: TypeExpr
 
 /// Exported bindings from a type-checked module, for cross-module imports
 type TypeModuleExport = {
@@ -395,6 +416,11 @@ type TypeModuleExport = {
     TypeDefs: Map<string, TypeDefInfo>
     VariantTags: Map<string, string * IRType option>
     Units: Map<string, IR.UnitSig>
+    /// Static function ASTs from this module. Imported alongside Variables
+    /// so eta-reduced DepIdx in an importing module can inline a static
+    /// function defined in this one. The body is needed for the inlining;
+    /// the TypeEnv-side StaticFunctions map is the consumer.
+    StaticFunctions: Map<string, FunctionDecl>
 }
 
 /// Type checking environment
@@ -418,6 +444,11 @@ type TypeEnv = {
     Context: string list
     /// Exports from previously type-checked modules
     ModuleExports: Map<string, TypeModuleExport>
+    /// Static function ASTs, populated during checkModule's pre-pass.
+    /// Used by lowerIndexTypeList to inline eta-reduced DepIdx bodies —
+    /// `DepIdx<O, f>` desugars to `lambda(i) -> Idx<f(i)>`, and the
+    /// substitution into the inner extent requires access to f's body.
+    StaticFunctions: Map<string, FunctionDecl>
 }
 
 let emptyEnv () = {
@@ -434,6 +465,7 @@ let emptyEnv () = {
     Units = Map.empty
     Context = []
     ModuleExports = Map.empty
+    StaticFunctions = Map.empty
 }
 
 /// Push a context frame onto the environment
@@ -681,10 +713,19 @@ let rec lowerTypeExpr (env: TypeEnv) (ty: TypeExpr) : IRType =
         | "Bool" -> IRTScalar ETBool
         | "Void" -> IRTUnit
         | "Nat" -> IRTNat None
+        | "String" -> IRTScalar ETString
+        | "Char" -> IRTScalar ETInt32
         | "Poly" ->
+            // Each Poly occurrence gets its own arity variable name. Packs are
+            // independent at the call site (different slots can have different
+            // arities), so the type rep shouldn't claim they share one variable.
+            // The name is generated fresh per occurrence; it's used by ppIRType
+            // for diagnostics but doesn't drive any per-slot specialization logic
+            // (that lives in the IR phase, keyed by parameter position).
+            let arityName = sprintf "r%d" (env.Builder.FreshId())
             match args with
-            | [inner] -> IRTPoly (lowerTypeExpr env inner, "r")
-            | _ -> IRTPoly (IRTScalar ETFloat64, "r")
+            | [inner] -> IRTPoly (lowerTypeExpr env inner, arityName)
+            | _ -> IRTPoly (IRTScalar ETFloat64, arityName)
         | _ ->
             match lookupTypeDef name env with
             | Some (TDIAlias resolvedTy) -> resolvedTy
@@ -825,11 +866,13 @@ let rec lowerTypeExpr (env: TypeEnv) (ty: TypeExpr) : IRType =
     // tuple element) represents an integer in [0, n) that compiles to a loop
     // bound at codegen time; it is not a Float-array indexed by Idx<n>.
     //
-    // The current shape (IRTScalar ETInt64) for arity-1 cases mirrors the
-    // existing lowerElemType:895-897 precedent and matches the runtime
-    // story. Aliased index types (`type RegionIdx = Idx<n>`; `i: RegionIdx`)
-    // continue to route through TyNamed -> ETIndexRef name preserving
-    // nominative identity.
+    // Lowered to IRTScalar ETAnonIdx — a typecheck-only tag that preserves
+    // "this is an anonymous index" identity through the IR. Critical so that
+    // inferArithType can reject arithmetic on these values (matching the
+    // rejection rule for named index types ETIndexRef). At codegen time
+    // ETAnonIdx renders as int64_t (the runtime backing). Aliased index
+    // types (`type RegionIdx = Idx<n>`; `i: RegionIdx`) continue to route
+    // through TyNamed -> ETIndexRef name preserving nominative identity.
     //
     // KNOWN GAP — higher-arity / dependent cases below (TySymIdx, TyAntisymIdx,
     // TyHermitianIdx, TyCompoundIdx, TyDepIdx | TyRaggedIdx | TyRaggedIdxOpaque,
@@ -838,7 +881,9 @@ let rec lowerTypeExpr (env: TypeEnv) (ty: TypeExpr) : IRType =
     // an ordered r-tuple of integers under a sort constraint, a type error,
     // or something else; the formalism doesn't currently say. No test
     // exercises these paths; the wrong shape is a dead-code latent bug.
-    | TyIdx _ -> IRTScalar ETInt64
+    | TyIdx extent ->
+        let nominalId = env.Builder.FreshId()
+        IRTScalar (ETAnonIdx (nominalId, lowerExtentExpr env extent))
 
     | TySymIdx (arity, extent) ->
         let ext = lowerExtentExpr env extent
@@ -865,7 +910,18 @@ let rec lowerTypeExpr (env: TypeEnv) (ty: TypeExpr) : IRType =
                     Symmetry = SymNone; Tag = None; Kind = SDimension; Dependencies = [] }
         IRTArray { ElemType = IRTScalar ETFloat64; IndexTypes = [idx]; IsVirtual = false; Identity = None }
 
-    | TyEnumIdx _ -> IRTScalar ETInt64
+    | TyEnumIdx valuesExpr ->
+        // Determine underlying element type from values. All-string lowers to
+        // ETString; otherwise (all-int, empty, or mixed-but-recoverable) ETInt64.
+        // Mixed lists won't reach here in practice — the same extraction is
+        // run by registerTypeDecl and surfaces a clean error when aliased; an
+        // unaliased mixed-list slips through silently with ETInt64.
+        let isAllString =
+            match valuesExpr with
+            | ExprArrayLit elems when not elems.IsEmpty ->
+                elems |> List.forall (function ExprLit (LitString _) -> true | _ -> false)
+            | _ -> false
+        if isAllString then IRTScalar ETString else IRTScalar ETInt64
 
     | TyDepIdx _ | TyRaggedIdx _ | TyRaggedIdxOpaque ->
         // DepIdx/RaggedIdx in non-index position. Defensive fallback matching
@@ -876,7 +932,12 @@ let rec lowerTypeExpr (env: TypeEnv) (ty: TypeExpr) : IRType =
         let idx = lowerIndexType env 0 ty
         IRTArray { ElemType = IRTScalar ETFloat64; IndexTypes = [idx]; IsVirtual = false; Identity = None }
 
-    | TyPoly inner -> IRTPoly (lowerTypeExpr env inner, "r")
+    | TyPoly inner ->
+        // Fresh arity-variable name per Poly occurrence. See the TyNamed "Poly"
+        // case above for rationale: packs are independent, so each Poly param
+        // gets its own identifier in the type rep.
+        let arityName = sprintf "r%d" (env.Builder.FreshId())
+        IRTPoly (lowerTypeExpr env inner, arityName)
     | TyConstrained (inner, _) -> lowerTypeExpr env inner
     | TyEquivIdx (_dim, _group, _rep) ->
         let idx = { Id = env.Builder.FreshId(); Arity = 1; Extent = IRParam ("equiv", 0, IRTNat None)
@@ -899,9 +960,18 @@ and lowerElemType env ty : IRType =
         | Some (TDIIndexType _) -> IRTScalar (ETIndexRef name)
         | Some (TDIEnumIdx _) -> IRTScalar (ETIndexRef name)
         | _ -> lowerTypeExpr env ty   // struct, sum, alias, type variable, etc.
-    | TyIdx _ | TySymIdx _ | TyAntisymIdx _ | TyHermitianIdx _ | TyEnumIdx _ ->
+    | TyIdx _ | TySymIdx _ | TyAntisymIdx _ | TyHermitianIdx _ ->
         // Raw index type syntax in element position (e.g., Array<Idx<3> like ...>)
         IRTScalar ETInt64
+    | TyEnumIdx valuesExpr ->
+        // Mirror of the value-position handling: all-string values → ETString,
+        // otherwise → ETInt64.
+        let isAllString =
+            match valuesExpr with
+            | ExprArrayLit elems when not elems.IsEmpty ->
+                elems |> List.forall (function ExprLit (LitString _) -> true | _ -> false)
+            | _ -> false
+        if isAllString then IRTScalar ETString else IRTScalar ETInt64
     | _ ->
         lowerTypeExpr env ty
 
@@ -962,7 +1032,7 @@ and lowerIndexType env (_position: int) (ty: TypeExpr) : IRIndexType =
     | TyNamed (name, _) ->
         match lookupTypeDef name env with
         | Some (TDIIndexType (_, idx, _)) -> { idx with Id = id }
-        | Some (TDIEnumIdx (_, idx, _)) -> { idx with Id = id }
+        | Some (TDIEnumIdx (_, idx, _, _)) -> { idx with Id = id }
         | _ ->
             { Id = id; Arity = 1; Extent = IRParam (name, 0, IRTNat None); Symmetry = SymNone
               Tag = Some name; Kind = SDimension; Dependencies = [] }
@@ -984,20 +1054,40 @@ and lowerIndexTypeList (env: TypeEnv) (position: int) (ty: TypeExpr) : IRIndexTy
         // for the inner extent's reference to the lambda parameter.
         let outerIdx = lowerIndexType env position outerTy
         let outerWithTag = { outerIdx with Tag = Some "__depidx_outer" }
-        // Extract the inner extent expression. Body shape is `Idx<expr>` for
-        // the lambda form; eta-reduced forms produce a TyNamed body that
-        // doesn't yet resolve cleanly (see Round 2 limitations comment in
-        // the parser). For non-Idx bodies we emit a placeholder; the lambda
-        // form is the path that produces a real Extent.
-        let bodyExtentExpr =
-            match bodyTy with
-            | TyIdx e -> Some e
-            | _ -> None
         let outerVarRef = IRVar (outerWithTag.Id, IRTScalar ETInt64)
+        // Extract the inner extent expression. Two body shapes are recognized:
+        //   - Lambda form: `lambda(i) -> Idx<expr>` parses to `TyIdx expr`.
+        //     Substitute paramName with outerVarRef in expr.
+        //   - Eta-reduced form: `DepIdx<O, f>` parses to a synthesized
+        //     TyNamed(funcName, [TyNamed(paramName, [])]) body. Inline by
+        //     looking up f in StaticFunctions, taking its body Expr, and
+        //     substituting f's param name (not paramName) with outerVarRef.
+        // Anything else falls back to a runtime placeholder.
         let innerExtent =
-            match bodyExtentExpr with
-            | Some e -> substituteAndLowerExtent env paramName outerVarRef e
-            | None -> IRParam ("__depidx_inner", 0, IRTNat None)
+            match bodyTy with
+            | TyIdx e ->
+                substituteAndLowerExtent env paramName outerVarRef e
+            | TyNamed (funcName, [TyNamed (innerParam, [])]) when innerParam = paramName ->
+                match Map.tryFind funcName env.StaticFunctions with
+                | Some funcDecl when funcDecl.Params.Length = 1 ->
+                    // Substitute the function's formal param with the outer
+                    // iteration var. The function's body becomes the inner
+                    // extent expression — its structure is fixed at compile
+                    // time, but it evaluates per-iteration as outer walks.
+                    //
+                    // Peel a trivial block wrapper so `function f(x) = { e }`
+                    // (parses to ExprBlock([], Some e)) reduces the same as
+                    // the inline form `function f(x) = e`.
+                    let funcParamName = funcDecl.Params.[0].Name
+                    let bodyExpr =
+                        match funcDecl.Body with
+                        | ExprBlock ([], Some e) -> e
+                        | other -> other
+                    substituteAndLowerExtent env funcParamName outerVarRef bodyExpr
+                | _ ->
+                    IRParam ("__depidx_inner", 0, IRTNat None)
+            | _ ->
+                IRParam ("__depidx_inner", 0, IRTNat None)
         let innerIdx = {
             Id = env.Builder.FreshId()
             Arity = 1
@@ -1544,6 +1634,31 @@ let rec inferExpr (env: TypeEnv) (expr: Expr) : TypeResult<TypedExpr> =
             let resTy = match op with OpNot -> IRTScalar ETBool | OpNeg -> tOp.Type
             Ok (mkTyped (TExprUnaryOp (op, tOp)) resTy))
 
+    // ---- Module-qualified value/function: `Math.pi`, `MathLib.double(x)` ----
+    // These two cases must precede the method-call and struct-field handlers
+    // because `Math` would otherwise be looked up as a value and fail. The
+    // DeclImport handler registers imported entries under qualified names
+    // (`Math.pi`, `MathLib.double`); when the form is `ExprVar n . field`
+    // and the qualified name resolves, we treat the access as a direct
+    // variable reference. Falls through to the existing struct/method
+    // handlers when the qualified name is not registered.
+
+    | ExprApp (ExprField (ExprVar n, field), args)
+        when (lookupVar (sprintf "%s.%s" n field) env).IsSome ->
+        let qualName = sprintf "%s.%s" n field
+        let info = (lookupVar qualName env).Value
+        let useTy =
+            match info.Scheme with
+            | Some scheme -> instantiate env.Subst scheme
+            | None -> info.Type
+        let tFunc = mkTyped (TExprVar (qualName, info.VarId, info.Identity)) useTy
+        args |> List.map (inferExpr env) |> sequenceResults |> Result.bind (fun tArgs ->
+            let retTy =
+                match useTy with
+                | IRTFunc (_, ret) -> ret
+                | _ -> env.Subst.Fresh()
+            Ok (mkTyped (TExprApp (tFunc, tArgs)) retTy))
+
     // ---- Method call: obj.method(args) → impl resolution ----
     | ExprApp (ExprField (obj, method), args) ->
         inferExpr env obj |> Result.bind (fun tObj ->
@@ -1631,6 +1746,18 @@ let rec inferExpr (env: TypeEnv) (expr: Expr) : TypeResult<TypedExpr> =
                 Ok (mkTyped (TExprTupleIndex (tT, tI)) (env.Subst.Fresh()))))
 
     // ---- Field access ----
+    | ExprField (ExprVar n, field)
+        when (lookupVar (sprintf "%s.%s" n field) env).IsSome ->
+        // Module-qualified value access (e.g. `let tau = Math.pi * 2.0`).
+        // Same rationale as the qualified application case above.
+        let qualName = sprintf "%s.%s" n field
+        let info = (lookupVar qualName env).Value
+        let useTy =
+            match info.Scheme with
+            | Some scheme -> instantiate env.Subst scheme
+            | None -> info.Type
+        Ok (mkTyped (TExprVar (qualName, info.VarId, info.Identity)) useTy)
+
     | ExprField (obj, field) ->
         inferExpr env obj |> Result.bind (fun tObj ->
             let (fieldTy, fieldIdx) =
@@ -1836,7 +1963,7 @@ let rec inferExpr (env: TypeEnv) (expr: Expr) : TypeResult<TypedExpr> =
                         match lookupTypeDef name env with
                         | Some (TDIIndexType (_, idx, _)) ->
                             ({ idx with Id = env.Builder.FreshId(); Tag = Some name }, None)
-                        | Some (TDIEnumIdx (_, idx, values)) ->
+                        | Some (TDIEnumIdx (_, idx, values, _)) ->
                             ({ idx with Id = env.Builder.FreshId(); Tag = Some name }, Some values)
                         | _ ->
                             ({ Id = env.Builder.FreshId(); Arity = 1
@@ -2153,10 +2280,16 @@ let rec inferExpr (env: TypeEnv) (expr: Expr) : TypeResult<TypedExpr> =
 
     // ---- Type annotation ----
     | ExprTyped (e, tyAnno) ->
-        inferExpr env e |> Result.bind (fun tE ->
-            let annoTy = lowerTypeExpr env tyAnno
-            let _ = unify env.Subst tE.Type annoTy
-            Ok { tE with Type = annoTy })
+        // Route through bidirectional checkExpr so the annotation pushes
+        // down into literal/constructor positions. The motivating case
+        // is `(re, im) : Complex128`: a 2-tuple checked against Complex
+        // produces a TExprComplexLit (preserving scalar nature) rather
+        // than synthesizing as a tuple-of-floats and failing to unify.
+        // For non-special-cased shapes, checkExpr falls through to
+        // inferExpr + unify, preserving the prior plain-cast behavior.
+        let annoTy = lowerTypeExpr env tyAnno
+        checkExpr env annoTy e |> Result.map (fun tE ->
+            { tE with Type = annoTy })
 
     // ---- Arity special forms ----
     | ExprArity paramName -> Ok (mkTyped (TExprArity paramName) (IRTScalar ETInt64))
@@ -2380,6 +2513,37 @@ and inferArithType mode op leftTy rightTy : TypeResult<IRType> =
         let rUnits = IR.getUnits rightTy
         let lBare = IR.stripUnits leftTy
         let rBare = IR.stripUnits rightTy
+        // No arithmetic on index types (named OR anonymous). Per the
+        // formalism's nominal-type discipline, index types are nominal
+        // labels — arithmetic on them serves no useful purpose:
+        // (1) value-level position arithmetic is reachable via virtual
+        // array iteration, which produces plain ints; (2) type-level
+        // construction of new index types from arithmetic is a separate
+        // (deferred) workstream. So we simply reject. ETIndexRef "X" is
+        // the named form, ETAnonIdx is the anonymous form (`Idx<n>` in
+        // value position) — both follow the same algebra.
+        // Floats: by the same principle, index types are completely
+        // incompatible with floating point — no `Idx + Float` either.
+        let isIndexType t =
+            match t with
+            | IRTScalar (ETIndexRef _) | IRTScalar (ETAnonIdx _) -> true
+            | _ -> false
+        let indexTypeName t =
+            match t with
+            | IRTScalar (ETIndexRef n) -> n
+            | IRTScalar (ETAnonIdx _) -> "<anonymous Idx>"
+            | _ -> "?"
+        let indexArithErr =
+            match lBare, rBare with
+            | IRTScalar (ETIndexRef ln), IRTScalar (ETIndexRef rn) when ln <> rn ->
+                Some (Other (sprintf "Cross-nominal index-type arithmetic: cannot combine values of distinct index domains '%s' and '%s'." ln rn))
+            | l, r when isIndexType l || isIndexType r ->
+                let n = if isIndexType l then indexTypeName l else indexTypeName r
+                Some (Other (sprintf "Arithmetic on index type '%s' is not permitted. Index types are nominal labels — for value-level arithmetic on positions, use virtual array iteration (which produces plain ints); for new index types derived from arithmetic, type-level construction is a separate workstream not yet implemented." n))
+            | _ -> None
+        match indexArithErr with
+        | Some err -> Error err
+        | None ->
         let bareResult =
             match mode with
             | Outer ->
@@ -2432,6 +2596,27 @@ and resolveTypedExpr (env: TypeEnv) (texpr: TypedExpr) : TypedExpr =
         | None -> texpr
     | _ -> texpr
 
+/// Pick the zero literal for an element type. ETIndexRef _ requires looking up
+/// the alias in env.TypeDefs: a string-valued EnumIdx needs LitString "" (the
+/// empty string is the natural zero for std::string), an int-valued EnumIdx
+/// uses LitInt 0L. ETString itself uses LitString "". Other types follow the
+/// obvious pattern. This is consulted by every site that synthesizes a "zero
+/// kernel" for a method_for / object_for with `<@> zero` — the runtime value
+/// is rarely meaningful semantically (no obvious string identity for fold),
+/// but the literal kind must match the element type or codegen produces
+/// invalid C++.
+and zeroLitForElem (env: TypeEnv) (et: ElemType) : TypedExprKind =
+    match et with
+    | ETInt32 | ETInt64 | ETAnonIdx _ -> TExprLit (LitInt 0L)
+    | ETIndexRef name ->
+        match Map.tryFind name env.TypeDefs with
+        | Some (TDIEnumIdx (_, _, values, _)) when IR.EnumValue.allString values && not values.IsEmpty ->
+            TExprLit (LitString "")
+        | _ -> TExprLit (LitInt 0L)
+    | ETBool -> TExprLit (LitBool false)
+    | ETString -> TExprLit (LitString "")
+    | _ -> TExprLit (LitFloat 0.0)
+
 and inferApply (env: TypeEnv) (tLeft: TypedExpr) (tRight: TypedExpr) : TypeResult<TypedExpr> =
     let rL = resolveTypedExpr env tLeft
     let rR = resolveTypedExpr env tRight
@@ -2483,11 +2668,7 @@ and inferApply (env: TypeEnv) (tLeft: TypedExpr) (tRight: TypedExpr) : TypeResul
             | AnyPrimElem et -> et
             | _ -> ETFloat64
         let paramTy = IRTScalar elemType
-        let zeroLit =
-            match elemType with
-            | ETInt32 | ETInt64 -> TExprLit (LitInt 0L)
-            | ETBool -> TExprLit (LitBool false)
-            | _ -> TExprLit (LitFloat 0.0)
+        let zeroLit = zeroLitForElem env elemType
         // Create one parameter per array (all rank-0 element types)
         let nArrays = mfInfo.Arrays.Length
         let params_ = List.init nArrays (fun i ->
@@ -2638,11 +2819,7 @@ and inferApply (env: TypeEnv) (tLeft: TypedExpr) (tRight: TypedExpr) : TypeResul
                 | AnyPrimElem et -> et
                 | _ -> ETFloat64
             let paramTy = IRTScalar elemType
-            let zeroLit =
-                match elemType with
-                | ETInt32 | ETInt64 -> TExprLit (LitInt 0L)
-                | ETBool -> TExprLit (LitBool false)
-                | _ -> TExprLit (LitFloat 0.0)
+            let zeroLit = zeroLitForElem env elemType
             let nArrays = flatArrays.Length
             let params_ = List.init nArrays (fun i ->
                 let pid = env.Builder.FreshId()
@@ -2832,17 +3009,51 @@ and buildApplyInfo (env: TypeEnv)
 // ============================================================================
 
 /// Pre-scan type annotations to collect type variable NAMES before lowering.
-/// Only looks for TyVar nodes (which have `^` in the source). This populates
-/// the known-name set so that bare `T` in TyNamed resolves as a type variable
-/// regardless of parameter order.
+/// Two sources of type-variable names:
+///   1. Explicit `T^N` syntax (TyVar nodes from the parser) — always
+///      a type variable, registered unconditionally.
+///   2. Implicit bare `T` in type position (TyNamed without args) — treated
+///      as a type variable IF the name isn't a registered type or builtin
+///      scalar. This implements F#/OCaml-style implicit polymorphism:
+///      `function f(x: T) -> T = x` introduces `T` as a fresh type var
+///      without requiring `T^0` annotation, and the bare form composes
+///      with explicit `T^N` (so `Poly<T^0>, T` works — both refer to
+///      the same `T`).
+///
+/// The recursion walks all TypeExpr variants so type-var names are
+/// collected from arbitrarily nested positions (`Array<T like Idx<n>>`,
+/// `(T, U)`, `T -> U`, etc.).
 ///
 /// Pass 1: collect names (this function)
 /// Pass 2: lower types, creating inference vars lazily (lowerTypeExpr)
 and prescanTypeVarNames (env: TypeEnv) (types: TypeExpr option list) : unit =
+    let isBuiltinScalar name =
+        match name with
+        | "Int" | "Int32" | "Int64"
+        | "Float" | "Float32" | "Float64" | "Double"
+        | "Complex64" | "Complex128"
+        | "Bool" | "Void" | "Nat" | "String" | "Char"
+        | "Poly" | "Array" -> true
+        | _ -> false
     let rec scan ty =
         match ty with
         | TyVar (name, _) ->
             env.Subst.RegisterTypeVarName(name)
+        | TyNamed (name, args) ->
+            // F#/OCaml-style implicit type vars: a bare name (no args) that
+            // isn't a registered type or builtin scalar is an implicit type
+            // variable. The check uses lookupTypeDef against the current
+            // env, so types declared earlier in the same module are
+            // correctly recognized as concrete (and not registered as vars).
+            // Forward references to types declared later remain unsupported
+            // in Blade — same convention as F#/OCaml.
+            if args.IsEmpty
+               && not (isBuiltinScalar name)
+               && (lookupTypeDef name env).IsNone then
+                env.Subst.RegisterTypeVarName(name)
+            // Recurse into args regardless — `Array<T like Idx<n>>` has
+            // `T` in a nested position.
+            args |> List.iter scan
         | TyAbstractArray (elemTy, _, _) -> scan elemTy
         | TyFunc (args, ret) -> args |> List.iter scan; scan ret
         | TyTuple ts -> ts |> List.iter scan
@@ -2911,10 +3122,25 @@ and checkExpr (env: TypeEnv) (expected: IRType) (expr: Expr) : TypeResult<TypedE
     // level value but its IRType matches the annotation.
     | ExprLit (LitInt _ as lit), IRTScalar et ->
         match et with
-        | ETInt32 | ETInt64 | ETIndexRef _ ->
+        | ETInt32 | ETInt64 | ETIndexRef _ | ETAnonIdx _ ->
             Ok (mkTyped (TExprLit lit) (IRTScalar et))
         | _ ->
             Error (TypeMismatch (resolved, IRTScalar ETInt64))
+    | ExprLit (LitString _ as lit), IRTScalar et ->
+        // Mirror of the int-literal rule: a string literal can target ETString
+        // directly, or ETIndexRef _ when the alias resolves to a string-valued
+        // EnumIdx. We don't look up the alias here — accepting any ETIndexRef
+        // keeps the rule symmetric with int (which doesn't check whether the
+        // alias is actually int-valued either). A mismatch surfaces later if
+        // the alias's underlying type doesn't match the string's runtime
+        // representation, but typically the codegen `using` alias resolves
+        // ETIndexRef name to std::string for string-valued EnumIdx, so a
+        // string literal initializing it is correct.
+        match et with
+        | ETString | ETIndexRef _ ->
+            Ok (mkTyped (TExprLit lit) (IRTScalar et))
+        | _ ->
+            Error (TypeMismatch (resolved, IRTScalar ETString))
     | ExprLit (LitFloat _ as lit), IRTScalar et ->
         match et with
         | ETFloat32 | ETFloat64 -> Ok (mkTyped (TExprLit lit) (IRTScalar et))
@@ -2953,6 +3179,27 @@ and checkExpr (env: TypeEnv) (expected: IRType) (expr: Expr) : TypeResult<TypedE
         List.zip exprs ts |> List.map (fun (e, t) -> checkExpr env t e) |> sequenceResults
         |> Result.map (fun tExprs ->
             mkTyped (TExprTuple tExprs) (IRTTuple (tExprs |> List.map (fun e -> e.Type))))
+
+    // Complex literal construction. A 2-tuple checked against Complex64
+    // or Complex128 — typically `(re, im) : Complex128` — produces a
+    // TExprComplexLit (NOT TExprTuple) typed as the scalar Complex type.
+    // The TExprTuple form would lower to IRTuple and lose the scalar
+    // nature, leading downstream code to potentially flatten the "tuple"
+    // into the surrounding array's shape (an N-element Complex array
+    // becoming an N x 2 doubles array). TExprComplexLit lowers to
+    // IRLitComplex, a scalar IR node that codegen renders as
+    // std::complex<double>(re, im). Per the design rule, both components
+    // must be float-typed (no implicit int → float promotion at literal
+    // construction time) — this is enforced by checkExpr recursing into
+    // each component with the corresponding float type.
+    | ExprTuple [reExpr; imExpr], IRTScalar (ETComplex64 | ETComplex128 as cet) ->
+        let componentTy =
+            match cet with
+            | ETComplex64 -> IRTScalar ETFloat32
+            | _ -> IRTScalar ETFloat64
+        checkExpr env componentTy reExpr |> Result.bind (fun tRe ->
+        checkExpr env componentTy imExpr |> Result.map (fun tIm ->
+            mkTyped (TExprComplexLit (tRe, tIm)) (IRTScalar cet)))
 
     // Default: synthesize, then unify. This is the path that handles variables,
     // function calls, complex expressions, and any case the special-cases miss.
@@ -3592,41 +3839,41 @@ and checkDecl (env: TypeEnv) (decl: Decl) : TypeResult<TypedDecl * TypeEnv> =
     | DeclFunction funcDecl -> checkFunctionDecl env funcDecl
 
     | DeclType typeDecl ->
-        let env' = registerTypeDecl env typeDecl
-        let ttd =
-            match typeDecl with
-            | TyDeclAlias (name, typeParams, body) ->
-                // Distinguish index-type aliases (Idx, SymIdx, ..., EnumIdx) from
-                // ordinary type aliases. Both register in env.TypeDefs the same
-                // way; the typed-AST distinction is what survives into Lowering
-                // and CodeGen, where index aliases need different rendering than
-                // generic IRType aliases (using Name = int64_t; rather than a
-                // promote<>-based template expansion).
-                match Map.tryFind name env'.TypeDefs with
-                | Some (TDIIndexType (_, idx, _)) ->
-                    TTDIndexType (name, idx)
-                | Some (TDIEnumIdx (_, idx, values)) ->
-                    TTDEnumIdx (name, idx, values)
-                | _ ->
-                    TTDAlias (name, typeParams, lowerTypeExpr env' body)
-            | TyDeclStruct (name, typeParams, fields, invariant) ->
-                let resolvedFields = fields |> List.map (fun f -> (f.Name, lowerTypeExpr env' f.Type))
-                let tInvariant =
-                    invariant |> Option.bind (fun expr ->
-                        // Bind field names for invariant checking
-                        let mutable invEnv = env'
-                        for f in fields do
-                            let fId = invEnv.Builder.FreshId()
-                            invEnv <- bindVarSimple f.Name fId (lowerTypeExpr env' f.Type) invEnv
-                        match inferExpr invEnv expr with
-                        | Ok tE -> Some tE
-                        | Error _ -> None)
-                TTDStruct (name, typeParams, resolvedFields, tInvariant)
-            | TyDeclSum (name, typeParams, variants) ->
-                let resolvedVariants = variants |> List.map (fun v ->
-                    (v.Name, v.Data |> Option.map (lowerTypeExpr env')))
-                TTDVariant (name, typeParams, resolvedVariants)
-        Ok (TDeclType ttd, env')
+        registerTypeDecl env typeDecl |> Result.bind (fun env' ->
+            let ttd =
+                match typeDecl with
+                | TyDeclAlias (name, typeParams, body) ->
+                    // Distinguish index-type aliases (Idx, SymIdx, ..., EnumIdx) from
+                    // ordinary type aliases. Both register in env.TypeDefs the same
+                    // way; the typed-AST distinction is what survives into Lowering
+                    // and CodeGen, where index aliases need different rendering than
+                    // generic IRType aliases (using Name = int64_t; rather than a
+                    // promote<>-based template expansion).
+                    match Map.tryFind name env'.TypeDefs with
+                    | Some (TDIIndexType (_, idx, _)) ->
+                        TTDIndexType (name, idx)
+                    | Some (TDIEnumIdx (_, idx, values, _)) ->
+                        TTDEnumIdx (name, idx, values)
+                    | _ ->
+                        TTDAlias (name, typeParams, lowerTypeExpr env' body)
+                | TyDeclStruct (name, typeParams, fields, invariant) ->
+                    let resolvedFields = fields |> List.map (fun f -> (f.Name, lowerTypeExpr env' f.Type))
+                    let tInvariant =
+                        invariant |> Option.bind (fun expr ->
+                            // Bind field names for invariant checking
+                            let mutable invEnv = env'
+                            for f in fields do
+                                let fId = invEnv.Builder.FreshId()
+                                invEnv <- bindVarSimple f.Name fId (lowerTypeExpr env' f.Type) invEnv
+                            match inferExpr invEnv expr with
+                            | Ok tE -> Some tE
+                            | Error _ -> None)
+                    TTDStruct (name, typeParams, resolvedFields, tInvariant)
+                | TyDeclSum (name, typeParams, variants) ->
+                    let resolvedVariants = variants |> List.map (fun v ->
+                        (v.Name, v.Data |> Option.map (lowerTypeExpr env')))
+                    TTDVariant (name, typeParams, resolvedVariants)
+            Ok (TDeclType ttd, env'))
 
     | DeclInterface ifaceDecl -> 
         let env' = { env with Interfaces = Map.add ifaceDecl.Name ifaceDecl env.Interfaces }
@@ -3739,6 +3986,14 @@ and checkDecl (env: TypeEnv) (decl: Decl) : TypeResult<TypedDecl * TypeEnv> =
                         e <- { e with VariantTags = Map.add kv.Key kv.Value e.VariantTags }
                     for kv in exports.Units do
                         e <- { e with Units = Map.add kv.Key kv.Value e.Units }
+                    // Static functions: register under alias.name. Bare-name
+                    // references to these would need parser support for
+                    // dotted names in eta-reduced DepIdx position; for now,
+                    // qualified-import use sites of static functions only
+                    // work in expression contexts where dotted names parse.
+                    for kv in exports.StaticFunctions do
+                        let qualName = sprintf "%s.%s" alias kv.Key
+                        e <- { e with StaticFunctions = Map.add qualName kv.Value e.StaticFunctions }
                     e
                 | ImportSelective names ->
                     let mutable e = env
@@ -3748,6 +4003,10 @@ and checkDecl (env: TypeEnv) (decl: Decl) : TypeResult<TypedDecl * TypeEnv> =
                         | None -> ()
                         match Map.tryFind name exports.TypeDefs with
                         | Some tdi -> e <- registerTypeDef name tdi e
+                        | None -> ()
+                        match Map.tryFind name exports.StaticFunctions with
+                        | Some fd ->
+                            e <- { e with StaticFunctions = Map.add name fd e.StaticFunctions }
                         | None -> ()
                     e
             | None ->
@@ -3793,8 +4052,31 @@ and checkFunctionDecl (env: TypeEnv) (funcDecl: FunctionDecl) : TypeResult<Typed
         { Name = p.Name; Type = paramTypes.[i]; Index = i; VarId = varId } : TypedParam)
 
     let result =
-        inferExpr bodyEnv funcDecl.Body |> Result.bind (fun tBody ->
-            let _ = unify env.Subst tBody.Type retType
+        // When a return type is annotated, drive the body bidirectionally
+        // via checkExpr. This pushes the expected type into literal and
+        // tuple-constructor positions so that e.g. `(4, 1)` retypes its
+        // elements against `(StationIdx, Idx<3>)` (giving the literals
+        // their named-index types directly) rather than synthesizing
+        // `(Int64, Int64)` and then failing to unify against the named
+        // tuple. Without an annotation, fall back to plain inference —
+        // there's no expectation to push.
+        let bodyResult =
+            match funcDecl.ReturnType with
+            | Some _ -> checkExpr bodyEnv retType funcDecl.Body
+            | None -> inferExpr bodyEnv funcDecl.Body
+        bodyResult |> Result.bind (fun tBody ->
+            // Belt-and-suspenders: even after checkExpr, run unify on the
+            // synthesized body type vs the annotation. checkExpr's fall-
+            // through case (line ~3082) is `inferExpr + unify` already,
+            // and the special-cased shapes (literals, tuples) build a
+            // TypedExpr whose .Type matches the expected type by
+            // construction — so this unify is mostly a no-op when
+            // checkExpr was used. When the bodyResult came from inferExpr
+            // (no annotation), retType is itself a fresh inference var
+            // and the unify just binds it. Either way we propagate the
+            // result so genuine mismatches surface here rather than
+            // exploding at codegen.
+            unify env.Subst tBody.Type retType |> Result.bind (fun () ->
             let commGroups =
                 extractCommGroups
                     (funcDecl.Params |> List.map (fun p -> { Name = p.Name; Type = p.Type } : LambdaParam))
@@ -3808,69 +4090,82 @@ and checkFunctionDecl (env: TypeEnv) (funcDecl: FunctionDecl) : TypeResult<Typed
                 WhereClause = funcDecl.WhereClause; Body = tBody
                 CommGroups = commGroups; IsStatic = funcDecl.IsStatic
             }
-            Ok (TDeclFunction tf, envWithFunc))
+            Ok (TDeclFunction tf, envWithFunc)))
 
     env.Subst.PopTypeVarScope(savedScope)
     result
 
-and registerTypeDecl (env: TypeEnv) (typeDecl: TypeDecl) : TypeEnv =
+and registerTypeDecl (env: TypeEnv) (typeDecl: TypeDecl) : TypeResult<TypeEnv> =
     match typeDecl with
     | TyDeclAlias (name, _typeParams, body) ->
-        let defInfo =
+        // Chase one level of alias indirection: if the body is `TyNamed n`
+        // where n is itself a registered TDIIndexType or TDIEnumIdx alias,
+        // use n's stored body for our own registration. Each registration
+        // step already stores its resolved body, so chains of any depth
+        // flatten without transitive walking at lookup time.
+        //
+        // Without this, `type B = A` (where A is an index or enum alias)
+        // falls to the generic `_ -> TDIAlias` branch and B is never
+        // recognized as an index/enum alias — using B in array index lists
+        // or foreign-key element positions then fails with placeholder
+        // records.
+        let chasedBody =
             match body with
+            | TyNamed (referencedName, _) ->
+                match Map.tryFind referencedName env.TypeDefs with
+                | Some (TDIIndexType (_, _, refBody)) -> refBody
+                | Some (TDIEnumIdx (_, _, _, refBody)) -> refBody
+                | _ -> body
+            | _ -> body
+        let defInfoResult =
+            match chasedBody with
             | TyIdx _ | TySymIdx _ | TyAntisymIdx _ | TyHermitianIdx _ | TyBoundedIdx _ ->
-                // Static index types: override Tag with the alias name. The
-                // alias name is the nominative identity used by ETIndexRef in
-                // foreign-key element types — codegen renders these aliases
-                // directly (e.g. `using StationIdx = int64_t;`).
-                let idx = lowerIndexType env 0 body
-                TDIIndexType (name, { idx with Tag = Some name }, body)
+                let idx = lowerIndexType env 0 chasedBody
+                Ok (TDIIndexType (name, { idx with Tag = Some name }, chasedBody))
             | TyDepIdx _ | TyRaggedIdx _ | TyRaggedIdxOpaque ->
-                // Runtime index types: preserve the structural Tag set by
-                // lowerIndexType (`__raggedidx`, `__depidx_inner`, etc.).
-                // Codegen predicates like isRaggedArrayType match on these
-                // strings; overriding with the alias name would break ragged
-                // detection through alias indirection. The alias name still
-                // appears in the cpp output via the standalone typedef path.
-                //
-                // The body is stored alongside the placeholder idx so that
-                // lowerIndexTypeList can re-walk the original AST for types
-                // (notably TyDepIdx) whose correct expansion is multi-record
-                // and can't fit in lowerIndexType's single-record signature.
-                let idx = lowerIndexType env 0 body
-                TDIIndexType (name, idx, body)
+                let idx = lowerIndexType env 0 chasedBody
+                Ok (TDIIndexType (name, idx, chasedBody))
             | TyEnumIdx valuesExpr ->
-                // Static-evaluate the array literal to extract int64 values
-                let values =
+                // Static-evaluate the array literal to extract values. Each
+                // element must be either an int literal (with optional negation)
+                // or a string literal. Mixed kinds are a type error — the two
+                // backings (int64_t vs std::string) cannot share one EnumIdx.
+                let raw =
                     match valuesExpr with
                     | ExprArrayLit elems ->
                         elems |> List.choose (fun e ->
                             match e with
-                            | ExprLit (LitInt n) -> Some n
-                            | ExprUnaryOp (OpNeg, ExprLit (LitInt n)) -> Some (-n)
+                            | ExprLit (LitInt n) -> Some (IR.EVInt n)
+                            | ExprUnaryOp (OpNeg, ExprLit (LitInt n)) -> Some (IR.EVInt (-n))
+                            | ExprLit (LitString s) -> Some (IR.EVString s)
                             | _ -> None)
                     | _ -> []
-                let extent = int64 values.Length
-                let idx = {
-                    Id = env.Builder.FreshId(); Arity = 1
-                    Extent = IRLit (IRLitInt extent)
-                    Symmetry = SymNone; Tag = Some name
-                    Kind = SDimension; Dependencies = []
-                }
-                TDIEnumIdx (name, idx, values)
-            | _ -> TDIAlias (lowerTypeExpr env body)
-        registerTypeDef name defInfo env
+                let hasInt = raw |> List.exists (function IR.EVInt _ -> true | _ -> false)
+                let hasString = raw |> List.exists (function IR.EVString _ -> true | _ -> false)
+                if hasInt && hasString then
+                    Error (Other (sprintf "EnumIdx '%s' has mixed value kinds: integer and string literals in the same EnumIdx<[...]> aren't allowed. The runtime backing must be one or the other (int64_t or std::string)." name))
+                else
+                    let extent = int64 raw.Length
+                    let idx = {
+                        Id = env.Builder.FreshId(); Arity = 1
+                        Extent = IRLit (IRLitInt extent)
+                        Symmetry = SymNone; Tag = Some name
+                        Kind = SDimension; Dependencies = []
+                    }
+                    Ok (TDIEnumIdx (name, idx, raw, chasedBody))
+            | _ -> Ok (TDIAlias (lowerTypeExpr env body))
+        defInfoResult |> Result.map (fun defInfo -> registerTypeDef name defInfo env)
 
     | TyDeclStruct (name, typeParams, fields, _invariant) ->
         let fieldTypes = fields |> List.map (fun f -> (f.Name, lowerTypeExpr env f.Type))
-        registerTypeDef name (TDIStruct (name, typeParams, fieldTypes)) env
+        Ok (registerTypeDef name (TDIStruct (name, typeParams, fieldTypes)) env)
 
     | TyDeclSum (name, typeParams, variants) ->
         let variantTypes = variants |> List.map (fun v ->
             (v.Name, v.Data |> Option.map (lowerTypeExpr env)))
         let env' = registerTypeDef name (TDIVariant (name, typeParams, variantTypes)) env
-        variants |> List.fold (fun e v ->
-            registerVariantTag v.Name name (v.Data |> Option.map (lowerTypeExpr env)) e) env'
+        Ok (variants |> List.fold (fun e v ->
+            registerVariantTag v.Name name (v.Data |> Option.map (lowerTypeExpr env)) e) env')
 
 // ============================================================================
 // 11b. Zonking — Final Type Resolution
@@ -3886,7 +4181,13 @@ and registerTypeDecl (env: TypeEnv) (typeDecl: TypeDecl) : TypeEnv =
 let rec zonkType (subst: Subst) (ty: IRType) : IRType =
     let resolved = subst.Resolve ty
     match resolved with
-    | IRTInfer _ -> IRTScalar ETFloat64  // Unsolved — default
+    | IRTInfer n ->
+        // Function-boundary HM type variables survive zonking — IR-phase
+        // monomorphization will substitute them at call sites. Genuinely
+        // unresolved (non-boundary) inference vars still default to Float64
+        // for backwards compatibility with underconstrained local lets.
+        if subst.IsPolymorphicId(n) then resolved
+        else IRTScalar ETFloat64
     | IRTScalar _ | IRTUnit | IRTNat _ | IRTNamed _ -> resolved
     | IRTArray arr ->
         // Phase B2: ElemType is IRType — must zonk it too.
@@ -3962,6 +4263,7 @@ let rec zonkExpr (subst: Subst) (expr: TypedExpr) : TypedExpr =
         | TExprField (obj, fld, idx) -> TExprField (z obj, fld, idx)
         // Collections
         | TExprTuple es -> TExprTuple (zs es)
+        | TExprComplexLit (re, im) -> TExprComplexLit (z re, z im)
         | TExprArrayLit (es, arrTy) -> TExprArrayLit (zs es, arrTy)
         | TExprZip es -> TExprZip (zs es)
         | TExprStack es -> TExprStack (zs es)
@@ -4078,6 +4380,79 @@ let zonkModule (subst: Subst) (modul: TypedModule) : TypedModule =
 // 12. Module and Program
 // ============================================================================
 
+// ============================================================================
+// 11c. Type expression pre-validation
+// ============================================================================
+// Walks every TypeExpr in a module looking for inline `EnumIdx<[...]>` with
+// mixed value kinds (ints and strings in the same list). The aliased case
+// `type X = EnumIdx<[1, "two"]>` is caught by registerTypeDecl's per-decl
+// validation; this pre-pass covers the inline cases that the aliased check
+// can't see, e.g. `let x: Array<EnumIdx<[1, "two"]> like ...> = ...`.
+
+let private isMixedEnumIdxValues (valuesExpr: Expr) : bool =
+    match valuesExpr with
+    | ExprArrayLit elems ->
+        let isInt e =
+            match e with
+            | ExprLit (LitInt _) | ExprUnaryOp (OpNeg, ExprLit (LitInt _)) -> true
+            | _ -> false
+        let isString e = match e with ExprLit (LitString _) -> true | _ -> false
+        let hasInt = elems |> List.exists isInt
+        let hasString = elems |> List.exists isString
+        hasInt && hasString
+    | _ -> false
+
+let rec private walkTypeExprForMixedEnumIdx (ty: TypeExpr) : Expr list =
+    let here =
+        match ty with
+        | TyEnumIdx v when isMixedEnumIdxValues v -> [v]
+        | _ -> []
+    let children =
+        match ty with
+        | TyArray (elem, idxs) ->
+            walkTypeExprForMixedEnumIdx elem @ (idxs |> List.collect walkTypeExprForMixedEnumIdx)
+        | TyAbstractArray (elem, _, _) -> walkTypeExprForMixedEnumIdx elem
+        | TyFunc (args, ret) ->
+            (args |> List.collect walkTypeExprForMixedEnumIdx) @ walkTypeExprForMixedEnumIdx ret
+        | TyTuple ts -> ts |> List.collect walkTypeExprForMixedEnumIdx
+        | TyDepIdx (outer, _, body) ->
+            walkTypeExprForMixedEnumIdx outer @ walkTypeExprForMixedEnumIdx body
+        | TyConstrained (inner, _) -> walkTypeExprForMixedEnumIdx inner
+        | TyPoly inner -> walkTypeExprForMixedEnumIdx inner
+        | TyNamed (_, args) -> args |> List.collect walkTypeExprForMixedEnumIdx
+        | TyEquivIdx (_, g, r) ->
+            walkTypeExprForMixedEnumIdx g @ walkTypeExprForMixedEnumIdx r
+        | _ -> []
+    here @ children
+
+/// Find all mixed-value TyEnumIdx inside a single declaration. Returns the
+/// list of offending valuesExpr nodes (one per occurrence). The caller
+/// converts each into a TypeError with the decl's span.
+let collectMixedEnumIdxInDecl (decl: Decl) : Expr list =
+    let walkOpt = function Some t -> walkTypeExprForMixedEnumIdx t | None -> []
+    match decl with
+    | DeclLet binding | DeclStatic binding ->
+        walkOpt binding.Type
+    | DeclFunction f ->
+        (f.Params |> List.collect (fun p -> walkOpt p.Type))
+        @ walkOpt f.ReturnType
+    | DeclType (TyDeclAlias (_, _, body)) ->
+        // The TyDeclAlias body when itself a TyEnumIdx is caught by
+        // registerTypeDecl. We still walk deeper into the body for nested
+        // inline forms (e.g., `type X = Array<EnumIdx<[1, "x"]> like ...>`).
+        match body with
+        | TyEnumIdx _ -> []  // already handled at the alias site
+        | _ -> walkTypeExprForMixedEnumIdx body
+    | DeclType (TyDeclStruct (_, _, fields, _)) ->
+        fields |> List.collect (fun f -> walkTypeExprForMixedEnumIdx f.Type)
+    | DeclType (TyDeclSum (_, _, variants)) ->
+        variants |> List.collect (fun v -> walkOpt v.Data)
+    | DeclImpl impl ->
+        impl.Methods |> List.collect (fun m ->
+            (m.Params |> List.collect (fun p -> walkOpt p.Type))
+            @ walkOpt m.ReturnType)
+    | DeclInterface _ | DeclImport _ | DeclUnit _ -> []
+
 let checkModule (env: TypeEnv) (modul: ModuleDecl) : TypedModule * TypeEnv * CompileError list =
     // Pre-pass: register static functions and static values with placeholder types
     // so forward references and mutual recursion resolve correctly.
@@ -4092,7 +4467,10 @@ let checkModule (env: TypeEnv) (modul: ModuleDecl) : TypedModule * TypeEnv * Com
                               | None -> e.Subst.Fresh()
                 let funcType = IRTFunc (paramTypes, retType)
                 let funcVarId = e.Builder.FreshId()
-                bindVarSimple funcDecl.Name funcVarId funcType e
+                let e' = bindVarSimple funcDecl.Name funcVarId funcType e
+                // Stash the AST so lowerIndexTypeList can inline the body when
+                // this function appears in an eta-reduced DepIdx position.
+                { e' with StaticFunctions = Map.add funcDecl.Name funcDecl e'.StaticFunctions }
             | DeclStatic binding ->
                 let name = match binding.Pattern with PatVar n -> n | _ -> "_"
                 let varId = e.Builder.FreshId()
@@ -4104,6 +4482,17 @@ let checkModule (env: TypeEnv) (modul: ModuleDecl) : TypedModule * TypeEnv * Com
     let mutable errors = []
     
     for d in modul.Decls do
+        // Pre-validation: inline TyEnumIdx<[mixed values]> occurrences. The
+        // alias-site check in registerTypeDecl catches `type X = EnumIdx<[...]>`
+        // declarations but not inline embeddings like `let x: Array<EnumIdx<[1,
+        // "two"]> like ...> = ...`. Each finding becomes an error attached to
+        // the decl's span.
+        let mixedFindings = collectMixedEnumIdxInDecl d.Value
+        for _ in mixedFindings do
+            let err = Other "Inline EnumIdx<[...]> has mixed value kinds (integer and string literals in the same list). The runtime backing must be one or the other (int64_t or std::string)."
+            let ce = locateError d.Span currentEnv err
+            errors <- ce :: errors
+
         let declName =
             match d.Value with
             | DeclLet b -> sprintf "in let binding '%s'" (match b.Pattern with PatVar n -> n | _ -> "_")
@@ -4149,6 +4538,7 @@ let checkProgram (program: Program) : TypedProgram * IRBuilder * CompileError li
             TypeDefs = finalEnv.TypeDefs |> Map.filter (fun k _ -> not (k.Contains(".")))
             VariantTags = finalEnv.VariantTags
             Units = finalEnv.Units
+            StaticFunctions = finalEnv.StaticFunctions |> Map.filter (fun k _ -> not (k.Contains(".")))
         }
         moduleExports <- Map.add moduleName export moduleExports
     ({ Modules = List.rev modules }, env.Builder, allErrors)

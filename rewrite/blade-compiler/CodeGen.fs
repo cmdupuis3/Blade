@@ -120,6 +120,7 @@ let rec collectVarRefs (expr: IRExpr) : Set<IRId> =
     | IRApp (func, args, _) -> 
         Set.unionMany (collectVarRefs func :: List.map collectVarRefs args)
     | IRTuple exprs -> Set.unionMany (List.map collectVarRefs exprs)
+    | IRComplex (re, im) -> Set.union (collectVarRefs re) (collectVarRefs im)
     | IRTupleProj (e, _, _) -> collectVarRefs e
     | IRArrayLit (exprs, _) -> Set.unionMany (List.map collectVarRefs exprs)
     | IRIndex (arr, indices, _) -> 
@@ -186,6 +187,7 @@ let rec inferExprType (expr: IRExpr) : IRType =
     | IRLit (IRLitInt _) -> IRTScalar ETInt64
     | IRLit (IRLitFloat _) -> IRTScalar ETFloat64
     | IRLit (IRLitBool _) -> IRTScalar ETBool
+    | IRLit (IRLitString _) -> IRTScalar ETString
     | IRLit IRLitUnit -> IRTUnit
     | IRBinOp (_, op, left, right) ->
         match op with
@@ -207,6 +209,13 @@ let rec inferExprType (expr: IRExpr) : IRType =
         let retType = inferExprType info.Body
         IRTFunc (argTypes, retType)
     | IRTuple exprs -> IRTTuple (exprs |> List.map inferExprType)
+    | IRComplex (re, _) ->
+        // Complex type derived from component width: Float32 → Complex64,
+        // Float64 → Complex128. Reports as a scalar (NOT a tuple) — that's
+        // the whole point of having a separate IRComplex node.
+        match inferExprType re with
+        | IRTScalar ETFloat32 -> IRTScalar ETComplex64
+        | _ -> IRTScalar ETComplex128
     | IRTupleProj (e, i, isFlat) ->
         let parentTy = inferExprType e
         if isFlat then
@@ -263,33 +272,22 @@ let rec inferExprType (expr: IRExpr) : IRType =
         // struct or the field isn't found — same robustness fallback as
         // the IR-side liftInferType.
         //
-        // v24d-1 fallback: if obj's inferred type isn't IRTNamed (e.g.,
-        // the IRVar carries an unresolved IRTInfer that didn't get unified
-        // upstream), scan all structs in the cache for this field name.
-        // If it appears in exactly one struct, use that struct's field
-        // type. Mirrors what an IDE's "find symbol" would do.
-        let directLookup =
-            match inferExprType obj with
-            | IRTNamed structName ->
-                match codegenStructFieldsCache.TryGetValue(structName) with
-                | true, fields ->
-                    fields |> List.tryFind (fun (n, _) -> n = field) |> Option.map snd
-                | false, _ -> None
-            | _ -> None
-        match directLookup with
-        | Some ty -> ty
-        | None ->
-            // Scan: collect field types matching `field` across all structs
-            let matches =
-                codegenStructFieldsCache
-                |> Seq.choose (fun kvp ->
-                    kvp.Value 
-                    |> List.tryFind (fun (n, _) -> n = field) 
-                    |> Option.map snd)
-                |> List.ofSeq
-            match matches with
-            | [singleTy] -> singleTy
-            | _ -> IRTUnit
+        // The v24d-1 scan fallback (which searched all structs for matching
+        // field names when obj's type wasn't IRTNamed) was removed after
+        // probe testing confirmed the type-recovery pipeline always
+        // produces IRTNamed for valid struct field access. If a future
+        // regression ever leaks a non-IRTNamed obj here, the result type
+        // will be IRTUnit and the binding will surface as a codegen error
+        // downstream — preferable to silent recovery via name-based scan.
+        match inferExprType obj with
+        | IRTNamed structName ->
+            match codegenStructFieldsCache.TryGetValue(structName) with
+            | true, fields ->
+                match fields |> List.tryFind (fun (n, _) -> n = field) |> Option.map snd with
+                | Some ty -> ty
+                | None -> IRTUnit
+            | false, _ -> IRTUnit
+        | _ -> IRTUnit
     | IRFunctorMap (f, c) ->
         // f <$> c: return type is f's return type
         match inferExprType f with
@@ -343,6 +341,9 @@ let primTypeToCpp = function
     | ETUnit -> "void"
     | ETString -> "std::string"
     | ETIndexRef name -> name
+    // Anonymous index types collapse to int64_t at codegen — the
+    // runtime backing for any index value.
+    | ETAnonIdx _ -> "int64_t"
 
 /// Get rank (total dimensions) from array type
 let arrayRank (arr: IRArrayType) = 
@@ -445,6 +446,26 @@ let unaryOpToCpp = function
     | IRNeg -> "-"
     | IRNot -> "!"
 
+/// Quote a Blade string value as a C++ string literal. Escapes the minimal
+/// set that would otherwise break the surrounding "..." token: backslash,
+/// double-quote, and the four common control characters. Other characters
+/// pass through, including UTF-8 multibyte sequences (which are valid as
+/// raw bytes inside a C++ "..." literal).
+let escapeStringLit (s: string) : string =
+    let sb = System.Text.StringBuilder()
+    sb.Append('"') |> ignore
+    for c in s do
+        match c with
+        | '\\' -> sb.Append("\\\\") |> ignore
+        | '"'  -> sb.Append("\\\"") |> ignore
+        | '\n' -> sb.Append("\\n") |> ignore
+        | '\r' -> sb.Append("\\r") |> ignore
+        | '\t' -> sb.Append("\\t") |> ignore
+        | '\000' -> sb.Append("\\0") |> ignore
+        | _ -> sb.Append(c) |> ignore
+    sb.Append('"') |> ignore
+    sb.ToString()
+
 /// Simplified exprToCpp that doesn't recurse into complex IR nodes
 /// Used for kernel bodies in inline generation
 let rec exprToCppSimple (names: Map<IRId, string>) (expr: IRExpr) : string =
@@ -452,6 +473,7 @@ let rec exprToCppSimple (names: Map<IRId, string>) (expr: IRExpr) : string =
     | IRLit (IRLitInt n) -> sprintf "%dL" n
     | IRLit (IRLitFloat f) -> sprintf "%g" f
     | IRLit (IRLitBool b) -> if b then "true" else "false"
+    | IRLit (IRLitString s) -> sprintf "std::string(%s)" (escapeStringLit s)
     | IRLit IRLitUnit -> "((void)0)"
     | IRVar (id, _) -> Map.tryFind id names |> Option.defaultValue (sprintf "__v%d" id)
     | IRParam (name, _, _) -> name
@@ -471,6 +493,7 @@ let litToCpp (lit: IRLit) : string =
     | IRLitInt n -> sprintf "%dL" n
     | IRLitFloat f -> sprintf "%g" f
     | IRLitBool b -> if b then "true" else "false"
+    | IRLitString s -> sprintf "std::string(%s)" (escapeStringLit s)
     | IRLitUnit -> "((void)0)"  // Valid C++ no-op; should be elided by callers
 
 /// Detect whether an IRArrayType represents a ragged array (any RaggedIdx
@@ -555,6 +578,16 @@ let rec exprToCpp (names: Map<IRId, string>) (expr: IRExpr) : string =
             (exprToCpp names elseBr)
     | IRTuple exprs ->
         sprintf "std::make_tuple(%s)" (exprs |> List.map (exprToCpp names) |> String.concat ", ")
+    | IRComplex (re, im) ->
+        // Determine width from the component type. checkExpr enforces
+        // that Complex128 components are Float64 and Complex64 are
+        // Float32, so we inspect either component (they match) and pick
+        // the corresponding C++ template instantiation.
+        let cppType =
+            match inferExprType re with
+            | IRTScalar ETFloat32 -> "std::complex<float>"
+            | _ -> "std::complex<double>"  // Float64 default
+        sprintf "%s(%s, %s)" cppType (exprToCpp names re) (exprToCpp names im)
     | IRTupleProj (e, i, isFlat) ->
         if not isFlat then
             sprintf "std::get<%d>(%s)" i (exprToCpp names e)
@@ -943,7 +976,7 @@ let rec exprToCpp (names: Map<IRId, string>) (expr: IRExpr) : string =
         let zeroStr =
             match inferExprType body with
             | IRTScalar ETBool -> "false"
-            | IRTScalar ETInt64 | IRTScalar ETInt32 -> "0L"
+            | IRTScalar ETInt64 | IRTScalar ETInt32 | IRTScalar (ETAnonIdx _) -> "0L"
             | _ -> "0.0"
         sprintf "(%s ? %s : %s)" condStr bodyStr zeroStr
     | IRCompose (f, g) ->
@@ -981,8 +1014,23 @@ let rec exprToCpp (names: Map<IRId, string>) (expr: IRExpr) : string =
         exprError "opaque-extent marker reached expression rendering — kernel-param sub-array was not bound to a concrete extent at the peel point (codegen routing bug)"
     | other -> exprError (sprintf "unsupported IR node: %s" (other.GetType().Name))
 
-/// Generate inline combinator application as an IIFE expression
-/// This is used when L <@> f appears in expression context (not as a top-level binding)
+/// Generate inline combinator application as an IIFE expression.
+/// This is used when L <@> f appears in expression context (not as a let
+/// binding's RHS or a function-body return). The let-binding and return
+/// cases route through genApplyCombinator (the statement form) which uses
+/// the full LoopNestCodeGen machinery and handles every shape uniformly.
+///
+/// LIMITATION (carried forward from the original implementation): this
+/// function only supports the 2-array Cartesian-sum-reduce shape inline.
+/// Other shapes (1-array, 3+ arrays, array output, anything with
+/// commutativity/Reynolds/co-iteration) emit a BLADE_CODEGEN_ERROR sentinel
+/// and crash the C++ build. The principled fix is to make this a thin
+/// wrapper around genApplyCombinator's statement output:
+///   `[&]() { <statements>; return <name>; }()`.
+/// That delegation is deferred — no current test exercises an inline
+/// non-2-array combinator, so the cleanup waits for one. Bindings and
+/// returns already go through genApplyCombinator, which is where the real
+/// machinery lives.
 and genApplyCombinatorExpr (names: Map<IRId, string>) (info: ApplyInfo) : string =
     // Extract array info
     let arrayNames = 
@@ -1281,6 +1329,7 @@ let rec canonicalKey (nameMap: Map<int, string>) (expr: IRExpr) : string =
         | IRLitInt n -> string n
         | IRLitFloat f -> sprintf "%g" f
         | IRLitBool b -> if b then "true" else "false"
+        | IRLitString s -> sprintf "\"%s\"" s
         | IRLitUnit -> "()"
     | IRBinOp (mode, op, l, r) when isCommutativeOp op && isAssociativeOp op ->
         let operands = flattenAssocOp mode op expr
@@ -1308,6 +1357,8 @@ let rec canonicalKey (nameMap: Map<int, string>) (expr: IRExpr) : string =
     | IRTuple elems ->
         let ek = elems |> List.map (canonicalKey nameMap) |> String.concat ","
         sprintf "(tuple %s)" ek
+    | IRComplex (re, im) ->
+        sprintf "(complex %s %s)" (canonicalKey nameMap re) (canonicalKey nameMap im)
     | IRFieldAccess (obj, field) ->
         sprintf "(field %s %s)" (canonicalKey nameMap obj) field
     | IRStructLit (name, fields) ->
@@ -1478,22 +1529,39 @@ let genLoopNest (codeGen: LoopNestCodeGen) (outerNames: Map<int, string>) (inden
         codeGen.Captures
         |> List.fold (fun acc c -> Map.add c.Id c.Name acc) nameMap
     
-    // Generate kernel assignment (with Reynolds permutation sum if applicable)
-    let outputIdx = 
-        codeGen.Bindings 
-        |> List.map (fun b -> sprintf "[%s]" b.IndexName)
-        |> String.concat ""
-    
+    // Generate kernel assignment (with Reynolds permutation sum if applicable).
+    // The shape of the assignment depends on output type:
+    //   - Array output: indexed slot assignment, `name[i][j]... = kernelBody;`.
+    //     Each loop binding contributes one bracketed index. This is the standard
+    //     case for `method_for(...) <@> kernel` returning a tensor.
+    //   - Scalar output: sum accumulation, `name += kernelBody;`. The loop nest
+    //     still iterates over input dimensions, but the kernel result is summed
+    //     into a scalar accumulator declared by the caller (genApplyCombinator).
+    //     Used when the function's return type is scalar even though the
+    //     `<@>` kernel produces a per-iteration value (the Cartesian-sum-reduce
+    //     pattern that the old hand-written IIFE handled for the 2-array case).
+    let outputIdx =
+        match codeGen.OutputType with
+        | IRTScalar _ -> ""
+        | _ ->
+            codeGen.Bindings
+            |> List.map (fun b -> sprintf "[%s]" b.IndexName)
+            |> String.concat ""
+    let assignOp =
+        match codeGen.OutputType with
+        | IRTScalar _ -> "+="
+        | _ -> "="
+
     let reynoldsResult = genKernelExprWithReynolds codeGen.KernelExpr codeGen.KernelParams codeGen.HasReynolds codeGen.IsAntisymmetric nameMap paramFinalNames
     if codeGen.HasReynolds && reynoldsResult.UniqueTerms < reynoldsResult.TotalPerms then
         lines <- lines @ [ind depth + sprintf "// Reynolds: %d/%d perms unique (dedup %dx)" reynoldsResult.UniqueTerms reynoldsResult.TotalPerms (reynoldsResult.TotalPerms / max 1 reynoldsResult.UniqueTerms)]
-    lines <- lines @ [ind depth + sprintf "%s%s = %s;" codeGen.OutputName outputIdx reynoldsResult.CppExpr]
-    
+    lines <- lines @ [ind depth + sprintf "%s%s %s %s;" codeGen.OutputName outputIdx assignOp reynoldsResult.CppExpr]
+
     // Close all loops
     for _ in codeGen.Bindings do
         depth <- depth - 1
         lines <- lines @ [ind depth + "}"]
-    
+
     lines
 
 
@@ -1586,6 +1654,7 @@ let genIncludes () : string list =
      "#include <chrono>"
      "#include <algorithm>"  // std::stable_sort (used by sort())
      "#include <numeric>"    // std::iota (used by sort())
+     "#include <unordered_map>"  // group_keys Case 3 (dynamic ngroups via hash discovery)
      "// Note: OpenMP disabled for portability"
      "// #include <omp.h>"
      "#include \"nested_array_utilities.cpp\""
@@ -1597,275 +1666,55 @@ let genIncludes () : string list =
      "#define TIME_DIFF std::chrono::duration_cast<std::chrono::nanoseconds>(end - start).count()"
      ""]
 
-/// Generate the runtime library as an embedded string (for self-contained output)
-/// Generate the runtime header file content (for separate file)
+// ============================================================================
+// C++ runtime headers
+// ============================================================================
+//
+// The Blade C++ runtime lives in cpp/*.hpp at the source root and is read
+// from disk at codegen time, not embedded in the F# binary as string
+// literals. Blade.fsproj copies the cpp/ directory into the build output
+// via <CopyToOutputDirectory>, so AppContext.BaseDirectory + "cpp" resolves
+// to the correct location regardless of where dotnet run is invoked from.
+//
+// The generated C++ test output picks up the headers when Main.fs writes
+// them into each test's output directory alongside the .cpp file (the
+// existing pattern; see Main.fs's writes of headerFile / arrayTypesHeaderFile).
+// g++ then resolves `#include "nested_array_utilities.hpp"` relative to
+// the .cpp file's directory — no -I flag needed, no build-output paths
+// leaked into the C++ compile line.
+
+/// Resolve the path of a runtime header file shipped in the cpp/ directory
+/// next to the compiler binary. Used by both genRuntimeHeader and
+/// genRuntimeArrayTypesHeader; centralized here so the AppContext.BaseDirectory
+/// and "cpp" subpath assumptions live in one place.
+let private cppRuntimeHeaderPath (filename: string) : string =
+    System.IO.Path.Combine(System.AppContext.BaseDirectory, "cpp", filename)
+
+/// Read a Blade C++ runtime header from disk. Fails loudly if the build
+/// hasn't copied cpp/ into the output directory — this is a configuration
+/// error rather than a compiler bug, so the message points at .fsproj.
+let private readCppRuntimeHeader (filename: string) : string =
+    let path = cppRuntimeHeaderPath filename
+    if not (System.IO.File.Exists path) then
+        failwithf
+            "C++ runtime header not found at: %s\n\
+             The build should copy cpp/%s into the output directory.\n\
+             Check that Blade.fsproj contains a <None Include=\"cpp/%s\">\n\
+             item with <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>."
+            path filename filename
+    System.IO.File.ReadAllText path
+
+/// Generate the runtime header file content (read from cpp/nested_array_utilities.hpp).
+/// Main.fs writes the result alongside each test's generated .cpp so
+/// `#include "nested_array_utilities.hpp"` resolves at g++ time.
 let genRuntimeHeader () : string =
-    """#pragma once
-// nested_array_utilities.hpp
-// Blade DSL Runtime Support Library
+    readCppRuntimeHeader "nested_array_utilities.hpp"
 
-#include <algorithm>
-#include <cstddef>
-#include <type_traits>
-
-namespace nested_array_utilities {
-
-    template<typename TYPE>
-    constexpr const size_t get_rank() {
-        if constexpr (std::is_pointer<TYPE>::value) {
-            return 1 + get_rank<typename std::remove_pointer<TYPE>::type>();
-        } else {
-            return 0;
-        }
-    }
-
-    template<typename TYPE, const size_t rank, const size_t depth = 0>
-    constexpr auto promote_impl() {
-        if constexpr (depth < rank) {
-            return promote_impl<typename std::add_pointer<TYPE>::type, rank, depth + 1>();
-        } else if constexpr (depth == rank) {
-            TYPE dummy = {0};
-            return dummy;
-        } else {
-            return;
-        }
-    }
-
-    template<typename TYPE, const size_t rank, const size_t depth = 0>
-    class promote {
-    public:
-        typedef decltype(promote_impl<TYPE, rank>()) type;
-    };
-
-    template<typename TYPE, const size_t SYMM[] = nullptr, const size_t DEPTH = 0>
-    constexpr TYPE allocate(const size_t extents[], const size_t lastIndex = 0) {
-        typedef typename std::remove_pointer<TYPE>::type DTYPE;
-        TYPE array;
-
-        if constexpr ((bool)SYMM && DEPTH > 0 && SYMM[DEPTH-1] == SYMM[DEPTH]) {
-            array = new DTYPE[extents[DEPTH] - lastIndex];
-            if constexpr (std::is_pointer<DTYPE>::value) {
-                for (size_t i = 0; i < extents[DEPTH] - lastIndex; i++) {
-                    if constexpr ((bool)SYMM && SYMM[DEPTH] == SYMM[DEPTH + 1]) {
-                        array[i] = allocate<DTYPE, SYMM, DEPTH + 1>(extents, i + lastIndex);
-                    } else {
-                        array[i] = allocate<DTYPE, SYMM, DEPTH + 1>(extents);
-                    }
-                }
-            }
-        } else {
-            array = new DTYPE[extents[DEPTH]];
-            if constexpr (std::is_pointer<DTYPE>::value) {
-                for (size_t i = 0; i < extents[DEPTH]; i++) {
-                    if constexpr ((bool)SYMM && SYMM[DEPTH] == SYMM[DEPTH + 1]) {
-                        array[i] = allocate<DTYPE, SYMM, DEPTH + 1>(extents, i);
-                    } else {
-                        array[i] = allocate<DTYPE, SYMM, DEPTH + 1>(extents);
-                    }
-                }
-            }
-        }
-        return array;
-    }
-
-    template<typename TYPE, const size_t SYMM[] = nullptr, const size_t DEPTH = 0>
-    constexpr void fill_random(TYPE array_in, const size_t extents[], int mod_in, size_t lastIndex = 0) {
-        typedef typename std::remove_pointer<TYPE>::type DTYPE;
-
-        if constexpr ((bool)SYMM && DEPTH > 0 && SYMM[DEPTH - 1] == SYMM[DEPTH]) {
-            if constexpr (std::is_pointer<DTYPE>::value) {
-                for (size_t i = 0; i < extents[DEPTH] - lastIndex; i++) {
-                    if constexpr ((bool)SYMM && SYMM[DEPTH] == SYMM[DEPTH + 1]) {
-                        fill_random<DTYPE, SYMM, DEPTH + 1>(array_in[i], extents, mod_in, i + lastIndex);
-                    } else {
-                        fill_random<DTYPE, SYMM, DEPTH + 1>(array_in[i], extents, mod_in);
-                    }
-                }
-            } else {
-                for (size_t i = 0; i < extents[DEPTH] - lastIndex; i++) {
-                    array_in[i] = rand() % mod_in;
-                }
-            }
-        } else {
-            if constexpr (std::is_pointer<DTYPE>::value) {
-                for (size_t i = 0; i < extents[DEPTH]; i++) {
-                    if constexpr ((bool)SYMM && SYMM[DEPTH] == SYMM[DEPTH + 1]) {
-                        fill_random<DTYPE, SYMM, DEPTH + 1>(array_in[i], extents, mod_in, i);
-                    } else {
-                        fill_random<DTYPE, SYMM, DEPTH + 1>(array_in[i], extents, mod_in);
-                    }
-                }
-            } else {
-                for (size_t i = 0; i < extents[DEPTH]; i++) {
-                    array_in[i] = rand() % mod_in;
-                }
-            }
-        }
-    }
-
-    template<typename TYPE, const size_t SYMM[] = nullptr, const size_t DEPTH = 0>
-    constexpr void fill_value(TYPE array_in, const size_t extents[], 
-                              typename std::remove_pointer<TYPE>::type value, size_t lastIndex = 0) {
-        typedef typename std::remove_pointer<TYPE>::type DTYPE;
-
-        if constexpr ((bool)SYMM && DEPTH > 0 && SYMM[DEPTH - 1] == SYMM[DEPTH]) {
-            if constexpr (std::is_pointer<DTYPE>::value) {
-                for (size_t i = 0; i < extents[DEPTH] - lastIndex; i++) {
-                    if constexpr ((bool)SYMM && SYMM[DEPTH] == SYMM[DEPTH + 1]) {
-                        fill_value<DTYPE, SYMM, DEPTH + 1>(array_in[i], extents, value, i + lastIndex);
-                    } else {
-                        fill_value<DTYPE, SYMM, DEPTH + 1>(array_in[i], extents, value);
-                    }
-                }
-            } else {
-                for (size_t i = 0; i < extents[DEPTH] - lastIndex; i++) {
-                    array_in[i] = value;
-                }
-            }
-        } else {
-            if constexpr (std::is_pointer<DTYPE>::value) {
-                for (size_t i = 0; i < extents[DEPTH]; i++) {
-                    if constexpr ((bool)SYMM && SYMM[DEPTH] == SYMM[DEPTH + 1]) {
-                        fill_value<DTYPE, SYMM, DEPTH + 1>(array_in[i], extents, value, i);
-                    } else {
-                        fill_value<DTYPE, SYMM, DEPTH + 1>(array_in[i], extents, value);
-                    }
-                }
-            } else {
-                for (size_t i = 0; i < extents[DEPTH]; i++) {
-                    array_in[i] = value;
-                }
-            }
-        }
-    }
-
-
-    // =========================================================================
-    // Antisymmetric array support
-    // =========================================================================
-
-    // Allocate antisymmetric array: strict i < j, so n-1 elements in first row,
-    // n-2 in second, etc. Total: n(n-1)/2
-    // Same nested pointer structure as symmetric but with -1 offset at each level.
-    template<typename TYPE, const size_t DEPTH = 0>
-    constexpr TYPE allocate_antisym(const size_t extents[], const size_t lastIndex = 0) {
-        typedef typename std::remove_pointer<TYPE>::type DTYPE;
-        TYPE array;
-
-        if constexpr (DEPTH == 0) {
-            // Outermost: full extent (rows)
-            array = new DTYPE[extents[DEPTH]];
-            if constexpr (std::is_pointer<DTYPE>::value) {
-                for (size_t i = 0; i < extents[DEPTH]; i++) {
-                    array[i] = allocate_antisym<DTYPE, DEPTH + 1>(extents, i + 1);
-                }
-            }
-        } else {
-            // Inner: strict bound, extent - lastIndex elements
-            size_t len = (extents[DEPTH] > lastIndex) ? extents[DEPTH] - lastIndex : 0;
-            array = new DTYPE[len];
-            if constexpr (std::is_pointer<DTYPE>::value) {
-                for (size_t i = 0; i < len; i++) {
-                    array[i] = allocate_antisym<DTYPE, DEPTH + 1>(extents, i + lastIndex);
-                }
-            }
-        }
-        return array;
-    }
-
-    // =========================================================================
-    // Index canonicalization wrappers
-    // =========================================================================
-
-    // Symmetric canonicalization: (i,j) -> (min(i,j), max(i,j))
-    inline void sym_canonical(size_t i, size_t j, size_t& ci, size_t& cj) {
-        ci = (i <= j) ? i : j;
-        cj = (i <= j) ? j : i;
-    }
-
-    // Antisymmetric canonicalization: (i,j) -> (min(i,j), max(i,j)), sign = +1 or -1
-    // Returns -1 if swapped (odd permutation), +1 if not
-    inline int antisym_canonical(size_t i, size_t j, size_t& ci, size_t& cj) {
-        if (i < j) { ci = i; cj = j; return 1; }
-        else if (i > j) { ci = j; cj = i; return -1; }
-        else { ci = i; cj = j; return 0; }  // diagonal: value is zero
-    }
-
-    // Hermitian canonicalization: (i,j) -> (min(i,j), max(i,j)), needs_conj flag
-    // For Hermitian: A(i,j) = conj(A(j,i)), so access with j<i needs conjugation
-    inline bool hermitian_canonical(size_t i, size_t j, size_t& ci, size_t& cj) {
-        if (i <= j) { ci = i; cj = j; return false; }  // no conjugation needed
-        else { ci = j; cj = i; return true; }           // needs conjugation
-    }
-
-} // namespace nested_array_utilities
-
-using namespace nested_array_utilities;
-"""
-
-/// Generate the array-types runtime header (Phase D / v24 wrapper structs).
-/// Same pattern as genRuntimeHeader: emitted as a string at runtime, written
-/// to the test output dir alongside nested_array_utilities.hpp so the
-/// generated C++'s `#include "nested_array_types.hpp"` resolves.
+/// Generate the array-types runtime header (read from cpp/nested_array_types.hpp).
+/// Phase D / v24 wrapper structs (Array<T,N>, Ragged<T>). Same emission
+/// pattern as genRuntimeHeader.
 let genRuntimeArrayTypesHeader () : string =
-    """#pragma once
-// nested_array_types.hpp
-// Blade DSL: array wrapper types
-//
-// Replaces the bare-pointer-plus-sibling-globals representation with
-// uniform wrapper structs that bundle data + shape together. This lets
-// arrays be first-class values: passable to functions as a single
-// argument, storable as a struct field without losing shape information,
-// and uniformly indexed regardless of rectangular vs ragged shape.
-//
-// Phase D / v24 refactor:
-//   - Rectangular: `Array<T, N>` carries a `promote<T, N>::type data` and
-//     a `const size_t* extents` pointer (shape lives outside the wrapper
-//     since extents are typically static-constexpr globals).
-//   - Ragged: `Ragged<T>` carries `T** data` (row pointers), plus
-//     `extents`, `lens`, and `offsets` (CSR-style) for shape.
-//
-// Indexing: both wrappers expose `operator[]` that forwards to the
-// underlying data. So `arr[i]` works transparently.
-
-#include <cstddef>
-#include "nested_array_utilities.hpp"
-
-namespace nested_array_utilities {
-
-    template<typename T, size_t N>
-    struct Array {
-        typename promote<T, N>::type data;
-        const size_t* extents;
-        constexpr auto& operator[](size_t i) const { return data[i]; }
-        constexpr auto& operator[](size_t i) { return data[i]; }
-        // Implicit conversion to the underlying pointer type. Used by:
-        // (1) producer-side rank-N construction patterns where rank-(N-1)
-        //     wrappers are assigned into outer-array slots that have type
-        //     T* (e.g. result[i] = result_i in Sequence/Replicate codegen)
-        // (2) auto-print machinery that streams array-typed struct fields
-        //     and bindings through cout — the conversion lets std's
-        //     operator<<(const void*) overload print the pointer address
-        //     when no specialized printer exists.
-        // Removing this requires per-site changes (explicit .data on writes,
-        // smart printers that skip arrays) which is deferred.
-        constexpr operator typename promote<T, N>::type() const { return data; }
-    };
-
-    template<typename T>
-    struct Ragged {
-        T** data;
-        const size_t* extents;
-        const size_t* lens;
-        const size_t* offsets;
-        constexpr T* operator[](size_t i) const { return data[i]; }
-        constexpr T* operator[](size_t i) { return data[i]; }
-        // Implicit conversion to T**. Same rationale as Array<T,N> above.
-        constexpr operator T**() const { return data; }
-    };
-
-}  // namespace nested_array_utilities
-"""
+    readCppRuntimeHeader "nested_array_types.hpp"
 
 /// Generate includes that reference external header
 let genIncludesExternal () : string list =
@@ -1883,6 +1732,7 @@ let genIncludesExternal () : string list =
      "#include <set>"
      "#include <algorithm>"  // std::stable_sort (used by sort())
      "#include <numeric>"    // std::iota (used by sort())
+     "#include <unordered_map>"  // group_keys Case 3 (dynamic ngroups via hash discovery)
      "#include <omp.h>"
      "#include \"nested_array_utilities.hpp\""
      "#include \"nested_array_types.hpp\""
@@ -2205,27 +2055,19 @@ let genScalarBinding (ctx: CodeGenContext) (name: string) (value: IRExpr) (ty: I
             let inferred = inferExprType value
             if inferred = IRTUnit then ty else inferred
         | t -> t
-    // v24d-1 last-resort: for shape-bearing expressions (IRFieldAccess of
-    // an array-typed field, IRVar to a wrapper, etc.), if every type-
-    // inference path returned IRTUnit but C++ would still see a usable
-    // wrapper at the RHS, fall back to `auto <name> = <expr>;`. This works
-    // because the RHS IS a wrapper (Array<T,N> or Ragged<T>) at C++ level
-    // — auto deduces the wrapper type. Downstream consumers reading
-    // `<name>.extents[d]` etc. work transparently.
-    let producesWrapperShape =
-        match value with
-        | IRFieldAccess _ | IRVar _ | IRMask _ | IRSort _ | IRIntersect _ | IRUnion _ -> true
-        | _ -> false
+    // The v24d-1 auto-fallback (which emitted `auto <name> = <expr>;` when
+    // a binding's resolvedTy was IRTUnit and the RHS was a shape-bearing
+    // expression like IRMask/IRSort/IRVar/IRFieldAccess/IRIntersect/IRUnion)
+    // was removed after probe testing confirmed those RHS shapes always
+    // resolve to a non-IRTUnit type by this point. If a future regression
+    // ever reaches this branch with a shape-bearing IRTUnit binding, the
+    // expression-statement form below would produce invalid C++ — that's
+    // intentional: a regression should surface as a compile error rather
+    // than be papered over with auto-deduction.
     match resolvedTy with
     | IRTUnit ->
         if isUnitExpr value then 
             []
-        elif producesWrapperShape then
-            // Last-resort fallback: emit `auto` so C++ deduces the wrapper
-            // type from the RHS expression. This keeps the binding usable
-            // even when our internal type-inference pipeline lost the type.
-            let valueStr = exprToCppCtx ctx value
-            [sprintf "%sauto %s = %s;" ind name valueStr]
         else
             // Genuinely unit-valued: emit as expression statement
             let valueStr = exprToCppCtx ctx value
@@ -2241,11 +2083,17 @@ let genScalarBinding (ctx: CodeGenContext) (name: string) (value: IRExpr) (ty: I
         // IRArrayLit (via genArrayLiteral, but those go through a
         // different binding path), IRVar that resolves to a wrapper,
         // IRMask/IRSort/IRIntersect/IRUnion (via materializeInlineForm).
+        // IRApp is also included — function calls returning IRTArray emit
+        // `Array<T, N>` at the function-decl level (genFuncDef:4181), so
+        // their let-bound results must use the same wrapper type, not the
+        // raw `promote<T, N>::type` storage pointer that would lose
+        // `.extents` and silently decay to the data pointer.
         let producesWrapper =
             match value with
             | IRFieldAccess _ -> true
             | IRVar _ -> true                // assume wrapper (most producers migrated)
             | IRMask _ | IRSort _ | IRIntersect _ | IRUnion _ -> true
+            | IRApp _ -> true                // function-call returns wrapped Array
             | _ -> false
         let cppType =
             match resolvedTy with
@@ -2492,15 +2340,6 @@ let genApplyCombinator (ctx: CodeGenContext) (name: string) (info: ApplyInfo) (b
         // Build LoopNestCodeGen (handles both outer product and co-iteration)
         let codeGen = buildLoopNestCodeGen info arrayNames name builder
         
-        // Generate static declarations for symmetry vector
-        let symmVecName = sprintf "%s_symm" name
-        let symmVecDecl = 
-            if codeGen.OutputSymmVec.IsEmpty then
-                sprintf "%sstatic constexpr const size_t* %s = nullptr;" ind symmVecName
-            else
-                let values = codeGen.OutputSymmVec |> List.map string |> String.concat ", "
-                sprintf "%sstatic constexpr const size_t %s[%d] = {%s};" ind symmVecName codeGen.OutputSymmVec.Length values
-        
         // Get output rank and type info
         let outputRank = 
             match codeGen.OutputType with
@@ -2513,32 +2352,58 @@ let genApplyCombinator (ctx: CodeGenContext) (name: string) (info: ApplyInfo) (b
             | IRTArray arr -> elemTypeToCpp arr.ElemType
             | IRTScalar et -> primTypeToCpp et
             | t -> irTypeToCpp t
-        
-        // Generate extent computation
-        let extentsName = sprintf "%s_extents" name
-        let extentsDecl = sprintf "%ssize_t* %s = new size_t[%d];" ind extentsName outputRank
-        
-        // Fill extents from loop level info
-        let extentsFill = 
-            codeGen.Bindings |> List.mapi (fun i b ->
-                match b.Extent with
-                | IRLit (IRLitInt n) ->
-                    sprintf "%s%s[%d] = %s;" ind extentsName i (sprintf "%d" n)
-                | _ ->
-                    sprintf "%s%s[%d] = %s.extents[%d];" ind extentsName i b.ExtentArrayRef b.ExtentDimRef)
-        
-        // Generate allocation as Array<T,N> wrapper. extentsName here is
-        // a runtime-allocated `size_t*` (not a static constexpr); the
-        // wrapper just stores a pointer to it, so the same brace-init
-        // pattern works.
-        let allocDecl = sprintf "%sArray<%s, %d> %s = { allocate<typename promote<%s, %d>::type, %s>(%s), %s };" 
-                            ind outputElemType outputRank name outputElemType outputRank symmVecName extentsName extentsName
-        
-        // Generate loop nest
-        let loopCode = genLoopNest codeGen tempCtx.VarNames tempCtx.Indent
-        
-        // Combine all (prepend any pre-materialized temporaries)
-        preCode @ [symmVecDecl; ""; extentsDecl] @ extentsFill @ [""; allocDecl; ""] @ loopCode
+
+        // Branch on output shape. Array output gets the full ceremony
+        // (symmetry vector, extents declaration, allocation, then loop nest
+        // with indexed assignments). Scalar output gets a single scalar
+        // accumulator initialized to zero, then the same loop nest with
+        // `+=` accumulation (genLoopNest detects this via codeGen.OutputType).
+        // The scalar branch handles the Cartesian-sum-reduce pattern that
+        // the old hand-written 2-array IIFE special-cased — now generalized
+        // to any number of input arrays through the shared LoopNestCodeGen
+        // machinery (commutativity, Reynolds, etc. all carry through).
+        match codeGen.OutputType with
+        | IRTScalar _ ->
+            // Scalar accumulator: declare initialized to 0, then run the
+            // loop nest which accumulates into it via genLoopNest's `+=`.
+            let scalarDecl = sprintf "%s%s %s = 0;" ind outputElemType name
+            let loopCode = genLoopNest codeGen tempCtx.VarNames tempCtx.Indent
+            preCode @ [scalarDecl; ""] @ loopCode
+        | _ ->
+            // Array output: symmetry vector, extents, allocation, loop nest.
+            let symmVecName = sprintf "%s_symm" name
+            let symmVecDecl =
+                if codeGen.OutputSymmVec.IsEmpty then
+                    sprintf "%sstatic constexpr const size_t* %s = nullptr;" ind symmVecName
+                else
+                    let values = codeGen.OutputSymmVec |> List.map string |> String.concat ", "
+                    sprintf "%sstatic constexpr const size_t %s[%d] = {%s};" ind symmVecName codeGen.OutputSymmVec.Length values
+
+            // Generate extent computation
+            let extentsName = sprintf "%s_extents" name
+            let extentsDecl = sprintf "%ssize_t* %s = new size_t[%d];" ind extentsName outputRank
+
+            // Fill extents from loop level info
+            let extentsFill =
+                codeGen.Bindings |> List.mapi (fun i b ->
+                    match b.Extent with
+                    | IRLit (IRLitInt n) ->
+                        sprintf "%s%s[%d] = %s;" ind extentsName i (sprintf "%d" n)
+                    | _ ->
+                        sprintf "%s%s[%d] = %s.extents[%d];" ind extentsName i b.ExtentArrayRef b.ExtentDimRef)
+
+            // Generate allocation as Array<T,N> wrapper. extentsName here is
+            // a runtime-allocated `size_t*` (not a static constexpr); the
+            // wrapper just stores a pointer to it, so the same brace-init
+            // pattern works.
+            let allocDecl = sprintf "%sArray<%s, %d> %s = { allocate<typename promote<%s, %d>::type, %s>(%s), %s };"
+                                ind outputElemType outputRank name outputElemType outputRank symmVecName extentsName extentsName
+
+            // Generate loop nest
+            let loopCode = genLoopNest codeGen tempCtx.VarNames tempCtx.Indent
+
+            // Combine all (prepend any pre-materialized temporaries)
+            preCode @ [symmVecDecl; ""; extentsDecl] @ extentsFill @ [""; allocDecl; ""] @ loopCode
 
 /// Generate a fused loop nest with multiple kernel assignments.
 /// All kernels share the same loop structure (bindings), only differ in kernel expr and output.
@@ -2958,20 +2823,35 @@ let rec genBinding (ctx: CodeGenContext) (binding: IRBinding) (builder: IRBuilde
                 | _ -> None
             match ngroupsOpt, enumValuesOpt with
             | None, _ ->
-                // Case 3 — dynamic ngroups via max-key scan. Suitable when keys
-                // are positional integers but the bound isn't known statically
-                // (no ETIndexRef annotation). Hash-based discovery for arbitrary
-                // key spaces remains future work — this only handles dense [0..N).
+                // Case 3 — dynamic ngroups via hash discovery. Builds a key →
+                // bucket-index map in a single discovery pass, then reuses the
+                // map for counts/offsets/permutation. Bucket indices are
+                // assigned in first-occurrence order: the bucket for a key is
+                // its position in the sequence of distinct keys as encountered
+                // walking the input left-to-right.
+                //
+                // Replaces an earlier max-key-scan implementation that only
+                // worked for dense [0..N) keys; sparse keys (e.g. [101, 205,
+                // 307]) caused max-scan to allocate one bucket per integer in
+                // [0..max], almost all empty, with the wrong semantics.
+                //
+                // For monotonic dense keys (the historical Case 3 pattern,
+                // e.g. [0,1,2,0,1,2]) the hash and max-scan paths produce
+                // identical bucket orderings, so existing tests are unchanged.
+                // Non-monotonic dense keys differ (hash uses first-occurrence
+                // order, max-scan used numeric order); users who want numeric
+                // ordering should annotate with `Idx<N>` to opt into Case 1.
                 let code = keysElemErrCode @ [
-                    sprintf "%s// group_keys: dynamic ngroups (max-value scan, %s keys)" ind elemStr
+                    sprintf "%s// group_keys: dynamic ngroups (hash discovery, %s keys)" ind elemStr
+                    sprintf "%sstd::unordered_map<%s, size_t> %s__lookup;" ind elemStr name
                     sprintf "%ssize_t %s__ngroups = 0;" ind name
                     sprintf "%sfor (size_t __ki = 0; __ki < %s.extents[0]; __ki++) {" ind keysName
-                    sprintf "%s    size_t __v = (size_t)%s[__ki];" ind keysName
-                    sprintf "%s    if (__v + 1 > %s__ngroups) %s__ngroups = __v + 1;" ind name name
+                    sprintf "%s    %s __k = %s[__ki];" ind elemStr keysName
+                    sprintf "%s    if (%s__lookup.find(__k) == %s__lookup.end()) %s__lookup[__k] = %s__ngroups++;" ind name name name name
                     sprintf "%s}" ind
                     sprintf "%ssize_t* %s__counts = new size_t[%s__ngroups]();" ind name name
                     sprintf "%sfor (size_t __ki = 0; __ki < %s.extents[0]; __ki++) {" ind keysName
-                    sprintf "%s    %s__counts[(size_t)%s[__ki]]++;" ind name keysName
+                    sprintf "%s    %s__counts[%s__lookup[%s[__ki]]]++;" ind name name keysName
                     sprintf "%s}" ind
                     sprintf "%ssize_t* %s__offsets = new size_t[%s__ngroups + 1];" ind name name
                     sprintf "%s%s__offsets[0] = 0;" ind name
@@ -2979,7 +2859,7 @@ let rec genBinding (ctx: CodeGenContext) (binding: IRBinding) (builder: IRBuilde
                     sprintf "%ssize_t* %s__fill = new size_t[%s__ngroups]();" ind name name
                     sprintf "%ssize_t* %s__perm = new size_t[%s.extents[0]];" ind name keysName
                     sprintf "%sfor (size_t __ki = 0; __ki < %s.extents[0]; __ki++) {" ind keysName
-                    sprintf "%s    size_t __g = (size_t)%s[__ki];" ind keysName
+                    sprintf "%s    size_t __g = %s__lookup[%s[__ki]];" ind name keysName
                     sprintf "%s    %s__perm[%s__offsets[__g] + %s__fill[__g]++] = __ki;" ind name name name
                     sprintf "%s}" ind
                     sprintf "%ssize_t %s_extents[1] = {%s__ngroups};" ind name name
@@ -3011,11 +2891,20 @@ let rec genBinding (ctx: CodeGenContext) (binding: IRBinding) (builder: IRBuilde
                 let ctx' = addVarName binding.Id name ctx
                 (code, ctx')
             | Some ngroups, Some values ->
-                // Case 2: EnumIdx — keys are arbitrary integers; map them via inline dispatch.
+                // Case 2: EnumIdx — keys are arbitrary integers OR strings;
+                // map them via inline dispatch. Each value rendered to its
+                // C++ literal form (int suffix `LL` or `std::string("...")`).
+                // The comparison op is `==` for both kinds — works on
+                // int64_t and std::string in C++.
                 let bucketLambda =
+                    let renderVal v =
+                        match v with
+                        | IR.EVInt n -> sprintf "%dLL" n
+                        | IR.EVString s -> escapeStringLit s
                     let cases =
                         values
-                        |> List.mapi (fun i v -> sprintf "if (__v == %dLL) return (size_t)%d;" v i)
+                        |> List.mapi (fun i v ->
+                            sprintf "if (__v == %s) return (size_t)%d;" (renderVal v) i)
                         |> String.concat " "
                     sprintf "auto %s__bucket = [](%s __v) -> size_t { %s return (size_t)0; };" name elemStr cases
                 let code = keysElemErrCode @ [
@@ -3312,6 +3201,7 @@ let rec genBinding (ctx: CodeGenContext) (binding: IRBinding) (builder: IRBuilde
                             | IRApp (f, args, rt) -> IRApp (subst f, args |> List.map subst, rt)
                             | IRIndex (a, idxs, ty) -> IRIndex (subst a, idxs |> List.map subst, ty)
                             | IRTuple es -> IRTuple (es |> List.map subst)
+                            | IRComplex (re, im) -> IRComplex (subst re, subst im)
                             | IRTupleProj (e, i, flat) -> IRTupleProj (subst e, i, flat)
                             | IRFieldAccess (e, f) -> IRFieldAccess (subst e, f)
                             | IRLet (id, v, b) -> IRLet (id, subst v, subst b)
@@ -3650,7 +3540,7 @@ let rec genBinding (ctx: CodeGenContext) (binding: IRBinding) (builder: IRBuilde
                             let zeroVal =
                                 match inferExprType lInfo.Body with
                                 | IRTScalar ETBool -> IRLit (IRLitBool false)
-                                | IRTScalar ETInt64 | IRTScalar ETInt32 -> IRLit (IRLitInt 0L)
+                                | IRTScalar ETInt64 | IRTScalar ETInt32 | IRTScalar (ETAnonIdx _) -> IRLit (IRLitInt 0L)
                                 | _ -> IRLit (IRLitFloat 0.0)
                             IRLambda { lInfo with Body = IRIf (cond, lInfo.Body, zeroVal) }
                         | other -> other  // Can't wrap non-lambda kernels
@@ -3927,7 +3817,7 @@ let rec genBinding (ctx: CodeGenContext) (binding: IRBinding) (builder: IRBuilde
             let ctx' = addVarName binding.Id name ctx
             (code, ctx')
 
-    | IRTuple _ | IRFieldAccess _ | IRLit _ | IRBinOp _ | IRUnaryOp _ | IRIf _ | IRApp _ | IRParam _ | IRMatch _
+    | IRTuple _ | IRComplex _ | IRFieldAccess _ | IRLit _ | IRBinOp _ | IRUnaryOp _ | IRIf _ | IRApp _ | IRParam _ | IRMatch _
     | IRPure _ | IRIndex _ | IRExtent _ ->
         // Check if it's a tuple of deferred computations
         match binding.Value with
@@ -4151,8 +4041,25 @@ let genFuncBody (ctx: CodeGenContext) (builder: IRBuilder) (names: Map<IRId, str
     if isUnitExpr retExpr then
         stmts  // Void function: no return statement needed
     else
-        let retStr = exprToCpp currentNames retExpr
-        stmts @ [sprintf "%sreturn %s;" indent retStr]
+        // If the return expression is `compute(applyCombinator)`, synthesize
+        // an internal let binding so the statement-form genApplyCombinator
+        // emits the full sequence (extents/alloc + loop nest for array
+        // output, scalar accumulator + loop nest for scalar output) and we
+        // return the bound name. This unifies both shapes through the same
+        // LoopNestCodeGen machinery; without it, exprToCpp would route
+        // through the inline expression-form genApplyCombinatorExpr — which
+        // is still a hardcoded 2-array IIFE special case kept for inline
+        // expression contexts that lack a surrounding statement scope (a
+        // separate cleanup will fold that into a wrapper around this path).
+        match retExpr with
+        | IRCompute (IRApplyCombinator info) ->
+            let retVarName = sprintf "__ret%d" (builder.FreshId())
+            let bodyCtx = { ctx with VarNames = currentNames; Indent = ctx.Indent + 1 }
+            let combCode = genApplyCombinator bodyCtx retVarName info builder
+            stmts @ combCode @ [sprintf "%sreturn %s;" indent retVarName]
+        | _ ->
+            let retStr = exprToCpp currentNames retExpr
+            stmts @ [sprintf "%sreturn %s;" indent retStr]
 
 let genFuncDef (ctx: CodeGenContext) (builder: IRBuilder) (funcDef: IRFuncDef) : string list * CodeGenContext =
     let ind = indentStr ctx
@@ -4414,9 +4321,13 @@ let genTypeDefs (modul: IRModule) : string list =
             // The alias is transparent — int64_t-compatible — but makes generated
             // C++ self-documenting and leaves a hook for future strong typing.
             [sprintf "using %s = int64_t;" name; ""]
-        | IRTDEnumIdx (name, _, _) ->
-            // Same treatment for EnumIdx aliases.
-            [sprintf "using %s = int64_t;" name; ""]
+        | IRTDEnumIdx (name, _, values) ->
+            // EnumIdx alias: render as the underlying runtime type. All-int
+            // values → int64_t; all-string values → std::string. The chosen
+            // C++ type must match what the Case 2 reverse-lookup dispatch
+            // and any keys array stored under this type expect.
+            let underlying = IR.EnumValue.underlyingElemType values
+            [sprintf "using %s = %s;" name (primTypeToCpp underlying); ""]
     )
 
 /// Generate code to print a scalar value
@@ -4590,7 +4501,7 @@ let genPrintStatements (modul: IRModule) : string list =
         
         if isPrintable then
             match IR.stripUnits b.Type with
-            | IRTScalar (ETFloat64 | ETFloat32 | ETInt64 | ETInt32 | ETBool | ETIndexRef _) ->
+            | IRTScalar (ETFloat64 | ETFloat32 | ETInt64 | ETInt32 | ETBool | ETIndexRef _ | ETComplex64 | ETComplex128 | ETAnonIdx _ | ETString) ->
                 genPrintScalar b.Name
             | IRTArray arrType ->
                 // Phase D: arrays of named (struct) types — cout's operator<<

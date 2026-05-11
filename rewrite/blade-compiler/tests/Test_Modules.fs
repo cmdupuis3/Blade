@@ -187,6 +187,37 @@ let area = C.pi * square(5.0)
 """)
     ])
 
+let test88_crossModuleEtaDepIdx : string * (string * string) list =
+    ("Cross-module eta-reduced DepIdx",
+    // The triangular extent function lives in module Geometry; the array
+    // declaration referencing it via DepIdx eta-reduction lives in Main.
+    // The body `3 - i` is closed (no free identifiers besides the param),
+    // which is what the cross-module inlining round currently supports.
+    //
+    // Selective import (`from Geometry import tri_extent`) brings the
+    // function in under its bare name. Qualified import would parse the
+    // dotted name in expression position fine, but the eta-reduction
+    // position in `DepIdx<O, _>` only accepts a single TokIdent — qualified
+    // names there would need a parser extension, deferred.
+    [
+        ("Geometry", """
+module Geometry
+
+static function tri_extent(i: Int64) -> Int64 = 3 - i
+""");
+        ("Main", """
+module Main
+from Geometry import tri_extent
+
+let r: Array<Float64 like DepIdx<Idx<3>, tri_extent>> = [
+    [1.0, 2.0, 3.0],
+    [4.0, 5.0],
+    [6.0]
+]
+// EXPECT: r = [1, 2, 3, 4, 5, 6]
+""")
+    ])
+
 /// Single-file module tests
 let moduleTests = [
     ("Module Declaration", test53_moduleDecl)
@@ -203,4 +234,5 @@ let multiFileTests = [
     test85_selectiveImport
     test86_selectiveImportFunction
     test87_mixedImportStyles
+    test88_crossModuleEtaDepIdx
 ]

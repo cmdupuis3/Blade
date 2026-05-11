@@ -776,7 +776,7 @@ and parseInlineOrBlock (tokens: Token list) : ParseResult<Expr> =
         success expr remaining
 
 and parseAssignment (tokens: Token list) : ParseResult<Expr> =
-    parseNamedInfix tokens >>= fun left rest ->
+    parseTyped tokens >>= fun left rest ->
     match peek rest with
     | Some (TokOp "=") ->
         advance rest |> parseAssignment >>= fun right remaining ->
@@ -795,6 +795,23 @@ and parseAssignment (tokens: Token list) : ParseResult<Expr> =
         advance rest |> parseAssignment >>= fun right remaining ->
         success (ExprAssign (left, ExprBinOp (Elementwise, OpDiv, left, right))) remaining
     | _ -> success left rest
+
+/// Postfix type annotation: `expr : Type`
+/// Sits between parseAssignment and parseNamedInfix in the precedence chain.
+/// The cast binds tighter than `=` (so `x = e: T` parses as `x = (e: T)`)
+/// but looser than every operator below it (so `a + b : Int` parses as
+/// `(a + b) : Int`). The motivating use case is complex literal construction
+/// — `(re, im) : Complex128` — but the form is general; TypeCheck applies
+/// it to the surrounding expression and unifies the inferred type with
+/// the annotation, with a special case for Complex that recognizes a
+/// 2-tuple of float literals.
+and parseTyped (tokens: Token list) : ParseResult<Expr> =
+    parseNamedInfix tokens >>= fun expr rest ->
+    match peek rest with
+    | Some TokColon ->
+        advance rest |> parseTypeExpr >>= fun ty remaining ->
+        success (ExprTyped (expr, ty)) remaining
+    | _ -> success expr rest
 
 /// Named infix operators: a :name: b -> name(a, b)
 /// Lowest precedence, left-associative

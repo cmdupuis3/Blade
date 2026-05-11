@@ -38,10 +38,48 @@ function skew(A: Array<Float64 like Idx<n>>) -> Float64 = {
 // ============================================================================
 
 let test_hermitian_parse_type = """
-// Parse HermitianIdx in a function signature  
+// Parse HermitianIdx in a function signature. Hermitian arrays require
+// complex element types (the Hermitian property A[i,j] = conj(A[j,i])
+// is meaningful only over C), so signature uses Complex128 throughout
+// and body returns an explicit Complex128 zero literal via the postfix
+// type annotation form `(re, im) : Complex128`. Both components are
+// float-typed (decimal-point literals) per the design rule that complex
+// literals require explicit floating-point real/imaginary parts.
 function trace(H: Array<Complex128 like HermitianIdx<n>>) -> Complex128 = {
-    0.0
+    (0.0, 0.0) : Complex128
 }
+"""
+
+let test_complex_lit_basic = """
+// Complex128 literal construction via postfix type annotation.
+// `(re, im) : Complex128` — both components are float-typed; the
+// resulting value is a scalar Complex128, NOT a 2-tuple of doubles.
+let x = (1.0, 2.0) : Complex128
+let y = (3.0, 4.0) : Complex128
+// EXPECT: x = (1,2)
+// EXPECT: y = (3,4)
+"""
+
+let test_complex_lit_in_array = """
+// Array of Complex128 elements, each constructed via the literal form.
+// The array is rank-1 (Idx<3>) — Complex elements do NOT add a phantom
+// dimension. Runtime layout is std::complex<double>[3] = 3 elements,
+// each storing a (real, imag) pair internally; the array's rank stays 1.
+let arr: Array<Complex128 like Idx<3>> = [
+    (1.0, 0.0) : Complex128,
+    (0.0, 1.0) : Complex128,
+    (1.0, 1.0) : Complex128
+]
+// EXPECT: arr = [(1, 0), (0, 1), (1, 1)]
+"""
+
+let test_complex_lit_via_let_annotation = """
+// When a let binding has an explicit Complex128 annotation, the tuple
+// form (re, im) is recognized via bidirectional checkExpr without a
+// trailing : Complex128 cast. This exercises the same checkExpr rule
+// reached from a different entry point.
+let x: Complex128 = (5.0, -7.0)
+// EXPECT: x = (5,-7)
 """
 
 let test_hermitian_rectangular = """
@@ -413,12 +451,18 @@ let s = next_station(3)
 
 let test_idx_value_static_tuple_destructuring = """
 // Static tuple containing index types in `let static` destructuring:
-// permitted because the tuple is in static-context.
+// permitted because the tuple is in static-context. Observation of
+// destructured components is direct — no arithmetic, since arithmetic
+// on named index types is forbidden (per the formalism: index types are
+// nominal labels with no useful arithmetic semantics; for value-level
+// position arithmetic, use virtual array iteration; for new index types
+// derived from arithmetic, type-level construction is a separate
+// workstream).
 type StationIdx = Idx<6>
 static function lookup_pair() -> (StationIdx, Idx<3>) = (4, 1)
 let static (a, b) = lookup_pair()
-let r = a + b
-// EXPECT: r = 5
+let r = a
+// EXPECT: r = 4
 """
 
 let test_idx_value_alias_runtime_smoke = """
@@ -448,6 +492,65 @@ let r: Array<Float64 like Tri3> = [
 // EXPECT: r = [1, 2, 3, 4, 5, 6]
 """
 
+let test_idx_value_alias_chain_static = """
+// Chained static alias: type B = A where A is itself an index alias.
+// registerTypeDecl chases one level of TDIIndexType reference at
+// registration; B then behaves like a direct alias of Idx<6>, including
+// in foreign-key element-type position.
+type StationIdx = Idx<6>
+type RegionIdx = StationIdx
+let codes: Array<RegionIdx like Idx<3>> = [0, 1, 2]
+let v = codes(1)
+// EXPECT: v = 1
+"""
+
+let test_idx_value_alias_chain_enum = """
+// Chained EnumIdx alias: type B = A where A is itself an EnumIdx alias.
+// Same chase pattern as the static chain test, but resolving through
+// TDIEnumIdx (whose body field was added in this round). Without the
+// body, the chain falls through to TDIAlias and the array's element
+// type lookup misses the EnumIdx values list.
+type LandType = EnumIdx<[101, 205, 307]>
+type RegionCode = LandType
+let codes: Array<RegionCode like Idx<3>> = [101, 205, 307]
+let v = codes(1)
+// EXPECT: v = 205
+"""
+
+let test_idx_value_alias_chain_depidx = """
+// Chained runtime alias over DepIdx. After registration chase, TriCopy's
+// body is TyDepIdx (peeled from Tri3's stored body). lowerIndexTypeList
+// then re-expands to the proper outer + inner records when TriCopy is
+// used in an array index list.
+type Tri3 = DepIdx<Idx<3>, lambda(i) -> Idx<3 - i>>
+type TriCopy = Tri3
+let r: Array<Float64 like TriCopy> = [
+    [1.0, 2.0, 3.0],
+    [4.0, 5.0],
+    [6.0]
+]
+// EXPECT: r = [1, 2, 3, 4, 5, 6]
+"""
+
+let test_depidx_eta_reduced_value = """
+// Eta-reduced DepIdx — the named-function form. Semantically equivalent
+// to `DepIdx<Idx<3>, lambda(i) -> Idx<3 - i>>` (test_depidx_triangular_literal),
+// but with the per-row extent computed by a static function. The eta-
+// reduction inlines the function's body at the use site, substituting
+// the function's param with the outer iteration variable.
+//
+// The function uses Int64 throughout to avoid index-type coercion
+// concerns; the eta-reduction mechanism is type-agnostic and simply
+// extracts the body expression for substitution.
+static function tri_extent(i: Int64) -> Int64 = 3 - i
+let r: Array<Float64 like DepIdx<Idx<3>, tri_extent>> = [
+    [1.0, 2.0, 3.0],
+    [4.0, 5.0],
+    [6.0]
+]
+// EXPECT: r = [1, 2, 3, 4, 5, 6]
+"""
+
 
 /// Index type tests (AntisymIdx, HermitianIdx)
 let indexTypeTests = [
@@ -457,6 +560,9 @@ let indexTypeTests = [
     ("Block Return With Loop", test_block_return_with_loop)
     ("AntisymIdx Parse Type", test_antisym_parse_type)
     ("HermitianIdx Parse Type", test_hermitian_parse_type)
+    ("Complex Lit Basic", test_complex_lit_basic)
+    ("Complex Lit In Array", test_complex_lit_in_array)
+    ("Complex Lit Via Let Annotation", test_complex_lit_via_let_annotation)
     ("HermitianIdx Rectangular", test_hermitian_rectangular)
     ("DepIdx Parse Lambda", test_depidx_parse_lambda)
     ("DepIdx Parse Eta", test_depidx_parse_eta)
@@ -483,4 +589,8 @@ let indexTypeTests = [
     ("Idx Value Static Tuple Destructuring", test_idx_value_static_tuple_destructuring)
     ("Idx Value Alias Runtime Smoke", test_idx_value_alias_runtime_smoke)
     ("Idx Value Alias DepIdx", test_idx_value_alias_depidx)
+    ("Idx Value Alias Chain Static", test_idx_value_alias_chain_static)
+    ("Idx Value Alias Chain Enum", test_idx_value_alias_chain_enum)
+    ("Idx Value Alias Chain DepIdx", test_idx_value_alias_chain_depidx)
+    ("DepIdx Eta-Reduced Value", test_depidx_eta_reduced_value)
 ]

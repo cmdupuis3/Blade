@@ -1,34 +1,25 @@
 module Blade.Tests.InferenceProbes
 
 // ============================================================================
-// Phase 0 — Inference probes
+// Type-checking probes
 // ============================================================================
 //
-// These tests are deliberate probes of how Blade's typecheck/inference
-// machinery propagates (or fails to propagate) constraints into special
-// forms used in kernel-parameter contexts.
+// This file holds two related groups of tests, both exercising Blade's
+// type-checking pipeline rather than any particular language feature:
 //
-// They are EXPECTED TO FAIL until the broader inference refactor (Phase
-// 3 onward) is complete. Each probe targets a specific gap:
+//   1. Inference probes (display name "Inference: ..."). Originally written
+//      to surface gaps in how the typechecker propagated constraints into
+//      special forms (extents, mask, sort, reduce) when the kernel arg was
+//      unannotated. Most now pass — they document working behavior; the
+//      one rejection-style probe (Annotation Mismatch) is a regression
+//      guard that confirms a deliberate type clash still errors.
 //
-//   - Probes A/B/C: same Gap-1 pattern as reduce (special form inspects
-//     resolved type but doesn't drive unification when the arg is an
-//     unannotated kernel param).
-//
-//   - Probe D: tests Gap 2.5 — does the elem type chosen at reduce
-//     typecheck (currently defaults to Float64) actually flow correctly
-//     when the source data is non-Float64? Reveals whether buildApplyInfo
-//     needs to unify kernel param types with source per-row types.
-//
-//   - Probe E: directly tests Gap 2.5 by deliberately mismatching an
-//     annotated kernel-param elem type against the source's elem type.
-//     If this silently compiles, we have a silent miscompile latent in
-//     the language; if it errors, the unification is at least partly
-//     working somewhere.
-//
-//   - Probe F: control case — annotated extents on a kernel param.
-//     Should pass; if it doesn't, extents has more issues than just
-//     Gap 1.
+//   2. Validator probes (display name "Validator: ... (rejects)"). Each
+//      asserts that the IndexTypeValidator rejects a specific forbidden
+//      placement of an index type — as a regular function parameter, struct
+//      field, let-binding annotation, etc. All seven are expected to fail
+//      IR lowering with a specific validator error message; that's the
+//      pass criterion.
 // ============================================================================
 
 let probe_a_extents_unannotated = """
@@ -160,18 +151,38 @@ let lens: Array<Int64 like Idx<3>> = [3, 2, 1]
 static function f() -> RaggedIdx<lens> = lens(0)
 """
 
+let probe_v8_enumidx_mixed_values = """
+// EnumIdx with both integer and string literals in the same values list.
+// Surface intent is ambiguous (different runtime backings: int64_t vs
+// std::string), so it must be a type error at the alias declaration.
+type LandType = EnumIdx<[101, "urban", 307]>
+"""
+
+let probe_v9_enumidx_mixed_inline = """
+// Same kind of mixed-values rejection, but inline (no `type X = ...`).
+// Uses `Array<T like EnumIdx<[...]>>` — index domain position, which the
+// IndexTypeValidator permits. The mixed-values pre-pass then catches the
+// mixing. (Element position `Array<EnumIdx<[...]> like ...>` would trip
+// the validator first with "Anonymous index types cannot be used as an
+// array element type" — that path forces an alias which is already
+// covered by probe_v8.)
+let codes: Array<Float64 like EnumIdx<[1, "two"]>> = [1.0, 2.0]
+"""
+
 let inferenceProbes = [
-    ("Probe A: Extents Unannotated", probe_a_extents_unannotated)
-    ("Probe B: Mask Unannotated", probe_b_mask_unannotated)
-    ("Probe C: Sort Unannotated", probe_c_sort_unannotated)
-    ("Probe D: Reduce Int Source", probe_d_reduce_int_source)
-    ("Probe E: Annotated Mismatch", probe_e_annotated_mismatch)
-    ("Probe F: Extents Annotated (control)", probe_f_extents_annotated)
-    ("Probe V1: Anon Idx Regular Fn Param", probe_v1_anon_idx_regular_fn_param)
-    ("Probe V2: Aliased Idx Regular Fn Param", probe_v2_aliased_idx_regular_fn_param)
-    ("Probe V3: Anon Idx Struct Field", probe_v3_anon_idx_struct_field)
-    ("Probe V4: Anon Idx Let Binding", probe_v4_anon_idx_let_binding)
-    ("Probe V5: Anon Idx Static Fn Param", probe_v5_anon_idx_static_fn_param)
-    ("Probe V6: Anon Idx Array Elem Type", probe_v6_anon_idx_array_elem_type)
-    ("Probe V7: Runtime Idx Static Fn Return", probe_v7_runtime_idx_static_fn_return)
+    ("Inference: Unannotated Extents", probe_a_extents_unannotated)
+    ("Inference: Unannotated Mask", probe_b_mask_unannotated)
+    ("Inference: Unannotated Sort", probe_c_sort_unannotated)
+    ("Inference: Reduce Int Source", probe_d_reduce_int_source)
+    ("Inference: Annotation Mismatch (rejects)", probe_e_annotated_mismatch)
+    ("Inference: Annotated Extents", probe_f_extents_annotated)
+    ("Validator: Anon Idx As Fn Param (rejects)", probe_v1_anon_idx_regular_fn_param)
+    ("Validator: Aliased Idx As Fn Param (rejects)", probe_v2_aliased_idx_regular_fn_param)
+    ("Validator: Anon Idx As Struct Field (rejects)", probe_v3_anon_idx_struct_field)
+    ("Validator: Anon Idx As Let Annotation (rejects)", probe_v4_anon_idx_let_binding)
+    ("Validator: Anon Idx As Static Fn Param (rejects)", probe_v5_anon_idx_static_fn_param)
+    ("Validator: Anon Idx As Array Elem (rejects)", probe_v6_anon_idx_array_elem_type)
+    ("Validator: Runtime Idx As Static Return (rejects)", probe_v7_runtime_idx_static_fn_return)
+    ("Validator: EnumIdx Mixed Values (rejects)", probe_v8_enumidx_mixed_values)
+    ("Validator: EnumIdx Mixed Values Inline (rejects)", probe_v9_enumidx_mixed_inline)
 ]

@@ -44,6 +44,18 @@ namespace nested_array_utilities {
         // rank 1, it's a T&.
         constexpr auto& operator[](size_t i) const { return data[i]; }
         constexpr auto& operator[](size_t i) { return data[i]; }
+
+        // Implicit conversion to the underlying pointer type. Used by:
+        // (1) producer-side rank-N construction patterns where rank-(N-1)
+        //     wrappers are assigned into outer-array slots that have type
+        //     T* (e.g. result[i] = result_i in Sequence/Replicate codegen)
+        // (2) auto-print machinery that streams array-typed struct fields
+        //     and bindings through cout — the conversion lets std's
+        //     operator<<(const void*) overload print the pointer address
+        //     when no specialized printer exists.
+        // Removing this requires per-site changes (explicit .data on writes,
+        // smart printers that skip arrays) which is deferred.
+        constexpr operator typename promote<T, N>::type() const { return data; }
     };
 
     // Ragged array wrapper. Mirrors the existing CSR-style layout:
@@ -68,6 +80,9 @@ namespace nested_array_utilities {
 
         constexpr T* operator[](size_t i) const { return data[i]; }
         constexpr T* operator[](size_t i) { return data[i]; }
+
+        // Implicit conversion to T**. Same rationale as Array<T,N> above.
+        constexpr operator T**() const { return data; }
     };
 
 }  // namespace nested_array_utilities

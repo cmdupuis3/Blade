@@ -39,4 +39,20 @@
     <Compile Include="Main.fs" />
   </ItemGroup>
 
+  <!-- C++ runtime headers. Read at codegen time via AppContext.BaseDirectory.
+       PreserveNewest copies on first build and on file change. The Link
+       directive controls the destination subpath inside the output dir,
+       so headers end up at bin/<config>/net7.0/cpp/ regardless of where
+       dotnet run is invoked from. -->
+  <ItemGroup>
+    <None Include="cpp/nested_array_utilities.hpp">
+      <Link>cpp/nested_array_utilities.hpp</Link>
+      <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
+    </None>
+    <None Include="cpp/nested_array_types.hpp">
+      <Link>cpp/nested_array_types.hpp</Link>
+      <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
+    </None>
+  </ItemGroup>
+
 </Project>

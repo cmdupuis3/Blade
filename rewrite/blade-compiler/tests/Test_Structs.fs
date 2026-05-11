@@ -67,7 +67,7 @@ let x = Balanced { a = 3, b = 7, total = 99 }
 """
 
 let test_phaseD_podStructArray = """
-// Phase D probe: array of POD struct.
+// array of POD struct.
 // Struct has only primitive fields. Builds the array via literal,
 // reads back a single field for value-check.
 struct Particle {
@@ -84,7 +84,7 @@ let second_x = pts[1].x
 """
 
 let test_phaseD_podStructArrayPrint = """
-// Phase D probe: exercises per-field auto-print of POD struct array.
+// exercises per-field auto-print of POD struct array.
 // Validator can't parse [{x: 1, y: 2}, ...] as a float list, so the
 // EXPECT line tests a scalar derived from the array. The print codegen
 // runs as a side effect — if it fails to compile, the whole test
@@ -102,7 +102,7 @@ let sum_x = pts[0].x + pts[1].x
 """
 
 let test_phaseD_rank3Scalar = """
-// Phase D probe: rank-3 scalar array literal. Pre-generalization, the
+// rank-3 scalar array literal. Pre-generalization, the
 // init path emitted only a TODO comment and the array was uninitialized.
 // Now uses the recursive walker that handles arbitrary rank.
 let cube = [[[1.0, 2.0], [3.0, 4.0]], [[5.0, 6.0], [7.0, 8.0]]]
@@ -112,7 +112,7 @@ let v = cube[1][0][1]
 """
 
 let test_phaseD_rank3StructArray = """
-// Phase D probe: rank-3 array of POD struct. Tests the per-element path
+// rank-3 array of POD struct. Tests the per-element path
 // of the generalized walker, plus chained bracket indexing through three
 // levels.
 struct Particle {
@@ -134,7 +134,7 @@ let v = grid[1][0][1].y
 """
 
 let test_phaseD_arrayOfArrays = """
-// Phase D probe: explicit `Array<Array<T>>` syntax. Without
+// explicit `Array<Array<T>>` syntax. Without
 // type-level normalization at lowering, this would mis-allocate and
 // fail to compile (rank/dims mismatch in genArrayLiteral). With the
 // fix, it's flattened to the equivalent multi-Idx form and reuses the
@@ -149,7 +149,7 @@ let v = groups[1][0]
 """
 
 let test_phaseD_structWithArrayField = """
-// Phase D probe: struct with an array-typed field. Without lifting,
+// struct with an array-typed field. Without lifting,
 // `samples = [1.0, 2.0, 3.0]` inline as a struct field value would
 // fail at codegen — array literals are statement-level constructs
 // (need allocation), not inline expressions. The lift pass moves the
@@ -167,7 +167,7 @@ let s1 = t.samples[1]
 """
 
 let test_phaseD_inlineArrayLitInFuncArg = """
-// Phase D probe: inline array literal as a function argument. Tests
+// inline array literal as a function argument. Tests
 // the generalized lift — IRArrayLit appearing in IRApp args goes
 // through liftChildren -> liftChild, which now matches isInlineForm.
 // Pre-generalization, this would break because exprToCpp has no
@@ -180,7 +180,7 @@ let v = sumThree([10.0, 20.0, 30.0])
 """
 
 let test_phaseD_arrayOfStructsWithArrayField = """
-// Phase D probe (item 3 — combinations): array of structs, where the
+// array of structs, where the
 // struct has an array-typed field. Combines the v15-v20 work:
 //   - struct array allocation (v15)
 //   - bracket disambiguation (v15)
@@ -202,7 +202,7 @@ let v1 = arr[1].id
 """
 
 let test_phaseD_reduceOverStructArrayField = """
-// Phase D probe (companion-array gap): reduce over a struct's array field.
+// reduce over a struct's array field.
 // This requires:
 //   1. Lift hoists `t.samples` to a let-RHS so codegen has a name to attach
 //      a companion `_extents` to
@@ -219,6 +219,29 @@ let total = reduce(t.samples, (+))
 // EXPECT: total = 60
 """
 
+let test_phaseE_structWithStringField = """
+// Struct with a string field. Verifies several pieces:
+//   - "String" name in field type position resolves through TyNamed to
+//     IRTScalar ETString (was missing before; resolved alongside Layer 1)
+//   - Struct decl renders the field as std::string in the C++ struct
+//   - Struct construction emits .name = std::string("Alice") in the
+//     designated initializer
+//   - Field access p.name produces an std::string r-value usable for
+//     equality comparison against a string literal
+struct Person {
+    name: String,
+    age: Int64
+}
+let alice = Person { name = "Alice", age = 30 }
+let bob = Person { name = "Bob", age = 25 }
+let aliceMatch = if alice.name == "Alice" then 1 else 0
+let bobMatch = if bob.name == "Alice" then 1 else 0
+let ageSum = alice.age + bob.age
+// EXPECT: aliceMatch = 1
+// EXPECT: bobMatch = 0
+// EXPECT: ageSum = 55
+"""
+
 /// Struct tests
 let structTests = [
     ("Struct Declaration", test45_structDecl)
@@ -226,15 +249,16 @@ let structTests = [
     ("Struct Pattern", test47_structPattern)
     ("Struct Constraint Valid", test48_structConstraintValid)
     ("Struct Constraint Arithmetic", test49_structConstraintArith)
-    ("Phase D: POD Struct Array", test_phaseD_podStructArray)
-    ("Phase D: POD Struct Array Print", test_phaseD_podStructArrayPrint)
-    ("Phase D: Rank-3 Scalar Array", test_phaseD_rank3Scalar)
-    ("Phase D: Rank-3 Struct Array", test_phaseD_rank3StructArray)
-    ("Phase D: Array of Arrays", test_phaseD_arrayOfArrays)
-    ("Phase D: Struct With Array Field", test_phaseD_structWithArrayField)
-    ("Phase D: Inline ArrayLit In FuncArg", test_phaseD_inlineArrayLitInFuncArg)
-    ("Phase D: Array of Structs With Array Field", test_phaseD_arrayOfStructsWithArrayField)
-    ("Phase D: Reduce Over Struct Array Field", test_phaseD_reduceOverStructArrayField)
+    ("Struct Array Basic", test_phaseD_podStructArray)
+    ("Struct Array Print", test_phaseD_podStructArrayPrint)
+    ("Rank-3 Scalar Array", test_phaseD_rank3Scalar)
+    ("Rank-3 Struct Array", test_phaseD_rank3StructArray)
+    ("Nested Array Type", test_phaseD_arrayOfArrays)
+    ("Struct With Array Field", test_phaseD_structWithArrayField)
+    ("Inline Array Literal Arg", test_phaseD_inlineArrayLitInFuncArg)
+    ("Struct Array With Array Field", test_phaseD_arrayOfStructsWithArrayField)
+    ("Reduce Struct Array Field", test_phaseD_reduceOverStructArrayField)
+    ("Struct With String Field", test_phaseE_structWithStringField)
 ]
 
 /// Tests that should abort at runtime (constraint violation)
