@@ -58,6 +58,33 @@ namespace nested_array_utilities {
         constexpr operator typename promote<T, N>::type() const { return data; }
     };
 
+    // A single row of a Ragged array. Bundles a row pointer with its
+    // runtime length, so callers receiving a row can query `.len`
+    // without holding a reference back to the parent Ragged.
+    //
+    // Minimal by design: just operator[] for indexing into the row, plus
+    // an implicit decay to `T*` so existing code that consumes a row as
+    // a raw pointer (the historic Ragged::operator[] return type) keeps
+    // working without any callsite changes.
+    //
+    // Ownership / lifetime: `data` is a non-owning pointer into the
+    // parent Ragged's backing array; `len` is a copy of `lens[i]` at
+    // the time of construction. If the parent Ragged is mutated or
+    // destroyed, the row's pointers become dangling — same hazard as
+    // the previous `T*`-returning operator[].
+    template<typename T>
+    struct RaggedRow {
+        T* data;
+        size_t len;
+
+        constexpr T& operator[](size_t i) const { return data[i]; }
+        constexpr T& operator[](size_t i) { return data[i]; }
+
+        // Implicit decay to raw pointer. Preserves source compatibility
+        // with code written against the prior `Ragged::operator[] -> T*`.
+        constexpr operator T*() const { return data; }
+    };
+
     // Ragged array wrapper. Mirrors the existing CSR-style layout:
     //   - `data` is the row-pointer array (T**) — each row may have a
     //     different length.
@@ -68,9 +95,10 @@ namespace nested_array_utilities {
     //   - `offsets[i]` is the offset into the flat backing array where
     //     row i begins; `offsets[n]` is the total element count.
     //
-    // Indexing returns the i-th row pointer (T*). Caller can then index
-    // again via the returned pointer's [] (no bounds-checking; same as
-    // the bare-pointer behavior the wrapper replaces).
+    // Indexing returns a `RaggedRow<T>` carrying both the row pointer
+    // and its length. The wrapper implicitly converts to `T*` so callers
+    // expecting the prior raw-pointer return type still compile; new
+    // callers that want the row length can read it directly via `.len`.
     template<typename T>
     struct Ragged {
         T** data;
@@ -78,8 +106,8 @@ namespace nested_array_utilities {
         const size_t* lens;
         const size_t* offsets;
 
-        constexpr T* operator[](size_t i) const { return data[i]; }
-        constexpr T* operator[](size_t i) { return data[i]; }
+        constexpr RaggedRow<T> operator[](size_t i) const { return RaggedRow<T>{data[i], lens[i]}; }
+        constexpr RaggedRow<T> operator[](size_t i) { return RaggedRow<T>{data[i], lens[i]}; }
 
         // Implicit conversion to T**. Same rationale as Array<T,N> above.
         constexpr operator T**() const { return data; }

@@ -36,6 +36,10 @@
     <Compile Include="tests/Test_Units.fs" />
     <Compile Include="tests/Test_Sqlish.fs" />
     <Compile Include="tests/Test_InferenceProbes.fs" />
+    <Compile Include="tests/Test_FuncArrays.fs" />
+    <Compile Include="tests/Test_Normalize.fs" />
+    <Compile Include="tests/Test_Unify.fs" />
+    <Compile Include="tests/Test_ValidateArrow.fs" />
     <Compile Include="Main.fs" />
   </ItemGroup>
 

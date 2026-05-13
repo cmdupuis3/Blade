@@ -264,12 +264,7 @@ let ncFileToModule
     let dimsFields =
         file.Dims |> List.map (fun dim ->
             let idx = dimMap.[dim.Name]
-            let arrType = IRTArray {
-                ElemType = IRTScalar ETInt64
-                IndexTypes = [idx]
-                IsVirtual = false
-                Identity = Some (AIDVariable dim.Name)
-            }
+            let arrType = mkArrayArrow [idx] (IRTScalar ETInt64) (Some (AIDVariable dim.Name))
             (dim.Name, arrType))
 
     let dimsStruct = IRTDStruct("dims", dimsFields, None)
@@ -286,7 +281,7 @@ let ncFileToModule
         |> List.filter (not << isCoordinateVar)
         |> List.map (fun v ->
             let arrType = ncVarToArrayType dimMap v
-            (v.Name, IRTArray arrType))
+            (v.Name, mkArrayLike arrType))
 
     let varsStruct = IRTDStruct("vars", varsFields, None)
 

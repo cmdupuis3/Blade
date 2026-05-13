@@ -127,14 +127,14 @@ let rec lowerTypedExpr (env: TypedLowerEnv) (texpr: TypedExpr) : IRExpr =
     
     | TExprVar (name, varId, identity) ->
         // Variant constructors without payload (e.g. North) have type IRTNamed
-        // Variant constructors with payload (e.g. Some) have type IRTFunc([_], IRTNamed _)
+        // Variant constructors with payload (e.g. Some) have type FuncElem ([_], IRTNamed _)
         // Neither are bound in the lowering environment. Emit the name verbatim.
         let isVariantCtor =
             not (Map.containsKey name env.Variables) &&
             not (Map.containsKey name env.Functions) &&
             match texpr.Type with
             | IRTNamed _ -> true
-            | IRTFunc (_, IRTNamed _) -> true
+            | FuncElem (_, IRTNamed _) -> true
             | _ -> false
         if isVariantCtor then IRParam (name, 0, texpr.Type)
         else IRVar (varId, texpr.Type)
@@ -335,9 +335,9 @@ let rec lowerTypedExpr (env: TypedLowerEnv) (texpr: TypedExpr) : IRExpr =
         // Rank-N: emit a tuple of IRExtent (arr, i) for i in 0..N-1.
         let arr' = lowerTypedExpr env array
         match array.Type with
-        | IRTArray arrTy when arrTy.IndexTypes.Length = 1 ->
+        | ArrayElem arrTy when arrTy.IndexTypes.Length = 1 ->
             IRExtent (arr', 0)
-        | IRTArray arrTy ->
+        | ArrayElem arrTy ->
             let n = arrTy.IndexTypes.Length
             IRTuple (List.init n (fun i -> IRExtent (arr', i)))
         | _ ->
@@ -348,7 +348,8 @@ let rec lowerTypedExpr (env: TypedLowerEnv) (texpr: TypedExpr) : IRExpr =
     | TExprZero ->
         // Lower to type-appropriate zero literal based on resolved type
         match texpr.Type with
-        | IRTScalar ETInt32 | IRTScalar ETInt64 | IRTScalar (ETAnonIdx _) | IRTScalar (ETIndexRef _) -> IRLit (IRLitInt 0L)
+        | IRTScalar ETInt32 | IRTScalar ETInt64 -> IRLit (IRLitInt 0L)
+        | IRTIdxTagged (IRTScalar (ETInt32 | ETInt64), _) -> IRLit (IRLitInt 0L)
         | IRTScalar ETBool -> IRLit (IRLitBool false)
         | IRTScalar ETFloat32 | IRTScalar ETFloat64 -> IRLit (IRLitFloat 0.0)
         | IRTInfer _ -> IRLit (IRLitFloat 0.0)  // unresolved defaults to float
@@ -363,7 +364,7 @@ let rec lowerTypedExpr (env: TypedLowerEnv) (texpr: TypedExpr) : IRExpr =
     | TExprRank e ->
         // Resolve rank statically from the typed expression's type
         let rank = match e.Type with
-                   | IRTArray at -> at.IndexTypes |> List.sumBy (fun idx -> idx.Arity)
+                   | ArrayElem at -> at.IndexTypes |> List.sumBy (fun idx -> idx.Arity)
                    | _ -> 0
         IRLit (IRLitInt (int64 rank))
     
@@ -552,8 +553,8 @@ and lowerTypedBinOp env mode op l r leftExpr rightExpr resultType =
                     | OpEq | OpNeq | OpLt | OpLe | OpGt | OpGe
                     | OpAnd | OpOr -> true
                     | _ -> false
-    let leftIsArray = match leftExpr.Type with IRTArray _ -> true | _ -> false
-    let rightIsArray = match rightExpr.Type with IRTArray _ -> true | _ -> false
+    let leftIsArray = match leftExpr.Type with ArrayElem _ -> true | _ -> false
+    let rightIsArray = match rightExpr.Type with ArrayElem _ -> true | _ -> false
     
     if isArithOp && leftIsArray && rightIsArray then
         // Synthesize: object_for(lambda(x, y) -> x [op] y)(A, B)
@@ -571,12 +572,12 @@ and lowerTypedBinOp env mode op l r leftExpr rightExpr resultType =
         // separate cleanup.
         let elemTypeL =
             match leftExpr.Type with
-            | IRTArray a ->
+            | ArrayElem a ->
                 match a.ElemType with PrimElem et -> et | _ -> ETFloat64
             | _ -> ETFloat64
         let elemTypeR =
             match rightExpr.Type with
-            | IRTArray a ->
+            | ArrayElem a ->
                 match a.ElemType with PrimElem et -> et | _ -> ETFloat64
             | _ -> ETFloat64
         let aId = env.Builder.FreshId()
@@ -1110,7 +1111,14 @@ let lower (source: string) : Result<IRProgram, string> =
     match Blade.Parser.parseProgram source with
     | Ok program ->
         match Blade.TypeCheck.typeCheck program with
-        | Ok (typedProgram, builder) -> Ok (lowerTypedProgram typedProgram (Some program) builder)
+        | Ok (typedProgram, builder, warnings) ->
+            // Print TypeCheck warnings to stderr so the pipeline output
+            // (the IR program) stays clean. This is the lower-level entry
+            // point; the Main.fs runners surface warnings to stdout, but
+            // here we don't have a structured channel.
+            for w in warnings do
+                eprintfn "[TypeCheck Warning] %s" w
+            Ok (lowerTypedProgram typedProgram (Some program) builder)
         | Error errors -> 
             let msgs = errors |> List.map Blade.TypeCheck.formatCompileError
             Error (String.concat "\n" msgs)
@@ -1121,7 +1129,10 @@ let lowerMultiSource (sources: (string * string) list) : Result<IRProgram, strin
     match Blade.Parser.parseMultiSource sources with
     | Ok program ->
         match Blade.TypeCheck.typeCheck program with
-        | Ok (typedProgram, builder) -> Ok (lowerTypedProgram typedProgram (Some program) builder)
+        | Ok (typedProgram, builder, warnings) ->
+            for w in warnings do
+                eprintfn "[TypeCheck Warning] %s" w
+            Ok (lowerTypedProgram typedProgram (Some program) builder)
         | Error errors ->
             let msgs = errors |> List.map Blade.TypeCheck.formatCompileError
             Error (String.concat "\n" msgs)

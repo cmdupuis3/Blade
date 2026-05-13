@@ -36,6 +36,10 @@ open Blade.Tests.Static
 open Blade.Tests.Units
 open Blade.Tests.Sqlish
 open Blade.Tests.InferenceProbes
+open Blade.Tests.FuncArrays
+open Blade.Tests.Normalize
+open Blade.Tests.Unify
+open Blade.Tests.ValidateArrow
 // Aliases for cleaner code
 type Process = System.Diagnostics.Process
 type ProcessStartInfo = System.Diagnostics.ProcessStartInfo
@@ -501,8 +505,10 @@ let testTypeCheck source =
     | Ok program ->
         printfn "Parse: OK"
         match typeCheck program with
-        | Ok (typedProgram, _builder) ->
+        | Ok (typedProgram, _builder, warnings) ->
             printfn "TypeCheck: OK (%d modules)" typedProgram.Modules.Length
+            for w in warnings do
+                printfn "  [TypeCheck Warning] %s" w
             for m in typedProgram.Modules do
                 let moduleName = m.Name |> Option.map (String.concat ".") |> Option.defaultValue "<anonymous>"
                 printfn "  Module: %s" moduleName
@@ -584,6 +590,7 @@ let allTests =
     @ indexTypeTests @ mutabilityTests @ staticTests @ unitTests
     @ foreignKeyTests @ maskTests @ setOpTests @ groupByTests @ sortTests @ reduceTests @ extentsTests @ extentsMultiRankTests @ regressionTests @ sqlCombinedTests @ v24dProbes
     @ inferenceProbes
+    @ funcArrayTests
 
 // ============================================================================
 // Test Runner
@@ -718,73 +725,112 @@ let sanitizeFileName (name: string) : string =
         .Replace("*", "_")
         .Replace("?", "_")
 
+/// Lock serializing the F# pipeline (lower → IR → genCpp). The lower and
+/// codegen functions rely on module-level mutable struct-field caches
+/// (`structFieldsCache` in IR.fs, `codegenStructFieldsCache` in CodeGen.fs)
+/// that are not thread-safe. With `Array.Parallel.mapi` running tests
+/// concurrently, two tests' lift/codegen phases can race on these caches
+/// — e.g., two tests both define `struct Trace` with different fields,
+/// and test A's codegen reads a cache that test B has already overwritten
+/// with its version of Trace, so A's field lookups fail.
+///
+/// The fix is to serialize the F# pipeline phase per test. C++ compile
+/// and run (external subprocesses) remain outside the lock, so the
+/// expensive parallelism is preserved.
+///
+/// Proper long-term fix: thread the struct-field map through as an
+/// explicit parameter rather than module-level mutable state. That's
+/// a larger refactor touching every recursive type-inference call;
+/// deferred until needed.
+let private fsharpPipelineLock = obj()
+
+/// Encapsulates the result of the F# pipeline phase (parse → IR → C++
+/// source generation), so the caller can run compile/run outside the lock.
+type private FsPipelineOutcome =
+    | FpIRError of string
+    | FpIRValidationError of string list
+    | FpIROnly of IRProgram          // compileAndRun = false, no .cpp generated
+    | FpCppGenerated of IRProgram * string * string list  // ir, cppFile, codegenWarnings
+    | FpGenError of IRProgram * string  // ir was valid but codegen threw
+
+let private runFsharpPipelineLocked (source: string) (testName: string) (outputDir: string) (compileAndRun: bool) : FsPipelineOutcome =
+    lock fsharpPipelineLock (fun () ->
+        let irResult = lower source
+        match irResult with
+        | Error e -> FpIRError e
+        | Ok ir ->
+            match IR.validateIR ir with
+            | Error validationErrors -> FpIRValidationError validationErrors
+            | Ok ir ->
+                if not compileAndRun then FpIROnly ir
+                else
+                    let safeName = sanitizeFileName testName
+                    let cppFile = Path.Combine(outputDir, safeName + ".cpp")
+                    try
+                        let (cppCode, codegenWarnings) = CodeGen.genSelfContainedProgramFromIR ir testName
+                        File.WriteAllText(cppFile, cppCode)
+                        FpCppGenerated (ir, cppFile, codegenWarnings)
+                    with ex ->
+                        FpGenError (ir, sprintf "Generation failed: %s" ex.Message)
+    )
+
 /// Run a full test: IR lowering + C++ generation + compilation + execution
 let runFullTest (testName: string) (source: string) (outputDir: string) (compileAndRun: bool) : FullTestResult =
     // Parse expected values from source comments
     let expectedValues = parseExpectedValues source
-    
-    // Step 1: Lower to IR
-    let irResult = lower source
-    
-    match irResult with
-    | Error e ->
-        { TestName = testName; IRResult = Error e; CppGenerated = false; 
+
+    // F# pipeline (lower + codegen) runs under a lock to avoid cache
+    // races. C++ compile and run (below) stay outside the lock so they
+    // parallelize freely across tests.
+    let pipelineOutcome = runFsharpPipelineLocked source testName outputDir compileAndRun
+
+    match pipelineOutcome with
+    | FpIRError e ->
+        { TestName = testName; IRResult = Error e; CppGenerated = false;
           CppFile = None; CompileResult = Error "IR failed"; RunResult = Error "IR failed";
           ValueCheckResult = Error ["IR failed"]; HasExpectedValues = not expectedValues.IsEmpty }
-    | Ok ir ->
-        // Step 1b: Validate IR
-        match IR.validateIR ir with
-        | Error validationErrors ->
-            for e in validationErrors do
-                printfn "  %s" e
-            { TestName = testName; IRResult = Error (validationErrors |> String.concat "; "); CppGenerated = false; 
-              CppFile = None; CompileResult = Error "IR validation failed"; RunResult = Error "IR validation failed";
-              ValueCheckResult = Error ["IR validation failed"]; HasExpectedValues = not expectedValues.IsEmpty }
-        | Ok ir ->
-        if not compileAndRun then
-            { TestName = testName; IRResult = Ok ir; CppGenerated = false;
-              CppFile = None; CompileResult = Error "Skipped"; RunResult = Error "Skipped";
-              ValueCheckResult = Error ["Skipped"]; HasExpectedValues = not expectedValues.IsEmpty }
-        else
-            // Step 2: Generate C++
-            let safeName = sanitizeFileName testName
-            let cppFile = Path.Combine(outputDir, safeName + ".cpp")
-            
-            try
-                let (cppCode, codegenWarnings) = CodeGen.genSelfContainedProgramFromIR ir testName
-                for w in codegenWarnings do
-                    printfn "  [CodeGen Warning] %s" w
-                File.WriteAllText(cppFile, cppCode)
-                
-                // Step 3: Compile
-                let compileResult = compileCpp cppFile outputDir
-                
-                match compileResult with
-                | Error e ->
-                    { TestName = testName; IRResult = Ok ir; CppGenerated = true;
-                      CppFile = Some cppFile; CompileResult = Error e; RunResult = Error "Compile failed";
-                      ValueCheckResult = Error ["Compile failed"]; HasExpectedValues = not expectedValues.IsEmpty }
-                | Ok exeFile ->
-                    // Step 4: Run
-                    let runResult = runExecutable exeFile
-                    
-                    // Step 5: Check values if run succeeded
-                    let valueCheckResult = 
-                        match runResult with
-                        | Ok (0, output) -> 
-                            if expectedValues.IsEmpty then Ok ()
-                            else checkExpectedValues expectedValues output
-                        | Ok (code, _) -> Error [sprintf "Exit code %d" code]
-                        | Error e -> Error [e]
-                    
-                    { TestName = testName; IRResult = Ok ir; CppGenerated = true;
-                      CppFile = Some cppFile; CompileResult = Ok exeFile; RunResult = runResult;
-                      ValueCheckResult = valueCheckResult; HasExpectedValues = not expectedValues.IsEmpty }
-            with ex ->
-                { TestName = testName; IRResult = Ok ir; CppGenerated = false;
-                  CppFile = None; CompileResult = Error (sprintf "Generation failed: %s" ex.Message); 
-                  RunResult = Error "Generation failed"; ValueCheckResult = Error ["Generation failed"]; 
-                  HasExpectedValues = not expectedValues.IsEmpty }
+    | FpIRValidationError validationErrors ->
+        for e in validationErrors do printfn "  %s" e
+        { TestName = testName; IRResult = Error (validationErrors |> String.concat "; "); CppGenerated = false;
+          CppFile = None; CompileResult = Error "IR validation failed"; RunResult = Error "IR validation failed";
+          ValueCheckResult = Error ["IR validation failed"]; HasExpectedValues = not expectedValues.IsEmpty }
+    | FpIROnly ir ->
+        { TestName = testName; IRResult = Ok ir; CppGenerated = false;
+          CppFile = None; CompileResult = Error "Skipped"; RunResult = Error "Skipped";
+          ValueCheckResult = Error ["Skipped"]; HasExpectedValues = not expectedValues.IsEmpty }
+    | FpGenError (ir, msg) ->
+        { TestName = testName; IRResult = Ok ir; CppGenerated = false;
+          CppFile = None; CompileResult = Error msg;
+          RunResult = Error "Generation failed"; ValueCheckResult = Error ["Generation failed"];
+          HasExpectedValues = not expectedValues.IsEmpty }
+    | FpCppGenerated (ir, cppFile, codegenWarnings) ->
+        for w in codegenWarnings do
+            printfn "  [CodeGen Warning] %s" w
+
+        // Step 3: Compile (outside lock — separate subprocess)
+        let compileResult = compileCpp cppFile outputDir
+
+        match compileResult with
+        | Error e ->
+            { TestName = testName; IRResult = Ok ir; CppGenerated = true;
+              CppFile = Some cppFile; CompileResult = Error e; RunResult = Error "Compile failed";
+              ValueCheckResult = Error ["Compile failed"]; HasExpectedValues = not expectedValues.IsEmpty }
+        | Ok exeFile ->
+            // Step 4: Run (outside lock)
+            let runResult = runExecutable exeFile
+
+            // Step 5: Check values if run succeeded
+            let valueCheckResult =
+                match runResult with
+                | Ok (0, output) ->
+                    if expectedValues.IsEmpty then Ok ()
+                    else checkExpectedValues expectedValues output
+                | Ok (code, _) -> Error [sprintf "Exit code %d" code]
+                | Error e -> Error [e]
+
+            { TestName = testName; IRResult = Ok ir; CppGenerated = true;
+              CppFile = Some cppFile; CompileResult = Ok exeFile; RunResult = runResult;
+              ValueCheckResult = valueCheckResult; HasExpectedValues = not expectedValues.IsEmpty }
 
 /// Print a full test result
 let printFullTestResult (result: FullTestResult) (verbose: bool) (showFullError: bool) =
@@ -1636,7 +1682,7 @@ let runNetcdfTests () =
     check "vars.A exists" (varAType.IsSome) ""
 
     match varAType with
-    | Some (IRTArray arr) ->
+    | Some (ArrayElem arr) ->
         check "A element type is Float64"
             (arr.ElemType = IRTScalar ETFloat64) (sprintf "got %A" arr.ElemType)
         check "A has 3 index types"
@@ -1680,11 +1726,11 @@ let runNetcdfTests () =
     // Both variables should reference the same IRIndexType (same Id)
     let tempIdxIds =
         match vars2.Value |> List.tryPick (fun (n,t) -> if n = "temperature" then Some t else None) with
-        | Some (IRTArray a) -> a.IndexTypes |> List.map (fun i -> i.Id)
+        | Some (ArrayElem a) -> a.IndexTypes |> List.map (fun i -> i.Id)
         | _ -> []
     let pressIdxIds =
         match vars2.Value |> List.tryPick (fun (n,t) -> if n = "pressure" then Some t else None) with
-        | Some (IRTArray a) -> a.IndexTypes |> List.map (fun i -> i.Id)
+        | Some (ArrayElem a) -> a.IndexTypes |> List.map (fun i -> i.Id)
         | _ -> []
     
     check "temperature and pressure share same lat index Id"
@@ -1697,7 +1743,7 @@ let runNetcdfTests () =
 
     check "temperature is Float64, pressure is Float32"
         (match vars2.Value.[0] |> snd, vars2.Value.[1] |> snd with
-         | IRTArray a1, IRTArray a2 ->
+         | ArrayElem a1, ArrayElem a2 ->
              a1.ElemType = IRTScalar ETFloat64 && a2.ElemType = IRTScalar ETFloat32
          | _ -> false) ""
 
@@ -1742,7 +1788,7 @@ let runNetcdfTests () =
         (match vars3, vars4 with
          | Some f3, Some f4 ->
              match f3.[0] |> snd, f4.[0] |> snd with
-             | IRTArray a1, IRTArray a2 ->
+             | ArrayElem a1, ArrayElem a2 ->
                  a1.IndexTypes.[0].Id = sharedLat.Id
                  && a2.IndexTypes.[0].Id = sharedLat.Id
              | _ -> false
@@ -1758,7 +1804,7 @@ let runNetcdfTests () =
         (dimNames = ["lat"; "lon"; "time"]) (sprintf "got %A" dimNames)
     
     match varAType with
-    | Some (IRTArray arrType) ->
+    | Some (ArrayElem arrType) ->
         let readCode = NetcdfProvider.CppNetcdf.genReadVar "sample.nc" "A" "A" arrType
         check "genReadVar produces nc_open call"
             (readCode |> List.exists (fun s -> s.Contains "nc_open")) ""
@@ -2210,7 +2256,9 @@ let checkFile (filePath: string) : int =
                 for e in errors do
                     eprintfn "%s" (Blade.TypeCheck.formatCompileError e)
                 1
-            | Ok _ ->
+            | Ok (_, _, warnings) ->
+                for w in warnings do
+                    printfn "[TypeCheck Warning] %s" w
                 printfn "OK"
                 0
 
@@ -2258,6 +2306,23 @@ let main args =
     | [| "test" |] -> runAllTestsFull ()
     | [| "test"; "--ir-only" |] -> runAllTests ()
     | [| "test"; "--gen" |] -> runAllTestsGenOnly ()
+    | [| "test"; "normalize" |] ->
+        // IR-level F# unit tests for the type normalizer. Runs in-process,
+        // no Blade source pipeline involved.
+        let (_, failed) = runNormalizeTests ()
+        if failed = 0 then 0 else 1
+    | [| "test"; "unify" |] ->
+        // TypeCheck-level F# unit tests for the unify §5.3 fast path.
+        // Constructs IRType values directly and calls unify; no Blade
+        // source pipeline.
+        let (_, failed) = runUnifyTests ()
+        if failed = 0 then 0 else 1
+    | [| "test"; "validate-arrow" |] ->
+        // IR-level F# unit tests for the validateArrowShape gate at
+        // mkVirtualArrayArrow entry. Constructs IRType values directly;
+        // no Blade source pipeline.
+        let (_, failed) = runValidateArrowTests ()
+        if failed = 0 then 0 else 1
     | [| "test"; cat |] ->
         // Test a specific category: blade test basic, blade test loops, etc.
         let categoryTests =
@@ -2278,6 +2343,7 @@ let main args =
             | "static" -> Some ("Static", staticTests)
             | "units" -> Some ("Units", unitTests)
             | "mutability" -> Some ("Mutability", mutabilityTests)
+            | "funcarrays" | "fa" -> Some ("Func Arrays", funcArrayTests)
             | "sqlish" | "sql" -> Some ("SQL-ish", foreignKeyTests @ maskTests @ setOpTests @ groupByTests @ sortTests @ reduceTests @ extentsTests @ extentsMultiRankTests @ regressionTests @ sqlCombinedTests)
             | _ -> None
         match categoryTests with

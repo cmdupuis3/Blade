@@ -135,32 +135,11 @@ type ElemType =
     | ETBool
     | ETUnit
     | ETString
-    | ETIndexRef of string  // Foreign key: integer tagged with an index type name
-    // Anonymous index type at type level. Source forms like
-    // `let static (a, b): (StationIdx, Idx<3>) = ...` previously had
-    // `b: ETInt64` (the runtime backing) which let arithmetic on `b`
-    // typecheck even though `b` is conceptually an index value.
-    // ETAnonIdx preserves "this is an anonymous index, not just an int"
-    // through the IR so inferArithType can reject arithmetic on it
-    // (matching the rule for named index types, ETIndexRef). Collapsed
-    // to int64_t at codegen time.
-    //
-    // Anonymous index types are NOMINALLY typed: each TyIdx occurrence
-    // produces its own fresh nominal type, identified by `nominalId`.
-    // Two `Idx<3>`s in different declaration sites are DIFFERENT types
-    // even though their extents match — extent equality alone does not
-    // drive unification, just like with named index types where
-    // `type X = Idx<6>` and `type Y = Idx<6>` are distinct.
-    //
-    // The `extent` payload is preserved for diagnostics and pretty-
-    // printing (the user wrote `Idx<3>`, we should be able to display
-    // that). For unification, F# structural equality compares both the
-    // id and the extent — but since the id is unique per occurrence,
-    // two ETAnonIdx never collide unless they came from the same source
-    // node. Practical extents: literal `Idx<3>` -> IRLit IRLitInt 3,
-    // statically-bound `Idx<n>` -> resolved via evalConstExpr,
-    // runtime parametric `Idx<n>` -> IRParam.
-    | ETAnonIdx of nominalId: int * extent: IRExpr
+    // Note: ETIndexRef (the legacy element-position foreign-key tag) was
+    // retired in the Option C migration. Named index references — in both
+    // value and element position — are now represented at the IRType level
+    // as `IRTIdxTagged (inner, IRefNamed name)`, unifying with the value-
+    // position encoding. Element-position lowering produces this directly.
 
 /// Index type in IR - represents a single dimension's structure
 and IRIndexType = {
@@ -185,23 +164,127 @@ and IRArrayType = {
     Identity: ArrayIdentity option  // For tracking array identity
 }
 
+/// Reference to an index type from the value side.
+/// Used by IRTIdxTagged as the nominal tag (parallel to UnitSig for
+/// IRTUnitAnnotated). Carries identity only — not the source index type's
+/// structure (arity, symmetry, bijection, etc.), which lives in
+/// IRIndexType records attached to arrays.
+///
+/// Two index tags are compatible iff their IdxRefs are structurally
+/// equal: same name for named, same nominalId for anonymous.
+and IdxRef =
+    /// User-defined named index type: Nat<LatIdx>.
+    /// Identity is the name.
+    | IRefNamed of string
+    /// Anonymous Idx<n> occurrence: Nat<Idx<n>>.
+    /// Identity is the nominalId — fresh per source TyIdx node, must
+    /// match the corresponding IRIndexType.Id of the index type that
+    /// emits this value. Extent preserved for diagnostics / pretty-
+    /// printing only; NOT part of identity for unification.
+    | IRefAnon of nominalId: int * extent: IRExpr
+
 /// IR Types
 and IRType =
     | IRTScalar of ElemType
-    | IRTArray of IRArrayType
     | IRTTuple of IRType list
-    | IRTFunc of args: IRType list * ret: IRType
     | IRTLoop of LoopType
     | IRTComputation of IRType   // Suspended computation producing this type
     | IRTUnit
     | IRTPoly of baseType: IRType * arityVar: string  // Arity-polymorphic type
     | IRTNat of int option  // Type-level natural number (None = variable)
+    // IRTIdxTagged: a base type wrapped with a nominal index-type tag.
+    // The shape parallels IRTUnitAnnotated (base * UnitSig) but uses an
+    // IdxRef tag with NO multiplicative algebra — index tags are nominal
+    // labels, not exponent vectors. Formalism §4.18.5 puts Nat<LatIdx>
+    // alongside Float<meters>, so the wrapper shape matches; the
+    // composition semantics deliberately don't.
+    //
+    // Typical inner type is IRTScalar ETInt64 (giving "Nat<I>"), but the
+    // constructor accepts any IRType — same flexibility as IRTUnitAnnotated.
+    //
+    // Identity: structural equality on (inner, idxRef). Two IRTIdxTagged
+    // values unify iff their inner types unify AND their IdxRefs match
+    // (name=name for IRefNamed, nominalId=nominalId for IRefAnon).
+    //
+    // Renders the inner type at codegen — the tag is a typecheck-time
+    // invariant, not a runtime carrier. For IRefNamed, the C++ typedef
+    // alias is used as a documentation hook.
+    //
+    // Distinct from `IRTNat of int option` (type-level naturals for
+    // ranks and known extent values): IRTIdxTagged is a runtime value's
+    // type; IRTNat is a type-parameter.
+    //
+    // Replaces the ElemType-level encoding (ETAnonIdx, ETIndexRef) for
+    // value positions. The legacy encodings remain in place during
+    // transition; IRTIdxTagged is structurally equivalent and treated
+    // identically at every match site.
+    | IRTIdxTagged of inner: IRType * tag: IdxRef
     | IRTNamed of string    // Named type (struct, sum type, etc.)
     | IRTInfer of int       // Unresolved type variable (id for unification)
     | IRTUnitAnnotated of IRType * UnitSig  // Type with unit-of-measure annotation
     | IRTGroupKeys of outerIdx: IRIndexType * sourceIdx: IRIndexType * enumValues: EnumValue list option
       // GroupKeys: CSR structure mapping sourceIdx → groups indexed by outerIdx.
       // enumValues: if keys are EnumIdx, carries the actual key values for reverse lookup.
+    // IRTArrow: unified arrow type. Subsumes function types (all-SVal slots)
+    // and is the production form for array types after Segment 3 producer
+    // migration. The slot list represents the consumption order — applying
+    // values consumes slots left-to-right; once all slots are consumed, the
+    // result type emerges.
+    //
+    // Slot kinds:
+    //   - SIdx (storage-backed): takes an index value. Array dim with real
+    //     allocated storage. The IRIndexType carries Tag, Symmetry, and
+    //     Extent for the slot's domain.
+    //   - SIdxVirt (virtual index): takes an index value but the values
+    //     are computed on-the-fly (no allocated storage). Models virtual
+    //     arrays like `range<I>`, `reverse<I>`, etc.
+    //   - SVal (value/closure): takes a value of the given type. A pure
+    //     function param.
+    //
+    // The `identity` field tracks array-handle identity for stored-array
+    // shapes (was IRArrayType.Identity). Pure functions and virtual arrays
+    // carry `None`. Mixed-shape arrows may carry `Some` when the outermost
+    // dimension is stored.
+    //
+    // Shape constraints (enforced at `mkVirtualArrayArrow` entry via
+    // `validateArrowShape`; other constructors are constraint-safe by
+    // construction):
+    //   1. If any slot is SIdxVirt, all slots from that point onward must
+    //      also be SIdxVirt (no SIdx or SVal after the first SIdxVirt).
+    //      Reason: virtual generation can't contain stored sub-arrays or
+    //      function closures — once we go virtual, we stay virtual.
+    //   2. If any slot is SIdxVirt, the result type must not be IRTArrow.
+    //      Reason: a virtual array's elements must be simple values, not
+    //      nested arrays/functions.
+    //
+    // Internal transformations (normalize, substTypeInIRType, Subst.Resolve)
+    // preserve these invariants on validly-constructed input — they
+    // restructure or substitute without introducing new slot-kind patterns.
+    //
+    // Empty-slot policy:
+    //   `IRTArrow ([], ret, None)` is reserved for nullary functions
+    //   produced by `mkFuncArrow []`. `ArrayElem` rejects this shape so
+    //   nullary function calls don't get misclassified as rank-0 array
+    //   indexing. Rank-0 arrays collapse to their element type at the
+    //   `mkArrayLike` producer site, matching Subst.Resolve.
+    //
+    // Examples:
+    //   [SVal; SVal] -> ret           : pure binary function
+    //   [SIdx; SIdx] -> elem          : stored 2D array
+    //   [SIdxVirt; SIdxVirt] -> elem  : virtual 2D generator
+    //   [SIdx; SIdxVirt] -> elem      : stored array of virtual sub-arrays
+    //   [SVal; SIdx] -> elem          : function returning a stored array
+    //   [SIdxVirt; SIdx] -> elem      : INVALID — stored after virtual
+    //
+    // Retirement state: Segments 2 and 4 retired IRTFunc; Segments 3 and 5
+    // retired IRTArray. IRTArrow is now the sole arrow-shaped type; functions,
+    // stored arrays, and virtual arrays are distinguished by slot kind only.
+    | IRTArrow of slots: IRArrowSlot list * result: IRType * identity: ArrayIdentity option
+
+and IRArrowSlot =
+    | SIdx of IRIndexType       // Storage-backed slot, consumed by an index value
+    | SIdxVirt of IRIndexType   // Virtual slot — values computed on-the-fly, no storage
+    | SVal of IRType            // Value/closure slot, consumed by any value of that type
 
 /// Kind of loop object with arity tracking
 and LoopType = {
@@ -428,11 +511,10 @@ and AlignSpec = {
 }
 
 /// Compute the promoted element type for two numeric types per §3.4.2.
-/// Returns None if the types are incompatible for promotion. Defined here
-/// (after the mutual recursion block) because ElemType now references
-/// IRExpr (via ETAnonIdx) and must be inside the block. ETAnonIdx isn't
-/// in the promotion table — arithmetic on anonymous index types is
-/// rejected upstream in inferArithType, so promotion never reaches them.
+/// Returns None if the types are incompatible for promotion. Index nominal
+/// tags are no longer represented at the ElemType level (ETIndexRef was
+/// retired in the Option C migration); their strict unification happens
+/// at the IRType level via IRTIdxTagged in `unify`.
 let promoteElemType (a: ElemType) (b: ElemType) : ElemType option =
     if a = b then Some a
     else
@@ -443,13 +525,6 @@ let promoteElemType (a: ElemType) (b: ElemType) : ElemType option =
         | ETInt64, ETFloat32 | ETFloat32, ETInt64 -> Some ETFloat64
         | ETInt64, ETFloat64 | ETFloat64, ETInt64 -> Some ETFloat64
         | ETFloat32, ETFloat64 | ETFloat64, ETFloat32 -> Some ETFloat64
-        // Index refs promote with integers, preserving the tag
-        | ETIndexRef name, ETInt64 | ETInt64, ETIndexRef name -> Some (ETIndexRef name)
-        | ETIndexRef name, ETInt32 | ETInt32, ETIndexRef name -> Some (ETIndexRef name)
-        // String-valued EnumIdx aliases: same promotion rule. The
-        // distinguishing happens at the `using <name> = ...` emission site;
-        // here we just preserve the tag.
-        | ETIndexRef name, ETString | ETString, ETIndexRef name -> Some (ETIndexRef name)
         | _ -> None
 
 /// Active pattern for assignment target (lvalue) classification
@@ -479,12 +554,16 @@ let (|PrimElem|_|) (ty: IRType) =
     | IRTScalar et -> Some et
     | _ -> None
 
-/// Primitive element, optionally unit-annotated. Workhorse for read sites
-/// that just want the primitive and don't care whether units are attached.
+/// Primitive element, optionally unit-annotated or index-tagged. Workhorse
+/// for read sites that just want the primitive and don't care whether
+/// wrappers are attached. Matches through both IRTUnitAnnotated (physical
+/// units) and IRTIdxTagged (nominal index tags) — both preserve their
+/// inner type and erase at codegen.
 let (|AnyPrimElem|_|) (ty: IRType) =
     match ty with
     | IRTScalar et -> Some et
     | IRTUnitAnnotated (IRTScalar et, _) -> Some et
+    | IRTIdxTagged (IRTScalar et, _) -> Some et
     | _ -> None
 
 /// Unit-annotated primitive: returns both the elem type and the unit
@@ -512,21 +591,368 @@ let (|NamedElem|_|) (ty: IRType) =
 /// Function-valued elem type. Reflects the array-function duality: in
 /// Blade, an Array<T like Idx<n>> is conceptually a function `Idx<n> -> T`,
 /// so functions in elem position (arrays of functions) are structurally
-/// natural. Codegen support for these is future work.
+/// Function-shaped type. Matches `IRTArrow` when every slot is `SVal`
+/// (i.e., a pure function with no storage-backed slots), and returns
+/// the canonical `(args, ret)` view that consumers want.
+///
+/// Note: matches the empty-slot case too — `IRTArrow ([], ret, None)`
+/// is a nullary function (produced by `mkFuncArrow []`). This is the
+/// symmetric counterpart to ArrayElem's empty-slot rejection: only
+/// FuncElem accepts the empty-arrow shape.
+///
+/// The `identity` field on IRTArrow is ignored here — functions don't
+/// carry array identity; producers of function arrows always set it
+/// to None.
 let (|FuncElem|_|) (ty: IRType) =
     match ty with
-    | IRTFunc (args, ret) -> Some (args, ret)
+    | IRTArrow (slots, ret, _) when slots |> List.forall (function SVal _ -> true | _ -> false) ->
+        let args = slots |> List.map (function SVal t -> t | _ -> failwith "unreachable")
+        Some (args, ret)
     | _ -> None
 
-/// Array-valued elem type. Nested arrays. Currently the parser accepts
-/// `Array<Array<T like Idx<N>> like Idx<M>>` but `lowerElemType` silently
-/// demotes the inner array to ETFloat64. After Phase B2, this pattern
-/// fires correctly and codegen needs to handle nested-array elem types
-/// (the C++ promote<T,k> template handles this transparently per design).
+/// Smart constructor: build an arrow-shaped type from a parameter type
+/// list and return type. Produces an `IRTArrow` with all-`SVal` slots
+/// and no identity — the unified-IR function form.
+let mkFuncArrow (args: IRType list) (ret: IRType) : IRType =
+    IRTArrow (args |> List.map SVal, ret, None)
+
+/// Validate the shape constraints on an IRTArrow's slot list and result.
+///
+/// Constraints (per the unified-arrow design):
+///   1. If any slot is SIdxVirt, all slots from that point onward must
+///      also be SIdxVirt. Equivalently: no SIdx or SVal may appear
+///      after the first SIdxVirt.
+///   2. If any slot is SIdxVirt, the result type must NOT be IRTArrow —
+///      virtual arrays' elements must be simple values.
+///
+/// Returns the empty list if the arrow is well-formed; otherwise a
+/// list of human-readable error strings.
+let rec validateArrowShape (slots: IRArrowSlot list) (result: IRType) : string list =
+    let errs = ResizeArray<string>()
+    let firstVirt =
+        slots |> List.tryFindIndex (function SIdxVirt _ -> true | _ -> false)
+    match firstVirt with
+    | None -> ()  // No virtual slots — no constraint
+    | Some k ->
+        // Constraint 1: all slots at or after k must be SIdxVirt
+        slots
+        |> List.iteri (fun i slot ->
+            if i > k then
+                match slot with
+                | SIdxVirt _ -> ()
+                | SIdx _ ->
+                    errs.Add(sprintf "Slot %d is SIdx but appears after first SIdxVirt at %d (stored cannot follow virtual)" i k)
+                | SVal _ ->
+                    errs.Add(sprintf "Slot %d is SVal but appears after first SIdxVirt at %d (virtual arrays cannot contain functions)" i k))
+        // Constraint 2: result must not be an arrow
+        match result with
+        | IRTArrow _ ->
+            errs.Add("Virtual arrow has IRTArrow result (virtual arrays cannot contain arrays/functions)")
+        | _ -> ()
+    errs |> List.ofSeq
+
+/// Array-shaped type. Matches `IRTArrow` when slots are *uniformly* either
+/// all `SIdx` (stored) or all `SIdxVirt` (virtual). Mixed-slot arrows
+/// (some `SIdx` + some `SIdxVirt`, or any `SVal`) do NOT match — they
+/// have no IRArrayType-equivalent encoding.
+///
+/// Returns an `IRArrayType` record as a view of the arrow's array shape;
+/// the record exists primarily as a convenient destructuring target with
+/// `.ElemType`, `.IndexTypes`, `.IsVirtual`, `.Identity` accessors. After
+/// Segment 5, `IRArrayType` is a view-only type (no DU constructor wraps it).
+///
+/// `IsVirtual` is reconstructed from slot kinds:
+///   - all SIdx → IsVirtual = false
+///   - all SIdxVirt → IsVirtual = true
+/// The reconstruction allocates a fresh record on each match; tolerable
+/// for typecheck/codegen frequencies.
+///
+/// Empty-slot arrows do NOT match — they represent nullary functions
+/// (per `mkFuncArrow []`). Rank-0 arrays don't exist as a type form
+/// after Segment 3d: `mkArrayLike` collapses rank-0 IRArrayType inputs
+/// to their element type at the producer side.
 let (|ArrayElem|_|) (ty: IRType) =
     match ty with
-    | IRTArray arr -> Some arr
+    | IRTArrow ([], _, _) -> None  // nullary function, not an array — see docstring
+    | IRTArrow (slots, result, identity) ->
+        let allStored = slots |> List.forall (function SIdx _ -> true | _ -> false)
+        let allVirtual = slots |> List.forall (function SIdxVirt _ -> true | _ -> false)
+        if allStored || allVirtual then
+            let indexTypes =
+                slots |> List.map (function
+                    | SIdx i -> i
+                    | SIdxVirt i -> i
+                    | _ -> failwith "unreachable — checked by guards above")
+            Some {
+                ElemType = result
+                IndexTypes = indexTypes
+                IsVirtual = allVirtual
+                Identity = identity
+            }
+        else
+            None
     | _ -> None
+
+/// Stored-array variant of ArrayElem. Matches IRTArrow with all-SIdx slots
+/// (non-empty). Useful for codegen paths that need to allocate / read
+/// storage and want to reject virtual sources at the type-match level.
+let (|StoredArrayElem|_|) (ty: IRType) =
+    match ty with
+    | IRTArrow ([], _, _) -> None  // nullary function — see ArrayElem
+    | IRTArrow (slots, result, identity)
+        when slots |> List.forall (function SIdx _ -> true | _ -> false) ->
+        let indexTypes = slots |> List.map (function SIdx i -> i | _ -> failwith "unreachable")
+        Some {
+            ElemType = result
+            IndexTypes = indexTypes
+            IsVirtual = false
+            Identity = identity
+        }
+    | _ -> None
+
+/// Virtual-array variant of ArrayElem. Matches IRTArrow with all-SIdxVirt
+/// slots (non-empty). Useful for iteration codegen and range/reverse/blocked
+/// dispatch.
+let (|VirtualArrayElem|_|) (ty: IRType) =
+    match ty with
+    | IRTArrow ([], _, _) -> None  // nullary function — see ArrayElem
+    | IRTArrow (slots, result, _identity)
+        when slots |> List.forall (function SIdxVirt _ -> true | _ -> false) ->
+        let indexTypes = slots |> List.map (function SIdxVirt i -> i | _ -> failwith "unreachable")
+        Some {
+            ElemType = result
+            IndexTypes = indexTypes
+            IsVirtual = true
+            Identity = None  // Virtual arrays don't carry identity
+        }
+    | _ -> None
+
+/// Smart constructor for a stored array arrow. The slot list is the
+/// array's index types each wrapped as `SIdx`, the result is the
+/// element type, and identity is the caller-supplied handle.
+let mkArrayArrow (indexTypes: IRIndexType list) (elemType: IRType) (identity: ArrayIdentity option) : IRType =
+    IRTArrow (indexTypes |> List.map SIdx, elemType, identity)
+
+/// Smart constructor for a virtual array arrow. Identity is forced to
+/// `None` (virtual arrays don't materialize, so there's no handle to
+/// track).
+///
+/// **Gate**: invokes `validateArrowShape` on the constructed slot/result
+/// pair and raises if any violations are reported. The most common
+/// trigger is passing an `IRTArrow` as `elemType` — virtual arrays must
+/// hold simple values, not nested arrays or function closures.
+///
+/// This is a compiler-invariant check, not a user-facing diagnostic.
+/// User-facing rejection of invalid virtual-array shapes (e.g.,
+/// `reverse` of an array-of-arrays) should happen earlier, in
+/// TypeCheck, before reaching this constructor. If this raises, the
+/// upstream type-check or lowering let an invalid shape through and
+/// the error message should be treated as a bug report on that path.
+///
+/// `mkArrayArrow` (all-SIdx) and `mkFuncArrow` (all-SVal) don't gate
+/// because their slot-construction is structurally constraint-safe:
+/// without any `SIdxVirt`, neither constraint can fire. If those
+/// constructors are ever changed to admit mixed slots, the gate should
+/// move here too.
+let mkVirtualArrayArrow (indexTypes: IRIndexType list) (elemType: IRType) : IRType =
+    let slots = indexTypes |> List.map SIdxVirt
+    match validateArrowShape slots elemType with
+    | [] -> IRTArrow (slots, elemType, None)
+    | errs ->
+        failwithf "mkVirtualArrayArrow: invalid virtual-array shape (compiler invariant violation):\n  %s\n  indexTypes count: %d, elemType: %A"
+                  (System.String.Join("\n  ", errs))
+                  indexTypes.Length
+                  elemType
+
+/// Smart constructor that takes an `IRArrayType` view (as returned by
+/// `ArrayElem`) and produces the appropriate `IRTArrow` form. Dispatches
+/// on `IsVirtual` to choose between `mkArrayArrow` (stored, all-SIdx)
+/// and `mkVirtualArrayArrow` (virtual, all-SIdxVirt).
+///
+/// Used at form-update producer sites: `ArrayElem arr -> mkArrayLike { arr with ... }`.
+/// The virtual/stored character is preserved through the rebuild.
+let mkArrayLike (arr: IRArrayType) : IRType =
+    // Rank-0 collapse: a zero-rank array equals its element. Prevents the
+    // empty-slot `IRTArrow ([], _, _)` form, which is reserved for nullary
+    // functions per mkFuncArrow. Without this guard, `mkArrayLike` with
+    // empty IndexTypes would produce a shape ambiguous with a nullary
+    // function and consumers via ArrayElem would reject it.
+    if arr.IndexTypes.IsEmpty then
+        arr.ElemType
+    elif arr.IsVirtual then
+        mkVirtualArrayArrow arr.IndexTypes arr.ElemType
+    else
+        mkArrayArrow arr.IndexTypes arr.ElemType arr.Identity
+
+// ============================================================================
+// IRType normalization (Segment 6 — Path B-nested)
+// ============================================================================
+//
+// The IR admits two definitionally-equivalent encodings of the same type
+// (formalism §5.2):
+//
+//   Nested (uniform per arrow):
+//     IRTArrow ([SIdx I; SIdx J],
+//               IRTArrow ([SVal P], R, None),
+//               Some id)
+//
+//   Flat (mixed slots in one arrow):
+//     IRTArrow ([SIdx I; SIdx J; SVal P], R, Some id)
+//
+// Producers currently emit nested forms exclusively, so this normalizer is a
+// no-op on the existing producer output. Its value is:
+//   1. Defining a canonical form so type equivalence is decidable by
+//      structural equality after normalization.
+//   2. Future-proofing for any code path that produces mixed-slot arrows
+//      (e.g., a future B-flat migration where flat IS canonical).
+//   3. Making the formalism's §5.2 identity an algorithm rather than an
+//      external proof obligation.
+//
+// `NormalizeMode` is a parameter so the canonical direction is a single
+// choice-point rather than scattered convention. `ToFlat` is the eventual
+// B-flat direction; currently stubbed.
+
+/// Direction of canonical-form normalization.
+///   - `ToNested`: split mixed-slot arrows at slot-kind boundaries into
+///     nested uniform-kind arrows. Currently the committed canonical form.
+///   - `ToFlat`: merge nested uniform-kind arrows into a single mixed-slot
+///     arrow. Not yet implemented — reserved for future B-flat migration.
+type NormalizeMode =
+    | ToNested
+    | ToFlat
+
+/// Kind discriminator for arrow slots, used for grouping consecutive
+/// slots of the same kind during normalization. The integer values are
+/// arbitrary; only equality matters.
+let private slotKind (s: IRArrowSlot) : int =
+    match s with
+    | SIdx _ -> 0
+    | SIdxVirt _ -> 1
+    | SVal _ -> 2
+
+/// True if all slots have the same kind. Vacuously true for an empty
+/// list (which represents a nullary function per mkFuncArrow []).
+let private isUniformKind (slots: IRArrowSlot list) : bool =
+    match slots with
+    | [] -> true
+    | first :: rest ->
+        let k = slotKind first
+        rest |> List.forall (fun s -> slotKind s = k)
+
+/// Group consecutive slots of the same kind into sub-lists. Order is
+/// preserved. For an empty input, returns empty. For uniform input,
+/// returns a single-group list.
+let private groupConsecutiveByKind (slots: IRArrowSlot list) : IRArrowSlot list list =
+    let rec loop (current: IRArrowSlot list) (acc: IRArrowSlot list list) (remaining: IRArrowSlot list) =
+        match remaining with
+        | [] ->
+            match current with
+            | [] -> List.rev acc
+            | _ -> List.rev (List.rev current :: acc)
+        | x :: xs ->
+            match current with
+            | [] -> loop [x] acc xs
+            | y :: _ when slotKind x = slotKind y -> loop (x :: current) acc xs
+            | _ -> loop [x] (List.rev current :: acc) xs
+    loop [] [] slots
+
+/// Normalize an IRType to the canonical form selected by `mode`. The
+/// transformation walks every IRType subterm; for `IRTArrow` it splits
+/// mixed-slot arrows at slot-kind boundaries (ToNested) into a chain
+/// of nested uniform-kind arrows.
+///
+/// Identity propagation rule (ToNested split): the outermost split
+/// sub-arrow inherits the original identity. All inner sub-arrows get
+/// `None`. Rationale: identity tracks a stored-array handle that exists
+/// at the start of the program; inner sub-arrows in a split chain are
+/// either function residuals (no identity) or function-returned arrays
+/// (fresh identity not known at type level).
+///
+/// `ToFlat` is not yet implemented and raises `notImplemented`.
+let rec normalize (mode: NormalizeMode) (ty: IRType) : IRType =
+    match mode with
+    | ToNested -> normalizeToNested ty
+    | ToFlat -> failwith "normalize ToFlat: not yet implemented (reserved for B-flat migration)"
+
+and normalizeToNested (ty: IRType) : IRType =
+    match ty with
+    | IRTArrow (slots, result, idOpt) ->
+        // Recurse first: normalize result, and any IRType inside SVal slots.
+        // Index types (SIdx, SIdxVirt) carry IRIndexType, which doesn't
+        // contain IRType members — opaque under this walker.
+        let normResult = normalizeToNested result
+        let normSlots =
+            slots |> List.map (fun s ->
+                match s with
+                | SVal t -> SVal (normalizeToNested t)
+                | SIdx _ | SIdxVirt _ -> s)
+        // Now decide whether to split this arrow.
+        if isUniformKind normSlots then
+            // Already uniform; rebuild with normalized sub-parts.
+            IRTArrow (normSlots, normResult, idOpt)
+        else
+            // Mixed slots — split at kind boundaries into nested arrows.
+            let groups = groupConsecutiveByKind normSlots
+            match groups with
+            | [] ->
+                // Unreachable: isUniformKind is true for empty lists, so
+                // we never enter this branch with [] slots.
+                IRTArrow (normSlots, normResult, idOpt)
+            | firstGroup :: restGroups ->
+                // Build inner arrows right-to-left with None identity.
+                let inner =
+                    List.foldBack
+                        (fun grp acc -> IRTArrow (grp, acc, None))
+                        restGroups
+                        normResult
+                // Outermost arrow inherits the original identity.
+                IRTArrow (firstGroup, inner, idOpt)
+
+    // Compound types: recurse into substructure.
+    | IRTTuple ts ->
+        IRTTuple (ts |> List.map normalizeToNested)
+    | IRTLoop lt ->
+        IRTLoop { lt with
+                    ArrayTypes = lt.ArrayTypes |> List.map normalizeToNested
+                    KernelType = lt.KernelType |> Option.map normalizeToNested }
+    | IRTComputation inner ->
+        IRTComputation (normalizeToNested inner)
+    | IRTPoly (baseT, var) ->
+        IRTPoly (normalizeToNested baseT, var)
+    | IRTIdxTagged (inner, tag) ->
+        IRTIdxTagged (normalizeToNested inner, tag)
+    | IRTUnitAnnotated (inner, units) ->
+        IRTUnitAnnotated (normalizeToNested inner, units)
+
+    // Leaf types — no IRType subterms.
+    | IRTScalar _
+    | IRTUnit
+    | IRTNat _
+    | IRTNamed _
+    | IRTInfer _
+    | IRTGroupKeys _ -> ty
+
+/// Structural equivalence on IRTypes, modulo the canonical (B-nested)
+/// normalization. Returns `true` iff `t1` and `t2` normalize to the
+/// same structural form under `normalize ToNested`.
+///
+/// What this currently bridges (§5.3 mixed-slot identity):
+///   - flat mixed-slot arrows and their split nested forms, e.g.
+///     `IRTArrow ([SIdx I, SVal A], R, _)` ≡
+///     `IRTArrow ([SIdx I], IRTArrow ([SVal A], R, _), _)`.
+///
+/// What this does NOT currently bridge (§5.2 array identity — deferred):
+///   - flat uniform-kind arrays and their nested counterparts, e.g.
+///     `Array<T like I, J>` and `Array<Array<T like J> like I>` are NOT
+///     equivalent here. `ToNested` only splits at slot-kind boundaries;
+///     uniform-kind multi-slot is the canonical form for uniform input.
+///     The §5.2 collapse becomes available when `ToFlat` is implemented
+///     (B-flat migration).
+///
+/// It does NOT perform alpha-renaming on IRTInfer ids — those are
+/// globally unique unification handles, not bound variables.
+let irTypeEquiv (t1: IRType) (t2: IRType) : bool =
+    normalize ToNested t1 = normalize ToNested t2
 
 /// Tuple elem type. Arrays of tuples. Useful for structured records that
 /// don't have a named type definition.
@@ -1122,12 +1548,7 @@ let deduceOutputType
             // After Phase B2, elemType is already IRType so no IRTScalar wrap.
             elemType
         else
-            IRTArray { 
-                ElemType = elemType
-                IndexTypes = allDims
-                IsVirtual = false
-                Identity = None 
-            }
+            mkArrayArrow allDims elemType None
 
 
 // ============================================================================
@@ -1220,7 +1641,7 @@ type LoopNestCodeGen = {
 /// Consecutive equal values indicate symmetric dimensions
 let buildSymmVec (outputType: IRType) : int list =
     match outputType with
-    | IRTArray arr ->
+    | ArrayElem arr ->
         let mutable symmVec = []
         let mutable groupNum = 1
         let mutable prevSymm = None
@@ -1508,14 +1929,17 @@ let rec mapIRExpr (f: IRExpr -> IRExpr) (expr: IRExpr) : IRExpr =
 let rec substTypeInIRType (bindings: Map<int, IRType>) (ty: IRType) : IRType =
     match ty with
     | IRTInfer n when bindings.ContainsKey n -> bindings.[n]
-    | IRTArray arr ->
-        IRTArray { arr with ElemType = substTypeInIRType bindings arr.ElemType }
     | IRTTuple ts -> IRTTuple (ts |> List.map (substTypeInIRType bindings))
-    | IRTFunc (args, ret) ->
-        IRTFunc (args |> List.map (substTypeInIRType bindings), substTypeInIRType bindings ret)
     | IRTComputation t -> IRTComputation (substTypeInIRType bindings t)
     | IRTPoly (base', var) -> IRTPoly (substTypeInIRType bindings base', var)
     | IRTUnitAnnotated (inner, units) -> IRTUnitAnnotated (substTypeInIRType bindings inner, units)
+    | IRTIdxTagged (inner, idxRef) -> IRTIdxTagged (substTypeInIRType bindings inner, idxRef)
+    | IRTArrow (slots, result, identity) ->
+        let substSlot = function
+            | SIdx idx -> SIdx idx
+            | SIdxVirt idx -> SIdxVirt idx   // IRIndexType has no IRType members; opaque
+            | SVal ty -> SVal (substTypeInIRType bindings ty)
+        IRTArrow (slots |> List.map substSlot, substTypeInIRType bindings result, identity)
     | _ -> ty
 
 /// Substitute types in an IRExpr at all type-bearing positions. Uses
@@ -1564,7 +1988,7 @@ let exprTypeIfKnown (expr: IRExpr) : IRType option =
     | IRVar (_, ty) -> Some ty
     | IRParam (_, _, ty) -> Some ty
     | IRApp (_, _, retType) -> Some retType
-    | IRArrayLit (_, aty) -> Some (IRTArray aty)
+    | IRArrayLit (_, aty) -> Some (mkArrayLike aty)
     | IRLit (IRLitInt _) -> Some (IRTScalar ETInt64)
     | IRLit (IRLitFloat _) -> Some (IRTScalar ETFloat64)
     | IRLit (IRLitBool _) -> Some (IRTScalar ETBool)
@@ -1579,39 +2003,57 @@ let exprTypeIfKnown (expr: IRExpr) : IRType option =
 
 /// Unify a parameter type against an argument type, accumulating
 /// (typeVarId, concreteType) bindings. Walks pairs structurally:
-/// IRTArray vs IRTArray pairs ElemType, IRTTuple pairs elementwise,
-/// IRTFunc pairs args and ret. An IRTInfer on the param side absorbs
-/// whatever's on the arg side. This is one-sided (not full unification)
-/// because at HM call sites the arg type is fully concrete.
+/// ArrayElem pairs ElemType, IRTTuple pairs elementwise, FuncElem
+/// pairs args and ret. An IRTInfer on the param side absorbs whatever's
+/// on the arg side. This is one-sided (not full unification) because at
+/// HM call sites the arg type is fully concrete.
 let rec unifyParamWithArg (paramTy: IRType) (argTy: IRType) (acc: Map<int, IRType>) : Map<int, IRType> =
     match paramTy, argTy with
     | IRTInfer n, t when not (acc.ContainsKey n) -> Map.add n t acc
     | IRTInfer n, t when acc.[n] = t -> acc  // Consistent reuse — fine
     | IRTInfer _, _ -> acc  // Inconsistent — leave as-is; the IR validator will catch it
-    | IRTArray pa, IRTArray aa ->
+    | ArrayElem pa, ArrayElem aa ->
         unifyParamWithArg pa.ElemType aa.ElemType acc
     | IRTTuple pts, IRTTuple ats when pts.Length = ats.Length ->
         List.zip pts ats |> List.fold (fun m (p, a) -> unifyParamWithArg p a m) acc
-    | IRTFunc (pas, pr), IRTFunc (aas, ar) when pas.Length = aas.Length ->
+    | FuncElem (pas, pr), FuncElem (aas, ar) when pas.Length = aas.Length ->
+        // FuncElem matches IRTArrow with all-SVal slots (function form).
         let acc' = List.zip pas aas |> List.fold (fun m (p, a) -> unifyParamWithArg p a m) acc
         unifyParamWithArg pr ar acc'
     | IRTComputation pt, IRTComputation at -> unifyParamWithArg pt at acc
     | IRTPoly (pb, _), IRTPoly (ab, _) -> unifyParamWithArg pb ab acc
     | IRTUnitAnnotated (pi, _), IRTUnitAnnotated (ai, _) -> unifyParamWithArg pi ai acc
+    | IRTIdxTagged (pi, _), IRTIdxTagged (ai, _) -> unifyParamWithArg pi ai acc
+    | IRTArrow (pSlots, pRet, _), IRTArrow (aSlots, aRet, _) when pSlots.Length = aSlots.Length ->
+        // Generic IRTArrow-vs-IRTArrow: handles arrows with SIdx and/or
+        // SIdxVirt slots (FuncElem above only matched all-SVal arrows).
+        // Identity is ignored for unification — it's metadata, not type.
+        let unifySlot acc' (p, a) =
+            match p, a with
+            | SVal pt, SVal at -> unifyParamWithArg pt at acc'
+            | SIdx _, SIdx _ -> acc'
+            | SIdxVirt _, SIdxVirt _ -> acc'
+            | _ -> acc'
+        let acc' = List.zip pSlots aSlots |> List.fold unifySlot acc
+        unifyParamWithArg pRet aRet acc'
     | _ -> acc  // Concrete types or unhandled compound — no bindings learned
 
 /// Walk a type collecting all IRTInfer IDs found inside (recursively).
 let rec collectInferIds (ty: IRType) : Set<int> =
     match ty with
     | IRTInfer n -> Set.singleton n
-    | IRTArray arr -> collectInferIds arr.ElemType
     | IRTTuple ts -> ts |> List.fold (fun s t -> Set.union s (collectInferIds t)) Set.empty
-    | IRTFunc (args, ret) ->
-        let argIds = args |> List.fold (fun s t -> Set.union s (collectInferIds t)) Set.empty
-        Set.union argIds (collectInferIds ret)
     | IRTComputation t -> collectInferIds t
     | IRTPoly (b, _) -> collectInferIds b
     | IRTUnitAnnotated (i, _) -> collectInferIds i
+    | IRTIdxTagged (i, _) -> collectInferIds i
+    | IRTArrow (slots, ret, _) ->
+        let slotIds =
+            slots |> List.fold (fun s slot ->
+                match slot with
+                | SVal ty -> Set.union s (collectInferIds ty)
+                | SIdx _ | SIdxVirt _ -> s) Set.empty
+        Set.union slotIds (collectInferIds ret)
     | _ -> Set.empty
 
 /// Does this function carry any unresolved type variables in its declared
@@ -1696,8 +2138,6 @@ let specializeHMFunction (func: IRFuncDef) (bindings: Map<int, IRType>) (builder
         | IRTScalar ETString -> "string"
         | IRTScalar ETComplex64 -> "c64"
         | IRTScalar ETComplex128 -> "c128"
-        | IRTScalar (ETAnonIdx _) -> "anonidx"
-        | IRTScalar (ETIndexRef n) -> n
         | IRTNamed n -> n
         | _ -> "T"  // Fallback for compound types — rare in practice
     let suffix =
@@ -1800,7 +2240,7 @@ let monomorphizeHMFunctions (modul: IRModule) (builder: IRBuilder) : IRModule =
             let sortedBindings = bindings |> Map.toList |> List.sortBy fst
             match Map.tryFind (funcId, sortedBindings) specMap with
             | Some spec ->
-                IRApp (IRVar (spec.Id, IRTFunc (spec.Params |> List.map (fun p -> p.Type), spec.RetType)),
+                IRApp (IRVar (spec.Id, mkFuncArrow (spec.Params |> List.map (fun p -> p.Type)) spec.RetType),
                        args, spec.RetType)
             | None -> e
         | _ -> e
@@ -2206,24 +2646,44 @@ let specializeFunction (func: IRFuncDef) (arities: int list) (builder: IRBuilder
 /// hit; if a fallback ever fires in practice, the resulting IRVar's type
 /// would be wrong and a downstream codegen step would surface it.
 /// Map from struct name to its fields, used by liftInferType for IRFieldAccess
-/// resolution. Built once at the entry to liftInlineFormsModule and threaded
-/// through. A mutable cell because liftExpr is recursive over many cases and
-/// passing through every signature would be noisy; the map is set at module-
-/// entry and read-only thereafter.
-let private structFieldsCache : System.Collections.Generic.Dictionary<string, (string * IRType) list> =
-    System.Collections.Generic.Dictionary<string, (string * IRType) list>()
+/// resolution. Built at the entry to liftInlineFormsModule and used throughout
+/// the same lift-pass invocation.
+///
+/// Thread-safety: the test runner uses `Array.Parallel.mapi` to compile
+/// tests in parallel. With a plain module-level mutable Dictionary, one
+/// test's `setStructFieldsCache` would wipe another concurrent test's
+/// cache state — causing intermittent `IRTUnit` results from
+/// `tryLookupFieldType` and downstream codegen errors (see the
+/// `Struct Array With Array Field` regression). Wrapping the cache in
+/// `AsyncLocal<T>` and assigning a fresh Dictionary per set call gives
+/// each task its own instance.
+let private structFieldsCacheStorage =
+    System.Threading.AsyncLocal<System.Collections.Generic.Dictionary<string, (string * IRType) list>>()
+
+let private getStructFieldsCache () : System.Collections.Generic.Dictionary<string, (string * IRType) list> =
+    let v = structFieldsCacheStorage.Value
+    if isNull v then
+        let fresh = System.Collections.Generic.Dictionary<string, (string * IRType) list>()
+        structFieldsCacheStorage.Value <- fresh
+        fresh
+    else v
 
 let setStructFieldsCache (types: IRTypeDef list) =
-    structFieldsCache.Clear()
+    // Create a fresh Dictionary for this async context — do not reuse and
+    // .Clear() a shared instance, since other tasks may hold the same
+    // reference from earlier in the parallel test run.
+    let cache = System.Collections.Generic.Dictionary<string, (string * IRType) list>()
     for td in types do
         match td with
-        | IRTDStruct (name, fields, _) -> structFieldsCache.[name] <- fields
+        | IRTDStruct (name, fields, _) -> cache.[name] <- fields
         | _ -> ()
+    structFieldsCacheStorage.Value <- cache
 
 let tryLookupFieldType (objType: IRType) (fieldName: string) : IRType option =
     match objType with
     | IRTNamed structName ->
-        match structFieldsCache.TryGetValue(structName) with
+        let cache = getStructFieldsCache ()
+        match cache.TryGetValue(structName) with
         | true, fields ->
             fields |> List.tryFind (fun (n, _) -> n = fieldName) |> Option.map snd
         | false, _ -> None
@@ -2234,7 +2694,7 @@ let rec liftInferType (expr: IRExpr) : IRType =
     | IRVar (_, ty) -> ty
     | IRParam (_, _, ty) -> ty
     | IRApp (_, _, retTy) -> retTy
-    | IRArrayLit (_, arrTy) -> IRTArray arrTy
+    | IRArrayLit (_, arrTy) -> mkArrayLike arrTy
     | IRMask (arr, _) -> liftInferType arr
     | IRSort (arr, _) -> liftInferType arr
     | IRIntersect (a, _) -> liftInferType a
@@ -2244,8 +2704,8 @@ let rec liftInferType (expr: IRExpr) : IRType =
     | IRLet (_, _, body) -> liftInferType body
     | IRIndex (arr, idxs, _) ->
         match liftInferType arr with
-        | IRTArray a when idxs.Length >= a.IndexTypes.Length -> a.ElemType
-        | IRTArray a -> IRTArray { a with IndexTypes = a.IndexTypes |> List.skip idxs.Length }
+        | ArrayElem a when idxs.Length >= a.IndexTypes.Length -> a.ElemType
+        | ArrayElem a -> mkArrayLike { a with IndexTypes = a.IndexTypes |> List.skip idxs.Length }
         | t -> t
     | IRTupleProj (e, i, _) ->
         match liftInferType e with
@@ -2305,7 +2765,7 @@ let private isArrayFieldAccess (e: IRExpr) : bool =
     match e with
     | IRFieldAccess _ ->
         match liftInferType e with
-        | IRTArray _ -> true
+        | ArrayElem _ -> true
         | _ -> false
     | _ -> false
 
@@ -2341,7 +2801,7 @@ let liftChildIncludingArrayLit (builder: IRBuilder) (child: IRExpr) : (IRId * IR
     match inner with
     | IRArrayLit (_, arrTy) ->
         let id = builder.FreshId()
-        let ty = IRTArray arrTy
+        let ty = mkArrayLike arrTy
         (peeled @ [(id, ty, inner)], IRVar (id, ty))
     | e when isInlineForm e ->
         let id = builder.FreshId()
@@ -2686,21 +3146,8 @@ let rec ppIRType = function
     | IRTScalar ETBool -> "Bool"
     | IRTScalar ETUnit -> "Void"
     | IRTScalar ETString -> "String"
-    | IRTScalar (ETIndexRef name) -> name
-    | IRTScalar (ETAnonIdx (_, extent)) ->
-        let extentStr =
-            match extent with
-            | IRLit (IRLitInt n) -> string n
-            | IRParam (name, _, _) -> name
-            | _ -> "?"
-        sprintf "Idx<%s>" extentStr
-    | IRTArray arr ->
-        let indices = arr.IndexTypes |> List.map ppIndexType |> String.concat ", "
-        sprintf "Array<%s like %s>" (ppIRType arr.ElemType) indices
     | IRTTuple ts ->
         sprintf "(%s)" (ts |> List.map ppIRType |> String.concat ", ")
-    | IRTFunc (args, ret) ->
-        sprintf "(%s) -> %s" (args |> List.map ppIRType |> String.concat ", ") (ppIRType ret)
     | IRTLoop lt ->
         match lt.Kind with
         | LKMethod -> sprintf "MethodLoop<%d>" (lt.Arity |> Option.defaultValue 0)
@@ -2710,10 +3157,56 @@ let rec ppIRType = function
     | IRTPoly (base', var) -> sprintf "Poly<%s, %s>" (ppIRType base') var
     | IRTNat (Some n) -> sprintf "Nat<%d>" n
     | IRTNat None -> "Nat<?>"
+    | IRTIdxTagged (inner, idxRef) ->
+        // Conventional form: when the inner is the typical int64 backing,
+        // render compactly as "Nat<I>" (parallel to "Float<meters>"); for
+        // other inner types, show both ("(inner)<I>") to surface the
+        // wrapper shape.
+        let tagStr =
+            match idxRef with
+            | IRefNamed name -> name
+            | IRefAnon (id, extent) ->
+                let extentStr =
+                    match extent with
+                    | IRLit (IRLitInt n) -> sprintf "%d" n
+                    | IRParam (name, _, _) -> name
+                    | IRVar (vid, _) -> sprintf "v%d" vid
+                    | _ -> "?"
+                sprintf "Idx<%s>#%d" extentStr id
+        match inner with
+        | IRTScalar ETInt64 | IRTScalar ETInt32 -> sprintf "Nat<%s>" tagStr
+        | other -> sprintf "(%s)<%s>" (ppIRType other) tagStr
     | IRTNamed name -> name  // Named types print as themselves
     | IRTInfer id -> sprintf "T?%d" id
     | IRTUnitAnnotated (inner, units) -> sprintf "%s<%s>" (ppIRType inner) (ppUnitSig units)
     | IRTGroupKeys (outerIdx, sourceIdx, _) -> sprintf "GroupKeys<%s, %s>" (ppIndexType outerIdx) (ppIndexType sourceIdx)
+    | IRTArrow (slots, result, identity) ->
+        // Renders the unified arrow form. For array-shaped arrows (all-SIdx
+        // or all-SIdxVirt with non-empty slots), use the user-friendly
+        // "Array<elem like indices>" rendering — same form as the legacy
+        // IRTArray printer, which keeps error messages recognizable. Other
+        // shapes (functions, mixed slots) get the canonical "Arrow<...>" form.
+        let isAllStored = not slots.IsEmpty && slots |> List.forall (function SIdx _ -> true | _ -> false)
+        let isAllVirtual = not slots.IsEmpty && slots |> List.forall (function SIdxVirt _ -> true | _ -> false)
+        if isAllStored || isAllVirtual then
+            let indices =
+                slots |> List.map (function
+                    | SIdx i | SIdxVirt i -> ppIndexType i
+                    | _ -> failwith "unreachable")
+                |> String.concat ", "
+            sprintf "Array<%s like %s>" (ppIRType result) indices
+        else
+            let slotStr =
+                slots |> List.map (function
+                    | SIdx idx -> sprintf "Idx<%s>" (ppIndexType idx)
+                    | SIdxVirt idx -> sprintf "VirtIdx<%s>" (ppIndexType idx)
+                    | SVal ty -> ppIRType ty)
+                |> String.concat ", "
+            let idStr =
+                match identity with
+                | Some _ -> " [id]"
+                | None -> ""
+            sprintf "Arrow<%s -> %s>%s" slotStr (ppIRType result) idStr
 
 and ppIndexType (idx: IRIndexType) =
     // Inline extent printing since ppIRExpr is defined later
@@ -2744,7 +3237,7 @@ let indexNameMap (modul: IRModule) : Map<IRId, string> =
 
 /// Context-aware pretty-printers that resolve named index types
 let rec ppIRTypeIn (names: Map<IRId, string>) = function
-    | IRTArray arr ->
+    | ArrayElem arr ->
         let indices = arr.IndexTypes |> List.map (ppIndexTypeIn names) |> String.concat ", "
         sprintf "Array<%s, %s>" (ppIRTypeIn names arr.ElemType) indices
     | other -> ppIRType other
@@ -3020,7 +3513,7 @@ let rec collectTypesInExpr (expr: IRExpr) : IRType list =
         | IRTuple elems -> elems |> List.collect go
         | IRComplex (re, im) -> go re @ go im
         | IRTupleProj (e, _, _) -> go e
-        | IRArrayLit (elems, arrTy) -> [IRTArray arrTy] @ (elems |> List.collect go)
+        | IRArrayLit (elems, arrTy) -> [mkArrayLike arrTy] @ (elems |> List.collect go)
         | IRIndex (arr, idxs, _) -> go arr @ (idxs |> List.collect go)
         | IRFieldAccess (obj, _) -> go obj
         | IRStructLit (_, fields) -> fields |> List.collect (snd >> go)
@@ -3050,18 +3543,19 @@ let rec collectTypesInExpr (expr: IRExpr) : IRType list =
 let rec containsInfer (ty: IRType) : int option =
     match ty with
     | IRTInfer id -> Some id
-    | IRTArray arr ->
-        // Phase B2: ElemType is IRType, so recurse directly. Also check
-        // index extents — they're IRExpr not IRType so a separate walk
-        // would be needed; for now we check elem type only (consistent
-        // with prior behavior, which never actually walked index types
-        // due to the bug fixed in S1).
-        containsInfer arr.ElemType
     | IRTTuple ts -> ts |> List.tryPick containsInfer
-    | IRTFunc (args, ret) -> (args @ [ret]) |> List.tryPick containsInfer
     | IRTComputation inner -> containsInfer inner
     | IRTUnitAnnotated (inner, _) -> containsInfer inner
+    | IRTIdxTagged (inner, _) -> containsInfer inner
     | IRTPoly (inner, _) -> containsInfer inner
+    | IRTArrow (slots, ret, _) ->
+        let slotInfer =
+            slots |> List.tryPick (function
+                | SVal ty -> containsInfer ty
+                | SIdx _ | SIdxVirt _ -> None)
+        match slotInfer with
+        | Some _ -> slotInfer
+        | None -> containsInfer ret
     | _ -> None
 
 /// Collect all VarIds defined (brought into scope) by an expression

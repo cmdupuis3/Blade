@@ -551,6 +551,46 @@ let r: Array<Float64 like DepIdx<Idx<3>, tri_extent>> = [
 // EXPECT: r = [1, 2, 3, 4, 5, 6]
 """
 
+// ============================================================================
+// Nominal index value tests
+// ============================================================================
+//
+// These exercise the post-Option-C handling of named (nominal) index types
+// at the value level: how the typechecker tags values, how step 5's
+// indexing check accepts matching tags, and how iteration-tagging makes
+// the common kernel-over-virtual-array pattern work without explicit
+// annotations on the kernel parameter.
+
+let test_iter_tag_named_range = """
+// Iteration-tagging via range<NamedIdx>: the virtual array's element
+// type is Nat<Lat>, so the lambda parameter `i` is inferred as a
+// Lat-tagged value. Step 5's tag check on A(i) then matches the array's
+// LatIdx slot tag without needing an explicit annotation on `i`.
+//
+// This is the practical payoff of iteration-tagging — the common
+// pattern of "iterate over an index space and look up sibling arrays"
+// typechecks naturally.
+type Lat = Idx<3>
+let A: Array<Float64 like Lat> = [10.0, 20.0, 30.0]
+let r = method_for(range<Lat>) <@> lambda(i) -> A(i) * 2.0 |> compute
+// EXPECT: r = [20, 40, 60]
+"""
+
+let test_named_idx_explicit_cast_index = """
+// Expression-level type cast `(expr : NamedIdx)` produces a tagged
+// Nat<NamedIdx> value via the literal-coercion rule in checkExpr
+// (§4.18.3). The expression-position cast bypasses the IndexType
+// validator (which only constrains declaration-level positions),
+// giving a way to construct a tagged value outside static function
+// signatures.
+//
+// Indexing with a matching-tag value succeeds under step 5's check.
+type Lat = Idx<3>
+let A: Array<Float64 like Lat> = [10.0, 20.0, 30.0]
+let v = A((1 : Lat))
+// EXPECT: v = 20
+"""
+
 
 /// Index type tests (AntisymIdx, HermitianIdx)
 let indexTypeTests = [
@@ -593,4 +633,6 @@ let indexTypeTests = [
     ("Idx Value Alias Chain Enum", test_idx_value_alias_chain_enum)
     ("Idx Value Alias Chain DepIdx", test_idx_value_alias_chain_depidx)
     ("DepIdx Eta-Reduced Value", test_depidx_eta_reduced_value)
+    ("Nominal: Iter Tag Named Range", test_iter_tag_named_range)
+    ("Nominal: Explicit Cast Index", test_named_idx_explicit_cast_index)
 ]

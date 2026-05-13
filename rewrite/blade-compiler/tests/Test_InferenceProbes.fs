@@ -169,6 +169,22 @@ let probe_v9_enumidx_mixed_inline = """
 let codes: Array<Float64 like EnumIdx<[1, "two"]>> = [1.0, 2.0]
 """
 
+let probe_v10_cross_tag_index_mismatch = """
+// Step 5 (Option C, conservative) tag check: indexing an array whose slot
+// has a user-named tag with a value bearing a *different* named tag is a
+// type error. Tests the "real teeth" of §4.18.2's nominal-typing discipline.
+//
+// Lat and Lon are two distinct named index types both backed by Idx<3>.
+// Structural extent equality is irrelevant — nominal tags differ, so the
+// indexing is rejected. The (1 : Lon) cast produces a Lon-tagged value
+// via the literal-coercion rule; A's slot expects Lat; mismatch.
+type Lat = Idx<3>
+type Lon = Idx<3>
+let A: Array<Float64 like Lat> = [10.0, 20.0, 30.0]
+let v = A((1 : Lon))
+// EXPECT: typecheck failure — "Array index tag mismatch: slot expects 'Lat'..."
+"""
+
 let inferenceProbes = [
     ("Inference: Unannotated Extents", probe_a_extents_unannotated)
     ("Inference: Unannotated Mask", probe_b_mask_unannotated)
@@ -185,4 +201,5 @@ let inferenceProbes = [
     ("Validator: Runtime Idx As Static Return (rejects)", probe_v7_runtime_idx_static_fn_return)
     ("Validator: EnumIdx Mixed Values (rejects)", probe_v8_enumidx_mixed_values)
     ("Validator: EnumIdx Mixed Values Inline (rejects)", probe_v9_enumidx_mixed_inline)
+    ("Nominal: Cross-Tag Index Mismatch (rejects)", probe_v10_cross_tag_index_mismatch)
 ]
