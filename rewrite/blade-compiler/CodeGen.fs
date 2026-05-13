@@ -37,14 +37,35 @@ type CodeGenContext = {
     Warnings: string list ref
 }
 
-/// Module-level expression warnings collector.
-/// exprToCpp is pure (returns string) so it can't use CodeGenContext directly.
-/// This collects warnings from exprToCpp calls and is synced into CodeGenContext.
-let exprWarnings : string list ref = ref []
+/// Module-level expression warnings collector. exprToCpp is pure (returns
+/// string) so it can't use CodeGenContext directly. This collects warnings
+/// from exprToCpp calls and is synced into CodeGenContext.
+///
+/// Thread-safety: like the struct caches, this is wrapped in `AsyncLocal<T>`
+/// so each parallel test task gets its own ref cell. With a shared
+/// `ref []` and parallel test execution, appends from one task would
+/// interleave with resets from another, losing or duplicating warnings.
+/// Each task's `exprWarningsCell()` returns its own per-flow ref instance.
+let private exprWarningsStorage =
+    System.Threading.AsyncLocal<string list ref>()
+
+let exprWarningsCell () : string list ref =
+    let v = exprWarningsStorage.Value
+    // Box to obj before isNull: F# enforces non-nullability on its own
+    // `Ref<T>` record type, even though the CLR-level default is null
+    // when AsyncLocal hasn't been assigned. The Dictionary-based caches
+    // don't need this dance because Dictionary is a BCL class that F#
+    // treats as nullable.
+    if isNull (box v) then
+        let fresh = ref []
+        exprWarningsStorage.Value <- fresh
+        fresh
+    else v
 
 /// Record an expression-level warning and return a C++ expression that causes a compile error.
 let exprError (msg: string) : string =
-    exprWarnings.Value <- exprWarnings.Value @ [msg]
+    let cell = exprWarningsCell ()
+    cell.Value <- cell.Value @ [msg]
     sprintf "BLADE_CODEGEN_ERROR_%s" (msg.Replace(" ", "_").Replace("'", "").Replace("(", "").Replace(")", "").Replace(",", "").Replace(":", "").Replace("\"", "").ToUpper())
 
 /// Check if an expression is unit/void-typed (should not generate a value)
@@ -253,7 +274,6 @@ let rec inferExprType (expr: IRExpr) : IRType =
         | [] -> IRTUnit
     | IRIndex (arr, indices, _) ->
         // Indexing peels dimensions; full indexing yields the element type.
-        // Phase B2: arrTy.ElemType is IRType; return directly.
         match inferExprType arr with
         | ArrayElem arrTy when indices.Length >= arrTy.IndexTypes.Length -> arrTy.ElemType
         | ArrayElem arrTy -> mkArrayLike { arrTy with IndexTypes = arrTy.IndexTypes |> List.skip indices.Length }
@@ -284,31 +304,27 @@ let rec inferExprType (expr: IRExpr) : IRType =
     | IROpaqueExtent -> IRTScalar ETInt64
     | IRRange _ -> IRTScalar ETInt64
     | IRFieldAccess (obj, field) ->
-        // Phase D: resolve via codegenStructFieldsCache (async-local;
-        // populated at genModule entry).
+        // Resolve via codegenStructFieldsCache, populated per-task at
+        // genModule entry (async-local for parallel test safety).
         //
-        // Fallback to IR.fs's liftInferType: defensive backup in case
-        // codegen's cache lookup misses an entry that IR.fs's cache has
-        // (or vice versa). The historical motivation was the parallel
-        // test-runner race condition on these caches (see Struct Array
-        // With Array Field regression history) — fixed by making both
-        // caches `AsyncLocal<T>`. The fallback remains as belt-and-suspenders
-        // for the case where either cache is, for any future reason,
-        // unpopulated when an IRFieldAccess is processed.
-        let primary =
-            match inferExprType obj with
-            | IRTNamed structName ->
-                let cache = getCodegenStructFieldsCache ()
-                match cache.TryGetValue(structName) with
-                | true, fields ->
-                    match fields |> List.tryFind (fun (n, _) -> n = field) |> Option.map snd with
-                    | Some ty -> Some ty
-                    | None -> None
-                | false, _ -> None
-            | _ -> None
-        match primary with
-        | Some ty -> ty
-        | None -> liftInferType expr
+        // No fallback to liftInferType: previously this branch had a
+        // belt-and-suspenders fallback to IR.fs's liftInferType, added
+        // to paper over the parallel cache race (see Struct Array With
+        // Array Field regression history). With both caches now
+        // AsyncLocal'd and reliably populated per task, the fallback
+        // is redundant — if `obj` resolves to a struct name we know,
+        // the lookup succeeds; if it doesn't, returning IRTUnit is the
+        // honest answer.
+        match inferExprType obj with
+        | IRTNamed structName ->
+            let cache = getCodegenStructFieldsCache ()
+            match cache.TryGetValue(structName) with
+            | true, fields ->
+                match fields |> List.tryFind (fun (n, _) -> n = field) |> Option.map snd with
+                | Some ty -> ty
+                | None -> IRTUnit
+            | false, _ -> IRTUnit
+        | _ -> IRTUnit
     | IRFunctorMap (f, c) ->
         // f <$> c: return type is f's return type
         match inferExprType f with
@@ -329,7 +345,49 @@ let rec inferExprType (expr: IRExpr) : IRType =
     | IRGuard (_, body) -> inferExprType body
     | IRMask (arr, _) -> inferExprType arr  // Same elem type, different extent
     | IRIntersect (a, _) | IRUnion (a, _) -> inferExprType a  // Same elem type, different extent
-    | IRGroupBy (v, _) -> inferExprType v  // Placeholder: actual type is rank-2 ragged
+    | IRGroupBy (v, gk) ->
+        // The TypeCheck-side `ExprGroupBy` rule constructs a rank-2 array
+        // type with `__group_outer` + `__group_member` tagged index slots
+        // (see TypeCheck.fs:ExprGroupBy). For let-bound group_by results
+        // — which is the only currently-allowed usage; inline group_by
+        // in method_for() is rejected at codegen entry — the binding's
+        // Type field carries this rank-2 form, and `IRVar` lookups
+        // return it correctly via line 230.
+        //
+        // This branch fires when an IRGroupBy node is consulted
+        // directly (e.g., lifted bindings, future inline support).
+        // Reconstruct the same rank-2 form here so consumers that
+        // pattern-match on shape (ArrayElem, rank checks) see the
+        // correct structure.
+        //
+        // Synthetic IDs (-1, -2): inferExprType has no IRBuilder access,
+        // so we use sentinels. Consumers of inferred types use Tag and
+        // structural shape rather than specific IDs; collisions don't
+        // affect codegen decisions. The same sentinels would appear in
+        // every inferred group_by result, but the typed AST stage
+        // (which DOES use FreshId) is the canonical source — this is
+        // only a recovery path.
+        let valsTy = inferExprType v
+        let gkTy = inferExprType gk
+        match gkTy, valsTy with
+        | IRTGroupKeys (outerIdx, _, _), ArrayElem valsArr ->
+            let outer = { outerIdx with Id = -1; Tag = Some "__group_outer" }
+            let memberIdx = {
+                Id = -2
+                Arity = 1
+                Extent = IRParam ("__groupsz", 0, IRTNat None)
+                Symmetry = SymNone
+                Tag = Some "__group_member"
+                Kind = SDimension
+                Dependencies = []
+            }
+            mkArrayArrow [outer; memberIdx] valsArr.ElemType None
+        | _ ->
+            // Fallback: gk isn't IRTGroupKeys-typed yet or v isn't an
+            // array. Returning vals's type preserves the prior placeholder
+            // behavior — same shape, same element type — so any caller
+            // that was previously satisfied stays satisfied.
+            valsTy
     | IRGroupKeys _ -> IRTUnit  // GroupKeys is an opaque structure, not a runtime value with a simple type
     | IRSort (arr, _) -> inferExprType arr  // Same shape as input — sort preserves length and elem type
     | IRReduce (arr, _) ->
@@ -367,7 +425,7 @@ let arrayRank (arr: IRArrayType) =
     arr.IndexTypes |> List.sumBy (fun i -> i.Arity)
 
 /// Convert an IRType in array-element position to a C++ type string.
-/// Phase B2: dispatches via active patterns.
+/// Dispatches via active patterns:
 ///   - PrimElem / AnyPrimElem: render the primitive (with units erased).
 ///   - NamedElem: render the struct/sum's name. Codegen for nominal-typed
 ///     element arrays is still future work (the `promote<T, k>` template
@@ -391,23 +449,26 @@ let rec elemTypeToCpp (ty: IRType) : string =
     | NamedElem "String" -> "std::string"
     | NamedElem name -> name
     | InferElem id ->
-        exprWarnings.Value <- exprWarnings.Value @
+        let cell = exprWarningsCell ()
+        cell.Value <- cell.Value @
             [sprintf "elemTypeToCpp: unresolved type variable T?%d in element position" id]
         sprintf "BLADE_UNRESOLVED_ELEM_TYPE_%d" id
     | PolyElem (_, var) ->
-        exprWarnings.Value <- exprWarnings.Value @
+        let cell = exprWarningsCell ()
+        cell.Value <- cell.Value @
             [sprintf "elemTypeToCpp: PolyElem<%s> in element position is not yet implemented" var]
         "BLADE_NOT_IMPLEMENTED_POLY_ELEM"
     | InvalidElem ->
-        exprWarnings.Value <- exprWarnings.Value @
+        let cell = exprWarningsCell ()
+        cell.Value <- cell.Value @
             [sprintf "elemTypeToCpp: invalid type in element position: %A" ty]
         "BLADE_INVALID_ELEM_TYPE"
     | _ ->
         // FuncElem / ArrayElem / TupleElem / other: delegate to irTypeToCpp.
         irTypeToCpp ty
 
-/// Convert IR type to C++ type string. Phase B2: mutually recursive with
-/// `elemTypeToCpp` because the array element type is now an arbitrary IRType.
+/// Convert IR type to C++ type string. Mutually recursive with
+/// `elemTypeToCpp` because the array element type is itself an IRType.
 and irTypeToCpp = function
     | IRTScalar et -> primTypeToCpp et
     | IRTTuple ts -> sprintf "std::tuple<%s>" (ts |> List.map irTypeToCpp |> String.concat ", ")
@@ -434,7 +495,8 @@ and irTypeToCpp = function
     | IRTNamed "String" -> "std::string"  // Blade String → C++ std::string
     | IRTNamed name -> name  // Named types (structs, etc.) use their name directly
     | IRTInfer n ->
-        exprWarnings.Value <- exprWarnings.Value @ [sprintf "unresolved type variable _%d reached codegen" n]
+        let cell = exprWarningsCell ()
+        cell.Value <- cell.Value @ [sprintf "unresolved type variable _%d reached codegen" n]
         sprintf "BLADE_UNRESOLVED_TYPE_%d" n
     | IRTUnitAnnotated (inner, _) -> irTypeToCpp inner  // Units erase at codegen
     | IRTGroupKeys _ -> "void*"  // GroupKeys is an opaque runtime structure
@@ -486,7 +548,8 @@ and irTypeToCpp = function
             }
             sprintf "promote<%s, %d>::type" (elemTypeToCpp arr.ElemType) (arrayRank arr)
         else
-            exprWarnings.Value <- exprWarnings.Value @ ["IRTArrow with mixed slot kinds reached codegen (no language construct produces these yet)"]
+            let cell = exprWarningsCell ()
+            cell.Value <- cell.Value @ ["IRTArrow with mixed slot kinds reached codegen (no language construct produces these yet)"]
             "BLADE_UNSUPPORTED_ARROW_TYPE"
 
 /// Render a type for use inside a std::function<...> signature (i.e. as a
@@ -519,7 +582,7 @@ and arrowSlotTypeForFuncSig (ty: IRType) : string =
 /// warning and emit a `#error` line as the rendered code. The point is to fail
 /// loudly rather than silently emit code that might miscompile — e.g., indexing
 /// with a float, or narrowing int64 keys to double in a sort comparator.
-/// Returns (elemType as IRType, optional error code). Phase B2.
+/// Returns (elemType as IRType, optional error code).
 let inferElemTypeStrict (ctx: CodeGenContext) (ind: string) (expr: IRExpr) (opName: string) : IRType * string list =
     match inferExprType expr with
     | ArrayElem arr -> (arr.ElemType, [])
@@ -725,7 +788,7 @@ let rec exprToCpp (names: Map<IRId, string>) (expr: IRExpr) : string =
         let idxStr = indices |> List.map (fun i -> sprintf "[%s]" (exprToCpp names i)) |> String.concat ""
         sprintf "%s%s" arrStr idxStr
     | IRApp (func, args, _) ->
-        // v24c: function signatures take Array<T,N> / Ragged<T> wrappers
+        // Function signatures take Array<T,N> / Ragged<T> wrappers
         // natively, one argument per Blade param. Array args pass through
         // as-is (the wrapper carries its own shape via .extents/.lens/
         // .offsets); no companion-arg synthesis. Non-array args render
@@ -864,7 +927,7 @@ let rec exprToCpp (names: Map<IRId, string>) (expr: IRExpr) : string =
                 |> Map.add lInfo.Params.[1].VarId bName
                 |> fun m -> lInfo.Captures |> List.fold (fun acc c -> Map.add c.Id c.Name acc) m
             let kStr = exprToCpp kNames lInfo.Body
-            // v24d-1: consumers read shape via `.extents` member.
+            // Consumers read shape via `.extents` member of the wrapper.
             let guard =
                 if isStaticallyNonEmpty then ""
                 else sprintf "if (%s.extents[0] == 0) { std::cerr << \"reduce: empty array, no reduction possible\" << std::endl; std::abort(); } " arrStr
@@ -1815,8 +1878,9 @@ let genRuntimeHeader () : string =
     readCppRuntimeHeader "nested_array_utilities.hpp"
 
 /// Generate the array-types runtime header (read from cpp/nested_array_types.hpp).
-/// Phase D / v24 wrapper structs (Array<T,N>, Ragged<T>). Same emission
-/// pattern as genRuntimeHeader.
+/// Contains the wrapper structs (Array<T,N>, Ragged<T>, RaggedRow<T>) that
+/// carry shape metadata alongside the data pointer. Same emission pattern
+/// as genRuntimeHeader.
 let genRuntimeArrayTypesHeader () : string =
     readCppRuntimeHeader "nested_array_types.hpp"
 
@@ -2159,15 +2223,24 @@ let genScalarBinding (ctx: CodeGenContext) (name: string) (value: IRExpr) (ty: I
             let inferred = inferExprType value
             if inferred = IRTUnit then ty else inferred
         | t -> t
-    // The v24d-1 auto-fallback (which emitted `auto <name> = <expr>;` when
+    // A previous auto-fallback (which emitted `auto <name> = <expr>;` when
     // a binding's resolvedTy was IRTUnit and the RHS was a shape-bearing
     // expression like IRMask/IRSort/IRVar/IRFieldAccess/IRIntersect/IRUnion)
-    // was removed after probe testing confirmed those RHS shapes always
-    // resolve to a non-IRTUnit type by this point. If a future regression
-    // ever reaches this branch with a shape-bearing IRTUnit binding, the
-    // expression-statement form below would produce invalid C++ — that's
-    // intentional: a regression should surface as a compile error rather
-    // than be papered over with auto-deduction.
+    // was removed after probe testing suggested those RHS shapes always
+    // resolve to a non-IRTUnit type by this point.
+    //
+    // History note: that conclusion turned out to be conditional, not
+    // absolute. Under parallel test execution, the codegen struct-fields
+    // cache was racing with the IR-side cache, causing intermittent
+    // IRTUnit results for IRFieldAccess on struct fields. The race was
+    // fixed by making both caches AsyncLocal'd per task; the auto-fallback
+    // is correctly absent post-fix because the cache reliably returns the
+    // right type. If a future regression reaches this branch with a
+    // shape-bearing IRTUnit binding, the expression-statement form below
+    // will produce invalid C++ — that's intentional: such a regression
+    // indicates a real bug in upstream resolution (cache, type
+    // propagation, etc.) and should be diagnosed there rather than
+    // papered over with auto-deduction here.
     match resolvedTy with
     | IRTUnit ->
         if isUnitExpr value then 
@@ -2177,18 +2250,17 @@ let genScalarBinding (ctx: CodeGenContext) (name: string) (value: IRExpr) (ty: I
             let valueStr = exprToCppCtx ctx value
             [sprintf "%s%s;" ind valueStr]
     | _ ->
-        // v24b: array-typed bindings render as Array<T,N> / Ragged<T>
-        // wrappers when the RHS itself produces a wrapper. For RHSes that
-        // produce bare pointers (IRIndex peeling a sub-array, IRApp where
-        // the function still returns T* per v24c-deferred signatures),
-        // render bare to avoid a brace-init mismatch.
+        // Array-typed bindings render as Array<T,N> / Ragged<T> wrappers
+        // when the RHS itself produces a wrapper. For RHSes that produce
+        // bare pointers (IRIndex peeling a sub-array, IRApp where the
+        // callee returns T*), render bare to avoid a brace-init mismatch.
         //
-        // Producers that yield wrappers (post-v24b): IRFieldAccess,
-        // IRArrayLit (via genArrayLiteral, but those go through a
-        // different binding path), IRVar that resolves to a wrapper,
+        // Producers that yield wrappers: IRFieldAccess, IRArrayLit (via
+        // genArrayLiteral, but those go through a different binding
+        // path), IRVar that resolves to a wrapper,
         // IRMask/IRSort/IRIntersect/IRUnion (via materializeInlineForm).
         // IRApp is also included — function calls returning IRTArray emit
-        // `Array<T, N>` at the function-decl level (genFuncDef:4181), so
+        // `Array<T, N>` at the function-decl level (genFuncDef), so
         // their let-bound results must use the same wrapper type, not the
         // raw `promote<T, N>::type` storage pointer that would lose
         // `.extents` and silently decay to the data pointer.
@@ -2216,7 +2288,7 @@ let genScalarBinding (ctx: CodeGenContext) (name: string) (value: IRExpr) (ty: I
 /// Build a simple (no symmetry) ApplyInfo for applying a unary kernel to arrays.
 /// Used by >>@ and @>> to construct stage-2 pipeline applications.
 let defaultIndexType () = { Id = 0; Arity = 1; Extent = IRLit (IRLitInt 0); Symmetry = SymNone; Tag = None; Kind = SDimension; Dependencies = [] }
-/// Build a default IRArrayType. Phase B2: takes an IRType for the elem type.
+/// Build a default IRArrayType.
 let defaultArrayType (et: IRType) = { ElemType = et; IndexTypes = [defaultIndexType ()]; IsVirtual = false; Identity = None }
 
 let buildSimpleApplyInfo (arrays: IRExpr list) (kernel: IRExpr) (outputType: IRType) : ApplyInfo =
@@ -2339,7 +2411,6 @@ let genApplyCombinator (ctx: CodeGenContext) (name: string) (info: ApplyInfo) (b
                         // Element type of the inner sub-array (for the param binding type).
                         let arrElemStr = elemTypeToCpp arrType.ElemType
                         // Element type of the OUTPUT (per-row result).
-                        // Phase B2: all branches return IRType.
                         let outElem =
                             match info.OutputType with
                             | ArrayElem a -> a.ElemType
@@ -2364,7 +2435,7 @@ let genApplyCombinator (ctx: CodeGenContext) (name: string) (info: ApplyInfo) (b
                             sprintf "%ssize_t %s_extents[1] = {%s};" ind name ngroupsExpr
                             sprintf "%sArray<%s, 1> %s = { new %s[%s], %s_extents };" ind outElemStr name outElemStr ngroupsExpr name
                             sprintf "%sfor (size_t __g = 0; __g < %s; __g++) {" ind ngroupsExpr
-                            // v24d-1: peeled row is wrapper-typed so the kernel
+                            // Peeled row is wrapper-typed so the kernel
                             // can iterate via .extents and the wrapper's
                             // operator[]. The local _extents declaration
                             // remains as the wrapper's extents pointer source.
@@ -3046,7 +3117,7 @@ let rec genBinding (ctx: CodeGenContext) (binding: IRBinding) (builder: IRBuilde
         // Outer extent = gk__ngroups; inner is ragged. Track grouped → gk so
         // future ragged-aware iteration can recover offsets.
         //
-        // v24d-1: wrap the outer pointer-array in Array<T*, 1>. The wrapper's
+        // The outer pointer-array is wrapped in Array<T*, 1>. The wrapper's
         // .extents points at the 2-element local size_t array {ngroups, 0};
         // .extents[0] = ngroups, .extents[1] reads 0 (placeholder for the
         // ragged inner). Element type T* keeps `grouped[g]` as a bare row
@@ -3592,9 +3663,9 @@ let rec genBinding (ctx: CodeGenContext) (binding: IRBinding) (builder: IRBuilde
                 (codeL @ [""] @ codeR @ [""] @ code, ctx')
             else
                 // Array choice: allocate result, element-wise combine.
-                // v24d-1: read the source's shape via the wrapper's
-                // .extents member; populate name_extents alias for the
-                // allocate<> template (which still takes a const size_t*).
+                // Read the source's shape via the wrapper's .extents
+                // member; populate name_extents alias for the allocate<>
+                // template (which still takes a const size_t*).
                 let symmVecName = sprintf "%s_symm" nameL     // reuse left's symmetry
                 let extentsAlias = sprintf "%sconst size_t* %s_extents = %s.extents;" ind name nameL
                 let symmAlias = sprintf "%sstatic constexpr const size_t* %s_symm = %s;" ind name symmVecName
@@ -3939,12 +4010,11 @@ let rec genBinding (ctx: CodeGenContext) (binding: IRBinding) (builder: IRBuilde
             let ctx' = { ctx' with DeferredComputations = Map.add binding.Id binding.Value ctx'.DeferredComputations }
             ([sprintf "%s// %s = <deferred computation tuple>" ind name], ctx')
         | IRFieldAccess _ when (match binding.Type with ArrayElem _ -> true | _ -> false) ->
-            // Phase D / v24b: when the value is a struct field of array
-            // v24d-1: when the value is a struct field of array type,
-            // the field itself is already an Array<T,N> / Ragged<T>
-            // wrapper (per genStructDef field rendering). Assigning it
-            // to a wrapper-typed binding copies the wrapper, which
-            // carries its shape via .extents. No companion alias needed.
+            // Struct field of array type: the field itself is already an
+            // Array<T,N> / Ragged<T> wrapper (per genStructDef field
+            // rendering). Assigning it to a wrapper-typed binding copies
+            // the wrapper, which carries its shape via .extents. No
+            // companion alias needed.
             let dataCode = genScalarBinding ctx name binding.Value binding.Type
             let ctx' = addVarName binding.Id name ctx
             (dataCode, ctx')
@@ -4189,7 +4259,7 @@ let genFuncDef (ctx: CodeGenContext) (builder: IRBuilder) (funcDef: IRFuncDef) :
     let ind = indentStr ctx
     let bodyInd = ind + "    "
     
-    // v24d-1: array parameters are wrappers. Body reads shape via
+    // Array parameters are wrappers. Body reads shape via
     // `<name>.extents[d]`, `<name>.lens[d]`, `<name>.offsets[d]`. No need
     // for separate body-level aliases — the wrapper IS the binding.
     let paramList = 
@@ -4232,7 +4302,7 @@ let genFuncDef (ctx: CodeGenContext) (builder: IRBuilder) (funcDef: IRFuncDef) :
 let genFuncDefAsLambda (ctx: CodeGenContext) (funcDef: IRFuncDef) : string list * CodeGenContext =
     let ind = indentStr ctx
     
-    // v24c: array params are wrappers; same approach as genFuncDef.
+    // Array params are wrappers; same approach as genFuncDef.
     let paramList = 
         funcDef.Params 
         |> List.map (fun p -> 
@@ -4323,7 +4393,7 @@ let genModule (modul: IRModule) (builder: IRBuilder) : string list * string list
             | _ -> None)
     
     // Generate forward declarations for all file-scope functions.
-    // v24c: signature uses Array<T,N> / Ragged<T> wrappers, single arg per
+    // Signature uses Array<T,N> / Ragged<T> wrappers, single arg per
     // Blade param. Must match genFuncDef.
     let forwardDecls =
         fileScopeFuncs |> List.map (fun funcDef ->
@@ -4366,16 +4436,17 @@ let genModule (modul: IRModule) (builder: IRBuilder) : string list * string list
         ) (forwardDecls, [], ctx0)
     
     // Merge context warnings into module-level collector
-    exprWarnings.Value <- exprWarnings.Value @ finalCtx.Warnings.Value
+    let cell = exprWarningsCell ()
+    cell.Value <- cell.Value @ finalCtx.Warnings.Value
     
     (funcCode, bindCode)
 
 /// Generate a complete C++ program with main() from an IR module
 let genStructDef (name: string) (fields: (string * IRType) list) (invariant: StructConstraintInfo option) : string list =
     let fieldLines = fields |> List.map (fun (fname, fty) ->
-        // Array-typed fields render as Array<T,N> / Ragged<T> wrappers
-        // (v24b refactor) so the field carries its shape with it. Other
-        // types use the standard irTypeToCpp rendering.
+        // Array-typed fields render as Array<T,N> / Ragged<T> wrappers so
+        // the field carries its shape with it. Other types use the
+        // standard irTypeToCpp rendering.
         let cppTy =
             match fty with
             | ArrayElem arr when isRaggedArrayType arr || isDepIdxArrayType arr ->
@@ -4776,7 +4847,7 @@ let genMainWrapper (testName: string) (bodyIndented: string list) (printCode: st
 /// Generate print statements for all bindings in a module.
 /// Shared by genSelfContainedProgram and genProgramWithExternalRuntime.
 let genMainProgram (modul: IRModule) (testName: string) : string =
-    exprWarnings.Value <- []
+    (exprWarningsCell ()).Value <- []
     let builder = IRBuilder()
     
     let includes = genIncludes ()
@@ -4835,8 +4906,9 @@ let genProgramWithExternalRuntime (modul: IRModule) (testName: string) : string 
 
 /// Generate a self-contained C++ program from an IR program
 let genSelfContainedProgramFromIR (program: IRProgram) (testName: string) : string * string list =
-    // Reset module-level expression warnings
-    exprWarnings.Value <- []
+    // Reset module-level expression warnings (per-task via AsyncLocal cell)
+    let cell = exprWarningsCell ()
+    cell.Value <- []
     let code =
         match program.Modules with
         | [] -> "// Empty program\nint main() { return 0; }\n"
@@ -4853,4 +4925,4 @@ let genSelfContainedProgramFromIR (program: IRProgram) (testName: string) : stri
                     Map.fold (fun a k v -> Map.add k v a) acc m.StaticFunctionUsage) Map.empty
             }
             genSelfContainedProgram merged testName
-    (code, exprWarnings.Value)
+    (code, cell.Value)

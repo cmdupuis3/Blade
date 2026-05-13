@@ -378,6 +378,54 @@ let result = method_for(grouped) <@> lambda(g: Array<Float64 like RaggedIdx<_>>)
 """
 
 // ============================================================================
+// Phase 4 follow-on: additional coverage for gaps surfaced during recon
+// ============================================================================
+
+let test_groupby_enum_string_reduce = """
+// String-EnumIdx + reduce per group. Exercises Case 2 (EnumIdx reverse
+// lookup) with std::string keys, then peels each group and reduces.
+// The reduce kernel sees a Ragged sub-array; the per-group lengths come
+// from the gk's offsets.
+type LandType = EnumIdx<["forest", "urban", "farmland"]>
+type StationIdx = Idx<6>
+let codes: Array<LandType like StationIdx> = ["forest", "urban", "farmland", "forest", "urban", "farmland"]
+let temps: Array<Float64 like StationIdx> = [20.0, 25.0, 30.0, 22.0, 27.0, 32.0]
+let gk = group_keys(codes)
+let grouped = group_by(temps, gk)
+let result = method_for(grouped) <@> lambda(g: Array<Float64 like RaggedIdx<_>>) -> reduce(g, (+)) |> compute
+// EXPECT: result = [42, 52, 62]
+"""
+
+let test_groupby_single_group = """
+// All keys map to a single bucket. Exercises the degenerate-ngroups
+// case: one group containing all elements. ngroups discovered dynamically
+// as 1; the result is a rank-2 ragged array with outer extent 1 and
+// inner extent equal to the input length.
+let region = [0, 0, 0, 0]
+let temps = [1.0, 2.0, 3.0, 4.0]
+let gk = group_keys(region)
+let grouped = group_by(temps, gk)
+let result = method_for(grouped) <@> lambda(g: Array<Float64 like RaggedIdx<_>>) -> reduce(g, (+)) |> compute
+// EXPECT: result = [10]
+"""
+
+let test_groupby_after_method_for = """
+// group_by consuming the output of another combinator. method_for + compute
+// materializes a derived array; that array then flows into group_by as the
+// values input. Exercises the chain
+//   method_for(temps) |> compute  →  group_by(_, gk)  →  method_for(grouped)
+// confirming that group_by accepts the materialized output of an upstream
+// combinator as cleanly as a literal input array would.
+let region = [0, 1, 2, 0, 1, 2]
+let temps = [20.0, 25.0, 30.0, 22.0, 27.0, 32.0]
+let doubled = method_for(temps) <@> lambda(t) -> t * 2.0 |> compute
+let gk = group_keys(region)
+let grouped = group_by(doubled, gk)
+let result = method_for(grouped) <@> lambda(g) -> g(0) |> compute
+// EXPECT: result = [40, 50, 60]
+"""
+
+// ============================================================================
 // Phase 5: sort — Sorted Iteration (NOT YET IMPLEMENTED)
 // ============================================================================
 
@@ -534,6 +582,9 @@ let groupByTests = [
     ("GroupBy Mixed Kernel", test_groupby_mixed_kernel)
     ("GroupBy Sparse Keys Dynamic", test_groupby_sparse_keys_dynamic)
     ("GroupBy Sparse Keys Reduce", test_groupby_sparse_keys_reduce)
+    ("GroupBy Enum String Reduce", test_groupby_enum_string_reduce)
+    ("GroupBy Single Group", test_groupby_single_group)
+    ("GroupBy After Method For", test_groupby_after_method_for)
 ]
 
 /// Phase 5: sort
