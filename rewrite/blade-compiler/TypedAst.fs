@@ -209,7 +209,7 @@ and TypedExprKind =
     | TExprIntersect of TypedExpr * TypedExpr
     | TExprUnion of TypedExpr * TypedExpr
     | TExprGroupBy of values: TypedExpr * grouping: TypedExpr
-    | TExprGroupKeys of keys: TypedExpr
+    | TExprGroupKeys of keys: TypedExpr list
     | TExprSort of array: TypedExpr * key: TypedExpr
     | TExprReduce of array: TypedExpr * kernel: TypedExpr
     | TExprExtents of array: TypedExpr

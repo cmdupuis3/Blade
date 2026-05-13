@@ -1218,10 +1218,11 @@ and parsePrimary (tokens: Token list) : ParseResult<Expr> =
         expect TokRParen afterKeys >>= fun _ remaining ->
         success (ExprGroupBy (vals, keys)) remaining
     
-    // group_keys(keys)
+    // group_keys(keys1, keys2, ...) — single key for ordinary grouping;
+    // multiple keys triggers compound (tuple-keyed) grouping.
     | Some (TokKeyword KwGroupKeys) ->
         advance tokens |> expect TokLParen >>= fun _ afterLParen ->
-        parseExprImpl afterLParen >>= fun keys afterKeys ->
+        sepBy parseExprImpl TokComma afterLParen >>= fun keys afterKeys ->
         expect TokRParen afterKeys >>= fun _ remaining ->
         success (ExprGroupKeys keys) remaining
     

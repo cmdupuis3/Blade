@@ -373,7 +373,7 @@ and IRExpr =
     | IRIntersect of IRExpr * IRExpr          // intersect(A, B) - elements in both
     | IRUnion of IRExpr * IRExpr              // union(A, B) - elements in either
     | IRGroupBy of values: IRExpr * grouping: IRExpr  // group_by(vals, gk) - apply grouping
-    | IRGroupKeys of keys: IRExpr                    // group_keys(keys) - build CSR structure
+    | IRGroupKeys of keys: IRExpr list               // group_keys(keys1, keys2, ...) - CSR grouping; multi-key ⇒ compound dispatch
     | IRSort of array: IRExpr * key: IRExpr          // sort(arr, key) - stable ascending sort by key
     | IRReduce of array: IRExpr * kernel: IRExpr     // reduce(arr, op) - fold innermost dim by kernel
     | IRZip of IRExpr list
@@ -1875,7 +1875,7 @@ let rec mapIRExpr (f: IRExpr -> IRExpr) (expr: IRExpr) : IRExpr =
         | IRIntersect (a, b) -> IRIntersect (m a, m b)
         | IRUnion (a, b) -> IRUnion (m a, m b)
         | IRGroupBy (v, k) -> IRGroupBy (m v, m k)
-        | IRGroupKeys k -> IRGroupKeys (m k)
+        | IRGroupKeys ks -> IRGroupKeys (List.map m ks)
         | IRSort (a, k) -> IRSort (m a, m k)
         | IRReduce (a, k) -> IRReduce (m a, m k)
         | IRPolyIndex (p, i) -> IRPolyIndex (m p, m i)
@@ -2853,7 +2853,7 @@ let rec liftExpr (builder: IRBuilder) (expr: IRExpr) : IRExpr =
     | IRIntersect (a, b) -> IRIntersect (liftExpr builder a, liftExpr builder b)
     | IRUnion (a, b) -> IRUnion (liftExpr builder a, liftExpr builder b)
     | IRGroupBy (v, k) -> IRGroupBy (liftExpr builder v, liftExpr builder k)
-    | IRGroupKeys k -> IRGroupKeys (liftExpr builder k)
+    | IRGroupKeys ks -> IRGroupKeys (List.map (liftExpr builder) ks)
 
     // Single-child consumers where the array slot can hold an inline form
     | IRReduce (arr, kernel) ->
@@ -3476,7 +3476,7 @@ let rec collectVarRefsIR (expr: IRExpr) : Set<IRId> =
     | IRIntersect (a, b) -> Set.union (collectVarRefsIR a) (collectVarRefsIR b)
     | IRUnion (a, b) -> Set.union (collectVarRefsIR a) (collectVarRefsIR b)
     | IRGroupBy (v, k) -> Set.union (collectVarRefsIR v) (collectVarRefsIR k)
-    | IRGroupKeys k -> collectVarRefsIR k
+    | IRGroupKeys ks -> ks |> List.map collectVarRefsIR |> Set.unionMany
     | IRSort (a, k) -> Set.union (collectVarRefsIR a) (collectVarRefsIR k)
     | IRReduce (a, k) -> Set.union (collectVarRefsIR a) (collectVarRefsIR k)
     | IRExtent (a, _) -> collectVarRefsIR a

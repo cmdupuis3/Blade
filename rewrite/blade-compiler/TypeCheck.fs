@@ -1359,7 +1359,7 @@ let rec collectFreeVars (bound: Set<string>) (expr: Expr) : Set<string> =
     | ExprIntersect (a, b) -> Set.union (collectFreeVars bound a) (collectFreeVars bound b)
     | ExprUnion (a, b) -> Set.union (collectFreeVars bound a) (collectFreeVars bound b)
     | ExprGroupBy (v, k) -> Set.union (collectFreeVars bound v) (collectFreeVars bound k)
-    | ExprGroupKeys k -> collectFreeVars bound k
+    | ExprGroupKeys ks -> ks |> List.map (collectFreeVars bound) |> Set.unionMany
     | ExprSort (a, k) -> Set.union (collectFreeVars bound a) (collectFreeVars bound k)
     | ExprReduce (a, k) -> Set.union (collectFreeVars bound a) (collectFreeVars bound k)
     | ExprExtents a -> collectFreeVars bound a
@@ -2134,51 +2134,103 @@ let rec inferExpr (env: TypeEnv) (expr: Expr) : TypeResult<TypedExpr> =
                     let texpr = if isIntersect then TExprIntersect (tA, tB) else TExprUnion (tA, tB)
                     Ok (mkTyped texpr resultType)))))
 
-    // group_keys(keys) — build CSR grouping structure from key array
-    // Returns GroupKeys type carrying outer index type and source index type
+    // group_keys(keys1, keys2, ...) — build CSR grouping structure.
+    // Single key: existing single-keyed grouping (positional / EnumIdx /
+    // dynamic-discovery cases).
+    // Multi-key (≥2): compound grouping. Each (k1, k2, ...) tuple becomes
+    // its own bucket. Discovery is dynamic regardless of any single key's
+    // staticness — even if all components were Idx<N>, the compound shape
+    // is determined by which tuples actually appear in the data.
+    // Precondition: all key arrays share the same outer index (same length;
+    // i-th element of each represents the same record).
     | ExprGroupKeys keys ->
-        inferExpr env keys |> Result.bind (fun tKeys ->
-            requireArrayArg env tKeys "group_keys" |> Result.bind (fun arrTy ->
-                // Source index: from the key array's index types
-                let sourceIdx =
-                    if arrTy.IndexTypes.Length > 0 then arrTy.IndexTypes.[0]
-                    else {
-                        Id = env.Builder.FreshId(); Arity = 1
-                        Extent = IRParam ("__src", 0, IRTNat None)
-                        Symmetry = SymNone; Tag = None
-                        Kind = SDimension; Dependencies = []
-                    }
-                // Outer index: number of groups.
-                // The element type is one of:
-                //   - IRTIdxTagged (_, IRefNamed name): named foreign-key —
-                //     look up target index type for static extent
-                //   - other: dynamic, extent unknown at typecheck time
-                let namedRef =
-                    match arrTy.ElemType with
-                    | IRTIdxTagged (_, IRefNamed name) -> Some name
-                    | _ -> None
-                let (outerIdx, enumValues) =
-                    match namedRef with
-                    | Some name ->
-                        // Semi-static: look up target index type for extent
-                        match lookupTypeDef name env with
-                        | Some (TDIIndexType (_, idx, _)) ->
-                            ({ idx with Id = env.Builder.FreshId(); Tag = Some name }, None)
-                        | Some (TDIEnumIdx (_, idx, values, _)) ->
-                            ({ idx with Id = env.Builder.FreshId(); Tag = Some name }, Some values)
-                        | _ ->
+        match keys with
+        | [] ->
+            Error (Other "group_keys requires at least one key array; got empty argument list")
+        | [singleKey] ->
+            // Existing single-key path, unchanged.
+            inferExpr env singleKey |> Result.bind (fun tKeys ->
+                requireArrayArg env tKeys "group_keys" |> Result.bind (fun arrTy ->
+                    let sourceIdx =
+                        if arrTy.IndexTypes.Length > 0 then arrTy.IndexTypes.[0]
+                        else {
+                            Id = env.Builder.FreshId(); Arity = 1
+                            Extent = IRParam ("__src", 0, IRTNat None)
+                            Symmetry = SymNone; Tag = None
+                            Kind = SDimension; Dependencies = []
+                        }
+                    let namedRef =
+                        match arrTy.ElemType with
+                        | IRTIdxTagged (_, IRefNamed name) -> Some name
+                        | _ -> None
+                    let (outerIdx, enumValues) =
+                        match namedRef with
+                        | Some name ->
+                            match lookupTypeDef name env with
+                            | Some (TDIIndexType (_, idx, _)) ->
+                                ({ idx with Id = env.Builder.FreshId(); Tag = Some name }, None)
+                            | Some (TDIEnumIdx (_, idx, values, _)) ->
+                                ({ idx with Id = env.Builder.FreshId(); Tag = Some name }, Some values)
+                            | _ ->
+                                ({ Id = env.Builder.FreshId(); Arity = 1
+                                   Extent = IRParam ("__ngroups", 0, IRTNat None)
+                                   Symmetry = SymNone; Tag = None
+                                   Kind = SDimension; Dependencies = [] }, None)
+                        | None ->
                             ({ Id = env.Builder.FreshId(); Arity = 1
                                Extent = IRParam ("__ngroups", 0, IRTNat None)
                                Symmetry = SymNone; Tag = None
                                Kind = SDimension; Dependencies = [] }, None)
-                    | None ->
-                        // Dynamic: number of groups unknown until runtime
-                        ({ Id = env.Builder.FreshId(); Arity = 1
-                           Extent = IRParam ("__ngroups", 0, IRTNat None)
-                           Symmetry = SymNone; Tag = None
-                           Kind = SDimension; Dependencies = [] }, None)
-                let gkType = IRTGroupKeys (outerIdx, sourceIdx, enumValues)
-                Ok (mkTyped (TExprGroupKeys tKeys) gkType)))
+                    let gkType = IRTGroupKeys (outerIdx, sourceIdx, enumValues)
+                    Ok (mkTyped (TExprGroupKeys [tKeys]) gkType)))
+        | multipleKeys ->
+            // Compound case: infer all keys, verify shared outer index,
+            // build a GroupKeys result with dynamic compound outer.
+            let inferAll =
+                multipleKeys
+                |> List.fold (fun accRes k ->
+                    accRes |> Result.bind (fun acc ->
+                        inferExpr env k |> Result.bind (fun tk ->
+                            requireArrayArg env tk "group_keys" |> Result.map (fun arrTy ->
+                                acc @ [(tk, arrTy)]))))
+                    (Ok [])
+            inferAll |> Result.bind (fun pairs ->
+                // Precondition check: all key arrays must be rank-1 and
+                // share an outer index. We compare extent expressions
+                // structurally — Blade's typechecker is structural enough
+                // that the same Idx<N> annotation produces equal Extent
+                // values across multiple bindings.
+                let firstSource =
+                    pairs |> List.head |> snd |> fun ty -> ty.IndexTypes.[0]
+                let allShareOuter =
+                    pairs |> List.forall (fun (_, ty) ->
+                        ty.IndexTypes.Length = 1
+                        && ty.IndexTypes.[0].Extent = firstSource.Extent)
+                if not allShareOuter then
+                    Error (Other (
+                        "group_keys: all key arrays must be rank-1 and share the same outer index (same length). " +
+                        "Compound grouping requires each i-th element of every key array to refer to the same record."))
+                else
+                    // Compound outer: dynamic extent, tagged so codegen
+                    // recognizes "this is compound-dynamic, dispatch via
+                    // tuple unordered_map". The tag name reserves
+                    // `__compoundidx_static` for the future mask-derived
+                    // path (TyCompoundIdx) which is statically evaluable
+                    // — that case would have Extent = IRLit (cardinality)
+                    // and a different codegen story. Component types are
+                    // not carried in IRTGroupKeys today; codegen recovers
+                    // them from the IRGroupKeys node's keys list at emit
+                    // time, and IDE tooltips would do the same.
+                    let outerIdx = {
+                        Id = env.Builder.FreshId(); Arity = 1
+                        Extent = IRParam ("__ngroups", 0, IRTNat None)
+                        Symmetry = SymNone
+                        Tag = Some "__compoundidx_dynamic"
+                        Kind = SDimension; Dependencies = []
+                    }
+                    let gkType = IRTGroupKeys (outerIdx, firstSource, None)
+                    let tKeys = pairs |> List.map fst
+                    Ok (mkTyped (TExprGroupKeys tKeys) gkType))
 
     // group_by(values, grouping) — apply GroupKeys to a values array
     // Result: rank-2 array (groups × members), with GroupIdx
@@ -4441,7 +4493,7 @@ let rec zonkExpr (subst: Subst) (expr: TypedExpr) : TypedExpr =
         | TExprIntersect (a, b) -> TExprIntersect (z a, z b)
         | TExprUnion (a, b) -> TExprUnion (z a, z b)
         | TExprGroupBy (v, k) -> TExprGroupBy (z v, z k)
-        | TExprGroupKeys k -> TExprGroupKeys (z k)
+        | TExprGroupKeys ks -> TExprGroupKeys (List.map z ks)
         | TExprSort (a, k) -> TExprSort (z a, z k)
         | TExprReduce (a, k) -> TExprReduce (z a, z k)
         | TExprExtents a -> TExprExtents (z a)

@@ -4,7 +4,10 @@
 
 #include <algorithm>
 #include <cstddef>
+#include <functional>
+#include <tuple>
 #include <type_traits>
+#include <utility>  // for std::index_sequence_for
 
 namespace nested_array_utilities {
 
@@ -195,6 +198,33 @@ namespace nested_array_utilities {
         if (i <= j) { ci = i; cj = j; return false; }  // no conjugation needed
         else { ci = j; cj = i; return true; }           // needs conjugation
     }
+
+    // =========================================================================
+    // tuple_hasher: std::hash specialization for std::tuple<...>
+    // =========================================================================
+    //
+    // The standard library does not provide std::hash<std::tuple<...>>.
+    // This hasher uses the canonical boost-style hash-combine recipe:
+    //   seed ^= hash(elem) + 0x9e3779b9 + (seed << 6) + (seed >> 2)
+    // applied across all tuple elements via C++17 fold expression.
+    //
+    // Used by compound group_keys (multi-key SQL-style grouping) where the
+    // bucket dispatch is an unordered_map keyed by a tuple of component
+    // key values. Each component must itself be hashable via std::hash.
+    struct tuple_hasher {
+        template <typename... Ts>
+        std::size_t operator()(const std::tuple<Ts...>& t) const noexcept {
+            return hash_combine_tuple(t, std::index_sequence_for<Ts...>{});
+        }
+    private:
+        template <typename Tuple, std::size_t... I>
+        static std::size_t hash_combine_tuple(const Tuple& t, std::index_sequence<I...>) noexcept {
+            std::size_t seed = 0;
+            ((seed ^= std::hash<std::tuple_element_t<I, Tuple>>{}(std::get<I>(t))
+                       + 0x9e3779b9 + (seed << 6) + (seed >> 2)), ...);
+            return seed;
+        }
+    };
 
 } // namespace nested_array_utilities
 

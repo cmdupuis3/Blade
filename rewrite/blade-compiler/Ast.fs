@@ -260,7 +260,7 @@ and Expr =
     | ExprIntersect of Expr * Expr         // intersect(A, B) - elements in both
     | ExprUnion of Expr * Expr             // union(A, B) - elements in either
     | ExprGroupBy of values: Expr * grouping: Expr  // group_by(vals, gk) - apply grouping to values
-    | ExprGroupKeys of keys: Expr                  // group_keys(keys) - build CSR grouping structure
+    | ExprGroupKeys of keys: Expr list             // group_keys(keys1, keys2, ...) - build CSR grouping structure (compound if >1 key)
     | ExprSort of array: Expr * key: Expr          // sort(A, key) - sort array by key function (stable)
     | ExprReduce of array: Expr * kernel: Expr     // reduce(A, op) - reduce innermost dim by binary kernel
     | ExprExtents of array: Expr                   // extents(A) - innermost dim extent (rank-1 only for now)

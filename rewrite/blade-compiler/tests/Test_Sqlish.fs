@@ -425,6 +425,42 @@ let result = method_for(grouped) <@> lambda(g) -> g(0) |> compute
 // EXPECT: result = [40, 50, 60]
 """
 
+let test_groupby_compound_two_keys_first = """
+// Compound (multi-key) group_keys: distinct (region, year) tuples each
+// become their own bucket. First-occurrence ordering: bucket index = the
+// order in which a unique tuple first appears walking left-to-right.
+//
+// region+year first-occurrence in this input:
+//   (0, 2020) at i=0 → bucket 0, repeated at i=4
+//   (1, 2020) at i=1 → bucket 1, repeated at i=5
+//   (0, 2021) at i=2 → bucket 2
+//   (1, 2021) at i=3 → bucket 3
+// Each bucket's first element comes from the first input index assigned to it.
+let region = [0, 1, 0, 1, 0, 1]
+let year =   [2020, 2020, 2021, 2021, 2020, 2020]
+let temps =  [10.0, 11.0, 20.0, 21.0, 12.0, 13.0]
+let gk = group_keys(region, year)
+let grouped = group_by(temps, gk)
+let result = method_for(grouped) <@> lambda(g) -> g(0) |> compute
+// EXPECT: result = [10, 11, 20, 21]
+"""
+
+let test_groupby_compound_two_keys_reduce = """
+// Compound group_keys + reduce per group. Same tuple structure as the
+// _first variant, but each bucket sums its members.
+//   bucket 0: indices [0, 4] → temps [10.0, 12.0] → sum 22.0
+//   bucket 1: indices [1, 5] → temps [11.0, 13.0] → sum 24.0
+//   bucket 2: indices [2]    → temps [20.0]       → sum 20.0
+//   bucket 3: indices [3]    → temps [21.0]       → sum 21.0
+let region = [0, 1, 0, 1, 0, 1]
+let year =   [2020, 2020, 2021, 2021, 2020, 2020]
+let temps =  [10.0, 11.0, 20.0, 21.0, 12.0, 13.0]
+let gk = group_keys(region, year)
+let grouped = group_by(temps, gk)
+let result = method_for(grouped) <@> lambda(g: Array<Float64 like RaggedIdx<_>>) -> reduce(g, (+)) |> compute
+// EXPECT: result = [22, 24, 20, 21]
+"""
+
 // ============================================================================
 // Phase 5: sort — Sorted Iteration (NOT YET IMPLEMENTED)
 // ============================================================================
@@ -585,6 +621,8 @@ let groupByTests = [
     ("GroupBy Enum String Reduce", test_groupby_enum_string_reduce)
     ("GroupBy Single Group", test_groupby_single_group)
     ("GroupBy After Method For", test_groupby_after_method_for)
+    ("GroupBy Compound Two Keys First", test_groupby_compound_two_keys_first)
+    ("GroupBy Compound Two Keys Reduce", test_groupby_compound_two_keys_reduce)
 ]
 
 /// Phase 5: sort

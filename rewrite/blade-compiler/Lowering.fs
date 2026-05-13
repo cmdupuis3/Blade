@@ -322,7 +322,7 @@ let rec lowerTypedExpr (env: TypedLowerEnv) (texpr: TypedExpr) : IRExpr =
         IRGroupBy (lowerTypedExpr env values, lowerTypedExpr env grouping)
     
     | TExprGroupKeys keys ->
-        IRGroupKeys (lowerTypedExpr env keys)
+        IRGroupKeys (keys |> List.map (lowerTypedExpr env))
     
     | TExprSort (array, key) ->
         IRSort (lowerTypedExpr env array, lowerTypedExpr env key)
