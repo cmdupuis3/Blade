@@ -1209,6 +1209,22 @@ and parsePrimary (tokens: Token list) : ParseResult<Expr> =
         expect TokRParen afterB >>= fun _ remaining ->
         success (ExprUnion (a, b)) remaining
     
+    // unique(A) — dedup, first-occurrence order
+    | Some (TokKeyword KwUnique) ->
+        advance tokens |> expect TokLParen >>= fun _ afterLParen ->
+        parseExprImpl afterLParen >>= fun arr afterArr ->
+        expect TokRParen afterArr >>= fun _ remaining ->
+        success (ExprUnique arr) remaining
+    
+    // contains(A, x) — membership test, returns Bool
+    | Some (TokKeyword KwContains) ->
+        advance tokens |> expect TokLParen >>= fun _ afterLParen ->
+        parseExprImpl afterLParen >>= fun arr afterArr ->
+        expect TokComma afterArr >>= fun _ afterComma ->
+        parseExprImpl afterComma >>= fun value afterValue ->
+        expect TokRParen afterValue >>= fun _ remaining ->
+        success (ExprContains (arr, value)) remaining
+    
     // group_by(values, keys)
     | Some (TokKeyword KwGroupBy) ->
         advance tokens |> expect TokLParen >>= fun _ afterLParen ->

@@ -40,6 +40,8 @@ open Blade.Tests.FuncArrays
 open Blade.Tests.Normalize
 open Blade.Tests.Unify
 open Blade.Tests.ValidateArrow
+open Blade.Tests.ExprAttrs
+open Blade.Tests.CodeGenSubst
 // Aliases for cleaner code
 type Process = System.Diagnostics.Process
 type ProcessStartInfo = System.Diagnostics.ProcessStartInfo
@@ -588,7 +590,7 @@ let allTests =
     basicTests @ loopTests @ symmetryTests @ reynoldsTests @ arityTests @ functionTests 
     @ structTests @ sumTypeTests @ interfaceTests @ moduleTests @ guardTests @ guardCombinatorTests @ zeroCombinatorTests @ sequenceCombinatorTests @ tupleViewTests @ replicateTests @ anonRangeTests @ forInTests @ bracketedTests
     @ indexTypeTests @ mutabilityTests @ staticTests @ unitTests
-    @ foreignKeyTests @ maskTests @ setOpTests @ groupByTests @ sortTests @ reduceTests @ extentsTests @ extentsMultiRankTests @ regressionTests @ sqlCombinedTests @ v24dProbes
+    @ foreignKeyTests @ maskTests @ setOpTests @ uniqueContainsTests @ semijoinTests @ groupByTests @ sortTests @ reduceTests @ extentsTests @ extentsMultiRankTests @ regressionTests @ sqlCombinedTests @ v24dProbes
     @ inferenceProbes
     @ funcArrayTests
 
@@ -1165,7 +1167,14 @@ let runAllTestsFull () =
     let outputDir = "./generated_cpp_tests"
     let r1 = runTestCategoryFull "All" allTests outputDir
     let r2 = runMultiFileTestsFull "Multi-File Modules" multiFileTests outputDir
-    if r1 = 0 && r2 = 0 then 0 else 1
+    // Phase B: F# unit tests for the exprAttrs computation. Runs after
+    // the source-program tests; reports separately so it doesn't muddy
+    // the source-test counts. Exit code includes attrs failures.
+    let (_, attrsFailed) = runAttrsTests ()
+    // Phase C Step 2: F# unit tests for the codegen substitution
+    // mechanism. Same reporting convention.
+    let (_, substFailed) = runCodeGenSubstTests ()
+    if r1 = 0 && r2 = 0 && attrsFailed = 0 && substFailed = 0 then 0 else 1
 
 /// Run tests with C++ generation only (no compilation)
 let runTestCategoryGenOnly (name: string) (tests: (string * string) list) (outputDir: string) =
@@ -2322,6 +2331,20 @@ let main args =
         // mkVirtualArrayArrow entry. Constructs IRType values directly;
         // no Blade source pipeline.
         let (_, failed) = runValidateArrowTests ()
+        if failed = 0 then 0 else 1
+    | [| "test"; "attrs" |] ->
+        // Phase B: IR-level F# unit tests for the exprAttrs bottom-up
+        // attribute computation. Constructs IR fragments directly and
+        // compares actual vs. expected attribute sets. No Blade source
+        // pipeline.
+        let (_, failed) = runAttrsTests ()
+        if failed = 0 then 0 else 1
+    | [| "test"; "subst" |] ->
+        // Phase C Step 2: F# unit tests for the contains-substitution
+        // mechanism in exprToCpp. Constructs IR fragments, renders with
+        // populated and empty SubstMaps, asserts on the resulting C++
+        // string. No Blade source pipeline.
+        let (_, failed) = runCodeGenSubstTests ()
         if failed = 0 then 0 else 1
     | [| "test"; cat |] ->
         // Test a specific category: blade test basic, blade test loops, etc.

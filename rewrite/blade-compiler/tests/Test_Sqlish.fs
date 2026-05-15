@@ -215,6 +215,51 @@ let result = method_for(none) <@> lambda(x) -> x |> compute
 // EXPECT: result = []
 """
 
+let test_intersect_dedups_a = """
+// SQL set semantics: duplicates in A are dropped; first occurrence
+// wins for ordering. A has 3 twice and 5 once; B has 3 and 5.
+// Result: [3, 5] — not [3, 3, 5].
+let A = [3, 3, 5, 3]
+let B = [3, 5, 7]
+let r = intersect(A, B)
+let result = method_for(r) <@> lambda(x) -> x |> compute
+// EXPECT: result = [3, 5]
+"""
+
+let test_intersect_dedups_b_irrelevant = """
+// Duplicates in B don't affect the result. B's role is membership only;
+// B = [5, 5, 7, 7, 5] tests the same set as B = [5, 7]. A is already
+// unique so output order is direct.
+let A = [3, 5, 7]
+let B = [5, 5, 7, 7, 5]
+let r = intersect(A, B)
+let result = method_for(r) <@> lambda(x) -> x |> compute
+// EXPECT: result = [5, 7]
+"""
+
+let test_union_dedups_both = """
+// SQL set semantics: duplicates within A AND within B are dropped.
+// Ordering: first occurrences in A precede first occurrences in B.
+// A = [1, 2, 1, 3] has unique values {1, 2, 3} in order [1, 2, 3].
+// B = [3, 4, 4] adds {4} (3 is already seen).
+// Result: [1, 2, 3, 4].
+let A = [1, 2, 1, 3]
+let B = [3, 4, 4]
+let r = union(A, B)
+let result = method_for(r) <@> lambda(x) -> x |> compute
+// EXPECT: result = [1, 2, 3, 4]
+"""
+
+let test_union_a_subsumes_b = """
+// When all of B is already in A, union equals dedup(A). Tests that the
+// B-loop's seen-check correctly suppresses everything.
+let A = [1, 2, 3, 2, 1]
+let B = [1, 3]
+let r = union(A, B)
+let result = method_for(r) <@> lambda(x) -> x |> compute
+// EXPECT: result = [1, 2, 3]
+"""
+
 let test_sql_where_and = """
 // SQL: SELECT temp FROM stations WHERE temp > 20.0 AND temp < 30.0
 let temps = [20.0, 25.0, 30.0, 22.0, 27.0, 32.0]
@@ -223,6 +268,161 @@ let above20 = mask(temps, lambda(t) -> t > 20.0)
 let below30 = mask(temps, lambda(t) -> t < 30.0)
 let result = method_for(intersect(above20, below30)) <@> lambda(t) -> t |> compute
 // EXPECT: result = [25.0, 22.0, 27.0]
+"""
+
+// ============================================================================
+// Phase 3.5: unique — first-occurrence deduplication
+// ============================================================================
+
+let test_unique_basic = """
+// unique drops repeated elements, keeping the first occurrence of each.
+let A = [3, 1, 4, 1, 5, 9, 2, 6, 5, 3, 5]
+let u = unique(A)
+let result = method_for(u) <@> lambda(x) -> x |> compute
+// EXPECT: result = [3, 1, 4, 5, 9, 2, 6]
+"""
+
+let test_unique_no_dupes = """
+// Already-unique input passes through unchanged.
+let A = [10, 20, 30, 40, 50]
+let u = unique(A)
+let result = method_for(u) <@> lambda(x) -> x |> compute
+// EXPECT: result = [10, 20, 30, 40, 50]
+"""
+
+let test_unique_float = """
+// unique on Float64 — same machinery, std::unordered_set handles the hash.
+let A = [1.5, 2.5, 1.5, 3.5, 2.5]
+let u = unique(A)
+let result = method_for(u) <@> lambda(x) -> x |> compute
+// EXPECT: result = [1.5, 2.5, 3.5]
+"""
+
+// ============================================================================
+// Phase 3.5: contains — membership test (linear scan)
+// ============================================================================
+
+let test_contains_present = """
+// Element present in array — returns true.
+let A = [10, 20, 30, 40, 50]
+let result = contains(A, 30)
+// EXPECT: result = true
+"""
+
+let test_contains_absent = """
+// Element not in array — returns false.
+let A = [10, 20, 30, 40, 50]
+let result = contains(A, 99)
+// EXPECT: result = false
+"""
+
+let test_contains_empty_after_mask = """
+// contains on an empty (dynamic) array — returns false without aborting.
+let A = [1, 2, 3]
+let empty_arr = mask(A, lambda(x) -> x > 100)
+let result = contains(empty_arr, 5)
+// EXPECT: result = false
+"""
+
+let test_contains_in_mask_predicate = """
+// contains used inside a mask predicate — the canonical semijoin idiom.
+// After the IR pattern matcher runs, this lowers to IRSemijoin(A, B):
+// codegen pre-builds an unordered_set from B and probes A once, dropping
+// the inner cost from O(|A|·|B|) to O(|A|+|B|). The result is identical
+// to the unfused form — this test guards correctness across the rewrite.
+let A = [1, 2, 3, 4, 5, 6]
+let B = [2, 4, 6, 8]
+let in_B = mask(A, lambda(x) -> contains(B, x))
+let result = method_for(in_B) <@> lambda(x) -> x |> compute
+// EXPECT: result = [2, 4, 6]
+"""
+
+// ============================================================================
+// Phase 3.6: semijoin / antijoin pattern matcher tests
+// ============================================================================
+// These exercise the IR rewrite for mask(A, contains(B, x)) → IRSemijoin
+// and mask(A, !contains(B, x)) → IRAntijoin. Correctness is checked by
+// value comparison; the algorithmic improvement (O(|A|·|B|) → O(|A|+|B|))
+// is implicit but not measured here.
+
+let test_semijoin_preserves_multiplicity = """
+// Semijoin is NOT a set operation: it preserves A's multiplicity.
+// A has 3 twice and 1 twice; both copies of each should appear in the
+// output as long as they're members of B. This distinguishes semijoin
+// from intersect (which would dedup to [3, 1]).
+let A = [3, 1, 3, 2, 1, 4]
+let B = [1, 3]
+let r = mask(A, lambda(x) -> contains(B, x))
+let result = method_for(r) <@> lambda(x) -> x |> compute
+// EXPECT: result = [3, 1, 3, 1]
+"""
+
+let test_antijoin_basic = """
+// Antijoin: elements of A NOT in B. Pattern is mask(A, !contains(B, x)).
+let A = [1, 2, 3, 4, 5, 6, 7]
+let B = [2, 4, 6]
+let r = mask(A, lambda(x) -> !contains(B, x))
+let result = method_for(r) <@> lambda(x) -> x |> compute
+// EXPECT: result = [1, 3, 5, 7]
+"""
+
+let test_antijoin_preserves_multiplicity = """
+// Antijoin also preserves A's multiplicity. A has duplicates; the
+// duplicates that aren't in B all appear in the output.
+let A = [3, 1, 3, 2, 1, 4, 2]
+let B = [1, 3]
+let r = mask(A, lambda(x) -> !contains(B, x))
+let result = method_for(r) <@> lambda(x) -> x |> compute
+// EXPECT: result = [2, 4, 2]
+"""
+
+let test_pattern_does_not_fire_on_conjunction = """
+// When the predicate is compound (contains AND something else), the
+// pattern matcher must NOT rewrite to semijoin — the result would be
+// wrong. The IR stays as IRMask with the full lambda body, and codegen
+// uses the slow O(|A|·|B|) path. Correctness is what matters; this
+// test guards against an over-eager rewriter.
+let A = [1, 2, 3, 4, 5, 6, 7, 8]
+let B = [2, 4, 6, 8]
+let r = mask(A, lambda(x) -> contains(B, x) && x > 3)
+let result = method_for(r) <@> lambda(x) -> x |> compute
+// EXPECT: result = [4, 6, 8]
+"""
+
+let test_semijoin_float64 = """
+// Semijoin on Float64 — exercises std::hash<double> through the
+// pattern-matched path (mirrors Unique Float on the unique() side).
+let A = [1.5, 2.5, 3.5, 4.5]
+let B = [2.5, 4.5, 6.5]
+let r = mask(A, lambda(x) -> contains(B, x))
+let result = method_for(r) <@> lambda(x) -> x |> compute
+// EXPECT: result = [2.5, 4.5]
+"""
+
+let test_unique_of_semijoin = """
+// Composition: unique(semijoin) drops A's multiplicity after the
+// membership filter. Equivalent to SQL intersect but expressed via
+// the more general primitives. Exercises the lift pass — the inner
+// inline form (IRSemijoin) and the outer one (IRUnique) both get
+// auto-let-bound, and codegen must thread the temporary correctly.
+let A = [3, 1, 3, 2, 1, 4]
+let B = [1, 3]
+let r = unique(mask(A, lambda(x) -> contains(B, x)))
+let result = method_for(r) <@> lambda(x) -> x |> compute
+// EXPECT: result = [3, 1]
+"""
+
+let test_semijoin_then_mask = """
+// Composition: mask after semijoin. Tests that semijoin's output (an
+// array, but with dynamic extent) flows correctly into another mask
+// kernel. The outer mask is NOT a semijoin pattern — its predicate
+// is a comparison, not a contains — so it stays IRMask.
+let A = [1, 2, 3, 4, 5, 6, 7, 8]
+let B = [2, 3, 5, 7]
+let in_B = mask(A, lambda(x) -> contains(B, x))
+let big = mask(in_B, lambda(x) -> x > 2)
+let result = method_for(big) <@> lambda(x) -> x |> compute
+// EXPECT: result = [3, 5, 7]
 """
 
 // ============================================================================
@@ -604,6 +804,32 @@ let setOpTests = [
     ("Union Basic", test_union_basic)
     ("Intersect Disjoint", test_intersect_disjoint)
     ("SQL WHERE AND", test_sql_where_and)
+    ("Intersect Dedups A", test_intersect_dedups_a)
+    ("Intersect Dedups B Irrelevant", test_intersect_dedups_b_irrelevant)
+    ("Union Dedups Both", test_union_dedups_both)
+    ("Union A Subsumes B", test_union_a_subsumes_b)
+]
+
+/// Phase 3.5: unique / contains — value-set primitives
+let uniqueContainsTests = [
+    ("Unique Basic", test_unique_basic)
+    ("Unique No Duplicates", test_unique_no_dupes)
+    ("Unique Float", test_unique_float)
+    ("Contains Present", test_contains_present)
+    ("Contains Absent", test_contains_absent)
+    ("Contains Empty After Mask", test_contains_empty_after_mask)
+    ("Contains In Mask Predicate", test_contains_in_mask_predicate)
+]
+
+/// Phase 3.6: semijoin / antijoin pattern matcher
+let semijoinTests = [
+    ("Semijoin Preserves Multiplicity", test_semijoin_preserves_multiplicity)
+    ("Antijoin Basic", test_antijoin_basic)
+    ("Antijoin Preserves Multiplicity", test_antijoin_preserves_multiplicity)
+    ("Pattern Does Not Fire On Conjunction", test_pattern_does_not_fire_on_conjunction)
+    ("Semijoin Float64", test_semijoin_float64)
+    ("Unique Of Semijoin", test_unique_of_semijoin)
+    ("Semijoin Then Mask", test_semijoin_then_mask)
 ]
 
 /// Phase 4: group_by
@@ -829,4 +1055,4 @@ let v24dProbes = [
 
 /// All SQL-ish tests
 let sqlishTests =
-    foreignKeyTests @ maskTests @ setOpTests @ groupByTests @ sortTests @ reduceTests @ extentsTests @ extentsMultiRankTests @ regressionTests @ sqlCombinedTests @ v24dProbes
+    foreignKeyTests @ maskTests @ setOpTests @ uniqueContainsTests @ semijoinTests @ groupByTests @ sortTests @ reduceTests @ extentsTests @ extentsMultiRankTests @ regressionTests @ sqlCombinedTests @ v24dProbes

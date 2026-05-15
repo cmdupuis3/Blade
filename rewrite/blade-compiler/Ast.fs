@@ -259,6 +259,8 @@ and Expr =
     | ExprMask of array: Expr * pred: Expr // mask(A, pred) - filter array by predicate
     | ExprIntersect of Expr * Expr         // intersect(A, B) - elements in both
     | ExprUnion of Expr * Expr             // union(A, B) - elements in either
+    | ExprUnique of array: Expr            // unique(A) - dedup, first-occurrence order
+    | ExprContains of array: Expr * value: Expr  // contains(A, x) - is x present in A
     | ExprGroupBy of values: Expr * grouping: Expr  // group_by(vals, gk) - apply grouping to values
     | ExprGroupKeys of keys: Expr list             // group_keys(keys1, keys2, ...) - build CSR grouping structure (compound if >1 key)
     | ExprSort of array: Expr * key: Expr          // sort(A, key) - sort array by key function (stable)

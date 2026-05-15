@@ -185,6 +185,69 @@ let v = A((1 : Lon))
 // EXPECT: typecheck failure — "Array index tag mismatch: slot expects 'Lat'..."
 """
 
+let probe_v11_foreign_key_cross_tag = """
+// Foreign-key dereference variant of probe_v10. A foreign-key array
+// produces tagged values via co-iteration in a kernel; using one of those
+// values to index a sibling array with a DIFFERENT nominal tag must be
+// rejected. This exercises the tag-matching path through a kernel
+// parameter rather than through an explicit (expr : Tag) cast.
+//
+// region's elements are RegionIdx-tagged. by_country expects a CountryIdx
+// index. Structural extents match (both Idx<3>) but nominal tags differ;
+// the indexing site must reject.
+type StationIdx = Idx<6>
+type RegionIdx = Idx<3>
+type CountryIdx = Idx<3>
+let region: Array<RegionIdx like StationIdx> = [0, 1, 2, 0, 1, 2]
+let by_country: Array<Float64 like CountryIdx> = [10.0, 20.0, 30.0]
+let bad = method_for(region) <@> lambda(r) -> by_country(r) |> compute
+// EXPECT: typecheck failure — tag mismatch between RegionIdx and CountryIdx
+"""
+
+let probe_v12_struct_field_foreign_key_cross_tag = """
+// Cross-tag rejection through a struct-field foreign-key dereference.
+//
+// `data.region(s)` lowers through the dispatchAppOrIndex helper's
+// method-call entry: array-typed struct fields route to TExprIndex,
+// producing a value whose type carries the array's element type — which
+// for a foreign-key field is `IRTIdxTagged(_, IRefNamed "RegionIdx")`.
+// That tagged value is then passed to `by_country(...)`, which enters
+// dispatchAppOrIndex via the general ExprApp branch and runs the tag
+// check against by_country's CountryIdx slot. The two named tags don't
+// match — rejection.
+//
+// Distinct from probe_v11: that one tests tag flow through
+// iteration-tagging on the kernel parameter `r`, which is currently
+// permissive (the kernel parameter's type doesn't pick up the iterated
+// array's element tag). This probe tests tag flow through explicit
+// field indexing, which DOES preserve the tag via TExprIndex's elem-type
+// propagation. Both should reject; only this one currently does.
+type StationIdx = Idx<6>
+type RegionIdx = Idx<3>
+type CountryIdx = Idx<3>
+struct StationData {
+    temp:   Array<Float64 like StationIdx>,
+    region: Array<RegionIdx like StationIdx>
+}
+let data = StationData {
+    temp   = [11.0, 19.0, 31.0, 12.0, 21.0, 29.0],
+    region = [0, 1, 2, 0, 1, 2]
+}
+let by_country: Array<Float64 like CountryIdx> = [10.0, 20.0, 30.0]
+let bad = method_for(range<StationIdx>) <@> lambda(s) -> by_country(data.region(s)) |> compute
+// EXPECT: typecheck failure — tag mismatch between RegionIdx and CountryIdx
+"""
+
+let probe_v13_contains_type_mismatch = """
+// `contains(A, x)` requires x's type to unify with A's element type.
+// Passing a Float64 to an Int64-array contains should reject in typecheck,
+// not silently coerce or pick a default. The unify in the ExprContains
+// rule (TypeCheck.fs) is the rejection point.
+let ints = [1, 2, 3]
+let bad = contains(ints, 5.0)
+// EXPECT: typecheck failure — Int64 vs Float64 in contains value
+"""
+
 let inferenceProbes = [
     ("Inference: Unannotated Extents", probe_a_extents_unannotated)
     ("Inference: Unannotated Mask", probe_b_mask_unannotated)
@@ -202,4 +265,7 @@ let inferenceProbes = [
     ("Validator: EnumIdx Mixed Values (rejects)", probe_v8_enumidx_mixed_values)
     ("Validator: EnumIdx Mixed Values Inline (rejects)", probe_v9_enumidx_mixed_inline)
     ("Nominal: Cross-Tag Index Mismatch (rejects)", probe_v10_cross_tag_index_mismatch)
+    ("Nominal: Foreign Key Cross-Tag (rejects)", probe_v11_foreign_key_cross_tag)
+    ("Nominal: Struct Field Foreign Key Cross-Tag (rejects)", probe_v12_struct_field_foreign_key_cross_tag)
+    ("Nominal: Contains Type Mismatch (rejects)", probe_v13_contains_type_mismatch)
 ]

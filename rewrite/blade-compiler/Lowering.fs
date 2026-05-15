@@ -318,6 +318,12 @@ let rec lowerTypedExpr (env: TypedLowerEnv) (texpr: TypedExpr) : IRExpr =
     | TExprUnion (a, b) ->
         IRUnion (lowerTypedExpr env a, lowerTypedExpr env b)
     
+    | TExprUnique a ->
+        IRUnique (lowerTypedExpr env a)
+    
+    | TExprContains (a, v) ->
+        IRContains (lowerTypedExpr env a, lowerTypedExpr env v)
+    
     | TExprGroupBy (values, grouping) ->
         IRGroupBy (lowerTypedExpr env values, lowerTypedExpr env grouping)
     

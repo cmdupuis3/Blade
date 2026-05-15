@@ -1358,6 +1358,8 @@ let rec collectFreeVars (bound: Set<string>) (expr: Expr) : Set<string> =
     | ExprMask (a, p) -> Set.union (collectFreeVars bound a) (collectFreeVars bound p)
     | ExprIntersect (a, b) -> Set.union (collectFreeVars bound a) (collectFreeVars bound b)
     | ExprUnion (a, b) -> Set.union (collectFreeVars bound a) (collectFreeVars bound b)
+    | ExprUnique a -> collectFreeVars bound a
+    | ExprContains (a, v) -> Set.union (collectFreeVars bound a) (collectFreeVars bound v)
     | ExprGroupBy (v, k) -> Set.union (collectFreeVars bound v) (collectFreeVars bound k)
     | ExprGroupKeys ks -> ks |> List.map (collectFreeVars bound) |> Set.unionMany
     | ExprSort (a, k) -> Set.union (collectFreeVars bound a) (collectFreeVars bound k)
@@ -1718,6 +1720,157 @@ let requireArrayArg (env: TypeEnv) (tArr: TypedExpr) (opName: string) : TypeResu
     | _ ->
         Error (Other (sprintf "%s() requires an array as argument" opName))
 
+/// Tag-check helper: validate that each index argument's nominal tag (if any)
+/// agrees with the corresponding array slot's nominal tag. Slot tags starting
+/// with "__" are internal synthetic markers and skipped. Untagged ints into
+/// named slots are permissive (warning emitted, no error) — iteration-tagging
+/// typically resolves these later.
+///
+/// Pulled out as a separate helper so the same logic can run BOTH at the
+/// indexing call site (eager check via dispatchAppOrIndex) AND as a
+/// post-unification pass over a kernel body (revalidateBodyTagChecks).
+let private checkArrayIndexTags (env: TypeEnv) (arrTy: IRArrayType) (tArgs: TypedExpr list) : TypeResult<unit> =
+    let tagMismatch =
+        List.zip tArgs (arrTy.IndexTypes |> List.truncate tArgs.Length)
+        |> List.tryPick (fun (tArg, idxType) ->
+            match idxType.Tag with
+            | Some tagName when not (tagName.StartsWith("__")) ->
+                match env.Subst.Resolve tArg.Type with
+                | IRTIdxTagged (_, IRefNamed argName)
+                    when argName = tagName -> None
+                | IRTIdxTagged (_, IRefNamed argName) ->
+                    Some (Other (sprintf
+                        "Array index tag mismatch: slot expects '%s' but argument has type '%s'."
+                        tagName argName))
+                | IRTIdxTagged (_, IRefAnon _) ->
+                    Some (Other (sprintf
+                        "Array index tag mismatch: slot expects named tag '%s' but argument is an anonymous index value."
+                        tagName))
+                | IRTScalar (ETInt32 | ETInt64) ->
+                    emitWarning env (sprintf
+                        "Array indexed with untagged integer where slot expects tag '%s'. Consider an explicit cast like `(expr : %s)` or iterate via `range<%s>` to flow the tag automatically."
+                        tagName tagName tagName)
+                    None
+                | _ -> None
+            | _ -> None)
+    match tagMismatch with
+    | Some err -> Error err
+    | None -> Ok ()
+
+/// Dispatch a typed function/array expression with typed args into either
+/// TExprIndex (array indexing) or TExprApp (function call), with nominal
+/// tag-checking on array slots. Shared between the general ExprApp handler
+/// and the method-call (ExprField) handler so that indexing through a
+/// struct-field array (`data.region(s)`) enforces the same tag discipline
+/// as indexing through a plain variable.
+///
+/// Tag-check semantics: see checkArrayIndexTags above.
+let private dispatchAppOrIndex (env: TypeEnv) (tFunc: TypedExpr) (tArgs: TypedExpr list) : TypeResult<TypedExpr> =
+    match tFunc.Type with
+    | ArrayElem arrTy when tArgs.Length <= arrTy.IndexTypes.Length ->
+        checkArrayIndexTags env arrTy tArgs
+        |> Result.bind (fun () ->
+            let identity = match tFunc.Kind with TExprVar (_, _, id) -> id | _ -> None
+            if tArgs.Length = arrTy.IndexTypes.Length then
+                Ok (mkTyped (TExprIndex (tFunc, tArgs, identity)) arrTy.ElemType)
+            else
+                let remaining = arrTy.IndexTypes |> List.skip tArgs.Length
+                Ok (mkTyped (TExprIndex (tFunc, tArgs, identity))
+                            (mkArrayLike { arrTy with IndexTypes = remaining })))
+    | FuncElem (_paramTys, retTy) ->
+        Ok (mkTyped (TExprApp (tFunc, tArgs)) retTy)
+    | _ ->
+        let retTy = env.Subst.Fresh()
+        Ok (mkTyped (TExprApp (tFunc, tArgs)) retTy)
+
+/// Re-run the tag-check at every TExprIndex site reachable from `expr`.
+/// Called after buildApplyInfo's kernel-parameter unification, when the
+/// substitution may have pinned previously-unresolved inference variables
+/// to nominally-tagged types. The original eager check (in
+/// dispatchAppOrIndex) saw those variables as IRTInfer and let them
+/// through; this post-pass catches the now-resolved mismatches.
+///
+/// Without this, indexing through an iteration-tagged kernel parameter —
+/// e.g., `lambda(r) -> by_country(r)` where `r` is iterated from
+/// `Array<RegionIdx like StationIdx>` but `by_country` expects CountryIdx —
+/// would silently typecheck.
+///
+/// The walk is structural: visit every sub-expression, perform the tag
+/// check at TExprIndex nodes, and short-circuit on the first error.
+let rec private revalidateBodyTagChecks (env: TypeEnv) (expr: TypedExpr) : TypeResult<unit> =
+    let children : TypedExpr list =
+        match expr.Kind with
+        | TExprLit _ | TExprVar _ | TExprQualified _ | TExprSection _
+        | TExprZero | TExprRange _ | TExprReverse _ | TExprArity _ -> []
+        | TExprUnaryOp (_, e) -> [e]
+        | TExprBinOp (_, _, l, r) -> [l; r]
+        | TExprApp (f, args) -> f :: args
+        | TExprTupleIndex (t, i) -> [t; i]
+        | TExprField (e, _, _) -> [e]
+        | TExprLambda info -> [info.Body]
+        | TExprLet (_, _, v, b) -> [v; b]
+        | TExprMatch (s, cases) ->
+            s :: (cases |> List.collect (fun c ->
+                c.Body :: (Option.toList c.Guard)))
+        | TExprIf (c, t, e) -> [c; t; e]
+        | TExprTuple es | TExprArrayLit (es, _) | TExprZip es | TExprStack es
+        | TExprSequence es -> es
+        | TExprComplexLit (re, im) -> [re; im]
+        | TExprMethodFor info -> info.Arrays
+        | TExprObjectFor info -> [info.Kernel]
+        | TExprApply info -> info.Loop :: info.Kernel :: info.Arrays
+        | TExprBind (a, b) | TExprParallel (a, b) | TExprFusion (a, b)
+        | TExprChoice (a, b) -> [a; b]
+        | TExprFunctorMap (f, c) -> [f; c]
+        | TExprCompose (_, l, r) -> [l; r]
+        | TExprDotDot (lo, hi) -> [lo; hi]
+        | TExprBlocked (_, bs) -> [bs]
+        | TExprPure e | TExprCompute e | TExprRank e
+        | TExprExtents e | TExprReynolds (e, _) -> [e]
+        | TExprGuard (c, b) -> [c; b]
+        | TExprMask (a, p) | TExprIntersect (a, p) | TExprUnion (a, p)
+        | TExprGroupBy (a, p) | TExprSort (a, p) | TExprReduce (a, p) -> [a; p]
+        | TExprUnique a -> [a]
+        | TExprContains (a, v) -> [a; v]
+        | TExprGroupKeys keys -> keys
+        | TExprStruct (_, fields) -> fields |> List.map snd
+        | TExprIndex (arr, idxs, _) -> arr :: idxs
+        | TExprBlock (stmts, final) ->
+            let stmtExprs =
+                stmts |> List.collect (fun s ->
+                    match s with
+                    | TStmtLet b -> [b.Value]
+                    | TStmtAssign (l, r) -> [l; r]
+                    | TStmtExpr e -> [e]
+                    | TStmtForIn (_, _, lo, hi, body) ->
+                        let bodyExprs =
+                            body |> List.collect (fun bs ->
+                                match bs with
+                                | TStmtLet b -> [b.Value]
+                                | TStmtAssign (l, r) -> [l; r]
+                                | TStmtExpr e -> [e]
+                                | TStmtForIn _ -> [])  // nested for-in: skip (rare)
+                        lo :: hi :: bodyExprs)
+            stmtExprs @ Option.toList final
+        | TExprAssign (l, r) -> [l; r]
+        | TExprReplicate (c, b) -> [c; b]
+        | TExprAlign (es, _) -> es
+        | TExprPartialApp (_, a, _) -> [a]
+    // Recurse into children first, short-circuiting on error.
+    let childRes =
+        children
+        |> List.fold (fun acc child ->
+            acc |> Result.bind (fun () -> revalidateBodyTagChecks env child))
+            (Ok ())
+    childRes |> Result.bind (fun () ->
+        match expr.Kind with
+        | TExprIndex (arr, args, _) ->
+            match env.Subst.Resolve arr.Type with
+            | ArrayElem at when args.Length <= at.IndexTypes.Length ->
+                checkArrayIndexTags env at args
+            | _ -> Ok ()
+        | _ -> Ok ())
+
 let rec inferExpr (env: TypeEnv) (expr: Expr) : TypeResult<TypedExpr> =
     match expr with
     // ---- Literals ----
@@ -1808,8 +1961,12 @@ let rec inferExpr (env: TypeEnv) (expr: Expr) : TypeResult<TypedExpr> =
                              idx |> Option.defaultValue 0)
                         | _ -> (env.Subst.Fresh(), 0)
                     let tField = mkTyped (TExprField (tObj, method, fieldIdx)) fieldTy
-                    let retTy = match fieldTy with FuncElem (_, ret) -> ret | _ -> env.Subst.Fresh()
-                    Ok (mkTyped (TExprApp (tField, tArgs)) retTy)
+                    // Route through dispatchAppOrIndex so array-typed fields
+                    // become TExprIndex (with tag-checking) rather than
+                    // TExprApp. Without this, `data.region(s)` would lower to
+                    // IRApp and emit a C++ function call against the
+                    // Array<T,N> wrapper, which has no operator().
+                    dispatchAppOrIndex env tField tArgs
             | _ ->
                 // Non-named type — regular field access + application
                 let tField = mkTyped (TExprField (tObj, method, 0)) (env.Subst.Fresh())
@@ -1820,67 +1977,7 @@ let rec inferExpr (env: TypeEnv) (expr: Expr) : TypeResult<TypedExpr> =
     | ExprApp (func, args) ->
         inferExpr env func |> Result.bind (fun tFunc ->
         args |> List.map (inferExpr env) |> sequenceResults |> Result.bind (fun tArgs ->
-            match tFunc.Type with
-            | ArrayElem arrTy when tArgs.Length <= arrTy.IndexTypes.Length ->
-                // Tag check: when an array slot carries a user-named tag
-                // (LatIdx, etc.), the corresponding arg type must agree.
-                // §4.18.2: `A(j)` where j has the wrong unit is a type
-                // error. Tags starting with "__" are internal synthetic
-                // markers and not enforced. Unnamed slots (Tag = None)
-                // are also not enforced — this is the "conservative" step
-                // that keeps untagged-int flows working while catching
-                // named-tag mismatches.
-                let tagMismatch =
-                    List.zip tArgs (arrTy.IndexTypes |> List.truncate tArgs.Length)
-                    |> List.tryPick (fun (tArg, idxType) ->
-                        match idxType.Tag with
-                        | Some tagName when not (tagName.StartsWith("__")) ->
-                            match env.Subst.Resolve tArg.Type with
-                            // Matching named tag: ok
-                            | IRTIdxTagged (_, IRefNamed argName)
-                                when argName = tagName -> None
-                            // Wrong named tag
-                            | IRTIdxTagged (_, IRefNamed argName) ->
-                                Some (Other (sprintf
-                                    "Array index tag mismatch: slot expects '%s' but argument has type '%s'."
-                                    tagName argName))
-                            // Anonymous tag can't satisfy a named slot
-                            | IRTIdxTagged (_, IRefAnon _) ->
-                                Some (Other (sprintf
-                                    "Array index tag mismatch: slot expects named tag '%s' but argument is an anonymous index value."
-                                    tagName))
-                            // Untagged int into named slot: permissive, but
-                            // worth a diagnostic. Most kernel-body indexings
-                            // have unresolved infer-var args at this point
-                            // and don't reach here; concrete bare ints (like
-                            // `A(10)`) do. Iteration-tagging covers the
-                            // common case automatically; surfacing the
-                            // others flags accidental untagged uses.
-                            | IRTScalar (ETInt32 | ETInt64) ->
-                                emitWarning env (sprintf
-                                    "Array indexed with untagged integer where slot expects tag '%s'. Consider an explicit cast like `(expr : %s)` or iterate via `range<%s>` to flow the tag automatically."
-                                    tagName tagName tagName)
-                                None
-                            // Other types (infer vars, etc.): permissive,
-                            // no warning — these typically resolve later
-                            // via unification.
-                            | _ -> None
-                        | _ -> None)
-                match tagMismatch with
-                | Some err -> Error err
-                | None ->
-                    let identity = match tFunc.Kind with TExprVar (_, _, id) -> id | _ -> None
-                    if tArgs.Length = arrTy.IndexTypes.Length then
-                        Ok (mkTyped (TExprIndex (tFunc, tArgs, identity)) arrTy.ElemType)
-                    else
-                        let remaining = arrTy.IndexTypes |> List.skip tArgs.Length
-                        Ok (mkTyped (TExprIndex (tFunc, tArgs, identity))
-                                    (mkArrayLike { arrTy with IndexTypes = remaining }))
-            | FuncElem (_paramTys, retTy) ->
-                Ok (mkTyped (TExprApp (tFunc, tArgs)) retTy)
-            | _ ->
-                let retTy = env.Subst.Fresh()
-                Ok (mkTyped (TExprApp (tFunc, tArgs)) retTy)))
+            dispatchAppOrIndex env tFunc tArgs))
 
     // ---- Poly-tuple indexing OR array indexing (brackets) ----
     // `e[i]` is parsed as ExprTupleIndex regardless of e's type. Disambiguate
@@ -2133,6 +2230,31 @@ let rec inferExpr (env: TypeEnv) (expr: Expr) : TypeResult<TypedExpr> =
                     let resultType = mkArrayArrow [resultIdx] arrTy.ElemType None
                     let texpr = if isIntersect then TExprIntersect (tA, tB) else TExprUnion (tA, tB)
                     Ok (mkTyped texpr resultType)))))
+
+    // unique(A) — deduplicate, preserving first-occurrence order. Same
+    // element type as input, dynamic extent (≤ input extent).
+    | ExprUnique a ->
+        inferExpr env a |> Result.bind (fun tA ->
+            requireArrayArg env tA "unique" |> Result.bind (fun arrTy ->
+                let resultIdx = {
+                    Id = env.Builder.FreshId(); Arity = 1
+                    Extent = IRParam ("__unique", 0, IRTNat None)
+                    Symmetry = SymNone; Tag = None
+                    Kind = SDimension; Dependencies = []
+                }
+                let resultType = mkArrayArrow [resultIdx] arrTy.ElemType None
+                Ok (mkTyped (TExprUnique tA) resultType)))
+
+    // contains(A, x) — membership test. Returns Bool. The value's type
+    // must unify with the array's element type; mismatch (e.g., looking
+    // for a Float64 in an Int64 array) is a hard error.
+    | ExprContains (a, value) ->
+        inferExpr env a |> Result.bind (fun tA ->
+        inferExpr env value |> Result.bind (fun tValue ->
+            requireArrayArg env tA "contains" |> Result.bind (fun arrTy ->
+                unify env.Subst tValue.Type arrTy.ElemType
+                |> Result.bind (fun () ->
+                    Ok (mkTyped (TExprContains (tA, tValue)) (IRTScalar ETBool))))))
 
     // group_keys(keys1, keys2, ...) — build CSR grouping structure.
     // Single key: existing single-keyed grouping (positional / EnumIdx /
@@ -3202,6 +3324,15 @@ and buildApplyInfo (env: TypeEnv)
     match kernelParamUnifyResult with
     | Error e -> Error e
     | Ok () ->
+        // After param-type unification, inference variables that flowed into
+        // the body's TExprIndex sites may now resolve to nominally-tagged
+        // types (e.g., `r` in `lambda(r) -> by_country(r)` is unified with
+        // the iterated array's elem type `Nat<RegionIdx>`). Re-run the tag
+        // check across the body so cross-tag indexing through kernel
+        // parameters surfaces as a real type error rather than silently
+        // typechecking. See revalidateBodyTagChecks for rationale.
+        revalidateBodyTagChecks env lambdaInfo.Body
+        |> Result.bind (fun () ->
         // Infer output element type from kernel return type, falling back to input arrays.
         // Returns IRType (Phase B2). Primitives are wrapped IRTScalar.
         let outputElemType =
@@ -3250,7 +3381,7 @@ and buildApplyInfo (env: TypeEnv)
             HasReynolds = isReynolds; OutputType = outputType
             IsCoIteration = isCoIter
         }
-        Ok (mkTyped (TExprApply info) outputType)
+        Ok (mkTyped (TExprApply info) outputType))
 
 // ============================================================================
 // 10c. Lambda, Let, Match, Block, MethodFor, ObjectFor, Struct, For
@@ -4492,6 +4623,8 @@ let rec zonkExpr (subst: Subst) (expr: TypedExpr) : TypedExpr =
         | TExprMask (a, p) -> TExprMask (z a, z p)
         | TExprIntersect (a, b) -> TExprIntersect (z a, z b)
         | TExprUnion (a, b) -> TExprUnion (z a, z b)
+        | TExprUnique a -> TExprUnique (z a)
+        | TExprContains (a, v) -> TExprContains (z a, z v)
         | TExprGroupBy (v, k) -> TExprGroupBy (z v, z k)
         | TExprGroupKeys ks -> TExprGroupKeys (List.map z ks)
         | TExprSort (a, k) -> TExprSort (z a, z k)

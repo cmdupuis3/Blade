@@ -102,6 +102,8 @@ and Keyword =
     | KwMask
     | KwIntersect
     | KwUnion
+    | KwUnique
+    | KwContains
     | KwGroupBy
     | KwGroupKeys
     | KwSort
@@ -178,6 +180,8 @@ let keywords =
       "mask", KwMask
       "intersect", KwIntersect
       "union", KwUnion
+      "unique", KwUnique
+      "contains", KwContains
       "group_by", KwGroupBy
       "group_keys", KwGroupKeys
       "sort", KwSort

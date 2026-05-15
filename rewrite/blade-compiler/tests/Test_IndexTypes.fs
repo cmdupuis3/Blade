@@ -591,6 +591,69 @@ let v = A((1 : Lat))
 // EXPECT: v = 20
 """
 
+// ============================================================================
+// Foreign-key dereference tests (step 0 for the SQL-like layer)
+//
+// These exercise the round-trip:
+//   1. Declare an array whose ELEMENT type is a named index alias —
+//      `Array<RegionIdx like StationIdx>`. The element type lowers to
+//      IRTIdxTagged(IRTScalar ETInt64, IRefNamed "RegionIdx").
+//   2. Co-iterate this foreign-key array alongside a value array sharing
+//      the same outer index type (StationIdx). The kernel parameter for
+//      the foreign-key array picks up the RegionIdx nominal tag.
+//   3. Use that tagged value to index a sibling array whose own index
+//      type is RegionIdx. Step 5's tag-matching check on the index site
+//      enforces tag equality, so this typechecks; codegen emits a plain
+//      integer subscript.
+//
+// This is the compositional analogue of SQL's inner-join-plus-projection:
+// one DMWF pass, no intermediate join table, lookup fused with kernel.
+// ============================================================================
+
+let test_foreign_key_deref_kernel = """
+// Basic foreign-key dereference inside a kernel. Iterate the StationIdx
+// range; inside the kernel, `region(s)` produces a RegionIdx-tagged
+// value, and `region_avg(region(s))` chains the dereference into a
+// sibling RegionIdx-keyed array. The whole pipeline is one DMWF pass
+// — SQL's inner-join-plus-projection collapsed into one indexing
+// expression.
+//
+// Multi-arg method_for(A, B) produces the Cartesian outer product
+// (CROSS JOIN). For co-iteration of same-indexed arrays, iterate the
+// shared index range and dereference explicitly inside the kernel.
+type StationIdx = Idx<6>
+type RegionIdx = Idx<3>
+let region: Array<RegionIdx like StationIdx> = [0, 1, 2, 0, 1, 2]
+let region_avg: Array<Float64 like RegionIdx> = [10.0, 20.0, 30.0]
+let temps: Array<Float64 like StationIdx> = [11.0, 19.0, 31.0, 12.0, 21.0, 29.0]
+let deltas = method_for(range<StationIdx>) <@> lambda(s) -> temps(s) - region_avg(region(s)) |> compute
+// EXPECT: deltas = [1, -1, 1, 2, 1, -1]
+"""
+
+let test_foreign_key_deref_record = """
+// Record-based foreign-key transformation. The struct bundles two
+// StationIdx-keyed fields (one value, one foreign key); the kernel
+// projects out both via chained field-then-index access and
+// dereferences the foreign key into a sibling RegionIdx-keyed array.
+//
+// Tests that field projection preserves the IRefNamed tag on the
+// foreign-key array, so `data.region(s)` still produces a properly
+// tagged RegionIdx value at the indexing site.
+type StationIdx = Idx<6>
+type RegionIdx = Idx<3>
+struct StationData {
+    temp:   Array<Float64 like StationIdx>,
+    region: Array<RegionIdx like StationIdx>
+}
+let region_baseline: Array<Float64 like RegionIdx> = [10.0, 20.0, 30.0]
+let data = StationData {
+    temp   = [11.0, 19.0, 31.0, 12.0, 21.0, 29.0],
+    region = [0, 1, 2, 0, 1, 2]
+}
+let result = method_for(range<StationIdx>) <@> lambda(s) -> data.temp(s) - region_baseline(data.region(s)) |> compute
+// EXPECT: result = [1, -1, 1, 2, 1, -1]
+"""
+
 
 /// Index type tests (AntisymIdx, HermitianIdx)
 let indexTypeTests = [
@@ -635,4 +698,6 @@ let indexTypeTests = [
     ("DepIdx Eta-Reduced Value", test_depidx_eta_reduced_value)
     ("Nominal: Iter Tag Named Range", test_iter_tag_named_range)
     ("Nominal: Explicit Cast Index", test_named_idx_explicit_cast_index)
+    ("Foreign Key Deref Kernel", test_foreign_key_deref_kernel)
+    ("Foreign Key Deref Record", test_foreign_key_deref_record)
 ]

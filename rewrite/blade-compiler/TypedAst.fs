@@ -208,6 +208,8 @@ and TypedExprKind =
     | TExprMask of array: TypedExpr * pred: TypedExpr
     | TExprIntersect of TypedExpr * TypedExpr
     | TExprUnion of TypedExpr * TypedExpr
+    | TExprUnique of array: TypedExpr
+    | TExprContains of array: TypedExpr * value: TypedExpr
     | TExprGroupBy of values: TypedExpr * grouping: TypedExpr
     | TExprGroupKeys of keys: TypedExpr list
     | TExprSort of array: TypedExpr * key: TypedExpr

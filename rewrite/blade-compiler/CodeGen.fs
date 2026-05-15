@@ -68,6 +68,35 @@ let exprError (msg: string) : string =
     cell.Value <- cell.Value @ [msg]
     sprintf "BLADE_CODEGEN_ERROR_%s" (msg.Replace(" ", "_").Replace("'", "").Replace("(", "").Replace(")", "").Replace(",", "").Replace(":", "").Replace("\"", "").ToUpper())
 
+// ----------------------------------------------------------------------------
+// Substitution map for Phase C contains-aware mask rendering
+// ----------------------------------------------------------------------------
+//
+// When a mask renderer hoists a contains-set build into its preamble, it
+// registers each hoisted IRContains node here (keyed by object reference)
+// alongside the C++ name of the precomputed set. As exprToCpp walks the
+// predicate body to produce the C++ string for the count/fill loops'
+// `if (...)` clauses, the IRContains arm consults this map first: a hit
+// emits `<set>.count(<value>)`; a miss falls through to the original
+// linear-scan IIFE.
+//
+// Reference equality is essential. Two structurally-equal IRContains
+// nodes can appear at distinct positions (e.g. once inside a predicate
+// where the build is hoistable, once elsewhere where it isn't). The map
+// uses object identity to distinguish them. The substitution map is
+// produced and consumed within a single rendering pass over the same IR
+// tree — no transformations happen between — so references are stable.
+//
+// Linear search is fine: per-mask probe counts are small (typically 1–3).
+type SubstMap = (IRExpr * string) list
+
+let private emptySubst : SubstMap = []
+
+let private trySubst (subst: SubstMap) (node: IRExpr) : string option =
+    subst
+    |> List.tryFind (fun (n, _) -> System.Object.ReferenceEquals(n, node))
+    |> Option.map snd
+
 /// Check if an expression is unit/void-typed (should not generate a value)
 let isUnitExpr (expr: IRExpr) : bool =
     match expr with
@@ -173,6 +202,8 @@ let rec collectVarRefs (expr: IRExpr) : Set<IRId> =
         Set.union (collectVarRefs arr) (collectVarRefs pred)
     | IRIntersect (a, b) | IRUnion (a, b) ->
         Set.union (collectVarRefs a) (collectVarRefs b)
+    | IRUnique a -> collectVarRefs a
+    | IRContains (a, v) -> Set.union (collectVarRefs a) (collectVarRefs v)
     | IRGroupBy (v, k) ->
         Set.union (collectVarRefs v) (collectVarRefs k)
     | IRGroupKeys ks -> ks |> List.map collectVarRefs |> Set.unionMany
@@ -373,6 +404,8 @@ let rec inferExprType (expr: IRExpr) : IRType =
     | IRGuard (_, body) -> inferExprType body
     | IRMask (arr, _) -> inferExprType arr  // Same elem type, different extent
     | IRIntersect (a, _) | IRUnion (a, _) -> inferExprType a  // Same elem type, different extent
+    | IRUnique a -> inferExprType a  // Same elem type, different (smaller) extent
+    | IRContains _ -> IRTScalar ETBool  // Membership returns bool
     | IRGroupBy (v, gk) ->
         // The TypeCheck-side `ExprGroupBy` rule constructs a rank-2 array
         // type with `__group_outer` + `__group_member` tagged index slots
@@ -634,6 +667,7 @@ let inferInlineElemTypeStr (opName: string) (form: IRExpr) : string =
         match form with
         | IRMask (a, _) | IRSort (a, _)
         | IRIntersect (a, _) | IRUnion (a, _) -> a
+        | IRUnique a -> a
         | _ -> form
     match inferExprType arrExpr with
     | ArrayElem a -> elemTypeToCpp a.ElemType
@@ -770,7 +804,7 @@ let rec evalDepIdxExtent (outerId: IRId) (i: int) (expr: IRExpr) : int option =
     | _ -> None
 
 /// Convert IRExpr to C++ expression string
-let rec exprToCpp (names: Map<IRId, string>) (expr: IRExpr) : string =
+let rec exprToCppCore (subst: SubstMap) (names: Map<IRId, string>) (expr: IRExpr) : string =
     match expr with
     | IRLit lit -> litToCpp lit
     | IRVar (id, _) -> 
@@ -779,21 +813,21 @@ let rec exprToCpp (names: Map<IRId, string>) (expr: IRExpr) : string =
         | None -> sprintf "__v%d" id
     | IRParam (name, _, _) -> name
     | IRBinOp (_, op, l, r) ->
-        let lStr = exprToCpp names l
-        let rStr = exprToCpp names r
+        let lStr = exprToCppCore subst names l
+        let rStr = exprToCppCore subst names r
         if op = IRCaret then
             sprintf "pow(%s, %s)" lStr rStr
         else
             sprintf "(%s %s %s)" lStr (binOpToCpp op) rStr
     | IRUnaryOp (op, e) ->
-        sprintf "%s(%s)" (unaryOpToCpp op) (exprToCpp names e)
+        sprintf "%s(%s)" (unaryOpToCpp op) (exprToCppCore subst names e)
     | IRIf (cond, thenBr, elseBr) ->
         sprintf "(%s ? %s : %s)" 
-            (exprToCpp names cond) 
-            (exprToCpp names thenBr) 
-            (exprToCpp names elseBr)
+            (exprToCppCore subst names cond) 
+            (exprToCppCore subst names thenBr) 
+            (exprToCppCore subst names elseBr)
     | IRTuple exprs ->
-        sprintf "std::make_tuple(%s)" (exprs |> List.map (exprToCpp names) |> String.concat ", ")
+        sprintf "std::make_tuple(%s)" (exprs |> List.map (exprToCppCore subst names) |> String.concat ", ")
     | IRComplex (re, im) ->
         // Determine width from the component type. checkExpr enforces
         // that Complex128 components are Float64 and Complex64 are
@@ -803,10 +837,10 @@ let rec exprToCpp (names: Map<IRId, string>) (expr: IRExpr) : string =
             match inferExprType re with
             | IRTScalar ETFloat32 -> "std::complex<float>"
             | _ -> "std::complex<double>"  // Float64 default
-        sprintf "%s(%s, %s)" cppType (exprToCpp names re) (exprToCpp names im)
+        sprintf "%s(%s, %s)" cppType (exprToCppCore subst names re) (exprToCppCore subst names im)
     | IRTupleProj (e, i, isFlat) ->
         if not isFlat then
-            sprintf "std::get<%d>(%s)" i (exprToCpp names e)
+            sprintf "std::get<%d>(%s)" i (exprToCppCore subst names e)
         else
             // Flat projection into potentially nested tuple — compute navigation path
             let parentTy = inferExprType e
@@ -826,16 +860,16 @@ let rec exprToCpp (names: Map<IRId, string>) (expr: IRExpr) : string =
                     found |> Option.defaultValue [i]
                 | _ -> [i]
             let path = findPath parentTy i
-            path |> List.fold (fun acc idx -> sprintf "std::get<%d>(%s)" idx acc) (exprToCpp names e)
+            path |> List.fold (fun acc idx -> sprintf "std::get<%d>(%s)" idx acc) (exprToCppCore subst names e)
     | IRFieldAccess (obj, field) ->
-        sprintf "%s.%s" (exprToCpp names obj) field
+        sprintf "%s.%s" (exprToCppCore subst names obj) field
     | IRStructLit (typeName, fields) ->
         let fieldInits = fields |> List.map (fun (fname, e) -> 
-            sprintf ".%s = %s" fname (exprToCpp names e)) |> String.concat ", "
+            sprintf ".%s = %s" fname (exprToCppCore subst names e)) |> String.concat ", "
         sprintf "%s { %s }" typeName fieldInits
     | IRIndex (arr, indices, _) ->
-        let arrStr = exprToCpp names arr
-        let idxStr = indices |> List.map (fun i -> sprintf "[%s]" (exprToCpp names i)) |> String.concat ""
+        let arrStr = exprToCppCore subst names arr
+        let idxStr = indices |> List.map (fun i -> sprintf "[%s]" (exprToCppCore subst names i)) |> String.concat ""
         sprintf "%s%s" arrStr idxStr
     | IRApp (func, args, _) ->
         // Function signatures take Array<T,N> / Ragged<T> wrappers
@@ -843,10 +877,10 @@ let rec exprToCpp (names: Map<IRId, string>) (expr: IRExpr) : string =
         // as-is (the wrapper carries its own shape via .extents/.lens/
         // .offsets); no companion-arg synthesis. Non-array args render
         // through exprToCpp normally.
-        let funcStr = exprToCpp names func
+        let funcStr = exprToCppCore subst names func
         let argStrs =
             args |> List.collect (fun a ->
-                let argStr = exprToCpp names a
+                let argStr = exprToCppCore subst names a
                 match a, inferExprType a with
                 | (IRVar _ | IRParam _), ArrayElem _ -> [argStr]
                 | _ -> [argStr])
@@ -859,7 +893,7 @@ let rec exprToCpp (names: Map<IRId, string>) (expr: IRExpr) : string =
             if isUnitExpr body then
                 "((void)0)"
             else
-                exprToCpp names' body
+                exprToCppCore subst names' body
         else
             // Phase C lift pass produces IRLet bindings whose value can be
             // an inline form (mask/sort/intersect/union). These can't be
@@ -872,20 +906,20 @@ let rec exprToCpp (names: Map<IRId, string>) (expr: IRExpr) : string =
             // results, etc.), the existing "auto __v = ..." form is correct.
             let inlineElemTypeStr (form: IRExpr) =
                 inferInlineElemTypeStr "IRLet inline form" form
-            match materializeInlineForm names (sprintf "__v%d" id) (inlineElemTypeStr value) value with
+            match materializeInlineForm subst names (sprintf "__v%d" id) (inlineElemTypeStr value) value with
             | Some preludeStmts ->
                 let bodyStr =
                     if isUnitExpr body then "((void)0)"
-                    else exprToCpp names' body
+                    else exprToCppCore subst names' body
                 let prelude = preludeStmts |> String.concat " "
                 sprintf "([&]() { %s return %s; }())" prelude bodyStr
             | None ->
-                let valStr = exprToCpp names value
+                let valStr = exprToCppCore subst names value
                 match body with
                 | IRLit IRLitUnit ->
                     sprintf "([&]() { auto __v%d = %s; }())" id valStr
                 | _ ->
-                    let bodyStr = exprToCpp names' body
+                    let bodyStr = exprToCppCore subst names' body
                     sprintf "([&]() { auto __v%d = %s; return %s; }())" id valStr bodyStr
     | IRLambda info ->
         // Generate C++ lambda
@@ -894,7 +928,7 @@ let rec exprToCpp (names: Map<IRId, string>) (expr: IRExpr) : string =
         if isUnitExpr info.Body then
             sprintf "[&](%s) { }" paramList
         else
-            let bodyStr = exprToCpp names' info.Body
+            let bodyStr = exprToCppCore subst names' info.Body
             sprintf "[&](%s) { return %s; }" paramList bodyStr
     | IRMethodFor _ -> exprError "loop object used as value"
     | IRObjectFor _ -> exprError "loop object used as value"
@@ -903,9 +937,9 @@ let rec exprToCpp (names: Map<IRId, string>) (expr: IRExpr) : string =
     | IRCompute inner -> 
         // compute forces evaluation of a lazy computation
         match inner with
-        | IRApplyCombinator info -> genApplyCombinatorExpr names info
-        | _ -> exprToCpp names inner  // For non-combinator compute, just evaluate
-    | IRPure e -> exprToCpp names e     // pure wraps value
+        | IRApplyCombinator info -> genApplyCombinatorExpr subst names info
+        | _ -> exprToCppCore subst names inner  // For non-combinator compute, just evaluate
+    | IRPure e -> exprToCppCore subst names e     // pure wraps value
     | IRRank arr -> 
         // Rank is known statically from the type
         let rank = match inferExprType arr with
@@ -924,7 +958,7 @@ let rec exprToCpp (names: Map<IRId, string>) (expr: IRExpr) : string =
             match tryEvalIntIR at.IndexTypes.[dim].Extent with
             | Some n -> sprintf "%dL" n
             | None ->
-                let arrName = exprToCpp names arr
+                let arrName = exprToCppCore subst names arr
                 sprintf "(int64_t)(%s.extents[%d])" arrName dim
         | _ ->
             // Should be unreachable — typecheck rejects non-arrays. Surface a
@@ -942,7 +976,7 @@ let rec exprToCpp (names: Map<IRId, string>) (expr: IRExpr) : string =
         // guard when the extent is statically proven > 0 (typecheck has
         // already rejected statically-empty inputs); emit the guard for
         // dynamic extents (mask results, group_by groups, etc.).
-        let arrStr = exprToCpp names arrExpr
+        let arrStr = exprToCppCore subst names arrExpr
         let elemType =
             match inferExprType arrExpr with
             | ArrayElem a -> a.ElemType
@@ -966,7 +1000,7 @@ let rec exprToCpp (names: Map<IRId, string>) (expr: IRExpr) : string =
                 |> Map.add lInfo.Params.[0].VarId aName
                 |> Map.add lInfo.Params.[1].VarId bName
                 |> fun m -> lInfo.Captures |> List.fold (fun acc c -> Map.add c.Id c.Name acc) m
-            let kStr = exprToCpp kNames lInfo.Body
+            let kStr = exprToCppCore subst kNames lInfo.Body
             // Consumers read shape via `.extents` member of the wrapper.
             let guard =
                 if isStaticallyNonEmpty then ""
@@ -975,32 +1009,53 @@ let rec exprToCpp (names: Map<IRId, string>) (expr: IRExpr) : string =
                 guard elemStr aName elemStr bName kStr elemStr arrStr arrStr arrStr
         | _ ->
             "/* reduce: non-lambda kernel inline (typechecker or IR bug) */"
+
+    | IRContains (arrExpr, valueExpr) as node ->
+        // Consult the substitution map first. If this specific IRContains
+        // node has been registered (by reference) — meaning some enclosing
+        // mask renderer hoisted the build out as a preamble — emit the
+        // set-probe form directly. Otherwise fall through to the linear
+        // scan baseline. (Step 2 only adds the machinery; Step 3 wires
+        // mask to populate the map. With an empty substitution, this arm
+        // is byte-identical to the old behavior.)
+        match trySubst subst node with
+        | Some setName ->
+            sprintf "%s.count(%s)" setName (exprToCppCore subst names valueExpr)
+        | None ->
+            // Linear-scan membership test as an IIFE returning bool.
+            // Captures by reference so any names in the array/value
+            // expressions resolve through the surrounding scope.
+            let arrStr = exprToCppCore subst names arrExpr
+            let valStr = exprToCppCore subst names valueExpr
+            sprintf "[&]() { for (size_t __ci = 0; __ci < %s.extents[0]; __ci++) { if (%s[__ci] == %s) return true; } return false; }()"
+                arrStr arrStr valStr
+
     | IRArity (Some n, _) -> sprintf "%d" n
     | IRArity (None, paramName) -> 
         // Arity of poly pack - use tuple_size on the named parameter
         sprintf "std::tuple_size_v<std::decay_t<decltype(%s)>>" paramName
     | IRBind (comp, cont) ->
         // Monadic bind - comp >>= cont
-        sprintf "%s(%s)" (exprToCpp names cont) (exprToCpp names comp)
+        sprintf "%s(%s)" (exprToCppCore subst names cont) (exprToCppCore subst names comp)
     | IRReynolds (kernel, isAntisym) ->
         // Reynolds operator wraps kernel
         exprError "reynolds wrapper in expression position"
     | IRZip arrs ->
         // In expression context (e.g. inside a kernel body), zip produces a tuple
-        sprintf "std::make_tuple(%s)" (arrs |> List.map (exprToCpp names) |> String.concat ", ")
+        sprintf "std::make_tuple(%s)" (arrs |> List.map (exprToCppCore subst names) |> String.concat ", ")
     | IRStack arrs ->
         exprError "stack not yet implemented in codegen"
     | IRSlice (arr, dim, start, stop) ->
         exprError "slice not yet implemented in codegen"
     | IRCurry (arr, idx, resultRank) ->
-        sprintf "%s[%s]" (exprToCpp names arr) (exprToCpp names idx)
+        sprintf "%s[%s]" (exprToCppCore subst names arr) (exprToCppCore subst names idx)
     | IRTupleCons (head, tail) ->
-        sprintf "std::tuple_cat(std::make_tuple(%s), %s)" (exprToCpp names head) (exprToCpp names tail)
+        sprintf "std::tuple_cat(std::make_tuple(%s), %s)" (exprToCppCore subst names head) (exprToCppCore subst names tail)
     | IRTupleDecons tuple ->
-        exprToCpp names tuple  // Decons is handled by projection
+        exprToCppCore subst names tuple  // Decons is handled by projection
     | IRMatch (scrutinee, cases) ->
         // Generate nested ternary for match expressions
-        let scrut = exprToCpp names scrutinee
+        let scrut = exprToCppCore subst names scrutinee
         let rec genCase (cases: IRMatchCase list) : string =
             match cases with
             | [] -> "([&]() -> double { std::cerr << \"Blade: non-exhaustive match\" << std::endl; std::abort(); return 0; }())"
@@ -1011,7 +1066,7 @@ let rec exprToCpp (names: Map<IRId, string>) (expr: IRExpr) : string =
                 let wrapGuard (bodyStr: string) (names': Map<IRId, string>) : string =
                     match case.Guard with
                     | Some guard ->
-                        let guardStr = exprToCpp names' guard
+                        let guardStr = exprToCppCore subst names' guard
                         sprintf "(%s ? %s : %s)" guardStr bodyStr abortExpr
                     | None -> bodyStr
                 match case.Pattern with
@@ -1023,16 +1078,16 @@ let rec exprToCpp (names: Map<IRId, string>) (expr: IRExpr) : string =
                     if varUsed then
                         let varName = sprintf "__match_%d" varId
                         let names' = Map.add varId varName names
-                        let bodyStr = exprToCpp names' case.Body
+                        let bodyStr = exprToCppCore subst names' case.Body
                         let guardedBody = wrapGuard bodyStr names'
                         sprintf "[&]() { auto %s = %s; return %s; }()" varName scrut guardedBody
                     else
-                        wrapGuard (exprToCpp names case.Body) names
+                        wrapGuard (exprToCppCore subst names case.Body) names
                 | IRPatWild ->
-                    wrapGuard (exprToCpp names case.Body) names
+                    wrapGuard (exprToCppCore subst names case.Body) names
                 | IRPatLit lit ->
                     let litStr = litToCpp lit
-                    let bodyStr = wrapGuard (exprToCpp names case.Body) names
+                    let bodyStr = wrapGuard (exprToCppCore subst names case.Body) names
                     sprintf "(%s == %s ? %s : %s)" scrut litStr bodyStr abortExpr
                 | IRPatVariant (ctorName, tag, innerOpt, isEnum) ->
                     // Last variant case — extract payload and evaluate body
@@ -1041,11 +1096,11 @@ let rec exprToCpp (names: Map<IRId, string>) (expr: IRExpr) : string =
                         let varName = sprintf "__match_%d" varId
                         let names' = Map.add varId varName names
                         let extractExpr = sprintf "std::get<%s_T>(%s).value" ctorName scrut
-                        let bodyStr = exprToCpp names' case.Body
+                        let bodyStr = exprToCppCore subst names' case.Body
                         let guardedBody = wrapGuard bodyStr names'
                         sprintf "[&]() { auto %s = %s; return %s; }()" varName extractExpr guardedBody
                     | _ ->
-                        wrapGuard (exprToCpp names case.Body) names
+                        wrapGuard (exprToCppCore subst names case.Body) names
                 | IRPatTuple innerPats ->
                     // Last tuple case — bind each element
                     let bindings =
@@ -1057,11 +1112,11 @@ let rec exprToCpp (names: Map<IRId, string>) (expr: IRExpr) : string =
                     let bindingDecls = bindings |> List.map (fun (_, name, idx) ->
                         sprintf "auto %s = std::get<%d>(%s)" name idx scrut) |> String.concat "; "
                     let names' = bindings |> List.fold (fun acc (id, name, _) -> Map.add id name acc) names
-                    let bodyStr = exprToCpp names' case.Body
+                    let bodyStr = exprToCppCore subst names' case.Body
                     let guardedBody = wrapGuard bodyStr names'
                     sprintf "[&]() { %s; return %s; }()" bindingDecls guardedBody
                 | _ ->
-                    wrapGuard (exprToCpp names case.Body) names
+                    wrapGuard (exprToCppCore subst names case.Body) names
             | case :: rest ->
                 let restStr = genCase rest
                 match case.Pattern with
@@ -1070,9 +1125,9 @@ let rec exprToCpp (names: Map<IRId, string>) (expr: IRExpr) : string =
                     let bodyStr = 
                         match case.Guard with
                         | Some guard -> 
-                            let guardStr = exprToCpp names guard
-                            sprintf "(%s ? %s : %s)" guardStr (exprToCpp names case.Body) restStr
-                        | None -> exprToCpp names case.Body
+                            let guardStr = exprToCppCore subst names guard
+                            sprintf "(%s ? %s : %s)" guardStr (exprToCppCore subst names case.Body) restStr
+                        | None -> exprToCppCore subst names case.Body
                     sprintf "(%s == %s ? %s : %s)" scrut litStr bodyStr restStr
                 | IRPatVar varId ->
                     let varUsed =
@@ -1083,32 +1138,32 @@ let rec exprToCpp (names: Map<IRId, string>) (expr: IRExpr) : string =
                         match case.Guard with
                         | Some guard ->
                             // Variable pattern with guard, variable used
-                            let guardStr = exprToCppWithVar names varId varName guard
-                            let bodyStr = exprToCppWithVar names varId varName case.Body
+                            let guardStr = exprToCppWithVarCore subst names varId varName guard
+                            let bodyStr = exprToCppWithVarCore subst names varId varName case.Body
                             sprintf "[&]() { auto %s = %s; return %s ? %s : %s; }()" varName scrut guardStr bodyStr restStr
                         | None ->
                             // Variable pattern without guard - always matches, variable used
-                            let bodyStr = exprToCppWithVar names varId varName case.Body
+                            let bodyStr = exprToCppWithVarCore subst names varId varName case.Body
                             sprintf "[&]() { auto %s = %s; return %s; }()" varName scrut bodyStr
                     else
                         match case.Guard with
                         | Some guard ->
                             // Variable unused, but has guard
-                            let guardStr = exprToCpp names guard
-                            let bodyStr = exprToCpp names case.Body
+                            let guardStr = exprToCppCore subst names guard
+                            let bodyStr = exprToCppCore subst names case.Body
                             sprintf "(%s ? %s : %s)" guardStr bodyStr restStr
                         | None ->
                             // Variable unused, no guard - always matches (like wildcard)
-                            exprToCpp names case.Body
+                            exprToCppCore subst names case.Body
                 | IRPatWild ->
                     match case.Guard with
                     | Some guard ->
-                        let guardStr = exprToCpp names guard
-                        let bodyStr = exprToCpp names case.Body
+                        let guardStr = exprToCppCore subst names guard
+                        let bodyStr = exprToCppCore subst names case.Body
                         sprintf "(%s ? %s : %s)" guardStr bodyStr restStr
                     | None ->
                         // Wildcard without guard - always matches
-                        exprToCpp names case.Body
+                        exprToCppCore subst names case.Body
                 | IRPatTuple innerPats ->
                     // Tuple pattern - bind each element
                     let rec collectVarBindings (pats: IRPattern list) (idx: int) : (IRId * string) list =
@@ -1128,11 +1183,11 @@ let rec exprToCpp (names: Map<IRId, string>) (expr: IRExpr) : string =
                     
                     match case.Guard with
                     | Some guard ->
-                        let guardStr = exprToCpp names' guard
-                        let bodyStr = exprToCpp names' case.Body
+                        let guardStr = exprToCppCore subst names' guard
+                        let bodyStr = exprToCppCore subst names' case.Body
                         sprintf "[&]() { %s; return %s ? %s : %s; }()" bindingDecls guardStr bodyStr restStr
                     | None ->
-                        let bodyStr = exprToCpp names' case.Body
+                        let bodyStr = exprToCppCore subst names' case.Body
                         sprintf "[&]() { %s; return %s; }()" bindingDecls bodyStr
                 | IRPatVariant (ctorName, tag, innerOpt, isEnum) ->
                     // Variant pattern - check variant type and optionally bind inner value
@@ -1146,39 +1201,39 @@ let rec exprToCpp (names: Map<IRId, string>) (expr: IRExpr) : string =
                         let varName = sprintf "__match_%d" varId
                         let names' = Map.add varId varName names
                         let extractExpr = sprintf "std::get<%s_T>(%s).value" ctorName scrut
-                        let bodyStr = exprToCpp names' case.Body
+                        let bodyStr = exprToCppCore subst names' case.Body
                         sprintf "(%s ? [&]() { auto %s = %s; return %s; }() : %s)" checkExpr varName extractExpr bodyStr restStr
                     | Some _ ->
                         // Other inner patterns - fallback
-                        let bodyStr = exprToCpp names case.Body
+                        let bodyStr = exprToCppCore subst names case.Body
                         sprintf "(%s ? %s : %s)" checkExpr bodyStr restStr
                     | None ->
                         // Variant without inner value
-                        let bodyStr = exprToCpp names case.Body
+                        let bodyStr = exprToCppCore subst names case.Body
                         sprintf "(%s ? %s : %s)" checkExpr bodyStr restStr
                 | _ ->
                     // Unsupported pattern - fallback
-                    sprintf "(true ? %s : %s)" (exprToCpp names case.Body) restStr
+                    sprintf "(true ? %s : %s)" (exprToCppCore subst names case.Body) restStr
         genCase cases
     | IRNth -> exprError "nth keyword not supported in expression position"
     | IRZero -> "0"
     | IRPolyIndex (pack, idx) ->
         // For static index, use std::get; otherwise runtime indexing
         match idx with
-        | IRLit (IRLitInt n) -> sprintf "std::get<%d>(%s)" n (exprToCpp names pack)
-        | _ -> sprintf "%s[%s]" (exprToCpp names pack) (exprToCpp names idx)
+        | IRLit (IRLitInt n) -> sprintf "std::get<%d>(%s)" n (exprToCppCore subst names pack)
+        | _ -> sprintf "%s[%s]" (exprToCppCore subst names pack) (exprToCppCore subst names idx)
     | IRParallel (a, b, _) ->
         exprError "parallel combinator in expression position"
     | IRFusion (a, b) ->
         exprError "fusion combinator in expression position"
     | IRChoice (a, b) ->
-        let aStr = exprToCpp names a
-        let bStr = exprToCpp names b
+        let aStr = exprToCppCore subst names a
+        let bStr = exprToCppCore subst names b
         sprintf "(%s != 0 ? %s : %s)" aStr aStr bStr
     | IRGuard (cond, body) ->
         // guard(p, c) → p ? c : 0 (type-appropriate zero)
-        let condStr = exprToCpp names cond
-        let bodyStr = exprToCpp names body
+        let condStr = exprToCppCore subst names cond
+        let bodyStr = exprToCppCore subst names body
         let zeroStr =
             match inferExprType body with
             | IRTScalar ETBool -> "false"
@@ -1188,8 +1243,8 @@ let rec exprToCpp (names: Map<IRId, string>) (expr: IRExpr) : string =
         sprintf "(%s ? %s : %s)" condStr bodyStr zeroStr
     | IRCompose (f, g) ->
         // f >> g = [&](auto... args) { return g(f(args...)); }
-        let fStr = exprToCpp names f
-        let gStr = exprToCpp names g
+        let fStr = exprToCppCore subst names f
+        let gStr = exprToCppCore subst names g
         sprintf "[&](auto... __args) { return %s(%s(__args...)); }" gStr fStr
     | IRComposeObj (f, g) ->
         exprError "compose_obj in expression position"
@@ -1204,12 +1259,12 @@ let rec exprToCpp (names: Map<IRId, string>) (expr: IRExpr) : string =
             match target with
             | LVVar id -> Map.tryFind id names |> Option.defaultValue (sprintf "__v%d" id)
             | LVIndex (arr, idxs) ->
-                let arrStr = exprToCpp names arr
-                let idxStr = idxs |> List.map (fun i -> sprintf "[%s]" (exprToCpp names i)) |> String.concat ""
+                let arrStr = exprToCppCore subst names arr
+                let idxStr = idxs |> List.map (fun i -> sprintf "[%s]" (exprToCppCore subst names i)) |> String.concat ""
                 sprintf "%s%s" arrStr idxStr
-            | LVField (obj, f) -> sprintf "%s.%s" (exprToCpp names obj) f
+            | LVField (obj, f) -> sprintf "%s.%s" (exprToCppCore subst names obj) f
             | LVOther e -> exprError "invalid assignment target"
-        sprintf "%s = %s" targetStr (exprToCpp names value)
+        sprintf "%s = %s" targetStr (exprToCppCore subst names value)
     | IRForRange (vid, lo, hi, body) ->
         exprError "for-range loop in expression position"
     | IROpaqueExtent ->
@@ -1238,7 +1293,7 @@ let rec exprToCpp (names: Map<IRId, string>) (expr: IRExpr) : string =
 /// non-2-array combinator, so the cleanup waits for one. Bindings and
 /// returns already go through genApplyCombinator, which is where the real
 /// machinery lives.
-and genApplyCombinatorExpr (names: Map<IRId, string>) (info: ApplyInfo) : string =
+and genApplyCombinatorExpr (subst: SubstMap) (names: Map<IRId, string>) (info: ApplyInfo) : string =
     // Extract array info
     let arrayNames = 
         info.Arrays |> List.mapi (fun i arr ->
@@ -1254,13 +1309,13 @@ and genApplyCombinatorExpr (names: Map<IRId, string>) (info: ApplyInfo) : string
             let paramNames = lInfo.Params |> List.map (fun p -> p.Name)
             let bodyStr = 
                 let names' = lInfo.Params |> List.fold (fun m p -> Map.add p.VarId p.Name m) names
-                exprToCpp names' lInfo.Body
+                exprToCppCore subst names' lInfo.Body
             (paramNames, bodyStr)
         | IRReynolds (IRLambda lInfo, _) ->
             let paramNames = lInfo.Params |> List.map (fun p -> p.Name)
             let bodyStr = 
                 let names' = lInfo.Params |> List.fold (fun m p -> Map.add p.VarId p.Name m) names
-                exprToCpp names' lInfo.Body
+                exprToCppCore subst names' lInfo.Body
             (paramNames, bodyStr)
         | _ -> ([], exprError "kernel is not a lambda in inline combinator expression")
     
@@ -1289,9 +1344,23 @@ and genApplyCombinatorExpr (names: Map<IRId, string>) (info: ApplyInfo) : string
         exprError (sprintf "inline combinator not supported for %d arrays" arrayNames.Length)
 
 /// Convert IRExpr to C++ with an additional variable binding
-and exprToCppWithVar (names: Map<IRId, string>) (varId: IRId) (varName: string) (expr: IRExpr) : string =
+and exprToCppWithVarCore (subst: SubstMap) (names: Map<IRId, string>) (varId: IRId) (varName: string) (expr: IRExpr) : string =
     let names' = Map.add varId varName names
-    exprToCpp names' expr
+    exprToCppCore subst names' expr
+
+/// Convenience wrapper: render with no contains-substitution. This is the
+/// API every existing caller uses; the substitution-aware path goes through
+/// exprToCppWithSubst (defined outside the let-rec group).
+///
+/// Wrappers are inside the recursion group because sibling helpers
+/// (`genApplyCombinatorExpr`, `materializeInlineForm`) reference these
+/// names; defining them as plain `let` after the group would push them
+/// out of scope at those call sites.
+and exprToCpp (names: Map<IRId, string>) (expr: IRExpr) : string =
+    exprToCppCore emptySubst names expr
+
+and exprToCppWithVar (names: Map<IRId, string>) (varId: IRId) (varName: string) (expr: IRExpr) : string =
+    exprToCppWithVarCore emptySubst names varId varName expr
 
 /// Generate the C++ statements that materialize an inline form (IRMask,
 /// IRIntersect, IRUnion, IRSort) into `varName` and `varName + "_extents"`.
@@ -1311,22 +1380,94 @@ and exprToCppWithVar (names: Map<IRId, string>) (varId: IRId) (varName: string) 
 ///
 /// Mutually recursive with exprToCpp so it can render nested predicate
 /// and key bodies. Returns None for forms outside this set.
-and materializeInlineForm (names: Map<IRId, string>) (varName: string) (elemTypeStr: string) (form: IRExpr) : string list option =
+and materializeInlineForm (subst: SubstMap) (names: Map<IRId, string>) (varName: string) (elemTypeStr: string) (form: IRExpr) : string list option =
     match form with
     | IRMask (arrExpr, predExpr) ->
-        let arrName = exprToCpp names arrExpr
+        let arrName = exprToCppCore subst names arrExpr
         // Predicate must be a single-param lambda (TypeCheck enforces).
-        let (predParamName, predStr) =
+        // Beyond rendering the predicate body, this is where Phase C's
+        // contains-aware mask optimization happens. The flow:
+        //   1. Walk the lambda body via exprAttrs to collect ContainsProbes.
+        //   2. Partition into hoistable / non-hoistable: a probe is
+        //      hoistable iff its BuildOn doesn't reference the lambda
+        //      parameter. Non-hoistable probes fall through to the
+        //      existing IIFE linear scan (handled by exprToCppCore's
+        //      IRContains arm when the substitution map has no entry
+        //      for that node).
+        //   3. Deduplicate hoistable probes by structural equality on
+        //      BuildOn — multiple `contains(B, _)` calls with the same B
+        //      share one preamble set.
+        //   4. Emit `std::unordered_set` build statements as preamble,
+        //      and build a SubstMap mapping each hoistable probe's Node
+        //      (by reference) to the assigned set name.
+        //   5. Render the predicate body with the augmented subst.
+        let (preambleStmts, predParamName, predStr) =
             match predExpr with
             | IRLambda lInfo when lInfo.Params.Length = 1 ->
+                let lambdaParamId = lInfo.Params.[0].VarId
                 let pName = sprintf "__%s_x" varName
                 let predNames =
                     names
-                    |> Map.add lInfo.Params.[0].VarId pName
+                    |> Map.add lambdaParamId pName
                     |> fun m -> lInfo.Captures |> List.fold (fun acc c -> Map.add c.Id c.Name acc) m
-                (pName, exprToCpp predNames lInfo.Body)
-            | _ -> (sprintf "__%s_x" varName, "true")
-        Some [
+
+                // Step 1: collect probes from the predicate body.
+                let predAttrs = exprAttrs lInfo.Body
+                let allProbes = predAttrs.Probes
+
+                // Step 2: filter for hoistable — BuildOn invariant w.r.t.
+                // the mask's iteration variable.
+                let isHoistable (probe: ContainsProbe) =
+                    let buildAttrs = exprAttrs probe.BuildOn
+                    not (Set.contains lambdaParamId buildAttrs.FreeVars)
+                let hoistableProbes = allProbes |> List.filter isHoistable
+
+                // Step 3: deduplicate by structural equality on BuildOn.
+                // F# discriminated unions get default structural equality,
+                // so List.distinct works directly. First-occurrence order
+                // is preserved.
+                let uniqueBuilds =
+                    hoistableProbes
+                    |> List.map (fun p -> p.BuildOn)
+                    |> List.distinct
+
+                // Step 4: assign set names + emit build statements.
+                // Set names are `<varName>__probe_set_<n>`; varName is
+                // typically `__v3` or similar safe identifier already.
+                let buildAssignments =
+                    uniqueBuilds
+                    |> List.mapi (fun i b -> (b, sprintf "%s__probe_set_%d" varName i))
+                let preamble =
+                    buildAssignments |> List.collect (fun (build, setName) ->
+                        let buildCpp = exprToCppCore subst names build
+                        [
+                            sprintf "std::unordered_set<%s> %s;" elemTypeStr setName
+                            sprintf "for (size_t __pi = 0; __pi < %s.extents[0]; __pi++) %s.insert(%s[__pi]);"
+                                buildCpp setName buildCpp
+                        ])
+
+                // Step 5a: build the substitution map. Each hoistable
+                // probe Node maps to the set name of its BuildOn (by
+                // structural equality lookup against buildAssignments).
+                let probeSubst : SubstMap =
+                    hoistableProbes |> List.map (fun probe ->
+                        let setName =
+                            buildAssignments
+                            |> List.find (fun (b, _) -> b = probe.BuildOn)
+                            |> snd
+                        (probe.Node, setName))
+                // Combine with outer subst so nested probes from
+                // enclosing scopes still resolve correctly.
+                let combinedSubst = probeSubst @ subst
+
+                // Step 5b: render the predicate body with the augmented
+                // subst active. The IRContains arm in exprToCppCore now
+                // emits `setName.count(value)` for any hoisted probe,
+                // and falls through to the IIFE linear scan otherwise.
+                let predStr = exprToCppCore combinedSubst predNames lInfo.Body
+                (preamble, pName, predStr)
+            | _ -> ([], sprintf "__%s_x" varName, "true")
+        Some (preambleStmts @ [
             sprintf "size_t %s__count = 0;" varName
             sprintf "for (size_t __mi = 0; __mi < %s.extents[0]; __mi++) {" arrName
             sprintf "    %s %s = %s[__mi];" elemTypeStr predParamName arrName
@@ -1339,45 +1480,87 @@ and materializeInlineForm (names: Map<IRId, string>) (varName: string) (elemType
             sprintf "    %s %s = %s[__mi];" elemTypeStr predParamName arrName
             sprintf "    if (%s) { %s[%s__fill++] = %s; }" predStr varName varName predParamName
             "}"
-        ]
+        ])
     | IRIntersect (aExpr, bExpr) ->
-        let aName = exprToCpp names aExpr
-        let bName = exprToCpp names bExpr
+        // SQL INTERSECT: unique values appearing in BOTH arrays, output in
+        // first-occurrence order from A. Two-pass with set reuse, mirroring
+        // unique() — first pass counts unique A-elements that are also in
+        // B, second pass emits them in order.
+        //
+        // The `__seen.insert(x).second` idiom is a one-shot "is-first?"
+        // check: returns true iff x wasn't previously in the set. Used in
+        // both passes so each unique A-element is counted exactly once
+        // (regardless of how often it repeats in A).
+        let aName = exprToCppCore subst names aExpr
+        let bName = exprToCppCore subst names bExpr
         Some [
-            sprintf "std::set<%s> %s__set;" elemTypeStr varName
-            sprintf "for (size_t __si = 0; __si < %s.extents[0]; __si++) %s__set.insert(%s[__si]);" bName varName bName
+            sprintf "std::unordered_set<%s> %s__b_set;" elemTypeStr varName
+            sprintf "for (size_t __si = 0; __si < %s.extents[0]; __si++) %s__b_set.insert(%s[__si]);" bName varName bName
+            sprintf "std::unordered_set<%s> %s__seen;" elemTypeStr varName
             sprintf "size_t %s__count = 0;" varName
             sprintf "for (size_t __si = 0; __si < %s.extents[0]; __si++) {" aName
-            sprintf "    if (%s__set.count(%s[__si])) %s__count++;" varName aName varName
+            sprintf "    %s __x = %s[__si];" elemTypeStr aName
+            sprintf "    if (%s__b_set.count(__x) && %s__seen.insert(__x).second) %s__count++;" varName varName varName
             "}"
             sprintf "size_t %s_extents[1] = {%s__count};" varName varName
             sprintf "Array<%s, 1> %s = { new %s[%s__count], %s_extents };" elemTypeStr varName elemTypeStr varName varName
+            sprintf "%s__seen.clear();" varName
             sprintf "size_t %s__fill = 0;" varName
             sprintf "for (size_t __si = 0; __si < %s.extents[0]; __si++) {" aName
-            sprintf "    if (%s__set.count(%s[__si])) %s[%s__fill++] = %s[__si];" varName aName varName varName aName
+            sprintf "    %s __x = %s[__si];" elemTypeStr aName
+            sprintf "    if (%s__b_set.count(__x) && %s__seen.insert(__x).second) %s[%s__fill++] = __x;" varName varName varName varName
             "}"
         ]
     | IRUnion (aExpr, bExpr) ->
-        let aName = exprToCpp names aExpr
-        let bName = exprToCpp names bExpr
+        // SQL UNION: unique values appearing in EITHER array, output in
+        // first-occurrence order across the concatenation A ++ B. Two-pass
+        // with set reuse. Each pass walks A then B; the shared seen set
+        // ensures A's elements appear before B's, and within each, only
+        // first occurrences survive.
+        let aName = exprToCppCore subst names aExpr
+        let bName = exprToCppCore subst names bExpr
         Some [
-            sprintf "std::set<%s> %s__set;" elemTypeStr varName
-            sprintf "for (size_t __si = 0; __si < %s.extents[0]; __si++) %s__set.insert(%s[__si]);" aName varName aName
-            sprintf "size_t %s__extra = 0;" varName
-            sprintf "for (size_t __si = 0; __si < %s.extents[0]; __si++) {" bName
-            sprintf "    if (!%s__set.count(%s[__si])) %s__extra++;" varName bName varName
+            sprintf "std::unordered_set<%s> %s__seen;" elemTypeStr varName
+            sprintf "size_t %s__count = 0;" varName
+            sprintf "for (size_t __si = 0; __si < %s.extents[0]; __si++) {" aName
+            sprintf "    if (%s__seen.insert(%s[__si]).second) %s__count++;" varName aName varName
             "}"
-            sprintf "size_t %s__total = %s.extents[0] + %s__extra;" varName aName varName
-            sprintf "size_t %s_extents[1] = {%s__total};" varName varName
-            sprintf "Array<%s, 1> %s = { new %s[%s__total], %s_extents };" elemTypeStr varName elemTypeStr varName varName
-            sprintf "for (size_t __si = 0; __si < %s.extents[0]; __si++) %s[__si] = %s[__si];" aName varName aName
-            sprintf "size_t %s__fill = %s.extents[0];" varName aName
             sprintf "for (size_t __si = 0; __si < %s.extents[0]; __si++) {" bName
-            sprintf "    if (!%s__set.count(%s[__si])) %s[%s__fill++] = %s[__si];" varName bName varName varName bName
+            sprintf "    if (%s__seen.insert(%s[__si]).second) %s__count++;" varName bName varName
+            "}"
+            sprintf "size_t %s_extents[1] = {%s__count};" varName varName
+            sprintf "Array<%s, 1> %s = { new %s[%s__count], %s_extents };" elemTypeStr varName elemTypeStr varName varName
+            sprintf "%s__seen.clear();" varName
+            sprintf "size_t %s__fill = 0;" varName
+            sprintf "for (size_t __si = 0; __si < %s.extents[0]; __si++) {" aName
+            sprintf "    if (%s__seen.insert(%s[__si]).second) %s[%s__fill++] = %s[__si];" varName aName varName varName aName
+            "}"
+            sprintf "for (size_t __si = 0; __si < %s.extents[0]; __si++) {" bName
+            sprintf "    if (%s__seen.insert(%s[__si]).second) %s[%s__fill++] = %s[__si];" varName bName varName varName bName
+            "}"
+        ]
+    | IRUnique aExpr ->
+        // First pass: insert each element into an unordered_set; count
+        // first-occurrences. Second pass: clear the set, rescan, emit on
+        // first occurrence. Two passes keep allocation exact (no
+        // intermediate vector) while preserving first-occurrence order.
+        let aName = exprToCppCore subst names aExpr
+        Some [
+            sprintf "std::unordered_set<%s> %s__seen;" elemTypeStr varName
+            sprintf "size_t %s__count = 0;" varName
+            sprintf "for (size_t __ui = 0; __ui < %s.extents[0]; __ui++) {" aName
+            sprintf "    if (%s__seen.insert(%s[__ui]).second) %s__count++;" varName aName varName
+            "}"
+            sprintf "size_t %s_extents[1] = {%s__count};" varName varName
+            sprintf "Array<%s, 1> %s = { new %s[%s__count], %s_extents };" elemTypeStr varName elemTypeStr varName varName
+            sprintf "%s__seen.clear();" varName
+            sprintf "size_t %s__fill = 0;" varName
+            sprintf "for (size_t __ui = 0; __ui < %s.extents[0]; __ui++) {" aName
+            sprintf "    if (%s__seen.insert(%s[__ui]).second) %s[%s__fill++] = %s[__ui];" varName aName varName varName aName
             "}"
         ]
     | IRSort (arrExpr, keyExpr) ->
-        let arrName = exprToCpp names arrExpr
+        let arrName = exprToCppCore subst names arrExpr
         let (keyParamId, keyBody, keyCaptures) =
             match keyExpr with
             | IRLambda lInfo when lInfo.Params.Length = 1 ->
@@ -1388,7 +1571,7 @@ and materializeInlineForm (names: Map<IRId, string>) (varName: string) (elemType
             names
             |> Map.add keyParamId keyParamName
             |> fun m -> keyCaptures |> List.fold (fun acc c -> Map.add c.Id c.Name acc) m
-        let keyStr = exprToCpp keyNames keyBody
+        let keyStr = exprToCppCore subst keyNames keyBody
         Some [
             sprintf "auto %s__key = [&](%s %s) { return %s; };" varName elemTypeStr keyParamName keyStr
             sprintf "size_t* %s__perm = new size_t[%s.extents[0]];" varName arrName
@@ -1405,6 +1588,27 @@ and materializeInlineForm (names: Map<IRId, string>) (varName: string) (elemType
 /// Convert IRExpr to C++ using context
 let exprToCppCtx (ctx: CodeGenContext) (expr: IRExpr) : string =
     exprToCpp ctx.VarNames expr
+
+/// Render an IRExpr with a contains-substitution map active. Used by the
+/// mask renderer (Step 3, upcoming): the mask walks its predicate, hoists
+/// builds for each hoistable contains, builds the substitution map, and
+/// then calls this function to produce the predicate's C++ string with
+/// `set.count(...)` substituted for each hoisted IRContains node.
+///
+/// With an empty substitution this is byte-identical to `exprToCpp`.
+///
+/// The substitution propagates through every renderer in the rec group:
+/// `exprToCppCore`, `exprToCppWithVarCore`, `genApplyCombinatorExpr`, and
+/// `materializeInlineForm`. That means a contains nested inside a method_for
+/// kernel inside a mask predicate gets the same treatment as a contains
+/// directly in the predicate — wherever Phase B's bottom-up walk would
+/// flag the probe, Step 2's renderer can substitute it. External callers
+/// of `materializeInlineForm` / `genApplyCombinatorExpr` (the binding-
+/// level entry points) pass `emptySubst`; Step 3 wires the mask renderer
+/// to populate a real subst map when materializing a mask whose
+/// predicate carries probes.
+let exprToCppWithSubst (subst: SubstMap) (names: Map<IRId, string>) (expr: IRExpr) : string =
+    exprToCppCore subst names expr
 
 // ============================================================================
 // Loop Nest Code Generation
@@ -1862,6 +2066,7 @@ let genIncludes () : string list =
      "#include <algorithm>"  // std::stable_sort (used by sort())
      "#include <numeric>"    // std::iota (used by sort())
      "#include <unordered_map>"  // group_keys Case 3 (dynamic ngroups via hash discovery)
+     "#include <unordered_set>"  // unique() dedup, contains() hoist (future)
      "// Note: OpenMP disabled for portability"
      "// #include <omp.h>"
      "#include \"nested_array_utilities.cpp\""
@@ -1937,10 +2142,10 @@ let genIncludesExternal () : string list =
      "#include <iostream>"
      "#include <iomanip>"
      "#include <chrono>"
-     "#include <set>"
      "#include <algorithm>"  // std::stable_sort (used by sort())
      "#include <numeric>"    // std::iota (used by sort())
      "#include <unordered_map>"  // group_keys Case 3 (dynamic ngroups via hash discovery)
+     "#include <unordered_set>"  // unique() dedup, contains() hoist (future)
      "#include <omp.h>"
      "#include \"nested_array_utilities.hpp\""
      "#include \"nested_array_types.hpp\""
@@ -2308,7 +2513,7 @@ let genScalarBinding (ctx: CodeGenContext) (name: string) (value: IRExpr) (ty: I
             match value with
             | IRFieldAccess _ -> true
             | IRVar _ -> true                // assume wrapper (most producers migrated)
-            | IRMask _ | IRSort _ | IRIntersect _ | IRUnion _ -> true
+            | IRMask _ | IRSort _ | IRIntersect _ | IRUnion _ | IRUnique _ -> true
             | IRApp _ -> true                // function-call returns wrapped Array
             | _ -> false
         let cppType =
@@ -2504,7 +2709,7 @@ let genApplyCombinator (ctx: CodeGenContext) (name: string) (info: ApplyInfo) (b
             | IRRange _ -> (sprintf "__range%d" i, arr)
             | IRVirtualReverse _ -> (sprintf "__rev%d" i, arr)
             | IRBlocked _ -> (sprintf "__blk%d" i, arr)
-            | IRMask _ | IRIntersect _ | IRUnion _ ->
+            | IRMask _ | IRIntersect _ | IRUnion _ | IRUnique _ ->
                 // Auto-materialize: when a method_for receives an inline form
                 // as one of its arrays, generate a temporary binding before
                 // the loop nest. The Phase C lift pass deliberately leaves
@@ -2521,7 +2726,7 @@ let genApplyCombinator (ctx: CodeGenContext) (name: string) (info: ApplyInfo) (b
                 let elemStr = elemTypeToCpp elemET
                 preCode <- preCode @ autoMaterErr
                 let matStmts =
-                    match materializeInlineForm tempCtx.VarNames tmpName elemStr arr with
+                    match materializeInlineForm emptySubst tempCtx.VarNames tmpName elemStr arr with
                     | Some s -> s
                     | None -> []
                 let code = matStmts |> List.map (fun s -> ind + s)
@@ -2991,7 +3196,7 @@ let rec genBinding (ctx: CodeGenContext) (binding: IRBinding) (builder: IRBuilde
             | IRLambda lInfo when lInfo.Params.Length = 1 -> []
             | _ -> codegenError ctx ind "mask: predicate must be a single-parameter lambda; got something else (typechecker or IR bug)"
         let matStmts =
-            match materializeInlineForm ctx.VarNames name elemStr binding.Value with
+            match materializeInlineForm emptySubst ctx.VarNames name elemStr binding.Value with
             | Some s -> s
             | None -> []  // Unreachable: helper supports IRMask
         let code = elemErrCode @ predErrCode @ [sprintf "%s// mask: count + compact" ind] @ (matStmts |> List.map (fun s -> ind + s))
@@ -3003,7 +3208,7 @@ let rec genBinding (ctx: CodeGenContext) (binding: IRBinding) (builder: IRBuilde
         let (elemET, elemErrCode) = inferElemTypeStrict ctx ind aExpr "intersect"
         let elemStr = elemTypeToCpp elemET
         let matStmts =
-            match materializeInlineForm ctx.VarNames name elemStr binding.Value with
+            match materializeInlineForm emptySubst ctx.VarNames name elemStr binding.Value with
             | Some s -> s
             | None -> []
         let code = elemErrCode @ [sprintf "%s// intersect: build set from B, scan A" ind] @ (matStmts |> List.map (fun s -> ind + s))
@@ -3015,13 +3220,28 @@ let rec genBinding (ctx: CodeGenContext) (binding: IRBinding) (builder: IRBuilde
         let (elemET, elemErrCode) = inferElemTypeStrict ctx ind aExpr "union"
         let elemStr = elemTypeToCpp elemET
         let matStmts =
-            match materializeInlineForm ctx.VarNames name elemStr binding.Value with
+            match materializeInlineForm emptySubst ctx.VarNames name elemStr binding.Value with
             | Some s -> s
             | None -> []
         let code = elemErrCode @ [sprintf "%s// union: all of A, plus elements from B not in A" ind] @ (matStmts |> List.map (fun s -> ind + s))
         let ctx' = addVarName binding.Id name ctx
         (code, ctx')
     
+    | IRUnique arrExpr ->
+        // unique(A): dedup, preserving first-occurrence order. Two-pass:
+        // first counts unique elements via std::unordered_set, then fills
+        // the output array on a second pass (clearing the set in between
+        // so first-occurrence membership testing repeats identically).
+        let (elemET, elemErrCode) = inferElemTypeStrict ctx ind arrExpr "unique"
+        let elemStr = elemTypeToCpp elemET
+        let matStmts =
+            match materializeInlineForm emptySubst ctx.VarNames name elemStr binding.Value with
+            | Some s -> s
+            | None -> []
+        let code = elemErrCode @ [sprintf "%s// unique: dedup via unordered_set, first-occurrence order" ind] @ (matStmts |> List.map (fun s -> ind + s))
+        let ctx' = addVarName binding.Id name ctx
+        (code, ctx')
+
     | IRGroupKeys keys ->
         // group_keys: build CSR offsets + permutation from a key array.
         //
@@ -3336,7 +3556,7 @@ let rec genBinding (ctx: CodeGenContext) (binding: IRBinding) (builder: IRBuilde
             | IRLambda lInfo when lInfo.Params.Length = 1 -> []
             | _ -> codegenError ctx ind "sort: key must be a single-parameter lambda; got something else (typechecker or IR bug)"
         let matStmts =
-            match materializeInlineForm ctx.VarNames name elemStr binding.Value with
+            match materializeInlineForm emptySubst ctx.VarNames name elemStr binding.Value with
             | Some s -> s
             | None -> []
         let code = elemErrCode @ keyErrCode @ [sprintf "%s// sort: stable_sort on permutation, eager materialization" ind] @ (matStmts |> List.map (fun s -> ind + s))
@@ -4203,7 +4423,7 @@ let rec genBinding (ctx: CodeGenContext) (binding: IRBinding) (builder: IRBuilde
             (code, ctx')
 
     | IRTuple _ | IRComplex _ | IRFieldAccess _ | IRLit _ | IRBinOp _ | IRUnaryOp _ | IRIf _ | IRApp _ | IRParam _ | IRMatch _
-    | IRPure _ | IRIndex _ | IRExtent _ ->
+    | IRPure _ | IRIndex _ | IRExtent _ | IRContains _ ->
         // Check if it's a tuple of deferred computations
         match binding.Value with
         | IRTuple elems when elems |> List.forall (fun e ->
@@ -4394,14 +4614,14 @@ let genFuncBody (ctx: CodeGenContext) (builder: IRBuilder) (names: Map<IRId, str
             let code = genApplyCombinator bodyCtx varName info builder
             currentNames <- Map.add id varName currentNames
             code
-        | IRMask _ | IRIntersect _ | IRUnion _ | IRSort _ ->
+        | IRMask _ | IRIntersect _ | IRUnion _ | IRSort _ | IRUnique _ ->
             // Phase C lift pass can place an inline form as a let value at
             // function-body level. The same materialization helper used by
             // exprToCpp's IRLet (for kernel-body IIFEs) produces format-
             // neutral statement lines; here we emit them with the function
             // body's indent rather than space-joined inline.
             let elemStr = inferInlineElemTypeStr "lambda-body inline form" value
-            match materializeInlineForm currentNames varName elemStr value with
+            match materializeInlineForm emptySubst currentNames varName elemStr value with
             | Some matStmts ->
                 currentNames <- Map.add id varName currentNames
                 matStmts |> List.map (fun s -> indent + s)
