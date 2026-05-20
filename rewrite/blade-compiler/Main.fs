@@ -1455,12 +1455,14 @@ let result = L <@> f
                     printfn "    TriangularLevels: %A" info.TriangularLevels
                     printfn "    SpeedupFactor: %d" info.SpeedupFactor
                     
-                    // Check kernel comm groups
-                    match info.Kernel with
-                    | IRLambda linfo ->
+                    // Check kernel comm groups.
+                    // Stage 3c.4c: kernel arrives as IRVar; resolve
+                    // through resolveCallable to inspect the callable.
+                    match Blade.IR.resolveCallable info.Kernel with
+                    | Some linfo ->
                         printfn "    Kernel CommGroups: %A" linfo.CommGroups
                         printfn "    Kernel IsCommutative: %b" linfo.IsCommutative
-                    | _ -> ()
+                    | None -> ()
                     
                     // Check loop identities
                     match info.Loop with

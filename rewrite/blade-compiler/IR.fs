@@ -333,7 +333,6 @@ and IRExpr =
     | IRSlice of array: IRExpr * dim: int * start: IRExpr * stop: IRExpr
     | IRCurry of array: IRExpr * index: IRExpr * resultRank: int
     | IRApp of func: IRExpr * args: IRExpr list * retType: IRType
-    | IRLambda of LambdaInfo
     | IRTuple of IRExpr list
     // Complex literal construction: std::complex<double>(re, im) at codegen.
     // Distinct from IRTuple to preserve scalar nature — Complex is a scalar
@@ -370,10 +369,26 @@ and IRExpr =
     | IRSequence of IRExpr list
     | IRReplicate of count: IRExpr * body: IRExpr
     | IRMask of array: IRExpr * pred: IRExpr  // mask(array, pred) - filter array by predicate
+    /// Fused form of `mask(A, lambda(x) -> ... contains(B, x) ...)` produced
+    /// by the rewriteMaskContains pre-codegen pass. Carries the input array
+    /// A, the set source B (a "buildOn" expression invariant w.r.t. the
+    /// mask iteration), the parameter id that the residual references, and
+    /// the residual predicate body — i.e., the lambda's body with the
+    /// `IRContains(B, x)` call replaced by `IRSetMember(paramId, x)`.
+    /// Codegen renders this as: build set from B, scan A, apply residual
+    /// per element with set-membership replacing the contains call.
+    | IRMaskWithSet of array: IRExpr * setSource: IRExpr * paramId: IRId * residual: IRExpr
     | IRIntersect of IRExpr * IRExpr          // intersect(A, B) - set intersection (deduplicated, order from A)
     | IRUnion of IRExpr * IRExpr              // union(A, B) - set union (deduplicated, A's elements first)
     | IRUnique of array: IRExpr               // unique(A) - dedup, first-occurrence order
     | IRContains of array: IRExpr * value: IRExpr  // contains(A, x) - membership test, returns bool
+    /// Set-membership query against a precomputed set tied to a mask's
+    /// paramId. Only appears inside an `IRMaskWithSet`'s residual: codegen
+    /// for IRMaskWithSet generates a set variable from setSource, gives it
+    /// a name, and renders IRSetMember(paramId, value) as
+    /// `<setName>.count(value)`. The paramId identifies which mask's set
+    /// this query belongs to (in case of future nested masks).
+    | IRSetMember of paramId: IRId * value: IRExpr
     | IRGroupBy of values: IRExpr * grouping: IRExpr  // group_by(vals, gk) - apply grouping
     | IRGroupKeys of keys: IRExpr list               // group_keys(keys1, keys2, ...) - CSR grouping; multi-key ⇒ compound dispatch
     | IRSort of array: IRExpr * key: IRExpr          // sort(arr, key) - stable ascending sort by key
@@ -426,18 +441,59 @@ and IRExpr =
     | IRAssign of target: IRExpr * value: IRExpr
     | IRForRange of varId: IRId * lo: IRExpr * hi: IRExpr * body: IRExpr
 
-/// Lambda with proper capture tracking
-and LambdaInfo = {
+/// Abstract callable in IR. The merged form of source-level functions
+/// and lambdas. Lives in the IRExpr mutual-recursion group because
+/// `IRCallable.Body : IRExpr` forms a cycle with IRExpr's variants.
+///
+/// Field roles by source kind:
+///   - Id, Name: always populated. Lambdas get synthesized "__lambda_<id>".
+///   - Params, Body: the callable's interface and computation.
+///   - Captures: free vars from enclosing scope. Empty for source-level
+///     functions; populated for lambdas by lambda-lifting.
+///   - IsCommutative, CommGroups: kernel symmetry annotations.
+///     IsCommutative=false, CommGroups=[] when not annotated.
+///   - Parallelism, IsStatic, IsArityPoly, ArityParam: function-only
+///     metadata; empty/false/None for lambdas.
+///   - RetType: explicit return type. Functions get it from declaration;
+///     lambdas get it from inference at construction time.
+///
+/// Codegen (Stage 5) renders all callables as top-level C++ functions
+/// with signature (originalParams..., captures...). At call sites
+/// referencing a callable with non-empty Captures, a thin C++ lambda
+/// wrapper forwards the captures by reference, preserving the
+/// OCaml-style capture semantics users expect from lambdas.
+and IRCallable = {
+    Id: IRId
+    Name: string
     Params: IRParam list
+    RetType: IRType
     Body: IRExpr
-    Captures: CaptureInfo list
+    IsStatic: bool
     IsCommutative: bool
     CommGroups: int list list
+    Parallelism: (int * int) list
+    IsArityPoly: bool
+    ArityParam: string option
+    Captures: CaptureInfo list
 }
+
+/// IRFuncDef is a semantic-marker alias for IRCallable that names
+/// "top-level function in module.Functions" — distinct in intent
+/// from the codegen-internal synthetic callables and from let-bound
+/// aliases. The two type names refer to the same underlying record;
+/// usage sites pick whichever conveys intent.
+and IRFuncDef = IRCallable
 
 and CaptureInfo = {
     Id: IRId
     Name: string
+    /// The capture's IR type. Lifted-lambda codegen (Stage 3c) extends
+    /// the C++ function signature with one parameter per capture, typed
+    /// from this field as a reference (`T&`) so mutation propagates and
+    /// the value stays alive via the wrapper's `[&]` capture at the use
+    /// site. Source-level functions have no captures, so this field is
+    /// irrelevant for them.
+    Type: IRType
     IsMutable: bool
 }
 
@@ -1339,19 +1395,74 @@ let computeTriangularBound
 // IR Declarations
 // ============================================================================
 
-/// Function definition in IR
-type IRFuncDef = {
-    Id: IRId
-    Name: string
-    Params: IRParam list
-    RetType: IRType
-    Body: IRExpr
-    IsStatic: bool
-    Commutativity: int list list option
-    Parallelism: (int * int) list
-    IsArityPoly: bool
-    ArityParam: string option
+// ----------------------------------------------------------------------------
+// ContainsProbe — payload for the contains-aware-mask optimization
+// ----------------------------------------------------------------------------
+//
+// A ContainsProbe records a single use of `contains(B, x)` somewhere
+// inside an expression. The bottom-up walker (exprAttrs, defined later)
+// collects probes from every subexpression and propagates them upward
+// through every compositional construct (binops, ifs, function-call
+// arguments, nested lambda bodies, match cases, let bodies, ...). The
+// propagation is *consumed* at IRMask — a mask's predicate is the only
+// place where probes get resolved. Anywhere else, they keep flowing up
+// until they reach a mask.
+//
+// IRFuncDef carries a Probes list summarizing the contains calls inside
+// its body, with BuildOn expressions stated in terms of the function's
+// formal parameters. At a call site, parameters are substituted with
+// the actual arguments and the probes are imported into the caller's
+// analysis — so a mask predicate that calls a function whose body has
+// a contains gets the same propagation as if the contains were inline.
+//
+// The optimization driven by these probes lives at codegen: when a mask
+// is rendered, the codegen inspects its predicate's probes, hoists each
+// hoistable build (B that doesn't depend on the mask's kernel binders)
+// into a `std::unordered_set` constructed in the mask's preamble, and
+// substitutes `set.count(value)` for the original IRContains node when
+// rendering the predicate body. Non-hoistable probes (B references the
+// kernel param) fall through to the existing per-iteration scan.
+//
+// `Node` is the actual IRContains object reference. Codegen builds a
+// substitution map keyed on this reference; matching at the contains
+// site uses object identity to decide whether to render the substituted
+// form or fall back to the linear-scan IIFE.
+//
+// Probes propagate through every compositional construct. They also
+// flow through function-call boundaries: when exprAttrs walks an
+// IRApp(IRVar(fId), args, _), it consults a per-module callables
+// table; if `fId` resolves, the function body is walked with parameter
+// substitution applied. This unifies how lambdas and functions are
+// treated for probe analysis — both are "callables whose body we walk
+// through." Recursion is handled by a visited-set passed through the
+// walker.
+//
+// Caveat: the codegen substitution mechanism in Phase C operates on
+// `Node` reference equality within the rendered tree. Probes whose
+// IRContains lives inside a called function's body propagate to the
+// caller's analysis (so the user can see them), but the substitution
+// itself can't fire from the caller's mask boundary — the rendered
+// tree only contains the IRApp call, not the inlined contains. The
+// mask renderer applies a reachability check before hoisting, so
+// unreachable probes don't generate unused preamble. Cross-procedural
+// calls compile to ordinary function calls with the IIFE inside.
+//
+// `BuildOn` is the array argument (B). Tests assert on this; the
+// hoistability check (FreeVars(BuildOn) ∩ maskBinders = ∅) also reads it.
+
+type ContainsProbe = {
+    Node:    IRExpr
+    BuildOn: IRExpr
 }
+
+/// Active pattern recognizing "this expression is a probe over some array."
+/// Returns (containsNode, arrayArg, valueArg). Future expansion (e.g. an
+/// IRPosition or IRCount operator with similar build-then-probe shape) is
+/// done by adding cases here; the rest of the propagator stays unchanged.
+let (|ContainsProbeAt|_|) (expr: IRExpr) : (IRExpr * IRExpr * IRExpr) option =
+    match expr with
+    | IRContains (arr, value) -> Some (expr, arr, value)
+    | _ -> None
 
 /// Type definition in IR
 /// Constraint information for structs with where clauses
@@ -1439,6 +1550,41 @@ type IRBuilder() =
     member this.MkLet(value, bodyFn) =
         let id = this.FreshId()
         IRLet(id, value, bodyFn id)
+
+/// Build a fresh IRCallable for an inline lambda with sensible defaults
+/// for the lambda case: synthesized "__lambda_<id>" name, no parallelism
+/// hints, not arity-polymorphic, not static. Function-style metadata
+/// fields default to their identity values so lambdas and functions can
+/// share the same record type without spurious distinction.
+///
+/// Used by every lambda-construction site in Lowering.fs to avoid
+/// repeating boilerplate. The captures list, return type, and
+/// commutativity metadata are caller-supplied because they depend on
+/// the specific lambda being built.
+let mkLambdaCallable
+    (builder: IRBuilder)
+    (parms: IRParam list)
+    (body: IRExpr)
+    (retType: IRType)
+    (captures: CaptureInfo list)
+    (isCommutative: bool)
+    (commGroups: int list list)
+    : IRCallable =
+    let id = builder.FreshId()
+    {
+        Id = id
+        Name = sprintf "__lambda_%d" id
+        Params = parms
+        RetType = retType
+        Body = body
+        IsStatic = false
+        IsCommutative = isCommutative
+        CommGroups = commGroups
+        Parallelism = []
+        IsArityPoly = false
+        ArityParam = None
+        Captures = captures
+    }
 
 /// Deduce output array type from loop application
 /// According to formalism section 10.9:
@@ -1665,6 +1811,109 @@ let buildSymmVec (outputType: IRType) : int list =
         symmVec
     | _ -> []
 
+// ============================================================================
+// Cross-procedural analysis context. All callable references in IR are
+// IRVar(callable.Id, funcType); resolveCallable threads them back to
+// the underlying IRCallable via the CallablesTable installed in the
+// AsyncLocal context. Consumers (buildLoopNestCodeGen, validator's
+// ApplyInfo check, mask-rewrite, exprAttrs IRApp arm) all share this
+// resolution path.
+// ============================================================================
+
+type CallablesTable = Map<IRId, IRCallable>
+
+type AnalysisContext = {
+    Callables: CallablesTable
+    Visited:   Set<IRId>
+    /// Per-codegen-pass registry of transient synthetic callables.
+    /// These are created during codegen by transformations that need
+    /// to express "callable with modified body" — e.g.
+    /// applyFunctorWrappers' inline-wrap or the IRIf guard wrap —
+    /// without storing them in module.Functions (they're consumed
+    /// immediately by buildLoopNestCodeGen for inline emission and
+    /// don't need C++ function emission). `resolveCallable` queries
+    /// this registry alongside the module's CallablesTable. The
+    /// registry is mutable (Dictionary, not Map) for cheap in-place
+    /// accumulation; it's a per-flow AsyncLocal field, so concurrent
+    /// module compilations don't interfere.
+    SyntheticCallables: System.Collections.Generic.Dictionary<IRId, IRCallable>
+}
+
+let private analysisCtxStorage =
+    System.Threading.AsyncLocal<AnalysisContext>()
+
+let private emptyAnalysisCtx : AnalysisContext =
+    { Callables = Map.empty
+      Visited = Set.empty
+      SyntheticCallables = System.Collections.Generic.Dictionary<IRId, IRCallable>() }
+
+let private currentAnalysisCtx () : AnalysisContext =
+    let v = analysisCtxStorage.Value
+    if isNull (box v) then emptyAnalysisCtx else v
+
+/// Install the callables table. Returns the previous context for
+/// stack-style save/restore by the caller. The synthetic registry
+/// is reset to a fresh empty Dictionary — each module compilation
+/// starts with no synthetic callables. Synthetic callables produced
+/// during one module's codegen don't leak into another's.
+let setCallablesContext (callables: CallablesTable) : AnalysisContext =
+    let prev = currentAnalysisCtx ()
+    analysisCtxStorage.Value <-
+        { prev with
+            Callables = callables
+            SyntheticCallables = System.Collections.Generic.Dictionary<IRId, IRCallable>() }
+    prev
+
+/// Restore a previously-captured context.
+let restoreAnalysisContext (ctx: AnalysisContext) : unit =
+    analysisCtxStorage.Value <- ctx
+
+/// Run `action` with fId added to Visited, restoring on completion.
+/// Used by the IRApp arm of exprAttrs to mark a function as being
+/// walked, so mutual recursion short-circuits when the cycle closes.
+let private withVisited (fId: IRId) (action: unit -> 'T) : 'T =
+    let prev = currentAnalysisCtx ()
+    analysisCtxStorage.Value <- { prev with Visited = Set.add fId prev.Visited }
+    try action()
+    finally analysisCtxStorage.Value <- prev
+
+/// Register a synthetic callable in the current AnalysisContext's
+/// registry and return an IRVar reference to it. The caller must
+/// supply a fresh IRId for the callable (typically via
+/// IRBuilder.FreshId()) so it doesn't collide with module.Functions
+/// ids or other synthetic ids. The returned IRVar can be consumed
+/// like any other callable reference — resolveCallable will find
+/// the registered version via the SyntheticCallables registry.
+let registerSyntheticCallable (callable: IRCallable) : IRExpr =
+    let ctx = currentAnalysisCtx ()
+    ctx.SyntheticCallables.[callable.Id] <- callable
+    let paramTypes = callable.Params |> List.map (fun p -> p.Type)
+    let funcType = mkFuncArrow paramTypes callable.RetType
+    IRVar (callable.Id, funcType)
+
+/// Resolve an expression at a "callable position" to the underlying
+/// IRCallable. Handles:
+///   - `IRVar(id, _)` where id resolves in the CallablesTable
+///     (module.Functions + let-binding aliases): returns Some c.
+///   - `IRVar(id, _)` where id resolves in the SyntheticCallables
+///     registry (codegen-internal synthetic callables): returns
+///     Some c.
+///   - Anything else (or unresolvable IRVar): returns None.
+let resolveCallable (expr: IRExpr) : IRCallable option =
+    match expr with
+    | IRVar (id, _) ->
+        let ctx = currentAnalysisCtx ()
+        match Map.tryFind id ctx.Callables with
+        | Some c -> Some c
+        | None ->
+            // Fall through to synthetic registry. Dictionary lookup is
+            // O(1); the registry is typically empty or single-digit
+            // entries per module compilation.
+            match ctx.SyntheticCallables.TryGetValue(id) with
+            | true, c -> Some c
+            | false, _ -> None
+    | _ -> None
+
 /// Build LoopNestCodeGen from ApplyInfo
 let buildLoopNestCodeGen 
     (info: ApplyInfo) 
@@ -1678,12 +1927,25 @@ let buildLoopNestCodeGen
     let arrayTypes = info.ArrayTypes
     let sDimsPerArray = info.SDimsPerArray
     
-    // Extract kernel info
+    // Extract kernel info through `resolveCallable`, which handles
+    // both module.Functions references and let-binding aliases via
+    // the CallablesTable. Reynolds wrapping is peeled and its
+    // isAntisymmetric flag flows through; the inner expression is
+    // resolved the same way.
     let (kernelParams, kernelBody, commGroups, captures, isAntisymmetric) =
+        let extract (k: IRExpr) =
+            match resolveCallable k with
+            | Some c -> Some (c.Params, c.Body, c.CommGroups, c.Captures)
+            | None -> None
         match info.Kernel with
-        | IRLambda lInfo -> (lInfo.Params, lInfo.Body, lInfo.CommGroups, lInfo.Captures, false)
-        | IRReynolds (IRLambda lInfo, isAnti) -> (lInfo.Params, lInfo.Body, lInfo.CommGroups, lInfo.Captures, isAnti)
-        | _ -> ([], IRLit IRLitUnit, [], [], false)
+        | IRReynolds (inner, isAnti) ->
+            match extract inner with
+            | Some (p, b, g, c) -> (p, b, g, c, isAnti)
+            | None -> ([], IRLit IRLitUnit, [], [], false)
+        | other ->
+            match extract other with
+            | Some (p, b, g, c) -> (p, b, g, c, false)
+            | None -> ([], IRLit IRLitUnit, [], [], false)
     
     // Map array position to kernel param
     let paramByArrayPos = 
@@ -1874,10 +2136,12 @@ let rec mapIRExpr (f: IRExpr -> IRExpr) (expr: IRExpr) : IRExpr =
         | IRGuard (c, b) -> IRGuard (m c, m b)
         | IRReplicate (c, b) -> IRReplicate (m c, m b)
         | IRMask (a, p) -> IRMask (m a, m p)
+        | IRMaskWithSet (a, s, pid, r) -> IRMaskWithSet (m a, m s, pid, m r)
         | IRIntersect (a, b) -> IRIntersect (m a, m b)
         | IRUnion (a, b) -> IRUnion (m a, m b)
         | IRUnique a -> IRUnique (m a)
         | IRContains (a, v) -> IRContains (m a, m v)
+        | IRSetMember (pid, v) -> IRSetMember (pid, m v)
         | IRGroupBy (v, k) -> IRGroupBy (m v, m k)
         | IRGroupKeys ks -> IRGroupKeys (List.map m ks)
         | IRSort (a, k) -> IRSort (m a, m k)
@@ -1908,8 +2172,6 @@ let rec mapIRExpr (f: IRExpr -> IRExpr) (expr: IRExpr) : IRExpr =
         | IRMatch (scr, cases) ->
             IRMatch (m scr, cases |> List.map (fun c ->
                 { c with Guard = c.Guard |> Option.map m; Body = m c.Body }))
-        | IRLambda info ->
-            IRLambda { info with Body = m info.Body }
         | IRMethodFor info ->
             IRMethodFor { info with Arrays = ms info.Arrays }
         | IRObjectFor info ->
@@ -1946,10 +2208,25 @@ let rec substTypeInIRType (bindings: Map<int, IRType>) (ty: IRType) : IRType =
         IRTArrow (slots |> List.map substSlot, substTypeInIRType bindings result, identity)
     | _ -> ty
 
+/// Substitute IRVar references throughout an expression tree. For each
+/// IRVar(id, _) where `mapping` has an entry, replace the node with the
+/// mapped expression. Used when importing a called function's probes
+/// into a caller's analysis: the probe's BuildOn references the
+/// function's formal parameters, and at the call site we want those
+/// references resolved to the actual argument expressions.
+///
+/// Walks bottom-up via mapIRExpr; only IRVar nodes are affected, and
+/// only those whose id appears in `mapping`. Other variant types (IRApp,
+/// IRBinOp, etc.) carry their own substituted children automatically.
+let substituteIRVars (mapping: Map<IRId, IRExpr>) (expr: IRExpr) : IRExpr =
+    mapIRExpr (fun e ->
+        match e with
+        | IRVar (id, _) when Map.containsKey id mapping -> Map.find id mapping
+        | _ -> e) expr
+
 /// Substitute types in an IRExpr at all type-bearing positions. Uses
 /// mapIRExpr for structural traversal; the per-node callback only updates
-/// fields that carry types directly (IRVar.ty, IRApp.retType, IRLambda
-/// param types, etc.).
+/// fields that carry types directly (IRVar.ty, IRApp.retType, etc.).
 let substTypeInIRExpr (bindings: Map<int, IRType>) (expr: IRExpr) : IRExpr =
     let st = substTypeInIRType bindings
     let substInNode e =
@@ -1959,9 +2236,6 @@ let substTypeInIRExpr (bindings: Map<int, IRType>) (expr: IRExpr) : IRExpr =
         | IRApp (fn, args, retType) -> IRApp (fn, args, st retType)
         | IRArrayLit (elems, aty) ->
             IRArrayLit (elems, { aty with ElemType = st aty.ElemType })
-        | IRLambda info ->
-            IRLambda { info with
-                        Params = info.Params |> List.map (fun p -> { p with Type = st p.Type }) }
         | IRMethodFor info ->
             IRMethodFor { info with
                             ArrayTypes = info.ArrayTypes
@@ -2114,7 +2388,7 @@ let collectHMCallSites (hmFuncMap: Map<IRId, IRFuncDef>) (expr: IRExpr) : (IRId 
 /// Generate a specialized copy of a function for a given set of type-var
 /// bindings. Substitutes types throughout params, return, and body, and
 /// mangles the name to encode the binding pattern.
-let specializeHMFunction (func: IRFuncDef) (bindings: Map<int, IRType>) (builder: IRBuilder) : IRFuncDef =
+let specializeHMFunction (func: IRFuncDef) (bindings: Map<int, IRType>) (builder: IRBuilder) (callables: Map<IRId, IRCallable>) : IRFuncDef * IRCallable list =
     let newParams =
         func.Params |> List.map (fun p ->
             { p with Type = substTypeInIRType bindings p.Type
@@ -2126,10 +2400,90 @@ let specializeHMFunction (func: IRFuncDef) (bindings: Map<int, IRType>) (builder
         |> List.map (fun (oldP, newP) -> (oldP.VarId, newP.VarId))
         |> Map.ofList
     let bodyWithTypes = substTypeInIRExpr bindings func.Body
+
+    // Stage 3c.3 follow-on: lifted lambdas that capture HM-polymorphic
+    // params need to be cloned-and-specialized alongside their
+    // enclosing function. Pre-3c.3 the lambda was inline in the
+    // enclosing function's body so the existing `mapIRExpr` walk over
+    // `bodyWithTypes` covered everything in one pass: the lambda's
+    // body, captures, and the VarId remap all got reached. Post-3c.3
+    // the lambda lives in `module.Functions` and the body only carries
+    // an `IRVar(lambdaId, _)` reference; the lambda's body and its
+    // Captures.Type fields still hold the unsubstituted T type, and
+    // its Captures.Id still points at the pre-spec function's param
+    // VarIds. Both checks fail validation: dangling VarId (the spec
+    // function's params have new ids) AND unresolved IRTInfer (T
+    // never got substituted in the lambda).
+    //
+    // Fix: for each lifted callable the body references whose
+    // captures intersect this function's params, clone it. The clone
+    // gets fresh ids for its own params, has captures' Ids and types
+    // remapped via `varIdRemap` and `bindings`, body's IRVar refs
+    // remapped via the combined map. The original lambda stays in
+    // module.Functions unchanged — other specializations or the
+    // unspecialized form (which doesn't survive monomorphization
+    // anyway) would build their own clones.
+    let origParamIds = func.Params |> List.map (fun p -> p.VarId) |> Set.ofList
+    let lambdaClones = System.Collections.Generic.Dictionary<IRId, IRCallable>()
+    let needsClone (c: IRCallable) : bool =
+        c.Captures |> List.exists (fun cap -> Set.contains cap.Id origParamIds)
+    // Walk bodyWithTypes to identify referenced lambdas needing clones.
+    let _ =
+        mapIRExpr (fun e ->
+            (match e with
+             | IRVar (id, _) when callables.ContainsKey id && not (lambdaClones.ContainsKey id) ->
+                 let lam = callables.[id]
+                 if needsClone lam then
+                     let cloneId = builder.FreshId()
+                     let newCaps =
+                         lam.Captures |> List.map (fun cap ->
+                             let newId =
+                                 match Map.tryFind cap.Id varIdRemap with
+                                 | Some n -> n
+                                 | None -> cap.Id
+                             { cap with Id = newId; Type = substTypeInIRType bindings cap.Type })
+                     // Clone lambda's own params with fresh VarIds (independent
+                     // of the parent's param remap). The combined remap
+                     // covers both parent's captures-as-our-captures and
+                     // our local params.
+                     let paramRemap =
+                         lam.Params |> List.map (fun p -> (p.VarId, builder.FreshId())) |> Map.ofList
+                     let newParams' =
+                         lam.Params |> List.map (fun p ->
+                             { p with VarId = paramRemap.[p.VarId]
+                                      Type = substTypeInIRType bindings p.Type })
+                     let combinedRemap =
+                         varIdRemap
+                         |> Map.fold (fun acc k v -> Map.add k v acc) paramRemap
+                     let newBody =
+                         lam.Body
+                         |> substTypeInIRExpr bindings
+                         |> mapIRExpr (fun e2 ->
+                             match e2 with
+                             | IRVar (id2, ty) when combinedRemap.ContainsKey id2 ->
+                                 IRVar (combinedRemap.[id2], ty)
+                             | _ -> e2)
+                     let newRet = substTypeInIRType bindings lam.RetType
+                     let clone =
+                         { lam with
+                             Id = cloneId
+                             Name = sprintf "%s_HM_%d" lam.Name cloneId
+                             Params = newParams'
+                             Captures = newCaps
+                             Body = newBody
+                             RetType = newRet }
+                     lambdaClones.[id] <- clone
+             | _ -> ())
+            e) bodyWithTypes
+
     let bodyRewritten =
         mapIRExpr (fun e ->
             match e with
             | IRVar (id, ty) when varIdRemap.ContainsKey id -> IRVar (varIdRemap.[id], ty)
+            | IRVar (id, _) when lambdaClones.ContainsKey id ->
+                let clone = lambdaClones.[id]
+                let funcTy = mkFuncArrow (clone.Params |> List.map (fun p -> p.Type)) clone.RetType
+                IRVar (clone.Id, funcTy)
             | _ -> e) bodyWithTypes
     // Name-mangle by binding signature: f__T_double__U_int64 etc.
     let mangleType ty =
@@ -2150,12 +2504,15 @@ let specializeHMFunction (func: IRFuncDef) (bindings: Map<int, IRType>) (builder
         |> List.sortBy fst
         |> List.map (fun (id, ty) -> sprintf "_%d_%s" id (mangleType ty))
         |> String.concat ""
-    { func with
-        Id = builder.FreshId()
-        Name = sprintf "%s_HM%s" func.Name suffix
-        Params = newParams
-        RetType = newRetType
-        Body = bodyRewritten }
+    let spec =
+        { func with
+            Id = builder.FreshId()
+            Name = sprintf "%s_HM%s" func.Name suffix
+            Params = newParams
+            RetType = newRetType
+            Body = bodyRewritten }
+    let clonesList = lambdaClones.Values |> List.ofSeq
+    (spec, clonesList)
 
 /// Driver: monomorphize all HM-polymorphic functions in a module.
 ///
@@ -2186,6 +2543,9 @@ let monomorphizeHMFunctions (modul: IRModule) (builder: IRBuilder) : IRModule =
     //    of specs generated in earlier rounds (those bodies may contain HM
     //    calls whose arg types only became concrete after substitution).
     let mutable specMap : Map<IRId * (int * IRType) list, IRFuncDef> = Map.empty
+    // Stage 3c.3: cloned lambdas accumulated across spec generation.
+    // See specializeHMFunction's clone logic.
+    let lambdaClones = System.Collections.Generic.List<IRCallable>()
     let mutable changed = true
     let mutable iterationGuard = 0
     let MAX_ITERATIONS = 16  // pathological safety net; real programs converge in 2-3
@@ -2223,8 +2583,13 @@ let monomorphizeHMFunctions (modul: IRModule) (builder: IRBuilder) : IRModule =
             if allConcrete && not (Map.containsKey key specMap) then
                 let origFunc = hmFuncMap.[funcId]
                 let bindingMap = sortedBindings |> Map.ofList
-                let spec = specializeHMFunction origFunc bindingMap builder
+                let availableCallables =
+                    modul.Functions @ (lambdaClones |> List.ofSeq)
+                    |> List.map (fun f -> (f.Id, f))
+                    |> Map.ofList
+                let (spec, clones) = specializeHMFunction origFunc bindingMap builder availableCallables
                 specMap <- Map.add key spec specMap
+                lambdaClones.AddRange(clones)
                 changed <- true
 
     // 3. Build the call-site rewriter using the now-frozen specMap.
@@ -2347,7 +2712,7 @@ let monomorphizeHMFunctions (modul: IRModule) (builder: IRBuilder) : IRModule =
                                    { p with Type = substTypeInIRType bindings p.Type }) })
 
     { modul with
-        Functions = newFunctions @ specFuncs
+        Functions = newFunctions @ specFuncs @ (lambdaClones |> List.ofSeq)
         Bindings = newBindings }
 
 // ============================================================================
@@ -2495,7 +2860,6 @@ let specializeFunction (func: IRFuncDef) (arities: int list) (builder: IRBuilder
                         aliases <- Set.add id aliases
                     walk body
                 | IRLet (_, value, body) -> walk value; walk body
-                | IRLambda info -> walk info.Body
                 | IRIf (c, t, e) -> walk c; walk t; walk e
                 | IRMatch (s, cases) -> walk s; cases |> List.iter (fun c -> walk c.Body)
                 | IRBinOp (_, _, l, r) -> walk l; walk r
@@ -2591,15 +2955,21 @@ let specializeFunction (func: IRFuncDef) (arities: int list) (builder: IRBuilder
                 cur <- cur + span
             acc |> List.rev |> Map.ofList
 
-        let newComm =
-            func.Commutativity |> Option.map (fun groups ->
-                groups |> List.map (fun group ->
-                    group |> List.collect (fun idx ->
-                        match Map.tryFind idx origToNew with
-                        | Some (start, span) ->
-                            if span = 1 then [start]
-                            else List.init span (fun i -> start + i)
-                        | None -> [idx])))
+        // Specializing arity groups means rewriting group indices to
+        // account for expanded parameters. If the source had groups,
+        // newCommGroups is the expanded form; otherwise empty.
+        let (newIsComm, newCommGroups) =
+            if func.IsCommutative then
+                let expanded =
+                    func.CommGroups |> List.map (fun group ->
+                        group |> List.collect (fun idx ->
+                            match Map.tryFind idx origToNew with
+                            | Some (start, span) ->
+                                if span = 1 then [start]
+                                else List.init span (fun i -> start + i)
+                            | None -> [idx]))
+                (true, expanded)
+            else (false, [])
 
         // Mangled name encodes every slot's arity, so different shapes get
         // distinct specializations. `pairSum_arity_2_3` for arities [2; 3].
@@ -2611,10 +2981,14 @@ let specializeFunction (func: IRFuncDef) (arities: int list) (builder: IRBuilder
           RetType = newRetType
           Body = newBody
           IsStatic = func.IsStatic
-          Commutativity = newComm
+          IsCommutative = newIsComm
+          CommGroups = newCommGroups
           Parallelism = func.Parallelism
           IsArityPoly = false
-          ArityParam = None }
+          ArityParam = None
+          // Specialized clones inherit the original's captures verbatim;
+          // arity specialization doesn't introduce new free vars.
+          Captures = func.Captures }
 
 // ============================================================================
 // Inline-Form Lifting Pass
@@ -2700,11 +3074,13 @@ let rec liftInferType (expr: IRExpr) : IRType =
     | IRApp (_, _, retTy) -> retTy
     | IRArrayLit (_, arrTy) -> mkArrayLike arrTy
     | IRMask (arr, _) -> liftInferType arr
+    | IRMaskWithSet (arr, _, _, _) -> liftInferType arr  // Same element type, filtered extent
     | IRSort (arr, _) -> liftInferType arr
     | IRIntersect (a, _) -> liftInferType a
     | IRUnion (a, _) -> liftInferType a
     | IRUnique a -> liftInferType a
     | IRContains _ -> IRTScalar ETBool
+    | IRSetMember _ -> IRTScalar ETBool
     | IRGroupBy (v, _) -> liftInferType v  // Approximation; codegen recomputes
     | IRGroupKeys _ -> IRTUnit  // GroupKeys is opaque
     | IRLet (_, _, body) -> liftInferType body
@@ -2739,7 +3115,7 @@ let rec liftInferType (expr: IRExpr) : IRType =
 /// argument to reduce IS what we lift, not reduce itself.
 let isInlineForm (e: IRExpr) : bool =
     match e with
-    | IRMask _ | IRSort _ | IRIntersect _ | IRUnion _ | IRUnique _
+    | IRMask _ | IRMaskWithSet _ | IRSort _ | IRIntersect _ | IRUnion _ | IRUnique _
     | IRGroupBy _ | IRGroupKeys _ -> true
     | _ -> false
 
@@ -2863,6 +3239,17 @@ let rec liftExpr (builder: IRBuilder) (expr: IRExpr) : IRExpr =
         let p' = liftExpr builder p
         let (binds, aFinal) = liftChild builder a'
         wrapLets binds (IRMask (aFinal, p'))
+    | IRMaskWithSet (a, s, pid, r) ->
+        // Same shape as IRMask: lift the array arg (which may be another
+        // inline form) so codegen can name it. setSource is also lifted
+        // through liftExpr for nested inline forms. Residual carries
+        // IRSetMember references; lift-pass leaves those alone.
+        let a' = liftExpr builder a
+        let s' = liftExpr builder s
+        let r' = liftExpr builder r
+        let (bindsA, aFinal) = liftChild builder a'
+        let (bindsS, sFinal) = liftChild builder s'
+        wrapLets (bindsA @ bindsS) (IRMaskWithSet (aFinal, sFinal, pid, r'))
     | IRSort (a, k) ->
         let a' = liftExpr builder a
         let k' = liftExpr builder k
@@ -2894,6 +3281,13 @@ let rec liftExpr (builder: IRBuilder) (expr: IRExpr) : IRExpr =
         let v' = liftExpr builder v
         let (binds, arrFinal) = liftChild builder arr'
         wrapLets binds (IRContains (arrFinal, v'))
+
+    // IRSetMember is a leaf-level membership query against a precomputed
+    // set tied to a paramId. The set itself was built by the enclosing
+    // IRMaskWithSet's preamble — no inline form to lift here. Just walk
+    // the value expression and reconstruct.
+    | IRSetMember (paramId, v) ->
+        IRSetMember (paramId, liftExpr builder v)
 
     // Single-child consumers where the array slot can hold an inline form
     | IRReduce (arr, kernel) ->
@@ -3061,10 +3455,6 @@ let rec liftExpr (builder: IRBuilder) (expr: IRExpr) : IRExpr =
     | IRForRange (vid, lo, hi, body) ->
         IRForRange (vid, liftExpr builder lo, liftExpr builder hi, liftExpr builder body)
     | IRBlocked (it, bs) -> IRBlocked (it, liftExpr builder bs)
-
-    // Lambdas: descend into body
-    | IRLambda info ->
-        IRLambda { info with Body = liftExpr builder info.Body }
 
     // Loop forms: their auto-materialize handles top-level Arrays for
     // inline forms. We still descend into the kernels and any nested
@@ -3400,12 +3790,6 @@ let rec ppIRExprWithNames (names: Map<int, string>) indent (expr: IRExpr) =
         sprintf "%s(%s) [->rank %d]" (pp arr) (pp idx) rank
     | IRApp (f, args, _) ->
         sprintf "%s(%s)" (pp f) (args |> List.map pp |> String.concat ", ")
-    | IRLambda info ->
-        let ps = info.Params |> List.map (fun p -> sprintf "%s:%s" p.Name (ppIRType p.Type)) |> String.concat ", "
-        let commStr = if info.IsCommutative then " [comm]" else ""
-        // Build name mapping from parameter VarIds to names
-        let names' = info.Params |> List.fold (fun m p -> Map.add p.VarId p.Name m) names
-        sprintf "lambda(%s)%s -> %s" ps commStr (ppIRExprWithNames names' 0 info.Body)
     | IRZip arrs ->
         sprintf "zip(%s)" (arrs |> List.map pp |> String.concat ", ")
     | IRStack arrs ->
@@ -3489,9 +3873,6 @@ let rec collectVarRefsIR (expr: IRExpr) : Set<IRId> =
     | IRUnaryOp (_, e) -> collectVarRefsIR e
     | IRIf (c, t, e) -> Set.unionMany [collectVarRefsIR c; collectVarRefsIR t; collectVarRefsIR e]
     | IRLet (_, v, b) -> Set.union (collectVarRefsIR v) (collectVarRefsIR b)
-    | IRLambda info ->
-        let paramIds = info.Params |> List.map (fun p -> p.VarId) |> Set.ofList
-        Set.difference (collectVarRefsIR info.Body) paramIds
     | IRApp (f, args, _) -> Set.unionMany (collectVarRefsIR f :: List.map collectVarRefsIR args)
     | IRTuple es -> Set.unionMany (List.map collectVarRefsIR es)
     | IRComplex (re, im) -> Set.union (collectVarRefsIR re) (collectVarRefsIR im)
@@ -3513,10 +3894,16 @@ let rec collectVarRefsIR (expr: IRExpr) : Set<IRId> =
         Set.unionMany [collectVarRefsIR lo; collectVarRefsIR hi; Set.remove vid (collectVarRefsIR body)]
     | IRGuard (c, b) -> Set.union (collectVarRefsIR c) (collectVarRefsIR b)
     | IRMask (a, p) -> Set.union (collectVarRefsIR a) (collectVarRefsIR p)
+    | IRMaskWithSet (a, s, _, r) ->
+        // paramId is a binder, not a reference; residual may reference it
+        // but it's bound by the mask, not free. Union of array, setSource,
+        // and residual; the binder is removed by exprAttrs's BoundVars logic.
+        Set.unionMany [collectVarRefsIR a; collectVarRefsIR s; collectVarRefsIR r]
     | IRIntersect (a, b) -> Set.union (collectVarRefsIR a) (collectVarRefsIR b)
     | IRUnion (a, b) -> Set.union (collectVarRefsIR a) (collectVarRefsIR b)
     | IRUnique a -> collectVarRefsIR a
     | IRContains (a, v) -> Set.union (collectVarRefsIR a) (collectVarRefsIR v)
+    | IRSetMember (_, v) -> collectVarRefsIR v  // paramId is a binder reference, not a free var
     | IRGroupBy (v, k) -> Set.union (collectVarRefsIR v) (collectVarRefsIR k)
     | IRGroupKeys ks -> ks |> List.map collectVarRefsIR |> Set.unionMany
     | IRSort (a, k) -> Set.union (collectVarRefsIR a) (collectVarRefsIR k)
@@ -3531,6 +3918,218 @@ let rec collectVarRefsIR (expr: IRExpr) : Set<IRId> =
     | IRFunctorMap (f, c) -> Set.union (collectVarRefsIR f) (collectVarRefsIR c)
     | IRPure e -> collectVarRefsIR e
     | _ -> Set.empty
+
+// ============================================================================
+// AnalysisContext — unified callable-walking for cross-procedural analysis
+// ============================================================================
+//
+// `exprAttrs` walks an expression tree to compute attributes (FreeVars,
+// BoundVars, IsPure, Probes). For probes specifically, the analysis is
+// "complete" only if it can see every IRContains the program will
+// execute. That includes contains calls inside the bodies of functions
+// called from the analyzed expression. The IRApp arm follows
+// IRVar(fId) references via the CallablesTable, substitutes the
+// callee's params with the call's args, and walks the body — surfacing
+// probes that originate inside the callee's body.
+//
+// `Visited` short-circuits recursion. When walking f's body, we add f
+// to Visited; if g calls f (mutual recursion), the IRApp arm sees f in
+// Visited and stops. Direct self-recursion stops on the first walk.
+//
+// The CallablesTable is set once per module at codegen entry. Visited
+// is augmented (and restored) at each IRApp boundary by `withVisited`.
+// Both live in a single AsyncLocal record so we have one piece of
+// per-flow state rather than two.
+//
+// What this gives the optimization: a mask predicate's exprAttrs walk
+// sees every reachable contains — direct, through inline lambdas, and
+// through function calls (up to recursion). Whether codegen can
+// actually substitute set.count for any given probe is a separate
+// question answered by reachability check on the rendered tree.
+//
+// (CallablesTable, AnalysisContext, analysisCtxStorage, currentAnalysisCtx,
+// setCallablesContext, restoreAnalysisContext, withVisited, and
+// resolveCallable were moved earlier in the file — to before
+// buildLoopNestCodeGen — because Stage 3c.3 needs that builder to
+// resolve IRVar-typed kernels through the CallablesTable.)
+
+/// Build a CallablesTable from a module's function list. Codegen calls
+/// this at module entry and installs the result via setCallablesContext.
+let buildCallablesTable (funcs: IRCallable list) : CallablesTable =
+    funcs |> List.map (fun f -> (f.Id, f)) |> Map.ofList
+
+/// Build a CallablesTable from a full module, including alias entries
+/// for let-bindings that reference lifted callables.
+///
+/// Stage 3c.3 motivation: when `let f = lambda(...)` lowers, the lambda
+/// gets lifted to module.Functions with callableId, and the binding's
+/// value is `IRVar(callableId, funcType)`. The binding itself has a
+/// FRESH `bindingId` distinct from `callableId`. Subsequent references
+/// to `f` lower as `IRVar(bindingId, _)`, NOT `IRVar(callableId, _)` —
+/// they go through the binding's identity, not the callable's.
+///
+/// Without alias entries, `resolveCallable(IRVar(bindingId, _))` returns
+/// None because the binding id isn't in the function table. Consumers
+/// then fall to their non-callable fallback, which for the loop nest
+/// kernel-extraction site means an empty body (rendered as
+/// `((void)0)` in the generated C++).
+///
+/// This helper walks both top-level bindings AND nested IRLet
+/// expressions (a `let f = lambda(...) in body` inside a block becomes
+/// `IRLet(f.Id, ..., body)` inside the enclosing binding's value).
+/// Every alias of the form `bindingId = IRVar(callableId, _)` where
+/// callableId resolves in the base table adds `bindingId → callable`
+/// to the alias map. Multiple hops are followed transitively
+/// (`let g = f` where `f` itself aliases a callable resolves `g` to the
+/// same callable). The result is the base table with all aliases merged.
+let buildCallablesTableForModule (modul: IRModule) : CallablesTable =
+    let baseTable = buildCallablesTable modul.Functions
+    let aliases = System.Collections.Generic.Dictionary<IRId, IRId>()
+    // Side-effecting visitor: at every IRLet, record bindingId → targetId
+    // if the value is a direct IRVar reference. Returns the expression
+    // unchanged so `mapIRExpr` walks the whole tree.
+    let visitor (e: IRExpr) : IRExpr =
+        match e with
+        | IRLet (bindingId, IRVar (targetId, _), _) ->
+            aliases.[bindingId] <- targetId
+        | _ -> ()
+        e
+    let walk (e: IRExpr) : unit = mapIRExpr visitor e |> ignore
+    // Walk top-level binding values; also record alias if a top-level
+    // binding's value is a direct IRVar (handles `let f = lambda(...)`
+    // at module scope).
+    modul.Bindings |> List.iter (fun b ->
+        (match b.Value with
+         | IRVar (targetId, _) -> aliases.[b.Id] <- targetId
+         | _ -> ())
+        walk b.Value)
+    // Walk function bodies (nested IRLets there too).
+    modul.Functions |> List.iter (fun f -> walk f.Body)
+    // Resolve transitive aliases (bindingId → targetId → ...) with a
+    // fixed step bound. Well-formed IR has fresh ids per binding so
+    // cycles are structurally impossible; the bound is defensive.
+    let resolveTransitive (startId: IRId) : IRId =
+        let mutable curr = startId
+        let mutable steps = 0
+        while steps < 32 && aliases.ContainsKey(curr) do
+            curr <- aliases.[curr]
+            steps <- steps + 1
+        curr
+    // For each alias, follow transitively; if the final target is a
+    // real callable, add the binding id → callable entry.
+    let mutable result = baseTable
+    for kvp in aliases do
+        let finalId = resolveTransitive kvp.Key
+        match Map.tryFind finalId baseTable with
+        | Some callable -> result <- Map.add kvp.Key callable result
+        | None -> ()
+    result
+
+// (resolveCallable was moved earlier in the file — see the analysisCtx
+// block before buildLoopNestCodeGen — so that the loop-nest builder
+// can call it for IRVar-typed kernels after Stage 3c.3.)
+
+// ============================================================================
+// rewriteMaskContains — fuse mask(A, lambda(x) -> ... contains(B, x) ...)
+// ============================================================================
+//
+// The IR-level optimization that replaces Phase C's codegen substitution
+// machinery with a structural rewrite. For each IRMask in the module:
+//   1. Resolve the predicate to an IRCallable.
+//   2. If the callable has exactly one parameter (TypeCheck enforces
+//      this; defensive otherwise), scan its body for IRContains nodes.
+//   3. A node is "hoistable" iff its BuildOn (the array argument)
+//      doesn't reference the predicate's parameter — i.e., the set
+//      can be precomputed once per mask invocation, not per element.
+//   4. If exactly one hoistable IRContains is found, rewrite to:
+//        IRMaskWithSet(arr, buildOn, paramId, residual)
+//      where `residual` is the callable's body with the IRContains
+//      replaced by `IRSetMember(paramId, value)`.
+//   5. Otherwise (zero or 2+ hoistable nodes), leave as IRMask.
+//      Option A (per design discussion): multi-contains masks fall
+//      back to per-element evaluation. Revisit if real code hits this.
+//
+// This handles the LOCAL case: contains directly inside the predicate's
+// body. The CROSS-PROCEDURAL case (contains inside a function called
+// from the predicate) is M1.2 v2 — not yet implemented. The unified
+// analysis sees those probes for diagnostic purposes but optimization
+// doesn't fire across the call.
+
+/// Collect hoistable IRContains nodes from an expression. Returns
+/// (containsNode, buildOn, value) for each IRContains whose BuildOn
+/// doesn't reference paramId. Walks via mapIRExpr for full coverage.
+let private collectHoistableContains (paramId: IRId) (body: IRExpr)
+        : (IRExpr * IRExpr * IRExpr) list =
+    let mutable results = []
+    let _ = mapIRExpr (fun e ->
+        match e with
+        | IRContains (buildOn, value) ->
+            let refs = collectVarRefsIR buildOn
+            if not (Set.contains paramId refs) then
+                results <- (e, buildOn, value) :: results
+            e
+        | _ -> e) body
+    List.rev results
+
+/// Replace a specific subexpression (by reference identity) with another.
+/// Used to swap an IRContains node for an IRSetMember node within a
+/// predicate body. Reference identity ensures we only replace the
+/// specific node we collected; structurally-equal duplicates elsewhere
+/// in the tree are left alone.
+let private replaceNodeByRef (target: IRExpr) (replacement: IRExpr) (root: IRExpr) : IRExpr =
+    mapIRExpr (fun e ->
+        if System.Object.ReferenceEquals(e, target) then replacement
+        else e) root
+
+/// Attempt to rewrite a single IRMask to IRMaskWithSet. Returns the
+/// rewritten form if the pattern matches, otherwise None.
+let private tryRewriteMaskContains (expr: IRExpr) : IRExpr option =
+    match expr with
+    | IRMask (arr, pred) ->
+        match resolveCallable pred with
+        | None -> None  // Predicate isn't a recognizable callable
+        | Some callable when callable.Params.Length <> 1 -> None
+        | Some callable ->
+            let paramId = callable.Params.[0].VarId
+            let hoistable = collectHoistableContains paramId callable.Body
+            match hoistable with
+            | [(node, buildOn, value)] ->
+                let setMember = IRSetMember (paramId, value)
+                let residual = replaceNodeByRef node setMember callable.Body
+                Some (IRMaskWithSet (arr, buildOn, paramId, residual))
+            | _ ->
+                // 0 hoistable: nothing to optimize.
+                // 2+ hoistable: multi-contains case — skip per Option A
+                // (design decision: revisit when real code demands it).
+                None
+    | _ -> None
+
+/// Apply tryRewriteMaskContains bottom-up across an expression tree.
+/// Bottom-up means inner masks are rewritten before outer ones — useful
+/// when a mask's array argument is itself a mask, so the inner rewrite
+/// is visible when the outer is considered.
+let private rewriteMaskContainsExpr (expr: IRExpr) : IRExpr =
+    mapIRExpr (fun e ->
+        match tryRewriteMaskContains e with
+        | Some rewritten -> rewritten
+        | None -> e) expr
+
+/// Module-level rewrite pass. Runs after lift, before codegen. Builds
+/// and installs the CallablesTable so resolveCallable can resolve
+/// kernel slots and predicate references to their underlying callable.
+let rewriteMaskContains (modul: IRModule) : IRModule =
+    let callables = buildCallablesTable modul.Functions
+    let prev = setCallablesContext callables
+    try
+        let newBindings =
+            modul.Bindings |> List.map (fun b ->
+                { b with Value = rewriteMaskContainsExpr b.Value })
+        let newFunctions =
+            modul.Functions |> List.map (fun f ->
+                { f with Body = rewriteMaskContainsExpr f.Body })
+        { modul with Bindings = newBindings; Functions = newFunctions }
+    finally
+        restoreAnalysisContext prev
 
 // ============================================================================
 // ExprAttrs — bottom-up attribute computation for IR expressions
@@ -3566,43 +4165,10 @@ let rec collectVarRefsIR (expr: IRExpr) : Set<IRId> =
 // ContainsProbe — payload for the contains-aware-mask optimization
 // ----------------------------------------------------------------------------
 //
-// A ContainsProbe records a single use of `contains(B, x)` somewhere
-// inside an expression. The bottom-up walker collects probes from every
-// subexpression and propagates them upward through every compositional
-// construct (binops, ifs, function-call arguments, nested lambda bodies,
-// match cases, let bodies, ...). The propagation is *consumed* at
-// IRMask — a mask's predicate is the only place where probes get
-// resolved. Anywhere else, they keep flowing up until they reach a mask.
-//
-// The optimization driven by these probes lives at codegen: when a mask
-// is rendered, the codegen inspects its predicate's probes, hoists each
-// hoistable build (B that doesn't depend on the mask's kernel binders)
-// into a `std::unordered_set` constructed in the mask's preamble, and
-// substitutes `set.count(value)` for the original IRContains node when
-// rendering the predicate body. Non-hoistable probes (B references the
-// kernel param) fall through to the existing per-iteration scan.
-//
-// `Node` is the actual IRContains object reference. Codegen builds a
-// substitution map keyed on this reference; matching at the contains
-// site uses object identity to decide whether to render the substituted
-// form or fall back to the linear-scan IIFE.
-//
-// `BuildOn` is the array argument (B). Tests assert on this; the
-// hoistability check (FreeVars(BuildOn) ∩ maskBinders = ∅) also reads it.
-
-type ContainsProbe = {
-    Node:    IRExpr
-    BuildOn: IRExpr
-}
-
-/// Active pattern recognizing "this expression is a probe over some array."
-/// Returns (containsNode, arrayArg, valueArg). Future expansion (e.g. an
-/// IRPosition or IRCount operator with similar build-then-probe shape) is
-/// done by adding cases here; the rest of the propagator stays unchanged.
-let (|ContainsProbeAt|_|) (expr: IRExpr) : (IRExpr * IRExpr * IRExpr) option =
-    match expr with
-    | IRContains (arr, value) -> Some (expr, arr, value)
-    | _ -> None
+// The type, active pattern, and detailed doc-comment for ContainsProbe
+// live earlier in this file (right after the IRExpr definition), because
+// IRFuncDef carries a `Probes: ContainsProbe list` field and forward
+// references aren't possible in F#. See lines ~410 for the definitions.
 
 type ExprAttrs = {
     FreeVars:  Set<IRId>
@@ -3665,20 +4231,6 @@ let rec exprAttrs (expr: IRExpr) : ExprAttrs =
           BoundVars = Set.unionMany [va.BoundVars; ba.BoundVars; Set.singleton id]
           IsPure    = va.IsPure && ba.IsPure
           Probes    = va.Probes @ ba.Probes }
-
-    | IRLambda info ->
-        let ba = exprAttrs info.Body
-        let paramIds = info.Params |> List.map (fun p -> p.VarId) |> Set.ofList
-        // Lambda body sees params as bound. Captures appear in the body's
-        // IRVar refs naturally, so they flow up through FreeVars without
-        // explicit accounting — matching the existing collectVarRefsIR
-        // convention. (CaptureInfo is annotation, not a source of refs.)
-        // Probes propagate through the lambda — the lambda boundary is
-        // NOT a probe-consuming construct (only IRMask is).
-        { FreeVars  = Set.difference ba.FreeVars paramIds
-          BoundVars = Set.union ba.BoundVars paramIds
-          IsPure    = ba.IsPure
-          Probes    = ba.Probes }
 
     | IRForRange (vid, lo, hi, body) ->
         let la = exprAttrs lo
@@ -3756,7 +4308,8 @@ let rec exprAttrs (expr: IRExpr) : ExprAttrs =
         let a = exprAttrs arr
         let v = exprAttrs value
         let combined = mergeAttrs a v
-        { combined with Probes = { Node = node; BuildOn = arr } :: combined.Probes }
+        let probe = { Node = node; BuildOn = arr }
+        { combined with Probes = probe :: combined.Probes }
 
     // IRMask consumes the predicate's probes. The predicate is the only
     // place a mask can resolve them; once the mask has them, they do not
@@ -3768,6 +4321,34 @@ let rec exprAttrs (expr: IRExpr) : ExprAttrs =
         let predAttrs = exprAttrs pred
         let consumed = { predAttrs with Probes = [] }
         mergeAttrs arrAttrs consumed
+
+    // IRMaskWithSet is the post-rewrite form: the contains-based optimization
+    // is already extracted. The residual no longer contains IRContains nodes
+    // for THIS mask's optimization, but may contain other contains-based
+    // probes (nested masks, residual logic). Attribute computation walks
+    // arr, setSource, and residual; the paramId is a binder for the residual.
+    | IRMaskWithSet (arr, setSrc, paramId, residual) ->
+        let arrAttrs = exprAttrs arr
+        let setSrcAttrs = exprAttrs setSrc
+        let residualAttrs = exprAttrs residual
+        // paramId is bound by the mask; remove from FreeVars, add to BoundVars.
+        let residual' = {
+            residualAttrs with
+                FreeVars = Set.remove paramId residualAttrs.FreeVars
+                BoundVars = Set.add paramId residualAttrs.BoundVars
+        }
+        // The residual's probes (if any) are consumed by this mask, like IRMask.
+        let consumed = { residual' with Probes = [] }
+        mergeMany [arrAttrs; setSrcAttrs; consumed]
+
+    // IRSetMember is a "leaf" lookup against a precomputed set. It references
+    // paramId (which is bound by the enclosing IRMaskWithSet) and the value.
+    | IRSetMember (paramId, value) ->
+        let v = exprAttrs value
+        // paramId is referenced (bound by the enclosing IRMaskWithSet, so
+        // resolves correctly). Including it in FreeVars lets the enclosing
+        // mask's BoundVars logic close over it.
+        { v with FreeVars = Set.add paramId v.FreeVars }
 
     | IRUnique a -> exprAttrs a
 
@@ -3797,7 +4378,42 @@ let rec exprAttrs (expr: IRExpr) : ExprAttrs =
         mergeAttrs (exprAttrs count) (exprAttrs body)
 
     | IRApp (f, args, _) ->
-        mergeMany (exprAttrs f :: List.map exprAttrs args)
+        let baseAttrs = mergeMany (exprAttrs f :: List.map exprAttrs args)
+        // Unified cross-procedural analysis: if the called function is a
+        // direct IRVar reference and resolvable in the current
+        // CallablesTable, walk its body with parameter substitution.
+        // This treats named functions the same way the IR tree walker
+        // already treats inline lambdas — both are "callables whose
+        // body we walk." Recursion is bounded by the visited set in
+        // AnalysisContext, which is augmented at every function-body
+        // walk and restored afterwards.
+        //
+        // The walked body's probes will have Node references pointing
+        // at IRContains nodes inside the function body, not in the
+        // caller's tree. The mask renderer's reachability check
+        // (Phase C codegen) filters those out before adding to its
+        // substitution map, so unreachable probes don't generate
+        // unused preamble. They remain visible in the analysis for
+        // diagnostic or future-use purposes.
+        match f with
+        | IRVar (fId, _) ->
+            let ctx = currentAnalysisCtx ()
+            match Map.tryFind fId ctx.Callables with
+            | Some callable when not (Set.contains fId ctx.Visited) ->
+                // Substitute formal params with actual args. Lengths
+                // should match in well-typed IR; defensively truncate.
+                let parms = callable.Params
+                let body = callable.Body
+                let n = min args.Length parms.Length
+                let mapping =
+                    List.zip (List.truncate n parms) (List.truncate n args)
+                    |> List.map (fun (p, a) -> (p.VarId, a))
+                    |> Map.ofList
+                let body' = substituteIRVars mapping body
+                let bodyAttrs = withVisited fId (fun () -> exprAttrs body')
+                mergeAttrs baseAttrs bodyAttrs
+            | _ -> baseAttrs
+        | _ -> baseAttrs
 
     | IRStructLit (_, fields) ->
         fields |> List.map (snd >> exprAttrs) |> mergeMany
@@ -3835,6 +4451,7 @@ let rec exprAttrs (expr: IRExpr) : ExprAttrs =
             :: exprAttrs info.Kernel
             :: List.map exprAttrs info.Arrays)
 
+
 /// Validation error with context
 type IRValidationError = {
     Message: string
@@ -3853,8 +4470,6 @@ let rec collectTypesInExpr (expr: IRExpr) : IRType list =
         | IRIf (c, t, e) -> go c @ go t @ go e
         | IRLet (_, v, b) -> go v @ go b
         | IRApp (f, args, retTy) -> [retTy] @ go f @ (args |> List.collect go)
-        | IRLambda info ->
-            (info.Params |> List.map (fun p -> p.Type)) @ go info.Body
         | IRTuple elems -> elems |> List.collect go
         | IRComplex (re, im) -> go re @ go im
         | IRTupleProj (e, _, _) -> go e
@@ -3907,9 +4522,6 @@ let rec containsInfer (ty: IRType) : int option =
 let rec collectDefinedIds (expr: IRExpr) : Set<IRId> =
     match expr with
     | IRLet (id, value, body) -> Set.add id (Set.union (collectDefinedIds value) (collectDefinedIds body))
-    | IRLambda info ->
-        let paramIds = info.Params |> List.map (fun p -> p.VarId) |> Set.ofList
-        Set.union paramIds (collectDefinedIds info.Body)
     | IRForRange (vid, lo, hi, body) ->
         Set.add vid (Set.unionMany [collectDefinedIds lo; collectDefinedIds hi; collectDefinedIds body])
     | IRMatch (scrut, cases) ->
@@ -3932,6 +4544,16 @@ and collectPatternIds (pat: IRPattern) : Set<IRId> =
 let validateModule (externalIds: Set<IRId>) (modul: IRModule) : IRValidationError list =
     let errors = ResizeArray<IRValidationError>()
     let addError ctx msg = errors.Add({ Message = msg; Context = ctx })
+
+    // checkApplyInfo (below) resolves kernel slots through
+    // `resolveCallable` to inspect param count and comm groups,
+    // which requires the CallablesTable to be installed in the
+    // AsyncLocal analysis context. We install it here using
+    // buildCallablesTableForModule (so let-bound kernel references
+    // resolve through their binding-id → callable alias) and
+    // restore the prior context on exit, so the validator doesn't
+    // leak state to subsequent passes.
+    let savedCtx = setCallablesContext (buildCallablesTableForModule modul)
     
     // Track all defined IDs (bindings + functions define names in scope).
     // External Ids come from other modules visible via imports; the IR-level
@@ -3982,9 +4604,6 @@ let validateModule (externalIds: Set<IRId>) (modul: IRModule) : IRValidationErro
         | IRLet (id, value, body) ->
             checkScope scope ctx value
             checkScope (Set.add id scope) ctx body
-        | IRLambda info ->
-            let paramIds = info.Params |> List.map (fun p -> p.VarId) |> Set.ofList
-            checkScope (Set.union scope paramIds) ctx info.Body
         | IRForRange (vid, lo, hi, body) ->
             checkScope scope ctx lo
             checkScope scope ctx hi
@@ -4039,7 +4658,20 @@ let validateModule (externalIds: Set<IRId>) (modul: IRModule) : IRValidationErro
     for f in modul.Functions do
         let ctx = sprintf "in function '%s'" f.Name
         let paramIds = f.Params |> List.map (fun p -> p.VarId) |> Set.ofList
-        let funcScope = Set.union moduleIds paramIds
+        // Stage 3c.3: lifted lambdas live in module.Functions with their
+        // captures in `f.Captures` (separate from `f.Params`). The
+        // captures' Ids reference the enclosing source-level var; the
+        // lambda's body references those Ids directly. Before 3c.3, the
+        // lambda lived inline inside its enclosing function's body, so
+        // the body's IRVar references to captures resolved against the
+        // enclosing function's params — and the validator's scope
+        // walk picked them up that way. After 3c.3, the lambda is its
+        // own top-level function and the enclosing function's params
+        // aren't in scope at the validator's `for f in modul.Functions`
+        // loop; we have to add the function's own Captures' Ids to
+        // the visible scope so the body's references resolve.
+        let captureIds = f.Captures |> List.map (fun c -> c.Id) |> Set.ofList
+        let funcScope = Set.unionMany [moduleIds; paramIds; captureIds]
         checkScope funcScope ctx f.Body
     
     // --- Check 3: ApplyInfo consistency ---
@@ -4052,9 +4684,16 @@ let validateModule (externalIds: Set<IRId>) (modul: IRModule) : IRValidationErro
                 addError ctx (sprintf "ApplyInfo: Arrays.Length=%d != Identities.Length=%d" info.Arrays.Length info.Identities.Length)
             if info.SDimsPerArray.Length <> info.Arrays.Length && info.SDimsPerArray.Length <> 0 then
                 addError ctx (sprintf "ApplyInfo: SDimsPerArray.Length=%d != Arrays.Length=%d" info.SDimsPerArray.Length info.Arrays.Length)
-            // Check kernel param count vs input ranks
-            match info.Kernel with
-            | IRLambda lInfo | IRReynolds (IRLambda lInfo, _) ->
+            // Check kernel param count vs input ranks.
+            // Stage 3c.4c: kernel slot is always IRVar (or
+            // IRReynolds(IRVar)); resolve through resolveCallable to
+            // get param count and comm groups.
+            let kernelInner =
+                match info.Kernel with
+                | IRReynolds (inner, _) -> inner
+                | other -> other
+            match resolveCallable kernelInner with
+            | Some lInfo ->
                 if lInfo.Params.Length <> info.KernelInputRanks.Length then
                     addError ctx (sprintf "ApplyInfo: kernel params=%d != KernelInputRanks.Length=%d" lInfo.Params.Length info.KernelInputRanks.Length)
                 // Verify CommGroup indices are in range
@@ -4062,7 +4701,7 @@ let validateModule (externalIds: Set<IRId>) (modul: IRModule) : IRValidationErro
                     for idx in cg do
                         if idx < 0 || idx >= lInfo.Params.Length then
                             addError ctx (sprintf "CommGroup index %d out of range [0, %d)" idx lInfo.Params.Length)
-            | _ -> ()
+            | None -> ()
         | _ -> ()
         // Recurse into sub-expressions
         match expr with
@@ -4098,7 +4737,10 @@ let validateModule (externalIds: Set<IRId>) (modul: IRModule) : IRValidationErro
     
     for b in modul.Bindings do
         checkEmptyMatch (sprintf "in binding '%s'" b.Name) b.Value
-    
+
+    // Restore the prior AnalysisContext so the validator doesn't
+    // leak its installed CallablesTable to subsequent passes.
+    restoreAnalysisContext savedCtx
     errors |> Seq.toList
 
 /// Validate an entire IR program.

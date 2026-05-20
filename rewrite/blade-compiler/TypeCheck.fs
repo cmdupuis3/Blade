@@ -2201,15 +2201,32 @@ let rec inferExpr (env: TypeEnv) (expr: Expr) : TypeResult<TypedExpr> =
         inferExpr env array |> Result.bind (fun tArr ->
         inferExpr env pred |> Result.bind (fun tPred ->
             requireArrayArg env tArr "mask" |> Result.bind (fun arrTy ->
-                // Result: 1D array with same element type, runtime-opaque extent
-                let resultIdx = {
-                    Id = env.Builder.FreshId(); Arity = 1
-                    Extent = IRParam ("__masked", 0, IRTNat None)
-                    Symmetry = SymNone; Tag = None
-                    Kind = SDimension; Dependencies = []
-                }
-                let resultType = mkArrayArrow [resultIdx] arrTy.ElemType None
-                Ok (mkTyped (TExprMask (tArr, tPred)) resultType))))
+                // The predicate is `Element → Bool`. inferExpr typed it
+                // without knowing the element type, so its param starts as
+                // a fresh IRTInfer. Without explicit unification here, the
+                // var stays unbound and zonkType's default (Float64) kicks
+                // in — which then breaks bodies that use integer ops on
+                // int arrays (`x % 2`) or struct field access on struct
+                // arrays (`p.a`). Unify the predicate's param with the
+                // array's element type so zonking propagates the right
+                // type into the standalone-lifted function signature and
+                // the body's operator/field-access positions resolve
+                // against the real element type.
+                let unifyPredParam =
+                    match tPred.Kind with
+                    | TExprLambda info when info.Params.Length = 1 ->
+                        unify env.Subst info.Params.[0].Type arrTy.ElemType
+                    | _ -> Ok ()
+                unifyPredParam |> Result.bind (fun () ->
+                    // Result: 1D array with same element type, runtime-opaque extent
+                    let resultIdx = {
+                        Id = env.Builder.FreshId(); Arity = 1
+                        Extent = IRParam ("__masked", 0, IRTNat None)
+                        Symmetry = SymNone; Tag = None
+                        Kind = SDimension; Dependencies = []
+                    }
+                    let resultType = mkArrayArrow [resultIdx] arrTy.ElemType None
+                    Ok (mkTyped (TExprMask (tArr, tPred)) resultType)))))
 
     // intersect(A, B) / union(A, B) — set operations on arrays
     | ExprIntersect (a, b) | ExprUnion (a, b) ->
@@ -2525,9 +2542,34 @@ let rec inferExpr (env: TypeEnv) (expr: Expr) : TypeResult<TypedExpr> =
                 | Some n when n <= 0L ->
                     Error (Other (sprintf "reduce() rejects statically empty arrays (extent = %d). Empty input has no defined reduction without an identity; a 3-arg form `reduce(arr, op, init)` is the planned solution." n))
                 | _ ->
-                    // arrTy.ElemType is IRType post-B2; return directly.
-                    let resultType = arrTy.ElemType
-                    Ok (mkTyped (TExprReduce (tArr, tKernel)) resultType)
+                    // Stage 3c.2 follow-on: unify the kernel's param types
+                    // with the array's element type. The kernel arrives as
+                    // an arrow `(α, β) → γ` where α, β are typically still
+                    // unresolved inference variables — operator sections
+                    // lower polymorphically per `inferExpr ExprSection`,
+                    // and unannotated 2-arg lambdas don't get their param
+                    // types pinned by the body alone for `+`/`-`/etc.
+                    // Without this unification, zonking defaults the
+                    // section's IRTInfer to Float64, which then bakes a
+                    // literal-Float64 signature into the lifted function
+                    // and breaks reduces over non-Float64 source arrays
+                    // (the lifted function returns Float64 even when the
+                    // accumulator is Int64). Pin both params to the
+                    // array's element type so the section's polymorphism
+                    // resolves correctly before zonking. Result type
+                    // stays whatever the kernel declared (Bool for
+                    // comparison sections, elemType for arithmetic).
+                    let kernelUnify =
+                        match env.Subst.Resolve(tKernel.Type) with
+                        | FuncElem (paramTys, _) ->
+                            paramTys |> List.fold (fun acc pTy ->
+                                acc |> Result.bind (fun () -> unify env.Subst pTy arrTy.ElemType))
+                                (Ok ())
+                        | _ -> Ok ()
+                    kernelUnify |> Result.bind (fun () ->
+                        // arrTy.ElemType is IRType post-B2; return directly.
+                        let resultType = arrTy.ElemType
+                        Ok (mkTyped (TExprReduce (tArr, tKernel)) resultType))
             | ArrayElem _ ->
                 Error (Other "reduce() currently supports only rank-1 arrays (multi-rank reduction over the innermost dimension is deferred)")
             | _ ->
@@ -2721,11 +2763,30 @@ and inferBinOp env mode op left right : TypeResult<TypedExpr> =
         // Result type is the return type of the continuation
         inferExpr env left |> Result.bind (fun tL ->
         inferExpr env right |> Result.bind (fun tR ->
-            let resultType =
+            // Path 1 follow-on: propagate type info from the computation
+            // into the continuation. Without this, a continuation like
+            // `lambda(arr) -> method_for(arr) <@> ...` has arr left as
+            // IRTInfer (because the body's `method_for(arr)` doesn't
+            // pin it), and codegen subsequently emits arr's type as
+            // a default scalar — which doesn't match the array-typed
+            // computation flowing in. Unify the continuation's first
+            // param with α (the computation's element type, unwrapping
+            // an explicit IRTComputation if present).
+            let alpha =
+                match tL.Type with
+                | IRTComputation t -> t
+                | t -> t
+            let unifyResult =
                 match tR.Type with
-                | FuncElem (_, retType) -> retType  // k : α → β, result is β
-                | _ -> tR.Type  // If not a function, use right's type directly
-            Ok (mkTyped (TExprBind (tL, tR)) resultType)))
+                | FuncElem (paramTys, _) when paramTys.Length >= 1 ->
+                    unify env.Subst (List.head paramTys) alpha
+                | _ -> Ok ()
+            unifyResult |> Result.bind (fun () ->
+                let resultType =
+                    match tR.Type with
+                    | FuncElem (_, retType) -> retType  // k : α → β, result is β
+                    | _ -> tR.Type  // If not a function, use right's type directly
+                Ok (mkTyped (TExprBind (tL, tR)) resultType))))
 
     | OpParallel ->
         inferExpr env left |> Result.bind (fun tL ->
@@ -3259,11 +3320,62 @@ and buildApplyInfo (env: TypeEnv)
     // compute kRank = 0, which makes perRowType think the kernel takes a
     // scalar — leading to a shape mismatch when we later unify against
     // the real rank-N source per-row type.
+    //
+    // Path 1 fix (Stage 3c follow-on): when the param's resolved type is
+    // STILL IRTInfer after body typechecking — i.e., the body didn't
+    // structurally constrain the param's shape (e.g. `lambda(g) -> g(0)`,
+    // where g(0) is ambiguous between array indexing and function
+    // application) — fall back to the array-side rank: the kernel sees
+    // a slice of rank (array rank − iterated S-dimensions). For a
+    // typical `method_for(arr)` with one iterated outer dim, kRank
+    // becomes (arrTy.rank - 1). This recovers the array shape
+    // information that the body alone couldn't supply, and lets the
+    // subsequent perRowType unification pin the param to the correct
+    // Array<T, N> type rather than collapsing to the scalar element.
     let resolvedParamTypes =
         lambdaInfo.Params |> List.map (fun p -> env.Subst.Resolve p.Type)
+    // Param rank: if the param's resolved type is an array, read its
+    // rank directly. If the param is still IRTInfer — meaning the body
+    // didn't structurally constrain the param's shape (e.g.
+    // `lambda(g) -> g(0)`, where the application is ambiguous between
+    // array indexing and function application) — fall back to the
+    // array-side rank.
+    //
+    // The array-side rank isn't naively `(array rank − iterated
+    // S-dimensions)`. For ragged-inner-dim arrays (group_by results,
+    // ragged literals, depidx-inner shapes), `computeSDimsPerArray`
+    // counts every SDimension equally — the inner ragged dim included.
+    // But codegen's ragged-peel pass treats those inner dims as
+    // KERNEL-SIDE (peeled into a per-row binding), not iterated. To
+    // match codegen semantics here, we adjust: every index with a
+    // ragged-family tag contributes to the kernel's rank, not to the
+    // iterated count. The result is the kernel's effective rank as
+    // codegen actually sees it.
+    let isRaggedInnerTag (tag: string option) : bool =
+        match tag with
+        | Some t ->
+            t.StartsWith "__raggedidx"
+            || t.StartsWith "__depidx_inner"
+            || t.StartsWith "__group_member"
+            || t = "__error_ragged_no_prior"
+        | None -> false
     let kernelInputRanks =
-        resolvedParamTypes |> List.map (fun t ->
-            match t with ArrayElem arr -> arr.IndexTypes.Length | _ -> 0)
+        resolvedParamTypes |> List.mapi (fun i t ->
+            match t with
+            | ArrayElem arr -> arr.IndexTypes.Length
+            | IRTInfer _ when i < arrayTypes.Length && i < sDimsPerArray.Length ->
+                let arrTy = arrayTypes.[i]
+                let sDims = sDimsPerArray.[i]
+                let raggedInnerCount =
+                    arrTy.IndexTypes
+                    |> List.filter (fun idx -> isRaggedInnerTag idx.Tag)
+                    |> List.length
+                // sDimsPerArray includes ragged inner dims (computeSDimsPerArray
+                // doesn't filter by tag). Re-attribute those to the kernel side
+                // so the kernel rank reflects what codegen actually emits.
+                let trueIteratedDims = max 0 (sDims - raggedInnerCount)
+                max 0 (arrTy.IndexTypes.Length - trueIteratedDims)
+            | _ -> 0)
 
     // Infer T-dimensions from the kernel's resolved return type (§9.2).
     // If the kernel returns an array, its index types become T-dimensions
@@ -3354,9 +3466,30 @@ and buildApplyInfo (env: TypeEnv)
                 if r > 1 then factorial r else 1L
             else 1L
 
-        // Store RESOLVED kernel so Lowering produces IRLambda (not IRVar)
+        // After unification, the substitution holds the refined param
+        // types but `lambdaInfo.Params[i].Type` still holds the original
+        // (often IRTInfer) values — F# records are immutable. Downstream
+        // zonking should resolve those through the substitution, but a
+        // diagnostic from the Stage 3c filter-removal work showed lifted
+        // lambdas getting `(double)` parameters where the substitution
+        // had bound them to `Array<...>`. To remove any ambiguity, rebuild
+        // the lambda info with explicitly-resolved param types, the
+        // return type, and (for the value-flow side) the body's typed
+        // expression. The resolved kernel then carries refined types
+        // directly, independent of whether downstream zonking visits
+        // every node.
+        let resolvedLambdaInfo =
+            { lambdaInfo with
+                Params =
+                    lambdaInfo.Params |> List.map (fun p ->
+                        { p with Type = env.Subst.Resolve p.Type })
+                ReturnType = env.Subst.Resolve lambdaInfo.ReturnType }
+
+        // Store the kernel with resolved types in the typed AST. Lowering
+        // walks this typed lambda and emits a lifted IRCallable referenced
+        // via IRVar(callable.Id) at the kernel slot.
         let resolvedKernel =
-            let lambdaExpr = mkTyped (TExprLambda lambdaInfo) tKernel.Type
+            let lambdaExpr = mkTyped (TExprLambda resolvedLambdaInfo) tKernel.Type
             if isReynolds then mkTyped (TExprReynolds (lambdaExpr, isAntisym)) tKernel.Type
             else lambdaExpr
 

@@ -164,9 +164,6 @@ let rec collectVarRefs (expr: IRExpr) : Set<IRId> =
     | IRIf (cond, thenBr, elseBr) -> 
         Set.unionMany [collectVarRefs cond; collectVarRefs thenBr; collectVarRefs elseBr]
     | IRLet (_, value, body) -> Set.union (collectVarRefs value) (collectVarRefs body)
-    | IRLambda info -> 
-        let paramIds = info.Params |> List.map (fun p -> p.VarId) |> Set.ofList
-        Set.difference (collectVarRefs info.Body) paramIds
     | IRApp (func, args, _) -> 
         Set.unionMany (collectVarRefs func :: List.map collectVarRefs args)
     | IRTuple exprs -> Set.unionMany (List.map collectVarRefs exprs)
@@ -200,10 +197,19 @@ let rec collectVarRefs (expr: IRExpr) : Set<IRId> =
         Set.union (collectVarRefs cond) (collectVarRefs body)
     | IRMask (arr, pred) ->
         Set.union (collectVarRefs arr) (collectVarRefs pred)
+    | IRMaskWithSet (arr, setSrc, paramId, residual) ->
+        // paramId is bound by this mask. Free vars of residual minus paramId,
+        // plus arr's and setSrc's free vars.
+        let residualRefs = Set.remove paramId (collectVarRefs residual)
+        Set.unionMany [collectVarRefs arr; collectVarRefs setSrc; residualRefs]
     | IRIntersect (a, b) | IRUnion (a, b) ->
         Set.union (collectVarRefs a) (collectVarRefs b)
     | IRUnique a -> collectVarRefs a
     | IRContains (a, v) -> Set.union (collectVarRefs a) (collectVarRefs v)
+    | IRSetMember (_, v) ->
+        // paramId is a binder reference (bound by enclosing IRMaskWithSet),
+        // not a free variable from the perspective of this expression.
+        collectVarRefs v
     | IRGroupBy (v, k) ->
         Set.union (collectVarRefs v) (collectVarRefs k)
     | IRGroupKeys ks -> ks |> List.map collectVarRefs |> Set.unionMany
@@ -301,10 +307,6 @@ let rec inferExprType (expr: IRExpr) : IRType =
     | IRIf (_, thenBr, _) -> inferExprType thenBr
     | IRCompute inner -> inferExprType inner
     | IRApplyCombinator info -> info.OutputType
-    | IRLambda info -> 
-        let argTypes = info.Params |> List.map (fun p -> p.Type)
-        let retType = inferExprType info.Body
-        mkFuncArrow argTypes retType
     | IRTuple exprs -> IRTTuple (exprs |> List.map inferExprType)
     | IRComplex (re, _) ->
         // Complex type derived from component width: Float32 → Complex64,
@@ -403,9 +405,11 @@ let rec inferExprType (expr: IRExpr) : IRType =
     | IRChoice (l, _) -> inferExprType l
     | IRGuard (_, body) -> inferExprType body
     | IRMask (arr, _) -> inferExprType arr  // Same elem type, different extent
+    | IRMaskWithSet (arr, _, _, _) -> inferExprType arr  // Same: filtered result
     | IRIntersect (a, _) | IRUnion (a, _) -> inferExprType a  // Same elem type, different extent
     | IRUnique a -> inferExprType a  // Same elem type, different (smaller) extent
     | IRContains _ -> IRTScalar ETBool  // Membership returns bool
+    | IRSetMember _ -> IRTScalar ETBool  // Set-membership query returns bool
     | IRGroupBy (v, gk) ->
         // The TypeCheck-side `ExprGroupBy` rule constructs a rank-2 array
         // type with `__group_outer` + `__group_member` tagged index slots
@@ -667,6 +671,7 @@ let inferInlineElemTypeStr (opName: string) (form: IRExpr) : string =
         match form with
         | IRMask (a, _) | IRSort (a, _)
         | IRIntersect (a, _) | IRUnion (a, _) -> a
+        | IRMaskWithSet (a, _, _, _) -> a
         | IRUnique a -> a
         | _ -> form
     match inferExprType arrExpr with
@@ -776,6 +781,87 @@ let isRaggedArrayType (arrTy: IRArrayType) : bool =
 let isDepIdxArrayType (arrTy: IRArrayType) : bool =
     arrTy.IndexTypes |> List.exists (fun idx ->
         idx.Tag = Some "__depidx_inner")
+
+/// Render an array type as its C++ type string. Handles the three cases:
+///   * Rank-1 ragged/dep-idx → `RaggedRow<T>` (a peeled-row slice — produced
+///     when the kernel side of a `method_for` over a 2D ragged peels the
+///     inner-ragged dim into the kernel's binding; the runtime layout is
+///     a row pointer + length).
+///   * Rank ≥ 2 ragged/dep-idx → `Ragged<T>` (full multi-row container).
+///   * Otherwise → `Array<T, N>` (uniform shape).
+///
+/// The rank-1 distinction matters because `Ragged<T>::operator[]` returns
+/// `RaggedRow<T>`, not `T`. A lambda whose param IS a peeled row must
+/// declare the row type directly so `g[0]` resolves to the element. This
+/// stays consistent with user-written annotations: at the source level
+/// rank-1 ragged is malformed (no prior index to drive the lookup) and
+/// surfaces as the `__error_ragged_no_prior` placeholder; the only rank-1
+/// ragged types Lowering hands to codegen come from kernel-side peeling.
+let cppArrayTypeStr (arr: IRArrayType) : string =
+    if isRaggedArrayType arr || isDepIdxArrayType arr then
+        if arr.IndexTypes.Length = 1 then
+            sprintf "RaggedRow<%s>" (elemTypeToCpp arr.ElemType)
+        else
+            sprintf "Ragged<%s>" (elemTypeToCpp arr.ElemType)
+    else
+        sprintf "Array<%s, %d>" (elemTypeToCpp arr.ElemType) (arrayRank arr)
+
+/// Wrapper-emission helper. Takes an IRCallable and produces a local
+/// C++ closure that mediates between the lifted function's signature
+/// (regular params + capture params) and the consumer's expected
+/// callable shape (regular params only). The wrapper is what lets
+/// `IRVar(callable.Id, funcType)` stand in at any consumer site that
+/// needs to call the callable as if it had only its regular params.
+///
+/// Shape:
+///     auto __wrap_<id>_<suffix> = [&](P1 p1, P2 p2) { return <fnName>(p1, p2, c1, c2); };
+///
+/// The wrapper takes only the callable's regular params. Captures are
+/// hidden from the wrapper's signature and forwarded into the lifted
+/// function call from the surrounding scope via the `[&]` capture chain.
+/// The `[&]` form binds capture-named identifiers by reference, matching
+/// the `T& cap_name` capture-param signature that `genFuncDef` emits on
+/// the lifted function side. As long as the wrapper is emitted in a scope
+/// where the capture-named variables are visible (typically the same
+/// scope where the original `lambda(...)` literal appeared), the chain
+/// closes correctly.
+///
+/// Return-type rendering uses `auto`. This avoids two complications: (1)
+/// computing the return type explicitly for callables whose RetType is
+/// IRTInfer or a synthesized shape, and (2) handling void returns —
+/// since C++14, `return voidFn()` in an `auto`-returning context deduces
+/// to `void` and is legal. Consumers that need a specific signature
+/// (e.g., an `std::function<T(P)>`-typed slot) can still wrap the wrapper.
+///
+/// The wrapper name combines the callable id with a caller-supplied
+/// suffix. Same callable referenced from multiple consumer sites at the
+/// same C++ scope would otherwise produce duplicate names (since the
+/// callable id alone isn't unique-per-use). Callers pass a suffix that
+/// disambiguates — typically the let binding's name or a fresh counter
+/// from the IR builder. Pass empty string when the caller guarantees a
+/// single emission per scope.
+///
+/// Returns (code lines, wrapper name). Callers prepend the code lines to
+/// the enclosing block and use the wrapper name wherever they'd
+/// previously have inlined the lambda body.
+let genCallableWrapper (suffix: string) (callable: IRCallable) : string list * string =
+    let safeName = sanitizeCppName callable.Name
+    let wrapperName =
+        if suffix = "" then sprintf "__wrap_%d" callable.Id
+        else sprintf "__wrap_%d_%s" callable.Id suffix
+    let paramSig =
+        callable.Params
+        |> List.map (fun p ->
+            match p.Type with
+            | ArrayElem arr -> sprintf "%s %s" (cppArrayTypeStr arr) p.Name
+            | _ -> sprintf "%s %s" (irTypeToCpp p.Type) p.Name)
+        |> String.concat ", "
+    let regularArgs = callable.Params |> List.map (fun p -> p.Name)
+    let captureArgs = callable.Captures |> List.map (fun c -> c.Name)
+    let allArgs = (regularArgs @ captureArgs) |> String.concat ", "
+    let code =
+        [sprintf "auto %s = [&](%s) { return %s(%s); };" wrapperName paramSig safeName allArgs]
+    (code, wrapperName)
 
 /// Evaluate a DepIdx inner-extent formula for a specific outer index value.
 /// The formula is an IRExpr referencing the outer record's Id via IRVar; we
@@ -921,15 +1007,6 @@ let rec exprToCppCore (subst: SubstMap) (names: Map<IRId, string>) (expr: IRExpr
                 | _ ->
                     let bodyStr = exprToCppCore subst names' body
                     sprintf "([&]() { auto __v%d = %s; return %s; }())" id valStr bodyStr
-    | IRLambda info ->
-        // Generate C++ lambda
-        let paramList = info.Params |> List.map (fun p -> sprintf "%s %s" (irTypeToCpp p.Type) p.Name) |> String.concat ", "
-        let names' = info.Params |> List.fold (fun m p -> Map.add p.VarId p.Name m) names
-        if isUnitExpr info.Body then
-            sprintf "[&](%s) { }" paramList
-        else
-            let bodyStr = exprToCppCore subst names' info.Body
-            sprintf "[&](%s) { return %s; }" paramList bodyStr
     | IRMethodFor _ -> exprError "loop object used as value"
     | IRObjectFor _ -> exprError "loop object used as value"
     | IRApplyCombinator _ -> 
@@ -989,46 +1066,59 @@ let rec exprToCppCore (subst: SubstMap) (names: Map<IRId, string>) (expr: IRExpr
                 | Some n -> n > 0L
                 | None -> false
             | _ -> false
-        match kernelExpr with
-        | IRLambda lInfo when lInfo.Params.Length = 2 ->
-            // Use IIFE-local names "__r_a" and "__r_b" for the kernel params.
-            // C++ scoping makes these collision-free even for nested reduces.
-            let aName = "__r_a"
-            let bName = "__r_b"
-            let kNames =
-                names
-                |> Map.add lInfo.Params.[0].VarId aName
-                |> Map.add lInfo.Params.[1].VarId bName
-                |> fun m -> lInfo.Captures |> List.fold (fun acc c -> Map.add c.Id c.Name acc) m
-            let kStr = exprToCppCore subst kNames lInfo.Body
-            // Consumers read shape via `.extents` member of the wrapper.
+        // Reduce-kernel resolution via `resolveCallable`. The fold
+        // kernel emits as a local wrapper closure inside the IIFE; the
+        // fold loop invokes the wrapper on `(acc, arr[__ri])`. The
+        // wrapper lives inside the IIFE's `[&]() { ... }()` scope, so
+        // name collisions across multiple reduces at the same outer
+        // scope are structurally avoided — each IIFE is its own block.
+        //
+        // This migration was reverted earlier in 3c.2 because operator
+        // sections (`(+)`, `(*)`, ...) lowered with hardcoded Float64
+        // param/return types, and the wrapper-based path exposed the
+        // resulting signature mismatch on non-Float64 source arrays
+        // (e.g., `reduce(int_array, (+))` triggered -Wfloat-conversion
+        // when the Float64 return assigned back to an Int64
+        // accumulator). The section lowering was subsequently fixed:
+        // `lowerTypedSection` now reads the section's resolved type
+        // from the typed expression, and `inferReduce` unifies the
+        // kernel's params with the array element type before zonking.
+        // With sections honest, wrappers carry the right signature and
+        // the migration is safe.
+        match resolveCallable kernelExpr with
+        | Some callable when callable.Params.Length = 2 ->
+            let (wrapperCode, wname) = genCallableWrapper "" callable
+            let wrapperStr = wrapperCode |> String.concat " "
             let guard =
                 if isStaticallyNonEmpty then ""
                 else sprintf "if (%s.extents[0] == 0) { std::cerr << \"reduce: empty array, no reduction possible\" << std::endl; std::abort(); } " arrStr
-            sprintf "[&]() { %sauto __op = [&](%s %s, %s %s) { return %s; }; %s __r = %s[0]; for (size_t __ri = 1; __ri < %s.extents[0]; __ri++) { __r = __op(__r, %s[__ri]); } return __r; }()"
-                guard elemStr aName elemStr bName kStr elemStr arrStr arrStr arrStr
+            sprintf "[&]() { %s%s %s __r = %s[0]; for (size_t __ri = 1; __ri < %s.extents[0]; __ri++) { __r = %s(__r, %s[__ri]); } return __r; }()"
+                guard wrapperStr elemStr arrStr arrStr wname arrStr
         | _ ->
-            "/* reduce: non-lambda kernel inline (typechecker or IR bug) */"
+            "/* reduce: non-callable kernel (typechecker or IR bug) */"
 
-    | IRContains (arrExpr, valueExpr) as node ->
-        // Consult the substitution map first. If this specific IRContains
-        // node has been registered (by reference) — meaning some enclosing
-        // mask renderer hoisted the build out as a preamble — emit the
-        // set-probe form directly. Otherwise fall through to the linear
-        // scan baseline. (Step 2 only adds the machinery; Step 3 wires
-        // mask to populate the map. With an empty substitution, this arm
-        // is byte-identical to the old behavior.)
-        match trySubst subst node with
-        | Some setName ->
-            sprintf "%s.count(%s)" setName (exprToCppCore subst names valueExpr)
-        | None ->
-            // Linear-scan membership test as an IIFE returning bool.
-            // Captures by reference so any names in the array/value
-            // expressions resolve through the surrounding scope.
-            let arrStr = exprToCppCore subst names arrExpr
-            let valStr = exprToCppCore subst names valueExpr
-            sprintf "[&]() { for (size_t __ci = 0; __ci < %s.extents[0]; __ci++) { if (%s[__ci] == %s) return true; } return false; }()"
-                arrStr arrStr valStr
+    | IRContains (arrExpr, valueExpr) ->
+        // Linear-scan membership test as an IIFE returning bool. The
+        // hoist-set optimization for contains-inside-mask is now done
+        // at the IR level by rewriteMaskContains, which produces
+        // IRMaskWithSet+IRSetMember pairs that don't reach this arm.
+        // Anything still arriving here is either a standalone contains
+        // (not inside an optimizable mask) or a contains inside a mask
+        // pattern the rewrite didn't fuse (multi-contains under
+        // Option A, or non-hoistable BuildOn).
+        let arrStr = exprToCppCore subst names arrExpr
+        let valStr = exprToCppCore subst names valueExpr
+        sprintf "[&]() { for (size_t __ci = 0; __ci < %s.extents[0]; __ci++) { if (%s[__ci] == %s) return true; } return false; }()"
+            arrStr arrStr valStr
+
+    // IRSetMember: set-membership query against a precomputed set tied to
+    // a paramId. Renders as `<setName>.count(value)`. The set name is
+    // computed deterministically from the paramId so the IRMaskWithSet
+    // renderer (M1.3) and this arm agree on naming without explicit
+    // wiring through context.
+    | IRSetMember (paramId, valueExpr) ->
+        let valStr = exprToCppCore subst names valueExpr
+        sprintf "__mset_p%d.count(%s)" paramId valStr
 
     | IRArity (Some n, _) -> sprintf "%d" n
     | IRArity (None, paramName) -> 
@@ -1302,44 +1392,43 @@ and genApplyCombinatorExpr (subst: SubstMap) (names: Map<IRId, string>) (info: A
             | IRParam (name, _, _) -> name
             | _ -> sprintf "arr%d" i)
     
-    // Extract kernel
-    let kernelExpr = 
+    // Stage 3c.2: kernel resolution unified via `resolveCallable`. The
+    // 2-array Cartesian sum-reduce emits the kernel as a local wrapper
+    // closure inside the IIFE, dropping the previous duck-typed inline
+    // body (which re-bound the kernel body inside an `elemStr`-typed
+    // closure to compensate for sections' formerly-hardcoded Float64
+    // types). With sections now honestly typed (`lowerTypedSection`
+    // + `inferReduce` kernel-param unify), the wrapper carries the
+    // right signature directly.
+    //
+    // IRReynolds-wrapped kernels are peeled — at this inline-form
+    // emission site the Reynolds symmetrization is informational and
+    // doesn't change what the kernel computes per call; the symmetric
+    // accumulation is the iteration structure, not the kernel itself.
+    let kernelInner =
         match info.Kernel with
-        | IRLambda lInfo -> 
-            let paramNames = lInfo.Params |> List.map (fun p -> p.Name)
-            let bodyStr = 
-                let names' = lInfo.Params |> List.fold (fun m p -> Map.add p.VarId p.Name m) names
-                exprToCppCore subst names' lInfo.Body
-            (paramNames, bodyStr)
-        | IRReynolds (IRLambda lInfo, _) ->
-            let paramNames = lInfo.Params |> List.map (fun p -> p.Name)
-            let bodyStr = 
-                let names' = lInfo.Params |> List.fold (fun m p -> Map.add p.VarId p.Name m) names
-                exprToCppCore subst names' lInfo.Body
-            (paramNames, bodyStr)
-        | _ -> ([], exprError "kernel is not a lambda in inline combinator expression")
-    
-    let (paramNames, kernelBody) = kernelExpr
-    
+        | IRReynolds (inner, _) -> inner
+        | other -> other
+
     // Infer output element type from ApplyInfo
     let elemTypeStr =
         match info.OutputType with
         | IRTScalar et -> primTypeToCpp et
         | ArrayElem arr -> elemTypeToCpp arr.ElemType
         | t -> irTypeToCpp t
-    
+
     // For scalar output (simple accumulation), generate inline loop
     // This is a simplified version - full version would use LoopNestCodeGen
-    if arrayNames.Length = 2 && paramNames.Length = 2 then
+    match resolveCallable kernelInner with
+    | Some callable when callable.Params.Length = 2 && arrayNames.Length = 2 ->
         let arr1 = arrayNames.[0]
         let arr2 = arrayNames.[1]
-        let p1 = paramNames.[0]
-        let p2 = paramNames.[1]
-        // Generate as IIFE with nested loops
-        // Use _extents arrays for size (works with both top-level arrays and function params)
-        sprintf "([&]() { %s __result = 0; for (size_t __i0 = 0; __i0 < %s.extents[0]; __i0++) { %s %s = %s[__i0]; for (size_t __i1 = 0; __i1 < %s.extents[0]; __i1++) { %s %s = %s[__i1]; __result += %s; } } return __result; }())"
-            elemTypeStr arr1 elemTypeStr p1 arr1 arr2 elemTypeStr p2 arr2 kernelBody
-    else
+        let (wrapperCode, wname) = genCallableWrapper "" callable
+        let wrapperStr = wrapperCode |> String.concat " "
+        // Generate as IIFE with nested loops.
+        sprintf "([&]() { %s%s __result = 0; for (size_t __i0 = 0; __i0 < %s.extents[0]; __i0++) { for (size_t __i1 = 0; __i1 < %s.extents[0]; __i1++) { __result += %s(%s[__i0], %s[__i1]); } } return __result; }())"
+            wrapperStr elemTypeStr arr1 arr2 wname arr1 arr2
+    | _ ->
         // Fallback - can't generate inline code
         exprError (sprintf "inline combinator not supported for %d arrays" arrayNames.Length)
 
@@ -1383,104 +1472,94 @@ and exprToCppWithVar (names: Map<IRId, string>) (varId: IRId) (varName: string) 
 and materializeInlineForm (subst: SubstMap) (names: Map<IRId, string>) (varName: string) (elemTypeStr: string) (form: IRExpr) : string list option =
     match form with
     | IRMask (arrExpr, predExpr) ->
+        // Bare mask rendering. Probes (the contains-based optimization)
+        // are handled at the IR level by IR.rewriteMaskContains (M1)
+        // which converts qualifying masks to IRMaskWithSet. Anything
+        // still in IRMask form here either had no contains, or had
+        // multiple contains (per Option A, multi-contains is not
+        // currently fused), or had a contains whose BuildOn referenced
+        // the iteration variable (not hoistable). In all those cases,
+        // the predicate is evaluated per element, with any contains
+        // calls rendering as the IIFE linear scan (see IRContains
+        // arm in exprToCppCore).
+        //
+        // The predicate resolves via `resolveCallable` and emits as a
+        // local C++ closure (`__wrap_<id>_<varName>`) that forwards
+        // to the lifted function with captures pulled by reference.
+        // The wrapper name carries `varName` as a suffix to
+        // disambiguate when the same callable id appears in multiple
+        // let-bindings' mask emissions at the same C++ scope.
         let arrName = exprToCppCore subst names arrExpr
-        // Predicate must be a single-param lambda (TypeCheck enforces).
-        // Beyond rendering the predicate body, this is where Phase C's
-        // contains-aware mask optimization happens. The flow:
-        //   1. Walk the lambda body via exprAttrs to collect ContainsProbes.
-        //   2. Partition into hoistable / non-hoistable: a probe is
-        //      hoistable iff its BuildOn doesn't reference the lambda
-        //      parameter. Non-hoistable probes fall through to the
-        //      existing IIFE linear scan (handled by exprToCppCore's
-        //      IRContains arm when the substitution map has no entry
-        //      for that node).
-        //   3. Deduplicate hoistable probes by structural equality on
-        //      BuildOn — multiple `contains(B, _)` calls with the same B
-        //      share one preamble set.
-        //   4. Emit `std::unordered_set` build statements as preamble,
-        //      and build a SubstMap mapping each hoistable probe's Node
-        //      (by reference) to the assigned set name.
-        //   5. Render the predicate body with the augmented subst.
-        let (preambleStmts, predParamName, predStr) =
-            match predExpr with
-            | IRLambda lInfo when lInfo.Params.Length = 1 ->
-                let lambdaParamId = lInfo.Params.[0].VarId
-                let pName = sprintf "__%s_x" varName
-                let predNames =
-                    names
-                    |> Map.add lambdaParamId pName
-                    |> fun m -> lInfo.Captures |> List.fold (fun acc c -> Map.add c.Id c.Name acc) m
+        let predParamName = sprintf "__%s_x" varName
+        let (wrapperCode, predCall) =
+            match resolveCallable predExpr with
+            | Some callable when callable.Params.Length = 1 ->
+                let (code, wname) = genCallableWrapper varName callable
+                (code, sprintf "%s(%s)" wname predParamName)
+            | _ -> ([], "true")
+        Some (
+            wrapperCode @ [
+                sprintf "size_t %s__count = 0;" varName
+                sprintf "for (size_t __mi = 0; __mi < %s.extents[0]; __mi++) {" arrName
+                sprintf "    %s %s = %s[__mi];" elemTypeStr predParamName arrName
+                sprintf "    if (%s) %s__count++;" predCall varName
+                "}"
+                sprintf "size_t %s_extents[1] = {%s__count};" varName varName
+                sprintf "Array<%s, 1> %s = { new %s[%s__count], %s_extents };" elemTypeStr varName elemTypeStr varName varName
+                sprintf "size_t %s__fill = 0;" varName
+                sprintf "for (size_t __mi = 0; __mi < %s.extents[0]; __mi++) {" arrName
+                sprintf "    %s %s = %s[__mi];" elemTypeStr predParamName arrName
+                sprintf "    if (%s) { %s[%s__fill++] = %s; }" predCall varName varName predParamName
+                "}"
+            ]
+        )
 
-                // Step 1: collect probes from the predicate body.
-                let predAttrs = exprAttrs lInfo.Body
-                let allProbes = predAttrs.Probes
-
-                // Step 2: filter for hoistable — BuildOn invariant w.r.t.
-                // the mask's iteration variable.
-                let isHoistable (probe: ContainsProbe) =
-                    let buildAttrs = exprAttrs probe.BuildOn
-                    not (Set.contains lambdaParamId buildAttrs.FreeVars)
-                let hoistableProbes = allProbes |> List.filter isHoistable
-
-                // Step 3: deduplicate by structural equality on BuildOn.
-                // F# discriminated unions get default structural equality,
-                // so List.distinct works directly. First-occurrence order
-                // is preserved.
-                let uniqueBuilds =
-                    hoistableProbes
-                    |> List.map (fun p -> p.BuildOn)
-                    |> List.distinct
-
-                // Step 4: assign set names + emit build statements.
-                // Set names are `<varName>__probe_set_<n>`; varName is
-                // typically `__v3` or similar safe identifier already.
-                let buildAssignments =
-                    uniqueBuilds
-                    |> List.mapi (fun i b -> (b, sprintf "%s__probe_set_%d" varName i))
-                let preamble =
-                    buildAssignments |> List.collect (fun (build, setName) ->
-                        let buildCpp = exprToCppCore subst names build
-                        [
-                            sprintf "std::unordered_set<%s> %s;" elemTypeStr setName
-                            sprintf "for (size_t __pi = 0; __pi < %s.extents[0]; __pi++) %s.insert(%s[__pi]);"
-                                buildCpp setName buildCpp
-                        ])
-
-                // Step 5a: build the substitution map. Each hoistable
-                // probe Node maps to the set name of its BuildOn (by
-                // structural equality lookup against buildAssignments).
-                let probeSubst : SubstMap =
-                    hoistableProbes |> List.map (fun probe ->
-                        let setName =
-                            buildAssignments
-                            |> List.find (fun (b, _) -> b = probe.BuildOn)
-                            |> snd
-                        (probe.Node, setName))
-                // Combine with outer subst so nested probes from
-                // enclosing scopes still resolve correctly.
-                let combinedSubst = probeSubst @ subst
-
-                // Step 5b: render the predicate body with the augmented
-                // subst active. The IRContains arm in exprToCppCore now
-                // emits `setName.count(value)` for any hoisted probe,
-                // and falls through to the IIFE linear scan otherwise.
-                let predStr = exprToCppCore combinedSubst predNames lInfo.Body
-                (preamble, pName, predStr)
-            | _ -> ([], sprintf "__%s_x" varName, "true")
-        Some (preambleStmts @ [
+    | IRMaskWithSet (arrExpr, setSrc, paramId, residual) ->
+        // Fused mask+contains form produced by IR.rewriteMaskContains.
+        // Three pieces:
+        //   1. Preamble: build a std::unordered_set from setSrc, named by
+        //      paramId. The IRSetMember arm in exprToCppCore (M1.1)
+        //      renders membership queries as `__mset_p<paramId>.count(v)`,
+        //      so the preamble's set name MUST match by paramId convention.
+        //   2. Count pass: iterate A, bind the iteration value to a
+        //      C++ variable named after paramId, evaluate residual.
+        //   3. Allocate + fill: identical shape to the IRMask renderer
+        //      above. Same loop structure, residual re-evaluated.
+        //
+        // The set construction is hoisted out of both loops — done once
+        // per mask invocation, not per element. That's the whole point
+        // of the rewrite.
+        let arrName = exprToCppCore subst names arrExpr
+        let setSrcName = exprToCppCore subst names setSrc
+        let setName = sprintf "__mset_p%d" paramId
+        let paramName = sprintf "__%s_x" varName
+        // Register paramId -> paramName so the residual's references to
+        // the iteration variable resolve correctly during rendering.
+        let resNames = Map.add paramId paramName names
+        let resStr = exprToCppCore subst resNames residual
+        // setSrc and the residual's IRSetMember queries share elemTypeStr
+        // (TypeCheck enforces matching types for contains: B and x both
+        // carry the same element type, which is A's element type).
+        Some [
+            // Preamble: build set
+            sprintf "std::unordered_set<%s> %s;" elemTypeStr setName
+            sprintf "for (size_t __si = 0; __si < %s.extents[0]; __si++) %s.insert(%s[__si]);" setSrcName setName setSrcName
+            // Count pass
             sprintf "size_t %s__count = 0;" varName
             sprintf "for (size_t __mi = 0; __mi < %s.extents[0]; __mi++) {" arrName
-            sprintf "    %s %s = %s[__mi];" elemTypeStr predParamName arrName
-            sprintf "    if (%s) %s__count++;" predStr varName
+            sprintf "    %s %s = %s[__mi];" elemTypeStr paramName arrName
+            sprintf "    if (%s) %s__count++;" resStr varName
             "}"
+            // Allocate
             sprintf "size_t %s_extents[1] = {%s__count};" varName varName
             sprintf "Array<%s, 1> %s = { new %s[%s__count], %s_extents };" elemTypeStr varName elemTypeStr varName varName
+            // Fill pass
             sprintf "size_t %s__fill = 0;" varName
             sprintf "for (size_t __mi = 0; __mi < %s.extents[0]; __mi++) {" arrName
-            sprintf "    %s %s = %s[__mi];" elemTypeStr predParamName arrName
-            sprintf "    if (%s) { %s[%s__fill++] = %s; }" predStr varName varName predParamName
+            sprintf "    %s %s = %s[__mi];" elemTypeStr paramName arrName
+            sprintf "    if (%s) { %s[%s__fill++] = %s; }" resStr varName varName paramName
             "}"
-        ])
+        ]
     | IRIntersect (aExpr, bExpr) ->
         // SQL INTERSECT: unique values appearing in BOTH arrays, output in
         // first-occurrence order from A. Two-pass with set reuse, mirroring
@@ -1560,29 +1639,37 @@ and materializeInlineForm (subst: SubstMap) (names: Map<IRId, string>) (varName:
             "}"
         ]
     | IRSort (arrExpr, keyExpr) ->
+        // Key-callable resolution via `resolveCallable`. The key
+        // function emits as a local wrapper closure
+        // (`__wrap_<id>_<varName>`) that forwards to the lifted
+        // function with captures pulled by reference. The wrapper
+        // takes the element value as its single arg and returns
+        // the orderable key; the stable_sort's comparator invokes
+        // the wrapper on each element under comparison.
+        //
+        // Fallback for unresolved keyExpr (shouldn't happen for
+        // well-typed sort calls): emit a sort that's a no-op on
+        // key (returns literal 0 — all elements compare equal,
+        // preserving input order under stable_sort).
         let arrName = exprToCppCore subst names arrExpr
-        let (keyParamId, keyBody, keyCaptures) =
-            match keyExpr with
-            | IRLambda lInfo when lInfo.Params.Length = 1 ->
-                (lInfo.Params.[0].VarId, lInfo.Body, lInfo.Captures)
-            | _ -> (0, IRLit (IRLitInt 0L), [])
-        let keyParamName = sprintf "__%s_x" varName
-        let keyNames =
-            names
-            |> Map.add keyParamId keyParamName
-            |> fun m -> keyCaptures |> List.fold (fun acc c -> Map.add c.Id c.Name acc) m
-        let keyStr = exprToCppCore subst keyNames keyBody
-        Some [
-            sprintf "auto %s__key = [&](%s %s) { return %s; };" varName elemTypeStr keyParamName keyStr
-            sprintf "size_t* %s__perm = new size_t[%s.extents[0]];" varName arrName
-            sprintf "for (size_t __pi = 0; __pi < %s.extents[0]; __pi++) %s__perm[__pi] = __pi;" arrName varName
-            sprintf "std::stable_sort(%s__perm, %s__perm + %s.extents[0], [&](size_t __a, size_t __b) {" varName varName arrName
-            sprintf "    return %s__key(%s[__a]) < %s__key(%s[__b]);" varName arrName varName arrName
-            "});"
-            sprintf "size_t %s_extents[1] = {%s.extents[0]};" varName arrName
-            sprintf "Array<%s, 1> %s = { new %s[%s.extents[0]], %s_extents };" elemTypeStr varName elemTypeStr arrName varName
-            sprintf "for (size_t __si = 0; __si < %s.extents[0]; __si++) %s[__si] = %s[%s__perm[__si]];" arrName varName arrName varName
-        ]
+        let (wrapperCode, keyCall) =
+            match resolveCallable keyExpr with
+            | Some callable when callable.Params.Length = 1 ->
+                let (code, wname) = genCallableWrapper varName callable
+                (code, wname)
+            | _ -> ([], "[](auto) { return 0; }")  // degenerate fallback
+        Some (
+            wrapperCode @ [
+                sprintf "size_t* %s__perm = new size_t[%s.extents[0]];" varName arrName
+                sprintf "for (size_t __pi = 0; __pi < %s.extents[0]; __pi++) %s__perm[__pi] = __pi;" arrName varName
+                sprintf "std::stable_sort(%s__perm, %s__perm + %s.extents[0], [&](size_t __a, size_t __b) {" varName varName arrName
+                sprintf "    return %s(%s[__a]) < %s(%s[__b]);" keyCall arrName keyCall arrName
+                "});"
+                sprintf "size_t %s_extents[1] = {%s.extents[0]};" varName arrName
+                sprintf "Array<%s, 1> %s = { new %s[%s.extents[0]], %s_extents };" elemTypeStr varName elemTypeStr arrName varName
+                sprintf "for (size_t __si = 0; __si < %s.extents[0]; __si++) %s[__si] = %s[%s__perm[__si]];" arrName varName arrName varName
+            ]
+        )
     | _ -> None
 
 /// Convert IRExpr to C++ using context
@@ -1779,9 +1866,6 @@ let rec canonicalKey (nameMap: Map<int, string>) (expr: IRExpr) : string =
         let sk = canonicalKey nameMap scrutinee
         let ck = cases |> List.map (fun c -> sprintf "%A->%s" c.Pattern (canonicalKey nameMap c.Body)) |> String.concat "|"
         sprintf "(match %s [%s])" sk ck
-    | IRLambda info ->
-        let pk = info.Params |> List.map (fun p -> sprintf "%s:%d" p.Name p.VarId) |> String.concat ","
-        sprintf "(fn [%s] %s)" pk (canonicalKey nameMap info.Body)
     | IRIndex (arr, indices, _) ->
         let ak = canonicalKey nameMap arr
         let ik = indices |> List.map (canonicalKey nameMap) |> String.concat ","
@@ -2513,15 +2597,12 @@ let genScalarBinding (ctx: CodeGenContext) (name: string) (value: IRExpr) (ty: I
             match value with
             | IRFieldAccess _ -> true
             | IRVar _ -> true                // assume wrapper (most producers migrated)
-            | IRMask _ | IRSort _ | IRIntersect _ | IRUnion _ | IRUnique _ -> true
+            | IRMask _ | IRMaskWithSet _ | IRSort _ | IRIntersect _ | IRUnion _ | IRUnique _ -> true
             | IRApp _ -> true                // function-call returns wrapped Array
             | _ -> false
         let cppType =
             match resolvedTy with
-            | ArrayElem arr when producesWrapper && (isRaggedArrayType arr || isDepIdxArrayType arr) ->
-                sprintf "Ragged<%s>" (elemTypeToCpp arr.ElemType)
-            | ArrayElem arr when producesWrapper ->
-                sprintf "Array<%s, %d>" (elemTypeToCpp arr.ElemType) (arrayRank arr)
+            | ArrayElem arr when producesWrapper -> cppArrayTypeStr arr
             | _ -> irTypeToCpp resolvedTy
         let valueStr = exprToCppCtx ctx value
         [sprintf "%s%s %s = %s;" ind cppType name valueStr]
@@ -2643,16 +2724,43 @@ let genApplyCombinator (ctx: CodeGenContext) (name: string) (info: ApplyInfo) (b
                 match lengthsSource with
                 | None -> None
                 | Some (ngroupsExpr, perRowLenExpr) ->
-                    match info.Kernel with
-                    | IRLambda lInfo when lInfo.Params.Length = 1 ->
-                        let param = lInfo.Params.[0]
-                        // Rewrite g(args) -> IRIndex(g, args, None) in the kernel body.
+                    // Ragged-peel kernel resolution through
+                    // `resolveCallable`. The kernel reaches this site
+                    // as IRVar(callableId, _); the resolver walks back
+                    // to the lifted IRCallable. Without this,
+                    // tryRaggedPeel returns None and execution falls
+                    // through to the standard loop nest path, which
+                    // doesn't know about ragged peeling — generating a
+                    // doubled-up nested loop (one for each of the
+                    // array's index types) and indexing the output 2D
+                    // instead of 1D-per-row.
+                    //
+                    // The inline body emission stays: this site inlines
+                    // the kernel body inside the per-row loop, with the
+                    // peeled row binding `subName` substituted for the
+                    // kernel's param. Using a wrapper here would create
+                    // a signature mismatch — the lifted callable's param
+                    // type is `RaggedRow<T>` (Path 1 fix), but the
+                    // per-row codegen emits `subName` as `Array<T, 1>`
+                    // (with `RaggedRow<T>::operator T*()` providing the
+                    // implicit conversion). Inline emission sidesteps the
+                    // mismatch by binding the param name directly to the
+                    // Array-typed subName in the nameMap.
+                    match resolveCallable info.Kernel with
+                    | Some callable when callable.Params.Length = 1 ->
+                        let param = callable.Params.[0]
+                        // Rewriter from the pre-Path-1 days: rewrites
+                        // `g(args)` to `g[args]` in the kernel body. With
+                        // Lowering's dispatch fix, the body already has
+                        // IRIndex where it used to have IRApp(IRVar(g)),
+                        // so this rewriter is effectively a no-op on
+                        // post-Path-1 bodies but kept for defense in depth.
                         let rewriter e =
                             match e with
                             | IRApp (IRVar (id, ty), args, _) when id = param.VarId ->
                                 IRIndex (IRVar (id, ty), args, None)
                             | _ -> e
-                        let body = mapIRExpr rewriter lInfo.Body
+                        let body = mapIRExpr rewriter callable.Body
                         // Element type of the inner sub-array (for the param binding type).
                         let arrElemStr = elemTypeToCpp arrType.ElemType
                         // Element type of the OUTPUT (per-row result).
@@ -2670,7 +2778,7 @@ let genApplyCombinator (ctx: CodeGenContext) (name: string) (info: ApplyInfo) (b
                         let subName = sprintf "%s__sub" name
                         let nameMap0 = Map.add param.VarId subName ctx.VarNames
                         let nameMap =
-                            lInfo.Captures
+                            callable.Captures
                             |> List.fold (fun m c -> Map.add c.Id c.Name m) nameMap0
                         let bodyStr = exprToCpp nameMap body
                         let originLabel =
@@ -2680,10 +2788,6 @@ let genApplyCombinator (ctx: CodeGenContext) (name: string) (info: ApplyInfo) (b
                             sprintf "%ssize_t %s_extents[1] = {%s};" ind name ngroupsExpr
                             sprintf "%sArray<%s, 1> %s = { new %s[%s], %s_extents };" ind outElemStr name outElemStr ngroupsExpr name
                             sprintf "%sfor (size_t __g = 0; __g < %s; __g++) {" ind ngroupsExpr
-                            // Peeled row is wrapper-typed so the kernel
-                            // can iterate via .extents and the wrapper's
-                            // operator[]. The local _extents declaration
-                            // remains as the wrapper's extents pointer source.
                             sprintf "%s    size_t %s_extents[1] = {%s};" ind subName perRowLenExpr
                             sprintf "%s    Array<%s, 1> %s = { %s[__g], %s_extents };" ind arrElemStr subName arrName subName
                             sprintf "%s    %s[__g] = %s;" ind name bodyStr
@@ -2709,7 +2813,7 @@ let genApplyCombinator (ctx: CodeGenContext) (name: string) (info: ApplyInfo) (b
             | IRRange _ -> (sprintf "__range%d" i, arr)
             | IRVirtualReverse _ -> (sprintf "__rev%d" i, arr)
             | IRBlocked _ -> (sprintf "__blk%d" i, arr)
-            | IRMask _ | IRIntersect _ | IRUnion _ | IRUnique _ ->
+            | IRMask _ | IRMaskWithSet _ | IRIntersect _ | IRUnion _ | IRUnique _ ->
                 // Auto-materialize: when a method_for receives an inline form
                 // as one of its arrays, generate a temporary binding before
                 // the loop nest. The Phase C lift pass deliberately leaves
@@ -2908,75 +3012,54 @@ let genObjectForApplication (ctx: CodeGenContext) (name: string) (objInfo: Objec
         | IRVar (id, _) -> Map.tryFind id ctx.VarNames |> Option.defaultValue (sprintf "arr%d" i)
         | _ -> sprintf "arr%d" i)
     
-    // Get kernel info
-    let (kernelParams, kernelBody) =
-        match objInfo.Kernel with
-        | IRLambda lInfo -> (lInfo.Params, lInfo.Body)
-        | _ -> ([], IRLit IRLitUnit)
-    
-    // Infer element type from kernel params
-    let elemTypeStr =
-        kernelParams |> List.tryPick (fun p ->
-            match p.Type with IRTScalar et -> Some (primTypeToCpp et) | ArrayElem arr -> Some (elemTypeToCpp arr.ElemType) | _ -> None)
-        |> Option.defaultValue (match kernelParams with p :: _ -> irTypeToCpp p.Type | [] -> "void")
-    
-    // For outer product (InputRanks = [1; 1], OutputRank = 2), generate nested loops
-    // For elementwise (InputRanks = [0; 0], OutputRank = 1), generate single loop
-    
-    match objInfo.InputRanks, arrayNames with
-    | [1; 1], [arrA; arrB] ->
-        // Outer product: result[i][j] = kernel(A[i], B[j])
-        let extentsDecl = sprintf "%ssize_t %s_extents[2] = {%s.extents[0], %s.extents[0]};" ind name arrA arrB
-        let allocDecl = sprintf "%sArray<%s, 2> %s = { allocate<promote<%s, 2>::type>(%s_extents), %s_extents };" ind elemTypeStr name elemTypeStr name name
-        
-        // Build name map for kernel body
-        let bodyNames = 
-            kernelParams 
-            |> List.mapi (fun i p -> (p.VarId, sprintf "%s_%s" (if i = 0 then arrA else arrB) "__i"))
-            |> Map.ofList
-            |> Map.fold (fun acc k v -> Map.add k v acc) ctx.VarNames
-        
-        let kernelStr = exprToCpp bodyNames kernelBody
-        
-        let loopCode = [
-            sprintf "%sfor (size_t __i0 = 0; __i0 < %s.extents[0]; __i0++) {" ind arrA
-            sprintf "%s    %s %s___i = %s[__i0];" ind elemTypeStr arrA arrA
-            sprintf "%s    for (size_t __i1 = 0; __i1 < %s.extents[0]; __i1++) {" ind arrB
-            sprintf "%s        %s %s___i = %s[__i1];" ind elemTypeStr arrB arrB
-            sprintf "%s        %s[__i0][__i1] = %s;" ind name kernelStr
-            sprintf "%s    }" ind
-            sprintf "%s}" ind
-        ]
-        
-        [extentsDecl; allocDecl; ""] @ loopCode
-        
-    | [0; 0], [arrA; arrB] ->
-        // Elementwise: result[i] = kernel(A[i], B[i])
-        let extentsDecl = sprintf "%ssize_t %s_extents[1] = {%s.extents[0]};" ind name arrA
-        let allocDecl = sprintf "%sArray<%s, 1> %s = { allocate<promote<%s, 1>::type>(%s_extents), %s_extents };" ind elemTypeStr name elemTypeStr name name
-        
-        // Build name map for kernel body
-        let bodyNames = 
-            kernelParams 
-            |> List.mapi (fun i p -> (p.VarId, sprintf "%s___i" (if i = 0 then arrA else arrB)))
-            |> Map.ofList
-            |> Map.fold (fun acc k v -> Map.add k v acc) ctx.VarNames
-        
-        let kernelStr = exprToCpp bodyNames kernelBody
-        
-        let loopCode = [
-            sprintf "%sfor (size_t __i0 = 0; __i0 < %s.extents[0]; __i0++) {" ind arrA
-            sprintf "%s    %s %s___i = %s[__i0];" ind elemTypeStr arrA arrA
-            sprintf "%s    %s %s___i = %s[__i0];" ind elemTypeStr arrB arrB
-            sprintf "%s    %s[__i0] = %s;" ind name kernelStr
-            sprintf "%s}" ind
-        ]
-        
-        [extentsDecl; allocDecl; ""] @ loopCode
-        
+    // Resolve the kernel via `resolveCallable`. The wrapper closure
+    // takes the kernel's regular params (elementwise) and forwards to
+    // the lifted function with captures pulled by reference. Loop
+    // bodies invoke the wrapper with the per-iteration array slots —
+    // eliminating the need for intermediate scalar locals.
+    match resolveCallable objInfo.Kernel with
+    | Some callable when callable.Params.Length = 2 ->
+        let (wrapperCode, wname) = genCallableWrapper name callable
+        // Infer element type from kernel params (same logic as before).
+        let elemTypeStr =
+            callable.Params |> List.tryPick (fun p ->
+                match p.Type with
+                | IRTScalar et -> Some (primTypeToCpp et)
+                | ArrayElem arr -> Some (elemTypeToCpp arr.ElemType)
+                | _ -> None)
+            |> Option.defaultValue (match callable.Params with p :: _ -> irTypeToCpp p.Type | [] -> "void")
+        // Indent wrapper-emission lines to match surrounding scope.
+        let wrapperLines = wrapperCode |> List.map (fun s -> ind + s)
+        match objInfo.InputRanks, arrayNames with
+        | [1; 1], [arrA; arrB] ->
+            // Outer product: result[i][j] = kernel(A[i], B[j])
+            let extentsDecl = sprintf "%ssize_t %s_extents[2] = {%s.extents[0], %s.extents[0]};" ind name arrA arrB
+            let allocDecl = sprintf "%sArray<%s, 2> %s = { allocate<promote<%s, 2>::type>(%s_extents), %s_extents };" ind elemTypeStr name elemTypeStr name name
+            let loopCode = [
+                sprintf "%sfor (size_t __i0 = 0; __i0 < %s.extents[0]; __i0++) {" ind arrA
+                sprintf "%s    for (size_t __i1 = 0; __i1 < %s.extents[0]; __i1++) {" ind arrB
+                sprintf "%s        %s[__i0][__i1] = %s(%s[__i0], %s[__i1]);" ind name wname arrA arrB
+                sprintf "%s    }" ind
+                sprintf "%s}" ind
+            ]
+            [extentsDecl; allocDecl; ""] @ wrapperLines @ loopCode
+
+        | [0; 0], [arrA; arrB] ->
+            // Elementwise: result[i] = kernel(A[i], B[i])
+            let extentsDecl = sprintf "%ssize_t %s_extents[1] = {%s.extents[0]};" ind name arrA
+            let allocDecl = sprintf "%sArray<%s, 1> %s = { allocate<promote<%s, 1>::type>(%s_extents), %s_extents };" ind elemTypeStr name elemTypeStr name name
+            let loopCode = [
+                sprintf "%sfor (size_t __i0 = 0; __i0 < %s.extents[0]; __i0++) {" ind arrA
+                sprintf "%s    %s[__i0] = %s(%s[__i0], %s[__i0]);" ind name wname arrA arrB
+                sprintf "%s}" ind
+            ]
+            [extentsDecl; allocDecl; ""] @ wrapperLines @ loopCode
+
+        | _ ->
+            // Unsupported configuration
+            codegenError ctx ind (sprintf "unsupported object_for configuration for '%s'" name)
     | _ ->
-        // Unsupported configuration
-        codegenError ctx ind (sprintf "unsupported object_for configuration for '%s'" name)
+        codegenError ctx ind (sprintf "object_for kernel for '%s' does not resolve to a callable" name)
 
 // ============================================================================
 // Binding Generation
@@ -3118,14 +3201,25 @@ let genFusionTree (ctx: CodeGenContext) (name: string) (expr: IRExpr) (builder: 
             // Build primary LoopNestCodeGen
             let codeGenPrimary = buildLoopNestCodeGen primaryInfo arrayNames primaryName builder
             
-            // Extract kernel info for all additional leaves
+            // Extract kernel info for all additional leaves. Resolution
+            // through `resolveCallable`. Reynolds wrapping is peeled
+            // and its isAntisymmetric flag flows through.
             let extraKernels = 
                 (List.tail infos, List.tail leafNames) ||> List.map2 (fun info outName ->
                     let (kParams, kBody, _commGroups, captures, hasReynolds, isAntisym) =
+                        let extract (k: IRExpr) =
+                            match resolveCallable k with
+                            | Some c -> Some (c.Params, c.Body, c.CommGroups, c.Captures)
+                            | None -> None
                         match info.Kernel with
-                        | IRLambda lInfo -> (lInfo.Params, lInfo.Body, lInfo.CommGroups, lInfo.Captures, false, false)
-                        | IRReynolds (IRLambda lInfo, isAnti) -> (lInfo.Params, lInfo.Body, lInfo.CommGroups, lInfo.Captures, true, isAnti)
-                        | _ -> ([], IRLit IRLitUnit, [], [], false, false)
+                        | IRReynolds (inner, isAnti) ->
+                            match extract inner with
+                            | Some (p, b, g, c) -> (p, b, g, c, true, isAnti)
+                            | None -> ([], IRLit IRLitUnit, [], [], false, false)
+                        | other ->
+                            match extract other with
+                            | Some (p, b, g, c) -> (p, b, g, c, false, false)
+                            | None -> ([], IRLit IRLitUnit, [], [], false, false)
                     (outName, kBody, kParams, captures, hasReynolds, isAntisym))
             
             // Generate symm vec + extents + allocation for each output
@@ -3187,19 +3281,39 @@ let rec genBinding (ctx: CodeGenContext) (binding: IRBinding) (builder: IRBuilde
     | IRMask (arrExpr, predExpr) ->
         // mask(array, pred): eager compaction — scan, count, allocate, fill.
         // Strict elem-type inference (emits #error if unresolvable) and
-        // predicate-lambda validation happen here at the call site; the
+        // predicate-callable validation happen here at the call site; the
         // shared `materializeInlineForm` helper just emits the C++ template.
+        //
+        // Validation accepts any predicate that resolves to a
+        // single-parameter callable through resolveCallable.
         let (elemET, elemErrCode) = inferElemTypeStrict ctx ind arrExpr "mask"
         let elemStr = elemTypeToCpp elemET
         let predErrCode =
-            match predExpr with
-            | IRLambda lInfo when lInfo.Params.Length = 1 -> []
-            | _ -> codegenError ctx ind "mask: predicate must be a single-parameter lambda; got something else (typechecker or IR bug)"
+            match resolveCallable predExpr with
+            | Some callable when callable.Params.Length = 1 -> []
+            | _ -> codegenError ctx ind "mask: predicate must resolve to a single-parameter callable; got something else (typechecker or IR bug)"
         let matStmts =
             match materializeInlineForm emptySubst ctx.VarNames name elemStr binding.Value with
             | Some s -> s
             | None -> []  // Unreachable: helper supports IRMask
         let code = elemErrCode @ predErrCode @ [sprintf "%s// mask: count + compact" ind] @ (matStmts |> List.map (fun s -> ind + s))
+        let ctx' = addVarName binding.Id name ctx
+        (code, ctx')
+
+    | IRMaskWithSet (arrExpr, _, _, _) ->
+        // Fused mask+contains: same shape as IRMask binding-wise (produces
+        // an Array<T, 1>, element type comes from the input array). The
+        // residual's IRSetMember references are handled in exprToCppCore
+        // by the M1.1 arm. No predicate-lambda validation needed: by
+        // construction the rewrite pass only fires when the predicate
+        // was a single-param lambda with a recognizable contains call.
+        let (elemET, elemErrCode) = inferElemTypeStrict ctx ind arrExpr "mask"
+        let elemStr = elemTypeToCpp elemET
+        let matStmts =
+            match materializeInlineForm emptySubst ctx.VarNames name elemStr binding.Value with
+            | Some s -> s
+            | None -> []  // Unreachable: helper supports IRMaskWithSet
+        let code = elemErrCode @ [sprintf "%s// mask+contains (fused): build set + count + compact" ind] @ (matStmts |> List.map (fun s -> ind + s))
         let ctx' = addVarName binding.Id name ctx
         (code, ctx')
     
@@ -3548,13 +3662,13 @@ let rec genBinding (ctx: CodeGenContext) (binding: IRBinding) (builder: IRBuilde
         // those analyses, not as a substitute for them.
         let (elemET, elemErrCode) = inferElemTypeStrict ctx ind arrExpr "sort"
         let elemStr = elemTypeToCpp elemET
-        // Validate single-param key lambda. Helper falls back to a 0L key
+        // Validate single-param key callable. Helper falls back to a 0L key
         // (preserving input order); the #error here surfaces the IR bug
         // before the silently-wrong sort runs.
         let keyErrCode =
-            match keyExpr with
-            | IRLambda lInfo when lInfo.Params.Length = 1 -> []
-            | _ -> codegenError ctx ind "sort: key must be a single-parameter lambda; got something else (typechecker or IR bug)"
+            match resolveCallable keyExpr with
+            | Some callable when callable.Params.Length = 1 -> []
+            | _ -> codegenError ctx ind "sort: key must resolve to a single-parameter callable; got something else (typechecker or IR bug)"
         let matStmts =
             match materializeInlineForm emptySubst ctx.VarNames name elemStr binding.Value with
             | Some s -> s
@@ -3574,12 +3688,13 @@ let rec genBinding (ctx: CodeGenContext) (binding: IRBinding) (builder: IRBuilde
         //     empty rather than reading uninitialized memory from arr[0]
         //   - Static extent = 0: typecheck rejects before reaching here
         //
-        // Section kernels like (+) are lowered to lambdas during Lowering, so
-        // we only handle IRLambda here.
+        // Section kernels like (+) lower to callables during Lowering
+        // with properly-resolved scalar types. Resolution flows
+        // through `resolveCallable`.
         let arrName = exprToCppCtx ctx arrExpr
         let (elemType, elemErrCode) = inferElemTypeStrict ctx ind arrExpr "reduce"
         let elemStr = elemTypeToCpp elemType
-        
+
         // Decide whether to emit a runtime extent check based on whether
         // the array's innermost-dim extent is statically known.
         let isStaticallyNonEmpty =
@@ -3589,39 +3704,34 @@ let rec genBinding (ctx: CodeGenContext) (binding: IRBinding) (builder: IRBuilde
                 | Some n -> n > 0L
                 | None -> false
             | _ -> false
-        
-        let (kParams, kBody, kCaptures, kErrCode) =
-            match kernelExpr with
-            | IRLambda lInfo when lInfo.Params.Length = 2 ->
-                (lInfo.Params, lInfo.Body, lInfo.Captures, [])
-            | _ ->
-                let errLines = codegenError ctx ind "reduce: kernel must be a binary lambda or operator section (typechecker or IR bug if not)"
-                ([], IRLit (IRLitInt 0L), [], errLines)
-        
-        let aParamName = sprintf "__%s_a" name
-        let bParamName = sprintf "__%s_b" name
-        let kNames =
-            ctx.VarNames
-            |> (fun m -> if kParams.Length >= 1 then Map.add kParams.[0].VarId aParamName m else m)
-            |> (fun m -> if kParams.Length >= 2 then Map.add kParams.[1].VarId bParamName m else m)
-            |> fun m -> kCaptures |> List.fold (fun acc c -> Map.add c.Id c.Name acc) m
-        let kStr = exprToCpp kNames kBody
-        
+
         let guardLines =
             if isStaticallyNonEmpty then []
             else [
                 sprintf "%s// reduce: dynamic extent — runtime non-emptiness guard" ind
                 sprintf "%sif (%s.extents[0] == 0) { std::cerr << \"reduce: empty array, no reduction possible\" << std::endl; std::abort(); }" ind arrName
             ]
-        
-        let code = elemErrCode @ kErrCode @ guardLines @ [
-            sprintf "%s// reduce: accumulator loop, eager" ind
-            sprintf "%sauto %s__op = [&](%s %s, %s %s) { return %s; };" ind name elemStr aParamName elemStr bParamName kStr
-            sprintf "%s%s %s = %s[0];" ind elemStr name arrName
-            sprintf "%sfor (size_t __ri = 1; __ri < %s.extents[0]; __ri++) {" ind arrName
-            sprintf "%s    %s = %s__op(%s, %s[__ri]);" ind name name name arrName
-            sprintf "%s}" ind
-        ]
+
+        let code =
+            match resolveCallable kernelExpr with
+            | Some callable when callable.Params.Length = 2 ->
+                // Stage 3c.2: wrapper-based emission. The fold's
+                // accumulator and the wrapper agree on type — both come
+                // from the array's elem type via the inferReduce
+                // unification — so the call `__r = __wrap(__r, arr[i])`
+                // type-checks without narrowing/conversion warnings.
+                let (wrapperCode, wname) = genCallableWrapper name callable
+                let wrapperLines = wrapperCode |> List.map (fun s -> ind + s)
+                elemErrCode @ guardLines @ wrapperLines @ [
+                    sprintf "%s// reduce: accumulator loop, eager" ind
+                    sprintf "%s%s %s = %s[0];" ind elemStr name arrName
+                    sprintf "%sfor (size_t __ri = 1; __ri < %s.extents[0]; __ri++) {" ind arrName
+                    sprintf "%s    %s = %s(%s, %s[__ri]);" ind name wname name arrName
+                    sprintf "%s}" ind
+                ]
+            | _ ->
+                let errLines = codegenError ctx ind "reduce: kernel must resolve to a binary callable (typechecker or IR bug if not)"
+                elemErrCode @ errLines
         let ctx' = addVarName binding.Id name ctx
         (code, ctx')
     
@@ -3710,6 +3820,17 @@ let rec genBinding (ctx: CodeGenContext) (binding: IRBinding) (builder: IRBuilde
                 match Map.tryFind id ctx.DeferredComputations with
                 | Some deferred -> resolveComputation deferred wrappers
                 | None -> (expr, wrappers)
+            | IRCompute inner ->
+                // Stage 3c.0 added an IRCompute wrap at lambda lift time around
+                // bodies whose top form is IRApplyCombinator. The wrap is
+                // semantically the identity at compute time (force evaluation,
+                // which a computation already is). Peel it through here so the
+                // downstream dispatch sees the unwrapped form. Without this,
+                // a double-wrapped IRCompute(IRCompute(IRApplyCombinator)) —
+                // produced when the bind expansion explicitly wraps an
+                // already-wrapped continuation body — would fall through to
+                // the generic case below and fail to materialize.
+                resolveComputation inner wrappers
             | IRFunctorMap (f, inner) ->
                 resolveComputation inner (f :: wrappers)
             | IRGuard (cond, body) ->
@@ -3718,17 +3839,20 @@ let rec genBinding (ctx: CodeGenContext) (binding: IRBinding) (builder: IRBuilde
                 (IRGuard (cond, innerResolved), innerWrappers)
             | IRComposeMeth (left, right) ->
                 // @>> : c1 @>> c2 means "at each index, apply c2's kernel to c1's result"
-                // Only fold into wrappers if kernel is an inlinable IRLambda
+                // The kernel resolves to a callable via the
+                // CallablesTable; the returned kernel expression flows
+                // into the wrappers list and gets substituted by
+                // betaReduce via the same resolution.
                 let rec extractInlinableKernel e =
                     match e with
                     | IRVar (id, _) ->
                         match Map.tryFind id ctx.DeferredComputations with
                         | Some d -> extractInlinableKernel d
                         | None -> None
-                    | IRApplyCombinator info -> 
-                        match info.Kernel with
-                        | IRLambda _ -> Some info.Kernel  // Only fold if kernel is inline lambda
-                        | _ -> None
+                    | IRApplyCombinator info ->
+                        match resolveCallable info.Kernel with
+                        | Some _ -> Some info.Kernel
+                        | None -> None
                     | IRFunctorMap (f, inner) ->
                         match extractInlinableKernel inner with
                         | Some k -> Some (IRCompose (k, f))
@@ -3751,10 +3875,15 @@ let rec genBinding (ctx: CodeGenContext) (binding: IRBinding) (builder: IRBuilde
                 // f <$> (L <@> g) where f = λx → h(x)
                 // becomes L <@> λparams → h(g(params))
                 let betaReduce (wrapper: IRExpr) (body: IRExpr) : IRExpr =
-                    match wrapper with
-                    | IRLambda wInfo when wInfo.Params.Length = 1 ->
+                    // Resolve through the CallablesTable. When the
+                    // wrapper resolves to a single-param callable,
+                    // substitute the param VarId with `body`. When it
+                    // doesn't resolve (or arity mismatch), fall back
+                    // to IRApp form (still correct, just not inlined).
+                    match resolveCallable wrapper with
+                    | Some c when c.Params.Length = 1 ->
                         // Substitute param VarId with body expression
-                        let paramId = wInfo.Params.[0].VarId
+                        let paramId = c.Params.[0].VarId
                         let rec subst (expr: IRExpr) =
                             match expr with
                             | IRVar (id, _) when id = paramId -> body
@@ -3770,35 +3899,54 @@ let rec genBinding (ctx: CodeGenContext) (binding: IRBinding) (builder: IRBuilde
                             | IRFieldAccess (e, f) -> IRFieldAccess (subst e, f)
                             | IRLet (id, v, b) -> IRLet (id, subst v, subst b)
                             | _ -> expr  // For complex nodes, leave as-is
-                        subst wInfo.Body
+                        subst c.Body
                     | _ ->
-                        // Can't beta-reduce, fall back to IRApp (IIFE in C++)
-                        let retTy = match wrapper with
-                                    | IRLambda li -> inferExprType li.Body
-                                    | _ -> IRTScalar ETFloat64
+                        // Can't beta-reduce (couldn't resolve, or arity
+                        // mismatch), fall back to IRApp (IIFE in C++).
+                        let retTy =
+                            match resolveCallable wrapper with
+                            | Some c -> c.RetType
+                            | None -> IRTScalar ETFloat64
                         IRApp (wrapper, [body], retTy)
                 
                 let wrappedKernel =
+                    // Stage 3c.4a: synthetic-registry construction. Each
+                    // per-use-site wrap produces a fresh IRCallable with
+                    // a new builder-allocated id, registers it in the
+                    // codegen-pass synthetic registry, and returns an
+                    // IRVar reference. resolveCallable now queries both
+                    // the module's CallablesTable and the synthetic
+                    // registry, so downstream consumers (buildLoopNest-
+                    // CodeGen for inline emission, betaReduce for further
+                    // kernel-fold) see the wrapped body uniformly.
+                    let wrapBody (body: IRExpr) =
+                        wrappers |> List.fold (fun b w -> betaReduce w b) body
+                    let buildInline (c: IRCallable) : IRExpr =
+                        let synthetic =
+                            { c with Id = builder.FreshId()
+                                     Body = wrapBody c.Body }
+                        registerSyntheticCallable synthetic
                     match info.Kernel with
-                    | IRLambda lInfo ->
-                        // Apply wrappers innermost first (list is already innermost-first from peeling)
-                        let wrappedBody =
-                            wrappers |> List.fold (fun body wrapper ->
-                                betaReduce wrapper body
-                            ) lInfo.Body
-                        IRLambda { lInfo with Body = wrappedBody }
-                    | IRReynolds (IRLambda lInfo, isAnti) ->
-                        let wrappedBody =
-                            wrappers |> List.fold (fun body wrapper ->
-                                betaReduce wrapper body
-                            ) lInfo.Body
-                        IRReynolds (IRLambda { lInfo with Body = wrappedBody }, isAnti)
-                    | other -> other
-                // Update output type from outermost wrapper's return type
+                    | IRReynolds (inner, isAnti) ->
+                        match resolveCallable inner with
+                        | Some c -> IRReynolds (buildInline c, isAnti)
+                        | None -> info.Kernel  // resolveCallable failed; leave unchanged
+                    | other ->
+                        match resolveCallable other with
+                        | Some c -> buildInline c
+                        | None -> other  // resolveCallable failed; leave unchanged
+                // Update output type from outermost wrapper's return
+                // type, resolving the wrapper through resolveCallable.
+                // info.OutputType might otherwise be stale relative to
+                // the wrapped kernel, mis-typing downstream sites (the
+                // element-type adjustment below, output allocation).
                 let newOutputType =
                     match wrappers |> List.tryHead with
-                    | Some (IRLambda li) -> inferExprType li.Body
-                    | _ -> info.OutputType
+                    | Some w ->
+                        match resolveCallable w with
+                        | Some c -> c.RetType
+                        | None -> info.OutputType
+                    | None -> info.OutputType
                 // If output is an array, update the element type
                 let adjustedOutputType =
                     match info.OutputType, newOutputType with
@@ -3889,13 +4037,17 @@ let rec genBinding (ctx: CodeGenContext) (binding: IRBinding) (builder: IRBuilde
                     // Fallback: kernels are inline lambdas, use ApplyInfo path
                     let s1Name = sprintf "%s__s1" name
                     let s1Id = builder.FreshId()
+                    // Resolve through `resolveCallable` so IRVar-referenced
+                    // kernels also get their return type read correctly.
+                    // The inferred ret type guides the intermediate array's
+                    // element type for the compose's s1 → s2 pipeline.
                     let s1ElemType : IRType =
-                        match kernel1 with 
-                        | IRLambda li ->
-                            match inferExprType li.Body with
+                        match resolveCallable kernel1 with
+                        | Some callable ->
+                            match callable.RetType with
                             | IRTScalar _ as t -> t
-                            | t -> t  // pass through (could be array, named, etc.)
-                        | _ -> IRTScalar ETFloat64
+                            | t -> t  // pass through (array, named, etc.)
+                        | None -> IRTScalar ETFloat64
                     let inputArrayTypes = arrays |> List.map (fun a -> 
                         match inferExprType a with 
                         | ArrayElem arr -> arr 
@@ -4008,10 +4160,13 @@ let rec genBinding (ctx: CodeGenContext) (binding: IRBinding) (builder: IRBuilde
             let s1Binding = { Id = s1Id; Name = s1Name; Type = s1Type; Value = IRCompute resolvedComp; IsConst = true; IsMutable = false }
             let (code1, ctx1) = genBinding ctx s1Binding builder
             
-            // Resolve continuation to IRLambda
+            // Resolve continuation to its underlying callable. Post-3c.4
+            // the continuation arrives as IRVar(callableId, _) for any
+            // let-bound or inline continuation; resolveCallable handles
+            // both the CallablesTable and the synthetic registry.
             let resolvedCont = resolveDeferred cont
-            match resolvedCont with
-            | IRLambda lInfo when lInfo.Params.Length >= 1 ->
+            match resolveCallable resolvedCont with
+            | Some lInfo when lInfo.Params.Length >= 1 ->
                 // Bind lambda parameter to stage 1 result
                 let param = lInfo.Params.[0]
                 let ctx2 = addVarName param.VarId s1Name ctx1
@@ -4021,7 +4176,9 @@ let rec genBinding (ctx: CodeGenContext) (binding: IRBinding) (builder: IRBuilde
                 let (code2, ctx3) = genBinding ctx2 bodyBinding builder
                 (code1 @ [""] @ code2, ctx3)
             | _ ->
-                // Fallback: continuation not resolvable to lambda — generate function call
+                // Fallback: continuation not resolvable to callable —
+                // generate a function call against whatever cont
+                // reference we have.
                 let contName = match cont with IRVar (id, _) -> Map.tryFind id ctx.VarNames | _ -> None
                 match contName with
                 | Some kName ->
@@ -4136,17 +4293,37 @@ let rec genBinding (ctx: CodeGenContext) (binding: IRBinding) (builder: IRBuilde
                 match resolvedBody with
                 | IRApplyCombinator info ->
                     // Wrap kernel: λparams → cond ? kernel_body : 0
+                    //
+                    // Resolves the kernel through resolveCallable and
+                    // routes through the synthetic registry: a fresh
+                    // callable with a new builder-allocated id holds
+                    // the conditional-wrapped body, gets registered,
+                    // and is referenced via IRVar. The original
+                    // callable in module.Functions is unchanged — the
+                    // guard wrap is per-use-site.
+                    let zeroForReturnType (retTy: IRType) =
+                        match retTy with
+                        | IRTScalar ETBool -> IRLit (IRLitBool false)
+                        | IRTScalar ETInt64 | IRTScalar ETInt32 -> IRLit (IRLitInt 0L)
+                        | IRTIdxTagged (IRTScalar (ETInt64 | ETInt32), _) -> IRLit (IRLitInt 0L)
+                        | _ -> IRLit (IRLitFloat 0.0)
+                    let buildGuarded (c: IRCallable) : IRExpr =
+                        let zeroVal = zeroForReturnType c.RetType
+                        let synthetic =
+                            { c with Id = builder.FreshId()
+                                     Body = IRIf (cond, c.Body, zeroVal) }
+                        registerSyntheticCallable synthetic
                     let wrappedKernel =
-                        match info.Kernel with
-                        | IRLambda lInfo ->
-                            let zeroVal =
-                                match inferExprType lInfo.Body with
-                                | IRTScalar ETBool -> IRLit (IRLitBool false)
-                                | IRTScalar ETInt64 | IRTScalar ETInt32 -> IRLit (IRLitInt 0L)
-                                | IRTIdxTagged (IRTScalar (ETInt64 | ETInt32), _) -> IRLit (IRLitInt 0L)
-                                | _ -> IRLit (IRLitFloat 0.0)
-                            IRLambda { lInfo with Body = IRIf (cond, lInfo.Body, zeroVal) }
-                        | other -> other  // Can't wrap non-lambda kernels
+                        match resolveCallable info.Kernel with
+                        | Some callable -> buildGuarded callable
+                        | None ->
+                            // Couldn't resolve — leave kernel unchanged
+                            // (guard will be silently lost, but the
+                            // ApplyInfo will still produce correct
+                            // unconditional output; the only path here
+                            // is a genuinely malformed IR, which
+                            // upstream validation should catch).
+                            info.Kernel
                     let guardedInfo = { info with Kernel = wrappedKernel }
                     // Apply any functor wrappers
                     let finalInfo = applyFunctorWrappers guardedInfo functorWrappers
@@ -4243,46 +4420,6 @@ let rec genBinding (ctx: CodeGenContext) (binding: IRBinding) (builder: IRBuilde
             | _ -> args
         let code = genObjectForApplication ctx name objInfo arrays builder
         let ctx' = addVarName binding.Id name ctx
-        (code, ctx')
-    
-    | IRLambda info ->
-        // Check if body is a computation expression (e.g., method_for(arr) <@> f)
-        // Such lambdas are continuation lambdas for >>= — they return computations,
-        // not values, so they can't be rendered as simple C++ lambdas.
-        // The bind handler inlines their body through DeferredComputations.
-        let isCompBody =
-            match info.Body with
-            | IRApplyCombinator _ | IRBind _ | IRComposeMeth _ | IRComposeObj _
-            | IRParallel _ | IRFusion _ | IRFunctorMap _ | IRChoice _ -> true
-            | _ -> false
-        if isCompBody then
-            let ctx' = addVarName binding.Id name ctx
-            let ctx' = { ctx' with DeferredComputations = Map.add binding.Id binding.Value ctx'.DeferredComputations }
-            ([sprintf "%s// %s = <continuation lambda (deferred for >>=)>" ind name], ctx')
-        else
-        // Generate C++ lambda for named functions
-        let paramList = info.Params |> List.map (fun p -> 
-            sprintf "%s %s" (irTypeToCpp p.Type) p.Name) |> String.concat ", "
-        // Build name map with params and captures
-        let bodyNames = info.Params |> List.fold (fun m p -> Map.add p.VarId p.Name m) Map.empty
-        let bodyNames = info.Captures |> List.fold (fun m c -> Map.add c.Id c.Name m) bodyNames
-        let bodyStr = exprToCpp bodyNames info.Body
-        // Return type from binding annotation or inferred from body
-        let retType = 
-            match binding.Type with
-            | FuncElem (_, ret) -> irTypeToCpp ret
-            | _ -> irTypeToCpp (inferExprType info.Body)
-        // Build std::function type: std::function<RetType(P1Type, P2Type, ...)>
-        let paramTypeList = info.Params |> List.map (fun p -> irTypeToCpp p.Type) |> String.concat ", "
-        let funcType = sprintf "std::function<%s(%s)>" retType paramTypeList
-        let code =
-            if isUnitExpr info.Body then
-                [sprintf "%s%s %s = [&](%s) { %s; };" ind funcType name paramList bodyStr]
-            else
-                [sprintf "%s%s %s = [&](%s) -> %s { return %s; };" ind funcType name paramList retType bodyStr]
-        let ctx' = addVarName binding.Id name ctx
-        // Also store IR for bind (>>=) continuation resolution
-        let ctx' = { ctx' with DeferredComputations = Map.add binding.Id binding.Value ctx'.DeferredComputations }
         (code, ctx')
     
     | IRStructLit (typeName, _) ->
@@ -4389,21 +4526,80 @@ let rec genBinding (ctx: CodeGenContext) (binding: IRBinding) (builder: IRBuilde
             let ctx' = { ctx' with DeferredComputations = Map.add binding.Id deferred ctx'.DeferredComputations }
             ([sprintf "%s// %s = <deferred computation (alias)>" ind name], ctx')
         | None ->
-            // Variable reference — may be aliasing a tuple, propagate children
-            let srcName = Map.tryFind srcId ctx.VarNames |> Option.defaultValue ""
-            let hasTupleChildren = Map.containsKey srcName ctx.TupleChildren
-            // Use auto& when source has flat TupleChildren to avoid type mismatch
-            let code =
-                if hasTupleChildren then
-                    [sprintf "%sauto& %s = %s;" ind name srcName]
-                else
-                    genScalarBinding ctx name binding.Value binding.Type
-            let ctx' = addVarName binding.Id name ctx
-            let ctx' =
-                match Map.tryFind srcName ctx'.TupleChildren with
-                | Some children -> { ctx' with TupleChildren = Map.add name children ctx'.TupleChildren }
-                | None -> ctx'
-            (code, ctx')
+            // Stage 3c.3: let-binding whose value is a reference to a
+            // lifted callable. `let f = lambda(...)` lowers to
+            // `binding.Value = IRVar(callable.Id, funcType)`, and
+            // subsequent uses of `f` reference the binding by its
+            // bindingId. Emit a wrapper closure bound to the user's
+            // name `f` so direct calls `f(args)` work — the wrapper's
+            // signature matches the callable's regular params (captures
+            // pulled in by reference via `[&]`, hidden from the user's
+            // call site). Without this, genScalarBinding's fallback
+            // emits `std::function<...> f = __lambda_X;`, which fails
+            // to compile because the lifted function has captures as
+            // extra positional params and doesn't match the user-facing
+            // function type.
+            //
+            // Closure body: `return __lambda_X(regulars..., captures...);`
+            // Comparison/logical ops return Bool by convention; arithmetic
+            // returns the callable's declared RetType. The wrapper's
+            // declared return type defers to `auto` because the closure
+            // body is a trivial forwarding call — the compiler infers
+            // it precisely from the callable's signature, and the user
+            // doesn't see the wrapper's type directly.
+            match resolveCallable binding.Value with
+            | Some callable ->
+                let safeName = sanitizeCppName callable.Name
+                let paramSig =
+                    callable.Params
+                    |> List.map (fun p ->
+                        match p.Type with
+                        | ArrayElem arr -> sprintf "%s %s" (cppArrayTypeStr arr) p.Name
+                        | _ -> sprintf "%s %s" (irTypeToCpp p.Type) p.Name)
+                    |> String.concat ", "
+                let regularArgs = callable.Params |> List.map (fun p -> p.Name)
+                let captureArgs = callable.Captures |> List.map (fun c -> c.Name)
+                let allArgs = (regularArgs @ captureArgs) |> String.concat ", "
+                // Wrapper type: `std::function<Ret(P1, P2, ...)>`. Explicit
+                // type per the codegen convention (auto reserved for thin
+                // forwarding wrappers prefixed `__wrap_*`). std::function
+                // is required when the wrapper itself flows into another
+                // function's capture slot — the receiving function takes
+                // captures as `std::function<...>&`, which can't bind to
+                // an rvalue temporary if we emit raw closures via auto.
+                // std::function gives the binding a stable lvalue type
+                // that matches the capture-slot signature.
+                let paramTypes =
+                    callable.Params
+                    |> List.map (fun p ->
+                        match p.Type with
+                        | ArrayElem arr -> cppArrayTypeStr arr
+                        | _ -> irTypeToCpp p.Type)
+                let retTypeStr =
+                    match callable.RetType with
+                    | ArrayElem arr -> cppArrayTypeStr arr
+                    | t -> irTypeToCpp t
+                let funcTypeStr =
+                    sprintf "std::function<%s(%s)>" retTypeStr (String.concat ", " paramTypes)
+                let code = [sprintf "%s%s %s = [&](%s) { return %s(%s); };" ind funcTypeStr name paramSig safeName allArgs]
+                let ctx' = addVarName binding.Id name ctx
+                (code, ctx')
+            | None ->
+                // Plain variable alias — may be aliasing a tuple, propagate children
+                let srcName = Map.tryFind srcId ctx.VarNames |> Option.defaultValue ""
+                let hasTupleChildren = Map.containsKey srcName ctx.TupleChildren
+                // Use auto& when source has flat TupleChildren to avoid type mismatch
+                let code =
+                    if hasTupleChildren then
+                        [sprintf "%sauto& %s = %s;" ind name srcName]
+                    else
+                        genScalarBinding ctx name binding.Value binding.Type
+                let ctx' = addVarName binding.Id name ctx
+                let ctx' =
+                    match Map.tryFind srcName ctx'.TupleChildren with
+                    | Some children -> { ctx' with TupleChildren = Map.add name children ctx'.TupleChildren }
+                    | None -> ctx'
+                (code, ctx')
 
     | IRBind (comp, cont) ->
         // Monadic bind: defer if comp is a deferred computation
@@ -4614,7 +4810,7 @@ let genFuncBody (ctx: CodeGenContext) (builder: IRBuilder) (names: Map<IRId, str
             let code = genApplyCombinator bodyCtx varName info builder
             currentNames <- Map.add id varName currentNames
             code
-        | IRMask _ | IRIntersect _ | IRUnion _ | IRSort _ | IRUnique _ ->
+        | IRMask _ | IRMaskWithSet _ | IRIntersect _ | IRUnion _ | IRSort _ | IRUnique _ ->
             // Phase C lift pass can place an inline form as a let value at
             // function-body level. The same materialization helper used by
             // exprToCpp's IRLet (for kernel-body IIFEs) produces format-
@@ -4676,35 +4872,59 @@ let genFuncBody (ctx: CodeGenContext) (builder: IRBuilder) (names: Map<IRId, str
 let genFuncDef (ctx: CodeGenContext) (builder: IRBuilder) (funcDef: IRFuncDef) : string list * CodeGenContext =
     let ind = indentStr ctx
     let bodyInd = ind + "    "
-    
+
     // Array parameters are wrappers. Body reads shape via
     // `<name>.extents[d]`, `<name>.lens[d]`, `<name>.offsets[d]`. No need
     // for separate body-level aliases — the wrapper IS the binding.
-    let paramList = 
-        funcDef.Params 
-        |> List.map (fun p -> 
-            match p.Type with
-            | ArrayElem arr when isRaggedArrayType arr || isDepIdxArrayType arr ->
-                sprintf "Ragged<%s> %s" (elemTypeToCpp arr.ElemType) p.Name
-            | ArrayElem arr ->
-                sprintf "Array<%s, %d> %s" (elemTypeToCpp arr.ElemType) (arrayRank arr) p.Name
-            | _ ->
-                sprintf "%s %s" (irTypeToCpp p.Type) p.Name)
-        |> String.concat ", "
-    
+    let paramStr (name: string) (ty: IRType) : string =
+        match ty with
+        | ArrayElem arr -> sprintf "%s %s" (cppArrayTypeStr arr) name
+        | _ -> sprintf "%s %s" (irTypeToCpp ty) name
+    let captureParamStr (cap: CaptureInfo) : string =
+        // Captures are appended after the regular params. Pass-by-reference
+        // so mutation propagates and the captures' lifetimes are tied to
+        // the wrapper's `[&]` capture at the use site (Stage 3c.1).
+        // `T&` for plain types, `Array<T, N>&` for arrays — the wrapper
+        // declaration treats them symmetrically; the `&` after the type
+        // string is appended without parsing.
+        //
+        // Stage 3c.3 wrinkle: function-typed captures use `const
+        // std::function<...>&` rather than non-const reference. Top-level
+        // function declarations in Blade (`function name(args) = body`)
+        // emit as ordinary C++ functions; their names denote function
+        // references, not std::function values. A non-const reference
+        // parameter can't bind to such a function-reference rvalue (C++
+        // would have to materialize a temporary std::function, which
+        // can't bind to non-const). const references CAN bind to rvalue
+        // temporaries, so the implicit conversion at the call site
+        // works. The trade-off is loss of mutation-through-capture for
+        // function values — fine because function values are immutable
+        // bindings in Blade.
+        match cap.Type with
+        | ArrayElem arr -> sprintf "%s& %s" (cppArrayTypeStr arr) cap.Name
+        | FuncElem _ -> sprintf "const %s& %s" (irTypeToCpp cap.Type) cap.Name
+        | _ -> sprintf "%s& %s" (irTypeToCpp cap.Type) cap.Name
+    let regularParams = funcDef.Params |> List.map (fun p -> paramStr p.Name p.Type)
+    let captureParams = funcDef.Captures |> List.map captureParamStr
+    let paramList = (regularParams @ captureParams) |> String.concat ", "
+
     // Use declared return type, or infer from body as fallback
     let retType = 
         match funcDef.RetType with
         | IRTInfer _ -> irTypeToCpp (inferExprType funcDef.Body)  // Should not happen with typed IR
-        | ArrayElem arr when isRaggedArrayType arr || isDepIdxArrayType arr ->
-            sprintf "Ragged<%s>" (elemTypeToCpp arr.ElemType)
-        | ArrayElem arr ->
-            sprintf "Array<%s, %d>" (elemTypeToCpp arr.ElemType) (arrayRank arr)
+        | ArrayElem arr -> cppArrayTypeStr arr
         | t -> irTypeToCpp t
-    
-    // Build name map with params on top of module-level names
-    let bodyNames = funcDef.Params |> List.fold (fun m p -> Map.add p.VarId p.Name m) ctx.VarNames
-    
+
+    // Build name map: regular params + captures both contribute, so the
+    // body's IRVar references to captured variables resolve to the same
+    // C++ name the signature declared.
+    let bodyNames =
+        funcDef.Params
+        |> List.fold (fun m p -> Map.add p.VarId p.Name m) ctx.VarNames
+    let bodyNames =
+        funcDef.Captures
+        |> List.fold (fun m c -> Map.add c.Id c.Name m) bodyNames
+
     // Generate proper C++ function
     let safeName = sanitizeCppName funcDef.Name
     let bodyStmts = genFuncBody ctx builder bodyNames bodyInd funcDef.Body
@@ -4725,21 +4945,14 @@ let genFuncDefAsLambda (ctx: CodeGenContext) (funcDef: IRFuncDef) : string list 
         funcDef.Params 
         |> List.map (fun p -> 
             match p.Type with
-            | ArrayElem arr when isRaggedArrayType arr || isDepIdxArrayType arr ->
-                sprintf "Ragged<%s> %s" (elemTypeToCpp arr.ElemType) p.Name
-            | ArrayElem arr ->
-                sprintf "Array<%s, %d> %s" (elemTypeToCpp arr.ElemType) (arrayRank arr) p.Name
-            | _ ->
-                sprintf "%s %s" (irTypeToCpp p.Type) p.Name)
+            | ArrayElem arr -> sprintf "%s %s" (cppArrayTypeStr arr) p.Name
+            | _ -> sprintf "%s %s" (irTypeToCpp p.Type) p.Name)
         |> String.concat ", "
     
     let retType = 
         match funcDef.RetType with
         | IRTInfer _ -> irTypeToCpp (inferExprType funcDef.Body)
-        | ArrayElem arr when isRaggedArrayType arr || isDepIdxArrayType arr ->
-            sprintf "Ragged<%s>" (elemTypeToCpp arr.ElemType)
-        | ArrayElem arr ->
-            sprintf "Array<%s, %d>" (elemTypeToCpp arr.ElemType) (arrayRank arr)
+        | ArrayElem arr -> cppArrayTypeStr arr
         | t -> irTypeToCpp t
     
     let bodyNames = funcDef.Params |> List.fold (fun m p -> Map.add p.VarId p.Name m) ctx.VarNames
@@ -4750,10 +4963,7 @@ let genFuncDefAsLambda (ctx: CodeGenContext) (funcDef: IRFuncDef) : string list 
         funcDef.Params
         |> List.map (fun p ->
             match p.Type with
-            | ArrayElem arr when isRaggedArrayType arr || isDepIdxArrayType arr ->
-                sprintf "Ragged<%s>" (elemTypeToCpp arr.ElemType)
-            | ArrayElem arr ->
-                sprintf "Array<%s, %d>" (elemTypeToCpp arr.ElemType) (arrayRank arr)
+            | ArrayElem arr -> cppArrayTypeStr arr
             | _ -> irTypeToCpp p.Type)
         |> String.concat ", "
     let funcType = sprintf "std::function<%s(%s)>" retType paramTypeList
@@ -4771,7 +4981,16 @@ let genModule (modul: IRModule) (builder: IRBuilder) : string list * string list
     // Phase D / companion-array gap: populate the codegen-side struct fields
     // cache so inferExprType can resolve IRFieldAccess result types.
     setCodegenStructFieldsCache modul.Types
-    
+
+    // Install the callables table so exprAttrs walks (e.g., from the
+    // mask renderer) can do cross-procedural probe analysis. Lambdas
+    // and named functions are now handled uniformly: the IR-tree walk
+    // descends into lambda bodies directly, and the CallablesTable
+    // resolves named function IDs to their (params, body) so the IRApp
+    // arm can walk them with parameter substitution.
+    let callables = IR.buildCallablesTableForModule modul
+    IR.setCallablesContext callables |> ignore
+
     let ctx0 = emptyContext ()
     
     // Collect constrained struct names from type definitions
@@ -4787,9 +5006,18 @@ let genModule (modul: IRModule) (builder: IRBuilder) : string list * string list
         modul.Bindings |> List.fold (fun c b -> addVarName b.Id b.Name c) ctx0
     let ctx0 =
         modul.Functions |> List.fold (fun c f -> addVarName f.Id f.Name c) ctx0
-    
-    // Build a combined list of items with their "order" based on ID
-    // Lower IDs were created earlier in the source
+
+    // Build a combined list of items with their "order" based on ID.
+    // Lower IDs were created earlier in the source. Lifted lambdas
+    // live alongside source-level functions in module.Functions and
+    // emit as ordinary top-level C++ functions: genFuncDef appends
+    // captures as reference parameters, and lambda bodies whose top
+    // form is IRApplyCombinator are wrapped in IRCompute at lift
+    // time so genFuncBody's return-position handler renders them
+    // correctly. Use sites reference the lifted callable through
+    // IRVar(callable.Id) and call it through a thin wrapper closure
+    // (genCallableWrapper) that hides the capture parameters from
+    // consumers expecting the callable's surface arity.
     let bindingItems = modul.Bindings |> List.map (fun b -> (b.Id, Choice1Of2 b))
     let funcItems = modul.Functions |> List.map (fun f -> (f.Id, Choice2Of2 f))
     let allItems = bindingItems @ funcItems |> List.sortBy fst
@@ -4797,11 +5025,28 @@ let genModule (modul: IRModule) (builder: IRBuilder) : string list * string list
     // Build set of all function IDs (to exclude from free var checks)
     let funcIds = modul.Functions |> List.map (fun f -> f.Id) |> Set.ofList
     
-    // Generate in ID order (approximates source order)
-    // First, collect file-scope functions to generate forward declarations
+    // Generate in ID order (approximates source order).
+    // First, collect file-scope functions to generate forward declarations.
+    //
+    // Explicit-pass capture: lifted callables receive their captures
+    // as additional reference-typed parameters appended after the
+    // regular params (see genFuncDef). For the
+    // file-scope eligibility check, capture VarIds therefore count as
+    // "param-like" — they're in the function's actual C++ signature,
+    // not its enclosing scope. Without including them in `paramIds`
+    // here, `collectVarRefs funcDef.Body` reports them as free vars
+    // and the function gets excluded from forward declarations. After
+    // Stage 3c.3 that's a problem: `let f = lambda(...)` emits a
+    // wrapper closure `auto f = [&](...) { return __lambda_X(..., captures); };`
+    // at the binding's emission site, which may precede the lifted
+    // function's definition in the file. Without a forward decl,
+    // `__lambda_X` is unknown at the wrapper's site and the C++
+    // compile fails with "not declared in this scope".
     let hasFreeVarsCheck (funcDef: IRFuncDef) (c: CodeGenContext) =
         let paramIds = funcDef.Params |> List.map (fun p -> p.VarId) |> Set.ofList
-        let freeVars = Set.difference (collectVarRefs funcDef.Body) (Set.union paramIds funcIds)
+        let captureIds = funcDef.Captures |> List.map (fun cap -> cap.Id) |> Set.ofList
+        let bound = Set.unionMany [paramIds; captureIds; funcIds]
+        let freeVars = Set.difference (collectVarRefs funcDef.Body) bound
         freeVars |> Set.exists (fun id -> Map.containsKey id c.VarNames)
     
     let fileScopeFuncs =
@@ -4811,31 +5056,35 @@ let genModule (modul: IRModule) (builder: IRBuilder) : string list * string list
             | _ -> None)
     
     // Generate forward declarations for all file-scope functions.
-    // Signature uses Array<T,N> / Ragged<T> wrappers, single arg per
-    // Blade param. Must match genFuncDef.
+    // Signature uses Array<T,N> / Ragged<T> wrappers; captures appear
+    // after regular params as additional reference-typed args. Must
+    // match genFuncDef's actual emission (regular params first, then
+    // captures with `&` reference modifier).
     let forwardDecls =
         fileScopeFuncs |> List.map (fun funcDef ->
             let paramList = 
                 funcDef.Params 
                 |> List.map (fun p -> 
                     match p.Type with
-                    | ArrayElem arr when isRaggedArrayType arr || isDepIdxArrayType arr ->
-                        sprintf "Ragged<%s> %s" (elemTypeToCpp arr.ElemType) p.Name
-                    | ArrayElem arr ->
-                        sprintf "Array<%s, %d> %s" (elemTypeToCpp arr.ElemType) (arrayRank arr) p.Name
-                    | _ ->
-                        sprintf "%s %s" (irTypeToCpp p.Type) p.Name)
-                |> String.concat ", "
+                    | ArrayElem arr -> sprintf "%s %s" (cppArrayTypeStr arr) p.Name
+                    | _ -> sprintf "%s %s" (irTypeToCpp p.Type) p.Name)
+            let captureList =
+                funcDef.Captures
+                |> List.map (fun cap ->
+                    // Match captureParamStr in genFuncDef: const& for
+                    // function types, mutable & otherwise.
+                    match cap.Type with
+                    | ArrayElem arr -> sprintf "%s& %s" (cppArrayTypeStr arr) cap.Name
+                    | FuncElem _ -> sprintf "const %s& %s" (irTypeToCpp cap.Type) cap.Name
+                    | _ -> sprintf "%s& %s" (irTypeToCpp cap.Type) cap.Name)
+            let allParams = (paramList @ captureList) |> String.concat ", "
             let retType = 
                 match funcDef.RetType with
                 | IRTInfer _ -> irTypeToCpp (inferExprType funcDef.Body)
-                | ArrayElem arr when isRaggedArrayType arr || isDepIdxArrayType arr ->
-                    sprintf "Ragged<%s>" (elemTypeToCpp arr.ElemType)
-                | ArrayElem arr ->
-                    sprintf "Array<%s, %d>" (elemTypeToCpp arr.ElemType) (arrayRank arr)
+                | ArrayElem arr -> cppArrayTypeStr arr
                 | t -> irTypeToCpp t
             let safeName = sanitizeCppName funcDef.Name
-            sprintf "%s %s(%s);" retType safeName paramList)
+            sprintf "%s %s(%s);" retType safeName allParams)
     let forwardDecls = if forwardDecls.IsEmpty then [] else forwardDecls @ [""]
     
     let (funcCode, bindCode, finalCtx) =
@@ -4867,10 +5116,7 @@ let genStructDef (name: string) (fields: (string * IRType) list) (invariant: Str
         // standard irTypeToCpp rendering.
         let cppTy =
             match fty with
-            | ArrayElem arr when isRaggedArrayType arr || isDepIdxArrayType arr ->
-                sprintf "Ragged<%s>" (elemTypeToCpp arr.ElemType)
-            | ArrayElem arr ->
-                sprintf "Array<%s, %d>" (elemTypeToCpp arr.ElemType) (arrayRank arr)
+            | ArrayElem arr -> cppArrayTypeStr arr
             | _ -> irTypeToCpp fty
         sprintf "    %s %s;" cppTy fname)
     let validateLines =
@@ -5103,7 +5349,7 @@ let genPrintStatements (modul: IRModule) : string list =
             | IRCompute (IRBind _) -> true
             | IRCompute (IRGuard _) -> true
             | IRCompute (IRSequence _) -> true
-            | IRCompute _ | IRMethodFor _ | IRObjectFor _ | IRLambda _ -> false
+            | IRCompute _ | IRMethodFor _ | IRObjectFor _ -> false
             | _ -> true
         
         let hasSymmetry =

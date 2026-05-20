@@ -97,6 +97,19 @@ type TypedLowerEnv = {
     ImportedModules: Map<string, string>
     /// Provider alias -> qualified provider name (e.g. "NetCDF" -> ["Providers"; "NetCDF"])
     ProviderAliases: Map<string, string list>
+    /// Lifted lambda callables accumulated during lowering of the current
+    /// module. Each lambda-construction site (lowerTypedLambda,
+    /// lowerTypedSection, lowerTypedPartialApp, binop-kernel synthesis)
+    /// adds its newly-built IRCallable here. At module-assembly time
+    /// (end of lowerTypedModule), these are appended to IRModule.Functions
+    /// so the lifted lambdas are available alongside source-level
+    /// functions for cross-procedural analysis and codegen.
+    ///
+    /// Mutable shared state — F# record `with` updates share the
+    /// underlying ResizeArray, so additions from any nested call
+    /// accumulate into the module's single list. Reset per-module
+    /// at the start of lowerTypedModule.
+    LiftedCallables: ResizeArray<IRCallable>
 }
 
 let emptyTypedEnv () : TypedLowerEnv = {
@@ -114,6 +127,7 @@ let emptyTypedEnv () : TypedLowerEnv = {
     ModuleExports = Map.empty
     ImportedModules = Map.empty
     ProviderAliases = Map.empty
+    LiftedCallables = ResizeArray<IRCallable>()
 }
 
 let bindTypedVar name id (env: TypedLowerEnv) : TypedLowerEnv =
@@ -156,7 +170,19 @@ let rec lowerTypedExpr (env: TypedLowerEnv) (texpr: TypedExpr) : IRExpr =
     | TExprApp (func, args) ->
         let f = lowerTypedExpr env func
         let as' = args |> List.map (lowerTypedExpr env)
-        IRApp (f, as', texpr.Type)
+        // Path 1 fix (Stage 3c follow-on): if TypeCheck pinned the
+        // function position to an array type — e.g., after
+        // buildApplyInfo unified a kernel param to Array<T, N> — the
+        // application is structurally an index, not a function call.
+        // Dispatch here so the IR's IRIndex/IRApp split matches the
+        // semantic intent at the value-renderer side. Codegen's
+        // ragged-peel pass has historically applied this rewrite at
+        // codegen time as a workaround; pushing it back to Lowering
+        // ensures the body's shape is correct regardless of whether
+        // the lambda is inlined or lifted to a top-level function.
+        match func.Type with
+        | ArrayElem _ -> IRIndex (f, as', None)
+        | _ -> IRApp (f, as', texpr.Type)
     
     | TExprIndex (array, indices, identity) ->
         let arr = lowerTypedExpr env array
@@ -407,10 +433,10 @@ let rec lowerTypedExpr (env: TypedLowerEnv) (texpr: TypedExpr) : IRExpr =
         IRAlign (exprs |> List.map (lowerTypedExpr env), spec)
     
     | TExprSection op ->
-        lowerTypedSection env op
+        lowerTypedSection env op texpr.Type
     
     | TExprPartialApp (op, arg, isLeft) ->
-        lowerTypedPartialApp env op (lowerTypedExpr env arg) isLeft
+        lowerTypedPartialApp env op (lowerTypedExpr env arg) isLeft texpr.Type
 
 /// Lower a typed lambda
 and lowerTypedLambda env (info: TypedLambdaInfo) : IRExpr =
@@ -418,19 +444,46 @@ and lowerTypedLambda env (info: TypedLambdaInfo) : IRExpr =
     let paramInfos = info.Params |> List.map (fun p ->
         paramEnv <- bindTypedVar p.Name p.VarId paramEnv
         { Name = p.Name; Type = p.Type; Index = p.Index; VarId = p.VarId } : IRParam)
-    
+
     let captures = info.Captures |> List.map (fun c ->
-        { Id = c.VarId; Name = c.Name; IsMutable = c.IsMutable } : CaptureInfo)
-    
+        { Id = c.VarId; Name = c.Name; Type = c.Type; IsMutable = c.IsMutable } : CaptureInfo)
+
     let body' = lowerTypedExpr paramEnv info.Body
-    
-    IRLambda {
-        Params = paramInfos
-        Body = body'
-        Captures = captures
-        IsCommutative = info.IsCommutative
-        CommGroups = info.CommGroups
-    }
+
+    // If the body's top-level shape is value-position-illegal as a
+    // standalone function return, wrap it in IRCompute. Currently this
+    // applies only to bare IRApplyCombinator — `method_for { ... }` and
+    // similar combinator forms that need a destination to materialize
+    // into. genFuncBody's return-position match handles
+    // `IRCompute(IRApplyCombinator _)` by synthesizing an internal let
+    // binding, running the full combinator codegen, and returning the
+    // bound name. Use-site rendering (exprToCppCore's IRCompute arm) is
+    // identical for IRCompute(IRApplyCombinator) and bare IRApplyCombinator,
+    // so the wrap doesn't change behavior at existing use sites.
+    let bodyWrapped =
+        match body' with
+        | IRApplyCombinator _ -> IRCompute body'
+        | _ -> body'
+
+    // Build unified IRCallable. info.ReturnType comes from TypeCheck,
+    // so the lambda has a concrete return type. The body's IRExpr type
+    // matches it (modulo inference); we trust TypeCheck's annotation.
+    let callable =
+        mkLambdaCallable env.Builder paramInfos bodyWrapped info.ReturnType
+                         captures info.IsCommutative info.CommGroups
+    // Emit IRVar(callable.Id, funcType) — the callable lives in
+    // LiftedCallables → module.Functions; the IRVar carries just the
+    // function type for type-inference and consumer dispatch.
+    // Consumers use `resolveCallable` to walk back to the callable
+    // when they need params/body/captures. The function type for the
+    // IRVar annotation uses the regular params only — captures are
+    // an implementation detail of the lifted function's signature
+    // and aren't part of what consumers see.
+    env.LiftedCallables.Add(callable)
+    let funcType =
+        let paramTypes = callable.Params |> List.map (fun p -> p.Type)
+        mkFuncArrow paramTypes callable.RetType
+    IRVar (callable.Id, funcType)
 
 /// Lower a typed match case
 and lowerTypedMatchCase env (case: TypedMatchCase) : IRMatchCase =
@@ -505,7 +558,7 @@ and lowerBndMode (mode: Ast.BoundaryMode) : IR.BoundaryMode =
     | Ast.BndReflect -> IR.BndReflect
 
 /// Lower a sectioned operator to a lambda
-and lowerTypedSection env (op: BinOp) : IRExpr =
+and lowerTypedSection env (op: BinOp) (funcTy: IRType) : IRExpr =
     let aId = env.Builder.FreshId()
     let bId = env.Builder.FreshId()
     let (irOp, isComm) =
@@ -518,17 +571,54 @@ and lowerTypedSection env (op: BinOp) : IRExpr =
         | OpGt -> (IRGt, false) | OpGe -> (IRGe, false)
         | OpAnd -> (IRAnd, true) | OpOr -> (IROr, true)
         | _ -> (IRAdd, true)
-    let body = IRBinOp(IRElementwise, irOp, IRVar (aId, IRTScalar ETFloat64), IRVar (bId, IRTScalar ETFloat64))
-    IRLambda {
-        Params = [{ Name = "a"; Type = IRTScalar ETFloat64; Index = 0; VarId = aId }
-                  { Name = "b"; Type = IRTScalar ETFloat64; Index = 1; VarId = bId }]
-        Body = body; Captures = []
-        IsCommutative = isComm
-        CommGroups = if isComm then [[0; 1]] else []
-    }
+    // Stage 3c.2 follow-on: extract the resolved param/return types from
+    // the typed section's function type instead of hardcoding Float64.
+    // TypeCheck.inferExpr ExprSection already types sections
+    // polymorphically (`α → α → α`); subsequent unifications in
+    // consumer-position handlers (e.g., inferReduce pinning kernel
+    // params to the array element type) bind that fresh α to the actual
+    // context type. By zonk time the section's funcTy carries the
+    // resolved scalar type, and we pull it from there. Float64 only
+    // appears as a fallback for sections whose type genuinely couldn't
+    // be resolved — a case that should not occur in practice but is
+    // preserved as a defensive default rather than crashing.
+    let (paramTy, retTy) =
+        match funcTy with
+        | IRTArrow (slots, r, _) when slots.Length = 2 ->
+            // Pull the first param's resolved scalar type. Both slots
+            // should resolve to the same scalar after typecheck's
+            // section unification, but we read the first as canonical.
+            let first =
+                match slots.[0] with
+                | SVal t -> t
+                | SIdx _ | SIdxVirt _ -> IRTScalar ETFloat64
+            (first, r)
+        | _ -> (IRTScalar ETFloat64, IRTScalar ETFloat64)
+    let body = IRBinOp(IRElementwise, irOp, IRVar (aId, paramTy), IRVar (bId, paramTy))
+    let parms : IRParam list =
+        [{ Name = "a"; Type = paramTy; Index = 0; VarId = aId }
+         { Name = "b"; Type = paramTy; Index = 1; VarId = bId }]
+    // Comparison and logical ops produce bool regardless of operand
+    // type; arithmetic ops produce the operand element type. retTy
+    // from the funcTy should already encode this distinction, but
+    // we recompute defensively so a malformed funcTy doesn't put a
+    // wrong return type on the lifted callable.
+    let retType =
+        match irOp with
+        | IREq | IRNeq | IRLt | IRLe | IRGt | IRGe | IRAnd | IROr ->
+            IRTScalar ETBool
+        | _ -> retTy
+    let commGroups = if isComm then [[0; 1]] else []
+    let callable = mkLambdaCallable env.Builder parms body retType [] isComm commGroups
+    env.LiftedCallables.Add(callable)
+    // Stage 3c.3: emit IRVar reference to the lifted callable.
+    let funcType =
+        let paramTypes = callable.Params |> List.map (fun p -> p.Type)
+        mkFuncArrow paramTypes callable.RetType
+    IRVar (callable.Id, funcType)
 
 /// Lower a partial operator application to a lambda
-and lowerTypedPartialApp env (op: BinOp) (argExpr: IRExpr) (isLeft: bool) : IRExpr =
+and lowerTypedPartialApp env (op: BinOp) (argExpr: IRExpr) (isLeft: bool) (funcTy: IRType) : IRExpr =
     let paramId = env.Builder.FreshId()
     let irOp =
         match op with
@@ -540,14 +630,40 @@ and lowerTypedPartialApp env (op: BinOp) (argExpr: IRExpr) (isLeft: bool) : IREx
         | OpGt -> IRGt | OpGe -> IRGe
         | OpAnd -> IRAnd | OpOr -> IROr
         | _ -> IRAdd
+    // Same resolved-type extraction as lowerTypedSection: pull the
+    // partial application's param/return scalar types from the typed
+    // function type. For partial app the funcTy is `α → α` (or
+    // `α → Bool` for comparisons), so we read slot 0 as the param
+    // type. argExpr was already lowered and carries its own type via
+    // the IR; we don't need to consult it here because the typechecker
+    // already unified arg's type with the operator's left-or-right
+    // operand position.
+    let (paramTy, retTy) =
+        match funcTy with
+        | IRTArrow (slots, r, _) when slots.Length = 1 ->
+            let p =
+                match slots.[0] with
+                | SVal t -> t
+                | SIdx _ | SIdxVirt _ -> IRTScalar ETFloat64
+            (p, r)
+        | _ -> (IRTScalar ETFloat64, IRTScalar ETFloat64)
     let body =
-        if isLeft then IRBinOp (IRElementwise, irOp, argExpr, IRVar (paramId, IRTScalar ETFloat64))
-        else IRBinOp (IRElementwise, irOp, IRVar (paramId, IRTScalar ETFloat64), argExpr)
-    IRLambda {
-        Params = [{ Name = "x"; Type = IRTScalar ETFloat64; Index = 0; VarId = paramId }]
-        Body = body; Captures = []
-        IsCommutative = false; CommGroups = []
-    }
+        if isLeft then IRBinOp (IRElementwise, irOp, argExpr, IRVar (paramId, paramTy))
+        else IRBinOp (IRElementwise, irOp, IRVar (paramId, paramTy), argExpr)
+    let parms : IRParam list =
+        [{ Name = "x"; Type = paramTy; Index = 0; VarId = paramId }]
+    let retType =
+        match irOp with
+        | IREq | IRNeq | IRLt | IRLe | IRGt | IRGe | IRAnd | IROr ->
+            IRTScalar ETBool
+        | _ -> retTy
+    let callable = mkLambdaCallable env.Builder parms body retType [] false []
+    env.LiftedCallables.Add(callable)
+    // Stage 3c.3: emit IRVar reference to the lifted callable.
+    let funcType =
+        let paramTypes = callable.Params |> List.map (fun p -> p.Type)
+        mkFuncArrow paramTypes callable.RetType
+    IRVar (callable.Id, funcType)
 
 /// Lower typed binary operations
 and lowerTypedBinOp env mode op l r leftExpr rightExpr resultType =
@@ -589,19 +705,32 @@ and lowerTypedBinOp env mode op l r leftExpr rightExpr resultType =
         let aId = env.Builder.FreshId()
         let bId = env.Builder.FreshId()
         let body = IRBinOp(IRElementwise, irOp, IRVar (aId, IRTScalar elemTypeL), IRVar (bId, IRTScalar elemTypeR))
-        let lambdaInfo : LambdaInfo = {
-            Params = [
-                { Name = "__a"; Type = IRTScalar elemTypeL; Index = 0; VarId = aId }
-                { Name = "__b"; Type = IRTScalar elemTypeR; Index = 1; VarId = bId }
-            ]
-            Body = body; Captures = []
-            IsCommutative = false
-            CommGroups = (if mode = Elementwise then [[0; 1]] else [])
-        }
+        let parms : IRParam list = [
+            { Name = "__a"; Type = IRTScalar elemTypeL; Index = 0; VarId = aId }
+            { Name = "__b"; Type = IRTScalar elemTypeR; Index = 1; VarId = bId }
+        ]
+        // Kernel return type: comparison/logical ops produce bool;
+        // arithmetic ops keep the left operand's element type (matches
+        // existing IRBinOp typing conventions for elementwise ops).
+        let kernelRetType =
+            match irOp with
+            | IREq | IRNeq | IRLt | IRLe | IRGt | IRGe | IRAnd | IROr ->
+                IRTScalar ETBool
+            | _ -> IRTScalar elemTypeL
+        let commGroups = if mode = Elementwise then [[0; 1]] else []
+        let lambdaInfo =
+            mkLambdaCallable env.Builder parms body kernelRetType [] false commGroups
+        env.LiftedCallables.Add(lambdaInfo)
+        // Kernel slot references the lifted callable via IRVar;
+        // genObjectForApplication uses resolveCallable + wrapper to
+        // consume it.
+        let kernelFuncType =
+            let paramTypes = lambdaInfo.Params |> List.map (fun p -> p.Type)
+            mkFuncArrow paramTypes lambdaInfo.RetType
         let inputRanks = match mode with Outer -> [1; 1] | Elementwise -> [0; 0]
         let objInfo : ObjectForInfo = {
-            Kernel = IRLambda lambdaInfo
-            CommGroups = (if mode = Elementwise then [[0; 1]] else [])
+            Kernel = IRVar (lambdaInfo.Id, kernelFuncType)
+            CommGroups = commGroups
             InputRanks = inputRanks
             OutputRank = 0
         }
@@ -694,17 +823,22 @@ let lowerTypedFuncDecl (env: TypedLowerEnv) (decl: TypedFunctionDecl) : IRFuncDe
 
     let body = lowerTypedExpr paramEnv decl.Body
 
-    let funcDef : IRFuncDef = {
+    let funcDef : IRCallable = {
         Id = decl.FuncId
         Name = decl.Name
         Params = irParams
         RetType = decl.ReturnType
         Body = body
         IsStatic = decl.IsStatic
-        Commutativity = if decl.CommGroups.IsEmpty then None else Some decl.CommGroups
+        IsCommutative = not decl.CommGroups.IsEmpty
+        CommGroups = decl.CommGroups
         Parallelism = parallelism
         IsArityPoly = isArityPoly
         ArityParam = polyParamNames |> List.tryHead
+        // Source-level functions live at top level and have no enclosing
+        // scope to capture from. Lifted lambdas (handled separately in
+        // Stage 4) populate Captures from the lambda's free variables.
+        Captures = []
     }
 
     let env' = bindTypedVar decl.Name decl.FuncId env
@@ -903,6 +1037,9 @@ let tryInvokeProvider (env: TypedLowerEnv) (binding: TypedBinding) : (IRTypeDef 
 
 /// Lower a typed module
 let lowerTypedModule (env: TypedLowerEnv) (modul: TypedModule) (rawDecls: Located<Decl> list option) : IRModule * ModuleExport =
+    // Fresh LiftedCallables for this module. Lifted lambdas from a
+    // previous module's lowering must not leak into this one.
+    let env = { env with LiftedCallables = ResizeArray<IRCallable>() }
     // Phase 0: Resolve static values/functions from raw declarations
     let mutable currentEnv = 
         match rawDecls with
@@ -1068,7 +1205,11 @@ let lowerTypedModule (env: TypedLowerEnv) (modul: TypedModule) (rawDecls: Locate
     let irModule = {
         Name = modul.Name |> Option.map (String.concat ".") |> Option.defaultValue ""
         Types = types
-        Functions = funcs
+        // Source-level functions plus all lambdas lifted to module
+        // scope during lowering. Use sites reference these callables
+        // via IRVar(callable.Id, funcType); the single canonical
+        // definition lives here in module.Functions.
+        Functions = funcs @ (currentEnv.LiftedCallables |> List.ofSeq)
         Bindings = bindings
         StaticFunctionUsage = usageReport
     }
@@ -1103,6 +1244,14 @@ let lowerTypedProgram (program: TypedProgram) (rawProgram: Program option) (buil
         // appearing in non-let-RHS positions) into auto-let bindings so
         // codegen sees the canonical "let-bound" pattern uniformly.
         let irModule = IR.liftInlineFormsModule irModule env.Builder
+        // M1.4: structural rewrite of mask+contains fusion. Recognizes
+        // mask(A, lambda(x) -> ... contains(B, x) ...) patterns and
+        // rewrites to IRMaskWithSet, which codegen (M1.3) renders as a
+        // hoisted-set + scan + compact loop. Replaces the codegen-side
+        // substitution machinery in Phase C for the single-contains
+        // case. Multi-contains predicates (per Option A) fall through
+        // unchanged and use Phase C's renderer as before.
+        let irModule = IR.rewriteMaskContains irModule
         currentExports <- Map.add moduleName exports currentExports
         irModules <- irModules @ [irModule]
     

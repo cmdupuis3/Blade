@@ -42,7 +42,9 @@ let private mkAttrsWithProbes
         probeArrays |> List.map (fun arr ->
             // Node here is just a placeholder for the test's expected value;
             // attrsEqual compares probes by BuildOn (structural) only.
-            { Node = IRLit (IRLitInt 0L); BuildOn = arr })
+            // Same shape as what exprAttrs's IRContains arm produces.
+            { Node = IRLit (IRLitInt 0L)
+              BuildOn = arr })
     { FreeVars  = Set.ofList free
       BoundVars = Set.ofList bound
       IsPure    = isPure
@@ -166,57 +168,14 @@ let test_let_value_can_be_free = {
 /// ------------------------------------------------------------
 /// 4. IRLambda binder
 /// ------------------------------------------------------------
-
-let test_lambda_binds_params = {
-    Name = "Lambda: param IDs are bound; body refs to them not free"
-    Run = fun () ->
-        // lambda(x: 10) -> x + 1
-        let param: IRParam = { Name = "x"; Type = intTy; Index = 0; VarId = 10 }
-        let body = IRBinOp (IRElementwise, IRAdd, IRVar (10, intTy), IRLit (IRLitInt 1L))
-        let info: LambdaInfo = {
-            Params = [param]; Body = body; Captures = []
-            IsCommutative = false; CommGroups = []
-        }
-        let actual = exprAttrs (IRLambda info)
-        let expected = mkAttrs [] [10] true
-        (actual, expected)
-}
-
-let test_lambda_captures_outer = {
-    Name = "Lambda: body refs to outer vars flow up as FreeVars"
-    Run = fun () ->
-        // lambda(x: 10) -> x + y    -- y is captured (outer)
-        let param: IRParam = { Name = "x"; Type = intTy; Index = 0; VarId = 10 }
-        let body = IRBinOp (IRElementwise, IRAdd, IRVar (10, intTy), IRVar (99, intTy))
-        let info: LambdaInfo = {
-            Params = [param]; Body = body; Captures = []
-            IsCommutative = false; CommGroups = []
-        }
-        let actual = exprAttrs (IRLambda info)
-        let expected = mkAttrs [99] [10] true
-        (actual, expected)
-}
-
-let test_nested_lambda = {
-    Name = "Lambda: inner lambda captures outer lambda's param"
-    Run = fun () ->
-        // lambda(x: 10) -> lambda(y: 20) -> x + y
-        // From outermost view: FreeVars = {}; BoundVars = {10, 20}
-        let innerParam: IRParam = { Name = "y"; Type = intTy; Index = 0; VarId = 20 }
-        let innerBody = IRBinOp (IRElementwise, IRAdd, IRVar (10, intTy), IRVar (20, intTy))
-        let innerLam = IRLambda {
-            Params = [innerParam]; Body = innerBody; Captures = []
-            IsCommutative = false; CommGroups = []
-        }
-        let outerParam: IRParam = { Name = "x"; Type = intTy; Index = 0; VarId = 10 }
-        let outerLam = IRLambda {
-            Params = [outerParam]; Body = innerLam; Captures = []
-            IsCommutative = false; CommGroups = []
-        }
-        let actual = exprAttrs outerLam
-        let expected = mkAttrs [] [10; 20] true
-        (actual, expected)
-}
+///
+/// Stage 3c.4c: the IRLambda variant has been retired from the IR
+/// type. Lambdas in surface Blade lower to lifted IRCallables
+/// referenced via IRVar(callable.Id) at use sites; their binder
+/// semantics now live at the IRFuncDef level (which isn't an IRExpr
+/// and so isn't testable through exprAttrs). The three IRLambda
+/// binder tests that lived here (test_lambda_binds_params,
+/// test_lambda_captures_outer, test_nested_lambda) are removed.
 
 /// ------------------------------------------------------------
 /// 5. IRForRange and IRMatch binders
@@ -377,28 +336,18 @@ let test_shift_with_pad = {
 
 /// ------------------------------------------------------------
 /// 8. The key composition: nested binder + outer free var
-/// (this is the semantic core that Phase C will rest on)
 /// ------------------------------------------------------------
-
-let test_mask_lambda_binder_does_not_leak = {
-    Name = "Composition: lambda-bound param doesn't leak to outer FreeVars"
-    Run = fun () ->
-        // Mask with a contains-only predicate (the canonical pattern that
-        // Phase C handles end-to-end at codegen). From outside the mask,
-        // FreeVars should be {1, 2} (A and B). x_50 must NOT appear — it's
-        // bound inside the lambda. The probe over B is consumed by the
-        // mask, so the outer view also has Probes=[] (default empty).
-        let xParam: IRParam = { Name = "x"; Type = intTy; Index = 0; VarId = 50 }
-        let lamBody = IRContains (IRVar (2, intTy), IRVar (50, intTy))
-        let lam = IRLambda {
-            Params = [xParam]; Body = lamBody; Captures = []
-            IsCommutative = false; CommGroups = []
-        }
-        let e = IRMask (IRVar (1, intTy), lam)
-        let actual = exprAttrs e
-        let expected = mkAttrs [1; 2] [50] true
-        (actual, expected)
-}
+///
+/// Stage 3c.4c: the test that lived here
+/// (test_mask_lambda_binder_does_not_leak) constructed an
+/// IRLambda predicate inline. With IRLambda retired from the IR
+/// type, predicates arrive as IRVar references; the
+/// "lambda-bound param doesn't leak" semantic is now trivially
+/// preserved because exprAttrs over an IRVar doesn't see the
+/// callable's body in the first place. The actual probe
+/// optimization (IRMask → IRMaskWithSet) is tested via
+/// tryRewriteMaskContains end-to-end through the full pipeline,
+/// not via exprAttrs.
 
 /// ------------------------------------------------------------
 /// 9. Contains probe propagation
@@ -433,70 +382,17 @@ let test_probe_in_if = {
         (actual, expected)
 }
 
-let test_probe_through_nested_lambda = {
-    Name = "Probe: contains inside a nested lambda body propagates upward"
-    Run = fun () ->
-        // Outer expression is the lambda itself — body has a contains.
-        // From outside the lambda, the lambda's param is bound but the
-        // contains's probe propagates up. (The lambda is NOT a mask.)
-        let yParam: IRParam = { Name = "y"; Type = intTy; Index = 0; VarId = 30 }
-        let arrB = IRVar (10, intTy)
-        let body = IRContains (arrB, IRVar (30, intTy))
-        let lam = IRLambda {
-            Params = [yParam]; Body = body; Captures = []
-            IsCommutative = false; CommGroups = []
-        }
-        let actual = exprAttrs lam
-        // FreeVars: just 10 (the array); 30 is the lambda param, bound.
-        // BoundVars: {30}. Probe propagates up.
-        let expected = mkAttrsWithProbes [10] [30] true [arrB]
-        (actual, expected)
-}
-
-let test_mask_consumes_probe = {
-    Name = "Probe: IRMask consumes probes from its predicate"
-    Run = fun () ->
-        // mask(A_1, lambda(x_50) -> contains(B_2, x_50))
-        // The contains generates a probe inside the predicate. The
-        // mask consumes it. From outside, the OUTER view has no
-        // probes. FreeVars and BoundVars accumulate normally.
-        let arrB = IRVar (2, intTy)
-        let cont = IRContains (arrB, IRVar (50, intTy))
-        let xParam: IRParam = { Name = "x"; Type = intTy; Index = 0; VarId = 50 }
-        let pred = IRLambda {
-            Params = [xParam]; Body = cont; Captures = []
-            IsCommutative = false; CommGroups = []
-        }
-        let e = IRMask (IRVar (1, intTy), pred)
-        let actual = exprAttrs e
-        // No probes at the outer level — mask consumed it.
-        let expected = mkAttrs [1; 2] [50] true
-        (actual, expected)
-}
-
-let test_mask_consumes_only_predicate_probes = {
-    Name = "Probe: IRMask consumes ONLY predicate probes, not array-side"
-    Run = fun () ->
-        // mask(contains(B_1, k_2), lambda(x_50) -> contains(C_3, x_50))
-        // The mask's predicate has a contains (consumed by mask). The
-        // mask's array slot ALSO has a contains (unusual, but legal IR);
-        // that one is not in the predicate, so it propagates up.
-        let arrB = IRVar (1, intTy)
-        let arrC = IRVar (3, intTy)
-        let arrSide = IRContains (arrB, IRVar (2, intTy))
-        let predBody = IRContains (arrC, IRVar (50, intTy))
-        let xParam: IRParam = { Name = "x"; Type = intTy; Index = 0; VarId = 50 }
-        let pred = IRLambda {
-            Params = [xParam]; Body = predBody; Captures = []
-            IsCommutative = false; CommGroups = []
-        }
-        let e = IRMask (arrSide, pred)
-        let actual = exprAttrs e
-        // arrSide's probe (BuildOn = B) survives; predBody's probe
-        // (BuildOn = C) is consumed.
-        let expected = mkAttrsWithProbes [1; 2; 3] [50] true [arrB]
-        (actual, expected)
-}
+// Stage 3c.4c: four tests that lived in this section have been removed
+// (test_probe_through_nested_lambda, test_mask_consumes_probe,
+// test_mask_consumes_only_predicate_probes, test_nested_mask_no_outer_probe).
+// All four constructed IRLambda predicates inline. With IRLambda retired,
+// predicates arrive as IRVar references whose callable bodies aren't
+// walked by exprAttrs over IRMask. The probe-consume semantic is now
+// trivially preserved (the predicate slot contributes no probes to
+// begin with), and the actual cross-procedural probe analysis that
+// enables IRMask → IRMaskWithSet rewriting is driven by
+// tryRewriteMaskContains using resolveCallable directly on the
+// callable body — verified end-to-end via the full-pipeline mask tests.
 
 let test_multiple_probes_in_one_predicate = {
     Name = "Probe: two distinct contains calls in a predicate both collected"
@@ -510,36 +406,6 @@ let test_multiple_probes_in_one_predicate = {
         let e = IRBinOp (IRElementwise, IROr, cont1, cont2)
         let actual = exprAttrs e
         let expected = mkAttrsWithProbes [1; 2; 3] [] true [arrB; arrC]
-        (actual, expected)
-}
-
-let test_nested_mask_no_outer_probe = {
-    Name = "Probe: contains inside an inner mask's predicate does not escape"
-    Run = fun () ->
-        // outer expression: mask(A_1, lambda(x_50) ->
-        //   contains(mask(C_2, lambda(y_60) -> contains(B_3, y_60)), x_50))
-        // The inner mask consumes its own probe (over B_3). The outer
-        // mask's predicate then has a contains whose array is the inner
-        // mask's result, so its probe propagates up to the OUTER mask,
-        // which consumes it. Net: zero probes escape to the top level.
-        let innerB = IRVar (3, intTy)
-        let innerCont = IRContains (innerB, IRVar (60, intTy))
-        let yParam: IRParam = { Name = "y"; Type = intTy; Index = 0; VarId = 60 }
-        let innerPred = IRLambda {
-            Params = [yParam]; Body = innerCont; Captures = []
-            IsCommutative = false; CommGroups = []
-        }
-        let innerMask = IRMask (IRVar (2, intTy), innerPred)
-        let outerCont = IRContains (innerMask, IRVar (50, intTy))
-        let xParam: IRParam = { Name = "x"; Type = intTy; Index = 0; VarId = 50 }
-        let outerPred = IRLambda {
-            Params = [xParam]; Body = outerCont; Captures = []
-            IsCommutative = false; CommGroups = []
-        }
-        let e = IRMask (IRVar (1, intTy), outerPred)
-        let actual = exprAttrs e
-        // No probes at top level (both consumed).
-        let expected = mkAttrs [1; 2; 3] [50; 60] true
         (actual, expected)
 }
 
@@ -557,7 +423,49 @@ let test_probe_in_let_value = {
         (actual, expected)
 }
 
-/// All Phase B + Phase C foundation corpus tests, in registration order.
+let test_probe_imported_via_callable_table = {
+    Name = "Probe: cross-procedural propagation via unified callable walker"
+    Run = fun () ->
+        // Simulate a callable `f(arr, x) = contains(arr, x)` registered
+        // in the CallablesTable. The caller expression is `f(B_1, x_2)`.
+        // The walker should descend into f's body with arr→B_1, x→x_2
+        // substitution applied, see the IRContains, and surface a probe
+        // whose BuildOn is IRVar(B_1).
+        let f_id = 99
+        let arrP : IRParam = { Name = "arr"; Type = intTy; Index = 0; VarId = 77 }
+        let xP   : IRParam = { Name = "x";   Type = intTy; Index = 1; VarId = 78 }
+        // f's body: contains(arr, x)
+        let fBody = IRContains (IRVar (77, intTy), IRVar (78, intTy))
+        // Register f in the callables table as a full IRCallable
+        // (the table now stores full callables, not just (params, body)).
+        let fCallable : IRCallable = {
+            Id = f_id; Name = "f"
+            Params = [arrP; xP]; RetType = boolTy; Body = fBody
+            IsStatic = false
+            IsCommutative = false; CommGroups = []
+            Parallelism = []; IsArityPoly = false; ArityParam = None
+            Captures = []
+        }
+        let callables : CallablesTable =
+            Map.ofList [(f_id, fCallable)]
+        let prev = setCallablesContext callables
+        try
+            // Call site: f(B_1, x_2)
+            let arrB = IRVar (1, intTy)
+            let e = IRApp (IRVar (f_id, intTy), [arrB; IRVar (2, intTy)], intTy)
+            let actual = exprAttrs e
+            // FreeVars at the IRApp arm: {99 (the function ref), 1, 2}.
+            // Plus, after walking f's body with substitution: the IRVar(77)
+            // becomes IRVar(1), so still {1}. IRVar(78) becomes IRVar(2),
+            // so still {2}. Net: {99, 1, 2}.
+            // Probes: one probe with BuildOn = IRVar(1) (after substitution).
+            let expected = mkAttrsWithProbes [99; 1; 2] [] true [arrB]
+            (actual, expected)
+        finally
+            restoreAnalysisContext prev
+}
+
+
 let allAttrsTests : AttrsTest list = [
     test_lit_has_no_refs
     test_var_is_free
@@ -568,9 +476,6 @@ let allAttrsTests : AttrsTest list = [
     test_let_binds_id
     test_let_shadowing
     test_let_value_can_be_free
-    test_lambda_binds_params
-    test_lambda_captures_outer
-    test_nested_lambda
     test_forrange_binds_loop_var
     test_match_pattern_binds
     test_match_tuple_pattern
@@ -584,16 +489,13 @@ let allAttrsTests : AttrsTest list = [
     test_slice_finds_refs
     test_join_finds_refs
     test_shift_with_pad
-    test_mask_lambda_binder_does_not_leak
     // Phase C foundation: contains-probe propagation
     test_probe_in_binop
     test_probe_in_if
-    test_probe_through_nested_lambda
-    test_mask_consumes_probe
-    test_mask_consumes_only_predicate_probes
     test_multiple_probes_in_one_predicate
-    test_nested_mask_no_outer_probe
     test_probe_in_let_value
+    // Phase C unified walker: cross-procedural propagation via CallablesTable
+    test_probe_imported_via_callable_table
 ]
 
 /// Pretty-print an ExprAttrs for diffing. The sets are printed sorted so
@@ -612,8 +514,8 @@ let private fmtAttrs (a: ExprAttrs) : string =
         (setStr a.FreeVars) (setStr a.BoundVars) a.IsPure probesStr
 
 let private attrsEqual (a: ExprAttrs) (b: ExprAttrs) : bool =
-    // Probes compared by BuildOn (structural) and length; the Node field
-    // is for codegen reference-identity use and isn't meaningful in tests.
+    // Probes compared by BuildOn (structural) and count. Node field is
+    // for codegen reference-identity use and isn't meaningful in tests.
     let probesMatch =
         a.Probes.Length = b.Probes.Length &&
         List.zip a.Probes b.Probes
