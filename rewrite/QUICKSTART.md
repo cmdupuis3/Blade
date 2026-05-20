@@ -214,10 +214,10 @@ a
 12
 ```
 
-The opposite is `const`, which tells the compiler that this value can never change. This means that reassigning the variable in its scope will error.
+The opposite is `static`, which tells the compiler that this value can never change. This means that reassigning the variable in its scope will error.
 
 ```F#
-let const a = 2
+let static a = 2
 function tryToChange(a: T^0) = {
     a + 10
 }
@@ -561,9 +561,9 @@ let q95 = LoopA <@> quantile(95)
 Another thing: Blade is typed strongly enough that despite the fact that the inputs to covLoop have different ranks, we *still* get the correct types for output arrays:
 
 ```F#
-A: Array<T like SymIdx<2, M>>
-B: Array<T like SymIdx<2, M>, SymIdx<2, N>>
-C: Array<T like SymIdx<2, M>, SymIdx<2, N>, SymIdx<2, P>>
+covA: Array<T like SymIdx<2, M>>
+covB: Array<T like SymIdx<2, M>, SymIdx<2, N>>
+covC: Array<T like SymIdx<2, M>, SymIdx<2, N>, SymIdx<2, P>>
 ```
 
 Most array languages and packages would have a hard time with this.
