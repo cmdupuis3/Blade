@@ -220,6 +220,100 @@ let result = L <@> reynolds(g, Antisymmetric) |> compute
 // EXPECT: result = [-6.0, -12.0, -4.0, -10.0]
 """
 
+// ============================================================================
+// Cross-feature: Reynolds × SQL-like primitives (mask, intersect)
+//
+// These tests probe whether the SQL-like array-construction primitives
+// (mask, intersect) compose with Reynolds-wrapped kernels. The two
+// refactor axes are orthogonal in principle — mask/intersect produce
+// the input arrays; Reynolds wraps the kernel — but the composition
+// has never been exercised before, so this is establishing baseline
+// coverage rather than testing a specific bug.
+//
+// Each Reynolds test is paired with a baseline (same shape, no Reynolds)
+// so a failure is attributable to either the SQL-primitive interaction
+// or the Reynolds interaction, not both.
+// ============================================================================
+
+let test157_reynoldsMaskBaseline = """
+// Baseline: method_for over two distinct masks of the same source,
+// non-Reynolds kernel. Rectangular iteration since the masks have
+// different identities (different filter predicates).
+let A = [1.0, 2.0, 3.0, 4.0, 5.0]
+let above2 = mask(A, lambda(x) -> x > 2.0)
+let below5 = mask(A, lambda(x) -> x < 5.0)
+let g = lambda(x, y) -> x * y
+let result = method_for(above2, below5) <@> g |> compute
+// above2 = [3, 4, 5]; below5 = [1, 2, 3, 4]; 3x4 rectangular.
+// Row-major: (3,1)(3,2)(3,3)(3,4), (4,1)(4,2)(4,3)(4,4), (5,1)(5,2)(5,3)(5,4)
+// EXPECT: result = [3.0, 6.0, 9.0, 12.0, 4.0, 8.0, 12.0, 16.0, 5.0, 10.0, 15.0, 20.0]
+"""
+
+let test158_reynoldsMaskCross = """
+// Reynolds version of test157. Same shape; the kernel is wrapped in
+// reynolds(), which sums the kernel over input-position permutations:
+// reynolds(2x+y)(x,y) = (2x+y) + (2y+x) = 3*(x+y).
+let A = [1.0, 2.0, 3.0, 4.0, 5.0]
+let above2 = mask(A, lambda(x) -> x > 2.0)
+let below5 = mask(A, lambda(x) -> x < 5.0)
+let g = lambda(x, y) -> 2.0 * x + y
+let result = method_for(above2, below5) <@> reynolds(g) |> compute
+// 3x4 rectangular; each entry = 3*(x+y).
+// (3,1)=12 (3,2)=15 (3,3)=18 (3,4)=21
+// (4,1)=15 (4,2)=18 (4,3)=21 (4,4)=24
+// (5,1)=18 (5,2)=21 (5,3)=24 (5,4)=27
+// EXPECT: result = [12.0, 15.0, 18.0, 21.0, 15.0, 18.0, 21.0, 24.0, 18.0, 21.0, 24.0, 27.0]
+"""
+
+let test159_reynoldsIntersectBaseline = """
+// Baseline: method_for over (intersect-derived array, regular array),
+// non-Reynolds kernel. The intersect result is a filtered view that
+// keeps positions where both masks agree.
+let A = [1.0, 2.0, 3.0, 4.0, 5.0]
+let above2 = mask(A, lambda(x) -> x > 2.0)
+let below5 = mask(A, lambda(x) -> x < 5.0)
+let both = intersect(above2, below5)
+let B = [10.0, 20.0]
+let g = lambda(x, y) -> x * y
+let result = method_for(both, B) <@> g |> compute
+// both = [3, 4]; 2x2 rectangular.
+// (3,10)=30 (3,20)=60 (4,10)=40 (4,20)=80
+// EXPECT: result = [30.0, 60.0, 40.0, 80.0]
+"""
+
+let test160_reynoldsIntersectCross = """
+// Reynolds version of test159. reynolds(xy)(x,y) = xy + yx = 2xy
+// (g is mathematically commutative; without `where comm` the iteration
+// is rectangular but Reynolds still applies the permutation sum).
+let A = [1.0, 2.0, 3.0, 4.0, 5.0]
+let above2 = mask(A, lambda(x) -> x > 2.0)
+let below5 = mask(A, lambda(x) -> x < 5.0)
+let both = intersect(above2, below5)
+let B = [10.0, 20.0]
+let g = lambda(x, y) -> x * y
+let result = method_for(both, B) <@> reynolds(g) |> compute
+// both = [3, 4]; 2x2 rectangular; each entry = 2xy.
+// (3,10)=60 (3,20)=120 (4,10)=80 (4,20)=160
+// EXPECT: result = [60.0, 120.0, 80.0, 160.0]
+"""
+
+let test161_reynoldsFunctorMap = """
+// Functor-map over a Reynolds-wrapped applycombinator: covers the
+// kernel-fold path that goes through applyFunctorWrappers ->
+// mapKernelInner (item-1 site 3 in CodeGen). The synthetic registry
+// re-wraps the inner with IRReynolds preserving isAntisymmetric;
+// without this rewrap, `twice` would be applied to the bare kernel
+// output instead of the Reynolds permutation sum.
+let A = [1.0, 2.0]
+let B = [3.0, 4.0]
+let g = lambda(x, y) -> x * y
+let twice = lambda(z) -> z * 2.0
+let result = twice <$> (method_for(A, B) <@> reynolds(g)) |> compute
+// reynolds(g)(x,y) = xy + yx = 2xy; then twice gives 4xy.
+// (1,3)=12 (1,4)=16 (2,3)=24 (2,4)=32
+// EXPECT: result = [12.0, 16.0, 24.0, 32.0]
+"""
+
 /// Reynolds operator tests
 let reynoldsTests = [
     ("Reynolds 2D Symmetric", test27_reynolds2dSym)
@@ -237,4 +331,9 @@ let reynoldsTests = [
     ("Reynolds Partial Symmetry 3D", test39_reynoldsPartialSymmetry3d)
     ("Reynolds AntiSym Cancellation", test40_reynoldsAntiSymCancellation)
     ("Reynolds AntiSym Non-Symmetric", test41_reynoldsAntiNonSym)
+    ("Reynolds Mask Baseline", test157_reynoldsMaskBaseline)
+    ("Reynolds Mask Cross", test158_reynoldsMaskCross)
+    ("Reynolds Intersect Baseline", test159_reynoldsIntersectBaseline)
+    ("Reynolds Intersect Cross", test160_reynoldsIntersectCross)
+    ("Reynolds Functor Map", test161_reynoldsFunctorMap)
 ]

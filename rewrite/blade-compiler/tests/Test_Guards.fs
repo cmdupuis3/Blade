@@ -116,6 +116,35 @@ let result = guard(p, guard(q, 99))
 // EXPECT: result = 0
 """
 
+let test155_guardFalseComputation = """
+// guard(false, L <@> f) |> compute — output should be zeroed.
+// Baseline for test156: establishes that the IRGuard codegen wraps a
+// non-Reynolds kernel with the predicate correctly.
+let A = [1.0, 2.0, 3.0]
+let L = method_for(A)
+let f = lambda(x) -> x + 10.0
+let cond = false
+let result = guard(cond, L <@> f) |> compute
+// EXPECT: result = [0.0, 0.0, 0.0]
+"""
+
+let test156_guardFalseReynolds = """
+// guard(false, L <@> reynolds(g)) |> compute — output should be zeroed.
+// Regression test for the IRGuard codegen path silently dropping the
+// guard predicate when the kernel is Reynolds-wrapped (CodeGen.fs site
+// resolveCallable-without-peelReynolds, fixed via mapKernelInner).
+let A = [1.0, 2.0, 3.0]
+let L = method_for(A, A)
+let g = lambda(x, y) where comm(x, y) -> x * y
+let cond = false
+let result = guard(cond, L <@> reynolds(g)) |> compute
+// Without the fix: triangular [2.0, 4.0, 6.0, 8.0, 12.0, 18.0]
+//   (= 2 * x * y at each unordered (i, j) pair in {1, 2, 3}^2,
+//    Reynolds doubles a commutative kernel).
+// With the fix: guard fires, output zeroed.
+// EXPECT: result = [0.0, 0.0, 0.0, 0.0, 0.0, 0.0]
+"""
+
 let guardCombinatorTests = [
     ("Guard Scalar True", test120_guardScalarTrue)
     ("Guard Scalar False", test121_guardScalarFalse)
@@ -129,6 +158,8 @@ let guardCombinatorTests = [
     // winner was non-deterministic and one validation would fail.
     ("Guard Nested True", test126_guardNested)
     ("Guard Nested False", test127_guardNestedFalse)
+    ("Guard False Computation", test155_guardFalseComputation)
+    ("Guard False Reynolds", test156_guardFalseReynolds)
 ]
 
 // ============================================================================

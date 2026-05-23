@@ -1405,10 +1405,9 @@ and genApplyCombinatorExpr (subst: SubstMap) (names: Map<IRId, string>) (info: A
     // emission site the Reynolds symmetrization is informational and
     // doesn't change what the kernel computes per call; the symmetric
     // accumulation is the iteration structure, not the kernel itself.
-    let kernelInner =
-        match info.Kernel with
-        | IRReynolds (inner, _) -> inner
-        | other -> other
+    // (See audit item 4 for the open question on whether this peel is
+    // actually correctness-preserving.)
+    let (kernelInner, _) = peelReynolds info.Kernel
 
     // Infer output element type from ApplyInfo
     let elemTypeStr =
@@ -3201,25 +3200,18 @@ let genFusionTree (ctx: CodeGenContext) (name: string) (expr: IRExpr) (builder: 
             // Build primary LoopNestCodeGen
             let codeGenPrimary = buildLoopNestCodeGen primaryInfo arrayNames primaryName builder
             
-            // Extract kernel info for all additional leaves. Resolution
-            // through `resolveCallable`. Reynolds wrapping is peeled
-            // and its isAntisymmetric flag flows through.
+            // Extract kernel info for all additional leaves via
+            // `resolveKernel`, which peels any `IRReynolds` wrapper and
+            // resolves the inner callable through the CallablesTable +
+            // synthetic registry.
             let extraKernels = 
                 (List.tail infos, List.tail leafNames) ||> List.map2 (fun info outName ->
-                    let (kParams, kBody, _commGroups, captures, hasReynolds, isAntisym) =
-                        let extract (k: IRExpr) =
-                            match resolveCallable k with
-                            | Some c -> Some (c.Params, c.Body, c.CommGroups, c.Captures)
-                            | None -> None
-                        match info.Kernel with
-                        | IRReynolds (inner, isAnti) ->
-                            match extract inner with
-                            | Some (p, b, g, c) -> (p, b, g, c, true, isAnti)
-                            | None -> ([], IRLit IRLitUnit, [], [], false, false)
-                        | other ->
-                            match extract other with
-                            | Some (p, b, g, c) -> (p, b, g, c, false, false)
-                            | None -> ([], IRLit IRLitUnit, [], [], false, false)
+                    let (kParams, kBody, captures, hasReynolds, isAntisym) =
+                        match resolveKernel info.Kernel with
+                        | Some rk ->
+                            (rk.Callable.Params, rk.Callable.Body, rk.Callable.Captures,
+                             rk.Reynolds.HasReynolds, rk.Reynolds.IsAntisymmetric)
+                        | None -> ([], IRLit IRLitUnit, [], false, false)
                     (outName, kBody, kParams, captures, hasReynolds, isAntisym))
             
             // Generate symm vec + extents + allocation for each output
@@ -3919,6 +3911,10 @@ let rec genBinding (ctx: CodeGenContext) (binding: IRBinding) (builder: IRBuilde
                     // registry, so downstream consumers (buildLoopNest-
                     // CodeGen for inline emission, betaReduce for further
                     // kernel-fold) see the wrapped body uniformly.
+                    // `mapKernelInner` peels any `IRReynolds` wrapper,
+                    // applies the transform to the inner callable, and
+                    // re-wraps with Reynolds (preserving isAntisymmetric)
+                    // if it was present.
                     let wrapBody (body: IRExpr) =
                         wrappers |> List.fold (fun b w -> betaReduce w b) body
                     let buildInline (c: IRCallable) : IRExpr =
@@ -3926,15 +3922,7 @@ let rec genBinding (ctx: CodeGenContext) (binding: IRBinding) (builder: IRBuilde
                             { c with Id = builder.FreshId()
                                      Body = wrapBody c.Body }
                         registerSyntheticCallable synthetic
-                    match info.Kernel with
-                    | IRReynolds (inner, isAnti) ->
-                        match resolveCallable inner with
-                        | Some c -> IRReynolds (buildInline c, isAnti)
-                        | None -> info.Kernel  // resolveCallable failed; leave unchanged
-                    | other ->
-                        match resolveCallable other with
-                        | Some c -> buildInline c
-                        | None -> other  // resolveCallable failed; leave unchanged
+                    mapKernelInner buildInline info.Kernel
                 // Update output type from outermost wrapper's return
                 // type, resolving the wrapper through resolveCallable.
                 // info.OutputType might otherwise be stale relative to
@@ -4313,17 +4301,14 @@ let rec genBinding (ctx: CodeGenContext) (binding: IRBinding) (builder: IRBuilde
                             { c with Id = builder.FreshId()
                                      Body = IRIf (cond, c.Body, zeroVal) }
                         registerSyntheticCallable synthetic
-                    let wrappedKernel =
-                        match resolveCallable info.Kernel with
-                        | Some callable -> buildGuarded callable
-                        | None ->
-                            // Couldn't resolve — leave kernel unchanged
-                            // (guard will be silently lost, but the
-                            // ApplyInfo will still produce correct
-                            // unconditional output; the only path here
-                            // is a genuinely malformed IR, which
-                            // upstream validation should catch).
-                            info.Kernel
+                    // `mapKernelInner` peels any `IRReynolds` wrapper,
+                    // applies `buildGuarded` to the inner callable, and
+                    // re-wraps with Reynolds (preserving isAntisymmetric)
+                    // if it was present. Before this consolidation the
+                    // peel was open-coded as `resolveCallable info.Kernel`
+                    // which returns None on Reynolds-wrapped kernels,
+                    // silently dropping the guard predicate.
+                    let wrappedKernel = mapKernelInner buildGuarded info.Kernel
                     let guardedInfo = { info with Kernel = wrappedKernel }
                     // Apply any functor wrappers
                     let finalInfo = applyFunctorWrappers guardedInfo functorWrappers

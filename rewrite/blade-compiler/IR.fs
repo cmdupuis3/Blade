@@ -1914,6 +1914,67 @@ let resolveCallable (expr: IRExpr) : IRCallable option =
             | false, _ -> None
     | _ -> None
 
+// ============================================================================
+// Reynolds peel/resolve helpers
+//
+// The kernel slot of an ApplyInfo (and of functor-wrapper composition
+// sites) may be either a bare callable reference (`IRVar(id, _)`) or
+// that same reference wrapped in `IRReynolds(_, isAntisymmetric)`.
+// Several passes need to look through the optional Reynolds wrapper to
+// reach the underlying callable. Before consolidation each site
+// open-coded the peel + resolveCallable dance, with subtly different
+// tuple shapes. These three helpers express the common patterns.
+// ============================================================================
+
+/// Captures the flags carried by an `IRReynolds` wrapper. For
+/// non-Reynolds kernels both flags are `false`. The invariant
+/// `not HasReynolds ⇒ not IsAntisymmetric` is preserved by construction
+/// in `peelReynolds` (the only constructor in normal use).
+type ReynoldsDescriptor = {
+    HasReynolds: bool
+    IsAntisymmetric: bool
+}
+
+/// Peel an `IRReynolds` wrapper if present, returning the inner
+/// expression and a descriptor of the wrapper's flags. For non-Reynolds
+/// expressions the input is returned unchanged with a descriptor whose
+/// flags are both `false`.
+let peelReynolds (expr: IRExpr) : IRExpr * ReynoldsDescriptor =
+    match expr with
+    | IRReynolds (inner, isAnti) ->
+        (inner, { HasReynolds = true; IsAntisymmetric = isAnti })
+    | other ->
+        (other, { HasReynolds = false; IsAntisymmetric = false })
+
+/// Result of resolving a (possibly Reynolds-wrapped) kernel expression
+/// to a callable through the CallablesTable + synthetic registry.
+type ResolvedKernel = {
+    Callable: IRCallable
+    Reynolds: ReynoldsDescriptor
+}
+
+/// Peel any `IRReynolds` wrapper and resolve the inner expression to a
+/// callable via `resolveCallable` (CallablesTable + synthetic registry).
+/// Returns `None` if the inner doesn't resolve, regardless of whether a
+/// Reynolds wrapper was present.
+let resolveKernel (expr: IRExpr) : ResolvedKernel option =
+    let (inner, desc) = peelReynolds expr
+    resolveCallable inner
+    |> Option.map (fun c -> { Callable = c; Reynolds = desc })
+
+/// Apply a transformation to the inner callable of a (possibly
+/// Reynolds-wrapped) kernel expression. Preserves the Reynolds wrapper
+/// (with its `isAntisymmetric` flag) if present. If the inner doesn't
+/// resolve to a callable, returns the original expression unchanged.
+let mapKernelInner (transform: IRCallable -> IRExpr) (expr: IRExpr) : IRExpr =
+    let (inner, desc) = peelReynolds expr
+    match resolveCallable inner with
+    | Some c ->
+        let transformed = transform c
+        if desc.HasReynolds then IRReynolds (transformed, desc.IsAntisymmetric)
+        else transformed
+    | None -> expr
+
 /// Build LoopNestCodeGen from ApplyInfo
 let buildLoopNestCodeGen 
     (info: ApplyInfo) 
@@ -1927,25 +1988,17 @@ let buildLoopNestCodeGen
     let arrayTypes = info.ArrayTypes
     let sDimsPerArray = info.SDimsPerArray
     
-    // Extract kernel info through `resolveCallable`, which handles
-    // both module.Functions references and let-binding aliases via
-    // the CallablesTable. Reynolds wrapping is peeled and its
-    // isAntisymmetric flag flows through; the inner expression is
-    // resolved the same way.
+    // Extract kernel info through `resolveKernel`, which peels any
+    // `IRReynolds` wrapper and resolves the inner callable via both
+    // module.Functions references and let-binding aliases in the
+    // CallablesTable + synthetic registry. The Reynolds wrapper's
+    // `isAntisymmetric` flag is captured in the descriptor.
     let (kernelParams, kernelBody, commGroups, captures, isAntisymmetric) =
-        let extract (k: IRExpr) =
-            match resolveCallable k with
-            | Some c -> Some (c.Params, c.Body, c.CommGroups, c.Captures)
-            | None -> None
-        match info.Kernel with
-        | IRReynolds (inner, isAnti) ->
-            match extract inner with
-            | Some (p, b, g, c) -> (p, b, g, c, isAnti)
-            | None -> ([], IRLit IRLitUnit, [], [], false)
-        | other ->
-            match extract other with
-            | Some (p, b, g, c) -> (p, b, g, c, false)
-            | None -> ([], IRLit IRLitUnit, [], [], false)
+        match resolveKernel info.Kernel with
+        | Some rk ->
+            (rk.Callable.Params, rk.Callable.Body, rk.Callable.CommGroups,
+             rk.Callable.Captures, rk.Reynolds.IsAntisymmetric)
+        | None -> ([], IRLit IRLitUnit, [], [], false)
     
     // Map array position to kernel param
     let paramByArrayPos = 
@@ -4685,23 +4738,59 @@ let validateModule (externalIds: Set<IRId>) (modul: IRModule) : IRValidationErro
             if info.SDimsPerArray.Length <> info.Arrays.Length && info.SDimsPerArray.Length <> 0 then
                 addError ctx (sprintf "ApplyInfo: SDimsPerArray.Length=%d != Arrays.Length=%d" info.SDimsPerArray.Length info.Arrays.Length)
             // Check kernel param count vs input ranks.
-            // Stage 3c.4c: kernel slot is always IRVar (or
-            // IRReynolds(IRVar)); resolve through resolveCallable to
-            // get param count and comm groups.
-            let kernelInner =
-                match info.Kernel with
-                | IRReynolds (inner, _) -> inner
-                | other -> other
-            match resolveCallable kernelInner with
-            | Some lInfo ->
-                if lInfo.Params.Length <> info.KernelInputRanks.Length then
-                    addError ctx (sprintf "ApplyInfo: kernel params=%d != KernelInputRanks.Length=%d" lInfo.Params.Length info.KernelInputRanks.Length)
-                // Verify CommGroup indices are in range
-                for cg in lInfo.CommGroups do
-                    for idx in cg do
-                        if idx < 0 || idx >= lInfo.Params.Length then
-                            addError ctx (sprintf "CommGroup index %d out of range [0, %d)" idx lInfo.Params.Length)
-            | None -> ()
+            //
+            // The Kernel slot's semantics depend on info.Loop. For the
+            // canonical case (Loop = IRMethodFor) Kernel is a callable
+            // reference — either IRVar(id, _) or IRReynolds(IRVar(id, _), _).
+            // For the composed-object idiom
+            //   (object_for(f) >>@ object_for(g)) <@> A
+            // Loop is IRComposeObj and Kernel slot holds the input
+            // arrays instead; CodeGen.fs:3953 destructures it that way.
+            // Similarly Loop may be IRVar bound to any of these shapes,
+            // or one of several meta-application patterns
+            // (object_for(<@>) <@> tuples) that route through different
+            // codegen paths.
+            //
+            // To stay conservative — and because this validator is
+            // defensive scaffolding, not a load-bearing typing pass —
+            // gate the callable-shape check on Loop being structurally
+            // IRMethodFor. Future refinement could broaden the gate as
+            // each Loop shape's kernel-slot contract is documented.
+            let kernelSlotIsCallable =
+                match info.Loop with
+                | IRMethodFor _ -> true
+                | _ -> false
+            if kernelSlotIsCallable then
+                match resolveKernel info.Kernel with
+                | Some rk ->
+                    let lInfo = rk.Callable
+                    if lInfo.Params.Length <> info.KernelInputRanks.Length then
+                        addError ctx (sprintf "ApplyInfo: kernel params=%d != KernelInputRanks.Length=%d" lInfo.Params.Length info.KernelInputRanks.Length)
+                    // Verify CommGroup indices are in range
+                    for cg in lInfo.CommGroups do
+                        for idx in cg do
+                            if idx < 0 || idx >= lInfo.Params.Length then
+                                addError ctx (sprintf "CommGroup index %d out of range [0, %d)" idx lInfo.Params.Length)
+                | None ->
+                    // Identify the structural form to make the error
+                    // actionable for whoever introduced the malformed
+                    // IR. Shape names match the IRExpr discriminator so
+                    // a grep against the constructor finds the producer.
+                    let (inner, desc) = peelReynolds info.Kernel
+                    let shapeDesc =
+                        match inner with
+                        | IRVar (id, _) ->
+                            sprintf "IRVar(v%d) [id resolves in neither CallablesTable nor synthetic registry]" id
+                        | IRLit _ -> "IRLit [literal in kernel slot]"
+                        | IRBinOp _ -> "IRBinOp [unlifted operator expression]"
+                        | IRApp _ -> "IRApp [unlifted application]"
+                        | IRZero -> "IRZero [zero placeholder; should have been synthesized to a callable]"
+                        | IRReynolds _ -> "IRReynolds [nested Reynolds wrapper, not supported]"
+                        | _ -> "non-callable expression"
+                    let prefix =
+                        if desc.HasReynolds then "ApplyInfo: IRReynolds inner is"
+                        else "ApplyInfo: kernel slot is"
+                    addError ctx (sprintf "%s %s" prefix shapeDesc)
         | _ -> ()
         // Recurse into sub-expressions
         match expr with
