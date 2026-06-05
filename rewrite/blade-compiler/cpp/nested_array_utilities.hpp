@@ -38,35 +38,134 @@ namespace nested_array_utilities {
         typedef decltype(promote_impl<TYPE, rank>()) type;
     };
 
-    template<typename TYPE, const size_t SYMM[] = nullptr, const size_t DEPTH = 0>
-    constexpr TYPE allocate(const size_t extents[], const size_t lastIndex = 0) {
-        typedef typename std::remove_pointer<TYPE>::type DTYPE;
-        TYPE array;
+    // strip_ptr<T>: peel all pointer levels to the underlying scalar element
+    // type (T*** -> T). Used by the contiguous allocator to type the single
+    // backing pool.
+    template<typename TYPE, bool IsPtr = std::is_pointer<TYPE>::value>
+    struct strip_ptr;
+    template<typename TYPE>
+    struct strip_ptr<TYPE, false> { using type = TYPE; };
+    template<typename TYPE>
+    struct strip_ptr<TYPE, true> {
+        using type = typename strip_ptr<typename std::remove_pointer<TYPE>::type>::type;
+    };
 
+    // ========================================================================
+    // allocate<>: contiguous-backing allocation
+    // ========================================================================
+    //
+    // This is the index metamorphism of formalism §2.7 (double metamorphism
+    // with feedback) with the DATA phases (3-5) elided: we run the INDEX loop
+    // purely to discover the array's shape, allocating one slot per emitted
+    // leaf. index-cata structures the remaining space (the per-level bound
+    // shrink); index-ana emits each child slot; the feedback `i + lastIndex`
+    // threads the current index to condition the next level.
+    //
+    // LAYOUT: a single contiguous data pool (alloc #1) holds every scalar
+    // element in depth-first iteration order; a pointer skeleton (alloc #2)
+    // is laid over it so the nested `arr[i][j][k]` interface is unchanged.
+    // The leaf data rows point into `pool + offset`; interior rows are small
+    // pointer arrays. This replaces the previous piecewise `new T[]` per leaf,
+    // which produced a non-contiguous layout that could not be sliced into
+    // cudaMemcpy-able spans.
+    //
+    // PER-LEVEL SPAN: the child count at each level is computed by FORMULA from
+    // the prefix indices — `extents[DEPTH]` (free) or `extents[DEPTH]-lastIndex`
+    // (in symmetry group). This formula path is valid for rectangular,
+    // symmetric, and (via the sibling allocate_antisym) antisymmetric index
+    // types. SEAM: tree/graph/compound index types (extensions §2.3-2.4) do NOT
+    // have formula-computable per-level spans — they supply a precomputed
+    // subtree-size / offset table and will route through a separate placement
+    // path. The pool-and-skeleton substrate itself is universal (extensions
+    // §2.3.6); only this span computation forks.
+    //
+    // TEARDOWN CONTRACT (not yet built — see CodeGen scope-tracker TODO): the
+    // pool is ONE `delete[]`; the skeleton is the interior pointer rows, freed
+    // bottom-up. This differs from naive recursive per-leaf frees. Generated
+    // programs currently do not free (pre-existing leak, unchanged here).
+
+    // Phase A — count_leaves: total SCALAR element count under this subtree.
+    // Same recursion shape as the skeleton walk, so the count provably matches
+    // the allocation traversal (no formula-vs-traversal drift).
+    template<typename TYPE, const size_t SYMM[] = nullptr, const size_t DEPTH = 0>
+    constexpr size_t count_leaves(const size_t extents[], const size_t lastIndex = 0) {
+        typedef typename std::remove_pointer<TYPE>::type DTYPE;
+
+        size_t n;
         if constexpr ((bool)SYMM && DEPTH > 0 && SYMM[DEPTH-1] == SYMM[DEPTH]) {
-            array = new DTYPE[extents[DEPTH] - lastIndex];
-            if constexpr (std::is_pointer<DTYPE>::value) {
-                for (size_t i = 0; i < extents[DEPTH] - lastIndex; i++) {
-                    if constexpr ((bool)SYMM && SYMM[DEPTH] == SYMM[DEPTH + 1]) {
-                        array[i] = allocate<DTYPE, SYMM, DEPTH + 1>(extents, i + lastIndex);
-                    } else {
-                        array[i] = allocate<DTYPE, SYMM, DEPTH + 1>(extents);
-                    }
-                }
-            }
+            n = extents[DEPTH] - lastIndex;
         } else {
-            array = new DTYPE[extents[DEPTH]];
-            if constexpr (std::is_pointer<DTYPE>::value) {
-                for (size_t i = 0; i < extents[DEPTH]; i++) {
-                    if constexpr ((bool)SYMM && SYMM[DEPTH] == SYMM[DEPTH + 1]) {
-                        array[i] = allocate<DTYPE, SYMM, DEPTH + 1>(extents, i);
-                    } else {
-                        array[i] = allocate<DTYPE, SYMM, DEPTH + 1>(extents);
-                    }
+            n = extents[DEPTH];
+        }
+
+        if constexpr (!std::is_pointer<DTYPE>::value) {
+            return n;  // leaf data row contributes n scalars
+        } else {
+            size_t total = 0;
+            for (size_t i = 0; i < n; i++) {
+                if constexpr ((bool)SYMM && SYMM[DEPTH] == SYMM[DEPTH + 1]) {
+                    if constexpr ((bool)SYMM && DEPTH > 0 && SYMM[DEPTH-1] == SYMM[DEPTH])
+                        total += count_leaves<DTYPE, SYMM, DEPTH + 1>(extents, i + lastIndex);
+                    else
+                        total += count_leaves<DTYPE, SYMM, DEPTH + 1>(extents, i);
+                } else {
+                    total += count_leaves<DTYPE, SYMM, DEPTH + 1>(extents, 0);
                 }
             }
+            return total;
         }
-        return array;
+    }
+
+    // Phase C — build_skeleton: build pointer rows (alloc #2); leaf data rows
+    // point into `pool`. `offset` is threaded by reference so leaf placement
+    // order equals the DFS traversal order (the canonical storage coordinate
+    // system that linearize/unlinearize will later have to agree with).
+    template<typename TYPE, const size_t SYMM[] = nullptr, const size_t DEPTH = 0>
+    TYPE build_skeleton(const size_t extents[],
+                        typename strip_ptr<TYPE>::type* pool,
+                        size_t& offset,
+                        const size_t lastIndex = 0) {
+        typedef typename std::remove_pointer<TYPE>::type DTYPE;
+
+        size_t n;
+        if constexpr ((bool)SYMM && DEPTH > 0 && SYMM[DEPTH-1] == SYMM[DEPTH]) {
+            n = extents[DEPTH] - lastIndex;
+        } else {
+            n = extents[DEPTH];
+        }
+
+        if constexpr (!std::is_pointer<DTYPE>::value) {
+            // Leaf data row: point into the contiguous pool, advance offset.
+            TYPE row = pool + offset;
+            offset += n;
+            return row;
+        } else {
+            // Interior pointer row (alloc #2).
+            TYPE row = new DTYPE[n];
+            for (size_t i = 0; i < n; i++) {
+                if constexpr ((bool)SYMM && SYMM[DEPTH] == SYMM[DEPTH + 1]) {
+                    if constexpr ((bool)SYMM && DEPTH > 0 && SYMM[DEPTH-1] == SYMM[DEPTH])
+                        row[i] = build_skeleton<DTYPE, SYMM, DEPTH + 1>(extents, pool, offset, i + lastIndex);
+                    else
+                        row[i] = build_skeleton<DTYPE, SYMM, DEPTH + 1>(extents, pool, offset, i);
+                } else {
+                    row[i] = build_skeleton<DTYPE, SYMM, DEPTH + 1>(extents, pool, offset, 0);
+                }
+            }
+            return row;
+        }
+    }
+
+    // Top-level entry. Signature compatible with the prior allocate<> (the
+    // optional trailing lastIndex is accepted and ignored at the top level;
+    // internal recursion threads it). Call sites are unchanged.
+    template<typename TYPE, const size_t SYMM[] = nullptr, const size_t DEPTH = 0>
+    TYPE allocate(const size_t extents[], const size_t /*lastIndex*/ = 0) {
+        using SCALAR = typename strip_ptr<TYPE>::type;
+        size_t total = count_leaves<TYPE, SYMM, 0>(extents, 0);
+        SCALAR* pool = new SCALAR[total];                                 // alloc #1
+        size_t offset = 0;
+        return build_skeleton<TYPE, SYMM, 0>(extents, pool, offset, 0);   // alloc #2
     }
 
     template<typename TYPE, const size_t SYMM[] = nullptr, const size_t DEPTH = 0>
@@ -145,33 +244,73 @@ namespace nested_array_utilities {
     // Antisymmetric array support
     // =========================================================================
 
-    // Allocate antisymmetric array: strict i < j, so n-1 elements in first row,
-    // n-2 in second, etc. Total: n(n-1)/2
-    // Same nested pointer structure as symmetric but with -1 offset at each level.
-    template<typename TYPE, const size_t DEPTH = 0>
-    constexpr TYPE allocate_antisym(const size_t extents[], const size_t lastIndex = 0) {
-        typedef typename std::remove_pointer<TYPE>::type DTYPE;
-        TYPE array;
+    // Allocate antisymmetric array: strict i < j < ... < k (no repetition).
+    // Cardinality = C(n, r) per formalism (AntisymIdx<r,n>). Contiguous backing:
+    // one data pool (alloc #1) + pointer skeleton (alloc #2), same pattern as
+    // allocate<> above. The strict-simplex recurrence starts each level's index
+    // at prev+1 (vs. symmetric's prev), so no diagonal is stored.
+    //
+    // NOTE (correctness fix): the previous version used a per-level bound of
+    // `extents[DEPTH] - lastIndex` at every level INCLUDING the leaf, which is
+    // the symmetric (<=) count, not the strict (<) count. That over-counted at
+    // rank >= 3 (e.g. rank-3 n=4 gave 10 instead of C(4,3)=4); rank-2 happened
+    // to be correct. The strict `start = prev+1` recurrence below matches the
+    // documented C(n,r) cardinality at all ranks.
+    //
+    // SEAM / TEARDOWN: same as allocate<> — pool is one delete[], skeleton rows
+    // freed bottom-up; not yet built (pre-existing leak). Tree/graph antisym
+    // (commutative children, extensions §2.3.8 open question) is future work.
 
-        if constexpr (DEPTH == 0) {
-            // Outermost: full extent (rows)
-            array = new DTYPE[extents[DEPTH]];
-            if constexpr (std::is_pointer<DTYPE>::value) {
-                for (size_t i = 0; i < extents[DEPTH]; i++) {
-                    array[i] = allocate_antisym<DTYPE, DEPTH + 1>(extents, i + 1);
-                }
-            }
+    // Phase A — count strict-simplex leaves. `start` = first allowed index here.
+    template<typename TYPE, const size_t DEPTH = 0>
+    constexpr size_t count_antisym(const size_t extents[], size_t start = 0) {
+        typedef typename std::remove_pointer<TYPE>::type DTYPE;
+        size_t n = extents[DEPTH];
+        size_t cnt = (n > start) ? n - start : 0;          // indices [start, n)
+        if constexpr (!std::is_pointer<DTYPE>::value) {
+            return cnt;                                     // leaf row length
         } else {
-            // Inner: strict bound, extent - lastIndex elements
-            size_t len = (extents[DEPTH] > lastIndex) ? extents[DEPTH] - lastIndex : 0;
-            array = new DTYPE[len];
-            if constexpr (std::is_pointer<DTYPE>::value) {
-                for (size_t i = 0; i < len; i++) {
-                    array[i] = allocate_antisym<DTYPE, DEPTH + 1>(extents, i + lastIndex);
-                }
-            }
+            size_t total = 0;
+            for (size_t idx = start; idx < n; idx++)
+                total += count_antisym<DTYPE, DEPTH + 1>(extents, idx + 1);  // strict
+            return total;
         }
-        return array;
+    }
+
+    // Phase C — build skeleton over pool; leaf rows point into `pool`.
+    // `offset` threaded by reference => leaf placement order == DFS order.
+    template<typename TYPE, const size_t DEPTH = 0>
+    TYPE build_antisym(const size_t extents[],
+                       typename strip_ptr<TYPE>::type* pool,
+                       size_t& offset,
+                       size_t start = 0) {
+        typedef typename std::remove_pointer<TYPE>::type DTYPE;
+        size_t n = extents[DEPTH];
+        size_t cnt = (n > start) ? n - start : 0;
+        if constexpr (!std::is_pointer<DTYPE>::value) {
+            TYPE row = pool + offset;                       // leaf data row
+            offset += cnt;
+            return row;
+        } else {
+            TYPE row = new DTYPE[cnt];
+            size_t local = 0;
+            for (size_t idx = start; idx < n; idx++)
+                row[local++] = build_antisym<DTYPE, DEPTH + 1>(extents, pool, offset, idx + 1);
+            return row;
+        }
+    }
+
+    // Top-level entry. Signature compatible with the prior allocate_antisym
+    // (optional trailing lastIndex accepted and ignored at top level).
+    template<typename TYPE, const size_t DEPTH = 0>
+    TYPE allocate_antisym(const size_t extents[], const size_t /*lastIndex*/ = 0) {
+        using SCALAR = typename strip_ptr<TYPE>::type;
+        size_t total = count_antisym<TYPE, 0>(extents, 0);
+        // Guard the degenerate total==0 case (e.g. rank > n): allocate a
+        // 1-element pool so `new SCALAR[0]`-then-deref is never relied upon.
+        SCALAR* pool = new SCALAR[total > 0 ? total : 1];   // alloc #1
+        size_t offset = 0;
+        return build_antisym<TYPE, 0>(extents, pool, offset, 0);  // alloc #2
     }
 
     // =========================================================================

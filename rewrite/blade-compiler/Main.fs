@@ -615,6 +615,115 @@ let checkGppAvailable () =
     // Just assume g++ is available - actual errors will be caught during compilation
     true
 
+// ============================================================================
+// Backend capability detection + toolchain resolution
+//
+// CUDA is a backend *mode* from Blade's POV: the choice of whether a test
+// targets the device is determined during codegen. From the harness POV
+// the generated source is already settled by the time we compile, so the
+// backend requirement is *inferred* from the output (presence of device
+// kernels) rather than declared per-test.
+//
+// The harness advertises environment capabilities once at startup; each
+// test's inferred requirement is intersected against them. A test whose
+// requirement the environment can't satisfy is SKIPPED with a reason, not
+// failed. The host-compiler choice is a per-(platform, backend) resolution,
+// never a per-test axis.
+// ============================================================================
+
+type HostPlatform = PWindows | PLinux | PMacOS
+
+type Capabilities = {
+    Platform : HostPlatform
+    HasGpp   : bool
+    HasNvcc  : bool
+    HasCl    : bool      // cl.exe on PATH (the host compiler nvcc drives on Windows)
+    HasGpu   : bool      // a runnable CUDA device is present
+}
+
+/// Backend requirement inferred from generated source. `RequiresCuda` when
+/// codegen emitted at least one device kernel; `CpuOnly` otherwise.
+type BackendReq = CpuOnly | RequiresCuda
+
+/// Resolution of (capabilities, requirement) into a concrete compile action.
+type CompilePlan =
+    | UseGpp
+    | UseNvcc                 // nvcc drives host compiler: cl.exe (Windows) / g++ (Linux)
+    | SkipCompile of string   // human-readable reason
+
+/// Probe whether a tool responds to a version/help query on PATH.
+let private probeTool (exe: string) (args: string) : bool =
+    try
+        let psi = ProcessStartInfo(exe, args)
+        psi.RedirectStandardOutput <- true
+        psi.RedirectStandardError <- true
+        psi.UseShellExecute <- false
+        psi.CreateNoWindow <- true
+        use proc = Process.Start(psi)
+        // Drain to avoid pipe deadlock; we only care that it launched + exited.
+        proc.StandardOutput.ReadToEnd() |> ignore
+        proc.StandardError.ReadToEnd() |> ignore
+        proc.WaitForExit(10000) |> ignore
+        proc.ExitCode = 0
+    with _ -> false
+
+/// Probe for a runnable CUDA device. `nvidia-smi -L` lists devices and exits
+/// 0 with a non-empty list when at least one GPU is present. This is a proxy
+/// for a real `cudaGetDeviceCount` probe but avoids compiling one.
+let private probeGpu () : bool =
+    try
+        let psi = ProcessStartInfo("nvidia-smi", "-L")
+        psi.RedirectStandardOutput <- true
+        psi.RedirectStandardError <- true
+        psi.UseShellExecute <- false
+        psi.CreateNoWindow <- true
+        use proc = Process.Start(psi)
+        let out = proc.StandardOutput.ReadToEnd()
+        proc.StandardError.ReadToEnd() |> ignore
+        proc.WaitForExit(10000) |> ignore
+        proc.ExitCode = 0 && out.Contains("GPU")
+    with _ -> false
+
+let detectCapabilities () : Capabilities =
+    let platform =
+        if RuntimeInformation.IsOSPlatform(OSPlatform.Windows) then PWindows
+        elif RuntimeInformation.IsOSPlatform(OSPlatform.OSX) then PMacOS
+        else PLinux
+    {
+        Platform = platform
+        HasGpp   = probeTool "g++" "--version"
+        HasNvcc  = probeTool "nvcc" "--version"
+        HasCl    = (platform = PWindows) && probeTool "cl" "/?"
+        HasGpu   = probeGpu ()
+    }
+
+/// Capabilities are environment-global; detect once, lazily.
+let capabilities = lazy (detectCapabilities ())
+
+/// Infer the backend requirement from generated source. CUDA codegen emits
+/// `__global__`-qualified kernels; CPU codegen never does. This keeps the
+/// codegen signature untouched while the CUDA backend is built out — every
+/// current test infers CpuOnly, and the inference flips automatically once
+/// device kernels appear in the output.
+let inferBackendReq (generatedSource: string) : BackendReq =
+    if generatedSource.Contains("__global__") then RequiresCuda else CpuOnly
+
+/// Resolve (capabilities, requirement) into a compile action. A test never
+/// picks a compiler; it produces a BackendReq and this picks the toolchain.
+let resolveCompile (caps: Capabilities) (req: BackendReq) : CompilePlan =
+    match req, caps.Platform with
+    | CpuOnly, _ when not caps.HasGpp           -> SkipCompile "requires g++, not found"
+    | CpuOnly, _                                -> UseGpp
+    | RequiresCuda, _ when not caps.HasNvcc     -> SkipCompile "requires CUDA, nvcc not found"
+    | RequiresCuda, PMacOS                      -> SkipCompile "CUDA unsupported on macOS"
+    | RequiresCuda, PWindows when not caps.HasCl -> SkipCompile "requires CUDA, cl.exe not found (nvcc host compiler)"
+    | RequiresCuda, _                           -> UseNvcc
+
+/// Whether a Result error string denotes a skip (no-toolchain, no-GPU, etc.)
+/// rather than a genuine failure. Skips never count against the pass total.
+let isSkipError (e: string) =
+    e = "Skipped" || e.StartsWith("Skipped:")
+
 /// Compile a C++ file with g++
 let compileCpp (cppFile: string) (outputDir: string) : Result<string, string> =
     try
@@ -676,6 +785,71 @@ let compileCpp (cppFile: string) (outputDir: string) : Result<string, string> =
                 Error (sprintf "Compilation failed (exit %d):\n%s" proc.ExitCode allOutput)
     with ex ->
         Error (sprintf "Compilation exception: %s\n%s" ex.Message ex.StackTrace)
+
+/// Compile a CUDA (.cu) file with nvcc. nvcc auto-selects the host compiler
+/// (cl.exe on Windows, g++ on Linux). Host-side warning flags are passed
+/// through with -Xcompiler. Mirrors compileCpp's subprocess machinery.
+let compileCuda (cuFile: string) (outputDir: string) : Result<string, string> =
+    try
+        let exeExt = if RuntimeInformation.IsOSPlatform(OSPlatform.Windows) then ".exe" else ".out"
+        let exeFile = Path.ChangeExtension(cuFile, exeExt)
+        let cuFullPath = Path.GetFullPath(cuFile)
+        let exeFullPath = Path.GetFullPath(exeFile)
+
+        // Host-compiler passthrough for the narrowing safety net. nvcc's own
+        // front-end doesn't accept -Werror=float-conversion, so route it to
+        // the host compiler via -Xcompiler. (cl.exe uses different flag
+        // spellings; on Windows we drop the g++-specific ones and rely on
+        // nvcc/cl defaults — refine once a Windows CUDA box is exercised.)
+        let hostWarn =
+            if RuntimeInformation.IsOSPlatform(OSPlatform.Windows) then ""
+            else "-Xcompiler -Werror=float-conversion,-Werror=narrowing"
+
+        // -std=c++17 matches the CPU path. nvcc accepts it directly.
+        let args = sprintf "-std=c++17 -O2 %s -o \"%s\" \"%s\"" hostWarn exeFullPath cuFullPath
+
+        let psi = ProcessStartInfo("nvcc", args)
+        psi.RedirectStandardOutput <- true
+        psi.RedirectStandardError <- true
+        psi.UseShellExecute <- false
+        psi.CreateNoWindow <- true
+
+        use proc = Process.Start(psi)
+        let stdoutTask = proc.StandardOutput.ReadToEndAsync()
+        let stderrTask = proc.StandardError.ReadToEndAsync()
+
+        if not (proc.WaitForExit(120000)) then
+            try proc.Kill() with _ -> ()
+            Error "CUDA compilation timed out after 120s"
+        else
+
+        let stdout = stdoutTask.Result
+        let stderr = stderrTask.Result
+        let allOutput =
+            [if not (String.IsNullOrWhiteSpace stdout) then yield stdout
+             if not (String.IsNullOrWhiteSpace stderr) then yield stderr]
+            |> String.concat "\n"
+
+        if proc.ExitCode = 0 then
+            Ok exeFullPath
+        else
+            if String.IsNullOrWhiteSpace allOutput then
+                Error (sprintf "CUDA compilation failed (exit %d) with no output. Command: nvcc %s" proc.ExitCode args)
+            else
+                Error (sprintf "CUDA compilation failed (exit %d):\n%s" proc.ExitCode allOutput)
+    with ex ->
+        Error (sprintf "CUDA compilation exception: %s\n%s" ex.Message ex.StackTrace)
+
+/// Compile a generated source file according to its backend requirement,
+/// resolved against the environment's capabilities. Returns the existing
+/// `Result<exePath, message>` shape; a skip is reported as
+/// `Error "Skipped: <reason>"` so downstream skip handling recognizes it.
+let compileForBackend (caps: Capabilities) (req: BackendReq) (srcFile: string) (outputDir: string) : Result<string, string> =
+    match resolveCompile caps req with
+    | UseGpp          -> compileCpp srcFile outputDir
+    | UseNvcc         -> compileCuda srcFile outputDir
+    | SkipCompile why -> Error ("Skipped: " + why)
+
 
 /// Run a compiled executable
 let runExecutable (exeFile: string) : Result<int * string, string> =
@@ -752,7 +926,7 @@ type private FsPipelineOutcome =
     | FpIRError of string
     | FpIRValidationError of string list
     | FpIROnly of IRProgram          // compileAndRun = false, no .cpp generated
-    | FpCppGenerated of IRProgram * string * string list  // ir, cppFile, codegenWarnings
+    | FpCppGenerated of IRProgram * string * string list * BackendReq  // ir, srcFile, warnings, backend
     | FpGenError of IRProgram * string  // ir was valid but codegen threw
 
 let private runFsharpPipelineLocked (source: string) (testName: string) (outputDir: string) (compileAndRun: bool) : FsPipelineOutcome =
@@ -767,11 +941,18 @@ let private runFsharpPipelineLocked (source: string) (testName: string) (outputD
                 if not compileAndRun then FpIROnly ir
                 else
                     let safeName = sanitizeFileName testName
-                    let cppFile = Path.Combine(outputDir, safeName + ".cpp")
                     try
                         let (cppCode, codegenWarnings) = CodeGen.genSelfContainedProgramFromIR ir testName
-                        File.WriteAllText(cppFile, cppCode)
-                        FpCppGenerated (ir, cppFile, codegenWarnings)
+                        // Backend requirement is inferred from the settled
+                        // codegen output. CUDA codegen emits device kernels
+                        // (.cu, compiled by nvcc); CPU codegen does not
+                        // (.cpp, g++). The extension matches so the host
+                        // toolchain recognizes device syntax.
+                        let backendReq = inferBackendReq cppCode
+                        let ext = match backendReq with RequiresCuda -> ".cu" | CpuOnly -> ".cpp"
+                        let srcFile = Path.Combine(outputDir, safeName + ext)
+                        File.WriteAllText(srcFile, cppCode)
+                        FpCppGenerated (ir, srcFile, codegenWarnings, backendReq)
                     with ex ->
                         FpGenError (ir, sprintf "Generation failed: %s" ex.Message)
     )
@@ -805,50 +986,67 @@ let runFullTest (testName: string) (source: string) (outputDir: string) (compile
           CppFile = None; CompileResult = Error msg;
           RunResult = Error "Generation failed"; ValueCheckResult = Error ["Generation failed"];
           HasExpectedValues = not expectedValues.IsEmpty }
-    | FpCppGenerated (ir, cppFile, codegenWarnings) ->
+    | FpCppGenerated (ir, srcFile, codegenWarnings, backendReq) ->
         for w in codegenWarnings do
             printfn "  [CodeGen Warning] %s" w
 
-        // Step 3: Compile (outside lock — separate subprocess)
-        let compileResult = compileCpp cppFile outputDir
+        let caps = capabilities.Value
+
+        // Step 3: Compile (outside lock — separate subprocess). The
+        // toolchain is resolved from the inferred backend requirement
+        // against the environment's capabilities; an unsatisfiable
+        // requirement comes back as Error "Skipped: <reason>".
+        let compileResult = compileForBackend caps backendReq srcFile outputDir
 
         match compileResult with
         | Error e ->
+            // Both genuine compile failures and skips flow here; the
+            // skip vs fail distinction is made downstream via isSkipError.
+            let runErr = if isSkipError e then e else "Compile failed"
             { TestName = testName; IRResult = Ok ir; CppGenerated = true;
-              CppFile = Some cppFile; CompileResult = Error e; RunResult = Error "Compile failed";
-              ValueCheckResult = Error ["Compile failed"]; HasExpectedValues = not expectedValues.IsEmpty }
+              CppFile = Some srcFile; CompileResult = Error e; RunResult = Error runErr;
+              ValueCheckResult = Error [runErr]; HasExpectedValues = not expectedValues.IsEmpty }
         | Ok exeFile ->
-            // Step 4: Run (outside lock)
-            let runResult = runExecutable exeFile
+            // Step 4: Run — but a CUDA-requiring test on a GPU-less box can
+            // compile yet not execute. Validate the compile, skip the run.
+            if backendReq = RequiresCuda && not caps.HasGpu then
+                { TestName = testName; IRResult = Ok ir; CppGenerated = true;
+                  CppFile = Some srcFile; CompileResult = Ok exeFile;
+                  RunResult = Error "Skipped: no GPU";
+                  ValueCheckResult = Error ["Skipped: no GPU"];
+                  HasExpectedValues = not expectedValues.IsEmpty }
+            else
+                let runResult = runExecutable exeFile
 
-            // Step 5: Check values if run succeeded
-            let valueCheckResult =
-                match runResult with
-                | Ok (0, output) ->
-                    if expectedValues.IsEmpty then Ok ()
-                    else checkExpectedValues expectedValues output
-                | Ok (code, _) -> Error [sprintf "Exit code %d" code]
-                | Error e -> Error [e]
+                // Step 5: Check values if run succeeded
+                let valueCheckResult =
+                    match runResult with
+                    | Ok (0, output) ->
+                        if expectedValues.IsEmpty then Ok ()
+                        else checkExpectedValues expectedValues output
+                    | Ok (code, _) -> Error [sprintf "Exit code %d" code]
+                    | Error e -> Error [e]
 
-            { TestName = testName; IRResult = Ok ir; CppGenerated = true;
-              CppFile = Some cppFile; CompileResult = Ok exeFile; RunResult = runResult;
-              ValueCheckResult = valueCheckResult; HasExpectedValues = not expectedValues.IsEmpty }
+                { TestName = testName; IRResult = Ok ir; CppGenerated = true;
+                  CppFile = Some srcFile; CompileResult = Ok exeFile; RunResult = runResult;
+                  ValueCheckResult = valueCheckResult; HasExpectedValues = not expectedValues.IsEmpty }
 
 /// Print a full test result
 let printFullTestResult (result: FullTestResult) (verbose: bool) (showFullError: bool) =
     let irStatus = match result.IRResult with Ok _ -> "OK" | Error _ -> "FAIL"
     let cppStatus = if result.CppGenerated then "OK" else "SKIP"
-    let compileStatus = match result.CompileResult with Ok _ -> "OK" | Error "Skipped" -> "SKIP" | Error _ -> "FAIL"
+    let compileStatus = match result.CompileResult with Ok _ -> "OK" | Error e when isSkipError e -> "SKIP" | Error _ -> "FAIL"
     let runStatus = 
         match result.RunResult with 
         | Ok (0, _) -> "OK" 
         | Ok (code, _) -> sprintf "EXIT(%d)" code
-        | Error "Skipped" -> "SKIP"
+        | Error e when isSkipError e -> "SKIP"
         | Error _ -> "FAIL"
     let valueStatus =
         if not result.HasExpectedValues then ""
         else match result.ValueCheckResult with
              | Ok () -> "OK"
+             | Error errs when errs |> List.exists isSkipError -> "SKIP"
              | Error _ -> "FAIL"
     
     // Only show value status if there were expected values to check
@@ -862,7 +1060,7 @@ let printFullTestResult (result: FullTestResult) (verbose: bool) (showFullError:
         | Ok _ -> ()
         
         match result.CompileResult with
-        | Error e when e <> "Skipped" && e <> "IR failed" -> 
+        | Error e when not (isSkipError e) && e <> "IR failed" -> 
             printfn "    Compile Error:\n%s" e
             match result.CppFile with
             | Some f -> printfn "    Generated: %s" f
@@ -877,13 +1075,13 @@ let printFullTestResult (result: FullTestResult) (verbose: bool) (showFullError:
                     printfn "    Output:\n%s" output
                 else
                     printfn "    Output: %s" (output.Split('\n').[0])
-        | Error e when e <> "Skipped" && e <> "IR failed" && e <> "Compile failed" -> 
+        | Error e when not (isSkipError e) && e <> "IR failed" && e <> "Compile failed" -> 
             printfn "    Run Error: %s" e
         | _ -> ()
         
         // Show value check errors
         match result.ValueCheckResult with
-        | Error errors when not (List.contains "Skipped" errors) && 
+        | Error errors when not (errors |> List.exists isSkipError) && 
                            not (List.contains "IR failed" errors) &&
                            not (List.contains "Compile failed" errors) &&
                            not (List.contains "Generation failed" errors) ->
@@ -993,16 +1191,23 @@ let runMultiFileTestsFull (name: string) (tests: (string * (string * string) lis
                 failed <- failed + 1
             | Ok ir ->
             let safeName = sanitizeFileName testName
-            let cppFile = Path.Combine(outputDir, safeName + ".cpp")
             try
                 let (cppCode, codegenWarnings) = CodeGen.genSelfContainedProgramFromIR ir testName
                 for w in codegenWarnings do
                     printfn "  [CodeGen Warning] %s" w
+                // Same backend inference as the single-file pipeline:
+                // .cu + nvcc when device kernels are emitted, else .cpp + g++.
+                let backendReq = inferBackendReq cppCode
+                let ext = match backendReq with RequiresCuda -> ".cu" | CpuOnly -> ".cpp"
+                let cppFile = Path.Combine(outputDir, safeName + ext)
                 File.WriteAllText(cppFile, cppCode)
                 printfn "Generated: %s" cppFile
                 
                 if gppAvailable then
-                    match compileCpp cppFile outputDir with
+                    match compileForBackend capabilities.Value backendReq cppFile outputDir with
+                    | Error e when isSkipError e ->
+                        printfn "SKIPPED (%s)" e
+                        skipped <- skipped + 1
                     | Error e ->
                         printfn "FAILED (compile): %s" e
                         failed <- failed + 1
@@ -1085,7 +1290,12 @@ let runTestCategoryFull (name: string) (tests: (string * string) list) (outputDi
         testArray
         |> Array.Parallel.mapi (fun idx (testName, source) ->
             let result = runFullTest testName source outputDir gppAvailable
-            let status = match result.CompileResult with Ok _ -> "ok" | Error e when e = "IR failed" -> "IR fail" | Error _ -> "compile fail"
+            let status =
+                match result.CompileResult with
+                | Ok _ -> "ok"
+                | Error e when e = "IR failed" -> "IR fail"
+                | Error e when isSkipError e -> "skip"
+                | Error _ -> "compile fail"
             let line = sprintf "[%d/%d] %s... %s" (idx + 1) total testName status
             
             // Buffer this result and flush any sequential completions
@@ -1100,11 +1310,11 @@ let runTestCategoryFull (name: string) (tests: (string * string) list) (outputDi
             result)
         |> Array.toList
     
-    // Find first compile failure to show full error
+    // Find first compile failure to show full error (skips are not failures)
     let firstCompileFailure = 
         results |> List.tryFind (fun r -> 
             match r.CompileResult with 
-            | Error e when e <> "Skipped" && e <> "IR failed" -> true 
+            | Error e when not (isSkipError e) && e <> "IR failed" -> true 
             | _ -> false)
     
     // Print results (brief for most, full for first failure)
@@ -1137,18 +1347,41 @@ let runTestCategoryFull (name: string) (tests: (string * string) list) (outputDi
     let fullPassed = results |> List.filter isFullPass |> List.length
     let compiled = results |> List.filter (fun r -> match r.CompileResult with Ok _ -> true | _ -> false) |> List.length
     let generated = results |> List.filter (fun r -> r.CppGenerated) |> List.length
+
+    // A test is "skipped" if either its compile or its run was skipped
+    // (no toolchain, or no GPU for a CUDA-requiring test). Skips are not
+    // failures and must not deflate the pass totals.
+    let isSkipped (r: FullTestResult) =
+        (match r.CompileResult with Error e when isSkipError e -> true | _ -> false) ||
+        (match r.RunResult with Error e when isSkipError e -> true | _ -> false)
+    let skipped = results |> List.filter isSkipped |> List.length
+
+    // Tests whose codegen inferred the CUDA backend (emitted device
+    // kernels → .cu source). Reported separately so the CPU/CUDA split
+    // is visible at a glance.
+    let cudaTests =
+        results |> List.filter (fun r ->
+            match r.CppFile with Some f -> f.EndsWith(".cu") | None -> false) |> List.length
     
-    // Count value check results (only for tests that have expected values)
-    let testsWithExpected = results |> List.filter (fun r -> r.HasExpectedValues)
+    // Count value check results (only for tests that have expected values
+    // AND weren't skipped — a skipped test has no output to check).
+    let testsWithExpected = results |> List.filter (fun r -> r.HasExpectedValues && not (isSkipped r))
     let valuesPassed = testsWithExpected |> List.filter (fun r -> 
         match r.ValueCheckResult with Ok () -> true | _ -> false) |> List.length
+
+    let caps = capabilities.Value
+    let platformStr = match caps.Platform with PWindows -> "Windows" | PLinux -> "Linux" | PMacOS -> "macOS"
     
     printHeader "Test Summary"
+    printfn "Environment:  %s | g++:%b nvcc:%b cl:%b gpu:%b"
+        platformStr caps.HasGpp caps.HasNvcc caps.HasCl caps.HasGpu
     printfn "IR Lowering:  %d passed, %d failed" irPassed irFailed
-    printfn "C++ Generated: %d / %d" generated results.Length
+    printfn "C++ Generated: %d / %d  (CUDA backend: %d)" generated results.Length cudaTests
     if gppAvailable then
         printfn "Compiled:     %d / %d" compiled results.Length
         printfn "Full Pass:    %d / %d (IR + Compile + Run)" fullPassed results.Length
+        if skipped > 0 then
+            printfn "Skipped:      %d (toolchain/GPU unavailable)" skipped
         if testsWithExpected.Length > 0 then
             printfn "Value Check:  %d / %d" valuesPassed testsWithExpected.Length
     else
@@ -1157,7 +1390,299 @@ let runTestCategoryFull (name: string) (tests: (string * string) list) (outputDi
     
     if irFailed > 0 then 1 else 0
 
-/// Run all tests with full C++ pipeline.
+/// Run the standalone C++ allocation-layout test suite (cpp/alloc_layout_tests.cpp).
+///
+/// These tests verify runtime-layout invariants of the contiguous-backing
+/// allocate<> that the value-checking Blade tests structurally cannot catch:
+/// single-pool contiguity, DFS leaf ordering, and closed-form cardinality.
+/// They are C++ (the property under test is a C++ runtime invariant), so this
+/// runs them directly rather than through the Blade source pipeline — the same
+/// category as `test normalize` / `test unify`, just in C++.
+///
+/// The test .cpp and the runtime headers are both shipped in cpp/ next to the
+/// compiler binary (AppContext.BaseDirectory/cpp), copied there by Blade.fsproj.
+/// Compiling in that directory means the test exercises the EXACT headers the
+/// codegen path uses — not a stale copy — which is the point of syncing it here.
+///
+/// Returns 0 on all-pass or skip (g++ absent); 1 on any compile/run/check failure.
+let runAllocLayoutTests () : int =
+    let cppDir = Path.Combine(AppContext.BaseDirectory, "cpp")
+    let testSrc = Path.Combine(cppDir, "alloc_layout_tests.cpp")
+    let caps = capabilities.Value
+    printHeader "Allocation Layout Tests"
+    if not caps.HasGpp then
+        printfn "Skipped: g++ not found (cannot compile C++ layout tests)."
+        0  // skip, not failure — mirrors harness skip policy
+    elif not (File.Exists testSrc) then
+        eprintfn "alloc_layout_tests.cpp not found at: %s" testSrc
+        eprintfn "Check that Blade.fsproj copies cpp/alloc_layout_tests.cpp to the output dir."
+        1
+    else
+        let exeExt = if RuntimeInformation.IsOSPlatform(OSPlatform.Windows) then ".exe" else ".out"
+        let exePath = Path.ChangeExtension(testSrc, exeExt)
+        // Compile in cppDir so #include "nested_array_utilities.hpp" resolves to
+        // the shipped headers, exactly as g++ resolves them for generated tests.
+        let args = sprintf "-std=c++17 -O2 -o \"%s\" \"%s\"" exePath testSrc
+        let psi = ProcessStartInfo("g++", args)
+        psi.RedirectStandardOutput <- true
+        psi.RedirectStandardError <- true
+        psi.UseShellExecute <- false
+        psi.CreateNoWindow <- true
+        psi.WorkingDirectory <- cppDir
+        use cproc = Process.Start(psi)
+        let cOut = cproc.StandardOutput.ReadToEndAsync()
+        let cErr = cproc.StandardError.ReadToEndAsync()
+        cproc.WaitForExit(60000) |> ignore
+        if cproc.ExitCode <> 0 then
+            printfn "C++ compilation FAILED:"
+            printfn "%s" (cOut.Result + "\n" + cErr.Result)
+            1
+        else
+            // Run the compiled test; stream its PASS/FAIL lines through.
+            let rpsi = ProcessStartInfo(exePath)
+            rpsi.RedirectStandardOutput <- true
+            rpsi.RedirectStandardError <- true
+            rpsi.UseShellExecute <- false
+            rpsi.CreateNoWindow <- true
+            rpsi.WorkingDirectory <- cppDir
+            use rproc = Process.Start(rpsi)
+            let rOut = rproc.StandardOutput.ReadToEndAsync()
+            let rErr = rproc.StandardError.ReadToEndAsync()
+            rproc.WaitForExit(30000) |> ignore
+            printf "%s" rOut.Result
+            if not (String.IsNullOrWhiteSpace rErr.Result) then eprintf "%s" rErr.Result
+            // Exit code is the source of truth (0 iff all checks passed).
+            if rproc.ExitCode = 0 then
+                printfn "All allocation layout tests passed."
+                0
+            else
+                printfn "Some allocation layout tests FAILED."
+                1
+
+/// Run OpenMP thread-coverage tests. Generates representative loop-nest
+/// programs with codegen TEST MODE on (which injects per-region thread
+/// observation), compiles with -fopenmp, runs with OMP_NUM_THREADS forced > 1,
+/// parses the emitted "[omp-coverage] region=... teamsz=K distinct=D maxth=M"
+/// lines, and applies the rule:
+///   - maxth <= 1            : single-core context — cannot test parallelism;
+///                             reported as a skip-ish PASS (not a failure).
+///   - maxth > 1, teamsz <= 1: ERROR — a loop that should be an OpenMP-parallel
+///                             loop ran as a serial region (pragma not honored).
+///   - maxth > 1, teamsz > 1 : PASS — a genuine parallel team was formed. (If
+///                             distinct == 1, the scheduler put all work on one
+///                             thread; that is an allowed scheduler choice, so
+///                             it is reported as a WARNING, not a failure.)
+///
+/// Returns 0 if no errors (warnings allowed), 1 if any error.
+let runOmpCoverageTests () : int =
+    let caps = capabilities.Value
+    printHeader "OpenMP Thread-Coverage Tests"
+    if not caps.HasGpp then
+        printfn "Skipped: g++ not found."
+        0
+    else
+        // Representative programs exercising each parallelization strategy.
+        // Source strings are defined as separate bindings (not inline in the
+        // list) so the triple-quoted content does not disturb F# offside parsing.
+        //
+        // COVERAGE programs (just need to compile + form a parallel region):
+        //   rect (collapse), symmetric (dynamic outer), and a partial-comm 3-arg
+        //   kernel (mixed symmetry structure). Antisymmetric STRICT iteration is
+        //   not expressed by a simple clause (it requires AntisymIdx typing), so
+        //   it is intentionally omitted here rather than guessed at.
+        let rectSrc =
+            "let A = [1.0,2.0,3.0,4.0,5.0,6.0,7.0,8.0]\n" +
+            "let B = [1.0,2.0,3.0,4.0,5.0,6.0,7.0,8.0]\n" +
+            "let L = method_for(A, B)\n" +
+            "let f = lambda(x, y) -> x * y\n" +
+            "let result = L <@> f |> compute\n"
+        let symSrc =
+            "let A = [1.0,2.0,3.0,4.0,5.0,6.0,7.0,8.0]\n" +
+            "let L = method_for(A, A)\n" +
+            "let k = lambda(x, y) where comm(x, y) -> x * y\n" +
+            "let result = L <@> k |> compute\n"
+        // Partial comm: 3-arg kernel with comm on a subset (proven form, see
+        // Test_Symmetry). Exercises a mixed symmetry nest through genNestPragma.
+        let mixedSrc =
+            "let A = [1.0,2.0,3.0,4.0]\n" +
+            "let L = method_for(A, A, A)\n" +
+            "let k = lambda(x, y, z) where comm(x, y) -> x * y * z\n" +
+            "let result = L <@> k |> compute\n"
+        let programs =
+            [ ("rect_outer_product", rectSrc)
+              ("symmetric_triangular", symSrc)
+              ("mixed_partial_comm", mixedSrc) ]
+        let outputDir = "./generated_omp_coverage"
+        Directory.CreateDirectory(outputDir) |> ignore
+        // Write runtime headers into the output dir so the generated programs'
+        // #include "nested_array_utilities.hpp" / "nested_array_types.hpp"
+        // resolve at g++ time (same as the main test path does).
+        File.WriteAllText(Path.Combine(outputDir, "nested_array_utilities.hpp"), CodeGen.genRuntimeHeader ())
+        File.WriteAllText(Path.Combine(outputDir, "nested_array_types.hpp"), CodeGen.genRuntimeArrayTypesHeader ())
+        let mutable errors = 0
+        let mutable warnings = 0
+        // Force a multi-thread environment for the run so the gate is meaningful.
+        let forcedThreads = "4"
+        for (name, src) in programs do
+            // Generate with codegen test-mode ON (injects instrumentation), then
+            // restore so nothing else in the process is affected.
+            setOmpTestMode true
+            let outcome =
+                try
+                    let safeName = sanitizeFileName name
+                    match lower src with
+                    | Error e -> Error (sprintf "lower failed: %s" e)
+                    | Ok ir0 ->
+                        let ir =
+                            match IR.validateIR ir0 with
+                            | Ok v -> v
+                            | Error _ -> ir0   // validation errors don't block this probe
+                        let (cppCode, _warnings) = CodeGen.genSelfContainedProgramFromIR ir name
+                        let srcFile = Path.Combine(outputDir, safeName + ".cpp")
+                        File.WriteAllText(srcFile, cppCode)
+                        Ok srcFile
+                with ex -> Error (sprintf "codegen failed: %s" ex.Message)
+            setOmpTestMode false
+            match outcome with
+            | Error e -> printfn "  [%s] generation FAILED: %s" name e; errors <- errors + 1
+            | Ok srcFile ->
+                let exeExt = if RuntimeInformation.IsOSPlatform(OSPlatform.Windows) then ".exe" else ".out"
+                // Use ABSOLUTE paths for g++. srcFile is relative to the process
+                // cwd; passing it relative while also setting WorkingDirectory to
+                // the output dir caused g++ to resolve it against that dir (a
+                // doubled path). Absolute paths make the working dir irrelevant.
+                let srcAbs = Path.GetFullPath(srcFile)
+                let exeAbs = Path.ChangeExtension(srcAbs, exeExt)
+                let cpsi = ProcessStartInfo("g++", sprintf "-std=c++17 -O2 -fopenmp -o \"%s\" \"%s\"" exeAbs srcAbs)
+                cpsi.RedirectStandardError <- true
+                cpsi.UseShellExecute <- false
+                use cproc = Process.Start(cpsi)
+                let cerr = cproc.StandardError.ReadToEndAsync()
+                cproc.WaitForExit(60000) |> ignore
+                if cproc.ExitCode <> 0 then
+                    printfn "  [%s] compile FAILED:\n%s" name cerr.Result
+                    errors <- errors + 1
+                else
+                    // Run with OMP_NUM_THREADS forced.
+                    let rpsi = ProcessStartInfo(exeAbs)
+                    rpsi.RedirectStandardOutput <- true
+                    rpsi.RedirectStandardError <- true
+                    rpsi.UseShellExecute <- false
+                    rpsi.WorkingDirectory <- Path.GetDirectoryName(exeAbs)
+                    rpsi.Environment.["OMP_NUM_THREADS"] <- forcedThreads
+                    use rproc = Process.Start(rpsi)
+                    let rout = rproc.StandardOutput.ReadToEndAsync()
+                    rproc.WaitForExit(30000) |> ignore
+                    let lines = rout.Result.Split('\n') |> Array.filter (fun l -> l.Contains("[omp-coverage]"))
+                    if lines.Length = 0 then
+                        printfn "  [%s] no coverage lines emitted (no parallel region?)" name
+                        // Not an error per se — the program may have no parallel loop.
+                    for line in lines do
+                        // parse "region=R teamsz=K distinct=D maxth=M"
+                        let getField (k: string) =
+                            let m = System.Text.RegularExpressions.Regex.Match(line, k + "=(\\d+)")
+                            if m.Success then int m.Groups.[1].Value else -1
+                        let teamsz = getField "teamsz"
+                        let distinct = getField "distinct"
+                        let maxth = getField "maxth"
+                        if maxth <= 1 then
+                            printfn "  [%s] PASS (single-core: maxth=%d, cannot test parallelism)" name maxth
+                        elif teamsz <= 1 then
+                            printfn "  [%s] ERROR: parallel loop ran serially (teamsz=%d, maxth=%d) — pragma not honored" name teamsz maxth
+                            errors <- errors + 1
+                        elif distinct <= 1 then
+                            printfn "  [%s] WARNING: parallel team formed (teamsz=%d) but scheduler used 1 thread (distinct=%d)" name teamsz distinct
+                            warnings <- warnings + 1
+                        else
+                            printfn "  [%s] PASS (teamsz=%d, distinct=%d, maxth=%d)" name teamsz distinct maxth
+
+        // -------------------------------------------------------------------
+        // VALUE CORRECTNESS UNDER FORCED MULTI-THREADING (#2)
+        // -------------------------------------------------------------------
+        // The coverage checks above confirm a parallel region forms, but NOT
+        // that the parallelized computation produces CORRECT values. A data
+        // race in the triangular outer-parallelization (the disjoint-slab
+        // assumption) would show as wrong values only under threading — which
+        // neither the coverage checks nor the main value suite (default
+        // threading) would catch. Here we run a symmetric computation with
+        // KNOWN expected values under OMP_NUM_THREADS=4, repeated several times
+        // (races are nondeterministic, so one run can pass by luck), and assert
+        // the values are correct every time.
+        //
+        // N=12 symmetric: C(13,2)=78 elements, large enough that the scheduler
+        // genuinely distributes the outer loop. Expected values computed here
+        // (not hand-written): for comm(x,y)->x*y over A=[1..N], the left-
+        // justified symmetric order is A[i]*A[j] for i<=j.
+        let nVal = 12
+        let aVals = [ for i in 1 .. nVal -> float i ]
+        let expectedSym =
+            [ for i in 0 .. nVal - 1 do
+                for j in i .. nVal - 1 do
+                    yield aVals.[i] * aVals.[j] ]
+        let aLit = aVals |> List.map (sprintf "%g") |> String.concat ","
+        let expectedLit = expectedSym |> List.map (sprintf "%g") |> String.concat ", "
+        let valSrc =
+            sprintf "let A = [%s]\n" aLit +
+            "let L = method_for(A, A)\n" +
+            "let k = lambda(x, y) where comm(x, y) -> x * y\n" +
+            "let result = L <@> k |> compute\n" +
+            sprintf "// EXPECT: result = [%s]\n" expectedLit
+        printSubHeader "Value correctness under forced threading (N=12 symmetric)"
+        setOmpTestMode false  // value test: no instrumentation, just real codegen
+        let valOutcome =
+            try
+                match lower valSrc with
+                | Error e -> Error (sprintf "lower failed: %s" e)
+                | Ok ir0 ->
+                    let ir = match IR.validateIR ir0 with Ok v -> v | Error _ -> ir0
+                    let (cppCode, _w) = CodeGen.genSelfContainedProgramFromIR ir "omp_value_check"
+                    let sf = Path.Combine(outputDir, "omp_value_check.cpp")
+                    File.WriteAllText(sf, cppCode)
+                    Ok (Path.GetFullPath sf)
+            with ex -> Error (sprintf "codegen failed: %s" ex.Message)
+        match valOutcome with
+        | Error e -> printfn "  generation FAILED: %s" e; errors <- errors + 1
+        | Ok srcAbs ->
+            let exeExt = if RuntimeInformation.IsOSPlatform(OSPlatform.Windows) then ".exe" else ".out"
+            let exeAbs = Path.ChangeExtension(srcAbs, exeExt)
+            let cpsi = ProcessStartInfo("g++", sprintf "-std=c++17 -O2 -fopenmp -o \"%s\" \"%s\"" exeAbs srcAbs)
+            cpsi.RedirectStandardError <- true
+            cpsi.UseShellExecute <- false
+            use cproc = Process.Start(cpsi)
+            let cerr = cproc.StandardError.ReadToEndAsync()
+            cproc.WaitForExit(60000) |> ignore
+            if cproc.ExitCode <> 0 then
+                printfn "  compile FAILED:\n%s" cerr.Result
+                errors <- errors + 1
+            else
+                let expected = parseExpectedValues valSrc
+                let mutable allRunsOk = true
+                // Repeat: a race may pass on some runs and fail on others.
+                for run in 1 .. 5 do
+                    let rpsi = ProcessStartInfo(exeAbs)
+                    rpsi.RedirectStandardOutput <- true
+                    rpsi.RedirectStandardError <- true
+                    rpsi.UseShellExecute <- false
+                    rpsi.WorkingDirectory <- Path.GetDirectoryName(exeAbs)
+                    rpsi.Environment.["OMP_NUM_THREADS"] <- forcedThreads
+                    use rproc = Process.Start(rpsi)
+                    let rout = rproc.StandardOutput.ReadToEndAsync()
+                    rproc.WaitForExit(30000) |> ignore
+                    match checkExpectedValues expected rout.Result with
+                    | Ok () -> ()
+                    | Error errs ->
+                        allRunsOk <- false
+                        printfn "  run %d: VALUE MISMATCH (possible race): %s" run (String.concat "; " errs)
+                if allRunsOk then
+                    printfn "  PASS (correct values across 5 runs under OMP_NUM_THREADS=%s)" forcedThreads
+                else
+                    printfn "  ERROR: values incorrect under threading — likely a data race in parallelization"
+                    errors <- errors + 1
+
+        printfn "OMP COVERAGE: %d error(s), %d warning(s)" errors warnings
+        if errors > 0 then 1 else 0
+
+
 /// Includes both the single-file test corpus (`allTests`) and the multi-file
 /// module/import corpus (`multiFileTests`). External-dependency tests
 /// (NetCDF provider tests in particular) are NOT included here — they have
@@ -1174,7 +1699,15 @@ let runAllTestsFull () =
     // Phase C Step 2: F# unit tests for the codegen substitution
     // mechanism. Same reporting convention.
     let (_, substFailed) = runCodeGenSubstTests ()
-    if r1 = 0 && r2 = 0 && attrsFailed = 0 && substFailed = 0 then 0 else 1
+    // C++ runtime-layout tests for the contiguous-backing allocate<>.
+    // Same separate-reporting convention; verifies layout invariants the
+    // value-checking source tests cannot catch. Skips cleanly if g++ absent.
+    let allocFailed = runAllocLayoutTests ()
+    // OpenMP thread-coverage: verifies emitted pragmas form genuine parallel
+    // regions when cores are available. Errors only on serial-when-parallel
+    // expected (teamsz<=1 with maxth>1); scheduler-distribution is a warning.
+    let ompFailed = runOmpCoverageTests ()
+    if r1 = 0 && r2 = 0 && attrsFailed = 0 && substFailed = 0 && allocFailed = 0 && ompFailed = 0 then 0 else 1
 
 /// Run tests with C++ generation only (no compilation)
 let runTestCategoryGenOnly (name: string) (tests: (string * string) list) (outputDir: string) =
@@ -2171,6 +2704,7 @@ let printUsage () =
     printfn "  emit <file.edgi> [-o output.cpp]  Emit C++ source without compiling"
     printfn "  test                              Run full test suite (IR + C++ + run)"
     printfn "  test --ir-only                    Run IR-only tests (fast, no C++ compilation)"
+    printfn "  test alloc                        Run C++ allocation-layout tests (contiguity/cardinality)"
     printfn ""
     printfn "Options:"
     printfn "  -o <path>      Output file path"
@@ -2211,13 +2745,16 @@ let compileToExe (filePath: string) (outputPath: string option) (verbose: bool) 
         let baseName = Path.GetFileNameWithoutExtension(filePath)
         let dir = Path.GetDirectoryName(Path.GetFullPath(filePath))
         let dir = if String.IsNullOrEmpty dir then "." else dir
-        let cppFile = Path.Combine(dir, baseName + ".cpp")
+        // Infer backend from generated source: device kernels → .cu + nvcc.
+        let backendReq = inferBackendReq cppCode
+        let ext = match backendReq with RequiresCuda -> ".cu" | CpuOnly -> ".cpp"
+        let cppFile = Path.Combine(dir, baseName + ext)
         File.WriteAllText(cppFile, cppCode)
         if verbose then
             eprintfn "[Emit] %s" cppFile
-        match compileCpp cppFile dir with
+        match compileForBackend capabilities.Value backendReq cppFile dir with
         | Error e ->
-            Error (sprintf "C++ compilation failed:\n%s" e)
+            Error (sprintf "Compilation failed:\n%s" e)
         | Ok exePath ->
             // If user specified output path, move the exe there
             let finalPath =
@@ -2348,6 +2885,17 @@ let main args =
         // string. No Blade source pipeline.
         let (_, failed) = runCodeGenSubstTests ()
         if failed = 0 then 0 else 1
+    | [| "test"; "alloc" |] ->
+        // Standalone C++ runtime-layout tests for the contiguous-backing
+        // allocate<>. Compiles + runs cpp/alloc_layout_tests.cpp against the
+        // shipped headers. Verifies contiguity/cardinality invariants the
+        // value-checking Blade tests cannot catch. No Blade source pipeline.
+        runAllocLayoutTests ()
+    | [| "test"; "omp-coverage" |] ->
+        // OpenMP thread-coverage: generate representative loop programs with
+        // codegen test-mode instrumentation, compile -fopenmp, run with forced
+        // threads, verify emitted pragmas form genuine parallel regions.
+        runOmpCoverageTests ()
     | [| "test"; cat |] ->
         // Test a specific category: blade test basic, blade test loops, etc.
         let categoryTests =

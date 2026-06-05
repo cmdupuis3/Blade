@@ -353,6 +353,14 @@ and IRExpr =
     | IRMethodFor of MethodForInfo
     | IRObjectFor of ObjectForInfo
     | IRApplyCombinator of ApplyInfo
+    /// Slot-inverted apply: `(object_for(f) >>@ object_for(g)) <@> arrays`.
+    /// Distinct from IRApplyCombinator because the kernel slot of a
+    /// canonical apply holds a callable, whereas the compose case threads
+    /// arrays through a composed-object chain. Modeling these as separate
+    /// variants removes the slot overloading that previously forced every
+    /// consumer to inspect Loop's shape to figure out which interpretation
+    /// to apply. See `ComposeApplyInfo` below.
+    | IRComposeApply of ComposeApplyInfo
     | IRBind of comp: IRExpr * cont: IRExpr
     | IRParallel of IRExpr * IRExpr * fusionDepth: int option
     | IRFusion of IRExpr * IRExpr
@@ -534,6 +542,22 @@ and ApplyInfo = {
     HasReynolds: bool              // Whether kernel has Reynolds annotation
     OutputType: IRType             // Deduced output array type
     IsCoIteration: bool            // True for 'for ... in' co-iteration
+}
+
+/// Information for slot-inverted compose application:
+///   (object_for(f) >>@ object_for(g)) <@> A
+/// In a canonical `IRApplyCombinator` the `Kernel` slot is a callable
+/// reference; in the compose case the kernel slot of `<@>` instead
+/// holds the input arrays threaded through the composed-object chain.
+/// `Composition` is the chain itself (`IRComposeObj`, or an `IRVar`
+/// let-bound to one — codegen resolves the latter via
+/// `ctx.DeferredComputations`). `InputArrays` are the arrays the
+/// chain is applied to. Unlike `ApplyInfo`, no symmetry/triangulation
+/// metadata is carried: the composition's leaves carry their own.
+and ComposeApplyInfo = {
+    Composition: IRExpr     // Provenance: IRComposeObj (or IRVar bound to one)
+    InputArrays: IRExpr list
+    OutputType: IRType
 }
 
 and IRParam = {
@@ -2050,7 +2074,13 @@ let buildLoopNestCodeGen
                     let strictOffset =
                         if isTriangular && isAntisymmetric then level
                         else 0
-                    let isParallel = level = 0 && not isTriangular
+                    // Outer level is the parallelization candidate. Triangularity
+                    // no longer vetoes it: the outermost loop of a triangular nest
+                    // is independently parallelizable (each outer index owns a
+                    // disjoint sub-slab). CodeGen's genNestPragma reads the bound
+                    // structure to pick the safe strategy — collapse for
+                    // rectangular, dynamic-scheduled outer loop for triangular.
+                    let isParallel = level = 0
                     let state =
                         if isTriangular && level > 0 then SCSymmetric
                         else SCNeither
@@ -2107,7 +2137,10 @@ let buildLoopNestCodeGen
                 let deps = if level < boundDependencies.Length then boundDependencies.[level] else []
                 let isTriangular = level < triangularLevels.Length && triangularLevels.[level]
                 let state = if level < symcomStates.Length then symcomStates.[level] else SCNeither
-                let isParallel = level = 0 && not isTriangular
+                // Outer level is the parallelization candidate regardless of
+                // triangularity (see shared-index path note above); genNestPragma
+                // picks collapse vs. dynamic-scheduled outer from bound structure.
+                let isParallel = level = 0
                 let strictOffset =
                     if isTriangular && levelInfo.IndexSpace.Symmetry = SymAntisymmetric then 1
                     else 0
@@ -2231,6 +2264,8 @@ let rec mapIRExpr (f: IRExpr -> IRExpr) (expr: IRExpr) : IRExpr =
             IRObjectFor { info with Kernel = m info.Kernel }
         | IRApplyCombinator info ->
             IRApplyCombinator { info with Loop = m info.Loop; Kernel = m info.Kernel; Arrays = ms info.Arrays }
+        | IRComposeApply info ->
+            IRComposeApply { info with Composition = m info.Composition; InputArrays = ms info.InputArrays }
     f mapped
 
 // ============================================================================
@@ -2308,6 +2343,13 @@ let substTypeInIRExpr (bindings: Map<int, IRType>) (expr: IRExpr) : IRExpr =
                                                |> List.map (fun aty ->
                                                     { aty with ElemType = st aty.ElemType })
                                   OutputType = st info.OutputType }
+        | IRComposeApply info ->
+            // ComposeApplyInfo carries only OutputType as a type-bearing
+            // field. The composition's leaves (IRObjectFor entries with
+            // their own kernels) carry their own type metadata that the
+            // generic walk reaches via the Composition / InputArrays
+            // descent.
+            IRComposeApply { info with OutputType = st info.OutputType }
         | _ -> e
     mapIRExpr substInNode expr
 
@@ -3157,6 +3199,7 @@ let rec liftInferType (expr: IRExpr) : IRType =
     | IRCompute e -> liftInferType e
     | IRPure e -> liftInferType e
     | IRApplyCombinator info -> info.OutputType
+    | IRComposeApply info -> info.OutputType
     | IRIf (_, t, _) -> liftInferType t
     | IRMatch (_, c :: _) -> liftInferType c.Body
     | IRMatch (_, []) -> IRTUnit
@@ -3542,6 +3585,22 @@ let rec liftExpr (builder: IRBuilder) (expr: IRExpr) : IRExpr =
                 else
                     (accB @ peeled, accA @ [inner])) ([], [])
         wrapLets binds (IRApplyCombinator { info with Loop = loop'; Kernel = kernel'; Arrays = arraysFinal })
+    | IRComposeApply info ->
+        // Same array-let lifting as IRApplyCombinator, applied to
+        // InputArrays. No Kernel slot to lift (slot inversion: the
+        // arrays *are* what would have gone in the kernel position).
+        let composition' = liftExpr builder info.Composition
+        let arrays' = info.InputArrays |> List.map (liftExpr builder)
+        let (binds, arraysFinal) =
+            arrays' |> List.fold (fun (accB, accA) a ->
+                let (peeled, inner) = peelLetChain a
+                if isArrayFieldAccess inner then
+                    let id = builder.FreshId()
+                    let ty = liftInferType inner
+                    (accB @ peeled @ [(id, ty, inner)], accA @ [IRVar (id, ty)])
+                else
+                    (accB @ peeled, accA @ [inner])) ([], [])
+        wrapLets binds (IRComposeApply { info with Composition = composition'; InputArrays = arraysFinal })
 
 /// Lift inline forms across an entire IR module's bindings and functions.
 let liftInlineFormsModule (modul: IRModule) (builder: IRBuilder) : IRModule =
@@ -3822,6 +3881,13 @@ let rec ppIRExprWithNames (names: Map<int, string>) indent (expr: IRExpr) =
             | t -> sprintf ", out=%s" (ppIRType t)
         sprintf "(%s <@> %s) [states=%s, tri=[%s], speedup=%dx%s%s]" 
             (pp info.Loop) (pp info.Kernel) states triLevels info.SpeedupFactor reynoldsStr outputStr
+    | IRComposeApply info ->
+        let arrs = info.InputArrays |> List.map pp |> String.concat ", "
+        let outputStr = 
+            match info.OutputType with
+            | IRTUnit -> ""
+            | t -> sprintf ", out=%s" (ppIRType t)
+        sprintf "(%s <@> [%s]) [compose-apply%s]" (pp info.Composition) arrs outputStr
     | IRCompute c ->
         sprintf "(%s |> compute)" (pp c)
     | IRReynolds (k, isAntisym) ->
@@ -3940,6 +4006,8 @@ let rec collectVarRefsIR (expr: IRExpr) : Set<IRId> =
     | IRObjectFor info -> collectVarRefsIR info.Kernel
     | IRApplyCombinator info ->
         Set.unionMany [collectVarRefsIR info.Loop; collectVarRefsIR info.Kernel; Set.unionMany (List.map collectVarRefsIR info.Arrays)]
+    | IRComposeApply info ->
+        Set.unionMany (collectVarRefsIR info.Composition :: List.map collectVarRefsIR info.InputArrays)
     | IRMatch (scrut, cases) ->
         Set.union (collectVarRefsIR scrut) (cases |> List.map (fun c -> collectVarRefsIR c.Body) |> Set.unionMany)
     | IRAssign (t, v) -> Set.union (collectVarRefsIR t) (collectVarRefsIR v)
@@ -4504,6 +4572,9 @@ let rec exprAttrs (expr: IRExpr) : ExprAttrs =
             :: exprAttrs info.Kernel
             :: List.map exprAttrs info.Arrays)
 
+    | IRComposeApply info ->
+        mergeMany (exprAttrs info.Composition :: List.map exprAttrs info.InputArrays)
+
 
 /// Validation error with context
 type IRValidationError = {
@@ -4539,6 +4610,8 @@ let rec collectTypesInExpr (expr: IRExpr) : IRType list =
         | IRObjectFor info -> go info.Kernel
         | IRApplyCombinator info ->
             [info.OutputType] @ go info.Loop @ go info.Kernel @ (info.Arrays |> List.collect go)
+        | IRComposeApply info ->
+            [info.OutputType] @ go info.Composition @ (info.InputArrays |> List.collect go)
         | IRParallel (a, b, _) -> go a @ go b
         | IRFusion (a, b) -> go a @ go b
         | IRChoice (a, b) -> go a @ go b
@@ -4691,6 +4764,9 @@ let validateModule (externalIds: Set<IRId>) (modul: IRModule) : IRValidationErro
             checkScope scope ctx info.Loop
             checkScope scope ctx info.Kernel
             info.Arrays |> List.iter (checkScope scope ctx)
+        | IRComposeApply info ->
+            checkScope scope ctx info.Composition
+            info.InputArrays |> List.iter (checkScope scope ctx)
         | IRParallel (a, b, _) -> checkScope scope ctx a; checkScope scope ctx b
         | IRFusion (a, b) -> checkScope scope ctx a; checkScope scope ctx b
         | IRChoice (a, b) -> checkScope scope ctx a; checkScope scope ctx b
@@ -4737,28 +4813,26 @@ let validateModule (externalIds: Set<IRId>) (modul: IRModule) : IRValidationErro
                 addError ctx (sprintf "ApplyInfo: Arrays.Length=%d != Identities.Length=%d" info.Arrays.Length info.Identities.Length)
             if info.SDimsPerArray.Length <> info.Arrays.Length && info.SDimsPerArray.Length <> 0 then
                 addError ctx (sprintf "ApplyInfo: SDimsPerArray.Length=%d != Arrays.Length=%d" info.SDimsPerArray.Length info.Arrays.Length)
-            // Check kernel param count vs input ranks.
+            // Canonical apply: Kernel slot is a callable reference,
+            // either IRVar(id, _) or IRReynolds(IRVar(id, _), _).
+            // `resolveKernel` peels any Reynolds wrapper and resolves
+            // the inner via CallablesTable + synthetic registry.
             //
-            // The Kernel slot's semantics depend on info.Loop. For the
-            // canonical case (Loop = IRMethodFor) Kernel is a callable
-            // reference — either IRVar(id, _) or IRReynolds(IRVar(id, _), _).
-            // For the composed-object idiom
-            //   (object_for(f) >>@ object_for(g)) <@> A
-            // Loop is IRComposeObj and Kernel slot holds the input
-            // arrays instead; CodeGen.fs:3953 destructures it that way.
-            // Similarly Loop may be IRVar bound to any of these shapes,
-            // or one of several meta-application patterns
-            // (object_for(<@>) <@> tuples) that route through different
-            // codegen paths.
+            // After the IRComposeApply split, `info.Loop = IRObjectFor _`
+            // can only arise from canonical `object_for(g) <@> A` going
+            // through `buildApplyInfo` — the slot-inverted compose case
+            // routes through IRComposeApply, and the meta-application
+            // patterns (object_for(<@>) <@> tuples) don't produce
+            // TExprApply at all. So IRObjectFor in the Loop slot also
+            // unambiguously implies a callable kernel.
             //
-            // To stay conservative — and because this validator is
-            // defensive scaffolding, not a load-bearing typing pass —
-            // gate the callable-shape check on Loop being structurally
-            // IRMethodFor. Future refinement could broaden the gate as
-            // each Loop shape's kernel-slot contract is documented.
+            // We still skip the check when Loop is IRVar (let-bound;
+            // could resolve to either canonical or compose-apply
+            // shape, and we don't have the binding env here) — the
+            // codegen path retains its own resolution for that case.
             let kernelSlotIsCallable =
                 match info.Loop with
-                | IRMethodFor _ -> true
+                | IRMethodFor _ | IRObjectFor _ -> true
                 | _ -> false
             if kernelSlotIsCallable then
                 match resolveKernel info.Kernel with
@@ -4791,6 +4865,23 @@ let validateModule (externalIds: Set<IRId>) (modul: IRModule) : IRValidationErro
                         if desc.HasReynolds then "ApplyInfo: IRReynolds inner is"
                         else "ApplyInfo: kernel slot is"
                     addError ctx (sprintf "%s %s" prefix shapeDesc)
+        | IRComposeApply info ->
+            // Compose-apply: InputArrays threaded through a composed
+            // object chain. Composition should resolve to IRComposeObj
+            // (possibly through a let-binding); InputArrays must be
+            // non-empty (you can't apply a compose to nothing).
+            if info.InputArrays.IsEmpty then
+                addError ctx "ComposeApplyInfo: InputArrays is empty"
+            match info.Composition with
+            | IRComposeObj _ | IRVar _ -> ()   // expected shapes
+            | other ->
+                let shapeName =
+                    match other with
+                    | IRLit _ -> "IRLit"
+                    | IRObjectFor _ -> "IRObjectFor [single object, not composed]"
+                    | IRMethodFor _ -> "IRMethodFor [should be IRApplyCombinator, not IRComposeApply]"
+                    | _ -> "non-compose expression"
+                addError ctx (sprintf "ComposeApplyInfo: Composition is %s; expected IRComposeObj or IRVar" shapeName)
         | _ -> ()
         // Recurse into sub-expressions
         match expr with

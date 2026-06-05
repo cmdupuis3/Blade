@@ -62,6 +62,39 @@ let exprWarningsCell () : string list ref =
         fresh
     else v
 
+/// Module-level OpenMP test-mode flag. When set, parallel loop nests emit
+/// additional thread-coverage instrumentation: each parallel region records
+/// which OpenMP threads actually executed iterations, and prints a parseable
+/// line after the loop. This lets the test harness verify that the emitted
+/// pragmas produce GENUINE parallel regions (the runtime honored them), not
+/// just that they are syntactically present.
+///
+/// This is OFF by default and is toggled ON only by the test harness — never
+/// in user-facing codegen. The instrumentation would otherwise pollute normal
+/// program output and add overhead.
+///
+/// Thread-safety: AsyncLocal (like exprWarnings above) so parallel test tasks
+/// don't race on the flag. Each test flow sets its own value.
+let private ompTestModeStorage =
+    System.Threading.AsyncLocal<bool ref>()
+
+let ompTestModeCell () : bool ref =
+    let v = ompTestModeStorage.Value
+    if isNull (box v) then
+        let fresh = ref false
+        ompTestModeStorage.Value <- fresh
+        fresh
+    else v
+
+/// Set/clear OpenMP test-mode for the current async flow (called by the harness).
+let setOmpTestMode (on: bool) : unit =
+    (ompTestModeCell ()).Value <- on
+
+/// Query whether OpenMP test-mode instrumentation should be emitted.
+let ompTestModeEnabled () : bool =
+    (ompTestModeCell ()).Value
+
+
 /// Record an expression-level warning and return a C++ expression that causes a compile error.
 let exprError (msg: string) : string =
     let cell = exprWarningsCell ()
@@ -181,6 +214,8 @@ let rec collectVarRefs (expr: IRExpr) : Set<IRId> =
         collectVarRefs info.Kernel
     | IRApplyCombinator info -> 
         Set.unionMany [collectVarRefs info.Loop; collectVarRefs info.Kernel; Set.unionMany (List.map collectVarRefs info.Arrays)]
+    | IRComposeApply info ->
+        Set.unionMany (collectVarRefs info.Composition :: List.map collectVarRefs info.InputArrays)
     | IRArity _ -> Set.empty
     | IRReynolds (inner, _) -> collectVarRefs inner
     | IRMatch (scrutinee, cases) ->
@@ -307,6 +342,7 @@ let rec inferExprType (expr: IRExpr) : IRType =
     | IRIf (_, thenBr, _) -> inferExprType thenBr
     | IRCompute inner -> inferExprType inner
     | IRApplyCombinator info -> info.OutputType
+    | IRComposeApply info -> info.OutputType
     | IRTuple exprs -> IRTTuple (exprs |> List.map inferExprType)
     | IRComplex (re, _) ->
         // Complex type derived from component width: Float32 → Complex64,
@@ -1009,7 +1045,7 @@ let rec exprToCppCore (subst: SubstMap) (names: Map<IRId, string>) (expr: IRExpr
                     sprintf "([&]() { auto __v%d = %s; return %s; }())" id valStr bodyStr
     | IRMethodFor _ -> exprError "loop object used as value"
     | IRObjectFor _ -> exprError "loop object used as value"
-    | IRApplyCombinator _ -> 
+    | IRApplyCombinator _ | IRComposeApply _ -> 
         exprError "unevaluated computation used as value - use |> compute"
     | IRCompute inner -> 
         // compute forces evaluation of a lazy computation
@@ -1751,10 +1787,96 @@ let genElementBindingNew (level: LoopIndexBinding) (elem: ElementBinding) (curre
                     elemTypeStr resultRank newName currentName arrayIndex currentName
         (code, newName)
 
-/// Generate a for-loop header with optional OpenMP pragma
+/// Decide the OpenMP pragma for a loop NEST, based on the bound structure of
+/// its levels. Parallelization strategy is a function of index-type structure:
+///
+///   - RECTANGULAR leading levels (bound has no dependency on outer indices:
+///     BoundDependencies empty AND StrictOffset = 0) form a perfect rectangular
+///     iteration space. Where additionally COLLAPSE-ELIGIBLE (see gate below),
+///     they can be fused:
+///       #pragma omp parallel for collapse(d)
+///     where d = count of leading rectangular AND collapse-eligible levels
+///     (d >= 2 to be worth it). Collapse is valuable for short outer dimensions:
+///     a 3x3x3 nest has only 3 outer iterations, so without collapse no more
+///     than 3 threads can be used; collapse(3) exposes all 27.
+///
+///   - TRIANGULAR levels (symmetric/antisymmetric: inner bound depends on outer
+///     indices, e.g. j < N - i) are NON-RECTANGULAR. OpenMP `collapse` requires
+///     a rectangular space and is unsafe here. But the OUTERMOST loop is still
+///     independently parallelizable (each outer index owns a disjoint triangular
+///     sub-slab). Triangular work is unbalanced across the outer index (i=0 does
+///     the most, i=N-1 the least), so we use dynamic scheduling:
+///       #pragma omp parallel for schedule(dynamic)
+///     on the outer loop only; inner dependent loops stay sequential.
+///
+/// COLLAPSE-ELIGIBILITY GATE (architectural seam):
+///   OpenMP `collapse(d)` requires the d collapsed loops to be PERFECTLY NESTED
+///   — no code of any kind between the loop headers. This is in direct tension
+///   with Blade's iteration model (DMWF), which assumes loop levels are
+///   SEPARABLE: code may be injected between levels (streaming-I/O batch
+///   boundaries, per-level Reynolds folds, etc.). So a level is collapse-eligible
+///   only if (a) it is rectangular AND (b) nothing is injected between it and the
+///   next collapsed level.
+///
+///   Today (b) always holds: production codegen injects nothing between levels.
+///   So collapseEligible == isRectangular for now. When streaming/batching lands,
+///   a level that carries a batch boundary (or any inter-level injection) becomes
+///   collapse-INELIGIBLE even if rectangular, and the collapse prefix must stop
+///   before it. That future constraint has exactly one home: the collapseEligible
+///   predicate below. The rest of the decision logic does not change.
+///
+/// Returns the pragma string (with trailing newline+indent) for the OUTERMOST
+/// loop, or "" if the nest should not be parallelized. Inner loops never carry
+/// a pragma (collapse subsumes them; triangular inners are sequential).
+///
+/// The decision is driven entirely by per-level bound structure already present
+/// in the bindings — no index-type tag is consulted directly, so new index
+/// types get a sensible strategy from their bound shape automatically.
+let genNestPragma (bindings: LoopIndexBinding list) (pragmaIndent: string) : string =
+    match bindings with
+    | [] -> ""
+    | outer :: rest ->
+        if not outer.IsParallel then ""
+        else
+            // A level is "rectangular" iff its bound is independent of outer indices.
+            let isRectangular (b: LoopIndexBinding) =
+                b.BoundDependencies.IsEmpty && b.StrictOffset = 0
+            // COLLAPSE-ELIGIBILITY GATE. Currently equals rectangularity, but is
+            // a SEPARATE predicate by design: it is the single extension point
+            // for the future "no inter-level injection" constraint (see header).
+            // When a binding gains an inter-level-injection marker (batch
+            // boundary, streaming stage), add that exclusion HERE — e.g.
+            //   isRectangular b && not b.HasInterLevelInjection
+            // and the collapse prefix below will correctly stop before it.
+            let collapseEligible (b: LoopIndexBinding) =
+                isRectangular b
+            // Collapse depth = length of the leading prefix that is BOTH
+            // rectangular and collapse-eligible. (takeWhile stops at the first
+            // level failing either condition — that is the gate doing its job.)
+            let collapseDepth =
+                bindings |> List.takeWhile collapseEligible |> List.length
+            // Any triangular level anywhere below the outer loop means the
+            // per-outer-iteration work is unbalanced (inner extents shrink with
+            // the outer index), so dynamic scheduling is warranted.
+            let hasTriangularBelow =
+                rest |> List.exists (fun b -> not (isRectangular b))
+            if collapseDepth >= 2 then
+                // Perfect, collapse-eligible rectangular prefix of >=2 levels:
+                // fuse them. (A collapsed rectangular prefix is balanced; static.)
+                sprintf "#pragma omp parallel for collapse(%d)\n%s" collapseDepth pragmaIndent
+            elif hasTriangularBelow then
+                // Outer loop rectangular (or single), but triangular work below:
+                // parallelize the outer loop with dynamic schedule for balance.
+                sprintf "#pragma omp parallel for schedule(dynamic)\n%s" pragmaIndent
+            else
+                // Outer loop parallel, remaining work balanced (rectangular or
+                // none): plain static parallel for.
+                sprintf "#pragma omp parallel for\n%s" pragmaIndent
+
+/// Generate a for-loop header (no pragma; pragmas are nest-level, see
+/// genNestPragma, and are prepended only at the outermost level by the caller).
 /// Bounds are computed as: extent - sum of all dependency indices
 let genForLoopHeader (binding: LoopIndexBinding) : string =
-    let pragma = if binding.IsParallel then "#pragma omp parallel for\n    " else ""
     let extentStr = 
         match binding.Extent with
         | IRLit (IRLitInt n) -> sprintf "%d" n
@@ -1768,8 +1890,7 @@ let genForLoopHeader (binding: LoopIndexBinding) : string =
             let offsetParts = if binding.StrictOffset > 0 then [sprintf "%d" binding.StrictOffset] else []
             depParts @ offsetParts |> String.concat " - " |> sprintf " - %s"
     
-    sprintf "%sfor (size_t %s = 0; %s < %s%s; %s++) {" 
-        pragma
+    sprintf "for (size_t %s = 0; %s < %s%s; %s++) {" 
         binding.IndexName 
         binding.IndexName 
         extentStr
@@ -1996,10 +2117,59 @@ let genLoopNest (codeGen: LoopNestCodeGen) (outerNames: Map<int, string>) (inden
     let mutable paramFinalNames : Map<int, string> = Map.empty
     
     // Generate nested loops with element bindings
+    // Nest-level OpenMP pragma (collapse for rectangular, dynamic for triangular)
+    // is prepended only at the outermost level.
+    //
+    // OpenMP thread-coverage instrumentation (test mode only): records the set
+    // of distinct OpenMP threads that actually executed the outer parallel
+    // region, and prints the count afterward. This empirically answers "did the
+    // runtime distribute this generated loop across multiple threads?" — the
+    // ground-truth question, not a heuristic on pragma text. Race-free: each
+    // thread writes ONLY its own slot in __omp_seen[], so no two threads touch
+    // the same address. Gated behind ompTestModeEnabled() so user codegen is
+    // never polluted.
+    let ompInstrument = ompTestModeEnabled ()
+    let outerIsParallel =
+        match codeGen.Bindings with
+        | outer :: _ -> outer.IsParallel
+        | [] -> false
+    // Unique region tag derived from the (unique) output name.
+    let regionTag = codeGen.OutputName
+    if ompInstrument && outerIsParallel then
+        lines <- lines @ [
+            ind depth + "// [omp-coverage] thread observation (test mode)"
+            ind depth + "int __omp_maxth = omp_get_max_threads();"
+            ind depth + "bool* __omp_seen = new bool[__omp_maxth]();"
+            ind depth + "int* __omp_team = new int[__omp_maxth]();"
+        ]
+
+    let mutable atOuterLevel = true
+    let lastBindingIdx = (List.length codeGen.Bindings) - 1
+    let mutable bidx = 0
     for binding in codeGen.Bindings do
-        // Generate the loop header
-        lines <- lines @ [ind depth + genForLoopHeader binding]
+        // Generate the loop header (pragma only on the outermost loop)
+        let pragmaPrefix = if atOuterLevel then genNestPragma codeGen.Bindings (ind depth) else ""
+        atOuterLevel <- false
+        lines <- lines @ [ind depth + pragmaPrefix + genForLoopHeader binding]
         depth <- depth + 1
+        // Thread-coverage marker: record this thread as seen and the team size
+        // it observes. Each thread writes ONLY its own slot (race-free). Team
+        // size is captured per-slot (not a single guarded write) because
+        // schedule(dynamic) does not guarantee any thread runs any iteration —
+        // taking the max over slots afterward recovers the true team size.
+        //
+        // Placed inside the INNERMOST loop body (after ALL loop headers), not
+        // the outer body: OpenMP `collapse(d)` requires the collapsed loops to
+        // be perfectly nested with no intervening code (and OMP API calls are
+        // explicitly forbidden between collapsed headers). Marking in the
+        // innermost body is past any collapsed prefix and always legal. The
+        // marker is idempotent (each thread re-sets its own slot to the same
+        // values), so running it per innermost-iteration is harmless.
+        if ompInstrument && outerIsParallel && bidx = lastBindingIdx then
+            lines <- lines @ [
+                ind depth + "{ int __tn = omp_get_thread_num(); __omp_seen[__tn] = true; __omp_team[__tn] = omp_get_num_threads(); }"
+            ]
+        bidx <- bidx + 1
         
         // Generate element bindings for all arrays at this level
         for elem in binding.Elements do
@@ -2055,6 +2225,29 @@ let genLoopNest (codeGen: LoopNestCodeGen) (outerNames: Map<int, string>) (inden
     for _ in codeGen.Bindings do
         depth <- depth - 1
         lines <- lines @ [ind depth + "}"]
+
+    // [omp-coverage] after the nest: count distinct threads that ran the outer
+    // region and print a parseable line. The harness reads "distinct=K" and the
+    // available-thread count to decide pass/fail (K>1 when maxth>1 ⇒ genuinely
+    // parallel; K==1 with maxth==1 ⇒ correctly serial on a 1-core environment).
+    // [omp-coverage] after the nest: report the parallel team size and the
+    // number of threads that actually did work. The harness uses:
+    //   - teamsz > 1               ⇒ a genuine parallel region was created
+    //   - maxth > 1 && teamsz == 1 ⇒ ERROR: pragma not honored (serial region)
+    //   - maxth > 1 && teamsz > 1 && distinct == 1 ⇒ WARNING: region parallel
+    //                                but scheduler put all work on one thread
+    //                                (an allowed scheduler choice, not a bug)
+    //   - maxth == 1               ⇒ single-core context, correctly serial
+    if ompInstrument && outerIsParallel then
+        lines <- lines @ [
+            ind depth + "{ int __omp_distinct = 0; int __omp_teamsz = 0;"
+            ind depth + "  for (int __t = 0; __t < __omp_maxth; __t++) {"
+            ind depth + "    if (__omp_seen[__t]) __omp_distinct++;"
+            ind depth + "    if (__omp_team[__t] > __omp_teamsz) __omp_teamsz = __omp_team[__t];"
+            ind depth + "  }"
+            ind depth + sprintf "  std::cout << \"[omp-coverage] region=%s teamsz=\" << __omp_teamsz << \" distinct=\" << __omp_distinct << \" maxth=\" << __omp_maxth << std::endl;" regionTag
+            ind depth + "  delete[] __omp_seen; delete[] __omp_team; }"
+        ]
 
     lines
 
@@ -2151,7 +2344,7 @@ let genIncludes () : string list =
      "#include <unordered_map>"  // group_keys Case 3 (dynamic ngroups via hash discovery)
      "#include <unordered_set>"  // unique() dedup, contains() hoist (future)
      "// Note: OpenMP disabled for portability"
-     "// #include <omp.h>"
+     (if ompTestModeEnabled () then "#include <omp.h>  // omp-coverage test-mode instrumentation" else "// #include <omp.h>")
      "#include \"nested_array_utilities.cpp\""
      "using namespace nested_array_utilities;"
      "using std::cout;"
@@ -2942,8 +3135,12 @@ let genFusedLoopNest (codeGen: LoopNestCodeGen) (extraKernels: (string * IRExpr 
     let mutable paramFinalNames : Map<int, string> = Map.empty
     
     // Generate nested loops with element bindings (same as genLoopNest)
+    // Nest-level OpenMP pragma prepended only at the outermost level.
+    let mutable atOuterLevel = true
     for binding in codeGen.Bindings do
-        lines <- lines @ [ind depth + genForLoopHeader binding]
+        let pragmaPrefix = if atOuterLevel then genNestPragma codeGen.Bindings (ind depth) else ""
+        atOuterLevel <- false
+        lines <- lines @ [ind depth + pragmaPrefix + genForLoopHeader binding]
         depth <- depth + 1
         for elem in binding.Elements do
             let currentName = 
@@ -3077,6 +3274,133 @@ let rec unrollLetChain (expr: IRExpr) : (IRId * IRExpr) list * IRExpr =
 // Recursive Parallel/Fusion Tree Helpers
 // ============================================================================
 
+/// Materialize an `IRComposeApply` (slot-inverted compose-apply form)
+/// into the named target. Used by:
+///   - the IRCompute dispatcher (the primary path: `let r = (o1 >>@ o2) <@> A |> compute`)
+///   - parallel/fusion leaf emission (when a compose-apply appears as
+///     a `<&>` or `<&!>` leaf alongside canonical applies)
+///   - method-composition stage-1 materialization (when a compose-apply
+///     is the left of `@>>`)
+///
+/// Resolves the composition through `ctx.DeferredComputations` to find
+/// the underlying `IRComposeObj`, then emits the chained-loop codegen:
+/// two stages (one per object in the chain), each running an
+/// element-wise loop with the resolved kernel. If both kernels emit as
+/// named C++ functions, generates direct call loops; otherwise falls
+/// back to per-stage `IRApplyCombinator` materialization via
+/// `genApplyCombinator`.
+///
+/// Does NOT register `name` in the returned context as a binding — that
+/// is the caller's responsibility (in canonical use, the caller is a
+/// `let`-binding handler that calls `addVarName binding.Id name`).
+let genComposeApply
+    (ctx: CodeGenContext)
+    (name: string)
+    (info: ComposeApplyInfo)
+    (outputType: IRType)
+    (builder: IRBuilder)
+    : string list * CodeGenContext =
+    let ind = indentStr ctx
+    let rec resolveDeferred e =
+        match e with
+        | IRVar (id, _) ->
+            match Map.tryFind id ctx.DeferredComputations with
+            | Some d -> resolveDeferred d
+            | None -> e
+        | _ -> e
+    let resolvedComposition = resolveDeferred info.Composition
+    match resolvedComposition with
+    | IRComposeObj (obj1, obj2) ->
+        let rObj1 = resolveDeferred obj1
+        let rObj2 = resolveDeferred obj2
+        let kernel1 = match rObj1 with IRObjectFor o -> o.Kernel | _ -> rObj1
+        let kernel2 = match rObj2 with IRObjectFor o -> o.Kernel | _ -> rObj2
+        let arrays = info.InputArrays
+
+        let kernelName1 = match kernel1 with IRVar (id, _) -> Map.tryFind id ctx.VarNames | _ -> None
+        let kernelName2 = match kernel2 with IRVar (id, _) -> Map.tryFind id ctx.VarNames | _ -> None
+
+        let arrName =
+            match arrays with
+            | [IRVar (id, _)] -> Map.tryFind id ctx.VarNames |> Option.defaultValue "arr0"
+            | _ -> "arr0"
+        let arrRank =
+            match arrays with
+            | [a] -> (match inferExprType a with ArrayElem arr -> arrayRank arr | _ -> 1)
+            | _ -> 1
+        let (elemType, elemTypeErrCode) =
+            match arrays with
+            | a :: _ ->
+                match inferExprType a with
+                | ArrayElem arr -> (elemTypeToCpp arr.ElemType, [])
+                | IRTScalar et -> (primTypeToCpp et, [])
+                | t ->
+                    (elemTypeToCpp (IRTScalar ETFloat64),
+                     codegenError ctx ind (sprintf ">>@: could not determine input element type (got %A) - likely a typechecker or IR bug" t))
+            | [] ->
+                (elemTypeToCpp (IRTScalar ETFloat64),
+                 codegenError ctx ind ">>@: empty array list - likely an IR-builder bug")
+
+        match kernelName1, kernelName2 with
+        | Some k1, Some k2 ->
+            // Both kernels are named C++ lambdas - direct call loops
+            let s1Name = sprintf "%s__s1" name
+            let s1Code = [
+                sprintf "%sstatic constexpr const size_t* %s_symm = nullptr;" ind s1Name
+                sprintf "%sconst size_t* %s_extents = %s.extents;" ind s1Name arrName
+                sprintf "%sArray<%s, %d> %s = { allocate<typename promote<%s, %d>::type, %s_symm>(%s_extents), %s_extents };" ind elemType arrRank s1Name elemType arrRank s1Name s1Name s1Name
+                sprintf "%sfor (size_t __i0 = 0; __i0 < %s.extents[0]; __i0++) {" ind arrName
+                sprintf "%s    %s[__i0] = %s(%s[__i0]);" ind s1Name k1 arrName
+                sprintf "%s}" ind
+            ]
+            let s2Code = [
+                sprintf "%sstatic constexpr const size_t* %s_symm = nullptr;" ind name
+                sprintf "%sconst size_t* %s_extents = %s.extents;" ind name s1Name
+                sprintf "%sArray<%s, %d> %s = { allocate<typename promote<%s, %d>::type, %s_symm>(%s_extents), %s_extents };" ind elemType arrRank name elemType arrRank name name name
+                sprintf "%sfor (size_t __i0 = 0; __i0 < %s.extents[0]; __i0++) {" ind s1Name
+                sprintf "%s    %s[__i0] = %s(%s[__i0]);" ind name k2 s1Name
+                sprintf "%s}" ind
+            ]
+            (elemTypeErrCode @ s1Code @ [""] @ s2Code, ctx)
+        | _ ->
+            // Fallback: inline lambdas - use ApplyInfo per stage.
+            // We materialize via direct `genApplyCombinator` calls
+            // (rather than constructing IRBindings and going through
+            // genBinding) to keep this helper independent of the
+            // recursive let-binding group below.
+            let s1Name = sprintf "%s__s1" name
+            let s1Id = builder.FreshId()
+            let s1ElemType : IRType =
+                match resolveCallable kernel1 with
+                | Some callable -> callable.RetType
+                | None -> IRTScalar ETFloat64
+            let inputArrayTypes = arrays |> List.map (fun a ->
+                match inferExprType a with
+                | ArrayElem arr -> arr
+                | _ -> defaultArrayType (IRTScalar ETFloat64))
+            let totalInputDims = inputArrayTypes |> List.sumBy arrayRank
+            let s1Type = mkArrayArrow [for _ in 1..totalInputDims -> defaultIndexType ()] s1ElemType None
+            let s1Info = buildSimpleApplyInfo arrays kernel1 s1Type
+            let code1 = genApplyCombinator ctx s1Name s1Info builder
+            let ctx1 = addVarName s1Id s1Name ctx
+
+            let s2OutputType =
+                match outputType with
+                | IRTUnit ->
+                    match s1Type with
+                    | ArrayElem arr -> mkArrayLike { arr with ElemType = s1ElemType }
+                    | _ -> mkArrayLike (defaultArrayType s1ElemType)
+                | other -> other
+            let s2Info = buildSimpleApplyInfo [IRVar(s1Id, s1Type)] kernel2 s2OutputType
+            let code2 = genApplyCombinator ctx1 name s2Info builder
+            (code1 @ [""] @ code2, ctx1)
+    | _ ->
+        // Composition didn't resolve to IRComposeObj at codegen time -
+        // should be impossible after the IRComposeApply split. Emit
+        // codegen-time error rather than silently generating bad code.
+        let errCode = codegenError ctx ind (sprintf "IRComposeApply: Composition did not resolve to IRComposeObj (got %A) - IR-builder bug" resolvedComposition)
+        (errCode, ctx)
+
 /// Recursively generate code for a parallel composition tree (<&>).
 /// Each leaf IRApplyCombinator gets its own independent loop nest.
 /// Returns (code_lines, result_variable_name, tupleChildrenMap).
@@ -3101,6 +3425,9 @@ let rec genParallelTree (ctx: CodeGenContext) (name: string) (expr: IRExpr) (bui
         | IRApplyCombinator info ->
             let code = genApplyCombinator ctx name info builder
             (code, name, Map.empty)
+        | IRComposeApply info ->
+            let (code, _) = genComposeApply ctx name info info.OutputType builder
+            (code, name, Map.empty)
         | IRVar (id, _) ->
             let existingName = Map.tryFind id ctx.VarNames |> Option.defaultValue name
             ([], existingName, Map.empty)
@@ -3115,6 +3442,9 @@ let rec genParallelTree (ctx: CodeGenContext) (name: string) (expr: IRExpr) (bui
                 match leaf with
                 | IRApplyCombinator info ->
                     genApplyCombinator ctx leafName info builder @ [""]
+                | IRComposeApply info ->
+                    let (code, _) = genComposeApply ctx leafName info info.OutputType builder
+                    code @ [""]
                 | IRVar (id, _) ->
                     let existingName = Map.tryFind id ctx.VarNames |> Option.defaultValue leafName
                     if existingName <> leafName then
@@ -3737,6 +4067,13 @@ let rec genBinding (ctx: CodeGenContext) (binding: IRBinding) (builder: IRBuilde
         let ctx' = addVarName binding.Id name ctx
         let ctx' = { ctx' with DeferredComputations = Map.add binding.Id binding.Value ctx'.DeferredComputations }
         ([sprintf "%s// %s = <deferred computation>" ind name], ctx')
+
+    | IRComposeApply _ ->
+        // Defer: compose-apply is also a lazy computation; materialized
+        // when |> compute reaches it (or a combinator forces it).
+        let ctx' = addVarName binding.Id name ctx
+        let ctx' = { ctx' with DeferredComputations = Map.add binding.Id binding.Value ctx'.DeferredComputations }
+        ([sprintf "%s// %s = <deferred compose-apply>" ind name], ctx')
     
     | IRParallel _ | IRFusion _ ->
         // Defer: computation combinator not materialized until |> compute
@@ -3758,7 +4095,7 @@ let rec genBinding (ctx: CodeGenContext) (binding: IRBinding) (builder: IRBuilde
     
     | IRChoice (left, right) ->
         // Only defer when children are computation-level (not scalar)
-        let isCompExpr e = match e with IRApplyCombinator _ | IRParallel _ | IRFusion _ | IRFunctorMap _ | IRChoice _ | IRComposeObj _ | IRComposeMeth _ | IRBind _ | IRGuard _ | IRSequence _ -> true | IRVar _ -> true | _ -> false
+        let isCompExpr e = match e with IRApplyCombinator _ | IRComposeApply _ | IRParallel _ | IRFusion _ | IRFunctorMap _ | IRChoice _ | IRComposeObj _ | IRComposeMeth _ | IRBind _ | IRGuard _ | IRSequence _ -> true | IRVar _ -> true | _ -> false
         if isCompExpr left || isCompExpr right then
             let ctx' = addVarName binding.Id name ctx
             let ctx' = { ctx' with DeferredComputations = Map.add binding.Id binding.Value ctx'.DeferredComputations }
@@ -3775,7 +4112,7 @@ let rec genBinding (ctx: CodeGenContext) (binding: IRBinding) (builder: IRBuilde
         let rec leafIsComputation e =
             match e with
             | IRGuard (_, inner) -> leafIsComputation inner
-            | IRApplyCombinator _ | IRParallel _ | IRFusion _ | IRFunctorMap _ | IRChoice _ | IRComposeObj _ | IRComposeMeth _ | IRBind _ | IRSequence _ -> true
+            | IRApplyCombinator _ | IRComposeApply _ | IRParallel _ | IRFusion _ | IRFunctorMap _ | IRChoice _ | IRComposeObj _ | IRComposeMeth _ | IRBind _ | IRSequence _ -> true
             | IRVar (id, _) -> Map.containsKey id ctx.DeferredComputations
             | _ -> false
         if leafIsComputation body then
@@ -3790,7 +4127,7 @@ let rec genBinding (ctx: CodeGenContext) (binding: IRBinding) (builder: IRBuilde
     
     | IRSequence elems ->
         // Defer: sequence is a flat n-ary parallel, materialized by |> compute
-        let isCompExpr e = match e with IRApplyCombinator _ | IRParallel _ | IRFusion _ | IRFunctorMap _ | IRChoice _ | IRComposeObj _ | IRComposeMeth _ | IRBind _ | IRGuard _ | IRSequence _ -> true | IRVar _ -> true | _ -> false
+        let isCompExpr e = match e with IRApplyCombinator _ | IRComposeApply _ | IRParallel _ | IRFusion _ | IRFunctorMap _ | IRChoice _ | IRComposeObj _ | IRComposeMeth _ | IRBind _ | IRGuard _ | IRSequence _ -> true | IRVar _ -> true | _ -> false
         if elems |> List.exists isCompExpr then
             let ctx' = addVarName binding.Id name ctx
             let ctx' = { ctx' with DeferredComputations = Map.add binding.Id binding.Value ctx'.DeferredComputations }
@@ -3944,126 +4281,49 @@ let rec genBinding (ctx: CodeGenContext) (binding: IRBinding) (builder: IRBuilde
         
         match resolved with
         | IRApplyCombinator info ->
-            // Check if Loop is a composed ObjectLoop (>>@)
-            let resolvedLoop =
-                match info.Loop with
-                | IRVar (id, _) -> Map.tryFind id ctx.DeferredComputations |> Option.defaultValue info.Loop
-                | other -> other
-            match resolvedLoop with
-            | IRComposeObj (obj1, obj2) ->
-                // >>@ applied to arrays: (object_for(f) >>@ object_for(g)) <@> A
-                // Resolve obj1/obj2 through deferred variables
-                let rec resolveObj e =
-                    match e with
-                    | IRVar (id, _) -> Map.tryFind id ctx.DeferredComputations |> Option.map resolveObj |> Option.defaultValue e
-                    | _ -> e
-                let rObj1 = resolveObj obj1
-                let rObj2 = resolveObj obj2
-                let kernel1 = match rObj1 with IRObjectFor o -> o.Kernel | _ -> rObj1
-                let kernel2 = match rObj2 with IRObjectFor o -> o.Kernel | _ -> rObj2
-                let arrays = match info.Kernel with IRTuple elems -> elems | other -> [other]
-                
-                // Get C++ names for kernels (they're emitted as auto lambdas)
-                let kernelName1 = match kernel1 with IRVar (id, _) -> Map.tryFind id ctx.VarNames | _ -> None
-                let kernelName2 = match kernel2 with IRVar (id, _) -> Map.tryFind id ctx.VarNames | _ -> None
-                
-                // Get array info
-                let arrName = 
-                    match arrays with 
-                    | [IRVar (id, _)] -> Map.tryFind id ctx.VarNames |> Option.defaultValue "arr0" 
-                    | _ -> "arr0"
-                let arrRank = 
-                    match arrays with 
-                    | [a] -> (match inferExprType a with ArrayElem arr -> arrayRank arr | _ -> 1) 
-                    | _ -> 1
-                // Element type for intermediate / final arrays in the
-                // `>>@` chain. The kernels k1, k2 are not type-resolved
-                // here (the chain hasn't been monomorphized at this
-                // codegen site), so we can't directly read their return
-                // types. The principled approximation: assume kernels are
-                // element-preserving and use the input array's element
-                // type. If the kernel signatures eventually differ from
-                // the input, that's a typechecker pre-condition violation
-                // that should be caught upstream, not silently turned
-                // into a runtime mismatch by defaulting to `double`.
-                let (elemType, elemTypeErrCode) =
-                    match arrays with
-                    | a :: _ -> 
-                        match inferExprType a with
-                        | ArrayElem arr -> (elemTypeToCpp arr.ElemType, [])
-                        | IRTScalar et -> (primTypeToCpp et, [])
-                        | t ->
-                            (elemTypeToCpp (IRTScalar ETFloat64),
-                             codegenError ctx ind (sprintf ">>@: could not determine input element type (got %A) — likely a typechecker or IR bug" t))
-                    | [] ->
-                        (elemTypeToCpp (IRTScalar ETFloat64),
-                         codegenError ctx ind ">>@: empty array list — likely an IR-builder bug")
-                
-                match kernelName1, kernelName2 with
-                | Some k1, Some k2 ->
-                    // Both kernels are named C++ lambdas — generate function-call loops
-                    let s1Name = sprintf "%s__s1" name
-                    let s1Code = [
-                        sprintf "%sstatic constexpr const size_t* %s_symm = nullptr;" ind s1Name
-                        sprintf "%sconst size_t* %s_extents = %s.extents;" ind s1Name arrName
-                        sprintf "%sArray<%s, %d> %s = { allocate<typename promote<%s, %d>::type, %s_symm>(%s_extents), %s_extents };" ind elemType arrRank s1Name elemType arrRank s1Name s1Name s1Name
-                        sprintf "%sfor (size_t __i0 = 0; __i0 < %s.extents[0]; __i0++) {" ind arrName
-                        sprintf "%s    %s[__i0] = %s(%s[__i0]);" ind s1Name k1 arrName
-                        sprintf "%s}" ind
-                    ]
-                    let s2Code = [
-                        sprintf "%sstatic constexpr const size_t* %s_symm = nullptr;" ind name
-                        sprintf "%sconst size_t* %s_extents = %s.extents;" ind name s1Name
-                        sprintf "%sArray<%s, %d> %s = { allocate<typename promote<%s, %d>::type, %s_symm>(%s_extents), %s_extents };" ind elemType arrRank name elemType arrRank name name name
-                        sprintf "%sfor (size_t __i0 = 0; __i0 < %s.extents[0]; __i0++) {" ind s1Name
-                        sprintf "%s    %s[__i0] = %s(%s[__i0]);" ind name k2 s1Name
-                        sprintf "%s}" ind
-                    ]
-                    let ctx' = addVarName binding.Id name ctx
-                    (elemTypeErrCode @ s1Code @ [""] @ s2Code, ctx')
-                | _ ->
-                    // Fallback: kernels are inline lambdas, use ApplyInfo path
-                    let s1Name = sprintf "%s__s1" name
-                    let s1Id = builder.FreshId()
-                    // Resolve through `resolveCallable` so IRVar-referenced
-                    // kernels also get their return type read correctly.
-                    // The inferred ret type guides the intermediate array's
-                    // element type for the compose's s1 → s2 pipeline.
-                    let s1ElemType : IRType =
-                        match resolveCallable kernel1 with
-                        | Some callable ->
-                            match callable.RetType with
-                            | IRTScalar _ as t -> t
-                            | t -> t  // pass through (array, named, etc.)
-                        | None -> IRTScalar ETFloat64
-                    let inputArrayTypes = arrays |> List.map (fun a -> 
-                        match inferExprType a with 
-                        | ArrayElem arr -> arr 
-                        | _ -> defaultArrayType (IRTScalar ETFloat64))
-                    let totalInputDims = inputArrayTypes |> List.sumBy arrayRank
-                    let s1Type = mkArrayArrow [for _ in 1..totalInputDims -> defaultIndexType ()] s1ElemType None
-                    let s1Info = buildSimpleApplyInfo arrays kernel1 s1Type
-                    let s1Binding = { Id = s1Id; Name = s1Name; Type = s1Type; Value = IRCompute (IRApplyCombinator s1Info); IsConst = true; IsMutable = false }
-                    let (code1, ctx1) = genBinding ctx s1Binding builder
-                    
-                    let s2OutputType =
-                        match binding.Type with
-                        | IRTUnit ->
-                            match s1Type with
-                            | ArrayElem arr -> mkArrayLike { arr with ElemType = s1ElemType }
-                            | _ -> mkArrayLike (defaultArrayType s1ElemType)
-                        | other -> other
-                    let s2Info = buildSimpleApplyInfo [IRVar(s1Id, s1Type)] kernel2 s2OutputType
-                    let code2 = genApplyCombinator ctx1 name s2Info builder
-                    let ctx2 = addVarName binding.Id name ctx1
-                    (code1 @ [""] @ code2, ctx2)
-            
-            | _ ->
-                // Normal apply
-                let info' = applyFunctorWrappers info functorWrappers
-                let code = genApplyCombinator ctx name info' builder
-                let ctx' = addVarName binding.Id name ctx
-                (code, ctx')
+            // After the IRComposeApply split, info.Loop is never a
+            // composed-object chain here — those route through the
+            // IRComposeApply arm below. The inner resolvedLoop dispatch
+            // that previously distinguished IRComposeObj from normal
+            // applies is no longer needed.
+            let info' = applyFunctorWrappers info functorWrappers
+            let code = genApplyCombinator ctx name info' builder
+            let ctx' = addVarName binding.Id name ctx
+            (code, ctx')
+
+        | IRComposeApply info ->
+            // Slot-inverted apply: (object_for(f) >>@ object_for(g)) <@> A.
+            //
+            // If functorWrappers is non-empty (the @>> case, where
+            // extractInlinableKernel of the right operand surfaced its
+            // kernel as a wrapper to apply to the left's result),
+            // materialize the compose-apply into a temporary and then
+            // emit a separate element-wise stage that applies the
+            // wrapped kernel chain. For canonical IRApplyCombinator
+            // this is handled by applyFunctorWrappers folding the
+            // wrappers into the kernel body; for compose-apply that
+            // doesn't apply (no single kernel slot), so we use the
+            // stage-on-stage form instead.
+            if functorWrappers.IsEmpty then
+                let (code, ctx') = genComposeApply ctx name info info.OutputType builder
+                let ctx'' = addVarName binding.Id name ctx'
+                (code, ctx'')
+            else
+                let s1Name = sprintf "%s__wrap_s1" name
+                let s1Id = builder.FreshId()
+                let s1Type = info.OutputType
+                let (code1, ctx1) = genComposeApply ctx s1Name info s1Type builder
+                let ctx1' = addVarName s1Id s1Name ctx1
+                // Build an ApplyInfo whose kernel is the innermost
+                // wrapper, then fold the rest on top via the existing
+                // wrapper-composition machinery.
+                let firstWrapper = List.head functorWrappers
+                let restWrappers = List.tail functorWrappers
+                let baseInfo = buildSimpleApplyInfo [IRVar(s1Id, s1Type)] firstWrapper binding.Type
+                let finalInfo = applyFunctorWrappers baseInfo restWrappers
+                let code2 = genApplyCombinator ctx1' name finalInfo builder
+                let ctx2 = addVarName binding.Id name ctx1'
+                (code1 @ [""] @ code2, ctx2)
         
         | IRComposeMeth (left, right) ->
             // @>> : sequential composition — compute left, feed result to right's kernel
@@ -4269,7 +4529,7 @@ let rec genBinding (ctx: CodeGenContext) (binding: IRBinding) (builder: IRBuilde
             // This allocates the array always but fills with zeros when false
             let isComputation =
                 match body with
-                | IRApplyCombinator _ | IRParallel _ | IRFusion _ | IRFunctorMap _ | IRChoice _ -> true
+                | IRApplyCombinator _ | IRComposeApply _ | IRParallel _ | IRFusion _ | IRFunctorMap _ | IRChoice _ -> true
                 | IRVar (id, _) -> Map.containsKey id ctx.DeferredComputations
                 | _ -> false
             if isComputation then
@@ -4343,6 +4603,7 @@ let rec genBinding (ctx: CodeGenContext) (binding: IRBinding) (builder: IRBuilde
                     let childType =
                         match wrappedElem with
                         | IRApplyCombinator info -> info.OutputType
+                        | IRComposeApply info -> info.OutputType
                         | _ -> inferExprType wrappedElem
                     let childBinding = { Id = builder.FreshId(); Name = childName; Type = childType; Value = IRCompute wrappedElem; IsConst = true; IsMutable = false }
                     genBinding ctx childBinding builder)
@@ -4591,7 +4852,7 @@ let rec genBinding (ctx: CodeGenContext) (binding: IRBinding) (builder: IRBuilde
         let isCompDeferred =
             match comp with
             | IRVar (id, _) -> Map.containsKey id ctx.DeferredComputations
-            | IRApplyCombinator _ | IRParallel _ | IRFusion _ | IRFunctorMap _ -> true
+            | IRApplyCombinator _ | IRComposeApply _ | IRParallel _ | IRFusion _ | IRFunctorMap _ -> true
             | _ -> false
         if isCompDeferred then
             let ctx' = addVarName binding.Id name ctx
@@ -4609,7 +4870,7 @@ let rec genBinding (ctx: CodeGenContext) (binding: IRBinding) (builder: IRBuilde
         match binding.Value with
         | IRTuple elems when elems |> List.forall (fun e ->
             match e with
-            | IRApplyCombinator _ | IRParallel _ | IRFusion _ | IRFunctorMap _ -> true
+            | IRApplyCombinator _ | IRComposeApply _ | IRParallel _ | IRFusion _ | IRFunctorMap _ -> true
             | IRVar (id, _) -> Map.containsKey id ctx.DeferredComputations
             | _ -> false) ->
             // All elements are computations — defer the whole tuple
@@ -4774,7 +5035,7 @@ let genFuncBody (ctx: CodeGenContext) (builder: IRBuilder) (names: Map<IRId, str
             // Loop objects are compile-time only — they're resolved when <@> is processed
             currentNames <- Map.add id varName currentNames
             []
-        | IRApplyCombinator _ ->
+        | IRApplyCombinator _ | IRComposeApply _ ->
             // Unevaluated computations — deferred until |> compute forces them
             currentNames <- Map.add id varName currentNames
             []
@@ -5290,13 +5551,13 @@ let genPrintArraySymAware (name: string) (indexTypes: IRIndexType list) : string
 let computeDeferredIds (bindings: IRBinding list) : Set<int> =
     let isDeferred (ids: Set<int>) (e: IRExpr) =
         match e with
-        | IRApplyCombinator _ | IRParallel _ | IRFusion _ | IRFunctorMap _ | IRChoice _ | IRComposeObj _ | IRComposeMeth _ | IRBind _ | IRZip _ | IRSequence _ -> true
+        | IRApplyCombinator _ | IRComposeApply _ | IRParallel _ | IRFusion _ | IRFunctorMap _ | IRChoice _ | IRComposeObj _ | IRComposeMeth _ | IRBind _ | IRZip _ | IRSequence _ -> true
         | IRVar (id, _) -> Set.contains id ids
         | _ -> false
     bindings |> List.fold (fun ids b ->
         let shouldDefer =
             match b.Value with
-            | IRApplyCombinator _ | IRParallel _ | IRFusion _ -> true
+            | IRApplyCombinator _ | IRComposeApply _ | IRParallel _ | IRFusion _ -> true
             | IRZip _ -> true
             | IRComposeObj _ -> true
             | IRBind (comp, _) -> isDeferred ids comp
@@ -5325,6 +5586,7 @@ let genPrintStatements (modul: IRModule) : string list =
             else
             match b.Value with
             | IRCompute (IRApplyCombinator _) -> true
+            | IRCompute (IRComposeApply _) -> true
             | IRCompute (IRParallel _) -> true
             | IRCompute (IRFusion _) -> true
             | IRCompute (IRVar _) -> true

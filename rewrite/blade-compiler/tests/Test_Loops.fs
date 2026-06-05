@@ -415,6 +415,76 @@ let rhs = (L <@> f) @>> (L <@> g) |> compute
 // EXPECT: rhs = [6.0, 9.0, 12.0]
 """
 
+// ============================================================================
+// Cross-feature: compose-apply in <&> / <&!> / @>> leaf positions
+//
+// IRComposeApply was introduced (item-1 follow-up) to distinguish
+// `(o1 >>@ o2) <@> A` from canonical `method_for(...) <@> kernel`.
+// Several codegen paths (parallel/fusion leaf extraction, @>> kernel
+// extraction) pattern-match IRApplyCombinator info specifically; on
+// IRComposeApply they fall through to defaults that may or may not
+// produce correct C++. These tests exercise each combination so we
+// can see what actually breaks vs. composes silently.
+// ============================================================================
+
+let test162_composeApplyInParallel = """
+// (compose-apply) <&> (canonical-apply) — parallel composition where
+// one leaf is the slot-inverted compose-apply form. The codegen path
+// at genParallelTree currently only extracts IRApplyCombinator leaves;
+// compose-apply leaves should also produce results that can be
+// combined into the parallel pair.
+let A = [1.0, 2.0, 3.0]
+let f = lambda(x) -> x + 1.0
+let g = lambda(x) -> x * 2.0
+let h = lambda(x) -> x - 1.0
+let L = method_for(A)
+let p = (object_for(f) >>@ object_for(g)) <@> A
+let q = L <@> h
+let (r1, r2) = p <&> q |> compute
+// p: each x in A → (x+1)*2 → [4, 6, 8]
+// q: each x in A → x-1   → [0, 1, 2]
+// EXPECT: r1 = [4.0, 6.0, 8.0]
+// EXPECT: r2 = [0.0, 1.0, 2.0]
+"""
+
+let test163_composeApplyInFusion = """
+// (compose-apply) <&!> (canonical-apply) — mandatory fusion: same
+// shape as parallel but with the fusion operator. genFusionTree at
+// CodeGen.fs:3175 extracts IRApplyCombinator infos to drive a single
+// fused loop nest; an IRComposeApply leaf isn't extractable that way.
+let A = [1.0, 2.0, 3.0]
+let f = lambda(x) -> x + 1.0
+let g = lambda(x) -> x * 2.0
+let h = lambda(x) -> x - 1.0
+let L = method_for(A)
+let p = (object_for(f) >>@ object_for(g)) <@> A
+let q = L <@> h
+let (r1, r2) = p <&!> q |> compute
+// Same per-element values as test162; fusion is an optimization,
+// not a semantic change.
+// EXPECT: r1 = [4.0, 6.0, 8.0]
+// EXPECT: r2 = [0.0, 1.0, 2.0]
+"""
+
+let test164_composeApplyInMethCompose = """
+// (compose-apply) @>> (canonical-apply) — method composition where
+// the left operand is a compose-apply. @>> semantics: at each index,
+// apply right's kernel to left's per-element result.
+// Right of @>> requires a single extractable kernel (which a
+// compose chain doesn't have), so we don't test compose-apply on
+// the right — only on the left.
+let A = [1.0, 2.0, 3.0]
+let f = lambda(x) -> x + 1.0
+let g = lambda(x) -> x * 2.0
+let h = lambda(x) -> x - 5.0
+let L = method_for(A)
+let p = (object_for(f) >>@ object_for(g)) <@> A   // [4, 6, 8]
+let q = L <@> h                                    // q's kernel: x - 5
+let result = p @>> q |> compute
+// At each index: h(p[i]) = p[i] - 5 = [-1, 1, 3]
+// EXPECT: result = [-1.0, 1.0, 3.0]
+"""
+
 let test111_bindComputation = """
 let A = [1.0, 2.0, 3.0]
 let c1 = method_for(A) <@> lambda(x) -> x + 1.0
@@ -574,6 +644,9 @@ let loopTests = [
     ("Compose Obj Basic", test108_composeObjBasic)
     ("Compose Meth Basic", test109_composeMethBasic)
     ("Duality Theorem", test110_dualityTheorem)
+    ("ComposeApply In Parallel", test162_composeApplyInParallel)
+    ("ComposeApply In Fusion", test163_composeApplyInFusion)
+    ("ComposeApply In MethCompose", test164_composeApplyInMethCompose)
     ("Bind Computation", test111_bindComputation)
     ("Bind Chained", test112_bindChained)
     ("Zip Basic", test113_zipBasic)

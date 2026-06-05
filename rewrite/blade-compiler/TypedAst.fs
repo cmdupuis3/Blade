@@ -83,7 +83,7 @@ and TypedObjectForInfo = {
 // ============================================================================
 
 and TypedApplyInfo = {
-    Loop: TypedExpr                         // Provenance: TExprMethodFor or TExprObjectFor
+    Loop: TypedExpr                         // Provenance: TExprMethodFor, TExprObjectFor, or TExprCompose(OpComposeObj,...)
     Kernel: TypedExpr
     Arrays: TypedExpr list                  // The actual array expressions
     Identities: ArrayIdentity list          // Array identity tracking (for symmetry)
@@ -100,6 +100,12 @@ and TypedApplyInfo = {
     HasReynolds: bool
     OutputType: IRType
     IsCoIteration: bool
+    /// True when this apply has Loop = TExprCompose(OpComposeObj, _, _) (or
+    /// a TExprVar resolving to one). The TypeCheck arm that builds these
+    /// puts the input arrays in the Kernel slot rather than a callable —
+    /// Lowering uses this flag to route to IRComposeApply instead of
+    /// IRApplyCombinator. Defaults to false for ordinary applies.
+    IsComposeApply: bool
 }
 
 // ============================================================================

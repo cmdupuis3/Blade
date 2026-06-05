@@ -69,8 +69,12 @@ let result = L <@> f |> compute
 """
 
 let test65_openmpSymmetric = """
-// Test OpenMP with symmetric/triangular iteration
-// Triangular loops should NOT have parallel on outermost loop
+// Test OpenMP with symmetric/triangular iteration.
+// Triangular loops parallelize the OUTERMOST loop with schedule(dynamic):
+// each outer index owns a disjoint triangular sub-slab, and dynamic scheduling
+// balances the (unequal) per-slab work. Inner dependent loops stay sequential
+// (collapse is unsafe on a non-rectangular space). Values are independent of
+// the parallelization strategy — a race would corrupt them.
 let A = [1.0, 2.0, 3.0, 4.0, 5.0]
 
 // Symmetric kernel on same array - triangular iteration
@@ -78,7 +82,7 @@ let loop = method_for(A, A)
 let kernel = lambda(x, y) where comm(x, y) -> x * y
 let result = loop <@> kernel |> compute
 
-// With comm, outer loop is triangular (i <= j), so no parallel on it
+// With comm, iteration is triangular (i <= j); outer loop parallel, inner serial.
 // Triangular: [1*1,1*2,1*3,1*4,1*5, 2*2,2*3,2*4,2*5, 3*3,3*4,3*5, 4*4,4*5, 5*5]
 // EXPECT: result = [1, 2, 3, 4, 5, 4, 6, 8, 10, 9, 12, 15, 16, 20, 25]
 """

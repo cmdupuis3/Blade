@@ -247,8 +247,20 @@ let rec lowerTypedExpr (env: TypedLowerEnv) (texpr: TypedExpr) : IRExpr =
             OutputRank = info.OutputRank
         }
     
+    | TExprApply info when info.IsComposeApply ->
+        // Slot-inverted compose application: `(o1 >>@ o2) <@> A`.
+        // TypeCheck flagged this case with IsComposeApply = true, storing
+        // the input arrays in BOTH `info.Arrays` and (redundantly)
+        // `info.Kernel`. The IR form `IRComposeApply` carries them only
+        // in `InputArrays`; the redundancy goes away.
+        IRComposeApply {
+            Composition = lowerTypedExpr env info.Loop
+            InputArrays = info.Arrays |> List.map (lowerTypedExpr env)
+            OutputType = info.OutputType
+        }
+
     | TExprApply info ->
-        // Symmetry info already computed during type checking
+        // Canonical apply. Symmetry info already computed during type checking.
         IRApplyCombinator {
             Loop = lowerTypedExpr env info.Loop
             Kernel = lowerTypedExpr env info.Kernel
@@ -462,7 +474,7 @@ and lowerTypedLambda env (info: TypedLambdaInfo) : IRExpr =
     // so the wrap doesn't change behavior at existing use sites.
     let bodyWrapped =
         match body' with
-        | IRApplyCombinator _ -> IRCompute body'
+        | IRApplyCombinator _ | IRComposeApply _ -> IRCompute body'
         | _ -> body'
 
     // Build unified IRCallable. info.ReturnType comes from TypeCheck,

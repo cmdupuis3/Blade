@@ -3291,6 +3291,7 @@ and inferApply (env: TypeEnv) (tLeft: TypedExpr) (tRight: TypedExpr) : TypeResul
             SpeedupFactor = 1L; ReynoldsSpeedup = 1L
             HasReynolds = false; OutputType = outputType
             IsCoIteration = false
+            IsComposeApply = true
         }
         Ok (mkTyped (TExprApply info) outputType)
 
@@ -3513,6 +3514,7 @@ and buildApplyInfo (env: TypeEnv)
             SpeedupFactor = speedup; ReynoldsSpeedup = reynoldsSpeedup
             HasReynolds = isReynolds; OutputType = outputType
             IsCoIteration = isCoIter
+            IsComposeApply = false
         }
         Ok (mkTyped (TExprApply info) outputType))
 
@@ -4167,6 +4169,7 @@ and inferForExpr env source kernelOpt : TypeResult<TypedExpr> =
                             SpeedupFactor = 1L; ReynoldsSpeedup = 1L
                             HasReynolds = false; OutputType = outputType
                             IsCoIteration = true
+                            IsComposeApply = false
                         }
                         Ok (mkTyped (TExprApply info) outputType)
                     | _ ->

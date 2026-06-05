@@ -59,6 +59,14 @@
       <Link>cpp/nested_array_types.hpp</Link>
       <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
     </None>
+    <None Include="cpp/alloc_layout_tests.cpp">
+      <Link>cpp/alloc_layout_tests.cpp</Link>
+      <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
+    </None>
+    <None Include="cpp/linearized_storage.hpp">
+      <Link>cpp/linearized_storage.hpp</Link>
+      <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
+    </None>
   </ItemGroup>
 
 </Project>
