@@ -736,20 +736,78 @@ let parseIdentList (tokens: Token list) : ParseResult<string list> =
     loop [] tokens
 
 // Where clause parsing (used by both function declarations and lambdas)
+/// Parse the body of omp(...): comma-separated `ident: int` pairs.
+/// e.g. omp(a: 2, b: 1) => [("a",2); ("b",1)]
+let rec private parseOmpArgs (acc: (string * int) list) (tokens: Token list) : ParseResult<(string * int) list> =
+    expectIdent tokens >>= fun name afterName ->
+    expect TokColon afterName >>= fun _ afterColon ->
+    match afterColon with
+    | t :: rest ->
+        match t.Kind with
+        | TokInt n ->
+            let acc' = (name, int n) :: acc
+            match rest with
+            | t2 :: rest2 when t2.Kind = TokComma -> parseOmpArgs acc' rest2
+            | _ -> Ok (List.rev acc', rest)
+        | _ -> error (sprintf "Expected integer in omp(...) but got %A" t.Kind) t.Line t.Col
+    | [] -> error "Expected integer in omp(...) but got EOF" 0 0
+
 let parseWhereClause (tokens: Token list) : ParseResult<WhereClause> =
-    let rec loop comms pars toks =
+    // `par` accumulates parallelization strategy assignments as a LIST (see
+    // WhereClause.Parallel). Today the single-backend validation rule keeps it
+    // to at most one element: a second strategy keyword (of either backend) is
+    // rejected. The future mixed-strategy feature relaxes this to allow a second
+    // element of a DIFFERENT backend (omp on some dims, cuda on others).
+    let rec loop comms (par: ParallelStrategy list) toks =
+        let hasStrategy = not (List.isEmpty par)
         match peek toks with
         | Some (TokKeyword KwComm) ->
             advance toks |> expect TokLParen >>= fun _ afterLParen ->
             parseIdentList afterLParen >>= fun names afterNames ->
             expect TokRParen afterNames >>= fun _ remaining ->
-            loop (names :: comms) pars remaining
+            loop (names :: comms) par remaining
+        | Some (TokKeyword KwOmp) ->
+            if hasStrategy then
+                let line, col = currentPos toks
+                error "Only one parallelization strategy (omp or cuda) allowed per where-clause" line col
+            else
+                advance toks |> expect TokLParen >>= fun _ afterLParen ->
+                parseOmpArgs [] afterLParen >>= fun pairs afterArgs ->
+                expect TokRParen afterArgs >>= fun _ remaining ->
+                loop comms (par @ [Omp { Vars = pairs }]) remaining
+        | Some (TokKeyword KwCuda) ->
+            if hasStrategy then
+                let line, col = currentPos toks
+                error "Only one parallelization strategy (omp or cuda) allowed per where-clause" line col
+            else
+                // cuda  OR  cuda(block: N)
+                let afterCuda = advance toks
+                match peek afterCuda with
+                | Some TokLParen ->
+                    expect TokLParen afterCuda >>= fun _ afterLParen ->
+                    expectIdent afterLParen >>= fun key afterKey ->
+                    if key <> "block" then
+                        let line, col = currentPos afterLParen
+                        error (sprintf "Expected 'block' in cuda(...) but got '%s'" key) line col
+                    else
+                        expect TokColon afterKey >>= fun _ afterColon ->
+                        match afterColon with
+                        | t :: rest ->
+                            match t.Kind with
+                            | TokInt n ->
+                                expect TokRParen rest >>= fun _ remaining ->
+                                loop comms (par @ [Cuda { BlockSize = int n }]) remaining
+                            | _ -> error (sprintf "Expected integer block size but got %A" t.Kind) t.Line t.Col
+                        | [] -> error "Expected integer block size but got EOF" 0 0
+                | _ ->
+                    // bare `cuda` => default block size
+                    loop comms (par @ [Cuda { BlockSize = 256 }]) afterCuda
         | Some TokComma ->
-            loop comms pars (advance toks)
+            loop comms par (advance toks)
         | _ ->
             success { 
                 Commutativity = List.rev comms
-                Parallelism = pars
+                Parallel = par
                 TDims = []
             } toks
     loop [] [] tokens
@@ -1342,15 +1400,19 @@ and parseLambda (tokens: Token list) : ParseResult<Expr> =
     sepBy parseLambdaParam TokComma afterLParen >>= fun parms afterParms ->
     expect TokRParen afterParms >>= fun _ afterRParen ->
     
-    // Optional where clause (parallel to function declarations)
-    let whereClause, afterWhere =
+    // Optional where clause (parallel to function declarations).
+    // If a `where` keyword is present, a parse error inside the clause is a
+    // GENUINE error and must propagate — previously it was swallowed (reset to
+    // None), which then produced a misleading "expected ->" error at the `where`
+    // token and hid the real cause (e.g. mutual-exclusion violations).
+    let whereResult : ParseResult<WhereClause option> =
         match peek afterRParen with
         | Some (TokKeyword KwWhere) ->
             match parseWhereClause (advance afterRParen) with
-            | Ok (w, rest) -> Some w, rest
-            | Error _ -> None, afterRParen
-        | _ -> None, afterRParen
-    
+            | Ok (w, rest) -> Ok (Some w, rest)
+            | Error e -> Error e
+        | _ -> Ok (None, afterRParen)
+    whereResult >>= fun whereClause afterWhere ->
     expect (TokOp "->") afterWhere >>= fun _ afterArrow ->
     // Lambda body: check for block or parse inline expression
     let afterArrow = skipNL afterArrow
@@ -1753,6 +1815,10 @@ and parseNestedFunction (tokens: Token list) : ParseResult<Stmt> =
     let afterRParen = skipNL afterRParen
     
     // Optional where clause
+    // NOTE (latent bug, same as the one fixed in parseLambda ~line 1346): the
+    // `Error _ -> None` arm SWALLOWS genuine where-clause parse errors and then
+    // fails later with a misleading message. Not fixed here yet — no test
+    // exercises this `function` where-clause-error path; fix with a test.
     let whereClause, afterWhere =
         match peek afterRParen with
         | Some (TokKeyword KwWhere) ->
@@ -1832,6 +1898,10 @@ let parseFunctionDecl (tokens: Token list) : ParseResult<Decl> =
     let afterRParen = skipNL afterRParen
     
     // Optional where clause
+    // NOTE (latent bug, same as the one fixed in parseLambda ~line 1346): the
+    // `Error _ -> None` arm SWALLOWS genuine where-clause parse errors and then
+    // fails later with a misleading message. Not fixed here yet — no test
+    // exercises this `function` where-clause-error path; fix with a test.
     let whereClause, afterWhere =
         match peek afterRParen with
         | Some (TokKeyword KwWhere) ->

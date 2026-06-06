@@ -443,7 +443,7 @@ let test_probe_imported_via_callable_table = {
             Params = [arrP; xP]; RetType = boolTy; Body = fBody
             IsStatic = false
             IsCommutative = false; CommGroups = []
-            Parallelism = []; IsArityPoly = false; ArityParam = None
+            Parallelism = []; IsOmpParallel = false; IsCudaKernel = false; CudaBlockSize = 256; IsArityPoly = false; ArityParam = None
             Captures = []
         }
         let callables : CallablesTable =

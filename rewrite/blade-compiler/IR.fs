@@ -479,7 +479,20 @@ and IRCallable = {
     IsStatic: bool
     IsCommutative: bool
     CommGroups: int list list
+    // Parallelism: per-(param-index, dim-count) detail from an `omp(...)` clause.
+    // IsOmpParallel is the derived "this callable requested OpenMP" flag — the
+    // opt-in signal that drives loop parallelization (see buildLoopNestCodeGen).
+    // Kept as a bool alongside the detail list, mirroring IsCommutative/CommGroups.
     Parallelism: (int * int) list
+    IsOmpParallel: bool
+    // IsCudaKernel is the analogous opt-in flag for the `cuda` strategy: when
+    // true, codegen emits a flat-launch __global__ kernel + host launch instead
+    // of a host loop nest (see genCudaKernel — added in a following increment).
+    // CudaBlockSize carries the launch block size (default 256). omp and cuda are
+    // mutually exclusive today, so at most one of IsOmpParallel/IsCudaKernel is
+    // true; both false = serial host loop (the default).
+    IsCudaKernel: bool
+    CudaBlockSize: int
     IsArityPoly: bool
     ArityParam: string option
     Captures: CaptureInfo list
@@ -1593,6 +1606,10 @@ let mkLambdaCallable
     (captures: CaptureInfo list)
     (isCommutative: bool)
     (commGroups: int list list)
+    (parallelism: (int * int) list)
+    (isOmpParallel: bool)
+    (isCudaKernel: bool)
+    (cudaBlockSize: int)
     : IRCallable =
     let id = builder.FreshId()
     {
@@ -1604,7 +1621,13 @@ let mkLambdaCallable
         IsStatic = false
         IsCommutative = isCommutative
         CommGroups = commGroups
-        Parallelism = []
+        // Lambda-level parallelism IS propagated: omp/cuda clauses on a lambda
+        // flow TypedLambdaInfo.Parallel -> here. Callers supply the omp detail +
+        // flag and the cuda flag + block size (mutually exclusive today).
+        Parallelism = parallelism
+        IsOmpParallel = isOmpParallel
+        IsCudaKernel = isCudaKernel
+        CudaBlockSize = cudaBlockSize
         IsArityPoly = false
         ArityParam = None
         Captures = captures
@@ -1808,6 +1831,129 @@ type LoopNestCodeGen = {
     /// Whether Reynolds is antisymmetric (sign alternates with permutation parity)
     IsAntisymmetric: bool
 }
+
+/// One dimension GROUP of a device buffer. Mirrors a single IRIndexType:
+/// a group is either a plain rectangular axis (Arity=1, SymNone) or a
+/// symmetric/antisymmetric/hermitian block of Arity>=2 sharing one extent.
+type BufferDimGroup = {
+    Arity: int
+    Extent: IRExpr
+    Symmetry: SymmetryClass
+    Kind: DimensionKind
+    Dependencies: IRId list
+}
+
+/// The dimensional type of one contiguous device buffer (one array's pool).
+/// The pool holds `cardinality` scalars of `ElemType` in linearize (DFS) order
+/// — identical to allocate<>'s pool order, the invariant making host/device
+/// access consistent. A skeleton (promote<T,N>::type) is a VIEW of these bytes;
+/// this type is what makes the bytes interpretable and specifies the forward
+/// (native->device) and inverse (device->native) transforms the CUDA shim uses.
+/// Derived from IRArrayType (authoritative) so it cannot drift.
+type DeviceBufferType = {
+    ElemType: IRType
+    Groups: BufferDimGroup list
+}
+
+/// Project an IRArrayType into a DeviceBufferType. Each IRIndexType becomes one
+/// BufferDimGroup. Pure restructuring of information already on the array.
+/// A T-dimension never participates in symmetry, so its regime is forced SymNone.
+let deviceBufferTypeOfArray (arr: IRArrayType) : DeviceBufferType =
+    { ElemType = arr.ElemType
+      Groups =
+        arr.IndexTypes |> List.map (fun ix ->
+            { Arity = ix.Arity
+              Extent = ix.Extent
+              Symmetry = (match ix.Kind with TDimension -> SymNone | SDimension -> ix.Symmetry)
+              Kind = ix.Kind
+              Dependencies = ix.Dependencies }) }
+
+/// True iff every group is plain rectangular with a constant (non-dependent)
+/// extent: the scope of the FIRST cuda kernel. False => fall back to host loop.
+let isRectangularConstBuffer (bt: DeviceBufferType) : bool =
+    bt.Groups |> List.forall (fun g ->
+        g.Arity = 1 && g.Symmetry = SymNone && List.isEmpty g.Dependencies)
+
+/// True iff the element scalar type crosses an `extern "C"` linkage boundary
+/// cleanly. The CUDA launch wrapper is declared extern "C" so g++ (compiling
+/// the .cpp) and nvcc (compiling the .cu) agree on an unmangled symbol; every
+/// type crossing that boundary must have a stable ABI both compilers share.
+/// Fundamental scalars (int32/int64/float/double/bool) qualify. EXCLUDED:
+///   - ETComplex* (std::complex<...>): a C++ class template; even though
+///     std::complex<double> is often layout-compatible with double[2], that is
+///     NOT guaranteed across extern "C", so we don't rely on it.
+///   - ETString (std::string): a non-POD C++ object — never crosses.
+///   - ETUnit (void): not a data element.
+///
+/// FUTURE / std::complex (it matters — first-class numeric type): the eventual
+/// path is DEFINED, not speculative. The C++ standard guarantees
+/// std::complex<double> is layout-compatible with double[2] (array-oriented
+/// access via reinterpret is well-defined), and CUDA's cuDoubleComplex /
+/// cuFloatComplex share that layout. So complex support crosses the boundary as
+/// a `double*` (the complex pool reinterpreted as cardinality*2 doubles); the
+/// kernel operates on cuDoubleComplex over the same bytes; the inverse
+/// reinterprets back. Excluded from the FIRST kernel only because it adds the
+/// reinterpret-cast boundary convention + a CUDA-complex codegen mapping, which
+/// shouldn't ride along on the first kernel — but it is a known, well-defined
+/// extension, not a wall.
+///
+/// A non-boundary-safe element type makes the kernel fall back to the host loop
+/// (gate, don't emit an unlinkable kernel). Uses AnyPrimElem so a unit-annotated
+/// or idx-tagged primitive (e.g. a Float64 carrying a unit) is still recognized
+/// by its underlying scalar.
+let isCudaBoundarySafeElem (ty: IRType) : bool =
+    match ty with
+    | AnyPrimElem ETInt32 | AnyPrimElem ETInt64
+    | AnyPrimElem ETFloat32 | AnyPrimElem ETFloat64
+    | AnyPrimElem ETBool -> true
+    | _ -> false
+
+/// Binomial C(n, k) as int64. Incremental multiplicative form; each partial
+/// C(n, i+1) = C(n, i)*(n-i)/(i+1) is itself an integer, so the mid-loop
+/// division is EXACT (not lossy).
+let binomI64 (n: int64) (k: int64) : int64 =
+    if k < 0L || k > n then 0L
+    else
+        let k = if k > n - k then n - k else k
+        let mutable result = 1L
+        let mutable i = 0L
+        while i < k do
+            result <- result * (n - i) / (i + 1L)
+            i <- i + 1L
+        result
+
+/// Per-group scalar count as an IRExpr. Literal extents fold to a literal:
+///   rectangular (Arity=1)      => extent
+///   symmetric/hermitian (r>=2) => C(n + r - 1, r)   (multiset combinations)
+///   antisymmetric (r>=2)       => C(n, r)            (strict combinations)
+/// Symbolic-symmetric counts (binomial of a runtime extent) are deferred; the
+/// first kernel gates on isRectangularConstBuffer so only the literal and the
+/// symbolic-rectangular paths are reachable today.
+let bufferGroupCardinality (g: BufferDimGroup) : IRExpr =
+    match g.Extent with
+    | IRLit (IRLitInt n) ->
+        let r = int64 g.Arity
+        let count =
+            match g.Symmetry with
+            | SymNone -> n
+            | SymSymmetric | SymHermitian -> binomI64 (n + r - 1L) r
+            | SymAntisymmetric -> binomI64 n r
+        IRLit (IRLitInt count)
+    | other -> other
+
+/// Total pool cardinality as an IRExpr (product of per-group factors — product
+/// symmetry: independent groups multiply). Folds to a literal when all extents
+/// are literal.
+let deviceBufferCardinality (bt: DeviceBufferType) : IRExpr =
+    match bt.Groups with
+    | [] -> IRLit (IRLitInt 1L)
+    | groups ->
+        groups
+        |> List.map bufferGroupCardinality
+        |> List.reduce (fun a b ->
+            match a, b with
+            | IRLit (IRLitInt x), IRLit (IRLitInt y) -> IRLit (IRLitInt (x * y))
+            | _ -> IRBinOp (IRElementwise, IRMul, a, b))
 
 /// Build symmetry vector from output type
 /// Consecutive equal values indicate symmetric dimensions
@@ -2023,6 +2169,17 @@ let buildLoopNestCodeGen
             (rk.Callable.Params, rk.Callable.Body, rk.Callable.CommGroups,
              rk.Callable.Captures, rk.Reynolds.IsAntisymmetric)
         | None -> ([], IRLit IRLitUnit, [], [], false)
+
+    // Opt-in parallelism: the loop nest is parallelized ONLY if the resolved
+    // kernel callable requested OpenMP via an `omp(...)` clause. No clause =>
+    // serial (the language default, like C/Rust). This replaces the earlier
+    // structural rule (isParallel = level=0 unconditionally), which parallelized
+    // everything. The genNestPragma strategy logic (collapse vs. dynamic) is
+    // preserved as the IMPLEMENTATION of "how to parallelize once omp is asked".
+    let kernelRequestedOmp =
+        match resolveKernel info.Kernel with
+        | Some rk -> rk.Callable.IsOmpParallel
+        | None -> false
     
     // Map array position to kernel param
     let paramByArrayPos = 
@@ -2074,13 +2231,13 @@ let buildLoopNestCodeGen
                     let strictOffset =
                         if isTriangular && isAntisymmetric then level
                         else 0
-                    // Outer level is the parallelization candidate. Triangularity
-                    // no longer vetoes it: the outermost loop of a triangular nest
-                    // is independently parallelizable (each outer index owns a
-                    // disjoint sub-slab). CodeGen's genNestPragma reads the bound
-                    // structure to pick the safe strategy — collapse for
-                    // rectangular, dynamic-scheduled outer loop for triangular.
-                    let isParallel = level = 0
+                    // Outer level is the parallelization candidate, but ONLY if
+                    // the kernel opted into OpenMP via an `omp(...)` clause. No
+                    // clause => serial (the default). Triangularity does not veto
+                    // it: the outermost loop of a triangular nest is independently
+                    // parallelizable (each outer index owns a disjoint sub-slab);
+                    // genNestPragma picks the safe strategy (collapse vs dynamic).
+                    let isParallel = level = 0 && kernelRequestedOmp
                     let state =
                         if isTriangular && level > 0 then SCSymmetric
                         else SCNeither
@@ -2137,10 +2294,10 @@ let buildLoopNestCodeGen
                 let deps = if level < boundDependencies.Length then boundDependencies.[level] else []
                 let isTriangular = level < triangularLevels.Length && triangularLevels.[level]
                 let state = if level < symcomStates.Length then symcomStates.[level] else SCNeither
-                // Outer level is the parallelization candidate regardless of
-                // triangularity (see shared-index path note above); genNestPragma
-                // picks collapse vs. dynamic-scheduled outer from bound structure.
-                let isParallel = level = 0
+                // Outer level is the parallelization candidate, but ONLY if the
+                // kernel opted into OpenMP (see shared-index path note above);
+                // genNestPragma picks collapse vs. dynamic from bound structure.
+                let isParallel = level = 0 && kernelRequestedOmp
                 let strictOffset =
                     if isTriangular && levelInfo.IndexSpace.Symmetry = SymAntisymmetric then 1
                     else 0
@@ -3079,6 +3236,9 @@ let specializeFunction (func: IRFuncDef) (arities: int list) (builder: IRBuilder
           IsCommutative = newIsComm
           CommGroups = newCommGroups
           Parallelism = func.Parallelism
+          IsOmpParallel = func.IsOmpParallel
+          IsCudaKernel = func.IsCudaKernel
+          CudaBlockSize = func.CudaBlockSize
           IsArityPoly = false
           ArityParam = None
           // Specialized clones inherit the original's captures verbatim;

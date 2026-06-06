@@ -52,6 +52,10 @@ type TypedLambdaInfo = {
     CommGroups: int list list
     Captures: TypedVarInfo list
     IsCommutative: bool
+    // Parallelization strategy assignments (list; see WhereClause.Parallel).
+    // Propagated from the lambda's where-clause so lambda-level omp/cuda take
+    // effect. Today 0 or 1 element.
+    Parallel: ParallelStrategy list
 }
 
 // ============================================================================

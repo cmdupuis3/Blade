@@ -62,6 +62,22 @@ let exprWarningsCell () : string list ref =
         fresh
     else v
 
+/// Collector for CUDA kernel definitions destined for the .cu file. genCudaKernel
+/// appends each __global__ kernel + extern "C" wrapper here; the program
+/// assembler reads it to produce the .cu (only when non-empty). Mirrors
+/// exprWarningsCell (AsyncLocal per-flow ref) so a deep emission site contributes
+/// to a module-level collection without threading a return value everywhere.
+let private cudaKernelDefsStorage =
+    System.Threading.AsyncLocal<string list ref>()
+
+let cudaKernelDefsCell () : string list ref =
+    let v = cudaKernelDefsStorage.Value
+    if isNull (box v) then
+        let fresh = ref []
+        cudaKernelDefsStorage.Value <- fresh
+        fresh
+    else v
+
 /// Module-level OpenMP test-mode flag. When set, parallel loop nests emit
 /// additional thread-coverage instrumentation: each parallel region records
 /// which OpenMP threads actually executed iterations, and prints a parseable
@@ -2844,6 +2860,115 @@ let buildSimpleApplyInfo (arrays: IRExpr list) (kernel: IRExpr) (outputType: IRT
         IsCoIteration = false
     }
 
+/// Emit a CUDA kernel for the first-kernel scope (rectangular pointwise,
+/// boundary-safe scalar elements, single-chunk synchronous). Returns
+///   Some inlineLaunchLines  when emitted: the __global__ kernel + its
+///     extern "C" launch wrapper are appended to cudaKernelDefsCell (destined
+///     for the .cu file); the returned lines are the inline .cpp host code.
+///   None  when out of scope (caller falls back to the host loop).
+/// Gates: every binding rectangular const-extent RealArray scalar-leaf; array
+/// output with boundary-safe elem type; no Reynolds. Only flat T*/size_t cross
+/// the extern "C" boundary (pool_base supplies flat host pointers).
+let genCudaKernel (codeGen: LoopNestCodeGen) (name: string) (blockSize: int) : string list option =
+    let bindings = codeGen.Bindings
+    let nDims = List.length bindings
+    let rectOk =
+        bindings |> List.forall (fun b ->
+            b.BoundDependencies.IsEmpty && b.StrictOffset = 0
+            && (match b.Extent with IRLit (IRLitInt _) -> true | _ -> false)
+            && (b.Elements |> List.forall (fun e -> match e.Virtual with RealArray -> true | _ -> false)))
+    let outElemTyOpt =
+        match codeGen.OutputType with
+        | ArrayElem arr when isCudaBoundarySafeElem arr.ElemType -> Some arr.ElemType
+        | _ -> None
+    if codeGen.HasReynolds || not rectOk || outElemTyOpt.IsNone then None
+    else
+    let outElemTy = outElemTyOpt.Value
+    let elemCpp = elemTypeToCpp outElemTy
+    let extentLits =
+        bindings |> List.map (fun b -> match b.Extent with IRLit (IRLitInt n) -> n | _ -> 0L)
+    let cardinality = extentLits |> List.fold (fun a n -> a * n) 1L
+    let kernelName = sprintf "__cuda_%s" (sanitizeCppName name)
+    let launchName = sprintf "__launch_%s" (sanitizeCppName name)
+    let mutable paramFinalNames : Map<IRId, string> = Map.empty
+    let mutable currentNames : Map<int, string> =
+        codeGen.InputArrayNames |> List.mapi (fun i n -> (i, n)) |> Map.ofList
+    let bodyBinds =
+        [ for b in bindings do
+            for elem in b.Elements do
+                let cur = Map.tryFind elem.ArrayPosition currentNames |> Option.defaultValue elem.ArrayName
+                let newName = sprintf "%s__%s" cur b.IndexName
+                let etStr = elemTypeToCpp elem.ArrayElemType
+                currentNames <- Map.add elem.ArrayPosition newName currentNames
+                paramFinalNames <- Map.add elem.ParamVarId newName paramFinalNames
+                yield sprintf "    %s %s = %s[%s];" etStr newName cur b.IndexName ]
+    let nameMap =
+        codeGen.Captures |> List.fold (fun acc c -> Map.add c.Id c.Name acc) paramFinalNames
+    let reynolds = genKernelExprWithReynolds codeGen.KernelExpr codeGen.KernelParams false false nameMap paramFinalNames
+    let recover =
+        [ yield "    size_t __blade_g = __blade_i;"
+          for i in (nDims - 1) .. -1 .. 0 do
+            let e = extentLits.[i]
+            let b = bindings.[i]
+            yield sprintf "    size_t %s = __blade_g %% %dUL;" b.IndexName e
+            if i > 0 then yield sprintf "    __blade_g /= %dUL;" e ]
+    let kernelParams =
+        codeGen.InputArrayNames |> List.map (fun n -> sprintf "const %s* %s" elemCpp n) |> String.concat ", "
+    let kernelDef =
+        // NOTE on naming: generated CUDA-internal identifiers use a `__blade_`
+        // prefix. The plain `__out` originally chosen collided with MSVC's SAL
+        // annotation macro `__out` (sal.h, pulled in transitively on Windows),
+        // which expands to nothing — turning `__out[__i] = ...` into a stray
+        // `[__i] = ...` that nvcc/cl rejected as a bad attribute. `__in/__inout/
+        // __out` are MSVC macros; `__blade_*` cannot collide with SAL or other
+        // implementation-reserved names.
+        [ sprintf "__global__ void %s(%s, %s* __blade_out, size_t __blade_card) {" kernelName kernelParams elemCpp
+          "    size_t __blade_i = (size_t)blockIdx.x * blockDim.x + threadIdx.x;"
+          "    if (__blade_i >= __blade_card) return;" ]
+        @ recover @ bodyBinds
+        @ [ sprintf "    __blade_out[__blade_i] = %s;" reynolds.CppExpr; "}" ]
+    let wrapInParams =
+        codeGen.InputArrayNames |> List.map (fun n -> sprintf "const %s* %s" elemCpp n) |> String.concat ", "
+    let wrapper =
+        [ sprintf "extern \"C\" void %s(%s, %s* __blade_host_out) {" launchName wrapInParams elemCpp
+          sprintf "    size_t __blade_card = %dUL;" cardinality ]
+        @ [ for (i, n) in List.mapi (fun i n -> (i, n)) codeGen.InputArrayNames do
+              let sz = extentLits.[i]
+              yield sprintf "    %s* __blade_d_%s; cudaMalloc(&__blade_d_%s, %dUL * sizeof(%s));" elemCpp n n sz elemCpp
+              yield sprintf "    cudaMemcpy(__blade_d_%s, %s, %dUL * sizeof(%s), cudaMemcpyHostToDevice);" n n sz elemCpp ]
+        @ [ sprintf "    %s* __blade_d_out; cudaMalloc(&__blade_d_out, __blade_card * sizeof(%s));" elemCpp elemCpp
+            sprintf "    size_t __blade_blocks = (__blade_card + %dUL - 1UL) / %dUL;" blockSize blockSize
+            sprintf "    %s<<<(unsigned)__blade_blocks, %d>>>(%s, __blade_d_out, __blade_card);" kernelName blockSize
+              (codeGen.InputArrayNames |> List.map (sprintf "__blade_d_%s") |> String.concat ", ")
+            "    cudaDeviceSynchronize();"
+            sprintf "    cudaMemcpy(__blade_host_out, __blade_d_out, __blade_card * sizeof(%s), cudaMemcpyDeviceToHost);" elemCpp ]
+        @ [ for n in codeGen.InputArrayNames -> sprintf "    cudaFree(__blade_d_%s);" n ]
+        @ [ "    cudaFree(__blade_d_out);"; "}" ]
+    let cell = cudaKernelDefsCell ()
+    cell.Value <- cell.Value @ (kernelDef @ [""] @ wrapper @ [""])
+    let outputRank = nDims
+    let symmVecName = sprintf "%s_symm" name
+    let extentsName = sprintf "%s_extents" name
+    let inlineLines =
+        [ sprintf "    static constexpr const size_t* %s = nullptr;" symmVecName
+          sprintf "    size_t* %s = new size_t[%d];" extentsName outputRank ]
+        @ (bindings |> List.mapi (fun i b ->
+              match b.Extent with
+              | IRLit (IRLitInt n) -> sprintf "    %s[%d] = %dUL;" extentsName i n
+              | _ -> sprintf "    %s[%d] = %s.extents[%d];" extentsName i b.ExtentArrayRef b.ExtentDimRef))
+        @ [ sprintf "    Array<%s, %d> %s = { allocate<typename promote<%s, %d>::type, %s>(%s), %s };"
+                elemCpp outputRank name elemCpp outputRank symmVecName extentsName extentsName
+            sprintf "    %s(%s, pool_base(%s.data));"
+                launchName
+                // Inputs are Array<T,N> wrappers (array-literal bindings render as
+                // `Array<T,1> A = { ... }`), same as the output — so the flat pool
+                // is reached via `.data`. (An earlier version dropped `.data` on
+                // inputs after a host-shape test that wrongly modeled inputs as
+                // bare pointers; the self-contained program uses wrappers.)
+                (codeGen.InputArrayNames |> List.map (fun n -> sprintf "pool_base(%s.data)" n) |> String.concat ", ")
+                name ]
+    Some inlineLines
+
 /// Generate the complete code for a combinator application (L <@> f)
 let genApplyCombinator (ctx: CodeGenContext) (name: string) (info: ApplyInfo) (builder: IRBuilder) : string list =
     let ind = indentStr ctx
@@ -3086,6 +3211,18 @@ let genApplyCombinator (ctx: CodeGenContext) (name: string) (info: ApplyInfo) (b
             let loopCode = genLoopNest codeGen tempCtx.VarNames tempCtx.Indent
             preCode @ [scalarDecl; ""] @ loopCode
         | _ ->
+            // CUDA dispatch: if the resolved kernel opted into cuda AND the case
+            // is in first-kernel scope, emit a device kernel (+ .cu wrapper) and
+            // an inline launch instead of the host loop. genCudaKernel returns
+            // None for out-of-scope cases, falling back to the host loop below.
+            let cudaInline =
+                match resolveKernel info.Kernel with
+                | Some rk when rk.Callable.IsCudaKernel ->
+                    genCudaKernel codeGen name rk.Callable.CudaBlockSize
+                | _ -> None
+            match cudaInline with
+            | Some launchLines -> preCode @ [""] @ launchLines
+            | None ->
             // Array output: symmetry vector, extents, allocation, loop nest.
             let symmVecName = sprintf "%s_symm" name
             let symmVecDecl =
@@ -5759,15 +5896,42 @@ let genMainWrapper (testName: string) (bodyIndented: string list) (printCode: st
 /// Shared by genSelfContainedProgram and genProgramWithExternalRuntime.
 let genMainProgram (modul: IRModule) (testName: string) : string =
     (exprWarningsCell ()).Value <- []
+    // Reset the CUDA kernel collector; genCudaKernel appends during genModule.
+    (cudaKernelDefsCell ()).Value <- []
     let builder = IRBuilder()
     
     let includes = genIncludes ()
     let (funcDefs, bindCode) = genModule modul builder
+
+    // extern "C" launch-wrapper prototypes for any CUDA kernels emitted during
+    // genModule. Bodies live in the .cu (nvcc); the .cpp needs only the proto to
+    // call across the linkage boundary. Extract each wrapper's signature line
+    // (starts `extern "C" void __launch_`) and `;`-terminate it.
+    let cudaProtos =
+        (cudaKernelDefsCell ()).Value
+        |> List.filter (fun line -> line.StartsWith("extern \"C\" void __launch_"))
+        |> List.map (fun sigLine ->
+            let trimmed = sigLine.TrimEnd()
+            (if trimmed.EndsWith("{") then trimmed.Substring(0, trimmed.Length - 1).TrimEnd() else trimmed) + ";")
     
     let bodyIndented = bindCode |> List.map (fun s -> "    " + s)
     let mainFunc = genMainWrapper testName bodyIndented []
     
-    (includes @ [""] @ funcDefs @ mainFunc) |> String.concat "\n"
+    (includes @ [""] @ cudaProtos @ [""] @ funcDefs @ mainFunc) |> String.concat "\n"
+
+/// The .cu file content for the most recently assembled program, or None if no
+/// CUDA kernel was emitted. Call AFTER genMainProgram/genProgramFromIR (the
+/// collector is populated during assembly).
+let getCudaFileContent () : string option =
+    match (cudaKernelDefsCell ()).Value with
+    | [] -> None
+    | defs ->
+        let header =
+            [ "// Generated CUDA kernels (.cu) — compiled by nvcc, linked with the .cpp."
+              "#include <cstddef>"
+              "#include <cstdint>"
+              "" ]
+        Some ((header @ defs) |> String.concat "\n")
 
 /// Generate a complete C++ program from an IR program (all modules)
 let genProgramFromIR (program: IRProgram) (testName: string) : string =
@@ -5787,16 +5951,28 @@ let genProgramFromIR (program: IRProgram) (testName: string) : string =
 /// Generate C++ struct definition from IRTDStruct
 let genSelfContainedProgram (modul: IRModule) (testName: string) : string =
     let builder = IRBuilder()
+    // Reset the CUDA kernel collector for this program; genCudaKernel appends
+    // during genModule. Read afterward via getCudaFileContent for the .cu file.
+    (cudaKernelDefsCell ()).Value <- []
     
     let includes = genIncludesExternal ()
     let typeDefs = genTypeDefs modul
     let (funcDefs, bindCode) = genModule modul builder
+
+    // extern "C" launch-wrapper prototypes for any CUDA kernels emitted: the
+    // .cpp calls them across the linkage boundary (bodies live in the .cu).
+    let cudaProtos =
+        (cudaKernelDefsCell ()).Value
+        |> List.filter (fun line -> line.StartsWith("extern \"C\" void __launch_"))
+        |> List.map (fun sigLine ->
+            let trimmed = sigLine.TrimEnd()
+            (if trimmed.EndsWith("{") then trimmed.Substring(0, trimmed.Length - 1).TrimEnd() else trimmed) + ";")
     
     let bodyIndented = bindCode |> List.map (fun s -> "    " + s)
     let printCode = genPrintStatements modul
     let mainFunc = genMainWrapper testName bodyIndented printCode
     
-    (includes @ typeDefs @ [""] @ funcDefs @ mainFunc) |> String.concat "\n"
+    (includes @ typeDefs @ [""] @ cudaProtos @ [""] @ funcDefs @ mainFunc) |> String.concat "\n"
 
 /// Generate a C++ program with external runtime header
 /// Returns (mainFileContent, headerFileContent)

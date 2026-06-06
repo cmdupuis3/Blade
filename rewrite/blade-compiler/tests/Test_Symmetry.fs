@@ -109,6 +109,26 @@ let result = L <@> f |> compute
 // EXPECT: result = [16, 20, 24, 25, 30, 36, 32, 40, 48, 50, 60, 72, 48, 60, 72, 75, 90, 108, 64, 80, 96, 100, 120, 144, 96, 120, 144, 150, 180, 216, 144, 180, 216, 225, 270, 324]
 """
 
+let test43_ompClauseParse = """
+// omp clause parses and threads through; values UNCHANGED (the clause is inert
+// until the IsParallel flip — parsing + lowering must not alter results).
+let A = [1.0, 2.0, 3.0, 4.0, 5.0]
+let L = method_for(A, A)
+let f = lambda(x, y) where comm(x, y), omp(x: 1) -> x * y
+let result = L <@> f |> compute
+// EXPECT: result = [1.0, 2.0, 3.0, 4.0, 5.0, 4.0, 6.0, 8.0, 10.0, 9.0, 12.0, 15.0, 16.0, 20.0, 25.0]
+"""
+
+let test44_cudaClauseParse = """
+// cuda clause parses (with block size); values UNCHANGED (inert pre-flip; no
+// kernel codegen until the CUDA phase).
+let A = [1.0, 2.0, 3.0, 4.0, 5.0]
+let L = method_for(A, A)
+let f = lambda(x, y) where comm(x, y), cuda(block: 64) -> x * y
+let result = L <@> f |> compute
+// EXPECT: result = [1.0, 2.0, 3.0, 4.0, 5.0, 4.0, 6.0, 8.0, 10.0, 9.0, 12.0, 15.0, 16.0, 20.0, 25.0]
+"""
+
 /// Symmetry and triangular iteration
 let symmetryTests = [
     ("Triangular Iteration", test8_triangularIteration)
@@ -120,4 +140,6 @@ let symmetryTests = [
     ("Output Type: No Comm", test40_outputTypeNoComm)
     ("Output Type: Partial Comm", test41_partialComm)
     ("Output Type: Distinct Comm Groups", test42_distinctCommGroups)
+    ("Parse: omp clause (inert pre-flip)", test43_ompClauseParse)
+    ("Parse: cuda clause (inert pre-flip)", test44_cudaClauseParse)
 ]

@@ -480,9 +480,27 @@ and lowerTypedLambda env (info: TypedLambdaInfo) : IRExpr =
     // Build unified IRCallable. info.ReturnType comes from TypeCheck,
     // so the lambda has a concrete return type. The body's IRExpr type
     // matches it (modulo inference); we trust TypeCheck's annotation.
+    // Lambda-level parallelism: find the Omp assignment (if any) in the strategy
+    // list and map its named Vars to param indices. (Today the list has 0 or 1
+    // element; List.tryPick generalizes cleanly to the future mixed case where
+    // omp and cuda assignments coexist.) Cuda/none => no omp parallelism here.
+    let lamOmp = info.Parallel |> List.tryPick (function Omp o -> Some o | _ -> None)
+    let lamParallelism =
+        match lamOmp with
+        | Some omp ->
+            omp.Vars |> List.choose (fun (name, dims) ->
+                info.Params |> List.tryFindIndex (fun p -> p.Name = name)
+                |> Option.map (fun idx -> (idx, dims)))
+        | None -> []
+    let lamIsOmp = Option.isSome lamOmp
+    // Lambda-level cuda: find a Cuda assignment (if any) and its block size.
+    let lamCuda = info.Parallel |> List.tryPick (function Cuda c -> Some c | _ -> None)
+    let lamIsCuda = Option.isSome lamCuda
+    let lamBlock = match lamCuda with Some c -> c.BlockSize | None -> 256
     let callable =
         mkLambdaCallable env.Builder paramInfos bodyWrapped info.ReturnType
                          captures info.IsCommutative info.CommGroups
+                         lamParallelism lamIsOmp lamIsCuda lamBlock
     // Emit IRVar(callable.Id, funcType) — the callable lives in
     // LiftedCallables → module.Functions; the IRVar carries just the
     // function type for type-inference and consumer dispatch.
@@ -621,7 +639,7 @@ and lowerTypedSection env (op: BinOp) (funcTy: IRType) : IRExpr =
             IRTScalar ETBool
         | _ -> retTy
     let commGroups = if isComm then [[0; 1]] else []
-    let callable = mkLambdaCallable env.Builder parms body retType [] isComm commGroups
+    let callable = mkLambdaCallable env.Builder parms body retType [] isComm commGroups [] false false 256
     env.LiftedCallables.Add(callable)
     // Stage 3c.3: emit IRVar reference to the lifted callable.
     let funcType =
@@ -669,7 +687,7 @@ and lowerTypedPartialApp env (op: BinOp) (argExpr: IRExpr) (isLeft: bool) (funcT
         | IREq | IRNeq | IRLt | IRLe | IRGt | IRGe | IRAnd | IROr ->
             IRTScalar ETBool
         | _ -> retTy
-    let callable = mkLambdaCallable env.Builder parms body retType [] false []
+    let callable = mkLambdaCallable env.Builder parms body retType [] false [] [] false false 256
     env.LiftedCallables.Add(callable)
     // Stage 3c.3: emit IRVar reference to the lifted callable.
     let funcType =
@@ -731,7 +749,7 @@ and lowerTypedBinOp env mode op l r leftExpr rightExpr resultType =
             | _ -> IRTScalar elemTypeL
         let commGroups = if mode = Elementwise then [[0; 1]] else []
         let lambdaInfo =
-            mkLambdaCallable env.Builder parms body kernelRetType [] false commGroups
+            mkLambdaCallable env.Builder parms body kernelRetType [] false commGroups [] false false 256
         env.LiftedCallables.Add(lambdaInfo)
         // Kernel slot references the lifted callable via IRVar;
         // genObjectForApplication uses resolveCallable + wrapper to
@@ -818,14 +836,38 @@ let lowerTypedFuncDecl (env: TypedLowerEnv) (decl: TypedFunctionDecl) : IRFuncDe
         | _ -> None)
     let isArityPoly = not polyParamNames.IsEmpty
 
-    // Extract parallelism from where clause
-    let parallelism =
+    // Extract parallelism from where clause. The AST carries a ParallelStrategy
+    // LIST; find the Omp assignment (if any) and map its named vars + dim counts
+    // into the IRCallable.Parallelism (int*int) shape (param-index, level). Cuda
+    // does not populate this field (its IR channel is added in a later phase).
+    // No omp assignment => [] (serial), the default. (List.tryPick generalizes
+    // to the future mixed omp+cuda case.)
+    let declOmp =
         match decl.WhereClause with
-        | Some wc ->
-            wc.Parallelism |> List.choose (fun (name, level) ->
+        | Some wc -> wc.Parallel |> List.tryPick (function Omp o -> Some o | _ -> None)
+        | None -> None
+    let parallelism =
+        match declOmp with
+        | Some omp ->
+            omp.Vars |> List.choose (fun (name, dims) ->
                 decl.Params |> List.tryFindIndex (fun p -> p.Name = name)
-                |> Option.map (fun idx -> (idx, level)))
+                |> Option.map (fun idx -> (idx, dims)))
         | None -> []
+
+    // The opt-in OpenMP signal: true iff the where-clause carried an `omp(...)`
+    // assignment. Distinguishes omp from cuda and from serial, so loop
+    // parallelization keys on this, not on Parallelism-list emptiness.
+    let isOmpParallel = Option.isSome declOmp
+
+    // The opt-in CUDA signal: find a Cuda assignment in the strategy list. When
+    // present, codegen emits a flat-launch kernel (following increment). Carries
+    // the launch block size; default 256 if no Cuda assignment.
+    let declCuda =
+        match decl.WhereClause with
+        | Some wc -> wc.Parallel |> List.tryPick (function Cuda c -> Some c | _ -> None)
+        | None -> None
+    let isCudaKernel = Option.isSome declCuda
+    let cudaBlockSize = match declCuda with Some c -> c.BlockSize | None -> 256
 
     // Bind parameters in environment for body lowering
     let mutable paramEnv = { env with PolyParamNames = polyParamNames }
@@ -845,6 +887,9 @@ let lowerTypedFuncDecl (env: TypedLowerEnv) (decl: TypedFunctionDecl) : IRFuncDe
         IsCommutative = not decl.CommGroups.IsEmpty
         CommGroups = decl.CommGroups
         Parallelism = parallelism
+        IsOmpParallel = isOmpParallel
+        IsCudaKernel = isCudaKernel
+        CudaBlockSize = cudaBlockSize
         IsArityPoly = isArityPoly
         ArityParam = polyParamNames |> List.tryHead
         // Source-level functions live at top level and have no enclosing

@@ -67,6 +67,8 @@ and Keyword =
     | KwWith
     | KwWhere
     | KwComm
+    | KwOmp
+    | KwCuda
     | KwReynolds
     | KwTrue
     | KwFalse
@@ -143,6 +145,8 @@ let keywords =
       "with", KwWith
       "where", KwWhere
       "comm", KwComm
+      "omp", KwOmp
+      "cuda", KwCuda
       "reynolds", KwReynolds
       "true", KwTrue
       "false", KwFalse

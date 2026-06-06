@@ -840,6 +840,84 @@ let compileCuda (cuFile: string) (outputDir: string) : Result<string, string> =
     with ex ->
         Error (sprintf "CUDA compilation exception: %s\n%s" ex.Message ex.StackTrace)
 
+/// Run a subprocess, capturing combined output. Shared by the split-compile
+/// steps. Returns Ok () on exit 0, else Error with the captured output.
+let private runProc (exe: string) (args: string) (timeoutMs: int) : Result<unit, string> =
+    try
+        let psi = ProcessStartInfo(exe, args)
+        psi.RedirectStandardOutput <- true
+        psi.RedirectStandardError <- true
+        psi.UseShellExecute <- false
+        psi.CreateNoWindow <- true
+        use proc = Process.Start(psi)
+        let outT = proc.StandardOutput.ReadToEndAsync()
+        let errT = proc.StandardError.ReadToEndAsync()
+        if not (proc.WaitForExit(timeoutMs)) then
+            (try proc.Kill() with _ -> ())
+            Error (sprintf "%s timed out" exe)
+        else
+            let combined =
+                [ if not (String.IsNullOrWhiteSpace outT.Result) then yield outT.Result
+                  if not (String.IsNullOrWhiteSpace errT.Result) then yield errT.Result ]
+                |> String.concat "\n"
+            if proc.ExitCode = 0 then Ok ()
+            else Error (sprintf "%s failed (exit %d):\n%s\nCommand: %s %s" exe proc.ExitCode combined exe args)
+    with ex -> Error (sprintf "%s exception: %s" exe ex.Message)
+
+/// Compile a CUDA program split across two files, per the chosen separation:
+/// nvcc compiles the .cu (device kernels) to an object, g++ compiles the .cpp
+/// (host program — no CUDA syntax, only an extern "C" prototype) to an object,
+/// then the two objects are linked (with nvcc, which resolves the CUDA runtime
+/// automatically). The extern "C" launch wrapper is the unmangled boundary
+/// symbol both compilers agree on. Returns the exe path.
+let compileCudaSplit (cuFile: string) (cppFile: string) (outputDir: string) : Result<string, string> =
+    let onWindows = RuntimeInformation.IsOSPlatform(OSPlatform.Windows)
+    let exeExt = if onWindows then ".exe" else ".out"
+    let cuFull = Path.GetFullPath(cuFile)
+    let cppFull = Path.GetFullPath(cppFile)
+    let objExt = if onWindows then ".obj" else ".o"
+    let cuObj = Path.ChangeExtension(cuFull, ".cu" + objExt)
+    let cppObj = Path.ChangeExtension(cppFull, ".cpp" + objExt)
+    let exeFull = Path.GetFullPath(Path.Combine(outputDir, Path.GetFileNameWithoutExtension(cppFile) + exeExt))
+    if onWindows then
+        // Windows: pure MSVC toolchain, nvcc-orchestrated. nvcc drives cl.exe as
+        // the host compiler for BOTH the .cu device code and the .cpp host code,
+        // then links. This keeps a SINGLE C++ ABI (MSVC) across both objects —
+        // no MinGW/g++ in the CUDA path, so no cross-ABI link fragility. (The
+        // extern "C" launch wrapper would link across ABIs, but matching the
+        // host toolchain on both halves is the robust native-Windows setup.)
+        // Requires cl.exe on PATH — run from the VS x64 Native Tools prompt.
+        // No OpenMP here: the rank-1 cuda host half has no parallel host loop,
+        // so we avoid the MSVC /openmp vs g++ -fopenmp flag-spelling divergence.
+        let nvccCu  = sprintf "-std=c++17 -O2 -c -o \"%s\" \"%s\"" cuObj cuFull
+        let nvccCpp = sprintf "-std=c++17 -O2 -c -o \"%s\" \"%s\"" cppObj cppFull
+        let nvccLink = sprintf "-std=c++17 -O2 -o \"%s\" \"%s\" \"%s\"" exeFull cuObj cppObj
+        match runProc "nvcc" nvccCu 120000 with
+        | Error e -> Error e
+        | Ok () ->
+            match runProc "nvcc" nvccCpp 120000 with
+            | Error e -> Error e
+            | Ok () ->
+                match runProc "nvcc" nvccLink 120000 with
+                | Error e -> Error e
+                | Ok () -> Ok exeFull
+    else
+        // Linux: nvcc compiles the .cu (host code via g++), g++ compiles the
+        // .cpp; both share the g++ ABI, so the split + link is safe. Host
+        // warning passthrough mirrors compileCpp's safety net.
+        let nvccCu = sprintf "-std=c++17 -O2 -c -o \"%s\" \"%s\"" cuObj cuFull
+        let gppCpp = sprintf "-std=c++17 -O2 -fopenmp -Werror=float-conversion -Werror=narrowing -c -o \"%s\" \"%s\"" cppObj cppFull
+        let nvccLink = sprintf "-std=c++17 -O2 -Xcompiler -fopenmp -o \"%s\" \"%s\" \"%s\"" exeFull cuObj cppObj
+        match runProc "nvcc" nvccCu 120000 with
+        | Error e -> Error e
+        | Ok () ->
+            match runProc "g++" gppCpp 60000 with
+            | Error e -> Error e
+            | Ok () ->
+                match runProc "nvcc" nvccLink 120000 with
+                | Error e -> Error e
+                | Ok () -> Ok exeFull
+
 /// Compile a generated source file according to its backend requirement,
 /// resolved against the environment's capabilities. Returns the existing
 /// `Result<exePath, message>` shape; a skip is reported as
@@ -1405,6 +1483,203 @@ let runTestCategoryFull (name: string) (tests: (string * string) list) (outputDi
 /// codegen path uses — not a stale copy — which is the point of syncing it here.
 ///
 /// Returns 0 on all-pass or skip (g++ absent); 1 on any compile/run/check failure.
+/// F# unit tests for the DeviceBufferType dimensional-type machinery (the
+/// foundation for CUDA buffer streaming). Verifies cardinality computation —
+/// the load-bearing arithmetic that, if wrong, would silently corrupt the
+/// device buffer mapping (and there is no CPU oracle once on hardware, so this
+/// must be checked HERE against hand-computed values). Pure F#, no g++.
+let runBufferTypeTests () : int =
+    printHeader "Device Buffer Type Tests"
+    let mutable failures = 0
+    let lit n = IRLit (IRLitInt (int64 n))
+    // A buffer dim group constructor for the test
+    let grp arity ext symm : BufferDimGroup =
+        { Arity = arity; Extent = lit ext; Symmetry = symm
+          Kind = (if symm = SymNone then TDimension else SDimension)
+          Dependencies = [] }
+    // Rectangular SDimension group (Arity 1, SymNone, but SDimension)
+    let rectS ext : BufferDimGroup =
+        { Arity = 1; Extent = lit ext; Symmetry = SymNone
+          Kind = SDimension; Dependencies = [] }
+    let card (groups: BufferDimGroup list) =
+        match deviceBufferCardinality { ElemType = IRTScalar ETFloat64; Groups = groups } with
+        | IRLit (IRLitInt n) -> Some n
+        | _ -> None
+    let check name (groups: BufferDimGroup list) (expected: int64) =
+        match card groups with
+        | Some n when n = expected ->
+            printfn "  [PASS] %s => %d" name n
+        | Some n ->
+            printfn "  [FAIL] %s => %d (expected %d)" name n expected
+            failures <- failures + 1
+        | None ->
+            printfn "  [FAIL] %s => non-literal (expected %d)" name expected
+            failures <- failures + 1
+    // Rectangular: 8 x 8 = 64
+    check "rect 8x8" [rectS 8; rectS 8] 64L
+    // Rectangular 1-D: 12
+    check "rect 12" [rectS 12] 12L
+    // Symmetric SymIdx<2> over n=5: C(5+2-1, 2) = C(6,2) = 15
+    check "sym2 n=5" [grp 2 5 SymSymmetric] 15L
+    // Symmetric SymIdx<3> over n=4: C(4+3-1,3) = C(6,3) = 20
+    check "sym3 n=4" [grp 3 4 SymSymmetric] 20L
+    // Antisymmetric AntisymIdx<2> over n=5: C(5,2) = 10
+    check "antisym2 n=5" [grp 2 5 SymAntisymmetric] 10L
+    // Antisymmetric AntisymIdx<3> over n=5: C(5,3) = 10
+    check "antisym3 n=5" [grp 3 5 SymAntisymmetric] 10L
+    // Hermitian = same storage count as symmetric: C(6,2) = 15
+    check "herm2 n=5" [grp 2 5 SymHermitian] 15L
+    // Product symmetry: symmetric(n=5,r=2)=15 times rectangular 4 = 60
+    check "sym2 x rect4" [grp 2 5 SymSymmetric; rectS 4] 60L
+    // isRectangularConstBuffer predicate
+    let rectBt = { ElemType = IRTScalar ETFloat64; Groups = [rectS 8; rectS 8] }
+    let symBt = { ElemType = IRTScalar ETFloat64; Groups = [grp 2 5 SymSymmetric] }
+    if isRectangularConstBuffer rectBt then printfn "  [PASS] isRectangular(rect)=true"
+    else (printfn "  [FAIL] isRectangular(rect) should be true"; failures <- failures + 1)
+    if not (isRectangularConstBuffer symBt) then printfn "  [PASS] isRectangular(sym)=false"
+    else (printfn "  [FAIL] isRectangular(sym) should be false"; failures <- failures + 1)
+    // extern "C" boundary-safety gate: fundamental scalars cross, library types don't.
+    let checkBnd name ty expected =
+        if isCudaBoundarySafeElem ty = expected then printfn "  [PASS] boundary(%s)=%b" name expected
+        else (printfn "  [FAIL] boundary(%s) should be %b" name expected; failures <- failures + 1)
+    checkBnd "f64" (IRTScalar ETFloat64) true
+    checkBnd "f32" (IRTScalar ETFloat32) true
+    checkBnd "i64" (IRTScalar ETInt64) true
+    checkBnd "i32" (IRTScalar ETInt32) true
+    checkBnd "bool" (IRTScalar ETBool) true
+    checkBnd "complex128" (IRTScalar ETComplex128) false
+    checkBnd "string" (IRTScalar ETString) false
+    printfn "BUFFER TYPE: %d failure(s)" failures
+    failures
+
+/// First `where cuda` hardware test. Differential: generate the SAME rank-1 map
+/// program twice — once WITHOUT a cuda clause (host-loop oracle, g++), once WITH
+/// `cuda(block: N)` (device kernel, split-compiled nvcc+g++ then linked) — run
+/// both, and require identical output. This verifies cuda-vs-host CODEGEN
+/// equivalence (not just cuda-vs-hand-math). SKIPs cleanly when nvcc/GPU absent,
+/// so the harness stays green on non-CUDA machines; runs for real where a GPU is
+/// present. Rank-1 is the simplest kernel: flat thread index IS the coordinate
+/// (no div/mod recovery).
+let runCudaTests () : int =
+    printHeader "CUDA Kernel Tests"
+    let caps = capabilities.Value
+    let onWindows = RuntimeInformation.IsOSPlatform(OSPlatform.Windows)
+    if not caps.HasNvcc || not caps.HasGpu then
+        printfn "Skipped: requires nvcc + CUDA GPU (nvcc=%b, gpu=%b)." caps.HasNvcc caps.HasGpu
+        0  // skip, not failure — mirrors harness skip policy
+    elif (not onWindows) && not caps.HasGpp then
+        // g++ is the host compiler only on the Linux path; Windows uses nvcc/cl.
+        printfn "Skipped: requires g++ for the host half (Linux path)."
+        0
+    elif onWindows && not caps.HasCl then
+        // On Windows nvcc drives MSVC's cl.exe as its host compiler. If cl.exe
+        // isn't on PATH (e.g. running from a plain terminal rather than the
+        // "x64 Native Tools Command Prompt for VS"), nvcc fails with
+        // "Cannot find compiler 'cl.exe'". Skip cleanly here — same policy as
+        // resolveCompile's RequiresCuda/PWindows/not-HasCl branch — rather than
+        // attempt a compile that's guaranteed to fail. To actually run this
+        // test on Windows, launch from the VS Native Tools prompt (or run
+        // vcvars64.bat first) so cl.exe is on PATH.
+        printfn "Skipped: nvcc needs cl.exe (MSVC) as host compiler, not found on PATH."
+        printfn "         Run from the 'x64 Native Tools Command Prompt for VS' (or after vcvars64.bat)."
+        0
+    else
+        let outputDir = "./generated_cpp_tests"
+        Directory.CreateDirectory(outputDir) |> ignore
+        // Force-clean any STALE artifacts for these test names. The generated dir
+        // persists across runs (and across version unzips); a stale .cu from an
+        // earlier code state could otherwise be compiled instead of the freshly
+        // generated one, producing confusing errors that don't match the current
+        // codegen. Delete the cuda-test files (both variants, all extensions).
+        for stem in ["cuda_rank1_host"; "cuda_rank1_dev"] do
+            for ext in [".cu"; ".cpp"; ".cu.obj"; ".cpp.obj"; ".cu.o"; ".cpp.o"; ".exe"; ".out"] do
+                let f = Path.Combine(outputDir, stem + ext)
+                try if File.Exists f then File.Delete f with _ -> ()
+        File.WriteAllText(Path.Combine(outputDir, "nested_array_utilities.hpp"), CodeGen.genRuntimeHeader ())
+        File.WriteAllText(Path.Combine(outputDir, "nested_array_types.hpp"), CodeGen.genRuntimeArrayTypesHeader ())
+        // Rank-1 map: out[i] = A[i] * 2.0 + 1.0. Host vs cuda differ ONLY in the
+        // where-clause, so any output difference is a codegen-equivalence bug.
+        let hostSrc = """
+let A = [1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0]
+let R = method_for(A) <@> lambda(x) -> x * 2.0 + 1.0 |> compute
+"""
+        let cudaSrc = """
+let A = [1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0]
+let R = method_for(A) <@> lambda(x) where cuda(block: 64) -> x * 2.0 + 1.0 |> compute
+"""
+        let genVariant (name: string) (src: string) : Result<string * string option, string> =
+            try
+                match lower src with
+                | Error e -> Error (sprintf "lower failed: %s" e)
+                | Ok ir0 ->
+                    let ir = match IR.validateIR ir0 with Ok v -> v | Error _ -> ir0
+                    let (cppCode, _w) = CodeGen.genSelfContainedProgramFromIR ir name
+                    // .cu content is populated into the collector during codegen
+                    // above; read it now (same async flow).
+                    let cuOpt = CodeGen.getCudaFileContent ()
+                    let safe = sanitizeFileName name
+                    let cppFile = Path.Combine(outputDir, safe + ".cpp")
+                    File.WriteAllText(cppFile, cppCode)
+                    let cuFileOpt =
+                        cuOpt |> Option.map (fun cu ->
+                            let cuFile = Path.Combine(outputDir, safe + ".cu")
+                            File.WriteAllText(cuFile, cu)
+                            cuFile)
+                    Ok (cppFile, cuFileOpt)
+            with ex -> Error (sprintf "codegen failed: %s" ex.Message)
+
+        let mutable failures = 0
+        // Compile a plain host .cpp (the oracle) without MinGW on Windows: there
+        // we use nvcc to drive cl.exe (single MSVC toolchain, consistent with the
+        // cuda variant's host half). On Linux, g++ via compileCpp.
+        let compileHost (cppFile: string) : Result<string, string> =
+            if onWindows then
+                let cppFull = Path.GetFullPath(cppFile)
+                let exeFull = Path.ChangeExtension(cppFull, ".exe")
+                let args = sprintf "-std=c++17 -O2 -o \"%s\" \"%s\"" exeFull cppFull
+                runProc "nvcc" args 120000 |> Result.map (fun () -> exeFull)
+            else compileCpp cppFile outputDir
+        // Host oracle: must produce NO .cu (no cuda clause).
+        let hostOut =
+            match genVariant "cuda_rank1_host" hostSrc with
+            | Error e -> Error e
+            | Ok (cppFile, cuOpt) ->
+                if cuOpt.IsSome then Error "host variant unexpectedly emitted a .cu"
+                else
+                    match compileHost cppFile with
+                    | Error e -> Error (sprintf "host compile: %s" e)
+                    | Ok exe -> runExecutable exe |> Result.map snd
+        // Cuda variant: MUST emit a .cu, split-compile, run.
+        let cudaOut =
+            match genVariant "cuda_rank1_dev" cudaSrc with
+            | Error e -> Error e
+            | Ok (_cppFile, None) -> Error "cuda variant did not emit a .cu (kernel not generated)"
+            | Ok (cppFile, Some cuFile) ->
+                match compileCudaSplit cuFile cppFile outputDir with
+                | Error e -> Error (sprintf "cuda split-compile: %s" e)
+                | Ok exe -> runExecutable exe |> Result.map snd
+
+        match hostOut, cudaOut with
+        | Error e, _ -> printfn "  [host_oracle] FAILED: %s" e; failures <- failures + 1
+        | _, Error e -> printfn "  [cuda_rank1] FAILED: %s" e; failures <- failures + 1
+        | Ok hOut, Ok cOut ->
+            let norm (s: string) = s.Replace("\r\n", "\n").Trim()
+            // Compare the result line(s), ignoring the timing line which differs.
+            let resultLines (s: string) =
+                (norm s).Split('\n')
+                |> Array.filter (fun l -> not (l.Contains("completed in")))
+                |> String.concat "\n"
+            let h, c = resultLines hOut, resultLines cOut
+            if h = c then
+                printfn "  [cuda_rank1] PASS (cuda output matches host-loop oracle)"
+            else
+                printfn "  [cuda_rank1] FAIL: cuda output differs from host oracle"
+                printfn "    host: %s" h
+                printfn "    cuda: %s" c
+                failures <- failures + 1
+        printfn "CUDA TESTS: %d failure(s)" failures
+        failures
+
 let runAllocLayoutTests () : int =
     let cppDir = Path.Combine(AppContext.BaseDirectory, "cpp")
     let testSrc = Path.Combine(cppDir, "alloc_layout_tests.cpp")
@@ -1494,19 +1769,19 @@ let runOmpCoverageTests () : int =
             "let A = [1.0,2.0,3.0,4.0,5.0,6.0,7.0,8.0]\n" +
             "let B = [1.0,2.0,3.0,4.0,5.0,6.0,7.0,8.0]\n" +
             "let L = method_for(A, B)\n" +
-            "let f = lambda(x, y) -> x * y\n" +
+            "let f = lambda(x, y) where omp(x: 1) -> x * y\n" +
             "let result = L <@> f |> compute\n"
         let symSrc =
             "let A = [1.0,2.0,3.0,4.0,5.0,6.0,7.0,8.0]\n" +
             "let L = method_for(A, A)\n" +
-            "let k = lambda(x, y) where comm(x, y) -> x * y\n" +
+            "let k = lambda(x, y) where comm(x, y), omp(x: 1) -> x * y\n" +
             "let result = L <@> k |> compute\n"
         // Partial comm: 3-arg kernel with comm on a subset (proven form, see
         // Test_Symmetry). Exercises a mixed symmetry nest through genNestPragma.
         let mixedSrc =
             "let A = [1.0,2.0,3.0,4.0]\n" +
             "let L = method_for(A, A, A)\n" +
-            "let k = lambda(x, y, z) where comm(x, y) -> x * y * z\n" +
+            "let k = lambda(x, y, z) where comm(x, y), omp(x: 1) -> x * y * z\n" +
             "let result = L <@> k |> compute\n"
         let programs =
             [ ("rect_outer_product", rectSrc)
@@ -1624,7 +1899,10 @@ let runOmpCoverageTests () : int =
         let valSrc =
             sprintf "let A = [%s]\n" aLit +
             "let L = method_for(A, A)\n" +
-            "let k = lambda(x, y) where comm(x, y) -> x * y\n" +
+            // omp clause so this genuinely runs parallel under OMP_NUM_THREADS=4
+            // — otherwise (post-flip) it would be serial and the env var inert,
+            // defeating the race-detection purpose of the repeated runs.
+            "let k = lambda(x, y) where comm(x, y), omp(x: 1) -> x * y\n" +
             "let result = L <@> k |> compute\n" +
             sprintf "// EXPECT: result = [%s]\n" expectedLit
         printSubHeader "Value correctness under forced threading (N=12 symmetric)"
@@ -1707,7 +1985,13 @@ let runAllTestsFull () =
     // regions when cores are available. Errors only on serial-when-parallel
     // expected (teamsz<=1 with maxth>1); scheduler-distribution is a warning.
     let ompFailed = runOmpCoverageTests ()
-    if r1 = 0 && r2 = 0 && attrsFailed = 0 && substFailed = 0 && allocFailed = 0 && ompFailed = 0 then 0 else 1
+    // Device buffer dimensional-type tests (CUDA streaming foundation). Pure F#,
+    // verifies cardinality math against hand-computed values. No hardware needed.
+    let bufTypeFailed = runBufferTypeTests ()
+    // First `where cuda` hardware test (differential vs host-loop oracle).
+    // SKIPs cleanly (returns 0) when nvcc/GPU absent.
+    let cudaFailed = runCudaTests ()
+    if r1 = 0 && r2 = 0 && attrsFailed = 0 && substFailed = 0 && allocFailed = 0 && ompFailed = 0 && bufTypeFailed = 0 && cudaFailed = 0 then 0 else 1
 
 /// Run tests with C++ generation only (no compilation)
 let runTestCategoryGenOnly (name: string) (tests: (string * string) list) (outputDir: string) =

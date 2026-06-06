@@ -3064,6 +3064,7 @@ and inferApply (env: TypeEnv) (tLeft: TypedExpr) (tRight: TypedExpr) : TypeResul
             ReturnType = paramTy
             CommGroups = if isComm then [[0; 1]] else []
             Captures = []; IsCommutative = isComm
+            Parallel = []  // synthesized (operator section): no user clause
         }
         buildApplyInfo env mfInfo.Arrays mfInfo.Identities mfInfo.ArrayTypes mfInfo.SDimsPerArray mfInfo.SharedIndexType lambdaInfo tLeft tRight false false
 
@@ -3105,6 +3106,7 @@ and inferApply (env: TypeEnv) (tLeft: TypedExpr) (tRight: TypedExpr) : TypeResul
             ReturnType = paramTy
             CommGroups = []
             Captures = []; IsCommutative = true
+            Parallel = []  // synthesized (zero kernel): no user clause
         }
         let tZeroKernel = mkTyped (TExprLambda lambdaInfo) (IRTScalar elemType)
         buildApplyInfo env mfInfo.Arrays mfInfo.Identities mfInfo.ArrayTypes mfInfo.SDimsPerArray mfInfo.SharedIndexType lambdaInfo tLeft tZeroKernel false false
@@ -3262,6 +3264,7 @@ and inferApply (env: TypeEnv) (tLeft: TypedExpr) (tRight: TypedExpr) : TypeResul
                 ReturnType = paramTy
                 CommGroups = []
                 Captures = []; IsCommutative = true
+                Parallel = []  // synthesized (object_for zero kernel): no clause
             }
             buildApplyInfo env flatArrays identities arrayTypes sDimsPerArray sharedIdx lambdaInfo tLeft (mkTyped (TExprLambda lambdaInfo) (IRTScalar elemType)) false false
         | _ -> Error (Other (sprintf "object_for kernel must be a lambda, reynolds, or zero, but got %A" (resolvedKernel.Kind.GetType().Name)))
@@ -3606,6 +3609,9 @@ and inferLambda env parms whereClause body : TypeResult<TypedExpr> =
                 Params = typedParams; Body = tBody; ReturnType = tBody.Type
                 CommGroups = commGroups; Captures = captures
                 IsCommutative = not (List.isEmpty commGroups)
+                // Propagate the lambda's parallelization strategy (omp/cuda) from
+                // its where-clause so lambda-level omp drives parallelization.
+                Parallel = (match whereClause with Some wc -> wc.Parallel | None -> [])
             }
             let funcTy = mkFuncArrow (typedParams |> List.map (fun p -> p.Type)) tBody.Type
             Ok (mkTyped (TExprLambda info) funcTy))

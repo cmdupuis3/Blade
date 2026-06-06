@@ -302,6 +302,31 @@ int main() {
         }
     }
 
+    // pool_base: flat backing-pool extraction from a skeleton (CUDA streaming
+    // forward/inverse transform primitive). The pool is contiguous in DFS order;
+    // pool_base(skeleton) must reach pool+0 and the flat walk must match nested.
+    {
+        size_t e1[] = {5};
+        auto a1 = nested_array_utilities::allocate<double*>(e1);
+        for (size_t i = 0; i < 5; i++) a1[i] = (double)(i + 1);
+        double* p1 = nested_array_utilities::pool_base(a1);
+        bool ok = true;
+        for (size_t i = 0; i < 5; i++) if (p1[i] != a1[i]) ok = false;
+        check("pool_base_rank1_flat_matches_nested", ok);
+    }
+    {
+        size_t e2[] = {3, 4};
+        auto a2 = nested_array_utilities::allocate<double**>(e2);
+        double v = 1.0;
+        for (size_t i = 0; i < 3; i++) for (size_t j = 0; j < 4; j++) a2[i][j] = v++;
+        double* p2 = nested_array_utilities::pool_base(a2);
+        bool ok = true; size_t k = 0;
+        for (size_t i = 0; i < 3; i++) for (size_t j = 0; j < 4; j++) if (p2[k++] != a2[i][j]) ok = false;
+        // also: pool contiguous 1..12 in DFS order
+        for (size_t i = 0; i < 12; i++) if (p2[i] != (double)(i + 1)) ok = false;
+        check("pool_base_rank2_dfs_contiguous", ok);
+    }
+
     printf("ALLOC TESTS: %d/%d passed\n", g_pass, g_total);
     return (g_pass == g_total) ? 0 : 1;
 }

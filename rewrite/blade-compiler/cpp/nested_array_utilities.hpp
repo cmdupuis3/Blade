@@ -50,6 +50,41 @@ namespace nested_array_utilities {
         using type = typename strip_ptr<typename std::remove_pointer<TYPE>::type>::type;
     };
 
+    // pool_base<TYPE>: recover the contiguous backing-pool base pointer from a
+    // promote<T,N>::type skeleton. allocate<> places ALL scalars in one pool in
+    // DFS order; the first leaf row sits at pool + 0, and interior rows are just
+    // pointer arrays into that pool. Descending [0] to the first scalar and
+    // taking its address therefore yields the pool base, from which the whole
+    // array is contiguous (cardinality elements, DFS order). This is the forward-
+    // transform primitive for CUDA streaming: cudaMemcpy(d_buf, pool_base(arr),
+    // cardinality * sizeof(T), H2D) copies the entire pool; the inverse uses it
+    // as the D2H destination. Rank-generic (compile-time recursion on pointer
+    // depth) so generated code calls pool_base(arr.data) regardless of rank.
+    //
+    // NOTE: relies on allocate<>'s single-contiguous-pool invariant. A skeleton
+    // NOT produced by allocate<> (hypothetical non-contiguous backing) would
+    // break this; all Blade arrays go through allocate<>, so the invariant holds.
+    //
+    // FUTURE / RaggedIdx: this is correct ONLY for closed, contiguously-allocated
+    // arrays. A RaggedIdx array is OPEN (per-row materialization via
+    // IRRaggedLookup, GC-tracked) and is NOT guaranteed to be one contiguous pool
+    // in DFS order — so pool_base must NOT be used for ragged backing. Ragged GPU
+    // streaming will need a different forward transform: gather the rows into a
+    // contiguous staging buffer first, and carry the per-row lengths across the
+    // extern "C" boundary as a separate `const size_t*`. Far off (gated behind
+    // symmetric-kernel support and wanting ragged on the GPU at all), but the
+    // assumption is recorded here so no one treats pool_base as universal.
+    template<typename PTR>
+    typename strip_ptr<PTR>::type* pool_base(PTR skeleton) {
+        if constexpr (std::is_pointer<typename std::remove_pointer<PTR>::type>::value) {
+            // Interior level: descend into row 0 (which points at the pool base).
+            return pool_base(skeleton[0]);
+        } else {
+            // Leaf level: skeleton is T*, &skeleton[0] is the pool base.
+            return &skeleton[0];
+        }
+    }
+
     // ========================================================================
     // allocate<>: contiguous-backing allocation
     // ========================================================================

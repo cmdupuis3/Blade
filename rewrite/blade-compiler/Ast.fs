@@ -108,6 +108,25 @@ type Mutability =
     | Mutable         // mut
     | Static          // static (compile-time)
 
+/// Parallelization strategy requested by a where-clause. Parallelism is OPT-IN:
+/// no strategy => single-threaded. `omp` and `cuda` are sibling backends. These
+/// are standalone (not in the recursive AST chain) because a strategy does not
+/// reference any recursive AST node — it carries only plain descriptors.
+type OmpStrategy = {
+    // Per-variable dim counts from omp(a: 2, b: 1) => [("a",2); ("b",1)].
+    // (variable-name, number-of-dims-to-parallelize). Maps in lowering to the
+    // IRCallable.Parallelism (param-index, level) shape.
+    Vars : (Ident * int) list
+}
+
+type CudaStrategy = {
+    BlockSize : int        // CUDA launch block size; default 256
+}
+
+type ParallelStrategy =
+    | Omp of OmpStrategy
+    | Cuda of CudaStrategy
+
 type TypeExpr =
     // Primitive types
     | TyInt32
@@ -171,7 +190,18 @@ and Constraint =
 
 and WhereClause = {
     Commutativity: Ident list list        // comm(a,b), comm(c,d)
-    Parallelism: (Ident * int) list       // omp(a: 2, b: 1)
+    // Parallelization strategy assignments. A LIST of per-backend groupings,
+    // each carrying its own dimensions (OmpStrategy.Vars / CudaStrategy). Today
+    // the list holds 0 or 1 element: [] => serial, [single] => one strategy.
+    // The parser enforces a SINGLE-BACKEND validation rule (rejecting e.g.
+    // omp+cuda together) — see parseWhereClause. This is deliberate scaffolding:
+    // the eventual mixed-strategy feature (`omp(a:1), cuda(b:...)` — different
+    // backends on different dims of one kernel) becomes a RELAXATION of that
+    // validation rule, NOT a type change, because the list already represents
+    // multiple per-dim assignments. Mixed strategies additionally require the
+    // host/device mid-nest boundary machinery (deferred), so support is gated on
+    // that, but the data model no longer forecloses it.
+    Parallel: ParallelStrategy list       // [] => serial; today 0 or 1 element
     TDims: TDimSpec list
 }
 

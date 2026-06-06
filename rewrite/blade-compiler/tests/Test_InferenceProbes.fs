@@ -248,6 +248,16 @@ let bad = contains(ints, 5.0)
 // EXPECT: typecheck failure — Int64 vs Float64 in contains value
 """
 
+let probe_v14_omp_cuda_mutual_exclusion = """
+// omp and cuda are mutually exclusive parallelization strategies: a single
+// where-clause may not specify both. The parser rejects this at parse time.
+let A = [1.0, 2.0, 3.0]
+let L = method_for(A, A)
+let f = lambda(x, y) where comm(x, y), omp(x: 1), cuda(block: 64) -> x * y
+let result = L <@> f |> compute
+// EXPECT: parse failure — only one parallelization strategy per where-clause
+"""
+
 let inferenceProbes = [
     ("Inference: Unannotated Extents", probe_a_extents_unannotated)
     ("Inference: Unannotated Mask", probe_b_mask_unannotated)
@@ -268,4 +278,5 @@ let inferenceProbes = [
     ("Nominal: Foreign Key Cross-Tag (rejects)", probe_v11_foreign_key_cross_tag)
     ("Nominal: Struct Field Foreign Key Cross-Tag (rejects)", probe_v12_struct_field_foreign_key_cross_tag)
     ("Nominal: Contains Type Mismatch (rejects)", probe_v13_contains_type_mismatch)
+    ("Parallel: omp+cuda Mutual Exclusion (rejects)", probe_v14_omp_cuda_mutual_exclusion)
 ]
