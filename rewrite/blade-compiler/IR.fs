@@ -1957,6 +1957,20 @@ let deviceBufferCardinality (bt: DeviceBufferType) : IRExpr =
 
 /// Build symmetry vector from output type
 /// Consecutive equal values indicate symmetric dimensions
+/// True iff a symmetry vector encodes ANY actual symmetry — i.e. two adjacent
+/// positions share a group number (a symmetric/antisymmetric block). A purely
+/// rectangular output yields all-distinct consecutive groups (e.g. [1;2;3]),
+/// which is NOT symmetry and must be treated as "no symmetry" (pass nullptr to
+/// allocate). This matters for MSVC: a rectangular rank-2+ output was getting a
+/// non-empty vec like [1;2], which took the named-static-array allocate path and
+/// hit C2131 (address of a function-local static isn't a constant). Routing the
+/// no-real-symmetry case to nullptr fixes that and is semantically identical
+/// (allocate treats null SYMM and all-distinct SYMM the same: full rectangular).
+let hasRealSymmetry (symmVec: int list) : bool =
+    symmVec
+    |> List.pairwise
+    |> List.exists (fun (a, b) -> a = b)
+
 let buildSymmVec (outputType: IRType) : int list =
     match outputType with
     | ArrayElem arr ->

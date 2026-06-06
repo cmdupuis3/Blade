@@ -1586,27 +1586,22 @@ let runCudaTests () : int =
     else
         let outputDir = "./generated_cpp_tests"
         Directory.CreateDirectory(outputDir) |> ignore
-        // Force-clean any STALE artifacts for these test names. The generated dir
-        // persists across runs (and across version unzips); a stale .cu from an
-        // earlier code state could otherwise be compiled instead of the freshly
-        // generated one, producing confusing errors that don't match the current
-        // codegen. Delete the cuda-test files (both variants, all extensions).
-        for stem in ["cuda_rank1_host"; "cuda_rank1_dev"] do
-            for ext in [".cu"; ".cpp"; ".cu.obj"; ".cpp.obj"; ".cu.o"; ".cpp.o"; ".exe"; ".out"] do
-                let f = Path.Combine(outputDir, stem + ext)
-                try if File.Exists f then File.Delete f with _ -> ()
         File.WriteAllText(Path.Combine(outputDir, "nested_array_utilities.hpp"), CodeGen.genRuntimeHeader ())
         File.WriteAllText(Path.Combine(outputDir, "nested_array_types.hpp"), CodeGen.genRuntimeArrayTypesHeader ())
-        // Rank-1 map: out[i] = A[i] * 2.0 + 1.0. Host vs cuda differ ONLY in the
-        // where-clause, so any output difference is a codegen-equivalence bug.
-        let hostSrc = """
-let A = [1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0]
-let R = method_for(A) <@> lambda(x) -> x * 2.0 + 1.0 |> compute
-"""
-        let cudaSrc = """
-let A = [1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0]
-let R = method_for(A) <@> lambda(x) where cuda(block: 64) -> x * 2.0 + 1.0 |> compute
-"""
+
+        // Compile a plain host .cpp (the oracle) without MinGW on Windows: there
+        // we use nvcc to drive cl.exe (single MSVC toolchain, consistent with the
+        // cuda variant's host half). On Linux, g++ via compileCpp.
+        let compileHost (cppFile: string) : Result<string, string> =
+            if onWindows then
+                let cppFull = Path.GetFullPath(cppFile)
+                let exeFull = Path.ChangeExtension(cppFull, ".exe")
+                let args = sprintf "-std=c++17 -O2 -o \"%s\" \"%s\"" exeFull cppFull
+                runProc "nvcc" args 120000 |> Result.map (fun () -> exeFull)
+            else compileCpp cppFile outputDir
+
+        // Generate one variant: lower -> validate -> codegen -> write .cpp (+ .cu
+        // if a kernel was emitted). Returns (cppFile, optional cuFile).
         let genVariant (name: string) (src: string) : Result<string * string option, string> =
             try
                 match lower src with
@@ -1614,8 +1609,6 @@ let R = method_for(A) <@> lambda(x) where cuda(block: 64) -> x * 2.0 + 1.0 |> co
                 | Ok ir0 ->
                     let ir = match IR.validateIR ir0 with Ok v -> v | Error _ -> ir0
                     let (cppCode, _w) = CodeGen.genSelfContainedProgramFromIR ir name
-                    // .cu content is populated into the collector during codegen
-                    // above; read it now (same async flow).
                     let cuOpt = CodeGen.getCudaFileContent ()
                     let safe = sanitizeFileName name
                     let cppFile = Path.Combine(outputDir, safe + ".cpp")
@@ -1628,55 +1621,139 @@ let R = method_for(A) <@> lambda(x) where cuda(block: 64) -> x * 2.0 + 1.0 |> co
                     Ok (cppFile, cuFileOpt)
             with ex -> Error (sprintf "codegen failed: %s" ex.Message)
 
-        let mutable failures = 0
-        // Compile a plain host .cpp (the oracle) without MinGW on Windows: there
-        // we use nvcc to drive cl.exe (single MSVC toolchain, consistent with the
-        // cuda variant's host half). On Linux, g++ via compileCpp.
-        let compileHost (cppFile: string) : Result<string, string> =
-            if onWindows then
-                let cppFull = Path.GetFullPath(cppFile)
-                let exeFull = Path.ChangeExtension(cppFull, ".exe")
-                let args = sprintf "-std=c++17 -O2 -o \"%s\" \"%s\"" exeFull cppFull
-                runProc "nvcc" args 120000 |> Result.map (fun () -> exeFull)
-            else compileCpp cppFile outputDir
-        // Host oracle: must produce NO .cu (no cuda clause).
-        let hostOut =
-            match genVariant "cuda_rank1_host" hostSrc with
-            | Error e -> Error e
-            | Ok (cppFile, cuOpt) ->
-                if cuOpt.IsSome then Error "host variant unexpectedly emitted a .cu"
-                else
-                    match compileHost cppFile with
-                    | Error e -> Error (sprintf "host compile: %s" e)
-                    | Ok exe -> runExecutable exe |> Result.map snd
-        // Cuda variant: MUST emit a .cu, split-compile, run.
-        let cudaOut =
-            match genVariant "cuda_rank1_dev" cudaSrc with
-            | Error e -> Error e
-            | Ok (_cppFile, None) -> Error "cuda variant did not emit a .cu (kernel not generated)"
-            | Ok (cppFile, Some cuFile) ->
-                match compileCudaSplit cuFile cppFile outputDir with
-                | Error e -> Error (sprintf "cuda split-compile: %s" e)
-                | Ok exe -> runExecutable exe |> Result.map snd
+        let resultLines (s: string) =
+            (s.Replace("\r\n", "\n").Trim()).Split('\n')
+            |> Array.filter (fun l -> not (l.Contains("completed in")))
+            |> String.concat "\n"
 
-        match hostOut, cudaOut with
-        | Error e, _ -> printfn "  [host_oracle] FAILED: %s" e; failures <- failures + 1
-        | _, Error e -> printfn "  [cuda_rank1] FAILED: %s" e; failures <- failures + 1
-        | Ok hOut, Ok cOut ->
-            let norm (s: string) = s.Replace("\r\n", "\n").Trim()
-            // Compare the result line(s), ignoring the timing line which differs.
-            let resultLines (s: string) =
-                (norm s).Split('\n')
-                |> Array.filter (fun l -> not (l.Contains("completed in")))
-                |> String.concat "\n"
-            let h, c = resultLines hOut, resultLines cOut
-            if h = c then
-                printfn "  [cuda_rank1] PASS (cuda output matches host-loop oracle)"
-            else
-                printfn "  [cuda_rank1] FAIL: cuda output differs from host oracle"
-                printfn "    host: %s" h
-                printfn "    cuda: %s" c
-                failures <- failures + 1
+        // One differential case: the SAME program with and without `where cuda`.
+        // host (no clause, must emit NO .cu) vs cuda (clause, must emit a .cu);
+        // both run, outputs must match (cuda-vs-host codegen equivalence).
+        // Returns 0 on pass, 1 on failure; prints a labeled line either way.
+        let runCudaCase (label: string) (hostSrc: string) (cudaSrc: string) : int =
+            let hostName = sprintf "cuda_%s_host" label
+            let cudaName = sprintf "cuda_%s_dev" label
+            // Force-clean stale artifacts for THIS case (the generated dir
+            // persists across runs / version unzips).
+            for stem in [hostName; cudaName] do
+                for ext in [".cu"; ".cpp"; ".cu.obj"; ".cpp.obj"; ".cu.o"; ".cpp.o"; ".exe"; ".out"] do
+                    let f = Path.Combine(outputDir, stem + ext)
+                    try if File.Exists f then File.Delete f with _ -> ()
+            let hostOut =
+                match genVariant hostName hostSrc with
+                | Error e -> Error e
+                | Ok (cppFile, cuOpt) ->
+                    if cuOpt.IsSome then Error "host variant unexpectedly emitted a .cu"
+                    else
+                        match compileHost cppFile with
+                        | Error e -> Error (sprintf "host compile: %s" e)
+                        | Ok exe -> runExecutable exe |> Result.map snd
+            let cudaOut =
+                match genVariant cudaName cudaSrc with
+                | Error e -> Error e
+                | Ok (_cppFile, None) -> Error "cuda variant did not emit a .cu (kernel not generated)"
+                | Ok (cppFile, Some cuFile) ->
+                    match compileCudaSplit cuFile cppFile outputDir with
+                    | Error e -> Error (sprintf "cuda split-compile: %s" e)
+                    | Ok exe -> runExecutable exe |> Result.map snd
+            match hostOut, cudaOut with
+            | Error e, _ -> printfn "  [%s] FAILED (host oracle): %s" label e; 1
+            | _, Error e -> printfn "  [%s] FAILED (cuda): %s" label e; 1
+            | Ok hOut, Ok cOut ->
+                let h, c = resultLines hOut, resultLines cOut
+                if h = c then
+                    printfn "  [%s] PASS (cuda output matches host-loop oracle)" label
+                    0
+                else
+                    printfn "  [%s] FAIL: cuda output differs from host oracle" label
+                    printfn "    host: %s" h
+                    printfn "    cuda: %s" c
+                    1
+
+        // A case = (label, hostSrc, cudaSrc). cudaSrc adds `where cuda(block: N)`
+        // to the lambda; everything else identical so any diff is a codegen bug.
+        // Source variants bound individually first. Multi-line triple-quoted
+        // strings whose content dedents to column 0 confuse F#'s layout analysis
+        // when placed directly inside a list-of-tuples literal (the column-0
+        // `let A = ...` inside the string collides with the enclosing block's
+        // offside context). Binding them to names first sidesteps that entirely.
+        let rank1Host = """
+let A = [1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0]
+let R = method_for(A) <@> lambda(x) -> x * 2.0 + 1.0 |> compute
+"""
+        let rank1Cuda = """
+let A = [1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0]
+let R = method_for(A) <@> lambda(x) where cuda(block: 64) -> x * 2.0 + 1.0 |> compute
+"""
+        // rank-2 outer product: exercises div/mod coordinate recovery AND
+        // two-input streaming (the parts rank-1 skips entirely).
+        let rank2Host = """
+let A = [1.0, 2.0, 3.0]
+let B = [4.0, 5.0, 6.0]
+let R = method_for(A, B) <@> lambda(x, y) -> x * y |> compute
+"""
+        let rank2Cuda = """
+let A = [1.0, 2.0, 3.0]
+let B = [4.0, 5.0, 6.0]
+let R = method_for(A, B) <@> lambda(x, y) where cuda(block: 64) -> x * y |> compute
+"""
+        // multi-block: 8 elements with block size 4 => 2 blocks, so the grid
+        // spans multiple blocks (stresses __blade_blocks math + the bound check).
+        let mbHost = """
+let A = [10.0, 20.0, 30.0, 40.0, 50.0, 60.0, 70.0, 80.0]
+let R = method_for(A) <@> lambda(x) -> x * 3.0 |> compute
+"""
+        let mbCuda = """
+let A = [10.0, 20.0, 30.0, 40.0, 50.0, 60.0, 70.0, 80.0]
+let R = method_for(A) <@> lambda(x) where cuda(block: 4) -> x * 3.0 |> compute
+"""
+        // rank-3 with NON-UNIFORM extents (3x2x3=18): two `/=` steps in the
+        // coordinate recovery with DISTINCT moduli per dim — the deepest test of
+        // the div/mod unpacking (rank-2 used equal extents, which is more forgiving).
+        let rank3Host = """
+let A = [1.0, 2.0, 3.0]
+let B = [10.0, 20.0]
+let C = [100.0, 200.0, 300.0]
+let R = method_for(A, B, C) <@> lambda(a, b, c) -> a + b + c |> compute
+"""
+        let rank3Cuda = """
+let A = [1.0, 2.0, 3.0]
+let B = [10.0, 20.0]
+let C = [100.0, 200.0, 300.0]
+let R = method_for(A, B, C) <@> lambda(a, b, c) where cuda(block: 64) -> a + b + c |> compute
+"""
+        // integer element type: exercises int64_t crossing the extern "C"
+        // boundary (boundary-safe set includes ETInt64), not just double.
+        let intHost = """
+let A = [1, 2, 3, 4, 5, 6]
+let R = method_for(A) <@> lambda(x) -> x * 10 |> compute
+"""
+        let intCuda = """
+let A = [1, 2, 3, 4, 5, 6]
+let R = method_for(A) <@> lambda(x) where cuda(block: 64) -> x * 10 |> compute
+"""
+        // non-trivial kernel body: a polynomial in x exercises a deeper
+        // exprToCpp expression in the kernel (multiple ops, reuse of the bound
+        // element), not just a single multiply.
+        let polyHost = """
+let A = [1.0, 2.0, 3.0, 4.0, 5.0]
+let R = method_for(A) <@> lambda(x) -> x * x + x * 2.0 - 1.0 |> compute
+"""
+        let polyCuda = """
+let A = [1.0, 2.0, 3.0, 4.0, 5.0]
+let R = method_for(A) <@> lambda(x) where cuda(block: 64) -> x * x + x * 2.0 - 1.0 |> compute
+"""
+        let cases =
+            [ ("rank1", rank1Host, rank1Cuda)
+              ("rank2_outer", rank2Host, rank2Cuda)
+              ("rank1_multiblock", mbHost, mbCuda)
+              ("rank3_nonuniform", rank3Host, rank3Cuda)
+              ("int_elem", intHost, intCuda)
+              ("poly_body", polyHost, polyCuda) ]
+
+        let mutable failures = 0
+        for (label, hostSrc, cudaSrc) in cases do
+            failures <- failures + runCudaCase label hostSrc cudaSrc
         printfn "CUDA TESTS: %d failure(s)" failures
         failures
 

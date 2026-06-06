@@ -2947,17 +2947,17 @@ let genCudaKernel (codeGen: LoopNestCodeGen) (name: string) (blockSize: int) : s
     let cell = cudaKernelDefsCell ()
     cell.Value <- cell.Value @ (kernelDef @ [""] @ wrapper @ [""])
     let outputRank = nDims
-    let symmVecName = sprintf "%s_symm" name
     let extentsName = sprintf "%s_extents" name
+    // First-kernel scope is rectangular (no symmetry), so pass `nullptr` directly
+    // as the symm template arg — not via a function-local static (MSVC C2131).
     let inlineLines =
-        [ sprintf "    static constexpr const size_t* %s = nullptr;" symmVecName
-          sprintf "    size_t* %s = new size_t[%d];" extentsName outputRank ]
+        [ sprintf "    size_t* %s = new size_t[%d];" extentsName outputRank ]
         @ (bindings |> List.mapi (fun i b ->
               match b.Extent with
               | IRLit (IRLitInt n) -> sprintf "    %s[%d] = %dUL;" extentsName i n
               | _ -> sprintf "    %s[%d] = %s.extents[%d];" extentsName i b.ExtentArrayRef b.ExtentDimRef))
-        @ [ sprintf "    Array<%s, %d> %s = { allocate<typename promote<%s, %d>::type, %s>(%s), %s };"
-                elemCpp outputRank name elemCpp outputRank symmVecName extentsName extentsName
+        @ [ sprintf "    Array<%s, %d> %s = { allocate<typename promote<%s, %d>::type, nullptr>(%s), %s };"
+                elemCpp outputRank name elemCpp outputRank extentsName extentsName
             sprintf "    %s(%s, pool_base(%s.data));"
                 launchName
                 // Inputs are Array<T,N> wrappers (array-literal bindings render as
@@ -3225,12 +3225,20 @@ let genApplyCombinator (ctx: CodeGenContext) (name: string) (info: ApplyInfo) (b
             | None ->
             // Array output: symmetry vector, extents, allocation, loop nest.
             let symmVecName = sprintf "%s_symm" name
-            let symmVecDecl =
-                if codeGen.OutputSymmVec.IsEmpty then
-                    sprintf "%sstatic constexpr const size_t* %s = nullptr;" ind symmVecName
+            // When there's no symmetry, pass `nullptr` DIRECTLY as the template
+            // argument rather than routing through a named local
+            // `static constexpr const size_t* R_symm = nullptr`. MSVC rejects the
+            // address of a function-local static as a constant expression in the
+            // `if constexpr ((bool)SYMM && ...)` inside count_leaves/build_skeleton
+            // (error C2131, "unevaluable pointer value") — even when the value is
+            // nullptr. Passing the `nullptr` literal sidesteps it and matches the
+            // array-literal allocation path. g++ accepts both, so no regression.
+            let symmArg = if hasRealSymmetry codeGen.OutputSymmVec then symmVecName else "nullptr"
+            let symmVecDecls =
+                if not (hasRealSymmetry codeGen.OutputSymmVec) then []
                 else
                     let values = codeGen.OutputSymmVec |> List.map string |> String.concat ", "
-                    sprintf "%sstatic constexpr const size_t %s[%d] = {%s};" ind symmVecName codeGen.OutputSymmVec.Length values
+                    [ sprintf "%sstatic constexpr const size_t %s[%d] = {%s};" ind symmVecName codeGen.OutputSymmVec.Length values ]
 
             // Generate extent computation
             let extentsName = sprintf "%s_extents" name
@@ -3250,13 +3258,13 @@ let genApplyCombinator (ctx: CodeGenContext) (name: string) (info: ApplyInfo) (b
             // wrapper just stores a pointer to it, so the same brace-init
             // pattern works.
             let allocDecl = sprintf "%sArray<%s, %d> %s = { allocate<typename promote<%s, %d>::type, %s>(%s), %s };"
-                                ind outputElemType outputRank name outputElemType outputRank symmVecName extentsName extentsName
+                                ind outputElemType outputRank name outputElemType outputRank symmArg extentsName extentsName
 
             // Generate loop nest
             let loopCode = genLoopNest codeGen tempCtx.VarNames tempCtx.Indent
 
             // Combine all (prepend any pre-materialized temporaries)
-            preCode @ [symmVecDecl; ""; extentsDecl] @ extentsFill @ [""; allocDecl; ""] @ loopCode
+            preCode @ symmVecDecls @ [""; extentsDecl] @ extentsFill @ [""; allocDecl; ""] @ loopCode
 
 /// Generate a fused loop nest with multiple kernel assignments.
 /// All kernels share the same loop structure (bindings), only differ in kernel expr and output.
@@ -3483,17 +3491,15 @@ let genComposeApply
             // Both kernels are named C++ lambdas - direct call loops
             let s1Name = sprintf "%s__s1" name
             let s1Code = [
-                sprintf "%sstatic constexpr const size_t* %s_symm = nullptr;" ind s1Name
                 sprintf "%sconst size_t* %s_extents = %s.extents;" ind s1Name arrName
-                sprintf "%sArray<%s, %d> %s = { allocate<typename promote<%s, %d>::type, %s_symm>(%s_extents), %s_extents };" ind elemType arrRank s1Name elemType arrRank s1Name s1Name s1Name
+                sprintf "%sArray<%s, %d> %s = { allocate<typename promote<%s, %d>::type, nullptr>(%s_extents), %s_extents };" ind elemType arrRank s1Name elemType arrRank s1Name s1Name
                 sprintf "%sfor (size_t __i0 = 0; __i0 < %s.extents[0]; __i0++) {" ind arrName
                 sprintf "%s    %s[__i0] = %s(%s[__i0]);" ind s1Name k1 arrName
                 sprintf "%s}" ind
             ]
             let s2Code = [
-                sprintf "%sstatic constexpr const size_t* %s_symm = nullptr;" ind name
                 sprintf "%sconst size_t* %s_extents = %s.extents;" ind name s1Name
-                sprintf "%sArray<%s, %d> %s = { allocate<typename promote<%s, %d>::type, %s_symm>(%s_extents), %s_extents };" ind elemType arrRank name elemType arrRank name name name
+                sprintf "%sArray<%s, %d> %s = { allocate<typename promote<%s, %d>::type, nullptr>(%s_extents), %s_extents };" ind elemType arrRank name elemType arrRank name name
                 sprintf "%sfor (size_t __i0 = 0; __i0 < %s.extents[0]; __i0++) {" ind s1Name
                 sprintf "%s    %s[__i0] = %s(%s[__i0]);" ind name k2 s1Name
                 sprintf "%s}" ind
@@ -3688,7 +3694,13 @@ let genFusionTree (ctx: CodeGenContext) (name: string) (expr: IRExpr) (builder: 
             let declCode = allCodeGens |> List.mapi (fun i cg ->
                 let lname = leafNames.[i]
                 let symmVecName = sprintf "%s_symm" lname
-                let symmVecDecl = genSymmVecDecl symmVecName cg.OutputSymmVec
+                // Pass nullptr DIRECTLY when there's no symmetry — a function-local
+                // `static constexpr const size_t* X_symm = nullptr` can't be used
+                // as a constant template arg under MSVC (C2131; the address of a
+                // function-local static isn't a core-constant-expression). Only
+                // emit a named decl for the non-empty (real symmetry) case.
+                let symmArg = if hasRealSymmetry cg.OutputSymmVec then symmVecName else "nullptr"
+                let symmVecDecls = if not (hasRealSymmetry cg.OutputSymmVec) then [] else [genSymmVecDecl symmVecName cg.OutputSymmVec]
                 let outputRank = match cg.OutputType with ArrayElem arr -> arrayRank arr | _ -> 0
                 let outputElemType = match cg.OutputType with ArrayElem arr -> elemTypeToCpp arr.ElemType | IRTScalar et -> primTypeToCpp et | t -> irTypeToCpp t
                 let extentsName = sprintf "%s_extents" lname
@@ -3699,8 +3711,8 @@ let genFusionTree (ctx: CodeGenContext) (name: string) (expr: IRExpr) (builder: 
                         | IRLit (IRLitInt n) -> sprintf "%s%s[%d] = %d;" ind extentsName j n
                         | _ -> sprintf "%s%s[%d] = %s.extents[%d];" ind extentsName j b.ExtentArrayRef b.ExtentDimRef)
                 let allocDecl = sprintf "%sArray<%s, %d> %s = { allocate<typename promote<%s, %d>::type, %s>(%s), %s };" 
-                                    ind outputElemType outputRank lname outputElemType outputRank symmVecName extentsName extentsName
-                [symmVecDecl] @ [extentsDecl] @ extentsFill @ [allocDecl]) |> List.concat
+                                    ind outputElemType outputRank lname outputElemType outputRank symmArg extentsName extentsName
+                symmVecDecls @ [extentsDecl] @ extentsFill @ [allocDecl]) |> List.concat
             
             // Generate single fused loop nest
             let loopCode = genFusedLoopNest codeGenPrimary extraKernels ctx.VarNames ctx.Indent
@@ -4509,9 +4521,8 @@ let rec genBinding (ctx: CodeGenContext) (binding: IRBinding) (builder: IRBuilde
                         (elemTypeToCpp (IRTScalar ETFloat64),
                          codegenError ctx ind (sprintf "method composition: left side has non-array type %A (typechecker or IR bug)" t))
                 let s2Code = [
-                    sprintf "%sstatic constexpr const size_t* %s_symm = nullptr;" ind name
                     sprintf "%sconst size_t* %s_extents = %s.extents;" ind name s1Name
-                    sprintf "%sArray<%s, %d> %s = { allocate<typename promote<%s, %d>::type, %s_symm>(%s_extents), %s_extents };" ind elemType arrRank name elemType arrRank name name name
+                    sprintf "%sArray<%s, %d> %s = { allocate<typename promote<%s, %d>::type, nullptr>(%s_extents), %s_extents };" ind elemType arrRank name elemType arrRank name name
                     sprintf "%sfor (size_t __i0 = 0; __i0 < %s.extents[0]; __i0++) {" ind s1Name
                     sprintf "%s    %s[__i0] = %s(%s[__i0]);" ind name kName s1Name
                     sprintf "%s}" ind

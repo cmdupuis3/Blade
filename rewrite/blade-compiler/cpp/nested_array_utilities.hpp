@@ -127,7 +127,16 @@ namespace nested_array_utilities {
         typedef typename std::remove_pointer<TYPE>::type DTYPE;
 
         size_t n;
-        if constexpr ((bool)SYMM && DEPTH > 0 && SYMM[DEPTH-1] == SYMM[DEPTH]) {
+        // NOTE (MSVC portability): we must NOT write `(bool)SYMM` directly in an
+        // `if constexpr` when SYMM is the address of a function-local
+        // `static constexpr` array — MSVC refuses to treat that pointer as a
+        // core-constant-expression (error C2131, "unevaluable pointer value"),
+        // even when the value is nullptr. Capturing "is there a symmetry array"
+        // in a local `constexpr bool` first lets MSVC evaluate the branch
+        // condition without demanding the pointer itself be a constant. g++
+        // accepted the direct form too, so this is portable.
+        constexpr bool hasSymm = (SYMM != nullptr);
+        if constexpr (hasSymm && DEPTH > 0 && SYMM[DEPTH-1] == SYMM[DEPTH]) {
             n = extents[DEPTH] - lastIndex;
         } else {
             n = extents[DEPTH];
@@ -138,8 +147,8 @@ namespace nested_array_utilities {
         } else {
             size_t total = 0;
             for (size_t i = 0; i < n; i++) {
-                if constexpr ((bool)SYMM && SYMM[DEPTH] == SYMM[DEPTH + 1]) {
-                    if constexpr ((bool)SYMM && DEPTH > 0 && SYMM[DEPTH-1] == SYMM[DEPTH])
+                if constexpr (hasSymm && SYMM[DEPTH] == SYMM[DEPTH + 1]) {
+                    if constexpr (hasSymm && DEPTH > 0 && SYMM[DEPTH-1] == SYMM[DEPTH])
                         total += count_leaves<DTYPE, SYMM, DEPTH + 1>(extents, i + lastIndex);
                     else
                         total += count_leaves<DTYPE, SYMM, DEPTH + 1>(extents, i);
@@ -163,7 +172,11 @@ namespace nested_array_utilities {
         typedef typename std::remove_pointer<TYPE>::type DTYPE;
 
         size_t n;
-        if constexpr ((bool)SYMM && DEPTH > 0 && SYMM[DEPTH-1] == SYMM[DEPTH]) {
+        // MSVC portability: see the note in count_leaves — capture symmetry
+        // presence in a constexpr bool rather than `(bool)SYMM` on a possibly
+        // function-local-static pointer.
+        constexpr bool hasSymm = (SYMM != nullptr);
+        if constexpr (hasSymm && DEPTH > 0 && SYMM[DEPTH-1] == SYMM[DEPTH]) {
             n = extents[DEPTH] - lastIndex;
         } else {
             n = extents[DEPTH];
@@ -178,8 +191,8 @@ namespace nested_array_utilities {
             // Interior pointer row (alloc #2).
             TYPE row = new DTYPE[n];
             for (size_t i = 0; i < n; i++) {
-                if constexpr ((bool)SYMM && SYMM[DEPTH] == SYMM[DEPTH + 1]) {
-                    if constexpr ((bool)SYMM && DEPTH > 0 && SYMM[DEPTH-1] == SYMM[DEPTH])
+                if constexpr (hasSymm && SYMM[DEPTH] == SYMM[DEPTH + 1]) {
+                    if constexpr (hasSymm && DEPTH > 0 && SYMM[DEPTH-1] == SYMM[DEPTH])
                         row[i] = build_skeleton<DTYPE, SYMM, DEPTH + 1>(extents, pool, offset, i + lastIndex);
                     else
                         row[i] = build_skeleton<DTYPE, SYMM, DEPTH + 1>(extents, pool, offset, i);
@@ -206,11 +219,12 @@ namespace nested_array_utilities {
     template<typename TYPE, const size_t SYMM[] = nullptr, const size_t DEPTH = 0>
     constexpr void fill_random(TYPE array_in, const size_t extents[], int mod_in, size_t lastIndex = 0) {
         typedef typename std::remove_pointer<TYPE>::type DTYPE;
+        constexpr bool hasSymm = (SYMM != nullptr);  // MSVC portability (see count_leaves)
 
-        if constexpr ((bool)SYMM && DEPTH > 0 && SYMM[DEPTH - 1] == SYMM[DEPTH]) {
+        if constexpr (hasSymm && DEPTH > 0 && SYMM[DEPTH - 1] == SYMM[DEPTH]) {
             if constexpr (std::is_pointer<DTYPE>::value) {
                 for (size_t i = 0; i < extents[DEPTH] - lastIndex; i++) {
-                    if constexpr ((bool)SYMM && SYMM[DEPTH] == SYMM[DEPTH + 1]) {
+                    if constexpr (hasSymm && SYMM[DEPTH] == SYMM[DEPTH + 1]) {
                         fill_random<DTYPE, SYMM, DEPTH + 1>(array_in[i], extents, mod_in, i + lastIndex);
                     } else {
                         fill_random<DTYPE, SYMM, DEPTH + 1>(array_in[i], extents, mod_in);
@@ -224,7 +238,7 @@ namespace nested_array_utilities {
         } else {
             if constexpr (std::is_pointer<DTYPE>::value) {
                 for (size_t i = 0; i < extents[DEPTH]; i++) {
-                    if constexpr ((bool)SYMM && SYMM[DEPTH] == SYMM[DEPTH + 1]) {
+                    if constexpr (hasSymm && SYMM[DEPTH] == SYMM[DEPTH + 1]) {
                         fill_random<DTYPE, SYMM, DEPTH + 1>(array_in[i], extents, mod_in, i);
                     } else {
                         fill_random<DTYPE, SYMM, DEPTH + 1>(array_in[i], extents, mod_in);
@@ -242,11 +256,12 @@ namespace nested_array_utilities {
     constexpr void fill_value(TYPE array_in, const size_t extents[], 
                               typename std::remove_pointer<TYPE>::type value, size_t lastIndex = 0) {
         typedef typename std::remove_pointer<TYPE>::type DTYPE;
+        constexpr bool hasSymm = (SYMM != nullptr);  // MSVC portability (see count_leaves)
 
-        if constexpr ((bool)SYMM && DEPTH > 0 && SYMM[DEPTH - 1] == SYMM[DEPTH]) {
+        if constexpr (hasSymm && DEPTH > 0 && SYMM[DEPTH - 1] == SYMM[DEPTH]) {
             if constexpr (std::is_pointer<DTYPE>::value) {
                 for (size_t i = 0; i < extents[DEPTH] - lastIndex; i++) {
-                    if constexpr ((bool)SYMM && SYMM[DEPTH] == SYMM[DEPTH + 1]) {
+                    if constexpr (hasSymm && SYMM[DEPTH] == SYMM[DEPTH + 1]) {
                         fill_value<DTYPE, SYMM, DEPTH + 1>(array_in[i], extents, value, i + lastIndex);
                     } else {
                         fill_value<DTYPE, SYMM, DEPTH + 1>(array_in[i], extents, value);
@@ -260,7 +275,7 @@ namespace nested_array_utilities {
         } else {
             if constexpr (std::is_pointer<DTYPE>::value) {
                 for (size_t i = 0; i < extents[DEPTH]; i++) {
-                    if constexpr ((bool)SYMM && SYMM[DEPTH] == SYMM[DEPTH + 1]) {
+                    if constexpr (hasSymm && SYMM[DEPTH] == SYMM[DEPTH + 1]) {
                         fill_value<DTYPE, SYMM, DEPTH + 1>(array_in[i], extents, value, i);
                     } else {
                         fill_value<DTYPE, SYMM, DEPTH + 1>(array_in[i], extents, value);
