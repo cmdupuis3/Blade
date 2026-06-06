@@ -78,6 +78,38 @@ let cudaKernelDefsCell () : string list ref =
         fresh
     else v
 
+/// Collector for symmetry-vector array declarations that must live at NAMESPACE
+/// scope, not function-local. Genuinely symmetric outputs need a real symm array
+/// (e.g. `{1,1}`) passed to allocate<> as a non-type template argument. MSVC
+/// (C2131) refuses to treat the ADDRESS of a function-local `static constexpr`
+/// array as a constant expression, so the decl must be hoisted out of main() to
+/// file scope, where its address IS a core constant. (Rectangular outputs dodge
+/// this by passing nullptr; symmetric ones cannot — they need the actual array.)
+/// Mirrors cudaKernelDefsCell. Reset at program assembly, emitted in the preamble.
+let private symmDeclsStorage =
+    System.Threading.AsyncLocal<string list ref>()
+
+let symmDeclsCell () : string list ref =
+    let v = symmDeclsStorage.Value
+    if isNull (box v) then
+        let fresh = ref []
+        symmDeclsStorage.Value <- fresh
+        fresh
+    else v
+
+/// Append a namespace-scope symm-array decl to the hoist collector (idempotent
+/// per distinct name — avoids duplicate definitions if the same output symm is
+/// referenced twice). The returned name is what the allocate<> call site uses as
+/// its template argument; because the decl is now file-scope, its address is a
+/// valid constant expression under MSVC.
+let hoistSymmDecl (name: string) (symmVec: int list) : string =
+    let cell = symmDeclsCell ()
+    let values = symmVec |> List.map string |> String.concat ", "
+    let decl = sprintf "static constexpr const size_t %s[%d] = {%s};" name symmVec.Length values
+    if not (List.contains decl cell.Value) then
+        cell.Value <- cell.Value @ [decl]
+    name
+
 /// Module-level OpenMP test-mode flag. When set, parallel loop nests emit
 /// additional thread-coverage instrumentation: each parallel region records
 /// which OpenMP threads actually executed iterations, and prints a parseable
@@ -2272,14 +2304,6 @@ let genLoopNest (codeGen: LoopNestCodeGen) (outerNames: Map<int, string>) (inden
 // Symmetry Vector Generation
 // ============================================================================
 
-/// Generate C++ static constexpr array for symmetry vector
-let genSymmVecDecl (name: string) (symmVec: int list) : string =
-    if symmVec.IsEmpty then
-        sprintf "static constexpr const size_t* %s = nullptr;" name
-    else
-        let values = symmVec |> List.map string |> String.concat ", "
-        sprintf "static constexpr const size_t %s[%d] = {%s};" name symmVec.Length values
-
 
 // ============================================================================
 // Array Allocation Generation
@@ -3233,12 +3257,12 @@ let genApplyCombinator (ctx: CodeGenContext) (name: string) (info: ApplyInfo) (b
             // (error C2131, "unevaluable pointer value") — even when the value is
             // nullptr. Passing the `nullptr` literal sidesteps it and matches the
             // array-literal allocation path. g++ accepts both, so no regression.
-            let symmArg = if hasRealSymmetry codeGen.OutputSymmVec then symmVecName else "nullptr"
-            let symmVecDecls =
-                if not (hasRealSymmetry codeGen.OutputSymmVec) then []
-                else
-                    let values = codeGen.OutputSymmVec |> List.map string |> String.concat ", "
-                    [ sprintf "%sstatic constexpr const size_t %s[%d] = {%s};" ind symmVecName codeGen.OutputSymmVec.Length values ]
+            let symmArg =
+                if hasRealSymmetry codeGen.OutputSymmVec then hoistSymmDecl symmVecName codeGen.OutputSymmVec
+                else "nullptr"
+            // No function-local symm decl: rectangular -> nullptr (literal),
+            // symmetric -> hoisted to namespace scope (see hoistSymmDecl). Either
+            // way nothing symm-related is declared inside main().
 
             // Generate extent computation
             let extentsName = sprintf "%s_extents" name
@@ -3264,7 +3288,7 @@ let genApplyCombinator (ctx: CodeGenContext) (name: string) (info: ApplyInfo) (b
             let loopCode = genLoopNest codeGen tempCtx.VarNames tempCtx.Indent
 
             // Combine all (prepend any pre-materialized temporaries)
-            preCode @ symmVecDecls @ [""; extentsDecl] @ extentsFill @ [""; allocDecl; ""] @ loopCode
+            preCode @ [""; extentsDecl] @ extentsFill @ [""; allocDecl; ""] @ loopCode
 
 /// Generate a fused loop nest with multiple kernel assignments.
 /// All kernels share the same loop structure (bindings), only differ in kernel expr and output.
@@ -3699,8 +3723,9 @@ let genFusionTree (ctx: CodeGenContext) (name: string) (expr: IRExpr) (builder: 
                 // as a constant template arg under MSVC (C2131; the address of a
                 // function-local static isn't a core-constant-expression). Only
                 // emit a named decl for the non-empty (real symmetry) case.
-                let symmArg = if hasRealSymmetry cg.OutputSymmVec then symmVecName else "nullptr"
-                let symmVecDecls = if not (hasRealSymmetry cg.OutputSymmVec) then [] else [genSymmVecDecl symmVecName cg.OutputSymmVec]
+                let symmArg =
+                    if hasRealSymmetry cg.OutputSymmVec then hoistSymmDecl symmVecName cg.OutputSymmVec
+                    else "nullptr"
                 let outputRank = match cg.OutputType with ArrayElem arr -> arrayRank arr | _ -> 0
                 let outputElemType = match cg.OutputType with ArrayElem arr -> elemTypeToCpp arr.ElemType | IRTScalar et -> primTypeToCpp et | t -> irTypeToCpp t
                 let extentsName = sprintf "%s_extents" lname
@@ -3712,7 +3737,7 @@ let genFusionTree (ctx: CodeGenContext) (name: string) (expr: IRExpr) (builder: 
                         | _ -> sprintf "%s%s[%d] = %s.extents[%d];" ind extentsName j b.ExtentArrayRef b.ExtentDimRef)
                 let allocDecl = sprintf "%sArray<%s, %d> %s = { allocate<typename promote<%s, %d>::type, %s>(%s), %s };" 
                                     ind outputElemType outputRank lname outputElemType outputRank symmArg extentsName extentsName
-                symmVecDecls @ [extentsDecl] @ extentsFill @ [allocDecl]) |> List.concat
+                [extentsDecl] @ extentsFill @ [allocDecl]) |> List.concat
             
             // Generate single fused loop nest
             let loopCode = genFusedLoopNest codeGenPrimary extraKernels ctx.VarNames ctx.Indent
@@ -4643,11 +4668,15 @@ let rec genBinding (ctx: CodeGenContext) (binding: IRBinding) (builder: IRBuilde
                 // Read the source's shape via the wrapper's .extents
                 // member; populate name_extents alias for the allocate<>
                 // template (which still takes a const size_t*).
-                let symmVecName = sprintf "%s_symm" nameL     // reuse left's symmetry
+                // Array choice: allocate result, element-wise combine. The
+                // choice of two same-shaped arrays is rectangular at this layer;
+                // pass nullptr for SYMM (a symmetric <|> would need the operand's
+                // hoisted symm name, which isn't threaded here — out of scope and
+                // not currently produced). This avoids referencing a nonexistent
+                // function-local `nameL_symm` after the symm-hoist refactor.
                 let extentsAlias = sprintf "%sconst size_t* %s_extents = %s.extents;" ind name nameL
-                let symmAlias = sprintf "%sstatic constexpr const size_t* %s_symm = %s;" ind name symmVecName
-                let allocDecl = sprintf "%sArray<%s, %d> %s = { allocate<typename promote<%s, %d>::type, %s_symm>(%s_extents), %s_extents };" 
-                                    ind elemType rank name elemType rank name name name
+                let allocDecl = sprintf "%sArray<%s, %d> %s = { allocate<typename promote<%s, %d>::type, nullptr>(%s_extents), %s_extents };" 
+                                    ind elemType rank name elemType rank name name
                 
                 // Generate nested loops for element-wise choice
                 let mutable loopLines = []
@@ -4668,7 +4697,7 @@ let rec genBinding (ctx: CodeGenContext) (binding: IRBinding) (builder: IRBuilde
                     loopLines <- loopLines @ [sprintf "%s}" (indD depth)]
                 
                 let ctx' = addVarName binding.Id name ctxR
-                (codeL @ [""] @ codeR @ [""] @ elemTypeErrCode @ [extentsAlias; symmAlias; allocDecl; ""] @ loopLines, ctx')
+                (codeL @ [""] @ codeR @ [""] @ elemTypeErrCode @ [extentsAlias; allocDecl; ""] @ loopLines, ctx')
         
         | IRGuard (cond, body) ->
             // guard(p, c) |> compute: conditionally execute computation
@@ -5909,6 +5938,7 @@ let genMainProgram (modul: IRModule) (testName: string) : string =
     (exprWarningsCell ()).Value <- []
     // Reset the CUDA kernel collector; genCudaKernel appends during genModule.
     (cudaKernelDefsCell ()).Value <- []
+    (symmDeclsCell ()).Value <- []
     let builder = IRBuilder()
     
     let includes = genIncludes ()
@@ -5924,11 +5954,12 @@ let genMainProgram (modul: IRModule) (testName: string) : string =
         |> List.map (fun sigLine ->
             let trimmed = sigLine.TrimEnd()
             (if trimmed.EndsWith("{") then trimmed.Substring(0, trimmed.Length - 1).TrimEnd() else trimmed) + ";")
+    let symmDecls = (symmDeclsCell ()).Value
     
     let bodyIndented = bindCode |> List.map (fun s -> "    " + s)
     let mainFunc = genMainWrapper testName bodyIndented []
     
-    (includes @ [""] @ cudaProtos @ [""] @ funcDefs @ mainFunc) |> String.concat "\n"
+    (includes @ [""] @ symmDecls @ [""] @ cudaProtos @ [""] @ funcDefs @ mainFunc) |> String.concat "\n"
 
 /// The .cu file content for the most recently assembled program, or None if no
 /// CUDA kernel was emitted. Call AFTER genMainProgram/genProgramFromIR (the
@@ -5965,6 +5996,9 @@ let genSelfContainedProgram (modul: IRModule) (testName: string) : string =
     // Reset the CUDA kernel collector for this program; genCudaKernel appends
     // during genModule. Read afterward via getCudaFileContent for the .cu file.
     (cudaKernelDefsCell ()).Value <- []
+    // Reset the symm-decl hoist collector; symmetric outputs append namespace-
+    // scope symm arrays during genModule, emitted in the preamble below.
+    (symmDeclsCell ()).Value <- []
     
     let includes = genIncludesExternal ()
     let typeDefs = genTypeDefs modul
@@ -5978,12 +6012,16 @@ let genSelfContainedProgram (modul: IRModule) (testName: string) : string =
         |> List.map (fun sigLine ->
             let trimmed = sigLine.TrimEnd()
             (if trimmed.EndsWith("{") then trimmed.Substring(0, trimmed.Length - 1).TrimEnd() else trimmed) + ";")
+
+    // Namespace-scope symm arrays hoisted out of main() (MSVC constant-address
+    // requirement — see hoistSymmDecl).
+    let symmDecls = (symmDeclsCell ()).Value
     
     let bodyIndented = bindCode |> List.map (fun s -> "    " + s)
     let printCode = genPrintStatements modul
     let mainFunc = genMainWrapper testName bodyIndented printCode
     
-    (includes @ typeDefs @ [""] @ cudaProtos @ [""] @ funcDefs @ mainFunc) |> String.concat "\n"
+    (includes @ typeDefs @ [""] @ symmDecls @ [""] @ cudaProtos @ [""] @ funcDefs @ mainFunc) |> String.concat "\n"
 
 /// Generate a C++ program with external runtime header
 /// Returns (mainFileContent, headerFileContent)

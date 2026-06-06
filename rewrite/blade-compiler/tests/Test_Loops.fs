@@ -373,6 +373,18 @@ let result = (L <@> f) <|> (L <@> g) |> compute
 // EXPECT: result = [11.0, 1.0, 2.0]
 """
 
+let test106b_choiceRank2 = """
+let A = [1.0, 2.0]
+let B = [1.0, 2.0]
+let L = method_for(A, B)
+let f = lambda(x, y) -> x - y
+let g = lambda(x, y) -> x + y
+let result = (L <@> f) <|> (L <@> g) |> compute
+// L<@>f = [[0,-1],[1,0]] flat [0,-1,1,0]; L<@>g = [[2,3],[3,4]] flat [2,3,3,4]
+// <|> picks (lhs != 0 ? lhs : rhs) => [2, -1, 1, 4]
+// EXPECT: result = [2.0, -1.0, 1.0, 4.0]
+"""
+
 let test107_objectForChoice = """
 let A = [1.0, 2.0, 3.0]
 let L = method_for(A)
@@ -640,6 +652,7 @@ let loopTests = [
     ("Choice Scalar", test104_choiceScalar)
     ("Choice Kernel", test105_choiceKernel)
     ("Choice Computation", test106_choiceComputation)
+    ("Choice Rank2", test106b_choiceRank2)
     ("Object For Choice", test107_objectForChoice)
     ("Compose Obj Basic", test108_composeObjBasic)
     ("Compose Meth Basic", test109_composeMethBasic)
