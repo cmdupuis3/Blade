@@ -42,6 +42,7 @@
     <Compile Include="tests/Test_ValidateArrow.fs" />
     <Compile Include="tests/Test_ExprAttrs.fs" />
     <Compile Include="tests/Test_CodeGenSubst.fs" />
+    <Compile Include="tests/Test_TypeStructure.fs" />
     <Compile Include="Main.fs" />
   </ItemGroup>
 

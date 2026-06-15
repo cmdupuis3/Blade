@@ -1640,6 +1640,9 @@ let runCudaTests () : int =
                     let f = Path.Combine(outputDir, stem + ext)
                     try if File.Exists f then File.Delete f with _ -> ()
             let hostOut =
+                // Host variant: CUDA emission OFF -> `cuda` clause stays inert,
+                // no .cu emitted, pure host-loop codegen (the oracle).
+                CodeGen.setCudaEmitMode false
                 match genVariant hostName hostSrc with
                 | Error e -> Error e
                 | Ok (cppFile, cuOpt) ->
@@ -1649,13 +1652,18 @@ let runCudaTests () : int =
                         | Error e -> Error (sprintf "host compile: %s" e)
                         | Ok exe -> runExecutable exe |> Result.map snd
             let cudaOut =
-                match genVariant cudaName cudaSrc with
-                | Error e -> Error e
-                | Ok (_cppFile, None) -> Error "cuda variant did not emit a .cu (kernel not generated)"
-                | Ok (cppFile, Some cuFile) ->
-                    match compileCudaSplit cuFile cppFile outputDir with
-                    | Error e -> Error (sprintf "cuda split-compile: %s" e)
-                    | Ok exe -> runExecutable exe |> Result.map snd
+                // CUDA variant: emission ON -> kernel + launch emitted into .cu/.cpp.
+                CodeGen.setCudaEmitMode true
+                let r =
+                    match genVariant cudaName cudaSrc with
+                    | Error e -> Error e
+                    | Ok (_cppFile, None) -> Error "cuda variant did not emit a .cu (kernel not generated)"
+                    | Ok (cppFile, Some cuFile) ->
+                        match compileCudaSplit cuFile cppFile outputDir with
+                        | Error e -> Error (sprintf "cuda split-compile: %s" e)
+                        | Ok exe -> runExecutable exe |> Result.map snd
+                CodeGen.setCudaEmitMode false
+                r
             match hostOut, cudaOut with
             | Error e, _ -> printfn "  [%s] FAILED (host oracle): %s" label e; 1
             | _, Error e -> printfn "  [%s] FAILED (cuda): %s" label e; 1
@@ -1795,6 +1803,101 @@ let R = method_for(A) <@> lambda(x) where cuda(block: 8) -> x + 100.0 |> compute
 let A = [1.0, 2.0, 3.0, 4.0]
 let R = method_for(A, A) <@> lambda(x, y) where comm(x, y) -> x * y |> compute
 """
+        // SYMMETRIC rank-2 DIFFERENTIAL case (the first triangular CUDA path):
+        // same symmetric Reynolds product with vs without `where cuda`. The cuda
+        // variant must emit a .cu (genCudaKernelSimplicial fires: single arity-2
+        // symmetric group, const square extent, symmetric — not antisym — fold),
+        // run on the device with the triangular unrank, and match the host
+        // triangular output exactly. A kernel that DOES touch the symmetry path.
+        let symTriHost = """
+let A = [1.0, 2.0, 3.0, 4.0, 5.0]
+let R = method_for(A, A) <@> lambda(x, y) where comm(x, y) -> 2.0 * x + y |> compute
+"""
+        let symTriCuda = """
+let A = [1.0, 2.0, 3.0, 4.0, 5.0]
+let R = method_for(A, A) <@> lambda(x, y) where comm(x, y), cuda(block: 32) -> 2.0 * x + y |> compute
+"""
+        // ANTISYMMETRIC rank-2 strict-triangular DIFFERENTIAL case. reynolds(g,
+        // Antisymmetric) folds to g(x,y)-g(y,x); stored on the strict triangle
+        // (i<j). The cuda variant must emit a .cu (genCudaKernelSimplicial fires:
+        // single arity-2 antisym group, antisym Reynolds), run the strict unrank
+        // + sign on device, and match the host strict-triangular output. Lands on
+        // the strict-offset/sign bug class the differential harness guards.
+        let antiTriHost = """
+let A = [1.0, 2.0, 3.0, 4.0, 5.0]
+let g = lambda(x, y) where comm(x, y) -> x * x * y
+let R = method_for(A, A) <@> reynolds(g, Antisymmetric) |> compute
+"""
+        let antiTriCuda = """
+let A = [1.0, 2.0, 3.0, 4.0, 5.0]
+let g = lambda(x, y) where comm(x, y), cuda(block: 32) -> x * x * y
+let R = method_for(A, A) <@> reynolds(g, Antisymmetric) |> compute
+"""
+        // SYMMETRIC rank-3 INCLUSIVE simplex (i<=j<=k) DIFFERENTIAL case — the
+        // first higher-rank triangular CUDA path (2-level simplicial unrank). raw
+        // comm kernel over method_for(A,A,A); cuda variant must emit a .cu
+        // (genCudaKernelSimplicial fires: single arity-3 symmetric group), run the
+        // closed-form outer unrank + rank-2 inner unrank on device, match host.
+        let sym3Host = """
+let A = [1.0, 2.0, 3.0, 4.0, 5.0]
+let R = method_for(A, A, A) <@> lambda(x, y, z) where comm(x, y, z) -> x + 2.0 * y + 3.0 * z |> compute
+"""
+        let sym3Cuda = """
+let A = [1.0, 2.0, 3.0, 4.0, 5.0]
+let R = method_for(A, A, A) <@> lambda(x, y, z) where comm(x, y, z), cuda(block: 32) -> x + 2.0 * y + 3.0 * z |> compute
+"""
+        // ANTISYMMETRIC rank-3 STRICT simplex (i<j<k) DIFFERENTIAL case — the
+        // strict higher-rank path (binomial outer start + sign). non-degenerate
+        // kernel x*x*y+z (antisymmetrizes to distinct nonzero values).
+        let anti3Host = """
+let A = [1.0, 2.0, 3.0, 4.0, 5.0]
+let g = lambda(x, y, z) where comm(x, y, z) -> x * x * y + z
+let R = method_for(A, A, A) <@> reynolds(g, Antisymmetric) |> compute
+"""
+        let anti3Cuda = """
+let A = [1.0, 2.0, 3.0, 4.0, 5.0]
+let g = lambda(x, y, z) where comm(x, y, z), cuda(block: 32) -> x * x * y + z
+let R = method_for(A, A, A) <@> reynolds(g, Antisymmetric) |> compute
+"""
+        // RANK-4 and RANK-5 cases — exercise the GENERAL simplicial unrank at
+        // higher S-group arity (the depths a closed-form would not cover). sym
+        // = inclusive simplex, anti = strict simplex. Non-degenerate kernels.
+        let sym4Host = """
+let A = [1.0, 2.0, 3.0, 4.0, 5.0, 6.0]
+let R = method_for(A, A, A, A) <@> lambda(w, x, y, z) where comm(w, x, y, z) -> w + 2.0 * x + 3.0 * y + 4.0 * z |> compute
+"""
+        let sym4Cuda = """
+let A = [1.0, 2.0, 3.0, 4.0, 5.0, 6.0]
+let R = method_for(A, A, A, A) <@> lambda(w, x, y, z) where comm(w, x, y, z), cuda(block: 32) -> w + 2.0 * x + 3.0 * y + 4.0 * z |> compute
+"""
+        let anti4Host = """
+let A = [1.0, 2.0, 3.0, 4.0, 5.0, 6.0]
+let g = lambda(w, x, y, z) where comm(w, x, y, z) -> x * y * y * z * z * z
+let R = method_for(A, A, A, A) <@> reynolds(g, Antisymmetric) |> compute
+"""
+        let anti4Cuda = """
+let A = [1.0, 2.0, 3.0, 4.0, 5.0, 6.0]
+let g = lambda(w, x, y, z) where comm(w, x, y, z), cuda(block: 32) -> x * y * y * z * z * z
+let R = method_for(A, A, A, A) <@> reynolds(g, Antisymmetric) |> compute
+"""
+        let sym5Host = """
+let A = [1.0, 2.0, 3.0, 4.0, 5.0, 6.0]
+let R = method_for(A, A, A, A, A) <@> lambda(a, b, c, d, e) where comm(a, b, c, d, e) -> a + 2.0 * b + 3.0 * c + 4.0 * d + 5.0 * e |> compute
+"""
+        let sym5Cuda = """
+let A = [1.0, 2.0, 3.0, 4.0, 5.0, 6.0]
+let R = method_for(A, A, A, A, A) <@> lambda(a, b, c, d, e) where comm(a, b, c, d, e), cuda(block: 32) -> a + 2.0 * b + 3.0 * c + 4.0 * d + 5.0 * e |> compute
+"""
+        let anti5Host = """
+let A = [1.0, 2.0, 3.0, 4.0, 5.0, 6.0]
+let g = lambda(a, b, c, d, e) where comm(a, b, c, d, e) -> b * c * c * d * d * d * e * e * e * e
+let R = method_for(A, A, A, A, A) <@> reynolds(g, Antisymmetric) |> compute
+"""
+        let anti5Cuda = """
+let A = [1.0, 2.0, 3.0, 4.0, 5.0, 6.0]
+let g = lambda(a, b, c, d, e) where comm(a, b, c, d, e), cuda(block: 32) -> b * c * c * d * d * d * e * e * e * e
+let R = method_for(A, A, A, A, A) <@> reynolds(g, Antisymmetric) |> compute
+"""
         let cases =
             [ ("rank1", rank1Host, rank1Cuda)
               ("rank2_outer", rank2Host, rank2Cuda)
@@ -1802,7 +1905,15 @@ let R = method_for(A, A) <@> lambda(x, y) where comm(x, y) -> x * y |> compute
               ("rank3_nonuniform", rank3Host, rank3Cuda)
               ("int_elem", intHost, intCuda)
               ("poly_body", polyHost, polyCuda)
-              ("big_multiblock", bigHost, bigCuda) ]
+              ("big_multiblock", bigHost, bigCuda)
+              ("sym_triangular", symTriHost, symTriCuda)
+              ("anti_triangular", antiTriHost, antiTriCuda)
+              ("sym3_simplex", sym3Host, sym3Cuda)
+              ("anti3_simplex", anti3Host, anti3Cuda)
+              ("sym4_simplex", sym4Host, sym4Cuda)
+              ("anti4_simplex", anti4Host, anti4Cuda)
+              ("sym5_simplex", sym5Host, sym5Cuda)
+              ("anti5_simplex", anti5Host, anti5Cuda) ]
 
         let mutable failures = 0
         for (label, hostSrc, cudaSrc) in cases do
@@ -2098,6 +2209,318 @@ let runOmpCoverageTests () : int =
         if errors > 0 then 1 else 0
 
 
+// ===========================================================================
+// DIFFERENTIAL SYMMETRY HARNESS
+// ===========================================================================
+// One test (`differentialSymmetryTest`) returning a single bool: true iff every
+// case subroutine agrees with an INDEPENDENT F# oracle. Each case generates
+// randomized inputs, computes the dense reference in F# (no symmetry exploited),
+// emits .edgi source running the OPTIMIZED Blade path with the oracle values as
+// EXPECT, then generates -> compiles -> runs -> value-checks. Because the oracle
+// never touches Blade's triangular/strict-offset/conjugate-read logic, a bug in
+// that logic makes the values diverge and the case returns false (printing which
+// input diverged). Adding a new differential case = appending one bool-returning
+// subroutine to the `cases` list in differentialSymmetryTest.
+//
+// NOTE: this is an end-to-end VALUE check (oracle vs Blade output). When a case
+// fails it identifies the operation and the diverging input, but not the faulty
+// compiler layer — diagnosis (emitted .cpp, etc.) still follows from there.
+
+/// Deterministic PRNG (fixed seed per call site) so runs are reproducible while
+/// still exercising "random" values rather than one hand-picked input.
+let private mkRng (seed: int) = System.Random(seed)
+
+/// Shared core: given a case name and .edgi source carrying an F#-computed
+/// EXPECT, run the full pipeline and return true iff values match. Prints a
+/// diagnostic line only on failure (keeps the top-level result a clean bool).
+let private runDiffCase (outputDir: string) (caseName: string) (edgiSrc: string) : bool =
+    try
+        match lower edgiSrc with
+        | Error e -> printfn "    [diff:%s] LOWER FAILED: %s" caseName e; false
+        | Ok ir0 ->
+            let ir = match IR.validateIR ir0 with Ok v -> v | Error _ -> ir0
+            let safeName = "diff_" + caseName.Replace(" ", "_").Replace("=", "")
+            let (cppCode, _w) = CodeGen.genSelfContainedProgramFromIR ir safeName
+            let srcPath = Path.Combine(outputDir, safeName + ".cpp")
+            File.WriteAllText(srcPath, cppCode)
+            let srcAbs = Path.GetFullPath srcPath
+            let exeExt = if RuntimeInformation.IsOSPlatform(OSPlatform.Windows) then ".exe" else ".out"
+            let exeAbs = Path.ChangeExtension(srcAbs, exeExt)
+            let cpsi = ProcessStartInfo("g++", sprintf "-std=c++17 -O2 -fopenmp -o \"%s\" \"%s\"" exeAbs srcAbs)
+            cpsi.RedirectStandardError <- true
+            cpsi.UseShellExecute <- false
+            cpsi.WorkingDirectory <- Path.GetDirectoryName(srcAbs)
+            use cproc = Process.Start(cpsi)
+            let cerr = cproc.StandardError.ReadToEndAsync()
+            cproc.WaitForExit(60000) |> ignore
+            if cproc.ExitCode <> 0 then
+                printfn "    [diff:%s] COMPILE FAILED:\n%s" caseName cerr.Result
+                false
+            else
+                let rpsi = ProcessStartInfo(exeAbs)
+                rpsi.RedirectStandardOutput <- true
+                rpsi.RedirectStandardError <- true
+                rpsi.UseShellExecute <- false
+                rpsi.WorkingDirectory <- Path.GetDirectoryName(exeAbs)
+                use rproc = Process.Start(rpsi)
+                let rout = rproc.StandardOutput.ReadToEndAsync()
+                rproc.WaitForExit(30000) |> ignore
+                let expected = parseExpectedValues edgiSrc
+                match checkExpectedValues expected rout.Result with
+                | Ok () -> true
+                | Error errs ->
+                    printfn "    [diff:%s] VALUE MISMATCH: %s" caseName (String.concat "; " errs)
+                    false
+    with ex ->
+        printfn "    [diff:%s] EXCEPTION: %s" caseName ex.Message
+        false
+
+/// Oracle: antisymmetric Reynolds of a rank-r kernel over A (length n), computed
+/// by summing sgn(sigma)*g(permuted components) over all permutations, stored on
+/// strict canonical tuples i0<i1<...<i_{r-1}. Independent of Blade's strict
+/// iteration — this is the reference the optimized path must match.
+let private oracleAntisymReynolds (a: float[]) (r: int) (g: float[] -> float) : float list =
+    let n = a.Length
+    // permutations of [0..r-1] with sign
+    let rec perms lst =
+        match lst with
+        | [] -> [[]]
+        | _ -> lst |> List.collect (fun x -> perms (List.filter ((<>) x) lst) |> List.map (fun p -> x :: p))
+    let sign (p: int list) =
+        let arr = List.toArray p
+        let mutable s = 1
+        for i in 0 .. arr.Length - 1 do
+            for j in i+1 .. arr.Length - 1 do
+                if arr.[i] > arr.[j] then s <- -s
+        float s
+    let allPerms = perms [0 .. r-1]
+    let out = System.Collections.Generic.List<float>()
+    // strict canonical tuples
+    let rec rec_ (start: int) (acc: int list) =
+        if List.length acc = r then
+            let tup = List.toArray (List.rev acc)
+            let mutable v = 0.0
+            for sigma in allPerms do
+                let sg = List.toArray sigma
+                let vals = [| for k in 0 .. r-1 -> a.[tup.[sg.[k]]] |]
+                v <- v + sign sigma * g vals
+            out.Add v
+        else
+            for i in start .. n-1 do rec_ (i+1) (i :: acc)
+    rec_ 0 []
+    List.ofSeq out
+
+/// Oracle: gram(A,A) for complex A (m x k), result[i][j] = sum_k A[i][k]*conj(A[j][k]),
+/// returned as the upper-triangle canonical print order [i][jr] (jr = j-i),
+/// matching how a SymHermitian array prints. Re/im pairs.
+let private oracleGramHermitian (re: float[,]) (im: float[,]) : (float * float) list =
+    let m = Array2D.length1 re
+    let k = Array2D.length2 re
+    let out = System.Collections.Generic.List<float * float>()
+    for i in 0 .. m-1 do
+        for j in i .. m-1 do
+            let mutable sr = 0.0
+            let mutable si = 0.0
+            for t in 0 .. k-1 do
+                // A[i][t] * conj(A[j][t]) = (ar+i*ai)(br - i*bi)
+                let ar, ai = re.[i,t], im.[i,t]
+                let br, bi = re.[j,t], im.[j,t]
+                sr <- sr + (ar*br + ai*bi)
+                si <- si + (ai*br - ar*bi)
+            out.Add (sr, si)
+    List.ofSeq out
+
+/// CASE 1: antisymmetric Reynolds, ranks 2/3, several random A. The rank-3 path
+/// is exactly where the strict-offset under-shift bug lived; this would have
+/// caught it (the buggy iteration visits non-canonical tuples -> values diverge
+/// from the permutation-sum oracle).
+let private diffCaseAntisymReynolds (outputDir: string) : bool =
+    let rng = mkRng 20260613
+    let mutable ok = true
+    // rank-2: g(x,y) = 2x + y ; rank-3: g(x,y,z) = x*x*y + z
+    let trials =
+        [ // (rank, n, kernelEdgi, kernelF#)
+          (2, 4, "2.0 * x + y", (fun (v: float[]) -> 2.0*v.[0] + v.[1]))
+          (2, 5, "2.0 * x + y", (fun v -> 2.0*v.[0] + v.[1]))
+          (3, 4, "x * x * y + z", (fun v -> v.[0]*v.[0]*v.[1] + v.[2]))
+          (3, 5, "x * x * y + z", (fun v -> v.[0]*v.[0]*v.[1] + v.[2])) ]
+    for (r, n, kEdgi, kFs) in trials do
+        // random integer-valued A (keeps float printing exact)
+        let a = [| for _ in 1 .. n -> float (rng.Next(1, 7)) |]
+        let expected = oracleAntisymReynolds a r kFs
+        let aLit = a |> Array.map (sprintf "%g") |> String.concat ", "
+        let paramList = (["x"; "y"; "z"; "w"; "u"] |> List.take r) |> String.concat ", "
+        let arrArgs = List.replicate r "A" |> String.concat ", "
+        let expectedLit = expected |> List.map (sprintf "%g") |> String.concat ", "
+        let src =
+            sprintf "let A = [%s]\n" aLit +
+            sprintf "let L = method_for(%s)\n" arrArgs +
+            sprintf "let g = lambda(%s) where comm(%s) -> %s\n" paramList paramList kEdgi +
+            "let result = L <@> reynolds(g, Antisymmetric) |> compute\n" +
+            sprintf "// EXPECT: result = [%s]\n" expectedLit
+        let caseName = sprintf "antisymReynolds_r%d_n%d" r n
+        if not (runDiffCase outputDir caseName src) then ok <- false
+    ok
+
+/// CASE 2: gram(A,A) complex Hermitian, several random complex A and sizes. First
+/// real-data exercise of the Hermitian produce->store->upper-triangle-print path
+/// under randomized inputs.
+let private diffCaseGramHermitian (outputDir: string) : bool =
+    let rng = mkRng 20260614
+    let mutable ok = true
+    for (m, k) in [ (2,3); (3,2); (3,4); (4,3) ] do
+        let re = Array2D.init m k (fun _ _ -> float (rng.Next(-3, 4)))
+        let im = Array2D.init m k (fun _ _ -> float (rng.Next(-3, 4)))
+        let expected = oracleGramHermitian re im
+        // build the complex 2D literal. Force a decimal point: Blade reads bare
+        // `2` as Int64, but a Complex128 literal needs Float64 components, so
+        // `%g` (which prints 2.0 as "2") would make the literal ill-typed.
+        let fl (x: float) = sprintf "%.1f" x
+        let rowLit i =
+            [ for j in 0 .. k-1 -> sprintf "(%s, %s) : Complex128" (fl re.[i,j]) (fl im.[i,j]) ]
+            |> String.concat ", "
+        let arrLit =
+            [ for i in 0 .. m-1 -> sprintf "    [%s]" (rowLit i) ] |> String.concat ",\n"
+        let expectedLit =
+            expected |> List.map (fun (r,i) -> sprintf "(%g, %g)" r i) |> String.concat ", "
+        let src =
+            sprintf "let A: Array<Complex128 like Idx<%d>, Idx<%d>> = [\n%s\n]\n" m k arrLit +
+            "let result = gram(A, A)\n" +
+            sprintf "// EXPECT: result = [%s]\n" expectedLit
+        let caseName = sprintf "gramHermitian_m%d_k%d" m k
+        if not (runDiffCase outputDir caseName src) then ok <- false
+    ok
+
+/// Oracle: symmetric Reynolds of a rank-2 kernel over A (length n) — sum over
+/// permutations WITHOUT sign, on inclusive canonical pairs i<=j. The symmetric
+/// analog of oracleAntisymReynolds; used as the compact source for symmetric
+/// decompact.
+let private oracleSymReynolds2 (a: float[]) (g: float[] -> float) : Map<int*int, float> =
+    let n = a.Length
+    let mutable m = Map.empty
+    for i in 0 .. n-1 do
+        for j in i .. n-1 do
+            // perms of (i,j): identity + swap, both unsigned
+            let v = g [| a.[i]; a.[j] |] + g [| a.[j]; a.[i] |]
+            m <- Map.add (i, j) v m
+    m
+
+/// Oracle: antisymmetric Reynolds rank-2, strict pairs i<j (signed). Returns the
+/// compact source map used for antisym decompact.
+let private oracleAntiReynolds2 (a: float[]) (g: float[] -> float) : Map<int*int, float> =
+    let n = a.Length
+    let mutable m = Map.empty
+    for i in 0 .. n-1 do
+        for j in i+1 .. n-1 do
+            // identity (+) minus swap (-)
+            let v = g [| a.[i]; a.[j] |] - g [| a.[j]; a.[i] |]
+            m <- Map.add (i, j) v m
+    m
+
+/// CASE 3: decompact rank-2 dissolution — symmetric, antisymmetric, and
+/// Hermitian. Each dissolves a compact rank-2 source to a DENSE n×n matrix; the
+/// oracle expands the compact source independently (symmetric mirror, antisym
+/// sign-on-mirror with zero diagonal, Hermitian conjugate-on-mirror) and the
+/// dense result is checked row-major. Exercises the decompact scatter arithmetic
+/// against a reference that never touches Blade's canonical addressing.
+let private diffCaseDecompact (outputDir: string) : bool =
+    let rng = mkRng 20260615
+    let mutable ok = true
+    // --- symmetric & antisym (real), several random A ---
+    for n in [ 3; 4; 5 ] do
+        let a = [| for _ in 1 .. n -> float (rng.Next(1, 7)) |]
+        let aLit = a |> Array.map (sprintf "%g") |> String.concat ", "
+        let g = fun (v: float[]) -> 2.0*v.[0] + v.[1]
+        // SYMMETRIC: dense[i][j] = src[min,max]
+        let symSrc = oracleSymReynolds2 a g
+        let symDense =
+            [ for i in 0 .. n-1 do
+                for j in 0 .. n-1 do
+                    yield symSrc.[(min i j, max i j)] ]
+        let symExpect = symDense |> List.map (sprintf "%g") |> String.concat ", "
+        let symSrcEdgi =
+            sprintf "let A = [%s]\n" aLit +
+            "let L = method_for(A, A)\n" +
+            "let g = lambda(x, y) where comm(x, y) -> 2.0 * x + y\n" +
+            "let sym = L <@> reynolds(g) |> compute\n" +
+            "let result = decompact(sym, 0)\n" +
+            sprintf "// EXPECT: result = [%s]\n" symExpect
+        if not (runDiffCase outputDir (sprintf "decompactSym_n%d" n) symSrcEdgi) then ok <- false
+        // ANTISYM: dense[i][j] = +src (i<j), -src (i>j), 0 (i==j)
+        let antiSrc = oracleAntiReynolds2 a g
+        let antiDense =
+            [ for i in 0 .. n-1 do
+                for j in 0 .. n-1 do
+                    if i < j then yield antiSrc.[(i, j)]
+                    elif i > j then yield -antiSrc.[(j, i)]
+                    else yield 0.0 ]
+        let antiExpect = antiDense |> List.map (sprintf "%g") |> String.concat ", "
+        let antiSrcEdgi =
+            sprintf "let A = [%s]\n" aLit +
+            "let L = method_for(A, A)\n" +
+            "let g = lambda(x, y) where comm(x, y) -> 2.0 * x + y\n" +
+            "let anti = L <@> reynolds(g, Antisymmetric) |> compute\n" +
+            "let result = decompact(anti, 0)\n" +
+            sprintf "// EXPECT: result = [%s]\n" antiExpect
+        if not (runDiffCase outputDir (sprintf "decompactAnti_n%d" n) antiSrcEdgi) then ok <- false
+    // --- Hermitian (complex), via gram, several random A ---
+    for (m, k) in [ (2,3); (3,2); (3,3) ] do
+        let re = Array2D.init m k (fun _ _ -> float (rng.Next(-3, 4)))
+        let im = Array2D.init m k (fun _ _ -> float (rng.Next(-3, 4)))
+        // Hermitian H[i][j] = sum_t A[i][t]*conj(A[j][t]); dense conjugate mirror.
+        let hAt i j =
+            let mutable sr = 0.0
+            let mutable si = 0.0
+            for t in 0 .. k-1 do
+                let ar, ai = re.[i,t], im.[i,t]
+                let br, bi = re.[j,t], im.[j,t]
+                sr <- sr + (ar*br + ai*bi)
+                si <- si + (ai*br - ar*bi)
+            (sr, si)
+        let dense =
+            [ for i in 0 .. m-1 do
+                for j in 0 .. m-1 do
+                    // hAt i j computes the FULL H[i][j] = sum_t A[i][t]*conj(A[j][t])
+                    // directly for any (i,j) — it already yields the conjugated
+                    // lower triangle (H[j][i] = conj(H[i][j])), so no extra flip.
+                    yield hAt i j ]
+        let fl (x: float) = sprintf "%.1f" x
+        let rowLit i = [ for j in 0 .. k-1 -> sprintf "(%s, %s) : Complex128" (fl re.[i,j]) (fl im.[i,j]) ] |> String.concat ", "
+        let arrLit = [ for i in 0 .. m-1 -> sprintf "    [%s]" (rowLit i) ] |> String.concat ",\n"
+        let expectLit = dense |> List.map (fun (r,i) -> sprintf "(%g, %g)" r i) |> String.concat ", "
+        let src =
+            sprintf "let A: Array<Complex128 like Idx<%d>, Idx<%d>> = [\n%s\n]\n" m k arrLit +
+            "let H = gram(A, A)\n" +
+            "let result = decompact(H, 0)\n" +
+            sprintf "// EXPECT: result = [%s]\n" expectLit
+        if not (runDiffCase outputDir (sprintf "decompactHerm_m%d_k%d" m k) src) then ok <- false
+    ok
+
+/// The single differential test: true iff every case agrees with its oracle.
+/// Skips cleanly (returns true) if g++ is unavailable, mirroring the other
+/// C++-dependent harness phases.
+let runDifferentialSymmetryTest () : bool =
+    let outputDir = "./generated_cpp_tests"
+    printHeader "Differential Symmetry"
+    let caps = capabilities.Value
+    if not caps.HasGpp then
+        printfn "Skipped: g++ not found (cannot compile differential cases)."
+        true
+    else
+        Directory.CreateDirectory(outputDir) |> ignore
+        let cases : (string * (string -> bool)) list =
+            [ "antisym-reynolds", diffCaseAntisymReynolds
+              "gram-hermitian",   diffCaseGramHermitian
+              "decompact",        diffCaseDecompact ]
+        let results = cases |> List.map (fun (nm, f) ->
+            let r = f outputDir
+            printfn "  [%s] %s" nm (if r then "PASS" else "FAIL")
+            r)
+        let allOk = results |> List.forall id
+        printfn "DIFFERENTIAL SYMMETRY: %s" (if allOk then "PASS" else "FAIL")
+        allOk
+
+
 /// Includes both the single-file test corpus (`allTests`) and the multi-file
 /// module/import corpus (`multiFileTests`). External-dependency tests
 /// (NetCDF provider tests in particular) are NOT included here — they have
@@ -2128,7 +2551,13 @@ let runAllTestsFull () =
     // First `where cuda` hardware test (differential vs host-loop oracle).
     // SKIPs cleanly (returns 0) when nvcc/GPU absent.
     let cudaFailed = runCudaTests ()
-    if r1 = 0 && r2 = 0 && attrsFailed = 0 && substFailed = 0 && allocFailed = 0 && ompFailed = 0 && bufTypeFailed = 0 && cudaFailed = 0 then 0 else 1
+    // Differential symmetry harness: one test, true iff every symmetry case
+    // agrees with an independent F# oracle over randomized inputs. SKIPs cleanly
+    // (returns true) when g++ absent.
+    let diffOk = runDifferentialSymmetryTest ()
+    // Type-structure tests: assert deduced IR types of bindings (no codegen/run).
+    let (_, typeStructFailed) = Blade.Tests.TypeStructure.runTypeStructureTests ()
+    if r1 = 0 && r2 = 0 && attrsFailed = 0 && substFailed = 0 && allocFailed = 0 && ompFailed = 0 && bufTypeFailed = 0 && cudaFailed = 0 && diffOk && typeStructFailed = 0 then 0 else 1
 
 /// Run tests with C++ generation only (no compilation)
 let runTestCategoryGenOnly (name: string) (tests: (string * string) list) (outputDir: string) =
@@ -3280,8 +3709,7 @@ let main args =
         // no Blade source pipeline involved.
         let (_, failed) = runNormalizeTests ()
         if failed = 0 then 0 else 1
-    | [| "test"; "unify" |] ->
-        // TypeCheck-level F# unit tests for the unify §5.3 fast path.
+    | [| "test"; "unify" |] ->        // TypeCheck-level F# unit tests for the unify §5.3 fast path.
         // Constructs IRType values directly and calls unify; no Blade
         // source pipeline.
         let (_, failed) = runUnifyTests ()
@@ -3291,6 +3719,12 @@ let main args =
         // mkVirtualArrayArrow entry. Constructs IRType values directly;
         // no Blade source pipeline.
         let (_, failed) = runValidateArrowTests ()
+        if failed = 0 then 0 else 1
+    | [| "test"; "type-structure" |] ->
+        // Type-level structural assertions on lowered Blade source: asserts the
+        // deduced IR type (rank, per-group arity+symmetry, element type) of named
+        // bindings via Blade's own matchesTypePattern relation. No codegen/run.
+        let (_, failed) = Blade.Tests.TypeStructure.runTypeStructureTests ()
         if failed = 0 then 0 else 1
     | [| "test"; "attrs" |] ->
         // Phase B: IR-level F# unit tests for the exprAttrs bottom-up

@@ -3,6 +3,7 @@
 // Blade DSL Runtime Support Library
 
 #include <algorithm>
+#include <complex>     // for std::complex / std::conj (conj_scalar, conjugate_pool)
 #include <cstddef>
 #include <functional>
 #include <tuple>
@@ -122,7 +123,18 @@ namespace nested_array_utilities {
     // Phase A — count_leaves: total SCALAR element count under this subtree.
     // Same recursion shape as the skeleton walk, so the count provably matches
     // the allocation traversal (no formula-vs-traversal drift).
-    template<typename TYPE, const size_t SYMM[] = nullptr, const size_t DEPTH = 0>
+    //
+    // DIAGONALS (default true): whether a symmetric group keeps its diagonal.
+    //   true  -> inclusive (i <= j): symmetric / Hermitian storage.
+    //   false -> strict   (i <  j): antisymmetric storage (no diagonal, each
+    //            row one shorter). The single difference from the inclusive
+    //            recurrence is the child SEED within a group: inclusive passes
+    //            `i + lastIndex` (child may equal parent), strict passes
+    //            `i + lastIndex + 1` (child must exceed parent). The shorter
+    //            rows then fall out automatically from the larger incoming
+    //            lastIndex at the next level (bound stays extents-lastIndex).
+    //            Verified byte-identical to the former count_antisym at ranks 2-4.
+    template<typename TYPE, const size_t SYMM[] = nullptr, bool DIAGONALS = true, const size_t DEPTH = 0>
     constexpr size_t count_leaves(const size_t extents[], const size_t lastIndex = 0) {
         typedef typename std::remove_pointer<TYPE>::type DTYPE;
 
@@ -136,6 +148,8 @@ namespace nested_array_utilities {
         // condition without demanding the pointer itself be a constant. g++
         // accepted the direct form too, so this is portable.
         constexpr bool hasSymm = (SYMM != nullptr);
+        // Strict offset: 0 for inclusive (diagonal kept), 1 for strict (dropped).
+        constexpr size_t strictOff = DIAGONALS ? 0 : 1;
         if constexpr (hasSymm && DEPTH > 0 && SYMM[DEPTH-1] == SYMM[DEPTH]) {
             n = extents[DEPTH] - lastIndex;
         } else {
@@ -149,11 +163,11 @@ namespace nested_array_utilities {
             for (size_t i = 0; i < n; i++) {
                 if constexpr (hasSymm && SYMM[DEPTH] == SYMM[DEPTH + 1]) {
                     if constexpr (hasSymm && DEPTH > 0 && SYMM[DEPTH-1] == SYMM[DEPTH])
-                        total += count_leaves<DTYPE, SYMM, DEPTH + 1>(extents, i + lastIndex);
+                        total += count_leaves<DTYPE, SYMM, DIAGONALS, DEPTH + 1>(extents, i + lastIndex + strictOff);
                     else
-                        total += count_leaves<DTYPE, SYMM, DEPTH + 1>(extents, i);
+                        total += count_leaves<DTYPE, SYMM, DIAGONALS, DEPTH + 1>(extents, i + strictOff);
                 } else {
-                    total += count_leaves<DTYPE, SYMM, DEPTH + 1>(extents, 0);
+                    total += count_leaves<DTYPE, SYMM, DIAGONALS, DEPTH + 1>(extents, 0);
                 }
             }
             return total;
@@ -164,7 +178,11 @@ namespace nested_array_utilities {
     // point into `pool`. `offset` is threaded by reference so leaf placement
     // order equals the DFS traversal order (the canonical storage coordinate
     // system that linearize/unlinearize will later have to agree with).
-    template<typename TYPE, const size_t SYMM[] = nullptr, const size_t DEPTH = 0>
+    //
+    // DIAGONALS: see count_leaves. false = strict (antisym, diagonal dropped);
+    // the only change is the child seed (+1 within a group). The leaf-placement
+    // order is byte-identical to the former build_antisym (verified ranks 2-4).
+    template<typename TYPE, const size_t SYMM[] = nullptr, bool DIAGONALS = true, const size_t DEPTH = 0>
     TYPE build_skeleton(const size_t extents[],
                         typename strip_ptr<TYPE>::type* pool,
                         size_t& offset,
@@ -176,6 +194,7 @@ namespace nested_array_utilities {
         // presence in a constexpr bool rather than `(bool)SYMM` on a possibly
         // function-local-static pointer.
         constexpr bool hasSymm = (SYMM != nullptr);
+        constexpr size_t strictOff = DIAGONALS ? 0 : 1;
         if constexpr (hasSymm && DEPTH > 0 && SYMM[DEPTH-1] == SYMM[DEPTH]) {
             n = extents[DEPTH] - lastIndex;
         } else {
@@ -193,11 +212,11 @@ namespace nested_array_utilities {
             for (size_t i = 0; i < n; i++) {
                 if constexpr (hasSymm && SYMM[DEPTH] == SYMM[DEPTH + 1]) {
                     if constexpr (hasSymm && DEPTH > 0 && SYMM[DEPTH-1] == SYMM[DEPTH])
-                        row[i] = build_skeleton<DTYPE, SYMM, DEPTH + 1>(extents, pool, offset, i + lastIndex);
+                        row[i] = build_skeleton<DTYPE, SYMM, DIAGONALS, DEPTH + 1>(extents, pool, offset, i + lastIndex + strictOff);
                     else
-                        row[i] = build_skeleton<DTYPE, SYMM, DEPTH + 1>(extents, pool, offset, i);
+                        row[i] = build_skeleton<DTYPE, SYMM, DIAGONALS, DEPTH + 1>(extents, pool, offset, i + strictOff);
                 } else {
-                    row[i] = build_skeleton<DTYPE, SYMM, DEPTH + 1>(extents, pool, offset, 0);
+                    row[i] = build_skeleton<DTYPE, SYMM, DIAGONALS, DEPTH + 1>(extents, pool, offset, 0);
                 }
             }
             return row;
@@ -207,13 +226,125 @@ namespace nested_array_utilities {
     // Top-level entry. Signature compatible with the prior allocate<> (the
     // optional trailing lastIndex is accepted and ignored at the top level;
     // internal recursion threads it). Call sites are unchanged.
-    template<typename TYPE, const size_t SYMM[] = nullptr, const size_t DEPTH = 0>
+    //
+    // DIAGONALS (default true): false selects strict (antisymmetric) storage —
+    // a single all-grouped SYMM mask {1,1,...} plus DIAGONALS=false reproduces
+    // the former allocate_antisym byte-for-byte (count and DFS layout verified
+    // at ranks 2-4). Blade always emits a single symmetry group per storage
+    // block (the multi-group SYMM machinery is vestigial from Blade's POV but
+    // retained for standalone C++ testing).
+    template<typename TYPE, const size_t SYMM[] = nullptr, bool DIAGONALS = true, const size_t DEPTH = 0>
     TYPE allocate(const size_t extents[], const size_t /*lastIndex*/ = 0) {
         using SCALAR = typename strip_ptr<TYPE>::type;
-        size_t total = count_leaves<TYPE, SYMM, 0>(extents, 0);
-        SCALAR* pool = new SCALAR[total];                                 // alloc #1
+        size_t total = count_leaves<TYPE, SYMM, DIAGONALS, 0>(extents, 0);
+        // Degenerate total==0 (e.g. strict storage with rank > n): allocate a
+        // 1-element pool so a later deref is never on a zero-length buffer.
+        SCALAR* pool = new SCALAR[total > 0 ? total : 1];                 // alloc #1
         size_t offset = 0;
-        return build_skeleton<TYPE, SYMM, 0>(extents, pool, offset, 0);   // alloc #2
+        return build_skeleton<TYPE, SYMM, DIAGONALS, 0>(extents, pool, offset, 0);   // alloc #2
+    }
+
+    // =========================================================================
+    // PER-GROUP-STRICT allocation (mixed strictness across groups)
+    // =========================================================================
+    //
+    // The global `DIAGONALS` flag above is all-or-nothing: every symmetry group
+    // in the storage is strict, or none is. That cannot express a layout that is
+    // strict in SOME groups and inclusive/dense in others — e.g. the
+    // compact-residual decompaction shape
+    //     Idx<n> -> AntisymIdx<2,n>      (freed dense axis, strict residual pair)
+    //     SYMM = {1,2,2}, per-group strict = {dense, strict}
+    // which arises when an antisymmetric group is fissioned and a residual
+    // antisymmetric sub-group survives.
+    //
+    // These overloads take a companion STRICT[] array parallel to SYMM[]:
+    // STRICT[d] != 0 means the group at depth d drops its diagonal (i<j); 0
+    // means inclusive (i<=j) or dense. The strict offset is keyed at the CURRENT
+    // depth's group, so each group's strictness is independent. Strictness only
+    // affects the child SEED within a group (the +1 that makes the next
+    // coordinate exceed, not equal, the parent); at a group boundary the seed is
+    // 0 regardless, so a STRICT flag on a non-grouped (dense / freed) axis is a
+    // harmless no-op.
+    //
+    // Relationship to the global flag (verified): STRICT all-zero reproduces the
+    // inclusive (symmetric) count; STRICT all-one on a single all-grouped mask
+    // reproduces the global-antisym count. So this is a strict generalization;
+    // the existing single-class call sites are unchanged (they keep using the
+    // DIAGONALS overload above). Only mixed-strictness outputs use these.
+    //
+    // Sign is NOT handled here — it lives entirely in the read path (canon_*
+    // transform) / the transpose primitive. This allocator is storage-only.
+
+    template<typename TYPE, const size_t SYMM[], const size_t STRICT[], const size_t DEPTH = 0>
+    constexpr size_t count_leaves_strict(const size_t extents[], const size_t lastIndex = 0) {
+        typedef typename std::remove_pointer<TYPE>::type DTYPE;
+        constexpr bool hasSymm = (SYMM != nullptr);
+        constexpr size_t strictOff = (STRICT != nullptr && STRICT[DEPTH]) ? 1 : 0;
+        size_t n;
+        if constexpr (hasSymm && DEPTH > 0 && SYMM[DEPTH-1] == SYMM[DEPTH]) {
+            n = extents[DEPTH] - lastIndex;
+        } else {
+            n = extents[DEPTH];
+        }
+        if constexpr (!std::is_pointer<DTYPE>::value) {
+            return n;
+        } else {
+            size_t total = 0;
+            for (size_t i = 0; i < n; i++) {
+                if constexpr (hasSymm && SYMM[DEPTH] == SYMM[DEPTH + 1]) {
+                    if constexpr (hasSymm && DEPTH > 0 && SYMM[DEPTH-1] == SYMM[DEPTH])
+                        total += count_leaves_strict<DTYPE, SYMM, STRICT, DEPTH + 1>(extents, i + lastIndex + strictOff);
+                    else
+                        total += count_leaves_strict<DTYPE, SYMM, STRICT, DEPTH + 1>(extents, i + strictOff);
+                } else {
+                    total += count_leaves_strict<DTYPE, SYMM, STRICT, DEPTH + 1>(extents, 0);
+                }
+            }
+            return total;
+        }
+    }
+
+    template<typename TYPE, const size_t SYMM[], const size_t STRICT[], const size_t DEPTH = 0>
+    TYPE build_skeleton_strict(const size_t extents[],
+                               typename strip_ptr<TYPE>::type* pool,
+                               size_t& offset,
+                               const size_t lastIndex = 0) {
+        typedef typename std::remove_pointer<TYPE>::type DTYPE;
+        constexpr bool hasSymm = (SYMM != nullptr);
+        constexpr size_t strictOff = (STRICT != nullptr && STRICT[DEPTH]) ? 1 : 0;
+        size_t n;
+        if constexpr (hasSymm && DEPTH > 0 && SYMM[DEPTH-1] == SYMM[DEPTH]) {
+            n = extents[DEPTH] - lastIndex;
+        } else {
+            n = extents[DEPTH];
+        }
+        if constexpr (!std::is_pointer<DTYPE>::value) {
+            TYPE row = pool + offset;
+            offset += n;
+            return row;
+        } else {
+            TYPE row = new DTYPE[n];
+            for (size_t i = 0; i < n; i++) {
+                if constexpr (hasSymm && SYMM[DEPTH] == SYMM[DEPTH + 1]) {
+                    if constexpr (hasSymm && DEPTH > 0 && SYMM[DEPTH-1] == SYMM[DEPTH])
+                        row[i] = build_skeleton_strict<DTYPE, SYMM, STRICT, DEPTH + 1>(extents, pool, offset, i + lastIndex + strictOff);
+                    else
+                        row[i] = build_skeleton_strict<DTYPE, SYMM, STRICT, DEPTH + 1>(extents, pool, offset, i + strictOff);
+                } else {
+                    row[i] = build_skeleton_strict<DTYPE, SYMM, STRICT, DEPTH + 1>(extents, pool, offset, 0);
+                }
+            }
+            return row;
+        }
+    }
+
+    template<typename TYPE, const size_t SYMM[], const size_t STRICT[]>
+    TYPE allocate_strict(const size_t extents[]) {
+        using SCALAR = typename strip_ptr<TYPE>::type;
+        size_t total = count_leaves_strict<TYPE, SYMM, STRICT, 0>(extents, 0);
+        SCALAR* pool = new SCALAR[total > 0 ? total : 1];
+        size_t offset = 0;
+        return build_skeleton_strict<TYPE, SYMM, STRICT, 0>(extents, pool, offset, 0);
     }
 
     template<typename TYPE, const size_t SYMM[] = nullptr, const size_t DEPTH = 0>
@@ -291,77 +422,23 @@ namespace nested_array_utilities {
 
 
     // =========================================================================
-    // Antisymmetric array support
+    // Antisymmetric array support — UNIFIED into allocate<TYPE, SYMM, false>
     // =========================================================================
-
-    // Allocate antisymmetric array: strict i < j < ... < k (no repetition).
-    // Cardinality = C(n, r) per formalism (AntisymIdx<r,n>). Contiguous backing:
-    // one data pool (alloc #1) + pointer skeleton (alloc #2), same pattern as
-    // allocate<> above. The strict-simplex recurrence starts each level's index
-    // at prev+1 (vs. symmetric's prev), so no diagonal is stored.
     //
-    // NOTE (correctness fix): the previous version used a per-level bound of
-    // `extents[DEPTH] - lastIndex` at every level INCLUDING the leaf, which is
-    // the symmetric (<=) count, not the strict (<) count. That over-counted at
-    // rank >= 3 (e.g. rank-3 n=4 gave 10 instead of C(4,3)=4); rank-2 happened
-    // to be correct. The strict `start = prev+1` recurrence below matches the
-    // documented C(n,r) cardinality at all ranks.
+    // Antisymmetric storage is no longer a separate code path. It is the unified
+    // allocate<>/count_leaves/build_skeleton recurrence driven with DIAGONALS =
+    // false (strict simplex: each level's index starts at prev+1, dropping the
+    // diagonal) and a single all-grouped SYMM mask {1,1,...}. This yields the
+    // documented C(n,r) cardinality and the identical DFS leaf-placement order
+    // the former standalone allocate_antisym produced (verified byte-identical at
+    // ranks 2-4 against the prior strict recurrence before removal).
     //
-    // SEAM / TEARDOWN: same as allocate<> — pool is one delete[], skeleton rows
-    // freed bottom-up; not yet built (pre-existing leak). Tree/graph antisym
-    // (commutative children, extensions §2.3.8 open question) is future work.
-
-    // Phase A — count strict-simplex leaves. `start` = first allowed index here.
-    template<typename TYPE, const size_t DEPTH = 0>
-    constexpr size_t count_antisym(const size_t extents[], size_t start = 0) {
-        typedef typename std::remove_pointer<TYPE>::type DTYPE;
-        size_t n = extents[DEPTH];
-        size_t cnt = (n > start) ? n - start : 0;          // indices [start, n)
-        if constexpr (!std::is_pointer<DTYPE>::value) {
-            return cnt;                                     // leaf row length
-        } else {
-            size_t total = 0;
-            for (size_t idx = start; idx < n; idx++)
-                total += count_antisym<DTYPE, DEPTH + 1>(extents, idx + 1);  // strict
-            return total;
-        }
-    }
-
-    // Phase C — build skeleton over pool; leaf rows point into `pool`.
-    // `offset` threaded by reference => leaf placement order == DFS order.
-    template<typename TYPE, const size_t DEPTH = 0>
-    TYPE build_antisym(const size_t extents[],
-                       typename strip_ptr<TYPE>::type* pool,
-                       size_t& offset,
-                       size_t start = 0) {
-        typedef typename std::remove_pointer<TYPE>::type DTYPE;
-        size_t n = extents[DEPTH];
-        size_t cnt = (n > start) ? n - start : 0;
-        if constexpr (!std::is_pointer<DTYPE>::value) {
-            TYPE row = pool + offset;                       // leaf data row
-            offset += cnt;
-            return row;
-        } else {
-            TYPE row = new DTYPE[cnt];
-            size_t local = 0;
-            for (size_t idx = start; idx < n; idx++)
-                row[local++] = build_antisym<DTYPE, DEPTH + 1>(extents, pool, offset, idx + 1);
-            return row;
-        }
-    }
-
-    // Top-level entry. Signature compatible with the prior allocate_antisym
-    // (optional trailing lastIndex accepted and ignored at top level).
-    template<typename TYPE, const size_t DEPTH = 0>
-    TYPE allocate_antisym(const size_t extents[], const size_t /*lastIndex*/ = 0) {
-        using SCALAR = typename strip_ptr<TYPE>::type;
-        size_t total = count_antisym<TYPE, 0>(extents, 0);
-        // Guard the degenerate total==0 case (e.g. rank > n): allocate a
-        // 1-element pool so `new SCALAR[0]`-then-deref is never relied upon.
-        SCALAR* pool = new SCALAR[total > 0 ? total : 1];   // alloc #1
-        size_t offset = 0;
-        return build_antisym<TYPE, 0>(extents, pool, offset, 0);  // alloc #2
-    }
+    //   allocate<promote<T,r>::type, MASK_all_ones, false>(extents)
+    //
+    // Antisym is thus "a symmetric grouping that happens to be strict" — same
+    // contiguous pool + pointer skeleton, same teardown. The previous
+    // count_antisym/build_antisym/allocate_antisym entry points were retired once
+    // the unification was confirmed in the test suite.
 
     // =========================================================================
     // Index canonicalization wrappers
@@ -386,6 +463,120 @@ namespace nested_array_utilities {
     inline bool hermitian_canonical(size_t i, size_t j, size_t& ci, size_t& cj) {
         if (i <= j) { ci = i; cj = j; return false; }  // no conjugation needed
         else { ci = j; cj = i; return true; }           // needs conjugation
+    }
+
+    // =========================================================================
+    // Whole-array elementwise transforms (negate / conjugate)
+    // =========================================================================
+    //
+    // These realize the CHEAP intra-group transposes: swapping two dimensions
+    // inside one symmetry group is, on storage, a uniform per-scalar transform
+    // — antisymmetric -> global negation (any transposition is odd parity),
+    // Hermitian -> global conjugation. The transform is STORAGE-SHAPE-INVARIANT:
+    // negating/conjugating the canonical element negates/conjugates each of its
+    // logical images, so the symmetry relation is preserved without touching the
+    // skeleton. Because every array reaching here has compact (symmetry-like)
+    // storage, it is one CONTIGUOUS scalar pool in DFS order (allocate<>'s
+    // invariant), so the transform is a straight flat loop over the pool — no
+    // skeleton traversal, no per-class branching.
+    //
+    // Type-correctness (which SYMM, the resulting nested view) is handled by the
+    // CALLER: it allocates the destination via the normal allocate path (same
+    // shape/SYMM as the source, so the result's Blade type is identical) and
+    // passes the two pool bases plus the element count. These routines are dumb
+    // T*->T* loops with no storage knowledge.
+
+    // conj_scalar: std::conj for complex element types; the identity for reals.
+    // (std::conj(double) would return std::complex<double>, breaking assignment
+    // back into a real pool — mirrors the IRConj real-vs-complex handling.)
+    template<typename T>
+    inline T conj_scalar(const T& x) { return x; }                    // real: identity
+    template<typename T>
+    inline std::complex<T> conj_scalar(const std::complex<T>& x) { return std::conj(x); }
+
+    // negate_pool: dst[i] = -src[i] over the contiguous pool. dst and src share
+    // shape (same cardinality n); n is supplied by the caller (count_leaves /
+    // count_antisym for the source's storage class).
+    template<typename T>
+    void negate_pool(T* dst, const T* src, size_t n) {
+        for (size_t i = 0; i < n; i++) dst[i] = -src[i];
+    }
+
+    // conjugate_pool: dst[i] = conj(src[i]) over the contiguous pool.
+    template<typename T>
+    void conjugate_pool(T* dst, const T* src, size_t n) {
+        for (size_t i = 0; i < n; i++) dst[i] = conj_scalar(src[i]);
+    }
+
+    // =========================================================================
+    // canon_access: lazy canonicalize-and-transform read of one compact group
+    // =========================================================================
+    //
+    // The runtime half of the lazy-sign-on-read access path (formalism 4.16,
+    // 14.2-14.3). Reading a compact-group array at an ARBITRARY index sub-tuple
+    // (not necessarily canonical) is three phases, per group:
+    //
+    //   (1) FOLD       sort the sub-tuple, tracking swap parity. For STRICT
+    //                  (antisymmetric) groups, a repeated index means the value
+    //                  is not stored -> implicit zero.
+    //   (2) LEFT-JUSTIFY  sorted tuple -> storage coords by cumulative
+    //                  subtraction; strict groups subtract an extra +k at
+    //                  position k (each row one shorter).
+    //   (3) TRANSFORM  apply to the fetched canonical value given the parity:
+    //                  symmetric -> identity, antisymmetric -> negate on odd,
+    //                  Hermitian -> conjugate on odd (conj_scalar is identity on
+    //                  reals, so Hermitian-of-real is symmetric automatically).
+    //
+    // The CALLER supplies the per-group strictness (STRICT) and a transform
+    // policy. The read path itself never branches on symmetry class — it folds,
+    // fetches, transforms. Verified (canon_access_proto) for antisym ranks 2-4
+    // and Hermitian rank 2 (complex + real) against dense references.
+    //
+    // COST: the fold is O(R^2) inversion counting + a sort, paid only on RANDOM
+    // access. Iteration-context reads are canonical by construction and bypass
+    // canon_access entirely (the codegen migration distinguishes the two so the
+    // bulk-compute hot path stays zero-overhead, per the 14.2 cost-model note).
+
+    // Transform policies. Selected by the caller from the index type's
+    // ReadTransformBehavior; share one fold/fetch code path.
+    enum class ReadTransform { Identity, NegateOnSwap, ConjugateOnSwap };
+
+    // Fold an R-tuple in place: sort ascending, return swap parity (0 even,
+    // 1 odd). For strict groups, set `zero` if any two entries are equal.
+    template<size_t R>
+    inline int canon_fold(std::array<size_t, R>& idx, bool strict, bool& zero) {
+        zero = false;
+        if (strict) {
+            for (size_t a = 0; a < R; a++)
+                for (size_t b = a + 1; b < R; b++)
+                    if (idx[a] == idx[b]) { zero = true; return 0; }
+        }
+        int inv = 0;
+        for (size_t a = 0; a < R; a++)
+            for (size_t b = a + 1; b < R; b++)
+                if (idx[a] > idx[b]) inv++;
+        std::sort(idx.begin(), idx.end());
+        return inv & 1;
+    }
+
+    // Left-justify a sorted R-tuple to storage coords. strict -> extra -k.
+    template<size_t R>
+    inline std::array<size_t, R> canon_left_justify(const std::array<size_t, R>& p, bool strict) {
+        std::array<size_t, R> c{};
+        c[0] = p[0];
+        for (size_t k = 1; k < R; k++) c[k] = p[k] - p[k-1] - (strict ? 1u : 0u);
+        return c;
+    }
+
+    // Apply the transform policy to a fetched value given the swap parity.
+    template<typename T>
+    inline T canon_transform(const T& val, int parity, ReadTransform tf) {
+        switch (tf) {
+            case ReadTransform::Identity:        return val;
+            case ReadTransform::NegateOnSwap:    return parity ? T(-val) : val;
+            case ReadTransform::ConjugateOnSwap: return parity ? conj_scalar(val) : val;
+        }
+        return val;
     }
 
     // =========================================================================

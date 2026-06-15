@@ -90,6 +90,10 @@ and Keyword =
     | KwObjectFor
     | KwRange
     | KwReverse
+    | KwTranspose
+    | KwHermitian
+    | KwGram
+    | KwDecompact
     | KwPure
     | KwCompute
     | KwGuard
@@ -110,6 +114,7 @@ and Keyword =
     | KwGroupKeys
     | KwSort
     | KwReduce
+    | KwConj
     | KwExtents
     | KwLike
     | KwPoly
@@ -170,6 +175,10 @@ let keywords =
       "object_for", KwObjectFor
       "range", KwRange
       "reverse", KwReverse
+      "transpose", KwTranspose
+      "hermitian", KwHermitian
+      "gram", KwGram
+      "decompact", KwDecompact
       "pure", KwPure
       "compute", KwCompute
       "guard", KwGuard
@@ -190,6 +199,7 @@ let keywords =
       "group_keys", KwGroupKeys
       "sort", KwSort
       "reduce", KwReduce
+      "conj", KwConj
       "extents", KwExtents
       "like", KwLike
       "Poly", KwPoly ]

@@ -110,6 +110,65 @@ let hoistSymmDecl (name: string) (symmVec: int list) : string =
         cell.Value <- cell.Value @ [decl]
     name
 
+/// Emit the right-hand side of an output array allocation from a backend-neutral
+/// AllocSpec (IIndexTypeBehavior.AllocRoutine / classifyOutputStorage), not the
+/// kernel's Reynolds flag. Returns either:
+///   Ok rhs    — the `{ allocate...(extents), extents }` brace-init expression
+///               the Array<T,N> wrapper is initialized from, or
+///   Error msg — a diagnostic for a shape with no representable allocator; the
+///               call site emits a `#error` line so the TU fails loudly rather
+///               than silently mis-allocating.
+///
+///   AllocDense        -> allocate<promote<T,R>::type, nullptr>(extents)
+///   AllocSymmetric    -> allocate<promote<T,R>::type, SYMM>(extents)   (SYMM hoisted)
+///   AllocAntisymmetric-> allocate<promote<T,R>::type, {1,..}, false>(extents)
+///                        (all-grouped mask + DIAGONALS=false = strict simplex;
+///                         unified with the symmetric path — antisym is a strict
+///                         symmetric grouping. The standalone allocate_antisym in
+///                         the runtime header is retained for C++ testing only.)
+///
+/// `symmArg` is the already-resolved SYMM template argument for the
+/// dense/symmetric path ("nullptr" or a hoisted vec name). The antisymmetric
+/// path hoists its own all-ones mask (the strict simplex is one group spanning
+/// all dims) and passes DIAGONALS=false.
+///
+/// AllocUnsupported has no representable allocator in the current runtime
+/// (allocate_antisym applies the strict shrink at every depth, so it cannot
+/// express antisym-plus-free-dimension). It cannot be triggered by a type
+/// annotation today (each annotation yields a single index group); the Error
+/// path guards against a future front-end change introducing it.
+let private emitAllocRhs
+        (spec: AllocSpec)
+        (elemType: string) (rank: int) (symmArg: string) (extentsName: string)
+        : Result<string, string> =
+    match spec with
+    | AllocAntisymmetric ->
+        // Antisymmetric storage is the unified recurrence with a single
+        // all-grouped mask {1,1,...} and DIAGONALS=false (strict simplex, no
+        // diagonal). This is byte-identical to the former allocate_antisym
+        // (verified at ranks 2-4) but flows through the same allocate<> path as
+        // symmetric — antisym is "a symmetric grouping that happens to be
+        // strict". (allocate_antisym is retained in the runtime header for
+        // standalone C++ testing but is no longer emitted by Blade.)
+        let allOnes = List.replicate rank 1
+        let maskName = hoistSymmDecl (sprintf "%s_anti" extentsName) allOnes
+        Ok (sprintf "{ allocate<typename promote<%s, %d>::type, %s, false>(%s), %s }"
+                elemType rank maskName extentsName extentsName)
+    | AllocDense | AllocSymmetric ->
+        Ok (sprintf "{ allocate<typename promote<%s, %d>::type, %s>(%s), %s }"
+                elemType rank symmArg extentsName extentsName)
+    | AllocPerGroupStrict strictVec ->
+        // Mixed strictness across groups: emit allocate_strict<T, SYMM, STRICT>.
+        // symmArg here MUST be the compact-grouped SYMM mask (antisym grouped
+        // like symmetric) — the caller builds it via buildSymmVecWithStrict so
+        // SYMM and STRICT align position-for-position. Sign is handled lazily on
+        // read (canon_*), never baked into storage.
+        let strictName = hoistSymmDecl (sprintf "%s_strict" extentsName) strictVec
+        Ok (sprintf "{ allocate_strict<typename promote<%s, %d>::type, %s, %s>(%s), %s }"
+                elemType rank symmArg strictName extentsName extentsName)
+    | AllocUnsupported reason ->
+        Error (sprintf "Blade codegen: unsupported antisymmetric output storage — %s" reason)
+
 /// Module-level OpenMP test-mode flag. When set, parallel loop nests emit
 /// additional thread-coverage instrumentation: each parallel region records
 /// which OpenMP threads actually executed iterations, and prints a parseable
@@ -141,6 +200,35 @@ let setOmpTestMode (on: bool) : unit =
 /// Query whether OpenMP test-mode instrumentation should be emitted.
 let ompTestModeEnabled () : bool =
     (ompTestModeCell ()).Value
+
+/// CUDA emission gate. CUDA kernel codegen (genCudaKernel / genCudaKernelSimplicial)
+/// emits an `extern "C"` launch declaration + call into the host .cpp and a
+/// `__global__` kernel into a separate .cu. That only links when the .cu is
+/// compiled and linked alongside the .cpp — which happens ONLY in the dedicated
+/// CUDA test phase. During ORDINARY (host-only) compilation of the main corpus,
+/// the .cu is never built, so emitting a launch call produces an undefined-symbol
+/// link error. This flag gates kernel emission so the `cuda` clause stays inert
+/// (host fallback) during normal codegen and only becomes active in the CUDA
+/// phase. Default OFF (AsyncLocal, like ompTestMode, so parallel test flows don't
+/// race). Mirrors the pre-existing "cuda clause is inert pre-flip" invariant.
+let private cudaEmitModeStorage =
+    System.Threading.AsyncLocal<bool ref>()
+
+let cudaEmitModeCell () : bool ref =
+    let v = cudaEmitModeStorage.Value
+    if isNull (box v) then
+        let fresh = ref false
+        cudaEmitModeStorage.Value <- fresh
+        fresh
+    else v
+
+/// Enable/disable actual CUDA kernel emission (called by the CUDA test phase).
+let setCudaEmitMode (on: bool) : unit =
+    (cudaEmitModeCell ()).Value <- on
+
+/// Query whether CUDA kernels should actually be emitted (vs host fallback).
+let cudaEmitModeEnabled () : bool =
+    (cudaEmitModeCell ()).Value
 
 
 /// Record an expression-level warning and return a C++ expression that causes a compile error.
@@ -298,6 +386,11 @@ let rec collectVarRefs (expr: IRExpr) : Set<IRId> =
     | IRGroupKeys ks -> ks |> List.map collectVarRefs |> Set.unionMany
     | IRSort (arr, key) ->
         Set.union (collectVarRefs arr) (collectVarRefs key)
+    | IRTranspose (arr, _, _) -> collectVarRefs arr
+    | IRDecompact (arr, _) -> collectVarRefs arr
+    | IRGram (l, r, _) -> Set.union (collectVarRefs l) (collectVarRefs r)
+    | IRArrayNegate arr -> collectVarRefs arr
+    | IRArrayConjugate arr -> collectVarRefs arr
     | IRReduce (arr, kernel) ->
         Set.union (collectVarRefs arr) (collectVarRefs kernel)
     | IRExtent (arr, _) -> collectVarRefs arr
@@ -387,6 +480,7 @@ let rec inferExprType (expr: IRExpr) : IRType =
         match op with
         | IRNot -> IRTScalar ETBool
         | IRNeg -> inferExprType operand
+        | IRConj -> inferExprType operand
     | IRIf (_, thenBr, _) -> inferExprType thenBr
     | IRCompute inner -> inferExprType inner
     | IRApplyCombinator info -> info.OutputType
@@ -532,6 +626,73 @@ let rec inferExprType (expr: IRExpr) : IRType =
             valsTy
     | IRGroupKeys _ -> IRTUnit  // GroupKeys is an opaque structure, not a runtime value with a simple type
     | IRSort (arr, _) -> inferExprType arr  // Same shape as input — sort preserves length and elem type
+    | IRTranspose (arr, d1, d2) ->
+        // Swap the two index slots. (TypeCheck has already verified both axes
+        // are arity-1 SymNone, so dim index == slot index here.)
+        (match inferExprType arr with
+         | ArrayElem a when d1 < a.IndexTypes.Length && d2 < a.IndexTypes.Length ->
+            let swapped =
+                a.IndexTypes
+                |> List.mapi (fun i ix ->
+                    if i = d1 then a.IndexTypes.[d2]
+                    elif i = d2 then a.IndexTypes.[d1]
+                    else ix)
+            mkArrayLike { a with IndexTypes = swapped }
+         | t -> t)
+    | IRDecompact (arr, d) ->
+        // Split the compact slot containing dim d: left-remainder / extracted
+        // Idx / right-remainder. Shape only (codegen reads arity/symmetry off
+        // this); Ids reused — authoritative nominal type is set by TypeCheck.
+        (match inferExprType arr with
+         | ArrayElem a ->
+            let rec walk slotIdx acc remaining =
+                match remaining with
+                | [] -> None
+                | (ix: IRIndexType) :: rest ->
+                    let ar = max 1 ix.Arity
+                    if d < acc + ar then Some (slotIdx, ar, d - acc, ix)
+                    else walk (slotIdx + 1) (acc + ar) rest
+            (match walk 0 0 a.IndexTypes with
+             | Some (slot, r, posInSlot, ix) when r >= 2 && ix.Symmetry <> SymNone ->
+                let mkRemainder (ar: int) : IRIndexType list =
+                    if ar <= 0 then []
+                    elif ar = 1 then [ { ix with Arity = 1; Symmetry = SymNone } ]
+                    else [ { ix with Arity = ar } ]
+                let extracted = { ix with Arity = 1; Symmetry = SymNone }
+                let replacement = mkRemainder posInSlot @ [extracted] @ mkRemainder (r - 1 - posInSlot)
+                let newIdx =
+                    a.IndexTypes
+                    |> List.mapi (fun i s -> (i, s))
+                    |> List.collect (fun (i, s) -> if i = slot then replacement else [s])
+                mkArrayLike { a with IndexTypes = newIdx }
+             | _ -> mkArrayLike a)
+         | t -> t)
+    | IRArrayNegate arr -> inferExprType arr        // type-preserving (same array type)
+    | IRArrayConjugate arr -> inferExprType arr     // type-preserving (same array type)
+    | IRGram (l, r, sameArray) ->
+        // gram(A, B) = A * B^H. A : m x n, B : p x n -> m x p. Element type is
+        // complex iff either operand is complex. Same-array -> square m x m,
+        // compact group of arity 2 (Hermitian if complex, else symmetric);
+        // distinct -> dense m x p (two plain axes).
+        (match inferExprType l, inferExprType r with
+         | ArrayElem la, ArrayElem ra when la.IndexTypes.Length >= 1 && ra.IndexTypes.Length >= 1 ->
+            let isComplexElem (t: IRType) =
+                match t with IRTScalar (ETComplex64 | ETComplex128) -> true | _ -> false
+            let outElem =
+                if isComplexElem la.ElemType then la.ElemType
+                elif isComplexElem ra.ElemType then ra.ElemType
+                else la.ElemType
+            let mOuter = la.IndexTypes.[0]
+            let pOuter = ra.IndexTypes.[0]
+            if sameArray then
+                let sym = if isComplexElem outElem then SymHermitian else SymSymmetric
+                let grp = { mOuter with Arity = 2; Symmetry = sym }
+                mkArrayLike { la with ElemType = outElem; IndexTypes = [grp] }
+            else
+                let s0 = { mOuter with Arity = 1; Symmetry = SymNone }
+                let s1 = { pOuter with Arity = 1; Symmetry = SymNone }
+                mkArrayLike { la with ElemType = outElem; IndexTypes = [s0; s1] }
+         | t, _ -> t)
     | IRReduce (arr, _) ->
         // Reduces innermost dim by 1. For rank-1 input, result is a scalar.
         match inferExprType arr with
@@ -784,6 +945,18 @@ let binOpToCpp = function
 let unaryOpToCpp = function
     | IRNeg -> "-"
     | IRNot -> "!"
+    | IRConj -> "std::conj"   // function-call form; exprToCppCore/exprToCppSimple
+                              // special-case IRConj for the complex-vs-real
+                              // decision (real conj is the identity)
+
+/// True iff a type's underlying scalar is a complex element type. Used to
+/// decide whether conj must emit std::conj (complex) or is the identity (real).
+let rec isComplexType (t: IRType) : bool =
+    match t with
+    | IRTScalar (ETComplex64 | ETComplex128) -> true
+    | IRTIdxTagged (inner, _) -> isComplexType inner
+    | IRTUnitAnnotated (inner, _) -> isComplexType inner
+    | _ -> false
 
 /// Quote a Blade string value as a C++ string literal. Escapes the minimal
 /// set that would otherwise break the surrounding "..." token: backslash,
@@ -821,6 +994,10 @@ let rec exprToCppSimple (names: Map<IRId, string>) (expr: IRExpr) : string =
         let rStr = exprToCppSimple names r
         if op = IRCaret then sprintf "pow(%s, %s)" lStr rStr
         else sprintf "(%s %s %s)" lStr (binOpToCpp op) rStr
+    | IRUnaryOp (IRConj, e) ->
+        let inner = exprToCppSimple names e
+        if isComplexType (inferExprType e) then sprintf "std::conj(%s)" inner
+        else inner
     | IRUnaryOp (op, e) -> sprintf "%s(%s)" (unaryOpToCpp op) (exprToCppSimple names e)
     | IRGuard (cond, body) ->
         sprintf "(%s ? %s : 0.0)" (exprToCppSimple names cond) (exprToCppSimple names body)
@@ -989,6 +1166,13 @@ let rec exprToCppCore (subst: SubstMap) (names: Map<IRId, string>) (expr: IRExpr
             sprintf "pow(%s, %s)" lStr rStr
         else
             sprintf "(%s %s %s)" lStr (binOpToCpp op) rStr
+    | IRUnaryOp (IRConj, e) ->
+        // conj is std::conj on complex operands; the identity on reals
+        // (mathematically conj(x)=x for real x, and std::conj(double) would
+        // wrongly promote to std::complex<double>, so emit the operand bare).
+        let inner = exprToCppCore subst names e
+        if isComplexType (inferExprType e) then sprintf "std::conj(%s)" inner
+        else inner
     | IRUnaryOp (op, e) ->
         sprintf "%s(%s)" (unaryOpToCpp op) (exprToCppCore subst names e)
     | IRIf (cond, thenBr, elseBr) ->
@@ -1039,8 +1223,106 @@ let rec exprToCppCore (subst: SubstMap) (names: Map<IRId, string>) (expr: IRExpr
         sprintf "%s { %s }" typeName fieldInits
     | IRIndex (arr, indices, _) ->
         let arrStr = exprToCppCore subst names arr
-        let idxStr = indices |> List.map (fun i -> sprintf "[%s]" (exprToCppCore subst names i)) |> String.concat ""
-        sprintf "%s%s" arrStr idxStr
+        // STEP 3 (lazy sign-on-read): if `arr` is an array whose SOLE index slot
+        // is a compact group (Symmetric/Antisymmetric/Hermitian, arity >= 2) and
+        // the indices fully cover that group, the access may be NON-CANONICAL
+        // (e.g. A[5][2] on an upper-triangular store). Emit a fold-fetch-transform
+        // read instead of a raw subscript: sort the index tuple (tracking parity),
+        // detect implicit-zero (strict diagonal), left-justify to storage coords,
+        // fetch, and apply the class's read transform (identity / negate-on-swap /
+        // conjugate-on-swap). The behavior descriptors come from IIndexTypeBehavior
+        // so the read path never branches on symmetry class inline.
+        //
+        // This fires ONLY for compact-group random access — the case nothing
+        // currently produces canonically-guaranteed. Plain/rectangular reads, and
+        // (for now) all iteration reads, keep the raw subscript. Iteration reads
+        // are migrated to skip the fold in step 4 (they are canonical by
+        // construction); folding them here would be correct but is deferred to keep
+        // the bulk-compute hot path zero-overhead per the formalism cost model.
+        let rawSubscript () =
+            let idxStr = indices |> List.map (fun i -> sprintf "[%s]" (exprToCppCore subst names i)) |> String.concat ""
+            sprintf "%s%s" arrStr idxStr
+        let lazyCompactRead () : string option =
+            match inferExprType arr with
+            | ArrayElem arrTy ->
+                // Generalized lazy read: the index-type list may contain multiple
+                // compact groups (e.g. an interior antisym decompact result
+                // AntisymIdx<2> -> Idx -> AntisymIdx<2>) interleaved with plain
+                // freed slots. Each compact group folds INDEPENDENTLY (its own
+                // canon_fold / zero-guard / left-justify / transform); plain slots
+                // pass their index through. The fetch subscript interleaves folded
+                // coords and plain indices in slot order; the read value chains
+                // canon_transform over every group's parity. Fires only when at
+                // least one slot is a compact group AND the indices fully cover
+                // the whole index list; otherwise raw subscript.
+                let slots = arrTy.IndexTypes
+                let totalArity = slots |> List.sumBy (fun s -> max 1 s.Arity)
+                let anyCompact = slots |> List.exists (fun s -> s.Symmetry <> SymNone && (max 1 s.Arity) >= 2)
+                if anyCompact && indices.Length = totalArity then
+                    let elemTypeStr = irTypeToCpp arrTy.ElemType
+                    let idxStrs = indices |> List.map (fun i -> exprToCppCore subst names i) |> Array.ofList
+                    // Walk slots, consuming arity indices each. For compact groups
+                    // emit fold-locals; collect (fetchSubParts, transformChain).
+                    let sb = System.Text.StringBuilder()
+                    let mutable cursor = 0
+                    let mutable groupNum = 0
+                    let mutable fetchParts = []      // C++ subscript pieces in slot order
+                    let mutable transforms = []      // (parityVar, tfStr) per compact group
+                    let mutable ok = true
+                    for s in slots do
+                        let a = max 1 s.Arity
+                        let these = [ for j in 0 .. a - 1 -> idxStrs.[cursor + j] ]
+                        cursor <- cursor + a
+                        if s.Symmetry <> SymNone && a >= 2 then
+                            let beh = behaviorFor s.Symmetry
+                            let strictArg =
+                                match beh.Canonicalize () with
+                                | CanonSortStrict -> "true"
+                                | CanonSort | CanonNone -> "false"
+                            let tf =
+                                match beh.ReadTransform () with
+                                | TfIdentity -> "nested_array_utilities::ReadTransform::Identity"
+                                | TfNegateOnSwap -> "nested_array_utilities::ReadTransform::NegateOnSwap"
+                                | TfConjugateOnSwap -> "nested_array_utilities::ReadTransform::ConjugateOnSwap"
+                            let g = groupNum
+                            groupNum <- groupNum + 1
+                            sb.Append(sprintf "std::array<size_t,%d> __g%d = { %s }; " a g (String.concat ", " these)) |> ignore
+                            sb.Append(sprintf "bool __z%d; int __p%d = nested_array_utilities::canon_fold<%d>(__g%d, %s, __z%d); " g g a g strictArg g) |> ignore
+                            sb.Append(sprintf "if (__z%d) return %s(); " g elemTypeStr) |> ignore
+                            sb.Append(sprintf "auto __c%d = nested_array_utilities::canon_left_justify<%d>(__g%d, %s); " g a g strictArg) |> ignore
+                            for j in 0 .. a - 1 do
+                                fetchParts <- fetchParts @ [ sprintf "[__c%d[%d]]" g j ]
+                            transforms <- transforms @ [ (sprintf "__p%d" g, tf) ]
+                        elif s.Symmetry <> SymNone && a = 1 then
+                            // arity-1 compact (e.g. SymIdx<1> = Idx): no fold.
+                            fetchParts <- fetchParts @ [ sprintf "[%s]" these.[0] ]
+                        else
+                            // plain slot(s): pass each index through directly.
+                            for t in these do fetchParts <- fetchParts @ [ sprintf "[%s]" t ]
+                    if not ok then None
+                    else
+                        let fetch = String.concat "" fetchParts
+                        // chain transforms: v0 = transform(base, p0); v1 = transform(v0,p1); ...
+                        let body = System.Text.StringBuilder()
+                        body.Append(sb.ToString()) |> ignore
+                        body.Append(sprintf "%s __v = %s%s; " elemTypeStr arrStr fetch) |> ignore
+                        match transforms with
+                        | [] ->
+                            // No real fold happened (shouldn't reach: anyCompact true) — return raw.
+                            body.Append("return __v;") |> ignore
+                        | _ ->
+                            let mutable prev = "__v"
+                            transforms |> List.iteri (fun i (pv, tf) ->
+                                let outv = sprintf "__tv%d" i
+                                body.Append(sprintf "%s %s = nested_array_utilities::canon_transform<%s>(%s, %s, %s); " elemTypeStr outv elemTypeStr prev pv tf) |> ignore
+                                prev <- outv)
+                            body.Append(sprintf "return %s;" prev) |> ignore
+                        Some (sprintf "([&]() -> %s { %s }())" elemTypeStr (body.ToString()))
+                else None
+            | _ -> None
+        match lazyCompactRead () with
+        | Some code -> code
+        | None -> rawSubscript ()
     | IRApp (func, args, _) ->
         // Function signatures take Array<T,N> / Ragged<T> wrappers
         // natively, one argument per Blade param. Array args pass through
@@ -1753,6 +2035,482 @@ and materializeInlineForm (subst: SubstMap) (names: Map<IRId, string>) (varName:
                 sprintf "for (size_t __si = 0; __si < %s.extents[0]; __si++) %s[__si] = %s[%s__perm[__si]];" arrName varName arrName varName
             ]
         )
+    | IRTranspose (arrExpr, d1, d2) ->
+        // Hard transpose: allocate a fresh pool at the SWAPPED extents and copy
+        // every element with axes d1/d2 exchanged. The result is an independent
+        // array (new pool, new row-pointers) — no aliasing back to the source,
+        // which is why this is always correct (never a soft/view transpose).
+        // General rank: an N-deep nested loop over the SOURCE extents; the
+        // destination subscript list is the source loop vars with positions
+        // d1 and d2 swapped. TypeCheck guarantees both axes are arity-1 SymNone,
+        // so the source is rectangular and every dim is a single plain Idx.
+        let arrName = exprToCppCore subst names arrExpr
+        (match inferExprType arrExpr with
+         | ArrayElem arrTy ->
+            let rank = arrTy.IndexTypes.Length
+            let extentsName = sprintf "%s_extents" varName
+            // Source loop variables, one per dimension.
+            let srcVar d = sprintf "__t%s_%d" varName d
+            // Destination extents = source extents with d1/d2 swapped.
+            let swapDim d = if d = d1 then d2 elif d = d2 then d1 else d
+            let extentDecl =
+                [ sprintf "size_t %s[%d];" extentsName rank ]
+                @ [ for d in 0 .. rank - 1 ->
+                        sprintf "%s[%d] = %s.extents[%d];" extentsName d arrName (swapDim d) ]
+            let allocDecl =
+                sprintf "Array<%s, %d> %s = { allocate<typename promote<%s, %d>::type, nullptr>(%s), %s };"
+                    elemTypeStr rank varName elemTypeStr rank extentsName extentsName
+            // Nested copy loops over the SOURCE extents.
+            let openLoops =
+                [ for d in 0 .. rank - 1 ->
+                    let ind = String.replicate d "    "
+                    sprintf "%sfor (size_t %s = 0; %s < %s.extents[%d]; %s++) {"
+                        ind (srcVar d) (srcVar d) arrName d (srcVar d) ]
+            // dst subscript at position p reads the source var whose dimension
+            // maps to p under the swap, i.e. dst[swap(p)] index = srcVar(p).
+            // Equivalently: walk source vars in order, but write them into dst
+            // at swapped positions. Build dst index from src vars: the dst's
+            // dimension d is fed by source dimension swapDim(d).
+            let srcIdx = [ for d in 0 .. rank - 1 -> sprintf "[%s]" (srcVar d) ] |> String.concat ""
+            let dstIdx = [ for d in 0 .. rank - 1 -> sprintf "[%s]" (srcVar (swapDim d)) ] |> String.concat ""
+            let bodyInd = String.replicate rank "    "
+            let body = [ sprintf "%s%s%s = %s%s;" bodyInd varName dstIdx arrName srcIdx ]
+            let closeLoops = [ for d in rank - 1 .. -1 .. 0 -> sprintf "%s}" (String.replicate d "    ") ]
+            Some (extentDecl @ [allocDecl] @ openLoops @ body @ closeLoops)
+         | _ -> None)
+    | IRDecompact (arrExpr, dimArg) ->
+        // Decompaction = binary group FISSION. decompact(A, d) isolates the
+        // logical dimension d of a compact group as a free Idx, cutting on BOTH
+        // sides: SymIdx<r,n> -> SymIdx<dPos,n> -> Idx<n> -> SymIdx<r-dPos-1,n>.
+        // Edges degenerate to a single cut. Storage is value-equivalent to the
+        // source but strictly larger (fission breaks the inter-axis dependency,
+        // so each sub-group ranges over the full [0,n) again) — the cost paid to
+        // make the freed axis densely indexable / transposable.
+        //
+        // TWO emitted shapes:
+        //   (1) General SYMMETRIC fission, any rank, any d (sole compact slot):
+        //       GATHER into a fission-shaped output allocated with a per-group
+        //       SYMM mask {left-run | freed-singleton | right-run}. Each output
+        //       cell is written exactly once: enumerate left-group canonical
+        //       coords (left-justified), freed dense axis, right-group canonical
+        //       coords; assemble the logical r-tuple; sort; read the source at
+        //       its left-justified canonical address. (Validated rank 2-5, all
+        //       cut positions, against the runtime allocator.)
+        //   (2) ANTISYMMETRIC rank-2 (fully dissolves to dense n×n): the legacy
+        //       two-image scatter with sign on the mirror and zeroed diagonal.
+        //   (3) ANTISYMMETRIC rank>=3 (general, any cut): per-group-strict
+        //       (allocate_strict) fission into the chain Antisym<aLen> -> Idx ->
+        //       Antisym<bLen>, with the full-tuple sign baked at scatter and each
+        //       residual group's own antisymmetry applied lazily on read. Handles
+        //       boundary cuts (one residual group), one-sided interior cuts
+        //       (rank 4: one group + a degenerate plain residual), two-sided
+        //       interior cuts (rank 5: two groups), and the rank-3 interior case
+        //       (both residuals degenerate -> fully dense).
+        let arrName = exprToCppCore subst names arrExpr
+        (match inferExprType arrExpr with
+         | ArrayElem arrTy ->
+            // The compact slot must be the sole index slot (TypeCheck enforces
+            // this for now); read its arity r and symmetry.
+            let (r, sym) =
+                match arrTy.IndexTypes with
+                | [ix] -> (max 1 ix.Arity, ix.Symmetry)
+                | _ -> (0, SymNone)
+            let extentsName = sprintf "%s_extents" varName
+            let nExpr = sprintf "%s.extents[0]" arrName
+            (match sym with
+             | SymSymmetric when r >= 2 ->
+                // ----- General symmetric fission (gather) -----
+                let dPos = dimArg          // logical position within the group
+                let aLen = dPos            // left group arity
+                let bLen = r - dPos - 1    // right group arity
+                // Build the per-group SYMM mask: a run of arity>=2 is one group
+                // (compact); arity-1 (and the freed axis) are distinct singletons
+                // (dense). This mirrors buildSymmVec's adjacent-equal grouping.
+                let mask =
+                    let acc = System.Collections.Generic.List<int>()
+                    let mutable g = 1
+                    let emitGroup len =
+                        if len = 1 then
+                            acc.Add g
+                            g <- g + 1
+                        elif len > 1 then
+                            for _ in 1 .. len do acc.Add g
+                            g <- g + 1
+                        // len <= 0: emit nothing, do NOT advance the group counter
+                    emitGroup aLen
+                    emitGroup 1            // the freed axis (always a singleton)
+                    emitGroup bLen
+                    List.ofSeq acc
+                let symmArg = hoistSymmDecl (sprintf "%s_symm" varName) mask
+                let extentDecl =
+                    [ sprintf "size_t %s[%d];" extentsName r ]
+                    @ [ for i in 0 .. r - 1 -> sprintf "%s[%d] = %s;" extentsName i nExpr ]
+                let allocDecl =
+                    sprintf "Array<%s, %d> %s = { allocate<typename promote<%s, %d>::type, %s>(%s), %s };"
+                        elemTypeStr r varName elemTypeStr r symmArg extentsName extentsName
+                // Emit a left-justified canonical nest for a group. Returns the
+                // generated loop-open lines, the storage subscript ("[v0][v1]..")
+                // and the names of the per-level LOGICAL vars (prefix sums).
+                let lvName tag k = sprintf "__dc%s_%s%d" varName tag k
+                let emitGroupNest (tag: string) (len: int) (startIndent: int)
+                    : string list * string * string list =
+                    let mutable lines = []
+                    let mutable subs = ""
+                    let mutable logs = []
+                    for k in 0 .. len - 1 do
+                        let ind = String.replicate (startIndent + k) "    "
+                        let v = lvName tag k
+                        let logName = v + "_log"
+                        let bound =
+                            if k = 0 then nExpr
+                            else sprintf "%s - %s" nExpr ((lvName tag (k-1)) + "_log")
+                        let logRhs =
+                            if k = 0 then v
+                            else sprintf "%s + %s" ((lvName tag (k-1)) + "_log") v
+                        lines <- lines @
+                            [ sprintf "%sfor (size_t %s = 0; %s < %s; %s++) {" ind v v bound v
+                              sprintf "%s    size_t %s = %s;" ind logName logRhs ]
+                        subs <- subs + sprintf "[%s]" v
+                        logs <- logs @ [logName]
+                    (lines, subs, logs)
+                let fv = sprintf "__dc%s_F" varName
+                let mutable depth = 0
+                let (lLines, lSubs, lLogs) = emitGroupNest "L" aLen depth
+                depth <- depth + aLen
+                let fInd = String.replicate depth "    "
+                let fLine = sprintf "%sfor (size_t %s = 0; %s < %s; %s++) {" fInd fv fv nExpr fv
+                depth <- depth + 1
+                let (rLines, rSubs, rLogs) = emitGroupNest "R" bLen depth
+                depth <- depth + bLen
+                let logicalTuple = lLogs @ [fv] @ rLogs
+                let bodyInd = String.replicate depth "    "
+                let arrInit = logicalTuple |> String.concat ", "
+                let srcSub =
+                    [ for k in 0 .. r - 1 ->
+                        if k = 0 then sprintf "[__dc%s_t[0]]" varName
+                        else sprintf "[__dc%s_t[%d] - __dc%s_t[%d]]" varName k varName (k-1) ]
+                    |> String.concat ""
+                let outSub = lSubs + sprintf "[%s]" fv + rSubs
+                let body =
+                    [ sprintf "%ssize_t __dc%s_t[%d] = { %s };" bodyInd varName r arrInit
+                      sprintf "%sstd::sort(__dc%s_t, __dc%s_t + %d);" bodyInd varName varName r
+                      sprintf "%s%s%s = %s%s;" bodyInd varName outSub arrName srcSub ]
+                let closes = [ for dd in depth - 1 .. -1 .. 0 -> sprintf "%s}" (String.replicate dd "    ") ]
+                Some (extentDecl @ [allocDecl] @ lLines @ [fLine] @ rLines @ body @ closes)
+             | SymAntisymmetric when r = 2 ->
+                // ----- Antisym rank-2: fully dissolves to dense n×n -----
+                // Zero-fill (diagonal stays 0). Walk a in [0,n), b in [0,n-a-1);
+                // strict: i=a, j=a+b+1. Write +A to (i,j), -A to (j,i).
+                let extentDecl =
+                    [ sprintf "size_t %s[2] = { %s, %s };" extentsName nExpr nExpr ]
+                let allocDecl =
+                    sprintf "Array<%s, 2> %s = { allocate<typename promote<%s, 2>::type, nullptr>(%s), %s };"
+                        elemTypeStr varName elemTypeStr extentsName extentsName
+                let a = sprintf "__dc%s_a" varName
+                let b = sprintf "__dc%s_b" varName
+                let zeroFill =
+                    [ sprintf "for (size_t __dcz0 = 0; __dcz0 < %s; __dcz0++)" nExpr
+                      sprintf "    for (size_t __dcz1 = 0; __dcz1 < %s; __dcz1++)" nExpr
+                      sprintf "        %s[__dcz0][__dcz1] = 0;" varName ]
+                let loops =
+                    [ sprintf "for (size_t %s = 0; %s < %s; %s++) {" a a nExpr a
+                      sprintf "    for (size_t %s = 0; %s + 1 < %s - %s; %s++) {" b b nExpr a b
+                      sprintf "        size_t __dci = %s; size_t __dcj = %s + %s + 1;" a a b
+                      sprintf "        %s[__dci][__dcj] = %s[%s][%s];" varName arrName a b
+                      sprintf "        %s[__dcj][__dci] = -(%s[%s][%s]);" varName arrName a b
+                      "    }"
+                      "}" ]
+                Some (extentDecl @ [allocDecl] @ zeroFill @ loops)
+             | SymHermitian when r = 2 ->
+                // ----- Hermitian rank-2: dissolves to dense n×n -----
+                // Source is upper-triangle Hermitian storage (from gram). Walk the
+                // INCLUSIVE upper triangle i<=j (diagonal kept — it is real for a
+                // Hermitian matrix, unlike the zeroed antisym diagonal): write the
+                // stored value to [i][j] and its CONJUGATE to the mirror [j][i].
+                // conj_scalar is std::conj on complex / identity on real, so this
+                // also handles a (degenerate) real Hermitian = symmetric input.
+                let extentDecl =
+                    [ sprintf "size_t %s[2] = { %s, %s };" extentsName nExpr nExpr ]
+                let allocDecl =
+                    sprintf "Array<%s, 2> %s = { allocate<typename promote<%s, 2>::type, nullptr>(%s), %s };"
+                        elemTypeStr varName elemTypeStr extentsName extentsName
+                let a = sprintf "__dc%s_a" varName
+                let b = sprintf "__dc%s_b" varName
+                let loops =
+                    [ sprintf "for (size_t %s = 0; %s < %s; %s++) {" a a nExpr a
+                      sprintf "    for (size_t %s = 0; %s + %s < %s; %s++) {" b a b nExpr b
+                      sprintf "        size_t __dci = %s; size_t __dcj = %s + %s;" a a b
+                      sprintf "        %s[__dci][__dcj] = %s[%s][%s];" varName arrName a b
+                      sprintf "        if (__dci != __dcj) %s[__dcj][__dci] = nested_array_utilities::conj_scalar(%s[%s][%s]);" varName arrName a b
+                      "    }"
+                      "}" ]
+                Some (extentDecl @ [allocDecl] @ loops)
+             | SymAntisymmetric when r >= 3 ->
+                // ----- Antisym rank>=3: COMPACT-RESIDUAL fission (general) -----
+                // decompact(anti<r>, dPos) severs the group into a chain:
+                //   left residual (arity dPos) -> freed Idx -> right residual
+                //   (arity r-1-dPos), the two residuals being INDEPENDENT antisym
+                //   groups (NOT one merged group). Each residual of arity>=2 is a
+                //   compact strict group; arity 1 degenerates to a plain Idx;
+                //   arity 0 is absent. Storage is per-group strict (allocate_strict)
+                //   with the mask derived from the result TYPE via
+                //   buildSymmVecWithStrict. The scatter stores CANONICAL values
+                //   with the FULL-tuple (cross-group + freed) sign BAKED (canon_fold
+                //   over the whole logical tuple); each residual group's OWN
+                //   antisymmetry is applied lazily on read. Proven end-to-end
+                //   (twogroup_clean / general_scatter_emit) for boundary (one
+                //   residual), one-sided interior (rank 4), and two-sided interior
+                //   (rank 5) cuts. The rank-3 interior case (both residuals arity 1)
+                //   is fully dense and handled by the same emission (no strict
+                //   groups, two plain freed-style loops + the freed axis).
+                let dPos = dimArg
+                let aLen = dPos
+                let bLen = r - dPos - 1
+                // Per-slot descriptors in logical order: (kind, arity, startVar fn).
+                // kind: "group" (strict compact, arity>=2) | "plain" (single dense
+                // axis: a degenerate residual OR the freed axis).
+                // Build the ordered slot list.
+                let slotList =
+                    [ if aLen >= 2 then yield ("group", aLen)
+                      elif aLen = 1 then yield ("plain", 1)
+                      yield ("freed", 1)
+                      if bLen >= 2 then yield ("group", bLen)
+                      elif bLen = 1 then yield ("plain", 1) ]
+                // Result type drives the storage mask. resultType isn't bound in
+                // this arm (only the source arrTy is), so build the mask directly
+                // from slotList using the same grouping rule as
+                // buildSymmVecWithStrict: each arity>=2 group is one strict
+                // compact group; each plain/freed axis is its own dense singleton.
+                let (symmMaskVec, strictMaskVec) =
+                    let mutable symm = []
+                    let mutable strict = []
+                    let mutable g = 1
+                    for (kind, arity) in slotList do
+                        match kind with
+                        | "group" ->
+                            for _ in 0 .. arity - 1 do
+                                symm <- symm @ [g]
+                                strict <- strict @ [1]
+                            g <- g + 1
+                        | _ ->
+                            symm <- symm @ [g]
+                            strict <- strict @ [0]
+                            g <- g + 1
+                    (symm, strict)
+                let symmArg = hoistSymmDecl (sprintf "%s_symm" varName) symmMaskVec
+                let strictArg = hoistSymmDecl (sprintf "%s_strict" varName) strictMaskVec
+                let extentDecl =
+                    [ sprintf "size_t %s[%d];" extentsName r ]
+                    @ [ for i in 0 .. r - 1 -> sprintf "%s[%d] = %s;" extentsName i nExpr ]
+                let allocDecl =
+                    sprintf "Array<%s, %d> %s = { allocate_strict<typename promote<%s, %d>::type, %s, %s>(%s), %s };"
+                        elemTypeStr r varName elemTypeStr r symmArg strictArg extentsName extentsName
+                // Emit the loop nest in slot order. Track:
+                //   - loopLines: the for-loop openers (with indentation)
+                //   - storeSubs: the storage subscript pieces (strict-relative for
+                //     groups, raw var for plain/freed)
+                //   - logTuple: the logical index expressions in slot order (for
+                //     assembling the full tuple whose sign is baked)
+                let mutable loopLines = []
+                let mutable storeSubs = ""
+                let mutable logTuple = []
+                let mutable depth = 0
+                let mutable gi = 0    // group counter (for var naming)
+                let mutable pi = 0    // plain/freed counter
+                for (kind, arity) in slotList do
+                    match kind with
+                    | "group" ->
+                        // strict left-justified sub-nest of `arity` levels.
+                        let g = gi
+                        gi <- gi + 1
+                        for k in 0 .. arity - 1 do
+                            let ind = String.replicate depth "    "
+                            let v = sprintf "__dc%s_g%d_%d" varName g k
+                            let logName = v + "_log"
+                            let bound =
+                                if k = 0 then nExpr
+                                else sprintf "%s - %s - 1" nExpr (sprintf "__dc%s_g%d_%d_log" varName g (k-1))
+                            let logRhs =
+                                if k = 0 then v
+                                else sprintf "%s + %s + 1" (sprintf "__dc%s_g%d_%d_log" varName g (k-1)) v
+                            loopLines <- loopLines @
+                                [ sprintf "%sfor (size_t %s = 0; %s < %s; %s++) {" ind v v bound v
+                                  sprintf "%s    size_t %s = %s;" ind logName logRhs ]
+                            storeSubs <- storeSubs + sprintf "[%s]" v
+                            logTuple <- logTuple @ [logName]
+                            depth <- depth + 1
+                    | _ ->
+                        // "plain" (degenerate residual) or "freed": one dense axis.
+                        let v = sprintf "__dc%s_p%d" varName pi
+                        pi <- pi + 1
+                        let ind = String.replicate depth "    "
+                        loopLines <- loopLines @
+                            [ sprintf "%sfor (size_t %s = 0; %s < %s; %s++) {" ind v v nExpr v ]
+                        storeSubs <- storeSubs + sprintf "[%s]" v
+                        logTuple <- logTuple @ [v]
+                        depth <- depth + 1
+                let bodyInd = String.replicate depth "    "
+                let arrInit = logTuple |> String.concat ", "
+                // Source read: the source is the rank-r strict antisym storage; the
+                // canonical value lives at the strict left-justified position of the
+                // SORTED logical tuple. canon_fold sorts __dc_a in place (strict) and
+                // yields parity + zero flag (repeat ⇒ antisym 0).
+                let srcSub =
+                    [ for k in 0 .. r - 1 ->
+                        if k = 0 then sprintf "[__dc%s_t[0]]" varName
+                        else sprintf "[__dc%s_t[%d] - __dc%s_t[%d] - 1]" varName k varName (k-1) ]
+                    |> String.concat ""
+                let body =
+                    [ sprintf "%sstd::array<size_t,%d> __dc%s_a = { %s };" bodyInd r varName arrInit
+                      sprintf "%sbool __dc%s_z; int __dc%s_p = nested_array_utilities::canon_fold<%d>(__dc%s_a, true, __dc%s_z);" bodyInd varName varName r varName varName
+                      sprintf "%ssize_t __dc%s_t[%d] = { %s };" bodyInd varName r
+                          (String.concat ", " [ for k in 0 .. r - 1 -> sprintf "__dc%s_a[%d]" varName k ])
+                      sprintf "%s%s%s = __dc%s_z ? %s() : nested_array_utilities::canon_transform<%s>(%s%s, __dc%s_p, nested_array_utilities::ReadTransform::NegateOnSwap);"
+                          bodyInd varName storeSubs varName elemTypeStr elemTypeStr arrName srcSub varName ]
+                let closes = [ for dd in depth - 1 .. -1 .. 0 -> sprintf "%s}" (String.replicate dd "    ") ]
+                Some (extentDecl @ [allocDecl] @ loopLines @ body @ closes)
+             | _ -> None)
+         | _ -> None)
+    | IRArrayNegate arrExpr | IRArrayConjugate arrExpr ->
+        // Whole-array eager transform (negate for antisym transpose, conjugate
+        // for Hermitian transpose). Type-PRESERVING: the result has the same
+        // storage shape/SYMM as the source, so we allocate a fresh same-shape
+        // array and run a flat contiguous-pool transform (negate_pool /
+        // conjugate_pool). Every array reaching here has compact storage (one
+        // contiguous pool), so pool_base + count is correct and storage-agnostic.
+        let isConj = (match form with IRArrayConjugate _ -> true | _ -> false)
+        let arrName = exprToCppCore subst names arrExpr
+        let srcType = inferExprType arrExpr
+        (match srcType with
+         | ArrayElem arrTy ->
+            let rank = arrTy.IndexTypes |> List.sumBy (fun ix -> max 1 ix.Arity)
+            let extentsName = sprintf "%s_extents" varName
+            // Same-shape extents: copy the source's logical extents.
+            let extentDecl =
+                [ sprintf "size_t %s[%d];" extentsName rank ]
+                @ [ for d in 0 .. rank - 1 -> sprintf "%s[%d] = %s.extents[%d];" extentsName d arrName d ]
+            // Allocate the destination with the SOURCE's storage class so the
+            // result type is identical (antisym stays antisym, etc.).
+            let spec = classifyOutputStorage srcType
+            let symmArg =
+                match spec with
+                | AllocPerGroupStrict _ ->
+                    // Compact-grouped SYMM (antisym grouped like symmetric) so it
+                    // aligns with the STRICT mask emitAllocRhs hoists.
+                    let (sVec, _) = buildSymmVecWithStrict srcType
+                    if hasRealSymmetry sVec then hoistSymmDecl (sprintf "%s_symm" varName) sVec
+                    else "nullptr"
+                | _ ->
+                    let symmVec = buildSymmVec srcType
+                    if hasRealSymmetry symmVec then hoistSymmDecl (sprintf "%s_symm" varName) symmVec
+                    else "nullptr"
+            let allocRhs =
+                match emitAllocRhs spec elemTypeStr rank symmArg extentsName with
+                | Ok rhs -> rhs
+                | Error msg -> sprintf "{ nullptr, %s };\n#error \"%s\"" extentsName msg
+            let allocDecl = sprintf "Array<%s, %d> %s = %s;" elemTypeStr rank varName allocRhs
+            // Element count: count_antisym for antisym storage, count_leaves
+            // (with the SYMM mask) otherwise. Matches the allocator's traversal.
+            let countExpr =
+                match spec with
+                | AllocAntisymmetric ->
+                    // Strict storage: all-ones mask + DIAGONALS=false, same as the
+                    // unified allocate path (count_antisym retired from Blade emission).
+                    let allOnes = List.replicate rank 1
+                    let cMask = hoistSymmDecl (sprintf "%s_anti" extentsName) allOnes
+                    sprintf "count_leaves<typename promote<%s, %d>::type, %s, false>(%s)" elemTypeStr rank cMask extentsName
+                | AllocPerGroupStrict strictVec ->
+                    // Mixed strictness: count via the per-group-strict recurrence
+                    // using the same SYMM + STRICT masks the allocator used.
+                    let cStrict = hoistSymmDecl (sprintf "%s_cstrict" extentsName) strictVec
+                    sprintf "count_leaves_strict<typename promote<%s, %d>::type, %s, %s>(%s)" elemTypeStr rank symmArg cStrict extentsName
+                | _ ->
+                    // Symmetric/Hermitian/dense: DIAGONALS defaults true, DEPTH defaults 0.
+                    sprintf "count_leaves<typename promote<%s, %d>::type, %s>(%s)" elemTypeStr rank symmArg extentsName
+            let countName = sprintf "%s_n" varName
+            let routine = if isConj then "conjugate_pool" else "negate_pool"
+            let call =
+                [ sprintf "size_t %s = %s;" countName countExpr
+                  sprintf "%s(pool_base(%s.data), pool_base(%s.data), %s);" routine varName arrName countName ]
+            Some (extentDecl @ [allocDecl] @ call)
+         | _ -> None)
+    | IRGram (lExpr, rExpr, sameArray) ->
+        // gram(A, B) = A * B^H:  result[i][j] = sum_k A[i][k] * conj(B[j][k]).
+        // A : m x n, B : p x n.  conj() is std::conj on complex, identity on real
+        // (we always emit std::conj; for real element types it is a harmless
+        // no-op via the conj_scalar overload). Two modes:
+        //   sameArray  -> square m x m, SymHermitian/SymSymmetric storage,
+        //                 UPPER-TRIANGLE scatter only (i<=j, left-justified jr);
+        //                 the lower triangle is recovered lazily on read
+        //                 (canon ConjugateOnSwap for Hermitian, plain for sym).
+        //   distinct   -> dense m x p, full scatter over all (i,j).
+        let lName = exprToCppCore subst names lExpr
+        let rName = exprToCppCore subst names rExpr
+        let lTy = inferExprType lExpr
+        let rTy = inferExprType rExpr
+        (match lTy, rTy with
+         | ArrayElem la, ArrayElem ra ->
+            // element type of the result (complex iff either operand complex)
+            let isComplexElem (t: IRType) =
+                match t with IRTScalar (ETComplex64 | ETComplex128) -> true | _ -> false
+            let outElem =
+                if isComplexElem la.ElemType then la.ElemType
+                elif isComplexElem ra.ElemType then ra.ElemType
+                else la.ElemType
+            let outElemStr = irTypeToCpp outElem
+            // The contracted-axis extent comes from A's trailing dim at runtime.
+            let nExtent = sprintf "%s.extents[1]" lName
+            let mExtent = sprintf "%s.extents[0]" lName
+            let pExtent = sprintf "%s.extents[0]" rName
+            let extentsName = sprintf "%s_extents" varName
+            // conj wrapper on B's element (std::conj; identity-safe on reals via
+            // conj_scalar). Use conj_scalar to keep one spelling for real/complex.
+            let mulTerm i j =
+                sprintf "%s[%s][__gk] * nested_array_utilities::conj_scalar(%s[%s][__gk])" lName i rName j
+            if sameArray then
+                // square m x m, symmetric/Hermitian upper-triangle storage
+                let extentDecl =
+                    [ sprintf "size_t %s[2];" extentsName
+                      sprintf "%s[0] = %s;" extentsName mExtent
+                      sprintf "%s[1] = %s;" extentsName mExtent ]
+                let symmVec = [1; 1]
+                let symmArg = hoistSymmDecl (sprintf "%s_symm" varName) symmVec
+                let allocDecl =
+                    sprintf "Array<%s, 2> %s = { allocate<typename promote<%s, 2>::type, %s>(%s), %s };"
+                        outElemStr varName outElemStr symmArg extentsName extentsName
+                let loop =
+                    [ sprintf "for (size_t __gi = 0; __gi < %s; __gi++) {" mExtent
+                      sprintf "    for (size_t __gjr = 0; __gjr < %s - __gi; __gjr++) {" mExtent
+                      sprintf "        size_t __gj = __gi + __gjr;"
+                      sprintf "        %s __gacc = %s();" outElemStr outElemStr
+                      sprintf "        for (size_t __gk = 0; __gk < %s; __gk++) {" nExtent
+                      sprintf "            __gacc += %s;" (mulTerm "__gi" "__gj")
+                      sprintf "        }"
+                      sprintf "        %s[__gi][__gjr] = __gacc;" varName
+                      sprintf "    }"
+                      sprintf "}" ]
+                Some (extentDecl @ [allocDecl] @ loop)
+            else
+                // dense m x p
+                let extentDecl =
+                    [ sprintf "size_t %s[2];" extentsName
+                      sprintf "%s[0] = %s;" extentsName mExtent
+                      sprintf "%s[1] = %s;" extentsName pExtent ]
+                let allocDecl =
+                    sprintf "Array<%s, 2> %s = { allocate<typename promote<%s, 2>::type, nullptr>(%s), %s };"
+                        outElemStr varName outElemStr extentsName extentsName
+                let loop =
+                    [ sprintf "for (size_t __gi = 0; __gi < %s; __gi++) {" mExtent
+                      sprintf "    for (size_t __gj = 0; __gj < %s; __gj++) {" pExtent
+                      sprintf "        %s __gacc = %s();" outElemStr outElemStr
+                      sprintf "        for (size_t __gk = 0; __gk < %s; __gk++) {" nExtent
+                      sprintf "            __gacc += %s;" (mulTerm "__gi" "__gj")
+                      sprintf "        }"
+                      sprintf "        %s[__gi][__gj] = __gacc;" varName
+                      sprintf "    }"
+                      sprintf "}" ]
+                Some (extentDecl @ [allocDecl] @ loop)
+         | _ -> None)
     | _ -> None
 
 /// Convert IRExpr to C++ using context
@@ -1812,13 +2570,21 @@ let genElementBindingNew (level: LoopIndexBinding) (elem: ElementBinding) (curre
         let resultRank = elem.ArrayRank - levelsConsumed
         let elemTypeStr = elemTypeToCpp elem.ArrayElemType
         
-        // For left-justified iteration, array index = current + sum of dependencies
-        let arrayIndex = 
-            if level.BoundDependencies.IsEmpty then
-                level.IndexName
-            else
-                let deps = level.BoundDependencies |> List.map (sprintf "__i%d") |> String.concat " + "
-                sprintf "%s + %s" level.IndexName deps
+        // For left-justified iteration, array index = current loop var
+        // + sum of bound-dependency vars + the strict offset. The loop var is
+        // 0-based and relative to the row start; the dependency vars shift it
+        // to the row's absolute base. For STRICT (antisymmetric) iteration the
+        // row also starts past the diagonal, so StrictOffset (the cumulative
+        // within-group depth = number of prior group levels, NOT a flat 1) must
+        // be added to recover the true operand index — otherwise the kernel
+        // reads the wrong operand and, at rank >= 3, the loop bound visits
+        // non-canonical tuples that alias storage cells.
+        let arrayIndex =
+            let depParts = level.BoundDependencies |> List.map (sprintf "__i%d")
+            let offsetParts = if level.StrictOffset > 0 then [string level.StrictOffset] else []
+            match depParts @ offsetParts with
+            | [] -> level.IndexName
+            | shifts -> sprintf "%s + %s" level.IndexName (String.concat " + " shifts)
         
         let newName = sprintf "%s__%s" currentName level.IndexName
         let code =
@@ -2053,8 +2819,14 @@ let rec canonicalKey (nameMap: Map<int, string>) (expr: IRExpr) : string =
         sprintf "(slice %s %d %s %s)" (canonicalKey nameMap arr) dim (canonicalKey nameMap start) (canonicalKey nameMap stop)
     | IRCurry (arr, idx, rank) ->
         sprintf "(curry %s %s %d)" (canonicalKey nameMap arr) (canonicalKey nameMap idx) rank
-    | IRTranspose (arr, perm) ->
-        sprintf "(transpose %s %A)" (canonicalKey nameMap arr) perm
+    | IRTranspose (arr, d1, d2) ->
+        sprintf "(transpose %s %d %d)" (canonicalKey nameMap arr) d1 d2
+    | IRDecompact (arr, d) ->
+        sprintf "(decompact %s %d)" (canonicalKey nameMap arr) d
+    | IRArrayNegate arr ->
+        sprintf "(array_negate %s)" (canonicalKey nameMap arr)
+    | IRArrayConjugate arr ->
+        sprintf "(array_conjugate %s)" (canonicalKey nameMap arr)
     | IRAssign (lhs, rhs) ->
         sprintf "(assign %s %s)" (canonicalKey nameMap lhs) (canonicalKey nameMap rhs)
     | IRForRange (vid, lo, hi, body) ->
@@ -2884,6 +3656,214 @@ let buildSimpleApplyInfo (arrays: IRExpr list) (kernel: IRExpr) (outputType: IRT
         IsCoIteration = false
     }
 
+/// Emit a CUDA kernel for any single S-dimension symmetry group of arity >= 2,
+/// symmetric (inclusive simplex i0<=i1<=...) or antisymmetric (strict simplex
+/// i0<i1<...). This is the GENERAL simplicial-unrank kernel: it replaces the
+/// former per-rank closed-form kernels (Sym2/Anti2/Sym3/Anti3) with one path
+/// driven by the group's arity R and symmetry.
+///
+/// Per Section 9.2/10.8 of the formalism, S-dims ARE the iteration structure:
+/// they are stored compactly and flattened to a contiguous pool to cross the
+/// extern "C" device boundary, and the flat thread id unranks to the canonical
+/// S-tuple. (T-dims, by contrast, live inside the kernel as per-thread slices and
+/// do NOT participate in this addressing — handled separately, not here. This
+/// path requires a scalar-leaf, all-S, single-group output: T-rank 0.)
+///
+/// The device unrank is the combinatorial number system (proven against
+/// lexicographic tuple order, and in exact emitted form, for R=2..5, both
+/// variants, in the sandbox):
+///   strict = (Symmetry = SymAntisymmetric)
+///   neff   = strict ? N : N + R - 1          (inclusive maps to strict over N+R-1)
+///   card   = C(neff, R)
+///   unrank(t): x=0; rem=t
+///     for pos in 0..R-1:
+///       after = R - pos - 1
+///       v = x; while (rem >= C(neff-1-v, after)) { rem -= C(...); v++ }
+///       idx[pos] = strict ? v : (v - pos)     (de-shift for inclusive)
+///       x = v + 1
+/// A single __device__ binomial helper __blade_binom is emitted once per .cu.
+///
+/// Fold: symmetric is a raw comm kernel (hasReynolds=false); antisymmetric IS the
+/// Reynolds antisymmetrization (hasReynolds=true, isAntisym=true).
+/// Storage: symmetric -> allocate<T, SYMM={1..1}>; antisymmetric ->
+/// allocate_strict<T, SYMM={1..1}, STRICT={1..1}>.
+let genCudaKernelSimplicial (codeGen: LoopNestCodeGen) (name: string) (blockSize: int) : string list option =
+    // Detect a single S-dim symmetry group of arity >= 2 (sym or antisym).
+    let grpOpt =
+        match codeGen.OutputType with
+        | ArrayElem arr ->
+            match arr.IndexTypes with
+            | [ix] when (max 1 ix.Arity) >= 2
+                        && (ix.Symmetry = SymSymmetric || ix.Symmetry = SymAntisymmetric)
+                        && ix.Kind = SDimension
+                        && isCudaBoundarySafeElem arr.ElemType ->
+                Some (arr.ElemType, ix.Extent, (max 1 ix.Arity), ix.Symmetry)
+            | _ -> None
+        | _ -> None
+    if grpOpt.IsNone then None
+    else
+    let (outElemTy, extentExpr, rArity, sym) = grpOpt.Value
+    let strict = (sym = SymAntisymmetric)
+    // Antisym requires the Reynolds antisymmetrization; symmetric is a raw comm.
+    if strict && not (codeGen.HasReynolds && codeGen.IsAntisymmetric) then None
+    elif (not strict) && codeGen.IsAntisymmetric then None
+    else
+    let nOpt = match extentExpr with IRLit (IRLitInt n) -> Some n | _ -> None
+    if nOpt.IsNone then None
+    else
+    let n = nOpt.Value
+    if codeGen.InputArrayNames.IsEmpty then None
+    else
+    let bindings = codeGen.Bindings
+    if List.length bindings < rArity then None
+    else
+    let srcName = match codeGen.InputArrayNames with n0 :: _ -> n0 | [] -> ""
+    if srcName = "" then None
+    else
+    let elemCpp = elemTypeToCpp outElemTy
+    let r = int rArity
+    // card = C(neff, R), neff = strict ? N : N+R-1
+    let neff = if strict then n else n + int64 r - 1L
+    let binom (m: int64) (k: int) : int64 =
+        if k < 0 || m < int64 k then 0L
+        else
+            let mutable num = 1L
+            let mutable den = 1L
+            for i in 0 .. k - 1 do
+                num <- num * (m - int64 i)
+                den <- den * int64 (i + 1)
+            num / den
+    let card = binom neff r
+    let kernelName = sprintf "__cuda_%s" (sanitizeCppName name)
+    let launchName = sprintf "__launch_%s" (sanitizeCppName name)
+    // Per-level index variables idx[0..r-1] -> device names.
+    let idxVarOf pos = sprintf "__blade_idx_%d" pos
+    // Operand reads keyed by elem.ParamVarId (the var-id the kernel body uses),
+    // each binding level reading at its unranked index.
+    let mutable paramFinalNames : Map<IRId, string> = Map.empty
+    let readBinds =
+        [ for b in bindings do
+            let idxVar = idxVarOf b.Level
+            for elem in b.Elements do
+                let readName = sprintf "__blade_op_%d_%d" b.Level elem.ArrayPosition
+                let etStr = elemTypeToCpp elem.ArrayElemType
+                paramFinalNames <- Map.add elem.ParamVarId readName paramFinalNames
+                yield sprintf "    %s %s = %s[%s];" etStr readName srcName idxVar ]
+    let nameMap =
+        codeGen.Captures |> List.fold (fun acc c -> Map.add c.Id c.Name acc) paramFinalNames
+    // Antisym: Reynolds fold (true,true) emits the signed antisymmetrization.
+    // Symmetric: raw comm kernel (false,false).
+    let reynolds =
+        genKernelExprWithReynolds codeGen.KernelExpr codeGen.KernelParams strict strict nameMap paramFinalNames
+    // Device combinadic unrank loop. Emits idx_0..idx_{r-1} as absolute indices.
+    //
+    // Per level, the count of cells whose value is < v has the closed form
+    //   cum(v) = C(neff-x, after+1) - C(neff-v, after+1)
+    // (hockey-stick identity over C(neff-1-q, after) for q in [x, v); verified in
+    // the sandbox against lexicographic order for r=2..5, both variants). Because
+    // cum is monotincreasing in v, each level brackets its value by BINARY SEARCH
+    // in O(log n) rather than the O(n) linear scan — restoring the cost the former
+    // closed-form rank-2/3 kernels had, now generalized to arbitrary rank. Total
+    // per-thread cost O(r log n).
+    //
+    // FUTURE O(1) OPTION (deferred until timing tests exist): the unrank has no
+    // constant-time closed form — inverting the combinatorial number system is
+    // fundamentally a search. To approach O(1) per thread, precompute the
+    // card x r table of canonical tuples ONCE (the MethodLoop's S-structure is
+    // fixed and reused across kernel applications), store it flat in device
+    // memory, and have each thread load idx[pos] = table[t*r + pos] (one coalesced
+    // read). This trades O(r log n) arithmetic for a memory gather + one-time table
+    // build, amortized over repeated applications. Whether it actually beats the
+    // arithmetic depends on r, n, reuse count, and memory-vs-compute balance on the
+    // target GPU, so it should be chosen by BENCHMARK, not assumed — GPU arithmetic
+    // is often nearly free relative to bandwidth, so the table is not obviously
+    // faster despite being "O(1)".
+    let unrank =
+        [ "    size_t __blade_t = __blade_i;"
+          sprintf "    long __blade_neff = %dL;" neff
+          "    long __blade_x = 0;"
+          "    long long __blade_rem = (long long)__blade_t;" ]
+        @ [ for pos in 0 .. r - 1 do
+              let after = r - pos - 1
+              // binary search largest v in [x, neff] with cum(v) <= rem
+              yield sprintf "    long __blade_lo_%d = __blade_x; long __blade_hi_%d = __blade_neff; long __blade_vf_%d = __blade_x;" pos pos pos
+              yield sprintf "    long long __blade_base_%d = __blade_binom(__blade_neff - __blade_x, %d);" pos (after + 1)
+              yield  "    while (true) {"
+              yield sprintf "        if (__blade_lo_%d > __blade_hi_%d) break;" pos pos
+              yield sprintf "        long __blade_mid_%d = (__blade_lo_%d + __blade_hi_%d) / 2;" pos pos pos
+              yield sprintf "        long long __blade_cum_%d = __blade_base_%d - __blade_binom(__blade_neff - __blade_mid_%d, %d);" pos pos pos (after + 1)
+              yield sprintf "        if (__blade_cum_%d <= __blade_rem) { __blade_vf_%d = __blade_mid_%d; __blade_lo_%d = __blade_mid_%d + 1; }" pos pos pos pos pos
+              yield sprintf "        else { __blade_hi_%d = __blade_mid_%d - 1; }" pos pos
+              yield  "    }"
+              yield sprintf "    long long __blade_cumf_%d = __blade_base_%d - __blade_binom(__blade_neff - __blade_vf_%d, %d);" pos pos pos (after + 1)
+              yield sprintf "    __blade_rem -= __blade_cumf_%d;" pos
+              // strict -> absolute v ; inclusive -> v - pos (de-shift)
+              if strict then
+                  yield sprintf "    size_t %s = (size_t)__blade_vf_%d;" (idxVarOf pos) pos
+              else
+                  yield sprintf "    size_t %s = (size_t)(__blade_vf_%d - %d);" (idxVarOf pos) pos pos
+              yield sprintf "    __blade_x = __blade_vf_%d + 1;" pos ]
+    let kernelParams = sprintf "const %s* %s" elemCpp srcName
+    let kernelDef =
+        [ sprintf "__global__ void %s(%s, %s* __blade_out, size_t __blade_card) {" kernelName kernelParams elemCpp
+          "    size_t __blade_i = (size_t)blockIdx.x * blockDim.x + threadIdx.x;"
+          "    if (__blade_i >= __blade_card) return;" ]
+        @ unrank @ readBinds
+        @ [ sprintf "    __blade_out[__blade_i] = %s;" reynolds.CppExpr; "}" ]
+    let wrapper =
+        [ sprintf "extern \"C\" void %s(const %s* %s, %s* __blade_host_out) {" launchName elemCpp srcName elemCpp
+          sprintf "    size_t __blade_card = %dUL;" card
+          sprintf "    %s* __blade_d_%s; cudaMalloc(&__blade_d_%s, %dUL * sizeof(%s));" elemCpp srcName srcName n elemCpp
+          sprintf "    cudaMemcpy(__blade_d_%s, %s, %dUL * sizeof(%s), cudaMemcpyHostToDevice);" srcName srcName n elemCpp
+          sprintf "    %s* __blade_d_out; cudaMalloc(&__blade_d_out, __blade_card * sizeof(%s));" elemCpp elemCpp
+          sprintf "    size_t __blade_blocks = (__blade_card + %dUL - 1UL) / %dUL;" blockSize blockSize
+          sprintf "    %s<<<(unsigned)__blade_blocks, %d>>>(__blade_d_%s, __blade_d_out, __blade_card);" kernelName blockSize srcName
+          "    cudaDeviceSynchronize();"
+          sprintf "    cudaMemcpy(__blade_host_out, __blade_d_out, __blade_card * sizeof(%s), cudaMemcpyDeviceToHost);" elemCpp
+          sprintf "    cudaFree(__blade_d_%s);" srcName
+          "    cudaFree(__blade_d_out);"; "}" ]
+    // Emit the __device__ binomial helper once per .cu. Idempotency is keyed on
+    // the cell's own contents (race-safe: cudaKernelDefsCell is AsyncLocal, so each
+    // program-assembly flow has its own cell, reset per program) rather than a
+    // module-level mutable, which would not reset between programs and would race
+    // under the parallel test runner.
+    let cell = cudaKernelDefsCell ()
+    let helperMarker = "__device__ static long long __blade_binom"
+    let binomHelper =
+        if cell.Value |> List.exists (fun l -> l.StartsWith helperMarker) then []
+        else
+            [ "__device__ static long long __blade_binom(long m, long k) {"
+              "    if (k < 0 || m < (long)k) return 0;"
+              "    if (k == 0) return 1;"
+              "    long long num = 1; long long den = 1;"
+              "    for (long i = 0; i < k; i++) { num *= (m - i); den *= (i + 1); }"
+              "    return num / den;"
+              "}"
+              "" ]
+    cell.Value <- cell.Value @ (binomHelper @ kernelDef @ [""] @ wrapper @ [""])
+    // Host-side inline allocation matching the host storage:
+    //   symmetric  -> allocate<T, SYMM={1..1}>
+    //   antisym    -> allocate_strict<T, SYMM={1..1}, STRICT={1..1}>
+    let extentsName = sprintf "%s_extents" name
+    let ones = List.replicate r 1
+    let symmArg = hoistSymmDecl (sprintf "%s_symm" name) ones
+    let extentDecls =
+        [ sprintf "    size_t* %s = new size_t[%d];" extentsName r ]
+        @ [ for d in 0 .. r - 1 -> sprintf "    %s[%d] = %dUL;" extentsName d n ]
+    let allocLine =
+        if strict then
+            let strictArg = hoistSymmDecl (sprintf "%s_strict" name) ones
+            sprintf "    Array<%s, %d> %s = { allocate_strict<typename promote<%s, %d>::type, %s, %s>(%s), %s };"
+                elemCpp r name elemCpp r symmArg strictArg extentsName extentsName
+        else
+            sprintf "    Array<%s, %d> %s = { allocate<typename promote<%s, %d>::type, %s>(%s), %s };"
+                elemCpp r name elemCpp r symmArg extentsName extentsName
+    let inlineLines =
+        extentDecls
+        @ [ allocLine
+            sprintf "    %s(pool_base(%s.data), pool_base(%s.data));" launchName srcName name ]
+    Some inlineLines
+
 /// Emit a CUDA kernel for the first-kernel scope (rectangular pointwise,
 /// boundary-safe scalar elements, single-chunk synchronous). Returns
 ///   Some inlineLaunchLines  when emitted: the __global__ kernel + its
@@ -3241,8 +4221,21 @@ let genApplyCombinator (ctx: CodeGenContext) (name: string) (info: ApplyInfo) (b
             // None for out-of-scope cases, falling back to the host loop below.
             let cudaInline =
                 match resolveKernel info.Kernel with
-                | Some rk when rk.Callable.IsCudaKernel ->
-                    genCudaKernel codeGen name rk.Callable.CudaBlockSize
+                | Some rk when rk.Callable.IsCudaKernel && cudaEmitModeEnabled () ->
+                    // CUDA emission is gated: it only fires in the dedicated CUDA
+                    // phase (which compiles+links the .cu). During ordinary
+                    // host-only compilation the flag is off, so the `cuda` clause
+                    // stays inert (host fallback) — otherwise the emitted
+                    // `extern "C"` launch call would be an undefined symbol at link
+                    // time (the .cu isn't built in the host corpus).
+                    // Try the symmetric rank-2 triangular path, then the
+                    // antisymmetric rank-2 strict-triangular path, then the
+                    // rectangular pointwise path; None => host loop.
+                    // One general simplicial kernel handles any single S-group of
+                    // arity >= 2 (symmetric inclusive / antisymmetric strict, any
+                    // rank); then the rectangular pointwise path; None => host loop.
+                    genCudaKernelSimplicial codeGen name rk.Callable.CudaBlockSize
+                    |> Option.orElseWith (fun () -> genCudaKernel codeGen name rk.Callable.CudaBlockSize)
                 | _ -> None
             match cudaInline with
             | Some launchLines -> preCode @ [""] @ launchLines
@@ -3281,8 +4274,13 @@ let genApplyCombinator (ctx: CodeGenContext) (name: string) (info: ApplyInfo) (b
             // a runtime-allocated `size_t*` (not a static constexpr); the
             // wrapper just stores a pointer to it, so the same brace-init
             // pattern works.
-            let allocDecl = sprintf "%sArray<%s, %d> %s = { allocate<typename promote<%s, %d>::type, %s>(%s), %s };"
-                                ind outputElemType outputRank name outputElemType outputRank symmArg extentsName extentsName
+            let allocRhs =
+                match emitAllocRhs (classifyOutputStorage codeGen.OutputType)
+                          outputElemType outputRank symmArg extentsName with
+                | Ok rhs -> rhs
+                | Error msg -> sprintf "{ nullptr, %s };\n#error \"%s\"" extentsName msg
+            let allocDecl = sprintf "%sArray<%s, %d> %s = %s;"
+                                ind outputElemType outputRank name allocRhs
 
             // Generate loop nest
             let loopCode = genLoopNest codeGen tempCtx.VarNames tempCtx.Indent
@@ -3735,8 +4733,13 @@ let genFusionTree (ctx: CodeGenContext) (name: string) (expr: IRExpr) (builder: 
                         match b.Extent with
                         | IRLit (IRLitInt n) -> sprintf "%s%s[%d] = %d;" ind extentsName j n
                         | _ -> sprintf "%s%s[%d] = %s.extents[%d];" ind extentsName j b.ExtentArrayRef b.ExtentDimRef)
-                let allocDecl = sprintf "%sArray<%s, %d> %s = { allocate<typename promote<%s, %d>::type, %s>(%s), %s };" 
-                                    ind outputElemType outputRank lname outputElemType outputRank symmArg extentsName extentsName
+                let allocRhs =
+                    match emitAllocRhs (classifyOutputStorage cg.OutputType)
+                              outputElemType outputRank symmArg extentsName with
+                    | Ok rhs -> rhs
+                    | Error msg -> sprintf "{ nullptr, %s };\n#error \"%s\"" extentsName msg
+                let allocDecl = sprintf "%sArray<%s, %d> %s = %s;" 
+                                    ind outputElemType outputRank lname allocRhs
                 [extentsDecl] @ extentsFill @ [allocDecl]) |> List.concat
             
             // Generate single fused loop nest
@@ -4170,6 +5173,71 @@ let rec genBinding (ctx: CodeGenContext) (binding: IRBinding) (builder: IRBuilde
             | Some s -> s
             | None -> []
         let code = elemErrCode @ keyErrCode @ [sprintf "%s// sort: stable_sort on permutation, eager materialization" ind] @ (matStmts |> List.map (fun s -> ind + s))
+        let ctx' = addVarName binding.Id name ctx
+        (code, ctx')
+
+    | IRTranspose (arrExpr, d1, d2) ->
+        // transpose(array, [d1, d2]): hard transpose — allocate a fresh pool at
+        // the swapped extents and copy with axes d1/d2 exchanged. Eager
+        // materialization (same phase-1 strategy as sort); the result is an
+        // independent array with no aliasing back to the source. TypeCheck has
+        // already verified both axes are arity-1 SymNone and in range.
+        let (elemET, elemErrCode) = inferElemTypeStrict ctx ind arrExpr "transpose"
+        let elemStr = elemTypeToCpp elemET
+        let matStmts =
+            match materializeInlineForm emptySubst ctx.VarNames name elemStr binding.Value with
+            | Some s -> s
+            | None -> []
+        let code = elemErrCode @ [sprintf "%s// transpose: hard (swapped-extent alloc + axis-swapped copy)" ind] @ (matStmts |> List.map (fun s -> ind + s))
+        let ctx' = addVarName binding.Id name ctx
+        (code, ctx')
+    
+    | IRDecompact (arrExpr, d) ->
+        // decompact(array, d): pull the compact component at dim d out as a
+        // free Idx. Hard materialization — allocate a fresh dense pool and
+        // scatter the canonical (triangular-packed) source elements into all
+        // of the decompacted component's image positions, applying the per-
+        // class transform (Sym copy / Antisym sign + zero diagonal / Hermitian
+        // conj). TypeCheck has verified dim d targets a compact slot and that
+        // the Antisym middle-peel case is excluded.
+        let (elemET, elemErrCode) = inferElemTypeStrict ctx ind arrExpr "decompact"
+        let elemStr = elemTypeToCpp elemET
+        let matStmts =
+            match materializeInlineForm emptySubst ctx.VarNames name elemStr binding.Value with
+            | Some s -> s
+            | None -> []
+        let code = elemErrCode @ [sprintf "%s// decompact: hard (dense alloc + symmetry-expanding scatter)" ind] @ (matStmts |> List.map (fun s -> ind + s))
+        let ctx' = addVarName binding.Id name ctx
+        (code, ctx')
+    
+    | IRArrayNegate arrExpr | IRArrayConjugate arrExpr ->
+        // Whole-array eager negate/conjugate (the cheap intra-group transposes).
+        // Type-preserving: same-shape alloc + flat contiguous-pool transform.
+        let isConj = (match binding.Value with IRArrayConjugate _ -> true | _ -> false)
+        let label = if isConj then "conjugate" else "negate"
+        let (elemET, elemErrCode) = inferElemTypeStrict ctx ind arrExpr (sprintf "array_%s" label)
+        let elemStr = elemTypeToCpp elemET
+        let matStmts =
+            match materializeInlineForm emptySubst ctx.VarNames name elemStr binding.Value with
+            | Some s -> s
+            | None -> []
+        let code = elemErrCode @ [sprintf "%s// array_%s: whole-array eager transform (same-shape alloc + pool loop)" ind label] @ (matStmts |> List.map (fun s -> ind + s))
+        let ctx' = addVarName binding.Id name ctx
+        (code, ctx')
+
+    | IRGram (_, _, _) ->
+        // gram(A, B) = A * B^H. Materialized as a triangular (same-array,
+        // symmetric/Hermitian) or full (distinct, dense) scatter with an inner
+        // contracted-axis reduction. The shared helper emits the statement form.
+        let elemStr =
+            match binding.Type with
+            | ArrayElem at -> irTypeToCpp at.ElemType
+            | _ -> "double"
+        let matStmts =
+            match materializeInlineForm emptySubst ctx.VarNames name elemStr binding.Value with
+            | Some s -> s
+            | None -> []
+        let code = [sprintf "%s// gram: A * B^H (Gram product)" ind] @ (matStmts |> List.map (fun s -> ind + s))
         let ctx' = addVarName binding.Id name ctx
         (code, ctx')
     
@@ -5233,7 +6301,7 @@ let genFuncBody (ctx: CodeGenContext) (builder: IRBuilder) (names: Map<IRId, str
             let code = genApplyCombinator bodyCtx varName info builder
             currentNames <- Map.add id varName currentNames
             code
-        | IRMask _ | IRMaskWithSet _ | IRIntersect _ | IRUnion _ | IRSort _ | IRUnique _ ->
+        | IRMask _ | IRMaskWithSet _ | IRIntersect _ | IRUnion _ | IRSort _ | IRUnique _ | IRTranspose _ | IRDecompact _ | IRArrayNegate _ | IRArrayConjugate _ | IRGram _ ->
             // Phase C lift pass can place an inline form as a let value at
             // function-body level. The same materialization helper used by
             // exprToCpp's IRLet (for kernel-body IIFEs) produces format-
@@ -5682,7 +6750,16 @@ let genPrintArraySymAware (name: string) (indexTypes: IRIndexType list) : string
     let dims =
         indexTypes |> List.fold (fun (acc, dimIdx) idx ->
             let arity = max 1 idx.Arity
-            let isSym = idx.Symmetry = SymSymmetric || idx.Symmetry = SymAntisymmetric
+            let isSym = idx.Symmetry = SymSymmetric || idx.Symmetry = SymAntisymmetric || idx.Symmetry = SymHermitian
+            // Antisymmetric storage is STRICT (i < j < ...): each successive
+            // level in the group loses one more slot than the symmetric
+            // (i <= j) case. The writer applies this as StrictOffset=1 per
+            // triangular antisym level (genLoopHeader / IR strictOffset). The
+            // reader must mirror it exactly, or it walks one element past the
+            // end of each strict-packed row into adjacent/garbage memory —
+            // precisely the antisym-Reynolds value mismatch. Symmetric stays
+            // strictConst = 0 (left-justified bound n - i).
+            let strictConst = if idx.Symmetry = SymAntisymmetric then 1 else 0
             let groupDims =
                 [0 .. arity - 1] |> List.map (fun a ->
                     let loopVar = if dimIdx + a < loopVarNames.Length then loopVarNames.[dimIdx + a] else sprintf "d%d" (dimIdx + a)
@@ -5690,7 +6767,10 @@ let genPrintArraySymAware (name: string) (indexTypes: IRIndexType list) : string
                         if isSym && a > 0 then
                             [0 .. a - 1] |> List.map (fun prev -> loopVarNames.[dimIdx + prev])
                         else []
-                    (loopVar, dimIdx + a, offsets))
+                    // Strict offset applies on every group level beyond the
+                    // first (a > 0): level a subtracts a * strictConst.
+                    let strict = if a > 0 then a * strictConst else 0
+                    (loopVar, dimIdx + a, offsets, strict))
             (acc @ groupDims, dimIdx + arity)
         ) ([], 0) |> fst
     let rank = dims.Length
@@ -5702,17 +6782,23 @@ let genPrintArraySymAware (name: string) (indexTypes: IRIndexType list) : string
             sprintf "    cout << \"%s = [\";" name
             sprintf "    bool %s = true;" firstVar ]
         let loops =
-            dims |> List.map (fun (loopVar, dimIdx, offsets) ->
-                let indent = "    " + String.replicate (dims |> List.findIndex (fun (v,_,_) -> v = loopVar)) "    "
+            dims |> List.map (fun (loopVar, dimIdx, offsets, strict) ->
+                let indent = "    " + String.replicate (dims |> List.findIndex (fun (v,_,_,_) -> v = loopVar)) "    "
+                // Bound = extents[d] - (prior loop vars) - (strict constant).
+                // For a free dim both are empty/zero -> bare extent. For a
+                // symmetric group level -> extent - priorVars. For an
+                // antisymmetric group level -> extent - priorVars - a (strict).
+                let subParts =
+                    offsets @ (if strict > 0 then [string strict] else [])
                 let bound =
-                    match offsets with
+                    match subParts with
                     | [] -> sprintf "%s.extents[%d]" name dimIdx
                     | _ ->
-                        let sub = offsets |> String.concat " - "
+                        let sub = subParts |> String.concat " - "
                         sprintf "%s.extents[%d] - %s" name dimIdx sub
                 sprintf "%sfor (size_t %s = 0; %s < %s; %s++) {" indent loopVar loopVar bound loopVar)
         let innerIndent = "    " + String.replicate rank "    "
-        let idx = dims |> List.map (fun (v,_,_) -> sprintf "[%s]" v) |> String.concat ""
+        let idx = dims |> List.map (fun (v,_,_,_) -> sprintf "[%s]" v) |> String.concat ""
         let inner = [
             sprintf "%sif (!%s) cout << \", \";" innerIndent firstVar
             sprintf "%s%s = false;" innerIndent firstVar
@@ -5780,7 +6866,7 @@ let genPrintStatements (modul: IRModule) : string list =
             match IR.stripUnits b.Type with
             | ArrayElem arr ->
                 arr.IndexTypes |> List.exists (fun idx ->
-                    idx.Symmetry = SymSymmetric || idx.Symmetry = SymAntisymmetric)
+                    idx.Symmetry = SymSymmetric || idx.Symmetry = SymAntisymmetric || idx.Symmetry = SymHermitian)
             | _ -> false
         
         if isPrintable then

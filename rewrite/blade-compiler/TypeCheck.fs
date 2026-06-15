@@ -1831,6 +1831,11 @@ let rec private revalidateBodyTagChecks (env: TypeEnv) (expr: TypedExpr) : TypeR
         | TExprMask (a, p) | TExprIntersect (a, p) | TExprUnion (a, p)
         | TExprGroupBy (a, p) | TExprSort (a, p) | TExprReduce (a, p) -> [a; p]
         | TExprUnique a -> [a]
+        | TExprTranspose (a, _, _) -> [a]
+        | TExprDecompact (a, _) -> [a]
+        | TExprGram (l, r, _) -> [l; r]
+        | TExprArrayNegate a -> [a]
+        | TExprArrayConjugate a -> [a]
         | TExprContains (a, v) -> [a; v]
         | TExprGroupKeys keys -> keys
         | TExprStruct (_, fields) -> fields |> List.map snd
@@ -1908,8 +1913,29 @@ let rec inferExpr (env: TypeEnv) (expr: Expr) : TypeResult<TypedExpr> =
     // ---- Unary operations ----
     | ExprUnaryOp (op, operand) ->
         inferExpr env operand |> Result.bind (fun tOp ->
-            let resTy = match op with OpNot -> IRTScalar ETBool | OpNeg -> tOp.Type
-            Ok (mkTyped (TExprUnaryOp (op, tOp)) resTy))
+            // OpConj (conj): result type equals operand type. Conjugate of a
+            // complex is complex; of a real, the identity (real). Permissive,
+            // mirroring OpNeg — no type guard. Codegen emits std::conj only for
+            // complex element types; reals pass through unchanged.
+            //
+            // WHOLE-ARRAY conj: when the operand is an array (not a scalar), the
+            // scalar IRUnaryOp(IRConj, _) path is wrong — it would emit a scalar
+            // std::conj against an array value and fall through to a bare
+            // passthrough (losing the Array<> wrapper and applying no conjugation).
+            // Route it to TExprArrayConjugate, the whole-array eager conjugate
+            // (same node the Hermitian-transpose TConjugatedCopy path uses), which
+            // materializes a fresh same-shape array with a pool conjugation loop.
+            // This is what makes `hermitian(A) = conj(transpose(A,[0,1]))` work,
+            // and it fixes surface `conj(wholeArray)` generally.
+            match op, tOp.Type with
+            | OpConj, ArrayElem _ ->
+                Ok (mkTyped (TExprArrayConjugate tOp) tOp.Type)
+            | _ ->
+                let resTy = match op with
+                            | OpNot -> IRTScalar ETBool
+                            | OpNeg -> tOp.Type
+                            | OpConj -> tOp.Type
+                Ok (mkTyped (TExprUnaryOp (op, tOp)) resTy))
 
     // ---- Module-qualified value/function: `Math.pi`, `MathLib.double(x)` ----
     // These two cases must precede the method-call and struct-field handlers
@@ -2437,6 +2463,218 @@ let rec inferExpr (env: TypeEnv) (expr: Expr) : TypeResult<TypedExpr> =
                     }
                     let resultType = mkArrayArrow [resultIdx] arrTy.ElemType None
                     Ok (mkTyped (TExprSort (tArr, tKey)) resultType))))
+
+    | ExprTranspose (array, d1, d2) ->
+        inferExpr env array |> Result.bind (fun tArr ->
+            requireArrayArg env tArr "transpose" |> Result.bind (fun arrTy ->
+                // Map a logical DIMENSION index to its INDEX-TYPE slot. A slot
+                // of arity k occupies k consecutive dimensions; we walk the
+                // slot list accumulating arities until the target dimension
+                // falls inside a slot. Returns (slotIndex, slotArity, dimWithinSlot).
+                // For the first cut every reachable slot is arity-1, so this is
+                // identity — but writing it properly keeps the gate correct in
+                // the presence of compound groups elsewhere in the array.
+                let totalDims = arrTy.IndexTypes |> List.sumBy (fun ix -> max 1 ix.Arity)
+                let dimToSlot (d: int) : Result<int * int * int, TypeError> =
+                    if d < 0 || d >= totalDims then
+                        Error (Other (sprintf "transpose: axis %d is out of range for a rank-%d array (valid axes 0..%d)" d totalDims (totalDims - 1)))
+                    else
+                        let rec walk slotIdx acc remaining =
+                            match remaining with
+                            | [] -> Error (Other (sprintf "transpose: axis %d out of range (internal)" d))
+                            | (ix: IRIndexType) :: rest ->
+                                let ar = max 1 ix.Arity
+                                if d < acc + ar then Ok (slotIdx, ar, d - acc)
+                                else walk (slotIdx + 1) (acc + ar) rest
+                        walk 0 0 arrTy.IndexTypes
+                if d1 = d2 then
+                    Error (Other (sprintf "transpose: the two axes must differ (got [%d, %d]); swapping an axis with itself is the identity" d1 d2))
+                else
+                    dimToSlot d1 |> Result.bind (fun (slot1, ar1, _) ->
+                    dimToSlot d2 |> Result.bind (fun (slot2, ar2, _) ->
+                        let ix1 = arrTy.IndexTypes.[slot1]
+                        let ix2 = arrTy.IndexTypes.[slot2]
+                        if slot1 = slot2 then
+                            // Both dimensions lie INSIDE one index type — an intra-
+                            // group swap. The index-type class decides the behavior
+                            // (storage-preserving): symmetric -> identity, antisym ->
+                            // whole-array negation, hermitian -> whole-array
+                            // conjugation. No decompaction, no dense blow-up.
+                            (match (behaviorOf ix1).TransposeWithin () with
+                             | TIdentity ->
+                                // A(i,j) = A(j,i): storage unchanged. Erase the
+                                // transpose; the result IS the source array.
+                                Ok tArr
+                             | TNegatedCopy ->
+                                Ok (mkTyped (TExprArrayNegate tArr) tArr.Type)
+                             | TConjugatedCopy ->
+                                Ok (mkTyped (TExprArrayConjugate tArr) tArr.Type)
+                             | TDataMove ->
+                                // A plain (SymNone) slot of arity >= 2 swapped
+                                // within itself: a genuine dimensional swap inside a
+                                // rectangular compound. Not yet emitted (the data-
+                                // move materializer handles cross-slot rank-1 only).
+                                Error (Other (sprintf "transpose: swapping two dimensions within a single rectangular index group (arity %d) is not yet supported." ar1))
+                             | TRequiresDecompaction reason ->
+                                Error (Other (sprintf "transpose: %s" reason)))
+                        else
+                            // Different slots. The structure-preserving case is two
+                            // plain (arity-1 SymNone) axes -> physical data move.
+                            // Anything else means one axis is bound in a compact
+                            // group and the other is outside it: swapping them would
+                            // break that group's symmetry. That is a structure-
+                            // changing operation requiring explicit decompaction
+                            // (decompact then transpose), not a silent transpose.
+                            let plain ar (ix: IRIndexType) = ar = 1 && ix.Symmetry = SymNone
+                            if plain ar1 ix1 && plain ar2 ix2 then
+                                let swapped =
+                                    arrTy.IndexTypes
+                                    |> List.mapi (fun i ix ->
+                                        if i = slot1 then arrTy.IndexTypes.[slot2]
+                                        elif i = slot2 then arrTy.IndexTypes.[slot1]
+                                        else ix)
+                                let resultType = mkArrayArrow swapped arrTy.ElemType None
+                                Ok (mkTyped (TExprTranspose (tArr, d1, d2)) resultType)
+                            else
+                                let culprit, cd, car, cix =
+                                    if not (plain ar1 ix1) then "first", d1, ar1, ix1 else "second", d2, ar2, ix2
+                                Error (Other (sprintf "transpose: the %s axis (dim %d) is bound in a %A index group (arity %d), and the other axis is outside it. Swapping across a group boundary would decompose the group's symmetry. Decompact the axis first (decompact then transpose)." culprit cd cix.Symmetry car))))))
+
+    | ExprGram (leftE, rightE) ->
+        // gram(A, B) = A * B^H:  result[i][j] = sum_k A[i][k] * conj(B[j][k])
+        // A : m x n, B : p x n (shared contracted dim n) -> result : m x p.
+        // Element type: complex iff EITHER operand is complex (conj is the
+        // identity on reals, so a real/complex mix still conjugates correctly).
+        // Symmetry: when A and B are the SAME array (syntactically the same
+        // variable -> conservative, never claims false symmetry), the result is
+        // square (m = p) and SymHermitian (complex) / SymSymmetric (real),
+        // computed by the triangular upper-half scatter. Otherwise it is a
+        // general dense m x p array (SymNone).
+        inferExpr env leftE |> Result.bind (fun tL ->
+        inferExpr env rightE |> Result.bind (fun tR ->
+            requireArrayArg env tL "gram" |> Result.bind (fun lTy ->
+            requireArrayArg env tR "gram" |> Result.bind (fun rTy ->
+                let lDims = lTy.IndexTypes |> List.sumBy (fun ix -> max 1 ix.Arity)
+                let rDims = rTy.IndexTypes |> List.sumBy (fun ix -> max 1 ix.Arity)
+                if lDims <> 2 || rDims <> 2 then
+                    Error (Other (sprintf "gram(A, B): both operands must be rank-2 (matrix) arrays; got rank-%d and rank-%d. gram contracts the trailing axis: A (m x n), B (p x n) -> m x p." lDims rDims))
+                else
+                    // Extents: outer (m / p) and inner contracted (n) per operand.
+                    let lOuter = lTy.IndexTypes.[0].Extent
+                    let lInner = lTy.IndexTypes.[1].Extent
+                    let rOuter = rTy.IndexTypes.[0].Extent
+                    let rInner = rTy.IndexTypes.[1].Extent
+                    // Static contracted-dim mismatch is a hard error; otherwise trust.
+                    let innerMismatch =
+                        match tryEvalIntIR lInner, tryEvalIntIR rInner with
+                        | Some a, Some b -> a <> b
+                        | _ -> false
+                    if innerMismatch then
+                        Error (Other "gram(A, B): the contracted (trailing) dimensions of A and B must match.")
+                    else
+                        // Element type join: complex if either operand is complex.
+                        let isComplexElem (t: IRType) =
+                            match t with
+                            | IRTScalar (ETComplex64 | ETComplex128) -> true
+                            | _ -> false
+                        let outElem =
+                            if isComplexElem lTy.ElemType then lTy.ElemType
+                            elif isComplexElem rTy.ElemType then rTy.ElemType
+                            else lTy.ElemType
+                        let isComplex = isComplexElem outElem
+                        // Conservative same-array test: both bare vars, same name.
+                        let sameArray =
+                            match tL.Kind, tR.Kind with
+                            | TExprVar (n1, _, _), TExprVar (n2, _, _) -> n1 = n2
+                            | _ -> false
+                        let freshSlot (ext: IRExpr) (sym: SymmetryClass) (arity: int) =
+                            { Id = env.Builder.FreshId(); Arity = arity; Extent = ext
+                              Symmetry = sym; Tag = None; Kind = SDimension; Dependencies = [] }
+                        let resultType =
+                            if sameArray then
+                                // Square m x m, compact group of arity 2 carrying the
+                                // (anti-)symmetry: Hermitian (complex) or symmetric.
+                                let sym = if isComplex then SymHermitian else SymSymmetric
+                                let grp = { (freshSlot lOuter sym 2) with Extent = lOuter }
+                                mkArrayArrow [grp] outElem None
+                            else
+                                // General dense m x p (two independent plain axes).
+                                let s0 = freshSlot lOuter SymNone 1
+                                let s1 = freshSlot rOuter SymNone 1
+                                mkArrayArrow [s0; s1] outElem None
+                        Ok (mkTyped (TExprGram (tL, tR, sameArray)) resultType)))))
+
+    | ExprDecompact (array, d) ->
+        inferExpr env array |> Result.bind (fun tArr ->
+            requireArrayArg env tArr "decompact" |> Result.bind (fun arrTy ->
+                // Resolve the logical dimension d to (slotIndex, slotArity,
+                // posInSlot). A compact slot of arity r spans r consecutive
+                // dimensions; posInSlot in [0, r) says which component within
+                // the group d targets — that position decides peel-first /
+                // peel-last / peel-middle.
+                let totalDims = arrTy.IndexTypes |> List.sumBy (fun ix -> max 1 ix.Arity)
+                let dimToSlot (dd: int) : Result<int * int * int, TypeError> =
+                    if dd < 0 || dd >= totalDims then
+                        Error (Other (sprintf "decompact: dimension %d is out of range for a rank-%d array (valid dims 0..%d)" dd totalDims (totalDims - 1)))
+                    else
+                        let rec walk slotIdx acc remaining =
+                            match remaining with
+                            | [] -> Error (Other (sprintf "decompact: dimension %d out of range (internal)" dd))
+                            | (ix: IRIndexType) :: rest ->
+                                let ar = max 1 ix.Arity
+                                if dd < acc + ar then Ok (slotIdx, ar, dd - acc)
+                                else walk (slotIdx + 1) (acc + ar) rest
+                        walk 0 0 arrTy.IndexTypes
+                dimToSlot d |> Result.bind (fun (slot, r, posInSlot) ->
+                    let ix = arrTy.IndexTypes.[slot]
+                    if r < 2 || ix.Symmetry = SymNone then
+                        Error (Other (sprintf "decompact: dimension %d is a plain (arity-1, non-symmetric) axis; there is nothing to decompact. decompact pulls a component out of a compact group (SymIdx/AntisymIdx/HermitianIdx)." d))
+                    elif arrTy.IndexTypes.Length <> 1 then
+                        // Codegen scope: the compact group must be the array's
+                        // sole index slot. Decompact with surrounding free
+                        // dimensions needs the scatter wrapped in the untouched-
+                        // dim loop product; deferred to a later increment.
+                        Error (Other (sprintf "decompact: surrounding index dimensions are not yet supported by codegen (handles a compact group as the sole index slot). The array here has %d index slots." arrTy.IndexTypes.Length))
+                    elif ix.Symmetry = SymHermitian && r >= 3 then
+                        // Rank-2 Hermitian (the only Hermitian arrays a producer
+                        // makes today, via gram) dissolves to a dense n×n with the
+                        // lower triangle conjugated — handled below. Rank >= 3
+                        // Hermitian has no producer yet and its compact-residual
+                        // conjugate semantics aren't worked out, so reject.
+                        Error (Other "decompact: rank >= 3 SymHermitian is not yet supported (no producer exists for rank >= 3 Hermitian arrays; gram produces rank-2 Hermitian, which decompacts to a dense conjugate-mirrored matrix).")
+                    else
+                        // SYMMETRIC decompact: general fission, any rank, any cut
+                        // (peel-first/last/middle), via the gather materializer.
+                        // ANTISYMMETRIC decompact: rank 2 dissolves to dense n×n;
+                        // rank >= 3 BOUNDARY cuts leave one residual antisym group,
+                        // now allocatable via the per-group-strict mask
+                        // (allocate_strict) with the sign applied lazily on read
+                        // (canon_* transform). Codegen-supported, so not rejected.
+                        // Build the replacement slots: left remainder (arity
+                        // posInSlot) + extracted Idx + right remainder (arity
+                        // r-1-posInSlot). Each remainder of arity a>=2 becomes a
+                        // fresh SymIdx<a> of the SAME symmetry class (fresh Id =
+                        // nominally distinct, since the two halves' symmetries are
+                        // now independent relations); a=1 degenerates to a plain
+                        // Idx; a=0 is omitted. For the v1 r=2 case this always
+                        // yields two plain Idx (the group fully dissolves).
+                        let mkRemainder (a: int) : IRIndexType list =
+                            if a <= 0 then []
+                            elif a = 1 then
+                                [ { ix with Id = env.Builder.FreshId(); Arity = 1; Symmetry = SymNone } ]
+                            else
+                                [ { ix with Id = env.Builder.FreshId(); Arity = a } ]
+                        let extracted =
+                            { ix with Id = env.Builder.FreshId(); Arity = 1; Symmetry = SymNone }
+                        let leftRem = mkRemainder posInSlot
+                        let rightRem = mkRemainder (r - 1 - posInSlot)
+                        let replacement = leftRem @ [extracted] @ rightRem
+                        let newIndexTypes =
+                            arrTy.IndexTypes
+                            |> List.mapi (fun i s -> (i, s))
+                            |> List.collect (fun (i, s) -> if i = slot then replacement else [s])
+                        let resultType = mkArrayArrow newIndexTypes arrTy.ElemType None
+                        Ok (mkTyped (TExprDecompact (tArr, d)) resultType))))
 
     // reduce(array, kernel) — T/S reduction primitive.
     // Consumes the innermost dimension via a binary kernel. For rank-1 input,
@@ -3462,7 +3700,7 @@ and buildApplyInfo (env: TypeEnv)
                 // The input arrays' elem types are already IRType post-B2.
                 arrayTypes |> List.tryPick (fun at -> Some at.ElemType)
                 |> Option.defaultValue (IRTScalar ETFloat64)
-        let outputType = deduceOutputType arrayTypes identities commGroups sDimsPerArray kernelTDims outputElemType env.Builder
+        let outputType = deduceOutputType arrayTypes identities commGroups sDimsPerArray kernelTDims outputElemType isAntisym env.Builder
 
         let reynoldsSpeedup =
             if isReynolds then
@@ -4771,6 +5009,11 @@ let rec zonkExpr (subst: Subst) (expr: TypedExpr) : TypedExpr =
         | TExprGroupKeys ks -> TExprGroupKeys (List.map z ks)
         | TExprSort (a, k) -> TExprSort (z a, z k)
         | TExprReduce (a, k) -> TExprReduce (z a, z k)
+        | TExprTranspose (a, d1, d2) -> TExprTranspose (z a, d1, d2)
+        | TExprDecompact (a, d) -> TExprDecompact (z a, d)
+        | TExprGram (l, r, s) -> TExprGram (z l, z r, s)
+        | TExprArrayNegate a -> TExprArrayNegate (z a)
+        | TExprArrayConjugate a -> TExprArrayConjugate (z a)
         | TExprExtents a -> TExprExtents (z a)
         | TExprZero -> TExprZero
         | TExprReplicate (c, b) -> TExprReplicate (z c, z b)

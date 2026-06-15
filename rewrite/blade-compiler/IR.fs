@@ -319,7 +319,7 @@ and IRBinOpMode =
 
 /// Unary operations
 and IRUnaryOp =
-    | IRNeg | IRNot
+    | IRNeg | IRNot | IRConj
 
 /// IR Expressions - SSA-like representation
 and IRExpr =
@@ -404,7 +404,11 @@ and IRExpr =
     | IRZip of IRExpr list
     | IRAlign of arrays: IRExpr list * spec: AlignSpec
     | IRStack of IRExpr list
-    | IRTranspose of array: IRExpr * perm: int list
+    | IRTranspose of array: IRExpr * dim1: int * dim2: int
+    | IRDecompact of array: IRExpr * dim: int
+    | IRGram of left: IRExpr * right: IRExpr * isSameArray: bool  // A * B^H contraction; symmetric/Hermitian when isSameArray
+    | IRArrayNegate of array: IRExpr     // whole-array elementwise negation (eager); type-preserving
+    | IRArrayConjugate of array: IRExpr  // whole-array elementwise conjugation (eager); type-preserving
     | IRReverse of array: IRExpr * dim: int
     | IRShift of array: IRExpr * dim: int * offset: IRExpr * boundary: BoundaryMode
     | IRDiag of array: IRExpr
@@ -880,8 +884,71 @@ let mkArrayLike (arr: IRArrayType) : IRType =
         mkArrayArrow arr.IndexTypes arr.ElemType arr.Identity
 
 // ============================================================================
-// IRType normalization (Segment 6 — Path B-nested)
+// Type-pattern matching (concrete + abstract) — shared by the type-structure
+// test harness and (eventually) the language server's "type of expression"
+// queries and surface type-ascription checks.
 // ============================================================================
+//
+// `matchesTypePattern pattern actual` decides whether `actual` is an INSTANCE
+// of `pattern`. The pattern is the asserted/expected type; it may be CONCRETE
+// (fully specified — then this is strict structural equality on the dimensions
+// that define a type's identity) or ABSTRACT (containing holes that match any
+// concrete filling). This is deliberately NOT `unify`:
+//   - `unify` is symmetric and treats SymNone as compatible with any symmetry
+//     (correct for inference, wrong for an assertion — it would accept a plain
+//     Idx where AntisymIdx<2> is asserted). Here the pattern's symmetry/arity
+//     must match EXACTLY unless that position is a hole.
+//   - raw structural `=` is too strict: it compares extents, inference-var ids,
+//     and synthetic `__` tags, none of which are part of a type's identity.
+//
+// Holes in the PATTERN (the abstract positions, each matching anything):
+//   - IRTInfer _            : a whole-type hole (element type, etc.)
+//   - IRTNat None           : an abstract type-level nat (extent placeholder)
+//   - index Extent of (IRTInfer _ / IRLit-less)  : abstract extent — IGNORED
+//     for matching regardless (extents are runtime values, never type identity)
+// Everything else in the pattern is matched concretely against `actual`.
+let rec matchesTypePattern (pattern: IRType) (actual: IRType) : bool =
+    match pattern, actual with
+    // Whole-type hole in the pattern matches anything.
+    | IRTInfer _, _ -> true
+    | IRTScalar e1, IRTScalar e2 -> e1 = e2
+    | IRTNamed n1, IRTNamed n2 -> n1 = n2
+    | IRTUnit, IRTUnit -> true
+    | IRTNat _, IRTNat _ -> true       // nat-vs-nat: value is not type identity
+    | ArrayElem p, ArrayElem a ->
+        // Rank and virtual character are identity.
+        p.IndexTypes.Length = a.IndexTypes.Length
+        && p.IsVirtual = a.IsVirtual
+        && List.forall2 matchesIndexPattern p.IndexTypes a.IndexTypes
+        && matchesTypePattern p.ElemType a.ElemType
+    | IRTTuple ps, IRTTuple as_ ->
+        ps.Length = as_.Length && List.forall2 matchesTypePattern ps as_
+    | FuncElem (pa, pr), FuncElem (aa, ar) ->
+        pa.Length = aa.Length
+        && List.forall2 matchesTypePattern pa aa
+        && matchesTypePattern pr ar
+    | IRTComputation p, IRTComputation a -> matchesTypePattern p a
+    | _ -> pattern = actual   // fallback: exact structural equality
+
+/// Per-index pattern match. Arity and Symmetry are type identity and must match
+/// exactly UNLESS the pattern leaves them abstract:
+///   - Arity = 0 in the pattern is the "any arity" hole.
+///   - A user-meaningful Tag in the pattern must match; a None tag or a
+///     synthetic `__` tag in the pattern is treated as "don't care".
+/// Extent and Dependencies are NEVER compared (runtime / iteration detail).
+/// Kind (S/T dimension) IS compared (it's part of how the dimension behaves).
+and matchesIndexPattern (p: IRIndexType) (a: IRIndexType) : bool =
+    let arityOk = p.Arity = 0 || p.Arity = a.Arity
+    let symOk = p.Symmetry = a.Symmetry
+    let kindOk = p.Kind = a.Kind
+    let tagOk =
+        match p.Tag with
+        | None -> true
+        | Some t when t.StartsWith("__") -> true
+        | Some t -> (a.Tag = Some t)
+    arityOk && symOk && kindOk && tagOk
+
+
 //
 // The IR admits two definitionally-equivalent encodings of the same type
 // (formalism §5.2):
@@ -1560,6 +1627,16 @@ type IRProgram = {
     Modules: IRModule list
 }
 
+/// Query: the fully-deduced IR type of a top-level binding by name, searched
+/// across all modules of a lowered program. Shallow accessor intended for reuse
+/// by the language server (hover / inline type) and the type-structure test
+/// harness. Returns None if no binding with that name exists.
+let bindingTypeByName (program: IRProgram) (name: string) : IRType option =
+    program.Modules
+    |> List.tryPick (fun m ->
+        m.Bindings |> List.tryFind (fun b -> b.Name = name) |> Option.map (fun b -> b.Type))
+
+
 // ============================================================================
 // IR Construction Helpers
 // ============================================================================
@@ -1637,6 +1714,14 @@ let mkLambdaCallable
 /// According to formalism section 10.9:
 /// 1. Group arrays by identity (consecutive identical arrays)
 /// 2. For each group: if comm + arity > 1, use SymIdx; else Idx
+///    (AntisymIdx instead of SymIdx when isAntisym is set — Reynolds
+///     antisymmetrization over a commutative same-array group produces a
+///     strictly-triangular antisymmetric output, NOT a symmetric one. The
+///     antisymmetric output stores C(n,r) strict tuples with no diagonal,
+///     versus C(n+r-1,r) for symmetric. This is what makes the
+///     allocate_antisym storage path reachable from the common Reynolds use
+///     case; without it a same-array reynolds(f, Antisymmetric) would deduce
+///     symmetric storage (wrong cardinality, spurious zero diagonal).)
 /// 3. Concatenate S-dims from all groups
 /// 4. Add T-dims from kernel output
 let deduceOutputType 
@@ -1646,6 +1731,7 @@ let deduceOutputType
     (sDimsPerArray: int list)
     (kernelTDims: IRIndexType list)
     (elemType: IRType)
+    (isAntisym: bool)
     (builder: IRBuilder) : IRType =
     
     if arrayTypes.IsEmpty then IRTUnit
@@ -1684,16 +1770,20 @@ let deduceOutputType
                         indices |> List.forall (fun i -> List.contains i cg))
                 
                 if inCommGroup && arity > 1 then
-                    // Commutative group: create symmetric index with higher arity
+                    // Commutative group: create a higher-arity index over the
+                    // group. Symmetric by default; antisymmetric when this
+                    // application is a Reynolds antisymmetrization (isAntisym).
                     // Takes S-dims from first member, uses arity = group size
                     match groupMembers with
                     | [] -> []
                     | (_, arrTy, numSDims) :: _ ->
+                        let groupSymmetry =
+                            if isAntisym then SymAntisymmetric else SymSymmetric
                         let sDimIndices = arrTy.IndexTypes |> List.take (min numSDims arrTy.IndexTypes.Length)
                         sDimIndices |> List.map (fun idx ->
                             { idx with 
                                 Arity = arity
-                                Symmetry = SymSymmetric
+                                Symmetry = groupSymmetry
                                 Id = builder.FreshId() })
                 else
                     // Non-commutative: each member contributes its own S-dims
@@ -1980,7 +2070,13 @@ let buildSymmVec (outputType: IRType) : int list =
         
         for idx in arr.IndexTypes do
             for arityIdx in 0 .. idx.Arity - 1 do
-                let isSymmetric = idx.Symmetry = SymSymmetric && idx.Arity > 1
+                // Hermitian shares the symmetric storage layout: the upper
+                // triangle is stored compactly (same {1,1,..} mask as SymIdx),
+                // and the lower triangle is recovered by conjugation at read
+                // time. So Hermitian groups identically to symmetric here; only
+                // the READ path differs (std::conj on lower-triangle access).
+                let isSymmetric =
+                    (idx.Symmetry = SymSymmetric || idx.Symmetry = SymHermitian) && idx.Arity > 1
                 if isSymmetric && arityIdx > 0 then
                     // Continue same group
                     symmVec <- symmVec @ [groupNum]
@@ -1994,6 +2090,298 @@ let buildSymmVec (outputType: IRType) : int list =
                 prevSymm <- Some isSymmetric
         symmVec
     | _ -> []
+
+/// Like buildSymmVec, but groups ALL compact classes (symmetric, Hermitian, AND
+/// antisymmetric) into shared storage groups, and returns a parallel per-group
+/// STRICT mask. buildSymmVec deliberately treats antisym as non-symmetric (one
+/// singleton group per dim) because the legacy antisym path used a SEPARATE
+/// all-spanning allocate_antisym. For the PER-GROUP-STRICT path we instead want
+/// an antisym group to be one compact SYMM group (so storage shrinks) with its
+/// strictness carried in STRICT. Returns (symmVec, strictVec) of equal length:
+///   symmVec[d]   = storage group number at dim d (adjacent-equal = same group)
+///   strictVec[d] = 1 if that group drops its diagonal (antisym), else 0
+/// A dense/freed axis (arity-1 SymNone) is its own group with strict 0.
+let buildSymmVecWithStrict (outputType: IRType) : (int list * int list) =
+    match outputType with
+    | ArrayElem arr ->
+        let mutable symmVec = []
+        let mutable strictVec = []
+        let mutable groupNum = 1
+        let mutable prevCompact = None
+        for idx in arr.IndexTypes do
+            // All compact classes (sym/herm/antisym) form shrinking storage
+            // groups when arity > 1. Antisym differs only by its STRICT flag.
+            let isCompact =
+                (match idx.Symmetry with
+                 | SymSymmetric | SymAntisymmetric | SymHermitian -> true
+                 | SymNone -> false) && idx.Arity > 1
+            let isStrict = idx.Symmetry = SymAntisymmetric && idx.Arity > 1
+            for arityIdx in 0 .. idx.Arity - 1 do
+                if isCompact && arityIdx > 0 then
+                    symmVec <- symmVec @ [groupNum]
+                    strictVec <- strictVec @ [if isStrict then 1 else 0]
+                else
+                    if prevCompact = Some true && arityIdx = 0 then
+                        groupNum <- groupNum + 1
+                    symmVec <- symmVec @ [groupNum]
+                    strictVec <- strictVec @ [if isStrict then 1 else 0]
+                    if not isCompact then
+                        groupNum <- groupNum + 1
+                prevCompact <- Some isCompact
+        (symmVec, strictVec)
+    | _ -> ([], [])
+
+/// Storage allocation, derived from an output array's index TYPE (not from the
+/// kernel's Reynolds descriptor). The per-index-class allocator comes from
+/// IIndexTypeBehavior.AllocRoutine:
+///   - AllocDense / AllocSymmetric -> allocate<T, SYMM>(...)
+///       (SYMM = nullptr for dense, hoisted {1,1,..} vec for symmetric;
+///        Hermitian shares the symmetric path — same upper-triangle storage)
+///   - AllocAntisymmetric -> allocate_antisym<T>(...)  (strict simplex, no mask)
+///
+/// CRITICAL distinction from LoopNestCodeGen.IsAntisymmetric: that flag comes
+/// from the Reynolds descriptor and describes the COMPUTATION (sign alternation
+/// on permutation parity). It is orthogonal to STORAGE: a kernel may
+/// antisymmetrize its arithmetic while writing a rectangular output, or an
+/// antisymmetric-typed output may be filled by a non-Reynolds kernel. Allocation
+/// must key off storage, so it reads the output index type here.
+///
+/// The runtime allocate_antisym applies the strict shrink at EVERY pointer
+/// depth uniformly (no per-group mask), so it is only correct for a SINGLE
+/// antisymmetric index spanning all dimensions. A type annotation always
+/// produces exactly that shape, so a mixed antisym+free output cannot arise from
+/// the front end today. AllocUnsupported is returned defensively if one ever
+/// does, so callers fail loudly (no silent mis-allocation).
+// ============================================================================
+// Index-type behavior interface (the storage-class abstraction).
+//
+// Each index-type CLASS (Rectangular / Symmetric / Antisymmetric / Hermitian,
+// and later Compound / Tree / Graph / CG) populates one stateless behavior
+// object. The behavior is keyed on the index type's SymmetryClass and DERIVED,
+// never stored, so the class and its behavior cannot drift: change the
+// SymmetryClass and the behavior follows automatically (see `behaviorFor`).
+//
+// The methods return BACKEND-NEUTRAL descriptors (AllocSpec, TransposeBehavior),
+// never C++ strings — the IR stays backend-agnostic (a Python backend would
+// consume the same descriptors). A per-backend emitter (in CodeGen for C++)
+// turns the descriptors into concrete code. This mirrors how allocate/linearize
+// are pre-rolled runtime routines the codegen merely CALLS rather than computes.
+//
+// This is introduced ADDITIVELY here: the existing scattered `match Symmetry`
+// dispatch (emitAllocRhs, transpose typecheck, etc.) is migrated onto this
+// interface in subsequent steps, each verified against the test suite.
+// ============================================================================
+
+/// Names a runtime allocation routine + how its symmetry mask is supplied.
+/// Backend-neutral: the C++ emitter maps AllocDense/AllocSymmetric ->
+/// `allocate<T,SYMM>` and AllocAntisymmetric -> `allocate_antisym<T>`.
+type AllocSpec =
+    | AllocDense                       // rectangular: allocate<T, nullptr>
+    | AllocSymmetric                   // triangular upper: allocate<T, SYMM-vec>
+    | AllocAntisymmetric               // strict simplex: allocate_antisym<T>
+    | AllocPerGroupStrict of strict: int list
+                                       // mixed strictness across groups: a
+                                       // companion STRICT[] mask parallel to the
+                                       // SYMM-vec (1 = group drops its diagonal /
+                                       // strict, 0 = inclusive or dense). Emits
+                                       // allocate_strict<T, SYMM, STRICT>. Arises
+                                       // from antisym fission leaving a residual
+                                       // antisymmetric sub-group beside a freed
+                                       // dense axis (e.g. Idx -> AntisymIdx<2>).
+    | AllocUnsupported of reason: string
+
+/// Semantic result of transposing two dimensions that lie WITHIN one index
+/// type (an intra-type dimensional swap). Backend-neutral decision; the C++
+/// emitter realizes each (identity = return source; negated/conjugated = a
+/// same-shape copy via the corresponding runtime routine; data-move = the
+/// existing dense axis-swap copy).
+type TransposeBehavior =
+    | TIdentity                        // symmetric: storage unchanged, A(i,j)=A(j,i)
+    | TNegatedCopy                     // antisymmetric: whole-array sign flip
+    | TConjugatedCopy                  // hermitian: whole-array conjugation
+    | TDataMove                        // rectangular: physical axis swap (dense copy)
+    | TRequiresDecompaction of reason: string  // would break the symmetry relation
+
+/// How a compact group folds an arbitrary index sub-tuple to its canonical
+/// (stored) representative — the FOLD phase of a lazy read (formalism 4.16,
+/// 14.2). Backend-neutral; the C++ emitter realizes each as inline fold code.
+///   CanonNone    — rectangular / freed axis: indices are already canonical,
+///                  no reorder, always stored (identity fold).
+///   CanonSort    — symmetric / Hermitian: sort within the group, track swap
+///                  parity, always stored (diagonal kept).
+///   CanonSortStrict — antisymmetric: sort within the group, track parity, AND
+///                  return "not stored" (implicit zero) on any repeated index
+///                  (the dropped diagonal / strict-simplex storage).
+type CanonicalizeBehavior =
+    | CanonNone
+    | CanonSort
+    | CanonSortStrict
+
+/// What transform a lazy read applies to the fetched canonical value given the
+/// fold's swap parity — the TRANSFORM phase (formalism 4.16). Backend-neutral.
+///   TfIdentity         — symmetric / rectangular: value unchanged on swap.
+///   TfNegateOnSwap     — antisymmetric: negate when swap parity is odd.
+///   TfConjugateOnSwap  — Hermitian: conjugate when swap parity is odd
+///                        (conj_scalar is identity on real element types, so
+///                        Hermitian-of-real degenerates to symmetric for free).
+type ReadTransformBehavior =
+    | TfIdentity
+    | TfNegateOnSwap
+    | TfConjugateOnSwap
+
+/// The interface every index-type class populates. Stateless: one shared
+/// instance per class. Methods take the live IRIndexType (or relevant
+/// metadata) as arguments rather than caching it, so they always read current
+/// metadata and cannot go stale.
+type IIndexTypeBehavior =
+    /// Human-readable class name (diagnostics).
+    abstract member ClassName : string
+    /// The symmetry class this behavior implements (round-trips with behaviorFor).
+    abstract member Symmetry : SymmetryClass
+    /// Reject metadata that is contradictory for this class (smart-constructor
+    /// guard). Antisymmetric/Symmetric/Hermitian require arity >= 2; Hermitian
+    /// is rank-2 only; etc. Ok () means well-formed.
+    abstract member Validate : IRIndexType -> Result<unit, string>
+    /// Which runtime allocator to call for an array whose storage is governed
+    /// by this class.
+    abstract member AllocRoutine : AllocSpec
+    /// What an intra-type transpose of two of this class's dimensions does.
+    abstract member TransposeWithin : unit -> TransposeBehavior
+    /// How this class folds an index sub-tuple to its canonical stored form
+    /// (the FOLD phase of a lazy read). See CanonicalizeBehavior.
+    abstract member Canonicalize : unit -> CanonicalizeBehavior
+    /// What transform a lazy read applies to the fetched value given the fold's
+    /// swap parity (the TRANSFORM phase). See ReadTransformBehavior.
+    abstract member ReadTransform : unit -> ReadTransformBehavior
+
+/// Rectangular (no symmetry): dense storage, physical transpose.
+type private RectangularBehavior() =
+    interface IIndexTypeBehavior with
+        member _.ClassName = "Rectangular"
+        member _.Symmetry = SymNone
+        member _.Validate _ = Ok ()
+        member _.AllocRoutine = AllocDense
+        member _.TransposeWithin () = TDataMove
+        member _.Canonicalize () = CanonNone        // dense: indices already canonical
+        member _.ReadTransform () = TfIdentity
+
+/// Symmetric: triangular storage; transpose within the group is the identity
+/// (A(i,j) = A(j,i), canonical storage unchanged).
+type private SymmetricBehavior() =
+    interface IIndexTypeBehavior with
+        member _.ClassName = "Symmetric"
+        member _.Symmetry = SymSymmetric
+        member _.Validate ix =
+            if ix.Arity < 2 then Error (sprintf "Symmetric index requires arity >= 2 (got %d): a symmetry relation needs at least two components" ix.Arity)
+            else Ok ()
+        member _.AllocRoutine = AllocSymmetric
+        member _.TransposeWithin () = TIdentity
+        member _.Canonicalize () = CanonSort        // sort within group, diagonal kept
+        member _.ReadTransform () = TfIdentity      // symmetric: no change on swap
+
+/// Antisymmetric: strict-simplex storage; transpose within the group negates
+/// the whole array (any transposition is an odd permutation -> parity -1).
+type private AntisymmetricBehavior() =
+    interface IIndexTypeBehavior with
+        member _.ClassName = "Antisymmetric"
+        member _.Symmetry = SymAntisymmetric
+        member _.Validate ix =
+            if ix.Arity < 2 then Error (sprintf "Antisymmetric index requires arity >= 2 (got %d): an antisymmetry relation needs at least two components" ix.Arity)
+            else Ok ()
+        member _.AllocRoutine = AllocAntisymmetric
+        member _.TransposeWithin () = TNegatedCopy
+        member _.Canonicalize () = CanonSortStrict  // sort; implicit-zero on repeat
+        member _.ReadTransform () = TfNegateOnSwap   // negate on odd parity
+
+/// Hermitian: shares symmetric (upper-triangle) storage, conjugation on read;
+/// transpose within the group conjugates the whole array. Rank-2 only.
+type private HermitianBehavior() =
+    interface IIndexTypeBehavior with
+        member _.ClassName = "Hermitian"
+        member _.Symmetry = SymHermitian
+        member _.Validate ix =
+            if ix.Arity <> 2 then Error (sprintf "Hermitian index requires arity = 2 (got %d): the Hermitian relation is defined on a matrix (two components)" ix.Arity)
+            else Ok ()
+        member _.AllocRoutine = AllocSymmetric   // same upper-triangle layout as symmetric
+        member _.TransposeWithin () = TConjugatedCopy
+        member _.Canonicalize () = CanonSort        // sort within group, diagonal kept (real)
+        member _.ReadTransform () = TfConjugateOnSwap  // conjugate on odd parity
+
+// Shared stateless singletons (one per class).
+let private rectangularBehavior = RectangularBehavior() :> IIndexTypeBehavior
+let private symmetricBehavior = SymmetricBehavior() :> IIndexTypeBehavior
+let private antisymmetricBehavior = AntisymmetricBehavior() :> IIndexTypeBehavior
+let private hermitianBehavior = HermitianBehavior() :> IIndexTypeBehavior
+
+/// Total, exhaustive resolver from symmetry class to behavior. Adding a new
+/// SymmetryClass case forces a new arm here (compile error otherwise) — the
+/// openness guarantee: a new index-type class is "write a behavior + one arm".
+let behaviorFor (sym: SymmetryClass) : IIndexTypeBehavior =
+    match sym with
+    | SymNone -> rectangularBehavior
+    | SymSymmetric -> symmetricBehavior
+    | SymAntisymmetric -> antisymmetricBehavior
+    | SymHermitian -> hermitianBehavior
+
+/// Derived behavior accessor for an index type. Behavior follows Symmetry;
+/// there is no stored Behavior field to fall out of sync.
+let behaviorOf (ix: IRIndexType) : IIndexTypeBehavior = behaviorFor ix.Symmetry
+
+/// Active pattern grouping the symmetry-like classes (those backed by compact
+/// triangular/simplex storage with a symmetry relation), so call sites that
+/// only care about "is this a compact symmetry class" match the group rather
+/// than enumerating. Rectangular and (future) Compound/Tree/Graph/CG fall to
+/// the `_` branch.
+let (|SymmetryLike|_|) (sym: SymmetryClass) : SymmetryClass option =
+    match sym with
+    | SymSymmetric | SymAntisymmetric | SymHermitian -> Some sym
+    | SymNone -> None
+
+/// Validate an index type against its class's well-formedness rules. Smart
+/// constructors route through this; a future migration can make IRIndexType
+/// only constructible via these guarded builders.
+let validateIndexType (ix: IRIndexType) : Result<unit, string> =
+    (behaviorOf ix).Validate ix
+
+/// Storage allocation spec for an output array, derived from its index TYPE.
+/// Source of truth for which C++ allocator to emit. The per-index-class
+/// decision comes from IIndexTypeBehavior.AllocRoutine; the whole-array
+/// COMPOSITION rules (a single antisymmetric index spanning all dims is
+/// allocatable; antisym mixed with other components is not, since
+/// allocate_antisym has no per-group mask) live here, because they are a
+/// property of the array's index-list combination, not of any one class.
+let classifyOutputStorage (outputType: IRType) : AllocSpec =
+    match outputType with
+    | ArrayElem arr ->
+        let antisymIdxs =
+            arr.IndexTypes |> List.filter (fun ix -> ix.Symmetry = SymAntisymmetric)
+        match antisymIdxs with
+        | [] ->
+            // No antisymmetric component: symmetric iff buildSymmVec finds a
+            // real symmetric block. buildSymmVec groups SymHermitian like
+            // SymSymmetric (Hermitian shares compact upper-triangle storage),
+            // so hasRealSymmetry covers Hermitian too. Per-class routine for a
+            // symmetric/hermitian index is AllocSymmetric; plain index AllocDense.
+            let symmVec = buildSymmVec outputType
+            if hasRealSymmetry symmVec then AllocSymmetric
+            else AllocDense
+        | [ single ] when single.Arity = (arr.IndexTypes |> List.sumBy (fun ix -> ix.Arity)) ->
+            // Exactly one antisymmetric index spanning every dimension: the
+            // pure-antisymmetric shape allocate_antisym supports. Per-class
+            // routine confirms (behaviorFor SymAntisymmetric -> AllocAntisymmetric).
+            (behaviorFor SymAntisymmetric).AllocRoutine
+        | _ ->
+            // Antisymmetric group(s) combined with other components in one
+            // storage block — the mixed-strictness layout the global DIAGONALS
+            // flag cannot express, but the per-group STRICT mask can. This is
+            // the compact-residual fission shape (e.g. Idx -> AntisymIdx<2>:
+            // a freed dense axis beside a strict residual pair). Each group is
+            // uniformly strict (antisym) or dense, so buildSymmVecWithStrict
+            // produces a well-formed (SYMM, STRICT) pair; emit allocate_strict.
+            // (Sign is handled lazily on read via canon_*, not here.)
+            let (_symmVec, strictVec) = buildSymmVecWithStrict outputType
+            AllocPerGroupStrict strictVec
+    | _ -> AllocDense
 
 // ============================================================================
 // Cross-procedural analysis context. All callable references in IR are
@@ -2312,8 +2700,31 @@ let buildLoopNestCodeGen
                 // kernel opted into OpenMP (see shared-index path note above);
                 // genNestPragma picks collapse vs. dynamic from bound structure.
                 let isParallel = level = 0 && kernelRequestedOmp
+                // Strict (j > i > ...) bounds are required whenever the OUTPUT
+                // storage is antisymmetric — strict-triangular storage has no
+                // diagonal, so the iteration must not visit it. Two ways the
+                // output is antisymmetric:
+                //   (1) the input index type is itself SymAntisymmetric (an
+                //       explicit AntisymIdx array), reflected in IndexSpace, or
+                //   (2) this application is a Reynolds antisymmetrization over a
+                //       commutative group (isAntisymmetric, from the Reynolds
+                //       descriptor). Here the INPUT arrays are plain (SymNone) —
+                //       the triangular iteration comes from the commutative path
+                //       — so IndexSpace.Symmetry alone would miss it.
+                // The strict offset is CUMULATIVE across the group: level a (the
+                // a-th index within the strict group, 0-based) must start a slots
+                // past the group base, because each prior index already consumed
+                // one diagonal slot. That cumulative depth equals the number of
+                // bound-dependency levels this level carries (List.length deps):
+                // level 1 -> 1, level 2 -> 2, etc. (A flat offset of 1 is correct
+                // only at rank 2, where level 1 is the sole strict level; at rank
+                // >= 3 a flat 1 under-shifts, making the loop visit non-canonical
+                // tuples with repeated indices that alias storage cells — the
+                // antisym rank-3 storage-collision bug.)
                 let strictOffset =
-                    if isTriangular && levelInfo.IndexSpace.Symmetry = SymAntisymmetric then 1
+                    if isTriangular &&
+                       (levelInfo.IndexSpace.Symmetry = SymAntisymmetric || isAntisymmetric)
+                    then List.length deps
                     else 0
                 
                 let element = mkElement arrayPos levelInfo.ArityIndex levelInfo.LocalDimIndex
@@ -2370,7 +2781,11 @@ let rec mapIRExpr (f: IRExpr -> IRExpr) (expr: IRExpr) : IRExpr =
         | IRPure e -> IRPure (m e)
         | IRCompute e -> IRCompute (m e)
         | IRReynolds (e, a) -> IRReynolds (m e, a)
-        | IRTranspose (e, p) -> IRTranspose (m e, p)
+        | IRTranspose (e, d1, d2) -> IRTranspose (m e, d1, d2)
+        | IRDecompact (e, d) -> IRDecompact (m e, d)
+        | IRGram (l, r, s) -> IRGram (m l, m r, s)
+        | IRArrayNegate e -> IRArrayNegate (m e)
+        | IRArrayConjugate e -> IRArrayConjugate (m e)
         | IRReverse (e, d) -> IRReverse (m e, d)
         | IRDiag e -> IRDiag (m e)
         | IRRank e -> IRRank (m e)
@@ -3345,6 +3760,49 @@ let rec liftInferType (expr: IRExpr) : IRType =
     | IRMask (arr, _) -> liftInferType arr
     | IRMaskWithSet (arr, _, _, _) -> liftInferType arr  // Same element type, filtered extent
     | IRSort (arr, _) -> liftInferType arr
+    | IRTranspose (arr, d1, d2) ->
+        (match liftInferType arr with
+         | ArrayElem a when d1 < a.IndexTypes.Length && d2 < a.IndexTypes.Length ->
+            let swapped =
+                a.IndexTypes
+                |> List.mapi (fun i ix ->
+                    if i = d1 then a.IndexTypes.[d2]
+                    elif i = d2 then a.IndexTypes.[d1]
+                    else ix)
+            mkArrayLike { a with IndexTypes = swapped }
+         | t -> t)
+    | IRDecompact (arr, d) ->
+        // Structural hint: split the compact slot containing dim d into
+        // left-remainder / extracted Idx / right-remainder. Ids are reused
+        // (this is an approximation for let-float; the authoritative type with
+        // fresh nominal Ids is set by TypeCheck). Shape (arity/symmetry) is
+        // what codegen reads, and that is correct here.
+        (match liftInferType arr with
+         | ArrayElem a ->
+            let rec walk slotIdx acc remaining =
+                match remaining with
+                | [] -> None
+                | (ix: IRIndexType) :: rest ->
+                    let ar = max 1 ix.Arity
+                    if d < acc + ar then Some (slotIdx, ar, d - acc, ix)
+                    else walk (slotIdx + 1) (acc + ar) rest
+            (match walk 0 0 a.IndexTypes with
+             | Some (slot, r, posInSlot, ix) when r >= 2 && ix.Symmetry <> SymNone ->
+                let mkRemainder (ar: int) : IRIndexType list =
+                    if ar <= 0 then []
+                    elif ar = 1 then [ { ix with Arity = 1; Symmetry = SymNone } ]
+                    else [ { ix with Arity = ar } ]
+                let extracted = { ix with Arity = 1; Symmetry = SymNone }
+                let replacement = mkRemainder posInSlot @ [extracted] @ mkRemainder (r - 1 - posInSlot)
+                let newIdx =
+                    a.IndexTypes
+                    |> List.mapi (fun i s -> (i, s))
+                    |> List.collect (fun (i, s) -> if i = slot then replacement else [s])
+                mkArrayLike { a with IndexTypes = newIdx }
+             | _ -> mkArrayLike a)
+         | t -> t)
+    | IRArrayNegate arr -> liftInferType arr        // type-preserving
+    | IRArrayConjugate arr -> liftInferType arr     // type-preserving
     | IRIntersect (a, _) -> liftInferType a
     | IRUnion (a, _) -> liftInferType a
     | IRUnique a -> liftInferType a
@@ -3386,7 +3844,7 @@ let rec liftInferType (expr: IRExpr) : IRType =
 let isInlineForm (e: IRExpr) : bool =
     match e with
     | IRMask _ | IRMaskWithSet _ | IRSort _ | IRIntersect _ | IRUnion _ | IRUnique _
-    | IRGroupBy _ | IRGroupKeys _ -> true
+    | IRGroupBy _ | IRGroupKeys _ | IRTranspose _ | IRDecompact _ | IRArrayNegate _ | IRArrayConjugate _ -> true
     | _ -> false
 
 /// Path B / Phase D: peel any IRLet chain that descendant lifts produced.
@@ -3591,10 +4049,28 @@ let rec liftExpr (builder: IRBuilder) (expr: IRExpr) : IRExpr =
         let idx' = liftExpr builder idx
         let (binds, arrFinal) = liftChild builder arr'
         wrapLets binds (IRCurry (arrFinal, idx', r))
-    | IRTranspose (arr, p) ->
+    | IRTranspose (arr, d1, d2) ->
         let arr' = liftExpr builder arr
         let (binds, arrFinal) = liftChild builder arr'
-        wrapLets binds (IRTranspose (arrFinal, p))
+        wrapLets binds (IRTranspose (arrFinal, d1, d2))
+    | IRDecompact (arr, d) ->
+        let arr' = liftExpr builder arr
+        let (binds, arrFinal) = liftChild builder arr'
+        wrapLets binds (IRDecompact (arrFinal, d))
+    | IRGram (l, r, s) ->
+        let l' = liftExpr builder l
+        let r' = liftExpr builder r
+        let (bindsL, lFinal) = liftChild builder l'
+        let (bindsR, rFinal) = liftChild builder r'
+        wrapLets (bindsL @ bindsR) (IRGram (lFinal, rFinal, s))
+    | IRArrayNegate arr ->
+        let arr' = liftExpr builder arr
+        let (binds, arrFinal) = liftChild builder arr'
+        wrapLets binds (IRArrayNegate arrFinal)
+    | IRArrayConjugate arr ->
+        let arr' = liftExpr builder arr
+        let (binds, arrFinal) = liftChild builder arr'
+        wrapLets binds (IRArrayConjugate arrFinal)
     | IRReverse (arr, d) ->
         let arr' = liftExpr builder arr
         let (binds, arrFinal) = liftChild builder arr'
@@ -4005,6 +4481,7 @@ let ppBinOpWithMode mode op =
 let ppUnaryOp = function
     | IRNeg -> "-"
     | IRNot -> "!"
+    | IRConj -> "conj"
 
 /// Pretty print IR expressions with optional name mapping for variables
 let rec ppIRExprWithNames (names: Map<int, string>) indent (expr: IRExpr) =
@@ -4202,6 +4679,10 @@ let rec collectVarRefsIR (expr: IRExpr) : Set<IRId> =
     | IRGroupBy (v, k) -> Set.union (collectVarRefsIR v) (collectVarRefsIR k)
     | IRGroupKeys ks -> ks |> List.map collectVarRefsIR |> Set.unionMany
     | IRSort (a, k) -> Set.union (collectVarRefsIR a) (collectVarRefsIR k)
+    | IRTranspose (a, _, _) -> collectVarRefsIR a
+    | IRDecompact (a, _) -> collectVarRefsIR a
+    | IRArrayNegate a -> collectVarRefsIR a
+    | IRArrayConjugate a -> collectVarRefsIR a
     | IRReduce (a, k) -> Set.union (collectVarRefsIR a) (collectVarRefsIR k)
     | IRExtent (a, _) -> collectVarRefsIR a
     | IRRaggedLookup l -> collectVarRefsIR l
@@ -4562,8 +5043,22 @@ let rec exprAttrs (expr: IRExpr) : ExprAttrs =
     | IRPure e
     | IRCompute e
     | IRReynolds (e, _)
-    | IRRaggedLookup e
-    | IRTranspose (e, _) ->
+    | IRRaggedLookup e ->
+        exprAttrs e
+    | IRTranspose (e, _, _) ->
+        exprAttrs e
+    | IRDecompact (e, _) ->
+        exprAttrs e
+    | IRGram (l, r, _) ->
+        let la = exprAttrs l
+        let ra = exprAttrs r
+        { FreeVars  = Set.union la.FreeVars ra.FreeVars
+          BoundVars = Set.union la.BoundVars ra.BoundVars
+          IsPure    = la.IsPure && ra.IsPure
+          Probes    = la.Probes @ ra.Probes }
+    | IRArrayNegate e ->
+        exprAttrs e
+    | IRArrayConjugate e ->
         exprAttrs e
 
     // IRExtent's dim is a static int, so just the array.
@@ -4933,6 +5428,10 @@ let validateModule (externalIds: Set<IRId>) (modul: IRModule) : IRValidationErro
         | IRMethodFor info -> info.Arrays |> List.iter (checkScope scope ctx)
         | IRObjectFor info -> checkScope scope ctx info.Kernel
         | IRSort (a, k) -> checkScope scope ctx a; checkScope scope ctx k
+        | IRTranspose (a, _, _) -> checkScope scope ctx a
+        | IRDecompact (a, _) -> checkScope scope ctx a
+        | IRArrayNegate a -> checkScope scope ctx a
+        | IRArrayConjugate a -> checkScope scope ctx a
         | IRReduce (a, k) -> checkScope scope ctx a; checkScope scope ctx k
         | IRApplyCombinator info ->
             checkScope scope ctx info.Loop

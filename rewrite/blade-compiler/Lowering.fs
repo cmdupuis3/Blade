@@ -166,6 +166,7 @@ let rec lowerTypedExpr (env: TypedLowerEnv) (texpr: TypedExpr) : IRExpr =
         match op with
         | OpNeg -> IRUnaryOp (IRNeg, e)
         | OpNot -> IRUnaryOp (IRNot, e)
+        | OpConj -> IRUnaryOp (IRConj, e)
     
     | TExprApp (func, args) ->
         let f = lowerTypedExpr env func
@@ -373,6 +374,17 @@ let rec lowerTypedExpr (env: TypedLowerEnv) (texpr: TypedExpr) : IRExpr =
     
     | TExprReduce (array, kernel) ->
         IRReduce (lowerTypedExpr env array, lowerTypedExpr env kernel)
+    
+    | TExprTranspose (array, dim1, dim2) ->
+        IRTranspose (lowerTypedExpr env array, dim1, dim2)
+    | TExprDecompact (array, dim) ->
+        IRDecompact (lowerTypedExpr env array, dim)
+    | TExprGram (left, right, isSameArray) ->
+        IRGram (lowerTypedExpr env left, lowerTypedExpr env right, isSameArray)
+    | TExprArrayNegate array ->
+        IRArrayNegate (lowerTypedExpr env array)
+    | TExprArrayConjugate array ->
+        IRArrayConjugate (lowerTypedExpr env array)
     
     | TExprExtents array ->
         // Rank-1: emit a single IRExtent (arr, 0).

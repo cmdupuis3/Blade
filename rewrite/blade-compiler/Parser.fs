@@ -1308,6 +1308,72 @@ and parsePrimary (tokens: Token list) : ParseResult<Expr> =
         parseExprImpl afterComma >>= fun key afterKey ->
         expect TokRParen afterKey >>= fun _ remaining ->
         success (ExprSort (array, key)) remaining
+
+    // transpose(A, [d1, d2]) — swap exactly two axes. The axis list must be
+    // EXACTLY two integer literals; any other shape is a parse error (no
+    // implicit "reverse all dims", no general permutation). Semantic checks
+    // (d1 != d2, in range, both axes arity-1 SymNone) happen in TypeCheck.
+    | Some (TokKeyword KwTranspose) ->
+        advance tokens |> expect TokLParen >>= fun _ afterLParen ->
+        parseExprImpl afterLParen >>= fun array afterArr ->
+        expect TokComma afterArr >>= fun _ afterComma ->
+        expect TokLBracket afterComma >>= fun _ afterLBrack ->
+        (match peek afterLBrack with
+         | Some (TokInt d1) ->
+            let afterD1 = advance afterLBrack
+            expect TokComma afterD1 >>= fun _ afterComma2 ->
+            (match peek afterComma2 with
+             | Some (TokInt d2) ->
+                let afterD2 = advance afterComma2
+                expect TokRBracket afterD2 >>= fun _ afterRBrack ->
+                expect TokRParen afterRBrack >>= fun _ remaining ->
+                success (ExprTranspose (array, int d1, int d2)) remaining
+             | _ ->
+                let line, col = currentPos afterComma2
+                error "transpose expects exactly two integer axis indices: transpose(A, [d1, d2])" line col)
+         | _ ->
+            let line, col = currentPos afterLBrack
+            error "transpose expects exactly two integer axis indices: transpose(A, [d1, d2])" line col)
+    
+    // hermitian(A) — the conjugate-transpose (Hermitian adjoint) A^H of a
+    // rank-2 array: swap axes 0 and 1 AND conjugate the elements. Pure surface
+    // sugar: desugars to conj(transpose(A, [0, 1])), riding entirely on the
+    // existing transpose + conj machinery (no new AST/IR/typecheck/codegen).
+    // NOTE: the RESULT is a plain dense array (the adjoint operation), NOT a
+    // SymHermitian-typed matrix — the name refers to the operation A^H, not the
+    // property. The Hermitian-typed producer is `gram` (A * hermitian(A)).
+    | Some (TokKeyword KwHermitian) ->
+        advance tokens |> expect TokLParen >>= fun _ afterLParen ->
+        parseExprImpl afterLParen >>= fun array afterArr ->
+        expect TokRParen afterArr >>= fun _ remaining ->
+        success (ExprUnaryOp (OpConj, ExprTranspose (array, 0, 1))) remaining
+
+    // gram(A, B) = A * B^H — the (conjugate) Gram product:
+    //   result[i][j] = sum_k A[i][k] * conj(B[j][k])
+    // A is m x n, B is p x n (shared contracted dim n), result is m x p. When A
+    // and B are the SAME array (syntactically the same variable) the result is
+    // square and symmetric (real) / Hermitian (complex), computed via the
+    // triangular upper-half scatter; otherwise it is a general dense m x p array.
+    | Some (TokKeyword KwGram) ->
+        advance tokens |> expect TokLParen >>= fun _ afterLParen ->
+        parseExprImpl afterLParen >>= fun left afterLeft ->
+        expect TokComma afterLeft >>= fun _ afterComma ->
+        parseExprImpl afterComma >>= fun right afterRight ->
+        expect TokRParen afterRight >>= fun _ remaining ->
+        success (ExprGram (left, right)) remaining
+
+    | Some (TokKeyword KwDecompact) ->
+        advance tokens |> expect TokLParen >>= fun _ afterLParen ->
+        parseExprImpl afterLParen >>= fun array afterArr ->
+        expect TokComma afterArr >>= fun _ afterComma ->
+        (match peek afterComma with
+         | Some (TokInt d) ->
+            let afterD = advance afterComma
+            expect TokRParen afterD >>= fun _ remaining ->
+            success (ExprDecompact (array, int d)) remaining
+         | _ ->
+            let line, col = currentPos afterComma
+            error "decompact expects a single integer dimension index: decompact(A, d)" line col)
     
     // reduce(array, op) — fold innermost dim by binary kernel.
     // The kernel is optional; if omitted, defaults to (+).
@@ -1325,6 +1391,15 @@ and parsePrimary (tokens: Token list) : ParseResult<Expr> =
             parseExprImpl afterComma >>= fun op afterOp ->
             expect TokRParen afterOp >>= fun _ remaining ->
             success (ExprReduce (array, op)) remaining
+
+    // conj(x) — complex conjugate. Built-in unary op (identity on real,
+    // conjugate on complex). Function-call surface form; lowers to the
+    // existing IRUnaryOp machinery via ExprUnaryOp(OpConj, _).
+    | Some (TokKeyword KwConj) ->
+        advance tokens |> expect TokLParen >>= fun _ afterLParen ->
+        parseExprImpl afterLParen >>= fun arg afterArg ->
+        expect TokRParen afterArg >>= fun _ remaining ->
+        success (ExprUnaryOp (OpConj, arg)) remaining
 
     // extents(array) — innermost-dim extent. Rank-1 returns scalar Int64.
     | Some (TokKeyword KwExtents) ->

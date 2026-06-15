@@ -188,14 +188,17 @@ int main() {
     }
 
     // ----- Antisymmetric: strict i<j<...<k, cardinality C(n,r) -----
-    // Guards the rank>=3 correctness fix (old code over-counted: gave 10 for
-    // rank-3 n=4 instead of C(4,3)=4). Contiguity checked at rank 2.
+    // Antisym is now the unified recurrence with an all-ones SYMM mask and
+    // DIAGONALS=false (the former count_antisym/allocate_antisym were retired).
+    // Guards the rank>=3 correctness (strict count gives C(n,r), not the
+    // symmetric over-count). Contiguity checked at rank 2.
     {
         static const size_t ext[2] = {4, 4};
+        static constexpr const size_t aMask2[2] = {1, 1};
         using T2 = promote<double, 2>::type;
-        size_t card = count_antisym<T2>(ext);
+        size_t card = count_leaves<T2, aMask2, false>(ext);
         check("antisym2_n4_cardinality", card == binom(4, 2) && card == 6);
-        T2 a = allocate_antisym<T2>(ext);
+        T2 a = allocate<T2, aMask2, false>(ext);
         // rows arr[i], i in [0,n), strict row length n-(i+1)
         double v = 0;
         for (size_t i=0;i<4;i++){ size_t len=4-(i+1); for(size_t j=0;j<len;j++) a[i][j]=v++; }
@@ -209,20 +212,23 @@ int main() {
     }
     {
         static const size_t ext[3] = {4, 4, 4};
+        static constexpr const size_t aMask3[3] = {1, 1, 1};
         using T3 = promote<double, 3>::type;
-        size_t card = count_antisym<T3>(ext);
+        size_t card = count_leaves<T3, aMask3, false>(ext);
         check("antisym3_n4_cardinality", card == binom(4, 3) && card == 4);
     }
     {
         static const size_t ext[3] = {5, 5, 5};
+        static constexpr const size_t aMask3[3] = {1, 1, 1};
         using T3 = promote<double, 3>::type;
-        size_t card = count_antisym<T3>(ext);
+        size_t card = count_leaves<T3, aMask3, false>(ext);
         check("antisym3_n5_cardinality", card == binom(5, 3) && card == 10);
     }
     {
         static const size_t ext[4] = {5, 5, 5, 5};
+        static constexpr const size_t aMask4[4] = {1, 1, 1, 1};
         using T4 = promote<double, 4>::type;
-        size_t card = count_antisym<T4>(ext);
+        size_t card = count_leaves<T4, aMask4, false>(ext);
         check("antisym4_n5_cardinality", card == binom(5, 4) && card == 5);
     }
 

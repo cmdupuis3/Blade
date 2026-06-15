@@ -33,6 +33,72 @@ function skew(A: Array<Float64 like Idx<n>>) -> Float64 = {
 }
 """
 
+let test_antisym_decl_param = """
+// Declare an antisymmetric array as a function parameter:
+// Array<T like AntisymIdx<2, n>>. Confirms the `like AntisymIdx<arity, extent>`
+// declaration form parses and type-checks in a binding position. (Usage that
+// POPULATES an antisymmetric array goes through the Reynolds/method_for path —
+// the Reynolds-antisymmetric tests above — which is currently the only
+// producer of antisymmetric storage.)
+function trace_skew(M: Array<Float64 like AntisymIdx<2, n>>) -> Float64 = {
+    0.0
+}
+"""
+
+// ----------------------------------------------------------------------------
+// Reynolds antisymmetric STORAGE tests.
+//
+// These exercise the path where same-array method_for + comm (triangular
+// iteration) + reynolds(_, Antisymmetric) deduces an AntisymIdx OUTPUT index
+// type. The discriminator is CARDINALITY: an antisymmetric rank-2 output over
+// n stores C(n,2) strict-upper-triangle elements (no diagonal), versus
+// C(n+1,2) for symmetric (with diagonal) or n*n for rectangular. The strict
+// left-justified DFS storage order is (0,1),(0,2),...,(0,n-1),(1,2),...,(n-2,n-1).
+//
+// Antisymmetrized value at (i,j) for g(x,y)=2x+y is g(A[i],A[j])-g(A[j],A[i])
+//   = (2A[i]+A[j]) - (2A[j]+A[i]) = A[i]-A[j].
+//
+// NOTE on comm semantics (formalism 2705/3514): `comm` declares the arguments
+// INTERCHANGEABLE FOR ITERATION (enables triangular bounds); it is NOT an
+// assertion that g(x,y)=g(y,x). So a comm-declared kernel may be Reynolds-
+// ANTIsymmetrized to a nonzero result. (A comm kernel that genuinely satisfied
+// g(x,y)=g(y,x) would antisymmetrize to zero — see the cancellation case.)
+
+let test_antisym_reynolds_n4 = """
+// Same array, comm + reynolds Antisymmetric -> AntisymIdx<2,4> output.
+// Strict pairs (i<j) for n=4: (0,1)(0,2)(0,3)(1,2)(1,3)(2,3) = C(4,2)=6 elements.
+// value(i,j) = A[i]-A[j] with A=[1,2,3,4]:
+//   (0,1)=-1 (0,2)=-2 (0,3)=-3 (1,2)=-1 (1,3)=-2 (2,3)=-1
+// Cardinality 6 (not 10 symmetric, not 16 rectangular) confirms antisym storage.
+let A = [1.0, 2.0, 3.0, 4.0]
+let L = method_for(A, A)
+let g = lambda(x, y) where comm(x, y) -> 2.0 * x + y
+let result = L <@> reynolds(g, Antisymmetric) |> compute
+// EXPECT: result = [-1.0, -2.0, -3.0, -1.0, -2.0, -1.0]
+"""
+
+let test_antisym_reynolds_n3 = """
+// Smaller case n=3: strict pairs (0,1)(0,2)(1,2) = C(3,2)=3 elements.
+// value(i,j)=A[i]-A[j], A=[1,2,3]: (0,1)=-1 (0,2)=-2 (1,2)=-1
+let A = [1.0, 2.0, 3.0]
+let L = method_for(A, A)
+let g = lambda(x, y) where comm(x, y) -> 2.0 * x + y
+let result = L <@> reynolds(g, Antisymmetric) |> compute
+// EXPECT: result = [-1.0, -2.0, -1.0]
+"""
+
+let test_antisym_reynolds_cancellation = """
+// A genuinely symmetric kernel (x*y) antisymmetrized cancels to zero on every
+// strict pair: x*y - y*x = 0. Confirms the strict layout still has C(3,2)=3
+// slots (all zero), distinguishing "antisym storage of zeros" from a bug that
+// drops the output entirely.
+let A = [1.0, 2.0, 3.0]
+let L = method_for(A, A)
+let g = lambda(x, y) where comm(x, y) -> x * y
+let result = L <@> reynolds(g, Antisymmetric) |> compute
+// EXPECT: result = [0.0, 0.0, 0.0]
+"""
+
 // ============================================================================
 // HermitianIdx Tests
 // ============================================================================
@@ -80,6 +146,91 @@ let test_complex_lit_via_let_annotation = """
 // reached from a different entry point.
 let x: Complex128 = (5.0, -7.0)
 // EXPECT: x = (5,-7)
+"""
+
+// ----------------------------------------------------------------------------
+// conj — built-in unary complex-conjugate op.
+//   conj((a, b) : Complex128) = (a, -b);  conj(real) = real (identity).
+// Lowers to IRUnaryOp(IRConj, _); codegen emits std::conj for complex
+// operands and the bare operand for reals.
+
+let test_conj_scalar = """
+// Conjugate a complex scalar: negates the imaginary part.
+let z = (3.0, 4.0) : Complex128
+let zc = conj(z)
+// EXPECT: zc = (3,-4)
+"""
+
+let test_conj_real_identity = """
+// conj on a real value is the identity (conj(x)=x for real x). Confirms the
+// permissive typing: conj : T -> T, with reals passing through unchanged.
+let r = 5.0
+let rc = conj(r)
+// EXPECT: rc = 5
+"""
+
+let test_conj_array = """
+// conj applied elementwise inside a kernel over a complex array. Each element
+// (a, b) becomes (a, -b).
+let A: Array<Complex128 like Idx<3>> = [
+    (1.0, 2.0) : Complex128,
+    (3.0, -4.0) : Complex128,
+    (0.0, 5.0) : Complex128
+]
+let L = method_for(A)
+let f = lambda(z) -> conj(z)
+let result = L <@> f |> compute
+// EXPECT: result = [(1, -2), (3, 4), (0, -5)]
+"""
+
+// hermitian(A) = conj(transpose(A, [0,1])) — the conjugate-transpose (adjoint)
+// A^H of a complex 2x3 -> 3x2. Element (a,b) at [i][j] becomes (a,-b) at [j][i].
+// Result is a plain dense array (the adjoint operation), not SymHermitian-typed.
+let test_hermitian_adjoint = """
+let A: Array<Complex128 like Idx<2>, Idx<3>> = [
+    [(1.0, 2.0) : Complex128, (3.0, -1.0) : Complex128, (0.0, 5.0) : Complex128],
+    [(2.0, 1.0) : Complex128, (-1.0, 4.0) : Complex128, (6.0, 0.0) : Complex128]
+]
+let result = hermitian(A)
+// EXPECT: result = [(1, -2), (2, -1), (3, 1), (-1, -4), (0, -5), (6, 0)]
+"""
+
+// gram(A, A) complex -> Hermitian 2x2. result[i][j] = sum_k A[i][k]*conj(A[j][k]).
+// Upper-triangle canonical print (left-justified [i][jr]): (0,0),(0,1),(1,1).
+let test_gram_hermitian = """
+let A: Array<Complex128 like Idx<2>, Idx<3>> = [
+    [(1.0, 1.0) : Complex128, (2.0, 0.0) : Complex128, (0.0, 1.0) : Complex128],
+    [(3.0, -1.0) : Complex128, (1.0, 2.0) : Complex128, (2.0, 0.0) : Complex128]
+]
+let result = gram(A, A)
+// EXPECT: result = [(7, 0), (4, 2), (19, 0)]
+"""
+
+// gram(A, A) real -> symmetric 2x2 (conj is identity on reals).
+let test_gram_symmetric = """
+let A: Array<Float64 like Idx<2>, Idx<3>> = [[1.0, 2.0, 3.0], [4.0, 5.0, 6.0]]
+let result = gram(A, A)
+// EXPECT: result = [14, 32, 77]
+"""
+
+// gram(A, B) distinct arrays -> general dense 2x2 (no symmetry).
+let test_gram_dense = """
+let A: Array<Float64 like Idx<2>, Idx<3>> = [[1.0, 2.0, 3.0], [4.0, 5.0, 6.0]]
+let B: Array<Float64 like Idx<2>, Idx<3>> = [[1.0, 0.0, 1.0], [0.0, 1.0, 0.0]]
+let result = gram(A, B)
+// EXPECT: result = [4, 2, 10, 5]
+"""
+
+// decompact(gram(A,A), d) on a rank-2 Hermitian -> dense n×n with the lower
+// triangle conjugated (diagonal kept, real). H = [[7, 4+2i],[4-2i, 19]].
+let test_gram_decompact_hermitian = """
+let A: Array<Complex128 like Idx<2>, Idx<3>> = [
+    [(1.0, 1.0) : Complex128, (2.0, 0.0) : Complex128, (0.0, 1.0) : Complex128],
+    [(3.0, -1.0) : Complex128, (1.0, 2.0) : Complex128, (2.0, 0.0) : Complex128]
+]
+let H = gram(A, A)
+let result = decompact(H, 0)
+// EXPECT: result = [(7, 0), (4, 2), (4, -2), (19, 0)]
 """
 
 let test_hermitian_rectangular = """
@@ -655,17 +806,320 @@ let result = method_for(range<StationIdx>) <@> lambda(s) -> data.temp(s) - regio
 """
 
 
+// ----------------------------------------------------------------------------
+// transpose(A, [d1, d2]) — hard transpose, swap two arity-1 SymNone axes.
+// Allocates a fresh pool at the swapped extents and copies axis-swapped. The
+// result is an independent array (no aliasing back to the source).
+
+let test_transpose_2d_nonsquare = """
+// Non-square 2x3 -> 3x2. Non-square is the discriminating case: a square test
+// would pass even if the extent-swap were forgotten. Flat print is row-major
+// over the RESULT (3x2), so [[1,2,3],[4,5,6]] transposed reads column-first.
+let A: Array<Float64 like Idx<2>, Idx<3>> = [[1.0, 2.0, 3.0], [4.0, 5.0, 6.0]]
+let result = transpose(A, [0, 1])
+// A row-major:        1 2 3 4 5 6
+// result is 3x2: [[1,4],[2,5],[3,6]] -> row-major 1 4 2 5 3 6
+// EXPECT: result = [1, 4, 2, 5, 3, 6]
+"""
+
+let test_transpose_square = """
+// Square 2x2, sanity check that the swap is a genuine transpose (off-diagonal
+// elements exchange, diagonal fixed).
+let A: Array<Float64 like Idx<2>, Idx<2>> = [[1.0, 2.0], [3.0, 4.0]]
+let result = transpose(A, [0, 1])
+// [[1,2],[3,4]] -> [[1,3],[2,4]] -> row-major 1 3 2 4
+// EXPECT: result = [1, 3, 2, 4]
+"""
+
+let test_transpose_rank3 = """
+// General rank: swap the outer two axes of a 2x2x2, leaving the innermost
+// axis in place. Exercises the N-deep copy with two swapped subscripts.
+let A: Array<Float64 like Idx<2>, Idx<2>, Idx<2>> = [[[1.0, 2.0], [3.0, 4.0]], [[5.0, 6.0], [7.0, 8.0]]]
+let result = transpose(A, [0, 1])
+// A[i][j][k] -> result[j][i][k]. Row-major result:
+//   r[0][0][*]=A[0][0]=1,2 ; r[0][1][*]=A[1][0]=5,6
+//   r[1][0][*]=A[0][1]=3,4 ; r[1][1][*]=A[1][1]=7,8
+// EXPECT: result = [1, 2, 5, 6, 3, 4, 7, 8]
+"""
+
+// Reject probes — each should fail before producing valid IR.
+
+let test_transpose_reject_same_axis = """
+// d1 == d2 is the identity; reject rather than silently no-op.
+let A: Array<Float64 like Idx<2>, Idx<3>> = [[1.0, 2.0, 3.0], [4.0, 5.0, 6.0]]
+let result = transpose(A, [1, 1])
+// EXPECT: typecheck failure — the two axes must differ.
+"""
+
+let test_transpose_reject_out_of_range = """
+// Axis 5 does not exist in a rank-2 array.
+let A: Array<Float64 like Idx<2>, Idx<3>> = [[1.0, 2.0, 3.0], [4.0, 5.0, 6.0]]
+let result = transpose(A, [0, 5])
+// EXPECT: typecheck failure — axis out of range.
+"""
+
+// ----------------------------------------------------------------------------
+// Intra-group transpose: swapping two dimensions inside one index type is a
+// storage-preserving, per-class transform (symmetric -> identity, antisym ->
+// whole-array negation). No decompaction, no dense blow-up.
+
+let test_transpose_symmetric_identity = """
+// Symmetric intra-group transpose is the IDENTITY: A(i,j) = A(j,i), so storage
+// is unchanged and the result equals the source. Producer: reynolds(g), g=2x+y
+// -> 3(x+y), triangular canonicals (0,0)=6 (0,1)=9 (0,2)=12 (1,1)=12 (1,2)=15
+// (2,2)=18. transpose(sym,[0,1]) prints identically to sym.
+let A = [1.0, 2.0, 3.0]
+let L = method_for(A, A)
+let g = lambda(x, y) where comm(x, y) -> 2.0 * x + y
+let sym = L <@> reynolds(g) |> compute
+let result = transpose(sym, [0, 1])
+// EXPECT: result = [6, 9, 12, 12, 15, 18]
+"""
+
+let test_transpose_antisym_negate = """
+// Antisymmetric intra-group transpose NEGATES the whole array (any transposition
+// is odd parity). Producer: reynolds(g, Antisymmetric), g=2x+y, A=[1,2,3] ->
+// strict canonicals (0,1)=-1 (0,2)=-2 (1,2)=-1. transpose negates each stored
+// element -> (0,1)=1 (0,2)=2 (1,2)=1; the storage shape (strict triangular) is
+// unchanged, so the print walks the same canonical layout.
+let A = [1.0, 2.0, 3.0]
+let L = method_for(A, A)
+let g = lambda(x, y) where comm(x, y) -> 2.0 * x + y
+let anti = L <@> reynolds(g, Antisymmetric) |> compute
+let result = transpose(anti, [0, 1])
+// EXPECT: result = [1, 2, 1]
+"""
+
+// ----------------------------------------------------------------------------
+// decompact(A, d) — pull the compact component at dim d out as a free Idx,
+// materializing the full dense tensor. v1: rank-2 sole compact slot
+// (SymIdx<2,n> / AntisymIdx<2,n>) → dense n×n.
+
+let test_decompact_symmetric = """
+// Symmetric source: reynolds(g) with g=2x+y gives 3(x+y), stored triangularly
+// as (0,0)=6 (0,1)=9 (0,2)=12 (1,1)=12 (1,2)=15 (2,2)=18. Decompacting the
+// symmetric group yields a dense 3×3 symmetric matrix (each canonical written
+// to both (i,j) and (j,i); diagonal once).
+let A = [1.0, 2.0, 3.0]
+let L = method_for(A, A)
+let g = lambda(x, y) where comm(x, y) -> 2.0 * x + y
+let sym = L <@> reynolds(g) |> compute
+let result = decompact(sym, 0)
+// M = [[6,9,12],[9,12,15],[12,15,18]] -> row-major
+// EXPECT: result = [6, 9, 12, 9, 12, 15, 12, 15, 18]
+"""
+
+let test_decompact_antisymmetric = """
+// Antisymmetric source n=3: reynolds(g, Antisymmetric) with g=2x+y, A=[1,2,3]
+// gives strict canonicals (0,1)=-1 (0,2)=-2 (1,2)=-1. Decompacting yields a
+// dense 3×3 antisymmetric matrix: M[i][j]=canon for i<j, M[j][i]=-canon, and
+// a literal-zero diagonal (the diagonal is never stored).
+let A = [1.0, 2.0, 3.0]
+let L = method_for(A, A)
+let g = lambda(x, y) where comm(x, y) -> 2.0 * x + y
+let anti = L <@> reynolds(g, Antisymmetric) |> compute
+let result = decompact(anti, 0)
+// M = [[0,-1,-2],[1,0,-1],[2,1,0]] -> row-major
+// EXPECT: result = [0, -1, -2, 1, 0, -1, 2, 1, 0]
+"""
+
+// Reject probes.
+
+let test_decompact_reject_plain = """
+// Decompacting a plain Idx axis — nothing to decompact.
+let A: Array<Float64 like Idx<3>> = [1.0, 2.0, 3.0]
+let result = decompact(A, 0)
+// EXPECT: typecheck failure — plain axis, nothing to decompact.
+"""
+
+let test_decompact_reject_out_of_range = """
+// Dimension 5 does not exist.
+let A = [1.0, 2.0, 3.0]
+let L = method_for(A, A)
+let g = lambda(x, y) where comm(x, y) -> x + y
+let sym = L <@> g |> compute
+let result = decompact(sym, 5)
+// EXPECT: typecheck failure — dimension out of range.
+"""
+
+// ---- General symmetric fission (rank >= 3) ----
+let test_decompact_sym3_peel_first = """
+// d=0: freed axis = dim 0, kept pair = (j,k) symmetric. Output Idx<3> ->
+// SymIdx<2,3>, mask {1,2,2}, storage out[i][a][b] with (j,k)=(a,a+b).
+let A = [1.0, 2.0, 3.0]
+let L = method_for(A, A, A)
+let f = lambda(x, y, z) where comm(x, y, z) -> x * y * z
+let sym = L <@> f |> compute
+let result = decompact(sym, 0)
+// EXPECT: result = [1, 2, 3, 4, 6, 9, 2, 4, 6, 8, 12, 18, 3, 6, 9, 12, 18, 27]
+"""
+
+let test_decompact_sym3_peel_last = """
+// d=2: freed axis = dim 2 (last), kept pair = (i,j) symmetric. Output
+// SymIdx<2,3> -> Idx<3>, mask {1,1,2}, storage out[a][b][k] with (i,j)=(a,a+b).
+let A = [1.0, 2.0, 3.0]
+let L = method_for(A, A, A)
+let f = lambda(x, y, z) where comm(x, y, z) -> x * y * z
+let sym = L <@> f |> compute
+let result = decompact(sym, 2)
+// EXPECT: result = [1, 2, 3, 2, 4, 6, 3, 6, 9, 4, 8, 12, 6, 12, 18, 9, 18, 27]
+"""
+
+let test_decompact_sym3_peel_mid = """
+// d=1: freed axis = middle. Both remainders are arity-1 (= plain Idx), so the
+// group fully dissolves to a dense 3x3x3. mask {1,2,3}, storage out[i][j][k].
+let A = [1.0, 2.0, 3.0]
+let L = method_for(A, A, A)
+let f = lambda(x, y, z) where comm(x, y, z) -> x * y * z
+let sym = L <@> f |> compute
+let result = decompact(sym, 1)
+// EXPECT: result = [1, 2, 3, 2, 4, 6, 3, 6, 9, 2, 4, 6, 4, 8, 12, 6, 12, 18, 3, 6, 9, 6, 12, 18, 9, 18, 27]
+"""
+
+// ---- Antisym rank-3 compact-residual decompact (boundary cuts) ----
+// Source: reynolds(f, Antisymmetric) with f = x*x*y + z, A=[1,2,3,4]. This is
+// the standard signed-permutation antisymmetrization; the strict canonical
+// rank-3 source (i<j<k), C(4,3)=4 elements, is:
+//   (0,1,2)=-2 (0,1,3)=-6 (0,2,3)=-6 (1,2,3)=-2
+// (Verified against the hand-computed antisymmetrization. These differ from an
+// earlier buggy build whose rank>=3 strict loop offset was flat-1 instead of
+// cumulative, collapsing the source to [0,-2,0,0]; the fix made the iteration
+// visit the true canonical tuples.)
+
+// Intermediate: assert the rank-3 antisym SOURCE pool directly (no decompact),
+// pinning the reynolds-source values the decompact EXPECTs are derived from.
+let test_reynolds_anti3_source = """
+let A = [1.0, 2.0, 3.0, 4.0]
+let L = method_for(A, A, A)
+let f = lambda(x, y, z) where comm(x, y, z) -> x * x * y + z
+let result = L <@> reynolds(f, Antisymmetric) |> compute
+// Strict canonical pool (i<j<k), DFS order.
+// EXPECT: result = [-2.0, -6.0, -6.0, -2.0]
+"""
+
+let test_decompact_anti3_peel_first = """
+let A = [1.0, 2.0, 3.0, 4.0]
+let L = method_for(A, A, A)
+let f = lambda(x, y, z) where comm(x, y, z) -> x * x * y + z
+let anti = L <@> reynolds(f, Antisymmetric) |> compute
+let result = decompact(anti, 0)
+// EXPECT: result = [0, 0, 0, -2, -6, -6, 0, 2, 6, 0, 0, -2, -2, 0, 6, 0, 2, 0, -6, -6, 0, -2, 0, 0]
+"""
+
+// d=2 boundary cut (last): residual AntisymIdx<2> + freed axis dim2.
+// Storage SYMM {1,1,2} STRICT {1,1,0}, card = C(n,2)*n = 24, DFS order
+// (strict residual pair outer, freed F inner).
+let test_decompact_anti3_peel_last = """
+let A = [1.0, 2.0, 3.0, 4.0]
+let L = method_for(A, A, A)
+let f = lambda(x, y, z) where comm(x, y, z) -> x * x * y + z
+let anti = L <@> reynolds(f, Antisymmetric) |> compute
+let result = decompact(anti, 2)
+// EXPECT: result = [0, 0, -2, -6, 0, 2, 0, -6, 0, 6, 6, 0, -2, 0, 0, -2, -6, 0, 2, 0, -6, -2, 0, 0]
+"""
+
+// ---- n=5 cases (C(5,3)=10 canonical source values, 4 distinct magnitudes
+// 2/6/12/16 — exercises distinct-value sign placement across larger pools).
+// Source x*x*y+z, A=[1..5]; canonical source (i<j<k) =
+//   [-2, -6, -12, -6, -16, -12, -2, -6, -6, -2]  (verified antisymmetrization).
+let test_reynolds_anti3_source_n5 = """
+let A = [1.0, 2.0, 3.0, 4.0, 5.0]
+let L = method_for(A, A, A)
+let f = lambda(x, y, z) where comm(x, y, z) -> x * x * y + z
+let result = L <@> reynolds(f, Antisymmetric) |> compute
+// EXPECT: result = [-2.0, -6.0, -12.0, -6.0, -16.0, -12.0, -2.0, -6.0, -6.0, -2.0]
+"""
+
+// d=0 boundary cut, n=5: SYMM {1,2,2} STRICT {0,1,1}, card = 5*C(5,2) = 50.
+let test_decompact_anti3_peel_first_n5 = """
+let A = [1.0, 2.0, 3.0, 4.0, 5.0]
+let L = method_for(A, A, A)
+let f = lambda(x, y, z) where comm(x, y, z) -> x * x * y + z
+let anti = L <@> reynolds(f, Antisymmetric) |> compute
+let result = decompact(anti, 0)
+// EXPECT: result = [0, 0, 0, 0, -2, -6, -12, -6, -16, -12, 0, 2, 6, 12, 0, 0, 0, -2, -6, -6, -2, 0, 6, 16, 0, 2, 6, 0, 0, -2, -6, -6, 0, 12, -2, 0, 6, 0, 2, 0, -12, -16, -12, 0, -6, -6, 0, -2, 0, 0]
+"""
+
+// d=2 boundary cut (last), n=5: SYMM {1,1,2} STRICT {1,1,0}, card = C(5,2)*5 = 50.
+let test_decompact_anti3_peel_last_n5 = """
+let A = [1.0, 2.0, 3.0, 4.0, 5.0]
+let L = method_for(A, A, A)
+let f = lambda(x, y, z) where comm(x, y, z) -> x * x * y + z
+let anti = L <@> reynolds(f, Antisymmetric) |> compute
+let result = decompact(anti, 2)
+// EXPECT: result = [0, 0, -2, -6, -12, 0, 2, 0, -6, -16, 0, 6, 6, 0, -12, 0, 12, 16, 12, 0, -2, 0, 0, -2, -6, -6, 0, 2, 0, -6, -12, 0, 6, 6, 0, -6, -2, 0, 0, -2, -16, -6, 0, 2, 0, -12, -6, -2, 0, 0]
+"""
+
+// Interior antisym cut, rank 4 d=1: result Idx -> Idx(freed) -> AntisymIdx<2>
+// (one surviving residual group + a degenerate arity-1 left side). Kernel uses
+// distinct exponents (x0^3 x1^2 x2) so the antisymmetrization does not vanish.
+let test_decompact_anti_interior_r4 = """
+let A = [1.0, 2.0, 3.0, 4.0, 5.0]
+let L = method_for(A, A, A, A)
+let f = lambda(w, x, y, z) where comm(w, x, y, z) -> w * w * w * x * x * y
+let anti = L <@> reynolds(f, Antisymmetric) |> compute
+let result = decompact(anti, 1)
+// EXPECT: result = [[0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 12, 48, 72, 0, 0, 0, 0, 0, -12, -48, 0, 0, 48, 0, 0, 0, 0, 12, 0, -72, 0, -48, 0, 0, 0, 0, 0, 48, 72, 0, 48, 0, 0, 0, 0, 0, 0, 0, 0, 0, -12, -48, -72, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 12, 48, 0, 0, 0, 0, 0, 12, 0, -12, 0, 72, 0, 0, 0, 0, -12, 0, 0, -48, -72, 0, 0, 0, 0, 12, 0, 0, 0, 0, 0, 0, 0, 12, 48, 0, 0, -48, 0, 0, -12, -48, 0, 0, 0, 0, 0, -12, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 12, 0, 0, 48, 0, 0, 12, 0, 0, 0, 48, 0, -48, 0, 0, -12, 0, 0, 0, 0, 0, 0, 0, 0, -12, 0, 72, 0, 48, 0, 0, 12, 0, -72, 0, 0, 0, 0, 12, 0, -12, 0, 0, -48, 0, 0, -12, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 72, 48, 0, 0, 12, 0, 0, 0, 0, 0, 0, 0, 0, 0, -48, -72, 0, -48, 0, 0, 0, 48, 72, 0, 0, 0, 0, -12, 0, 0, -48, 0, 48, 0, 0, 12, 0, 0, 0, 0, -72, -48, 0, 0, -12, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]]
+"""
+
+// Interior antisym cut, rank 5 d=2: result AntisymIdx<2> -> Idx(freed) ->
+// AntisymIdx<2> (TWO independent surviving residual groups). Kernel
+// x0^4 x1^3 x2^2 x3 (distinct exponents) -> non-vanishing antisymmetrization.
+let test_decompact_anti_interior_r5 = """
+let A = [1.0, 2.0, 3.0, 4.0, 5.0]
+let L = method_for(A, A, A, A, A)
+let f = lambda(a, b, c, d, e) where comm(a, b, c, d, e) -> a * a * a * a * b * b * b * c * c * d
+let anti = L <@> reynolds(f, Antisymmetric) |> compute
+let result = decompact(anti, 2)
+// EXPECT: result = [[0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 288, 0, 0, 0, 0, 0, 0, 0, 0, -288, 0, 0, 0, 0, 0, 0, 0, 0, 288, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, -288, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 288, 0, 0, 0, 0, 0, 0, 0, 0, -288, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 288, 0, 0, 0, 0, 0, 0, 0, -288, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 288, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, -288, 0, 0, 0, 0, 0, 0, 0, 288, 0, 0, 0, 0, 0, 0, 0, 0, -288, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 288, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, -288, 0, 0, 0, 0, 0, 0, 0, 0, 288, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, -288, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 288, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, -288, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 288, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, -288, 0, 0, 0, 0, 0, 0, 0, 0, 288, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 288, 0, 0, 0, 0, 0, 0, -288, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 288, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, -288, 0, 0, 0, 0, 0, 0, 288, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, -288, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 288, 0, 0, 0, 0, 0, 0, -288, 0, 0, 0, 0, 0, 0, 0, 0, 288, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]]
+"""
+
+
 /// Index type tests (AntisymIdx, HermitianIdx)
 let indexTypeTests = [
+    ("Transpose 2D Nonsquare", test_transpose_2d_nonsquare)
+    ("Transpose Square", test_transpose_square)
+    ("Transpose Rank3", test_transpose_rank3)
+    ("Transpose Same Axis (rejects)", test_transpose_reject_same_axis)
+    ("Transpose Out Of Range (rejects)", test_transpose_reject_out_of_range)
+    ("Transpose Symmetric Identity", test_transpose_symmetric_identity)
+    ("Transpose Antisym Negate", test_transpose_antisym_negate)
+    ("Decompact Symmetric", test_decompact_symmetric)
+    ("Decompact Antisymmetric", test_decompact_antisymmetric)
+    ("Decompact Sym3 Peel First", test_decompact_sym3_peel_first)
+    ("Decompact Sym3 Peel Last", test_decompact_sym3_peel_last)
+    ("Decompact Sym3 Peel Mid (dense)", test_decompact_sym3_peel_mid)
+    ("Decompact Anti3 Source", test_reynolds_anti3_source)
+    ("Decompact Anti3 Peel First", test_decompact_anti3_peel_first)
+    ("Decompact Anti3 Peel Last", test_decompact_anti3_peel_last)
+    ("Decompact Anti3 Source n5", test_reynolds_anti3_source_n5)
+    ("Decompact Anti3 Peel First n5", test_decompact_anti3_peel_first_n5)
+    ("Decompact Anti3 Peel Last n5", test_decompact_anti3_peel_last_n5)
+    ("Decompact Plain Axis (rejects)", test_decompact_reject_plain)
+    ("Decompact Out Of Range (rejects)", test_decompact_reject_out_of_range)
+    ("Decompact Anti Interior R4", test_decompact_anti_interior_r4)
+    ("Decompact Anti Interior R5", test_decompact_anti_interior_r5)
     ("AntisymIdx Iteration", test_antisym_iteration)
     ("AntisymIdx Kernel", test_antisym_type_in_kernel)
+    ("AntisymIdx Reynolds n4", test_antisym_reynolds_n4)
+    ("AntisymIdx Reynolds n3", test_antisym_reynolds_n3)
+    ("AntisymIdx Reynolds Cancellation", test_antisym_reynolds_cancellation)
     ("Block Return Simple", test_block_return_simple)
     ("Block Return With Loop", test_block_return_with_loop)
     ("AntisymIdx Parse Type", test_antisym_parse_type)
+    ("AntisymIdx Decl Param", test_antisym_decl_param)
     ("HermitianIdx Parse Type", test_hermitian_parse_type)
     ("Complex Lit Basic", test_complex_lit_basic)
     ("Complex Lit In Array", test_complex_lit_in_array)
     ("Complex Lit Via Let Annotation", test_complex_lit_via_let_annotation)
+    ("Conj Scalar", test_conj_scalar)
+    ("Conj Real Identity", test_conj_real_identity)
+    ("Conj Array", test_conj_array)
+    ("Gram Decompact Hermitian", test_gram_decompact_hermitian)
+    ("Gram Hermitian", test_gram_hermitian)
+    ("Gram Symmetric", test_gram_symmetric)
+    ("Gram Dense", test_gram_dense)
+    ("Hermitian Adjoint", test_hermitian_adjoint)
     ("HermitianIdx Rectangular", test_hermitian_rectangular)
     ("DepIdx Parse Lambda", test_depidx_parse_lambda)
     ("DepIdx Parse Eta", test_depidx_parse_eta)

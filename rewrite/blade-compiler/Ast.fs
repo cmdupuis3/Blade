@@ -91,6 +91,7 @@ type BinOpMode =
 type UnaryOp =
     | OpNeg       // -
     | OpNot       // !
+    | OpConj      // conj(x) — complex conjugate (identity on real)
 
 type AssignOp =
     | AssignEq    // =
@@ -295,6 +296,9 @@ and Expr =
     | ExprGroupKeys of keys: Expr list             // group_keys(keys1, keys2, ...) - build CSR grouping structure (compound if >1 key)
     | ExprSort of array: Expr * key: Expr          // sort(A, key) - sort array by key function (stable)
     | ExprReduce of array: Expr * kernel: Expr     // reduce(A, op) - reduce innermost dim by binary kernel
+    | ExprTranspose of array: Expr * dim1: int * dim2: int  // transpose(A, [d1, d2]) - swap two arity-1 SymNone axes (hard; allocates)
+    | ExprDecompact of array: Expr * dim: int  // decompact(A, d) - pull the compact component at dim d out as a free Idx (hard; allocates dense)
+    | ExprGram of left: Expr * right: Expr  // gram(A, B) = A * B^H: result[i][j] = sum_k A[i][k]*conj(B[j][k]). Square+Hermitian/symmetric when A,B same array; dense otherwise.
     | ExprExtents of array: Expr                   // extents(A) - innermost dim extent (rank-1 only for now)
     // Struct construction
     | ExprStruct of Ident * (Ident * Expr) list  // Point { x = 1, y = 2 }
