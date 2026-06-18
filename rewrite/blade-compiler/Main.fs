@@ -4510,6 +4510,12 @@ let main args =
         // warns (never fails) on a slow ratio. Requires g++.
         let failed = (runDifferentialTimingTests ()).Failed
         if failed = 0 then 0 else 1
+    | [| "test"; "netcdf" |] ->
+        // NetCDF provider tests. Tests 1-6 run against a mock NcFile (pure,
+        // always run). Tests 7-8 ("Live Load", "Blade Program Import") need
+        // sample.nc in the working dir + libnetcdf, else they SKIP. Returns an
+        // exit code directly (not a BlockResult like the other blocks).
+        runNetcdfTests ()
     | [| "test"; cat |] ->
         // Test a specific category: blade test basic, blade test loops, etc.
         let categoryTests =
