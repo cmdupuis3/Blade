@@ -1252,7 +1252,12 @@ let computeSDimsPerArray (arrayTypes: IRArrayType list) : int list =
         |> List.sumBy (fun idx -> idx.Arity))
 
 /// Build the flattened loop level structure
-let buildLoopLevelStructure (arrayTypes: IRArrayType list) (sDimsPerArray: int list) : LoopLevelInfo list =
+/// Build the RAW (by-array, unreordered) loop levels: one level per S-dimension
+/// arity component, emitted array-by-array in index-type order. This is the
+/// pre-grouping structure; product-symmetry reordering is applied separately by
+/// buildLoopLevelStructure so that the grouping rule lives in exactly one place
+/// (rawAxisGroups) and the reorder cannot drift from it.
+let buildRawLoopLevels (arrayTypes: IRArrayType list) (sDimsPerArray: int list) : LoopLevelInfo list =
     let mutable levels = []
     let mutable globalIdx = 0
     
@@ -1266,11 +1271,7 @@ let buildLoopLevelStructure (arrayTypes: IRArrayType list) (sDimsPerArray: int l
         // levelsConsumed). A single multi-arity record (e.g. SymIdx<2>, one
         // record Arity 2) and a sequence of arity-1 records (e.g. dense Idx,
         // Idx — two records) BOTH span the same number of levels, so the depth
-        // must increment continuously across records. Resetting per record (the
-        // old `arityIdx` from 0..Arity-1) left every arity-1 record's level at
-        // depth 0, so the innermost level of a multi-record dense array peeled
-        // to a sub-array instead of reading the scalar leaf (the elementwise-
-        // over-dense-multidim over-peel bug).
+        // must increment continuously across records.
         let mutable arrLevel = 0
         
         for idx in arr.IndexTypes do
@@ -1293,60 +1294,84 @@ let buildLoopLevelStructure (arrayTypes: IRArrayType list) (sDimsPerArray: int l
                     arrLevel <- arrLevel + 1
                 localDimIdx <- localDimIdx + 1
     
-    // Reorder the levels so that all levels sharing an index space are
-    // CONTIGUOUS (grouped by axis across the repeated/comm arrays), rather than
-    // grouped by array. The result storage for product symmetry lays the
-    // symmetric pairs out adjacently — SymIdx<2,Lat>, SymIdx<2,Lon> => dim order
-    // [Lat0, Lat1, Lon0, Lon1] — so the loop nest must visit dims in that same
-    // order for the write subscript and the per-axis triangular bounds to line
-    // up with storage. The default by-array emission above produces the
-    // interleaved order [Lat0, Lon0, Lat1, Lon1]; without this reorder the
-    // triangular pair (i0,i2) writes into storage dims (0,1) that expect a full
-    // range, scattering out of bounds (the product-symmetry crash).
-    //
-    // The reorder is a STABLE group-by on the index-space signature
-    // (LocalDimIndex + nominal Tag + extent key): levels are bucketed by the
-    // axis they belong to, buckets ordered by first appearance, and each array's
-    // own dim order is preserved within/across buckets (stable). Per-array slice
-    // state (currentNames keyed by ArrayPosition) and ArityComponent (per-array
-    // peel depth) are unaffected by global reordering, so slice construction
-    // stays correct. For d=1 and single-array cases every level already shares
-    // (or trivially groups into) one bucket in emission order, so the reorder is
-    // an identity — behavior is unchanged outside genuine multi-axis product
-    // Group ONLY by a shared NAMED index space: a nominal Tag, or a named
-    // extent binding (IRVar/IRParam). Two levels merge into one axis bucket iff
-    // they carry the same such name AND sit at the same positional axis
-    // (LocalDimIndex). Anonymous LITERAL extents are deliberately NOT grouped —
-    // two distinct arrays that merely share a length do not share an index
-    // space (§14.6), so each anonymous level gets a UNIQUE key (its global
-    // position) and stays put. This keeps the reorder an identity for plain
-    // outer products over distinct arrays (e.g. method_for(A,B,C) with A,B,C of
-    // extents 3,2,3 — A and C share length 3 but must NOT be reordered together;
-    // doing so scrambled the CUDA unrank, dropping the A index-2 contribution).
-    // Product symmetry uses NAMED index types (LatIdx, LonIdx) or same-array
-    // identity, both of which carry a stable name here, so it still groups by
-    // axis as required. This mirrors indexSpacesMatch's rule that anonymous
-    // literal coincidence does not constitute a shared index space.
-    let axisKey (gi: int) (lv: LoopLevelInfo) : string =
-        match lv.IndexSpace.Tag with
-        | Some t -> sprintf "%d|T:%s" lv.LocalDimIndex t
+    levels
+
+/// THE single canonical grouping rule, operating on RAW levels. Assigns each
+/// raw level an axis-group id (in first-appearance order). Two levels share a
+/// group iff they are product-symmetric partners under either multiplicity axis
+/// of the index-type scheme:
+///   (A) WITHIN one index type: consecutive arity components of a single
+///       symmetric/antisymmetric record (same array, same LocalDimIndex,
+///       consecutive ArityIndex).
+///   (B) ACROSS arrays: the same index space recurring in a commutative group —
+///       same comm group, same positional axis (LocalDimIndex), and the index
+///       types AGREE there via array identity (same array, the short-circuit,
+///       which also covers anonymous literal extents) OR nominal index-type
+///       identity (indexSpacesMatch). Position is required: A<Lat,Lon> and
+///       B<Lon,Lat> do NOT group without an explicit transpose; A<Lat,Lon> and
+///       B<Lat,Depth> group only the Lat axis.
+/// Both the loop reorder/iteration AND the output storage layout derive from
+/// this one function, so they cannot drift apart.
+let rawAxisGroups
+    (identities: ArrayIdentity list)
+    (commGroups: int list list)
+    (rawLevels: LoopLevelInfo list) : int list =
+    let inSameCommGroup i j =
+        commGroups |> List.exists (fun cg -> List.contains i cg && List.contains j cg)
+    let sameArrayIdentity i j =
+        i < identities.Length && j < identities.Length &&
+        sameIdentity identities.[i] identities.[j]
+    let mergesWith (lv: LoopLevelInfo) (prior: LoopLevelInfo) : bool =
+        let withinType =
+            lv.ArrayIndex = prior.ArrayIndex &&
+            lv.LocalDimIndex = prior.LocalDimIndex &&
+            lv.ArityIndex = prior.ArityIndex + 1 &&
+            (lv.IndexSpace.Symmetry = SymSymmetric ||
+             lv.IndexSpace.Symmetry = SymAntisymmetric)
+        let acrossArray =
+            inSameCommGroup lv.ArrayIndex prior.ArrayIndex &&
+            lv.LocalDimIndex = prior.LocalDimIndex &&
+            (sameArrayIdentity lv.ArrayIndex prior.ArrayIndex ||
+             indexSpacesMatch lv.IndexSpace prior.IndexSpace)
+        withinType || acrossArray
+    let arr = List.toArray rawLevels
+    let groupOf = Array.create arr.Length -1
+    let mutable nextGroup = 0
+    for gi in 0 .. arr.Length - 1 do
+        let prior = [ gi - 1 .. -1 .. 0 ] |> List.tryFind (fun j -> mergesWith arr.[gi] arr.[j])
+        match prior with
+        | Some j -> groupOf.[gi] <- groupOf.[j]
         | None ->
-            match lv.IndexSpace.Extent with
-            | IRVar (id, _) -> sprintf "%d|V:%d" lv.LocalDimIndex id
-            | IRParam (n, _, _) -> sprintf "%d|P:%s" lv.LocalDimIndex n
-            // Anonymous literal / other: unique per level -> never grouped.
-            | _ -> sprintf "U:%d" gi
-    let keyed = levels |> List.mapi (fun gi lv -> (axisKey gi lv, lv))
-    // Bucket order = order of first appearance of each axis key.
+            groupOf.[gi] <- nextGroup
+            nextGroup <- nextGroup + 1
+    List.ofArray groupOf
+
+/// Build the loop level structure, REORDERED so that levels sharing an axis
+/// group (per rawAxisGroups) are CONTIGUOUS — grouped by axis across the
+/// repeated/comm arrays rather than by array. The output storage for product
+/// symmetry lays its symmetric dims out adjacently (SymIdx<2,Lat>, SymIdx<2,Lon>
+/// => [Lat0,Lat1,Lon0,Lon1]); the loop nest must visit dims in the SAME order
+/// for the write subscript and per-axis triangular bounds to line up with
+/// storage. Both this reorder and deduceOutputType derive their ordering from
+/// rawAxisGroups, so iteration and storage cannot disagree. The reorder is a
+/// STABLE group-by (each group's members keep their by-array relative order),
+/// which preserves per-array slice state (currentNames keyed by ArrayPosition)
+/// and ArityComponent. For single-axis / single-array cases every level is its
+/// own or one shared group in emission order, so the reorder is an identity.
+let buildLoopLevelStructure
+    (identities: ArrayIdentity list)
+    (commGroups: int list list)
+    (arrayTypes: IRArrayType list)
+    (sDimsPerArray: int list) : LoopLevelInfo list =
+    let raw = buildRawLoopLevels arrayTypes sDimsPerArray
+    let groups = rawAxisGroups identities commGroups raw
+    // Bucket order = first appearance of each group id; stable within bucket.
+    let keyed = List.zip groups raw
     let bucketOrder =
-        keyed
-        |> List.map fst
-        |> List.fold (fun acc k -> if List.contains k acc then acc else acc @ [k]) []
+        groups |> List.fold (fun acc g -> if List.contains g acc then acc else acc @ [g]) []
     let reordered =
         bucketOrder
-        |> List.collect (fun k -> keyed |> List.filter (fun (kk, _) -> kk = k) |> List.map snd)
-    // Reassign GlobalLevelIndex to the new sequential positions; everything
-    // downstream (loop var __i{n}, iminMap, write subscript) keys on this.
+        |> List.collect (fun g -> keyed |> List.filter (fun (gg, _) -> gg = g) |> List.map snd)
     reordered |> List.mapi (fun i lv -> { lv with GlobalLevelIndex = i })
 
 // ============================================================================
@@ -1405,7 +1430,7 @@ let computeAllSymcomStates
     (commGroups: int list list)
     (sDimsPerArray: int list) : SymcomState list =
     
-    let levels = buildLoopLevelStructure arrayTypes sDimsPerArray
+    let levels = buildLoopLevelStructure identities commGroups arrayTypes sDimsPerArray
     if levels.IsEmpty then []
     else
         let inSameCommGroup i j =
@@ -1476,18 +1501,63 @@ let computeAllSymcomStates
                     if factorial symArity >= factorial commArity then SCSymmetric 
                     else SCCommutative)
 
-/// Determine which loop levels can use triangular iteration
+/// CANONICAL AXIS GROUPING — the single source of dimension grouping that both
+/// the OUTPUT STORAGE layout (deduceOutputType) and the ITERATION layout
+/// (buildLoopLevelStructure reorder / iminMap chaining) are intended to derive
+/// from, so the two cannot drift out of sync (the storage-vs-iteration
+/// divergence behind this session's product-symmetry bugs).
+///
+/// Returns one group id per loop level (parallel to `buildLoopLevelStructure`'s
+/// output order). Two levels share a group iff they are product-symmetric
+/// partners — i.e. iterate/store as one higher-arity symmetric index — under
+/// EITHER of the two multiplicity axes the index-type scheme allows:
+///
+///   (A) WITHIN one index type: consecutive arity components of a single
+///       symmetric/antisymmetric record (a SymIdx<r> spans r levels at the same
+///       LocalDimIndex of the same array, consecutive ArityIndex).
+///   (B) ACROSS arrays: the same index space recurring in a commutative group —
+///       same comm group, same positional axis (LocalDimIndex), and the index
+///       types AGREE there, established by array identity (same array repeated,
+///       the short-circuit) OR nominal index-type identity (indexSpacesMatch:
+///       shared Tag / named extent). This is the path the nominal system is
+///       designed to reach, including DISTINCT arrays that share an index type
+///       at aligned positions (e.g. comm over A<Lat,Lon>, B<Lat,Depth> groups
+///       the Lat axis while Lon/Depth stay independent).
+///
+/// Position is required in (B): A<Lat,Lon> and B<Lon,Lat> do NOT group (tags
+/// match but at swapped positions — needs an explicit transpose). Anonymous
+/// literal extents do not establish identity (handled by indexSpacesMatch).
+let computeAxisGroups
+    (identities: ArrayIdentity list)
+    (arrayTypes: IRArrayType list)
+    (commGroups: int list list)
+    (sDimsPerArray: int list) : int list =
+    // Group ids parallel to buildLoopLevelStructure's REORDERED output order,
+    // using the one shared grouping rule (rawAxisGroups). Applying rawAxisGroups
+    // to the already-reordered levels is well-defined: the reorder is itself a
+    // stable group-by on the same rule, so contiguous same-group runs come out
+    // with contiguous ids — exactly what the iteration consumers index by.
+    let levels = buildLoopLevelStructure identities commGroups arrayTypes sDimsPerArray
+    rawAxisGroups identities commGroups levels
+
+/// Determine which loop levels can use triangular iteration. A level iterates
+/// triangularly iff it is a non-first member of its canonical axis group (the
+/// first member is the group's root, iterated fully; each later member descends
+/// relative to its predecessors). Derives from the single computeAxisGroups
+/// analysis so this stays in lock-step with the iminMap chaining and the output
+/// storage layout.
 let computeTriangularLevels
     (arrayTypes: IRArrayType list)
     (identities: ArrayIdentity list)
     (commGroups: int list list)
     (sDimsPerArray: int list) : bool list =
-    
-    let states = computeAllSymcomStates identities arrayTypes commGroups sDimsPerArray
-    states |> List.map (fun s ->
-        match s with
-        | SCSymmetric | SCCommutative | SCBoth -> true
-        | SCNeither -> false)
+
+    let groupIds = computeAxisGroups identities arrayTypes commGroups sDimsPerArray
+    let seen = System.Collections.Generic.HashSet<int>()
+    groupIds |> List.map (fun g ->
+        let priorMember = seen.Contains g
+        seen.Add g |> ignore
+        priorMember)
 
 /// Compute speedup factor considering partial product symmetry
 let computePartialProductSpeedup 
@@ -1520,7 +1590,7 @@ let computePartialProductSpeedup
             |> List.filter (fun idx -> idx.Kind = SDimension && idx.Symmetry = SymSymmetric && idx.Arity > 1)
             |> List.fold (fun acc idx -> acc * factorial idx.Arity) 1L
     else
-        let levels = buildLoopLevelStructure arrayTypes sDimsPerArray
+        let levels = buildLoopLevelStructure identities commGroups arrayTypes sDimsPerArray
         let states = computeAllSymcomStates identities arrayTypes commGroups sDimsPerArray
         
         let mutable speedup = 1L
@@ -1805,71 +1875,67 @@ let deduceOutputType
     
     if arrayTypes.IsEmpty then IRTUnit
     else
-        // Step 1: Build identity groups (consecutive identical arrays)
-        let groups = 
-            let mutable result = []
-            let mutable currentGroup = []
-            let mutable currentId = None
-            
-            for i, (arrTy, identity) in List.zip arrayTypes identities |> List.indexed do
-                let sDims = if i < sDimsPerArray.Length then sDimsPerArray.[i] else 0
-                match currentId with
-                | None -> 
-                    currentId <- Some identity
-                    currentGroup <- [(i, arrTy, sDims)]
-                | Some id when sameIdentity id identity ->
-                    currentGroup <- currentGroup @ [(i, arrTy, sDims)]
-                | Some _ ->
-                    result <- result @ [(currentId.Value, currentGroup)]
-                    currentId <- Some identity
-                    currentGroup <- [(i, arrTy, sDims)]
-            
-            if currentGroup.Length > 0 then
-                result <- result @ [(currentId.Value, currentGroup)]
-            result
-        
-        // Step 2 & 3: Build S-dim index types for each group
+        // Step 1+2: Build output S-dim index types from the SINGLE canonical
+        // axis grouping (rawAxisGroups) — the same source the iteration thread
+        // uses — so output storage and loop iteration cannot disagree. This
+        // replaces the older array-identity grouping, which could not express
+        // PARTIAL product symmetry: distinct arrays sharing an index space at
+        // some positions (e.g. comm over A<Lat,Lon>, B<Lat,Depth>) must
+        // symmetrize ONLY the shared axis (Lat), which is an axis-level fact,
+        // not an array-level one (§14.6).
+        //
+        // Each axis group becomes ONE output S-dim index:
+        //   - group size > 1  -> a higher-arity SYMMETRIC index (Arity = group
+        //     size), or ANTISYMMETRIC under a Reynolds antisymmetrization. This
+        //     covers both same-array repetition and distinct arrays sharing a
+        //     named index space, plus a within-type symmetric record (whose
+        //     arity components form one group of that arity).
+        //   - group size == 1 -> the source index type copied VERBATIM (Id
+        //     refreshed only), preserving its own Arity/Symmetry and any
+        //     ragged/dep structure. This is load-bearing for a single symmetric
+        //     input (method_for(sym) <@> h carries SymIdx<r,N> through) and for
+        //     elementwise-over-ragged/dep (rank-0 kernel preserves input shape).
+        //
+        // A level's (ArrayIndex, LocalDimIndex) recovers its source IRIndexType
+        // from that array's S-dim records, so the verbatim copy uses the full
+        // original record (not the projected IndexSpace).
+        let sLevels = buildLoopLevelStructure identities commGroups arrayTypes sDimsPerArray
+        let sGroups = rawAxisGroups identities commGroups sLevels
+        // Per array: its S-dimension index-type records, in order (LocalDimIndex
+        // indexes into this list).
+        let sDimRecordsByArray =
+            arrayTypes |> List.map (fun arr ->
+                arr.IndexTypes |> List.filter (fun idx -> idx.Kind = SDimension))
+        let sourceRecord (lv: LoopLevelInfo) : IRIndexType option =
+            if lv.ArrayIndex < sDimRecordsByArray.Length then
+                let recs = sDimRecordsByArray.[lv.ArrayIndex]
+                if lv.LocalDimIndex < recs.Length then Some recs.[lv.LocalDimIndex] else None
+            else None
         let outputSDims = 
-            groups |> List.collect (fun (_, groupMembers) ->
-                let arity = groupMembers.Length
-                let inCommGroup = 
-                    // Check if all indices of this group are in the same comm group
-                    let indices = groupMembers |> List.map (fun (i, _, _) -> i)
-                    commGroups |> List.exists (fun cg -> 
-                        indices |> List.forall (fun i -> List.contains i cg))
-                
-                if inCommGroup && arity > 1 then
-                    // Commutative group: create a higher-arity index over the
-                    // group. Symmetric by default; antisymmetric when this
-                    // application is a Reynolds antisymmetrization (isAntisym).
-                    // Takes S-dims from first member, uses arity = group size
-                    match groupMembers with
-                    | [] -> []
-                    | (_, arrTy, numSDims) :: _ ->
-                        let groupSymmetry =
-                            if isAntisym then SymAntisymmetric else SymSymmetric
-                        let sDimIndices = arrTy.IndexTypes |> List.take (min numSDims arrTy.IndexTypes.Length)
-                        sDimIndices |> List.map (fun idx ->
-                            { idx with 
-                                Arity = arity
-                                Symmetry = groupSymmetry
-                                Id = builder.FreshId() })
-                else
-                    // Non-commutative: each member contributes its own S-dims.
-                    // A rank-0 (elementwise) kernel preserves the INPUT's shape,
-                    // so copy each S-dim index type VERBATIM — keeping its own
-                    // Arity and Symmetry — and only refresh Id. For independent
-                    // rank-1 vectors this is identical to emitting Idx<n> (their
-                    // index types are already Arity=1/SymNone); for a single
-                    // symmetric input (e.g. method_for(sym) <@> h where sym is
-                    // SymIdx<r,N>) it correctly carries the symmetric index type
-                    // through to the output instead of collapsing it to a plain
-                    // rank-1 Idx (which mis-sized the output as a scalar).
-                    groupMembers |> List.collect (fun (_, arrTy, numSDims) ->
-                        let sDimIndices = arrTy.IndexTypes |> List.take (min numSDims arrTy.IndexTypes.Length)
-                        sDimIndices |> List.map (fun idx ->
-                            { idx with
-                                Id = builder.FreshId() })))
+            // Group ids in reordered level order; emit one index per group, in
+            // first-appearance order (which matches the loop nest order).
+            let levelArr = List.toArray sLevels
+            let groupArr = List.toArray sGroups
+            let mutable emittedGroups = []
+            let mutable result = []
+            for gi in 0 .. levelArr.Length - 1 do
+                let g = groupArr.[gi]
+                if not (List.contains g emittedGroups) then
+                    emittedGroups <- emittedGroups @ [g]
+                    let memberIdxs = [ for k in 0 .. levelArr.Length - 1 do if groupArr.[k] = g then yield k ]
+                    let arity = List.length memberIdxs
+                    let repLevel = levelArr.[List.head memberIdxs]
+                    match sourceRecord repLevel with
+                    | None -> ()
+                    | Some rep ->
+                        if arity > 1 then
+                            let groupSymmetry = if isAntisym then SymAntisymmetric else SymSymmetric
+                            result <- result @ [{ rep with Arity = arity; Symmetry = groupSymmetry; Id = builder.FreshId() }]
+                        else
+                            // size-1 group: verbatim copy (preserve Arity, Symmetry,
+                            // ragged/dep structure), refresh Id only.
+                            result <- result @ [{ rep with Id = builder.FreshId() }]
+            result
             // Drop indices tagged as "consumed by the kernel" — but ONLY when
             // the kernel actually consumes an inner dimension (it has an
             // array-typed parameter of rank > 0, e.g. `lambda(g: Array<...>) ->
@@ -2741,75 +2807,36 @@ let buildLoopNestCodeGen
             | None -> []  // Should not happen
         else
             // Outer product: one element per level
-            let loopLevels = buildLoopLevelStructure arrayTypes sDimsPerArray
+            let loopLevels = buildLoopLevelStructure identities commGroups arrayTypes sDimsPerArray
             let triangularLevels = info.TriangularLevels
             let symcomStates = info.SymcomStates
             
-            // Compute the iminMap
+            // Compute the iminMap from the single canonical axis grouping
+            // (computeAxisGroups), so chaining stays in lock-step with the
+            // triangular-level detection, the loop reorder, and the output
+            // storage layout. Each level either:
+            //   - is the FIRST member of its axis group -> root (maps to itself,
+            //     iterated fully), or
+            //   - chains to the NEAREST EARLIER level sharing its axis group ->
+            //     descends triangularly relative to it.
+            // The grouping itself encodes the product-symmetry rule (positional-
+            // and-nominal, with array identity as the same-array short-circuit):
+            // all levels of one shared index space form a single rank-r simplex;
+            // distinct index spaces stay independent (d independent simplices ->
+            // (r!)^d). It covers same-array repetition, distinct arrays sharing a
+            // named index type at aligned positions, and within-type symmetric
+            // records uniformly.
+            let axisGroupIds = computeAxisGroups identities arrayTypes commGroups sDimsPerArray
+            let groupAt i = if i < axisGroupIds.Length then axisGroupIds.[i] else -1
             let iminMap = 
-                loopLevels |> List.mapi (fun globalIdx level ->
-                    let state = if globalIdx < symcomStates.Length then symcomStates.[globalIdx] else SCNeither
-                    match state with
-                    | SCNeither -> globalIdx
-                    | SCSymmetric | SCCommutative | SCBoth ->
-                        // Chain this triangular level to the nearest preceding
-                        // level that shares its index space, covering BOTH
-                        // regimes of product symmetry:
-                        //   (1) Same array repeated (method_for(A, A)): the axes
-                        //       are literally the same physical index, matched by
-                        //       same array AND same positional axis
-                        //       (LocalDimIndex). This handles anonymous literal
-                        //       extents that the nominal check below rejects.
-                        //   (2) Different arrays in a comm group: matched by
-                        //       NOMINAL index-type identity (indexSpacesMatch:
-                        //       same named Tag or named extent binding), since
-                        //       positions need not align and identity is the
-                        //       license (§14.6).
-                        // All levels sharing an index space chain into one
-                        // rank-r simplex; distinct index spaces stay independent
-                        // -> d independent simplices -> (r!)^d. Linking to the
-                        // immediate predecessor (globalIdx-1) instead merged
-                        // every axis into one rank-(r*d) simplex (the over-
-                        // collapse: C(n+r*d-1, r*d), e.g. 4! instead of (2!)^2).
-                        let mySpace = level.IndexSpace
-                        let myArr = level.ArrayIndex
-                        let myDim = level.LocalDimIndex
-                        let myIdent = if myArr < identities.Length then Some identities.[myArr] else None
-                        let prior =
-                            [ globalIdx - 1 .. -1 .. 0 ]
-                            |> List.tryFind (fun j ->
-                                let lv = loopLevels.[j]
-                                // Product symmetry matches axis-by-axis: a level
-                                // chains with a prior level only when they are at
-                                // the SAME positional axis (LocalDimIndex) AND
-                                // their index types agree there. Two regimes of
-                                // "agree":
-                                //   - same array repeated: array identity makes
-                                //     every position trivially agree (the short-
-                                //     circuit heuristic — full product symmetry
-                                //     across all axes; also covers anonymous
-                                //     literal extents the nominal check rejects);
-                                //   - different arrays: the index types at this
-                                //     position must be NOMINALLY identical
-                                //     (indexSpacesMatch on Tag / named extent).
-                                // Position is required in BOTH: A<Lat,Lon> and
-                                // B<Lon,Lat> do NOT product-symmetrize without an
-                                // explicit transpose (the tags match but at
-                                // different positions); A<Lat,Lon> and
-                                // B<Lat,Depth> symmetrize only at position 0
-                                // (Lat), the rest staying independent.
-                                if lv.LocalDimIndex <> myDim then false
-                                else
-                                    let lvIdent = if lv.ArrayIndex < identities.Length then Some identities.[lv.ArrayIndex] else None
-                                    let sameArray =
-                                        match myIdent, lvIdent with
-                                        | Some ia, Some ib -> sameIdentity ia ib
-                                        | _ -> false
-                                    sameArray || indexSpacesMatch lv.IndexSpace mySpace)
-                        match prior with
-                        | Some j -> j
-                        | None -> globalIdx   // first level on this index space = root
-                )
+                loopLevels |> List.mapi (fun globalIdx _level ->
+                    let g = groupAt globalIdx
+                    let prior =
+                        [ globalIdx - 1 .. -1 .. 0 ]
+                        |> List.tryFind (fun j -> groupAt j = g)
+                    match prior with
+                    | Some j -> j
+                    | None -> globalIdx)   // first member of this axis group = root
             
             // Compute dependency path for each level
             let rec dependencyPath (level: int) : int list =

@@ -2778,8 +2778,10 @@ let private exactSimplexRatio (r: int) (axisExtents: int list) : float =
         if sym > 0.0 then acc * (dense / sym) else acc) 1.0
 
 /// Run the differential timing harness. Reports, per case, the measured
-/// speedup ratio against the (r!)^d theoretical ceiling, warning (not failing)
-/// when the observed ratio is below `warnFraction` of the ceiling.
+/// speedup ratio against the exact finite-n cell-count prediction (and the
+/// asymptotic (r!)^d ceiling for context), warning (not failing) when the
+/// ratio falls below a lower fraction of the prediction (symmetry under-
+/// exploited) or implausibly far above it (likely a measurement artifact).
 let runDifferentialTimingTests () : Blade.Tests.TestHarness.BlockResult =
     let outputDir = "./generated_cpp_tests"
     printHeader "Differential Timing"
@@ -2790,10 +2792,6 @@ let runDifferentialTimingTests () : Blade.Tests.TestHarness.BlockResult =
     else
         Directory.CreateDirectory(outputDir) |> ignore
         let runs = 5
-        // Below this fraction of the theoretical ceiling we WARN. Generous,
-        // because the whole-main timing (setup + print included) structurally
-        // depresses the ratio below the pure-compute (r!)^d.
-        let warnFraction = 0.30
         let mutable passed = 0
         let mutable warned = 0
         let mutable failed = 0
@@ -2838,15 +2836,35 @@ let runDifferentialTimingTests () : Blade.Tests.TestHarness.BlockResult =
                 let detail =
                     sprintf "n=%d r=%d d=%d | sym=%.4gs dense=%.4gs | ratio=%.2fx vs %s"
                         n r d ts td ratio targetStr
-                if ratio >= warnFraction * expectedRatio then
-                    Blade.Tests.TestHarness.resultLine Blade.Tests.TestHarness.Pass label detail
+                // The prediction (expectedRatio) is a CELL-COUNT limit: how many
+                // fewer iterations the symmetric arm performs. The measured
+                // wall-clock ratio is NOT a pure function of cell count — the
+                // symmetric result has a much smaller working set, so better
+                // cache locality can make it faster PER CELL and push the ratio
+                // ABOVE the cell-count prediction (a real, benign effect, e.g.
+                // r=2 measured 4.43x vs cell-count 3.75x). So this is a tolerance
+                // BAND, not a one-sided floor:
+                //   - below lowerFrac·prediction  -> WARN (genuine shortfall: the
+                //     symmetry is not being exploited — the failure signal);
+                //   - within [lowerFrac·pred, upperMult·pred] -> clean pass
+                //     (the expected zone, including a cache-bonus overshoot);
+                //   - above upperMult·prediction   -> WARN (implausibly fast —
+                //     likely a measurement artifact, e.g. a degenerate dense arm
+                //     doing near-zero work, NOT a real speedup).
+                let lowerFrac = 0.70
+                let upperMult = 5.0
+                if ratio < lowerFrac * expectedRatio then
+                    Blade.Tests.TestHarness.resultLine Blade.Tests.TestHarness.Pass label
+                        (sprintf "%s -- WARN: below %.0f%% of cell-count prediction (symmetry under-exploited?)" detail (lowerFrac * 100.0))
+                    warned <- warned + 1
+                    passed <- passed + 1
+                elif ratio > upperMult * expectedRatio then
+                    Blade.Tests.TestHarness.resultLine Blade.Tests.TestHarness.Pass label
+                        (sprintf "%s -- WARN: %.1fx the cell-count prediction (implausible; check for measurement artifact)" detail (ratio / expectedRatio))
+                    warned <- warned + 1
                     passed <- passed + 1
                 else
-                    // Below threshold: WARN, do not fail (timing is noisy /
-                    // setup-diluted). Still counts as a pass for block health.
-                    Blade.Tests.TestHarness.resultLine Blade.Tests.TestHarness.Pass label
-                        (sprintf "%s -- WARN: below %.0f%% of target" detail (warnFraction * 100.0))
-                    warned <- warned + 1
+                    Blade.Tests.TestHarness.resultLine Blade.Tests.TestHarness.Pass label detail
                     passed <- passed + 1
 
         // -------------------------------------------------------------------
