@@ -68,6 +68,23 @@ let result = L <@> reynolds(g) |> compute
 // EXPECT: result = [6.0, 9.0, 12.0, 12.0, 15.0, 18.0]
 """
 
+// Elementwise (rank-0) map over an already-symmetric array. `sym` is the
+// rank-2 symmetric array from test30 (stored canonical [6,9,12,12,15,18]);
+// mapping h(e) = e * 2 over it must stay symmetric and produce each canonical
+// element doubled. This is the RUNTIME+VALUE half of the elementwise-over-
+// symmetric feature (the type half is in Test_TypeStructure). It exercises
+// iterating a symmetric array as a method_for input + allocating a symmetric
+// output, the path that currently needs codegen support.
+let test_elementwiseOverSymmetric = """
+let A = [1.0, 2.0, 3.0]
+let L = method_for(A, A)
+let g = lambda(x, y) where comm(x, y) -> 2.0 * x + y
+let sym = L <@> reynolds(g) |> compute
+let h = lambda(e) -> e * 2.0
+let result = method_for(sym) <@> h |> compute
+// EXPECT: result = [12.0, 18.0, 24.0, 24.0, 30.0, 36.0]
+"""
+
 // ============================================================================
 // Reynolds with commutative kernel (sanity check)
 // ============================================================================
@@ -320,6 +337,7 @@ let reynoldsTests = [
     ("Reynolds 2D Antisymmetric", test28_reynolds2dAnti)
     ("Reynolds 3D Symmetric", test29_reynolds3dSym)
     ("Reynolds 2D Sym Identity", test30_reynolds2dSymIdentity)
+    ("Elementwise Over Symmetric", test_elementwiseOverSymmetric)
     ("Reynolds Commutative", test31_reynoldsCommutative)
     ("Reynolds Parallel", test32_reynoldsParallel)
     ("Reynolds Fusion", test33_reynoldsFusion)

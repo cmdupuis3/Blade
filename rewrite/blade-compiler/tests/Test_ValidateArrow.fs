@@ -1,6 +1,7 @@
 module Blade.Tests.ValidateArrow
 
 open Blade.IR
+open Blade.Tests.TestHarness
 
 // ============================================================================
 // Tests for the validateArrowShape gate at mkVirtualArrayArrow entry
@@ -152,7 +153,7 @@ let private test_validate_arrow_shape_directly () =
 
 // ---- Runner ---------------------------------------------------------------
 
-let runValidateArrowTests () : int * int =
+let runValidateArrowTests () : Blade.Tests.TestHarness.BlockResult =
     let tests = [
         test_valid_virtual_array_scalar_elem
         test_valid_virtual_array_rank_2
@@ -163,18 +164,18 @@ let runValidateArrowTests () : int * int =
         test_nullary_func_arrow_constructs
         test_validate_arrow_shape_directly
     ]
-    printfn ""
-    printfn "=== Validate Arrow gate tests ==="
+    Blade.Tests.TestHarness.printHeader "Validate Arrow Gate"
     let mutable passed = 0
     let mutable failed = 0
+    let mutable failedNames = []
     for testFn in tests do
         let (name, ok, detail) = testFn ()
         if ok then
             passed <- passed + 1
-            printfn "  ✓ %s" name
+            Blade.Tests.TestHarness.resultLine Blade.Tests.TestHarness.Pass name ""
         else
             failed <- failed + 1
-            printfn "  ✗ %s" name
-            printfn "      %s" detail
-    printfn "Validate Arrow: %d passed, %d failed" passed failed
-    (passed, failed)
+            failedNames <- failedNames @ [name]
+            Blade.Tests.TestHarness.resultLine Blade.Tests.TestHarness.Fail name detail
+    Blade.Tests.TestHarness.printFooter "Validate Arrow" [sprintf "%d passed" passed; sprintf "%d failed" failed]
+    { Block = "Validate Arrow"; Passed = passed; Failed = failed; Skipped = 0; FailedNames = failedNames }

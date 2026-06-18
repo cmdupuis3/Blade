@@ -954,6 +954,24 @@ let result = decompact(sym, 0)
 // EXPECT: result = [1, 2, 3, 4, 6, 9, 2, 4, 6, 8, 12, 18, 3, 6, 9, 12, 18, 27]
 """
 
+// Chained decompact: fully densify a rank-3 symmetric array by decompacting
+// twice. The FIRST decompact (sym, 0) yields [Idx ; SymIdx<2>] (one free leading
+// dim + a symmetric pair). The SECOND decompact (., 1) then targets that pair
+// while a free Idx PRECEDES it — exercising the surrounding-free-dimension
+// codegen path (leading free loop wrapping the symmetric fission scatter). The
+// result is a fully dense 3x3x3 array: dense[p][q][r] = product over sorted
+// (p,q,r) = A[p]*A[q]*A[r] (order-independent by symmetry). Confirms that
+// composed decompaction densifies, and that surrounding dims map identically.
+let test_decompact_chained_full_dense = """
+let A = [1.0, 2.0, 3.0]
+let L = method_for(A, A, A)
+let f = lambda(x, y, z) where comm(x, y, z) -> x * y * z
+let sym = L <@> f |> compute
+let step1 = decompact(sym, 0)
+let result = decompact(step1, 1)
+// EXPECT: result = [1, 2, 3, 2, 4, 6, 3, 6, 9, 2, 4, 6, 4, 8, 12, 6, 12, 18, 3, 6, 9, 6, 12, 18, 9, 18, 27]
+"""
+
 let test_decompact_sym3_peel_last = """
 // d=2: freed axis = dim 2 (last), kept pair = (i,j) symmetric. Output
 // SymIdx<2,3> -> Idx<3>, mask {1,1,2}, storage out[a][b][k] with (i,j)=(a,a+b).
@@ -1087,6 +1105,7 @@ let indexTypeTests = [
     ("Decompact Symmetric", test_decompact_symmetric)
     ("Decompact Antisymmetric", test_decompact_antisymmetric)
     ("Decompact Sym3 Peel First", test_decompact_sym3_peel_first)
+    ("Decompact Chained Full Dense", test_decompact_chained_full_dense)
     ("Decompact Sym3 Peel Last", test_decompact_sym3_peel_last)
     ("Decompact Sym3 Peel Mid (dense)", test_decompact_sym3_peel_mid)
     ("Decompact Anti3 Source", test_reynolds_anti3_source)

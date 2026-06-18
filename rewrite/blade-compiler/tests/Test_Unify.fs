@@ -1,6 +1,7 @@
 module Blade.Tests.Unify
 
 open Blade.IR
+open Blade.Tests.TestHarness
 open Blade.TypeCheck
 
 // ============================================================================
@@ -240,7 +241,7 @@ let private test_unrelated_types_fail () =
 
 // ---- Runner ---------------------------------------------------------------
 
-let runUnifyTests () : int * int =
+let runUnifyTests () : Blade.Tests.TestHarness.BlockResult =
     let tests = [
         test_identical_concrete
         test_mixed_flat_vs_split_nested
@@ -253,18 +254,18 @@ let runUnifyTests () : int * int =
         test_uniform_shape_with_infer_elem_binds
         test_unrelated_types_fail
     ]
-    printfn ""
-    printfn "=== Unify integration tests ==="
+    Blade.Tests.TestHarness.printHeader "Unify Integration"
     let mutable passed = 0
     let mutable failed = 0
+    let mutable failedNames = []
     for testFn in tests do
         let (name, ok, detail) = testFn ()
         if ok then
             passed <- passed + 1
-            printfn "  ✓ %s" name
+            Blade.Tests.TestHarness.resultLine Blade.Tests.TestHarness.Pass name ""
         else
             failed <- failed + 1
-            printfn "  ✗ %s" name
-            printfn "      %s" detail
-    printfn "Unify: %d passed, %d failed" passed failed
-    (passed, failed)
+            failedNames <- failedNames @ [name]
+            Blade.Tests.TestHarness.resultLine Blade.Tests.TestHarness.Fail name detail
+    Blade.Tests.TestHarness.printFooter "Unify" [sprintf "%d passed" passed; sprintf "%d failed" failed]
+    { Block = "Unify"; Passed = passed; Failed = failed; Skipped = 0; FailedNames = failedNames }

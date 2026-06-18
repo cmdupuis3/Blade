@@ -1,6 +1,7 @@
 module Blade.Tests.Normalize
 
 open Blade.IR
+open Blade.Tests.TestHarness
 
 // ============================================================================
 // IR-level unit tests for the type normalizer (Segment 6, Path B-nested).
@@ -220,7 +221,7 @@ let private test_empty_slots_preserved () =
 // ---- Runner ---------------------------------------------------------------
 
 /// Run all normalizer tests, return (passed, failed) counts.
-let runNormalizeTests () : int * int =
+let runNormalizeTests () : Blade.Tests.TestHarness.BlockResult =
     let tests = [
         test_noop_on_uniform
         test_noop_on_pure_function
@@ -234,18 +235,18 @@ let runNormalizeTests () : int * int =
         test_equiv_mixed_split
         test_empty_slots_preserved
     ]
-    printfn ""
-    printfn "=== IR Normalize tests ==="
+    Blade.Tests.TestHarness.printHeader "IR Normalize"
     let mutable passed = 0
     let mutable failed = 0
+    let mutable failedNames = []
     for testFn in tests do
         let (name, ok, detail) = testFn ()
         if ok then
             passed <- passed + 1
-            printfn "  ✓ %s" name
+            Blade.Tests.TestHarness.resultLine Blade.Tests.TestHarness.Pass name ""
         else
             failed <- failed + 1
-            printfn "  ✗ %s" name
-            printfn "      %s" detail
-    printfn "Normalize: %d passed, %d failed" passed failed
-    (passed, failed)
+            failedNames <- failedNames @ [name]
+            Blade.Tests.TestHarness.resultLine Blade.Tests.TestHarness.Fail name detail
+    Blade.Tests.TestHarness.printFooter "Normalize" [sprintf "%d passed" passed; sprintf "%d failed" failed]
+    { Block = "Normalize"; Passed = passed; Failed = failed; Skipped = 0; FailedNames = failedNames }

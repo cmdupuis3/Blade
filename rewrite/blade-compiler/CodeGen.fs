@@ -197,6 +197,59 @@ let ompTestModeCell () : bool ref =
 let setOmpTestMode (on: bool) : unit =
     (ompTestModeCell ()).Value <- on
 
+/// Split-timing mode: when on, the generated main() emits TWO timing
+/// checkpoints — one around input-data setup ("Input Allocation took <t>s")
+/// and one around the computation ("<name> completed in <t>s"), instead of a
+/// single whole-body clock. The differential-timing harness uses this so the
+/// reported compute time excludes input allocation (which the archaic Blade
+/// prototype showed can be a large, non-trivial fraction of the total). Default
+/// OFF so every other test's single "completed in" line (which value-checks
+/// parse around) is unchanged. AsyncLocal for the same reason as ompTestMode:
+/// the parallel test runner must not race on the flag.
+let private splitTimingModeStorage =
+    System.Threading.AsyncLocal<bool ref>()
+
+let splitTimingModeCell () : bool ref =
+    let v = splitTimingModeStorage.Value
+    if isNull (box v) then
+        let fresh = ref false
+        splitTimingModeStorage.Value <- fresh
+        fresh
+    else v
+
+let setSplitTimingMode (on: bool) : unit =
+    (splitTimingModeCell ()).Value <- on
+
+let splitTimingModeEnabled () : bool =
+    (splitTimingModeCell ()).Value
+
+/// Optional refinement of split-timing: when set to Some name, the compute
+/// clock starts immediately before the binding with that NAME (everything
+/// before it — producers, decompact chains, any setup — is attributed to the
+/// "input allocation" phase, and only that binding onward is timed). This
+/// isolates a single final kernel's runtime from all the work that prepares
+/// its inputs. When None, split-timing falls back to the default "first
+/// compute binding starts the clock" behavior. Dependency-safe: bindings are
+/// emitted in strict ID order, so everything the named binding reads is
+/// already emitted (in the setup phase) before the clock starts.
+let private splitTimingOnlyBindingStorage =
+    System.Threading.AsyncLocal<string option ref>()
+
+let private splitTimingOnlyBindingCell () : string option ref =
+    let v = splitTimingOnlyBindingStorage.Value
+    if isNull (box v) then
+        let fresh = ref None
+        splitTimingOnlyBindingStorage.Value <- fresh
+        fresh
+    else v
+
+let setSplitTimingOnlyBinding (name: string option) : unit =
+    (splitTimingOnlyBindingCell ()).Value <- name
+
+let splitTimingOnlyBinding () : string option =
+    (splitTimingOnlyBindingCell ()).Value
+
+
 /// Query whether OpenMP test-mode instrumentation should be emitted.
 let ompTestModeEnabled () : bool =
     (ompTestModeCell ()).Value
@@ -2109,18 +2162,36 @@ and materializeInlineForm (subst: SubstMap) (names: Map<IRId, string>) (varName:
         let arrName = exprToCppCore subst names arrExpr
         (match inferExprType arrExpr with
          | ArrayElem arrTy ->
-            // The compact slot must be the sole index slot (TypeCheck enforces
-            // this for now); read its arity r and symmetry.
+            // The compact group being decompacted is the LAST index slot
+            // (TypeCheck enforces: any preceding slots are plain free Idx
+            // singletons). Read the group's arity r and symmetry from that last
+            // slot; the leading free slots become an outer loop product that
+            // wraps the fission scatter. `leadingN` = number of leading free
+            // dims; their extents are emitted before the group's freed/expanded
+            // axes, and their indices map identically source->dest.
+            let leadingN = max 0 (arrTy.IndexTypes.Length - 1)
             let (r, sym) =
-                match arrTy.IndexTypes with
-                | [ix] -> (max 1 ix.Arity, ix.Symmetry)
-                | _ -> (0, SymNone)
+                match List.tryLast arrTy.IndexTypes with
+                | Some ix -> (max 1 ix.Arity, ix.Symmetry)
+                | None -> (0, SymNone)
+            // Leading free loop variables and the per-dimension subscript they
+            // contribute (prefixed to both the output and source addresses).
+            let leadVar j = sprintf "__dc%s_S%d" varName j
+            let leadSubs = [ for j in 0 .. leadingN - 1 -> sprintf "[%s]" (leadVar j) ] |> String.concat ""
             let extentsName = sprintf "%s_extents" varName
             let nExpr = sprintf "%s.extents[0]" arrName
             (match sym with
              | SymSymmetric when r >= 2 ->
                 // ----- General symmetric fission (gather) -----
-                let dPos = dimArg          // logical position within the group
+                // The targeted group is the LAST slot, preceded by `leadingN`
+                // free singleton dims (global indices 0..leadingN-1). The cut's
+                // position WITHIN the group is therefore the global dim minus
+                // the leading count — NOT the global dim itself. (For the sole-
+                // slot case leadingN=0 so they coincide, which is why this only
+                // surfaced once chained decompaction produced leading dims:
+                // using the global dim made aLen too large, emitting more tuple
+                // entries than the group's arity.)
+                let dPos = dimArg - leadingN   // logical position within the group
                 let aLen = dPos            // left group arity
                 let bLen = r - dPos - 1    // right group arity
                 // Build the per-group SYMM mask: a run of arity>=2 is one group
@@ -2137,17 +2208,23 @@ and materializeInlineForm (subst: SubstMap) (names: Map<IRId, string>) (varName:
                             for _ in 1 .. len do acc.Add g
                             g <- g + 1
                         // len <= 0: emit nothing, do NOT advance the group counter
+                    // Leading free dims are distinct dense singletons, emitted
+                    // before the fission group's mask entries.
+                    for _ in 1 .. leadingN do emitGroup 1
                     emitGroup aLen
                     emitGroup 1            // the freed axis (always a singleton)
                     emitGroup bLen
                     List.ofSeq acc
                 let symmArg = hoistSymmDecl (sprintf "%s_symm" varName) mask
+                // Total output rank = leading free dims + the fission group's
+                // r expanded axes. All axes share extent n (== arrName.extents[0]).
+                let totalRank = leadingN + r
                 let extentDecl =
-                    [ sprintf "size_t %s[%d];" extentsName r ]
-                    @ [ for i in 0 .. r - 1 -> sprintf "%s[%d] = %s;" extentsName i nExpr ]
+                    [ sprintf "size_t %s[%d];" extentsName totalRank ]
+                    @ [ for i in 0 .. totalRank - 1 -> sprintf "%s[%d] = %s;" extentsName i nExpr ]
                 let allocDecl =
                     sprintf "Array<%s, %d> %s = { allocate<typename promote<%s, %d>::type, %s>(%s), %s };"
-                        elemTypeStr r varName elemTypeStr r symmArg extentsName extentsName
+                        elemTypeStr totalRank varName elemTypeStr totalRank symmArg extentsName extentsName
                 // Emit a left-justified canonical nest for a group. Returns the
                 // generated loop-open lines, the storage subscript ("[v0][v1]..")
                 // and the names of the per-level LOGICAL vars (prefix sums).
@@ -2174,7 +2251,14 @@ and materializeInlineForm (subst: SubstMap) (names: Map<IRId, string>) (varName:
                         logs <- logs @ [logName]
                     (lines, subs, logs)
                 let fv = sprintf "__dc%s_F" varName
-                let mutable depth = 0
+                // Leading free dims become the outermost loops; the fission nest
+                // is emitted indented beneath them. Their indices are prefixed
+                // (leadSubs) to both the output and source addresses.
+                let leadLines =
+                    [ for j in 0 .. leadingN - 1 ->
+                        let ind = String.replicate j "    "
+                        sprintf "%sfor (size_t %s = 0; %s < %s; %s++) {" ind (leadVar j) (leadVar j) nExpr (leadVar j) ]
+                let mutable depth = leadingN
                 let (lLines, lSubs, lLogs) = emitGroupNest "L" aLen depth
                 depth <- depth + aLen
                 let fInd = String.replicate depth "    "
@@ -2190,13 +2274,16 @@ and materializeInlineForm (subst: SubstMap) (names: Map<IRId, string>) (varName:
                         if k = 0 then sprintf "[__dc%s_t[0]]" varName
                         else sprintf "[__dc%s_t[%d] - __dc%s_t[%d]]" varName k varName (k-1) ]
                     |> String.concat ""
-                let outSub = lSubs + sprintf "[%s]" fv + rSubs
+                // Free leading dims map identically source->dest, so prefix them
+                // to both subscripts.
+                let outSub = leadSubs + lSubs + sprintf "[%s]" fv + rSubs
+                let srcSubFull = leadSubs + srcSub
                 let body =
                     [ sprintf "%ssize_t __dc%s_t[%d] = { %s };" bodyInd varName r arrInit
                       sprintf "%sstd::sort(__dc%s_t, __dc%s_t + %d);" bodyInd varName varName r
-                      sprintf "%s%s%s = %s%s;" bodyInd varName outSub arrName srcSub ]
+                      sprintf "%s%s%s = %s%s;" bodyInd varName outSub arrName srcSubFull ]
                 let closes = [ for dd in depth - 1 .. -1 .. 0 -> sprintf "%s}" (String.replicate dd "    ") ]
-                Some (extentDecl @ [allocDecl] @ lLines @ [fLine] @ rLines @ body @ closes)
+                Some (extentDecl @ [allocDecl] @ leadLines @ lLines @ [fLine] @ rLines @ body @ closes)
              | SymAntisymmetric when r = 2 ->
                 // ----- Antisym rank-2: fully dissolves to dense n×n -----
                 // Zero-fill (diagonal stays 0). Walk a in [0,n), b in [0,n-a-1);
@@ -2570,17 +2657,33 @@ let genElementBindingNew (level: LoopIndexBinding) (elem: ElementBinding) (curre
         let resultRank = elem.ArrayRank - levelsConsumed
         let elemTypeStr = elemTypeToCpp elem.ArrayElemType
         
-        // For left-justified iteration, array index = current loop var
-        // + sum of bound-dependency vars + the strict offset. The loop var is
-        // 0-based and relative to the row start; the dependency vars shift it
-        // to the row's absolute base. For STRICT (antisymmetric) iteration the
-        // row also starts past the diagonal, so StrictOffset (the cumulative
-        // within-group depth = number of prior group levels, NOT a flat 1) must
-        // be added to recover the true operand index — otherwise the kernel
-        // reads the wrong operand and, at rank >= 3, the loop bound visits
-        // non-canonical tuples that alias storage cells.
+        // Array index into THIS level. The base is the current loop var.
+        //
+        // Two cases, distinguished by whether the array has already been
+        // peeled (sliced) at an outer level:
+        //
+        //  (1) Reading the ORIGINAL array (currentName == elem.ArrayName): the
+        //      array is still flat at this position, so the index must be the
+        //      ABSOLUTE coordinate = loop var + sum of bound-dependency vars
+        //      (which shift a row-relative 0-based loop var to its absolute row
+        //      base) + the strict offset. This is the producer-style flat read,
+        //      e.g. A[__i1 + __i0].
+        //
+        //  (2) Reading into an ALREADY-SLICED sub-array (currentName has been
+        //      peeled, currentName <> elem.ArrayName): each outer peel already
+        //      consumed its index via `data[__ik]`, so the sub-array is the row
+        //      and the within-row index is the LOCAL loop var alone. Re-adding
+        //      the dependency vars here double-counts the outer index and reads
+        //      out of bounds. (This is the compact-symmetric elementwise-read
+        //      bug: sym____i0[__i1 + __i0] should be sym____i0[__i1]. Verified
+        //      against a dense reference: local-only yields the correct
+        //      canonical order.) The StrictOffset (antisym diagonal shift) is a
+        //      within-row concept and still applies.
+        let isSliced = currentName <> elem.ArrayName
         let arrayIndex =
-            let depParts = level.BoundDependencies |> List.map (sprintf "__i%d")
+            let depParts =
+                if isSliced then []   // outer indices already consumed by the slice
+                else level.BoundDependencies |> List.map (sprintf "__i%d")
             let offsetParts = if level.StrictOffset > 0 then [string level.StrictOffset] else []
             match depParts @ offsetParts with
             | [] -> level.IndexName
@@ -6468,6 +6571,54 @@ let genFuncDefAsLambda (ctx: CodeGenContext) (funcDef: IRFuncDef) : string list 
 
 /// Generate C++ code for an entire IR module.
 /// Returns (functionDefs, bindingCode) — functions go outside main(), bindings inside.
+/// Forward declarations for file-scope functions. Factored out so genModule
+/// and genModuleSplit share one source of truth. Signature uses Array<T,N> /
+/// Ragged<T> wrappers; captures appear after regular params as additional
+/// reference-typed args, matching genFuncDef's emission.
+let private genForwardDecls (fileScopeFuncs: IRFuncDef list) : string list =
+    let decls =
+        fileScopeFuncs |> List.map (fun funcDef ->
+            let paramList =
+                funcDef.Params
+                |> List.map (fun p ->
+                    match p.Type with
+                    | ArrayElem arr -> sprintf "%s %s" (cppArrayTypeStr arr) p.Name
+                    | _ -> sprintf "%s %s" (irTypeToCpp p.Type) p.Name)
+            let captureList =
+                funcDef.Captures
+                |> List.map (fun cap ->
+                    match cap.Type with
+                    | ArrayElem arr -> sprintf "%s& %s" (cppArrayTypeStr arr) cap.Name
+                    | FuncElem _ -> sprintf "const %s& %s" (irTypeToCpp cap.Type) cap.Name
+                    | _ -> sprintf "%s& %s" (irTypeToCpp cap.Type) cap.Name)
+            let allParams = (paramList @ captureList) |> String.concat ", "
+            let retType =
+                match funcDef.RetType with
+                | IRTInfer _ -> irTypeToCpp (inferExprType funcDef.Body)
+                | ArrayElem arr -> cppArrayTypeStr arr
+                | t -> irTypeToCpp t
+            let safeName = sanitizeCppName funcDef.Name
+            sprintf "%s %s(%s);" retType safeName allParams)
+    if decls.IsEmpty then [] else decls @ [""]
+
+/// Classify a binding as a "computation" (forced combinator / compute) vs
+/// "data setup" (array literals, scalar lets, plain values). Used only by the
+/// split-timing path to decide which timing phase a binding's emitted code
+/// belongs to. Walks past IRLet/IRCompute wrappers to the operative form.
+let rec private isComputeBindingExpr (e: IRExpr) : bool =
+    match e with
+    | IRCompute _ -> true
+    | IRApplyCombinator _ | IRComposeApply _ | IRReynolds _
+    | IRMethodFor _ | IRObjectFor _ | IRBind _ | IRParallel _
+    | IRFusion _ | IRChoice _ | IRArrayProduct _ | IRComposeObj _
+    | IRComposeMeth _ | IRCompose _ | IRFunctorMap _ | IRPure _
+    | IRReplicate _ | IRSequence _ -> true
+    | IRLet (_, _, body) -> isComputeBindingExpr body
+    | _ -> false
+
+let private isComputeBinding (b: IRBinding) : bool =
+    isComputeBindingExpr b.Value
+
 let genModule (modul: IRModule) (builder: IRBuilder) : string list * string list =
     // Phase D / companion-array gap: populate the codegen-side struct fields
     // cache so inferExprType can resolve IRFieldAccess result types.
@@ -6546,38 +6697,10 @@ let genModule (modul: IRModule) (builder: IRBuilder) : string list * string list
             | Choice2Of2 funcDef when not (hasFreeVarsCheck funcDef ctx0) -> Some funcDef
             | _ -> None)
     
-    // Generate forward declarations for all file-scope functions.
-    // Signature uses Array<T,N> / Ragged<T> wrappers; captures appear
-    // after regular params as additional reference-typed args. Must
-    // match genFuncDef's actual emission (regular params first, then
-    // captures with `&` reference modifier).
-    let forwardDecls =
-        fileScopeFuncs |> List.map (fun funcDef ->
-            let paramList = 
-                funcDef.Params 
-                |> List.map (fun p -> 
-                    match p.Type with
-                    | ArrayElem arr -> sprintf "%s %s" (cppArrayTypeStr arr) p.Name
-                    | _ -> sprintf "%s %s" (irTypeToCpp p.Type) p.Name)
-            let captureList =
-                funcDef.Captures
-                |> List.map (fun cap ->
-                    // Match captureParamStr in genFuncDef: const& for
-                    // function types, mutable & otherwise.
-                    match cap.Type with
-                    | ArrayElem arr -> sprintf "%s& %s" (cppArrayTypeStr arr) cap.Name
-                    | FuncElem _ -> sprintf "const %s& %s" (irTypeToCpp cap.Type) cap.Name
-                    | _ -> sprintf "%s& %s" (irTypeToCpp cap.Type) cap.Name)
-            let allParams = (paramList @ captureList) |> String.concat ", "
-            let retType = 
-                match funcDef.RetType with
-                | IRTInfer _ -> irTypeToCpp (inferExprType funcDef.Body)
-                | ArrayElem arr -> cppArrayTypeStr arr
-                | t -> irTypeToCpp t
-            let safeName = sanitizeCppName funcDef.Name
-            sprintf "%s %s(%s);" retType safeName allParams)
-    let forwardDecls = if forwardDecls.IsEmpty then [] else forwardDecls @ [""]
-    
+    // Generate forward declarations for all file-scope functions (shared
+    // helper, also used by genModuleSplit).
+    let forwardDecls = genForwardDecls fileScopeFuncs
+
     let (funcCode, bindCode, finalCtx) =
         allItems |> List.fold (fun (fc, bc, c) (_, item) ->
             match item with
@@ -6596,8 +6719,94 @@ let genModule (modul: IRModule) (builder: IRBuilder) : string list * string list
     // Merge context warnings into module-level collector
     let cell = exprWarningsCell ()
     cell.Value <- cell.Value @ finalCtx.Warnings.Value
-    
+
     (funcCode, bindCode)
+
+/// Split-timing variant of genModule: identical context-threaded emission, but
+/// binding output is routed into TWO buckets — `setupCode` (data-setup
+/// bindings) and `computeCode` (forced computations) — so the caller can place
+/// a timing checkpoint between them. Functions stay in `funcCode`. Context is
+/// still threaded through ALL items in ID order (later bindings reference
+/// earlier ones), so only the OUTPUT is partitioned, never the evaluation
+/// order. Returns (funcCode, setupCode, computeCode).
+let genModuleSplit (modul: IRModule) (builder: IRBuilder) : string list * string list * string list =
+    setCodegenStructFieldsCache modul.Types
+    let callables = IR.buildCallablesTableForModule modul
+    IR.setCallablesContext callables |> ignore
+    let ctx0 = emptyContext ()
+    let constrainedNames =
+        modul.Types |> List.choose (function
+            | IRTDStruct (name, _, Some _) -> Some name
+            | _ -> None)
+        |> Set.ofList
+    let ctx0 = { ctx0 with ConstrainedStructs = constrainedNames }
+    let ctx0 =
+        modul.Bindings |> List.fold (fun c b -> addVarName b.Id b.Name c) ctx0
+    let ctx0 =
+        modul.Functions |> List.fold (fun c f -> addVarName f.Id f.Name c) ctx0
+    let bindingItems = modul.Bindings |> List.map (fun b -> (b.Id, Choice1Of2 b))
+    let funcItems = modul.Functions |> List.map (fun f -> (f.Id, Choice2Of2 f))
+    let allItems = bindingItems @ funcItems |> List.sortBy fst
+    let funcIds = modul.Functions |> List.map (fun f -> f.Id) |> Set.ofList
+    let hasFreeVarsCheck (funcDef: IRFuncDef) (c: CodeGenContext) =
+        let paramIds = funcDef.Params |> List.map (fun p -> p.VarId) |> Set.ofList
+        let captureIds = funcDef.Captures |> List.map (fun cap -> cap.Id) |> Set.ofList
+        let bound = Set.unionMany [paramIds; captureIds; funcIds]
+        let freeVars = Set.difference (collectVarRefs funcDef.Body) bound
+        freeVars |> Set.exists (fun id -> Map.containsKey id c.VarNames)
+    let fileScopeFuncs =
+        allItems |> List.choose (fun (_, item) ->
+            match item with
+            | Choice2Of2 funcDef when not (hasFreeVarsCheck funcDef ctx0) -> Some funcDef
+            | _ -> None)
+    let forwardDecls = genForwardDecls fileScopeFuncs
+    // Single split point: emit in strict ID order (NO reordering), and once
+    // the first compute binding is seen, every subsequent item stays in the
+    // compute phase. This preserves all cross-binding dependencies — a consumer
+    // of a compute result (e.g. `decompact(sym,0)` reading `sym`) is emitted
+    // AFTER its producer because it comes later in ID order and the phase flag
+    // is already in compute. The setup phase is exactly the leading run of
+    // data-declaration bindings before the first computation, matching the
+    // archaic prototype's "input allocation" vs "calculation" split.
+    //
+    // (Per-binding classification was wrong: it floated a non-compute consumer
+    // like decompact UP into setup, above the compute binding it depends on,
+    // producing an out-of-order "'sym' was not declared" C++ error.)
+    let (funcCode, setupCode, computeCode, _seenCompute, finalCtx) =
+        let onlyBinding = splitTimingOnlyBinding ()
+        allItems |> List.fold (fun (fc, sc, cc, seen, c) (_, item) ->
+            match item with
+            | Choice1Of2 binding ->
+                // When a specific binding name is designated as the timed
+                // kernel, the clock starts exactly at that binding (everything
+                // prior — producers, decompact chains — is setup). Otherwise
+                // fall back to "first compute binding starts the clock".
+                let nowCompute =
+                    match onlyBinding with
+                    | Some target -> seen || binding.Name = target
+                    | None -> seen || isComputeBinding binding
+                let (code, c') = genBinding c binding builder
+                if nowCompute then
+                    (fc, sc, cc @ code @ [""], true, c')
+                else
+                    (fc, sc @ code @ [""], cc, false, c')
+            | Choice2Of2 funcDef ->
+                if hasFreeVarsCheck funcDef c then
+                    // Lambda-as-binding (closure definition): follows the
+                    // current phase — setup if before the first compute, else
+                    // compute — so it never floats across a dependency.
+                    let (code, c') = genFuncDefAsLambda c funcDef
+                    if seen then (fc, sc, cc @ code @ [""], true, c')
+                    else (fc, sc @ code @ [""], cc, false, c')
+                else
+                    // True top-level function: always the function-def bucket,
+                    // emitted in the preamble (no effect on the phase flag).
+                    let (code, c') = genFuncDef c builder funcDef
+                    (fc @ code @ [""], sc, cc, seen, c')
+        ) (forwardDecls, [], [], false, ctx0)
+    let cell = exprWarningsCell ()
+    cell.Value <- cell.Value @ finalCtx.Warnings.Value
+    (funcCode, setupCode, computeCode)
 
 /// Generate a complete C++ program with main() from an IR module
 let genStructDef (name: string) (fields: (string * IRType) list) (invariant: StructConstraintInfo option) : string list =
@@ -7000,22 +7209,54 @@ let genPrintStatements (modul: IRModule) : string list =
 
 /// Assemble the main() function wrapper around binding code and print statements.
 let genMainWrapper (testName: string) (bodyIndented: string list) (printCode: string list) : string list =
-    ["int main() {"
-     "    cout << std::setprecision(15);"
-     "    cout << std::boolalpha;"
-     "    auto start = TIME;"
-     ""]
+    [ "int main() {"
+      "    cout << std::setprecision(15);"
+      "    cout << std::boolalpha;"
+      "    auto start = TIME;"
+      "" ]
     @ bodyIndented
-    @ [""
-       "    auto end = TIME;"
-       "    double elapsed = 1e-9 * TIME_DIFF;"
-       sprintf "    cout << \"%s completed in \" << elapsed << \"s\" << endl;" testName
-       ""
-       "    // Print results for verification"]
+    @ [ ""
+        "    auto end = TIME;"
+        "    double elapsed = 1e-9 * TIME_DIFF;"
+        sprintf "    cout << \"%s completed in \" << elapsed << \"s\" << endl;" testName
+        ""
+        "    // Print results for verification" ]
     @ printCode
-    @ [""
-       "    return 0;"
-       "}"]
+    @ [ ""
+        "    return 0;"
+        "}" ]
+
+/// Split-timing variant of genMainWrapper. `setupIndented` is input-data setup
+/// (array literals, etc.); `computeIndented` is the computation. Emits two
+/// checkpoints: "Input Allocation took <t>s" around setup, and the canonical
+/// "<name> completed in <t>s" around ONLY the compute region — so the harness's
+/// existing "completed in" parser reads the compute time, not the whole body.
+/// The clock variable is reused (start/end reset between phases) exactly as the
+/// archaic Blade prototype did.
+let genMainWrapperSplit (testName: string) (setupIndented: string list) (computeIndented: string list) (printCode: string list) : string list =
+    [ "int main() {"
+      "    cout << std::setprecision(15);"
+      "    cout << std::boolalpha;"
+      "    auto start = TIME;"
+      "" ]
+    @ setupIndented
+    @ [ ""
+        "    auto end = TIME;"
+        "    double setup_elapsed = 1e-9 * TIME_DIFF;"
+        sprintf "    cout << \"%s input allocation took \" << setup_elapsed << \"s\" << endl;" testName
+        ""
+        "    start = TIME;" ]
+    @ computeIndented
+    @ [ ""
+        "    end = TIME;"
+        "    double elapsed = 1e-9 * TIME_DIFF;"
+        sprintf "    cout << \"%s completed in \" << elapsed << \"s\" << endl;" testName
+        ""
+        "    // Print results for verification" ]
+    @ printCode
+    @ [ ""
+        "    return 0;"
+        "}" ]
 
 /// Generate a C++ program (uses external runtime header)
 /// Generate print statements for all bindings in a module.
@@ -7088,7 +7329,23 @@ let genSelfContainedProgram (modul: IRModule) (testName: string) : string =
     
     let includes = genIncludesExternal ()
     let typeDefs = genTypeDefs modul
-    let (funcDefs, bindCode) = genModule modul builder
+    let printCode = genPrintStatements modul
+
+    // Split-timing mode emits two clock checkpoints (input allocation vs
+    // compute) via genModuleSplit + genMainWrapperSplit; default mode emits the
+    // single whole-body clock. Both share the same CUDA-proto / symm-decl
+    // preamble, computed after generation (genModule* populates the cells).
+    let mainFunc =
+        if splitTimingModeEnabled () then
+            let (funcDefs, setupCode, computeCode) = genModuleSplit modul builder
+            let setupIndented = setupCode |> List.map (fun s -> "    " + s)
+            let computeIndented = computeCode |> List.map (fun s -> "    " + s)
+            (funcDefs, genMainWrapperSplit testName setupIndented computeIndented printCode)
+        else
+            let (funcDefs, bindCode) = genModule modul builder
+            let bodyIndented = bindCode |> List.map (fun s -> "    " + s)
+            (funcDefs, genMainWrapper testName bodyIndented printCode)
+    let (funcDefs, mainBody) = mainFunc
 
     // extern "C" launch-wrapper prototypes for any CUDA kernels emitted: the
     // .cpp calls them across the linkage boundary (bodies live in the .cu).
@@ -7102,12 +7359,8 @@ let genSelfContainedProgram (modul: IRModule) (testName: string) : string =
     // Namespace-scope symm arrays hoisted out of main() (MSVC constant-address
     // requirement — see hoistSymmDecl).
     let symmDecls = (symmDeclsCell ()).Value
-    
-    let bodyIndented = bindCode |> List.map (fun s -> "    " + s)
-    let printCode = genPrintStatements modul
-    let mainFunc = genMainWrapper testName bodyIndented printCode
-    
-    (includes @ typeDefs @ [""] @ symmDecls @ [""] @ cudaProtos @ [""] @ funcDefs @ mainFunc) |> String.concat "\n"
+
+    (includes @ typeDefs @ [""] @ symmDecls @ [""] @ cudaProtos @ [""] @ funcDefs @ mainBody) |> String.concat "\n"
 
 /// Generate a C++ program with external runtime header
 /// Returns (mainFileContent, headerFileContent)

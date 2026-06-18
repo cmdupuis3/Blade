@@ -18,6 +18,7 @@ module Blade.Tests.ExprAttrs
 // ============================================================================
 
 open Blade.IR
+open Blade.Tests.TestHarness
 
 /// A single corpus test: name + a thunk that returns the actual attrs and
 /// the expected attrs. The runner compares them and reports per-test.
@@ -528,21 +529,21 @@ let private attrsEqual (a: ExprAttrs) (b: ExprAttrs) : bool =
 /// Run all attribute tests, returning (passed, failed). Prints per-test
 /// status; on failure also prints actual vs expected so the difference
 /// is visible without re-running with extra flags.
-let runAttrsTests () : int * int =
-    printfn ""
-    printfn "=== Phase B: ExprAttrs corpus ==="
+let runAttrsTests () : Blade.Tests.TestHarness.BlockResult =
+    Blade.Tests.TestHarness.printHeader "ExprAttrs Corpus"
     let mutable passed = 0
     let mutable failed = 0
+    let mutable failedNames = []
     for t in allAttrsTests do
         let (actual, expected) = t.Run ()
         if attrsEqual actual expected then
             passed <- passed + 1
-            printfn "  [OK] %s" t.Name
+            Blade.Tests.TestHarness.resultLine Blade.Tests.TestHarness.Pass t.Name ""
         else
             failed <- failed + 1
-            printfn "  [FAIL] %s" t.Name
-            printfn "    expected: %s" (fmtAttrs expected)
-            printfn "    actual:   %s" (fmtAttrs actual)
-    printfn "ExprAttrs Tests: %d passed, %d failed" passed failed
-    (passed, failed)
+            failedNames <- failedNames @ [t.Name]
+            let detail = sprintf "expected %s, got %s" (fmtAttrs expected) (fmtAttrs actual)
+            Blade.Tests.TestHarness.resultLine Blade.Tests.TestHarness.Fail t.Name detail
+    Blade.Tests.TestHarness.printFooter "ExprAttrs" [sprintf "%d passed" passed; sprintf "%d failed" failed]
+    { Block = "ExprAttrs"; Passed = passed; Failed = failed; Skipped = 0; FailedNames = failedNames }
 

@@ -2629,12 +2629,31 @@ let rec inferExpr (env: TypeEnv) (expr: Expr) : TypeResult<TypedExpr> =
                     let ix = arrTy.IndexTypes.[slot]
                     if r < 2 || ix.Symmetry = SymNone then
                         Error (Other (sprintf "decompact: dimension %d is a plain (arity-1, non-symmetric) axis; there is nothing to decompact. decompact pulls a component out of a compact group (SymIdx/AntisymIdx/HermitianIdx)." d))
-                    elif arrTy.IndexTypes.Length <> 1 then
-                        // Codegen scope: the compact group must be the array's
-                        // sole index slot. Decompact with surrounding free
-                        // dimensions needs the scatter wrapped in the untouched-
-                        // dim loop product; deferred to a later increment.
-                        Error (Other (sprintf "decompact: surrounding index dimensions are not yet supported by codegen (handles a compact group as the sole index slot). The array here has %d index slots." arrTy.IndexTypes.Length))
+                    else
+                    // Codegen scope: the compact group being decompacted must be
+                    // the LAST index slot, with any preceding slots being plain
+                    // free Idx singletons (arity-1, SymNone). This is exactly the
+                    // shape produced by a chained "to-the-right-only" peel
+                    // (decompact frees one dim at a time, accumulating free Idx
+                    // dims on the left while the residual group stays last), so
+                    // it enables composed full densification. The surrounding
+                    // free dims are emitted as an outer loop product wrapping the
+                    // existing last-slot fission scatter (their indices map
+                    // identically source->dest). Other arrangements (compact slot
+                    // not last, or non-singleton surrounding slots) remain
+                    // deferred.
+                    let leadingSlots = arrTy.IndexTypes |> List.take slot
+                    let groupIsLast = (slot = arrTy.IndexTypes.Length - 1)
+                    let leadingAllFreeSingletons =
+                        leadingSlots |> List.forall (fun s -> (max 1 s.Arity) = 1 && s.Symmetry = SymNone)
+                    if not (groupIsLast && leadingAllFreeSingletons) then
+                        Error (Other (sprintf "decompact: only a compact group in the LAST index slot, optionally preceded by plain free Idx dimensions, is supported by codegen (the chained to-the-right peel shape). The array here has %d index slots with the compact group at slot %d." arrTy.IndexTypes.Length slot))
+                    elif leadingSlots.Length > 0 && ix.Symmetry <> SymSymmetric then
+                        // Surrounding-dim wrapping is currently wired only for the
+                        // symmetric fission scatter (the gather form). Antisym /
+                        // Hermitian fission with leading free dims is not yet
+                        // emitted, so reject rather than miscompile.
+                        Error (Other "decompact: surrounding free dimensions are currently supported only for symmetric groups; antisymmetric/Hermitian groups with preceding free dimensions are not yet wired.")
                     elif ix.Symmetry = SymHermitian && r >= 3 then
                         // Rank-2 Hermitian (the only Hermitian arrays a producer
                         // makes today, via gram) dissolves to a dense n×n with the
@@ -3601,6 +3620,47 @@ and buildApplyInfo (env: TypeEnv)
             || t.StartsWith "__group_member"
             || t = "__error_ragged_no_prior"
         | None -> false
+    // Does the kernel body use parameter `pname` AS AN ARRAY (indexed, applied,
+    // or passed to an array combinator like reduce/extents/rank/arity)? This
+    // distinguishes a CONSUMING kernel (e.g. `lambda(g) -> reduce(g, ...)` or
+    // `lambda(g) -> g(0)`), whose param is a sub-array along a ragged inner dim,
+    // from an ELEMENTWISE kernel (e.g. `lambda(e) -> e * 2.0`), whose param is a
+    // scalar. We cannot rely on the param's resolved scalar type, because mixed
+    // int/float arithmetic legitimately leaves an untyped scalar param flexible
+    // (e.g. a range index `i` in `i * 2.0` stays Int64, promoted — NOT unifiable
+    // to Float64). The structural use is the reliable signal.
+    let paramUsedAsArray (pname: string) (body: TypedExpr) : bool =
+        let isParamVar (e: TypedExpr) =
+            match e.Kind with TExprVar (n, _, _) -> n = pname | _ -> false
+        let rec walk (e: TypedExpr) : bool =
+            let here =
+                match e.Kind with
+                | TExprIndex (arr, _, _) when isParamVar arr -> true
+                | TExprApp (f, _) when isParamVar f -> true            // g(0) as application
+                | TExprReduce (arr, _) when isParamVar arr -> true
+                | TExprExtents arr when isParamVar arr -> true
+                | TExprRank arr when isParamVar arr -> true
+                | TExprArity n when n = pname -> true
+                | _ -> false
+            here || childrenAny e
+        and childrenAny (e: TypedExpr) : bool =
+            match e.Kind with
+            | TExprBinOp (_, _, l, r) -> walk l || walk r
+            | TExprUnaryOp (_, x) -> walk x
+            | TExprApp (f, args) -> walk f || List.exists walk args
+            | TExprIndex (a, idxs, _) -> walk a || List.exists walk idxs
+            | TExprReduce (a, k) -> walk a || walk k
+            | TExprExtents a | TExprRank a | TExprArrayNegate a
+            | TExprArrayConjugate a | TExprUnique a -> walk a
+            | TExprMask (a, p) -> walk a || walk p
+            | TExprSort (a, k) -> walk a || walk k
+            | TExprIf (c, t, e2) -> walk c || walk t || walk e2
+            | TExprBlock (_, Some fe) -> walk fe
+            | TExprSequence es -> List.exists walk es
+            | TExprTuple es -> List.exists walk es
+            | TExprLet (_, _, v, b) -> walk v || walk b
+            | _ -> false
+        walk body
     let kernelInputRanks =
         resolvedParamTypes |> List.mapi (fun i t ->
             match t with
@@ -3612,11 +3672,18 @@ and buildApplyInfo (env: TypeEnv)
                     arrTy.IndexTypes
                     |> List.filter (fun idx -> isRaggedInnerTag idx.Tag)
                     |> List.length
-                // sDimsPerArray includes ragged inner dims (computeSDimsPerArray
-                // doesn't filter by tag). Re-attribute those to the kernel side
-                // so the kernel rank reflects what codegen actually emits.
-                let trueIteratedDims = max 0 (sDims - raggedInnerCount)
-                max 0 (arrTy.IndexTypes.Length - trueIteratedDims)
+                // Re-attribute ragged inner dims to the kernel side ONLY when the
+                // param is structurally used as an array (consuming kernel). For
+                // an elementwise scalar use, the inner dim is NOT consumed and
+                // must stay on the iteration/output side -> kernel rank 0, so the
+                // ragged/DepIdx inner dim propagates to the output.
+                let pname =
+                    if i < lambdaInfo.Params.Length then lambdaInfo.Params.[i].Name else ""
+                if raggedInnerCount > 0 && not (paramUsedAsArray pname lambdaInfo.Body) then
+                    0
+                else
+                    let trueIteratedDims = max 0 (sDims - raggedInnerCount)
+                    max 0 (arrTy.IndexTypes.Length - trueIteratedDims)
             | _ -> 0)
 
     // Infer T-dimensions from the kernel's resolved return type (§9.2).
@@ -3630,9 +3697,31 @@ and buildApplyInfo (env: TypeEnv)
             (tDims, tDims.Length)
         | _ -> ([], 0)
 
-    let states = computeAllSymcomStates identities arrayTypes commGroups sDimsPerArray
-    let triLevels = computeTriangularLevels arrayTypes identities commGroups sDimsPerArray
-    let speedup = computePartialProductSpeedup arrayTypes identities commGroups sDimsPerArray
+    // Mark each array's consumed fiber dimensions as T-dimensions (§9.2). The
+    // kernel consumes its innermost irank(f,i) = kernelInputRanks.[i] dims as a
+    // fiber argument (e.g. a TimeIdx fiber reduced inside the kernel). Those
+    // dims are NOT part of the symmetric iteration grid: re-tagging them
+    // Kind = TDimension makes every downstream consumer consistent at once —
+    // computeSDimsPerArray (counts only SDimension) yields the grid count,
+    // buildLoopLevelStructure (builds levels only for SDimension) emits grid-
+    // depth loops and leaves the fiber as the kernel's array slice, and
+    // deduceOutputType symmetrizes only the grid dims. For scalar kernels
+    // irank = 0, so nothing is re-tagged and behavior is unchanged.
+    let gridArrayTypes =
+        arrayTypes |> List.mapi (fun i at ->
+            let irank = if i < kernelInputRanks.Length then kernelInputRanks.[i] else 0
+            if irank <= 0 then at
+            else
+                // The fiber is the innermost irank dims; mark them TDimension.
+                let n = at.IndexTypes.Length
+                let retagged =
+                    at.IndexTypes |> List.mapi (fun j idx ->
+                        if j >= n - irank then { idx with Kind = TDimension } else idx)
+                { at with IndexTypes = retagged })
+
+    let states = computeAllSymcomStates identities gridArrayTypes commGroups (computeSDimsPerArray gridArrayTypes)
+    let triLevels = computeTriangularLevels gridArrayTypes identities commGroups (computeSDimsPerArray gridArrayTypes)
+    let speedup = computePartialProductSpeedup gridArrayTypes identities commGroups (computeSDimsPerArray gridArrayTypes)
 
     // Phase 2 (Gap 2.5 fix): unify each kernel parameter with the source
     // array's per-row type. This catches mismatches like a String-typed
@@ -3700,7 +3789,13 @@ and buildApplyInfo (env: TypeEnv)
                 // The input arrays' elem types are already IRType post-B2.
                 arrayTypes |> List.tryPick (fun at -> Some at.ElemType)
                 |> Option.defaultValue (IRTScalar ETFloat64)
-        let outputType = deduceOutputType arrayTypes identities commGroups sDimsPerArray kernelTDims outputElemType isAntisym env.Builder
+        // A kernel CONSUMES an inner dimension when it has an array-typed
+        // parameter of rank > 0 (e.g. reduce over a ragged row). A purely
+        // elementwise kernel (all scalar params) consumes nothing, so the
+        // consumed-dim filter in deduceOutputType must NOT drop ragged/dep
+        // inner dims — they propagate through the elementwise map.
+        let kernelConsumesInner = kernelInputRanks |> List.exists (fun r -> r > 0)
+        let outputType = deduceOutputType gridArrayTypes identities commGroups (computeSDimsPerArray gridArrayTypes) kernelTDims outputElemType isAntisym kernelConsumesInner env.Builder
 
         let reynoldsSpeedup =
             if isReynolds then
@@ -3747,9 +3842,13 @@ and buildApplyInfo (env: TypeEnv)
         let info : TypedApplyInfo = {
             Loop = tLoop; Kernel = resolvedKernel
             Arrays = arrays; Identities = identities
-            ArrayTypes = arrayTypes; SharedIndexType = sharedIndexType
+            ArrayTypes = gridArrayTypes; SharedIndexType = sharedIndexType
             SymcomStates = states; TriangularLevels = triLevels
-            SDimsPerArray = sDimsPerArray
+            // Grid S-dim count from the fiber-retagged array types (consumed
+            // fiber dims are now TDimension, excluded from the count). Matches
+            // SymcomStates/TriangularLevels and the grid-depth loop nest codegen
+            // builds from ArrayTypes. Scalar kernels: irank=0, unchanged.
+            SDimsPerArray = computeSDimsPerArray gridArrayTypes
             KernelInputRanks = kernelInputRanks; KernelOutputRank = kernelOutputRank
             KernelTDims = kernelTDims
             SpeedupFactor = speedup; ReynoldsSpeedup = reynoldsSpeedup

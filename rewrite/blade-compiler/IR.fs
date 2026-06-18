@@ -1259,14 +1259,27 @@ let buildLoopLevelStructure (arrayTypes: IRArrayType list) (sDimsPerArray: int l
     for arrIdx in 0 .. arrayTypes.Length - 1 do
         let arr = arrayTypes.[arrIdx]
         let mutable localDimIdx = 0
+        // Cumulative count of levels emitted for THIS array so far. ArityIndex
+        // must be this cumulative depth — NOT the per-record arity position —
+        // because genElementBindingNew uses it as `levelsConsumed = ArityIndex +
+        // 1` to decide slice-vs-scalar-leaf (resultRank = ArrayRank -
+        // levelsConsumed). A single multi-arity record (e.g. SymIdx<2>, one
+        // record Arity 2) and a sequence of arity-1 records (e.g. dense Idx,
+        // Idx — two records) BOTH span the same number of levels, so the depth
+        // must increment continuously across records. Resetting per record (the
+        // old `arityIdx` from 0..Arity-1) left every arity-1 record's level at
+        // depth 0, so the innermost level of a multi-record dense array peeled
+        // to a sub-array instead of reading the scalar leaf (the elementwise-
+        // over-dense-multidim over-peel bug).
+        let mutable arrLevel = 0
         
         for idx in arr.IndexTypes do
             if idx.Kind = SDimension then
-                for arityIdx in 0 .. idx.Arity - 1 do
+                for _arityIdx in 0 .. idx.Arity - 1 do
                     levels <- levels @ [{
                         ArrayIndex = arrIdx
                         LocalDimIndex = localDimIdx
-                        ArityIndex = arityIdx
+                        ArityIndex = arrLevel
                         GlobalLevelIndex = globalIdx
                         IndexSpace = { 
                             Tag = idx.Tag
@@ -1277,9 +1290,64 @@ let buildLoopLevelStructure (arrayTypes: IRArrayType list) (sDimsPerArray: int l
                         }
                     }]
                     globalIdx <- globalIdx + 1
+                    arrLevel <- arrLevel + 1
                 localDimIdx <- localDimIdx + 1
     
-    levels
+    // Reorder the levels so that all levels sharing an index space are
+    // CONTIGUOUS (grouped by axis across the repeated/comm arrays), rather than
+    // grouped by array. The result storage for product symmetry lays the
+    // symmetric pairs out adjacently — SymIdx<2,Lat>, SymIdx<2,Lon> => dim order
+    // [Lat0, Lat1, Lon0, Lon1] — so the loop nest must visit dims in that same
+    // order for the write subscript and the per-axis triangular bounds to line
+    // up with storage. The default by-array emission above produces the
+    // interleaved order [Lat0, Lon0, Lat1, Lon1]; without this reorder the
+    // triangular pair (i0,i2) writes into storage dims (0,1) that expect a full
+    // range, scattering out of bounds (the product-symmetry crash).
+    //
+    // The reorder is a STABLE group-by on the index-space signature
+    // (LocalDimIndex + nominal Tag + extent key): levels are bucketed by the
+    // axis they belong to, buckets ordered by first appearance, and each array's
+    // own dim order is preserved within/across buckets (stable). Per-array slice
+    // state (currentNames keyed by ArrayPosition) and ArityComponent (per-array
+    // peel depth) are unaffected by global reordering, so slice construction
+    // stays correct. For d=1 and single-array cases every level already shares
+    // (or trivially groups into) one bucket in emission order, so the reorder is
+    // an identity — behavior is unchanged outside genuine multi-axis product
+    // Group ONLY by a shared NAMED index space: a nominal Tag, or a named
+    // extent binding (IRVar/IRParam). Two levels merge into one axis bucket iff
+    // they carry the same such name AND sit at the same positional axis
+    // (LocalDimIndex). Anonymous LITERAL extents are deliberately NOT grouped —
+    // two distinct arrays that merely share a length do not share an index
+    // space (§14.6), so each anonymous level gets a UNIQUE key (its global
+    // position) and stays put. This keeps the reorder an identity for plain
+    // outer products over distinct arrays (e.g. method_for(A,B,C) with A,B,C of
+    // extents 3,2,3 — A and C share length 3 but must NOT be reordered together;
+    // doing so scrambled the CUDA unrank, dropping the A index-2 contribution).
+    // Product symmetry uses NAMED index types (LatIdx, LonIdx) or same-array
+    // identity, both of which carry a stable name here, so it still groups by
+    // axis as required. This mirrors indexSpacesMatch's rule that anonymous
+    // literal coincidence does not constitute a shared index space.
+    let axisKey (gi: int) (lv: LoopLevelInfo) : string =
+        match lv.IndexSpace.Tag with
+        | Some t -> sprintf "%d|T:%s" lv.LocalDimIndex t
+        | None ->
+            match lv.IndexSpace.Extent with
+            | IRVar (id, _) -> sprintf "%d|V:%d" lv.LocalDimIndex id
+            | IRParam (n, _, _) -> sprintf "%d|P:%s" lv.LocalDimIndex n
+            // Anonymous literal / other: unique per level -> never grouped.
+            | _ -> sprintf "U:%d" gi
+    let keyed = levels |> List.mapi (fun gi lv -> (axisKey gi lv, lv))
+    // Bucket order = order of first appearance of each axis key.
+    let bucketOrder =
+        keyed
+        |> List.map fst
+        |> List.fold (fun acc k -> if List.contains k acc then acc else acc @ [k]) []
+    let reordered =
+        bucketOrder
+        |> List.collect (fun k -> keyed |> List.filter (fun (kk, _) -> kk = k) |> List.map snd)
+    // Reassign GlobalLevelIndex to the new sequential positions; everything
+    // downstream (loop var __i{n}, iminMap, write subscript) keys on this.
+    reordered |> List.mapi (fun i lv -> { lv with GlobalLevelIndex = i })
 
 // ============================================================================
 // Identity Group Detection
@@ -1732,6 +1800,7 @@ let deduceOutputType
     (kernelTDims: IRIndexType list)
     (elemType: IRType)
     (isAntisym: bool)
+    (kernelConsumesInner: bool)
     (builder: IRBuilder) : IRType =
     
     if arrayTypes.IsEmpty then IRTUnit
@@ -1786,38 +1855,46 @@ let deduceOutputType
                                 Symmetry = groupSymmetry
                                 Id = builder.FreshId() })
                 else
-                    // Non-commutative: each member contributes its own S-dims
+                    // Non-commutative: each member contributes its own S-dims.
+                    // A rank-0 (elementwise) kernel preserves the INPUT's shape,
+                    // so copy each S-dim index type VERBATIM — keeping its own
+                    // Arity and Symmetry — and only refresh Id. For independent
+                    // rank-1 vectors this is identical to emitting Idx<n> (their
+                    // index types are already Arity=1/SymNone); for a single
+                    // symmetric input (e.g. method_for(sym) <@> h where sym is
+                    // SymIdx<r,N>) it correctly carries the symmetric index type
+                    // through to the output instead of collapsing it to a plain
+                    // rank-1 Idx (which mis-sized the output as a scalar).
                     groupMembers |> List.collect (fun (_, arrTy, numSDims) ->
                         let sDimIndices = arrTy.IndexTypes |> List.take (min numSDims arrTy.IndexTypes.Length)
                         sDimIndices |> List.map (fun idx ->
-                            { idx with 
-                                Arity = 1
-                                Symmetry = SymNone
+                            { idx with
                                 Id = builder.FreshId() })))
-            // Drop indices tagged as "consumed by the kernel" — these inner
-            // dimensions are not part of the output iteration structure;
-            // the kernel implicitly receives a sub-array along them and
-            // produces a per-outer-iteration result.
+            // Drop indices tagged as "consumed by the kernel" — but ONLY when
+            // the kernel actually consumes an inner dimension (it has an
+            // array-typed parameter of rank > 0, e.g. `lambda(g: Array<...>) ->
+            // reduce(g, ...)`). In that case the kernel implicitly receives a
+            // sub-array along the tagged dim and produces a per-outer-iteration
+            // result, so the dim is not part of the output.
+            //
+            // For a rank-0 ELEMENTWISE kernel (all scalar params, e.g.
+            // `lambda(e) -> e * 2`), nothing is consumed: the kernel maps each
+            // scalar and the ragged/dependent inner dim must PROPAGATE to the
+            // output. Dropping it there collapsed a ragged/DepIdx array to a
+            // single Idx record (the elementwise-over-ragged/dep gap).
             //
             //   - __group_member        : ragged inner of group_by output
             //   - __raggedidx          : closed RaggedIdx<lens>
             //   - __raggedidx_inline   : ragged literal's inferred inner
             //   - __raggedidx_opaque   : opaque RaggedIdx<_>
             //   - __depidx_inner       : DepIdx inner (formula-driven extent)
-            //
-            // Without this filter, the output type retains the consumed dim,
-            // making subsequent operations (e.g., reduce(method_for_result))
-            // see a multi-rank array where there should be one outer dim.
-            // Print-path code historically compensated by special-casing
-            // ragged outputs to rank-1, but that only worked when no further
-            // type-querying operation was applied.
             |> List.filter (fun idx ->
                 match idx.Tag with
                 | Some "__group_member"
                 | Some "__raggedidx"
                 | Some "__raggedidx_inline"
                 | Some "__raggedidx_opaque"
-                | Some "__depidx_inner" -> false
+                | Some "__depidx_inner" -> not kernelConsumesInner
                 | _ -> true)
         
         // Step 4: T-dims from kernel output (passed in with real extents)
@@ -2674,9 +2751,64 @@ let buildLoopNestCodeGen
                     let state = if globalIdx < symcomStates.Length then symcomStates.[globalIdx] else SCNeither
                     match state with
                     | SCNeither -> globalIdx
-                    | SCSymmetric -> globalIdx - 1
-                    | SCCommutative -> globalIdx - 1
-                    | SCBoth -> globalIdx - 1
+                    | SCSymmetric | SCCommutative | SCBoth ->
+                        // Chain this triangular level to the nearest preceding
+                        // level that shares its index space, covering BOTH
+                        // regimes of product symmetry:
+                        //   (1) Same array repeated (method_for(A, A)): the axes
+                        //       are literally the same physical index, matched by
+                        //       same array AND same positional axis
+                        //       (LocalDimIndex). This handles anonymous literal
+                        //       extents that the nominal check below rejects.
+                        //   (2) Different arrays in a comm group: matched by
+                        //       NOMINAL index-type identity (indexSpacesMatch:
+                        //       same named Tag or named extent binding), since
+                        //       positions need not align and identity is the
+                        //       license (§14.6).
+                        // All levels sharing an index space chain into one
+                        // rank-r simplex; distinct index spaces stay independent
+                        // -> d independent simplices -> (r!)^d. Linking to the
+                        // immediate predecessor (globalIdx-1) instead merged
+                        // every axis into one rank-(r*d) simplex (the over-
+                        // collapse: C(n+r*d-1, r*d), e.g. 4! instead of (2!)^2).
+                        let mySpace = level.IndexSpace
+                        let myArr = level.ArrayIndex
+                        let myDim = level.LocalDimIndex
+                        let myIdent = if myArr < identities.Length then Some identities.[myArr] else None
+                        let prior =
+                            [ globalIdx - 1 .. -1 .. 0 ]
+                            |> List.tryFind (fun j ->
+                                let lv = loopLevels.[j]
+                                // Product symmetry matches axis-by-axis: a level
+                                // chains with a prior level only when they are at
+                                // the SAME positional axis (LocalDimIndex) AND
+                                // their index types agree there. Two regimes of
+                                // "agree":
+                                //   - same array repeated: array identity makes
+                                //     every position trivially agree (the short-
+                                //     circuit heuristic — full product symmetry
+                                //     across all axes; also covers anonymous
+                                //     literal extents the nominal check rejects);
+                                //   - different arrays: the index types at this
+                                //     position must be NOMINALLY identical
+                                //     (indexSpacesMatch on Tag / named extent).
+                                // Position is required in BOTH: A<Lat,Lon> and
+                                // B<Lon,Lat> do NOT product-symmetrize without an
+                                // explicit transpose (the tags match but at
+                                // different positions); A<Lat,Lon> and
+                                // B<Lat,Depth> symmetrize only at position 0
+                                // (Lat), the rest staying independent.
+                                if lv.LocalDimIndex <> myDim then false
+                                else
+                                    let lvIdent = if lv.ArrayIndex < identities.Length then Some identities.[lv.ArrayIndex] else None
+                                    let sameArray =
+                                        match myIdent, lvIdent with
+                                        | Some ia, Some ib -> sameIdentity ia ib
+                                        | _ -> false
+                                    sameArray || indexSpacesMatch lv.IndexSpace mySpace)
+                        match prior with
+                        | Some j -> j
+                        | None -> globalIdx   // first level on this index space = root
                 )
             
             // Compute dependency path for each level

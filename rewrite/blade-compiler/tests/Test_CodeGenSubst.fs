@@ -20,6 +20,7 @@ module Blade.Tests.CodeGenSubst
 // ============================================================================
 
 open Blade.IR
+open Blade.Tests.TestHarness
 open Blade.CodeGen
 
 type SubstTest = {
@@ -76,19 +77,19 @@ let allSubstTests : SubstTest list = [
     test_subst_param_harmless_when_no_contains
 ]
 
-let runCodeGenSubstTests () : int * int =
-    printfn ""
-    printfn "=== Codegen IRContains smoke tests ==="
+let runCodeGenSubstTests () : Blade.Tests.TestHarness.BlockResult =
+    Blade.Tests.TestHarness.printHeader "Codegen IRContains Smoke"
     let mutable passed = 0
     let mutable failed = 0
+    let mutable failedNames = []
     for t in allSubstTests do
         let (ok, msg) = t.Run ()
         if ok then
             passed <- passed + 1
-            printfn "  [OK] %s" t.Name
+            Blade.Tests.TestHarness.resultLine Blade.Tests.TestHarness.Pass t.Name ""
         else
             failed <- failed + 1
-            printfn "  [FAIL] %s" t.Name
-            printfn "    %s" msg
-    printfn "Subst Tests: %d passed, %d failed" passed failed
-    (passed, failed)
+            failedNames <- failedNames @ [t.Name]
+            Blade.Tests.TestHarness.resultLine Blade.Tests.TestHarness.Fail t.Name msg
+    Blade.Tests.TestHarness.printFooter "Subst" [sprintf "%d passed" passed; sprintf "%d failed" failed]
+    { Block = "Subst"; Passed = passed; Failed = failed; Skipped = 0; FailedNames = failedNames }

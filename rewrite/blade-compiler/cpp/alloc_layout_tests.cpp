@@ -16,8 +16,9 @@
 // must be a contiguous, cudaMemcpy-able slice). Run via `blade test alloc`,
 // which compiles and executes this file against the runtime headers.
 //
-// OUTPUT CONTRACT: prints one line per check as "PASS <name>" or "FAIL <name>",
-// then a final "ALLOC TESTS: <p>/<n> passed". Exit code 0 iff all pass. The
+// OUTPUT CONTRACT: prints one line per check as "  [PASS]: <name>" or
+// "  [FAIL]: <name>", then a final "ALLOC TESTS: <p>/<n> passed". Exit code 0
+// iff all pass. The
 // harness parses the final line and the exit code.
 // ============================================================================
 
@@ -35,8 +36,8 @@ static int g_total = 0;
 
 static void check(const char* name, bool ok) {
     g_total++;
-    if (ok) { g_pass++; printf("PASS %s\n", name); }
-    else    {           printf("FAIL %s\n", name); }
+    if (ok) { g_pass++; printf("  [PASS]: %s\n", name); }
+    else    {           printf("  [FAIL]: %s\n", name); }
 }
 
 // Closed-form binomial C(a, b) for cardinality expectations.

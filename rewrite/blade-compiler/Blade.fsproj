@@ -18,6 +18,7 @@
     <Compile Include="TypeCheck.fs" />
     <Compile Include="Lowering.fs" />
     <Compile Include="CodeGen.fs" />
+    <Compile Include="tests/TestHarness.fs" />
     <Compile Include="tests/Test_Basic.fs" />
     <Compile Include="tests/Test_Loops.fs" />
     <Compile Include="tests/Test_Symmetry.fs" />
