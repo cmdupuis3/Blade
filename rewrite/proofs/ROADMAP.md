@@ -1,9 +1,39 @@
 # Blade Proof System -- Roadmap for Open Items
 
-Status as of blade-proofs-v13 (18 files, 214 theorems, coqc + coqchk).
+Status as of blade-proofs-v14 (19 files, 232 theorems, coqc + coqchk).
 This document lists every remaining deferred item, with a concrete
 design where the direction is settled and an honest confidence note
 where it is not.
+
+## Closed in v14
+
+- **Monad + combinator laws; coverage check complete** (BladeMonad.v,
+  18 theorems): every law asserted in formalism 12.1-12.5 and the
+  proofs-doc MonadPlus table now has a checked artifact at the
+  materialized-value semantics. (1) The computation monad (bind =
+  flat_map, the loop-nest monad): ret/bind laws, and the four
+  MonadPlus laws EXACTLY as the text states them (left zero, both
+  identities, LEFT distribution) plus bonus right-zero; right
+  distribution provably fails for this monad (interleaving) -- the
+  text does not claim it and the rewrite must not add it. (2)
+  Plan-level plus CLOSED (deferred item): multi-plans as block
+  lists; mveval_plus_hom (evaluation is a monoid homomorphism);
+  mpipe_hom (12.1 at the plan-bag level). (3) Rank-changing
+  pipelines CLOSED (deferred item, materialized-slice form):
+  veval_blocks (dimensional currying at the value level),
+  curry_concat (blocks concatenate back -- currying loses nothing),
+  pipeT + rank_changing_pipe, pipe_pipe (>> associativity). (4)
+  Section 12.5: parallel_associative EXACT (flattened semantics
+  strictifies the up-to-reassociation law), parallel_commutative as
+  a Permutation with explicit segment-swap reindexing
+  (NoDup_Permutation route), application_not_commutative witness.
+  Fusion-distributes (<&!>) is a performance guarantee: prose by
+  design. Array combinators (3.6/3.7 zip/stack/transpose) are
+  array-level, out of loop-combinator scope; transpose laws belong
+  with the behavior layer and the compiler rewrite.
+  Remaining combinator-adjacent open item: k-slot structure (gated
+  on a mixed-source full-support property) and typed-path laws
+  (surface calculus).
 
 ## Closed in v13
 
