@@ -1,9 +1,47 @@
 # Blade Proof System -- Roadmap for Open Items
 
-Status as of blade-proofs-v10 (16 files, 175 theorems, coqc + coqchk).
+Status as of blade-proofs-v12 (17 files, 199 theorems, coqc + coqchk).
 This document lists every remaining deferred item, with a concrete
 design where the direction is settled and an honest confidence note
 where it is not.
+
+## Closed in v12
+
+- **Computation model + combinator laws** (BladeCompute.v, 24
+  theorems): materialized-list semantics (veval p = map kernel over
+  enumShape; funext-free). Duality/adjunction facts: veval_pval
+  (V o P = id -- the counit identity AND the checked constructive
+  core of Theorem 2.1: T/S is the trivial-plan fragment);
+  veval_not_injective (Theorem 12.7's core). Theorem 12.1
+  (compose_apply_duality) mechanized -- the proof IS map_map, making
+  the fusion connection exact. slot_interchange: kernel-slot and
+  array-slot composition agree under evaluation -- the 2-slot
+  instance of curryings <-> slot-classes <-> composition operators;
+  a third maximal currying (mixed-source property) would force a
+  third operator and a triangle of interchange laws. Theorem 12.2
+  (rank0_convergence, thin by design in the shallow semantics) +
+  fuse2_pairs (fused evaluation = pairwise product evaluation, the
+  semantic heart of <@>). Corollaries 12.3/12.4 via wrap0 round
+  trips. MonadPlus value-level laws (zero/plus identities,
+  associativity, pipe distributes). Theorems 9.19/9.20 (deduced
+  commutativity) in the invariance vocabulary. Coverage-audit row
+  updates implied: 2.1 PROSE->PARTIAL; 12.1 FULL (fragment); 12.2/
+  12.3/12.4 INSTANCE (elementwise fragment); 12.7 core FULL;
+  MonadPlus PARTIAL->FULL (value level); 9.19/9.20 FULL. Scope:
+  elementwise/rank-0 fragment; rank-changing pipelines (slice-typed
+  values) and plan-level plus remain with the surface-calculus item.
+
+## Research note (v11): Cauchy decomposition
+
+The counting theorem is the shadow of the classical Cauchy
+decomposition Sym^r(V (x) W) ~= sum over partitions of
+S^lambda(V) (x) S^lambda(W); product storage is the leading term.
+Recorded in BladeCounting.v (cite Cauchy; Reynolds = projection onto
+the leading term). Opens a CONJECTURAL item: the r = 2 constructive
+storage split (jointly-symmetric = sym(x)sym + antisym(x)antisym,
+each product-storable, totals exact: 36 + 9 = 45). Mechanization
+would need a x2/sum formulation over nat or a move to Z;
+dimension- and character-checked only so far.
 
 ## Closed in v10
 

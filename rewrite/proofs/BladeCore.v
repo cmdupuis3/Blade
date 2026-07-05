@@ -110,7 +110,10 @@ Proof.
   apply Nat.mul_lt_mono_pos_l; [nia | exact Hkey].
 Qed.
 
-(* Sanity instance matching the Python demo (L = M = 3): 36 < 45. *)
+(* Sanity instance matching the Python demo (L = M = 3): 36 < 45.       *)
+(* Classical identification (see BladeCounting.v header): the 9 missing  *)
+(* cells are dim Lambda^2(V) (x) Lambda^2(W) -- the second term of the   *)
+(* Cauchy decomposition of Sym^2(V (x) W).                               *)
 Example counting_3_3 : (3*(3+1)) * (3*(3+1)) < 2 * ((3*3) * (3*3+1)).
 Proof. compute. lia. Qed.   (* 144 < 180, i.e. 4*36 < 4*45 *)
 
