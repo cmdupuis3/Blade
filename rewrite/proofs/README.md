@@ -1,4 +1,4 @@
-# Blade Proof System (Coq) -- v12
+# Blade Proof System (Coq) -- v13
 
 Machine-checked kernel of the Blade formalism. Coq 8.18.0, stdlib only.
 All files verified by both coqc and coqchk (independent kernel checker).
@@ -10,7 +10,7 @@ All files verified by both coqc and coqchk (independent kernel checker).
 
 or manually with `coqc -Q . Blade <file>` in _CoqProject order.
 
-## Contents (199 theorems total)
+## Contents (214 theorems total)
 
 - BladeCore.v (16): Group Law both halves (diagonal swap sound; per-dim
   product swap refuted), counting lemma (no lossless product layout),
@@ -70,7 +70,11 @@ or manually with `coqc -Q . Blade <file>` in _CoqProject order.
 - BladeShape.v (3): NEW -- enumShape NoDup via fixed canonical lengths
   and unique app-splitting.
 - BladeCompound.v (7): rank-k Compound arrow.
-- BladeCompute.v (24): NEW -- the computation model: materialized
+- BladeCauchy.v (15): NEW -- the r = 2 Cauchy storage split: any
+  jointly-symmetric tensor = sym(x)sym + antisym(x)antisym components,
+  each per-dim product-canonical, with signed lossless access and
+  exact cell accounting (36 + 9 = 45 from live enumerations).
+- BladeCompute.v (24): the computation model: materialized
   evaluation; V o P = id (counit identity / Theorem 2.1 core);
   non-faithfulness (12.7); compose-apply duality (12.1) via map_map;
   slot interchange (2-slot instance of the currying/composition

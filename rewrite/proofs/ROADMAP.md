@@ -1,9 +1,31 @@
 # Blade Proof System -- Roadmap for Open Items
 
-Status as of blade-proofs-v12 (17 files, 199 theorems, coqc + coqchk).
+Status as of blade-proofs-v13 (18 files, 214 theorems, coqc + coqchk).
 This document lists every remaining deferred item, with a concrete
 design where the direction is settled and an honest confidence note
 where it is not.
+
+## Closed in v13
+
+- **The r = 2 CAUCHY STORAGE SPLIT** (BladeCauchy.v, 15 theorems):
+  the v11 conjecture is now theorem. For ANY jointly-symmetric T
+  (the only symmetry one identity group grants), Psym = T + lon-swap
+  and Qalt = T - lon-swap satisfy: 2T = Psym + Qalt; Psym has FULL
+  S2 x S2 product symmetry and Qalt is antisym (x) antisym (both lat
+  directions via joint symmetry -- where the decomposition earns its
+  keep); Qalt vanishes on either diagonal; cauchy_split_access: the
+  two per-dim-canonical component stores losslessly determine T at
+  every logical index with product-of-sort-signs; cauchy_cell_count:
+  cells(P) + cells(Q) = joint count exactly, division-free;
+  cauchy_cells_3_3: 36 + 9 = 45 computed from the live enumerations
+  (sym enum + antisym arrow). Consequence: single-identity-group
+  r = 2 (covariance-class) regains EXACT per-dimension
+  product-structured storage via SymIdx (x) SymIdx plus sign-tracked
+  AntisymIdx (x) AntisymIdx; the "flattening is forced" conclusion
+  is amended at r = 2. Honest scope: r = 2 only (r >= 3 has mixed
+  Schur components -- genuinely open); totals equal the joint count
+  (the win is per-dim structure, not fewer cells); bridge to
+  concrete lj/alj layouts mechanical and deferred.
 
 ## Closed in v12
 
@@ -37,8 +59,7 @@ The counting theorem is the shadow of the classical Cauchy
 decomposition Sym^r(V (x) W) ~= sum over partitions of
 S^lambda(V) (x) S^lambda(W); product storage is the leading term.
 Recorded in BladeCounting.v (cite Cauchy; Reynolds = projection onto
-the leading term). Opens a CONJECTURAL item: the r = 2 constructive
-storage split (jointly-symmetric = sym(x)sym + antisym(x)antisym,
+the leading term). The r = 2 constructive storage split (NOW PROVED in v13, BladeCauchy.v) (jointly-symmetric = sym(x)sym + antisym(x)antisym,
 each product-storable, totals exact: 36 + 9 = 45). Mechanization
 would need a x2/sum formulation over nat or a move to Z;
 dimension- and character-checked only so far.
