@@ -1,0 +1,11 @@
+-Q . Blade
+BladeCore.v
+BladeDMWF.v
+BladeBinomial.v
+BladeCurrying.v
+BladeCurryingGeneral.v
+BladeLowering.v
+BladeArrow.v
+BladeTrinity.v
+BladeTrinityAsym.v
+BladeCompleteness.v
