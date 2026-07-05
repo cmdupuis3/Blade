@@ -1,4 +1,4 @@
-# Blade Proof System (Coq) -- v5
+# Blade Proof System (Coq) -- v10
 
 Machine-checked kernel of the Blade formalism. Coq 8.18.0, stdlib only.
 All files verified by both coqc and coqchk (independent kernel checker).
@@ -10,7 +10,7 @@ All files verified by both coqc and coqchk (independent kernel checker).
 
 or manually with `coqc -Q . Blade <file>` in _CoqProject order.
 
-## Contents (125 theorems total)
+## Contents (175 theorems total)
 
 - BladeCore.v (16): Group Law both halves (diagonal swap sound; per-dim
   product swap refuted), counting lemma (no lossless product layout),
@@ -57,6 +57,29 @@ or manually with `coqc -Q . Blade <file>` in _CoqProject order.
   loops (nary_generated_by_unary); sprod monoid laws checked;
   evaluation is a strict monoid homomorphism (enumShape_monoid_hom),
   the checked core of V-P monoidality.
+- BladeFusionDuality.v (5): NEW -- fusion => duality. The fused
+  primitive (loop welded to indexing, kernel/arrays abstract) yields
+  the method_for/object_for duality: bridge lemmas connect identity
+  detection to Stab and commutativity to H; detections_jointly_license
+  instantiates the license from exactly the two detected properties;
+  fusion_duality restates the two-maximal-curryings theorem under the
+  fusion reading.
+- BladeAffine.v (8): NEW -- affine feedback descriptor: the
+  delta-parameterized arrow unifying lj (delta=0) and alj (delta=1),
+  round trips proved once, instance corollaries recover both exactly.
+- BladeShape.v (3): NEW -- enumShape NoDup via fixed canonical lengths
+  and unique app-splitting.
+- BladeCompound.v (7): rank-k Compound arrow.
+- BladeLex.v (12): NEW -- lex-sortedness at the arrow level; enum,
+  affine, and Compound instances inherit; offset order embeds lex
+  order (enum_offset_respects_lex).
+- BladeCounting.v (15): the general counting theorem: no
+  lossless product layout at any d >= 2, n_j >= 2, r >= 2, in both
+  enumeration and binomial form; injection-plus-witness proof over the
+  enumerations, pigeonhole via NoDup_incl_length. has_completion
+  (the FilteredIdx residual, executable); denotation theorem at every
+  rank (exactly the in-bounds mask-true tuples, each once); rank-2
+  concrete instance subsumed.
 
 ## Open items
 

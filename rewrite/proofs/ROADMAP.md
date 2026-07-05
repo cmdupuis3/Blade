@@ -1,9 +1,83 @@
 # Blade Proof System -- Roadmap for Open Items
 
-Status as of blade-proofs-v5 (10 files, 125 theorems, coqc + coqchk).
+Status as of blade-proofs-v10 (16 files, 175 theorems, coqc + coqchk).
 This document lists every remaining deferred item, with a concrete
 design where the direction is settled and an honest confidence note
 where it is not.
+
+## Closed in v10
+
+- **Lex-sortedness** (BladeLex.v, 12 theorems): iteration order =
+  storage order, proved ONCE at the arrow level -- any arrow with
+  strictly increasing heads enumerates in strictly increasing
+  lexicographic order (enumA_lex_sorted). Instances inherited: enum
+  (via the sym_arrow_correct list equality), the affine arrow (hence
+  Antisym), and the rank-k Compound arrow (filtered heads stay
+  sorted) -- discharging BladeCompound's order-agreement note: the
+  semantic enumeration is lex, matching the compiler's dense mask
+  scan. Payoff corollary enum_offset_respects_lex: earlier
+  enumeration position implies lex-smaller tuple; the converse
+  (trichotomy + NoDup) is routine and noted as a remark since no
+  downstream theorem consumes it.
+
+## Closed in v9
+
+- **GENERAL COUNTING THEOREM** (BladeCounting.v, 15 theorems): for
+  d >= 2 dimensions of extents >= 2 and rank r >= 2,
+  prod_j |MS(n_j, r)| < |MS(prod_j n_j, r)|, with the binomial form
+  prod_j C(n_j + r - 1, r) < C(prod n_j + r - 1, r)
+  (counting_general_C). Full proof, no conjecture remaining: the
+  two-factor core is an injection-plus-missing-witness argument on the
+  enumerations themselves (pairing e(x,y) = x*b + y is canonical-
+  preserving and injective; the tuple 1 :: b :: ... decodes to a
+  non-canonical second component), lifted to arbitrary d by strict
+  multiplicative induction, pigeonhole via NoDup_incl_length.
+  BladeCore's r = 2, d = 2 arithmetic instance is subsumed; the
+  no-lossless-product-layout half of the Group Law now holds at every
+  rank and dimension count. Hypothesis sharpness noted in-file
+  (r = 1, d = 1, or any n_j = 1 give equality).
+
+## Closed in v8
+
+- **Affine feedback descriptor** (BladeAffine.v, 8 theorems): the
+  delta-parameterized arrow (step l i = i + delta) unifies lj (delta
+  = 0) and alj (delta = 1); storage domain l + sum + delta * (r - 1)
+  < u with round trips proved once; four instance corollaries recover
+  canonical/storageOK and scanonical/astorageOK exactly. Strided
+  strictness (delta >= 2) covered for free. Nonlinear delta * (r - 1)
+  leaves discharged by nia.
+- **Shape-level NoDup** (BladeShape.v, 3 theorems): enumShape
+  enumerates each tuple exactly once, via canonical_length (fixed
+  per-record lengths) and unique app-splitting. Completes the
+  enumShape theorem set (membership was trinity_fold_closure).
+
+## Closed in v7
+
+- **Rank-k Compound arrow** (BladeCompound.v, 7 theorems): CompoundIdx
+  denotation at every rank. has_completion is the mask-conditioned
+  residual (FilteredIdx) in executable form; compoundk_denotation:
+  the arrow enumerates exactly the in-bounds mask-true tuples;
+  soundness stated for nonempty dims (the designed base-case
+  asymmetry), completeness unconditional, uniqueness via filtered
+  NoDup; rank2_subsumed shows BladeArrow's concrete rank-2 instance
+  is the [n; m] case. Value-dependent step through has_completion
+  makes the dichotomy apply: Compound factors iff the mask is a
+  product.
+
+## Closed in v6
+
+- **Fusion => duality** (BladeFusionDuality.v, 5 theorems): the
+  method_for / object_for duality DERIVED from loop-index fusion.
+  fused_form names the fusion equation (Out = loop welded to indexing,
+  kernel and arrays abstract); all_same_stabilizes bridges the currying
+  layer's identity detection to the lowering layer's Stab premise;
+  detections_jointly_license closes the loop (the two detected
+  properties instantiate the H-and-Stab license on the fused
+  primitive); fusion_duality restates the two-maximal theorem under
+  the fusion reading. Duality = fusion's two-sorted slot structure +
+  detection pruning (9.23/9.24); exactness is why nothing less
+  suffices. Formalism section 2 can now open with fusion and derive
+  the duality by citation.
 
 ## Closed in v5
 
@@ -60,61 +134,7 @@ where it is not.
 
 ## Open items
 
-### 1. Rank-k Compound arrow (direction settled; implementation deferred)
-
-Design, fully worked out:
-- State: `(remaining_dims : list nat, prefix : list nat)`.
-- `has_completion dims prefix : bool` -- recursive existsb over the
-  remaining product, base case `M prefix`. This function IS the
-  mask-conditioned residual (FilteredIdx) in executable form.
-- `heads (n :: dims', prefix) = filter (fun i => has_completion dims'
-  (prefix ++ [i])) (seq 0 n)`; `step` appends to the prefix.
-- Theorems, split by direction because the naive iff fails at the
-  empty-dims base (canonA gives True; M prefix may be false):
-  soundness under `dims <> []`; completeness via a witness lemma
-  (`Forall2 bounds t' dims' -> M (prefix ++ t') = true ->
-  has_completion dims' prefix = true`, by induction with
-  existsb_exists). Bookkeeping is app-associativity
-  (`(prefix ++ [i]) ++ t' = prefix ++ i :: t'`).
-- Estimate: 80-100 lines, mechanical. High confidence.
-
-### 2. General counting lemma in C-form (medium confidence)
-
-prod_j C(n_j + r - 1, r) < C(prod_j n_j + r - 1, r) for d >= 2,
-n_j >= 2, r >= 2. Now stateable with BladeBinomial's C. The honest
-proof is an injective-but-not-surjective map between multiset spaces,
-which needs finite-set cardinality machinery (or mathcomp). The r = 2
-arithmetic instance in BladeCore already settles the audit's flagship
-case unconditionally; generalize only if the formalism claims the
-general inequality as a theorem rather than citing instances.
-
-### 3. Lex-sortedness of enum (settled direction; low priority)
-
-Claim: enum r l u is sorted in lexicographic order, hence storage
-offset = lex rank (completing "iteration order = storage order").
-Approach: define lex on lists, prove a flat_map sortedness lemma
-(blocks ordered by head, heads strictly increasing from NoDup_seq +
-in_seq bounds), induct. Estimate 80-120 lines. No downstream theorem
-currently needs it; do it when the formalism section on storage
-offsets is rewritten.
-
-### 4. Affine feedback descriptor (settled; pure elegance)
-
-Unify lj (delta = 0) and alj (delta = 1): step l i = i + delta,
-coords a_{k+1} = i_{k+1} - i_k - delta, domain l + sum(a) +
-delta * (r - 1) < u. Same proof skeleton a third time. Worth doing
-only when a delta > 1 index type (strided strictness) enters the
-language; otherwise it duplicates two checked proofs for symmetry's
-sake.
-
-### 5. Shape-level NoDup (small gap)
-
-Membership characterization for shapes is DONE (trinity_fold_closure
-gives sound+complete via the Forall2 decomposition). NoDup of
-enumShape remains: needs unique app-splitting, which holds because
-canonical tuples have fixed per-record lengths. ~40 lines.
-
-### 6. Surface-calculus progress/preservation (large; sequencing note)
+### 1. Surface-calculus progress/preservation (large; sequencing note)
 
 The one species of theorem the tower still lacks: type soundness for
 a Blade-core surface calculus elaborating into BladeCore section 7's
