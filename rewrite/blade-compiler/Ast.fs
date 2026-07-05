@@ -157,8 +157,8 @@ type TypeExpr =
     | TyVar of Ident * int option
     // Index types
     | TyIdx of extent: Expr
-    | TySymIdx of arity: int * extent: Expr
-    | TyAntisymIdx of arity: int * extent: Expr
+    | TySymIdx of rank: int * extent: Expr
+    | TyAntisymIdx of rank: int * extent: Expr
     | TyBoundedIdx of lower: Expr * upper: Expr
     | TyCompoundIdx of mask: Expr
     | TyEquivIdx of dim: Expr * group: TypeExpr * rep: TypeExpr
@@ -234,6 +234,12 @@ and Pattern =
 and Expr =
     // Literals
     | ExprLit of Literal
+    // Wildcard hole `_` in expression position. A general discard/hole token
+    // (the expression-position sibling of PatWildcard). Context gives it meaning:
+    // as a compound-index coordinate it marks a FREE axis (B((a, _, c))). It is
+    // not a value and has no type of its own; contexts that don't interpret it
+    // (arbitrary expression position) reject it.
+    | ExprWildcard
     // Variables and names
     | ExprVar of Ident
     | ExprQualified of QualifiedName
@@ -264,7 +270,7 @@ and Expr =
     | ExprMethodFor of arrays: Expr list
     | ExprObjectFor of kernel: Expr
     // Virtual arrays
-    | ExprRange of TypeExpr                // range<I>
+    | ExprRange of TypeExpr list           // range<I> or range<I1, ..., In> (multi-index)
     | ExprDotDot of lo: Expr * hi: Expr  // a..b — anonymous range sugar
     | ExprReverse of TypeExpr              // reverse<I>
     | ExprBlocked of TypeExpr * Expr       // blocked<I, K>
@@ -276,6 +282,7 @@ and Expr =
     // Combinators
     | ExprPure of Expr
     | ExprCompute of Expr                  // expr |> compute
+    | ExprRead of Expr                     // expr |> read (force a deferred provider read)
     | ExprGuard of cond: Expr * body: Expr
     | ExprSequence of Expr list
     | ExprReplicate of count: Expr * body: Expr
@@ -288,6 +295,7 @@ and Expr =
     | ExprZero                             // zero keyword
     | ExprRank of Expr                     // rank(A) - get rank of array
     | ExprMask of array: Expr * pred: Expr // mask(A, pred) - filter array by predicate
+    | ExprCompound of dense: Expr * mask: Expr // compound(dense, mask) - scatter dense array into a CompoundIdx-typed compact array via a bool mask (formalism 4.5)
     | ExprIntersect of Expr * Expr         // intersect(A, B) - elements in both
     | ExprUnion of Expr * Expr             // union(A, B) - elements in either
     | ExprUnique of array: Expr            // unique(A) - dedup, first-occurrence order

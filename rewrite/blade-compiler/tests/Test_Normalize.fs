@@ -25,7 +25,7 @@ let private i64 = IRTScalar ETInt64
 let private idxN (n: int) : IRIndexType =
     {
         Id = n  // ad-hoc handle, only used for equality in the tests
-        Arity = 1
+        Rank = 1
         Extent = IRLit (IRLitInt (int64 n))
         Symmetry = SymNone
         Tag = None

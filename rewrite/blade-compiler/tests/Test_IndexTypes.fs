@@ -1093,8 +1093,29 @@ let result = decompact(anti, 2)
 """
 
 
+// compound(dense, mask): source-level compound construction (P5) + phase-1
+// full-tuple indexing, validated end-to-end against the dense source. The
+// dense array and the bool mask share NAMED index types (Lat, Lon), so
+// compoundViewType's identity check matches them by tag even though each
+// annotation reference gets a fresh Id (the fix aligning compound construction
+// with 14.6 shared-index-space identity). All dims are masked (no trailing),
+// so indexing a PRESENT cell returns a scalar equal to the dense value there.
+// Mask pattern: (0,0)=T (1,0)=T (1,1)=T, (0,1)=F -> cardinality 3.
+// B((0,0)) is present, so it must equal dense[0][0] = 10.0.
+let test_compound_construct_index = """
+type Lat = Idx<2>
+type Lon = Idx<2>
+let dense: Array<Float64 like Lat, Lon> = [[10.0, 20.0], [30.0, 40.0]]
+let m: Array<Bool like Lat, Lon> = [[true, false], [true, true]]
+let B = compound(dense, m)
+let x = B((0, 0))
+// EXPECT: x = 10
+"""
+
+
 /// Index type tests (AntisymIdx, HermitianIdx)
 let indexTypeTests = [
+    ("Compound Construct + Index", test_compound_construct_index)
     ("Transpose 2D Nonsquare", test_transpose_2d_nonsquare)
     ("Transpose Square", test_transpose_square)
     ("Transpose Rank3", test_transpose_rank3)

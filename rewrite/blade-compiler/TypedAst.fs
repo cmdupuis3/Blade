@@ -135,6 +135,11 @@ and TypedExpr = {
 and TypedExprKind =
     // Literals
     | TExprLit of Literal
+    // Wildcard hole `_` in expression position (typed sibling of TPatWild). Carries
+    // a hole type so it flows through tuple inference; only meaningful where a
+    // context consumes it (a compound-index coordinate marks a FREE axis). Reaching
+    // lowering/codegen unconsumed is an error.
+    | TExprWildcard
     
     // Variables and names
     | TExprVar of name: string * varId: IRId * identity: ArrayIdentity option
@@ -194,7 +199,7 @@ and TypedExprKind =
     | TExprCompose of BinOp * TypedExpr * TypedExpr
     
     // Virtual arrays
-    | TExprRange of indexType: IRIndexType
+    | TExprRange of indexTypes: IRIndexType list
     | TExprDotDot of lo: TypedExpr * hi: TypedExpr
     | TExprReverse of indexType: IRIndexType
     | TExprBlocked of indexType: IRIndexType * blockSize: TypedExpr
@@ -206,6 +211,13 @@ and TypedExprKind =
     // Special forms
     | TExprPure of TypedExpr
     | TExprCompute of TypedExpr
+    | TExprRead of TypedExpr
+    // fill_random(mod): internal builtin -- a random-filled array constructor.
+    // The result array type comes from the binding annotation (bidirectional
+    // check), so this only appears as an annotated let-binding value. Lowering
+    // records it in RandomInits; codegen emits allocate<> + the runtime
+    // fill_random. `modulus` is the argument to rand() % modulus.
+    | TExprFillRandom of modulus: TypedExpr
     | TExprGuard of cond: TypedExpr * body: TypedExpr
     | TExprZero
     | TExprReynolds of kernel: TypedExpr * isAntisymmetric: bool
@@ -216,6 +228,7 @@ and TypedExprKind =
     
     // Filtered array
     | TExprMask of array: TypedExpr * pred: TypedExpr
+    | TExprCompound of dense: TypedExpr * mask: TypedExpr
     | TExprIntersect of TypedExpr * TypedExpr
     | TExprUnion of TypedExpr * TypedExpr
     | TExprUnique of array: TypedExpr

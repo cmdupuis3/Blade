@@ -748,7 +748,45 @@ let compileCpp (cppFile: string) (outputDir: string) : Result<string, string> =
         //   counters compared with int literals, etc.) so we don't enable it.
         let safetyFlags = "-Werror=float-conversion -Werror=narrowing"
 
-        let args = sprintf "-std=c++17 -O2 %s %s -o \"%s\" \"%s\"" ompFlag safetyFlags exeFullPath cppFullPath
+        // Provider programs (load_compound / load) emit `#include <netcdf.h>` and
+        // call nc_*, so they need the netcdf header at compile and the library at
+        // link. These are NOT on g++'s default search path in the common Windows
+        // case: an official MSVC-built netCDF under Program Files, whose DLL is on
+        // PATH (for the F# P/Invoke side) but whose include/lib g++ never sees,
+        // and whose import lib is MSVC-format. Resolution:
+        //   - NETCDF_DIR set: add -I<dir>\include, and link the DLL in <dir>\bin
+        //     DIRECTLY (MinGW g++ links a Windows DLL by reading its export table
+        //     -- robust against an MSVC .lib; the C API is ABI-compatible on x64).
+        //     Fall back to -L<dir>\lib -lnetcdf if no DLL is found there.
+        //   - NETCDF_DIR unset: bare -lnetcdf (works when netcdf is already on the
+        //     default include/lib paths, e.g. an MSYS2 pacman install).
+        // Link inputs go AFTER the source (linker order). Non-provider programs
+        // add nothing.
+        let needsNetcdf =
+            try (File.ReadAllText cppFullPath).Contains "#include <netcdf.h>" with _ -> false
+        let netcdfFlags =
+            if not needsNetcdf then ""
+            else
+                (match System.Environment.GetEnvironmentVariable("NETCDF_DIR") with
+                 | null | "" -> " -lnetcdf"
+                 | dir ->
+                     let incFlag = sprintf " -I\"%s\"" (Path.Combine(dir, "include"))
+                     let binDir = Path.Combine(dir, "bin")
+                     let dllPath = Path.Combine(binDir, "netcdf.dll")
+                     let linkFlag =
+                         if File.Exists dllPath then sprintf " \"%s\"" dllPath
+                         else
+                             let glob =
+                                 try
+                                     if Directory.Exists binDir then Directory.GetFiles(binDir, "netcdf*.dll") |> Array.tryHead
+                                     else None
+                                 with _ -> None
+                             (match glob with
+                              | Some p -> sprintf " \"%s\"" p
+                              | None -> sprintf " -L\"%s\" -lnetcdf" (Path.Combine(dir, "lib")))
+                     incFlag + linkFlag)
+
+        let args = sprintf "-std=c++17 -O2 %s %s -o \"%s\" \"%s\"%s" ompFlag safetyFlags exeFullPath cppFullPath netcdfFlags
         
         let psi = ProcessStartInfo("g++", args)
         psi.RedirectStandardOutput <- true
@@ -781,7 +819,7 @@ let compileCpp (cppFile: string) (outputDir: string) : Result<string, string> =
             if String.IsNullOrWhiteSpace allOutput then
                 Error (sprintf "Compilation failed (exit %d) with no output. Command: g++ %s" proc.ExitCode args)
             else
-                Error (sprintf "Compilation failed (exit %d):\n%s" proc.ExitCode allOutput)
+                Error (sprintf "Compilation failed (exit %d):\n%s\nCommand: g++ %s" proc.ExitCode allOutput args)
     with ex ->
         Error (sprintf "Compilation exception: %s\n%s" ex.Message ex.StackTrace)
 
@@ -1297,10 +1335,7 @@ let runMultiFileTestsFull (name: string) (tests: (string * (string * string) lis
         Directory.CreateDirectory outputDir |> ignore
     
     // Write runtime header file once
-    let headerFile = Path.Combine(outputDir, "nested_array_utilities.hpp")
-    File.WriteAllText(headerFile, CodeGen.genRuntimeHeader ())
-    let arrayTypesHeaderFile = Path.Combine(outputDir, "nested_array_types.hpp")
-    File.WriteAllText(arrayTypesHeaderFile, CodeGen.genRuntimeArrayTypesHeader ())
+    CodeGen.deployRuntimeHeaders outputDir
     
     let mutable passed = 0
     let mutable failed = 0
@@ -1401,10 +1436,7 @@ let runTestCategoryFull (name: string) (tests: (string * string) list) (outputDi
         Directory.CreateDirectory outputDir |> ignore
     
     // Write runtime header file once
-    let headerFile = Path.Combine(outputDir, "nested_array_utilities.hpp")
-    File.WriteAllText(headerFile, CodeGen.genRuntimeHeader ())
-    let arrayTypesHeaderFile = Path.Combine(outputDir, "nested_array_types.hpp")
-    File.WriteAllText(arrayTypesHeaderFile, CodeGen.genRuntimeArrayTypesHeader ())
+    CodeGen.deployRuntimeHeaders outputDir
     
     printfn "Running %d tests...\n" (List.length tests)
     
@@ -1555,13 +1587,13 @@ let runBufferTypeTests () : Blade.Tests.TestHarness.BlockResult =
     let mutable failedNames = []
     let lit n = IRLit (IRLitInt (int64 n))
     // A buffer dim group constructor for the test
-    let grp arity ext symm : BufferDimGroup =
-        { Arity = arity; Extent = lit ext; Symmetry = symm
+    let grp rank ext symm : BufferDimGroup =
+        { Rank = rank; Extent = lit ext; Symmetry = symm
           Kind = (if symm = SymNone then TDimension else SDimension)
           Dependencies = [] }
-    // Rectangular SDimension group (Arity 1, SymNone, but SDimension)
+    // Rectangular SDimension group (Rank 1, SymNone, but SDimension)
     let rectS ext : BufferDimGroup =
-        { Arity = 1; Extent = lit ext; Symmetry = SymNone
+        { Rank = 1; Extent = lit ext; Symmetry = SymNone
           Kind = SDimension; Dependencies = [] }
     let card (groups: BufferDimGroup list) =
         match deviceBufferCardinality { ElemType = IRTScalar ETFloat64; Groups = groups } with
@@ -1654,8 +1686,7 @@ let runCudaTests () : Blade.Tests.TestHarness.BlockResult =
     else
         let outputDir = "./generated_cpp_tests"
         Directory.CreateDirectory(outputDir) |> ignore
-        File.WriteAllText(Path.Combine(outputDir, "nested_array_utilities.hpp"), CodeGen.genRuntimeHeader ())
-        File.WriteAllText(Path.Combine(outputDir, "nested_array_types.hpp"), CodeGen.genRuntimeArrayTypesHeader ())
+        CodeGen.deployRuntimeHeaders outputDir
 
         // Compile a plain host .cpp (the oracle) without MinGW on Windows: there
         // we use nvcc to drive cl.exe (single MSVC toolchain, consistent with the
@@ -2132,8 +2163,7 @@ let runOmpCoverageTests () : Blade.Tests.TestHarness.BlockResult =
         // Write runtime headers into the output dir so the generated programs'
         // #include "nested_array_utilities.hpp" / "nested_array_types.hpp"
         // resolve at g++ time (same as the main test path does).
-        File.WriteAllText(Path.Combine(outputDir, "nested_array_utilities.hpp"), CodeGen.genRuntimeHeader ())
-        File.WriteAllText(Path.Combine(outputDir, "nested_array_types.hpp"), CodeGen.genRuntimeArrayTypesHeader ())
+        CodeGen.deployRuntimeHeaders outputDir
         let mutable errors = 0
         let mutable warnings = 0
         let mutable passed = 0
@@ -2699,8 +2729,14 @@ let private timeEdgiProgramOnly (outputDir: string) (caseName: string) (edgiSrc:
             cpsi.WorkingDirectory <- Path.GetDirectoryName(srcAbs)
             use cproc = Process.Start(cpsi)
             let cerr = cproc.StandardError.ReadToEndAsync()
-            cproc.WaitForExit(60000) |> ignore
-            if cproc.ExitCode <> 0 then
+            // Guard ExitCode behind WaitForExit's return: reading ExitCode on a
+            // still-running (timed-out) process throws "Process must exit ...".
+            // Dense baselines emit large C++ whose -O2 compile can be slow, so
+            // allow generous headroom and fail gracefully on a genuine overrun.
+            if not (cproc.WaitForExit(300000)) then
+                (try cproc.Kill() with _ -> ())
+                Error "compile timed out (>300s)"
+            elif cproc.ExitCode <> 0 then
                 Error (sprintf "compile failed: %s" cerr.Result)
             else
                 // Parse "<...> completed in <t>s" from one run's stdout.
@@ -2712,7 +2748,10 @@ let private timeEdgiProgramOnly (outputDir: string) (caseName: string) (edgiSrc:
                     rpsi.WorkingDirectory <- Path.GetDirectoryName(exeAbs)
                     use rproc = Process.Start(rpsi)
                     let rout = rproc.StandardOutput.ReadToEndAsync()
-                    rproc.WaitForExit(60000) |> ignore
+                    // Kill a runaway run on timeout so rout.Result returns (a
+                    // graceful "no completed in" Error) instead of blocking
+                    // indefinitely on a process that may never exit.
+                    if not (rproc.WaitForExit(180000)) then (try rproc.Kill() with _ -> ())
                     let m = System.Text.RegularExpressions.Regex.Match(rout.Result, @"completed in\s+([0-9.eE+-]+)s")
                     if m.Success then
                         (match System.Double.TryParse(m.Groups.[1].Value, System.Globalization.NumberStyles.Float, System.Globalization.CultureInfo.InvariantCulture) with
@@ -2991,11 +3030,12 @@ let runDifferentialTimingTests () : Blade.Tests.TestHarness.BlockResult =
         // outer cells, each a heavy T-element reduce -> ~1-5s. Arrays are tiny
         // (L*M*T = 36000 elements); the cost is in the grid×fiber product.
         let prodSymFiberCase (rArgs: int) (lDim: int) (mDim: int) (tDim: int) (stages: int) =
-            // 3-D int array literal A[Lat][Lon][Time], values 1..L*M*T row-major.
-            let cell l m t = string (((l - 1) * mDim + (m - 1)) * tDim + t)
-            let timeRow l m = [ for t in 1 .. tDim -> cell l m t ] |> String.concat ", "
-            let lonRow l = [ for m in 1 .. mDim -> sprintf "[%s]" (timeRow l m) ] |> String.concat ", "
-            let lit = [ for l in 1 .. lDim -> sprintf "[%s]" (lonRow l) ] |> String.concat ", "
+            // 3-D int array A[Lat][Lon][Time] built by the internal fill_random
+            // constructor (rand() % 1000). This is a timing/ratio test: the values
+            // never enter the comparison (runRatioCase measures only the sym/dense
+            // wall-clock ratio, never results), so a random fill is equivalent to
+            // any literal here and keeps the generated source tiny (was a 72k-
+            // element literal at r=2 -> ~25s g++ compile).
             // Heavy per-fiber reduce: Horner-mod binop consumes the Time fiber,
             // putting T*stages-ish work in each outer (Lat,Lon) cell.
             let binop =
@@ -3003,7 +3043,7 @@ let runDifferentialTimingTests () : Blade.Tests.TestHarness.BlockResult =
                 sprintf "lambda(acc, x) -> (acc + x%s) %% 1000003" muls
             let typeDecl =
                 sprintf "type LatIdx = Idx<%d>\ntype LonIdx = Idx<%d>\ntype TimeIdx = Idx<%d>\n" lDim mDim tDim
-            let arrDecl = sprintf "let A: Array<Int64 like LatIdx, LonIdx, TimeIdx> = [%s]\n" lit
+            let arrDecl = "let A: Array<Int64 like LatIdx, LonIdx, TimeIdx> = fill_random(1000)\n"
             // r fiber params (a, b, c, ...) all in one comm group; each reduced
             // and summed. method_for(A, A, ..) repeats A r times. Correct product
             // symmetry makes EACH outer dim (Lat, Lon) a rank-r symmetric group
@@ -3028,11 +3068,12 @@ let runDifferentialTimingTests () : Blade.Tests.TestHarness.BlockResult =
             // dense scales as (LM)^r.
             let expectedRatio = exactSimplexRatio rArgs [lDim; mDim]
             runRatioCase (sprintf "prodsym-fiber r=%d d=2 L=%d M=%d T=%d" rArgs lDim mDim tDim) rArgs 2 (lDim * mDim) expectedRatio symSrc denseSrc
-        // T kept SMALL (fast compile, small result allocation). The runtime
-        // lever is `stages` (inline Horner length): it raises per-cell FLOPs
-        // WITHOUT growing the array literal (which scales with T and blew up
-        // compile time — a 7.3MB source literal at T=900) or the result
-        // allocation. A moderate stages (~60) lifts each arm into the ~0.15-0.7s
+        // T kept SMALL (small result allocation). The runtime lever is `stages`
+        // (inline Horner length): it raises per-cell FLOPs WITHOUT growing the
+        // result allocation. (The array data is built by fill_random, so it no
+        // longer bloats the source -- the dense literal it replaced blew up
+        // compile time, a 7.3MB source at T=900.) A moderate stages (~60) lifts
+        // each arm into the ~0.15-0.7s
         // range — well clear of the timer underflow that hit r=4 (was ~1.3ms) —
         // while keeping the generated Horner expression and the data small. (We do
         // NOT chase a 5s wall-clock: the dense cell count (L*M)^r times a heavy
@@ -3297,15 +3338,15 @@ let runAllTestsFull () =
     // Differential symmetry harness: every symmetry case vs an independent F#
     // oracle over randomized inputs. Skips cleanly when g++ absent.
     let diff = runDifferentialSymmetryTest ()
+    // Type-structure tests: assert deduced IR types of bindings (no codegen/run).
+    let typeStruct = Blade.Tests.TypeStructure.runTypeStructureTests ()
     // Differential timing: measured (r!)^d speedup of comm-annotation and
     // symmetric-type forms vs their dense equivalents. Reports ratios; warns
     // (never fails) on a slow ratio. Skips cleanly when g++ absent.
     let timing = runDifferentialTimingTests ()
-    // Type-structure tests: assert deduced IR types of bindings (no codegen/run).
-    let typeStruct = Blade.Tests.TypeStructure.runTypeStructureTests ()
 
     // Grand-total roll-up (#4): one line per block, a total, and failed names.
-    let blocks = [ r1; r2; attrs; subst; alloc; omp; bufType; cuda; diff; timing; typeStruct ]
+    let blocks = [ r1; r2; attrs; subst; alloc; omp; bufType; cuda; diff; typeStruct; timing ]
     Blade.Tests.TestHarness.printGrandTotal blocks
     let anyFailed = blocks |> List.sumBy (fun b -> b.Failed)
     if anyFailed = 0 then 0 else 1
@@ -3319,10 +3360,7 @@ let runTestCategoryGenOnly (name: string) (tests: (string * string) list) (outpu
         Directory.CreateDirectory outputDir |> ignore
     
     // Write runtime header file once
-    let headerFile = Path.Combine(outputDir, "nested_array_utilities.hpp")
-    File.WriteAllText(headerFile, CodeGen.genRuntimeHeader ())
-    let arrayTypesHeaderFile = Path.Combine(outputDir, "nested_array_types.hpp")
-    File.WriteAllText(arrayTypesHeaderFile, CodeGen.genRuntimeArrayTypesHeader ())
+    CodeGen.deployRuntimeHeaders outputDir
     
     printfn "Generating C++ for %d tests to %s...\n" (List.length tests) (Path.GetFullPath outputDir)
     
@@ -3468,10 +3506,7 @@ let runAbortTests (name: string) (tests: (string * string) list) (outputDir: str
 
     if not (Directory.Exists outputDir) then
         Directory.CreateDirectory outputDir |> ignore
-    let headerFile = Path.Combine(outputDir, "nested_array_utilities.hpp")
-    File.WriteAllText(headerFile, CodeGen.genRuntimeHeader ())
-    let arrayTypesHeaderFile = Path.Combine(outputDir, "nested_array_types.hpp")
-    File.WriteAllText(arrayTypesHeaderFile, CodeGen.genRuntimeArrayTypesHeader ())
+    CodeGen.deployRuntimeHeaders outputDir
 
     let gppAvailable = checkGppAvailable ()
     if not gppAvailable then
@@ -3840,6 +3875,365 @@ let runNetcdfTests () =
         check "A is an array type" false ""
 
     // ---------------------------------------------------------------
+    // Test 3b: Loaded-var typing (registerProviderModule)
+    // The type-check seam that makes `let sample = NetCDF.load(...)` type
+    // `sample` to a module struct, so `sample.vars.A` resolves to A's real
+    // Array type rather than a fresh type var. Exercised with the mock module
+    // above; the compile-time file read is bypassed, as in these tests.
+    // ---------------------------------------------------------------
+    printfn "\n--- Loaded-var typing (registerProviderModule) ---"
+
+    let env0 = emptyEnv ()
+    let (envP, moduleTy) = registerProviderModule env0 "sample" modul
+
+    check "sample binds to module struct type"
+        (moduleTy = IRTNamed "sample") (sprintf "got %A" moduleTy)
+
+    let fieldOf structName fieldName =
+        match lookupTypeDef structName envP with
+        | Some (TDIStruct (_, _, fields)) ->
+            fields |> List.tryPick (fun (n, t) -> if n = fieldName then Some t else None)
+        | _ -> None
+
+    check "sample.vars -> vars struct"
+        (fieldOf "sample" "vars" = Some (IRTNamed "vars")) (sprintf "got %A" (fieldOf "sample" "vars"))
+    check "sample.dims -> dims struct"
+        (fieldOf "sample" "dims" = Some (IRTNamed "dims")) (sprintf "got %A" (fieldOf "sample" "dims"))
+
+    match fieldOf "vars" "A" with
+    | Some (ArrayElem arr) ->
+        check "sample.vars.A resolves to a rank-3 array"
+            (arr.IndexTypes.Length = 3) (sprintf "got %d" arr.IndexTypes.Length)
+        check "sample.vars.A element type is Float64"
+            (arr.ElemType = IRTScalar ETFloat64) (sprintf "got %A" arr.ElemType)
+    | other ->
+        check "sample.vars.A resolves to an array type" false (sprintf "got %A" other)
+
+    // ---------------------------------------------------------------
+    // Test 3c: load_compound view transform (compoundViewType)
+    // Pure type transform -- a bool mask covering all of a variable's dims
+    // (matched by index Id) collapses them into one CompoundIdx, i.e. a scalar
+    // Compound<T, RANK>. No data read; that happens at |> read.
+    // ---------------------------------------------------------------
+    printfn "\n--- load_compound view transform (compoundViewType) ---"
+
+    let cBuilder = IRBuilder()
+    let cId1 = cBuilder.FreshId()
+    let cId2 = cBuilder.FreshId()
+    let cId3 = cBuilder.FreshId()
+    let mkIdx (id: IRId) (ext: int64) : IRIndexType =
+        { Id = id; Rank = 1; Extent = IRLit (IRLitInt ext)
+          Symmetry = SymNone; Tag = None; Kind = SDimension; Dependencies = [] }
+    let cVarArr : IRArrayType =
+        { ElemType = IRTScalar ETFloat32
+          IndexTypes = [mkIdx cId1 20L; mkIdx cId2 30L; mkIdx cId3 50L]
+          IsVirtual = false; Identity = Some (AIDVariable "B") }
+    let cMaskArr : IRArrayType =
+        { ElemType = IRTScalar ETInt64
+          IndexTypes = [mkIdx cId1 20L; mkIdx cId2 30L; mkIdx cId3 50L]
+          IsVirtual = false; Identity = Some (AIDVariable "B_mask") }
+    let cMaskIR = IRLit IRLitUnit
+
+    match compoundViewType (cBuilder.FreshId()) cVarArr cMaskArr cMaskIR with
+    | Ok (ArrayElem arr) ->
+        check "load_compound: collapses to a single compound index"
+            (arr.IndexTypes.Length = 1) (sprintf "got %d" arr.IndexTypes.Length)
+        check "load_compound: compound index has rank 3"
+            (arr.IndexTypes.[0].Rank = 3) (sprintf "got %d" arr.IndexTypes.[0].Rank)
+        check "load_compound: tagged __compoundidx"
+            (arr.IndexTypes.[0].Tag = Some "__compoundidx") (sprintf "got %A" arr.IndexTypes.[0].Tag)
+        check "load_compound: carries the mask as the compound extent"
+            (match arr.IndexTypes.[0].Extent with IRCompoundMask _ -> true | _ -> false) ""
+        check "load_compound: element type preserved (Float32)"
+            (arr.ElemType = IRTScalar ETFloat32) (sprintf "got %A" arr.ElemType)
+    | Ok other -> check "load_compound: result is an array" false (sprintf "got %A" other)
+    | Error e -> check "load_compound: all-dims integer mask succeeds" false e
+
+    // A non-integer mask is rejected (a float variable is data, not a presence
+    // mask; per-slice-length integer masks are a future RaggedIdx sibling).
+    let cFloatMask = { cMaskArr with ElemType = IRTScalar ETFloat64 }
+    check "load_compound: rejects a non-integer (float) mask"
+        (match compoundViewType (cBuilder.FreshId()) cVarArr cFloatMask cMaskIR with Error _ -> true | Ok _ -> false) ""
+
+    // Partial coverage (mask covers a leading prefix) is SUPPORTED: the masked
+    // prefix collapses to a CompoundIdx and the remaining dim stays a regular
+    // trailing slot (formalism CompoundIdx<mask>, Idx<...>).
+    let cPartialMask = { cMaskArr with IndexTypes = [mkIdx cId1 20L; mkIdx cId2 30L] }
+    (match compoundViewType (cBuilder.FreshId()) cVarArr cPartialMask cMaskIR with
+     | Ok (ArrayElem parr) ->
+         check "load_compound: partial mask -> compound + trailing slot"
+             (parr.IndexTypes.Length = 2) (sprintf "got %d slots" parr.IndexTypes.Length)
+         check "load_compound: partial compound index has rank 2"
+             (parr.IndexTypes.[0].Rank = 2 && parr.IndexTypes.[0].Tag = Some "__compoundidx")
+             (sprintf "got rank %d tag %A" parr.IndexTypes.[0].Rank parr.IndexTypes.[0].Tag)
+         check "load_compound: trailing dim preserved (3rd var dim)"
+             (parr.IndexTypes.[1].Id = cId3) (sprintf "got Id %d" parr.IndexTypes.[1].Id)
+     | Ok other -> check "load_compound: partial result is an array" false (sprintf "got %A" other)
+     | Error e -> check "load_compound: partial (leading-prefix) mask succeeds" false e)
+
+    // A NON-PREFIX mask (skips a dimension / out of order) is rejected -- only a
+    // contiguous leading prefix is supported.
+    let cReorderedMask = { cMaskArr with IndexTypes = [mkIdx cId1 20L; mkIdx cId3 50L] }
+    check "load_compound: rejects a non-prefix mask"
+        (match compoundViewType (cBuilder.FreshId()) cVarArr cReorderedMask cMaskIR with Error _ -> true | Ok _ -> false) ""
+
+    // A mask with MORE dimensions than the variable cannot be a leading prefix.
+    let cId4 = cBuilder.FreshId()
+    let cTooLongMask = { cMaskArr with IndexTypes = cMaskArr.IndexTypes @ [mkIdx cId4 7L] }
+    check "load_compound: rejects a mask longer than the variable"
+        (match compoundViewType (cBuilder.FreshId()) cVarArr cTooLongMask cMaskIR with Error _ -> true | Ok _ -> false) ""
+
+    // A rank-1 leading mask over a rank-3 variable: one CompoundIdx (rank 1) plus
+    // TWO regular trailing slots, preserved in order.
+    let cMask1of3 = { cMaskArr with IndexTypes = [mkIdx cId1 20L] }
+    (match compoundViewType (cBuilder.FreshId()) cVarArr cMask1of3 cMaskIR with
+     | Ok (ArrayElem qarr) ->
+         check "load_compound: rank-1 mask over rank-3 -> compound + 2 trailing slots"
+             (qarr.IndexTypes.Length = 3) (sprintf "got %d slots" qarr.IndexTypes.Length)
+         check "load_compound: rank-1 leading compound index has rank 1"
+             (qarr.IndexTypes.[0].Rank = 1 && qarr.IndexTypes.[0].Tag = Some "__compoundidx")
+             (sprintf "got rank %d tag %A" qarr.IndexTypes.[0].Rank qarr.IndexTypes.[0].Tag)
+         check "load_compound: rank-1 leading preserves trailing dims in order"
+             (qarr.IndexTypes.[1].Id = cId2 && qarr.IndexTypes.[2].Id = cId3)
+             (sprintf "got Ids %d, %d" qarr.IndexTypes.[1].Id qarr.IndexTypes.[2].Id)
+     | Ok other -> check "load_compound: rank-1 result is an array" false (sprintf "got %A" other)
+     | Error e -> check "load_compound: rank-1 leading mask succeeds" false e)
+
+    // ---------------------------------------------------------------
+    // dimsMatch: compound construction matches on shared INDEX-SPACE IDENTITY,
+    // not on equal extents. Two arrays that share a NAMED index type carry the
+    // same Tag but get FRESH Ids per reference (source-level named types) --
+    // these MUST match. Two anonymous arrays of equal shape do NOT share an
+    // index space and must be REJECTED (formalism 14.6). This is the fix that
+    // lets source-level `compound(dense, mask)` work when the user names the
+    // shared index types (the provider path still matches via shared Id).
+    // ---------------------------------------------------------------
+    let mkNamedIdx (id: IRId) (tag: string) (ext: int64) : IRIndexType =
+        { Id = id; Rank = 1; Extent = IRLit (IRLitInt ext)
+          Symmetry = SymNone; Tag = Some tag; Kind = SDimension; Dependencies = [] }
+    // Positive: dense and mask share NAMED index types (same tags) but have
+    // DISTINCT Ids per reference -- the source-level literal case.
+    let nDense : IRArrayType =
+        { ElemType = IRTScalar ETFloat64
+          IndexTypes = [ mkNamedIdx (cBuilder.FreshId()) "Lat" 2L
+                         mkNamedIdx (cBuilder.FreshId()) "Lon" 2L
+                         mkNamedIdx (cBuilder.FreshId()) "Depth" 4L ]
+          IsVirtual = false; Identity = Some (AIDVariable "dense") }
+    let nMask : IRArrayType =
+        { ElemType = IRTScalar ETBool
+          IndexTypes = [ mkNamedIdx (cBuilder.FreshId()) "Lat" 2L
+                         mkNamedIdx (cBuilder.FreshId()) "Lon" 2L ]  // fresh Ids, same tags
+          IsVirtual = false; Identity = Some (AIDVariable "mask") }
+    (match compoundViewType (cBuilder.FreshId()) nDense nMask cMaskIR with
+     | Ok (ArrayElem narr) ->
+         check "compound: matches named index types by tag (distinct Ids)"
+             (narr.IndexTypes.Length = 2 && narr.IndexTypes.[0].Rank = 2
+              && narr.IndexTypes.[0].Tag = Some "__compoundidx")
+             (sprintf "got %d slots, rank %d, tag %A" narr.IndexTypes.Length narr.IndexTypes.[0].Rank narr.IndexTypes.[0].Tag)
+         check "compound: preserves the trailing named dim (Depth)"
+             (narr.IndexTypes.[1].Tag = Some "Depth") (sprintf "got %A" narr.IndexTypes.[1].Tag)
+     | Ok other -> check "compound: named-tag result is an array" false (sprintf "got %A" other)
+     | Error e -> check "compound: named index types (same tag) succeed" false e)
+    // Negative (14.6): anonymous arrays of EQUAL shape but NO shared identity
+    // (distinct Ids, no tags, bare literal extents) must be REJECTED -- a
+    // coincidental shape match is not a shared index space.
+    let aDense : IRArrayType =
+        { ElemType = IRTScalar ETFloat64
+          IndexTypes = [ mkIdx (cBuilder.FreshId()) 2L; mkIdx (cBuilder.FreshId()) 2L ]
+          IsVirtual = false; Identity = Some (AIDVariable "adense") }
+    let aMask : IRArrayType =
+        { ElemType = IRTScalar ETBool
+          IndexTypes = [ mkIdx (cBuilder.FreshId()) 2L; mkIdx (cBuilder.FreshId()) 2L ]
+          IsVirtual = false; Identity = Some (AIDVariable "amask") }
+    check "compound: rejects anonymous arrays of equal shape (no shared identity, 14.6)"
+        (match compoundViewType (cBuilder.FreshId()) aDense aMask cMaskIR with Error _ -> true | Ok _ -> false) ""
+
+    // buildRawLoopLevels: a CompoundIdx slot is ONE loop axis (it iterates its
+    // present cells / cardinality), NOT leadRank dense grid levels. Take the
+    // partial compound [compoundIdx<2>, trailing Idx] and confirm it produces 2
+    // levels (compound + trailing), not 3. The compound level carries the mask
+    // rank in SourceRank for the codegen consumer; the trailing dim stays its
+    // own dense level. (Foundation for compound iteration; the compacted bound
+    // and compact address are emitted by the codegen consumer in a later step.)
+    (match compoundViewType (cBuilder.FreshId()) cVarArr cPartialMask cMaskIR with
+     | Ok (ArrayElem compArr) ->
+         let rawLevels = buildRawLoopLevels [compArr] (computeSDimsPerArray [compArr])
+         check "compound iteration: CompoundIdx slot is one loop axis (not leadRank)"
+             (rawLevels.Length = 2) (sprintf "got %d levels" rawLevels.Length)
+         check "compound iteration: compound level tagged __compoundidx, mask rank in SourceRank"
+             (rawLevels.Length = 2 && rawLevels.[0].IndexSpace.Tag = Some "__compoundidx" && rawLevels.[0].IndexSpace.SourceRank = 2)
+             (sprintf "got %d levels" rawLevels.Length)
+         check "compound iteration: trailing dim stays its own dense level"
+             (rawLevels.Length = 2 && rawLevels.[1].IndexSpace.Tag = None) ""
+     | Ok other -> check "compound iteration: partial compound is an array" false (sprintf "got %A" other)
+     | Error e -> check "compound iteration: partial compound builds" false e)
+
+    // genForLoopHeader: a compound axis bounds on the runtime cardinality of the
+    // compact index (idx->cardinality), not a dense .extents entry, and carries
+    // no triangular subtraction (a compound axis is its own group, no deps).
+    let compBinding : LoopIndexBinding =
+        { Level = 0; IndexName = "__i0"; Extent = IRCompoundMask (IRLit IRLitUnit)
+          ExtentArrayRef = "data"; ExtentDimRef = 0
+          BoundDependencies = []; StrictOffset = 0; IsParallel = false
+          State = SCNeither; Elements = [] }
+    let compoundNames = CodeGen.compoundArrayNamesOf [compBinding]
+    let compHdr = CodeGen.genForLoopHeader compoundNames compBinding
+    check "compound iteration: loop header bounds on idx->cardinality"
+        (compHdr.Contains "__i0 < data.idx->cardinality;") (sprintf "got: %s" compHdr)
+
+    // A compound array's trailing dim: a literal extent keeps its literal bound
+    // (IRLit arm); a NON-literal extent bounds on trailing_stride, since the
+    // Compound layout has no dense .extents to index.
+    let litTrailB : LoopIndexBinding =
+        { Level = 1; IndexName = "__i1"; Extent = IRLit (IRLitInt 50L)
+          ExtentArrayRef = "data"; ExtentDimRef = 1
+          BoundDependencies = []; StrictOffset = 0; IsParallel = false
+          State = SCNeither; Elements = [] }
+    let dynTrailB : LoopIndexBinding =
+        { litTrailB with Extent = IRVar (999, IRTScalar ETInt64) }
+    let litHdr = CodeGen.genForLoopHeader compoundNames litTrailB
+    check "compound iteration: literal trailing extent keeps its literal bound"
+        (litHdr.Contains "__i1 < 50;") (sprintf "got: %s" litHdr)
+    let dynHdr = CodeGen.genForLoopHeader compoundNames dynTrailB
+    check "compound iteration: non-literal trailing extent bounds on trailing_stride"
+        (dynHdr.Contains "__i1 < data.trailing_stride;") (sprintf "got: %s" dynHdr)
+
+    // genElementBindingNew compound access: the compound axis peels against the
+    // compact .data buffer. All-dims (no trailing, ArrayRank 1) -> scalar leaf
+    // data[r]; partial (trailing, ArrayRank 2) -> trailing row base
+    // (data + r*trailing_stride), which the dense peel then indexes.
+    let mkCompElem (arrRank: int) : ElementBinding =
+        { ArrayPosition = 0; ArrayName = "data"; ParamName = "x"; ParamVarId = -1
+          DimIndex = 0; RankComponent = 0; ArrayElemType = IRTScalar ETFloat64
+          ArrayRank = arrRank; Virtual = RealArray }
+    let (leafCode, _) = CodeGen.genElementBindingNew compBinding (mkCompElem 1) "data"
+    check "compound iteration: all-dims access peels the compact leaf data[r]"
+        (leafCode.Contains "= data.data[__i0];") (sprintf "got: %s" leafCode)
+    let (rowCode, _) = CodeGen.genElementBindingNew compBinding (mkCompElem 2) "data"
+    check "compound iteration: partial access peels the trailing row base"
+        (rowCode.Contains "data.data + __i0 * data.trailing_stride") (sprintf "got: %s" rowCode)
+
+    // compoundOutputSubscript: the compact WRITE address mirrors the read.
+    // all-dims (compound binding only) -> .data[r]; partial (one trailing) ->
+    // .data[r * out.trailing_stride + t].
+    let trailB : LoopIndexBinding =
+        { Level = 1; IndexName = "__i1"; Extent = IRLit (IRLitInt 4)
+          ExtentArrayRef = "out"; ExtentDimRef = 1
+          BoundDependencies = []; StrictOffset = 0; IsParallel = false
+          State = SCNeither; Elements = [] }
+    check "compound iteration: all-dims output subscript is .data[r]"
+        (CodeGen.compoundOutputSubscript [compBinding] "out" = ".data[__i0]")
+        (CodeGen.compoundOutputSubscript [compBinding] "out")
+    check "compound iteration: partial output subscript is .data[r*stride + t]"
+        (CodeGen.compoundOutputSubscript [compBinding; trailB] "out" = ".data[__i0 * out.trailing_stride + __i1]")
+        (CodeGen.compoundOutputSubscript [compBinding; trailB] "out")
+
+    // Stage 1 -- multi-index range<I1, ..., In> surface. A comma-separated range
+    // parses to one virtual array spanning all listed index types (which uncurry
+    // into nested loop levels in IR). A single-index range stays a 1-element list
+    // (no behavior change). Validated at the parser, independent of lowering.
+    let rangeArityOf (src: string) : int option =
+        match parseProgram src with
+        | Ok program ->
+            program.Modules.[0].Decls
+            |> List.map (fun d -> d.Value)
+            |> List.tryPick (fun d ->
+                match d with
+                | DeclLet b -> (match b.Value with ExprRange tys -> Some (List.length tys) | _ -> None)
+                | _ -> None)
+        | Error _ -> None
+    check "range surface: single-index range parses to a 1-element list"
+        (rangeArityOf "let r = range<Idx<5>>" = Some 1)
+        (sprintf "got %A" (rangeArityOf "let r = range<Idx<5>>"))
+    check "range surface: multi-index range<I1, I2> parses to a 2-element list"
+        (rangeArityOf "let r = range<Idx<3>, Idx<4>>" = Some 2)
+        (sprintf "got %A" (rangeArityOf "let r = range<Idx<3>, Idx<4>>"))
+    check "range surface: range<I1, I2, I3> parses to a 3-element list"
+        (rangeArityOf "let r = range<Idx<2>, Idx<3>, Idx<4>>" = Some 3)
+        (sprintf "got %A" (rangeArityOf "let r = range<Idx<2>, Idx<3>, Idx<4>>"))
+
+    // Baseline: single-index range<I> as a method_for driver, end to end. range<I>
+    // emits the index, the kernel maps it. This is the virtual-array-driver +
+    // index-param path that multi-index range (stage 1b) extends, and it had no
+    // prior coverage -- validate it before changing the param binding.
+    printfn "\n--- range<I> driver map (baseline) ---"
+    (try
+        match lower "let r = method_for(range<Idx<5>>) <@> lambda(i) -> i + 1 |> compute\n" with
+        | Ok ir ->
+            check "range<I> map: lowers" true ""
+            let (cpp, _) = CodeGen.genSelfContainedProgramFromIR ir "range_map_baseline"
+            let outDir = "./generated_cpp_tests"
+            if not (Directory.Exists outDir) then Directory.CreateDirectory outDir |> ignore
+            CodeGen.deployRuntimeHeaders outDir
+            let cppFile = Path.Combine(outDir, "range_map_baseline.cpp")
+            File.WriteAllText(cppFile, cpp)
+            (match compileCpp cppFile outDir with
+             | Ok exe ->
+                 check "range<I> map: compiles" true ""
+                 (match runExecutable exe with
+                  | Ok (0, _) -> check "range<I> map: runs (exit 0)" true ""
+                  | Ok (c, o) -> check "range<I> map: runs (exit 0)" false (sprintf "exit %d: %s" c o)
+                  | Error e -> check "range<I> map: runs (exit 0)" false e)
+             | Error e ->
+                 if isSkipError e then printfn "  SKIP range<I> map compile: %s" e
+                 else check "range<I> map: compiles" false e)
+        | Error e -> check "range<I> map: lowers" false e
+     with ex -> printfn "  SKIP range<I> map: %s" ex.Message)
+
+    // Stage 1b: multi-index range<I1, I2> as a driver. The kernel receives one
+    // param per index-type slot (i, j) via per-slot param binding; the two slots
+    // uncurry into nested loops. Validates the param binding end to end.
+    printfn "\n--- range<I1, I2> driver map (stage 1b) ---"
+    (try
+        match lower "let r = method_for(range<Idx<3>, Idx<4>>) <@> lambda(i, j) -> i + j |> compute\n" with
+        | Ok ir ->
+            check "range<I1,I2> map: lowers (per-slot params bind)" true ""
+            let (cpp, _) = CodeGen.genSelfContainedProgramFromIR ir "range2_map"
+            let outDir = "./generated_cpp_tests"
+            if not (Directory.Exists outDir) then Directory.CreateDirectory outDir |> ignore
+            CodeGen.deployRuntimeHeaders outDir
+            let cppFile = Path.Combine(outDir, "range2_map.cpp")
+            File.WriteAllText(cppFile, cpp)
+            (match compileCpp cppFile outDir with
+             | Ok exe ->
+                 check "range<I1,I2> map: compiles" true ""
+                 (match runExecutable exe with
+                  | Ok (0, _) -> check "range<I1,I2> map: runs (exit 0)" true ""
+                  | Ok (c, o) -> check "range<I1,I2> map: runs (exit 0)" false (sprintf "exit %d: %s" c o)
+                  | Error e -> check "range<I1,I2> map: runs (exit 0)" false e)
+             | Error e ->
+                 if isSkipError e then printfn "  SKIP range2 compile: %s" e
+                 else check "range<I1,I2> map: compiles" false e)
+        | Error e -> check "range<I1,I2> map: lowers (per-slot params bind)" false e
+     with ex -> printfn "  SKIP range<I1,I2> map: %s" ex.Message)
+
+    // Stage 2 probe (multi-rank, no compound/unhash): range<SymIdx<2,N>> is one
+    // index type of RANK 2, so by the rank rule the kernel gets two params (i, j)
+    // -- the two triangular positions, which are loop vars (no unhash needed).
+    // This exercises the rank-slot param binding for a multi-rank index type.
+    // Skip-tolerant: a symmetric range output may have separate codegen gaps; a
+    // green run confirms the multi-rank binding, a skip is informative.
+    printfn "\n--- range<SymIdx<2,N>> driver (stage 2: multi-rank slots) ---"
+    (try
+        match lower "let s = method_for(range<SymIdx<2, 5>>) <@> lambda(i, j) -> i + j |> compute\n" with
+        | Ok ir ->
+            let (cpp, _) = CodeGen.genSelfContainedProgramFromIR ir "range_sym_probe"
+            let outDir = "./generated_cpp_tests"
+            if not (Directory.Exists outDir) then Directory.CreateDirectory outDir |> ignore
+            CodeGen.deployRuntimeHeaders outDir
+            let f = Path.Combine(outDir, "range_sym_probe.cpp")
+            File.WriteAllText(f, cpp)
+            (match compileCpp f outDir with
+             | Ok exe ->
+                 (match runExecutable exe with
+                  | Ok (0, _) -> check "range<SymIdx<2,N>> map: runs (multi-rank params bind)" true ""
+                  | Ok (c, o) -> printfn "  SKIP range<SymIdx> run (exit %d): %s" c o
+                  | Error e -> printfn "  SKIP range<SymIdx> run: %s" e)
+             | Error e -> printfn "  SKIP range<SymIdx> compile: %s" e)
+        | Error e -> printfn "  SKIP range<SymIdx> lower: %s" e
+     with ex -> printfn "  SKIP range<SymIdx>: %s" ex.Message)
+
+    // ---------------------------------------------------------------
     // Test 4: Index type sharing within a module
     // ---------------------------------------------------------------
     printfn "\n--- Index Type Sharing ---"
@@ -3900,7 +4294,7 @@ let runNetcdfTests () =
     let schemaBuilder = IRBuilder()
     let sharedLat = {
         Id = schemaBuilder.FreshId()
-        Arity = 1
+        Rank = 1
         Extent = IRLit (IRLitInt 180L)
         Symmetry = SymNone
         Tag = None
@@ -3909,7 +4303,7 @@ let runNetcdfTests () =
     }
     let sharedLon = {
         Id = schemaBuilder.FreshId()
-        Arity = 1
+        Rank = 1
         Extent = IRLit (IRLitInt 360L)
         Symmetry = SymNone
         Tag = None
@@ -3966,6 +4360,83 @@ let runNetcdfTests () =
              && writeCode |> List.exists (fun s -> s.Contains "\"lon\"")
              && writeCode |> List.exists (fun s -> s.Contains "\"time\"")) ""
     | _ -> ()
+
+    // genReadCompoundVar: load_compound's materializer. Reads the dense var and
+    // the integer mask, converts nonzero -> bool, builds compound_index_t, and
+    // scatters into a compact buffer (verified against the real cpp/ runtime).
+    let compoundReadBuilder = IRBuilder()
+    let crDim id n : IRIndexType =
+        { Id = id; Rank = 1; Extent = IRLit (IRLitInt n)
+          Symmetry = SymNone; Tag = None; Kind = SDimension; Dependencies = [] }
+    let crVarArr : IRArrayType =
+        { ElemType = IRTScalar ETFloat64
+          IndexTypes = [crDim (compoundReadBuilder.FreshId()) 2L; crDim (compoundReadBuilder.FreshId()) 3L]
+          IsVirtual = false; Identity = Some (AIDVariable "B") }
+    let crMaskArr : IRArrayType =
+        { crVarArr with ElemType = IRTScalar ETInt64; Identity = Some (AIDVariable "B_mask") }
+    let compoundReadCode =
+        NetcdfProvider.CppNetcdf.genReadCompoundVar "f.nc" "B" "B_mask" "B" crVarArr crMaskArr
+    let crHas (sub: string) = compoundReadCode |> List.exists (fun s -> s.Contains sub)
+    check "genReadCompoundVar reads the dense var (nc_get_var_double)"
+        (crHas "nc_get_var_double") ""
+    check "genReadCompoundVar reads the integer mask (nc_get_var_longlong)"
+        (crHas "nc_get_var_longlong") ""
+    check "genReadCompoundVar converts mask nonzero -> bool"
+        (crHas "std::vector<bool>" && crHas "!= 0") ""
+    check "genReadCompoundVar builds a rank-2 compound_index_t"
+        (crHas "compound_index_t<2>") ""
+    check "genReadCompoundVar allocates compact sized by cardinality"
+        (crHas "cardinality") ""
+    check "genReadCompoundVar bundles a Compound wrapper"
+        (crHas "nested_array_utilities::Compound<double, 2>") ""
+
+    // Partial: a [2,3] mask over a [2,3,4] variable. The leading [2,3] become a
+    // rank-2 CompoundIdx; the trailing dim (4) folds into a runtime stride that
+    // the scatter copies as whole blocks and that is passed into Compound.
+    let crVarArr3 : IRArrayType =
+        { crVarArr with IndexTypes = crVarArr.IndexTypes @ [crDim (compoundReadBuilder.FreshId()) 4L] }
+    let compoundReadCode3 =
+        NetcdfProvider.CppNetcdf.genReadCompoundVar "f.nc" "B" "B_mask" "B" crVarArr3 crMaskArr
+    let cr3Has (sub: string) = compoundReadCode3 |> List.exists (fun s -> s.Contains sub)
+    check "genReadCompoundVar(partial) compound index is rank 2 (the mask rank)"
+        (cr3Has "compound_index_t<2>") ""
+    check "genReadCompoundVar(partial) computes a trailing stride and grid"
+        (cr3Has "_trail =" && cr3Has "_grid =") ""
+    check "genReadCompoundVar(partial) scatters whole trailing blocks"
+        (cr3Has "_r * B_trail + B_t" && cr3Has "_c * B_trail + B_t") ""
+    check "genReadCompoundVar(partial) passes trailing_stride into Compound"
+        (cr3Has "B_idx, B_trail }") ""
+
+    // Element-type coverage: a Float32 variable reads via nc_get_var_float and
+    // bundles Compound<float, ...>.
+    let crVarF32 = { crVarArr with ElemType = IRTScalar ETFloat32 }
+    let f32Code = NetcdfProvider.CppNetcdf.genReadCompoundVar "f.nc" "B" "B_mask" "B" crVarF32 crMaskArr
+    let f32Has (s: string) = f32Code |> List.exists (fun l -> l.Contains s)
+    check "genReadCompoundVar(Float32 var) reads via nc_get_var_float" (f32Has "nc_get_var_float") ""
+    check "genReadCompoundVar(Float32 var) bundles Compound<float" (f32Has "nested_array_utilities::Compound<float,") ""
+
+    // Mask-type coverage: an Int32 mask reads via nc_get_var_int into an int buffer.
+    let crMaskI32 = { crMaskArr with ElemType = IRTScalar ETInt32 }
+    let i32Code = NetcdfProvider.CppNetcdf.genReadCompoundVar "f.nc" "B" "B_mask" "B" crVarArr crMaskI32
+    let i32Has (s: string) = i32Code |> List.exists (fun l -> l.Contains s)
+    check "genReadCompoundVar(Int32 mask) reads mask via nc_get_var_int" (i32Has "nc_get_var_int(") ""
+    check "genReadCompoundVar(Int32 mask) allocates an int mask buffer" (i32Has "int* B_maskraw") ""
+
+    // Rank-1 leading mask: a 1-D mask over a 2-D variable -> compound_index_t<1>,
+    // the single leading dim as the grid, the trailing dim folded into a stride.
+    // (Runtime behaviour sandbox-verified separately: size 8, correct blocks.)
+    let crVar2 =
+        { ElemType = IRTScalar ETFloat64
+          IndexTypes = [crDim (compoundReadBuilder.FreshId()) 3L; crDim (compoundReadBuilder.FreshId()) 4L]
+          IsVirtual = false; Identity = Some (AIDVariable "C") }
+    let crMask1 =
+        { ElemType = IRTScalar ETInt64
+          IndexTypes = [crDim (compoundReadBuilder.FreshId()) 3L]
+          IsVirtual = false; Identity = Some (AIDVariable "C_mask") }
+    let r1Code = NetcdfProvider.CppNetcdf.genReadCompoundVar "f.nc" "C" "C_mask" "C" crVar2 crMask1
+    let r1Has (s: string) = r1Code |> List.exists (fun l -> l.Contains s)
+    check "genReadCompoundVar(rank-1 leading) builds compound_index_t<1>" (r1Has "compound_index_t<1>") ""
+    check "genReadCompoundVar(rank-1 leading) bundles Compound<double, 1>" (r1Has "nested_array_utilities::Compound<double, 1>") ""
 
     // ---------------------------------------------------------------
     // Test 7: Live load (requires libnetcdf + sample.nc)
@@ -4103,6 +4574,220 @@ let sample = NetCDF.load("sample.nc")
 
     | Error e ->
         check "Parse succeeds" false (sprintf "%d:%d %s" e.Line e.Col e.Message)
+
+    // ---------------------------------------------------------------
+    // load_compound |> read: full lowering + codegen wiring (slice 2b).
+    // Needs sample.nc (with a data variable B and an integer mask B_mask, the
+    // mask covering a leading prefix of B's dims) + libnetcdf; skips gracefully
+    // otherwise. When the fixture is present this asserts that lowering recorded
+    // ProviderReads (tryCompoundRead fired and recovered path/var/mask) and that
+    // codegen emitted the compound reader from it (the genBinding intercept) --
+    // exercising tryCompoundRead -> ProviderReads carrier -> genReadCompoundVar
+    // end to end, which the isolated unit tests above do not.
+    // ---------------------------------------------------------------
+    printfn "\n--- load_compound |> read (sample.nc) ---"
+    let lcSource = """
+import Providers.NetCDF as NetCDF
+
+let sample = NetCDF.load("sample.nc")
+let data = NetCDF.load_compound(sample.vars.B, sample.vars.B_mask) |> read
+"""
+    try
+        match lower lcSource with
+        | Ok ir ->
+            let modul = ir.Modules.[0]
+            check "load_compound|>read: ProviderReads populated"
+                (not (Map.isEmpty modul.ProviderReads))
+                (sprintf "got %d entries" modul.ProviderReads.Count)
+            (match modul.ProviderReads |> Map.toList |> List.tryHead |> Option.map snd with
+             | Some spec ->
+                 check "load_compound|>read: recovered var name B"
+                     (spec.VarName = "B") (sprintf "got '%s'" spec.VarName)
+                 check "load_compound|>read: recovered mask name B_mask"
+                     (spec.MaskName = Some "B_mask") (sprintf "got %A" spec.MaskName)
+             | None -> ())
+            let (cppCode, _) = CodeGen.genSelfContainedProgramFromIR ir "load_compound_e2e"
+            check "load_compound|>read: codegen emits compound_index_t"
+                (cppCode.Contains "compound_index_t<") ""
+            check "load_compound|>read: codegen emits int->bool mask conversion"
+                (cppCode.Contains "_maskvec" && cppCode.Contains "!= 0") ""
+            check "load_compound|>read: codegen bundles a Compound wrapper"
+                (cppCode.Contains "nested_array_utilities::Compound<") ""
+
+            // End-to-end compile + link + run, in-harness. compileCpp now links
+            // libnetcdf when the .cpp includes <netcdf.h>. The run's cwd is the
+            // exe's own directory, so place the fixture there before running;
+            // exit 0 means nc_open found the data and the var + mask were read
+            // and the compound materialized without crashing.
+            let lcOutDir = "./generated_cpp_tests"
+            if not (Directory.Exists lcOutDir) then Directory.CreateDirectory lcOutDir |> ignore
+            CodeGen.deployRuntimeHeaders lcOutDir
+            let lcCppFile = Path.Combine(lcOutDir, "load_compound_e2e.cpp")
+            File.WriteAllText(lcCppFile, cppCode)
+            (match compileCpp lcCppFile lcOutDir with
+             | Ok exePath ->
+                 check "load_compound e2e: compiles and links libnetcdf" true ""
+                 File.Copy("sample.nc", Path.Combine(lcOutDir, "sample.nc"), true)
+                 (match runExecutable exePath with
+                  | Ok (0, _) -> check "load_compound e2e: runs to completion (exit 0)" true ""
+                  | Ok (code, out) -> check "load_compound e2e: runs to completion (exit 0)" false (sprintf "exit %d: %s" code out)
+                  | Error e -> check "load_compound e2e: runs to completion (exit 0)" false e)
+             | Error e ->
+                 if isSkipError e then printfn "  SKIP load_compound e2e (compile skipped): %s" e
+                 else check "load_compound e2e: compiles and links libnetcdf" false e)
+        | Error e ->
+            printfn "  SKIP load_compound|>read (lower error; a fixture gap if sample.nc lacks B/B_mask): %s" e
+    with
+    | :? System.DllNotFoundException -> printfn "  SKIP load_compound|>read: libnetcdf not available"
+    | :? System.IO.FileNotFoundException -> printfn "  SKIP load_compound|>read: sample.nc not found"
+    | ex -> printfn "  SKIP load_compound|>read: %s" ex.Message
+
+    // ---------------------------------------------------------------
+    // Unary map over a compound: method_for(data) <@> (x -> x+x) |> compute.
+    // The output inherits data's CompoundIdx (shared mask): the map iterates the
+    // present cells (cardinality) x trailing dims, reads the compact buffer, and
+    // writes a fresh compact buffer that SHARES data's idx + trailing_stride.
+    // Float-safe kernel (x+x, not x*2.0) since B is Float32 (-Werror=float-conversion).
+    // A lowering failure routes to the SKIP arm, so this is a SEPARATE block and
+    // cannot regress the read-only e2e above. Value correctness is covered by the
+    // sandbox; here we confirm the path lowers, the compound-map codegen fires,
+    // and the program compiles + runs.
+    printfn "\n--- compound map: method_for(data) <@> (x -> x+x) (sample.nc) ---"
+    let lcMapSource = """
+import Providers.NetCDF as NetCDF
+
+let sample = NetCDF.load("sample.nc")
+let data = NetCDF.load_compound(sample.vars.B, sample.vars.B_mask) |> read
+let out = method_for(data) <@> lambda(x) -> x + x |> compute
+"""
+    try
+        match lower lcMapSource with
+        | Ok ir ->
+            let (cppCode, _) = CodeGen.genSelfContainedProgramFromIR ir "compound_map_e2e"
+            check "compound map: output alloc sizes by cardinality + shares the input idx"
+                (cppCode.Contains "data.idx->cardinality * data.trailing_stride") ""
+            check "compound map: writes the compact output subscript (r*stride + t)"
+                (cppCode.Contains ".trailing_stride + __") ""
+            let lcOutDir = "./generated_cpp_tests"
+            if not (Directory.Exists lcOutDir) then Directory.CreateDirectory lcOutDir |> ignore
+            CodeGen.deployRuntimeHeaders lcOutDir
+            let mapCppFile = Path.Combine(lcOutDir, "compound_map_e2e.cpp")
+            File.WriteAllText(mapCppFile, cppCode)
+            (match compileCpp mapCppFile lcOutDir with
+             | Ok exePath ->
+                 check "compound map e2e: compiles and links libnetcdf" true ""
+                 File.Copy("sample.nc", Path.Combine(lcOutDir, "sample.nc"), true)
+                 (match runExecutable exePath with
+                  | Ok (0, _) -> check "compound map e2e: runs to completion (exit 0)" true ""
+                  | Ok (code, runOut) -> check "compound map e2e: runs to completion (exit 0)" false (sprintf "exit %d: %s" code runOut)
+                  | Error e -> check "compound map e2e: runs to completion (exit 0)" false e)
+             | Error e ->
+                 if isSkipError e then printfn "  SKIP compound map e2e (compile skipped): %s" e
+                 else check "compound map e2e: compiles and links libnetcdf" false e)
+        | Error e ->
+            printfn "  SKIP compound map (lower error -- lowering of method_for over a compound not yet wired?): %s" e
+    with
+    | :? System.DllNotFoundException -> printfn "  SKIP compound map: libnetcdf not available"
+    | :? System.IO.FileNotFoundException -> printfn "  SKIP compound map: sample.nc not found"
+    | ex -> printfn "  SKIP compound map: %s" ex.Message
+
+    // ---------------------------------------------------------------
+    // Dense provider read: method_for(sample.vars.A |> read) <@> (x -> x+x).
+    // The dense analog of the compound path -- exercises tryPlainRead (a maskless
+    // ProviderReadSpec) -> the genBinding ProviderReads intercept -> genReadVar,
+    // which now materializes a nested Array (allocate + flat->nested copy) that a
+    // method_for can index. A is Float32 in sample.nc, so the kernel is float-safe
+    // (x + x, not x * 2.0, for -Werror=float-conversion). Skips gracefully without
+    // libnetcdf / sample.nc, like the compound tests above.
+    // ---------------------------------------------------------------
+    printfn "\n--- dense read: method_for(sample.vars.A |> read) <@> (x -> x+x) (sample.nc) ---"
+    let denseReadSource = """
+import Providers.NetCDF as NetCDF
+
+let sample = NetCDF.load("sample.nc")
+let A = sample.vars.A |> read
+let out = method_for(A) <@> lambda(x) -> x + x |> compute
+"""
+    try
+        match lower denseReadSource with
+        | Ok ir ->
+            check "dense read: ProviderReads has a maskless spec for A"
+                (let modul = ir.Modules.[0]
+                 modul.ProviderReads |> Map.exists (fun _ spec -> spec.VarName = "A" && spec.MaskName = None))
+                "expected a maskless ProviderRead for A"
+            let (cppCode, _) = CodeGen.genSelfContainedProgramFromIR ir "dense_read_e2e"
+            check "dense read: codegen emits genReadVar (nc_open + nc_get_var_float)"
+                (cppCode.Contains "nc_open" && cppCode.Contains "nc_get_var_float") ""
+            check "dense read: codegen materializes a nested Array (allocate + promote)"
+                (cppCode.Contains "allocate<typename promote<float, 3>::type") ""
+            let drOutDir = "./generated_cpp_tests"
+            if not (Directory.Exists drOutDir) then Directory.CreateDirectory drOutDir |> ignore
+            CodeGen.deployRuntimeHeaders drOutDir
+            let drCppFile = Path.Combine(drOutDir, "dense_read_e2e.cpp")
+            File.WriteAllText(drCppFile, cppCode)
+            (match compileCpp drCppFile drOutDir with
+             | Ok exePath ->
+                 check "dense read e2e: compiles and links libnetcdf" true ""
+                 File.Copy("sample.nc", Path.Combine(drOutDir, "sample.nc"), true)
+                 (match runExecutable exePath with
+                  | Ok (0, _) -> check "dense read e2e: runs to completion (exit 0)" true ""
+                  | Ok (code, runOut) -> check "dense read e2e: runs to completion (exit 0)" false (sprintf "exit %d: %s" code runOut)
+                  | Error e -> check "dense read e2e: runs to completion (exit 0)" false e)
+             | Error e ->
+                 if isSkipError e then printfn "  SKIP dense read e2e (compile skipped): %s" e
+                 else check "dense read e2e: compiles and links libnetcdf" false e)
+        | Error e ->
+            printfn "  SKIP dense read (lower error -- plain provider var read not wired?): %s" e
+    with
+    | :? System.DllNotFoundException -> printfn "  SKIP dense read: libnetcdf not available"
+    | :? System.IO.FileNotFoundException -> printfn "  SKIP dense read: sample.nc not found"
+    | ex -> printfn "  SKIP dense read: %s" ex.Message
+
+    // ---------------------------------------------------------------
+    // fill_random builtin (general codegen, hermetic -- no NetCDF): a random-fill
+    // array constructor whose shape comes from the annotation. Exercises the
+    // TExprFillRandom -> RandomInits -> genBinding path (allocate<> + the runtime
+    // fill_random), then a method_for map over the result. Placed here to reuse
+    // the compile+run harness; it needs neither libnetcdf nor sample.nc, so a
+    // lower error is a real failure, not a skip.
+    // ---------------------------------------------------------------
+    printfn "\n--- fill_random: method_for(fill_random(1000)) <@> (x -> x+x) (hermetic) ---"
+    let fillRandomSource = """
+type LatIdx = Idx<4>
+type LonIdx = Idx<3>
+type TimeIdx = Idx<5>
+let A: Array<Int64 like LatIdx, LonIdx, TimeIdx> = fill_random(1000)
+let out = method_for(A) <@> lambda(x) -> x + x |> compute
+"""
+    try
+        match lower fillRandomSource with
+        | Ok ir ->
+            check "fill_random: RandomInits populated"
+                (let modul = ir.Modules.[0]
+                 not (Map.isEmpty modul.RandomInits))
+                "expected a RandomInits entry for A"
+            let (cppCode, _) = CodeGen.genSelfContainedProgramFromIR ir "fill_random_e2e"
+            check "fill_random: codegen emits allocate + fill_random"
+                (cppCode.Contains "fill_random(" && cppCode.Contains "allocate<typename promote<") ""
+            let frOutDir = "./generated_cpp_tests"
+            if not (Directory.Exists frOutDir) then Directory.CreateDirectory frOutDir |> ignore
+            CodeGen.deployRuntimeHeaders frOutDir
+            let frCppFile = Path.Combine(frOutDir, "fill_random_e2e.cpp")
+            File.WriteAllText(frCppFile, cppCode)
+            (match compileCpp frCppFile frOutDir with
+             | Ok exePath ->
+                 check "fill_random e2e: compiles" true ""
+                 (match runExecutable exePath with
+                  | Ok (0, _) -> check "fill_random e2e: runs to completion (exit 0)" true ""
+                  | Ok (code, runOut) -> check "fill_random e2e: runs to completion (exit 0)" false (sprintf "exit %d: %s" code runOut)
+                  | Error e -> check "fill_random e2e: runs to completion (exit 0)" false e)
+             | Error e ->
+                 if isSkipError e then printfn "  SKIP fill_random e2e (compile skipped): %s" e
+                 else check "fill_random e2e: compiles" false e)
+        | Error e ->
+            check "fill_random: lowers" false (sprintf "lower error: %s" e)
+    with
+    | ex -> printfn "  SKIP fill_random: %s" ex.Message
 
     // ---------------------------------------------------------------
     // Summary

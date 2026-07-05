@@ -27,10 +27,10 @@ open Blade.Lowering
 // A group spec is (arity, symmetry); arity 0 means "any arity" (a hole).
 // Helpers name the common index forms.
 
-let private freshIx (arity: int) (sym: SymmetryClass) : IRIndexType =
+let private freshIx (rank: int) (sym: SymmetryClass) : IRIndexType =
     // Extent is never compared by matchesTypePattern (it is a runtime value, not
     // type identity), so any placeholder is fine here.
-    { Id = -1; Arity = arity; Extent = IRLit (IRLitInt 0L)
+    { Id = -1; Rank = rank; Extent = IRLit (IRLitInt 0L)
       Symmetry = sym; Tag = None; Kind = SDimension; Dependencies = [] }
 
 /// Plain free axis (Idx).
@@ -62,7 +62,7 @@ let anyElem = IRTInfer -1
 // detail (extent, dependencies, ids) is intentionally not shown, since it is
 // not part of the type. Pattern holes render as `_`:
 //   - IRTInfer (anyElem)        -> `_`
-//   - an index with Arity = 0   -> `_`  (the "any arity/symmetry" slot hole)
+//   - an index with Rank = 0   -> `_`  (the "any rank/symmetry" slot hole)
 
 /// Render an element type in Blade surface syntax.
 let rec formatBladeElem (ty: IRType) : string =
@@ -103,8 +103,8 @@ and formatExtent (e: IRExpr) : string =
 /// An arity-0 slot is a pattern hole and renders as `_`.
 and formatBladeIndex (ix: IRIndexType) : string =
     let n = formatExtent ix.Extent
-    match ix.Arity, ix.Symmetry with
-    | 0, _ -> "_"                                            // arity hole in a pattern
+    match ix.Rank, ix.Symmetry with
+    | 0, _ -> "_"                                            // rank hole in a pattern
     | 1, SymNone -> sprintf "Idx<%s>" n
     | r, SymSymmetric -> sprintf "SymIdx<%d, %s>" r n
     | r, SymAntisymmetric -> sprintf "AntisymIdx<%d, %s>" r n
@@ -112,8 +112,8 @@ and formatBladeIndex (ix: IRIndexType) : string =
     // Defensive fallbacks: shapes the canonical syntax doesn't define (e.g. a
     // non-symmetric group of arity > 1, or a non-rank-2 Hermitian). Surface the
     // anomaly rather than mis-rendering it as a well-formed type.
-    | r, SymNone -> sprintf "Idx<%s, arity=%d?>" n r
-    | r, SymHermitian -> sprintf "HermitianIdx<%s, arity=%d?>" n r
+    | r, SymNone -> sprintf "Idx<%s, rank=%d?>" n r
+    | r, SymHermitian -> sprintf "HermitianIdx<%s, rank=%d?>" n r
 
 /// Render a full type in Blade surface syntax. Arrays become
 /// `Array<Elem like Ix, Ix, ...>` (or `VirtualArray<...>` for virtual arrays);

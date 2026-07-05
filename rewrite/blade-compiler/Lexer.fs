@@ -83,6 +83,7 @@ and Keyword =
     | KwSymIdx
     | KwAntisymIdx
     | KwHermitianIdx
+    | KwCompoundIdx
     | KwEnumIdx
     | KwDepIdx
     | KwRaggedIdx
@@ -96,6 +97,7 @@ and Keyword =
     | KwDecompact
     | KwPure
     | KwCompute
+    | KwRead
     | KwGuard
     | KwSequence
     | KwReplicate
@@ -106,6 +108,7 @@ and Keyword =
     | KwZero
     | KwRank
     | KwMask
+    | KwCompound
     | KwIntersect
     | KwUnion
     | KwUnique
@@ -168,6 +171,7 @@ let keywords =
       "SymIdx", KwSymIdx
       "AntisymIdx", KwAntisymIdx
       "HermitianIdx", KwHermitianIdx
+      "CompoundIdx", KwCompoundIdx
       "EnumIdx", KwEnumIdx
       "DepIdx", KwDepIdx
       "RaggedIdx", KwRaggedIdx
@@ -181,6 +185,7 @@ let keywords =
       "decompact", KwDecompact
       "pure", KwPure
       "compute", KwCompute
+      "read", KwRead
       "guard", KwGuard
       "sequence", KwSequence
       "replicate", KwReplicate
@@ -191,6 +196,7 @@ let keywords =
       "zero", KwZero
       "rank", KwRank
       "mask", KwMask
+      "compound", KwCompound
       "intersect", KwIntersect
       "union", KwUnion
       "unique", KwUnique

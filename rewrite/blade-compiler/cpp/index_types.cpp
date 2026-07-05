@@ -1,5 +1,12 @@
 
 #include "index_types.h"
+#include <utility>
+
+// Reference TU: a using-directive is safe in a .cpp -- it never leaks to
+// other translation units the way a header-level one does. index_types.h
+// is deliberately kept header-clean (fully std::-qualified) so it pollutes
+// no includer, including generated code.
+using namespace std;
 
 /** promote class' implementation function */
 template<typename TYPE, const size_t rank, const size_t depth = 0>
@@ -32,8 +39,9 @@ public:
 
 
 
-struct simple_idx_t : abstract_simple_idx_t<simple_idx_t, 1> {
-	using abstract_simple_idx_t::abstract_simple_idx_t;
+struct simple_idx_t : abstract_simple_idx_t<1> {
+	simple_idx_t(std::string name_in, size_t size_in)
+		: abstract_simple_idx_t<1>(name_in, size_in) { this->hash(); }
 
 	void hash() {
 		this->cardinality = this->size;
@@ -47,10 +55,11 @@ struct simple_idx_t : abstract_simple_idx_t<simple_idx_t, 1> {
 };
 
 template<size_t ARITY>
-struct symmetric_idx_t : abstract_simple_idx_t<symmetric_idx_t<ARITY>, ARITY> {
-	using base = abstract_simple_idx_t<symmetric_idx_t<ARITY>, ARITY>;
-	using base::base;
-	using IDX = base::IDX;
+struct symmetric_idx_t : abstract_simple_idx_t<ARITY> {
+	using base = abstract_simple_idx_t<ARITY>;
+	using IDX = typename base::IDX;
+	symmetric_idx_t(std::string name_in, size_t size_in)
+		: base(name_in, size_in) { this->hash(); }
 
 	void hash() {
 		this->cardinality = compute_cardinality();
@@ -88,10 +97,11 @@ private:
 
 
 template<size_t ARITY>
-struct antisymmetric_idx_t : abstract_simple_idx_t<antisymmetric_idx_t<ARITY>, ARITY> {
-	using base = abstract_simple_idx_t<antisymmetric_idx_t<ARITY>, ARITY>;
-	using base::base;
-	using IDX = base::IDX;
+struct antisymmetric_idx_t : abstract_simple_idx_t<ARITY> {
+	using base = abstract_simple_idx_t<ARITY>;
+	using IDX = typename base::IDX;
+	antisymmetric_idx_t(std::string name_in, size_t size_in)
+		: base(name_in, size_in) { this->hash(); }
 
 	void hash() {
 		this->cardinality = compute_cardinality();
@@ -124,36 +134,4 @@ private:
 			enumerate_strict(indices, depth + 1, i + 1, flat);  // strict
 		}
 	}
-};
-
-
-template<size_t ARITY>
-struct compound_index_t : abstract_hashed_idx_t<compound_index_t<ARITY>, ARITY> {
-	using base = abstract_hashed_idx_t<compound_index_t<ARITY>, ARITY>;
-	using base::base;
-	using IDX = base::IDX;
-
-	typename promote<bool, ARITY>::type mask;
-
-	void hash(, IDX extents) {
-		this->cardinality = compute_cardinality();
-		this->table.resize(this->cardinality);
-
-		bool valid;
-		for (size_t i = 0; i < ARITY; i++) {
-			valid = index_rec(mask, indices);
-			if (valid) {
-				this->table[] = index;
-			}
-		}
-	}
-
-private:
-	size_t compute_cardinality(promote<bool, ARITY>::type &mask, IDX extents) {
-		for (size_t i = 0; i < ARITY; i++) {
-
-		}
-
-	}
-
 };

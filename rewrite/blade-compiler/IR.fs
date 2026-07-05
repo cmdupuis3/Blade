@@ -20,6 +20,35 @@ type SymmetryClass =
     | SymAntisymmetric // Antisymmetric (i < j, negate on swap)
     | SymHermitian     // Hermitian (conjugate on swap)
 
+/// Placement (membership + ranking) class for index types -- the Level-1 axis,
+/// orthogonal to the symmetry-transform axis (SymmetryClass). It answers "which
+/// tuples are stored, and how is a tuple ranked to a flat offset", independent
+/// of any value transform applied on non-canonical access.
+///
+/// For the four built-in classes, placement is a function of the symmetry class:
+/// PlaceDense for SymNone; PlaceCombinatorial for the three symmetries, which
+/// carry their SymmetryClass so ranking/cardinality can distinguish inclusive
+/// (sym/herm) from strict (antisym) combinadics. The placement-vs-symmetry
+/// distinction only DIVERGES with tabulated types (CompoundIdx / SparseIdx),
+/// whose validity is mask-/list-derived rather than a symmetry; those will add a
+/// PlaceTabulated case here, recognized by placementOf from the index type's
+/// definition rather than its SymmetryClass. Adding that case makes the dispatch
+/// functions warn (FS0025) until each handles it -- the intended openness check.
+type PlacementClass =
+    | PlaceDense                          // row-major dense (Idx, EnumIdx)
+    | PlaceCombinatorial of SymmetryClass // CNS-ranked compact (sym/antisym/herm)
+    | PlaceTabulated                      // mask/list-derived, runtime table (CompoundIdx)
+
+/// Core Level-1 classifier on the symmetry axis. The placement-proxy sites
+/// (cardinality, compact grouping, allocator choice) read SymmetryClass today,
+/// so this is the shared entry point; placementOf (below, once IRIndexType is
+/// defined) wraps it for a full index type and is where tabulated detection will
+/// hook in.
+let placementClassOf (sym: SymmetryClass) : PlacementClass =
+    match sym with
+    | SymNone -> PlaceDense
+    | SymSymmetric | SymAntisymmetric | SymHermitian -> PlaceCombinatorial sym
+
 /// Commutativity/Symmetry state at each loop level (Section 13.1)
 /// Determines whether triangular iteration is valid at this position
 type SymcomState =
@@ -144,7 +173,7 @@ type ElemType =
 /// Index type in IR - represents a single dimension's structure
 and IRIndexType = {
     Id: IRId
-    Arity: int               // Number of index components (1 for Idx, 2 for SymIdx<2>, etc.)
+    Rank: int               // Number of index components (1 for Idx, 2 for SymIdx<2>, etc.)
     Extent: IRExpr           // Size expression (may depend on outer indices)
     Symmetry: SymmetryClass
     Tag: string option       // Optional semantic tag (for index space matching)
@@ -414,7 +443,7 @@ and IRExpr =
     | IRDiag of array: IRExpr
     | IRJoin of arrays: IRExpr list * dim: int
     | IRSubset of array: IRExpr * dim: int * start: IRExpr * length: IRExpr
-    | IRRange of IRIndexType * offset: IRExpr option
+    | IRRange of IRIndexType list * offset: IRExpr option
     | IRVirtualReverse of IRIndexType
     | IRBlocked of IRIndexType * blockSize: IRExpr
     | IRArity of resolved: int option * paramName: string  // None = unresolved (use paramName), Some n = bound
@@ -435,6 +464,42 @@ and IRExpr =
     // IRRaggedLookup reads a value from the lengths array at the current
     // iteration's logical position.
     | IRRaggedLookup of lengths: IRExpr
+    // Compound-index marker (formalism 4.5): where this appears as an
+    // IRIndexType's Extent, the index type is a CompoundIdx -- a masked product
+    // space whose valid coordinates are selected by `mask`, a RUNTIME array
+    // value (index types are parameterized by runtime values; a CompoundIdx is
+    // identified by a whole-mask hash, 4.5). Rank (= mask rank) lives on the
+    // IRIndexType record; per-dimension extents are recovered from the mask's
+    // array type at codegen. Cardinality is NOT closed-form -- the emitted
+    // compound_index_t builds its rank<->tuple table at construction and reports
+    // cardinality at runtime. Distinct from IRRaggedLookup (a nested dependent
+    // extent): a compound mask couples all dimensions at once.
+    | IRCompoundMask of mask: IRExpr
+    // Residual-compound marker (formalism 4.5, partial indexing): where this
+    // appears as an IRIndexType's Extent, the index type is a CompoundIdx that
+    // arose from PARTIALLY indexing a parent compound -- pinning the first
+    // `prefixLen` (= j) of the parent's k coordinates and leaving k-j free. The
+    // residual is a masked product space over the remaining k-j axes, restricted
+    // to the parent's valid tuples whose leading j coords match the pinned
+    // prefix. Its Rank (= k-j) lives on the IRIndexType record.
+    //
+    // Representation (design decision, this feature): SHARED DATA, MATERIALIZED
+    // INDEX. The residual's data is a non-copied window into the parent's
+    // contiguous lex-sorted pool (the prefix_range [lo,hi) slice); its index is a
+    // freshly materialized compound_index_t<k-j> built over that window with the
+    // prefix stripped. This reconciles formalism 4.5's internal tension (the
+    // identity language said "view over (parent mask, fixed coords)"; the cost
+    // note said "O(n) scan/materialize") -- the data is a view, the index is
+    // materialized, so the O(window) cost note is the accurate one.
+    //
+    // `parent` is the parent compound array expression; `prefixLen` is j. The
+    // pinned coordinate VALUES are carried by the indexing site (IRIndex), not
+    // here -- this marker only records the residual's shape/identity so that
+    // Extent-consuming passes (PlaceTabulated detection, level counting, varref
+    // collection) treat it uniformly with IRCompoundMask. Codegen for the
+    // residual construction is deferred (phase 2); until then the partial-index
+    // path emits an explicit not-yet-implemented error rather than miscompiling.
+    | IRCompoundProject of parent: IRExpr * prefixLen: int
     // Opaque-extent marker: appears as an IRIndexType's Extent when the
     // extent is determined by surrounding context rather than declared up
     // front. The canonical use is a kernel-parameter type `RaggedIdx<_>`
@@ -608,6 +673,26 @@ and AlignSpec = {
     Offsets: (int * int) list
     Boundary: BoundaryMode
 }
+
+/// Level-1 placement classification of a full index type. Today this derives
+/// purely from the symmetry class (placementClassOf); it is the seam where
+/// tabulated detection (CompoundIdx / SparseIdx, from the index type's typedef)
+/// will hook in. Derived, not stored (mirrors behaviorOf): there is no
+/// PlacementClass field on IRIndexType to fall out of sync.
+let placementOf (ix: IRIndexType) : PlacementClass =
+    // Tabulated placement is detected from the Extent carrier (IRCompoundMask),
+    // not the symmetry class -- a CompoundIdx has Symmetry = SymNone but is NOT
+    // dense. Everything else derives from symmetry via placementClassOf.
+    match ix.Extent with
+    | IRCompoundMask _ -> PlaceTabulated
+    // A residual (partially-indexed) compound: the residual RANK decides
+    // placement. Rank 1 means exactly one free coordinate remains at the pinned
+    // prefix -- a single contiguous window [lo,hi) of present cells, iterated as
+    // an ordinary dense 1-D loop (no hash table). Rank >= 2 is still a masked
+    // product space over the remaining axes and needs the tabulated (materialized
+    // child index) path. (Option X: one carrier, placement by residual rank.)
+    | IRCompoundProject _ -> if ix.Rank <= 1 then placementClassOf ix.Symmetry else PlaceTabulated
+    | _ -> placementClassOf ix.Symmetry
 
 /// Compute the promoted element type for two numeric types per §3.4.2.
 /// Returns None if the types are incompatible for promotion. Index nominal
@@ -883,6 +968,93 @@ let mkArrayLike (arr: IRArrayType) : IRType =
     else
         mkArrayArrow arr.IndexTypes arr.ElemType arr.Identity
 
+/// The view transform behind `load_compound(var, mask)`: replace a variable's
+/// dimensions with a single CompoundIdx whose presence mask is `maskIR`. This
+/// is a pure type transform -- no data is read; materialization happens later
+/// at `|> read`. The mask is an INPUT (constructed outside Blade, e.g. by
+/// unlinearizing a CompoundIdx and writing NaN-filled gaps), so there is no
+/// is_nan synthesis here and the Blade core stays NaN-less.
+///
+/// The mask covers a LEADING PREFIX of the variable's dimensions, in order,
+/// matched by index-type Id (the provider shares Ids across variables within a
+/// file). The masked prefix collapses into one CompoundIdx (Rank = the mask's
+/// rank); any remaining variable dimensions are kept as regular trailing index
+/// slots -- the formalism's `Array<T like CompoundIdx<mask>, Idx<...>>` shape
+/// (4.5). All-dims coverage is the prefix case with an empty trailing, giving a
+/// scalar `Compound<T, RANK>`. The mask may be ANY integer array: NetCDF has no
+/// boolean type, and a flag/mask variable is stored as NC_BYTE/NC_INT and read
+/// back as Int. No special bool type is required, because the load_compound
+/// call is itself the signal that this variable is a mask -- the int ->
+/// std::vector<bool> conversion (nonzero = present) is triggered by
+/// load_compound at materialization, where compound_index_t needs it; a plain
+/// read of the same variable leaves it as Int. The trailing dims are assumed
+/// regular here; reordered / non-prefix masks, non-integer masks, and a ragged
+/// trailing dim (variable per-cell trailing size) are rejected or deferred.
+let compoundViewType (freshId: IRId) (varArr: IRArrayType) (maskArr: IRArrayType) (maskIR: IRExpr) : Result<IRType, string> =
+    let isMaskElem =
+        match maskArr.ElemType with
+        | IRTScalar ETInt64 | IRTScalar ETInt32 | IRTScalar ETBool -> true
+        | _ -> false
+    if not isMaskElem then
+        Error (sprintf "load_compound: the mask must be an integer presence array (NetCDF stores flag/mask variables as NC_BYTE/NC_INT, read as Int; nonzero = present); got element type %A" maskArr.ElemType)
+    else
+        let varIdxs = varArr.IndexTypes
+        let maskIdxs = maskArr.IndexTypes
+        let maskRank = List.length maskIdxs
+        // The mask must cover a LEADING prefix of the variable's dimensions, in
+        // order. Remaining dims become regular trailing slots. All-dims coverage
+        // is the maskRank = total case (empty trailing -> scalar Compound).
+        //
+        // Two dimensions "correspond" when they share INDEX-SPACE IDENTITY, not
+        // when they merely have equal extents. This mirrors IR.indexSpacesMatch
+        // (defined later in this file, over IndexSpaceInfo; replicated inline here
+        // because compoundViewType precedes it and needs the IRIndexType-level
+        // check plus the shared-Id fast path). Identity holds when:
+        //   (a) same IRIndexType Id -- the provider shares one index-type
+        //       instance across a file's variables (dimMap), so a mask variable
+        //       and a data variable over the same NetCDF dimension match here; or
+        //   (b) same non-anonymous Tag -- a user-declared NAMED index type
+        //       (`type LatIdx = Idx<n>`) carries Tag = Some "LatIdx", so two
+        //       source arrays annotated over the same named type match by name
+        //       even though each reference gets a fresh Id; or
+        //   (c) both anonymous but sharing a named-reference extent (IRVar id /
+        //       IRParam name) -- same rule as indexSpacesMatch's None/None arm.
+        // Deliberately does NOT match bare literal-extent equality: two anonymous
+        // same-length arrays do not share an index space (formalism 14.6). This is
+        // the user's contract -- they establish shared identity by NAMING the
+        // index types (or via a provider); coincidental shapes are not enough.
+        let dimsMatch (d: IRIndexType) (m: IRIndexType) : bool =
+            if d.Id = m.Id then true
+            else
+                match d.Tag, m.Tag with
+                | Some tagD, Some tagM -> tagD = tagM
+                | None, None ->
+                    (match d.Extent, m.Extent with
+                     | IRVar (idD, _), IRVar (idM, _) -> idD = idM
+                     | IRParam (nD, _, _), IRParam (nM, _, _) -> nD = nM
+                     | _ -> false)
+                | _ -> false
+        let isLeadingPrefix =
+            maskRank <= List.length varIdxs
+            && List.forall2 dimsMatch (varIdxs |> List.truncate maskRank) maskIdxs
+        if not isLeadingPrefix then
+            let varIds = varIdxs |> List.map (fun i -> i.Id)
+            let maskIds = maskIdxs |> List.map (fun i -> i.Id)
+            Error (sprintf "compound/load_compound: the mask must cover a leading prefix of the array's dimensions, sharing index-space identity (same named index type, or same provider dimension). Mask and dense leading dimensions do not correspond (mask dim Ids %A vs array dim Ids %A). Name the shared index types (e.g. `type LatIdx = Idx<n>`) so the mask and dense array refer to the same index space; reordered or non-prefix masks are not yet supported" maskIds varIds)
+        else
+            let compoundIdx =
+                { Id = freshId
+                  Rank = maskRank
+                  Extent = IRCompoundMask maskIR
+                  Symmetry = SymNone
+                  Tag = Some "__compoundidx"
+                  Kind = SDimension
+                  Dependencies = [] }
+            // Trailing regular dims: the variable's dimensions after the masked
+            // prefix. Empty in the all-dims case (scalar Compound<T, RANK>).
+            let trailing = varArr.IndexTypes |> List.skip maskRank
+            Ok (mkArrayArrow (compoundIdx :: trailing) varArr.ElemType varArr.Identity)
+
 // ============================================================================
 // Type-pattern matching (concrete + abstract) — shared by the type-structure
 // test harness and (eventually) the language server's "type of expression"
@@ -930,15 +1102,15 @@ let rec matchesTypePattern (pattern: IRType) (actual: IRType) : bool =
     | IRTComputation p, IRTComputation a -> matchesTypePattern p a
     | _ -> pattern = actual   // fallback: exact structural equality
 
-/// Per-index pattern match. Arity and Symmetry are type identity and must match
+/// Per-index pattern match. Rank and Symmetry are type identity and must match
 /// exactly UNLESS the pattern leaves them abstract:
-///   - Arity = 0 in the pattern is the "any arity" hole.
+///   - Rank = 0 in the pattern is the "any rank" hole.
 ///   - A user-meaningful Tag in the pattern must match; a None tag or a
 ///     synthetic `__` tag in the pattern is treated as "don't care".
 /// Extent and Dependencies are NEVER compared (runtime / iteration detail).
 /// Kind (S/T dimension) IS compared (it's part of how the dimension behaves).
 and matchesIndexPattern (p: IRIndexType) (a: IRIndexType) : bool =
-    let arityOk = p.Arity = 0 || p.Arity = a.Arity
+    let rankOk = p.Rank = 0 || p.Rank = a.Rank
     let symOk = p.Symmetry = a.Symmetry
     let kindOk = p.Kind = a.Kind
     let tagOk =
@@ -946,7 +1118,7 @@ and matchesIndexPattern (p: IRIndexType) (a: IRIndexType) : bool =
         | None -> true
         | Some t when t.StartsWith("__") -> true
         | Some t -> (a.Tag = Some t)
-    arityOk && symOk && kindOk && tagOk
+    rankOk && symOk && kindOk && tagOk
 
 
 //
@@ -1209,7 +1381,7 @@ type IndexSpaceInfo = {
     Extent: IRExpr
     Symmetry: SymmetryClass
     Kind: DimensionKind
-    SourceArity: int
+    SourceRank: int
 }
 
 
@@ -1236,10 +1408,31 @@ let indexSpacesMatch (a: IndexSpaceInfo) (b: IndexSpaceInfo) : bool =
 // ============================================================================
 
 /// Represents a single loop level in the nested loop structure
+/// The KIND of an index type -- the classification that iteration/addressing
+/// and other kind-specific logic dispatch on. Derived (not stored) from
+/// Symmetry + Tag, mirroring behaviorOf. The symmetry-like classes are ONE
+/// grouped arm (they share triangular/simplex storage and the fold facet via
+/// behaviorOf); Compound, Dep, and Ragged are siblings with their own
+/// storage/iteration. SymNone is NOT a kind: it is "no class assigned", which
+/// resolves to a plain dense index only when no tag claims it. Ragged variants
+/// (inline/opaque) and Dep sub-records (inner/outer) group here for now; a
+/// nested match splits them where each kind's iteration is built, mirroring how
+/// IxSymmetryLike defers the specific symmetry to ix.Symmetry. New kinds (Enum,
+/// CG, ...) add an arm here.
+let (|IxSymmetryLike|IxCompound|IxDep|IxRagged|IxDense|) (ix: IRIndexType) =
+    match ix.Symmetry with
+    | SymSymmetric | SymAntisymmetric | SymHermitian -> IxSymmetryLike
+    | SymNone ->
+        (match ix.Tag with
+         | Some ("__compoundidx" | "__compoundidx_dynamic") -> IxCompound
+         | Some ("__depidx" | "__depidx_inner" | "__depidx_outer") -> IxDep
+         | Some ("__raggedidx" | "__raggedidx_inline" | "__raggedidx_opaque") -> IxRagged
+         | _ -> IxDense)
+
 type LoopLevelInfo = {
     ArrayIndex: int
     LocalDimIndex: int
-    ArityIndex: int
+    RankIndex: int
     GlobalLevelIndex: int
     IndexSpace: IndexSpaceInfo
 }
@@ -1249,7 +1442,7 @@ let computeSDimsPerArray (arrayTypes: IRArrayType list) : int list =
     arrayTypes |> List.map (fun arr ->
         arr.IndexTypes 
         |> List.filter (fun idx -> idx.Kind = SDimension) 
-        |> List.sumBy (fun idx -> idx.Arity))
+        |> List.sumBy (fun idx -> idx.Rank))
 
 /// Build the flattened loop level structure
 /// Build the RAW (by-array, unreordered) loop levels: one level per S-dimension
@@ -1264,30 +1457,38 @@ let buildRawLoopLevels (arrayTypes: IRArrayType list) (sDimsPerArray: int list) 
     for arrIdx in 0 .. arrayTypes.Length - 1 do
         let arr = arrayTypes.[arrIdx]
         let mutable localDimIdx = 0
-        // Cumulative count of levels emitted for THIS array so far. ArityIndex
+        // Cumulative count of levels emitted for THIS array so far. RankIndex
         // must be this cumulative depth — NOT the per-record arity position —
-        // because genElementBindingNew uses it as `levelsConsumed = ArityIndex +
+        // because genElementBindingNew uses it as `levelsConsumed = RankIndex +
         // 1` to decide slice-vs-scalar-leaf (resultRank = ArrayRank -
         // levelsConsumed). A single multi-arity record (e.g. SymIdx<2>, one
-        // record Arity 2) and a sequence of arity-1 records (e.g. dense Idx,
+        // record Rank 2) and a sequence of rank-1 records (e.g. dense Idx,
         // Idx — two records) BOTH span the same number of levels, so the depth
         // must increment continuously across records.
         let mutable arrLevel = 0
         
         for idx in arr.IndexTypes do
             if idx.Kind = SDimension then
-                for _arityIdx in 0 .. idx.Arity - 1 do
+                // A CompoundIdx is a SINGLE semantic axis -- it iterates its
+                // present cells (cardinality), not a dense grid over the mask's
+                // leadRank dimensions -- so it contributes exactly ONE loop level
+                // regardless of mask rank. Symmetric/dense slots still expand one
+                // level per arity component. The compacted bound and compact
+                // address for the compound level are emitted by the codegen
+                // consumer; SourceRank carries the mask rank for that consumer.
+                let levelCount = match idx with | IxCompound -> 1 | _ -> idx.Rank
+                for _compIdx in 0 .. levelCount - 1 do
                     levels <- levels @ [{
                         ArrayIndex = arrIdx
                         LocalDimIndex = localDimIdx
-                        ArityIndex = arrLevel
+                        RankIndex = arrLevel
                         GlobalLevelIndex = globalIdx
                         IndexSpace = { 
                             Tag = idx.Tag
                             Extent = idx.Extent
                             Symmetry = idx.Symmetry
                             Kind = idx.Kind
-                            SourceArity = idx.Arity
+                            SourceRank = idx.Rank
                         }
                     }]
                     globalIdx <- globalIdx + 1
@@ -1302,7 +1503,7 @@ let buildRawLoopLevels (arrayTypes: IRArrayType list) (sDimsPerArray: int list) 
 /// of the index-type scheme:
 ///   (A) WITHIN one index type: consecutive arity components of a single
 ///       symmetric/antisymmetric record (same array, same LocalDimIndex,
-///       consecutive ArityIndex).
+///       consecutive RankIndex).
 ///   (B) ACROSS arrays: the same index space recurring in a commutative group —
 ///       same comm group, same positional axis (LocalDimIndex), and the index
 ///       types AGREE there via array identity (same array, the short-circuit,
@@ -1325,9 +1526,10 @@ let rawAxisGroups
         let withinType =
             lv.ArrayIndex = prior.ArrayIndex &&
             lv.LocalDimIndex = prior.LocalDimIndex &&
-            lv.ArityIndex = prior.ArityIndex + 1 &&
+            lv.RankIndex = prior.RankIndex + 1 &&
             (lv.IndexSpace.Symmetry = SymSymmetric ||
-             lv.IndexSpace.Symmetry = SymAntisymmetric)
+             lv.IndexSpace.Symmetry = SymAntisymmetric ||
+             lv.IndexSpace.Symmetry = SymHermitian)
         let acrossArray =
             inSameCommGroup lv.ArrayIndex prior.ArrayIndex &&
             lv.LocalDimIndex = prior.LocalDimIndex &&
@@ -1356,7 +1558,7 @@ let rawAxisGroups
 /// rawAxisGroups, so iteration and storage cannot disagree. The reorder is a
 /// STABLE group-by (each group's members keep their by-array relative order),
 /// which preserves per-array slice state (currentNames keyed by ArrayPosition)
-/// and ArityComponent. For single-axis / single-array cases every level is its
+/// and RankComponent. For single-axis / single-array cases every level is its
 /// own or one shared group in emission order, so the reorder is an identity.
 let buildLoopLevelStructure
     (identities: ArrayIdentity list)
@@ -1380,7 +1582,7 @@ let buildLoopLevelStructure
 
 type IdentityGroup = {
     StartIndex: int
-    Arity: int
+    Rank: int
     Identity: ArrayIdentity
 }
 
@@ -1389,14 +1591,14 @@ let partitionIntoIdentityGroups (identities: ArrayIdentity list) : IdentityGroup
     | [] -> []
     | first :: rest ->
         let mutable groups = []
-        let mutable currentGroup = { StartIndex = 0; Arity = 1; Identity = first }
+        let mutable currentGroup = { StartIndex = 0; Rank = 1; Identity = first }
         
         for i, id in List.indexed rest do
             if sameIdentity id currentGroup.Identity then
-                currentGroup <- { currentGroup with Arity = currentGroup.Arity + 1 }
+                currentGroup <- { currentGroup with Rank = currentGroup.Rank + 1 }
             else
                 groups <- groups @ [currentGroup]
-                currentGroup <- { StartIndex = i + 1; Arity = 1; Identity = id }
+                currentGroup <- { StartIndex = i + 1; Rank = 1; Identity = id }
         
         groups @ [currentGroup]
 
@@ -1450,7 +1652,7 @@ let computeAllSymcomStates
                     let priorLevel = levels.[idx]
                     if priorLevel.ArrayIndex = level.ArrayIndex &&
                        priorLevel.LocalDimIndex = level.LocalDimIndex &&
-                       priorLevel.ArityIndex = levels.[idx + 1].ArityIndex - 1 then
+                       priorLevel.RankIndex = levels.[idx + 1].RankIndex - 1 then
                         count <- count + 1
                         idx <- idx - 1
                     else
@@ -1482,7 +1684,7 @@ let computeAllSymcomStates
                 let isSymmetric =
                     level.ArrayIndex = priorLevel.ArrayIndex &&
                     level.LocalDimIndex = priorLevel.LocalDimIndex &&
-                    level.ArityIndex = priorLevel.ArityIndex + 1 &&
+                    level.RankIndex = priorLevel.RankIndex + 1 &&
                     (level.IndexSpace.Symmetry = SymSymmetric ||
                      level.IndexSpace.Symmetry = SymAntisymmetric)
                 
@@ -1496,9 +1698,9 @@ let computeAllSymcomStates
                 | true, false -> SCSymmetric
                 | false, true -> SCCommutative
                 | true, true ->
-                    let symArity = countSymmetricGroup level
-                    let commArity = countCommutativeGroup level
-                    if factorial symArity >= factorial commArity then SCSymmetric 
+                    let symRank = countSymmetricGroup level
+                    let commRank = countCommutativeGroup level
+                    if factorial symRank >= factorial commRank then SCSymmetric 
                     else SCCommutative)
 
 /// CANONICAL AXIS GROUPING — the single source of dimension grouping that both
@@ -1509,12 +1711,12 @@ let computeAllSymcomStates
 ///
 /// Returns one group id per loop level (parallel to `buildLoopLevelStructure`'s
 /// output order). Two levels share a group iff they are product-symmetric
-/// partners — i.e. iterate/store as one higher-arity symmetric index — under
+/// partners — i.e. iterate/store as one higher-rank symmetric index — under
 /// EITHER of the two multiplicity axes the index-type scheme allows:
 ///
 ///   (A) WITHIN one index type: consecutive arity components of a single
 ///       symmetric/antisymmetric record (a SymIdx<r> spans r levels at the same
-///       LocalDimIndex of the same array, consecutive ArityIndex).
+///       LocalDimIndex of the same array, consecutive RankIndex).
 ///   (B) ACROSS arrays: the same index space recurring in a commutative group —
 ///       same comm group, same positional axis (LocalDimIndex), and the index
 ///       types AGREE there, established by array identity (same array repeated,
@@ -1569,7 +1771,7 @@ let computePartialProductSpeedup
     let identityGroups = partitionIntoIdentityGroups identities
     let hasFullIdentity = 
         identityGroups.Length = 1 && 
-        identityGroups.[0].Arity = identities.Length &&
+        identityGroups.[0].Rank = identities.Length &&
         identities.Length > 1
     
     if hasFullIdentity then
@@ -1582,13 +1784,13 @@ let computePartialProductSpeedup
             let r = identities.Length
             let d = arrayTypes.[0].IndexTypes 
                     |> List.filter (fun idx -> idx.Kind = SDimension) 
-                    |> List.sumBy (fun idx -> idx.Arity)
+                    |> List.sumBy (fun idx -> idx.Rank)
             if d > 0 then pown (factorial r) d else 1L
         else
             arrayTypes 
             |> List.collect (fun arr -> arr.IndexTypes)
-            |> List.filter (fun idx -> idx.Kind = SDimension && idx.Symmetry = SymSymmetric && idx.Arity > 1)
-            |> List.fold (fun acc idx -> acc * factorial idx.Arity) 1L
+            |> List.filter (fun idx -> idx.Kind = SDimension && idx.Symmetry = SymSymmetric && idx.Rank > 1)
+            |> List.fold (fun acc idx -> acc * factorial idx.Rank) 1L
     else
         let levels = buildLoopLevelStructure identities commGroups arrayTypes sDimsPerArray
         let states = computeAllSymcomStates identities arrayTypes commGroups sDimsPerArray
@@ -1605,16 +1807,16 @@ let computePartialProductSpeedup
                     | SCNeither -> false
                 
                 if canTriangulate then
-                    let groupArity =
+                    let groupRank =
                         match state with
-                        | SCSymmetric -> level.IndexSpace.SourceArity
+                        | SCSymmetric -> level.IndexSpace.SourceRank
                         | _ -> 2  // Commutative pair
                     
-                    let groupStart = i - groupArity + 1
-                    let groupKey = (groupStart, groupArity)
+                    let groupStart = i - groupRank + 1
+                    let groupKey = (groupStart, groupRank)
                     
-                    if groupArity > 1 && not (Set.contains groupKey processedGroups) then
-                        speedup <- speedup * factorial groupArity
+                    if groupRank > 1 && not (Set.contains groupKey processedGroups) then
+                        speedup <- speedup * factorial groupRank
                         processedGroups <- Set.add groupKey processedGroups
         
         speedup
@@ -1750,6 +1952,18 @@ type IRBinding = {
 }
 
 /// IR Module
+/// Specification for a deferred provider data read, recovered at the read site
+/// (`view |> read`) and consumed at codegen to emit the NetCDF reader. Keyed in
+/// IRModule.ProviderReads by the receiving binding's IRId. A plain dense read
+/// leaves MaskName/MaskType = None; a load_compound read carries both.
+type ProviderReadSpec = {
+    FilePath: string
+    VarName: string
+    VarType: IRArrayType
+    MaskName: string option
+    MaskType: IRArrayType option
+}
+
 type IRModule = {
     Name: string
     Types: IRTypeDef list
@@ -1758,6 +1972,21 @@ type IRModule = {
     /// Diagnostics: static function usage tracking (function name → usage kind)
     /// "compile-time" | "runtime" | "both" | "unused"
     StaticFunctionUsage: Map<string, string>
+    /// Deferred provider reads, keyed by the receiving binding's IRId.
+    /// Populated during lowering (at `let x = view |> read` over a provider
+    /// variable) and consumed at codegen to emit the NetCDF reader. Empty for
+    /// modules with no provider reads.
+    ProviderReads: Map<IRId, ProviderReadSpec>
+    /// Deferred random-fill array constructors, keyed by the receiving binding's
+    /// IRId. Populated during lowering (at `let A: Array<..> = fill_random(mod)`)
+    /// and consumed at codegen to emit allocate<> + the runtime fill_random. The
+    /// value is the (lowered) modulus expression. Empty for modules with none.
+    RandomInits: Map<IRId, IRExpr>
+    /// Deferred compound-construction constructors (compound(dense, mask)),
+    /// keyed by the receiving binding's IRId. Populated during lowering and
+    /// consumed at codegen to emit P0 index materialization + a dense->compact
+    /// scatter. Value is (loweredDense, loweredMask). Empty for modules with none.
+    CompoundInits: Map<IRId, IRExpr * IRExpr>
 }
 
 /// IR Program
@@ -1852,7 +2081,7 @@ let mkLambdaCallable
 /// According to formalism section 10.9:
 /// 1. Group arrays by identity (consecutive identical arrays)
 /// 2. For each group: if comm + arity > 1, use SymIdx; else Idx
-///    (AntisymIdx instead of SymIdx when isAntisym is set — Reynolds
+///    (AntisymIdx instead of SymIdx when isReynoldsAntisym is set -- Reynolds
 ///     antisymmetrization over a commutative same-array group produces a
 ///     strictly-triangular antisymmetric output, NOT a symmetric one. The
 ///     antisymmetric output stores C(n,r) strict tuples with no diagonal,
@@ -1860,6 +2089,10 @@ let mkLambdaCallable
 ///     allocate_antisym storage path reachable from the common Reynolds use
 ///     case; without it a same-array reynolds(f, Antisymmetric) would deduce
 ///     symmetric storage (wrong cardinality, spurious zero diagonal).)
+///    When there is NO Reynolds clause (isReynolds = false), a rank-0
+///    elementwise kernel instead PRESERVES the input group's compact storage
+///    class verbatim (Sym/Antisym/Hermitian), since the kernel does not reshape
+///    symmetry; the Reynolds flags only apply when a Reynolds clause is present.
 /// 3. Concatenate S-dims from all groups
 /// 4. Add T-dims from kernel output
 let deduceOutputType 
@@ -1869,7 +2102,8 @@ let deduceOutputType
     (sDimsPerArray: int list)
     (kernelTDims: IRIndexType list)
     (elemType: IRType)
-    (isAntisym: bool)
+    (isReynolds: bool)
+    (isReynoldsAntisym: bool)
     (kernelConsumesInner: bool)
     (builder: IRBuilder) : IRType =
     
@@ -1885,13 +2119,13 @@ let deduceOutputType
         // not an array-level one (§14.6).
         //
         // Each axis group becomes ONE output S-dim index:
-        //   - group size > 1  -> a higher-arity SYMMETRIC index (Arity = group
+        //   - group size > 1  -> a higher-rank SYMMETRIC index (Rank = group
         //     size), or ANTISYMMETRIC under a Reynolds antisymmetrization. This
         //     covers both same-array repetition and distinct arrays sharing a
         //     named index space, plus a within-type symmetric record (whose
         //     arity components form one group of that arity).
         //   - group size == 1 -> the source index type copied VERBATIM (Id
-        //     refreshed only), preserving its own Arity/Symmetry and any
+        //     refreshed only), preserving its own Rank/Symmetry and any
         //     ragged/dep structure. This is load-bearing for a single symmetric
         //     input (method_for(sym) <@> h carries SymIdx<r,N> through) and for
         //     elementwise-over-ragged/dep (rank-0 kernel preserves input shape).
@@ -1923,16 +2157,29 @@ let deduceOutputType
                 if not (List.contains g emittedGroups) then
                     emittedGroups <- emittedGroups @ [g]
                     let memberIdxs = [ for k in 0 .. levelArr.Length - 1 do if groupArr.[k] = g then yield k ]
-                    let arity = List.length memberIdxs
+                    let groupRank = List.length memberIdxs
                     let repLevel = levelArr.[List.head memberIdxs]
                     match sourceRecord repLevel with
                     | None -> ()
                     | Some rep ->
-                        if arity > 1 then
-                            let groupSymmetry = if isAntisym then SymAntisymmetric else SymSymmetric
-                            result <- result @ [{ rep with Arity = arity; Symmetry = groupSymmetry; Id = builder.FreshId() }]
+                        if groupRank > 1 then
+                            // A Reynolds clause is a kernel-level unary combinator: when
+                            // present it shapes the output symmetry (sym/antisym per the
+                            // variant), and the input array's native storage class does
+                            // not override it. With NO Reynolds, a rank-0 elementwise
+                            // kernel preserves the input's compact storage class verbatim
+                            // (Sym/Antisym/Hermitian); only a plain (SymNone) multi-level
+                            // group defaults to symmetric.
+                            let groupSymmetry =
+                                if isReynolds then
+                                    (if isReynoldsAntisym then SymAntisymmetric else SymSymmetric)
+                                else
+                                    (match rep.Symmetry with
+                                     | SymSymmetric | SymAntisymmetric | SymHermitian -> rep.Symmetry
+                                     | SymNone -> SymSymmetric)
+                            result <- result @ [{ rep with Rank = groupRank; Symmetry = groupSymmetry; Id = builder.FreshId() }]
                         else
-                            // size-1 group: verbatim copy (preserve Arity, Symmetry,
+                            // size-1 group: verbatim copy (preserve Rank, Symmetry,
                             // ragged/dep structure), refresh Id only.
                             result <- result @ [{ rep with Id = builder.FreshId() }]
             result
@@ -2005,7 +2252,7 @@ type ElementBinding = {
     /// Which dimension within the array (for multi-dim arrays)
     DimIndex: int
     /// For SymIdx: which arity component (0, 1, 2, ...)
-    ArityComponent: int
+    RankComponent: int
     /// Element type of the array (for explicit typing).
     /// IRType to align with IRArrayType.ElemType (Phase B2).
     ArrayElemType: IRType
@@ -2066,10 +2313,10 @@ type LoopNestCodeGen = {
 }
 
 /// One dimension GROUP of a device buffer. Mirrors a single IRIndexType:
-/// a group is either a plain rectangular axis (Arity=1, SymNone) or a
-/// symmetric/antisymmetric/hermitian block of Arity>=2 sharing one extent.
+/// a group is either a plain rectangular axis (Rank=1, SymNone) or a
+/// symmetric/antisymmetric/hermitian block of Rank>=2 sharing one extent.
 type BufferDimGroup = {
-    Arity: int
+    Rank: int
     Extent: IRExpr
     Symmetry: SymmetryClass
     Kind: DimensionKind
@@ -2095,7 +2342,7 @@ let deviceBufferTypeOfArray (arr: IRArrayType) : DeviceBufferType =
     { ElemType = arr.ElemType
       Groups =
         arr.IndexTypes |> List.map (fun ix ->
-            { Arity = ix.Arity
+            { Rank = ix.Rank
               Extent = ix.Extent
               Symmetry = (match ix.Kind with TDimension -> SymNone | SDimension -> ix.Symmetry)
               Kind = ix.Kind
@@ -2105,7 +2352,7 @@ let deviceBufferTypeOfArray (arr: IRArrayType) : DeviceBufferType =
 /// extent: the scope of the FIRST cuda kernel. False => fall back to host loop.
 let isRectangularConstBuffer (bt: DeviceBufferType) : bool =
     bt.Groups |> List.forall (fun g ->
-        g.Arity = 1 && g.Symmetry = SymNone && List.isEmpty g.Dependencies)
+        g.Rank = 1 && g.Symmetry = SymNone && List.isEmpty g.Dependencies)
 
 /// True iff the element scalar type crosses an `extern "C"` linkage boundary
 /// cleanly. The CUDA launch wrapper is declared extern "C" so g++ (compiling
@@ -2156,7 +2403,7 @@ let binomI64 (n: int64) (k: int64) : int64 =
         result
 
 /// Per-group scalar count as an IRExpr. Literal extents fold to a literal:
-///   rectangular (Arity=1)      => extent
+///   rectangular (Rank=1)      => extent
 ///   symmetric/hermitian (r>=2) => C(n + r - 1, r)   (multiset combinations)
 ///   antisymmetric (r>=2)       => C(n, r)            (strict combinations)
 /// Symbolic-symmetric counts (binomial of a runtime extent) are deferred; the
@@ -2165,12 +2412,23 @@ let binomI64 (n: int64) (k: int64) : int64 =
 let bufferGroupCardinality (g: BufferDimGroup) : IRExpr =
     match g.Extent with
     | IRLit (IRLitInt n) ->
-        let r = int64 g.Arity
+        let r = int64 g.Rank
         let count =
-            match g.Symmetry with
-            | SymNone -> n
-            | SymSymmetric | SymHermitian -> binomI64 (n + r - 1L) r
-            | SymAntisymmetric -> binomI64 n r
+            // Cardinality is a placement-axis question: dense product vs a
+            // combinadic over the group's arity. Strict (antisym) gives C(n,r);
+            // inclusive (sym/herm) gives the multiset count C(n+r-1,r). Behavior
+            // identical to the prior SymmetryClass match; expressed via the
+            // Level-1 PlacementClass so a future PlaceTabulated arm slots in here
+            // (and FS0025 will flag this site until it does).
+            match placementClassOf g.Symmetry with
+            | PlaceDense -> n
+            | PlaceCombinatorial SymAntisymmetric -> binomI64 n r
+            | PlaceCombinatorial _ -> binomI64 (n + r - 1L) r
+            // Unreachable: placementClassOf yields only Dense/Combinatorial, and a
+            // compound carries an IRCompoundMask extent (taken by `| other` below,
+            // returning the runtime-cardinality expr), so this literal-extent branch
+            // is never tabulated. Defensive fallback to the literal count.
+            | PlaceTabulated -> n
         IRLit (IRLitInt count)
     | other -> other
 
@@ -2212,20 +2470,20 @@ let buildSymmVec (outputType: IRType) : int list =
         let mutable prevSymm = None
         
         for idx in arr.IndexTypes do
-            for arityIdx in 0 .. idx.Arity - 1 do
+            for compIdx in 0 .. idx.Rank - 1 do
                 // Hermitian shares the symmetric storage layout: the upper
                 // triangle is stored compactly (same {1,1,..} mask as SymIdx),
                 // and the lower triangle is recovered by conjugation at read
                 // time. So Hermitian groups identically to symmetric here; only
                 // the READ path differs (std::conj on lower-triangle access).
                 let isSymmetric =
-                    (idx.Symmetry = SymSymmetric || idx.Symmetry = SymHermitian) && idx.Arity > 1
-                if isSymmetric && arityIdx > 0 then
+                    (idx.Symmetry = SymSymmetric || idx.Symmetry = SymHermitian) && idx.Rank > 1
+                if isSymmetric && compIdx > 0 then
                     // Continue same group
                     symmVec <- symmVec @ [groupNum]
                 else
                     // Start new group
-                    if prevSymm = Some true && arityIdx = 0 then
+                    if prevSymm = Some true && compIdx = 0 then
                         groupNum <- groupNum + 1
                     symmVec <- symmVec @ [groupNum]
                     if not isSymmetric then
@@ -2257,14 +2515,14 @@ let buildSymmVecWithStrict (outputType: IRType) : (int list * int list) =
             let isCompact =
                 (match idx.Symmetry with
                  | SymSymmetric | SymAntisymmetric | SymHermitian -> true
-                 | SymNone -> false) && idx.Arity > 1
-            let isStrict = idx.Symmetry = SymAntisymmetric && idx.Arity > 1
-            for arityIdx in 0 .. idx.Arity - 1 do
-                if isCompact && arityIdx > 0 then
+                 | SymNone -> false) && idx.Rank > 1
+            let isStrict = idx.Symmetry = SymAntisymmetric && idx.Rank > 1
+            for compIdx in 0 .. idx.Rank - 1 do
+                if isCompact && compIdx > 0 then
                     symmVec <- symmVec @ [groupNum]
                     strictVec <- strictVec @ [if isStrict then 1 else 0]
                 else
-                    if prevCompact = Some true && arityIdx = 0 then
+                    if prevCompact = Some true && compIdx = 0 then
                         groupNum <- groupNum + 1
                     symmVec <- symmVec @ [groupNum]
                     strictVec <- strictVec @ [if isStrict then 1 else 0]
@@ -2276,7 +2534,7 @@ let buildSymmVecWithStrict (outputType: IRType) : (int list * int list) =
 
 /// Storage allocation, derived from an output array's index TYPE (not from the
 /// kernel's Reynolds descriptor). The per-index-class allocator comes from
-/// IIndexTypeBehavior.AllocRoutine:
+/// allocRoutineFor (the placement axis):
 ///   - AllocDense / AllocSymmetric -> allocate<T, SYMM>(...)
 ///       (SYMM = nullptr for dense, hoisted {1,1,..} vec for symmetric;
 ///        Hermitian shares the symmetric path — same upper-triangle storage)
@@ -2333,6 +2591,29 @@ type AllocSpec =
                                        // dense axis (e.g. Idx -> AntisymIdx<2>).
     | AllocUnsupported of reason: string
 
+/// Placement-axis allocator dispatch: which runtime allocator backs an array
+/// whose storage is governed by a given PlacementClass. This is the Level-1
+/// counterpart to behaviorFor (the symmetry axis) -- the allocator is a property
+/// of PLACEMENT (which tuples are stored and how they rank), not of the value
+/// transform, so it lives here rather than on IIndexTypeBehavior. Behavior is
+/// identical to the per-class AllocRoutine it replaces: dense -> AllocDense;
+/// strict combinadic (antisym) -> AllocAntisymmetric; inclusive combinadic
+/// (symmetric AND Hermitian, which share the upper-triangle layout) ->
+/// AllocSymmetric. A future PlaceTabulated arm adds the tabulated allocator here
+/// (and FS0025 flags this match until it does).
+let allocRoutineFor (pc: PlacementClass) : AllocSpec =
+    match pc with
+    | PlaceDense -> AllocDense
+    | PlaceCombinatorial SymAntisymmetric -> AllocAntisymmetric
+    | PlaceCombinatorial _ -> AllocSymmetric
+    | PlaceTabulated ->
+        // Compound storage is runtime-sized from the mask's popcount and is
+        // allocated through the emitted compound_index_t, not a closed-form
+        // allocator. Wired at codegen; unreached here until then (no caller
+        // passes PlaceTabulated yet -- classifyOutputStorage routes compound
+        // separately at codegen time).
+        AllocUnsupported "compound (tabulated) allocation is emitted via compound_index_t at codegen"
+
 /// Semantic result of transposing two dimensions that lie WITHIN one index
 /// type (an intra-type dimensional swap). Backend-neutral decision; the C++
 /// emitter realizes each (identity = return source; negated/conjugated = a
@@ -2385,9 +2666,6 @@ type IIndexTypeBehavior =
     /// guard). Antisymmetric/Symmetric/Hermitian require arity >= 2; Hermitian
     /// is rank-2 only; etc. Ok () means well-formed.
     abstract member Validate : IRIndexType -> Result<unit, string>
-    /// Which runtime allocator to call for an array whose storage is governed
-    /// by this class.
-    abstract member AllocRoutine : AllocSpec
     /// What an intra-type transpose of two of this class's dimensions does.
     abstract member TransposeWithin : unit -> TransposeBehavior
     /// How this class folds an index sub-tuple to its canonical stored form
@@ -2403,7 +2681,6 @@ type private RectangularBehavior() =
         member _.ClassName = "Rectangular"
         member _.Symmetry = SymNone
         member _.Validate _ = Ok ()
-        member _.AllocRoutine = AllocDense
         member _.TransposeWithin () = TDataMove
         member _.Canonicalize () = CanonNone        // dense: indices already canonical
         member _.ReadTransform () = TfIdentity
@@ -2415,9 +2692,8 @@ type private SymmetricBehavior() =
         member _.ClassName = "Symmetric"
         member _.Symmetry = SymSymmetric
         member _.Validate ix =
-            if ix.Arity < 2 then Error (sprintf "Symmetric index requires arity >= 2 (got %d): a symmetry relation needs at least two components" ix.Arity)
+            if ix.Rank < 2 then Error (sprintf "Symmetric index requires rank >= 2 (got %d): a symmetry relation needs at least two components" ix.Rank)
             else Ok ()
-        member _.AllocRoutine = AllocSymmetric
         member _.TransposeWithin () = TIdentity
         member _.Canonicalize () = CanonSort        // sort within group, diagonal kept
         member _.ReadTransform () = TfIdentity      // symmetric: no change on swap
@@ -2429,9 +2705,8 @@ type private AntisymmetricBehavior() =
         member _.ClassName = "Antisymmetric"
         member _.Symmetry = SymAntisymmetric
         member _.Validate ix =
-            if ix.Arity < 2 then Error (sprintf "Antisymmetric index requires arity >= 2 (got %d): an antisymmetry relation needs at least two components" ix.Arity)
+            if ix.Rank < 2 then Error (sprintf "Antisymmetric index requires rank >= 2 (got %d): an antisymmetry relation needs at least two components" ix.Rank)
             else Ok ()
-        member _.AllocRoutine = AllocAntisymmetric
         member _.TransposeWithin () = TNegatedCopy
         member _.Canonicalize () = CanonSortStrict  // sort; implicit-zero on repeat
         member _.ReadTransform () = TfNegateOnSwap   // negate on odd parity
@@ -2443,9 +2718,8 @@ type private HermitianBehavior() =
         member _.ClassName = "Hermitian"
         member _.Symmetry = SymHermitian
         member _.Validate ix =
-            if ix.Arity <> 2 then Error (sprintf "Hermitian index requires arity = 2 (got %d): the Hermitian relation is defined on a matrix (two components)" ix.Arity)
+            if ix.Rank <> 2 then Error (sprintf "Hermitian index requires rank = 2 (got %d): the Hermitian relation is defined on a matrix (two components)" ix.Rank)
             else Ok ()
-        member _.AllocRoutine = AllocSymmetric   // same upper-triangle layout as symmetric
         member _.TransposeWithin () = TConjugatedCopy
         member _.Canonicalize () = CanonSort        // sort within group, diagonal kept (real)
         member _.ReadTransform () = TfConjugateOnSwap  // conjugate on odd parity
@@ -2488,7 +2762,7 @@ let validateIndexType (ix: IRIndexType) : Result<unit, string> =
 
 /// Storage allocation spec for an output array, derived from its index TYPE.
 /// Source of truth for which C++ allocator to emit. The per-index-class
-/// decision comes from IIndexTypeBehavior.AllocRoutine; the whole-array
+/// decision comes from allocRoutineFor (the placement axis); the whole-array
 /// COMPOSITION rules (a single antisymmetric index spanning all dims is
 /// allocatable; antisym mixed with other components is not, since
 /// allocate_antisym has no per-group mask) live here, because they are a
@@ -2508,11 +2782,11 @@ let classifyOutputStorage (outputType: IRType) : AllocSpec =
             let symmVec = buildSymmVec outputType
             if hasRealSymmetry symmVec then AllocSymmetric
             else AllocDense
-        | [ single ] when single.Arity = (arr.IndexTypes |> List.sumBy (fun ix -> ix.Arity)) ->
+        | [ single ] when single.Rank = (arr.IndexTypes |> List.sumBy (fun ix -> ix.Rank)) ->
             // Exactly one antisymmetric index spanning every dimension: the
-            // pure-antisymmetric shape allocate_antisym supports. Per-class
-            // routine confirms (behaviorFor SymAntisymmetric -> AllocAntisymmetric).
-            (behaviorFor SymAntisymmetric).AllocRoutine
+            // pure-antisymmetric shape allocate_antisym supports. Placement-axis
+            // routine confirms (PlaceCombinatorial SymAntisymmetric -> AllocAntisymmetric).
+            allocRoutineFor (PlaceCombinatorial SymAntisymmetric)
         | _ ->
             // Antisymmetric group(s) combined with other components in one
             // storage block — the mixed-strictness layout the global DIAGONALS
@@ -2726,16 +3000,32 @@ let buildLoopNestCodeGen
         | Some rk -> rk.Callable.IsOmpParallel
         | None -> false
     
-    // Map array position to kernel param
-    let paramByArrayPos = 
-        kernelParams |> List.mapi (fun i p -> (i, p)) |> Map.ofList
+    // Map kernel params to (source, slot). A VIRTUAL source (range<...>) consumes
+    // one param PER index-type slot; every other source consumes one. This mirrors
+    // buildApplyInfo's expandedRows so param indices line up. The flat param index
+    // for (arrayPos, slot) is (sum of spans of earlier sources) + the slot. For
+    // single-slot sources every span is 1, so paramStart pos == pos and the
+    // mapping is identical to the old one-param-per-position scheme.
+    let isVirtualSrc pos =
+        pos < arrays.Length &&
+        (match arrays.[pos] with IRRange _ | IRVirtualReverse _ -> true | _ -> false)
+    let paramSpan pos =
+        if isVirtualSrc pos && pos < arrayTypes.Length then
+            max 1 (arrayTypes.[pos].IndexTypes |> List.sumBy (fun ix -> ix.Rank))
+        else 1
+    let paramStart pos = List.init (max 0 pos) paramSpan |> List.sum
     
     // Helper: create an ElementBinding for an array at a given arity component
-    let mkElement (arrayPos: int) (arityComponent: int) (dimIndex: int) =
+    let mkElement (arrayPos: int) (rankComponent: int) (dimIndex: int) =
         let arrName = if arrayPos < arrayNames.Length then arrayNames.[arrayPos] else sprintf "arr%d" arrayPos
         let arrType = if arrayPos < arrayTypes.Length then Some arrayTypes.[arrayPos] else None
         let elemType = arrType |> Option.map (fun t -> t.ElemType) |> Option.defaultValue (IRTScalar ETFloat64)
-        let arrRank = arrType |> Option.map (fun t -> t.IndexTypes |> List.sumBy (fun i -> i.Arity))
+        // ArrayRank counts LOOP LEVELS, not total index rank: a compound slot is
+        // ONE level (the cardinality axis) regardless of mask rank, matching
+        // buildRawLoopLevels. For dense/symmetric slots level count == Rank, so
+        // this is unchanged there. genElementBindingNew's
+        // resultRank = ArrayRank - levelsConsumed relies on this level count.
+        let arrRank = arrType |> Option.map (fun t -> t.IndexTypes |> List.sumBy (fun i -> match i with IxCompound -> 1 | _ -> i.Rank))
                               |> Option.defaultValue 1
         let virtualKind =
             if arrayPos < arrays.Length then
@@ -2744,7 +3034,23 @@ let buildLoopNestCodeGen
                 | IRVirtualReverse _ -> VirtualReverse
                 | _ -> RealArray
             else RealArray
-        let param = Map.tryFind arrayPos paramByArrayPos
+        // Per-slot param for a virtual source (range<...>): the flat param index
+        // is (sum of earlier sources' param spans, via paramStart) + this level's
+        // position WITHIN its source. That within-source position is the rank
+        // component (levelInfo.RankIndex): it advances once per loop level and
+        // resets per source (buildRawLoopLevels' arrLevel), so a rank-1 slot and
+        // each arity component of a multi-rank slot both map to consecutive
+        // params -- range<SymIdx<2,N>> yields two params (i, j) at RankIndex 0, 1.
+        // (Previously this used dimIndex = LocalDimIndex, which is shared across
+        // the rank components of a single multi-rank index type; that collapsed
+        // all of them onto the first param and left the rest undeclared -- the
+        // range<SymIdx<2,N>> "__v3 not declared" bug. LocalDimIndex == RankIndex
+        // for every rank-1 slot, so this only changes the multi-rank case.)
+        // Real / non-virtual sources resolve to paramStart pos (else branch).
+        let flatParamIdx =
+            if isVirtualSrc arrayPos then paramStart arrayPos + rankComponent
+            else paramStart arrayPos
+        let param = if flatParamIdx >= 0 && flatParamIdx < kernelParams.Length then Some kernelParams.[flatParamIdx] else None
         let paramName = param |> Option.map (fun p -> p.Name) |> Option.defaultValue (sprintf "p%d" arrayPos)
         let paramVarId = param |> Option.map (fun p -> p.VarId) |> Option.defaultValue -1
         {
@@ -2753,7 +3059,7 @@ let buildLoopNestCodeGen
             ParamName = paramName
             ParamVarId = paramVarId
             DimIndex = dimIndex
-            ArityComponent = arityComponent
+            RankComponent = rankComponent
             ArrayElemType = elemType
             ArrayRank = arrRank
             Virtual = virtualKind
@@ -2765,7 +3071,7 @@ let buildLoopNestCodeGen
             let sharedIdx = info.SharedIndexType
             match sharedIdx with
             | Some idx ->
-                let numLevels = idx.Arity
+                let numLevels = idx.Rank
                 let isSymmetric = idx.Symmetry = SymSymmetric
                 let isAntisymmetric = idx.Symmetry = SymAntisymmetric
                 let isTriangular = isSymmetric || isAntisymmetric
@@ -2886,7 +3192,7 @@ let buildLoopNestCodeGen
                     then List.length deps
                     else 0
                 
-                let element = mkElement arrayPos levelInfo.ArityIndex levelInfo.LocalDimIndex
+                let element = mkElement arrayPos levelInfo.RankIndex levelInfo.LocalDimIndex
                 
                 {
                     Level = level
@@ -2950,6 +3256,8 @@ let rec mapIRExpr (f: IRExpr -> IRExpr) (expr: IRExpr) : IRExpr =
         | IRRank e -> IRRank (m e)
         | IRExtent (e, d) -> IRExtent (m e, d)
         | IRRaggedLookup l -> IRRaggedLookup (m l)
+        | IRCompoundMask mk -> IRCompoundMask (m mk)
+        | IRCompoundProject (parent, plen) -> IRCompoundProject (m parent, plen)
         | IRAssign (t, v) -> IRAssign (m t, m v)
         | IRForRange (vid, lo, hi, body) -> IRForRange (vid, m lo, m hi, m body)
         // Binary
@@ -3942,16 +4250,16 @@ let rec liftInferType (expr: IRExpr) : IRType =
                 match remaining with
                 | [] -> None
                 | (ix: IRIndexType) :: rest ->
-                    let ar = max 1 ix.Arity
+                    let ar = max 1 ix.Rank
                     if d < acc + ar then Some (slotIdx, ar, d - acc, ix)
                     else walk (slotIdx + 1) (acc + ar) rest
             (match walk 0 0 a.IndexTypes with
              | Some (slot, r, posInSlot, ix) when r >= 2 && ix.Symmetry <> SymNone ->
                 let mkRemainder (ar: int) : IRIndexType list =
                     if ar <= 0 then []
-                    elif ar = 1 then [ { ix with Arity = 1; Symmetry = SymNone } ]
-                    else [ { ix with Arity = ar } ]
-                let extracted = { ix with Arity = 1; Symmetry = SymNone }
+                    elif ar = 1 then [ { ix with Rank = 1; Symmetry = SymNone } ]
+                    else [ { ix with Rank = ar } ]
+                let extracted = { ix with Rank = 1; Symmetry = SymNone }
                 let replacement = mkRemainder posInSlot @ [extracted] @ mkRemainder (r - 1 - posInSlot)
                 let newIdx =
                     a.IndexTypes
@@ -4356,6 +4664,8 @@ let rec liftExpr (builder: IRBuilder) (expr: IRExpr) : IRExpr =
     | IRFunctorMap (fn, c) -> IRFunctorMap (liftExpr builder fn, liftExpr builder c)
     | IRPolyIndex (p, i) -> IRPolyIndex (liftExpr builder p, liftExpr builder i)
     | IRRaggedLookup l -> IRRaggedLookup (liftExpr builder l)
+    | IRCompoundMask mk -> IRCompoundMask (liftExpr builder mk)
+    | IRCompoundProject (parent, plen) -> IRCompoundProject (liftExpr builder parent, plen)
     | IRAssign (t, v) -> IRAssign (t, liftExpr builder v)
     | IRForRange (vid, lo, hi, body) ->
         IRForRange (vid, liftExpr builder lo, liftExpr builder hi, liftExpr builder body)
@@ -4569,8 +4879,8 @@ and ppIndexType (idx: IRIndexType) =
         | _ -> "?"
     match idx.Symmetry with
     | SymNone -> sprintf "Idx<%s>" extentStr
-    | SymSymmetric -> sprintf "SymIdx<%d, %s>" idx.Arity extentStr
-    | SymAntisymmetric -> sprintf "AntisymIdx<%d, %s>" idx.Arity extentStr
+    | SymSymmetric -> sprintf "SymIdx<%d, %s>" idx.Rank extentStr
+    | SymAntisymmetric -> sprintf "AntisymIdx<%d, %s>" idx.Rank extentStr
     | SymHermitian -> sprintf "HermitianIdx<%s>" extentStr
 
 // (ppElemType removed in Phase B6: unused after ppIRType was made recursive
@@ -4605,8 +4915,8 @@ and ppIndexTypeIn (names: Map<IRId, string>) (idx: IRIndexType) =
             | _ -> "?"
     match idx.Symmetry with
     | SymNone -> sprintf "Idx<%s>" extentStr
-    | SymSymmetric -> sprintf "SymIdx<%d, %s>" idx.Arity extentStr
-    | SymAntisymmetric -> sprintf "AntisymIdx<%d, %s>" idx.Arity extentStr
+    | SymSymmetric -> sprintf "SymIdx<%d, %s>" idx.Rank extentStr
+    | SymAntisymmetric -> sprintf "AntisymIdx<%d, %s>" idx.Rank extentStr
     | SymHermitian -> sprintf "HermitianIdx<%s>" extentStr
 
 let ppSymcomState = function
@@ -4845,6 +5155,8 @@ let rec collectVarRefsIR (expr: IRExpr) : Set<IRId> =
     | IRReduce (a, k) -> Set.union (collectVarRefsIR a) (collectVarRefsIR k)
     | IRExtent (a, _) -> collectVarRefsIR a
     | IRRaggedLookup l -> collectVarRefsIR l
+    | IRCompoundMask mk -> collectVarRefsIR mk
+    | IRCompoundProject (parent, _) -> collectVarRefsIR parent
     | IRSequence es -> Set.unionMany (List.map collectVarRefsIR es)
     | IRParallel (a, b, _) -> Set.union (collectVarRefsIR a) (collectVarRefsIR b)
     | IRFusion (a, b) -> Set.union (collectVarRefsIR a) (collectVarRefsIR b)
@@ -5202,7 +5514,10 @@ let rec exprAttrs (expr: IRExpr) : ExprAttrs =
     | IRPure e
     | IRCompute e
     | IRReynolds (e, _)
-    | IRRaggedLookup e ->
+    | IRRaggedLookup e
+    | IRCompoundMask e ->
+        exprAttrs e
+    | IRCompoundProject (e, _) ->
         exprAttrs e
     | IRTranspose (e, _, _) ->
         exprAttrs e

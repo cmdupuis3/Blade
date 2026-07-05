@@ -97,6 +97,24 @@ type TypedLowerEnv = {
     ImportedModules: Map<string, string>
     /// Provider alias -> qualified provider name (e.g. "NetCDF" -> ["Providers"; "NetCDF"])
     ProviderAliases: Map<string, string list>
+    /// Provider load binding name -> file path literal (e.g. "sample" -> "f.nc").
+    /// Recorded at tryInvokeProvider; used at a `view |> read` site to recover
+    /// the path by walking the var-reference to its root provider binding.
+    ProviderPaths: Map<string, string>
+    /// Deferred provider reads accumulated during lowering, keyed by the
+    /// receiving binding's IRId. Copied into IRModule.ProviderReads at module
+    /// assembly and consumed at codegen.
+    ProviderReads: Map<IRId, ProviderReadSpec>
+    /// Deferred random-fill constructors accumulated during lowering, keyed by
+    /// the receiving binding's IRId. Value is the lowered modulus expr. Copied
+    /// into IRModule.RandomInits at module assembly and consumed at codegen.
+    RandomInits: Map<IRId, IRExpr>
+    /// Deferred compound-construction constructors (compound(dense, mask))
+    /// accumulated during lowering, keyed by the receiving binding's IRId.
+    /// Value is (loweredDense, loweredMask). Copied into IRModule.CompoundInits
+    /// at module assembly and consumed at codegen (P0 index materialization +
+    /// scatter). Mirrors RandomInits.
+    CompoundInits: Map<IRId, IRExpr * IRExpr>
     /// Lifted lambda callables accumulated during lowering of the current
     /// module. Each lambda-construction site (lowerTypedLambda,
     /// lowerTypedSection, lowerTypedPartialApp, binop-kernel synthesis)
@@ -127,6 +145,10 @@ let emptyTypedEnv () : TypedLowerEnv = {
     ModuleExports = Map.empty
     ImportedModules = Map.empty
     ProviderAliases = Map.empty
+    ProviderPaths = Map.empty
+    ProviderReads = Map.empty
+    RandomInits = Map.empty
+    CompoundInits = Map.empty
     LiftedCallables = ResizeArray<IRCallable>()
 }
 
@@ -138,6 +160,12 @@ let rec lowerTypedExpr (env: TypedLowerEnv) (texpr: TypedExpr) : IRExpr =
     match texpr.Kind with
     | TExprLit lit ->
         IRLit (lowerLiteralToIRLit lit)
+
+    | TExprWildcard ->
+        // A wildcard `_` is a hole, not a value. It is only meaningful where a
+        // context consumes it (a compound-index coordinate marks a free axis).
+        // Reaching lowering means it was used where no context interpreted it.
+        failwith "wildcard `_` is not valid here: it can only appear as a compound-index coordinate (e.g. B((a, _, c))) or in a pattern"
     
     | TExprVar (name, varId, identity) ->
         // Variant constructors without payload (e.g. North) have type IRTNamed
@@ -305,8 +333,8 @@ let rec lowerTypedExpr (env: TypedLowerEnv) (texpr: TypedExpr) : IRExpr =
         | OpComposeMeth -> IRComposeMeth (lIR, rIR)
         | _ -> IRCompose (lIR, rIR)
     
-    | TExprRange indexType ->
-        IRRange (indexType, None)
+    | TExprRange indexTypes ->
+        IRRange (indexTypes, None)
 
     | TExprDotDot (lo, hi) ->
         let loIR = lowerTypedExpr env lo
@@ -314,7 +342,7 @@ let rec lowerTypedExpr (env: TypedLowerEnv) (texpr: TypedExpr) : IRExpr =
         let extentExpr = IRBinOp (IRElementwise, IRSub, hiIR, loIR)
         let idx = {
             Id = env.Builder.FreshId()
-            Arity = 1
+            Rank = 1
             Extent = extentExpr
             Symmetry = SymNone
             Tag = Some "__anon"
@@ -325,7 +353,7 @@ let rec lowerTypedExpr (env: TypedLowerEnv) (texpr: TypedExpr) : IRExpr =
             match loIR with
             | IRLit (IRLitInt 0L) -> None
             | _ -> Some loIR
-        IRRange (idx, offset)
+        IRRange ([idx], offset)
     
     | TExprReverse indexType ->
         IRVirtualReverse indexType
@@ -344,6 +372,28 @@ let rec lowerTypedExpr (env: TypedLowerEnv) (texpr: TypedExpr) : IRExpr =
     
     | TExprCompute e ->
         IRCompute (lowerTypedExpr env e)
+    
+    | TExprRead e ->
+        // Slice 1: passthrough. |> read will force the deferred provider read
+        // that load_as produces (introduced in a later slice); until that
+        // exists, reading lowers to the operand itself (a no-op).
+        lowerTypedExpr env e
+
+    | TExprFillRandom _ ->
+        // fill_random(mod) is only meaningful as an annotated top-level
+        // let-binding value, where the TDeclLet loop intercepts it (it needs the
+        // binding's array type for the shape and records it in RandomInits).
+        // Reaching here means it was used inline / in a nested let, which has no
+        // annotation to supply the shape.
+        failwith "fill_random(mod) is only valid as an annotated top-level let-binding value (let A: Array<..> = fill_random(mod))"
+    
+    | TExprCompound _ ->
+        // compound(dense, mask) is only meaningful as a top-level let-binding
+        // value, where the TDeclLet loop intercepts it (it records the lowered
+        // dense + mask in CompoundInits and leaves a unit placeholder, mirroring
+        // fill_random). Reaching here means it was used inline / in a nested let,
+        // which the compound-construction codegen path does not handle.
+        failwith "compound(dense, mask) is only valid as a top-level let-binding value (let B = compound(dense, mask))"
     
     | TExprGuard (cond, body) ->
         IRGuard (lowerTypedExpr env cond, lowerTypedExpr env body)
@@ -420,7 +470,7 @@ let rec lowerTypedExpr (env: TypedLowerEnv) (texpr: TypedExpr) : IRExpr =
     | TExprRank e ->
         // Resolve rank statically from the typed expression's type
         let rank = match e.Type with
-                   | ArrayElem at -> at.IndexTypes |> List.sumBy (fun idx -> idx.Arity)
+                   | ArrayElem at -> at.IndexTypes |> List.sumBy (fun idx -> idx.Rank)
                    | _ -> 0
         IRLit (IRLitInt (int64 rank))
     
@@ -1100,8 +1150,75 @@ let tryInvokeProvider (env: TypedLowerEnv) (binding: TypedBinding) : (IRTypeDef 
                 IsMutable = false
             }
             let env' = bindTypedVar binding.Name binding.VarId env
+            let env' = { env' with ProviderPaths = Map.add binding.Name path env'.ProviderPaths }
             Some (providerModule.Types, bd, env')
         | _ -> None
+    | _ -> None
+
+/// Detect a deferred compound read: `let data = NetCDF.load_compound(var, mask) |> read`.
+/// Recovers everything genReadCompoundVar needs from the typed argument shape:
+/// the file path (via the variable reference's root provider binding recorded in
+/// ProviderPaths), the variable and mask names (the outer field of each provider
+/// field access, e.g. `sample.vars.B` -> "B"), and their array types. The
+/// presence of a mask is what marks this a compound (vs plain dense) read.
+let tryCompoundRead (env: TypedLowerEnv) (binding: TypedBinding) : ProviderReadSpec option =
+    let rec rootName (e: TypedExpr) =
+        match e.Kind with
+        | TExprVar (n, _, _) -> Some n
+        | TExprField (inner, _, _) -> rootName inner
+        | _ -> None
+    let fieldName (e: TypedExpr) =
+        match e.Kind with
+        | TExprField (_, f, _) -> Some f
+        | _ -> None
+    match binding.Value.Kind with
+    | TExprRead inner ->
+        (match inner.Kind with
+         | TExprApp ({ Kind = TExprField ({ Kind = TExprVar _ }, "load_compound", _) }, [tVar; tMask]) ->
+             (match rootName tVar, fieldName tVar, fieldName tMask with
+              | Some root, Some varName, Some maskName when Map.containsKey root env.ProviderPaths ->
+                  (match tVar.Type, tMask.Type with
+                   | ArrayElem varArr, ArrayElem maskArr ->
+                       Some { FilePath = env.ProviderPaths.[root]
+                              VarName = varName
+                              VarType = varArr
+                              MaskName = Some maskName
+                              MaskType = Some maskArr }
+                   | _ -> None)
+              | _ -> None)
+         | _ -> None)
+    | _ -> None
+
+/// Detect a deferred dense read: `let A = sample.vars.A |> read`. The dense
+/// (maskless) analog of tryCompoundRead -- a provider VAR field access piped to
+/// `read`, with NO mask. Recovers the file path (via the var's root provider
+/// binding in ProviderPaths), the variable name (the outer field, e.g.
+/// `sample.vars.A` -> "A"), and the array type. genBinding materializes it via
+/// genReadVar (the no-mask arm of the ProviderReads intercept). Distinct from a
+/// compound read: that wraps a `load_compound(...)` application; this wraps a
+/// plain field access, so the two matchers are mutually exclusive.
+let tryPlainRead (env: TypedLowerEnv) (binding: TypedBinding) : ProviderReadSpec option =
+    let rec rootName (e: TypedExpr) =
+        match e.Kind with
+        | TExprVar (n, _, _) -> Some n
+        | TExprField (inner, _, _) -> rootName inner
+        | _ -> None
+    match binding.Value.Kind with
+    | TExprRead inner ->
+        (match inner.Kind with
+         | TExprField (_, varName, _) ->
+             (match rootName inner with
+              | Some root when Map.containsKey root env.ProviderPaths ->
+                  (match inner.Type with
+                   | ArrayElem varArr ->
+                       Some { FilePath = env.ProviderPaths.[root]
+                              VarName = varName
+                              VarType = varArr
+                              MaskName = None
+                              MaskType = None }
+                   | _ -> None)
+              | _ -> None)
+         | _ -> None)
     | _ -> None
 
 /// Lower a typed module
@@ -1197,6 +1314,86 @@ let lowerTypedModule (env: TypedLowerEnv) (modul: TypedModule) (rawDecls: Locate
         
         // All other declarations go through lowerTypedDecl
         // But first check for provider calls (e.g. let sample = NetCDF.load("sample.nc"))
+        | TDeclLet binding when (tryCompoundRead currentEnv binding).IsSome ->
+            // Deferred compound read (`load_compound(var, mask) |> read`): the
+            // binding holds the compact Compound value, but no C++ is emitted
+            // here. genBinding materializes it via genReadCompoundVar when it
+            // sees the binding's IRId in ctx.ProviderReads. Value is a unit
+            // placeholder; the type is the compound view type from typecheck.
+            let spec = (tryCompoundRead currentEnv binding).Value
+            let bd = {
+                Id = binding.VarId
+                Name = binding.Name
+                Type = binding.Type
+                Value = IRLit IRLitUnit
+                IsConst = true
+                IsMutable = binding.IsMutable
+            }
+            bindings <- bindings @ [bd]
+            currentEnv <- bindTypedVar binding.Name binding.VarId currentEnv
+            currentEnv <- { currentEnv with ProviderReads = Map.add binding.VarId spec currentEnv.ProviderReads }
+        | TDeclLet binding when (tryPlainRead currentEnv binding).IsSome ->
+            // Deferred dense read (`sample.vars.A |> read`): the binding holds the
+            // dense array value, materialized in codegen via genReadVar (the
+            // no-mask arm of the ProviderReads intercept). Value is a unit
+            // placeholder; the type is the array type from typecheck. Mirrors the
+            // compound arm above; the matchers are mutually exclusive (compound
+            // wraps a load_compound app, this wraps a plain field access).
+            let spec = (tryPlainRead currentEnv binding).Value
+            let bd = {
+                Id = binding.VarId
+                Name = binding.Name
+                Type = binding.Type
+                Value = IRLit IRLitUnit
+                IsConst = true
+                IsMutable = binding.IsMutable
+            }
+            bindings <- bindings @ [bd]
+            currentEnv <- bindTypedVar binding.Name binding.VarId currentEnv
+            currentEnv <- { currentEnv with ProviderReads = Map.add binding.VarId spec currentEnv.ProviderReads }
+        | TDeclLet binding when (match binding.Value.Kind with TExprFillRandom _ -> true | _ -> false) ->
+            // Random-fill constructor (`let A: Array<..> = fill_random(mod)`): the
+            // binding holds a random-filled array, materialized in codegen via
+            // allocate<> + the runtime fill_random (the RandomInits intercept in
+            // genBinding). Value is a unit placeholder; the type is the array type
+            // from the annotation (typecheck). The modulus is lowered and recorded.
+            let modIR =
+                match binding.Value.Kind with
+                | TExprFillRandom m -> lowerTypedExpr currentEnv m
+                | _ -> IRLit (IRLitInt 1L)  // unreachable: guarded by the `when` above
+            let bd = {
+                Id = binding.VarId
+                Name = binding.Name
+                Type = binding.Type
+                Value = IRLit IRLitUnit
+                IsConst = true
+                IsMutable = binding.IsMutable
+            }
+            bindings <- bindings @ [bd]
+            currentEnv <- bindTypedVar binding.Name binding.VarId currentEnv
+            currentEnv <- { currentEnv with RandomInits = Map.add binding.VarId modIR currentEnv.RandomInits }
+        | TDeclLet binding when (match binding.Value.Kind with TExprCompound _ -> true | _ -> false) ->
+            // Compound-construction constructor (`let B = compound(dense, mask)`):
+            // the binding holds a CompoundIdx-typed compact array, materialized in
+            // codegen via P0 (genCompoundIndexFromMask) + a dense->compact scatter
+            // (the CompoundInits intercept in genBinding). Value is a unit
+            // placeholder; the type is the Compound view type from typecheck. The
+            // dense and mask are lowered and recorded. Mirrors the fill_random arm.
+            let denseIR, maskIR =
+                match binding.Value.Kind with
+                | TExprCompound (d, m) -> lowerTypedExpr currentEnv d, lowerTypedExpr currentEnv m
+                | _ -> IRLit IRLitUnit, IRLit IRLitUnit  // unreachable: guarded by the `when` above
+            let bd = {
+                Id = binding.VarId
+                Name = binding.Name
+                Type = binding.Type
+                Value = IRLit IRLitUnit
+                IsConst = true
+                IsMutable = binding.IsMutable
+            }
+            bindings <- bindings @ [bd]
+            currentEnv <- bindTypedVar binding.Name binding.VarId currentEnv
+            currentEnv <- { currentEnv with CompoundInits = Map.add binding.VarId (denseIR, maskIR) currentEnv.CompoundInits }
         | TDeclLet binding when isProviderCall currentEnv binding.Value ->
             match tryInvokeProvider currentEnv binding with
             | Some (providerTypes, bd, env') ->
@@ -1281,6 +1478,9 @@ let lowerTypedModule (env: TypedLowerEnv) (modul: TypedModule) (rawDecls: Locate
         Functions = funcs @ (currentEnv.LiftedCallables |> List.ofSeq)
         Bindings = bindings
         StaticFunctionUsage = usageReport
+        ProviderReads = currentEnv.ProviderReads
+        RandomInits = currentEnv.RandomInits
+        CompoundInits = currentEnv.CompoundInits
     }
     (irModule, moduleExport)
 

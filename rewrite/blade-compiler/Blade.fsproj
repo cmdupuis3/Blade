@@ -61,6 +61,10 @@
       <Link>cpp/nested_array_types.hpp</Link>
       <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
     </None>
+    <None Include="cpp/index_types.h">
+      <Link>cpp/index_types.h</Link>
+      <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
+    </None>
     <None Include="cpp/alloc_layout_tests.cpp">
       <Link>cpp/alloc_layout_tests.cpp</Link>
       <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>

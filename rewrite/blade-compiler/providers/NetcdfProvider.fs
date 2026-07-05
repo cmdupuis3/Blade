@@ -188,7 +188,7 @@ let ncTypeToElemType (tc: int) : ElemType =
 let ncDimToNamedIndexType (builder: IRBuilder) (dim: NcDim) : string * IRIndexType =
     let idx = {
         Id = builder.FreshId()
-        Arity = 1
+        Rank = 1
         Extent = IRLit (IRLitInt dim.Length)
         Symmetry = SymNone
         Tag = None
@@ -291,6 +291,9 @@ let ncFileToModule
         Functions = []
         Bindings = []
         StaticFunctionUsage = Map.empty
+        ProviderReads = Map.empty
+        RandomInits = Map.empty
+        CompoundInits = Map.empty
     }
 
 /// Convenience: load a file and produce a module in one step.
@@ -339,28 +342,166 @@ module CppNetcdf =
                 | IRLit (IRLitInt n) -> sprintf "size_t %s_extent_%d = %d;" cppVarName i n
                 | _ -> sprintf "size_t %s_extent_%d = /* dynamic */;" cppVarName i)
 
+        let extentNames =
+            arrType.IndexTypes |> List.mapi (fun i _ -> sprintf "%s_extent_%d" cppVarName i)
+        let ncGetSuffix =
+            match primElem with
+            | ETFloat32 -> "float"
+            | ETFloat64 -> "double"
+            | ETInt32 -> "int"
+            | ETInt64 -> "longlong"
+            | _ -> "double"
+        // Flat read: a NetCDF variable is stored contiguous (row-major), so read
+        // it into a flat buffer first.
+        let flatRead =
+            [
+                sprintf "// Read %s from %s" varName filePath
+                sprintf "int %s_ncid, %s_varid;" cppVarName cppVarName
+                sprintf "nc_open(\"%s\", NC_NOWRITE, &%s_ncid);" filePath cppVarName
+                sprintf "nc_inq_varid(%s_ncid, \"%s\", &%s_varid);" cppVarName varName cppVarName
+            ]
+            @ extentsFromDims
+            @ [
+                sprintf "%s* %s_flat = new %s[%s];"
+                    elemCpp cppVarName elemCpp (String.concat " * " extentNames)
+                sprintf "nc_get_var_%s(%s_ncid, %s_varid, %s_flat);" ncGetSuffix cppVarName cppVarName cppVarName
+                sprintf "nc_close(%s_ncid);" cppVarName
+            ]
+        // Materialize the nested-pointer Array a downstream method_for indexes as
+        // <v>[i][j]... . allocate<> builds the nested structure; the flat buffer is
+        // copied in (runtime-bounded loops, so this compiles fast, unlike a baked
+        // literal) and released. This is what makes a plain `sample.vars.A |> read`
+        // consumable by a compute -- the codegen ProviderReads intercept routes a
+        // maskless spec here, vs genReadCompoundVar for a masked one.
+        let idxVars = [ for i in 0 .. rank - 1 -> sprintf "%s_i%d" cppVarName i ]
+        let openLoops =
+            idxVars |> List.mapi (fun d iv ->
+                let ind = String.replicate d "    "
+                sprintf "%sfor (size_t %s = 0; %s < %s; %s++) {" ind iv iv extentNames.[d] iv)
+        let nestedSub = idxVars |> List.map (sprintf "[%s]") |> String.concat ""
+        // Row-major flat index (Horner): (((i0)*ext1 + i1)*ext2 + i2)... matches
+        // NetCDF's contiguous storage order.
+        let flatIdx =
+            let mutable acc = idxVars.[0]
+            for i in 1 .. rank - 1 do
+                acc <- sprintf "(%s) * %s + %s" acc extentNames.[i] idxVars.[i]
+            acc
+        let bodyInd = String.replicate rank "    "
+        let materialize =
+            [
+                sprintf "size_t %s_extents[] = { %s };" cppVarName (String.concat ", " extentNames)
+                sprintf "Array<%s, %d> %s = { allocate<typename promote<%s, %d>::type, nullptr>(%s_extents), %s_extents };"
+                    elemCpp rank cppVarName elemCpp rank cppVarName cppVarName
+            ]
+            @ openLoops
+            @ [ sprintf "%s%s%s = %s_flat[%s];" bodyInd cppVarName nestedSub cppVarName flatIdx ]
+            @ [ for d in rank - 1 .. -1 .. 0 -> sprintf "%s}" (String.replicate d "    ") ]
+            @ [ sprintf "delete[] %s_flat;" cppVarName ]
+        flatRead @ materialize
+
+    /// Generate C++ to read a variable as a COMPOUND (masked) array. The mask
+    /// variable `maskName` is any integer array (nonzero = present); the dense
+    /// var is scattered into a compact buffer of cardinality == popcount(mask).
+    /// This is load_compound's materialization: the int -> std::vector<bool>
+    /// conversion lives HERE, triggered only by load_compound (never a plain
+    /// read). All RANK dims are compound (first increment), so the result is a
+    /// scalar nested_array_utilities::Compound<T, RANK>. Both `data` and `idx`
+    /// are heap-allocated (Compound is non-owning, per the allocate<> convention).
+    ///
+    /// Scatter ordering: compound_index_t::enumerate walks tuples row-major and
+    /// assigns rank = running set-bit count, i.e. rank == row-major prefix
+    /// popcount. nc_get_var reads row-major too, so one sequential pass copying
+    /// set cells reproduces the compact layout exactly -- no linearize() per cell.
+    let genReadCompoundVar
+            (filePath: string) (varName: string) (maskName: string)
+            (cppVarName: string) (varArrType: IRArrayType) (maskArrType: IRArrayType) : string list =
+        // The mask covers the leading dims; its rank is the compound (leading)
+        // rank. Remaining variable dims are regular trailing dims folded into a
+        // runtime trailing_stride at allocation (here, at read).
+        let leadRank = maskArrType.IndexTypes.Length
+        let primElem =
+            match varArrType.ElemType with
+            | IRTScalar et -> et
+            | _ -> ETFloat64
+        let elemCpp =
+            match primElem with
+            | ETFloat32 -> "float"
+            | ETFloat64 -> "double"
+            | ETInt32   -> "int"
+            | ETInt64   -> "long long"
+            | _         -> "double"
+        let maskElem =
+            match maskArrType.ElemType with
+            | IRTScalar et -> et
+            | _ -> ETInt64
+        let maskCpp =
+            match maskElem with
+            | ETInt32 -> "int"
+            | ETInt64 -> "long long"
+            | ETBool  -> "signed char"
+            | _       -> "long long"
+        // nc_get_var_<suffix> for an ElemType (mask reads via schar when bool).
+        let ncGet et =
+            match et with
+            | ETFloat32 -> "float"
+            | ETFloat64 -> "double"
+            | ETInt32   -> "int"
+            | ETInt64   -> "longlong"
+            | ETBool    -> "schar"
+            | _         -> "double"
+
+        let extentsFromDims =
+            varArrType.IndexTypes
+            |> List.mapi (fun i idx ->
+                match idx.Extent with
+                | IRLit (IRLitInt n) -> sprintf "size_t %s_extent_%d = %d;" cppVarName i n
+                | _ -> sprintf "size_t %s_extent_%d = /* dynamic */;" cppVarName i)
+        let extentNames =
+            varArrType.IndexTypes |> List.mapi (fun i _ -> sprintf "%s_extent_%d" cppVarName i)
+        let v = cppVarName
+        let leadExtentNames = extentNames |> List.truncate leadRank
+        let trailExtentNames = extentNames |> List.skip leadRank
+        let gridExpr = leadExtentNames |> String.concat " * "
+        let trailExpr = match trailExtentNames with | [] -> "1" | xs -> String.concat " * " xs
+        let totalExpr = extentNames |> String.concat " * "
+        let leadExtentsInit = leadExtentNames |> String.concat ", "
+
         [
-            sprintf "// Read %s from %s" varName filePath
-            sprintf "int %s_ncid, %s_varid;" cppVarName cppVarName
-            sprintf "nc_open(\"%s\", NC_NOWRITE, &%s_ncid);" filePath cppVarName
-            sprintf "nc_inq_varid(%s_ncid, \"%s\", &%s_varid);" cppVarName varName cppVarName
+            sprintf "// Read compound %s (masked by %s) from %s" varName maskName filePath
+            sprintf "int %s_ncid, %s_varid, %s_maskid;" v v v
+            sprintf "nc_open(\"%s\", NC_NOWRITE, &%s_ncid);" filePath v
         ]
         @ extentsFromDims
         @ [
-            sprintf "%s* %s_flat = new %s[%s];"
-                elemCpp cppVarName elemCpp
-                (arrType.IndexTypes
-                 |> List.mapi (fun i _ -> sprintf "%s_extent_%d" cppVarName i)
-                 |> String.concat " * ")
-            sprintf "nc_get_var_%s(%s_ncid, %s_varid, %s_flat);"
-                (match primElem with
-                 | ETFloat32 -> "float"
-                 | ETFloat64 -> "double"
-                 | ETInt32 -> "int"
-                 | ETInt64 -> "longlong"
-                 | _ -> "double")
-                cppVarName cppVarName cppVarName
-            sprintf "nc_close(%s_ncid);" cppVarName
+            // grid = masked leading cells; trail = regular trailing stride; total = dense size
+            sprintf "size_t %s_grid = %s;" v gridExpr
+            sprintf "size_t %s_trail = %s;" v trailExpr
+            sprintf "size_t %s_total = %s;" v totalExpr
+            // dense variable (all dims)
+            sprintf "%s* %s_dense = new %s[%s_total];" elemCpp v elemCpp v
+            sprintf "nc_inq_varid(%s_ncid, \"%s\", &%s_varid);" v varName v
+            sprintf "nc_get_var_%s(%s_ncid, %s_varid, %s_dense);" (ncGet primElem) v v v
+            // integer mask over the leading masked dims -- size is grid, not total
+            sprintf "%s* %s_maskraw = new %s[%s_grid];" maskCpp v maskCpp v
+            sprintf "nc_inq_varid(%s_ncid, \"%s\", &%s_maskid);" v maskName v
+            sprintf "nc_get_var_%s(%s_ncid, %s_maskid, %s_maskraw);" (ncGet maskElem) v v v
+            sprintf "nc_close(%s_ncid);" v
+            // int -> std::vector<bool> (nonzero = present): the load_compound conversion
+            sprintf "std::vector<bool> %s_maskvec(%s_grid);" v v
+            sprintf "for (size_t %s_i = 0; %s_i < %s_grid; %s_i++) %s_maskvec[%s_i] = (%s_maskraw[%s_i] != 0);" v v v v v v v v
+            sprintf "delete[] %s_maskraw;" v
+            // compound index over the leading masked dims
+            sprintf "std::array<size_t, %d> %s_extents = { %s };" leadRank v leadExtentsInit
+            sprintf "compound_index_t<%d>* %s_idx = new compound_index_t<%d>(\"%s\", %s_extents, %s_maskvec);" leadRank v leadRank varName v v
+            // compact backing: present leading cells x trailing block
+            sprintf "%s* %s_compact = new %s[%s_idx->cardinality * %s_trail];" elemCpp v elemCpp v v
+            // scatter: for each present leading cell (row-major prefix-popcount),
+            // copy its whole contiguous trailing block. String-concatenated (not
+            // sprintf) so the index-variable count can't drift from the format.
+            ("{ size_t " + v + "_r = 0; for (size_t " + v + "_c = 0; " + v + "_c < " + v + "_grid; " + v + "_c++) if (" + v + "_maskvec[" + v + "_c]) { for (size_t " + v + "_t = 0; " + v + "_t < " + v + "_trail; " + v + "_t++) " + v + "_compact[" + v + "_r * " + v + "_trail + " + v + "_t] = " + v + "_dense[" + v + "_c * " + v + "_trail + " + v + "_t]; " + v + "_r++; } }")
+            sprintf "delete[] %s_dense;" v
+            // bundle into the non-owning Compound wrapper (trailing_stride = _trail; 1 when all dims are masked)
+            sprintf "nested_array_utilities::Compound<%s, %d> %s { %s_compact, %s_idx, %s_trail };" elemCpp leadRank v v v v
         ]
 
     /// Generate C++ code to write a variable to a NetCDF file.

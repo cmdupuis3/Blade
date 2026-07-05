@@ -403,6 +403,9 @@ and parseTypeAtom (tokens: Token list) : ParseResult<TypeExpr> =
     | Some (TokKeyword KwHermitianIdx) ->
         parseIndexType tokens
     
+    | Some (TokKeyword KwCompoundIdx) ->
+        parseIndexType tokens
+    
     | Some (TokKeyword KwEnumIdx) ->
         parseIndexType tokens
     
@@ -469,27 +472,37 @@ and parseIndexType (tokens: Token list) : ParseResult<TypeExpr> =
     
     | Some (TokKeyword KwSymIdx) ->
         advance tokens |> expect (TokOp "<") >>= fun _ afterLt ->
-        parseLiteral afterLt >>= fun arityLit afterArity ->
-        expect TokComma afterArity >>= fun _ afterComma ->
+        parseLiteral afterLt >>= fun rankLit afterRank ->
+        expect TokComma afterRank >>= fun _ afterComma ->
         parseSimpleExpr afterComma >>= fun extent afterExtent ->
         expectGt afterExtent >>= fun _ remaining ->
-        let arity = match arityLit with LitInt n -> int n | _ -> 2
-        success (TySymIdx (arity, extent)) remaining
+        let rank = match rankLit with LitInt n -> int n | _ -> 2
+        success (TySymIdx (rank, extent)) remaining
     
     | Some (TokKeyword KwAntisymIdx) ->
         advance tokens |> expect (TokOp "<") >>= fun _ afterLt ->
-        parseLiteral afterLt >>= fun arityLit afterArity ->
-        expect TokComma afterArity >>= fun _ afterComma ->
+        parseLiteral afterLt >>= fun rankLit afterRank ->
+        expect TokComma afterRank >>= fun _ afterComma ->
         parseSimpleExpr afterComma >>= fun extent afterExtent ->
         expectGt afterExtent >>= fun _ remaining ->
-        let arity = match arityLit with LitInt n -> int n | _ -> 2
-        success (TyAntisymIdx (arity, extent)) remaining
+        let rank = match rankLit with LitInt n -> int n | _ -> 2
+        success (TyAntisymIdx (rank, extent)) remaining
     
     | Some (TokKeyword KwHermitianIdx) ->
         advance tokens |> expect (TokOp "<") >>= fun _ afterLt ->
         parseSimpleExpr afterLt >>= fun extent afterExtent ->
         expectGt afterExtent >>= fun _ remaining ->
         success (TyHermitianIdx extent) remaining
+
+    // CompoundIdx<mask> -- masked product space (formalism 4.5). The mask is a
+    // runtime array expression; its rank determines the compound's arity, so the
+    // surface form carries only the mask (the per-dimension extents and arity are
+    // recovered from the mask's type at lowering).
+    | Some (TokKeyword KwCompoundIdx) ->
+        advance tokens |> expect (TokOp "<") >>= fun _ afterLt ->
+        parseSimpleExpr afterLt >>= fun mask afterMask ->
+        expectGt afterMask >>= fun _ remaining ->
+        success (TyCompoundIdx mask) remaining
     
     | Some (TokKeyword KwEnumIdx) ->
         advance tokens |> expect (TokOp "<") >>= fun _ afterLt ->
@@ -894,6 +907,7 @@ and parsePipeline (tokens: Token list) : ParseResult<Expr> =
             advance toks' |> parseChoice >>= fun right remaining ->
             match right with
             | ExprVar "compute" -> loop (ExprCompute acc) remaining
+            | ExprVar "read" -> loop (ExprRead acc) remaining
             | _ -> loop (ExprApp (right, [acc])) remaining
         | Some (TokOp "|@>") ->
             // Pipe-apply: a |@> b  desugars to  b <@> a
@@ -1114,6 +1128,11 @@ and parsePrimary (tokens: Token list) : ParseResult<Expr> =
     match peek tokens with
     // Literals (most common case first)
     | Some (LiteralTok lit) -> success (ExprLit lit) (advance tokens)
+
+    // Wildcard hole `_` in expression position (e.g. a free axis in a compound
+    // index B((a, _, c))). A general token; the consuming context gives it
+    // meaning, and unconsumed uses are rejected in typecheck.
+    | Some TokUnderscore -> success ExprWildcard (advance tokens)
     
     // Variables or struct construction
     | Some (TokIdent name) ->
@@ -1154,6 +1173,10 @@ and parsePrimary (tokens: Token list) : ParseResult<Expr> =
     // compute - standalone keyword (used after |>)
     | Some (TokKeyword KwCompute) ->
         success (ExprVar "compute") (advance tokens)
+    
+    // read - standalone keyword (used after |> to force a deferred provider read)
+    | Some (TokKeyword KwRead) ->
+        success (ExprVar "read") (advance tokens)
     
     // Lambda
     | Some (TokKeyword KwLambda) ->
@@ -1248,6 +1271,14 @@ and parsePrimary (tokens: Token list) : ParseResult<Expr> =
         parseExprImpl afterComma >>= fun pred afterPred ->
         expect TokRParen afterPred >>= fun _ remaining ->
         success (ExprMask (arr, pred)) remaining
+
+    | Some (TokKeyword KwCompound) ->
+        advance tokens |> expect TokLParen >>= fun _ afterLParen ->
+        parseExprImpl afterLParen >>= fun dense afterDense ->
+        expect TokComma afterDense >>= fun _ afterComma ->
+        parseExprImpl afterComma >>= fun mask afterMask ->
+        expect TokRParen afterMask >>= fun _ remaining ->
+        success (ExprCompound (dense, mask)) remaining
     
     // intersect(A, B)
     | Some (TokKeyword KwIntersect) ->
@@ -1431,12 +1462,13 @@ and parsePrimary (tokens: Token list) : ParseResult<Expr> =
         expect TokRParen afterSpec >>= fun _ remaining ->
         success (ExprReynolds (kernel, isAntisym)) remaining
     
-    // range<T>
+    // range<T> or range<T1, ..., Tn> (multi-index: one virtual array spanning
+    // all listed index types, uncurried into nested loop levels in IR)
     | Some (TokKeyword KwRange) ->
         advance tokens |> expect (TokOp "<") >>= fun _ afterLt ->
-        parseTypeExpr afterLt >>= fun ty afterTy ->
-        expectGt afterTy >>= fun _ remaining ->
-        success (ExprRange ty) remaining
+        afterLt |> sepBy parseTypeExpr TokComma >>= fun tys afterTys ->
+        expectGt afterTys >>= fun _ remaining ->
+        success (ExprRange tys) remaining
     
     // reverse<T>
     | Some (TokKeyword KwReverse) ->
