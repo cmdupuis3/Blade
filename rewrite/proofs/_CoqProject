@@ -1,0 +1,21 @@
+-Q . Blade
+BladeCore.v
+BladeDMWF.v
+BladeBinomial.v
+BladeCounting.v
+BladeCurrying.v
+BladeCurryingGeneral.v
+BladeLowering.v
+BladeArrow.v
+BladeAffine.v
+BladeCompound.v
+BladeShape.v
+BladeLex.v
+BladeTrinity.v
+BladeTrinityAsym.v
+BladeCompleteness.v
+BladeFusionDuality.v
+BladeCompute.v
+BladeCauchy.v
+BladeMonad.v
+BladeSafety.v
