@@ -1,0 +1,713 @@
+module Blade.Tests.Loops
+
+let test4_methodFor = """
+let A = [1.0, 2.0, 3.0]
+let L = method_for(A, A)
+"""
+
+let test5_objectFor = """
+let kernel = lambda(x: Float64, y: Float64) -> x * y
+let O = object_for(kernel)
+"""
+
+let test6_apply = """
+let A = [1.0, 2.0, 3.0]
+let L = method_for(A, A)
+let f = lambda(x, y) -> x * y
+let result = L <@> f |> compute
+// EXPECT: result = [1, 2, 3, 2, 4, 6, 3, 6, 9]
+"""
+
+let test9_loopObjectReuse = """
+let A = [1.0, 2.0, 3.0]
+let B = [4.0, 5.0, 6.0]
+let L = method_for(A, B)
+let sum = lambda(x, y) -> x + y
+let prod = lambda(x, y) -> x * y
+let sumResult = L <@> sum |> compute
+let prodResult = L <@> prod |> compute
+// EXPECT: sumResult = [5, 6, 7, 6, 7, 8, 7, 8, 9]
+// EXPECT: prodResult = [4, 5, 6, 8, 10, 12, 12, 15, 18]
+"""
+
+let test11_objectForWithArrays = """
+let kernel = lambda(a, b) -> a * b + 1.0
+let O = object_for(kernel)
+let A = [1.0, 2.0, 3.0]
+let B = [4.0, 5.0, 6.0]
+"""
+
+let test23_objectForApply = """
+let A = [1.0, 2.0, 3.0]
+let B = [4.0, 5.0, 6.0]
+let f = lambda(x, y) -> x + y
+let O = object_for(f)
+let result = O <@> (A, B) |> compute
+// EXPECT: result = [5, 6, 7, 6, 7, 8, 7, 8, 9]
+"""
+
+let test24_objectForComm = """
+let A = [1.0, 2.0, 3.0]
+let f = lambda(x, y) where comm(x, y) -> x * y
+let O = object_for(f)
+let result = O <@> (A, A) |> compute
+// EXPECT: result = [1, 2, 3, 4, 6, 9]
+"""
+
+let test16_combinators = """
+let A = [1.0, 2.0]
+let B = [3.0, 4.0]
+let L1 = method_for(A, A)
+let L2 = method_for(B, B)
+let f = lambda(x, y) -> x + y
+// Parallel composition
+let parallel = (L1 <@> f) <&> (L2 <@> f)
+"""
+
+let test21_compute = """
+let A = [1.0, 2.0, 3.0]
+let L = method_for(A, A)
+let f = lambda(x, y) -> x * y
+let result = L <@> f |> compute
+// result is 3x3 matrix: [[1*1, 1*2, 1*3], [2*1, 2*2, 2*3], [3*1, 3*2, 3*3]]
+// EXPECT: result = [1, 2, 3, 2, 4, 6, 3, 6, 9]
+"""
+
+let test22_pureAndBind = """
+let x = pure(42)
+let f = lambda(n) -> n * 2
+let result = x >>= f
+// EXPECT: result = 84
+"""
+
+let test77_rangeBasic = """
+// range<Idx<5>> produces virtual array [0, 1, 2, 3, 4]
+let R = method_for(range<Idx<5>>)
+let f = lambda(i) -> i * 2.0
+let result = R <@> f |> compute
+// EXPECT: result = [0, 2, 4, 6, 8]
+"""
+
+let test78_reverseBasic = """
+// reverse<Idx<5>> produces virtual array [4, 3, 2, 1, 0]
+let R = method_for(reverse<Idx<5>>)
+let f = lambda(i) -> i * 1.0
+let result = R <@> f |> compute
+// EXPECT: result = [4, 3, 2, 1, 0]
+"""
+
+let test79_rangeWithArray = """
+// Mix range with a real array
+let A = [10.0, 20.0, 30.0]
+let L = method_for(A, range<Idx<3>>)
+let f = lambda(a, i) -> a + i
+let result = L <@> f |> compute
+// EXPECT: result = [10, 11, 12, 20, 21, 22, 30, 31, 32]
+"""
+
+// Co-iteration: elementwise product via shared index space
+let test80_coIterBasic = """
+// Co-iteration: for (A, B) in range<Idx<N>> produces elementwise result
+let A = [1.0, 2.0, 3.0]
+let B = [4.0, 5.0, 6.0]
+let result = for (A, B) in range<Idx<3>> <@> lambda(a, b) -> a * b |> compute
+// EXPECT: result = [4, 10, 18]
+"""
+
+// Co-iteration: three-way elementwise operation
+let test81_coIter3Way = """
+// Three-way co-iteration
+let A = [1.0, 2.0, 3.0]
+let B = [4.0, 5.0, 6.0]
+let C = [7.0, 8.0, 9.0]
+let result = for (A, B, C) in range<Idx<3>> <@> lambda(a, b, c) -> a * b + c |> compute
+// EXPECT: result = [11, 18, 27]
+"""
+
+let test82_composeBasic = """
+function double(x) -> Int = x * 2
+function add_one(x) -> Int = x + 1
+let f = double >> add_one
+let result = f(5)
+// EXPECT: result = 11
+"""
+
+let test83_composeChain = """
+function inc(x) -> Float64 = x + 1.0
+function triple(x) -> Float64 = x * 3.0
+function negate(x) -> Float64 = 0.0 - x
+let g = inc >> triple >> negate
+let result = g(2.0)
+// EXPECT: result = -9.0
+"""
+
+let test84_parallelBasic = """
+let A = [1.0, 2.0, 3.0]
+let L = method_for(A)
+let f = lambda(x) -> x + 10.0
+let g = lambda(x) -> x * 2.0
+let (sums, prods) = (L <@> f) <&> (L <@> g) |> compute
+// EXPECT: sums = [11.0, 12.0, 13.0]
+// EXPECT: prods = [2.0, 4.0, 6.0]
+"""
+
+let test85_fusionBasic = """
+let A = [1.0, 2.0, 3.0]
+let L = method_for(A)
+let f = lambda(x) -> x + 10.0
+let g = lambda(x) -> x * 2.0
+let (sums, prods) = (L <@> f) <&!> (L <@> g) |> compute
+// EXPECT: sums = [11.0, 12.0, 13.0]
+// EXPECT: prods = [2.0, 4.0, 6.0]
+"""
+
+let test86_parallel3Way = """
+let A = [1.0, 2.0, 3.0]
+let L = method_for(A)
+let f = lambda(x) -> x + 10.0
+let g = lambda(x) -> x * 2.0
+let h = lambda(x) -> x * x
+let (sums, prods, squares) = (L <@> f) <&> (L <@> g) <&> (L <@> h) |> compute
+// EXPECT: sums = [11.0, 12.0, 13.0]
+// EXPECT: prods = [2.0, 4.0, 6.0]
+// EXPECT: squares = [1.0, 4.0, 9.0]
+"""
+
+let test87_fusion3Way = """
+let A = [1.0, 2.0, 3.0]
+let L = method_for(A)
+let f = lambda(x) -> x + 10.0
+let g = lambda(x) -> x * 2.0
+let h = lambda(x) -> x * x
+let (sums, prods, squares) = (L <@> f) <&!> (L <@> g) <&!> (L <@> h) |> compute
+// EXPECT: sums = [11.0, 12.0, 13.0]
+// EXPECT: prods = [2.0, 4.0, 6.0]
+// EXPECT: squares = [1.0, 4.0, 9.0]
+"""
+
+let test88_arrayProductBasic = """
+let A = [1.0, 2.0, 3.0]
+let B = [4.0, 5.0, 6.0]
+let L = method_for(A) <*> method_for(B)
+let result = L <@> lambda(x, y) -> x + y |> compute
+// EXPECT: result = [5, 6, 7, 6, 7, 8, 7, 8, 9]
+"""
+
+let test89_arrayProductSymmetric = """
+let A = [1.0, 2.0, 3.0]
+let L = method_for(A) <*> method_for(A)
+let result = L <@> lambda(x, y) where comm(x, y) -> x + y |> compute
+// EXPECT: result = [2, 3, 4, 4, 5, 6]
+"""
+
+let test90_arrayProduct3Way = """
+let A = [1.0, 2.0]
+let B = [10.0, 20.0]
+let C = [100.0, 200.0]
+let L = method_for(A) <*> method_for(B) <*> method_for(C)
+let result = L <@> lambda(x, y, z) -> x + y + z |> compute
+// EXPECT: result = [111, 211, 121, 221, 112, 212, 122, 222]
+"""
+
+let test91_objectForParallel = """
+let A = [1.0, 2.0, 3.0]
+let L = method_for(A)
+let f = lambda(x) -> x + 10.0
+let g = lambda(x) -> x * 2.0
+let c1 = L <@> f
+let c2 = L <@> g
+let (sums, prods) = c1 <&> c2 |> compute
+// EXPECT: sums = [11.0, 12.0, 13.0]
+// EXPECT: prods = [2.0, 4.0, 6.0]
+"""
+
+let test92_objectForFusion = """
+let A = [1.0, 2.0, 3.0]
+let L = method_for(A)
+let f = lambda(x) -> x + 10.0
+let g = lambda(x) -> x * 2.0
+let c1 = L <@> f
+let c2 = L <@> g
+let (sums, prods) = c1 <&!> c2 |> compute
+// EXPECT: sums = [11.0, 12.0, 13.0]
+// EXPECT: prods = [2.0, 4.0, 6.0]
+"""
+
+let test93_objectForArrayProduct = """
+let A = [1.0, 2.0, 3.0]
+let B = [4.0, 5.0]
+let L = method_for(A) <*> method_for(B)
+let result = L <@> lambda(x, y) -> x * y |> compute
+// EXPECT: result = [4, 5, 8, 10, 12, 15]
+"""
+
+let test94_objectForCombParallel = """
+let A = [1.0, 2.0, 3.0]
+let L = method_for(A)
+let c1 = L <@> lambda(x) -> x + 10.0
+let c2 = L <@> lambda(x) -> x * 2.0
+let c3 = L <@> lambda(x) -> x * x
+let (sums, prods, squares) = object_for(<&>) <@> (c1, c2, c3) |> compute
+// EXPECT: sums = [11.0, 12.0, 13.0]
+// EXPECT: prods = [2.0, 4.0, 6.0]
+// EXPECT: squares = [1.0, 4.0, 9.0]
+"""
+
+let test95_objectForCombFusion = """
+let A = [1.0, 2.0, 3.0]
+let L = method_for(A)
+let c1 = L <@> lambda(x) -> x + 10.0
+let c2 = L <@> lambda(x) -> x * 2.0
+let c3 = L <@> lambda(x) -> x * x
+let (sums, prods, squares) = object_for(<&!>) <@> (c1, c2, c3) |> compute
+// EXPECT: sums = [11.0, 12.0, 13.0]
+// EXPECT: prods = [2.0, 4.0, 6.0]
+// EXPECT: squares = [1.0, 4.0, 9.0]
+"""
+
+let test96_objectForCombApply = """
+let A = [1.0, 2.0, 3.0]
+let L = method_for(A)
+let f = lambda(x) -> x + 10.0
+let g = lambda(x) -> x * 2.0
+let (c1, c2) = object_for(<@>) <@> ((L, f), (L, g))
+let (sums, prods) = c1 <&> c2 |> compute
+// EXPECT: sums = [11.0, 12.0, 13.0]
+// EXPECT: prods = [2.0, 4.0, 6.0]
+"""
+
+let test97_objectForCombApply3Way = """
+let A = [1.0, 2.0, 3.0]
+let L = method_for(A)
+let f = lambda(x) -> x + 10.0
+let g = lambda(x) -> x * 2.0
+let h = lambda(x) -> x * x
+let (c1, c2, c3) = object_for(<@>) <@> ((L, f), (L, g), (L, h))
+let (sums, prods, squares) = object_for(<&>) <@> (c1, c2, c3) |> compute
+// EXPECT: sums = [11.0, 12.0, 13.0]
+// EXPECT: prods = [2.0, 4.0, 6.0]
+// EXPECT: squares = [1.0, 4.0, 9.0]
+"""
+
+let test98_pipeApplyBasic = """
+let A = [1.0, 2.0, 3.0]
+let L = method_for(A)
+let f = lambda(x) -> x + 10.0
+let result = f |@> L |> compute
+// EXPECT: result = [11.0, 12.0, 13.0]
+"""
+
+let test99_pipeApplyChain = """
+let A = [1.0, 2.0, 3.0]
+let L = method_for(A)
+let f = lambda(x) -> x + 10.0
+let g = lambda(x) -> x * 2.0
+let h = lambda(x) -> x * x
+let (sums, prods, squares) = ((L, f), (L, g), (L, h)) |@> object_for(<@>) |@> object_for(<&>) |> compute
+// EXPECT: sums = [11.0, 12.0, 13.0]
+// EXPECT: prods = [2.0, 4.0, 6.0]
+// EXPECT: squares = [1.0, 4.0, 9.0]
+"""
+
+let test100_functorMapBasic = """
+let A = [1.0, 2.0, 3.0]
+let L = method_for(A)
+let f = lambda(x) -> x + 10.0
+let twice = lambda(x) -> x * 2.0
+let result = twice <$> (L <@> f) |> compute
+// EXPECT: result = [22.0, 24.0, 26.0]
+"""
+
+let test101_functorMapChain = """
+let A = [1.0, 2.0, 3.0]
+let L = method_for(A)
+let f = lambda(x) -> x * x
+let add1 = lambda(x) -> x + 1.0
+let twice = lambda(x) -> x * 2.0
+let result = twice <$> (add1 <$> (L <@> f)) |> compute
+// EXPECT: result = [4.0, 10.0, 20.0]
+"""
+
+let test102_functorMapDeferred = """
+let A = [1.0, 2.0, 3.0]
+let L = method_for(A)
+let f = lambda(x) -> x + 10.0
+let negate = lambda(x) -> 0.0 - x
+let c = L <@> f
+let mapped = negate <$> c
+let result = mapped |> compute
+// EXPECT: result = [-11.0, -12.0, -13.0]
+"""
+
+let test103_objectForFunctorMap = """
+let A = [1.0, 2.0, 3.0]
+let L = method_for(A)
+let f = lambda(x) -> x + 10.0
+let twice = lambda(x) -> x * 2.0
+let c = L <@> f
+let result = object_for(<$>) <@> (twice, c) |> compute
+// EXPECT: result = [22.0, 24.0, 26.0]
+"""
+
+let test104_choiceScalar = """
+let x = 5.0 <|> 3.0
+let y = 0.0 <|> 7.0
+// EXPECT: x = 5.0
+// EXPECT: y = 7.0
+"""
+
+let test105_choiceKernel = """
+let A = [1.0, 2.0, 3.0]
+let L = method_for(A)
+let f = lambda(x) -> { (x - 2.0) <|> 99.0 }
+let result = L <@> f |> compute
+// EXPECT: result = [-1.0, 99.0, 1.0]
+"""
+
+let test106_choiceComputation = """
+let A = [1.0, 2.0, 3.0]
+let L = method_for(A)
+let f = lambda(x) -> x - 1.0
+let g = lambda(x) -> x + 10.0
+let result = (L <@> f) <|> (L <@> g) |> compute
+// EXPECT: result = [11.0, 1.0, 2.0]
+"""
+
+let test106b_choiceRank2 = """
+let A = [1.0, 2.0]
+let B = [1.0, 2.0]
+let L = method_for(A, B)
+let f = lambda(x, y) -> x - y
+let g = lambda(x, y) -> x + y
+let result = (L <@> f) <|> (L <@> g) |> compute
+// L<@>f = [[0,-1],[1,0]] flat [0,-1,1,0]; L<@>g = [[2,3],[3,4]] flat [2,3,3,4]
+// <|> picks (lhs != 0 ? lhs : rhs) => [2, -1, 1, 4]
+// EXPECT: result = [2.0, -1.0, 1.0, 4.0]
+"""
+
+let test107_objectForChoice = """
+let A = [1.0, 2.0, 3.0]
+let L = method_for(A)
+let f = lambda(x) -> x - 1.0
+let g = lambda(x) -> x + 10.0
+let c1 = L <@> f
+let c2 = L <@> g
+let result = object_for(<|>) <@> (c1, c2) |> compute
+// EXPECT: result = [11.0, 1.0, 2.0]
+"""
+
+let test108_composeObjBasic = """
+let A = [1.0, 2.0, 3.0]
+let f = lambda(x) -> x + 1.0
+let g = lambda(x) -> x * 2.0
+let p = object_for(f) >>@ object_for(g)
+let result = p <@> A |> compute
+// EXPECT: result = [4.0, 6.0, 8.0]
+"""
+
+let test109_composeMethBasic = """
+let A = [1.0, 2.0, 3.0]
+let L = method_for(A)
+let f = lambda(x) -> x + 1.0
+let g = lambda(x) -> x * 2.0
+let c1 = L <@> f
+let c2 = L <@> g
+let result = c1 @>> c2 |> compute
+// EXPECT: result = [4.0, 6.0, 8.0]
+"""
+
+let test110_dualityTheorem = """
+let A = [1.0, 2.0, 3.0]
+let f = lambda(x) -> x + 1.0
+let g = lambda(x) -> x * 3.0
+let lhs = (object_for(f) >>@ object_for(g)) <@> A |> compute
+let L = method_for(A)
+let rhs = (L <@> f) @>> (L <@> g) |> compute
+// EXPECT: lhs = [6.0, 9.0, 12.0]
+// EXPECT: rhs = [6.0, 9.0, 12.0]
+"""
+
+// ============================================================================
+// Cross-feature: compose-apply in <&> / <&!> / @>> leaf positions
+//
+// IRComposeApply was introduced (item-1 follow-up) to distinguish
+// `(o1 >>@ o2) <@> A` from canonical `method_for(...) <@> kernel`.
+// Several codegen paths (parallel/fusion leaf extraction, @>> kernel
+// extraction) pattern-match IRApplyCombinator info specifically; on
+// IRComposeApply they fall through to defaults that may or may not
+// produce correct C++. These tests exercise each combination so we
+// can see what actually breaks vs. composes silently.
+// ============================================================================
+
+let test162_composeApplyInParallel = """
+// (compose-apply) <&> (canonical-apply) — parallel composition where
+// one leaf is the slot-inverted compose-apply form. The codegen path
+// at genParallelTree currently only extracts IRApplyCombinator leaves;
+// compose-apply leaves should also produce results that can be
+// combined into the parallel pair.
+let A = [1.0, 2.0, 3.0]
+let f = lambda(x) -> x + 1.0
+let g = lambda(x) -> x * 2.0
+let h = lambda(x) -> x - 1.0
+let L = method_for(A)
+let p = (object_for(f) >>@ object_for(g)) <@> A
+let q = L <@> h
+let (r1, r2) = p <&> q |> compute
+// p: each x in A → (x+1)*2 → [4, 6, 8]
+// q: each x in A → x-1   → [0, 1, 2]
+// EXPECT: r1 = [4.0, 6.0, 8.0]
+// EXPECT: r2 = [0.0, 1.0, 2.0]
+"""
+
+let test163_composeApplyInFusion = """
+// (compose-apply) <&!> (canonical-apply) — mandatory fusion: same
+// shape as parallel but with the fusion operator. genFusionTree at
+// CodeGen.fs:3175 extracts IRApplyCombinator infos to drive a single
+// fused loop nest; an IRComposeApply leaf isn't extractable that way.
+let A = [1.0, 2.0, 3.0]
+let f = lambda(x) -> x + 1.0
+let g = lambda(x) -> x * 2.0
+let h = lambda(x) -> x - 1.0
+let L = method_for(A)
+let p = (object_for(f) >>@ object_for(g)) <@> A
+let q = L <@> h
+let (r1, r2) = p <&!> q |> compute
+// Same per-element values as test162; fusion is an optimization,
+// not a semantic change.
+// EXPECT: r1 = [4.0, 6.0, 8.0]
+// EXPECT: r2 = [0.0, 1.0, 2.0]
+"""
+
+let test164_composeApplyInMethCompose = """
+// (compose-apply) @>> (canonical-apply) — method composition where
+// the left operand is a compose-apply. @>> semantics: at each index,
+// apply right's kernel to left's per-element result.
+// Right of @>> requires a single extractable kernel (which a
+// compose chain doesn't have), so we don't test compose-apply on
+// the right — only on the left.
+let A = [1.0, 2.0, 3.0]
+let f = lambda(x) -> x + 1.0
+let g = lambda(x) -> x * 2.0
+let h = lambda(x) -> x - 5.0
+let L = method_for(A)
+let p = (object_for(f) >>@ object_for(g)) <@> A   // [4, 6, 8]
+let q = L <@> h                                    // q's kernel: x - 5
+let result = p @>> q |> compute
+// At each index: h(p[i]) = p[i] - 5 = [-1, 1, 3]
+// EXPECT: result = [-1.0, 1.0, 3.0]
+"""
+
+let test111_bindComputation = """
+let A = [1.0, 2.0, 3.0]
+let c1 = method_for(A) <@> lambda(x) -> x + 1.0
+let k = lambda(arr) -> method_for(arr) <@> lambda(y) -> y * 2.0
+let result = (c1 >>= k) |> compute
+// EXPECT: result = [4.0, 6.0, 8.0]
+"""
+
+let test112_bindChained = """
+let A = [1.0, 2.0, 3.0]
+let c1 = method_for(A) <@> lambda(x) -> x + 1.0
+let k1 = lambda(arr) -> method_for(arr) <@> lambda(y) -> y * 2.0
+let k2 = lambda(arr) -> method_for(arr) <@> lambda(z) -> z - 1.0
+let result = (c1 >>= k1 >>= k2) |> compute
+// EXPECT: result = [3.0, 5.0, 7.0]
+"""
+
+let test113_zipBasic = """
+// zip(A, B) used inside method_for — co-iteration producing elementwise result
+let A = [1.0, 2.0, 3.0]
+let B = [10.0, 20.0, 30.0]
+let L = method_for(zip(A, B))
+let f = lambda(a, b) -> a + b
+let result = L <@> f |> compute
+// EXPECT: result = [11, 22, 33]
+"""
+
+let test114_zipThreeWay = """
+// Three-way zip — co-iteration over three arrays
+let A = [1.0, 2.0, 3.0]
+let B = [10.0, 20.0, 30.0]
+let C = [100.0, 200.0, 300.0]
+let L = method_for(zip(A, B, C))
+let f = lambda(a, b, c) -> a + b + c
+let result = L <@> f |> compute
+// EXPECT: result = [111, 222, 333]
+"""
+
+let test115_zipProduct = """
+// zip used with multiplicative kernel
+let A = [2.0, 3.0, 4.0]
+let B = [5.0, 6.0, 7.0]
+let L = method_for(zip(A, B))
+let f = lambda(a, b) -> a * b
+let result = L <@> f |> compute
+// EXPECT: result = [10, 18, 28]
+"""
+
+let test116_zipIndirect = """
+// zip bound to a variable, then passed to method_for
+let A = [1.0, 2.0, 3.0]
+let B = [4.0, 5.0, 6.0]
+let Z = zip(A, B)
+let L = method_for(Z)
+let f = lambda(a, b) -> a * b
+let result = L <@> f |> compute
+// EXPECT: result = [4, 10, 18]
+"""
+
+let test117_zipObjectFor = """
+// object_for(f) <@> zip(A, B) — kernel-first with co-iteration
+let A = [1.0, 2.0, 3.0]
+let B = [10.0, 20.0, 30.0]
+let f = lambda(a, b) -> a + b
+let O = object_for(f)
+let result = O <@> zip(A, B) |> compute
+// EXPECT: result = [11, 22, 33]
+"""
+
+let test118_zipObjectForProduct = """
+// object_for with zip and multiplicative kernel
+let A = [2.0, 3.0, 4.0]
+let B = [5.0, 6.0, 7.0]
+let f = lambda(a, b) -> a * b
+let O = object_for(f)
+let result = O <@> zip(A, B) |> compute
+// EXPECT: result = [10, 18, 28]
+"""
+
+let test119_zipObjectForThreeWay = """
+// Three-way zip through object_for
+let A = [1.0, 2.0, 3.0]
+let B = [10.0, 20.0, 30.0]
+let C = [100.0, 200.0, 300.0]
+let f = lambda(a, b, c) -> a + b + c
+let O = object_for(f)
+let result = O <@> zip(A, B, C) |> compute
+// EXPECT: result = [111, 222, 333]
+"""
+
+// ============================================================================
+// Pipe precedence: verify |> compute binds outside lambda body
+// ============================================================================
+
+let test120_pipePrecedenceInline = """
+// Inline: L <@> lambda(...) -> body |> compute
+// Should parse as (L <@> (lambda(...) -> body)) |> compute
+let A = [1.0, 2.0, 3.0]
+let B = [4.0, 5.0, 6.0]
+let result = method_for(A, B) <@> lambda(x, y) -> x + y |> compute
+// EXPECT: result = [5, 6, 7, 6, 7, 8, 7, 8, 9]
+"""
+
+let test121_pipePrecedenceMultiline = """
+// Multiline combinator chain: operators on new lines trigger implicit continuation
+let A = [1.0, 2.0, 3.0]
+let B = [4.0, 5.0, 6.0]
+let result = method_for(A, B)
+    <@> lambda(x, y) -> x + y
+    |> compute
+// EXPECT: result = [5, 6, 7, 6, 7, 8, 7, 8, 9]
+"""
+
+/// Loop objects and application
+let loopTests = [
+    ("Method For", test4_methodFor)
+    ("Object For", test5_objectFor)
+    ("Apply Combinator", test6_apply)
+    ("Loop Object Reuse", test9_loopObjectReuse)
+    ("Object For With Arrays", test11_objectForWithArrays)
+    ("Combinators", test16_combinators)
+    ("Compute", test21_compute)
+    ("Pure and Bind", test22_pureAndBind)
+    ("Object For Apply", test23_objectForApply)
+    ("Object For Commutative", test24_objectForComm)
+    ("Range Basic", test77_rangeBasic)
+    ("Reverse Basic", test78_reverseBasic)
+    ("Range With Array", test79_rangeWithArray)
+    ("CoIter Basic", test80_coIterBasic)
+    ("CoIter 3-Way", test81_coIter3Way)
+    ("Compose Basic", test82_composeBasic)
+    ("Compose Chain", test83_composeChain)
+    ("Parallel Basic", test84_parallelBasic)
+    ("Fusion Basic", test85_fusionBasic)
+    ("Parallel 3-Way", test86_parallel3Way)
+    ("Fusion 3-Way", test87_fusion3Way)
+    ("Array Product Basic", test88_arrayProductBasic)
+    ("Array Product Symmetric", test89_arrayProductSymmetric)
+    ("Array Product 3-Way", test90_arrayProduct3Way)
+    ("Object For Parallel", test91_objectForParallel)
+    ("Object For Fusion", test92_objectForFusion)
+    ("Object For Array Product", test93_objectForArrayProduct)
+    ("Object For Comb Parallel", test94_objectForCombParallel)
+    ("Object For Comb Fusion", test95_objectForCombFusion)
+    ("Object For Comb Apply", test96_objectForCombApply)
+    ("Object For Comb Apply 3-Way", test97_objectForCombApply3Way)
+    ("Pipe Apply Basic", test98_pipeApplyBasic)
+    ("Pipe Apply Chain", test99_pipeApplyChain)
+    ("Functor Map Basic", test100_functorMapBasic)
+    ("Functor Map Chain", test101_functorMapChain)
+    ("Functor Map Deferred", test102_functorMapDeferred)
+    ("Object For Functor Map", test103_objectForFunctorMap)
+    ("Choice Scalar", test104_choiceScalar)
+    ("Choice Kernel", test105_choiceKernel)
+    ("Choice Computation", test106_choiceComputation)
+    ("Choice Rank2", test106b_choiceRank2)
+    ("Object For Choice", test107_objectForChoice)
+    ("Compose Obj Basic", test108_composeObjBasic)
+    ("Compose Meth Basic", test109_composeMethBasic)
+    ("Duality Theorem", test110_dualityTheorem)
+    ("ComposeApply In Parallel", test162_composeApplyInParallel)
+    ("ComposeApply In Fusion", test163_composeApplyInFusion)
+    ("ComposeApply In MethCompose", test164_composeApplyInMethCompose)
+    ("Bind Computation", test111_bindComputation)
+    ("Bind Chained", test112_bindChained)
+    ("Zip Basic", test113_zipBasic)
+    ("Zip Three-Way", test114_zipThreeWay)
+    ("Zip Product", test115_zipProduct)
+    ("Zip Indirect", test116_zipIndirect)
+    ("Zip ObjectFor", test117_zipObjectFor)
+    ("Zip ObjectFor Product", test118_zipObjectForProduct)
+    ("Zip ObjectFor Three-Way", test119_zipObjectForThreeWay)
+    ("Pipe Precedence Inline", test120_pipePrecedenceInline)
+    ("Pipe Precedence Multiline", test121_pipePrecedenceMultiline)
+]
+
+// ============================================================================
+// R1 (FUTURE, not yet implemented): multi-index-type range<I, J, ...>
+// ----------------------------------------------------------------------------
+// Breadcrumb for future compiler work. The desirable ergonomic is collapsing a
+// classic nested for-loop into a single co-iterated range over a PRODUCT of
+// several independent index types:
+//
+//     for (A, B) in range<LatIdx, LonIdx> <@> lambda(lat, lon) -> A(lat, lon)
+//
+// Current state (verified): range<> parses and typechecks EXACTLY ONE index
+// type. TExprRange carries a single idx and produces mkVirtualArrayArrow [idx];
+// a comma-separated range<I, J> does not parse today. The single index type MAY
+// be multi-position (SymIdx<2,N>, CompoundIdx<mask>), which is a DIFFERENT
+// generalization from the multi-index-type product wanted here.
+//
+// Work required for R1 (three layers):
+//   (1) Parser: accept a comma-separated list inside range< ... >.
+//   (2) TypeCheck: build a multi-slot virtual array (mkVirtualArrayArrow over
+//       the list), each listed index type contributing one product axis.
+//   (3) CodeGen: rectangular co-iteration over the product (nested loops), with
+//       the kernel receiving one bound variable per axis.
+//
+// Interaction with CompoundIdx: a CompoundIdx appearing as ONE element of a
+// multi-index range is where partial-indexing result types bite -- the rank-2
+// (-> Idx) vs rank-3+ (-> smaller CompoundIdx) degeneration governs what a
+// partially-resolved compound axis contributes to the product space. That
+// corner should get its own coverage once R1 and compound-range iteration both
+// exist.
+//
+// Skeleton (commented out; does not compile as Blade until R1 lands):
+//
+// let r1_multiIndexRange = """
+// let A: Array<Float like LatIdx, LonIdx> = fill_random(range<LatIdx, LonIdx>, gen)
+// let out = for (a) in range<LatIdx, LonIdx> <@> lambda(lat, lon) -> A(lat, lon)
+// """
+// EXPECT (once implemented): rectangular co-iteration over LatIdx x LonIdx,
+// element-wise, no product blow-up beyond the two declared axes.
+// ============================================================================

@@ -1,0 +1,78 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <OutputType>Exe</OutputType>
+    <TargetFramework>net7.0</TargetFramework>
+    <RootNamespace>Blade</RootNamespace>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <Compile Include="Ast.fs" />
+    <Compile Include="Lexer.fs" />
+    <Compile Include="Parser.fs" />
+    <Compile Include="IR.fs" />
+    <Compile Include="providers/NetcdfProvider.fs" />
+    <Compile Include="TypedAst.fs" />
+    <Compile Include="StaticEval.fs" />
+    <Compile Include="IndexTypeValidator.fs" />
+    <Compile Include="TypeCheck.fs" />
+    <Compile Include="Lowering.fs" />
+    <Compile Include="CodeGen.fs" />
+    <Compile Include="tests/TestHarness.fs" />
+    <Compile Include="tests/Test_Basic.fs" />
+    <Compile Include="tests/Test_Loops.fs" />
+    <Compile Include="tests/Test_Symmetry.fs" />
+    <Compile Include="tests/Test_Reynolds.fs" />
+    <Compile Include="tests/Test_Arity.fs" />
+    <Compile Include="tests/Test_Functions.fs" />
+    <Compile Include="tests/Test_Structs.fs" />
+    <Compile Include="tests/Test_SumTypes.fs" />
+    <Compile Include="tests/Test_Interfaces.fs" />
+    <Compile Include="tests/Test_Modules.fs" />
+    <Compile Include="tests/Test_Guards.fs" />
+    <Compile Include="tests/Test_Bracketed.fs" />
+    <Compile Include="tests/Test_IndexTypes.fs" />
+    <Compile Include="tests/Test_Mutability.fs" />
+    <Compile Include="tests/Test_Static.fs" />
+    <Compile Include="tests/Test_Units.fs" />
+    <Compile Include="tests/Test_Sqlish.fs" />
+    <Compile Include="tests/Test_InferenceProbes.fs" />
+    <Compile Include="tests/Test_FuncArrays.fs" />
+    <Compile Include="tests/Test_Normalize.fs" />
+    <Compile Include="tests/Test_Unify.fs" />
+    <Compile Include="tests/Test_ValidateArrow.fs" />
+    <Compile Include="tests/Test_ExprAttrs.fs" />
+    <Compile Include="tests/Test_CodeGenSubst.fs" />
+    <Compile Include="tests/Test_TypeStructure.fs" />
+    <Compile Include="Main.fs" />
+  </ItemGroup>
+
+  <!-- C++ runtime headers. Read at codegen time via AppContext.BaseDirectory.
+       PreserveNewest copies on first build and on file change. The Link
+       directive controls the destination subpath inside the output dir,
+       so headers end up at bin/<config>/net7.0/cpp/ regardless of where
+       dotnet run is invoked from. -->
+  <ItemGroup>
+    <None Include="cpp/nested_array_utilities.hpp">
+      <Link>cpp/nested_array_utilities.hpp</Link>
+      <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
+    </None>
+    <None Include="cpp/nested_array_types.hpp">
+      <Link>cpp/nested_array_types.hpp</Link>
+      <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
+    </None>
+    <None Include="cpp/index_types.h">
+      <Link>cpp/index_types.h</Link>
+      <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
+    </None>
+    <None Include="cpp/alloc_layout_tests.cpp">
+      <Link>cpp/alloc_layout_tests.cpp</Link>
+      <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
+    </None>
+    <None Include="cpp/linearized_storage.hpp">
+      <Link>cpp/linearized_storage.hpp</Link>
+      <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
+    </None>
+  </ItemGroup>
+
+</Project>
