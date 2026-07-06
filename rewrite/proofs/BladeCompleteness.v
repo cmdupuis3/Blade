@@ -1,7 +1,7 @@
 (* ===================================================================== *)
 (* BladeCompleteness.v -- Layer 3c: H-AND-STAB COMPLETENESS.             *)
 (*                                                                       *)
-(* Closes the deferred exactness half of Theorem 9.11.  BladeLowering    *)
+(* The exactness half of Theorem 9.11.  BladeLowering    *)
 (* proved soundness: H + Stab license a permutation.  This file proves   *)
 (* that no larger UNIFORM grant is sound, in both directions:            *)
 (*                                                                       *)

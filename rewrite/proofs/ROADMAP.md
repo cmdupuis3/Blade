@@ -1,9 +1,39 @@
 # Blade Proof System -- Roadmap for Open Items
 
-Status as of blade-proofs-v14 (19 files, 232 theorems, coqc + coqchk).
+Status as of blade-proofs-v16 (20 files, 241 theorems, coqc + coqchk).
+v16 is a comment-freshness pass, no new theorems: every stale
+deferred-item note updated to point at the file that closed it; the
+seven longest headers rewritten shorter and plainer; lemma names
+unchanged.
 This document lists every remaining deferred item, with a concrete
 design where the direction is settled and an honest confidence note
 where it is not.
+
+## Closed in v15 (response to external audit)
+
+- **Real bounds safety + verified offset arithmetic + buffer-elimination
+  fusion** (BladeSafety.v, 9 theorems; BladeCore sec 7 honestly
+  re-annotated). Audit finding 1 (indexing_total vacuous): CONCEDED --
+  the section header oversold and is rewritten; the theorem is retained
+  only as a signpost with a do-not-cite annotation. The real result now
+  exists: a failure-model semantics (nth_error CAN return None) in
+  which the compiler's triangular offset arithmetic is total AND
+  correct (typed_access_safe: every canonical pair's offset lookup
+  returns exactly Some [i; j]), in range (offset_in_range),
+  collision-free (offset_injective), with the closed-form polynomial
+  verified against the running block sum (roff_closed: 2*roff =
+  i*(2u - i + 1)), and the sigma-typed packaging (bidx_access_safe)
+  where the safety premises are discharged by typability alone -- the
+  type discipline is now EXERCISED against a failure mode. Scope:
+  rank 2; general-r offset = nested hockey-stick sums (follow-up).
+  Audit finding 2 (thin combinator laws): partially contested --
+  disclosed-by-design at the materialized level -- but strengthened
+  where content was available short of the surface calculus:
+  fusion_eliminates_buffer states 12.1 with a REAL store between
+  stages (T/S route materializes and indexes through nth_error; S/T
+  route fuses and never builds the buffer) -- loop-fusion soundness,
+  not a map_map restatement. Typed-path 12.1/12.2 remain with the
+  surface-calculus item, as before.
 
 ## Closed in v14
 

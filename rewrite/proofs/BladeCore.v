@@ -275,15 +275,19 @@ Section Canonicalization.
 End Canonicalization.
 
 (* ===================================================================== *)
-(* 7. BLADE-CORE TYPING SKELETON: bounds safety by construction.         *)
-(* Dependent residual index types (BoundedIdx after currying a SymIdx)   *)
-(* make out-of-bounds indexing UNREPRESENTABLE: an index value carries   *)
-(* its bound proofs, arrays are total functions on such indices, and     *)
-(* currying returns the residual-typed inner array.  Progress and        *)
-(* preservation for the full surface calculus reduce to elaboration      *)
-(* into these intrinsically-typed definitions; the payoff theorem        *)
-(* (formalism 4.18.4, "out-of-bounds access is impossible") holds here   *)
-(* definitionally, witnessed by totality.                                *)
+(* 7. BLADE-CORE TYPING SKELETON (definitions only; see BladeSafety.v).  *)
+(* Dependent residual index types (BoundedIdx after currying a SymIdx):  *)
+(* an index value carries its bound proofs, arrays are total functions   *)
+(* on such indices, and currying returns the residual-typed inner        *)
+(* array.  HONESTY NOTE (post external audit): totality of a total       *)
+(* function is not a theorem, and this section proves nothing about      *)
+(* bounds.  The REAL bounds-safety result -- a failure-model semantics   *)
+(* (nth_error lookups that CAN return None) in which the residual        *)
+(* typing discipline provably never hits the failure case, with the      *)
+(* closed-form offset arithmetic verified -- is BladeSafety.v            *)
+(* (typed_access_safe, bidx_access_safe, offset_in_range).  Full         *)
+(* progress/preservation for the surface calculus remains the deferred   *)
+(* elaboration item.                                                     *)
 (* ===================================================================== *)
 
 Section BladeCoreTypes.
@@ -312,8 +316,11 @@ Section BladeCoreTypes.
   Definition curry_sym {n} (A : SymArr n) (i : Idx n)
     : BoundedIdx (bval i) n -> T := A i.
 
-  (* Bounds safety: every well-typed access yields a value.  Vacuously
-     total -- which is the point: the unsafe access is not writable. *)
+  (* VACUOUS BY CONSTRUCTION -- retained only as a signpost.  This holds
+     for ANY function type and exercises nothing about bounds, symmetry,
+     or the residual.  Do not cite it as a safety result; cite
+     BladeSafety.typed_access_safe / bidx_access_safe instead, where a
+     failure mode exists and the type discipline is what avoids it. *)
   Theorem indexing_total :
     forall n (A : SymArr n) (i : Idx n) (j : BoundedIdx (bval i) n),
       exists v : T, A i j = v.

@@ -9,7 +9,7 @@
 (*       - enum_sound / enum_complete / enum_NoDup: the index            *)
 (*         metamorphism emits every canonical tuple exactly once         *)
 (*       - enum_length: cardinality by the same recursion (binomial      *)
-(*         identification deferred; see notes)                           *)
+(*         identification: BladeBinomial.v)                              *)
 (*       - lj_correct / unlj_correct: the GENERAL left-justified         *)
 (*         storage bijection (subsumes BladeCore.v's r=2,3 instances;    *)
 (*         formalism 14.2-14.3)                                          *)
@@ -189,9 +189,8 @@ Proof.
       rewrite <- Ex in Ey. injection Ey; intros; congruence.
 Qed.
 
-(* --- Cardinality follows the same recursion (the multiset coefficient  *)
-(*     C(u - l + r - 1, r); the closed-form identification is the        *)
-(*     hockey-stick identity, deferred -- see closing notes). ---------- *)
+(* --- Cardinality follows the same recursion; the closed form           *)
+(*     C(u - l + r - 1, r) is proved in BladeBinomial.v. --------------- *)
 
 Fixpoint mscard (r l u : nat) : nat :=
   match r with
@@ -363,16 +362,9 @@ Proof.
 Qed.
 
 (* ===================================================================== *)
-(* Notes toward the next layers:                                         *)
-(*  - Binomial identification: mscard r l u = C(u - l + r - 1, r) via    *)
-(*    the hockey-stick identity over the dmwf_equation recursion.        *)
-(*  - Lex-sortedness of enum (storage offset = lexicographic rank),      *)
-(*    completing the "iteration order = storage order" story.            *)
-(*  - Antisymmetric records: strict variant (residual lower bound i+1,   *)
-(*    the StrictOffset of the compiler); same proofs, shifted feedback.  *)
-(*  - L2: identity/comm detection over shapes; Lemmas 9.23-9.25 as       *)
-(*    non-factorization; Theorem 9.26's two maximal curryings by finite  *)
-(*    enumeration of the currying lattice.                               *)
-(*  - L3: the <*> fold closure (positive half of Thm 9.6); the output    *)
-(*    type family Out r indexed by arity with non-constancy (9.2/9.5).   *)
+(* Everything sketched here as future work is now built: binomial        *)
+(* closed form (BladeBinomial), lex order (BladeLex), strict and affine  *)
+(* variants (BladeArrow, BladeAffine), detection and the two maximal     *)
+(* curryings (BladeCurrying, BladeCurryingGeneral), fold closure and     *)
+(* arity results (BladeTrinity, BladeTrinityAsym).                       *)
 (* ===================================================================== *)

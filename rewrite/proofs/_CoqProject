@@ -18,3 +18,4 @@ BladeFusionDuality.v
 BladeCompute.v
 BladeCauchy.v
 BladeMonad.v
+BladeSafety.v

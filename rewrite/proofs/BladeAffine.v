@@ -1,7 +1,7 @@
 (* ===================================================================== *)
 (* BladeAffine.v -- Layer 1.5c: THE AFFINE FEEDBACK DESCRIPTOR.          *)
 (*                                                                       *)
-(* Closes the deferred lj/alj unification.  The symmetric and strict     *)
+(* Unifies the lj and alj storage transforms.  The symmetric and strict  *)
 (* arrows differ only in the offset their feedback induces:              *)
 (*   Sym      step l i = i        (delta = 0)                            *)
 (*   Antisym  step l i = i + 1    (delta = 1)                            *)

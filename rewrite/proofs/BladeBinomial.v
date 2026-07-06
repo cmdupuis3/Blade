@@ -1,7 +1,7 @@
 (* ===================================================================== *)
 (* BladeBinomial.v -- the STORAGE CARDINALITY closed form.               *)
 (*                                                                       *)
-(* Closes the deferred binomial identification: BladeDMWF's mscard       *)
+(* The binomial identification: BladeDMWF's mscard       *)
 (* (defined by the DMWF recursion itself) equals the multiset            *)
 (* coefficient, so the symmetric arrow's storage size is the classical   *)
 (*   |SymIdx<r> over [l, u)|  =  C(u - l + r - 1, r)                     *)
@@ -80,9 +80,5 @@ Corollary storage_cardinality : forall r n,
   length (enum r 0 n) = C (n + r - 1) r.
 Proof. intros. rewrite enum_length_binom. f_equal. lia. Qed.
 
-(* Note: with C available, BladeCore's counting lemma acquires its       *)
-(* general statement -- prod_j C(n_j + r - 1, r) < C(prod_j n_j + r - 1, *)
-(* r) for d >= 2 -- whose proof over C is genuine combinatorics and      *)
-(* remains deferred (see ROADMAP).  The r = 2 arithmetic instance in     *)
-(* BladeCore is unconditional and already closes the soundness           *)
-(* question for the audit's flagship case.                               *)
+(* With C available, the counting lemma acquires its general statement;  *)
+(* the full proof is BladeCounting.v (counting_general_C).               *)

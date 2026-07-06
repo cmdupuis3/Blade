@@ -1,4 +1,4 @@
-# Blade Proof System (Coq) -- v14
+# Blade Proof System (Coq) -- v16
 
 Machine-checked kernel of the Blade formalism. Coq 8.18.0, stdlib only.
 All files verified by both coqc and coqchk (independent kernel checker).
@@ -10,7 +10,7 @@ All files verified by both coqc and coqchk (independent kernel checker).
 
 or manually with `coqc -Q . Blade <file>` in _CoqProject order.
 
-## Contents (232 theorems total)
+## Contents (241 theorems total)
 
 - BladeCore.v (16): Group Law both halves (diagonal swap sound; per-dim
   product swap refuted), counting lemma (no lossless product layout),
@@ -70,7 +70,13 @@ or manually with `coqc -Q . Blade <file>` in _CoqProject order.
 - BladeShape.v (3): NEW -- enumShape NoDup via fixed canonical lengths
   and unique app-splitting.
 - BladeCompound.v (7): rank-k Compound arrow.
-- BladeMonad.v (18): NEW -- the computation monad (MonadPlus laws
+- BladeSafety.v (9): NEW -- bounds safety with a failure model:
+  verified triangular offset arithmetic (total, correct, in-range,
+  injective; closed form checked), sigma-typed access where
+  typability alone discharges safety, and buffer-elimination fusion
+  correctness (12.1 with a real store between stages). BladeCore
+  sec 7 re-annotated; indexing_total marked do-not-cite.
+- BladeMonad.v (18): the computation monad (MonadPlus laws
   exactly as the text states them; right distribution honestly fails);
   plan-level plus with evaluation homomorphism; rank-changing
   pipelines (veval_blocks, curry_concat, pipeT); section 12.5 laws
