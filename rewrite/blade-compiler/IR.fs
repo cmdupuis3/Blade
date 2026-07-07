@@ -3192,7 +3192,26 @@ let buildLoopNestCodeGen
                     then List.length deps
                     else 0
                 
-                let element = mkElement arrayPos levelInfo.RankIndex levelInfo.LocalDimIndex
+                // A compound VIRTUAL source (range<CompoundIdx<m>>) is ONE loop
+                // level (present-cell axis) but spans SourceRank kernel params
+                // (one per mask dimension, per the rank rule / expandedRows).
+                // Emit one element PER rank component at this single level so
+                // every coordinate param gets bound -- each element extracts
+                // component rc of the cell tuple (genElementBindingNew's
+                // compound VirtualRange arm: unhash(r)[rc]). A real compound
+                // ARRAY keeps the single peel element (it reads .data[r], not
+                // per-axis coordinates).
+                let elements =
+                    let isCompoundLevel =
+                        match levelInfo.IndexSpace.Extent with IRCompoundMask _ -> true | _ -> false
+                    let isVirtualSource =
+                        arrayPos < arrays.Length &&
+                        (match arrays.[arrayPos] with IRRange _ -> true | _ -> false)
+                    if isCompoundLevel && isVirtualSource then
+                        [0 .. levelInfo.IndexSpace.SourceRank - 1]
+                        |> List.map (fun rc -> mkElement arrayPos rc levelInfo.LocalDimIndex)
+                    else
+                        [mkElement arrayPos levelInfo.RankIndex levelInfo.LocalDimIndex]
                 
                 {
                     Level = level
@@ -3204,7 +3223,7 @@ let buildLoopNestCodeGen
                     StrictOffset = strictOffset
                     IsParallel = isParallel
                     State = state
-                    Elements = [element]
+                    Elements = elements
                 })
     
     let outputSymmVec = buildSymmVec info.OutputType

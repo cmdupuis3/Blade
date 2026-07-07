@@ -452,13 +452,21 @@ let scanIdentOrKeyword (state: LexerState) =
     
     let text = sb.ToString()
     let kind =
-        match Map.tryFind text keywords with
-        | Some kw -> 
-            match kw with
-            | KwTrue -> TokBool true
-            | KwFalse -> TokBool false
-            | _ -> TokKeyword kw
-        | None -> TokIdent text
+        match text with
+        // A lone `_` is the wildcard token, not an identifier. The scanToken
+        // dispatch reaches this function for `_` (isIdentStart includes '_'),
+        // shadowing the dedicated TokUnderscore branch; recover it here so the
+        // wildcard consumers (patterns, RaggedIdx<_>, compound-index coordinates)
+        // receive TokUnderscore. `_` is never a valid Blade identifier or keyword.
+        | "_" -> TokUnderscore
+        | _ ->
+            match Map.tryFind text keywords with
+            | Some kw -> 
+                match kw with
+                | KwTrue -> TokBool true
+                | KwFalse -> TokBool false
+                | _ -> TokKeyword kw
+            | None -> TokIdent text
     
     emit state startLine startCol kind
 

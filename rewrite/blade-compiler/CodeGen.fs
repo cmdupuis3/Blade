@@ -527,8 +527,47 @@ let setCodegenStructFieldsCache (types: IRTypeDef list) =
 //
 // Currently used by:
 //   - IRGroupBy reconstruction (synthSlotIdOuter, synthSlotIdMember)
+//   - Compound partial-index residual reconstruction (synthSlotIdCompoundResidual)
 let synthSlotIdOuter : IRId = -1
 let synthSlotIdMember : IRId = -2
+let synthSlotIdCompoundResidual : IRId = -3
+
+// ============================================================================
+// Compound Partial-Index Classification (formalism 4.5)
+// ============================================================================
+//
+// Shared by inferExprType's IRIndex arm, genScalarBinding's wrapper decision,
+// and exprToCppCore's compoundRead emission, so the three never disagree
+// about WHICH indexing form a compound read is.
+//
+// A wildcard coordinate arrives as an `IRLit IRLitUnit` sentinel inside the
+// index tuple: TypeCheck's dispatchAppOrIndex rewrites each consumed
+// TExprWildcard hole to a unit literal, and unit is never a valid coordinate
+// value, so the encoding is unambiguous. A short tuple (arity j < k, no
+// sentinels) pins the LEADING j coordinates -- B((a,b)) and B((a,b,_)) on a
+// rank-3 compound are the same read.
+
+/// Classification of the FIRST index against a rank-k compound head slot.
+type CompoundIndexForm =
+    /// All k coordinates pinned: the compound axis is fully consumed.
+    | CompoundFull
+    /// Partial: `pinned` = (axis position, coordinate expr) for each pinned
+    /// axis in increasing position order; `freePos` = the free axis positions.
+    | CompoundPartial of pinned: (int * IRExpr) list * freePos: int list
+
+let classifyCompoundIndexTuple (k: int) (coords: IRExpr list) : CompoundIndexForm =
+    let isFreeSentinel = function IRLit IRLitUnit -> true | _ -> false
+    if coords |> List.exists isFreeSentinel then
+        // Full-arity wildcard tuple (TypeCheck enforces arity = k and >= 1 pin).
+        let indexed = coords |> List.mapi (fun i c -> (i, c))
+        let pinned = indexed |> List.filter (fun (_, c) -> not (isFreeSentinel c))
+        let free = indexed |> List.filter (fun (_, c) -> isFreeSentinel c) |> List.map fst
+        CompoundPartial (pinned, free)
+    elif coords.Length < k then
+        // Short tuple: leading-prefix pin, trailing axes free.
+        CompoundPartial (coords |> List.mapi (fun i c -> (i, c)), [coords.Length .. k - 1])
+    else
+        CompoundFull
 
 /// Infer type from an IR expression (simplified version for codegen)
 let rec inferExprType (expr: IRExpr) : IRType =
@@ -584,9 +623,53 @@ let rec inferExprType (expr: IRExpr) : IRType =
         | [] -> IRTUnit
     | IRIndex (arr, indices, _) ->
         // Indexing peels dimensions; full indexing yields the element type.
+        //
+        // Compound-head partial indexing is the exception to positional
+        // peeling: a rank-k compound is ONE slot filled by ONE tuple, and a
+        // PARTIAL tuple (short prefix, or full-arity with wildcard sentinels)
+        // REPLACES that slot with a residual fragment rather than consuming
+        // it -- mirroring TypeCheck's compoundResidualType (dense Idx for one
+        // free axis, residual CompoundIdx for >= 2). Without this branch a
+        // partial read reports the element type (1 index >= 1 slot), which
+        // breaks chained/inline consumers (reduce over a residual, chained
+        // partials) at codegen.
         match inferExprType arr with
-        | ArrayElem arrTy when indices.Length >= arrTy.IndexTypes.Length -> arrTy.ElemType
-        | ArrayElem arrTy -> mkArrayLike { arrTy with IndexTypes = arrTy.IndexTypes |> List.skip indices.Length }
+        | ArrayElem arrTy ->
+            let headCompound =
+                match arrTy.IndexTypes with
+                | h :: _ when h.Tag = Some "__compoundidx" -> Some h
+                | _ -> None
+            match headCompound, indices with
+            | Some h, (IRTuple coords) :: trailingIdxs ->
+                (match classifyCompoundIndexTuple h.Rank coords with
+                 | CompoundPartial (pinned, freePos) ->
+                     let rr = freePos.Length
+                     let residual =
+                         if rr = 1 then
+                             { Id = synthSlotIdCompoundResidual; Rank = 1
+                               Extent = IRCompoundProject (arr, pinned.Length)
+                               Symmetry = SymNone; Tag = None
+                               Kind = SDimension; Dependencies = [] }
+                         else
+                             { Id = synthSlotIdCompoundResidual; Rank = rr
+                               Extent = IRCompoundProject (arr, pinned.Length)
+                               Symmetry = SymNone; Tag = Some "__compoundidx"
+                               Kind = SDimension; Dependencies = [] }
+                     let trailingSlots = List.tail arrTy.IndexTypes
+                     let trailingRemaining =
+                         if trailingIdxs.Length <= trailingSlots.Length
+                         then trailingSlots |> List.skip trailingIdxs.Length
+                         else []
+                     mkArrayLike { arrTy with IndexTypes = residual :: trailingRemaining }
+                 | CompoundFull ->
+                     // Full tuple consumes the one compound slot; any further
+                     // indices consume trailing slots positionally (the
+                     // pre-existing rule below already counts them right).
+                     if indices.Length >= arrTy.IndexTypes.Length then arrTy.ElemType
+                     else mkArrayLike { arrTy with IndexTypes = arrTy.IndexTypes |> List.skip indices.Length })
+            | _ ->
+                if indices.Length >= arrTy.IndexTypes.Length then arrTy.ElemType
+                else mkArrayLike { arrTy with IndexTypes = arrTy.IndexTypes |> List.skip indices.Length }
         | t -> t
     | IRSequence exprs ->
         match exprs with
@@ -1464,16 +1547,18 @@ let rec exprToCppCore (subst: SubstMap) (names: Map<IRId, string>) (expr: IRExpr
                         Some (sprintf "([&]() -> %s { %s }())" elemTypeStr (body.ToString()))
                 else None
             | _ -> None
-        // Compound full-tuple indexing (formalism 4.5): when `arr` is a
+        // Compound tuple indexing (formalism 4.5): when `arr` is a
         // Compound<T,RANK> and the first index is a tuple, the tuple's coords
         // gather through the compound's linearize rather than a peel chain.
         //   full (j = k):
         //     - no trailing dims        -> arr({coords})            : scalar
         //     - trailing dims, all given -> arr({coords}, trail)    : scalar
         //     - trailing dims remain     -> arr.row({coords})       : T* sub-view
-        //   partial (j < k): the residual index is typed (IRCompoundProject) but
-        //     its reconstitution codegen is phase 2 -> hard error here, so a
-        //     partial index never silently miscompiles.
+        //   partial (j < k): the residual is reconstituted by one of the four
+        //     runtime helpers (window / gather x dense / compound), dispatched
+        //     on whether the pinned axes form a leading prefix and on the
+        //     residual rank -- see the CompoundPartial arm. Trailing regular
+        //     dims combined with a partial read remain gated (hard error).
         let compoundRead () : string option =
             match inferExprType arr with
             | ArrayElem arrTy when isCompoundArrayType arrTy ->
@@ -1484,40 +1569,79 @@ let rec exprToCppCore (subst: SubstMap) (names: Map<IRId, string>) (expr: IRExpr
                         |> List.tryFind (fun ix -> ix.Tag = Some "__compoundidx")
                         |> Option.map (fun ix -> ix.Rank)
                         |> Option.defaultValue coords.Length
-                    let j = coords.Length
                     let trailingDims =
                         match arrTy.IndexTypes with
                         | _ :: rest -> rest
                         | [] -> []
-                    if j < k then
-                        // Partial (leading-prefix) compound indexing. The pinned
-                        // j coords select a prefix; the residual has rank k-j.
-                        //   k-j >= 2 : residual is a sub-CompoundIdx. Emit a call
-                        //     to make_partial_compound (shared-window residual, no
-                        //     data copy) -- a pure expression producing
-                        //     Compound<T, k-j>.
-                        //   k-j == 1 : residual DEGENERATES to a dense Idx window;
-                        //     a rank-1 Compound is not a valid API-level type. That
-                        //     case is a statement-level materialized Array<T,1>
-                        //     (like mask()), NOT emittable as an inline expression
-                        //     here -- deferred to the materialization path.
-                        let residualRank = k - j
-                        if not (List.isEmpty trailingDims) then
-                            failwithf "Partial compound indexing on an array with trailing dimensions (compound rank %d, %d pinned, %d trailing) is not yet supported; only all-dims-masked compounds can be partially indexed for now." k j trailingDims.Length
-                        elif not (List.isEmpty trailingIdxs) then
-                            failwithf "Partial compound indexing combined with trailing indices is not yet supported; index the residual separately (let r = B((c0, ..., c%d)); r(...))." (j - 1)
-                        elif residualRank = 1 then
-                            failwithf "Partial compound indexing with a rank-1 residual (a %d-tuple on a rank-%d compound) degenerates to a dense Idx window and is materialized statement-level (phase 2b); not yet wired. Use a full %d-tuple for now." j k k
+                    match classifyCompoundIndexTuple k coords with
+                    | CompoundPartial (pinned, freePos) ->
+                        // Partial compound indexing (formalism 4.5). The pinned
+                        // coordinates (a leading prefix for a short tuple;
+                        // arbitrary axes for a full-arity wildcard tuple with
+                        // `IRLit IRLitUnit` sentinels at the free positions)
+                        // are removed; the residual spans the free axes. Four
+                        // reconstitution shapes, all pure expressions:
+                        //   prefix,    rank >= 2 : make_partial_compound --
+                        //     contiguous shared-window residual, no data copy.
+                        //   prefix,    rank == 1 : make_partial_window --
+                        //     dense Idx window sharing the parent data
+                        //     (Array<T,1> with a heap-allocated extent).
+                        //   scattered, rank >= 2 : make_partial_compound_gather
+                        //     -- deep-copy gather into a fresh Compound<T,RR>.
+                        //   scattered, rank == 1 : make_partial_gather_dense --
+                        //     deep-copy gather into a fresh Array<T,1>.
+                        let j = pinned.Length
+                        let residualRank = freePos.Length
+                        if not (List.isEmpty trailingIdxs) then
+                            failwithf "Partial compound indexing combined with a SUPPLIED trailing index is not yet supported; leave the trailing dim free (omit it or write `_`), or index the residual separately (let r = B((...)); r(...))."
+                        elif trailingDims.Length > 1 then
+                            failwithf "Partial compound indexing with %d trailing dimensions is not supported (multi-trailing compounds are unsupported throughout: the wrapper stores only the trailing-stride product, not per-dim extents)." trailingDims.Length
                         else
-                            // k-j >= 2: residual sub-CompoundIdx via the runtime
-                            // helper. Pinned coords form the J-length std::array.
-                            let coordStrs = coords |> List.map (fun c -> exprToCppCore subst names c)
-                            let pinnedArr = sprintf "std::array<size_t, %d>{%s}" j (String.concat ", " coordStrs)
-                            Some (sprintf "nested_array_utilities::make_partial_compound<%s, %d, %d>(%s, %s)"
-                                          (elemTypeToCpp arrTy.ElemType) k j arrStr pinnedArr)
-                    else
+                            // One free trailing dim rides along at zero data cost
+                            // on the shared paths: the compact layout is lex-
+                            // sorted with the trailing block innermost, so a
+                            // residual COMPOUND (rank >= 2) keeps the parent's
+                            // trailing_stride through the SAME helpers, and a
+                            // rank-1 prefix residual becomes a contiguous rank-2
+                            // window (make_partial_window_trail: shared data,
+                            // fresh row table only). Scattered pins still
+                            // gather, now copying whole trailing blocks.
+                            let hasTrail = not (List.isEmpty trailingDims)
+                            let elemStr = elemTypeToCpp arrTy.ElemType
+                            // (size_t) casts: coordinate exprs are int64-typed at
+                            // the Blade level; a bare int64 VARIABLE inside a
+                            // std::array<size_t,J> brace-init is a narrowing
+                            // error (literals are exempt as constant exprs).
+                            let pinnedVals = pinned |> List.map (fun (_, c) -> sprintf "(size_t)(%s)" (exprToCppCore subst names c))
+                            let pinnedArr = sprintf "std::array<size_t, %d>{%s}" j (String.concat ", " pinnedVals)
+                            let isPrefix = (pinned |> List.map fst) = [0 .. j - 1]
+                            if isPrefix && residualRank >= 2 then
+                                Some (sprintf "nested_array_utilities::make_partial_compound<%s, %d, %d>(%s, %s)"
+                                              elemStr k j arrStr pinnedArr)
+                            elif isPrefix then
+                                let fn = if hasTrail then "make_partial_window_trail" else "make_partial_window"
+                                Some (sprintf "nested_array_utilities::%s<%s, %d, %d>(%s, %s)"
+                                              fn elemStr k j arrStr pinnedArr)
+                            else
+                                let posArr =
+                                    sprintf "std::array<size_t, %d>{%s}" j
+                                        (pinned |> List.map (fst >> string) |> String.concat ", ")
+                                if residualRank >= 2 then
+                                    Some (sprintf "nested_array_utilities::make_partial_compound_gather<%s, %d, %d>(%s, %s, %s)"
+                                                  elemStr k j arrStr pinnedArr posArr)
+                                else
+                                    let fn = if hasTrail then "make_partial_gather_dense_trail" else "make_partial_gather_dense"
+                                    Some (sprintf "nested_array_utilities::%s<%s, %d, %d>(%s, %s, %s)"
+                                                  fn elemStr k j arrStr pinnedArr posArr)
+                    | CompoundFull ->
                         // j = k: full index. Build the coord array literal.
-                        let coordStrs = coords |> List.map (fun c -> exprToCppCore subst names c)
+                        // (size_t) casts, same rationale as the partial path:
+                        // int64-typed coordinate VARIABLES (e.g. lifted-lambda
+                        // params) are a narrowing error in a std::array<size_t>
+                        // brace-init; literals and size_t loop vars were fine,
+                        // which is why this path survived until a kernel body
+                        // was lifted with int64_t params.
+                        let coordStrs = coords |> List.map (fun c -> sprintf "(size_t)(%s)" (exprToCppCore subst names c))
                         let coordArr = sprintf "std::array<size_t, %d>{%s}" k (String.concat ", " coordStrs)
                         if List.isEmpty trailingDims then
                             // No trailing dims: scalar cell.
@@ -1629,7 +1753,18 @@ let rec exprToCppCore (subst: SubstMap) (names: Map<IRId, string>) (expr: IRExpr
             | Some n -> sprintf "%dL" n
             | None ->
                 let arrName = exprToCppCore subst names arr
-                sprintf "(int64_t)(%s.extents[%d])" arrName dim
+                // A rank-1 ragged/dep-idx operand is a RaggedRow<T> (per
+                // cppArrayTypeStr), which carries its length inline as `.len`,
+                // not via a pointer-to-extents like Array<T,1>. Its only axis is
+                // dim 0. Every other operand (Array, higher-rank ragged) uses the
+                // materialized `.extents[dim]`.
+                let isRaggedRow =
+                    (isRaggedArrayType at || isDepIdxArrayType at)
+                    && at.IndexTypes.Length = 1
+                if isRaggedRow && dim = 0 then
+                    sprintf "(int64_t)(%s.len)" arrName
+                else
+                    sprintf "(int64_t)(%s.extents[%d])" arrName dim
         | _ ->
             // Should be unreachable — typecheck rejects non-arrays. Surface a
             // visible #error rather than emit garbage if the IR is malformed.
@@ -1669,10 +1804,29 @@ let rec exprToCppCore (subst: SubstMap) (names: Map<IRId, string>) (expr: IRExpr
             match inferExprType arrExpr with
             | ArrayElem at -> isCompoundArrayType at
             | _ -> false
+        // A reduce operand can also be a peeled ragged/dep-idx row, which lowers
+        // to RaggedRow<T>. RaggedRow exposes its length as `.len` (a bare size_t),
+        // NOT `.extents[0]` — and it is indexed `g[i]` via its operator[]. Detect
+        // it so the length bound uses `.len`; the default `%s[%s]` access already
+        // works for RaggedRow.
+        // Only a RANK-1 ragged/dep-idx operand is a RaggedRow<T> (with an inline
+        // `.len`). A rank-2+ Ragged<T> has `.extents`/`.lens`, not `.len`, so it
+        // must fall through to the default `.extents[0]`. Same predicate the peel
+        // emission and IRExtent use, so the length accessor stays consistent with
+        // the operand's actual C++ type.
+        let isRagged =
+            match inferExprType arrExpr with
+            | ArrayElem at ->
+                (isRaggedArrayType at || isDepIdxArrayType at)
+                && at.IndexTypes.Length = 1
+            | _ -> false
         let reduceAccAt (i: string) =
             if isCompound then sprintf "%s.data[%s]" arrStr i else sprintf "%s[%s]" arrStr i
-        let reduceBound = if isCompound then sprintf "%s.size()" arrStr else sprintf "%s.extents[0]" arrStr
-        let reduceNonEmpty = isStaticallyNonEmpty && not isCompound
+        let reduceBound =
+            if isCompound then sprintf "%s.size()" arrStr
+            elif isRagged then sprintf "%s.len" arrStr
+            else sprintf "%s.extents[0]" arrStr
+        let reduceNonEmpty = isStaticallyNonEmpty && not isCompound && not isRagged
         // Reduce-kernel resolution via `resolveCallable`. The fold
         // kernel emits as a local wrapper closure inside the IIFE; the
         // fold loop invokes the wrapper on `(acc, arr[__ri])`. The
@@ -2822,6 +2976,17 @@ let exprToCppWithSubst (subst: SubstMap) (names: Map<IRId, string>) (expr: IRExp
 let genElementBindingNew (level: LoopIndexBinding) (elem: ElementBinding) (currentName: string) 
     : string * string =
     match elem.Virtual with
+    | VirtualRange _ when (match level.Extent with IRCompoundMask _ -> true | _ -> false) ->
+        // range<CompoundIdx<m>>: ONE loop level over the present cells; each
+        // kernel param binds one COORDINATE of the current cell's tuple via
+        // the materialized index's O(1) unhash (rank_to_tuple lookup). The
+        // index variable `<name>_cidx` is emitted by the caller's
+        // materialization step (genCompoundIndexFromMask) before the nest.
+        // Offsets are not meaningful on a masked product space; TypeCheck
+        // never produces one for a compound range slot.
+        let code = sprintf "size_t %s = %s_cidx->unhash(%s)[%d];"
+                           elem.ParamName elem.ArrayName level.IndexName elem.RankComponent
+        (code, elem.ParamName)
     | VirtualRange offset ->
         // range<I>: kernel param gets the loop index, plus offset if present
         let valueExpr =
@@ -3017,8 +3182,19 @@ let genForLoopHeader (compoundArrays: Set<string>) (binding: LoopIndexBinding) :
         // A compound axis iterates its present cells, so its bound is the
         // runtime cardinality of the compact index, not a dense .extents entry.
         // (The compound level carries IRCompoundMask as its Extent; ExtentArrayRef
-        // is the compound array's name -> `<arr>.idx->cardinality`.)
-        | IRCompoundMask _ -> sprintf "%s.idx->cardinality" binding.ExtentArrayRef
+        // is the compound array's name -> `<arr>.idx->cardinality`.) A VIRTUAL
+        // compound source (range<CompoundIdx<m>>) has no Compound value to hang
+        // `.idx` off; its bound is the standalone materialized index
+        // `<name>_cidx->cardinality` (see genCompoundIndexFromMask).
+        | IRCompoundMask _ ->
+            let isVirtualCompound =
+                binding.Elements
+                |> List.exists (fun e ->
+                    e.ArrayName = binding.ExtentArrayRef &&
+                    (match e.Virtual with VirtualRange _ -> true | _ -> false))
+            if isVirtualCompound
+            then sprintf "%s_cidx->cardinality" binding.ExtentArrayRef
+            else sprintf "%s.idx->cardinality" binding.ExtentArrayRef
         // A compound array's trailing dim has no dense .extents; its (single)
         // trailing extent is the compact buffer's trailing_stride. A literal
         // trailing extent already took the IRLit arm above, so this catches a
@@ -3977,6 +4153,25 @@ let genScalarBinding (ctx: CodeGenContext) (name: string) (value: IRExpr) (ty: I
             | IRVar _ -> true                // assume wrapper (most producers migrated)
             | IRMask _ | IRMaskWithSet _ | IRSort _ | IRIntersect _ | IRUnion _ | IRUnique _ -> true
             | IRApp _ -> true                // function-call returns wrapped Array
+            | IRIndex (a, (IRTuple coords) :: _, _) ->
+                // A PARTIAL compound read (formalism 4.5) produces a wrapper:
+                // Compound<T, RR> for a residual-rank >= 2 read
+                // (make_partial_compound[_gather]) or Array<T, 1> for a dense
+                // rank-1 residual (make_partial_window / _gather_dense). A
+                // FULL compound read stays on the raw path (scalar, or a
+                // trailing-row T* sub-view via .row()), as does ordinary
+                // positional peeling on non-compound arrays.
+                (match inferExprType a with
+                 | ArrayElem at when isCompoundArrayType at ->
+                     let k =
+                         at.IndexTypes
+                         |> List.tryFind (fun ix -> ix.Tag = Some "__compoundidx")
+                         |> Option.map (fun ix -> ix.Rank)
+                         |> Option.defaultValue coords.Length
+                     (match classifyCompoundIndexTuple k coords with
+                      | CompoundPartial _ -> true
+                      | CompoundFull -> false)
+                 | _ -> false)
             | _ -> false
         let cppType =
             match resolvedTy with
@@ -4433,14 +4628,12 @@ let genApplyCombinator (ctx: CodeGenContext) (name: string) (info: ApplyInfo) (b
                     // The inline body emission stays: this site inlines
                     // the kernel body inside the per-row loop, with the
                     // peeled row binding `subName` substituted for the
-                    // kernel's param. Using a wrapper here would create
-                    // a signature mismatch — the lifted callable's param
-                    // type is `RaggedRow<T>` (Path 1 fix), but the
-                    // per-row codegen emits `subName` as `Array<T, 1>`
-                    // (with `RaggedRow<T>::operator T*()` providing the
-                    // implicit conversion). Inline emission sidesteps the
-                    // mismatch by binding the param name directly to the
-                    // Array-typed subName in the nameMap.
+                    // kernel's param. `subName` is now emitted as
+                    // `RaggedRow<T>` (matching the kernel param type and
+                    // cppArrayTypeStr's verdict for a rank-1 ragged value),
+                    // so the param name binds directly to it in the nameMap
+                    // with no type mismatch. (RaggedRow also decays to `T*`
+                    // via its `operator T*()` where a raw pointer is wanted.)
                     match resolveCallable info.Kernel with
                     | Some callable when callable.Params.Length = 1 ->
                         let param = callable.Params.[0]
@@ -4478,16 +4671,37 @@ let genApplyCombinator (ctx: CodeGenContext) (name: string) (info: ApplyInfo) (b
                         let bodyStr = exprToCpp nameMap body
                         let originLabel =
                             if isGroupedOuter then "grouped array" else "ragged literal"
-                        let code = [
-                            sprintf "%s// ragged peel over %s '%s'" ind originLabel arrName
-                            sprintf "%ssize_t %s_extents[1] = {%s};" ind name ngroupsExpr
-                            sprintf "%sArray<%s, 1> %s = { new %s[%s], %s_extents };" ind outElemStr name outElemStr ngroupsExpr name
-                            sprintf "%sfor (size_t __g = 0; __g < %s; __g++) {" ind ngroupsExpr
-                            sprintf "%s    size_t %s_extents[1] = {%s};" ind subName perRowLenExpr
-                            sprintf "%s    Array<%s, 1> %s = { %s[__g], %s_extents };" ind arrElemStr subName arrName subName
-                            sprintf "%s    %s[__g] = %s;" ind name bodyStr
-                            sprintf "%s}" ind
-                        ]
+                        // The peeled sub-row's C++ type must match the kernel
+                        // PARAM's type, because the body's length accessor is
+                        // generated from that param type (a rank-1 ragged/dep-idx
+                        // param renders as RaggedRow<T>, using `.len`; anything
+                        // else is Array<T,1>, using `.extents[0]`). Emitting a
+                        // type that disagrees with the body's accessor produces
+                        // `RaggedRow.extents[0]` / `Array.len` mismatches. So we
+                        // derive the peel type from param.Type via the same
+                        // predicate cppArrayTypeStr uses.
+                        let paramIsRaggedRow =
+                            match param.Type with
+                            | ArrayElem at ->
+                                (isRaggedArrayType at || isDepIdxArrayType at)
+                                && at.IndexTypes.Length = 1
+                            | _ -> false
+                        let subDeclLines =
+                            if paramIsRaggedRow then
+                                // RaggedRow: inline `len` scalar, no separate _extents.
+                                [ sprintf "%s    RaggedRow<%s> %s = { %s[__g], %s };" ind arrElemStr subName arrName perRowLenExpr ]
+                            else
+                                // Array<T,1>: length via a materialized _extents buffer.
+                                [ sprintf "%s    size_t %s_extents[1] = {%s};" ind subName perRowLenExpr
+                                  sprintf "%s    Array<%s, 1> %s = { %s[__g], %s_extents };" ind arrElemStr subName arrName subName ]
+                        let code =
+                            [ sprintf "%s// ragged peel over %s '%s'" ind originLabel arrName
+                              sprintf "%ssize_t %s_extents[1] = {%s};" ind name ngroupsExpr
+                              sprintf "%sArray<%s, 1> %s = { new %s[%s], %s_extents };" ind outElemStr name outElemStr ngroupsExpr name
+                              sprintf "%sfor (size_t __g = 0; __g < %s; __g++) {" ind ngroupsExpr ]
+                            @ subDeclLines
+                            @ [ sprintf "%s    %s[__g] = %s;" ind name bodyStr
+                                sprintf "%s}" ind ]
                         Some code
                     | _ -> None
     
@@ -4505,6 +4719,30 @@ let genApplyCombinator (ctx: CodeGenContext) (name: string) (info: ApplyInfo) (b
             | IRVar (id, _) -> 
                 let name = Map.tryFind id tempCtx.VarNames |> Option.defaultValue (sprintf "arr%d" i)
                 (name, arr)
+            | IRRange (idxTys, _) when idxTys |> List.exists (fun ix -> ix.Tag = Some "__compoundidx") ->
+                // range<CompoundIdx<m>>: materialize the standalone
+                // compound_index_t for the driver BEFORE the loop nest. The
+                // loop header bounds off `<name>_cidx->cardinality` and the
+                // element bindings extract per-axis coordinates via
+                // `<name>_cidx->unhash(r)[c]` (genElementBindingNew). The
+                // compound slot must be the range's SOLE index type for now;
+                // mixing (range<CompoundIdx<m>, J>) is unsupported.
+                let rname = sprintf "__range%d" i
+                (match idxTys with
+                 | [ix] ->
+                     (match ix.Extent with
+                      | IRCompoundMask (IRVar (mid, _)) ->
+                          (match Map.tryFind mid tempCtx.VarNames with
+                           | Some maskName ->
+                               let (idxLines, _) = genCompoundIndexFromMask maskName ix.Rank (sprintf "%s_cidx" rname)
+                               preCode <- preCode @ (idxLines |> List.map (fun s -> ind + s))
+                           | None ->
+                               preCode <- preCode @ codegenError ctx ind "range<CompoundIdx>: mask variable not found in scope at codegen")
+                      | _ ->
+                          preCode <- preCode @ codegenError ctx ind "range<CompoundIdx>: the mask must be a NAMED Array<Bool like ...> variable (inline mask expressions are not supported); let-bind the mask first")
+                 | _ ->
+                     preCode <- preCode @ codegenError ctx ind "range<CompoundIdx<m>, ...>: a compound range slot cannot be combined with other index types in one range<> (not yet supported)")
+                (rname, arr)
             | IRRange _ -> (sprintf "__range%d" i, arr)
             | IRVirtualReverse _ -> (sprintf "__rev%d" i, arr)
             | IRBlocked _ -> (sprintf "__blk%d" i, arr)
@@ -4675,9 +4913,19 @@ let genApplyCombinator (ctx: CodeGenContext) (name: string) (info: ApplyInfo) (b
                     |> List.tryFind (fun idx -> idx.Tag = Some "__compoundidx")
                     |> Option.map (fun idx -> idx.Rank)
                     |> Option.defaultValue 1
+                // A range<CompoundIdx> DRIVER has no Compound value to share an
+                // idx from; the output shares the standalone materialized index
+                // (`<name>_cidx`, emitted into preCode above) with trailing
+                // stride 1. A compound VALUE input shares its `.idx` and stride.
+                let inputIsCompoundRange =
+                    match info.Arrays |> List.tryHead with
+                    | Some (IRRange (its, _)) -> its |> List.exists (fun ix -> ix.Tag = Some "__compoundidx")
+                    | _ -> false
+                let idxExpr = if inputIsCompoundRange then sprintf "%s_cidx" inName else sprintf "%s.idx" inName
+                let strideExpr = if inputIsCompoundRange then "1" else sprintf "%s.trailing_stride" inName
                 let compDecl =
-                    sprintf "%snested_array_utilities::Compound<%s, %d> %s = { new %s[%s.idx->cardinality * %s.trailing_stride], %s.idx, %s.trailing_stride };"
-                        ind outputElemType leadRank name outputElemType inName inName inName inName
+                    sprintf "%snested_array_utilities::Compound<%s, %d> %s = { new %s[%s->cardinality * %s], %s, %s };"
+                        ind outputElemType leadRank name outputElemType idxExpr strideExpr idxExpr strideExpr
                 preCode @ [""; compDecl; ""] @ loopCode
             | _ ->
                 preCode @ [""; extentsDecl] @ extentsFill @ [""; allocDecl; ""] @ loopCode
@@ -5086,6 +5334,16 @@ let genFusionTree (ctx: CodeGenContext) (name: string) (expr: IRExpr) (builder: 
         
         if arrayNames.IsEmpty then
             (codegenError ctx ind (sprintf "no arrays in method_for for parallel/sequence '%s'" name), name, Map.empty)
+        elif primaryInfo.Arrays |> List.exists (fun a ->
+                 match a with
+                 | IRRange (its, _) -> its |> List.exists (fun ix -> ix.Tag = Some "__compoundidx")
+                 | _ -> false) then
+            // The fused multi-output path allocates outputs through the dense
+            // extents machinery and does not materialize a standalone
+            // compound_index_t; a compound range here would emit references to
+            // an undeclared `__rangeN_cidx`. Fail loudly with a diagnosis
+            // instead of a confusing C++ compile error.
+            (codegenError ctx ind "range<CompoundIdx> is not yet supported in parallel/fused (multi-output) loop applications; use a single-kernel method_for", name, Map.empty)
         else
             // Build primary LoopNestCodeGen
             let codeGenPrimary = buildLoopNestCodeGen primaryInfo arrayNames primaryName builder
@@ -7541,6 +7799,27 @@ let genPrintStatements (modul: IRModule) : string list =
                     (match b.Value with
                      | IRArrayLit _ -> true
                      | _ -> false)
+                // A FULL compound read that leaves trailing dims (B((i,j)) or
+                // B((i,j), _) on Array<T like CompoundIdx<m>, Idx<...>>) binds
+                // the raw trailing-row T* (.row()), which carries no .extents
+                // member -- the flat print loop would not compile. Skip with a
+                // diagnostic; scalar derivations (r(t)) still print. (PARTIAL
+                // reads are unaffected: they produce real wrappers.)
+                let isCompoundRowSubview =
+                    match b.Value with
+                    | IRIndex (a, (IRTuple coords) :: _, _) ->
+                        (match inferExprType a with
+                         | ArrayElem at when isCompoundArrayType at ->
+                             let k =
+                                 at.IndexTypes
+                                 |> List.tryFind (fun ix -> ix.Tag = Some "__compoundidx")
+                                 |> Option.map (fun ix -> ix.Rank)
+                                 |> Option.defaultValue coords.Length
+                             (match classifyCompoundIndexTuple k coords with
+                              | CompoundFull -> true  // dense-typed result of a full read = trailing row
+                              | CompoundPartial _ -> false)
+                         | _ -> false)
+                    | _ -> false
                 // Look through IRCompute wrappers (from |> compute) to find
                 // the underlying combinator. Also check |> bind continuations
                 // and other materialization wrappers as needed.
@@ -7553,7 +7832,9 @@ let genPrintStatements (modul: IRModule) : string list =
                     (match unwrapMaterialization b.Value with
                      | IRApplyCombinator _ -> true
                      | _ -> false)
-                if isRaggedLiteralBinding then
+                if isCompoundRowSubview then
+                    [sprintf "    // (trailing-row view '%s' not auto-printed; the raw T* row carries no extents — derive scalars via %s(t))" b.Name b.Name]
+                elif isRaggedLiteralBinding then
                     // Ragged: iterate using offsets table. Print as flat
                     // comma-separated values across all rows; this matches
                     // the validation framework's expectation of a flat list.

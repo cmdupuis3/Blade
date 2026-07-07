@@ -1841,29 +1841,52 @@ let private validateCompoundIndex (env: TypeEnv) (arrTy: IRArrayType) (tArgs: Ty
         match tArgs with
         | [] -> Ok ()  // no args consumed here (e.g. bare array value); nothing to check
         | firstArg :: _ ->
-            // Wildcard compound indexing: the tuple is full-arity (k elements)
-            // with some `_` marking FREE axes (B((a, _, c))). Recognized as a
-            // distinct form; the position-aware residual type and codegen are a
-            // later step, so gate it here with a clear message rather than let a
-            // hole-typed wildcard flow on as if it were a pinned coordinate.
+            // Wildcard compound indexing: a FULL-arity tuple (k elements) with
+            // `_` marking FREE axes (formalism 4.5 currying table: B((a, _)),
+            // B((_, b)), B((a, _, _)), B((a, _, c)), ...). The residual rank is
+            // the wildcard count: 1 free axis degenerates to a dense Idx window
+            // (or gather, when non-prefix); >= 2 free axes form a residual
+            // CompoundIdx. Multiple wildcards are deliberately ALLOWED here --
+            // unlike function partial application (6.2.3, single `_` only) --
+            // because the 4.5 table requires them: B((a, _, _)) is the only way
+            // to pin a single leading coordinate of a rank-3 compound, since
+            // the 1-tuple `(a)` collapses to a bare scalar in the parser.
             let wildcardPositions =
                 match firstArg.Kind with
                 | TExprTuple elems ->
                     elems |> List.mapi (fun i e -> (i, e))
                           |> List.choose (fun (i, e) -> match e.Kind with TExprWildcard -> Some i | _ -> None)
                 | _ -> []
-            match wildcardPositions with
-            | _ :: _ ->
+            match firstArg.Kind, wildcardPositions with
+            | TExprWildcard, _ ->
+                // Bare `B(_)` (the parser collapses a 1-tuple `(_)` to the bare
+                // hole). It pins nothing: on a rank-1 compound the "residual"
+                // would be the whole array, and on rank >= 2 it is not even a
+                // tuple. Reject rather than let the hole flow as a coordinate.
                 Error (Other (sprintf
-                    "Wildcard compound indexing (free axis at position(s) %A on a rank-%d compound) is recognized but not yet fully implemented: the position-aware residual type and codegen are pending. Full indexing B((c0, ..., c%d)) is supported."
-                    wildcardPositions k (k - 1)))
-            | [] ->
+                    "A bare wildcard `_` cannot index a compound axis: it pins no coordinate (the result would just be the array itself). Index with a full %d-tuple, pinning at least one coordinate."
+                    k))
+            | _, (_ :: _) ->
+                let tupleLen =
+                    match firstArg.Kind with
+                    | TExprTuple es -> es.Length
+                    | _ -> 0
+                if tupleLen <> k then
+                    Error (Other (sprintf
+                        "Wildcard compound indexing must use a FULL-arity tuple: this compound axis has rank %d, so write all %d coordinates with `_` marking each free axis (got a %d-tuple). Short tuples (without wildcards) pin a leading prefix instead: B((c0, ..., cj))."
+                        k k tupleLen))
+                elif wildcardPositions.Length = k then
+                    Error (Other (sprintf
+                        "Compound index with all %d coordinates free (`_`) pins nothing -- the result is the array itself. Drop the index, or pin at least one coordinate."
+                        k))
+                else Ok ()
+            | _, [] ->
               (match env.Subst.Resolve firstArg.Type with
                | IRTTuple tys when tys.Length >= 1 && tys.Length <= k -> Ok ()
-                // 1 <= j <= k: full (j = k) or partial (j < k) index. The
-                // residual type is computed by compoundResidualType; partial
-                // (j < k) types correctly but its reconstitution codegen is
-                // gated at lowering (phase 2).
+                // 1 <= j <= k: full (j = k) or partial (j < k, leading-prefix)
+                // index. The residual type is computed by compoundResidualType;
+                // codegen reconstitutes it as a shared window (rank >= 2) or a
+                // dense window (rank 1).
                | IRTTuple tys ->
                    Error (Other (sprintf
                        "Compound index over-supplied: this array's compound axis has rank %d (mask is %d-dimensional), so it takes at most a %d-tuple like B((c0, ..., c%d)); got a %d-tuple."
@@ -1879,8 +1902,14 @@ let private validateCompoundIndex (env: TypeEnv) (arrTy: IRArrayType) (tArgs: Ty
     | _ -> Ok ()
 
 /// The residual index-type fragment (formalism 4.5 currying table) that
-/// REPLACES a rank-k compound slot after pinning its first j coordinates
-/// (1 <= j <= k). Returns the list of index types the compound slot becomes:
+/// REPLACES a rank-k compound slot after pinning j of its coordinates
+/// (1 <= j < k for a partial index; j = k full). For a short tuple the pinned
+/// axes are the leading prefix; for a full-arity wildcard tuple they are the
+/// non-`_` positions -- the residual SHAPE depends only on the count, so this
+/// fragment is position-blind. The pinned POSITIONS are carried in the index
+/// tuple itself (unit-literal sentinels at free axes, see dispatchAppOrIndex),
+/// where codegen reads them to choose window (prefix) vs gather (scattered)
+/// reconstitution. Returns the list of index types the compound slot becomes:
 ///
 ///   j = k       -> []            (compound fully consumed; trailing dims follow)
 ///   k - j = 1   -> [dense Idx]   (one free coord: a contiguous window of
@@ -1939,20 +1968,82 @@ let private dispatchAppOrIndex (env: TypeEnv) (tFunc: TypedExpr) (tArgs: TypedEx
                 let trailingSlots = List.tail arrTy.IndexTypes
                 let k = headSlot.Rank
                 let firstArg = List.head tArgs
-                // j = pinned coordinate count: tuple arity, or 1 for a scalar
-                // (rank-1 compound). validateCompoundIndex already rejected the
-                // malformed shapes (including the not-yet-implemented wildcard
-                // form), so this is well-formed here.
+                // Wildcard form (full-arity tuple with `_` marking free axes):
+                // validateCompoundIndex has already enforced full arity and at
+                // least one pinned coordinate. CONSUME the holes here by
+                // rewriting each TExprWildcard element to a unit literal:
+                //   * the wildcard-escape scan then correctly sees a consumed
+                //     (hole-free) value at every value-forming boundary, and
+                //   * lowering carries an unambiguous `IRLit IRLitUnit`
+                //     sentinel at each free position inside the index tuple --
+                //     unit is never a valid coordinate, so codegen reads the
+                //     pinned/free axis split directly off the tuple. The
+                //     extent carrier (IRCompoundProject) records only the
+                //     pinned COUNT; positions live in the tuple itself.
+                let wildPositions =
+                    match firstArg.Kind with
+                    | TExprTuple elems ->
+                        elems |> List.mapi (fun i e -> (i, e))
+                              |> List.choose (fun (i, e) -> match e.Kind with TExprWildcard -> Some i | _ -> None)
+                    | _ -> []
+                let firstArg =
+                    if List.isEmpty wildPositions then firstArg
+                    else
+                        match firstArg.Kind with
+                        | TExprTuple elems ->
+                            let elems' =
+                                elems |> List.map (fun e ->
+                                    match e.Kind with
+                                    | TExprWildcard -> { e with Kind = TExprLit LitUnit; Type = IRTUnit }
+                                    | _ -> e)
+                            { firstArg with
+                                Kind = TExprTuple elems'
+                                Type = IRTTuple (elems' |> List.map (fun e -> e.Type)) }
+                        | _ -> firstArg
+                let tArgs = firstArg :: List.tail tArgs
+                // Trailing-dim wildcards: `B((...), _)` leaves the trailing
+                // regular dim FREE -- semantically identical to omitting the
+                // arg, because the compact layout is lex-sorted with the
+                // trailing block innermost-contiguous, so a free trailing dim
+                // is exactly the contiguous slice the shorter form already
+                // denotes. Consume (drop) them here so the wildcard-escape
+                // scan sees no unconsumed hole. They must form a contiguous
+                // SUFFIX of the trailing args: a wildcard BEFORE a supplied
+                // trailing index (B((...), _, t)) frees an INTERIOR dim,
+                // which requires a data restructure and is rejected (multi-
+                // trailing compounds are unsupported throughout anyway).
+                let keptRemaining, interiorTrailingHole =
+                    let isWild (e: TypedExpr) = match e.Kind with TExprWildcard -> true | _ -> false
+                    let rec split acc seenWild args =
+                        match args with
+                        | [] -> (List.rev acc, false)
+                        | e :: rest when isWild e -> split acc true rest
+                        | e :: rest ->
+                            if seenWild then (List.rev acc, true)
+                            else split (e :: acc) false rest
+                    split [] false (List.tail tArgs)
+                let tArgs = firstArg :: keptRemaining
+                // j = pinned coordinate count: tuple arity minus free axes for
+                // the wildcard form; tuple arity for a short (prefix) tuple; 1
+                // for a scalar (rank-1 compound). validateCompoundIndex already
+                // rejected the malformed shapes, so this is well-formed here.
                 let j =
-                    match env.Subst.Resolve firstArg.Type with
-                    | IRTTuple tys -> tys.Length
-                    | _ -> 1
+                    if not (List.isEmpty wildPositions) then
+                        (match firstArg.Kind with
+                         | TExprTuple es -> es.Length
+                         | _ -> k) - wildPositions.Length
+                    else
+                        match env.Subst.Resolve firstArg.Type with
+                        | IRTTuple tys -> tys.Length
+                        | _ -> 1
                 // Parent IR reference for the residual extent carrier. Available
-                // when the array is a plain variable; other producers (field
-                // access, chained residuals) are deferred to phase 2 along with
-                // the reconstitution codegen, so a non-var parent still types via
-                // the fragment but carries an IRLitUnit placeholder parent (the
-                // phase-2 codegen gate catches the partial case regardless).
+                // when the array is a plain variable; a non-var parent (field
+                // access, inline chained residual) types via the fragment with
+                // an IRLitUnit placeholder parent. The placeholder is harmless:
+                // codegen reads the ACTUAL array expression at the IRIndex site
+                // for reconstitution, and consults the extent carrier only for
+                // pass-throughs (map/lift/var-collection) and tryEvalIntIR,
+                // which returns None for it (dynamic extent, correct).
                 let parentIR =
                     match tFunc.Kind with
                     | TExprVar (_, vid, _) -> IRVar (vid, tFunc.Type)
@@ -1966,7 +2057,9 @@ let private dispatchAppOrIndex (env: TypeEnv) (tFunc: TypedExpr) (tArgs: TypedEx
                         trailingSlots |> List.skip remainingArgs.Length
                     else trailingSlots  // (validateCompoundIndex/arity guard covers over-supply)
                 let finalSlots = residualFragment @ trailingRemaining
-                if List.isEmpty finalSlots then
+                if interiorTrailingHole then
+                    Error (Other "A wildcard `_` among the trailing indices of a compound array must come AFTER all supplied trailing indices (a free interior trailing dimension would require restructuring the trailing blocks). Reorder, or leave the trailing dims free by omitting them.")
+                elif List.isEmpty finalSlots then
                     Ok (mkTyped (TExprIndex (tFunc, tArgs, identity)) arrTy.ElemType)
                 else
                     Ok (mkTyped (TExprIndex (tFunc, tArgs, identity))
@@ -1995,10 +2088,10 @@ let private dispatchAppOrIndex (env: TypeEnv) (tFunc: TypedExpr) (tArgs: TypedEx
 /// `Array<RegionIdx like StationIdx>` but `by_country` expects CountryIdx —
 /// would silently typecheck.
 ///
-/// The walk is structural: visit every sub-expression, perform the tag
-/// check at TExprIndex nodes, and short-circuit on the first error.
-let rec private revalidateBodyTagChecks (env: TypeEnv) (expr: TypedExpr) : TypeResult<unit> =
-    let children : TypedExpr list =
+/// Structural child enumerator for a typed expression: the immediate
+/// sub-expressions of a node. Total over TExpr kinds. Shared by the tag-check
+/// revalidation walk and the wildcard-escape scan so the two never drift.
+let private typedExprChildren (expr: TypedExpr) : TypedExpr list =
         match expr.Kind with
         | TExprLit _ | TExprVar _ | TExprQualified _ | TExprSection _
         | TExprWildcard
@@ -2063,9 +2156,25 @@ let rec private revalidateBodyTagChecks (env: TypeEnv) (expr: TypedExpr) : TypeR
         | TExprReplicate (c, b) -> [c; b]
         | TExprAlign (es, _) -> es
         | TExprPartialApp (_, a, _) -> [a]
+
+/// True if the typed expression contains an unconsumed wildcard hole anywhere
+/// in its subtree. A wildcard is legitimate only as a compound-index coordinate,
+/// where dispatchAppOrIndex consumes it into a residual node before it reaches a
+/// value-forming boundary. Any TExprWildcard still present here has escaped into
+/// a value (bound to a name, returned, nested in a non-consuming call) and is an
+/// error. Local check: called at value-forming boundaries, not threaded through
+/// the AST.
+let rec private exprContainsWildcard (expr: TypedExpr) : bool =
+    match expr.Kind with
+    | TExprWildcard -> true
+    | _ -> typedExprChildren expr |> List.exists exprContainsWildcard
+
+/// The walk is structural: visit every sub-expression, perform the tag
+/// check at TExprIndex nodes, and short-circuit on the first error.
+let rec private revalidateBodyTagChecks (env: TypeEnv) (expr: TypedExpr) : TypeResult<unit> =
     // Recurse into children first, short-circuiting on error.
     let childRes =
-        children
+        typedExprChildren expr
         |> List.fold (fun acc child ->
             acc |> Result.bind (fun () -> revalidateBodyTagChecks env child))
             (Ok ())
@@ -4230,6 +4339,13 @@ and inferLambda env parms whereClause body : TypeResult<TypedExpr> =
 
     let result =
         inferExpr paramEnv body |> Result.bind (fun tBody ->
+            // A lambda body is a value-forming boundary: reject a wildcard `_`
+            // that escaped into it (its only legitimate role is a compound-index
+            // coordinate), rather than letting it reach lowering.
+            if exprContainsWildcard tBody then
+                Error (Other
+                    "wildcard `_` is not a value: it cannot be a lambda's body. It is only meaningful as a compound-index coordinate (e.g. B((a, _, c))).")
+            else
             let info : TypedLambdaInfo = {
                 Params = typedParams; Body = tBody; ReturnType = tBody.Type
                 CommGroups = commGroups; Captures = captures
@@ -4382,14 +4498,24 @@ and checkExpr (env: TypeEnv) (expected: IRType) (expr: Expr) : TypeResult<TypedE
 /// bidirectional checking and store the annotation as the canonical type;
 /// without, plain synthesis.
 and inferLetBindingValue (env: TypeEnv) (binding: Binding) : TypeResult<TypedExpr> =
+    // A let binding is a value-forming boundary. A wildcard `_` is a hole, not a
+    // value: it is only meaningful as a compound-index coordinate (consumed by
+    // dispatchAppOrIndex before it reaches here). If one survives into the bound
+    // value, it has escaped and is an error — reject cleanly at typecheck rather
+    // than let it reach lowering.
+    let rejectEscapedWildcard (tv: TypedExpr) : TypeResult<TypedExpr> =
+        if exprContainsWildcard tv then
+            Error (Other
+                "wildcard `_` is not a value: it can only appear as a compound-index coordinate (e.g. B((a, _, c))), not bound in a let. A tuple carrying a hole like (a, _, c) has no meaning on its own.")
+        else Ok tv
     match binding.Type with
     | Some annot ->
         let annotTy = lowerTypeExpr env annot
-        checkExpr env annotTy binding.Value |> Result.map (fun tv ->
+        checkExpr env annotTy binding.Value |> Result.bind (fun tv ->
             // Prefer the annotation as the canonical type — it can be more
             // specific than what the value synthesized to.
-            { tv with Type = annotTy })
-    | None -> inferExpr env binding.Value
+            rejectEscapedWildcard { tv with Type = annotTy })
+    | None -> inferExpr env binding.Value |> Result.bind rejectEscapedWildcard
 
 /// Bind the primary name of a let binding (single name or placeholder) with
 /// let-generalization. Only ReadOnly bindings are generalized — assignable
@@ -5249,6 +5375,13 @@ and checkFunctionDecl (env: TypeEnv) (funcDecl: FunctionDecl) : TypeResult<Typed
             | Some _ -> checkExpr bodyEnv retType funcDecl.Body
             | None -> inferExpr bodyEnv funcDecl.Body
         bodyResult |> Result.bind (fun tBody ->
+            // A function body is a value-forming boundary: a wildcard `_` that
+            // survives into it has escaped its only legitimate role (a compound-
+            // index coordinate). Reject cleanly here rather than at lowering.
+            if exprContainsWildcard tBody then
+                Error (Other
+                    "wildcard `_` is not a value: it cannot be a function's returned value. It is only meaningful as a compound-index coordinate (e.g. B((a, _, c))).")
+            else
             // Belt-and-suspenders: even after checkExpr, run unify on the
             // synthesized body type vs the annotation. checkExpr's fall-
             // through case (line ~3082) is `inferExpr + unify` already,

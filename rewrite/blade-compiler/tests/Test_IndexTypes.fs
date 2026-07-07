@@ -1113,9 +1113,326 @@ let x = B((0, 0))
 """
 
 
+// ---------------------------------------------------------------------------
+// Partial compound indexing (formalism 4.5, phase 2). Shared fixture shapes:
+//
+// Rank-2: Lat = Idx<2>, Lon = Idx<3>, dense values 10..60 row-major,
+//   mask [[T,F,T],[T,T,F]] -> present lex order:
+//   (0,0)=10, (0,2)=30, (1,0)=40, (1,1)=50   (cardinality 4)
+//
+// Rank-3: X = Y = Z = Idx<2>, dense value at (x,y,z) = 4x + 2y + z + 1,
+//   mask [[[T,F],[T,T]],[[F,T],[T,F]]] -> present lex order:
+//   (0,0,0)=1, (0,1,0)=3, (0,1,1)=4, (1,0,1)=6, (1,1,0)=7   (cardinality 5)
+//
+// The four reconstitution shapes are each hit at least once: prefix window
+// (dense rank-1 residual, shared data), prefix residual compound (shared
+// window, no copy), scattered dense gather, and (via the chained test)
+// gather on a residual produced by a prior partial.
+// ---------------------------------------------------------------------------
+
+// Trailing wildcard, rank-2: B((0, _)) -> the dense window of valid lons at
+// lat 0. Prefix pin -> make_partial_window (shared parent data, heap extent).
+// Also exercises scalar indexing into the residual and reduce over it.
+let test_compound_partial_prefix_window = """
+type Lat = Idx<2>
+type Lon = Idx<3>
+let dense: Array<Float64 like Lat, Lon> = [[10.0, 20.0, 30.0], [40.0, 50.0, 60.0]]
+let m: Array<Bool like Lat, Lon> = [[true, false, true], [true, true, false]]
+let B = compound(dense, m)
+let r = B((0, _))
+let x = r(1)
+let t = reduce(r, (+))
+// EXPECT: r = [10, 30]
+// EXPECT: x = 30
+// EXPECT: t = 40
+"""
+
+// Leading wildcard, rank-2: B((_, 0)) -> valid lats at lon 0. The pinned axis
+// is NOT a leading prefix, so the surviving cells are scattered in the parent
+// buffer -> make_partial_gather_dense (deep-copy gather).
+let test_compound_partial_scattered_dense = """
+type Lat = Idx<2>
+type Lon = Idx<3>
+let dense: Array<Float64 like Lat, Lon> = [[10.0, 20.0, 30.0], [40.0, 50.0, 60.0]]
+let m: Array<Bool like Lat, Lon> = [[true, false, true], [true, true, false]]
+let B = compound(dense, m)
+let r = B((_, 0))
+// EXPECT: r = [10, 40]
+"""
+
+// Short tuple, k-j = 1: a 2-tuple on a rank-3 compound pins the leading
+// prefix (x,y) = (0,1); the residual is the dense window over z. This is the
+// most reachable partial form via plain tuples (previously gated).
+let test_compound_partial_short_tuple_r3 = """
+type X = Idx<2>
+type Y = Idx<2>
+type Z = Idx<2>
+let dense: Array<Float64 like X, Y, Z> = [[[1.0, 2.0], [3.0, 4.0]], [[5.0, 6.0], [7.0, 8.0]]]
+let m: Array<Bool like X, Y, Z> = [[[true, false], [true, true]], [[false, true], [true, false]]]
+let B = compound(dense, m)
+let r = B((0, 1))
+// EXPECT: r = [3, 4]
+"""
+
+// Trailing double wildcard, rank-3: B((0, _, _)) pins x = 0; the residual is
+// a rank-2 CompoundIdx over (y, z) at that prefix -- shared-window
+// make_partial_compound, no data copy. Present residual cells at x = 0:
+// (0,0)=1, (1,0)=3, (1,1)=4. Validated by full-tuple reads on the residual.
+let test_compound_partial_residual_compound = """
+type X = Idx<2>
+type Y = Idx<2>
+type Z = Idx<2>
+let dense: Array<Float64 like X, Y, Z> = [[[1.0, 2.0], [3.0, 4.0]], [[5.0, 6.0], [7.0, 8.0]]]
+let m: Array<Bool like X, Y, Z> = [[[true, false], [true, true]], [[false, true], [true, false]]]
+let B = compound(dense, m)
+let r = B((0, _, _))
+let x1 = r((0, 0))
+let x2 = r((1, 1))
+// EXPECT: x1 = 1
+// EXPECT: x2 = 4
+"""
+
+// Interior wildcard, rank-3: B((0, _, 0)) frees the MIDDLE axis. The pinned
+// axes {x, z} are not a prefix -> scattered gather over y at (x,z) = (0,0):
+// (0,0,0)=1 present, (0,1,0)=3 present.
+let test_compound_partial_interior_wildcard = """
+type X = Idx<2>
+type Y = Idx<2>
+type Z = Idx<2>
+let dense: Array<Float64 like X, Y, Z> = [[[1.0, 2.0], [3.0, 4.0]], [[5.0, 6.0], [7.0, 8.0]]]
+let m: Array<Bool like X, Y, Z> = [[[true, false], [true, true]], [[false, true], [true, false]]]
+let B = compound(dense, m)
+let r = B((0, _, 0))
+// EXPECT: r = [1, 3]
+"""
+
+// Chained partial indexing: the rank-2 residual of B((0,_,_)) is itself a
+// first-class compound, further partial-indexable. s = r((_, 0)) gathers the
+// valid y values at z = 0 within the x = 0 window: residual cells (0,0)=1
+// and (1,0)=3.
+let test_compound_partial_chained = """
+type X = Idx<2>
+type Y = Idx<2>
+type Z = Idx<2>
+let dense: Array<Float64 like X, Y, Z> = [[[1.0, 2.0], [3.0, 4.0]], [[5.0, 6.0], [7.0, 8.0]]]
+let m: Array<Bool like X, Y, Z> = [[[true, false], [true, true]], [[false, true], [true, false]]]
+let B = compound(dense, m)
+let r = B((0, _, _))
+let s = r((_, 0))
+// EXPECT: s = [1, 3]
+"""
+
+// All coordinates free pins nothing -- the "residual" would be the array
+// itself. Rejected at typecheck with a drop-the-index message.
+let test_compound_partial_reject_all_free = """
+type Lat = Idx<2>
+type Lon = Idx<3>
+let dense: Array<Float64 like Lat, Lon> = [[10.0, 20.0, 30.0], [40.0, 50.0, 60.0]]
+let m: Array<Bool like Lat, Lon> = [[true, false, true], [true, true, false]]
+let B = compound(dense, m)
+let r = B((_, _))
+// EXPECT: typecheck failure — all coordinates free pins nothing.
+"""
+
+// A wildcard tuple must be FULL arity: on a rank-3 compound, a 2-tuple with a
+// wildcard is ambiguous (which axes?) and rejected; short tuples pin a
+// leading prefix only in their wildcard-free form.
+let test_compound_partial_reject_short_wildcard = """
+type X = Idx<2>
+type Y = Idx<2>
+type Z = Idx<2>
+let dense: Array<Float64 like X, Y, Z> = [[[1.0, 2.0], [3.0, 4.0]], [[5.0, 6.0], [7.0, 8.0]]]
+let m: Array<Bool like X, Y, Z> = [[[true, false], [true, true]], [[false, true], [true, false]]]
+let B = compound(dense, m)
+let r = B((0, _))
+// EXPECT: typecheck failure — wildcard tuple must have full arity 3.
+"""
+
+// ---------------------------------------------------------------------------
+// Compound with a trailing regular dim (mask over a leading prefix), and
+// range<CompoundIdx<m>> drivers. Trailing fixture (rank-2 mask + T):
+//   Lat = Idx<2>, Lon = Idx<3>, T = Idx<2>, mask [[T,F,T],[T,T,F]],
+//   dense[i][j][t] = (i*3 + j)*10 + t. Present cells (lex) with their blocks:
+//   (0,0)=[0,1], (0,2)=[20,21], (1,0)=[30,31], (1,1)=[40,41].
+// ---------------------------------------------------------------------------
+
+// Full compound tuple + trailing wildcard: B((0,2), _) leaves the trailing
+// dim free -- identical to B((0,2)) -- yielding the contiguous trailing-row
+// view (raw T*, zero copy; the lex-sorted compact layout keeps each cell's
+// block contiguous). Scalar reads off the row and the full scalar form
+// validate the values.
+let test_compound_trailing_wildcard_row = """
+type Lat = Idx<2>
+type Lon = Idx<3>
+type T = Idx<2>
+let dense: Array<Float64 like Lat, Lon, T> = [
+    [[0.0, 1.0], [10.0, 11.0], [20.0, 21.0]],
+    [[30.0, 31.0], [40.0, 41.0], [50.0, 51.0]]]
+let m: Array<Bool like Lat, Lon> = [[true, false, true], [true, true, false]]
+let B = compound(dense, m)
+let r = B((0, 2), _)
+let x = r(1)
+let y = B((1, 1), 0)
+// EXPECT: x = 21
+// EXPECT: y = 40
+"""
+
+// Partial prefix pin + one trailing dim: B((0, _)) frees Lon AND leaves T
+// free. The window of present (0,*) cells is contiguous INCLUDING their
+// trailing blocks, so the result is a rank-2 dense view {cells, T} sharing
+// the parent data (make_partial_window_trail: fresh row table only).
+let test_compound_trailing_partial_window = """
+type Lat = Idx<2>
+type Lon = Idx<3>
+type T = Idx<2>
+let dense: Array<Float64 like Lat, Lon, T> = [
+    [[0.0, 1.0], [10.0, 11.0], [20.0, 21.0]],
+    [[30.0, 31.0], [40.0, 41.0], [50.0, 51.0]]]
+let m: Array<Bool like Lat, Lon> = [[true, false, true], [true, true, false]]
+let B = compound(dense, m)
+let w = B((0, _))
+// EXPECT: w = [[0, 1], [20, 21]]
+"""
+
+// Scattered pin + one trailing dim: B((_, 0)) frees Lat at Lon = 0; the
+// surviving cells are non-contiguous, so their trailing BLOCKS are gathered
+// (make_partial_gather_dense_trail) into a fresh rank-2 dense array.
+let test_compound_trailing_partial_gather = """
+type Lat = Idx<2>
+type Lon = Idx<3>
+type T = Idx<2>
+let dense: Array<Float64 like Lat, Lon, T> = [
+    [[0.0, 1.0], [10.0, 11.0], [20.0, 21.0]],
+    [[30.0, 31.0], [40.0, 41.0], [50.0, 51.0]]]
+let m: Array<Bool like Lat, Lon> = [[true, false, true], [true, true, false]]
+let B = compound(dense, m)
+let g = B((_, 0))
+// EXPECT: g = [[0, 1], [30, 31]]
+"""
+
+// Residual COMPOUND + trailing dim: a rank-3 mask over (X,Y,Z) with trailing
+// T; B((0, _, _)) pins x = 0, leaving a rank-2 residual compound over (Y,Z)
+// that SHARES the parent window and keeps the trailing stride (same
+// make_partial_compound helper, no data copy). Present at x = 0 (with
+// blocks): (0,0)=[0,1], (1,0)=[20,21], (1,1)=[30,31].
+let test_compound_trailing_residual_compound = """
+type X = Idx<2>
+type Y = Idx<2>
+type Z = Idx<2>
+type T = Idx<2>
+let dense: Array<Float64 like X, Y, Z, T> = [
+    [[[0.0, 1.0], [10.0, 11.0]], [[20.0, 21.0], [30.0, 31.0]]],
+    [[[40.0, 41.0], [50.0, 51.0]], [[60.0, 61.0], [70.0, 71.0]]]]
+let m: Array<Bool like X, Y, Z> = [[[true, false], [true, true]], [[false, true], [true, false]]]
+let B = compound(dense, m)
+let r = B((0, _, _))
+let x1 = r((1, 1), 1)
+let x2 = r((1, 0), 0)
+// EXPECT: x1 = 31
+// EXPECT: x2 = 20
+"""
+
+// A wildcard BEFORE a supplied trailing index would free an interior
+// trailing dim (a restructure of the trailing blocks) -- rejected.
+let test_compound_trailing_interior_hole_reject = """
+type Lat = Idx<2>
+type Lon = Idx<3>
+type T = Idx<2>
+let dense: Array<Float64 like Lat, Lon, T> = [
+    [[0.0, 1.0], [10.0, 11.0], [20.0, 21.0]],
+    [[30.0, 31.0], [40.0, 41.0], [50.0, 51.0]]]
+let m: Array<Bool like Lat, Lon> = [[true, false, true], [true, true, false]]
+let B = compound(dense, m)
+let x = B((0, 0), _, 1)
+// EXPECT: typecheck failure — a trailing wildcard must come after all supplied trailing indices.
+"""
+
+// range<CompoundIdx<m>>: a virtual driver over the PRESENT cells of a mask
+// (formalism 4.5 x range semantics: one loop level over the cardinality;
+// the kernel receives one coordinate param per mask dimension, in lex
+// order). The output is a compound array sharing the materialized index.
+// Kernel i*10+j makes each cell's value its own coordinates, so full-tuple
+// reads pin down exactly which cells were visited and in what coordinates.
+let test_range_compound_map = """
+type Lat = Idx<2>
+type Lon = Idx<3>
+let m: Array<Bool like Lat, Lon> = [[true, false, true], [true, true, false]]
+let R = method_for(range<CompoundIdx<m>>) <@> lambda(i, j) -> i * 10 + j |> compute
+let y0 = R((0, 0))
+let y1 = R((0, 2))
+let y2 = R((1, 0))
+let y3 = R((1, 1))
+// EXPECT: y0 = 0
+// EXPECT: y1 = 2
+// EXPECT: y2 = 10
+// EXPECT: y3 = 11
+"""
+
+// range<CompoundIdx<m>> driving reads of a SAME-mask compound value: the
+// canonical "iterate the present cells, transform the stored values"
+// pattern. (The kernel captures B; coordinates arrive as size_t and flow
+// into the full-tuple read.)
+let test_range_compound_reads_compound = """
+type Lat = Idx<2>
+type Lon = Idx<3>
+let dense: Array<Float64 like Lat, Lon> = [[1.0, 2.0, 3.0], [4.0, 5.0, 6.0]]
+let m: Array<Bool like Lat, Lon> = [[true, false, true], [true, true, false]]
+let B = compound(dense, m)
+let R = method_for(range<CompoundIdx<m>>) <@> lambda(i, j) -> B((i, j)) * 2.0 |> compute
+let y1 = R((0, 2))
+let y2 = R((1, 1))
+// EXPECT: y1 = 6
+// EXPECT: y2 = 10
+"""
+
+// A compound range slot cannot (yet) be combined with other index types in
+// one range<>; the gate is a codegen-stage #error, so the probe passes by
+// failing at compile.
+let test_range_compound_mixed_reject = """
+type Lat = Idx<2>
+type Lon = Idx<3>
+type K = Idx<4>
+let m: Array<Bool like Lat, Lon> = [[true, false, true], [true, true, false]]
+let R = method_for(range<CompoundIdx<m>, K>) <@> lambda(i, j, k) -> i * 100 + j * 10 + k |> compute
+// EXPECT: typecheck failure — compound range slot cannot mix with other index types.
+"""
+
+// A wildcard `_` is a hole, not a value: it is only meaningful as a compound-
+// index coordinate (B((a, _, c))), where the index dispatch consumes it. Bound
+// into a let as part of a tuple value, it has escaped and must be rejected at
+// typecheck. `a` and `c` are defined so the ONLY failure reason is the escaped
+// hole (not an undefined name). This currently rejects at typecheck via the
+// value-forming-boundary guard in inferLetBindingValue; before that guard it
+// slipped to a lowering failwith, which is the wrong (unlocated, exception-
+// based) mechanism.
+let test_wildcard_escape_reject = """
+let a = 1
+let c = 3
+let t = (a, _, c)
+// EXPECT: typecheck failure — a wildcard hole cannot be bound as a value.
+"""
+
+
 /// Index type tests (AntisymIdx, HermitianIdx)
 let indexTypeTests = [
     ("Compound Construct + Index", test_compound_construct_index)
+    ("Compound Partial Prefix Window", test_compound_partial_prefix_window)
+    ("Compound Partial Scattered Dense", test_compound_partial_scattered_dense)
+    ("Compound Partial Short Tuple R3", test_compound_partial_short_tuple_r3)
+    ("Compound Partial Residual Compound", test_compound_partial_residual_compound)
+    ("Compound Partial Interior Wildcard", test_compound_partial_interior_wildcard)
+    ("Compound Partial Chained", test_compound_partial_chained)
+    ("Compound Partial All Free (rejects)", test_compound_partial_reject_all_free)
+    ("Compound Partial Short Wildcard (rejects)", test_compound_partial_reject_short_wildcard)
+    ("Compound Trailing Wildcard Row", test_compound_trailing_wildcard_row)
+    ("Compound Trailing Partial Window", test_compound_trailing_partial_window)
+    ("Compound Trailing Partial Gather", test_compound_trailing_partial_gather)
+    ("Compound Trailing Residual Compound", test_compound_trailing_residual_compound)
+    ("Compound Trailing Interior Hole (rejects)", test_compound_trailing_interior_hole_reject)
+    ("Range Compound Map", test_range_compound_map)
+    ("Range Compound Reads Compound", test_range_compound_reads_compound)
+    ("Range Compound Mixed (rejects)", test_range_compound_mixed_reject)
+    ("Wildcard Escape In Let (rejects)", test_wildcard_escape_reject)
     ("Transpose 2D Nonsquare", test_transpose_2d_nonsquare)
     ("Transpose Square", test_transpose_square)
     ("Transpose Rank3", test_transpose_rank3)
