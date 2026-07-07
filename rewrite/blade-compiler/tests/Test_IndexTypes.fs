@@ -1397,6 +1397,118 @@ let R = method_for(range<CompoundIdx<m>, K>) <@> lambda(i, j, k) -> i * 100 + j 
 // EXPECT: typecheck failure — compound range slot cannot mix with other index types.
 """
 
+// ---------------------------------------------------------------------------
+// RaggedIdx coverage round: paths implemented end-to-end but previously
+// exercised only in one spelling. Tuple-form reads (existing tests use only
+// the curried r(i)(j)), the closed RaggedIdx<lens> annotation driving a
+// TOP-LEVEL peel (previously only inside function bodies), and the
+// ragged-first-slot surface rule.
+// ---------------------------------------------------------------------------
+
+// Tuple-form indexing on a ragged literal: r(i, j) consumes both slots in
+// one application, mirroring the dense multi-arg form (the curried r(i)(j)
+// spelling is covered elsewhere). Also pins rank(r) = 2: RaggedIdx
+// contributes ONE record (unlike DepIdx's two-record expansion), so outer +
+// ragged inner = 2.
+let test_ragged_tuple_form_read = """
+let r = [[1.0, 2.0, 3.0], [4.0, 5.0], [6.0, 7.0, 8.0, 9.0]]
+let v = r(1, 0)
+let w = r(2, 3)
+let k = rank(r)
+// EXPECT: v = 4
+// EXPECT: w = 9
+// EXPECT: k = 2
+"""
+
+// Closed RaggedIdx<lens> annotation on a top-level let, driving the peel
+// directly (the closed form was previously peeled only via function
+// parameters; the alias test covers annotation + direct reads but not
+// iteration). The annotated literal emits the same Ragged<T> wrapper with
+// .lens/.offsets companions, and tryRaggedPeel recognizes the closed
+// __raggedidx tag alongside the inline/opaque forms.
+let test_raggedidx_closed_toplevel_peel = """
+let lens: Array<Int64 like Idx<3>> = [3, 2, 1]
+let r: Array<Float64 like Idx<3>, RaggedIdx<lens>> = [[1.0, 2.0, 3.0], [4.0, 5.0], [6.0]]
+let row_sums = method_for(r) <@> lambda(g: Array<Float64 like RaggedIdx<_>>) -> reduce(g, (+)) |> compute
+let total = reduce(row_sums, (+))
+// EXPECT: row_sums = [6, 9, 6]
+// EXPECT: total = 21
+"""
+
+// RaggedIdx cannot be the FIRST index slot: with no prior index there is no
+// iteration position to drive the lengths lookup (formalism 4.4 -- the
+// ragged extent is a function of the outer index). The rank-1 annotation
+// also cannot describe the rank-2 nested literal.
+let test_raggedidx_first_slot_reject = """
+let lens: Array<Int64 like Idx<2>> = [2, 1]
+let r: Array<Float64 like RaggedIdx<lens>> = [[1.0, 2.0], [3.0]]
+// EXPECT: typecheck failure — RaggedIdx requires at least one prior index.
+"""
+
+// ---------------------------------------------------------------------------
+// Ragged round 2: shape-preserving elementwise maps, sub-views that carry
+// their length, and the surface rules that used to fail silently.
+// ---------------------------------------------------------------------------
+
+// Elementwise map over a ragged array: same-shaped ragged output. The kernel
+// param is a scalar ELEMENT (contrast the consuming lambda(g) -> reduce(g,+)
+// form); TypeCheck keeps the ragged inner dim in the output type, and codegen
+// allocates a fresh pool over shared extents/lens/offsets metadata. Printed
+// as the flat value sequence, row structure preserved underneath.
+let test_ragged_elementwise_map = """
+let r = [[1.0, 2.0, 3.0], [4.0, 5.0], [6.0, 7.0, 8.0, 9.0]]
+let d = method_for(r) <@> lambda(e) -> e * 2.0 |> compute
+// EXPECT: d = [2, 4, 6, 8, 10, 12, 14, 16, 18]
+"""
+
+// Elementwise output is itself a first-class ragged value: feed it straight
+// into the consuming (row-reduce) form. The map's output shares the parent's
+// lens metadata, which is exactly what the downstream peel reads.
+let test_ragged_elementwise_then_reduce = """
+let r = [[1.0, 2.0, 3.0], [4.0, 5.0], [6.0]]
+let d = method_for(r) <@> lambda(e) -> e * 10.0 |> compute
+let sums = method_for(d) <@> lambda(g: Array<Float64 like RaggedIdx<_>>) -> reduce(g, (+)) |> compute
+// EXPECT: sums = [60, 90, 60]
+"""
+
+// A let-bound ragged row now carries its length: `let row = r(i)` binds a
+// RaggedRow (pointer + len) rather than decaying to a bare pointer, so
+// every length-dependent op downstream works -- print, extents, reduce,
+// and element reads.
+let test_ragged_subview_metadata = """
+let r = [[1.0, 2.0, 3.0], [4.0, 5.0], [6.0]]
+let row = r(1)
+let n = extents(row)
+let s = reduce(row, (+))
+let v = row(0)
+// EXPECT: row = [4, 5]
+// EXPECT: n = 2
+// EXPECT: s = 9
+// EXPECT: v = 4
+"""
+
+// extents() on a MULTI-RANK ragged array is statically ill-posed: the
+// ragged dimension's extent varies per row, so there is no scalar answer
+// for the tuple form to contain. extents answers from the argument type
+// where it can, and rejects where the type says the question has no
+// answer. (Per-row lengths: extents on a peeled or indexed row.)
+let test_ragged_extents_rank2_reject = """
+let r = [[1.0, 2.0], [3.0]]
+let e = extents(r)
+// EXPECT: typecheck failure — extents on a ragged array is per-row for the ragged dimension.
+"""
+
+// A ragged operand slipping past the peel (here: multi-array method_for
+// mixing ragged with dense) is gated rather than silently miscompiled --
+// the standard loop nest knows nothing about per-row lengths. Co-iteration
+// semantics for ragged operands are a rewrite-spec question.
+let test_ragged_multi_array_reject = """
+let r = [[1.0, 2.0], [3.0]]
+let d = [10.0, 20.0]
+let x = method_for(r, d) <@> lambda(g: Array<Float64 like RaggedIdx<_>>, y) -> reduce(g, (+)) + y |> compute
+// EXPECT: typecheck failure — ragged operands support only the single-array peel forms.
+"""
+
 // A wildcard `_` is a hole, not a value: it is only meaningful as a compound-
 // index coordinate (B((a, _, c))), where the index dispatch consumes it. Bound
 // into a let as part of a tuple value, it has escaped and must be rejected at
@@ -1432,6 +1544,14 @@ let indexTypeTests = [
     ("Range Compound Map", test_range_compound_map)
     ("Range Compound Reads Compound", test_range_compound_reads_compound)
     ("Range Compound Mixed (rejects)", test_range_compound_mixed_reject)
+    ("Ragged Tuple Form Read", test_ragged_tuple_form_read)
+    ("RaggedIdx Closed Toplevel Peel", test_raggedidx_closed_toplevel_peel)
+    ("RaggedIdx First Slot (rejects)", test_raggedidx_first_slot_reject)
+    ("Ragged Elementwise Map", test_ragged_elementwise_map)
+    ("Ragged Elementwise Then Reduce", test_ragged_elementwise_then_reduce)
+    ("Ragged Subview Metadata", test_ragged_subview_metadata)
+    ("Ragged Extents Rank2 (rejects)", test_ragged_extents_rank2_reject)
+    ("Ragged Multi Array (rejects)", test_ragged_multi_array_reject)
     ("Wildcard Escape In Let (rejects)", test_wildcard_escape_reject)
     ("Transpose 2D Nonsquare", test_transpose_2d_nonsquare)
     ("Transpose Square", test_transpose_square)

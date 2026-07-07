@@ -1187,6 +1187,24 @@ let isRaggedArrayType (arrTy: IRArrayType) : bool =
         | Some "__raggedidx_inline" | Some "__raggedidx" | Some "__raggedidx_opaque" -> true
         | _ -> false)
 
+/// A rank-1 value whose single axis is a RAGGED-FAMILY inner dimension: a
+/// peeled/indexed row of a ragged literal (__raggedidx*), a DepIdx-allocated
+/// array (__depidx_inner), or a group_by result (__group_member). All three
+/// share the same runtime row shape -- a pointer plus a per-row length --
+/// and are represented as `RaggedRow<T>` when bound (`.len`, operator[]).
+/// This is the ONE predicate for "does this rank-1 operand carry its length
+/// inline as .len rather than via .extents", used consistently by the
+/// sub-view binding emission, reduce (both forms), IRExtent, and print, so
+/// the accessor never disagrees with the declared type.
+let isRaggedRowType (arrTy: IRArrayType) : bool =
+    arrTy.IndexTypes.Length = 1 &&
+    (match arrTy.IndexTypes.[0].Tag with
+     | Some t ->
+         t.StartsWith "__raggedidx"
+         || t = "__depidx_inner"
+         || t = "__group_member"
+     | None -> false)
+
 /// Detect whether an IRArrayType represents a DepIdx array — outer Idx plus
 /// an inner record whose Extent is a function of the outer iteration index.
 /// Recognized by the `__depidx_inner` tag on a non-first index. Once
@@ -1758,9 +1776,7 @@ let rec exprToCppCore (subst: SubstMap) (names: Map<IRId, string>) (expr: IRExpr
                 // not via a pointer-to-extents like Array<T,1>. Its only axis is
                 // dim 0. Every other operand (Array, higher-rank ragged) uses the
                 // materialized `.extents[dim]`.
-                let isRaggedRow =
-                    (isRaggedArrayType at || isDepIdxArrayType at)
-                    && at.IndexTypes.Length = 1
+                let isRaggedRow = isRaggedRowType at
                 if isRaggedRow && dim = 0 then
                     sprintf "(int64_t)(%s.len)" arrName
                 else
@@ -1816,9 +1832,7 @@ let rec exprToCppCore (subst: SubstMap) (names: Map<IRId, string>) (expr: IRExpr
         // the operand's actual C++ type.
         let isRagged =
             match inferExprType arrExpr with
-            | ArrayElem at ->
-                (isRaggedArrayType at || isDepIdxArrayType at)
-                && at.IndexTypes.Length = 1
+            | ArrayElem at -> isRaggedRowType at
             | _ -> false
         let reduceAccAt (i: string) =
             if isCompound then sprintf "%s.data[%s]" arrStr i else sprintf "%s[%s]" arrStr i
@@ -4147,6 +4161,37 @@ let genScalarBinding (ctx: CodeGenContext) (name: string) (value: IRExpr) (ty: I
         // their let-bound results must use the same wrapper type, not the
         // raw `promote<T, N>::type` storage pointer that would lose
         // `.extents` and silently decay to the data pointer.
+        // Rank-1 ragged-family SUB-VIEW binding: `let row = r(i)` on a ragged
+        // (or DepIdx-allocated) parent, or `let g0 = grouped(i)` on a group_by
+        // result. Previously these bound as a raw T* (RaggedRow's decay
+        // operator / the grouped row pointer), losing the row LENGTH -- so
+        // every downstream length-dependent op (reduce, extents, print)
+        // emitted accessors a bare pointer doesn't have. Bind as
+        // RaggedRow<T> instead:
+        //   * ragged/DepIdx parent: Ragged<T>::operator[] already RETURNS
+        //     RaggedRow{ptr,len}, so only the declared type changes.
+        //   * grouped parent: the Array<T*,1> value has no lens member; the
+        //     length comes from the group_keys offsets table (looked up via
+        //     ctx.GroupedArrays), same source the peel path uses.
+        let raggedRowSubview =
+            match value, resolvedTy with
+            | IRIndex (parent, [idxExpr], _), ArrayElem rowTy when isRaggedRowType rowTy ->
+                let valueStr = exprToCppCtx ctx value
+                let elemStr = elemTypeToCpp rowTy.ElemType
+                let isGroupRow = rowTy.IndexTypes.[0].Tag = Some "__group_member"
+                if isGroupRow then
+                    let parentName = exprToCppCtx ctx parent
+                    match Map.tryFind parentName ctx.GroupedArrays with
+                    | Some gkName ->
+                        let idxStr = exprToCppCtx ctx idxExpr
+                        Some [sprintf "%sRaggedRow<%s> %s = { %s, %s__offsets[(%s) + 1] - %s__offsets[%s] };"
+                                  ind elemStr name valueStr gkName idxStr gkName idxStr]
+                    | None -> None  // grouped parent not registered (non-var producer): fall through to raw
+                else
+                    Some [sprintf "%sRaggedRow<%s> %s = %s;" ind elemStr name valueStr]
+            | _ -> None
+        if raggedRowSubview.IsSome then raggedRowSubview.Value
+        else
         let producesWrapper =
             match value with
             | IRFieldAccess _ -> true
@@ -4614,27 +4659,69 @@ let genApplyCombinator (ctx: CodeGenContext) (name: string) (info: ApplyInfo) (b
                 match lengthsSource with
                 | None -> None
                 | Some (ngroupsExpr, perRowLenExpr) ->
-                    // Ragged-peel kernel resolution through
-                    // `resolveCallable`. The kernel reaches this site
-                    // as IRVar(callableId, _); the resolver walks back
-                    // to the lifted IRCallable. Without this,
-                    // tryRaggedPeel returns None and execution falls
-                    // through to the standard loop nest path, which
-                    // doesn't know about ragged peeling — generating a
-                    // doubled-up nested loop (one for each of the
-                    // array's index types) and indexing the output 2D
-                    // instead of 1D-per-row.
-                    //
-                    // The inline body emission stays: this site inlines
-                    // the kernel body inside the per-row loop, with the
-                    // peeled row binding `subName` substituted for the
-                    // kernel's param. `subName` is now emitted as
-                    // `RaggedRow<T>` (matching the kernel param type and
-                    // cppArrayTypeStr's verdict for a rank-1 ragged value),
-                    // so the param name binds directly to it in the nameMap
-                    // with no type mismatch. (RaggedRow also decays to `T*`
-                    // via its `operator T*()` where a raw pointer is wanted.)
+                    // Elementwise-vs-consuming dispatch, keyed on the OUTPUT
+                    // type -- the authoritative signal, because TypeCheck
+                    // already made this exact decision (paramUsedAsArray):
+                    // a CONSUMING kernel (lambda(g) -> reduce(g, +)) collapses
+                    // the ragged inner dim, so the output is dense rank-1; an
+                    // ELEMENTWISE kernel (lambda(e) -> e * 2.0) leaves it in
+                    // place, so the output keeps a ragged-family inner slot.
+                    // Re-deriving the choice from the param type or body here
+                    // would risk disagreeing with the type the rest of the
+                    // pipeline committed to.
+                    let outputInnerTags =
+                        match info.OutputType with
+                        | ArrayElem a when a.IndexTypes.Length >= 2 ->
+                            a.IndexTypes |> List.skip 1 |> List.choose (fun ix -> ix.Tag)
+                        | _ -> []
+                    let outputIsRaggedShaped =
+                        outputInnerTags |> List.exists (fun t -> t.StartsWith "__raggedidx" || t = "__depidx_inner")
+                    let outputIsGroupShaped =
+                        outputInnerTags |> List.exists (fun t -> t = "__group_member")
                     match resolveCallable info.Kernel with
+                    | Some callable when callable.Params.Length = 1 && outputIsGroupShaped ->
+                        // Elementwise map over a group_by result. The grouped
+                        // value is an Array<T*,1> without lens/offsets wrapper
+                        // members, and the group-shaped output type has no
+                        // consumer support downstream (print, further peels
+                        // resolve lengths through ctx.GroupedArrays, which this
+                        // site cannot extend). Gate rather than miscompile;
+                        // mapping BEFORE grouping is semantically equivalent.
+                        Some (codegenError ctx ind "elementwise map over a group_by result is not yet supported; apply the map to the values BEFORE group_by (equivalent), or reduce per group")
+                    | Some callable when callable.Params.Length = 1 && outputIsRaggedShaped ->
+                        // Elementwise map over a ragged array: shape-preserving.
+                        // The output is a fresh Ragged<T> that SHARES the
+                        // parent's extents/lens/offsets metadata (same shape by
+                        // construction) over a newly allocated contiguous pool
+                        // (offsets[n] = total element count) with its own
+                        // row-pointer table. Kernel applies per element; the
+                        // param binds each element value.
+                        let param = callable.Params.[0]
+                        let inElemStr = elemTypeToCpp arrType.ElemType
+                        let outElem =
+                            match info.OutputType with
+                            | ArrayElem a -> a.ElemType
+                            | t -> t
+                        let outElemStr = elemTypeToCpp outElem
+                        let eName = sprintf "%s__e" name
+                        let nameMap0 = Map.add param.VarId eName ctx.VarNames
+                        let nameMap =
+                            callable.Captures
+                            |> List.fold (fun m c -> Map.add c.Id c.Name m) nameMap0
+                        let bodyStr = exprToCpp nameMap callable.Body
+                        let code =
+                            [ sprintf "%s// ragged elementwise map over '%s' (shape-preserving; shares extents/lens/offsets)" ind arrName
+                              sprintf "%s%s* %s__pool = new %s[%s.offsets[%s.extents[0]]];" ind outElemStr name outElemStr arrName arrName
+                              sprintf "%s%s** %s__rows = new %s*[%s.extents[0]];" ind outElemStr name outElemStr arrName
+                              sprintf "%sRagged<%s> %s = { %s__rows, %s.extents, %s.lens, %s.offsets };" ind outElemStr name name arrName arrName arrName
+                              sprintf "%sfor (size_t __g = 0; __g < %s.extents[0]; __g++) {" ind arrName
+                              sprintf "%s    %s__rows[__g] = %s__pool + %s.offsets[__g];" ind name name arrName
+                              sprintf "%s    for (size_t __k = 0; __k < %s.lens[__g]; __k++) {" ind arrName
+                              sprintf "%s        const %s %s = %s[__g][__k];" ind inElemStr eName arrName
+                              sprintf "%s        %s__rows[__g][__k] = %s;" ind name bodyStr
+                              sprintf "%s    }" ind
+                              sprintf "%s}" ind ]
+                        Some code
                     | Some callable when callable.Params.Length = 1 ->
                         let param = callable.Params.[0]
                         // Rewriter from the pre-Path-1 days: rewrites
@@ -4707,6 +4794,27 @@ let genApplyCombinator (ctx: CodeGenContext) (name: string) (info: ApplyInfo) (b
     
     let raggedResult = tryRaggedPeel ()
     if raggedResult.IsSome then raggedResult.Value
+    else
+    
+    // Ragged/grouped operands are handled ONLY by tryRaggedPeel (single
+    // array, single-param kernel). Anything that slipped past it -- a
+    // multi-array method_for mixing a ragged operand with others, or a
+    // multi-param kernel over a ragged array -- would fall into the standard
+    // loop nest, which knows nothing about per-row lengths: it would emit a
+    // doubled-up dense nest over the placeholder inner extent and index the
+    // output 2D. That is SILENTLY WRONG code, so gate it loudly here.
+    // (DepIdx-tagged arrays are deliberately not gated: their dependent
+    // bounds have their own standard-nest handling.) Co-iteration semantics
+    // for ragged operands -- e.g. aligning a dense per-row array against
+    // ragged rows -- are a language-design question for the rewrite spec.
+    let raggedStandardNestOperand =
+        info.ArrayTypes |> List.exists (fun at ->
+            at.IndexTypes |> List.exists (fun ix ->
+                match ix.Tag with
+                | Some t -> t.StartsWith "__raggedidx" || t.StartsWith "__group_"
+                | None -> false))
+    if raggedStandardNestOperand then
+        codegenError ctx ind "method_for over a ragged or grouped operand supports only the single-array, single-row-param form (lambda(g) -> ...) or an elementwise map (lambda(e) -> ...); mixing ragged operands with other arrays or multi-param kernels is not yet supported"
     else
     
     // Pre-materialize any inline array expressions (mask, intersect, union, etc.)
@@ -5996,6 +6104,20 @@ let rec genBinding (ctx: CodeGenContext) (binding: IRBinding) (builder: IRBuilde
         let (elemType, elemErrCode) = inferElemTypeStrict ctx ind arrExpr "reduce"
         let elemStr = elemTypeToCpp elemType
 
+        // Length accessor: a rank-1 ragged-family operand (a let-bound row of
+        // a ragged/DepIdx array or of a group_by result) is a RaggedRow<T>,
+        // which carries its length inline as `.len` -- not `.extents[0]`.
+        // Same predicate the expression-form reduce, IRExtent, and the
+        // sub-view binding use, so the accessor always matches the declared
+        // type. Element access `%s[%s]` works for both via operator[].
+        let isRaggedRowOperand =
+            match inferExprType arrExpr with
+            | ArrayElem at -> isRaggedRowType at
+            | _ -> false
+        let boundExpr =
+            if isRaggedRowOperand then sprintf "%s.len" arrName
+            else sprintf "%s.extents[0]" arrName
+
         // Decide whether to emit a runtime extent check based on whether
         // the array's innermost-dim extent is statically known.
         let isStaticallyNonEmpty =
@@ -6010,7 +6132,7 @@ let rec genBinding (ctx: CodeGenContext) (binding: IRBinding) (builder: IRBuilde
             if isStaticallyNonEmpty then []
             else [
                 sprintf "%s// reduce: dynamic extent — runtime non-emptiness guard" ind
-                sprintf "%sif (%s.extents[0] == 0) { std::cerr << \"reduce: empty array, no reduction possible\" << std::endl; std::abort(); }" ind arrName
+                sprintf "%sif (%s == 0) { std::cerr << \"reduce: empty array, no reduction possible\" << std::endl; std::abort(); }" ind boundExpr
             ]
 
         let code =
@@ -6026,7 +6148,7 @@ let rec genBinding (ctx: CodeGenContext) (binding: IRBinding) (builder: IRBuilde
                 elemErrCode @ guardLines @ wrapperLines @ [
                     sprintf "%s// reduce: accumulator loop, eager" ind
                     sprintf "%s%s %s = %s[0];" ind elemStr name arrName
-                    sprintf "%sfor (size_t __ri = 1; __ri < %s.extents[0]; __ri++) {" ind arrName
+                    sprintf "%sfor (size_t __ri = 1; __ri < %s; __ri++) {" ind boundExpr
                     sprintf "%s    %s = %s(%s, %s[__ri]);" ind name wname name arrName
                     sprintf "%s}" ind
                 ]
@@ -7832,12 +7954,34 @@ let genPrintStatements (modul: IRModule) : string list =
                     (match unwrapMaterialization b.Value with
                      | IRApplyCombinator _ -> true
                      | _ -> false)
+                // A rank-1 ragged-family SUB-VIEW binding (`let row = r(i)`,
+                // `let g0 = grouped(i)`) is a RaggedRow<T> with an inline
+                // `.len` -- printable directly, now that the binding carries
+                // its length (it used to bind as a bare T* and had to be
+                // skipped).
+                let isRaggedRowBinding =
+                    isRaggedRowType arrType &&
+                    (match b.Value with IRIndex _ -> true | _ -> false)
                 if isCompoundRowSubview then
                     [sprintf "    // (trailing-row view '%s' not auto-printed; the raw T* row carries no extents — derive scalars via %s(t))" b.Name b.Name]
-                elif isRaggedLiteralBinding then
-                    // Ragged: iterate using offsets table. Print as flat
-                    // comma-separated values across all rows; this matches
-                    // the validation framework's expectation of a flat list.
+                elif isRaggedRowBinding then
+                    let firstVar = sprintf "%s__first" b.Name
+                    [
+                        sprintf "    cout << \"%s = [\";" b.Name
+                        sprintf "    bool %s = true;" firstVar
+                        sprintf "    for (size_t __rk = 0; __rk < %s.len; __rk++) {" b.Name
+                        sprintf "        if (!%s) cout << \", \";" firstVar
+                        sprintf "        %s = false;" firstVar
+                        sprintf "        cout << %s[__rk];" b.Name
+                        "    }"
+                        "    cout << \"]\" << endl;"
+                    ]
+                elif isRaggedLiteralBinding || (isRaggedPeelOutput && rank >= 2) then
+                    // Ragged wrapper with lens/offsets companions: a ragged
+                    // LITERAL, or an ELEMENTWISE map output (shape-preserving
+                    // Ragged<T> sharing the parent's metadata). Iterate rows
+                    // via .lens; print as the flat value sequence the
+                    // validation framework expects.
                     let firstVar = sprintf "%s__first" b.Name
                     [
                         sprintf "    cout << \"%s = [\";" b.Name

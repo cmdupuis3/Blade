@@ -3229,6 +3229,25 @@ let rec inferExpr (env: TypeEnv) (expr: Expr) : TypeResult<TypedExpr> =
                 if arrTy.IndexTypes.Length = 1 then
                     Ok (mkTyped (TExprExtents tArr) (IRTScalar ETInt64))
                 else
+                    // extents() is static-first: it answers from the ARGUMENT
+                    // TYPE when possible (IRExtent emits a literal for
+                    // statically-evaluable extents). A ragged-family slot has
+                    // no scalar extent AT ALL -- its extent is a per-row
+                    // function of the outer position -- so the multi-rank
+                    // tuple form is statically ill-posed for such arrays
+                    // (the runtime fallback would read a meaningless 0
+                    // placeholder). Reject with guidance instead.
+                    let raggedFamilySlot =
+                        arrTy.IndexTypes |> List.exists (fun ix ->
+                            match ix.Tag with
+                            | Some t ->
+                                t.StartsWith "__raggedidx"
+                                || t = "__depidx_inner"
+                                || t.StartsWith "__group_"
+                            | None -> false)
+                    if raggedFamilySlot then
+                        Error (Other "extents() on a ragged (or grouped) array has no scalar answer for the ragged dimension -- its extent varies per row. Use extents(row) on a peeled or indexed row for a per-row length, or the lengths array itself.")
+                    else
                     // Multi-rank: tuple of Int64s, one per dimension
                     let n = arrTy.IndexTypes.Length
                     let tupleTy = IRTTuple (List.replicate n (IRTScalar ETInt64))
@@ -4483,7 +4502,23 @@ and checkExpr (env: TypeEnv) (expected: IRType) (expr: Expr) : TypeResult<TypedE
             | Error _ -> Error (TypeMismatch (expected, tE.Type)))
 
 // ---- Shared helpers for both let paths (let-as-expression and top-level DeclLet) ----
-//
+
+/// Scan a lowered IRType for the `__error_ragged_no_prior` placeholder that
+/// lowerTypeExpr plants when RaggedIdx appears as the FIRST index slot (no
+/// prior index to drive the per-row lengths lookup, formalism 4.4). Lowering
+/// can only produce a degenerate placeholder -- IT cannot Error -- so the
+/// annotation consumers (let bindings, function signatures) call this and
+/// surface the actual rejection. Without this check the placeholder used to
+/// sail through silently.
+and irTypeHasRaggedNoPrior (t: IRType) : bool =
+    match t with
+    | ArrayElem at ->
+        (at.IndexTypes |> List.exists (fun ix -> ix.Tag = Some "__error_ragged_no_prior"))
+        || irTypeHasRaggedNoPrior at.ElemType
+    | IRTTuple ts -> ts |> List.exists irTypeHasRaggedNoPrior
+    | FuncElem (ps, r) -> (ps |> List.exists irTypeHasRaggedNoPrior) || irTypeHasRaggedNoPrior r
+    | _ -> false
+
 // inferLetBinding (let-as-expression in function bodies and blocks) and
 // checkDecl/DeclLet (top-level let declarations) share their annotation handling
 // and PatVar binding logic. Extracting them here keeps the two paths in sync;
@@ -4511,6 +4546,9 @@ and inferLetBindingValue (env: TypeEnv) (binding: Binding) : TypeResult<TypedExp
     match binding.Type with
     | Some annot ->
         let annotTy = lowerTypeExpr env annot
+        if irTypeHasRaggedNoPrior annotTy then
+            Error (Other "RaggedIdx requires at least one prior index in the array's index list: the ragged extent is a per-row function of the OUTER iteration position (formalism 4.4), so there is nothing for a leading RaggedIdx to vary over. Add an outer index, e.g. Array<T like Idx<n>, RaggedIdx<lens>>.")
+        else
         checkExpr env annotTy binding.Value |> Result.bind (fun tv ->
             // Prefer the annotation as the canonical type — it can be more
             // specific than what the value synthesized to.
@@ -5345,6 +5383,9 @@ and checkFunctionDecl (env: TypeEnv) (funcDecl: FunctionDecl) : TypeResult<Typed
     let retType = match funcDecl.ReturnType with
                   | Some t -> lowerTypeExpr env t
                   | None -> env.Subst.Fresh()
+    if (paramTypes |> List.exists irTypeHasRaggedNoPrior) || irTypeHasRaggedNoPrior retType then
+        Error (Other (sprintf "function '%s': RaggedIdx requires at least one prior index in the array's index list -- the ragged extent is a per-row function of the OUTER iteration position (formalism 4.4). Add an outer index, e.g. Array<T like Idx<n>, RaggedIdx<lens>>." funcDecl.Name))
+    else
     let funcType = mkFuncArrow paramTypes retType
     // Reuse pre-pass varId if this function was already pre-registered (static functions)
     // This ensures other functions' bodies reference the same varId

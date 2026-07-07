@@ -775,6 +775,91 @@ let r = s(0)
 // ============================================================================
 
 /// Phase 1: Foreign key arrays, ETIndexRef, array captures
+// ---------------------------------------------------------------------------
+// group_by x standard-array intersection coverage: the grouped result is a
+// first-class ragged value, so plain array reads and downstream reductions
+// should work on it without going through a kernel. Fixture (uneven groups,
+// first-seen key order): region [0,1,0,0,1], temps [10,20,30,40,50] ->
+// group 0 = [10,30,40], group 1 = [20,50].
+// ---------------------------------------------------------------------------
+
+// Direct element reads off the grouped value at binding level -- both the
+// curried grouped(i)(j) and tuple-arg grouped(i, j) spellings. Existing
+// group_by tests consume groups only through method_for kernels; this pins
+// the grouped result as an ordinarily-indexable rank-2 value.
+let test_groupby_direct_reads = """
+let region = [0, 1, 0, 0, 1]
+let temps = [10.0, 20.0, 30.0, 40.0, 50.0]
+let gk = group_keys(region)
+let grouped = group_by(temps, gk)
+let a = grouped(0)(1)
+let b = grouped(1, 0)
+let c = grouped(0)(2)
+// EXPECT: a = 30
+// EXPECT: b = 20
+// EXPECT: c = 40
+"""
+
+// Group SIZES via extents(g) with UNEVEN groups. The existing extents test
+// runs over a ragged literal (lens from the literal's own companions); here
+// the row length comes from the group_keys offsets table at the peel point,
+// and unequal groups distinguish the per-group length from any constant.
+let test_groupby_sizes_uneven = """
+let region = [0, 1, 0, 0, 1]
+let temps = [10.0, 20.0, 30.0, 40.0, 50.0]
+let gk = group_keys(region)
+let grouped = group_by(temps, gk)
+let sizes = method_for(grouped) <@> lambda(g: Array<Float64 like RaggedIdx<_>>) -> extents(g) |> compute
+// EXPECT: sizes = [3, 2]
+"""
+
+// The canonical SQL aggregate composed end-to-end in Blade terms: per-group
+// reduction (a ragged peel producing a dense rank-1 of group sums), then a
+// plain dense reduction over that for the grand total -- SUM(x) GROUP BY k
+// followed by SUM over groups. Exercises the dense-array downstream of the
+// SQL-side output with a dynamic (ngroups) extent.
+let test_groupby_grand_total = """
+let region = [0, 1, 0, 0, 1]
+let temps = [10.0, 20.0, 30.0, 40.0, 50.0]
+let gk = group_keys(region)
+let grouped = group_by(temps, gk)
+let sums = method_for(grouped) <@> lambda(g: Array<Float64 like RaggedIdx<_>>) -> reduce(g, (+)) |> compute
+let grand = reduce(sums, (+))
+// EXPECT: sums = [80, 70]
+// EXPECT: grand = 150
+"""
+
+// A let-bound GROUP row carries its length: `let g0 = grouped(i)` binds a
+// RaggedRow whose len comes from the group_keys offsets table (the grouped
+// value itself has no lens member). Print, reduce, and element reads all
+// work on the binding.
+let test_groupby_row_subview = """
+let region = [0, 1, 0, 0, 1]
+let temps = [10.0, 20.0, 30.0, 40.0, 50.0]
+let gk = group_keys(region)
+let grouped = group_by(temps, gk)
+let g0 = grouped(0)
+let s0 = reduce(g0, (+))
+let v = g0(2)
+// EXPECT: g0 = [10, 30, 40]
+// EXPECT: s0 = 80
+// EXPECT: v = 40
+"""
+
+// Elementwise map over a group_by result is gated (the grouped value lacks
+// the wrapper metadata the shape-preserving map shares, and group-shaped
+// outputs have no downstream consumers yet). Mapping BEFORE grouping is
+// semantically equivalent and supported.
+let test_groupby_elementwise_reject = """
+let region = [0, 1, 0]
+let temps = [10.0, 20.0, 30.0]
+let gk = group_keys(region)
+let grouped = group_by(temps, gk)
+let d = method_for(grouped) <@> lambda(e) -> e * 2.0 |> compute
+// EXPECT: typecheck failure — elementwise map over a group_by result is gated; map before grouping.
+"""
+
+
 let foreignKeyTests = [
     ("Foreign Key Basic", test_foreignKey_basic)
     ("Foreign Key Iterate", test_foreignKey_iterate)
@@ -849,6 +934,11 @@ let groupByTests = [
     ("GroupBy After Method For", test_groupby_after_method_for)
     ("GroupBy Compound Two Keys First", test_groupby_compound_two_keys_first)
     ("GroupBy Compound Two Keys Reduce", test_groupby_compound_two_keys_reduce)
+    ("GroupBy Direct Reads", test_groupby_direct_reads)
+    ("GroupBy Sizes Uneven", test_groupby_sizes_uneven)
+    ("GroupBy Grand Total", test_groupby_grand_total)
+    ("GroupBy Row Subview", test_groupby_row_subview)
+    ("GroupBy Elementwise (rejects)", test_groupby_elementwise_reject)
 ]
 
 /// Phase 5: sort
