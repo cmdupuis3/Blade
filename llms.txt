@@ -1,0 +1,26 @@
+# Project Overview
+This repository is for Blade, an array-oriented, functional language. Here, you will find the Blade compiler, Coq proofs, and general prose and user guides.
+
+# Documentation Map
+* [All-purpose Formalism](rewrite/blade_formalism_v10.md) - Large, but useful to skim for general info about specific topics.
+* [Proofs](rewrite/proofs) - A collection of proofs demonstrating most of Blade's design principles. Shorter than the formalism, but more abstract.
+* [Equivarient ML Speculation](rewrite/blade_ml_spec.md) - Exploratory syntax for supporting machine learning applications.
+
+# Important Rules & Conventions
+
+Blade syntax can parallel certain languages sometimes, like Python, OCaml, Rust, or Haskell, but be aware that anything involving iterations or array symmetry is highly distinctive. Important features to note:
+* Use method_for and object_for, or Blade's particular "for ... in ..." syntax, which can cover multiple dimensions at once. 
+* Pay attention to transposition when translating from other languages. In Blade, the fastest way is the only way, meaning that cache-striding is (usually) a compiler error.
+* Virtual arrays, particularly "range", are similar in function but very different from ranges in most languages. Avoid using them as a backdoor to conventional iteration.
+* Robust array types that offer symmetry tracking inside a Hindley-Milner type system.
+
+ALso, depending on the state of the repo, certain bits may contradict each other. In general, the precedence of canonicality is:
+1. The Coq proofs
+2. The formalism
+3. The compiler itself
+4. Speculative markdowns
+
+# Key Files
+* [Compiler](rewrite/blade-compiler) - Root directory for all the compiler files.
+* `rewrite/QUICKSTART` - Intro to Blade, assuming a new user coming from the Python/numpy world.
+* `rewrite/QUICKSTARTp2` - Intro to more complex features in Blade.
