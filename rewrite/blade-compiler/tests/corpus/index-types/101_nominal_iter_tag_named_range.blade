@@ -1,0 +1,31 @@
+// TEST: Nominal: Iter Tag Named Range
+// ============================================================================
+// Nominal index value tests
+// ============================================================================
+//
+// These exercise the post-Option-C handling of named (nominal) index types
+// at the value level: how the typechecker tags values, how step 5's
+// indexing check accepts matching tags, and how iteration-tagging makes
+// the common kernel-over-virtual-array pattern work without explicit
+// annotations on the kernel parameter.
+// ============================================================================
+// Nominal index value tests
+// ============================================================================
+//
+// These exercise the post-Option-C handling of named (nominal) index types
+// at the value level: how the typechecker tags values, how step 5's
+// indexing check accepts matching tags, and how iteration-tagging makes
+// the common kernel-over-virtual-array pattern work without explicit
+// annotations on the kernel parameter.
+// Iteration-tagging via range<NamedIdx>: the virtual array's element
+// type is Nat<Lat>, so the lambda parameter `i` is inferred as a
+// Lat-tagged value. Step 5's tag check on A(i) then matches the array's
+// LatIdx slot tag without needing an explicit annotation on `i`.
+//
+// This is the practical payoff of iteration-tagging — the common
+// pattern of "iterate over an index space and look up sibling arrays"
+// typechecks naturally.
+type Lat = Idx<3>
+let A: Array<Float64 like Lat> = [10.0, 20.0, 30.0]
+let r = method_for(range<Lat>) <@> lambda(i) -> A(i) * 2.0 |> compute
+// EXPECT: r = [20, 40, 60]

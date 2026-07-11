@@ -1,0 +1,45 @@
+// TEST: GroupBy Direct Reads
+// ============================================================================
+// Test Lists
+// ============================================================================
+
+/// Phase 1: Foreign key arrays, ETIndexRef, array captures
+// ---------------------------------------------------------------------------
+// group_by x standard-array intersection coverage: the grouped result is a
+// first-class ragged value, so plain array reads and downstream reductions
+// should work on it without going through a kernel. Fixture (uneven groups,
+// first-seen key order): region [0,1,0,0,1], temps [10,20,30,40,50] ->
+// group 0 = [10,30,40], group 1 = [20,50].
+// ---------------------------------------------------------------------------
+
+// Direct element reads off the grouped value at binding level -- both the
+// curried grouped(i)(j) and tuple-arg grouped(i, j) spellings. Existing
+// group_by tests consume groups only through method_for kernels; this pins
+// the grouped result as an ordinarily-indexable rank-2 value.
+// ============================================================================
+// Test Lists
+// ============================================================================
+
+/// Phase 1: Foreign key arrays, ETIndexRef, array captures
+// ---------------------------------------------------------------------------
+// group_by x standard-array intersection coverage: the grouped result is a
+// first-class ragged value, so plain array reads and downstream reductions
+// should work on it without going through a kernel. Fixture (uneven groups,
+// first-seen key order): region [0,1,0,0,1], temps [10,20,30,40,50] ->
+// group 0 = [10,30,40], group 1 = [20,50].
+// ---------------------------------------------------------------------------
+
+// Direct element reads off the grouped value at binding level -- both the
+// curried grouped(i)(j) and tuple-arg grouped(i, j) spellings. Existing
+// group_by tests consume groups only through method_for kernels; this pins
+// the grouped result as an ordinarily-indexable rank-2 value.
+let region = [0, 1, 0, 0, 1]
+let temps = [10.0, 20.0, 30.0, 40.0, 50.0]
+let gk = group_keys(region)
+let grouped = group_by(temps, gk)
+let a = grouped(0)(1)
+let b = grouped(1, 0)
+let c = grouped(0)(2)
+// EXPECT: a = 30
+// EXPECT: b = 20
+// EXPECT: c = 40

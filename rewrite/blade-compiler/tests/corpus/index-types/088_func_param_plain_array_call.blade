@@ -1,0 +1,10 @@
+// TEST: Func Param Plain Array Call
+// Latent-bug regression: a function with a plain (non-ragged) array param
+// is now actually callable. Previously the decl emitted `const size_t*`
+// extents companions, but the call site didn't pass them, producing a
+// "too few arguments" C++ error. Argument-driven companion-passing fixes
+// both ragged and non-ragged calls.
+function arraySum(A: Array<Float64 like Idx<3>>) -> Float64 = reduce(A, (+))
+let A = [1.0, 2.0, 3.0]
+let result = arraySum(A)
+// EXPECT: result = 6

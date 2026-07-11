@@ -1,0 +1,15 @@
+// TEST: FA T4: Func returning array
+// ----------------------------------------------------------------------------
+// T4: Function returning array
+// ----------------------------------------------------------------------------
+// The dual shape: a function whose return type is an array. This exercises
+// the IRTArrow form `[SVal _] -> IRTArrow ([SIdx _], elem, identity)`.
+// ----------------------------------------------------------------------------
+// T4: Function returning array
+// ----------------------------------------------------------------------------
+// The dual shape: a function whose return type is an array. This exercises
+// the IRTArrow form `[SVal _] -> IRTArrow ([SIdx _], elem, identity)`.
+function range3() -> Array<Float64 like Idx<3>> = [1.0, 2.0, 3.0]
+let arr = range3()
+let r = arr(1)
+// EXPECT: r = 2

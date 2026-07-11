@@ -1,0 +1,14 @@
+// TEST: Nominal: Cross-Tag Index Mismatch (rejects)
+// Step 5 (Option C, conservative) tag check: indexing an array whose slot
+// has a user-named tag with a value bearing a *different* named tag is a
+// type error. Tests the "real teeth" of §4.18.2's nominal-typing discipline.
+//
+// Lat and Lon are two distinct named index types both backed by Idx<3>.
+// Structural extent equality is irrelevant — nominal tags differ, so the
+// indexing is rejected. The (1 : Lon) cast produces a Lon-tagged value
+// via the literal-coercion rule; A's slot expects Lat; mismatch.
+type Lat = Idx<3>
+type Lon = Idx<3>
+let A: Array<Float64 like Lat> = [10.0, 20.0, 30.0]
+let v = A((1 : Lon))
+// EXPECT: typecheck failure — "Array index tag mismatch: slot expects 'Lat'..."

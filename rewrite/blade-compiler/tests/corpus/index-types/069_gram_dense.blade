@@ -1,0 +1,7 @@
+// TEST: Gram Dense
+// gram(A, B) distinct arrays -> general dense 2x2 (no symmetry).
+// gram(A, B) distinct arrays -> general dense 2x2 (no symmetry).
+let A: Array<Float64 like Idx<2>, Idx<3>> = [[1.0, 2.0, 3.0], [4.0, 5.0, 6.0]]
+let B: Array<Float64 like Idx<2>, Idx<3>> = [[1.0, 0.0, 1.0], [0.0, 1.0, 0.0]]
+let result = gram(A, B)
+// EXPECT: result = [4, 2, 10, 5]

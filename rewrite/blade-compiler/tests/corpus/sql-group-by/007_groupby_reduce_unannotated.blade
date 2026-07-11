@@ -1,0 +1,16 @@
+// TEST: GroupBy Reduce Unannotated
+// Same per-group sum without an explicit kernel-param annotation. Works
+// because reduce's typecheck drives inference for unconstrained kernel
+// parameters: it deduces an element type from the kernel's first arg
+// (concrete IRTScalar wins; otherwise defaults to Float64), then unifies
+// the array arg with a fresh rank-1 array of that elem type. For section
+// kernels like (+) the args are fresh type variables, so this falls
+// through to the Float64 default — matching what section lowering already
+// emits in the IR. For non-Float64 data with a section kernel, an
+// explicit annotation on the kernel param is still required.
+let region = [0, 1, 2, 0, 1, 2]
+let temps = [20.0, 25.0, 30.0, 22.0, 27.0, 32.0]
+let gk = group_keys(region)
+let grouped = group_by(temps, gk)
+let result = method_for(grouped) <@> lambda(g) -> reduce(g, (+)) |> compute
+// EXPECT: result = [42, 52, 62]

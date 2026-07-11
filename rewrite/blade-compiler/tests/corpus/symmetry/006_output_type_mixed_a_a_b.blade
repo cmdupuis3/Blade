@@ -1,0 +1,9 @@
+// TEST: Output Type: Mixed (A,A,B)
+// Mixed: (A, A, B) -> SymIdx<2, 3>, Idx<3>
+let A = [1.0, 2.0, 3.0]
+let B = [4.0, 5.0, 6.0]
+let L = method_for(A, A, B)
+let f = lambda(x, y, z) where comm(x, y, z) -> x * y * z
+let result = L <@> f |> compute
+// Triangular on A,A (i<=j), full on B (k=0..2)
+// EXPECT: result = [4, 5, 6, 8, 10, 12, 12, 15, 18, 16, 20, 24, 24, 30, 36, 36, 45, 54]

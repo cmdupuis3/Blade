@@ -1,0 +1,6 @@
+// TEST: Object For Array Product
+let A = [1.0, 2.0, 3.0]
+let B = [4.0, 5.0]
+let L = method_for(A) <*> method_for(B)
+let result = L <@> lambda(x, y) -> x * y |> compute
+// EXPECT: result = [4, 5, 8, 10, 12, 15]

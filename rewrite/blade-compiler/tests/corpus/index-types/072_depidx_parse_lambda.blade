@@ -1,0 +1,17 @@
+// TEST: DepIdx Parse Lambda
+// ============================================================================
+// DepIdx Round 1 — parse + typecheck only.
+// Iteration codegen is deferred to a later round; these tests confirm the
+// surface syntax parses and types lower without error. The function body
+// returns a constant to avoid exercising any iteration path.
+// ============================================================================
+// ============================================================================
+// DepIdx Round 1 — parse + typecheck only.
+// Iteration codegen is deferred to a later round; these tests confirm the
+// surface syntax parses and types lower without error. The function body
+// returns a constant to avoid exercising any iteration path.
+// ============================================================================
+// DepIdx<outer, lambda(i) -> body>: explicit lambda form
+function f(A: Array<Float64 like DepIdx<Idx<3>, lambda(i) -> Idx<3>>>) -> Float64 = {
+    0.0
+}

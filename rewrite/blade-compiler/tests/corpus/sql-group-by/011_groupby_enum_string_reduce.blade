@@ -1,0 +1,19 @@
+// TEST: GroupBy Enum String Reduce
+// ============================================================================
+// Phase 4 follow-on: additional coverage for gaps surfaced during recon
+// ============================================================================
+// ============================================================================
+// Phase 4 follow-on: additional coverage for gaps surfaced during recon
+// ============================================================================
+// String-EnumIdx + reduce per group. Exercises Case 2 (EnumIdx reverse
+// lookup) with std::string keys, then peels each group and reduces.
+// The reduce kernel sees a Ragged sub-array; the per-group lengths come
+// from the gk's offsets.
+type LandType = EnumIdx<["forest", "urban", "farmland"]>
+type StationIdx = Idx<6>
+let codes: Array<LandType like StationIdx> = ["forest", "urban", "farmland", "forest", "urban", "farmland"]
+let temps: Array<Float64 like StationIdx> = [20.0, 25.0, 30.0, 22.0, 27.0, 32.0]
+let gk = group_keys(codes)
+let grouped = group_by(temps, gk)
+let result = method_for(grouped) <@> lambda(g: Array<Float64 like RaggedIdx<_>>) -> reduce(g, (+)) |> compute
+// EXPECT: result = [42, 52, 62]

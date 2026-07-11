@@ -1,0 +1,11 @@
+// TEST: Bracketed Arithmetic
+// Bracketed arithmetic operators for outer product
+let A = [1.0, 2.0, 3.0]
+let B = [10.0, 20.0]
+let added = A [+] B
+let multiplied = A [*] B
+let powered = A [^] B
+// added is 3x2: [[11,21], [12,22], [13,23]]
+// EXPECT: added = [11, 21, 12, 22, 13, 23]
+// multiplied is 3x2: [[10,20], [20,40], [30,60]]
+// EXPECT: multiplied = [10, 20, 20, 40, 30, 60]

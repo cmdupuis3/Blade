@@ -1,0 +1,19 @@
+// TEST: FA T3: Array of named funcs
+// ----------------------------------------------------------------------------
+// T3: Array of named functions (literal construction)
+// ----------------------------------------------------------------------------
+// Stores function values in an array literal. Indexing returns one function;
+// calling it produces a scalar. This is the minimum case for "array of
+// functions" — rank 1, uniform element type.
+// ----------------------------------------------------------------------------
+// T3: Array of named functions (literal construction)
+// ----------------------------------------------------------------------------
+// Stores function values in an array literal. Indexing returns one function;
+// calling it produces a scalar. This is the minimum case for "array of
+// functions" — rank 1, uniform element type.
+function add1(x: Float64) -> Float64 = x + 1.0
+function mul2(x: Float64) -> Float64 = x * 2.0
+function sub1(x: Float64) -> Float64 = x - 1.0
+let funcs: Array<(Float64 -> Float64) like Idx<3>> = [add1, mul2, sub1]
+let r = funcs(1)(5.0)
+// EXPECT: r = 10

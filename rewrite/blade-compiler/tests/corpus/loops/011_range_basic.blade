@@ -1,0 +1,6 @@
+// TEST: Range Basic
+// range<Idx<5>> produces virtual array [0, 1, 2, 3, 4]
+let R = method_for(range<Idx<5>>)
+let f = lambda(i) -> i * 2.0
+let result = R <@> f |> compute
+// EXPECT: result = [0, 2, 4, 6, 8]

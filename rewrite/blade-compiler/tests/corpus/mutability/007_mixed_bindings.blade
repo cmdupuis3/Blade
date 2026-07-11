@@ -1,0 +1,10 @@
+// TEST: Mixed bindings
+let static N = 100
+let result = {
+    let x = N + 1
+    let mut y = N + 2
+    x = x + 1
+    y = y + 1
+    x + y
+}
+// EXPECT: result = 205

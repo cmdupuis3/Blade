@@ -1,0 +1,19 @@
+// TEST: Elementwise Compare
+// Elementwise comparison on NUMERIC arrays via bare `>=` produces a Bool array
+// (exercises the object_for output-element-type = kernel-return-type path:
+// double inputs, bool output). Feeds compound.
+// Elementwise comparison on NUMERIC arrays via bare `>=` produces a Bool array
+// (exercises the object_for output-element-type = kernel-return-type path:
+// double inputs, bool output). Feeds compound.
+type CD = Idx<5>
+let A: Array<Float64 like CD> = [1.0, 2.0, 3.0, 4.0, 5.0]
+let B: Array<Float64 like CD> = [3.0, 3.0, 3.0, 3.0, 3.0]
+let ge = A >= B
+let f = compound(A, ge)
+// A >= B = [F,F,T,T,T] -> coordinates {2, 3, 4} = 3.0, 4.0, 5.0
+let n = extents(f)
+let x2 = f(2)
+let x4 = f(4)
+// EXPECT: n = 3
+// EXPECT: x2 = 3.0
+// EXPECT: x4 = 5.0

@@ -1,0 +1,6 @@
+// TEST: Apply Combinator
+let A = [1.0, 2.0, 3.0]
+let L = method_for(A, A)
+let f = lambda(x, y) -> x * y
+let result = L <@> f |> compute
+// EXPECT: result = [1, 2, 3, 2, 4, 6, 3, 6, 9]

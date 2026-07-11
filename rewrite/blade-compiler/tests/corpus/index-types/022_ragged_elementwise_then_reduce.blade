@@ -1,0 +1,11 @@
+// TEST: Ragged Elementwise Then Reduce
+// Elementwise output is itself a first-class ragged value: feed it straight
+// into the consuming (row-reduce) form. The map's output shares the parent's
+// lens metadata, which is exactly what the downstream peel reads.
+// Elementwise output is itself a first-class ragged value: feed it straight
+// into the consuming (row-reduce) form. The map's output shares the parent's
+// lens metadata, which is exactly what the downstream peel reads.
+let r = [[1.0, 2.0, 3.0], [4.0, 5.0], [6.0]]
+let d = method_for(r) <@> lambda(e) -> e * 10.0 |> compute
+let sums = method_for(d) <@> lambda(g: Array<Float64 like RaggedIdx<_>>) -> reduce(g, (+)) |> compute
+// EXPECT: sums = [60, 90, 60]

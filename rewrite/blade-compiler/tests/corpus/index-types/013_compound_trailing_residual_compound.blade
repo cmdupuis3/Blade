@@ -1,0 +1,25 @@
+// TEST: Compound Trailing Residual Compound
+// Residual COMPOUND + trailing dim: a rank-3 mask over (X,Y,Z) with trailing
+// T; B((0, _, _)) pins x = 0, leaving a rank-2 residual compound over (Y,Z)
+// that SHARES the parent window and keeps the trailing stride (same
+// make_partial_compound helper, no data copy). Present at x = 0 (with
+// blocks): (0,0)=[0,1], (1,0)=[20,21], (1,1)=[30,31].
+// Residual COMPOUND + trailing dim: a rank-3 mask over (X,Y,Z) with trailing
+// T; B((0, _, _)) pins x = 0, leaving a rank-2 residual compound over (Y,Z)
+// that SHARES the parent window and keeps the trailing stride (same
+// make_partial_compound helper, no data copy). Present at x = 0 (with
+// blocks): (0,0)=[0,1], (1,0)=[20,21], (1,1)=[30,31].
+type X = Idx<2>
+type Y = Idx<2>
+type Z = Idx<2>
+type T = Idx<2>
+let dense: Array<Float64 like X, Y, Z, T> = [
+    [[[0.0, 1.0], [10.0, 11.0]], [[20.0, 21.0], [30.0, 31.0]]],
+    [[[40.0, 41.0], [50.0, 51.0]], [[60.0, 61.0], [70.0, 71.0]]]]
+let m: Array<Bool like X, Y, Z> = [[[true, false], [true, true]], [[false, true], [true, false]]]
+let B = compound(dense, m)
+let r = B((0, _, _))
+let x1 = r((1, 1), 1)
+let x2 = r((1, 0), 0)
+// EXPECT: x1 = 31
+// EXPECT: x2 = 20

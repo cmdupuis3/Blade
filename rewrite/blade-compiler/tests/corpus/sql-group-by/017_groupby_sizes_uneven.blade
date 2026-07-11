@@ -1,0 +1,15 @@
+// TEST: GroupBy Sizes Uneven
+// Group SIZES via extents(g) with UNEVEN groups. The existing extents test
+// runs over a ragged literal (lens from the literal's own companions); here
+// the row length comes from the group_keys offsets table at the peel point,
+// and unequal groups distinguish the per-group length from any constant.
+// Group SIZES via extents(g) with UNEVEN groups. The existing extents test
+// runs over a ragged literal (lens from the literal's own companions); here
+// the row length comes from the group_keys offsets table at the peel point,
+// and unequal groups distinguish the per-group length from any constant.
+let region = [0, 1, 0, 0, 1]
+let temps = [10.0, 20.0, 30.0, 40.0, 50.0]
+let gk = group_keys(region)
+let grouped = group_by(temps, gk)
+let sizes = method_for(grouped) <@> lambda(g: Array<Float64 like RaggedIdx<_>>) -> extents(g) |> compute
+// EXPECT: sizes = [3, 2]

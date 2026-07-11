@@ -1,0 +1,21 @@
+// TEST: Wildcard Escape In Let (rejects)
+// A wildcard `_` is a hole, not a value: it is only meaningful as a compound-
+// index coordinate (B((a, _, c))), where the index dispatch consumes it. Bound
+// into a let as part of a tuple value, it has escaped and must be rejected at
+// typecheck. `a` and `c` are defined so the ONLY failure reason is the escaped
+// hole (not an undefined name). This currently rejects at typecheck via the
+// value-forming-boundary guard in inferLetBindingValue; before that guard it
+// slipped to a lowering failwith, which is the wrong (unlocated, exception-
+// based) mechanism.
+// A wildcard `_` is a hole, not a value: it is only meaningful as a compound-
+// index coordinate (B((a, _, c))), where the index dispatch consumes it. Bound
+// into a let as part of a tuple value, it has escaped and must be rejected at
+// typecheck. `a` and `c` are defined so the ONLY failure reason is the escaped
+// hole (not an undefined name). This currently rejects at typecheck via the
+// value-forming-boundary guard in inferLetBindingValue; before that guard it
+// slipped to a lowering failwith, which is the wrong (unlocated, exception-
+// based) mechanism.
+let a = 1
+let c = 3
+let t = (a, _, c)
+// EXPECT: typecheck failure — a wildcard hole cannot be bound as a value.

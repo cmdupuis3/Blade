@@ -1,0 +1,18 @@
+// TEST: Reynolds 2D Sym Identity
+// ============================================================================
+// Reynolds Symmetric 2D — Same array (identity + Reynolds)
+// ============================================================================
+// g(x,y) = 2*x + y, comm(x,y) for identity optimization
+// reynolds(g)(x,y) = (2x+y) + (2y+x) = 3(x+y)
+// A=[1,2,3], stored triangularly: (0,0)=6, (0,1)=9, (0,2)=12, (1,1)=12, (1,2)=15, (2,2)=18
+// ============================================================================
+// Reynolds Symmetric 2D — Same array (identity + Reynolds)
+// ============================================================================
+// g(x,y) = 2*x + y, comm(x,y) for identity optimization
+// reynolds(g)(x,y) = (2x+y) + (2y+x) = 3(x+y)
+// A=[1,2,3], stored triangularly: (0,0)=6, (0,1)=9, (0,2)=12, (1,1)=12, (1,2)=15, (2,2)=18
+let A = [1.0, 2.0, 3.0]
+let L = method_for(A, A)
+let g = lambda(x, y) where comm(x, y) -> 2.0 * x + y
+let result = L <@> reynolds(g) |> compute
+// EXPECT: result = [6.0, 9.0, 12.0, 12.0, 15.0, 18.0]

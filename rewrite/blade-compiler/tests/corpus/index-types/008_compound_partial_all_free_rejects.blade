@@ -1,0 +1,12 @@
+// TEST: Compound Partial All Free (rejects)
+// All coordinates free pins nothing -- the "residual" would be the array
+// itself. Rejected at typecheck with a drop-the-index message.
+// All coordinates free pins nothing -- the "residual" would be the array
+// itself. Rejected at typecheck with a drop-the-index message.
+type Lat = Idx<2>
+type Lon = Idx<3>
+let dense: Array<Float64 like Lat, Lon> = [[10.0, 20.0, 30.0], [40.0, 50.0, 60.0]]
+let m: Array<Bool like Lat, Lon> = [[true, false, true], [true, true, false]]
+let B = compound(dense, m)
+let r = B((_, _))
+// EXPECT: typecheck failure — all coordinates free pins nothing.

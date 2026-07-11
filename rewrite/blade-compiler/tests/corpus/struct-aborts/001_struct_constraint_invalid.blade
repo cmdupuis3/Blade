@@ -1,0 +1,8 @@
+// TEST: Struct Constraint Invalid
+// Struct with where constraint - INVALID construction (should abort)
+struct Balanced {
+    a: Int,
+    b: Int,
+    total: Int
+} where a + b == total
+let x = Balanced { a = 3, b = 7, total = 99 }

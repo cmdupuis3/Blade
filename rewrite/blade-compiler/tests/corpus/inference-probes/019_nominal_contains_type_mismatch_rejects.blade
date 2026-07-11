@@ -1,0 +1,8 @@
+// TEST: Nominal: Contains Type Mismatch (rejects)
+// `contains(A, x)` requires x's type to unify with A's element type.
+// Passing a Float64 to an Int64-array contains should reject in typecheck,
+// not silently coerce or pick a default. The unify in the ExprContains
+// rule (TypeCheck.fs) is the rejection point.
+let ints = [1, 2, 3]
+let bad = contains(ints, 5.0)
+// EXPECT: typecheck failure — Int64 vs Float64 in contains value

@@ -1,0 +1,21 @@
+// TEST: Semijoin Then Mask
+// Composition, post-redesign: "members of A in B, then those > 2". mask now
+// returns Bool presence arrays, so this is the elementwise AND of the semijoin
+// mask and the comparison mask over A's shared named index, then compactify.
+type AB = Idx<8>
+let A: Array<Int64 like AB> = [1, 2, 3, 4, 5, 6, 7, 8]
+let B = [2, 3, 5, 7]
+let inB = mask(A, lambda(x) -> contains(B, x))
+let gt2 = mask(A, lambda(x) -> x > 2)
+let both = inB && gt2
+let f = compound(A, both)
+// inB = [F,T,T,F,T,F,T,F], gt2 = [F,F,T,T,T,T,T,T], AND = [F,F,T,F,T,F,T,F]
+// -> coordinates {2, 4, 6} = 3, 5, 7
+let n = extents(f)
+let x2 = f(2)
+let x4 = f(4)
+let x6 = f(6)
+// EXPECT: n = 3
+// EXPECT: x2 = 3
+// EXPECT: x4 = 5
+// EXPECT: x6 = 7

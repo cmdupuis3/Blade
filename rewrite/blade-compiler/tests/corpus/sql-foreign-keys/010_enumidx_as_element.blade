@@ -1,0 +1,9 @@
+// TEST: EnumIdx As Element
+// EnumIdx values used as foreign keys
+type RegionCode = EnumIdx<[100, 200, 300]>
+
+// Key array stores actual values (100, 200, 300), not positions
+let codes = [100, 300, 200, 100, 300, 200]
+let L = method_for(codes)
+let result = L <@> lambda(c) -> c |> compute
+// EXPECT: result = [100, 300, 200, 100, 300, 200]

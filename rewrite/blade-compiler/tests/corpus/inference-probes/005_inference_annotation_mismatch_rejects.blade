@@ -1,0 +1,13 @@
+// TEST: Inference: Annotation Mismatch (rejects)
+// Probe E: annotated kernel param with WRONG elem type relative to source.
+// Tests Gap 2.5: does buildApplyInfo (or unify) catch the mismatch
+// between an annotated Int64 kernel param and a Float64 source array?
+//
+// If error: unification correctly enforces elem-type compatibility.
+// If silent: confirmed silent miscompile — kernel param's elem type and
+//   source's elem type are decoupled at typecheck/codegen.
+let r = [[1.0, 2.0, 3.0], [4.0, 5.0], [6.0]]
+let sums = method_for(r) <@> lambda(g: Array<Int64 like RaggedIdx<_>>) -> reduce(g, (+)) |> compute
+// If error (good): test fails at typecheck with a clear message.
+// If silent (bad): result is whatever the implicit conversion produces.
+// EXPECT: typecheck failure with elem-type mismatch

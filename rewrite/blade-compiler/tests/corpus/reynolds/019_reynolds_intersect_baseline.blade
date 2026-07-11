@@ -1,0 +1,13 @@
+// TEST: Reynolds Intersect Baseline
+// Baseline: method_for over (intersect-derived array, regular array),
+// non-Reynolds kernel. The intersect result is a filtered view that
+// keeps positions where both masks agree.
+let above2 = unique([3.0, 4.0, 5.0, 3.0])
+let below5 = unique([1.0, 2.0, 3.0, 4.0, 1.0])
+let both = intersect(above2, below5)
+let B = [10.0, 20.0]
+let g = lambda(x, y) -> x * y
+let result = method_for(both, B) <@> g |> compute
+// both = [3, 4]; 2x2 rectangular.
+// (3,10)=30 (3,20)=60 (4,10)=40 (4,20)=80
+// EXPECT: result = [30.0, 60.0, 40.0, 80.0]

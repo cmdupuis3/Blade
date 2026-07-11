@@ -1,0 +1,8 @@
+// TEST: Object For Functor Map
+let A = [1.0, 2.0, 3.0]
+let L = method_for(A)
+let f = lambda(x) -> x + 10.0
+let twice = lambda(x) -> x * 2.0
+let c = L <@> f
+let result = object_for(<$>) <@> (twice, c) |> compute
+// EXPECT: result = [22.0, 24.0, 26.0]

@@ -1,0 +1,22 @@
+// TEST: Symmetry Demonstration
+// Case 1: Different arrays, no symmetry -> speedup = 1
+let A = [1.0, 2.0, 3.0]
+let B = [4.0, 5.0, 6.0]
+let L1 = method_for(A, B)
+let f1 = lambda(x, y) -> x * y
+let r1 = L1 <@> f1 |> compute
+// EXPECT: r1 = [4.0, 5.0, 6.0, 8.0, 10.0, 12.0, 12.0, 15.0, 18.0]
+
+// Case 2: Same array twice WITH comm -> triangular iteration, speedup = 2
+let C = [1.0, 2.0, 3.0]
+let L2 = method_for(C, C)
+let f2 = lambda(x, y) where comm(x, y) -> x * y
+let r2 = L2 <@> f2 |> compute
+// EXPECT: r2 = [1.0, 2.0, 3.0, 4.0, 6.0, 9.0]
+
+// Case 3: Same array three times with comm (gives 6x speedup)
+let D = [1.0, 2.0, 3.0]
+let L3 = method_for(D, D, D)
+let f3 = lambda(x, y, z) where comm(x, y, z) -> x * y * z
+let r3 = L3 <@> f3 |> compute
+// EXPECT: r3 = [1, 2, 3, 4, 6, 9, 8, 12, 18, 27]

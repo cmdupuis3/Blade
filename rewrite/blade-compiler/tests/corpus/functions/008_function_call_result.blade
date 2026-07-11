@@ -1,0 +1,10 @@
+// TEST: Function Call Result
+// Function declaration + call with verified result
+function add(a: Float64, b: Float64) -> Float64 = a + b
+function square(x: Float64) -> Float64 = x * x
+let r1 = add(3.0, 4.0)
+let r2 = square(5.0)
+let r3 = add(square(2.0), square(3.0))
+// EXPECT: r1 = 7
+// EXPECT: r2 = 25
+// EXPECT: r3 = 13

@@ -1,0 +1,55 @@
+// TEST: FA T1: Func as scalar
+// ============================================================================
+// Arrays of functions (formalism §5.3 "models" case)
+// ============================================================================
+//
+// The formalism establishes that array element types can be arbitrary, including
+// function types. The canonical example from §5.3:
+//
+//     let models: Array<(Params → TimeSeries) like LatIdx, LonIdx>
+//     models(lat, lon)(land_model_params)(time)
+//
+// This file tests increasingly complex versions of this pattern, starting from
+// the simplest "function as scalar value" case and building up to the nested-
+// arrow case from the formalism. Each test stands alone; later tests assume
+// the language features exercised by earlier tests work.
+//
+// Expected status (Segment 6 starting position): some of these likely fail.
+// The failure pattern reveals which language features need work to fully
+// support the formalism's array-of-functions semantics.
+
+// ----------------------------------------------------------------------------
+// T1: Function as scalar value (baseline — should already work)
+// ----------------------------------------------------------------------------
+// Bind a named function to a variable, call through the variable.
+// If this fails, the rest of the file will too — it tests the most basic
+// "functions are first-class values" capability.
+// ============================================================================
+// Arrays of functions (formalism §5.3 "models" case)
+// ============================================================================
+//
+// The formalism establishes that array element types can be arbitrary, including
+// function types. The canonical example from §5.3:
+//
+//     let models: Array<(Params → TimeSeries) like LatIdx, LonIdx>
+//     models(lat, lon)(land_model_params)(time)
+//
+// This file tests increasingly complex versions of this pattern, starting from
+// the simplest "function as scalar value" case and building up to the nested-
+// arrow case from the formalism. Each test stands alone; later tests assume
+// the language features exercised by earlier tests work.
+//
+// Expected status (Segment 6 starting position): some of these likely fail.
+// The failure pattern reveals which language features need work to fully
+// support the formalism's array-of-functions semantics.
+
+// ----------------------------------------------------------------------------
+// T1: Function as scalar value (baseline — should already work)
+// ----------------------------------------------------------------------------
+// Bind a named function to a variable, call through the variable.
+// If this fails, the rest of the file will too — it tests the most basic
+// "functions are first-class values" capability.
+function add1(x: Float64) -> Float64 = x + 1.0
+let f: Float64 -> Float64 = add1
+let r = f(5.0)
+// EXPECT: r = 6

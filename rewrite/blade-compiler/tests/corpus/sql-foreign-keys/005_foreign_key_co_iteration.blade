@@ -1,0 +1,11 @@
+// TEST: Foreign Key Co-iteration
+// Zip temps and region for element-wise pairing, use region values to look up weights
+let temps = [20.0, 25.0, 30.0]
+let region = [0, 1, 2]
+let weights = [1.0, 2.0, 3.0]
+
+// Co-iterate: each (temp, region) pair, look up weight by region index
+let L = method_for(zip(temps, region))
+let result = L <@> lambda(t, r) -> t * weights(r) |> compute
+// 20*1=20, 25*2=50, 30*3=90
+// EXPECT: result = [20.0, 50.0, 90.0]

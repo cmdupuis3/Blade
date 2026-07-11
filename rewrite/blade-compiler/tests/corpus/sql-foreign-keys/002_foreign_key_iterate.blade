@@ -1,0 +1,6 @@
+// TEST: Foreign Key Iterate
+// Foreign key values can be iterated and used in kernels as integers
+let region = [0, 1, 2, 0, 1, 2]
+let L = method_for(region)
+let result = L <@> lambda(r) -> r * 10 |> compute
+// EXPECT: result = [0, 10, 20, 0, 10, 20]

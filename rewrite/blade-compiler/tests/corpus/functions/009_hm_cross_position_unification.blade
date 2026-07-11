@@ -1,0 +1,32 @@
+// TEST: HM Cross-Position Unification
+// ============================================================================
+// HM polymorphism × arity-scheme interaction probes
+// ============================================================================
+//
+// Blade uses F#/OCaml-style implicit Hindley-Milner polymorphism: type
+// variables (uppercase identifiers like `T`, `U`) and extent variables
+// (lowercase like `n`, `m`) appear in signatures without explicit binding,
+// and are unified across positions. These probes exercise the specific
+// interactions between HM type-var unification and Blade's arity machinery
+// (Poly packs, like-clauses, Reynolds combinators) that the language's
+// design separates into independent universes per Moggi 2000.
+// ============================================================================
+// ============================================================================
+// HM polymorphism × arity-scheme interaction probes
+// ============================================================================
+//
+// Blade uses F#/OCaml-style implicit Hindley-Milner polymorphism: type
+// variables (uppercase identifiers like `T`, `U`) and extent variables
+// (lowercase like `n`, `m`) appear in signatures without explicit binding,
+// and are unified across positions. These probes exercise the specific
+// interactions between HM type-var unification and Blade's arity machinery
+// (Poly packs, like-clauses, Reynolds combinators) that the language's
+// design separates into independent universes per Moggi 2000.
+// ============================================================================
+// HM unification: T in param and T in return refer to the same type
+// variable (cross-position unification, F#-style implicit polymorphism).
+function arr_id(a: Array<T like Idx<n>>) -> Array<T like Idx<n>> = a
+let xs: Array<Float64 like Idx<3>> = [1.0, 2.0, 3.0]
+let result = arr_id(xs)
+let r = result(0)
+// EXPECT: r = 1

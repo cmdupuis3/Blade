@@ -1,0 +1,10 @@
+// TEST: Idx Value Alias Runtime Smoke
+// Aliasing a runtime-evaluable index type at the alias-body position is
+// permitted by the validator (alias bodies accept any index type, runtime
+// or static). End-to-end test: declare the alias, use it as the second
+// index in a 2-D ragged array, index into the array, verify the value.
+let lens: Array<Int64 like Idx<3>> = [3, 2, 1]
+type Ragged3 = RaggedIdx<lens>
+let r: Array<Float64 like Idx<3>, Ragged3> = [[1.0, 2.0, 3.0], [4.0, 5.0], [6.0]]
+let v = r(0)(0)
+// EXPECT: v = 1

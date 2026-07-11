@@ -1,0 +1,14 @@
+// TEST: Foreign Key Struct
+// Struct with integer field used as a foreign key
+// ETIndexRef infrastructure exists but is exercised in Phase 2
+// when Array<RegionIdx like StationIdx> type annotations are enforced
+struct Station {
+    temp: Float64,
+    region: Int64
+}
+
+let s = Station { temp = 25.0, region = 2 }
+let t = s.temp
+let r = s.region
+// EXPECT: t = 25
+// EXPECT: r = 2

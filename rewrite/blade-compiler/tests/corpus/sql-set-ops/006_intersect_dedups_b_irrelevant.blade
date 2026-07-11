@@ -1,0 +1,9 @@
+// TEST: Intersect Dedups B Irrelevant
+// Duplicates in B don't affect the result. B's role is membership only;
+// B = [5, 5, 7, 7, 5] tests the same set as B = [5, 7]. A is already
+// unique so output order is direct.
+let A = [3, 5, 7]
+let B = [5, 5, 7, 7, 5]
+let r = intersect(A, B)
+let result = method_for(r) <@> lambda(x) -> x |> compute
+// EXPECT: result = [5, 7]

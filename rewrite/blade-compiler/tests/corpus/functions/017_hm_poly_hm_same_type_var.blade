@@ -1,0 +1,45 @@
+// TEST: HM Poly+HM Same Type Var
+// ---- Mixed Poly + HM: Poly<T^N> arity-polymorphism interacting with free
+// type variables. These exercise the unified specialization story — the
+// architecture must produce one concrete C++ function per distinct
+// (arity × type-binding) pattern at call sites.
+//
+// KNOWN-FAILING (as of this writing): both tests below currently fail
+// because the Poly stage's call-site arity detection (monomorphizeModule
+// in IR.fs, `let arity = args.Length`) treats every positional arg as a
+// pack element, not just the args destined for the Poly param. So
+// `f((10, 20, 30), 5)` arrives at Poly with arity=2 (total args), the
+// pack expands to 2 sub-params, and the resulting f_arity2 has 3 params
+// (pack_0, pack_1, scalar) while the call has 2 args — a shape mismatch
+// that HM downstream can't repair. Fixing this requires teaching Poly to
+// (a) recognize which positional args correspond to Poly params vs free
+// params, and (b) accept a tuple expression in a Poly position and
+// flatten it into individual pack elements at the call site. Until that
+// design lands, these tests document the intended Poly+HM semantics but
+// don't pass; treat them as forward-looking specs.
+// ---- Mixed Poly + HM: Poly<T^N> arity-polymorphism interacting with free
+// type variables. These exercise the unified specialization story — the
+// architecture must produce one concrete C++ function per distinct
+// (arity × type-binding) pattern at call sites.
+//
+// KNOWN-FAILING (as of this writing): both tests below currently fail
+// because the Poly stage's call-site arity detection (monomorphizeModule
+// in IR.fs, `let arity = args.Length`) treats every positional arg as a
+// pack element, not just the args destined for the Poly param. So
+// `f((10, 20, 30), 5)` arrives at Poly with arity=2 (total args), the
+// pack expands to 2 sub-params, and the resulting f_arity2 has 3 params
+// (pack_0, pack_1, scalar) while the call has 2 args — a shape mismatch
+// that HM downstream can't repair. Fixing this requires teaching Poly to
+// (a) recognize which positional args correspond to Poly params vs free
+// params, and (b) accept a tuple expression in a Poly position and
+// flatten it into individual pack elements at the call site. Until that
+// design lands, these tests document the intended Poly+HM semantics but
+// don't pass; treat them as forward-looking specs.
+// Same-T mix: the type variable inside the Poly pack and the free scalar
+// share the same name T, so they unify to a single concrete type at the
+// call site. The function picks the first element of the pack (typed T)
+// and adds the scalar (also T). The pack is passed as a tuple literal;
+// the scalar follows as a separate argument.
+function f(pack: Poly<T^0>, scalar: T) -> T = pack[0] + scalar
+let r = f((10, 20, 30), 5)
+// EXPECT: r = 15

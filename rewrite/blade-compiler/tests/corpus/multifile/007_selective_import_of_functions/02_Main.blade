@@ -1,0 +1,9 @@
+// TEST: Selective import of functions
+// MODULE: Main
+module Main
+from Helpers import double, negate
+
+let a = double(5.0)
+let b = negate(3.0)
+// EXPECT: a = 10
+// EXPECT: b = -3

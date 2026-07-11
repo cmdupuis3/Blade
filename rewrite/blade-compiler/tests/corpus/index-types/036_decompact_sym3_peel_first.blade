@@ -1,0 +1,11 @@
+// TEST: Decompact Sym3 Peel First
+// ---- General symmetric fission (rank >= 3) ----
+// ---- General symmetric fission (rank >= 3) ----
+// d=0: freed axis = dim 0, kept pair = (j,k) symmetric. Output Idx<3> ->
+// SymIdx<2,3>, mask {1,2,2}, storage out[i][a][b] with (j,k)=(a,a+b).
+let A = [1.0, 2.0, 3.0]
+let L = method_for(A, A, A)
+let f = lambda(x, y, z) where comm(x, y, z) -> x * y * z
+let sym = L <@> f |> compute
+let result = decompact(sym, 0)
+// EXPECT: result = [1, 2, 3, 4, 6, 9, 2, 4, 6, 8, 12, 18, 3, 6, 9, 12, 18, 27]

@@ -1,0 +1,6 @@
+// TEST: Pipe Apply Basic
+let A = [1.0, 2.0, 3.0]
+let L = method_for(A)
+let f = lambda(x) -> x + 10.0
+let result = f |@> L |> compute
+// EXPECT: result = [11.0, 12.0, 13.0]

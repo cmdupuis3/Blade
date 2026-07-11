@@ -1,0 +1,22 @@
+// TEST: Mask Basic
+// ============================================================================
+// Phase 2: mask(array, pred) — Filtered Iteration
+// ============================================================================
+// ============================================================================
+// Phase 2: mask(array, pred) — Filtered Iteration
+// ============================================================================
+// mask constructs the Bool PRESENCE array over A's own index space;
+// compound(A, m) compactifies. Reads are COORDINATE-based (positions in
+// the original space), so the selection stays composable with companion
+// columns over the same index space.
+let A = [3.0, -1.0, 4.0, -2.0, 5.0]
+let m = mask(A, lambda(x) -> x > 0.0)
+let pos = compound(A, m)
+let n = extents(pos)
+let x0 = pos(0)
+let x2 = pos(2)
+let x4 = pos(4)
+// EXPECT: n = 3
+// EXPECT: x0 = 3
+// EXPECT: x2 = 4
+// EXPECT: x4 = 5

@@ -1,0 +1,15 @@
+// TEST: GroupBy Elementwise (rejects)
+// Elementwise map over a group_by result is gated (the grouped value lacks
+// the wrapper metadata the shape-preserving map shares, and group-shaped
+// outputs have no downstream consumers yet). Mapping BEFORE grouping is
+// semantically equivalent and supported.
+// Elementwise map over a group_by result is gated (the grouped value lacks
+// the wrapper metadata the shape-preserving map shares, and group-shaped
+// outputs have no downstream consumers yet). Mapping BEFORE grouping is
+// semantically equivalent and supported.
+let region = [0, 1, 0]
+let temps = [10.0, 20.0, 30.0]
+let gk = group_keys(region)
+let grouped = group_by(temps, gk)
+let d = method_for(grouped) <@> lambda(e) -> e * 2.0 |> compute
+// EXPECT: typecheck failure — elementwise map over a group_by result is gated; map before grouping.

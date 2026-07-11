@@ -1,0 +1,14 @@
+// TEST: Idx Value Static Tuple Destructuring
+// Static tuple containing index types in `let static` destructuring:
+// permitted because the tuple is in static-context. Observation of
+// destructured components is direct — no arithmetic, since arithmetic
+// on named index types is forbidden (per the formalism: index types are
+// nominal labels with no useful arithmetic semantics; for value-level
+// position arithmetic, use virtual array iteration; for new index types
+// derived from arithmetic, type-level construction is a separate
+// workstream).
+type StationIdx = Idx<6>
+static function lookup_pair() -> (StationIdx, Idx<3>) = (4, 1)
+let static (a, b) = lookup_pair()
+let r = a
+// EXPECT: r = 4

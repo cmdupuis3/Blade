@@ -1,0 +1,6 @@
+// TEST: Unique No Duplicates
+// Already-unique input passes through unchanged.
+let A = [10, 20, 30, 40, 50]
+let u = unique(A)
+let result = method_for(u) <@> lambda(x) -> x |> compute
+// EXPECT: result = [10, 20, 30, 40, 50]

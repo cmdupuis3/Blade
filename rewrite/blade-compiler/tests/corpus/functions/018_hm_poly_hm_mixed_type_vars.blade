@@ -1,0 +1,10 @@
+// TEST: HM Poly+HM Mixed Type Vars
+// Mixed-type mix: Poly pack typed T, free scalar typed U. T and U are
+// distinct type variables that must specialize independently — T to the
+// pack element type (Float64 here from the literals), U to the scalar's
+// concrete type (Int64). The function returns the scalar (typed U), so
+// the result type comes from U alone. The pack is passed as a tuple
+// literal; the scalar follows as a separate argument.
+function g(pack: Poly<T^0>, scalar: U) -> U = scalar
+let r = g((1.0, 2.0, 3.0), 42)
+// EXPECT: r = 42

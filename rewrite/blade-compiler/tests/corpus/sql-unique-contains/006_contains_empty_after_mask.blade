@@ -1,0 +1,7 @@
+// TEST: Contains Empty After Mask
+// contains on an EMPTY filtered set (cardinality-0 compound) — returns
+// false without aborting.
+let A = [1, 2, 3]
+let empty_set = compound(A, mask(A, lambda(x) -> x > 100))
+let result = contains(empty_set, 5)
+// EXPECT: result = false

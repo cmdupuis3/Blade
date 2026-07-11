@@ -1,0 +1,16 @@
+// TEST: Struct With Array Field
+// struct with an array-typed field. Without lifting,
+// `samples = [1.0, 2.0, 3.0]` inline as a struct field value would
+// fail at codegen — array literals are statement-level constructs
+// (need allocation), not inline expressions. The lift pass moves the
+// literal to an auto-let binding, then references it by name in the
+// struct lit.
+struct Trace {
+    id: Int,
+    samples: Array<Float64 like Idx<3>>
+}
+let t = Trace { id = 7, samples = [1.0, 2.0, 3.0] }
+let id_val = t.id
+let s1 = t.samples[1]
+// EXPECT: id_val = 7
+// EXPECT: s1 = 2

@@ -1,0 +1,7 @@
+// TEST: Array Product 3-Way
+let A = [1.0, 2.0]
+let B = [10.0, 20.0]
+let C = [100.0, 200.0]
+let L = method_for(A) <*> method_for(B) <*> method_for(C)
+let result = L <@> lambda(x, y, z) -> x + y + z |> compute
+// EXPECT: result = [111, 211, 121, 221, 112, 212, 122, 222]

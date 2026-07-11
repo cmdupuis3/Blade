@@ -1,0 +1,10 @@
+// TEST: SQL Sum Where
+// SQL: SELECT SUM(temp), COUNT(*) FROM stations WHERE temp > 25.0
+// The whole aggregate-over-filtered pattern in two moves: mask constructs
+// the selection, compound applies it, reduce consumes the compact buffer.
+let temps = [20.0, 25.0, 30.0, 22.0, 27.0, 32.0]
+let hot = compound(temps, mask(temps, lambda(t) -> t > 25.0))
+let total = reduce(hot, (+))
+let n = extents(hot)
+// EXPECT: total = 89
+// EXPECT: n = 3

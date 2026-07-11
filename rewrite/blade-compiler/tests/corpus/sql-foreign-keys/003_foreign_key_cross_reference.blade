@@ -1,0 +1,9 @@
+// TEST: Foreign Key Cross-Reference
+// Use a foreign key to index into another array (lambda captures the lookup array)
+let region = [0, 1, 2, 0, 1, 2]
+let weights = [5.0, 6.0, 4.0]
+
+// Look up each station's region weight via foreign key indexing
+let L = method_for(region)
+let result = L <@> lambda(r) -> weights(r) |> compute
+// EXPECT: result = [5.0, 6.0, 4.0, 5.0, 6.0, 4.0]

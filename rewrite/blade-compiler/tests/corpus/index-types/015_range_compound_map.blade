@@ -1,0 +1,25 @@
+// TEST: Range Compound Map
+// range<CompoundIdx<m>>: a virtual driver over the PRESENT cells of a mask
+// (formalism 4.5 x range semantics: one loop level over the cardinality;
+// the kernel receives one coordinate param per mask dimension, in lex
+// order). The output is a compound array sharing the materialized index.
+// Kernel i*10+j makes each cell's value its own coordinates, so full-tuple
+// reads pin down exactly which cells were visited and in what coordinates.
+// range<CompoundIdx<m>>: a virtual driver over the PRESENT cells of a mask
+// (formalism 4.5 x range semantics: one loop level over the cardinality;
+// the kernel receives one coordinate param per mask dimension, in lex
+// order). The output is a compound array sharing the materialized index.
+// Kernel i*10+j makes each cell's value its own coordinates, so full-tuple
+// reads pin down exactly which cells were visited and in what coordinates.
+type Lat = Idx<2>
+type Lon = Idx<3>
+let m: Array<Bool like Lat, Lon> = [[true, false, true], [true, true, false]]
+let R = method_for(range<CompoundIdx<m>>) <@> lambda(i, j) -> i * 10 + j |> compute
+let y0 = R((0, 0))
+let y1 = R((0, 2))
+let y2 = R((1, 0))
+let y3 = R((1, 1))
+// EXPECT: y0 = 0
+// EXPECT: y1 = 2
+// EXPECT: y2 = 10
+// EXPECT: y3 = 11

@@ -1,0 +1,19 @@
+// TEST: Transpose Symmetric Identity
+// ----------------------------------------------------------------------------
+// Intra-group transpose: swapping two dimensions inside one index type is a
+// storage-preserving, per-class transform (symmetric -> identity, antisym ->
+// whole-array negation). No decompaction, no dense blow-up.
+// ----------------------------------------------------------------------------
+// Intra-group transpose: swapping two dimensions inside one index type is a
+// storage-preserving, per-class transform (symmetric -> identity, antisym ->
+// whole-array negation). No decompaction, no dense blow-up.
+// Symmetric intra-group transpose is the IDENTITY: A(i,j) = A(j,i), so storage
+// is unchanged and the result equals the source. Producer: reynolds(g), g=2x+y
+// -> 3(x+y), triangular canonicals (0,0)=6 (0,1)=9 (0,2)=12 (1,1)=12 (1,2)=15
+// (2,2)=18. transpose(sym,[0,1]) prints identically to sym.
+let A = [1.0, 2.0, 3.0]
+let L = method_for(A, A)
+let g = lambda(x, y) where comm(x, y) -> 2.0 * x + y
+let sym = L <@> reynolds(g) |> compute
+let result = transpose(sym, [0, 1])
+// EXPECT: result = [6, 9, 12, 12, 15, 18]

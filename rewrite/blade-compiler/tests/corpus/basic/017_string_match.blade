@@ -1,0 +1,17 @@
+// TEST: String Match
+// Match expression on string scrutinee. Each IRPatLit with an
+// IRLitString lowers via litToCpp to a `scrut == std::string("...")`
+// guard, chained as nested ternaries by the match codegen.
+let s = "urban"
+let code = match s with
+  | "forest" -> 1
+  | "urban" -> 2
+  | "farmland" -> 3
+  | _ -> 0
+let s2 = "ocean"
+let code2 = match s2 with
+  | "forest" -> 1
+  | "urban" -> 2
+  | _ -> 99
+// EXPECT: code = 2
+// EXPECT: code2 = 99

@@ -1,0 +1,8 @@
+// TEST: CoIter Basic
+// Co-iteration: elementwise product via shared index space
+// Co-iteration: elementwise product via shared index space
+// Co-iteration: for (A, B) in range<Idx<N>> produces elementwise result
+let A = [1.0, 2.0, 3.0]
+let B = [4.0, 5.0, 6.0]
+let result = for (A, B) in range<Idx<3>> <@> lambda(a, b) -> a * b |> compute
+// EXPECT: result = [4, 10, 18]

@@ -1,0 +1,4 @@
+// TEST: Validator: Anon Idx As Struct Field (rejects)
+// Anonymous index type as a struct field: rejected.
+struct Pair { i: Idx<3>, j: Idx<3> }
+let p = Pair { i = 1, j = 2 }

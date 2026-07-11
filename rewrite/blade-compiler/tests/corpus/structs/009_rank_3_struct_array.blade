@@ -1,0 +1,20 @@
+// TEST: Rank-3 Struct Array
+// rank-3 array of POD struct. Tests the per-element path
+// of the generalized walker, plus chained bracket indexing through three
+// levels.
+struct Particle {
+    x: Float64,
+    y: Float64
+}
+let grid: Array<Particle like Idx<2>, Idx<2>, Idx<2>> = [
+    [
+        [Particle { x = 1.0, y = 2.0 }, Particle { x = 3.0, y = 4.0 }],
+        [Particle { x = 5.0, y = 6.0 }, Particle { x = 7.0, y = 8.0 }]
+    ],
+    [
+        [Particle { x = 9.0, y = 10.0 }, Particle { x = 11.0, y = 12.0 }],
+        [Particle { x = 13.0, y = 14.0 }, Particle { x = 15.0, y = 16.0 }]
+    ]
+]
+let v = grid[1][0][1].y
+// EXPECT: v = 12

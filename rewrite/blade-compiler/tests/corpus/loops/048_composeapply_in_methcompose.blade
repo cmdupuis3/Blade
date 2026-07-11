@@ -1,0 +1,17 @@
+// TEST: ComposeApply In MethCompose
+// (compose-apply) @>> (canonical-apply) — method composition where
+// the left operand is a compose-apply. @>> semantics: at each index,
+// apply right's kernel to left's per-element result.
+// Right of @>> requires a single extractable kernel (which a
+// compose chain doesn't have), so we don't test compose-apply on
+// the right — only on the left.
+let A = [1.0, 2.0, 3.0]
+let f = lambda(x) -> x + 1.0
+let g = lambda(x) -> x * 2.0
+let h = lambda(x) -> x - 5.0
+let L = method_for(A)
+let p = (object_for(f) >>@ object_for(g)) <@> A   // [4, 6, 8]
+let q = L <@> h                                    // q's kernel: x - 5
+let result = p @>> q |> compute
+// At each index: h(p[i]) = p[i] - 5 = [-1, 1, 3]
+// EXPECT: result = [-1.0, 1.0, 3.0]

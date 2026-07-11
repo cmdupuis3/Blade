@@ -1,0 +1,10 @@
+// TEST: Struct Pattern
+// Struct destructuring in pattern
+struct Pair {
+    first: Int,
+    second: Int
+}
+let p = Pair { first = 10, second = 20 }
+let Pair { first, second } = p
+let total = first + second
+// EXPECT: total = 30

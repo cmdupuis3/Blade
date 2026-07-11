@@ -1,0 +1,17 @@
+// TEST: Compound Trailing Partial Gather
+// Scattered pin + one trailing dim: B((_, 0)) frees Lat at Lon = 0; the
+// surviving cells are non-contiguous, so their trailing BLOCKS are gathered
+// (make_partial_gather_dense_trail) into a fresh rank-2 dense array.
+// Scattered pin + one trailing dim: B((_, 0)) frees Lat at Lon = 0; the
+// surviving cells are non-contiguous, so their trailing BLOCKS are gathered
+// (make_partial_gather_dense_trail) into a fresh rank-2 dense array.
+type Lat = Idx<2>
+type Lon = Idx<3>
+type T = Idx<2>
+let dense: Array<Float64 like Lat, Lon, T> = [
+    [[0.0, 1.0], [10.0, 11.0], [20.0, 21.0]],
+    [[30.0, 31.0], [40.0, 41.0], [50.0, 51.0]]]
+let m: Array<Bool like Lat, Lon> = [[true, false, true], [true, true, false]]
+let B = compound(dense, m)
+let g = B((_, 0))
+// EXPECT: g = [[0, 1], [30, 31]]

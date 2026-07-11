@@ -1,0 +1,19 @@
+// TEST: Range Compound Reads Compound
+// range<CompoundIdx<m>> driving reads of a SAME-mask compound value: the
+// canonical "iterate the present cells, transform the stored values"
+// pattern. (The kernel captures B; coordinates arrive as size_t and flow
+// into the full-tuple read.)
+// range<CompoundIdx<m>> driving reads of a SAME-mask compound value: the
+// canonical "iterate the present cells, transform the stored values"
+// pattern. (The kernel captures B; coordinates arrive as size_t and flow
+// into the full-tuple read.)
+type Lat = Idx<2>
+type Lon = Idx<3>
+let dense: Array<Float64 like Lat, Lon> = [[1.0, 2.0, 3.0], [4.0, 5.0, 6.0]]
+let m: Array<Bool like Lat, Lon> = [[true, false, true], [true, true, false]]
+let B = compound(dense, m)
+let R = method_for(range<CompoundIdx<m>>) <@> lambda(i, j) -> B((i, j)) * 2.0 |> compute
+let y1 = R((0, 2))
+let y2 = R((1, 1))
+// EXPECT: y1 = 6
+// EXPECT: y2 = 10

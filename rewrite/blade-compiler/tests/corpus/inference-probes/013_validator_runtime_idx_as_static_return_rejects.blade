@@ -1,0 +1,4 @@
+// TEST: Validator: Runtime Idx As Static Return (rejects)
+// Runtime-evaluable index type as a static function return: rejected.
+let lens: Array<Int64 like Idx<3>> = [3, 2, 1]
+static function f() -> RaggedIdx<lens> = lens(0)

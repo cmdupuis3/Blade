@@ -1,0 +1,8 @@
+// TEST: AntisymIdx Reynolds n3
+// Smaller case n=3: strict pairs (0,1)(0,2)(1,2) = C(3,2)=3 elements.
+// value(i,j)=A[i]-A[j], A=[1,2,3]: (0,1)=-1 (0,2)=-2 (1,2)=-1
+let A = [1.0, 2.0, 3.0]
+let L = method_for(A, A)
+let g = lambda(x, y) where comm(x, y) -> 2.0 * x + y
+let result = L <@> reynolds(g, Antisymmetric) |> compute
+// EXPECT: result = [-1.0, -2.0, -1.0]

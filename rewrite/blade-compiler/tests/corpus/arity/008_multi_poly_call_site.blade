@@ -1,0 +1,9 @@
+// TEST: Multi Poly Call Site
+// Multi-Poly function with an actual call site. The two Poly packs must
+// have the same arity since both share the arity variable "r" by current
+// convention. Tests the multi-slot specialization path.
+function pairSum(xs: Poly<T^0>, ys: Poly<T^0>) -> T^0
+= xs[0] + ys[0] + xs[1] + ys[1]
+
+let result = pairSum((10.0, 20.0), (1.0, 2.0))
+// EXPECT: result = 33.0

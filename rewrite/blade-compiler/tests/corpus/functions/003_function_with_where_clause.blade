@@ -1,0 +1,11 @@
+// TEST: Function With Where Clause
+// Function with array parameters and a where clause. The body produces
+// a rank-2 tensor M[i][j] = A[i] * B[j], so the declared return type
+// matches that shape (Idx<n>, Idx<n>). The where clause asserts
+// `comm(A, B)`, but since A and B are distinct arrays the comm doesn't
+// fold into output symmetry — the output is full Idx, Idx, not SymIdx
+// (per Test_Symmetry test37). The point of this test is exercising
+// where-clause parsing alongside array-typed params.
+function covariance(A: Array<Float64 like Idx<n>>, B: Array<Float64 like Idx<n>>) 
+  where comm(A, B) -> Array<Float64 like Idx<n>, Idx<n>> = 
+  method_for(A, B) <@> lambda(x, y) -> x * y |> compute

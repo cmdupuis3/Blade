@@ -1,0 +1,9 @@
+// TEST: Validator: EnumIdx Mixed Values Inline (rejects)
+// Same kind of mixed-values rejection, but inline (no `type X = ...`).
+// Uses `Array<T like EnumIdx<[...]>>` — index domain position, which the
+// IndexTypeValidator permits. The mixed-values pre-pass then catches the
+// mixing. (Element position `Array<EnumIdx<[...]> like ...>` would trip
+// the validator first with "Anonymous index types cannot be used as an
+// array element type" — that path forces an alias which is already
+// covered by probe_v8.)
+let codes: Array<Float64 like EnumIdx<[1, "two"]>> = [1.0, 2.0]

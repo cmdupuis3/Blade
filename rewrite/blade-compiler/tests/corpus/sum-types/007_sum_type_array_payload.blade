@@ -1,0 +1,19 @@
+// TEST: Sum Type Array (Payload)
+// Array of sum type with data-bearing variants. Match
+// dispatch uses std::holds_alternative + std::get<>::value on the
+// indexed array element. Tests both Yes(n) extraction and No fallback
+// across distinct array elements.
+type Maybe = Yes : Int | No
+let arr: Array<Maybe like Idx<3>> = [Yes(10), No, Yes(30)]
+let v0 = match arr[0] with
+    | Yes(n) -> n
+    | No -> 0
+let v1 = match arr[1] with
+    | Yes(n) -> n
+    | No -> 0
+let v2 = match arr[2] with
+    | Yes(n) -> n
+    | No -> 0
+// EXPECT: v0 = 10
+// EXPECT: v1 = 0
+// EXPECT: v2 = 30

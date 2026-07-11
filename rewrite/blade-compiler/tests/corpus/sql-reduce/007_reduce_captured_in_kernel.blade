@@ -1,0 +1,10 @@
+// TEST: Reduce Captured In Kernel
+// Reduce a CAPTURED outer array from inside a method_for kernel.
+// This exercises the IIFE path with capture-by-reference: each iteration
+// of the kernel computes (x + total) where total is recomputed by reducing
+// the captured array. (Real code would let-bind total once, but this is a
+// minimal test of the inline path.)
+let weights = [1.0, 2.0, 3.0]
+let xs = [10.0, 20.0]
+let result = method_for(xs) <@> lambda(x) -> x + reduce(weights) |> compute
+// EXPECT: result = [16, 26]

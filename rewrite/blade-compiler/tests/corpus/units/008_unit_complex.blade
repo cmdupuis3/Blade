@@ -1,0 +1,10 @@
+// TEST: Unit Complex
+// Multiple derived units
+Unit kg
+Unit meters
+Unit seconds
+Unit newtons = kg * meters / seconds^2
+let mass: Float<kg> = 10.0
+let accel = 9.8
+let force = mass * accel
+// EXPECT: force = 98

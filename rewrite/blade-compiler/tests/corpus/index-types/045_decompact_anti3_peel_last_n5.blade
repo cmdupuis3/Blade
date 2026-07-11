@@ -1,0 +1,9 @@
+// TEST: Decompact Anti3 Peel Last n5
+// d=2 boundary cut (last), n=5: SYMM {1,1,2} STRICT {1,1,0}, card = C(5,2)*5 = 50.
+// d=2 boundary cut (last), n=5: SYMM {1,1,2} STRICT {1,1,0}, card = C(5,2)*5 = 50.
+let A = [1.0, 2.0, 3.0, 4.0, 5.0]
+let L = method_for(A, A, A)
+let f = lambda(x, y, z) where comm(x, y, z) -> x * x * y + z
+let anti = L <@> reynolds(f, Antisymmetric) |> compute
+let result = decompact(anti, 2)
+// EXPECT: result = [0, 0, -2, -6, -12, 0, 2, 0, -6, -16, 0, 6, 6, 0, -12, 0, 12, 16, 12, 0, -2, 0, 0, -2, -6, -6, 0, 2, 0, -6, -12, 0, 6, 6, 0, -6, -2, 0, 0, -2, -16, -6, 0, 2, 0, -12, -6, -2, 0, 0]

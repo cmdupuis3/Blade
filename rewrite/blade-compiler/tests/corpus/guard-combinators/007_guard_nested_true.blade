@@ -1,0 +1,10 @@
+// TEST: Guard Nested True
+// Named "Guard Nested True" (not "Guard Nested") to disambiguate from the
+// match-form "Guard Nested" in the guards category. The previous shared name
+// caused both tests to write to the same Guard_Nested.cpp file under parallel
+// execution; the winner was non-deterministic and one validation would fail.
+// Nested guard: guard(p, guard(q, c)) = guard(p && q, c)
+let p = true
+let q = true
+let result = guard(p, guard(q, 99))
+// EXPECT: result = 99

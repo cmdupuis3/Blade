@@ -1,0 +1,16 @@
+// TEST: SQL Select-Where-OrderBy
+// ============================================================================
+// Combined: SQL-like queries using multiple features (depends on sort)
+// ============================================================================
+// ============================================================================
+// Combined: SQL-like queries using multiple features (depends on sort)
+// ============================================================================
+// SQL: SELECT temp FROM stations WHERE temp > 25.0 ORDER BY temp DESC
+type StationIdx = Idx<6>
+let temps: Array<Float like StationIdx> = [20.0, 25.0, 30.0, 22.0, 27.0, 32.0]
+
+let hot = compound(temps, mask(temps, lambda(t) -> t > 25.0))
+let sorted = sort(hot, lambda(t) -> -t)
+// sort over a rank-1 compound walks the compact buffer; the DENSE output
+// is semantically honest (sorting discards coordinate meaning).
+// EXPECT: sorted = [32, 30, 27]

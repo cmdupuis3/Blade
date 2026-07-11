@@ -1,0 +1,14 @@
+// TEST: Mask With Compute
+// Mask over a COMPUTED array: the mask reuses the computed array's own
+// index records, so compound() matches by identity even though the
+// computed output's indices are anonymous.
+let A = [1.0, 2.0, 3.0, 4.0, 5.0]
+let doubled = method_for(A) <@> lambda(a) -> a * 2.0 |> compute
+let big = compound(doubled, mask(doubled, lambda(x) -> x > 5.0))
+// doubled = [2, 4, 6, 8, 10]; > 5 at coordinates {2, 3, 4}
+let n = extents(big)
+let x2 = big(2)
+let x4 = big(4)
+// EXPECT: n = 3
+// EXPECT: x2 = 6
+// EXPECT: x4 = 10

@@ -1,0 +1,7 @@
+// TEST: AntisymIdx Kernel
+// Kernel producing antisymmetric output
+let A = [1.0, 2.0, 3.0]
+let L = method_for(A, A)
+let f = lambda(x, y) where comm(x, y) -> x * y
+let result = L <@> f |> compute
+// EXPECT: result = [1, 2, 3, 4, 6, 9]

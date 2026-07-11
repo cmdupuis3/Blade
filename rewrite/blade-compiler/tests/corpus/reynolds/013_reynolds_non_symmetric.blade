@@ -1,0 +1,11 @@
+// TEST: Reynolds Non-Symmetric
+// Non-symmetric kernel: x*x + y → 2 distinct terms, no dedup
+// reynolds(f)(x,y) = (x²+y) + (y²+x) = x² + y² + x + y
+// Non-symmetric kernel: x*x + y → 2 distinct terms, no dedup
+// reynolds(f)(x,y) = (x²+y) + (y²+x) = x² + y² + x + y
+let A = [1.0, 2.0]
+let B = [3.0, 4.0]
+let L = method_for(A, B)
+let g = lambda(x, y) -> x * x + y
+let result = L <@> reynolds(g) |> compute
+// EXPECT: result = [14.0, 22.0, 18.0, 26.0]

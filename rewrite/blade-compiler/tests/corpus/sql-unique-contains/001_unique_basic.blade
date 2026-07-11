@@ -1,0 +1,12 @@
+// TEST: Unique Basic
+// ============================================================================
+// Phase 3.5: unique — first-occurrence deduplication
+// ============================================================================
+// ============================================================================
+// Phase 3.5: unique — first-occurrence deduplication
+// ============================================================================
+// unique drops repeated elements, keeping the first occurrence of each.
+let A = [3, 1, 4, 1, 5, 9, 2, 6, 5, 3, 5]
+let u = unique(A)
+let result = method_for(u) <@> lambda(x) -> x |> compute
+// EXPECT: result = [3, 1, 4, 5, 9, 2, 6]

@@ -1,0 +1,6 @@
+// TEST: Conj Real Identity
+// conj on a real value is the identity (conj(x)=x for real x). Confirms the
+// permissive typing: conj : T -> T, with reals passing through unchanged.
+let r = 5.0
+let rc = conj(r)
+// EXPECT: rc = 5

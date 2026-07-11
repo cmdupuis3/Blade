@@ -1,0 +1,18 @@
+// TEST: Ragged Subview Metadata
+// A let-bound ragged row now carries its length: `let row = r(i)` binds a
+// RaggedRow (pointer + len) rather than decaying to a bare pointer, so
+// every length-dependent op downstream works -- print, extents, reduce,
+// and element reads.
+// A let-bound ragged row now carries its length: `let row = r(i)` binds a
+// RaggedRow (pointer + len) rather than decaying to a bare pointer, so
+// every length-dependent op downstream works -- print, extents, reduce,
+// and element reads.
+let r = [[1.0, 2.0, 3.0], [4.0, 5.0], [6.0]]
+let row = r(1)
+let n = extents(row)
+let s = reduce(row, (+))
+let v = row(0)
+// EXPECT: row = [4, 5]
+// EXPECT: n = 2
+// EXPECT: s = 9
+// EXPECT: v = 4

@@ -1,0 +1,8 @@
+// TEST: Validator: Aliased Idx As Fn Param (rejects)
+// Aliased index type as a regular function parameter: also rejected
+// (regular fns reject all index types; aliased ones are allowed only in
+// static fn params and foreign-key element types).
+type StationIdx = Idx<6>
+function get_temp(temps: Array<Float64 like StationIdx>, s: StationIdx) -> Float64 = temps(s)
+let temps: Array<Float64 like StationIdx> = [20.0, 21.5, 22.0, 19.0, 18.5, 23.0]
+let r = get_temp(temps, 3)

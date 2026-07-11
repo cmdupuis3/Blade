@@ -1,0 +1,23 @@
+// TEST: Impl Multiple Methods
+// Multiple methods in one impl block
+struct Vec2 {
+    x: Float64,
+    y: Float64
+}
+interface VecOps {
+    function dot(self, other: Vec2) -> Float64
+    function scale(self, s: Float64) -> Vec2
+}
+impl VecOps for Vec2 {
+    function dot(self, other: Vec2) -> Float64 = self.x * other.x + self.y * other.y
+    function scale(self, s: Float64) -> Vec2 = Vec2 { x = self.x * s, y = self.y * s }
+}
+let v1 = Vec2 { x = 3.0, y = 4.0 }
+let v2 = Vec2 { x = 1.0, y = 2.0 }
+let d = v1.dot(v2)
+let v3 = v1.scale(2.0)
+let sx = v3.x
+let sy = v3.y
+// EXPECT: d = 11
+// EXPECT: sx = 6
+// EXPECT: sy = 8

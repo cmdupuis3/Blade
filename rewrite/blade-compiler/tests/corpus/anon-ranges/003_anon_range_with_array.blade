@@ -1,0 +1,8 @@
+// TEST: Anon Range With Array
+// 0..N combined with a real array
+let A = [10.0, 20.0, 30.0]
+let L = method_for(A)
+let result = L <@> lambda(a) -> a + 1.0 |> compute
+let indices = method_for(0..3) <@> lambda(i) -> i |> compute
+// EXPECT: result = [11.0, 21.0, 31.0]
+// EXPECT: indices = [0, 1, 2]

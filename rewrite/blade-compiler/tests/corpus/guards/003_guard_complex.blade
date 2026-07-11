@@ -1,0 +1,9 @@
+// TEST: Guard Complex
+// Complex guard with multiple conditions
+let x = 50
+let y = 30
+let result = match (x, y) with
+    | (a, b) if a > 0 && b > 0 && a + b < 100 -> a + b
+    | (a, b) if a < 0 || b < 0 -> 0
+    | _ -> 999
+// EXPECT: result = 80

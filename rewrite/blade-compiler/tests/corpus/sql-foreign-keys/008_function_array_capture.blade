@@ -1,0 +1,10 @@
+// TEST: Function Array Capture
+// Named function references a module-level array (generated as C++ lambda with [&] capture)
+let weights = [10.0, 20.0, 30.0]
+
+function weighted(idx: Int64) -> Float64 = weights(idx)
+
+let r1 = weighted(0)
+let r2 = weighted(2)
+// EXPECT: r1 = 10
+// EXPECT: r2 = 30

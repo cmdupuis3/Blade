@@ -1,0 +1,12 @@
+// TEST: Intersect Disjoint
+// Disjoint filters: elementwise AND of two masks that never overlap -> empty
+// presence array -> zero-cardinality compound.
+type AB = Idx<5>
+let A: Array<Float64 like AB> = [1.0, 2.0, 3.0, 4.0, 5.0]
+let low = mask(A, lambda(x) -> x < 3.0)
+let high = mask(A, lambda(x) -> x > 3.0)
+let none = method_for(zip(low, high)) <@> lambda(a, b) -> a && b |> compute
+let f = compound(A, none)
+// AND = [F,F,F,F,F] -> empty
+let n = extents(f)
+// EXPECT: n = 0

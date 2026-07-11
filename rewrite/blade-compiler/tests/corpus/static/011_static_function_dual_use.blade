@@ -1,0 +1,10 @@
+// TEST: Static Function Dual Use
+// Same static function used both at compile time and at runtime
+static function twice(x) = x * 2
+let static ct_result = twice(21)
+let rt_input = 5
+let rt_result = twice(rt_input)
+let a = ct_result
+let b = rt_result
+// EXPECT: a = 42
+// EXPECT: b = 10

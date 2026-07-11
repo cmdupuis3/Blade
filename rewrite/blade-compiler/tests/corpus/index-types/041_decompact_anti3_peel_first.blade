@@ -1,0 +1,7 @@
+// TEST: Decompact Anti3 Peel First
+let A = [1.0, 2.0, 3.0, 4.0]
+let L = method_for(A, A, A)
+let f = lambda(x, y, z) where comm(x, y, z) -> x * x * y + z
+let anti = L <@> reynolds(f, Antisymmetric) |> compute
+let result = decompact(anti, 0)
+// EXPECT: result = [0, 0, 0, -2, -6, -6, 0, 2, 6, 0, 0, -2, -2, 0, 6, 0, 2, 0, -6, -6, 0, -2, 0, 0]

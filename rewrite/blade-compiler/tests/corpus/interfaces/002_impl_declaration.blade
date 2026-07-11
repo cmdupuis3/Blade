@@ -1,0 +1,12 @@
+// TEST: Impl Declaration
+// Interface implementation
+interface Scalable {
+    function scale(self, factor: Float64) -> Float64
+}
+struct Box {
+    width: Float64,
+    height: Float64
+}
+impl Scalable for Box {
+    function scale(self, factor: Float64) -> Float64 = self.width * self.height * factor
+}

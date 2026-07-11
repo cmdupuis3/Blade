@@ -1,0 +1,9 @@
+// TEST: Selective import (from...import)
+// MODULE: Main
+module Main
+from Math import pi, e
+
+let tau = pi * 2.0
+let sum = pi + e
+// EXPECT: tau = 6.28318
+// EXPECT: sum = 5.85987

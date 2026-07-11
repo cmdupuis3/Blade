@@ -1,0 +1,6 @@
+// TEST: Replicate Singleton
+// replicate(1, c) collapses to identity
+let A = [10.0, 20.0]
+let L = method_for(A)
+let result = replicate(1, L <@> lambda(x) -> x + 1.0) |> compute
+// EXPECT: result = [11.0, 21.0]

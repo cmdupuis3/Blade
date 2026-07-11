@@ -1,0 +1,10 @@
+// TEST: Object For Comb Fusion
+let A = [1.0, 2.0, 3.0]
+let L = method_for(A)
+let c1 = L <@> lambda(x) -> x + 10.0
+let c2 = L <@> lambda(x) -> x * 2.0
+let c3 = L <@> lambda(x) -> x * x
+let (sums, prods, squares) = object_for(<&!>) <@> (c1, c2, c3) |> compute
+// EXPECT: sums = [11.0, 12.0, 13.0]
+// EXPECT: prods = [2.0, 4.0, 6.0]
+// EXPECT: squares = [1.0, 4.0, 9.0]

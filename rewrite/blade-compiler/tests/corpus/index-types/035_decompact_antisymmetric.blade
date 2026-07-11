@@ -1,0 +1,12 @@
+// TEST: Decompact Antisymmetric
+// Antisymmetric source n=3: reynolds(g, Antisymmetric) with g=2x+y, A=[1,2,3]
+// gives strict canonicals (0,1)=-1 (0,2)=-2 (1,2)=-1. Decompacting yields a
+// dense 3×3 antisymmetric matrix: M[i][j]=canon for i<j, M[j][i]=-canon, and
+// a literal-zero diagonal (the diagonal is never stored).
+let A = [1.0, 2.0, 3.0]
+let L = method_for(A, A)
+let g = lambda(x, y) where comm(x, y) -> 2.0 * x + y
+let anti = L <@> reynolds(g, Antisymmetric) |> compute
+let result = decompact(anti, 0)
+// M = [[0,-1,-2],[1,0,-1],[2,1,0]] -> row-major
+// EXPECT: result = [0, -1, -2, 1, 0, -1, 2, 1, 0]

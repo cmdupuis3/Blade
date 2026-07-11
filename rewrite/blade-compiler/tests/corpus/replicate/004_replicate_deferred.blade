@@ -1,0 +1,7 @@
+// TEST: Replicate Deferred
+// replicate bound to variable, then computed
+let A = [1.0, 2.0]
+let L = method_for(A)
+let r = replicate(2, L <@> lambda(x) -> x * x)
+let result = r |> compute
+// EXPECT: result = [1.0, 4.0, 1.0, 4.0]

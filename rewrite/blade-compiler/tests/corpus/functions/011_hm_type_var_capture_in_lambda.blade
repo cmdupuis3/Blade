@@ -1,0 +1,11 @@
+// TEST: HM Type Var Capture In Lambda
+// HM type-var capture: a lambda inside a polymorphic function captures
+// a value of type T from the enclosing scope and uses it in the kernel
+// body. Tests that the type variable threads through method_for and the
+// lambda's parameter environment correctly.
+function applyVal(arr: Array<T like Idx<n>>, v: T) -> Array<T like Idx<n>>
+= method_for(arr) <@> lambda(x) -> v |> compute
+let arr: Array<Float64 like Idx<3>> = [1.0, 2.0, 3.0]
+let result = applyVal(arr, 42.0)
+let r = result(0)
+// EXPECT: r = 42

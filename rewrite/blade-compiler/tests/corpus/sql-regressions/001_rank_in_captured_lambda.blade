@@ -1,0 +1,23 @@
+// TEST: Rank In Captured Lambda
+/// Phase 7c: regression tests for the concerns raised when extents() landed.
+/// These exercise specific situations to confirm or refute speculation about
+/// edge cases.
+
+// rank() inside a lambda body that captures an array — verifies the existing
+// default fall-through in collectVarRefsIR doesn't break capture analysis for
+// rank. (Spoiler: rank's argument doesn't actually need capture because it
+// resolves statically from the type, but the test pins down that behavior.)
+/// Phase 7c: regression tests for the concerns raised when extents() landed.
+/// These exercise specific situations to confirm or refute speculation about
+/// edge cases.
+
+// rank() inside a lambda body that captures an array — verifies the existing
+// default fall-through in collectVarRefsIR doesn't break capture analysis for
+// rank. (Spoiler: rank's argument doesn't actually need capture because it
+// resolves statically from the type, but the test pins down that behavior.)
+// rank(captured) inside a lambda — should be fine because rank resolves
+// statically from the type, no runtime capture needed.
+let A = [1.0, 2.0, 3.0]
+let f = lambda(x: Int64) -> rank(A) + x
+let result = f(10)
+// EXPECT: result = 11

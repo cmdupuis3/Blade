@@ -1,0 +1,47 @@
+// TEST: AntisymIdx Reynolds n4
+// ----------------------------------------------------------------------------
+// Reynolds antisymmetric STORAGE tests.
+//
+// These exercise the path where same-array method_for + comm (triangular
+// iteration) + reynolds(_, Antisymmetric) deduces an AntisymIdx OUTPUT index
+// type. The discriminator is CARDINALITY: an antisymmetric rank-2 output over
+// n stores C(n,2) strict-upper-triangle elements (no diagonal), versus
+// C(n+1,2) for symmetric (with diagonal) or n*n for rectangular. The strict
+// left-justified DFS storage order is (0,1),(0,2),...,(0,n-1),(1,2),...,(n-2,n-1).
+//
+// Antisymmetrized value at (i,j) for g(x,y)=2x+y is g(A[i],A[j])-g(A[j],A[i])
+//   = (2A[i]+A[j]) - (2A[j]+A[i]) = A[i]-A[j].
+//
+// NOTE on comm semantics (formalism 2705/3514): `comm` declares the arguments
+// INTERCHANGEABLE FOR ITERATION (enables triangular bounds); it is NOT an
+// assertion that g(x,y)=g(y,x). So a comm-declared kernel may be Reynolds-
+// ANTIsymmetrized to a nonzero result. (A comm kernel that genuinely satisfied
+// g(x,y)=g(y,x) would antisymmetrize to zero — see the cancellation case.)
+// ----------------------------------------------------------------------------
+// Reynolds antisymmetric STORAGE tests.
+//
+// These exercise the path where same-array method_for + comm (triangular
+// iteration) + reynolds(_, Antisymmetric) deduces an AntisymIdx OUTPUT index
+// type. The discriminator is CARDINALITY: an antisymmetric rank-2 output over
+// n stores C(n,2) strict-upper-triangle elements (no diagonal), versus
+// C(n+1,2) for symmetric (with diagonal) or n*n for rectangular. The strict
+// left-justified DFS storage order is (0,1),(0,2),...,(0,n-1),(1,2),...,(n-2,n-1).
+//
+// Antisymmetrized value at (i,j) for g(x,y)=2x+y is g(A[i],A[j])-g(A[j],A[i])
+//   = (2A[i]+A[j]) - (2A[j]+A[i]) = A[i]-A[j].
+//
+// NOTE on comm semantics (formalism 2705/3514): `comm` declares the arguments
+// INTERCHANGEABLE FOR ITERATION (enables triangular bounds); it is NOT an
+// assertion that g(x,y)=g(y,x). So a comm-declared kernel may be Reynolds-
+// ANTIsymmetrized to a nonzero result. (A comm kernel that genuinely satisfied
+// g(x,y)=g(y,x) would antisymmetrize to zero — see the cancellation case.)
+// Same array, comm + reynolds Antisymmetric -> AntisymIdx<2,4> output.
+// Strict pairs (i<j) for n=4: (0,1)(0,2)(0,3)(1,2)(1,3)(2,3) = C(4,2)=6 elements.
+// value(i,j) = A[i]-A[j] with A=[1,2,3,4]:
+//   (0,1)=-1 (0,2)=-2 (0,3)=-3 (1,2)=-1 (1,3)=-2 (2,3)=-1
+// Cardinality 6 (not 10 symmetric, not 16 rectangular) confirms antisym storage.
+let A = [1.0, 2.0, 3.0, 4.0]
+let L = method_for(A, A)
+let g = lambda(x, y) where comm(x, y) -> 2.0 * x + y
+let result = L <@> reynolds(g, Antisymmetric) |> compute
+// EXPECT: result = [-1.0, -2.0, -3.0, -1.0, -2.0, -1.0]

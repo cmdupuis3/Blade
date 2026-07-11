@@ -1,0 +1,32 @@
+// TEST: Nominal: Struct Field Foreign Key Cross-Tag (rejects)
+// Cross-tag rejection through a struct-field foreign-key dereference.
+//
+// `data.region(s)` lowers through the dispatchAppOrIndex helper's
+// method-call entry: array-typed struct fields route to TExprIndex,
+// producing a value whose type carries the array's element type — which
+// for a foreign-key field is `IRTIdxTagged(_, IRefNamed "RegionIdx")`.
+// That tagged value is then passed to `by_country(...)`, which enters
+// dispatchAppOrIndex via the general ExprApp branch and runs the tag
+// check against by_country's CountryIdx slot. The two named tags don't
+// match — rejection.
+//
+// Distinct from probe_v11: that one tests tag flow through
+// iteration-tagging on the kernel parameter `r`, which is currently
+// permissive (the kernel parameter's type doesn't pick up the iterated
+// array's element tag). This probe tests tag flow through explicit
+// field indexing, which DOES preserve the tag via TExprIndex's elem-type
+// propagation. Both should reject; only this one currently does.
+type StationIdx = Idx<6>
+type RegionIdx = Idx<3>
+type CountryIdx = Idx<3>
+struct StationData {
+    temp:   Array<Float64 like StationIdx>,
+    region: Array<RegionIdx like StationIdx>
+}
+let data = StationData {
+    temp   = [11.0, 19.0, 31.0, 12.0, 21.0, 29.0],
+    region = [0, 1, 2, 0, 1, 2]
+}
+let by_country: Array<Float64 like CountryIdx> = [10.0, 20.0, 30.0]
+let bad = method_for(range<StationIdx>) <@> lambda(s) -> by_country(data.region(s)) |> compute
+// EXPECT: typecheck failure — tag mismatch between RegionIdx and CountryIdx

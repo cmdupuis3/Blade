@@ -1,0 +1,24 @@
+// TEST: GroupBy Idx First
+// ============================================================================
+// Phase 4: group_by — Two-op flat API (group_keys + group_by)
+// ============================================================================
+// Tests use simple kernel patterns (g(0), g(0) + g(1)) instead of reduce/extent,
+// since reduce is convenience-not-primitive and extent is deferred.
+// With let-binding annotation enforcement (bidirectional checking), tests
+// can opt into Case 1 (positional Idx<N>) or Case 2 (EnumIdx reverse lookup)
+// by annotating the keys array; otherwise Case 3 (dynamic max+1) fires.
+// ============================================================================
+// Phase 4: group_by — Two-op flat API (group_keys + group_by)
+// ============================================================================
+// Tests use simple kernel patterns (g(0), g(0) + g(1)) instead of reduce/extent,
+// since reduce is convenience-not-primitive and extent is deferred.
+// With let-binding annotation enforcement (bidirectional checking), tests
+// can opt into Case 1 (positional Idx<N>) or Case 2 (EnumIdx reverse lookup)
+// by annotating the keys array; otherwise Case 3 (dynamic max+1) fires.
+// First element of each group; no annotation -> Case 3 dynamic.
+let region = [0, 1, 2, 0, 1, 2]
+let temps = [20.0, 25.0, 30.0, 22.0, 27.0, 32.0]
+let gk = group_keys(region)
+let grouped = group_by(temps, gk)
+let result = method_for(grouped) <@> lambda(g) -> g(0) |> compute
+// EXPECT: result = [20.0, 25.0, 30.0]

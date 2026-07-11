@@ -1,0 +1,6 @@
+// TEST: Static Recursive Function
+// Static function with recursion (fibonacci)
+static function fib(n) = if n <= 1 then n else fib(n - 1) + fib(n - 2)
+let static f10 = fib(10)
+let x = f10
+// EXPECT: x = 55

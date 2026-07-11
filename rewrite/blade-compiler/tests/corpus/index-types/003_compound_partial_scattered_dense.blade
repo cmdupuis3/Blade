@@ -1,0 +1,14 @@
+// TEST: Compound Partial Scattered Dense
+// Leading wildcard, rank-2: B((_, 0)) -> valid lats at lon 0. The pinned axis
+// is NOT a leading prefix, so the surviving cells are scattered in the parent
+// buffer -> make_partial_gather_dense (deep-copy gather).
+// Leading wildcard, rank-2: B((_, 0)) -> valid lats at lon 0. The pinned axis
+// is NOT a leading prefix, so the surviving cells are scattered in the parent
+// buffer -> make_partial_gather_dense (deep-copy gather).
+type Lat = Idx<2>
+type Lon = Idx<3>
+let dense: Array<Float64 like Lat, Lon> = [[10.0, 20.0, 30.0], [40.0, 50.0, 60.0]]
+let m: Array<Bool like Lat, Lon> = [[true, false, true], [true, true, false]]
+let B = compound(dense, m)
+let r = B((_, 0))
+// EXPECT: r = [10, 40]

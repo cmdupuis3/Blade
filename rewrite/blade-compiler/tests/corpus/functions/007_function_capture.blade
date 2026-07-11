@@ -1,0 +1,9 @@
+// TEST: Function Capture
+// Lambdas CAN capture functions from environment
+// Scalar params inferred, return type inferred
+function square(x) = x * x
+let A = [1.0, 2.0, 3.0]
+let L = method_for(A, A)
+let f = lambda(x, y) where comm(x, y) -> square(x) + square(y)
+let result = L <@> f |> compute
+// EXPECT: result = [2, 5, 10, 8, 13, 18]

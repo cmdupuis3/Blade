@@ -1,0 +1,6 @@
+// TEST: Static function reassign error
+let static f = lambda(x) -> x + 1
+let result = {
+    f = lambda(x) -> x + 2
+    f(1)
+}

@@ -1,0 +1,8 @@
+// TEST: EnumIdx Basic
+// EnumIdx: index type with known key values
+type LandType = EnumIdx<[101, 205, 307]>
+
+// Array indexed by LandType has 3 elements (one per enum value)
+let names = [10.0, 20.0, 30.0]
+let result = method_for(names) <@> lambda(x) -> x + 1.0 |> compute
+// EXPECT: result = [11.0, 21.0, 31.0]

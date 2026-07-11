@@ -1,0 +1,27 @@
+// TEST: Idx Value Static Fn Return Anon
+// ============================================================================
+// Index types as standalone value types. The validator (IndexTypeValidator.fs)
+// enforces:
+//   - regular function params/returns: forbidden
+//   - struct fields: forbidden
+//   - let-binding annotations: forbidden
+//   - static fn params: aliased + statically-evaluable only
+//   - static fn returns: statically-evaluable (anon or aliased)
+//   - tuple elements in static-context: statically-evaluable
+//   - array element types: aliased only (foreign keys)
+// ============================================================================
+// ============================================================================
+// Index types as standalone value types. The validator (IndexTypeValidator.fs)
+// enforces:
+//   - regular function params/returns: forbidden
+//   - struct fields: forbidden
+//   - let-binding annotations: forbidden
+//   - static fn params: aliased + statically-evaluable only
+//   - static fn returns: statically-evaluable (anon or aliased)
+//   - tuple elements in static-context: statically-evaluable
+//   - array element types: aliased only (foreign keys)
+// ============================================================================
+// Anonymous index type as static-fn return: permitted.
+static function pivot() -> Idx<5> = 2
+let p = pivot()
+// EXPECT: p = 2

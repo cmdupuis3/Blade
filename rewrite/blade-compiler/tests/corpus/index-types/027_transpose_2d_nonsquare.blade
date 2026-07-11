@@ -1,0 +1,17 @@
+// TEST: Transpose 2D Nonsquare
+// ----------------------------------------------------------------------------
+// transpose(A, [d1, d2]) — hard transpose, swap two arity-1 SymNone axes.
+// Allocates a fresh pool at the swapped extents and copies axis-swapped. The
+// result is an independent array (no aliasing back to the source).
+// ----------------------------------------------------------------------------
+// transpose(A, [d1, d2]) — hard transpose, swap two arity-1 SymNone axes.
+// Allocates a fresh pool at the swapped extents and copies axis-swapped. The
+// result is an independent array (no aliasing back to the source).
+// Non-square 2x3 -> 3x2. Non-square is the discriminating case: a square test
+// would pass even if the extent-swap were forgotten. Flat print is row-major
+// over the RESULT (3x2), so [[1,2,3],[4,5,6]] transposed reads column-first.
+let A: Array<Float64 like Idx<2>, Idx<3>> = [[1.0, 2.0, 3.0], [4.0, 5.0, 6.0]]
+let result = transpose(A, [0, 1])
+// A row-major:        1 2 3 4 5 6
+// result is 3x2: [[1,4],[2,5],[3,6]] -> row-major 1 4 2 5 3 6
+// EXPECT: result = [1, 4, 2, 5, 3, 6]

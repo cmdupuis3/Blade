@@ -18,7 +18,11 @@
     <Compile Include="TypeCheck.fs" />
     <Compile Include="Lowering.fs" />
     <Compile Include="CodeGen.fs" />
+    <Compile Include="Build.fs" />
     <Compile Include="tests/TestHarness.fs" />
+    <Compile Include="tests/Expect.fs" />
+    <Compile Include="tests/Corpus.fs" />
+    <Compile Include="tests/Runner.fs" />
     <Compile Include="tests/Test_Basic.fs" />
     <Compile Include="tests/Test_Loops.fs" />
     <Compile Include="tests/Test_Symmetry.fs" />
@@ -44,6 +48,15 @@
     <Compile Include="tests/Test_ExprAttrs.fs" />
     <Compile Include="tests/Test_CodeGenSubst.fs" />
     <Compile Include="tests/Test_TypeStructure.fs" />
+    <Compile Include="tests/Oracles.fs" />
+    <Compile Include="tests/Differential.fs" />
+    <Compile Include="tests/Benchmarks.fs" />
+    <Compile Include="tests/CudaTests.fs" />
+    <Compile Include="tests/OmpTests.fs" />
+    <Compile Include="tests/AllocTests.fs" />
+    <Compile Include="tests/NetcdfTests.fs" />
+    <Compile Include="tests/RunAll.fs" />
+    <Compile Include="Cli.fs" />
     <Compile Include="Main.fs" />
   </ItemGroup>
 
@@ -52,6 +65,14 @@
        directive controls the destination subpath inside the output dir,
        so headers end up at bin/<config>/net7.0/cpp/ regardless of where
        dotnet run is invoked from. -->
+  <!-- On-disk .blade test corpus (tests/Corpus.fs loads it). Copied next to
+       the binary so the suite runs regardless of the working directory. -->
+  <ItemGroup>
+    <None Include="tests/corpus/**/*.blade">
+      <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
+    </None>
+  </ItemGroup>
+
   <ItemGroup>
     <None Include="cpp/nested_array_utilities.hpp">
       <Link>cpp/nested_array_utilities.hpp</Link>

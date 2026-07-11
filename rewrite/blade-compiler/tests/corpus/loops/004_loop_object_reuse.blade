@@ -1,0 +1,10 @@
+// TEST: Loop Object Reuse
+let A = [1.0, 2.0, 3.0]
+let B = [4.0, 5.0, 6.0]
+let L = method_for(A, B)
+let sum = lambda(x, y) -> x + y
+let prod = lambda(x, y) -> x * y
+let sumResult = L <@> sum |> compute
+let prodResult = L <@> prod |> compute
+// EXPECT: sumResult = [5, 6, 7, 6, 7, 8, 7, 8, 9]
+// EXPECT: prodResult = [4, 5, 6, 8, 10, 12, 12, 15, 18]

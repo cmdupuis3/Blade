@@ -1,0 +1,8 @@
+// TEST: Mask All Pass
+// All elements pass: cardinality equals the source extent.
+let A = [1.0, 2.0, 3.0]
+let all = compound(A, mask(A, lambda(x) -> x > 0.0))
+let n = extents(all)
+let s = reduce(all, (+))
+// EXPECT: n = 3
+// EXPECT: s = 6

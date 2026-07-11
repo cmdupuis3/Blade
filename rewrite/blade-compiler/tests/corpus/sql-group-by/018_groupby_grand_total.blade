@@ -1,0 +1,19 @@
+// TEST: GroupBy Grand Total
+// The canonical SQL aggregate composed end-to-end in Blade terms: per-group
+// reduction (a ragged peel producing a dense rank-1 of group sums), then a
+// plain dense reduction over that for the grand total -- SUM(x) GROUP BY k
+// followed by SUM over groups. Exercises the dense-array downstream of the
+// SQL-side output with a dynamic (ngroups) extent.
+// The canonical SQL aggregate composed end-to-end in Blade terms: per-group
+// reduction (a ragged peel producing a dense rank-1 of group sums), then a
+// plain dense reduction over that for the grand total -- SUM(x) GROUP BY k
+// followed by SUM over groups. Exercises the dense-array downstream of the
+// SQL-side output with a dynamic (ngroups) extent.
+let region = [0, 1, 0, 0, 1]
+let temps = [10.0, 20.0, 30.0, 40.0, 50.0]
+let gk = group_keys(region)
+let grouped = group_by(temps, gk)
+let sums = method_for(grouped) <@> lambda(g: Array<Float64 like RaggedIdx<_>>) -> reduce(g, (+)) |> compute
+let grand = reduce(sums, (+))
+// EXPECT: sums = [80, 70]
+// EXPECT: grand = 150

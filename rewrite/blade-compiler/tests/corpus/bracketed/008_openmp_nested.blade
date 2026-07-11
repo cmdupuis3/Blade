@@ -1,0 +1,10 @@
+// TEST: OpenMP Nested
+// 3-way outer product: outermost loop gets OMP
+let A = [1.0, 2.0, 3.0]
+let B = [10.0, 20.0]
+let C = [100.0, 200.0, 300.0]
+let loop = method_for(A, B, C)
+let kernel = lambda(a, b, c) -> a + b + c
+let result = loop <@> kernel |> compute
+// 3×2×3 = 18 elements
+// EXPECT: result = [111, 211, 311, 121, 221, 321, 112, 212, 312, 122, 222, 322, 113, 213, 313, 123, 223, 323]

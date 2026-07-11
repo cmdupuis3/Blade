@@ -1,0 +1,20 @@
+// TEST: Elementwise Mask AND
+// Elementwise Bool AND of two masks via bare `&&` (mask algebra) — the clean
+// replacement for the method_for(zip(...)) <@> a && b idiom. Bool inputs, Bool
+// output; feeds compound directly (mask shares A's index identity).
+// Elementwise Bool AND of two masks via bare `&&` (mask algebra) — the clean
+// replacement for the method_for(zip(...)) <@> a && b idiom. Bool inputs, Bool
+// output; feeds compound directly (mask shares A's index identity).
+type AB = Idx<5>
+let A: Array<Float64 like AB> = [1.0, 2.0, 3.0, 4.0, 5.0]
+let above2 = mask(A, lambda(x) -> x > 2.0)
+let below5 = mask(A, lambda(x) -> x < 5.0)
+let both = above2 && below5
+let f = compound(A, both)
+// above2 && below5 = [F,F,T,T,F] -> coordinates {2, 3} = 3.0, 4.0
+let n = extents(f)
+let x2 = f(2)
+let x3 = f(3)
+// EXPECT: n = 2
+// EXPECT: x2 = 3.0
+// EXPECT: x3 = 4.0

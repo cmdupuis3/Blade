@@ -1,0 +1,7 @@
+// TEST: Kernel With Types
+// Kernel with explicit param types — exercises inline annotation syntax
+// on lambda params. Body produces rank-2 outer product M[i][j] = a[i] * b[j],
+// hence the rank-2 return type.
+function vectorDot(a: Array<Float64 like Idx<n>>, b: Array<Float64 like Idx<n>>)
+  -> Array<Float64 like Idx<n>, Idx<n>> = 
+  method_for(a, b) <@> lambda(x: Float64, y: Float64) -> x * y |> compute

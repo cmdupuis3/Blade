@@ -1,0 +1,19 @@
+// TEST: SQL WHERE
+// ============================================================================
+// Phase 2b: SQL WHERE equivalent
+// ============================================================================
+// ============================================================================
+// Phase 2b: SQL WHERE equivalent
+// ============================================================================
+// SQL: SELECT temp FROM stations WHERE temp > 25.0
+let temps = [20.0, 25.0, 30.0, 22.0, 27.0, 32.0]
+
+let m = mask(temps, lambda(t) -> t > 25.0)
+let hot = compound(temps, m)
+// present coordinates {2, 4, 5} = 30, 27, 32
+let n = extents(hot)
+let total = reduce(hot, (+))
+let t2 = hot(2)
+// EXPECT: n = 3
+// EXPECT: total = 89
+// EXPECT: t2 = 30

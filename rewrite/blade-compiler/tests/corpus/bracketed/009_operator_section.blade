@@ -1,0 +1,18 @@
+// TEST: Operator Section
+// Test first-class operator sections: (+), (*), etc.
+// Use operator section directly as a kernel
+let A = [1.0, 2.0, 3.0]
+let B = [10.0, 20.0, 30.0]
+
+// Apply (+) as a kernel to method_for - creates pairwise sums
+let loop = method_for(A, B)
+let sums = loop <@> (+) |> compute
+// EXPECT: sums = [11, 21, 31, 12, 22, 32, 13, 23, 33]
+
+// Apply (*) as a kernel - creates pairwise products  
+let prods = loop <@> (*) |> compute
+// EXPECT: prods = [10, 20, 30, 20, 40, 60, 30, 60, 90]
+
+// Inline usage - pairwise differences
+let result = method_for(A, B) <@> (-) |> compute
+// EXPECT: result = [-9, -19, -29, -8, -18, -28, -7, -17, -27]

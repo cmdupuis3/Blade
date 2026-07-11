@@ -1,0 +1,10 @@
+// TEST: Ragged Literal Row Then Elem
+// Bind a row to an intermediate variable, then index into it. Tests that the
+// row binding holds a usable pointer and that subsequent indexing through it
+// produces correct values.
+let r = [[10.0, 20.0, 30.0], [40.0, 50.0], [60.0, 70.0, 80.0, 90.0]]
+let row1 = r(1)
+let v = row1(0)
+let w = row1(1)
+// EXPECT: v = 40
+// EXPECT: w = 50

@@ -1,0 +1,9 @@
+// TEST: Zip Three-Way
+// Three-way zip — co-iteration over three arrays
+let A = [1.0, 2.0, 3.0]
+let B = [10.0, 20.0, 30.0]
+let C = [100.0, 200.0, 300.0]
+let L = method_for(zip(A, B, C))
+let f = lambda(a, b, c) -> a + b + c
+let result = L <@> f |> compute
+// EXPECT: result = [111, 222, 333]

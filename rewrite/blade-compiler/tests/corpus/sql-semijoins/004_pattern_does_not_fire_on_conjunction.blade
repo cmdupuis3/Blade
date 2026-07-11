@@ -1,0 +1,16 @@
+// TEST: Pattern Does Not Fire On Conjunction
+// Conjunction predicate (contains AND a scalar condition). The LOCAL
+// set-hoist substitutes the contains node in place, so conjunctions,
+// negations, and multi-contains predicates all fuse now — the old
+// global rewriter had to decline these. Correctness is what this
+// test guards; the hoist firing more often must not change values.
+let A = [1, 2, 3, 4, 5, 6, 7, 8]
+let B = [2, 4, 6, 8]
+let r = compound(A, mask(A, lambda(x) -> contains(B, x) && x > 3))
+// coordinates {3, 5, 7} = 4, 6, 8
+let n = extents(r)
+let x3 = r(3)
+let x7 = r(7)
+// EXPECT: n = 3
+// EXPECT: x3 = 4
+// EXPECT: x7 = 8

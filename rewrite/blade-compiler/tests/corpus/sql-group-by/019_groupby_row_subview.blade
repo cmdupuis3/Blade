@@ -1,0 +1,19 @@
+// TEST: GroupBy Row Subview
+// A let-bound GROUP row carries its length: `let g0 = grouped(i)` binds a
+// RaggedRow whose len comes from the group_keys offsets table (the grouped
+// value itself has no lens member). Print, reduce, and element reads all
+// work on the binding.
+// A let-bound GROUP row carries its length: `let g0 = grouped(i)` binds a
+// RaggedRow whose len comes from the group_keys offsets table (the grouped
+// value itself has no lens member). Print, reduce, and element reads all
+// work on the binding.
+let region = [0, 1, 0, 0, 1]
+let temps = [10.0, 20.0, 30.0, 40.0, 50.0]
+let gk = group_keys(region)
+let grouped = group_by(temps, gk)
+let g0 = grouped(0)
+let s0 = reduce(g0, (+))
+let v = g0(2)
+// EXPECT: g0 = [10, 30, 40]
+// EXPECT: s0 = 80
+// EXPECT: v = 40

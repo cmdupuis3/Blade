@@ -1,0 +1,15 @@
+// TEST: Reduce Dynamic NonEmpty
+// reduce() on a dynamic-extent array (mask result) — codegen MUST emit the
+// runtime guard. We test the non-empty path here; the empty path would abort
+// the program, which the test framework can't easily verify.
+// reduce() on a dynamic-extent array (mask result) — codegen MUST emit the
+// runtime guard. We test the non-empty path here; the empty path would abort
+// the program, which the test framework can't easily verify.
+// reduce over a compacted mask (compound). mask returns a Bool presence array;
+// compound() gathers the passing VALUES, and reduce sums them. The dynamic
+// extent still exercises the runtime non-emptiness guard.
+let xs = [1.0, 2.0, 3.0, 4.0, 5.0, 6.0]
+let evens = mask(xs, lambda(x) -> x > 2.0)
+let ev = compound(xs, evens)
+let total = reduce(ev, (+))
+// EXPECT: total = 18

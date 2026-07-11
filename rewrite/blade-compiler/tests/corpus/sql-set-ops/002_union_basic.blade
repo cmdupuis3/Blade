@@ -1,0 +1,16 @@
+// TEST: Union Basic
+// Positional two-mask OR: elementwise Bool OR of two presence masks over the
+// same named index space, then compactify (union of two filters over one source).
+type AB = Idx<5>
+let A: Array<Float64 like AB> = [1.0, 2.0, 3.0, 4.0, 5.0]
+let low = mask(A, lambda(x) -> x < 2.0)
+let high = mask(A, lambda(x) -> x > 4.0)
+let either = method_for(zip(low, high)) <@> lambda(a, b) -> a || b |> compute
+let f = compound(A, either)
+// OR = [T,F,F,F,T] -> coordinates {0, 4} = 1.0, 5.0
+let n = extents(f)
+let x0 = f(0)
+let x4 = f(4)
+// EXPECT: n = 2
+// EXPECT: x0 = 1.0
+// EXPECT: x4 = 5.0

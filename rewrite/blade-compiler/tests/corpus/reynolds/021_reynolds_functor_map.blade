@@ -1,0 +1,15 @@
+// TEST: Reynolds Functor Map
+// Functor-map over a Reynolds-wrapped applycombinator: covers the
+// kernel-fold path that goes through applyFunctorWrappers ->
+// mapKernelInner (item-1 site 3 in CodeGen). The synthetic registry
+// re-wraps the inner with IRReynolds preserving isAntisymmetric;
+// without this rewrap, `twice` would be applied to the bare kernel
+// output instead of the Reynolds permutation sum.
+let A = [1.0, 2.0]
+let B = [3.0, 4.0]
+let g = lambda(x, y) -> x * y
+let twice = lambda(z) -> z * 2.0
+let result = twice <$> (method_for(A, B) <@> reynolds(g)) |> compute
+// reynolds(g)(x,y) = xy + yx = 2xy; then twice gives 4xy.
+// (1,3)=12 (1,4)=16 (2,3)=24 (2,4)=32
+// EXPECT: result = [12.0, 16.0, 24.0, 32.0]

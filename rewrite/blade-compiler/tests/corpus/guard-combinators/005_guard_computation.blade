@@ -1,0 +1,8 @@
+// TEST: Guard Computation
+// guard wrapping a computation — true case executes
+let A = [1.0, 2.0, 3.0]
+let L = method_for(A)
+let f = lambda(x) -> x + 10.0
+let cond = true
+let result = guard(cond, L <@> f) |> compute
+// EXPECT: result = [11.0, 12.0, 13.0]

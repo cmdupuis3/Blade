@@ -1,0 +1,9 @@
+// TEST: Duality Theorem
+let A = [1.0, 2.0, 3.0]
+let f = lambda(x) -> x + 1.0
+let g = lambda(x) -> x * 3.0
+let lhs = (object_for(f) >>@ object_for(g)) <@> A |> compute
+let L = method_for(A)
+let rhs = (L <@> f) @>> (L <@> g) |> compute
+// EXPECT: lhs = [6.0, 9.0, 12.0]
+// EXPECT: rhs = [6.0, 9.0, 12.0]

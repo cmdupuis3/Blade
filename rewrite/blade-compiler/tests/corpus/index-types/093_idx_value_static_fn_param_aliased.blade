@@ -1,0 +1,6 @@
+// TEST: Idx Value Static Fn Param Aliased
+// Aliased index type as static-fn parameter: permitted.
+type StationIdx = Idx<6>
+static function next_station(s: StationIdx) -> StationIdx = s
+let s = next_station(3)
+// EXPECT: s = 3

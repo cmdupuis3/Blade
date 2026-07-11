@@ -1,0 +1,19 @@
+// TEST: Validator: Anon Idx As Fn Param (rejects)
+// ============================================================================
+// Validator rejection probes (IndexTypeValidator.fs).
+//
+// Each probe documents a forbidden position for index types. Expected to
+// fail at IR (typecheck) with a validator error message. They serve as
+// regression tests that the validator catches these patterns.
+// ============================================================================
+// ============================================================================
+// Validator rejection probes (IndexTypeValidator.fs).
+//
+// Each probe documents a forbidden position for index types. Expected to
+// fail at IR (typecheck) with a validator error message. They serve as
+// regression tests that the validator catches these patterns.
+// ============================================================================
+// Anonymous Idx<n> as a regular function parameter: rejected.
+// Validator should report: "Index types cannot appear as regular function parameters."
+function bump(i: Idx<5>) -> Int64 = i + 1
+let r = bump(2)

@@ -1,0 +1,9 @@
+// TEST: Extents Dynamic Mask
+// extents() on a compacted mask (compound). mask now returns a Bool presence
+// array over xs's own index; compound() gathers the passing cells, and
+// extents() of a rank-1 compound is its cardinality (the count that passed).
+let xs = [1, 2, 3, 4, 5, 6, 7, 8, 9, 10]
+let evens = mask(xs, lambda(x) -> x % 2 == 0)
+let ev = compound(xs, evens)
+let n = extents(ev)
+// EXPECT: n = 5

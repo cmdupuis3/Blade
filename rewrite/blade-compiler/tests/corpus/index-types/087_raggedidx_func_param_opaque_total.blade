@@ -1,0 +1,10 @@
+// TEST: RaggedIdx Func Param Opaque Total
+// Same as above, opaque form. The ragged structural logic is identical;
+// only the type-level annotation differs.
+function totalSum(A: Array<Float64 like Idx<3>, RaggedIdx<_>>) -> Float64 = {
+    let row_sums = method_for(A) <@> lambda(g: Array<Float64 like RaggedIdx<_>>) -> reduce(g, (+)) |> compute
+    reduce(row_sums, (+))
+}
+let r = [[1.0, 2.0, 3.0], [4.0, 5.0], [6.0, 7.0, 8.0, 9.0]]
+let result = totalSum(r)
+// EXPECT: result = 45

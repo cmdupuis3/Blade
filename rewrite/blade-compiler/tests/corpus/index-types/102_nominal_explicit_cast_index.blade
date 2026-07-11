@@ -1,0 +1,13 @@
+// TEST: Nominal: Explicit Cast Index
+// Expression-level type cast `(expr : NamedIdx)` produces a tagged
+// Nat<NamedIdx> value via the literal-coercion rule in checkExpr
+// (§4.18.3). The expression-position cast bypasses the IndexType
+// validator (which only constrains declaration-level positions),
+// giving a way to construct a tagged value outside static function
+// signatures.
+//
+// Indexing with a matching-tag value succeeds under step 5's check.
+type Lat = Idx<3>
+let A: Array<Float64 like Lat> = [10.0, 20.0, 30.0]
+let v = A((1 : Lat))
+// EXPECT: v = 20

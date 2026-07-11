@@ -1,0 +1,9 @@
+// TEST: Output Type: Distinct Comm Groups
+// Two distinct comm groups
+let A = [1.0, 2.0, 3.0]
+let B = [4.0, 5.0, 6.0]
+let L = method_for(A, A, B, B)
+let f = lambda(x, y, z, w) where comm(x, y), comm(z, w) -> x * y * z * w
+let result = L <@> f |> compute
+// SymIdx<2, 3> for A,A; SymIdx<2, 3> for B,B — two independent triangular pairs
+// EXPECT: result = [16, 20, 24, 25, 30, 36, 32, 40, 48, 50, 60, 72, 48, 60, 72, 75, 90, 108, 64, 80, 96, 100, 120, 144, 96, 120, 144, 150, 180, 216, 144, 180, 216, 225, 270, 324]

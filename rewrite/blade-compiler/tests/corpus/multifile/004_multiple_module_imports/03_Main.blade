@@ -1,0 +1,8 @@
+// TEST: Multiple module imports
+// MODULE: Main
+module Main
+import Constants
+import Formulas
+
+let circleArea = Constants.pi * Formulas.area(5.0)
+// EXPECT: circleArea = 78.53975

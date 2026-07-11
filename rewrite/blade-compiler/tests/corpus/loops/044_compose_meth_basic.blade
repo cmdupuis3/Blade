@@ -1,0 +1,9 @@
+// TEST: Compose Meth Basic
+let A = [1.0, 2.0, 3.0]
+let L = method_for(A)
+let f = lambda(x) -> x + 1.0
+let g = lambda(x) -> x * 2.0
+let c1 = L <@> f
+let c2 = L <@> g
+let result = c1 @>> c2 |> compute
+// EXPECT: result = [4.0, 6.0, 8.0]

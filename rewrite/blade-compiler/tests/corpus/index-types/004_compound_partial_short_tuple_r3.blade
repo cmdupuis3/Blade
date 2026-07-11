@@ -1,0 +1,15 @@
+// TEST: Compound Partial Short Tuple R3
+// Short tuple, k-j = 1: a 2-tuple on a rank-3 compound pins the leading
+// prefix (x,y) = (0,1); the residual is the dense window over z. This is the
+// most reachable partial form via plain tuples (previously gated).
+// Short tuple, k-j = 1: a 2-tuple on a rank-3 compound pins the leading
+// prefix (x,y) = (0,1); the residual is the dense window over z. This is the
+// most reachable partial form via plain tuples (previously gated).
+type X = Idx<2>
+type Y = Idx<2>
+type Z = Idx<2>
+let dense: Array<Float64 like X, Y, Z> = [[[1.0, 2.0], [3.0, 4.0]], [[5.0, 6.0], [7.0, 8.0]]]
+let m: Array<Bool like X, Y, Z> = [[[true, false], [true, true]], [[false, true], [true, false]]]
+let B = compound(dense, m)
+let r = B((0, 1))
+// EXPECT: r = [3, 4]

@@ -1,0 +1,8 @@
+// TEST: Zip Product
+// zip used with multiplicative kernel
+let A = [2.0, 3.0, 4.0]
+let B = [5.0, 6.0, 7.0]
+let L = method_for(zip(A, B))
+let f = lambda(a, b) -> a * b
+let result = L <@> f |> compute
+// EXPECT: result = [10, 18, 28]

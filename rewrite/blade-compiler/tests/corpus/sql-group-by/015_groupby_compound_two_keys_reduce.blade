@@ -1,0 +1,14 @@
+// TEST: GroupBy Compound Two Keys Reduce
+// Compound group_keys + reduce per group. Same tuple structure as the
+// _first variant, but each bucket sums its members.
+//   bucket 0: indices [0, 4] → temps [10.0, 12.0] → sum 22.0
+//   bucket 1: indices [1, 5] → temps [11.0, 13.0] → sum 24.0
+//   bucket 2: indices [2]    → temps [20.0]       → sum 20.0
+//   bucket 3: indices [3]    → temps [21.0]       → sum 21.0
+let region = [0, 1, 0, 1, 0, 1]
+let year =   [2020, 2020, 2021, 2021, 2020, 2020]
+let temps =  [10.0, 11.0, 20.0, 21.0, 12.0, 13.0]
+let gk = group_keys(region, year)
+let grouped = group_by(temps, gk)
+let result = method_for(grouped) <@> lambda(g: Array<Float64 like RaggedIdx<_>>) -> reduce(g, (+)) |> compute
+// EXPECT: result = [22, 24, 20, 21]

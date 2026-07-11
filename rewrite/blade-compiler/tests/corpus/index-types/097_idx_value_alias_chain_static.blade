@@ -1,0 +1,10 @@
+// TEST: Idx Value Alias Chain Static
+// Chained static alias: type B = A where A is itself an index alias.
+// registerTypeDecl chases one level of TDIIndexType reference at
+// registration; B then behaves like a direct alias of Idx<6>, including
+// in foreign-key element-type position.
+type StationIdx = Idx<6>
+type RegionIdx = StationIdx
+let codes: Array<RegionIdx like Idx<3>> = [0, 1, 2]
+let v = codes(1)
+// EXPECT: v = 1

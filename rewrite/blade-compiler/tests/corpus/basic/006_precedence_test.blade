@@ -1,0 +1,6 @@
+// TEST: Precedence Test
+// Test that * binds tighter than +
+let x = 1 + 2 * 3
+let y = (1 + 2) * 3
+// EXPECT: x = 7
+// EXPECT: y = 9

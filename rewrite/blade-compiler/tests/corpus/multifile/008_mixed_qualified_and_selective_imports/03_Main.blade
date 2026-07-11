@@ -1,0 +1,8 @@
+// TEST: Mixed qualified and selective imports
+// MODULE: Main
+module Main
+import Constants as C
+from Formulas import square
+
+let area = C.pi * square(5.0)
+// EXPECT: area = 78.53975

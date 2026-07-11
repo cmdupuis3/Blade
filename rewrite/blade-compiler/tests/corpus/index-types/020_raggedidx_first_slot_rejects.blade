@@ -1,0 +1,12 @@
+// TEST: RaggedIdx First Slot (rejects)
+// RaggedIdx cannot be the FIRST index slot: with no prior index there is no
+// iteration position to drive the lengths lookup (formalism 4.4 -- the
+// ragged extent is a function of the outer index). The rank-1 annotation
+// also cannot describe the rank-2 nested literal.
+// RaggedIdx cannot be the FIRST index slot: with no prior index there is no
+// iteration position to drive the lengths lookup (formalism 4.4 -- the
+// ragged extent is a function of the outer index). The rank-1 annotation
+// also cannot describe the rank-2 nested literal.
+let lens: Array<Int64 like Idx<2>> = [2, 1]
+let r: Array<Float64 like RaggedIdx<lens>> = [[1.0, 2.0], [3.0]]
+// EXPECT: typecheck failure — RaggedIdx requires at least one prior index.

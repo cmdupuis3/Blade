@@ -1,0 +1,22 @@
+// TEST: Foreign Key Deref Record
+// Record-based foreign-key transformation. The struct bundles two
+// StationIdx-keyed fields (one value, one foreign key); the kernel
+// projects out both via chained field-then-index access and
+// dereferences the foreign key into a sibling RegionIdx-keyed array.
+//
+// Tests that field projection preserves the IRefNamed tag on the
+// foreign-key array, so `data.region(s)` still produces a properly
+// tagged RegionIdx value at the indexing site.
+type StationIdx = Idx<6>
+type RegionIdx = Idx<3>
+struct StationData {
+    temp:   Array<Float64 like StationIdx>,
+    region: Array<RegionIdx like StationIdx>
+}
+let region_baseline: Array<Float64 like RegionIdx> = [10.0, 20.0, 30.0]
+let data = StationData {
+    temp   = [11.0, 19.0, 31.0, 12.0, 21.0, 29.0],
+    region = [0, 1, 2, 0, 1, 2]
+}
+let result = method_for(range<StationIdx>) <@> lambda(s) -> data.temp(s) - region_baseline(data.region(s)) |> compute
+// EXPECT: result = [1, -1, 1, 2, 1, -1]

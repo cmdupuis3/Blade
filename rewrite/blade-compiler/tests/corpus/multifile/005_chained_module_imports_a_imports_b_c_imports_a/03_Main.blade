@@ -1,0 +1,7 @@
+// TEST: Chained module imports (A imports B, C imports A)
+// MODULE: Main
+module Main
+import Middle
+
+let result = Middle.scaled + 5.0
+// EXPECT: result = 25

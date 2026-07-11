@@ -1,0 +1,12 @@
+// TEST: Reynolds Partial Symmetry 3D
+// Partially symmetric 3-ary: x*y + z → 3 groups of 2 (mul is commutative)
+// reynolds(f) = 2*(xy+z) + 2*(xz+y) + 2*(yz+x) = 2(xy+xz+yz+x+y+z)
+// Partially symmetric 3-ary: x*y + z → 3 groups of 2 (mul is commutative)
+// reynolds(f) = 2*(xy+z) + 2*(xz+y) + 2*(yz+x) = 2(xy+xz+yz+x+y+z)
+let A = [1.0, 2.0]
+let B = [3.0, 4.0]
+let C = [5.0, 6.0]
+let L = method_for(A, B, C)
+let g = lambda(x, y, z) -> x * y + z
+let result = L <@> reynolds(g) |> compute
+// EXPECT: result = [64.0, 74.0, 78.0, 90.0, 82.0, 94.0, 98.0, 112.0]

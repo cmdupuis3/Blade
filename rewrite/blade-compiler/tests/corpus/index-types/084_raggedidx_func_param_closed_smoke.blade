@@ -1,0 +1,43 @@
+// TEST: RaggedIdx Func Param Closed Smoke
+// ============================================================================
+// Function parameters with ragged types (Leg 2).
+// A function declared `f(A: Array<... RaggedIdx<...>>)` must receive `A_lens`
+// alongside `A_extents` at the C++ calling convention. With those companion
+// arrays in scope inside the body, tryRaggedPeel handles iteration via the
+// usual `A_lens[__g]` / `A_extents[0]` machinery — the same path that
+// already worked for ragged literals.
+//
+// Both surface forms are exercised:
+//   - Closed `RaggedIdx<lens>`: type-level reference to a named lens binding.
+//     Currently decorative — no runtime check that the caller's lens equals
+//     the named binding. Enforcement is deferred to a materialization round.
+//   - Opaque `RaggedIdx<_>`:    the universal ragged spelling for any context.
+//
+// Both produce identical C++ at the call site; the named form's enforcement
+// is the only future-different bit.
+// ============================================================================
+// ============================================================================
+// Function parameters with ragged types (Leg 2).
+// A function declared `f(A: Array<... RaggedIdx<...>>)` must receive `A_lens`
+// alongside `A_extents` at the C++ calling convention. With those companion
+// arrays in scope inside the body, tryRaggedPeel handles iteration via the
+// usual `A_lens[__g]` / `A_extents[0]` machinery — the same path that
+// already worked for ragged literals.
+//
+// Both surface forms are exercised:
+//   - Closed `RaggedIdx<lens>`: type-level reference to a named lens binding.
+//     Currently decorative — no runtime check that the caller's lens equals
+//     the named binding. Enforcement is deferred to a materialization round.
+//   - Opaque `RaggedIdx<_>`:    the universal ragged spelling for any context.
+//
+// Both produce identical C++ at the call site; the named form's enforcement
+// is the only future-different bit.
+// ============================================================================
+// Function decl with closed RaggedIdx<lens> param. Body is constant — only
+// verifies the decl signature emits properly and the call site passes the
+// companion arrays.
+let lens = [3, 2, 4]
+function h(A: Array<Float64 like Idx<3>, RaggedIdx<lens>>) -> Float64 = 0.0
+let r = [[1.0, 2.0, 3.0], [4.0, 5.0], [6.0, 7.0, 8.0, 9.0]]
+let result = h(r)
+// EXPECT: result = 0

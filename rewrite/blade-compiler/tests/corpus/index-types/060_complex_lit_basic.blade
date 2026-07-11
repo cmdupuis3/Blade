@@ -1,0 +1,8 @@
+// TEST: Complex Lit Basic
+// Complex128 literal construction via postfix type annotation.
+// `(re, im) : Complex128` — both components are float-typed; the
+// resulting value is a scalar Complex128, NOT a 2-tuple of doubles.
+let x = (1.0, 2.0) : Complex128
+let y = (3.0, 4.0) : Complex128
+// EXPECT: x = (1,2)
+// EXPECT: y = (3,4)

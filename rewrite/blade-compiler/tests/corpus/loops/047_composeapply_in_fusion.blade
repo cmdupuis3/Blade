@@ -1,0 +1,17 @@
+// TEST: ComposeApply In Fusion
+// (compose-apply) <&!> (canonical-apply) — mandatory fusion: same
+// shape as parallel but with the fusion operator. genFusionTree at
+// CodeGen.fs:3175 extracts IRApplyCombinator infos to drive a single
+// fused loop nest; an IRComposeApply leaf isn't extractable that way.
+let A = [1.0, 2.0, 3.0]
+let f = lambda(x) -> x + 1.0
+let g = lambda(x) -> x * 2.0
+let h = lambda(x) -> x - 1.0
+let L = method_for(A)
+let p = (object_for(f) >>@ object_for(g)) <@> A
+let q = L <@> h
+let (r1, r2) = p <&!> q |> compute
+// Same per-element values as test162; fusion is an optimization,
+// not a semantic change.
+// EXPECT: r1 = [4.0, 6.0, 8.0]
+// EXPECT: r2 = [0.0, 1.0, 2.0]

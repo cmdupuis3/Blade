@@ -1,0 +1,20 @@
+// TEST: Struct Array With Array Field
+// array of structs, where the
+// struct has an array-typed field. Combines the v15-v20 work:
+//   - struct array allocation (v15)
+//   - bracket disambiguation (v15)
+//   - generalized walker (v17)
+//   - array-field lifting in struct lits (v20)
+//   - generalized lift in nested positions (v21)
+struct Trace {
+    id: Int,
+    samples: Array<Float64 like Idx<2>>
+}
+let arr: Array<Trace like Idx<2>> = [
+    Trace { id = 1, samples = [1.0, 2.0] },
+    Trace { id = 2, samples = [3.0, 4.0] }
+]
+let v0 = arr[0].samples[1]
+let v1 = arr[1].id
+// EXPECT: v0 = 2
+// EXPECT: v1 = 2

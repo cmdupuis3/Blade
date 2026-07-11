@@ -1,0 +1,16 @@
+// TEST: Reduce Struct Array Field
+// reduce over a struct's array field.
+// This requires:
+//   1. Lift hoists `t.samples` to a let-RHS so codegen has a name to attach
+//      a companion `_extents` to
+//   2. genBinding's IRFieldAccess case (v23b) synthesizes `<name>_extents`
+//      from the field's static array type
+// Without (1), the reduce would refer to `t.samples` directly with no
+// shape; without (2), the binding would lack a sibling extents declaration
+// and `<name>_extents[0]` lookups would fail to compile.
+struct Trace {
+    samples: Array<Float64 like Idx<3>>
+}
+let t = Trace { samples = [10.0, 20.0, 30.0] }
+let total = reduce(t.samples, (+))
+// EXPECT: total = 60

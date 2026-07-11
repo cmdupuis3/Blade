@@ -1,0 +1,44 @@
+// TEST: Type Recovery: Poly Struct Field
+// ============================================================================
+// v24d-1 fallback regression guards. These four cases originally exercised
+// the type-recovery pathways that two CodeGen fallbacks defended against:
+//   - The IRFieldAccess scan fallback (CodeGen.fs:260) that searched all
+//     structs by field name when obj's type wasn't IRTNamed
+//   - The auto-fallback (CodeGen.fs:2208) that emitted `auto x = expr` for
+//     shape-bearing IRTUnit bindings
+//
+// Both fallbacks were removed after instrumentation showed neither fired
+// across the full test corpus including these four probes. They remain
+// here as regression guards — if a future change to typechecking or
+// lowering ever leaks IRTUnit / non-IRTNamed types through to codegen for
+// these patterns, these probes will fail and surface the regression
+// instead of the codegen silently recovering.
+// ============================================================================
+// ============================================================================
+// v24d-1 fallback regression guards. These four cases originally exercised
+// the type-recovery pathways that two CodeGen fallbacks defended against:
+//   - The IRFieldAccess scan fallback (CodeGen.fs:260) that searched all
+//     structs by field name when obj's type wasn't IRTNamed
+//   - The auto-fallback (CodeGen.fs:2208) that emitted `auto x = expr` for
+//     shape-bearing IRTUnit bindings
+//
+// Both fallbacks were removed after instrumentation showed neither fired
+// across the full test corpus including these four probes. They remain
+// here as regression guards — if a future change to typechecking or
+// lowering ever leaks IRTUnit / non-IRTNamed types through to codegen for
+// these patterns, these probes will fail and surface the regression
+// instead of the codegen silently recovering.
+// ============================================================================
+// Probe 1: field access on a struct returned from a function call. Tests
+// that the function-return path preserves struct identity (IRTNamed)
+// through to the field access. Originally framed around polymorphism, but
+// Blade's Poly<T^N> system is for arity polymorphism, not type generics —
+// the function-call indirection alone is the relevant test surface here.
+struct PointType {
+    x: Float64,
+    y: Float64
+}
+function ident(p: PointType) -> PointType = p
+let p = ident(PointType { x = 3.0, y = 4.0 })
+let r = p.x
+// EXPECT: r = 3

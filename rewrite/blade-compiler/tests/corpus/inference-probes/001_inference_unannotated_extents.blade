@@ -1,0 +1,49 @@
+// TEST: Inference: Unannotated Extents
+// ============================================================================
+// Type-checking probes
+// ============================================================================
+//
+// This file holds two related groups of tests, both exercising Blade's
+// type-checking pipeline rather than any particular language feature:
+//
+//   1. Inference probes (display name "Inference: ..."). Originally written
+//      to surface gaps in how the typechecker propagated constraints into
+//      special forms (extents, mask, sort, reduce) when the kernel arg was
+//      unannotated. Most now pass — they document working behavior; the
+//      one rejection-style probe (Annotation Mismatch) is a regression
+//      guard that confirms a deliberate type clash still errors.
+//
+//   2. Validator probes (display name "Validator: ... (rejects)"). Each
+//      asserts that the IndexTypeValidator rejects a specific forbidden
+//      placement of an index type — as a regular function parameter, struct
+//      field, let-binding annotation, etc. All seven are expected to fail
+//      IR lowering with a specific validator error message; that's the
+//      pass criterion.
+// ============================================================================
+// ============================================================================
+// Type-checking probes
+// ============================================================================
+//
+// This file holds two related groups of tests, both exercising Blade's
+// type-checking pipeline rather than any particular language feature:
+//
+//   1. Inference probes (display name "Inference: ..."). Originally written
+//      to surface gaps in how the typechecker propagated constraints into
+//      special forms (extents, mask, sort, reduce) when the kernel arg was
+//      unannotated. Most now pass — they document working behavior; the
+//      one rejection-style probe (Annotation Mismatch) is a regression
+//      guard that confirms a deliberate type clash still errors.
+//
+//   2. Validator probes (display name "Validator: ... (rejects)"). Each
+//      asserts that the IndexTypeValidator rejects a specific forbidden
+//      placement of an index type — as a regular function parameter, struct
+//      field, let-binding annotation, etc. All seven are expected to fail
+//      IR lowering with a specific validator error message; that's the
+//      pass criterion.
+// ============================================================================
+// Probe A: extents() on an unannotated kernel param.
+// Expected to fail at typecheck with "extents requires array" or similar
+// — same pattern reduce had before the recent fix.
+let r = [[1.0, 2.0, 3.0], [4.0, 5.0], [6.0]]
+let sizes = method_for(r) <@> lambda(g) -> extents(g) |> compute
+// If this ever passes: EXPECT: sizes = [3, 2, 1]

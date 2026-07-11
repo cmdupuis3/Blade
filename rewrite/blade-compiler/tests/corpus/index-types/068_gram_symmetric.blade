@@ -1,0 +1,6 @@
+// TEST: Gram Symmetric
+// gram(A, A) real -> symmetric 2x2 (conj is identity on reals).
+// gram(A, A) real -> symmetric 2x2 (conj is identity on reals).
+let A: Array<Float64 like Idx<2>, Idx<3>> = [[1.0, 2.0, 3.0], [4.0, 5.0, 6.0]]
+let result = gram(A, A)
+// EXPECT: result = [14, 32, 77]

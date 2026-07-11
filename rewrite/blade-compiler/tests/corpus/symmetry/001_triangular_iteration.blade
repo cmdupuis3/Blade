@@ -1,0 +1,9 @@
+// TEST: Triangular Iteration
+// Same array used twice with commutative kernel - enables triangular iteration
+let A = [1.0, 2.0, 3.0, 4.0, 5.0]
+let L = method_for(A, A)
+let f = lambda(x, y) where comm(x, y) -> x * y
+let result = L <@> f |> compute
+// With comm(x,y), symmetric 5x5 matrix stored as left-justified triangular
+// Row-major order: row0=[1,2,3,4,5], row1=[4,6,8,10], row2=[9,12,15], row3=[16,20], row4=[25]
+// EXPECT: result = [1.0, 2.0, 3.0, 4.0, 5.0, 4.0, 6.0, 8.0, 10.0, 9.0, 12.0, 15.0, 16.0, 20.0, 25.0]

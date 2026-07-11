@@ -1,0 +1,20 @@
+// TEST: Decompact Symmetric
+// ----------------------------------------------------------------------------
+// decompact(A, d) — pull the compact component at dim d out as a free Idx,
+// materializing the full dense tensor. v1: rank-2 sole compact slot
+// (SymIdx<2,n> / AntisymIdx<2,n>) → dense n×n.
+// ----------------------------------------------------------------------------
+// decompact(A, d) — pull the compact component at dim d out as a free Idx,
+// materializing the full dense tensor. v1: rank-2 sole compact slot
+// (SymIdx<2,n> / AntisymIdx<2,n>) → dense n×n.
+// Symmetric source: reynolds(g) with g=2x+y gives 3(x+y), stored triangularly
+// as (0,0)=6 (0,1)=9 (0,2)=12 (1,1)=12 (1,2)=15 (2,2)=18. Decompacting the
+// symmetric group yields a dense 3×3 symmetric matrix (each canonical written
+// to both (i,j) and (j,i); diagonal once).
+let A = [1.0, 2.0, 3.0]
+let L = method_for(A, A)
+let g = lambda(x, y) where comm(x, y) -> 2.0 * x + y
+let sym = L <@> reynolds(g) |> compute
+let result = decompact(sym, 0)
+// M = [[6,9,12],[9,12,15],[12,15,18]] -> row-major
+// EXPECT: result = [6, 9, 12, 9, 12, 15, 12, 15, 18]

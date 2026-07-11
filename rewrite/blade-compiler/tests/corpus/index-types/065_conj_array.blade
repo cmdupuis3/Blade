@@ -1,0 +1,12 @@
+// TEST: Conj Array
+// conj applied elementwise inside a kernel over a complex array. Each element
+// (a, b) becomes (a, -b).
+let A: Array<Complex128 like Idx<3>> = [
+    (1.0, 2.0) : Complex128,
+    (3.0, -4.0) : Complex128,
+    (0.0, 5.0) : Complex128
+]
+let L = method_for(A)
+let f = lambda(z) -> conj(z)
+let result = L <@> f |> compute
+// EXPECT: result = [(1, -2), (3, 4), (0, -5)]

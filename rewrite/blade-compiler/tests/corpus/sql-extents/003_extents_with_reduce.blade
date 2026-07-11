@@ -1,0 +1,8 @@
+// TEST: Extents With Reduce
+// extents() composes with the reduce machinery: counting elements via
+// extents is the static-friendly counterpart to summing 1s.
+let xs = [3.0, 1.0, 4.0, 1.0, 5.0, 9.0, 2.0, 6.0]
+let count = extents(xs)
+let sum = reduce(xs, (+))
+// EXPECT: count = 8
+// EXPECT: sum = 31

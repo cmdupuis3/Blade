@@ -1,0 +1,12 @@
+// TEST: Mask Composition
+// Predicate conjunction inside one mask (WHERE p AND q as one pass). The
+// POSITIONAL two-mask composition (elementwise Bool AND of two mask
+// arrays) is exercised separately in SQL WHERE AND.
+let A = [1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0, 9.0, 10.0]
+let band = compound(A, mask(A, lambda(x) -> x > 3.0 && x < 8.0))
+let n = extents(band)
+let x3 = band(3)
+let x6 = band(6)
+// EXPECT: n = 4
+// EXPECT: x3 = 4
+// EXPECT: x6 = 7

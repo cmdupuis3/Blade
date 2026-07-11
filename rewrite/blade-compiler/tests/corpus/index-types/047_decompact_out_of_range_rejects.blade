@@ -1,0 +1,8 @@
+// TEST: Decompact Out Of Range (rejects)
+// Dimension 5 does not exist.
+let A = [1.0, 2.0, 3.0]
+let L = method_for(A, A)
+let g = lambda(x, y) where comm(x, y) -> x + y
+let sym = L <@> g |> compute
+let result = decompact(sym, 5)
+// EXPECT: typecheck failure — dimension out of range.

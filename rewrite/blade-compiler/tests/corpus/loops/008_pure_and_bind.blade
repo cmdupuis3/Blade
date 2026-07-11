@@ -1,0 +1,5 @@
+// TEST: Pure and Bind
+let x = pure(42)
+let f = lambda(n) -> n * 2
+let result = x >>= f
+// EXPECT: result = 84

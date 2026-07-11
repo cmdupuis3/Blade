@@ -1,0 +1,11 @@
+// TEST: Idx Value Alias Chain Enum
+// Chained EnumIdx alias: type B = A where A is itself an EnumIdx alias.
+// Same chase pattern as the static chain test, but resolving through
+// TDIEnumIdx (whose body field was added in this round). Without the
+// body, the chain falls through to TDIAlias and the array's element
+// type lookup misses the EnumIdx values list.
+type LandType = EnumIdx<[101, 205, 307]>
+type RegionCode = LandType
+let codes: Array<RegionCode like Idx<3>> = [101, 205, 307]
+let v = codes(1)
+// EXPECT: v = 205

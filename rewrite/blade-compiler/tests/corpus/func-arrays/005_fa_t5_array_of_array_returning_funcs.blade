@@ -1,0 +1,16 @@
+// TEST: FA T5: Array of array-returning funcs
+// ----------------------------------------------------------------------------
+// T5: Array of array-returning functions
+// ----------------------------------------------------------------------------
+// Combines T3 and T4: each element is a function returning an array.
+// Type shape: Array<(Float64 -> Array<Float64 like Idx<3>>) like Idx<2>>
+// ----------------------------------------------------------------------------
+// T5: Array of array-returning functions
+// ----------------------------------------------------------------------------
+// Combines T3 and T4: each element is a function returning an array.
+// Type shape: Array<(Float64 -> Array<Float64 like Idx<3>>) like Idx<2>>
+function shift_up(x: Float64) -> Array<Float64 like Idx<3>> = [x + 1.0, x + 2.0, x + 3.0]
+function shift_dn(x: Float64) -> Array<Float64 like Idx<3>> = [x - 1.0, x - 2.0, x - 3.0]
+let funcs: Array<(Float64 -> Array<Float64 like Idx<3>>) like Idx<2>> = [shift_up, shift_dn]
+let r = funcs(0)(10.0)(1)
+// EXPECT: r = 12

@@ -1,0 +1,8 @@
+// TEST: Parallel: omp+cuda Mutual Exclusion (rejects)
+// omp and cuda are mutually exclusive parallelization strategies: a single
+// where-clause may not specify both. The parser rejects this at parse time.
+let A = [1.0, 2.0, 3.0]
+let L = method_for(A, A)
+let f = lambda(x, y) where comm(x, y), omp(x: 1), cuda(block: 64) -> x * y
+let result = L <@> f |> compute
+// EXPECT: parse failure — only one parallelization strategy per where-clause

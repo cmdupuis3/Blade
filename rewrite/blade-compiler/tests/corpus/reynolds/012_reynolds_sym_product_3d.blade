@@ -1,0 +1,12 @@
+// TEST: Reynolds Sym Product 3D
+// Fully symmetric 3-ary product: x*y*z → all 6 perms identical → 1 term × 6
+// reynolds(f)(x,y,z) = 6*x*y*z
+// Fully symmetric 3-ary product: x*y*z → all 6 perms identical → 1 term × 6
+// reynolds(f)(x,y,z) = 6*x*y*z
+let A = [1.0, 2.0]
+let B = [3.0, 4.0]
+let C = [5.0, 6.0]
+let L = method_for(A, B, C)
+let g = lambda(x, y, z) -> x * y * z
+let result = L <@> reynolds(g) |> compute
+// EXPECT: result = [90.0, 108.0, 120.0, 144.0, 180.0, 216.0, 240.0, 288.0]

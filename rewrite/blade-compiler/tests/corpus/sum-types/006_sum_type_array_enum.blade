@@ -1,0 +1,12 @@
+// TEST: Sum Type Array (Enum)
+// Array of enum-like sum type (no payload variants).
+// Tests construction via ArrayLit, bracket-indexing into the array,
+// and match dispatch on the indexed result. Match for enum-style
+// variants compiles to `==` comparisons on the underlying enum int.
+type Status = Pending | Active | Completed
+let states: Array<Status like Idx<3>> = [Pending, Active, Completed]
+let v = match states[1] with
+    | Pending -> 1
+    | Active -> 2
+    | Completed -> 3
+// EXPECT: v = 2

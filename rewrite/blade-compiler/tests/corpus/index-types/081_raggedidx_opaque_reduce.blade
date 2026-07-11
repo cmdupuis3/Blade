@@ -1,0 +1,7 @@
+// TEST: RaggedIdx Opaque Reduce
+// Reduce each row of a ragged literal. With the typed kernel param, reduce(g)
+// typechecks because g is rank-1; codegen renders the inline IIFE against
+// the sub-array binding's _extents, producing per-row sums.
+let r = [[1.0, 2.0, 3.0], [4.0, 5.0], [6.0, 7.0, 8.0, 9.0]]
+let sums = method_for(r) <@> lambda(g: Array<Float64 like RaggedIdx<_>>) -> reduce(g, (+)) |> compute
+// EXPECT: sums = [6, 9, 30]

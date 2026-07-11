@@ -1,0 +1,8 @@
+// TEST: Combinators
+let A = [1.0, 2.0]
+let B = [3.0, 4.0]
+let L1 = method_for(A, A)
+let L2 = method_for(B, B)
+let f = lambda(x, y) -> x + y
+// Parallel composition
+let parallel = (L1 <@> f) <&> (L2 <@> f)

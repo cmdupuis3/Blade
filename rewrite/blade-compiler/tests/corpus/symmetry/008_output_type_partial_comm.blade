@@ -1,0 +1,9 @@
+// TEST: Output Type: Partial Comm
+// Partial comm: only (x,y) are commutative, not z
+let A = [1.0, 2.0, 3.0]
+let B = [4.0, 5.0, 6.0]
+let L = method_for(A, A, B)
+let f = lambda(x, y, z) where comm(x, y) -> x * y * z
+let result = L <@> f |> compute
+// SymIdx<2, 3> for A,A pair; Idx<3> for B (z not in comm group)
+// EXPECT: result = [4, 5, 6, 8, 10, 12, 12, 15, 18, 16, 20, 24, 24, 30, 36, 36, 45, 54]

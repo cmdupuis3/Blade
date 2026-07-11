@@ -1,0 +1,7 @@
+// TEST: Arity In Poly
+// arity(param) inside poly function, monomorphized at call site
+function polyArityCheck(args: Poly<T^0>) -> T^0
+= arity(args)
+
+let result = polyArityCheck(10, 20, 30)
+// EXPECT: result = 3

@@ -1,0 +1,9 @@
+// TEST: Object For Comb Apply
+let A = [1.0, 2.0, 3.0]
+let L = method_for(A)
+let f = lambda(x) -> x + 10.0
+let g = lambda(x) -> x * 2.0
+let (c1, c2) = object_for(<@>) <@> ((L, f), (L, g))
+let (sums, prods) = c1 <&> c2 |> compute
+// EXPECT: sums = [11.0, 12.0, 13.0]
+// EXPECT: prods = [2.0, 4.0, 6.0]

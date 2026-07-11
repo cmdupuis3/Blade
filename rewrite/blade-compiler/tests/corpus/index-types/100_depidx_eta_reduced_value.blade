@@ -1,0 +1,17 @@
+// TEST: DepIdx Eta-Reduced Value
+// Eta-reduced DepIdx — the named-function form. Semantically equivalent
+// to `DepIdx<Idx<3>, lambda(i) -> Idx<3 - i>>` (test_depidx_triangular_literal),
+// but with the per-row extent computed by a static function. The eta-
+// reduction inlines the function's body at the use site, substituting
+// the function's param with the outer iteration variable.
+//
+// The function uses Int64 throughout to avoid index-type coercion
+// concerns; the eta-reduction mechanism is type-agnostic and simply
+// extracts the body expression for substitution.
+static function tri_extent(i: Int64) -> Int64 = 3 - i
+let r: Array<Float64 like DepIdx<Idx<3>, tri_extent>> = [
+    [1.0, 2.0, 3.0],
+    [4.0, 5.0],
+    [6.0]
+]
+// EXPECT: r = [1, 2, 3, 4, 5, 6]

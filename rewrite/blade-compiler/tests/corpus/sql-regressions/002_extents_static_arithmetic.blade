@@ -1,0 +1,18 @@
+// TEST: Extents Static Arithmetic
+// Static arithmetic in extent expressions: tests whether tryEvalIntIR
+// successfully evaluates literal arithmetic in index types. If the static
+// path fires correctly, the C++ output uses a literal; if not, it falls back
+// to a runtime read. Either way the test value should be correct — this is
+// a *correctness* test, not a performance one. The static path is verified
+// indirectly by inspecting the generated C++ for `4L` vs `_extents[0]`.
+// Static arithmetic in extent expressions: tests whether tryEvalIntIR
+// successfully evaluates literal arithmetic in index types. If the static
+// path fires correctly, the C++ output uses a literal; if not, it falls back
+// to a runtime read. Either way the test value should be correct — this is
+// a *correctness* test, not a performance one. The static path is verified
+// indirectly by inspecting the generated C++ for `4L` vs `_extents[0]`.
+// Index extent involving literal arithmetic — should still resolve statically
+// when tryEvalIntIR can evaluate the expression.
+let A = [1.0, 2.0, 3.0, 4.0]
+let n = extents(A)
+// EXPECT: n = 4

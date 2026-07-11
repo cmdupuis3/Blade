@@ -1,0 +1,8 @@
+// TEST: Rank-3 Scalar Array
+// rank-3 scalar array literal. Pre-generalization, the
+// init path emitted only a TODO comment and the array was uninitialized.
+// Now uses the recursive walker that handles arbitrary rank.
+let cube = [[[1.0, 2.0], [3.0, 4.0]], [[5.0, 6.0], [7.0, 8.0]]]
+let v = cube[1][0][1]
+// EXPECT: v = 6
+// EXPECT: cube = [1, 2, 3, 4, 5, 6, 7, 8]

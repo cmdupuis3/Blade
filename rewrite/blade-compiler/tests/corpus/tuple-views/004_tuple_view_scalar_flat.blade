@@ -1,0 +1,8 @@
+// TEST: Tuple View Scalar Flat
+// Flat view of scalar tuples
+let x = (1.0, 2.0)
+let y = (x, 3.0)
+let (a, b, c) = y
+// EXPECT: a = 1
+// EXPECT: b = 2
+// EXPECT: c = 3

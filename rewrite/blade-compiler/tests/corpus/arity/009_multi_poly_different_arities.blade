@@ -1,0 +1,10 @@
+// TEST: Multi Poly Different Arities
+// Each Poly pack stands independently — different slots can have different
+// arities at the same call site. Exercises the per-slot arity machinery:
+// xs gets arity 2, ys gets arity 3, and the specialization mangled name is
+// e.g. mix_arity_2_3.
+function mix(xs: Poly<T^0>, ys: Poly<T^0>) -> T^0
+= xs[0] + xs[1] + ys[0] + ys[1] + ys[2]
+
+let result = mix((10.0, 20.0), (1.0, 2.0, 3.0))
+// EXPECT: result = 36.0

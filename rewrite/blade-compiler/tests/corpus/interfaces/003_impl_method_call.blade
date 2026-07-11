@@ -1,0 +1,15 @@
+// TEST: Impl Method Call
+// Interface + impl + method call with verified result
+struct Rect {
+    w: Float64,
+    h: Float64
+}
+interface HasArea {
+    function area(self) -> Float64
+}
+impl HasArea for Rect {
+    function area(self) -> Float64 = self.w * self.h
+}
+let r = Rect { w = 3.0, h = 4.0 }
+let a = r.area()
+// EXPECT: a = 12

@@ -1,0 +1,6 @@
+// TEST: Mask None Pass
+// No elements pass — cardinality 0 (empty filtered set).
+let A = [1.0, 2.0, 3.0]
+let none = compound(A, mask(A, lambda(x) -> x > 100.0))
+let n = extents(none)
+// EXPECT: n = 0

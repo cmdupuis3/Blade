@@ -1,0 +1,20 @@
+// TEST: FA T6: 2D array of funcs
+// ----------------------------------------------------------------------------
+// T6: 2D array of functions (the formalism's models case, simplified)
+// ----------------------------------------------------------------------------
+// Array<(Float64 -> Float64) like Idx<2>, Idx<2>>: a 2x2 grid of scalar
+// functions. This is the §5.3 models case with simpler types (scalars rather
+// than parameterized types and time series).
+// ----------------------------------------------------------------------------
+// T6: 2D array of functions (the formalism's models case, simplified)
+// ----------------------------------------------------------------------------
+// Array<(Float64 -> Float64) like Idx<2>, Idx<2>>: a 2x2 grid of scalar
+// functions. This is the §5.3 models case with simpler types (scalars rather
+// than parameterized types and time series).
+function f00(x: Float64) -> Float64 = x + 0.0
+function f01(x: Float64) -> Float64 = x + 1.0
+function f10(x: Float64) -> Float64 = x + 10.0
+function f11(x: Float64) -> Float64 = x + 11.0
+let grid: Array<(Float64 -> Float64) like Idx<2>, Idx<2>> = [[f00, f01], [f10, f11]]
+let r = grid(1, 0)(5.0)
+// EXPECT: r = 15

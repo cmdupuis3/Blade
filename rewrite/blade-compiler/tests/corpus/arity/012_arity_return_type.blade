@@ -1,0 +1,4 @@
+// TEST: Arity Return Type
+// T^arity(param) in return type - rank depends on poly pack size
+function identity(args: Poly<T^1>) -> T^arity(args)
+= args[0]

@@ -1,0 +1,8 @@
+// TEST: Unit Annotated Type
+// Unit-annotated scalar types
+Unit meters
+Unit seconds
+let dist: Float<meters> = 100.0
+let time: Float<seconds> = 9.58
+// EXPECT: dist = 100
+// EXPECT: time = 9.58

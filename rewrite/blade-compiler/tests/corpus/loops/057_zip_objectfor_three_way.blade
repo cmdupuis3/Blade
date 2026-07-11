@@ -1,0 +1,9 @@
+// TEST: Zip ObjectFor Three-Way
+// Three-way zip through object_for
+let A = [1.0, 2.0, 3.0]
+let B = [10.0, 20.0, 30.0]
+let C = [100.0, 200.0, 300.0]
+let f = lambda(a, b, c) -> a + b + c
+let O = object_for(f)
+let result = O <@> zip(A, B, C) |> compute
+// EXPECT: result = [111, 222, 333]

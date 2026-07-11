@@ -1,0 +1,13 @@
+// TEST: Ragged Multi Array (rejects)
+// A ragged operand slipping past the peel (here: multi-array method_for
+// mixing ragged with dense) is gated rather than silently miscompiled --
+// the standard loop nest knows nothing about per-row lengths. Co-iteration
+// semantics for ragged operands are a rewrite-spec question.
+// A ragged operand slipping past the peel (here: multi-array method_for
+// mixing ragged with dense) is gated rather than silently miscompiled --
+// the standard loop nest knows nothing about per-row lengths. Co-iteration
+// semantics for ragged operands are a rewrite-spec question.
+let r = [[1.0, 2.0], [3.0]]
+let d = [10.0, 20.0]
+let x = method_for(r, d) <@> lambda(g: Array<Float64 like RaggedIdx<_>>, y) -> reduce(g, (+)) + y |> compute
+// EXPECT: typecheck failure — ragged operands support only the single-array peel forms.

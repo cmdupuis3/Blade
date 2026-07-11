@@ -1,0 +1,52 @@
+// TEST: Compound Partial Prefix Window
+// ---------------------------------------------------------------------------
+// Partial compound indexing (formalism 4.5, phase 2). Shared fixture shapes:
+//
+// Rank-2: Lat = Idx<2>, Lon = Idx<3>, dense values 10..60 row-major,
+//   mask [[T,F,T],[T,T,F]] -> present lex order:
+//   (0,0)=10, (0,2)=30, (1,0)=40, (1,1)=50   (cardinality 4)
+//
+// Rank-3: X = Y = Z = Idx<2>, dense value at (x,y,z) = 4x + 2y + z + 1,
+//   mask [[[T,F],[T,T]],[[F,T],[T,F]]] -> present lex order:
+//   (0,0,0)=1, (0,1,0)=3, (0,1,1)=4, (1,0,1)=6, (1,1,0)=7   (cardinality 5)
+//
+// The four reconstitution shapes are each hit at least once: prefix window
+// (dense rank-1 residual, shared data), prefix residual compound (shared
+// window, no copy), scattered dense gather, and (via the chained test)
+// gather on a residual produced by a prior partial.
+// ---------------------------------------------------------------------------
+
+// Trailing wildcard, rank-2: B((0, _)) -> the dense window of valid lons at
+// lat 0. Prefix pin -> make_partial_window (shared parent data, heap extent).
+// Also exercises scalar indexing into the residual and reduce over it.
+// ---------------------------------------------------------------------------
+// Partial compound indexing (formalism 4.5, phase 2). Shared fixture shapes:
+//
+// Rank-2: Lat = Idx<2>, Lon = Idx<3>, dense values 10..60 row-major,
+//   mask [[T,F,T],[T,T,F]] -> present lex order:
+//   (0,0)=10, (0,2)=30, (1,0)=40, (1,1)=50   (cardinality 4)
+//
+// Rank-3: X = Y = Z = Idx<2>, dense value at (x,y,z) = 4x + 2y + z + 1,
+//   mask [[[T,F],[T,T]],[[F,T],[T,F]]] -> present lex order:
+//   (0,0,0)=1, (0,1,0)=3, (0,1,1)=4, (1,0,1)=6, (1,1,0)=7   (cardinality 5)
+//
+// The four reconstitution shapes are each hit at least once: prefix window
+// (dense rank-1 residual, shared data), prefix residual compound (shared
+// window, no copy), scattered dense gather, and (via the chained test)
+// gather on a residual produced by a prior partial.
+// ---------------------------------------------------------------------------
+
+// Trailing wildcard, rank-2: B((0, _)) -> the dense window of valid lons at
+// lat 0. Prefix pin -> make_partial_window (shared parent data, heap extent).
+// Also exercises scalar indexing into the residual and reduce over it.
+type Lat = Idx<2>
+type Lon = Idx<3>
+let dense: Array<Float64 like Lat, Lon> = [[10.0, 20.0, 30.0], [40.0, 50.0, 60.0]]
+let m: Array<Bool like Lat, Lon> = [[true, false, true], [true, true, false]]
+let B = compound(dense, m)
+let r = B((0, _))
+let x = r(1)
+let t = reduce(r, (+))
+// EXPECT: r = [10, 30]
+// EXPECT: x = 30
+// EXPECT: t = 40

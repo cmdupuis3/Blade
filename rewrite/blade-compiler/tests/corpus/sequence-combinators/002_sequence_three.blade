@@ -1,0 +1,9 @@
+// TEST: Sequence Three
+// sequence(c1, c2, c3) — 3 homogeneous computations
+let A = [1.0, 2.0, 3.0]
+let L = method_for(A)
+let f = lambda(x) -> x + 10.0
+let g = lambda(x) -> x * 2.0
+let h = lambda(x) -> x * x
+let result = sequence(L <@> f, L <@> g, L <@> h) |> compute
+// EXPECT: result = [11.0, 12.0, 13.0, 2.0, 4.0, 6.0, 1.0, 4.0, 9.0]

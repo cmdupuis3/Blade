@@ -1,0 +1,54 @@
+// TEST: Foreign Key Deref Kernel
+// ============================================================================
+// Foreign-key dereference tests (step 0 for the SQL-like layer)
+//
+// These exercise the round-trip:
+//   1. Declare an array whose ELEMENT type is a named index alias —
+//      `Array<RegionIdx like StationIdx>`. The element type lowers to
+//      IRTIdxTagged(IRTScalar ETInt64, IRefNamed "RegionIdx").
+//   2. Co-iterate this foreign-key array alongside a value array sharing
+//      the same outer index type (StationIdx). The kernel parameter for
+//      the foreign-key array picks up the RegionIdx nominal tag.
+//   3. Use that tagged value to index a sibling array whose own index
+//      type is RegionIdx. Step 5's tag-matching check on the index site
+//      enforces tag equality, so this typechecks; codegen emits a plain
+//      integer subscript.
+//
+// This is the compositional analogue of SQL's inner-join-plus-projection:
+// one DMWF pass, no intermediate join table, lookup fused with kernel.
+// ============================================================================
+// ============================================================================
+// Foreign-key dereference tests (step 0 for the SQL-like layer)
+//
+// These exercise the round-trip:
+//   1. Declare an array whose ELEMENT type is a named index alias —
+//      `Array<RegionIdx like StationIdx>`. The element type lowers to
+//      IRTIdxTagged(IRTScalar ETInt64, IRefNamed "RegionIdx").
+//   2. Co-iterate this foreign-key array alongside a value array sharing
+//      the same outer index type (StationIdx). The kernel parameter for
+//      the foreign-key array picks up the RegionIdx nominal tag.
+//   3. Use that tagged value to index a sibling array whose own index
+//      type is RegionIdx. Step 5's tag-matching check on the index site
+//      enforces tag equality, so this typechecks; codegen emits a plain
+//      integer subscript.
+//
+// This is the compositional analogue of SQL's inner-join-plus-projection:
+// one DMWF pass, no intermediate join table, lookup fused with kernel.
+// ============================================================================
+// Basic foreign-key dereference inside a kernel. Iterate the StationIdx
+// range; inside the kernel, `region(s)` produces a RegionIdx-tagged
+// value, and `region_avg(region(s))` chains the dereference into a
+// sibling RegionIdx-keyed array. The whole pipeline is one DMWF pass
+// — SQL's inner-join-plus-projection collapsed into one indexing
+// expression.
+//
+// Multi-arg method_for(A, B) produces the Cartesian outer product
+// (CROSS JOIN). For co-iteration of same-indexed arrays, iterate the
+// shared index range and dereference explicitly inside the kernel.
+type StationIdx = Idx<6>
+type RegionIdx = Idx<3>
+let region: Array<RegionIdx like StationIdx> = [0, 1, 2, 0, 1, 2]
+let region_avg: Array<Float64 like RegionIdx> = [10.0, 20.0, 30.0]
+let temps: Array<Float64 like StationIdx> = [11.0, 19.0, 31.0, 12.0, 21.0, 29.0]
+let deltas = method_for(range<StationIdx>) <@> lambda(s) -> temps(s) - region_avg(region(s)) |> compute
+// EXPECT: deltas = [1, -1, 1, 2, 1, -1]

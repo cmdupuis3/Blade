@@ -1,0 +1,6 @@
+// TEST: Choice Kernel
+let A = [1.0, 2.0, 3.0]
+let L = method_for(A)
+let f = lambda(x) -> { (x - 2.0) <|> 99.0 }
+let result = L <@> f |> compute
+// EXPECT: result = [-1.0, 99.0, 1.0]

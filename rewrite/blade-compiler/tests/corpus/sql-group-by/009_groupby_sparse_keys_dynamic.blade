@@ -1,0 +1,11 @@
+// TEST: GroupBy Sparse Keys Dynamic
+// Sparse keys without annotation — Case 3 hash-based dispatch. The keys
+// 101, 205, 307 occupy a sparse range; an earlier max-scan implementation
+// would have allocated 308 buckets (almost all empty). Hash discovery
+// produces 3 buckets in first-occurrence order.
+let codes = [101, 205, 307, 101, 205, 307]
+let temps = [20.0, 25.0, 30.0, 22.0, 27.0, 32.0]
+let gk = group_keys(codes)
+let grouped = group_by(temps, gk)
+let result = method_for(grouped) <@> lambda(g) -> g(0) |> compute
+// EXPECT: result = [20.0, 25.0, 30.0]

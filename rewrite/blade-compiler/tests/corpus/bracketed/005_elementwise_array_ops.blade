@@ -1,0 +1,12 @@
+// TEST: Elementwise Array Ops
+// Elementwise operations on arrays (co-iteration)
+let A = [1.0, 2.0, 3.0]
+let B = [10.0, 20.0, 30.0]
+let sum = A + B           // elementwise: [11.0, 22.0, 33.0]
+let diff = A - B          // elementwise: [-9.0, -18.0, -27.0]
+let prod = A * B          // elementwise: [10.0, 40.0, 90.0]
+let quot = B / A          // elementwise: [10.0, 10.0, 10.0]
+// EXPECT: sum = [11, 22, 33]
+// EXPECT: diff = [-9, -18, -27]
+// EXPECT: prod = [10, 40, 90]
+// EXPECT: quot = [10, 10, 10]

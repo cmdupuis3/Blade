@@ -1,0 +1,34 @@
+// TEST: Ragged Tuple Form Read
+// ---------------------------------------------------------------------------
+// RaggedIdx coverage round: paths implemented end-to-end but previously
+// exercised only in one spelling. Tuple-form reads (existing tests use only
+// the curried r(i)(j)), the closed RaggedIdx<lens> annotation driving a
+// TOP-LEVEL peel (previously only inside function bodies), and the
+// ragged-first-slot surface rule.
+// ---------------------------------------------------------------------------
+
+// Tuple-form indexing on a ragged literal: r(i, j) consumes both slots in
+// one application, mirroring the dense multi-arg form (the curried r(i)(j)
+// spelling is covered elsewhere). Also pins rank(r) = 2: RaggedIdx
+// contributes ONE record (unlike DepIdx's two-record expansion), so outer +
+// ragged inner = 2.
+// ---------------------------------------------------------------------------
+// RaggedIdx coverage round: paths implemented end-to-end but previously
+// exercised only in one spelling. Tuple-form reads (existing tests use only
+// the curried r(i)(j)), the closed RaggedIdx<lens> annotation driving a
+// TOP-LEVEL peel (previously only inside function bodies), and the
+// ragged-first-slot surface rule.
+// ---------------------------------------------------------------------------
+
+// Tuple-form indexing on a ragged literal: r(i, j) consumes both slots in
+// one application, mirroring the dense multi-arg form (the curried r(i)(j)
+// spelling is covered elsewhere). Also pins rank(r) = 2: RaggedIdx
+// contributes ONE record (unlike DepIdx's two-record expansion), so outer +
+// ragged inner = 2.
+let r = [[1.0, 2.0, 3.0], [4.0, 5.0], [6.0, 7.0, 8.0, 9.0]]
+let v = r(1, 0)
+let w = r(2, 3)
+let k = rank(r)
+// EXPECT: v = 4
+// EXPECT: w = 9
+// EXPECT: k = 2

@@ -1,0 +1,5 @@
+// TEST: Validator: EnumIdx Mixed Values (rejects)
+// EnumIdx with both integer and string literals in the same values list.
+// Surface intent is ambiguous (different runtime backings: int64_t vs
+// std::string), so it must be a type error at the alias declaration.
+type LandType = EnumIdx<[101, "urban", 307]>

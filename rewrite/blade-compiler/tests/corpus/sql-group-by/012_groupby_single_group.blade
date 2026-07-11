@@ -1,0 +1,11 @@
+// TEST: GroupBy Single Group
+// All keys map to a single bucket. Exercises the degenerate-ngroups
+// case: one group containing all elements. ngroups discovered dynamically
+// as 1; the result is a rank-2 ragged array with outer extent 1 and
+// inner extent equal to the input length.
+let region = [0, 0, 0, 0]
+let temps = [1.0, 2.0, 3.0, 4.0]
+let gk = group_keys(region)
+let grouped = group_by(temps, gk)
+let result = method_for(grouped) <@> lambda(g: Array<Float64 like RaggedIdx<_>>) -> reduce(g, (+)) |> compute
+// EXPECT: result = [10]

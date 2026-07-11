@@ -1,0 +1,16 @@
+// TEST: HM Scalar Identity
+// ---- Scalar HM tests: the simplest possible polymorphism. These exercise
+// implicit type-variable introduction (bare `T` in type position) without
+// involving arrays, kernels, or capture — useful as baseline checks that
+// the F#/OCaml-style implicit polymorphism is recognized by the parser
+// and propagated through unification at scalar level.
+// ---- Scalar HM tests: the simplest possible polymorphism. These exercise
+// implicit type-variable introduction (bare `T` in type position) without
+// involving arrays, kernels, or capture — useful as baseline checks that
+// the F#/OCaml-style implicit polymorphism is recognized by the parser
+// and propagated through unification at scalar level.
+// Scalar polymorphic identity: the simplest HM test. `T` appears bare
+// in param and return; should be inferred as a type variable.
+function id(x: T) -> T = x
+let r = id(42)
+// EXPECT: r = 42

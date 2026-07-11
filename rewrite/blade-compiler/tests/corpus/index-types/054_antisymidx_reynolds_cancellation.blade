@@ -1,0 +1,10 @@
+// TEST: AntisymIdx Reynolds Cancellation
+// A genuinely symmetric kernel (x*y) antisymmetrized cancels to zero on every
+// strict pair: x*y - y*x = 0. Confirms the strict layout still has C(3,2)=3
+// slots (all zero), distinguishing "antisym storage of zeros" from a bug that
+// drops the output entirely.
+let A = [1.0, 2.0, 3.0]
+let L = method_for(A, A)
+let g = lambda(x, y) where comm(x, y) -> x * y
+let result = L <@> reynolds(g, Antisymmetric) |> compute
+// EXPECT: result = [0.0, 0.0, 0.0]

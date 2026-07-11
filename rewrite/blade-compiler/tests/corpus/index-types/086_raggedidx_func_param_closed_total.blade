@@ -1,0 +1,13 @@
+// TEST: RaggedIdx Func Param Closed Total
+// Function takes a ragged input, returns the total sum of all elements.
+// Body uses tryRaggedPeel via method_for(A) inside the function — A_lens
+// and A_extents must both be in scope, which only happens if the calling
+// convention plumbing is correct.
+let lens = [3, 2, 4]
+function totalSum(A: Array<Float64 like Idx<3>, RaggedIdx<lens>>) -> Float64 = {
+    let row_sums = method_for(A) <@> lambda(g: Array<Float64 like RaggedIdx<_>>) -> reduce(g, (+)) |> compute
+    reduce(row_sums, (+))
+}
+let r = [[1.0, 2.0, 3.0], [4.0, 5.0], [6.0, 7.0, 8.0, 9.0]]
+let result = totalSum(r)
+// EXPECT: result = 45

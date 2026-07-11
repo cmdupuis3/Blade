@@ -1,0 +1,4 @@
+// TEST: Guard Scalar False
+// guard(false, expr) = 0
+let result = guard(false, 42)
+// EXPECT: result = 0

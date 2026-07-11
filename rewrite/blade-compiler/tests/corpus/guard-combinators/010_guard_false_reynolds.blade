@@ -1,0 +1,15 @@
+// TEST: Guard False Reynolds
+// guard(false, L <@> reynolds(g)) |> compute — output should be zeroed.
+// Regression test for the IRGuard codegen path silently dropping the
+// guard predicate when the kernel is Reynolds-wrapped (CodeGen.fs site
+// resolveCallable-without-peelReynolds, fixed via mapKernelInner).
+let A = [1.0, 2.0, 3.0]
+let L = method_for(A, A)
+let g = lambda(x, y) where comm(x, y) -> x * y
+let cond = false
+let result = guard(cond, L <@> reynolds(g)) |> compute
+// Without the fix: triangular [2.0, 4.0, 6.0, 8.0, 12.0, 18.0]
+//   (= 2 * x * y at each unordered (i, j) pair in {1, 2, 3}^2,
+//    Reynolds doubles a commutative kernel).
+// With the fix: guard fires, output zeroed.
+// EXPECT: result = [0.0, 0.0, 0.0, 0.0, 0.0, 0.0]

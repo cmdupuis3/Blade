@@ -1,0 +1,4 @@
+// TEST: Non-Scalar Kernel
+// Kernel that operates on 1D slices (irank = 1 for each input)
+let matrix = [[1.0, 2.0], [3.0, 4.0]]
+let O = object_for(lambda(row: Array<Float64 like Idx<2>>) -> row)

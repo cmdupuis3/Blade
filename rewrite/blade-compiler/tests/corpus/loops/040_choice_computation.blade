@@ -1,0 +1,7 @@
+// TEST: Choice Computation
+let A = [1.0, 2.0, 3.0]
+let L = method_for(A)
+let f = lambda(x) -> x - 1.0
+let g = lambda(x) -> x + 10.0
+let result = (L <@> f) <|> (L <@> g) |> compute
+// EXPECT: result = [11.0, 1.0, 2.0]

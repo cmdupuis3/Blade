@@ -1,0 +1,15 @@
+// TEST: GroupBy Enum String
+// String-valued EnumIdx — same shape as test_groupby_enum_first but the keys
+// are strings. Exercises Layer 2 of string support: the `using LandType`
+// alias resolves to std::string, the keys array stores std::string elements,
+// and the Case 2 reverse-lookup dispatch generates `__v == "forest"`-style
+// comparisons (efficient because std::string::operator== accepts const char*
+// without allocating a temporary).
+type LandType = EnumIdx<["forest", "urban", "farmland"]>
+type StationIdx = Idx<6>
+let codes: Array<LandType like StationIdx> = ["forest", "urban", "farmland", "forest", "urban", "farmland"]
+let temps: Array<Float64 like StationIdx> = [20.0, 25.0, 30.0, 22.0, 27.0, 32.0]
+let gk = group_keys(codes)
+let grouped = group_by(temps, gk)
+let result = method_for(grouped) <@> lambda(g) -> g(0) |> compute
+// EXPECT: result = [20.0, 25.0, 30.0]

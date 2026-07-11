@@ -1,0 +1,9 @@
+// TEST: Type Recovery: Unannotated Mask
+// Probe 3: unannotated binding whose RHS is a mask result. If the
+// mask-returning expression's type doesn't flow back to the binding but
+// the codegen sees a wrapper-shaped RHS, the auto-fallback (now removed)
+// would have fired.
+let arr: Array<Float64 like Idx<4>> = [1.0, 2.0, 3.0, 4.0]
+let f = compound(arr, mask(arr, lambda(x) -> x > 1.5))
+let r = f(1)
+// EXPECT: r = 2

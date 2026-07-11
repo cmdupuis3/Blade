@@ -1,0 +1,9 @@
+// TEST: String Array
+// String array literal — exercises the per-element genArrayLiteral
+// path (extractLiteralValues silently returns [] for strings, so the
+// fast scalar path falls through). Each element renders via litToCpp.
+let words = ["forest", "urban", "farmland"]
+let count = if words(0) == "forest" then 1 else 0
+let count2 = count + (if words(1) == "urban" then 1 else 0)
+let count3 = count2 + (if words(2) == "farmland" then 1 else 0)
+// EXPECT: count3 = 3

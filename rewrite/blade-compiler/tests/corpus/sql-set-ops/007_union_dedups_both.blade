@@ -1,0 +1,11 @@
+// TEST: Union Dedups Both
+// SQL set semantics: duplicates within A AND within B are dropped.
+// Ordering: first occurrences in A precede first occurrences in B.
+// A = [1, 2, 1, 3] has unique values {1, 2, 3} in order [1, 2, 3].
+// B = [3, 4, 4] adds {4} (3 is already seen).
+// Result: [1, 2, 3, 4].
+let A = [1, 2, 1, 3]
+let B = [3, 4, 4]
+let r = union(A, B)
+let result = method_for(r) <@> lambda(x) -> x |> compute
+// EXPECT: result = [1, 2, 3, 4]

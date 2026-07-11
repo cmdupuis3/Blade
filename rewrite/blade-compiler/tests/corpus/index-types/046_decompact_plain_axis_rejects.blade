@@ -1,0 +1,7 @@
+// TEST: Decompact Plain Axis (rejects)
+// Reject probes.
+// Reject probes.
+// Decompacting a plain Idx axis — nothing to decompact.
+let A: Array<Float64 like Idx<3>> = [1.0, 2.0, 3.0]
+let result = decompact(A, 0)
+// EXPECT: typecheck failure — plain axis, nothing to decompact.

@@ -1,0 +1,17 @@
+// TEST: Nominal: Foreign Key Cross-Tag (rejects)
+// Foreign-key dereference variant of probe_v10. A foreign-key array
+// produces tagged values via co-iteration in a kernel; using one of those
+// values to index a sibling array with a DIFFERENT nominal tag must be
+// rejected. This exercises the tag-matching path through a kernel
+// parameter rather than through an explicit (expr : Tag) cast.
+//
+// region's elements are RegionIdx-tagged. by_country expects a CountryIdx
+// index. Structural extents match (both Idx<3>) but nominal tags differ;
+// the indexing site must reject.
+type StationIdx = Idx<6>
+type RegionIdx = Idx<3>
+type CountryIdx = Idx<3>
+let region: Array<RegionIdx like StationIdx> = [0, 1, 2, 0, 1, 2]
+let by_country: Array<Float64 like CountryIdx> = [10.0, 20.0, 30.0]
+let bad = method_for(region) <@> lambda(r) -> by_country(r) |> compute
+// EXPECT: typecheck failure — tag mismatch between RegionIdx and CountryIdx

@@ -1,0 +1,13 @@
+// TEST: Range Compound Mixed (rejects)
+// A compound range slot cannot (yet) be combined with other index types in
+// one range<>; the gate is a codegen-stage #error, so the probe passes by
+// failing at compile.
+// A compound range slot cannot (yet) be combined with other index types in
+// one range<>; the gate is a codegen-stage #error, so the probe passes by
+// failing at compile.
+type Lat = Idx<2>
+type Lon = Idx<3>
+type K = Idx<4>
+let m: Array<Bool like Lat, Lon> = [[true, false, true], [true, true, false]]
+let R = method_for(range<CompoundIdx<m>, K>) <@> lambda(i, j, k) -> i * 100 + j * 10 + k |> compute
+// EXPECT: typecheck failure — compound range slot cannot mix with other index types.

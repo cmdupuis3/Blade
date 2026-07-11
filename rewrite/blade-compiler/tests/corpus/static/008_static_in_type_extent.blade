@@ -1,0 +1,7 @@
+// TEST: Static In Type Extent
+// Static value used in type position (index extent)
+let static n = 5
+let A = [1.0, 2.0, 3.0, 4.0, 5.0]
+let L = method_for(A, A)
+let f = lambda(x, y) where comm(x, y) -> x * y
+let result = L <@> f

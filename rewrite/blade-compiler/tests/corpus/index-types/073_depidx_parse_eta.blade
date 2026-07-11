@@ -1,0 +1,14 @@
+// TEST: DepIdx Parse Eta
+// DepIdx<outer, func>: eta-reduced form. Desugars at parse time to the
+// lambda form. Round 1 lowers to a placeholder dynamic extent regardless;
+// this test only confirms the surface form parses.
+//
+// Per the index-type role validator: the named extent function must be a
+// static function (its result feeds a DepIdx body, which is a static-context
+// position), with aliased index parameters (anonymous index types are not
+// permitted as static-fn params).
+type TriIdx = Idx<3>
+static function tri_extent(i: TriIdx) -> TriIdx = i
+function g(A: Array<Float64 like DepIdx<TriIdx, tri_extent>>) -> Float64 = {
+    0.0
+}

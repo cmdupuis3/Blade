@@ -1,0 +1,15 @@
+// TEST: Ragged Literal Basic
+// Round 2 Phase 2 — ragged literal allocation and printing.
+// A nested array literal with uneven inner lengths is now typed as a
+// RaggedIdx-typed array. Codegen emits offsets table, flat backing buffer,
+// and row-pointer table. The print loop walks the structure using the
+// offsets to produce the correct flat output.
+// Round 2 Phase 2 — ragged literal allocation and printing.
+// A nested array literal with uneven inner lengths is now typed as a
+// RaggedIdx-typed array. Codegen emits offsets table, flat backing buffer,
+// and row-pointer table. The print loop walks the structure using the
+// offsets to produce the correct flat output.
+// Ragged literal: rows of differing lengths. The literal allocates as
+// RaggedIdx-typed; print emits the flat sequence of values.
+let r = [[1.0, 2.0, 3.0], [4.0, 5.0], [6.0, 7.0, 8.0, 9.0]]
+// EXPECT: r = [1, 2, 3, 4, 5, 6, 7, 8, 9]

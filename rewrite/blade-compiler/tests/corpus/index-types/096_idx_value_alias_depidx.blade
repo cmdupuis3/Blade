@@ -1,0 +1,13 @@
+// TEST: Idx Value Alias DepIdx
+// DepIdx aliasing — the multi-record case. The unaliased form expands to
+// two IRIndexType records (outer + inner with Dependencies linking them);
+// the alias must re-expand at the use site rather than retrieve a
+// single-record placeholder. lowerIndexTypeList catches TyNamed → DepIdx
+// body and recurses on the body.
+type Tri3 = DepIdx<Idx<3>, lambda(i) -> Idx<3 - i>>
+let r: Array<Float64 like Tri3> = [
+    [1.0, 2.0, 3.0],
+    [4.0, 5.0],
+    [6.0]
+]
+// EXPECT: r = [1, 2, 3, 4, 5, 6]

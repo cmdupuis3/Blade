@@ -1,0 +1,7 @@
+// TEST: Transpose Same Axis (rejects)
+// Reject probes — each should fail before producing valid IR.
+// Reject probes — each should fail before producing valid IR.
+// d1 == d2 is the identity; reject rather than silently no-op.
+let A: Array<Float64 like Idx<2>, Idx<3>> = [[1.0, 2.0, 3.0], [4.0, 5.0, 6.0]]
+let result = transpose(A, [1, 1])
+// EXPECT: typecheck failure — the two axes must differ.

@@ -1,0 +1,7 @@
+// TEST: Sequence Singleton
+// sequence(c) collapses to c (identity)
+let A = [1.0, 2.0, 3.0]
+let L = method_for(A)
+let f = lambda(x) -> x + 100.0
+let result = sequence(L <@> f) |> compute
+// EXPECT: result = [101.0, 102.0, 103.0]

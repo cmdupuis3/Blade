@@ -1,0 +1,11 @@
+// TEST: Extents Rank 2 Tuple
+/// Phase 7b: extents on multi-rank arrays — returns a tuple
+/// Phase 7b: extents on multi-rank arrays — returns a tuple
+// Multi-rank extents returns a tuple (Int64, Int64) — outermost dim first.
+// The 2x3 nested array literal produces a typed array with IndexTypes
+// [Idx<2>, Idx<3>].
+let matrix = [[1.0, 2.0, 3.0], [4.0, 5.0, 6.0]]
+let dims = extents(matrix)
+let (outer, inner) = dims
+// EXPECT: outer = 2
+// EXPECT: inner = 3

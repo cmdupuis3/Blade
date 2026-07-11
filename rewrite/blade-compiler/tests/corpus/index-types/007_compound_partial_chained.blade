@@ -1,0 +1,18 @@
+// TEST: Compound Partial Chained
+// Chained partial indexing: the rank-2 residual of B((0,_,_)) is itself a
+// first-class compound, further partial-indexable. s = r((_, 0)) gathers the
+// valid y values at z = 0 within the x = 0 window: residual cells (0,0)=1
+// and (1,0)=3.
+// Chained partial indexing: the rank-2 residual of B((0,_,_)) is itself a
+// first-class compound, further partial-indexable. s = r((_, 0)) gathers the
+// valid y values at z = 0 within the x = 0 window: residual cells (0,0)=1
+// and (1,0)=3.
+type X = Idx<2>
+type Y = Idx<2>
+type Z = Idx<2>
+let dense: Array<Float64 like X, Y, Z> = [[[1.0, 2.0], [3.0, 4.0]], [[5.0, 6.0], [7.0, 8.0]]]
+let m: Array<Bool like X, Y, Z> = [[[true, false], [true, true]], [[false, true], [true, false]]]
+let B = compound(dense, m)
+let r = B((0, _, _))
+let s = r((_, 0))
+// EXPECT: s = [1, 3]

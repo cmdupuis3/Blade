@@ -1,0 +1,6 @@
+// TEST: Zero Kernel
+// M <@> zero produces array of zeros
+let A = [1.0, 2.0, 3.0]
+let L = method_for(A)
+let result = L <@> zero |> compute
+// EXPECT: result = [0.0, 0.0, 0.0]

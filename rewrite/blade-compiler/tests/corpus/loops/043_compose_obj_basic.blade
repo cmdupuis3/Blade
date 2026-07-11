@@ -1,0 +1,7 @@
+// TEST: Compose Obj Basic
+let A = [1.0, 2.0, 3.0]
+let f = lambda(x) -> x + 1.0
+let g = lambda(x) -> x * 2.0
+let p = object_for(f) >>@ object_for(g)
+let result = p <@> A |> compute
+// EXPECT: result = [4.0, 6.0, 8.0]

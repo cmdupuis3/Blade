@@ -1,0 +1,10 @@
+// TEST: Static Mutual Recursion
+// Static functions calling each other
+static function is_even(n) = if n == 0 then 1 else is_odd(n - 1)
+static function is_odd(n) = if n == 0 then 0 else is_even(n - 1)
+let static a = is_even(10)
+let static b = is_odd(7)
+let x = a
+let y = b
+// EXPECT: x = 1
+// EXPECT: y = 1

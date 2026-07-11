@@ -1,0 +1,6 @@
+// TEST: Guard Variable False
+// guard with false variable condition
+let x = 3
+let cond = x > 5
+let result = guard(cond, x * 2)
+// EXPECT: result = 0

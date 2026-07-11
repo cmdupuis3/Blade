@@ -1,0 +1,23 @@
+// TEST: Reynolds Commutative
+// ============================================================================
+// Reynolds with commutative kernel (sanity check)
+// ============================================================================
+// g(x,y) = x + y is already commutative
+// reynolds(g)(x,y) = g(x,y) + g(y,x) = (x+y) + (y+x) = 2*(x+y)
+// So Reynolds doubles the result of a commutative kernel
+// A=[1,2], B=[3,4]: out[i][j] = 2*(A[i]+B[j])
+// [0][0]=8, [0][1]=10, [1][0]=10, [1][1]=12
+// ============================================================================
+// Reynolds with commutative kernel (sanity check)
+// ============================================================================
+// g(x,y) = x + y is already commutative
+// reynolds(g)(x,y) = g(x,y) + g(y,x) = (x+y) + (y+x) = 2*(x+y)
+// So Reynolds doubles the result of a commutative kernel
+// A=[1,2], B=[3,4]: out[i][j] = 2*(A[i]+B[j])
+// [0][0]=8, [0][1]=10, [1][0]=10, [1][1]=12
+let A = [1.0, 2.0]
+let B = [3.0, 4.0]
+let L = method_for(A, B)
+let g = lambda(x, y) -> x + y
+let result = L <@> reynolds(g) |> compute
+// EXPECT: result = [8.0, 10.0, 10.0, 12.0]

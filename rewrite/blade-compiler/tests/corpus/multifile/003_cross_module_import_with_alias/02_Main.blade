@@ -1,0 +1,7 @@
+// TEST: Cross-module import with alias
+// MODULE: Main
+module Main
+import Utilities as U
+
+let result = U.convert(3.5)
+// EXPECT: result = 350

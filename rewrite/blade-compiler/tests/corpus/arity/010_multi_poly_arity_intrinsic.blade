@@ -1,0 +1,8 @@
+// TEST: Multi Poly Arity Intrinsic
+// arity(xs) and arity(ys) inside a multi-Poly body each resolve to their
+// own slot's arity literal after specialization.
+function shapes(xs: Poly<T^0>, ys: Poly<T^0>) -> T^0
+= arity(xs) * 100 + arity(ys)
+
+let result = shapes((1.0, 2.0), (1.0, 2.0, 3.0, 4.0))
+// EXPECT: result = 204

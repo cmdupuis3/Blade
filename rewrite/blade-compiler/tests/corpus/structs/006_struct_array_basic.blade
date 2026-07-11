@@ -1,0 +1,15 @@
+// TEST: Struct Array Basic
+// array of POD struct.
+// Struct has only primitive fields. Builds the array via literal,
+// reads back a single field for value-check.
+struct Particle {
+    x: Float64,
+    y: Float64
+}
+let pts: Array<Particle like Idx<3>> = [
+    Particle { x = 1.0, y = 2.0 },
+    Particle { x = 3.0, y = 4.0 },
+    Particle { x = 5.0, y = 6.0 }
+]
+let second_x = pts[1].x
+// EXPECT: second_x = 3

@@ -1,0 +1,6 @@
+// TEST: Guard-Zero Equivalence
+// guard(false, c) should behave like zero
+let x = guard(false, 42)
+let y = zero
+// EXPECT: x = 0
+// EXPECT: y = 0

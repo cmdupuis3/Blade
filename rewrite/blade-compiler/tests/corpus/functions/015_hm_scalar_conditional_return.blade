@@ -1,0 +1,7 @@
+// TEST: HM Scalar Conditional Return
+// Polymorphic conditional return: tests that if-then-else preserves the
+// type variable through both branches, and that the branches unify to
+// a single T at the return site.
+function pick(x: T, y: T, b: Bool) -> T = if b then x else y
+let r = pick(7, 13, True)
+// EXPECT: r = 7

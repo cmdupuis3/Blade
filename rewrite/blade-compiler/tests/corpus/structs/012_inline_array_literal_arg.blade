@@ -1,0 +1,11 @@
+// TEST: Inline Array Literal Arg
+// inline array literal as a function argument. Tests
+// the generalized lift — IRArrayLit appearing in IRApp args goes
+// through liftChildren -> liftChild, which now matches isInlineForm.
+// Pre-generalization, this would break because exprToCpp has no
+// IRArrayLit case (catchall emits BLADE_UNSUPPORTED_IR_NODE_*).
+function sumThree(a: Array<Float64 like Idx<3>>) -> Float64 = {
+    a(0) + a(1) + a(2)
+}
+let v = sumThree([10.0, 20.0, 30.0])
+// EXPECT: v = 60

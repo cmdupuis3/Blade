@@ -1,0 +1,31 @@
+// TEST: Decompact Anti3 Source
+// ---- Antisym rank-3 compact-residual decompact (boundary cuts) ----
+// Source: reynolds(f, Antisymmetric) with f = x*x*y + z, A=[1,2,3,4]. This is
+// the standard signed-permutation antisymmetrization; the strict canonical
+// rank-3 source (i<j<k), C(4,3)=4 elements, is:
+//   (0,1,2)=-2 (0,1,3)=-6 (0,2,3)=-6 (1,2,3)=-2
+// (Verified against the hand-computed antisymmetrization. These differ from an
+// earlier buggy build whose rank>=3 strict loop offset was flat-1 instead of
+// cumulative, collapsing the source to [0,-2,0,0]; the fix made the iteration
+// visit the true canonical tuples.)
+
+// Intermediate: assert the rank-3 antisym SOURCE pool directly (no decompact),
+// pinning the reynolds-source values the decompact EXPECTs are derived from.
+// ---- Antisym rank-3 compact-residual decompact (boundary cuts) ----
+// Source: reynolds(f, Antisymmetric) with f = x*x*y + z, A=[1,2,3,4]. This is
+// the standard signed-permutation antisymmetrization; the strict canonical
+// rank-3 source (i<j<k), C(4,3)=4 elements, is:
+//   (0,1,2)=-2 (0,1,3)=-6 (0,2,3)=-6 (1,2,3)=-2
+// (Verified against the hand-computed antisymmetrization. These differ from an
+// earlier buggy build whose rank>=3 strict loop offset was flat-1 instead of
+// cumulative, collapsing the source to [0,-2,0,0]; the fix made the iteration
+// visit the true canonical tuples.)
+
+// Intermediate: assert the rank-3 antisym SOURCE pool directly (no decompact),
+// pinning the reynolds-source values the decompact EXPECTs are derived from.
+let A = [1.0, 2.0, 3.0, 4.0]
+let L = method_for(A, A, A)
+let f = lambda(x, y, z) where comm(x, y, z) -> x * x * y + z
+let result = L <@> reynolds(f, Antisymmetric) |> compute
+// Strict canonical pool (i<j<k), DFS order.
+// EXPECT: result = [-2.0, -6.0, -6.0, -2.0]

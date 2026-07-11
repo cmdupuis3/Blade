@@ -1,0 +1,9 @@
+// TEST: Functor Map Deferred
+let A = [1.0, 2.0, 3.0]
+let L = method_for(A)
+let f = lambda(x) -> x + 10.0
+let negate = lambda(x) -> 0.0 - x
+let c = L <@> f
+let mapped = negate <$> c
+let result = mapped |> compute
+// EXPECT: result = [-11.0, -12.0, -13.0]

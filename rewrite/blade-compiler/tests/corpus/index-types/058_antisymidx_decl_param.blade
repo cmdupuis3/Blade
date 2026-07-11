@@ -1,0 +1,10 @@
+// TEST: AntisymIdx Decl Param
+// Declare an antisymmetric array as a function parameter:
+// Array<T like AntisymIdx<2, n>>. Confirms the `like AntisymIdx<arity, extent>`
+// declaration form parses and type-checks in a binding position. (Usage that
+// POPULATES an antisymmetric array goes through the Reynolds/method_for path —
+// the Reynolds-antisymmetric tests above — which is currently the only
+// producer of antisymmetric storage.)
+function trace_skew(M: Array<Float64 like AntisymIdx<2, n>>) -> Float64 = {
+    0.0
+}

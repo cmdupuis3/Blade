@@ -1,0 +1,9 @@
+// TEST: Type Recovery: Unannotated Sort
+// Probe 4: unannotated binding whose RHS is a sort result. Same shape as
+// probe 3 but exercising the IRSort path through producesWrapperShape.
+// `sort` takes a key-extractor lambda (returns the sort key for each
+// element), not a comparator.
+let arr: Array<Float64 like Idx<4>> = [3.0, 1.0, 4.0, 2.0]
+let s = sort(arr, lambda(x) -> x)
+let r = s(0)
+// EXPECT: r = 1

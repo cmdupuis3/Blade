@@ -1,0 +1,14 @@
+// TEST: Decompact Anti3 Source n5
+// ---- n=5 cases (C(5,3)=10 canonical source values, 4 distinct magnitudes
+// 2/6/12/16 — exercises distinct-value sign placement across larger pools).
+// Source x*x*y+z, A=[1..5]; canonical source (i<j<k) =
+//   [-2, -6, -12, -6, -16, -12, -2, -6, -6, -2]  (verified antisymmetrization).
+// ---- n=5 cases (C(5,3)=10 canonical source values, 4 distinct magnitudes
+// 2/6/12/16 — exercises distinct-value sign placement across larger pools).
+// Source x*x*y+z, A=[1..5]; canonical source (i<j<k) =
+//   [-2, -6, -12, -6, -16, -12, -2, -6, -6, -2]  (verified antisymmetrization).
+let A = [1.0, 2.0, 3.0, 4.0, 5.0]
+let L = method_for(A, A, A)
+let f = lambda(x, y, z) where comm(x, y, z) -> x * x * y + z
+let result = L <@> reynolds(f, Antisymmetric) |> compute
+// EXPECT: result = [-2.0, -6.0, -12.0, -6.0, -16.0, -12.0, -2.0, -6.0, -6.0, -2.0]

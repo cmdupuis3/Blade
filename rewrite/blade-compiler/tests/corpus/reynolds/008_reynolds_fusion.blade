@@ -1,0 +1,13 @@
+// TEST: Reynolds Fusion
+// <&!> (mandatory fusion) with two Reynolds sym kernels — single fused loop
+// Same arrays and kernels, same expected output
+// <&!> (mandatory fusion) with two Reynolds sym kernels — single fused loop
+// Same arrays and kernels, same expected output
+let A = [1.0, 2.0]
+let B = [3.0, 4.0]
+let L = method_for(A, B)
+let g = lambda(x, y) -> 2.0 * x + y
+let h = lambda(x, y) -> x * y
+let (rg, rh) = (L <@> reynolds(g)) <&!> (L <@> reynolds(h)) |> compute
+// EXPECT: rg = [12.0, 15.0, 15.0, 18.0]
+// EXPECT: rh = [6.0, 8.0, 12.0, 16.0]

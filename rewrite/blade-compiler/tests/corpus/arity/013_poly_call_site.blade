@@ -1,0 +1,7 @@
+// TEST: Poly Call Site
+// Poly function with actual call site — triggers monomorphization
+function polySum(args: Poly<T^0>) -> T^0
+= args[0] + args[1]
+
+let result = polySum(3.0, 4.0)
+// EXPECT: result = 7.0

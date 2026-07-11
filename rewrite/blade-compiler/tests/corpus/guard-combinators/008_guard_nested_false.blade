@@ -1,0 +1,6 @@
+// TEST: Guard Nested False
+// Nested guard with outer false
+let p = false
+let q = true
+let result = guard(p, guard(q, 99))
+// EXPECT: result = 0

@@ -1,0 +1,8 @@
+// TEST: Functor Map Chain
+let A = [1.0, 2.0, 3.0]
+let L = method_for(A)
+let f = lambda(x) -> x * x
+let add1 = lambda(x) -> x + 1.0
+let twice = lambda(x) -> x * 2.0
+let result = twice <$> (add1 <$> (L <@> f)) |> compute
+// EXPECT: result = [4.0, 10.0, 20.0]

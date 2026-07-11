@@ -1,0 +1,17 @@
+// TEST: DepIdx Func Param Total
+// Function takes a DepIdx-typed parameter, computes per-row reductions in
+// the body, then totals them. Exercises the calling convention (lens
+// companion passed at the call site), the function-body let-binding of
+// method_for output (Leg 2 fix), and the per-row peel through the
+// __depidx_inner tag.
+function totalSum(A: Array<Float64 like DepIdx<Idx<3>, lambda(i) -> Idx<3 - i>>>) -> Float64 = {
+    let row_sums = method_for(A) <@> lambda(g: Array<Float64 like RaggedIdx<_>>) -> reduce(g, (+)) |> compute
+    reduce(row_sums, (+))
+}
+let r: Array<Float64 like DepIdx<Idx<3>, lambda(i) -> Idx<3 - i>>> = [
+    [1.0, 2.0, 3.0],
+    [4.0, 5.0],
+    [6.0]
+]
+let total = totalSum(r)
+// EXPECT: total = 21

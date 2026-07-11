@@ -1,0 +1,9 @@
+// TEST: Cross-module function import
+// MODULE: Main
+module Main
+import MathLib
+
+let a = MathLib.double(5.0)
+let b = MathLib.square(3.0)
+// EXPECT: a = 10
+// EXPECT: b = 9

@@ -1,0 +1,9 @@
+// TEST: Tuple View Scalar Structural
+// Structural view of scalar tuples
+let x = (1.0, 2.0)
+let y = (x, 3.0)
+let (inner, c) = y
+let (a, b) = inner
+// EXPECT: a = 1
+// EXPECT: b = 2
+// EXPECT: c = 3

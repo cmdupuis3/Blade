@@ -1,0 +1,20 @@
+// TEST: RaggedIdx Parse
+// ============================================================================
+// RaggedIdx Round 1 — parse + typecheck only.
+// RaggedIdx contributes a single IR record (the ragged dim itself); it
+// references an external lengths array and requires at least one prior index
+// in the array's index list to iterate over.
+// ============================================================================
+// ============================================================================
+// RaggedIdx Round 1 — parse + typecheck only.
+// RaggedIdx contributes a single IR record (the ragged dim itself); it
+// references an external lengths array and requires at least one prior index
+// in the array's index list to iterate over.
+// ============================================================================
+// RaggedIdx<lengths>: externally parameterized via a lengths array.
+// The required prior index (Idx<3>) provides the iteration position used to
+// look up lengths internally.
+let lens = [2, 3, 1]
+function h(A: Array<Float64 like Idx<3>, RaggedIdx<lens>>) -> Float64 = {
+    0.0
+}

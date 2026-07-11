@@ -1,0 +1,5 @@
+// TEST: Guard Expression False
+// guard(false, expr) in arithmetic context
+let x = 10
+let y = guard(x > 20, x * 3) + 5
+// EXPECT: y = 5

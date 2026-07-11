@@ -1,0 +1,9 @@
+// TEST: String Scalar
+// String scalar literals + equality. Exercises IRLitString lowering,
+// litToCpp emission as std::string("..."), and string == comparison
+// (which lowers to C++ std::string operator==).
+let s = "hello"
+let same = if s == "hello" then 42 else 0
+let diff = if s == "world" then 1 else 0
+// EXPECT: same = 42
+// EXPECT: diff = 0

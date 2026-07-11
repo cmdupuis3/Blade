@@ -1,0 +1,14 @@
+// TEST: Ragged Extents Rank2 (rejects)
+// extents() on a MULTI-RANK ragged array is statically ill-posed: the
+// ragged dimension's extent varies per row, so there is no scalar answer
+// for the tuple form to contain. extents answers from the argument type
+// where it can, and rejects where the type says the question has no
+// answer. (Per-row lengths: extents on a peeled or indexed row.)
+// extents() on a MULTI-RANK ragged array is statically ill-posed: the
+// ragged dimension's extent varies per row, so there is no scalar answer
+// for the tuple form to contain. extents answers from the argument type
+// where it can, and rejects where the type says the question has no
+// answer. (Per-row lengths: extents on a peeled or indexed row.)
+let r = [[1.0, 2.0], [3.0]]
+let e = extents(r)
+// EXPECT: typecheck failure — extents on a ragged array is per-row for the ragged dimension.

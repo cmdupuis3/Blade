@@ -1,0 +1,7 @@
+// TEST: Static Function
+// Static function evaluated at compile time
+static function triangle(k) = k * (k + 1) / 2
+let static n = 10
+let static t = triangle(n)
+let x = t
+// EXPECT: x = 55

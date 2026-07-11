@@ -1,0 +1,8 @@
+// TEST: Sum Type With Data
+// Sum type with payload — construct and extract via match
+type Option = Some : Int | None
+let x = Some(42)
+let val = match x with
+    | Some(n) -> n
+    | None -> 0
+// EXPECT: val = 42

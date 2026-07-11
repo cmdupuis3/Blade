@@ -1,0 +1,13 @@
+// TEST: Idx Value Alias Chain DepIdx
+// Chained runtime alias over DepIdx. After registration chase, TriCopy's
+// body is TyDepIdx (peeled from Tri3's stored body). lowerIndexTypeList
+// then re-expands to the proper outer + inner records when TriCopy is
+// used in an array index list.
+type Tri3 = DepIdx<Idx<3>, lambda(i) -> Idx<3 - i>>
+type TriCopy = Tri3
+let r: Array<Float64 like TriCopy> = [
+    [1.0, 2.0, 3.0],
+    [4.0, 5.0],
+    [6.0]
+]
+// EXPECT: r = [1, 2, 3, 4, 5, 6]

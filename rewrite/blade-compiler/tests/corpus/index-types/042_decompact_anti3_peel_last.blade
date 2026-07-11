@@ -1,0 +1,13 @@
+// TEST: Decompact Anti3 Peel Last
+// d=2 boundary cut (last): residual AntisymIdx<2> + freed axis dim2.
+// Storage SYMM {1,1,2} STRICT {1,1,0}, card = C(n,2)*n = 24, DFS order
+// (strict residual pair outer, freed F inner).
+// d=2 boundary cut (last): residual AntisymIdx<2> + freed axis dim2.
+// Storage SYMM {1,1,2} STRICT {1,1,0}, card = C(n,2)*n = 24, DFS order
+// (strict residual pair outer, freed F inner).
+let A = [1.0, 2.0, 3.0, 4.0]
+let L = method_for(A, A, A)
+let f = lambda(x, y, z) where comm(x, y, z) -> x * x * y + z
+let anti = L <@> reynolds(f, Antisymmetric) |> compute
+let result = decompact(anti, 2)
+// EXPECT: result = [0, 0, -2, -6, 0, 2, 0, -6, 0, 6, 6, 0, -2, 0, 0, -2, -6, 0, 2, 0, -6, -2, 0, 0]

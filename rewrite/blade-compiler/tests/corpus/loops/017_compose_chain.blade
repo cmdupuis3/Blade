@@ -1,0 +1,7 @@
+// TEST: Compose Chain
+function inc(x) -> Float64 = x + 1.0
+function triple(x) -> Float64 = x * 3.0
+function negate(x) -> Float64 = 0.0 - x
+let g = inc >> triple >> negate
+let result = g(2.0)
+// EXPECT: result = -9.0

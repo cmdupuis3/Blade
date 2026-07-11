@@ -1,0 +1,21 @@
+// TEST: Struct With String Field
+// Struct with a string field. Verifies several pieces:
+//   - "String" name in field type position resolves through TyNamed to
+//     IRTScalar ETString (was missing before; resolved alongside Layer 1)
+//   - Struct decl renders the field as std::string in the C++ struct
+//   - Struct construction emits .name = std::string("Alice") in the
+//     designated initializer
+//   - Field access p.name produces an std::string r-value usable for
+//     equality comparison against a string literal
+struct Person {
+    name: String,
+    age: Int64
+}
+let alice = Person { name = "Alice", age = 30 }
+let bob = Person { name = "Bob", age = 25 }
+let aliceMatch = if alice.name == "Alice" then 1 else 0
+let bobMatch = if bob.name == "Alice" then 1 else 0
+let ageSum = alice.age + bob.age
+// EXPECT: aliceMatch = 1
+// EXPECT: bobMatch = 0
+// EXPECT: ageSum = 55

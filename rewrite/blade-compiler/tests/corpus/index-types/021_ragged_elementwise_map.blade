@@ -1,0 +1,24 @@
+// TEST: Ragged Elementwise Map
+// ---------------------------------------------------------------------------
+// Ragged round 2: shape-preserving elementwise maps, sub-views that carry
+// their length, and the surface rules that used to fail silently.
+// ---------------------------------------------------------------------------
+
+// Elementwise map over a ragged array: same-shaped ragged output. The kernel
+// param is a scalar ELEMENT (contrast the consuming lambda(g) -> reduce(g,+)
+// form); TypeCheck keeps the ragged inner dim in the output type, and codegen
+// allocates a fresh pool over shared extents/lens/offsets metadata. Printed
+// as the flat value sequence, row structure preserved underneath.
+// ---------------------------------------------------------------------------
+// Ragged round 2: shape-preserving elementwise maps, sub-views that carry
+// their length, and the surface rules that used to fail silently.
+// ---------------------------------------------------------------------------
+
+// Elementwise map over a ragged array: same-shaped ragged output. The kernel
+// param is a scalar ELEMENT (contrast the consuming lambda(g) -> reduce(g,+)
+// form); TypeCheck keeps the ragged inner dim in the output type, and codegen
+// allocates a fresh pool over shared extents/lens/offsets metadata. Printed
+// as the flat value sequence, row structure preserved underneath.
+let r = [[1.0, 2.0, 3.0], [4.0, 5.0], [6.0, 7.0, 8.0, 9.0]]
+let d = method_for(r) <@> lambda(e) -> e * 2.0 |> compute
+// EXPECT: d = [2, 4, 6, 8, 10, 12, 14, 16, 18]

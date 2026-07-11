@@ -3758,18 +3758,23 @@ let genRuntimeArrayTypesHeader () : string =
 let genIndexTypesHeader () : string =
     readCppRuntimeHeader "index_types.h"
 
+/// The C++ runtime header set. SINGLE SOURCE OF TRUTH: a header newly
+/// depended on by the runtime is added here once (and to Blade.fsproj's copy
+/// set), after which it reaches every emit site via deployRuntimeHeaders.
+/// Exposed as names so callers that clean up after a compile (Cli.fs) know
+/// exactly which files were deployed.
+let runtimeHeaderNames : string list =
+    [ "nested_array_utilities.hpp"
+      "nested_array_types.hpp"
+      "index_types.h" ]
+
 /// Deploy every C++ runtime header next to a generated .cpp so its `#include`s
-/// resolve at g++ time with no -I flag. SINGLE SOURCE OF TRUTH for the runtime
-/// header set: a header newly depended on by the runtime is added here once
-/// (and to Blade.fsproj's copy set), after which it reaches every emit site.
-/// These are pre-existing static files in cpp/, copied verbatim -- nothing is
-/// generated or transformed.
+/// resolve at g++ time with no -I flag. These are pre-existing static files in
+/// cpp/, copied verbatim -- nothing is generated or transformed.
 let deployRuntimeHeaders (outputDir: string) : unit =
-    [ "nested_array_utilities.hpp", genRuntimeHeader ()
-      "nested_array_types.hpp",     genRuntimeArrayTypesHeader ()
-      "index_types.h",              genIndexTypesHeader () ]
-    |> List.iter (fun (name, contents) ->
-        System.IO.File.WriteAllText(System.IO.Path.Combine(outputDir, name), contents))
+    runtimeHeaderNames
+    |> List.iter (fun name ->
+        System.IO.File.WriteAllText(System.IO.Path.Combine(outputDir, name), readCppRuntimeHeader name))
 
 /// Generate includes that reference external header
 let genIncludesExternal () : string list =

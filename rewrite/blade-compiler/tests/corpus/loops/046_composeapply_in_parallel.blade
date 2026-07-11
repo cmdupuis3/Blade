@@ -1,0 +1,40 @@
+// TEST: ComposeApply In Parallel
+// ============================================================================
+// Cross-feature: compose-apply in <&> / <&!> / @>> leaf positions
+//
+// IRComposeApply was introduced (item-1 follow-up) to distinguish
+// `(o1 >>@ o2) <@> A` from canonical `method_for(...) <@> kernel`.
+// Several codegen paths (parallel/fusion leaf extraction, @>> kernel
+// extraction) pattern-match IRApplyCombinator info specifically; on
+// IRComposeApply they fall through to defaults that may or may not
+// produce correct C++. These tests exercise each combination so we
+// can see what actually breaks vs. composes silently.
+// ============================================================================
+// ============================================================================
+// Cross-feature: compose-apply in <&> / <&!> / @>> leaf positions
+//
+// IRComposeApply was introduced (item-1 follow-up) to distinguish
+// `(o1 >>@ o2) <@> A` from canonical `method_for(...) <@> kernel`.
+// Several codegen paths (parallel/fusion leaf extraction, @>> kernel
+// extraction) pattern-match IRApplyCombinator info specifically; on
+// IRComposeApply they fall through to defaults that may or may not
+// produce correct C++. These tests exercise each combination so we
+// can see what actually breaks vs. composes silently.
+// ============================================================================
+// (compose-apply) <&> (canonical-apply) — parallel composition where
+// one leaf is the slot-inverted compose-apply form. The codegen path
+// at genParallelTree currently only extracts IRApplyCombinator leaves;
+// compose-apply leaves should also produce results that can be
+// combined into the parallel pair.
+let A = [1.0, 2.0, 3.0]
+let f = lambda(x) -> x + 1.0
+let g = lambda(x) -> x * 2.0
+let h = lambda(x) -> x - 1.0
+let L = method_for(A)
+let p = (object_for(f) >>@ object_for(g)) <@> A
+let q = L <@> h
+let (r1, r2) = p <&> q |> compute
+// p: each x in A → (x+1)*2 → [4, 6, 8]
+// q: each x in A → x-1   → [0, 1, 2]
+// EXPECT: r1 = [4.0, 6.0, 8.0]
+// EXPECT: r2 = [0.0, 1.0, 2.0]

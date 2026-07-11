@@ -1,0 +1,7 @@
+// TEST: Guard With &&
+// Guard with && operator
+let x = 15
+let result = match x with
+    | n if n > 10 && n < 20 -> n
+    | _ -> 0
+// EXPECT: result = 15

@@ -1,0 +1,20 @@
+// TEST: Broadcast Compare
+// Array<->scalar broadcast comparison: `A > 2.0` produces a Bool mask directly
+// (scalar held fixed, array iterated). Also covers scalar-on-left `2.0 < A`.
+// Array<->scalar broadcast comparison: `A > 2.0` produces a Bool mask directly
+// (scalar held fixed, array iterated). Also covers scalar-on-left `2.0 < A`.
+type EF = Idx<5>
+let A: Array<Float64 like EF> = [1.0, 2.0, 3.0, 4.0, 5.0]
+let hi = A > 2.0
+let f = compound(A, hi)
+// A > 2.0 = [F,F,T,T,T] -> coordinates {2, 3, 4} = 3.0, 4.0, 5.0
+let n = extents(f)
+let x2 = f(2)
+let x4 = f(4)
+let hi2 = 2.0 < A
+let g = compound(A, hi2)
+let m = extents(g)
+// EXPECT: n = 3
+// EXPECT: x2 = 3.0
+// EXPECT: x4 = 5.0
+// EXPECT: m = 3

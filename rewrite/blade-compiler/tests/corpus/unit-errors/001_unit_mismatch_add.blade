@@ -1,0 +1,7 @@
+// TEST: Unit Mismatch Add
+// Adding incompatible units is a type error
+Unit meters
+Unit seconds
+let dist: Float<meters> = 10.0
+let time: Float<seconds> = 5.0
+let bad = dist + time

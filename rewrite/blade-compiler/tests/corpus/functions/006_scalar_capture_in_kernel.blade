@@ -1,0 +1,11 @@
+// TEST: Scalar Capture In Kernel
+// Scalars and arrays can be captured by lambdas
+let scale = 2.5
+let offset = 1.0
+let A = [1.0, 2.0, 3.0]
+let B = [4.0, 5.0, 6.0]
+let L = method_for(A, B)
+let f = lambda(x, y) -> (x + y) * scale + offset
+let result = L <@> f |> compute
+// result[i][j] = (A[i]+B[j])*2.5 + 1
+// EXPECT: result = [13.5, 16, 18.5, 16, 18.5, 21, 18.5, 21, 23.5]

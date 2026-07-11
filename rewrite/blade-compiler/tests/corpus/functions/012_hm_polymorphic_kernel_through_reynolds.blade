@@ -1,0 +1,12 @@
+// TEST: HM Polymorphic Kernel Through Reynolds
+// HM through Reynolds: a polymorphic kernel's type information must
+// flow through the reynolds combinator to the loop machinery. The
+// kernel `lambda(x, y) -> x - y` is antisymmetric in its arguments, so
+// reynolds(kern) computes kern(x,y) + kern(y,x) = 0 for all (x,y).
+// Every output entry is zero.
+let A: Array<Float64 like Idx<2>> = [3.0, 5.0]
+let B: Array<Float64 like Idx<2>> = [1.0, 2.0]
+let kern = lambda(x, y) -> x - y
+let result = method_for(A, B) <@> reynolds(kern) |> compute
+let r = result(0, 0)
+// EXPECT: r = 0

@@ -1,0 +1,7 @@
+// TEST: Range With Array
+// Mix range with a real array
+let A = [10.0, 20.0, 30.0]
+let L = method_for(A, range<Idx<3>>)
+let f = lambda(a, i) -> a + i
+let result = L <@> f |> compute
+// EXPECT: result = [10, 11, 12, 20, 21, 22, 30, 31, 32]

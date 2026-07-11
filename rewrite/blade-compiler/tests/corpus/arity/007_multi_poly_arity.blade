@@ -1,0 +1,5 @@
+// TEST: Multi Poly Arity
+// Multiple Poly<> parameters - each has its own arity
+// Useful for zip-like operations that need to know both sizes
+function selectLarger(xs: Poly<T^0>, ys: Poly<T^0>) -> T^0
+= if arity(xs) >= arity(ys) then xs[0] else ys[0]

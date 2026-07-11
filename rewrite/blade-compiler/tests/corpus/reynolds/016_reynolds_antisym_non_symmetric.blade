@@ -1,0 +1,11 @@
+// TEST: Reynolds AntiSym Non-Symmetric
+// Antisymmetric non-symmetric kernel: x*x + y → no cancellation, 2 distinct terms
+// reynolds(f, Anti) = (x²+y) - (y²+x) = x² - y² + y - x
+// Antisymmetric non-symmetric kernel: x*x + y → no cancellation, 2 distinct terms
+// reynolds(f, Anti) = (x²+y) - (y²+x) = x² - y² + y - x
+let A = [1.0, 2.0]
+let B = [3.0, 4.0]
+let L = method_for(A, B)
+let g = lambda(x, y) -> x * x + y
+let result = L <@> reynolds(g, Antisymmetric) |> compute
+// EXPECT: result = [-6.0, -12.0, -4.0, -10.0]

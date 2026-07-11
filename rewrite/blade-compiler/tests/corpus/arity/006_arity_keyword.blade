@@ -1,0 +1,5 @@
+// TEST: Arity Keyword
+// arity(param) - get arity of a Poly<> parameter
+// Returns the number of elements in the poly pack at call site
+function firstOrDefault(args: Poly<T^0>, fallback: T^0) -> T^0
+= if arity(args) == 1 then args[0] else fallback

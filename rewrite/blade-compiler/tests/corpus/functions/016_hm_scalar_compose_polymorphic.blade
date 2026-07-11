@@ -1,0 +1,9 @@
+// TEST: HM Scalar Compose Polymorphic
+// Polymorphic composition: two polymorphic functions composed. The outer
+// function's T flows through both inner calls; each call instantiates
+// the inner T independently (let-polymorphism), but in this case all
+// instantiations resolve to the same concrete type.
+function id(x: T) -> T = x
+function twiceId(x: T) -> T = id(id(x))
+let r = twiceId(100)
+// EXPECT: r = 100

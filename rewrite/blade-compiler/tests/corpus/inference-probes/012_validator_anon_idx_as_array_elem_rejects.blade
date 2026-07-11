@@ -1,0 +1,4 @@
+// TEST: Validator: Anon Idx As Array Elem (rejects)
+// Anonymous index type as an array element type (foreign-key position):
+// rejected. Foreign keys require an alias for nominative identity.
+let r: Array<Idx<3> like Idx<6>> = [0, 1, 2, 0, 1, 2]

@@ -1,0 +1,9 @@
+// TEST: String Direct Expect
+// Exercises the harness's ExpectedString and ExpectedArray1DString variants
+// directly. cout emits strings without quotes (`s = hello`, not `s = "hello"`),
+// so the harness strips the quotes from the EXPECT line before comparing.
+// Array elements are split on `, ` from the printed form `[a, b, c]`.
+let greeting = "hello"
+let words = ["forest", "urban", "farmland"]
+// EXPECT: greeting = "hello"
+// EXPECT: words = ["forest", "urban", "farmland"]

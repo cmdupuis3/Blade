@@ -1,0 +1,16 @@
+// TEST: Struct Array Print
+// exercises per-field auto-print of POD struct array.
+// Validator can't parse [{x: 1, y: 2}, ...] as a float list, so the
+// EXPECT line tests a scalar derived from the array. The print codegen
+// runs as a side effect — if it fails to compile, the whole test
+// regresses at Compile:OK.
+struct Particle {
+    x: Float64,
+    y: Float64
+}
+let pts: Array<Particle like Idx<2>> = [
+    Particle { x = 1.0, y = 2.0 },
+    Particle { x = 3.0, y = 4.0 }
+]
+let sum_x = pts[0].x + pts[1].x
+// EXPECT: sum_x = 4

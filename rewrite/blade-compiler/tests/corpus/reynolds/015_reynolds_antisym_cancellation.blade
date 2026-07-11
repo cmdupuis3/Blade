@@ -1,0 +1,11 @@
+// TEST: Reynolds AntiSym Cancellation
+// Antisymmetric of symmetric kernel: x*y → complete cancellation → 0
+// Both perms give same value but opposite signs: +xy - xy = 0
+// Antisymmetric of symmetric kernel: x*y → complete cancellation → 0
+// Both perms give same value but opposite signs: +xy - xy = 0
+let A = [1.0, 2.0]
+let B = [3.0, 4.0]
+let L = method_for(A, B)
+let g = lambda(x, y) -> x * y
+let result = L <@> reynolds(g, Antisymmetric) |> compute
+// EXPECT: result = [0.0, 0.0, 0.0, 0.0]

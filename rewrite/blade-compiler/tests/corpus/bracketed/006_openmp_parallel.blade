@@ -1,0 +1,10 @@
+// TEST: OpenMP Parallel
+// OpenMP correctness: rectangular outer product gets #pragma omp parallel for.
+// Verify results match hand-computed values — if OMP has a race condition, values will be wrong.
+let A = [1.0, 2.0, 3.0, 4.0, 5.0]
+let B = [10.0, 20.0, 30.0, 40.0, 50.0]
+let L = method_for(A, B)
+let f = lambda(x, y) -> x * y
+let result = L <@> f |> compute
+// 5×5 rectangular = 25 elements, outermost loop gets OMP
+// EXPECT: result = [10, 20, 30, 40, 50, 20, 40, 60, 80, 100, 30, 60, 90, 120, 150, 40, 80, 120, 160, 200, 50, 100, 150, 200, 250]

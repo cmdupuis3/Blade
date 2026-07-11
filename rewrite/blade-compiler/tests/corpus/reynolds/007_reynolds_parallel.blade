@@ -1,0 +1,25 @@
+// TEST: Reynolds Parallel
+// ============================================================================
+// Reynolds + Fusion Tests
+// ============================================================================
+
+// <&> (optional parallel) with two Reynolds sym kernels — independent loops
+// A=[1,2], B=[3,4]
+// g(x,y) = 2x+y, reynolds: (2x+y)+(2y+x) = 3x+3y → [12, 15, 15, 18]
+// h(x,y) = x*y,  reynolds: xy+yx = 2xy → [6, 8, 12, 16]
+// ============================================================================
+// Reynolds + Fusion Tests
+// ============================================================================
+
+// <&> (optional parallel) with two Reynolds sym kernels — independent loops
+// A=[1,2], B=[3,4]
+// g(x,y) = 2x+y, reynolds: (2x+y)+(2y+x) = 3x+3y → [12, 15, 15, 18]
+// h(x,y) = x*y,  reynolds: xy+yx = 2xy → [6, 8, 12, 16]
+let A = [1.0, 2.0]
+let B = [3.0, 4.0]
+let L = method_for(A, B)
+let g = lambda(x, y) -> 2.0 * x + y
+let h = lambda(x, y) -> x * y
+let (rg, rh) = (L <@> reynolds(g)) <&> (L <@> reynolds(h)) |> compute
+// EXPECT: rg = [12.0, 15.0, 15.0, 18.0]
+// EXPECT: rh = [6.0, 8.0, 12.0, 16.0]

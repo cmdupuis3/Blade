@@ -1,0 +1,12 @@
+// TEST: Tuple View Structural 3-Way
+// Structural view of 3-way parallel: (inner, c) against ((α, β), γ)
+let A = [1.0, 2.0, 3.0]
+let L = method_for(A)
+let f = lambda(x) -> x + 10.0
+let g = lambda(x) -> x * 2.0
+let h = lambda(x) -> x * x
+let (inner, squares) = (L <@> f) <&> (L <@> g) <&> (L <@> h) |> compute
+let (sums, prods) = inner
+// EXPECT: sums = [11.0, 12.0, 13.0]
+// EXPECT: prods = [2.0, 4.0, 6.0]
+// EXPECT: squares = [1.0, 4.0, 9.0]

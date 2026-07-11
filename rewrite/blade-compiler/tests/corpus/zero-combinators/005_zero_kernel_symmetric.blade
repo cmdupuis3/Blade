@@ -1,0 +1,6 @@
+// TEST: Zero Kernel Symmetric
+// method_for(A, A) <@> zero with symmetric arrays
+let A = [1.0, 2.0, 3.0]
+let L = method_for(A, A)
+let result = L <@> zero |> compute
+// EXPECT: result [symmetric]

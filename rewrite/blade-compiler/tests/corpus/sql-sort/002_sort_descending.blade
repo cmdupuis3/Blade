@@ -1,0 +1,6 @@
+// TEST: Sort Descending
+// Sort array by value descending
+let A = [30.0, 10.0, 50.0, 20.0, 40.0]
+let sorted = sort(A, lambda(x) -> -x)
+let result = method_for(sorted) <@> lambda(x) -> x |> compute
+// EXPECT: result = [50.0, 40.0, 30.0, 20.0, 10.0]

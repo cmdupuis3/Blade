@@ -1,0 +1,7 @@
+// TEST: Lambda Array Capture
+// Lambda captures an array from outer scope and indexes into it
+let lookup = [10.0, 20.0, 30.0]
+let indices = [2, 0, 1]
+let L = method_for(indices)
+let result = L <@> lambda(i) -> lookup(i) |> compute
+// EXPECT: result = [30.0, 10.0, 20.0]

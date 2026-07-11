@@ -1,0 +1,10 @@
+// TEST: Struct Constraint Valid
+// Struct with where constraint - valid construction
+struct Balanced {
+    a: Int,
+    b: Int,
+    total: Int
+} where a + b == total
+let x = Balanced { a = 3, b = 7, total = 10 }
+let result = x.total
+// EXPECT: result = 10

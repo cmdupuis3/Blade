@@ -1,0 +1,19 @@
+// TEST: Ragged Literal Indexing
+// Ragged literal direct indexing: with the row-pointer setup, r(i)(j) works
+// as nested C++ indexing on the heterogeneous-length rows. This test exercises
+// element access without involving combinator iteration (which still requires
+// the kernel-param typing fix that's a separate workstream).
+// Ragged literal direct indexing: with the row-pointer setup, r(i)(j) works
+// as nested C++ indexing on the heterogeneous-length rows. This test exercises
+// element access without involving combinator iteration (which still requires
+// the kernel-param typing fix that's a separate workstream).
+// Direct index access into a ragged literal. The row-pointer table makes
+// r(i)(j) generate r[i][j] in C++, which works correctly because each r[i]
+// points into the flat buffer at the right offset.
+let r = [[1.0, 2.0, 3.0], [4.0, 5.0], [6.0, 7.0, 8.0, 9.0]]
+let a = r(0)(2)
+let b = r(1)(0)
+let c = r(2)(3)
+// EXPECT: a = 3
+// EXPECT: b = 4
+// EXPECT: c = 9

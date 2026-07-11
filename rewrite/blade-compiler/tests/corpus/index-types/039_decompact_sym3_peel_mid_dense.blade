@@ -1,0 +1,9 @@
+// TEST: Decompact Sym3 Peel Mid (dense)
+// d=1: freed axis = middle. Both remainders are arity-1 (= plain Idx), so the
+// group fully dissolves to a dense 3x3x3. mask {1,2,3}, storage out[i][j][k].
+let A = [1.0, 2.0, 3.0]
+let L = method_for(A, A, A)
+let f = lambda(x, y, z) where comm(x, y, z) -> x * y * z
+let sym = L <@> f |> compute
+let result = decompact(sym, 1)
+// EXPECT: result = [1, 2, 3, 2, 4, 6, 3, 6, 9, 2, 4, 6, 4, 8, 12, 6, 12, 18, 3, 6, 9, 6, 12, 18, 9, 18, 27]

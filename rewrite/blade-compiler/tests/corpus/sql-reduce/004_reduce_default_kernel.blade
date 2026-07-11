@@ -1,0 +1,6 @@
+// TEST: Reduce Default Kernel
+// reduce with no kernel argument: defaults to (+).
+// reduce(arr) ≡ reduce(arr, (+)) — sum is the most common reduction.
+let A = [1.0, 2.0, 3.0, 4.0, 5.0]
+let total = reduce(A)
+// EXPECT: total = 15

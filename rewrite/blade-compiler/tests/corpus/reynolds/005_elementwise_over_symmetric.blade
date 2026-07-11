@@ -1,0 +1,22 @@
+// TEST: Elementwise Over Symmetric
+// Elementwise (rank-0) map over an already-symmetric array. `sym` is the
+// rank-2 symmetric array from test30 (stored canonical [6,9,12,12,15,18]);
+// mapping h(e) = e * 2 over it must stay symmetric and produce each canonical
+// element doubled. This is the RUNTIME+VALUE half of the elementwise-over-
+// symmetric feature (the type half is in Test_TypeStructure). It exercises
+// iterating a symmetric array as a method_for input + allocating a symmetric
+// output, the path that currently needs codegen support.
+// Elementwise (rank-0) map over an already-symmetric array. `sym` is the
+// rank-2 symmetric array from test30 (stored canonical [6,9,12,12,15,18]);
+// mapping h(e) = e * 2 over it must stay symmetric and produce each canonical
+// element doubled. This is the RUNTIME+VALUE half of the elementwise-over-
+// symmetric feature (the type half is in Test_TypeStructure). It exercises
+// iterating a symmetric array as a method_for input + allocating a symmetric
+// output, the path that currently needs codegen support.
+let A = [1.0, 2.0, 3.0]
+let L = method_for(A, A)
+let g = lambda(x, y) where comm(x, y) -> 2.0 * x + y
+let sym = L <@> reynolds(g) |> compute
+let h = lambda(e) -> e * 2.0
+let result = method_for(sym) <@> h |> compute
+// EXPECT: result = [12.0, 18.0, 24.0, 24.0, 30.0, 36.0]

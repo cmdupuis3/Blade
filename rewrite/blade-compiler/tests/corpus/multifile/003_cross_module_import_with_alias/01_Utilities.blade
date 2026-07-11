@@ -1,0 +1,6 @@
+// TEST: Cross-module import with alias
+// MODULE: Utilities
+module Utilities
+
+let scale = 100.0
+function convert(x: Float64) -> Float64 = x * scale

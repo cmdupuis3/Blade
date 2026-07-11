@@ -1,0 +1,41 @@
+// TEST: Reynolds Mask Baseline
+// ============================================================================
+// Cross-feature: Reynolds × SQL-like primitives (mask, intersect)
+//
+// These tests probe whether the SQL-like array-construction primitives
+// (mask, intersect) compose with Reynolds-wrapped kernels. The two
+// refactor axes are orthogonal in principle — mask/intersect produce
+// the input arrays; Reynolds wraps the kernel — but the composition
+// has never been exercised before, so this is establishing baseline
+// coverage rather than testing a specific bug.
+//
+// Each Reynolds test is paired with a baseline (same shape, no Reynolds)
+// so a failure is attributable to either the SQL-primitive interaction
+// or the Reynolds interaction, not both.
+// ============================================================================
+// ============================================================================
+// Cross-feature: Reynolds × SQL-like primitives (mask, intersect)
+//
+// These tests probe whether the SQL-like array-construction primitives
+// (mask, intersect) compose with Reynolds-wrapped kernels. The two
+// refactor axes are orthogonal in principle — mask/intersect produce
+// the input arrays; Reynolds wraps the kernel — but the composition
+// has never been exercised before, so this is establishing baseline
+// coverage rather than testing a specific bug.
+//
+// Each Reynolds test is paired with a baseline (same shape, no Reynolds)
+// so a failure is attributable to either the SQL-primitive interaction
+// or the Reynolds interaction, not both.
+// ============================================================================
+// Baseline: method_for over two distinct masks of the same source,
+// non-Reynolds kernel. Rectangular iteration since the masks have
+// different identities (different filter predicates).
+// Dynamic-extent runtime-derived operands via unique() (mask now returns
+// a Bool array; the point here is Reynolds over runtime extents).
+let above2 = unique([3.0, 4.0, 5.0, 3.0])
+let below5 = unique([1.0, 2.0, 3.0, 4.0, 1.0])
+let g = lambda(x, y) -> x * y
+let result = method_for(above2, below5) <@> g |> compute
+// above2 = [3, 4, 5]; below5 = [1, 2, 3, 4]; 3x4 rectangular.
+// Row-major: (3,1)(3,2)(3,3)(3,4), (4,1)(4,2)(4,3)(4,4), (5,1)(5,2)(5,3)(5,4)
+// EXPECT: result = [3.0, 6.0, 9.0, 12.0, 4.0, 8.0, 12.0, 16.0, 5.0, 10.0, 15.0, 20.0]

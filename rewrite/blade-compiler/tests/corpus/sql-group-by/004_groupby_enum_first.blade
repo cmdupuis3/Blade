@@ -1,0 +1,10 @@
+// TEST: GroupBy Enum First
+// Annotated EnumIdx keys -> Case 2 static (reverse lookup, sparse key space).
+type LandType = EnumIdx<[101, 205, 307]>
+type StationIdx = Idx<6>
+let codes: Array<LandType like StationIdx> = [101, 205, 307, 101, 205, 307]
+let temps: Array<Float64 like StationIdx> = [20.0, 25.0, 30.0, 22.0, 27.0, 32.0]
+let gk = group_keys(codes)
+let grouped = group_by(temps, gk)
+let result = method_for(grouped) <@> lambda(g) -> g(0) |> compute
+// EXPECT: result = [20.0, 25.0, 30.0]

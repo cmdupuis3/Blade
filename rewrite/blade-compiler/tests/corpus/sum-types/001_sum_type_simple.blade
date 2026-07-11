@@ -1,0 +1,16 @@
+// TEST: Sum Type Simple
+// ============================================================================
+// Basic Sum Type Construction
+// ============================================================================
+// ============================================================================
+// Basic Sum Type Construction
+// ============================================================================
+// Simple sum type (enum-like) — match extracts tag as int
+type Direction = North | South | East | West
+let d = South
+let val = match d with
+    | North -> 1
+    | South -> 2
+    | East -> 3
+    | West -> 4
+// EXPECT: val = 2

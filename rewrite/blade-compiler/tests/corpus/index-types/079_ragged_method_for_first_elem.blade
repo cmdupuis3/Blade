@@ -1,0 +1,22 @@
+// TEST: Ragged Method For First Elem
+// Combinator iteration over a ragged literal. Routes through the generalized
+// tryRaggedPeel codegen path: outer loop over rows, sub-array binding for the
+// kernel param, kernel body produces one scalar per row.
+//
+// The kernel's `g(0)` references work via the IRApp→IRIndex rewrite already
+// used by group_by aggregation. The kernel param's type stays unconstrained
+// at typecheck (a fresh type variable) — the codegen path handles it
+// regardless. Output is rectangular `Array<Float64 like Idx<3>>`.
+// Combinator iteration over a ragged literal. Routes through the generalized
+// tryRaggedPeel codegen path: outer loop over rows, sub-array binding for the
+// kernel param, kernel body produces one scalar per row.
+//
+// The kernel's `g(0)` references work via the IRApp→IRIndex rewrite already
+// used by group_by aggregation. The kernel param's type stays unconstrained
+// at typecheck (a fresh type variable) — the codegen path handles it
+// regardless. Output is rectangular `Array<Float64 like Idx<3>>`.
+// method_for over a ragged literal. Kernel returns the first element of each
+// row.
+let r = [[1.0, 2.0, 3.0], [4.0, 5.0], [6.0, 7.0, 8.0, 9.0]]
+let firsts = method_for(r) <@> lambda(g) -> g(0) |> compute
+// EXPECT: firsts = [1, 4, 6]

@@ -1,0 +1,5 @@
+// TEST: Array Product Symmetric
+let A = [1.0, 2.0, 3.0]
+let L = method_for(A) <*> method_for(A)
+let result = L <@> lambda(x, y) where comm(x, y) -> x + y |> compute
+// EXPECT: result = [2, 3, 4, 4, 5, 6]

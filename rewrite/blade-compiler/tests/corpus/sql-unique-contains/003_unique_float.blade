@@ -1,0 +1,6 @@
+// TEST: Unique Float
+// unique on Float64 — same machinery, std::unordered_set handles the hash.
+let A = [1.5, 2.5, 1.5, 3.5, 2.5]
+let u = unique(A)
+let result = method_for(u) <@> lambda(x) -> x |> compute
+// EXPECT: result = [1.5, 2.5, 3.5]

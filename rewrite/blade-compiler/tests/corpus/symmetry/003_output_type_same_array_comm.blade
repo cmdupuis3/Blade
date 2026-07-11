@@ -1,0 +1,8 @@
+// TEST: Output Type: Same Array + Comm
+// Output type should be SymIdx when comm + same array
+let A = [1.0, 2.0, 3.0]
+let L = method_for(A, A)
+let f = lambda(x, y) where comm(x, y) -> x * y
+let result = L <@> f |> compute
+// Triangular: row0=[1*1, 1*2, 1*3], row1=[2*2, 2*3], row2=[3*3]
+// EXPECT: result = [1.0, 2.0, 3.0, 4.0, 6.0, 9.0]

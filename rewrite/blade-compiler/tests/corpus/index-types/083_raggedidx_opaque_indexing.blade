@@ -1,0 +1,8 @@
+// TEST: RaggedIdx Opaque Indexing
+// Direct indexing on a typed kernel param. With the annotation, g(0) is
+// TExprIndex at typecheck (since g is a rank-1 array type) — distinct from
+// the unannotated path where g(0) became TExprApp and was rewritten to
+// IRIndex post-hoc. Both should produce equivalent output.
+let r = [[10.0, 20.0, 30.0], [40.0, 50.0], [60.0, 70.0]]
+let firsts = method_for(r) <@> lambda(g: Array<Float64 like RaggedIdx<_>>) -> g(0) |> compute
+// EXPECT: firsts = [10, 40, 60]

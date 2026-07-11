@@ -1,0 +1,30 @@
+// TEST: RaggedIdx Opaque Parse
+// ============================================================================
+// RaggedIdx<_> — opaque-extent variant for kernel-parameter typing.
+// Round 3 (Leg 1): a kernel parameter typed `Array<T like RaggedIdx<_>>`
+// represents a sub-array peeled from a parent ragged at iteration time.
+// The `_` is a wildcard for "extent supplied by surrounding context"; only
+// the raggedness is part of the kernel-param type. Without this annotation,
+// the kernel param has a fresh type variable and operations like reduce(g),
+// extents(g) cannot typecheck. With the annotation, those operations
+// typecheck normally, and codegen produces correct C++ via the existing
+// tryRaggedPeel sub-array binding (which also emits the per-row _extents
+// the kernel body needs to read).
+// ============================================================================
+// ============================================================================
+// RaggedIdx<_> — opaque-extent variant for kernel-parameter typing.
+// Round 3 (Leg 1): a kernel parameter typed `Array<T like RaggedIdx<_>>`
+// represents a sub-array peeled from a parent ragged at iteration time.
+// The `_` is a wildcard for "extent supplied by surrounding context"; only
+// the raggedness is part of the kernel-param type. Without this annotation,
+// the kernel param has a fresh type variable and operations like reduce(g),
+// extents(g) cannot typecheck. With the annotation, those operations
+// typecheck normally, and codegen produces correct C++ via the existing
+// tryRaggedPeel sub-array binding (which also emits the per-row _extents
+// the kernel body needs to read).
+// ============================================================================
+// Parse + typecheck smoke for the wildcard form. Body is constant; this
+// only exercises the surface syntax and type lowering.
+let r = [[1.0, 2.0, 3.0], [4.0, 5.0]]
+let firsts = method_for(r) <@> lambda(g: Array<Float64 like RaggedIdx<_>>) -> 0.0 |> compute
+// EXPECT: firsts = [0, 0]

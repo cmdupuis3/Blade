@@ -1,0 +1,24 @@
+// TEST: Intersect Basic
+// ============================================================================
+// Phase 3: intersect / union — Mask Combinators
+// ============================================================================
+// ============================================================================
+// Phase 3: intersect / union — Mask Combinators
+// ============================================================================
+// Positional two-mask AND, post-redesign: mask now returns a Bool presence
+// array (not filtered values), so "intersection of two filters over the same
+// source" is the elementwise Bool AND of the two masks, then compactify. This
+// mirrors SQL WHERE AND; value-based intersect() is covered by the dedup tests.
+type AB = Idx<5>
+let A: Array<Float64 like AB> = [1.0, 2.0, 3.0, 4.0, 5.0]
+let above2 = mask(A, lambda(x) -> x > 2.0)
+let below5 = mask(A, lambda(x) -> x < 5.0)
+let both = method_for(zip(above2, below5)) <@> lambda(a, b) -> a && b |> compute
+let f = compound(A, both)
+// AND = [F,F,T,T,F] -> coordinates {2, 3} = 3.0, 4.0
+let n = extents(f)
+let x2 = f(2)
+let x3 = f(3)
+// EXPECT: n = 2
+// EXPECT: x2 = 3.0
+// EXPECT: x3 = 4.0

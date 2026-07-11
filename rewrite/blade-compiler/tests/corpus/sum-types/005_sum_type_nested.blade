@@ -1,0 +1,15 @@
+// TEST: Sum Type Nested
+// Nested match — sum type result feeds another computation
+type Option = Some : Float64 | None
+let a = Some(3.0)
+let b = Some(4.0)
+let va = match a with
+    | Some(n) -> n * n
+    | None -> 0.0
+let vb = match b with
+    | Some(n) -> n * n
+    | None -> 0.0
+let sum = va + vb
+// EXPECT: va = 9
+// EXPECT: vb = 16
+// EXPECT: sum = 25

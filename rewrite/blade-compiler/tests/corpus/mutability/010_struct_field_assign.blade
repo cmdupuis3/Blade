@@ -1,0 +1,8 @@
+// TEST: Struct field assign
+// EXPECT: result = 3
+struct Point { x: Float, y: Float }
+let p = Point { x = 1.0, y = 2.0 }
+let result = {
+    p.x = 3.0
+    p.x
+}

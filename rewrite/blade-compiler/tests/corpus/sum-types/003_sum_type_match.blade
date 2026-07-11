@@ -1,0 +1,13 @@
+// TEST: Sum Type Match
+// Pattern matching on sum type — multiple cases
+type Result = Ok : Int | Err : Int
+let r1 = Ok(100)
+let r2 = Err(404)
+let v1 = match r1 with
+    | Ok(n) -> n
+    | Err(e) -> 0 - e
+let v2 = match r2 with
+    | Ok(n) -> n
+    | Err(e) -> 0 - e
+// EXPECT: v1 = 100
+// EXPECT: v2 = -404

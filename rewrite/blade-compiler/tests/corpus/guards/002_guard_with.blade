@@ -1,0 +1,7 @@
+// TEST: Guard With ||
+// Guard with || operator
+let x = 5
+let result = match x with
+    | n if n < 0 || n > 100 -> 0
+    | n -> n * 2
+// EXPECT: result = 10

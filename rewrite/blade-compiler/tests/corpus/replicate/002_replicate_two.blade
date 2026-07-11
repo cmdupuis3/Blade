@@ -1,0 +1,6 @@
+// TEST: Replicate Two
+// replicate(2, c) — same as sequence(c, c)
+let A = [1.0, 2.0]
+let L = method_for(A)
+let result = replicate(2, L <@> lambda(x) -> x * 3.0) |> compute
+// EXPECT: result = [3.0, 6.0, 3.0, 6.0]

@@ -1,0 +1,4 @@
+// TEST: Validator: Anon Idx As Static Fn Param (rejects)
+// Anonymous index type as a static function parameter: rejected.
+// Static fn params require nominative identity (aliased only).
+static function f(i: Idx<3>) -> Idx<3> = i

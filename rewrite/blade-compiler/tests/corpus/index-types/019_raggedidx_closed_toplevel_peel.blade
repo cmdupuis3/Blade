@@ -1,0 +1,19 @@
+// TEST: RaggedIdx Closed Toplevel Peel
+// Closed RaggedIdx<lens> annotation on a top-level let, driving the peel
+// directly (the closed form was previously peeled only via function
+// parameters; the alias test covers annotation + direct reads but not
+// iteration). The annotated literal emits the same Ragged<T> wrapper with
+// .lens/.offsets companions, and tryRaggedPeel recognizes the closed
+// __raggedidx tag alongside the inline/opaque forms.
+// Closed RaggedIdx<lens> annotation on a top-level let, driving the peel
+// directly (the closed form was previously peeled only via function
+// parameters; the alias test covers annotation + direct reads but not
+// iteration). The annotated literal emits the same Ragged<T> wrapper with
+// .lens/.offsets companions, and tryRaggedPeel recognizes the closed
+// __raggedidx tag alongside the inline/opaque forms.
+let lens: Array<Int64 like Idx<3>> = [3, 2, 1]
+let r: Array<Float64 like Idx<3>, RaggedIdx<lens>> = [[1.0, 2.0, 3.0], [4.0, 5.0], [6.0]]
+let row_sums = method_for(r) <@> lambda(g: Array<Float64 like RaggedIdx<_>>) -> reduce(g, (+)) |> compute
+let total = reduce(row_sums, (+))
+// EXPECT: row_sums = [6, 9, 6]
+// EXPECT: total = 21

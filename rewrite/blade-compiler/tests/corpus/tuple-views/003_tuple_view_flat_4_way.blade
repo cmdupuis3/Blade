@@ -1,0 +1,10 @@
+// TEST: Tuple View Flat 4-Way
+// Flat view of 4-way parallel: (a, b, c, d) against (((α, β), γ), δ)
+let A = [1.0, 2.0, 3.0]
+let L = method_for(A)
+let r = (L <@> lambda(x) -> x + 1.0) <&> (L <@> lambda(x) -> x + 2.0) <&> (L <@> lambda(x) -> x + 3.0) <&> (L <@> lambda(x) -> x + 4.0) |> compute
+let (a, b, c, d) = r
+// EXPECT: a = [2.0, 3.0, 4.0]
+// EXPECT: b = [3.0, 4.0, 5.0]
+// EXPECT: c = [4.0, 5.0, 6.0]
+// EXPECT: d = [5.0, 6.0, 7.0]

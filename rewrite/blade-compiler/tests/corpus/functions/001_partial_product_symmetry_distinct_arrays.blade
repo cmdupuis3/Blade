@@ -1,0 +1,40 @@
+// TEST: Partial Product Symmetry Distinct Arrays
+// Partial product symmetry over DISTINCT arrays sharing a NAMED index space
+// (§14.6). A and B are different arrays but both indexed by the named type Lat,
+// and the kernel is commutative. Per §14.6 ("commutativity is the license,
+// shared index spaces are the payoff"), the shared Lat axis product-
+// symmetrizes: the output is SymIdx<2, Lat> and iteration is triangular over
+// the Lat pair (i <= j), giving the 6-cell upper triangle rather than the dense
+// 3x3 = 9. The §13.2 / Lemma 9.21 "arrays must be identical" framing is the
+// older, pre-nominal-index-type position, superseded by §14.6 + §13.3's
+// per-dimension stabilizer (Stab is non-trivial on a shared index space even
+// for distinct arrays). The 6 triangular cells store kernel(A[i], B[j]) = A[i]*
+// B[j] for pairs (0,0),(0,1),(0,2),(1,1),(1,2),(2,2):
+//   [1*10, 1*20, 1*30, 2*20, 2*30, 3*30] = [10, 20, 30, 40, 60, 90].
+// NOTE: this currently FAILS (wrong values) — the iteration thread groups the
+// shared Lat axis (triangular) but deduceOutputType still identity-groups A,B
+// separately (dense [Idx,Idx] storage), so the triangular writes land in a
+// 9-cell layout. Step 3 (deduceOutputType deriving from the unified
+// rawAxisGroups grouping) makes storage agree, turning this green.
+// Partial product symmetry over DISTINCT arrays sharing a NAMED index space
+// (§14.6). A and B are different arrays but both indexed by the named type Lat,
+// and the kernel is commutative. Per §14.6 ("commutativity is the license,
+// shared index spaces are the payoff"), the shared Lat axis product-
+// symmetrizes: the output is SymIdx<2, Lat> and iteration is triangular over
+// the Lat pair (i <= j), giving the 6-cell upper triangle rather than the dense
+// 3x3 = 9. The §13.2 / Lemma 9.21 "arrays must be identical" framing is the
+// older, pre-nominal-index-type position, superseded by §14.6 + §13.3's
+// per-dimension stabilizer (Stab is non-trivial on a shared index space even
+// for distinct arrays). The 6 triangular cells store kernel(A[i], B[j]) = A[i]*
+// B[j] for pairs (0,0),(0,1),(0,2),(1,1),(1,2),(2,2):
+//   [1*10, 1*20, 1*30, 2*20, 2*30, 3*30] = [10, 20, 30, 40, 60, 90].
+// NOTE: this currently FAILS (wrong values) — the iteration thread groups the
+// shared Lat axis (triangular) but deduceOutputType still identity-groups A,B
+// separately (dense [Idx,Idx] storage), so the triangular writes land in a
+// 9-cell layout. Step 3 (deduceOutputType deriving from the unified
+// rawAxisGroups grouping) makes storage agree, turning this green.
+type Lat = Idx<3>
+let A: Array<Float64 like Lat> = [1.0, 2.0, 3.0]
+let B: Array<Float64 like Lat> = [10.0, 20.0, 30.0]
+let result = method_for(A, B) <@> lambda(x, y) where comm(x, y) -> x * y |> compute
+// EXPECT: result = [10, 20, 30, 40, 60, 90]

@@ -1,0 +1,6 @@
+// TEST: Reduce Inline Let Chain
+// Inline reduce as part of a let-binding expression with following arithmetic.
+// Tests that the IIFE result composes with later operations cleanly.
+let A = [2.0, 3.0, 4.0]
+let doubled = reduce(A) * 2.0
+// EXPECT: doubled = 18

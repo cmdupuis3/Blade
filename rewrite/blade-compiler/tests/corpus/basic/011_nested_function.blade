@@ -1,0 +1,8 @@
+// TEST: Nested Function
+// Nested function in block
+let result = {
+    function helper(x) -> Int = x * 2
+    let y = helper(5)
+    y + 1
+}
+// EXPECT: result = 11

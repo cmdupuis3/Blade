@@ -1,0 +1,15 @@
+// TEST: Reynolds Mixed Fusion
+// <&!> with one Reynolds and one plain kernel
+// g(x,y) = 2x+y, reynolds_sym → [12, 15, 15, 18]
+// h(x,y) = x - y, plain → [-2, -3, -1, -2]
+// <&!> with one Reynolds and one plain kernel
+// g(x,y) = 2x+y, reynolds_sym → [12, 15, 15, 18]
+// h(x,y) = x - y, plain → [-2, -3, -1, -2]
+let A = [1.0, 2.0]
+let B = [3.0, 4.0]
+let L = method_for(A, B)
+let g = lambda(x, y) -> 2.0 * x + y
+let h = lambda(x, y) -> x - y
+let (rg, plain) = (L <@> reynolds(g)) <&!> (L <@> h) |> compute
+// EXPECT: rg = [12.0, 15.0, 15.0, 18.0]
+// EXPECT: plain = [-2.0, -3.0, -1.0, -2.0]

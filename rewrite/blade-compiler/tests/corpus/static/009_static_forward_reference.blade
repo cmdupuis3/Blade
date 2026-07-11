@@ -1,0 +1,8 @@
+// TEST: Static Forward Reference
+// Static values can be used before their textual definition
+// because evaluation uses topological order, not source order
+let static result = base + offset
+let static base = 100
+let static offset = 42
+let x = result
+// EXPECT: x = 142

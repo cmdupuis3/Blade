@@ -1,0 +1,4 @@
+// TEST: Anon Range Literal
+// Literal bounds 1..4 (offset range)
+let result = method_for(1..4) <@> lambda(i) -> i * 10 |> compute
+// EXPECT: result = [10, 20, 30]

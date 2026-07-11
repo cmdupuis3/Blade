@@ -1,0 +1,8 @@
+// TEST: Static Dependency Order
+// Static values with dependencies resolved in correct order
+let static base_dim = 5
+static function sym_count(d) = d * (d + 1) / 2
+let static total = sym_count(base_dim)
+let static doubled = total * 2
+let x = doubled
+// EXPECT: x = 30

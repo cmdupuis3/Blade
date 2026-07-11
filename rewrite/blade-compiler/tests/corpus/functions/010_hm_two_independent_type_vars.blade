@@ -1,0 +1,9 @@
+// TEST: HM Two Independent Type Vars
+// HM independence: distinct type variables T and U in the same signature
+// are independent — they don't get unified just because both appear as
+// element types. Calling with Float64 and Int64 arrays exercises this.
+function takeFirst(a: Array<T like Idx<n>>, b: Array<U like Idx<n>>) -> T = a(0)
+let xs: Array<Float64 like Idx<2>> = [10.0, 20.0]
+let ys: Array<Int64 like Idx<2>> = [3, 7]
+let r = takeFirst(xs, ys)
+// EXPECT: r = 10

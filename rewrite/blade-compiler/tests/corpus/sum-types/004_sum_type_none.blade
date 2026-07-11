@@ -1,0 +1,8 @@
+// TEST: Sum Type None
+// Sum type — match on no-payload variant
+type Option = Some : Float64 | None
+let x = None
+let val = match x with
+    | Some(n) -> n
+    | None -> -1.0
+// EXPECT: val = -1

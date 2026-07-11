@@ -1,0 +1,11 @@
+// TEST: GroupBy Mixed Kernel
+// Kernel mixing direct indexing with a reduce call. Confirms the peel's
+// kernel rewriter (g(args) -> IRIndex) doesn't break the reduce(g, ...)
+// path: only g(args) shapes get rewritten, not g passed as an array.
+let region = [0, 1, 2, 0, 1, 2]
+let temps = [20.0, 25.0, 30.0, 22.0, 27.0, 32.0]
+let gk = group_keys(region)
+let grouped = group_by(temps, gk)
+let result = method_for(grouped) <@> lambda(g: Array<Float64 like RaggedIdx<_>>) -> g(0) + reduce(g, (+)) |> compute
+// First elements [20, 25, 30] + sums [42, 52, 62] = [62, 77, 92]
+// EXPECT: result = [62, 77, 92]

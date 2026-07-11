@@ -1,0 +1,9 @@
+// TEST: Decompact Sym3 Peel Last
+// d=2: freed axis = dim 2 (last), kept pair = (i,j) symmetric. Output
+// SymIdx<2,3> -> Idx<3>, mask {1,1,2}, storage out[a][b][k] with (i,j)=(a,a+b).
+let A = [1.0, 2.0, 3.0]
+let L = method_for(A, A, A)
+let f = lambda(x, y, z) where comm(x, y, z) -> x * y * z
+let sym = L <@> f |> compute
+let result = decompact(sym, 2)
+// EXPECT: result = [1, 2, 3, 2, 4, 6, 3, 6, 9, 4, 8, 12, 6, 12, 18, 9, 18, 27]

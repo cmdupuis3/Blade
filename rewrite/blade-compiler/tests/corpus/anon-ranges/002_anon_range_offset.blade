@@ -1,0 +1,4 @@
+// TEST: Anon Range Offset
+// min..max with non-zero min
+let result = method_for(3..7) <@> lambda(i) -> i |> compute
+// EXPECT: result = [3, 4, 5, 6]

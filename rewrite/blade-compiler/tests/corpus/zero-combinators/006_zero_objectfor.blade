@@ -1,0 +1,5 @@
+// TEST: Zero ObjectFor
+// object_for(zero) <@> arrays
+let A = [1.0, 2.0, 3.0]
+let result = object_for(zero) <@> (A, A) |> compute
+// EXPECT: result [symmetric]

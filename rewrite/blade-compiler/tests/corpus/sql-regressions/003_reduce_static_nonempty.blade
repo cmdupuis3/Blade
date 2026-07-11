@@ -1,0 +1,10 @@
+// TEST: Reduce Static NonEmpty
+// reduce() on a statically-extent-non-empty array — codegen should NOT emit
+// a runtime guard. Functionally produces same answer regardless.
+// reduce() on a statically-extent-non-empty array — codegen should NOT emit
+// a runtime guard. Functionally produces same answer regardless.
+// reduce on a statically non-empty array: typecheck proves non-emptiness,
+// codegen omits the runtime guard, loop produces the answer directly.
+let A = [10.0, 20.0, 30.0]
+let total = reduce(A, (+))
+// EXPECT: total = 60

@@ -1,0 +1,13 @@
+// TEST: Pipe Precedence Inline
+// ============================================================================
+// Pipe precedence: verify |> compute binds outside lambda body
+// ============================================================================
+// ============================================================================
+// Pipe precedence: verify |> compute binds outside lambda body
+// ============================================================================
+// Inline: L <@> lambda(...) -> body |> compute
+// Should parse as (L <@> (lambda(...) -> body)) |> compute
+let A = [1.0, 2.0, 3.0]
+let B = [4.0, 5.0, 6.0]
+let result = method_for(A, B) <@> lambda(x, y) -> x + y |> compute
+// EXPECT: result = [5, 6, 7, 6, 7, 8, 7, 8, 9]

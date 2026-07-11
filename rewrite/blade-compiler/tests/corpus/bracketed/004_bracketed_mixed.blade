@@ -1,0 +1,10 @@
+// TEST: Bracketed Mixed
+// Mixed bracketed operators in same expression
+let A = [1.0, 2.0]
+let B = [3.0, 4.0]
+let C = [5.0, 6.0]
+// Outer products with different operators
+let outer_mul = A [*] B
+let outer_add = A [+] C
+// EXPECT: outer_mul = [3, 4, 6, 8]
+// EXPECT: outer_add = [6, 7, 7, 8]

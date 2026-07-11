@@ -1,0 +1,18 @@
+// TEST: Inference: Reduce Int Source
+// Probe D: unannotated reduce on an Int64 source. The current reduce fix
+// defaults to Float64 when the kernel arg is unbound — does the resulting
+// kernel param's Float64 type actually reconcile with the Int64 source at
+// <@> time, or does buildApplyInfo skip that unification?
+//
+// If silent miscompile: produces wrong values or odd C++.
+// If clean error: the inference correctly catches the elem-type mismatch.
+// If correct: the kernel-param Float64 default works through implicit
+// numeric promotion at codegen.
+type StationIdx = Idx<6>
+type RegionIdx = Idx<3>
+let region: Array<RegionIdx like StationIdx> = [0, 1, 2, 0, 1, 2]
+let temps_int: Array<Int64 like StationIdx> = [20, 25, 30, 22, 27, 32]
+let gk = group_keys(region)
+let grouped = group_by(temps_int, gk)
+let result = method_for(grouped) <@> lambda(g) -> reduce(g, (+)) |> compute
+// EXPECT: result = [42, 52, 62]

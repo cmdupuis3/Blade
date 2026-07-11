@@ -1,0 +1,10 @@
+// TEST: Struct Field Access
+// Struct field access
+struct Vector3 {
+    x: Float64,
+    y: Float64,
+    z: Float64
+}
+let v = Vector3 { x = 1.0, y = 2.0, z = 3.0 }
+let sum = v.x + v.y + v.z
+// EXPECT: sum = 6

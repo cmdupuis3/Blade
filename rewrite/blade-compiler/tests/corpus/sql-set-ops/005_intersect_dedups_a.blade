@@ -1,0 +1,9 @@
+// TEST: Intersect Dedups A
+// SQL set semantics: duplicates in A are dropped; first occurrence
+// wins for ordering. A has 3 twice and 5 once; B has 3 and 5.
+// Result: [3, 5] — not [3, 3, 5].
+let A = [3, 3, 5, 3]
+let B = [3, 5, 7]
+let r = intersect(A, B)
+let result = method_for(r) <@> lambda(x) -> x |> compute
+// EXPECT: result = [3, 5]

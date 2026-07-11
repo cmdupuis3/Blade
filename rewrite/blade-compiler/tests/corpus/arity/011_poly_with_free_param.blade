@@ -1,0 +1,10 @@
+// TEST: Poly With Free Param
+// Mixed Poly + free params. Free args sit between Poly slots; the Poly
+// stage expands tuples at the Poly indices and leaves free args in place.
+// xs at slot 0 has arity 2, w is free, ys at slot 2 has arity 2.
+// After specialization: blend_arity_2_2(xs_0, xs_1, w, ys_0, ys_1).
+function blend(xs: Poly<T^0>, w: Float64, ys: Poly<T^0>) -> T^0
+= w * (xs[0] + xs[1]) + ys[0] + ys[1]
+
+let result = blend((10.0, 20.0), 2.0, (1.0, 3.0))
+// EXPECT: result = 64.0
