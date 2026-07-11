@@ -406,26 +406,10 @@ and IRExpr =
     | IRSequence of IRExpr list
     | IRReplicate of count: IRExpr * body: IRExpr
     | IRMask of array: IRExpr * pred: IRExpr  // mask(array, pred) - filter array by predicate
-    /// Fused form of `mask(A, lambda(x) -> ... contains(B, x) ...)` produced
-    /// by the rewriteMaskContains pre-codegen pass. Carries the input array
-    /// A, the set source B (a "buildOn" expression invariant w.r.t. the
-    /// mask iteration), the parameter id that the residual references, and
-    /// the residual predicate body — i.e., the lambda's body with the
-    /// `IRContains(B, x)` call replaced by `IRSetMember(paramId, x)`.
-    /// Codegen renders this as: build set from B, scan A, apply residual
-    /// per element with set-membership replacing the contains call.
-    | IRMaskWithSet of array: IRExpr * setSource: IRExpr * paramId: IRId * residual: IRExpr
     | IRIntersect of IRExpr * IRExpr          // intersect(A, B) - set intersection (deduplicated, order from A)
     | IRUnion of IRExpr * IRExpr              // union(A, B) - set union (deduplicated, A's elements first)
     | IRUnique of array: IRExpr               // unique(A) - dedup, first-occurrence order
     | IRContains of array: IRExpr * value: IRExpr  // contains(A, x) - membership test, returns bool
-    /// Set-membership query against a precomputed set tied to a mask's
-    /// paramId. Only appears inside an `IRMaskWithSet`'s residual: codegen
-    /// for IRMaskWithSet generates a set variable from setSource, gives it
-    /// a name, and renders IRSetMember(paramId, value) as
-    /// `<setName>.count(value)`. The paramId identifies which mask's set
-    /// this query belongs to (in case of future nested masks).
-    | IRSetMember of paramId: IRId * value: IRExpr
     | IRGroupBy of values: IRExpr * grouping: IRExpr  // group_by(vals, gk) - apply grouping
     | IRGroupKeys of keys: IRExpr list               // group_keys(keys1, keys2, ...) - CSR grouping; multi-key ⇒ compound dispatch
     | IRSort of array: IRExpr * key: IRExpr          // sort(arr, key) - stable ascending sort by key
@@ -1839,76 +1823,6 @@ let computeTriangularBound
 // IR Declarations
 // ============================================================================
 
-// ----------------------------------------------------------------------------
-// ContainsProbe — payload for the contains-aware-mask optimization
-// ----------------------------------------------------------------------------
-//
-// A ContainsProbe records a single use of `contains(B, x)` somewhere
-// inside an expression. The bottom-up walker (exprAttrs, defined later)
-// collects probes from every subexpression and propagates them upward
-// through every compositional construct (binops, ifs, function-call
-// arguments, nested lambda bodies, match cases, let bodies, ...). The
-// propagation is *consumed* at IRMask — a mask's predicate is the only
-// place where probes get resolved. Anywhere else, they keep flowing up
-// until they reach a mask.
-//
-// IRFuncDef carries a Probes list summarizing the contains calls inside
-// its body, with BuildOn expressions stated in terms of the function's
-// formal parameters. At a call site, parameters are substituted with
-// the actual arguments and the probes are imported into the caller's
-// analysis — so a mask predicate that calls a function whose body has
-// a contains gets the same propagation as if the contains were inline.
-//
-// The optimization driven by these probes lives at codegen: when a mask
-// is rendered, the codegen inspects its predicate's probes, hoists each
-// hoistable build (B that doesn't depend on the mask's kernel binders)
-// into a `std::unordered_set` constructed in the mask's preamble, and
-// substitutes `set.count(value)` for the original IRContains node when
-// rendering the predicate body. Non-hoistable probes (B references the
-// kernel param) fall through to the existing per-iteration scan.
-//
-// `Node` is the actual IRContains object reference. Codegen builds a
-// substitution map keyed on this reference; matching at the contains
-// site uses object identity to decide whether to render the substituted
-// form or fall back to the linear-scan IIFE.
-//
-// Probes propagate through every compositional construct. They also
-// flow through function-call boundaries: when exprAttrs walks an
-// IRApp(IRVar(fId), args, _), it consults a per-module callables
-// table; if `fId` resolves, the function body is walked with parameter
-// substitution applied. This unifies how lambdas and functions are
-// treated for probe analysis — both are "callables whose body we walk
-// through." Recursion is handled by a visited-set passed through the
-// walker.
-//
-// Caveat: the codegen substitution mechanism in Phase C operates on
-// `Node` reference equality within the rendered tree. Probes whose
-// IRContains lives inside a called function's body propagate to the
-// caller's analysis (so the user can see them), but the substitution
-// itself can't fire from the caller's mask boundary — the rendered
-// tree only contains the IRApp call, not the inlined contains. The
-// mask renderer applies a reachability check before hoisting, so
-// unreachable probes don't generate unused preamble. Cross-procedural
-// calls compile to ordinary function calls with the IIFE inside.
-//
-// `BuildOn` is the array argument (B). Tests assert on this; the
-// hoistability check (FreeVars(BuildOn) ∩ maskBinders = ∅) also reads it.
-
-type ContainsProbe = {
-    Node:    IRExpr
-    BuildOn: IRExpr
-}
-
-/// Active pattern recognizing "this expression is a probe over some array."
-/// Returns (containsNode, arrayArg, valueArg). Future expansion (e.g. an
-/// IRPosition or IRCount operator with similar build-then-probe shape) is
-/// done by adding cases here; the rest of the propagator stays unchanged.
-let (|ContainsProbeAt|_|) (expr: IRExpr) : (IRExpr * IRExpr * IRExpr) option =
-    match expr with
-    | IRContains (arr, value) -> Some (expr, arr, value)
-    | _ -> None
-
-/// Type definition in IR
 /// Constraint information for structs with where clauses
 type StructConstraintInfo = {
     /// The lowered constraint expression (e.g., m1 + m2 == m_out)
@@ -3294,12 +3208,10 @@ let rec mapIRExpr (f: IRExpr -> IRExpr) (expr: IRExpr) : IRExpr =
         | IRGuard (c, b) -> IRGuard (m c, m b)
         | IRReplicate (c, b) -> IRReplicate (m c, m b)
         | IRMask (a, p) -> IRMask (m a, m p)
-        | IRMaskWithSet (a, s, pid, r) -> IRMaskWithSet (m a, m s, pid, m r)
         | IRIntersect (a, b) -> IRIntersect (m a, m b)
         | IRUnion (a, b) -> IRUnion (m a, m b)
         | IRUnique a -> IRUnique (m a)
         | IRContains (a, v) -> IRContains (m a, m v)
-        | IRSetMember (pid, v) -> IRSetMember (pid, m v)
         | IRGroupBy (v, k) -> IRGroupBy (m v, m k)
         | IRGroupKeys ks -> IRGroupKeys (List.map m ks)
         | IRSort (a, k) -> IRSort (m a, m k)
@@ -4243,8 +4155,12 @@ let rec liftInferType (expr: IRExpr) : IRType =
     | IRParam (_, _, ty) -> ty
     | IRApp (_, _, retTy) -> retTy
     | IRArrayLit (_, arrTy) -> mkArrayLike arrTy
-    | IRMask (arr, _) -> liftInferType arr
-    | IRMaskWithSet (arr, _, _, _) -> liftInferType arr  // Same element type, filtered extent
+    | IRMask (arr, _) ->
+        // mask(A, pred) is the Bool PRESENCE array over A's own index space
+        // (records reused verbatim -- index-space identity feeds compound()).
+        (match liftInferType arr with
+         | ArrayElem a -> mkArrayArrow a.IndexTypes (IRTScalar ETBool) None
+         | t -> t)
     | IRSort (arr, _) -> liftInferType arr
     | IRTranspose (arr, d1, d2) ->
         (match liftInferType arr with
@@ -4293,7 +4209,6 @@ let rec liftInferType (expr: IRExpr) : IRType =
     | IRUnion (a, _) -> liftInferType a
     | IRUnique a -> liftInferType a
     | IRContains _ -> IRTScalar ETBool
-    | IRSetMember _ -> IRTScalar ETBool
     | IRGroupBy (v, _) -> liftInferType v  // Approximation; codegen recomputes
     | IRGroupKeys _ -> IRTUnit  // GroupKeys is opaque
     | IRLet (_, _, body) -> liftInferType body
@@ -4329,7 +4244,7 @@ let rec liftInferType (expr: IRExpr) : IRType =
 /// argument to reduce IS what we lift, not reduce itself.
 let isInlineForm (e: IRExpr) : bool =
     match e with
-    | IRMask _ | IRMaskWithSet _ | IRSort _ | IRIntersect _ | IRUnion _ | IRUnique _
+    | IRMask _ | IRSort _ | IRIntersect _ | IRUnion _ | IRUnique _
     | IRGroupBy _ | IRGroupKeys _ | IRTranspose _ | IRDecompact _ | IRArrayNegate _ | IRArrayConjugate _ -> true
     | _ -> false
 
@@ -4451,39 +4366,28 @@ let rec liftExpr (builder: IRBuilder) (expr: IRExpr) : IRExpr =
         // inline form — so it just recurses normally.
         let a' = liftExpr builder a
         let p' = liftExpr builder p
-        let (binds, aFinal) = liftChild builder a'
+        let (binds, aFinal) = liftChildIncludingArrayLit builder a'
         wrapLets binds (IRMask (aFinal, p'))
-    | IRMaskWithSet (a, s, pid, r) ->
-        // Same shape as IRMask: lift the array arg (which may be another
-        // inline form) so codegen can name it. setSource is also lifted
-        // through liftExpr for nested inline forms. Residual carries
-        // IRSetMember references; lift-pass leaves those alone.
-        let a' = liftExpr builder a
-        let s' = liftExpr builder s
-        let r' = liftExpr builder r
-        let (bindsA, aFinal) = liftChild builder a'
-        let (bindsS, sFinal) = liftChild builder s'
-        wrapLets (bindsA @ bindsS) (IRMaskWithSet (aFinal, sFinal, pid, r'))
     | IRSort (a, k) ->
         let a' = liftExpr builder a
         let k' = liftExpr builder k
-        let (binds, aFinal) = liftChild builder a'
+        let (binds, aFinal) = liftChildIncludingArrayLit builder a'
         wrapLets binds (IRSort (aFinal, k'))
     | IRIntersect (a, b) ->
         let a' = liftExpr builder a
         let b' = liftExpr builder b
-        let (bindsA, aFinal) = liftChild builder a'
-        let (bindsB, bFinal) = liftChild builder b'
+        let (bindsA, aFinal) = liftChildIncludingArrayLit builder a'
+        let (bindsB, bFinal) = liftChildIncludingArrayLit builder b'
         wrapLets (bindsA @ bindsB) (IRIntersect (aFinal, bFinal))
     | IRUnion (a, b) ->
         let a' = liftExpr builder a
         let b' = liftExpr builder b
-        let (bindsA, aFinal) = liftChild builder a'
-        let (bindsB, bFinal) = liftChild builder b'
+        let (bindsA, aFinal) = liftChildIncludingArrayLit builder a'
+        let (bindsB, bFinal) = liftChildIncludingArrayLit builder b'
         wrapLets (bindsA @ bindsB) (IRUnion (aFinal, bFinal))
     | IRUnique a ->
         let a' = liftExpr builder a
-        let (binds, aFinal) = liftChild builder a'
+        let (binds, aFinal) = liftChildIncludingArrayLit builder a'
         wrapLets binds (IRUnique aFinal)
     | IRGroupBy (v, k) -> IRGroupBy (liftExpr builder v, liftExpr builder k)
     | IRGroupKeys ks -> IRGroupKeys (List.map (liftExpr builder) ks)
@@ -4495,13 +4399,6 @@ let rec liftExpr (builder: IRBuilder) (expr: IRExpr) : IRExpr =
         let v' = liftExpr builder v
         let (binds, arrFinal) = liftChild builder arr'
         wrapLets binds (IRContains (arrFinal, v'))
-
-    // IRSetMember is a leaf-level membership query against a precomputed
-    // set tied to a paramId. The set itself was built by the enclosing
-    // IRMaskWithSet's preamble — no inline form to lift here. Just walk
-    // the value expression and reconstruct.
-    | IRSetMember (paramId, v) ->
-        IRSetMember (paramId, liftExpr builder v)
 
     // Single-child consumers where the array slot can hold an inline form
     | IRReduce (arr, kernel) ->
@@ -5154,16 +5051,10 @@ let rec collectVarRefsIR (expr: IRExpr) : Set<IRId> =
         Set.unionMany [collectVarRefsIR lo; collectVarRefsIR hi; Set.remove vid (collectVarRefsIR body)]
     | IRGuard (c, b) -> Set.union (collectVarRefsIR c) (collectVarRefsIR b)
     | IRMask (a, p) -> Set.union (collectVarRefsIR a) (collectVarRefsIR p)
-    | IRMaskWithSet (a, s, _, r) ->
-        // paramId is a binder, not a reference; residual may reference it
-        // but it's bound by the mask, not free. Union of array, setSource,
-        // and residual; the binder is removed by exprAttrs's BoundVars logic.
-        Set.unionMany [collectVarRefsIR a; collectVarRefsIR s; collectVarRefsIR r]
     | IRIntersect (a, b) -> Set.union (collectVarRefsIR a) (collectVarRefsIR b)
     | IRUnion (a, b) -> Set.union (collectVarRefsIR a) (collectVarRefsIR b)
     | IRUnique a -> collectVarRefsIR a
     | IRContains (a, v) -> Set.union (collectVarRefsIR a) (collectVarRefsIR v)
-    | IRSetMember (_, v) -> collectVarRefsIR v  // paramId is a binder reference, not a free var
     | IRGroupBy (v, k) -> Set.union (collectVarRefsIR v) (collectVarRefsIR k)
     | IRGroupKeys ks -> ks |> List.map collectVarRefsIR |> Set.unionMany
     | IRSort (a, k) -> Set.union (collectVarRefsIR a) (collectVarRefsIR k)
@@ -5190,13 +5081,10 @@ let rec collectVarRefsIR (expr: IRExpr) : Set<IRId> =
 // ============================================================================
 //
 // `exprAttrs` walks an expression tree to compute attributes (FreeVars,
-// BoundVars, IsPure, Probes). For probes specifically, the analysis is
-// "complete" only if it can see every IRContains the program will
-// execute. That includes contains calls inside the bodies of functions
-// called from the analyzed expression. The IRApp arm follows
-// IRVar(fId) references via the CallablesTable, substitutes the
-// callee's params with the call's args, and walks the body — surfacing
-// probes that originate inside the callee's body.
+// BoundVars, IsPure). The IRApp arm follows IRVar(fId) references via
+// the CallablesTable, substitutes the callee's params with the call's
+// args, and walks the body, so free variables originating inside a
+// callee's body are surfaced to the caller's analysis.
 //
 // `Visited` short-circuits recursion. When walking f's body, we add f
 // to Visited; if g calls f (mutual recursion), the IRApp arm sees f in
@@ -5296,108 +5184,6 @@ let buildCallablesTableForModule (modul: IRModule) : CallablesTable =
 // can call it for IRVar-typed kernels after Stage 3c.3.)
 
 // ============================================================================
-// rewriteMaskContains — fuse mask(A, lambda(x) -> ... contains(B, x) ...)
-// ============================================================================
-//
-// The IR-level optimization that replaces Phase C's codegen substitution
-// machinery with a structural rewrite. For each IRMask in the module:
-//   1. Resolve the predicate to an IRCallable.
-//   2. If the callable has exactly one parameter (TypeCheck enforces
-//      this; defensive otherwise), scan its body for IRContains nodes.
-//   3. A node is "hoistable" iff its BuildOn (the array argument)
-//      doesn't reference the predicate's parameter — i.e., the set
-//      can be precomputed once per mask invocation, not per element.
-//   4. If exactly one hoistable IRContains is found, rewrite to:
-//        IRMaskWithSet(arr, buildOn, paramId, residual)
-//      where `residual` is the callable's body with the IRContains
-//      replaced by `IRSetMember(paramId, value)`.
-//   5. Otherwise (zero or 2+ hoistable nodes), leave as IRMask.
-//      Option A (per design discussion): multi-contains masks fall
-//      back to per-element evaluation. Revisit if real code hits this.
-//
-// This handles the LOCAL case: contains directly inside the predicate's
-// body. The CROSS-PROCEDURAL case (contains inside a function called
-// from the predicate) is M1.2 v2 — not yet implemented. The unified
-// analysis sees those probes for diagnostic purposes but optimization
-// doesn't fire across the call.
-
-/// Collect hoistable IRContains nodes from an expression. Returns
-/// (containsNode, buildOn, value) for each IRContains whose BuildOn
-/// doesn't reference paramId. Walks via mapIRExpr for full coverage.
-let private collectHoistableContains (paramId: IRId) (body: IRExpr)
-        : (IRExpr * IRExpr * IRExpr) list =
-    let mutable results = []
-    let _ = mapIRExpr (fun e ->
-        match e with
-        | IRContains (buildOn, value) ->
-            let refs = collectVarRefsIR buildOn
-            if not (Set.contains paramId refs) then
-                results <- (e, buildOn, value) :: results
-            e
-        | _ -> e) body
-    List.rev results
-
-/// Replace a specific subexpression (by reference identity) with another.
-/// Used to swap an IRContains node for an IRSetMember node within a
-/// predicate body. Reference identity ensures we only replace the
-/// specific node we collected; structurally-equal duplicates elsewhere
-/// in the tree are left alone.
-let private replaceNodeByRef (target: IRExpr) (replacement: IRExpr) (root: IRExpr) : IRExpr =
-    mapIRExpr (fun e ->
-        if System.Object.ReferenceEquals(e, target) then replacement
-        else e) root
-
-/// Attempt to rewrite a single IRMask to IRMaskWithSet. Returns the
-/// rewritten form if the pattern matches, otherwise None.
-let private tryRewriteMaskContains (expr: IRExpr) : IRExpr option =
-    match expr with
-    | IRMask (arr, pred) ->
-        match resolveCallable pred with
-        | None -> None  // Predicate isn't a recognizable callable
-        | Some callable when callable.Params.Length <> 1 -> None
-        | Some callable ->
-            let paramId = callable.Params.[0].VarId
-            let hoistable = collectHoistableContains paramId callable.Body
-            match hoistable with
-            | [(node, buildOn, value)] ->
-                let setMember = IRSetMember (paramId, value)
-                let residual = replaceNodeByRef node setMember callable.Body
-                Some (IRMaskWithSet (arr, buildOn, paramId, residual))
-            | _ ->
-                // 0 hoistable: nothing to optimize.
-                // 2+ hoistable: multi-contains case — skip per Option A
-                // (design decision: revisit when real code demands it).
-                None
-    | _ -> None
-
-/// Apply tryRewriteMaskContains bottom-up across an expression tree.
-/// Bottom-up means inner masks are rewritten before outer ones — useful
-/// when a mask's array argument is itself a mask, so the inner rewrite
-/// is visible when the outer is considered.
-let private rewriteMaskContainsExpr (expr: IRExpr) : IRExpr =
-    mapIRExpr (fun e ->
-        match tryRewriteMaskContains e with
-        | Some rewritten -> rewritten
-        | None -> e) expr
-
-/// Module-level rewrite pass. Runs after lift, before codegen. Builds
-/// and installs the CallablesTable so resolveCallable can resolve
-/// kernel slots and predicate references to their underlying callable.
-let rewriteMaskContains (modul: IRModule) : IRModule =
-    let callables = buildCallablesTable modul.Functions
-    let prev = setCallablesContext callables
-    try
-        let newBindings =
-            modul.Bindings |> List.map (fun b ->
-                { b with Value = rewriteMaskContainsExpr b.Value })
-        let newFunctions =
-            modul.Functions |> List.map (fun f ->
-                { f with Body = rewriteMaskContainsExpr f.Body })
-        { modul with Bindings = newBindings; Functions = newFunctions }
-    finally
-        restoreAnalysisContext prev
-
-// ============================================================================
 // ExprAttrs — bottom-up attribute computation for IR expressions
 // ============================================================================
 //
@@ -5427,32 +5213,19 @@ let rewriteMaskContains (modul: IRModule) : IRModule =
 //     exprAttrs is exhaustive — every IRExpr variant has an explicit
 //     arm. The corpus tests are how we know this matters.
 
-// ----------------------------------------------------------------------------
-// ContainsProbe — payload for the contains-aware-mask optimization
-// ----------------------------------------------------------------------------
-//
-// The type, active pattern, and detailed doc-comment for ContainsProbe
-// live earlier in this file (right after the IRExpr definition), because
-// IRFuncDef carries a `Probes: ContainsProbe list` field and forward
-// references aren't possible in F#. See lines ~410 for the definitions.
-
 type ExprAttrs = {
     FreeVars:  Set<IRId>
     BoundVars: Set<IRId>
     IsPure:    bool
-    Probes:    ContainsProbe list
 }
 
 let private emptyAttrs : ExprAttrs =
-    { FreeVars = Set.empty; BoundVars = Set.empty; IsPure = true; Probes = [] }
+    { FreeVars = Set.empty; BoundVars = Set.empty; IsPure = true }
 
 let private mergeAttrs (a: ExprAttrs) (b: ExprAttrs) : ExprAttrs =
     { FreeVars  = Set.union a.FreeVars  b.FreeVars
       BoundVars = Set.union a.BoundVars b.BoundVars
-      IsPure    = a.IsPure && b.IsPure
-      // Concatenate probes left-to-right so the order matches source order
-      // for predictable substitution-map population at codegen.
-      Probes    = a.Probes @ b.Probes }
+      IsPure    = a.IsPure && b.IsPure }
 
 let private mergeMany (xs: ExprAttrs list) : ExprAttrs =
     List.fold mergeAttrs emptyAttrs xs
@@ -5491,12 +5264,9 @@ let rec exprAttrs (expr: IRExpr) : ExprAttrs =
         // Any reference to id inside `value` would be ill-formed IR (use
         // before binding); we still union without subtracting, so such a
         // bug would still show up as id ∈ FreeVars at the outer level.
-        // Probes propagate from both halves: an IRContains in the value
-        // is just as collectable as one in the body.
         { FreeVars  = Set.union va.FreeVars (Set.remove id ba.FreeVars)
           BoundVars = Set.unionMany [va.BoundVars; ba.BoundVars; Set.singleton id]
-          IsPure    = va.IsPure && ba.IsPure
-          Probes    = va.Probes @ ba.Probes }
+          IsPure    = va.IsPure && ba.IsPure }
 
     | IRForRange (vid, lo, hi, body) ->
         let la = exprAttrs lo
@@ -5504,8 +5274,7 @@ let rec exprAttrs (expr: IRExpr) : ExprAttrs =
         let ba = exprAttrs body
         { FreeVars  = Set.unionMany [la.FreeVars; ha.FreeVars; Set.remove vid ba.FreeVars]
           BoundVars = Set.unionMany [la.BoundVars; ha.BoundVars; ba.BoundVars; Set.singleton vid]
-          IsPure    = la.IsPure && ha.IsPure && ba.IsPure
-          Probes    = la.Probes @ ha.Probes @ ba.Probes }
+          IsPure    = la.IsPure && ha.IsPure && ba.IsPure }
 
     | IRMatch (scrut, cases) ->
         let sa = exprAttrs scrut
@@ -5514,12 +5283,10 @@ let rec exprAttrs (expr: IRExpr) : ExprAttrs =
                 let pIds = patternBoundIds c.Pattern
                 let ga = c.Guard |> Option.map exprAttrs |> Option.defaultValue emptyAttrs
                 let ba = exprAttrs c.Body
-                // Pattern bindings are visible in guard and body. Probes
-                // propagate from guard and body alike.
+                // Pattern bindings are visible in guard and body.
                 { FreeVars  = Set.union (Set.difference ga.FreeVars pIds) (Set.difference ba.FreeVars pIds)
                   BoundVars = Set.unionMany [ga.BoundVars; ba.BoundVars; pIds]
-                  IsPure    = ga.IsPure && ba.IsPure
-                  Probes    = ga.Probes @ ba.Probes })
+                  IsPure    = ga.IsPure && ba.IsPure })
         mergeMany (sa :: caseAttrs)
 
     // -- Unary expressions: one child, no binders --
@@ -5547,8 +5314,7 @@ let rec exprAttrs (expr: IRExpr) : ExprAttrs =
         let ra = exprAttrs r
         { FreeVars  = Set.union la.FreeVars ra.FreeVars
           BoundVars = Set.union la.BoundVars ra.BoundVars
-          IsPure    = la.IsPure && ra.IsPure
-          Probes    = la.Probes @ ra.Probes }
+          IsPure    = la.IsPure && ra.IsPure }
     | IRArrayNegate e ->
         exprAttrs e
     | IRArrayConjugate e ->
@@ -5580,58 +5346,11 @@ let rec exprAttrs (expr: IRExpr) : ExprAttrs =
     | IRAssign (l, r) ->
         mergeAttrs (exprAttrs l) (exprAttrs r)
 
-    // IRContains is the probe site. Match directly (rather than via the
-    // ContainsProbeAt active pattern) so F#'s exhaustiveness checker can
-    // verify coverage — partial active patterns return `option` and the
-    // checker doesn't treat them as definitely matching IRContains. The
-    // active pattern stays exported for downstream consumers (codegen
-    // substitution, future operator-decomposition extensions) where
-    // exhaustiveness isn't being asserted.
-    | IRContains (arr, value) as node ->
-        let a = exprAttrs arr
-        let v = exprAttrs value
-        let combined = mergeAttrs a v
-        let probe = { Node = node; BuildOn = arr }
-        { combined with Probes = probe :: combined.Probes }
+    | IRContains (arr, value) ->
+        mergeAttrs (exprAttrs arr) (exprAttrs value)
 
-    // IRMask consumes the predicate's probes. The predicate is the only
-    // place a mask can resolve them; once the mask has them, they do not
-    // propagate further up the tree. The array argument's probes
-    // (uncommon — an IRMask whose array operand itself contains a
-    // contains call) still propagate.
     | IRMask (arr, pred) ->
-        let arrAttrs = exprAttrs arr
-        let predAttrs = exprAttrs pred
-        let consumed = { predAttrs with Probes = [] }
-        mergeAttrs arrAttrs consumed
-
-    // IRMaskWithSet is the post-rewrite form: the contains-based optimization
-    // is already extracted. The residual no longer contains IRContains nodes
-    // for THIS mask's optimization, but may contain other contains-based
-    // probes (nested masks, residual logic). Attribute computation walks
-    // arr, setSource, and residual; the paramId is a binder for the residual.
-    | IRMaskWithSet (arr, setSrc, paramId, residual) ->
-        let arrAttrs = exprAttrs arr
-        let setSrcAttrs = exprAttrs setSrc
-        let residualAttrs = exprAttrs residual
-        // paramId is bound by the mask; remove from FreeVars, add to BoundVars.
-        let residual' = {
-            residualAttrs with
-                FreeVars = Set.remove paramId residualAttrs.FreeVars
-                BoundVars = Set.add paramId residualAttrs.BoundVars
-        }
-        // The residual's probes (if any) are consumed by this mask, like IRMask.
-        let consumed = { residual' with Probes = [] }
-        mergeMany [arrAttrs; setSrcAttrs; consumed]
-
-    // IRSetMember is a "leaf" lookup against a precomputed set. It references
-    // paramId (which is bound by the enclosing IRMaskWithSet) and the value.
-    | IRSetMember (paramId, value) ->
-        let v = exprAttrs value
-        // paramId is referenced (bound by the enclosing IRMaskWithSet, so
-        // resolves correctly). Including it in FreeVars lets the enclosing
-        // mask's BoundVars logic close over it.
-        { v with FreeVars = Set.add paramId v.FreeVars }
+        mergeAttrs (exprAttrs arr) (exprAttrs pred)
 
     | IRUnique a -> exprAttrs a
 

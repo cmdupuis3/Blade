@@ -827,6 +827,33 @@ and lowerTypedBinOp env mode op l r leftExpr rightExpr resultType =
             OutputRank = 0
         }
         IRApp(IRObjectFor objInfo, [IRTuple [l; r]], resultType)
+    elif mode = Elementwise
+         && (match op with OpEq|OpNeq|OpLt|OpLe|OpGt|OpGe|OpAnd|OpOr -> true | _ -> false)
+         && (leftIsArray <> rightIsArray) then
+        // Array<->scalar broadcast for comparison/logical ops: `A > 2.0` or
+        // `2.0 < A`. The op is T^0 -> T^0 -> T^0; co-iteration peels the array
+        // operand down to T^0 and the scalar already matches that rank, so we
+        // iterate the array with the scalar held fixed via a 1-param partial-
+        // application kernel (lambda(x) -> x op s, or lambda(x) -> s op x). The
+        // scalar operand is captured as the fixed arg; isLeft selects the side.
+        let (arrayIR, kernelVar) =
+            if leftIsArray then
+                // A op scalar  ->  lambda(x) -> x op scalar   (fixed arg on right, isLeft = false)
+                let elemTy = (match leftExpr.Type with ArrayElem a -> a.ElemType | _ -> IRTScalar ETFloat64)
+                let funcTy = mkFuncArrow [elemTy] (IRTScalar ETBool)
+                (l, lowerTypedPartialApp env op r false funcTy)
+            else
+                // scalar op A  ->  lambda(x) -> scalar op x   (fixed arg on left, isLeft = true)
+                let elemTy = (match rightExpr.Type with ArrayElem a -> a.ElemType | _ -> IRTScalar ETFloat64)
+                let funcTy = mkFuncArrow [elemTy] (IRTScalar ETBool)
+                (r, lowerTypedPartialApp env op l true funcTy)
+        let objInfo : ObjectForInfo = {
+            Kernel = kernelVar
+            CommGroups = []
+            InputRanks = [0]
+            OutputRank = 0
+        }
+        IRApp(IRObjectFor objInfo, [arrayIR], resultType)
     else
     
     match op with
@@ -1514,13 +1541,12 @@ let lowerTypedProgram (program: TypedProgram) (rawProgram: Program option) (buil
         // codegen sees the canonical "let-bound" pattern uniformly.
         let irModule = IR.liftInlineFormsModule irModule env.Builder
         // M1.4: structural rewrite of mask+contains fusion. Recognizes
-        // mask(A, lambda(x) -> ... contains(B, x) ...) patterns and
-        // rewrites to IRMaskWithSet, which codegen (M1.3) renders as a
-        // hoisted-set + scan + compact loop. Replaces the codegen-side
-        // substitution machinery in Phase C for the single-contains
-        // case. Multi-contains predicates (per Option A) fall through
-        // unchanged and use Phase C's renderer as before.
-        let irModule = IR.rewriteMaskContains irModule
+        // The mask+contains fusion pass, the IRMaskWithSet/IRSetMember IR
+        // variants, the dead mask-emitter set-hoist, and the ContainsProbe
+        // probe machinery (type, active pattern, the exprAttrs Probes field
+        // and its collection/consumption) are all removed. NOTE: mask+contains
+        // now always runs a linear scan; the semijoin hash-set is a separate,
+        // not-yet-implemented optimization.
         currentExports <- Map.add moduleName exports currentExports
         irModules <- irModules @ [irModule]
     

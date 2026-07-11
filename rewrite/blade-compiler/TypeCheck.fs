@@ -2483,6 +2483,17 @@ let rec inferExpr (env: TypeEnv) (expr: Expr) : TypeResult<TypedExpr> =
     // asymmetric treatment of named vs anonymous element-position tags.
     | ExprRange idxTys ->
         let idxs = idxTys |> List.map (lowerIndexType env 0)
+        // A CompoundIdx slot (masked product space, formalism 4.5) IS the whole
+        // iteration space, so it cannot share a range<> with other index types.
+        // Reject range<CompoundIdx<m>, J> HERE at typecheck (EXPECT: typecheck
+        // failure) rather than letting it fall through and leak a codegen #error
+        // plus a cascade of undeclared-variable errors into the generated C++.
+        // A SOLE compound slot (idxs.Length = 1) is fine and passes through.
+        let hasCompound =
+            idxs |> List.exists (fun ix -> (match ix.Extent with IRCompoundMask _ -> true | _ -> false))
+        if hasCompound && idxs.Length > 1 then
+            Error (Other "range<CompoundIdx<m>, ...>: a compound range slot cannot be combined with other index types in one range<> (formalism 4.5)")
+        else
         // Each listed index type becomes one virtual slot; downstream the slots
         // uncurry into nested loop levels. The element type is taken from the
         // innermost (last) index -- the value yielded at the deepest level --
@@ -2579,7 +2590,19 @@ let rec inferExpr (env: TypeEnv) (expr: Expr) : TypeResult<TypedExpr> =
         inferExpr env body |> Result.bind (fun tB ->
             Ok (mkTyped (TExprGuard (tC, tB)) tB.Type)))
     
-    // mask(array, pred) — filter array by predicate, producing compacted array
+    // mask(array, pred) — construct the Bool PRESENCE array over the source's
+    // own index space: m(i) = pred(A(i)). mask is the predicate-driven mask
+    // CONSTRUCTOR; compaction is compound(A, m) (formalism 4.5), iteration of
+    // the filtered space is range<CompoundIdx<m>>, and positional composition
+    // (WHERE p AND q) is elementwise Bool algebra on mask arrays. This
+    // replaces the earlier value-filtering semantics (which returned the
+    // packed values, discarding positions and making the selection
+    // non-reusable across companion columns).
+    //
+    // The result type reuses the source's IRIndexType records VERBATIM (same
+    // Ids/Tags) — index-space identity is what compoundViewType checks, so a
+    // freshly-derived mask must provably live over A's space even when A's
+    // indices are anonymous.
     | ExprMask (array, pred) ->
         inferExpr env array |> Result.bind (fun tArr ->
         inferExpr env pred |> Result.bind (fun tPred ->
@@ -2601,14 +2624,7 @@ let rec inferExpr (env: TypeEnv) (expr: Expr) : TypeResult<TypedExpr> =
                         unify env.Subst info.Params.[0].Type arrTy.ElemType
                     | _ -> Ok ()
                 unifyPredParam |> Result.bind (fun () ->
-                    // Result: 1D array with same element type, runtime-opaque extent
-                    let resultIdx = {
-                        Id = env.Builder.FreshId(); Rank = 1
-                        Extent = IRParam ("__masked", 0, IRTNat None)
-                        Symmetry = SymNone; Tag = None
-                        Kind = SDimension; Dependencies = []
-                    }
-                    let resultType = mkArrayArrow [resultIdx] arrTy.ElemType None
+                    let resultType = mkArrayArrow arrTy.IndexTypes (IRTScalar ETBool) None
                     Ok (mkTyped (TExprMask (tArr, tPred)) resultType)))))
 
     // compound(dense, mask) -- scatter a dense array into a CompoundIdx-typed
@@ -3244,9 +3260,10 @@ let rec inferExpr (env: TypeEnv) (expr: Expr) : TypeResult<TypedExpr> =
                                 t.StartsWith "__raggedidx"
                                 || t = "__depidx_inner"
                                 || t.StartsWith "__group_"
+                                || t.StartsWith "__compoundidx"
                             | None -> false)
                     if raggedFamilySlot then
-                        Error (Other "extents() on a ragged (or grouped) array has no scalar answer for the ragged dimension -- its extent varies per row. Use extents(row) on a peeled or indexed row for a per-row length, or the lengths array itself.")
+                        Error (Other "extents() on a ragged, grouped, or multi-rank compound array has no scalar answer for the masked/ragged dimensions. Use extents(row) on a peeled or indexed row, the lengths array, or extents on a rank-1 compound (which is its cardinality).")
                     else
                     // Multi-rank: tuple of Int64s, one per dimension
                     let n = arrTy.IndexTypes.Length
@@ -3574,6 +3591,24 @@ and inferBinOp env mode op left right : TypeResult<TypedExpr> =
                 mkTyped (TExprBinOp (mode, op, tL, tR)) resTy)))
 
 and inferArithType mode op leftTy rightTy : TypeResult<IRType> =
+    // Elementwise boolean/comparison over two ARRAYS lifts to a Bool-element
+    // array of the same shape (mask algebra: `above2 && below5`, `A < B`).
+    // The lowering already synthesizes the object_for with a Bool kernel
+    // (lowerTypedBinOp maps these ops and sets kernelRetType = ETBool), so only
+    // the RESULT TYPE needs to become the array here. Scalars keep scalar Bool;
+    // Outer mode and array<->scalar broadcast are intentionally out of scope for
+    // now and also keep scalar Bool.
+    let elementwiseBoolTy =
+        match mode, IR.stripUnits leftTy, IR.stripUnits rightTy with
+        | Elementwise, ArrayElem arrL, ArrayElem _ ->
+            mkArrayLike { arrL with ElemType = IRTScalar ETBool }
+        | Elementwise, ArrayElem arrL, _ ->
+            // array <op> scalar broadcast (`A > 2.0`): result shape follows the array
+            mkArrayLike { arrL with ElemType = IRTScalar ETBool }
+        | Elementwise, _, ArrayElem arrR ->
+            // scalar <op> array broadcast (`2.0 < A`): result shape follows the array
+            mkArrayLike { arrR with ElemType = IRTScalar ETBool }
+        | _ -> IRTScalar ETBool
     match op with
     | OpEq | OpNeq | OpLt | OpLe | OpGt | OpGe ->
         // Comparisons require compatible units
@@ -3582,8 +3617,8 @@ and inferArithType mode op leftTy rightTy : TypeResult<IRType> =
         match lUnits, rUnits with
         | Some lu, Some ru when not (IR.unitCompatible lu ru) ->
             Error (Other (sprintf "Unit mismatch in comparison: %s vs %s" (IR.ppUnitSig lu) (IR.ppUnitSig ru)))
-        | _ -> Ok (IRTScalar ETBool)
-    | OpAnd | OpOr -> Ok (IRTScalar ETBool)
+        | _ -> Ok elementwiseBoolTy
+    | OpAnd | OpOr -> Ok elementwiseBoolTy
     | _ ->
         // Extract unit annotations if present
         let lUnits = IR.getUnits leftTy

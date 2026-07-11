@@ -135,6 +135,63 @@ let c = a + b
 // needs lambda-in-variable calling support (future work)
 """
 
+// Elementwise Bool AND of two masks via bare `&&` (mask algebra) — the clean
+// replacement for the method_for(zip(...)) <@> a && b idiom. Bool inputs, Bool
+// output; feeds compound directly (mask shares A's index identity).
+let test69_elementwiseMaskAnd = """
+type AB = Idx<5>
+let A: Array<Float64 like AB> = [1.0, 2.0, 3.0, 4.0, 5.0]
+let above2 = mask(A, lambda(x) -> x > 2.0)
+let below5 = mask(A, lambda(x) -> x < 5.0)
+let both = above2 && below5
+let f = compound(A, both)
+// above2 && below5 = [F,F,T,T,F] -> coordinates {2, 3} = 3.0, 4.0
+let n = extents(f)
+let x2 = f(2)
+let x3 = f(3)
+// EXPECT: n = 2
+// EXPECT: x2 = 3.0
+// EXPECT: x3 = 4.0
+"""
+
+// Elementwise comparison on NUMERIC arrays via bare `>=` produces a Bool array
+// (exercises the object_for output-element-type = kernel-return-type path:
+// double inputs, bool output). Feeds compound.
+let test70_elementwiseCompare = """
+type CD = Idx<5>
+let A: Array<Float64 like CD> = [1.0, 2.0, 3.0, 4.0, 5.0]
+let B: Array<Float64 like CD> = [3.0, 3.0, 3.0, 3.0, 3.0]
+let ge = A >= B
+let f = compound(A, ge)
+// A >= B = [F,F,T,T,T] -> coordinates {2, 3, 4} = 3.0, 4.0, 5.0
+let n = extents(f)
+let x2 = f(2)
+let x4 = f(4)
+// EXPECT: n = 3
+// EXPECT: x2 = 3.0
+// EXPECT: x4 = 5.0
+"""
+
+// Array<->scalar broadcast comparison: `A > 2.0` produces a Bool mask directly
+// (scalar held fixed, array iterated). Also covers scalar-on-left `2.0 < A`.
+let test71_broadcastCompare = """
+type EF = Idx<5>
+let A: Array<Float64 like EF> = [1.0, 2.0, 3.0, 4.0, 5.0]
+let hi = A > 2.0
+let f = compound(A, hi)
+// A > 2.0 = [F,F,T,T,T] -> coordinates {2, 3, 4} = 3.0, 4.0, 5.0
+let n = extents(f)
+let x2 = f(2)
+let x4 = f(4)
+let hi2 = 2.0 < A
+let g = compound(A, hi2)
+let m = extents(g)
+// EXPECT: n = 3
+// EXPECT: x2 = 3.0
+// EXPECT: x4 = 5.0
+// EXPECT: m = 3
+"""
+
 /// Bracketed (outer product) operator tests
 let bracketedTests = [
     ("Bracketed Arithmetic", test59_bracketedArithmetic)
@@ -147,4 +204,7 @@ let bracketedTests = [
     ("OpenMP Nested", test66_openmpNested)
     ("Operator Section", test67_operatorSection)
     ("Named Infix", test68_namedInfix)
+    ("Elementwise Mask AND", test69_elementwiseMaskAnd)
+    ("Elementwise Compare", test70_elementwiseCompare)
+    ("Broadcast Compare", test71_broadcastCompare)
 ]

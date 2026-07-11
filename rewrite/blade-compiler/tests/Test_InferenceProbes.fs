@@ -32,14 +32,14 @@ let sizes = method_for(r) <@> lambda(g) -> extents(g) |> compute
 """
 
 let probe_b_mask_unannotated = """
-// Probe B: mask() on an unannotated kernel param. Result is reduced
-// to a scalar so the test has a concrete check at the end.
-// Expected to fail at typecheck — mask inspects the array arg's type.
+// Probe B: mask() on an unannotated kernel param. mask now returns the
+// Bool presence array over the param's own index space, so its extents
+// equal the row length -- a concrete check that exercises mask's typing
+// against an inference-resolved (rather than annotated) array argument.
 let r = [[1.0, 2.0, 3.0], [4.0, 5.0], [6.0]]
-let high_sum = method_for(r) <@> lambda(g) -> reduce(mask(g, lambda(x) -> x > 2.0), (+)) |> compute
-// Filtered values per row: [3.0], [4.0, 5.0], [6.0]
-// Sums: 3, 9, 6
-// If this ever passes: EXPECT: high_sum = [3, 9, 6]
+let sizes = method_for(r) <@> lambda(g) -> extents(mask(g, lambda(x) -> x > 2.0)) |> compute
+// Row lengths: 3, 2, 1
+// If this ever passes: EXPECT: sizes = [3, 2, 1]
 """
 
 let probe_c_sort_unannotated = """

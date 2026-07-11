@@ -30,26 +30,7 @@ type AttrsTest = {
 let private mkAttrs (free: int list) (bound: int list) (isPure: bool) : ExprAttrs =
     { FreeVars  = Set.ofList free
       BoundVars = Set.ofList bound
-      IsPure    = isPure
-      Probes    = [] }
-
-/// Build an ExprAttrs with explicit probe list. Used by tests that
-/// verify probe collection. The probes' Node field is filled with a
-/// reference-identity placeholder; tests compare on BuildOn only.
-let private mkAttrsWithProbes
-        (free: int list) (bound: int list) (isPure: bool)
-        (probeArrays: IRExpr list) : ExprAttrs =
-    let probes =
-        probeArrays |> List.map (fun arr ->
-            // Node here is just a placeholder for the test's expected value;
-            // attrsEqual compares probes by BuildOn (structural) only.
-            // Same shape as what exprAttrs's IRContains arm produces.
-            { Node = IRLit (IRLitInt 0L)
-              BuildOn = arr })
-    { FreeVars  = Set.ofList free
-      BoundVars = Set.ofList bound
-      IsPure    = isPure
-      Probes    = probes }
+      IsPure    = isPure }
 
 let private intTy = IRTScalar ETInt64
 let private boolTy = IRTScalar ETBool
@@ -279,7 +260,7 @@ let test_contains_arm = {
         let arr = IRVar (1, intTy)
         let e = IRContains (arr, IRVar (2, intTy))
         let actual = exprAttrs e
-        let expected = mkAttrsWithProbes [1; 2] [] true [arr]
+        let expected = mkAttrs [1; 2] [] true
         (actual, expected)
 }
 
@@ -367,7 +348,7 @@ let test_probe_in_binop = {
         let cont = IRContains (arrB, IRVar (2, intTy))
         let e = IRBinOp (IRElementwise, IRAnd, cont, IRLit (IRLitBool true))
         let actual = exprAttrs e
-        let expected = mkAttrsWithProbes [1; 2] [] true [arrB]
+        let expected = mkAttrs [1; 2] [] true
         (actual, expected)
 }
 
@@ -379,7 +360,7 @@ let test_probe_in_if = {
         let cont = IRContains (arrB, IRVar (3, intTy))
         let e = IRIf (IRVar (1, boolTy), cont, IRLit (IRLitBool false))
         let actual = exprAttrs e
-        let expected = mkAttrsWithProbes [1; 2; 3] [] true [arrB]
+        let expected = mkAttrs [1; 2; 3] [] true
         (actual, expected)
 }
 
@@ -406,7 +387,7 @@ let test_multiple_probes_in_one_predicate = {
         let cont2 = IRContains (arrC, IRVar (3, intTy))
         let e = IRBinOp (IRElementwise, IROr, cont1, cont2)
         let actual = exprAttrs e
-        let expected = mkAttrsWithProbes [1; 2; 3] [] true [arrB; arrC]
+        let expected = mkAttrs [1; 2; 3] [] true
         (actual, expected)
 }
 
@@ -420,7 +401,7 @@ let test_probe_in_let_value = {
         let e = IRLet (10, cont, IRVar (10, boolTy))
         let actual = exprAttrs e
         // FreeVars: {1, 2}; BoundVars: {10}; probe propagates.
-        let expected = mkAttrsWithProbes [1; 2] [10] true [arrB]
+        let expected = mkAttrs [1; 2] [10] true
         (actual, expected)
 }
 
@@ -460,7 +441,7 @@ let test_probe_imported_via_callable_table = {
             // becomes IRVar(1), so still {1}. IRVar(78) becomes IRVar(2),
             // so still {2}. Net: {99, 1, 2}.
             // Probes: one probe with BuildOn = IRVar(1) (after substitution).
-            let expected = mkAttrsWithProbes [99; 1; 2] [] true [arrB]
+            let expected = mkAttrs [99; 1; 2] [] true
             (actual, expected)
         finally
             restoreAnalysisContext prev
@@ -507,24 +488,13 @@ let private fmtAttrs (a: ExprAttrs) : string =
     let setStr (s: Set<IRId>) =
         s |> Set.toList |> List.sort
           |> List.map string |> String.concat ", "
-    let probesStr =
-        a.Probes
-        |> List.map (fun p -> sprintf "%A" p.BuildOn)
-        |> String.concat ", "
-    sprintf "{ Free={%s}; Bound={%s}; Pure=%b; Probes=[%s] }"
-        (setStr a.FreeVars) (setStr a.BoundVars) a.IsPure probesStr
+    sprintf "{ Free={%s}; Bound={%s}; Pure=%b }"
+        (setStr a.FreeVars) (setStr a.BoundVars) a.IsPure
 
 let private attrsEqual (a: ExprAttrs) (b: ExprAttrs) : bool =
-    // Probes compared by BuildOn (structural) and count. Node field is
-    // for codegen reference-identity use and isn't meaningful in tests.
-    let probesMatch =
-        a.Probes.Length = b.Probes.Length &&
-        List.zip a.Probes b.Probes
-        |> List.forall (fun (pa, pb) -> pa.BuildOn = pb.BuildOn)
     a.FreeVars = b.FreeVars
         && a.BoundVars = b.BoundVars
         && a.IsPure = b.IsPure
-        && probesMatch
 
 /// Run all attribute tests, returning (passed, failed). Prints per-test
 /// status; on failure also prints actual vs expected so the difference

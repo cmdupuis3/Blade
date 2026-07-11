@@ -256,9 +256,10 @@ let test157_reynoldsMaskBaseline = """
 // Baseline: method_for over two distinct masks of the same source,
 // non-Reynolds kernel. Rectangular iteration since the masks have
 // different identities (different filter predicates).
-let A = [1.0, 2.0, 3.0, 4.0, 5.0]
-let above2 = mask(A, lambda(x) -> x > 2.0)
-let below5 = mask(A, lambda(x) -> x < 5.0)
+// Dynamic-extent runtime-derived operands via unique() (mask now returns
+// a Bool array; the point here is Reynolds over runtime extents).
+let above2 = unique([3.0, 4.0, 5.0, 3.0])
+let below5 = unique([1.0, 2.0, 3.0, 4.0, 1.0])
 let g = lambda(x, y) -> x * y
 let result = method_for(above2, below5) <@> g |> compute
 // above2 = [3, 4, 5]; below5 = [1, 2, 3, 4]; 3x4 rectangular.
@@ -270,9 +271,8 @@ let test158_reynoldsMaskCross = """
 // Reynolds version of test157. Same shape; the kernel is wrapped in
 // reynolds(), which sums the kernel over input-position permutations:
 // reynolds(2x+y)(x,y) = (2x+y) + (2y+x) = 3*(x+y).
-let A = [1.0, 2.0, 3.0, 4.0, 5.0]
-let above2 = mask(A, lambda(x) -> x > 2.0)
-let below5 = mask(A, lambda(x) -> x < 5.0)
+let above2 = unique([3.0, 4.0, 5.0, 3.0])
+let below5 = unique([1.0, 2.0, 3.0, 4.0, 1.0])
 let g = lambda(x, y) -> 2.0 * x + y
 let result = method_for(above2, below5) <@> reynolds(g) |> compute
 // 3x4 rectangular; each entry = 3*(x+y).
@@ -286,9 +286,8 @@ let test159_reynoldsIntersectBaseline = """
 // Baseline: method_for over (intersect-derived array, regular array),
 // non-Reynolds kernel. The intersect result is a filtered view that
 // keeps positions where both masks agree.
-let A = [1.0, 2.0, 3.0, 4.0, 5.0]
-let above2 = mask(A, lambda(x) -> x > 2.0)
-let below5 = mask(A, lambda(x) -> x < 5.0)
+let above2 = unique([3.0, 4.0, 5.0, 3.0])
+let below5 = unique([1.0, 2.0, 3.0, 4.0, 1.0])
 let both = intersect(above2, below5)
 let B = [10.0, 20.0]
 let g = lambda(x, y) -> x * y
@@ -302,9 +301,8 @@ let test160_reynoldsIntersectCross = """
 // Reynolds version of test159. reynolds(xy)(x,y) = xy + yx = 2xy
 // (g is mathematically commutative; without `where comm` the iteration
 // is rectangular but Reynolds still applies the permutation sum).
-let A = [1.0, 2.0, 3.0, 4.0, 5.0]
-let above2 = mask(A, lambda(x) -> x > 2.0)
-let below5 = mask(A, lambda(x) -> x < 5.0)
+let above2 = unique([3.0, 4.0, 5.0, 3.0])
+let below5 = unique([1.0, 2.0, 3.0, 4.0, 1.0])
 let both = intersect(above2, below5)
 let B = [10.0, 20.0]
 let g = lambda(x, y) -> x * y

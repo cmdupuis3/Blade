@@ -1472,12 +1472,16 @@ let runTestCategoryFull (name: string) (tests: (string * string) list) (outputDi
             result)
         |> Array.toList
     
-    // Find first compile failure to show full error (skips are not failures)
+    // Find first compile failure to show full error (skips are not failures).
+    // Reject-probes (name ends in "(rejects)") are EXPECTED to fail compilation
+    // and are already counted as passes, so they must not be surfaced here — this
+    // diagnostic is for UNEXPECTED compile failures only.
     let firstCompileFailure = 
         results |> List.tryFind (fun r -> 
-            match r.CompileResult with 
-            | Error e when not (isSkipError e) && e <> "IR failed" -> true 
-            | _ -> false)
+            not (r.TestName.EndsWith "(rejects)") &&
+            (match r.CompileResult with 
+             | Error e when not (isSkipError e) && e <> "IR failed" -> true 
+             | _ -> false))
     
     // Print results (brief for most, full for first failure)
     printfn ""

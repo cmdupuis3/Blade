@@ -437,19 +437,10 @@ let rec collectVarRefs (expr: IRExpr) : Set<IRId> =
         Set.union (collectVarRefs cond) (collectVarRefs body)
     | IRMask (arr, pred) ->
         Set.union (collectVarRefs arr) (collectVarRefs pred)
-    | IRMaskWithSet (arr, setSrc, paramId, residual) ->
-        // paramId is bound by this mask. Free vars of residual minus paramId,
-        // plus arr's and setSrc's free vars.
-        let residualRefs = Set.remove paramId (collectVarRefs residual)
-        Set.unionMany [collectVarRefs arr; collectVarRefs setSrc; residualRefs]
     | IRIntersect (a, b) | IRUnion (a, b) ->
         Set.union (collectVarRefs a) (collectVarRefs b)
     | IRUnique a -> collectVarRefs a
     | IRContains (a, v) -> Set.union (collectVarRefs a) (collectVarRefs v)
-    | IRSetMember (_, v) ->
-        // paramId is a binder reference (bound by enclosing IRMaskWithSet),
-        // not a free variable from the perspective of this expression.
-        collectVarRefs v
     | IRGroupBy (v, k) ->
         Set.union (collectVarRefs v) (collectVarRefs k)
     | IRGroupKeys ks -> ks |> List.map collectVarRefs |> Set.unionMany
@@ -738,12 +729,14 @@ let rec inferExprType (expr: IRExpr) : IRType =
     | IRFusion (l, r) -> IRTTuple [inferExprType l; inferExprType r]
     | IRChoice (l, _) -> inferExprType l
     | IRGuard (_, body) -> inferExprType body
-    | IRMask (arr, _) -> inferExprType arr  // Same elem type, different extent
-    | IRMaskWithSet (arr, _, _, _) -> inferExprType arr  // Same: filtered result
+    | IRMask (arr, _) ->
+        // Bool presence array over the source's own index space (verbatim records)
+        (match inferExprType arr with
+         | ArrayElem a -> mkArrayLike { a with ElemType = IRTScalar ETBool }
+         | t -> t)
     | IRIntersect (a, _) | IRUnion (a, _) -> inferExprType a  // Same elem type, different extent
     | IRUnique a -> inferExprType a  // Same elem type, different (smaller) extent
     | IRContains _ -> IRTScalar ETBool  // Membership returns bool
-    | IRSetMember _ -> IRTScalar ETBool  // Set-membership query returns bool
     | IRGroupBy (v, gk) ->
         // The TypeCheck-side `ExprGroupBy` rule constructs a rank-2 array
         // type with `__group_outer` + `__group_member` tagged index slots
@@ -1071,9 +1064,11 @@ let inferElemTypeStrict (ctx: CodeGenContext) (ind: string) (expr: IRExpr) (opNa
 let inferInlineElemTypeStr (opName: string) (form: IRExpr) : string =
     let arrExpr =
         match form with
-        | IRMask (a, _) | IRSort (a, _)
+        // IRMask deliberately NOT extracted: its result elem is Bool (the
+        // presence array), independent of the source elem -- fall through to
+        // `form` so inferExprType's IRMask arm answers.
+        | IRSort (a, _)
         | IRIntersect (a, _) | IRUnion (a, _) -> a
-        | IRMaskWithSet (a, _, _, _) -> a
         | IRUnique a -> a
         | _ -> form
     match inferExprType arrExpr with
@@ -1580,6 +1575,21 @@ let rec exprToCppCore (subst: SubstMap) (names: Map<IRId, string>) (expr: IRExpr
         let compoundRead () : string option =
             match inferExprType arr with
             | ArrayElem arrTy when isCompoundArrayType arrTy ->
+                // Rank-1 compound scalar sugar: `C(i)` on a rank-1 compound
+                // (the filtered-set case) is the 1-tuple read `C((i))` --
+                // there is no way to even WRITE a 1-tuple literal at the
+                // surface, so the scalar spelling is the canonical one.
+                // Normalize to the tuple path; without this it fell to the
+                // raw-subscript peel (`C[i]`), which Compound cannot compile.
+                let k1 =
+                    arrTy.IndexTypes
+                    |> List.tryFind (fun ix -> ix.Tag = Some "__compoundidx")
+                    |> Option.map (fun ix -> ix.Rank)
+                let indices =
+                    match k1, indices with
+                    | Some 1, first :: rest when (match first with IRTuple _ -> false | _ -> true) ->
+                        IRTuple [first] :: rest
+                    | _ -> indices
                 match indices with
                 | (IRTuple coords) :: trailingIdxs ->
                     let k =
@@ -1777,8 +1787,16 @@ let rec exprToCppCore (subst: SubstMap) (names: Map<IRId, string>) (expr: IRExpr
                 // dim 0. Every other operand (Array, higher-rank ragged) uses the
                 // materialized `.extents[dim]`.
                 let isRaggedRow = isRaggedRowType at
+                // A rank-1 all-dims compound (the filtered-set case,
+                // compound(A, mask(A, p))) has no .extents member; its sole
+                // axis's runtime extent is the compact index's cardinality.
+                // (Multi-rank compound extents are rejected at typecheck,
+                // same ill-posedness rule as ragged slots.)
+                let isRank1Compound = isCompoundArrayType at && at.IndexTypes.Length = 1
                 if isRaggedRow && dim = 0 then
                     sprintf "(int64_t)(%s.len)" arrName
+                elif isRank1Compound && dim = 0 then
+                    sprintf "(int64_t)(%s.idx->cardinality)" arrName
                 else
                     sprintf "(int64_t)(%s.extents[%d])" arrName dim
         | _ ->
@@ -1837,7 +1855,7 @@ let rec exprToCppCore (subst: SubstMap) (names: Map<IRId, string>) (expr: IRExpr
         let reduceAccAt (i: string) =
             if isCompound then sprintf "%s.data[%s]" arrStr i else sprintf "%s[%s]" arrStr i
         let reduceBound =
-            if isCompound then sprintf "%s.size()" arrStr
+            if isCompound then sprintf "(%s.idx->cardinality * %s.trailing_stride)" arrStr arrStr
             elif isRagged then sprintf "%s.len" arrStr
             else sprintf "%s.extents[0]" arrStr
         let reduceNonEmpty = isStaticallyNonEmpty && not isCompound && not isRagged
@@ -1873,27 +1891,21 @@ let rec exprToCppCore (subst: SubstMap) (names: Map<IRId, string>) (expr: IRExpr
             "/* reduce: non-callable kernel (typechecker or IR bug) */"
 
     | IRContains (arrExpr, valueExpr) ->
-        // Linear-scan membership test as an IIFE returning bool. The
-        // hoist-set optimization for contains-inside-mask is now done
-        // at the IR level by rewriteMaskContains, which produces
-        // IRMaskWithSet+IRSetMember pairs that don't reach this arm.
-        // Anything still arriving here is either a standalone contains
-        // (not inside an optimizable mask) or a contains inside a mask
-        // pattern the rewrite didn't fuse (multi-contains under
-        // Option A, or non-hoistable BuildOn).
+        // Linear-scan membership test as an IIFE returning bool. (A prior
+        // hoist-set fusion for contains-inside-mask has been removed; every
+        // contains now renders here as a linear scan.)
         let arrStr = exprToCppCore subst names arrExpr
         let valStr = exprToCppCore subst names valueExpr
-        sprintf "[&]() { for (size_t __ci = 0; __ci < %s.extents[0]; __ci++) { if (%s[__ci] == %s) return true; } return false; }()"
-            arrStr arrStr valStr
-
-    // IRSetMember: set-membership query against a precomputed set tied to
-    // a paramId. Renders as `<setName>.count(value)`. The set name is
-    // computed deterministically from the paramId so the IRMaskWithSet
-    // renderer (M1.3) and this arm agree on naming without explicit
-    // wiring through context.
-    | IRSetMember (paramId, valueExpr) ->
-        let valStr = exprToCppCore subst names valueExpr
-        sprintf "__mset_p%d.count(%s)" paramId valStr
+        // A rank-1 compound operand (filtered set) scans its compact buffer:
+        // bound = cardinality, elements via .data[i]. Dense stays .extents/[].
+        let isR1Compound =
+            match inferExprType arrExpr with
+            | ArrayElem at -> isCompoundArrayType at && at.IndexTypes.Length = 1
+            | _ -> false
+        let bound = if isR1Compound then sprintf "%s.idx->cardinality" arrStr else sprintf "%s.extents[0]" arrStr
+        let elemAt = if isR1Compound then sprintf "%s.data[__ci]" arrStr else sprintf "%s[__ci]" arrStr
+        sprintf "[&]() { for (size_t __ci = 0; __ci < %s; __ci++) { if (%s == %s) return true; } return false; }()"
+            bound elemAt valStr
 
     | IRArity (Some n, _) -> sprintf "%d" n
     | IRArity (None, paramName) -> 
@@ -2246,94 +2258,61 @@ and exprToCppWithVar (names: Map<IRId, string>) (varId: IRId) (varName: string) 
 and materializeInlineForm (subst: SubstMap) (names: Map<IRId, string>) (varName: string) (elemTypeStr: string) (form: IRExpr) : string list option =
     match form with
     | IRMask (arrExpr, predExpr) ->
-        // Bare mask rendering. Probes (the contains-based optimization)
-        // are handled at the IR level by IR.rewriteMaskContains (M1)
-        // which converts qualifying masks to IRMaskWithSet. Anything
-        // still in IRMask form here either had no contains, or had
-        // multiple contains (per Option A, multi-contains is not
-        // currently fused), or had a contains whose BuildOn referenced
-        // the iteration variable (not hoistable). In all those cases,
-        // the predicate is evaluated per element, with any contains
-        // calls rendering as the IIFE linear scan (see IRContains
-        // arm in exprToCppCore).
-        //
-        // The predicate resolves via `resolveCallable` and emits as a
-        // local C++ closure (`__wrap_<id>_<varName>`) that forwards
-        // to the lifted function with captures pulled by reference.
-        // The wrapper name carries `varName` as a suffix to
-        // disambiguate when the same callable id appears in multiple
-        // let-bindings' mask emissions at the same C++ scope.
+        // mask(A, pred) -> the Bool PRESENCE array over A's own index space,
+        // m[i] = pred(A[i]). One pass, no value copying: compaction belongs
+        // to compound(A, m); iteration to range<CompoundIdx<m>>. A contains(B, x)
+        // inside the predicate renders as a linear scan (see the note on the
+        // predicate arm below); the retired probe/set-hoist machinery has been
+        // removed.
         let arrName = exprToCppCore subst names arrExpr
-        let predParamName = sprintf "__%s_x" varName
-        let (wrapperCode, predCall) =
-            match resolveCallable predExpr with
-            | Some callable when callable.Params.Length = 1 ->
-                let (code, wname) = genCallableWrapper varName callable
-                (code, sprintf "%s(%s)" wname predParamName)
-            | _ -> ([], "true")
-        Some (
-            wrapperCode @ [
-                sprintf "size_t %s__count = 0;" varName
-                sprintf "for (size_t __mi = 0; __mi < %s.extents[0]; __mi++) {" arrName
-                sprintf "    %s %s = %s[__mi];" elemTypeStr predParamName arrName
-                sprintf "    if (%s) %s__count++;" predCall varName
-                "}"
-                sprintf "size_t %s_extents[1] = {%s__count};" varName varName
-                sprintf "Array<%s, 1> %s = { new %s[%s__count], %s_extents };" elemTypeStr varName elemTypeStr varName varName
-                sprintf "size_t %s__fill = 0;" varName
-                sprintf "for (size_t __mi = 0; __mi < %s.extents[0]; __mi++) {" arrName
-                sprintf "    %s %s = %s[__mi];" elemTypeStr predParamName arrName
-                sprintf "    if (%s) { %s[%s__fill++] = %s; }" predCall varName varName predParamName
-                "}"
+        let maskRank =
+            match inferExprType arrExpr with
+            | ArrayElem a -> a.IndexTypes.Length
+            | _ -> 1
+        // A RaggedRow-typed source (mask over a peeled row param) carries its
+        // length inline as .len; everything else reads .extents[0].
+        let srcBound =
+            match inferExprType arrExpr with
+            | ArrayElem a when isRaggedRowType a -> sprintf "%s.len" arrName
+            | _ -> sprintf "%s.extents[0]" arrName
+        if maskRank <> 1 then
+            Some [sprintf "#error \"Blade codegen: mask over a rank-%d array is not yet supported (rank-1 only for now; rank-k masks land with the compound composition round)\"" maskRank]
+        else
+        match resolveCallable predExpr with
+        | Some callable when callable.Params.Length = 1 ->
+            // Emit the per-element predicate call. (An earlier "local set-hoist"
+            // that pre-built an unordered_set for hoistable contains nodes was a
+            // no-op: genCallableWrapper calls the predicate by NAME and ignores
+            // the swapped body, so the set was built but never queried. It has
+            // been removed; the contains runs as a linear scan inside the named
+            // predicate. Making the semijoin set actually fire is a separate
+            // optimization, tracked apart from the probe-machinery excision.)
+            let (wrapperCode, wname) = genCallableWrapper varName callable
+            let predParamName = sprintf "__%s_x" varName
+            // Source element type (elemTypeStr is the RESULT type, i.e. bool).
+            let srcElemStr =
+                match inferExprType arrExpr with
+                | ArrayElem a -> elemTypeToCpp a.ElemType
+                | _ -> "double"
+            Some (
+                wrapperCode @ [
+                    sprintf "size_t %s_extents[1] = {%s};" varName srcBound
+                    sprintf "Array<bool, 1> %s = { new bool[%s], %s_extents };" varName srcBound varName
+                    sprintf "for (size_t __mi = 0; __mi < %s; __mi++) {" srcBound
+                    sprintf "    %s %s = %s[__mi];" srcElemStr predParamName arrName
+                    sprintf "    %s[__mi] = %s(%s);" varName wname predParamName
+                    "}"
+                ]
+            )
+        | _ ->
+            // Degenerate (unresolved predicate): all-true mask; #error would be
+            // kinder but this mirrors the prior fallback's shape.
+            Some [
+                sprintf "size_t %s_extents[1] = {%s};" varName srcBound
+                sprintf "Array<bool, 1> %s = { new bool[%s], %s_extents };" varName srcBound varName
+                sprintf "for (size_t __mi = 0; __mi < %s; __mi++) %s[__mi] = true;" srcBound varName
             ]
-        )
 
-    | IRMaskWithSet (arrExpr, setSrc, paramId, residual) ->
-        // Fused mask+contains form produced by IR.rewriteMaskContains.
-        // Three pieces:
-        //   1. Preamble: build a std::unordered_set from setSrc, named by
-        //      paramId. The IRSetMember arm in exprToCppCore (M1.1)
-        //      renders membership queries as `__mset_p<paramId>.count(v)`,
-        //      so the preamble's set name MUST match by paramId convention.
-        //   2. Count pass: iterate A, bind the iteration value to a
-        //      C++ variable named after paramId, evaluate residual.
-        //   3. Allocate + fill: identical shape to the IRMask renderer
-        //      above. Same loop structure, residual re-evaluated.
-        //
-        // The set construction is hoisted out of both loops — done once
-        // per mask invocation, not per element. That's the whole point
-        // of the rewrite.
-        let arrName = exprToCppCore subst names arrExpr
-        let setSrcName = exprToCppCore subst names setSrc
-        let setName = sprintf "__mset_p%d" paramId
-        let paramName = sprintf "__%s_x" varName
-        // Register paramId -> paramName so the residual's references to
-        // the iteration variable resolve correctly during rendering.
-        let resNames = Map.add paramId paramName names
-        let resStr = exprToCppCore subst resNames residual
-        // setSrc and the residual's IRSetMember queries share elemTypeStr
-        // (TypeCheck enforces matching types for contains: B and x both
-        // carry the same element type, which is A's element type).
-        Some [
-            // Preamble: build set
-            sprintf "std::unordered_set<%s> %s;" elemTypeStr setName
-            sprintf "for (size_t __si = 0; __si < %s.extents[0]; __si++) %s.insert(%s[__si]);" setSrcName setName setSrcName
-            // Count pass
-            sprintf "size_t %s__count = 0;" varName
-            sprintf "for (size_t __mi = 0; __mi < %s.extents[0]; __mi++) {" arrName
-            sprintf "    %s %s = %s[__mi];" elemTypeStr paramName arrName
-            sprintf "    if (%s) %s__count++;" resStr varName
-            "}"
-            // Allocate
-            sprintf "size_t %s_extents[1] = {%s__count};" varName varName
-            sprintf "Array<%s, 1> %s = { new %s[%s__count], %s_extents };" elemTypeStr varName elemTypeStr varName varName
-            // Fill pass
-            sprintf "size_t %s__fill = 0;" varName
-            sprintf "for (size_t __mi = 0; __mi < %s.extents[0]; __mi++) {" arrName
-            sprintf "    %s %s = %s[__mi];" elemTypeStr paramName arrName
-            sprintf "    if (%s) { %s[%s__fill++] = %s; }" resStr varName varName paramName
-            "}"
-        ]
     | IRIntersect (aExpr, bExpr) ->
         // SQL INTERSECT: unique values appearing in BOTH arrays, output in
         // first-occurrence order from A. Two-pass with set reuse, mirroring
@@ -2426,6 +2405,17 @@ and materializeInlineForm (subst: SubstMap) (names: Map<IRId, string>) (varName:
         // key (returns literal 0 — all elements compare equal,
         // preserving input order under stable_sort).
         let arrName = exprToCppCore subst names arrExpr
+        // A rank-1 compound operand (compound(A, mask(A, p)) -- the filtered
+        // set) sorts its compact buffer: bound = cardinality, elements via
+        // .data[i]. Sorting discards coordinate meaning by construction, so
+        // the DENSE output shape is the semantically honest one. Dense
+        // operands keep .extents/operator[].
+        let isR1Compound =
+            match inferExprType arrExpr with
+            | ArrayElem at -> isCompoundArrayType at && at.IndexTypes.Length = 1
+            | _ -> false
+        let srcBound = if isR1Compound then sprintf "%s.idx->cardinality" arrName else sprintf "%s.extents[0]" arrName
+        let srcAt (i: string) = if isR1Compound then sprintf "%s.data[%s]" arrName i else sprintf "%s[%s]" arrName i
         let (wrapperCode, keyCall) =
             match resolveCallable keyExpr with
             | Some callable when callable.Params.Length = 1 ->
@@ -2434,14 +2424,14 @@ and materializeInlineForm (subst: SubstMap) (names: Map<IRId, string>) (varName:
             | _ -> ([], "[](auto) { return 0; }")  // degenerate fallback
         Some (
             wrapperCode @ [
-                sprintf "size_t* %s__perm = new size_t[%s.extents[0]];" varName arrName
-                sprintf "for (size_t __pi = 0; __pi < %s.extents[0]; __pi++) %s__perm[__pi] = __pi;" arrName varName
-                sprintf "std::stable_sort(%s__perm, %s__perm + %s.extents[0], [&](size_t __a, size_t __b) {" varName varName arrName
-                sprintf "    return %s(%s[__a]) < %s(%s[__b]);" keyCall arrName keyCall arrName
+                sprintf "size_t* %s__perm = new size_t[%s];" varName srcBound
+                sprintf "for (size_t __pi = 0; __pi < %s; __pi++) %s__perm[__pi] = __pi;" srcBound varName
+                sprintf "std::stable_sort(%s__perm, %s__perm + %s, [&](size_t __a, size_t __b) {" varName varName srcBound
+                sprintf "    return %s(%s) < %s(%s);" keyCall (srcAt "__a") keyCall (srcAt "__b")
                 "});"
-                sprintf "size_t %s_extents[1] = {%s.extents[0]};" varName arrName
-                sprintf "Array<%s, 1> %s = { new %s[%s.extents[0]], %s_extents };" elemTypeStr varName elemTypeStr arrName varName
-                sprintf "for (size_t __si = 0; __si < %s.extents[0]; __si++) %s[__si] = %s[%s__perm[__si]];" arrName varName arrName varName
+                sprintf "size_t %s_extents[1] = {%s};" varName srcBound
+                sprintf "Array<%s, 1> %s = { new %s[%s], %s_extents };" elemTypeStr varName elemTypeStr srcBound varName
+                sprintf "for (size_t __si = 0; __si < %s; __si++) %s[__si] = %s;" srcBound varName (srcAt (sprintf "%s__perm[__si]" varName))
             ]
         )
     | IRTranspose (arrExpr, d1, d2) ->
@@ -4196,7 +4186,7 @@ let genScalarBinding (ctx: CodeGenContext) (name: string) (value: IRExpr) (ty: I
             match value with
             | IRFieldAccess _ -> true
             | IRVar _ -> true                // assume wrapper (most producers migrated)
-            | IRMask _ | IRMaskWithSet _ | IRSort _ | IRIntersect _ | IRUnion _ | IRUnique _ -> true
+            | IRMask _ | IRSort _ | IRIntersect _ | IRUnion _ | IRUnique _ -> true
             | IRApp _ -> true                // function-call returns wrapped Array
             | IRIndex (a, (IRTuple coords) :: _, _) ->
                 // A PARTIAL compound read (formalism 4.5) produces a wrapper:
@@ -4854,7 +4844,7 @@ let genApplyCombinator (ctx: CodeGenContext) (name: string) (info: ApplyInfo) (b
             | IRRange _ -> (sprintf "__range%d" i, arr)
             | IRVirtualReverse _ -> (sprintf "__rev%d" i, arr)
             | IRBlocked _ -> (sprintf "__blk%d" i, arr)
-            | IRMask _ | IRMaskWithSet _ | IRIntersect _ | IRUnion _ | IRUnique _ ->
+            | IRMask _ | IRIntersect _ | IRUnion _ | IRUnique _ ->
                 // Auto-materialize: when a method_for receives an inline form
                 // as one of its arrays, generate a temporary binding before
                 // the loop nest. The Phase C lift pass deliberately leaves
@@ -5132,16 +5122,24 @@ let genObjectForApplication (ctx: CodeGenContext) (name: string) (objInfo: Objec
     // bodies invoke the wrapper with the per-iteration array slots —
     // eliminating the need for intermediate scalar locals.
     match resolveCallable objInfo.Kernel with
-    | Some callable when callable.Params.Length = 2 ->
+    | Some callable when callable.Params.Length = 1 || callable.Params.Length = 2 ->
         let (wrapperCode, wname) = genCallableWrapper name callable
-        // Infer element type from kernel params (same logic as before).
+        // Output element type is the kernel's RETURN type. Comparison/logical
+        // kernels (`A < B`, `above2 && below5`) consume numeric or bool inputs
+        // but PRODUCE bool, so the result array must be Array<bool> even when the
+        // inputs are double. For every other kernel the return type matches the
+        // inputs, so fall back to the historical param-based inference to avoid
+        // disturbing the arithmetic and user-kernel paths.
         let elemTypeStr =
-            callable.Params |> List.tryPick (fun p ->
-                match p.Type with
-                | IRTScalar et -> Some (primTypeToCpp et)
-                | ArrayElem arr -> Some (elemTypeToCpp arr.ElemType)
-                | _ -> None)
-            |> Option.defaultValue (match callable.Params with p :: _ -> irTypeToCpp p.Type | [] -> "void")
+            match callable.RetType with
+            | IRTScalar ETBool -> "bool"
+            | _ ->
+                callable.Params |> List.tryPick (fun p ->
+                    match p.Type with
+                    | IRTScalar et -> Some (primTypeToCpp et)
+                    | ArrayElem arr -> Some (elemTypeToCpp arr.ElemType)
+                    | _ -> None)
+                |> Option.defaultValue (match callable.Params with p :: _ -> irTypeToCpp p.Type | [] -> "void")
         // Indent wrapper-emission lines to match surrounding scope.
         let wrapperLines = wrapperCode |> List.map (fun s -> ind + s)
         match objInfo.InputRanks, arrayNames with
@@ -5165,6 +5163,19 @@ let genObjectForApplication (ctx: CodeGenContext) (name: string) (objInfo: Objec
             let loopCode = [
                 sprintf "%sfor (size_t __i0 = 0; __i0 < %s.extents[0]; __i0++) {" ind arrA
                 sprintf "%s    %s[__i0] = %s(%s[__i0], %s[__i0]);" ind name wname arrA arrB
+                sprintf "%s}" ind
+            ]
+            [extentsDecl; allocDecl; ""] @ wrapperLines @ loopCode
+
+        | [0], [arrA] ->
+            // Single-array elementwise map (array<->scalar broadcast):
+            // result[i] = kernel(A[i]). The scalar is baked into the 1-param
+            // kernel, so only the array is iterated.
+            let extentsDecl = sprintf "%ssize_t %s_extents[1] = {%s.extents[0]};" ind name arrA
+            let allocDecl = sprintf "%sArray<%s, 1> %s = { allocate<promote<%s, 1>::type>(%s_extents), %s_extents };" ind elemTypeStr name elemTypeStr name name
+            let loopCode = [
+                sprintf "%sfor (size_t __i0 = 0; __i0 < %s.extents[0]; __i0++) {" ind arrA
+                sprintf "%s    %s[__i0] = %s(%s[__i0]);" ind name wname arrA
                 sprintf "%s}" ind
             ]
             [extentsDecl; allocDecl; ""] @ wrapperLines @ loopCode
@@ -5592,7 +5603,24 @@ let rec genBinding (ctx: CodeGenContext) (binding: IRBinding) (builder: IRBuilde
         // contiguous row-major pool the scatter walks.
         let (denseExpr, maskExpr) = ctx.CompoundInits.[binding.Id]
         let denseName = exprToCpp ctx.VarNames denseExpr
-        let maskName = exprToCpp ctx.VarNames maskExpr
+        // The mask operand may be written INLINE inside compound(...) --
+        // `compound(A, mask(A, p))` -- in which case it lowers to a bare
+        // IRMask node. exprToCpp cannot render a mask inline (it needs a
+        // multi-statement materialization), so it would emit the
+        // BLADE_CODEGEN_ERROR sentinel as the "name". Materialize such an
+        // inline mask into a Bool presence-array temp first (the same helper
+        // the method_for auto-materialize path uses), then feed that temp's
+        // name to the index builder. A let-bound mask
+        // (`let m = mask(...); compound(A, m)`) arrives as an IRVar and skips
+        // this. maskPre is prepended to the emitted lines below.
+        let (maskPre, maskName) =
+            match maskExpr with
+            | IRMask _ ->
+                let tmpName = sprintf "%s__masksrc" name
+                (match materializeInlineForm emptySubst ctx.VarNames tmpName "bool" maskExpr with
+                 | Some stmts -> (stmts |> List.map (fun s -> ind + s), tmpName)
+                 | None -> ([], exprToCpp ctx.VarNames maskExpr))
+            | _ -> ([], exprToCpp ctx.VarNames maskExpr)
         (match binding.Type with
          | ArrayElem arrTy when isCompoundArrayType arrTy ->
              let leadRank =
@@ -5611,7 +5639,8 @@ let rec genBinding (ctx: CodeGenContext) (binding: IRBinding) (builder: IRBuilde
                  [ for d in 0 .. trailingDimCount - 1 -> sprintf "%s.extents[%d]" denseName (leadRank + d) ]
              let trailExpr = match trailTerms with | [] -> "1" | xs -> String.concat " * " xs
              let lines =
-                 (idxLines |> List.map (fun l -> ind + l))
+                 maskPre
+                 @ (idxLines |> List.map (fun l -> ind + l))
                  @ [ sprintf "%ssize_t %s_trail = %s;" ind name trailExpr
                      sprintf "%s%s* %s_densepool = nested_array_utilities::pool_base(%s.data);" ind elemCpp name denseName
                      sprintf "%s%s* %s_compact = new %s[%s->cardinality * %s_trail];" ind elemCpp name elemCpp idxName name
@@ -5644,23 +5673,6 @@ let rec genBinding (ctx: CodeGenContext) (binding: IRBinding) (builder: IRBuilde
         let ctx' = addVarName binding.Id name ctx
         (code, ctx')
 
-    | IRMaskWithSet (arrExpr, _, _, _) ->
-        // Fused mask+contains: same shape as IRMask binding-wise (produces
-        // an Array<T, 1>, element type comes from the input array). The
-        // residual's IRSetMember references are handled in exprToCppCore
-        // by the M1.1 arm. No predicate-lambda validation needed: by
-        // construction the rewrite pass only fires when the predicate
-        // was a single-param lambda with a recognizable contains call.
-        let (elemET, elemErrCode) = inferElemTypeStrict ctx ind arrExpr "mask"
-        let elemStr = elemTypeToCpp elemET
-        let matStmts =
-            match materializeInlineForm emptySubst ctx.VarNames name elemStr binding.Value with
-            | Some s -> s
-            | None -> []  // Unreachable: helper supports IRMaskWithSet
-        let code = elemErrCode @ [sprintf "%s// mask+contains (fused): build set + count + compact" ind] @ (matStmts |> List.map (fun s -> ind + s))
-        let ctx' = addVarName binding.Id name ctx
-        (code, ctx')
-    
     | IRIntersect (aExpr, bExpr) ->
         // intersect(A, B): elements present in both arrays.
         let (elemET, elemErrCode) = inferElemTypeStrict ctx ind aExpr "intersect"
@@ -6114,9 +6126,22 @@ let rec genBinding (ctx: CodeGenContext) (binding: IRBinding) (builder: IRBuilde
             match inferExprType arrExpr with
             | ArrayElem at -> isRaggedRowType at
             | _ -> false
+        // A compound operand reduces over its compact buffer: bound =
+        // cardinality * trailing_stride (all present values), elements via
+        // .data[i]. This is what makes `reduce(compound(A, mask(A, p)), (+))`
+        // -- SQL's SUM(x) WHERE p -- a one-liner. Mirrors the expression-form
+        // reduce's compound handling.
+        let isCompoundOperand =
+            match inferExprType arrExpr with
+            | ArrayElem at -> isCompoundArrayType at
+            | _ -> false
         let boundExpr =
             if isRaggedRowOperand then sprintf "%s.len" arrName
+            elif isCompoundOperand then sprintf "(%s.idx->cardinality * %s.trailing_stride)" arrName arrName
             else sprintf "%s.extents[0]" arrName
+        let elemAt (i: string) =
+            if isCompoundOperand then sprintf "%s.data[%s]" arrName i
+            else sprintf "%s[%s]" arrName i
 
         // Decide whether to emit a runtime extent check based on whether
         // the array's innermost-dim extent is statically known.
@@ -6147,9 +6172,9 @@ let rec genBinding (ctx: CodeGenContext) (binding: IRBinding) (builder: IRBuilde
                 let wrapperLines = wrapperCode |> List.map (fun s -> ind + s)
                 elemErrCode @ guardLines @ wrapperLines @ [
                     sprintf "%s// reduce: accumulator loop, eager" ind
-                    sprintf "%s%s %s = %s[0];" ind elemStr name arrName
+                    sprintf "%s%s %s = %s;" ind elemStr name (elemAt "0")
                     sprintf "%sfor (size_t __ri = 1; __ri < %s; __ri++) {" ind boundExpr
-                    sprintf "%s    %s = %s(%s, %s[__ri]);" ind name wname name arrName
+                    sprintf "%s    %s = %s(%s, %s);" ind name wname name (elemAt "__ri")
                     sprintf "%s}" ind
                 ]
             | _ ->
@@ -7160,7 +7185,7 @@ let genFuncBody (ctx: CodeGenContext) (builder: IRBuilder) (names: Map<IRId, str
             let code = genApplyCombinator bodyCtx varName info builder
             currentNames <- Map.add id varName currentNames
             code
-        | IRMask _ | IRMaskWithSet _ | IRIntersect _ | IRUnion _ | IRSort _ | IRUnique _ | IRTranspose _ | IRDecompact _ | IRArrayNegate _ | IRArrayConjugate _ | IRGram _ ->
+        | IRMask _ | IRIntersect _ | IRUnion _ | IRSort _ | IRUnique _ | IRTranspose _ | IRDecompact _ | IRArrayNegate _ | IRArrayConjugate _ | IRGram _ ->
             // Phase C lift pass can place an inline form as a let value at
             // function-body level. The same materialization helper used by
             // exprToCpp's IRLet (for kernel-body IIFEs) produces format-

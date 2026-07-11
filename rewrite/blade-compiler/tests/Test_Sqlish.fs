@@ -117,52 +117,69 @@ let result = L <@> lambda(c) -> c |> compute
 // ============================================================================
 
 let test_mask_basic = """
-// Filter an array to only positive values
+// mask constructs the Bool PRESENCE array over A's own index space;
+// compound(A, m) compactifies. Reads are COORDINATE-based (positions in
+// the original space), so the selection stays composable with companion
+// columns over the same index space.
 let A = [3.0, -1.0, 4.0, -2.0, 5.0]
-let pos = mask(A, lambda(x) -> x > 0.0)
-
-let result = method_for(pos) <@> lambda(x) -> x * 2.0 |> compute
-// EXPECT: result = [6.0, 8.0, 10.0]
+let m = mask(A, lambda(x) -> x > 0.0)
+let pos = compound(A, m)
+let n = extents(pos)
+let x0 = pos(0)
+let x2 = pos(2)
+let x4 = pos(4)
+// EXPECT: n = 3
+// EXPECT: x0 = 3
+// EXPECT: x2 = 4
+// EXPECT: x4 = 5
 """
 
 let test_mask_all_pass = """
-// All elements pass the predicate
+// All elements pass: cardinality equals the source extent.
 let A = [1.0, 2.0, 3.0]
-let all = mask(A, lambda(x) -> x > 0.0)
-
-let result = method_for(all) <@> lambda(x) -> x |> compute
-// EXPECT: result = [1.0, 2.0, 3.0]
+let all = compound(A, mask(A, lambda(x) -> x > 0.0))
+let n = extents(all)
+let s = reduce(all, (+))
+// EXPECT: n = 3
+// EXPECT: s = 6
 """
 
 let test_mask_none_pass = """
-// No elements pass — empty result (0-extent array)
+// No elements pass — cardinality 0 (empty filtered set).
 let A = [1.0, 2.0, 3.0]
-let none = mask(A, lambda(x) -> x > 100.0)
-
-let result = method_for(none) <@> lambda(x) -> x |> compute
-// EXPECT: result = []
+let none = compound(A, mask(A, lambda(x) -> x > 100.0))
+let n = extents(none)
+// EXPECT: n = 0
 """
 
 let test_mask_with_compute = """
-// Filter the result of a 1D computation
+// Mask over a COMPUTED array: the mask reuses the computed array's own
+// index records, so compound() matches by identity even though the
+// computed output's indices are anonymous.
 let A = [1.0, 2.0, 3.0, 4.0, 5.0]
 let doubled = method_for(A) <@> lambda(a) -> a * 2.0 |> compute
-
-// Only keep doubled values > 5
-let big = mask(doubled, lambda(x) -> x > 5.0)
-let result = method_for(big) <@> lambda(x) -> x |> compute
-// doubled = [2, 4, 6, 8, 10], filter >5: [6, 8, 10]
-// EXPECT: result = [6.0, 8.0, 10.0]
+let big = compound(doubled, mask(doubled, lambda(x) -> x > 5.0))
+// doubled = [2, 4, 6, 8, 10]; > 5 at coordinates {2, 3, 4}
+let n = extents(big)
+let x2 = big(2)
+let x4 = big(4)
+// EXPECT: n = 3
+// EXPECT: x2 = 6
+// EXPECT: x4 = 10
 """
 
 let test_mask_composition = """
-// Two successive masks
+// Predicate conjunction inside one mask (WHERE p AND q as one pass). The
+// POSITIONAL two-mask composition (elementwise Bool AND of two mask
+// arrays) is exercised separately in SQL WHERE AND.
 let A = [1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0, 9.0, 10.0]
-let above3 = mask(A, lambda(x) -> x > 3.0)
-let below8 = mask(above3, lambda(x) -> x < 8.0)
-
-let result = method_for(below8) <@> lambda(x) -> x |> compute
-// EXPECT: result = [4.0, 5.0, 6.0, 7.0]
+let band = compound(A, mask(A, lambda(x) -> x > 3.0 && x < 8.0))
+let n = extents(band)
+let x3 = band(3)
+let x6 = band(6)
+// EXPECT: n = 4
+// EXPECT: x3 = 4
+// EXPECT: x6 = 7
 """
 
 // ============================================================================
@@ -173,9 +190,15 @@ let test_sql_where = """
 // SQL: SELECT temp FROM stations WHERE temp > 25.0
 let temps = [20.0, 25.0, 30.0, 22.0, 27.0, 32.0]
 
-let hot = mask(temps, lambda(t) -> t > 25.0)
-let result = method_for(hot) <@> lambda(t) -> t |> compute
-// EXPECT: result = [30.0, 27.0, 32.0]
+let m = mask(temps, lambda(t) -> t > 25.0)
+let hot = compound(temps, m)
+// present coordinates {2, 4, 5} = 30, 27, 32
+let n = extents(hot)
+let total = reduce(hot, (+))
+let t2 = hot(2)
+// EXPECT: n = 3
+// EXPECT: total = 89
+// EXPECT: t2 = 30
 """
 
 // ============================================================================
@@ -183,36 +206,55 @@ let result = method_for(hot) <@> lambda(t) -> t |> compute
 // ============================================================================
 
 let test_intersect_basic = """
-// Intersection of two masks: positions valid in both
-let A = [1.0, 2.0, 3.0, 4.0, 5.0]
+// Positional two-mask AND, post-redesign: mask now returns a Bool presence
+// array (not filtered values), so "intersection of two filters over the same
+// source" is the elementwise Bool AND of the two masks, then compactify. This
+// mirrors SQL WHERE AND; value-based intersect() is covered by the dedup tests.
+type AB = Idx<5>
+let A: Array<Float64 like AB> = [1.0, 2.0, 3.0, 4.0, 5.0]
 let above2 = mask(A, lambda(x) -> x > 2.0)
 let below5 = mask(A, lambda(x) -> x < 5.0)
-
-let both = intersect(above2, below5)
-let result = method_for(both) <@> lambda(x) -> x |> compute
-// EXPECT: result = [3.0, 4.0]
+let both = method_for(zip(above2, below5)) <@> lambda(a, b) -> a && b |> compute
+let f = compound(A, both)
+// AND = [F,F,T,T,F] -> coordinates {2, 3} = 3.0, 4.0
+let n = extents(f)
+let x2 = f(2)
+let x3 = f(3)
+// EXPECT: n = 2
+// EXPECT: x2 = 3.0
+// EXPECT: x3 = 4.0
 """
 
 let test_union_basic = """
-// Union of two masks: positions valid in either
-let A = [1.0, 2.0, 3.0, 4.0, 5.0]
+// Positional two-mask OR: elementwise Bool OR of two presence masks over the
+// same named index space, then compactify (union of two filters over one source).
+type AB = Idx<5>
+let A: Array<Float64 like AB> = [1.0, 2.0, 3.0, 4.0, 5.0]
 let low = mask(A, lambda(x) -> x < 2.0)
 let high = mask(A, lambda(x) -> x > 4.0)
-
-let either = union(low, high)
-let result = method_for(either) <@> lambda(x) -> x |> compute
-// EXPECT: result = [1.0, 5.0]
+let either = method_for(zip(low, high)) <@> lambda(a, b) -> a || b |> compute
+let f = compound(A, either)
+// OR = [T,F,F,F,T] -> coordinates {0, 4} = 1.0, 5.0
+let n = extents(f)
+let x0 = f(0)
+let x4 = f(4)
+// EXPECT: n = 2
+// EXPECT: x0 = 1.0
+// EXPECT: x4 = 5.0
 """
 
 let test_intersect_disjoint = """
-// Disjoint masks — intersection is empty
-let A = [1.0, 2.0, 3.0, 4.0, 5.0]
+// Disjoint filters: elementwise AND of two masks that never overlap -> empty
+// presence array -> zero-cardinality compound.
+type AB = Idx<5>
+let A: Array<Float64 like AB> = [1.0, 2.0, 3.0, 4.0, 5.0]
 let low = mask(A, lambda(x) -> x < 3.0)
 let high = mask(A, lambda(x) -> x > 3.0)
-
-let none = intersect(low, high)
-let result = method_for(none) <@> lambda(x) -> x |> compute
-// EXPECT: result = []
+let none = method_for(zip(low, high)) <@> lambda(a, b) -> a && b |> compute
+let f = compound(A, none)
+// AND = [F,F,F,F,F] -> empty
+let n = extents(f)
+// EXPECT: n = 0
 """
 
 let test_intersect_dedups_a = """
@@ -261,13 +303,23 @@ let result = method_for(r) <@> lambda(x) -> x |> compute
 """
 
 let test_sql_where_and = """
-// SQL: SELECT temp FROM stations WHERE temp > 20.0 AND temp < 30.0
-let temps = [20.0, 25.0, 30.0, 22.0, 27.0, 32.0]
+// SQL: SELECT SUM(temp) FROM stations WHERE temp > 20.0 AND temp < 30.0
+// POSITIONAL composition: two mask arrays over the same (named) index
+// space, combined by elementwise Bool AND, then compactified. This is
+// what the value-based intersect could not express (it operates on
+// element VALUES, which coincide across positions).
+type SIdx = Idx<6>
+let temps: Array<Float64 like SIdx> = [20.0, 25.0, 30.0, 22.0, 27.0, 32.0]
 
 let above20 = mask(temps, lambda(t) -> t > 20.0)
 let below30 = mask(temps, lambda(t) -> t < 30.0)
-let result = method_for(intersect(above20, below30)) <@> lambda(t) -> t |> compute
-// EXPECT: result = [25.0, 22.0, 27.0]
+let both = method_for(zip(above20, below30)) <@> lambda(a, b) -> a && b |> compute
+let f = compound(temps, both)
+// AND = [F,T,F,T,T,F] -> coordinates {1, 3, 4} = 25, 22, 27
+let n = extents(f)
+let total = reduce(f, (+))
+// EXPECT: n = 3
+// EXPECT: total = 74
 """
 
 // ============================================================================
@@ -317,10 +369,11 @@ let result = contains(A, 99)
 """
 
 let test_contains_empty_after_mask = """
-// contains on an empty (dynamic) array — returns false without aborting.
+// contains on an EMPTY filtered set (cardinality-0 compound) — returns
+// false without aborting.
 let A = [1, 2, 3]
-let empty_arr = mask(A, lambda(x) -> x > 100)
-let result = contains(empty_arr, 5)
+let empty_set = compound(A, mask(A, lambda(x) -> x > 100))
+let result = contains(empty_set, 5)
 // EXPECT: result = false
 """
 
@@ -332,9 +385,14 @@ let test_contains_in_mask_predicate = """
 // to the unfused form — this test guards correctness across the rewrite.
 let A = [1, 2, 3, 4, 5, 6]
 let B = [2, 4, 6, 8]
-let in_B = mask(A, lambda(x) -> contains(B, x))
-let result = method_for(in_B) <@> lambda(x) -> x |> compute
-// EXPECT: result = [2, 4, 6]
+let in_B = compound(A, mask(A, lambda(x) -> contains(B, x)))
+// coordinates {1, 3, 5} = 2, 4, 6
+let n = extents(in_B)
+let x1 = in_B(1)
+let x5 = in_B(5)
+// EXPECT: n = 3
+// EXPECT: x1 = 2
+// EXPECT: x5 = 6
 """
 
 // ============================================================================
@@ -352,18 +410,30 @@ let test_semijoin_preserves_multiplicity = """
 // from intersect (which would dedup to [3, 1]).
 let A = [3, 1, 3, 2, 1, 4]
 let B = [1, 3]
-let r = mask(A, lambda(x) -> contains(B, x))
-let result = method_for(r) <@> lambda(x) -> x |> compute
-// EXPECT: result = [3, 1, 3, 1]
+let r = compound(A, mask(A, lambda(x) -> contains(B, x)))
+// present coordinates {0, 1, 2, 4}: both 3s and both 1s survive
+let n = extents(r)
+let x0 = r(0)
+let x2 = r(2)
+let x4 = r(4)
+// EXPECT: n = 4
+// EXPECT: x0 = 3
+// EXPECT: x2 = 3
+// EXPECT: x4 = 1
 """
 
 let test_antijoin_basic = """
 // Antijoin: elements of A NOT in B. Pattern is mask(A, !contains(B, x)).
 let A = [1, 2, 3, 4, 5, 6, 7]
 let B = [2, 4, 6]
-let r = mask(A, lambda(x) -> !contains(B, x))
-let result = method_for(r) <@> lambda(x) -> x |> compute
-// EXPECT: result = [1, 3, 5, 7]
+let r = compound(A, mask(A, lambda(x) -> !contains(B, x)))
+// present coordinates {0, 2, 4, 6} = 1, 3, 5, 7
+let n = extents(r)
+let x0 = r(0)
+let x6 = r(6)
+// EXPECT: n = 4
+// EXPECT: x0 = 1
+// EXPECT: x6 = 7
 """
 
 let test_antijoin_preserves_multiplicity = """
@@ -371,22 +441,32 @@ let test_antijoin_preserves_multiplicity = """
 // duplicates that aren't in B all appear in the output.
 let A = [3, 1, 3, 2, 1, 4, 2]
 let B = [1, 3]
-let r = mask(A, lambda(x) -> !contains(B, x))
-let result = method_for(r) <@> lambda(x) -> x |> compute
-// EXPECT: result = [2, 4, 2]
+let r = compound(A, mask(A, lambda(x) -> !contains(B, x)))
+// present coordinates {3, 5, 6} = 2, 4, 2 (multiplicity preserved)
+let n = extents(r)
+let x3 = r(3)
+let x6 = r(6)
+// EXPECT: n = 3
+// EXPECT: x3 = 2
+// EXPECT: x6 = 2
 """
 
 let test_pattern_does_not_fire_on_conjunction = """
-// When the predicate is compound (contains AND something else), the
-// pattern matcher must NOT rewrite to semijoin — the result would be
-// wrong. The IR stays as IRMask with the full lambda body, and codegen
-// uses the slow O(|A|·|B|) path. Correctness is what matters; this
-// test guards against an over-eager rewriter.
+// Conjunction predicate (contains AND a scalar condition). The LOCAL
+// set-hoist substitutes the contains node in place, so conjunctions,
+// negations, and multi-contains predicates all fuse now — the old
+// global rewriter had to decline these. Correctness is what this
+// test guards; the hoist firing more often must not change values.
 let A = [1, 2, 3, 4, 5, 6, 7, 8]
 let B = [2, 4, 6, 8]
-let r = mask(A, lambda(x) -> contains(B, x) && x > 3)
-let result = method_for(r) <@> lambda(x) -> x |> compute
-// EXPECT: result = [4, 6, 8]
+let r = compound(A, mask(A, lambda(x) -> contains(B, x) && x > 3))
+// coordinates {3, 5, 7} = 4, 6, 8
+let n = extents(r)
+let x3 = r(3)
+let x7 = r(7)
+// EXPECT: n = 3
+// EXPECT: x3 = 4
+// EXPECT: x7 = 8
 """
 
 let test_semijoin_float64 = """
@@ -394,35 +474,57 @@ let test_semijoin_float64 = """
 // pattern-matched path (mirrors Unique Float on the unique() side).
 let A = [1.5, 2.5, 3.5, 4.5]
 let B = [2.5, 4.5, 6.5]
-let r = mask(A, lambda(x) -> contains(B, x))
-let result = method_for(r) <@> lambda(x) -> x |> compute
-// EXPECT: result = [2.5, 4.5]
+let r = compound(A, mask(A, lambda(x) -> contains(B, x)))
+// coordinates {1, 3} = 2.5, 4.5
+let n = extents(r)
+let x1 = r(1)
+let x3 = r(3)
+// EXPECT: n = 2
+// EXPECT: x1 = 2.5
+// EXPECT: x3 = 4.5
 """
 
 let test_unique_of_semijoin = """
-// Composition: unique(semijoin) drops A's multiplicity after the
-// membership filter. Equivalent to SQL intersect but expressed via
-// the more general primitives. Exercises the lift pass — the inner
-// inline form (IRSemijoin) and the outer one (IRUnique) both get
-// auto-let-bound, and codegen must thread the temporary correctly.
+// Distinct members of A that are in B, post-redesign. mask now returns a Bool
+// presence array (not packed values), so "unique of the semijoin" is expressed
+// as: take the distinct values of A, then keep those present in B. For the set
+// of distinct passing values, unique-then-filter == filter-then-unique, and
+// both preserve A's first-occurrence order.
 let A = [3, 1, 3, 2, 1, 4]
 let B = [1, 3]
-let r = unique(mask(A, lambda(x) -> contains(B, x)))
-let result = method_for(r) <@> lambda(x) -> x |> compute
-// EXPECT: result = [3, 1]
+let uniqA = unique(A)
+let inB = mask(uniqA, lambda(x) -> contains(B, x))
+let f = compound(uniqA, inB)
+// unique(A) = [3, 1, 2, 4]; in B = [T, T, F, F] -> coordinates {0, 1} = 3, 1
+let n = extents(f)
+let x0 = f(0)
+let x1 = f(1)
+// EXPECT: n = 2
+// EXPECT: x0 = 3
+// EXPECT: x1 = 1
 """
 
 let test_semijoin_then_mask = """
-// Composition: mask after semijoin. Tests that semijoin's output (an
-// array, but with dynamic extent) flows correctly into another mask
-// kernel. The outer mask is NOT a semijoin pattern — its predicate
-// is a comparison, not a contains — so it stays IRMask.
-let A = [1, 2, 3, 4, 5, 6, 7, 8]
+// Composition, post-redesign: "members of A in B, then those > 2". mask now
+// returns Bool presence arrays, so this is the elementwise AND of the semijoin
+// mask and the comparison mask over A's shared named index, then compactify.
+type AB = Idx<8>
+let A: Array<Int64 like AB> = [1, 2, 3, 4, 5, 6, 7, 8]
 let B = [2, 3, 5, 7]
-let in_B = mask(A, lambda(x) -> contains(B, x))
-let big = mask(in_B, lambda(x) -> x > 2)
-let result = method_for(big) <@> lambda(x) -> x |> compute
-// EXPECT: result = [3, 5, 7]
+let inB = mask(A, lambda(x) -> contains(B, x))
+let gt2 = mask(A, lambda(x) -> x > 2)
+let both = inB && gt2
+let f = compound(A, both)
+// inB = [F,T,T,F,T,F,T,F], gt2 = [F,F,T,T,T,T,T,T], AND = [F,F,T,F,T,F,T,F]
+// -> coordinates {2, 4, 6} = 3, 5, 7
+let n = extents(f)
+let x2 = f(2)
+let x4 = f(4)
+let x6 = f(6)
+// EXPECT: n = 3
+// EXPECT: x2 = 3
+// EXPECT: x4 = 5
+// EXPECT: x6 = 7
 """
 
 // ============================================================================
@@ -690,10 +792,11 @@ let test_sql_select_where_orderby = """
 type StationIdx = Idx<6>
 let temps: Array<Float like StationIdx> = [20.0, 25.0, 30.0, 22.0, 27.0, 32.0]
 
-let hot = mask(temps, lambda(t) -> t > 25.0)
+let hot = compound(temps, mask(temps, lambda(t) -> t > 25.0))
 let sorted = sort(hot, lambda(t) -> -t)
-let result = method_for(sorted) <@> lambda(t) -> t |> compute
-// EXPECT: result = [32.0, 30.0, 27.0]
+// sort over a rank-1 compound walks the compact buffer; the DENSE output
+// is semantically honest (sorting discards coordinate meaning).
+// EXPECT: sorted = [32, 30, 27]
 """
 
 // ============================================================================
@@ -742,8 +845,8 @@ let pairs: Array<Pair like Idx<3>> = [
     Pair { a = 2.0, b = 20.0 },
     Pair { a = 3.0, b = 30.0 }
 ]
-let m = mask(pairs, lambda(p) -> p.a > 1.5)
-let elem = m(0)
+let f = compound(pairs, mask(pairs, lambda(p) -> p.a > 1.5))
+let elem = f(1)
 let r = elem.a
 // EXPECT: r = 2
 """
@@ -754,8 +857,8 @@ let test_v24d_probe_3_unannotated_mask = """
 // the codegen sees a wrapper-shaped RHS, the auto-fallback (now removed)
 // would have fired.
 let arr: Array<Float64 like Idx<4>> = [1.0, 2.0, 3.0, 4.0]
-let m = mask(arr, lambda(x) -> x > 1.5)
-let r = m(0)
+let f = compound(arr, mask(arr, lambda(x) -> x > 1.5))
+let r = f(1)
 // EXPECT: r = 2
 """
 
@@ -860,6 +963,18 @@ let d = method_for(grouped) <@> lambda(e) -> e * 2.0 |> compute
 """
 
 
+let test_sql_sum_where = """
+// SQL: SELECT SUM(temp), COUNT(*) FROM stations WHERE temp > 25.0
+// The whole aggregate-over-filtered pattern in two moves: mask constructs
+// the selection, compound applies it, reduce consumes the compact buffer.
+let temps = [20.0, 25.0, 30.0, 22.0, 27.0, 32.0]
+let hot = compound(temps, mask(temps, lambda(t) -> t > 25.0))
+let total = reduce(hot, (+))
+let n = extents(hot)
+// EXPECT: total = 89
+// EXPECT: n = 3
+"""
+
 let foreignKeyTests = [
     ("Foreign Key Basic", test_foreignKey_basic)
     ("Foreign Key Iterate", test_foreignKey_iterate)
@@ -939,6 +1054,7 @@ let groupByTests = [
     ("GroupBy Grand Total", test_groupby_grand_total)
     ("GroupBy Row Subview", test_groupby_row_subview)
     ("GroupBy Elementwise (rejects)", test_groupby_elementwise_reject)
+    ("SQL Sum Where", test_sql_sum_where)
 ]
 
 /// Phase 5: sort
@@ -1025,12 +1141,13 @@ let n = extents(A)
 """
 
 let test_extents_dynamic = """
-// extents() on a mask result reads the runtime extent.
-// The masked array's length is data-dependent, so the codegen falls back
-// to <name>_extents[0].
+// extents() on a compacted mask (compound). mask now returns a Bool presence
+// array over xs's own index; compound() gathers the passing cells, and
+// extents() of a rank-1 compound is its cardinality (the count that passed).
 let xs = [1, 2, 3, 4, 5, 6, 7, 8, 9, 10]
 let evens = mask(xs, lambda(x) -> x % 2 == 0)
-let n = extents(evens)
+let ev = compound(xs, evens)
+let n = extents(ev)
 // EXPECT: n = 5
 """
 
@@ -1111,12 +1228,13 @@ let total = reduce(A, (+))
 // runtime guard. We test the non-empty path here; the empty path would abort
 // the program, which the test framework can't easily verify.
 let test_reduce_dynamic_nonempty = """
-// reduce on a mask result: extent is dynamic. Codegen emits a runtime guard
-// that would abort on empty input. With a non-empty mask result, the guard
-// passes and we get the correct sum.
+// reduce over a compacted mask (compound). mask returns a Bool presence array;
+// compound() gathers the passing VALUES, and reduce sums them. The dynamic
+// extent still exercises the runtime non-emptiness guard.
 let xs = [1.0, 2.0, 3.0, 4.0, 5.0, 6.0]
 let evens = mask(xs, lambda(x) -> x > 2.0)
-let total = reduce(evens, (+))
+let ev = compound(xs, evens)
+let total = reduce(ev, (+))
 // EXPECT: total = 18
 """
 
