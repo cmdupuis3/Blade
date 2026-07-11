@@ -11,6 +11,7 @@ module Blade.Lowering
 open System
 open Blade.Ast
 open Blade.IR
+open Blade.Types
 open Blade.TypedAst
 
 // ============================================================================
@@ -32,7 +33,7 @@ type ModuleExport = {
     Functions: Map<string, IRId>
     Types: Map<string, IRType>
     StructDefs: Map<string, (string * IRType) list>
-    UnitDefs: Map<string, IR.UnitSig>
+    UnitDefs: Map<string, UnitSig>
     StaticValues: Map<string, StaticEval.StaticValue>
     StaticFunctions: Map<string, StaticEval.StaticFuncDef>
 }
@@ -55,7 +56,7 @@ let rec staticValueToIR (v: StaticEval.StaticValue) : IRExpr =
     | StaticEval.SVTuple vs -> IRTuple (vs |> List.map staticValueToIR)
 
 // (The duplicated resolveUnitExpr that lived here is gone — audit Phase 0.3.
-// The one definition is TypeCheck.resolveUnitExpr; the single use below
+// The one definition is TypeEnv.resolveUnitExpr; the single use below
 // calls it qualified.)
 
 // ============================================================================
@@ -1116,7 +1117,7 @@ let lowerTypedDecl (env: TypedLowerEnv) (decl: TypedDecl) : (Choice<IRFuncDef, I
             | None | Some UnitBase ->
                 Map.ofList [(unitDecl.Name, 1)]
             | Some (UnitDerived expr) ->
-                match TypeCheck.resolveUnitExpr env.UnitDefs expr with
+                match TypeEnv.resolveUnitExpr env.UnitDefs expr with
                 | Ok resolved -> resolved
                 | Error msg ->
                     eprintfn "Unit error: %s" msg
@@ -1555,7 +1556,7 @@ let lower (source: string) : Result<IRProgram, string> =
                 eprintfn "[TypeCheck Warning] %s" w
             Ok (lowerTypedProgram typedProgram (Some program) builder)
         | Error errors -> 
-            let msgs = errors |> List.map Blade.TypeCheck.formatCompileError
+            let msgs = errors |> List.map Blade.TypeEnv.formatCompileError
             Error (String.concat "\n" msgs)
     | Error e -> Error (sprintf "Parse error at %d:%d: %s" e.Line e.Col e.Message)
 
@@ -1569,6 +1570,6 @@ let lowerMultiSource (sources: (string * string) list) : Result<IRProgram, strin
                 eprintfn "[TypeCheck Warning] %s" w
             Ok (lowerTypedProgram typedProgram (Some program) builder)
         | Error errors ->
-            let msgs = errors |> List.map Blade.TypeCheck.formatCompileError
+            let msgs = errors |> List.map Blade.TypeEnv.formatCompileError
             Error (String.concat "\n" msgs)
     | Error e -> Error (sprintf "Parse error at %d:%d: %s" e.Line e.Col e.Message)

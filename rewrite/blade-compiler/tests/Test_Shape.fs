@@ -7,6 +7,7 @@ module Blade.Tests.Shape
 
 open Blade
 open Blade.IR
+open Blade.Types
 open Blade.Tests.TestHarness
 
 let private f64 = IRTScalar ETFloat64

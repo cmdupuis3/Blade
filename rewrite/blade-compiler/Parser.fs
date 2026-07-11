@@ -1821,12 +1821,19 @@ and stringToBinOp (op: string) : BinOp option =
 and parseBlock (tokens: Token list) : ParseResult<Expr> =
     let rec loop stmts toks =
         let toks = skipNL toks
+        // Statement span (audit §3.4): the position of the statement's first
+        // token. End position is not tracked yet — a start line/col is what
+        // error messages need; widening to full ranges is rewrite work.
+        let sLine, sCol = currentPos toks
+        let spanned (stmt: Stmt) =
+            StmtSpanned (stmt, { StartLine = sLine; StartCol = sCol; EndLine = sLine; EndCol = sCol; File = None })
         match peek toks with
         | Some TokRBrace ->
             // End of block - last expression (if any) is the return value
             // stmts is in reverse order (most recent first), so head = last statement
-            let (statements, finalExpr) = 
+            let (statements, finalExpr) =
                 match stmts with
+                | StmtSpanned (StmtExpr e, _) :: rest
                 | StmtExpr e :: rest -> List.rev rest, Some e
                 | all -> List.rev all, None
             success (ExprBlock (statements, finalExpr)) (advance toks)
@@ -1837,12 +1844,12 @@ and parseBlock (tokens: Token list) : ParseResult<Expr> =
             advance toks |> parseLetStmt >>= fun stmt remaining ->
             // Consume optional terminator (newline or semicolon)
             let remaining = skipTerminator remaining
-            loop (stmt :: stmts) remaining
+            loop (spanned stmt :: stmts) remaining
         | Some (TokKeyword KwFunction) ->
             // Nested function declaration - parse as let binding of lambda
             advance toks |> parseNestedFunction >>= fun stmt remaining ->
             let remaining = skipTerminator remaining
-            loop (stmt :: stmts) remaining
+            loop (spanned stmt :: stmts) remaining
         | Some (TokKeyword KwFor) ->
             // Check for imperative for-in loop: for IDENT in EXPR { STMTS }
             let afterFor = advance toks
@@ -1860,7 +1867,7 @@ and parseBlock (tokens: Token list) : ParseResult<Expr> =
                         // Parse body as block of statements
                         advance afterRange |> parseForInBody >>= fun bodyStmts remaining ->
                         let remaining = skipTerminator remaining
-                        loop (StmtForIn (varName, rangeExpr, bodyStmts) :: stmts) remaining
+                        loop (spanned (StmtForIn (varName, rangeExpr, bodyStmts)) :: stmts) remaining
                     | _ ->
                         let line, col = currentPos afterRange
                         error "Expected '{' after for-in range expression" line col
@@ -1868,16 +1875,16 @@ and parseBlock (tokens: Token list) : ParseResult<Expr> =
                     // Not a for-in, fall through to expression parser
                     parseExprImpl toks >>= fun expr remaining ->
                     let remaining = skipTerminator remaining
-                    loop (StmtExpr expr :: stmts) remaining
+                    loop (spanned (StmtExpr expr) :: stmts) remaining
             | _ ->
                 // Not a for-in, fall through to expression parser
                 parseExprImpl toks >>= fun expr remaining ->
                 let remaining = skipTerminator remaining
-                loop (StmtExpr expr :: stmts) remaining
+                loop (spanned (StmtExpr expr) :: stmts) remaining
         | Some _ ->
             parseExprImpl toks >>= fun expr remaining ->
             let remaining = skipTerminator remaining
-            loop (StmtExpr expr :: stmts) remaining
+            loop (spanned (StmtExpr expr) :: stmts) remaining
         | None ->
             error "Unexpected EOF in block" 0 0
     loop [] tokens
@@ -1892,6 +1899,9 @@ and skipTerminator toks =
 and parseForInBody (tokens: Token list) : ParseResult<Stmt list> =
     let rec loop stmts toks =
         let toks = skipNL toks
+        let sLine, sCol = currentPos toks
+        let spanned (stmt: Stmt) =
+            StmtSpanned (stmt, { StartLine = sLine; StartCol = sCol; EndLine = sLine; EndCol = sCol; File = None })
         match peek toks with
         | Some TokRBrace ->
             success (List.rev stmts) (advance toks)
@@ -1900,12 +1910,12 @@ and parseForInBody (tokens: Token list) : ParseResult<Stmt list> =
         | Some (TokKeyword KwLet) ->
             advance toks |> parseLetStmt >>= fun stmt remaining ->
             let remaining = skipTerminator remaining
-            loop (stmt :: stmts) remaining
+            loop (spanned stmt :: stmts) remaining
         | Some _ ->
             // Parse expression (includes assignments via parseAssignment)
             parseExprImpl toks >>= fun expr remaining ->
             let remaining = skipTerminator remaining
-            loop (StmtExpr expr :: stmts) remaining
+            loop (spanned (StmtExpr expr) :: stmts) remaining
         | None ->
             error "Unexpected EOF in for-in body" 0 0
     loop [] tokens

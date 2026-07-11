@@ -8,6 +8,7 @@
 
   <ItemGroup>
     <Compile Include="Ast.fs" />
+    <Compile Include="Types.fs" />
     <Compile Include="Lexer.fs" />
     <Compile Include="Parser.fs" />
     <Compile Include="IR.fs" />
@@ -15,8 +16,12 @@
     <Compile Include="TypedAst.fs" />
     <Compile Include="StaticEval.fs" />
     <Compile Include="IndexTypeValidator.fs" />
+    <Compile Include="Unify.fs" />
+    <Compile Include="TypeEnv.fs" />
+    <Compile Include="Zonk.fs" />
     <Compile Include="TypeCheck.fs" />
     <Compile Include="Lowering.fs" />
+    <Compile Include="EmitCpp.fs" />
     <Compile Include="CodeGen.fs" />
     <Compile Include="Build.fs" />
     <Compile Include="tests/TestHarness.fs" />
@@ -49,6 +54,7 @@
     <Compile Include="tests/Test_CodeGenSubst.fs" />
     <Compile Include="tests/Test_TypeStructure.fs" />
     <Compile Include="tests/Test_Shape.fs" />
+    <Compile Include="tests/Test_Spans.fs" />
     <Compile Include="tests/Oracles.fs" />
     <Compile Include="tests/Test_Oracles.fs" />
     <Compile Include="tests/Differential.fs" />
@@ -57,6 +63,7 @@
     <Compile Include="tests/OmpTests.fs" />
     <Compile Include="tests/AllocTests.fs" />
     <Compile Include="tests/NetcdfTests.fs" />
+    <Compile Include="tests/DiffOracle.fs" />
     <Compile Include="tests/RunAll.fs" />
     <Compile Include="Cli.fs" />
     <Compile Include="Main.fs" />

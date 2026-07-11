@@ -83,6 +83,7 @@ and collectPatternBindings (pat: Pattern) : Set<string> =
 
 and collectStmtNames (stmt: Stmt) : Set<string> =
     match stmt with
+    | StmtSpanned (inner, _) -> collectStmtNames inner
     | StmtLet binding -> collectFreeNames binding.Value
     | StmtAssign (lhs, _, rhs) -> Set.union (collectFreeNames lhs) (collectFreeNames rhs)
     | StmtExpr e -> collectFreeNames e
@@ -283,6 +284,9 @@ and evalBlock env fuel (stmts: Stmt list) (finalExpr: Expr option) : Result<Stat
         match finalExpr with
         | Some e -> evalExpr env fuel e
         | None -> Ok SVUnit
+    | StmtSpanned (inner, _) :: rest ->
+        // Span annotations are transparent to static evaluation.
+        evalBlock env fuel (inner :: rest) finalExpr
     | StmtLet binding :: rest ->
         evalExpr env fuel binding.Value |> Result.bind (fun v ->
             let env' = bindPattern env binding.Pattern v

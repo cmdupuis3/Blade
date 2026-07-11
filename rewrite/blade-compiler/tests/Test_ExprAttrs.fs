@@ -18,6 +18,7 @@ module Blade.Tests.ExprAttrs
 // ============================================================================
 
 open Blade.IR
+open Blade.Types
 open Blade.Tests.TestHarness
 
 /// A single corpus test: name + a thunk that returns the actual attrs and

@@ -1,6 +1,7 @@
 module Blade.Tests.Normalize
 
 open Blade.IR
+open Blade.Types
 open Blade.Tests.TestHarness
 
 // ============================================================================

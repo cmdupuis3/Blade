@@ -1,8 +1,12 @@
 module Blade.Tests.Unify
 
 open Blade.IR
+open Blade.Types
 open Blade.Tests.TestHarness
 open Blade.TypeCheck
+open Blade.Unify
+open Blade.TypeEnv
+open Blade.Zonk
 
 // ============================================================================
 // TypeCheck-level tests for the §5.3 fast path in unify (Segment 6).

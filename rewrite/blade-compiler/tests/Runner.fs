@@ -7,6 +7,7 @@ open System
 open Blade
 open System.IO
 open Blade.IR
+open Blade.Types
 open Blade.Lowering
 open Blade.CodeGen
 open Blade.Build

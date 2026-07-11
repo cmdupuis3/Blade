@@ -11,8 +11,12 @@ open System.Runtime.InteropServices
 open Blade.Ast
 open Blade.Parser
 open Blade.IR
+open Blade.Types
 open Blade.TypedAst
 open Blade.TypeCheck
+open Blade.Unify
+open Blade.TypeEnv
+open Blade.Zonk
 open Blade.Lowering
 open Blade.CodeGen
 open Blade.NetcdfProvider

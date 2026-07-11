@@ -353,6 +353,11 @@ and Stmt =
     | StmtAssign of lhs: Expr * op: AssignOp * rhs: Expr
     | StmtExpr of Expr
     | StmtForIn of varName: string * range: Expr * body: Stmt list
+    /// A statement annotated with its source span (audit §3.4). The parser
+    /// wraps every block statement in exactly one layer; the type checker
+    /// unwraps it to stamp error locations, and consumers that don't care
+    /// about locations match via `unwrapStmt` (defined after this group).
+    | StmtSpanned of Stmt * Span
 
 and Binding = {
     Mutability: BindingMut
@@ -481,3 +486,11 @@ and ImportItem =
 type Program = {
     Modules: ModuleDecl list
 }
+
+/// Strip a statement's StmtSpanned annotation (recursively, defensively —
+/// the parser emits exactly one layer). Walkers that don't report locations
+/// match on `unwrapStmt stmt` instead of adding a StmtSpanned arm.
+let rec unwrapStmt (s: Stmt) : Stmt =
+    match s with
+    | StmtSpanned (inner, _) -> unwrapStmt inner
+    | _ -> s

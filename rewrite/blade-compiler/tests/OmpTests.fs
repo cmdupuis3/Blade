@@ -9,6 +9,7 @@ open System.IO
 open System.Diagnostics
 open System.Runtime.InteropServices
 open Blade.IR
+open Blade.Types
 open Blade.Lowering
 open Blade.CodeGen
 open Blade.Build

@@ -229,7 +229,7 @@ let checkFile (filePath: string) : int =
             match Blade.TypeCheck.typeCheck program with
             | Error errors ->
                 for e in errors do
-                    eprintfn "%s" (Blade.TypeCheck.formatCompileError e)
+                    eprintfn "%s" (Blade.TypeEnv.formatCompileError e)
                 1
             | Ok (_, _, warnings) ->
                 for w in warnings do
@@ -318,6 +318,20 @@ let private dispatchTest (rest: string list) : int =
         // childrenOf/rebuildWith round-trips, mapIRExpr identity, and
         // collectVarRefsIR completeness. No Blade source pipeline.
         let failed = (Blade.Tests.Shape.runShapeTests ()).Failed
+        if failed = 0 then 0 else 1
+    | [ "diff-oracle" ] ->
+        // Phase 4 differential gate: this binary vs the pinned ./oracle build
+        // over the dense corpus slice — identical printed VALUES required.
+        let failed = (Blade.Tests.DiffOracle.runDiffOracleTests "./oracle/Blade.exe" Blade.Tests.DiffOracle.denseSlice).Failed
+        if failed = 0 then 0 else 1
+    | [ "diff-oracle"; cat ] ->
+        // Single corpus category against the pinned oracle.
+        let failed = (Blade.Tests.DiffOracle.runDiffOracleTests "./oracle/Blade.exe" [cat]).Failed
+        if failed = 0 then 0 else 1
+    | [ "spans" ] ->
+        // Error-location tests (§3.4 / Phase 2 gate): deliberately broken
+        // sources, asserting the reported line. No C++ pipeline.
+        let failed = (Blade.Tests.Spans.runSpanTests ()).Failed
         if failed = 0 then 0 else 1
     | [ "oracles" ] ->
         // Phase 0.2 review block: the differential-harness oracles checked

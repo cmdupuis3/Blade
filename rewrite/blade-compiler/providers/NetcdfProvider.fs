@@ -8,6 +8,7 @@ module Blade.NetcdfProvider
 
 open System.Runtime.InteropServices
 open Blade.IR
+open Blade.Types
 
 // ============================================================================
 // NetCDF Metadata Types

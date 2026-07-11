@@ -1,6 +1,7 @@
 module Blade.Tests.TypeStructure
 
 open Blade.IR
+open Blade.Types
 open Blade.Tests.TestHarness
 open Blade.Lowering
 

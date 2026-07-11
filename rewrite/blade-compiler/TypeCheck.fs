@@ -21,691 +21,12 @@ module Blade.TypeCheck
 
 open Blade.Ast
 open Blade.IR
+open Blade.Types
 open Blade.TypedAst
+open Blade.Unify
+open Blade.TypeEnv
+open Blade.Zonk
 
-// ============================================================================
-// Error Types (public — consumed by Lowering.fs and Main.fs)
-// ============================================================================
-
-type TypeError =
-    | UnboundVariable of string
-    | TypeMismatch of expected: IRType * actual: IRType
-    | ArityMismatch of expected: int * actual: int
-    | InvalidArrayCapture of varName: string
-    | InvalidApplication of funcType: IRType
-    | PatternTypeMismatch of pattern: string * expected: IRType
-    | Other of string
-
-/// A compile error with source location and context stack
-type CompileError = {
-    Error: TypeError
-    Span: Span
-    Context: string list  // e.g., ["in function 'foo'"; "in let binding 'x'"]
-}
-
-type TypeResult<'T> = Result<'T, TypeError>
-
-// ============================================================================
-// 1. Unification Infrastructure
-// ============================================================================
-
-/// Mutable substitution mapping inference variable IDs to resolved types.
-type Subst() =
-    let mutable map : Map<int, IRType> = Map.empty
-    let mutable nextId = 10000  // High start avoids collision with IRBuilder IDs
-    let mutable typeVarScope : Map<string, IRType * int> = Map.empty
-    let mutable arityConstraints : Map<int, int> = Map.empty
-    let mutable knownTypeVarNames : Set<string> = Set.empty
-    /// IDs of type variables that are HM-polymorphic at a function boundary.
-    /// Such IDs are preserved by zonking (not defaulted to Float64) so the
-    /// IR-phase HM monomorphization pass can substitute them at call sites.
-    /// Populated lazily as LookupOrCreateTypeVar produces fresh IDs for
-    /// names that prescanTypeVarNames previously registered.
-    let mutable polymorphicIds : Set<int> = Set.empty
-
-    member _.Fresh() =
-        let id = nextId
-        nextId <- nextId + 1
-        IRTInfer id
-
-    member _.Bind(id, ty) =
-        map <- Map.add id ty map
-
-    member _.TryFind(id) =
-        Map.tryFind id map
-
-    member this.LookupOrCreateTypeVar(name: string, arity: int, builder: IRBuilder) : IRType =
-        let key = name + "^" + string arity
-        match Map.tryFind key typeVarScope with
-        | Some (tv, _) -> tv
-        | None ->
-            let tv = this.Fresh()
-            if arity > 0 then
-                match tv with
-                | IRTInfer id -> arityConstraints <- Map.add id arity arityConstraints
-                | _ -> ()
-            typeVarScope <- Map.add key (tv, arity) typeVarScope
-            // If this name was registered by prescanTypeVarNames, the fresh
-            // ID is a function-boundary HM type variable. Track it so zonk
-            // doesn't default it to Float64 — IR-phase HM monomorphization
-            // will substitute it at call sites.
-            if Set.contains name knownTypeVarNames then
-                match tv with
-                | IRTInfer id -> polymorphicIds <- Set.add id polymorphicIds
-                | _ -> ()
-            tv
-
-    member this.LookupOrCreateTypeVar(name: string) : IRType =
-        let key = name + "^0"
-        match Map.tryFind key typeVarScope with
-        | Some (tv, _) -> tv
-        | None ->
-            let tv = this.Fresh()
-            typeVarScope <- Map.add key (tv, 0) typeVarScope
-            if Set.contains name knownTypeVarNames then
-                match tv with
-                | IRTInfer id -> polymorphicIds <- Set.add id polymorphicIds
-                | _ -> ()
-            tv
-
-    member _.IsPolymorphicId(id: int) : bool =
-        Set.contains id polymorphicIds
-
-    member _.GetArityConstraint(id: int) : int option =
-        Map.tryFind id arityConstraints
-
-    member _.CopyArityConstraint(fromId: int, toId: int) =
-        match Map.tryFind fromId arityConstraints with
-        | Some k -> arityConstraints <- Map.add toId k arityConstraints
-        | None -> ()
-
-    member _.RegisterTypeVarName(name: string) =
-        knownTypeVarNames <- Set.add name knownTypeVarNames
-
-    member _.IsTypeVar(name: string) : bool =
-        Set.contains name knownTypeVarNames
-
-    member _.PushTypeVarScope() : Map<string, IRType * int> * Set<string> =
-        let savedScope = typeVarScope
-        let savedNames = knownTypeVarNames
-        typeVarScope <- Map.empty
-        knownTypeVarNames <- Set.empty
-        (savedScope, savedNames)
-
-    member _.PopTypeVarScope(saved: Map<string, IRType * int> * Set<string>) =
-        typeVarScope <- fst saved
-        knownTypeVarNames <- snd saved
-
-    /// Recursively resolve a type through the substitution.
-    /// Applies rank-0 collapse: Array<T, (no indices)> -> Scalar T.
-    member this.Resolve(ty: IRType) : IRType =
-        match ty with
-        | IRTInfer id ->
-            match this.TryFind id with
-            | Some ty' -> this.Resolve ty'
-            | None -> ty
-        | IRTTuple ts -> IRTTuple (ts |> List.map this.Resolve)
-        | IRTComputation t -> IRTComputation (this.Resolve t)
-        | IRTLoop lt ->
-            IRTLoop { lt with
-                        ArrayTypes = lt.ArrayTypes |> List.map this.Resolve
-                        KernelType = lt.KernelType |> Option.map this.Resolve }
-        | IRTPoly (base', var) -> IRTPoly (this.Resolve base', var)
-        | IRTUnitAnnotated (inner, units) -> IRTUnitAnnotated (this.Resolve inner, units)
-        | IRTIdxTagged (inner, idxRef) -> IRTIdxTagged (this.Resolve inner, idxRef)
-        | IRTArrow (slots, result, identity) ->
-            let resolveSlot = function
-                | SIdx idx -> SIdx idx
-                | SIdxVirt idx -> SIdxVirt idx
-                | SVal ty -> SVal (this.Resolve ty)
-            IRTArrow (slots |> List.map resolveSlot, this.Resolve result, identity)
-        | _ -> ty
-
-    member this.ResolveIdx (idx: IRIndexType) = idx  // Index extents are IRExpr, not IRType
-
-/// Occurs check: does inference variable `id` appear in `ty`?
-let rec occursIn (id: int) (ty: IRType) : bool =
-    match ty with
-    | IRTInfer id2 -> id = id2
-    | IRTTuple ts -> ts |> List.exists (occursIn id)
-    | IRTComputation t -> occursIn id t
-    | IRTPoly (base', _) -> occursIn id base'
-    | IRTLoop lt ->
-        (lt.ArrayTypes |> List.exists (occursIn id)) ||
-        (lt.KernelType |> Option.map (occursIn id) |> Option.defaultValue false)
-    | IRTUnitAnnotated (inner, _) -> occursIn id inner
-    | IRTIdxTagged (inner, _) -> occursIn id inner
-    | IRTArrow (slots, ret, _) ->
-        let slotHit =
-            slots |> List.exists (function
-                | SVal ty -> occursIn id ty
-                | SIdx _ | SIdxVirt _ -> false)
-        slotHit || occursIn id ret
-    | _ -> false
-
-/// Walk an inference variable chain to find the leaf variable bound to a
-/// concrete scalar (or unbound).  Returns its id so we can rebind it to
-/// the promoted type.  Returns None if the type is not an inference chain.
-let rec findLeafInferScalar (subst: Subst) (ty: IRType) : int option =
-    match ty with
-    | IRTInfer id ->
-        match subst.TryFind id with
-        | Some (IRTInfer _ as next) -> findLeafInferScalar subst next
-        | Some (IRTScalar _) -> Some id   // bound to concrete scalar — rebindable
-        | None -> Some id                  // unbound — bindable
-        | _ -> None                        // bound to non-scalar — leave alone
-    | _ -> None
-
-/// Unify two types under the current substitution. Mutates `subst` to
-/// bind inference variables as needed.
-///
-/// Normalization: both sides are passed through `normalize ToNested`
-/// after resolve. This makes the §5.3 mixed-slot identity transparent
-/// to the recursive cases below — they see the canonical (nested)
-/// form regardless of which surface form the caller supplied.
-///
-/// What integrating normalize buys us:
-///   - Concrete equivalent pair (no IRTInfer): structural `=` fires
-///     and we short-circuit.
-///   - Pair containing IRTInfer where one side is flat-mixed-slot and
-///     the other is its split-nested equivalent: the recursive arrow
-///     case (`IRTArrow s1 r1 vs IRTArrow s2 r2`) now sees matching
-///     slot lengths because both sides have been split at kind
-///     boundaries. Inner IRTInfer binds via the structural recursion.
-///   - Genuine mismatches (different slot kinds at a position, different
-///     index identities, different rank): still rejected — normalize
-///     doesn't conflate distinct shapes.
-///
-/// What it does NOT yet bridge: the §5.2 uniform-kind array identity
-/// (flat uniform vs nested uniform). That requires `ToFlat` mode,
-/// which is reserved for the B-flat migration.
-///
-/// Numeric promotion: when two different numeric scalars meet, the
-/// inference variable (if any) is rebound to the promoted type so that
-/// downstream IR and codegen see the correct wider type.
-let rec unify (subst: Subst) (t1: IRType) (t2: IRType) : TypeResult<unit> =
-    let orig1 = t1
-    let orig2 = t2
-    let t1 = subst.Resolve t1 |> normalize ToNested
-    let t2 = subst.Resolve t2 |> normalize ToNested
-    // §5.3 fast path: post-normalization, structural equality holds
-    // iff the two surface forms are equivalent under the mixed-slot
-    // identity. Catches concrete-on-both-sides cases without entering
-    // the recursive cases at all.
-    if t1 = t2 then Ok ()
-    else
-    match t1, t2 with
-    | IRTInfer id1, IRTInfer id2 when id1 = id2 -> Ok ()
-    | IRTInfer id, ty | ty, IRTInfer id ->
-        if occursIn id ty then Error (Other "Infinite type detected")
-        else
-            // Check arity invariant: T^k must unify with rank-k array
-            match subst.GetArityConstraint(id) with
-            | Some k when k > 0 ->
-                match ty with
-                | ArrayElem arr when arr.IndexTypes.Length = k ->
-                    subst.Bind(id, ty); Ok ()
-                | IRTInfer _ ->
-                    // Binding two inference vars — defer invariant check
-                    subst.Bind(id, ty); Ok ()
-                | _ ->
-                    Error (Other (sprintf "Type variable with arity %d requires a rank-%d array, got %A" k k ty))
-            | _ ->
-                subst.Bind(id, ty); Ok ()
-    | IRTScalar e1, IRTScalar e2 when e1 = e2 -> Ok ()
-    // Scalar unification.
-    //
-    // Phase 2 (post-Gap-2.5): two concrete-and-different primitives are a
-    // real type error. Pre-fix, we accepted them via `promoteElemType` and
-    // returned Ok, which silently lifted promotion to "type compatibility."
-    // That made Probe E (Int64-annotated kernel param against Float64 source)
-    // type-check — the C++ then truncated values silently.
-    //
-    // The promotion rebind path stays alive when at least one side is an
-    // inference variable: that's the legitimate use (a fresh literal type
-    // gets pinned to the wider type a context requires). When both sides
-    // are concrete, promotion would rewrite types without binding anything,
-    // which is the silent-acceptance failure mode.
-    | IRTScalar e1, IRTScalar e2 ->
-        match promoteElemType e1 e2 with
-        | Some promoted ->
-            let leaf1 = findLeafInferScalar subst orig1
-            let leaf2 = findLeafInferScalar subst orig2
-            match leaf1, leaf2 with
-            | None, None ->
-                // Both concrete, neither is an inference variable being pinned.
-                // The promoteElemType call was just suggesting a "compatible
-                // wider type" — which is a value-promotion fact (used by binop
-                // result-type inference), not a type-equality fact. Refuse.
-                Error (TypeMismatch (t1, t2))
-            | _ ->
-                let promotedTy = IRTScalar promoted
-                leaf1 |> Option.iter (fun id -> subst.Bind(id, promotedTy))
-                leaf2 |> Option.iter (fun id -> subst.Bind(id, promotedTy))
-                Ok ()
-        | None ->
-            Error (TypeMismatch (t1, t2))
-    | ArrayElem a1, ArrayElem a2 ->
-        // ArrayElem matches IRTArrow with all-SIdx or all-SIdxVirt slots.
-        // Rank must match, virtual/stored character must match.
-        if a1.IndexTypes.Length <> a2.IndexTypes.Length || a1.IsVirtual <> a2.IsVirtual then
-            Error (TypeMismatch (t1, t2))
-        else
-            // Per-index compatibility: named index types must match by name,
-            // symmetry classes must be compatible.
-            // NOTE: We intentionally do NOT compare extents here — extents are
-            // runtime values in C++, not compile-time template parameters.
-            //
-            // Synthetic tags (those starting with "__") are internal structural
-            // markers like "__raggedidx_inline", "__depidx_inner", "__group_member",
-            // "__error_ragged_no_prior". These represent kinds of dimensions, not
-            // nominal names, and must not be compared as "named index types are
-            // nominative." Only user-named tags get the nominative treatment.
-            let isSyntheticTag (t: string) = t.StartsWith("__")
-            let indexMismatch =
-                List.zip a1.IndexTypes a2.IndexTypes |> List.tryFind (fun (i1, i2) ->
-                    // User-named index types are nominative: lat != lon even if both Idx<180>.
-                    // Synthetic tags (starting with __) are structural and should not gate
-                    // unification — they're set by lowering for internal bookkeeping.
-                    match i1.Tag, i2.Tag with
-                    | Some t1, Some t2 when t1 <> t2
-                                            && not (isSyntheticTag t1)
-                                            && not (isSyntheticTag t2) -> true
-                    | _ ->
-                        // Symmetry class must be compatible
-                        i1.Symmetry <> i2.Symmetry && i1.Symmetry <> SymNone && i2.Symmetry <> SymNone)
-            match indexMismatch with
-            | Some _ -> Error (TypeMismatch (t1, t2))
-            | None ->
-                // Phase B5: recursive elem-type unification.
-                // ElemType is IRType post-B2, so this falls through to the
-                // existing unify logic. Inference vars bind; primitives
-                // promote where compatible (IRTScalar e1, IRTScalar e2);
-                // genuine mismatches error out (catching the silent
-                // miscompile that Probe E demonstrated).
-                unify subst a1.ElemType a2.ElemType
-    | IRTTuple ts1, IRTTuple ts2 when ts1.Length = ts2.Length ->
-        List.zip ts1 ts2 |> List.fold (fun acc (a, b) ->
-            acc |> Result.bind (fun () -> unify subst a b)) (Ok ())
-    | FuncElem (a1, r1), FuncElem (a2, r2) when a1.Length = a2.Length ->
-        // FuncElem matches IRTArrow with all-SVal slots (the unified function form).
-        // Slot-by-slot arg unification followed by return-type unification.
-        List.zip a1 a2 |> List.fold (fun acc (a, b) ->
-            acc |> Result.bind (fun () -> unify subst a b)) (Ok ())
-        |> Result.bind (fun () -> unify subst r1 r2)
-    | IRTUnit, IRTUnit -> Ok ()
-    | IRTNamed n1, IRTNamed n2 when n1 = n2 -> Ok ()
-    | IRTLoop l1, IRTLoop l2 when l1.Kind = l2.Kind -> Ok ()
-    | IRTComputation t1, IRTComputation t2 -> unify subst t1 t2
-    | IRTNat _, IRTNat _ -> Ok ()
-    // IRTIdxTagged unification (parallel to IRTUnitAnnotated below):
-    //   1. Inner types must unify (so an int64 tag won't accidentally
-    //      match a float-tagged value, even if both have the same IdxRef).
-    //   2. IdxRefs must be structurally equal by identity: named-vs-named
-    //      requires name match; anon-vs-anon requires nominalId match
-    //      (extent ignored — diagnostic carrier, not identity).
-    //   Mixed named-vs-anon: never compatible.
-    // The asymmetric arms (tagged-vs-other below) are intentionally
-    // omitted: unlike IRTUnitAnnotated which freely strips units in cross
-    // unification, IRTIdxTagged is strict — a plain int cannot flow to
-    // Nat<I> without explicit casting. This enforces §4.18.3's "untyped
-    // literal" rule at the type level.
-    | IRTIdxTagged (inner1, r1), IRTIdxTagged (inner2, r2) ->
-        let refMatch =
-            match r1, r2 with
-            | IRefNamed n1, IRefNamed n2 when n1 = n2 -> true
-            | IRefAnon (id1, _), IRefAnon (id2, _) when id1 = id2 -> true
-            | _ -> false
-        if refMatch then unify subst inner1 inner2
-        else Error (TypeMismatch (t1, t2))
-    // IRTArrow: slot-by-slot unification. Slot kinds (SIdx/SIdxVirt/SVal)
-    // must agree at each position; SIdx/SIdxVirt require matching index
-    // identity (id and tag); SVal recurses through unify. The result
-    // types must also unify. Identity field is ignored — it's metadata.
-    | IRTArrow (s1, r1, _), IRTArrow (s2, r2, _) when s1.Length = s2.Length ->
-        let unifySlot acc (sa, sb) =
-            acc |> Result.bind (fun () ->
-                match sa, sb with
-                | SVal ta, SVal tb -> unify subst ta tb
-                | SIdx ia, SIdx ib | SIdxVirt ia, SIdxVirt ib ->
-                    if ia.Id = ib.Id && ia.Tag = ib.Tag then Ok ()
-                    else Error (TypeMismatch (t1, t2))
-                | _ -> Error (TypeMismatch (t1, t2)))
-        List.zip s1 s2 |> List.fold unifySlot (Ok ())
-        |> Result.bind (fun () -> unify subst r1 r2)
-    // Unit-annotated types: unify inner types (unit checking is separate)
-    | IRTUnitAnnotated (inner1, _), IRTUnitAnnotated (inner2, _) -> unify subst inner1 inner2
-    | IRTUnitAnnotated (inner, _), other | other, IRTUnitAnnotated (inner, _) -> unify subst inner other
-    | _ -> Error (TypeMismatch (t1, t2))
-
-// ============================================================================
-// 1b. Let-Generalization (Hindley-Milner Polymorphism)
-// ============================================================================
-
-/// A type scheme: a type with universally quantified inference variables.
-/// E.g., `let id = lambda(x: T) -> x` gets scheme `forall {#10001}. #10001 -> #10001`.
-type TypeScheme = {
-    QuantifiedVars: int list   // Inference variable IDs that are universally quantified
-    Body: IRType               // The type (resolved), with quantified vars still as IRTInfer
-}
-
-
-/// Collect free (unresolved) inference variable IDs in a type.
-let rec freeInferVars (subst: Subst) (ty: IRType) : Set<int> =
-    match subst.Resolve ty with
-    | IRTInfer id -> Set.singleton id
-    | IRTScalar _ | IRTUnit | IRTNamed _ | IRTNat _ -> Set.empty
-    | IRTTuple ts -> ts |> List.map (freeInferVars subst) |> Set.unionMany
-    | IRTComputation t -> freeInferVars subst t
-    | IRTPoly (t, _) -> freeInferVars subst t
-    | IRTLoop lt ->
-        Set.union
-            (lt.ArrayTypes |> List.map (freeInferVars subst) |> Set.unionMany)
-            (lt.KernelType |> Option.map (freeInferVars subst) |> Option.defaultValue Set.empty)
-    | IRTUnitAnnotated (inner, _) -> freeInferVars subst inner
-    | IRTIdxTagged (inner, _) -> freeInferVars subst inner
-    | IRTArrow (slots, ret, _) ->
-        let slotVars =
-            slots |> List.map (function
-                | SVal ty -> freeInferVars subst ty
-                | SIdx _ | SIdxVirt _ -> Set.empty)
-            |> Set.unionMany
-        Set.union slotVars (freeInferVars subst ret)
-    | IRTGroupKeys _ -> Set.empty
-
-/// Instantiate a type scheme: replace each quantified variable with a fresh
-/// inference variable, so each use site gets independent type constraints.
-let instantiate (subst: Subst) (scheme: TypeScheme) : IRType =
-    if scheme.QuantifiedVars.IsEmpty then
-        scheme.Body
-    else
-        let mapping =
-            scheme.QuantifiedVars
-            |> List.map (fun v ->
-                let fresh = subst.Fresh()
-                // Propagate arity constraints to the fresh variable
-                match fresh with
-                | IRTInfer freshId -> subst.CopyArityConstraint(v, freshId)
-                | _ -> ()
-                (v, fresh))
-            |> Map.ofList
-        let rec replace ty =
-            match ty with
-            | IRTInfer id ->
-                Map.tryFind id mapping |> Option.defaultValue ty
-            | IRTTuple ts -> IRTTuple (ts |> List.map replace)
-            | IRTArrow (slots, ret, identity) ->
-                let replaceSlot = function
-                    | SIdx idx -> SIdx idx
-                    | SIdxVirt idx -> SIdxVirt idx
-                    | SVal t -> SVal (replace t)
-                IRTArrow (slots |> List.map replaceSlot, replace ret, identity)
-            | IRTComputation t -> IRTComputation (replace t)
-            | IRTPoly (t, v) -> IRTPoly (replace t, v)
-            | IRTLoop lt ->
-                IRTLoop { lt with
-                            ArrayTypes = lt.ArrayTypes |> List.map replace
-                            KernelType = lt.KernelType |> Option.map replace }
-            | _ -> ty  // IRTScalar, IRTUnit, IRTNamed, IRTNat (no inference vars to replace)
-        replace scheme.Body
-
-// ============================================================================
-// 2. Type Environment
-// ============================================================================
-
-/// Variable assignability levels tracked during type checking.
-/// Maps to binding forms: static → ReadOnly, let → Assignable, let mut → MutPassable
-type Assignability =
-    | ReadOnly      // static: not assignable, generalizable
-    | Assignable    // let: assignable in scope, not passable to mut params
-    | MutPassable   // let mut: assignable + passable to mut params
-
-/// Variable binding information tracked during type checking.
-type VarInfo = {
-    VarId: IRId
-    Type: IRType
-    Identity: ArrayIdentity option
-    Assign: Assignability
-    /// The TypedExpr this variable was bound to, for <@> resolution.
-    TypedValue: TypedExpr option
-    /// If Some, this binding is polymorphic (let-generalized).
-    /// Variable lookup instantiates fresh type variables from the scheme.
-    Scheme: TypeScheme option
-}
-
-/// Registered type definition
-type TypeDefInfo =
-    | TDIAlias of IRType
-    | TDIStruct of name: string * typeParams: string list * fields: (string * IRType) list
-    | TDIVariant of name: string * typeParams: string list * variants: (string * IRType option) list
-    | TDIIndexType of name: string * idx: IRIndexType * body: TypeExpr
-    | TDIEnumIdx of name: string * idx: IRIndexType * values: IR.EnumValue list * body: TypeExpr
-
-/// Exported bindings from a type-checked module, for cross-module imports
-type TypeModuleExport = {
-    Variables: Map<string, VarInfo>
-    TypeDefs: Map<string, TypeDefInfo>
-    VariantTags: Map<string, string * IRType option>
-    Units: Map<string, IR.UnitSig>
-    /// Static function ASTs from this module. Imported alongside Variables
-    /// so eta-reduced DepIdx in an importing module can inline a static
-    /// function defined in this one. The body is needed for the inlining;
-    /// the TypeEnv-side StaticFunctions map is the consumer.
-    StaticFunctions: Map<string, FunctionDecl>
-}
-
-/// Type checking environment
-type TypeEnv = {
-    Variables: Map<string, VarInfo>
-    TypeDefs: Map<string, TypeDefInfo>
-    /// Variant tag -> (parentTypeName, payloadType option)
-    VariantTags: Map<string, string * IRType option>
-    Subst: Subst
-    Builder: IRBuilder
-    OuterScope: Map<string, VarInfo>
-    InPolyContext: bool
-    CurrentCommGroups: int list list
-    /// Interface name -> InterfaceDecl
-    Interfaces: Map<string, InterfaceDecl>
-    /// (typeName, methodName) -> (mangledFuncVarId, funcType)
-    ImplMethods: Map<string * string, IRId * IRType>
-    /// Unit name -> canonical UnitSig
-    Units: Map<string, IR.UnitSig>
-    /// Context stack for error reporting, e.g. ["in function 'foo'"]
-    Context: string list
-    /// Exports from previously type-checked modules
-    ModuleExports: Map<string, TypeModuleExport>
-    /// Static function ASTs, populated during checkModule's pre-pass.
-    /// Used by lowerIndexTypeList to inline eta-reduced DepIdx bodies —
-    /// `DepIdx<O, f>` desugars to `lambda(i) -> Idx<f(i)>`, and the
-    /// substitution into the inner extent requires access to f's body.
-    StaticFunctions: Map<string, FunctionDecl>
-    /// Non-fatal diagnostics accumulated during type-checking. The field
-    /// is a mutable ResizeArray so functional updates (`{ env with ... }`)
-    /// share the same collector — warnings emitted from any scope land
-    /// in one place. Surfaced through `typeCheck`'s Ok return; runs even
-    /// when the program also has hard errors (warnings + errors aren't
-    /// mutually exclusive, but the current Ok-only plumbing skips them
-    /// on the error path — extending to both paths is a future tweak).
-    Warnings: ResizeArray<string>
-}
-
-let emptyEnv () = {
-    Variables = Map.empty
-    TypeDefs = Map.empty
-    VariantTags = Map.empty
-    Subst = Subst()
-    Builder = IRBuilder()
-    OuterScope = Map.empty
-    InPolyContext = false
-    CurrentCommGroups = []
-    Interfaces = Map.empty
-    ImplMethods = Map.empty
-    Units = Map.empty
-    Context = []
-    ModuleExports = Map.empty
-    StaticFunctions = Map.empty
-    Warnings = ResizeArray<string>()
-}
-
-/// Append a non-fatal diagnostic to the env's warnings collector.
-/// The collector is shared by reference across all functional updates
-/// of the env, so callsites don't need to thread anything through.
-let emitWarning (env: TypeEnv) (msg: string) : unit =
-    env.Warnings.Add(msg)
-
-/// Push a context frame onto the environment
-let pushContext (ctx: string) (env: TypeEnv) : TypeEnv =
-    { env with Context = ctx :: env.Context }
-
-/// Wrap a TypeError with span and context into a CompileError
-let locateError (span: Span) (env: TypeEnv) (err: TypeError) : CompileError =
-    { Error = err; Span = span; Context = env.Context }
-
-/// Format a TypeError as a human-readable string
-let formatTypeError (err: TypeError) : string =
-    match err with
-    | UnboundVariable name -> sprintf "Unbound variable: %s" name
-    | TypeMismatch (exp, act) -> sprintf "Type mismatch: expected %A, got %A" exp act
-    | ArityMismatch (exp, act) -> sprintf "Arity mismatch: expected %d args, got %d" exp act
-    | InvalidArrayCapture name -> sprintf "Lambda cannot capture array '%s'" name
-    | InvalidApplication funcTy -> sprintf "Cannot apply non-function type: %A" funcTy
-    | PatternTypeMismatch (pat, ty) -> sprintf "Pattern '%s' incompatible with type %A" pat ty
-    | Other msg -> msg
-
-/// Format a CompileError with location and context
-let formatCompileError (err: CompileError) : string =
-    let loc =
-        if err.Span.StartLine > 0 then
-            match err.Span.File with
-            | Some f -> sprintf "%s:%d:%d" f err.Span.StartLine err.Span.StartCol
-            | None -> sprintf "%d:%d" err.Span.StartLine err.Span.StartCol
-        else ""
-    let msg = formatTypeError err.Error
-    let context =
-        err.Context
-        |> List.rev
-        |> List.map (sprintf "  %s")
-        |> String.concat "\n"
-    if loc = "" && context = "" then msg
-    elif context = "" then sprintf "%s: %s" loc msg
-    else sprintf "%s: %s\n%s" loc msg context
-
-let bindVar name info (env: TypeEnv) =
-    { env with Variables = Map.add name info env.Variables }
-
-let bindVarSimple name varId ty env =
-    bindVar name { VarId = varId; Type = ty; Identity = None
-                   Assign = ReadOnly; TypedValue = None; Scheme = None } env
-
-
-let bindVarFull name varId ty identity assign typedValue env =
-    bindVar name { VarId = varId; Type = ty; Identity = identity
-                   Assign = assign; TypedValue = typedValue; Scheme = None } env
-
-/// Bind a polymorphic (let-generalized) variable.
-let bindVarPoly name varId ty identity assign typedValue scheme env =
-    bindVar name { VarId = varId; Type = ty; Identity = identity
-                   Assign = assign; TypedValue = typedValue
-                   Scheme = Some scheme } env
-
-let lookupVar name env = Map.tryFind name env.Variables
-let lookupTypeDef name env = Map.tryFind name env.TypeDefs
-
-/// Convert AST BindingMut to Assignability.
-let assignOfBindingMut = function
-    | BindConst -> ReadOnly    // static / let const → immutable
-    | BindLet -> Assignable    // let → assignable in scope
-    | BindMut -> MutPassable   // let mut → assignable + mut-passable
-
-let enterScope env =
-    { env with OuterScope = Map.foldBack Map.add env.Variables env.OuterScope }
-
-let registerTypeDef name info (env: TypeEnv) =
-    { env with TypeDefs = Map.add name info env.TypeDefs }
-
-/// Register a loaded provider module's struct types into the type-check env and
-/// return the binding's module-struct type. The provider's emitted dims/vars
-/// structs are registered as-is; a synthetic top-level struct named `name` is
-/// added so the loaded binding carries `.dims` / `.vars` fields, letting field
-/// access (e.g. `sample.vars.temp`) resolve to a variable's real Array type.
-/// Pure (no file IO) so it can be unit-tested with a mock module; reading the
-/// file metadata that produces `pm` is the caller's concern.
-let registerProviderModule (env: TypeEnv) (name: string) (pm: IRModule) : TypeEnv * IRType =
-    let envS =
-        pm.Types |> List.fold (fun e td ->
-            match td with
-            | IRTDStruct (n, fields, _) -> registerTypeDef n (TDIStruct (n, [], fields)) e
-            | _ -> e) env
-    let moduleStruct = TDIStruct (name, [], [("dims", IRTNamed "dims"); ("vars", IRTNamed "vars")])
-    (registerTypeDef name moduleStruct envS, IRTNamed name)
-
-
-/// Check if a variant type is a pure enum (all constructors have no data)
-let isEnumType (env: TypeEnv) (parentName: string) : bool =
-    match Map.tryFind parentName env.TypeDefs with
-    | Some (TDIVariant (_, _, variants)) -> variants |> List.forall (fun (_, d) -> d.IsNone)
-    | _ -> false
-
-let registerVariantTag tag parentName payload (env: TypeEnv) =
-    { env with VariantTags = Map.add tag (parentName, payload) env.VariantTags }
-
-/// Resolve a UnitExpr AST node to a canonical UnitSig
-let rec resolveUnitExpr (units: Map<string, IR.UnitSig>) (expr: UnitExpr) : Result<IR.UnitSig, string> =
-    match expr with
-    | UnitNamed name ->
-        match Map.tryFind name units with
-        | Some sig' -> Ok sig'
-        | None -> Error (sprintf "Unknown unit '%s'" name)
-    | UnitMul (a, b) ->
-        resolveUnitExpr units a |> Result.bind (fun sa ->
-        resolveUnitExpr units b |> Result.map (fun sb ->
-            IR.unitMul sa sb))
-    | UnitDiv (a, b) ->
-        resolveUnitExpr units a |> Result.bind (fun sa ->
-        resolveUnitExpr units b |> Result.map (fun sb ->
-            IR.unitDiv sa sb))
-    | UnitPow (a, n) ->
-        resolveUnitExpr units a |> Result.map (fun sa ->
-            IR.unitPow sa n)
-
-/// Register a unit declaration in the environment
-let registerUnit (env: TypeEnv) (decl: UnitDecl) : TypeEnv =
-    let sig' =
-        match decl.Definition with
-        | None | Some UnitBase ->
-            // Base unit: canonical form is {name: 1}
-            Map.ofList [(decl.Name, 1)]
-        | Some (UnitDerived expr) ->
-            match resolveUnitExpr env.Units expr with
-            | Ok resolved -> resolved
-            | Error msg ->
-                eprintfn "Unit error: %s" msg
-                Map.ofList [(decl.Name, 1)]  // fallback to base unit
-    { env with Units = Map.add decl.Name sig' env.Units }
-
-// ============================================================================
-// 2b. Generalization (needs VarInfo defined above)
-// ============================================================================
-
-/// Collect free inference vars across all variable types in scope.
-let freeInferVarsInEnv (subst: Subst) (vars: Map<string, VarInfo>) : Set<int> =
-    vars |> Map.fold (fun acc _ info ->
-        Set.union acc (freeInferVars subst info.Type)) Set.empty
-
-/// Generalize a type: quantify over inference vars free in the type
-/// but NOT free in the environment.
-let generalize (subst: Subst) (envVars: Map<string, VarInfo>) (ty: IRType) : TypeScheme =
-    let envFree = freeInferVarsInEnv subst envVars
-    let tyFree = freeInferVars subst (subst.Resolve ty)
-    let quantified = Set.difference tyFree envFree |> Set.toList
-    { QuantifiedVars = quantified; Body = subst.Resolve ty }
-
-// ============================================================================
-// 3. Constant Expression Evaluation (for index extents)
-// ============================================================================
-
-/// Try to evaluate an AST expression to a compile-time int64.
 let rec evalConstExpr (env: TypeEnv) (expr: Expr) : int64 option =
     match expr with
     | ExprLit (LitInt n) -> Some n
@@ -846,7 +167,7 @@ let rec lowerTypeExpr (env: TypeEnv) (ty: TypeExpr) : IRType =
                 // list (all-string → ETString, else ETInt64). The C++
                 // typedef emitted alongside resolves the alias to the
                 // matching primitive.
-                let underlying = IR.EnumValue.underlyingElemType values
+                let underlying = EnumValue.underlyingElemType values
                 IRTIdxTagged (IRTScalar underlying, IRefNamed name)
             | None ->
                 // If this name is in the type variable scope (introduced by T^k
@@ -1077,7 +398,7 @@ and lowerElemType env ty : IRType =
         | Some (TDIIndexType _) ->
             IRTIdxTagged (IRTScalar ETInt64, IRefNamed name)
         | Some (TDIEnumIdx (_, _, values, _)) ->
-            let underlying = IR.EnumValue.underlyingElemType values
+            let underlying = EnumValue.underlyingElemType values
             IRTIdxTagged (IRTScalar underlying, IRefNamed name)
         | _ -> lowerTypeExpr env ty   // struct, sum, alias, type variable, etc.
     | TyIdx _ | TySymIdx _ | TyAntisymIdx _ | TyHermitianIdx _ ->
@@ -1379,7 +700,8 @@ let rec collectFreeVars (bound: Set<string>) (expr: Expr) : Set<string> =
         let mutable b = bound
         let mutable free = Set.empty
         for stmt in stmts do
-            match stmt with
+            match unwrapStmt stmt with
+            | StmtSpanned _ -> ()  // unreachable: unwrapStmt strips the annotation
             | StmtLet binding ->
                 free <- Set.union free (collectFreeVars b binding.Value)
                 b <- patternNames binding.Pattern |> List.fold (fun s n -> Set.add n s) b
@@ -1391,7 +713,8 @@ let rec collectFreeVars (bound: Set<string>) (expr: Expr) : Set<string> =
                 free <- Set.union free (collectFreeVars b rangeExpr)
                 let innerBound = Set.add varName b
                 for bodyStmt in bodyStmts do
-                    match bodyStmt with
+                    match unwrapStmt bodyStmt with
+                    | StmtSpanned _ -> ()  // unreachable: unwrapStmt strips the annotation
                     | StmtLet binding ->
                         free <- Set.union free (collectFreeVars innerBound binding.Value)
                     | StmtAssign (lhs, _, rhs) ->
@@ -2230,46 +1553,7 @@ let rec inferExpr (env: TypeEnv) (expr: Expr) : TypeResult<TypedExpr> =
 
     // ---- Unary operations ----
     | ExprUnaryOp (op, operand) ->
-        inferExpr env operand |> Result.bind (fun tOp ->
-            // OpConj (conj): result type equals operand type. Conjugate of a
-            // complex is complex; of a real, the identity (real). Permissive,
-            // mirroring OpNeg — no type guard. Codegen emits std::conj only for
-            // complex element types; reals pass through unchanged.
-            //
-            // WHOLE-ARRAY conj: when the operand is an array (not a scalar), the
-            // scalar IRUnaryOp(IRConj, _) path is wrong — it would emit a scalar
-            // std::conj against an array value and fall through to a bare
-            // passthrough (losing the Array<> wrapper and applying no conjugation).
-            // Route it to TExprArrayConjugate, the whole-array eager conjugate
-            // (same node the Hermitian-transpose TConjugatedCopy path uses), which
-            // materializes a fresh same-shape array with a pool conjugation loop.
-            // This is what makes `hermitian(A) = conj(transpose(A,[0,1]))` work,
-            // and it fixes surface `conj(wholeArray)` generally.
-            match op, tOp.Type with
-            | OpConj, ArrayElem _ ->
-                Ok (mkTyped (TExprArrayConjugate tOp) tOp.Type)
-            | _ ->
-                let resTy = match op with
-                            | OpNot -> IRTScalar ETBool
-                            | OpNeg -> tOp.Type
-                            | OpConj -> tOp.Type
-                Ok (mkTyped (TExprUnaryOp (op, tOp)) resTy))
-
-    // ---- Module-qualified value/function: `Math.pi`, `MathLib.double(x)` ----
-    // These two cases must precede the method-call and struct-field handlers
-    // because `Math` would otherwise be looked up as a value and fail. The
-    // DeclImport handler registers imported entries under qualified names
-    // (`Math.pi`, `MathLib.double`); when the form is `ExprVar n . field`
-    // and the qualified name resolves, we treat the access as a direct
-    // variable reference. Falls through to the existing struct/method
-    // handlers when the qualified name is not registered.
-
-    // ---- Provider compound read: alias.load_compound(var, mask) ----
-    // Rides the generic field-call shape (no new syntax). The mask is any
-    // integer array; compoundViewType validates full-dimension coverage and
-    // yields the compact Compound<T, RANK> view type. The maskIR carried in the
-    // type is a unit placeholder: codegen recovers the actual mask variable by
-    // name from the argument shape (ProviderReadSpec), not from the type.
+        inferUnaryOp env op operand
     | ExprApp (ExprField (ExprVar alias, "load_compound"), [varE; maskE])
         when (match lookupVar alias env with
               | Some vi ->
@@ -2308,42 +1592,7 @@ let rec inferExpr (env: TypeEnv) (expr: Expr) : TypeResult<TypedExpr> =
 
     // ---- Method call: obj.method(args) → impl resolution ----
     | ExprApp (ExprField (obj, method), args) ->
-        inferExpr env obj |> Result.bind (fun tObj ->
-        args |> List.map (inferExpr env) |> sequenceResults |> Result.bind (fun tArgs ->
-            // Check if this is an impl method call
-            match tObj.Type with
-            | IRTNamed typeName ->
-                match Map.tryFind (typeName, method) env.ImplMethods with
-                | Some (funcVarId, funcType) ->
-                    // Resolve to mangled function call: TypeName__method(self, args)
-                    let mangledName = sprintf "%s__%s" typeName method
-                    let retTy = match funcType with FuncElem (_, ret) -> ret | _ -> env.Subst.Fresh()
-                    let tFunc = mkTyped (TExprVar (mangledName, funcVarId, None)) funcType
-                    Ok (mkTyped (TExprApp (tFunc, tObj :: tArgs)) retTy)
-                | None ->
-                    // Not an impl method — treat as struct field access + application
-                    let (fieldTy, fieldIdx) =
-                        match lookupTypeDef typeName env with
-                        | Some (TDIStruct (_, _, fields)) ->
-                            let idx = fields |> List.tryFindIndex (fun (n, _) -> n = method)
-                            let ty = fields |> List.tryFind (fun (n, _) -> n = method) |> Option.map snd
-                            (ty |> Option.defaultValue (env.Subst.Fresh()),
-                             idx |> Option.defaultValue 0)
-                        | _ -> (env.Subst.Fresh(), 0)
-                    let tField = mkTyped (TExprField (tObj, method, fieldIdx)) fieldTy
-                    // Route through dispatchAppOrIndex so array-typed fields
-                    // become TExprIndex (with tag-checking) rather than
-                    // TExprApp. Without this, `data.region(s)` would lower to
-                    // IRApp and emit a C++ function call against the
-                    // Array<T,N> wrapper, which has no operator().
-                    dispatchAppOrIndex env tField tArgs
-            | _ ->
-                // Non-named type — regular field access + application
-                let tField = mkTyped (TExprField (tObj, method, 0)) (env.Subst.Fresh())
-                let retTy = env.Subst.Fresh()
-                Ok (mkTyped (TExprApp (tField, tArgs)) retTy)))
-
-    // ---- Application / Array indexing ----
+        inferMethodCall env obj method args
     | ExprApp (func, args) ->
         inferExpr env func |> Result.bind (fun tFunc ->
         args |> List.map (inferExpr env) |> sequenceResults |> Result.bind (fun tArgs ->
@@ -2361,54 +1610,7 @@ let rec inferExpr (env: TypeEnv) (expr: Expr) : TypeResult<TypedExpr> =
     // `std::get<n>(arr)` since no test before Phase D exercised bracket-
     // indexed reads on a real array.
     | ExprTupleIndex (tuple, index) ->
-        inferExpr env tuple |> Result.bind (fun tT ->
-        inferExpr env index |> Result.bind (fun tI ->
-            match env.Subst.Resolve(tT.Type) with
-            | ArrayElem arrTy ->
-                // One bracket = one index dimension. Mirrors ExprApp's
-                // tArgs.Length <= arrTy.IndexTypes.Length check.
-                let identity = match tT.Kind with TExprVar (_, _, id) -> id | _ -> None
-                // Tag check on the single index (same rule as ExprApp).
-                let tagMismatch =
-                    match arrTy.IndexTypes with
-                    | [] -> None
-                    | idxType :: _ ->
-                        match idxType.Tag with
-                        | Some tagName when not (tagName.StartsWith("__")) ->
-                            match env.Subst.Resolve tI.Type with
-                            | IRTIdxTagged (_, IRefNamed argName) when argName = tagName -> None
-                            | IRTIdxTagged (_, IRefNamed argName) ->
-                                Some (Other (sprintf
-                                    "Array index tag mismatch: slot expects '%s' but argument has type '%s'."
-                                    tagName argName))
-                            | IRTIdxTagged (_, IRefAnon _) ->
-                                Some (Other (sprintf
-                                    "Array index tag mismatch: slot expects named tag '%s' but argument is an anonymous index value."
-                                    tagName))
-                            | IRTScalar (ETInt32 | ETInt64) ->
-                                emitWarning env (sprintf
-                                    "Array indexed with untagged integer where slot expects tag '%s'. Consider an explicit cast like `(expr : %s)` or iterate via `range<%s>` to flow the tag automatically."
-                                    tagName tagName tagName)
-                                None
-                            | _ -> None
-                        | _ -> None
-                match tagMismatch with
-                | Some err -> Error err
-                | None ->
-                    if 1 = arrTy.IndexTypes.Length then
-                        Ok (mkTyped (TExprIndex (tT, [tI], identity)) arrTy.ElemType)
-                    elif 1 < arrTy.IndexTypes.Length then
-                        let remaining = arrTy.IndexTypes |> List.skip 1
-                        Ok (mkTyped (TExprIndex (tT, [tI], identity))
-                                    (mkArrayLike { arrTy with IndexTypes = remaining }))
-                    else
-                        Error (Other "array indexing: too many indices for array rank")
-            | _ ->
-                // Poly-pack / tuple indexing: result type is fresh — codegen
-                // resolves via std::get based on flat-leaf paths.
-                Ok (mkTyped (TExprTupleIndex (tT, tI)) (env.Subst.Fresh()))))
-
-    // ---- Field access ----
+        inferTupleIndex env tuple index
     | ExprField (ExprVar n, field)
         when (lookupVar (sprintf "%s.%s" n field) env).IsSome ->
         // Module-qualified value access (e.g. `let tau = Math.pi * 2.0`).
@@ -2537,36 +1739,7 @@ let rec inferExpr (env: TypeEnv) (expr: Expr) : TypeResult<TypedExpr> =
 
     // ---- Zip / Stack ----
     | ExprZip exprs ->
-        exprs |> List.map (inferExpr env) |> sequenceResults |> Result.bind (fun tExprs ->
-            // Zip produces an array with tuple element type, shared prefix index space.
-            // zip(A : T1^r1, B : T2^r2) -> Array<Tuple(T1,T2), min(r1,r2), shared_indices>
-            let arrayTypes =
-                tExprs |> List.choose (fun te ->
-                    match env.Subst.Resolve te.Type with
-                    | ArrayElem at -> Some at
-                    | _ -> None)
-            if arrayTypes.Length = tExprs.Length && arrayTypes.Length >= 2 then
-                // All inputs are arrays — build proper zip type
-                let minRank = arrayTypes |> List.map (fun at -> at.IndexTypes.Length) |> List.min
-                let sharedIndices = arrayTypes.[0].IndexTypes |> List.take minRank
-                // Element types: for rank-equal arrays, the elem itself; for higher-rank, remaining slice
-                let elemTypes =
-                    arrayTypes |> List.map (fun at ->
-                        let extra = at.IndexTypes |> List.skip minRank
-                        if extra.IsEmpty then at.ElemType
-                        else mkArrayLike { at with IndexTypes = extra })
-                let tupleElemType =
-                    match elemTypes with
-                    | [single] -> single  // degenerate: single-array zip
-                    | _ -> IRTTuple elemTypes
-                // Infer a shared ElemType tag for the IRArrayType wrapper
-                // We use ETFloat64 as placeholder since the real element is a tuple
-                let zipArrayType =
-                    mkArrayArrow sharedIndices (IRTScalar ETFloat64) None  // placeholder; real elem is the tuple
-                Ok (mkTyped (TExprZip tExprs) zipArrayType)
-            else
-                // Fallback: not all arrays, or fewer than 2 — return tuple type
-                Ok (mkTyped (TExprZip tExprs) (IRTTuple (tExprs |> List.map (fun e -> e.Type)))))
+        inferZip env exprs
     | ExprStack exprs ->
         exprs |> List.map (inferExpr env) |> sequenceResults |> Result.bind (fun tExprs ->
             let elemTy = if tExprs.IsEmpty then IRTUnit else tExprs.[0].Type
@@ -2604,39 +1777,7 @@ let rec inferExpr (env: TypeEnv) (expr: Expr) : TypeResult<TypedExpr> =
     // freshly-derived mask must provably live over A's space even when A's
     // indices are anonymous.
     | ExprMask (array, pred) ->
-        inferExpr env array |> Result.bind (fun tArr ->
-        inferExpr env pred |> Result.bind (fun tPred ->
-            requireArrayArg env tArr "mask" |> Result.bind (fun arrTy ->
-                // The predicate is `Element → Bool`. inferExpr typed it
-                // without knowing the element type, so its param starts as
-                // a fresh IRTInfer. Without explicit unification here, the
-                // var stays unbound and zonkType's default (Float64) kicks
-                // in — which then breaks bodies that use integer ops on
-                // int arrays (`x % 2`) or struct field access on struct
-                // arrays (`p.a`). Unify the predicate's param with the
-                // array's element type so zonking propagates the right
-                // type into the standalone-lifted function signature and
-                // the body's operator/field-access positions resolve
-                // against the real element type.
-                let unifyPredParam =
-                    match tPred.Kind with
-                    | TExprLambda info when info.Params.Length = 1 ->
-                        unify env.Subst info.Params.[0].Type arrTy.ElemType
-                    | _ -> Ok ()
-                unifyPredParam |> Result.bind (fun () ->
-                    let resultType = mkArrayArrow arrTy.IndexTypes (IRTScalar ETBool) None
-                    Ok (mkTyped (TExprMask (tArr, tPred)) resultType)))))
-
-    // compound(dense, mask) -- scatter a dense array into a CompoundIdx-typed
-    // compact array via a bool mask over the leading dims (formalism 4.5). The
-    // in-language analog of the provider's load_compound: same validation
-    // (compoundViewType checks the mask covers a leading prefix of dense's dims
-    // and yields the compact Compound<T, RANK> view type), but the dense source
-    // is a Blade array value rather than a NetCDF variable. The mask must be a
-    // bool array; compoundViewType already accepts ETBool masks. Lowering records
-    // (denseIR, maskIR) in CompoundInits; codegen materializes the index (P0,
-    // genCompoundIndexFromMask), scatters dense -> compact, and bundles a
-    // Compound<T, RANK> wrapper.
+        inferMask env array pred
     | ExprCompound (dense, mask) ->
         inferExpr env dense |> Result.bind (fun tDense ->
         inferExpr env mask |> Result.bind (fun tMask ->
@@ -2703,142 +1844,9 @@ let rec inferExpr (env: TypeEnv) (expr: Expr) : TypeResult<TypedExpr> =
     // Precondition: all key arrays share the same outer index (same length;
     // i-th element of each represents the same record).
     | ExprGroupKeys keys ->
-        match keys with
-        | [] ->
-            Error (Other "group_keys requires at least one key array; got empty argument list")
-        | [singleKey] ->
-            // Existing single-key path, unchanged.
-            inferExpr env singleKey |> Result.bind (fun tKeys ->
-                requireArrayArg env tKeys "group_keys" |> Result.bind (fun arrTy ->
-                    let sourceIdx =
-                        if arrTy.IndexTypes.Length > 0 then arrTy.IndexTypes.[0]
-                        else {
-                            Id = env.Builder.FreshId(); Rank = 1
-                            Extent = IRParam ("__src", 0, IRTNat None)
-                            Symmetry = SymNone; Tag = None; IxKind = IxKPlain
-                            Kind = SDimension; Dependencies = []
-                        }
-                    let namedRef =
-                        match arrTy.ElemType with
-                        | IRTIdxTagged (_, IRefNamed name) -> Some name
-                        | _ -> None
-                    let (outerIdx, enumValues) =
-                        match namedRef with
-                        | Some name ->
-                            match lookupTypeDef name env with
-                            | Some (TDIIndexType (_, idx, _)) ->
-                                ({ idx with Id = env.Builder.FreshId(); Tag = Some name; IxKind = ixKindOfTag (Some name) }, None)
-                            | Some (TDIEnumIdx (_, idx, values, _)) ->
-                                ({ idx with Id = env.Builder.FreshId(); Tag = Some name; IxKind = ixKindOfTag (Some name) }, Some values)
-                            | _ ->
-                                ({ Id = env.Builder.FreshId(); Rank = 1
-                                   Extent = IRParam ("__ngroups", 0, IRTNat None)
-                                   Symmetry = SymNone; Tag = None; IxKind = IxKPlain
-                                   Kind = SDimension; Dependencies = [] }, None)
-                        | None ->
-                            ({ Id = env.Builder.FreshId(); Rank = 1
-                               Extent = IRParam ("__ngroups", 0, IRTNat None)
-                               Symmetry = SymNone; Tag = None; IxKind = IxKPlain
-                               Kind = SDimension; Dependencies = [] }, None)
-                    let gkType = IRTGroupKeys (outerIdx, sourceIdx, enumValues)
-                    Ok (mkTyped (TExprGroupKeys [tKeys]) gkType)))
-        | multipleKeys ->
-            // Compound case: infer all keys, verify shared outer index,
-            // build a GroupKeys result with dynamic compound outer.
-            let inferAll =
-                multipleKeys
-                |> List.fold (fun accRes k ->
-                    accRes |> Result.bind (fun acc ->
-                        inferExpr env k |> Result.bind (fun tk ->
-                            requireArrayArg env tk "group_keys" |> Result.map (fun arrTy ->
-                                acc @ [(tk, arrTy)]))))
-                    (Ok [])
-            inferAll |> Result.bind (fun pairs ->
-                // Precondition check: all key arrays must be rank-1 and
-                // share an outer index. We compare extent expressions
-                // structurally — Blade's typechecker is structural enough
-                // that the same Idx<N> annotation produces equal Extent
-                // values across multiple bindings.
-                let firstSource =
-                    pairs |> List.head |> snd |> fun ty -> ty.IndexTypes.[0]
-                let allShareOuter =
-                    pairs |> List.forall (fun (_, ty) ->
-                        ty.IndexTypes.Length = 1
-                        && ty.IndexTypes.[0].Extent = firstSource.Extent)
-                if not allShareOuter then
-                    Error (Other (
-                        "group_keys: all key arrays must be rank-1 and share the same outer index (same length). " +
-                        "Compound grouping requires each i-th element of every key array to refer to the same record."))
-                else
-                    // Compound outer: dynamic extent, tagged so codegen
-                    // recognizes "this is compound-dynamic, dispatch via
-                    // tuple unordered_map". The tag name reserves
-                    // `__compoundidx_static` for the future mask-derived
-                    // path (TyCompoundIdx) which is statically evaluable
-                    // — that case would have Extent = IRLit (cardinality)
-                    // and a different codegen story. Component types are
-                    // not carried in IRTGroupKeys today; codegen recovers
-                    // them from the IRGroupKeys node's keys list at emit
-                    // time, and IDE tooltips would do the same.
-                    let outerIdx = {
-                        Id = env.Builder.FreshId(); Rank = 1
-                        Extent = IRParam ("__ngroups", 0, IRTNat None)
-                        Symmetry = SymNone
-                        Tag = Some "__compoundidx_dynamic"; IxKind = IxKCompoundDynamic
-                        Kind = SDimension; Dependencies = []
-                    }
-                    let gkType = IRTGroupKeys (outerIdx, firstSource, None)
-                    let tKeys = pairs |> List.map fst
-                    Ok (mkTyped (TExprGroupKeys tKeys) gkType))
-
-    // group_by(values, grouping) — apply GroupKeys to a values array
-    // Result: rank-2 array (groups × members), with GroupIdx
-    // Tags ("__group_outer", "__group_member") signal to codegen to use ragged peel.
+        inferGroupKeys env keys
     | ExprGroupBy (values, grouping) ->
-        inferExpr env values |> Result.bind (fun tVals ->
-        inferExpr env grouping |> Result.bind (fun tGrouping ->
-            requireArrayArg env tVals "group_by" |> Result.bind (fun arrTy ->
-                // Extract group structure from GroupKeys type, or fall back for raw key arrays
-                let (outerIdx, memberIdx) =
-                    match env.Subst.Resolve(tGrouping.Type) with
-                    | IRTGroupKeys (outer, _, _) ->
-                        let member_ = {
-                            Id = env.Builder.FreshId(); Rank = 1
-                            Extent = IRParam ("__groupsz", 0, IRTNat None)
-                            Symmetry = SymNone; Tag = Some "__group_member"; IxKind = IxKGroupMember
-                            Kind = SDimension; Dependencies = []
-                        }
-                        ({ outer with Id = env.Builder.FreshId(); Tag = Some "__group_outer"; IxKind = IxKGroupOuter }, member_)
-                    | _ ->
-                        // Fallback: treat second arg as raw key array (backward compat)
-                        let outer = {
-                            Id = env.Builder.FreshId(); Rank = 1
-                            Extent = IRParam ("__ngroups", 0, IRTNat None)
-                            Symmetry = SymNone; Tag = Some "__group_outer"; IxKind = IxKGroupOuter
-                            Kind = SDimension; Dependencies = []
-                        }
-                        let member_ = {
-                            Id = env.Builder.FreshId(); Rank = 1
-                            Extent = IRParam ("__groupsz", 0, IRTNat None)
-                            Symmetry = SymNone; Tag = Some "__group_member"; IxKind = IxKGroupMember
-                            Kind = SDimension; Dependencies = []
-                        }
-                        (outer, member_)
-                let resultType = mkArrayArrow [outerIdx; memberIdx] arrTy.ElemType None
-                Ok (mkTyped (TExprGroupBy (tVals, tGrouping)) resultType))))
-
-    // sort(array, key) — stable sort by ascending key.
-    // Phase 1 (current): eager materialization. Result is a new physical array
-    // with the same element type and extent as the input, indexed by a fresh
-    // anonymous index (mask-style). The order property is NOT tracked in the
-    // type system yet — that's deferred to a future "key map chain" subsystem.
-    //
-    // The eventual direction is lazy: sort produces a chain handle recording
-    // (key_fn, permutation), with materialization deferred to first access.
-    // Rationale: deferring evaluation preserves optimization headroom — the
-    // compiler can analyze chains of operations before any layout is committed,
-    // enabling sort-skip, merge-style joins, and other rearrangements.
-    // Caching strategies are downstream of those analyses, not a substitute.
+        inferGroupBy env values grouping
     | ExprSort (array, key) ->
         inferExpr env array |> Result.bind (fun tArr ->
         inferExpr env key |> Result.bind (fun tKey ->
@@ -2859,495 +1867,19 @@ let rec inferExpr (env: TypeEnv) (expr: Expr) : TypeResult<TypedExpr> =
                     Ok (mkTyped (TExprSort (tArr, tKey)) resultType))))
 
     | ExprTranspose (array, d1, d2) ->
-        inferExpr env array |> Result.bind (fun tArr ->
-            requireArrayArg env tArr "transpose" |> Result.bind (fun arrTy ->
-                // Map a logical DIMENSION index to its INDEX-TYPE slot. A slot
-                // of arity k occupies k consecutive dimensions; we walk the
-                // slot list accumulating arities until the target dimension
-                // falls inside a slot. Returns (slotIndex, slotArity, dimWithinSlot).
-                // For the first cut every reachable slot is arity-1, so this is
-                // identity — but writing it properly keeps the gate correct in
-                // the presence of compound groups elsewhere in the array.
-                let totalDims = arrTy.IndexTypes |> List.sumBy (fun ix -> max 1 ix.Rank)
-                let dimToSlot (d: int) : Result<int * int * int, TypeError> =
-                    if d < 0 || d >= totalDims then
-                        Error (Other (sprintf "transpose: axis %d is out of range for a rank-%d array (valid axes 0..%d)" d totalDims (totalDims - 1)))
-                    else
-                        let rec walk slotIdx acc remaining =
-                            match remaining with
-                            | [] -> Error (Other (sprintf "transpose: axis %d out of range (internal)" d))
-                            | (ix: IRIndexType) :: rest ->
-                                let ar = max 1 ix.Rank
-                                if d < acc + ar then Ok (slotIdx, ar, d - acc)
-                                else walk (slotIdx + 1) (acc + ar) rest
-                        walk 0 0 arrTy.IndexTypes
-                if d1 = d2 then
-                    Error (Other (sprintf "transpose: the two axes must differ (got [%d, %d]); swapping an axis with itself is the identity" d1 d2))
-                else
-                    dimToSlot d1 |> Result.bind (fun (slot1, ar1, _) ->
-                    dimToSlot d2 |> Result.bind (fun (slot2, ar2, _) ->
-                        let ix1 = arrTy.IndexTypes.[slot1]
-                        let ix2 = arrTy.IndexTypes.[slot2]
-                        if slot1 = slot2 then
-                            // Both dimensions lie INSIDE one index type — an intra-
-                            // group swap. The index-type class decides the behavior
-                            // (storage-preserving): symmetric -> identity, antisym ->
-                            // whole-array negation, hermitian -> whole-array
-                            // conjugation. No decompaction, no dense blow-up.
-                            (match (behaviorOf ix1).TransposeWithin () with
-                             | TIdentity ->
-                                // A(i,j) = A(j,i): storage unchanged. Erase the
-                                // transpose; the result IS the source array.
-                                Ok tArr
-                             | TNegatedCopy ->
-                                Ok (mkTyped (TExprArrayNegate tArr) tArr.Type)
-                             | TConjugatedCopy ->
-                                Ok (mkTyped (TExprArrayConjugate tArr) tArr.Type)
-                             | TDataMove ->
-                                // A plain (SymNone) slot of arity >= 2 swapped
-                                // within itself: a genuine dimensional swap inside a
-                                // rectangular compound. Not yet emitted (the data-
-                                // move materializer handles cross-slot rank-1 only).
-                                Error (Other (sprintf "transpose: swapping two dimensions within a single rectangular index group (rank %d) is not yet supported." ar1))
-                             | TRequiresDecompaction reason ->
-                                Error (Other (sprintf "transpose: %s" reason)))
-                        else
-                            // Different slots. The structure-preserving case is two
-                            // plain (arity-1 SymNone) axes -> physical data move.
-                            // Anything else means one axis is bound in a compact
-                            // group and the other is outside it: swapping them would
-                            // break that group's symmetry. That is a structure-
-                            // changing operation requiring explicit decompaction
-                            // (decompact then transpose), not a silent transpose.
-                            let plain ar (ix: IRIndexType) = ar = 1 && ix.Symmetry = SymNone
-                            if plain ar1 ix1 && plain ar2 ix2 then
-                                let swapped =
-                                    arrTy.IndexTypes
-                                    |> List.mapi (fun i ix ->
-                                        if i = slot1 then arrTy.IndexTypes.[slot2]
-                                        elif i = slot2 then arrTy.IndexTypes.[slot1]
-                                        else ix)
-                                let resultType = mkArrayArrow swapped arrTy.ElemType None
-                                Ok (mkTyped (TExprTranspose (tArr, d1, d2)) resultType)
-                            else
-                                let culprit, cd, car, cix =
-                                    if not (plain ar1 ix1) then "first", d1, ar1, ix1 else "second", d2, ar2, ix2
-                                Error (Other (sprintf "transpose: the %s axis (dim %d) is bound in a %A index group (rank %d), and the other axis is outside it. Swapping across a group boundary would decompose the group's symmetry. Decompact the axis first (decompact then transpose)." culprit cd cix.Symmetry car))))))
-
+        inferTranspose env array d1 d2
     | ExprGram (leftE, rightE) ->
-        // gram(A, B) = A * B^H:  result[i][j] = sum_k A[i][k] * conj(B[j][k])
-        // A : m x n, B : p x n (shared contracted dim n) -> result : m x p.
-        // Element type: complex iff EITHER operand is complex (conj is the
-        // identity on reals, so a real/complex mix still conjugates correctly).
-        // Symmetry: when A and B are the SAME array (syntactically the same
-        // variable -> conservative, never claims false symmetry), the result is
-        // square (m = p) and SymHermitian (complex) / SymSymmetric (real),
-        // computed by the triangular upper-half scatter. Otherwise it is a
-        // general dense m x p array (SymNone).
-        inferExpr env leftE |> Result.bind (fun tL ->
-        inferExpr env rightE |> Result.bind (fun tR ->
-            requireArrayArg env tL "gram" |> Result.bind (fun lTy ->
-            requireArrayArg env tR "gram" |> Result.bind (fun rTy ->
-                let lDims = lTy.IndexTypes |> List.sumBy (fun ix -> max 1 ix.Rank)
-                let rDims = rTy.IndexTypes |> List.sumBy (fun ix -> max 1 ix.Rank)
-                if lDims <> 2 || rDims <> 2 then
-                    Error (Other (sprintf "gram(A, B): both operands must be rank-2 (matrix) arrays; got rank-%d and rank-%d. gram contracts the trailing axis: A (m x n), B (p x n) -> m x p." lDims rDims))
-                else
-                    // Extents: outer (m / p) and inner contracted (n) per operand.
-                    let lOuter = lTy.IndexTypes.[0].Extent
-                    let lInner = lTy.IndexTypes.[1].Extent
-                    let rOuter = rTy.IndexTypes.[0].Extent
-                    let rInner = rTy.IndexTypes.[1].Extent
-                    // Static contracted-dim mismatch is a hard error; otherwise trust.
-                    let innerMismatch =
-                        match tryEvalIntIR lInner, tryEvalIntIR rInner with
-                        | Some a, Some b -> a <> b
-                        | _ -> false
-                    if innerMismatch then
-                        Error (Other "gram(A, B): the contracted (trailing) dimensions of A and B must match.")
-                    else
-                        // Element type join: complex if either operand is complex.
-                        let isComplexElem (t: IRType) =
-                            match t with
-                            | IRTScalar (ETComplex64 | ETComplex128) -> true
-                            | _ -> false
-                        let outElem =
-                            if isComplexElem lTy.ElemType then lTy.ElemType
-                            elif isComplexElem rTy.ElemType then rTy.ElemType
-                            else lTy.ElemType
-                        let isComplex = isComplexElem outElem
-                        // Conservative same-array test: both bare vars, same name.
-                        let sameArray =
-                            match tL.Kind, tR.Kind with
-                            | TExprVar (n1, _, _), TExprVar (n2, _, _) -> n1 = n2
-                            | _ -> false
-                        let freshSlot (ext: IRExpr) (sym: SymmetryClass) (rank: int) =
-                            { Id = env.Builder.FreshId(); Rank = rank; Extent = ext
-                              Symmetry = sym; Tag = None; IxKind = IxKPlain; Kind = SDimension; Dependencies = [] }
-                        let resultType =
-                            if sameArray then
-                                // Square m x m, compact group of arity 2 carrying the
-                                // (anti-)symmetry: Hermitian (complex) or symmetric.
-                                let sym = if isComplex then SymHermitian else SymSymmetric
-                                let grp = { (freshSlot lOuter sym 2) with Extent = lOuter }
-                                mkArrayArrow [grp] outElem None
-                            else
-                                // General dense m x p (two independent plain axes).
-                                let s0 = freshSlot lOuter SymNone 1
-                                let s1 = freshSlot rOuter SymNone 1
-                                mkArrayArrow [s0; s1] outElem None
-                        Ok (mkTyped (TExprGram (tL, tR, sameArray)) resultType)))))
-
+        inferGram env leftE rightE
     | ExprDecompact (array, d) ->
-        inferExpr env array |> Result.bind (fun tArr ->
-            requireArrayArg env tArr "decompact" |> Result.bind (fun arrTy ->
-                // Resolve the logical dimension d to (slotIndex, slotArity,
-                // posInSlot). A compact slot of arity r spans r consecutive
-                // dimensions; posInSlot in [0, r) says which component within
-                // the group d targets — that position decides peel-first /
-                // peel-last / peel-middle.
-                let totalDims = arrTy.IndexTypes |> List.sumBy (fun ix -> max 1 ix.Rank)
-                let dimToSlot (dd: int) : Result<int * int * int, TypeError> =
-                    if dd < 0 || dd >= totalDims then
-                        Error (Other (sprintf "decompact: dimension %d is out of range for a rank-%d array (valid dims 0..%d)" dd totalDims (totalDims - 1)))
-                    else
-                        let rec walk slotIdx acc remaining =
-                            match remaining with
-                            | [] -> Error (Other (sprintf "decompact: dimension %d out of range (internal)" dd))
-                            | (ix: IRIndexType) :: rest ->
-                                let ar = max 1 ix.Rank
-                                if dd < acc + ar then Ok (slotIdx, ar, dd - acc)
-                                else walk (slotIdx + 1) (acc + ar) rest
-                        walk 0 0 arrTy.IndexTypes
-                dimToSlot d |> Result.bind (fun (slot, r, posInSlot) ->
-                    let ix = arrTy.IndexTypes.[slot]
-                    if r < 2 || ix.Symmetry = SymNone then
-                        Error (Other (sprintf "decompact: dimension %d is a plain (rank-1, non-symmetric) axis; there is nothing to decompact. decompact pulls a component out of a compact group (SymIdx/AntisymIdx/HermitianIdx)." d))
-                    else
-                    // Codegen scope: the compact group being decompacted must be
-                    // the LAST index slot, with any preceding slots being plain
-                    // free Idx singletons (arity-1, SymNone). This is exactly the
-                    // shape produced by a chained "to-the-right-only" peel
-                    // (decompact frees one dim at a time, accumulating free Idx
-                    // dims on the left while the residual group stays last), so
-                    // it enables composed full densification. The surrounding
-                    // free dims are emitted as an outer loop product wrapping the
-                    // existing last-slot fission scatter (their indices map
-                    // identically source->dest). Other arrangements (compact slot
-                    // not last, or non-singleton surrounding slots) remain
-                    // deferred.
-                    let leadingSlots = arrTy.IndexTypes |> List.take slot
-                    let groupIsLast = (slot = arrTy.IndexTypes.Length - 1)
-                    let leadingAllFreeSingletons =
-                        leadingSlots |> List.forall (fun s -> (max 1 s.Rank) = 1 && s.Symmetry = SymNone)
-                    if not (groupIsLast && leadingAllFreeSingletons) then
-                        Error (Other (sprintf "decompact: only a compact group in the LAST index slot, optionally preceded by plain free Idx dimensions, is supported by codegen (the chained to-the-right peel shape). The array here has %d index slots with the compact group at slot %d." arrTy.IndexTypes.Length slot))
-                    elif leadingSlots.Length > 0 && ix.Symmetry <> SymSymmetric then
-                        // Surrounding-dim wrapping is currently wired only for the
-                        // symmetric fission scatter (the gather form). Antisym /
-                        // Hermitian fission with leading free dims is not yet
-                        // emitted, so reject rather than miscompile.
-                        Error (Other "decompact: surrounding free dimensions are currently supported only for symmetric groups; antisymmetric/Hermitian groups with preceding free dimensions are not yet wired.")
-                    elif ix.Symmetry = SymHermitian && r >= 3 then
-                        // Rank-2 Hermitian (the only Hermitian arrays a producer
-                        // makes today, via gram) dissolves to a dense n×n with the
-                        // lower triangle conjugated — handled below. Rank >= 3
-                        // Hermitian has no producer yet and its compact-residual
-                        // conjugate semantics aren't worked out, so reject.
-                        Error (Other "decompact: rank >= 3 SymHermitian is not yet supported (no producer exists for rank >= 3 Hermitian arrays; gram produces rank-2 Hermitian, which decompacts to a dense conjugate-mirrored matrix).")
-                    else
-                        // SYMMETRIC decompact: general fission, any rank, any cut
-                        // (peel-first/last/middle), via the gather materializer.
-                        // ANTISYMMETRIC decompact: rank 2 dissolves to dense n×n;
-                        // rank >= 3 BOUNDARY cuts leave one residual antisym group,
-                        // now allocatable via the per-group-strict mask
-                        // (allocate_strict) with the sign applied lazily on read
-                        // (canon_* transform). Codegen-supported, so not rejected.
-                        // Build the replacement slots: left remainder (arity
-                        // posInSlot) + extracted Idx + right remainder (arity
-                        // r-1-posInSlot). Each remainder of arity a>=2 becomes a
-                        // fresh SymIdx<a> of the SAME symmetry class (fresh Id =
-                        // nominally distinct, since the two halves' symmetries are
-                        // now independent relations); a=1 degenerates to a plain
-                        // Idx; a=0 is omitted. For the v1 r=2 case this always
-                        // yields two plain Idx (the group fully dissolves).
-                        let mkRemainder (a: int) : IRIndexType list =
-                            if a <= 0 then []
-                            elif a = 1 then
-                                [ { ix with Id = env.Builder.FreshId(); Rank = 1; Symmetry = SymNone } ]
-                            else
-                                [ { ix with Id = env.Builder.FreshId(); Rank = a } ]
-                        let extracted =
-                            { ix with Id = env.Builder.FreshId(); Rank = 1; Symmetry = SymNone }
-                        let leftRem = mkRemainder posInSlot
-                        let rightRem = mkRemainder (r - 1 - posInSlot)
-                        let replacement = leftRem @ [extracted] @ rightRem
-                        let newIndexTypes =
-                            arrTy.IndexTypes
-                            |> List.mapi (fun i s -> (i, s))
-                            |> List.collect (fun (i, s) -> if i = slot then replacement else [s])
-                        let resultType = mkArrayArrow newIndexTypes arrTy.ElemType None
-                        Ok (mkTyped (TExprDecompact (tArr, d)) resultType))))
-
-    // reduce(array, kernel) — T/S reduction primitive.
-    // Consumes the innermost dimension via a binary kernel. For rank-1 input,
-    // produces a scalar of the element type. Multi-rank reduction is deferred.
-    //
-    // Empty-array policy (post-extents integration):
-    //   - If extent is statically known to be 0  → typecheck error (caller bug)
-    //   - If extent is statically known to be > 0 → typecheck OK; codegen emits
-    //                                              standard loop without guard
-    //   - If extent is dynamic                   → typecheck OK; codegen adds
-    //                                              a runtime guard that aborts
-    //                                              cleanly on empty
-    //
-    // A 3-arg form `reduce(arr, op, init)` for well-defined empty handling
-    // (returning init) is a future addition for the dynamic case if a use
-    // case demands silently-handled empties.
+        inferDecompact env array d
     | ExprReduce (array, kernel) ->
-        inferExpr env array |> Result.bind (fun tArr ->
-        inferExpr env kernel |> Result.bind (fun tKernel ->
-            // Drive type inference for unannotated kernel parameters: when
-            // the array argument's resolved type is an unconstrained
-            // inference variable (e.g., `lambda(g) -> reduce(g, (+))` with
-            // no type annotation on `g`), bind it to a fresh rank-1 array.
-            //
-            // Element type is deduced from the kernel's first argument
-            // type:
-            //   1. If the kernel resolves to `FuncElem (paramTys, _)` and
-            //      `paramTys.[0]` resolves to a concrete `IRTScalar et`,
-            //      use `et`. Catches typed-arg kernels like
-            //      `lambda(x: Int64, y: Int64) -> x + y` and untyped
-            //      lambdas whose body has unified the params with a
-            //      concrete elem type via literals or other constraints.
-            //   2. Otherwise default to Float64. Operator sections like
-            //      `(+)` always have fresh type variables for args, so
-            //      they hit this path — which matches what
-            //      lowerTypedSection emits in the IR (sections are
-            //      hardcoded to Float64). Untyped lambdas with
-            //      uninferable bodies also fall through here.
-            //
-            // The unification only fires when the resolved array type is
-            // genuinely unconstrained; concrete non-array types fall
-            // through to the existing error path. For non-Float64 source
-            // data with a section kernel, an explicit annotation on the
-            // kernel parameter is still required.
-            // Phase B2: ElemType field is IRType. Helper returns IRType
-            // directly; primitives are wrapped as IRTScalar at the
-            // resolution point.
-            //
-            // Phase 2 (post-Gap-2.5): with strict scalar unify, we cannot
-            // pin elem type to whatever the kernel's declared param type is —
-            // operator sections like `(+)` have hardcoded Float64 in their
-            // lowering, which would make `reduce(int_array, (+))` fail.
-            // So when the kernel is a section default (or when its first
-            // arg type is itself unresolved), we return a fresh inference
-            // variable that gets pinned later by buildApplyInfo's
-            // kernel-param unification against the actual source's per-row
-            // type.
-            //
-            // We DO use a concrete kernel-arg type when the kernel was
-            // declared with an explicit annotation (e.g., a user-written
-            // `lambda(x: Int64) -> ...`). That's a real constraint from
-            // the user; if it conflicts with the source array, that's a
-            // genuine type error worth surfacing.
-            let deduceElemFromKernel () : IRType =
-                // Heuristic: if the kernel's first param is unresolved
-                // (still an IRTInfer), the user didn't annotate it — so
-                // we return that same inference variable (not a fresh one)
-                // so subsequent inference flows through it: when
-                // buildApplyInfo unifies the reduce's per-row type with
-                // the source's elem type, the kernel's param type gets
-                // pinned at the same time. If we returned a fresh var,
-                // the section's existing T-var would never bind, leaving
-                // an unresolved type variable in the kernel's lowered
-                // form. If the first param IS concrete (annotated), we
-                // pin to that and let unification surface mismatches.
-                match env.Subst.Resolve(tKernel.Type) with
-                | FuncElem (paramTys, _) when not paramTys.IsEmpty ->
-                    let resolved = env.Subst.Resolve(paramTys.[0])
-                    match resolved with
-                    | IRTScalar _ -> resolved          // annotated: pin to user's type
-                    | IRTInfer _ -> resolved           // unresolved: defer via the same var
-                    | _ -> env.Builder.FreshInferType()
-                | _ -> env.Builder.FreshInferType()
-            (match env.Subst.Resolve(tArr.Type) with
-             | IRTInfer _ ->
-                let elemType = deduceElemFromKernel ()
-                let freshIdx = {
-                    Id = env.Builder.FreshId()
-                    Rank = 1
-                    Extent = IRParam ("__inferred_n", 0, IRTNat None)
-                    Symmetry = SymNone
-                    Tag = None; IxKind = IxKPlain
-                    Kind = SDimension
-                    Dependencies = []
-                }
-                let freshArr = mkArrayArrow [freshIdx] elemType None
-                unify env.Subst tArr.Type freshArr |> ignore
-             | _ -> ())
-            match env.Subst.Resolve(tArr.Type) with
-            | ArrayElem arrTy when arrTy.IndexTypes.Length = 1 ->
-                // Static guarantee: reject if we can prove the extent is 0.
-                match tryEvalIntIR arrTy.IndexTypes.[0].Extent with
-                | Some n when n <= 0L ->
-                    Error (Other (sprintf "reduce() rejects statically empty arrays (extent = %d). Empty input has no defined reduction without an identity; a 3-arg form `reduce(arr, op, init)` is the planned solution." n))
-                | _ ->
-                    // Stage 3c.2 follow-on: unify the kernel's param types
-                    // with the array's element type. The kernel arrives as
-                    // an arrow `(α, β) → γ` where α, β are typically still
-                    // unresolved inference variables — operator sections
-                    // lower polymorphically per `inferExpr ExprSection`,
-                    // and unannotated 2-arg lambdas don't get their param
-                    // types pinned by the body alone for `+`/`-`/etc.
-                    // Without this unification, zonking defaults the
-                    // section's IRTInfer to Float64, which then bakes a
-                    // literal-Float64 signature into the lifted function
-                    // and breaks reduces over non-Float64 source arrays
-                    // (the lifted function returns Float64 even when the
-                    // accumulator is Int64). Pin both params to the
-                    // array's element type so the section's polymorphism
-                    // resolves correctly before zonking. Result type
-                    // stays whatever the kernel declared (Bool for
-                    // comparison sections, elemType for arithmetic).
-                    let kernelUnify =
-                        match env.Subst.Resolve(tKernel.Type) with
-                        | FuncElem (paramTys, _) ->
-                            paramTys |> List.fold (fun acc pTy ->
-                                acc |> Result.bind (fun () -> unify env.Subst pTy arrTy.ElemType))
-                                (Ok ())
-                        | _ -> Ok ()
-                    kernelUnify |> Result.bind (fun () ->
-                        // arrTy.ElemType is IRType post-B2; return directly.
-                        let resultType = arrTy.ElemType
-                        Ok (mkTyped (TExprReduce (tArr, tKernel)) resultType))
-            | ArrayElem _ ->
-                Error (Other "reduce() currently supports only rank-1 arrays (multi-rank reduction over the innermost dimension is deferred)")
-            | _ ->
-                Error (Other "reduce() requires an array as first argument")))
-
-    // extents(array) — extent(s) along each dimension as Int64.
-    // Rank-1 → scalar Int64 (the single dim's extent).
-    // Rank-N → tuple (Int64, Int64, ..., Int64) of length N (one per dim,
-    //          outermost first).
-    // The codegen prefers a static literal when the index type's extent
-    // expression is statically evaluable (extends to literal arithmetic via
-    // tryEvalIntIR), matching rank()'s static-when-possible behavior.
-    //
-    // Future direction: a homogeneous List<Int64> collection type would be a
-    // more natural return type for the multi-rank case. Tuples work because
-    // all components share Int64, but they're heterogeneous in the type
-    // system. Switching to List when one becomes available is a future-
-    // compat note, not a blocker.
+        inferReduce env array kernel
     | ExprExtents array ->
-        inferExpr env array |> Result.bind (fun tArr ->
-            requireArrayArg env tArr "extents" |> Result.bind (fun arrTy ->
-                if arrTy.IndexTypes.Length = 1 then
-                    Ok (mkTyped (TExprExtents tArr) (IRTScalar ETInt64))
-                else
-                    // extents() is static-first: it answers from the ARGUMENT
-                    // TYPE when possible (IRExtent emits a literal for
-                    // statically-evaluable extents). A ragged-family slot has
-                    // no scalar extent AT ALL -- its extent is a per-row
-                    // function of the outer position -- so the multi-rank
-                    // tuple form is statically ill-posed for such arrays
-                    // (the runtime fallback would read a meaningless 0
-                    // placeholder). Reject with guidance instead.
-                    let raggedFamilySlot =
-                        arrTy.IndexTypes |> List.exists (fun ix ->
-                            match ix.IxKind with
-                            | IxKRagged | IxKRaggedInline | IxKRaggedOpaque
-                            | IxKDepInner
-                            | IxKGroupOuter | IxKGroupMember
-                            | IxKCompound | IxKCompoundDynamic -> true
-                            | _ -> false)
-                    if raggedFamilySlot then
-                        Error (Other "extents() on a ragged, grouped, or multi-rank compound array has no scalar answer for the masked/ragged dimensions. Use extents(row) on a peeled or indexed row, the lengths array, or extents on a rank-1 compound (which is its cardinality).")
-                    else
-                    // Multi-rank: tuple of Int64s, one per dimension
-                    let n = arrTy.IndexTypes.Length
-                    let tupleTy = IRTTuple (List.replicate n (IRTScalar ETInt64))
-                    Ok (mkTyped (TExprExtents tArr) tupleTy)))
-
+        inferExtents env array
     | ExprSequence exprs ->
-        exprs |> List.map (inferExpr env) |> sequenceResults |> Result.bind (fun tExprs ->
-            match tExprs with
-            | [] -> Ok (mkTyped (TExprSequence []) IRTUnit)
-            | [single] -> Ok single  // sequence(c) ≡ c
-            | _ ->
-                // Unify all element types — sequence is homogeneous
-                let elemType = (List.head tExprs).Type
-                let unifyResults =
-                    tExprs |> List.tail |> List.fold (fun acc e ->
-                        acc |> Result.bind (fun () -> unify env.Subst elemType e.Type)) (Ok ())
-                unifyResults |> Result.bind (fun () ->
-                    let resolved = env.Subst.Resolve(elemType)
-                    let n = tExprs.Length
-                    // Create anonymous Idx<N> for the sequence dimension
-                    let seqIdx = {
-                        Id = env.Builder.FreshId()
-                        Rank = 1
-                        Extent = IRLit (IRLitInt (int64 n))
-                        Symmetry = SymNone
-                        Tag = Some "__seq"; IxKind = IxKSeq
-                        Kind = SDimension
-                        Dependencies = []
-                    }
-                    // Result type: prepend Idx<N> to the element type
-                    let resultType =
-                        match resolved with
-                        | ArrayElem arrTy ->
-                            // Array elements: Idx<N> × inner index types
-                            mkArrayLike { arrTy with IndexTypes = seqIdx :: arrTy.IndexTypes }
-                        | IRTScalar et ->
-                            // Scalar elements: simple array Idx<N> → scalar
-                            mkArrayArrow [seqIdx] (IRTScalar et) None
-                        | _ ->
-                            // S3 tag: relic. Fallback to Float64 array for non-array,
-                            // non-scalar resolved types — should arguably be a typecheck
-                            // error, but preserving prior behavior.
-                            mkArrayArrow [seqIdx] (IRTScalar ETFloat64) None
-                    Ok (mkTyped (TExprSequence tExprs) resultType)))
+        inferSequence env exprs
     | ExprReplicate (count, body) ->
-        inferExpr env count |> Result.bind (fun tC ->
-        inferExpr env body |> Result.bind (fun tB ->
-            // Extract count as literal integer
-            let n =
-                match tC.Kind with
-                | TExprLit (LitInt v) -> Some (int v)
-                | _ -> None
-            match n with
-            | None ->
-                Error (Other "replicate count must be an integer literal")
-            | Some 1 ->
-                // replicate(1, c) ≡ c
-                Ok tB
-            | Some n when n >= 2 ->
-                let resolved = env.Subst.Resolve(tB.Type)
-                // Create anonymous Idx<N> for the replicate dimension
-                let seqIdx = {
-                    Id = env.Builder.FreshId()
-                    Rank = 1
-                    Extent = IRLit (IRLitInt (int64 n))
-                    Symmetry = SymNone
-                    Tag = Some "__seq"; IxKind = IxKSeq
-                    Kind = SDimension
-                    Dependencies = []
-                }
-                let resultType =
-                    match resolved with
-                    | ArrayElem arrTy ->
-                        mkArrayLike { arrTy with IndexTypes = seqIdx :: arrTy.IndexTypes }
-                    | IRTScalar et ->
-                        mkArrayArrow [seqIdx] (IRTScalar et) None
-                    | _ ->
-                        // S3 tag: relic. Same as sequence fallback above.
-                        mkArrayArrow [seqIdx] (IRTScalar ETFloat64) None
-                Ok (mkTyped (TExprReplicate (tC, tB)) resultType)
-            | _ ->
-                Error (Other (sprintf "replicate count must be >= 1, got %A" n))))
-
-    // ---- Reynolds ----
+        inferReplicate env count body
     | ExprReynolds (kernel, isAntisym) ->
         inferExpr env kernel |> Result.bind (fun tK ->
             Ok (mkTyped (TExprReynolds (tK, isAntisym)) tK.Type))
@@ -3420,6 +1952,853 @@ let rec inferExpr (env: TypeEnv) (expr: Expr) : TypeResult<TypedExpr> =
 // ============================================================================
 // 10a. Binary Operation Inference
 // ============================================================================
+
+
+and inferReduce (env: TypeEnv) array kernel : TypeResult<TypedExpr> =
+    inferExpr env array |> Result.bind (fun tArr ->
+    inferExpr env kernel |> Result.bind (fun tKernel ->
+        // Drive type inference for unannotated kernel parameters: when
+        // the array argument's resolved type is an unconstrained
+        // inference variable (e.g., `lambda(g) -> reduce(g, (+))` with
+        // no type annotation on `g`), bind it to a fresh rank-1 array.
+        //
+        // Element type is deduced from the kernel's first argument
+        // type:
+        //   1. If the kernel resolves to `FuncElem (paramTys, _)` and
+        //      `paramTys.[0]` resolves to a concrete `IRTScalar et`,
+        //      use `et`. Catches typed-arg kernels like
+        //      `lambda(x: Int64, y: Int64) -> x + y` and untyped
+        //      lambdas whose body has unified the params with a
+        //      concrete elem type via literals or other constraints.
+        //   2. Otherwise default to Float64. Operator sections like
+        //      `(+)` always have fresh type variables for args, so
+        //      they hit this path — which matches what
+        //      lowerTypedSection emits in the IR (sections are
+        //      hardcoded to Float64). Untyped lambdas with
+        //      uninferable bodies also fall through here.
+        //
+        // The unification only fires when the resolved array type is
+        // genuinely unconstrained; concrete non-array types fall
+        // through to the existing error path. For non-Float64 source
+        // data with a section kernel, an explicit annotation on the
+        // kernel parameter is still required.
+        // Phase B2: ElemType field is IRType. Helper returns IRType
+        // directly; primitives are wrapped as IRTScalar at the
+        // resolution point.
+        //
+        // Phase 2 (post-Gap-2.5): with strict scalar unify, we cannot
+        // pin elem type to whatever the kernel's declared param type is —
+        // operator sections like `(+)` have hardcoded Float64 in their
+        // lowering, which would make `reduce(int_array, (+))` fail.
+        // So when the kernel is a section default (or when its first
+        // arg type is itself unresolved), we return a fresh inference
+        // variable that gets pinned later by buildApplyInfo's
+        // kernel-param unification against the actual source's per-row
+        // type.
+        //
+        // We DO use a concrete kernel-arg type when the kernel was
+        // declared with an explicit annotation (e.g., a user-written
+        // `lambda(x: Int64) -> ...`). That's a real constraint from
+        // the user; if it conflicts with the source array, that's a
+        // genuine type error worth surfacing.
+        let deduceElemFromKernel () : IRType =
+            // Heuristic: if the kernel's first param is unresolved
+            // (still an IRTInfer), the user didn't annotate it — so
+            // we return that same inference variable (not a fresh one)
+            // so subsequent inference flows through it: when
+            // buildApplyInfo unifies the reduce's per-row type with
+            // the source's elem type, the kernel's param type gets
+            // pinned at the same time. If we returned a fresh var,
+            // the section's existing T-var would never bind, leaving
+            // an unresolved type variable in the kernel's lowered
+            // form. If the first param IS concrete (annotated), we
+            // pin to that and let unification surface mismatches.
+            match env.Subst.Resolve(tKernel.Type) with
+            | FuncElem (paramTys, _) when not paramTys.IsEmpty ->
+                let resolved = env.Subst.Resolve(paramTys.[0])
+                match resolved with
+                | IRTScalar _ -> resolved          // annotated: pin to user's type
+                | IRTInfer _ -> resolved           // unresolved: defer via the same var
+                | _ -> env.Builder.FreshInferType()
+            | _ -> env.Builder.FreshInferType()
+        (match env.Subst.Resolve(tArr.Type) with
+         | IRTInfer _ ->
+            let elemType = deduceElemFromKernel ()
+            let freshIdx = {
+                Id = env.Builder.FreshId()
+                Rank = 1
+                Extent = IRParam ("__inferred_n", 0, IRTNat None)
+                Symmetry = SymNone
+                Tag = None; IxKind = IxKPlain
+                Kind = SDimension
+                Dependencies = []
+            }
+            let freshArr = mkArrayArrow [freshIdx] elemType None
+            unify env.Subst tArr.Type freshArr |> ignore
+         | _ -> ())
+        match env.Subst.Resolve(tArr.Type) with
+        | ArrayElem arrTy when arrTy.IndexTypes.Length = 1 ->
+            // Static guarantee: reject if we can prove the extent is 0.
+            match tryEvalIntIR arrTy.IndexTypes.[0].Extent with
+            | Some n when n <= 0L ->
+                Error (Other (sprintf "reduce() rejects statically empty arrays (extent = %d). Empty input has no defined reduction without an identity; a 3-arg form `reduce(arr, op, init)` is the planned solution." n))
+            | _ ->
+                // Stage 3c.2 follow-on: unify the kernel's param types
+                // with the array's element type. The kernel arrives as
+                // an arrow `(α, β) → γ` where α, β are typically still
+                // unresolved inference variables — operator sections
+                // lower polymorphically per `inferExpr ExprSection`,
+                // and unannotated 2-arg lambdas don't get their param
+                // types pinned by the body alone for `+`/`-`/etc.
+                // Without this unification, zonking defaults the
+                // section's IRTInfer to Float64, which then bakes a
+                // literal-Float64 signature into the lifted function
+                // and breaks reduces over non-Float64 source arrays
+                // (the lifted function returns Float64 even when the
+                // accumulator is Int64). Pin both params to the
+                // array's element type so the section's polymorphism
+                // resolves correctly before zonking. Result type
+                // stays whatever the kernel declared (Bool for
+                // comparison sections, elemType for arithmetic).
+                let kernelUnify =
+                    match env.Subst.Resolve(tKernel.Type) with
+                    | FuncElem (paramTys, _) ->
+                        paramTys |> List.fold (fun acc pTy ->
+                            acc |> Result.bind (fun () -> unify env.Subst pTy arrTy.ElemType))
+                            (Ok ())
+                    | _ -> Ok ()
+                kernelUnify |> Result.bind (fun () ->
+                    // arrTy.ElemType is IRType post-B2; return directly.
+                    let resultType = arrTy.ElemType
+                    Ok (mkTyped (TExprReduce (tArr, tKernel)) resultType))
+        | ArrayElem _ ->
+            Error (Other "reduce() currently supports only rank-1 arrays (multi-rank reduction over the innermost dimension is deferred)")
+        | _ ->
+            Error (Other "reduce() requires an array as first argument")))
+
+// extents(array) — extent(s) along each dimension as Int64.
+// Rank-1 → scalar Int64 (the single dim's extent).
+// Rank-N → tuple (Int64, Int64, ..., Int64) of length N (one per dim,
+//          outermost first).
+// The codegen prefers a static literal when the index type's extent
+// expression is statically evaluable (extends to literal arithmetic via
+// tryEvalIntIR), matching rank()'s static-when-possible behavior.
+//
+// Future direction: a homogeneous List<Int64> collection type would be a
+// more natural return type for the multi-rank case. Tuples work because
+// all components share Int64, but they're heterogeneous in the type
+// system. Switching to List when one becomes available is a future-
+// compat note, not a blocker.
+
+
+and inferDecompact (env: TypeEnv) array d : TypeResult<TypedExpr> =
+    inferExpr env array |> Result.bind (fun tArr ->
+        requireArrayArg env tArr "decompact" |> Result.bind (fun arrTy ->
+            // Resolve the logical dimension d to (slotIndex, slotArity,
+            // posInSlot). A compact slot of arity r spans r consecutive
+            // dimensions; posInSlot in [0, r) says which component within
+            // the group d targets — that position decides peel-first /
+            // peel-last / peel-middle.
+            let totalDims = arrTy.IndexTypes |> List.sumBy (fun ix -> max 1 ix.Rank)
+            let dimToSlot (dd: int) : Result<int * int * int, TypeError> =
+                if dd < 0 || dd >= totalDims then
+                    Error (Other (sprintf "decompact: dimension %d is out of range for a rank-%d array (valid dims 0..%d)" dd totalDims (totalDims - 1)))
+                else
+                    let rec walk slotIdx acc remaining =
+                        match remaining with
+                        | [] -> Error (Other (sprintf "decompact: dimension %d out of range (internal)" dd))
+                        | (ix: IRIndexType) :: rest ->
+                            let ar = max 1 ix.Rank
+                            if dd < acc + ar then Ok (slotIdx, ar, dd - acc)
+                            else walk (slotIdx + 1) (acc + ar) rest
+                    walk 0 0 arrTy.IndexTypes
+            dimToSlot d |> Result.bind (fun (slot, r, posInSlot) ->
+                let ix = arrTy.IndexTypes.[slot]
+                if r < 2 || ix.Symmetry = SymNone then
+                    Error (Other (sprintf "decompact: dimension %d is a plain (rank-1, non-symmetric) axis; there is nothing to decompact. decompact pulls a component out of a compact group (SymIdx/AntisymIdx/HermitianIdx)." d))
+                else
+                // Codegen scope: the compact group being decompacted must be
+                // the LAST index slot, with any preceding slots being plain
+                // free Idx singletons (arity-1, SymNone). This is exactly the
+                // shape produced by a chained "to-the-right-only" peel
+                // (decompact frees one dim at a time, accumulating free Idx
+                // dims on the left while the residual group stays last), so
+                // it enables composed full densification. The surrounding
+                // free dims are emitted as an outer loop product wrapping the
+                // existing last-slot fission scatter (their indices map
+                // identically source->dest). Other arrangements (compact slot
+                // not last, or non-singleton surrounding slots) remain
+                // deferred.
+                let leadingSlots = arrTy.IndexTypes |> List.take slot
+                let groupIsLast = (slot = arrTy.IndexTypes.Length - 1)
+                let leadingAllFreeSingletons =
+                    leadingSlots |> List.forall (fun s -> (max 1 s.Rank) = 1 && s.Symmetry = SymNone)
+                if not (groupIsLast && leadingAllFreeSingletons) then
+                    Error (Other (sprintf "decompact: only a compact group in the LAST index slot, optionally preceded by plain free Idx dimensions, is supported by codegen (the chained to-the-right peel shape). The array here has %d index slots with the compact group at slot %d." arrTy.IndexTypes.Length slot))
+                elif leadingSlots.Length > 0 && ix.Symmetry <> SymSymmetric then
+                    // Surrounding-dim wrapping is currently wired only for the
+                    // symmetric fission scatter (the gather form). Antisym /
+                    // Hermitian fission with leading free dims is not yet
+                    // emitted, so reject rather than miscompile.
+                    Error (Other "decompact: surrounding free dimensions are currently supported only for symmetric groups; antisymmetric/Hermitian groups with preceding free dimensions are not yet wired.")
+                elif ix.Symmetry = SymHermitian && r >= 3 then
+                    // Rank-2 Hermitian (the only Hermitian arrays a producer
+                    // makes today, via gram) dissolves to a dense n×n with the
+                    // lower triangle conjugated — handled below. Rank >= 3
+                    // Hermitian has no producer yet and its compact-residual
+                    // conjugate semantics aren't worked out, so reject.
+                    Error (Other "decompact: rank >= 3 SymHermitian is not yet supported (no producer exists for rank >= 3 Hermitian arrays; gram produces rank-2 Hermitian, which decompacts to a dense conjugate-mirrored matrix).")
+                else
+                    // SYMMETRIC decompact: general fission, any rank, any cut
+                    // (peel-first/last/middle), via the gather materializer.
+                    // ANTISYMMETRIC decompact: rank 2 dissolves to dense n×n;
+                    // rank >= 3 BOUNDARY cuts leave one residual antisym group,
+                    // now allocatable via the per-group-strict mask
+                    // (allocate_strict) with the sign applied lazily on read
+                    // (canon_* transform). Codegen-supported, so not rejected.
+                    // Build the replacement slots: left remainder (arity
+                    // posInSlot) + extracted Idx + right remainder (arity
+                    // r-1-posInSlot). Each remainder of arity a>=2 becomes a
+                    // fresh SymIdx<a> of the SAME symmetry class (fresh Id =
+                    // nominally distinct, since the two halves' symmetries are
+                    // now independent relations); a=1 degenerates to a plain
+                    // Idx; a=0 is omitted. For the v1 r=2 case this always
+                    // yields two plain Idx (the group fully dissolves).
+                    let mkRemainder (a: int) : IRIndexType list =
+                        if a <= 0 then []
+                        elif a = 1 then
+                            [ { ix with Id = env.Builder.FreshId(); Rank = 1; Symmetry = SymNone } ]
+                        else
+                            [ { ix with Id = env.Builder.FreshId(); Rank = a } ]
+                    let extracted =
+                        { ix with Id = env.Builder.FreshId(); Rank = 1; Symmetry = SymNone }
+                    let leftRem = mkRemainder posInSlot
+                    let rightRem = mkRemainder (r - 1 - posInSlot)
+                    let replacement = leftRem @ [extracted] @ rightRem
+                    let newIndexTypes =
+                        arrTy.IndexTypes
+                        |> List.mapi (fun i s -> (i, s))
+                        |> List.collect (fun (i, s) -> if i = slot then replacement else [s])
+                    let resultType = mkArrayArrow newIndexTypes arrTy.ElemType None
+                    Ok (mkTyped (TExprDecompact (tArr, d)) resultType))))
+
+// reduce(array, kernel) — T/S reduction primitive.
+// Consumes the innermost dimension via a binary kernel. For rank-1 input,
+// produces a scalar of the element type. Multi-rank reduction is deferred.
+//
+// Empty-array policy (post-extents integration):
+//   - If extent is statically known to be 0  → typecheck error (caller bug)
+//   - If extent is statically known to be > 0 → typecheck OK; codegen emits
+//                                              standard loop without guard
+//   - If extent is dynamic                   → typecheck OK; codegen adds
+//                                              a runtime guard that aborts
+//                                              cleanly on empty
+//
+// A 3-arg form `reduce(arr, op, init)` for well-defined empty handling
+// (returning init) is a future addition for the dynamic case if a use
+// case demands silently-handled empties.
+
+
+and inferGram (env: TypeEnv) leftE rightE : TypeResult<TypedExpr> =
+    // gram(A, B) = A * B^H:  result[i][j] = sum_k A[i][k] * conj(B[j][k])
+    // A : m x n, B : p x n (shared contracted dim n) -> result : m x p.
+    // Element type: complex iff EITHER operand is complex (conj is the
+    // identity on reals, so a real/complex mix still conjugates correctly).
+    // Symmetry: when A and B are the SAME array (syntactically the same
+    // variable -> conservative, never claims false symmetry), the result is
+    // square (m = p) and SymHermitian (complex) / SymSymmetric (real),
+    // computed by the triangular upper-half scatter. Otherwise it is a
+    // general dense m x p array (SymNone).
+    inferExpr env leftE |> Result.bind (fun tL ->
+    inferExpr env rightE |> Result.bind (fun tR ->
+        requireArrayArg env tL "gram" |> Result.bind (fun lTy ->
+        requireArrayArg env tR "gram" |> Result.bind (fun rTy ->
+            let lDims = lTy.IndexTypes |> List.sumBy (fun ix -> max 1 ix.Rank)
+            let rDims = rTy.IndexTypes |> List.sumBy (fun ix -> max 1 ix.Rank)
+            if lDims <> 2 || rDims <> 2 then
+                Error (Other (sprintf "gram(A, B): both operands must be rank-2 (matrix) arrays; got rank-%d and rank-%d. gram contracts the trailing axis: A (m x n), B (p x n) -> m x p." lDims rDims))
+            else
+                // Extents: outer (m / p) and inner contracted (n) per operand.
+                let lOuter = lTy.IndexTypes.[0].Extent
+                let lInner = lTy.IndexTypes.[1].Extent
+                let rOuter = rTy.IndexTypes.[0].Extent
+                let rInner = rTy.IndexTypes.[1].Extent
+                // Static contracted-dim mismatch is a hard error; otherwise trust.
+                let innerMismatch =
+                    match tryEvalIntIR lInner, tryEvalIntIR rInner with
+                    | Some a, Some b -> a <> b
+                    | _ -> false
+                if innerMismatch then
+                    Error (Other "gram(A, B): the contracted (trailing) dimensions of A and B must match.")
+                else
+                    // Element type join: complex if either operand is complex.
+                    let isComplexElem (t: IRType) =
+                        match t with
+                        | IRTScalar (ETComplex64 | ETComplex128) -> true
+                        | _ -> false
+                    let outElem =
+                        if isComplexElem lTy.ElemType then lTy.ElemType
+                        elif isComplexElem rTy.ElemType then rTy.ElemType
+                        else lTy.ElemType
+                    let isComplex = isComplexElem outElem
+                    // Conservative same-array test: both bare vars, same name.
+                    let sameArray =
+                        match tL.Kind, tR.Kind with
+                        | TExprVar (n1, _, _), TExprVar (n2, _, _) -> n1 = n2
+                        | _ -> false
+                    let freshSlot (ext: IRExpr) (sym: SymmetryClass) (rank: int) =
+                        { Id = env.Builder.FreshId(); Rank = rank; Extent = ext
+                          Symmetry = sym; Tag = None; IxKind = IxKPlain; Kind = SDimension; Dependencies = [] }
+                    let resultType =
+                        if sameArray then
+                            // Square m x m, compact group of arity 2 carrying the
+                            // (anti-)symmetry: Hermitian (complex) or symmetric.
+                            let sym = if isComplex then SymHermitian else SymSymmetric
+                            let grp = { (freshSlot lOuter sym 2) with Extent = lOuter }
+                            mkArrayArrow [grp] outElem None
+                        else
+                            // General dense m x p (two independent plain axes).
+                            let s0 = freshSlot lOuter SymNone 1
+                            let s1 = freshSlot rOuter SymNone 1
+                            mkArrayArrow [s0; s1] outElem None
+                    Ok (mkTyped (TExprGram (tL, tR, sameArray)) resultType)))))
+
+
+
+and inferTranspose (env: TypeEnv) array d1 d2 : TypeResult<TypedExpr> =
+    inferExpr env array |> Result.bind (fun tArr ->
+        requireArrayArg env tArr "transpose" |> Result.bind (fun arrTy ->
+            // Map a logical DIMENSION index to its INDEX-TYPE slot. A slot
+            // of arity k occupies k consecutive dimensions; we walk the
+            // slot list accumulating arities until the target dimension
+            // falls inside a slot. Returns (slotIndex, slotArity, dimWithinSlot).
+            // For the first cut every reachable slot is arity-1, so this is
+            // identity — but writing it properly keeps the gate correct in
+            // the presence of compound groups elsewhere in the array.
+            let totalDims = arrTy.IndexTypes |> List.sumBy (fun ix -> max 1 ix.Rank)
+            let dimToSlot (d: int) : Result<int * int * int, TypeError> =
+                if d < 0 || d >= totalDims then
+                    Error (Other (sprintf "transpose: axis %d is out of range for a rank-%d array (valid axes 0..%d)" d totalDims (totalDims - 1)))
+                else
+                    let rec walk slotIdx acc remaining =
+                        match remaining with
+                        | [] -> Error (Other (sprintf "transpose: axis %d out of range (internal)" d))
+                        | (ix: IRIndexType) :: rest ->
+                            let ar = max 1 ix.Rank
+                            if d < acc + ar then Ok (slotIdx, ar, d - acc)
+                            else walk (slotIdx + 1) (acc + ar) rest
+                    walk 0 0 arrTy.IndexTypes
+            if d1 = d2 then
+                Error (Other (sprintf "transpose: the two axes must differ (got [%d, %d]); swapping an axis with itself is the identity" d1 d2))
+            else
+                dimToSlot d1 |> Result.bind (fun (slot1, ar1, _) ->
+                dimToSlot d2 |> Result.bind (fun (slot2, ar2, _) ->
+                    let ix1 = arrTy.IndexTypes.[slot1]
+                    let ix2 = arrTy.IndexTypes.[slot2]
+                    if slot1 = slot2 then
+                        // Both dimensions lie INSIDE one index type — an intra-
+                        // group swap. The index-type class decides the behavior
+                        // (storage-preserving): symmetric -> identity, antisym ->
+                        // whole-array negation, hermitian -> whole-array
+                        // conjugation. No decompaction, no dense blow-up.
+                        (match (behaviorOf ix1).TransposeWithin () with
+                         | TIdentity ->
+                            // A(i,j) = A(j,i): storage unchanged. Erase the
+                            // transpose; the result IS the source array.
+                            Ok tArr
+                         | TNegatedCopy ->
+                            Ok (mkTyped (TExprArrayNegate tArr) tArr.Type)
+                         | TConjugatedCopy ->
+                            Ok (mkTyped (TExprArrayConjugate tArr) tArr.Type)
+                         | TDataMove ->
+                            // A plain (SymNone) slot of arity >= 2 swapped
+                            // within itself: a genuine dimensional swap inside a
+                            // rectangular compound. Not yet emitted (the data-
+                            // move materializer handles cross-slot rank-1 only).
+                            Error (Other (sprintf "transpose: swapping two dimensions within a single rectangular index group (rank %d) is not yet supported." ar1))
+                         | TRequiresDecompaction reason ->
+                            Error (Other (sprintf "transpose: %s" reason)))
+                    else
+                        // Different slots. The structure-preserving case is two
+                        // plain (arity-1 SymNone) axes -> physical data move.
+                        // Anything else means one axis is bound in a compact
+                        // group and the other is outside it: swapping them would
+                        // break that group's symmetry. That is a structure-
+                        // changing operation requiring explicit decompaction
+                        // (decompact then transpose), not a silent transpose.
+                        let plain ar (ix: IRIndexType) = ar = 1 && ix.Symmetry = SymNone
+                        if plain ar1 ix1 && plain ar2 ix2 then
+                            let swapped =
+                                arrTy.IndexTypes
+                                |> List.mapi (fun i ix ->
+                                    if i = slot1 then arrTy.IndexTypes.[slot2]
+                                    elif i = slot2 then arrTy.IndexTypes.[slot1]
+                                    else ix)
+                            let resultType = mkArrayArrow swapped arrTy.ElemType None
+                            Ok (mkTyped (TExprTranspose (tArr, d1, d2)) resultType)
+                        else
+                            let culprit, cd, car, cix =
+                                if not (plain ar1 ix1) then "first", d1, ar1, ix1 else "second", d2, ar2, ix2
+                            Error (Other (sprintf "transpose: the %s axis (dim %d) is bound in a %A index group (rank %d), and the other axis is outside it. Swapping across a group boundary would decompose the group's symmetry. Decompact the axis first (decompact then transpose)." culprit cd cix.Symmetry car))))))
+
+
+
+and inferGroupBy (env: TypeEnv) values grouping : TypeResult<TypedExpr> =
+    inferExpr env values |> Result.bind (fun tVals ->
+    inferExpr env grouping |> Result.bind (fun tGrouping ->
+        requireArrayArg env tVals "group_by" |> Result.bind (fun arrTy ->
+            // Extract group structure from GroupKeys type, or fall back for raw key arrays
+            let (outerIdx, memberIdx) =
+                match env.Subst.Resolve(tGrouping.Type) with
+                | IRTGroupKeys (outer, _, _) ->
+                    let member_ = {
+                        Id = env.Builder.FreshId(); Rank = 1
+                        Extent = IRParam ("__groupsz", 0, IRTNat None)
+                        Symmetry = SymNone; Tag = Some "__group_member"; IxKind = IxKGroupMember
+                        Kind = SDimension; Dependencies = []
+                    }
+                    ({ outer with Id = env.Builder.FreshId(); Tag = Some "__group_outer"; IxKind = IxKGroupOuter }, member_)
+                | _ ->
+                    // Fallback: treat second arg as raw key array (backward compat)
+                    let outer = {
+                        Id = env.Builder.FreshId(); Rank = 1
+                        Extent = IRParam ("__ngroups", 0, IRTNat None)
+                        Symmetry = SymNone; Tag = Some "__group_outer"; IxKind = IxKGroupOuter
+                        Kind = SDimension; Dependencies = []
+                    }
+                    let member_ = {
+                        Id = env.Builder.FreshId(); Rank = 1
+                        Extent = IRParam ("__groupsz", 0, IRTNat None)
+                        Symmetry = SymNone; Tag = Some "__group_member"; IxKind = IxKGroupMember
+                        Kind = SDimension; Dependencies = []
+                    }
+                    (outer, member_)
+            let resultType = mkArrayArrow [outerIdx; memberIdx] arrTy.ElemType None
+            Ok (mkTyped (TExprGroupBy (tVals, tGrouping)) resultType))))
+
+// sort(array, key) — stable sort by ascending key.
+// Phase 1 (current): eager materialization. Result is a new physical array
+// with the same element type and extent as the input, indexed by a fresh
+// anonymous index (mask-style). The order property is NOT tracked in the
+// type system yet — that's deferred to a future "key map chain" subsystem.
+//
+// The eventual direction is lazy: sort produces a chain handle recording
+// (key_fn, permutation), with materialization deferred to first access.
+// Rationale: deferring evaluation preserves optimization headroom — the
+// compiler can analyze chains of operations before any layout is committed,
+// enabling sort-skip, merge-style joins, and other rearrangements.
+// Caching strategies are downstream of those analyses, not a substitute.
+
+
+and inferGroupKeys (env: TypeEnv) keys : TypeResult<TypedExpr> =
+    match keys with
+    | [] ->
+        Error (Other "group_keys requires at least one key array; got empty argument list")
+    | [singleKey] ->
+        // Existing single-key path, unchanged.
+        inferExpr env singleKey |> Result.bind (fun tKeys ->
+            requireArrayArg env tKeys "group_keys" |> Result.bind (fun arrTy ->
+                let sourceIdx =
+                    if arrTy.IndexTypes.Length > 0 then arrTy.IndexTypes.[0]
+                    else {
+                        Id = env.Builder.FreshId(); Rank = 1
+                        Extent = IRParam ("__src", 0, IRTNat None)
+                        Symmetry = SymNone; Tag = None; IxKind = IxKPlain
+                        Kind = SDimension; Dependencies = []
+                    }
+                let namedRef =
+                    match arrTy.ElemType with
+                    | IRTIdxTagged (_, IRefNamed name) -> Some name
+                    | _ -> None
+                let (outerIdx, enumValues) =
+                    match namedRef with
+                    | Some name ->
+                        match lookupTypeDef name env with
+                        | Some (TDIIndexType (_, idx, _)) ->
+                            ({ idx with Id = env.Builder.FreshId(); Tag = Some name; IxKind = ixKindOfTag (Some name) }, None)
+                        | Some (TDIEnumIdx (_, idx, values, _)) ->
+                            ({ idx with Id = env.Builder.FreshId(); Tag = Some name; IxKind = ixKindOfTag (Some name) }, Some values)
+                        | _ ->
+                            ({ Id = env.Builder.FreshId(); Rank = 1
+                               Extent = IRParam ("__ngroups", 0, IRTNat None)
+                               Symmetry = SymNone; Tag = None; IxKind = IxKPlain
+                               Kind = SDimension; Dependencies = [] }, None)
+                    | None ->
+                        ({ Id = env.Builder.FreshId(); Rank = 1
+                           Extent = IRParam ("__ngroups", 0, IRTNat None)
+                           Symmetry = SymNone; Tag = None; IxKind = IxKPlain
+                           Kind = SDimension; Dependencies = [] }, None)
+                let gkType = IRTGroupKeys (outerIdx, sourceIdx, enumValues)
+                Ok (mkTyped (TExprGroupKeys [tKeys]) gkType)))
+    | multipleKeys ->
+        // Compound case: infer all keys, verify shared outer index,
+        // build a GroupKeys result with dynamic compound outer.
+        let inferAll =
+            multipleKeys
+            |> List.fold (fun accRes k ->
+                accRes |> Result.bind (fun acc ->
+                    inferExpr env k |> Result.bind (fun tk ->
+                        requireArrayArg env tk "group_keys" |> Result.map (fun arrTy ->
+                            acc @ [(tk, arrTy)]))))
+                (Ok [])
+        inferAll |> Result.bind (fun pairs ->
+            // Precondition check: all key arrays must be rank-1 and
+            // share an outer index. We compare extent expressions
+            // structurally — Blade's typechecker is structural enough
+            // that the same Idx<N> annotation produces equal Extent
+            // values across multiple bindings.
+            let firstSource =
+                pairs |> List.head |> snd |> fun ty -> ty.IndexTypes.[0]
+            let allShareOuter =
+                pairs |> List.forall (fun (_, ty) ->
+                    ty.IndexTypes.Length = 1
+                    && ty.IndexTypes.[0].Extent = firstSource.Extent)
+            if not allShareOuter then
+                Error (Other (
+                    "group_keys: all key arrays must be rank-1 and share the same outer index (same length). " +
+                    "Compound grouping requires each i-th element of every key array to refer to the same record."))
+            else
+                // Compound outer: dynamic extent, tagged so codegen
+                // recognizes "this is compound-dynamic, dispatch via
+                // tuple unordered_map". The tag name reserves
+                // `__compoundidx_static` for the future mask-derived
+                // path (TyCompoundIdx) which is statically evaluable
+                // — that case would have Extent = IRLit (cardinality)
+                // and a different codegen story. Component types are
+                // not carried in IRTGroupKeys today; codegen recovers
+                // them from the IRGroupKeys node's keys list at emit
+                // time, and IDE tooltips would do the same.
+                let outerIdx = {
+                    Id = env.Builder.FreshId(); Rank = 1
+                    Extent = IRParam ("__ngroups", 0, IRTNat None)
+                    Symmetry = SymNone
+                    Tag = Some "__compoundidx_dynamic"; IxKind = IxKCompoundDynamic
+                    Kind = SDimension; Dependencies = []
+                }
+                let gkType = IRTGroupKeys (outerIdx, firstSource, None)
+                let tKeys = pairs |> List.map fst
+                Ok (mkTyped (TExprGroupKeys tKeys) gkType))
+
+// group_by(values, grouping) — apply GroupKeys to a values array
+// Result: rank-2 array (groups × members), with GroupIdx
+// Tags ("__group_outer", "__group_member") signal to codegen to use ragged peel.
+
+
+and inferReplicate (env: TypeEnv) count body : TypeResult<TypedExpr> =
+    inferExpr env count |> Result.bind (fun tC ->
+    inferExpr env body |> Result.bind (fun tB ->
+        // Extract count as literal integer
+        let n =
+            match tC.Kind with
+            | TExprLit (LitInt v) -> Some (int v)
+            | _ -> None
+        match n with
+        | None ->
+            Error (Other "replicate count must be an integer literal")
+        | Some 1 ->
+            // replicate(1, c) ≡ c
+            Ok tB
+        | Some n when n >= 2 ->
+            let resolved = env.Subst.Resolve(tB.Type)
+            // Create anonymous Idx<N> for the replicate dimension
+            let seqIdx = {
+                Id = env.Builder.FreshId()
+                Rank = 1
+                Extent = IRLit (IRLitInt (int64 n))
+                Symmetry = SymNone
+                Tag = Some "__seq"; IxKind = IxKSeq
+                Kind = SDimension
+                Dependencies = []
+            }
+            let resultType =
+                match resolved with
+                | ArrayElem arrTy ->
+                    mkArrayLike { arrTy with IndexTypes = seqIdx :: arrTy.IndexTypes }
+                | IRTScalar et ->
+                    mkArrayArrow [seqIdx] (IRTScalar et) None
+                | _ ->
+                    // S3 tag: relic. Same as sequence fallback above.
+                    mkArrayArrow [seqIdx] (IRTScalar ETFloat64) None
+            Ok (mkTyped (TExprReplicate (tC, tB)) resultType)
+        | _ ->
+            Error (Other (sprintf "replicate count must be >= 1, got %A" n))))
+
+// ---- Reynolds ----
+
+
+and inferTupleIndex (env: TypeEnv) tuple index : TypeResult<TypedExpr> =
+    inferExpr env tuple |> Result.bind (fun tT ->
+    inferExpr env index |> Result.bind (fun tI ->
+        match env.Subst.Resolve(tT.Type) with
+        | ArrayElem arrTy ->
+            // One bracket = one index dimension. Mirrors ExprApp's
+            // tArgs.Length <= arrTy.IndexTypes.Length check.
+            let identity = match tT.Kind with TExprVar (_, _, id) -> id | _ -> None
+            // Tag check on the single index (same rule as ExprApp).
+            let tagMismatch =
+                match arrTy.IndexTypes with
+                | [] -> None
+                | idxType :: _ ->
+                    match idxType.Tag with
+                    | Some tagName when not (tagName.StartsWith("__")) ->
+                        match env.Subst.Resolve tI.Type with
+                        | IRTIdxTagged (_, IRefNamed argName) when argName = tagName -> None
+                        | IRTIdxTagged (_, IRefNamed argName) ->
+                            Some (Other (sprintf
+                                "Array index tag mismatch: slot expects '%s' but argument has type '%s'."
+                                tagName argName))
+                        | IRTIdxTagged (_, IRefAnon _) ->
+                            Some (Other (sprintf
+                                "Array index tag mismatch: slot expects named tag '%s' but argument is an anonymous index value."
+                                tagName))
+                        | IRTScalar (ETInt32 | ETInt64) ->
+                            emitWarning env (sprintf
+                                "Array indexed with untagged integer where slot expects tag '%s'. Consider an explicit cast like `(expr : %s)` or iterate via `range<%s>` to flow the tag automatically."
+                                tagName tagName tagName)
+                            None
+                        | _ -> None
+                    | _ -> None
+            match tagMismatch with
+            | Some err -> Error err
+            | None ->
+                if 1 = arrTy.IndexTypes.Length then
+                    Ok (mkTyped (TExprIndex (tT, [tI], identity)) arrTy.ElemType)
+                elif 1 < arrTy.IndexTypes.Length then
+                    let remaining = arrTy.IndexTypes |> List.skip 1
+                    Ok (mkTyped (TExprIndex (tT, [tI], identity))
+                                (mkArrayLike { arrTy with IndexTypes = remaining }))
+                else
+                    Error (Other "array indexing: too many indices for array rank")
+        | _ ->
+            // Poly-pack / tuple indexing: result type is fresh — codegen
+            // resolves via std::get based on flat-leaf paths.
+            Ok (mkTyped (TExprTupleIndex (tT, tI)) (env.Subst.Fresh()))))
+
+// ---- Field access ----
+
+
+and inferUnaryOp (env: TypeEnv) op operand : TypeResult<TypedExpr> =
+    inferExpr env operand |> Result.bind (fun tOp ->
+        // OpConj (conj): result type equals operand type. Conjugate of a
+        // complex is complex; of a real, the identity (real). Permissive,
+        // mirroring OpNeg — no type guard. Codegen emits std::conj only for
+        // complex element types; reals pass through unchanged.
+        //
+        // WHOLE-ARRAY conj: when the operand is an array (not a scalar), the
+        // scalar IRUnaryOp(IRConj, _) path is wrong — it would emit a scalar
+        // std::conj against an array value and fall through to a bare
+        // passthrough (losing the Array<> wrapper and applying no conjugation).
+        // Route it to TExprArrayConjugate, the whole-array eager conjugate
+        // (same node the Hermitian-transpose TConjugatedCopy path uses), which
+        // materializes a fresh same-shape array with a pool conjugation loop.
+        // This is what makes `hermitian(A) = conj(transpose(A,[0,1]))` work,
+        // and it fixes surface `conj(wholeArray)` generally.
+        match op, tOp.Type with
+        | OpConj, ArrayElem _ ->
+            Ok (mkTyped (TExprArrayConjugate tOp) tOp.Type)
+        | _ ->
+            let resTy = match op with
+                        | OpNot -> IRTScalar ETBool
+                        | OpNeg -> tOp.Type
+                        | OpConj -> tOp.Type
+            Ok (mkTyped (TExprUnaryOp (op, tOp)) resTy))
+
+// ---- Module-qualified value/function: `Math.pi`, `MathLib.double(x)` ----
+// These two cases must precede the method-call and struct-field handlers
+// because `Math` would otherwise be looked up as a value and fail. The
+// DeclImport handler registers imported entries under qualified names
+// (`Math.pi`, `MathLib.double`); when the form is `ExprVar n . field`
+// and the qualified name resolves, we treat the access as a direct
+// variable reference. Falls through to the existing struct/method
+// handlers when the qualified name is not registered.
+
+// ---- Provider compound read: alias.load_compound(var, mask) ----
+// Rides the generic field-call shape (no new syntax). The mask is any
+// integer array; compoundViewType validates full-dimension coverage and
+// yields the compact Compound<T, RANK> view type. The maskIR carried in the
+// type is a unit placeholder: codegen recovers the actual mask variable by
+// name from the argument shape (ProviderReadSpec), not from the type.
+
+
+and inferMethodCall (env: TypeEnv) obj method args : TypeResult<TypedExpr> =
+    inferExpr env obj |> Result.bind (fun tObj ->
+    args |> List.map (inferExpr env) |> sequenceResults |> Result.bind (fun tArgs ->
+        // Check if this is an impl method call
+        match tObj.Type with
+        | IRTNamed typeName ->
+            match Map.tryFind (typeName, method) env.ImplMethods with
+            | Some (funcVarId, funcType) ->
+                // Resolve to mangled function call: TypeName__method(self, args)
+                let mangledName = sprintf "%s__%s" typeName method
+                let retTy = match funcType with FuncElem (_, ret) -> ret | _ -> env.Subst.Fresh()
+                let tFunc = mkTyped (TExprVar (mangledName, funcVarId, None)) funcType
+                Ok (mkTyped (TExprApp (tFunc, tObj :: tArgs)) retTy)
+            | None ->
+                // Not an impl method — treat as struct field access + application
+                let (fieldTy, fieldIdx) =
+                    match lookupTypeDef typeName env with
+                    | Some (TDIStruct (_, _, fields)) ->
+                        let idx = fields |> List.tryFindIndex (fun (n, _) -> n = method)
+                        let ty = fields |> List.tryFind (fun (n, _) -> n = method) |> Option.map snd
+                        (ty |> Option.defaultValue (env.Subst.Fresh()),
+                         idx |> Option.defaultValue 0)
+                    | _ -> (env.Subst.Fresh(), 0)
+                let tField = mkTyped (TExprField (tObj, method, fieldIdx)) fieldTy
+                // Route through dispatchAppOrIndex so array-typed fields
+                // become TExprIndex (with tag-checking) rather than
+                // TExprApp. Without this, `data.region(s)` would lower to
+                // IRApp and emit a C++ function call against the
+                // Array<T,N> wrapper, which has no operator().
+                dispatchAppOrIndex env tField tArgs
+        | _ ->
+            // Non-named type — regular field access + application
+            let tField = mkTyped (TExprField (tObj, method, 0)) (env.Subst.Fresh())
+            let retTy = env.Subst.Fresh()
+            Ok (mkTyped (TExprApp (tField, tArgs)) retTy)))
+
+// ---- Application / Array indexing ----
+
+
+and inferMask (env: TypeEnv) array pred : TypeResult<TypedExpr> =
+    inferExpr env array |> Result.bind (fun tArr ->
+    inferExpr env pred |> Result.bind (fun tPred ->
+        requireArrayArg env tArr "mask" |> Result.bind (fun arrTy ->
+            // The predicate is `Element → Bool`. inferExpr typed it
+            // without knowing the element type, so its param starts as
+            // a fresh IRTInfer. Without explicit unification here, the
+            // var stays unbound and zonkType's default (Float64) kicks
+            // in — which then breaks bodies that use integer ops on
+            // int arrays (`x % 2`) or struct field access on struct
+            // arrays (`p.a`). Unify the predicate's param with the
+            // array's element type so zonking propagates the right
+            // type into the standalone-lifted function signature and
+            // the body's operator/field-access positions resolve
+            // against the real element type.
+            let unifyPredParam =
+                match tPred.Kind with
+                | TExprLambda info when info.Params.Length = 1 ->
+                    unify env.Subst info.Params.[0].Type arrTy.ElemType
+                | _ -> Ok ()
+            unifyPredParam |> Result.bind (fun () ->
+                let resultType = mkArrayArrow arrTy.IndexTypes (IRTScalar ETBool) None
+                Ok (mkTyped (TExprMask (tArr, tPred)) resultType)))))
+
+// compound(dense, mask) -- scatter a dense array into a CompoundIdx-typed
+// compact array via a bool mask over the leading dims (formalism 4.5). The
+// in-language analog of the provider's load_compound: same validation
+// (compoundViewType checks the mask covers a leading prefix of dense's dims
+// and yields the compact Compound<T, RANK> view type), but the dense source
+// is a Blade array value rather than a NetCDF variable. The mask must be a
+// bool array; compoundViewType already accepts ETBool masks. Lowering records
+// (denseIR, maskIR) in CompoundInits; codegen materializes the index (P0,
+// genCompoundIndexFromMask), scatters dense -> compact, and bundles a
+// Compound<T, RANK> wrapper.
+
+
+and inferZip (env: TypeEnv) exprs : TypeResult<TypedExpr> =
+    exprs |> List.map (inferExpr env) |> sequenceResults |> Result.bind (fun tExprs ->
+        // Zip produces an array with tuple element type, shared prefix index space.
+        // zip(A : T1^r1, B : T2^r2) -> Array<Tuple(T1,T2), min(r1,r2), shared_indices>
+        let arrayTypes =
+            tExprs |> List.choose (fun te ->
+                match env.Subst.Resolve te.Type with
+                | ArrayElem at -> Some at
+                | _ -> None)
+        if arrayTypes.Length = tExprs.Length && arrayTypes.Length >= 2 then
+            // All inputs are arrays — build proper zip type
+            let minRank = arrayTypes |> List.map (fun at -> at.IndexTypes.Length) |> List.min
+            let sharedIndices = arrayTypes.[0].IndexTypes |> List.take minRank
+            // Element types: for rank-equal arrays, the elem itself; for higher-rank, remaining slice
+            let elemTypes =
+                arrayTypes |> List.map (fun at ->
+                    let extra = at.IndexTypes |> List.skip minRank
+                    if extra.IsEmpty then at.ElemType
+                    else mkArrayLike { at with IndexTypes = extra })
+            let tupleElemType =
+                match elemTypes with
+                | [single] -> single  // degenerate: single-array zip
+                | _ -> IRTTuple elemTypes
+            // Infer a shared ElemType tag for the IRArrayType wrapper
+            // We use ETFloat64 as placeholder since the real element is a tuple
+            let zipArrayType =
+                mkArrayArrow sharedIndices (IRTScalar ETFloat64) None  // placeholder; real elem is the tuple
+            Ok (mkTyped (TExprZip tExprs) zipArrayType)
+        else
+            // Fallback: not all arrays, or fewer than 2 — return tuple type
+            Ok (mkTyped (TExprZip tExprs) (IRTTuple (tExprs |> List.map (fun e -> e.Type)))))
+
+
+and inferExtents (env: TypeEnv) array : TypeResult<TypedExpr> =
+    inferExpr env array |> Result.bind (fun tArr ->
+        requireArrayArg env tArr "extents" |> Result.bind (fun arrTy ->
+            if arrTy.IndexTypes.Length = 1 then
+                Ok (mkTyped (TExprExtents tArr) (IRTScalar ETInt64))
+            else
+                // extents() is static-first: it answers from the ARGUMENT
+                // TYPE when possible (IRExtent emits a literal for
+                // statically-evaluable extents). A ragged-family slot has
+                // no scalar extent AT ALL -- its extent is a per-row
+                // function of the outer position -- so the multi-rank
+                // tuple form is statically ill-posed for such arrays
+                // (the runtime fallback would read a meaningless 0
+                // placeholder). Reject with guidance instead.
+                let raggedFamilySlot =
+                    arrTy.IndexTypes |> List.exists (fun ix ->
+                        match ix.IxKind with
+                        | IxKRagged | IxKRaggedInline | IxKRaggedOpaque
+                        | IxKDepInner
+                        | IxKGroupOuter | IxKGroupMember
+                        | IxKCompound | IxKCompoundDynamic -> true
+                        | _ -> false)
+                if raggedFamilySlot then
+                    Error (Other "extents() on a ragged, grouped, or multi-rank compound array has no scalar answer for the masked/ragged dimensions. Use extents(row) on a peeled or indexed row, the lengths array, or extents on a rank-1 compound (which is its cardinality).")
+                else
+                // Multi-rank: tuple of Int64s, one per dimension
+                let n = arrTy.IndexTypes.Length
+                let tupleTy = IRTTuple (List.replicate n (IRTScalar ETInt64))
+                Ok (mkTyped (TExprExtents tArr) tupleTy)))
+
+
+
+and inferSequence (env: TypeEnv) exprs : TypeResult<TypedExpr> =
+    exprs |> List.map (inferExpr env) |> sequenceResults |> Result.bind (fun tExprs ->
+        match tExprs with
+        | [] -> Ok (mkTyped (TExprSequence []) IRTUnit)
+        | [single] -> Ok single  // sequence(c) ≡ c
+        | _ ->
+            // Unify all element types — sequence is homogeneous
+            let elemType = (List.head tExprs).Type
+            let unifyResults =
+                tExprs |> List.tail |> List.fold (fun acc e ->
+                    acc |> Result.bind (fun () -> unify env.Subst elemType e.Type)) (Ok ())
+            unifyResults |> Result.bind (fun () ->
+                let resolved = env.Subst.Resolve(elemType)
+                let n = tExprs.Length
+                // Create anonymous Idx<N> for the sequence dimension
+                let seqIdx = {
+                    Id = env.Builder.FreshId()
+                    Rank = 1
+                    Extent = IRLit (IRLitInt (int64 n))
+                    Symmetry = SymNone
+                    Tag = Some "__seq"; IxKind = IxKSeq
+                    Kind = SDimension
+                    Dependencies = []
+                }
+                // Result type: prepend Idx<N> to the element type
+                let resultType =
+                    match resolved with
+                    | ArrayElem arrTy ->
+                        // Array elements: Idx<N> × inner index types
+                        mkArrayLike { arrTy with IndexTypes = seqIdx :: arrTy.IndexTypes }
+                    | IRTScalar et ->
+                        // Scalar elements: simple array Idx<N> → scalar
+                        mkArrayArrow [seqIdx] (IRTScalar et) None
+                    | _ ->
+                        // S3 tag: relic. Fallback to Float64 array for non-array,
+                        // non-scalar resolved types — should arguably be a typecheck
+                        // error, but preserving prior behavior.
+                        mkArrayArrow [seqIdx] (IRTScalar ETFloat64) None
+                Ok (mkTyped (TExprSequence tExprs) resultType)))
 
 and inferBinOp env mode op left right : TypeResult<TypedExpr> =
     match op with
@@ -3614,8 +2993,8 @@ and inferArithType mode op leftTy rightTy : TypeResult<IRType> =
         let lUnits = IR.getUnits leftTy
         let rUnits = IR.getUnits rightTy
         match lUnits, rUnits with
-        | Some lu, Some ru when not (IR.unitCompatible lu ru) ->
-            Error (Other (sprintf "Unit mismatch in comparison: %s vs %s" (IR.ppUnitSig lu) (IR.ppUnitSig ru)))
+        | Some lu, Some ru when not (unitCompatible lu ru) ->
+            Error (Other (sprintf "Unit mismatch in comparison: %s vs %s" (ppUnitSig lu) (ppUnitSig ru)))
         | _ -> Ok elementwiseBoolTy
     | OpAnd | OpOr -> Ok elementwiseBoolTy
     | _ ->
@@ -3677,23 +3056,23 @@ and inferArithType mode op leftTy rightTy : TypeResult<IRType> =
             // Addition/subtraction: units must match
             match lUnits, rUnits with
             | Some lu, Some ru ->
-                if IR.unitCompatible lu ru then Ok (IRTUnitAnnotated (bareResult, lu))
+                if unitCompatible lu ru then Ok (IRTUnitAnnotated (bareResult, lu))
                 else
                     Error (Other (sprintf "Unit mismatch in %s: %s vs %s"
                         (if op = OpAdd then "addition" else "subtraction")
-                        (IR.ppUnitSig lu) (IR.ppUnitSig ru)))
+                        (ppUnitSig lu) (ppUnitSig ru)))
             | Some u, None | None, Some u -> Ok (IRTUnitAnnotated (bareResult, u))
             | None, None -> Ok bareResult
         | OpMul ->
             match lUnits, rUnits with
-            | Some lu, Some ru -> Ok (IRTUnitAnnotated (bareResult, IR.unitMul lu ru))
+            | Some lu, Some ru -> Ok (IRTUnitAnnotated (bareResult, unitMul lu ru))
             | Some u, None | None, Some u -> Ok (IRTUnitAnnotated (bareResult, u))
             | None, None -> Ok bareResult
         | OpDiv | OpMod ->
             match lUnits, rUnits with
-            | Some lu, Some ru -> Ok (IRTUnitAnnotated (bareResult, IR.unitDiv lu ru))
+            | Some lu, Some ru -> Ok (IRTUnitAnnotated (bareResult, unitDiv lu ru))
             | Some u, None -> Ok (IRTUnitAnnotated (bareResult, u))
-            | None, Some u -> Ok (IRTUnitAnnotated (bareResult, IR.unitDiv IR.unitDimensionless u))
+            | None, Some u -> Ok (IRTUnitAnnotated (bareResult, unitDiv unitDimensionless u))
             | None, None -> Ok bareResult
         | _ -> Ok bareResult
 
@@ -4692,7 +4071,17 @@ and inferBlock env stmts finalExpr : TypeResult<TypedExpr> =
 
     for stmt in stmts do
         if err.IsNone then
+            // Unwrap the parser's span annotation and stamp the statement's
+            // location for error reporting (see currentStmtSpanStorage).
+            let stmt =
+                match stmt with
+                | StmtSpanned (inner, sp) -> setCurrentStmtSpan sp; inner
+                | s -> s
             match stmt with
+            | StmtSpanned _ ->
+                // Unreachable: the parser emits exactly one annotation layer,
+                // stripped just above. Loud failure beats a skipped statement.
+                failwith "inferBlock: nested StmtSpanned"
             | StmtLet binding ->
                 match inferExpr curEnv binding.Value with
                 | Ok tValue ->
@@ -4759,7 +4148,13 @@ and inferBlock env stmts finalExpr : TypeResult<TypedExpr> =
                     let mutable typedBodyStmts : TypedStmt list = []
                     for bodyStmt in bodyStmts do
                         if bodyErr.IsNone then
+                            let bodyStmt =
+                                match bodyStmt with
+                                | StmtSpanned (inner, sp) -> setCurrentStmtSpan sp; inner
+                                | s -> s
                             match bodyStmt with
+                            | StmtSpanned _ ->
+                                failwith "inferBlock (for-in): nested StmtSpanned"
                             | StmtLet binding ->
                                 match inferExpr bodyEnv binding.Value with
                                 | Ok tValue ->
@@ -5027,6 +4422,9 @@ and inferForExpr env source kernelOpt : TypeResult<TypedExpr> =
 // ============================================================================
 
 and checkDecl (env: TypeEnv) (decl: Decl) : TypeResult<TypedDecl * TypeEnv> =
+    // Fresh declaration: clear any statement span left over from the previous
+    // decl's body so errors here can't inherit a stale location (§3.4).
+    resetCurrentStmtSpan ()
     match decl with
     | DeclLet binding ->
         // Top-level let: shares value-resolution and primary-name binding with
@@ -5521,13 +4919,13 @@ and registerTypeDecl (env: TypeEnv) (typeDecl: TypeDecl) : TypeResult<TypeEnv> =
                     | ExprArrayLit elems ->
                         elems |> List.choose (fun e ->
                             match e with
-                            | ExprLit (LitInt n) -> Some (IR.EVInt n)
-                            | ExprUnaryOp (OpNeg, ExprLit (LitInt n)) -> Some (IR.EVInt (-n))
-                            | ExprLit (LitString s) -> Some (IR.EVString s)
+                            | ExprLit (LitInt n) -> Some (EVInt n)
+                            | ExprUnaryOp (OpNeg, ExprLit (LitInt n)) -> Some (EVInt (-n))
+                            | ExprLit (LitString s) -> Some (EVString s)
                             | _ -> None)
                     | _ -> []
-                let hasInt = raw |> List.exists (function IR.EVInt _ -> true | _ -> false)
-                let hasString = raw |> List.exists (function IR.EVString _ -> true | _ -> false)
+                let hasInt = raw |> List.exists (function EVInt _ -> true | _ -> false)
+                let hasString = raw |> List.exists (function EVString _ -> true | _ -> false)
                 if hasInt && hasString then
                     Error (Other (sprintf "EnumIdx '%s' has mixed value kinds: integer and string literals in the same EnumIdx<[...]> aren't allowed. The runtime backing must be one or the other (int64_t or std::string)." name))
                 else
@@ -5564,217 +4962,6 @@ and registerTypeDecl (env: TypeEnv) (typeDecl: TypeDecl) : TypeResult<TypeEnv> =
 // Float64. After zonking, no IRTInfer should remain in the program.
 
 /// Finalize a type: resolve through substitution, default unsolved to Float64.
-let rec zonkType (subst: Subst) (ty: IRType) : IRType =
-    let resolved = subst.Resolve ty
-    match resolved with
-    | IRTInfer n ->
-        // Function-boundary HM type variables survive zonking — IR-phase
-        // monomorphization will substitute them at call sites. Genuinely
-        // unresolved (non-boundary) inference vars still default to Float64
-        // for backwards compatibility with underconstrained local lets.
-        if subst.IsPolymorphicId(n) then resolved
-        else IRTScalar ETFloat64
-    | IRTScalar _ | IRTUnit | IRTNat _ | IRTNamed _ -> resolved
-    | IRTTuple ts -> IRTTuple (ts |> List.map (zonkType subst))
-    | IRTComputation t -> IRTComputation (zonkType subst t)
-    | IRTLoop lt ->
-        IRTLoop { lt with
-                    ArrayTypes = lt.ArrayTypes |> List.map (zonkType subst)
-                    KernelType = lt.KernelType |> Option.map (zonkType subst) }
-    | IRTPoly (base', var) -> IRTPoly (zonkType subst base', var)
-    | IRTUnitAnnotated (inner, units) -> IRTUnitAnnotated (zonkType subst inner, units)
-    | IRTIdxTagged (inner, idxRef) -> IRTIdxTagged (zonkType subst inner, idxRef)
-    | IRTArrow (slots, ret, identity) ->
-        let zonkSlot = function
-            | SIdx idx -> SIdx (zonkIndexType subst idx)
-            | SIdxVirt idx -> SIdxVirt (zonkIndexType subst idx)
-            | SVal ty -> SVal (zonkType subst ty)
-        IRTArrow (slots |> List.map zonkSlot, zonkType subst ret, identity)
-    | IRTGroupKeys (outer, source, enumValues) -> IRTGroupKeys (zonkIndexType subst outer, zonkIndexType subst source, enumValues)
-
-and zonkIndexType (subst: Subst) (idx: IRIndexType) : IRIndexType = idx  // Extents are IRExpr, not IRType
-
-/// Zonk a TypedParam
-let zonkParam (subst: Subst) (p: TypedParam) : TypedParam =
-    { p with Type = zonkType subst p.Type }
-
-/// Zonk a TypedVarInfo
-let zonkVarInfo (subst: Subst) (v: TypedVarInfo) : TypedVarInfo =
-    { v with Type = zonkType subst v.Type }
-
-/// Zonk all types in a TypedExpr tree (bottom-up)
-let rec zonkExpr (subst: Subst) (expr: TypedExpr) : TypedExpr =
-    let z = zonkExpr subst
-    let zs = List.map z
-    let zt = zonkType subst
-    let kind =
-        match expr.Kind with
-        // Leaves
-        | TExprLit _ | TExprVar _ | TExprQualified _
-        | TExprArity _ | TExprRange _ | TExprReverse _
-        | TExprWildcard
-        | TExprSection _ -> expr.Kind
-        // Unary expr
-        | TExprUnaryOp (op, e) -> TExprUnaryOp (op, z e)
-        | TExprPure e -> TExprPure (z e)
-        | TExprCompute e -> TExprCompute (z e)
-        | TExprRead e -> TExprRead (z e)
-        | TExprFillRandom e -> TExprFillRandom (z e)
-        | TExprRank e -> TExprRank (z e)
-        | TExprDotDot (lo, hi) -> TExprDotDot (z lo, z hi)
-        | TExprReynolds (k, a) -> TExprReynolds (z k, a)
-        // Binary expr
-        | TExprBinOp (m, op, l, r) -> TExprBinOp (m, op, z l, z r)
-        | TExprBind (a, b) -> TExprBind (z a, z b)
-        | TExprParallel (a, b) -> TExprParallel (z a, z b)
-        | TExprFusion (a, b) -> TExprFusion (z a, z b)
-        | TExprFunctorMap (f, c) -> TExprFunctorMap (z f, z c)
-        | TExprChoice (a, b) -> TExprChoice (z a, z b)
-        | TExprCompose (op, a, b) -> TExprCompose (op, z a, z b)
-        | TExprGuard (c, b) -> TExprGuard (z c, z b)
-        | TExprMask (a, p) -> TExprMask (z a, z p)
-        | TExprCompound (d, m) -> TExprCompound (z d, z m)
-        | TExprIntersect (a, b) -> TExprIntersect (z a, z b)
-        | TExprUnion (a, b) -> TExprUnion (z a, z b)
-        | TExprUnique a -> TExprUnique (z a)
-        | TExprContains (a, v) -> TExprContains (z a, z v)
-        | TExprGroupBy (v, k) -> TExprGroupBy (z v, z k)
-        | TExprGroupKeys ks -> TExprGroupKeys (List.map z ks)
-        | TExprSort (a, k) -> TExprSort (z a, z k)
-        | TExprReduce (a, k) -> TExprReduce (z a, z k)
-        | TExprTranspose (a, d1, d2) -> TExprTranspose (z a, d1, d2)
-        | TExprDecompact (a, d) -> TExprDecompact (z a, d)
-        | TExprGram (l, r, s) -> TExprGram (z l, z r, s)
-        | TExprArrayNegate a -> TExprArrayNegate (z a)
-        | TExprArrayConjugate a -> TExprArrayConjugate (z a)
-        | TExprExtents a -> TExprExtents (z a)
-        | TExprZero -> TExprZero
-        | TExprReplicate (c, b) -> TExprReplicate (z c, z b)
-        | TExprAssign (l, r) -> TExprAssign (z l, z r)
-        | TExprPartialApp (op, arg, isL) -> TExprPartialApp (op, z arg, isL)
-        // Ternary
-        | TExprIf (c, t, e) -> TExprIf (z c, z t, z e)
-        // Indexing
-        | TExprApp (f, args) -> TExprApp (z f, zs args)
-        | TExprTupleIndex (t, i) -> TExprTupleIndex (z t, z i)
-        | TExprIndex (arr, idxs, id) -> TExprIndex (z arr, zs idxs, id)
-        | TExprField (obj, fld, idx) -> TExprField (z obj, fld, idx)
-        // Collections
-        | TExprTuple es -> TExprTuple (zs es)
-        | TExprComplexLit (re, im) -> TExprComplexLit (z re, z im)
-        | TExprArrayLit (es, arrTy) -> TExprArrayLit (zs es, arrTy)
-        | TExprZip es -> TExprZip (zs es)
-        | TExprStack es -> TExprStack (zs es)
-        | TExprSequence es -> TExprSequence (zs es)
-        | TExprAlign (es, sp) -> TExprAlign (zs es, sp)
-        | TExprBlocked (it, bs) -> TExprBlocked (it, z bs)
-        // Structured
-        | TExprLet (name, vid, value, body) -> TExprLet (name, vid, z value, z body)
-        | TExprMatch (scr, cases) ->
-            TExprMatch (z scr, cases |> List.map (zonkMatchCase subst))
-        | TExprLambda info -> TExprLambda (zonkLambdaInfo subst info)
-        | TExprStruct (tn, flds) -> TExprStruct (tn, flds |> List.map (fun (n, e) -> (n, z e)))
-        | TExprBlock (stmts, final) ->
-            TExprBlock (stmts |> List.map (zonkStmt subst), final |> Option.map z)
-        // Loop constructs
-        | TExprMethodFor info ->
-            TExprMethodFor { info with
-                                Arrays = zs info.Arrays
-                                ArrayTypes = info.ArrayTypes |> List.map (fun at ->
-                                    { at with IndexTypes = at.IndexTypes |> List.map (zonkIndexType subst) }) }
-        | TExprObjectFor info ->
-            TExprObjectFor { info with Kernel = z info.Kernel }
-        | TExprApply info ->
-            TExprApply { info with
-                            Loop = z info.Loop
-                            Kernel = z info.Kernel
-                            Arrays = zs info.Arrays
-                            ArrayTypes = info.ArrayTypes |> List.map (fun at ->
-                                { at with IndexTypes = at.IndexTypes |> List.map (zonkIndexType subst) })
-                            SharedIndexType = info.SharedIndexType |> Option.map (zonkIndexType subst)
-                            OutputType = zt info.OutputType }
-    { expr with Kind = kind; Type = zt expr.Type }
-
-and zonkMatchCase (subst: Subst) (case: TypedMatchCase) : TypedMatchCase =
-    { Pattern = zonkPattern subst case.Pattern
-      Guard = case.Guard |> Option.map (zonkExpr subst)
-      Body = zonkExpr subst case.Body }
-
-and zonkPattern (subst: Subst) (pat: TypedPattern) : TypedPattern =
-    let zt = zonkType subst
-    let kind =
-        match pat.Kind with
-        | TPatWild | TPatLit _ -> pat.Kind
-        | TPatVar (n, id) -> TPatVar (n, id)
-        | TPatTuple ps -> TPatTuple (ps |> List.map (zonkPattern subst))
-        | TPatCons (h, t) -> TPatCons (zonkPattern subst h, zonkPattern subst t)
-        | TPatVariant (tag, payload, isEnum) -> TPatVariant (tag, payload |> Option.map (zonkPattern subst), isEnum)
-        | TPatStruct (tn, flds) -> TPatStruct (tn, flds |> List.map (fun (n, p) -> (n, zonkPattern subst p)))
-        | TPatGuarded (p, e) -> TPatGuarded (zonkPattern subst p, zonkExpr subst e)
-    { Kind = kind
-      Type = zt pat.Type
-      Bindings = pat.Bindings |> List.map (fun (n, id, ty) -> (n, id, zt ty)) }
-
-and zonkStmt (subst: Subst) (stmt: TypedStmt) : TypedStmt =
-    match stmt with
-    | TStmtLet b -> TStmtLet (zonkBinding subst b)
-    | TStmtAssign (l, r) -> TStmtAssign (zonkExpr subst l, zonkExpr subst r)
-    | TStmtExpr e -> TStmtExpr (zonkExpr subst e)
-    | TStmtForIn (name, vid, lo, hi, body) ->
-        TStmtForIn (name, vid, zonkExpr subst lo, zonkExpr subst hi, body |> List.map (zonkStmt subst))
-
-and zonkBinding (subst: Subst) (b: TypedBinding) : TypedBinding =
-    let zt = zonkType subst
-    { b with
-        Type = zt b.Type
-        Value = zonkExpr subst b.Value
-        SubBindings = b.SubBindings |> List.map (fun (n, id, ty) -> (n, id, zt ty)) }
-
-and zonkLambdaInfo (subst: Subst) (info: TypedLambdaInfo) : TypedLambdaInfo =
-    { info with
-        Params = info.Params |> List.map (zonkParam subst)
-        Body = zonkExpr subst info.Body
-        ReturnType = zonkType subst info.ReturnType
-        Captures = info.Captures |> List.map (zonkVarInfo subst) }
-
-/// Zonk a TypedFunctionDecl
-let zonkFunctionDecl (subst: Subst) (decl: TypedFunctionDecl) : TypedFunctionDecl =
-    { decl with
-        Params = decl.Params |> List.map (zonkParam subst)
-        ReturnType = zonkType subst decl.ReturnType
-        Body = zonkExpr subst decl.Body }
-
-/// Zonk a TypedTypeDef
-let zonkTypeDef (subst: Subst) (td: TypedTypeDef) : TypedTypeDef =
-    let zt = zonkType subst
-    match td with
-    | TTDAlias (n, tp, ty) -> TTDAlias (n, tp, zt ty)
-    | TTDStruct (n, tp, flds, inv) ->
-        TTDStruct (n, tp, flds |> List.map (fun (fn, ft) -> (fn, zt ft)),
-                   inv |> Option.map (zonkExpr subst))
-    | TTDVariant (n, tp, vs) ->
-        TTDVariant (n, tp, vs |> List.map (fun (vn, vt) -> (vn, vt |> Option.map zt)))
-    | TTDIndexType _ | TTDEnumIdx _ ->
-        // Index aliases carry concrete extents (literal int) and (for EnumIdx)
-        // concrete value lists. No inference variables to resolve, pass through.
-        td
-
-/// Zonk a TypedDecl
-let zonkDecl (subst: Subst) (decl: TypedDecl) : TypedDecl =
-    match decl with
-    | TDeclLet b -> TDeclLet (zonkBinding subst b)
-    | TDeclStatic b -> TDeclStatic (zonkBinding subst b)
-    | TDeclFunction fd -> TDeclFunction (zonkFunctionDecl subst fd)
-    | TDeclType td -> TDeclType (zonkTypeDef subst td)
-    | TDeclImpl impl ->
-        TDeclImpl { impl with Methods = impl.Methods |> List.map (zonkFunctionDecl subst) }
-    | TDeclInterface _ | TDeclUnit _ | TDeclImport _ -> decl
-
-/// Zonk an entire TypedModule
-let zonkModule (subst: Subst) (modul: TypedModule) : TypedModule =
-    { modul with Decls = modul.Decls |> List.map (zonkDecl subst) }
-
-// ============================================================================
 // 12. Module and Program
 // ============================================================================
 
