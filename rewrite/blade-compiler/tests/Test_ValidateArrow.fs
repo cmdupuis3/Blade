@@ -40,7 +40,7 @@ let private idxN (n: int) : IRIndexType =
         Rank = 1
         Extent = IRLit (IRLitInt (int64 n))
         Symmetry = SymNone
-        Tag = None
+        Tag = None; IxKind = IxKPlain
         Kind = SDimension
         Dependencies = []
     }

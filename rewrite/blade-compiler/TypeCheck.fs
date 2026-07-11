@@ -883,7 +883,7 @@ let rec lowerTypeExpr (env: TypeEnv) (ty: TypeExpr) : IRType =
                 Id = env.Builder.FreshId(); Rank = 1
                 Extent = IRParam ("__error_ragged_no_prior", 0, IRTNat None)
                 Symmetry = SymNone
-                Tag = Some "__error_ragged_no_prior"
+                Tag = Some "__error_ragged_no_prior"; IxKind = IxKErrorRaggedNoPrior
                 Kind = SDimension; Dependencies = []
             }
             mkArrayArrow [placeholderIdx] elem None
@@ -942,7 +942,7 @@ let rec lowerTypeExpr (env: TypeEnv) (ty: TypeExpr) : IRType =
                     let elem = lowerElemType env elemTy
                     let indices = [0 .. r - 1] |> List.map (fun _ ->
                         { Id = env.Builder.FreshId(); Rank = 1; Extent = IRParam ("n", 0, IRTNat None)
-                          Symmetry = SymNone; Tag = None; Kind = SDimension; Dependencies = [] })
+                          Symmetry = SymNone; Tag = None; IxKind = IxKPlain; Kind = SDimension; Dependencies = [] })
                     mkArrayArrow indices elem None
         | None ->
             // Non-constant rank (e.g., T^r where r is a variable)
@@ -1000,26 +1000,26 @@ let rec lowerTypeExpr (env: TypeEnv) (ty: TypeExpr) : IRType =
     | TySymIdx (rank, extent) ->
         let ext = lowerExtentExpr env extent
         let idx = { Id = env.Builder.FreshId(); Rank = rank; Extent = ext
-                    Symmetry = SymSymmetric; Tag = None; Kind = SDimension; Dependencies = [] }
+                    Symmetry = SymSymmetric; Tag = None; IxKind = IxKPlain; Kind = SDimension; Dependencies = [] }
         mkArrayArrow [idx] (IRTScalar ETFloat64) None
 
     | TyAntisymIdx (rank, extent) ->
         let ext = lowerExtentExpr env extent
         let idx = { Id = env.Builder.FreshId(); Rank = rank; Extent = ext
-                    Symmetry = SymAntisymmetric; Tag = None; Kind = SDimension; Dependencies = [] }
+                    Symmetry = SymAntisymmetric; Tag = None; IxKind = IxKPlain; Kind = SDimension; Dependencies = [] }
         mkArrayArrow [idx] (IRTScalar ETFloat64) None
 
     | TyHermitianIdx extent ->
         let ext = lowerExtentExpr env extent
         let idx = { Id = env.Builder.FreshId(); Rank = 2; Extent = ext
-                    Symmetry = SymHermitian; Tag = None; Kind = SDimension; Dependencies = [] }
+                    Symmetry = SymHermitian; Tag = None; IxKind = IxKPlain; Kind = SDimension; Dependencies = [] }
         mkArrayArrow [idx] (IRTScalar ETFloat64) None
 
     | TyBoundedIdx _ -> IRTScalar ETInt64
 
     | TyCompoundIdx _mask ->
         let idx = { Id = env.Builder.FreshId(); Rank = 1; Extent = IRParam ("compound", 0, IRTNat None)
-                    Symmetry = SymNone; Tag = None; Kind = SDimension; Dependencies = [] }
+                    Symmetry = SymNone; Tag = None; IxKind = IxKPlain; Kind = SDimension; Dependencies = [] }
         mkArrayArrow [idx] (IRTScalar ETFloat64) None
 
     | TyEnumIdx valuesExpr ->
@@ -1053,7 +1053,7 @@ let rec lowerTypeExpr (env: TypeEnv) (ty: TypeExpr) : IRType =
     | TyConstrained (inner, _) -> lowerTypeExpr env inner
     | TyEquivIdx (_dim, _group, _rep) ->
         let idx = { Id = env.Builder.FreshId(); Rank = 1; Extent = IRParam ("equiv", 0, IRTNat None)
-                    Symmetry = SymNone; Tag = None; Kind = SDimension; Dependencies = [] }
+                    Symmetry = SymNone; Tag = None; IxKind = IxKPlain; Kind = SDimension; Dependencies = [] }
         mkArrayArrow [idx] (IRTScalar ETFloat64) None
 
 and lowerElemType env ty : IRType =
@@ -1103,23 +1103,23 @@ and lowerIndexType env (_position: int) (ty: TypeExpr) : IRIndexType =
     match ty with
     | TyIdx extent ->
         { Id = id; Rank = 1; Extent = lowerExtentExpr env extent
-          Symmetry = SymNone; Tag = None; Kind = SDimension; Dependencies = [] }
+          Symmetry = SymNone; Tag = None; IxKind = IxKPlain; Kind = SDimension; Dependencies = [] }
     | TySymIdx (rank, extent) ->
         { Id = id; Rank = rank; Extent = lowerExtentExpr env extent
-          Symmetry = SymSymmetric; Tag = None; Kind = SDimension; Dependencies = [] }
+          Symmetry = SymSymmetric; Tag = None; IxKind = IxKPlain; Kind = SDimension; Dependencies = [] }
     | TyAntisymIdx (rank, extent) ->
         { Id = id; Rank = rank; Extent = lowerExtentExpr env extent
-          Symmetry = SymAntisymmetric; Tag = None; Kind = SDimension; Dependencies = [] }
+          Symmetry = SymAntisymmetric; Tag = None; IxKind = IxKPlain; Kind = SDimension; Dependencies = [] }
     | TyHermitianIdx extent ->
         { Id = id; Rank = 2; Extent = lowerExtentExpr env extent
-          Symmetry = SymHermitian; Tag = None; Kind = SDimension; Dependencies = [] }
+          Symmetry = SymHermitian; Tag = None; IxKind = IxKPlain; Kind = SDimension; Dependencies = [] }
     | TyEnumIdx valuesExpr ->
         let nValues =
             match valuesExpr with
             | ExprArrayLit elems -> int64 elems.Length
             | _ -> 0L
         { Id = id; Rank = 1; Extent = IRLit (IRLitInt nValues); Symmetry = SymNone
-          Tag = None; Kind = SDimension; Dependencies = [] }
+          Tag = None; IxKind = IxKPlain; Kind = SDimension; Dependencies = [] }
     | TyDepIdx (outerTy, _paramName, _bodyTy) ->
         // Single-slot context (e.g., type alias, range): return a placeholder
         // inner-only record. Two-record expansion happens at the array-index-
@@ -1128,7 +1128,7 @@ and lowerIndexType env (_position: int) (ty: TypeExpr) : IRIndexType =
         // (iteration, etc.) should route through lowerIndexTypeList instead.
         let outerIdx = lowerIndexType env _position outerTy
         { Id = id; Rank = 2; Extent = IRParam ("__depidx_inner", 0, IRTNat None)
-          Symmetry = SymNone; Tag = Some "__depidx"
+          Symmetry = SymNone; Tag = Some "__depidx"; IxKind = IxKDep
           Kind = SDimension; Dependencies = [outerIdx.Id] }
     | TyRaggedIdx lengthsExpr ->
         // Single-record shape matching lowerIndexTypeList's unaliased TyRaggedIdx
@@ -1140,7 +1140,7 @@ and lowerIndexType env (_position: int) (ty: TypeExpr) : IRIndexType =
         // through alias indirection.
         let lengthsIR = lowerExtentExpr env lengthsExpr
         { Id = id; Rank = 1; Extent = IRRaggedLookup lengthsIR
-          Symmetry = SymNone; Tag = Some "__raggedidx"
+          Symmetry = SymNone; Tag = Some "__raggedidx"; IxKind = IxKRagged
           Kind = SDimension; Dependencies = [] }
     | TyRaggedIdxOpaque ->
         // Opaque-extent variant: rank-1, no lengths array, no outer position.
@@ -1150,7 +1150,7 @@ and lowerIndexType env (_position: int) (ty: TypeExpr) : IRIndexType =
         // because we haven't computed it yet" (IRParam) from "extent supplied
         // by surrounding loop binding" (IROpaqueExtent).
         { Id = id; Rank = 1; Extent = IROpaqueExtent
-          Symmetry = SymNone; Tag = Some "__raggedidx_opaque"
+          Symmetry = SymNone; Tag = Some "__raggedidx_opaque"; IxKind = IxKRaggedOpaque
           Kind = SDimension; Dependencies = [] }
     | TyNamed (name, _) ->
         match lookupTypeDef name env with
@@ -1158,7 +1158,7 @@ and lowerIndexType env (_position: int) (ty: TypeExpr) : IRIndexType =
         | Some (TDIEnumIdx (_, idx, _, _)) -> { idx with Id = id }
         | _ ->
             { Id = id; Rank = 1; Extent = IRParam (name, 0, IRTNat None); Symmetry = SymNone
-              Tag = Some name; Kind = SDimension; Dependencies = [] }
+              Tag = Some name; IxKind = ixKindOfTag (Some name); Kind = SDimension; Dependencies = [] }
     | TyCompoundIdx maskExpr ->
         // CompoundIdx<mask> -- masked product space (formalism 4.5). Rank = the
         // RANK of the mask array (its number of dimensions). The mask is a runtime
@@ -1192,11 +1192,11 @@ and lowerIndexType env (_position: int) (ty: TypeExpr) : IRIndexType =
                  | None -> lowerExtentExpr env maskExpr, 1)
             | _ -> lowerExtentExpr env maskExpr, 1
         { Id = id; Rank = rank; Extent = IRCompoundMask maskIR
-          Symmetry = SymNone; Tag = Some "__compoundidx"
+          Symmetry = SymNone; Tag = Some "__compoundidx"; IxKind = IxKCompound
           Kind = SDimension; Dependencies = [] }
     | _ ->
         { Id = id; Rank = 1; Extent = IRParam ("?", 0, IRTNat None); Symmetry = SymNone
-          Tag = None; Kind = SDimension; Dependencies = [] }
+          Tag = None; IxKind = IxKPlain; Kind = SDimension; Dependencies = [] }
 
 /// Lower an index type to a list of IRIndexType records. Most types produce a
 /// single-element list; dependent forms (DepIdx, RaggedIdx) produce two records
@@ -1211,7 +1211,7 @@ and lowerIndexTypeList (env: TypeEnv) (position: int) (ty: TypeExpr) : IRIndexTy
         // Lower outer first to get its Id; that Id is the dependency target
         // for the inner extent's reference to the lambda parameter.
         let outerIdx = lowerIndexType env position outerTy
-        let outerWithTag = { outerIdx with Tag = Some "__depidx_outer" }
+        let outerWithTag = { outerIdx with Tag = Some "__depidx_outer"; IxKind = IxKDepOuter }
         let outerVarRef = IRVar (outerWithTag.Id, IRTScalar ETInt64)
         // Extract the inner extent expression. Two body shapes are recognized:
         //   - Lambda form: `lambda(i) -> Idx<expr>` parses to `TyIdx expr`.
@@ -1251,7 +1251,7 @@ and lowerIndexTypeList (env: TypeEnv) (position: int) (ty: TypeExpr) : IRIndexTy
             Rank = 1
             Extent = innerExtent
             Symmetry = SymNone
-            Tag = Some "__depidx_inner"
+            Tag = Some "__depidx_inner"; IxKind = IxKDepInner
             Kind = SDimension
             Dependencies = [outerWithTag.Id]
         }
@@ -1278,7 +1278,7 @@ and lowerIndexTypeList (env: TypeEnv) (position: int) (ty: TypeExpr) : IRIndexTy
             Rank = 1
             Extent = IRRaggedLookup lengthsIR
             Symmetry = SymNone
-            Tag = Some "__raggedidx"
+            Tag = Some "__raggedidx"; IxKind = IxKRagged
             Kind = SDimension
             Dependencies = []  // populated by the codegen iteration as needed
         }]
@@ -1293,7 +1293,7 @@ and lowerIndexTypeList (env: TypeEnv) (position: int) (ty: TypeExpr) : IRIndexTy
             Rank = 1
             Extent = IROpaqueExtent
             Symmetry = SymNone
-            Tag = Some "__raggedidx_opaque"
+            Tag = Some "__raggedidx_opaque"; IxKind = IxKRaggedOpaque
             Kind = SDimension
             Dependencies = []
         }]
@@ -1529,7 +1529,7 @@ let inferArrayLitType (builder: IRBuilder) (exprs: TypedExpr list) : IRArrayType
         let n = List.length exprs
         let outerIdx = {
             Id = builder.FreshId(); Rank = 1; Extent = IRLit (IRLitInt (int64 n))
-            Symmetry = SymNone; Tag = None; Kind = SDimension; Dependencies = []
+            Symmetry = SymNone; Tag = None; IxKind = IxKPlain; Kind = SDimension; Dependencies = []
         }
         // The lengths reference is a synthetic IRParam — codegen recognizes
         // this and emits the lengths array inline from the literal structure.
@@ -1537,7 +1537,7 @@ let inferArrayLitType (builder: IRBuilder) (exprs: TypedExpr list) : IRArrayType
         let innerIdx = {
             Id = builder.FreshId(); Rank = 1
             Extent = IRRaggedLookup (IRParam ("__inline_lens", 0, IRTNat None))
-            Symmetry = SymNone; Tag = Some "__raggedidx_inline"
+            Symmetry = SymNone; Tag = Some "__raggedidx_inline"; IxKind = IxKRaggedInline
             Kind = SDimension; Dependencies = []
         }
         { ElemType = elemType; IndexTypes = [outerIdx; innerIdx]; IsVirtual = false; Identity = None }
@@ -1553,7 +1553,7 @@ let inferArrayLitType (builder: IRBuilder) (exprs: TypedExpr list) : IRArrayType
         let shape = getShape exprs
         let indexTypes = shape |> List.map (fun extent ->
             { Id = builder.FreshId(); Rank = 1; Extent = IRLit (IRLitInt (int64 extent))
-              Symmetry = SymNone; Tag = None; Kind = SDimension; Dependencies = [] })
+              Symmetry = SymNone; Tag = None; IxKind = IxKPlain; Kind = SDimension; Dependencies = [] })
         { ElemType = elemType; IndexTypes = indexTypes; IsVirtual = false; Identity = None }
 
 let getArrayType (env: TypeEnv) (expr: Expr) : IRArrayType =
@@ -1567,14 +1567,14 @@ let getArrayType (env: TypeEnv) (expr: Expr) : IRArrayType =
                 { ElemType = IRTScalar ETFloat64
                   IndexTypes = [{ Id = env.Builder.FreshId(); Rank = 1
                                   Extent = IRParam(name + "_n", 0, IRTNat None)
-                                  Symmetry = SymNone; Tag = None; Kind = SDimension
+                                  Symmetry = SymNone; Tag = None; IxKind = IxKPlain; Kind = SDimension
                                   Dependencies = [] }]
                   IsVirtual = false; Identity = Some (AIDVariable name) }
         | None ->
             { ElemType = IRTScalar ETFloat64
               IndexTypes = [{ Id = env.Builder.FreshId(); Rank = 1
                               Extent = IRParam(name + "_n", 0, IRTNat None)
-                              Symmetry = SymNone; Tag = None; Kind = SDimension
+                              Symmetry = SymNone; Tag = None; IxKind = IxKPlain; Kind = SDimension
                               Dependencies = [] }]
               IsVirtual = false; Identity = Some (AIDVariable name) }
     | _ ->
@@ -1751,7 +1751,7 @@ let requireArrayArg (env: TypeEnv) (tArr: TypedExpr) (opName: string) : TypeResu
             Rank = 1
             Extent = IRParam (sprintf "__%s_inferred_n" opName, 0, IRTNat None)
             Symmetry = SymNone
-            Tag = None
+            Tag = None; IxKind = IxKPlain
             Kind = SDimension
             Dependencies = []
         }
@@ -1836,7 +1836,7 @@ let private checkArrayIndexTags (env: TypeEnv) (arrTy: IRArrayType) (tArgs: Type
 /// an explicit 1-tuple. k >= 2 requires the tuple form.
 let private validateCompoundIndex (env: TypeEnv) (arrTy: IRArrayType) (tArgs: TypedExpr list) : TypeResult<unit> =
     match arrTy.IndexTypes with
-    | headSlot :: _ when headSlot.Tag = Some "__compoundidx" ->
+    | headSlot :: _ when headSlot.IxKind = IxKCompound ->
         let k = headSlot.Rank
         match tArgs with
         | [] -> Ok ()  // no args consumed here (e.g. bare array value); nothing to check
@@ -1932,7 +1932,7 @@ let private compoundResidualType (headSlot: IRIndexType) (parentIR: IRExpr) (j: 
         // Dense residual Idx: one free coordinate, a contiguous [lo,hi) window.
         [ { Id = fresh (); Rank = 1
             Extent = IRCompoundProject (parentIR, j)
-            Symmetry = SymNone; Tag = None
+            Symmetry = SymNone; Tag = None; IxKind = IxKPlain
             Kind = SDimension; Dependencies = [] } ]
     else
         // Residual CompoundIdx over the remaining k-j axes at the pinned prefix.
@@ -1940,7 +1940,7 @@ let private compoundResidualType (headSlot: IRIndexType) (parentIR: IRExpr) (j: 
         // compound (further indexable, further partial-indexable).
         [ { Id = fresh (); Rank = residualRank
             Extent = IRCompoundProject (parentIR, j)
-            Symmetry = SymNone; Tag = Some "__compoundidx"
+            Symmetry = SymNone; Tag = Some "__compoundidx"; IxKind = IxKCompound
             Kind = SDimension; Dependencies = [] } ]
 
 let private dispatchAppOrIndex (env: TypeEnv) (tFunc: TypedExpr) (tArgs: TypedExpr list) : TypeResult<TypedExpr> =
@@ -1961,7 +1961,7 @@ let private dispatchAppOrIndex (env: TypeEnv) (tFunc: TypedExpr) (tArgs: TypedEx
             // a compound is one slot of rank k filled by one k-tuple.
             let headIsCompound =
                 match arrTy.IndexTypes with
-                | h :: _ -> h.Tag = Some "__compoundidx"
+                | h :: _ -> h.IxKind = IxKCompound
                 | [] -> false
             if headIsCompound then
                 let headSlot = List.head arrTy.IndexTypes
@@ -2518,7 +2518,7 @@ let rec inferExpr (env: TypeEnv) (expr: Expr) : TypeResult<TypedExpr> =
                 Rank = 1
                 Extent = extentExpr
                 Symmetry = SymNone
-                Tag = Some "__anon"
+                Tag = Some "__anon"; IxKind = IxKPlain
                 Kind = SDimension
                 Dependencies = []
             }
@@ -2661,7 +2661,7 @@ let rec inferExpr (env: TypeEnv) (expr: Expr) : TypeResult<TypedExpr> =
                     let resultIdx = {
                         Id = env.Builder.FreshId(); Rank = 1
                         Extent = IRParam ((if isIntersect then "__isect" else "__union"), 0, IRTNat None)
-                        Symmetry = SymNone; Tag = None
+                        Symmetry = SymNone; Tag = None; IxKind = IxKPlain
                         Kind = SDimension; Dependencies = []
                     }
                     let resultType = mkArrayArrow [resultIdx] arrTy.ElemType None
@@ -2676,7 +2676,7 @@ let rec inferExpr (env: TypeEnv) (expr: Expr) : TypeResult<TypedExpr> =
                 let resultIdx = {
                     Id = env.Builder.FreshId(); Rank = 1
                     Extent = IRParam ("__unique", 0, IRTNat None)
-                    Symmetry = SymNone; Tag = None
+                    Symmetry = SymNone; Tag = None; IxKind = IxKPlain
                     Kind = SDimension; Dependencies = []
                 }
                 let resultType = mkArrayArrow [resultIdx] arrTy.ElemType None
@@ -2715,7 +2715,7 @@ let rec inferExpr (env: TypeEnv) (expr: Expr) : TypeResult<TypedExpr> =
                         else {
                             Id = env.Builder.FreshId(); Rank = 1
                             Extent = IRParam ("__src", 0, IRTNat None)
-                            Symmetry = SymNone; Tag = None
+                            Symmetry = SymNone; Tag = None; IxKind = IxKPlain
                             Kind = SDimension; Dependencies = []
                         }
                     let namedRef =
@@ -2727,18 +2727,18 @@ let rec inferExpr (env: TypeEnv) (expr: Expr) : TypeResult<TypedExpr> =
                         | Some name ->
                             match lookupTypeDef name env with
                             | Some (TDIIndexType (_, idx, _)) ->
-                                ({ idx with Id = env.Builder.FreshId(); Tag = Some name }, None)
+                                ({ idx with Id = env.Builder.FreshId(); Tag = Some name; IxKind = ixKindOfTag (Some name) }, None)
                             | Some (TDIEnumIdx (_, idx, values, _)) ->
-                                ({ idx with Id = env.Builder.FreshId(); Tag = Some name }, Some values)
+                                ({ idx with Id = env.Builder.FreshId(); Tag = Some name; IxKind = ixKindOfTag (Some name) }, Some values)
                             | _ ->
                                 ({ Id = env.Builder.FreshId(); Rank = 1
                                    Extent = IRParam ("__ngroups", 0, IRTNat None)
-                                   Symmetry = SymNone; Tag = None
+                                   Symmetry = SymNone; Tag = None; IxKind = IxKPlain
                                    Kind = SDimension; Dependencies = [] }, None)
                         | None ->
                             ({ Id = env.Builder.FreshId(); Rank = 1
                                Extent = IRParam ("__ngroups", 0, IRTNat None)
-                               Symmetry = SymNone; Tag = None
+                               Symmetry = SymNone; Tag = None; IxKind = IxKPlain
                                Kind = SDimension; Dependencies = [] }, None)
                     let gkType = IRTGroupKeys (outerIdx, sourceIdx, enumValues)
                     Ok (mkTyped (TExprGroupKeys [tKeys]) gkType)))
@@ -2784,7 +2784,7 @@ let rec inferExpr (env: TypeEnv) (expr: Expr) : TypeResult<TypedExpr> =
                         Id = env.Builder.FreshId(); Rank = 1
                         Extent = IRParam ("__ngroups", 0, IRTNat None)
                         Symmetry = SymNone
-                        Tag = Some "__compoundidx_dynamic"
+                        Tag = Some "__compoundidx_dynamic"; IxKind = IxKCompoundDynamic
                         Kind = SDimension; Dependencies = []
                     }
                     let gkType = IRTGroupKeys (outerIdx, firstSource, None)
@@ -2805,22 +2805,22 @@ let rec inferExpr (env: TypeEnv) (expr: Expr) : TypeResult<TypedExpr> =
                         let member_ = {
                             Id = env.Builder.FreshId(); Rank = 1
                             Extent = IRParam ("__groupsz", 0, IRTNat None)
-                            Symmetry = SymNone; Tag = Some "__group_member"
+                            Symmetry = SymNone; Tag = Some "__group_member"; IxKind = IxKGroupMember
                             Kind = SDimension; Dependencies = []
                         }
-                        ({ outer with Id = env.Builder.FreshId(); Tag = Some "__group_outer" }, member_)
+                        ({ outer with Id = env.Builder.FreshId(); Tag = Some "__group_outer"; IxKind = IxKGroupOuter }, member_)
                     | _ ->
                         // Fallback: treat second arg as raw key array (backward compat)
                         let outer = {
                             Id = env.Builder.FreshId(); Rank = 1
                             Extent = IRParam ("__ngroups", 0, IRTNat None)
-                            Symmetry = SymNone; Tag = Some "__group_outer"
+                            Symmetry = SymNone; Tag = Some "__group_outer"; IxKind = IxKGroupOuter
                             Kind = SDimension; Dependencies = []
                         }
                         let member_ = {
                             Id = env.Builder.FreshId(); Rank = 1
                             Extent = IRParam ("__groupsz", 0, IRTNat None)
-                            Symmetry = SymNone; Tag = Some "__group_member"
+                            Symmetry = SymNone; Tag = Some "__group_member"; IxKind = IxKGroupMember
                             Kind = SDimension; Dependencies = []
                         }
                         (outer, member_)
@@ -2852,7 +2852,7 @@ let rec inferExpr (env: TypeEnv) (expr: Expr) : TypeResult<TypedExpr> =
                     let resultIdx = {
                         Id = env.Builder.FreshId(); Rank = 1
                         Extent = srcIdx.Extent
-                        Symmetry = SymNone; Tag = None
+                        Symmetry = SymNone; Tag = None; IxKind = IxKPlain
                         Kind = SDimension; Dependencies = []
                     }
                     let resultType = mkArrayArrow [resultIdx] arrTy.ElemType None
@@ -2983,7 +2983,7 @@ let rec inferExpr (env: TypeEnv) (expr: Expr) : TypeResult<TypedExpr> =
                             | _ -> false
                         let freshSlot (ext: IRExpr) (sym: SymmetryClass) (rank: int) =
                             { Id = env.Builder.FreshId(); Rank = rank; Extent = ext
-                              Symmetry = sym; Tag = None; Kind = SDimension; Dependencies = [] }
+                              Symmetry = sym; Tag = None; IxKind = IxKPlain; Kind = SDimension; Dependencies = [] }
                         let resultType =
                             if sameArray then
                                 // Square m x m, compact group of arity 2 carrying the
@@ -3179,7 +3179,7 @@ let rec inferExpr (env: TypeEnv) (expr: Expr) : TypeResult<TypedExpr> =
                     Rank = 1
                     Extent = IRParam ("__inferred_n", 0, IRTNat None)
                     Symmetry = SymNone
-                    Tag = None
+                    Tag = None; IxKind = IxKPlain
                     Kind = SDimension
                     Dependencies = []
                 }
@@ -3255,13 +3255,12 @@ let rec inferExpr (env: TypeEnv) (expr: Expr) : TypeResult<TypedExpr> =
                     // placeholder). Reject with guidance instead.
                     let raggedFamilySlot =
                         arrTy.IndexTypes |> List.exists (fun ix ->
-                            match ix.Tag with
-                            | Some t ->
-                                t.StartsWith "__raggedidx"
-                                || t = "__depidx_inner"
-                                || t.StartsWith "__group_"
-                                || t.StartsWith "__compoundidx"
-                            | None -> false)
+                            match ix.IxKind with
+                            | IxKRagged | IxKRaggedInline | IxKRaggedOpaque
+                            | IxKDepInner
+                            | IxKGroupOuter | IxKGroupMember
+                            | IxKCompound | IxKCompoundDynamic -> true
+                            | _ -> false)
                     if raggedFamilySlot then
                         Error (Other "extents() on a ragged, grouped, or multi-rank compound array has no scalar answer for the masked/ragged dimensions. Use extents(row) on a peeled or indexed row, the lengths array, or extents on a rank-1 compound (which is its cardinality).")
                     else
@@ -3290,7 +3289,7 @@ let rec inferExpr (env: TypeEnv) (expr: Expr) : TypeResult<TypedExpr> =
                         Rank = 1
                         Extent = IRLit (IRLitInt (int64 n))
                         Symmetry = SymNone
-                        Tag = Some "__seq"
+                        Tag = Some "__seq"; IxKind = IxKSeq
                         Kind = SDimension
                         Dependencies = []
                     }
@@ -3331,7 +3330,7 @@ let rec inferExpr (env: TypeEnv) (expr: Expr) : TypeResult<TypedExpr> =
                     Rank = 1
                     Extent = IRLit (IRLitInt (int64 n))
                     Symmetry = SymNone
-                    Tag = Some "__seq"
+                    Tag = Some "__seq"; IxKind = IxKSeq
                     Kind = SDimension
                     Dependencies = []
                 }
@@ -4044,14 +4043,8 @@ and buildApplyInfo (env: TypeEnv)
     // ragged-family tag contributes to the kernel's rank, not to the
     // iterated count. The result is the kernel's effective rank as
     // codegen actually sees it.
-    let isRaggedInnerTag (tag: string option) : bool =
-        match tag with
-        | Some t ->
-            t.StartsWith "__raggedidx"
-            || t.StartsWith "__depidx_inner"
-            || t.StartsWith "__group_member"
-            || t = "__error_ragged_no_prior"
-        | None -> false
+    let isRaggedInnerKind (k: IxKind) : bool =
+        isRaggedRowKind k || k = IxKErrorRaggedNoPrior
     // Does the kernel body use parameter `pname` AS AN ARRAY (indexed, applied,
     // or passed to an array combinator like reduce/extents/rank/arity)? This
     // distinguishes a CONSUMING kernel (e.g. `lambda(g) -> reduce(g, ...)` or
@@ -4103,7 +4096,7 @@ and buildApplyInfo (env: TypeEnv)
                 let sDims = sDimsPerArray.[i]
                 let raggedInnerCount =
                     arrTy.IndexTypes
-                    |> List.filter (fun idx -> isRaggedInnerTag idx.Tag)
+                    |> List.filter (fun idx -> isRaggedInnerKind idx.IxKind)
                     |> List.length
                 // Re-attribute ragged inner dims to the kernel side ONLY when the
                 // param is structurally used as an array (consuming kernel). For
@@ -4548,7 +4541,7 @@ and checkExpr (env: TypeEnv) (expected: IRType) (expr: Expr) : TypeResult<TypedE
 and irTypeHasRaggedNoPrior (t: IRType) : bool =
     match t with
     | ArrayElem at ->
-        (at.IndexTypes |> List.exists (fun ix -> ix.Tag = Some "__error_ragged_no_prior"))
+        (at.IndexTypes |> List.exists (fun ix -> ix.IxKind = IxKErrorRaggedNoPrior))
         || irTypeHasRaggedNoPrior at.ElemType
     | IRTTuple ts -> ts |> List.exists irTypeHasRaggedNoPrior
     | FuncElem (ps, r) -> (ps |> List.exists irTypeHasRaggedNoPrior) || irTypeHasRaggedNoPrior r
@@ -4940,7 +4933,7 @@ and inferForExpr env source kernelOpt : TypeResult<TypedExpr> =
                 | ArrayElem at when at.IndexTypes.Length > 0 -> at.IndexTypes.[0]
                 | _ -> { Id = env.Builder.FreshId(); Rank = 1
                          Extent = IRLit (IRLitInt 1L); Symmetry = SymNone
-                         Tag = None; Kind = SDimension; Dependencies = [] }
+                         Tag = None; IxKind = IxKPlain; Kind = SDimension; Dependencies = [] }
             
             let identities = arrays |> List.map (fun arr ->
                 match arr with ExprVar name -> AIDVariable name | _ -> AIDLiteral (env.Builder.FreshId()))
@@ -5514,7 +5507,7 @@ and registerTypeDecl (env: TypeEnv) (typeDecl: TypeDecl) : TypeResult<TypeEnv> =
             match chasedBody with
             | TyIdx _ | TySymIdx _ | TyAntisymIdx _ | TyHermitianIdx _ | TyBoundedIdx _ ->
                 let idx = lowerIndexType env 0 chasedBody
-                Ok (TDIIndexType (name, { idx with Tag = Some name }, chasedBody))
+                Ok (TDIIndexType (name, { idx with Tag = Some name; IxKind = ixKindOfTag (Some name) }, chasedBody))
             | TyDepIdx _ | TyRaggedIdx _ | TyRaggedIdxOpaque ->
                 let idx = lowerIndexType env 0 chasedBody
                 Ok (TDIIndexType (name, idx, chasedBody))
@@ -5542,7 +5535,7 @@ and registerTypeDecl (env: TypeEnv) (typeDecl: TypeDecl) : TypeResult<TypeEnv> =
                     let idx = {
                         Id = env.Builder.FreshId(); Rank = 1
                         Extent = IRLit (IRLitInt extent)
-                        Symmetry = SymNone; Tag = Some name
+                        Symmetry = SymNone; Tag = Some name; IxKind = ixKindOfTag (Some name)
                         Kind = SDimension; Dependencies = []
                     }
                     Ok (TDIEnumIdx (name, idx, raw, chasedBody))

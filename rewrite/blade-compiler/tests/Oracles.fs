@@ -4,6 +4,14 @@
 // correctness references the optimized Blade paths must match — kept in
 // their own file so they can be reviewed against independently verified
 // truth (audit §2.3 / plan Phase 0.2). Extracted verbatim from Main.fs.
+//
+// REVIEWED against hand-computed / analytic values (Phase 0.2, 2026-07-11):
+// tests/Test_Oracles.fs pins each oracle to independently derived truth
+// (Vandermonde identity, degenerate-kernel vanishing, a hand-multiplied
+// complex Gram, the factorial form of C(n+r-1, r), ...) and documents the
+// conventions: Reynolds sums are UNNORMALIZED (no 1/r!), the symmetric
+// rank-2 oracle doubles on the diagonal, strict tuples are lexicographic.
+// Change an oracle -> re-derive the affected values there BY HAND.
 module Blade.Tests.Oracles
 
 open System

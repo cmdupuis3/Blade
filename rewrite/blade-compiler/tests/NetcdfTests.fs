@@ -209,7 +209,7 @@ let runNetcdfTests () =
     let cId3 = cBuilder.FreshId()
     let mkIdx (id: IRId) (ext: int64) : IRIndexType =
         { Id = id; Rank = 1; Extent = IRLit (IRLitInt ext)
-          Symmetry = SymNone; Tag = None; Kind = SDimension; Dependencies = [] }
+          Symmetry = SymNone; Tag = None; IxKind = IxKPlain; Kind = SDimension; Dependencies = [] }
     let cVarArr : IRArrayType =
         { ElemType = IRTScalar ETFloat32
           IndexTypes = [mkIdx cId1 20L; mkIdx cId2 30L; mkIdx cId3 50L]
@@ -227,7 +227,7 @@ let runNetcdfTests () =
         check "load_compound: compound index has rank 3"
             (arr.IndexTypes.[0].Rank = 3) (sprintf "got %d" arr.IndexTypes.[0].Rank)
         check "load_compound: tagged __compoundidx"
-            (arr.IndexTypes.[0].Tag = Some "__compoundidx") (sprintf "got %A" arr.IndexTypes.[0].Tag)
+            (arr.IndexTypes.[0].IxKind = IxKCompound) (sprintf "got %A" arr.IndexTypes.[0].Tag)
         check "load_compound: carries the mask as the compound extent"
             (match arr.IndexTypes.[0].Extent with IRCompoundMask _ -> true | _ -> false) ""
         check "load_compound: element type preserved (Float32)"
@@ -250,7 +250,7 @@ let runNetcdfTests () =
          check "load_compound: partial mask -> compound + trailing slot"
              (parr.IndexTypes.Length = 2) (sprintf "got %d slots" parr.IndexTypes.Length)
          check "load_compound: partial compound index has rank 2"
-             (parr.IndexTypes.[0].Rank = 2 && parr.IndexTypes.[0].Tag = Some "__compoundidx")
+             (parr.IndexTypes.[0].Rank = 2 && parr.IndexTypes.[0].IxKind = IxKCompound)
              (sprintf "got rank %d tag %A" parr.IndexTypes.[0].Rank parr.IndexTypes.[0].Tag)
          check "load_compound: trailing dim preserved (3rd var dim)"
              (parr.IndexTypes.[1].Id = cId3) (sprintf "got Id %d" parr.IndexTypes.[1].Id)
@@ -277,7 +277,7 @@ let runNetcdfTests () =
          check "load_compound: rank-1 mask over rank-3 -> compound + 2 trailing slots"
              (qarr.IndexTypes.Length = 3) (sprintf "got %d slots" qarr.IndexTypes.Length)
          check "load_compound: rank-1 leading compound index has rank 1"
-             (qarr.IndexTypes.[0].Rank = 1 && qarr.IndexTypes.[0].Tag = Some "__compoundidx")
+             (qarr.IndexTypes.[0].Rank = 1 && qarr.IndexTypes.[0].IxKind = IxKCompound)
              (sprintf "got rank %d tag %A" qarr.IndexTypes.[0].Rank qarr.IndexTypes.[0].Tag)
          check "load_compound: rank-1 leading preserves trailing dims in order"
              (qarr.IndexTypes.[1].Id = cId2 && qarr.IndexTypes.[2].Id = cId3)
@@ -296,7 +296,7 @@ let runNetcdfTests () =
     // ---------------------------------------------------------------
     let mkNamedIdx (id: IRId) (tag: string) (ext: int64) : IRIndexType =
         { Id = id; Rank = 1; Extent = IRLit (IRLitInt ext)
-          Symmetry = SymNone; Tag = Some tag; Kind = SDimension; Dependencies = [] }
+          Symmetry = SymNone; Tag = Some tag; IxKind = ixKindOfTag (Some tag); Kind = SDimension; Dependencies = [] }
     // Positive: dense and mask share NAMED index types (same tags) but have
     // DISTINCT Ids per reference -- the source-level literal case.
     let nDense : IRArrayType =
@@ -314,7 +314,7 @@ let runNetcdfTests () =
      | Ok (ArrayElem narr) ->
          check "compound: matches named index types by tag (distinct Ids)"
              (narr.IndexTypes.Length = 2 && narr.IndexTypes.[0].Rank = 2
-              && narr.IndexTypes.[0].Tag = Some "__compoundidx")
+              && narr.IndexTypes.[0].IxKind = IxKCompound)
              (sprintf "got %d slots, rank %d, tag %A" narr.IndexTypes.Length narr.IndexTypes.[0].Rank narr.IndexTypes.[0].Tag)
          check "compound: preserves the trailing named dim (Depth)"
              (narr.IndexTypes.[1].Tag = Some "Depth") (sprintf "got %A" narr.IndexTypes.[1].Tag)
@@ -583,7 +583,7 @@ let runNetcdfTests () =
         Rank = 1
         Extent = IRLit (IRLitInt 180L)
         Symmetry = SymNone
-        Tag = None
+        Tag = None; IxKind = IxKPlain
         Kind = SDimension
         Dependencies = []
     }
@@ -592,7 +592,7 @@ let runNetcdfTests () =
         Rank = 1
         Extent = IRLit (IRLitInt 360L)
         Symmetry = SymNone
-        Tag = None
+        Tag = None; IxKind = IxKPlain
         Kind = SDimension
         Dependencies = []
     }
@@ -653,7 +653,7 @@ let runNetcdfTests () =
     let compoundReadBuilder = IRBuilder()
     let crDim id n : IRIndexType =
         { Id = id; Rank = 1; Extent = IRLit (IRLitInt n)
-          Symmetry = SymNone; Tag = None; Kind = SDimension; Dependencies = [] }
+          Symmetry = SymNone; Tag = None; IxKind = IxKPlain; Kind = SDimension; Dependencies = [] }
     let crVarArr : IRArrayType =
         { ElemType = IRTScalar ETFloat64
           IndexTypes = [crDim (compoundReadBuilder.FreshId()) 2L; crDim (compoundReadBuilder.FreshId()) 3L]

@@ -313,6 +313,17 @@ let private dispatchTest (rest: string list) : int =
         // string. No Blade source pipeline.
         let failed = (runCodeGenSubstTests ()).Failed
         if failed = 0 then 0 else 1
+    | [ "shape" ] ->
+        // F# unit tests for the canonical ExprShape traversal (§3.2):
+        // childrenOf/rebuildWith round-trips, mapIRExpr identity, and
+        // collectVarRefsIR completeness. No Blade source pipeline.
+        let failed = (Blade.Tests.Shape.runShapeTests ()).Failed
+        if failed = 0 then 0 else 1
+    | [ "oracles" ] ->
+        // Phase 0.2 review block: the differential-harness oracles checked
+        // against hand-computed / analytic values. No Blade source pipeline.
+        let failed = (Blade.Tests.OracleReview.runOracleTests ()).Failed
+        if failed = 0 then 0 else 1
     | [ "alloc" ] ->
         // Standalone C++ runtime-layout tests for the contiguous-backing
         // allocate<>. Compiles + runs cpp/alloc_layout_tests.cpp against the

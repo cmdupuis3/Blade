@@ -48,7 +48,9 @@
     <Compile Include="tests/Test_ExprAttrs.fs" />
     <Compile Include="tests/Test_CodeGenSubst.fs" />
     <Compile Include="tests/Test_TypeStructure.fs" />
+    <Compile Include="tests/Test_Shape.fs" />
     <Compile Include="tests/Oracles.fs" />
+    <Compile Include="tests/Test_Oracles.fs" />
     <Compile Include="tests/Differential.fs" />
     <Compile Include="tests/Benchmarks.fs" />
     <Compile Include="tests/CudaTests.fs" />

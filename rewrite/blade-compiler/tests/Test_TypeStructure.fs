@@ -31,7 +31,7 @@ let private freshIx (rank: int) (sym: SymmetryClass) : IRIndexType =
     // Extent is never compared by matchesTypePattern (it is a runtime value, not
     // type identity), so any placeholder is fine here.
     { Id = -1; Rank = rank; Extent = IRLit (IRLitInt 0L)
-      Symmetry = sym; Tag = None; Kind = SDimension; Dependencies = [] }
+      Symmetry = sym; Tag = None; IxKind = IxKPlain; Kind = SDimension; Dependencies = [] }
 
 /// Plain free axis (Idx).
 let idx = freshIx 1 SymNone

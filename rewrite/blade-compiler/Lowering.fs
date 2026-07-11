@@ -54,24 +54,9 @@ let rec staticValueToIR (v: StaticEval.StaticValue) : IRExpr =
     | StaticEval.SVUnit -> IRLit IRLitUnit
     | StaticEval.SVTuple vs -> IRTuple (vs |> List.map staticValueToIR)
 
-/// Resolve a UnitExpr AST node to a canonical UnitSig using the unit environment
-let rec resolveUnitExpr (units: Map<string, IR.UnitSig>) (expr: UnitExpr) : Result<IR.UnitSig, string> =
-    match expr with
-    | UnitNamed name ->
-        match Map.tryFind name units with
-        | Some sig' -> Ok sig'
-        | None -> Error (sprintf "Unknown unit '%s'" name)
-    | UnitMul (a, b) ->
-        resolveUnitExpr units a |> Result.bind (fun sa ->
-        resolveUnitExpr units b |> Result.map (fun sb ->
-            IR.unitMul sa sb))
-    | UnitDiv (a, b) ->
-        resolveUnitExpr units a |> Result.bind (fun sa ->
-        resolveUnitExpr units b |> Result.map (fun sb ->
-            IR.unitDiv sa sb))
-    | UnitPow (a, n) ->
-        resolveUnitExpr units a |> Result.map (fun sa ->
-            IR.unitPow sa n)
+// (The duplicated resolveUnitExpr that lived here is gone — audit Phase 0.3.
+// The one definition is TypeCheck.resolveUnitExpr; the single use below
+// calls it qualified.)
 
 // ============================================================================
 // TypedAST-based Lowering (New Pipeline)
@@ -345,7 +330,7 @@ let rec lowerTypedExpr (env: TypedLowerEnv) (texpr: TypedExpr) : IRExpr =
             Rank = 1
             Extent = extentExpr
             Symmetry = SymNone
-            Tag = Some "__anon"
+            Tag = Some "__anon"; IxKind = IxKPlain
             Kind = SDimension
             Dependencies = []
         }
@@ -1131,7 +1116,7 @@ let lowerTypedDecl (env: TypedLowerEnv) (decl: TypedDecl) : (Choice<IRFuncDef, I
             | None | Some UnitBase ->
                 Map.ofList [(unitDecl.Name, 1)]
             | Some (UnitDerived expr) ->
-                match resolveUnitExpr env.UnitDefs expr with
+                match TypeCheck.resolveUnitExpr env.UnitDefs expr with
                 | Ok resolved -> resolved
                 | Error msg ->
                     eprintfn "Unit error: %s" msg
@@ -1587,6 +1572,3 @@ let lowerMultiSource (sources: (string * string) list) : Result<IRProgram, strin
             let msgs = errors |> List.map Blade.TypeCheck.formatCompileError
             Error (String.concat "\n" msgs)
     | Error e -> Error (sprintf "Parse error at %d:%d: %s" e.Line e.Col e.Message)
-
-/// Alias for backward compatibility
-let lowerWithTypeCheck = lower

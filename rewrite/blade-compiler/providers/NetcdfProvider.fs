@@ -191,7 +191,7 @@ let ncDimToNamedIndexType (builder: IRBuilder) (dim: NcDim) : string * IRIndexTy
         Rank = 1
         Extent = IRLit (IRLitInt dim.Length)
         Symmetry = SymNone
-        Tag = None
+        Tag = None; IxKind = IxKPlain
         Kind = SDimension
         Dependencies = []
     }

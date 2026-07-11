@@ -86,6 +86,87 @@ type DimensionKind =
     | SDimension   // Spatial dimension - participates in symmetry
     | TDimension   // Temporal dimension - does not participate in symmetry
 
+/// Reserved KIND of an index type (audit §3.3): the semantic discriminator
+/// that used to be smuggled through `Tag` as "__..." sentinel strings, in
+/// the same namespace as user index-type names. `Tag` is for NAMES; IxKind
+/// is for KINDS. One case per legacy sentinel so the migration is 1:1.
+///
+/// Migration state: constructors still write the legacy sentinel into Tag
+/// alongside the IxKind (some downstream identity/matching logic keys on
+/// Tag equality generically), and the IR validator enforces that the two
+/// encodings AGREE — so they cannot silently diverge. All kind DISPATCH
+/// reads IxKind (directly or via the IxSymmetryLike/IxCompound/... active
+/// pattern); dropping the Tag sentinels entirely is a rewrite-phase step.
+type IxKind =
+    | IxKPlain              // ordinary index type (user-named or anonymous)
+    | IxKCompound           // "__compoundidx": masked product space
+    | IxKCompoundDynamic    // "__compoundidx_dynamic": mask known only at runtime
+    | IxKDep                // "__depidx": dependent-extent head marker
+    | IxKDepInner           // "__depidx_inner": the dependent inner dimension
+    | IxKDepOuter           // "__depidx_outer": the outer dim a DepIdx depends on
+    | IxKRagged             // "__raggedidx": ragged (per-row extent) dimension
+    | IxKRaggedInline       // "__raggedidx_inline": ragged with inline lengths
+    | IxKRaggedOpaque       // "__raggedidx_opaque": context-supplied extent
+    | IxKGroupOuter         // "__group_outer": group_by outer (per-group) slot
+    | IxKGroupMember        // "__group_member": group_by member slot
+    | IxKSeq                // "__seq": sequence-combinator-produced dimension
+    | IxKErrorRaggedNoPrior // "__error_ragged_no_prior": typecheck error marker
+
+/// The legacy Tag sentinel for a kind (None for IxKPlain). The single
+/// source of the kind<->sentinel correspondence, used by constructors that
+/// still mirror the kind into Tag and by the validator's agreement check.
+let ixKindSentinel (k: IxKind) : string option =
+    match k with
+    | IxKPlain -> None
+    | IxKCompound -> Some "__compoundidx"
+    | IxKCompoundDynamic -> Some "__compoundidx_dynamic"
+    | IxKDep -> Some "__depidx"
+    | IxKDepInner -> Some "__depidx_inner"
+    | IxKDepOuter -> Some "__depidx_outer"
+    | IxKRagged -> Some "__raggedidx"
+    | IxKRaggedInline -> Some "__raggedidx_inline"
+    | IxKRaggedOpaque -> Some "__raggedidx_opaque"
+    | IxKGroupOuter -> Some "__group_outer"
+    | IxKGroupMember -> Some "__group_member"
+    | IxKSeq -> Some "__seq"
+    | IxKErrorRaggedNoPrior -> Some "__error_ragged_no_prior"
+
+/// Derive the kind from a (possibly user-supplied) Tag value: sentinel
+/// strings map to their kind, anything else — user names, "__anon"
+/// placeholders, None — is IxKPlain. For construction sites whose tag is
+/// dynamic; sites with a literal sentinel should state the IxKind directly.
+let ixKindOfTag (tag: string option) : IxKind =
+    match tag with
+    | Some "__compoundidx" -> IxKCompound
+    | Some "__compoundidx_dynamic" -> IxKCompoundDynamic
+    | Some "__depidx" -> IxKDep
+    | Some "__depidx_inner" -> IxKDepInner
+    | Some "__depidx_outer" -> IxKDepOuter
+    | Some "__raggedidx" -> IxKRagged
+    | Some "__raggedidx_inline" -> IxKRaggedInline
+    | Some "__raggedidx_opaque" -> IxKRaggedOpaque
+    | Some "__group_outer" -> IxKGroupOuter
+    | Some "__group_member" -> IxKGroupMember
+    | Some "__seq" -> IxKSeq
+    | Some "__error_ragged_no_prior" -> IxKErrorRaggedNoPrior
+    | _ -> IxKPlain
+
+/// Ragged FAMILY: dimensions whose extent varies per outer row.
+let isRaggedFamilyKind (k: IxKind) : bool =
+    match k with
+    | IxKRagged | IxKRaggedInline | IxKRaggedOpaque -> true
+    | _ -> false
+
+/// Ragged-ROW family: inner dimensions whose rank-1 rows carry their length
+/// inline (`.len` on a RaggedRow<T>) rather than via `.extents` — peeled
+/// ragged rows, DepIdx-allocated inners, and group_by members all share
+/// this runtime shape.
+let isRaggedRowKind (k: IxKind) : bool =
+    match k with
+    | IxKRagged | IxKRaggedInline | IxKRaggedOpaque
+    | IxKDepInner | IxKGroupMember -> true
+    | _ -> false
+
 /// Unit of measure signature: product of base units with integer exponents
 /// e.g. velocity = {meters: 1, seconds: -1}
 /// Dimensionless = empty map
@@ -176,8 +257,11 @@ and IRIndexType = {
     Rank: int               // Number of index components (1 for Idx, 2 for SymIdx<2>, etc.)
     Extent: IRExpr           // Size expression (may depend on outer indices)
     Symmetry: SymmetryClass
-    Tag: string option       // Optional semantic tag (for index space matching)
+    Tag: string option       // Name (for index space matching). Legacy: still
+                             // mirrors IxKind's sentinel during migration —
+                             // the validator enforces agreement (audit §3.3).
     Kind: DimensionKind      // S-dimension or T-dimension
+    IxKind: IxKind           // Reserved kind discriminator (never a user name)
     Dependencies: IRId list  // Dependencies on outer loop indices (for triangular iteration)
 }
 
@@ -1031,7 +1115,7 @@ let compoundViewType (freshId: IRId) (varArr: IRArrayType) (maskArr: IRArrayType
                   Rank = maskRank
                   Extent = IRCompoundMask maskIR
                   Symmetry = SymNone
-                  Tag = Some "__compoundidx"
+                  Tag = Some "__compoundidx"; IxKind = IxKCompound
                   Kind = SDimension
                   Dependencies = [] }
             // Trailing regular dims: the variable's dimensions after the masked
@@ -1407,11 +1491,14 @@ let (|IxSymmetryLike|IxCompound|IxDep|IxRagged|IxDense|) (ix: IRIndexType) =
     match ix.Symmetry with
     | SymSymmetric | SymAntisymmetric | SymHermitian -> IxSymmetryLike
     | SymNone ->
-        (match ix.Tag with
-         | Some ("__compoundidx" | "__compoundidx_dynamic") -> IxCompound
-         | Some ("__depidx" | "__depidx_inner" | "__depidx_outer") -> IxDep
-         | Some ("__raggedidx" | "__raggedidx_inline" | "__raggedidx_opaque") -> IxRagged
-         | _ -> IxDense)
+        // Kind dispatch reads IxKind, never Tag strings (audit §3.3) — and
+        // is exhaustive, so a new IxKind case must decide its family here.
+        (match ix.IxKind with
+         | IxKCompound | IxKCompoundDynamic -> IxCompound
+         | IxKDep | IxKDepInner | IxKDepOuter -> IxDep
+         | IxKRagged | IxKRaggedInline | IxKRaggedOpaque -> IxRagged
+         | IxKPlain | IxKGroupOuter | IxKGroupMember | IxKSeq
+         | IxKErrorRaggedNoPrior -> IxDense)
 
 type LoopLevelInfo = {
     ArrayIndex: int
@@ -1467,7 +1554,7 @@ let buildRawLoopLevels (arrayTypes: IRArrayType list) (sDimsPerArray: int list) 
                         LocalDimIndex = localDimIdx
                         RankIndex = arrLevel
                         GlobalLevelIndex = globalIdx
-                        IndexSpace = { 
+                        IndexSpace = {
                             Tag = idx.Tag
                             Extent = idx.Extent
                             Symmetry = idx.Symmetry
@@ -2116,12 +2203,12 @@ let deduceOutputType
             //   - __raggedidx_opaque   : opaque RaggedIdx<_>
             //   - __depidx_inner       : DepIdx inner (formula-driven extent)
             |> List.filter (fun idx ->
-                match idx.Tag with
-                | Some "__group_member"
-                | Some "__raggedidx"
-                | Some "__raggedidx_inline"
-                | Some "__raggedidx_opaque"
-                | Some "__depidx_inner" -> not kernelConsumesInner
+                match idx.IxKind with
+                | IxKGroupMember
+                | IxKRagged
+                | IxKRaggedInline
+                | IxKRaggedOpaque
+                | IxKDepInner -> not kernelConsumesInner
                 | _ -> true)
         
         // Step 4: T-dims from kernel output (passed in with real extents)
@@ -3157,100 +3244,267 @@ let buildLoopNestCodeGen
     }
 
 // ============================================================================
+// Canonical expression traversal — ExprShape (audit §3.2)
+// ============================================================================
+//
+// THE one place that knows every IRExpr variant's immediate expression
+// children. Every generic walker (mapIRExpr, collectVarRefsIR,
+// collectTypesInExpr, exprAttrs) is a fold over this shape, so a new IRExpr
+// variant is added in exactly one enumeration — this one. The match is
+// deliberately wildcard-free: a new variant fails to compile until its shape
+// is declared here, which is the exhaustiveness guarantee the old per-walker
+// `| _ ->` fallbacks silently destroyed.
+//
+// Scope decisions (uniform across all walkers by construction):
+//   - IRIndexType is OPAQUE to expression traversal. Extent-marker
+//     expressions living inside an IRIndexType are reached by the dedicated
+//     extent paths, never by generic traversal — matching the long-standing
+//     behavior of mapIRExpr.
+//   - Boundary pads and range offsets ARE children: the BndPad expression in
+//     IRShift/IRAlign and IRRange's offset are real sub-expressions. (The old
+//     hand-maintained walkers disagreed about these — mapIRExpr skipped them,
+//     exprAttrs walked the pads — the canonical shape includes them.)
+//
+// `rebuild` requires exactly the children it handed out (same count, same
+// order); anything else is a hard failure, never a silent drop.
+
+/// Child-list mismatch in a rebuild — always a walker bug, never recoverable.
+let private badChildren (ctor: string) : 'a =
+    failwithf "ExprShape.rebuild: child list does not match %s's shape" ctor
+
+/// Total active pattern: an expression's immediate children, plus a function
+/// rebuilding the same variant around replacement children.
+let (|ExprShape|) (expr: IRExpr) : IRExpr list * (IRExpr list -> IRExpr) =
+    match expr with
+    // -- Leaves: no expression children ------------------------------------
+    | IRLit _ | IRVar _ | IRParam _ | IRNth | IRZero | IROpaqueExtent
+    | IRVirtualReverse _ | IRArity _ ->
+        [], (function [] -> expr | _ -> badChildren "leaf")
+    | IRRange (idxTys, offset) ->
+        Option.toList offset,
+        (function
+         | [] when Option.isNone offset -> expr
+         | [off'] when Option.isSome offset -> IRRange (idxTys, Some off')
+         | _ -> badChildren "IRRange")
+
+    // -- One child ----------------------------------------------------------
+    | IRUnaryOp (op, e) -> [e], (function [e'] -> IRUnaryOp (op, e') | _ -> badChildren "IRUnaryOp")
+    | IRTupleProj (e, i, flat) -> [e], (function [e'] -> IRTupleProj (e', i, flat) | _ -> badChildren "IRTupleProj")
+    | IRTupleDecons e -> [e], (function [e'] -> IRTupleDecons e' | _ -> badChildren "IRTupleDecons")
+    | IRFieldAccess (e, fld) -> [e], (function [e'] -> IRFieldAccess (e', fld) | _ -> badChildren "IRFieldAccess")
+    | IRPure e -> [e], (function [e'] -> IRPure e' | _ -> badChildren "IRPure")
+    | IRCompute e -> [e], (function [e'] -> IRCompute e' | _ -> badChildren "IRCompute")
+    | IRReynolds (e, anti) -> [e], (function [e'] -> IRReynolds (e', anti) | _ -> badChildren "IRReynolds")
+    | IRTranspose (e, d1, d2) -> [e], (function [e'] -> IRTranspose (e', d1, d2) | _ -> badChildren "IRTranspose")
+    | IRDecompact (e, d) -> [e], (function [e'] -> IRDecompact (e', d) | _ -> badChildren "IRDecompact")
+    | IRArrayNegate e -> [e], (function [e'] -> IRArrayNegate e' | _ -> badChildren "IRArrayNegate")
+    | IRArrayConjugate e -> [e], (function [e'] -> IRArrayConjugate e' | _ -> badChildren "IRArrayConjugate")
+    | IRReverse (e, d) -> [e], (function [e'] -> IRReverse (e', d) | _ -> badChildren "IRReverse")
+    | IRDiag e -> [e], (function [e'] -> IRDiag e' | _ -> badChildren "IRDiag")
+    | IRRank e -> [e], (function [e'] -> IRRank e' | _ -> badChildren "IRRank")
+    | IRExtent (e, d) -> [e], (function [e'] -> IRExtent (e', d) | _ -> badChildren "IRExtent")
+    | IRRaggedLookup e -> [e], (function [e'] -> IRRaggedLookup e' | _ -> badChildren "IRRaggedLookup")
+    | IRCompoundMask e -> [e], (function [e'] -> IRCompoundMask e' | _ -> badChildren "IRCompoundMask")
+    | IRCompoundProject (e, plen) -> [e], (function [e'] -> IRCompoundProject (e', plen) | _ -> badChildren "IRCompoundProject")
+    | IRUnique e -> [e], (function [e'] -> IRUnique e' | _ -> badChildren "IRUnique")
+    | IRBlocked (idxTy, bs) -> [bs], (function [bs'] -> IRBlocked (idxTy, bs') | _ -> badChildren "IRBlocked")
+
+    // -- Two children ---------------------------------------------------------
+    | IRBinOp (mode, op, l, r) -> [l; r], (function [l'; r'] -> IRBinOp (mode, op, l', r') | _ -> badChildren "IRBinOp")
+    | IRComplex (re, im) -> [re; im], (function [re'; im'] -> IRComplex (re', im') | _ -> badChildren "IRComplex")
+    | IRTupleCons (h, t) -> [h; t], (function [h'; t'] -> IRTupleCons (h', t') | _ -> badChildren "IRTupleCons")
+    | IRBind (c, k) -> [c; k], (function [c'; k'] -> IRBind (c', k') | _ -> badChildren "IRBind")
+    | IRParallel (a, b, d) -> [a; b], (function [a'; b'] -> IRParallel (a', b', d) | _ -> badChildren "IRParallel")
+    | IRFusion (a, b) -> [a; b], (function [a'; b'] -> IRFusion (a', b') | _ -> badChildren "IRFusion")
+    | IRChoice (a, b) -> [a; b], (function [a'; b'] -> IRChoice (a', b') | _ -> badChildren "IRChoice")
+    | IRArrayProduct (a, b) -> [a; b], (function [a'; b'] -> IRArrayProduct (a', b') | _ -> badChildren "IRArrayProduct")
+    | IRComposeObj (a, b) -> [a; b], (function [a'; b'] -> IRComposeObj (a', b') | _ -> badChildren "IRComposeObj")
+    | IRComposeMeth (a, b) -> [a; b], (function [a'; b'] -> IRComposeMeth (a', b') | _ -> badChildren "IRComposeMeth")
+    | IRCompose (a, b) -> [a; b], (function [a'; b'] -> IRCompose (a', b') | _ -> badChildren "IRCompose")
+    | IRFunctorMap (fn, c) -> [fn; c], (function [fn'; c'] -> IRFunctorMap (fn', c') | _ -> badChildren "IRFunctorMap")
+    | IRGuard (c, b) -> [c; b], (function [c'; b'] -> IRGuard (c', b') | _ -> badChildren "IRGuard")
+    | IRReplicate (count, body) -> [count; body], (function [c'; b'] -> IRReplicate (c', b') | _ -> badChildren "IRReplicate")
+    | IRMask (a, p) -> [a; p], (function [a'; p'] -> IRMask (a', p') | _ -> badChildren "IRMask")
+    | IRIntersect (a, b) -> [a; b], (function [a'; b'] -> IRIntersect (a', b') | _ -> badChildren "IRIntersect")
+    | IRUnion (a, b) -> [a; b], (function [a'; b'] -> IRUnion (a', b') | _ -> badChildren "IRUnion")
+    | IRContains (a, v) -> [a; v], (function [a'; v'] -> IRContains (a', v') | _ -> badChildren "IRContains")
+    | IRGroupBy (v, k) -> [v; k], (function [v'; k'] -> IRGroupBy (v', k') | _ -> badChildren "IRGroupBy")
+    | IRSort (a, k) -> [a; k], (function [a'; k'] -> IRSort (a', k') | _ -> badChildren "IRSort")
+    | IRReduce (a, k) -> [a; k], (function [a'; k'] -> IRReduce (a', k') | _ -> badChildren "IRReduce")
+    | IRPolyIndex (p, i) -> [p; i], (function [p'; i'] -> IRPolyIndex (p', i') | _ -> badChildren "IRPolyIndex")
+    | IRAssign (t, v) -> [t; v], (function [t'; v'] -> IRAssign (t', v') | _ -> badChildren "IRAssign")
+    | IRCurry (arr, idx, r) -> [arr; idx], (function [arr'; idx'] -> IRCurry (arr', idx', r) | _ -> badChildren "IRCurry")
+    | IRGram (l, r, same) -> [l; r], (function [l'; r'] -> IRGram (l', r', same) | _ -> badChildren "IRGram")
+    | IRLet (id, v, b) -> [v; b], (function [v'; b'] -> IRLet (id, v', b') | _ -> badChildren "IRLet")
+
+    // -- Three children -------------------------------------------------------
+    | IRIf (c, t, e) -> [c; t; e], (function [c'; t'; e'] -> IRIf (c', t', e') | _ -> badChildren "IRIf")
+    | IRSlice (arr, d, s, e) -> [arr; s; e], (function [arr'; s'; e'] -> IRSlice (arr', d, s', e') | _ -> badChildren "IRSlice")
+    | IRSubset (arr, d, s, len) -> [arr; s; len], (function [arr'; s'; len'] -> IRSubset (arr', d, s', len') | _ -> badChildren "IRSubset")
+    | IRForRange (vid, lo, hi, body) -> [lo; hi; body], (function [lo'; hi'; b'] -> IRForRange (vid, lo', hi', b') | _ -> badChildren "IRForRange")
+    | IRShift (arr, d, off, bnd) ->
+        (match bnd with
+         | BndPad p ->
+             [arr; off; p],
+             (function [arr'; off'; p'] -> IRShift (arr', d, off', BndPad p') | _ -> badChildren "IRShift")
+         | BndShrink | BndPeriodic | BndReflect ->
+             [arr; off],
+             (function [arr'; off'] -> IRShift (arr', d, off', bnd) | _ -> badChildren "IRShift"))
+
+    // -- Head + list ----------------------------------------------------------
+    | IRIndex (arr, idxs, ident) ->
+        arr :: idxs,
+        (function
+         | arr' :: idxs' when idxs'.Length = idxs.Length -> IRIndex (arr', idxs', ident)
+         | _ -> badChildren "IRIndex")
+    | IRApp (f, args, rt) ->
+        f :: args,
+        (function
+         | f' :: args' when args'.Length = args.Length -> IRApp (f', args', rt)
+         | _ -> badChildren "IRApp")
+
+    // -- Lists ----------------------------------------------------------------
+    | IRArrayLit (es, ty) -> es, (fun es' -> if es'.Length = es.Length then IRArrayLit (es', ty) else badChildren "IRArrayLit")
+    | IRTuple es -> es, (fun es' -> if es'.Length = es.Length then IRTuple es' else badChildren "IRTuple")
+    | IRSequence es -> es, (fun es' -> if es'.Length = es.Length then IRSequence es' else badChildren "IRSequence")
+    | IRZip es -> es, (fun es' -> if es'.Length = es.Length then IRZip es' else badChildren "IRZip")
+    | IRStack es -> es, (fun es' -> if es'.Length = es.Length then IRStack es' else badChildren "IRStack")
+    | IRJoin (es, d) -> es, (fun es' -> if es'.Length = es.Length then IRJoin (es', d) else badChildren "IRJoin")
+    | IRGroupKeys ks -> ks, (fun ks' -> if ks'.Length = ks.Length then IRGroupKeys ks' else badChildren "IRGroupKeys")
+    | IRAlign (es, spec) ->
+        (match spec.Boundary with
+         | BndPad p ->
+             es @ [p],
+             (fun cs ->
+                 if cs.Length <> es.Length + 1 then badChildren "IRAlign"
+                 else
+                     let es', rest = List.splitAt es.Length cs
+                     IRAlign (es', { spec with Boundary = BndPad (List.exactlyOne rest) }))
+         | BndShrink | BndPeriodic | BndReflect ->
+             es, (fun es' -> if es'.Length = es.Length then IRAlign (es', spec) else badChildren "IRAlign"))
+    | IRStructLit (tn, fields) ->
+        List.map snd fields,
+        (fun es' ->
+            if es'.Length <> fields.Length then badChildren "IRStructLit"
+            else IRStructLit (tn, List.map2 (fun (n, _) e' -> (n, e')) fields es'))
+
+    // -- Match: flat child list is scrutinee, then per-case guard?/body ------
+    | IRMatch (scrut, cases) ->
+        let caseChildren = cases |> List.collect (fun c -> Option.toList c.Guard @ [c.Body])
+        scrut :: caseChildren,
+        (function
+         | scrut' :: rest ->
+             // Re-thread the flat list back through the (guard?, body) case
+             // structure; leftovers or shortfalls are shape violations.
+             let cases', leftover =
+                 cases |> List.fold (fun (acc, remaining) c ->
+                     match c.Guard, remaining with
+                     | Some _, g' :: b' :: tl -> (acc @ [{ c with Guard = Some g'; Body = b' }], tl)
+                     | None, b' :: tl -> (acc @ [{ c with Body = b' }], tl)
+                     | _ -> badChildren "IRMatch") ([], rest)
+             if not (List.isEmpty leftover) then badChildren "IRMatch"
+             else IRMatch (scrut', cases')
+         | [] -> badChildren "IRMatch")
+
+    // -- Info-record combinators ----------------------------------------------
+    | IRMethodFor info ->
+        info.Arrays,
+        (fun arrs' ->
+            if arrs'.Length = info.Arrays.Length then IRMethodFor { info with Arrays = arrs' }
+            else badChildren "IRMethodFor")
+    | IRObjectFor info ->
+        [info.Kernel], (function [k'] -> IRObjectFor { info with Kernel = k' } | _ -> badChildren "IRObjectFor")
+    | IRApplyCombinator info ->
+        info.Loop :: info.Kernel :: info.Arrays,
+        (function
+         | l' :: k' :: arrs' when arrs'.Length = info.Arrays.Length ->
+             IRApplyCombinator { info with Loop = l'; Kernel = k'; Arrays = arrs' }
+         | _ -> badChildren "IRApplyCombinator")
+    | IRComposeApply info ->
+        info.Composition :: info.InputArrays,
+        (function
+         | c' :: arrs' when arrs'.Length = info.InputArrays.Length ->
+             IRComposeApply { info with Composition = c'; InputArrays = arrs' }
+         | _ -> badChildren "IRComposeApply")
+
+/// Immediate expression children of a node, in canonical order.
+let childrenOf (ExprShape (children, _)) : IRExpr list = children
+
+/// Rebuild a node around replacement children (same count/order as
+/// childrenOf handed out).
+let rebuildWith (expr: IRExpr) (children: IRExpr list) : IRExpr =
+    let (ExprShape (_, rebuild)) = expr
+    rebuild children
+
+/// Pattern bindings: IRPatVar introduces an IRId visible in the case body
+/// and (if present) the guard. Nested patterns (tuple, cons, variant
+/// payload) accumulate all their child bindings.
+let rec patternBoundIds (pat: IRPattern) : Set<IRId> =
+    match pat with
+    | IRPatWild | IRPatLit _ -> Set.empty
+    | IRPatVar id -> Set.singleton id
+    | IRPatTuple pats -> pats |> List.map patternBoundIds |> Set.unionMany
+    | IRPatCons (h, t) -> Set.union (patternBoundIds h) (patternBoundIds t)
+    | IRPatVariant (_, _, Some p, _) -> patternBoundIds p
+    | IRPatVariant (_, _, None, _) -> Set.empty
+
+/// The variants that introduce variable scopes, factored out for
+/// binder-aware dispatchers (exprAttrs today; any future capture or escape
+/// analysis). Returns the children NOT under a binder, plus one
+/// (boundIds, scopedChildren) group per scope. Non-binding variants return
+/// None and fall through to the generic ExprShape arm of whichever
+/// dispatcher is asking — so a new binding variant needs exactly one case
+/// here to get correct scoping everywhere.
+let (|BinderShape|_|) (expr: IRExpr) : (IRExpr list * (Set<IRId> * IRExpr list) list) option =
+    match expr with
+    | IRLet (id, value, body) ->
+        // `value` is deliberately OUTSIDE the scope: a reference to `id`
+        // inside its own value is ill-formed IR, and leaving it unscoped
+        // keeps such a bug visible as a free var at the outer level.
+        Some ([value], [Set.singleton id, [body]])
+    | IRForRange (vid, lo, hi, body) ->
+        Some ([lo; hi], [Set.singleton vid, [body]])
+    | IRMatch (scrut, cases) ->
+        // Pattern bindings are visible in both the guard and the body.
+        Some ([scrut],
+              cases |> List.map (fun c ->
+                  (patternBoundIds c.Pattern, Option.toList c.Guard @ [c.Body])))
+    | _ -> None
+
+// ============================================================================
 // Expression Mapping (bottom-up rewriter)
 // ============================================================================
 
 /// Apply f to every sub-expression bottom-up, then to the root.
 /// f should return the expression unchanged for cases it doesn't handle.
+/// Generic recursion is a fold over ExprShape — variant-specific structure
+/// lives entirely in the shape enumeration above.
 let rec mapIRExpr (f: IRExpr -> IRExpr) (expr: IRExpr) : IRExpr =
-    let m = mapIRExpr f
-    let ms = List.map m
     let mapped =
         match expr with
-        // Leaves
-        | IRLit _ | IRVar _ | IRParam _ | IRNth | IRZero
-        | IRRange _ | IRVirtualReverse _ | IRArity _
-        | IROpaqueExtent -> expr
-        // Unary
-        | IRUnaryOp (op, e) -> IRUnaryOp (op, m e)
-        | IRTupleProj (e, i, flat) -> IRTupleProj (m e, i, flat)
-        | IRTupleDecons e -> IRTupleDecons (m e)
-        | IRFieldAccess (e, fld) -> IRFieldAccess (m e, fld)
-        | IRPure e -> IRPure (m e)
-        | IRCompute e -> IRCompute (m e)
-        | IRReynolds (e, a) -> IRReynolds (m e, a)
-        | IRTranspose (e, d1, d2) -> IRTranspose (m e, d1, d2)
-        | IRDecompact (e, d) -> IRDecompact (m e, d)
-        | IRGram (l, r, s) -> IRGram (m l, m r, s)
-        | IRArrayNegate e -> IRArrayNegate (m e)
-        | IRArrayConjugate e -> IRArrayConjugate (m e)
-        | IRReverse (e, d) -> IRReverse (m e, d)
-        | IRDiag e -> IRDiag (m e)
-        | IRRank e -> IRRank (m e)
-        | IRExtent (e, d) -> IRExtent (m e, d)
-        | IRRaggedLookup l -> IRRaggedLookup (m l)
-        | IRCompoundMask mk -> IRCompoundMask (m mk)
-        | IRCompoundProject (parent, plen) -> IRCompoundProject (m parent, plen)
-        | IRAssign (t, v) -> IRAssign (m t, m v)
-        | IRForRange (vid, lo, hi, body) -> IRForRange (vid, m lo, m hi, m body)
-        // Binary
-        | IRBinOp (mode, op, l, r) -> IRBinOp (mode, op, m l, m r)
-        | IRTupleCons (h, t) -> IRTupleCons (m h, m t)
-        | IRBind (c, k) -> IRBind (m c, m k)
-        | IRParallel (a, b, d) -> IRParallel (m a, m b, d)
-        | IRFusion (a, b) -> IRFusion (m a, m b)
-        | IRChoice (a, b) -> IRChoice (m a, m b)
-        | IRArrayProduct (a, b) -> IRArrayProduct (m a, m b)
-        | IRComposeObj (a, b) -> IRComposeObj (m a, m b)
-        | IRComposeMeth (a, b) -> IRComposeMeth (m a, m b)
-        | IRCompose (a, b) -> IRCompose (m a, m b)
-        | IRFunctorMap (fn, c) -> IRFunctorMap (m fn, m c)
-        | IRGuard (c, b) -> IRGuard (m c, m b)
-        | IRReplicate (c, b) -> IRReplicate (m c, m b)
-        | IRMask (a, p) -> IRMask (m a, m p)
-        | IRIntersect (a, b) -> IRIntersect (m a, m b)
-        | IRUnion (a, b) -> IRUnion (m a, m b)
-        | IRUnique a -> IRUnique (m a)
-        | IRContains (a, v) -> IRContains (m a, m v)
-        | IRGroupBy (v, k) -> IRGroupBy (m v, m k)
-        | IRGroupKeys ks -> IRGroupKeys (List.map m ks)
-        | IRSort (a, k) -> IRSort (m a, m k)
-        | IRReduce (a, k) -> IRReduce (m a, m k)
-        | IRPolyIndex (p, i) -> IRPolyIndex (m p, m i)
-        // Ternary
-        | IRIf (c, t, e) -> IRIf (m c, m t, m e)
-        | IRSlice (arr, d, s, e) -> IRSlice (m arr, d, m s, m e)
-        | IRSubset (arr, d, s, l) -> IRSubset (m arr, d, m s, m l)
-        | IRShift (arr, d, off, bm) -> IRShift (m arr, d, m off, bm)
-        // 1 + list
-        | IRIndex (arr, idxs, id) -> IRIndex (m arr, ms idxs, id)
-        | IRApp (fn, args, rt) -> IRApp (m fn, ms args, rt)
-        | IRCurry (arr, idx, r) -> IRCurry (m arr, m idx, r)
-        // Lists
-        | IRArrayLit (es, ty) -> IRArrayLit (ms es, ty)
-        | IRTuple es -> IRTuple (ms es)
-        | IRComplex (re, im) -> IRComplex (m re, m im)
-        | IRSequence es -> IRSequence (ms es)
-        | IRZip es -> IRZip (ms es)
-        | IRAlign (es, sp) -> IRAlign (ms es, sp)
-        | IRStack es -> IRStack (ms es)
-        | IRJoin (es, d) -> IRJoin (ms es, d)
-        // Structured
-        | IRLet (id, v, b) -> IRLet (id, m v, m b)
-        | IRStructLit (tn, flds) -> IRStructLit (tn, flds |> List.map (fun (n, e) -> (n, m e)))
-        | IRBlocked (it, bs) -> IRBlocked (it, m bs)
-        | IRMatch (scr, cases) ->
-            IRMatch (m scr, cases |> List.map (fun c ->
-                { c with Guard = c.Guard |> Option.map m; Body = m c.Body }))
-        | IRMethodFor info ->
-            IRMethodFor { info with Arrays = ms info.Arrays }
-        | IRObjectFor info ->
-            IRObjectFor { info with Kernel = m info.Kernel }
-        | IRApplyCombinator info ->
-            IRApplyCombinator { info with Loop = m info.Loop; Kernel = m info.Kernel; Arrays = ms info.Arrays }
-        | IRComposeApply info ->
-            IRComposeApply { info with Composition = m info.Composition; InputArrays = ms info.InputArrays }
+        | ExprShape ([], _) -> expr
+        | ExprShape (children, rebuild) -> rebuild (children |> List.map (mapIRExpr f))
     f mapped
+
+/// Collect every variable id referenced (IRVar) anywhere in an expression.
+/// The one var-ref collector (audit §3.2 [now]: CodeGen's hand-maintained
+/// duplicate `collectVarRefs` is gone; capture computation and match-case
+/// usage checks in CodeGen call this). Recursion is the ExprShape fold, so
+/// no variant's subtree can be silently skipped the way the old
+/// `| _ -> Set.empty` catchalls did.
+///
+/// Scoping contract: only IRForRange subtracts its binder — its loop var is
+/// synthesized and callers never mean it. IRLet ids and match-pattern ids
+/// stay IN the result because the call sites subtract or query specific ids
+/// themselves. For real free/bound analysis use exprAttrs, which scopes all
+/// binders via BinderShape.
+let rec collectVarRefsIR (expr: IRExpr) : Set<IRId> =
+    match expr with
+    | IRVar (id, _) -> Set.singleton id
+    | IRForRange (vid, lo, hi, body) ->
+        Set.unionMany [collectVarRefsIR lo; collectVarRefsIR hi; Set.remove vid (collectVarRefsIR body)]
+    | ExprShape (children, _) ->
+        children |> List.map collectVarRefsIR |> Set.unionMany
 
 // ============================================================================
 // HM Type Substitution
@@ -3337,25 +3591,36 @@ let substTypeInIRExpr (bindings: Map<int, IRType>) (expr: IRExpr) : IRExpr =
         | _ -> e
     mapIRExpr substInNode expr
 
-/// Get the type of an IRExpr where determinable from the node directly.
-/// Used at HM call sites to extract arg types for unification against
-/// param types. Returns None for nodes whose type isn't carried locally.
-let exprTypeIfKnown (expr: IRExpr) : IRType option =
+/// Types carried directly on a node — no reconstruction, no environment.
+/// The shared first tier of the canonical typing (audit §2.2): the whole of
+/// exprTypeIfKnown below, and the first arm of typeOf.
+let (|CarriedType|_|) (expr: IRExpr) : IRType option =
     match expr with
     | IRVar (_, ty) -> Some ty
     | IRParam (_, _, ty) -> Some ty
     | IRApp (_, _, retType) -> Some retType
     | IRArrayLit (_, aty) -> Some (mkArrayLike aty)
+    | IRStructLit (typeName, _) -> Some (IRTNamed typeName)
+    | IRApplyCombinator info -> Some info.OutputType
+    | IRComposeApply info -> Some info.OutputType
     | IRLit (IRLitInt _) -> Some (IRTScalar ETInt64)
     | IRLit (IRLitFloat _) -> Some (IRTScalar ETFloat64)
     | IRLit (IRLitBool _) -> Some (IRTScalar ETBool)
     | IRLit (IRLitString _) -> Some (IRTScalar ETString)
-    | IRFieldAccess _ | IRIndex _ | IRBinOp _ | IRUnaryOp _ ->
-        // These nodes' types aren't carried locally. Leaving as None means
-        // call sites with such args fall back to the function's declared
-        // type-var positions; they'll be substituted with whatever else
-        // unification provides.
-        None
+    | IRLit IRLitUnit -> Some IRTUnit
+    | _ -> None
+
+/// Get the type of an IRExpr where determinable from the node directly —
+/// deliberately the CarriedType tier only, NOT the full typeOf
+/// reconstruction. Used at HM call sites to extract arg types for
+/// unification against param types: a reconstructed type could carry
+/// pre-substitution type variables, so only node-carried types are safe to
+/// unify with. For anything else this returns None, and the call site falls
+/// back to the function's declared type-var positions; they'll be
+/// substituted with whatever else unification provides.
+let exprTypeIfKnown (expr: IRExpr) : IRType option =
+    match expr with
+    | CarriedType ty -> Some ty
     | _ -> None
 
 /// Unify a parameter type against an argument type, accumulating
@@ -4100,12 +4365,7 @@ let specializeFunction (func: IRFuncDef) (arities: int list) (builder: IRBuilder
 // Everywhere else (IRReduce.array, IRExtent.array, IRIndex.array, IRApp args,
 // etc.), the rewrite fires.
 
-/// Minimal type inferrer for the lift pass. Only handles cases that show up
-/// as the result of an inline form (mask/sort/etc preserve their argument's
-/// type). Falls back to IRTUnit for shapes the lift pass doesn't expect to
-/// hit; if a fallback ever fires in practice, the resulting IRVar's type
-/// would be wrong and a downstream codegen step would surface it.
-/// Map from struct name to its fields, used by liftInferType for IRFieldAccess
+/// Map from struct name to its fields, used by typeOf for IRFieldAccess
 /// resolution. Built at the entry to liftInlineFormsModule and used throughout
 /// the same lift-pass invocation.
 ///
@@ -4149,21 +4409,310 @@ let tryLookupFieldType (objType: IRType) (fieldName: string) : IRType option =
         | false, _ -> None
     | _ -> None
 
-let rec liftInferType (expr: IRExpr) : IRType =
+// ============================================================================
+// Canonical expression typing — typeOf (audit §2.2)
+// ============================================================================
+//
+// THE one type-reconstruction over IR expressions. Until every IR node
+// carries its type (the rewrite's design), passes that need a type must
+// re-derive it. Previously three hand-maintained derivations existed —
+// CodeGen.inferExprType (full, with its own compound/group_by/gram rules),
+// IR.typeOf (a partial second copy for the lift pass), and
+// IR.exprTypeIfKnown (deliberately local) — and any divergence between them
+// was a silent wrong-codegen bug. Now:
+//   - typeOf                — the full reconstruction (this section)
+//   - exprTypeIfKnown       — the CarriedType subset only (HM call sites
+//                             must not unify against reconstructed types;
+//                             see its doc comment)
+//   - CodeGen.inferExprType — thin alias of typeOf
+//
+// Dispatch is organized as active-pattern families feeding a top-level
+// match, not one flat 74-arm wall:
+//   CarriedType — types carried directly on the node (defined earlier,
+//                 shared with exprTypeIfKnown)
+//   TypeVia     — variants whose type IS one distinguished child's type
+//   IntValued   — index-arithmetic markers, always Int64
+// Structural rules (indexing, group_by, gram, ...) follow, and the
+// deliberately-untyped variants (loop objects, emission-internal markers)
+// are enumerated WITHOUT a wildcard, so a new IRExpr variant demands an
+// explicit typing decision here instead of silently becoming IRTUnit.
+
+/// Variants whose type equals one distinguished child's type. The returned
+/// expression is the child whose type to take — not necessarily the first
+/// child (e.g. `IRComposeMeth (_, right)` types as `right`).
+let (|TypeVia|_|) (expr: IRExpr) : IRExpr option =
     match expr with
-    | IRVar (_, ty) -> ty
-    | IRParam (_, _, ty) -> ty
-    | IRApp (_, _, retTy) -> retTy
-    | IRArrayLit (_, arrTy) -> mkArrayLike arrTy
-    | IRMask (arr, _) ->
-        // mask(A, pred) is the Bool PRESENCE array over A's own index space
-        // (records reused verbatim -- index-space identity feeds compound()).
-        (match liftInferType arr with
-         | ArrayElem a -> mkArrayArrow a.IndexTypes (IRTScalar ETBool) None
+    // Shape- and element-preserving array transforms.
+    | IRSort (a, _) | IRArrayNegate a | IRArrayConjugate a
+    // Element-preserving, extent-changing set ops (extent is runtime data,
+    // not part of the arrow shape consumers read).
+    | IRIntersect (a, _) | IRUnion (a, _) | IRUnique a
+    // Computation wrappers erase at this level.
+    | IRCompute a | IRPure a
+    // Control flow: the type of the canonical branch/body.
+    | IRLet (_, _, a) | IRIf (_, a, _) | IRGuard (_, a) | IRChoice (a, _)
+    // @>> composition: the right side's type.
+    | IRComposeMeth (_, a) ->
+        Some a
+    | IRMatch (_, c :: _) -> Some c.Body
+    | _ -> None
+
+/// Index-space arithmetic markers: always Int64 scalars.
+let (|IntValued|_|) (expr: IRExpr) : unit option =
+    match expr with
+    | IRArity _ | IRNth | IRRank _ | IRExtent _ | IRRaggedLookup _
+    | IRCompoundMask _ | IRCompoundProject _ | IROpaqueExtent | IRRange _ ->
+        Some ()
+    | _ -> None
+
+// ----------------------------------------------------------------------------
+// Synthetic sentinel index IDs
+//
+// Some typeOf branches need to construct an IRIndexType in flight — e.g., to
+// recover the rank-2 shape of an IRGroupBy result that was not already
+// let-bound (and therefore has no typecheck-derived IRBinding.Type to
+// consult). Those branches don't have access to an IRBuilder and can't
+// allocate fresh IDs via FreshId().
+//
+// Convention: synthetic sentinel IDs are NEGATIVE. IRBuilder.FreshId starts
+// at 0 and counts up, so the negative range is reserved and never collides
+// with builder-assigned IDs. Each call site that synthesizes indices picks a
+// distinct negative ID below.
+//
+// IDs are not load-bearing for codegen decisions — consumers of inferred
+// types pattern-match on structure (ArrayElem, IRTScalar) and on `Tag`, not
+// on `Id`. The IDs serve only to satisfy IRIndexType's record shape.
+// ----------------------------------------------------------------------------
+let synthSlotIdOuter : IRId = -1
+let synthSlotIdMember : IRId = -2
+let synthSlotIdCompoundResidual : IRId = -3
+
+// ----------------------------------------------------------------------------
+// Compound partial-index classification (formalism 4.5)
+//
+// Shared by typeOf's IRIndex arm, CodeGen's genScalarBinding wrapper
+// decision, and exprToCppCore's compoundRead emission, so the three never
+// disagree about WHICH indexing form a compound read is.
+//
+// A wildcard coordinate arrives as an `IRLit IRLitUnit` sentinel inside the
+// index tuple: TypeCheck's dispatchAppOrIndex rewrites each consumed
+// TExprWildcard hole to a unit literal, and unit is never a valid coordinate
+// value, so the encoding is unambiguous. A short tuple (arity j < k, no
+// sentinels) pins the LEADING j coordinates -- B((a,b)) and B((a,b,_)) on a
+// rank-3 compound are the same read.
+// ----------------------------------------------------------------------------
+
+/// Classification of the FIRST index against a rank-k compound head slot.
+type CompoundIndexForm =
+    /// All k coordinates pinned: the compound axis is fully consumed.
+    | CompoundFull
+    /// Partial: `pinned` = (axis position, coordinate expr) for each pinned
+    /// axis in increasing position order; `freePos` = the free axis positions.
+    | CompoundPartial of pinned: (int * IRExpr) list * freePos: int list
+
+let classifyCompoundIndexTuple (k: int) (coords: IRExpr list) : CompoundIndexForm =
+    let isFreeSentinel = function IRLit IRLitUnit -> true | _ -> false
+    if coords |> List.exists isFreeSentinel then
+        // Full-arity wildcard tuple (TypeCheck enforces arity = k and >= 1 pin).
+        let indexed = coords |> List.mapi (fun i c -> (i, c))
+        let pinned = indexed |> List.filter (fun (_, c) -> not (isFreeSentinel c))
+        let free = indexed |> List.filter (fun (_, c) -> isFreeSentinel c) |> List.map fst
+        CompoundPartial (pinned, free)
+    elif coords.Length < k then
+        // Short tuple: leading-prefix pin, trailing axes free.
+        CompoundPartial (coords |> List.mapi (fun i c -> (i, c)), [coords.Length .. k - 1])
+    else
+        CompoundFull
+
+/// Coverage-arm backstop: a family active pattern above no longer covers a
+/// constructor its coverage arm claims. Impossible unless a family pattern
+/// was edited out of sync with typeOf's coverage tail — fail loudly rather
+/// than mistype silently.
+let private unreachableTyping (family: string) (expr: IRExpr) : 'a =
+    failwithf "typeOf: family pattern %s no longer covers %s — coverage arm and family out of sync"
+        family (expr.GetType().Name)
+
+/// The canonical expression type reconstruction. See the section comment
+/// above for how this relates to exprTypeIfKnown and CodeGen.inferExprType.
+let rec typeOf (expr: IRExpr) : IRType =
+    match expr with
+    // -- Node-carried types (shared with exprTypeIfKnown) --
+    | CarriedType ty -> ty
+
+    // -- Pass-throughs: the type of one distinguished child --
+    | TypeVia child -> typeOf child
+
+    // -- Index-arithmetic markers --
+    | IntValued -> IRTScalar ETInt64
+
+    | IRBinOp (_, op, left, right) ->
+        (match op with
+         | IREq | IRNeq | IRLt | IRLe | IRGt | IRGe | IRAnd | IROr -> IRTScalar ETBool
+         | _ ->
+             match typeOf left, typeOf right with
+             | IRTScalar e1, IRTScalar e2 ->
+                 IRTScalar (promoteElemType e1 e2 |> Option.defaultValue e1)
+             | lt, _ -> lt)
+    | IRUnaryOp (op, operand) ->
+        (match op with
+         | IRNot -> IRTScalar ETBool
+         | IRNeg -> typeOf operand
+         | IRConj -> typeOf operand)
+    | IRTuple exprs -> IRTTuple (exprs |> List.map typeOf)
+    | IRComplex (re, _) ->
+        // Complex type derived from component width: Float32 → Complex64,
+        // Float64 → Complex128. Reports as a scalar (NOT a tuple) — that's
+        // the whole point of having a separate IRComplex node.
+        (match typeOf re with
+         | IRTScalar ETFloat32 -> IRTScalar ETComplex64
+         | _ -> IRTScalar ETComplex128)
+    | IRTupleProj (e, i, isFlat) ->
+        let parentTy = typeOf e
+        if isFlat then
+            let leaves = flattenTupleLeaves parentTy
+            if i < leaves.Length then leaves.[i] else IRTUnit
+        else
+            (match parentTy with
+             | IRTTuple ts when i < ts.Length -> ts.[i]
+             | _ -> IRTUnit)
+    | IRMatch (_, []) -> IRTUnit
+    | IRIndex (arr, indices, _) ->
+        // Indexing peels dimensions; full indexing yields the element type.
+        //
+        // Compound-head partial indexing is the exception to positional
+        // peeling: a rank-k compound is ONE slot filled by ONE tuple, and a
+        // PARTIAL tuple (short prefix, or full-arity with wildcard sentinels)
+        // REPLACES that slot with a residual fragment rather than consuming
+        // it -- mirroring TypeCheck's compoundResidualType (dense Idx for one
+        // free axis, residual CompoundIdx for >= 2). Without this branch a
+        // partial read reports the element type (1 index >= 1 slot), which
+        // breaks chained/inline consumers (reduce over a residual, chained
+        // partials) at codegen.
+        (match typeOf arr with
+         | ArrayElem arrTy ->
+             let headCompound =
+                 match arrTy.IndexTypes with
+                 | h :: _ when h.IxKind = IxKCompound -> Some h
+                 | _ -> None
+             (match headCompound, indices with
+              | Some h, (IRTuple coords) :: trailingIdxs ->
+                  (match classifyCompoundIndexTuple h.Rank coords with
+                   | CompoundPartial (pinned, freePos) ->
+                       let rr = freePos.Length
+                       let residual =
+                           if rr = 1 then
+                               { Id = synthSlotIdCompoundResidual; Rank = 1
+                                 Extent = IRCompoundProject (arr, pinned.Length)
+                                 Symmetry = SymNone; Tag = None; IxKind = IxKPlain
+                                 Kind = SDimension; Dependencies = [] }
+                           else
+                               { Id = synthSlotIdCompoundResidual; Rank = rr
+                                 Extent = IRCompoundProject (arr, pinned.Length)
+                                 Symmetry = SymNone; Tag = Some "__compoundidx"; IxKind = IxKCompound
+                                 Kind = SDimension; Dependencies = [] }
+                       let trailingSlots = List.tail arrTy.IndexTypes
+                       let trailingRemaining =
+                           if trailingIdxs.Length <= trailingSlots.Length
+                           then trailingSlots |> List.skip trailingIdxs.Length
+                           else []
+                       mkArrayLike { arrTy with IndexTypes = residual :: trailingRemaining }
+                   | CompoundFull ->
+                       // Full tuple consumes the one compound slot; any further
+                       // indices consume trailing slots positionally (the
+                       // pre-existing rule below already counts them right).
+                       if indices.Length >= arrTy.IndexTypes.Length then arrTy.ElemType
+                       else mkArrayLike { arrTy with IndexTypes = arrTy.IndexTypes |> List.skip indices.Length })
+              | _ ->
+                  if indices.Length >= arrTy.IndexTypes.Length then arrTy.ElemType
+                  else mkArrayLike { arrTy with IndexTypes = arrTy.IndexTypes |> List.skip indices.Length })
          | t -> t)
-    | IRSort (arr, _) -> liftInferType arr
+    | IRSequence exprs ->
+        (match exprs with
+         | [] -> IRTUnit
+         | _ ->
+             // Sequence produces array with Idx<N> over element type
+             let elemType = typeOf (List.head exprs)
+             (match elemType with
+              | ArrayElem arr ->
+                  // Array elements: prepend sequence dimension
+                  let seqIdx = { Id = 0; Rank = 1; Extent = IRLit (IRLitInt (int64 exprs.Length)); Symmetry = SymNone; Tag = Some "__seq"; IxKind = IxKSeq; Kind = SDimension; Dependencies = [] }
+                  mkArrayLike { arr with IndexTypes = seqIdx :: arr.IndexTypes }
+              | IRTScalar et ->
+                  // Scalar elements: simple array
+                  let seqIdx = { Id = 0; Rank = 1; Extent = IRLit (IRLitInt (int64 exprs.Length)); Symmetry = SymNone; Tag = Some "__seq"; IxKind = IxKSeq; Kind = SDimension; Dependencies = [] }
+                  mkArrayArrow [seqIdx] (IRTScalar et) None
+              | _ -> elemType))
+    | IRAssign _ -> IRTUnit
+    | IRForRange _ -> IRTUnit
+    | IRFieldAccess (obj, field) ->
+        // Resolved via the ONE struct-fields cache (structFieldsCacheStorage
+        // above), populated both at liftInlineFormsModule entry and at
+        // codegen module entry from the same module's Types — collapsing the
+        // duplicate codegen-side cache that audit §2.4 flagged as a
+        // valid-but-wrong-lookup hazard.
+        (match tryLookupFieldType (typeOf obj) field with
+         | Some ty -> ty
+         | None -> IRTUnit)
+    | IRFunctorMap (f, c) ->
+        // f <$> c: return type is f's return type
+        (match typeOf f with
+         | FuncElem (_, retTy) -> retTy
+         | _ -> typeOf c)  // fallback: preserve computation type
+    | IRBind (_, cont) ->
+        // >>= : result type is continuation's return type
+        (match typeOf cont with
+         | FuncElem (_, retTy) -> retTy
+         | t -> t)
+    | IRParallel (l, r, _) -> IRTTuple [typeOf l; typeOf r]
+    | IRFusion (l, r) -> IRTTuple [typeOf l; typeOf r]
+    | IRMask (arr, _) ->
+        // Bool presence array over the source's own index space (verbatim
+        // records -- index-space identity feeds compound()).
+        (match typeOf arr with
+         | ArrayElem a -> mkArrayLike { a with ElemType = IRTScalar ETBool }
+         | t -> t)
+    | IRContains _ -> IRTScalar ETBool  // Membership returns bool
+    | IRGroupBy (v, gk) ->
+        // The TypeCheck-side `ExprGroupBy` rule constructs a rank-2 array
+        // type with `__group_outer` + `__group_member` tagged index slots
+        // (see TypeCheck.fs:ExprGroupBy). For let-bound group_by results
+        // — which is the only currently-allowed usage; inline group_by
+        // in method_for() is rejected at codegen entry — the binding's
+        // Type field carries this rank-2 form, and `IRVar` lookups
+        // return it correctly.
+        //
+        // This branch fires when an IRGroupBy node is consulted
+        // directly (e.g., lifted bindings, future inline support).
+        // Reconstruct the same rank-2 form here so consumers that
+        // pattern-match on shape (ArrayElem, rank checks) see the
+        // correct structure. See `synthSlotId*` above for the
+        // sentinel-ID convention used here.
+        let valsTy = typeOf v
+        let gkTy = typeOf gk
+        (match gkTy, valsTy with
+         | IRTGroupKeys (outerIdx, _, _), ArrayElem valsArr ->
+             let outer = { outerIdx with Id = synthSlotIdOuter; Tag = Some "__group_outer"; IxKind = IxKGroupOuter }
+             let memberIdx = {
+                 Id = synthSlotIdMember
+                 Rank = 1
+                 Extent = IRParam ("__groupsz", 0, IRTNat None)
+                 Symmetry = SymNone
+                 Tag = Some "__group_member"; IxKind = IxKGroupMember
+                 Kind = SDimension
+                 Dependencies = []
+             }
+             mkArrayArrow [outer; memberIdx] valsArr.ElemType None
+         | _ ->
+             // Fallback: gk isn't IRTGroupKeys-typed yet or v isn't an
+             // array. Returning vals's type preserves the prior placeholder
+             // behavior — same shape, same element type — so any caller
+             // that was previously satisfied stays satisfied.
+             valsTy)
+    | IRGroupKeys _ -> IRTUnit  // GroupKeys is an opaque structure, not a runtime value with a simple type
     | IRTranspose (arr, d1, d2) ->
-        (match liftInferType arr with
+        // Swap the two index slots. (TypeCheck has already verified both axes
+        // are arity-1 SymNone, so dim index == slot index here.)
+        (match typeOf arr with
          | ArrayElem a when d1 < a.IndexTypes.Length && d2 < a.IndexTypes.Length ->
             let swapped =
                 a.IndexTypes
@@ -4174,12 +4723,10 @@ let rec liftInferType (expr: IRExpr) : IRType =
             mkArrayLike { a with IndexTypes = swapped }
          | t -> t)
     | IRDecompact (arr, d) ->
-        // Structural hint: split the compact slot containing dim d into
-        // left-remainder / extracted Idx / right-remainder. Ids are reused
-        // (this is an approximation for let-float; the authoritative type with
-        // fresh nominal Ids is set by TypeCheck). Shape (arity/symmetry) is
-        // what codegen reads, and that is correct here.
-        (match liftInferType arr with
+        // Split the compact slot containing dim d: left-remainder / extracted
+        // Idx / right-remainder. Shape only (codegen reads arity/symmetry off
+        // this); Ids reused — authoritative nominal type is set by TypeCheck.
+        (match typeOf arr with
          | ArrayElem a ->
             let rec walk slotIdx acc remaining =
                 match remaining with
@@ -4203,40 +4750,68 @@ let rec liftInferType (expr: IRExpr) : IRType =
                 mkArrayLike { a with IndexTypes = newIdx }
              | _ -> mkArrayLike a)
          | t -> t)
-    | IRArrayNegate arr -> liftInferType arr        // type-preserving
-    | IRArrayConjugate arr -> liftInferType arr     // type-preserving
-    | IRIntersect (a, _) -> liftInferType a
-    | IRUnion (a, _) -> liftInferType a
-    | IRUnique a -> liftInferType a
-    | IRContains _ -> IRTScalar ETBool
-    | IRGroupBy (v, _) -> liftInferType v  // Approximation; codegen recomputes
-    | IRGroupKeys _ -> IRTUnit  // GroupKeys is opaque
-    | IRLet (_, _, body) -> liftInferType body
-    | IRIndex (arr, idxs, _) ->
-        match liftInferType arr with
-        | ArrayElem a when idxs.Length >= a.IndexTypes.Length -> a.ElemType
-        | ArrayElem a -> mkArrayLike { a with IndexTypes = a.IndexTypes |> List.skip idxs.Length }
-        | t -> t
-    | IRTupleProj (e, i, _) ->
-        match liftInferType e with
-        | IRTTuple ts when i < ts.Length -> ts.[i]
-        | t -> t
-    | IRFieldAccess (obj, field) ->
-        // Phase D / companion-array gap: resolve field type via the struct
-        // definitions map. Returns IRTUnit if the obj isn't an IRTNamed
-        // struct (typecheck rejects this; the IRTUnit fallback is for
-        // robustness against malformed IR — codegen surfaces the issue).
-        match tryLookupFieldType (liftInferType obj) field with
-        | Some ty -> ty
-        | None -> IRTUnit
-    | IRCompute e -> liftInferType e
-    | IRPure e -> liftInferType e
-    | IRApplyCombinator info -> info.OutputType
-    | IRComposeApply info -> info.OutputType
-    | IRIf (_, t, _) -> liftInferType t
-    | IRMatch (_, c :: _) -> liftInferType c.Body
-    | IRMatch (_, []) -> IRTUnit
-    | _ -> IRTUnit
+    | IRGram (l, r, sameArray) ->
+        // gram(A, B) = A * B^H. A : m x n, B : p x n -> m x p. Element type is
+        // complex iff either operand is complex. Same-array -> square m x m,
+        // compact group of arity 2 (Hermitian if complex, else symmetric);
+        // distinct -> dense m x p (two plain axes).
+        (match typeOf l, typeOf r with
+         | ArrayElem la, ArrayElem ra when la.IndexTypes.Length >= 1 && ra.IndexTypes.Length >= 1 ->
+            let isComplexElem (t: IRType) =
+                match t with IRTScalar (ETComplex64 | ETComplex128) -> true | _ -> false
+            let outElem =
+                if isComplexElem la.ElemType then la.ElemType
+                elif isComplexElem ra.ElemType then ra.ElemType
+                else la.ElemType
+            let mOuter = la.IndexTypes.[0]
+            let pOuter = ra.IndexTypes.[0]
+            if sameArray then
+                let sym = if isComplexElem outElem then SymHermitian else SymSymmetric
+                let grp = { mOuter with Rank = 2; Symmetry = sym }
+                mkArrayLike { la with ElemType = outElem; IndexTypes = [grp] }
+            else
+                let s0 = { mOuter with Rank = 1; Symmetry = SymNone }
+                let s1 = { pOuter with Rank = 1; Symmetry = SymNone }
+                mkArrayLike { la with ElemType = outElem; IndexTypes = [s0; s1] }
+         | t, _ -> t)
+    | IRReduce (arr, _) ->
+        // Reduces innermost dim by 1. For rank-1 input, result is a scalar.
+        (match typeOf arr with
+         | ArrayElem a when a.IndexTypes.Length = 1 -> a.ElemType  // IRType already
+         | ArrayElem a ->
+             // Multi-rank reduction: drop innermost index. (Not yet supported by
+             // codegen; TypeCheck rejects rank>1 today, but keep this consistent.)
+             mkArrayLike { a with IndexTypes = a.IndexTypes |> List.take (a.IndexTypes.Length - 1) }
+         | t -> t)
+
+    // -- Deliberately untyped (loop objects, combinator/emission-internal
+    //    markers — not runtime values with a simple type). Enumerated with
+    //    no wildcard so a NEW variant demands a typing decision here.
+    | IRMethodFor _ | IRObjectFor _ | IRReynolds _ | IRArrayProduct _
+    | IRComposeObj _ | IRCompose _
+    | IRSlice _ | IRCurry _ | IRSubset _ | IRShift _ | IRReverse _ | IRDiag _
+    | IRZip _ | IRAlign _ | IRStack _ | IRJoin _
+    | IRTupleCons _ | IRTupleDecons _ | IRPolyIndex _ | IRReplicate _
+    | IRVirtualReverse _ | IRBlocked _ | IRZero ->
+        IRTUnit
+
+    // -- Coverage tail ---------------------------------------------------
+    // Every constructor below is already handled by a family pattern above
+    // (partial active patterns are invisible to the exhaustiveness checker).
+    // Listing them keeps this match provably exhaustive WITHOUT a wildcard —
+    // a brand-new IRExpr variant still fails to compile until it gets a
+    // typing rule — and if one of these arms ever fires, a family pattern
+    // was edited out of sync: fail loudly, never mistype.
+    | IRVar _ | IRParam _ | IRApp _ | IRArrayLit _ | IRStructLit _
+    | IRApplyCombinator _ | IRComposeApply _ | IRLit _ ->
+        unreachableTyping "CarriedType" expr
+    | IRSort _ | IRArrayNegate _ | IRArrayConjugate _ | IRIntersect _
+    | IRUnion _ | IRUnique _ | IRCompute _ | IRPure _ | IRLet _ | IRIf _
+    | IRGuard _ | IRChoice _ | IRComposeMeth _ | IRMatch _ ->
+        unreachableTyping "TypeVia" expr
+    | IRArity _ | IRNth | IRRank _ | IRExtent _ | IRRaggedLookup _
+    | IRCompoundMask _ | IRCompoundProject _ | IROpaqueExtent | IRRange _ ->
+        unreachableTyping "IntValued" expr
 
 /// Predicate: is this an inline form that needs lifting when in a non-blessed
 /// position? Note: we deliberately exclude IRReduce — reduce's codegen
@@ -4262,7 +4837,7 @@ let isInlineForm (e: IRExpr) : bool =
 let peelLetChain (e: IRExpr) : (IRId * IRType * IRExpr) list * IRExpr =
     let rec loop acc e =
         match e with
-        | IRLet (id, v, body) -> loop (acc @ [(id, liftInferType v, v)]) body
+        | IRLet (id, v, body) -> loop (acc @ [(id, typeOf v, v)]) body
         | _ -> (acc, e)
     loop [] e
 
@@ -4275,7 +4850,7 @@ let peelLetChain (e: IRExpr) : (IRId * IRType * IRExpr) list * IRExpr =
 let private isArrayFieldAccess (e: IRExpr) : bool =
     match e with
     | IRFieldAccess _ ->
-        match liftInferType e with
+        match typeOf e with
         | ArrayElem _ -> true
         | _ -> false
     | _ -> false
@@ -4291,13 +4866,13 @@ let liftChild (builder: IRBuilder) (child: IRExpr) : (IRId * IRType * IRExpr) li
     let (peeled, inner) = peelLetChain child
     if isInlineForm inner then
         let id = builder.FreshId()
-        let ty = liftInferType inner
+        let ty = typeOf inner
         (peeled @ [(id, ty, inner)], IRVar (id, ty))
     elif isArrayFieldAccess inner then
         // Phase D: hoist `t.samples` (when samples is array-typed) into a
         // let-RHS so codegen can synthesize `<bound_name>_extents`.
         let id = builder.FreshId()
-        let ty = liftInferType inner
+        let ty = typeOf inner
         (peeled @ [(id, ty, inner)], IRVar (id, ty))
     else
         (peeled, inner)
@@ -4316,13 +4891,13 @@ let liftChildIncludingArrayLit (builder: IRBuilder) (child: IRExpr) : (IRId * IR
         (peeled @ [(id, ty, inner)], IRVar (id, ty))
     | e when isInlineForm e ->
         let id = builder.FreshId()
-        let ty = liftInferType e
+        let ty = typeOf e
         (peeled @ [(id, ty, e)], IRVar (id, ty))
     | e when isArrayFieldAccess e ->
         // Phase D: same hoisting as liftChild, so struct field values and
         // function args carrying `t.samples` get the same treatment.
         let id = builder.FreshId()
-        let ty = liftInferType e
+        let ty = typeOf e
         (peeled @ [(id, ty, e)], IRVar (id, ty))
     | e -> (peeled, e)
 
@@ -4599,7 +5174,7 @@ let rec liftExpr (builder: IRBuilder) (expr: IRExpr) : IRExpr =
                 let (peeled, inner) = peelLetChain a
                 if isArrayFieldAccess inner then
                     let id = builder.FreshId()
-                    let ty = liftInferType inner
+                    let ty = typeOf inner
                     (accB @ peeled @ [(id, ty, inner)], accA @ [IRVar (id, ty)])
                 else
                     (accB @ peeled, accA @ [inner])) ([], [])
@@ -4615,7 +5190,7 @@ let rec liftExpr (builder: IRBuilder) (expr: IRExpr) : IRExpr =
                 let (peeled, inner) = peelLetChain a
                 if isArrayFieldAccess inner then
                     let id = builder.FreshId()
-                    let ty = liftInferType inner
+                    let ty = typeOf inner
                     (accB @ peeled @ [(id, ty, inner)], accA @ [IRVar (id, ty)])
                 else
                     (accB @ peeled, accA @ [inner])) ([], [])
@@ -4631,7 +5206,7 @@ let rec liftExpr (builder: IRBuilder) (expr: IRExpr) : IRExpr =
                 let (peeled, inner) = peelLetChain a
                 if isArrayFieldAccess inner then
                     let id = builder.FreshId()
-                    let ty = liftInferType inner
+                    let ty = typeOf inner
                     (accB @ peeled @ [(id, ty, inner)], accA @ [IRVar (id, ty)])
                 else
                     (accB @ peeled, accA @ [inner])) ([], [])
@@ -4640,7 +5215,7 @@ let rec liftExpr (builder: IRBuilder) (expr: IRExpr) : IRExpr =
 /// Lift inline forms across an entire IR module's bindings and functions.
 let liftInlineFormsModule (modul: IRModule) (builder: IRBuilder) : IRModule =
     // Phase D / companion-array gap: populate the struct fields cache so
-    // liftInferType can resolve IRFieldAccess result types. Required for
+    // typeOf can resolve IRFieldAccess result types. Required for
     // hoisting array-typed field accesses to let-RHS so codegen can
     // synthesize their _extents companions.
     setStructFieldsCache modul.Types
@@ -5020,61 +5595,10 @@ let rec tryEvalIntIR (expr: IRExpr) : int64 option =
         tryEvalIntIR e |> Option.map (fun n -> -n)
     | _ -> None
 
-let rec collectVarRefsIR (expr: IRExpr) : Set<IRId> =
-    match expr with
-    | IRVar (id, _) -> Set.singleton id
-    | IRLit _ | IRParam _ | IRNth | IRZero | IROpaqueExtent -> Set.empty
-    | IRBinOp (_, _, l, r) -> Set.union (collectVarRefsIR l) (collectVarRefsIR r)
-    | IRUnaryOp (_, e) -> collectVarRefsIR e
-    | IRIf (c, t, e) -> Set.unionMany [collectVarRefsIR c; collectVarRefsIR t; collectVarRefsIR e]
-    | IRLet (_, v, b) -> Set.union (collectVarRefsIR v) (collectVarRefsIR b)
-    | IRApp (f, args, _) -> Set.unionMany (collectVarRefsIR f :: List.map collectVarRefsIR args)
-    | IRTuple es -> Set.unionMany (List.map collectVarRefsIR es)
-    | IRComplex (re, im) -> Set.union (collectVarRefsIR re) (collectVarRefsIR im)
-    | IRTupleProj (e, _, _) -> collectVarRefsIR e
-    | IRArrayLit (es, _) -> Set.unionMany (List.map collectVarRefsIR es)
-    | IRIndex (arr, idxs, _) -> Set.unionMany (collectVarRefsIR arr :: List.map collectVarRefsIR idxs)
-    | IRFieldAccess (obj, _) -> collectVarRefsIR obj
-    | IRStructLit (_, fields) -> Set.unionMany (fields |> List.map (snd >> collectVarRefsIR))
-    | IRCompute inner -> collectVarRefsIR inner
-    | IRReynolds (inner, _) -> collectVarRefsIR inner
-    | IRMethodFor info -> Set.unionMany (List.map collectVarRefsIR info.Arrays)
-    | IRObjectFor info -> collectVarRefsIR info.Kernel
-    | IRApplyCombinator info ->
-        Set.unionMany [collectVarRefsIR info.Loop; collectVarRefsIR info.Kernel; Set.unionMany (List.map collectVarRefsIR info.Arrays)]
-    | IRComposeApply info ->
-        Set.unionMany (collectVarRefsIR info.Composition :: List.map collectVarRefsIR info.InputArrays)
-    | IRMatch (scrut, cases) ->
-        Set.union (collectVarRefsIR scrut) (cases |> List.map (fun c -> collectVarRefsIR c.Body) |> Set.unionMany)
-    | IRAssign (t, v) -> Set.union (collectVarRefsIR t) (collectVarRefsIR v)
-    | IRForRange (vid, lo, hi, body) ->
-        Set.unionMany [collectVarRefsIR lo; collectVarRefsIR hi; Set.remove vid (collectVarRefsIR body)]
-    | IRGuard (c, b) -> Set.union (collectVarRefsIR c) (collectVarRefsIR b)
-    | IRMask (a, p) -> Set.union (collectVarRefsIR a) (collectVarRefsIR p)
-    | IRIntersect (a, b) -> Set.union (collectVarRefsIR a) (collectVarRefsIR b)
-    | IRUnion (a, b) -> Set.union (collectVarRefsIR a) (collectVarRefsIR b)
-    | IRUnique a -> collectVarRefsIR a
-    | IRContains (a, v) -> Set.union (collectVarRefsIR a) (collectVarRefsIR v)
-    | IRGroupBy (v, k) -> Set.union (collectVarRefsIR v) (collectVarRefsIR k)
-    | IRGroupKeys ks -> ks |> List.map collectVarRefsIR |> Set.unionMany
-    | IRSort (a, k) -> Set.union (collectVarRefsIR a) (collectVarRefsIR k)
-    | IRTranspose (a, _, _) -> collectVarRefsIR a
-    | IRDecompact (a, _) -> collectVarRefsIR a
-    | IRArrayNegate a -> collectVarRefsIR a
-    | IRArrayConjugate a -> collectVarRefsIR a
-    | IRReduce (a, k) -> Set.union (collectVarRefsIR a) (collectVarRefsIR k)
-    | IRExtent (a, _) -> collectVarRefsIR a
-    | IRRaggedLookup l -> collectVarRefsIR l
-    | IRCompoundMask mk -> collectVarRefsIR mk
-    | IRCompoundProject (parent, _) -> collectVarRefsIR parent
-    | IRSequence es -> Set.unionMany (List.map collectVarRefsIR es)
-    | IRParallel (a, b, _) -> Set.union (collectVarRefsIR a) (collectVarRefsIR b)
-    | IRFusion (a, b) -> Set.union (collectVarRefsIR a) (collectVarRefsIR b)
-    | IRChoice (a, b) -> Set.union (collectVarRefsIR a) (collectVarRefsIR b)
-    | IRBind (c, k) -> Set.union (collectVarRefsIR c) (collectVarRefsIR k)
-    | IRFunctorMap (f, c) -> Set.union (collectVarRefsIR f) (collectVarRefsIR c)
-    | IRPure e -> collectVarRefsIR e
-    | _ -> Set.empty
+// (collectVarRefsIR now lives beside the canonical ExprShape traversal,
+// before mapIRExpr. The hand-maintained copy that lived here had a
+// `| _ -> Set.empty` catchall that silently skipped ~15 variants; the
+// shape-based fold cannot skip anything.)
 
 // ============================================================================
 // AnalysisContext — unified callable-walking for cross-procedural analysis
@@ -5191,8 +5715,7 @@ let buildCallablesTableForModule (modul: IRModule) : CallablesTable =
 //   FreeVars  — IRIds referenced from outside this expression's binders
 //   BoundVars — IRIds introduced inside (by IRLet, lambda params, etc.)
 //   IsPure    — no observable side effects
-// for any IRExpr. Each non-leaf arm unions children's attrs and adjusts
-// for any binders introduced at that node. Leaves contribute trivially.
+// for any IRExpr.
 //
 // Phase B does NOT drive any rewrite. The function exists so that future
 // passes (Phase C: general hoist; Phase D: LICM/CSE) can consume a
@@ -5207,11 +5730,11 @@ let buildCallablesTableForModule (modul: IRModule) : CallablesTable =
 //     codegen wraps in deterministic allocations). The field exists for
 //     forward compatibility — when an impure construct lands, its arm
 //     declares IsPure = false and the field starts mattering.
-//   - The previous `collectVarRefsIR` has a `| _ -> Set.empty` catchall
-//     that silently misses references in several variants (IRSlice,
-//     IRCurry, IRStack, IRJoin, IRSubset, IRShift, IRTranspose, ...).
-//     exprAttrs is exhaustive — every IRExpr variant has an explicit
-//     arm. The corpus tests are how we know this matters.
+//   - Exhaustive by construction: only the semantically special variants
+//     have explicit arms (IRVar contributes a free var; IRApp follows
+//     resolvable callees; the BinderShape variants scope their bound ids).
+//     Everything else — including any future variant — merges its
+//     children's attrs via the canonical ExprShape fold.
 
 type ExprAttrs = {
     FreeVars:  Set<IRId>
@@ -5230,154 +5753,11 @@ let private mergeAttrs (a: ExprAttrs) (b: ExprAttrs) : ExprAttrs =
 let private mergeMany (xs: ExprAttrs list) : ExprAttrs =
     List.fold mergeAttrs emptyAttrs xs
 
-/// Pattern bindings: IRPatVar introduces an IRId visible in the case body
-/// and (if present) the guard. Nested patterns (tuple, cons, variant
-/// payload) accumulate all their child bindings.
-let rec private patternBoundIds (pat: IRPattern) : Set<IRId> =
-    match pat with
-    | IRPatWild | IRPatLit _ -> Set.empty
-    | IRPatVar id -> Set.singleton id
-    | IRPatTuple pats -> pats |> List.map patternBoundIds |> Set.unionMany
-    | IRPatCons (h, t) -> Set.union (patternBoundIds h) (patternBoundIds t)
-    | IRPatVariant (_, _, Some p, _) -> patternBoundIds p
-    | IRPatVariant (_, _, None, _) -> Set.empty
-
 let rec exprAttrs (expr: IRExpr) : ExprAttrs =
     match expr with
-    // -- Leaves: no children, no binders, pure --
-    | IRLit _ | IRParam _ | IRNth | IRZero | IROpaqueExtent
-    | IRRange _ | IRVirtualReverse _ | IRArity _ ->
-        emptyAttrs
-
-    // IRBlocked carries a block-size expression that may reference variables.
-    | IRBlocked (_, blockSize) -> exprAttrs blockSize
-
-    // -- Variable reference: contributes to FreeVars --
+    // -- Variable reference: the one FreeVars source --
     | IRVar (id, _) ->
         { emptyAttrs with FreeVars = Set.singleton id }
-
-    // -- Binders: variables introduced here are *not* free in this node --
-    | IRLet (id, value, body) ->
-        let va = exprAttrs value
-        let ba = exprAttrs body
-        // id is bound in body; remove from body's free vars before union.
-        // Any reference to id inside `value` would be ill-formed IR (use
-        // before binding); we still union without subtracting, so such a
-        // bug would still show up as id ∈ FreeVars at the outer level.
-        { FreeVars  = Set.union va.FreeVars (Set.remove id ba.FreeVars)
-          BoundVars = Set.unionMany [va.BoundVars; ba.BoundVars; Set.singleton id]
-          IsPure    = va.IsPure && ba.IsPure }
-
-    | IRForRange (vid, lo, hi, body) ->
-        let la = exprAttrs lo
-        let ha = exprAttrs hi
-        let ba = exprAttrs body
-        { FreeVars  = Set.unionMany [la.FreeVars; ha.FreeVars; Set.remove vid ba.FreeVars]
-          BoundVars = Set.unionMany [la.BoundVars; ha.BoundVars; ba.BoundVars; Set.singleton vid]
-          IsPure    = la.IsPure && ha.IsPure && ba.IsPure }
-
-    | IRMatch (scrut, cases) ->
-        let sa = exprAttrs scrut
-        let caseAttrs =
-            cases |> List.map (fun c ->
-                let pIds = patternBoundIds c.Pattern
-                let ga = c.Guard |> Option.map exprAttrs |> Option.defaultValue emptyAttrs
-                let ba = exprAttrs c.Body
-                // Pattern bindings are visible in guard and body.
-                { FreeVars  = Set.union (Set.difference ga.FreeVars pIds) (Set.difference ba.FreeVars pIds)
-                  BoundVars = Set.unionMany [ga.BoundVars; ba.BoundVars; pIds]
-                  IsPure    = ga.IsPure && ba.IsPure })
-        mergeMany (sa :: caseAttrs)
-
-    // -- Unary expressions: one child, no binders --
-    | IRUnaryOp (_, e)
-    | IRTupleProj (e, _, _)
-    | IRTupleDecons e
-    | IRFieldAccess (e, _)
-    | IRRank e
-    | IRReverse (e, _)
-    | IRDiag e
-    | IRPure e
-    | IRCompute e
-    | IRReynolds (e, _)
-    | IRRaggedLookup e
-    | IRCompoundMask e ->
-        exprAttrs e
-    | IRCompoundProject (e, _) ->
-        exprAttrs e
-    | IRTranspose (e, _, _) ->
-        exprAttrs e
-    | IRDecompact (e, _) ->
-        exprAttrs e
-    | IRGram (l, r, _) ->
-        let la = exprAttrs l
-        let ra = exprAttrs r
-        { FreeVars  = Set.union la.FreeVars ra.FreeVars
-          BoundVars = Set.union la.BoundVars ra.BoundVars
-          IsPure    = la.IsPure && ra.IsPure }
-    | IRArrayNegate e ->
-        exprAttrs e
-    | IRArrayConjugate e ->
-        exprAttrs e
-
-    // IRExtent's dim is a static int, so just the array.
-    | IRExtent (a, _) -> exprAttrs a
-
-    // -- Binary expressions: two children, no binders --
-    | IRBinOp (_, _, l, r)
-    | IRComplex (l, r)
-    | IRTupleCons (l, r)
-    | IRIntersect (l, r)
-    | IRUnion (l, r)
-    | IRGroupBy (l, r)
-    | IRSort (l, r)
-    | IRReduce (l, r)
-    | IRFusion (l, r)
-    | IRChoice (l, r)
-    | IRBind (l, r)
-    | IRArrayProduct (l, r)
-    | IRComposeObj (l, r)
-    | IRComposeMeth (l, r)
-    | IRCompose (l, r)
-    | IRFunctorMap (l, r)
-    | IRCurry (l, r, _)
-    | IRPolyIndex (l, r)
-    | IRGuard (l, r)
-    | IRAssign (l, r) ->
-        mergeAttrs (exprAttrs l) (exprAttrs r)
-
-    | IRContains (arr, value) ->
-        mergeAttrs (exprAttrs arr) (exprAttrs value)
-
-    | IRMask (arr, pred) ->
-        mergeAttrs (exprAttrs arr) (exprAttrs pred)
-
-    | IRUnique a -> exprAttrs a
-
-    | IRParallel (a, b, _) -> mergeAttrs (exprAttrs a) (exprAttrs b)
-
-    // -- Ternary and structured --
-    | IRIf (c, t, e) ->
-        mergeMany [exprAttrs c; exprAttrs t; exprAttrs e]
-
-    | IRIndex (arr, idxs, _) ->
-        mergeMany (exprAttrs arr :: List.map exprAttrs idxs)
-
-    | IRSlice (a, _, start, stop) ->
-        mergeMany [exprAttrs a; exprAttrs start; exprAttrs stop]
-
-    | IRShift (a, _, offset, boundary) ->
-        let ba =
-            match boundary with
-            | BndPad e -> exprAttrs e
-            | BndShrink | BndPeriodic | BndReflect -> emptyAttrs
-        mergeMany [exprAttrs a; exprAttrs offset; ba]
-
-    | IRSubset (a, _, start, length) ->
-        mergeMany [exprAttrs a; exprAttrs start; exprAttrs length]
-
-    | IRReplicate (count, body) ->
-        mergeAttrs (exprAttrs count) (exprAttrs body)
 
     | IRApp (f, args, _) ->
         let baseAttrs = mergeMany (exprAttrs f :: List.map exprAttrs args)
@@ -5417,44 +5797,26 @@ let rec exprAttrs (expr: IRExpr) : ExprAttrs =
             | _ -> baseAttrs
         | _ -> baseAttrs
 
-    | IRStructLit (_, fields) ->
-        fields |> List.map (snd >> exprAttrs) |> mergeMany
+    // -- Binders: scoped children lose their bound ids, which surface in
+    //    BoundVars instead. One arm covers IRLet, IRForRange, and IRMatch
+    //    via BinderShape — a new binding variant needs exactly one
+    //    BinderShape case to get correct scoping here. (IRLet's value
+    //    arrives in the free part: a reference to the let-id inside its
+    //    own value is ill-formed IR, and NOT subtracting it there keeps
+    //    such a bug visible as a free var at the outer level.)
+    | BinderShape (free, scopes) ->
+        let freeAttrs = free |> List.map exprAttrs |> mergeMany
+        let scopeAttrs =
+            scopes |> List.map (fun (bound, parts) ->
+                let a = parts |> List.map exprAttrs |> mergeMany
+                { FreeVars  = Set.difference a.FreeVars bound
+                  BoundVars = Set.union a.BoundVars bound
+                  IsPure    = a.IsPure })
+        mergeMany (freeAttrs :: scopeAttrs)
 
-    // -- List-valued --
-    | IRTuple es | IRSequence es | IRZip es | IRStack es ->
-        es |> List.map exprAttrs |> mergeMany
-
-    | IRArrayLit (es, _) ->
-        es |> List.map exprAttrs |> mergeMany
-
-    | IRGroupKeys ks ->
-        ks |> List.map exprAttrs |> mergeMany
-
-    | IRJoin (arrs, _) ->
-        arrs |> List.map exprAttrs |> mergeMany
-
-    | IRAlign (arrs, spec) ->
-        let bIfPad =
-            match spec.Boundary with
-            | BndPad e -> exprAttrs e
-            | _ -> emptyAttrs
-        mergeMany (bIfPad :: List.map exprAttrs arrs)
-
-    // -- Loop/combinator nodes --
-    | IRMethodFor info ->
-        info.Arrays |> List.map exprAttrs |> mergeMany
-
-    | IRObjectFor info ->
-        exprAttrs info.Kernel
-
-    | IRApplyCombinator info ->
-        mergeMany (
-            exprAttrs info.Loop
-            :: exprAttrs info.Kernel
-            :: List.map exprAttrs info.Arrays)
-
-    | IRComposeApply info ->
-        mergeMany (exprAttrs info.Composition :: List.map exprAttrs info.InputArrays)
+    // -- Everything else: merge over the canonical children --
+    | ExprShape (children, _) ->
+        children |> List.map exprAttrs |> mergeMany
 
 
 /// Validation error with context
@@ -5463,47 +5825,25 @@ type IRValidationError = {
     Context: string  // e.g. "in binding 'result'" or "in function 'covariance'"
 }
 
-/// Recursively collect all types from an IRExpr tree
-let rec collectTypesInExpr (expr: IRExpr) : IRType list =
-    let rec go e =
-        match e with
-        | IRVar (_, ty) -> [ty]
-        | IRLit _ -> []
-        | IRParam (_, _, ty) -> [ty]
-        | IRBinOp (_, _, l, r) -> go l @ go r
-        | IRUnaryOp (_, inner) -> go inner
-        | IRIf (c, t, e) -> go c @ go t @ go e
-        | IRLet (_, v, b) -> go v @ go b
-        | IRApp (f, args, retTy) -> [retTy] @ go f @ (args |> List.collect go)
-        | IRTuple elems -> elems |> List.collect go
-        | IRComplex (re, im) -> go re @ go im
-        | IRTupleProj (e, _, _) -> go e
-        | IRArrayLit (elems, arrTy) -> [mkArrayLike arrTy] @ (elems |> List.collect go)
-        | IRIndex (arr, idxs, _) -> go arr @ (idxs |> List.collect go)
-        | IRFieldAccess (obj, _) -> go obj
-        | IRStructLit (_, fields) -> fields |> List.collect (snd >> go)
-        | IRMatch (scrut, cases) ->
-            go scrut @ (cases |> List.collect (fun c ->
-                go c.Body @ (c.Guard |> Option.map go |> Option.defaultValue [])))
-        | IRCompute inner -> go inner
-        | IRReynolds (inner, _) -> go inner
-        | IRMethodFor info -> info.Arrays |> List.collect go
-        | IRObjectFor info -> go info.Kernel
-        | IRApplyCombinator info ->
-            [info.OutputType] @ go info.Loop @ go info.Kernel @ (info.Arrays |> List.collect go)
-        | IRComposeApply info ->
-            [info.OutputType] @ go info.Composition @ (info.InputArrays |> List.collect go)
-        | IRParallel (a, b, _) -> go a @ go b
-        | IRFusion (a, b) -> go a @ go b
-        | IRChoice (a, b) -> go a @ go b
-        | IRGuard (c, b) -> go c @ go b
-        | IRSequence elems -> elems |> List.collect go
-        | IRAssign (t, v) -> go t @ go v
-        | IRForRange (_, lo, hi, body) -> go lo @ go hi @ go body
-        | IRBind (comp, cont) -> go comp @ go cont
-        | IRFunctorMap (f, c) -> go f @ go c
-        | IRPure e -> go e
-        | _ -> []
+/// Recursively collect all types from an IRExpr tree. The per-variant TYPE
+/// contributions are enumerated in `own` (a contribution override with a
+/// default, not a traversal); recursion into children is the canonical
+/// ExprShape fold, so no variant's subtree can be silently skipped. (The
+/// previous version's `| _ -> []` catchall stopped RECURSION at ~15
+/// variants — IRSlice, IRShift, IRMask, IRZip, ... — hiding any unresolved
+/// types below them from the validator.)
+let collectTypesInExpr (expr: IRExpr) : IRType list =
+    let rec go (e: IRExpr) : IRType list =
+        let own =
+            match e with
+            | IRVar (_, ty) -> [ty]
+            | IRParam (_, _, ty) -> [ty]
+            | IRApp (_, _, retTy) -> [retTy]
+            | IRArrayLit (_, arrTy) -> [mkArrayLike arrTy]
+            | IRApplyCombinator info -> [info.OutputType]
+            | IRComposeApply info -> [info.OutputType]
+            | _ -> []
+        own @ (childrenOf e |> List.collect go)
     go expr
 
 /// Check if a type contains any unresolved IRTInfer
@@ -5574,32 +5914,59 @@ let validateModule (externalIds: Set<IRId>) (modul: IRModule) : IRValidationErro
         let funcIds = modul.Functions |> List.map (fun f -> f.Id) |> Set.ofList
         Set.unionMany [bindIds; funcIds; externalIds]
     
+    // Tag/IxKind agreement (audit §3.3 migration): while both encodings
+    // exist, they must never diverge — a construction or with-update that
+    // stamps a sentinel Tag without the matching IxKind (or vice versa)
+    // is exactly the valid-but-wrong hazard the field was added to kill.
+    // ixKindOfTag maps sentinels to kinds and everything else to IxKPlain,
+    // so equality enforces both directions.
+    let rec indexTypesOfType (ty: IRType) : IRIndexType list =
+        match ty with
+        | IRTArrow (slots, ret, _) ->
+            (slots |> List.collect (function
+                | SIdx ix | SIdxVirt ix -> [ix]
+                | SVal t -> indexTypesOfType t))
+            @ indexTypesOfType ret
+        | IRTTuple ts -> ts |> List.collect indexTypesOfType
+        | IRTComputation t | IRTPoly (t, _)
+        | IRTUnitAnnotated (t, _) | IRTIdxTagged (t, _) -> indexTypesOfType t
+        | _ -> []
+    let checkKindAgreement ctx (ty: IRType) =
+        for ix in indexTypesOfType ty do
+            if ixKindOfTag ix.Tag <> ix.IxKind then
+                addError ctx (sprintf "index type Tag/IxKind disagree: Tag=%A IxKind=%A (index id %d)" ix.Tag ix.IxKind ix.Id)
+
     // --- Check 1: No unresolved IRTInfer in binding types ---
     for b in modul.Bindings do
         let ctx = sprintf "in binding '%s'" b.Name
         match containsInfer b.Type with
         | Some id -> addError ctx (sprintf "unresolved type variable T?%d in declared type" id)
         | None -> ()
+        checkKindAgreement ctx b.Type
         // Also check types inside the expression tree
         for ty in collectTypesInExpr b.Value do
             match containsInfer ty with
             | Some id -> addError ctx (sprintf "unresolved type variable T?%d in expression" id)
             | None -> ()
-    
+            checkKindAgreement ctx ty
+
     // --- Check 1b: No unresolved IRTInfer in function types ---
     for f in modul.Functions do
         let ctx = sprintf "in function '%s'" f.Name
         match containsInfer f.RetType with
         | Some id -> addError ctx (sprintf "unresolved type variable T?%d in return type" id)
         | None -> ()
+        checkKindAgreement ctx f.RetType
         for p in f.Params do
             match containsInfer p.Type with
             | Some id -> addError ctx (sprintf "unresolved type variable T?%d in param '%s'" id p.Name)
             | None -> ()
+            checkKindAgreement ctx p.Type
         for ty in collectTypesInExpr f.Body do
             match containsInfer ty with
             | Some id -> addError ctx (sprintf "unresolved type variable T?%d in body" id)
             | None -> ()
+            checkKindAgreement ctx ty
     
     // --- Check 2: No dangling VarId references ---
     // Walk the expression tree, threading scope through lets, lambdas, matches, for-ranges
