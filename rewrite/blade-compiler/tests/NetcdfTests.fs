@@ -364,7 +364,7 @@ let runNetcdfTests () =
     let compBinding : LoopIndexBinding =
         { Level = 0; IndexName = "__i0"; Extent = IRCompoundMask (IRLit IRLitUnit)
           ExtentArrayRef = "data"; ExtentDimRef = 0
-          BoundDependencies = []; StrictOffset = 0; IsParallel = false
+          BoundDependencies = []; StrictOffset = 0; FusedRank = None; IsParallel = false
           State = SCNeither; Elements = [] }
     let compoundNames = CodeGen.compoundArrayNamesOf [compBinding]
     let compHdr = CodeGen.genForLoopHeader compoundNames compBinding
@@ -377,7 +377,7 @@ let runNetcdfTests () =
     let litTrailB : LoopIndexBinding =
         { Level = 1; IndexName = "__i1"; Extent = IRLit (IRLitInt 50L)
           ExtentArrayRef = "data"; ExtentDimRef = 1
-          BoundDependencies = []; StrictOffset = 0; IsParallel = false
+          BoundDependencies = []; StrictOffset = 0; FusedRank = None; IsParallel = false
           State = SCNeither; Elements = [] }
     let dynTrailB : LoopIndexBinding =
         { litTrailB with Extent = IRVar (999, IRTScalar ETInt64) }
@@ -409,7 +409,7 @@ let runNetcdfTests () =
     let trailB : LoopIndexBinding =
         { Level = 1; IndexName = "__i1"; Extent = IRLit (IRLitInt 4)
           ExtentArrayRef = "out"; ExtentDimRef = 1
-          BoundDependencies = []; StrictOffset = 0; IsParallel = false
+          BoundDependencies = []; StrictOffset = 0; FusedRank = None; IsParallel = false
           State = SCNeither; Elements = [] }
     check "compound iteration: all-dims output subscript is .data[r]"
         (CodeGen.compoundOutputSubscript [compBinding] "out" = ".data[__i0]")

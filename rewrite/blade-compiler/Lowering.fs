@@ -181,6 +181,7 @@ let rec lowerTypedExpr (env: TypedLowerEnv) (texpr: TypedExpr) : IRExpr =
         | OpNeg -> IRUnaryOp (IRNeg, e)
         | OpNot -> IRUnaryOp (IRNot, e)
         | OpConj -> IRUnaryOp (IRConj, e)
+        | OpMath name -> IRUnaryOp (IRMath name, e)
     
     | TExprApp (func, args) ->
         let f = lowerTypedExpr env func
@@ -408,8 +409,9 @@ let rec lowerTypedExpr (env: TypedLowerEnv) (texpr: TypedExpr) : IRExpr =
     | TExprSort (array, key) ->
         IRSort (lowerTypedExpr env array, lowerTypedExpr env key)
     
-    | TExprReduce (array, kernel) ->
-        IRReduce (lowerTypedExpr env array, lowerTypedExpr env kernel)
+    | TExprReduce (array, kernel, init) ->
+        IRReduce (lowerTypedExpr env array, lowerTypedExpr env kernel,
+                  init |> Option.map (lowerTypedExpr env))
     
     | TExprTranspose (array, dim1, dim2) ->
         IRTranspose (lowerTypedExpr env array, dim1, dim2)
@@ -1053,9 +1055,12 @@ let lowerTypedDecl (env: TypedLowerEnv) (decl: TypedDecl) : (Choice<IRFuncDef, I
         ([Choice1Of3 funcDef], env')
     
     | TDeclStatic binding ->
-        // Static values: use pre-evaluated value if available, else lower normally
+        // Static values: use pre-evaluated value if available, else lower
+        // normally. The fast path is for plain `let static x` only — a
+        // destructured static's primary is the synthetic "_" and its leaves
+        // are emitted as constants from the sub-binding loop below.
         let (primary, env') =
-            match Map.tryFind binding.Name env.StaticValues with
+            match (if binding.SubBindings.IsEmpty then Map.tryFind binding.Name env.StaticValues else None) with
             | Some sv ->
                 let irValue = staticValueToIR sv
                 let ty = match sv with
@@ -1066,7 +1071,7 @@ let lowerTypedDecl (env: TypedLowerEnv) (decl: TypedDecl) : (Choice<IRFuncDef, I
                 let bd = { Id = binding.VarId; Name = binding.Name; Type = ty; Value = irValue; IsConst = true; IsMutable = false }
                 let env' = bindTypedVar binding.Name binding.VarId env
                 (bd, env')
-            | None ->
+            | _ ->
                 // Fallback: lower as normal binding
                 let (irBinding, env') = lowerTypedBinding env binding
                 (irBinding, env')
@@ -1240,15 +1245,18 @@ let lowerTypedModule (env: TypedLowerEnv) (modul: TypedModule) (rawDecls: Locate
     // previous module's lowering must not leak into this one.
     let env = { env with LiftedCallables = ResizeArray<IRCallable>() }
     // Phase 0: Resolve static values/functions from raw declarations
-    let mutable currentEnv = 
+    let mutable currentEnv =
         match rawDecls with
         | Some decls ->
             match StaticEval.resolveStatics decls with
-            | Ok staticEnv ->
+            // Failures were already reported as compile errors by the
+            // type-checker's pre-pass; unfolded statics lower as runtime
+            // bindings here regardless.
+            | Ok (staticEnv, _) ->
                 let tracker = ref Map.empty
                 for fname in staticEnv.CalledFunctions.Value do
                     tracker.Value <- Map.add fname StaticUsage.CompileTime tracker.Value
-                { env with 
+                { env with
                     StaticValues = staticEnv.Values
                     StaticFunctions = staticEnv.Functions
                     StaticUsageTracker = tracker }

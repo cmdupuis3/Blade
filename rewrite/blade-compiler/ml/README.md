@@ -1,16 +1,52 @@
+# ml/ — everything ML in one place
+
+This directory holds BOTH halves of the equivariant ML work, kept apart by
+project boundary:
+
+| Layer | Where | Compiled by | Role |
+|---|---|---|---|
+| **Reference implementation** (this README's main subject) | `ml/*.fs`, `BladeML.fsproj` | `dotnet run --project ml` — its own exe; `Blade.fsproj` does NOT reference it | executable semantics + value oracle |
+| **Compiler ML layer** (`Blade.ML.*`) | `ml/compiler/*.fs` | `Blade.fsproj` (the main compiler) | the ops in the language |
+
+`ml/compiler/` contents (in compile order):
+- `MLSpec.fs` (`Blade.ML.Spec`) — the static irreps-spec model: (l, parity,
+  mult) entries, dims/starts, TP paths, weight sizing. Pure.
+- `WignerTables.fs` (`Blade.ML.WignerTables`) — compiler-native 3j/CG and
+  the REAL-basis coupling tables (port of `ml/Wigner.fs`, which stays the
+  oracle; pinned by `tests/Test_WignerTables.fs`).
+- `MLStatics.fs` (`Blade.ML.Statics`) — StaticValue↔spec conversions and
+  the sizing builtins (`sh_spec`, `total_dim`, `tp_weight_dim`,
+  `linear_weight_dim`), registered through `StaticEval.registerStaticBuiltin`
+  so the core evaluator stays ML-free.
+- `MLElaborate.fs` (`Blade.ML.Elaborate`) — the ops elaboration pass
+  (`y_to` / `tensor_product` / `linear` / `gated` → synthesized Blade
+  functions with baked CG tables), running before Grad expansion.
+
+Core-compiler touchpoints are exactly two: `StaticEval`'s builtin registry
+(generic) and the `Blade.ML.Elaborate.expand` pipeline stage in
+`TypeCheck.typeCheck`. Corpus tests live with the rest of the corpus:
+`tests/corpus/ml-ops/` (op pins + rejects) and `tests/corpus/ml-e2e/`
+(training runs pinned to this project's oracle values).
+
+---
+
 # BladeML — reference implementation of the equivariant ML module
 
 **Status**: standalone executable semantics + test oracle. Deliberately
 separate from the compiler (`Blade.fsproj` does not reference this project).
 
 **Sources of truth**:
-`rewrite/docs/features/equivariant-nn.md` (module doc, canonical) and
-`rewrite/blade_ml_spec_v10.md` (Draft 0.3, detailed constructs), on top of
-`rewrite/docs/formalism.md` v11.
+`rewrite/docs/features/equivariant-nn.md` (module doc, canonical; §11b
+documents the elaboration surface implemented by `ml/compiler/`), on top of
+`rewrite/docs/formalism.md` v11. (The old `blade_ml_spec_v10.md` is
+superseded and no longer on disk.)
 
 **Run**: `dotnet run --project ml` from the repo root (or `dotnet run` inside
 `ml/`). Prints per-section progress and a pass/fail summary; exit code 0 on
-success. Current baseline: **149 passed, 0 failed**.
+success. Current baseline: **170 passed, 0 failed** (149 forward + 21
+autodiff/training). `dotnet run --project ml -- dump-oracle` prints the
+training oracle's dataset, CG tables, and pinned trajectory for authoring the
+Blade e2e example.
 
 ---
 
@@ -189,21 +225,37 @@ states. The addition-theorem test pins it.
 | `Linear.fs` | `LinearWeightIdx`, `all_irreps_present`, block-diagonal linear | §7, §11.2 |
 | `Activations.fs` | `silu`/`sigmoid`/`relu`, gated + norm activations | §8 |
 | `MessagePassing.fs` | `gather`, `scatter_add`, `equivariant_conv` | §9, §12 |
-| `TestHarness.fs`, `Tests_*.fs`, `Program.fs` | runner + 149 checks | — |
+| `Autodiff.fs` | hand-written VJPs: linear/TP/gated/gather⇄scatter/conv/MSE | §10; module doc §11 |
+| `TrainingOracle.fs` | 27-param invariant-regression model + fixed-seed GD run (e2e pins) | module doc §10 |
+| `OracleDump.fs` | `-- dump-oracle`: dataset/CG tables/trajectory as pasteable literals | — |
+| `TestHarness.fs`, `Tests_*.fs`, `Program.fs` | runner + 170 checks | — |
 
-## 5. Not implemented (deliberately)
+## 5. Autodiff layer (added with the compiler-AD arc)
+
+`Autodiff.fs` holds hand-written VJPs for every op (linear, tensor product,
+gated activation, gather⇄scatter, conv, MSE) — the executable semantics the
+compiler's `grad` transform must reproduce. `TrainingOracle.fs` is a complete
+27-parameter invariant-regression model (2 conv layers, gates, linear,
+invariant readout) trained by full-batch GD from a fixed seed; its loss
+trajectory and gradient snapshots are the value pins for the Blade e2e
+example. `Tests_Autodiff.fs` verifies: per-op VJPs and the full model against
+central finite differences, the gather/scatter adjoint duality, the
+"dW nonzero at w = 0" trap (the forward's skip must not leak into the
+backward), and rotation invariance of loss AND gradients. `OracleDump.fs`
+prints everything (`-- dump-oracle`).
+
+## 6. Not implemented (deliberately)
 
 - **Part I annotation hook** (`with equiv`, inference rules, the five
   compile-time error classes): a type-checker feature of the core compiler,
   not a library. When it lands in `TypeCheck.fs`, its test corpus should
   assert the §3 error taxonomy; this project supplies the ground-truth
   values.
-- **AD** (§10): spec marks it compiler-supported-library / future; the
-  primitive rules are trivial once needed (CG coefficients are constants).
+- **normAct VJP**: the e2e example uses `gated`; add when consumed.
 - **Open items** §13 / module doc §12: path filtering, attention, GPU fused
   kernels, r ≥ 3 Schur-component storage — all future work.
 
-## 6. Integration path into the compiler
+## 7. Integration path into the compiler
 
 1. `StaticEval.fs` gains irrep/spec/path evaluation (all pure functions of
    static data — `Irreps.fs` + `TensorProduct.paths` port directly).

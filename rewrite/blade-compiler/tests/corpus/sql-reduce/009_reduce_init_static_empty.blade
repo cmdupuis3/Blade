@@ -1,0 +1,6 @@
+// TEST: Reduce Init Static Empty
+// A statically-empty array is LEGAL with an init: the empty fold is init.
+// (Without init this is a compile-time rejection — sql-regressions pins that.)
+let empty : Array<Float64 like Idx<0>> = []
+let r = reduce(empty, (+), 42.0)
+// EXPECT: r = 42.0

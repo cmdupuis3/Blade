@@ -439,6 +439,20 @@ let A = [1.0, 2.0, 3.0, 4.0, 5.0, 6.0]
 let g = lambda(a, b, c, d, e) where comm(a, b, c, d, e), cuda(block: 32) -> b * c * c * d * d * d * e * e * e * e
 let R = method_for(A, A, A, A, A) <@> reynolds(g, Antisymmetric) |> compute
 """
+        // Arc-8 probe: the arc-1 FUSED JOINT level (one identity group over a
+        // 2-D array -> single compound axis, joint SymIdx<2, 6> output) under
+        // the cuda clause. Device-side element access must decode per-dim
+        // coordinates from the compound index (row-major) exactly like the
+        // host fused arm — or the emitter must decline cleanly to the host
+        // loop. Either way host and cuda variants must agree on values.
+        let joint2dHost = """
+let A: Array<Float64 like Idx<2>, Idx<3>> = [[1.0, 2.0, 3.0], [4.0, 5.0, 6.0]]
+let R = method_for(A, A) <@> lambda(x, y) where comm(x, y) -> x * y |> compute
+"""
+        let joint2dCuda = """
+let A: Array<Float64 like Idx<2>, Idx<3>> = [[1.0, 2.0, 3.0], [4.0, 5.0, 6.0]]
+let R = method_for(A, A) <@> lambda(x, y) where comm(x, y), cuda(block: 32) -> x * y |> compute
+"""
         let cases =
             [ ("rank1", rank1Host, rank1Cuda)
               ("rank2_outer", rank2Host, rank2Cuda)
@@ -454,7 +468,8 @@ let R = method_for(A, A, A, A, A) <@> reynolds(g, Antisymmetric) |> compute
               ("sym4_simplex", sym4Host, sym4Cuda)
               ("anti4_simplex", anti4Host, anti4Cuda)
               ("sym5_simplex", sym5Host, sym5Cuda)
-              ("anti5_simplex", anti5Host, anti5Cuda) ]
+              ("anti5_simplex", anti5Host, anti5Cuda)
+              ("joint_2d", joint2dHost, joint2dCuda) ]
 
         let mutable failures = 0
         let mutable passed = 0

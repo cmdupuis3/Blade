@@ -1,0 +1,30 @@
+// TEST: ML Ops Elaboration Values
+// ============================================================================
+// Value pins for the elaborated ML ops (MLElaborate.fs): static sizing
+// builtins, y_to closed forms, trivial tensor_product, identity linear,
+// silu-shaped gated. Values verified against ml/ closed forms.
+// ============================================================================
+let static spec_h = [(0, 0, 2), (1, 1, 2), (2, 0, 1)]
+let static sh2 = sh_spec(2)
+let static cfg1 = ([(0, 0, 1)], sh2, spec_h)
+
+let static dh = total_dim(spec_h)
+let static w1d = tp_weight_dim(cfg1)
+let static w2d = linear_weight_dim(spec_h, spec_h)
+let dims_ok = dh * 10000 + w1d * 100 + w2d
+// EXPECT: dims_ok = 130509
+
+let sh = y_to(2, 1.0, 2.0, 3.0)
+// EXPECT: sh = [0.28209479177387814, 0.9772050238058398, 1.4658075357087597, 0.4886025119029199, 2.1850968611841584, 6.555290583552475, 4.100090348282761, 3.2776452917762376, -1.6388226458881188]
+
+let static tiny = [(0, 0, 1)]
+let static tinycfg = (tiny, tiny, tiny)
+let tout = tensor_product(tinycfg, [2.0], [3.0], [0.5])
+// EXPECT: tout = [3.0]
+
+let static s2 = [(0, 0, 2)]
+let lout = linear(s2, s2, [1.0, 0.0, 0.0, 1.0], [5.0, 7.0])
+// EXPECT: lout = [5.0, 7.0]
+
+let gout = gated(s2, [0.0, 2.0])
+// EXPECT: gout = [0.0, 1.7615941559557646]

@@ -1,0 +1,19 @@
+// TEST: AD Gather Via Foreign Key
+// ============================================================================
+// Reads at data-dependent indices (the gather pattern): the adjoint is a
+// scatter into the same indices — multiply-referenced weights accumulate
+// their multiplicity.
+// ============================================================================
+let srcs = [0, 1, 1, 2]
+function r(w: Array<Float like Idx<3>>) -> Float = {
+    let mut s = 0.0
+    for e in 0..4 {
+        s += w(srcs(e)) * 2.0
+    }
+    s
+}
+let wr_ = [10.0, 20.0, 30.0]
+let mut dr = [0.0, 0.0, 0.0]
+let rv = grad(r)(wr_, dr)
+// EXPECT: rv = 160.0
+// EXPECT: dr = [2.0, 4.0, 2.0]

@@ -1,0 +1,13 @@
+// TEST: Shared Named Index Without Identity Stays Rectangular
+// CORRECTED semantics (arc 1): commutativity licenses triangular iteration only
+// with ARRAY IDENTITY at the call site. Two DISTINCT arrays over the same named
+// index type do NOT symmetrize (proofs.md shared_units_insufficient refutes the
+// old §14.6 "shared index spaces are the payoff" rule) — the output is the full
+// dense 3x3, not a 6-cell triangle.
+type N3 = Idx<3>
+let A: Array<Float64 like N3> = [1.0, 2.0, 3.0]
+let B: Array<Float64 like N3> = [10.0, 20.0, 30.0]
+let L = method_for(A, B)
+let f = lambda(x, y) where comm(x, y) -> x * y
+let result = L <@> f |> compute
+// EXPECT: result = [10.0, 20.0, 30.0, 20.0, 40.0, 60.0, 30.0, 60.0, 90.0]

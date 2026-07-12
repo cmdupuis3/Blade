@@ -1,0 +1,7 @@
+// TEST: Intrinsics Array Operand (rejects)
+// ============================================================================
+// Scalar-only: exp(A) on a whole array is a type error with steering toward
+// an elementwise kernel. (Mapping over arrays is a kernel's job.)
+// ============================================================================
+let A = [1.0, 2.0, 3.0]
+let bad = exp(A)

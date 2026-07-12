@@ -87,7 +87,7 @@ let rec zonkExpr (subst: Subst) (expr: TypedExpr) : TypedExpr =
         | TExprGroupBy (v, k) -> TExprGroupBy (z v, z k)
         | TExprGroupKeys ks -> TExprGroupKeys (List.map z ks)
         | TExprSort (a, k) -> TExprSort (z a, z k)
-        | TExprReduce (a, k) -> TExprReduce (z a, z k)
+        | TExprReduce (a, k, i) -> TExprReduce (z a, z k, Option.map z i)
         | TExprTranspose (a, d1, d2) -> TExprTranspose (z a, d1, d2)
         | TExprDecompact (a, d) -> TExprDecompact (z a, d)
         | TExprGram (l, r, s) -> TExprGram (z l, z r, s)

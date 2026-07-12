@@ -1,0 +1,9 @@
+// TEST: Reduce Init Basic
+// 3-arg form (arc 4, committed item): reduce(arr, op, init) seeds the fold
+// with init and folds ALL elements: init op a0 op a1 op ...
+let A = [1.0, 2.0, 3.0, 4.0]
+let r1 = reduce(A, (+), 100.0)
+let r2 = reduce(A, (*), 2.0)
+// r1 = 100 + 1+2+3+4 = 110; r2 = 2 * 1*2*3*4 = 48
+// EXPECT: r1 = 110.0
+// EXPECT: r2 = 48.0

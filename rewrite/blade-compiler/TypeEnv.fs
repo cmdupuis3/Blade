@@ -116,6 +116,13 @@ type TypeEnv = {
     /// `DepIdx<O, f>` desugars to `lambda(i) -> Idx<f(i)>`, and the
     /// substitution into the inner extent requires access to f's body.
     StaticFunctions: Map<string, FunctionDecl>
+    /// Static VALUE bindings (`let static x = ...`), resolved once in
+    /// checkModule's pre-pass via StaticEval. Mirrors StaticFunctions and
+    /// exists so compile-time-known scalars (e.g. a `replicate` count) can be
+    /// resolved during type-checking, before the lowering phase's own
+    /// resolveStatics runs. Best-effort: entries that don't statically
+    /// evaluate are simply absent.
+    StaticValues: Map<string, StaticEval.StaticValue>
     /// Non-fatal diagnostics accumulated during type-checking. The field
     /// is a mutable ResizeArray so functional updates (`{ env with ... }`)
     /// share the same collector — warnings emitted from any scope land
@@ -141,6 +148,7 @@ let emptyEnv () = {
     Context = []
     ModuleExports = Map.empty
     StaticFunctions = Map.empty
+    StaticValues = Map.empty
     Warnings = ResizeArray<string>()
 }
 

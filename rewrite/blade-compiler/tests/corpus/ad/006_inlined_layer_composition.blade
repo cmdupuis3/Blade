@@ -1,0 +1,46 @@
+// TEST: AD Inlined Layer Composition
+// ============================================================================
+// The e2e shape: array-returning layer function -> elementwise nonlinearity
+// (user sigmoid, itself inlined) -> readout sum. grad() inlines the call
+// chain and differentiates the whole composition.
+// Values verified against silu'(y) = sig(y) + y*sig(y)*(1-sig(y)).
+// ============================================================================
+function sigmoid(z: Float) -> Float = 1.0 / (1.0 + exp(0.0 - z))
+
+function layer(w: Array<Float like Idx<6>>, x: Array<Float like Idx<3>>) -> Array<Float like Idx<2>> = {
+    let mut y = [0.0, 0.0]
+    for i in 0..2 {
+        for j in 0..3 {
+            y(i) += w(i * 3 + j) * x(j)
+        }
+    }
+    y
+}
+
+function gate(y: Array<Float like Idx<2>>) -> Array<Float like Idx<2>> = {
+    let mut z = [0.0, 0.0]
+    for i in 0..2 {
+        z(i) = y(i) * sigmoid(y(i))
+    }
+    z
+}
+
+let data_x = [1.0, 2.0, 0.5]
+
+function loss(w: Array<Float like Idx<6>>) -> Float = {
+    let y = layer(w, data_x)
+    let z = gate(y)
+    let mut s = 0.0
+    for i in 0..2 {
+        s += z(i)
+    }
+    s
+}
+
+let w0 = [0.1, 0.2, 0.3, 0.4, 0.5, 0.6]
+let mut dw = [0.0, 0.0, 0.0, 0.0, 0.0, 0.0]
+let lv = grad(loss)(w0, dw)
+// y = [0.65, 1.7]; lv = silu(0.65)+silu(1.7)
+// dw(0..2) = silu'(0.65) * x; dw(3..5) = silu'(1.7) * x
+// EXPECT: lv = 1.8644658500957715
+// EXPECT: dw = [0.8034864771706839, 1.6069729543413678, 0.40174323858534195, 1.0675645047590216, 2.135129009518043, 0.5337822523795108]

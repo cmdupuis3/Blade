@@ -1,0 +1,11 @@
+// TEST: Joint Product Symmetry: 2D Triple
+// Three copies of a 2x2 array under a fully commutative kernel: joint
+// SymIdx<3, 4> over the compound space (flat a = [1,2,3,4]); speedup 3! = 6,
+// NOT (3!)^2 = 36. C(6,3) = 20 canonical triples p1 <= p2 <= p3, lex order.
+let A: Array<Float64 like Idx<2>, Idx<2>> = [[1.0, 2.0], [3.0, 4.0]]
+let L = method_for(A, A, A)
+let f = lambda(x, y, z) where comm(x, y, z) -> x * y * z
+let result = L <@> f |> compute
+// (000)1 (001)2 (002)3 (003)4 (011)4 (012)6 (013)8 (022)9 (023)12 (033)16
+// (111)8 (112)12 (113)16 (122)18 (123)24 (133)32 (222)27 (223)36 (233)48 (333)64
+// EXPECT: result = [1.0, 2.0, 3.0, 4.0, 4.0, 6.0, 8.0, 9.0, 12.0, 16.0, 8.0, 12.0, 16.0, 18.0, 24.0, 32.0, 27.0, 36.0, 48.0, 64.0]

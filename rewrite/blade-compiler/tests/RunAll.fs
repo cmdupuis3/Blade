@@ -42,7 +42,7 @@ open Blade.Tests.Benchmarks
 
 /// All tests combined
 let allTests =
-    basicTests @ loopTests @ symmetryTests @ reynoldsTests @ arityTests @ functionTests
+    basicTests @ intrinsicsTests @ adTests @ mlE2eTests @ mlOpsTests @ loopTests @ symmetryTests @ reynoldsTests @ arityTests @ functionTests
     @ structTests @ sumTypeTests @ interfaceTests @ moduleTests @ guardTests @ guardCombinatorTests @ zeroCombinatorTests @ sequenceCombinatorTests @ tupleViewTests @ replicateTests @ anonRangeTests @ forInTests @ bracketedTests
     @ indexTypeTests @ mutabilityTests @ staticTests @ unitTests
     @ foreignKeyTests @ maskTests @ setOpTests @ uniqueContainsTests @ semijoinTests @ groupByTests @ sortTests @ reduceTests @ extentsTests @ extentsMultiRankTests @ regressionTests @ sqlCombinedTests @ v24dProbes
@@ -88,6 +88,8 @@ let runAllTestsFullWith (extraBlocks: (unit -> Blade.Tests.TestHarness.BlockResu
     let shape = Blade.Tests.Shape.runShapeTests ()
     // Oracle review: differential-harness oracles vs hand-computed truth (Phase 0.2).
     let oracles = Blade.Tests.OracleReview.runOracleTests ()
+    // Compiler-native CG tables (WignerTables.fs) vs closed forms (ML arc).
+    let wigner = Blade.Tests.WignerTablesReview.runWignerTablesTests ()
     // Error locations: parse/type errors point at the right line (§3.4).
     let spans = Blade.Tests.Spans.runSpanTests ()
     // C++ runtime-layout tests for the contiguous-backing allocate<>.
@@ -129,7 +131,7 @@ let runAllTestsFullWith (extraBlocks: (unit -> Blade.Tests.TestHarness.BlockResu
 
     // Grand-total roll-up (#4): one line per block, a total, and failed names.
     let blocks =
-        [ yield r1; yield r2; yield attrs; yield subst; yield shape; yield oracles; yield spans; yield alloc
+        [ yield r1; yield r2; yield attrs; yield subst; yield shape; yield oracles; yield wigner; yield spans; yield alloc
           match omp with Some b -> yield b | None -> ()
           yield bufType
           match cuda with Some b -> yield b | None -> ()

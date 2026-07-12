@@ -300,11 +300,22 @@ let isIRPass (result: FullTestResult) =
 let isRejectProbe (result: FullTestResult) =
     result.TestName.EndsWith "(rejects)"
 
-/// Did the test behave correctly? For a normal test, that's a full pass. For a
-/// reject-probe, that's correctly NOT passing (it was supposed to be rejected).
+/// Did the test behave correctly? For a reject-probe: correctly NOT passing
+/// (it was supposed to be rejected). For a normal test: a full pass AND — when
+/// the test carries EXPECT values — a passing value check. A program that
+/// compiles, runs, and prints the WRONG values is a FAILURE: the
+/// compiles-clean-but-wrong class is the entire reason EXPECT checks exist.
+/// Before this gate, value mismatches surfaced only in the informational
+/// "Value Check: N/M" summary line while the block total stayed green — a
+/// known-red value test (functions/001, pinning the refuted shared-index-space
+/// symmetry rule) rode inside "TOTAL: 0 failed" undetected until the arc-1
+/// correction surfaced it.
 let isCorrectOutcome (result: FullTestResult) =
     if isRejectProbe result then not (isFullPass result)
-    else isFullPass result
+    else
+        isFullPass result &&
+        (not result.HasExpectedValues ||
+         (match result.ValueCheckResult with Ok () -> true | Error _ -> false))
 
 /// Run test category with IR only
 let runTestCategory name tests =

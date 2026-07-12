@@ -1,0 +1,19 @@
+// TEST: AD Array Dot Via Loop
+// ============================================================================
+// Array-parameter gradient through a for-in accumulation loop, with a
+// captured module-level constant. Array gradients go to caller-allocated
+// mut out-buffers (ACCUMULATED — caller zeroes them); the primal returns.
+// ============================================================================
+let xs = [4.0, 5.0, 6.0]
+function h(w: Array<Float like Idx<3>>) -> Float = {
+    let mut s = 0.0
+    for k in 0..3 {
+        s += w(k) * xs(k)
+    }
+    s
+}
+let w0 = [1.0, 2.0, 3.0]
+let mut dh = [0.0, 0.0, 0.0]
+let hv = grad(h)(w0, dh)
+// EXPECT: hv = 32.0
+// EXPECT: dh = [4.0, 5.0, 6.0]

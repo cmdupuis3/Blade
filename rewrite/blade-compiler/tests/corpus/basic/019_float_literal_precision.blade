@@ -1,0 +1,16 @@
+// TEST: Float Literal Round-Trip Precision
+// ============================================================================
+// REGRESSION (pre-AD literal fix): every float literal used to emit into the
+// generated C++ via %g — 6 significant digits — so 0.6931471805599453 became
+// 0.693147 at runtime, silently corrupting any constant finer than 1e-6
+// (e.g. Clebsch-Gordan coefficients). Literals must round-trip exactly:
+// scalar, dense array literal, and static-substituted paths.
+// ============================================================================
+let x = 0.6931471805599453
+let scaled = x * 1000000000.0
+let arr = [0.6931471805599453, 1.4142135623730951]
+let arrscaled = method_for(arr) <@> lambda(v) -> v * 1000000000.0 |> compute
+// EXPECT: x = 0.6931471805599453
+// EXPECT: scaled = 693147180.5599453
+// EXPECT: arr = [0.6931471805599453, 1.4142135623730951]
+// EXPECT: arrscaled = [693147180.5599453, 1414213562.3730951]

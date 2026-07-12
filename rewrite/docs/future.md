@@ -44,24 +44,42 @@ Mostly small items surfaced by the v7 implementation:
 
 ### 2.1 Automatic differentiation (ext §2.2)
 
-Forward mode (`DComp`, tangent propagation) and reverse mode (`GComp`, tape)
-preserving triangular structure: tape size C(n+r-1, r) instead of n^r — the
-same r! reduction as the forward pass. Key pieces already worked out:
+**v1 LANDED in v7 (AD arc, 2026-07-12)**: reverse-mode `grad` as an
+AST-level source transform over the imperative core (lets, additive
+accumulation, element construction, nested for-in, intrinsics, gather-style
+reads, call inlining), with same-direction adjoint loops (exact for the
+accumulation subset, discipline-checked), mut out-buffer ABI, and the
+end-to-end equivariant training example pinned to the ml/ oracle. See the
+module doc §11 for the ABI and subset; corpus `ad/` + `ml-e2e/`.
 
-- AD-through-combinator rules (`<@>`, `@>>`, `>>@`, `<&>`, `<*>`; reversed
-  composition order in reverse mode; branch recording for `<|>`, used-side
-  routing for `<|:>`).
-- Symmetric gradient accumulation (gradients flow to both/all positions of an
-  identity group per canonical tuple).
-- Jacobian symmetry theorem: Jacobians inherit output symmetry in the first r
-  indices. NOTE: v10's "(r!)^d for product symmetry" corollary inherits the
-  product-symmetry correction — the checked speedup story is r! per identity
-  group (joint symmetry); see [proofs.md](proofs.md).
+Still open from the original design (ext §2.2, file itself lost — summary
+here is the surviving spec):
+
+- Forward mode (`DComp`, tangent propagation).
+- AD-through-COMBINATOR rules. Per the author's recollection of the lost
+  ext §2.2 draft: differentiation was worked through MOST internal
+  functions/combinators (`<@>`, `@>>`, `>>@`, `<&>`, `<*>`; reversed
+  composition order in reverse mode), with `<|>` and `<|:>` the NOTABLE
+  EXCEPTIONS (the surviving summary's "branch recording" / "used-side
+  routing" were the sketched-but-not-settled approaches for them), and
+  if/match a further complexity class of the same kind (control flow
+  recorded at runtime). v1 rejects combinators inside differentiated code.
+- Triangular tape/storage exploitation: tape size C(n+r-1, r) instead of
+  n^r. The route in the v1 architecture is for adjoint code to ride the
+  EXISTING symmetry system (generated source, ordinary inference), not
+  AD-specific storage logic.
+- Symmetric gradient accumulation (gradients flow to both/all positions of
+  an identity group per canonical tuple).
+- Jacobian symmetry theorem: Jacobians inherit output symmetry in the first
+  r indices. NOTE: v10's "(r!)^d for product symmetry" corollary inherits
+  the product-symmetry correction — the checked speedup story is r! per
+  identity group (joint symmetry); see [proofs.md](proofs.md).
 - Arity-polymorphic AD via recursive destructuring.
-
-Remaining: forward/reverse kernel codegen, triangular tape management,
-stencil interaction (symmetric scatter-add), decomposition interaction
-(gradient halos), PyTorch/JAX bindings.
+- v1 subset lifts: wrt-lists, if/match in differentiated code, taping for
+  nonlinear loop-carried recurrences, differentiating through mut-param
+  callees, non-literal-extent gradient locals.
+- Stencil interaction (symmetric scatter-add), decomposition interaction
+  (gradient halos), PyTorch/JAX bindings.
 
 ### 2.2 Trees and graphs (ext §2.3–2.4)
 

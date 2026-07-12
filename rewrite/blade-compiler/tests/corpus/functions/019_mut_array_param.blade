@@ -1,0 +1,21 @@
+// TEST: Mut Array Parameter
+// ============================================================================
+// `x: mut Array<...>` params (formalism §2.7): the callee may assign into
+// the array; writes land in the caller's buffer (all params pass by
+// reference — the wrapper's data pointer is shared). Used as the gradient
+// out-buffer ABI by grad(). Scalar `mut` params are rejected (by-value in
+// the C++ ABI, writes would drop silently).
+// ============================================================================
+function accumulate_into(x: Array<Float like Idx<3>>, out: mut Array<Float like Idx<3>>) -> Float = {
+    let mut s = 0.0
+    for i in 0..3 {
+        out(i) += x(i) * 2.0
+        s += x(i)
+    }
+    s
+}
+let w = [1.0, 2.0, 3.0]
+let mut g = [0.0, 0.0, 0.0]
+let s = accumulate_into(w, g)
+// EXPECT: g = [2.0, 4.0, 6.0]
+// EXPECT: s = 6.0

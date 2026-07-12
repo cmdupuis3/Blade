@@ -1,0 +1,8 @@
+// TEST: Reduce Over Symmetric Storage (rejects)
+// reduce() over a compact symmetric record must be a TYPE ERROR, not silent
+// garbage: SymIdx<2,3> is one index RECORD but not a rank-1 axis (the old
+// one-record check let it through to codegen, which walked extents[0] handing
+// out row pointers). Folding canonical vs logical cells is also semantically
+// ambiguous — decompact first.
+let S: Array<Int64 like SymIdx<2, 3>> = fill_random(10)
+let bad = reduce(S, (+))

@@ -188,12 +188,90 @@ those land.
 
 ### 11. AD posture
 
-AD is a **compiler-supported library**, not a core-language feature yet:
-forward/reverse primitive rules exist (add/mul/exp; CG coefficients are
-constants with zero derivative), and the Jacobian-symmetry result says
-gradients inherit output symmetry with the same sparse-CG iteration both
-directions. Full AD (tape management, combinator rules, stencil/decomposition
-interactions) is future work — see [future.md](../future.md).
+**Reverse-mode `grad` is implemented (v7, v1 subset)** as an AST-level
+source-to-source transform (`Grad.fs`, pre-typecheck): the synthesized
+derivative is ordinary Blade source that flows through the standard
+typechecker/lowering/codegen — so gradients of symmetric computations will
+inherit triangular storage from the existing symmetry system rather than
+from AD-specific logic.
+
+**ABI.** `grad(f)` (call-shaped special form; `f` a same-module top-level
+function returning `Float`) rewrites to `f__grad`, whose signature is f's
+parameters followed by **one `mut` out-buffer per Float-array parameter**
+(same type; ACCUMULATED into — callers zero them, PyTorch-style), returning
+the primal, or `(primal, dscalar…)` when f has Float scalar parameters.
+Int/int-array parameters (edge lists, sizes) are non-differentiable. Data
+enters by module-scope capture, so a loss function's parameters are exactly
+its trainables.
+
+**v1 subset** (clean errors outside it): lets, additive accumulation
+(`+=`/`-=`, scalar and array-element), element construction writes, nested
+`for-in` over int ranges, scalar arithmetic and the math intrinsics, array
+reads at data-dependent indices (gather; adjoint is scatter), and calls to
+other AD-able functions (inlined). Adjoint loops run in the same direction
+— exact for the accumulation subset; the discipline that makes it exact is
+enforced (no non-additive scalar overwrites, no reads of loop-outliving
+accumulators mid-loop, no array recurrences, no read-then-later-write).
+Loop bodies are replayed inside the adjoint loop (recompute-based; no tape).
+
+**Verification** follows the module's differential-oracle stance: hand VJPs
++ finite differences + gradient-rotation-invariance in `ml/`
+(`Autodiff.fs`, `Tests_Autodiff.fs`), value-pinned corpus tests (`ad/`),
+and the end-to-end training example (`ml-e2e/001`) whose loss trajectory,
+gradient snapshots, and final weights reproduce `ml/TrainingOracle.fs` to
+printed precision — including loss AND gradients invariant under rotated
+inputs.
+
+Remaining (see [future.md](../future.md) §2.1): combinator rules
+(`<@>`/`>>@`/…), triangular-tape exploitation for symmetric intermediates,
+forward mode, wrt-lists, if/match in differentiated code, taping for
+nonlinear loop recurrences, stencil/decomposition interactions, framework
+bindings.
+
+### 11b. v7 implementation status (ops elaboration)
+
+The ops landed in v7 (2026-07-12) as **compile-time elaboration to Blade
+source** (`MLSpec.fs` + `MLElaborate.fs` + `WignerTables.fs`; user
+decision over opaque builtins): for each op × static config used, the
+compiler synthesizes an ordinary Blade function with real-basis CG tables
+baked as constants, so `grad()` differentiates through the generated ops
+via its normal inliner and codegen is unchanged.
+
+Surface (v1 — ordinary required-static arguments; angle-bracket static
+args are future sugar):
+
+```blade
+let static spec_h = [(0, 0, 2), (1, 1, 2), (2, 0, 1)]   // (l, parity, mult), parity 0=e/1=o
+let static cfg1  = (spec_in, sh_spec(2), spec_h)         // (spec1, spec2, specOut)
+let static w1dim = tp_weight_dim(cfg1)                   // sizing builtins:
+let static w2dim = linear_weight_dim(spec_h, spec_h)     // total_dim, sh_spec, ...
+
+let sh  = y_to(2, x, y, z)                    // real solid harmonics, lmax <= 2 (v1)
+let out = tensor_product(cfg1, x1, sh, w)     // uvw fully-connected, path-validated
+let z   = linear(spec_in, spec_out, w, x)     // block-diagonal, first-match blocks
+let g   = gated(spec, x)                      // scalar double-duty gates (F2 rule)
+```
+
+Checks at elaboration: `all_valid_outputs` for tensor products, block-0
+scalars for `gated`, static-ness of configs — all clean compile errors.
+Value pins: corpus `ml-ops/` (op-level) and `ml-e2e/002`, which re-runs the
+entire §10 training example through elaborated ops and reproduces the
+`ml/TrainingOracle` pins exactly (same loop order and product association
+as the reference — agreement to the ulp).
+
+**CGIndex basis decision (F1 resolution, user-guided)**: the complex-basis
+rule `m1 + m2 == m_out` and the real-basis support are DIFFERENT
+constraints, so they get different types. `CGIndex` = the real-basis
+sparse support (what the spec's own real harmonics and `tensor_product`
+need; iteration = the compiler's real-CG nonzero entries).
+`CGIndexComplex` = the m-selection rule, reserved for complex-basis
+pipelines. The §7 struct sketch's `where m1 + m2 == m_out` describes
+`CGIndexComplex`, not the type the ops consume.
+
+Not yet in v7: `IrrepsIdx<spec>` as an index type (primitive, SymIdx-style
+— design settled), dependent records for user-defined `CGPath` (future.md
+§1.9), `y_to` above lmax 2, angle-bracket static args, per-edge fused
+convolution elaboration.
 
 ### 12. Open items
 

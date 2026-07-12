@@ -113,6 +113,22 @@ let topoSort (deps: Map<string, Set<string>>) : Result<string list, string list>
     else Error (remaining |> Map.toList |> List.map fst)
 
 // ============================================================================
+// External builtin registry
+// ============================================================================
+
+/// Extension point: domain layers register additional static builtins here
+/// (name -> evaluated args -> result). The evaluator consults the registry
+/// only after its own builtin table misses, so core names cannot be
+/// overridden. Current registrant: the ML module's sizing builtins
+/// (ml/compiler/MLStatics.fs, installed by MLElaborate.expand).
+let private externalBuiltins =
+    System.Collections.Concurrent.ConcurrentDictionary<string, StaticValue list -> Result<StaticValue, string>>()
+
+/// Register (idempotently — last write wins) an external static builtin.
+let registerStaticBuiltin (name: string) (f: StaticValue list -> Result<StaticValue, string>) =
+    externalBuiltins.[name] <- f
+
+// ============================================================================
 // Expression Evaluator
 // ============================================================================
 
@@ -227,6 +243,7 @@ and bindPattern (env: StaticEnv) (pat: Pattern) (value: StaticValue) : StaticEnv
         | SVTuple vs when vs.Length = pats.Length ->
             (pats, vs) ||> List.zip |> List.fold (fun e (p, v) -> bindPattern e p v) env
         | _ -> env
+    | PatTyped (p, _) -> bindPattern env p value
     | PatWildcard -> env
     | _ -> env  // other patterns: no binding in static context
 
@@ -302,7 +319,20 @@ and evalBlock env fuel (stmts: Stmt list) (finalExpr: Expr option) : Result<Stat
 /// Built-in static functions (abs, min, max, length, etc.)
 and evalBuiltin env fuel (name: string) (args: Expr list) : Result<StaticValue, string> =
     evalArgs env fuel args |> Result.bind (fun argVals ->
+        // Scalar math intrinsics: same whitelist as TypeCheck.mathIntrinsics
+        // (runtime form renders std::<name>); int operands promote to float.
+        let asFloat = function SVInt n -> Some (float n) | SVFloat f -> Some f | _ -> None
+        let mathFns : Map<string, float -> float> =
+            Map.ofList [
+                "exp", exp; "log", log; "sqrt", sqrt
+                "sin", sin; "cos", cos; "tan", tan
+                "sinh", sinh; "cosh", cosh; "tanh", tanh
+                "asin", asin; "acos", acos; "atan", atan
+                "floor", floor; "ceil", ceil
+            ]
         match name, argVals with
+        | _, [v] when (Map.containsKey name mathFns) && (asFloat v).IsSome ->
+            Ok (SVFloat (mathFns.[name] (asFloat v).Value))
         | "abs", [SVInt n] -> Ok (SVInt (abs n))
         | "abs", [SVFloat f] -> Ok (SVFloat (abs f))
         | "min", [SVInt a; SVInt b] -> Ok (SVInt (min a b))
@@ -310,7 +340,13 @@ and evalBuiltin env fuel (name: string) (args: Expr list) : Result<StaticValue, 
         | "min", [SVFloat a; SVFloat b] -> Ok (SVFloat (min a b))
         | "max", [SVFloat a; SVFloat b] -> Ok (SVFloat (max a b))
         | "length", [SVTuple xs] -> Ok (SVInt (int64 xs.Length))
-        | _ -> Error (sprintf "Static evaluation: unknown function '%s' or wrong arguments" name))
+        | _ ->
+            // External registry (domain layers, e.g. the ML module's sizing
+            // builtins — see registerStaticBuiltin). Consulted after the
+            // core table misses so core names cannot be overridden.
+            match externalBuiltins.TryGetValue name with
+            | true, f -> f argVals
+            | _ -> Error (sprintf "Static evaluation: unknown function '%s' or wrong arguments" name))
 
 /// Evaluate binary operations with type promotion
 and evalBinOp (op: BinOp) (lv: StaticValue) (rv: StaticValue) : Result<StaticValue, string> =
@@ -360,12 +396,48 @@ and evalBinOp (op: BinOp) (lv: StaticValue) (rv: StaticValue) : Result<StaticVal
 // Static Resolution — Main Entry Point
 // ============================================================================
 
+/// A `let static` declaration whose right-hand side did not evaluate at
+/// compile time. `let static` is an assertion — fold or fail loudly — so
+/// the type-checker turns these into compile errors. A bare `let` remains
+/// free to stage its work at runtime; only the annotated form demands
+/// folding.
+type StaticFailure = {
+    /// Names bound by the declaration's pattern (one for `let static x`,
+    /// several for tuple destructuring).
+    Names: string list
+    /// The evaluator's reason for the failure.
+    Reason: string
+    /// The declaration's source span.
+    Span: Span
+}
+
+/// One `let static` declaration collected in Phase 1, carrying what Phase 3
+/// needs to evaluate it once and report a failure against source.
+type private PendingStatic = {
+    Id: int
+    Pattern: Pattern
+    Names: string list
+    Expr: Expr
+    Span: Span
+}
+
+/// A lambda-valued `let static` declares a function (the marker means
+/// immutability there), not a foldable value — the fold assertion skips it.
+let rec private isLambdaExpr (expr: Expr) : bool =
+    match expr with
+    | ExprLambda _ -> true
+    | ExprTyped (e, _) -> isLambdaExpr e
+    | _ -> false
+
 /// Resolve all static declarations in a module.
-/// Returns a map of name → StaticValue for use during lowering.
-let resolveStatics (decls: Located<Decl> list) : Result<StaticEnv, string> =
-    // Phase 1: Collect static function definitions and static value names
+/// Returns the environment of folded values (tuple-destructured statics
+/// bind their leaf names) plus one StaticFailure per `let static` whose
+/// right-hand side did not evaluate. The Error case is reserved for a
+/// circular dependency among static values.
+let resolveStatics (decls: Located<Decl> list) : Result<StaticEnv * StaticFailure list, string> =
+    // Phase 1: Collect static function definitions and static value decls
     let mutable staticFuncs : Map<string, StaticFuncDef> = Map.empty
-    let mutable staticValueDecls : (string * Expr) list = []
+    let mutable pendingRev : PendingStatic list = []
 
     for locDecl in decls do
         match locDecl.Value with
@@ -376,21 +448,30 @@ let resolveStatics (decls: Located<Decl> list) : Result<StaticEnv, string> =
                 Body = fd.Body
             } staticFuncs
         | DeclStatic binding ->
-            match binding.Pattern with
-            | PatVar name ->
-                staticValueDecls <- staticValueDecls @ [(name, binding.Value)]
-            | _ -> ()  // Tuple/struct patterns in statics — skip for now
+            // Any pattern that binds at least one name participates; a
+            // pure-wildcard static asserts nothing observable.
+            let names = collectPatternBindings binding.Pattern |> Set.toList
+            if not names.IsEmpty then
+                pendingRev <- { Id = List.length pendingRev
+                                Pattern = binding.Pattern
+                                Names = names
+                                Expr = binding.Value
+                                Span = locDecl.Span } :: pendingRev
         | _ -> ()
 
-    let staticValueNames = staticValueDecls |> List.map fst |> Set.ofList
+    let pending = List.rev pendingRev
+    let staticNames = pending |> List.collect (fun pd -> pd.Names) |> Set.ofList
 
-    // Phase 2: Build dependency graph and topological sort
+    // Phase 2: Dependency graph over bound names — a destructured decl's
+    // names share the decl's dependencies — and topological sort.
     let deps =
-        staticValueDecls |> List.map (fun (name, expr) ->
-            let refs = collectFreeNames expr
-            // Only dependencies on OTHER static values (not functions, not self)
-            let valueDeps = Set.intersect refs staticValueNames |> Set.remove name
-            (name, valueDeps))
+        pending
+        |> List.collect (fun pd ->
+            let refs = collectFreeNames pd.Expr
+            // Only dependencies on OTHER static values (not functions, not
+            // names bound by this same declaration)
+            let declDeps = Set.difference (Set.intersect refs staticNames) (Set.ofList pd.Names)
+            pd.Names |> List.map (fun n -> (n, declDeps)))
         |> Map.ofList
 
     match topoSort deps with
@@ -398,24 +479,33 @@ let resolveStatics (decls: Located<Decl> list) : Result<StaticEnv, string> =
         Error (sprintf "Static evaluation: circular dependency among: %s"
                    (cycle |> String.concat ", "))
     | Ok evalOrder ->
-        // Phase 3: Evaluate static values in topological order
-        let valueMap = staticValueDecls |> Map.ofList
+        // Phase 3: Evaluate each declaration once, in dependency order.
+        // Duplicate names across decls: Map.ofList keeps the last decl,
+        // matching the pre-assertion shadowing behavior.
+        let nameToDecl =
+            pending
+            |> List.collect (fun pd -> pd.Names |> List.map (fun n -> (n, pd)))
+            |> Map.ofList
         let calledRef = ref Set.empty
         let mutable env = { Values = Map.empty; Functions = staticFuncs; CalledFunctions = calledRef }
+        let mutable failures : StaticFailure list = []
+        let mutable evaluated = Set.empty
 
         for name in evalOrder do
-            match Map.tryFind name valueMap with
-            | Some expr ->
-                match evalExpr env maxSteps expr with
-                | Ok value ->
-                    env <- { env with Values = Map.add name value env.Values }
-                | Error _ ->
-                    // Skip values that can't be statically evaluated (e.g. lambdas, runtime exprs)
-                    // They'll be handled by normal lowering as regular bindings
-                    ()
-            | None -> ()
+            match Map.tryFind name nameToDecl with
+            | Some pd when not (Set.contains pd.Id evaluated) ->
+                evaluated <- Set.add pd.Id evaluated
+                if isLambdaExpr pd.Expr then
+                    ()  // function definition, lowered as an ordinary closure
+                else
+                    match evalExpr env maxSteps pd.Expr with
+                    | Ok value ->
+                        env <- bindPattern env pd.Pattern value
+                    | Error reason ->
+                        failures <- failures @ [{ Names = pd.Names; Reason = reason; Span = pd.Span }]
+            | _ -> ()
 
-        Ok env
+        Ok (env, failures)
 
 /// Convert a StaticValue to a printable string (for debugging)
 let rec ppStaticValue (v: StaticValue) : string =

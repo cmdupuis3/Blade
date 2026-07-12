@@ -1,0 +1,14 @@
+// TEST: Static Tuple Destructure Fold
+// Module-level `let static (a, b) = ...` folds: resolveStatics evaluates the
+// RHS once and bindPattern binds each leaf, so destructured components are
+// compile-time values — usable as a replicate count (like replicate/005) and
+// still readable at runtime (lowered as constants, not tuple projections).
+static function pair() -> (Int64, Int64) = (2, 3)
+let static (m, n) = pair()
+let A = [1.0, 2.0]
+let L = method_for(A)
+let c = L <@> lambda(x) -> x + 1.0
+let result = replicate(n, c) |> compute
+let m_val = m
+// EXPECT: result = [2.0, 3.0, 2.0, 3.0, 2.0, 3.0]
+// EXPECT: m_val = 2

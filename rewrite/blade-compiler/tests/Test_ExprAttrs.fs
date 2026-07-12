@@ -277,7 +277,7 @@ let test_sort_arm = {
 let test_reduce_arm = {
     Name = "Inline: IRReduce unions array and kernel"
     Run = fun () ->
-        let e = IRReduce (IRVar (1, intTy), IRVar (2, intTy))
+        let e = IRReduce (IRVar (1, intTy), IRVar (2, intTy), None)
         let actual = exprAttrs e
         let expected = mkAttrs [1; 2] [] true
         (actual, expected)

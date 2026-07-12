@@ -1,0 +1,24 @@
+// TEST: Intrinsics Trig Family
+// ============================================================================
+// sin/cos/tan, inverse trig, hyperbolic pair, floor/ceil.
+// ============================================================================
+let sn = sin(1.0)
+let cs = cos(1.0)
+let tn = tan(1.0)
+let arcsin = asin(0.5)
+let arccos = acos(0.5)
+let arctan = atan(1.0)
+let sh = sinh(1.0)
+let ch = cosh(1.0)
+let fl = floor(2.7)
+let ce = ceil(2.3)
+// EXPECT: sn = 0.8414709848078965
+// EXPECT: cs = 0.5403023058681398
+// EXPECT: tn = 1.5574077246549023
+// EXPECT: arcsin = 0.5235987755982988
+// EXPECT: arccos = 1.0471975511965976
+// EXPECT: arctan = 0.7853981633974483
+// EXPECT: sh = 1.1752011936438014
+// EXPECT: ch = 1.5430806348152437
+// EXPECT: fl = 2
+// EXPECT: ce = 3

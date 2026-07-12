@@ -59,6 +59,7 @@ let printUsage () =
     printfn "  test omp-coverage                 Run the OpenMP thread-coverage block standalone"
     printfn "  test cuda                         Run the CUDA kernel block standalone"
     printfn "  test timing                       Run the differential timing block standalone"
+    printfn "  test diff-oracle [category]       Diff printed values against the pinned ./oracle build"
     printfn ""
     printfn "Options:"
     printfn "  -o <path>      Output file path"

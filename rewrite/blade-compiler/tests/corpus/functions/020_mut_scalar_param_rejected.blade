@@ -1,0 +1,10 @@
+// TEST: Mut Scalar Parameter (rejects)
+// ============================================================================
+// `mut` is array-only: a scalar passes by value in the C++ ABI, so callee
+// writes would silently vanish. Reject with steering.
+// ============================================================================
+function bump(x: mut Float) -> Float = {
+    x += 1.0
+    x
+}
+let r = bump(1.0)

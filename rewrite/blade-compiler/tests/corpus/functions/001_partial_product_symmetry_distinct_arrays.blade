@@ -1,40 +1,18 @@
 // TEST: Partial Product Symmetry Distinct Arrays
-// Partial product symmetry over DISTINCT arrays sharing a NAMED index space
-// (§14.6). A and B are different arrays but both indexed by the named type Lat,
-// and the kernel is commutative. Per §14.6 ("commutativity is the license,
-// shared index spaces are the payoff"), the shared Lat axis product-
-// symmetrizes: the output is SymIdx<2, Lat> and iteration is triangular over
-// the Lat pair (i <= j), giving the 6-cell upper triangle rather than the dense
-// 3x3 = 9. The §13.2 / Lemma 9.21 "arrays must be identical" framing is the
-// older, pre-nominal-index-type position, superseded by §14.6 + §13.3's
-// per-dimension stabilizer (Stab is non-trivial on a shared index space even
-// for distinct arrays). The 6 triangular cells store kernel(A[i], B[j]) = A[i]*
-// B[j] for pairs (0,0),(0,1),(0,2),(1,1),(1,2),(2,2):
-//   [1*10, 1*20, 1*30, 2*20, 2*30, 3*30] = [10, 20, 30, 40, 60, 90].
-// NOTE: this currently FAILS (wrong values) — the iteration thread groups the
-// shared Lat axis (triangular) but deduceOutputType still identity-groups A,B
-// separately (dense [Idx,Idx] storage), so the triangular writes land in a
-// 9-cell layout. Step 3 (deduceOutputType deriving from the unified
-// rawAxisGroups grouping) makes storage agree, turning this green.
-// Partial product symmetry over DISTINCT arrays sharing a NAMED index space
-// (§14.6). A and B are different arrays but both indexed by the named type Lat,
-// and the kernel is commutative. Per §14.6 ("commutativity is the license,
-// shared index spaces are the payoff"), the shared Lat axis product-
-// symmetrizes: the output is SymIdx<2, Lat> and iteration is triangular over
-// the Lat pair (i <= j), giving the 6-cell upper triangle rather than the dense
-// 3x3 = 9. The §13.2 / Lemma 9.21 "arrays must be identical" framing is the
-// older, pre-nominal-index-type position, superseded by §14.6 + §13.3's
-// per-dimension stabilizer (Stab is non-trivial on a shared index space even
-// for distinct arrays). The 6 triangular cells store kernel(A[i], B[j]) = A[i]*
-// B[j] for pairs (0,0),(0,1),(0,2),(1,1),(1,2),(2,2):
-//   [1*10, 1*20, 1*30, 2*20, 2*30, 3*30] = [10, 20, 30, 40, 60, 90].
-// NOTE: this currently FAILS (wrong values) — the iteration thread groups the
-// shared Lat axis (triangular) but deduceOutputType still identity-groups A,B
-// separately (dense [Idx,Idx] storage), so the triangular writes land in a
-// 9-cell layout. Step 3 (deduceOutputType deriving from the unified
-// rawAxisGroups grouping) makes storage agree, turning this green.
+// CORRECTED (arc 1). This test originally pinned the v10 s14.6 rule
+// ("commutativity is the license, shared index spaces are the payoff"):
+// distinct arrays A, B over the same named index type Lat, comm kernel,
+// expected triangular SymIdx<2, Lat> output (6 cells). That rule is REFUTED -
+// machine-checked: proofs.md shared_units_insufficient (v10 Thm 9.17) shows a
+// commutative kernel over DISTINCT arrays on the same index space produces an
+// asymmetric output; identity generates symmetry, nominal index-type identity
+// does not. (The old s13.2 / Lemma 9.21 "arrays must be identical" framing,
+// which this test's earlier comment called superseded, is the correct one.)
+// The test was a known-value-failure awaiting a fix in the WRONG direction;
+// it now pins the sound behavior: rectangular iteration, dense 3x3 output,
+// kernel(A[i], B[j]) = A[i] * B[j] row-major. See also symmetry/014.
 type Lat = Idx<3>
 let A: Array<Float64 like Lat> = [1.0, 2.0, 3.0]
 let B: Array<Float64 like Lat> = [10.0, 20.0, 30.0]
 let result = method_for(A, B) <@> lambda(x, y) where comm(x, y) -> x * y |> compute
-// EXPECT: result = [10, 20, 30, 40, 60, 90]
+// EXPECT: result = [10.0, 20.0, 30.0, 20.0, 40.0, 60.0, 30.0, 60.0, 90.0]

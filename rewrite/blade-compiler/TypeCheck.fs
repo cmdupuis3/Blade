@@ -711,17 +711,26 @@ let rec collectFreeVars (bound: Set<string>) (expr: Expr) : Set<string> =
                 free <- Set.union free (collectFreeVars b e)
             | StmtForIn (varName, rangeExpr, bodyStmts) ->
                 free <- Set.union free (collectFreeVars b rangeExpr)
-                let innerBound = Set.add varName b
-                for bodyStmt in bodyStmts do
-                    match unwrapStmt bodyStmt with
-                    | StmtSpanned _ -> ()  // unreachable: unwrapStmt strips the annotation
-                    | StmtLet binding ->
-                        free <- Set.union free (collectFreeVars innerBound binding.Value)
-                    | StmtAssign (lhs, _, rhs) ->
-                        free <- Set.union free (Set.union (collectFreeVars innerBound lhs) (collectFreeVars innerBound rhs))
-                    | StmtExpr e ->
-                        free <- Set.union free (collectFreeVars innerBound e)
-                    | StmtForIn _ -> ()  // Nested not yet supported
+                // Recurse over the body with the loop variable bound; nested
+                // for-in loops recurse through the same walker. NOTE: like
+                // the outer StmtLet case, lets inside the body extend the
+                // bound set for SUBSEQUENT statements.
+                let rec walkForBody (bound: Set<string>) (stmts: Stmt list) =
+                    let mutable bb = bound
+                    for bodyStmt in stmts do
+                        match unwrapStmt bodyStmt with
+                        | StmtSpanned _ -> ()  // unreachable: unwrapStmt strips the annotation
+                        | StmtLet binding ->
+                            free <- Set.union free (collectFreeVars bb binding.Value)
+                            bb <- patternNames binding.Pattern |> List.fold (fun s n -> Set.add n s) bb
+                        | StmtAssign (lhs, _, rhs) ->
+                            free <- Set.union free (Set.union (collectFreeVars bb lhs) (collectFreeVars bb rhs))
+                        | StmtExpr e ->
+                            free <- Set.union free (collectFreeVars bb e)
+                        | StmtForIn (v2, range2, body2) ->
+                            free <- Set.union free (collectFreeVars bb range2)
+                            walkForBody (Set.add v2 bb) body2
+                walkForBody (Set.add varName b) bodyStmts
         match finalExpr with
         | Some e -> Set.union free (collectFreeVars b e)
         | None -> free
@@ -738,7 +747,11 @@ let rec collectFreeVars (bound: Set<string>) (expr: Expr) : Set<string> =
     | ExprGroupBy (v, k) -> Set.union (collectFreeVars bound v) (collectFreeVars bound k)
     | ExprGroupKeys ks -> ks |> List.map (collectFreeVars bound) |> Set.unionMany
     | ExprSort (a, k) -> Set.union (collectFreeVars bound a) (collectFreeVars bound k)
-    | ExprReduce (a, k) -> Set.union (collectFreeVars bound a) (collectFreeVars bound k)
+    | ExprReduce (a, k, i) ->
+        let baseVars = Set.union (collectFreeVars bound a) (collectFreeVars bound k)
+        match i with
+        | Some e -> Set.union baseVars (collectFreeVars bound e)
+        | None -> baseVars
     | ExprExtents a -> collectFreeVars bound a
     | ExprReynolds (k, _) -> collectFreeVars bound k
     | ExprField (e, _) -> collectFreeVars bound e
@@ -1446,8 +1459,9 @@ let private typedExprChildren (expr: TypedExpr) : TypedExpr list =
         | TExprExtents e | TExprReynolds (e, _) -> [e]
         | TExprGuard (c, b) -> [c; b]
         | TExprMask (a, p) | TExprIntersect (a, p) | TExprUnion (a, p)
-        | TExprGroupBy (a, p) | TExprSort (a, p) | TExprReduce (a, p)
+        | TExprGroupBy (a, p) | TExprSort (a, p)
         | TExprCompound (a, p) -> [a; p]
+        | TExprReduce (a, p, i) -> [a; p] @ Option.toList i
         | TExprUnique a -> [a]
         | TExprTranspose (a, _, _) -> [a]
         | TExprDecompact (a, _) -> [a]
@@ -1459,22 +1473,14 @@ let private typedExprChildren (expr: TypedExpr) : TypedExpr list =
         | TExprStruct (_, fields) -> fields |> List.map snd
         | TExprIndex (arr, idxs, _) -> arr :: idxs
         | TExprBlock (stmts, final) ->
-            let stmtExprs =
-                stmts |> List.collect (fun s ->
-                    match s with
-                    | TStmtLet b -> [b.Value]
-                    | TStmtAssign (l, r) -> [l; r]
-                    | TStmtExpr e -> [e]
-                    | TStmtForIn (_, _, lo, hi, body) ->
-                        let bodyExprs =
-                            body |> List.collect (fun bs ->
-                                match bs with
-                                | TStmtLet b -> [b.Value]
-                                | TStmtAssign (l, r) -> [l; r]
-                                | TStmtExpr e -> [e]
-                                | TStmtForIn _ -> [])  // nested for-in: skip (rare)
-                        lo :: hi :: bodyExprs)
-            stmtExprs @ Option.toList final
+            let rec stmtExprsOf (s: TypedStmt) : TypedExpr list =
+                match s with
+                | TStmtLet b -> [b.Value]
+                | TStmtAssign (l, r) -> [l; r]
+                | TStmtExpr e -> [e]
+                | TStmtForIn (_, _, lo, hi, body) ->
+                    lo :: hi :: (body |> List.collect stmtExprsOf)
+            (stmts |> List.collect stmtExprsOf) @ Option.toList final
         | TExprAssign (l, r) -> [l; r]
         | TExprReplicate (c, b) -> [c; b]
         | TExprAlign (es, _) -> es
@@ -1509,6 +1515,11 @@ let rec private revalidateBodyTagChecks (env: TypeEnv) (expr: TypedExpr) : TypeR
                 checkArrayIndexTags env at args
             | _ -> Ok ()
         | _ -> Ok ())
+
+/// Scalar math intrinsics — the canonical list lives in Grad.fs (which also
+/// carries the derivative rules); StaticEval.evalBuiltin mirrors the same
+/// names for static contexts.
+let isMathIntrinsic (name: string) : bool = Blade.Grad.isMathIntrinsic name
 
 let rec inferExpr (env: TypeEnv) (expr: Expr) : TypeResult<TypedExpr> =
     match expr with
@@ -1593,6 +1604,32 @@ let rec inferExpr (env: TypeEnv) (expr: Expr) : TypeResult<TypedExpr> =
     // ---- Method call: obj.method(args) → impl resolution ----
     | ExprApp (ExprField (obj, method), args) ->
         inferMethodCall env obj method args
+    // ---- Scalar math intrinsics: exp(x), sqrt(x), ... ----
+    // Surface form is a plain call; the name is rewritten to OpMath only
+    // when it is NOT user-bound (a user `function exp(...)` or a local
+    // binding named `exp` shadows the intrinsic). Scalar-only: mapping over
+    // an array is a kernel's job, so an array operand is a type error with
+    // steering. Result is Float64 (Float32 operands widen; Int operands are
+    // promoted by the C++ overload set).
+    | ExprApp (ExprVar name, [arg]) when isMathIntrinsic name && (lookupVar name env).IsNone ->
+        inferExpr env arg |> Result.bind (fun tArg ->
+            match env.Subst.Resolve tArg.Type with
+            | ArrayElem _ ->
+                Error (Other (sprintf
+                    "%s applies to scalars; map it over the array elementwise (e.g. method_for(A) <@> lambda(x) -> %s(x) |> compute)."
+                    name name))
+            | IRTScalar (ETComplex64 | ETComplex128) ->
+                Error (Other (sprintf "%s is not defined for complex operands (yet)." name))
+            | IRTScalar ETBool | IRTScalar ETString ->
+                Error (Other (sprintf "%s expects a numeric operand." name))
+            | IRTInfer _ ->
+                // Unresolved operand (e.g. an unannotated lambda parameter):
+                // pin it to Float64, the intrinsic's natural domain.
+                unify env.Subst tArg.Type (IRTScalar ETFloat64) |> Result.bind (fun () ->
+                Ok (mkTyped (TExprUnaryOp (OpMath name, tArg)) (IRTScalar ETFloat64)))
+            | _ ->
+                Ok (mkTyped (TExprUnaryOp (OpMath name, tArg)) (IRTScalar ETFloat64)))
+
     | ExprApp (func, args) ->
         inferExpr env func |> Result.bind (fun tFunc ->
         args |> List.map (inferExpr env) |> sequenceResults |> Result.bind (fun tArgs ->
@@ -1872,8 +1909,8 @@ let rec inferExpr (env: TypeEnv) (expr: Expr) : TypeResult<TypedExpr> =
         inferGram env leftE rightE
     | ExprDecompact (array, d) ->
         inferDecompact env array d
-    | ExprReduce (array, kernel) ->
-        inferReduce env array kernel
+    | ExprReduce (array, kernel, init) ->
+        inferReduce env array kernel init
     | ExprExtents array ->
         inferExtents env array
     | ExprSequence exprs ->
@@ -1954,9 +1991,12 @@ let rec inferExpr (env: TypeEnv) (expr: Expr) : TypeResult<TypedExpr> =
 // ============================================================================
 
 
-and inferReduce (env: TypeEnv) array kernel : TypeResult<TypedExpr> =
+and inferReduce (env: TypeEnv) array kernel (init: Expr option) : TypeResult<TypedExpr> =
     inferExpr env array |> Result.bind (fun tArr ->
     inferExpr env kernel |> Result.bind (fun tKernel ->
+    (match init with
+     | Some e -> inferExpr env e |> Result.map Some
+     | None -> Ok None) |> Result.bind (fun tInitOpt ->
         // Drive type inference for unannotated kernel parameters: when
         // the array argument's resolved type is an unconstrained
         // inference variable (e.g., `lambda(g) -> reduce(g, (+))` with
@@ -2037,11 +2077,24 @@ and inferReduce (env: TypeEnv) array kernel : TypeResult<TypedExpr> =
             unify env.Subst tArr.Type freshArr |> ignore
          | _ -> ())
         match env.Subst.Resolve(tArr.Type) with
+        | ArrayElem arrTy when arrTy.IndexTypes.Length = 1
+                               && (match arrTy.IndexTypes.[0].Symmetry with
+                                   | SymSymmetric | SymAntisymmetric | SymHermitian -> true
+                                   | SymNone -> false) ->
+            // Arc 3 hardening: a single SYMMETRY-CLASS record passes the
+            // one-record check but is NOT a rank-1 axis — reduce would walk
+            // extents[0] handing out row pointers (discovered via the
+            // fill_random probe: compiled garbage). Also semantically
+            // ambiguous (fold canonical cells vs logical cells). Reject with
+            // guidance until a deliberate semantics is chosen.
+            Error (Other "reduce() over compact symmetric/antisymmetric/Hermitian storage is not supported: folding the canonical cells and folding the logical (mirrored) cells differ. decompact(A, d) first for the logical fold.")
         | ArrayElem arrTy when arrTy.IndexTypes.Length = 1 ->
-            // Static guarantee: reject if we can prove the extent is 0.
+            // Static guarantee: reject if we can prove the extent is 0 AND no
+            // init was supplied. With an init, the empty fold is defined (it
+            // is simply init), so statically-empty inputs are legal.
             match tryEvalIntIR arrTy.IndexTypes.[0].Extent with
-            | Some n when n <= 0L ->
-                Error (Other (sprintf "reduce() rejects statically empty arrays (extent = %d). Empty input has no defined reduction without an identity; a 3-arg form `reduce(arr, op, init)` is the planned solution." n))
+            | Some n when n <= 0L && tInitOpt.IsNone ->
+                Error (Other (sprintf "reduce() rejects statically empty arrays (extent = %d). Empty input has no defined reduction without an identity; supply one with the 3-arg form `reduce(arr, op, init)`." n))
             | _ ->
                 // Stage 3c.2 follow-on: unify the kernel's param types
                 // with the array's element type. The kernel arrives as
@@ -2067,14 +2120,21 @@ and inferReduce (env: TypeEnv) array kernel : TypeResult<TypedExpr> =
                             acc |> Result.bind (fun () -> unify env.Subst pTy arrTy.ElemType))
                             (Ok ())
                     | _ -> Ok ()
+                // The init seeds the accumulator, so it must share the
+                // element type (same unification the kernel params get).
+                let initUnify =
+                    match tInitOpt with
+                    | Some tInit -> unify env.Subst tInit.Type arrTy.ElemType
+                    | None -> Ok ()
                 kernelUnify |> Result.bind (fun () ->
+                initUnify |> Result.bind (fun () ->
                     // arrTy.ElemType is IRType post-B2; return directly.
                     let resultType = arrTy.ElemType
-                    Ok (mkTyped (TExprReduce (tArr, tKernel)) resultType))
+                    Ok (mkTyped (TExprReduce (tArr, tKernel, tInitOpt)) resultType)))
         | ArrayElem _ ->
             Error (Other "reduce() currently supports only rank-1 arrays (multi-rank reduction over the innermost dimension is deferred)")
         | _ ->
-            Error (Other "reduce() requires an array as first argument")))
+            Error (Other "reduce() requires an array as first argument"))))
 
 // extents(array) — extent(s) along each dimension as Int64.
 // Rank-1 → scalar Int64 (the single dim's extent).
@@ -2487,14 +2547,34 @@ and inferGroupKeys (env: TypeEnv) keys : TypeResult<TypedExpr> =
 and inferReplicate (env: TypeEnv) count body : TypeResult<TypedExpr> =
     inferExpr env count |> Result.bind (fun tC ->
     inferExpr env body |> Result.bind (fun tB ->
-        // Extract count as literal integer
+        // The count must be compile-time known. Accept a bare literal, or any
+        // statically evaluable integer expression (a `let static` value or a
+        // static-function call), resolved via the same StaticEval the lowering
+        // phase uses. env.StaticValues/StaticFunctions were populated in the
+        // checkModule pre-pass.
         let n =
             match tC.Kind with
             | TExprLit (LitInt v) -> Some (int v)
-            | _ -> None
+            | _ ->
+                let staticEnv : StaticEval.StaticEnv =
+                    { Values = env.StaticValues
+                      Functions =
+                        env.StaticFunctions
+                        |> Map.map (fun _ (fd: FunctionDecl) ->
+                            { StaticEval.Name = fd.Name
+                              StaticEval.Params = fd.Params |> List.map (fun p -> p.Name)
+                              StaticEval.Body = fd.Body })
+                      CalledFunctions = ref Set.empty }
+                match StaticEval.evalExpr staticEnv StaticEval.maxSteps count with
+                | Ok (StaticEval.SVInt v) -> Some (int v)
+                | _ -> None
+        // Normalize the resolved count to a literal in the typed tree, so the
+        // lowering unroll (List.replicate n) sees a concrete factor regardless
+        // of how the count was written at the source level.
+        let litCount k = mkTyped (TExprLit (LitInt (int64 k))) tC.Type
         match n with
         | None ->
-            Error (Other "replicate count must be an integer literal")
+            Error (Other "replicate count must be a compile-time integer (a literal, `let static`, or static-function call)")
         | Some 1 ->
             // replicate(1, c) ≡ c
             Ok tB
@@ -2519,7 +2599,7 @@ and inferReplicate (env: TypeEnv) count body : TypeResult<TypedExpr> =
                 | _ ->
                     // S3 tag: relic. Same as sequence fallback above.
                     mkArrayArrow [seqIdx] (IRTScalar ETFloat64) None
-            Ok (mkTyped (TExprReplicate (tC, tB)) resultType)
+            Ok (mkTyped (TExprReplicate (litCount n, tB)) resultType)
         | _ ->
             Error (Other (sprintf "replicate count must be >= 1, got %A" n))))
 
@@ -2601,6 +2681,10 @@ and inferUnaryOp (env: TypeEnv) op operand : TypeResult<TypedExpr> =
                         | OpNot -> IRTScalar ETBool
                         | OpNeg -> tOp.Type
                         | OpConj -> tOp.Type
+                        // OpMath is synthesized by the ExprApp intrinsic
+                        // intercept, never parsed as ExprUnaryOp — this arm
+                        // is exhaustiveness only.
+                        | OpMath _ -> IRTScalar ETFloat64
             Ok (mkTyped (TExprUnaryOp (op, tOp)) resTy))
 
 // ---- Module-qualified value/function: `Math.pi`, `MathLib.double(x)` ----
@@ -3441,7 +3525,7 @@ and buildApplyInfo (env: TypeEnv)
                 match e.Kind with
                 | TExprIndex (arr, _, _) when isParamVar arr -> true
                 | TExprApp (f, _) when isParamVar f -> true            // g(0) as application
-                | TExprReduce (arr, _) when isParamVar arr -> true
+                | TExprReduce (arr, _, _) when isParamVar arr -> true
                 | TExprExtents arr when isParamVar arr -> true
                 | TExprRank arr when isParamVar arr -> true
                 | TExprArity n when n = pname -> true
@@ -3453,7 +3537,8 @@ and buildApplyInfo (env: TypeEnv)
             | TExprUnaryOp (_, x) -> walk x
             | TExprApp (f, args) -> walk f || List.exists walk args
             | TExprIndex (a, idxs, _) -> walk a || List.exists walk idxs
-            | TExprReduce (a, k) -> walk a || walk k
+            | TExprReduce (a, k, i) ->
+                walk a || walk k || (match i with Some e -> walk e | None -> false)
             | TExprExtents a | TExprRank a | TExprArrayNegate a
             | TExprArrayConjugate a | TExprUnique a -> walk a
             | TExprMask (a, p) -> walk a || walk p
@@ -4128,63 +4213,8 @@ and inferBlock env stmts finalExpr : TypeResult<TypedExpr> =
                 | Ok tE -> typedStmts <- typedStmts @ [TStmtExpr tE]
                 | Error e -> err <- Some e
             | StmtForIn (varName, rangeExpr, bodyStmts) ->
-                // Extract lo/hi from ExprDotDot range expression
-                let loHiResult =
-                    match rangeExpr with
-                    | ExprDotDot (lo, hi) ->
-                        match inferExpr curEnv lo, inferExpr curEnv hi with
-                        | Ok tL, Ok tH -> Ok (tL, tH)
-                        | Error e, _ | _, Error e -> Error e
-                    | _ ->
-                        Error (Other "for-in range must use a..b syntax")
-                match loHiResult with
-                | Ok (tLo, tHi) ->
-                    // Bind loop variable as Int64
-                    let varId = curEnv.Builder.FreshId()
-                    let loopEnv = bindVarSimple varName varId (IRTScalar ETInt64) curEnv
-                    // Infer body statements
-                    let mutable bodyEnv = loopEnv
-                    let mutable bodyErr = None
-                    let mutable typedBodyStmts : TypedStmt list = []
-                    for bodyStmt in bodyStmts do
-                        if bodyErr.IsNone then
-                            let bodyStmt =
-                                match bodyStmt with
-                                | StmtSpanned (inner, sp) -> setCurrentStmtSpan sp; inner
-                                | s -> s
-                            match bodyStmt with
-                            | StmtSpanned _ ->
-                                failwith "inferBlock (for-in): nested StmtSpanned"
-                            | StmtLet binding ->
-                                match inferExpr bodyEnv binding.Value with
-                                | Ok tValue ->
-                                    let bName = match binding.Pattern with PatVar n -> n | _ -> "_"
-                                    let bId = bodyEnv.Builder.FreshId()
-                                    let assign = assignOfBindingMut binding.Mutability
-                                    bodyEnv <- bindVarFull bName bId tValue.Type None assign (Some tValue) bodyEnv
-                                    let tb : TypedBinding = {
-                                        Name = bName; VarId = bId; Type = tValue.Type
-                                        Identity = None; IsMutable = (assign <> ReadOnly); Value = tValue
-                                        SubBindings = []
-                                    }
-                                    typedBodyStmts <- typedBodyStmts @ [TStmtLet tb]
-                                | Error e -> bodyErr <- Some e
-                            | StmtAssign (lhs, _, rhs) ->
-                                match inferExpr bodyEnv lhs, inferExpr bodyEnv rhs with
-                                | Ok tL, Ok tR ->
-                                    let _ = unify bodyEnv.Subst tL.Type tR.Type
-                                    typedBodyStmts <- typedBodyStmts @ [TStmtAssign (tL, tR)]
-                                | Error e, _ | _, Error e -> bodyErr <- Some e
-                            | StmtExpr e ->
-                                match inferExpr bodyEnv e with
-                                | Ok tE -> typedBodyStmts <- typedBodyStmts @ [TStmtExpr tE]
-                                | Error e -> bodyErr <- Some e
-                            | StmtForIn _ ->
-                                bodyErr <- Some (Other "Nested for-in loops not yet supported")
-                    match bodyErr with
-                    | Some e -> err <- Some e
-                    | None ->
-                        typedStmts <- typedStmts @ [TStmtForIn (varName, varId, tLo, tHi, typedBodyStmts)]
+                match inferForIn curEnv varName rangeExpr bodyStmts with
+                | Ok tStmt -> typedStmts <- typedStmts @ [tStmt]
                 | Error e -> err <- Some e
 
     match err with
@@ -4194,6 +4224,63 @@ and inferBlock env stmts finalExpr : TypeResult<TypedExpr> =
         | Some e -> inferExpr curEnv e |> Result.map (fun tF ->
             mkTyped (TExprBlock (typedStmts, Some tF)) tF.Type)
         | None -> Ok (mkTyped (TExprBlock (typedStmts, None)) IRTUnit)
+
+/// Infer one for-in loop statement. Recursive so loops nest to any depth
+/// (required by the ML-module layers and grad-generated adjoint loops).
+/// The loop variable binds as Int64 in the body scope; body lets stay local
+/// to the loop (they do NOT leak past it), matching block-scope rules.
+and inferForIn (env: TypeEnv) (varName: string) (rangeExpr: Expr) (bodyStmts: Stmt list) : TypeResult<TypedStmt> =
+    match rangeExpr with
+    | ExprDotDot (lo, hi) ->
+        match inferExpr env lo, inferExpr env hi with
+        | Error e, _ | _, Error e -> Error e
+        | Ok tLo, Ok tHi ->
+            let varId = env.Builder.FreshId()
+            let loopEnv = bindVarSimple varName varId (IRTScalar ETInt64) env
+            let mutable bodyEnv = loopEnv
+            let mutable bodyErr = None
+            let mutable typedBodyStmts : TypedStmt list = []
+            for bodyStmt in bodyStmts do
+                if bodyErr.IsNone then
+                    let bodyStmt =
+                        match bodyStmt with
+                        | StmtSpanned (inner, sp) -> setCurrentStmtSpan sp; inner
+                        | s -> s
+                    match bodyStmt with
+                    | StmtSpanned _ ->
+                        failwith "inferForIn: nested StmtSpanned"
+                    | StmtLet binding ->
+                        match inferExpr bodyEnv binding.Value with
+                        | Ok tValue ->
+                            let bName = match binding.Pattern with PatVar n -> n | _ -> "_"
+                            let bId = bodyEnv.Builder.FreshId()
+                            let assign = assignOfBindingMut binding.Mutability
+                            bodyEnv <- bindVarFull bName bId tValue.Type None assign (Some tValue) bodyEnv
+                            let tb : TypedBinding = {
+                                Name = bName; VarId = bId; Type = tValue.Type
+                                Identity = None; IsMutable = (assign <> ReadOnly); Value = tValue
+                                SubBindings = []
+                            }
+                            typedBodyStmts <- typedBodyStmts @ [TStmtLet tb]
+                        | Error e -> bodyErr <- Some e
+                    | StmtAssign (lhs, _, rhs) ->
+                        match inferExpr bodyEnv lhs, inferExpr bodyEnv rhs with
+                        | Ok tL, Ok tR ->
+                            let _ = unify bodyEnv.Subst tL.Type tR.Type
+                            typedBodyStmts <- typedBodyStmts @ [TStmtAssign (tL, tR)]
+                        | Error e, _ | _, Error e -> bodyErr <- Some e
+                    | StmtExpr e ->
+                        match inferExpr bodyEnv e with
+                        | Ok tE -> typedBodyStmts <- typedBodyStmts @ [TStmtExpr tE]
+                        | Error e -> bodyErr <- Some e
+                    | StmtForIn (v2, range2, body2) ->
+                        match inferForIn bodyEnv v2 range2 body2 with
+                        | Ok tStmt -> typedBodyStmts <- typedBodyStmts @ [tStmt]
+                        | Error e -> bodyErr <- Some e
+            match bodyErr with
+            | Some e -> Error e
+            | None -> Ok (TStmtForIn (varName, varId, tLo, tHi, typedBodyStmts))
+    | _ -> Error (Other "for-in range must use a..b syntax")
 
 and inferMethodFor env arrays : TypeResult<TypedExpr> =
     // Detect method_for(zip(A, B, ...)) — expand zip into co-iteration
@@ -4550,7 +4637,37 @@ and checkDecl (env: TypeEnv) (decl: Decl) : TypeResult<TypedDecl * TypeEnv> =
         // an annotation like `let static x: Float<meters> = 100.0` was
         // silently dropped — the binding would carry the synthesized type
         // instead.
-        inferLetBindingValue env binding |> Result.bind (fun tValue ->
+        //
+        // RESOLVED-VALUE SHORTCUT: when StaticEval already reduced this
+        // binding to a value (env.StaticValues, populated in checkModule),
+        // type the binding from that VALUE rather than re-inferring the
+        // original expression. Static-only builtins (sh_spec, total_dim,
+        // tp_weight_dim, length, ...) have no runtime binding, so inferring
+        // their call expressions would fail with "unbound variable" even
+        // though the static evaluator handled them fine.
+        let staticShortcut =
+            match binding.Pattern with
+            | PatVar n ->
+                match Map.tryFind n env.StaticValues with
+                | Some sv ->
+                    let rec svToTyped (v: StaticEval.StaticValue) : TypedExpr =
+                        match v with
+                        | StaticEval.SVInt i -> mkTyped (TExprLit (LitInt i)) (IRTScalar ETInt64)
+                        | StaticEval.SVFloat f -> mkTyped (TExprLit (LitFloat f)) (IRTScalar ETFloat64)
+                        | StaticEval.SVBool b -> mkTyped (TExprLit (LitBool b)) (IRTScalar ETBool)
+                        | StaticEval.SVString s -> mkTyped (TExprLit (LitString s)) (IRTScalar ETString)
+                        | StaticEval.SVUnit -> mkTyped (TExprLit LitUnit) IRTUnit
+                        | StaticEval.SVTuple vs ->
+                            let ts = vs |> List.map svToTyped
+                            mkTyped (TExprTuple ts) (IRTTuple (ts |> List.map (fun t -> t.Type)))
+                    Some (svToTyped sv)
+                | None -> None
+            | _ -> None
+        let inferred =
+            match staticShortcut with
+            | Some tv -> Ok tv
+            | None -> inferLetBindingValue env binding
+        inferred |> Result.bind (fun tValue ->
             let name = match binding.Pattern with PatVar n -> n | _ -> "_"
             // Reuse pre-pass varId if this static was already pre-registered
             let varId =
@@ -4822,10 +4939,34 @@ and checkFunctionDecl (env: TypeEnv) (funcDecl: FunctionDecl) : TypeResult<Typed
     // Register function BEFORE body (enables recursion)
     let envWithFunc = bindVarSimple funcDecl.Name funcVarId funcType env
 
+    // `x: mut T` params bind MutPassable so the body may assign into them
+    // (gradient out-buffers). Array-typed only: the C++ ABI passes the
+    // Array<> wrapper by value, which aliases the caller's DATA (shallow
+    // pointer copy) — element writes land in the caller — but a scalar
+    // passed by value would silently drop its writes.
+    let mutParamErr =
+        funcDecl.Params |> List.tryPick (fun p ->
+            if p.Mutability = Mutable then
+                let i = funcDecl.Params |> List.findIndex (fun q -> q.Name = p.Name)
+                match env.Subst.Resolve paramTypes.[i] with
+                | ArrayElem _ -> None
+                | _ -> Some (Other (sprintf
+                            "function '%s': parameter '%s' is `mut` but not array-typed. Only array parameters can be mutated in place (scalars pass by value); return the new scalar instead."
+                            funcDecl.Name p.Name))
+            else None)
+    match mutParamErr with
+    | Some e ->
+        env.Subst.PopTypeVarScope(savedScope)
+        Error e
+    | None ->
+
     let mutable bodyEnv = enterScope envWithFunc
     let typedParams = funcDecl.Params |> List.mapi (fun i p ->
         let varId = env.Builder.FreshId()
-        bodyEnv <- bindVarSimple p.Name varId paramTypes.[i] bodyEnv
+        let assign = match p.Mutability with
+                     | Mutable -> MutPassable
+                     | _ -> ReadOnly
+        bodyEnv <- bindVarFull p.Name varId paramTypes.[i] None assign None bodyEnv
         { Name = p.Name; Type = paramTypes.[i]; Index = i; VarId = varId } : TypedParam)
 
     let result =
@@ -5039,6 +5180,32 @@ let collectMixedEnumIdxInDecl (decl: Decl) : Expr list =
     | DeclInterface _ | DeclImport _ | DeclUnit _ -> []
 
 let checkModule (env: TypeEnv) (modul: ModuleDecl) : TypedModule * TypeEnv * CompileError list =
+    // Resolve compile-time-known static VALUES up front (the same
+    // StaticEval.resolveStatics the lowering phase runs as its Phase 0), so
+    // type-checking can consult them — e.g. a `replicate` count written as a
+    // `let static`/static-function call rather than a bare literal.
+    // `let static` is an assertion — fold or fail loudly — so a decl that
+    // doesn't statically evaluate is a compile error here, not a silent
+    // demotion to a runtime binding (lambda statics excepted: they declare
+    // functions). A circular dependency, previously swallowed, also lands
+    // as an error on the first static decl.
+    let env, staticAssertErrors =
+        match StaticEval.resolveStatics modul.Decls with
+        | Ok (se, failures) ->
+            let env' = { env with StaticValues = Map.fold (fun acc k v -> Map.add k v acc) env.StaticValues se.Values }
+            let errs =
+                failures |> List.map (fun (f: StaticEval.StaticFailure) ->
+                    let msg =
+                        sprintf "`let static %s` does not evaluate at compile time: %s. `let static` asserts a compile-time value — use plain `let` for values computed at runtime."
+                            (f.Names |> String.concat ", ") f.Reason
+                    locateError f.Span env' (Other msg))
+            env', errs
+        | Error msg ->
+            let span =
+                modul.Decls
+                |> List.tryPick (fun d -> match d.Value with DeclStatic _ -> Some d.Span | _ -> None)
+                |> Option.defaultValue noSpan
+            env, [locateError span env (Other msg)]
     // Pre-pass: register static functions and static values with placeholder types
     // so forward references and mutual recursion resolve correctly.
     let preEnv =
@@ -5104,7 +5271,7 @@ let checkModule (env: TypeEnv) (modul: ModuleDecl) : TypedModule * TypeEnv * Com
     let typedModule = { Name = Some modul.Name; Decls = List.rev decls }
     // Zonk: resolve all IRTInfer through the substitution, default unsolved to Float64
     let zonked = zonkModule currentEnv.Subst typedModule
-    (zonked, currentEnv, List.rev errors)
+    (zonked, currentEnv, staticAssertErrors @ List.rev errors)
 
 let checkProgram (program: Program) : TypedProgram * IRBuilder * CompileError list * string list =
     let env = emptyEnv ()
@@ -5146,6 +5313,23 @@ let checkProgram (program: Program) : TypedProgram * IRBuilder * CompileError li
 /// compilation early — once an AST passes validation, downstream lowering
 /// can assume index types only appear in their permitted positions.
 let typeCheck (program: Program) : Result<TypedProgram * IRBuilder * string list, CompileError list> =
+    // AST -> AST expansions, in order: ML-op elaboration first (so grad()
+    // sees the generated functions as plain Blade source and can inline
+    // them), then grad() expansion. Both synthesize ordinary declarations
+    // that flow through validation, checking, lowering and codegen exactly
+    // like user code.
+    match Blade.ML.Elaborate.expand program with
+    | Error msg ->
+        Error [ { Error = Other msg
+                  Span = { StartLine = 0; StartCol = 0; EndLine = 0; EndCol = 0; File = None }
+                  Context = ["ML elaboration"] } ]
+    | Ok program ->
+    match Blade.Grad.expand program with
+    | Error msg ->
+        Error [ { Error = Other msg
+                  Span = { StartLine = 0; StartCol = 0; EndLine = 0; EndCol = 0; File = None }
+                  Context = ["grad expansion"] } ]
+    | Ok program ->
     let validationErrors = IndexTypeValidator.validateProgram program
     if not validationErrors.IsEmpty then
         let compileErrors =

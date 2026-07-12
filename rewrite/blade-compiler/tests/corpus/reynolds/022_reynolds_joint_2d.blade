@@ -1,0 +1,15 @@
+// TEST: Reynolds Joint 2D
+// Reynolds over a repeated MULTI-DIM array rides the arc-1 fused joint path:
+// the 2x2 argument's S-block fuses to one compound axis (flat a = [1,2,3,4]),
+// output is joint SymIdx<2, 4> — C(5,2) = 10 cells, NOT per-dim SymIdx pairs.
+// Value-level Reynolds: K(x,y) = g(x,y) + g(y,x) with g = x*x + y, so
+// K = x^2 + y^2 + x + y at canonical pairs p1 <= p2 (unnormalized sum).
+// NOTE: comm(x, y) is the ITERATION LICENSE (interchangeable-for-iteration
+// declaration; g itself is not commutative — reynolds supplies the summed
+// terms). Without it, reynolds gives dense symmetrized VALUES, no compaction.
+let A: Array<Float64 like Idx<2>, Idx<2>> = [[1.0, 2.0], [3.0, 4.0]]
+let L = method_for(A, A)
+let g = lambda(x, y) where comm(x, y) -> x * x + y
+let result = L <@> reynolds(g) |> compute
+// (1,1)4 (1,2)8 (1,3)14 (1,4)22 (2,2)12 (2,3)18 (2,4)26 (3,3)24 (3,4)32 (4,4)40
+// EXPECT: result = [4.0, 8.0, 14.0, 22.0, 12.0, 18.0, 26.0, 24.0, 32.0, 40.0]

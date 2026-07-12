@@ -314,37 +314,34 @@ let private test_elementwise_over_enumidx_type () =
     assertBindingType "elementwise over enumidx" src "result"
         (arrOf anyElem [idx])
 
-// PRODUCT SYMMETRY (d=2) type deduction. Per formalism §14.6.2: a comm kernel
-// over a REPEATED MULTIDIMENSIONAL array should symmetrize EACH shared spatial
-// dimension independently, giving the compounded (r!)^d structure. For a 2-D
-// array A: Array<.., Idx<2>, Idx<3>> with comm(x,y), the predicted output is
-// SymIdx<2,2>, SymIdx<2,3> (rank-2 symmetric on BOTH dims) — the type-level
-// basis for the 2^d = 4x speedup. This probe confirms whether deduceOutputType
-// actually produces per-dimension product symmetry (it maps the group arity
-// over every S-dim), as opposed to only a single symmetric group. If it
-// deduces something else, that tells us the scalar-arg construct isn't the
-// right surface form for product symmetry (the formalism uses T^1 fiber args).
+// JOINT PRODUCT SYMMETRY (d=2) type deduction — CORRECTED (arc 1). One
+// identity group over a multi-dim array licenses only the JOINT (diagonal)
+// symmetry: whole argument index tuples are interchangeable, never each data
+// dimension independently (docs/formalism.md §8.4/§12.4; proofs.md
+// per_dim_swap_not_symmetry refutes the old per-dim SymIdx<2,2>, SymIdx<2,3>
+// prediction, and counting_general_C shows that shape cannot even hold the
+// result). For A: Array<.., Idx<2>, Idx<3>> with comm(x,y), the argument's
+// dense S-block fuses into one compound axis of extent 6, and the output is
+// the single joint record SymIdx<2, 6> — speedup 2!, not (2!)^2.
 let private test_product_symmetry_2d_type () =
     let src =
         "let A: Array<Float64 like Idx<2>, Idx<3>> = [[1.0, 2.0, 3.0], [4.0, 5.0, 6.0]]\n" +
         "let L = method_for(A, A)\n" +
         "let f = lambda(x, y) where comm(x, y) -> x * y\n" +
         "let result = L <@> f |> compute\n"
-    // Predicted (formalism §14.6.2): both dims rank-2 symmetric.
-    assertBindingType "product symmetry 2D (A,A)" src "result"
-        (arrOf anyElem [sym 2; sym 2])
+    // Corrected: ONE joint symmetric record over the compound spatial space.
+    assertBindingType "joint product symmetry 2D (A,A)" src "result"
+        (arrOf anyElem [sym 2])
 
-// PRODUCT SYMMETRY via FIBER KERNEL (the formalism's intended construct).
-// Per the language design: product symmetry (r!)^d is expressed with the inner
-// dimension CURRIED as a consumed fiber, not flattened into the symmetric grid.
-// A: Array<.., LatIdx, LonIdx, TimeIdx> with a comm kernel taking two TimeIdx
-// fibers (k(a: Array<.. TimeIdx>, b: ..) where comm(a,b) -> reduce(+, a*b)).
-// The OUTER shared S-dims (Lat, Lon) each receive the comm group's arity ->
-// SymIdx<2,Lat>, SymIdx<2,Lon>; the Time fiber is consumed by the reduce and
-// does NOT appear in the output. This is the per-dimension product symmetry the
-// flat scalar form (above) could not express. This probe checks whether
-// deduceOutputType, given fiber-arg consumption, leaves exactly the two outer
-// S-dims and symmetrizes each — the type-level basis for (2!)^2.
+// JOINT PRODUCT SYMMETRY via FIBER KERNEL — CORRECTED (arc 1). A comm kernel
+// consuming a TimeIdx fiber from each copy of A: Array<.., LatIdx, LonIdx,
+// TimeIdx> leaves (Lat, Lon) as each argument's S-block. The old prediction
+// symmetrized each outer dim independently (SymIdx<2,Lat>, SymIdx<2,Lon> —
+// the (2!)^2 basis); that is refuted (per_dim_swap_not_symmetry): swapping
+// only the Lat coordinates across the two fiber arguments is NOT an output
+// symmetry. Corrected: the (Lat, Lon) block fuses into one compound axis
+// (extent Lat*Lon = 6) and the output is the single joint SymIdx<2, 6>;
+// Time is consumed by the reduce and absent, as before.
 let private test_product_symmetry_fiber_type () =
     let src =
         "type LatIdx = Idx<2>\n" +
@@ -356,9 +353,9 @@ let private test_product_symmetry_fiber_type () =
         "let L = method_for(A, A)\n" +
         "let k = lambda(a: Array<Float64 like TimeIdx>, b: Array<Float64 like TimeIdx>) where comm(a, b) -> reduce(a, (+))\n" +
         "let result = L <@> k |> compute\n"
-    // Predicted: outer Lat, Lon each rank-2 symmetric; Time consumed (absent).
-    assertBindingType "product symmetry fiber (A,A over Time)" src "result"
-        (arrOf anyElem [sym 2; sym 2])
+    // Corrected: one joint symmetric record over (Lat x Lon); Time consumed.
+    assertBindingType "joint product symmetry fiber (A,A over Time)" src "result"
+        (arrOf anyElem [sym 2])
 
 // Rank-2 antisym decompact -> fully dense [Idx; Idx].
 let private test_decompact_anti_type () =

@@ -662,6 +662,8 @@ let unaryOpToCpp = function
     | IRConj -> "std::conj"   // function-call form; exprToCppCore/exprToCppSimple
                               // special-case IRConj for the complex-vs-real
                               // decision (real conj is the identity)
+    | IRMath name -> "std::" + name  // function-call form via the generic
+                                     // `op(expr)` unary arm
 
 /// True iff a type's underlying scalar is a complex element type. Used to
 /// decide whether conj must emit std::conj (complex) or is the identity (real).
@@ -671,6 +673,24 @@ let rec isComplexType (t: IRType) : bool =
     | IRTIdxTagged (inner, _) -> isComplexType inner
     | IRTUnitAnnotated (inner, _) -> isComplexType inner
     | _ -> false
+
+/// Render a float as a C++ double literal. Two invariants the old
+/// `sprintf "%g"` violated (silently, at every literal site):
+///   1. ROUND-TRIP precision — %g truncates to 6 significant digits, so
+///      0.6931471805599453 became 0.693147 in the generated C++ (fatal for
+///      CG coefficients and any test pinned finer than 1e-6).
+///   2. FLOAT SPELLING — %g renders 2.0 as the bare token `2`, an int
+///      literal in C++, so `2.0 / 3.0` compiled to integer division `2 / 3`
+///      and evaluated to 0.
+/// "R" on .NET 7 is shortest-round-trip; invariant culture guards against
+/// decimal-comma locales; the suffix check restores the `.0` spelling.
+let floatToCppLiteral (f: float) : string =
+    if System.Double.IsNaN f then "std::numeric_limits<double>::quiet_NaN()"
+    elif System.Double.IsPositiveInfinity f then "std::numeric_limits<double>::infinity()"
+    elif System.Double.IsNegativeInfinity f then "(-std::numeric_limits<double>::infinity())"
+    else
+        let s = f.ToString("R", System.Globalization.CultureInfo.InvariantCulture)
+        if s.Contains "." || s.Contains "e" || s.Contains "E" then s else s + ".0"
 
 /// Quote a Blade string value as a C++ string literal. Escapes the minimal
 /// set that would otherwise break the surrounding "..." token: backslash,
@@ -697,7 +717,7 @@ let escapeStringLit (s: string) : string =
 let rec exprToCppSimple (names: Map<IRId, string>) (expr: IRExpr) : string =
     match expr with
     | IRLit (IRLitInt n) -> sprintf "%dL" n
-    | IRLit (IRLitFloat f) -> sprintf "%g" f
+    | IRLit (IRLitFloat f) -> floatToCppLiteral f
     | IRLit (IRLitBool b) -> if b then "true" else "false"
     | IRLit (IRLitString s) -> sprintf "std::string(%s)" (escapeStringLit s)
     | IRLit IRLitUnit -> "((void)0)"
@@ -721,7 +741,7 @@ let rec exprToCppSimple (names: Map<IRId, string>) (expr: IRExpr) : string =
 let litToCpp (lit: IRLit) : string =
     match lit with
     | IRLitInt n -> sprintf "%dL" n
-    | IRLitFloat f -> sprintf "%g" f
+    | IRLitFloat f -> floatToCppLiteral f
     | IRLitBool b -> if b then "true" else "false"
     | IRLitString s -> sprintf "std::string(%s)" (escapeStringLit s)
     | IRLitUnit -> "((void)0)"  // Valid C++ no-op; should be elided by callers
@@ -1050,8 +1070,8 @@ let rec exprToCppCore (subst: SubstMap) (names: Map<IRId, string>) (expr: IRExpr
         sprintf "%dL" rank
     | IRExtent (arr, dim) ->
         renderExtentExpr subst names arr dim
-    | IRReduce (arrExpr, kernelExpr) ->
-        renderReduceExpr subst names arrExpr kernelExpr
+    | IRReduce (arrExpr, kernelExpr, initExpr) ->
+        renderReduceExpr subst names arrExpr kernelExpr initExpr
     | IRContains (arrExpr, valueExpr) ->
         // Linear-scan membership test as an IIFE returning bool. (A prior
         // hoist-set fusion for contains-inside-mask has been removed; every
@@ -1580,7 +1600,7 @@ and renderMatchExpr (subst: SubstMap) (names: Map<IRId, string>) scrutinee cases
     genCase cases
 
 
-and renderReduceExpr (subst: SubstMap) (names: Map<IRId, string>) arrExpr kernelExpr : string =
+and renderReduceExpr (subst: SubstMap) (names: Map<IRId, string>) arrExpr kernelExpr (initExpr: IRExpr option) : string =
     // Inline reduction as an IIFE. Mirrors the genBinding form's loop but
     // wraps it in `[&]() { ... }()` so it can appear in expression context
     // — kernel bodies (lambda(g) -> reduce(g)) and arithmetic
@@ -1658,6 +1678,15 @@ and renderReduceExpr (subst: SubstMap) (names: Map<IRId, string>) arrExpr kernel
     | Some callable when callable.Params.Length = 2 ->
         let (wrapperCode, wname) = genCallableWrapper "" callable
         let wrapperStr = wrapperCode |> String.concat " "
+        match initExpr with
+        | Some initE ->
+            // 3-arg form: the accumulator seeds from init and the loop covers
+            // ALL elements. The empty fold is defined (it is init), so no
+            // emptiness guard is needed for any extent, static or dynamic.
+            let initStr = exprToCppCore subst names initE
+            sprintf "[&]() { %s %s __r = %s; for (size_t __ri = 0; __ri < %s; __ri++) { __r = %s(__r, %s); } return __r; }()"
+                wrapperStr elemStr initStr reduceBound wname (reduceAccAt "__ri")
+        | None ->
         let guard =
             if reduceNonEmpty then ""
             else sprintf "if (%s == 0) { std::cerr << \"reduce: empty array, no reduction possible\" << std::endl; std::abort(); } " reduceBound
@@ -2617,6 +2646,54 @@ let genElementBindingNew (level: LoopIndexBinding) (elem: ElementBinding) (curre
             | _ -> sprintf "%s.extents[%d]" elem.ArrayName elem.DimIndex
         let code = sprintf "size_t %s = (%s - 1 - %s);" elem.ParamName extentStr level.IndexName
         (code, elem.ParamName)
+    | RealArray when level.FusedRank.IsSome ->
+        // Arc 1 fused JOINT level (see IR.fuseJointSLevels): this single loop
+        // level spans the argument's whole plain-dense S-block (d dims), so the
+        // grouped triangular iteration ranges over whole argument index tuples —
+        // the joint symmetry, the only one an identity group licenses
+        // (docs/formalism.md §12.4). The loop var is left-justified-relative
+        // under triangular chaining, so component 0 first shifts it to the
+        // ABSOLUTE compound coordinate p (deps + strict offset, mirroring the
+        // dense arm's case 1) and binds it once per (level, array); every
+        // component then decodes its per-dim coordinate row-major
+        //   coord_rc = (p / prod_{j>rc} n_j) % n_rc
+        // (matching lex enumeration and the storage bijection) and peels
+        // exactly one dimension of the array.
+        let d = level.FusedRank.Value
+        let rc = elem.RankComponent
+        let extAt j = sprintf "%s.extents[%d]" elem.ArrayName j
+        let strideAfter k =
+            if k >= d - 1 then "1"
+            else [k + 1 .. d - 1] |> List.map extAt |> String.concat " * "
+        let pAbs = sprintf "__p%d_a%d" level.Level elem.ArrayPosition
+        let pAbsDecl =
+            if rc = 0 then
+                let depParts = level.BoundDependencies |> List.map (sprintf "__i%d")
+                let offsetParts = if level.StrictOffset > 0 then [string level.StrictOffset] else []
+                let sum =
+                    match depParts @ offsetParts with
+                    | [] -> level.IndexName
+                    | shifts -> sprintf "%s + %s" level.IndexName (String.concat " + " shifts)
+                sprintf "size_t %s = %s; " pAbs sum
+            else ""
+        let coordName = sprintf "%s_c%d" pAbs rc
+        let coordExpr =
+            if d = 1 then pAbs
+            elif rc = 0 then sprintf "%s / (%s)" pAbs (strideAfter 0)
+            elif rc = d - 1 then sprintf "%s %% %s" pAbs (extAt rc)
+            else sprintf "(%s / (%s)) %% %s" pAbs (strideAfter rc) (extAt rc)
+        let levelsConsumed = rc + 1
+        let resultRank = elem.ArrayRank - levelsConsumed
+        let elemTypeStr = elemTypeToCpp elem.ArrayElemType
+        let newName = sprintf "%s__%s_%d" currentName level.IndexName rc
+        let peel =
+            if resultRank <= 0 then
+                sprintf "%s %s = %s[%s];" elemTypeStr newName currentName coordName
+            else
+                sprintf "Array<%s, %d> %s = { %s.data[%s], %s.extents + 1 };"
+                    elemTypeStr resultRank newName currentName coordName currentName
+        let code = sprintf "%ssize_t %s = %s; %s" pAbsDecl coordName coordExpr peel
+        (code, newName)
     | RealArray when (match level.Extent with IRCompoundMask _ -> true | _ -> false) ->
         // Compound axis: peel the present-cell index `r` against the COMPACT
         // buffer (.data), not the dense .extents grid. A compound axis has no
@@ -2816,6 +2893,14 @@ let genForLoopHeader (compoundArrays: Set<string>) (binding: LoopIndexBinding) :
         // supported: trailing_stride is the product, not a per-dim extent.)
         | _ when Set.contains binding.ExtentArrayRef compoundArrays ->
             sprintf "%s.trailing_stride" binding.ExtentArrayRef
+        // Arc 1 fused JOINT level: the axis spans the array's first d dense
+        // dims; its bound is the product of those extents. A literal product
+        // was already folded to IRLit by IR.fuseJointSLevels (first arm); this
+        // renders the runtime form.
+        | _ when binding.FusedRank.IsSome ->
+            [0 .. binding.FusedRank.Value - 1]
+            |> List.map (sprintf "%s.extents[%d]" binding.ExtentArrayRef)
+            |> String.concat " * "
         | _ -> sprintf "%s.extents[%d]" binding.ExtentArrayRef binding.ExtentDimRef
     
     // Compute bound subtraction from dependencies
@@ -2881,7 +2966,10 @@ let rec canonicalKey (nameMap: Map<int, string>) (expr: IRExpr) : string =
     | IRLit lit ->
         match lit with
         | IRLitInt n -> string n
-        | IRLitFloat f -> sprintf "%g" f
+        // Round-trip spelling: %g's 6-digit key would COLLIDE distinct
+        // constants and wrongly deduplicate structurally-different
+        // Reynolds terms (multiplicity miscount).
+        | IRLitFloat f -> floatToCppLiteral f
         | IRLitBool b -> if b then "true" else "false"
         | IRLitString s -> sprintf "\"%s\"" s
         | IRLitUnit -> "()"
@@ -3574,7 +3662,14 @@ let genArrayLiteral (ctx: CodeGenContext) (varName: string) (elements: IRExpr li
                             let lensList = lens |> List.map string |> String.concat ", "
                             let offsets = lens |> List.scan (fun acc len -> acc + len) 0
                             let offsetsList = offsets |> List.map string |> String.concat ", "
-                            let flatValues = allValues |> List.map (sprintf "%g") |> String.concat ", "
+                            // Float elements need round-trip literals (see
+                            // floatToCppLiteral); integral elements keep the
+                            // bare spelling (a `.0` suffix would be a C++
+                            // narrowing error in the braced initializer).
+                            let renderFlat (v: float) =
+                                if elemType.Contains "double" || elemType.Contains "float"
+                                then floatToCppLiteral v else sprintf "%g" v
+                            let flatValues = allValues |> List.map renderFlat |> String.concat ", "
                             let extentsDecl = sprintf "%sstatic constexpr const size_t %s_extents[1] = {%d};" ind varName nRows
                             let lensDecl = sprintf "%sstatic constexpr const size_t %s_lens[%d] = {%s};" ind varName nRows lensList
                             let offsetsDecl = sprintf "%sstatic constexpr const size_t %s_offsets[%d] = {%s};" ind varName (nRows + 1) offsetsList
@@ -3609,7 +3704,11 @@ let genArrayLiteral (ctx: CodeGenContext) (varName: string) (elements: IRExpr li
             let offsets =
                 rowLengths |> List.scan (fun acc len -> acc + len) 0
             let offsetsList = offsets |> List.map string |> String.concat ", "
-            let flatValues = allValues |> List.map (sprintf "%g") |> String.concat ", "
+            // Same float/integral literal split as the DepIdx branch above.
+            let renderFlat (v: float) =
+                if elemType.Contains "double" || elemType.Contains "float"
+                then floatToCppLiteral v else sprintf "%g" v
+            let flatValues = allValues |> List.map renderFlat |> String.concat ", "
             let extentsDecl = sprintf "%sstatic constexpr const size_t %s_extents[1] = {%d};" ind varName n
             let lensDecl = sprintf "%sstatic constexpr const size_t %s_lens[%d] = {%s};" ind varName n lensList
             let offsetsDecl = sprintf "%sstatic constexpr const size_t %s_offsets[%d] = {%s};" ind varName (n + 1) offsetsList
@@ -3700,7 +3799,10 @@ let genArrayLiteral (ctx: CodeGenContext) (varName: string) (elements: IRExpr li
                     // in row-major order, so the alignment is exact.
                     let paths = enumerateIndexPaths dims
                     List.zip paths values |> List.map (fun (path, v) ->
-                        sprintf "%s%s%s = %g;" ind varName (formatIndexPath path) v)
+                        // Round-trip literal (see floatToCppLiteral); plain
+                        // assignment converts implicitly for integral
+                        // element types, so no narrowing concern here.
+                        sprintf "%s%s%s = %s;" ind varName (formatIndexPath path) (floatToCppLiteral v))
                 else
                     // Per-element path: walk the nested IRArrayLit. Index path
                     // accumulates as we descend; leaves render via exprToCpp.
@@ -3963,7 +4065,14 @@ let genCudaKernelSimplicial (codeGen: LoopNestCodeGen) (name: string) (blockSize
     let readBinds =
         [ for b in bindings do
             let idxVar = idxVarOf b.Level
-            for elem in b.Elements do
+            // A FUSED joint level (arc 1) carries one element per source dim,
+            // all sharing (Level, ArrayPosition) and the same ParamVarId. On
+            // the DEVICE the operand is the flat pool, where the compound
+            // index IS the row-major position — a single flat read serves the
+            // whole fused block (no per-dim decode needed, unlike the host
+            // peel chain). Dedup so the read variable is declared once
+            // (duplicate declarations were an nvcc redefinition error).
+            for elem in b.Elements |> List.distinctBy (fun e -> e.ArrayPosition) do
                 let readName = sprintf "__blade_op_%d_%d" b.Level elem.ArrayPosition
                 let etStr = elemTypeToCpp elem.ArrayElemType
                 paramFinalNames <- Map.add elem.ParamVarId readName paramFinalNames
@@ -4178,7 +4287,12 @@ let genCudaKernel (codeGen: LoopNestCodeGen) (name: string) (blockSize: int) : s
         @ (bindings |> List.mapi (fun i b ->
               match b.Extent with
               | IRLit (IRLitInt n) -> sprintf "    %s[%d] = %dUL;" extentsName i n
-              | _ -> sprintf "    %s[%d] = %s.extents[%d];" extentsName i b.ExtentArrayRef b.ExtentDimRef))
+              | _ ->
+                  match b.FusedRank with
+                  | Some d ->
+                      let prod = [0 .. d - 1] |> List.map (sprintf "%s.extents[%d]" b.ExtentArrayRef) |> String.concat " * "
+                      sprintf "    %s[%d] = %s;" extentsName i prod
+                  | None -> sprintf "    %s[%d] = %s.extents[%d];" extentsName i b.ExtentArrayRef b.ExtentDimRef))
         @ [ sprintf "    Array<%s, %d> %s = { allocate<typename promote<%s, %d>::type, nullptr>(%s), %s };"
                 elemCpp outputRank name elemCpp outputRank extentsName extentsName
             sprintf "    %s(%s, pool_base(%s.data));"
@@ -4589,7 +4703,14 @@ let genApplyCombinator (ctx: CodeGenContext) (name: string) (info: ApplyInfo) (b
                     | IRLit (IRLitInt n) ->
                         sprintf "%s%s[%d] = %s;" ind extentsName i (sprintf "%d" n)
                     | _ ->
-                        sprintf "%s%s[%d] = %s.extents[%d];" ind extentsName i b.ExtentArrayRef b.ExtentDimRef)
+                        // Fused joint level (arc 1): output extent = product of
+                        // the source array's fused dims.
+                        match b.FusedRank with
+                        | Some d ->
+                            let prod = [0 .. d - 1] |> List.map (sprintf "%s.extents[%d]" b.ExtentArrayRef) |> String.concat " * "
+                            sprintf "%s%s[%d] = %s;" ind extentsName i prod
+                        | None ->
+                            sprintf "%s%s[%d] = %s.extents[%d];" ind extentsName i b.ExtentArrayRef b.ExtentDimRef)
 
             // Generate allocation as Array<T,N> wrapper. extentsName here is
             // a runtime-allocated `size_t*` (not a static constexpr); the
@@ -5117,7 +5238,12 @@ let genFusionTree (ctx: CodeGenContext) (name: string) (expr: IRExpr) (builder: 
                     cg.Bindings |> List.mapi (fun j b ->
                         match b.Extent with
                         | IRLit (IRLitInt n) -> sprintf "%s%s[%d] = %d;" ind extentsName j n
-                        | _ -> sprintf "%s%s[%d] = %s.extents[%d];" ind extentsName j b.ExtentArrayRef b.ExtentDimRef)
+                        | _ ->
+                            match b.FusedRank with
+                            | Some d ->
+                                let prod = [0 .. d - 1] |> List.map (sprintf "%s.extents[%d]" b.ExtentArrayRef) |> String.concat " * "
+                                sprintf "%s%s[%d] = %s;" ind extentsName j prod
+                            | None -> sprintf "%s%s[%d] = %s.extents[%d];" ind extentsName j b.ExtentArrayRef b.ExtentDimRef)
                 let allocRhs =
                     match emitAllocRhs (classifyOutputStorage cg.OutputType)
                               outputElemType outputRank symmArg extentsName with
@@ -5200,8 +5326,8 @@ let rec genBinding (ctx: CodeGenContext) (binding: IRBinding) (builder: IRBuilde
         genArrayNegateConjugateBinding ctx binding builder arrExpr
     | IRGram (_, _, _) ->
         genGramBinding ctx binding builder 
-    | IRReduce (arrExpr, kernelExpr) ->
-        genReduceBinding ctx binding builder arrExpr kernelExpr
+    | IRReduce (arrExpr, kernelExpr, initExpr) ->
+        genReduceBinding ctx binding builder arrExpr kernelExpr initExpr
     | IRArrayLit (elements, arrType) ->
         let code = genArrayLiteral ctx name elements arrType
         let ctx' = addVarName binding.Id name ctx
@@ -6161,21 +6287,73 @@ and genRandomInitBinding (ctx: CodeGenContext) (binding: IRBinding) (builder: IR
     let modExpr = ctx.RandomInits.[binding.Id]
     (match binding.Type with
      | ArrayElem arrTy ->
-         let rank = arrayRank arrTy
          let elemCpp = elemTypeToCpp arrTy.ElemType
-         let extentNames = arrTy.IndexTypes |> List.mapi (fun i _ -> sprintf "%s_extent_%d" name i)
-         let extentDecls =
-             arrTy.IndexTypes |> List.mapi (fun i idx ->
-                 match idx.Extent with
-                 | IRLit (IRLitInt n) -> sprintf "%ssize_t %s_extent_%d = %d;" ind name i n
-                 | _ -> sprintf "%s#error \"fill_random binding '%s' has a non-literal extent at dim %d\"" ind name i)
-         let extentsArr = sprintf "%ssize_t %s_extents[] = { %s };" ind name (String.concat ", " extentNames)
-         let allocLine =
-             sprintf "%sArray<%s, %d> %s = { allocate<typename promote<%s, %d>::type, nullptr>(%s_extents), %s_extents };"
-                 ind elemCpp rank name elemCpp rank name name
-         let fillLine =
-             sprintf "%sfill_random(%s.data, %s_extents, (int)(%s));" ind name name (exprToCpp ctx.VarNames modExpr)
-         (extentDecls @ [extentsArr; allocLine; fillLine], addVarName binding.Id name ctx)
+         let allDenseRank1 =
+             arrTy.IndexTypes |> List.forall (fun idx -> idx.Rank = 1 && idx.Symmetry = SymNone)
+         let hasHermitian =
+             arrTy.IndexTypes |> List.exists (fun idx -> idx.Symmetry = SymHermitian)
+         if allDenseRank1 then
+             // Dense-rectangular path: unchanged (byte-compatible with the
+             // pre-arc-3 emission — the runtime fill_random walks the shape).
+             let rank = arrayRank arrTy
+             let extentNames = arrTy.IndexTypes |> List.mapi (fun i _ -> sprintf "%s_extent_%d" name i)
+             let extentDecls =
+                 arrTy.IndexTypes |> List.mapi (fun i idx ->
+                     match idx.Extent with
+                     | IRLit (IRLitInt n) -> sprintf "%ssize_t %s_extent_%d = %d;" ind name i n
+                     | _ -> sprintf "%s#error \"fill_random binding '%s' has a non-literal extent at dim %d\"" ind name i)
+             let extentsArr = sprintf "%ssize_t %s_extents[] = { %s };" ind name (String.concat ", " extentNames)
+             let allocLine =
+                 sprintf "%sArray<%s, %d> %s = { allocate<typename promote<%s, %d>::type, nullptr>(%s_extents), %s_extents };"
+                     ind elemCpp rank name elemCpp rank name name
+             let fillLine =
+                 sprintf "%sfill_random(%s.data, %s_extents, (int)(%s));" ind name name (exprToCpp ctx.VarNames modExpr)
+             (extentDecls @ [extentsArr; allocLine; fillLine], addVarName binding.Id name ctx)
+         elif hasHermitian then
+             // Hermitian stores the full n^2 cells but they are CONSTRAINT-
+             // COUPLED (A(i,j) = conj(A(j,i))): independent pool draws would
+             // violate the invariant, so hermitian fill needs a canonical-
+             // half fill + mirrored conjugation — not yet emitted.
+             ([sprintf "%s#error \"fill_random binding '%s': HermitianIdx is not supported (stored cells are constraint-coupled)\"" ind name],
+              addVarName binding.Id name ctx)
+         else
+             // GENERALIZED fill (arc 3, formalism 3.5): one draw per STORED
+             // cell. Compact storage classes (SymIdx/AntisymIdx, mixed with
+             // dense axes) allocate with their SYMM vector and fill the flat
+             // pool linearly — the pool holds exactly the canonical cells, so
+             // symmetry holds by construction, antisym diagonals stay
+             // implicit zeros, and the draw count is the storage cardinality
+             // (deviceBufferCardinality — same closed forms as allocation).
+             let componentExtents =
+                 arrTy.IndexTypes |> List.collect (fun idx -> List.replicate idx.Rank idx.Extent)
+             let rank = componentExtents.Length
+             let nonLiteral =
+                 componentExtents |> List.exists (fun e -> match e with IRLit (IRLitInt _) -> false | _ -> true)
+             if nonLiteral then
+                 ([sprintf "%s#error \"fill_random binding '%s' requires literal extents\"" ind name],
+                  addVarName binding.Id name ctx)
+             else
+                 let extentTerms =
+                     componentExtents |> List.map (fun e ->
+                         match e with IRLit (IRLitInt n) -> sprintf "%d" n | _ -> "0")
+                 let extentsName = sprintf "%s_extents" name
+                 let extentsArr = sprintf "%ssize_t %s[] = { %s };" ind extentsName (String.concat ", " extentTerms)
+                 let symmVec = buildSymmVec binding.Type
+                 let symmArg =
+                     if hasRealSymmetry symmVec then hoistSymmDecl (sprintf "%s_symm" name) symmVec
+                     else "nullptr"
+                 let allocLines =
+                     match emitAllocRhs (classifyOutputStorage binding.Type) elemCpp rank symmArg extentsName with
+                     | Ok rhs -> [sprintf "%sArray<%s, %d> %s = %s;" ind elemCpp rank name rhs]
+                     | Error msg -> [sprintf "%s#error \"fill_random '%s': %s\"" ind name msg]
+                 let poolCount =
+                     deviceBufferCardinality (deviceBufferTypeOfArray arrTy)
+                     |> exprToCpp ctx.VarNames
+                 let fillLines =
+                     [ sprintf "%s{ auto* __fr_pool = nested_array_utilities::pool_base(%s.data);" ind name
+                       sprintf "%s  for (size_t __fr_i = 0; __fr_i < %s; __fr_i++) { __fr_pool[__fr_i] = static_cast<%s>(rand() %% (int)(%s)); } }"
+                           ind poolCount elemCpp (exprToCpp ctx.VarNames modExpr) ]
+                 (extentsArr :: allocLines @ fillLines, addVarName binding.Id name ctx)
      | _ ->
          ([sprintf "%s#error \"fill_random binding '%s' is not an array type\"" ind name], addVarName binding.Id name ctx))
 
@@ -6477,7 +6655,7 @@ and genGramBinding (ctx: CodeGenContext) (binding: IRBinding) (builder: IRBuilde
 
 
 
-and genReduceBinding (ctx: CodeGenContext) (binding: IRBinding) (builder: IRBuilder) (arrExpr: IRExpr) (kernelExpr: IRExpr) : string list * CodeGenContext =
+and genReduceBinding (ctx: CodeGenContext) (binding: IRBinding) (builder: IRBuilder) (arrExpr: IRExpr) (kernelExpr: IRExpr) (initExpr: IRExpr option) : string list * CodeGenContext =
     let ind = indentStr ctx
     let name = bindingCppName binding
     // reduce(array, op): T/S reduction. Consumes the innermost dim by a
@@ -6535,7 +6713,9 @@ and genReduceBinding (ctx: CodeGenContext) (binding: IRBinding) (builder: IRBuil
         | _ -> false
 
     let guardLines =
-        if isStaticallyNonEmpty then []
+        // The 3-arg (init) form defines the empty fold as init, so it never
+        // needs an emptiness guard, static or dynamic.
+        if isStaticallyNonEmpty || initExpr.IsSome then []
         else [
             sprintf "%s// reduce: dynamic extent — runtime non-emptiness guard" ind
             sprintf "%sif (%s == 0) { std::cerr << \"reduce: empty array, no reduction possible\" << std::endl; std::abort(); }" ind boundExpr
@@ -6551,10 +6731,16 @@ and genReduceBinding (ctx: CodeGenContext) (binding: IRBinding) (builder: IRBuil
             // type-checks without narrowing/conversion warnings.
             let (wrapperCode, wname) = genCallableWrapper name callable
             let wrapperLines = wrapperCode |> List.map (fun s -> ind + s)
+            // Seed and loop start: without init, seed = arr[0], fold from 1;
+            // with init, seed = init, fold over ALL elements from 0.
+            let (seedStr, loopStart) =
+                match initExpr with
+                | Some initE -> (exprToCppCtx ctx initE, "0")
+                | None -> (elemAt "0", "1")
             elemErrCode @ guardLines @ wrapperLines @ [
                 sprintf "%s// reduce: accumulator loop, eager" ind
-                sprintf "%s%s %s = %s;" ind elemStr name (elemAt "0")
-                sprintf "%sfor (size_t __ri = 1; __ri < %s; __ri++) {" ind boundExpr
+                sprintf "%s%s %s = %s;" ind elemStr name seedStr
+                sprintf "%sfor (size_t __ri = %s; __ri < %s; __ri++) {" ind loopStart boundExpr
                 sprintf "%s    %s = %s(%s, %s);" ind name wname name (elemAt "__ri")
                 sprintf "%s}" ind
             ]
@@ -6896,30 +7082,20 @@ let genFuncBody (ctx: CodeGenContext) (builder: IRBuilder) (names: Map<IRId, str
         let varName = sprintf "__v%d" id
         match value with
         | IRForRange (vid, lo, hi, forBody) ->
-            let loopVar = sprintf "__k%d" vid
-            let loStr = exprToCpp currentNames lo
-            let hiStr = exprToCpp currentNames hi
-            let innerNames = Map.add vid loopVar currentNames
-            let (bodyLets, _) = deepUnroll forBody
-            let mutable bodyNames = innerNames
-            let bodyStmts = bodyLets |> List.collect (fun (bid, bval) ->
-                let bName = sprintf "__v%d" bid
-                match bval with
-                | IRAssign (target, v) ->
-                    let targetStr =
-                        match target with
-                        | LVVar tid -> Map.tryFind tid bodyNames |> Option.defaultValue (sprintf "__v%d" tid)
-                        | _ -> exprToCpp bodyNames target
-                    bodyNames <- Map.add bid bName bodyNames
-                    [sprintf "%s    %s = %s;" indent targetStr (exprToCpp bodyNames v)]
-                | _ ->
-                    let valStr = exprToCpp bodyNames bval
-                    bodyNames <- Map.add bid bName bodyNames
-                    [sprintf "%s    auto %s = %s;" indent bName valStr])
+            // Route through genForRangeBinding — the recursive binding-level
+            // renderer — so nested for-in loops (and any statement form its
+            // genBinding dispatch supports) work inside FUNCTION bodies
+            // exactly as they do at module level. The old inline renderer
+            // here was flat: a nested IRForRange fell through exprToCpp and
+            // emitted an unsupported-expression marker.
+            let bodyCtx = { ctx with VarNames = currentNames; Indent = bodyIndent }
+            let tempBinding = {
+                Id = id; Name = varName; Type = IRTUnit
+                Value = value; IsConst = true; IsMutable = false
+            }
+            let (code, _) = genForRangeBinding bodyCtx tempBinding builder vid lo hi forBody
             currentNames <- Map.add id varName currentNames
-            [forLoopFrom indent loopVar loStr hiStr]
-            @ bodyStmts
-            @ [sprintf "%s}" indent]
+            code
         | IRAssign (target, v) ->
             let targetStr =
                 match target with
@@ -6954,6 +7130,20 @@ let genFuncBody (ctx: CodeGenContext) (builder: IRBuilder) (names: Map<IRId, str
             // mirrors what genBinding does at the module level.
             let bodyCtx = { ctx with VarNames = currentNames; Indent = bodyIndent }
             let code = genApplyCombinator bodyCtx varName info builder
+            currentNames <- Map.add id varName currentNames
+            code
+        | IRArrayLit _ ->
+            // Array literal as a function-body let (e.g. a locally built
+            // buffer that loops then fill): route through genBinding, whose
+            // IRArrayLit arm emits the statement form (extents + allocate +
+            // per-element init). The default arm's exprToCpp has no inline
+            // rendering for array literals.
+            let bodyCtx = { ctx with VarNames = currentNames; Indent = bodyIndent }
+            let tempBinding = {
+                Id = id; Name = varName; Type = inferExprType value
+                Value = value; IsConst = false; IsMutable = true
+            }
+            let (code, _) = genBinding bodyCtx tempBinding builder
             currentNames <- Map.add id varName currentNames
             code
         | IRMask _ | IRIntersect _ | IRUnion _ | IRSort _ | IRUnique _ | IRTranspose _ | IRDecompact _ | IRArrayNegate _ | IRArrayConjugate _ | IRGram _ ->
@@ -7083,26 +7273,25 @@ let genFuncDef (ctx: CodeGenContext) (builder: IRBuilder) (funcDef: IRFuncDef) :
     (code, ctx')
 
 /// Generate a function as a C++ lambda (for functions that capture module-level bindings)
-let genFuncDefAsLambda (ctx: CodeGenContext) (funcDef: IRFuncDef) : string list * CodeGenContext =
+let genFuncDefAsLambda (ctx: CodeGenContext) (builder: IRBuilder) (funcDef: IRFuncDef) : string list * CodeGenContext =
     let ind = indentStr ctx
-    
+
     // Array params are wrappers; same approach as genFuncDef.
-    let paramList = 
-        funcDef.Params 
-        |> List.map (fun p -> 
+    let paramList =
+        funcDef.Params
+        |> List.map (fun p ->
             match p.Type with
             | ArrayElem arr -> sprintf "%s %s" (cppArrayTypeStr arr) p.Name
             | _ -> sprintf "%s %s" (irTypeToCpp p.Type) p.Name)
         |> String.concat ", "
-    
-    let retType = 
+
+    let retType =
         match funcDef.RetType with
         | IRTInfer _ -> irTypeToCpp (inferExprType funcDef.Body)
         | ArrayElem arr -> cppArrayTypeStr arr
         | t -> irTypeToCpp t
-    
+
     let bodyNames = funcDef.Params |> List.fold (fun m p -> Map.add p.VarId p.Name m) ctx.VarNames
-    let bodyStr = exprToCpp bodyNames funcDef.Body
     let safeName = sanitizeCppName funcDef.Name
     // std::function type with one param type per Blade param (no companion args).
     let paramTypeList =
@@ -7113,11 +7302,19 @@ let genFuncDefAsLambda (ctx: CodeGenContext) (funcDef: IRFuncDef) : string list 
             | _ -> irTypeToCpp p.Type)
         |> String.concat ", "
     let funcType = sprintf "std::function<%s(%s)>" retType paramTypeList
+    // Statement-form body via genFuncBody — the same renderer proper C++
+    // functions use — so for-in loops, local array literals, and element
+    // assignment work in captured functions too. (The old inline
+    // `return <exprToCpp body>` form silently DROPPED loop and assignment
+    // statements: a captured function containing a for-in compiled to just
+    // its final expression.)
+    let bodyInd = ind + "    "
+    let bodyCtx = { ctx with VarNames = bodyNames; Indent = ctx.Indent + 1 }
+    let bodyStmts = genFuncBody bodyCtx builder bodyNames bodyInd funcDef.Body
     let code =
-        if isUnitExpr funcDef.Body then
-            [sprintf "%s%s %s = [&](%s) { %s; };" ind funcType safeName paramList bodyStr]
-        else
-            [sprintf "%s%s %s = [&](%s) -> %s { return %s; };" ind funcType safeName paramList retType bodyStr]
+        [sprintf "%s%s %s = [&](%s) -> %s {" ind funcType safeName paramList retType]
+        @ bodyStmts
+        @ [sprintf "%s};" ind]
     let ctx' = addVarName funcDef.Id funcDef.Name ctx
     (code, ctx')
 
@@ -7261,7 +7458,7 @@ let genModule (modul: IRModule) (builder: IRBuilder) : string list * string list
                 (fc, bc @ code @ [""], c')
             | Choice2Of2 funcDef ->
                 if hasFreeVarsCheck funcDef c then
-                    let (code, c') = genFuncDefAsLambda c funcDef
+                    let (code, c') = genFuncDefAsLambda c builder funcDef
                     (fc, bc @ code @ [""], c')
                 else
                     let (code, c') = genFuncDef c builder funcDef
@@ -7347,7 +7544,7 @@ let genModuleSplit (modul: IRModule) (builder: IRBuilder) : string list * string
                     // Lambda-as-binding (closure definition): follows the
                     // current phase — setup if before the first compute, else
                     // compute — so it never floats across a dependency.
-                    let (code, c') = genFuncDefAsLambda c funcDef
+                    let (code, c') = genFuncDefAsLambda c builder funcDef
                     if seen then (fc, sc, cc @ code @ [""], true, c')
                     else (fc, sc @ code @ [""], cc, false, c')
                 else
@@ -7871,7 +8068,12 @@ let genMainProgram (modul: IRModule) (testName: string) : string =
     (cudaKernelDefsCell ()).Value <- []
     (symmDeclsCell ()).Value <- []
     let builder = IRBuilder()
-    
+    // Codegen-synthesized ids (sequence children, __s1 stages, __ret temps)
+    // must not collide with typecheck/lowering ids arriving in the module —
+    // a reused id re-registers the original variable's name in VarNames.
+    // 2^30 is far above any real program's id count.
+    builder.EnsureAtLeast(0x40000000)
+
     let includes = genIncludes ()
     let (funcDefs, bindCode) = genModule modul builder
 
@@ -7927,6 +8129,7 @@ let genProgramFromIR (program: IRProgram) (testName: string) : string =
 /// Generate C++ struct definition from IRTDStruct
 let genSelfContainedProgram (modul: IRModule) (testName: string) : string =
     let builder = IRBuilder()
+    builder.EnsureAtLeast(0x40000000)  // see genMainProgram: keep codegen ids disjoint
     // Reset the CUDA kernel collector for this program; genCudaKernel appends
     // during genModule. Read afterward via getCudaFileContent for the .cu file.
     (cudaKernelDefsCell ()).Value <- []
@@ -7979,6 +8182,7 @@ let genSelfContainedProgram (modul: IRModule) (testName: string) : string =
 /// Returns (mainFileContent, headerFileContent)
 let genProgramWithExternalRuntime (modul: IRModule) (testName: string) : string * string =
     let builder = IRBuilder()
+    builder.EnsureAtLeast(0x40000000)  // see genMainProgram: keep codegen ids disjoint
     
     let includes =
         // See genSelfContainedProgram: netcdf C API needed only for provider reads.

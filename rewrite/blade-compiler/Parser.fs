@@ -1406,9 +1406,12 @@ and parsePrimary (tokens: Token list) : ParseResult<Expr> =
             let line, col = currentPos afterComma
             error "decompact expects a single integer dimension index: decompact(A, d)" line col)
     
-    // reduce(array, op) — fold innermost dim by binary kernel.
+    // reduce(array, op[, init]) — fold innermost dim by binary kernel.
     // The kernel is optional; if omitted, defaults to (+).
     // Accept operator sections like (+) the same way object_for does.
+    // The optional 3rd argument is the fold's initial accumulator: the fold
+    // computes init ⊕ a0 ⊕ a1 ⊕ ..., and an EMPTY array reduces to init
+    // (without init, empty inputs are rejected/guarded).
     | Some (TokKeyword KwReduce) ->
         advance tokens |> expect TokLParen >>= fun _ afterLParen ->
         parseExprImpl afterLParen >>= fun array afterArr ->
@@ -1416,12 +1419,19 @@ and parsePrimary (tokens: Token list) : ParseResult<Expr> =
         | Some TokRParen ->
             // 1-arg form: reduce(arr) ≡ reduce(arr, (+))
             expect TokRParen afterArr >>= fun _ remaining ->
-            success (ExprReduce (array, ExprSection OpAdd)) remaining
+            success (ExprReduce (array, ExprSection OpAdd, None)) remaining
         | _ ->
             expect TokComma afterArr >>= fun _ afterComma ->
             parseExprImpl afterComma >>= fun op afterOp ->
-            expect TokRParen afterOp >>= fun _ remaining ->
-            success (ExprReduce (array, op)) remaining
+            match peek afterOp with
+            | Some TokRParen ->
+                expect TokRParen afterOp >>= fun _ remaining ->
+                success (ExprReduce (array, op, None)) remaining
+            | _ ->
+                expect TokComma afterOp >>= fun _ afterComma2 ->
+                parseExprImpl afterComma2 >>= fun initE afterInit ->
+                expect TokRParen afterInit >>= fun _ remaining ->
+                success (ExprReduce (array, op, Some initE)) remaining
 
     // conj(x) — complex conjugate. Built-in unary op (identity on real,
     // conjugate on complex). Function-call surface form; lowers to the
@@ -1896,6 +1906,9 @@ and skipTerminator toks =
     | _ -> toks
 
 /// Parse the body of a for-in loop: { stmt; stmt; ... }
+/// Accepts the same statement forms as parseBlock, including NESTED for-in
+/// loops (required by the ML-module layers and the grad transform, whose
+/// generated adjoint loops mirror the forward nesting).
 and parseForInBody (tokens: Token list) : ParseResult<Stmt list> =
     let rec loop stmts toks =
         let toks = skipNL toks
@@ -1911,6 +1924,35 @@ and parseForInBody (tokens: Token list) : ParseResult<Stmt list> =
             advance toks |> parseLetStmt >>= fun stmt remaining ->
             let remaining = skipTerminator remaining
             loop (spanned stmt :: stmts) remaining
+        | Some (TokKeyword KwFor) ->
+            // Nested for-in: same disambiguation as parseBlock (an actual
+            // `for IDENT in` starts an imperative loop; anything else falls
+            // through to the expression parser, e.g. loop-object `for`).
+            let afterFor = advance toks
+            match peek afterFor with
+            | Some (TokIdent varName) ->
+                let afterIdent = advance afterFor
+                match peek afterIdent with
+                | Some (TokKeyword KwIn) ->
+                    let afterIn = advance afterIdent
+                    parseExprImpl afterIn >>= fun rangeExpr afterRange ->
+                    let afterRange = skipNL afterRange
+                    match peek afterRange with
+                    | Some TokLBrace ->
+                        advance afterRange |> parseForInBody >>= fun bodyStmts remaining ->
+                        let remaining = skipTerminator remaining
+                        loop (spanned (StmtForIn (varName, rangeExpr, bodyStmts)) :: stmts) remaining
+                    | _ ->
+                        let line, col = currentPos afterRange
+                        error "Expected '{' after for-in range expression" line col
+                | _ ->
+                    parseExprImpl toks >>= fun expr remaining ->
+                    let remaining = skipTerminator remaining
+                    loop (spanned (StmtExpr expr) :: stmts) remaining
+            | _ ->
+                parseExprImpl toks >>= fun expr remaining ->
+                let remaining = skipTerminator remaining
+                loop (spanned (StmtExpr expr) :: stmts) remaining
         | Some _ ->
             // Parse expression (includes assignments via parseAssignment)
             parseExprImpl toks >>= fun expr remaining ->
@@ -2000,8 +2042,16 @@ let parseParamDecl (tokens: Token list) : ParseResult<ParamDecl> =
     expectIdent tokens >>= fun name afterName ->
     match peek afterName with
     | Some TokColon ->
-        advance afterName |> parseTypeExpr >>= fun ty remaining ->
-        success { Name = name; Type = Some ty; Mutability = Immutable } remaining
+        // Optional mutability marker before the type: `x: mut T`
+        // (formalism §2.7 — permits callee mutation; used by grad's
+        // gradient out-buffers). All params pass by reference already,
+        // so this is a CHECKING property, not a calling-convention one.
+        let mutability, afterAnnot =
+            match peek (advance afterName) with
+            | Some (TokKeyword KwMut) -> Mutable, advance (advance afterName)
+            | _ -> Immutable, advance afterName
+        parseTypeExpr afterAnnot >>= fun ty remaining ->
+        success { Name = name; Type = Some ty; Mutability = mutability } remaining
     | _ ->
         success { Name = name; Type = None; Mutability = Immutable } afterName
 

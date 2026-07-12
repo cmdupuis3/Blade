@@ -1,0 +1,13 @@
+// TEST: Intrinsics Scalar Basics
+// ============================================================================
+// Scalar math intrinsics (exp/log/sqrt/tanh) as plain calls. Values pinned at
+// full double precision (EXPECT compares at 1e-9 relative tolerance).
+// ============================================================================
+let e1 = exp(1.0)
+let l2 = log(2.0)
+let s2 = sqrt(2.0)
+let t1 = tanh(1.0)
+// EXPECT: e1 = 2.718281828459045
+// EXPECT: l2 = 0.6931471805599453
+// EXPECT: s2 = 1.4142135623730951
+// EXPECT: t1 = 0.7615941559557649

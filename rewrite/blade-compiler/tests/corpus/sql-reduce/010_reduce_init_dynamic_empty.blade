@@ -1,0 +1,11 @@
+// TEST: Reduce Init Dynamic Empty
+// A dynamically-empty operand (a filter nothing passes) reduces to init with
+// NO runtime abort — the 3-arg form emits no emptiness guard. This is SQL's
+// "SUM over an empty WHERE result is the identity, not an error".
+let A = [1.0, 2.0, 3.0]
+let m = mask(A, lambda(x) -> x > 100.0)
+let hot = compound(A, m)
+let n = extents(hot)
+let total = reduce(hot, (+), 0.0)
+// EXPECT: n = 0
+// EXPECT: total = 0.0

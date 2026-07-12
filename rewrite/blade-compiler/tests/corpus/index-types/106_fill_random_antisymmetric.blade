@@ -1,0 +1,11 @@
+// TEST: Fill Random Antisymmetric
+// fill_random over AntisymIdx draws one value per STRICT cell; diagonals are
+// implicit zeros (not stored, not drawn); transposed reads see the negated
+// canonical draw.
+let A: Array<Int64 like AntisymIdx<2, 3>> = fill_random(10)
+let diagZero = A(1, 1) == 0
+let antiOk = A(0, 2) == 0 - A(2, 0)
+let inRange = A(0, 1) >= 0 && A(0, 1) < 10
+// EXPECT: diagZero = true
+// EXPECT: antiOk = true
+// EXPECT: inRange = true

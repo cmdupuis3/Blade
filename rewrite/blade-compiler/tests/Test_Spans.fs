@@ -103,5 +103,44 @@ let runSpanTests () : BlockResult =
     check "formatCompileError includes line:col"
         (formatted.Contains "3:") (sprintf "got: %s" formatted)
 
+    // -- `let static` assertion: fold or fail loudly ----------------------
+    // A static whose RHS needs a runtime value is a compile error at the
+    // static decl's own line, with the assertion wording.
+    let firstErr (src: string) : (int * string) option =
+        match Parser.parseProgram src with
+        | Error _ -> None
+        | Ok program ->
+            match TypeCheck.typeCheck program with
+            | Error (e :: _) -> Some (e.Span.StartLine, TypeEnv.formatTypeError e.Error)
+            | _ -> None
+    let assertSrc =
+        "let runtime_v = 41\n" +
+        "\n" +
+        "let static bad = runtime_v + 1\n" +
+        "let r = bad\n"
+    check "static assertion: unfoldable `let static` errors at its line"
+        (match firstErr assertSrc with
+         | Some (3, msg) -> msg.Contains "does not evaluate at compile time"
+         | _ -> false)
+        (sprintf "got %A" (firstErr assertSrc))
+
+    // A lambda-valued static declares a function, not a foldable value —
+    // exempt from the assertion.
+    let lambdaSrc =
+        "let static twice = lambda(x) -> x * 2.0\n" +
+        "let y = twice(2.0)\n"
+    check "static assertion: lambda static stays legal"
+        (firstErr lambdaSrc = None)
+        (sprintf "got %A" (firstErr lambdaSrc))
+
+    // A destructured static folds (leaves bound by bindPattern) — no error.
+    let tupleSrc =
+        "static function pr() -> (Int64, Int64) = (4, 1)\n" +
+        "let static (a, b) = pr()\n" +
+        "let r = a + b\n"
+    check "static assertion: destructured static folds without error"
+        (firstErr tupleSrc = None)
+        (sprintf "got %A" (firstErr tupleSrc))
+
     printFooter "Error Locations" [sprintf "%d passed" passed; sprintf "%d failure(s)" failed]
     { Block = "Error Locations"; Passed = passed; Failed = failed; Skipped = 0; FailedNames = failedNames }

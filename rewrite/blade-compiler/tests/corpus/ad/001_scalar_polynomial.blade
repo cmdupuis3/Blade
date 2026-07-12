@@ -1,0 +1,9 @@
+// TEST: AD Scalar Polynomial
+// ============================================================================
+// grad() basics: f(x) = x^3 + 2x, differentiated at x = 2.
+// grad(f) for scalar-only params returns (primal, dscalars...).
+// ============================================================================
+function f(x: Float) -> Float = x ^ 3 + 2.0 * x
+let (fv, dfdx) = grad(f)(2.0)
+// EXPECT: fv = 12.0
+// EXPECT: dfdx = 14.0

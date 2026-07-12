@@ -242,27 +242,22 @@ let runDifferentialTimingTests () : Blade.Tests.TestHarness.BlockResult =
         // clause, which switches full-hypercube iteration to canonical-tuple
         // (triangular) iteration. Theoretical ceiling: r! (one symmetric group).
         //
-        // WHAT LICENSES THE TRIANGULAR ITERATION (corrected model): `comm`
-        // declares the arguments interchangeable FOR ITERATION (it is NOT an
-        // assertion that g(x,y) = g(y,x) — a comm kernel can still be Reynolds-
-        // antisymmetrized to nonzero). The compiler then grants triangular
-        // iteration (SymcomState SCCommutative/SCBoth) when the comm-grouped
-        // positions share an INDEX-TYPE IDENTITY — see IR.indexSpacesMatch:
-        // same array (fast path), same semantic Tag, or the same NAMED index
-        // type (same extent variable/param). It deliberately does NOT match on
-        // bare extent equality. This is the §14.6 product-symmetry rule
-        // ("commutativity is the license, shared index spaces are the payoff;
-        // array identity is sufficient but not necessary") — which the COMPILER
-        // implements ahead of the formalism's §13.2 (that older text allowed
-        // only array identity).
+        // WHAT LICENSES THE TRIANGULAR ITERATION (arc-1 corrected model):
+        // `comm` declares the arguments interchangeable FOR ITERATION (it is
+        // NOT an assertion that g(x,y) = g(y,x) — a comm kernel can still be
+        // Reynolds-antisymmetrized to nonzero). The compiler grants triangular
+        // iteration (SCCommutative/SCBoth) only when the comm-grouped
+        // positions hold the SAME ARRAY (identity at the call site). Nominal
+        // index-type identity across DISTINCT arrays licenses nothing — the
+        // old §14.6 "shared index spaces are the payoff" rule is refuted
+        // (proofs.md shared_units_insufficient) and was removed; see corpus
+        // symmetry/014 for the pinned rectangular behavior. For a repeated
+        // MULTI-DIM array the license is the JOINT simplex over compound
+        // index tuples (r! once, docs/formalism.md §12.4), realized by level
+        // fusion (IR.fuseJointSLevels) — never per-dimension.
         //
         // These cases use method_for(A, A, ...) — the same array repeated —
-        // which hits the array-identity fast path. That is a valid instance of
-        // shared index-type identity; it is not the only one. A distinct-arrays
-        // /shared-named-index-type case would exercise the more general path and
-        // is a worthwhile addition once the surface syntax is confirmed (left
-        // out here rather than guessed, since a mis-typed case would silently
-        // fall to SCNeither and measure nothing).
+        // which is exactly the licensed situation.
         // -------------------------------------------------------------------
         // Heavy kernel body, written as a block-bodied lambda with a chain of
         // local `let` accumulators (Blade DOES support let bindings in a `{ }`

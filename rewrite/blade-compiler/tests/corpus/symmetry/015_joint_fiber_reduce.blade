@@ -1,0 +1,14 @@
+// TEST: Joint Product Symmetry: Fiber Kernel
+// The formalism's comoment shape: a comm kernel consuming a Time fiber from
+// each copy of a (Lat, Lon, Time) array. The (Lat, Lon) S-block fuses into one
+// compound axis (extent 4); output is joint SymIdx<2, 4>. Fiber sums:
+// s = [3, 7, 11, 15] (flat p over Lat x Lon); cell (p1 <= p2) = s_p1 + s_p2.
+type LatIdx = Idx<2>
+type LonIdx = Idx<2>
+type TimeIdx = Idx<2>
+let A: Array<Float64 like LatIdx, LonIdx, TimeIdx> = [[[1.0, 2.0], [3.0, 4.0]], [[5.0, 6.0], [7.0, 8.0]]]
+let L = method_for(A, A)
+let k = lambda(a: Array<Float64 like TimeIdx>, b: Array<Float64 like TimeIdx>) where comm(a, b) -> reduce(a, (+)) + reduce(b, (+))
+let result = L <@> k |> compute
+// p1=0: 6,10,14,18 | p1=1: 14,18,22 | p1=2: 22,26 | p1=3: 30
+// EXPECT: result = [6.0, 10.0, 14.0, 18.0, 14.0, 18.0, 22.0, 22.0, 26.0, 30.0]

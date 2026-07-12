@@ -1,0 +1,7 @@
+// TEST: ML Op Non-Static Config (rejects)
+// ============================================================================
+// ML op configs must be `let static` bindings — a runtime binding is
+// rejected at elaboration with steering.
+// ============================================================================
+let runtime_cfg = ([(0, 0, 1)], [(0, 0, 1)], [(0, 0, 1)])
+let bad = tensor_product(runtime_cfg, [1.0], [1.0], [1.0])

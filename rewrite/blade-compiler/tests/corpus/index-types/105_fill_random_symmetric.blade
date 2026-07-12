@@ -1,0 +1,10 @@
+// TEST: Fill Random Symmetric
+// Generalized fill_random (arc 3, formalism 3.5): one draw per STORED cell —
+// the compact pool is filled linearly, so a symmetric array is symmetric by
+// construction (a canonical cell and its transposed read are the SAME cell)
+// and every draw lies in [0, mod). Properties are pinned (draws are random).
+let S: Array<Int64 like SymIdx<2, 3>> = fill_random(10)
+let symOk = S(0, 2) == S(2, 0)
+let inRange = S(0, 0) >= 0 && S(0, 0) < 10 && S(1, 2) >= 0 && S(1, 2) < 10
+// EXPECT: symOk = true
+// EXPECT: inRange = true

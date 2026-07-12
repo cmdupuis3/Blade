@@ -1,0 +1,12 @@
+// TEST: AD Non-Additive Overwrite (rejects)
+// ============================================================================
+// Non-additive reassignment of a differentiable scalar is rejected: the
+// reverse sweep re-evaluates forward expressions at FINAL values, so the
+// pre-statement value `t` needs would be lost. The error steers to SSA lets.
+// ============================================================================
+function bad(x: Float) -> Float = {
+    let mut t = x * 2.0
+    t = t * t
+    t + x
+}
+let (bv, dbv) = grad(bad)(3.0)

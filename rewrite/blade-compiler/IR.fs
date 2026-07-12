@@ -35,6 +35,8 @@ type IRBinOpMode =
 /// Unary operations
 type IRUnaryOp =
     | IRNeg | IRNot | IRConj
+    | IRMath of string  // scalar math intrinsic (exp/log/sqrt/...);
+                        // renders as std::<name>(arg), result Float64
 
 /// IR Expressions - SSA-like representation
 type IRExpr =
@@ -99,7 +101,7 @@ type IRExpr =
     | IRGroupBy of values: IRExpr * grouping: IRExpr  // group_by(vals, gk) - apply grouping
     | IRGroupKeys of keys: IRExpr list               // group_keys(keys1, keys2, ...) - CSR grouping; multi-key ⇒ compound dispatch
     | IRSort of array: IRExpr * key: IRExpr          // sort(arr, key) - stable ascending sort by key
-    | IRReduce of array: IRExpr * kernel: IRExpr     // reduce(arr, op) - fold innermost dim by kernel
+    | IRReduce of array: IRExpr * kernel: IRExpr * init: IRExpr option  // reduce(arr, op[, init]) - fold innermost dim; init seeds the fold and defines the empty result
     | IRZip of IRExpr list
     | IRAlign of arrays: IRExpr list * spec: AlignSpec
     | IRStack of IRExpr list
@@ -1067,7 +1069,12 @@ type IndexSpaceInfo = {
 }
 
 
-/// Check if two index spaces are "shared" (same logical index space)
+/// Check if two index spaces are "shared" (same logical index space).
+/// DIAGNOSTIC-ONLY since arc 1: nominal index-space identity is NOT a
+/// symmetry license — distinct arrays over the same named index type get NO
+/// triangular grouping (proofs.md shared_units_insufficient refuted the old
+/// §14.6 rule; grouping requires array identity, see rawAxisGroups). Kept for
+/// alignment diagnostics and future nominal-typing checks.
 let indexSpacesMatch (a: IndexSpaceInfo) (b: IndexSpaceInfo) : bool =
     if a.Kind <> SDimension || b.Kind <> SDimension then false
     else
@@ -1120,6 +1127,18 @@ type LoopLevelInfo = {
     RankIndex: int
     GlobalLevelIndex: int
     IndexSpace: IndexSpaceInfo
+    /// Arc 1 (joint product symmetry): Some factors marks this level as the
+    /// FUSION of its argument's entire plain-dense S-block into one compound
+    /// axis (extent = product of the factors' extents; factors = the original
+    /// S-dim records in order). Iteration decodes per-dim coordinates from the
+    /// compound index (row-major = lex enumeration order). Fusion is what makes
+    /// cross-argument commutative grouping sound for multi-dim identity groups:
+    /// one identity group licenses only the JOINT symmetry over whole argument
+    /// index tuples (docs/formalism.md §12.4, proofs.md diagonal_group_law) —
+    /// never per-dimension partnering (per_dim_swap_not_symmetry), and never
+    /// across distinct arrays via shared index spaces
+    /// (shared_units_insufficient).
+    FusedFactors: IRIndexType list option
 }
 
 /// Compute per-array S-dimension counts (accounting for arity expansion)
@@ -1175,6 +1194,7 @@ let buildRawLoopLevels (arrayTypes: IRArrayType list) (sDimsPerArray: int list) 
                             Kind = idx.Kind
                             SourceRank = idx.Rank
                         }
+                        FusedFactors = None
                     }]
                     globalIdx <- globalIdx + 1
                     arrLevel <- arrLevel + 1
@@ -1182,20 +1202,86 @@ let buildRawLoopLevels (arrayTypes: IRArrayType list) (sDimsPerArray: int list) 
     
     levels
 
-/// THE single canonical grouping rule, operating on RAW levels. Assigns each
-/// raw level an axis-group id (in first-appearance order). Two levels share a
-/// group iff they are product-symmetric partners under either multiplicity axis
-/// of the index-type scheme:
+/// Arc 1 (corrected product symmetry): fuse each eligible argument's plain-
+/// dense multi-level S-block into a SINGLE compound loop level, so that
+/// cross-argument commutative grouping operates on whole argument index tuples
+/// — the JOINT symmetry, which is the only symmetry a single identity group
+/// licenses (docs/formalism.md §12.4; proofs.md diagonal_group_law). The old
+/// per-dimension partnering produced SymIdx per data dimension and an (r!)^d
+/// claim, both refuted (per_dim_swap_not_symmetry, counting_general_C).
+///
+/// Eligibility (all required):
+///   - the argument sits in a comm group together with at least one OTHER
+///     position holding the SAME array (identity; shared index spaces license
+///     nothing: shared_units_insufficient),
+///   - it contributes >= 2 S-levels, ALL plain dense rank-1 records (SymNone,
+///     IxKPlain, no dependencies) — symmetric/ragged/dep/compound records do
+///     not fuse (their joint form needs unrank decode; such arguments simply
+///     do not group across positions), and
+///   - the source is a real array (not a range/reverse virtual).
+/// Identity partners share an array type, so eligibility is uniform across a
+/// group: every member fuses or none does — a fused level therefore always
+/// finds its partners fused.
+let fuseJointSLevels
+    (identities: ArrayIdentity list)
+    (commGroups: int list list)
+    (arrayTypes: IRArrayType list)
+    (rawLevels: LoopLevelInfo list) : LoopLevelInfo list =
+    let hasIdentityPartner k =
+        commGroups |> List.exists (fun cg ->
+            List.contains k cg &&
+            cg |> List.exists (fun q ->
+                q <> k && q < identities.Length && k < identities.Length &&
+                sameIdentity identities.[k] identities.[q]))
+    let sRecordsByArray =
+        arrayTypes |> List.map (fun arr ->
+            arr.IndexTypes |> List.filter (fun idx -> idx.Kind = SDimension))
+    let productExtent (es: IRExpr list) : IRExpr =
+        es |> List.reduce (fun a b ->
+            match a, b with
+            | IRLit (IRLitInt x), IRLit (IRLitInt y) -> IRLit (IRLitInt (x * y))
+            | _ -> IRBinOp (IRElementwise, IRMul, a, b))
+    let fused =
+        rawLevels
+        |> List.groupBy (fun l -> l.ArrayIndex)
+        |> List.collect (fun (arrIdx, lvls) ->
+            let recs = if arrIdx < sRecordsByArray.Length then sRecordsByArray.[arrIdx] else []
+            let isVirtual = arrIdx < arrayTypes.Length && arrayTypes.[arrIdx].IsVirtual
+            let allPlainDense =
+                recs.Length = lvls.Length &&
+                recs |> List.forall (fun r ->
+                    r.Rank = 1 && r.Symmetry = SymNone && r.IxKind = IxKPlain &&
+                    List.isEmpty r.Dependencies)
+            if not isVirtual && lvls.Length >= 2 && hasIdentityPartner arrIdx && allPlainDense then
+                let rep = List.head lvls
+                [ { rep with
+                      LocalDimIndex = 0
+                      RankIndex = 0
+                      IndexSpace =
+                        { Tag = None
+                          Extent = productExtent (recs |> List.map (fun r -> r.Extent))
+                          Symmetry = SymNone
+                          Kind = SDimension
+                          SourceRank = recs.Length }
+                      FusedFactors = Some recs } ]
+            else lvls)
+    fused |> List.mapi (fun i lv -> { lv with GlobalLevelIndex = i })
+
+/// THE single canonical grouping rule, operating on RAW (post-fusion) levels.
+/// Assigns each level an axis-group id (in first-appearance order). Two levels
+/// share a group iff they are product-symmetric partners under either
+/// multiplicity axis of the index-type scheme:
 ///   (A) WITHIN one index type: consecutive arity components of a single
 ///       symmetric/antisymmetric record (same array, same LocalDimIndex,
 ///       consecutive RankIndex).
-///   (B) ACROSS arrays: the same index space recurring in a commutative group —
-///       same comm group, same positional axis (LocalDimIndex), and the index
-///       types AGREE there via array identity (same array, the short-circuit,
-///       which also covers anonymous literal extents) OR nominal index-type
-///       identity (indexSpacesMatch). Position is required: A<Lat,Lon> and
-///       B<Lon,Lat> do NOT group without an explicit transpose; A<Lat,Lon> and
-///       B<Lat,Depth> group only the Lat axis.
+///   (B) ACROSS arguments: same comm group AND SAME ARRAY (identity) AND each
+///       side's S-block is a single level (d = 1, or the fused compound level
+///       from fuseJointSLevels). Corrected per docs/formalism.md §11.2/§12.4:
+///       identity is REQUIRED — distinct arrays sharing a named index space
+///       license nothing (proofs.md shared_units_insufficient refuted the old
+///       §14.6 nominal-identity rule) — and per-dimension partnering of a
+///       multi-dim identity group is unsound (per_dim_swap_not_symmetry);
+///       multi-dim groups reach here only through fusion, as whole-tuple axes.
 /// Both the loop reorder/iteration AND the output storage layout derive from
 /// this one function, so they cannot drift apart.
 let rawAxisGroups
@@ -1207,6 +1293,9 @@ let rawAxisGroups
     let sameArrayIdentity i j =
         i < identities.Length && j < identities.Length &&
         sameIdentity identities.[i] identities.[j]
+    let sLevelCount =
+        let counts = rawLevels |> List.countBy (fun l -> l.ArrayIndex) |> Map.ofList
+        fun arrIdx -> match counts.TryFind arrIdx with Some c -> c | None -> 0
     let mergesWith (lv: LoopLevelInfo) (prior: LoopLevelInfo) : bool =
         let withinType =
             lv.ArrayIndex = prior.ArrayIndex &&
@@ -1218,8 +1307,9 @@ let rawAxisGroups
         let acrossArray =
             inSameCommGroup lv.ArrayIndex prior.ArrayIndex &&
             lv.LocalDimIndex = prior.LocalDimIndex &&
-            (sameArrayIdentity lv.ArrayIndex prior.ArrayIndex ||
-             indexSpacesMatch lv.IndexSpace prior.IndexSpace)
+            sameArrayIdentity lv.ArrayIndex prior.ArrayIndex &&
+            sLevelCount lv.ArrayIndex = 1 &&
+            sLevelCount prior.ArrayIndex = 1
         withinType || acrossArray
     let arr = List.toArray rawLevels
     let groupOf = Array.create arr.Length -1
@@ -1233,24 +1323,26 @@ let rawAxisGroups
             nextGroup <- nextGroup + 1
     List.ofArray groupOf
 
-/// Build the loop level structure, REORDERED so that levels sharing an axis
-/// group (per rawAxisGroups) are CONTIGUOUS — grouped by axis across the
-/// repeated/comm arrays rather than by array. The output storage for product
-/// symmetry lays its symmetric dims out adjacently (SymIdx<2,Lat>, SymIdx<2,Lon>
-/// => [Lat0,Lat1,Lon0,Lon1]); the loop nest must visit dims in the SAME order
-/// for the write subscript and per-axis triangular bounds to line up with
-/// storage. Both this reorder and deduceOutputType derive their ordering from
-/// rawAxisGroups, so iteration and storage cannot disagree. The reorder is a
-/// STABLE group-by (each group's members keep their by-array relative order),
-/// which preserves per-array slice state (currentNames keyed by ArrayPosition)
-/// and RankComponent. For single-axis / single-array cases every level is its
-/// own or one shared group in emission order, so the reorder is an identity.
+/// Build the loop level structure: fuse joint S-blocks (fuseJointSLevels,
+/// arc 1), then REORDER so that levels sharing an axis group (per
+/// rawAxisGroups) are CONTIGUOUS — grouped by axis across the repeated comm
+/// arguments rather than by array. Grouped output storage lays its symmetric
+/// dims out adjacently (e.g. the joint SymIdx<2, Lat*Lon> spans its two fused
+/// levels back-to-back); the loop nest must visit dims in the SAME order for
+/// the write subscript and triangular bounds to line up with storage. Both
+/// this reorder and deduceOutputType derive their ordering from rawAxisGroups,
+/// so iteration and storage cannot disagree. The reorder is a STABLE group-by
+/// (each group's members keep their by-array relative order), which preserves
+/// per-array slice state (currentNames keyed by ArrayPosition) and
+/// RankComponent. For single-axis / single-array cases every level is its own
+/// or one shared group in emission order, so the reorder is an identity.
 let buildLoopLevelStructure
     (identities: ArrayIdentity list)
     (commGroups: int list list)
     (arrayTypes: IRArrayType list)
     (sDimsPerArray: int list) : LoopLevelInfo list =
-    let raw = buildRawLoopLevels arrayTypes sDimsPerArray
+    let raw0 = buildRawLoopLevels arrayTypes sDimsPerArray
+    let raw = fuseJointSLevels identities commGroups arrayTypes raw0
     let groups = rawAxisGroups identities commGroups raw
     // Bucket order = first appearance of each group id; stable within bucket.
     let keyed = List.zip groups raw
@@ -1323,11 +1415,19 @@ let computeAllSymcomStates
         let inSameCommGroup i j =
             commGroups |> List.exists (fun cg ->
                 List.contains i cg && List.contains j cg)
-        
+
         let sameArrayIdentity i j =
             i < identities.Length && j < identities.Length &&
             sameIdentity identities.[i] identities.[j]
-        
+
+        // Corrected commutative licensing (arc 1): identity required (shared
+        // index spaces license nothing — shared_units_insufficient), and each
+        // side's S-block must be a single level (d = 1 or fused): mirrors
+        // rawAxisGroups.mergesWith.acrossArray exactly.
+        let sLevelCount =
+            let counts = levels |> List.countBy (fun l -> l.ArrayIndex) |> Map.ofList
+            fun arrIdx -> match counts.TryFind arrIdx with Some c -> c | None -> 0
+
         let countSymmetricGroup (level: LoopLevelInfo) =
             if level.IndexSpace.Symmetry <> SymSymmetric && level.IndexSpace.Symmetry <> SymAntisymmetric then 1
             else
@@ -1352,8 +1452,9 @@ let computeAllSymcomStates
                 let thisLevel = if idx = level.GlobalLevelIndex - 1 then level else levels.[idx + 1]
                 let canContinue =
                     inSameCommGroup thisLevel.ArrayIndex priorLevel.ArrayIndex &&
-                    (sameArrayIdentity thisLevel.ArrayIndex priorLevel.ArrayIndex ||
-                     indexSpacesMatch thisLevel.IndexSpace priorLevel.IndexSpace)
+                    sameArrayIdentity thisLevel.ArrayIndex priorLevel.ArrayIndex &&
+                    sLevelCount thisLevel.ArrayIndex = 1 &&
+                    sLevelCount priorLevel.ArrayIndex = 1
                 if canContinue then
                     count <- count + 1
                     idx <- idx - 1
@@ -1375,8 +1476,9 @@ let computeAllSymcomStates
                 
                 let isCommutative =
                     inSameCommGroup level.ArrayIndex priorLevel.ArrayIndex &&
-                    (sameArrayIdentity level.ArrayIndex priorLevel.ArrayIndex ||
-                     indexSpacesMatch level.IndexSpace priorLevel.IndexSpace)
+                    sameArrayIdentity level.ArrayIndex priorLevel.ArrayIndex &&
+                    sLevelCount level.ArrayIndex = 1 &&
+                    sLevelCount priorLevel.ArrayIndex = 1
                 
                 match isSymmetric, isCommutative with
                 | false, false -> SCNeither
@@ -1395,25 +1497,20 @@ let computeAllSymcomStates
 /// divergence behind this session's product-symmetry bugs).
 ///
 /// Returns one group id per loop level (parallel to `buildLoopLevelStructure`'s
-/// output order). Two levels share a group iff they are product-symmetric
+/// output order). Two levels share a group iff they are joint-symmetric
 /// partners — i.e. iterate/store as one higher-rank symmetric index — under
 /// EITHER of the two multiplicity axes the index-type scheme allows:
 ///
 ///   (A) WITHIN one index type: consecutive arity components of a single
 ///       symmetric/antisymmetric record (a SymIdx<r> spans r levels at the same
 ///       LocalDimIndex of the same array, consecutive RankIndex).
-///   (B) ACROSS arrays: the same index space recurring in a commutative group —
-///       same comm group, same positional axis (LocalDimIndex), and the index
-///       types AGREE there, established by array identity (same array repeated,
-///       the short-circuit) OR nominal index-type identity (indexSpacesMatch:
-///       shared Tag / named extent). This is the path the nominal system is
-///       designed to reach, including DISTINCT arrays that share an index type
-///       at aligned positions (e.g. comm over A<Lat,Lon>, B<Lat,Depth> groups
-///       the Lat axis while Lon/Depth stay independent).
-///
-/// Position is required in (B): A<Lat,Lon> and B<Lon,Lat> do NOT group (tags
-/// match but at swapped positions — needs an explicit transpose). Anonymous
-/// literal extents do not establish identity (handled by indexSpacesMatch).
+///   (B) ACROSS arguments: the SAME ARRAY repeated in a commutative group,
+///       where each occurrence's S-block is one level (d = 1, or the fused
+///       compound level from fuseJointSLevels for d >= 2). Corrected (arc 1):
+///       array identity is REQUIRED — nominal index-type identity across
+///       distinct arrays licenses nothing (shared_units_insufficient) — and a
+///       multi-dim identity group forms ONE joint group over compound tuples,
+///       never one group per data dimension (per_dim_swap_not_symmetry).
 let computeAxisGroups
     (identities: ArrayIdentity list)
     (arrayTypes: IRArrayType list)
@@ -1446,65 +1543,23 @@ let computeTriangularLevels
         seen.Add g |> ignore
         priorMember)
 
-/// Compute speedup factor considering partial product symmetry
-let computePartialProductSpeedup 
+/// Compute the iteration-count speedup from the canonical axis grouping: each
+/// axis group of size g >= 2 is one joint simplex contributing g!; distinct
+/// groups multiply. This is the CORRECTED accounting (arc 1): one identity
+/// group over a d-dimensional array yields a single fused group of size r —
+/// speedup r!, never (r!)^d (per_dim_swap_not_symmetry, counting_general_C);
+/// multiplicative factors come only from DISTINCT groups (separate comm groups
+/// or within-record symmetric blocks). docs/formalism.md §12.4.
+let computePartialProductSpeedup
     (arrayTypes: IRArrayType list)
-    (identities: ArrayIdentity list) 
+    (identities: ArrayIdentity list)
     (commGroups: int list list)
     (sDimsPerArray: int list) : int64 =
-    
-    let identityGroups = partitionIntoIdentityGroups identities
-    let hasFullIdentity = 
-        identityGroups.Length = 1 && 
-        identityGroups.[0].Rank = identities.Length &&
-        identities.Length > 1
-    
-    if hasFullIdentity then
-        let allPositions = [0 .. identities.Length - 1]
-        let allCommutative = 
-            commGroups |> List.exists (fun cg ->
-                allPositions |> List.forall (fun p -> List.contains p cg))
-        
-        if allCommutative && not arrayTypes.IsEmpty then
-            let r = identities.Length
-            let d = arrayTypes.[0].IndexTypes 
-                    |> List.filter (fun idx -> idx.Kind = SDimension) 
-                    |> List.sumBy (fun idx -> idx.Rank)
-            if d > 0 then pown (factorial r) d else 1L
-        else
-            arrayTypes 
-            |> List.collect (fun arr -> arr.IndexTypes)
-            |> List.filter (fun idx -> idx.Kind = SDimension && idx.Symmetry = SymSymmetric && idx.Rank > 1)
-            |> List.fold (fun acc idx -> acc * factorial idx.Rank) 1L
-    else
-        let levels = buildLoopLevelStructure identities commGroups arrayTypes sDimsPerArray
-        let states = computeAllSymcomStates identities arrayTypes commGroups sDimsPerArray
-        
-        let mutable speedup = 1L
-        let mutable processedGroups = Set.empty
-        
-        for i, state in List.indexed states do
-            if i < levels.Length then
-                let level = levels.[i]
-                let canTriangulate = 
-                    match state with
-                    | SCSymmetric | SCCommutative | SCBoth -> true
-                    | SCNeither -> false
-                
-                if canTriangulate then
-                    let groupRank =
-                        match state with
-                        | SCSymmetric -> level.IndexSpace.SourceRank
-                        | _ -> 2  // Commutative pair
-                    
-                    let groupStart = i - groupRank + 1
-                    let groupKey = (groupStart, groupRank)
-                    
-                    if groupRank > 1 && not (Set.contains groupKey processedGroups) then
-                        speedup <- speedup * factorial groupRank
-                        processedGroups <- Set.add groupKey processedGroups
-        
-        speedup
+    let levels = buildLoopLevelStructure identities commGroups arrayTypes sDimsPerArray
+    let groups = rawAxisGroups identities commGroups levels
+    groups
+    |> List.countBy id
+    |> List.fold (fun acc (_, size) -> if size >= 2 then acc * factorial size else acc) 1L
 
 /// Compute the lower bound for triangular iteration
 let computeTriangularBound 
@@ -1631,8 +1686,14 @@ type IRBuilder() =
         let id = nextId
         nextId <- nextId + 1
         id
-    
+
     member _.CurrentId() = nextId
+    /// Raise the id floor so ids minted here can never collide with ids
+    /// minted by an earlier builder (codegen builds a fresh IRBuilder and
+    /// must not reuse typecheck/lowering-era ids — a synthetic binding
+    /// registered under a reused id hijacks the original variable's
+    /// rendered name).
+    member _.EnsureAtLeast(n: int) = if nextId < n then nextId <- n
     member _.Reset() = 
         nextId <- 0
         nextInferId <- 0
@@ -1774,6 +1835,39 @@ let deduceOutputType
                     let memberIdxs = [ for k in 0 .. levelArr.Length - 1 do if groupArr.[k] = g then yield k ]
                     let groupRank = List.length memberIdxs
                     let repLevel = levelArr.[List.head memberIdxs]
+                    match repLevel.FusedFactors with
+                    | Some factors when not factors.IsEmpty && groupRank > 1 ->
+                        // Arc 1 JOINT output record: one symmetric index of rank
+                        // groupRank over the COMPOUND extent (product of the fused
+                        // argument's per-dim extents) — SymIdx<r, prod(n_j)>, the
+                        // only sound output for one identity group over a
+                        // multi-dim array (docs/formalism.md §8.4/§12.4). The old
+                        // per-dimension SymIdx-per-dim output is refuted
+                        // (per_dim_swap_not_symmetry) and cannot even hold the
+                        // result (counting_general_C).
+                        let groupSymmetry =
+                            if isReynolds then
+                                (if isReynoldsAntisym then SymAntisymmetric else SymSymmetric)
+                            else SymSymmetric
+                        let prodExtent =
+                            factors |> List.map (fun f -> f.Extent)
+                                    |> List.reduce (fun a b ->
+                                        match a, b with
+                                        | IRLit (IRLitInt x), IRLit (IRLitInt y) -> IRLit (IRLitInt (x * y))
+                                        | _ -> IRBinOp (IRElementwise, IRMul, a, b))
+                        let template = List.head factors
+                        result <- result @ [{ template with
+                                                Extent = prodExtent
+                                                Rank = groupRank
+                                                Symmetry = groupSymmetry
+                                                Tag = None
+                                                Id = builder.FreshId() }]
+                    | Some factors ->
+                        // Defensive: a lone fused level cannot occur by
+                        // construction (identity partners fuse uniformly);
+                        // restore the source records verbatim if it ever does.
+                        result <- result @ (factors |> List.map (fun f -> { f with Id = builder.FreshId() }))
+                    | None ->
                     match sourceRecord repLevel with
                     | None -> ()
                     | Some rep ->
@@ -1893,6 +1987,12 @@ type LoopIndexBinding = {
     BoundDependencies: int list
     /// Extra offset to subtract from bound (1 for antisymmetric strict i < j)
     StrictOffset: int
+    /// Arc 1: Some d marks a FUSED joint level spanning d plain-dense source
+    /// dims of its array (extent = product of the array's first d extents).
+    /// Codegen renders the bound as extents[0]*...*extents[d-1] and each
+    /// element binding decodes its per-dim coordinate from the compound index
+    /// (row-major). None = ordinary single-dim level.
+    FusedRank: int option
     /// Whether this loop level is parallelized
     IsParallel: bool
     /// Symcom state at this level
@@ -2721,6 +2821,7 @@ let buildLoopNestCodeGen
                         ExtentDimRef = 0  // Shared index: all dims have same extent
                         BoundDependencies = deps
                         StrictOffset = strictOffset
+                        FusedRank = None
                         IsParallel = isParallel
                         State = state
                         Elements = elements
@@ -2740,13 +2841,13 @@ let buildLoopNestCodeGen
             //     iterated fully), or
             //   - chains to the NEAREST EARLIER level sharing its axis group ->
             //     descends triangularly relative to it.
-            // The grouping itself encodes the product-symmetry rule (positional-
-            // and-nominal, with array identity as the same-array short-circuit):
-            // all levels of one shared index space form a single rank-r simplex;
-            // distinct index spaces stay independent (d independent simplices ->
-            // (r!)^d). It covers same-array repetition, distinct arrays sharing a
-            // named index type at aligned positions, and within-type symmetric
-            // records uniformly.
+            // The grouping encodes the CORRECTED symmetry rule (arc 1): a
+            // repeated array under comm forms ONE rank-r simplex over its
+            // (possibly fused compound) S-axis — the joint symmetry, r! once —
+            // and distinct groups (separate comm groups, within-type symmetric
+            // records) stay independent and multiply. Never per-dimension for
+            // one group, never across distinct arrays via shared index types
+            // (docs/formalism.md §12.4).
             let axisGroupIds = computeAxisGroups identities arrayTypes commGroups sDimsPerArray
             let groupAt i = if i < axisGroupIds.Length then axisGroupIds.[i] else -1
             let iminMap = 
@@ -2822,12 +2923,21 @@ let buildLoopNestCodeGen
                     let isVirtualSource =
                         arrayPos < arrays.Length &&
                         (match arrays.[arrayPos] with IRRange _ -> true | _ -> false)
+                    match levelInfo.FusedFactors with
+                    | Some factors ->
+                        // Fused JOINT level (arc 1): one element per source dim;
+                        // each decodes its coordinate from the compound loop
+                        // index and peels one dimension (genElementBindingNew's
+                        // fused arm). RankComponent doubles as the dim position.
+                        [0 .. factors.Length - 1]
+                        |> List.map (fun rc -> mkElement arrayPos rc rc)
+                    | None ->
                     if isCompoundLevel && isVirtualSource then
                         [0 .. levelInfo.IndexSpace.SourceRank - 1]
                         |> List.map (fun rc -> mkElement arrayPos rc levelInfo.LocalDimIndex)
                     else
                         [mkElement arrayPos levelInfo.RankIndex levelInfo.LocalDimIndex]
-                
+
                 {
                     Level = level
                     IndexName = indexName
@@ -2836,6 +2946,7 @@ let buildLoopNestCodeGen
                     ExtentDimRef = levelInfo.LocalDimIndex
                     BoundDependencies = deps
                     StrictOffset = strictOffset
+                    FusedRank = levelInfo.FusedFactors |> Option.map List.length
                     IsParallel = isParallel
                     State = state
                     Elements = elements
@@ -2944,7 +3055,8 @@ let (|ExprShape|) (expr: IRExpr) : IRExpr list * (IRExpr list -> IRExpr) =
     | IRContains (a, v) -> [a; v], (function [a'; v'] -> IRContains (a', v') | _ -> badChildren "IRContains")
     | IRGroupBy (v, k) -> [v; k], (function [v'; k'] -> IRGroupBy (v', k') | _ -> badChildren "IRGroupBy")
     | IRSort (a, k) -> [a; k], (function [a'; k'] -> IRSort (a', k') | _ -> badChildren "IRSort")
-    | IRReduce (a, k) -> [a; k], (function [a'; k'] -> IRReduce (a', k') | _ -> badChildren "IRReduce")
+    | IRReduce (a, k, None) -> [a; k], (function [a'; k'] -> IRReduce (a', k', None) | _ -> badChildren "IRReduce")
+    | IRReduce (a, k, Some i) -> [a; k; i], (function [a'; k'; i'] -> IRReduce (a', k', Some i') | _ -> badChildren "IRReduce")
     | IRPolyIndex (p, i) -> [p; i], (function [p'; i'] -> IRPolyIndex (p', i') | _ -> badChildren "IRPolyIndex")
     | IRAssign (t, v) -> [t; v], (function [t'; v'] -> IRAssign (t', v') | _ -> badChildren "IRAssign")
     | IRCurry (arr, idx, r) -> [arr; idx], (function [arr'; idx'] -> IRCurry (arr', idx', r) | _ -> badChildren "IRCurry")
@@ -4171,7 +4283,8 @@ let rec typeOf (expr: IRExpr) : IRType =
         (match op with
          | IRNot -> IRTScalar ETBool
          | IRNeg -> typeOf operand
-         | IRConj -> typeOf operand)
+         | IRConj -> typeOf operand
+         | IRMath _ -> IRTScalar ETFloat64)
     | IRTuple exprs -> IRTTuple (exprs |> List.map typeOf)
     | IRComplex (re, _) ->
         // Complex type derived from component width: Float32 → Complex64,
@@ -4388,7 +4501,7 @@ let rec typeOf (expr: IRExpr) : IRType =
                 let s1 = { pOuter with Rank = 1; Symmetry = SymNone }
                 mkArrayLike { la with ElemType = outElem; IndexTypes = [s0; s1] }
          | t, _ -> t)
-    | IRReduce (arr, _) ->
+    | IRReduce (arr, _, _) ->
         // Reduces innermost dim by 1. For rank-1 input, result is a scalar.
         (match typeOf arr with
          | ArrayElem a when a.IndexTypes.Length = 1 -> a.ElemType  // IRType already
@@ -4590,11 +4703,12 @@ let rec liftExpr (builder: IRBuilder) (expr: IRExpr) : IRExpr =
         wrapLets binds (IRContains (arrFinal, v'))
 
     // Single-child consumers where the array slot can hold an inline form
-    | IRReduce (arr, kernel) ->
+    | IRReduce (arr, kernel, init) ->
         let arr' = liftExpr builder arr
         let kernel' = liftExpr builder kernel
+        let init' = init |> Option.map (liftExpr builder)
         let (binds, arrFinal) = liftChild builder arr'
-        wrapLets binds (IRReduce (arrFinal, kernel'))
+        wrapLets binds (IRReduce (arrFinal, kernel', init'))
     | IRExtent (arr, dim) ->
         let arr' = liftExpr builder arr
         let (binds, arrFinal) = liftChild builder arr'
@@ -5056,6 +5170,7 @@ let ppUnaryOp = function
     | IRNeg -> "-"
     | IRNot -> "!"
     | IRConj -> "conj"
+    | IRMath name -> name
 
 /// Pretty print IR expressions with optional name mapping for variables
 let rec ppIRExprWithNames (names: Map<int, string>) indent (expr: IRExpr) =
@@ -5625,7 +5740,9 @@ let validateModule (externalIds: Set<IRId>) (modul: IRModule) : IRValidationErro
         | IRDecompact (a, _) -> checkScope scope ctx a
         | IRArrayNegate a -> checkScope scope ctx a
         | IRArrayConjugate a -> checkScope scope ctx a
-        | IRReduce (a, k) -> checkScope scope ctx a; checkScope scope ctx k
+        | IRReduce (a, k, i) ->
+            checkScope scope ctx a; checkScope scope ctx k
+            (match i with Some e -> checkScope scope ctx e | None -> ())
         | IRApplyCombinator info ->
             checkScope scope ctx info.Loop
             checkScope scope ctx info.Kernel

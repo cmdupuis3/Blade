@@ -1,0 +1,13 @@
+// TEST: Replicate Static Count
+// The replicate count may be any compile-time-known integer, not just a bare
+// literal: a `let static` value, a static-function call, and static arithmetic
+// over them all resolve during type-checking (same StaticEval the lowering
+// phase uses) and normalize to a concrete unroll factor.
+static function order() = 2
+let static base = 1
+let A = [1.0, 2.0, 3.0]
+let L = method_for(A)
+let c = L <@> lambda(x) -> x + 10.0
+let result = replicate(order() + base, c) |> compute
+// order() + base = 3 copies of [11, 12, 13]
+// EXPECT: result = [11.0, 12.0, 13.0, 11.0, 12.0, 13.0, 11.0, 12.0, 13.0]

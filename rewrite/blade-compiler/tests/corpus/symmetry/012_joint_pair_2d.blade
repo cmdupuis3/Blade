@@ -1,0 +1,13 @@
+// TEST: Joint Product Symmetry: 2D Pair
+// CORRECTED semantics (arc 1, docs/formalism.md §12.4): one identity group over
+// a 2-D array licenses only the JOINT symmetry — whole (i,j) tuples swap
+// together — so the output is SymIdx<2, 6> over the compound space (row-major
+// flat a = [1,2,3,4,5,6]), NOT SymIdx<2,2> x SymIdx<2,3> (refuted:
+// per_dim_swap_not_symmetry; that shape holds only 18 cells vs 21 unique
+// values, counting_general_C). C(7,2) = 21 canonical pairs p1 <= p2, lex order.
+let A: Array<Float64 like Idx<2>, Idx<3>> = [[1.0, 2.0, 3.0], [4.0, 5.0, 6.0]]
+let L = method_for(A, A)
+let f = lambda(x, y) where comm(x, y) -> x * y
+let result = L <@> f |> compute
+// p1=0: 1,2,3,4,5,6 | p1=1: 4,6,8,10,12 | p1=2: 9,12,15,18 | p1=3: 16,20,24 | p1=4: 25,30 | p1=5: 36
+// EXPECT: result = [1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 4.0, 6.0, 8.0, 10.0, 12.0, 9.0, 12.0, 15.0, 18.0, 16.0, 20.0, 24.0, 25.0, 30.0, 36.0]

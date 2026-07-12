@@ -274,11 +274,11 @@ Spec-only; domain rules live in libraries.
 | Clebsch-Gordan paths, `CGIdx` (via SparseIdx/constrained records), CG lookup | Near-term | ml-spec §4 |
 | Tensor product operation (paths, weights, block indices) | Near-term | ml-spec §5 |
 | Spherical harmonics | Near-term | ml-spec §6 |
-| Equivariant linear layer | Near-term | ml-spec §7 |
-| Gated / norm activations | Near-term | ml-spec §8 |
-| Message passing: `scatter` / `gather` | Near-term | ml-spec §9 |
+| Equivariant tensor product / `Y_to` / linear / gated (compile-time elaboration, static specs, real-basis CG tables) | Core (v7) | module doc §11b; corpus `ml-ops/` + `ml-e2e/002`; norm activation + lmax>2 pending |
+| Norm activation | Near-term | ml-spec §8.2 |
+| Message passing: `scatter` / `gather` | Near-term | ml-spec §9 (expressible today as loops — `ml-e2e/00*` do; dedicated ops pending) |
 | Reynolds applications: symmetric message passing, CG speedups, higher-order interactions, antisymmetric applications | Near-term | ml-spec §14 |
-| Automatic differentiation | Planned | ml-spec §10 sketches primitive rules; full AD design in ext §2.2 — [future.md](future.md) |
+| Automatic differentiation (`grad`, reverse mode, v1 subset) | Core (v7) | AST-level source transform; module doc §11 has the ABI + subset; corpus `ad/` + `ml-e2e/`; remaining work in [future.md](future.md) §2.1 |
 
 ## 17. Graphs and trees (planned module)
 

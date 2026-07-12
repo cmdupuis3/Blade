@@ -237,7 +237,7 @@ and TypedExprKind =
     | TExprGroupBy of values: TypedExpr * grouping: TypedExpr
     | TExprGroupKeys of keys: TypedExpr list
     | TExprSort of array: TypedExpr * key: TypedExpr
-    | TExprReduce of array: TypedExpr * kernel: TypedExpr
+    | TExprReduce of array: TypedExpr * kernel: TypedExpr * init: TypedExpr option
     | TExprTranspose of array: TypedExpr * dim1: int * dim2: int
     | TExprDecompact of array: TypedExpr * dim: int
     | TExprGram of left: TypedExpr * right: TypedExpr * isSameArray: bool

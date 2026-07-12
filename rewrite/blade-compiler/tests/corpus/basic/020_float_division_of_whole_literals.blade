@@ -1,0 +1,13 @@
+// TEST: Float Division Of Whole-Valued Literals
+// ============================================================================
+// REGRESSION (pre-AD literal fix): %g rendered 2.0 as the bare token `2`, an
+// int literal in C++, so `2.0 / 3.0` compiled to integer division and
+// evaluated to 0. Float literals must always be SPELLED floating in the
+// generated C++ (trailing .0 when the value is whole).
+// ============================================================================
+let twothirds = 2.0 / 3.0
+let half = 1.0 / 2.0
+let mixed = 3.0 / 2
+// EXPECT: twothirds = 0.6666666666666666
+// EXPECT: half = 0.5
+// EXPECT: mixed = 1.5

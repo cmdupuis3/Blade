@@ -1,0 +1,15 @@
+// TEST: Intrinsics Static Eval And Int Promotion
+// ============================================================================
+// Intrinsics work in static contexts (StaticEval.evalBuiltin, same whitelist)
+// and promote integer operands. The static value substitutes into runtime
+// code as a full-precision literal (same round-trip guarantee as source
+// literals — see basic/019).
+// ============================================================================
+let static ln2 = log(2.0)
+let l2r = log(2.0) * 1000000000.0
+let e0 = exp(0)
+let s4 = sqrt(4)
+// EXPECT: ln2 = 0.6931471805599453
+// EXPECT: l2r = 693147180.5599453
+// EXPECT: e0 = 1
+// EXPECT: s4 = 2

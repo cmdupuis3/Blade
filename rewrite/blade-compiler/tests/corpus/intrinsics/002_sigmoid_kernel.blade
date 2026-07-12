@@ -1,0 +1,13 @@
+// TEST: Intrinsics Sigmoid In Kernel
+// ============================================================================
+// The gate nonlinearity of the equivariant ML module: sigmoid built from exp
+// in a user function, applied both directly and elementwise via method_for.
+// ============================================================================
+function sigmoid(x: Float) -> Float = 1.0 / (1.0 + exp(0.0 - x))
+let sig0 = sigmoid(0.0)
+let sig2 = sigmoid(2.0)
+let A = [0.0, 1.0, 2.0]
+let gated = method_for(A) <@> lambda(x) -> x * sigmoid(x) |> compute
+// EXPECT: sig0 = 0.5
+// EXPECT: sig2 = 0.8807970779778823
+// EXPECT: gated = [0.0, 0.7310585786300049, 1.7615941559557646]

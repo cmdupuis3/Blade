@@ -23,6 +23,22 @@ open Blade.Tests.Corpus
 /// compute, printing. Categories grow as later phases claim more surface.
 let denseSlice = [ "basic"; "loops"; "guards"; "for-in" ]
 
+/// Corrected-semantics slice: corpus tests whose values INTENTIONALLY
+/// diverge from the pinned oracle after a semantics correction — the
+/// mechanism the plan calls for ("the differential test for that slice
+/// should assert disagreement"). Divergence for a listed name CONFIRMS the
+/// correction; agreement means the old unsound path did not fire for that
+/// shape. Ground truth is the hand-computed EXPECT values in the corpus,
+/// never the oracle.
+///
+/// EMPTY since the 2026-07-12 re-pin: the arc-1 joint-product-symmetry
+/// names (symmetry/012–016, functions/001) served against the pre-arc-1
+/// pin and were retired when the oracle advanced past the correction —
+/// those semantics are now IN the oracle and pinned by corpus EXPECTs.
+/// Repopulate this set for the next intentional value-semantics change,
+/// and retire it again at the following re-pin.
+let correctedSlice : Set<string> = Set.empty
+
 /// Run `<exe> run <srcFile>` and capture stdout. The generous timeout covers
 /// the g++ compile that `blade run` performs internally.
 let private runBlade (exePath: string) (srcFile: string) : Result<string, string> =
@@ -44,10 +60,16 @@ let private runBlade (exePath: string) (srcFile: string) : Result<string, string
     with ex -> Error ex.Message
 
 /// Value lines only: timing lines vary run to run; line endings normalize.
+/// Heap pointer addresses are masked: the struct printer currently renders an
+/// array-typed field as its raw pointer (e.g. `samples: 0x1f3f4a878b0`), which
+/// differs on EVERY run — without masking, structs/013 flakes against any
+/// oracle. (Printing something useful instead of a pointer is a separate
+/// printer backlog item.)
 let private normalize (s: string) : string =
     s.Replace("\r\n", "\n").Split('\n')
     |> Array.filter (fun l -> not (l.Contains "completed in"))
-    |> Array.map (fun l -> l.TrimEnd())
+    |> Array.map (fun l ->
+        System.Text.RegularExpressions.Regex.Replace(l.TrimEnd(), "0x[0-9a-fA-F]+", "0xPTR"))
     |> String.concat "\n"
     |> fun t -> t.Trim()
 
@@ -89,7 +111,14 @@ let runDiffOracleTests (oracleExe: string) (categories: string list) : BlockResu
                     match runBlade thisExe mineSrc, runBlade oracleExe theirsSrc with
                     | Ok mine, Ok theirs when normalize mine = normalize theirs ->
                         passed <- passed + 1
-                        resultLine Pass name "values identical"
+                        if Set.contains name correctedSlice then
+                            resultLine Pass name "oracle agrees (old unsound path did not fire for this shape)"
+                        else
+                            resultLine Pass name "values identical"
+                    | Ok mine, Ok theirs when Set.contains name correctedSlice ->
+                        // Corrected-semantics slice: this divergence is the point.
+                        passed <- passed + 1
+                        resultLine Pass name "INTENTIONAL divergence from pre-arc-1 oracle confirmed (corrected product symmetry)"
                     | Ok mine, Ok theirs ->
                         failed <- failed + 1
                         failedNames <- failedNames @ [name]

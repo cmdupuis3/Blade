@@ -1,0 +1,11 @@
+// TEST: Reynolds Joint 2D Antisym
+// Antisymmetric Reynolds over a repeated 2x2 array: joint AntisymIdx<2, 4>
+// over the compound axis (flat a = [1,2,3,4]) — strict pairs p1 < p2, C(4,2) =
+// 6 cells, diagonal implicitly zero. K(x,y) = g(x,y) - g(y,x) with
+// g = x*x + y gives K = (x - y)(x + y - 1) at canonical cells.
+let A: Array<Float64 like Idx<2>, Idx<2>> = [[1.0, 2.0], [3.0, 4.0]]
+let L = method_for(A, A)
+let g = lambda(x, y) where comm(x, y) -> x * x + y
+let result = L <@> reynolds(g, Antisymmetric) |> compute
+// (1,2)-2 (1,3)-6 (1,4)-12 (2,3)-4 (2,4)-10 (3,4)-6
+// EXPECT: result = [-2.0, -6.0, -12.0, -4.0, -10.0, -6.0]

@@ -1,0 +1,32 @@
+// TEST: Nested For-In Loops
+// ============================================================================
+// REGRESSION (AD arc): for-in loops nest to arbitrary depth — in module
+// blocks AND inside function bodies (both parser and codegen paths). The
+// inner loop reads the outer loop variable; a triple nest accumulates.
+// ============================================================================
+let block_nested = {
+    let mut acc = 0.0
+    for i in 0..3 {
+        for j in 0..2 {
+            acc = acc + 1.0 * i + j
+        }
+    }
+    acc
+}
+// i=0: 0+1; i=1: 1+2; i=2: 2+3 => 9
+
+function func_nested(x: Array<Float like Idx<2>>) -> Float = {
+    let mut s = 0.0
+    for i in 0..2 {
+        for j in 0..2 {
+            for k in 0..2 {
+                s += x(i) * x(j) * x(k)
+            }
+        }
+    }
+    s
+}
+let fx = func_nested([1.0, 2.0])
+// (1+2)^3 = 27
+// EXPECT: block_nested = 9.0
+// EXPECT: fx = 27.0

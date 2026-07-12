@@ -17,12 +17,16 @@
     <Compile Include="Linear.fs" />
     <Compile Include="Activations.fs" />
     <Compile Include="MessagePassing.fs" />
+    <Compile Include="Autodiff.fs" />
+    <Compile Include="TrainingOracle.fs" />
+    <Compile Include="OracleDump.fs" />
     <Compile Include="TestHarness.fs" />
     <Compile Include="Tests_Core.fs" />
     <Compile Include="Tests_Wigner.fs" />
     <Compile Include="Tests_SphericalHarmonics.fs" />
     <Compile Include="Tests_Ops.fs" />
     <Compile Include="Tests_Graph.fs" />
+    <Compile Include="Tests_Autodiff.fs" />
     <Compile Include="Program.fs" />
   </ItemGroup>
 
