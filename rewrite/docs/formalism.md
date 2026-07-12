@@ -1126,6 +1126,13 @@ library concern.
 - `match ... with | pat -> expr` (values, tuples, guards, sum-type payloads,
   brace blocks); match is an expression; `if c then a else b` is sugar for
   Bool match.
+- Imperative `for x in RANGE { body }` statements (blocks/function bodies):
+  the range header is a **no-struct-literal context** — the next top-level
+  `{` after the range expression is the loop body, so `for k in 0..n {`
+  reads `n` as a variable, never as struct construction `n { ... }`.
+  Delimited sub-expressions (parentheses, call arguments, index brackets)
+  re-enable struct literals inside the header. The rule extends to any
+  future brace-headed literal form (e.g. anonymous structs).
 - Tuples: `(a, b)` literals; destructuring exact / wildcard / `head :: tail`;
   `()` unit; `(e)` is grouping, not a 1-tuple.
 - Sum types: `type Option<T> = Some : T | None`; construction `Some(42)`;

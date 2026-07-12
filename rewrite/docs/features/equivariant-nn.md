@@ -250,6 +250,11 @@ let sh  = y_to(2, x, y, z)                    // real solid harmonics, lmax <= 2
 let out = tensor_product(cfg1, x1, sh, w)     // uvw fully-connected, path-validated
 let z   = linear(spec_in, spec_out, w, x)     // block-diagonal, first-match blocks
 let g   = gated(spec, x)                      // scalar double-duty gates (F2 rule)
+
+// batched row forms over flat row-major storage (N static): the per-node
+// case of graph networks, with no hand-written row-extract/write-back loops
+let g1 = gated_rows(spec, N, x_rows)
+let h1 = linear_rows(spec_in, spec_out, N, w, x_rows)
 ```
 
 Checks at elaboration: `all_valid_outputs` for tensor products, block-0

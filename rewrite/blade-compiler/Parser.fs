@@ -263,6 +263,36 @@ let parseExpr tokens = !parseExprRef tokens
 // Has proper precedence: multiplicative binds tighter than additive
 // ============================================================================
 
+/// FOR-IN RANGE HEADER CONTEXT. A `for x in RANGE { body }` statement's
+/// range expression is always followed by the loop-body brace, so a bare
+/// identifier meeting `{` there is the START OF THE BODY, not a struct
+/// literal — without this, `for k in 0..n {` misparsed as struct
+/// construction `n { ... }` (any identifier bound before a block).
+/// The flag suppresses struct-literal parsing at the top nesting level of
+/// the range expression only; delimited sub-expressions (parens, call
+/// arguments, index brackets) restore it, so `for p in f(Point { x = 1 })`
+/// stays expressible. This also hedges against future anonymous-struct
+/// syntax: any brace-headed literal form would inherit the same ambiguity
+/// and the same context rule. AsyncLocal mirrors the compiler's other
+/// context cells (parse-parallel safety).
+let private noStructLiteralCtx = new System.Threading.AsyncLocal<bool>()
+
+/// Run a sub-parse with struct literals re-enabled (delimited context).
+let private allowingStructLiterals (parse: unit -> ParseResult<'a>) : ParseResult<'a> =
+    let saved = noStructLiteralCtx.Value
+    noStructLiteralCtx.Value <- false
+    let r = parse ()
+    noStructLiteralCtx.Value <- saved
+    r
+
+/// Run a sub-parse with struct literals suppressed (for-in range header).
+let private suppressingStructLiterals (parse: unit -> ParseResult<'a>) : ParseResult<'a> =
+    let saved = noStructLiteralCtx.Value
+    noStructLiteralCtx.Value <- true
+    let r = parse ()
+    noStructLiteralCtx.Value <- saved
+    r
+
 let rec parseSimpleExpr (tokens: Token list) : ParseResult<Expr> =
     parseSimpleAdditive tokens
 
@@ -1108,13 +1138,13 @@ and parsePostfix (tokens: Token list) : ParseResult<Expr> =
     let rec loop acc toks =
         match peek toks with
         | Some TokLParen ->
-            // Function call
-            advance toks |> sepBy parseExprImpl TokComma >>= fun args afterArgs ->
+            // Function call (delimited: struct literals re-enabled)
+            allowingStructLiterals (fun () -> advance toks |> sepBy parseExprImpl TokComma) >>= fun args afterArgs ->
             expect TokRParen afterArgs >>= fun _ remaining ->
             loop (ExprApp (acc, args)) remaining
         | Some TokLBracket ->
-            // Poly-tuple indexing: args[k]
-            advance toks |> parseExprImpl >>= fun index afterIndex ->
+            // Poly-tuple indexing: args[k] (delimited: struct literals re-enabled)
+            allowingStructLiterals (fun () -> advance toks |> parseExprImpl) >>= fun index afterIndex ->
             expect TokRBracket afterIndex >>= fun _ remaining ->
             loop (ExprTupleIndex (acc, index)) remaining
         | Some TokDot ->
@@ -1138,8 +1168,10 @@ and parsePrimary (tokens: Token list) : ParseResult<Expr> =
     | Some (TokIdent name) ->
         let afterName = advance tokens
         match peek afterName with
-        | Some TokLBrace ->
+        | Some TokLBrace when not noStructLiteralCtx.Value ->
             // Struct construction: Name { field1 = val1, field2 = val2 }
+            // (suppressed in for-in range headers, where the brace is the
+            // loop body — see noStructLiteralCtx)
             parseStructExpr name afterName
         | _ ->
             success (ExprVar name) afterName
@@ -1487,15 +1519,18 @@ and parsePrimary (tokens: Token list) : ParseResult<Expr> =
         expectGt afterTy >>= fun _ remaining ->
         success (ExprReverse ty) remaining
     
-    // Parenthesized expression or tuple
+    // Parenthesized expression or tuple (delimited: struct literals
+    // re-enabled inside — the for-in range-header suppression applies to
+    // the top nesting level only)
     | Some TokLParen ->
-        advance tokens |> parseParenExpr
-    
-    // Array literal
+        allowingStructLiterals (fun () -> advance tokens |> parseParenExpr)
+
+    // Array literal (delimited: struct literals re-enabled)
     | Some TokLBracket ->
-        advance tokens |> sepBy parseExprImpl TokComma >>= fun elems afterElems ->
-        expect TokRBracket afterElems >>= fun _ remaining ->
-        success (ExprArrayLit elems) remaining
+        allowingStructLiterals (fun () ->
+            advance tokens |> sepBy parseExprImpl TokComma >>= fun elems afterElems ->
+            expect TokRBracket afterElems >>= fun _ remaining ->
+            success (ExprArrayLit elems) remaining)
     
     // Block
     | Some TokLBrace ->
@@ -1868,9 +1903,10 @@ and parseBlock (tokens: Token list) : ParseResult<Expr> =
                 let afterIdent = advance afterFor
                 match peek afterIdent with
                 | Some (TokKeyword KwIn) ->
-                    // Parse range expression
+                    // Parse range expression (struct literals suppressed:
+                    // the next top-level `{` is the loop body)
                     let afterIn = advance afterIdent
-                    parseExprImpl afterIn >>= fun rangeExpr afterRange ->
+                    suppressingStructLiterals (fun () -> parseExprImpl afterIn) >>= fun rangeExpr afterRange ->
                     let afterRange = skipNL afterRange
                     match peek afterRange with
                     | Some TokLBrace ->
@@ -1935,7 +1971,9 @@ and parseForInBody (tokens: Token list) : ParseResult<Stmt list> =
                 match peek afterIdent with
                 | Some (TokKeyword KwIn) ->
                     let afterIn = advance afterIdent
-                    parseExprImpl afterIn >>= fun rangeExpr afterRange ->
+                    // struct literals suppressed in the range header (see
+                    // noStructLiteralCtx / the parseBlock site)
+                    suppressingStructLiterals (fun () -> parseExprImpl afterIn) >>= fun rangeExpr afterRange ->
                     let afterRange = skipNL afterRange
                     match peek afterRange with
                     | Some TokLBrace ->

@@ -193,13 +193,21 @@ let private tpDecl (name: string) (cfg: TPConfig) : FunctionDecl =
 /// first-match input block, ml/Linear loop order (blocks -> muO -> muI -> c).
 /// `rows` is MLSpec.linearBlocks output: one (inputBlockIdx, eo, ei) per
 /// OUTPUT block, in output-block order (list position = output index).
+/// linear over nRows row vectors stored flat (row-major): the per-block
+/// multiplicity mixing (first-match input block, ml/Linear loop order:
+/// blocks -> muO -> muI -> c) inside an outer row loop, all x/out indices
+/// offset by the row base. nRows = 1 is the single-vector `linear`; the
+/// batched `linear_rows` form exists so callers do not hand-write
+/// row-extract/write-back copy loops around the single-vector op.
 let private linearDecl (name: string) (specIn: Spec) (specOut: Spec)
-                       (rows: (int * SpecEntry * SpecEntry) list) : FunctionDecl =
+                       (rows: (int * SpecEntry * SpecEntry) list) (nRows: int) : FunctionDecl =
     let dIn = totalDim specIn
     let dOut = totalDim specOut
     let sIn = blockStarts specIn
     let sOut = blockStarts specOut
     let wDim = rows |> List.sumBy (fun (_, eo, ei) -> eo.Mult * ei.Mult)
+    let baseIn = mul (v "rr") (iLit dIn)
+    let baseOut = mul (v "rr") (iLit dOut)
     let mutable wOff = 0
     let blockStmts =
         rows |> List.mapi (fun b (bi, eo, ei) ->
@@ -210,16 +218,24 @@ let private linearDecl (name: string) (specIn: Spec) (specOut: Spec)
                 [ sFor "mi" 0 ei.Mult
                     [ sLet "wv" (idx "w" (add (iLit thisOff) (add (mul (v "mo") (iLit ei.Mult)) (v "mi"))))
                       sFor "c" 0 d
-                        [ sAccum (idx "out" (add (iLit sOut.[b]) (add (mul (v "mo") (iLit d)) (v "c"))))
+                        [ sAccum (idx "out" (add baseOut (add (iLit sOut.[b]) (add (mul (v "mo") (iLit d)) (v "c")))))
                                  (mul (v "wv")
-                                      (idx "x" (add (iLit sIn.[bi]) (add (mul (v "mi") (iLit d)) (v "c"))))) ] ] ])
-    let body = ExprBlock (sLetMut "out" (zerosLit dOut) :: blockStmts, Some (v "out"))
-    mkFunc name [ ("w", tyFloatArr wDim); ("x", tyFloatArr dIn) ] (tyFloatArr dOut) body
+                                      (idx "x" (add baseIn (add (iLit sIn.[bi]) (add (mul (v "mi") (iLit d)) (v "c")))))) ] ] ])
+    let body =
+        ExprBlock (
+            [ sLetMut "out" (zerosLit (nRows * dOut))
+              sFor "rr" 0 nRows blockStmts ],
+            Some (v "out"))
+    mkFunc name [ ("w", tyFloatArr wDim); ("x", tyFloatArr (nRows * dIn)) ] (tyFloatArr (nRows * dOut)) body
 
 /// gated for a fixed spec: block-0 scalars silu'd AND reused as gates for
 /// higher-L blocks (gate for multiplicity mu is sigmoid(x[mu % numGates])),
 /// mirroring ml/Activations.gated including the scalar double-duty (F2).
-let private gatedDecl (name: string) (sigmoidName: string) (spec: Spec) : Result<FunctionDecl, string> =
+/// gated over nRows row vectors stored flat: block-0 scalars silu'd AND
+/// reused as gates for higher-L blocks (gate for multiplicity mu is
+/// sigmoid(x[row_base + mu % numGates]) — the F2 double-duty rule, per
+/// row), inside an outer row loop. nRows = 1 is the single-vector `gated`.
+let private gatedDecl (name: string) (sigmoidName: string) (spec: Spec) (nRows: int) : Result<FunctionDecl, string> =
     if spec.IsEmpty then Error "gated: empty spec"
     elif spec.Head.L <> 0 then Error "gated: the first block must be scalars (L=0)"
     else
@@ -227,31 +243,35 @@ let private gatedDecl (name: string) (sigmoidName: string) (spec: Spec) : Result
     let starts = blockStarts spec
     let numGates = spec.Head.Mult
     let sigCall e = ExprApp (v sigmoidName, [e])
-    let stmts =
-        [ yield sLetMut "out" (zerosLit dTot)
-          for b in 0 .. spec.Length - 1 do
+    let baseE = mul (v "rr") (iLit dTot)
+    let rowStmts =
+        [ for b in 0 .. spec.Length - 1 do
             let e = spec.[b]
             let d = dim e
             if e.L = 0 then
                 yield sFor "mu" 0 e.Mult
-                    [ sAssign (idx "out" (add (iLit starts.[b]) (v "mu")))
-                              (mul (idx "x" (add (iLit starts.[b]) (v "mu")))
-                                   (sigCall (idx "x" (add (iLit starts.[b]) (v "mu"))))) ]
+                    [ sAssign (idx "out" (add baseE (add (iLit starts.[b]) (v "mu"))))
+                              (mul (idx "x" (add baseE (add (iLit starts.[b]) (v "mu"))))
+                                   (sigCall (idx "x" (add baseE (add (iLit starts.[b]) (v "mu")))))) ]
             else
                 yield sFor "mu" 0 e.Mult
-                    [ sLet "g" (sigCall (idx "x" (ExprBinOp (Elementwise, OpMod, v "mu", iLit numGates))))
+                    [ sLet "g" (sigCall (idx "x" (add baseE (ExprBinOp (Elementwise, OpMod, v "mu", iLit numGates)))))
                       sFor "c" 0 d
-                        [ sAssign (idx "out" (add (iLit starts.[b]) (add (mul (v "mu") (iLit d)) (v "c"))))
+                        [ sAssign (idx "out" (add baseE (add (iLit starts.[b]) (add (mul (v "mu") (iLit d)) (v "c")))))
                                   (mul (v "g")
-                                       (idx "x" (add (iLit starts.[b]) (add (mul (v "mu") (iLit d)) (v "c"))))) ] ] ]
-    Ok (mkFunc name [ ("x", tyFloatArr dTot) ] (tyFloatArr dTot)
-            (ExprBlock (stmts, Some (v "out"))))
+                                       (idx "x" (add baseE (add (iLit starts.[b]) (add (mul (v "mu") (iLit d)) (v "c")))))) ] ] ]
+    Ok (mkFunc name [ ("x", tyFloatArr (nRows * dTot)) ] (tyFloatArr (nRows * dTot))
+            (ExprBlock (
+                [ sLetMut "out" (zerosLit (nRows * dTot))
+                  sFor "rr" 0 nRows rowStmts ],
+                Some (v "out"))))
 
 // ============================================================================
 // Call-site recognition + program expansion
 // ============================================================================
 
-let private opNames = Set.ofList [ "y_to"; "tensor_product"; "linear"; "gated" ]
+let private opNames =
+    Set.ofList [ "y_to"; "tensor_product"; "linear"; "gated"; "linear_rows"; "gated_rows" ]
 
 type private ElabState = {
     mutable Counter: int
@@ -297,6 +317,30 @@ let private ensure (st: ElabState) (key: string) (make: string -> Result<Functio
             st.Decls <- st.Decls @ [ decl ]
             n)
 
+/// Shared elaboration for linear / linear_rows (nRows = 1 is the
+/// single-vector form; the fingerprint includes nRows so each batch size
+/// gets its own generated function).
+let private elabLinear (st: ElabState) (statics: StaticEnv) (what: string)
+                       (sInE: Expr) (sOutE: Expr) (nRows: int) (wE: Expr) (xE: Expr)
+    : Result<Expr, string> =
+    staticArg statics (what + " specIn") sInE |> Result.bind (fun svi ->
+    staticArg statics (what + " specOut") sOutE |> Result.bind (fun svo ->
+    specOfStatic (what + " specIn") svi |> Result.bind (fun si ->
+    specOfStatic (what + " specOut") svo |> Result.bind (fun so ->
+    linearBlocks si so |> Result.bind (fun rows ->
+        ensure st (fingerprint "linear" (box (si, so, nRows))) (fun n -> Ok (linearDecl n si so rows nRows))
+        |> Result.map (fun n -> ExprApp (v n, [ wE; xE ])))))))
+
+/// Shared elaboration for gated / gated_rows.
+let private elabGated (st: ElabState) (statics: StaticEnv) (what: string)
+                      (specE: Expr) (nRows: int) (xE: Expr)
+    : Result<Expr, string> =
+    staticArg statics (what + " spec") specE |> Result.bind (fun sv ->
+    specOfStatic what sv |> Result.bind (fun spec ->
+        let sig_ = ensureSigmoid st
+        ensure st (fingerprint "gated" (box (spec, nRows))) (fun n -> gatedDecl n sig_ spec nRows)
+        |> Result.map (fun n -> ExprApp (v n, [ xE ]))))
+
 /// Rewrite ML-op calls in an expression. Same walker shape as
 /// Grad.rewriteExpr; the two passes stay separate because this one carries
 /// elaboration state and runs first.
@@ -329,21 +373,25 @@ let rec private rewriteExpr (st: ElabState) (statics: StaticEnv) (declNames: Set
                         |> Result.map (fun n -> ExprApp (v n, [ xE; yE; wE ]))))
             | "tensor_product", _ -> Error "tensor_product: expected tensor_product(CFG, x, y, w)"
             | "linear", [ sInE; sOutE; wE; xE ] ->
-                staticArg statics "linear specIn" sInE |> Result.bind (fun svi ->
-                staticArg statics "linear specOut" sOutE |> Result.bind (fun svo ->
-                specOfStatic "linear specIn" svi |> Result.bind (fun si ->
-                specOfStatic "linear specOut" svo |> Result.bind (fun so ->
-                linearBlocks si so |> Result.bind (fun rows ->
-                    ensure st (fingerprint "linear" (box (si, so))) (fun n -> Ok (linearDecl n si so rows))
-                    |> Result.map (fun n -> ExprApp (v n, [ wE; xE ])))))))
+                elabLinear st statics "linear" sInE sOutE 1 wE xE
             | "linear", _ -> Error "linear: expected linear(SPEC_IN, SPEC_OUT, w, x)"
+            | "linear_rows", [ sInE; sOutE; nE; wE; xE ] ->
+                staticArg statics "linear_rows nrows" nE |> Result.bind (fun sv ->
+                    match sv with
+                    | SVInt n when n >= 1L ->
+                        elabLinear st statics "linear_rows" sInE sOutE (int n) wE xE
+                    | _ -> Error "linear_rows: NROWS must be a static int >= 1")
+            | "linear_rows", _ -> Error "linear_rows: expected linear_rows(SPEC_IN, SPEC_OUT, NROWS, w, x)"
             | "gated", [ specE; xE ] ->
-                staticArg statics "gated spec" specE |> Result.bind (fun sv ->
-                specOfStatic "gated" sv |> Result.bind (fun spec ->
-                    let sig_ = ensureSigmoid st
-                    ensure st (fingerprint "gated" (box spec)) (fun n -> gatedDecl n sig_ spec)
-                    |> Result.map (fun n -> ExprApp (v n, [ xE ]))))
+                elabGated st statics "gated" specE 1 xE
             | "gated", _ -> Error "gated: expected gated(SPEC, x)"
+            | "gated_rows", [ specE; nE; xE ] ->
+                staticArg statics "gated_rows nrows" nE |> Result.bind (fun sv ->
+                    match sv with
+                    | SVInt n when n >= 1L ->
+                        elabGated st statics "gated_rows" specE (int n) xE
+                    | _ -> Error "gated_rows: NROWS must be a static int >= 1")
+            | "gated_rows", _ -> Error "gated_rows: expected gated_rows(SPEC, NROWS, x)"
             | _ -> Error (sprintf "%s: unrecognized ML-op call shape" op))
     | ExprLit _ | ExprVar _ -> Ok e
     | ExprApp (f, args) ->

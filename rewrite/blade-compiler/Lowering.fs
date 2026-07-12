@@ -358,7 +358,23 @@ let rec lowerTypedExpr (env: TypedLowerEnv) (texpr: TypedExpr) : IRExpr =
         IRPure (lowerTypedExpr env e)
     
     | TExprCompute e ->
-        IRCompute (lowerTypedExpr env e)
+        // CONSTANT-FILL FOLD: `replicate(N, pure(lit)) |> compute` with a
+        // concrete count and a literal body is exactly an N-element array
+        // literal — lower it as IRArrayLit so it rides the array-literal
+        // machinery everywhere (function bodies included; the general
+        // IRSequence realization is main-body-only). The generated C++ is
+        // byte-identical to writing the literal out. Non-literal counts
+        // and non-constant bodies keep the general combinator path.
+        (match e.Kind with
+         | TExprReplicate (cnt, body) ->
+             (match cnt.Kind, body.Kind, texpr.Type with
+              | TExprLit (LitInt n), TExprPure inner, ArrayElem arrTy
+                    when n >= 0L && n <= 1_000_000L
+                         && (match inner.Kind with TExprLit _ -> true | _ -> false) ->
+                  let copies = List.replicate (int n) (lowerTypedExpr env inner)
+                  IRArrayLit (copies, arrTy)
+              | _ -> IRCompute (lowerTypedExpr env e))
+         | _ -> IRCompute (lowerTypedExpr env e))
     
     | TExprRead e ->
         // Slice 1: passthrough. |> read will force the deferred provider read

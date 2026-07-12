@@ -186,6 +186,21 @@ let private convertBody (fname: string) (body: Expr) : Result<NStmt list * Expr,
 // Expression validation + variable collection over the AD-able fragment
 // ============================================================================
 
+/// The constant-fill array constructor `replicate(N, pure(lit)) |> compute`
+/// — the idiomatic replacement for hand-written N-element zero literals.
+/// Combinators are otherwise rejected in differentiated code (v1), but a
+/// literal fill computes nothing and reads nothing, so it is admitted as
+/// an array-literal equivalent wherever ExprArrayLit initializers are.
+/// Captures (count expr, fill literal).
+let private (|ConstFill|_|) (e: Expr) =
+    match e with
+    | ExprCompute (ExprReplicate (cnt, ExprPure (ExprLit lit))) -> Some (cnt, lit)
+    | _ -> None
+
+/// A ConstFill of the same count with the fill value zeroed.
+let private zeroFill (cnt: Expr) : Expr =
+    ExprCompute (ExprReplicate (cnt, ExprPure (ExprLit (LitFloat 0.0))))
+
 /// Walk an expression, validating it stays inside the differentiable
 /// fragment, and call `onVar` for every variable REFERENCE (not index
 /// positions — those are int-typed and non-differentiable, but we still
@@ -212,6 +227,7 @@ let rec private walkExpr (fname: string) (ctx: Ctx) (onVar: string -> unit) (e: 
     | ExprMatch _ -> err fname "match is not supported in differentiated code"
     | ExprBlock _ -> err fname "nested block expressions are not supported in differentiated code"
     | ExprLet _ -> err fname "expression-level let is not supported in differentiated code"
+    | ConstFill _ -> Ok ()   // literal fill: computes nothing, reads nothing
     | ExprLambda _ | ExprMethodFor _ | ExprObjectFor _ | ExprCompute _ | ExprPure _ ->
         err fname "loop-object combinators are not supported in differentiated code (write explicit for-in loops)"
     | ExprTuple _ -> err fname "tuple values are not supported in differentiated code"
@@ -237,6 +253,11 @@ let rec private renameExpr (ren: Map<string, string>) (e: Expr) : Expr =
     | ExprArrayLit elems -> ExprArrayLit (elems |> List.map (renameExpr ren))
     | ExprAssign (l, r) -> ExprAssign (renameExpr ren l, renameExpr ren r)
     | ExprDotDot (l, h) -> ExprDotDot (renameExpr ren l, renameExpr ren h)
+    // constant-fill constructors ride through inlined callee bodies; the
+    // count may reference renamed statics-in-scope, so rename inside
+    | ExprCompute inner -> ExprCompute (renameExpr ren inner)
+    | ExprReplicate (c, b) -> ExprReplicate (renameExpr ren c, renameExpr ren b)
+    | ExprPure inner -> ExprPure (renameExpr ren inner)
     | other -> other
 
 let rec private renameNStmts (ren: Map<string, string>) (stmts: NStmt list) : NStmt list =
@@ -419,7 +440,7 @@ let private classifyParam (fname: string) (p: ParamDecl) : Result<ParamClass, st
     | Some (TyArray (elem, _)) when isFloatTy elem -> Ok DiffArray
     | Some _ -> Ok NonDiff
 
-/// Zero value matching an array literal's shape.
+/// Zero value matching an array literal's (or constant fill's) shape.
 let rec private zerosLikeLiteral (e: Expr) : Expr option =
     match e with
     | ExprArrayLit elems ->
@@ -428,6 +449,7 @@ let rec private zerosLikeLiteral (e: Expr) : Expr option =
             | Some z -> z
             | None -> fLit 0.0)
         Some (ExprArrayLit zs)
+    | ConstFill (cnt, _) -> Some (zeroFill cnt)
     | _ -> None
 
 /// Zero value for a differentiable param's declared type (arrays need
@@ -474,7 +496,7 @@ let private analyze (fname: string) (ctx: Ctx)
                 match s with
                 | NLet (name, _, value) ->
                     (match value with
-                     | ExprArrayLit _ -> arrays <- Set.add name arrays
+                     | ExprArrayLit _ | ConstFill _ -> arrays <- Set.add name arrays
                      | ExprVar src when Set.contains src arrays ->
                          arrays <- Set.add name arrays
                      | _ -> ())
@@ -492,6 +514,7 @@ let private analyze (fname: string) (ctx: Ctx)
                         if t then diff <- Set.add name diff
                         match value with
                         | ExprArrayLit _ when isFloatLit value -> diff <- Set.add name diff
+                        | ConstFill (_, LitFloat _) -> diff <- Set.add name diff
                         | _ -> ())
                 | NAssign (lhs, rhs) ->
                     touches rhs |> Result.map (fun t ->
@@ -769,7 +792,7 @@ let rec private adjointOfStmt (rc: RevCtx) (s: NStmt) : Result<NStmt list, strin
         if not (Set.contains x rc.Diff) then Ok []
         else
             (match value with
-             | ExprArrayLit _ -> Ok []   // zero-literal init: nothing flows back
+             | ExprArrayLit _ | ConstFill _ -> Ok []   // literal/fill init: nothing flows back
              | _ -> adjointOf rc value (v (dName x)))
     | NAssign (lhs, rhs) ->
         (match additiveSelf lhs rhs with
@@ -821,7 +844,10 @@ let rec private adjointOfStmt (rc: RevCtx) (s: NStmt) : Result<NStmt list, strin
             localLets |> List.map (fun n ->
                 match body |> List.tryPick (fun s ->
                         match s with
-                        | NLet (m, _, (ExprArrayLit _ as lit)) when m = n -> zerosLikeLiteral lit
+                        // literal or constant-fill initializer: zerosLike
+                        // yields the matching zero shape (None for other
+                        // forms, so tryPick keeps them scalar-defaulted)
+                        | NLet (m, _, init) when m = n -> zerosLikeLiteral init
                         | _ -> None) with
                 | Some z -> NLet (dName n, true, z)
                 | None -> NLet (dName n, true, fLit 0.0))
@@ -918,7 +944,7 @@ let private synthesize (ctx: Ctx) (fd: FunctionDecl) : Result<FunctionDecl, stri
             | NLet (n, _, value) when Set.contains n diff ->
                 if Set.contains n arrays then
                     match value with
-                    | ExprArrayLit _ ->
+                    | ExprArrayLit _ | ConstFill _ ->
                         zerosLikeLiteral value |> Option.map (fun z -> NLet (dName n, true, z))
                     | _ -> None   // rejected below
                 else Some (NLet (dName n, true, fLit 0.0))
@@ -929,7 +955,7 @@ let private synthesize (ctx: Ctx) (fd: FunctionDecl) : Result<FunctionDecl, stri
             match s with
             | NLet (n, _, value) when Set.contains n diff && Set.contains n arrays ->
                 (match value with
-                 | ExprArrayLit _ -> None
+                 | ExprArrayLit _ | ConstFill _ -> None
                  | ExprVar _ -> Some n   // alias — cotangent identity untrackable
                  | _ -> Some n)
             | _ -> None)

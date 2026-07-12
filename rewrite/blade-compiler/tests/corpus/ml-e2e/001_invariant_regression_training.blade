@@ -1,4 +1,4 @@
-// TEST: ML E2E Invariant Regression Training
+﻿// TEST: ML E2E Invariant Regression Training
 // ============================================================================
 // The end-to-end equivariant ML example (module doc features/equivariant-nn.md
 // §10 + AD): a two-layer E(3)-equivariant message-passing network trained by
@@ -42,19 +42,7 @@ let targets = [2.4891719023683296, 2.4811582292885235, 3.238512152035927, 2.0886
 
 // ---- edge vectors per graph: ev = pos(src) - pos(tgt) ----------------------
 let all_ev = {
-    let mut ev = [
-        0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0,
-        0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0,
-        0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0,
-        0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0,
-        0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0,
-        0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0,
-        0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0,
-        0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0,
-        0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0,
-        0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0,
-        0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0,
-        0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0]
+    let mut ev = replicate(240, pure(0.0)) |> compute
     for s in 0..4 {
         for e in 0..20 {
             for c in 0..3 {
@@ -101,7 +89,7 @@ function sigmoid(zv: Float) -> Float = 1.0 / (1.0 + exp(-zv))
 // Real solid spherical harmonics Y_to<2>: 9 components, m ascending per l,
 // exactly the ml/ closed forms (orthonormalized real solid harmonics).
 function y_to2(x: Float, y: Float, z: Float) -> Array<Float like Idx<9>> = {
-    let mut sh = [0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0]
+    let mut sh = replicate(9, pure(0.0)) |> compute
     sh(0) = 0.28209479177387814
     sh(1) = 0.4886025119029199 * y
     sh(2) = 0.4886025119029199 * z
@@ -118,16 +106,11 @@ function y_to2(x: Float, y: Float, z: Float) -> Array<Float like Idx<9>> = {
 // conv1: gather source scalar, expand edge vector in Y≤2, tensor-product
 // into a 13-dim message, scatter-add onto the target node.
 function conv1(feat: Array<Float like Idx<5>>, ev: Array<Float like Idx<60>>, w: Array<Float like Idx<5>>) -> Array<Float like Idx<65>> = {
-    let mut out = [
-        0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0,
-        0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0,
-        0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0,
-        0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0,
-        0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0]
+    let mut out = replicate(65, pure(0.0)) |> compute
     for e in 0..20 {
         let sh = y_to2(ev(e * 3), ev(e * 3 + 1), ev(e * 3 + 2))
         let xf = feat(edge_src(e))
-        let mut msg = [0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0]
+        let mut msg = replicate(13, pure(0.0)) |> compute
         for p in 0..3 {
             for mo in 0..tp1_multO(p) {
                 let wv = w(tp1_woff(p) + mo)
@@ -146,12 +129,7 @@ function conv1(feat: Array<Float like Idx<5>>, ev: Array<Float like Idx<60>>, w:
 // gated activation on specH: block-0 scalars silu'd AND reused as the gates
 // for the higher-L blocks (the spec's scalar double-duty).
 function gated_all(f: Array<Float like Idx<65>>) -> Array<Float like Idx<65>> = {
-    let mut out = [
-        0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0,
-        0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0,
-        0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0,
-        0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0,
-        0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0]
+    let mut out = replicate(65, pure(0.0)) |> compute
     for i in 0..5 {
         let b = i * 13
         for mu in 0..2 {
@@ -174,12 +152,7 @@ function gated_all(f: Array<Float like Idx<65>>) -> Array<Float like Idx<65>> = 
 // equivariant linear on specH: block-diagonal multiplicity mixing, shared
 // across m (cross-irrep mixing unrepresentable by construction).
 function linear_all(w: Array<Float like Idx<9>>, f: Array<Float like Idx<65>>) -> Array<Float like Idx<65>> = {
-    let mut out = [
-        0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0,
-        0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0,
-        0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0,
-        0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0,
-        0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0]
+    let mut out = replicate(65, pure(0.0)) |> compute
     for i in 0..5 {
         let b = i * 13
         for mo in 0..2 {
@@ -204,10 +177,10 @@ function linear_all(w: Array<Float like Idx<9>>, f: Array<Float like Idx<65>>) -
 
 // conv2: specH ⊗ Y≤2 → specOut (two even scalars per node).
 function conv2(h: Array<Float like Idx<65>>, ev: Array<Float like Idx<60>>, w: Array<Float like Idx<10>>) -> Array<Float like Idx<10>> = {
-    let mut out = [0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0]
+    let mut out = replicate(10, pure(0.0)) |> compute
     for e in 0..20 {
         let sh = y_to2(ev(e * 3), ev(e * 3 + 1), ev(e * 3 + 2))
-        let mut xf = [0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0]
+        let mut xf = replicate(13, pure(0.0)) |> compute
         for c in 0..13 {
             xf(c) = h(edge_src(e) * 13 + c)
         }
@@ -231,7 +204,7 @@ function conv2(h: Array<Float like Idx<65>>, ev: Array<Float like Idx<60>>, w: A
 
 // output gate: specOut is all scalars, so gated == silu elementwise.
 function gate2_all(f: Array<Float like Idx<10>>) -> Array<Float like Idx<10>> = {
-    let mut out = [0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0]
+    let mut out = replicate(10, pure(0.0)) |> compute
     for k in 0..10 {
         out(k) = f(k) * sigmoid(f(k))
     }
@@ -248,15 +221,11 @@ function gate2_all(f: Array<Float like Idx<10>>) -> Array<Float like Idx<10>> = 
 function loss_ev(w1: Array<Float like Idx<5>>, w2: Array<Float like Idx<9>>, w3: Array<Float like Idx<10>>, wr: Array<Float like Idx<2>>, brA: Array<Float like Idx<1>>, evs: Array<Float like Idx<240>>) -> Float = {
     let mut acc = 0.0
     for s in 0..4 {
-        let mut feat_s = [0.0, 0.0, 0.0, 0.0, 0.0]
+        let mut feat_s = replicate(5, pure(0.0)) |> compute
         for i in 0..5 {
             feat_s(i) = all_feat(s * 5 + i)
         }
-        let mut ev_s = [
-            0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0,
-            0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0,
-            0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0,
-            0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0]
+        let mut ev_s = replicate(60, pure(0.0)) |> compute
         for k in 0..60 {
             ev_s(k) = evs(s * 60 + k)
         }
@@ -287,26 +256,26 @@ let mut w3v = [0.4674427131970612, 0.019242270625774882, -0.2090272203595504, 0.
 let mut wrv = [-0.34236242381965853, -0.03847419262792645]
 let mut brv = [0.0]
 
-let mut dw1 = [0.0, 0.0, 0.0, 0.0, 0.0]
-let mut dw2 = [0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0]
-let mut dw3 = [0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0]
+let mut dw1 = replicate(5, pure(0.0)) |> compute
+let mut dw2 = replicate(9, pure(0.0)) |> compute
+let mut dw3 = replicate(10, pure(0.0)) |> compute
 let mut dwr = [0.0, 0.0]
 let mut dbr = [0.0]
 
 let step0_loss = grad(loss)(w1v, w2v, w3v, wrv, brv, dw1, dw2, dw3, dwr, dbr)
 
 let dw1_s0 = {
-    let mut cp = [0.0, 0.0, 0.0, 0.0, 0.0]
+    let mut cp = replicate(5, pure(0.0)) |> compute
     for k in 0..5 { cp(k) = dw1(k) }
     cp
 }
 let dw2_s0 = {
-    let mut cp = [0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0]
+    let mut cp = replicate(9, pure(0.0)) |> compute
     for k in 0..9 { cp(k) = dw2(k) }
     cp
 }
 let dw3_s0 = {
-    let mut cp = [0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0]
+    let mut cp = replicate(10, pure(0.0)) |> compute
     for k in 0..10 { cp(k) = dw3(k) }
     cp
 }
@@ -318,9 +287,7 @@ let dwr_s0 = {
 let dbr_s0 = dbr(0)
 
 // ---- training: 30 steps of full-batch gradient descent, lr = 0.1 -----------
-let mut traj = [
-    0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0,
-    0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0]
+let mut traj = replicate(31, pure(0.0)) |> compute
 
 let final_loss = {
     for step in 0..30 {
@@ -350,19 +317,7 @@ let final_loss = {
 let rot = [0.34692944965489897, -0.644217687237691, 0.681632986593423, 0.29221464428477228, 0.7648421872844885, 0.57413154434798608, -0.89120736006143542, 0.0, 0.45359612142557731]
 
 let rot_loss = {
-    let mut ev_r = [
-        0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0,
-        0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0,
-        0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0,
-        0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0,
-        0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0,
-        0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0,
-        0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0,
-        0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0,
-        0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0,
-        0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0,
-        0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0,
-        0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0]
+    let mut ev_r = replicate(240, pure(0.0)) |> compute
     for k in 0..80 {
         for r in 0..3 {
             let mut a = 0.0
