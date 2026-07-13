@@ -243,6 +243,97 @@ let private test_unrelated_types_fail () =
      pass,
      if pass then "correctly rejected" else describeResult result)
 
+// ---- Dist<r, τ> unification (typed-Dist arc, phase 1) ----------------------
+
+let private idxTagged (n: int) (tag: string) : IRIndexType =
+    { idxN n with Tag = Some tag }
+
+let private test_dist_same_order_unifies () =
+    // Two Dists of equal order, unifiable elem, same axis tag → Ok.
+    let subst = Subst()
+    let d1 = IRTDist (2, f64, [idxTagged 3 "I3"])
+    let d2 = IRTDist (2, f64, [idxTagged 3 "I3"])
+    let result = unify subst d1 d2
+    ("Dist<2> unifies with Dist<2> (same elem, same axes)",
+     isOk result,
+     describeResult result)
+
+let private test_dist_order_mismatch_rejects () =
+    // The order guard's foundation: carried orders are part of the type.
+    let subst = Subst()
+    let d1 = IRTDist (2, f64, [idxTagged 3 "I3"])
+    let d2 = IRTDist (4, f64, [idxTagged 3 "I3"])
+    let result = unify subst d1 d2
+    let pass = not (isOk result)
+    ("Dist<2> vs Dist<4> rejected (order is nominal)",
+     pass,
+     if pass then "correctly rejected" else describeResult result)
+
+let private test_dist_elem_infer_binds () =
+    // An inference variable in elem position binds through the Dist wrapper
+    // (the HM path a Dist-typed function parameter will exercise).
+    let subst = Subst()
+    let infTy = subst.Fresh()
+    let infId = match infTy with IRTInfer id -> id | _ -> failwith "expected IRTInfer"
+    let d1 = IRTDist (3, infTy, [idxTagged 3 "I3"])
+    let d2 = IRTDist (3, f64, [idxTagged 3 "I3"])
+    let result = unify subst d1 d2
+    let bound = subst.TryFind(infId)
+    let pass =
+        match result, bound with
+        | Ok (), Some t when t = f64 -> true
+        | _ -> false
+    ("Dist elem inference var binds through the wrapper",
+     pass,
+     sprintf "%s / bound=%A" (describeResult result) bound)
+
+let private test_dist_vs_tuple_rejects () =
+    // Strictness (the IRTIdxTagged discipline): a bare tuple of arrays never
+    // implicitly becomes a Dist — only the construction intrinsic and
+    // dist-typed operators produce one.
+    let subst = Subst()
+    let d = IRTDist (2, f64, [idxTagged 3 "I3"])
+    let tup = IRTTuple [ IRTArrow ([SIdx (idxTagged 3 "I3")], f64, None)
+                         IRTArrow ([SIdx (idxTagged 3 "I3")], f64, None) ]
+    let r1 = unify subst d tup
+    let r2 = unify subst tup d
+    let pass = not (isOk r1) && not (isOk r2)
+    ("Dist vs bare tuple rejected in both directions (strict, no coercion)",
+     pass,
+     if pass then "correctly rejected" else sprintf "%s / %s" (describeResult r1) (describeResult r2))
+
+let private test_dist_axis_tag_mismatch_rejects () =
+    // Axes are nominative like ArrayElem index types: lat-Dist ≠ lon-Dist
+    // even at equal extents; synthetic (__) tags stay structural.
+    let subst = Subst()
+    let dLat = IRTDist (2, f64, [idxTagged 180 "lat"])
+    let dLon = IRTDist (2, f64, [idxTagged 180 "lon"])
+    let rNamed = unify subst dLat dLon
+    let dSyn1 = IRTDist (2, f64, [idxTagged 180 "__compoundidx"])
+    let dSyn2 = IRTDist (2, f64, [idxTagged 180 "__seq"])
+    let rSyn = unify subst dSyn1 dSyn2
+    let pass = not (isOk rNamed) && isOk rSyn
+    ("Dist axis tags are nominative (user names gate, synthetic tags don't)",
+     pass,
+     sprintf "named: %s / synthetic: %s" (describeResult rNamed) (describeResult rSyn))
+
+let private test_dist_zonk_erases_to_component_tuple () =
+    // Zonking is the ERASURE point: a Dist<2, τ like D> leaves the checker
+    // as the tuple (κ_1 : Array<τ like D>, κ_2 : Array<τ like SymIdx<2, D>>),
+    // with the elem resolved through the substitution first.
+    let subst = Subst()
+    let infTy = subst.Fresh()
+    let d = IRTDist (2, infTy, [idxTagged 3 "I3"])
+    match unify subst infTy f64 with
+    | Error e -> ("Dist zonk erases to component tuple", false, sprintf "setup unify failed: %A" e)
+    | Ok () ->
+        let zonked = zonkType subst d
+        let expected = IRTTuple (Blade.IR.distComponentTypes 2 f64 [idxTagged 3 "I3"])
+        let pass = (zonked = expected)
+        ("Dist zonk erases to the κ_1..κ_r component tuple (elem resolved)",
+         pass,
+         sprintf "%A" zonked)
+
 // ---- Runner ---------------------------------------------------------------
 
 let runUnifyTests () : Blade.Tests.TestHarness.BlockResult =
@@ -257,6 +348,12 @@ let runUnifyTests () : Blade.Tests.TestHarness.BlockResult =
         test_kind_mismatch_after_normalize_rejects
         test_uniform_shape_with_infer_elem_binds
         test_unrelated_types_fail
+        test_dist_same_order_unifies
+        test_dist_order_mismatch_rejects
+        test_dist_elem_infer_binds
+        test_dist_vs_tuple_rejects
+        test_dist_axis_tag_mismatch_rejects
+        test_dist_zonk_erases_to_component_tuple
     ]
     Blade.Tests.TestHarness.printHeader "Unify Integration"
     let mutable passed = 0

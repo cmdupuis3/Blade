@@ -1,0 +1,11 @@
+// TEST: Transpose Forces Deferred Input
+// transpose over an array input that is still an UNFORCED computation (the
+// if/then/else kernel body swallows the trailing `|> compute` into the else
+// branch, leaving `w` deferred). transpose's extent reads and axis-swapped
+// copy index the input by name, so its codegen forces the deferred binding
+// in place first (shared forceDeferredArrayInput helper).
+let A: Array<Float64 like Idx<2>, Idx<3>> = [[1.0, 2.0, 3.0], [4.0, 5.0, 6.0]]
+let w = method_for(A) <@> lambda(q) -> if q > 3.0 then q else 0.0 |> compute
+let result = transpose(w, [0, 1])
+// w = [[0,0,0],[4,5,6]] -> 3x2 [[0,4],[0,5],[0,6]] -> row-major
+// EXPECT: result = [0, 4, 0, 5, 0, 6]

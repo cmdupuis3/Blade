@@ -1,0 +1,14 @@
+// TEST: Union Forces Deferred Inputs
+// Value-based union where BOTH array inputs are still UNFORCED computations
+// (the if/then/else kernel bodies swallow the trailing `|> compute` into the
+// else branch, leaving wa and wb deferred). union's scan loops read both
+// inputs by name, so its codegen forces each deferred binding in place first
+// (shared forceDeferredArrayInput helper, applied per input slot).
+let a = [1.0, 2.0, 3.0]
+let b = [0.0, 1.0, 4.0]
+let wa = method_for(a) <@> lambda(q) -> if q > 1.5 then 1.0 else 0.0 |> compute
+let wb = method_for(b) <@> lambda(q) -> if q > 3.5 then 3.0 else 2.0 |> compute
+let u = union(wa, wb)
+let result = method_for(u) <@> lambda(x) -> x |> compute
+// wa = [0, 1, 1], wb = [2, 2, 3] -> unique values, A-first order
+// EXPECT: result = [0, 1, 2, 3]

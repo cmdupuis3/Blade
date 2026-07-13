@@ -1,0 +1,12 @@
+// TEST: Comoments Independent Zero
+// Declared independence is structural sparsity: `let _ = independent(X, Y)`
+// makes comoments(X, Y) elaborate to a literal zero block — the cross
+// kernel and its loops are never emitted. (Exact for central pair
+// comoments: X ⊥ Y ⇒ E[(x-mx)(y-my)] = 0.) Same arrays as 005, where the
+// computed block is NONZERO — proving the zeros come from the declaration.
+type TimeIdx = Idx<2>
+let X: Array<Float64 like Idx<2>, TimeIdx> = [[1.0, 2.0], [3.0, 5.0]]
+let Y: Array<Float64 like Idx<3>, TimeIdx> = [[2.0, 4.0], [1.0, 1.0], [0.0, 2.0]]
+let _ = independent(X, Y)
+let c = comoments(X, Y)
+// EXPECT: c = [0.0, 0.0, 0.0, 0.0, 0.0, 0.0]

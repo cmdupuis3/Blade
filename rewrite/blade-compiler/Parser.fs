@@ -461,6 +461,26 @@ and parseTypeAtom (tokens: Token list) : ParseResult<TypeExpr> =
         | [single] -> success single remaining
         | _ -> success (TyTuple types) remaining
     
+    | Some (TokIdent "Dist") when (match peek (advance tokens) with Some (TokOp "<") -> true | _ -> false) ->
+        // Dist<order, Elem like I1, ..., Ik> — the typed dist tower
+        // (ppl/NOTES.md). Order-first is deliberate: the order is an
+        // EXPRESSION (any statically-evaluable int, per the replicate-count
+        // contract), so leading with it keeps the parse unambiguous; the
+        // rest is exactly Array's `Elem like indices` inner syntax.
+        // A bare `Dist` without `<` falls through to the TyNamed arm below.
+        advance tokens |> expect (TokOp "<") >>= fun _ afterLt ->
+        parseSimpleExpr afterLt >>= fun orderExpr afterOrder ->
+        expect TokComma afterOrder >>= fun _ afterComma ->
+        parseTypeExpr afterComma >>= fun elemType afterElem ->
+        (match peek afterElem with
+         | Some (TokKeyword KwLike) ->
+             advance afterElem |> sepBy parseIndexType TokComma >>= fun axes afterAxes ->
+             expectGt afterAxes >>= fun _ remaining ->
+             success (TyDist (orderExpr, elemType, axes)) remaining
+         | _ ->
+             expectGt afterElem >>= fun _ remaining ->
+             success (TyDist (orderExpr, elemType, [])) remaining)
+
     | Some (TokIdent name) ->
         let afterName = advance tokens
         match peek afterName with
@@ -801,14 +821,14 @@ let parseWhereClause (tokens: Token list) : ParseResult<WhereClause> =
     // to at most one element: a second strategy keyword (of either backend) is
     // rejected. The future mixed-strategy feature relaxes this to allow a second
     // element of a DIFFERENT backend (omp on some dims, cuda on others).
-    let rec loop comms (par: ParallelStrategy list) toks =
+    let rec loop comms (par: ParallelStrategy list) custom toks =
         let hasStrategy = not (List.isEmpty par)
         match peek toks with
         | Some (TokKeyword KwComm) ->
             advance toks |> expect TokLParen >>= fun _ afterLParen ->
             parseIdentList afterLParen >>= fun names afterNames ->
             expect TokRParen afterNames >>= fun _ remaining ->
-            loop (names :: comms) par remaining
+            loop (names :: comms) par custom remaining
         | Some (TokKeyword KwOmp) ->
             if hasStrategy then
                 let line, col = currentPos toks
@@ -817,7 +837,7 @@ let parseWhereClause (tokens: Token list) : ParseResult<WhereClause> =
                 advance toks |> expect TokLParen >>= fun _ afterLParen ->
                 parseOmpArgs [] afterLParen >>= fun pairs afterArgs ->
                 expect TokRParen afterArgs >>= fun _ remaining ->
-                loop comms (par @ [Omp { Vars = pairs }]) remaining
+                loop comms (par @ [Omp { Vars = pairs }]) custom remaining
         | Some (TokKeyword KwCuda) ->
             if hasStrategy then
                 let line, col = currentPos toks
@@ -839,21 +859,32 @@ let parseWhereClause (tokens: Token list) : ParseResult<WhereClause> =
                             match t.Kind with
                             | TokInt n ->
                                 expect TokRParen rest >>= fun _ remaining ->
-                                loop comms (par @ [Cuda { BlockSize = int n }]) remaining
+                                loop comms (par @ [Cuda { BlockSize = int n }]) custom remaining
                             | _ -> error (sprintf "Expected integer block size but got %A" t.Kind) t.Line t.Col
                         | [] -> error "Expected integer block size but got EOF" 0 0
                 | _ ->
                     // bare `cuda` => default block size
-                    loop comms (par @ [Cuda { BlockSize = 256 }]) afterCuda
+                    loop comms (par @ [Cuda { BlockSize = 256 }]) custom afterCuda
+        | Some (TokIdent name) when (match peek (advance toks) with Some TokLParen -> true | _ -> false) ->
+            // Open constraint conjunct: `<name>(<idents>)` for any identifier
+            // the grammar doesn't own (e.g. PPL's `indep(a, b)`). Parsed as
+            // DATA — (name, args) — and dispatched by the CHECKER through
+            // the Blade.Constraints registry; an unregistered name errors
+            // there with the registered vocabulary, not here.
+            advance toks |> expect TokLParen >>= fun _ afterLParen ->
+            parseIdentList afterLParen >>= fun args afterArgs ->
+            expect TokRParen afterArgs >>= fun _ remaining ->
+            loop comms par (custom @ [(name, args)]) remaining
         | Some TokComma ->
-            loop comms par (advance toks)
+            loop comms par custom (advance toks)
         | _ ->
-            success { 
+            success {
                 Commutativity = List.rev comms
                 Parallel = par
                 TDims = []
+                Custom = custom
             } toks
-    loop [] [] tokens
+    loop [] [] [] tokens
 
 let rec parseExprImpl (tokens: Token list) : ParseResult<Expr> =
     parseAssignment tokens

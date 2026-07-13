@@ -1,0 +1,18 @@
+// TEST: Sort Forces Deferred Input
+// sort over an array input that is still an UNFORCED computation. The kernel
+// body is an if/then/else, and parseIf consumes the trailing `|> compute` into
+// the else branch (`0.0 |> compute`, identity on a scalar) — so `w` stays a
+// deferred computation when sort consumes it. sort's permutation and copy
+// loops index the input by name, so its codegen forces the deferred binding
+// in place (shared forceDeferredArrayInput helper, same machinery as
+// |> compute) before sorting. The second sort over the same binding confirms
+// the forced materialization happens exactly once (no C++ redefinition of w).
+let vals = [3, 1, 2]
+let w = method_for(vals) <@> lambda(q) -> if q > 1 then 1.0 else 0.0 |> compute
+let s = sort(w, lambda(x) -> x)
+let result = method_for(s) <@> lambda(x) -> x |> compute
+let s2 = sort(w, lambda(x) -> x)
+let result2 = method_for(s2) <@> lambda(x) -> x |> compute
+// w = [1, 0, 1] -> sorted ascending by identity key
+// EXPECT: result = [0, 1, 1]
+// EXPECT: result2 = [0, 1, 1]

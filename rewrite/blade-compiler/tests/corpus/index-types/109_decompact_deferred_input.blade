@@ -1,0 +1,14 @@
+// TEST: Decompact Forces Deferred Input
+// decompact over a symmetric array that is still an UNFORCED computation
+// (the reynolds pipeline is left without `|> compute`, so `sym` stays a
+// deferred binding). decompact's extent reads and symmetry-expanding scatter
+// index the input by name, so its codegen forces the deferred binding in
+// place first (shared forceDeferredArrayInput helper). Values mirror
+// 034_decompact_symmetric.
+let A = [1.0, 2.0, 3.0]
+let L = method_for(A, A)
+let g = lambda(x, y) where comm(x, y) -> 2.0 * x + y
+let sym = L <@> reynolds(g)
+let result = decompact(sym, 0)
+// M = [[6,9,12],[9,12,15],[12,15,18]] -> row-major
+// EXPECT: result = [6, 9, 12, 9, 12, 15, 12, 15, 18]

@@ -1,0 +1,24 @@
+// TEST: Cross-module static value
+// MODULE: Main
+// M exports `let static k = 3`. Main both reads it as a plain value (v)
+// and folds it into its OWN `let static` (x = M.k + 1) -- the latter used
+// to fail the `let static` fold assertion with "does not evaluate at
+// compile time: Static evaluation: undefined variable 'M'", because
+// StaticEval.resolveStatics only ever evaluates a module's own decls (see
+// checkModule's importedStaticSeed / rewriteImportedStaticRefs).
+module Main
+import M
+
+let v = M.k
+let static x = M.k + 1
+let x_val = x
+// The imported static also drives elaboration positions directly: the
+// replicate count evaluates M.k through the qualified-name seed
+// (StaticEval.evalExpr's ExprField arm over env.Values).
+let A = [1.0, 2.0]
+let L = method_for(A)
+let c = L <@> lambda(q) -> q + 1.0
+let reps = replicate(M.k, c) |> compute
+// EXPECT: v = 3
+// EXPECT: x_val = 4
+// EXPECT: reps = [2.0, 3.0, 2.0, 3.0, 2.0, 3.0]

@@ -1,0 +1,123 @@
+// TEST: Example Distributed Telemetry Streaming Moments
+// ============================================================================
+// Distributed latency telemetry in Blade's moment algebra. Three gateway
+// shards each observe a bivariate stream (api latency, db latency). Each
+// shard compresses its window into a fixed-size sufficient-statistic state
+// (mstate); the collector merges states pairwise -- the merge is a monoid,
+// so order and grouping don't matter -- and freezes the merged state into
+// cumulants. The whole pipeline never re-touches raw samples.
+//
+// Property pins (the example checks itself):
+//   * merged-shards cumulants == batch cumulants over the concatenated
+//     stream (printed side by side, orders 1..4);
+//   * the k = 2 pooled-covariance merge (comoments_merge) reproduces the
+//     batch covariance of the first two shards;
+//   * moments(dist(Z,2), 2) round-trips the raw moments exactly, while
+//     order-4 reconstruction from an order-2 dist is the Isserlis closure
+//     (differs from the true 4th moments by the truncated k3/k4 mass).
+//
+// All EXPECT values verified against an independent implementation of the
+// standard population cumulant formulas (PowerShell reference script);
+// packed symmetric tensors print as flat canonical upper-triangle cells.
+// ============================================================================
+
+// ---- shard windows: 2 channels x 2 samples each (vars first, time LAST) ----
+type TimeIdx = Idx<2>
+let S1: Array<Float64 like Idx<2>, TimeIdx> = [[12.0, 18.0], [5.0, 9.0]]
+let S2: Array<Float64 like Idx<2>, TimeIdx> = [[14.0, 22.0], [7.0, 11.0]]
+let S3: Array<Float64 like Idx<2>, TimeIdx> = [[16.0, 10.0], [6.0, 13.0]]
+
+// The concatenated stream, written out as its own literal (the batch-side
+// oracle; there is no runtime concat -- the point is that the collector
+// never needs one).
+type FullIdx = Idx<6>
+let Z: Array<Float64 like Idx<2>, FullIdx> = [
+    [12.0, 18.0, 14.0, 22.0, 16.0, 10.0],
+    [5.0, 9.0, 7.0, 11.0, 6.0, 13.0]]
+
+// ============================================================================
+// (a) Streaming path: per-shard states, chained binary merges, freeze.
+// mstate(X, 4) carries (n, mean, central comoment sums M2..M4); the merge
+// combines them cell-wise by the Pebay subset-lattice kernels. Merging a
+// merged state with a fresh one is the monoid associativity the corpus
+// pins -- here it is the collector's natural left fold over shards.
+// ============================================================================
+let s1 = mstate(S1, 4)
+let s2 = mstate(S2, 4)
+let s3 = mstate(S3, 4)
+let s12 = mstate_merge(s1, s2)
+let s_all = mstate_merge(s12, s3)
+let (k1, k2, k3, k4) = mstate_cumulants(s_all)
+// EXPECT: k1 = [15.3333333333333, 8.5]
+// EXPECT: k2 = [15.5555555555556, 1.0, 7.91666666666667]
+// EXPECT: k3 = [20.7407407407407, 33.3333333333333, -17.5555555555556, 7.5]
+// EXPECT: k4 = [-232.296296296296, -13.3333333333333, 41.2592592592592, -64.5, -80.7916666666667]
+
+// ============================================================================
+// (b) Batch path over the concatenated stream -- must agree with (a) to
+// floating-point noise. cumulants(Z, r) runs the full Moebius inversion
+// over RAW power sums, so its high orders carry ~1e-10 of cancellation
+// noise that the central-moment streaming path avoids -- the agreement of
+// the two pins both the algebra and the numerics.
+// ============================================================================
+let b1 = cumulants(Z, 1)
+let b2 = cumulants(Z, 2)
+let b3 = cumulants(Z, 3)
+let b4 = cumulants(Z, 4)
+// EXPECT: b1 = [15.3333333333333, 8.5]
+// EXPECT: b2 = [15.5555555555555, 1.0, 7.91666666666667]
+// EXPECT: b3 = [20.7407407407418, 33.3333333333335, -17.5555555555557, 7.49999999999977]
+// EXPECT: b4 = [-232.29629629619, -13.3333333333139, 41.259259259281, -64.4999999999891, -80.7916666666642]
+
+// ============================================================================
+// (c) The k = 2 specialization: pooled covariance via comoments_merge,
+// using the exact identity C = (nA CA + nB CB)/n + (nA nB / n^2) dd^T.
+// Checked against the batch comoments of shards 1+2 concatenated.
+// ============================================================================
+type Full12 = Idx<4>
+let Z12: Array<Float64 like Idx<2>, Full12> = [
+    [12.0, 18.0, 14.0, 22.0],
+    [5.0, 9.0, 7.0, 11.0]]
+let c1 = comoments(S1, 2)
+let m1 = moments(S1, 1)
+let c2 = comoments(S2, 2)
+let m2 = moments(S2, 1)
+let pooled = comoments_merge(c1, m1, 2, c2, m2, 2)
+let batch12 = comoments(Z12, 2)
+// EXPECT: pooled = [14.75, 8.5, 5.0]
+// EXPECT: batch12 = [14.75, 8.5, 5.0]
+
+// ============================================================================
+// (d) Derived KPIs by pushing the distribution through a linear map.
+// W rows define total = api + db and gap = api - db; dist_affine transports
+// ALL carried cumulant orders at once (kappa'_r = W^(x)r kappa_r), so the
+// derived KPIs' variance, skew ingredients, etc. come out of the carried
+// state -- no re-pass over samples.
+// ============================================================================
+let W: Array<Float64 like Idx<2>, Idx<2>> = [[1.0, 1.0], [1.0, -1.0]]
+let d3 = dist(Z, 3)
+let (p1, p2, p3) = dist_affine(W, d3)
+// EXPECT: p1 = [23.8333333333333, 6.83333333333333]
+// EXPECT: p2 = [25.4722222222222, 7.63888888888884, 21.4722222222222]
+// EXPECT: p3 = [75.574074074075, 64.1296296296312, 12.4629629629637, -139.425925925925]
+
+// ============================================================================
+// (e) Reconstruction: moments(d, k) rebuilds raw moments from carried
+// cumulants (mu_S = sum over partitions of products of kappa_B, blocks
+// beyond the carried order contributing zero).
+//   * Round trip: order-2 moments from an order-2 dist equal the raw
+//     moments of the data exactly.
+//   * Isserlis closure: order-4 moments from an order-2 dist keep only
+//     pair-and-singleton partitions -- the gap to the true 4th moments is
+//     exactly the truncated k3/k4 mass (compare w4 against r4 below).
+// ============================================================================
+let d2 = dist(Z, 2)
+let w2 = moments(d2, 2)
+let r2 = moments(Z, 2)
+// EXPECT: w2 = [250.666666666667, 131.333333333333, 80.1666666666667]
+// EXPECT: r2 = [250.666666666667, 131.333333333333, 80.1666666666667]
+
+let w4 = moments(d2, 4)
+let r4 = moments(Z, 4)
+// EXPECT: w4 = [77946.8641975308, 37477.037037037, 20618.4444444444, 12752.5, 8839.95833333334]
+// EXPECT: r4 = [78986.6666666667, 39173.3333333333, 20688.0, 12355.3333333333, 9014.16666666667]

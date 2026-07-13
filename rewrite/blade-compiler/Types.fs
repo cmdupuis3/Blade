@@ -348,6 +348,21 @@ and IRTypeG<'Ext> =
     // transition; IRTIdxTagged is structurally equivalent and treated
     // identically at every match site.
     | IRTIdxTagged of inner: IRTypeG<'Ext> * tag: IdxRefG<'Ext>
+    // IRTDist: a distribution carried to stochastic order `order` — the
+    // typed form of the PPL dist tower (ppl/NOTES.md). Nominal and
+    // parameterized: `order` is a STATIC int (resolved before this type is
+    // constructed — deliberately a plain int, not IRTNat, whose unification
+    // ignores the value); `elem` is the cumulant element type (typically
+    // IRTScalar ETFloat64); `axes` are the variable-axis index types of the
+    // underlying random vector, needed to type component projection —
+    // cumulant k of a Dist over axes D is Array<elem like SymIdx<k, D>>.
+    //
+    // Like IRTIdxTagged, this is a typecheck-time invariant with strict
+    // unification (a bare tuple never implicitly becomes a Dist; only the
+    // dist construction intrinsic and dist-typed operators produce one) and
+    // it is ERASED before codegen: a Dist value lowers to the tuple of its
+    // packed cumulant component arrays (κ_1 .. κ_order).
+    | IRTDist of order: int * elem: IRTypeG<'Ext> * axes: IRIndexTypeG<'Ext> list
     | IRTNamed of string    // Named type (struct, sum type, etc.)
     | IRTInfer of int       // Unresolved type variable (id for unification)
     | IRTUnitAnnotated of IRTypeG<'Ext> * UnitSig  // Type with unit-of-measure annotation

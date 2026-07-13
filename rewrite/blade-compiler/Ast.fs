@@ -148,6 +148,12 @@ type TypeExpr =
     | TyNamed of Ident * TypeExpr list
     // Array type: Array<T like I1, I2, ...>
     | TyArray of elemType: TypeExpr * indexTypes: TypeExpr list
+    // Typed dist tower (ppl/NOTES.md): Dist<order, Elem like I1, ..., Ik>.
+    // order is any statically-evaluable int expression (literal, `let
+    // static`, or static-function call — the replicate-count contract);
+    // axes are the variable-axis index types of the underlying random
+    // vector, parsed with the same `like` syntax as Array's index list.
+    | TyDist of order: Expr * elemType: TypeExpr * axes: TypeExpr list
     // Abstract array type: Float64^r or similar where element type is concrete
     // For type variable arities (T^r), use TyVar with arity instead
     | TyAbstractArray of elemType: TypeExpr * rank: Expr * symmetry: int list option
@@ -208,6 +214,14 @@ and WhereClause = {
     // that, but the data model no longer forecloses it.
     Parallel: ParallelStrategy list       // [] => serial; today 0 or 1 element
     TDims: TDimSpec list
+    // OPEN constraint conjuncts: `where <name>(<idents>)` for any name the
+    // parser doesn't recognize as a built-in clause keyword. The parser
+    // stays grammar-only — it records (name, args) as data; the CHECKER
+    // dispatches each conjunct through the Blade.Constraints registry
+    // (extension modules register handlers; PPL registers `indep`). An
+    // unregistered name is a check-time error listing the registered
+    // vocabulary, not a parse error.
+    Custom: (Ident * Ident list) list
 }
 
 and TDimSpec = {

@@ -1,0 +1,197 @@
+// TEST: Example Weather Station QC And Aggregation
+// ============================================================================
+// A realistic sensor-network workload on Blade's SQL surface: a station
+// catalog and a readings log held as parallel-array tables, quality-
+// controlled, joined, grouped, and summarized -- no imperative loops
+// anywhere. Every aggregate is a mask / compound / group_by / reduce
+// pipeline, and the single-pass multi-statistic sweep at the end fills
+// three accumulators in one traversal of the data (the loops/060 fused-
+// pool shape).
+//
+// Tables:
+//   stations: id (implicit 0..5), elevation_m, region code (0..2)
+//   readings: station foreign key, temperature, qc flag (0 good, 1
+//             suspect, 2 bad)
+//
+// All EXPECT values are hand-derived from the literals below.
+// ============================================================================
+
+// ---- station catalog (6 stations, 3 regions: 0 coast, 1 valley, 2 alpine) --
+// Station codes appear as *values* in the readings log and the audit list,
+// so the code-keyed columns stay plain-Int-indexed (a nominally tagged slot
+// only accepts literal-coerced or range-flowed tags, not dynamic Ints).
+type StationIdx = Idx<6>
+let elevation_m: Array<Float64 like StationIdx> = [42.0, 388.0, 1204.0, 15.0, 730.0, 2210.0]
+let region = [0, 1, 2, 0, 1, 2]
+
+// ---- readings log (18 readings, 3 per station, station-major order) --------
+type ReadIdx = Idx<18>
+let r_station: Array<Int like ReadIdx> = [0, 0, 0, 1, 1, 1, 2, 2, 2, 3, 3, 3, 4, 4, 4, 5, 5, 5]
+let r_temp: Array<Float64 like ReadIdx> = [14.0, 16.0, 18.0, 11.0, 13.0, 12.0, 3.0, 5.0, 4.0, 17.0, 15.0, 19.0, 10.0, 14.0, 12.0, -2.0, 0.0, -1.0]
+let r_qc: Array<Int like ReadIdx> = [0, 0, 0, 0, 1, 0, 0, 0, 0, 2, 0, 0, 0, 0, 1, 0, 0, 0]
+
+// ============================================================================
+// (a) Quality control -- SQL: SELECT temp FROM readings WHERE qc = 0
+// mask builds the presence vector, compound compacts, reduce/extents consume.
+// The qc mask is built over a *different column* of the same ReadIdx table --
+// masks are positional, so any same-index-space column can drive the filter.
+// ============================================================================
+let qc_ok = mask(r_qc, lambda(q) -> q == 0)
+let good_temps = compound(r_temp, qc_ok)
+let n_good = extents(good_temps)
+let sum_good = reduce(good_temps, (+))
+// EXPECT: n_good = 15
+// EXPECT: sum_good = 138.0
+
+// ============================================================================
+// (b) Semijoin -- readings that belong to audited stations.
+// mask(A, contains(B, x)) is recognized and rewritten to a hash semijoin,
+// so this is O(|readings| + |audited|), not a nested scan.
+// ============================================================================
+let audited = [1, 4, 5]
+let from_audited = mask(r_station, lambda(s) -> contains(audited, s))
+let audited_temps = compound(r_temp, from_audited)
+let n_audited = extents(audited_temps)
+let sum_audited = reduce(audited_temps, (+))
+let mean_audited = sum_audited / (1.0 * n_audited)
+// EXPECT: n_audited = 9
+// EXPECT: sum_audited = 69.0
+// EXPECT: mean_audited = 7.66666666666667
+
+// ============================================================================
+// (c) GROUP BY station -- per-station mean over the full log.
+// group_by peels the readings into ragged per-station sub-arrays; the kernel
+// param must carry the opaque RaggedIdx<_> annotation because reduce inspects
+// (but does not infer) its argument's type. Group order = first occurrence
+// of each key, and stations are pre-numbered 0..5 in log order, so the
+// output lines up with the station catalog by construction.
+// ============================================================================
+let gk = group_keys(r_station)
+let by_station = group_by(r_temp, gk)
+let station_sums = method_for(by_station)
+    <@> lambda(g: Array<Float64 like RaggedIdx<_>>) -> reduce(g, (+))
+    |> compute
+let station_means = method_for(by_station)
+    <@> lambda(g: Array<Float64 like RaggedIdx<_>>) -> reduce(g, (+)) / (1.0 * extents(g))
+    |> compute
+let grand_total = reduce(station_sums, (+))
+// EXPECT: station_sums = [48.0, 36.0, 12.0, 51.0, 36.0, -3.0]
+// EXPECT: station_means = [16.0, 12.0, 4.0, 17.0, 12.0, -1.0]
+// EXPECT: grand_total = 180.0
+
+// ============================================================================
+// (d) Re-broadcast join -- per-reading anomaly against the station mean.
+// The kernel iterates the readings index space and dereferences BOTH columns
+// plus the freshly computed station_means through the foreign key: the
+// double-deref means(fk(i)) is the canonical Blade join (index-types/103).
+// ============================================================================
+let anomaly = method_for(range<ReadIdx>)
+    <@> lambda(i) -> r_temp(i) - station_means(r_station(i))
+    |> compute
+// EXPECT: anomaly = [-2.0, 0.0, 2.0, -1.0, 1.0, 0.0, -1.0, 1.0, 0.0, 0.0, -2.0, 2.0, -2.0, 2.0, 0.0, -1.0, 1.0, 0.0]
+
+// ============================================================================
+// (e) ORDER BY -- stations ranked by mean temperature.
+// sort takes a key-extractor lambda over the element (not a comparator);
+// negate the key for descending order.
+// ============================================================================
+let coldest_first = sort(station_means, lambda(x) -> x)
+let warmest_first = sort(station_means, lambda(x) -> -x)
+// EXPECT: coldest_first = [-1.0, 4.0, 12.0, 12.0, 16.0, 17.0]
+// EXPECT: warmest_first = [17.0, 16.0, 12.0, 12.0, 4.0, -1.0]
+
+// ============================================================================
+// (f) Composed filters -- positional mask algebra and value set-ops.
+// WHERE ... AND ... is elementwise Bool AND of two presence masks over the
+// same named index space; OR is the union filter. Both zip the masks and
+// compact once at the end.
+// ============================================================================
+// SQL: SELECT SUM(temp), COUNT(*) FROM readings WHERE temp > 12 AND qc = 0
+let warm = mask(r_temp, lambda(t) -> t > 12.0)
+let warm_and_good = method_for(zip(warm, qc_ok)) <@> lambda(a, b) -> a && b |> compute
+let warm_good_temps = compound(r_temp, warm_and_good)
+let n_warm_good = extents(warm_good_temps)
+let sum_warm_good = reduce(warm_good_temps, (+))
+// EXPECT: n_warm_good = 6
+// EXPECT: sum_warm_good = 96.0
+
+// SQL: ... WHERE temp < 0 OR qc <> 0   (readings needing review)
+let freezing = mask(r_temp, lambda(t) -> t < 0.0)
+let qc_flagged = mask(r_qc, lambda(q) -> q > 0)
+let needs_review = method_for(zip(freezing, qc_flagged)) <@> lambda(a, b) -> a || b |> compute
+let review_temps = compound(r_temp, needs_review)
+let n_review = extents(review_temps)
+let sum_review = reduce(review_temps, (+))
+// EXPECT: n_review = 5
+// EXPECT: sum_review = 39.0
+
+// ============================================================================
+// Station-axis roll-up: which stations produced qc-flagged readings?
+// qc codes are ordered by severity (0 good, 1 suspect, 2 bad), so the
+// per-station SUM of codes is a severity score, and score > 0 means "had
+// at least one flagged reading". Grouping the raw column keeps the whole
+// roll-up a group_by + reduce pipeline; the set logic then happens as
+// positional mask algebra over the distinct-station axis. Note the order:
+// unique FIRST, then mask/filter (filters yield compacted views, and the
+// dedup/set operators consume dense arrays).
+// ============================================================================
+let by_station_qc = group_by(r_qc, gk)
+let station_qc_score = method_for(by_station_qc)
+    <@> lambda(g: Array<Int like RaggedIdx<_>>) -> reduce(g, (+))
+    |> compute
+// EXPECT: station_qc_score = [0, 1, 0, 2, 1, 0]
+
+let uniq_stations = unique(r_station)
+let audited_mask = mask(uniq_stations, lambda(s) -> contains(audited, s))
+let troubled_mask = mask(uniq_stations, lambda(s) -> station_qc_score(s) > 0)
+let audited_and_troubled = method_for(zip(audited_mask, troubled_mask)) <@> lambda(a, b) -> a && b |> compute
+let audited_or_troubled = method_for(zip(audited_mask, troubled_mask)) <@> lambda(a, b) -> a || b |> compute
+let watchlist = compound(uniq_stations, audited_and_troubled)
+let contactlist = compound(uniq_stations, audited_or_troubled)
+let n_watch = extents(watchlist)
+let n_contact = extents(contactlist)
+// audited {1,4,5} AND qc-troubled {1,3,4} = {1,4}; OR = {1,3,4,5}
+// EXPECT: n_watch = 2
+// EXPECT: n_contact = 4
+
+// Value-based set ops (SQL INTERSECT / UNION with dedup) against an external
+// input: region codes covered by the audit vs. regions under a weather alert.
+let audited_regions_all = method_for(audited) <@> lambda(s) -> region(s) |> compute
+let audited_regions = unique(audited_regions_all)
+let alert_regions = [0, 1]
+let regions_both = intersect(audited_regions, alert_regions)
+let regions_either = union(audited_regions, alert_regions)
+// EXPECT: audited_regions = [1, 2]
+// EXPECT: regions_both = [1]
+// EXPECT: regions_either = [1, 2, 0]
+
+// ============================================================================
+// (g) Single-pass multi-statistic sweep over the QC'd data.
+// The reduction terminal wants a dense co-iteration, so the sweep zips the
+// raw value column with its qc column and gates inside the kernels -- one
+// shared loop object, one kernel per statistic, <&!>-fused so the chain
+// compiles to ONE traversal filling all three accumulators (the fused-pool
+// shape). Gated sum, sum of squares, and count come out of one pass; mean
+// and variance are derived scalars.
+// ============================================================================
+let G = method_for(zip(r_temp, r_qc))
+let k_sum = lambda(t, q) -> if q == 0 then t else 0.0
+let k_sq = lambda(t, q) -> if q == 0 then t * t else 0.0
+let k_one = lambda(t, q) -> if q == 0 then 1.0 else 0.0
+let (g_sum, g_sq, g_cnt) = reduce((G <@> k_sum) <&!> (G <@> k_sq) <&!> (G <@> k_one), (+))
+let mean_good = g_sum / g_cnt
+let var_good = g_sq / g_cnt - mean_good * mean_good
+let std_good = sqrt(var_good)
+// EXPECT: g_sum = 138.0
+// EXPECT: g_sq = 1978.0
+// EXPECT: g_cnt = 15.0
+// EXPECT: mean_good = 9.2
+// EXPECT: var_good = 47.2266666666667
+// EXPECT: std_good = 6.87216608258755
+
+// Extremes need their own fold kernels (min/max are reduce lambdas, not
+// intrinsics) -- still declarative one-liners over the compacted data.
+let max_good = reduce(good_temps, lambda(a, b) -> if a > b then a else b)
+let min_good = reduce(good_temps, lambda(a, b) -> if a < b then a else b)
+// EXPECT: max_good = 19.0
+// EXPECT: min_good = -2.0

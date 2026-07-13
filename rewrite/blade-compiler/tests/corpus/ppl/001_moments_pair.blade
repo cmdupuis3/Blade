@@ -1,0 +1,10 @@
+// TEST: Moments Pair
+// moments(A, 2): raw pair comoment former. Elaborates (PplElaborate) to
+// method_for(A, A) <@> lambda(x1, x2) where comm(x1, x2) ->
+// prodsum(x1, x2) / 2.0 |> compute. Fibers along the sample (last) axis:
+// f0 = [1,2], f1 = [3,4]; output packed SymIdx<2, 2>.
+// E[f0*f0] = (1+4)/2 = 2.5 | E[f0*f1] = (3+8)/2 = 5.5 | E[f1*f1] = (9+16)/2 = 12.5
+type TimeIdx = Idx<2>
+let A: Array<Float64 like Idx<2>, TimeIdx> = [[1.0, 2.0], [3.0, 4.0]]
+let m2 = moments(A, 2)
+// EXPECT: m2 = [2.5, 5.5, 12.5]

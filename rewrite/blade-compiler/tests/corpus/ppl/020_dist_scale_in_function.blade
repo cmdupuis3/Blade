@@ -1,0 +1,22 @@
+// TEST: Dist Scale In Function
+// Checker-level dist operator dispatch (typed-Dist arc phase 4): scalar *
+// Dist is κ_k(c·X) = c^k κ_k(X) — pure multilinearity, no independence
+// requirement — so it dispatches in ANY expression position. Here on a
+// Dist-typed function PARAMETER (invisible to the elaboration registry):
+// TypeCheck.inferDistBinOp synthesizes the per-order component maps
+// (DistSynth.scaleExpr) and re-infers them. The coefficient is a function
+// parameter spliced into the kernels (capture-by-name of params must
+// survive both the inline-loop and lifted-lambda kernel paths).
+// Oracle (ppl/014): κ1(X) = [1.5, 3.5], κ2(X) = [0.25, 0.25, 0.25].
+type TimeIdx = Idx<2>
+let X: Array<Float64 like Idx<2>, TimeIdx> = [[1.0, 2.0], [3.0, 4.0]]
+let dx = dist(X, 2)
+
+function scale_dist(c: Float64, d: Dist<2, Float64 like Idx<2>>) -> Dist<2, Float64 like Idx<2>> =
+  c * d
+
+let h = scale_dist(3.0, dx)
+let h1 = cumulant(h, 1)
+let h2 = cumulant(h, 2)
+// EXPECT: h1 = [4.5, 10.5]
+// EXPECT: h2 = [2.25, 2.25, 2.25]

@@ -485,7 +485,18 @@ let rec elemTypeToCpp (ty: IRType) : string =
 /// `elemTypeToCpp` because the array element type is itself an IRType.
 and irTypeToCpp = function
     | IRTScalar et -> primTypeToCpp et
-    | IRTTuple ts -> sprintf "std::tuple<%s>" (ts |> List.map irTypeToCpp |> String.concat ", ")
+    | IRTTuple ts ->
+        // Array-shaped elements render as the WRAPPER form (Array<T, N>),
+        // not the raw promote<>::type pointer: a std::tuple is a value
+        // boundary exactly like a function signature (which already uses
+        // the wrapper via arrowSlotTypeForFuncSig), and the wrapper's
+        // implicit conversion to the raw pointer means a raw-element tuple
+        // silently DROPS extents when a wrapper flows in — anything
+        // downstream needing `.extents` (auto-print, loop bounds) then
+        // breaks. arrowSlotTypeForFuncSig delegates non-array elements
+        // back to irTypeToCpp, so scalar/nested-tuple elements render as
+        // before.
+        sprintf "std::tuple<%s>" (ts |> List.map arrowSlotTypeForFuncSig |> String.concat ", ")
     | IRTUnit -> "void"
     | IRTLoop lt ->
         match lt.Kind with
@@ -506,6 +517,13 @@ and irTypeToCpp = function
         match idxRef with
         | IRefNamed name -> name
         | IRefAnon _ -> irTypeToCpp inner
+    | IRTDist _ ->
+        // Dist<r, τ> is erased at lowering (a Dist value lowers to the tuple
+        // of its packed cumulant component arrays); reaching codegen means
+        // the erasure was skipped.
+        let cell = exprWarningsCell ()
+        cell.Value <- cell.Value @ ["irTypeToCpp: IRTDist reached codegen — Dist erasure was skipped at lowering"]
+        "BLADE_ERROR_DIST_TYPE"
     | IRTNamed "String" -> "std::string"  // Blade String → C++ std::string
     | IRTNamed name -> name  // Named types (structs, etc.) use their name directly
     | IRTInfer n ->
@@ -1054,8 +1072,13 @@ let rec exprToCppCore (subst: SubstMap) (names: Map<IRId, string>) (expr: IRExpr
         renderLetExpr subst names id value body
     | IRMethodFor _ -> exprError "loop object used as value"
     | IRObjectFor _ -> exprError "loop object used as value"
-    | IRApplyCombinator _ | IRComposeApply _ -> 
+    | IRApplyCombinator _ | IRComposeApply _ ->
         exprError "unevaluated computation used as value - use |> compute"
+    | IRReduceCompute _ ->
+        // Statement-shaped (declares accumulators + a loop nest); no IIFE
+        // form yet. Reached only if a fused reduce lands in expression
+        // position — bind it to a `let` first.
+        exprError "reduce over a deferred computation must be bound to a let (expression position is not supported yet)"
     | IRCompute inner -> 
         // compute forces evaluation of a lazy computation
         match inner with
@@ -1072,6 +1095,20 @@ let rec exprToCppCore (subst: SubstMap) (names: Map<IRId, string>) (expr: IRExpr
         renderExtentExpr subst names arr dim
     | IRReduce (arrExpr, kernelExpr, initExpr) ->
         renderReduceExpr subst names arrExpr kernelExpr initExpr
+    | IRProdSum args ->
+        // Fused product-sum Σ_t Π_ℓ argℓ[t]: one loop, one accumulator,
+        // rendered as an IIFE so it composes in any expression position —
+        // most importantly inside method_for kernels, where the moment
+        // formers' fiber kernels land. Bound comes from the first operand
+        // (TypeCheck rejects provably mismatched static extents).
+        let argStrs = args |> List.map (exprToCppCore subst names)
+        let elemStr =
+            match inferExprType (List.head args) with
+            | ArrayElem at -> elemTypeToCpp at.ElemType
+            | t -> elemTypeToCpp t
+        let product = argStrs |> List.map (fun a -> sprintf "%s[__pt]" a) |> String.concat " * "
+        sprintf "[&]() { %s __ps = 0; for (size_t __pt = 0; __pt < %s.extents[0]; __pt++) { __ps += %s; } return __ps; }()"
+            elemStr (List.head argStrs) product
     | IRContains (arrExpr, valueExpr) ->
         // Linear-scan membership test as an IIFE returning bool. (A prior
         // hoist-set fusion for contains-inside-mask has been removed; every
@@ -1701,11 +1738,28 @@ and renderLetExpr (subst: SubstMap) (names: Map<IRId, string>) id value body : s
     // For inline let expressions, we need statement context
     let names' = Map.add id (sprintf "__v%d" id) names
     if isUnitExpr value then
-        // Unit-valued binding: skip the auto declaration
-        if isUnitExpr body then
-            "((void)0)"
+        // Unit-valued binding. lowerTypedBlock sequences STATEMENTS
+        // (assignments, for-in loops) through dummy lets, so a unit value
+        // here is normally a side-effecting statement, not dead code.
+        // Render its statement form as an IIFE prelude. The pre-fix code
+        // skipped the value outright, which silently discarded kernel-body
+        // loops: a block kernel { let mut s = 0.0; for .. { s = s + .. }; s }
+        // inlined at a method_for apply site returned the init value
+        // unchanged (all-zeros output).
+        let stmtPrelude = renderUnitStmts subst names value
+        if stmtPrelude = "" then
+            // Genuinely effect-free (unit literal): old skip behavior.
+            if isUnitExpr body then
+                "((void)0)"
+            else
+                exprToCppCore subst names' body
+        elif isUnitExpr body then
+            // Effectful value, unit body: whole let is a void expression.
+            let bodyStmts = renderUnitStmts subst names' body
+            let stmts = [stmtPrelude; bodyStmts] |> List.filter (fun s -> s <> "") |> String.concat " "
+            sprintf "([&]() { %s }())" stmts
         else
-            exprToCppCore subst names' body
+            sprintf "([&]() { %s return %s; }())" stmtPrelude (exprToCppCore subst names' body)
     else
         // Phase C lift pass produces IRLet bindings whose value can be
         // an inline form (mask/sort/intersect/union). These can't be
@@ -1730,9 +1784,67 @@ and renderLetExpr (subst: SubstMap) (names: Map<IRId, string>) id value body : s
             match body with
             | IRLit IRLitUnit ->
                 sprintf "([&]() { auto __v%d = %s; }())" id valStr
+            | b when isUnitExpr b ->
+                // Unit-typed but effectful tail (assignment / for-in as the
+                // block's last statement): emit its statement form rather
+                // than a `return` of a statement expression.
+                sprintf "([&]() { auto __v%d = %s; %s }())" id valStr (renderUnitStmts subst names' b)
             | _ ->
                 let bodyStr = exprToCppCore subst names' body
                 sprintf "([&]() { auto __v%d = %s; return %s; }())" id valStr bodyStr
+
+
+/// Render a unit-typed side-effecting expression — a STATEMENT that
+/// lowerTypedBlock sequenced through a dummy let (assignment, for-in loop,
+/// nested statement block) — as flat C++ statement text for splicing into
+/// an expression-context IIFE. Returns "" when the expression has no
+/// runtime effect (unit literal).
+///
+/// This is the expression-context sibling of genFuncBody's IRForRange /
+/// IRAssign statement arms; it lives in the exprToCppCore let-rec group
+/// because statements re-enter expression rendering for their operands
+/// (loop bounds, assignment RHS, indices).
+and renderUnitStmts (subst: SubstMap) (names: Map<IRId, string>) (expr: IRExpr) : string =
+    match expr with
+    | IRLit IRLitUnit -> ""
+    | IRAssign _ ->
+        sprintf "%s;" (exprToCppCore subst names expr)
+    | IRForRange (vid, lo, hi, body) ->
+        // Same loop-var naming (__k<id>) and size_t convention as
+        // genForRangeBinding / EmitCpp.forLoopFrom, so inlined kernel
+        // loops read like their module-level counterparts.
+        let varName = sprintf "__k%d" vid
+        let names' = Map.add vid varName names
+        let loStr = exprToCppCore subst names lo
+        let hiStr = exprToCppCore subst names hi
+        let bodyStmts = renderUnitStmts subst names' body
+        sprintf "for (size_t %s = %s; %s < %s; %s++) { %s }" varName loStr varName hiStr varName bodyStmts
+    | IRLet (letId, value, body) ->
+        // Statement-position let chain (a nested block): declare non-unit
+        // values, splice unit statements, continue down the chain. Inline
+        // forms (mask/sort/...) get their multi-statement materialization,
+        // mirroring renderLetExpr's expression-position handling.
+        let names' = Map.add letId (sprintf "__v%d" letId) names
+        let valueStmt =
+            if isUnitExpr value then
+                renderUnitStmts subst names value
+            else
+                match materializeInlineForm subst names (sprintf "__v%d" letId) (inferInlineElemTypeStr "statement-position let" value) value with
+                | Some prelude -> prelude |> String.concat " "
+                | None -> sprintf "auto __v%d = %s;" letId (exprToCppCore subst names value)
+        [valueStmt; renderUnitStmts subst names' body]
+        |> List.filter (fun s -> s <> "")
+        |> String.concat " "
+    | IRSequence elems ->
+        elems
+        |> List.map (renderUnitStmts subst names)
+        |> List.filter (fun s -> s <> "")
+        |> String.concat " "
+    | other ->
+        // Not statically unit: evaluate for side effects, discard the value.
+        // Also the safety net for unhandled statement forms — a visible
+        // C++ expression beats a silent drop.
+        sprintf "(void)(%s);" (exprToCppCore subst names other)
 
 
 and renderExtentExpr (subst: SubstMap) (names: Map<IRId, string>) arr dim : string =
@@ -3194,8 +3306,13 @@ let genLoopNest (codeGen: LoopNestCodeGen) (outerNames: Map<int, string>) (inden
     let mutable bidx = 0
     let compoundArrays = compoundArrayNamesOf codeGen.Bindings
     for binding in codeGen.Bindings do
-        // Generate the loop header (pragma only on the outermost loop)
-        let pragmaPrefix = if atOuterLevel then genNestPragma codeGen.Bindings (ind depth) else ""
+        // Generate the loop header (pragma only on the outermost loop).
+        // Fused-fold nests accumulate into shared scalars — not race-safe
+        // under a parallel-for — so the pragma is suppressed entirely
+        // (an omp `reduction(...)` clause is the future upgrade path).
+        let pragmaPrefix =
+            if atOuterLevel && codeGen.FoldWrapper.IsNone
+            then genNestPragma codeGen.Bindings (ind depth) else ""
         atOuterLevel <- false
         lines <- lines @ [ind depth + pragmaPrefix + genForLoopHeader compoundArrays binding]
         depth <- depth + 1
@@ -3270,7 +3387,13 @@ let genLoopNest (codeGen: LoopNestCodeGen) (outerNames: Map<int, string>) (inden
     let reynoldsResult = genKernelExprWithReynolds codeGen.KernelExpr codeGen.KernelParams codeGen.HasReynolds codeGen.IsAntisymmetric nameMap paramFinalNames
     if codeGen.HasReynolds && reynoldsResult.UniqueTerms < reynoldsResult.TotalPerms then
         lines <- lines @ [ind depth + sprintf "// Reynolds: %d/%d perms unique (dedup %dx)" reynoldsResult.UniqueTerms reynoldsResult.TotalPerms (reynoldsResult.TotalPerms / max 1 reynoldsResult.UniqueTerms)]
-    lines <- lines @ [ind depth + sprintf "%s%s %s %s;" codeGen.OutputName outputIdx assignOp reynoldsResult.CppExpr]
+    let assignLine =
+        match codeGen.FoldWrapper with
+        // Fused fold: accumulate the kernel value through the fold-kernel
+        // wrapper into the caller-declared scalar accumulator.
+        | Some wname -> sprintf "%s = %s(%s, %s);" codeGen.OutputName wname codeGen.OutputName reynoldsResult.CppExpr
+        | None -> sprintf "%s%s %s %s;" codeGen.OutputName outputIdx assignOp reynoldsResult.CppExpr
+    lines <- lines @ [ind depth + assignLine]
 
     // Close all loops
     for _ in codeGen.Bindings do
@@ -3899,12 +4022,52 @@ let genScalarBinding (ctx: CodeGenContext) (name: string) (value: IRExpr) (ty: I
             | _ -> None
         if raggedRowSubview.IsSome then raggedRowSubview.Value
         else
+        // Plain dense PARTIAL positional read: `let r0 = A(i)` supplies FEWER
+        // subscripts than the array's rank, so the result is a row/slab sub-view
+        // (residual rank >= 1), not a scalar. The raw path below would bind it as
+        // `promote<T, R>::type` -- a bare data pointer that has lost `.extents`,
+        // so every downstream `.extents` consumer (auto-print, method_for/zip)
+        // fails to compile. Bind the Array<T, R> wrapper directly, mirroring the
+        // loop-peel slice idiom (genElementBindingNew): the data pointer steps
+        // through the consumed leading dims and the extents pointer shifts past
+        // them, e.g. `Array<double,1> r0 = { A.data[0L], A.extents + 1 };`.
+        //
+        // Scoped to fully plain-dense rectangular arrays (every axis IxKPlain /
+        // SymNone / SDimension / arity-1) so the consumed-dims count equals the
+        // subscript count and the extents shift is exact. Compound partial reads
+        // take the IRTuple arm in producesWrapper; ragged/dep-idx rows take
+        // raggedRowSubview above; and a flat single-subscript into PACKED
+        // symmetric storage returns a row pointer under compact semantics that
+        // must NOT be re-wrapped here -- all excluded by the axis predicate.
+        let densePartialSubview =
+            match value, resolvedTy with
+            | IRIndex (arr, indices, _), ArrayElem residTy
+                    when not (List.isEmpty indices)
+                         && indices |> List.forall (function IRTuple _ -> false | _ -> true) ->
+                match inferExprType arr with
+                | ArrayElem arrTy
+                        when arrTy.IndexTypes.Length > indices.Length
+                             && arrTy.IndexTypes |> List.forall (fun ix ->
+                                    ix.IxKind = IxKPlain && ix.Symmetry = SymNone
+                                    && ix.Kind = SDimension && ix.Rank = 1) ->
+                    let arrStr = exprToCppCtx ctx arr
+                    let subscripts =
+                        indices
+                        |> List.map (fun i -> sprintf "[%s]" (exprToCppCtx ctx i))
+                        |> String.concat ""
+                    Some [sprintf "%s%s %s = { %s.data%s, %s.extents + %d };"
+                              ind (cppArrayTypeStr residTy) name arrStr subscripts arrStr indices.Length]
+                | _ -> None
+            | _ -> None
+        if densePartialSubview.IsSome then densePartialSubview.Value
+        else
         let producesWrapper =
             match value with
             | IRFieldAccess _ -> true
             | IRVar _ -> true                // assume wrapper (most producers migrated)
             | IRMask _ | IRSort _ | IRIntersect _ | IRUnion _ | IRUnique _ -> true
             | IRApp _ -> true                // function-call returns wrapped Array
+            | IRTupleProj _ -> true          // tuple elements carry wrappers (irTypeToCpp IRTTuple)
             | IRIndex (a, (IRTuple coords) :: _, _) ->
                 // A PARTIAL compound read (formalism 4.5) produces a wrapper:
                 // Compound<T, RR> for a residual-rank >= 2 read
@@ -4778,7 +4941,11 @@ let genFusedLoopNest (codeGen: LoopNestCodeGen) (extraKernels: (string * IRExpr 
     let mutable atOuterLevel = true
     let compoundArrays = compoundArrayNamesOf codeGen.Bindings
     for binding in codeGen.Bindings do
-        let pragmaPrefix = if atOuterLevel then genNestPragma codeGen.Bindings (ind depth) else ""
+        // Fold nests accumulate into shared scalars: suppress the parallel
+        // pragma (see genLoopNest; omp reduction clauses are the upgrade).
+        let pragmaPrefix =
+            if atOuterLevel && codeGen.FoldWrapper.IsNone
+            then genNestPragma codeGen.Bindings (ind depth) else ""
         atOuterLevel <- false
         lines <- lines @ [ind depth + pragmaPrefix + genForLoopHeader compoundArrays binding]
         depth <- depth + 1
@@ -4795,19 +4962,28 @@ let genFusedLoopNest (codeGen: LoopNestCodeGen) (extraKernels: (string * IRExpr 
             | RealArray ->
                 paramFinalNames <- Map.add elem.ParamVarId newName paramFinalNames
     
-    // Output index expression (shared by all kernels)
-    let outputIdx = 
-        codeGen.Bindings 
-        |> List.map (fun b -> sprintf "[%s]" b.IndexName)
-        |> String.concat ""
-    
+    // Output index expression (shared by all kernels); a fused FOLD writes
+    // scalar accumulators, so cells are not indexed at all.
+    let outputIdx =
+        if codeGen.FoldWrapper.IsSome then ""
+        else
+            codeGen.Bindings
+            |> List.map (fun b -> sprintf "[%s]" b.IndexName)
+            |> String.concat ""
+    // Assignment shape: cell write for compute, accumulate-through-wrapper
+    // for the fused fold (one shared fold kernel for every leaf).
+    let mkAssign (outName: string) (cppExpr: string) =
+        match codeGen.FoldWrapper with
+        | Some wname -> sprintf "%s = %s(%s, %s);" outName wname outName cppExpr
+        | None -> sprintf "%s%s = %s;" outName outputIdx cppExpr
+
     // First kernel assignment (uses primary LoopNestCodeGen's Reynolds info)
     let nameMap0 = paramFinalNames |> Map.fold (fun acc k v -> Map.add k v acc) outerNames
     let nameMap0 = codeGen.Captures |> List.fold (fun acc c -> Map.add c.Id c.Name acc) nameMap0
     let reynoldsResult0 = genKernelExprWithReynolds codeGen.KernelExpr codeGen.KernelParams codeGen.HasReynolds codeGen.IsAntisymmetric nameMap0 paramFinalNames
     if codeGen.HasReynolds && reynoldsResult0.UniqueTerms < reynoldsResult0.TotalPerms then
         lines <- lines @ [ind depth + sprintf "// Reynolds: %d/%d perms unique (dedup %dx)" reynoldsResult0.UniqueTerms reynoldsResult0.TotalPerms (reynoldsResult0.TotalPerms / max 1 reynoldsResult0.UniqueTerms)]
-    lines <- lines @ [ind depth + sprintf "%s%s = %s;" codeGen.OutputName outputIdx reynoldsResult0.CppExpr]
+    lines <- lines @ [ind depth + mkAssign codeGen.OutputName reynoldsResult0.CppExpr]
     
     // Additional kernel assignments
     // Each extra kernel has its own param VarIds that need mapping to the same peeled names.
@@ -4828,7 +5004,7 @@ let genFusedLoopNest (codeGen: LoopNestCodeGen) (extraKernels: (string * IRExpr 
         let reynoldsResult = genKernelExprWithReynolds kernelExpr extraParams hasReynolds isAntisym nameMap extraParamFinalNames
         if hasReynolds && reynoldsResult.UniqueTerms < reynoldsResult.TotalPerms then
             lines <- lines @ [ind depth + sprintf "// Reynolds: %d/%d perms unique (dedup %dx)" reynoldsResult.UniqueTerms reynoldsResult.TotalPerms (reynoldsResult.TotalPerms / max 1 reynoldsResult.UniqueTerms)]
-        lines <- lines @ [ind depth + sprintf "%s%s = %s;" outName outputIdx reynoldsResult.CppExpr]
+        lines <- lines @ [ind depth + mkAssign outName reynoldsResult.CppExpr]
     
     // Close all loops
     for _ in codeGen.Bindings do
@@ -5328,6 +5504,13 @@ let rec genBinding (ctx: CodeGenContext) (binding: IRBinding) (builder: IRBuilde
         genGramBinding ctx binding builder 
     | IRReduce (arrExpr, kernelExpr, initExpr) ->
         genReduceBinding ctx binding builder arrExpr kernelExpr initExpr
+    | IRReduceCompute (compExpr, kernelExpr, seedExpr) ->
+        genReduceComputeBinding ctx binding builder compExpr kernelExpr seedExpr
+    | IRProdSum _ ->
+        // Scalar result; the expression renderer emits the fused-loop IIFE.
+        let code = genScalarBinding ctx name binding.Value binding.Type
+        let ctx' = addVarName binding.Id name ctx
+        (code, ctx')
     | IRArrayLit (elements, arrType) ->
         let code = genArrayLiteral ctx name elements arrType
         let ctx' = addVarName binding.Id name ctx
@@ -6423,6 +6606,40 @@ and genCompoundInitBinding (ctx: CodeGenContext) (binding: IRBinding) (builder: 
          ([sprintf "%s#error \"compound() binding '%s' is not a CompoundIdx array type\"" ind name], addVarName binding.Id name ctx))
 
 
+/// Rearrangement combinators (group_by, sort, mask, transpose, decompact,
+/// intersect, union, unique, array negate/conjugate) index their array
+/// inputs by NAME in the emitted C++, so they need a MATERIALIZED input.
+/// An input that is still an unforced computation — a deferred binding
+/// (only a "<deferred computation>" comment in the C++), or an inline
+/// computation node — is forced here first, exactly as |> compute would
+/// force it. Returns (forceCode, ctx', expr') where expr' names the
+/// materialized array; callers rebuild their form node from expr' before
+/// rendering. `tmpBase` names the synthetic temporary when the input is an
+/// inline computation (and is the fallback name for a deferred binding
+/// missing from VarNames); pass a distinct base per input slot.
+and forceDeferredArrayInput (ctx: CodeGenContext) (builder: IRBuilder) (tmpBase: string) (expr: IRExpr) : string list * CodeGenContext * IRExpr =
+    match expr with
+    | IRVar (srcId, ty) when Map.containsKey srcId ctx.DeferredComputations ->
+        // Materialize under the deferred binding's own name, then drop it
+        // from the deferred map: later consumers (including a second
+        // rearrangement over the same binding) must see the materialized
+        // array, not re-force it into a C++ redefinition.
+        let srcName = Map.tryFind srcId ctx.VarNames |> Option.defaultValue tmpBase
+        let matBinding = { Id = srcId; Name = srcName; Type = ty; Value = IRCompute (IRVar (srcId, ty)); IsConst = true; IsMutable = false }
+        let (code, ctx1) = genBinding ctx matBinding builder
+        let ctx1 = { ctx1 with DeferredComputations = Map.remove srcId ctx1.DeferredComputations }
+        (code @ [""], ctx1, expr)
+    | IRApplyCombinator _ | IRComposeApply _ | IRParallel _ | IRFusion _ | IRFunctorMap _ | IRComposeMeth _ | IRBind _ | IRCompute _ ->
+        // Inline computation as the array argument: materialize into a
+        // synthetic temporary and rearrange over that.
+        let tmpId = builder.FreshId()
+        let ty = inferExprType expr
+        let matBinding = { Id = tmpId; Name = tmpBase; Type = ty; Value = IRCompute expr; IsConst = true; IsMutable = false }
+        let (code, ctx1) = genBinding ctx matBinding builder
+        (code @ [""], ctx1, IRVar (tmpId, ty))
+    | _ -> ([], ctx, expr)
+
+
 and genMaskBinding (ctx: CodeGenContext) (binding: IRBinding) (builder: IRBuilder) (arrExpr: IRExpr) (predExpr: IRExpr) : string list * CodeGenContext =
     let ind = indentStr ctx
     let name = bindingCppName binding
@@ -6433,6 +6650,7 @@ and genMaskBinding (ctx: CodeGenContext) (binding: IRBinding) (builder: IRBuilde
     //
     // Validation accepts any predicate that resolves to a
     // single-parameter callable through resolveCallable.
+    let (forceCode, ctx, arrExpr) = forceDeferredArrayInput ctx builder (sprintf "%s__arr" name) arrExpr
     let (elemET, elemErrCode) = inferElemTypeStrict ctx ind arrExpr "mask"
     let elemStr = elemTypeToCpp elemET
     let predErrCode =
@@ -6440,10 +6658,10 @@ and genMaskBinding (ctx: CodeGenContext) (binding: IRBinding) (builder: IRBuilde
         | Some callable when callable.Params.Length = 1 -> []
         | _ -> codegenError ctx ind "mask: predicate must resolve to a single-parameter callable; got something else (typechecker or IR bug)"
     let matStmts =
-        match materializeInlineForm emptySubst ctx.VarNames name elemStr binding.Value with
+        match materializeInlineForm emptySubst ctx.VarNames name elemStr (IRMask (arrExpr, predExpr)) with
         | Some s -> s
         | None -> []  // Unreachable: helper supports IRMask
-    let code = elemErrCode @ predErrCode @ [sprintf "%s// mask: count + compact" ind] @ (matStmts |> List.map (fun s -> ind + s))
+    let code = forceCode @ elemErrCode @ predErrCode @ [sprintf "%s// mask: count + compact" ind] @ (matStmts |> List.map (fun s -> ind + s))
     let ctx' = addVarName binding.Id name ctx
     (code, ctx')
 
@@ -6453,13 +6671,15 @@ and genIntersectBinding (ctx: CodeGenContext) (binding: IRBinding) (builder: IRB
     let ind = indentStr ctx
     let name = bindingCppName binding
     // intersect(A, B): elements present in both arrays.
+    let (forceCodeA, ctx, aExpr) = forceDeferredArrayInput ctx builder (sprintf "%s__a" name) aExpr
+    let (forceCodeB, ctx, bExpr) = forceDeferredArrayInput ctx builder (sprintf "%s__b" name) bExpr
     let (elemET, elemErrCode) = inferElemTypeStrict ctx ind aExpr "intersect"
     let elemStr = elemTypeToCpp elemET
     let matStmts =
-        match materializeInlineForm emptySubst ctx.VarNames name elemStr binding.Value with
+        match materializeInlineForm emptySubst ctx.VarNames name elemStr (IRIntersect (aExpr, bExpr)) with
         | Some s -> s
         | None -> []
-    let code = elemErrCode @ [sprintf "%s// intersect: build set from B, scan A" ind] @ (matStmts |> List.map (fun s -> ind + s))
+    let code = forceCodeA @ forceCodeB @ elemErrCode @ [sprintf "%s// intersect: build set from B, scan A" ind] @ (matStmts |> List.map (fun s -> ind + s))
     let ctx' = addVarName binding.Id name ctx
     (code, ctx')
 
@@ -6469,13 +6689,15 @@ and genUnionBinding (ctx: CodeGenContext) (binding: IRBinding) (builder: IRBuild
     let ind = indentStr ctx
     let name = bindingCppName binding
     // union(A, B): all elements from A, plus elements from B not in A.
+    let (forceCodeA, ctx, aExpr) = forceDeferredArrayInput ctx builder (sprintf "%s__a" name) aExpr
+    let (forceCodeB, ctx, bExpr) = forceDeferredArrayInput ctx builder (sprintf "%s__b" name) bExpr
     let (elemET, elemErrCode) = inferElemTypeStrict ctx ind aExpr "union"
     let elemStr = elemTypeToCpp elemET
     let matStmts =
-        match materializeInlineForm emptySubst ctx.VarNames name elemStr binding.Value with
+        match materializeInlineForm emptySubst ctx.VarNames name elemStr (IRUnion (aExpr, bExpr)) with
         | Some s -> s
         | None -> []
-    let code = elemErrCode @ [sprintf "%s// union: all of A, plus elements from B not in A" ind] @ (matStmts |> List.map (fun s -> ind + s))
+    let code = forceCodeA @ forceCodeB @ elemErrCode @ [sprintf "%s// union: all of A, plus elements from B not in A" ind] @ (matStmts |> List.map (fun s -> ind + s))
     let ctx' = addVarName binding.Id name ctx
     (code, ctx')
 
@@ -6488,13 +6710,14 @@ and genUniqueBinding (ctx: CodeGenContext) (binding: IRBinding) (builder: IRBuil
     // first counts unique elements via std::unordered_set, then fills
     // the output array on a second pass (clearing the set in between
     // so first-occurrence membership testing repeats identically).
+    let (forceCode, ctx, arrExpr) = forceDeferredArrayInput ctx builder (sprintf "%s__arr" name) arrExpr
     let (elemET, elemErrCode) = inferElemTypeStrict ctx ind arrExpr "unique"
     let elemStr = elemTypeToCpp elemET
     let matStmts =
-        match materializeInlineForm emptySubst ctx.VarNames name elemStr binding.Value with
+        match materializeInlineForm emptySubst ctx.VarNames name elemStr (IRUnique arrExpr) with
         | Some s -> s
         | None -> []
-    let code = elemErrCode @ [sprintf "%s// unique: dedup via unordered_set, first-occurrence order" ind] @ (matStmts |> List.map (fun s -> ind + s))
+    let code = forceCode @ elemErrCode @ [sprintf "%s// unique: dedup via unordered_set, first-occurrence order" ind] @ (matStmts |> List.map (fun s -> ind + s))
     let ctx' = addVarName binding.Id name ctx
     (code, ctx')
 
@@ -6517,6 +6740,10 @@ and genGroupByBinding (ctx: CodeGenContext) (binding: IRBinding) (builder: IRBui
     // ragged inner). Element type T* keeps `grouped[g]` as a bare row
     // pointer for downstream peeling. Print's inner-loop bound of 0
     // means no values printed, matching prior behavior.
+    //
+    // group_by's copy loop indexes vals by name, so it needs a MATERIALIZED
+    // input; the shared helper forces a still-deferred or inline vals first.
+    let (forceCode, ctx, vals) = forceDeferredArrayInput ctx builder (sprintf "%s__vals" name) vals
     let valsName = exprToCppCtx ctx vals
     let gkName = exprToCppCtx ctx gk
     let (elemType, elemErrCode) = inferElemTypeStrict ctx ind vals "group_by"
@@ -6535,7 +6762,7 @@ and genGroupByBinding (ctx: CodeGenContext) (binding: IRBinding) (builder: IRBui
     ]
     let ctx' = addVarName binding.Id name ctx
     let ctx' = { ctx' with GroupedArrays = Map.add name gkName ctx'.GroupedArrays }
-    (code, ctx')
+    (forceCode @ code, ctx')
 
 
 
@@ -6555,6 +6782,7 @@ and genSortBinding (ctx: CodeGenContext) (binding: IRBinding) (builder: IRBuilde
     // enabling sort-skip, merge-style joins, and other optimizations.
     // Materialization caching (memoize-on-first-access) sits downstream of
     // those analyses, not as a substitute for them.
+    let (forceCode, ctx, arrExpr) = forceDeferredArrayInput ctx builder (sprintf "%s__arr" name) arrExpr
     let (elemET, elemErrCode) = inferElemTypeStrict ctx ind arrExpr "sort"
     let elemStr = elemTypeToCpp elemET
     // Validate single-param key callable. Helper falls back to a 0L key
@@ -6565,10 +6793,10 @@ and genSortBinding (ctx: CodeGenContext) (binding: IRBinding) (builder: IRBuilde
         | Some callable when callable.Params.Length = 1 -> []
         | _ -> codegenError ctx ind "sort: key must resolve to a single-parameter callable; got something else (typechecker or IR bug)"
     let matStmts =
-        match materializeInlineForm emptySubst ctx.VarNames name elemStr binding.Value with
+        match materializeInlineForm emptySubst ctx.VarNames name elemStr (IRSort (arrExpr, keyExpr)) with
         | Some s -> s
         | None -> []
-    let code = elemErrCode @ keyErrCode @ [sprintf "%s// sort: stable_sort on permutation, eager materialization" ind] @ (matStmts |> List.map (fun s -> ind + s))
+    let code = forceCode @ elemErrCode @ keyErrCode @ [sprintf "%s// sort: stable_sort on permutation, eager materialization" ind] @ (matStmts |> List.map (fun s -> ind + s))
     let ctx' = addVarName binding.Id name ctx
     (code, ctx')
 
@@ -6582,13 +6810,14 @@ and genTransposeBinding (ctx: CodeGenContext) (binding: IRBinding) (builder: IRB
     // materialization (same phase-1 strategy as sort); the result is an
     // independent array with no aliasing back to the source. TypeCheck has
     // already verified both axes are arity-1 SymNone and in range.
+    let (forceCode, ctx, arrExpr) = forceDeferredArrayInput ctx builder (sprintf "%s__arr" name) arrExpr
     let (elemET, elemErrCode) = inferElemTypeStrict ctx ind arrExpr "transpose"
     let elemStr = elemTypeToCpp elemET
     let matStmts =
-        match materializeInlineForm emptySubst ctx.VarNames name elemStr binding.Value with
+        match materializeInlineForm emptySubst ctx.VarNames name elemStr (IRTranspose (arrExpr, d1, d2)) with
         | Some s -> s
         | None -> []
-    let code = elemErrCode @ [sprintf "%s// transpose: hard (swapped-extent alloc + axis-swapped copy)" ind] @ (matStmts |> List.map (fun s -> ind + s))
+    let code = forceCode @ elemErrCode @ [sprintf "%s// transpose: hard (swapped-extent alloc + axis-swapped copy)" ind] @ (matStmts |> List.map (fun s -> ind + s))
     let ctx' = addVarName binding.Id name ctx
     (code, ctx')
 
@@ -6604,13 +6833,14 @@ and genDecompactBinding (ctx: CodeGenContext) (binding: IRBinding) (builder: IRB
     // class transform (Sym copy / Antisym sign + zero diagonal / Hermitian
     // conj). TypeCheck has verified dim d targets a compact slot and that
     // the Antisym middle-peel case is excluded.
+    let (forceCode, ctx, arrExpr) = forceDeferredArrayInput ctx builder (sprintf "%s__arr" name) arrExpr
     let (elemET, elemErrCode) = inferElemTypeStrict ctx ind arrExpr "decompact"
     let elemStr = elemTypeToCpp elemET
     let matStmts =
-        match materializeInlineForm emptySubst ctx.VarNames name elemStr binding.Value with
+        match materializeInlineForm emptySubst ctx.VarNames name elemStr (IRDecompact (arrExpr, d)) with
         | Some s -> s
         | None -> []
-    let code = elemErrCode @ [sprintf "%s// decompact: hard (dense alloc + symmetry-expanding scatter)" ind] @ (matStmts |> List.map (fun s -> ind + s))
+    let code = forceCode @ elemErrCode @ [sprintf "%s// decompact: hard (dense alloc + symmetry-expanding scatter)" ind] @ (matStmts |> List.map (fun s -> ind + s))
     let ctx' = addVarName binding.Id name ctx
     (code, ctx')
 
@@ -6623,13 +6853,15 @@ and genArrayNegateConjugateBinding (ctx: CodeGenContext) (binding: IRBinding) (b
     // Type-preserving: same-shape alloc + flat contiguous-pool transform.
     let isConj = (match binding.Value with IRArrayConjugate _ -> true | _ -> false)
     let label = if isConj then "conjugate" else "negate"
+    let (forceCode, ctx, arrExpr) = forceDeferredArrayInput ctx builder (sprintf "%s__arr" name) arrExpr
     let (elemET, elemErrCode) = inferElemTypeStrict ctx ind arrExpr (sprintf "array_%s" label)
     let elemStr = elemTypeToCpp elemET
+    let form = if isConj then IRArrayConjugate arrExpr else IRArrayNegate arrExpr
     let matStmts =
-        match materializeInlineForm emptySubst ctx.VarNames name elemStr binding.Value with
+        match materializeInlineForm emptySubst ctx.VarNames name elemStr form with
         | Some s -> s
         | None -> []
-    let code = elemErrCode @ [sprintf "%s// array_%s: whole-array eager transform (same-shape alloc + pool loop)" ind label] @ (matStmts |> List.map (fun s -> ind + s))
+    let code = forceCode @ elemErrCode @ [sprintf "%s// array_%s: whole-array eager transform (same-shape alloc + pool loop)" ind label] @ (matStmts |> List.map (fun s -> ind + s))
     let ctx' = addVarName binding.Id name ctx
     (code, ctx')
 
@@ -6749,6 +6981,104 @@ and genReduceBinding (ctx: CodeGenContext) (binding: IRBinding) (builder: IRBuil
             elemErrCode @ errLines
     let ctx' = addVarName binding.Id name ctx
     (code, ctx')
+
+and genReduceComputeBinding (ctx: CodeGenContext) (binding: IRBinding) (builder: IRBuilder) (compExpr: IRExpr) (kernelExpr: IRExpr) (seedExpr: IRExpr) : string list * CodeGenContext =
+    let ind = indentStr ctx
+    let name = bindingCppName binding
+    // The fused reduction terminal: reduce(deferred, op[, init]). Fold every
+    // cell of a deferred computation — a single unforced apply, or an <&!>
+    // fusion tree of them — into scalar accumulator(s) through the fold
+    // kernel's wrapper, WITHOUT materializing any output array. One loop
+    // nest total; a fusion tree gets one accumulator per leaf and packs a
+    // flat tuple (mirroring genFusionTree's make_tuple convention, so tuple
+    // destructuring projects with flat get<i> indices).
+    let rec resolveDeferred e =
+        match e with
+        | IRVar (id, _) ->
+            (match Map.tryFind id ctx.DeferredComputations with
+             | Some d -> resolveDeferred d
+             | None -> e)
+        | _ -> e
+    let rec collectLeaves e =
+        match resolveDeferred e with
+        | IRFusion (l, r) -> collectLeaves l @ collectLeaves r
+        | other -> [other]
+    let leaves = collectLeaves compExpr
+    let infos = leaves |> List.choose (function IRApplyCombinator i -> Some i | _ -> None)
+    let ctx' = addVarName binding.Id name ctx
+    if infos.IsEmpty || infos.Length <> leaves.Length then
+        (codegenError ctx ind "reduce over a deferred computation requires unforced method_for/object_for applications at every leaf (typechecker or IR bug if not)", ctx')
+    else
+        // The fold bypasses genApplyCombinator's special input paths
+        // (ragged peel, grouped, compound, CUDA) — reject what they handle.
+        let unsupportedInput =
+            infos |> List.exists (fun info ->
+                info.ArrayTypes |> List.exists (fun at ->
+                    at.IndexTypes |> List.exists (fun ix ->
+                        isRaggedFamilyKind ix.IxKind || ix.IxKind = IxKDepInner
+                        || ix.IxKind = IxKGroupOuter || ix.IxKind = IxKCompound)))
+        if unsupportedInput then
+            (codegenError ctx ind "reduce over a deferred computation is not supported for ragged/grouped/compound inputs yet — force with |> compute and reduce the array", ctx')
+        else
+            match resolveCallable kernelExpr with
+            | Some callable when callable.Params.Length = 2 ->
+                let (wrapperCode, wname) = genCallableWrapper name callable
+                let wrapperLines = wrapperCode |> List.map (fun s -> ind + s)
+                // Accumulator C++ type: the fold callable's return type (the
+                // checker unified it with every leaf's element type).
+                let elemStr =
+                    match callable.RetType with
+                    | IRTScalar et -> primTypeToCpp et
+                    | t -> irTypeToCpp t
+                let seedStr = exprToCppCtx ctx seedExpr
+                let arrayNamesOf (info: ApplyInfo) =
+                    info.Arrays |> List.mapi (fun i arr ->
+                        match arr with
+                        | IRVar (id, _) -> Map.tryFind id ctx.VarNames |> Option.defaultValue (sprintf "arr%d" i)
+                        | IRRange _ -> sprintf "__range%d" i
+                        | IRVirtualReverse _ -> sprintf "__rev%d" i
+                        | IRBlocked _ -> sprintf "__blk%d" i
+                        | _ -> sprintf "arr%d" i)
+                let foldCg (info: ApplyInfo) (accName: string) =
+                    let cg = buildLoopNestCodeGen info (arrayNamesOf info) accName builder
+                    { cg with OutputType = callable.RetType; FoldWrapper = Some wname }
+                match infos with
+                | [single] ->
+                    let cg = foldCg single name
+                    let code =
+                        wrapperLines
+                        @ [sprintf "%s%s %s = %s;" ind elemStr name seedStr]
+                        @ genLoopNest cg ctx.VarNames ctx.Indent
+                    (code, ctx')
+                | primary :: _ ->
+                    // Fused tree: leaves share the primary's loop structure
+                    // (the <&!> contract — genFusedLoopNest bridges extra
+                    // kernels' params to the primary's peeled names by
+                    // position, exactly as the compute path does).
+                    let leafNames = infos |> List.mapi (fun i _ -> sprintf "%s_%d" name i)
+                    let cgPrimary = foldCg primary leafNames.Head
+                    let extraKernels =
+                        (List.tail infos, List.tail leafNames) ||> List.map2 (fun info outName ->
+                            let (kParams, kBody, captures, hasReynolds, isAntisym) =
+                                match resolveKernel info.Kernel with
+                                | Some rk ->
+                                    (rk.Callable.Params, rk.Callable.Body, rk.Callable.Captures,
+                                     rk.Reynolds.HasReynolds, rk.Reynolds.IsAntisymmetric)
+                                | None -> ([], IRLit IRLitUnit, [], false, false)
+                            (outName, kBody, kParams, captures, hasReynolds, isAntisym))
+                    let declCode =
+                        leafNames |> List.map (fun ln -> sprintf "%s%s %s = %s;" ind elemStr ln seedStr)
+                    let loopCode = genFusedLoopNest cgPrimary extraKernels ctx.VarNames ctx.Indent
+                    let tupleLine = sprintf "%sauto %s = std::make_tuple(%s);" ind name (leafNames |> String.concat ", ")
+                    // Destructure sub-bindings resolve through TupleChildren
+                    // straight to the accumulator names (the fusion-tree
+                    // convention) — never through std::get on the nested type.
+                    let ctxOut = { ctx' with TupleChildren = Map.add name leafNames ctx'.TupleChildren }
+                    (wrapperLines @ declCode @ loopCode @ [tupleLine], ctxOut)
+                | [] ->
+                    (codegenError ctx ind "reduce over a deferred computation: no leaves (unreachable)", ctx')
+            | _ ->
+                (codegenError ctx ind "reduce over a deferred computation: fold kernel must resolve to a binary callable (typechecker or IR bug if not)", ctx')
 
 
 

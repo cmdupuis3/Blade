@@ -70,6 +70,17 @@ module private NcFFI =
     [<DllImport("netcdf", CallingConvention = CallingConvention.Cdecl)>]
     extern int nc_inq_vardimid(int fileId, int varid, int[] dimids)
 
+    // Data reads for the compile-time fold (provider-backed statics).
+    // libnetcdf converts any numeric variable type to the requested C type,
+    // so double + longlong cover the whole ncTypeToElemType surface. These
+    // are the same C functions CppNetcdf.genReadVar emits as source text
+    // for the runtime schedule — the two schedules read through one API.
+    [<DllImport("netcdf", CallingConvention = CallingConvention.Cdecl)>]
+    extern int nc_get_var_double(int fileId, int varid, double[] data)
+
+    [<DllImport("netcdf", CallingConvention = CallingConvention.Cdecl)>]
+    extern int nc_get_var_longlong(int fileId, int varid, int64[] data)
+
     let check (status: int) (msg: string) =
         if status <> 0 then failwithf "NetCDF error (%d): %s" status msg
 
@@ -159,6 +170,58 @@ let load (path: string) : NcFile =
         { Path = path; Dims = dims; Vars = vars }
     finally
         NcQuery.closeFile fileId
+
+// ============================================================================
+// Compile-time DATA read (provider-backed statics, staging contract
+// clause 1: reading at compile time and at runtime produce the same
+// value, so a closed input's payload may fold)
+// ============================================================================
+
+/// A variable's payload read at compile time: dimension extents plus the
+/// row-major flat buffer. libnetcdf handles the container format (classic
+/// or NetCDF-4/HDF5), chunking, compression, and endianness internally —
+/// the buffer arrives host-ordered.
+type NcVarData = {
+    DimLengths: int list
+    Payload: NcPayload
+}
+and NcPayload =
+    | NcFloats of float[]
+    | NcInts of int64[]
+
+/// Read a variable's full payload at compile time. Float-coded variables
+/// (NC_FLOAT/NC_DOUBLE) arrive as doubles; every integer coding arrives
+/// as int64 — mirroring ncTypeToElemType's collapse.
+let readVarData (path: string) (varName: string) : Result<NcVarData, string> =
+    try
+        let fileId = NcQuery.openFile path 0  // NC_NOWRITE
+        try
+            let dimIds = NcQuery.getDimIds fileId
+            let dims = dimIds |> Array.map (NcQuery.getDim fileId) |> Array.toList
+            let dimLookup = dimIds |> Array.mapi (fun i id -> (id, dims.[i])) |> Map.ofArray
+            let hit =
+                NcQuery.getVarIds fileId
+                |> Array.tryPick (fun vid ->
+                    let v = NcQuery.getVar fileId vid dimLookup
+                    if v.Name = varName then Some (vid, v) else None)
+            match hit with
+            | None -> Error (sprintf "variable '%s' not found in '%s'" varName path)
+            | Some (vid, v) ->
+                let lens = v.Dims |> List.map (fun d -> int d.Length)
+                let count = lens |> List.fold (*) 1
+                match v.TypeCode with
+                | 5 | 6 ->  // NC_FLOAT, NC_DOUBLE
+                    let buf : float[] = Array.zeroCreate (max count 1)
+                    NcFFI.check (NcFFI.nc_get_var_double(fileId, vid, buf)) (sprintf "reading '%s'" varName)
+                    Ok { DimLengths = lens; Payload = NcFloats buf }
+                | _ ->
+                    let buf : int64[] = Array.zeroCreate (max count 1)
+                    NcFFI.check (NcFFI.nc_get_var_longlong(fileId, vid, buf)) (sprintf "reading '%s'" varName)
+                    Ok { DimLengths = lens; Payload = NcInts buf }
+        finally
+            NcQuery.closeFile fileId
+    with ex ->
+        Error ex.Message
 
 // ============================================================================
 // Mapping to Blade IR Types
@@ -317,6 +380,21 @@ module CppNetcdf =
         | ETInt64   -> "NC_INT64"
         | _         -> "NC_DOUBLE"  // fallback
 
+    /// Wrap a fallible nc_* call: capture its status into <cppVarName>_ncstat
+    /// (declared once per fragment) and exit loudly on failure. Every nc_*
+    /// status used to be ignored, so a runtime failure -- e.g. the .nc file
+    /// missing from the executable's working directory -- left the data buffer
+    /// uninitialized: the program printed denormal heap garbage and still
+    /// exited 0. `callExpr` is the call without its trailing semicolon;
+    /// `context` describes the operation for the stderr message (it is spliced
+    /// into a C++ string literal, so it must not contain double quotes).
+    let private ncChecked (cppVarName: string) (context: string) (callExpr: string) : string list =
+        [
+            sprintf "%s_ncstat = %s;" cppVarName callExpr
+            sprintf "if (%s_ncstat != NC_NOERR) { std::cerr << \"NetCDF error (%s): \" << nc_strerror(%s_ncstat) << std::endl; std::exit(1); }"
+                cppVarName context cppVarName
+        ]
+
     /// Generate C++ code to open a NetCDF file and read a variable
     let genReadVar (filePath: string) (varName: string) (cppVarName: string) (arrType: IRArrayType) : string list =
         let rank = arrType.IndexTypes.Length
@@ -353,19 +431,26 @@ module CppNetcdf =
             | ETInt64 -> "longlong"
             | _ -> "double"
         // Flat read: a NetCDF variable is stored contiguous (row-major), so read
-        // it into a flat buffer first.
+        // it into a flat buffer first. Each nc_* call is status-checked: a
+        // silent open/read failure would otherwise hand the copy loop an
+        // uninitialized buffer (denormal garbage) with exit code 0.
         let flatRead =
             [
                 sprintf "// Read %s from %s" varName filePath
-                sprintf "int %s_ncid, %s_varid;" cppVarName cppVarName
-                sprintf "nc_open(\"%s\", NC_NOWRITE, &%s_ncid);" filePath cppVarName
-                sprintf "nc_inq_varid(%s_ncid, \"%s\", &%s_varid);" cppVarName varName cppVarName
+                sprintf "int %s_ncid, %s_varid, %s_ncstat;" cppVarName cppVarName cppVarName
             ]
+            @ ncChecked cppVarName (sprintf "opening '%s' to read %s" filePath varName)
+                (sprintf "nc_open(\"%s\", NC_NOWRITE, &%s_ncid)" filePath cppVarName)
+            @ ncChecked cppVarName (sprintf "locating variable '%s' in '%s'" varName filePath)
+                (sprintf "nc_inq_varid(%s_ncid, \"%s\", &%s_varid)" cppVarName varName cppVarName)
             @ extentsFromDims
             @ [
                 sprintf "%s* %s_flat = new %s[%s];"
                     elemCpp cppVarName elemCpp (String.concat " * " extentNames)
-                sprintf "nc_get_var_%s(%s_ncid, %s_varid, %s_flat);" ncGetSuffix cppVarName cppVarName cppVarName
+            ]
+            @ ncChecked cppVarName (sprintf "reading variable '%s' from '%s'" varName filePath)
+                (sprintf "nc_get_var_%s(%s_ncid, %s_varid, %s_flat)" ncGetSuffix cppVarName cppVarName cppVarName)
+            @ [
                 sprintf "nc_close(%s_ncid);" cppVarName
             ]
         // Materialize the nested-pointer Array a downstream method_for indexes as
@@ -469,9 +554,10 @@ module CppNetcdf =
 
         [
             sprintf "// Read compound %s (masked by %s) from %s" varName maskName filePath
-            sprintf "int %s_ncid, %s_varid, %s_maskid;" v v v
-            sprintf "nc_open(\"%s\", NC_NOWRITE, &%s_ncid);" filePath v
+            sprintf "int %s_ncid, %s_varid, %s_maskid, %s_ncstat;" v v v v
         ]
+        @ ncChecked v (sprintf "opening '%s' to read %s" filePath varName)
+            (sprintf "nc_open(\"%s\", NC_NOWRITE, &%s_ncid)" filePath v)
         @ extentsFromDims
         @ [
             // grid = masked leading cells; trail = regular trailing stride; total = dense size
@@ -480,12 +566,20 @@ module CppNetcdf =
             sprintf "size_t %s_total = %s;" v totalExpr
             // dense variable (all dims)
             sprintf "%s* %s_dense = new %s[%s_total];" elemCpp v elemCpp v
-            sprintf "nc_inq_varid(%s_ncid, \"%s\", &%s_varid);" v varName v
-            sprintf "nc_get_var_%s(%s_ncid, %s_varid, %s_dense);" (ncGet primElem) v v v
+        ]
+        @ ncChecked v (sprintf "locating variable '%s' in '%s'" varName filePath)
+            (sprintf "nc_inq_varid(%s_ncid, \"%s\", &%s_varid)" v varName v)
+        @ ncChecked v (sprintf "reading variable '%s' from '%s'" varName filePath)
+            (sprintf "nc_get_var_%s(%s_ncid, %s_varid, %s_dense)" (ncGet primElem) v v v)
+        @ [
             // integer mask over the leading masked dims -- size is grid, not total
             sprintf "%s* %s_maskraw = new %s[%s_grid];" maskCpp v maskCpp v
-            sprintf "nc_inq_varid(%s_ncid, \"%s\", &%s_maskid);" v maskName v
-            sprintf "nc_get_var_%s(%s_ncid, %s_maskid, %s_maskraw);" (ncGet maskElem) v v v
+        ]
+        @ ncChecked v (sprintf "locating mask '%s' in '%s'" maskName filePath)
+            (sprintf "nc_inq_varid(%s_ncid, \"%s\", &%s_maskid)" v maskName v)
+        @ ncChecked v (sprintf "reading mask '%s' from '%s'" maskName filePath)
+            (sprintf "nc_get_var_%s(%s_ncid, %s_maskid, %s_maskraw)" (ncGet maskElem) v v v)
+        @ [
             sprintf "nc_close(%s_ncid);" v
             // int -> std::vector<bool> (nonzero = present): the load_compound conversion
             sprintf "std::vector<bool> %s_maskvec(%s_grid);" v v
@@ -534,30 +628,37 @@ module CppNetcdf =
                     match idx.Extent with
                     | IRLit (IRLitInt n) -> sprintf "%d" n
                     | _ -> "0 /* unlimited */"
-                sprintf "nc_def_dim(%s_ncid, \"%s\", %s, &%s_dimids[%d]);"
-                    cppVarName dimName extent cppVarName i)
+                ncChecked cppVarName (sprintf "defining dimension '%s' in '%s'" dimName filePath)
+                    (sprintf "nc_def_dim(%s_ncid, \"%s\", %s, &%s_dimids[%d])"
+                        cppVarName dimName extent cppVarName i))
+            |> List.concat
 
         [
             sprintf "// Write %s to %s" varName filePath
-            sprintf "int %s_ncid, %s_varid;" cppVarName cppVarName
+            sprintf "int %s_ncid, %s_varid, %s_ncstat;" cppVarName cppVarName cppVarName
             sprintf "int %s_dimids[%d];" cppVarName rank
-            sprintf "nc_create(\"%s\", NC_CLOBBER | NC_NETCDF4, &%s_ncid);" filePath cppVarName
         ]
+        @ ncChecked cppVarName (sprintf "creating '%s' to write %s" filePath varName)
+            (sprintf "nc_create(\"%s\", NC_CLOBBER | NC_NETCDF4, &%s_ncid)" filePath cppVarName)
         @ dimDefs
-        @ [
-            sprintf "nc_def_var(%s_ncid, \"%s\", %s, %d, %s_dimids, &%s_varid);"
-                cppVarName varName ncType rank cppVarName cppVarName
-            sprintf "nc_enddef(%s_ncid);" cppVarName
-            sprintf "nc_put_var_%s(%s_ncid, %s_varid, %s_flat);"
+        @ ncChecked cppVarName (sprintf "defining variable '%s' in '%s'" varName filePath)
+            (sprintf "nc_def_var(%s_ncid, \"%s\", %s, %d, %s_dimids, &%s_varid)"
+                cppVarName varName ncType rank cppVarName cppVarName)
+        @ ncChecked cppVarName (sprintf "ending define mode for '%s'" filePath)
+            (sprintf "nc_enddef(%s_ncid)" cppVarName)
+        @ ncChecked cppVarName (sprintf "writing variable '%s' to '%s'" varName filePath)
+            (sprintf "nc_put_var_%s(%s_ncid, %s_varid, %s_flat)"
                 (match primElem with
                  | ETFloat32 -> "float"
                  | ETFloat64 -> "double"
                  | ETInt32 -> "int"
                  | ETInt64 -> "longlong"
                  | _ -> "double")
-                cppVarName cppVarName cppVarName
-            sprintf "nc_close(%s_ncid);" cppVarName
-        ]
+                cppVarName cppVarName cppVarName)
+        // nc_close flushes buffered writes, so its status matters here (unlike
+        // the read paths, where a close failure cannot corrupt already-read data).
+        @ ncChecked cppVarName (sprintf "closing '%s' after writing %s" filePath varName)
+            (sprintf "nc_close(%s_ncid)" cppVarName)
 
     /// Extract dimension names from a module's index type definitions
     let dimNamesFromModule (modul: IRModule) : string list =

@@ -1,0 +1,176 @@
+// TEST: Example Multi-Channel Signal Conditioning
+// ============================================================================
+// A three-channel data-acquisition rig expressed in Blade's loop-object
+// combinator algebra. Conditioning stages are first-class deferred objects
+// (object_for kernels) composed with >>@ before any data is touched;
+// analyses fan out over ONE shared loop object with <&> / <&!> so every
+// multi-statistic sweep is a single traversal; post-processing rides on the
+// functor map <$>; dead channels are handled declaratively with guard()
+// gating and <|> failover. Nothing below is an imperative loop.
+//
+// Channels: ch0 healthy accelerometer axis, ch1 low-level (mostly inside
+// the deadband once calibrated), ch2 dead (all zeros).
+//
+// All EXPECT values are derived independently of the compiler (exact
+// arithmetic; transcendentals cross-checked in PowerShell).
+// ============================================================================
+
+// ---- raw samples: 3 channels x 8 samples, row-major -------------------------
+let A: Array<Float64 like Idx<3>, Idx<8>> = [
+    [0.5, -1.5, 2.0, -2.5, 1.0, -0.5, 1.5, -0.5],
+    [0.05, -0.02, 0.04, -0.03, 0.01, -0.05, 0.02, 0.03],
+    [0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0]]
+let r0 = A(0)
+let r1 = A(1)
+let r2 = A(2)
+
+// ---- conditioning kernels (plain scalar lambdas, reusable everywhere) ------
+let calibrate = lambda(x) -> 2.0 * x + 0.1
+let square = lambda(x) -> x * x
+let k_abs = lambda(x) -> if x < 0.0 then -x else x
+// |x| < 0.1 gate written as x^2 < 0.01 so the kernel stays a single branch
+let deadband = lambda(x) -> if x * x < 0.01 then 0.0 else x
+let k_id = lambda(x) -> x
+let k_one = lambda(x) -> 1.0
+
+// ============================================================================
+// (a) Deferred stage composition. The conditioning pipeline is built ONCE as
+// an object_for chain -- a value -- and applied to whichever channel needs
+// it. Nothing runs until |> compute.
+// ============================================================================
+let condition = object_for(calibrate) >>@ object_for(deadband)
+let cond0 = condition <@> r0 |> compute
+let cond1 = condition <@> r1 |> compute
+// ch0 calibrated: 2x+0.1, every |value| >= 0.1 so the deadband passes all.
+// ch1 calibrated: [0.2, 0.06, 0.18, 0.04, 0.12, 0.0, 0.14, 0.16] -- the
+// deadband zeroes the four sub-threshold cells.
+// EXPECT: cond0 = [1.1, -2.9, 4.1, -4.9, 2.1, -0.9, 3.1, -0.9]
+// EXPECT: cond1 = [0.2, 0.0, 0.18, 0.0, 0.12, 0.0, 0.14, 0.16]
+
+// The duality theorem: composing kernel objects then applying equals
+// applying then composing the computations. Same pipeline, two spellings.
+let L0 = method_for(r0)
+let power_lhs = (object_for(calibrate) >>@ object_for(square)) <@> r0 |> compute
+let power_rhs = (L0 <@> calibrate) @>> (L0 <@> square) |> compute
+// EXPECT: power_lhs = [1.21, 8.41, 16.81, 24.01, 4.41, 0.81, 9.61, 0.81]
+// EXPECT: power_rhs = [1.21, 8.41, 16.81, 24.01, 4.41, 0.81, 9.61, 0.81]
+
+// ============================================================================
+// (b) Single-pass channel statistics. One loop object, one kernel per
+// statistic, <&!>-fused: the chain compiles to ONE sweep of the channel
+// filling all three accumulators, folded by the reduction terminal.
+// ============================================================================
+let (s0, ss0, n0) = reduce((L0 <@> k_id) <&!> (L0 <@> square) <&!> (L0 <@> k_one), (+))
+let mean0 = s0 / n0
+let ms0 = ss0 / n0
+let rms0 = sqrt(ms0)
+// sum 0.0, sum of squares 16.5, count 8 -> mean 0, mean square 2.0625
+// EXPECT: s0 = 0.0
+// EXPECT: ss0 = 16.5
+// EXPECT: n0 = 8.0
+// EXPECT: mean0 = 0.0
+// EXPECT: ms0 = 2.0625
+// EXPECT: rms0 = 1.43614066163451
+
+// Extremes are reduce lambdas (min/max are fold kernels, not intrinsics).
+// Folding a deferred pipeline with a lambda kernel takes the seeded 3-arg
+// form; folding a plain array does not.
+let peak0 = reduce(r0, lambda(a, b) -> if a > b then a else b)
+let trough0 = reduce(r0, lambda(a, b) -> if a < b then a else b)
+let peak_abs0 = reduce(L0 <@> k_abs, lambda(a, b) -> if a > b then a else b, 0.0)
+// EXPECT: peak0 = 2.0
+// EXPECT: trough0 = -2.5
+// EXPECT: peak_abs0 = 2.5
+
+// ============================================================================
+// (c) Functor map post-processing. <$> rides on an existing computation:
+// the instantaneous power trace converts to dB without another loop object.
+// The map itself is deferrable -- db_trace0 below is built from an unforced
+// pipeline and only materializes at |> compute.
+// ============================================================================
+let to_db = lambda(p) -> 10.0 * log(p) / log(10.0)
+let power_c = L0 <@> square
+let db_trace0 = to_db <$> power_c |> compute
+// 10*log10 of [0.25, 2.25, 4, 6.25, 1, 0.25, 2.25, 0.25]
+// EXPECT: db_trace0 = [-6.02059991327962, 3.52182518111362, 6.02059991327962, 7.95880017344075, 0.0, -6.02059991327962, 3.52182518111362, -6.02059991327962]
+
+// ============================================================================
+// (d) Dead-channel handling, declaratively.
+// guard(cond, c) zeroes a disabled channel's whole pipeline; <|> picks the
+// first NON-ZERO value element-wise (zero counts as failure), giving
+// per-sample failover from the dead primary to the healthy backup.
+// ============================================================================
+let ch2_enabled = false
+let L2 = method_for(r2)
+let gated2 = guard(ch2_enabled, L2 <@> calibrate) |> compute
+// EXPECT: gated2 = [0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0]
+
+let failover = (L2 <@> k_id) <|> (L0 <@> k_id) |> compute
+// ch2 is all zeros, so every element falls through to ch0
+// EXPECT: failover = [0.5, -1.5, 2.0, -2.5, 1.0, -0.5, 1.5, -0.5]
+
+// The derived scalar report falls back the same way (spelled as a plain
+// conditional -- scalar <|> is for value positions, not derived folds).
+let peak_abs2 = reduce(L2 <@> k_abs, lambda(a, b) -> if a > b then a else b, 0.0)
+let peak_reported = if peak_abs2 > 0.0 then peak_abs2 else peak_abs0
+// EXPECT: peak_abs2 = 0.0
+// EXPECT: peak_reported = 2.5
+
+// ============================================================================
+// (e) Combinator sections and the pipe-apply spelling. object_for(<@>) and
+// object_for(<&>) are the apply and parallel operators lifted to values, so
+// a whole "three views of one channel" analysis is a single |@> chain over
+// (loop, kernel) pairs -- and still one fused traversal.
+// ============================================================================
+let (view_raw, view_sq, view_abs) = ((L0, k_id), (L0, square), (L0, k_abs))
+    |@> object_for(<@>)
+    |@> object_for(<&>)
+    |> compute
+// EXPECT: view_raw = [0.5, -1.5, 2.0, -2.5, 1.0, -0.5, 1.5, -0.5]
+// EXPECT: view_sq = [0.25, 2.25, 4.0, 6.25, 1.0, 0.25, 2.25, 0.25]
+// EXPECT: view_abs = [0.5, 1.5, 2.0, 2.5, 1.0, 0.5, 1.5, 0.5]
+
+// ============================================================================
+// (f) Co-iteration across channels. zip builds one loop object over all
+// three rows; per-channel sum kernels fan out <&!>-fused, so the cross-
+// channel sweep is again a single pass over the sample axis. The same zip
+// drives the differential measurement (signal minus mean of references).
+// ============================================================================
+let Z = method_for(zip(r0, r1, r2))
+let kc0 = lambda(a, b, c) -> a
+let kc1 = lambda(a, b, c) -> b
+let kc2 = lambda(a, b, c) -> c
+let (sum0, sum1, sum2) = reduce((Z <@> kc0) <&!> (Z <@> kc1) <&!> (Z <@> kc2), (+))
+// EXPECT: sum0 = 0.0
+// EXPECT: sum1 = 0.05
+// EXPECT: sum2 = 0.0
+
+let differential = Z <@> lambda(a, b, c) -> a - (b + c) / 2.0 |> compute
+// EXPECT: differential = [0.475, -1.49, 1.98, -2.485, 0.995, -0.475, 1.49, -0.515]
+
+// ============================================================================
+// (g) Monadic bind: a second stage whose kernel needs the WHOLE first-stage
+// array (normalize by a known full-scale value after rectification).
+// ============================================================================
+let normalized = ((L0 <@> k_abs) >>= lambda(arr) -> method_for(arr) <@> lambda(y) -> y / 2.5) |> compute
+// EXPECT: normalized = [0.2, 0.6, 0.8, 1.0, 0.4, 0.2, 0.6, 0.2]
+
+// ============================================================================
+// (h) Structural combinators: sequence stacks homogeneous computations along
+// a new leading axis (raw trace then power trace, 16 cells); replicate emits
+// n copies of a computation (a repeated calibration reference).
+// ============================================================================
+let trace_pair = sequence(L0 <@> k_id, L0 <@> square) |> compute
+// EXPECT: trace_pair = [0.5, -1.5, 2.0, -2.5, 1.0, -0.5, 1.5, -0.5, 0.25, 2.25, 4.0, 6.25, 1.0, 0.25, 2.25, 0.25]
+
+let reference = replicate(2, L0 <@> calibrate) |> compute
+// EXPECT: reference = [1.1, -2.9, 4.1, -4.9, 2.1, -0.9, 3.1, -0.9, 1.1, -2.9, 4.1, -4.9, 2.1, -0.9, 3.1, -0.9]
+
+// ============================================================================
+// (i) Virtual index arrays: the time axis is a mapped range (sample period
+// 0.25 s), and reverse<> yields the countdown view -- no stored arrays.
+// ============================================================================
+let t_axis = method_for(range<Idx<8>>) <@> lambda(i) -> 0.25 * i |> compute
+let countdown = method_for(reverse<Idx<8>>) <@> lambda(i) -> 1.0 * i |> compute
+// EXPECT: t_axis = [0.0, 0.25, 0.5, 0.75, 1.0, 1.25, 1.5, 1.75]
+// EXPECT: countdown = [7.0, 6.0, 5.0, 4.0, 3.0, 2.0, 1.0, 0.0]

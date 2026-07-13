@@ -1,0 +1,18 @@
+// TEST: Dist Add Needs License (rejects)
+// d1 + d2 is exact ONLY for independent operands. Inside a function body,
+// operand provenance is invisible until `where indep(...)` licenses land
+// (typed-Dist arc phase 5) — so the checker REJECTS the combination with
+// steering rather than silently typing nonsense. Module-level d1 + d2
+// (where declared independence is checked by elaboration) keeps working —
+// ppl/014 pins that.
+type TimeIdx = Idx<2>
+let X: Array<Float64 like Idx<2>, TimeIdx> = [[1.0, 2.0], [3.0, 4.0]]
+let Y: Array<Float64 like Idx<2>, TimeIdx> = [[2.0, 2.0], [1.0, 3.0]]
+let _ = independent(X, Y)
+let dx = dist(X, 2)
+let dy = dist(Y, 2)
+
+function combine(a: Dist<2, Float64 like Idx<2>>, b: Dist<2, Float64 like Idx<2>>) -> Dist<2, Float64 like Idx<2>> =
+  a + b
+
+let s = combine(dx, dy)

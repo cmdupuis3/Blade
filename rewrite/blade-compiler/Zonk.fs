@@ -30,6 +30,15 @@ let rec zonkType (subst: Subst) (ty: IRType) : IRType =
     | IRTPoly (base', var) -> IRTPoly (zonkType subst base', var)
     | IRTUnitAnnotated (inner, units) -> IRTUnitAnnotated (zonkType subst inner, units)
     | IRTIdxTagged (inner, idxRef) -> IRTIdxTagged (zonkType subst inner, idxRef)
+    | IRTDist (order, elem, axes) ->
+        // ERASURE POINT: Dist<r, τ> is a typecheck-time invariant. All
+        // Dist-aware checking (order guard, operator dispatch, signature
+        // unification) happens during inference, before zonking; downstream
+        // of the checker a Dist value IS the tuple of its packed cumulant
+        // component arrays, so Lowering/IR/CodeGen never see IRTDist (the
+        // CodeGen sentinel arm is the backstop if one leaks).
+        let e = zonkType subst elem
+        IRTTuple (distComponentTypes order e axes)
     | IRTArrow (slots, ret, identity) ->
         let zonkSlot = function
             | SIdx idx -> SIdx (zonkIndexType subst idx)
@@ -88,6 +97,7 @@ let rec zonkExpr (subst: Subst) (expr: TypedExpr) : TypedExpr =
         | TExprGroupKeys ks -> TExprGroupKeys (List.map z ks)
         | TExprSort (a, k) -> TExprSort (z a, z k)
         | TExprReduce (a, k, i) -> TExprReduce (z a, z k, Option.map z i)
+        | TExprProdSum args -> TExprProdSum (List.map z args)
         | TExprTranspose (a, d1, d2) -> TExprTranspose (z a, d1, d2)
         | TExprDecompact (a, d) -> TExprDecompact (z a, d)
         | TExprGram (l, r, s) -> TExprGram (z l, z r, s)

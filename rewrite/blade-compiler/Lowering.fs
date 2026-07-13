@@ -207,8 +207,16 @@ let rec lowerTypedExpr (env: TypedLowerEnv) (texpr: TypedExpr) : IRExpr =
     
     | TExprTupleIndex (tuple, index) ->
         let tup = lowerTypedExpr env tuple
-        let idx = lowerTypedExpr env index
-        IRPolyIndex (tup, idx)
+        // A LITERAL index into a real tuple is a static projection —
+        // IRTupleProj, same as destructuring emits. (The checker's
+        // cumulant(d, k) arm produces exactly this shape: by lowering
+        // time the Dist type has zonk-erased to IRTTuple.) Everything
+        // else stays on the poly-pack path (IRPolyIndex).
+        match tuple.Type, index.Kind with
+        | IRTTuple _, TExprLit (LitInt n) -> IRTupleProj (tup, int n, false)
+        | _ ->
+            let idx = lowerTypedExpr env index
+            IRPolyIndex (tup, idx)
     
     | TExprField (obj, field, _) ->
         let o = lowerTypedExpr env obj
@@ -426,9 +434,21 @@ let rec lowerTypedExpr (env: TypedLowerEnv) (texpr: TypedExpr) : IRExpr =
         IRSort (lowerTypedExpr env array, lowerTypedExpr env key)
     
     | TExprReduce (array, kernel, init) ->
-        IRReduce (lowerTypedExpr env array, lowerTypedExpr env kernel,
-                  init |> Option.map (lowerTypedExpr env))
-    
+        (match array.Kind, init with
+         // Fused reduction terminal: the checker spliced a RESOLVED deferred
+         // computation (plain apply or canonical fusion tree) as the child
+         // and always filled the seed (tryInferReduceCompute). Fold without
+         // materializing — codegen emits one nest with scalar accumulators.
+         | (TExprApply _ | TExprFusion _), Some seed ->
+            IRReduceCompute (lowerTypedExpr env array, lowerTypedExpr env kernel,
+                             lowerTypedExpr env seed)
+         | _ ->
+            IRReduce (lowerTypedExpr env array, lowerTypedExpr env kernel,
+                      init |> Option.map (lowerTypedExpr env)))
+
+    | TExprProdSum args ->
+        IRProdSum (args |> List.map (lowerTypedExpr env))
+
     | TExprTranspose (array, dim1, dim2) ->
         IRTranspose (lowerTypedExpr env array, dim1, dim2)
     | TExprDecompact (array, dim) ->
@@ -622,8 +642,33 @@ and lowerTypedBlock env (stmts: TypedStmt list) (finalExpr: TypedExpr option) : 
         | TStmtLet binding ->
             let value = lowerTypedExpr env binding.Value
             let env' = bindTypedVar binding.Name binding.VarId env
-            let body = lowerTypedBlock env' rest finalExpr
-            IRLet (binding.VarId, value, body)
+            if binding.SubBindings.IsEmpty then
+                let body = lowerTypedBlock env' rest finalExpr
+                IRLet (binding.VarId, value, body)
+            else
+                // Destructuring let inside a block (`let (x, y) = p`): chain a
+                // projection IRLet per pattern leaf after the primary binding,
+                // mirroring the TDeclLet path — without these the leaf VarIds
+                // dangle (the body references bindings never introduced).
+                let isStruct = match binding.Type with IRTNamed _ -> true | _ -> false
+                let isFlat =
+                    match binding.Type with
+                    | IRTTuple ts ->
+                        let structCount = ts.Length
+                        let flatCount = IR.flattenTupleLeaves binding.Type |> List.length
+                        binding.SubBindings.Length = flatCount && binding.SubBindings.Length <> structCount
+                    | _ -> false
+                let env'' = binding.SubBindings |> List.fold (fun e (name, subId, _) -> bindTypedVar name subId e) env'
+                let body = lowerTypedBlock env'' rest finalExpr
+                let indexedSubs =
+                    binding.SubBindings |> List.mapi (fun i (name, subId, _subTy) -> (i, name, subId))
+                let chained =
+                    List.foldBack (fun (i, name, subId) acc ->
+                        let projExpr =
+                            if isStruct then IRFieldAccess (IRVar (binding.VarId, binding.Type), name)
+                            else IRTupleProj (IRVar (binding.VarId, binding.Type), i, isFlat)
+                        IRLet (subId, projExpr, acc)) indexedSubs body
+                IRLet (binding.VarId, value, chained)
         | TStmtAssign (lhs, rhs) ->
             let target = lowerTypedExpr env lhs
             let value = lowerTypedExpr env rhs

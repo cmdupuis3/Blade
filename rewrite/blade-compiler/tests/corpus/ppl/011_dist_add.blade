@@ -1,0 +1,19 @@
+// TEST: Dist Add
+// The Dist tower's defining law: cumulants of a sum of INDEPENDENT
+// variables add — convolution becomes tensor addition. dist(A, r) builds
+// the κ_1..κ_r pipelines; dist_add demands the declared independence (it
+// is a compile error without `independent(X, Y)`); cumulant(d, k) binds a
+// component as an ordinary packed array.
+// κ1: [1.5,3.5] + [2,2] = [3.5, 5.5]
+// κ2: [0.25,0.25,0.25] + [0,0,1] = [0.25, 0.25, 1.25]
+type TimeIdx = Idx<2>
+let X: Array<Float64 like Idx<2>, TimeIdx> = [[1.0, 2.0], [3.0, 4.0]]
+let Y: Array<Float64 like Idx<2>, TimeIdx> = [[2.0, 2.0], [1.0, 3.0]]
+let _ = independent(X, Y)
+let dx = dist(X, 2)
+let dy = dist(Y, 2)
+let s = dist_add(dx, dy)
+let s1 = cumulant(s, 1)
+let s2 = cumulant(s, 2)
+// EXPECT: s1 = [3.5, 5.5]
+// EXPECT: s2 = [0.25, 0.25, 1.25]

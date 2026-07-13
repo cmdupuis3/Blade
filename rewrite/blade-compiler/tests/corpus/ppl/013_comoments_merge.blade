@@ -1,0 +1,20 @@
+// TEST: Comoments Merge
+// The streaming story's k = 2 merge kernel: two chunks' comoments + means
+// combine into the whole's via the exact pooled identity
+// C = (nA CA + nB CB)/n + (nA nB / n^2) δδᵀ. The batch comoments of the
+// concatenated data (v0 = [1,2,4,6], v1 = [3,5,4,2]) are the oracle:
+// var0 = 14.25 - 10.5625 = 3.6875 | cov = 10.25 - 11.375 = -1.125
+// var1 = 13.5 - 12.25 = 1.25. Chunked and batch must agree exactly.
+type TimeIdx = Idx<2>
+type FullIdx = Idx<4>
+let XA: Array<Float64 like Idx<2>, TimeIdx> = [[1.0, 2.0], [3.0, 5.0]]
+let XB: Array<Float64 like Idx<2>, TimeIdx> = [[4.0, 6.0], [4.0, 2.0]]
+let Z: Array<Float64 like Idx<2>, FullIdx> = [[1.0, 2.0, 4.0, 6.0], [3.0, 5.0, 4.0, 2.0]]
+let cA = comoments(XA, 2)
+let mA = moments(XA, 1)
+let cB = comoments(XB, 2)
+let mB = moments(XB, 1)
+let merged = comoments_merge(cA, mA, 2, cB, mB, 2)
+let batch = comoments(Z, 2)
+// EXPECT: merged = [3.6875, -1.125, 1.25]
+// EXPECT: batch = [3.6875, -1.125, 1.25]

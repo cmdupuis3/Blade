@@ -38,6 +38,7 @@ let instantiate (subst: Subst) (scheme: TypeScheme) : IRType =
                 IRTArrow (slots |> List.map replaceSlot, replace ret, identity)
             | IRTComputation t -> IRTComputation (replace t)
             | IRTPoly (t, v) -> IRTPoly (replace t, v)
+            | IRTDist (order, elem, axes) -> IRTDist (order, replace elem, axes)
             | IRTLoop lt ->
                 IRTLoop { lt with
                             ArrayTypes = lt.ArrayTypes |> List.map replace
@@ -88,6 +89,15 @@ type TypeModuleExport = {
     /// function defined in this one. The body is needed for the inlining;
     /// the TypeEnv-side StaticFunctions map is the consumer.
     StaticFunctions: Map<string, FunctionDecl>
+    /// Folded `let static` VALUES from this module (the TypeEnv-side
+    /// StaticValues map, filtered to bare names — see checkProgram's export
+    /// builder). Mirrors StaticFunctions: an importing module's checkModule
+    /// pre-pass seeds these under "alias.name" (qualified import) or "name"
+    /// (selective import) so cross-module references like `M.k` or a
+    /// selectively-imported `k` are visible to that module's OWN static
+    /// resolution -- see checkModule's importedStaticSeed / the
+    /// rewriteImportedStaticRefs substitution ahead of StaticEval.resolveStatics.
+    StaticValues: Map<string, StaticEval.StaticValue>
 }
 
 /// Type checking environment
@@ -131,6 +141,16 @@ type TypeEnv = {
     /// mutually exclusive, but the current Ok-only plumbing skips them
     /// on the error path — extending to both paths is a future tweak).
     Warnings: ResizeArray<string>
+    /// Dist value provenance: varId → the value's source set (underlying
+    /// array names for module-level dists, `func.param` license tokens for
+    /// Dist-typed parameters). Consumed by Dist ± dispatch and where-clause
+    /// call-site discharge. Mutable dictionary shared by reference across
+    /// functional env updates, like Warnings.
+    Provenance: System.Collections.Generic.Dictionary<IRId, Set<string>>
+    /// Functions carrying registered custom where-clause conjuncts:
+    /// funcName → (paramNames, conjuncts). Populated by checkFunctionDecl;
+    /// consulted at call sites for constraint discharge.
+    FuncConstraints: System.Collections.Generic.Dictionary<string, string list * (string * string list) list>
 }
 
 let emptyEnv () = {
@@ -150,6 +170,8 @@ let emptyEnv () = {
     StaticFunctions = Map.empty
     StaticValues = Map.empty
     Warnings = ResizeArray<string>()
+    Provenance = System.Collections.Generic.Dictionary<IRId, Set<string>>()
+    FuncConstraints = System.Collections.Generic.Dictionary<string, string list * (string * string list) list>()
 }
 
 /// Append a non-fatal diagnostic to the env's warnings collector.
@@ -193,7 +215,7 @@ let locateError (span: Span) (env: TypeEnv) (err: TypeError) : CompileError =
 let formatTypeError (err: TypeError) : string =
     match err with
     | UnboundVariable name -> sprintf "Unbound variable: %s" name
-    | TypeMismatch (exp, act) -> sprintf "Type mismatch: expected %A, got %A" exp act
+    | TypeMismatch (exp, act) -> sprintf "Type mismatch: expected %s, got %s" (ppIRType exp) (ppIRType act)
     | ArityMismatch (exp, act) -> sprintf "Arity mismatch: expected %d args, got %d" exp act
     | InvalidArrayCapture name -> sprintf "Lambda cannot capture array '%s'" name
     | InvalidApplication funcTy -> sprintf "Cannot apply non-function type: %A" funcTy

@@ -989,6 +989,11 @@ let out = method_for(data) <@> lambda(x) -> x + x |> compute
     // method_for can index. A is Float32 in sample.nc, so the kernel is float-safe
     // (x + x, not x * 2.0, for -Werror=float-conversion). Skips gracefully without
     // libnetcdf / sample.nc, like the compound tests above.
+    //
+    // Beyond exit code, this block asserts the actual OUTPUT VALUES against
+    // ground truth read via the F# libnetcdf binding, and that a missing .nc
+    // at runtime exits nonzero with a NetCDF error instead of printing the
+    // uninitialized buffer.
     // ---------------------------------------------------------------
     printfn "\n--- dense read: method_for(sample.vars.A |> read) <@> (x -> x+x) (sample.nc) ---"
     let denseReadSource = """
@@ -1020,7 +1025,70 @@ let out = method_for(A) <@> lambda(x) -> x + x |> compute
                  check "dense read e2e: compiles and links libnetcdf" true ""
                  File.Copy("sample.nc", Path.Combine(drOutDir, "sample.nc"), true)
                  (match runExecutable exePath with
-                  | Ok (0, _) -> check "dense read e2e: runs to completion (exit 0)" true ""
+                  | Ok (0, runOut) ->
+                      check "dense read e2e: runs to completion (exit 0)" true ""
+                      // Value assertion: the exit code alone cannot catch a bad read
+                      // (a silently failed nc_open used to hand the copy loop an
+                      // uninitialized buffer -- denormal heap garbage -- and still
+                      // exit 0). Ground truth comes from libnetcdf itself via the F#
+                      // binding (the compile-time read path), so the fixture can be
+                      // regenerated freely without touching pinned values here.
+                      (match NetcdfProvider.readVarData "sample.nc" "A" with
+                       | Ok { Payload = NetcdfProvider.NcFloats truth } ->
+                           let expected = truth |> Array.map (fun x -> x + x)  // kernel is x + x
+                           let outLine =
+                               runOut.Split('\n')
+                               |> Array.tryPick (fun l ->
+                                   let l = l.Trim()
+                                   if l.StartsWith "out = [" && l.EndsWith "]" then Some l else None)
+                           (match outLine with
+                            | None ->
+                                check "dense read e2e: out values match libnetcdf ground truth (2*A)" false
+                                    "no 'out = [...]' line in program output"
+                            | Some line ->
+                                let inner = line.Substring("out = [".Length, line.Length - "out = [".Length - 1)
+                                let parsed =
+                                    inner.Split(',')
+                                    |> Array.map (fun s -> Double.Parse(s.Trim(), System.Globalization.CultureInfo.InvariantCulture))
+                                if parsed.Length <> expected.Length then
+                                    check "dense read e2e: out values match libnetcdf ground truth (2*A)" false
+                                        (sprintf "expected %d values, got %d" expected.Length parsed.Length)
+                                else
+                                    // Float32 data printed at precision 15 round-trips exactly and
+                                    // x+x is exact in fp, so the tolerance only guards the parse.
+                                    let mutable firstBad = -1
+                                    for i in 0 .. expected.Length - 1 do
+                                        if firstBad < 0 && abs (parsed.[i] - expected.[i]) > 1e-6 * max 1.0 (abs expected.[i]) then
+                                            firstBad <- i
+                                    check "dense read e2e: out values match libnetcdf ground truth (2*A)"
+                                        (firstBad < 0)
+                                        (if firstBad < 0 then ""
+                                         else sprintf "first mismatch at flat index %d: expected %.9g, got %.9g"
+                                                  firstBad expected.[firstBad] parsed.[firstBad]))
+                       | Ok _ ->
+                           check "dense read e2e: out values match libnetcdf ground truth (2*A)" false
+                               "A did not read back as floats"
+                       | Error e ->
+                           check "dense read e2e: out values match libnetcdf ground truth (2*A)" false
+                               (sprintf "ground-truth read failed: %s" e))
+                      // A missing .nc at RUNTIME must fail loudly, not print garbage:
+                      // the same exe run from a fresh dir without sample.nc has to exit
+                      // nonzero with a NetCDF error on stderr (netcdf.dll resolves via
+                      // PATH, so the exe still launches from the bare directory).
+                      let missingDir = Path.Combine(Path.GetTempPath(), "blade_nc_missing_" + Guid.NewGuid().ToString("N"))
+                      Directory.CreateDirectory missingDir |> ignore
+                      (try
+                          let exeCopy = Path.Combine(missingDir, Path.GetFileName exePath)
+                          File.Copy(exePath, exeCopy, true)
+                          (match runExecutable exeCopy with
+                           | Ok (code, missOut) ->
+                               check "dense read e2e: missing sample.nc at runtime fails loudly (nonzero exit + NetCDF error)"
+                                   (code <> 0 && missOut.Contains "NetCDF error")
+                                   (sprintf "exit %d: %s" code (missOut.Substring(0, min 200 missOut.Length)))
+                           | Error e ->
+                               check "dense read e2e: missing sample.nc at runtime fails loudly (nonzero exit + NetCDF error)" false e)
+                       finally
+                          try Directory.Delete(missingDir, true) with _ -> ())
                   | Ok (code, runOut) -> check "dense read e2e: runs to completion (exit 0)" false (sprintf "exit %d: %s" code runOut)
                   | Error e -> check "dense read e2e: runs to completion (exit 0)" false e)
              | Error e ->
@@ -1078,6 +1146,57 @@ let out = method_for(A) <@> lambda(x) -> x + x |> compute
             check "fill_random: lowers" false (sprintf "lower error: %s" e)
     with
     | ex -> printfn "  SKIP fill_random: %s" ex.Message
+
+    // ---------------------------------------------------------------
+    // Provider-backed statics: the compile-time fold (ProviderStatics)
+    // ---------------------------------------------------------------
+    // Unconditional: shapeValue nests a flat buffer row-major.
+    printfn "\n--- provider statics: shapeValue + live fold ---"
+    (let v = Blade.ProviderStatics.shapeValue [2; 3] (fun i -> Blade.StaticEval.SVInt (int64 i))
+     let expected =
+         Blade.StaticEval.SVTuple [
+             Blade.StaticEval.SVTuple [Blade.StaticEval.SVInt 0L; Blade.StaticEval.SVInt 1L; Blade.StaticEval.SVInt 2L]
+             Blade.StaticEval.SVTuple [Blade.StaticEval.SVInt 3L; Blade.StaticEval.SVInt 4L; Blade.StaticEval.SVInt 5L] ]
+     check "shapeValue: 2x3 row-major nesting" (v = expected) (sprintf "got %A" v)
+     let scalar = Blade.ProviderStatics.shapeValue [] (fun _ -> Blade.StaticEval.SVFloat 7.5)
+     check "shapeValue: rank-0 folds to the bare scalar" (scalar = Blade.StaticEval.SVFloat 7.5) (sprintf "got %A" scalar))
+
+    // Live fold: `let static xd = sample.dims.xdim |> read` folds through
+    // libnetcdf; xdim = 1..20 in the fixture, so length = 20 and the
+    // static prodsum is sum i^2 = 2870. Skips without libnetcdf/sample.nc.
+    let foldSource = """
+import Providers.NetCDF as NetCDF
+
+let sample = NetCDF.load("sample.nc")
+let static xd = sample.dims.xdim |> read
+let static n = length(xd)
+let static ps = prodsum(xd, xd)
+let a = n
+let b = ps
+"""
+    (try
+        Blade.ProviderStatics.install ()
+        match Parser.parseProgram foldSource with
+        | Error e -> check "static fold: parses" false e.Message
+        | Ok program ->
+            match TypeCheck.typeCheck program with
+            | Error errs ->
+                check "static fold: typechecks (fold succeeded)" false
+                    (errs |> List.map TypeEnv.formatCompileError |> String.concat "; ")
+            | Ok _ ->
+                check "static fold: typechecks (fold succeeded)" true ""
+                // The folded values land in resolveStatics' env directly:
+                match Blade.StaticEval.resolveStatics program.Modules.Head.Decls with
+                | Ok (se, _) ->
+                    check "static fold: length(xd) = 20"
+                        (Map.tryFind "n" se.Values = Some (Blade.StaticEval.SVInt 20L))
+                        (sprintf "got %A" (Map.tryFind "n" se.Values))
+                    check "static fold: prodsum(xd, xd) = 2870"
+                        (Map.tryFind "ps" se.Values = Some (Blade.StaticEval.SVFloat 2870.0))
+                        (sprintf "got %A" (Map.tryFind "ps" se.Values))
+                | Error e -> check "static fold: resolveStatics" false e
+     with
+     | ex -> printfn "  SKIP provider static fold: %s" ex.Message)
 
     // ---------------------------------------------------------------
     // Summary

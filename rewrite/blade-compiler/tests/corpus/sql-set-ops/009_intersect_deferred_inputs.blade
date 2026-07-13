@@ -1,0 +1,15 @@
+// TEST: Intersect Forces Deferred Inputs
+// Value-based intersect where BOTH array inputs are still UNFORCED
+// computations (the if/then/else kernel bodies swallow the trailing
+// `|> compute` into the else branch, leaving wa and wb deferred).
+// intersect's set-build and scan loops read both inputs by name, so its
+// codegen forces each deferred binding in place first (shared
+// forceDeferredArrayInput helper, applied per input slot).
+let a = [1.0, 2.0, 3.0]
+let b = [0.0, 1.0, 4.0]
+let wa = method_for(a) <@> lambda(q) -> if q > 1.5 then 1.0 else 0.0 |> compute
+let wb = method_for(b) <@> lambda(q) -> if q > 0.5 then 1.0 else 0.0 |> compute
+let both = intersect(wa, wb)
+let result = method_for(both) <@> lambda(x) -> x |> compute
+// wa = [0, 1, 1], wb = [0, 1, 1] -> unique values in both, A-order
+// EXPECT: result = [0, 1]

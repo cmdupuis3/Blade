@@ -138,6 +138,7 @@ type Subst() =
         | IRTPoly (base', var) -> IRTPoly (this.Resolve base', var)
         | IRTUnitAnnotated (inner, units) -> IRTUnitAnnotated (this.Resolve inner, units)
         | IRTIdxTagged (inner, idxRef) -> IRTIdxTagged (this.Resolve inner, idxRef)
+        | IRTDist (order, elem, axes) -> IRTDist (order, this.Resolve elem, axes)
         | IRTArrow (slots, result, identity) ->
             let resolveSlot = function
                 | SIdx idx -> SIdx idx
@@ -160,6 +161,7 @@ let rec occursIn (id: int) (ty: IRType) : bool =
         (lt.KernelType |> Option.map (occursIn id) |> Option.defaultValue false)
     | IRTUnitAnnotated (inner, _) -> occursIn id inner
     | IRTIdxTagged (inner, _) -> occursIn id inner
+    | IRTDist (_, elem, _) -> occursIn id elem
     | IRTArrow (slots, ret, _) ->
         let slotHit =
             slots |> List.exists (function
@@ -343,6 +345,32 @@ let rec unify (subst: Subst) (t1: IRType) (t2: IRType) : TypeResult<unit> =
             | _ -> false
         if refMatch then unify subst inner1 inner2
         else Error (TypeMismatch (t1, t2))
+    // IRTDist unification: strict, like IRTIdxTagged — no asymmetric arms,
+    // so a bare tuple of arrays never flows into a Dist (only the dist
+    // construction intrinsic and dist-typed operators produce Dist values).
+    //   1. Carried orders must be EQUAL (the order guard's foundation —
+    //      combining or passing dists of different stochastic order is a
+    //      type error, not a runtime one).
+    //   2. Axes must agree positionally, with the same compatibility rule
+    //      as ArrayElem index types: user-named tags are nominative,
+    //      synthetic (__-prefixed) tags are structural, extents are NOT
+    //      compared (runtime values), symmetry classes must be compatible.
+    //   3. Element types unify recursively.
+    | IRTDist (o1, e1, ax1), IRTDist (o2, e2, ax2) ->
+        if o1 <> o2 || ax1.Length <> ax2.Length then
+            Error (TypeMismatch (t1, t2))
+        else
+            let isSyntheticTag (t: string) = t.StartsWith("__")
+            let axisMismatch =
+                List.zip ax1 ax2 |> List.exists (fun (i1, i2) ->
+                    match i1.Tag, i2.Tag with
+                    | Some t1, Some t2 when t1 <> t2
+                                            && not (isSyntheticTag t1)
+                                            && not (isSyntheticTag t2) -> true
+                    | _ ->
+                        i1.Symmetry <> i2.Symmetry && i1.Symmetry <> SymNone && i2.Symmetry <> SymNone)
+            if axisMismatch then Error (TypeMismatch (t1, t2))
+            else unify subst e1 e2
     // IRTArrow: slot-by-slot unification. Slot kinds (SIdx/SIdxVirt/SVal)
     // must agree at each position; SIdx/SIdxVirt require matching index
     // identity (id and tag); SVal recurses through unify. The result
@@ -389,6 +417,7 @@ let rec freeInferVars (subst: Subst) (ty: IRType) : Set<int> =
             (lt.KernelType |> Option.map (freeInferVars subst) |> Option.defaultValue Set.empty)
     | IRTUnitAnnotated (inner, _) -> freeInferVars subst inner
     | IRTIdxTagged (inner, _) -> freeInferVars subst inner
+    | IRTDist (_, elem, _) -> freeInferVars subst elem
     | IRTArrow (slots, ret, _) ->
         let slotVars =
             slots |> List.map (function

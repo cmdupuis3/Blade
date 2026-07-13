@@ -20,6 +20,7 @@ open Blade.Tests.Bracketed
 open Blade.Tests.IndexTypes
 open Blade.Tests.Mutability
 open Blade.Tests.Static
+open Blade.Tests.Ppl
 open Blade.Tests.Units
 open Blade.Tests.Sqlish
 open Blade.Tests.InferenceProbes
@@ -44,7 +45,7 @@ open Blade.Tests.Benchmarks
 let allTests =
     basicTests @ intrinsicsTests @ adTests @ mlE2eTests @ mlOpsTests @ loopTests @ symmetryTests @ reynoldsTests @ arityTests @ functionTests
     @ structTests @ sumTypeTests @ interfaceTests @ moduleTests @ guardTests @ guardCombinatorTests @ zeroCombinatorTests @ sequenceCombinatorTests @ tupleViewTests @ replicateTests @ anonRangeTests @ forInTests @ bracketedTests
-    @ indexTypeTests @ mutabilityTests @ staticTests @ unitTests
+    @ indexTypeTests @ mutabilityTests @ staticTests @ pplTests @ unitTests
     @ foreignKeyTests @ maskTests @ setOpTests @ uniqueContainsTests @ semijoinTests @ groupByTests @ sortTests @ reduceTests @ extentsTests @ extentsMultiRankTests @ regressionTests @ sqlCombinedTests @ v24dProbes
     @ inferenceProbes
     @ funcArrayTests

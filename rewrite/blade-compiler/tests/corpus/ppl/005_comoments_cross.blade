@@ -1,0 +1,10 @@
+// TEST: Comoments Cross
+// comoments(X, Y): central cross-covariance block between two DIFFERENT
+// arrays — rectangular (method_for(X, Y), no comm clause), 2 x 3.
+// X fibers: [1,2] (m 1.5), [3,5] (m 4). Y fibers: [2,4] (m 3), [1,1] (m 1), [0,2] (m 1).
+// row f0: 5-4.5=0.5, 1.5-1.5=0, 2-1.5=0.5 | row f1: 13-12=1, 4-4=0, 5-4=1
+type TimeIdx = Idx<2>
+let X: Array<Float64 like Idx<2>, TimeIdx> = [[1.0, 2.0], [3.0, 5.0]]
+let Y: Array<Float64 like Idx<3>, TimeIdx> = [[2.0, 4.0], [1.0, 1.0], [0.0, 2.0]]
+let c = comoments(X, Y)
+// EXPECT: c = [0.5, 0.0, 0.5, 1.0, 0.0, 1.0]

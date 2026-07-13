@@ -1,0 +1,19 @@
+// TEST: FA T9: dense row slice (literal index) + zip pipeline
+// ----------------------------------------------------------------------------
+// T9: A row taken from a rank-2 DENSE module array with a LITERAL index --
+// `let r0 = A(0)` -- is a PARTIAL positional read (one subscript, rank-2 array),
+// so the result is a rank-1 sub-view, not a scalar. genScalarBinding used to
+// bind such reads as the raw `promote<T, 1>::type` (a bare `double*`), which
+// dropped `.extents` and broke every downstream shape consumer: auto-print and
+// the method_for/zip fiber both need `.extents`, and the emitted C++ failed to
+// compile (`request for member 'extents' in ... double*`).
+// Fixed 2026-07-12: bind the Array<T, 1> wrapper { A.data[0], A.extents + 1 }
+// (mirroring the loop-peel slice idiom). The rows must print with correct
+// values AND drive a method_for(zip) elementwise-product pipeline.
+let A: Array<Float64 like Idx<2>, Idx<3>> = [[1.0, 2.0, 4.0], [3.0, 5.0, 4.0]]
+let r0 = A(0)
+let r1 = A(1)
+let prod = method_for(zip(r0, r1)) <@> lambda(u, w) -> u * w |> compute
+// EXPECT: r0 = [1, 2, 4]
+// EXPECT: r1 = [3, 5, 4]
+// EXPECT: prod = [3, 10, 16]

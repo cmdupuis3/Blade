@@ -1,0 +1,22 @@
+// TEST: Dist Function Boundary
+// The typed-Dist arc's headline: a dist is a first-class VALUE of nominal
+// type Dist<r, τ like axes> (elaboration binds it via the __dist_pack
+// intrinsic; the checker types it; zonk erases it to the κ_1..κ_r component
+// tuple). It crosses function boundaries, and cumulant(d, k) is a
+// checker-level, order-guarded projection valid in any expression position —
+// here inside callees on a Dist-typed parameter. Values pinned from
+// ppl/014's oracle: κ1(X) = means, κ2(X) = packed pair comoments.
+type TimeIdx = Idx<2>
+let X: Array<Float64 like Idx<2>, TimeIdx> = [[1.0, 2.0], [3.0, 4.0]]
+let dx = dist(X, 2)
+
+function meanOf(d: Dist<2, Float64 like Idx<2>>) -> Array<Float64 like Idx<2>> =
+  cumulant(d, 1)
+
+function variances(d: Dist<2, Float64 like Idx<2>>) -> Array<Float64 like SymIdx<2, 2>> =
+  cumulant(d, 2)
+
+let m = meanOf(dx)
+let c = variances(dx)
+// EXPECT: m = [1.5, 3.5]
+// EXPECT: c = [0.25, 0.25, 0.25]

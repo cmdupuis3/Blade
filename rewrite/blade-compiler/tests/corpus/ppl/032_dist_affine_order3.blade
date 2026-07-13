@@ -1,0 +1,12 @@
+// TEST: Dist Affine Order 3
+// Nonzero third-order pushforward: κ'_3 = W^⊗3 κ_3 on data B (N = 3, real
+// skewness). Oracle: prototype Dist.affine (hand-verified: kp3[0,0,0] =
+// κ3[000] + 6κ3[001] + 12κ3[011] + 8κ3[111] = −250/27).
+type TimeIdx = Idx<3>
+let B: Array<Float64 like Idx<2>, TimeIdx> = [[1.0, 2.0, 4.0], [3.0, 5.0, 4.0]]
+let W: Array<Float64 like Idx<2>, Idx<2>> = [[1.0, 2.0], [0.0, 1.0]]
+let d = dist(B, 3)
+let (p1, p2, p3) = dist_affine(W, d)
+// EXPECT: p1 = [10.3333333333, 4.0]
+// EXPECT: p2 = [5.55555555556, 1.66666666667, 0.666666666667]
+// EXPECT: p3 = [-9.25925925926, -2.77777777778, -0.555555555556, 0.0]

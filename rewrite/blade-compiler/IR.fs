@@ -102,6 +102,17 @@ type IRExpr =
     | IRGroupKeys of keys: IRExpr list               // group_keys(keys1, keys2, ...) - CSR grouping; multi-key ⇒ compound dispatch
     | IRSort of array: IRExpr * key: IRExpr          // sort(arr, key) - stable ascending sort by key
     | IRReduce of array: IRExpr * kernel: IRExpr * init: IRExpr option  // reduce(arr, op[, init]) - fold innermost dim; init seeds the fold and defines the empty result
+    // reduce(deferred, op[, init]) — the FUSED reduction terminal: fold a
+    // deferred computation (IRApplyCombinator, or an IRFusion tree of them)
+    // without materializing the array(s). ONE loop nest; one scalar
+    // accumulator per fusion leaf (result = tuple of scalars for trees).
+    // Semantically the fold is a binary-kernel stage in the loop-object
+    // composition algebra (object_for((+)) is a reduction stage); this node
+    // is the checker-typed forcing of that composition. init is ALWAYS
+    // filled by the checker (identity for (+)/(*) sections, user's init
+    // otherwise — arbitrary kernels REQUIRE an explicit init).
+    | IRReduceCompute of computation: IRExpr * kernel: IRExpr * init: IRExpr
+    | IRProdSum of args: IRExpr list  // prodsum(x1..xk): fused Σ_t Π_ℓ xℓ(t) over rank-1 arrays of equal extent; empty extent ⇒ 0
     | IRZip of IRExpr list
     | IRAlign of arrays: IRExpr list * spec: AlignSpec
     | IRStack of IRExpr list
@@ -652,6 +663,43 @@ let mkArrayLike (arr: IRArrayType) : IRType =
     else
         mkArrayArrow arr.IndexTypes arr.ElemType arr.Identity
 
+/// The κ_k component array type of a Dist<order, elem, axes> (typed dist
+/// tower, ppl/NOTES.md). κ_1 is the mean tensor over the variable axes
+/// as-declared; κ_k for k >= 2 is the order-k joint cumulant, symmetric
+/// packed over the FUSED variable-axis space: one SymIdx record of Rank k
+/// whose Extent is the product of the axes' extents (the base dimension of
+/// the fused space, matching what the elaborated method_for(A ×k) comm
+/// tower produces). Used by the checker to type cumulant(d, k) projections
+/// and by Zonk to ERASE IRTDist into the component tuple.
+let distComponentType (k: int) (elem: IRType) (axes: IRIndexType list) : IRType =
+    if k = 1 then
+        mkArrayArrow axes elem None
+    else
+        let fusedExtent =
+            match axes with
+            | [] -> IRLit (IRLitInt 0L)
+            | [one] -> one.Extent
+            | first :: rest ->
+                rest |> List.fold (fun acc a ->
+                    match acc, a.Extent with
+                    | IRLit (IRLitInt m), IRLit (IRLitInt n) -> IRLit (IRLitInt (m * n))
+                    | l, r -> IRBinOp (IRElementwise, IRMul, l, r)) first.Extent
+        let symIdx = {
+            Id = (axes |> List.tryHead |> Option.map (fun a -> a.Id) |> Option.defaultValue 0)
+            Rank = k
+            Extent = fusedExtent
+            Symmetry = SymSymmetric
+            Tag = None; IxKind = IxKPlain
+            Kind = SDimension
+            Dependencies = []
+        }
+        mkArrayArrow [symIdx] elem None
+
+/// All component types κ_1 .. κ_order of a Dist — the tuple a Dist value
+/// erases to after type checking.
+let distComponentTypes (order: int) (elem: IRType) (axes: IRIndexType list) : IRType list =
+    [ for k in 1 .. order -> distComponentType k elem axes ]
+
 /// The view transform behind `load_compound(var, mask)`: replace a variable's
 /// dimensions with a single CompoundIdx whose presence mask is `maskIR`. This
 /// is a pure type transform -- no data is read; materialization happens later
@@ -941,6 +989,9 @@ and normalizeToNested (ty: IRType) : IRType =
         IRTIdxTagged (normalizeToNested inner, tag)
     | IRTUnitAnnotated (inner, units) ->
         IRTUnitAnnotated (normalizeToNested inner, units)
+    | IRTDist (order, elem, axes) ->
+        // Axes are IRIndexTypes (no IRType members) — opaque under this walker.
+        IRTDist (order, normalizeToNested elem, axes)
 
     // Leaf types — no IRType subterms.
     | IRTScalar _
@@ -2025,6 +2076,13 @@ type LoopNestCodeGen = {
     HasReynolds: bool
     /// Whether Reynolds is antisymmetric (sign alternates with permutation parity)
     IsAntisymmetric: bool
+    /// Fused-fold mode (reduce over a deferred computation): when Some,
+    /// the nest ACCUMULATES `OutputName = <wrapper>(OutputName, kernel)`
+    /// into a caller-declared scalar instead of assigning output cells —
+    /// "+" / "*" fast-path to `+=` / `*=`. The caller declares and seeds
+    /// the accumulator, forces OutputType scalar, and suppresses the
+    /// nest-level OMP pragma (scalar accumulation is not race-safe).
+    FoldWrapper: string option
 }
 
 /// One dimension GROUP of a device buffer. Mirrors a single IRIndexType:
@@ -2966,6 +3024,7 @@ let buildLoopNestCodeGen
         SpeedupFactor = info.SpeedupFactor
         HasReynolds = info.HasReynolds
         IsAntisymmetric = isAntisymmetric
+        FoldWrapper = None
     }
 
 // ============================================================================
@@ -3057,6 +3116,8 @@ let (|ExprShape|) (expr: IRExpr) : IRExpr list * (IRExpr list -> IRExpr) =
     | IRSort (a, k) -> [a; k], (function [a'; k'] -> IRSort (a', k') | _ -> badChildren "IRSort")
     | IRReduce (a, k, None) -> [a; k], (function [a'; k'] -> IRReduce (a', k', None) | _ -> badChildren "IRReduce")
     | IRReduce (a, k, Some i) -> [a; k; i], (function [a'; k'; i'] -> IRReduce (a', k', Some i') | _ -> badChildren "IRReduce")
+    | IRReduceCompute (c, k, i) -> [c; k; i], (function [c'; k'; i'] -> IRReduceCompute (c', k', i') | _ -> badChildren "IRReduceCompute")
+    | IRProdSum args -> args, (fun args' -> IRProdSum args')
     | IRPolyIndex (p, i) -> [p; i], (function [p'; i'] -> IRPolyIndex (p', i') | _ -> badChildren "IRPolyIndex")
     | IRAssign (t, v) -> [t; v], (function [t'; v'] -> IRAssign (t', v') | _ -> badChildren "IRAssign")
     | IRCurry (arr, idx, r) -> [arr; idx], (function [arr'; idx'] -> IRCurry (arr', idx', r) | _ -> badChildren "IRCurry")
@@ -3252,6 +3313,7 @@ let rec substTypeInIRType (bindings: Map<int, IRType>) (ty: IRType) : IRType =
     | IRTPoly (base', var) -> IRTPoly (substTypeInIRType bindings base', var)
     | IRTUnitAnnotated (inner, units) -> IRTUnitAnnotated (substTypeInIRType bindings inner, units)
     | IRTIdxTagged (inner, idxRef) -> IRTIdxTagged (substTypeInIRType bindings inner, idxRef)
+    | IRTDist (order, elem, axes) -> IRTDist (order, substTypeInIRType bindings elem, axes)
     | IRTArrow (slots, result, identity) ->
         let substSlot = function
             | SIdx idx -> SIdx idx
@@ -3372,6 +3434,7 @@ let rec unifyParamWithArg (paramTy: IRType) (argTy: IRType) (acc: Map<int, IRTyp
     | IRTPoly (pb, _), IRTPoly (ab, _) -> unifyParamWithArg pb ab acc
     | IRTUnitAnnotated (pi, _), IRTUnitAnnotated (ai, _) -> unifyParamWithArg pi ai acc
     | IRTIdxTagged (pi, _), IRTIdxTagged (ai, _) -> unifyParamWithArg pi ai acc
+    | IRTDist (po, pe, _), IRTDist (ao, ae, _) when po = ao -> unifyParamWithArg pe ae acc
     | IRTArrow (pSlots, pRet, _), IRTArrow (aSlots, aRet, _) when pSlots.Length = aSlots.Length ->
         // Generic IRTArrow-vs-IRTArrow: handles arrows with SIdx and/or
         // SIdxVirt slots (FuncElem above only matched all-SVal arrows).
@@ -3395,6 +3458,7 @@ let rec collectInferIds (ty: IRType) : Set<int> =
     | IRTPoly (b, _) -> collectInferIds b
     | IRTUnitAnnotated (i, _) -> collectInferIds i
     | IRTIdxTagged (i, _) -> collectInferIds i
+    | IRTDist (_, e, _) -> collectInferIds e
     | IRTArrow (slots, ret, _) ->
         let slotIds =
             slots |> List.fold (fun s slot ->
@@ -4510,6 +4574,23 @@ let rec typeOf (expr: IRExpr) : IRType =
              // codegen; TypeCheck rejects rank>1 today, but keep this consistent.)
              mkArrayLike { a with IndexTypes = a.IndexTypes |> List.take (a.IndexTypes.Length - 1) }
          | t -> t)
+    | IRReduceCompute (comp, _, seed) ->
+        // Fused reduction terminal: one scalar per fusion leaf. The seed
+        // carries the accumulator type (checker-unified with every leaf's
+        // element type); the result mirrors the tree's nested-pair shape.
+        let rec shape e =
+            match e with
+            | IRFusion (l, r) -> IRTTuple [shape l; shape r]
+            | _ -> typeOf seed
+        shape comp
+    | IRProdSum args ->
+        // Scalar: the fused fold of rank-1 operands (TypeCheck enforces rank 1).
+        (match args with
+         | first :: _ ->
+             (match typeOf first with
+              | ArrayElem a -> a.ElemType
+              | t -> t)
+         | [] -> IRTScalar ETFloat64)
 
     // -- Deliberately untyped (loop objects, combinator/emission-internal
     //    markers — not runtime values with a simple type). Enumerated with
@@ -4709,6 +4790,20 @@ let rec liftExpr (builder: IRBuilder) (expr: IRExpr) : IRExpr =
         let init' = init |> Option.map (liftExpr builder)
         let (binds, arrFinal) = liftChild builder arr'
         wrapLets binds (IRReduce (arrFinal, kernel', init'))
+    | IRReduceCompute (comp, kernel, seed) ->
+        // The computation child is a deferred combinator (apply/fusion
+        // tree) — never lift it into a binding (it has no materialized
+        // value); recurse for nested inline forms in kernel arrays/seed.
+        IRReduceCompute (liftExpr builder comp, liftExpr builder kernel, liftExpr builder seed)
+    | IRProdSum args ->
+        // Every operand slot can hold an inline form; lift each so codegen
+        // reads .extents off named bindings.
+        let (allBinds, finals) =
+            args |> List.fold (fun (bs, fs) a ->
+                let a' = liftExpr builder a
+                let (b, aFinal) = liftChild builder a'
+                (bs @ b, fs @ [aFinal])) ([], [])
+        wrapLets allBinds (IRProdSum finals)
     | IRExtent (arr, dim) ->
         let arr' = liftExpr builder arr
         let (binds, arrFinal) = liftChild builder arr'
@@ -5056,6 +5151,9 @@ let rec ppIRType = function
         match inner with
         | IRTScalar ETInt64 | IRTScalar ETInt32 -> sprintf "Nat<%s>" tagStr
         | other -> sprintf "(%s)<%s>" (ppIRType other) tagStr
+    | IRTDist (order, elem, axes) ->
+        let axesStr = axes |> List.map ppIndexType |> String.concat ", "
+        sprintf "Dist<%d, %s like %s>" order (ppIRType elem) axesStr
     | IRTNamed name -> name  // Named types print as themselves
     | IRTInfer id -> sprintf "T?%d" id
     | IRTUnitAnnotated (inner, units) -> sprintf "%s<%s>" (ppIRType inner) (ppUnitSig units)
@@ -5743,6 +5841,7 @@ let validateModule (externalIds: Set<IRId>) (modul: IRModule) : IRValidationErro
         | IRReduce (a, k, i) ->
             checkScope scope ctx a; checkScope scope ctx k
             (match i with Some e -> checkScope scope ctx e | None -> ())
+        | IRProdSum args -> args |> List.iter (checkScope scope ctx)
         | IRApplyCombinator info ->
             checkScope scope ctx info.Loop
             checkScope scope ctx info.Kernel

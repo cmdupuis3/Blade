@@ -1,0 +1,15 @@
+// TEST: Negate Forces Deferred Input
+// Antisymmetric intra-group transpose lowers to whole-array NEGATE
+// (IRArrayNegate). Here the antisymmetric source is still an UNFORCED
+// computation (the reynolds pipeline is left without `|> compute`, so `anti`
+// stays a deferred binding). The negate's same-shape alloc and pool loop
+// index the input by name, so its codegen forces the deferred binding in
+// place first (shared forceDeferredArrayInput helper). Values mirror
+// 033_transpose_antisym_negate.
+let A = [1.0, 2.0, 3.0]
+let L = method_for(A, A)
+let g = lambda(x, y) where comm(x, y) -> 2.0 * x + y
+let anti = L <@> reynolds(g, Antisymmetric)
+let result = transpose(anti, [0, 1])
+// anti canonicals (0,1)=-1 (0,2)=-2 (1,2)=-1 -> negated
+// EXPECT: result = [1, 2, 1]

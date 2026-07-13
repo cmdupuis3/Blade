@@ -1,0 +1,151 @@
+// TEST: Example Portfolio Moment Analytics
+// ============================================================================
+// Two-asset return analytics on Blade's moment algebra and symmetric index
+// types. The estimators come from three different subsystems and are pinned
+// against each other:
+//   * the PPL formers (moments/comoments/cumulants) -- fused single-sweep
+//     sufficient-statistic pipelines over the return matrix;
+//   * the raw combinator algebra (the loops/060 fused pool) -- the same
+//     power sums spelled by hand, plus gram(), which IS the raw scatter;
+//   * the distribution tower (dist / independence licenses / dist_affine)
+//     -- portfolio and hedge cumulants transported without re-touching
+//     samples.
+// Packed symmetric tensors (SymIdx storage) print as flat canonical
+// upper-triangle cells; decompact() materializes the full dense matrix.
+//
+// All EXPECT values verified against an independent implementation of the
+// population moment/cumulant formulas (PowerShell reference script).
+// ============================================================================
+
+// ---- daily returns (percent): 2 assets x 6 days (vars first, time LAST) ----
+type DayIdx = Idx<6>
+let R: Array<Float64 like Idx<2>, DayIdx> = [
+    [1.0, -2.0, 3.0, 0.5, -1.5, 2.0],
+    [0.5, 0.8, -0.2, 0.4, 0.1, 0.6]]
+
+// ============================================================================
+// (a) Means and covariance as PPL formers. comoments(R, 2) is the packed
+// central covariance, printed as its canonical upper-triangle cells
+// (var0, cov, var1).
+// ============================================================================
+let mu = moments(R, 1)
+let C = comoments(R, 2)
+// EXPECT: mu = [0.5, 0.366666666666667]
+// EXPECT: C = [3.16666666666667, -0.258333333333333, 0.108888888888889]
+
+// ============================================================================
+// (b) Higher-order joint cumulants -- the skew/kurtosis ingredients. k3's 4
+// cells are the joint third cumulants (000, 001, 011, 111); k4 is a true
+// cumulant (the three sigma-squared pairings subtracted), not the central
+// fourth moment.
+// ============================================================================
+let k3 = cumulants(R, 3)
+let k4 = cumulants(R, 4)
+// EXPECT: k3 = [-0.75, -0.223611111111111, 0.0469444444444444, -0.0174074074074075]
+// EXPECT: k4 = [-13.5416666666667, 0.339583333333333, 0.12037037037037, -0.0156388888888888, -0.0111185185185185]
+
+// ============================================================================
+// (c) The same statistics from the raw combinator algebra: one co-iteration
+// loop object, five product kernels, <&!>-fused into a single pass over the
+// day axis (this is exactly the sweep the PPL formers elaborate to). gram()
+// computes the raw scatter matrix directly -- its cells ARE the pool's
+// second-order power sums -- and the pooled covariance derived from the
+// sweep reproduces comoments(R, 2) above.
+// ============================================================================
+let r0 = R(0)
+let r1 = R(1)
+let Z = method_for(zip(r0, r1))
+let q0 = lambda(x, y) -> x
+let q1 = lambda(x, y) -> y
+let q00 = lambda(x, y) -> x * x
+let q01 = lambda(x, y) -> x * y
+let q11 = lambda(x, y) -> y * y
+let (p0, p1, p00, p01, p11) = reduce((Z <@> q0) <&!> (Z <@> q1) <&!> (Z <@> q00) <&!> (Z <@> q01) <&!> (Z <@> q11), (+))
+// EXPECT: p0 = 3.0
+// EXPECT: p1 = 2.2
+// EXPECT: p00 = 20.5
+// EXPECT: p01 = -0.45
+// EXPECT: p11 = 1.46
+
+let scatter = gram(R, R)
+// EXPECT: scatter = [20.5, -0.45, 1.46]
+
+let cov00 = p00 / 6.0 - (p0 / 6.0) * (p0 / 6.0)
+let cov01 = p01 / 6.0 - (p0 / 6.0) * (p1 / 6.0)
+let cov11 = p11 / 6.0 - (p1 / 6.0) * (p1 / 6.0)
+// EXPECT: cov00 = 3.16666666666667
+// EXPECT: cov01 = -0.258333333333333
+// EXPECT: cov11 = 0.108888888888889
+
+// ============================================================================
+// (d) Symmetric packed storage from a Reynolds-symmetrized kernel. The
+// day-pair co-gain surface r_i * r_j is symmetric, so the `where comm`
+// kernel under reynolds() stores only the upper triangle (6 cells for a
+// 3-day window instead of 9); decompact rebuilds the dense matrix when
+// needed. reynolds(g) sums g over both argument orders, hence 2 * r_i r_j.
+// ============================================================================
+let w3 = [1.0, -2.0, 3.0]
+let Lp = method_for(w3, w3)
+let co_gain = Lp <@> reynolds(lambda(x, y) where comm(x, y) -> x * y) |> compute
+let co_gain_dense = decompact(co_gain, 0)
+// EXPECT: co_gain = [2.0, -4.0, 6.0, 8.0, -12.0, 18.0]
+// EXPECT: co_gain_dense = [2.0, -4.0, 6.0, -4.0, 8.0, -12.0, 6.0, -12.0, 18.0]
+
+// ============================================================================
+// (e) The distribution tower. Market factors X and idiosyncratic factors Y
+// are DECLARED independent -- that declaration is what licenses cumulant
+// addition (convolution becomes tensor addition; it is a compile error
+// without it). The portfolio 0.6 X + 0.4 Y is built from scaled
+// intermediates: kappa_k scales by w^k (multilinearity), then adds
+// order-wise under the license.
+// ============================================================================
+type FDayIdx = Idx<4>
+let X: Array<Float64 like Idx<2>, FDayIdx> = [
+    [1.0, 2.0, 3.0, 2.0],
+    [0.5, 1.5, 1.0, 1.0]]
+let Y: Array<Float64 like Idx<2>, FDayIdx> = [
+    [0.2, 0.4, 0.2, 0.4],
+    [1.0, 3.0, 2.0, 2.0]]
+let _ = independent(X, Y)
+let dx = dist(X, 3)
+let dy = dist(Y, 3)
+let sx = 0.6 * dx
+let sy = 0.4 * dy
+let port = sx + sy
+let c1 = cumulant(port, 1)
+let c2 = cumulant(port, 2)
+let c3 = cumulant(port, 3)
+// kappa_k(port) = 0.6^k kappa_k(X) + 0.4^k kappa_k(Y); Y is mean-symmetric
+// so its odd cumulants vanish and the portfolio skew is X's, scaled.
+// EXPECT: c1 = [1.32, 1.4]
+// EXPECT: c2 = [0.1816, 0.053, 0.125]
+// EXPECT: c3 = [0.0, -0.027, -0.0135, 0.0]
+
+// The same combination as a REUSABLE licensed function: `where indep(a, b)`
+// admits + on the Dist parameters inside the body, and each call site must
+// discharge the license against its actuals' declared sources.
+function combine(a: Dist<3, Float64 like Idx<2>>, b: Dist<3, Float64 like Idx<2>>)
+  where indep(a, b) -> Dist<3, Float64 like Idx<2>> =
+  a + b
+
+let total = combine(dx, dy)
+let t1 = cumulant(total, 1)
+let t2 = cumulant(total, 2)
+// unweighted sum: kappa_k(X) + kappa_k(Y)
+// EXPECT: t1 = [2.3, 3.0]
+// EXPECT: t2 = [0.51, 0.175, 0.625]
+
+// ============================================================================
+// (f) Hedging as a cumulant pushforward. dist_affine(W, d) transports ALL
+// carried orders through the linear map at once (kappa'_r = W tensor-power
+// r applied to kappa_r): row 0 is the hedged book (equity - 0.5 * bond),
+// row 1 the raw bond. Variance, covariance, and joint skew of the hedged
+// positions come straight out of the carried state -- no second pass over
+// the return history.
+// ============================================================================
+let W: Array<Float64 like Idx<2>, Idx<2>> = [[1.0, -0.5], [0.0, 1.0]]
+let dR = dist(R, 3)
+let (h1, h2, h3) = dist_affine(W, dR)
+// EXPECT: h1 = [0.316666666666667, 0.366666666666667]
+// EXPECT: h2 = [3.45222222222222, -0.312777777777778, 0.108888888888889]
+// EXPECT: h3 = [-0.377199074074074, -0.274907407407407, 0.0556481481481482, -0.0174074074074075]

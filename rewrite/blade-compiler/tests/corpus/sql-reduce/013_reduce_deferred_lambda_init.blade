@@ -1,0 +1,15 @@
+// TEST: Reduce Deferred Lambda Init
+// A lambda fold kernel over a deferred pipeline REQUIRES the explicit
+// 3-arg init (a fused nest cannot seed from its first element); with the
+// init supplied, any binary kernel folds. Also: init on a fused tree
+// seeds EVERY leaf's accumulator.
+let A = [1.0, 2.0, 3.0]
+let mx = reduce(method_for(A) <@> lambda(x) -> x * 2.0, lambda(a, b) -> if a > b then a else b, 0.0)
+let L = method_for(A)
+let f = lambda(x) -> x + 10.0
+let g = lambda(x) -> x * 2.0
+let (sa, sb) = reduce((L <@> f) <&!> (L <@> g), (+), 100.0)
+// mx = max(2,4,6) = 6; sa = 100 + 11+12+13 = 136; sb = 100 + 2+4+6 = 112
+// EXPECT: mx = 6.0
+// EXPECT: sa = 136.0
+// EXPECT: sb = 112.0

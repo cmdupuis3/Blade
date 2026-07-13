@@ -1,0 +1,19 @@
+// TEST: MState Merge
+// Arbitrary-order streaming: mstate(A, 4) = (mean, central comoment sums
+// M_2..M_4); mstate_merge combines chunks by the DERIVED subset-lattice
+// kernels (Pébay — M_∅ = n, M_single = 0 pruned; generated cell-wise as
+// straight-line code, logical reads on packed tensors); mstate_cumulants
+// freezes into κ_1..κ_4 (singleton-pruned partition formula, κ1 = mean).
+// Oracle: prototype dump-cumulants, data Z4 = XA ++ XB along the sample
+// axis — chunked must equal batch.
+type TimeIdx = Idx<2>
+let XA: Array<Float64 like Idx<2>, TimeIdx> = [[1.0, 2.0], [3.0, 5.0]]
+let XB: Array<Float64 like Idx<2>, TimeIdx> = [[4.0, 6.0], [4.0, 2.0]]
+let sA = mstate(XA, 4)
+let sB = mstate(XB, 4)
+let s = mstate_merge(sA, sB)
+let (k1, k2, k3, k4) = mstate_cumulants(s)
+// EXPECT: k1 = [3.25, 3.5]
+// EXPECT: k2 = [3.6875, -1.125, 1.25]
+// EXPECT: k3 = [1.96875, -2.8125, 0.75, 0.0]
+// EXPECT: k4 = [-19.3984375, 5.390625, -1.65625, 0.9375, -2.125]

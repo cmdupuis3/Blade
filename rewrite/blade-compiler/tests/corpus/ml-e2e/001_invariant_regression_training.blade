@@ -1,26 +1,26 @@
 ﻿// TEST: ML E2E Invariant Regression Training
 // ============================================================================
 // The end-to-end equivariant ML example (module doc features/equivariant-nn.md
-// §10 + AD): a two-layer E(3)-equivariant message-passing network trained by
+// Â§10 + AD): a two-layer E(3)-equivariant message-passing network trained by
 // full-batch gradient descent on a rotation-invariant regression task,
-// entirely in Blade — forward pass, grad()-generated reverse pass, SGD loop.
+// entirely in Blade â€” forward pass, grad()-generated reverse pass, SGD loop.
 //
-// Task: y = Σ_{i<j} exp(-|r_i - r_j|²) over 5-node point clouds (targets
+// Task: y = Î£_{i<j} exp(-|r_i - r_j|Â²) over 5-node point clouds (targets
 // baked as literals).
 //
 // Architecture (flat-array formulation; specs static so all offsets are
 // compile-time tables):
-//   specIn=[(0e,1)]  →conv⊗Y≤2→  specH=[(0e,2),(1o,2),(2e,1)] (dim 13)
-//   → gated → linear → conv⊗Y≤2 → specOut=[(0e,2)] → silu → Σ·wr + br
+//   specIn=[(0e,1)]  â†’convâŠ—Yâ‰¤2â†’  specH=[(0e,2),(1o,2),(2e,1)] (dim 13)
+//   â†’ gated â†’ linear â†’ convâŠ—Yâ‰¤2 â†’ specOut=[(0e,2)] â†’ silu â†’ Î£Â·wr + br
 //
-// ORACLE: ml/TrainingOracle.fs (seed 20260711, lr 0.1, 30 steps) — this file
+// ORACLE: ml/TrainingOracle.fs (seed 20260711, lr 0.1, 30 steps) â€” this file
 // bakes its exact dataset/weights/CG tables and pins its loss trajectory,
 // step-0 gradients, and final weights (`dotnet run --project ml --
 // dump-oracle`). The layer loops mirror the F# loop order statement-for-
 // statement so values agree to ~1 ulp.
 //
 // EQUIVARIANCE PIN: the same loss evaluated on positions rotated by
-// R = Rz(0.7)·Ry(1.1) reproduces the unrotated loss (invariant readout).
+// R = Rz(0.7)Â·Ry(1.1) reproduces the unrotated loss (invariant readout).
 // ============================================================================
 
 // ---- graph structure: complete digraph on 5 nodes -------------------------
@@ -53,8 +53,8 @@ let all_ev = {
     ev
 }
 
-// ---- tensor-product path tables (static spec ⇒ compile-time constants) ----
-// conv1: specIn ⊗ sh → specH. Paths p: (0e)⊗(block p of sh)→(block p of H).
+// ---- tensor-product path tables (static spec â‡’ compile-time constants) ----
+// conv1: specIn âŠ— sh â†’ specH. Paths p: (0e)âŠ—(block p of sh)â†’(block p of H).
 let tp1_multO = [2, 2, 1]
 let tp1_d = [1, 3, 5]
 let tp1_s2 = [0, 1, 4]
@@ -64,7 +64,7 @@ let tp1_cgoff = [0, 1, 4, 9]
 let cg1_c2 = [0, 0, 1, 2, 0, 1, 2, 3, 4]
 let cg1_c3 = [0, 0, 1, 2, 0, 1, 2, 3, 4]
 let cg1_coef = [1.0, 0.9999999999999997, 0.9999999999999999, 0.9999999999999997, 0.9999999999999998, 0.9999999999999998, 1.0, 0.9999999999999998, 0.9999999999999998]
-// conv2: specH ⊗ sh → specOut=[(0e,2)]. Paths p: (block p of H)⊗(block p of sh)→0e.
+// conv2: specH âŠ— sh â†’ specOut=[(0e,2)]. Paths p: (block p of H)âŠ—(block p of sh)â†’0e.
 let tp2_mult1 = [2, 2, 1]
 let tp2_d = [1, 3, 5]
 let tp2_hs = [0, 2, 8]
@@ -103,7 +103,7 @@ function y_to2(x: Float, y: Float, z: Float) -> Array<Float like Idx<9>> = {
     sh
 }
 
-// conv1: gather source scalar, expand edge vector in Y≤2, tensor-product
+// conv1: gather source scalar, expand edge vector in Yâ‰¤2, tensor-product
 // into a 13-dim message, scatter-add onto the target node.
 function conv1(feat: Array<Float like Idx<5>>, ev: Array<Float like Idx<60>>, w: Array<Float like Idx<5>>) -> Array<Float like Idx<65>> = {
     let mut out = replicate(65, pure(0.0)) |> compute
@@ -175,7 +175,7 @@ function linear_all(w: Array<Float like Idx<9>>, f: Array<Float like Idx<65>>) -
     out
 }
 
-// conv2: specH ⊗ Y≤2 → specOut (two even scalars per node).
+// conv2: specH âŠ— Yâ‰¤2 â†’ specOut (two even scalars per node).
 function conv2(h: Array<Float like Idx<65>>, ev: Array<Float like Idx<60>>, w: Array<Float like Idx<10>>) -> Array<Float like Idx<10>> = {
     let mut out = replicate(10, pure(0.0)) |> compute
     for e in 0..20 {
@@ -213,7 +213,7 @@ function gate2_all(f: Array<Float like Idx<10>>) -> Array<Float like Idx<10>> = 
 
 // full-batch MSE loss over the 4 graphs, generalized over the edge-vector
 // buffer (so the rotation-invariance check can evaluate on rotated
-// geometry). Features and targets are captured from module scope — grad()
+// geometry). Features and targets are captured from module scope â€” grad()
 // differentiates wrt the PARAMETERS of the function it is given, so `loss`
 // below wraps this with the module data and exposes only the trainables:
 // w1, w2, w3, wr, and the bias (as a 1-array so its gradient rides the
@@ -309,7 +309,7 @@ let final_loss = {
     lv
 }
 
-// ---- equivariance: rotate the geometry by R = Rz(0.7)·Ry(1.1) --------------
+// ---- equivariance: rotate the geometry by R = Rz(0.7)Â·Ry(1.1) --------------
 // A rotation commutes with the position difference, so rotating the edge
 // vectors IS rotating the positions. The network's readout is invariant, so
 // the initial-weight loss must reproduce step0_loss (pinned to the same

@@ -1,0 +1,23 @@
+// TEST: FA T8: Tuple of arrays as function parameter
+// ----------------------------------------------------------------------------
+// T8: Function taking a tuple of arrays as one parameter, destructured
+// inside the body with a statement-level `let (x, y) = p`.
+// ----------------------------------------------------------------------------
+// Pins the in-block destructure defect (fixed 2026-07-12, typed-Dist arc):
+// inferBlock's StmtLet arm bound tuple-pattern leaves into the checking env
+// but emitted SubBindings = [] — the leaf VarIds referenced by the rest of
+// the block were never introduced in the IR, so lowering produced dangling
+// VarId references ([IR Validation] error). The fix records SubBindings in
+// the block path (mirroring checkDecl) and chains projection IRLets in
+// lowerTypedBlock (mirroring the module-decl path).
+type I3 = Idx<3>
+let A: Array<Float64 like I3> = [1.0, 2.0, 3.0]
+let B: Array<Float64 like I3> = [4.0, 5.0, 6.0]
+
+function sumEnds(p: (Array<Float64 like I3>, Array<Float64 like I3>)) -> Float64 = {
+  let (x, y) = p
+  x(0) + y(2)
+}
+
+let s = sumEnds((A, B))
+// EXPECT: s = 7

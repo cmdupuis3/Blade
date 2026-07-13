@@ -52,6 +52,72 @@ let rec evalConstExpr (env: TypeEnv) (expr: Expr) : int64 option =
         | Some a, Some b when b <> 0L -> Some (a / b) | _ -> None
     | _ -> None
 
+/// Evaluate an expression to a compile-time int under the FULL static
+/// contract (the replicate-count rule): a literal, a Nat-typed var, a
+/// `let static` value, or a static-function call. Two tiers: the cheap
+/// evalConstExpr first, then StaticEval against the StaticValues/
+/// StaticFunctions maps populated by checkModule's pre-pass. Shared by the
+/// Dist annotation order (lowerTypeExpr's TyDist arm) and the cumulant
+/// projection order (inferCumulantProj).
+let evalStaticIntExpr (env: TypeEnv) (expr: Expr) : int option =
+    match evalConstExpr env expr with
+    | Some n -> Some (int n)
+    | None ->
+        let staticEnv : StaticEval.StaticEnv =
+            { Values = env.StaticValues
+              Functions =
+                env.StaticFunctions
+                |> Map.map (fun _ (fd: FunctionDecl) ->
+                    { StaticEval.Name = fd.Name
+                      StaticEval.Params = fd.Params |> List.map (fun p -> p.Name)
+                      StaticEval.Body = fd.Body })
+              CalledFunctions = ref Set.empty
+              ProviderRoots = Map.empty }
+        match StaticEval.evalExpr staticEnv StaticEval.maxSteps expr with
+        | Ok (StaticEval.SVInt v) -> Some (int v)
+        | _ -> None
+
+/// Dist provenance of a surface expression: the union of the provenance
+/// sets of every variable reachable in it (conservative — an
+/// over-approximated source set can only make independence HARDER to
+/// prove, never easier, so union is sound). Empty means "unknown", which
+/// consumers treat as un-provable rather than vacuously independent.
+/// Sources of ground truth: module-level dist bindings (seeded from the
+/// PPL elaboration state at checkDecl) and Dist-typed function parameters
+/// (seeded with their license token at checkFunctionDecl).
+let rec provenanceOfSurface (env: TypeEnv) (e: Expr) : Set<string> =
+    let prov = provenanceOfSurface env
+    let unionMany es = es |> List.map prov |> List.fold Set.union Set.empty
+    match e with
+    | ExprVar n ->
+        (match lookupVar n env with
+         | Some vi ->
+             match env.Provenance.TryGetValue vi.VarId with
+             | true, s -> s
+             | _ -> Set.empty
+         | None -> Set.empty)
+    | ExprBinOp (_, _, l, r) -> Set.union (prov l) (prov r)
+    | ExprUnaryOp (_, x) -> prov x
+    | ExprApp (ExprVar "cumulant", _) -> Set.empty   // a projected component is an ARRAY, not a dist
+    | ExprApp (_, args) -> unionMany args            // call result: union of Dist-relevant args (conservative)
+    | ExprTyped (x, _) -> prov x
+    | ExprTuple es -> unionMany es
+    | ExprIf (_, t, f) -> Set.union (prov t) (prov f)
+    | ExprLet (b, body) -> Set.union (prov b.Value) (prov body)
+    | ExprBlock (stmts, fin) ->
+        let stmtProv s =
+            let rec go s =
+                match s with
+                | StmtSpanned (inner, _) -> go inner
+                | StmtLet b -> prov b.Value
+                | StmtAssign (_, _, r) -> prov r
+                | StmtExpr x -> prov x
+                | StmtForIn (_, _, _) -> Set.empty
+            go s
+        Set.union (stmts |> List.map stmtProv |> List.fold Set.union Set.empty)
+                  (fin |> Option.map prov |> Option.defaultValue Set.empty)
+    | _ -> Set.empty
+
 /// Lower an extent expression to IRExpr, preserving as much info as possible.
 let lowerExtentExpr (env: TypeEnv) (expr: Expr) : IRExpr =
     match evalConstExpr env expr with
@@ -242,6 +308,23 @@ let rec lowerTypeExpr (env: TypeEnv) (ty: TypeExpr) : IRType =
                 mkArrayArrow (indices @ inner.IndexTypes) inner.ElemType None
             | _ ->
                 mkArrayArrow indices elem None
+
+    | TyDist (orderExpr, elemTy, axesTys) ->
+        // Typed dist tower: Dist<order, Elem like I1, ..., Ik>.
+        // The order must be a compile-time integer >= 1 — a literal, a
+        // `let static`, or a static-function call (the replicate-count
+        // contract; same two-tier resolution as inferReplicate: cheap
+        // evalConstExpr first, then the full StaticEval against the
+        // checkModule pre-pass's StaticValues/StaticFunctions). Failure
+        // lowers to the -1 SENTINEL, reported at the annotation-consumption
+        // sites (inferLetBindingValue / checkFunctionDecl) alongside the
+        // ragged no-prior check — lowerTypeExpr itself has no error channel.
+        let order = evalStaticIntExpr env orderExpr
+        let elem = lowerElemType env elemTy
+        let axes = axesTys |> List.mapi (fun i ity -> lowerIndexTypeList env i ity) |> List.concat
+        match order with
+        | Some n when n >= 1 -> IRTDist (n, elem, axes)
+        | _ -> IRTDist (-1, elem, axes)
 
     | TyAbstractArray (elemTy, rankExpr, _symmOpt) ->
         match evalConstExpr env rankExpr with
@@ -1462,6 +1545,7 @@ let private typedExprChildren (expr: TypedExpr) : TypedExpr list =
         | TExprGroupBy (a, p) | TExprSort (a, p)
         | TExprCompound (a, p) -> [a; p]
         | TExprReduce (a, p, i) -> [a; p] @ Option.toList i
+        | TExprProdSum args -> args
         | TExprUnique a -> [a]
         | TExprTranspose (a, _, _) -> [a]
         | TExprDecompact (a, _) -> [a]
@@ -1630,10 +1714,61 @@ let rec inferExpr (env: TypeEnv) (expr: Expr) : TypeResult<TypedExpr> =
             | _ ->
                 Ok (mkTyped (TExprUnaryOp (OpMath name, tArg)) (IRTScalar ETFloat64)))
 
+    // ---- prodsum(x1, ..., xk): fused fiber product-sum ----
+    // Σ_t Π_ℓ xℓ(t) over rank-1 arrays of equal extent — the k-fold
+    // generalization of a dot product, and the comoment primitive the PPL
+    // moment formers elaborate to. Surface form is a plain call,
+    // shadowable like the math intrinsics. Empty extent folds to 0 (sum
+    // identity), so no non-empty check.
+    | ExprApp (ExprVar "prodsum", args) when not args.IsEmpty && (lookupVar "prodsum" env).IsNone ->
+        inferProdSum env args
+
+    // ---- __dist_pack(κ1, ..., κr): typed-dist construction intrinsic ----
+    // Compiler-internal (double-underscore reserved): emitted by the PPL
+    // elaboration stage after it builds the fused cumulant tower, never
+    // written by users. Packs the component arrays into a value of nominal
+    // type Dist<r, τ like axes>; the typed node is a plain TExprTuple (the
+    // representation a Dist erases to at zonk), only the TYPE is nominal.
+    | ExprApp (ExprVar "__dist_pack", args) when not args.IsEmpty ->
+        inferDistPack env args
+
+    // ---- cumulant(d, k): dist component projection, order-guarded ----
+    // The order guard as a TYPE error (ppl/NOTES.md typed-Dist arc): k must
+    // be a static int in 1..r where r is the dist's carried order. Works in
+    // any expression position on any Dist-typed value — including function
+    // parameters, which the elaboration-level registry could never see.
+    // Shadowable like the formers and math intrinsics.
+    | ExprApp (ExprVar "cumulant", [dExpr; kExpr]) when (lookupVar "cumulant" env).IsNone ->
+        inferCumulantProj env dExpr kExpr
+
     | ExprApp (func, args) ->
         inferExpr env func |> Result.bind (fun tFunc ->
         args |> List.map (inferExpr env) |> sequenceResults |> Result.bind (fun tArgs ->
-            dispatchAppOrIndex env tFunc tArgs))
+            // Call-site constraint DISCHARGE: if the callee declared custom
+            // where-clause conjuncts (e.g. PPL's `indep(a, b)`), the caller
+            // must prove them for the actual arguments — each registered
+            // handler gets the callee's conjunct args plus a provenance
+            // oracle mapping callee param names to the actuals' provenance.
+            let dischargeErr =
+                match func with
+                | ExprVar fname ->
+                    match env.FuncConstraints.TryGetValue fname with
+                    | true, (paramNames, conjuncts) ->
+                        let provOf (pname: string) : Set<string> =
+                            match List.tryFindIndex ((=) pname) paramNames with
+                            | Some i when i < args.Length -> provenanceOfSurface env args.[i]
+                            | _ -> Set.empty
+                        conjuncts |> List.tryPick (fun (cname, cargs) ->
+                            Blade.Constraints.lookupConstraint cname
+                            |> Option.bind (fun h ->
+                                match h.Discharge fname cargs provOf with
+                                | Ok () -> None
+                                | Error msg -> Some msg))
+                    | _ -> None
+                | _ -> None
+            match dischargeErr with
+            | Some msg -> Error (Other msg)
+            | None -> dispatchAppOrIndex env tFunc tArgs))
 
     // ---- Poly-tuple indexing OR array indexing (brackets) ----
     // `e[i]` is parsed as ExprTupleIndex regardless of e's type. Disambiguate
@@ -1991,12 +2126,124 @@ let rec inferExpr (env: TypeEnv) (expr: Expr) : TypeResult<TypedExpr> =
 // ============================================================================
 
 
+/// Detect and type the fused reduction terminal. Returns None when the
+/// first argument is NOT a deferred computation (ordinary array reduce
+/// proceeds). Some (Ok ...) types the fold: the child spliced into the
+/// typed node is a CANONICAL left-nested fusion over the RESOLVED leaves
+/// (one let-hop each, the <@> resolution rule), so lowering and codegen
+/// never chase variable bindings. Result type: elem for a single apply,
+/// left-nested scalar pairs for a tree (mirroring `|> compute`'s tuple
+/// convention — nested pair TYPE, flat make_tuple VALUE, flat projections).
+and tryInferReduceCompute (env: TypeEnv) (tArr: TypedExpr) (tKernel: TypedExpr) (tInitOpt: TypedExpr option) : TypeResult<TypedExpr> option =
+    // Collect fusion leaves left-to-right, resolving each through bindings.
+    // None = the root is not a deferred computation at all (fall through);
+    // Some (Error _) = it IS deferred but malformed for a fused fold.
+    let rec collect (t: TypedExpr) : Result<TypedExpr list, TypeError> option =
+        let r = resolveTypedExpr env t
+        match r.Kind with
+        | TExprFusion (l, rgt) ->
+            (match collect l, collect rgt with
+             | Some (Ok ls), Some (Ok rs) -> Some (Ok (ls @ rs))
+             | Some (Error e), _ | _, Some (Error e) -> Some (Error e)
+             | _ ->
+                Some (Error (Other "reduce() over a fused tree requires every <&!> leaf to be an unforced `method_for/object_for <@> kernel` application")))
+        | TExprApply info when not info.IsComposeApply -> Some (Ok [r])
+        | TExprApply _ ->
+            Some (Error (Other "reduce() over a composed (>>@/@>>) application is not supported yet — force it with `|> compute` and reduce the resulting array"))
+        | _ -> None
+    match collect tArr with
+    | None -> None
+    | Some leavesR ->
+        Some (
+            leavesR |> Result.bind (fun leaves ->
+            // Each leaf must produce plain (non-compact) cells: folding
+            // canonical vs logical cells of symmetric storage differ, the
+            // same ambiguity the array form rejects.
+            let leafElem (leaf: TypedExpr) : Result<IRType, TypeError> =
+                match leaf.Kind with
+                | TExprApply info ->
+                    (match env.Subst.Resolve info.OutputType with
+                     | ArrayElem arr ->
+                        let packed =
+                            arr.IndexTypes |> List.exists (fun ix ->
+                                match ix.Symmetry with SymNone -> false | _ -> true)
+                        if packed then
+                            Error (Other "reduce() over a computation with compact symmetric/antisymmetric/Hermitian output is not supported: folding the canonical cells and folding the logical (mirrored) cells differ. Force with `|> compute` and decompact(A, d) first for the logical fold.")
+                        else Ok arr.ElemType
+                     | IRTScalar _ as s -> Ok s
+                     | _ -> Error (Other "reduce() over a deferred computation needs an array-producing kernel application"))
+                | _ -> Error (Other "reduce(): internal — fusion leaf is not an apply")
+            leaves |> List.map leafElem |> sequenceResults |> Result.bind (fun elems ->
+            let elem0 = elems.Head
+            elems.Tail
+            |> List.fold (fun acc e -> acc |> Result.bind (fun () -> unify env.Subst e elem0)) (Ok ())
+            |> Result.bind (fun () ->
+            // Fold-kernel params and init share the leaves' element type
+            // (same unification the array form performs).
+            (match env.Subst.Resolve(tKernel.Type) with
+             | FuncElem (paramTys, _) ->
+                paramTys |> List.fold (fun acc pTy ->
+                    acc |> Result.bind (fun () -> unify env.Subst pTy elem0)) (Ok ())
+             | _ -> Ok ())
+            |> Result.bind (fun () ->
+            (match tInitOpt with
+             | Some tInit -> unify env.Subst tInit.Type elem0
+             | None -> Ok ())
+            |> Result.bind (fun () ->
+            // Seed: user's init, else the section's identity. A fused nest
+            // cannot seed-with-first (no single first cell across a
+            // multi-dim or multi-leaf nest), so everything else is an error.
+            let seed : Result<TypedExpr, TypeError> =
+                match tInitOpt with
+                | Some tInit -> Ok tInit
+                | None ->
+                    let et = match env.Subst.Resolve elem0 with AnyPrimElem e -> e | _ -> ETFloat64
+                    (match tKernel.Kind with
+                     | TExprSection OpAdd ->
+                        let lit = match et with ETInt32 | ETInt64 -> TExprLit (LitInt 0L) | _ -> TExprLit (LitFloat 0.0)
+                        Ok (mkTyped lit elem0)
+                     | TExprSection OpMul ->
+                        let lit = match et with ETInt32 | ETInt64 -> TExprLit (LitInt 1L) | _ -> TExprLit (LitFloat 1.0)
+                        Ok (mkTyped lit elem0)
+                     | TExprSection _ ->
+                        Error (Other "reduce() over a deferred computation requires an explicit init for this kernel (3-arg form `reduce(c, op, init)`) — only (+) and (*) carry implicit identities")
+                     | _ ->
+                        Error (Other "reduce() over a deferred computation requires an explicit init for a lambda kernel (3-arg form `reduce(c, op, init)`) — a fused fold cannot seed from its first element"))
+            seed |> Result.map (fun tSeed ->
+            let rebuilt =
+                match leaves with
+                | [one] -> one
+                | first :: rest ->
+                    rest |> List.fold (fun acc leaf ->
+                        mkTyped (TExprFusion (acc, leaf)) (IRTTuple [acc.Type; leaf.Type])) first
+                | [] -> tArr
+            let resultType =
+                match leaves with
+                | [_] -> elem0
+                | _ :: rest -> rest |> List.fold (fun acc _ -> IRTTuple [acc; elem0]) elem0
+                | [] -> elem0
+            mkTyped (TExprReduce (rebuilt, tKernel, Some tSeed)) resultType)))))))
+
 and inferReduce (env: TypeEnv) array kernel (init: Expr option) : TypeResult<TypedExpr> =
     inferExpr env array |> Result.bind (fun tArr ->
     inferExpr env kernel |> Result.bind (fun tKernel ->
     (match init with
      | Some e -> inferExpr env e |> Result.map Some
      | None -> Ok None) |> Result.bind (fun tInitOpt ->
+        // ---- Fused reduction terminal -------------------------------------
+        // reduce over a DEFERRED computation (an unforced `L <@> k`, or an
+        // <&!> fusion tree of them, possibly behind one let-hop) folds the
+        // kernel over the computation's cells WITHOUT materializing arrays:
+        // one loop nest, one scalar accumulator per fusion leaf (a tree
+        // yields a tuple of scalars, mirroring `|> compute`'s tuple shape).
+        // Semantically this is the fold stage of the loop-object composition
+        // algebra — a binary-kernel object (object_for((+))) composed after
+        // the map stages — typed here at the forcing site. (+)/(*) sections
+        // seed with their identity; any other kernel REQUIRES the 3-arg
+        // init: a fused nest cannot seed-with-first like the array fold.
+        match tryInferReduceCompute env tArr tKernel tInitOpt with
+        | Some result -> result
+        | None ->
         // Drive type inference for unannotated kernel parameters: when
         // the array argument's resolved type is an unconstrained
         // inference variable (e.g., `lambda(g) -> reduce(g, (+))` with
@@ -2135,6 +2382,91 @@ and inferReduce (env: TypeEnv) array kernel (init: Expr option) : TypeResult<Typ
             Error (Other "reduce() currently supports only rank-1 arrays (multi-rank reduction over the innermost dimension is deferred)")
         | _ ->
             Error (Other "reduce() requires an array as first argument"))))
+
+and inferProdSum (env: TypeEnv) (args: Expr list) : TypeResult<TypedExpr> =
+    args |> List.map (inferExpr env) |> sequenceResults |> Result.bind (fun tArgs ->
+        // Every operand must be a rank-1 array over free (SymNone) storage;
+        // element types unify across operands (the product's type).
+        let rec go (elemTy: IRType option) (staticN: int64 option) (rest: TypedExpr list) : Result<IRType, TypeError> =
+            match rest with
+            | [] ->
+                (match elemTy with
+                 | Some e -> Ok e
+                 | None -> Error (Other "prodsum() requires at least one array argument"))
+            | t :: more ->
+                match env.Subst.Resolve t.Type with
+                | ArrayElem arrTy when arrTy.IndexTypes.Length = 1
+                                       && (match arrTy.IndexTypes.[0].Symmetry with
+                                           | SymSymmetric | SymAntisymmetric | SymHermitian -> true
+                                           | SymNone -> false) ->
+                    // Same ambiguity as reduce over compact storage: canonical
+                    // vs logical cells differ. Mirror its guidance.
+                    Error (Other "prodsum() over compact symmetric/antisymmetric/Hermitian storage is not supported: folding the canonical cells and folding the logical (mirrored) cells differ. decompact(A, d) first for the logical fold.")
+                | ArrayElem arrTy when arrTy.IndexTypes.Length = 1 ->
+                    // Provably mismatched static extents are an error now;
+                    // unknown extents are trusted (codegen loops over the
+                    // first operand's extent).
+                    let thisN = tryEvalIntIR arrTy.IndexTypes.[0].Extent
+                    (match staticN, thisN with
+                     | Some a, Some b when a <> b ->
+                         Error (Other (sprintf "prodsum() operands must share one extent: got %d and %d" a b))
+                     | _ ->
+                        let unifyElem =
+                            match elemTy with
+                            | Some e -> unify env.Subst e arrTy.ElemType
+                            | None -> Ok ()
+                        unifyElem |> Result.bind (fun () ->
+                            go (Some (elemTy |> Option.defaultValue arrTy.ElemType))
+                               (match staticN with Some _ -> staticN | None -> thisN)
+                               more))
+                | ArrayElem _ ->
+                    Error (Other "prodsum() supports only rank-1 arrays (fibers); pass each operand's innermost slice")
+                | _ ->
+                    Error (Other "prodsum() requires array arguments")
+        go None None tArgs |> Result.map (fun elemTy ->
+            mkTyped (TExprProdSum tArgs) elemTy))
+
+/// __dist_pack(κ1, ..., κr): construct a Dist<r, τ like axes> value from
+/// its cumulant component arrays. Compiler-internal — the PPL elaboration
+/// stage emits it after building the fused tower. κ_1 (the mean tensor over
+/// the variable axes as-declared) fixes τ and the axes; the component count
+/// fixes r. The typed node is a plain TExprTuple — the exact representation
+/// the type erases to at zonk — so no new lowering or codegen path exists;
+/// only the TYPE is nominal. Unification stays strict (Unify has no
+/// tuple↔Dist coercion), so this intrinsic and Dist-typed operators are the
+/// only producers of Dist values.
+and inferDistPack (env: TypeEnv) (args: Expr list) : TypeResult<TypedExpr> =
+    args |> List.map (inferExpr env) |> sequenceResults |> Result.bind (fun tArgs ->
+        match env.Subst.Resolve tArgs.Head.Type with
+        | ArrayElem a1 ->
+            let order = tArgs.Length
+            Ok (mkTyped (TExprTuple tArgs) (IRTDist (order, a1.ElemType, a1.IndexTypes)))
+        | t ->
+            Error (Other (sprintf "__dist_pack: components must be arrays (κ_1 lowered to %s) — this intrinsic is emitted by the PPL elaboration stage, not written by hand" (ppIRType t))))
+
+/// cumulant(d, k): the order-k component of a Dist value, as an ordinary
+/// array. THE ORDER GUARD AS A TYPE ERROR: k must be a static int (the
+/// replicate-count contract) in 1..r. Result type comes from
+/// distComponentType, so the projection is fully typed at any expression
+/// position — including on Dist-typed function parameters, where the old
+/// elaboration-level registry could never reach.
+and inferCumulantProj (env: TypeEnv) (dExpr: Expr) (kExpr: Expr) : TypeResult<TypedExpr> =
+    inferExpr env dExpr |> Result.bind (fun tD ->
+        match env.Subst.Resolve tD.Type with
+        | IRTDist (order, elem, axes) ->
+            (match evalStaticIntExpr env kExpr with
+             | None ->
+                 Error (Other "cumulant: the order must be a compile-time integer (a literal, `let static`, or static-function call)")
+             | Some k when k < 1 ->
+                 Error (Other (sprintf "cumulant: order must be >= 1, got %d" k))
+             | Some k when k > order ->
+                 Error (Other (sprintf "cumulant: order %d exceeds the dist's carried order %d — insufficient stochastic order. Construct with a higher order (dist(A, %d)) or project a carried component." k order k))
+             | Some k ->
+                 let compTy = distComponentType k elem axes
+                 let idxLit = mkTyped (TExprLit (LitInt (int64 (k - 1)))) (IRTScalar ETInt64)
+                 Ok (mkTyped (TExprTupleIndex (tD, idxLit)) compTy))
+        | t ->
+            Error (Other (sprintf "cumulant expects cumulant(d, k) where d is a Dist value (a dist(...) binding or Dist-typed parameter); got %s" (ppIRType t))))
 
 // extents(array) — extent(s) along each dimension as Int64.
 // Rank-1 → scalar Int64 (the single dim's extent).
@@ -2564,7 +2896,8 @@ and inferReplicate (env: TypeEnv) count body : TypeResult<TypedExpr> =
                             { StaticEval.Name = fd.Name
                               StaticEval.Params = fd.Params |> List.map (fun p -> p.Name)
                               StaticEval.Body = fd.Body })
-                      CalledFunctions = ref Set.empty }
+                      CalledFunctions = ref Set.empty
+                      ProviderRoots = Map.empty }
                 match StaticEval.evalExpr staticEnv StaticEval.maxSteps count with
                 | Ok (StaticEval.SVInt v) -> Some (int v)
                 | _ -> None
@@ -3049,8 +3382,113 @@ and inferBinOp env mode op left right : TypeResult<TypedExpr> =
         // Arithmetic, comparison, logical
         inferExpr env left |> Result.bind (fun tL ->
         inferExpr env right |> Result.bind (fun tR ->
+            let lRes = env.Subst.Resolve tL.Type
+            let rRes = env.Subst.Resolve tR.Type
+            let isDist t = match t with IRTDist _ -> true | _ -> false
+            if isDist lRes || isDist rRes then
+                // Typed-Dist operator dispatch (checker-level; the surface
+                // operand exprs are re-synthesized into the expansion, so
+                // this works in any expression position — see inferDistBinOp).
+                inferDistBinOp env op left right lRes rRes
+            else
+            // Elementwise op on TWO ARRAYS: re-synthesize as the zip
+            // co-iteration pipeline — method_for(zip(l, r)) <@>
+            // lambda(u, w) -> u op w |> compute — and re-infer
+            // (synthesize-and-infer, the inferDistBinOp pattern). The
+            // direct TExprBinOp lowering hand-rolled a flat rank-1
+            // object_for loop, which mis-iterates symmetry-PACKED storage
+            // (row pointers into a scalar kernel — silent miscompile) and
+            // any rank > 1 operand; the co-iteration builder handles
+            // packed, dense, and multi-rank uniformly. Outer mode ([+])
+            // keeps its cross-iteration path.
+            let bothArrays =
+                (match lRes with ArrayElem _ -> true | _ -> false)
+                && (match rRes with ArrayElem _ -> true | _ -> false)
+            let isZipOp =
+                match op with
+                | OpAdd | OpSub | OpMul | OpDiv | OpMod | OpCaret
+                | OpEq | OpNeq | OpLt | OpLe | OpGt | OpGe
+                | OpAnd | OpOr -> true
+                | _ -> false
+            if mode = Elementwise && bothArrays && isZipOp then
+                // One index record per operand = zip-able: dense rank-1, or
+                // packed symmetry-class storage of any logical rank (the
+                // co-iteration walks its flat canonical cells). Multiple
+                // index records (dense multi-axis) exceed the zip builder —
+                // reject clearly rather than letting codegen emit a
+                // loop-object error.
+                let singleRecord t =
+                    match t with ArrayElem at -> at.IndexTypes.Length = 1 | _ -> false
+                if singleRecord lRes && singleRecord rRes then
+                    let synth =
+                        ExprCompute (ExprBinOp (Elementwise, OpApply,
+                            ExprMethodFor [ExprZip [left; right]],
+                            ExprLambda ([{ Name = "__zl"; Type = None }; { Name = "__zr"; Type = None }], None,
+                                        ExprBinOp (Elementwise, op, ExprVar "__zl", ExprVar "__zr"))))
+                    inferExpr env synth
+                else
+                    Error (Other "elementwise operators on multi-axis arrays are deferred: co-iteration currently spans one index record per operand (dense rank-1 or packed symmetric storage)")
+            else
             inferArithType mode op tL.Type tR.Type |> Result.map (fun resTy ->
                 mkTyped (TExprBinOp (mode, op, tL, tR)) resTy)))
+
+/// Checker-level Dist operator dispatch (typed-Dist arc phase 4).
+/// Scalar * Dist (either side) is κ_k(c·X) = c^k κ_k(X) — pure
+/// multilinearity, exact with NO independence requirement — so it
+/// dispatches in ANY expression position, including on Dist-typed function
+/// parameters: the surface operand exprs are packed into the expansion
+/// DistSynth.scaleExpr builds, and the whole block is re-inferred
+/// (synthesize-and-infer). Dist ± Dist is exact ONLY for independent
+/// operands; until function-boundary independence licenses land
+/// (`where indep(...)`, the next phase), provenance is invisible in
+/// checker positions, so +/− here steers to the module-level elaboration
+/// path (which checks declared independence). dist * dist steers to the
+/// Wick machinery message.
+and inferDistBinOp (env: TypeEnv) (op: BinOp) (left: Expr) (right: Expr) (lTy: IRType) (rTy: IRType) : TypeResult<TypedExpr> =
+    let isScalarish t =
+        match t with
+        | IRTScalar _ | IRTUnitAnnotated (IRTScalar _, _) | IRTInfer _ -> true
+        | _ -> false
+    match op, lTy, rTy with
+    | OpMul, IRTDist _, IRTDist _ ->
+        Error (Other "dist * dist is not defined: cumulants are additive under independent sums and multilinear under scalar scaling; products of random variables need the moment (Wick/Faà di Bruno) machinery")
+    | OpMul, IRTDist (order, _, _), c when isScalarish c ->
+        inferExpr env (Blade.Ppl.Elaborate.DistSynth.scaleExpr (env.Builder.FreshId()) right left order)
+    | OpMul, c, IRTDist (order, _, _) when isScalarish c ->
+        inferExpr env (Blade.Ppl.Elaborate.DistSynth.scaleExpr (env.Builder.FreshId()) left right order)
+    | (OpAdd | OpSub), IRTDist (lo, _, _), IRTDist (ro, _, _) ->
+        // Exact ONLY for independent operands: every cross pair of the two
+        // provenance sets must be related under the declared relation ∪ the
+        // active `where indep` licenses (PPL-owned state). Empty provenance
+        // is un-provable, not vacuously independent.
+        if lo <> ro then
+            Error (Other (sprintf "dist %s: orders disagree (%d vs %d) — carry the same stochastic order on both sides" (if op = OpAdd then "+" else "-") lo ro))
+        else
+        let provL = provenanceOfSurface env left
+        let provR = provenanceOfSurface env right
+        if Set.isEmpty provL || Set.isEmpty provR then
+            Error (Other "dist + / -: cannot establish the operands' provenance — combine dist bindings (or expressions built from them) so independence of their sources can be verified")
+        else
+            let missing =
+                [ for s1 in provL do
+                    for s2 in provR do
+                      if not (Blade.Ppl.Elaborate.Independence.isRelated s1 s2) then yield (s1, s2) ]
+            match missing with
+            | (s1, s2) :: _ ->
+                // Token-shaped sources ("func.param") mean unlicensed
+                // parameters — steer to the signature license, not to a
+                // module-level declaration over internal token names.
+                let steering =
+                    if s1.Contains "." || s2.Contains "." then
+                        "add a `where indep(...)` license naming the two parameters to the enclosing function's signature"
+                    else
+                        sprintf "declare `let _ = independent(%s, %s)` (module level) or a struct `where indep(...)`" s1 s2
+                Error (Other (sprintf "dist %s: cumulants combine only for independent distributions — sources '%s' and '%s' are not declared independent; %s" (if op = OpAdd then "+" else "-") s1 s2 steering))
+            | [] ->
+                let weight = if op = OpAdd then (fun _ -> 1.0) else (fun k -> if k % 2 = 0 then 1.0 else -1.0)
+                inferExpr env (Blade.Ppl.Elaborate.DistSynth.combineExpr (env.Builder.FreshId()) weight left right lo)
+    | _ ->
+        Error (Other (sprintf "this operator is not defined on Dist values (left: %s, right: %s): dists support scalar * (multilinearity), + and - of independent dists, and component projection via cumulant(d, k)" (ppIRType lTy) (ppIRType rTy)))
 
 and inferArithType mode op leftTy rightTy : TypeResult<IRType> =
     // Elementwise boolean/comparison over two ARRAYS lifts to a Bool-element
@@ -3122,6 +3560,22 @@ and inferArithType mode op leftTy rightTy : TypeResult<IRType> =
         match indexArithErr with
         | Some err -> Error err
         | None ->
+        // Dist operands: checker-level operator dispatch (per-order cumulant
+        // combination — + adds, − flips odd orders, scalar * is c^k
+        // multilinearity, all independence-gated) is the typed-Dist arc's
+        // phase 4. Until it lands, module-level dist operators still go
+        // through the elaboration rewrites (which never reach here); any
+        // OTHER position — notably operators on Dist-typed function
+        // parameters — must error with steering rather than fall through
+        // to scalar promotion and silently type nonsense.
+        match lBare, rBare with
+        | IRTDist _, _ | _, IRTDist _ ->
+            Error (Other "operators on Dist values are not yet typed in this position (checker-level dist operator dispatch is in progress): combine dists where they are constructed (module-level d1 + d2, d1 - d2, c * d), or project a component with cumulant(d, k)")
+        | _ ->
+        // (Both-array Elementwise ops never reach here anymore: inferBinOp
+        // re-synthesizes them as the zip co-iteration pipeline, which
+        // handles packed and multi-rank storage the plain lowering could
+        // not.)
         let bareResult =
             match mode with
             | Outer ->
@@ -3526,6 +3980,7 @@ and buildApplyInfo (env: TypeEnv)
                 | TExprIndex (arr, _, _) when isParamVar arr -> true
                 | TExprApp (f, _) when isParamVar f -> true            // g(0) as application
                 | TExprReduce (arr, _, _) when isParamVar arr -> true
+                | TExprProdSum args when List.exists isParamVar args -> true
                 | TExprExtents arr when isParamVar arr -> true
                 | TExprRank arr when isParamVar arr -> true
                 | TExprArity n when n = pname -> true
@@ -3539,6 +3994,7 @@ and buildApplyInfo (env: TypeEnv)
             | TExprIndex (a, idxs, _) -> walk a || List.exists walk idxs
             | TExprReduce (a, k, i) ->
                 walk a || walk k || (match i with Some e -> walk e | None -> false)
+            | TExprProdSum args -> List.exists walk args
             | TExprExtents a | TExprRank a | TExprArrayNegate a
             | TExprArrayConjugate a | TExprUnique a -> walk a
             | TExprMask (a, p) -> walk a || walk p
@@ -4011,6 +4467,18 @@ and irTypeHasRaggedNoPrior (t: IRType) : bool =
     | FuncElem (ps, r) -> (ps |> List.exists irTypeHasRaggedNoPrior) || irTypeHasRaggedNoPrior r
     | _ -> false
 
+/// Detect the Dist order sentinel (lowerTypeExpr's TyDist arm lowers a
+/// non-static or < 1 order to IRTDist(-1, ...) because it has no error
+/// channel). Same consumption-site pattern as irTypeHasRaggedNoPrior:
+/// let bindings and function signatures call this and surface the rejection.
+and irTypeHasBadDistOrder (t: IRType) : bool =
+    match t with
+    | IRTDist (n, elem, _) -> n < 1 || irTypeHasBadDistOrder elem
+    | ArrayElem at -> irTypeHasBadDistOrder at.ElemType
+    | IRTTuple ts -> ts |> List.exists irTypeHasBadDistOrder
+    | FuncElem (ps, r) -> (ps |> List.exists irTypeHasBadDistOrder) || irTypeHasBadDistOrder r
+    | _ -> false
+
 // inferLetBinding (let-as-expression in function bodies and blocks) and
 // checkDecl/DeclLet (top-level let declarations) share their annotation handling
 // and PatVar binding logic. Extracting them here keeps the two paths in sync;
@@ -4040,6 +4508,8 @@ and inferLetBindingValue (env: TypeEnv) (binding: Binding) : TypeResult<TypedExp
         let annotTy = lowerTypeExpr env annot
         if irTypeHasRaggedNoPrior annotTy then
             Error (Other "RaggedIdx requires at least one prior index in the array's index list: the ragged extent is a per-row function of the OUTER iteration position (formalism 4.4), so there is nothing for a leading RaggedIdx to vary over. Add an outer index, e.g. Array<T like Idx<n>, RaggedIdx<lens>>.")
+        elif irTypeHasBadDistOrder annotTy then
+            Error (Other "Dist order must be a compile-time integer >= 1 (a literal, `let static`, or static-function call): Dist<order, Elem like I1, ..., Ik>")
         else
         checkExpr env annotTy binding.Value |> Result.bind (fun tv ->
             // Prefer the annotation as the canonical type — it can be more
@@ -4175,20 +4645,53 @@ and inferBlock env stmts finalExpr : TypeResult<TypedExpr> =
                     let identity = match binding.Pattern with PatVar n -> Some (AIDVariable n) | _ -> None
                     let assign = assignOfBindingMut binding.Mutability
                     curEnv <- bindVarFull name varId tValue.Type identity assign (Some tValue) curEnv
-                    // Also bind tuple/cons destructured names
-                    match binding.Pattern with
-                    | PatTuple pats ->
+                    // Dist provenance: in-block dist lets (e.g. `let h =
+                    // 2.0 * d` on a licensed parameter) derive from the RHS.
+                    (match curEnv.Subst.Resolve tValue.Type with
+                     | IRTDist _ ->
+                         let prov = provenanceOfSurface curEnv binding.Value
+                         if not (Set.isEmpty prov) then curEnv.Provenance.[varId] <- prov
+                     | _ -> ())
+                    // Tuple destructuring in a block: bind the leaves AND
+                    // record them as SubBindings so Lowering emits their
+                    // projection lets (mirrors checkDecl's PatTuple path).
+                    // Previously SubBindings was left empty here, so the
+                    // leaf VarIds referenced by the rest of the block were
+                    // never introduced in the IR — dangling VarId at
+                    // validation for any in-body `let (x, y) = p`.
+                    let mutable subBindings : (string * IRId * IRType) list = []
+                    (match binding.Pattern with
+                     | PatTuple pats ->
+                        let resolvedTy = curEnv.Subst.Resolve(tValue.Type)
+                        let typeList =
+                            match resolvedTy with
+                            | IRTTuple ts ->
+                                if pats.Length = ts.Length then ts
+                                else
+                                    // Flat match: (x, y, z) against ((α,β), γ)
+                                    let flat = IR.flattenTupleLeaves resolvedTy
+                                    if pats.Length = flat.Length then flat else ts
+                            | _ -> []
                         pats |> List.iteri (fun i p ->
-                            for n in patternNames p do
-                                let eTy = match tValue.Type with
-                                          | IRTTuple ts when i < ts.Length -> ts.[i]
-                                          | _ -> env.Subst.Fresh()
-                                curEnv <- bindVarSimple n (curEnv.Builder.FreshId()) eTy curEnv)
-                    | _ -> ()
+                            match p with
+                            | PatVar n ->
+                                let eTy =
+                                    if i < typeList.Length then curEnv.Subst.Resolve(typeList.[i])
+                                    else curEnv.Subst.Fresh()
+                                let subId = curEnv.Builder.FreshId()
+                                subBindings <- subBindings @ [(n, subId, eTy)]
+                                curEnv <- bindVarSimple n subId eTy curEnv
+                            | _ ->
+                                for n in patternNames p do
+                                    let subId = curEnv.Builder.FreshId()
+                                    let eTy = curEnv.Subst.Fresh()
+                                    subBindings <- subBindings @ [(n, subId, eTy)]
+                                    curEnv <- bindVarSimple n subId eTy curEnv)
+                     | _ -> ())
                     let tb : TypedBinding = {
                         Name = name; VarId = varId; Type = tValue.Type
                         Identity = identity; IsMutable = (assign <> ReadOnly); Value = tValue
-                        SubBindings = []
+                        SubBindings = subBindings |> List.map (fun (n, id, ty) -> (n, id, curEnv.Subst.Resolve ty))
                     }
                     typedStmts <- typedStmts @ [TStmtLet tb]
                 | Error e -> err <- Some e
@@ -4553,6 +5056,20 @@ and checkDecl (env: TypeEnv) (decl: Decl) : TypeResult<TypedDecl * TypeEnv> =
             let identity = match binding.Pattern with PatVar n -> Some (AIDVariable n) | _ -> None
             let assign = assignOfBindingMut binding.Mutability
             let (varId, env') = bindLetPatVar env name identity assign tValue
+
+            // Dist provenance seeding: a module-level dist binding gets its
+            // source-array set from the PPL elaboration state (by name —
+            // covers `let d = dist(A, r)` and the call-form combinators);
+            // any other Dist-typed value derives conservatively from its
+            // RHS (covers operator results: `let s = combine(dx, dy)` etc.).
+            (match env.Subst.Resolve tValue.Type with
+             | IRTDist _ ->
+                 let prov =
+                     match Blade.Ppl.Elaborate.Independence.distSources name with
+                     | Some s -> s
+                     | None -> provenanceOfSurface env binding.Value
+                 if not (Set.isEmpty prov) then env.Provenance.[varId] <- prov
+             | _ -> ())
 
             // Handle destructuring at top level — collect sub-bindings for Lowering
             let mutable subBindings : (string * IRId * IRType) list = []
@@ -4928,6 +5445,8 @@ and checkFunctionDecl (env: TypeEnv) (funcDecl: FunctionDecl) : TypeResult<Typed
                   | None -> env.Subst.Fresh()
     if (paramTypes |> List.exists irTypeHasRaggedNoPrior) || irTypeHasRaggedNoPrior retType then
         Error (Other (sprintf "function '%s': RaggedIdx requires at least one prior index in the array's index list -- the ragged extent is a per-row function of the OUTER iteration position (formalism 4.4). Add an outer index, e.g. Array<T like Idx<n>, RaggedIdx<lens>>." funcDecl.Name))
+    elif (paramTypes |> List.exists irTypeHasBadDistOrder) || irTypeHasBadDistOrder retType then
+        Error (Other (sprintf "function '%s': Dist order must be a compile-time integer >= 1 (a literal, `let static`, or static-function call): Dist<order, Elem like I1, ..., Ik>" funcDecl.Name))
     else
     let funcType = mkFuncArrow paramTypes retType
     // Reuse pre-pass varId if this function was already pre-registered (static functions)
@@ -4960,6 +5479,33 @@ and checkFunctionDecl (env: TypeEnv) (funcDecl: FunctionDecl) : TypeResult<Typed
         Error e
     | None ->
 
+    // Custom where-clause conjuncts (`where <name>(<args>)` for names the
+    // grammar doesn't own): dispatch each through the Blade.Constraints
+    // registry. Validate at the signature; record the function for
+    // call-site discharge; the license scope opens around body checking
+    // below. An unregistered name errors with the registered vocabulary.
+    let paramNames = funcDecl.Params |> List.map (fun p -> p.Name)
+    let customConjuncts =
+        funcDecl.WhereClause |> Option.map (fun w -> w.Custom) |> Option.defaultValue []
+    let conjunctErr =
+        customConjuncts |> List.tryPick (fun (cname, cargs) ->
+            match Blade.Constraints.lookupConstraint cname with
+            | None ->
+                let known = Blade.Constraints.registeredConstraintNames ()
+                let vocab = if known.IsEmpty then "none registered" else String.concat ", " known
+                Some (Other (sprintf "function '%s': unknown where-clause constraint '%s' (registered constraints: %s)" funcDecl.Name cname vocab))
+            | Some h ->
+                match h.Validate funcDecl.Name paramNames cargs with
+                | Ok () -> None
+                | Error msg -> Some (Other msg))
+    match conjunctErr with
+    | Some e ->
+        env.Subst.PopTypeVarScope(savedScope)
+        Error e
+    | None ->
+    if not customConjuncts.IsEmpty then
+        env.FuncConstraints.[funcDecl.Name] <- (paramNames, customConjuncts)
+
     let mutable bodyEnv = enterScope envWithFunc
     let typedParams = funcDecl.Params |> List.mapi (fun i p ->
         let varId = env.Builder.FreshId()
@@ -4967,7 +5513,19 @@ and checkFunctionDecl (env: TypeEnv) (funcDecl: FunctionDecl) : TypeResult<Typed
                      | Mutable -> MutPassable
                      | _ -> ReadOnly
         bodyEnv <- bindVarFull p.Name varId paramTypes.[i] None assign None bodyEnv
+        // Dist-typed parameters carry their license token as provenance —
+        // the `where indep` handler licenses exactly these tokens for the
+        // body, and call-site discharge maps them back to actuals.
+        (match env.Subst.Resolve paramTypes.[i] with
+         | IRTDist _ ->
+             env.Provenance.[varId] <- Set.singleton (Blade.Constraints.paramProvenanceToken funcDecl.Name p.Name)
+         | _ -> ())
         { Name = p.Name; Type = paramTypes.[i]; Index = i; VarId = varId } : TypedParam)
+
+    // Open the license scope for the body; closed after `result` is
+    // computed (both success and error paths flow past the exit below).
+    for (cname, cargs) in customConjuncts do
+        Blade.Constraints.lookupConstraint cname |> Option.iter (fun h -> h.EnterBody funcDecl.Name cargs)
 
     let result =
         // When a return type is annotated, drive the body bidirectionally
@@ -5016,6 +5574,11 @@ and checkFunctionDecl (env: TypeEnv) (funcDecl: FunctionDecl) : TypeResult<Typed
                 CommGroups = commGroups; IsStatic = funcDecl.IsStatic
             }
             Ok (TDeclFunction tf, envWithFunc)))
+
+    // Close the license scope (error paths included — `result` has
+    // materialized either way by this point).
+    for (cname, cargs) in customConjuncts do
+        Blade.Constraints.lookupConstraint cname |> Option.iter (fun h -> h.ExitBody funcDecl.Name cargs)
 
     env.Subst.PopTypeVarScope(savedScope)
     result
@@ -5179,6 +5742,154 @@ let collectMixedEnumIdxInDecl (decl: Decl) : Expr list =
             @ walkOpt m.ReturnType)
     | DeclInterface _ | DeclImport _ | DeclUnit _ -> []
 
+// ============================================================================
+// Cross-module static value visibility (checkModule's import-seeding pre-pass)
+// ============================================================================
+//
+// KNOWN GAP being closed here: `let static k = 5` in module M wasn't visible
+// to module Main's OWN static resolution -- `let static x = M.k + 1` failed
+// the `let static` fold assertion with "does not evaluate at compile time",
+// even though M.k is perfectly compile-time-known. Root cause: StaticEval.
+// resolveStatics (StaticEval.fs) is a pure function of a module's OWN decls
+// with no seed/environment parameter, so it can't learn what a DIFFERENT
+// module folded its statics to. Extending its signature (a
+// `resolveStaticsWith seedValues` variant) would be the clean fix, but
+// StaticEval.fs is owned by concurrent work and off-limits here. Also ruled
+// out: seeding alone (TypeEnv.StaticValues) does NOT fix the fold assertion,
+// because resolveStatics never reads env.StaticValues -- it's called as
+// `StaticEval.resolveStatics modul.Decls`, decls only. And even if it did,
+// `M.k` parses as ExprField(ExprVar "M", "k") (Parser.fs's parsePostfix), and
+// StaticEval.evalExpr's ExprField arm unconditionally errors ("field access
+// not supported on static values") -- so seeding wouldn't help a qualified
+// reference resolve even if resolveStatics *did* consult a seed.
+//
+// The fix that stays inside TypeCheck.fs: literally substitute resolved
+// cross-module static references with their literal values in a COPY of the
+// decls handed to resolveStatics, before it ever runs. `M.k` (qualified
+// import) and a bare `k` (selective import) both become e.g. `ExprLit
+// (LitInt 3L)`. Only the copy fed to resolveStatics is rewritten; the
+// decls used for ordinary type-checking (checkModule's main loop below) are
+// untouched, so `let v = M.k` keeps going through the existing ExprField
+// (ExprVar n, field) qualified-value-access special case (inferExpr, binds
+// to the real imported variable) rather than being replaced by a baked-in
+// literal.
+
+/// Render a folded StaticValue back into surface `Expr` literal form, for
+/// splicing into another module's decls ahead of static resolution. The
+/// TypedExpr analog of this conversion (checkDecl's DeclStatic
+/// "RESOLVED-VALUE SHORTCUT") runs one stage later, on already-typed trees;
+/// this one runs pre-typing, directly on the surface AST.
+let rec private staticValueToImportExpr (v: StaticEval.StaticValue) : Expr =
+    match v with
+    | StaticEval.SVInt i -> ExprLit (LitInt i)
+    | StaticEval.SVFloat f -> ExprLit (LitFloat f)
+    | StaticEval.SVBool b -> ExprLit (LitBool b)
+    | StaticEval.SVString s -> ExprLit (LitString s)
+    | StaticEval.SVUnit -> ExprLit LitUnit
+    | StaticEval.SVTuple vs -> ExprTuple (vs |> List.map staticValueToImportExpr)
+
+/// Substitute references to cross-module static values (keyed in `seed` as
+/// "alias.name" for a qualified import, "name" for a selective one) with
+/// their literal form. Shadow-aware for local binding forms (let/match/
+/// lambda) that could plausibly appear inside a `let static` RHS or a
+/// static function body, so a same-named local doesn't get clobbered.
+/// Structured after StaticEval.collectFreeNames's case coverage (the set of
+/// expression forms StaticEval.evalExpr actually supports; substitution
+/// beyond that set is moot since resolveStatics would reject the form
+/// regardless).
+let rec private rewriteImportedStaticRefs (seed: Map<string, StaticEval.StaticValue>) (expr: Expr) : Expr =
+    if Map.isEmpty seed then expr else
+    let go = rewriteImportedStaticRefs seed
+    let goWithout (boundNames: string list) (e: Expr) =
+        let seed' = boundNames |> List.fold (fun (s: Map<string, StaticEval.StaticValue>) n -> Map.remove n s) seed
+        rewriteImportedStaticRefs seed' e
+    match expr with
+    | ExprVar name ->
+        match Map.tryFind name seed with
+        | Some sv -> staticValueToImportExpr sv
+        | None -> expr
+    | ExprField (ExprVar alias, field) ->
+        match Map.tryFind (sprintf "%s.%s" alias field) seed with
+        | Some sv -> staticValueToImportExpr sv
+        | None -> expr
+    | ExprField (obj, field) -> ExprField (go obj, field)
+    | ExprBinOp (mode, op, l, r) -> ExprBinOp (mode, op, go l, go r)
+    | ExprUnaryOp (op, e) -> ExprUnaryOp (op, go e)
+    | ExprApp (f, args) -> ExprApp (go f, args |> List.map go)
+    | ExprIf (c, t, e) -> ExprIf (go c, go t, go e)
+    | ExprTuple es -> ExprTuple (es |> List.map go)
+    | ExprArrayLit es -> ExprArrayLit (es |> List.map go)
+    | ExprLet (binding, body) ->
+        let bound = StaticEval.collectPatternBindings binding.Pattern |> Set.toList
+        ExprLet ({ binding with Value = go binding.Value }, goWithout bound body)
+    | ExprMatch (scrut, cases) ->
+        ExprMatch (go scrut, cases |> List.map (fun c ->
+            let bound = StaticEval.collectPatternBindings c.Pattern |> Set.toList
+            { c with Guard = c.Guard |> Option.map (goWithout bound); Body = goWithout bound c.Body }))
+    | ExprBlock (stmts, finalExpr) ->
+        ExprBlock (stmts |> List.map (rewriteImportedStaticRefsStmt seed), finalExpr |> Option.map go)
+    | ExprStruct (name, fields) -> ExprStruct (name, fields |> List.map (fun (n, e) -> (n, go e)))
+    | ExprTyped (e, t) -> ExprTyped (go e, t)
+    | ExprLambda (parms, whereClause, body) ->
+        let bound = parms |> List.map (fun p -> p.Name)
+        ExprLambda (parms, whereClause, goWithout bound body)
+    | _ -> expr
+and private rewriteImportedStaticRefsStmt (seed: Map<string, StaticEval.StaticValue>) (stmt: Stmt) : Stmt =
+    match stmt with
+    | StmtSpanned (inner, span) -> StmtSpanned (rewriteImportedStaticRefsStmt seed inner, span)
+    | StmtLet binding -> StmtLet { binding with Value = rewriteImportedStaticRefs seed binding.Value }
+    | StmtAssign (lhs, op, rhs) -> StmtAssign (rewriteImportedStaticRefs seed lhs, op, rewriteImportedStaticRefs seed rhs)
+    | StmtExpr e -> StmtExpr (rewriteImportedStaticRefs seed e)
+    | StmtForIn (n, range, body) ->
+        StmtForIn (n, rewriteImportedStaticRefs seed range, body |> List.map (rewriteImportedStaticRefsStmt seed))
+
+/// Rewrite only the two decl shapes StaticEval.resolveStatics actually
+/// consults (its Phase 1: `DeclStatic` and `DeclFunction ... IsStatic`) --
+/// everything else (including plain `let`s and the DeclImport decls
+/// themselves) passes through unchanged. A static function's own parameters
+/// are excluded from the substitution seed (they're local, not the
+/// cross-module reference).
+let private seedImportedStaticsIntoDecls (seed: Map<string, StaticEval.StaticValue>) (decls: Located<Decl> list) : Located<Decl> list =
+    if Map.isEmpty seed then decls else
+    decls |> List.map (fun locDecl ->
+        match locDecl.Value with
+        | DeclStatic binding ->
+            { locDecl with Value = DeclStatic { binding with Value = rewriteImportedStaticRefs seed binding.Value } }
+        | DeclFunction fd when fd.IsStatic ->
+            let paramNames = fd.Params |> List.map (fun p -> p.Name)
+            let seed' = paramNames |> List.fold (fun (s: Map<string, StaticEval.StaticValue>) n -> Map.remove n s) seed
+            { locDecl with Value = DeclFunction { fd with Body = rewriteImportedStaticRefs seed' fd.Body } }
+        | _ -> locDecl)
+
+/// Collect the StaticValues exported by this module's imports, keyed the
+/// same way references to them actually parse: "alias.name" for a
+/// qualified/aliased import (`M.k` parses as ExprField(ExprVar "M", "k")),
+/// "name" for a selective import (`from M import k` brings in a bare
+/// ExprVar "k"). Only modules already present in env.ModuleExports
+/// (checked earlier in program order) contribute -- providers and
+/// not-yet-checked modules are silently skipped, same as the existing
+/// DeclImport handling in checkDecl.
+let private importedStaticSeed (env: TypeEnv) (decls: Located<Decl> list) : Map<string, StaticEval.StaticValue> =
+    decls
+    |> List.fold (fun acc locDecl ->
+        match locDecl.Value with
+        | DeclImport (qname, style) ->
+            let fullName = String.concat "." qname
+            match Map.tryFind fullName env.ModuleExports with
+            | Some exports ->
+                match style with
+                | ImportQualified aliasOpt ->
+                    let alias = aliasOpt |> Option.defaultValue (List.last qname)
+                    exports.StaticValues
+                    |> Map.fold (fun acc2 k v -> Map.add (sprintf "%s.%s" alias k) v acc2) acc
+                | ImportSelective names ->
+                    names |> List.fold (fun acc2 n ->
+                        match Map.tryFind n exports.StaticValues with
+                        | Some v -> Map.add n v acc2
+                        | None -> acc2) acc
+            | None -> acc
+        | _ -> acc) Map.empty
+
 let checkModule (env: TypeEnv) (modul: ModuleDecl) : TypedModule * TypeEnv * CompileError list =
     // Resolve compile-time-known static VALUES up front (the same
     // StaticEval.resolveStatics the lowering phase runs as its Phase 0), so
@@ -5189,8 +5900,21 @@ let checkModule (env: TypeEnv) (modul: ModuleDecl) : TypedModule * TypeEnv * Com
     // demotion to a runtime binding (lambda statics excepted: they declare
     // functions). A circular dependency, previously swallowed, also lands
     // as an error on the first static decl.
+    // Cross-module static import seeding (see the comment block above this
+    // function for why this can't live in StaticEval.resolveStatics
+    // itself). Seed env.StaticValues directly with the imported entries
+    // (dotted "alias.name" / plain "name" keys) so other StaticValues
+    // consumers (evalStaticIntExpr, inferReplicate, the DeclStatic
+    // resolved-value shortcut below) see them, AND splice literal
+    // substitutions into a copy of this module's OWN static decls so
+    // resolveStatics's fold assertion can see through a `let static x =
+    // M.k + 1`-shaped reference despite resolveStatics taking no seed
+    // parameter.
+    let crossModuleStaticSeed = importedStaticSeed env modul.Decls
+    let env = { env with StaticValues = Map.fold (fun acc k v -> Map.add k v acc) env.StaticValues crossModuleStaticSeed }
+    let declsForStaticResolution = seedImportedStaticsIntoDecls crossModuleStaticSeed modul.Decls
     let env, staticAssertErrors =
-        match StaticEval.resolveStatics modul.Decls with
+        match StaticEval.resolveStatics declsForStaticResolution with
         | Ok (se, failures) ->
             let env' = { env with StaticValues = Map.fold (fun acc k v -> Map.add k v acc) env.StaticValues se.Values }
             let errs =
@@ -5291,6 +6015,7 @@ let checkProgram (program: Program) : TypedProgram * IRBuilder * CompileError li
             VariantTags = finalEnv.VariantTags
             Units = finalEnv.Units
             StaticFunctions = finalEnv.StaticFunctions |> Map.filter (fun k _ -> not (k.Contains(".")))
+            StaticValues = finalEnv.StaticValues |> Map.filter (fun k _ -> not (k.Contains(".")))
         }
         moduleExports <- Map.add moduleName export moduleExports
     // env.Warnings is shared by reference across all envWithExports updates
@@ -5318,11 +6043,21 @@ let typeCheck (program: Program) : Result<TypedProgram * IRBuilder * string list
     // them), then grad() expansion. Both synthesize ordinary declarations
     // that flow through validation, checking, lowering and codegen exactly
     // like user code.
+    // Provider-backed statics: install the compile-time data reader before
+    // ANY resolveStatics pass runs (the ML and PPL elaborations each run
+    // their own; all inherit the fold through StaticEval's hook).
+    Blade.ProviderStatics.install ()
     match Blade.ML.Elaborate.expand program with
     | Error msg ->
         Error [ { Error = Other msg
                   Span = { StartLine = 0; StartCol = 0; EndLine = 0; EndCol = 0; File = None }
                   Context = ["ML elaboration"] } ]
+    | Ok program ->
+    match Blade.Ppl.Elaborate.expand program with
+    | Error msg ->
+        Error [ { Error = Other msg
+                  Span = { StartLine = 0; StartCol = 0; EndLine = 0; EndCol = 0; File = None }
+                  Context = ["PPL elaboration"] } ]
     | Ok program ->
     match Blade.Grad.expand program with
     | Error msg ->

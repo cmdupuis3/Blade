@@ -1,0 +1,8 @@
+// TEST: Reduce Deferred Packed Output (rejects)
+// reduce() over a deferred computation whose output is compact symmetric
+// storage is rejected with the same canonical-vs-logical guidance as the
+// array form: folding canonical cells and folding logical (mirrored)
+// cells differ.
+let A = [1.0, 2.0, 3.0]
+let k = lambda(x, y) where comm(x, y) -> x * y
+let s = reduce(method_for(A, A) <@> k, (+))

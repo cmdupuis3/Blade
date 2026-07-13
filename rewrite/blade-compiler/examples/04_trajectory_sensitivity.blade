@@ -1,0 +1,133 @@
+// TEST: Example Trajectory Units And Sensitivity
+// ============================================================================
+// A projectile study in three parts, each using the language feature that
+// actually fits:
+//
+//   A. Vacuum kinematics with UNIT-CHECKED scalars -- base units declared,
+//      derived units (velocity, acceleration) flowing through * and / so a
+//      dimensionally wrong formula cannot typecheck.
+//   B. A DIFFERENTIABLE drag-loss estimate: energy lost to quadratic drag,
+//      integrated by midpoint quadrature over the closed-form vacuum
+//      velocity profile. grad() generates the reverse pass; the example
+//      prints the AD sensitivities next to finite-difference quotients
+//      computed in-file, and they must agree.
+//      (AD discipline: the accumulator update reads only the loop index,
+//      the parameters, and fresh per-step lets -- grad() rejects loops
+//      whose update reads mut state mutated in the same loop, so the
+//      integrand is derived from the closed form, not a recurrence.)
+//   C. The TRUE dynamics with drag, integrated imperatively -- a for-in
+//      Euler recurrence over mutable state is exactly what the imperative
+//      subset is for at runtime. Landing is handled by gating each update
+//      with an airborne indicator (no break statement needed).
+//
+// EXPECT values verified against an independent PowerShell implementation
+// of the same quadrature and simulation, plus the in-file FD self-checks.
+// ============================================================================
+
+// ============================================================================
+// Part A -- unit-checked vacuum kinematics.
+// ============================================================================
+Unit meters
+Unit seconds
+Unit velocity = meters / seconds
+Unit acceleration = meters / seconds^2
+
+let vx0: Float<velocity> = 15.0
+let vy0: Float<velocity> = 19.62
+let grav: Float<acceleration> = 9.81
+
+// velocity / acceleration = seconds; velocity * seconds = meters -- the
+// checker tracks the dimensions through every step.
+let t_apex = vy0 / grav
+let t_flight = 2.0 * t_apex
+let apex = 0.5 * vy0 * t_apex
+let range_vac = vx0 * t_flight
+// EXPECT: t_apex = 2.0
+// EXPECT: t_flight = 4.0
+// EXPECT: apex = 19.62
+// EXPECT: range_vac = 60.0
+
+// ============================================================================
+// Part B -- differentiable drag-loss estimate.
+// Power dissipated by quadratic drag is c_d |v|^3; integrating over the
+// vacuum profile v(t) = (vx0, vy0 - g t) with N = 40 midpoint steps gives a
+// first-order estimate of the energy lost per unit mass. The whole function
+// is closed-form per step (fresh lets from the loop index and parameters
+// feeding one additive accumulator), which is precisely the loop shape
+// grad() differentiates.
+// ============================================================================
+function drag_loss(ux: Float, uy: Float) -> Float = {
+    let mut s = 0.0
+    for t in 0..40 {
+        let dt = 2.0 * uy / (9.81 * 40.0)
+        let tm = (1.0 * t + 0.5) * dt
+        let vy = uy - 9.81 * tm
+        let sp2 = ux * ux + vy * vy
+        s += sqrt(sp2) * sp2 * dt
+    }
+    0.02 * s
+}
+
+let (E_drag, dE_dvx0, dE_dvy0) = grad(drag_loss)(15.0, 19.62)
+// EXPECT: E_drag = 551.601893248218
+
+// Finite-difference cross-checks, computed in this same file: the AD
+// sensitivities and the central quotients must agree to ~1e-8.
+let fd_vx = (drag_loss(15.00001, 19.62) - drag_loss(14.99999, 19.62)) / 0.00002
+let fd_vy = (drag_loss(15.0, 19.62001) - drag_loss(15.0, 19.61999)) / 0.00002
+// (the ~1e-8 daylight between the AD and FD numbers is the finite
+// difference's own cancellation noise at h = 1e-5, not AD error)
+// EXPECT: dE_dvx0 = 66.8109454543554
+// EXPECT: fd_vx = 66.8109454636578
+// EXPECT: dE_dvy0 = 61.3783583678664
+// EXPECT: fd_vy = 61.3783583617078
+
+// ============================================================================
+// Part C -- the true dynamics, imperatively. Euler integration of the
+// drag-coupled equations is a genuine recurrence (each velocity update
+// reads the current velocity), so a for-in loop over mutable state is the
+// right tool -- this is the imperative subset earning its keep at runtime.
+// The airborne indicator gates every update, freezing the state at
+// touchdown without control flow.
+// ============================================================================
+let sim = {
+    let mut x = 0.0
+    let mut y = 0.0
+    let mut vx = 15.0
+    let mut vy = 19.62
+    let mut ft = 0.0
+    for i in 0..450 {
+        let airborne = if vy > 0.0 || y > 0.0 then 1.0 else 0.0
+        let speed = sqrt(vx * vx + vy * vy)
+        let ax = 0.0 - 0.002 * vx * speed
+        let ay = 0.0 - 9.81 - 0.002 * vy * speed
+        x += airborne * vx * 0.01
+        y += airborne * vy * 0.01
+        vx += airborne * ax * 0.01
+        vy += airborne * ay * 0.01
+        ft += airborne * 0.01
+    }
+    x
+}
+// Drag shortens the vacuum range (60 m) by about nine percent.
+// EXPECT: sim = 54.7425173674639
+
+let sim_time = {
+    let mut y = 0.0
+    let mut vx = 15.0
+    let mut vy = 19.62
+    let mut ft = 0.0
+    for i in 0..450 {
+        let airborne = if vy > 0.0 || y > 0.0 then 1.0 else 0.0
+        let speed = sqrt(vx * vx + vy * vy)
+        let ax = 0.0 - 0.002 * vx * speed
+        let ay = 0.0 - 9.81 - 0.002 * vy * speed
+        y += airborne * vy * 0.01
+        vx += airborne * ax * 0.01
+        vy += airborne * ay * 0.01
+        ft += airborne * 0.01
+    }
+    ft
+}
+// ...and the flight time (4.0 s in vacuum) accordingly.
+// EXPECT: sim_time = 3.90999999999996

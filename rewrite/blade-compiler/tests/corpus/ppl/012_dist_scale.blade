@@ -1,0 +1,11 @@
+// TEST: Dist Scale
+// Multilinearity: κ_k(c·X) = c^k κ_k(X). dist_scale(2.0, d) doubles the
+// mean and quadruples the covariance.
+type TimeIdx = Idx<2>
+let X: Array<Float64 like Idx<2>, TimeIdx> = [[1.0, 2.0], [3.0, 4.0]]
+let dx = dist(X, 2)
+let h = dist_scale(2.0, dx)
+let h1 = cumulant(h, 1)
+let h2 = cumulant(h, 2)
+// EXPECT: h1 = [3.0, 7.0]
+// EXPECT: h2 = [1.0, 1.0, 1.0]

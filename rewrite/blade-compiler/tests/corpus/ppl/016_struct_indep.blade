@@ -1,0 +1,14 @@
+// TEST: Struct Indep
+// Constrained record carrying its independence structure (formalism
+// §17.13.2): `where indep(X, Y)` is a STATIC license — stripped from the
+// runtime validate() and consumed into the relation, scoped to each
+// instance's fields. The cross block of a declared-independent pair
+// elaborates to literal zeros (same arrays as ppl/005's NONZERO block).
+type TimeIdx = Idx<2>
+struct Model {
+    X: Array<Float64 like Idx<2>, TimeIdx>,
+    Y: Array<Float64 like Idx<3>, TimeIdx>
+} where indep(X, Y)
+let m = Model { X = [[1.0, 2.0], [3.0, 5.0]], Y = [[2.0, 4.0], [1.0, 1.0], [0.0, 2.0]] }
+let c = comoments(m.X, m.Y)
+// EXPECT: c = [0.0, 0.0, 0.0, 0.0, 0.0, 0.0]

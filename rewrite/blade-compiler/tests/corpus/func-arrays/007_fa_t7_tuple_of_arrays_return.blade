@@ -1,0 +1,26 @@
+// TEST: FA T7: Tuple of arrays returned from function
+// ----------------------------------------------------------------------------
+// T7: Function returning a tuple of arrays; caller destructures.
+// ----------------------------------------------------------------------------
+// Compound types (OCaml/F#-style tuples) must cross function boundaries with
+// arrays inside. Two defects pinned here (fixed 2026-07-12, typed-Dist arc):
+//   1. irTypeToCpp rendered tuple elements in the RAW promote<T,N>::type
+//      form; the Array wrapper's implicit pointer conversion silently
+//      DROPPED extents at the std::tuple boundary, breaking auto-print and
+//      any downstream .extents consumer.
+//   2. genScalarBinding declared opaque-tuple projections raw for the same
+//      reason (IRTupleProj now produces a wrapper).
+// The destructured components must print with correct values AND extents.
+type I3 = Idx<3>
+let A: Array<Float64 like I3> = [1.0, 2.0, 3.0]
+let B: Array<Float64 like I3> = [4.0, 5.0, 6.0]
+
+function pair(X: Array<Float64 like I3>, Y: Array<Float64 like I3>) -> (Array<Float64 like I3>, Array<Float64 like I3>) =
+  (X, Y)
+
+let p = pair(A, B)
+let (u, w) = p
+let s = u(0) + w(2)
+// EXPECT: u = [1, 2, 3]
+// EXPECT: w = [4, 5, 6]
+// EXPECT: s = 7

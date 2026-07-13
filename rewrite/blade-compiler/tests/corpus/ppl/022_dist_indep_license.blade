@@ -1,0 +1,26 @@
+// TEST: Dist Indep License
+// The full where-indep arc (typed-Dist phase 5, open constraint registry):
+// `where indep(a, b)` PROMOTES combine to a PPL function — the parser
+// records the unknown conjunct as data (WhereClause.Custom), the checker
+// dispatches it through Blade.Constraints, PPL's handler licenses the
+// parameter pair for the body (so a + b type-checks), and the CALL SITE
+// discharges the license against the actuals' sources (X, Y declared
+// independent). Module-level operators also flow through the same checker
+// dispatch now (the elaboration operator rewrites are gone) — ppl/014
+// pins those values. Oracle: κ1(X)+κ1(Y), κ2(X)+κ2(Y) from ppl/014.
+type TimeIdx = Idx<2>
+let X: Array<Float64 like Idx<2>, TimeIdx> = [[1.0, 2.0], [3.0, 4.0]]
+let Y: Array<Float64 like Idx<2>, TimeIdx> = [[2.0, 2.0], [1.0, 3.0]]
+let _ = independent(X, Y)
+let dx = dist(X, 2)
+let dy = dist(Y, 2)
+
+function combine(a: Dist<2, Float64 like Idx<2>>, b: Dist<2, Float64 like Idx<2>>)
+  where indep(a, b) -> Dist<2, Float64 like Idx<2>> =
+  a + b
+
+let s = combine(dx, dy)
+let s1 = cumulant(s, 1)
+let s2 = cumulant(s, 2)
+// EXPECT: s1 = [3.5, 5.5]
+// EXPECT: s2 = [0.25, 0.25, 1.25]

@@ -238,6 +238,7 @@ and TypedExprKind =
     | TExprGroupKeys of keys: TypedExpr list
     | TExprSort of array: TypedExpr * key: TypedExpr
     | TExprReduce of array: TypedExpr * kernel: TypedExpr * init: TypedExpr option
+    | TExprProdSum of args: TypedExpr list  // prodsum(x1..xk): fused Σ_t Π_ℓ xℓ(t) over rank-1 arrays
     | TExprTranspose of array: TypedExpr * dim1: int * dim2: int
     | TExprDecompact of array: TypedExpr * dim: int
     | TExprGram of left: TypedExpr * right: TypedExpr * isSameArray: bool

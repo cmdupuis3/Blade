@@ -1,0 +1,20 @@
+// TEST: GroupBy Forces Deferred Values
+// group_by over a values input that is still an UNFORCED computation. The
+// kernel body here is an if/then/else, and parseIf consumes the trailing
+// `|> compute` into the else branch (`0.0 |> compute`, identity on a scalar)
+// — so unlike the arithmetic-kernel pipeline in 013, `w` stays a deferred
+// computation when group_by consumes it. group_by's copy loop indexes its
+// values input by name, so its codegen forces the deferred binding in place
+// (same machinery as |> compute) before grouping. The second group_by over
+// the same binding confirms the forced materialization happens exactly once
+// (no C++ redefinition of w).
+let region = [0, 1, 2, 0, 1, 2]
+let vals = [1, 0, 2, 0, 0, 3]
+let w = method_for(vals) <@> lambda(q) -> if q > 0 then 1.0 else 0.0 |> compute
+let gk = group_keys(region)
+let grouped = group_by(w, gk)
+let counts = method_for(grouped) <@> lambda(g: Array<Float64 like RaggedIdx<_>>) -> reduce(g, (+)) |> compute
+let grouped2 = group_by(w, gk)
+let sums2 = method_for(grouped2) <@> lambda(g: Array<Float64 like RaggedIdx<_>>) -> reduce(g, (+)) |> compute
+// EXPECT: counts = [1, 0, 2]
+// EXPECT: sums2 = [1, 0, 2]

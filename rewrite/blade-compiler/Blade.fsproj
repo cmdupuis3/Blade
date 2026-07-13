@@ -16,6 +16,14 @@
     <Compile Include="providers/NetcdfProvider.fs" />
     <Compile Include="TypedAst.fs" />
     <Compile Include="StaticEval.fs" />
+    <!-- Provider-backed statics bridge: registers the NetCDF compile-time
+         data reader into StaticEval's provider hook (fold + provenance).
+         Must follow both NetcdfProvider.fs and StaticEval.fs. -->
+    <Compile Include="ProviderStatics.fs" />
+    <!-- Open where-clause constraint registry: extension modules register
+         handlers for constraint keywords (PPL: indep); the checker
+         dispatches WhereClause.Custom conjuncts through it. -->
+    <Compile Include="Constraints.fs" />
     <!-- ML compiler layer (Blade.ML.*): spec model, CG tables, static
          builtins, ops elaboration. Lives under ml/compiler/ beside the
          BladeML reference project (which is a SEPARATE fsproj and does
@@ -25,6 +33,12 @@
     <Compile Include="ml/compiler/WignerTables.fs" />
     <Compile Include="ml/compiler/MLStatics.fs" />
     <Compile Include="ml/compiler/MLElaborate.fs" />
+    <!-- PPL compiler layer (Blade.Ppl.*): moment/comoment formers and
+         declared independence, elaborated to plain Blade source. Lives
+         under ppl/compiler/ beside the MomentAlgebra reference project
+         (a SEPARATE fsproj); core touchpoint is the PplElaborate.expand
+         pipeline stage in TypeCheck.typeCheck. -->
+    <Compile Include="ppl/compiler/PplElaborate.fs" />
     <Compile Include="IndexTypeValidator.fs" />
     <Compile Include="Unify.fs" />
     <Compile Include="TypeEnv.fs" />
@@ -68,6 +82,7 @@
     <Compile Include="tests/Oracles.fs" />
     <Compile Include="tests/Test_Oracles.fs" />
     <Compile Include="tests/Test_WignerTables.fs" />
+    <Compile Include="tests/Test_Ppl.fs" />
     <Compile Include="tests/Differential.fs" />
     <Compile Include="tests/Benchmarks.fs" />
     <Compile Include="tests/CudaTests.fs" />

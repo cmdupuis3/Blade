@@ -1,0 +1,17 @@
+// TEST: Wick Reconstruction
+// moments(d, k) on a dist: raw moments reconstructed from carried
+// cumulants — μ_S = Σ over partitions Π κ_B, with κ beyond the carried
+// order ZERO (the implied closure). Two pins:
+//  * round trip: moments(dist(A,2), 2) == moments(A, 2) exactly
+//    (μ2 = κ2 + κ1κ1 — the lattice run backwards);
+//  * WICK / Isserlis: order-4 moments of an order-2 (Gaussian-closure)
+//    dist = the sum over pairings-and-singletons. Hand-derived from
+//    κ1 = [1.5, 3.5], κ2 ≡ 0.25; e.g. E[x0⁴] = κ1⁴ + 6κ2κ1² + 3κ2²
+//    = 8.625 (the true 8.5 differs by exactly the truncated κ4 = −0.125).
+type TimeIdx = Idx<2>
+let A: Array<Float64 like Idx<2>, TimeIdx> = [[1.0, 2.0], [3.0, 4.0]]
+let d2 = dist(A, 2)
+let m2 = moments(d2, 2)
+let m4 = moments(d2, 4)
+// EXPECT: m2 = [2.5, 5.5, 12.5]
+// EXPECT: m4 = [8.625, 17.625, 36.625, 77.625, 168.625]

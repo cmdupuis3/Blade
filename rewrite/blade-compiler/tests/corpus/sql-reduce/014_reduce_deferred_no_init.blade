@@ -1,0 +1,6 @@
+// TEST: Reduce Deferred Lambda No Init (rejects)
+// A lambda fold kernel over a deferred computation without an init is a
+// check-time error steering to the 3-arg form — the fused fold has no
+// first element to seed from and only (+)/(*) carry implicit identities.
+let A = [1.0, 2.0, 3.0]
+let mx = reduce(method_for(A) <@> lambda(x) -> x * 2.0, lambda(a, b) -> if a > b then a else b)
