@@ -619,8 +619,9 @@ let scanToken (state: LexerState) =
             // Potential named infix: :name:
             advance state |> ignore  // consume first ':'
             let nameStart = state.Pos
+            let colAfterColon = state.Col  // identifiers contain no newlines, so Line is unchanged
             // Collect the identifier
-            while state.Pos < state.Source.Length && 
+            while state.Pos < state.Source.Length &&
                   (let ch = state.Source.[state.Pos] in Char.IsLetterOrDigit(ch) || ch = '_') do
                 advance state |> ignore
             let name = state.Source.Substring(nameStart, state.Pos - nameStart)
@@ -630,9 +631,12 @@ let scanToken (state: LexerState) =
                 advance state |> ignore  // consume closing ':'
                 emit state startLine startCol (TokNamedInfix name)
             | _ ->
-                // Not a named infix, emit colon and let identifier be re-lexed
-                // This is tricky - we've consumed too much. For now, error.
-                emit state startLine startCol (TokError (sprintf "Expected ':' after :%s" name))
+                // Not a named infix (e.g. a type annotation `:Int64`). Backtrack:
+                // emit a plain colon and rewind so the identifier is re-lexed.
+                ignore name
+                state.Pos <- nameStart
+                state.Col <- colAfterColon
+                emit state startLine startCol TokColon
         | _ ->
             advance state |> ignore
             emit state startLine startCol TokColon

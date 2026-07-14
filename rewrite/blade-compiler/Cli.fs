@@ -46,6 +46,10 @@ let printUsage () =
     printfn "  compile <file.edgi> [-o output]   Compile to C++ (and optionally to executable)"
     printfn "  run <file.edgi>                   Compile and run a Blade program"
     printfn "  check <file.edgi>                 Type-check only (no code generation)"
+    printfn "  ide check --json <file.edgi>      Type-check and emit JSON diagnostics + binding types"
+    printfn "                                    (machine-readable, for editor tooling)"
+    printfn "  repl                              Interactive session: each input recompiles and"
+    printfn "                                    re-runs the accumulated program, printing new values"
     printfn "  emit <file.edgi> [-o output.cpp]  Emit C++ source without compiling"
     printfn "  test                              Run full test suite (IR + C++ + run)"
     printfn "  test --omp                        ... including the OpenMP thread-coverage block"
@@ -154,6 +158,154 @@ let runFile (filePath: string) (verbose: bool) : int =
         | Ok (exitCode, output) ->
             printf "%s" output
             exitCode
+
+// ----------------------------------------------------------------------------
+// Interactive REPL (`blade repl`)
+// ----------------------------------------------------------------------------
+//
+// Blade has no interpreter, but `blade run` semantics give REPL behavior for
+// free: every top-level binding prints its value. The REPL accumulates a
+// session program in a temp file; each submitted snippet re-compiles and
+// re-runs the WHOLE session, printing only output lines that are new or
+// changed since the previous run. Rebinding a top-level name replaces the
+// earlier definition (duplicate lets are a C++ redeclaration error), and the
+// diff display then shows the updated values of everything downstream.
+//
+// The compiled session runs with the REPL process's own working directory,
+// so relative data paths (NetCDF.load("sample.nc")) resolve where the user
+// launched the REPL — not in the session temp dir.
+
+/// Run a compiled session exe with an explicit working directory, capturing
+/// stdout/stderr separately (runExecutable pins cwd to the exe's dir, which
+/// would break relative data paths for REPL sessions).
+let private runExeIn (cwd: string) (exeFile: string) : Result<int * string * string, string> =
+    try
+        let psi = System.Diagnostics.ProcessStartInfo(Path.GetFullPath exeFile)
+        psi.RedirectStandardOutput <- true
+        psi.RedirectStandardError <- true
+        psi.UseShellExecute <- false
+        psi.CreateNoWindow <- true
+        psi.WorkingDirectory <- cwd
+        use proc = System.Diagnostics.Process.Start(psi)
+        let stdoutTask = proc.StandardOutput.ReadToEndAsync()
+        let stderrTask = proc.StandardError.ReadToEndAsync()
+        if proc.WaitForExit(60000) then
+            Ok (proc.ExitCode, stdoutTask.Result, stderrTask.Result)
+        else
+            (try proc.Kill() with _ -> ())
+            Error "Execution timed out after 60s"
+    with ex ->
+        Error (sprintf "Execution exception: %s" ex.Message)
+
+let replLoop () : int =
+    printfn "Blade REPL (v%s) — every top-level binding prints its value." compilerVersion
+    printfn "Commands: :reset (clear session)  :show (print session)  :quit"
+    printfn "Multi-line: unbalanced brackets continue on the next line, or use :paste ... :end"
+    let sessionDir = Path.Combine(Path.GetTempPath(), "blade-repl-" + Guid.NewGuid().ToString("N").Substring(0, 8))
+    Directory.CreateDirectory sessionDir |> ignore
+    let srcPath = Path.Combine(sessionDir, "session.blade")
+    let userCwd = Directory.GetCurrentDirectory()
+    let session = ResizeArray<string>()
+    let mutable lastLines : string[] = [||]
+
+    // Top-level name a snippet (re)defines, for rebind replacement.
+    let bindingNameRe =
+        System.Text.RegularExpressions.Regex(
+            @"^\s*(?:let\s+(?:mut\s+|static\s+)?|static\s+function\s+|function\s+|type\s+)([A-Za-z_][A-Za-z0-9_]*)")
+    let bindingName (snippet: string) =
+        let m = bindingNameRe.Match snippet
+        if m.Success then Some m.Groups.[1].Value else None
+
+    // The generated main prints a "<name> completed in Xs" timing line whose
+    // value changes every run — exclude it from the output diff.
+    let isTimingLine (l: string) =
+        System.Text.RegularExpressions.Regex.IsMatch(l, @"completed in [0-9.eE+~-]+m?s\s*$")
+
+    let evaluate (snippet: string) =
+        let trimmed = snippet.Trim()
+        if trimmed <> "" then
+            let candidate = ResizeArray(session)
+            // Rebinding replaces the earlier definition IN PLACE so snippets
+            // that referenced the name (defined later in the session) still
+            // see it; the output diff then shows their recomputed values.
+            match bindingName trimmed with
+            | Some name ->
+                let idx = candidate.FindIndex(fun s -> bindingName s = Some name)
+                if idx >= 0 then candidate.[idx] <- trimmed else candidate.Add trimmed
+            | None -> candidate.Add trimmed
+            File.WriteAllText(srcPath, String.concat "\n\n" candidate + "\n")
+            match compileToExe srcPath None false with
+            | Error e ->
+                eprintfn "%s" e
+                eprintfn "[snippet not kept]"
+            | Ok exePath ->
+                match runExeIn userCwd exePath with
+                | Error e ->
+                    eprintfn "Runtime error: %s" e
+                    eprintfn "[snippet not kept]"
+                | Ok (code, stdout, stderr) ->
+                    let lines =
+                        stdout.Replace("\r\n", "\n").Split('\n')
+                        |> Array.filter (fun l -> not (isTimingLine l))
+                    let mutable printed = 0
+                    for i in 0 .. lines.Length - 1 do
+                        if lines.[i].Trim() <> "" && (i >= lastLines.Length || lines.[i] <> lastLines.[i]) then
+                            printfn "%s" lines.[i]
+                            printed <- printed + 1
+                    if stderr.Trim() <> "" then eprintfn "%s" (stderr.Trim())
+                    if code = 0 then
+                        if printed = 0 then printfn "(ok)"   // defs print nothing new
+                        session.Clear()
+                        session.AddRange candidate
+                        lastLines <- lines
+                    else
+                        eprintfn "[exit %d — snippet not kept]" code
+
+    let bracketBalance (text: string) =
+        let mutable d = 0
+        for c in text do
+            match c with
+            | '(' | '[' | '{' -> d <- d + 1
+            | ')' | ']' | '}' -> d <- d - 1
+            | _ -> ()
+        d
+
+    let buffer = ResizeArray<string>()
+    let mutable pasteMode = false
+    let mutable finished = false
+    while not finished do
+        Console.Write(if pasteMode || buffer.Count > 0 then "  ... " else "blade> ")
+        Console.Out.Flush()
+        // Strip BOM/zero-width characters some clients prepend to piped input
+        // (a U+FEFF-prefixed `let` otherwise defeats rebind detection).
+        let readLine () =
+            match Console.ReadLine() with
+            | null -> null
+            | l -> l.Replace("\uFEFF", "").Replace("\u200B", "")
+        match readLine () with
+        | null -> finished <- true
+        | line when pasteMode ->
+            if line.Trim() = ":end" then
+                pasteMode <- false
+                evaluate (String.concat "\n" buffer)
+                buffer.Clear()
+            else buffer.Add line
+        | line when buffer.Count = 0 && line.Trim() = ":paste" -> pasteMode <- true
+        | line when buffer.Count = 0 && (line.Trim() = ":quit" || line.Trim() = ":q") -> finished <- true
+        | line when buffer.Count = 0 && line.Trim() = ":reset" ->
+            session.Clear()
+            lastLines <- [||]
+            printfn "(session cleared)"
+        | line when buffer.Count = 0 && line.Trim() = ":show" ->
+            if session.Count = 0 then printfn "(empty session)"
+            else printfn "%s" (String.concat "\n\n" session)
+        | line ->
+            buffer.Add line
+            if bracketBalance (String.concat "\n" buffer) <= 0 then
+                evaluate (String.concat "\n" buffer)
+                buffer.Clear()
+    try Directory.Delete(sessionDir, true) with _ -> ()
+    0
 
 /// End-to-end CLI smoke test: compile and run a one-line .edgi from a FRESH
 /// temp directory containing nothing but the source file. The test runners
@@ -430,6 +582,13 @@ let dispatch (args: string[]) : int =
     | [| "emit"; file; "-o"; output; "--verbose" |] -> emitFile file (Some output) true
 
     | [| "check"; file |] -> checkFile file
+
+    | [| "repl" |] -> replLoop ()
+
+    // ---- Editor tooling (JSON on stdout; see Ide.fs) ----
+    | [| "ide"; "check"; "--json"; file |]
+    | [| "ide"; "check"; file; "--json" |]
+    | [| "ide"; "check"; file |] -> Blade.Ide.ideCheck file
 
     // ---- Test commands ----
     | _ when args.Length >= 1 && args.[0] = "test" ->

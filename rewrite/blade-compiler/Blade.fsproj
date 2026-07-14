@@ -44,6 +44,7 @@
     <Compile Include="TypeEnv.fs" />
     <Compile Include="Zonk.fs" />
     <Compile Include="TypeCheck.fs" />
+    <Compile Include="Ide.fs" />
     <Compile Include="Lowering.fs" />
     <Compile Include="EmitCpp.fs" />
     <Compile Include="CodeGen.fs" />
