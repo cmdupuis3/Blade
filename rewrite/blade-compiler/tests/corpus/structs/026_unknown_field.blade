@@ -1,0 +1,7 @@
+// TEST: Struct Unknown Field (rejects)
+// Providing a field the struct does not declare must be a compile error.
+struct Point {
+    x: Float,
+    y: Float
+}
+let p = Point { x = 1.0, y = 2.0, z = 3.0 }

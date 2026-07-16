@@ -1,0 +1,40 @@
+// TEST: Physics -- Classical Decoherence Of An Oscillator Ensemble
+import ppl as ppl
+// ============================================================================
+// 12 oscillators with measured frequencies w ~ (3.0, 0.6^2) rad/s and a
+// common initial phase. Each x_i(t) = cos(w_i t) oscillates forever, but the
+// ENSEMBLE MEAN <cos(w t)> decays like cos(mu t) exp(-sigma^2 t^2 / 2):
+// irreversibility as seen by the moment tower. The jet DEGREE is how far into
+// the decay the description stays valid -- at t = 1 the degree-6 jet nails
+// <cos> to four digits; by t = 3 the phase spread sigma*t ~ 1.8 rad has left
+// the radius where a polynomial tracks a cosine, and successive degrees
+// SWING (0.56 -> -0.061 -> -0.156) instead of converging. That divergence is
+// the tower reporting its own breakdown.
+// EXPECT values checked vs an independent PowerShell ensemble.
+// ============================================================================
+type TimeIdx = Idx<12>
+let WD: Array<Float64 like Idx<1>, TimeIdx> = [[1.91758476486, 2.26479953333, 2.47606707831, 2.64497521577, 2.79336551522, 2.93209257483, 3.06790742517, 3.20663448478, 3.35502478423, 3.52393292169, 3.73520046667, 4.08241523514]]
+let d = ppl.dist(WD, 6)
+
+// t = 1.0 at jet degrees 2, 4, 6 -- converging to the exact -0.82348
+let da2 = ppl.dist_map(d, 1, 2, lambda(w) -> cos(w * 1.0))
+let da4 = ppl.dist_map(d, 1, 4, lambda(w) -> cos(w * 1.0))
+let da6 = ppl.dist_map(d, 1, 6, lambda(w) -> cos(w * 1.0))
+let ma2 = ppl.cumulant(da2, 1)
+let ma4 = ppl.cumulant(da4, 1)
+let ma6 = ppl.cumulant(da6, 1)
+
+// t = 3.0 -- degrees SWING: past the radius of validity
+let dc2 = ppl.dist_map(d, 1, 2, lambda(w) -> cos(w * 3.0))
+let dc6 = ppl.dist_map(d, 1, 6, lambda(w) -> cos(w * 3.0))
+let dc8 = ppl.dist_map_closed(d, 1, 8, lambda(w) -> cos(w * 3.0))
+let mc2 = ppl.cumulant(dc2, 1)
+let mc6 = ppl.cumulant(dc6, 1)
+let mc8 = ppl.cumulant(dc8, 1)
+
+// EXPECT: ma2 = [-0.811793847212641]
+// EXPECT: ma4 = [-0.823879633740353]
+// EXPECT: ma6 = [-0.823469664388064]
+// EXPECT: mc2 = [0.564900762366218]
+// EXPECT: mc6 = [-0.0610054219342417]
+// EXPECT: mc8 = [-0.156411520323496]

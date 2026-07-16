@@ -1,7 +1,8 @@
 // TEST: Moments Mean
+import ppl as ppl
 // moments(A, 1): first moment = per-variable mean over the sample axis.
 // Unary former (single method_for copy, no comm clause).
 type TimeIdx = Idx<2>
 let A: Array<Float64 like Idx<2>, TimeIdx> = [[1.0, 2.0], [3.0, 4.0]]
-let m1 = moments(A, 1)
+let m1 = ppl.moments(A, 1)
 // EXPECT: m1 = [1.5, 3.5]

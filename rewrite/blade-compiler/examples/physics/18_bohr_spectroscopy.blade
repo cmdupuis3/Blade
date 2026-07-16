@@ -1,0 +1,92 @@
+// TEST: Physics -- Bohr Spectroscopy from the Moment Tower
+// ============================================================================
+// The lagged-cumulant sequence of any quasiperiodic signal, C(n*Delta) =
+// sum_k w_k cos(omega_k n Delta), IS a moment tower: cos(n*theta) =
+// T_n(cos theta), so C(n) is the n-th CHEBYSHEV MOMENT of a measure whose
+// atoms sit at lambda_k = cos(omega_k Delta) with masses w_k. Frequency
+// extraction is therefore the classical truncated moment problem -- Hankel
+// determinants count the lines, quadrature nodes ARE the lines.
+// Here the signal is QUANTUM: <x>(t) for a coherent wavepacket, whose lines
+// sit at the BOHR TRANSITION ENERGIES E_{n+1} - E_n. Embedded below are the
+// EXACT towers (Delta = 0.5, from exact diagonalization, N=36 basis --
+// tools/spectral_quadrature.ps1) for
+//   * the HARMONIC oscillator: every gap equals 1, so the spectral measure
+//     is ONE atom -- det2n collapses to machine zero (RANK1). The evenly
+//     spaced ladder and the single classical SHM frequency are the same
+//     fact: an autocovariance Hankel matrix of rank 1.
+//   * the ANHARMONIC oscillator (H = p^2/2 + x^2/2 + 0.1 x^4): the gaps
+//     split, det2n jumps THIRTEEN ORDERS (3e-3 vs -1e-16) -- anharmonicity
+//     IS the Hankel rank climbing above 1 (verdict SPLIT).
+// Blade then DOES the spectroscopy in-language: lambda = m1/m0 gives the
+// harmonic line, and a 2-atom Prony fit (Hankel solve + quadratic formula)
+// compresses the anharmonic ladder onto its dominant transitions; arccos is
+// evaluated by an unrolled Newton iteration on cos. Recovered:
+//   harmonic:  omega = 1 (exact -- the quantum gap, machine precision)
+//   anharmonic: omega = 1.3865, 1.9996 -- the weighted compression of the
+//   true ladder (dominant gaps D0 = 1.2104, D1 = 1.3691, D2 = 1.4903, ...);
+//   the tool's full Gauss quadrature resolves all 15 lines individually,
+//   including the weak Delta-n = 3 lines at 4.4508 and 4.7611 to machine
+//   precision. The tower is the spectroscope.
+// ============================================================================
+let CH = [0.358174419125268, 0.314327624339549, 0.193522464556364, 0.0253362561178765, -0.149053151451091, -0.28694914913444, -0.354589987408239, -0.335414830006354, -0.234118424217761, -0.0755016630151661]
+let CA = [0.215793953136894, 0.162930268334336, 0.0315498503397277, -0.111856225115999, -0.196531418265121, -0.183587009282077, -0.0848829483266403, 0.0464732487720957, 0.14564960828205, 0.168788181041619]
+
+// --- Chebyshev moments -> power moments:  m_n = integral lambda^n dmu ---
+let Hm0 = CH(0)
+let Hm1 = CH(1)
+let Hm2 = (CH(2) + CH(0)) / 2.0
+let Hm3 = (CH(3) + 3.0 * CH(1)) / 4.0
+let Hm4 = (CH(4) + 4.0 * CH(2) + 3.0 * CH(0)) / 8.0
+let Am0 = CA(0)
+let Am1 = CA(1)
+let Am2 = (CA(2) + CA(0)) / 2.0
+let Am3 = (CA(3) + 3.0 * CA(1)) / 4.0
+let Am4 = (CA(4) + 4.0 * CA(2) + 3.0 * CA(0)) / 8.0
+
+// --- Hankel determinants: rank of the spectral measure ---
+let Hdet2 = (Hm0 * Hm2 - Hm1 * Hm1) / (Hm0 * Hm0)
+let Hdet3 = (Hm0 * (Hm2 * Hm4 - Hm3 * Hm3) - Hm1 * (Hm1 * Hm4 - Hm3 * Hm2) + Hm2 * (Hm1 * Hm3 - Hm2 * Hm2)) / (Hm0 * Hm0 * Hm0)
+let H_V = if sqrt(Hdet2 * Hdet2) < 0.000000001 then "RANK1" else "SPLIT"
+let Adet2 = (Am0 * Am2 - Am1 * Am1) / (Am0 * Am0)
+let Adet3 = (Am0 * (Am2 * Am4 - Am3 * Am3) - Am1 * (Am1 * Am4 - Am3 * Am2) + Am2 * (Am1 * Am3 - Am2 * Am2)) / (Am0 * Am0 * Am0)
+let A_V = if sqrt(Adet2 * Adet2) < 0.000000001 then "RANK1" else "SPLIT"
+
+// --- harmonic line: lambda = m1/m0, omega = arccos(lambda)/Delta (Newton) ---
+let Hlam = Hm1 / Hm0
+let Hth0 = 1.0
+let Hth1 = Hth0 + (cos(Hth0) - Hlam) / sin(Hth0)
+let Hth2 = Hth1 + (cos(Hth1) - Hlam) / sin(Hth1)
+let Hth3 = Hth2 + (cos(Hth2) - Hlam) / sin(Hth2)
+let Hth4 = Hth3 + (cos(Hth3) - Hlam) / sin(Hth3)
+let Hth5 = Hth4 + (cos(Hth4) - Hlam) / sin(Hth4)
+let Hom = Hth5 / 0.5
+
+// --- anharmonic 2-atom Prony: atoms are roots of lam^2 - t1 lam - t0 ---
+let Aden = Am0 * Am2 - Am1 * Am1
+let At0 = (Am2 * Am2 - Am1 * Am3) / Aden
+let At1 = (Am0 * Am3 - Am1 * Am2) / Aden
+let Adisc = sqrt(At1 * At1 + 4.0 * At0)
+let AlamA = 0.5 * (At1 + Adisc)
+let AlamB = 0.5 * (At1 - Adisc)
+let AthA0 = 1.0
+let AthA1 = AthA0 + (cos(AthA0) - AlamA) / sin(AthA0)
+let AthA2 = AthA1 + (cos(AthA1) - AlamA) / sin(AthA1)
+let AthA3 = AthA2 + (cos(AthA2) - AlamA) / sin(AthA2)
+let AthA4 = AthA3 + (cos(AthA3) - AlamA) / sin(AthA3)
+let AthA5 = AthA4 + (cos(AthA4) - AlamA) / sin(AthA4)
+let AomA = AthA5 / 0.5
+let AthB0 = 1.0
+let AthB1 = AthB0 + (cos(AthB0) - AlamB) / sin(AthB0)
+let AthB2 = AthB1 + (cos(AthB1) - AlamB) / sin(AthB1)
+let AthB3 = AthB2 + (cos(AthB2) - AlamB) / sin(AthB2)
+let AthB4 = AthB3 + (cos(AthB3) - AlamB) / sin(AthB3)
+let AthB5 = AthB4 + (cos(AthB4) - AlamB) / sin(AthB4)
+let AomB = AthB5 / 0.5
+
+// harmonic: one atom, gap = 1 exactly; anharmonic: rank climbs, gaps split
+// EXPECT: H_V = "RANK1"
+// EXPECT: A_V = "SPLIT"
+// EXPECT: Hlam = 0.877582561890373
+// EXPECT: Hom = 1.0
+// EXPECT: AomA = 1.38648583784674
+// EXPECT: AomB = 1.99957491465234

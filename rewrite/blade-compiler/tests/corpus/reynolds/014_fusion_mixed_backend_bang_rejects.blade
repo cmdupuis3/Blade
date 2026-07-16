@@ -1,0 +1,9 @@
+// TEST: Fusion Mixed Backend Bang (rejects)
+// <&!> requires identical backends at the shared level. mean is serial (no
+// clause) and cov requests omp — a mismatch. Mandatory fusion cannot silently
+// pick one, so the compiler rejects loudly with steering to <&> (which would
+// let the serial leaf defer to the omp sibling instead).
+let A = [1.0, 2.0, 3.0]
+let mean = lambda(x) -> x
+let cov = lambda(x, y) where omp(x: 1) -> x * y
+let (m1, m2) = (object_for(mean) <@> (A)) <&!> (object_for(cov) <@> (A, A)) |> compute

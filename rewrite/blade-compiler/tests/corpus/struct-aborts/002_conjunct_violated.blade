@@ -1,0 +1,9 @@
+// TEST: Struct Conjunct Violated (aborts)
+// Second conjunct fails: mid exceeds hi.
+// ABORT: Constraint violation in Ranged (conjunct 2)
+struct Ranged {
+    lo: Int,
+    hi: Int,
+    mid: Int
+} where lo <= mid, mid <= hi
+let r = Ranged { lo = 1, mid = 12, hi = 9 }

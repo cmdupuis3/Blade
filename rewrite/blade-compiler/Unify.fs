@@ -210,6 +210,35 @@ let rec findLeafInferScalar (subst: Subst) (ty: IRType) : int option =
 /// Numeric promotion: when two different numeric scalars meet, the
 /// inference variable (if any) is rebound to the promoted type so that
 /// downstream IR and codegen see the correct wider type.
+/// Per-index compatibility for POSITIONAL index-list matching (ArrayElem
+/// index types, Dist axes). True = the pair is INCOMPATIBLE. One shared
+/// predicate (previously duplicated inline in the ArrayElem and IRTDist
+/// arms) so the rules cannot drift:
+///   - Irreps tags (both sides): identity is the SPEC plus optional
+///     nominative alias name — different specs are distinct even at equal
+///     total_dim; two ALIASES of the same spec are distinct (nominative);
+///     anonymous-vs-named of the same spec is compatible (mirrors the
+///     Some-tag vs None permissiveness below). This arm must precede the
+///     synthetic-tag exemption: irreps tags are "__"-prefixed but carry
+///     identity, unlike the structural bookkeeping sentinels.
+///   - User-named tags are nominative: lat != lon even if both Idx<180>.
+///   - Synthetic tags ("__"-prefixed markers like "__raggedidx_inline")
+///     are structural and never gate unification.
+///   - Extents are NOT compared (runtime values, not template parameters).
+///   - Symmetry classes must be compatible (SymNone is a wildcard).
+let indexPairIncompatible (i1: IRIndexType) (i2: IRIndexType) : bool =
+    let isSyntheticTag (t: string) = t.StartsWith("__")
+    match i1.Tag, i2.Tag with
+    | Some (IrrepsTag (n1, s1)), Some (IrrepsTag (n2, s2)) ->
+        s1 <> s2 || (match n1, n2 with
+                     | Some a, Some b -> a <> b
+                     | _ -> false)
+    | Some t1, Some t2 when t1 <> t2
+                            && not (isSyntheticTag t1)
+                            && not (isSyntheticTag t2) -> true
+    | _ ->
+        i1.Symmetry <> i2.Symmetry && i1.Symmetry <> SymNone && i2.Symmetry <> SymNone
+
 let rec unify (subst: Subst) (t1: IRType) (t2: IRType) : TypeResult<unit> =
     let orig1 = t1
     let orig2 = t2
@@ -278,29 +307,13 @@ let rec unify (subst: Subst) (t1: IRType) (t2: IRType) : TypeResult<unit> =
         if a1.IndexTypes.Length <> a2.IndexTypes.Length || a1.IsVirtual <> a2.IsVirtual then
             Error (TypeMismatch (t1, t2))
         else
-            // Per-index compatibility: named index types must match by name,
-            // symmetry classes must be compatible.
-            // NOTE: We intentionally do NOT compare extents here — extents are
-            // runtime values in C++, not compile-time template parameters.
-            //
-            // Synthetic tags (those starting with "__") are internal structural
-            // markers like "__raggedidx_inline", "__depidx_inner", "__group_member",
-            // "__error_ragged_no_prior". These represent kinds of dimensions, not
-            // nominal names, and must not be compared as "named index types are
-            // nominative." Only user-named tags get the nominative treatment.
-            let isSyntheticTag (t: string) = t.StartsWith("__")
+            // Per-index compatibility: the shared indexPairIncompatible
+            // predicate (see its doc above unify) — nominative user tags,
+            // synthetic-tag exemption, irreps spec identity, compatible
+            // symmetry, extents never compared.
             let indexMismatch =
-                List.zip a1.IndexTypes a2.IndexTypes |> List.tryFind (fun (i1, i2) ->
-                    // User-named index types are nominative: lat != lon even if both Idx<180>.
-                    // Synthetic tags (starting with __) are structural and should not gate
-                    // unification — they're set by lowering for internal bookkeeping.
-                    match i1.Tag, i2.Tag with
-                    | Some t1, Some t2 when t1 <> t2
-                                            && not (isSyntheticTag t1)
-                                            && not (isSyntheticTag t2) -> true
-                    | _ ->
-                        // Symmetry class must be compatible
-                        i1.Symmetry <> i2.Symmetry && i1.Symmetry <> SymNone && i2.Symmetry <> SymNone)
+                List.zip a1.IndexTypes a2.IndexTypes
+                |> List.tryFind (fun (i1, i2) -> indexPairIncompatible i1 i2)
             match indexMismatch with
             | Some _ -> Error (TypeMismatch (t1, t2))
             | None ->
@@ -360,15 +373,8 @@ let rec unify (subst: Subst) (t1: IRType) (t2: IRType) : TypeResult<unit> =
         if o1 <> o2 || ax1.Length <> ax2.Length then
             Error (TypeMismatch (t1, t2))
         else
-            let isSyntheticTag (t: string) = t.StartsWith("__")
             let axisMismatch =
-                List.zip ax1 ax2 |> List.exists (fun (i1, i2) ->
-                    match i1.Tag, i2.Tag with
-                    | Some t1, Some t2 when t1 <> t2
-                                            && not (isSyntheticTag t1)
-                                            && not (isSyntheticTag t2) -> true
-                    | _ ->
-                        i1.Symmetry <> i2.Symmetry && i1.Symmetry <> SymNone && i2.Symmetry <> SymNone)
+                List.zip ax1 ax2 |> List.exists (fun (i1, i2) -> indexPairIncompatible i1 i2)
             if axisMismatch then Error (TypeMismatch (t1, t2))
             else unify subst e1 e2
     // IRTArrow: slot-by-slot unification. Slot kinds (SIdx/SIdxVirt/SVal)

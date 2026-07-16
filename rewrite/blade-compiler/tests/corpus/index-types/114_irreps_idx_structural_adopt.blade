@@ -1,0 +1,16 @@
+// TEST: IrrepsIdx Structural Adopt
+// ============================================================================
+// Gradual adoption: an IrrepsIdx-annotated array unifies with a plain
+// anonymous Idx<N> parameter of the same extent (irreps tag vs None falls
+// through to the symmetry check, like any named-vs-anonymous pair). This is
+// what lets users annotate SOME arrays with IrrepsIdx while every generated
+// __ml_N signature and existing call site keeps its plain Idx typing.
+// Strictness engages only between two DIFFERENT irreps identities (115/119).
+// ============================================================================
+let static spec2 = [(0, 0, 1), (1, 1, 1)]
+function total(v: Array<Float like Idx<4>>) -> Float = {
+    v(0) + v(1) + v(2) + v(3)
+}
+let a: Array<Float like IrrepsIdx<spec2>> = [1.0, 2.0, 3.0, 4.0]
+let t = total(a)
+// EXPECT: t = 10.0

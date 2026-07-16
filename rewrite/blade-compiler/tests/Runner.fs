@@ -28,6 +28,7 @@ type FullTestResult = {
     RunResult: Result<int * string, string>  // Ok(exitCode, stdout) or Error(message)
     ValueCheckResult: Result<unit, string list>  // Ok() or Error(list of mismatches)
     HasExpectedValues: bool  // Whether the test had EXPECT comments
+    AbortExpectation: string option  // "(aborts)" probes: expected output substring from // ABORT:
 }
 
 let testLower source =
@@ -103,7 +104,7 @@ let private runFsharpPipelineLocked (source: string) (testName: string) (outputD
                         // (.cpp, g++). The extension matches so the host
                         // toolchain recognizes device syntax.
                         let backendReq = inferBackendReq cppCode
-                        let ext = match backendReq with RequiresCuda -> ".cu" | CpuOnly -> ".cpp"
+                        let ext = match backendReq with RequiresCuda -> ".cu" | RequiresMpi | CpuOnly -> ".cpp"
                         let srcFile = Path.Combine(outputDir, safeName + ext)
                         File.WriteAllText(srcFile, cppCode)
                         FpCppGenerated (ir, srcFile, codegenWarnings, backendReq)
@@ -115,31 +116,39 @@ let private runFsharpPipelineLocked (source: string) (testName: string) (outputD
 let runFullTest (testName: string) (source: string) (outputDir: string) (compileAndRun: bool) : FullTestResult =
     // Parse expected values from source comments
     let expectedValues = parseExpectedValues source
+    let abortExpectation = parseAbortExpectation source
 
     // F# pipeline (lower + codegen) runs under a lock to avoid cache
     // races. C++ compile and run (below) stay outside the lock so they
     // parallelize freely across tests.
-    let pipelineOutcome = runFsharpPipelineLocked source testName outputDir compileAndRun
+    //
+    // Array.Parallel.mapi runs each test on a ~1 MB thread-pool thread, which
+    // the deep AST/IR recursion (e.g. ppl jet elaboration) can overflow — so
+    // the pipeline runs on a large-stack thread. The lock still serializes it,
+    // so at most one such thread does the deep work at a time. See Runtime.fs.
+    let pipelineOutcome =
+        Blade.Runtime.runOnLargeStack (fun () ->
+            runFsharpPipelineLocked source testName outputDir compileAndRun)
 
     match pipelineOutcome with
     | FpIRError e ->
         { TestName = testName; IRResult = Error e; CppGenerated = false;
           CppFile = None; CompileResult = Error "IR failed"; RunResult = Error "IR failed";
-          ValueCheckResult = Error ["IR failed"]; HasExpectedValues = not expectedValues.IsEmpty }
+          ValueCheckResult = Error ["IR failed"]; HasExpectedValues = not expectedValues.IsEmpty; AbortExpectation = abortExpectation }
     | FpIRValidationError validationErrors ->
         for e in validationErrors do printfn "  %s" e
         { TestName = testName; IRResult = Error (validationErrors |> String.concat "; "); CppGenerated = false;
           CppFile = None; CompileResult = Error "IR validation failed"; RunResult = Error "IR validation failed";
-          ValueCheckResult = Error ["IR validation failed"]; HasExpectedValues = not expectedValues.IsEmpty }
+          ValueCheckResult = Error ["IR validation failed"]; HasExpectedValues = not expectedValues.IsEmpty; AbortExpectation = abortExpectation }
     | FpIROnly ir ->
         { TestName = testName; IRResult = Ok ir; CppGenerated = false;
           CppFile = None; CompileResult = Error "Skipped"; RunResult = Error "Skipped";
-          ValueCheckResult = Error ["Skipped"]; HasExpectedValues = not expectedValues.IsEmpty }
+          ValueCheckResult = Error ["Skipped"]; HasExpectedValues = not expectedValues.IsEmpty; AbortExpectation = abortExpectation }
     | FpGenError (ir, msg) ->
         { TestName = testName; IRResult = Ok ir; CppGenerated = false;
           CppFile = None; CompileResult = Error msg;
           RunResult = Error "Generation failed"; ValueCheckResult = Error ["Generation failed"];
-          HasExpectedValues = not expectedValues.IsEmpty }
+          HasExpectedValues = not expectedValues.IsEmpty; AbortExpectation = abortExpectation }
     | FpCppGenerated (ir, srcFile, codegenWarnings, backendReq) ->
         for w in codegenWarnings do
             printfn "  [CodeGen Warning] %s" w
@@ -159,7 +168,7 @@ let runFullTest (testName: string) (source: string) (outputDir: string) (compile
             let runErr = if isSkipError e then e else "Compile failed"
             { TestName = testName; IRResult = Ok ir; CppGenerated = true;
               CppFile = Some srcFile; CompileResult = Error e; RunResult = Error runErr;
-              ValueCheckResult = Error [runErr]; HasExpectedValues = not expectedValues.IsEmpty }
+              ValueCheckResult = Error [runErr]; HasExpectedValues = not expectedValues.IsEmpty; AbortExpectation = abortExpectation }
         | Ok exeFile ->
             // Step 4: Run — but a CUDA-requiring test on a GPU-less box can
             // compile yet not execute. Validate the compile, skip the run.
@@ -168,7 +177,7 @@ let runFullTest (testName: string) (source: string) (outputDir: string) (compile
                   CppFile = Some srcFile; CompileResult = Ok exeFile;
                   RunResult = Error "Skipped: no GPU";
                   ValueCheckResult = Error ["Skipped: no GPU"];
-                  HasExpectedValues = not expectedValues.IsEmpty }
+                  HasExpectedValues = not expectedValues.IsEmpty; AbortExpectation = abortExpectation }
             else
                 let runResult = runExecutable exeFile
 
@@ -183,7 +192,27 @@ let runFullTest (testName: string) (source: string) (outputDir: string) (compile
 
                 { TestName = testName; IRResult = Ok ir; CppGenerated = true;
                   CppFile = Some srcFile; CompileResult = Ok exeFile; RunResult = runResult;
-                  ValueCheckResult = valueCheckResult; HasExpectedValues = not expectedValues.IsEmpty }
+                  ValueCheckResult = valueCheckResult; HasExpectedValues = not expectedValues.IsEmpty; AbortExpectation = abortExpectation }
+
+/// A test whose name ends in "(aborts)" is a runtime-abort probe: the CORRECT
+/// outcome is that it compiles cleanly and then exits nonzero at runtime (a
+/// constraint guard firing std::abort()). When the source pins a message via
+/// `// ABORT: <substring>`, the merged stdout+stderr must contain it. Exit
+/// codes are deliberately not pinned — abort() maps to different codes across
+/// runtimes (MinGW: 3; MSVC: 0xC0000409). An IR or compile failure is a
+/// genuine failure: the probe exercises the runtime guard, not the checker.
+let isAbortProbe (result: FullTestResult) =
+    result.TestName.EndsWith "(aborts)"
+
+/// Did an abort-probe behave correctly? Compiled, ran, exited nonzero, and
+/// printed the pinned abort message (when one is present).
+let isExpectedAbort (result: FullTestResult) =
+    match result.IRResult, result.CompileResult, result.RunResult with
+    | Ok _, Ok _, Ok (code, output) when code <> 0 ->
+        match result.AbortExpectation with
+        | Some sub -> output.Contains sub
+        | None -> true
+    | _ -> false
 
 /// Print a full test result
 let printFullTestResult (result: FullTestResult) (verbose: bool) (showFullError: bool) =
@@ -220,10 +249,17 @@ let printFullTestResult (result: FullTestResult) (verbose: bool) (showFullError:
     // A reject-probe (name ends in "(rejects)") is SUPPOSED to fail. If it
     // does, that's a pass; if it unexpectedly succeeds, that's the failure.
     let isReject = result.TestName.EndsWith "(rejects)"
+    // An abort-probe (name ends in "(aborts)") is SUPPOSED to compile and
+    // then exit nonzero at runtime, with the pinned // ABORT: message.
+    let isAbort = isAbortProbe result
     let outcome =
         if isReject then
             if anyFail then Blade.Tests.TestHarness.Pass    // correctly rejected
             else Blade.Tests.TestHarness.Fail               // should have been rejected
+        elif isAbort then
+            if isExpectedAbort result then Blade.Tests.TestHarness.Pass
+            elif anySkip && not anyFail then Blade.Tests.TestHarness.Skip
+            else Blade.Tests.TestHarness.Fail
         elif anyFail then Blade.Tests.TestHarness.Fail
         elif anySkip then Blade.Tests.TestHarness.Skip
         else Blade.Tests.TestHarness.Pass
@@ -233,6 +269,19 @@ let printFullTestResult (result: FullTestResult) (verbose: bool) (showFullError:
                 let (stg, _) = stages |> List.find (fun (_, s) -> s = "FAIL" || s.StartsWith "EXIT")
                 sprintf "correctly rejected at %s" stg
             else "expected rejection but it was accepted"
+        elif isAbort then
+            match result.RunResult with
+            | Ok (code, output) when code <> 0 ->
+                match result.AbortExpectation with
+                | Some sub when not (output.Contains sub) ->
+                    sprintf "aborted (exit %d) but output lacks '%s'" code sub
+                | _ -> sprintf "aborted as expected (exit %d)" code
+            | Ok (0, _) -> "expected runtime abort but exited 0"
+            | _ ->
+                match stages |> List.tryFind (fun (_, s) -> s = "FAIL" || s = "SKIP") with
+                | Some (stg, "SKIP") -> sprintf "%s skipped" stg
+                | Some (stg, _) -> sprintf "expected runtime abort but %s failed" stg
+                | None -> "expected runtime abort"
         else
             match outcome with
             | Blade.Tests.TestHarness.Pass ->
@@ -312,6 +361,7 @@ let isRejectProbe (result: FullTestResult) =
 /// correction surfaced it.
 let isCorrectOutcome (result: FullTestResult) =
     if isRejectProbe result then not (isFullPass result)
+    elif isAbortProbe result then isExpectedAbort result
     else
         isFullPass result &&
         (not result.HasExpectedValues ||
@@ -414,7 +464,7 @@ let runMultiFileTestsFull (name: string) (tests: (string * (string * string) lis
                 // Same backend inference as the single-file pipeline:
                 // .cu + nvcc when device kernels are emitted, else .cpp + g++.
                 let backendReq = inferBackendReq cppCode
-                let ext = match backendReq with RequiresCuda -> ".cu" | CpuOnly -> ".cpp"
+                let ext = match backendReq with RequiresCuda -> ".cu" | RequiresMpi | CpuOnly -> ".cpp"
                 let cppFile = Path.Combine(outputDir, safeName + ext)
                 File.WriteAllText(cppFile, cppCode)
 

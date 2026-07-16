@@ -1,4 +1,5 @@
-﻿// TEST: ML E2E Invariant Regression Training
+// TEST: ML E2E Invariant Regression Training
+import ad as ad
 // ============================================================================
 // The end-to-end equivariant ML example (module doc features/equivariant-nn.md
 // Â§10 + AD): a two-layer E(3)-equivariant message-passing network trained by
@@ -262,7 +263,7 @@ let mut dw3 = replicate(10, pure(0.0)) |> compute
 let mut dwr = [0.0, 0.0]
 let mut dbr = [0.0]
 
-let step0_loss = grad(loss)(w1v, w2v, w3v, wrv, brv, dw1, dw2, dw3, dwr, dbr)
+let step0_loss = ad.grad(loss)(w1v, w2v, w3v, wrv, brv, dw1, dw2, dw3, dwr, dbr)
 
 let dw1_s0 = {
     let mut cp = replicate(5, pure(0.0)) |> compute
@@ -296,7 +297,7 @@ let final_loss = {
         for k in 0..10 { dw3(k) = 0.0 }
         for k in 0..2 { dwr(k) = 0.0 }
         dbr(0) = 0.0
-        let lossv = grad(loss)(w1v, w2v, w3v, wrv, brv, dw1, dw2, dw3, dwr, dbr)
+        let lossv = ad.grad(loss)(w1v, w2v, w3v, wrv, brv, dw1, dw2, dw3, dwr, dbr)
         traj(step) = lossv
         for k in 0..5 { w1v(k) -= 0.1 * dw1(k) }
         for k in 0..9 { w2v(k) -= 0.1 * dw2(k) }

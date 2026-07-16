@@ -1,0 +1,10 @@
+// TEST: Struct Conjunct With And Inside
+// A && within one conjunct still works (back-compat with the single-expr
+// where form).
+struct Window {
+    lo: Int,
+    hi: Int
+} where lo <= hi && hi <= 100
+let w = Window { lo = 2, hi = 50 }
+let h = w.hi
+// EXPECT: h = 50

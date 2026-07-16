@@ -1,0 +1,16 @@
+// TEST: Struct Reassign And Mutate OK
+// Whole-struct reassignment and an invariant-preserving field mutation
+// both pass their per-assignment guards.
+struct Balanced {
+    a: Int,
+    b: Int,
+    total: Int
+} where a + b == total
+function go() -> Int = {
+    let mut x = Balanced { a = 1, b = 2, total = 3 }
+    x = Balanced { a = 2, b = 3, total = 5 }
+    x.b = 3
+    x.total
+}
+let t = go()
+// EXPECT: t = 5

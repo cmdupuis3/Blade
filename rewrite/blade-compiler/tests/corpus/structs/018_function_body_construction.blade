@@ -1,0 +1,15 @@
+// TEST: Struct Function Body Construction
+// Constrained construction inside a function body is guarded too (this
+// hole existed before: only module-level literals were validated).
+struct Balanced {
+    a: Int,
+    b: Int,
+    total: Int
+} where a + b == total
+function mk(a: Int, b: Int) -> Balanced = {
+    let r = Balanced { a = a, b = b, total = a + b }
+    r
+}
+let x = mk(3, 4)
+let t = x.total
+// EXPECT: t = 7

@@ -1,0 +1,50 @@
+// TEST: Physics -- Both Masses Fuzzy: Uncertainty Lives In The Frame
+import ppl as ppl
+// ============================================================================
+// Elastic collision with BOTH masses moment jets. u1 = 2, u2 = -1 (sharp),
+// m1 ~ (1.0, 0.2), m2 ~ (1.5, 0.3), independent (5x5 = 25 joint samples).
+// The result: ALL the outcome uncertainty collapses into ONE scalar jet --
+// the center-of-mass velocity V. Each outgoing velocity is an AFFINE image
+// v_i = 2V - u_i, so v1 and v2 share every higher cumulant (a2 = b2,
+// a3 = b3), and the RELATIVE velocity v1 - v2 is a DEGENERATE jet, sharp at
+// -(u1 - u2) = -3, no matter how fuzzy the masses are. In the center-of-mass
+// frame the collision just reverses the sharp relative velocity: it generates
+// no uncertainty. All the fuzz is in the BOOST between lab and COM frame,
+// because the COM velocity is a ratio of fuzzy masses. The moment jet is
+// attached to the choice of frame, not to the event -- a Galilean-relativity
+// reading, with the relative velocity and the conservation laws as the
+// invariants that stay sharp.
+// EXPECT values checked vs an independent PowerShell ensemble.
+// ============================================================================
+type TimeIdx = Idx<25>
+let MM: Array<Float64 like Idx<2>, TimeIdx> = [
+  [0.707325084957, 0.707325084957, 0.707325084957, 0.707325084957, 0.707325084957, 0.880244440193, 0.880244440193, 0.880244440193, 0.880244440193, 0.880244440193, 1.0, 1.0, 1.0, 1.0, 1.0, 1.11975555981, 1.11975555981, 1.11975555981, 1.11975555981, 1.11975555981, 1.29267491504, 1.29267491504, 1.29267491504, 1.29267491504, 1.29267491504],
+  [1.06098762744, 1.32036666029, 1.5, 1.67963333971, 1.93901237256, 1.06098762744, 1.32036666029, 1.5, 1.67963333971, 1.93901237256, 1.06098762744, 1.32036666029, 1.5, 1.67963333971, 1.93901237256, 1.06098762744, 1.32036666029, 1.5, 1.67963333971, 1.93901237256, 1.06098762744, 1.32036666029, 1.5, 1.67963333971, 1.93901237256]]
+let d = ppl.dist(MM, 6)
+
+// COM velocity V carries all the uncertainty
+let dV = ppl.dist_map(d, 3, 2, lambda(m1, m2) -> (2.0 * m1 - m2) / (m1 + m2))
+let V2 = ppl.cumulant(dV, 2)
+let V3 = ppl.cumulant(dV, 3)
+
+// outgoing velocities: affine images of V, so v1 and v2 share higher cumulants
+let dv1 = ppl.dist_map(d, 3, 2, lambda(m1, m2) -> (2.0 * m1 - 4.0 * m2) / (m1 + m2))
+let dv2 = ppl.dist_map(d, 3, 2, lambda(m1, m2) -> (5.0 * m1 - m2) / (m1 + m2))
+let a2 = ppl.cumulant(dv1, 2)
+let a3 = ppl.cumulant(dv1, 3)
+let b2 = ppl.cumulant(dv2, 2)
+let b3 = ppl.cumulant(dv2, 3)
+
+// relative velocity v1 - v2 : DEGENERATE, sharp at -3
+let ddiff = ppl.dist_map(d, 3, 2, lambda(m1, m2) -> (2.0 * m1 - 4.0 * m2) / (m1 + m2) - (5.0 * m1 - m2) / (m1 + m2))
+let w1 = ppl.cumulant(ddiff, 1)
+let w2 = ppl.cumulant(ddiff, 2)
+
+// a2 = b2 = 4*V2 and a3 = b3 = 8*V3 (affine slope 2); relative velocity sharp:
+// EXPECT: V2 = [0.041887217170366]
+// EXPECT: a2 = [0.167548868681464]
+// EXPECT: b2 = [0.167548868681464]
+// EXPECT: a3 = [0.00828464983490363]
+// EXPECT: b3 = [0.00828464983490363]
+// EXPECT: w1 = [-3.0]
+// EXPECT: w2 = [0.0]

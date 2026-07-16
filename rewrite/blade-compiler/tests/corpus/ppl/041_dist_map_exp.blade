@@ -1,0 +1,15 @@
+// TEST: Dist Map Exp
+import ppl as ppl
+// A non-polynomial map NEEDS the explicit truncation degree (the
+// approximation is a modeling choice): dist_map(xd, 2, 3, lambda(x) ->
+// exp(x)) differentiates exp three times symbolically — every derivative
+// evaluates to exp(μ) at the mean — and reproduces ppl/036's hand-jetted
+// truncated pushforward (dump-jet J4).
+type TimeIdx = Idx<6>
+let A: Array<Float64 like Idx<1>, TimeIdx> = [[1.0, 2.0, 4.0, 6.0, 0.0, 3.0]]
+let xd = ppl.dist(A, 6)
+let dy = ppl.dist_map(xd, 2, 3, lambda(x) -> exp(x))
+let y1 = ppl.cumulant(dy, 1)
+let y2 = ppl.cumulant(dy, 2)
+// EXPECT: y1 = [48.5949265682]
+// EXPECT: y2 = [7127.9191697]

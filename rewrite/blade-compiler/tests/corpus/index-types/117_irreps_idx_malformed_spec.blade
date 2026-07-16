@@ -1,0 +1,9 @@
+// TEST: IrrepsIdx Malformed Spec (rejects)
+// ============================================================================
+// The spec resolves statically but fails validation: parity must be 0
+// (even) or 1 (odd). Pins the specOfStatic message path through the
+// bad-spec marker: the diagnostic carries WHAT was wrong, not just that
+// the annotation was refused.
+// ============================================================================
+let static bad = [(0, 2, 1)]
+let x: Array<Float like IrrepsIdx<bad>> = [1.0]

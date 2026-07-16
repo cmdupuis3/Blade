@@ -1,9 +1,10 @@
 // TEST: Moments Triple
+import ppl as ppl
 // moments(A, 3): third-order raw comoment — three method_for copies under a
 // fully commutative prodsum kernel; output SymIdx<3, 2>, C(4,3) = 4 cells.
 // (000): (1+8)/2 = 4.5   | (001): (1*1*3 + 2*2*4)/2 = 9.5
 // (011): (1*9 + 2*16)/2 = 20.5 | (111): (27+64)/2 = 45.5
 type TimeIdx = Idx<2>
 let A: Array<Float64 like Idx<2>, TimeIdx> = [[1.0, 2.0], [3.0, 4.0]]
-let m3 = moments(A, 3)
+let m3 = ppl.moments(A, 3)
 // EXPECT: m3 = [4.5, 9.5, 20.5, 45.5]

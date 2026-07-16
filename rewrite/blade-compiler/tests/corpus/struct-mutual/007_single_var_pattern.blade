@@ -1,0 +1,11 @@
+// TEST: Mutual Single Var Pattern (rejects)
+// A group annotation requires a joint tuple-of-variables pattern.
+struct Particle {
+    pos: Float,
+    vel: Float,
+    mass: Float
+}
+type P1 = Particle
+and P2 = Particle
+where P1.vel + P2.vel == 0.0
+let pair: (P1, P2) = (Particle { pos = 0.0, vel = 1.0, mass = 1.0 }, Particle { pos = 1.0, vel = 0.0 - 1.0, mass = 1.0 })

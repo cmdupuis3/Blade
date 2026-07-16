@@ -1,0 +1,7 @@
+// TEST: Struct Bound References Later Field (rejects)
+// Field order matters: a bound may reference only EARLIER fields.
+struct Bad {
+    a: Int in 0 .. b,
+    b: Int
+}
+let x = Bad { a = 1, b = 5 }

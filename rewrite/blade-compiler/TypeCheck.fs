@@ -59,23 +59,31 @@ let rec evalConstExpr (env: TypeEnv) (expr: Expr) : int64 option =
 /// StaticFunctions maps populated by checkModule's pre-pass. Shared by the
 /// Dist annotation order (lowerTypeExpr's TyDist arm) and the cumulant
 /// projection order (inferCumulantProj).
+let staticEnvOf (env: TypeEnv) : StaticEval.StaticEnv =
+    { Values = env.StaticValues
+      Functions =
+        env.StaticFunctions
+        |> Map.map (fun _ (fd: FunctionDecl) ->
+            { StaticEval.Name = fd.Name
+              StaticEval.Params = fd.Params |> List.map (fun p -> p.Name)
+              StaticEval.Body = fd.Body })
+      CalledFunctions = ref Set.empty
+      ProviderRoots = Map.empty }
+
 let evalStaticIntExpr (env: TypeEnv) (expr: Expr) : int option =
     match evalConstExpr env expr with
     | Some n -> Some (int n)
     | None ->
-        let staticEnv : StaticEval.StaticEnv =
-            { Values = env.StaticValues
-              Functions =
-                env.StaticFunctions
-                |> Map.map (fun _ (fd: FunctionDecl) ->
-                    { StaticEval.Name = fd.Name
-                      StaticEval.Params = fd.Params |> List.map (fun p -> p.Name)
-                      StaticEval.Body = fd.Body })
-              CalledFunctions = ref Set.empty
-              ProviderRoots = Map.empty }
-        match StaticEval.evalExpr staticEnv StaticEval.maxSteps expr with
+        match StaticEval.evalExpr (staticEnvOf env) StaticEval.maxSteps expr with
         | Ok (StaticEval.SVInt v) -> Some (int v)
         | _ -> None
+
+/// Evaluate an expression to its raw StaticValue under the same full static
+/// contract as evalStaticIntExpr. For type arguments whose payload is
+/// structured rather than an int (the IrrepsIdx spec: an array of triples,
+/// which StaticEval folds to nested SVTuples).
+let evalStaticValueExpr (env: TypeEnv) (expr: Expr) : Result<StaticEval.StaticValue, string> =
+    StaticEval.evalExpr (staticEnvOf env) StaticEval.maxSteps expr
 
 /// Dist provenance of a surface expression: the union of the provenance
 /// sets of every variable reachable in it (conservative — an
@@ -98,7 +106,7 @@ let rec provenanceOfSurface (env: TypeEnv) (e: Expr) : Set<string> =
          | None -> Set.empty)
     | ExprBinOp (_, _, l, r) -> Set.union (prov l) (prov r)
     | ExprUnaryOp (_, x) -> prov x
-    | ExprApp (ExprVar "cumulant", _) -> Set.empty   // a projected component is an ARRAY, not a dist
+    | ExprApp (ExprVar "__ppl_cumulant", _) -> Set.empty   // a projected component is an ARRAY, not a dist
     | ExprApp (_, args) -> unionMany args            // call result: union of Dist-relevant args (conservative)
     | ExprTyped (x, _) -> prov x
     | ExprTuple es -> unionMany es
@@ -218,7 +226,7 @@ let rec lowerTypeExpr (env: TypeEnv) (ty: TypeExpr) : IRType =
         | _ ->
             match lookupTypeDef name env with
             | Some (TDIAlias resolvedTy) -> resolvedTy
-            | Some (TDIStruct (n, _, _)) -> IRTNamed n
+            | Some (TDIStruct (n, _, _, _)) -> IRTNamed n
             | Some (TDIVariant (n, _, _)) -> IRTNamed n
             | Some (TDIIndexType _) ->
                 // Aliased index type in value position (function param,
@@ -439,12 +447,13 @@ let rec lowerTypeExpr (env: TypeEnv) (ty: TypeExpr) : IRType =
             | _ -> false
         if isAllString then IRTScalar ETString else IRTScalar ETInt64
 
-    | TyDepIdx _ | TyRaggedIdx _ | TyRaggedIdxOpaque ->
-        // DepIdx/RaggedIdx in non-index position. Defensive fallback matching
-        // the shape used for TyCompoundIdx, TyEquivIdx, etc. — wrap in a
-        // single-index Array so the IR shape is consistent. Real iteration
-        // happens via lowerIndexType, which produces an arity-2 IRIndexType
-        // with the right Dependencies and Tag.
+    | TyDepIdx _ | TyRaggedIdx _ | TyRaggedIdxOpaque | TyIrrepsIdx _ ->
+        // DepIdx/RaggedIdx/IrrepsIdx in non-index position. Defensive fallback
+        // matching the shape used for TyCompoundIdx, TyEquivIdx, etc. — wrap
+        // in a single-index Array so the IR shape is consistent. Real
+        // iteration happens via lowerIndexType, which produces the correctly
+        // tagged IRIndexType (Dependencies for the dependent forms, the
+        // irreps identity tag for IrrepsIdx).
         let idx = lowerIndexType env 0 ty
         mkArrayArrow [idx] (IRTScalar ETFloat64) None
 
@@ -556,6 +565,37 @@ and lowerIndexType env (_position: int) (ty: TypeExpr) : IRIndexType =
         { Id = id; Rank = 1; Extent = IROpaqueExtent
           Symmetry = SymNone; Tag = Some "__raggedidx_opaque"; IxKind = IxKRaggedOpaque
           Kind = SDimension; Dependencies = [] }
+    | TyIrrepsIdx specExpr ->
+        // IrrepsIdx<spec>: block-structured dense index over an irreps spec.
+        // The spec resolves under the full static contract (like Dist's
+        // order); extent = total_dim(spec) and EVERY cell is stored — flat
+        // dense, no compression — so the record rides the ordinary dense
+        // paths (SymNone). The block structure matters for IDENTITY, carried
+        // in the Tag (mkIrrepsTag: spec equality = index-space identity;
+        // Unify adds the spec-mismatch strictness arm). lowerIndexType has
+        // no error channel, so a non-static/malformed spec lowers to the
+        // marker record consumed by irTypeHasBadIrrepsSpec at let-binding /
+        // function-signature sites (ragged-no-prior pattern), the failure
+        // detail smuggled in the IRParam name.
+        (match evalStaticValueExpr env specExpr
+               |> Result.bind (Blade.ML.Statics.specOfStatic "IrrepsIdx") with
+         | Ok spec ->
+             let triples = spec |> List.map (fun e -> (e.L, e.Parity, e.Mult))
+             { Id = id; Rank = 1
+               Extent = IRLit (IRLitInt (int64 (Blade.ML.Spec.totalDim spec)))
+               Symmetry = SymNone; Tag = Some (mkIrrepsTag None triples)
+               IxKind = IxKIrreps; Kind = SDimension; Dependencies = [] }
+         | Error detail ->
+             // specOfStatic prefixes its own "IrrepsIdx: " (its `what`
+             // label); the consumption-site diagnostic adds the same prefix,
+             // so strip it here to avoid "IrrepsIdx: IrrepsIdx: ...".
+             let detail =
+                 if detail.StartsWith "IrrepsIdx: " then detail.Substring "IrrepsIdx: ".Length
+                 else detail
+             { Id = id; Rank = 1
+               Extent = IRParam (detail, 0, IRTNat None)
+               Symmetry = SymNone; Tag = Some "__error_irreps_bad_spec"
+               IxKind = IxKErrorIrrepsBadSpec; Kind = SDimension; Dependencies = [] })
     | TyNamed (name, _) ->
         match lookupTypeDef name env with
         | Some (TDIIndexType (_, idx, _)) -> { idx with Id = id }
@@ -1111,7 +1151,7 @@ let rec checkPattern (env: TypeEnv) (expected: IRType) (pat: Pattern)
     | PatStruct (typeName, fieldPats) ->
         let fieldTypes =
             match lookupTypeDef typeName env with
-            | Some (TDIStruct (_, _, fields)) ->
+            | Some (TDIStruct (_, _, fields, _)) ->
                 fields |> List.map (fun (n, t) -> (n, t)) |> Map.ofList
             | _ -> Map.empty
         fieldPats |> List.map (fun (fname, fpat) ->
@@ -1489,8 +1529,37 @@ let private dispatchAppOrIndex (env: TypeEnv) (tFunc: TypedExpr) (tArgs: TypedEx
                 let remaining = arrTy.IndexTypes |> List.skip tArgs.Length
                 Ok (mkTyped (TExprIndex (tFunc, tArgs, identity))
                             (mkArrayLike { arrTy with IndexTypes = remaining }))))
-    | FuncElem (_paramTys, retTy) ->
-        Ok (mkTyped (TExprApp (tFunc, tArgs)) retTy)
+    | FuncElem (paramTys, retTy) ->
+        // IrrepsIdx strictness at DIRECT APPLICATION: plain function calls do
+        // not unify parameter types against argument types (historically the
+        // args are checked structurally downstream), so the irreps identity
+        // check — whose whole point is distinguishing SAME-EXTENT arrays —
+        // would be skipped at exactly the seam it exists for. Check just the
+        // irreps-vs-irreps index pairs here (both tags parse as IrrepsTag);
+        // every other pairing keeps the historical looseness, so this arm is
+        // dead code for non-irreps programs. Kernel application is covered
+        // separately by buildApplyInfo's real unification.
+        let irrepsClash =
+            let n = min paramTys.Length tArgs.Length
+            List.zip (List.truncate n paramTys) (List.truncate n tArgs)
+            |> List.mapi (fun i pair -> (i, pair))
+            |> List.tryPick (fun (i, (pTy, arg)) ->
+                match env.Subst.Resolve pTy, env.Subst.Resolve arg.Type with
+                | ArrayElem pa, ArrayElem aa when pa.IndexTypes.Length = aa.IndexTypes.Length ->
+                    List.zip pa.IndexTypes aa.IndexTypes
+                    |> List.tryPick (fun (pi, ai) ->
+                        match pi.Tag, ai.Tag with
+                        | Some (IrrepsTag _), Some (IrrepsTag _) when indexPairIncompatible pi ai ->
+                            Some (i, pi, ai)
+                        | _ -> None)
+                | _ -> None)
+        match irrepsClash with
+        | Some (i, pi, ai) ->
+            Error (Other (sprintf
+                "argument %d: IrrepsIdx mismatch: the parameter expects %s but the argument carries %s. IrrepsIdx identity is the spec (plus nominative alias name) — equal total_dim does not make two irreps spaces interchangeable."
+                (i + 1) (ppIndexType pi) (ppIndexType ai)))
+        | None ->
+            Ok (mkTyped (TExprApp (tFunc, tArgs)) retTy)
     | _ ->
         let retTy = env.Subst.Fresh()
         Ok (mkTyped (TExprApp (tFunc, tArgs)) retTy)
@@ -1566,6 +1635,7 @@ let private typedExprChildren (expr: TypedExpr) : TypedExpr list =
                     lo :: hi :: (body |> List.collect stmtExprsOf)
             (stmts |> List.collect stmtExprsOf) @ Option.toList final
         | TExprAssign (l, r) -> [l; r]
+        | TExprConstraintCheck (c, _) -> [c]
         | TExprReplicate (c, b) -> [c; b]
         | TExprAlign (es, _) -> es
         | TExprPartialApp (_, a, _) -> [a]
@@ -1604,6 +1674,17 @@ let rec private revalidateBodyTagChecks (env: TypeEnv) (expr: TypedExpr) : TypeR
 /// carries the derivative rules); StaticEval.evalBuiltin mirrors the same
 /// names for static contexts.
 let isMathIntrinsic (name: string) : bool = Blade.Grad.isMathIntrinsic name
+
+/// A variable is a provider-module alias when it is bound opaque to a
+/// registered provider's module name (`import netcdf as nc` binds
+/// nc : IRTNamed "netcdf"). Returns the registry name for dispatch.
+let providerAliasName (env: TypeEnv) (alias: string) : string option =
+    match lookupVar alias env with
+    | Some vi ->
+        (match env.Subst.Resolve(vi.Type) with
+         | IRTNamed pn when (Blade.ProviderRegistry.tryFind pn).IsSome -> Some pn
+         | _ -> None)
+    | None -> None
 
 let rec inferExpr (env: TypeEnv) (expr: Expr) : TypeResult<TypedExpr> =
     match expr with
@@ -1650,12 +1731,7 @@ let rec inferExpr (env: TypeEnv) (expr: Expr) : TypeResult<TypedExpr> =
     | ExprUnaryOp (op, operand) ->
         inferUnaryOp env op operand
     | ExprApp (ExprField (ExprVar alias, "load_compound"), [varE; maskE])
-        when (match lookupVar alias env with
-              | Some vi ->
-                  (match env.Subst.Resolve(vi.Type) with
-                   | IRTNamed pn -> pn.StartsWith("Providers.")
-                   | _ -> false)
-              | None -> false) ->
+        when (providerAliasName env alias).IsSome ->
         inferExpr env varE |> Result.bind (fun tVar ->
         inferExpr env maskE |> Result.bind (fun tMask ->
             match env.Subst.Resolve(tVar.Type), env.Subst.Resolve(tMask.Type) with
@@ -1668,6 +1744,89 @@ let rec inferExpr (env: TypeEnv) (expr: Expr) : TypeResult<TypedExpr> =
                      Ok (mkTyped (TExprApp (tField, [tVar; tMask])) compoundTy)
                  | Error msg -> Error (Other msg))
             | _ -> Error (Other "load_compound expects two array arguments: the variable and an integer mask")))
+
+    // ---- Provider read: alias.read(view) / view |> alias.read ----
+    // Both spellings arrive as this application (the pipe desugars to an
+    // application). The result is the operand's type unchanged; the typed
+    // node is TExprRead, which lowering's tryPlainRead/tryCompoundRead
+    // intercept to record the deferred ProviderReadSpec.
+    | ExprApp (ExprField (ExprVar alias, "read"), [operand])
+        when (providerAliasName env alias).IsSome ->
+        inferExpr env operand |> Result.bind (fun tE ->
+            Ok (mkTyped (TExprRead tE) tE.Type))
+
+    // ---- Streamed read: alias.stream(view) / view |> alias.stream ----
+    // Types exactly like a read (the array type is unchanged) but keeps the
+    // generic application shape so lowering records a STREAMED spec: no
+    // materialization at the binding; consuming loop nests inline per-fiber
+    // store reads at the S/T boundary instead.
+    | ExprApp (ExprField (ExprVar alias, "stream"), [operand])
+        when (providerAliasName env alias).IsSome ->
+        inferExpr env operand |> Result.bind (fun tE ->
+            match env.Subst.Resolve tE.Type with
+            | ArrayElem _ ->
+                let aliasVi = (lookupVar alias env).Value
+                let tAlias = mkTyped (TExprVar (alias, aliasVi.VarId, aliasVi.Identity)) aliasVi.Type
+                let tField = mkTyped (TExprField (tAlias, "stream", 0)) tE.Type
+                Ok (mkTyped (TExprApp (tField, [tE])) tE.Type)
+            | _ -> Error (Other (sprintf "%s.stream expects a provider array variable" alias)))
+
+    // ---- Windowed packed read: alias.read_window(view, lo, hi) ----
+    // Materializes only the cells with every coordinate in [lo, hi): a
+    // translated sub-simplex, typed with leading packed extent hi-lo.
+    // Bounds are integer literals (the window is a compile-time shape).
+    | ExprApp (ExprField (ExprVar alias, "read_window"), args)
+        when (providerAliasName env alias).IsSome ->
+        (match args with
+         | [operand; ExprLit (LitInt lo); ExprLit (LitInt hi)] ->
+             inferExpr env operand |> Result.bind (fun tE ->
+                 match env.Subst.Resolve tE.Type with
+                 | ArrayElem at ->
+                     (match at.IndexTypes with
+                      | lead :: rest when lead.Symmetry <> SymNone && lead.Rank >= 2 ->
+                          (match lead.Extent with
+                           | IRLit (IRLitInt n) when lo >= 0L && lo < hi && hi <= n ->
+                               let winIdx = { lead with Id = env.Builder.FreshId()
+                                                        Extent = IRLit (IRLitInt (hi - lo)) }
+                               let winTy = mkArrayLike { at with IndexTypes = winIdx :: rest }
+                               let aliasVi = (lookupVar alias env).Value
+                               let tAlias = mkTyped (TExprVar (alias, aliasVi.VarId, aliasVi.Identity)) aliasVi.Type
+                               let tField = mkTyped (TExprField (tAlias, "read_window", 0)) winTy
+                               let tLo = mkTyped (TExprLit (LitInt lo)) (IRTScalar ETInt64)
+                               let tHi = mkTyped (TExprLit (LitInt hi)) (IRTScalar ETInt64)
+                               Ok (mkTyped (TExprApp (tField, [tE; tLo; tHi])) winTy)
+                           | IRLit (IRLitInt n) ->
+                               Error (Other (sprintf "%s.read_window bounds [%d, %d) must satisfy 0 <= lo < hi <= %d (the packed extent)" alias lo hi n))
+                           | _ ->
+                               Error (Other (sprintf "%s.read_window needs a literal packed extent" alias)))
+                      | _ ->
+                          Error (Other (sprintf "%s.read_window applies to PACKED variables (leading SymIdx/AntisymIdx); use %s.read for dense variables" alias alias)))
+                 | _ -> Error (Other (sprintf "%s.read_window expects a provider array variable as its first argument" alias)))
+         | _ -> Error (Other (sprintf "%s.read_window expects (variable, lo, hi) with integer-literal bounds" alias)))
+
+    // ---- Provider write: alias.write("path", A) ----
+    // The source must be a named array binding (the store variable takes
+    // its name); the path must be a string literal (the store is created
+    // at a compile-time-known location, mirroring alias.load). Types as
+    // unit; the generic application node is kept — lowering's
+    // tryProviderWrite intercepts the shape into a ProviderWriteSpec.
+    | ExprApp (ExprField (ExprVar alias, "write"), args)
+        when (providerAliasName env alias).IsSome ->
+        (match args with
+         | [ExprLit (LitString path); valueE] ->
+             (match valueE with
+              | ExprVar _ ->
+                  inferExpr env valueE |> Result.bind (fun tValue ->
+                      match env.Subst.Resolve(tValue.Type) with
+                      | ArrayElem _ ->
+                          let aliasVi = (lookupVar alias env).Value
+                          let tAlias = mkTyped (TExprVar (alias, aliasVi.VarId, aliasVi.Identity)) aliasVi.Type
+                          let tField = mkTyped (TExprField (tAlias, "write", 0)) IRTUnit
+                          let tPath = mkTyped (TExprLit (LitString path)) (IRTScalar ETString)
+                          Ok (mkTyped (TExprApp (tField, [tPath; tValue])) IRTUnit)
+                      | _ -> Error (Other (sprintf "%s.write expects an array as its second argument (the variable to store)" alias)))
+              | _ -> Error (Other (sprintf "%s.write stores a NAMED array binding (its name becomes the store variable's name): bind the value first (let A = ...; %s.write(\"path\", A))" alias alias)))
+         | _ -> Error (Other (sprintf "%s.write expects (\"path\", array): a string-literal store path and the array to write" alias)))
 
     | ExprApp (ExprField (ExprVar n, field), args)
         when (lookupVar (sprintf "%s.%s" n field) env).IsSome ->
@@ -1714,6 +1873,22 @@ let rec inferExpr (env: TypeEnv) (expr: Expr) : TypeResult<TypedExpr> =
             | _ ->
                 Ok (mkTyped (TExprUnaryOp (OpMath name, tArg)) (IRTScalar ETFloat64)))
 
+    // ---- abs(x): polymorphic numeric intrinsic ----
+    // Deliberately NOT in mathIntrinsics (those are real-valued, typed
+    // Float64, and carry derivative rules); abs preserves its operand's
+    // numeric type and renders as std::abs, whose C++ overload set covers
+    // int64 and double. Ubiquitous in dependent field bounds
+    // (`in abs(l1 - l2) .. l1 + l2 + 1`).
+    | ExprApp (ExprVar "abs", [arg]) when (lookupVar "abs" env).IsNone ->
+        inferExpr env arg |> Result.bind (fun tArg ->
+            match env.Subst.Resolve tArg.Type with
+            | IRTScalar (ETInt32 | ETInt64 | ETFloat32 | ETFloat64) as sc ->
+                Ok (mkTyped (TExprUnaryOp (OpMath "abs", tArg)) sc)
+            | IRTInfer _ ->
+                Ok (mkTyped (TExprUnaryOp (OpMath "abs", tArg)) tArg.Type)
+            | other ->
+                Error (Other (sprintf "abs expects a numeric scalar operand, got %s" (ppIRType other))))
+
     // ---- prodsum(x1, ..., xk): fused fiber product-sum ----
     // Σ_t Π_ℓ xℓ(t) over rank-1 arrays of equal extent — the k-fold
     // generalization of a dot product, and the comoment primitive the PPL
@@ -1737,8 +1912,10 @@ let rec inferExpr (env: TypeEnv) (expr: Expr) : TypeResult<TypedExpr> =
     // be a static int in 1..r where r is the dist's carried order. Works in
     // any expression position on any Dist-typed value — including function
     // parameters, which the elaboration-level registry could never see.
-    // Shadowable like the formers and math intrinsics.
-    | ExprApp (ExprVar "cumulant", [dExpr; kExpr]) when (lookupVar "cumulant" env).IsNone ->
+    // `cumulant` is part of the `ppl` module surface: the ppl elaborator
+    // rewrites a qualified `p.cumulant(d, k)` to this internal marker, so a
+    // bare `cumulant(...)` no longer resolves (import-gated, not language-wide).
+    | ExprApp (ExprVar "__ppl_cumulant", [dExpr; kExpr]) when (lookupVar "__ppl_cumulant" env).IsNone ->
         inferCumulantProj env dExpr kExpr
 
     | ExprApp (func, args) ->
@@ -1801,7 +1978,7 @@ let rec inferExpr (env: TypeEnv) (expr: Expr) : TypeResult<TypedExpr> =
                 match tObj.Type with
                 | IRTNamed typeName ->
                     match lookupTypeDef typeName env with
-                    | Some (TDIStruct (_, _, fields)) ->
+                    | Some (TDIStruct (_, _, fields, _)) ->
                         let idx = fields |> List.tryFindIndex (fun (n, _) -> n = field)
                         let ty = fields |> List.tryFind (fun (n, _) -> n = field) |> Option.map snd
                         (ty |> Option.defaultValue (env.Subst.Fresh()),
@@ -2095,7 +2272,10 @@ let rec inferExpr (env: TypeEnv) (expr: Expr) : TypeResult<TypedExpr> =
     // ---- Assignment ----
     | ExprAssign (lhs, rhs) ->
         inferExpr env lhs |> Result.bind (fun tL ->
-        inferExpr env rhs |> Result.bind (fun tR ->
+        // Bidirectional: check the RHS against the target's type so literals
+        // adapt (Int64 literal into an Int32 field) as in every other
+        // checked position.
+        checkExpr env tL.Type rhs |> Result.bind (fun tR ->
             // Check assignability of LHS
             let assignErr =
                 match tL.Kind with
@@ -2108,8 +2288,15 @@ let rec inferExpr (env: TypeEnv) (expr: Expr) : TypeResult<TypedExpr> =
             match assignErr with
             | Some e -> Error e
             | None ->
-                let _ = unify env.Subst tL.Type tR.Type
-                Ok (mkTyped (TExprAssign (tL, tR)) IRTUnit)))
+                match unify env.Subst tL.Type tR.Type with
+                | Ok () ->
+                    let tAssign = mkTyped (TExprAssign (tL, tR)) IRTUnit
+                    // Constrained-struct target: inline the guard after the
+                    // store (whole-struct stores and field mutations alike).
+                    structChecksForAssign env lhs tL |> Result.map (fun checks ->
+                        if checks.IsEmpty then tAssign
+                        else mkTyped (TExprBlock (TStmtExpr tAssign :: (checks |> List.map TStmtExpr), None)) IRTUnit)
+                | Error _ -> Error (TypeMismatch (tL.Type, tR.Type))))
 
     // ---- For expression ----
     | ExprFor (source, _constraints, kernelOpt) ->
@@ -3054,7 +3241,7 @@ and inferMethodCall (env: TypeEnv) obj method args : TypeResult<TypedExpr> =
                 // Not an impl method — treat as struct field access + application
                 let (fieldTy, fieldIdx) =
                     match lookupTypeDef typeName env with
-                    | Some (TDIStruct (_, _, fields)) ->
+                    | Some (TDIStruct (_, _, fields, _)) ->
                         let idx = fields |> List.tryFindIndex (fun (n, _) -> n = method)
                         let ty = fields |> List.tryFind (fun (n, _) -> n = method) |> Option.map snd
                         (ty |> Option.defaultValue (env.Subst.Fresh()),
@@ -3429,6 +3616,55 @@ and inferBinOp env mode op left right : TypeResult<TypedExpr> =
                 else
                     Error (Other "elementwise operators on multi-axis arrays are deferred: co-iteration currently spans one index record per operand (dense rank-1 or packed symmetric storage)")
             else
+            // Elementwise op on ARRAY <-> SCALAR (`A + a`, `2.0 / A`,
+            // `A > t`): re-synthesize as a 1-param kernel map over the array
+            // operand — method_for(A) <@> lambda(__bx) -> __bx op s |>
+            // compute — the same synthesize-and-infer route as the both-array
+            // zip above. Embedding the scalar operand's SURFACE expr in the
+            // lambda body lets capture analysis see its variable references,
+            // so the lifted kernel receives them as explicit capture params
+            // and emits at file scope (forward-declared). The historical
+            // lowering-side partial-application kernel embedded the lowered
+            // scalar IR directly; a variable reference there was a free var,
+            // which forced a main-local std::function emitted AFTER its use
+            // site — invalid C++ (use before declaration).
+            let scalarish t =
+                match t with IRTScalar _ -> true | _ -> false
+            let arrayScalar =
+                match lRes, rRes with
+                | ArrayElem _, r when scalarish (IR.stripUnits r) -> Some true    // array on left
+                | l, ArrayElem _ when scalarish (IR.stripUnits l) -> Some false   // array on right
+                | _ -> None
+            match arrayScalar with
+            | Some arrayOnLeft when mode = Elementwise && isZipOp ->
+                let (arrExpr, body) =
+                    if arrayOnLeft then (left, ExprBinOp (Elementwise, op, ExprVar "__bx", right))
+                    else (right, ExprBinOp (Elementwise, op, left, ExprVar "__bx"))
+                // Annotate the kernel param with the array's element type:
+                // at body-inference time an unannotated param is still an
+                // unresolved infer var, and inferArithType's promotion rules
+                // would fall back to the scalar side's type (`a * A` would
+                // type Int64 elements for a double-computing body).
+                let elemAnn =
+                    match (if arrayOnLeft then lRes else rRes) with
+                    | ArrayElem arr ->
+                        match IR.stripUnits arr.ElemType with
+                        | IRTScalar ETFloat64 -> Some TyFloat64
+                        | IRTScalar ETFloat32 -> Some TyFloat32
+                        | IRTScalar ETInt64 -> Some TyInt64
+                        | IRTScalar ETInt32 -> Some TyInt32
+                        | IRTScalar ETBool -> Some TyBool
+                        | IRTScalar ETComplex64 -> Some TyComplex64
+                        | IRTScalar ETComplex128 -> Some TyComplex128
+                        | IRTScalar ETString -> Some TyString
+                        | _ -> None
+                    | _ -> None
+                let synth =
+                    ExprCompute (ExprBinOp (Elementwise, OpApply,
+                        ExprMethodFor [arrExpr],
+                        ExprLambda ([{ Name = "__bx"; Type = elemAnn }], None, body)))
+                inferExpr env synth
+            | _ ->
             inferArithType mode op tL.Type tR.Type |> Result.map (fun resTy ->
                 mkTyped (TExprBinOp (mode, op, tL, tR)) resTy)))
 
@@ -3480,9 +3716,9 @@ and inferDistBinOp (env: TypeEnv) (op: BinOp) (left: Expr) (right: Expr) (lTy: I
                 // module-level declaration over internal token names.
                 let steering =
                     if s1.Contains "." || s2.Contains "." then
-                        "add a `where indep(...)` license naming the two parameters to the enclosing function's signature"
+                        "add a `where <alias>.indep(...)` license (with `import ppl as <alias>`) naming the two parameters to the enclosing function's signature"
                     else
-                        sprintf "declare `let _ = independent(%s, %s)` (module level) or a struct `where indep(...)`" s1 s2
+                        sprintf "declare `let _ = ppl.independent(%s, %s)` (module level) or a struct `where ppl.indep(...)`" s1 s2
                 Error (Other (sprintf "dist %s: cumulants combine only for independent distributions — sources '%s' and '%s' are not declared independent; %s" (if op = OpAdd then "+" else "-") s1 s2 steering))
             | [] ->
                 let weight = if op = OpAdd then (fun _ -> 1.0) else (fun k -> if k % 2 = 0 then 1.0 else -1.0)
@@ -3576,6 +3812,13 @@ and inferArithType mode op leftTy rightTy : TypeResult<IRType> =
         // re-synthesizes them as the zip co-iteration pipeline, which
         // handles packed and multi-rank storage the plain lowering could
         // not.)
+        // Element-type promotion for array<->scalar broadcast: same rule as
+        // the scalar-scalar cases below.
+        let promoteElem (elemTy: IRType) (scalarTy: IRType) =
+            match elemTy, scalarTy with
+            | IRTScalar ETFloat64, _ | _, IRTScalar ETFloat64 -> IRTScalar ETFloat64
+            | IRTScalar ETFloat32, _ | _, IRTScalar ETFloat32 -> IRTScalar ETFloat32
+            | _ -> elemTy
         let bareResult =
             match mode with
             | Outer ->
@@ -3585,6 +3828,19 @@ and inferArithType mode op leftTy rightTy : TypeResult<IRType> =
                 | _ -> lBare
             | Elementwise ->
                 match lBare, rBare with
+                // Array <op> scalar / scalar <op> array broadcast (`A + a`,
+                // `2.0 / A`): the result follows the array's shape; the
+                // ELEMENT type follows scalar promotion against the other
+                // operand. Historically these fell into the scalar rules
+                // below and typed the whole result as a scalar (or as the
+                // bare left type), which codegen then emitted as pointer
+                // arithmetic on the Array wrapper. Lowering's broadcast
+                // kernel path (lowerTypedBinOp) is the value-side pair of
+                // this rule.
+                | ArrayElem arrL, (IRTScalar _ as s) ->
+                    mkArrayLike { arrL with ElemType = promoteElem arrL.ElemType s }
+                | (IRTScalar _ as s), ArrayElem arrR ->
+                    mkArrayLike { arrR with ElemType = promoteElem arrR.ElemType s }
                 | IRTScalar ETFloat64, _ | _, IRTScalar ETFloat64 -> IRTScalar ETFloat64
                 | IRTScalar ETFloat32, _ | _, IRTScalar ETFloat32 -> IRTScalar ETFloat32
                 | _ -> lBare
@@ -4479,6 +4735,28 @@ and irTypeHasBadDistOrder (t: IRType) : bool =
     | FuncElem (ps, r) -> (ps |> List.exists irTypeHasBadDistOrder) || irTypeHasBadDistOrder r
     | _ -> false
 
+/// Detect the IrrepsIdx bad-spec marker (lowerIndexType's TyIrrepsIdx arm
+/// plants IxKErrorIrrepsBadSpec when the spec is non-static or malformed,
+/// smuggling the failure detail in the marker's IRParam extent). Same
+/// consumption-site pattern as the two checks above, but returns the detail
+/// so the diagnostic can say WHAT was wrong with the spec.
+and irTypeBadIrrepsDetail (t: IRType) : string option =
+    let detailOf (ix: IRIndexType) =
+        if ix.IxKind = IxKErrorIrrepsBadSpec then
+            match ix.Extent with
+            | IRParam (detail, _, _) -> Some detail
+            | _ -> Some "invalid spec"
+        else None
+    match t with
+    | ArrayElem at ->
+        (at.IndexTypes |> List.tryPick detailOf)
+        |> Option.orElseWith (fun () -> irTypeBadIrrepsDetail at.ElemType)
+    | IRTTuple ts -> ts |> List.tryPick irTypeBadIrrepsDetail
+    | FuncElem (ps, r) ->
+        (ps |> List.tryPick irTypeBadIrrepsDetail)
+        |> Option.orElseWith (fun () -> irTypeBadIrrepsDetail r)
+    | _ -> None
+
 // inferLetBinding (let-as-expression in function bodies and blocks) and
 // checkDecl/DeclLet (top-level let declarations) share their annotation handling
 // and PatVar binding logic. Extracting them here keeps the two paths in sync;
@@ -4510,6 +4788,10 @@ and inferLetBindingValue (env: TypeEnv) (binding: Binding) : TypeResult<TypedExp
             Error (Other "RaggedIdx requires at least one prior index in the array's index list: the ragged extent is a per-row function of the OUTER iteration position (formalism 4.4), so there is nothing for a leading RaggedIdx to vary over. Add an outer index, e.g. Array<T like Idx<n>, RaggedIdx<lens>>.")
         elif irTypeHasBadDistOrder annotTy then
             Error (Other "Dist order must be a compile-time integer >= 1 (a literal, `let static`, or static-function call): Dist<order, Elem like I1, ..., Ik>")
+        else
+        let badIrreps = irTypeBadIrrepsDetail annotTy
+        if badIrreps.IsSome then
+            Error (Other (sprintf "IrrepsIdx: %s. The spec must be a static array of (l, parity, mult) int triples — a `let static` binding or an inline literal like IrrepsIdx<[(0, 0, 2), (1, 1, 2)]>." badIrreps.Value))
         else
         checkExpr env annotTy binding.Value |> Result.bind (fun tv ->
             // Prefer the annotation as the canonical type — it can be more
@@ -4688,16 +4970,42 @@ and inferBlock env stmts finalExpr : TypeResult<TypedExpr> =
                                     subBindings <- subBindings @ [(n, subId, eTy)]
                                     curEnv <- bindVarSimple n subId eTy curEnv)
                      | _ -> ())
+                    // Mutual-group check-point (block-level twin of the
+                    // top-level DeclLet hook). Block-let inference otherwise
+                    // ignores the annotation; only the mutual path reads it.
+                    let mutualChecks =
+                        match mutualBindingObligation curEnv binding with
+                        | Ok None -> []
+                        | Ok (Some (group, memberToLeaf)) ->
+                            match synthesizeMutualChecks curEnv group memberToLeaf with
+                            | Ok checks -> checks
+                            | Error e -> err <- Some e; []
+                        | Error e -> err <- Some e; []
+                    // Constrained-struct binding: check at every assignment.
+                    let structChecks =
+                        match binding.Pattern with
+                        | PatVar n ->
+                            match synthesizeStructChecks curEnv tValue.Type (ExprVar n) with
+                            | Ok cs -> cs |> List.map (fun c -> (curEnv.Builder.FreshId(), c))
+                            | Error e -> err <- Some e; []
+                        | _ -> []
+                    let postChecks = mutualChecks @ structChecks
                     let tb : TypedBinding = {
                         Name = name; VarId = varId; Type = tValue.Type
                         Identity = identity; IsMutable = (assign <> ReadOnly); Value = tValue
                         SubBindings = subBindings |> List.map (fun (n, id, ty) -> (n, id, curEnv.Subst.Resolve ty))
+                        PostChecks = postChecks
                     }
                     typedStmts <- typedStmts @ [TStmtLet tb]
                 | Error e -> err <- Some e
             | StmtAssign (lhs, _, rhs) ->
                 match inferExpr curEnv lhs, inferExpr curEnv rhs with
                 | Ok tL, Ok tR ->
+                    // Constrained-struct target: guard after the store.
+                    let assignChecks () =
+                        match structChecksForAssign curEnv lhs tL with
+                        | Ok cs -> cs |> List.map TStmtExpr
+                        | Error e -> err <- Some e; []
                     // Check assignability of LHS
                     match tL.Kind with
                     | TExprVar (name, _, _) ->
@@ -4706,10 +5014,10 @@ and inferBlock env stmts finalExpr : TypeResult<TypedExpr> =
                             err <- Some (Other (sprintf "Cannot assign to '%s': static bindings are immutable" name))
                         | _ ->
                             let _ = unify curEnv.Subst tL.Type tR.Type
-                            typedStmts <- typedStmts @ [TStmtAssign (tL, tR)]
+                            typedStmts <- typedStmts @ [TStmtAssign (tL, tR)] @ assignChecks ()
                     | _ ->
                         let _ = unify curEnv.Subst tL.Type tR.Type
-                        typedStmts <- typedStmts @ [TStmtAssign (tL, tR)]
+                        typedStmts <- typedStmts @ [TStmtAssign (tL, tR)] @ assignChecks ()
                 | Error e, _ | _, Error e -> err <- Some e
             | StmtExpr e ->
                 match inferExpr curEnv e with
@@ -4762,7 +5070,7 @@ and inferForIn (env: TypeEnv) (varName: string) (rangeExpr: Expr) (bodyStmts: St
                             let tb : TypedBinding = {
                                 Name = bName; VarId = bId; Type = tValue.Type
                                 Identity = None; IsMutable = (assign <> ReadOnly); Value = tValue
-                                SubBindings = []
+                                SubBindings = []; PostChecks = []
                             }
                             typedBodyStmts <- typedBodyStmts @ [TStmtLet tb]
                         | Error e -> bodyErr <- Some e
@@ -4770,7 +5078,12 @@ and inferForIn (env: TypeEnv) (varName: string) (rangeExpr: Expr) (bodyStmts: St
                         match inferExpr bodyEnv lhs, inferExpr bodyEnv rhs with
                         | Ok tL, Ok tR ->
                             let _ = unify bodyEnv.Subst tL.Type tR.Type
-                            typedBodyStmts <- typedBodyStmts @ [TStmtAssign (tL, tR)]
+                            // Constrained-struct target: guard after the store.
+                            let checks =
+                                match structChecksForAssign bodyEnv lhs tL with
+                                | Ok cs -> cs |> List.map TStmtExpr
+                                | Error e -> bodyErr <- Some e; []
+                            typedBodyStmts <- typedBodyStmts @ [TStmtAssign (tL, tR)] @ checks
                         | Error e, _ | _, Error e -> bodyErr <- Some e
                     | StmtExpr e ->
                         match inferExpr bodyEnv e with
@@ -4890,20 +5203,255 @@ and inferObjectFor env kernel : TypeResult<TypedExpr> =
 
 and inferStructConstruction env name fields : TypeResult<TypedExpr> =
     match lookupTypeDef name env with
-    | Some (TDIStruct (_, _, declFields)) ->
-        fields |> List.map (fun (fname, fexpr) ->
-            inferExpr env fexpr |> Result.bind (fun tFE ->
-                let expected = declFields |> List.tryFind (fun (n, _) -> n = fname) |> Option.map snd
-                match expected with
-                | Some eTy -> let _ = unify env.Subst tFE.Type eTy in Ok (fname, tFE)
-                | None -> Ok (fname, tFE)))
-        |> sequenceResults |> Result.map (fun tFields ->
-            mkTyped (TExprStruct (name, tFields)) (IRTNamed name))
+    | Some (TDIStruct (_, _, declFields, _)) ->
+        let declNames = declFields |> List.map fst
+        let providedNames = fields |> List.map fst
+        let duplicate =
+            providedNames |> List.countBy id
+            |> List.tryPick (fun (n, count) -> if count > 1 then Some n else None)
+        let unknown = providedNames |> List.tryFind (fun n -> not (List.contains n declNames))
+        let missing = declNames |> List.tryFind (fun n -> not (List.contains n providedNames))
+        match duplicate, unknown, missing with
+        | Some d, _, _ -> Error (Other (sprintf "struct %s: field '%s' assigned more than once" name d))
+        | _, Some u, _ -> Error (Other (sprintf "struct %s has no field '%s'" name u))
+        | _, _, Some m -> Error (Other (sprintf "struct %s: missing field '%s' in constructor" name m))
+        | None, None, None ->
+            fields |> List.map (fun (fname, fexpr) ->
+                // Bidirectional: check the field expr against the declared
+                // type so literals adapt (Int64 literal into an Int32 field)
+                // exactly as they do in every other checked position.
+                let eTy = declFields |> List.find (fun (n, _) -> n = fname) |> snd
+                match checkExpr env eTy fexpr with
+                | Ok tFE -> Ok (fname, tFE)
+                | Error (TypeMismatch (exp, act)) ->
+                    Error (Other (sprintf "struct %s, field '%s': expected %s, got %s"
+                                      name fname (ppIRType exp) (ppIRType act)))
+                | Error e -> Error e)
+            |> sequenceResults |> Result.map (fun tFields ->
+                // Emit fields in DECLARATION order: C++ designated
+                // initializers require it, and evaluation order becomes
+                // deterministic regardless of the literal's field order.
+                let ordered = declNames |> List.map (fun n -> tFields |> List.find (fun (fn, _) -> fn = n))
+                mkTyped (TExprStruct (name, ordered)) (IRTNamed name))
+    | Some (TDIAlias (IRTNamed target)) when target <> name ->
+        // Transparent alias naming a struct: construct through it.
+        inferStructConstruction env target fields
     | _ ->
-        fields |> List.map (fun (fname, fexpr) ->
-            inferExpr env fexpr |> Result.map (fun tFE -> (fname, tFE)))
-        |> sequenceResults |> Result.map (fun tFields ->
-            mkTyped (TExprStruct (name, tFields)) (IRTTuple (tFields |> List.map (fun (_, e) -> e.Type))))
+        Error (Other (sprintf "unknown struct type '%s' in constructor" name))
+
+// ---- Mutual-group binding-site machinery -----------------------------------
+// The joint check attaches exactly where a group's type-tuple is INTRODUCED:
+// a function's declared `(P1, P2)` return (checked at the return site) or an
+// annotated joint let (checked after the destructure). Detection runs on the
+// SURFACE TypeExpr — members are transparent aliases, erased by lowerTypeExpr.
+
+/// Deep-collect mutual-group member names appearing anywhere in a type
+/// annotation (one entry per occurrence).
+and mutualMemberNamesIn (env: TypeEnv) (t: TypeExpr) : string list =
+    let rec walk t =
+        match t with
+        | TyNamed (n, args) ->
+            (if env.MutualMembers.ContainsKey n then [n] else [])
+            @ (args |> List.collect walk)
+        | TyTuple ts -> ts |> List.collect walk
+        | TyArray (e, idxs) -> walk e @ (idxs |> List.collect walk)
+        | TyAbstractArray (e, _, _) -> walk e
+        | TyFunc (args, ret) -> (args |> List.collect walk) @ walk ret
+        | TyDepIdx (outer, _, body) -> walk outer @ walk body
+        | TyConstrained (inner, _) -> walk inner
+        | TyPoly inner -> walk inner
+        | TyEquivIdx (_, g, r) -> walk g @ walk r
+        | _ -> []
+    walk t
+
+/// Annotation side of the check-point rule. Ok None — no member names
+/// anywhere. Ok (Some group) — a top-level tuple listing exactly one group's
+/// full member set, each as a DIRECT element, exactly once (non-member
+/// elements alongside are fine). Anything else is a compile error.
+and tryMutualAnnotation (env: TypeEnv) (annot: TypeExpr) : TypeResult<MutualGroupInfo option> =
+    let allOccurrences = mutualMemberNamesIn env annot
+    if allOccurrences.IsEmpty then Ok None
+    else
+        let groupId = env.MutualMembers.[List.head allOccurrences]
+        let group = env.MutualGroups.[groupId]
+        let groupNames = group.Members |> List.map fst
+        let describe = groupNames |> String.concat ", "
+        match annot with
+        | TyNamed (n, []) ->
+            Error (Other (sprintf "type '%s' belongs to mutual group (%s); bind the group jointly: let (%s): (%s) = ..."
+                              n describe (groupNames |> List.map (fun s -> s.ToLower()) |> String.concat ", ") describe))
+        | TyTuple elems ->
+            let directNames =
+                elems |> List.choose (function
+                    | TyNamed (n, []) when env.MutualMembers.ContainsKey n -> Some n
+                    | _ -> None)
+            if directNames.Length <> allOccurrences.Length then
+                Error (Other (sprintf "mutual member types (group %s) may appear only as direct elements of a joint tuple annotation" describe))
+            elif directNames |> List.exists (fun n -> env.MutualMembers.[n] <> groupId) then
+                Error (Other "annotation mixes members of different mutual groups")
+            elif (directNames |> List.distinct |> List.length) <> directNames.Length then
+                Error (Other (sprintf "duplicate mutual member in annotation (group %s)" describe))
+            elif Set.ofList directNames <> Set.ofList groupNames then
+                Error (Other (sprintf "mutual group (%s) is incomplete in this annotation; all group members must appear together" describe))
+            else Ok (Some group)
+        | _ ->
+            Error (Other (sprintf "mutual member types (group %s) may appear only in a joint let annotation or a function's declared return type" describe))
+
+/// Rename member references in a decl-validated conjunct to a binding's leaf
+/// variable names (bare scalar refs and field-path bases alike).
+and renameMutualRefs (mapping: Map<string, string>) (e: Expr) : Expr =
+    let r = renameMutualRefs mapping
+    match e with
+    | ExprVar n when mapping.ContainsKey n -> ExprVar mapping.[n]
+    | ExprVar _ | ExprLit _ -> e
+    | ExprField (o, f) -> ExprField (r o, f)
+    | ExprApp (f, args) -> ExprApp (r f, args |> List.map r)
+    | ExprBinOp (mode, op, l, rr) -> ExprBinOp (mode, op, r l, r rr)
+    | ExprUnaryOp (op, i) -> ExprUnaryOp (op, r i)
+    | ExprIf (c, t, f) -> ExprIf (r c, r t, r f)
+    | ExprTuple es -> ExprTuple (es |> List.map r)
+    | ExprArrayLit es -> ExprArrayLit (es |> List.map r)
+    | ExprTyped (i, ty) -> ExprTyped (r i, ty)
+    | other -> other  // decl-time validation restricts conjuncts to the forms above
+
+/// Synthesize the joint runtime checks at a binding site. `env` must already
+/// have the leaf variables bound; the check IRIds are allocated HERE, after
+/// the leaves' ids — module emission is id-ordered, so later ids run later.
+and synthesizeMutualChecks (env: TypeEnv) (group: MutualGroupInfo) (memberToLeaf: Map<string, string>) : TypeResult<(IRId * TypedExpr) list> =
+    group.Constraints |> List.map (fun conjunct ->
+        let renamed = renameMutualRefs memberToLeaf conjunct
+        inferExpr env renamed |> Result.map (fun tCond ->
+            let checkId = env.Builder.FreshId()
+            let msg = sprintf "Mutual constraint violation (%s)" group.GroupId
+            (checkId, mkTyped (TExprConstraintCheck (tCond, msg)) IRTUnit)))
+    |> sequenceResults
+
+/// Binding side of the check-point rule for an annotated let. Ok None — no
+/// obligation here (no group named, or the RHS is a call to a function whose
+/// declared return already carries the check). Ok (Some (group, member→leaf))
+/// — synthesize checks after the destructure. Error — annotation/pattern
+/// misuse (lone member, non-tuple pattern, arity mismatch).
+and mutualBindingObligation (env: TypeEnv) (binding: Binding) : TypeResult<(MutualGroupInfo * Map<string, string>) option> =
+    match binding.Type with
+    | None -> Ok None
+    | Some annot ->
+        tryMutualAnnotation env annot |> Result.bind (function
+            | None -> Ok None
+            | Some group ->
+                match binding.Pattern, annot with
+                | PatTuple pats, TyTuple elems when
+                        pats.Length = elems.Length &&
+                        pats |> List.forall (function PatVar _ -> true | _ -> false) ->
+                    let memberToLeaf =
+                        List.zip elems pats
+                        |> List.choose (fun (t, p) ->
+                            match t, p with
+                            | TyNamed (n, []), PatVar leaf when group.Members |> List.exists (fun (m, _) -> m = n) ->
+                                Some (n, leaf)
+                            | _ -> None)
+                        |> Map.ofList
+                    // A call to a declared-return function was already checked
+                    // at its return site — the single verification point.
+                    let rec stripT e = match e with ExprTyped (i, _) -> stripT i | _ -> e
+                    let alreadyChecked =
+                        match stripT binding.Value with
+                        | ExprApp (ExprVar f, _) ->
+                            match env.MutualReturnFuncs.TryGetValue f with
+                            | true, gid -> gid = group.GroupId
+                            | _ -> false
+                        | _ -> false
+                    if alreadyChecked then Ok None
+                    else Ok (Some (group, memberToLeaf))
+                | _ ->
+                    let names = group.Members |> List.map fst |> String.concat ", "
+                    Error (Other (sprintf "a mutual group (%s) must be bound jointly with a tuple of variables: let (x, y): (%s) = ..." names names)))
+
+/// Struct where-constraint checks for an assignment target: substitute each
+/// field name with `<target>.<field>`, infer, and wrap as inlined guards.
+/// Returns [] when the target's type is not a constrained struct. Fires at
+/// every assignment of a constrained struct value — construction bindings,
+/// whole-struct reassignment, and field mutation alike (the math runs only
+/// in the generated C++).
+and synthesizeStructChecks (env: TypeEnv) (targetTy: IRType) (targetSurface: Expr) : TypeResult<TypedExpr list> =
+    match env.Subst.Resolve targetTy with
+    | IRTNamed sname ->
+        match lookupTypeDef sname env with
+        | Some (TDIStruct (_, _, declFields, constraints)) when not constraints.IsEmpty ->
+            let fieldNames = declFields |> List.map fst |> Set.ofList
+            let rec subst e =
+                match e with
+                | ExprVar n when fieldNames.Contains n -> ExprField (targetSurface, n)
+                | ExprVar _ | ExprLit _ -> e
+                | ExprField (o, f) -> ExprField (subst o, f)
+                | ExprApp (f, args) -> ExprApp (subst f, args |> List.map subst)
+                | ExprBinOp (m, op, l, r) -> ExprBinOp (m, op, subst l, subst r)
+                | ExprUnaryOp (op, i) -> ExprUnaryOp (op, subst i)
+                | ExprIf (c, t, f) -> ExprIf (subst c, subst t, subst f)
+                | ExprTuple es -> ExprTuple (es |> List.map subst)
+                | ExprArrayLit es -> ExprArrayLit (es |> List.map subst)
+                | ExprTyped (i, ty) -> ExprTyped (subst i, ty)
+                | other -> other
+            constraints |> List.mapi (fun i c ->
+                inferExpr env (subst c) |> Result.map (fun tCond ->
+                    let msg =
+                        if constraints.Length = 1 then sprintf "Constraint violation in %s" sname
+                        else sprintf "Constraint violation in %s (conjunct %d)" sname (i + 1)
+                    mkTyped (TExprConstraintCheck (tCond, msg)) IRTUnit))
+            |> sequenceResults
+        | _ -> Ok []
+    | _ -> Ok []
+
+/// Struct checks for an assignment statement/expression: a field mutation
+/// re-checks the OBJECT's constraints; any other target checks the assigned
+/// value's own struct type.
+and structChecksForAssign (env: TypeEnv) (lhsSurface: Expr) (tL: TypedExpr) : TypeResult<TypedExpr list> =
+    match lhsSurface, tL.Kind with
+    | ExprField (objSurface, _), TExprField (tObj, _, _) ->
+        synthesizeStructChecks env tObj.Type objSurface
+    | _ ->
+        synthesizeStructChecks env tL.Type lhsSurface
+
+/// Wrap a declared-return function body so the joint check runs at the
+/// return — the group's single verification point. The body becomes:
+///   let __mg_ret = <body>
+///   let __mg<i> = __mg_ret.<i>   (one per member, at its annotation slot)
+///   <conjunct checks>
+///   __mg_ret
+and wrapMutualReturnBody (env: TypeEnv) (retAnnot: TypeExpr) (group: MutualGroupInfo) (tBody: TypedExpr) : TypeResult<TypedExpr> =
+    let retTy = env.Subst.Resolve tBody.Type
+    let memberSlots =
+        match retAnnot with
+        | TyTuple elems ->
+            elems |> List.mapi (fun i t -> (i, t))
+            |> List.choose (fun (i, t) ->
+                match t with
+                | TyNamed (n, []) when group.Members |> List.exists (fun (m, _) -> m = n) -> Some (n, i)
+                | _ -> None)
+        | _ -> []
+    if memberSlots.Length <> group.Members.Length then
+        Error (Other (sprintf "mutual group (%s): declared return type must list every member as a direct tuple element"
+                          (group.Members |> List.map fst |> String.concat ", ")))
+    else
+        let rid = env.Builder.FreshId()
+        let retVar = mkTyped (TExprVar ("__mg_ret", rid, None)) retTy
+        let leaves =
+            memberSlots |> List.map (fun (mname, slot) ->
+                let kind = group.Members |> List.find (fun (m, _) -> m = mname) |> snd
+                let mTy = match kind with MMStruct s -> IRTNamed s | MMScalar t -> t
+                (mname, slot, env.Builder.FreshId(), sprintf "__mg%d" slot, mTy))
+        let mutable checkEnv = env
+        for (_, _, leafId, leafName, mTy) in leaves do
+            checkEnv <- bindVarSimple leafName leafId mTy checkEnv
+        let mapping = leaves |> List.map (fun (m, _, _, leafName, _) -> (m, leafName)) |> Map.ofList
+        synthesizeMutualChecks checkEnv group mapping |> Result.map (fun checks ->
+            let intLit i = mkTyped (TExprLit (LitInt (int64 i))) (IRTScalar ETInt64)
+            let checkStmts = checks |> List.map (fun (_, c) -> TStmtExpr c)
+            let inner = mkTyped (TExprBlock (checkStmts, Some retVar)) retTy
+            let withLeaves =
+                List.foldBack (fun (_, slot, leafId, leafName, mTy) acc ->
+                    let proj = mkTyped (TExprTupleIndex (retVar, intLit slot)) mTy
+                    mkTyped (TExprLet (leafName, leafId, proj, acc)) retTy) leaves inner
+            mkTyped (TExprLet ("__mg_ret", rid, tBody, withLeaves)) retTy)
 
 and inferForExpr env source kernelOpt : TypeResult<TypedExpr> =
     match source with
@@ -5035,20 +5583,15 @@ and checkDecl (env: TypeEnv) (decl: Decl) : TypeResult<TypedDecl * TypeEnv> =
             let (env, tValue) =
                 match binding.Value with
                 | ExprApp (ExprField (ExprVar alias, "load"), [ExprLit (LitString path)]) ->
-                    let isProvider =
-                        match lookupVar alias env with
-                        | Some vi ->
-                            (match env.Subst.Resolve(vi.Type) with
-                             | IRTNamed pn -> pn.StartsWith("Providers.")
-                             | _ -> false)
-                        | None -> false
-                    if not isProvider then (env, tValue)
-                    else
+                    match providerAliasName env alias with
+                    | None -> (env, tValue)
+                    | Some pname ->
                         try
-                            // Read the file metadata at compile time (the same read
+                            // Read the store metadata at compile time (the same read
                             // Lowering.tryInvokeProvider performs) and register the
                             // resulting struct types so `sample.vars.<v>` resolves.
-                            let pm = Blade.NetcdfProvider.loadAsModule env.Builder name path
+                            let spec = (Blade.ProviderRegistry.tryFind pname).Value
+                            let pm = spec.LoadAsModule env.Builder name path
                             let (envM, moduleTy) = registerProviderModule env name pm
                             (envM, { tValue with Type = moduleTy })
                         with _ -> (env, tValue)
@@ -5122,7 +5665,7 @@ and checkDecl (env: TypeEnv) (decl: Decl) : TypeResult<TypedDecl * TypeEnv> =
                         match env.Subst.Resolve(tValue.Type) with
                         | IRTNamed sName ->
                             match Map.tryFind sName env.TypeDefs with
-                            | Some (TDIStruct (_, _, fields)) -> fields
+                            | Some (TDIStruct (_, _, fields, _)) -> fields
                             | _ -> []
                         | _ -> []
                     let fieldTypeMap = Map.ofList structFields
@@ -5141,12 +5684,31 @@ and checkDecl (env: TypeEnv) (decl: Decl) : TypeResult<TypedDecl * TypeEnv> =
                             bindVarSimple n subId eTy e2) e) env'
                 | _ -> env'
 
+            // Mutual-group check-point: an annotation naming a group makes
+            // this let the introduce-site (unless the RHS is a call already
+            // checked at its declared return). Check IRIds allocate after
+            // the sub-binding ids, so id-ordered emission runs them last.
+            mutualBindingObligation env binding |> Result.bind (fun obligation ->
+            let mutualChecksR =
+                match obligation with
+                | Some (group, memberToLeaf) -> synthesizeMutualChecks env' group memberToLeaf
+                | None -> Ok []
+            mutualChecksR |> Result.bind (fun mutualChecks ->
+            // Constrained-struct binding: check at every assignment site.
+            let structChecksR =
+                match binding.Pattern with
+                | PatVar n -> synthesizeStructChecks env' tValue.Type (ExprVar n)
+                | _ -> Ok []
+            structChecksR |> Result.map (fun structChecks ->
+            let postChecks =
+                mutualChecks @ (structChecks |> List.map (fun c -> (env.Builder.FreshId(), c)))
             let tb : TypedBinding = {
                 Name = name; VarId = varId; Type = env.Subst.Resolve(tValue.Type)
                 Identity = identity; IsMutable = (assign <> ReadOnly); Value = tValue
                 SubBindings = subBindings |> List.map (fun (n, id, ty) -> (n, id, env.Subst.Resolve ty))
+                PostChecks = postChecks
             }
-            Ok (TDeclLet tb, env'))
+            (TDeclLet tb, env')))))
 
     | DeclStatic binding ->
         // Use the shared annotation handler so `let static` bindings enforce
@@ -5241,6 +5803,7 @@ and checkDecl (env: TypeEnv) (decl: Decl) : TypeResult<TypedDecl * TypeEnv> =
                 Name = name; VarId = varId; Type = env.Subst.Resolve(tValue.Type)
                 Identity = None; IsMutable = false; Value = tValue
                 SubBindings = subBindings |> List.map (fun (n, id, ty) -> (n, id, env.Subst.Resolve ty))
+                PostChecks = []
             }
             Ok (TDeclStatic tb, env''))
 
@@ -5248,7 +5811,7 @@ and checkDecl (env: TypeEnv) (decl: Decl) : TypeResult<TypedDecl * TypeEnv> =
 
     | DeclType typeDecl ->
         registerTypeDecl env typeDecl |> Result.bind (fun env' ->
-            let ttd =
+            let ttdResult =
                 match typeDecl with
                 | TyDeclAlias (name, typeParams, body) ->
                     // Distinguish index-type aliases (Idx, SymIdx, ..., EnumIdx) from
@@ -5259,29 +5822,27 @@ and checkDecl (env: TypeEnv) (decl: Decl) : TypeResult<TypedDecl * TypeEnv> =
                     // promote<>-based template expansion).
                     match Map.tryFind name env'.TypeDefs with
                     | Some (TDIIndexType (_, idx, _)) ->
-                        TTDIndexType (name, idx)
+                        Ok (TTDIndexType (name, idx))
                     | Some (TDIEnumIdx (_, idx, values, _)) ->
-                        TTDEnumIdx (name, idx, values)
+                        Ok (TTDEnumIdx (name, idx, values))
                     | _ ->
-                        TTDAlias (name, typeParams, lowerTypeExpr env' body)
-                | TyDeclStruct (name, typeParams, fields, invariant) ->
+                        Ok (TTDAlias (name, typeParams, lowerTypeExpr env' body))
+                | TyDeclStruct (name, typeParams, fields, _constraints) ->
+                    // Constraint validation happened in registerTypeDecl;
+                    // checks materialize per assignment site (PostChecks /
+                    // TExprConstraintCheck), not on the type def.
                     let resolvedFields = fields |> List.map (fun f -> (f.Name, lowerTypeExpr env' f.Type))
-                    let tInvariant =
-                        invariant |> Option.bind (fun expr ->
-                            // Bind field names for invariant checking
-                            let mutable invEnv = env'
-                            for f in fields do
-                                let fId = invEnv.Builder.FreshId()
-                                invEnv <- bindVarSimple f.Name fId (lowerTypeExpr env' f.Type) invEnv
-                            match inferExpr invEnv expr with
-                            | Ok tE -> Some tE
-                            | Error _ -> None)
-                    TTDStruct (name, typeParams, resolvedFields, tInvariant)
+                    Ok (TTDStruct (name, typeParams, resolvedFields))
                 | TyDeclSum (name, typeParams, variants) ->
                     let resolvedVariants = variants |> List.map (fun v ->
                         (v.Name, v.Data |> Option.map (lowerTypeExpr env')))
-                    TTDVariant (name, typeParams, resolvedVariants)
-            Ok (TDeclType ttd, env'))
+                    Ok (TTDVariant (name, typeParams, resolvedVariants))
+                | TyDeclMutualGroup (members, _) ->
+                    // Constraint validation happened in registerTypeDecl; the
+                    // typed decl just carries the member aliases for lowering.
+                    Ok (TTDMutualGroup (members |> List.map (fun (mname, mty) ->
+                        (mname, lowerTypeExpr env' mty))))
+            ttdResult |> Result.map (fun ttd -> (TDeclType ttd, env')))
 
     | DeclInterface ifaceDecl -> 
         let env' = { env with Interfaces = Map.add ifaceDecl.Name ifaceDecl env.Interfaces }
@@ -5375,6 +5936,20 @@ and checkDecl (env: TypeEnv) (decl: Decl) : TypeResult<TypedDecl * TypeEnv> =
     | DeclUnit unitDecl ->
         let env' = registerUnit env unitDecl
         Ok (TDeclUnit unitDecl, env')
+    | DeclImport (qname, style) when (not qname.IsEmpty) && qname.Head = "Providers" ->
+        // The pre-module provider spelling (`import Providers.NetCDF as X`)
+        // is a hard break: providers are ordinary modules now.
+        let suggestion =
+            match qname with
+            | [_; sub] -> sub.ToLowerInvariant()
+            | _ -> "netcdf"
+        Error (Other (sprintf "provider modules are imported by module name — write `import %s as <alias>` (the Providers.* spelling was removed; registered providers: %s)"
+                          suggestion (Blade.ProviderRegistry.names () |> String.concat ", ")))
+    | DeclImport ([pname], ImportSelective _) when (Blade.ProviderRegistry.tryFind pname).IsSome
+                                                   && not (Map.containsKey pname env.ModuleExports) ->
+        // Providers expose load/read/write through a qualified alias only;
+        // there are no free-standing names to import selectively.
+        Error (Other (sprintf "provider module '%s' does not support selective import — use `import %s as <alias>` and call <alias>.load/read/write" pname pname))
     | DeclImport (qname, style) ->
         let fullName = String.concat "." qname
         let env' =
@@ -5448,6 +6023,10 @@ and checkFunctionDecl (env: TypeEnv) (funcDecl: FunctionDecl) : TypeResult<Typed
     elif (paramTypes |> List.exists irTypeHasBadDistOrder) || irTypeHasBadDistOrder retType then
         Error (Other (sprintf "function '%s': Dist order must be a compile-time integer >= 1 (a literal, `let static`, or static-function call): Dist<order, Elem like I1, ..., Ik>" funcDecl.Name))
     else
+    let badIrreps = (paramTypes @ [retType]) |> List.tryPick irTypeBadIrrepsDetail
+    if badIrreps.IsSome then
+        Error (Other (sprintf "function '%s': IrrepsIdx: %s. The spec must be a static array of (l, parity, mult) int triples — a `let static` binding or an inline literal like IrrepsIdx<[(0, 0, 2), (1, 1, 2)]>." funcDecl.Name badIrreps.Value))
+    else
     let funcType = mkFuncArrow paramTypes retType
     // Reuse pre-pass varId if this function was already pre-registered (static functions)
     // This ensures other functions' bodies reference the same varId
@@ -5479,6 +6058,34 @@ and checkFunctionDecl (env: TypeEnv) (funcDecl: FunctionDecl) : TypeResult<Typed
         Error e
     | None ->
 
+    // Mutual-group scans. Member types are forbidden in parameter positions
+    // (alias transparency would silently erase the constraint); a declared
+    // return tuple naming a full group makes this function the group's
+    // introduce-site — checks emit at the return, annotated callers exempt.
+    let mutualParamErr =
+        funcDecl.Params |> List.tryPick (fun p ->
+            match p.Type with
+            | Some t ->
+                match mutualMemberNamesIn env t with
+                | [] -> None
+                | n :: _ -> Some (Other (sprintf
+                                "function '%s': parameter '%s' uses mutual member type '%s'; mutual member types may appear only in a joint let annotation or a function's declared return type"
+                                funcDecl.Name p.Name n))
+            | None -> None)
+    match mutualParamErr with
+    | Some e ->
+        env.Subst.PopTypeVarScope(savedScope)
+        Error e
+    | None ->
+    match (match funcDecl.ReturnType with Some t -> tryMutualAnnotation env t | None -> Ok None) with
+    | Error e ->
+        env.Subst.PopTypeVarScope(savedScope)
+        Error e
+    | Ok mutualReturnGroup ->
+    (match mutualReturnGroup with
+     | Some g -> env.MutualReturnFuncs.[funcDecl.Name] <- g.GroupId
+     | None -> ())
+
     // Custom where-clause conjuncts (`where <name>(<args>)` for names the
     // grammar doesn't own): dispatch each through the Blade.Constraints
     // registry. Validate at the signature; record the function for
@@ -5491,7 +6098,18 @@ and checkFunctionDecl (env: TypeEnv) (funcDecl: FunctionDecl) : TypeResult<Typed
         customConjuncts |> List.tryPick (fun (cname, cargs) ->
             match Blade.Constraints.lookupConstraint cname with
             | None ->
-                let known = Blade.Constraints.registeredConstraintNames ()
+                // Module-owned keywords are registered under mangled names
+                // ("__ppl_indep") and reached via a qualified conjunct that
+                // the owning module's elaborator normalizes. A bare (or
+                // wrongly-qualified) use of such a keyword gets a targeted
+                // hint; the vocabulary list shows the module spelling.
+                let bare = match cname.Split('.') with [| _; n |] -> n | _ -> cname
+                if (Blade.Constraints.lookupConstraint ("__ppl_" + bare)).IsSome then
+                    Some (Other (sprintf "function '%s': constraint '%s' belongs to the ppl module — add `import ppl as <alias>` and write `where <alias>.%s(...)`" funcDecl.Name bare bare))
+                else
+                let known =
+                    Blade.Constraints.registeredConstraintNames ()
+                    |> List.map (fun n -> if n.StartsWith "__ppl_" then "ppl." + n.Substring 6 else n)
                 let vocab = if known.IsEmpty then "none registered" else String.concat ", " known
                 Some (Other (sprintf "function '%s': unknown where-clause constraint '%s' (registered constraints: %s)" funcDecl.Name cname vocab))
             | Some h ->
@@ -5560,6 +6178,13 @@ and checkFunctionDecl (env: TypeEnv) (funcDecl: FunctionDecl) : TypeResult<Typed
             // result so genuine mismatches surface here rather than
             // exploding at codegen.
             unify env.Subst tBody.Type retType |> Result.bind (fun () ->
+            // Declared-return introduce-site: wrap the body so the joint
+            // check fires at the return (the single verification point).
+            let wrappedBodyR =
+                match mutualReturnGroup, funcDecl.ReturnType with
+                | Some group, Some retAnnot -> wrapMutualReturnBody envWithFunc retAnnot group tBody
+                | _ -> Ok tBody
+            wrappedBodyR |> Result.bind (fun tBody ->
             let commGroups =
                 extractCommGroups
                     (funcDecl.Params |> List.map (fun p -> { Name = p.Name; Type = p.Type } : LambdaParam))
@@ -5573,7 +6198,7 @@ and checkFunctionDecl (env: TypeEnv) (funcDecl: FunctionDecl) : TypeResult<Typed
                 WhereClause = funcDecl.WhereClause; Body = tBody
                 CommGroups = commGroups; IsStatic = funcDecl.IsStatic
             }
-            Ok (TDeclFunction tf, envWithFunc)))
+            Ok (TDeclFunction tf, envWithFunc))))
 
     // Close the license scope (error paths included — `result` has
     // materialized either way by this point).
@@ -5613,6 +6238,22 @@ and registerTypeDecl (env: TypeEnv) (typeDecl: TypeDecl) : TypeResult<TypeEnv> =
             | TyDepIdx _ | TyRaggedIdx _ | TyRaggedIdxOpaque ->
                 let idx = lowerIndexType env 0 chasedBody
                 Ok (TDIIndexType (name, idx, chasedBody))
+            | TyIrrepsIdx _ ->
+                // Nominative-alias rule: the alias name is FOLDED INTO the
+                // irreps identity tag (mkIrrepsTag (Some name) ...), so two
+                // aliases of the same spec are DISTINCT types while anonymous
+                // IrrepsIdx<spec> unifies with either (Unify's name-permissive
+                // rule). The plain-index arm's `Tag = Some name` overwrite
+                // would drop the spec payload and break Tag<->IxKind
+                // agreement. A bad-spec marker keeps its error tag so the
+                // consumption-site check still fires through the alias.
+                let idx = lowerIndexType env 0 chasedBody
+                let named =
+                    match idx.Tag with
+                    | Some (IrrepsTag (_, triples)) ->
+                        { idx with Tag = Some (mkIrrepsTag (Some name) triples) }
+                    | _ -> idx
+                Ok (TDIIndexType (name, named, chasedBody))
             | TyEnumIdx valuesExpr ->
                 // Static-evaluate the array literal to extract values. Each
                 // element must be either an int literal (with optional negation)
@@ -5644,9 +6285,84 @@ and registerTypeDecl (env: TypeEnv) (typeDecl: TypeDecl) : TypeResult<TypeEnv> =
             | _ -> Ok (TDIAlias (lowerTypeExpr env body))
         defInfoResult |> Result.map (fun defInfo -> registerTypeDef name defInfo env)
 
-    | TyDeclStruct (name, typeParams, fields, _invariant) ->
-        let fieldTypes = fields |> List.map (fun f -> (f.Name, lowerTypeExpr env f.Type))
-        Ok (registerTypeDef name (TDIStruct (name, typeParams, fieldTypes)) env)
+    | TyDeclStruct (name, typeParams, fields, constraints) ->
+        // Mutual member types are forbidden as field types — alias
+        // transparency would silently erase the constraint.
+        let memberMisuse =
+            fields |> List.tryPick (fun f ->
+                match mutualMemberNamesIn env f.Type with
+                | [] -> None
+                | n :: _ -> Some (Other (sprintf "struct %s, field '%s': mutual member type '%s' may not be used as a field type" name f.Name n)))
+        match memberMisuse with
+        | Some e -> Error e
+        | None ->
+            let fieldTypes = fields |> List.map (fun f -> (f.Name, lowerTypeExpr env f.Type))
+            // Field range refinements: SEQUENTIAL scoping — a bound may
+            // reference only EARLIER fields and statics, and call only
+            // statically-evaluable functions (the closed forms that lower
+            // into type positions).
+            let boundScopeErr =
+                let callables =
+                    Set.union (StaticEval.knownBuiltinNames ())
+                              (env.StaticFunctions |> Map.toSeq |> Seq.map fst |> Set.ofSeq)
+                let rec firstErr priorFields flds =
+                    match flds with
+                    | [] -> None
+                    | (f: FieldDecl) :: rest ->
+                        let checkRefs (e: Expr) =
+                            StaticEval.collectFreeNames e
+                            |> Set.filter (fun n ->
+                                not (Set.contains n priorFields)
+                                && not (env.StaticValues.ContainsKey n)
+                                && not (callables.Contains n))
+                            |> Set.toList
+                            |> List.tryHead
+                            |> Option.map (fun bad ->
+                                Other (sprintf "struct %s, field '%s': bound references '%s' — bounds may reference only earlier fields and statics"
+                                           name f.Name bad))
+                        let err =
+                            match f.Bound with
+                            | Some b -> [b.Lo; b.Hi] |> List.choose id |> List.tryPick checkRefs
+                            | None -> None
+                        match err with
+                        | Some e -> Some e
+                        | None -> firstErr (Set.add f.Name priorFields) rest
+                firstErr Set.empty fields
+            match boundScopeErr with
+            | Some e -> Error e
+            | None ->
+            // Desugar bounds into constraint conjuncts (`..` is half-open:
+            // lo <= f, f < hi) alongside the declared where-conjuncts.
+            let boundConjuncts =
+                fields |> List.collect (fun f ->
+                    match f.Bound with
+                    | Some b ->
+                        (b.Lo |> Option.map (fun lo -> ExprBinOp (Elementwise, OpLe, lo, ExprVar f.Name)) |> Option.toList)
+                        @ (b.Hi |> Option.map (fun hi -> ExprBinOp (Elementwise, OpLt, ExprVar f.Name, hi)) |> Option.toList)
+                    | None -> [])
+            let allConstraints = constraints @ boundConjuncts
+            // Validate all conjuncts at declaration: fields bound, each
+            // conjunct must typecheck to Bool. Hard errors — a malformed
+            // constraint is a compile error, not a silently dropped check.
+            let mutable conjEnv = env
+            for (fn, ft) in fieldTypes do
+                let fId = conjEnv.Builder.FreshId()
+                conjEnv <- bindVarSimple fn fId ft conjEnv
+            let conjCheck =
+                allConstraints |> List.fold (fun acc c ->
+                    acc |> Result.bind (fun () ->
+                        match inferExpr conjEnv c with
+                        | Ok tC ->
+                            match unify conjEnv.Subst tC.Type (IRTScalar ETBool) with
+                            | Ok () -> Ok ()
+                            | Error _ ->
+                                Error (Other (sprintf "struct %s: where-constraint must be a boolean expression, got %s"
+                                                  name (ppIRType tC.Type)))
+                        | Error e ->
+                            Error (Other (sprintf "struct %s where-constraint: %s" name (formatTypeError e)))))
+                    (Ok ())
+            conjCheck |> Result.map (fun () ->
+                registerTypeDef name (TDIStruct (name, typeParams, fieldTypes, allConstraints)) env)
 
     | TyDeclSum (name, typeParams, variants) ->
         let variantTypes = variants |> List.map (fun v ->
@@ -5654,6 +6370,103 @@ and registerTypeDecl (env: TypeEnv) (typeDecl: TypeDecl) : TypeResult<TypeEnv> =
         let env' = registerTypeDef name (TDIVariant (name, typeParams, variantTypes)) env
         Ok (variants |> List.fold (fun e v ->
             registerVariantTag v.Name name (v.Data |> Option.map (lowerTypeExpr env)) e) env')
+
+    | TyDeclMutualGroup (members, constraints) ->
+        // Members register as ordinary transparent aliases — unannotated use
+        // of the underlying types stays completely unconstrained. The group
+        // itself is a side registration consumed at binding sites.
+        let groupId = members |> List.head |> fst
+        let envAfterMembers =
+            members |> List.fold (fun acc (mname, mty) ->
+                acc |> Result.bind (fun e ->
+                    if e.MutualMembers.ContainsKey mname || e.MutualGroups.ContainsKey mname then
+                        Error (Other (sprintf "mutual-group member '%s' is already part of another group" mname))
+                    else registerTypeDecl e (TyDeclAlias (mname, [], mty)))) (Ok env)
+        envAfterMembers |> Result.bind (fun env1 ->
+            // Resolve each member to a struct or scalar kind.
+            let memberKindsR =
+                members |> List.map (fun (mname, mty) ->
+                    match lowerTypeExpr env1 mty with
+                    | IRTNamed s ->
+                        match Map.tryFind s env1.TypeDefs with
+                        | Some (TDIStruct _) -> Ok (mname, MMStruct s)
+                        | _ -> Error (Other (sprintf "mutual-group member '%s': '%s' is not a declared struct" mname s))
+                    | (IRTScalar _ | IRTUnitAnnotated _ | IRTIdxTagged _ | IRTNat _) as sc ->
+                        Ok (mname, MMScalar sc)
+                    | otherTy ->
+                        Error (Other (sprintf "mutual-group member '%s' must alias a struct or scalar type, got %s"
+                                          mname (ppIRType otherTy))))
+                |> sequenceResults
+            memberKindsR |> Result.bind (fun memberKindList ->
+                let memberKinds = Map.ofList memberKindList
+                let structFields s =
+                    match Map.tryFind s env1.TypeDefs with
+                    | Some (TDIStruct (_, _, fields, _)) -> fields |> List.map fst |> Set.ofList
+                    | _ -> Set.empty
+                let callables =
+                    Set.union (StaticEval.knownBuiltinNames ())
+                              (env1.StaticFunctions |> Map.toSeq |> Seq.map fst |> Set.ofSeq)
+                // Position-sensitive reference validation: member field paths,
+                // bare scalar members, folded statics, static-evaluable calls.
+                let rec walkConjunct e =
+                    match e with
+                    | ExprLit _ -> Ok ()
+                    | ExprField (ExprVar m, f) when memberKinds.ContainsKey m ->
+                        (match memberKinds.[m] with
+                         | MMStruct s when (structFields s).Contains f -> Ok ()
+                         | MMStruct s -> Error (Other (sprintf "mutual constraint references unknown field '%s.%s' (struct %s)" m f s))
+                         | MMScalar _ -> Error (Other (sprintf "'%s' aliases a scalar; reference it bare, not '%s.%s'" m m f)))
+                    | ExprVar m when memberKinds.ContainsKey m ->
+                        (match memberKinds.[m] with
+                         | MMScalar _ -> Ok ()
+                         | MMStruct _ -> Error (Other (sprintf "'%s' aliases a struct; reference one of its fields as '%s.<field>'" m m)))
+                    | ExprVar n ->
+                        if env1.StaticValues.ContainsKey n then Ok ()
+                        else Error (Other (sprintf "identifier '%s' in a mutual-group constraint must be a group member, a member field path, or a static" n))
+                    | ExprApp (ExprVar f, args) ->
+                        if callables.Contains f then walkAll args
+                        else Error (Other (sprintf "call to '%s' in a mutual-group constraint: only statically-evaluable functions may be called" f))
+                    | ExprBinOp (_, _, l, r) -> walkConjunct l |> Result.bind (fun () -> walkConjunct r)
+                    | ExprUnaryOp (_, inner) -> walkConjunct inner
+                    | ExprIf (c, t, f) -> walkAll [c; t; f]
+                    | ExprTuple es | ExprArrayLit es -> walkAll es
+                    | ExprTyped (inner, _) -> walkConjunct inner
+                    | _ -> Error (Other "unsupported expression form in a mutual-group constraint")
+                and walkAll es =
+                    match es with
+                    | [] -> Ok ()
+                    | e :: rest -> walkConjunct e |> Result.bind (fun () -> walkAll rest)
+                let refCheck =
+                    constraints |> List.fold (fun acc c -> acc |> Result.bind (fun () -> walkConjunct c)) (Ok ())
+                refCheck |> Result.bind (fun () ->
+                    // Typecheck each conjunct with members bound (struct
+                    // members as their nominal type, scalars as themselves)
+                    // and require Bool.
+                    let mutable conjEnv = env1
+                    for (mname, kind) in memberKindList do
+                        let mTy = match kind with MMStruct s -> IRTNamed s | MMScalar t -> t
+                        let mId = conjEnv.Builder.FreshId()
+                        conjEnv <- bindVarSimple mname mId mTy conjEnv
+                    let typeCheckAll =
+                        constraints |> List.fold (fun acc c ->
+                            acc |> Result.bind (fun () ->
+                                match inferExpr conjEnv c with
+                                | Ok tC ->
+                                    match unify conjEnv.Subst tC.Type (IRTScalar ETBool) with
+                                    | Ok () -> Ok ()
+                                    | Error _ ->
+                                        Error (Other (sprintf "mutual-group constraint (group %s) must be a boolean expression, got %s"
+                                                          groupId (ppIRType tC.Type)))
+                                | Error e ->
+                                    Error (Other (sprintf "mutual-group constraint (group %s): %s" groupId (formatTypeError e)))))
+                            (Ok ())
+                    typeCheckAll |> Result.map (fun () ->
+                        let info = { GroupId = groupId; Members = memberKindList; Constraints = constraints }
+                        { env1 with
+                            MutualGroups = Map.add groupId info env1.MutualGroups
+                            MutualMembers =
+                                memberKindList |> List.fold (fun m (mname, _) ->
+                                    Map.add mname groupId m) env1.MutualMembers }))))
 
 // ============================================================================
 // 11b. Zonking — Final Type Resolution
@@ -5736,6 +6549,8 @@ let collectMixedEnumIdxInDecl (decl: Decl) : Expr list =
         fields |> List.collect (fun f -> walkTypeExprForMixedEnumIdx f.Type)
     | DeclType (TyDeclSum (_, _, variants)) ->
         variants |> List.collect (fun v -> walkOpt v.Data)
+    | DeclType (TyDeclMutualGroup (members, _)) ->
+        members |> List.collect (fun (_, mty) -> walkTypeExprForMixedEnumIdx mty)
     | DeclImpl impl ->
         impl.Methods |> List.collect (fun m ->
             (m.Params |> List.collect (fun p -> walkOpt p.Type))
@@ -5977,6 +6792,8 @@ let checkModule (env: TypeEnv) (modul: ModuleDecl) : TypedModule * TypeEnv * Com
             | DeclType td ->
                 match td with
                 | TyDeclAlias (n, _, _) | TyDeclStruct (n, _, _, _) | TyDeclSum (n, _, _) -> sprintf "in type '%s'" n
+                | TyDeclMutualGroup (members, _) ->
+                    sprintf "in mutual group '%s'" (members |> List.map fst |> String.concat ", ")
             | DeclInterface i -> sprintf "in interface '%s'" i.Name
             | DeclImpl impl -> sprintf "in impl for '%A'" impl.ForType
             | DeclImport (qn, _) -> sprintf "in import '%s'" (String.concat "." qn)

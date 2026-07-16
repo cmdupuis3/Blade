@@ -1,5 +1,6 @@
 // TEST: AD Grad Of Unknown Function (rejects)
+import ad as ad
 // ============================================================================
 // grad's argument must be a named top-level function in the same module.
 // ============================================================================
-let g = grad(nonexistent)
+let g = ad.grad(nonexistent)

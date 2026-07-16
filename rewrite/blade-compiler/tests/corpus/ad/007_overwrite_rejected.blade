@@ -1,4 +1,5 @@
 // TEST: AD Non-Additive Overwrite (rejects)
+import ad as ad
 // ============================================================================
 // Non-additive reassignment of a differentiable scalar is rejected: the
 // reverse sweep re-evaluates forward expressions at FINAL values, so the
@@ -9,4 +10,4 @@ function bad(x: Float) -> Float = {
     t = t * t
     t + x
 }
-let (bv, dbv) = grad(bad)(3.0)
+let (bv, dbv) = ad.grad(bad)(3.0)

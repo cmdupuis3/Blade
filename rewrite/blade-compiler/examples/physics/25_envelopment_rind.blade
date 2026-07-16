@@ -1,0 +1,91 @@
+// TEST: Physics -- The Rind: Enveloped in a Ball That Might Be There
+// ============================================================================
+// Two balls at known density, mass ratio 1000. The big one (M = 1000,
+// R_B = 10, sharp) rests at the origin; the small one's mass is known only
+// to TWO ORDERS OF MAGNITUDE (7-point log jet, m in [0.05, 20], so
+// R_s in [0.37, 2.71]). The band of POSSIBLE contact surfaces -- the RIND,
+// [10.37, 12.71], built from the small ball's OWN size uncertainty since
+// contact sits at R_B + R_s -- is wider than the small ball itself. So "it
+// could be inside the big one, in some sense". This example makes the sense
+// precise, at T = 3.8 inside the fuzzy contact band:
+//   * INSIDE THE ACTUAL BALL: never. The joint gap g = x_s - x_B - 10 - R_s
+//     is >= 0 in every realization (min 0.19 here): P_joint(overlap) = 0,
+//     EXACTLY. But the PRODUCT OF MARGINALS -- position decorrelated from
+//     size -- overlaps with probability 15/49 = 0.31, up to 1.51 deep.
+//     Impenetrability is INVISIBLE in the marginals; the law is stored in
+//     the position-size cross-cumulants (the exclusion analogue of example
+//     06's conservation-as-correlation).
+//   * AND THE TOWER CAN TELL: a gap law must be a STIELTJES moment sequence
+//     (support in [0, inf)). Both towers share the same mean (0.6599 --
+//     decorrelation preserves first moments), but the shifted Hankel
+//     m1 m3 - m2^2 is +0.086 for the joint tower and -1.485 for the
+//     product tower: the decorrelated description is provably NOT a
+//     nonnegative-gap law, from three moments alone. Impenetrability is a
+//     realizability constraint on the joint tower.
+//   * INSIDE THE MEAN BALL: genuinely -- P = 4/7. And 4/7 of realizations
+//     have their WHOLE BODY below the outer possible surface: enveloped by
+//     the rind. Inside the mean ball, wrapped in its own uncertainty shell,
+//     never inside the actual ball.
+//   * (tools/envelopment.ps1 also prints the SOFT WALL: the ensemble of
+//     hard turning points is a diffuse sigmoid edge -- the classical shadow
+//     of the nuclear optical model's surface diffuseness. Every realization
+//     is hard; the ensemble description is soft.)
+// ============================================================================
+let XS = [11.2, 11.2, 11.2, 11.2, 11.583916725, 12.6863910271, 14.169446307]
+let XB = [0.0, 0.0, 0.0, 0.0, -0.00103657515753, -0.0109992936009, -0.059388926141]
+let RS = [0.368403149864, 0.531329284591, 0.736806299728, 1.0, 1.39247665008, 1.94869516037, 2.71441761659]
+let XP = [11.2, 11.2, 11.2, 11.2, 11.2, 11.2, 11.2, 11.2, 11.2, 11.2, 11.2, 11.2, 11.2, 11.2, 11.2, 11.2, 11.2, 11.2, 11.2, 11.2, 11.2, 11.2, 11.2, 11.2, 11.2, 11.2, 11.2, 11.2, 11.583916725, 11.583916725, 11.583916725, 11.583916725, 11.583916725, 11.583916725, 11.583916725, 12.6863910271, 12.6863910271, 12.6863910271, 12.6863910271, 12.6863910271, 12.6863910271, 12.6863910271, 14.169446307, 14.169446307, 14.169446307, 14.169446307, 14.169446307, 14.169446307, 14.169446307]
+let BP = [0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, -0.00103657515753, -0.00103657515753, -0.00103657515753, -0.00103657515753, -0.00103657515753, -0.00103657515753, -0.00103657515753, -0.0109992936009, -0.0109992936009, -0.0109992936009, -0.0109992936009, -0.0109992936009, -0.0109992936009, -0.0109992936009, -0.059388926141, -0.059388926141, -0.059388926141, -0.059388926141, -0.059388926141, -0.059388926141, -0.059388926141]
+let RP = [0.368403149864, 0.531329284591, 0.736806299728, 1.0, 1.39247665008, 1.94869516037, 2.71441761659, 0.368403149864, 0.531329284591, 0.736806299728, 1.0, 1.39247665008, 1.94869516037, 2.71441761659, 0.368403149864, 0.531329284591, 0.736806299728, 1.0, 1.39247665008, 1.94869516037, 2.71441761659, 0.368403149864, 0.531329284591, 0.736806299728, 1.0, 1.39247665008, 1.94869516037, 2.71441761659, 0.368403149864, 0.531329284591, 0.736806299728, 1.0, 1.39247665008, 1.94869516037, 2.71441761659, 0.368403149864, 0.531329284591, 0.736806299728, 1.0, 1.39247665008, 1.94869516037, 2.71441761659, 0.368403149864, 0.531329284591, 0.736806299728, 1.0, 1.39247665008, 1.94869516037, 2.71441761659]
+
+// --- joint ensemble: overlap count and gap moments ---
+let CJ = reduce(method_for(zip(XS, XB, RS)) <@> lambda(x, b, r) -> (if x - b - 10.0 - r < 0.0 then 1.0 else 0.0), (+))
+let P_joint = CJ / 7.0
+let J1s = reduce(method_for(zip(XS, XB, RS)) <@> lambda(x, b, r) -> x - b - 10.0 - r, (+))
+let J2s = reduce(method_for(zip(XS, XB, RS)) <@> lambda(x, b, r) -> (x - b - 10.0 - r) * (x - b - 10.0 - r), (+))
+let J3s = reduce(method_for(zip(XS, XB, RS)) <@> lambda(x, b, r) -> (x - b - 10.0 - r) * (x - b - 10.0 - r) * (x - b - 10.0 - r), (+))
+let Jm1 = J1s / 7.0
+let Jm2 = J2s / 7.0
+let Jm3 = J3s / 7.0
+let sHJ = Jm1 * Jm3 - Jm2 * Jm2
+let joint_V = if P_joint < 0.001 then "EXCLUDED" else "OVERLAPS"
+let lawJ_V = if sHJ > 0.0 then "STIELTJES_OK" else "STIELTJES_VIOLATED"
+
+// --- product of marginals: position-realization i paired with size-realization j ---
+let CP = reduce(method_for(zip(XP, BP, RP)) <@> lambda(x, b, r) -> (if x - b - 10.0 - r < 0.0 then 1.0 else 0.0), (+))
+let P_prod = CP / 49.0
+let DP = reduce(method_for(zip(XP, BP, RP)) <@> lambda(x, b, r) -> (if x - b - 10.0 - r < 0.0 then 0.0 - (x - b - 10.0 - r) else 0.0), (+))
+let meanDepth = DP / CP
+let PR1 = reduce(method_for(zip(XP, BP, RP)) <@> lambda(x, b, r) -> x - b - 10.0 - r, (+))
+let PR2 = reduce(method_for(zip(XP, BP, RP)) <@> lambda(x, b, r) -> (x - b - 10.0 - r) * (x - b - 10.0 - r), (+))
+let PR3 = reduce(method_for(zip(XP, BP, RP)) <@> lambda(x, b, r) -> (x - b - 10.0 - r) * (x - b - 10.0 - r) * (x - b - 10.0 - r), (+))
+let Pm1 = PR1 / 49.0
+let Pm2 = PR2 / 49.0
+let Pm3 = PR3 / 49.0
+let sHP = Pm1 * Pm3 - Pm2 * Pm2
+let prod_V = if P_prod < 0.001 then "EXCLUDED" else "OVERLAPS"
+let lawP_V = if sHP > 0.0 then "STIELTJES_OK" else "STIELTJES_VIOLATED"
+
+// --- inside, in what sense: the mean ball and the rind's outer edge ---
+let wallMean = 10.0 + (RS(0) + RS(1) + RS(2) + RS(3) + RS(4) + RS(5) + RS(6)) / 7.0
+let rindOut = 10.0 + RS(6)
+let CM = reduce(method_for(XS) <@> lambda(x) -> (if x < 11.2417325945 then 1.0 else 0.0), (+))
+let P_inMean = CM / 7.0
+let CR = reduce(method_for(zip(XS, RS)) <@> lambda(x, r) -> (if x + r < 12.7144176166 then 1.0 else 0.0), (+))
+let P_rind = CR / 7.0
+
+// never inside the actual ball; often inside the mean one, wrapped in the
+// rind; and the decorrelated tower fails the Stieltjes test from 3 moments:
+// EXPECT: P_joint = 0.0
+// EXPECT: Jm1 = 0.659864384682347
+// EXPECT: sHJ = 0.0855702802184315
+// EXPECT: joint_V = "EXCLUDED"
+// EXPECT: P_prod = 0.306122448979592
+// EXPECT: meanDepth = 0.755506078712937
+// EXPECT: Pm1 = 0.659864384682347
+// EXPECT: sHP = -1.48467723727151
+// EXPECT: prod_V = "OVERLAPS"
+// EXPECT: lawJ_V = "STIELTJES_OK"
+// EXPECT: P_inMean = 0.571428571428571
+// EXPECT: P_rind = 0.571428571428571
+// EXPECT: lawP_V = "STIELTJES_VIOLATED"

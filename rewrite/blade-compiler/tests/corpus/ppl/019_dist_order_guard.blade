@@ -1,4 +1,5 @@
 // TEST: Dist Order Guard (rejects)
+import ppl as ppl
 // "Insufficient stochastic order" is a TYPE error: cumulant(d, 3) on a
 // Dist<2, ...> parameter fails at check time (TypeCheck.inferCumulantProj),
 // with steering toward constructing at a higher order. The guard fires
@@ -6,9 +7,9 @@
 // elaboration-level registry could never see.
 type TimeIdx = Idx<2>
 let X: Array<Float64 like Idx<2>, TimeIdx> = [[1.0, 2.0], [3.0, 4.0]]
-let dx = dist(X, 2)
+let dx = ppl.dist(X, 2)
 
 function third(d: Dist<2, Float64 like Idx<2>>) -> Array<Float64 like SymIdx<3, 2>> =
-  cumulant(d, 3)
+  ppl.cumulant(d, 3)
 
 let t = third(dx)

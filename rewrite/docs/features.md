@@ -270,7 +270,7 @@ Spec-only; domain rules live in libraries.
 |---------|--------|-----------------|
 | `with equiv(G, ρ)` / `with invariant(G)` annotations; inference through expressions; error detection (rep mismatch, equivariance breaking, wrong output rep, index/equiv incompatibility) | Near-term | v10 §8.2–8.4; zero runtime cost, type-checking only |
 | Representations and irreps (`Rep`, parity, `2*L1o + 3*L2e` specs) | Near-term | ml-spec §2 |
-| `IrrepsIdx` (block-structured, via DepIdx) | Near-term | ml-spec §3 |
+| `IrrepsIdx<spec>` (block-structured primitive index type; flat-dense, spec-keyed nominal identity + nominative aliases; block-navigation statics `irreps_len/l/parity/mult/dim/offset`) | Core (v7) | ml-spec §3; module doc §6/§11b (the DepIdx equation is the semantic reading — DepIdx iteration codegen is NOT landed); corpus `index-types/111–119`, `ml-ops/005–008` |
 | Clebsch-Gordan paths, `CGIdx` (via SparseIdx/constrained records), CG lookup | Near-term | ml-spec §4 |
 | Tensor product operation (paths, weights, block indices) | Near-term | ml-spec §5 |
 | Spherical harmonics | Near-term | ml-spec §6 |

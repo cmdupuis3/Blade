@@ -89,6 +89,7 @@ let rec isIndexType (env: AliasEnv) (ty: TypeExpr) : bool =
     | TyIdx _ | TySymIdx _ | TyAntisymIdx _ | TyHermitianIdx _
     | TyBoundedIdx _ | TyEnumIdx _ | TyCompoundIdx _
     | TyDepIdx _ | TyRaggedIdx _ | TyRaggedIdxOpaque
+    | TyIrrepsIdx _
     | TyEquivIdx _ -> true
     | TyNamed (n, _) ->
         match Map.tryFind n env with
@@ -112,6 +113,7 @@ let isAnonymousIndexType (ty: TypeExpr) : bool =
     | TyIdx _ | TySymIdx _ | TyAntisymIdx _ | TyHermitianIdx _
     | TyBoundedIdx _ | TyEnumIdx _ | TyCompoundIdx _
     | TyDepIdx _ | TyRaggedIdx _ | TyRaggedIdxOpaque
+    | TyIrrepsIdx _
     | TyEquivIdx _ -> true
     | _ -> false
 
@@ -131,6 +133,7 @@ let rec isKnownStatic (env: AliasEnv) (ty: TypeExpr) : bool =
     match ty with
     | TyIdx _ | TySymIdx _ | TyAntisymIdx _ | TyHermitianIdx _
     | TyBoundedIdx _ | TyEnumIdx _ | TyEquivIdx _ -> true
+    | TyIrrepsIdx _ -> true  // spec is static by definition; extent folds to a literal
     | TyRaggedIdx _ | TyRaggedIdxOpaque | TyCompoundIdx _ -> false
     | TyDepIdx (outer, _, body) ->
         isKnownStatic env outer && isKnownStatic env body
@@ -344,6 +347,14 @@ let validateDecl (env: AliasEnv) (decl: Located<Decl>) : ValidationError list * 
                     validateTypeExpr env declName span (PosForbidden "variant payloads") t
                 | None -> [])
         (errs, env)
+
+    | DeclType (TyDeclMutualGroup (members, _)) ->
+        // Each member body validates like a type-alias body and extends the
+        // alias env like one.
+        members |> List.fold (fun (accErrs, accEnv) (mname, mty) ->
+            let declName = sprintf "in mutual-group member '%s'" mname
+            let errs = validateTypeExpr accEnv declName span PosAliasBody mty
+            (accErrs @ errs, Map.add mname mty accEnv)) ([], env)
 
     | DeclFunction f ->
         let kind = if f.IsStatic then "static function" else "function"

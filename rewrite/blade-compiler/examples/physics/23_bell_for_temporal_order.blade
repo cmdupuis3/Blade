@@ -1,0 +1,84 @@
+// TEST: Physics -- Bell's Theorem for Temporal Order: Both Sides of the Divide
+// ============================================================================
+// Zych-Costa-Pikovski-Brukner (Nat. Commun. 10, 3772, 2019): when a mass
+// configuration controls the ORDER of two operations, a Bell-type test
+// separates "coherent superposition of orders" from every classical
+// (probabilistic, even dynamical) definite-order model. Our fuzzy billiards
+// are the CLASSICAL side of exactly that construction: a fuzzy mass controls
+// which collision happens first. Near the tie (contact-time dispersions in
+// exact overlap) three different things must not be confused:
+//   * ENSEMBLE tie: eta = P(AB first) -> 1/2. NOT a causality violation --
+//     it is the CENTER of the classical order polytope, where the causal-
+//     inequality margins are MAXIMAL. What fails at the tie is any definite
+//     causal NARRATIVE (wrong half the time), not causality.
+//   * ONTIC tie: t1 = t2 exactly -- a genuine triple collision, where hard-
+//     sphere DYNAMICS itself is singular. A measure-zero surface (25/125 on
+//     a symmetric grid, 0/125 here): a continuum mass distribution never
+//     certifies one. Every observable tie is an ensemble tie; "it really
+//     tied" is undecidable from the tower.
+//   * VIOLATION: outside the polytope -- unreachable by ANY mixture, which
+//     is the point of this example.
+// The ZCPB pair construction, computed both ways from the SAME race
+// (tools/temporal_bell.ps1): two wings each hold |0>; U_A = sigma_z then
+// U_B = H are applied in the shared order (AB -> |+>, BA -> |->):
+//   classical mixture  rho = eta|++><++| + (1-eta)|--><--|
+//   coherent order     |Psi> = sqrt(eta)|++> + sqrt(1-eta)|-->
+// Same order marginals. CHSH maximum (Horodecki): the mixture sits AT the
+// separable bound S = 2 for EVERY eta; the coherent order gives
+// S = 2 sqrt(1 + 4 eta (1-eta)) -- maximal (2 sqrt 2) exactly AT the tie.
+// The tie is where the divide is widest: maximum classical safety, maximum
+// quantum order-entanglement. Locally both sides look identical (each wing
+// is mixed; the single-switch witness D = -1 needs the coherent control in
+// hand): the nonclassicality of causal order lives ONLY in correlations.
+// Below, Blade computes the classical side from the embedded race (eta from
+// order indicators; the downstream branch mixture in B's post-collision
+// velocity -- the 600x variance spike that is the tie's classical signature)
+// and both witness values from the same eta. Config: A(x=0,v=1,m~1+-0.2) ->
+// B(x=7,m~0.4+-0.05) <- C(x=16.65,v=-1.5,m~1+-0.2), radii m^(1/3), 125 grid.
+// ============================================================================
+let IND = [0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 1.0, 1.0, 0.0, 0.0, 0.0, 1.0, 1.0, 0.0, 0.0, 0.0, 1.0, 1.0, 0.0, 0.0, 0.0, 1.0, 1.0, 1.0, 0.0, 0.0, 1.0, 1.0, 1.0, 0.0, 0.0, 1.0, 1.0, 1.0, 0.0, 0.0, 1.0, 1.0, 1.0, 0.0, 0.0, 1.0, 1.0, 1.0, 1.0, 0.0, 1.0, 1.0, 1.0, 1.0, 0.0, 1.0, 1.0, 1.0, 1.0, 0.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0]
+let VB = [-2.08695652174, -2.16, -2.22222222222, -2.27586206897, -2.32258064516, -2.04255319149, -2.11764705882, -2.18181818182, -2.23728813559, -2.28571428571, -2.0, -2.07692307692, -2.14285714286, -2.2, -2.25, -1.95918367347, -2.03773584906, -2.10526315789, -2.16393442623, -2.21538461538, -1.92, -2.0, -2.06896551724, -2.12903225806, -2.18181818182, 1.44, -2.16, -2.22222222222, -2.27586206897, -2.32258064516, 1.41176470588, -2.11764705882, -2.18181818182, -2.23728813559, -2.28571428571, 1.38461538462, 1.38461538462, -2.14285714286, -2.2, -2.25, 1.35849056604, 1.35849056604, -2.10526315789, -2.16393442623, -2.21538461538, 1.33333333333, 1.33333333333, -2.06896551724, -2.12903225806, -2.18181818182, 1.48148148148, 1.48148148148, 1.48148148148, -2.27586206897, -2.32258064516, 1.45454545455, 1.45454545455, 1.45454545455, -2.23728813559, -2.28571428571, 1.42857142857, 1.42857142857, 1.42857142857, -2.2, -2.25, 1.40350877193, 1.40350877193, 1.40350877193, -2.16393442623, -2.21538461538, 1.37931034483, 1.37931034483, 1.37931034483, 1.37931034483, -2.18181818182, 1.51724137931, 1.51724137931, 1.51724137931, 1.51724137931, -2.32258064516, 1.49152542373, 1.49152542373, 1.49152542373, 1.49152542373, -2.28571428571, 1.46666666667, 1.46666666667, 1.46666666667, 1.46666666667, 1.46666666667, 1.44262295082, 1.44262295082, 1.44262295082, 1.44262295082, 1.44262295082, 1.41935483871, 1.41935483871, 1.41935483871, 1.41935483871, 1.41935483871, 1.54838709677, 1.54838709677, 1.54838709677, 1.54838709677, 1.54838709677, 1.52380952381, 1.52380952381, 1.52380952381, 1.52380952381, 1.52380952381, 1.5, 1.5, 1.5, 1.5, 1.5, 1.47692307692, 1.47692307692, 1.47692307692, 1.47692307692, 1.47692307692, 1.45454545455, 1.45454545455, 1.45454545455, 1.45454545455, 1.45454545455]
+
+// --- eta and the order entropy from the indicator column ---
+let IS = reduce(method_for(IND) <@> lambda(x) -> x, (+))
+let eta = IS / 125.0
+let Hent = (0.0 - (eta * log(eta) + (1.0 - eta) * log(1.0 - eta))) / log(2.0)
+let order_V = if eta < 0.001 then "DEFINITE" else (if eta > 0.999 then "DEFINITE" else "AMBIGUOUS")
+
+// --- downstream branch mixture: B's velocity after the first collision ---
+let V1 = reduce(method_for(VB) <@> lambda(x) -> x, (+))
+let V2 = reduce(method_for(VB) <@> lambda(x) -> x * x, (+))
+let VB_k1 = V1 / 125.0
+let VB_k2 = V2 / 125.0 - VB_k1 * VB_k1
+// conditional branch means via the indicator
+let BA1 = reduce(method_for(zip(VB, IND)) <@> lambda(v, w) -> v * w, (+))
+let BB1 = reduce(method_for(zip(VB, IND)) <@> lambda(v, w) -> v * (1.0 - w), (+))
+let muAB = BA1 / IS
+let muBA = BB1 / (125.0 - IS)
+// share of the variance carried by the ORDER ambiguity alone
+let between = eta * (1.0 - eta) * (muAB - muBA) * (muAB - muBA)
+let share = between / VB_k2
+
+// --- the witness, both sides, from the SAME eta ---
+let Exx = eta * 1.0 + (1.0 - eta) * 1.0
+let S_cl = 2.0 * sqrt(Exx * Exx)
+let conc = 2.0 * sqrt(eta * (1.0 - eta))
+let S_q = 2.0 * sqrt(1.0 + conc * conc)
+let margin = S_q - S_cl
+let cl_V = if S_cl < 2.0000001 then "AT_CLASSICAL_BOUND" else "ABOVE_BOUND"
+let q_V = if margin > 0.1 then "BOUND_VIOLATED" else "WITHIN_BOUND"
+
+// the same order statistics: classically pinned AT S=2, coherently 0.81 past
+// it -- and the gap is widest exactly where the order is most ambiguous:
+// EXPECT: eta = 0.576
+// EXPECT: Hent = 0.983269211096519
+// EXPECT: order_V = "AMBIGUOUS"
+// EXPECT: VB_k2 = 3.23372926353163
+// EXPECT: muAB = 1.45865029605806
+// EXPECT: muBA = -2.17707557354623
+// EXPECT: share = 0.998313499872428
+// EXPECT: S_cl = 2.0
+// EXPECT: cl_V = "AT_CLASSICAL_BOUND"
+// EXPECT: S_q = 2.8120426739294
+// EXPECT: margin = 0.812042673929398
+// EXPECT: q_V = "BOUND_VIOLATED"

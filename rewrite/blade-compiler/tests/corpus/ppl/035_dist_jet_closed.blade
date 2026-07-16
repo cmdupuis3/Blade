@@ -1,0 +1,20 @@
+// TEST: Dist Jet Closed
+import ppl as ppl
+// The EXPLICIT closure: the same x·y jet as ppl/034 but the input dist
+// carries only order 4, so q·s = 6 exceeds the budget. dist_jet rejects
+// (ppl/037 pins that); dist_jet_closed accepts and zero-fills cumulants
+// beyond the carried order (partition blocks larger than 4 are dropped —
+// the moments(d,k) closure convention). κ1, κ2 need orders ≤ 4 and stay
+// exact; κ3 absorbs the truncation (prototype dump-jet J3: strict −14.07
+// vs closed −54.30 — the difference is exactly the dropped κ5, κ6 terms).
+type TimeIdx = Idx<3>
+let B: Array<Float64 like Idx<2>, TimeIdx> = [[1.0, 2.0, 4.0], [3.0, 5.0, 4.0]]
+let db = ppl.dist(B, 4)
+let m = ppl.cumulant(db, 1)
+let dy = ppl.dist_jet_closed(db, 3, m(0) * m(1), [m(1), m(0)], [0.0, 1.0, 0.0])
+let y1 = ppl.cumulant(dy, 1)
+let y2 = ppl.cumulant(dy, 2)
+let y3 = ppl.cumulant(dy, 3)
+// EXPECT: y1 = [9.66666666667]
+// EXPECT: y2 = [28.2222222222]
+// EXPECT: y3 = [-54.2962962963]

@@ -1,0 +1,14 @@
+// TEST: Struct Reassign Violated (aborts)
+// Whole-struct reassignment with violating values fires the guard.
+// ABORT: Constraint violation in Balanced
+struct Balanced {
+    a: Int,
+    b: Int,
+    total: Int
+} where a + b == total
+function go() -> Int = {
+    let mut x = Balanced { a = 1, b = 2, total = 3 }
+    x = Balanced { a = 2, b = 2, total = 9 }
+    x.total
+}
+let t = go()

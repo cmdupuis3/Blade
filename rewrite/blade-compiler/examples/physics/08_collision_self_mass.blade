@@ -1,0 +1,37 @@
+// TEST: Physics -- We Are The Fuzzy Object
+import ppl as ppl
+// ============================================================================
+// Now WE are the projectile, uncertain of our own mass: m1 ~ (1.0, 0.25),
+// target m2 = 2 (sharp) at rest, u1 = 1. The frame-independent fraction of
+// energy WE retain is R = ((m1 - m2)/(m1 + m2))^2 = v1^2. Being uncertain of
+// our own inertia, we are 63% uncertain (sd/mean) about how much energy we
+// keep, and BIASED about ourselves -- the plug-in says 11.1%, but we actually
+// keep 13.0% on average (a convexity bias in our own favor). Yet our velocity
+// RELATIVE to the target is perfectly sharp (v1 - v2 = -1, a degenerate jet).
+// An observer uncertain of their own mass cannot pin their absolute recoil,
+// but keeps exact knowledge of relative motion and of the invariants.
+// EXPECT values checked vs an independent PowerShell ensemble.
+// ============================================================================
+type TimeIdx = Idx<7>
+let M1: Array<Float64 like Idx<1>, TimeIdx> = [[0.598104392874, 0.782868848894, 0.899580957024, 1.0, 1.10041904298, 1.21713115111, 1.40189560713]]
+let d = ppl.dist(M1, 6)
+
+// our recoil velocity
+let dv1 = ppl.dist_map(d, 3, 2, lambda(m) -> (m - 2.0) / (m + 2.0))
+let v1 = ppl.cumulant(dv1, 1)
+
+// fraction of energy WE keep (naive plug-in = 0.1111; true mean 0.1296 here)
+let dR = ppl.dist_map(d, 3, 2, lambda(m) -> ((m - 2.0) / (m + 2.0)) * ((m - 2.0) / (m + 2.0)))
+let R1 = ppl.cumulant(dR, 1)
+let R2 = ppl.cumulant(dR, 2)
+
+// relative velocity: SHARP even though we don't know our own mass
+let drel = ppl.dist_map(d, 3, 2, lambda(m) -> (m - 2.0) / (m + 2.0) - 2.0 * m / (m + 2.0))
+let rel1 = ppl.cumulant(drel, 1)
+let rel2 = ppl.cumulant(drel, 2)
+
+// EXPECT: v1 = [-0.342592592591937]
+// EXPECT: R1 = [0.129629629629313]
+// EXPECT: R2 = [0.00585672834388508]
+// EXPECT: rel1 = [-1.0]
+// EXPECT: rel2 = [0.0]

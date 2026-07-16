@@ -1,4 +1,5 @@
 // TEST: Cumulants Tower
+import ppl as ppl
 // Orders 1..4 on an asymmetric dataset (nonzero odd cumulants; k4 is a real
 // cumulant, NOT the central 4th moment — the 3-partition terms subtract the
 // 3 sigma^2 pairings). B(4) = 15 partitions, 15 shared block moments.
@@ -7,10 +8,10 @@
 // inversion and the compiler's generated kernels must agree.
 type TimeIdx = Idx<3>
 let B: Array<Float64 like Idx<2>, TimeIdx> = [[1.0, 2.0, 4.0], [3.0, 5.0, 4.0]]
-let k1 = cumulants(B, 1)
-let k2 = cumulants(B, 2)
-let k3 = cumulants(B, 3)
-let k4 = cumulants(B, 4)
+let k1 = ppl.cumulants(B, 1)
+let k2 = ppl.cumulants(B, 2)
+let k3 = ppl.cumulants(B, 3)
+let k4 = ppl.cumulants(B, 4)
 // EXPECT: k1 = [2.33333333333, 4.0]
 // EXPECT: k2 = [1.55555555556, 0.333333333333, 0.666666666667]
 // EXPECT: k3 = [0.740740740741, -0.555555555556, -0.555555555556, 0.0]

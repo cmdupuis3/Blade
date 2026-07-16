@@ -114,6 +114,91 @@ module Dist =
     /// order q. Needs joint moments of X up to q * max total degree — enforced
     /// here at runtime; in Blade this is the type-level "insufficient
     /// stochastic order" error, caught before any kernel is emitted.
+    /// Full Faà di Bruno pushforward, scalar output: Y = g(X) for a smooth g
+    /// supplied as its degree-s JET AT THE MEAN — g0 = g(μ) and
+    /// derivs.[k-1] = the rank-k symmetric derivative tensor g^(k)(μ).
+    /// Y − g0 is the Taylor polynomial in Z = X − μ, so raw moments of
+    /// Y' = Y − g0 expand over compositions of m into jet degrees,
+    /// derivative reads contracted with CENTRAL moment tensors of X
+    /// (partition sums over κ with every block of size ≥ 2 — singleton
+    /// blocks vanish because κ_1(Z) = 0); univariate Möbius inversion
+    /// returns cumulants and κ_1 shifts back by g0.
+    ///
+    /// Exact when g is a polynomial of degree ≤ s (its jet is finite) and
+    /// q·s ≤ the carried order. `closed = false` demands that budget — the
+    /// "insufficient stochastic order" contract; `closed = true` instead
+    /// zero-fills cumulants beyond the carried order (the moments(d,k)
+    /// closure convention: partition blocks larger than Order are dropped).
+    let jetPushforward (dist: T) (g0: float) (derivs: SymTensor.T[]) (q: int) (closed: bool) : T =
+        let d = dist.Dim
+        let s = derivs.Length
+        if s < 1 then failwith "jetPushforward: the jet needs at least D_1"
+        derivs |> Array.iteri (fun i dk ->
+            if dk.Dim <> d || dk.Rank <> i + 1 then
+                failwithf "jetPushforward: D_%d must be a rank-%d symmetric tensor over dim %d" (i + 1) (i + 1) d)
+        let tMax = q * s
+        if not closed && tMax > dist.Order then
+            failwithf "jetPushforward: needs input moments up to order %d but Dist carries order %d (closure required)"
+                tMax dist.Order
+        // central moment tensors of X, orders 1..tMax (order 1 = zeros)
+        let cm =
+            [| for t in 1 .. tMax ->
+                 let out = SymTensor.create d t
+                 if t >= 2 then
+                     let parts =
+                         Combinatorics.setPartitions t
+                         |> Array.filter (fun p ->
+                             p |> Array.forall (fun b -> b.Length >= 2 && b.Length <= dist.Order))
+                     for labels in SymTensor.enumerate d t do
+                         let mutable acc = 0.0
+                         for p in parts do
+                             let mutable prod = 1.0
+                             for b in p do
+                                 let sub = b |> Array.map (fun pos -> labels.[pos]) |> Array.sort
+                                 prod <- prod * SymTensor.get dist.Kappa.[b.Length - 1] sub
+                             acc <- acc + prod
+                         SymTensor.set out labels acc
+                 out |]
+        // raw moments of Y' = Y − g0: multinomial over jet-degree compositions
+        let rawY =
+            Array.init q (fun mi ->
+                let m = mi + 1
+                let mutable total = 0.0
+                for comp in Combinatorics.compositions m s do
+                    // comp.[k-1] factors take jet degree k; total Z-degree t
+                    let t = comp |> Array.mapi (fun i c -> (i + 1) * c) |> Array.sum
+                    if t >= 2 then   // t = 1 ⇒ D_1·E[Z] = 0; t = 0 impossible for m ≥ 1
+                        let mutable w = Combinatorics.factorial m
+                        for i in 0 .. s - 1 do
+                            w <- w / Combinatorics.factorial comp.[i]
+                            w <- w / (Combinatorics.factorial (i + 1) ** float comp.[i])
+                        let degs = [| for i in 0 .. s - 1 do for _ in 1 .. comp.[i] -> i + 1 |]
+                        let labels = Array.zeroCreate t
+                        let mutable sum = 0.0
+                        // per factor: enumerate its k labels, read D_k; at the
+                        // leaf read the central moment of ALL t labels
+                        let rec go (fi: int) (pos: int) (acc: float) =
+                            if fi = degs.Length then
+                                sum <- sum + acc * SymTensor.get cm.[t - 1] labels
+                            else
+                                let k = degs.[fi]
+                                let rec fill (j: int) =
+                                    if j = k then
+                                        let seg = Array.sub labels pos k
+                                        let dv = SymTensor.get derivs.[k - 1] seg
+                                        if dv <> 0.0 then go (fi + 1) (pos + k) (acc * dv)
+                                    else
+                                        for lab in 0 .. d - 1 do
+                                            labels.[pos + j] <- lab
+                                            fill (j + 1)
+                                fill 0
+                        go 0 0 1.0
+                        total <- total + w * sum
+                total)
+        let out = ofUnivariateMoments rawY
+        SymTensor.set out.Kappa.[0] [| 0 |] (SymTensor.get out.Kappa.[0] [| 0 |] + g0)
+        out
+
     let polyMoments (dist: T) (terms: (float * int[]) list) (q: int) : T =
         let maxDeg = terms |> List.map (fun (_, a) -> Array.sum a) |> List.max
         if q * maxDeg > dist.Order then

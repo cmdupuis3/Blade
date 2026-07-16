@@ -1,0 +1,13 @@
+// TEST: Mutual Joint Binding OK
+// Momentum-conserving pair: joint annotated binding, check passes at runtime.
+struct Particle {
+    pos: Float,
+    vel: Float,
+    mass: Float
+}
+type P1 = Particle
+and P2 = Particle
+where P1.vel * P1.mass + P2.vel * P2.mass == 0.0
+let (a, b): (P1, P2) = (Particle { pos = 0.0, vel = 1.0, mass = 2.0 }, Particle { pos = 1.0, vel = 0.0 - 1.0, mass = 2.0 })
+let total = a.vel * a.mass + b.vel * b.mass
+// EXPECT: total = 0

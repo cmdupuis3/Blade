@@ -1,0 +1,16 @@
+// TEST: Reduce Inline Binop
+// The fused reduction terminal reduce(deferred, op[, init]) is statement-shaped
+// (accumulator + loop nest, no IIFE form), so codegen can only emit it at a
+// let-binding position. When it appears INSIDE a larger scalar expression the
+// IR lift pass now hoists it into a preceding synthetic let (isInlineForm), so
+// `reduce(...) / n`, `reduce(...) - t`, `f(reduce(...))`, and reduce-on-both-
+// sides all work without the caller writing the intermediate let by hand.
+let I = [1.0, 2.0, 3.0, 4.0, 5.0]
+let mean = reduce(method_for(I) <@> lambda(x) -> x, (+)) / 5.0
+let var = reduce(method_for(I) <@> lambda(x) -> x * x, (+)) / 5.0 - mean * mean
+let rms = sqrt(reduce(method_for(I) <@> lambda(x) -> x * x, (+)))
+let ratio = reduce(method_for(I) <@> lambda(x) -> x, (+)) / reduce(method_for(I) <@> lambda(x) -> 1.0, (+))
+// EXPECT: mean = 3.0
+// EXPECT: var = 2.0
+// EXPECT: rms = 7.4161984871
+// EXPECT: ratio = 3.0

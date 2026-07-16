@@ -1,0 +1,10 @@
+// TEST: Fusion Mismatched Extents (rejects)
+// <&!> is MANDATORY fusion: leaves whose loop extents differ (3 vs 2)
+// cannot share a nest, and the compiler must say so loudly (#error with a
+// steering diagnostic pointing at <&>) rather than emit a nest that reads
+// past C's extent or silently fall back to independent loops.
+let A = [1.0, 2.0, 3.0]
+let C = [10.0, 20.0]
+let f = lambda(x) -> x + 1.0
+let g = lambda(x) -> x * 2.0
+let (u, v) = (object_for(f) <@> (A)) <&!> (object_for(g) <@> (C)) |> compute

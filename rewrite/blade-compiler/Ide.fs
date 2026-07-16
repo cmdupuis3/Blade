@@ -155,7 +155,9 @@ let rec private indexNamesOf (t: IRType) : (IRId * string) list =
     | IRTTuple ts -> ts |> List.collect indexNamesOf
     | _ -> []
 
-let private ppType (t: IRType) : string =
+/// Public: also the REPL's display printer (Cli.fs) — index-name-aware
+/// rendering beats bare ppIRType for any type embedding named index types.
+let ppType (t: IRType) : string =
     ppIRTypeIn (indexNamesOf t |> Map.ofList) t
 
 /// Multi-line function signature: each parameter and the return type on its
@@ -166,6 +168,99 @@ let private formatFunctionSig (ps: (string * string) list) (ret: string) =
     | _ ->
         let paramLines = ps |> List.map (fun (n, t) -> sprintf "    %s: %s" n t)
         sprintf "(\n%s\n) -> %s" (String.concat ",\n" paramLines) ret
+
+// ----------------------------------------------------------------------------
+// Abstract (type-variable) rendering — shared with the REPL (Cli.ReplTypes).
+// Post-zonk, surviving IRTInfer vars are exactly the HM-polymorphic positions
+// of a generic signature; rendering them as `T?10000` leaks inference ids
+// into hovers. Name them from the source annotations where possible (T,
+// T^2), fresh letters otherwise.
+// ----------------------------------------------------------------------------
+
+/// Does an unresolved inference variable survive anywhere in the type?
+let rec hasInfer (t: IRType) : bool =
+    match t with
+    | IRTInfer _ -> true
+    | IRTTuple ts -> ts |> List.exists hasInfer
+    | IRTComputation t | IRTPoly (t, _)
+    | IRTUnitAnnotated (t, _) | IRTIdxTagged (t, _) -> hasInfer t
+    | IRTDist (_, elem, _) -> hasInfer elem
+    | IRTLoop lt ->
+        (lt.ArrayTypes |> List.exists hasInfer)
+        || (lt.KernelType |> Option.exists hasInfer)
+    | IRTArrow (slots, ret, _) ->
+        hasInfer ret
+        || (slots |> List.exists (function SVal t -> hasInfer t | _ -> false))
+    | _ -> false
+
+/// Replace surviving inference variables with named placeholders (IRTNamed
+/// prints as itself), so the standard printer renders them as abstract type
+/// variables.
+let rec nameInfers (nameOf: int -> string) (t: IRType) : IRType =
+    match t with
+    | IRTInfer id -> IRTNamed (nameOf id)
+    | IRTTuple ts -> IRTTuple (ts |> List.map (nameInfers nameOf))
+    | IRTComputation t -> IRTComputation (nameInfers nameOf t)
+    | IRTPoly (t, v) -> IRTPoly (nameInfers nameOf t, v)
+    | IRTUnitAnnotated (t, u) -> IRTUnitAnnotated (nameInfers nameOf t, u)
+    | IRTIdxTagged (t, r) -> IRTIdxTagged (nameInfers nameOf t, r)
+    | IRTDist (o, elem, axes) -> IRTDist (o, nameInfers nameOf elem, axes)
+    | IRTLoop lt ->
+        IRTLoop { lt with
+                    ArrayTypes = lt.ArrayTypes |> List.map (nameInfers nameOf)
+                    KernelType = lt.KernelType |> Option.map (nameInfers nameOf) }
+    | IRTArrow (slots, ret, ident) ->
+        let slot = function SVal t -> SVal (nameInfers nameOf t) | s -> s
+        IRTArrow (slots |> List.map slot, nameInfers nameOf ret, ident)
+    | _ -> t
+
+/// Best-effort recovery of the SOURCE names of abstract type variables: walk
+/// an annotation in parallel with its resolved type, recording (inference id
+/// -> declared name) wherever a type-variable position is still unresolved.
+/// `T^k` keeps its arity suffix. A bare `T` parses as TyNamed — if that
+/// position resolved to an inference var, it was a type variable, so the
+/// name applies.
+let rec collectVarNames (ann: TypeExpr) (t: IRType) : (int * string) list =
+    match ann, t with
+    | TyVar (name, arity), IRTInfer id ->
+        let disp = match arity with
+                   | Some k when k > 0 -> sprintf "%s^%d" name k
+                   | _ -> name
+        [(id, disp)]
+    | TyNamed (name, []), IRTInfer id -> [(id, name)]
+    | TyAbstractArray (TyVar (name, _), _, _), IRTInfer id -> [(id, name)]
+    | TyTuple anns, IRTTuple ts when anns.Length = ts.Length ->
+        List.zip anns ts |> List.collect (fun (a, ty) -> collectVarNames a ty)
+    | TyFunc (args, ret), IRTArrow (slots, res, _) ->
+        let vals = slots |> List.choose (function SVal ty -> Some ty | _ -> None)
+        (if args.Length = vals.Length then
+            List.zip args vals |> List.collect (fun (a, ty) -> collectVarNames a ty)
+         else [])
+        @ collectVarNames ret res
+    | TyArray (elem, _), ArrayElem arr -> collectVarNames elem arr.ElemType
+    | _ -> []
+
+/// Fresh-letter pool for inference vars no source annotation names.
+let private typeVarPool =
+    seq { yield! ["T"; "U"; "V"; "W"]
+          for i in 1 .. 1000 -> sprintf "T%d" i }
+
+/// A per-signature abstract-type renderer: consistent letters across every
+/// type it prints (a function's params + return share one namespace).
+/// `seed` pre-names inference ids recovered from source annotations.
+let abstractRenderer (seed: (int * string) seq) : IRType -> string =
+    let named = Dictionary<int, string>()
+    for (id, n) in seed do named.[id] <- n
+    let used = HashSet<string>(named.Values)
+    let nameOf id =
+        match named.TryGetValue id with
+        | true, n -> n
+        | _ ->
+            let n = typeVarPool |> Seq.find (fun c -> not (used.Contains c))
+            used.Add n |> ignore
+            named.[id] <- n
+            n
+    fun t -> ppType (if hasInfer t then nameInfers nameOf t else t)
 
 // ----------------------------------------------------------------------------
 // Doc comments
@@ -296,7 +391,8 @@ let private whereConjuncts (wc: WhereClause option) : string list =
                 | Omp s ->
                     let vars = s.Vars |> List.map (fun (v, n) -> sprintf "%s: %d" v n)
                     sprintf "omp(%s)" (String.concat ", " vars)
-                | Cuda s -> sprintf "cuda(block: %d)" s.BlockSize)
+                | Cuda s -> sprintf "cuda(block: %d)" s.BlockSize
+                | Mpi -> "mpi")
         let customs =
             w.Custom
             |> List.map (fun (name, args) -> sprintf "%s(%s)" name (String.concat ", " args))
@@ -312,8 +408,12 @@ type private TypedEntry = {
     EWhere: string list
 }
 
-let private collectTypedBindings (tp: TypedProgram) =
+let private collectTypedBindings (srcFuncs: Map<string, FunctionDecl>) (tp: TypedProgram) =
     let acc = ResizeArray<TypedEntry>()
+    // Value bindings: each binding names its own abstract vars (T, U, ...) —
+    // schemes don't share ids across bindings, so per-binding namespaces
+    // can't collide.
+    let ppVal (t: IRType) = abstractRenderer [] t
     let add scope name kind tyStr =
         acc.Add { Scope = scope; EName = name; EKind = kind; ETypeStr = tyStr
                   EParams = []; ERet = None; EWhere = [] }
@@ -321,8 +421,8 @@ let private collectTypedBindings (tp: TypedProgram) =
         for s in stmts do
             match s with
             | TStmtLet b ->
-                add scope b.Name "let" (ppType b.Type)
-                for (n, _, t) in b.SubBindings do add scope n "let" (ppType t)
+                add scope b.Name "let" (ppVal b.Type)
+                for (n, _, t) in b.SubBindings do add scope n "let" (ppVal t)
             | TStmtForIn (v, _, _, _, body) ->
                 add scope v "for" (ppType (IRTScalar ETInt64))
                 walkTStmts scope body
@@ -332,24 +432,38 @@ let private collectTypedBindings (tp: TypedProgram) =
         | TExprBlock (stmts, _) -> walkTStmts scope stmts
         | _ -> ()
     let addFunc (f: TypedFunctionDecl) =
-        let ps = f.Params |> List.map (fun p -> (p.Name, ppType p.Type))
-        let ret = ppType f.ReturnType
+        // One abstract-var namespace across the whole signature, seeded with
+        // the SOURCE type-variable names where the annotations reveal them.
+        let seed =
+            match Map.tryFind f.Name srcFuncs with
+            | Some src when src.Params.Length = f.Params.Length ->
+                [ for (p, tp) in List.zip src.Params f.Params do
+                    match p.Type with
+                    | Some ann -> yield! collectVarNames ann tp.Type
+                    | None -> ()
+                  match src.ReturnType with
+                  | Some ann -> yield! collectVarNames ann f.ReturnType
+                  | None -> () ]
+            | _ -> []
+        let pp = abstractRenderer seed
+        let ps = f.Params |> List.map (fun p -> (p.Name, pp p.Type))
+        let ret = pp f.ReturnType
         let kind = if f.IsStatic then "static function" else "function"
         acc.Add { Scope = ""; EName = f.Name; EKind = kind
                   ETypeStr = formatFunctionSig ps ret
                   EParams = ps; ERet = Some ret
                   EWhere = whereConjuncts f.WhereClause }
-        for p in f.Params do add f.Name p.Name "param" (ppType p.Type)
+        for p in f.Params do add f.Name p.Name "param" (pp p.Type)
         walkFuncBody f.Name f.Body
     for m in tp.Modules do
         for d in m.Decls do
             match d with
             | TDeclLet b ->
-                add "" b.Name "let" (ppType b.Type)
-                for (n, _, t) in b.SubBindings do add "" n "let" (ppType t)
+                add "" b.Name "let" (ppVal b.Type)
+                for (n, _, t) in b.SubBindings do add "" n "let" (ppVal t)
             | TDeclStatic b ->
-                add "" b.Name "static" (ppType b.Type)
-                for (n, _, t) in b.SubBindings do add "" n "static" (ppType t)
+                add "" b.Name "static" (ppVal b.Type)
+                for (n, _, t) in b.SubBindings do add "" n "static" (ppVal t)
             | TDeclFunction f -> addFunc f
             | TDeclImpl impl -> for f in impl.Methods do addFunc f
             | _ -> ()
@@ -361,6 +475,16 @@ let private collectTypedBindings (tp: TypedProgram) =
 /// keyword kind (let / let mut / static / for) wins over the typed-side kind
 /// when the source recorded one.
 let private joinBindings (prog: Ast.Program) (tp: TypedProgram) (sourceLines: string[]) : BindingInfo list =
+    // Source-side function decls by name, for recovering declared
+    // type-variable names in signatures (collectTypedBindings.addFunc).
+    let srcFuncs =
+        [ for m in prog.Modules do
+            for ld in m.Decls do
+                match ld.Value with
+                | DeclFunction f -> yield (f.Name, f)
+                | DeclImpl impl -> for f in impl.Methods do yield (f.Name, f)
+                | _ -> () ]
+        |> Map.ofList
     let spans = Dictionary<string, Queue<Span * string option>>()
     for (scope, name, span, kindOpt) in collectSourceBindings prog do
         let key = scope + " " + name
@@ -380,7 +504,7 @@ let private joinBindings (prog: Ast.Program) (tp: TypedProgram) (sourceLines: st
             let d = docAbove sourceLines line
             docCache.[line] <- d
             d
-    [ for e in collectTypedBindings tp do
+    [ for e in collectTypedBindings srcFuncs tp do
         let key = e.Scope + " " + e.EName
         match spans.TryGetValue key with
         | true, q when q.Count > 0 ->

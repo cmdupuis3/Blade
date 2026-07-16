@@ -327,9 +327,19 @@ and parseSimplePrimary (tokens: Token list) : ParseResult<Expr> =
     | Some (LiteralTok lit) -> success (ExprLit lit) (advance tokens)
     | Some (TokIdent name) -> success (ExprVar name) (advance tokens)
     | Some TokLParen ->
-        advance tokens |> parseSimpleExpr >>= fun expr afterExpr ->
-        expect TokRParen afterExpr >>= fun _ remaining ->
-        success expr remaining
+        // Parenthesized simple expression OR tuple of simple expressions.
+        // The tuple form serves static index-type arguments whose payload is
+        // tuple-structured (e.g. IrrepsIdx<[(0, 0, 2), (1, 1, 2)]>). A comma
+        // here was previously a parse error, so accepting tuples changes no
+        // existing program's meaning.
+        advance tokens |> sepBy parseSimpleExpr TokComma >>= fun exprs afterExprs ->
+        expect TokRParen afterExprs >>= fun _ remaining ->
+        match exprs with
+        | [] ->
+            let line, col = currentPos tokens
+            error "Expected simple expression inside parentheses" line col
+        | [single] -> success single remaining
+        | many -> success (ExprTuple many) remaining
     | Some TokLBracket ->
         // Array literal inside simple expression context (e.g., EnumIdx<[1, 2, 3]>)
         advance tokens |> sepBy parseSimpleExpr TokComma >>= fun elems afterElems ->
@@ -447,6 +457,10 @@ and parseTypeAtom (tokens: Token list) : ParseResult<TypeExpr> =
     
     | Some (TokKeyword KwRaggedIdx) ->
         // RaggedIdx in standalone position. Same rationale as KwDepIdx above.
+        parseIndexType tokens
+
+    | Some (TokKeyword KwIrrepsIdx) ->
+        // IrrepsIdx in standalone position. Same rationale as KwDepIdx above.
         parseIndexType tokens
     
     | Some (TokKeyword KwVoid) ->
@@ -637,7 +651,17 @@ and parseIndexType (tokens: Token list) : ParseResult<TypeExpr> =
             parseSimpleExpr afterLt >>= fun lengthsExpr afterLengths ->
             expectGt afterLengths >>= fun _ remaining ->
             success (TyRaggedIdx lengthsExpr) remaining
-    
+
+    // IrrepsIdx<spec> — spec is a static-expression argument: a `let static`
+    // name or an inline array-of-triples literal ([(l, parity, mult), ...]).
+    // Resolved at typecheck via StaticEval; call syntax (IrrepsIdx<sh_spec(2)>)
+    // is not part of the simple-expression grammar — bind a `let static` first.
+    | Some (TokKeyword KwIrrepsIdx) ->
+        advance tokens |> expect (TokOp "<") >>= fun _ afterLt ->
+        parseSimpleExpr afterLt >>= fun specExpr afterSpec ->
+        expectGt afterSpec >>= fun _ remaining ->
+        success (TyIrrepsIdx specExpr) remaining
+
     | Some (TokIdent name) ->
         // Named index type alias (e.g. type RegionIdx = Idx<3>; ...like RegionIdx).
         // Resolved at typecheck via lowerIndexType / TyNamed lookup against
@@ -654,7 +678,7 @@ and parseIndexType (tokens: Token list) : ParseResult<TypeExpr> =
     
     | Some kind ->
         let line, col = currentPos tokens
-        error (sprintf "Expected index type (Idx, SymIdx, AntisymIdx, HermitianIdx, EnumIdx, DepIdx, RaggedIdx, or a named index type alias) but got %A" kind) line col
+        error (sprintf "Expected index type (Idx, SymIdx, AntisymIdx, HermitianIdx, EnumIdx, DepIdx, RaggedIdx, IrrepsIdx, or a named index type alias) but got %A" kind) line col
     
     | None ->
         error "Expected index type but got EOF" 0 0
@@ -817,12 +841,34 @@ let rec private parseOmpArgs (acc: (string * int) list) (tokens: Token list) : P
 
 let parseWhereClause (tokens: Token list) : ParseResult<WhereClause> =
     // `par` accumulates parallelization strategy assignments as a LIST (see
-    // WhereClause.Parallel). Today the single-backend validation rule keeps it
-    // to at most one element: a second strategy keyword (of either backend) is
-    // rejected. The future mixed-strategy feature relaxes this to allow a second
-    // element of a DIFFERENT backend (omp on some dims, cuda on others).
+    // WhereClause.Parallel), written OUTER backend first. Mixed parallelism
+    // allows at most TWO strategies; the legal pairs are `mpi, omp(...)`
+    // (rank decomposition outer, threads within each rank's slab/cell-range)
+    // and `mpi, cuda(...)` (ranks outer, device kernels over each rank's
+    // range). The order table is closed and purely syntactic, so every
+    // illegal pair rejects HERE with steering; shape-dependent checks
+    // (device eligibility, fold reassociation) stay in codegen.
     let rec loop comms (par: ParallelStrategy list) custom toks =
-        let hasStrategy = not (List.isEmpty par)
+        let isOmp = function Omp _ -> true | _ -> false
+        let isCuda = function Cuda _ -> true | _ -> false
+        let isMpi = function Mpi -> true | _ -> false
+        let rejectPair (line: int) (col: int) (incoming: string) =
+            if List.length par >= 2 then
+                error "At most two parallelization strategies per where-clause (outer, inner)" line col
+            elif par |> List.exists isCuda then
+                error "CUDA owns the whole device leaf — nothing nests inside a device kernel (write the cuda backend LAST: `where mpi, cuda(...)`)" line col
+            else
+                match incoming with
+                | "omp" when par |> List.exists isOmp ->
+                    error "omp requested twice — one omp(...) clause lists all parallel dims" line col
+                | "mpi" when par |> List.exists isMpi ->
+                    error "mpi requested twice" line col
+                | "cuda" -> // par starts with Omp here (cuda/dup handled above)
+                    error "A single kernel cannot be both OpenMP-host and CUDA-device — use `where cuda(...)` for the device kernel (omp-driven sections over independent cuda leaves are future work)" line col
+                | "mpi" -> // par starts with Omp: the rejected OpenMP-outer/MPI-inner order
+                    error "OpenMP-outer / MPI-inner is not supported: MPI ranks are processes fixed at launch and cannot nest inside host threads — did you mean `where mpi, omp(...)` (ranks outer, threads within each rank)?" line col
+                | _ ->
+                    error "Unsupported parallelization strategy combination" line col
         match peek toks with
         | Some (TokKeyword KwComm) ->
             advance toks |> expect TokLParen >>= fun _ afterLParen ->
@@ -830,18 +876,28 @@ let parseWhereClause (tokens: Token list) : ParseResult<WhereClause> =
             expect TokRParen afterNames >>= fun _ remaining ->
             loop (names :: comms) par custom remaining
         | Some (TokKeyword KwOmp) ->
-            if hasStrategy then
+            // Legal as: sole strategy, or the INNER of `mpi, omp(...)`.
+            if not (par = [] || par = [Mpi]) then
                 let line, col = currentPos toks
-                error "Only one parallelization strategy (omp or cuda) allowed per where-clause" line col
+                rejectPair line col "omp"
             else
                 advance toks |> expect TokLParen >>= fun _ afterLParen ->
                 parseOmpArgs [] afterLParen >>= fun pairs afterArgs ->
                 expect TokRParen afterArgs >>= fun _ remaining ->
                 loop comms (par @ [Omp { Vars = pairs }]) custom remaining
-        | Some (TokKeyword KwCuda) ->
-            if hasStrategy then
+        | Some (TokKeyword KwMpi) ->
+            // Legal only as the sole (and hence OUTER) strategy.
+            if not (List.isEmpty par) then
                 let line, col = currentPos toks
-                error "Only one parallelization strategy (omp or cuda) allowed per where-clause" line col
+                rejectPair line col "mpi"
+            else
+                // bare `mpi` — rank count is supplied at launch (mpiexec -n N)
+                loop comms (par @ [Mpi]) custom (advance toks)
+        | Some (TokKeyword KwCuda) ->
+            // Legal as: sole strategy, or the INNER of `mpi, cuda(...)`.
+            if not (par = [] || par = [Mpi]) then
+                let line, col = currentPos toks
+                rejectPair line col "cuda"
             else
                 // cuda  OR  cuda(block: N)
                 let afterCuda = advance toks
@@ -865,12 +921,24 @@ let parseWhereClause (tokens: Token list) : ParseResult<WhereClause> =
                 | _ ->
                     // bare `cuda` => default block size
                     loop comms (par @ [Cuda { BlockSize = 256 }]) custom afterCuda
+        | Some (TokIdent alias) when (match peek (advance toks) with Some TokDot -> true | _ -> false) ->
+            // Module-qualified constraint conjunct: `<alias>.<name>(<idents>)`
+            // (e.g. `p.indep(a, b)` with `import ppl as p`). Stored as DATA
+            // with the dotted name ("p.indep", args); the owning module's
+            // elaboration stage normalizes the alias, and the CHECKER
+            // dispatches through the Blade.Constraints registry.
+            advance (advance toks) |> expectIdent >>= fun name afterName ->
+            expect TokLParen afterName >>= fun _ afterLParen ->
+            parseIdentList afterLParen >>= fun args afterArgs ->
+            expect TokRParen afterArgs >>= fun _ remaining ->
+            loop comms par (custom @ [(alias + "." + name, args)]) remaining
         | Some (TokIdent name) when (match peek (advance toks) with Some TokLParen -> true | _ -> false) ->
             // Open constraint conjunct: `<name>(<idents>)` for any identifier
-            // the grammar doesn't own (e.g. PPL's `indep(a, b)`). Parsed as
-            // DATA — (name, args) — and dispatched by the CHECKER through
-            // the Blade.Constraints registry; an unregistered name errors
-            // there with the registered vocabulary, not here.
+            // the grammar doesn't own. Parsed as DATA — (name, args) — and
+            // dispatched by the CHECKER through the Blade.Constraints
+            // registry; an unregistered name errors there with the
+            // registered vocabulary, not here. (Module-owned keywords like
+            // PPL's `indep` are qualified — see the dotted arm above.)
             advance toks |> expect TokLParen >>= fun _ afterLParen ->
             parseIdentList afterLParen >>= fun args afterArgs ->
             expect TokRParen afterArgs >>= fun _ remaining ->
@@ -968,7 +1036,9 @@ and parsePipeline (tokens: Token list) : ParseResult<Expr> =
             advance toks' |> parseChoice >>= fun right remaining ->
             match right with
             | ExprVar "compute" -> loop (ExprCompute acc) remaining
-            | ExprVar "read" -> loop (ExprRead acc) remaining
+            // Provider reads are module-qualified (`x |> alias.read`), so they
+            // take the generic pipe-application desugar below; the checker's
+            // provider-read arm rewrites the application to TExprRead.
             | _ -> loop (ExprApp (right, [acc])) remaining
         | Some (TokOp "|@>") ->
             // Pipe-apply: a |@> b  desugars to  b <@> a
@@ -1166,14 +1236,31 @@ and parseStructExpr (name: string) (tokens: Token list) : ParseResult<Expr> =
 
 and parsePostfix (tokens: Token list) : ParseResult<Expr> =
     parsePrimary tokens >>= fun left rest ->
+    // A postfix `(` or `[` extends the previous expression only when it
+    // opens on the line where that expression ends. The lexer strips
+    // newline tokens inside delimiters (tokenizeWithNewlines), so inside a
+    // block `let b = v` followed by a final tuple `(a, b)` on the next line
+    // would otherwise parse as the call `v(a, b)` — reported as a baffling
+    // unbound-variable error at the let. Line numbers survive the
+    // stripping: compare the opener's line against the token before it
+    // (the same-line rule Kotlin and Swift use). `.field` chains stay
+    // line-insensitive.
+    let opensOnLaterLine (opener: Token) =
+        let rec lastLineBefore last toks =
+            match toks with
+            | (t: Token) :: rest when t.Line < opener.Line
+                                      || (t.Line = opener.Line && t.Col < opener.Col) ->
+                lastLineBefore t.Line rest
+            | _ -> last
+        lastLineBefore opener.Line tokens < opener.Line
     let rec loop acc toks =
         match peek toks with
-        | Some TokLParen ->
+        | Some TokLParen when not (opensOnLaterLine (List.head toks)) ->
             // Function call (delimited: struct literals re-enabled)
             allowingStructLiterals (fun () -> advance toks |> sepBy parseExprImpl TokComma) >>= fun args afterArgs ->
             expect TokRParen afterArgs >>= fun _ remaining ->
             loop (ExprApp (acc, args)) remaining
-        | Some TokLBracket ->
+        | Some TokLBracket when not (opensOnLaterLine (List.head toks)) ->
             // Poly-tuple indexing: args[k] (delimited: struct literals re-enabled)
             allowingStructLiterals (fun () -> advance toks |> parseExprImpl) >>= fun index afterIndex ->
             expect TokRBracket afterIndex >>= fun _ remaining ->
@@ -1236,11 +1323,7 @@ and parsePrimary (tokens: Token list) : ParseResult<Expr> =
     // compute - standalone keyword (used after |>)
     | Some (TokKeyword KwCompute) ->
         success (ExprVar "compute") (advance tokens)
-    
-    // read - standalone keyword (used after |> to force a deferred provider read)
-    | Some (TokKeyword KwRead) ->
-        success (ExprVar "read") (advance tokens)
-    
+
     // Lambda
     | Some (TokKeyword KwLambda) ->
         parseLambda (advance tokens)
@@ -2262,6 +2345,18 @@ let parseSumType (tokens: Token list) : ParseResult<VariantDecl list> =
     loop [] tokens
 
 /// Parse type declaration: type Name<T> = ... (alias or sum type)
+/// Parse a comma-separated conjunct list after `where`: c1, c2, ...
+/// Each conjunct is a full expression. A top-level comma always separates
+/// conjuncts — tuple expressions require parentheses, so parseExpr never
+/// consumes one.
+let parseConjuncts (tokens: Token list) : ParseResult<Expr list> =
+    let rec loop acc toks =
+        parseExpr (skipNL toks) >>= fun c afterC ->
+        match peek afterC with
+        | Some TokComma -> loop (acc @ [c]) (advance afterC)
+        | _ -> success (acc @ [c]) afterC
+    loop [] tokens
+
 let parseTypeDecl (tokens: Token list) : ParseResult<Decl> =
     match peek tokens with
     | Some (TokIdent name) ->
@@ -2269,7 +2364,7 @@ let parseTypeDecl (tokens: Token list) : ParseResult<Decl> =
         let typeParams, afterParams = parseTypeParams afterName
         expect (TokOp "=") (skipNL afterParams) >>= fun _ afterEq ->
         let afterEq = skipNL afterEq
-        
+
         // Check if it's a sum type (starts with | or identifier followed by |)
         let isSumType =
             match peek afterEq with
@@ -2277,20 +2372,54 @@ let parseTypeDecl (tokens: Token list) : ParseResult<Decl> =
             | Some (TokIdent _) ->
                 // Look ahead to see if there's a | after the first variant
                 match parseVariant afterEq with
-                | Ok (_, rest) -> 
+                | Ok (_, rest) ->
                     let rest = skipNL rest
                     match peek rest with
                     | Some TokPipe -> true
                     | _ -> false
                 | Error _ -> false
             | _ -> false
-        
+
         if isSumType then
             parseSumType afterEq >>= fun variants remaining ->
             success (DeclType (TyDeclSum (name, typeParams, variants))) remaining
         else
             parseTypeExpr afterEq >>= fun ty remaining ->
-            success (DeclType (TyDeclAlias (name, typeParams, ty))) remaining
+            // Mutual-group continuation:
+            //   type N1 = T1 (and N2 = T2)+ where c1, c2, ...
+            // `and` only ever continues a type decl, so peeking after a
+            // complete alias body (newlines allowed) is unambiguous.
+            let rec parseAndMembers acc toks =
+                let toks' = skipNL toks
+                match peek toks' with
+                | Some (TokKeyword KwAnd) ->
+                    match peek (advance toks') with
+                    | Some (TokIdent mname) ->
+                        let afterMName = advance (advance toks')
+                        expect (TokOp "=") (skipNL afterMName) >>= fun _ afterMEq ->
+                        parseTypeExpr (skipNL afterMEq) >>= fun mty afterMTy ->
+                        parseAndMembers (acc @ [(mname, mty)]) afterMTy
+                    | _ ->
+                        let line, col = currentPos (advance toks')
+                        error "Expected member name after 'and' in mutually constrained type declaration" line col
+                | _ -> success acc toks'
+            parseAndMembers [] remaining >>= fun members afterMembers ->
+            if members.IsEmpty then
+                // Plain alias: hand back the ORIGINAL remainder so trailing
+                // newlines are consumed by the decl loop, exactly as before.
+                success (DeclType (TyDeclAlias (name, typeParams, ty))) remaining
+            elif not typeParams.IsEmpty then
+                let line, col = currentPos tokens
+                error "Mutually constrained type aliases cannot take type parameters" line col
+            else
+                let afterMembers' = skipNL afterMembers
+                match peek afterMembers' with
+                | Some (TokKeyword KwWhere) ->
+                    parseConjuncts (advance afterMembers') >>= fun conjuncts afterWhere ->
+                    success (DeclType (TyDeclMutualGroup ((name, ty) :: members, conjuncts))) afterWhere
+                | _ ->
+                    let line, col = currentPos afterMembers'
+                    error "Mutually constrained type aliases require a 'where' clause" line col
     | _ ->
         let line, col = currentPos tokens
         error "Expected type name" line col
@@ -2302,7 +2431,31 @@ let parseFieldDecl (tokens: Token list) : ParseResult<FieldDecl> =
         let afterName = advance tokens
         expect TokColon afterName >>= fun _ afterColon ->
         parseTypeExpr afterColon >>= fun ty remaining ->
-        success { Name = name; Type = ty; Default = None } remaining
+        // Optional dependent range refinement: `in lo .. hi`. Bounds parse at
+        // the additive level (parseDotDot's own operand level) so they stop
+        // cleanly at `..`, ',' and '}'. `in` never otherwise follows a field
+        // type inside a struct body, so the postfix is unambiguous.
+        match peek remaining with
+        | Some (TokKeyword KwIn) ->
+            let afterIn = advance remaining
+            let loR =
+                match peek afterIn with
+                | Some TokDotDot -> success None afterIn
+                | _ -> parseAdditive afterIn >>= fun lo rest -> success (Some lo) rest
+            loR >>= fun lo afterLo ->
+            expect TokDotDot afterLo >>= fun _ afterDots ->
+            let hiR =
+                match peek afterDots with
+                | Some TokComma | Some TokRBrace | Some TokNewline | None -> success None afterDots
+                | _ -> parseAdditive afterDots >>= fun hi rest -> success (Some hi) rest
+            hiR >>= fun hi afterHi ->
+            if lo.IsNone && hi.IsNone then
+                let line, col = currentPos afterIn
+                error "Field bound needs at least one endpoint: `in lo .. hi`, `in lo ..`, or `in .. hi`" line col
+            else
+                success { Name = name; Type = ty; Default = None; Bound = Some { Lo = lo; Hi = hi } } afterHi
+        | _ ->
+            success { Name = name; Type = ty; Default = None; Bound = None } remaining
     | _ ->
         let line, col = currentPos tokens
         error "Expected field name" line col
@@ -2330,14 +2483,15 @@ let parseStructDecl (tokens: Token list) : ParseResult<Decl> =
                     error "Expected ',' or '}' in struct" line col
         
         loop [] afterBrace >>= fun fields remaining ->
-        // Parse optional where constraint
+        // Parse optional where constraint: comma-separated conjuncts,
+        // aligned with the function where-clause grammar.
         let remaining = skipNL remaining
         match peek remaining with
         | Some (TokKeyword KwWhere) ->
-            parseExpr (advance remaining) >>= fun constraintExpr afterConstraint ->
-            success (DeclType (TyDeclStruct (name, typeParams, fields, Some constraintExpr))) afterConstraint
+            parseConjuncts (advance remaining) >>= fun conjuncts afterConstraint ->
+            success (DeclType (TyDeclStruct (name, typeParams, fields, conjuncts))) afterConstraint
         | _ ->
-            success (DeclType (TyDeclStruct (name, typeParams, fields, None))) remaining
+            success (DeclType (TyDeclStruct (name, typeParams, fields, []))) remaining
     | _ ->
         let line, col = currentPos tokens
         error "Expected struct name" line col

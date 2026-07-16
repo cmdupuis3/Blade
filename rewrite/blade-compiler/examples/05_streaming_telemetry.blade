@@ -1,4 +1,5 @@
 // TEST: Example Distributed Telemetry Streaming Moments
+import ppl as ppl
 // ============================================================================
 // Distributed latency telemetry in Blade's moment algebra. Three gateway
 // shards each observe a bivariate stream (api latency, db latency). Each
@@ -42,12 +43,12 @@ let Z: Array<Float64 like Idx<2>, FullIdx> = [
 // merged state with a fresh one is the monoid associativity the corpus
 // pins -- here it is the collector's natural left fold over shards.
 // ============================================================================
-let s1 = mstate(S1, 4)
-let s2 = mstate(S2, 4)
-let s3 = mstate(S3, 4)
-let s12 = mstate_merge(s1, s2)
-let s_all = mstate_merge(s12, s3)
-let (k1, k2, k3, k4) = mstate_cumulants(s_all)
+let s1 = ppl.mstate(S1, 4)
+let s2 = ppl.mstate(S2, 4)
+let s3 = ppl.mstate(S3, 4)
+let s12 = ppl.mstate_merge(s1, s2)
+let s_all = ppl.mstate_merge(s12, s3)
+let (k1, k2, k3, k4) = ppl.mstate_cumulants(s_all)
 // EXPECT: k1 = [15.3333333333333, 8.5]
 // EXPECT: k2 = [15.5555555555556, 1.0, 7.91666666666667]
 // EXPECT: k3 = [20.7407407407407, 33.3333333333333, -17.5555555555556, 7.5]
@@ -60,10 +61,10 @@ let (k1, k2, k3, k4) = mstate_cumulants(s_all)
 // noise that the central-moment streaming path avoids -- the agreement of
 // the two pins both the algebra and the numerics.
 // ============================================================================
-let b1 = cumulants(Z, 1)
-let b2 = cumulants(Z, 2)
-let b3 = cumulants(Z, 3)
-let b4 = cumulants(Z, 4)
+let b1 = ppl.cumulants(Z, 1)
+let b2 = ppl.cumulants(Z, 2)
+let b3 = ppl.cumulants(Z, 3)
+let b4 = ppl.cumulants(Z, 4)
 // EXPECT: b1 = [15.3333333333333, 8.5]
 // EXPECT: b2 = [15.5555555555555, 1.0, 7.91666666666667]
 // EXPECT: b3 = [20.7407407407418, 33.3333333333335, -17.5555555555557, 7.49999999999977]
@@ -78,12 +79,12 @@ type Full12 = Idx<4>
 let Z12: Array<Float64 like Idx<2>, Full12> = [
     [12.0, 18.0, 14.0, 22.0],
     [5.0, 9.0, 7.0, 11.0]]
-let c1 = comoments(S1, 2)
-let m1 = moments(S1, 1)
-let c2 = comoments(S2, 2)
-let m2 = moments(S2, 1)
-let pooled = comoments_merge(c1, m1, 2, c2, m2, 2)
-let batch12 = comoments(Z12, 2)
+let c1 = ppl.comoments(S1, 2)
+let m1 = ppl.moments(S1, 1)
+let c2 = ppl.comoments(S2, 2)
+let m2 = ppl.moments(S2, 1)
+let pooled = ppl.comoments_merge(c1, m1, 2, c2, m2, 2)
+let batch12 = ppl.comoments(Z12, 2)
 // EXPECT: pooled = [14.75, 8.5, 5.0]
 // EXPECT: batch12 = [14.75, 8.5, 5.0]
 
@@ -95,8 +96,8 @@ let batch12 = comoments(Z12, 2)
 // state -- no re-pass over samples.
 // ============================================================================
 let W: Array<Float64 like Idx<2>, Idx<2>> = [[1.0, 1.0], [1.0, -1.0]]
-let d3 = dist(Z, 3)
-let (p1, p2, p3) = dist_affine(W, d3)
+let d3 = ppl.dist(Z, 3)
+let (p1, p2, p3) = ppl.dist_affine(W, d3)
 // EXPECT: p1 = [23.8333333333333, 6.83333333333333]
 // EXPECT: p2 = [25.4722222222222, 7.63888888888884, 21.4722222222222]
 // EXPECT: p3 = [75.574074074075, 64.1296296296312, 12.4629629629637, -139.425925925925]
@@ -111,13 +112,13 @@ let (p1, p2, p3) = dist_affine(W, d3)
 //     pair-and-singleton partitions -- the gap to the true 4th moments is
 //     exactly the truncated k3/k4 mass (compare w4 against r4 below).
 // ============================================================================
-let d2 = dist(Z, 2)
-let w2 = moments(d2, 2)
-let r2 = moments(Z, 2)
+let d2 = ppl.dist(Z, 2)
+let w2 = ppl.moments(d2, 2)
+let r2 = ppl.moments(Z, 2)
 // EXPECT: w2 = [250.666666666667, 131.333333333333, 80.1666666666667]
 // EXPECT: r2 = [250.666666666667, 131.333333333333, 80.1666666666667]
 
-let w4 = moments(d2, 4)
-let r4 = moments(Z, 4)
+let w4 = ppl.moments(d2, 4)
+let r4 = ppl.moments(Z, 4)
 // EXPECT: w4 = [77946.8641975308, 37477.037037037, 20618.4444444444, 12752.5, 8839.95833333334]
 // EXPECT: r4 = [78986.6666666667, 39173.3333333333, 20688.0, 12355.3333333333, 9014.16666666667]

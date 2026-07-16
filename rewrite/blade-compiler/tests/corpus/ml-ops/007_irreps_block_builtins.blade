@@ -1,0 +1,54 @@
+// TEST: ML Ops IrrepsIdx Block Builtins
+import ml as ml
+// ============================================================================
+// v3 block navigation: irreps_len / irreps_l / irreps_parity / irreps_mult
+// / irreps_dim / irreps_offset are static builtins over a spec, so block
+// offsets and bounds fold at compile time — the elaborated-loop answer to
+// (block, mu, m) iteration. spec_h blocks: b0 = 2x(l=0) cells 0..1,
+// b1 = 2x(l=1) cells 2..7, b2 = 1x(l=2) cells 8..12.
+// x = 1..13, so block sums pin to 3 / 33 / 55 (total 91 = 13*14/2).
+// ============================================================================
+let static spec_h = [(0, 0, 2), (1, 1, 2), (2, 0, 1)]
+let static nb = ml.irreps_len(spec_h)
+// EXPECT: nb = 3
+let static l1 = ml.irreps_l(spec_h, 1)
+let static p1 = ml.irreps_parity(spec_h, 1)
+let static m1 = ml.irreps_mult(spec_h, 1)
+let static d1 = ml.irreps_dim(spec_h, 1)
+let static off1 = ml.irreps_offset(spec_h, 1)
+// EXPECT: l1 = 1
+// EXPECT: p1 = 1
+// EXPECT: m1 = 2
+// EXPECT: d1 = 3
+// EXPECT: off1 = 2
+let static len1 = m1 * d1
+let static off2 = ml.irreps_offset(spec_h, 2)
+let static len2 = ml.irreps_mult(spec_h, 2) * ml.irreps_dim(spec_h, 2)
+// EXPECT: off2 = 8
+// EXPECT: len2 = 5
+
+let x: Array<Float like IrrepsIdx<spec_h>> = [1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0, 9.0, 10.0, 11.0, 12.0, 13.0]
+let s0 = {
+    let mut acc = 0.0
+    for k in 0..2 {
+        acc = acc + x(k)
+    }
+    acc
+}
+let s1 = {
+    let mut acc = 0.0
+    for k in 0..len1 {
+        acc = acc + x(off1 + k)
+    }
+    acc
+}
+let s2 = {
+    let mut acc = 0.0
+    for k in 0..len2 {
+        acc = acc + x(off2 + k)
+    }
+    acc
+}
+// EXPECT: s0 = 3.0
+// EXPECT: s1 = 33.0
+// EXPECT: s2 = 55.0

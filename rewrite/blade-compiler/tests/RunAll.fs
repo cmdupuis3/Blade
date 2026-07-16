@@ -44,7 +44,7 @@ open Blade.Tests.Benchmarks
 /// All tests combined
 let allTests =
     basicTests @ intrinsicsTests @ adTests @ mlE2eTests @ mlOpsTests @ loopTests @ symmetryTests @ reynoldsTests @ arityTests @ functionTests
-    @ structTests @ sumTypeTests @ interfaceTests @ moduleTests @ guardTests @ guardCombinatorTests @ zeroCombinatorTests @ sequenceCombinatorTests @ tupleViewTests @ replicateTests @ anonRangeTests @ forInTests @ bracketedTests
+    @ structTests @ structAbortTests @ structMutualTests @ sumTypeTests @ interfaceTests @ moduleTests @ guardTests @ guardCombinatorTests @ zeroCombinatorTests @ sequenceCombinatorTests @ tupleViewTests @ replicateTests @ anonRangeTests @ forInTests @ bracketedTests
     @ indexTypeTests @ mutabilityTests @ staticTests @ pplTests @ unitTests
     @ foreignKeyTests @ maskTests @ setOpTests @ uniqueContainsTests @ semijoinTests @ groupByTests @ sortTests @ reduceTests @ extentsTests @ extentsMultiRankTests @ regressionTests @ sqlCombinedTests @ v24dProbes
     @ inferenceProbes
@@ -61,9 +61,10 @@ type FullSuiteOptions = {
     IncludeOmp    : bool
     IncludeCuda   : bool
     IncludeTiming : bool
+    IncludeMpi    : bool
 }
 
-let defaultFullSuiteOptions = { IncludeOmp = false; IncludeCuda = false; IncludeTiming = false }
+let defaultFullSuiteOptions = { IncludeOmp = false; IncludeCuda = false; IncludeTiming = false; IncludeMpi = false }
 
 /// Includes both the single-file test corpus (`allTests`) and the multi-file
 /// module/import corpus (`multiFileTests`). External-dependency tests
@@ -113,6 +114,14 @@ let runAllTestsFullWith (extraBlocks: (unit -> Blade.Tests.TestHarness.BlockResu
         else
             printfn "CUDA kernel tests: not run (opt-in; enable with 'blade test --cuda' from the x64 Native Tools prompt)."
             None
+    // `where mpi` decomposition tests (differential vs serial oracle under
+    // mpiexec). Opt-in; even when requested they skip cleanly if g++ /
+    // -lmsmpi / mpiexec are absent.
+    let mpi =
+        if opts.IncludeMpi then Some (Blade.Tests.MpiTests.runMpiTests ())
+        else
+            printfn "MPI decomposition tests: not run (opt-in; enable with 'blade test --mpi' or run 'blade test mpi')."
+            None
     // Differential symmetry harness: every symmetry case vs an independent F#
     // oracle over randomized inputs. Skips cleanly when g++ absent.
     let diff = runDifferentialSymmetryTest ()
@@ -136,6 +145,7 @@ let runAllTestsFullWith (extraBlocks: (unit -> Blade.Tests.TestHarness.BlockResu
           match omp with Some b -> yield b | None -> ()
           yield bufType
           match cuda with Some b -> yield b | None -> ()
+          match mpi with Some b -> yield b | None -> ()
           yield diff; yield typeStruct
           match timing with Some b -> yield b | None -> ()
           yield! extras ]

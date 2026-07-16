@@ -1,0 +1,39 @@
+// TEST: Physics -- Pendulum-Clock Drift From Amplitude Jitter
+import ppl as ppl
+// ============================================================================
+// The relative period of a pendulum swung at finite amplitude is
+//   Trel(a) = 1 + a^2/16 + 11 a^4/3072   (large-amplitude correction).
+// Amplitude a ~ (0.35 rad, 0.0873^2). Because Trel is a POLYNOMIAL in a, the
+// derivative tower terminates structurally, so the q=1 pushforward is EXACT
+// -- no truncation choice. The payoff: a clockmaker who calibrates for the
+// MEAN amplitude but whose amplitude actually jitters loses a precisely known
+// 42.9 seconds/day, and the tower computes that shift to 10 digits because
+// the variance moves the mean of a nonlinear-but-polynomial map.
+// EXPECT values checked vs an independent PowerShell ensemble.
+// ============================================================================
+type TimeIdx = Idx<3>
+let AD: Array<Float64 like Idx<1>, TimeIdx> = [[0.243079772728, 0.35, 0.456920227272]]
+let d = ppl.dist(AD, 6)
+
+// polynomial map => q=1 pushforward is exact (no degree argument needed)
+let dT = ppl.dist_map(d, 1, lambda(a) -> 1.0 + a * a / 16.0 + 11.0 * a * a * a * a / 3072.0)
+let m1 = ppl.cumulant(dT, 1)
+
+// spread of the rate: q=2 wants order 8, dist carries 6 -- opt into closure
+let dTb = ppl.dist_map_closed(d, 2, 4, lambda(a) -> 1.0 + a * a / 16.0 + 11.0 * a * a * a * a / 3072.0)
+let w2 = ppl.cumulant(dTb, 2)
+
+// exact route
+let TD: Array<Float64 like Idx<1>, TimeIdx> = [[1.00370548763, 1.00770998332, 1.01320458076]]
+let e1 = ppl.cumulants(TD, 1)
+let e2 = ppl.cumulants(TD, 2)
+
+// seconds/day lost vs a clock calibrated at the MEAN amplitude Trel(0.35)
+let driftTower = 86400.0 * (m1(0) - 1.00770998332)
+let driftExact = 86400.0 * (e1(0) - 1.00770998332)
+
+// EXPECT: m1 = [1.0082066839019]
+// EXPECT: w2 = [0.0000151621567797889]
+// EXPECT: e1 = [1.00820668390333]
+// EXPECT: driftTower = 42.9149302764372
+// EXPECT: driftExact = 42.9149304000056

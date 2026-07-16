@@ -1,4 +1,5 @@
 // TEST: Moments Multiaxis
+import ppl as ppl
 // moments over a (Lat, Lon, Time) array — the formalism's comoment shape
 // (symmetry/015): the leading (Lat, Lon) block fuses into one compound axis
 // (extent 4); output is joint SymIdx<2, 4>, C(5,2) = 10 cells. Fibers (flat
@@ -7,5 +8,5 @@ type LatIdx = Idx<2>
 type LonIdx = Idx<2>
 type TimeIdx = Idx<2>
 let A: Array<Float64 like LatIdx, LonIdx, TimeIdx> = [[[1.0, 2.0], [3.0, 4.0]], [[5.0, 6.0], [7.0, 8.0]]]
-let m2 = moments(A, 2)
+let m2 = ppl.moments(A, 2)
 // EXPECT: m2 = [2.5, 5.5, 8.5, 11.5, 12.5, 19.5, 26.5, 30.5, 41.5, 56.5]

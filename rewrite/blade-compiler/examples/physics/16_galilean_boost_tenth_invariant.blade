@@ -1,0 +1,72 @@
+// TEST: Physics -- The Tenth Invariant: Conservation Laws Linear in Time
+// ============================================================================
+// Every detector in examples 09-15 tests functions of the STATE -- and there
+// is a whole sector of conservation laws none of them can see. A two-body
+// system (m1=1, m2=2, harmonic bond, symplectically integrated) conserves E
+// and P = p1+p2, but also the center-of-mass law
+//     G = m1 x1 + m2 x2 - P t
+// -- the Galilean-boost invariant, sibling of the N-body "ten first
+// integrals". G is linear in TIME, so it is not a function of state alone:
+// no state dictionary contains it, and the null space of the fitted Koopman
+// generator L is structurally blind to it. It hides one level deeper, in the
+// JORDAN STRUCTURE of L at eigenvalue 0:
+//     L (m1 x1 + m2 x2) = P,   L P = 0    (a nilpotent 2x2 chain)
+// tools/galilean_boost.ps1 recovers the chain from ker(L^2)/ker(L), reads the
+// MASSES off its coefficients, and shows the bracket algebra closes only up
+// to a CENTRAL CHARGE {G,P} = m1+m2 -- Bargmann's extension: the total mass,
+// measured from the symmetry algebra alone.
+// Here the Blade tower verifies the split on the emitted trajectory: the
+// candidate series are built IN-LANGUAGE from the raw (t, x1, p1, x2, p2)
+// samples with fused zip/reduce folds (one loop, scalar accumulators), and
+// the time-dependent combination G is degenerate while X_cm spreads.
+// Verdicts accept absolute degeneracy first (|k2| < 1e-12, the symplectic
+// floor) -- see the zero-mean-invariant note in 10_invariant_detector_kepler:
+// G's own mean here (-0.1) is small, exactly the regime that trap lives in.
+// ============================================================================
+let T  = [0.002, 0.502, 1.002, 1.502, 2.002, 2.502, 3.002, 3.502, 4.002, 4.502, 5.002, 5.502, 6.002, 6.502, 7.002, 7.502, 8.002, 8.502, 9.002, 9.502, 10.002, 10.502, 11.002, 11.502]
+let X1 = [0.5015984, 0.791520453999, 0.854644553711, 0.740715087852, 0.563822479544, 0.460939653692, 0.542142386914, 0.850604805588, 1.34690874549, 1.92336937435, 2.44317076023, 2.79008846612, 2.91072864068, 2.83393278193, 2.66029596002, 2.52560785939, 2.55150315014, 2.80125617286, 3.25678533909, 3.82522446749, 4.37267285546, 4.77285840079, 4.9530282846, 4.92038930521]
+let P1 = [0.7983988024, 0.349977917988, -0.0802635945496, -0.335964381635, -0.324195890318, -0.0492351073085, 0.388989813183, 0.831216132106, 1.11672689445, 1.14175979937, 0.897217214988, 0.471972502867, 0.0205710447305, -0.2929357117, -0.354610967296, -0.142040273041, 0.267522455493, 0.72523109179, 1.06474198971, 1.16266774472, 0.983419499969, 0.592140895383, 0.131033114383, -0.232324856157]
+let X2 = [-0.2995992, -0.144560226999, 0.123877723145, 0.480842456074, 0.869288760228, 1.22073017315, 1.48012880654, 1.62589759721, 1.67774562725, 1.68951531282, 1.72961461989, 1.85615576694, 2.09583567966, 2.43423360903, 2.82105201999, 3.18839607031, 3.47544842493, 3.65057191357, 3.72280733046, 3.73858776625, 3.76486357227, 3.86477079961, 4.0746858577, 4.39100534739]
+let P2 = [0.4016011976, 0.850022082012, 1.28026359455, 1.53596438164, 1.52419589032, 1.24923510731, 0.811010186817, 0.368783867894, 0.0832731055491, 0.0582402006314, 0.302782785012, 0.728027497133, 1.17942895527, 1.4929357117, 1.5546109673, 1.34204027304, 0.932477544507, 0.47476890821, 0.135258010291, 0.0373322552789, 0.216580500031, 0.607859104617, 1.06896688562, 1.43232485616]
+
+// --- total momentum P = p1 + p2  (in ker L: INVARIANT) ---
+let P_s1 = reduce(method_for(zip(P1, P2)) <@> lambda(b, d) -> b + d, (+))
+let P_s2 = reduce(method_for(zip(P1, P2)) <@> lambda(b, d) -> (b + d) * (b + d), (+))
+let P_k1 = P_s1 / 24.0
+let P_k2 = P_s2 / 24.0 - P_k1 * P_k1
+let P_disp = sqrt(P_k2 * P_k2) / (sqrt(P_k1 * P_k1) + 0.000000001)
+let P_V = if sqrt(P_k2 * P_k2) < 1.0e-12 then "INVARIANT" else (if P_disp < 0.0001 then "INVARIANT" else "VARIANT")
+
+// --- energy E = p1^2/2m1 + p2^2/2m2 + k/2 (x1-x2)^2  (in ker L: INVARIANT) ---
+let E_s1 = reduce(method_for(zip(X1, P1, X2, P2)) <@> lambda(a, b, c, d) -> 0.5 * b * b + 0.25 * d * d + 0.5 * (a - c) * (a - c), (+))
+let E_s2 = reduce(method_for(zip(X1, P1, X2, P2)) <@> lambda(a, b, c, d) -> (0.5 * b * b + 0.25 * d * d + 0.5 * (a - c) * (a - c)) * (0.5 * b * b + 0.25 * d * d + 0.5 * (a - c) * (a - c)), (+))
+let E_k1 = E_s1 / 24.0
+let E_k2 = E_s2 / 24.0 - E_k1 * E_k1
+let E_disp = sqrt(E_k2 * E_k2) / (sqrt(E_k1 * E_k1) + 0.000000001)
+let E_V = if sqrt(E_k2 * E_k2) < 1.0e-12 then "INVARIANT" else (if E_disp < 0.0001 then "INVARIANT" else "VARIANT")
+
+// --- center of mass X_cm = (m1 x1 + m2 x2)/M  (generalized eigenvector: VARIANT) ---
+let X_s1 = reduce(method_for(zip(X1, X2)) <@> lambda(a, c) -> (a + 2.0 * c) / 3.0, (+))
+let X_s2 = reduce(method_for(zip(X1, X2)) <@> lambda(a, c) -> ((a + 2.0 * c) / 3.0) * ((a + 2.0 * c) / 3.0), (+))
+let X_k1 = X_s1 / 24.0
+let X_k2 = X_s2 / 24.0 - X_k1 * X_k1
+let X_disp = sqrt(X_k2 * X_k2) / (sqrt(X_k1 * X_k1) + 0.000000001)
+let X_V = if sqrt(X_k2 * X_k2) < 1.0e-12 then "INVARIANT" else (if X_disp < 0.0001 then "INVARIANT" else "VARIANT")
+
+// --- G = (m1 x1 + m2 x2) - P t : needs the TIME atom  (INVARIANT) ---
+let G_s1 = reduce(method_for(zip(T, X1, P1, X2, P2)) <@> lambda(t, a, b, c, d) -> (a + 2.0 * c) - (b + d) * t, (+))
+let G_s2 = reduce(method_for(zip(T, X1, P1, X2, P2)) <@> lambda(t, a, b, c, d) -> ((a + 2.0 * c) - (b + d) * t) * ((a + 2.0 * c) - (b + d) * t), (+))
+let G_k1 = G_s1 / 24.0
+let G_k2 = G_s2 / 24.0 - G_k1 * G_k1
+let G_disp = sqrt(G_k2 * G_k2) / (sqrt(G_k1 * G_k1) + 0.000000001)
+let G_V = if sqrt(G_k2 * G_k2) < 1.0e-12 then "INVARIANT" else (if G_disp < 0.0001 then "INVARIANT" else "VARIANT")
+
+// P and E sharp; X_cm spreads; the time-linear G is sharp -- the boost law:
+// EXPECT: P_k1 = 1.2
+// EXPECT: P_V = "INVARIANT"
+// EXPECT: E_k1 = 0.679999868474123
+// EXPECT: E_V = "INVARIANT"
+// EXPECT: X_k2 = 1.91666666666702
+// EXPECT: X_V = "VARIANT"
+// EXPECT: G_k1 = -0.1
+// EXPECT: G_V = "INVARIANT"

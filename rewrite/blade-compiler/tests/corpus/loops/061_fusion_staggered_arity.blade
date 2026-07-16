@@ -1,0 +1,15 @@
+// TEST: Fusion Staggered Arity
+// <&!> over leaves of DIFFERENT arity (1, 2, 3) over the same array merges
+// into ONE staggered nest: each leaf's assignment sits at its own depth
+//   for i0 { m1[i0]; for i1 { m2[i0][i1]; for i2 { m3[i0][i1][i2] } } }
+// so all three stream A's outer elements from one load (the moment-tower
+// cache-sharing shape). Values = the identity / outer-product / triple
+// outer-product towers.
+let A = [1.0, 2.0, 3.0]
+let k1 = lambda(x) -> x
+let k2 = lambda(x, y) -> x * y
+let k3 = lambda(x, y, z) -> x * y * z
+let (m1, m2, m3) = (object_for(k1) <@> (A)) <&!> (object_for(k2) <@> (A, A)) <&!> (object_for(k3) <@> (A, A, A)) |> compute
+// EXPECT: m1 = [1.0, 2.0, 3.0]
+// EXPECT: m2 = [1.0, 2.0, 3.0, 2.0, 4.0, 6.0, 3.0, 6.0, 9.0]
+// EXPECT: m3 = [1.0, 2.0, 3.0, 2.0, 4.0, 6.0, 3.0, 6.0, 9.0, 2.0, 4.0, 6.0, 4.0, 8.0, 12.0, 6.0, 12.0, 18.0, 3.0, 6.0, 9.0, 6.0, 12.0, 18.0, 9.0, 18.0, 27.0]

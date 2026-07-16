@@ -1,4 +1,5 @@
 // TEST: MState Associative
+import ppl as ppl
 // The merge is a monoid: ((A ⊕ B) ⊕ C) equals the batch over the
 // concatenation — three chunks, order 3. A merged state (flat lex-ordered
 // tensors) merges again with a fresh packed state: both representations
@@ -8,12 +9,12 @@ type TimeIdx = Idx<2>
 let XA: Array<Float64 like Idx<2>, TimeIdx> = [[1.0, 2.0], [3.0, 5.0]]
 let XB: Array<Float64 like Idx<2>, TimeIdx> = [[4.0, 6.0], [4.0, 2.0]]
 let XC: Array<Float64 like Idx<2>, TimeIdx> = [[0.0, 3.0], [1.0, 7.0]]
-let sA = mstate(XA, 3)
-let sB = mstate(XB, 3)
-let sC = mstate(XC, 3)
-let sAB = mstate_merge(sA, sB)
-let s = mstate_merge(sAB, sC)
-let (k1, k2, k3) = mstate_cumulants(s)
+let sA = ppl.mstate(XA, 3)
+let sB = ppl.mstate(XB, 3)
+let sC = ppl.mstate(XC, 3)
+let sAB = ppl.mstate_merge(sA, sB)
+let s = ppl.mstate_merge(sAB, sC)
+let (k1, k2, k3) = ppl.mstate_cumulants(s)
 // EXPECT: k1 = [2.66666666667, 3.66666666667]
 // EXPECT: k2 = [3.88888888889, 0.555555555556, 3.88888888889]
 // EXPECT: k3 = [2.59259259259, -6.2962962963, -1.2962962963, 2.59259259259]

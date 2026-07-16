@@ -1,4 +1,5 @@
 // TEST: Mixed Cumulants Order 3
+import ppl as ppl
 // The (1, 2) mixed block κ(x_i, y_j, y_k) at N = 3 — nonzero third-order
 // cross-cumulants. Oracle: the stacked 5-variable joint tensor (prototype
 // dump, data XY5b), cells k3[i, 2+j, 2+k]; output is X-slot major with the
@@ -7,5 +8,5 @@
 type TimeIdx = Idx<3>
 let X: Array<Float64 like Idx<2>, TimeIdx> = [[1.0, 2.0, 4.0], [3.0, 5.0, 4.0]]
 let Y: Array<Float64 like Idx<3>, TimeIdx> = [[2.0, 4.0, 1.0], [1.0, 1.0, 5.0], [0.0, 2.0, 3.0]]
-let c12 = mixed_cumulants(X, Y, 1, 2)
+let c12 = ppl.mixed_cumulants(X, Y, 1, 2)
 // EXPECT: c12 = [0.62962962963, -1.92592592593, -1.2962962963, 2.96296296296, 1.03703703704, -0.259259259259, 0.888888888889, -0.888888888889, 0.0, 0.0, -0.888888888889, -0.888888888889]

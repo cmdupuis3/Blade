@@ -1,0 +1,15 @@
+// TEST: IrrepsIdx Spec Mismatch (rejects)
+// ============================================================================
+// THE strictness pin: two IrrepsIdx annotations with DIFFERENT specs must
+// not unify even when their total_dim is EQUAL — that identity check is the
+// feature. sa totals 2*1 + 2*3 + 1*5 = 13; sb = [(0,0,13)] also totals 13.
+// Extent comparison can never catch this (extents are runtime values and
+// equal anyway); only the spec-payload identity arm in Unify does.
+// ============================================================================
+let static sa = [(0, 0, 2), (1, 1, 2), (2, 0, 1)]
+let static sb = [(0, 0, 13)]
+function g(v: Array<Float like IrrepsIdx<sa>>) -> Float = {
+    v(0)
+}
+let b: Array<Float like IrrepsIdx<sb>> = [1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0, 9.0, 10.0, 11.0, 12.0, 13.0]
+let bad = g(b)

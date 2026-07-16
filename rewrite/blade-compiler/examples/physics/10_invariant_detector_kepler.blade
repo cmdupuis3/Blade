@@ -1,0 +1,91 @@
+// TEST: Physics -- Invariant Detector (Discovery: Kepler's Hidden Invariant)
+import ppl as ppl
+// ============================================================================
+// Kepler orbit (e = 0.6, L = 1, GM = 1). Fuzz the TRUE ANOMALY phi ~ (1.0,
+// 0.3) -- "we don't know where along the orbit the particle is" -- and feed a
+// battery of candidate phase-space quantities. The detector flags which are
+// conserved along the orbit purely by watching which towers refuse to spread.
+// It recovers energy and angular momentum, AND the two components of the
+// Laplace-Runge-Lenz vector -- the NON-OBVIOUS hidden invariant that makes
+// Kepler orbits close and never precess -- while correctly rejecting speed
+// (kinetic energy alone is not conserved; only total E is). ~30 orders of
+// magnitude separate the two classes.
+// NOTE (zero-mean invariants): the relative dispersion divides by |k1|, so an
+// invariant whose VALUE is zero -- here LRL_y, because the orbit is oriented
+// with A along x -- divides by the 1e-9 floor instead and reads ~1e-24 where
+// its peers read ~1e-33: nine orders of headroom lost to a normalization
+// artifact, not to physics. The verdicts therefore accept ABSOLUTE degeneracy
+// first (|k2| < 1e-20, machine zero for these towers) before the relative
+// test, so a zero-mean invariant cannot be misread when the margin thins
+// (e.g. under measurement noise).
+// State at anomaly p:  vx = -sin p, vy = 0.6 + cos p, r = 1/(1 + 0.6 cos p),
+// position direction (cos p, sin p).
+// ============================================================================
+type TimeIdx = Idx<7>
+let PHI: Array<Float64 like Idx<1>, TimeIdx> = [[0.517725271449, 0.739442618673, 0.879497148429, 1.0, 1.12050285157, 1.26055738133, 1.48227472855]]
+let d = ppl.dist(PHI, 6)
+
+// --- radius r ---
+let r_d  = ppl.dist_map(d, 2, 3, lambda(p) -> 1.0 / (1.0 + 0.6 * cos(p)))
+let r_k1 = ppl.cumulant(r_d, 1)
+let r_k2 = ppl.cumulant(r_d, 2)
+let r_disp = sqrt(r_k2(0) * r_k2(0)) / (sqrt(r_k1(0) * r_k1(0)) + 0.000000001)
+let r_V = if sqrt(r_k2(0) * r_k2(0)) < 1.0e-20 then "INVARIANT" else (if r_disp < 0.000001 then "INVARIANT" else "VARIANT")
+
+// --- speed ---
+let sp_d  = ppl.dist_map(d, 2, 3, lambda(p) -> sqrt(sin(p) * sin(p) + (0.6 + cos(p)) * (0.6 + cos(p))))
+let sp_k1 = ppl.cumulant(sp_d, 1)
+let sp_k2 = ppl.cumulant(sp_d, 2)
+let sp_disp = sqrt(sp_k2(0) * sp_k2(0)) / (sqrt(sp_k1(0) * sp_k1(0)) + 0.000000001)
+let sp_V = if sqrt(sp_k2(0) * sp_k2(0)) < 1.0e-20 then "INVARIANT" else (if sp_disp < 0.000001 then "INVARIANT" else "VARIANT")
+
+// --- position x ---
+let x_d  = ppl.dist_map(d, 2, 3, lambda(p) -> cos(p) / (1.0 + 0.6 * cos(p)))
+let x_k1 = ppl.cumulant(x_d, 1)
+let x_k2 = ppl.cumulant(x_d, 2)
+let x_disp = sqrt(x_k2(0) * x_k2(0)) / (sqrt(x_k1(0) * x_k1(0)) + 0.000000001)
+let x_V = if sqrt(x_k2(0) * x_k2(0)) < 1.0e-20 then "INVARIANT" else (if x_disp < 0.000001 then "INVARIANT" else "VARIANT")
+
+// --- velocity vx ---
+let vx_d  = ppl.dist_map(d, 2, 3, lambda(p) -> 0.0 - sin(p))
+let vx_k1 = ppl.cumulant(vx_d, 1)
+let vx_k2 = ppl.cumulant(vx_d, 2)
+let vx_disp = sqrt(vx_k2(0) * vx_k2(0)) / (sqrt(vx_k1(0) * vx_k1(0)) + 0.000000001)
+let vx_V = if sqrt(vx_k2(0) * vx_k2(0)) < 1.0e-20 then "INVARIANT" else (if vx_disp < 0.000001 then "INVARIANT" else "VARIANT")
+
+// --- ENERGY E = 1/2 v^2 - 1/r ---
+let E_d  = ppl.dist_map(d, 2, 3, lambda(p) -> 0.5 * (sin(p) * sin(p) + (0.6 + cos(p)) * (0.6 + cos(p))) - (1.0 + 0.6 * cos(p)))
+let E_k1 = ppl.cumulant(E_d, 1)
+let E_k2 = ppl.cumulant(E_d, 2)
+let E_disp = sqrt(E_k2(0) * E_k2(0)) / (sqrt(E_k1(0) * E_k1(0)) + 0.000000001)
+let E_V = if sqrt(E_k2(0) * E_k2(0)) < 1.0e-20 then "INVARIANT" else (if E_disp < 0.000001 then "INVARIANT" else "VARIANT")
+
+// --- ANGULAR MOMENTUM Lz = x vy - y vx ---
+let Lz_d  = ppl.dist_map(d, 2, 3, lambda(p) -> (cos(p) / (1.0 + 0.6 * cos(p))) * (0.6 + cos(p)) - (sin(p) / (1.0 + 0.6 * cos(p))) * (0.0 - sin(p)))
+let Lz_k1 = ppl.cumulant(Lz_d, 1)
+let Lz_k2 = ppl.cumulant(Lz_d, 2)
+let Lz_disp = sqrt(Lz_k2(0) * Lz_k2(0)) / (sqrt(Lz_k1(0) * Lz_k1(0)) + 0.000000001)
+let Lz_V = if sqrt(Lz_k2(0) * Lz_k2(0)) < 1.0e-20 then "INVARIANT" else (if Lz_disp < 0.000001 then "INVARIANT" else "VARIANT")
+
+// --- LRL_x = vy*Lz - x/r  (x/r = cos p) : the NON-OBVIOUS candidate ---
+let Ax_d  = ppl.dist_map(d, 2, 3, lambda(p) -> (0.6 + cos(p)) * ((cos(p) / (1.0 + 0.6 * cos(p))) * (0.6 + cos(p)) - (sin(p) / (1.0 + 0.6 * cos(p))) * (0.0 - sin(p))) - cos(p))
+let Ax_k1 = ppl.cumulant(Ax_d, 1)
+let Ax_k2 = ppl.cumulant(Ax_d, 2)
+let Ax_disp = sqrt(Ax_k2(0) * Ax_k2(0)) / (sqrt(Ax_k1(0) * Ax_k1(0)) + 0.000000001)
+let Ax_V = if sqrt(Ax_k2(0) * Ax_k2(0)) < 1.0e-20 then "INVARIANT" else (if Ax_disp < 0.000001 then "INVARIANT" else "VARIANT")
+
+// --- LRL_y = -vx*Lz - y/r  (-vx = sin p, y/r = sin p) ---
+let Ay_d  = ppl.dist_map(d, 2, 3, lambda(p) -> sin(p) * ((cos(p) / (1.0 + 0.6 * cos(p))) * (0.6 + cos(p)) - (sin(p) / (1.0 + 0.6 * cos(p))) * (0.0 - sin(p))) - sin(p))
+let Ay_k1 = ppl.cumulant(Ay_d, 1)
+let Ay_k2 = ppl.cumulant(Ay_d, 2)
+let Ay_disp = sqrt(Ay_k2(0) * Ay_k2(0)) / (sqrt(Ay_k1(0) * Ay_k1(0)) + 0.000000001)
+let Ay_V = if sqrt(Ay_k2(0) * Ay_k2(0)) < 1.0e-20 then "INVARIANT" else (if Ay_disp < 0.000001 then "INVARIANT" else "VARIANT")
+
+// EXPECT: r_V = "VARIANT"
+// EXPECT: sp_V = "VARIANT"
+// EXPECT: x_V = "VARIANT"
+// EXPECT: vx_V = "VARIANT"
+// EXPECT: E_V = "INVARIANT"
+// EXPECT: Lz_V = "INVARIANT"
+// EXPECT: Ax_V = "INVARIANT"
+// EXPECT: Ay_V = "INVARIANT"

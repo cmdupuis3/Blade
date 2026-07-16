@@ -1,0 +1,14 @@
+// TEST: Reynolds Staggered Fusion
+// The real moment-tower shape: a plain arity-1 leaf fused with Reynolds
+// `where comm` leaves at arity 2 and 3. The symmetric leaves iterate packed
+// upper triangles (i <= j <= k) whose levels prefix-match the plain leaf's
+// dense outer loop, so all three stagger into ONE nest with packed writes
+// at their own depths. reynolds sums over argument orders: 2!*x_i*x_j and
+// 3!*x_i*x_j*x_k on the canonical cells.
+let A = [1.0, 2.0, 3.0]
+let g2 = lambda(x, y) where comm(x, y) -> x * y
+let g3 = lambda(x, y, z) where comm(x, y, z) -> x * y * z
+let (s1, s2, s3) = (object_for(lambda(x) -> x) <@> (A)) <&!> (object_for(reynolds(g2)) <@> (A, A)) <&!> (object_for(reynolds(g3)) <@> (A, A, A)) |> compute
+// EXPECT: s1 = [1.0, 2.0, 3.0]
+// EXPECT: s2 = [2.0, 4.0, 6.0, 8.0, 12.0, 18.0]
+// EXPECT: s3 = [6.0, 12.0, 18.0, 24.0, 36.0, 54.0, 48.0, 72.0, 108.0, 162.0]

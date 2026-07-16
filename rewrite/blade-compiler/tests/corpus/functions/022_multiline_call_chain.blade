@@ -1,0 +1,32 @@
+// TEST: Multiline Call Chain Still Parses
+// The same-line rule for postfix `(`/`[` must not break deliberate
+// multi-line calls: a call opened on the callee's line may spread its
+// arguments across lines (top level and inside blocks), and combinator
+// continuation lines (`|>`) still extend the previous expression.
+function add(a: Float64, b: Float64) -> Float64 = a + b
+let r1 = add(
+    1.0,
+    2.0
+)
+let r2 = add(add(1.0,
+                 2.0),
+             3.0)
+function chain(v: Float64) -> Float64 = {
+    let s = add(
+        v,
+        1.0
+    )
+    add(s,
+        add(2.0,
+            3.0))
+}
+let r3 = chain(1.0)
+let A = [1.0, 2.0, 3.0]
+let L = method_for(A, A)
+let f = lambda(x, y) where comm(x, y) -> x * y
+let squares = L <@> f
+    |> compute
+// EXPECT: r1 = 3
+// EXPECT: r2 = 6
+// EXPECT: r3 = 7
+// EXPECT: squares = [1, 2, 3, 4, 6, 9]

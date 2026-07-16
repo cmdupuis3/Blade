@@ -200,6 +200,11 @@ type IRExpr =
     | IROpaqueExtent
     | IRAssign of target: IRExpr * value: IRExpr
     | IRForRange of varId: IRId * lo: IRExpr * hi: IRExpr * body: IRExpr
+    /// Runtime constraint guard, statement-positioned:
+    /// `if (!(cond)) { std::cerr << message << std::endl; std::abort(); }`.
+    /// Synthesized (mutual-group joint checks, struct constraint checks);
+    /// value type is unit.
+    | IRConstraintCheck of cond: IRExpr * message: string
 
 /// Abstract callable in IR. The merged form of source-level functions
 /// and lambdas. Lives in the IRExpr mutual-recursion group because
@@ -240,11 +245,17 @@ and IRCallable = {
     // IsCudaKernel is the analogous opt-in flag for the `cuda` strategy: when
     // true, codegen emits a flat-launch __global__ kernel + host launch instead
     // of a host loop nest (see genCudaKernel — added in a following increment).
-    // CudaBlockSize carries the launch block size (default 256). omp and cuda are
-    // mutually exclusive today, so at most one of IsOmpParallel/IsCudaKernel is
-    // true; both false = serial host loop (the default).
+    // CudaBlockSize carries the launch block size (default 256). omp, cuda, and
+    // mpi are mutually exclusive today, so at most one of
+    // IsOmpParallel/IsCudaKernel/IsMpiParallel is true; all false = serial host
+    // loop (the default).
     IsCudaKernel: bool
     CudaBlockSize: int
+    // IsMpiParallel is the opt-in flag for the `mpi` strategy: the kernel's
+    // iteration domain is decomposed across MPI ranks (SPMD; full output
+    // restored on all ranks by an Allgatherv after the loop). Emission is
+    // gated like cuda — inert unless mpiEmitMode is on (see genApplyCombinator).
+    IsMpiParallel: bool
     IsArityPoly: bool
     ArityParam: string option
     Captures: CaptureInfo list
@@ -1170,7 +1181,11 @@ let (|IxSymmetryLike|IxCompound|IxDep|IxRagged|IxDense|) (ix: IRIndexType) =
          | IxKDep | IxKDepInner | IxKDepOuter -> IxDep
          | IxKRagged | IxKRaggedInline | IxKRaggedOpaque -> IxRagged
          | IxKPlain | IxKGroupOuter | IxKGroupMember | IxKSeq
-         | IxKErrorRaggedNoPrior -> IxDense)
+         // IxKIrreps is dense BY DESIGN: every cell of the irreps space is
+         // stored (extent = total_dim(spec), no compression); the block
+         // structure is type identity, not a storage/iteration class.
+         | IxKIrreps
+         | IxKErrorRaggedNoPrior | IxKErrorIrrepsBadSpec -> IxDense)
 
 type LoopLevelInfo = {
     ArrayIndex: int
@@ -1630,17 +1645,11 @@ let computeTriangularBound
 // IR Declarations
 // ============================================================================
 
-/// Constraint information for structs with where clauses
-type StructConstraintInfo = {
-    /// The lowered constraint expression (e.g., m1 + m2 == m_out)
-    Expr: IRExpr
-    /// Mapping from field names to the IRVar IDs used in the constraint expr
-    FieldBindings: (string * IRId) list
-}
-
 type IRTypeDef =
     | IRTDAlias of name: string * ty: IRType
-    | IRTDStruct of name: string * fields: (string * IRType) list * invariant: StructConstraintInfo option
+    // Struct where-constraints don't live on the type def: the checker
+    // synthesizes IRConstraintCheck guards at every assignment site.
+    | IRTDStruct of name: string * fields: (string * IRType) list
     | IRTDVariant of name: string * variants: (string * IRType option) list
     | IRTDIndexType of name: string * idx: IRIndexType
     | IRTDEnumIdx of name: string * idx: IRIndexType * values: EnumValue list
@@ -1674,15 +1683,45 @@ type IRBinding = {
 
 /// IR Module
 /// Specification for a deferred provider data read, recovered at the read site
-/// (`view |> read`) and consumed at codegen to emit the NetCDF reader. Keyed in
-/// IRModule.ProviderReads by the receiving binding's IRId. A plain dense read
-/// leaves MaskName/MaskType = None; a load_compound read carries both.
+/// (`view |> alias.read`) and consumed at codegen to emit the provider's
+/// reader. Keyed in IRModule.ProviderReads by the receiving binding's IRId. A
+/// plain dense read leaves MaskName/MaskType = None; a load_compound read
+/// carries both. Provider is the registry module name ("netcdf", "zarr") —
+/// codegen dispatches the emitters through it.
 type ProviderReadSpec = {
+    Provider: string
     FilePath: string
     VarName: string
     VarType: IRArrayType
     MaskName: string option
     MaskType: IRArrayType option
+    /// Sub-simplex window [lo, hi) for `alias.read_window(var, lo, hi)`
+    /// over a packed variable; None for whole-variable reads. When set,
+    /// VarType is the WINDOW type (leading packed extent = hi-lo).
+    Window: (int64 * int64) option
+    /// `alias.stream(var)`: the variable is NOT materialized at the binding —
+    /// consuming loop nests inline per-fiber reads at the S/T boundary
+    /// (trailing-axis fibers read on demand as the site indices bind).
+    /// Only fiber-kernel method_for consumers are stream-eligible; other
+    /// consumption is a loud codegen error steering to `.read`.
+    Streamed: bool
+}
+
+/// Specification for a deferred provider data write (`alias.write("path", A)`),
+/// keyed in IRModule.ProviderWrites by the write binding's IRId. The source
+/// must be a named top-level array binding; codegen emits a flatten prologue
+/// (nested -> `<cpp>_flat`, row-major) and then the provider's writer.
+type ProviderWriteSpec = {
+    Provider: string
+    FilePath: string
+    /// Variable name inside the store (the source binding's surface name).
+    VarName: string
+    /// The source array binding being written.
+    SourceId: IRId
+    SourceType: IRArrayType
+    /// Dimension names for the store's metadata (named index types when
+    /// known; synthesized dim<i> otherwise).
+    DimNames: string list
 }
 
 type IRModule = {
@@ -1694,10 +1733,15 @@ type IRModule = {
     /// "compile-time" | "runtime" | "both" | "unused"
     StaticFunctionUsage: Map<string, string>
     /// Deferred provider reads, keyed by the receiving binding's IRId.
-    /// Populated during lowering (at `let x = view |> read` over a provider
-    /// variable) and consumed at codegen to emit the NetCDF reader. Empty for
-    /// modules with no provider reads.
+    /// Populated during lowering (at `let x = view |> alias.read` over a
+    /// provider variable) and consumed at codegen to emit the provider's
+    /// reader. Empty for modules with no provider reads.
     ProviderReads: Map<IRId, ProviderReadSpec>
+    /// Deferred provider writes (`alias.write("path", A)`), keyed by the
+    /// write binding's IRId. Populated during lowering and consumed at
+    /// codegen to emit a flatten prologue + the provider's writer. Empty
+    /// for modules with no provider writes.
+    ProviderWrites: Map<IRId, ProviderWriteSpec>
     /// Deferred random-fill array constructors, keyed by the receiving binding's
     /// IRId. Populated during lowering (at `let A: Array<..> = fill_random(mod)`)
     /// and consumed at codegen to emit allocate<> + the runtime fill_random. The
@@ -1781,6 +1825,7 @@ let mkLambdaCallable
     (isOmpParallel: bool)
     (isCudaKernel: bool)
     (cudaBlockSize: int)
+    (isMpiParallel: bool)
     : IRCallable =
     let id = builder.FreshId()
     {
@@ -1792,13 +1837,15 @@ let mkLambdaCallable
         IsStatic = false
         IsCommutative = isCommutative
         CommGroups = commGroups
-        // Lambda-level parallelism IS propagated: omp/cuda clauses on a lambda
-        // flow TypedLambdaInfo.Parallel -> here. Callers supply the omp detail +
-        // flag and the cuda flag + block size (mutually exclusive today).
+        // Lambda-level parallelism IS propagated: omp/cuda/mpi clauses on a
+        // lambda flow TypedLambdaInfo.Parallel -> here. Callers supply the omp
+        // detail + flag, the cuda flag + block size, and the mpi flag (mutually
+        // exclusive today).
         Parallelism = parallelism
         IsOmpParallel = isOmpParallel
         IsCudaKernel = isCudaKernel
         CudaBlockSize = cudaBlockSize
+        IsMpiParallel = isMpiParallel
         IsArityPoly = false
         ArityParam = None
         Captures = captures
@@ -2083,6 +2130,13 @@ type LoopNestCodeGen = {
     /// the accumulator, forces OutputType scalar, and suppresses the
     /// nest-level OMP pragma (scalar accumulation is not race-safe).
     FoldWrapper: string option
+    /// MPI slab mode (dense rectilinear decomposition): when true, the
+    /// OUTERMOST loop iterates the per-rank slab [__blade_mpi_lo_<out>,
+    /// __blade_mpi_hi_<out>) instead of [0, extent). The caller
+    /// (genApplyCombinator's MPI-dense path) emits the slab-bound prologue
+    /// before the nest and the Allgatherv after it. Always false outside
+    /// mpiEmitMode.
+    MpiSlab: bool
 }
 
 /// One dimension GROUP of a device buffer. Mirrors a single IRIndexType:
@@ -3025,6 +3079,7 @@ let buildLoopNestCodeGen
         HasReynolds = info.HasReynolds
         IsAntisymmetric = isAntisymmetric
         FoldWrapper = None
+        MpiSlab = false
     }
 
 // ============================================================================
@@ -3120,6 +3175,7 @@ let (|ExprShape|) (expr: IRExpr) : IRExpr list * (IRExpr list -> IRExpr) =
     | IRProdSum args -> args, (fun args' -> IRProdSum args')
     | IRPolyIndex (p, i) -> [p; i], (function [p'; i'] -> IRPolyIndex (p', i') | _ -> badChildren "IRPolyIndex")
     | IRAssign (t, v) -> [t; v], (function [t'; v'] -> IRAssign (t', v') | _ -> badChildren "IRAssign")
+    | IRConstraintCheck (c, msg) -> [c], (function [c'] -> IRConstraintCheck (c', msg) | _ -> badChildren "IRConstraintCheck")
     | IRCurry (arr, idx, r) -> [arr; idx], (function [arr'; idx'] -> IRCurry (arr', idx', r) | _ -> badChildren "IRCurry")
     | IRGram (l, r, same) -> [l; r], (function [l'; r'] -> IRGram (l', r', same) | _ -> badChildren "IRGram")
     | IRLet (id, v, b) -> [v; b], (function [v'; b'] -> IRLet (id, v', b') | _ -> badChildren "IRLet")
@@ -4121,6 +4177,7 @@ let specializeFunction (func: IRFuncDef) (arities: int list) (builder: IRBuilder
           IsOmpParallel = func.IsOmpParallel
           IsCudaKernel = func.IsCudaKernel
           CudaBlockSize = func.CudaBlockSize
+          IsMpiParallel = func.IsMpiParallel
           IsArityPoly = false
           ArityParam = None
           // Specialized clones inherit the original's captures verbatim;
@@ -4185,7 +4242,7 @@ let setStructFieldsCache (types: IRTypeDef list) =
     let cache = System.Collections.Generic.Dictionary<string, (string * IRType) list>()
     for td in types do
         match td with
-        | IRTDStruct (name, fields, _) -> cache.[name] <- fields
+        | IRTDStruct (name, fields) -> cache.[name] <- fields
         | _ -> ()
     structFieldsCacheStorage.Value <- cache
 
@@ -4435,6 +4492,7 @@ let rec typeOf (expr: IRExpr) : IRType =
               | _ -> elemType))
     | IRAssign _ -> IRTUnit
     | IRForRange _ -> IRTUnit
+    | IRConstraintCheck _ -> IRTUnit
     | IRFieldAccess (obj, field) ->
         // Resolved via the ONE struct-fields cache (structFieldsCacheStorage
         // above), populated both at liftInlineFormsModule entry and at
@@ -4625,10 +4683,20 @@ let rec typeOf (expr: IRExpr) : IRType =
 /// position? Note: we deliberately exclude IRReduce — reduce's codegen
 /// handles inline forms via IIFE (when the array is named) and the array
 /// argument to reduce IS what we lift, not reduce itself.
+///
+/// IRReduceCompute (the FUSED reduction terminal) IS included: unlike IRReduce
+/// it is statement-shaped — it declares scalar accumulator(s) plus a loop nest
+/// and has no expression/IIFE rendering — so codegen can only emit it at a
+/// let-binding position. Lifting it here means `reduce(deferred, …) / 125.0`
+/// normalizes to `let __t = reduce(deferred, …) in __t / 125.0` before codegen,
+/// exactly as writing that intermediate `let` by hand would (embedded reduces
+/// are always single-leaf scalars; a fused tree only ever appears as a directly
+/// destructured binding RHS, which is a blessed position and is not lifted).
 let isInlineForm (e: IRExpr) : bool =
     match e with
     | IRMask _ | IRSort _ | IRIntersect _ | IRUnion _ | IRUnique _
-    | IRGroupBy _ | IRGroupKeys _ | IRTranspose _ | IRDecompact _ | IRArrayNegate _ | IRArrayConjugate _ -> true
+    | IRGroupBy _ | IRGroupKeys _ | IRTranspose _ | IRDecompact _ | IRArrayNegate _ | IRArrayConjugate _
+    | IRReduceCompute _ -> true
     | _ -> false
 
 /// Path B / Phase D: peel any IRLet chain that descendant lifts produced.
@@ -4981,6 +5049,7 @@ let rec liftExpr (builder: IRBuilder) (expr: IRExpr) : IRExpr =
     | IRCompoundMask mk -> IRCompoundMask (liftExpr builder mk)
     | IRCompoundProject (parent, plen) -> IRCompoundProject (liftExpr builder parent, plen)
     | IRAssign (t, v) -> IRAssign (t, liftExpr builder v)
+    | IRConstraintCheck (c, msg) -> IRConstraintCheck (liftExpr builder c, msg)
     | IRForRange (vid, lo, hi, body) ->
         IRForRange (vid, liftExpr builder lo, liftExpr builder hi, liftExpr builder body)
     | IRBlocked (it, bs) -> IRBlocked (it, liftExpr builder bs)
@@ -5188,17 +5257,20 @@ let rec ppIRType = function
 
 and ppIndexType (idx: IRIndexType) =
     // Inline extent printing since ppIRExpr is defined later
-    let extentStr = 
+    let extentStr =
         match idx.Extent with
         | IRLit (IRLitInt n) -> sprintf "%d" n
         | IRVar (id, _) -> sprintf "v%d" id
         | IRParam (name, _, _) -> name
         | _ -> "?"
-    match idx.Symmetry with
-    | SymNone -> sprintf "Idx<%s>" extentStr
-    | SymSymmetric -> sprintf "SymIdx<%d, %s>" idx.Rank extentStr
-    | SymAntisymmetric -> sprintf "AntisymIdx<%d, %s>" idx.Rank extentStr
-    | SymHermitian -> sprintf "HermitianIdx<%s>" extentStr
+    match idx with
+    | IrrepsIdxLike rendered -> rendered
+    | _ ->
+        match idx.Symmetry with
+        | SymNone -> sprintf "Idx<%s>" extentStr
+        | SymSymmetric -> sprintf "SymIdx<%d, %s>" idx.Rank extentStr
+        | SymAntisymmetric -> sprintf "AntisymIdx<%d, %s>" idx.Rank extentStr
+        | SymHermitian -> sprintf "HermitianIdx<%s>" extentStr
 
 // (ppElemType removed in Phase B6: unused after ppIRType was made recursive
 // over IRType in Phase B2. The primitive-only printer is no longer needed
@@ -5230,11 +5302,14 @@ and ppIndexTypeIn (names: Map<IRId, string>) (idx: IRIndexType) =
             | IRVar (id, _) -> sprintf "v%d" id
             | IRParam (name, _, _) -> name
             | _ -> "?"
-    match idx.Symmetry with
-    | SymNone -> sprintf "Idx<%s>" extentStr
-    | SymSymmetric -> sprintf "SymIdx<%d, %s>" idx.Rank extentStr
-    | SymAntisymmetric -> sprintf "AntisymIdx<%d, %s>" idx.Rank extentStr
-    | SymHermitian -> sprintf "HermitianIdx<%s>" extentStr
+    match idx with
+    | IrrepsIdxLike rendered -> rendered
+    | _ ->
+        match idx.Symmetry with
+        | SymNone -> sprintf "Idx<%s>" extentStr
+        | SymSymmetric -> sprintf "SymIdx<%d, %s>" idx.Rank extentStr
+        | SymAntisymmetric -> sprintf "AntisymIdx<%d, %s>" idx.Rank extentStr
+        | SymHermitian -> sprintf "HermitianIdx<%s>" extentStr
 
 let ppSymcomState = function
     | SCNeither -> "Neither"
@@ -5365,6 +5440,8 @@ let rec ppIRExprWithNames (names: Map<int, string>) indent (expr: IRExpr) =
         sprintf "(%s >>@ %s)" (pp f) (pp g)
     | IRComposeMeth (f, g) ->
         sprintf "(%s @>> %s)" (pp f) (pp g)
+    | IRConstraintCheck (c, msg) ->
+        sprintf "check(%s, \"%s\")" (pp c) msg
     | IRAssign (target, v) ->
         let targetStr =
             match target with
@@ -5858,6 +5935,7 @@ let validateModule (externalIds: Set<IRId>) (modul: IRModule) : IRValidationErro
         | IRSequence es -> es |> List.iter (checkScope scope ctx)
         | IRPure e -> checkScope scope ctx e
         | IRAssign (t, v) -> checkScope scope ctx t; checkScope scope ctx v
+        | IRConstraintCheck (c, _) -> checkScope scope ctx c
         | _ -> ()  // Literals, params, etc. — no var refs
     
     let mutable cumulativeScope = moduleIds

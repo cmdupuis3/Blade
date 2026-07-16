@@ -1,0 +1,8 @@
+// TEST: Struct Field Type Mismatch (rejects)
+// A field value whose type cannot check against the declared field type
+// must be a compile error (previously swallowed by a discarded unify).
+struct Point {
+    x: Float,
+    y: Float
+}
+let p = Point { x = "not a float", y = 2.0 }

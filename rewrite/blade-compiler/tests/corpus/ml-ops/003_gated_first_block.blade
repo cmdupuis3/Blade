@@ -1,7 +1,8 @@
 // TEST: ML Op Gated First Block Not Scalar (rejects)
+import ml as ml
 // ============================================================================
 // gated requires the first block to be scalars (L=0) — its features double
 // as the gates (ml-spec §8.1; finding F2 documents the double duty).
 // ============================================================================
 let static bad_spec = [(1, 1, 2), (0, 0, 2)]
-let g = gated(bad_spec, [0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0])
+let g = ml.gated(bad_spec, [0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0])

@@ -1,0 +1,10 @@
+// TEST: IrrepsIdx Nonstatic Spec (rejects)
+// ============================================================================
+// The spec argument must resolve under the full static contract (a `let
+// static` binding or an inline literal). A plain runtime `let` is not
+// visible to StaticEval, so lowering plants the bad-spec marker and the
+// let-binding consumption site surfaces the rejection (same channel as the
+// ragged-no-prior and Dist(-1) checks; lowering itself cannot Error).
+// ============================================================================
+let n = 4
+let x: Array<Float like IrrepsIdx<n>> = [1.0, 2.0, 3.0, 4.0]

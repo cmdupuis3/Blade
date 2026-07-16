@@ -1,0 +1,13 @@
+// TEST: Fusion Different Arrays
+// <&!> leaves over DIFFERENT arrays (same extent) fuse into one loop that
+// peels each leaf's own array — every kernel's params resolve through its
+// OWN element bindings, never bridged positionally to another leaf's arrays.
+// (Pinned against a former silent-wrong-code path that read the first
+// leaf's array for every kernel: v used to come out as [2.0, 4.0, 6.0].)
+let A = [1.0, 2.0, 3.0]
+let B = [10.0, 20.0, 30.0]
+let f = lambda(x) -> x + 1.0
+let g = lambda(x) -> x * 2.0
+let (u, v) = (object_for(f) <@> (A)) <&!> (object_for(g) <@> (B)) |> compute
+// EXPECT: u = [2.0, 3.0, 4.0]
+// EXPECT: v = [20.0, 40.0, 60.0]

@@ -1,0 +1,10 @@
+// TEST: Struct Dependent Bound One Sided
+// Lower-only and upper-only bounds.
+struct Reading {
+    n: Int in 0 ..,
+    cap: Int,
+    used: Int in .. cap + 1
+}
+let r = Reading { n = 3, cap = 10, used = 10 }
+let u = r.used
+// EXPECT: u = 10

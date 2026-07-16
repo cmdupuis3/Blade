@@ -1,0 +1,10 @@
+// TEST: Dist Map Needs Degree (rejects)
+import ppl as ppl
+// Without an explicit s, dist_map only accepts maps whose derivative
+// tower terminates (polynomials — the exact fragment). exp never
+// vanishes, so the elaborator refuses to pick a truncation silently and
+// steers to the 4-argument form (ppl/041 pins that path).
+type TimeIdx = Idx<6>
+let A: Array<Float64 like Idx<1>, TimeIdx> = [[1.0, 2.0, 4.0, 6.0, 0.0, 3.0]]
+let xd = ppl.dist(A, 6)
+let dy = ppl.dist_map(xd, 2, lambda(x) -> exp(x))

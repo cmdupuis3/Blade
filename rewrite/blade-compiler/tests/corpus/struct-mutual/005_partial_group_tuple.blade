@@ -1,0 +1,11 @@
+// TEST: Mutual Partial Group Tuple (rejects)
+// The annotation tuple must contain the FULL member set.
+struct Particle {
+    pos: Float,
+    vel: Float,
+    mass: Float
+}
+type P1 = Particle
+and P2 = Particle
+where P1.vel + P2.vel == 0.0
+let (a, n): (P1, Int) = (Particle { pos = 0.0, vel = 1.0, mass = 1.0 }, 3)

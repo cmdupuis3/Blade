@@ -1,0 +1,4 @@
+// TEST: Struct Unknown Type Name (rejects)
+// Constructing a struct type that was never declared must be a compile
+// error, not a silent degradation to an anonymous tuple.
+let p = Pointt { x = 1.0, y = 2.0 }

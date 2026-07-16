@@ -1,0 +1,16 @@
+// TEST: Reduce Staggered Arity
+// reduce over a mixed-arity <&!> tree: one merged nest, one scalar
+// accumulator per leaf, each accumulating at its OWN depth —
+//   for i0 { p1 += x; for i1 { p2 += x*y; for i2 { p3 += x*y*z } } }
+// so p1 = sum(A), p2 = sum(A)^2, p3 = sum(A)^3 in a single pass structure.
+let A = [1.0, 2.0, 3.0]
+let k1 = lambda(x) -> x
+let k2 = lambda(x, y) -> x * y
+let k3 = lambda(x, y, z) -> x * y * z
+let L1 = method_for(A)
+let L2 = method_for(A, A)
+let L3 = method_for(A, A, A)
+let (p1, p2, p3) = reduce((L1 <@> k1) <&!> (L2 <@> k2) <&!> (L3 <@> k3), (+))
+// EXPECT: p1 = 6.0
+// EXPECT: p2 = 36.0
+// EXPECT: p3 = 216.0

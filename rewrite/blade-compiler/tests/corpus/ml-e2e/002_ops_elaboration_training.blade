@@ -1,4 +1,6 @@
 // TEST: ML E2E Ops Elaboration Training
+import ml as ml
+import ad as ad
 // ============================================================================
 // The SAME network, task, dataset, and training run as ml-e2e/001 — but the
 // equivariant ops come from the compiler's ML elaboration (MLElaborate.fs)
@@ -26,7 +28,7 @@
 let static spec_in = [(0, 0, 1)]
 let static spec_h = [(0, 0, 2), (1, 1, 2), (2, 0, 1)]
 let static spec_out = [(0, 0, 2)]
-let static sh2 = sh_spec(2)
+let static sh2 = ml.sh_spec(2)
 let static cfg1 = (spec_in, sh2, spec_h)
 let static cfg2 = (spec_h, sh2, spec_out)
 
@@ -35,15 +37,15 @@ let static ne = 20                     // edges (complete digraph)
 let static ng = 4                      // graphs
 let static nsteps = 30                 // training steps
 
-let static dh = total_dim(spec_h)      // 13
-let static dout = total_dim(spec_out)  // 2
+let static dh = ml.total_dim(spec_h)      // 13
+let static dout = ml.total_dim(spec_out)  // 2
 let static dh_all = dh * nn            // 65
 let static dout_all = dout * nn        // 10
 let static ev_len = ne * 3             // 60
 let static evs_all = ev_len * ng       // 240
-let static w1dim = tp_weight_dim(cfg1)              // 5
-let static w2dim = linear_weight_dim(spec_h, spec_h) // 9
-let static w3dim = tp_weight_dim(cfg2)              // 10
+let static w1dim = ml.tp_weight_dim(cfg1)              // 5
+let static w2dim = ml.linear_weight_dim(spec_h, spec_h) // 9
+let static w3dim = ml.tp_weight_dim(cfg2)              // 10
 
 // ---- graph structure: complete digraph on 5 nodes -------------------------
 let edge_src = [0, 0, 0, 0, 1, 1, 1, 1, 2, 2, 2, 2, 3, 3, 3, 3, 4, 4, 4, 4]
@@ -88,10 +90,10 @@ let br_init = [0.0]
 function conv1(feat: Array<Float like Idx<nn>>, ev: Array<Float like Idx<ev_len>>, w: Array<Float like Idx<w1dim>>) -> Array<Float like Idx<dh_all>> = {
     let mut out = replicate(dh_all, pure(0.0)) |> compute
     for e in 0..ne {
-        let sh = y_to(2, ev(e * 3), ev(e * 3 + 1), ev(e * 3 + 2))
+        let sh = ml.y_to(2, ev(e * 3), ev(e * 3 + 1), ev(e * 3 + 2))
         let mut xf = [0.0]
         xf(0) = feat(edge_src(e))
-        let msg = tensor_product(cfg1, xf, sh, w)
+        let msg = ml.tensor_product(cfg1, xf, sh, w)
         for c in 0..dh {
             out(edge_tgt(e) * dh + c) += msg(c)
         }
@@ -102,12 +104,12 @@ function conv1(feat: Array<Float like Idx<nn>>, ev: Array<Float like Idx<ev_len>
 function conv2(h: Array<Float like Idx<dh_all>>, ev: Array<Float like Idx<ev_len>>, w: Array<Float like Idx<w3dim>>) -> Array<Float like Idx<dout_all>> = {
     let mut out = replicate(dout_all, pure(0.0)) |> compute
     for e in 0..ne {
-        let sh = y_to(2, ev(e * 3), ev(e * 3 + 1), ev(e * 3 + 2))
+        let sh = ml.y_to(2, ev(e * 3), ev(e * 3 + 1), ev(e * 3 + 2))
         let mut xf = replicate(dh, pure(0.0)) |> compute
         for c in 0..dh {
             xf(c) = h(edge_src(e) * dh + c)
         }
-        let msg = tensor_product(cfg2, xf, sh, w)
+        let msg = ml.tensor_product(cfg2, xf, sh, w)
         for c in 0..dout {
             out(edge_tgt(e) * dout + c) += msg(c)
         }
@@ -127,10 +129,10 @@ function loss_ev(w1: Array<Float like Idx<w1dim>>, w2: Array<Float like Idx<w2di
             ev_s(k) = evs(s * ev_len + k)
         }
         let f1 = conv1(feat_s, ev_s, w1)
-        let g1 = gated_rows(spec_h, nn, f1)
-        let h = linear_rows(spec_h, spec_h, nn, w2, g1)
+        let g1 = ml.gated_rows(spec_h, nn, f1)
+        let h = ml.linear_rows(spec_h, spec_h, nn, w2, g1)
         let f2 = conv2(h, ev_s, w3)
-        let g2 = gated_rows(spec_out, nn, f2)
+        let g2 = ml.gated_rows(spec_out, nn, f2)
         let mut pred = brA(0)
         for i in 0..nn {
             for c in 0..dout {
@@ -159,7 +161,7 @@ let mut dw3_s0 = replicate(w3dim, pure(0.0)) |> compute
 let mut dwr_s0 = [0.0, 0.0]
 let mut dbr_b = [0.0]
 
-let step0_loss = grad(loss)(w1v, w2v, w3v, wrv, brv, dw1_s0, dw2_s0, dw3_s0, dwr_s0, dbr_b)
+let step0_loss = ad.grad(loss)(w1v, w2v, w3v, wrv, brv, dw1_s0, dw2_s0, dw3_s0, dwr_s0, dbr_b)
 let dbr_s0 = dbr_b(0)
 
 // ---- training: 30 steps of full-batch gradient descent, lr = 0.1 -----------
@@ -177,7 +179,7 @@ let final_loss = {
         for k in 0..w3dim { dw3(k) = 0.0 }
         for k in 0..dout { dwr(k) = 0.0 }
         dbr(0) = 0.0
-        let lossv = grad(loss)(w1v, w2v, w3v, wrv, brv, dw1, dw2, dw3, dwr, dbr)
+        let lossv = ad.grad(loss)(w1v, w2v, w3v, wrv, brv, dw1, dw2, dw3, dwr, dbr)
         traj(step) = lossv
         for k in 0..w1dim { w1v(k) -= 0.1 * dw1(k) }
         for k in 0..w2dim { w2v(k) -= 0.1 * dw2(k) }

@@ -1,0 +1,14 @@
+// TEST: Struct Field Mutation Violated (aborts)
+// Mutating one field out from under the invariant fires the guard.
+// ABORT: Constraint violation in Balanced
+struct Balanced {
+    a: Int,
+    b: Int,
+    total: Int
+} where a + b == total
+function go() -> Int = {
+    let mut x = Balanced { a = 1, b = 2, total = 3 }
+    x.a = 5
+    x.total
+}
+let t = go()

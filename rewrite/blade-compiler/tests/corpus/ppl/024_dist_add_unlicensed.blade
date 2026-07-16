@@ -1,10 +1,11 @@
 // TEST: Dist Add Unlicensed (rejects)
+import ppl as ppl
 // a + b on Dist parameters WITHOUT a `where indep(a, b)` license: the
 // parameters' provenance tokens are unrelated, so the body is rejected
 // with steering toward adding the license to the signature.
 type TimeIdx = Idx<2>
 let X: Array<Float64 like Idx<2>, TimeIdx> = [[1.0, 2.0], [3.0, 4.0]]
-let dx = dist(X, 2)
+let dx = ppl.dist(X, 2)
 
 function combine(a: Dist<2, Float64 like Idx<2>>, b: Dist<2, Float64 like Idx<2>>) -> Dist<2, Float64 like Idx<2>> =
   a + b

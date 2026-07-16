@@ -1,0 +1,20 @@
+// TEST: IrrepsIdx Alias
+// ============================================================================
+// `type Feat = IrrepsIdx<spec>` registers a NOMINATIVE alias: the alias name
+// is folded into the irreps identity tag. This test pins (1) iterating a
+// kernel over range<Feat>, and (2) the name-permissive edge: an alias-typed
+// array passed to a parameter annotated with the ANONYMOUS IrrepsIdx of the
+// same spec unifies (mirrors named-vs-None permissiveness for plain tags).
+// The strict edges are pinned by 115 (spec mismatch) and 119 (two aliases).
+// spec2 = [(0,0,1), (1,1,1)]: total_dim = 1 + 3 = 4.
+// ============================================================================
+let static spec2 = [(0, 0, 1), (1, 1, 1)]
+type Feat = IrrepsIdx<spec2>
+let a: Array<Float like Feat> = [1.0, 2.0, 3.0, 4.0]
+let r = method_for(range<Feat>) <@> lambda(i) -> a(i) * 2.0 |> compute
+// EXPECT: r = [2, 4, 6, 8]
+function f(v: Array<Float like IrrepsIdx<spec2>>) -> Float = {
+    v(0) + v(3)
+}
+let s = f(a)
+// EXPECT: s = 5.0

@@ -453,8 +453,33 @@ let R = method_for(A, A) <@> lambda(x, y) where comm(x, y) -> x * y |> compute
 let A: Array<Float64 like Idx<2>, Idx<3>> = [[1.0, 2.0, 3.0], [4.0, 5.0, 6.0]]
 let R = method_for(A, A) <@> lambda(x, y) where comm(x, y), cuda(block: 32) -> x * y |> compute
 """
+        // CO-FUSION: two SAME-ARITY cuda leaves over the SAME input, <&!>-fused
+        // into ONE device launch (genCudaCoFusion). The host oracle fuses them
+        // into one serial nest; the cuda variant emits a single __global__ with
+        // two output buffers. Values must match. rank-1 (flat grid, shared input
+        // loaded once) and rank-2 (div/mod recovery shared across both writes).
+        let cofuse1Host = """
+let A = [1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0]
+let (u, v) = (method_for(A) <@> lambda(x) -> x * 2.0 + 1.0) <&!> (method_for(A) <@> lambda(x) -> x + 100.0) |> compute
+"""
+        let cofuse1Cuda = """
+let A = [1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0]
+let (u, v) = (method_for(A) <@> lambda(x) where cuda(block: 64) -> x * 2.0 + 1.0) <&!> (method_for(A) <@> lambda(x) where cuda(block: 64) -> x + 100.0) |> compute
+"""
+        let cofuse2Host = """
+let A = [1.0, 2.0, 3.0]
+let B = [4.0, 5.0, 6.0]
+let (p, q) = (method_for(A, B) <@> lambda(x, y) -> x * y) <&!> (method_for(A, B) <@> lambda(x, y) -> x + y) |> compute
+"""
+        let cofuse2Cuda = """
+let A = [1.0, 2.0, 3.0]
+let B = [4.0, 5.0, 6.0]
+let (p, q) = (method_for(A, B) <@> lambda(x, y) where cuda(block: 64) -> x * y) <&!> (method_for(A, B) <@> lambda(x, y) where cuda(block: 64) -> x + y) |> compute
+"""
         let cases =
             [ ("rank1", rank1Host, rank1Cuda)
+              ("cofuse_rank1", cofuse1Host, cofuse1Cuda)
+              ("cofuse_rank2", cofuse2Host, cofuse2Cuda)
               ("rank2_outer", rank2Host, rank2Cuda)
               ("rank1_multiblock", mbHost, mbCuda)
               ("rank3_nonuniform", rank3Host, rank3Cuda)

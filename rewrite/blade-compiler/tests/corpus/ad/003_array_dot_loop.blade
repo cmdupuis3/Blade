@@ -1,4 +1,5 @@
 // TEST: AD Array Dot Via Loop
+import ad as ad
 // ============================================================================
 // Array-parameter gradient through a for-in accumulation loop, with a
 // captured module-level constant. Array gradients go to caller-allocated
@@ -14,6 +15,6 @@ function h(w: Array<Float like Idx<3>>) -> Float = {
 }
 let w0 = [1.0, 2.0, 3.0]
 let mut dh = [0.0, 0.0, 0.0]
-let hv = grad(h)(w0, dh)
+let hv = ad.grad(h)(w0, dh)
 // EXPECT: hv = 32.0
 // EXPECT: dh = [4.0, 5.0, 6.0]

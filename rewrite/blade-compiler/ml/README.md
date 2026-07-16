@@ -28,6 +28,27 @@ Core-compiler touchpoints are exactly two: `StaticEval`'s builtin registry
 `tests/corpus/ml-ops/` (op pins + rejects) and `tests/corpus/ml-e2e/`
 (training runs pinned to this project's oracle values).
 
+## Calling the ops — `import ml`
+
+The ML surface is a real module: reachable only through an import alias, not
+as language-wide bare names.
+
+    import ml as ml            // or e.g. `import ml as m`
+
+    let static sh2 = ml.sh_spec(2)
+    let y          = ml.y_to(2, x, y, z)
+    let out        = ml.linear(SPEC_IN, SPEC_OUT, w, x)
+
+Both the ops (`y_to`, `tensor_product`, `linear`, `gated`, `linear_rows`,
+`gated_rows`) and the static sizing builtins (`total_dim`, `sh_spec`,
+`tp_weight_dim`, `linear_weight_dim`, `irreps_len`, `irreps_*`) are called as
+`<alias>.<name>(...)`. The elaborator is import-gated: with no `import ml` in
+the module, these names are unbound (no longer injected globally), and
+`from ml import ...` is rejected — a selective import would reintroduce global
+names. Internally, qualified sizing calls normalize to mangled registry names
+(`Blade.ML.Statics.statName`, e.g. `__ml_stat_total_dim`); a bare
+`total_dim(...)` no longer resolves.
+
 ---
 
 # BladeML — reference implementation of the equivariant ML module

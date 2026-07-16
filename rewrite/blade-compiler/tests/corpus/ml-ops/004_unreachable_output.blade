@@ -1,8 +1,9 @@
 // TEST: ML Op Unreachable Output Irrep (rejects)
+import ml as ml
 // ============================================================================
 // all_valid_outputs (ml-spec §11.1): every output block must be reachable
 // via some CG path. 0e (x) 0e can only make 0e — asking for 1o fails, and
 // the parity matters: 0e (x) 1o -> 1e is also unreachable (parity rule).
 // ============================================================================
 let static bad_cfg = ([(0, 0, 1)], [(0, 0, 1)], [(1, 1, 1)])
-let bad = tensor_product(bad_cfg, [1.0], [1.0], [1.0])
+let bad = ml.tensor_product(bad_cfg, [1.0], [1.0], [1.0])

@@ -45,23 +45,31 @@ let printUsage () =
     printfn "Commands:"
     printfn "  compile <file.edgi> [-o output]   Compile to C++ (and optionally to executable)"
     printfn "  run <file.edgi>                   Compile and run a Blade program"
+    printfn "  run <file.edgi> --mpi <N>         ... with `where mpi` kernels decomposed across"
+    printfn "                                    N ranks (compiled -lmsmpi, run under mpiexec)"
     printfn "  check <file.edgi>                 Type-check only (no code generation)"
     printfn "  ide check --json <file.edgi>      Type-check and emit JSON diagnostics + binding types"
     printfn "                                    (machine-readable, for editor tooling)"
     printfn "  repl                              Interactive session: each input recompiles and"
     printfn "                                    re-runs the accumulated program, printing new values"
+    printfn "                                    with types; bare expressions evaluate and echo"
     printfn "  emit <file.edgi> [-o output.cpp]  Emit C++ source without compiling"
     printfn "  test                              Run full test suite (IR + C++ + run)"
     printfn "  test --omp                        ... including the OpenMP thread-coverage block"
     printfn "  test --cuda                       ... including the CUDA kernel block"
     printfn "                                    (Windows: run from the x64 Native Tools prompt"
     printfn "                                     so nvcc finds cl.exe)"
+    printfn "  test --mpi                        ... including the MPI decomposition block"
+    printfn "                                    (needs mingw msmpi + the MS-MPI runtime)"
     printfn "  test --timing                     ... including the differential timing block (slow)"
-    printfn "                                    (the --omp/--cuda/--timing flags can be combined)"
+    printfn "                                    (the --omp/--cuda/--timing/--mpi flags combine)"
     printfn "  test --ir-only                    Run IR-only tests (fast, no C++ compilation)"
     printfn "  test alloc                        Run C++ allocation-layout tests (contiguity/cardinality)"
     printfn "  test omp-coverage                 Run the OpenMP thread-coverage block standalone"
     printfn "  test cuda                         Run the CUDA kernel block standalone"
+    printfn "  test mpi                          Run the MPI decomposition block standalone"
+    printfn "  test netcdf                       Run the NetCDF provider block (needs libnetcdf + sample.nc)"
+    printfn "  test zarr                         Run the Zarr provider block (hermetic; g++ for the e2e parts)"
     printfn "  test timing                       Run the differential timing block standalone"
     printfn "  test diff-oracle [category]       Diff printed values against the pinned ./oracle build"
     printfn ""
@@ -106,7 +114,7 @@ let compileToExe (filePath: string) (outputPath: string option) (verbose: bool) 
         let dir = if String.IsNullOrEmpty dir then "." else dir
         // Infer backend from generated source: device kernels → .cu + nvcc.
         let backendReq = inferBackendReq cppCode
-        let ext = match backendReq with RequiresCuda -> ".cu" | CpuOnly -> ".cpp"
+        let ext = match backendReq with RequiresCuda -> ".cu" | RequiresMpi | CpuOnly -> ".cpp"
         let cppFile = Path.Combine(dir, baseName + ext)
         File.WriteAllText(cppFile, cppCode)
         // The generated source `#include`s the C++ runtime headers with plain
@@ -144,20 +152,43 @@ let compileToExe (filePath: string) (outputPath: string option) (verbose: bool) 
                 eprintfn "[Compile] %s" finalPath
             Ok finalPath
 
-/// Run a .edgi file: compile and execute
-let runFile (filePath: string) (verbose: bool) : int =
-    match compileToExe filePath None verbose with
-    | Error e ->
-        eprintfn "Error: %s" e
-        1
-    | Ok exePath ->
-        match runExecutable exePath with
+/// Run a .edgi file: compile and execute. `mpiRanks = Some n` switches on the
+/// MPI emit gate for codegen (decomposed kernels + Init/Finalize + rank-0
+/// printing), links -lmsmpi (via the mpi.h detection in compileCpp), and
+/// launches under `mpiexec -n n`. None = the historical serial path (any
+/// `where mpi` clause stays inert).
+let runFile (filePath: string) (verbose: bool) (mpiRanks: int option) : int =
+    match mpiRanks with
+    | None ->
+        match compileToExe filePath None verbose with
         | Error e ->
-            eprintfn "Runtime error: %s" e
+            eprintfn "Error: %s" e
             1
-        | Ok (exitCode, output) ->
-            printf "%s" output
-            exitCode
+        | Ok exePath ->
+            match runExecutable exePath with
+            | Error e ->
+                eprintfn "Runtime error: %s" e
+                1
+            | Ok (exitCode, output) ->
+                printf "%s" output
+                exitCode
+    | Some ranks ->
+        CodeGen.setMpiEmitMode true
+        try
+            match compileToExe filePath None verbose with
+            | Error e ->
+                eprintfn "Error: %s" e
+                1
+            | Ok exePath ->
+                match runExecutableMpi ranks exePath with
+                | Error e ->
+                    eprintfn "Runtime error: %s" e
+                    1
+                | Ok (exitCode, output) ->
+                    printf "%s" output
+                    exitCode
+        finally
+            CodeGen.setMpiEmitMode false
 
 // ----------------------------------------------------------------------------
 // Interactive REPL (`blade repl`)
@@ -170,6 +201,18 @@ let runFile (filePath: string) (verbose: bool) : int =
 // changed since the previous run. Rebinding a top-level name replaces the
 // earlier definition (duplicate lets are a C++ redeclaration error), and the
 // diff display then shows the updated values of everything downstream.
+//
+// A snippet that is not a declaration is a bare EXPRESSION (`a`, `a + 1`) —
+// the file-level "return a value by naming it" idiom. Top-level source only
+// admits declarations, so the REPL wraps the expression in a transient
+// binding (`let it = <expr>`), runs, echoes the value, and discards it: the
+// session and the diff baseline stay untouched, so repeating the expression
+// echoes again instead of diffing to silence. A bare identifier naming a
+// session FUNCTION echoes its signature from the typechecker alone (functions
+// aren't let-bindable just to print them).
+//
+// Output lines are type-annotated by an in-process parse+typecheck(+lower,
+// for HM-monomorphized value types) of the same source — see ReplTypes.
 //
 // The compiled session runs with the REPL process's own working directory,
 // so relative data paths (NetCDF.load("sample.nc")) resolve where the user
@@ -197,8 +240,139 @@ let private runExeIn (cwd: string) (exeFile: string) : Result<int * string * str
     with ex ->
         Error (sprintf "Execution exception: %s" ex.Message)
 
+// ----------------------------------------------------------------------------
+// REPL display: type-annotated echoes
+// ----------------------------------------------------------------------------
+//
+// The compiled session prints raw `name = value` lines. The REPL joins those
+// with an in-process parse+typecheck of the SAME source (the front half of
+// `lower`; cheap next to the g++ invocation that just ran) to display types:
+//
+//   - primitives inline:                  a = Int64: 5
+//   - all other types (arrays, tuples, functions) on the next line, tabbed:
+//         v = [1, 2, 3]
+//             Array<Int64, Idx<3>>
+//   - function definitions echo their signature. Abstract (type-variable)
+//     positions render with their source names (`T`, `T^2`); positions
+//     inference bound to a concrete type render that concrete type
+//     substituted into the same syntax.
+module ReplTypes =
+    open System.Collections.Generic
+    open System.Text.RegularExpressions
+    open Blade.Ast
+    open Blade.Types
+    open Blade.IR
+    open Blade.TypedAst
+
+    /// What the REPL knows about one top-level name.
+    type Info =
+        | RVal of IRType
+        | RFunc of signature: string
+
+    /// Render a function signature: `(Int64, T) -> T`. Concrete positions
+    /// print concretely; abstract positions print their source type-variable
+    /// names (fresh letters for inference-invented ones). The abstract-var
+    /// recovery and naming live in Blade.Ide (shared with `ide check`'s
+    /// hover types); this wraps them in the REPL's single-line format.
+    let funcSig (src: FunctionDecl option) (tf: TypedFunctionDecl) : string =
+        let seed =
+            match src with
+            | Some f when f.Params.Length = tf.Params.Length ->
+                [ for (p, tp) in List.zip f.Params tf.Params do
+                    match p.Type with
+                    | Some ann -> yield! Blade.Ide.collectVarNames ann tp.Type
+                    | None -> ()
+                  match f.ReturnType with
+                  | Some ann -> yield! Blade.Ide.collectVarNames ann tf.ReturnType
+                  | None -> () ]
+            | _ -> []
+        let pp = Blade.Ide.abstractRenderer seed
+        let ps = tf.Params |> List.map (fun p -> pp p.Type)
+        sprintf "(%s) -> %s" (String.concat ", " ps) (pp tf.ReturnType)
+
+    /// Parse + typecheck session source (no codegen) and return top-level
+    /// name -> display info. Failures yield an empty map — values still
+    /// print, just unannotated (shouldn't happen for source that just
+    /// compiled successfully).
+    let sessionInfo (source: string) : Map<string, Info> =
+        match Blade.Parser.parseProgram source with
+        | Error _ -> Map.empty
+        | Ok prog ->
+            match Blade.TypeCheck.typeCheck prog with
+            | Error _ -> Map.empty
+            | Ok (tp, builder, _) ->
+                let srcFuncs =
+                    [ for m in prog.Modules do
+                        for ld in m.Decls do
+                            match ld.Value with
+                            | DeclFunction f -> yield (f.Name, f)
+                            | _ -> () ]
+                    |> Map.ofList
+                // Value bindings prefer the LOWERED types: calls to
+                // HM-polymorphic functions monomorphize during lowering, so
+                // the typed AST can still carry T?n inference vars where the
+                // IR is concrete (`let r = id(3.5)` is Float64 only in IR).
+                let irTypes =
+                    try
+                        let ir = Blade.Lowering.lowerTypedProgram tp (Some prog) builder
+                        Map.ofList
+                            [ for m in ir.Modules do
+                                for b in m.Bindings do
+                                    yield (b.Name, b.Type) ]
+                    with _ -> Map.empty
+                let valTy (name: string) (fallback: IRType) =
+                    match Map.tryFind name irTypes with
+                    | Some t -> t
+                    | None -> fallback
+                let mutable acc = Map.empty
+                for m in tp.Modules do
+                    for d in m.Decls do
+                        match d with
+                        | TDeclLet b | TDeclStatic b ->
+                            acc <- Map.add b.Name (RVal (valTy b.Name b.Type)) acc
+                            for (n, _, t) in b.SubBindings do
+                                acc <- Map.add n (RVal (valTy n t)) acc
+                        | TDeclFunction f ->
+                            acc <- Map.add f.Name
+                                       (RFunc (funcSig (Map.tryFind f.Name srcFuncs) f)) acc
+                        | _ -> ()
+                acc
+
+    /// Primitive = annotate inline ("Int64: 5"); everything else goes on the
+    /// next line, tabbed.
+    let rec isPrimitive (t: IRType) : bool =
+        match t with
+        | IRTScalar _ | IRTNat _ -> true
+        | IRTIdxTagged (inner, _) | IRTUnitAnnotated (inner, _) -> isPrimitive inner
+        | _ -> false
+
+    let private eqLineRe = Regex(@"^([A-Za-z_][A-Za-z0-9_]*) = (.*)$", RegexOptions.Compiled)
+
+    /// Rewrite one raw output line for display. `transient` is the synthetic
+    /// binding a bare REPL expression was wrapped in — its name is stripped
+    /// so the value echoes alone.
+    let annotate (info: Map<string, Info>) (transient: string option) (line: string) : string =
+        let m = eqLineRe.Match line
+        if not m.Success then line
+        else
+            let name = m.Groups.[1].Value
+            let value = m.Groups.[2].Value
+            let isTransient = (transient = Some name)
+            match Map.tryFind name info with
+            | Some (RVal t) ->
+                let tyStr = Blade.Ide.abstractRenderer [] t
+                if isPrimitive t then
+                    if isTransient then sprintf "%s: %s" tyStr value
+                    else sprintf "%s = %s: %s" name tyStr value
+                else
+                    if isTransient then sprintf "%s\n\t%s" value tyStr
+                    else sprintf "%s = %s\n\t%s" name value tyStr
+            | Some (RFunc _) -> line
+            | None -> if isTransient then value else line
+
 let replLoop () : int =
-    printfn "Blade REPL (v%s) — every top-level binding prints its value." compilerVersion
+    printfn "Blade REPL (v%s) — every top-level binding prints its (typed) value." compilerVersion
+    printfn "A bare expression (e.g. `a`, `a + 1`) evaluates and echoes without joining the session."
     printfn "Commands: :reset (clear session)  :show (print session)  :quit"
     printfn "Multi-line: unbalanced brackets continue on the next line, or use :paste ... :end"
     let sessionDir = Path.Combine(Path.GetTempPath(), "blade-repl-" + Guid.NewGuid().ToString("N").Substring(0, 8))
@@ -221,45 +395,125 @@ let replLoop () : int =
     let isTimingLine (l: string) =
         System.Text.RegularExpressions.Regex.IsMatch(l, @"completed in [0-9.eE+~-]+m?s\s*$")
 
+    // A snippet is a declaration iff it opens with a declaration keyword;
+    // anything else is a bare expression to evaluate and echo.
+    let declRe =
+        System.Text.RegularExpressions.Regex(
+            @"^\s*(let|static|function|type|struct|interface|impl|unit|import|from|module)\b")
+    let identRe =
+        System.Text.RegularExpressions.Regex(@"^[A-Za-z_][A-Za-z0-9_]*$")
+    let funcDeclRe =
+        System.Text.RegularExpressions.Regex(@"^\s*(static\s+)?function\b")
+
+    /// Compile + run `candidate`, printing output lines that are new or
+    /// changed vs `lastLines` through `display`. Some (lines, printedCount)
+    /// on a clean exit; None means the snippet must not be kept.
+    let compileRunDiff (candidate: ResizeArray<string>) (display: string -> string) =
+        File.WriteAllText(srcPath, String.concat "\n\n" candidate + "\n")
+        match compileToExe srcPath None false with
+        | Error e ->
+            eprintfn "%s" e
+            eprintfn "[snippet not kept]"
+            None
+        | Ok exePath ->
+            match runExeIn userCwd exePath with
+            | Error e ->
+                eprintfn "Runtime error: %s" e
+                eprintfn "[snippet not kept]"
+                None
+            | Ok (code, stdout, stderr) ->
+                let lines =
+                    stdout.Replace("\r\n", "\n").Split('\n')
+                    |> Array.filter (fun l -> not (isTimingLine l))
+                let mutable printed = 0
+                for i in 0 .. lines.Length - 1 do
+                    if lines.[i].Trim() <> "" && (i >= lastLines.Length || lines.[i] <> lastLines.[i]) then
+                        printfn "%s" (display lines.[i])
+                        printed <- printed + 1
+                if stderr.Trim() <> "" then eprintfn "%s" (stderr.Trim())
+                if code = 0 then Some (lines, printed)
+                else
+                    eprintfn "[exit %d — snippet not kept]" code
+                    None
+
+    // Classification looks at the first non-comment, non-blank line so a
+    // doc-commented declaration isn't mistaken for a bare expression.
+    let classifyTarget (s: string) =
+        s.Replace("\r\n", "\n").Split('\n')
+        |> Array.tryFind (fun l ->
+            let t = l.TrimStart()
+            t <> "" && not (t.StartsWith "//"))
+        |> Option.defaultValue ""
+
     let evaluate (snippet: string) =
         let trimmed = snippet.Trim()
-        if trimmed <> "" then
+        if trimmed = "" then () else
+        if declRe.IsMatch (classifyTarget trimmed) then
+            // Declaration: rebinding replaces the earlier definition IN PLACE
+            // so snippets that referenced the name (defined later in the
+            // session) still see it; the output diff then shows their
+            // recomputed values.
             let candidate = ResizeArray(session)
-            // Rebinding replaces the earlier definition IN PLACE so snippets
-            // that referenced the name (defined later in the session) still
-            // see it; the output diff then shows their recomputed values.
             match bindingName trimmed with
             | Some name ->
                 let idx = candidate.FindIndex(fun s -> bindingName s = Some name)
                 if idx >= 0 then candidate.[idx] <- trimmed else candidate.Add trimmed
             | None -> candidate.Add trimmed
-            File.WriteAllText(srcPath, String.concat "\n\n" candidate + "\n")
-            match compileToExe srcPath None false with
-            | Error e ->
-                eprintfn "%s" e
-                eprintfn "[snippet not kept]"
-            | Ok exePath ->
-                match runExeIn userCwd exePath with
-                | Error e ->
-                    eprintfn "Runtime error: %s" e
-                    eprintfn "[snippet not kept]"
-                | Ok (code, stdout, stderr) ->
-                    let lines =
-                        stdout.Replace("\r\n", "\n").Split('\n')
-                        |> Array.filter (fun l -> not (isTimingLine l))
-                    let mutable printed = 0
-                    for i in 0 .. lines.Length - 1 do
-                        if lines.[i].Trim() <> "" && (i >= lastLines.Length || lines.[i] <> lastLines.[i]) then
-                            printfn "%s" lines.[i]
+            let info = lazy (ReplTypes.sessionInfo (String.concat "\n\n" candidate + "\n"))
+            match compileRunDiff candidate (fun l -> ReplTypes.annotate info.Value None l) with
+            | None -> ()
+            | Some (lines, printed) ->
+                let mutable printed = printed
+                // Function definitions produce no run output — echo the
+                // signature (abstract unless inference bound it concrete).
+                if funcDeclRe.IsMatch trimmed then
+                    match bindingName trimmed with
+                    | Some name ->
+                        match Map.tryFind name info.Value with
+                        | Some (ReplTypes.RFunc s) ->
+                            printfn "%s\n\t%s" name s
                             printed <- printed + 1
-                    if stderr.Trim() <> "" then eprintfn "%s" (stderr.Trim())
-                    if code = 0 then
-                        if printed = 0 then printfn "(ok)"   // defs print nothing new
-                        session.Clear()
-                        session.AddRange candidate
-                        lastLines <- lines
-                    else
-                        eprintfn "[exit %d — snippet not kept]" code
+                        | _ -> ()
+                    | None -> ()
+                if printed = 0 then printfn "(ok)"   // defs print nothing new
+                session.Clear()
+                session.AddRange candidate
+                lastLines <- lines
+        else
+            // Bare expression: `blade run` semantics only print top-level
+            // BINDINGS, so wrap the expression in a transient one, run, and
+            // echo its value — WITHOUT keeping it. The session (and diff
+            // baseline) stay untouched, so re-entering the same expression
+            // echoes again rather than diffing to silence.
+            let curInfo = lazy (ReplTypes.sessionInfo (String.concat "\n\n" session + "\n"))
+            let asFuncName =
+                if identRe.IsMatch trimmed then
+                    match Map.tryFind trimmed curInfo.Value with
+                    | Some (ReplTypes.RFunc s) -> Some s
+                    | _ -> None
+                else None
+            match asFuncName with
+            | Some s ->
+                // A function can't be let-bound just to echo it; print its
+                // signature straight from the typechecker.
+                printfn "%s\n\t%s" trimmed s
+            | None ->
+                let transient =
+                    let inUse = session |> Seq.choose bindingName |> Set.ofSeq
+                    Seq.initInfinite (fun i -> if i = 0 then "it" else sprintf "it%d" i)
+                    |> Seq.find (fun n -> not (Set.contains n inUse))
+                let candidate = ResizeArray(session)
+                candidate.Add (sprintf "let %s = %s" transient trimmed)
+                let info = lazy (ReplTypes.sessionInfo (String.concat "\n\n" candidate + "\n"))
+                match compileRunDiff candidate (fun l -> ReplTypes.annotate info.Value (Some transient) l) with
+                | None -> ()
+                | Some (_, printed) ->
+                    if printed = 0 then
+                        // Nothing printable (unit, deferred computation,
+                        // function value): show the type alone if known.
+                        match Map.tryFind transient info.Value with
+                        | Some (ReplTypes.RVal t) -> printfn "\t%s" (Blade.Ide.ppType t)
+                        | _ -> printfn "(ok)"
 
     let bracketBalance (text: string) =
         let mutable d = 0
@@ -420,13 +674,14 @@ let private runFullSuite opts = runAllTestsFullWith [runCliSmokeTests] opts
 let private dispatchTest (rest: string list) : int =
     // `--omp` / `--cuda` / `--timing` opt the corresponding blocks into the
     // full suite; they may appear in any order and combine.
-    let isSuiteFlag f = f = "--omp" || f = "--cuda" || f = "--timing"
+    let isSuiteFlag f = f = "--omp" || f = "--cuda" || f = "--timing" || f = "--mpi"
     match rest with
     | [] -> runFullSuite defaultFullSuiteOptions
     | flags when flags |> List.forall isSuiteFlag ->
         runFullSuite { IncludeOmp = List.contains "--omp" flags
                        IncludeCuda = List.contains "--cuda" flags
-                       IncludeTiming = List.contains "--timing" flags }
+                       IncludeTiming = List.contains "--timing" flags
+                       IncludeMpi = List.contains "--mpi" flags }
     | [ "--ir-only" ] -> runAllTests ()
     | [ "--gen" ] -> runAllTestsGenOnly ()
     | [ "normalize" ] ->
@@ -515,6 +770,12 @@ let private dispatchTest (rest: string list) : int =
         // x64 Native Tools prompt so nvcc finds cl.exe.
         let failed = (Blade.Tests.CudaTests.runCudaTests ()).Failed
         if failed = 0 then 0 else 1
+    | [ "mpi" ] ->
+        // MPI decomposition block standalone (differential vs serial oracle
+        // under mpiexec -n 1/2/4). Skips cleanly when g++ / -lmsmpi /
+        // mpiexec are absent.
+        let failed = (Blade.Tests.MpiTests.runMpiTests ()).Failed
+        if failed = 0 then 0 else 1
     | [ "timing" ] ->
         // Differential timing: measure the (r!)^d speedup of comm-annotation
         // and symmetric-type forms vs their dense equivalents. Reports ratios;
@@ -527,6 +788,18 @@ let private dispatchTest (rest: string list) : int =
         // sample.nc in the working dir + libnetcdf, else they SKIP. Returns an
         // exit code directly (not a BlockResult like the other blocks).
         Blade.Tests.NetcdfTests.runNetcdfTests ()
+    | [ "zarr" ] ->
+        // Zarr provider tests. Hermetic: fixtures are generated on the fly
+        // (pure .NET file writes), so only the e2e compile+run blocks need
+        // g++ (and skip without it). Kept out of the default aggregate like
+        // netcdf; returns an exit code directly.
+        Blade.Tests.ZarrTests.runZarrTests ()
+    | [ "hybrid" ] ->
+        // Mixed-parallelism tests (MixedParallelismPlan.md): order-table
+        // parse checks + gate-off degradation run always; the mpi+omp
+        // differentials need mpiexec and skip without it. Opt-in like
+        // netcdf/zarr; returns an exit code directly.
+        Blade.Tests.HybridTests.runHybridTests ()
     | [ cat ] ->
         // Test a specific category: blade test basic, blade test loops, etc.
         let categoryTests =
@@ -538,6 +811,8 @@ let private dispatchTest (rest: string list) : int =
             | "arity" -> Some ("Arity", arityTests)
             | "functions" -> Some ("Functions", functionTests)
             | "structs" -> Some ("Structs", structTests)
+            | "struct-aborts" | "structaborts" -> Some ("Struct Aborts", structAbortTests)
+            | "struct-mutual" | "mutual" -> Some ("Struct Mutual", structMutualTests)
             | "sumtypes" -> Some ("Sum Types", sumTypeTests)
             | "interfaces" -> Some ("Interfaces", interfaceTests)
             | "modules" -> Some ("Modules", moduleTests)
@@ -564,8 +839,29 @@ let dispatch (args: string[]) : int =
     Blade.Tests.TestHarness.version <- compilerVersion
     match args with
     // ---- User-facing commands ----
-    | [| "run"; file |] -> runFile file false
-    | [| "run"; file; "--verbose" |] -> runFile file true
+    // `run <file> [--verbose] [--mpi N]` — flags in any order after the file.
+    | _ when args.Length >= 2 && args.[0] = "run" ->
+        let rest = args.[1..] |> Array.toList
+        let mutable verbose = false
+        let mutable mpiRanks = None
+        let mutable file = None
+        let mutable bad = None
+        let rec parse toks =
+            match toks with
+            | [] -> ()
+            | "--verbose" :: tl -> verbose <- true; parse tl
+            | "--mpi" :: n :: tl ->
+                (match System.Int32.TryParse n with
+                 | true, v when v > 0 -> mpiRanks <- Some v; parse tl
+                 | _ -> bad <- Some (sprintf "--mpi expects a positive rank count, got '%s'" n))
+            | ["--mpi"] -> bad <- Some "--mpi requires a rank count (e.g. run prog.blade --mpi 4)"
+            | f :: tl when file.IsNone && not (f.StartsWith "--") -> file <- Some f; parse tl
+            | f :: _ -> bad <- Some (sprintf "unexpected argument '%s'" f)
+        parse rest
+        match bad, file with
+        | Some msg, _ -> eprintfn "Error: %s" msg; 1
+        | None, None -> printUsage (); 1
+        | None, Some f -> runFile f verbose mpiRanks
 
     | [| "compile"; file |] ->
         match compileToExe file None false with

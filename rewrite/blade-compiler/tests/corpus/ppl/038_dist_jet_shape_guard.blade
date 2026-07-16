@@ -1,0 +1,11 @@
+// TEST: Dist Jet Shape Guard (rejects)
+import ppl as ppl
+// Derivative tensors carry their rank in cell count: D2 over a
+// 2-dimensional dist needs C(2+2−1, 2) = 3 canonical cells ((0,0), (0,1),
+// (1,1)). A 2-cell literal is rejected at elaboration with the expected
+// count spelled out.
+type TimeIdx = Idx<3>
+let B: Array<Float64 like Idx<2>, TimeIdx> = [[1.0, 2.0, 4.0], [3.0, 5.0, 4.0]]
+let db = ppl.dist(B, 6)
+let m = ppl.cumulant(db, 1)
+let dy = ppl.dist_jet(db, 3, m(0) * m(1), [m(1), m(0)], [0.0, 1.0])

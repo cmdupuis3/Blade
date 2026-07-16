@@ -1,0 +1,10 @@
+// TEST: IrrepsIdx Range
+// ============================================================================
+// range<IrrepsIdx<spec>> is the FLAT dense range: bound = extent =
+// cardinality = total_dim(spec) (CompoundIdx range-Q2-consistent; there is
+// no compression, so extent and cardinality coincide). spec_h totals 13,
+// so the kernel sees i = 0..12.
+// ============================================================================
+let static spec_h = [(0, 0, 2), (1, 1, 2), (2, 0, 1)]
+let r = method_for(range<IrrepsIdx<spec_h>>) <@> lambda(i) -> i * 10 |> compute
+// EXPECT: r = [0, 10, 20, 30, 40, 50, 60, 70, 80, 90, 100, 110, 120]

@@ -1,0 +1,8 @@
+// TEST: Parse: mpi clause (inert pre-flip)
+// mpi clause parses and threads through; values UNCHANGED (the clause is inert
+// unless mpiEmitMode is on — parsing + lowering must not alter results).
+let A = [1.0, 2.0, 3.0, 4.0, 5.0]
+let L = method_for(A, A)
+let f = lambda(x, y) where comm(x, y), mpi -> x * y
+let result = L <@> f |> compute
+// EXPECT: result = [1.0, 2.0, 3.0, 4.0, 5.0, 4.0, 6.0, 8.0, 10.0, 9.0, 12.0, 15.0, 16.0, 20.0, 25.0]

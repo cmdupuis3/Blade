@@ -1,0 +1,31 @@
+// TEST: Dist Jet
+import ppl as ppl
+// dist_jet(d, q, g0, D1, ..., Ds): the FULL Faà di Bruno pushforward —
+// Y = g(X) via g's degree-s jet at the dist's mean (g0 = g(μ), D_k =
+// g^(k)(μ), scalar exprs for a univariate dist). Exact for polynomial g:
+// here g(x) = x², jet (m², 2m, 2) built in-language from cumulant(xd, 1).
+// TWO ROUTES, ONE ANSWER: pushing the empirical dist of A through the jet
+// equals the cumulants of the squared data — pinned against each other and
+// against the prototype (MomentAlgebra dump-jet, J1: jet1 = ref1 =
+// [11, 154, 2178]). The result is a first-class dist: cumulant(dy, k)
+// projects it, moments(dy, 2) reconstructs μ2 = κ2 + κ1² = 275.
+type TimeIdx = Idx<6>
+let A: Array<Float64 like Idx<1>, TimeIdx> = [[1.0, 2.0, 4.0, 6.0, 0.0, 3.0]]
+let Asq: Array<Float64 like Idx<1>, TimeIdx> = [[1.0, 4.0, 16.0, 36.0, 0.0, 9.0]]
+let xd = ppl.dist(A, 6)
+let k1 = ppl.cumulant(xd, 1)
+let dy = ppl.dist_jet(xd, 3, k1(0) * k1(0), 2.0 * k1(0), 2.0)
+let y1 = ppl.cumulant(dy, 1)
+let y2 = ppl.cumulant(dy, 2)
+let y3 = ppl.cumulant(dy, 3)
+let mu2 = ppl.moments(dy, 2)
+let r1 = ppl.cumulants(Asq, 1)
+let r2 = ppl.cumulants(Asq, 2)
+let r3 = ppl.cumulants(Asq, 3)
+// EXPECT: y1 = [11.0]
+// EXPECT: y2 = [154.0]
+// EXPECT: y3 = [2178.0]
+// EXPECT: mu2 = [275.0]
+// EXPECT: r1 = [11.0]
+// EXPECT: r2 = [154.0]
+// EXPECT: r3 = [2178.0]

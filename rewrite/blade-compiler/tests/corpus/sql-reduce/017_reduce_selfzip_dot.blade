@@ -1,0 +1,12 @@
+// TEST: Reduce Self-Zip Dot Product
+// zip(A, A) — an array zipped WITH ITSELF — puts two operand slots on the
+// same (array, index). The loop-nest emitter used to emit the per-leaf
+// binding `double A____i0 = A[__i0];` once per slot in the same loop body,
+// a g++ redeclaration error. Both the fused reduce terminal and the plain
+// compute pipeline hit it; now the identical declaration is bound once.
+let A = [1.0, 2.0, 3.0]
+let dot = reduce(method_for(zip(A, A)) <@> lambda(x, y) -> x * y, (+))
+let sq = method_for(zip(A, A)) <@> lambda(x, y) -> x * y |> compute
+// self dot product: 1 + 4 + 9
+// EXPECT: dot = 14.0
+// EXPECT: sq = [1, 4, 9]

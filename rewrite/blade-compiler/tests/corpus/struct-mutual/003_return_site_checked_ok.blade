@@ -1,0 +1,20 @@
+// TEST: Mutual Return Site Checked OK
+// Declared (P1, P2) return = the introduce-site; the annotated caller
+// binding does not re-check.
+struct Particle {
+    pos: Float,
+    vel: Float,
+    mass: Float
+}
+type P1 = Particle
+and P2 = Particle
+where P1.vel * P1.mass + P2.vel * P2.mass == 0.0
+function collide(v: Float) -> (P1, P2) = {
+    let a = Particle { pos = 0.0, vel = v, mass = 1.0 }
+    let b = Particle { pos = 1.0, vel = 0.0 - v, mass = 1.0 }
+    let pair = (a, b)
+    pair
+}
+let (x, y): (P1, P2) = collide(3.0)
+let check_val = x.vel + y.vel
+// EXPECT: check_val = 0

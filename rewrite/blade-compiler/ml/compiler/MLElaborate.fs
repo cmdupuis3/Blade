@@ -62,6 +62,20 @@ let private intArrLit (xs: int list) = ExprArrayLit (xs |> List.map iLit)
 let private floatArrLit (xs: float list) = ExprArrayLit (xs |> List.map fLit)
 let private tyFloatArr (n: int) = TyArray (TyNamed ("Float", []), [ TyIdx (ExprLit (LitInt (int64 n))) ])
 
+/// Array<Float like IrrepsIdx<[(l, p, m), ...]>> — irreps-typed signature
+/// slot, the inline spec literal rebuilt from the RESOLVED Spec. Used for
+/// the ops' feature params and results that genuinely ARE the irreps space
+/// (single-vector forms); row-stacked `_rows` buffers (extent nRows *
+/// total_dim) and path-major weight buffers are NOT irreps spaces and stay
+/// plain Idx. Anonymous (no alias name), so a user's alias of the same
+/// spec unifies by the name-permissive rule while a WRONG-spec annotation
+/// or argument is a type error.
+let private tyIrrepsArr (s: Spec) : TypeExpr =
+    let specLit =
+        ExprArrayLit (s |> List.map (fun e ->
+            ExprTuple [ iLit e.L; iLit e.Parity; iLit e.Mult ]))
+    TyArray (TyNamed ("Float", []), [ TyIrrepsIdx specLit ])
+
 let private mkFunc name (ps: (string * TypeExpr) list) retTy body : FunctionDecl =
     { Name = name
       TypeParams = []
@@ -103,7 +117,7 @@ let private yToDecl (name: string) (lmax: int) : Result<FunctionDecl, string> =
               yield sAssign (idx "sh" (iLit 6)) (mul (fLit 0.31539156525252005) (sub (mul (fLit 3.0) (mul (v "z") (v "z"))) (v "r2")))
               yield sAssign (idx "sh" (iLit 7)) (mul (fLit 1.0925484305920792) (mul (v "x") (v "z")))
               yield sAssign (idx "sh" (iLit 8)) (mul (fLit 0.5462742152960396) (sub (mul (v "x") (v "x")) (mul (v "y") (v "y")))) ]
-    Ok (mkFunc name [ ("x", f); ("y", f); ("z", f) ] (tyFloatArr dimTot)
+    Ok (mkFunc name [ ("x", f); ("y", f); ("z", f) ] (tyIrrepsArr (shSpec lmax))
             (ExprBlock (stmts, Some (v "sh"))))
 
 /// tensor_product for a fixed config: path/mult loops over baked tables,
@@ -186,8 +200,8 @@ let private tpDecl (name: string) (cfg: TPConfig) : FunctionDecl =
                                                                  (idx "__cg_c2" (v "t")))))) ]) ]) ]) ]) ] ],
             Some (v "out"))
     mkFunc name
-        [ ("x", tyFloatArr d1); ("y", tyFloatArr d2); ("w", tyFloatArr wDim) ]
-        (tyFloatArr dO) body
+        [ ("x", tyIrrepsArr cfg.Spec1); ("y", tyIrrepsArr cfg.Spec2); ("w", tyFloatArr wDim) ]
+        (tyIrrepsArr cfg.SpecOut) body
 
 /// linear for fixed (specIn, specOut): block-diagonal multiplicity mixing,
 /// first-match input block, ml/Linear loop order (blocks -> muO -> muI -> c).
@@ -226,7 +240,11 @@ let private linearDecl (name: string) (specIn: Spec) (specOut: Spec)
             [ sLetMut "out" (zerosLit (nRows * dOut))
               sFor "rr" 0 nRows blockStmts ],
             Some (v "out"))
-    mkFunc name [ ("w", tyFloatArr wDim); ("x", tyFloatArr (nRows * dIn)) ] (tyFloatArr (nRows * dOut)) body
+    // nRows = 1: x/out ARE the irreps spaces — stamp them. nRows > 1: the
+    // row-stacked buffers (extent nRows * total_dim) are not irreps spaces.
+    let tyIn = if nRows = 1 then tyIrrepsArr specIn else tyFloatArr (nRows * dIn)
+    let tyOut = if nRows = 1 then tyIrrepsArr specOut else tyFloatArr (nRows * dOut)
+    mkFunc name [ ("w", tyFloatArr wDim); ("x", tyIn) ] tyOut body
 
 /// gated for a fixed spec: block-0 scalars silu'd AND reused as gates for
 /// higher-L blocks (gate for multiplicity mu is sigmoid(x[mu % numGates])),
@@ -260,7 +278,9 @@ let private gatedDecl (name: string) (sigmoidName: string) (spec: Spec) (nRows: 
                         [ sAssign (idx "out" (add baseE (add (iLit starts.[b]) (add (mul (v "mu") (iLit d)) (v "c")))))
                                   (mul (v "g")
                                        (idx "x" (add baseE (add (iLit starts.[b]) (add (mul (v "mu") (iLit d)) (v "c")))))) ] ] ]
-    Ok (mkFunc name [ ("x", tyFloatArr (nRows * dTot)) ] (tyFloatArr (nRows * dTot))
+    // nRows = 1: x/out ARE the irreps space (same spec in and out) — stamp.
+    let tyVec = if nRows = 1 then tyIrrepsArr spec else tyFloatArr (nRows * dTot)
+    Ok (mkFunc name [ ("x", tyVec) ] tyVec
             (ExprBlock (
                 [ sLetMut "out" (zerosLit (nRows * dTot))
                   sFor "rr" 0 nRows rowStmts ],
@@ -272,6 +292,16 @@ let private gatedDecl (name: string) (sigmoidName: string) (spec: Spec) (nRows: 
 
 let private opNames =
     Set.ofList [ "y_to"; "tensor_product"; "linear"; "gated"; "linear_rows"; "gated_rows" ]
+
+/// Static sizing builtins that make up the rest of the ML surface (used in
+/// `let static` positions). Registered in the static evaluator under mangled
+/// internal names (Blade.ML.Statics.statName); a qualified `ml.total_dim(...)`
+/// is normalized to that internal name here, so bare `total_dim(...)` no
+/// longer resolves. Keep in sync with the registrations in MLStatics.install.
+let private sizingNames =
+    Set.ofList [ "sh_spec"; "total_dim"; "tp_weight_dim"; "linear_weight_dim"
+                 "irreps_len"; "irreps_l"; "irreps_parity"; "irreps_mult"
+                 "irreps_dim"; "irreps_offset" ]
 
 type private ElabState = {
     mutable Counter: int
@@ -344,15 +374,26 @@ let private elabGated (st: ElabState) (statics: StaticEnv) (what: string)
 /// Rewrite ML-op calls in an expression. Same walker shape as
 /// Grad.rewriteExpr; the two passes stay separate because this one carries
 /// elaboration state and runs first.
-let rec private rewriteExpr (st: ElabState) (statics: StaticEnv) (declNames: Set<string>) (e: Expr)
+let rec private rewriteExpr (st: ElabState) (statics: StaticEnv) (aliases: Set<string>) (opsEnabled: bool) (e: Expr)
     : Result<Expr, string> =
-    let r = rewriteExpr st statics declNames
+    let r = rewriteExpr st statics aliases opsEnabled
     let rList es =
         es |> List.fold (fun acc x ->
             acc |> Result.bind (fun xs -> r x |> Result.map (fun x' -> xs @ [x'])))
             (Ok [])
     match e with
-    | ExprApp (ExprVar op, args) when Set.contains op opNames && not (Set.contains op declNames) ->
+    // Qualified ML sizing builtin: `alias.total_dim(...)` -> the mangled
+    // internal registry name so the static evaluator folds it (and a bare
+    // `total_dim(...)` no longer resolves anywhere). Normalized in every pass
+    // — sizing must resolve before op configs fold.
+    | ExprApp (ExprField (ExprVar alias, name), args)
+        when Set.contains alias aliases && Set.contains name sizingNames ->
+        rList args |> Result.map (fun args' -> ExprApp (v (Blade.ML.Statics.statName name), args'))
+    // Qualified ML op: `alias.y_to(...)` -> generated specialized function.
+    // Bare `y_to(...)` is no longer recognized: the ML surface is reachable
+    // only through an `import ml` alias.
+    | ExprApp (ExprField (ExprVar alias, op), args)
+        when opsEnabled && Set.contains alias aliases && Set.contains op opNames ->
         rList args |> Result.bind (fun args' ->
             match op, args' with
             | "y_to", (lmaxE :: rest) when rest.Length = 3 ->
@@ -444,48 +485,74 @@ let rec private rewriteExpr (st: ElabState) (statics: StaticEnv) (declNames: Set
             |> Result.map (fun cs' -> ExprMatch (s', cs')))
     | other -> Ok other
 
-let private expandModule (decls: Located<Decl> list) : Result<Located<Decl> list, string> =
-    let declNames =
-        decls |> List.choose (fun d ->
+/// `import ml [as _]` — the module this layer owns.
+let private isMlImport (d: Located<Decl>) =
+    match d.Value with
+    | DeclImport (["ml"], _) -> true
+    | _ -> false
+
+/// Aliases bound to `ml` in this decl list. Errors on a selective
+/// `from ml import ...`, which would reintroduce the global names the module
+/// system is meant to remove.
+let private mlAliasesOf (decls: Located<Decl> list) : Result<Set<string>, string> =
+    decls |> List.fold (fun acc d ->
+        acc |> Result.bind (fun set ->
             match d.Value with
-            | DeclFunction fd -> Some fd.Name
-            | _ -> None)
-        |> Set.ofList
-    // Fast path: nothing to do if no op name appears as a non-shadowed call
-    // target anywhere. (Cheap textual pre-check is not available on the AST;
-    // just run the rewriter — it is a no-op when nothing matches.)
-    match Blade.StaticEval.resolveStatics decls with
-    | Error e -> Error (sprintf "ML elaboration: static resolution failed: %s" e)
-    // Fold failures are the type-checker's to report (assertion semantics);
-    // elaboration only needs the successfully folded environment.
-    | Ok (statics, _) ->
+            | DeclImport (["ml"], ImportQualified aliasOpt) ->
+                Ok (Set.add (aliasOpt |> Option.defaultValue "ml") set)
+            | DeclImport (["ml"], ImportSelective _) ->
+                Error "`ml` supports only `import ml [as <alias>]`; a selective `from ml import ...` would reintroduce global names"
+            | _ -> Ok set))
+        (Ok Set.empty)
+
+let private expandModule (decls: Located<Decl> list) : Result<Located<Decl> list, string> =
+    mlAliasesOf decls |> Result.bind (fun aliases ->
+    // Import-gated: with no `import ml`, this pass is a no-op — bare op names
+    // are left unbound (a normal type error) and never rewritten.
+    if Set.isEmpty aliases then Ok decls
+    else
+        let declsNoImport = decls |> List.filter (not << isMlImport)
         let st = { Counter = 0; Made = Map.empty; Decls = []; SigmoidName = None }
-        let rewritten =
-            decls |> List.fold (fun acc d ->
-                acc |> Result.bind (fun ds ->
+        let emptyStatics : StaticEnv =
+            { Values = Map.empty; Functions = Map.empty
+              CalledFunctions = ref Set.empty; ProviderRoots = Map.empty }
+        // Run rewriteExpr over every expression-bearing decl.
+        let mapDecls (statics: StaticEnv) (opsEnabled: bool) (ds: Located<Decl> list) =
+            ds |> List.fold (fun acc d ->
+                acc |> Result.bind (fun out ->
                     let mapped =
                         match d.Value with
                         | DeclFunction fd ->
-                            rewriteExpr st statics declNames fd.Body
+                            rewriteExpr st statics aliases opsEnabled fd.Body
                             |> Result.map (fun b -> DeclFunction { fd with Body = b })
                         | DeclLet binding ->
-                            rewriteExpr st statics declNames binding.Value
+                            rewriteExpr st statics aliases opsEnabled binding.Value
                             |> Result.map (fun v' -> DeclLet { binding with Value = v' })
                         | DeclStatic binding ->
-                            rewriteExpr st statics declNames binding.Value
+                            rewriteExpr st statics aliases opsEnabled binding.Value
                             |> Result.map (fun v' -> DeclStatic { binding with Value = v' })
                         | other -> Ok other
-                    mapped |> Result.map (fun value -> ds @ [{ d with Value = value }])))
+                    mapped |> Result.map (fun value -> out @ [{ d with Value = value }])))
                 (Ok [])
-        rewritten |> Result.map (fun decls' ->
-            if st.Decls.IsEmpty then decls'
-            else
-                // Generated functions are self-contained (literal tables,
-                // no captures): splice them at the FRONT so every use site
-                // (top-level lets included) sees them defined.
-                let span = { StartLine = 0; StartCol = 0; EndLine = 0; EndCol = 0; File = None }
-                let gen = st.Decls |> List.map (fun fd -> { Value = DeclFunction fd; Span = span })
-                gen @ decls')
+        // Pass 1: normalize qualified sizing builtins (`ml.total_dim(...)`) to
+        // their internal names so the static evaluator can fold them. Ops are
+        // left untouched (opsEnabled = false); statics are unused here.
+        mapDecls emptyStatics false declsNoImport |> Result.bind (fun decls1 ->
+        // Fold failures are the type-checker's to report; elaboration only
+        // needs the successfully folded environment.
+        match Blade.StaticEval.resolveStatics decls1 with
+        | Error e -> Error (sprintf "ML elaboration: static resolution failed: %s" e)
+        | Ok (statics, _) ->
+            // Pass 2: rewrite qualified ops into generated specialized functions.
+            mapDecls statics true decls1 |> Result.map (fun decls2 ->
+                if st.Decls.IsEmpty then decls2
+                else
+                    // Generated functions are self-contained (literal tables,
+                    // no captures): splice them at the FRONT so every use site
+                    // (top-level lets included) sees them defined.
+                    let span = { StartLine = 0; StartCol = 0; EndLine = 0; EndCol = 0; File = None }
+                    let gen = st.Decls |> List.map (fun fd -> { Value = DeclFunction fd; Span = span })
+                    gen @ decls2)))
 
 /// Entry point: elaborate ML ops across a program (before Grad expansion).
 /// Also installs the ML sizing builtins into the static evaluator —

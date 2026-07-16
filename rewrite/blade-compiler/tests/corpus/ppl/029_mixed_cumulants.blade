@@ -1,4 +1,5 @@
 // TEST: Mixed Cumulants
+import ppl as ppl
 // mixed_cumulants(X, Y, 1, 1): the (1,1) joint-cumulant block between two
 // arrays — X-slot major, Y-slot inner — which IS the cross-covariance
 // (matches ppl/005 and the stacked-family oracle cells k2[i, 2+j]).
@@ -8,10 +9,10 @@
 type TimeIdx = Idx<2>
 let X: Array<Float64 like Idx<2>, TimeIdx> = [[1.0, 2.0], [3.0, 5.0]]
 let Y: Array<Float64 like Idx<3>, TimeIdx> = [[2.0, 4.0], [1.0, 1.0], [0.0, 2.0]]
-let c11 = mixed_cumulants(X, Y, 1, 1)
+let c11 = ppl.mixed_cumulants(X, Y, 1, 1)
 let P: Array<Float64 like Idx<2>, TimeIdx> = [[1.0, 2.0], [3.0, 4.0]]
 let Q: Array<Float64 like Idx<2>, TimeIdx> = [[2.0, 2.0], [1.0, 3.0]]
-let _ = independent(P, Q)
-let z12 = mixed_cumulants(P, Q, 1, 2)
+let _ = ppl.independent(P, Q)
+let z12 = ppl.mixed_cumulants(P, Q, 1, 2)
 // EXPECT: c11 = [0.5, 0.0, 0.5, 1.0, 0.0, 1.0]
 // EXPECT: z12 = [0.0, 0.0, 0.0, 0.0, 0.0, 0.0]

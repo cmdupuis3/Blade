@@ -1,0 +1,12 @@
+// TEST: Dist Jet Order Guard (rejects)
+import ppl as ppl
+// The strict order budget: q output cumulants through a degree-s jet need
+// input order q·s. Here q = 3 through s = 2 wants order 6 but the dist
+// carries 4 — "insufficient stochastic order", with steering toward
+// carrying more order or opting into the truncation via dist_jet_closed
+// (ppl/035 pins the closed values).
+type TimeIdx = Idx<3>
+let B: Array<Float64 like Idx<2>, TimeIdx> = [[1.0, 2.0, 4.0], [3.0, 5.0, 4.0]]
+let db = ppl.dist(B, 4)
+let m = ppl.cumulant(db, 1)
+let dy = ppl.dist_jet(db, 3, m(0) * m(1), [m(1), m(0)], [0.0, 1.0, 0.0])

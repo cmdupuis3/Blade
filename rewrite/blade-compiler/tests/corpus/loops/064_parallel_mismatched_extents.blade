@@ -1,0 +1,11 @@
+// TEST: Parallel Mismatched Extents
+// <&> over leaves whose loop extents differ (3 vs 2) cannot merge into one
+// nest — the optimization silently falls back to independent per-leaf loops
+// (the historical <&> shape). Values are unaffected either way.
+let A = [1.0, 2.0, 3.0]
+let C = [10.0, 20.0]
+let f = lambda(x) -> x + 1.0
+let g = lambda(x) -> x * 2.0
+let (u, v) = (object_for(f) <@> (A)) <&> (object_for(g) <@> (C)) |> compute
+// EXPECT: u = [2.0, 3.0, 4.0]
+// EXPECT: v = [20.0, 40.0]

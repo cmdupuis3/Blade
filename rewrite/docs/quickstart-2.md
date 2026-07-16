@@ -360,9 +360,14 @@ Rules of the game:
   data is runtime.
 
 ```F#
-static spec = [(L0e, 16), (L1o, 8), (L2e, 4)]   // static data structures...
-type Features = Array<Float like IrrepsIdx<spec>> // ...drive dependent index types
+let static spec = [(0, 0, 16), (1, 1, 8), (2, 0, 4)]  // (l, parity, mult) — static data...
+type Features = IrrepsIdx<spec>                       // ...drives a block-structured index type
+let h: Array<Float like Features> = ...               // extent = 16·1 + 8·3 + 4·5 = 60
 ```
+
+(Landed in v7: `IrrepsIdx` is a flat-dense primitive index type whose
+identity is the spec itself — two 60-cell arrays with different specs are
+distinct types. See the equivariant-NN module doc §6.)
 
 This is the same machinery that makes arity polymorphism typable: the type
 level can *count and compute*, so output types can depend on how many arrays

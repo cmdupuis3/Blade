@@ -1,10 +1,11 @@
 // TEST: AD Two Scalars With Intrinsic
+import ad as ad
 // ============================================================================
 // Product rule + intrinsic chain rule: g(x, y) = x*y + sin(x) at (1, 3).
 // dg/dx = y + cos(1); dg/dy = x.
 // ============================================================================
 function g(x: Float, y: Float) -> Float = x * y + sin(x)
-let (gv, dgdx, dgdy) = grad(g)(1.0, 3.0)
+let (gv, dgdx, dgdy) = ad.grad(g)(1.0, 3.0)
 // EXPECT: gv = 3.8414709848078965
 // EXPECT: dgdx = 3.5403023058681398
 // EXPECT: dgdy = 1.0

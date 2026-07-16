@@ -29,11 +29,11 @@ type StaticEnv = {
     /// Accumulates names of functions called during evaluation
     CalledFunctions: ref<Set<string>>
     /// Provider-backed roots in scope: binding name (`sample` from
-    /// `let sample = NetCDF.load("f.nc")`) → source file path. Consulted
-    /// by the ExprRead fold — staging contract clause 1: a closed input
-    /// is an argument the program was applied to, so a `let static` read
-    /// may fold its payload at compile time.
-    ProviderRoots: Map<string, string>
+    /// `let sample = nc.load("f.nc")`) → (provider module name, store
+    /// path). Consulted by the provider-read fold — staging contract
+    /// clause 1: a closed input is an argument the program was applied
+    /// to, so a `let static` read may fold its payload at compile time.
+    ProviderRoots: Map<string, string * string>
 }
 
 // ============================================================================
@@ -134,22 +134,62 @@ let private externalBuiltins =
 let registerStaticBuiltin (name: string) (f: StaticValue list -> Result<StaticValue, string>) =
     externalBuiltins.[name] <- f
 
+/// Names the static evaluator can call: the core builtin table (must match
+/// evalBuiltin's arms) plus everything in the external registry. Used by
+/// constraint validation to reject calls that could never fold.
+let knownBuiltinNames () : Set<string> =
+    let core =
+        [ "exp"; "log"; "sqrt"; "sin"; "cos"; "tan"
+          "sinh"; "cosh"; "tanh"; "asin"; "acos"; "atan"
+          "floor"; "ceil"; "abs"; "min"; "max"; "length"; "prodsum" ]
+    Set.union (Set.ofList core) (externalBuiltins.Keys |> Set.ofSeq)
+
 /// Extension point: the provider layer registers its compile-time DATA
-/// reader here ((filePath, varName) → folded value) — see
+/// reader here ((providerName, storePath, varName) → folded value) — see
 /// ProviderStatics.install. Kept behind a hook so this module stays free
 /// of provider/IR dependencies (same layering rule as the builtin
-/// registry above). When absent or failing, a `let static ... |> read`
+/// registry above). When absent or failing, a `let static ... |> alias.read`
 /// fails the fold assertion with the reader's message.
-let mutable private providerReader : (string -> string -> Result<StaticValue, string>) option = None
+let mutable private providerReader : (string -> string -> string -> Result<StaticValue, string>) option = None
 
-let registerProviderReader (f: string -> string -> Result<StaticValue, string>) =
+let registerProviderReader (f: string -> string -> string -> Result<StaticValue, string>) =
     providerReader <- Some f
+
+/// Extension point: the set of registered provider MODULE names ("netcdf",
+/// "zarr", ...), used by resolveStatics to recognize provider imports
+/// (`import netcdf as nc`) without referencing the provider registry from
+/// here (same layering rule as the reader hook above).
+let mutable private providerModuleNames : Set<string> = Set.empty
+
+let registerProviderNames (names: Set<string>) =
+    providerModuleNames <- names
+
+let isProviderModuleName (name: string) : bool =
+    Set.contains name providerModuleNames
 
 // ============================================================================
 // Expression Evaluator
 // ============================================================================
 
 let maxSteps = 100_000
+
+/// Fold a provider read's operand (`root.vars.A` / `root.dims.x`) through
+/// the registered compile-time reader. Shared by the qualified-application
+/// form (`alias.read(inner)`) and the legacy ExprRead node.
+let private foldProviderRead (env: StaticEnv) (inner: Expr) : Result<StaticValue, string> =
+    let resolved =
+        match inner with
+        | ExprField (ExprField (ExprVar root, _), varName)
+        | ExprField (ExprVar root, varName) ->
+            Map.tryFind root env.ProviderRoots
+            |> Option.map (fun (provider, path) -> (provider, path, varName))
+        | _ -> None
+    match resolved, providerReader with
+    | Some (provider, path, varName), Some reader -> reader provider path varName
+    | Some _, None ->
+        Error "Static evaluation: no compile-time provider reader is installed (provider data folds need the provider's runtime loadable by the compiler)"
+    | None, _ ->
+        Error "Static evaluation: `alias.read(...)` folds only over a provider-backed variable (root.vars.<name> where root = alias.load(\"store\"))"
 
 let rec evalExpr (env: StaticEnv) (fuel: int) (expr: Expr) : Result<StaticValue, string> =
     if fuel <= 0 then
@@ -200,6 +240,17 @@ let rec evalExpr (env: StaticEnv) (fuel: int) (expr: Expr) : Result<StaticValue,
             // Try as a built-in static function
             evalBuiltin env fuel fname args
 
+    // Provider payload fold: `alias.read(root.vars.A)` (equivalently
+    // `root.vars.A |> alias.read`) where root is a provider-backed binding
+    // (env.ProviderRoots). The registered reader (ProviderStatics) pulls
+    // the data through the provider at compile time — the same value the
+    // runtime read would produce, so folding is unobservable except in
+    // cost (clause 1). Matched by the "read" field name; the operand's
+    // root decides the provider, so a non-provider `alias.read(...)`
+    // falls out with foldProviderRead's steering error.
+    | ExprApp (ExprField (ExprVar _alias, "read"), [inner]) ->
+        foldProviderRead env inner
+
     | ExprApp (func, args) ->
         // Non-variable function position — try evaluating
         Error (sprintf "Static evaluation: unsupported function form in call")
@@ -247,23 +298,9 @@ let rec evalExpr (env: StaticEnv) (fuel: int) (expr: Expr) : Result<StaticValue,
         |> Result.map SVTuple
 
     | ExprRead inner ->
-        // Provider payload fold: `root.vars.A |> read` where root is a
-        // provider-backed binding (env.ProviderRoots). The registered
-        // reader (ProviderStatics) pulls the data through libnetcdf at
-        // compile time — the same value the runtime read would produce,
-        // so folding is unobservable except in cost (clause 1).
-        let resolved =
-            match inner with
-            | ExprField (ExprField (ExprVar root, _), varName)
-            | ExprField (ExprVar root, varName) ->
-                Map.tryFind root env.ProviderRoots |> Option.map (fun path -> (path, varName))
-            | _ -> None
-        (match resolved, providerReader with
-         | Some (path, varName), Some reader -> reader path varName
-         | Some _, None ->
-             Error "Static evaluation: no compile-time provider reader is installed (provider data folds need libnetcdf loadable by the compiler)"
-         | None, _ ->
-             Error "Static evaluation: `|> read` folds only over a provider-backed variable (root.vars.<name> where root = Provider.load(\"file\"))")
+        // Legacy AST node (no longer produced by the parser); folds the
+        // same way as the qualified-application form above.
+        foldProviderRead env inner
 
     | _ ->
         Error (sprintf "Static evaluation: unsupported expression form")
@@ -520,24 +557,25 @@ let resolveStatics (decls: Located<Decl> list) : Result<StaticEnv * StaticFailur
     let pending = List.rev pendingRev
     let staticNames = pending |> List.collect (fun pd -> pd.Names) |> Set.ofList
 
-    // Provider-backed roots: `import Providers.X as P` aliases plus the
-    // bindings that load through them (`let sample = P.load("file")`),
-    // giving the ExprRead fold its name → file-path map. Both plain and
-    // static load bindings are recognized.
+    // Provider-backed roots: `import netcdf as nc` provider-module aliases
+    // (recognized against the registered provider-name set) plus the
+    // bindings that load through them (`let sample = nc.load("file")`),
+    // giving the provider-read fold its name → (provider, path) map. Both
+    // plain and static load bindings are recognized.
     let providerAliases =
         decls |> List.fold (fun acc d ->
             match d.Value with
-            | DeclImport (qname, ImportQualified aliasOpt) when (not qname.IsEmpty) && qname.Head = "Providers" ->
-                let alias = aliasOpt |> Option.defaultValue (List.last qname)
-                Set.add alias acc
-            | _ -> acc) Set.empty
+            | DeclImport ([pname], ImportQualified aliasOpt) when isProviderModuleName pname ->
+                let alias = aliasOpt |> Option.defaultValue pname
+                Map.add alias pname acc
+            | _ -> acc) Map.empty
     let providerRoots =
         decls |> List.fold (fun acc d ->
             match d.Value with
             | DeclLet { Pattern = PatVar root; Value = ExprApp (ExprField (ExprVar alias, "load"), [ExprLit (LitString path)]) }
             | DeclStatic { Pattern = PatVar root; Value = ExprApp (ExprField (ExprVar alias, "load"), [ExprLit (LitString path)]) }
-                when Set.contains alias providerAliases ->
-                Map.add root path acc
+                when Map.containsKey alias providerAliases ->
+                Map.add root (providerAliases.[alias], path) acc
             | _ -> acc) Map.empty
 
     // Phase 2: Dependency graph over bound names — a destructured decl's

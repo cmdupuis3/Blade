@@ -1,0 +1,11 @@
+// TEST: Mutual Scalar Aliases With Static OK
+// Scalar members referenced bare; free identifiers must be statics.
+let static Mass1 = 2.0
+let static Mass2 = 2.0
+let static TotalMomentum = 0.0
+type V1 = Float
+and V2 = Float
+where Mass1 * V1 + Mass2 * V2 == TotalMomentum
+let (u, w): (V1, V2) = (1.0, 0.0 - 1.0)
+let sum = u + w
+// EXPECT: sum = 0

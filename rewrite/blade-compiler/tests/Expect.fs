@@ -202,6 +202,19 @@ let parseExpectedValues (source: string) : ExpectedValue list =
         else None)
     |> Array.toList
 
+/// Parse the expected-abort message substring from test source comments.
+/// Format: // ABORT: <substring>
+/// Used by "(aborts)" probes: the test must compile, run, and exit nonzero
+/// with <substring> present in its output (runExecutable merges stderr into
+/// the output, so std::cerr abort messages are visible here).
+let parseAbortExpectation (source: string) : string option =
+    source.Split([|'\n'; '\r'|], StringSplitOptions.RemoveEmptyEntries)
+    |> Array.tryPick (fun line ->
+        let trimmed = line.Trim()
+        if trimmed.StartsWith("// ABORT:") then
+            Some (trimmed.Substring(9).Trim())
+        else None)
+
 /// Parse actual values from program output
 /// Looks for lines like "varname = value" or "varname = [...]"
 let parseActualValues (output: string) : Map<string, string> =

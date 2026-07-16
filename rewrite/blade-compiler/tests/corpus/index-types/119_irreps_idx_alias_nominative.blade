@@ -1,0 +1,16 @@
+// TEST: IrrepsIdx Alias Nominative (rejects)
+// ============================================================================
+// Nominative aliases (user decision, IrrepsIdx v1): two `type` aliases of
+// the SAME spec are DISTINCT types — the alias name is folded into the
+// irreps identity tag, so feeding a Feat array to a Hidden parameter is a
+// type error even though spec and extent agree exactly. (Anonymous
+// IrrepsIdx<spec> stays compatible with either alias — pinned by 112.)
+// ============================================================================
+let static spec2 = [(0, 0, 1), (1, 1, 1)]
+type Feat = IrrepsIdx<spec2>
+type Hidden = IrrepsIdx<spec2>
+function h(v: Array<Float like Hidden>) -> Float = {
+    v(0)
+}
+let a: Array<Float like Feat> = [1.0, 2.0, 3.0, 4.0]
+let bad = h(a)

@@ -1,0 +1,19 @@
+// TEST: Mutual Return Violated (aborts)
+// The declared-return function produces a violating pair: the check at the
+// return site fires.
+// ABORT: Mutual constraint violation (P1)
+struct Particle {
+    pos: Float,
+    vel: Float,
+    mass: Float
+}
+type P1 = Particle
+and P2 = Particle
+where P1.vel * P1.mass + P2.vel * P2.mass == 0.0
+function collide(v: Float) -> (P1, P2) = {
+    let a = Particle { pos = 0.0, vel = v, mass = 1.0 }
+    let b = Particle { pos = 1.0, vel = v, mass = 1.0 }
+    let pair = (a, b)
+    pair
+}
+let (x, y): (P1, P2) = collide(3.0)

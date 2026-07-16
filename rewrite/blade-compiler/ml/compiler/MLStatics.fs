@@ -47,31 +47,64 @@ let private specToStatic (s: Spec) : StaticValue =
 
 let mutable private installed = false
 
+/// Internal static-evaluator name for a sizing builtin. Qualified call sites
+/// (`ml.total_dim(...)`) are normalized to this mangled form by MLElaborate,
+/// and the registry is keyed by it — so a bare `total_dim(...)` in user
+/// source no longer resolves. The ML surface is reachable only through an
+/// `import ml` alias, not language-wide. The surface (unmangled) names are
+/// listed in MLElaborate.sizingNames; keep the two in sync.
+let statName (name: string) : string = "__ml_stat_" + name
+
 /// Register the ML sizing builtins with the core static evaluator.
 /// Idempotent; safe to call from multiple entry points.
 let install () =
     if not installed then
         installed <- true
-        registerStaticBuiltin "sh_spec" (fun args ->
+        registerStaticBuiltin (statName "sh_spec") (fun args ->
             match args with
             | [ SVInt lmax ] when lmax >= 0L -> Ok (specToStatic (shSpec (int lmax)))
             | _ -> Error "sh_spec: expected a non-negative static int lmax")
-        registerStaticBuiltin "total_dim" (fun args ->
+        registerStaticBuiltin (statName "total_dim") (fun args ->
             match args with
             | [ spec ] ->
                 specOfStatic "total_dim" spec
                 |> Result.map (fun s -> SVInt (int64 (totalDim s)))
             | _ -> Error "total_dim: expected one static spec argument")
-        registerStaticBuiltin "tp_weight_dim" (fun args ->
+        registerStaticBuiltin (statName "tp_weight_dim") (fun args ->
             match args with
             | [ cfg ] ->
                 cfgOfStatic "tp_weight_dim" cfg
                 |> Result.map (fun c -> SVInt (int64 (tpWeightDim c)))
             | _ -> Error "tp_weight_dim: expected one static (spec1, spec2, specOut) argument")
-        registerStaticBuiltin "linear_weight_dim" (fun args ->
+        registerStaticBuiltin (statName "linear_weight_dim") (fun args ->
             match args with
             | [ sIn; sOut ] ->
                 specOfStatic "linear_weight_dim specIn" sIn |> Result.bind (fun a ->
                 specOfStatic "linear_weight_dim specOut" sOut |> Result.bind (fun b ->
                 linearWeightDim a b |> Result.map (int64 >> SVInt)))
             | _ -> Error "linear_weight_dim: expected (specIn, specOut) static arguments")
+        // Block-navigation builtins (IrrepsIdx v3): fully static per-block
+        // accessors so users write block-structured loop nests —
+        //   x(irreps_offset(spec, b) + mu * irreps_dim(spec, b) + m)
+        // — with every offset and bound folding at compile time. Pure
+        // StaticEval surface; no codegen involvement.
+        registerStaticBuiltin (statName "irreps_len") (fun args ->
+            match args with
+            | [ spec ] ->
+                specOfStatic "irreps_len" spec
+                |> Result.map (fun s -> SVInt (int64 s.Length))
+            | _ -> Error "irreps_len: expected one static spec argument")
+        let registerBlockAccessor name (f: Spec -> int -> int) =
+            registerStaticBuiltin (statName name) (fun args ->
+                match args with
+                | [ spec; SVInt b ] ->
+                    specOfStatic name spec |> Result.bind (fun s ->
+                        if b < 0L || b >= int64 s.Length then
+                            Error (sprintf "%s: block index %d out of range (spec has %d blocks)" name b s.Length)
+                        else Ok (SVInt (int64 (f s (int b)))))
+                | _ -> Error (sprintf "%s: expected (spec, block) static arguments" name))
+        registerBlockAccessor "irreps_l" (fun s b -> s.[b].L)
+        registerBlockAccessor "irreps_parity" (fun s b -> s.[b].Parity)
+        registerBlockAccessor "irreps_mult" (fun s b -> s.[b].Mult)
+        registerBlockAccessor "irreps_dim" (fun s b -> dim s.[b])
+        registerBlockAccessor "irreps_offset" (fun s b -> (blockStarts s).[b])

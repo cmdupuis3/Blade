@@ -1,0 +1,18 @@
+// TEST: Dist Map
+import ppl as ppl
+// The symbolic front-end: dist_map(d, q, lambda(x) -> x * x) DERIVES the
+// jet — the elaborator differentiates the lambda (product rule, chain
+// terminates structurally at degree 2 ⇒ exact), evaluates g and its
+// derivatives at the runtime mean (κ_1 read bound once), and delegates to
+// dist_jet. Must reproduce ppl/033's hand-jetted values exactly
+// (prototype dump-jet J1: [11, 154, 2178]).
+type TimeIdx = Idx<6>
+let A: Array<Float64 like Idx<1>, TimeIdx> = [[1.0, 2.0, 4.0, 6.0, 0.0, 3.0]]
+let xd = ppl.dist(A, 6)
+let dy = ppl.dist_map(xd, 3, lambda(x) -> x * x)
+let y1 = ppl.cumulant(dy, 1)
+let y2 = ppl.cumulant(dy, 2)
+let y3 = ppl.cumulant(dy, 3)
+// EXPECT: y1 = [11.0]
+// EXPECT: y2 = [154.0]
+// EXPECT: y3 = [2178.0]

@@ -1,0 +1,7 @@
+// TEST: Struct Bound Nonstatic Free Var (rejects)
+// Free identifiers in a bound must be statically evaluable.
+let runtime_cap = 10
+struct Bad {
+    x: Int in 0 .. runtime_cap
+}
+let b = Bad { x = 3 }

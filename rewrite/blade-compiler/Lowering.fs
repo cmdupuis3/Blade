@@ -81,16 +81,22 @@ type TypedLowerEnv = {
     Interfaces: Map<string, InterfaceDecl>
     ModuleExports: Map<string, ModuleExport>
     ImportedModules: Map<string, string>
-    /// Provider alias -> qualified provider name (e.g. "NetCDF" -> ["Providers"; "NetCDF"])
-    ProviderAliases: Map<string, string list>
-    /// Provider load binding name -> file path literal (e.g. "sample" -> "f.nc").
-    /// Recorded at tryInvokeProvider; used at a `view |> read` site to recover
-    /// the path by walking the var-reference to its root provider binding.
-    ProviderPaths: Map<string, string>
+    /// Provider alias -> registered provider module name
+    /// (e.g. `import netcdf as nc` records "nc" -> "netcdf").
+    ProviderAliases: Map<string, string>
+    /// Provider load binding name -> (provider name, store path literal)
+    /// (e.g. "sample" -> ("netcdf", "f.nc")). Recorded at tryInvokeProvider;
+    /// used at a `view |> alias.read` site to recover provider + path by
+    /// walking the var-reference to its root provider binding.
+    ProviderPaths: Map<string, string * string>
     /// Deferred provider reads accumulated during lowering, keyed by the
     /// receiving binding's IRId. Copied into IRModule.ProviderReads at module
     /// assembly and consumed at codegen.
     ProviderReads: Map<IRId, ProviderReadSpec>
+    /// Deferred provider writes (`alias.write("path", A)`) accumulated during
+    /// lowering, keyed by the write binding's IRId. Copied into
+    /// IRModule.ProviderWrites at module assembly and consumed at codegen.
+    ProviderWrites: Map<IRId, ProviderWriteSpec>
     /// Deferred random-fill constructors accumulated during lowering, keyed by
     /// the receiving binding's IRId. Value is the lowered modulus expr. Copied
     /// into IRModule.RandomInits at module assembly and consumed at codegen.
@@ -133,6 +139,7 @@ let emptyTypedEnv () : TypedLowerEnv = {
     ProviderAliases = Map.empty
     ProviderPaths = Map.empty
     ProviderReads = Map.empty
+    ProviderWrites = Map.empty
     RandomInits = Map.empty
     CompoundInits = Map.empty
     LiftedCallables = ResizeArray<IRCallable>()
@@ -506,6 +513,9 @@ let rec lowerTypedExpr (env: TypedLowerEnv) (texpr: TypedExpr) : IRExpr =
     
     | TExprAssign (lhs, rhs) ->
         IRAssign (lowerTypedExpr env lhs, lowerTypedExpr env rhs)
+
+    | TExprConstraintCheck (cond, message) ->
+        IRConstraintCheck (lowerTypedExpr env cond, message)
     
     | TExprSequence exprs ->
         // sequence(c1, c2, ..., cn) → IRSequence (flat n-ary parallel)
@@ -583,10 +593,12 @@ and lowerTypedLambda env (info: TypedLambdaInfo) : IRExpr =
     let lamCuda = info.Parallel |> List.tryPick (function Cuda c -> Some c | _ -> None)
     let lamIsCuda = Option.isSome lamCuda
     let lamBlock = match lamCuda with Some c -> c.BlockSize | None -> 256
+    // Lambda-level mpi: bare flag (rank count is a launch-time property).
+    let lamIsMpi = info.Parallel |> List.exists (function Mpi -> true | _ -> false)
     let callable =
         mkLambdaCallable env.Builder paramInfos bodyWrapped info.ReturnType
                          captures info.IsCommutative info.CommGroups
-                         lamParallelism lamIsOmp lamIsCuda lamBlock
+                         lamParallelism lamIsOmp lamIsCuda lamBlock lamIsMpi
     // Emit IRVar(callable.Id, funcType) — the callable lives in
     // LiftedCallables → module.Functions; the IRVar carries just the
     // function type for type-inference and consumer dispatch.
@@ -642,7 +654,7 @@ and lowerTypedBlock env (stmts: TypedStmt list) (finalExpr: TypedExpr option) : 
         | TStmtLet binding ->
             let value = lowerTypedExpr env binding.Value
             let env' = bindTypedVar binding.Name binding.VarId env
-            if binding.SubBindings.IsEmpty then
+            if binding.SubBindings.IsEmpty && binding.PostChecks.IsEmpty then
                 let body = lowerTypedBlock env' rest finalExpr
                 IRLet (binding.VarId, value, body)
             else
@@ -660,6 +672,11 @@ and lowerTypedBlock env (stmts: TypedStmt list) (finalExpr: TypedExpr option) : 
                     | _ -> false
                 let env'' = binding.SubBindings |> List.fold (fun e (name, subId, _) -> bindTypedVar name subId e) env'
                 let body = lowerTypedBlock env'' rest finalExpr
+                // Constraint guards run right after the destructure, before
+                // the rest of the block.
+                let withChecks =
+                    List.foldBack (fun (checkId, tCheck) acc ->
+                        IRLet (checkId, lowerTypedExpr env'' tCheck, acc)) binding.PostChecks body
                 let indexedSubs =
                     binding.SubBindings |> List.mapi (fun i (name, subId, _subTy) -> (i, name, subId))
                 let chained =
@@ -667,7 +684,7 @@ and lowerTypedBlock env (stmts: TypedStmt list) (finalExpr: TypedExpr option) : 
                         let projExpr =
                             if isStruct then IRFieldAccess (IRVar (binding.VarId, binding.Type), name)
                             else IRTupleProj (IRVar (binding.VarId, binding.Type), i, isFlat)
-                        IRLet (subId, projExpr, acc)) indexedSubs body
+                        IRLet (subId, projExpr, acc)) indexedSubs withChecks
                 IRLet (binding.VarId, value, chained)
         | TStmtAssign (lhs, rhs) ->
             let target = lowerTypedExpr env lhs
@@ -750,7 +767,7 @@ and lowerTypedSection env (op: BinOp) (funcTy: IRType) : IRExpr =
             IRTScalar ETBool
         | _ -> retTy
     let commGroups = if isComm then [[0; 1]] else []
-    let callable = mkLambdaCallable env.Builder parms body retType [] isComm commGroups [] false false 256
+    let callable = mkLambdaCallable env.Builder parms body retType [] isComm commGroups [] false false 256 false
     env.LiftedCallables.Add(callable)
     // Stage 3c.3: emit IRVar reference to the lifted callable.
     let funcType =
@@ -798,7 +815,7 @@ and lowerTypedPartialApp env (op: BinOp) (argExpr: IRExpr) (isLeft: bool) (funcT
         | IREq | IRNeq | IRLt | IRLe | IRGt | IRGe | IRAnd | IROr ->
             IRTScalar ETBool
         | _ -> retTy
-    let callable = mkLambdaCallable env.Builder parms body retType [] false [] [] false false 256
+    let callable = mkLambdaCallable env.Builder parms body retType [] false [] [] false false 256 false
     env.LiftedCallables.Add(callable)
     // Stage 3c.3: emit IRVar reference to the lifted callable.
     let funcType =
@@ -860,7 +877,7 @@ and lowerTypedBinOp env mode op l r leftExpr rightExpr resultType =
             | _ -> IRTScalar elemTypeL
         let commGroups = if mode = Elementwise then [[0; 1]] else []
         let lambdaInfo =
-            mkLambdaCallable env.Builder parms body kernelRetType [] false commGroups [] false false 256
+            mkLambdaCallable env.Builder parms body kernelRetType [] false commGroups [] false false 256 false
         env.LiftedCallables.Add(lambdaInfo)
         // Kernel slot references the lifted callable via IRVar;
         // genObjectForApplication uses resolveCallable + wrapper to
@@ -876,25 +893,33 @@ and lowerTypedBinOp env mode op l r leftExpr rightExpr resultType =
             OutputRank = 0
         }
         IRApp(IRObjectFor objInfo, [IRTuple [l; r]], resultType)
-    elif mode = Elementwise
-         && (match op with OpEq|OpNeq|OpLt|OpLe|OpGt|OpGe|OpAnd|OpOr -> true | _ -> false)
-         && (leftIsArray <> rightIsArray) then
-        // Array<->scalar broadcast for comparison/logical ops: `A > 2.0` or
-        // `2.0 < A`. The op is T^0 -> T^0 -> T^0; co-iteration peels the array
-        // operand down to T^0 and the scalar already matches that rank, so we
-        // iterate the array with the scalar held fixed via a 1-param partial-
-        // application kernel (lambda(x) -> x op s, or lambda(x) -> s op x). The
-        // scalar operand is captured as the fixed arg; isLeft selects the side.
+    elif mode = Elementwise && isArithOp && (leftIsArray <> rightIsArray) then
+        // Array<->scalar broadcast: `A > 2.0`, `A + a`, `2.0 / A`. The op is
+        // T^0 -> T^0 -> T^0; co-iteration peels the array operand down to T^0
+        // and the scalar already matches that rank, so we iterate the array
+        // with the scalar held fixed via a 1-param partial-application kernel
+        // (lambda(x) -> x op s, or lambda(x) -> s op x). The scalar operand is
+        // captured as the fixed arg; isLeft selects the side. Comparisons and
+        // logicals produce Bool elements; arithmetic keeps the result type's
+        // element type (inferArithType already promoted it against the
+        // scalar operand).
+        let kernelRet =
+            match op with
+            | OpEq | OpNeq | OpLt | OpLe | OpGt | OpGe | OpAnd | OpOr -> IRTScalar ETBool
+            | _ ->
+                match IR.stripUnits resultType with
+                | ArrayElem a -> a.ElemType
+                | _ -> IRTScalar ETFloat64
         let (arrayIR, kernelVar) =
             if leftIsArray then
                 // A op scalar  ->  lambda(x) -> x op scalar   (fixed arg on right, isLeft = false)
                 let elemTy = (match leftExpr.Type with ArrayElem a -> a.ElemType | _ -> IRTScalar ETFloat64)
-                let funcTy = mkFuncArrow [elemTy] (IRTScalar ETBool)
+                let funcTy = mkFuncArrow [elemTy] kernelRet
                 (l, lowerTypedPartialApp env op r false funcTy)
             else
                 // scalar op A  ->  lambda(x) -> scalar op x   (fixed arg on left, isLeft = true)
                 let elemTy = (match rightExpr.Type with ArrayElem a -> a.ElemType | _ -> IRTScalar ETFloat64)
-                let funcTy = mkFuncArrow [elemTy] (IRTScalar ETBool)
+                let funcTy = mkFuncArrow [elemTy] kernelRet
                 (r, lowerTypedPartialApp env op l true funcTy)
         let objInfo : ObjectForInfo = {
             Kernel = kernelVar
@@ -1007,6 +1032,13 @@ let lowerTypedFuncDecl (env: TypedLowerEnv) (decl: TypedFunctionDecl) : IRFuncDe
     let isCudaKernel = Option.isSome declCuda
     let cudaBlockSize = match declCuda with Some c -> c.BlockSize | None -> 256
 
+    // The opt-in MPI signal: bare `mpi` in the strategy list. Rank count is a
+    // launch-time property (mpiexec -n N), so there is no payload to carry.
+    let isMpiParallel =
+        match decl.WhereClause with
+        | Some wc -> wc.Parallel |> List.exists (function Mpi -> true | _ -> false)
+        | None -> false
+
     // Bind parameters in environment for body lowering
     let mutable paramEnv = { env with PolyParamNames = polyParamNames }
     let irParams = decl.Params |> List.map (fun p ->
@@ -1028,6 +1060,7 @@ let lowerTypedFuncDecl (env: TypedLowerEnv) (decl: TypedFunctionDecl) : IRFuncDe
         IsOmpParallel = isOmpParallel
         IsCudaKernel = isCudaKernel
         CudaBlockSize = cudaBlockSize
+        IsMpiParallel = isMpiParallel
         IsArityPoly = isArityPoly
         ArityParam = polyParamNames |> List.tryHead
         // Source-level functions live at top level and have no enclosing
@@ -1050,28 +1083,14 @@ let lowerTypedTypeDef (env: TypedLowerEnv) (ttd: TypedTypeDef) : IRTypeDef =
         IRTDIndexType (name, idx)
     | TTDEnumIdx (name, idx, values) ->
         IRTDEnumIdx (name, idx, values)
-    | TTDStruct (name, _, fields, invariant) ->
-        let constraintInfo =
-            match invariant with
-            | Some texpr ->
-                let loweredExpr = lowerTypedExpr env texpr
-                // Extract field name -> VarId from the typed expression
-                // The type checker bound field names to VarIds; those ids persist in the lowered IR
-                let fieldNames = fields |> List.map fst |> Set.ofList
-                let rec collectTypedVars (te: TypedExpr) : (string * IRId) list =
-                    match te.Kind with
-                    | TExprVar (name, varId, _) when Set.contains name fieldNames -> [(name, varId)]
-                    | TExprBinOp (_, _, l, r) -> collectTypedVars l @ collectTypedVars r
-                    | TExprUnaryOp (_, e) -> collectTypedVars e
-                    | TExprIf (c, t, e) -> collectTypedVars c @ collectTypedVars t @ collectTypedVars e
-                    | TExprApp (f, args) -> collectTypedVars f @ (args |> List.collect collectTypedVars)
-                    | _ -> []
-                let fieldBindings = collectTypedVars texpr |> List.distinctBy fst
-                Some { Expr = loweredExpr; FieldBindings = fieldBindings }
-            | None -> None
-        IRTDStruct (name, fields, constraintInfo)
+    | TTDStruct (name, _, fields) ->
+        IRTDStruct (name, fields)
     | TTDVariant (name, _, variants) ->
         IRTDVariant (name, variants)
+    | TTDMutualGroup _ ->
+        // Lowered by lowerTypedDecl's TDeclType arm into one IRTDAlias per
+        // member; reaching here is an internal invariant violation.
+        failwith "TTDMutualGroup lowers via lowerTypedDecl (one alias per member)"
 
 /// Lower a typed binding
 let lowerTypedBinding (env: TypedLowerEnv) (binding: TypedBinding) : IRBinding * TypedLowerEnv =
@@ -1103,13 +1122,20 @@ let lowerTypedDecl (env: TypedLowerEnv) (decl: TypedDecl) : (Choice<IRFuncDef, I
                 binding.SubBindings.Length = flatCount && binding.SubBindings.Length <> structCount
             | _ -> false
         let subIRBindings = binding.SubBindings |> List.mapi (fun i (name, subId, subTy) ->
-            let projExpr = 
+            let projExpr =
                 if isStruct then IRFieldAccess (IRVar (binding.VarId, binding.Type), name)
                 else IRTupleProj (IRVar (binding.VarId, binding.Type), i, isFlat)
             let env' = bindTypedVar name subId env'
             { Id = subId; Name = name; Type = subTy; Value = projExpr; IsConst = true; IsMutable = false })
         let env'' = binding.SubBindings |> List.fold (fun e (name, subId, _) -> bindTypedVar name subId e) env'
-        ([Choice2Of3 irBinding] @ (subIRBindings |> List.map Choice2Of3), env'')
+        // Constraint guards run right after the destructure. Their IRIds were
+        // allocated by the checker after the sub-binding ids, so the module's
+        // id-ordered emission places them correctly.
+        let checkBindings =
+            binding.PostChecks |> List.mapi (fun i (checkId, tCheck) ->
+                { Id = checkId; Name = sprintf "__mg_check%d" i; Type = IRTUnit
+                  Value = lowerTypedExpr env'' tCheck; IsConst = true; IsMutable = false })
+        ([Choice2Of3 irBinding] @ (subIRBindings |> List.map Choice2Of3) @ (checkBindings |> List.map Choice2Of3), env'')
     
     | TDeclFunction funcDecl ->
         let (funcDef, env') = lowerTypedFuncDecl env funcDecl
@@ -1172,6 +1198,11 @@ let lowerTypedDecl (env: TypedLowerEnv) (decl: TypedDecl) : (Choice<IRFuncDef, I
             ) ([], env')
         ([Choice2Of3 primary] @ (subIRBindings |> List.map Choice2Of3), envFinal)
     
+    | TDeclType (TTDMutualGroup members) ->
+        // One transparent alias typedef per member; the joint constraint is
+        // emitted at binding sites, not in the type defs.
+        (members |> List.map (fun (n, ty) -> Choice3Of3 (IRTDAlias (n, ty))), env)
+
     | TDeclType ttd ->
         let irTd = lowerTypedTypeDef env ttd
         ([Choice3Of3 irTd], env)
@@ -1217,20 +1248,23 @@ let tryInvokeProvider (env: TypedLowerEnv) (binding: TypedBinding) : (IRTypeDef 
     match binding.Value.Kind with
     | TExprApp ({ Kind = TExprField ({ Kind = TExprVar (alias, _, _) }, "load", _) }, [arg]) ->
         match Map.tryFind alias env.ProviderAliases, arg.Kind with
-        | Some qname, TExprLit (LitString path) when qname = ["Providers"; "NetCDF"] ->
-            let providerModule = Blade.NetcdfProvider.loadAsModule env.Builder binding.Name path
-            // The binding value becomes unit (types are injected separately)
-            let bd = {
-                Id = binding.VarId
-                Name = binding.Name
-                Type = IRTUnit
-                Value = IRLit IRLitUnit
-                IsConst = true
-                IsMutable = false
-            }
-            let env' = bindTypedVar binding.Name binding.VarId env
-            let env' = { env' with ProviderPaths = Map.add binding.Name path env'.ProviderPaths }
-            Some (providerModule.Types, bd, env')
+        | Some pname, TExprLit (LitString path) ->
+            match Blade.ProviderRegistry.tryFind pname with
+            | None -> None
+            | Some spec ->
+                let providerModule = spec.LoadAsModule env.Builder binding.Name path
+                // The binding value becomes unit (types are injected separately)
+                let bd = {
+                    Id = binding.VarId
+                    Name = binding.Name
+                    Type = IRTUnit
+                    Value = IRLit IRLitUnit
+                    IsConst = true
+                    IsMutable = false
+                }
+                let env' = bindTypedVar binding.Name binding.VarId env
+                let env' = { env' with ProviderPaths = Map.add binding.Name (pname, path) env'.ProviderPaths }
+                Some (providerModule.Types, bd, env')
         | _ -> None
     | _ -> None
 
@@ -1258,11 +1292,15 @@ let tryCompoundRead (env: TypedLowerEnv) (binding: TypedBinding) : ProviderReadS
               | Some root, Some varName, Some maskName when Map.containsKey root env.ProviderPaths ->
                   (match tVar.Type, tMask.Type with
                    | ArrayElem varArr, ArrayElem maskArr ->
-                       Some { FilePath = env.ProviderPaths.[root]
+                       let (pname, path) = env.ProviderPaths.[root]
+                       Some { Provider = pname
+                              FilePath = path
                               VarName = varName
                               VarType = varArr
                               MaskName = Some maskName
-                              MaskType = Some maskArr }
+                              MaskType = Some maskArr
+                              Window = None
+                              Streamed = false }
                    | _ -> None)
               | _ -> None)
          | _ -> None)
@@ -1290,12 +1328,128 @@ let tryPlainRead (env: TypedLowerEnv) (binding: TypedBinding) : ProviderReadSpec
               | Some root when Map.containsKey root env.ProviderPaths ->
                   (match inner.Type with
                    | ArrayElem varArr ->
-                       Some { FilePath = env.ProviderPaths.[root]
+                       let (pname, path) = env.ProviderPaths.[root]
+                       Some { Provider = pname
+                              FilePath = path
                               VarName = varName
                               VarType = varArr
                               MaskName = None
-                              MaskType = None }
+                              MaskType = None
+                              Window = None
+                              Streamed = false }
                    | _ -> None)
+              | _ -> None)
+         | _ -> None)
+    | _ -> None
+
+/// Detect a streamed read: `let A = s.vars.A |> alias.stream`. Mirrors
+/// tryPlainRead (dense whole-variable spec) but marks the spec Streamed:
+/// codegen emits no materialization — consuming nests inline fiber reads.
+let tryStreamRead (env: TypedLowerEnv) (binding: TypedBinding) : ProviderReadSpec option =
+    let rec rootName (e: TypedExpr) =
+        match e.Kind with
+        | TExprVar (n, _, _) -> Some n
+        | TExprField (inner, _, _) -> rootName inner
+        | _ -> None
+    match binding.Value.Kind with
+    | TExprApp ({ Kind = TExprField ({ Kind = TExprVar (alias, _, _) }, "stream", _) }, [inner])
+        when Map.containsKey alias env.ProviderAliases ->
+        (match inner.Kind with
+         | TExprField (_, varName, _) ->
+             (match rootName inner with
+              | Some root when Map.containsKey root env.ProviderPaths ->
+                  (match inner.Type with
+                   | ArrayElem varArr ->
+                       let (pname, path) = env.ProviderPaths.[root]
+                       Some { Provider = pname
+                              FilePath = path
+                              VarName = varName
+                              VarType = varArr
+                              MaskName = None
+                              MaskType = None
+                              Window = None
+                              Streamed = true }
+                   | _ -> None)
+              | _ -> None)
+         | _ -> None)
+    | _ -> None
+
+/// Detect a windowed packed read: `let W = alias.read_window(s.vars.C, lo, hi)`.
+/// The checker guarantees the shape (provider alias, packed operand, literal
+/// integer bounds) and typed the binding as the WINDOW array (leading packed
+/// extent hi-lo); this recovers store/var via the operand's root provider
+/// binding, mirroring tryPlainRead, and records the window in the spec.
+let tryWindowRead (env: TypedLowerEnv) (binding: TypedBinding) : ProviderReadSpec option =
+    let rec rootName (e: TypedExpr) =
+        match e.Kind with
+        | TExprVar (n, _, _) -> Some n
+        | TExprField (inner, _, _) -> rootName inner
+        | _ -> None
+    match binding.Value.Kind with
+    | TExprApp ({ Kind = TExprField ({ Kind = TExprVar (alias, _, _) }, "read_window", _) }, [inner; tLo; tHi])
+        when Map.containsKey alias env.ProviderAliases ->
+        (match inner.Kind, tLo.Kind, tHi.Kind with
+         | TExprField (_, varName, _), TExprLit (LitInt lo), TExprLit (LitInt hi) ->
+             (match rootName inner with
+              | Some root when Map.containsKey root env.ProviderPaths ->
+                  (match binding.Type with
+                   | ArrayElem winArr ->
+                       let (pname, path) = env.ProviderPaths.[root]
+                       Some { Provider = pname
+                              FilePath = path
+                              VarName = varName
+                              VarType = winArr
+                              MaskName = None
+                              MaskType = None
+                              Window = Some (lo, hi)
+                              Streamed = false }
+                   | _ -> None)
+              | _ -> None)
+         | _ -> None)
+    | _ -> None
+
+/// Detect a provider write: `let _ = alias.write("path", A)`. The checker
+/// guarantees the shape (string-literal path, named array source, unit
+/// result); this recovers the source binding, its array type, and dimension
+/// names — named index types when the array's index Ids match module-level
+/// IRTDIndexType defs (e.g. a provider-loaded array written back), synthesized
+/// dim<i> otherwise. The binding lowers to a unit placeholder; codegen emits
+/// a flatten prologue + the provider's writer at the ProviderWrites intercept.
+let tryProviderWrite (env: TypedLowerEnv) (typeDefs: IRTypeDef list) (binding: TypedBinding) : ProviderWriteSpec option =
+    match binding.Value.Kind with
+    | TExprApp ({ Kind = TExprField ({ Kind = TExprVar (alias, _, _) }, "write", _) }, [tPath; tValue]) ->
+        (match Map.tryFind alias env.ProviderAliases, tPath.Kind, tValue.Kind with
+         | Some pname, TExprLit (LitString path), TExprVar (srcName, srcId, _) ->
+             (match tValue.Type with
+              | ArrayElem arrTy ->
+                  // Dimension names, best source first: (a) the source is
+                  // itself a provider read — ask its provider for the store's
+                  // names (round-trips them through the write); (b) a
+                  // module-level named index type with a matching Id; (c)
+                  // synthesized dim<i>.
+                  let fromSourceStore =
+                      match Map.tryFind srcId env.ProviderReads with
+                      | Some rspec ->
+                          (match Blade.ProviderRegistry.tryFind rspec.Provider with
+                           | Some p -> p.VarDimNames rspec.FilePath rspec.VarName
+                           | None -> None)
+                      | None -> None
+                  let dimNames =
+                      match fromSourceStore with
+                      | Some names when names.Length = arrTy.IndexTypes.Length -> names
+                      | _ ->
+                          arrTy.IndexTypes |> List.mapi (fun i idx ->
+                              typeDefs
+                              |> List.tryPick (function
+                                  | IRTDIndexType (n, it) when it.Id = idx.Id -> Some n
+                                  | _ -> None)
+                              |> Option.defaultValue (sprintf "dim%d" i))
+                  Some { Provider = pname
+                         FilePath = path
+                         VarName = srcName
+                         SourceId = srcId
+                         SourceType = arrTy
+                         DimNames = dimNames }
               | _ -> None)
          | _ -> None)
     | _ -> None
@@ -1353,10 +1507,11 @@ let lowerTypedModule (env: TypedLowerEnv) (modul: TypedModule) (rawDecls: Locate
                     for kv in exports.StaticFunctions do
                         currentEnv <- { currentEnv with StaticFunctions = Map.add (sprintf "%s.%s" alias kv.Key) kv.Value currentEnv.StaticFunctions }
                 | None ->
-                    // Check if this is a provider import (e.g. Providers.NetCDF)
-                    if qname.Length >= 2 && qname.[0] = "Providers" then
-                        currentEnv <- { currentEnv with ProviderAliases = Map.add alias qname currentEnv.ProviderAliases }
-                    else
+                    // Check if this is a provider-module import (e.g. `import netcdf as nc`)
+                    match qname with
+                    | [pname] when (Blade.ProviderRegistry.tryFind pname).IsSome ->
+                        currentEnv <- { currentEnv with ProviderAliases = Map.add alias pname currentEnv.ProviderAliases }
+                    | _ ->
                         eprintfn "Warning: module '%s' not found in typed pipeline" fullName
             | ImportSelective names ->
                 match Map.tryFind fullName currentEnv.ModuleExports with
@@ -1433,6 +1588,55 @@ let lowerTypedModule (env: TypedLowerEnv) (modul: TypedModule) (rawDecls: Locate
             bindings <- bindings @ [bd]
             currentEnv <- bindTypedVar binding.Name binding.VarId currentEnv
             currentEnv <- { currentEnv with ProviderReads = Map.add binding.VarId spec currentEnv.ProviderReads }
+        | TDeclLet binding when (tryStreamRead currentEnv binding).IsSome ->
+            // Streamed read (`alias.stream(view)`): a deferred-read binding
+            // whose spec is marked Streamed — codegen emits the stream-open
+            // prologue only; nests inline the fiber reads.
+            let spec = (tryStreamRead currentEnv binding).Value
+            let bd = {
+                Id = binding.VarId
+                Name = binding.Name
+                Type = binding.Type
+                Value = IRLit IRLitUnit
+                IsConst = true
+                IsMutable = binding.IsMutable
+            }
+            bindings <- bindings @ [bd]
+            currentEnv <- bindTypedVar binding.Name binding.VarId currentEnv
+            currentEnv <- { currentEnv with ProviderReads = Map.add binding.VarId spec currentEnv.ProviderReads }
+        | TDeclLet binding when (tryWindowRead currentEnv binding).IsSome ->
+            // Windowed packed read (`alias.read_window(view, lo, hi)`): same
+            // deferred-read mechanics as the arms below; the spec carries the
+            // window and the binding's type is the window array.
+            let spec = (tryWindowRead currentEnv binding).Value
+            let bd = {
+                Id = binding.VarId
+                Name = binding.Name
+                Type = binding.Type
+                Value = IRLit IRLitUnit
+                IsConst = true
+                IsMutable = binding.IsMutable
+            }
+            bindings <- bindings @ [bd]
+            currentEnv <- bindTypedVar binding.Name binding.VarId currentEnv
+            currentEnv <- { currentEnv with ProviderReads = Map.add binding.VarId spec currentEnv.ProviderReads }
+        | TDeclLet binding when (tryProviderWrite currentEnv types binding).IsSome ->
+            // Deferred provider write (`alias.write("path", A)`): no value is
+            // bound (the checker typed it unit); codegen emits the flatten
+            // prologue + the provider's writer when it sees the binding's
+            // IRId in ctx.ProviderWrites. Mirrors the read intercepts above.
+            let spec = (tryProviderWrite currentEnv types binding).Value
+            let bd = {
+                Id = binding.VarId
+                Name = binding.Name
+                Type = IRTUnit
+                Value = IRLit IRLitUnit
+                IsConst = true
+                IsMutable = false
+            }
+            bindings <- bindings @ [bd]
+            currentEnv <- bindTypedVar binding.Name binding.VarId currentEnv
+            currentEnv <- { currentEnv with ProviderWrites = Map.add binding.VarId spec currentEnv.ProviderWrites }
         | TDeclLet binding when (match binding.Value.Kind with TExprFillRandom _ -> true | _ -> false) ->
             // Random-fill constructor (`let A: Array<..> = fill_random(mod)`): the
             // binding holds a random-filled array, materialized in codegen via
@@ -1482,7 +1686,7 @@ let lowerTypedModule (env: TypedLowerEnv) (modul: TypedModule) (rawDecls: Locate
                 types <- types @ providerTypes
                 for td in providerTypes do
                     match td with
-                    | IRTDStruct (name, fields, _) ->
+                    | IRTDStruct (name, fields) ->
                         currentEnv <- { currentEnv with StructDefs = Map.add name fields currentEnv.StructDefs }
                     | _ -> ()
                 bindings <- bindings @ [bd]
@@ -1501,7 +1705,7 @@ let lowerTypedModule (env: TypedLowerEnv) (modul: TypedModule) (rawDecls: Locate
                     | Choice3Of3 td ->
                         types <- types @ [td]
                         match td with
-                        | IRTDStruct (name, fields, _) ->
+                        | IRTDStruct (name, fields) ->
                             currentEnv <- { currentEnv with StructDefs = Map.add name fields currentEnv.StructDefs }
                         | _ -> ()
 
@@ -1519,7 +1723,7 @@ let lowerTypedModule (env: TypedLowerEnv) (modul: TypedModule) (rawDecls: Locate
                 | Choice3Of3 td ->
                     types <- types @ [td]
                     match td with
-                    | IRTDStruct (name, fields, _) ->
+                    | IRTDStruct (name, fields) ->
                         currentEnv <- { currentEnv with StructDefs = Map.add name fields currentEnv.StructDefs }
                     | _ -> ()
     
@@ -1561,6 +1765,7 @@ let lowerTypedModule (env: TypedLowerEnv) (modul: TypedModule) (rawDecls: Locate
         Bindings = bindings
         StaticFunctionUsage = usageReport
         ProviderReads = currentEnv.ProviderReads
+        ProviderWrites = currentEnv.ProviderWrites
         RandomInits = currentEnv.RandomInits
         CompoundInits = currentEnv.CompoundInits
     }

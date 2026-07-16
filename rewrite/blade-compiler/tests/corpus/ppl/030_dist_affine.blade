@@ -1,4 +1,5 @@
 // TEST: Dist Affine
+import ppl as ppl
 // dist_affine(W, d): κ'_k = W^⊗k κ_k — multilinearity under a linear map,
 // the exact-linear case of the Faà di Bruno pushforward, unrolled
 // cell-wise (W read at runtime; the contraction structure is static).
@@ -8,8 +9,8 @@
 type TimeIdx = Idx<2>
 let A: Array<Float64 like Idx<2>, TimeIdx> = [[1.0, 2.0], [3.0, 4.0]]
 let W: Array<Float64 like Idx<2>, Idx<2>> = [[1.0, 2.0], [0.0, 1.0]]
-let d = dist(A, 3)
-let (p1, p2, p3) = dist_affine(W, d)
+let d = ppl.dist(A, 3)
+let (p1, p2, p3) = ppl.dist_affine(W, d)
 // EXPECT: p1 = [8.5, 3.5]
 // EXPECT: p2 = [2.25, 0.75, 0.25]
 // EXPECT: p3 = [0.0, 0.0, 0.0, 0.0]

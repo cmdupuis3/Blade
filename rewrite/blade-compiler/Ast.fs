@@ -114,9 +114,10 @@ type Mutability =
     | Static          // static (compile-time)
 
 /// Parallelization strategy requested by a where-clause. Parallelism is OPT-IN:
-/// no strategy => single-threaded. `omp` and `cuda` are sibling backends. These
-/// are standalone (not in the recursive AST chain) because a strategy does not
-/// reference any recursive AST node — it carries only plain descriptors.
+/// no strategy => single-threaded. `omp`, `cuda`, and `mpi` are sibling
+/// backends. These are standalone (not in the recursive AST chain) because a
+/// strategy does not reference any recursive AST node — it carries only plain
+/// descriptors.
 type OmpStrategy = {
     // Per-variable dim counts from omp(a: 2, b: 1) => [("a",2); ("b",1)].
     // (variable-name, number-of-dims-to-parallelize). Maps in lowering to the
@@ -131,6 +132,9 @@ type CudaStrategy = {
 type ParallelStrategy =
     | Omp of OmpStrategy
     | Cuda of CudaStrategy
+    // Bare `mpi`: rank-count is a runtime property (mpiexec -n N), so the
+    // strategy carries no payload; decomposition options can be added later.
+    | Mpi
 
 type TypeExpr =
     // Primitive types
@@ -188,6 +192,12 @@ type TypeExpr =
     // TyRaggedIdx because it carries no lengths expression — there is nothing
     // to look up; the extent is whatever the loop binding provides.
     | TyRaggedIdxOpaque
+    // IrrepsIdx<spec> — block-structured dense index over an equivariant-NN
+    // irreps spec (a static array of (l, parity, mult) int triples). Extent
+    // is total_dim(spec) = Σ mult*(2l+1); every cell is stored (flat dense,
+    // no compression) — the spec matters for type IDENTITY, not storage.
+    // The spec is an expression resolved at typecheck via StaticEval.
+    | TyIrrepsIdx of spec: Expr
     // With constraints
     | TyConstrained of TypeExpr * Constraint list
     // Poly type for arity polymorphism
@@ -414,8 +424,12 @@ type TypeDecl =
     | TyDeclAlias of name: Ident * typeParams: Ident list * body: TypeExpr
     // sum type (enum/variant)
     | TyDeclSum of name: Ident * typeParams: Ident list * variants: VariantDecl list
-    // struct (with optional where invariant)
-    | TyDeclStruct of name: Ident * typeParams: Ident list * fields: FieldDecl list * invariant: Expr option
+    // struct (with where-constraint conjuncts; empty = unconstrained)
+    | TyDeclStruct of name: Ident * typeParams: Ident list * fields: FieldDecl list * constraints: Expr list
+    // mutually constrained aliases: type P1 = T1 and P2 = T2 where c1, c2, ...
+    // Members are transparent aliases; the group's conjuncts are checked
+    // jointly wherever the members' types are introduced together.
+    | TyDeclMutualGroup of members: (Ident * TypeExpr) list * constraints: Expr list
 
 and VariantDecl = {
     Name: Ident
@@ -426,6 +440,15 @@ and FieldDecl = {
     Name: Ident
     Type: TypeExpr
     Default: Expr option
+    /// Dependent range refinement: `f: T in lo .. hi` — half-open like every
+    /// other `..`, either side optional. Bounds may reference earlier fields
+    /// and statics; they desugar into the struct's constraint conjuncts.
+    Bound: FieldBound option
+}
+
+and FieldBound = {
+    Lo: Expr option
+    Hi: Expr option
 }
 
 type InterfaceDecl = {

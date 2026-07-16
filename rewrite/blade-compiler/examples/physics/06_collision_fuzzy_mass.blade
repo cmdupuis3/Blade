@@ -1,0 +1,46 @@
+// TEST: Physics -- Elastic Collision With A Fuzzy Target Mass
+import ppl as ppl
+// ============================================================================
+// Cue ball (m1 = 1, u1 = 1) strikes a target at rest whose MASS is a moment
+// jet: m2 ~ (1.0, 0.4), straddling the equal-mass bifurcation. The outgoing
+// velocities v1 = (1-m2)/(1+m2), v2 = 2/(1+m2) are rational in the mass, so
+// they spread, bias, and skew. But momentum m1 v1 + m2 v2 and energy
+// v1^2 + m2 v2^2 are conserved for EVERY realization, so their towers come
+// out DEGENERATE (variance ~1e-32) -- even though each is a product of the
+// correlated jets m2 and v2. Conservation shows up as a spread that cancels
+// itself; the jet enforces it because it differentiates the composite map.
+// At this bifurcation the naive plug-in says the cue ball stops dead
+// (v1 = 0); the tower says it drifts forward on average (mean +0.044) with
+// the sign of the outcome genuinely uncertain across the ensemble.
+// EXPECT values checked vs an independent PowerShell ensemble.
+// ============================================================================
+type TimeIdx = Idx<7>
+let M2: Array<Float64 like Idx<1>, TimeIdx> = [[0.356967028599, 0.65259015823, 0.839329531238, 1.0, 1.16067046876, 1.34740984177, 1.6430329714]]
+let d = ppl.dist(M2, 6)
+
+// outgoing velocities as towers
+let dv1 = ppl.dist_map(d, 3, 2, lambda(m) -> (1.0 - m) / (1.0 + m))
+let v1_1 = ppl.cumulant(dv1, 1)
+
+// total momentum p = v1 + m2 v2  (identically 1) -> degenerate tower
+let dP = ppl.dist_map(d, 3, 2, lambda(m) -> (1.0 - m) / (1.0 + m) + (m * 2.0) / (1.0 + m))
+let P1 = ppl.cumulant(dP, 1)
+let P2 = ppl.cumulant(dP, 2)
+
+// total kinetic energy x2:  v1^2 + m2 v2^2  (identically 1) -> degenerate
+let dK = ppl.dist_map(d, 3, 2, lambda(m) -> ((1.0 - m) / (1.0 + m)) * ((1.0 - m) / (1.0 + m)) + m * ((2.0 / (1.0 + m)) * (2.0 / (1.0 + m))))
+let K1 = ppl.cumulant(dK, 1)
+let K2 = ppl.cumulant(dK, 2)
+
+// exact route: empirical cumulants of the transformed recoils
+let V1D: Array<Float64 like Idx<1>, TimeIdx> = [[0.47387516266, 0.210221415177, 0.0873527369801, 0.0, -0.0743613943371, -0.14799709688, -0.243293586708]]
+let e1 = ppl.cumulants(V1D, 1)
+
+// cue-ball recoil drifts forward on average (naive plug-in says 0):
+// EXPECT: v1_1 = [0.0400000000001464]
+// EXPECT: e1 = [0.043685319556]
+// momentum and energy conserved -- means pinned, variances vanish:
+// EXPECT: P1 = [1.0]
+// EXPECT: P2 = [0.0]
+// EXPECT: K1 = [1.0]
+// EXPECT: K2 = [0.0]

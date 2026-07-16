@@ -1,15 +1,16 @@
 // TEST: Dist Discharge Same Source (rejects)
+import ppl as ppl
 // Call-site discharge of `where indep(a, b)`: two dists built from the
 // SAME source array can never satisfy the license — the caller-side
 // provenance check rejects the call ("a value is not independent of
 // itself"), even though each dist binding is distinct.
 type TimeIdx = Idx<2>
 let X: Array<Float64 like Idx<2>, TimeIdx> = [[1.0, 2.0], [3.0, 4.0]]
-let dx = dist(X, 2)
-let dx2 = dist(X, 2)
+let dx = ppl.dist(X, 2)
+let dx2 = ppl.dist(X, 2)
 
 function combine(a: Dist<2, Float64 like Idx<2>>, b: Dist<2, Float64 like Idx<2>>)
-  where indep(a, b) -> Dist<2, Float64 like Idx<2>> =
+  where ppl.indep(a, b) -> Dist<2, Float64 like Idx<2>> =
   a + b
 
 let s = combine(dx, dx2)

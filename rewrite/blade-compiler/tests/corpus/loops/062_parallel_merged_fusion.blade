@@ -1,0 +1,13 @@
+// TEST: Parallel Merged Fusion
+// <&> means "fuse when legal": leaves of different arity over the same array
+// have prefix-compatible loop structures, so the parallel tree merges into
+// the SAME staggered nest <&!> would emit (061 pins the mandatory form).
+// Same values either way — the merge is a pure loop-structure optimization.
+let A = [1.0, 2.0, 3.0]
+let k1 = lambda(x) -> x
+let k2 = lambda(x, y) -> x * y
+let k3 = lambda(x, y, z) -> x * y * z
+let (m1, m2, m3) = (object_for(k1) <@> (A)) <&> (object_for(k2) <@> (A, A)) <&> (object_for(k3) <@> (A, A, A)) |> compute
+// EXPECT: m1 = [1.0, 2.0, 3.0]
+// EXPECT: m2 = [1.0, 2.0, 3.0, 2.0, 4.0, 6.0, 3.0, 6.0, 9.0]
+// EXPECT: m3 = [1.0, 2.0, 3.0, 2.0, 4.0, 6.0, 3.0, 6.0, 9.0, 2.0, 4.0, 6.0, 4.0, 8.0, 12.0, 6.0, 12.0, 18.0, 3.0, 6.0, 9.0, 6.0, 12.0, 18.0, 9.0, 18.0, 27.0]

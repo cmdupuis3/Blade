@@ -1,0 +1,8 @@
+// TEST: Struct Missing Field (rejects)
+// Omitting a declared field at construction must be a compile error —
+// constraints and downstream field reads assume every field is populated.
+struct Point {
+    x: Float,
+    y: Float
+}
+let p = Point { x = 1.0 }

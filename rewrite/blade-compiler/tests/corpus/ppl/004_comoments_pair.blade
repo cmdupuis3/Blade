@@ -1,9 +1,10 @@
 // TEST: Comoments Pair
+import ppl as ppl
 // comoments(A, 2): CENTRAL pair comoment (covariance), packed SymIdx<2, 2>.
 // Kernel is E[ab] - ma*mb over reduce/prodsum (no elementwise fiber algebra).
 // f0 = [1,2] (mean 1.5), f1 = [3,5] (mean 4):
 // var(f0) = 2.5 - 2.25 = 0.25 | cov = 6.5 - 6 = 0.5 | var(f1) = 17 - 16 = 1
 type TimeIdx = Idx<2>
 let A: Array<Float64 like Idx<2>, TimeIdx> = [[1.0, 2.0], [3.0, 5.0]]
-let c2 = comoments(A, 2)
+let c2 = ppl.comoments(A, 2)
 // EXPECT: c2 = [0.25, 0.5, 1.0]

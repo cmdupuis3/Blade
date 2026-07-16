@@ -1,4 +1,5 @@
 // TEST: Example Trajectory Units And Sensitivity
+import ad as ad
 // ============================================================================
 // A projectile study in three parts, each using the language feature that
 // actually fits:
@@ -68,7 +69,7 @@ function drag_loss(ux: Float, uy: Float) -> Float = {
     0.02 * s
 }
 
-let (E_drag, dE_dvx0, dE_dvy0) = grad(drag_loss)(15.0, 19.62)
+let (E_drag, dE_dvx0, dE_dvy0) = ad.grad(drag_loss)(15.0, 19.62)
 // EXPECT: E_drag = 551.601893248218
 
 // Finite-difference cross-checks, computed in this same file: the AD

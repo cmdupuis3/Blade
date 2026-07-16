@@ -331,7 +331,7 @@ let ncFileToModule
             let arrType = mkArrayArrow [idx] (IRTScalar ETInt64) (Some (AIDVariable dim.Name))
             (dim.Name, arrType))
 
-    let dimsStruct = IRTDStruct("dims", dimsFields, None)
+    let dimsStruct = IRTDStruct("dims", dimsFields)
 
     // Step 3: vars struct — data variables only (exclude coordinate variables)
     let dimNames = file.Dims |> List.map (fun d -> d.Name) |> Set.ofList
@@ -347,7 +347,7 @@ let ncFileToModule
             let arrType = ncVarToArrayType dimMap v
             (v.Name, mkArrayLike arrType))
 
-    let varsStruct = IRTDStruct("vars", varsFields, None)
+    let varsStruct = IRTDStruct("vars", varsFields)
 
     {
         Name = moduleName
@@ -356,6 +356,7 @@ let ncFileToModule
         Bindings = []
         StaticFunctionUsage = Map.empty
         ProviderReads = Map.empty
+        ProviderWrites = Map.empty
         RandomInits = Map.empty
         CompoundInits = Map.empty
     }
@@ -659,6 +660,62 @@ module CppNetcdf =
         // the read paths, where a close failure cannot corrupt already-read data).
         @ ncChecked cppVarName (sprintf "closing '%s' after writing %s" filePath varName)
             (sprintf "nc_close(%s_ncid)" cppVarName)
+
+    /// STREAMED fiber reads: hoisted prologue — open the file once, declare
+    /// the fiber buffer (trailing-axis length) and the start/count vectors
+    /// for nc_get_vara (count = {1,..,1,T}). The handle stays open for the
+    /// program's lifetime (read-only; process exit closes it).
+    let genStreamOpen (filePath: string) (varName: string) (cppVarName: string) (arrType: IRArrayType) : string list =
+        let v = cppVarName
+        let primElem =
+            match arrType.ElemType with
+            | IRTScalar et -> et
+            | _ -> ETFloat64
+        let elemCpp =
+            match primElem with
+            | ETFloat32 -> "float"
+            | ETFloat64 -> "double"
+            | ETInt32   -> "int"
+            | ETInt64   -> "long long"
+            | _         -> "double"
+        let rank = arrType.IndexTypes.Length
+        if rank < 2 then
+            failwithf "NetCDF stream of '%s': needs at least one site dim plus the trailing fiber axis (rank >= 2)" varName
+        if arrType.IndexTypes |> List.exists (fun ix -> ix.Symmetry <> SymNone || ix.Rank <> 1) then
+            failwithf "NetCDF stream of '%s': dense variables only" varName
+        let extents =
+            arrType.IndexTypes |> List.map (fun ix ->
+                match ix.Extent with
+                | IRLit (IRLitInt n) -> n
+                | _ -> failwithf "NetCDF stream of '%s' requires literal extents" varName)
+        let fiberLen = List.last extents
+        ignore elemCpp
+        [ sprintf "// Stream %s from %s (fiber reads inlined at the S/T boundary)" varName filePath
+          sprintf "int %s_ncid, %s_varid, %s_ncstat;" v v v ]
+        @ ncChecked v (sprintf "opening '%s' to stream %s" filePath varName)
+            (sprintf "nc_open(\"%s\", NC_NOWRITE, &%s_ncid)" filePath v)
+        @ ncChecked v (sprintf "locating variable '%s' in '%s'" varName filePath)
+            (sprintf "nc_inq_varid(%s_ncid, \"%s\", &%s_varid)" v varName v)
+        @ [ sprintf "size_t %s_fiber_ext[1] = { %d };" v fiberLen
+            sprintf "size_t %s_start[%d]; size_t %s_count[%d];" v rank v rank ]
+        @ [ for d in 0 .. rank - 2 -> sprintf "%s_count[%d] = 1;" v d ]
+        @ [ sprintf "%s_count[%d] = %d;" v (rank - 1) fiberLen
+            sprintf "%s_start[%d] = 0;" v (rank - 1) ]
+
+    /// STREAMED fiber reads: the in-nest read — set the site coordinates
+    /// and pull one trailing-axis fiber into the destination buffer.
+    let genStreamFiber (filePath: string) (varName: string) (cppVarName: string) (destBuf: string) (siteExprs: string list) (arrType: IRArrayType) : string list =
+        let v = cppVarName
+        let suffix =
+            match arrType.ElemType with
+            | IRTScalar ETFloat32 -> "float"
+            | IRTScalar ETFloat64 -> "double"
+            | IRTScalar ETInt32 -> "int"
+            | IRTScalar ETInt64 -> "longlong"
+            | _ -> "double"
+        [ for d in 0 .. siteExprs.Length - 1 -> sprintf "%s_start[%d] = (size_t)(%s);" v d siteExprs.[d] ]
+        @ ncChecked v (sprintf "streaming a fiber of '%s' from '%s'" varName filePath)
+            (sprintf "nc_get_vara_%s(%s_ncid, %s_varid, %s_start, %s_count, %s)" suffix v v v v destBuf)
 
     /// Extract dimension names from a module's index type definitions
     let dimNamesFromModule (modul: IRModule) : string list =

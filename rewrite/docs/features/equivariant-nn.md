@@ -117,10 +117,38 @@ type IrrepsIdx<spec> = DepIdx<
 >
 ```
 
-A specialization of the core `DepIdx`: iteration yields `(block, multiplicity,
-m-component)` triples; extent is `total_dim(spec)`. Coiteration with edges/nodes
-requires named index types (`type EdgeIdx = Idx<E>`) per the core structural
-identity rules.
+The DepIdx equation is the SEMANTIC reading: iteration yields `(block,
+multiplicity, m-component)` triples; extent is `total_dim(spec)`. Coiteration
+with edges/nodes requires named index types (`type EdgeIdx = Idx<E>`) per the
+core structural identity rules.
+
+**v7 implementation (landed 2026-07-14)**: a flat-dense PRIMITIVE index type,
+not a DepIdx lowering — every cell is stored (extent = cardinality =
+`total_dim(spec)`, no compression), and the block structure is carried as
+nominal identity, so all dense codegen paths apply unchanged. The identity
+rules:
+
+- Two `IrrepsIdx` annotations with DIFFERENT specs never unify, even at equal
+  `total_dim` (the whole point — `[(0,0,2),(1,1,2),(2,0,1)]` vs `[(0,0,13)]`
+  are both 13 cells and still distinct). Enforced in unification AND at
+  direct function application.
+- Aliases are NOMINATIVE: `type Feat = IrrepsIdx<s>` and
+  `type Hidden = IrrepsIdx<s>` are distinct types; anonymous
+  `IrrepsIdx<s>` unifies with either (named-vs-anonymous permissiveness).
+- An `IrrepsIdx` array unifies with a plain `Idx<total_dim>` annotation or
+  parameter (gradual adoption; generated op signatures interoperate).
+- The spec argument resolves under the full static contract: a `let static`
+  name or an inline literal `IrrepsIdx<[(0, 0, 2), (1, 1, 2)]>`. Call syntax
+  in the angle brackets (`IrrepsIdx<sh_spec(2)>`) is not in the
+  simple-expression grammar — bind a `let static` first.
+- `range<IrrepsIdx<spec>>` is the flat dense range (bound = `total_dim`).
+
+Block navigation is a static-builtin surface (`irreps_len(spec)`,
+`irreps_l/parity/mult/dim(spec, b)`, `irreps_offset(spec, b)`), so
+block-structured loop nests fold at compile time:
+`x(irreps_offset(spec, b) + mu * irreps_dim(spec, b) + m)`. The
+`for (b, mu, m) in axis` sugar is deferred until DepIdx iteration codegen
+lands. Corpus: `index-types/111–119`, `ml-ops/005–008`.
 
 ### 7. Clebsch-Gordan machinery
 
@@ -273,10 +301,21 @@ need; iteration = the compiler's real-CG nonzero entries).
 pipelines. The §7 struct sketch's `where m1 + m2 == m_out` describes
 `CGIndexComplex`, not the type the ops consume.
 
-Not yet in v7: `IrrepsIdx<spec>` as an index type (primitive, SymIdx-style
-— design settled), dependent records for user-defined `CGPath` (future.md
-§1.9), `y_to` above lmax 2, angle-bracket static args, per-edge fused
-convolution elaboration.
+**IrrepsIdx landed (2026-07-14)**: `IrrepsIdx<spec>` is a primitive index
+type (§6) and the elaborated ops now STAMP it on their generated
+signatures — feature params and results of `y_to` / `tensor_product` /
+`linear` / `gated` carry the anonymous irreps type of their spec (weight
+buffers stay `Idx<wdim>`: path-major weight spaces are not irreps spaces;
+likewise the row-stacked `_rows` buffers, whose extent is
+`nRows * total_dim`). Unannotated call sites are unaffected (irreps vs
+plain unifies); an annotation or argument with the WRONG spec is a type
+error. Corpus: `ml-ops/005` (accept + values), `ml-ops/006` (reject).
+
+Not yet in v7: dependent records for user-defined `CGPath` (formalism v10
+§17.13.1; the future.md §1.9 pointer was a dangling reference), `y_to`
+above lmax 2, angle-bracket static args, per-edge fused convolution
+elaboration, `for (b, mu, m)` structured iteration over an irreps axis
+(waits on DepIdx iteration codegen).
 
 ### 12. Open items
 

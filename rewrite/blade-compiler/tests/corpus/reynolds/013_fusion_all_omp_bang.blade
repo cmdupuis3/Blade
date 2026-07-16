@@ -1,0 +1,10 @@
+// TEST: Fusion All Omp Bang
+// <&!> is HARD fusion: every leaf must carry the SAME backend at the shared
+// level. Here BOTH leaves request omp, so the merged nest is emitted with an
+// outer omp pragma (agreement satisfied). Pins the all-omp <&!> path.
+let A = [1.0, 2.0, 3.0]
+let k1 = lambda(x) where omp(x: 1) -> x
+let k2 = lambda(x, y) where omp(x: 1) -> x * y
+let (m1, m2) = (object_for(k1) <@> (A)) <&!> (object_for(k2) <@> (A, A)) |> compute
+// EXPECT: m1 = [1.0, 2.0, 3.0]
+// EXPECT: m2 = [1.0, 2.0, 3.0, 2.0, 4.0, 6.0, 3.0, 6.0, 9.0]

@@ -1,0 +1,40 @@
+// TEST: Physics -- Discovered Invariant, Verified By The Tower
+import ppl as ppl
+// ============================================================================
+// The generator tools/gen_invariants.ps1 performs candidate GENERATION: it
+// enumerates every monomial up to a degree, forms the dictionary's covariance
+// under the fuzzed parameter (an order-2 moment tower), and reads off the
+// conserved quantities as the NULL SPACE of that covariance -- intersected
+// across several orbits so only true constants of motion survive. With no
+// conjectures it returns, at degree 3 on the Kepler problem, the Laplace-
+// Runge-Lenz vector in the raw monomial basis:
+//     LRL_x  =  x vy^2 - y vx vy - x/r
+// This file closes the loop: it feeds that DISCOVERED combination back through
+// the moment tower and confirms it is INVARIANT (a degenerate tower), while
+// each raw monomial it is built from is VARIANT. The needle the generator
+// pulled out is exactly the one whose tower refuses to spread.
+// Kepler orbit e = 0.6, L = 1; state at anomaly p: vx = -sin p, vy = 0.6+cos p,
+// x = cos p/(1+0.6 cos p), x/r = cos p.
+// ============================================================================
+type TimeIdx = Idx<7>
+let PHI: Array<Float64 like Idx<1>, TimeIdx> = [[0.517725271449, 0.739442618673, 0.879497148429, 1.0, 1.12050285157, 1.26055738133, 1.48227472855]]
+let d = ppl.dist(PHI, 6)
+
+// a raw constituent monomial x vy^2 -- expected VARIANT
+let mono_d  = ppl.dist_map(d, 2, 3, lambda(p) -> (cos(p) / (1.0 + 0.6 * cos(p))) * (0.6 + cos(p)) * (0.6 + cos(p)))
+let mono_k1 = ppl.cumulant(mono_d, 1)
+let mono_k2 = ppl.cumulant(mono_d, 2)
+let mono_disp = sqrt(mono_k2(0) * mono_k2(0)) / (sqrt(mono_k1(0) * mono_k1(0)) + 0.000000001)
+let mono_V = if mono_disp < 0.000001 then "INVARIANT" else "VARIANT"
+
+// the DISCOVERED combination x vy^2 - y vx vy - x/r -- expected INVARIANT (= e = 0.6)
+let lrl_d  = ppl.dist_map(d, 2, 3, lambda(p) -> (cos(p) / (1.0 + 0.6 * cos(p))) * (0.6 + cos(p)) * (0.6 + cos(p)) - (sin(p) / (1.0 + 0.6 * cos(p))) * (0.0 - sin(p)) * (0.6 + cos(p)) - cos(p))
+let lrl_k1 = ppl.cumulant(lrl_d, 1)
+let lrl_k2 = ppl.cumulant(lrl_d, 2)
+let lrl_disp = sqrt(lrl_k2(0) * lrl_k2(0)) / (sqrt(lrl_k1(0) * lrl_k1(0)) + 0.000000001)
+let lrl_V = if lrl_disp < 0.000001 then "INVARIANT" else "VARIANT"
+
+// the discovered invariant equals the eccentricity e = 0.6:
+// EXPECT: lrl_k1 = [0.6]
+// EXPECT: mono_V = "VARIANT"
+// EXPECT: lrl_V = "INVARIANT"

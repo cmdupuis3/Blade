@@ -1,0 +1,21 @@
+// TEST: Block Final Tuple After Let
+// A line-leading `(` or `[` must not extend the previous statement into a
+// call or index. `let b = v + 1.0` followed by `(a, b)` on the next line is
+// a let plus a final tuple — not the call `v(a, b)` (which used to stamp a
+// confusing "Unbound variable: b" at the let). Postfix `(`/`[` open on the
+// same line as the expression they extend; see Parser.parsePostfix.
+function mk(v: Float64) -> (Float64, Float64) = {
+    let a = v
+    let b = v + 1.0
+    (a, b)
+}
+let (x, y) = mk(3.0)
+let sum = x + y
+let arr = {
+    let base = 5.0
+    [base, base + 1.0]
+}
+// EXPECT: x = 3
+// EXPECT: y = 4
+// EXPECT: sum = 7
+// EXPECT: arr = [5, 6]

@@ -44,8 +44,10 @@ type Capabilities = {
 }
 
 /// Backend requirement inferred from generated source. `RequiresCuda` when
-/// codegen emitted at least one device kernel; `CpuOnly` otherwise.
-type BackendReq = CpuOnly | RequiresCuda
+/// codegen emitted at least one device kernel; `RequiresMpi` when the program
+/// includes <mpi.h> (mpiEmitMode codegen — needs -lmsmpi at link and mpiexec
+/// at run); `CpuOnly` otherwise.
+type BackendReq = CpuOnly | RequiresCuda | RequiresMpi
 
 /// Resolution of (capabilities, requirement) into a concrete compile action.
 type CompilePlan =
@@ -67,6 +69,24 @@ let private probeTool (exe: string) (args: string) : bool =
         proc.StandardError.ReadToEnd() |> ignore
         proc.WaitForExit(10000) |> ignore
         proc.ExitCode = 0
+    with _ -> false
+
+/// Marker-based tool probe: success = the tool launched and its combined
+/// output contains `marker` (case-insensitive). For tools whose exit codes
+/// are not trustworthy as a presence signal — MS-MPI's mpiexec exits nonzero
+/// from a bare help query.
+let private probeToolLoose (exe: string) (args: string) (marker: string) : bool =
+    try
+        let psi = ProcessStartInfo(exe, args)
+        psi.RedirectStandardOutput <- true
+        psi.RedirectStandardError <- true
+        psi.UseShellExecute <- false
+        psi.CreateNoWindow <- true
+        use proc = Process.Start(psi)
+        let out = proc.StandardOutput.ReadToEnd()
+        let err = proc.StandardError.ReadToEnd()
+        proc.WaitForExit(10000) |> ignore
+        (out + err).IndexOf(marker, StringComparison.OrdinalIgnoreCase) >= 0
     with _ -> false
 
 /// Probe for a runnable CUDA device. `nvidia-smi -L` lists devices and exits
@@ -108,14 +128,21 @@ let capabilities = lazy (detectCapabilities ())
 /// current test infers CpuOnly, and the inference flips automatically once
 /// device kernels appear in the output.
 let inferBackendReq (generatedSource: string) : BackendReq =
-    if generatedSource.Contains("__global__") then RequiresCuda else CpuOnly
+    if generatedSource.Contains("__global__") then RequiresCuda
+    elif generatedSource.Contains("#include <mpi.h>") then RequiresMpi
+    else CpuOnly
 
 /// Resolve (capabilities, requirement) into a compile action. A test never
 /// picks a compiler; it produces a BackendReq and this picks the toolchain.
+/// MPI compiles with plain g++ (compileCpp appends -lmsmpi when it sees the
+/// mpi.h include); a missing MS-MPI import lib fails the g++ link loudly,
+/// which is the correct signal under the opt-in mpi emit gate.
 let resolveCompile (caps: Capabilities) (req: BackendReq) : CompilePlan =
     match req, caps.Platform with
     | CpuOnly, _ when not caps.HasGpp           -> SkipCompile "requires g++, not found"
     | CpuOnly, _                                -> UseGpp
+    | RequiresMpi, _ when not caps.HasGpp       -> SkipCompile "requires g++, not found"
+    | RequiresMpi, _                            -> UseGpp
     | RequiresCuda, _ when not caps.HasNvcc     -> SkipCompile "requires CUDA, nvcc not found"
     | RequiresCuda, PMacOS                      -> SkipCompile "CUDA unsupported on macOS"
     | RequiresCuda, PWindows when not caps.HasCl -> SkipCompile "requires CUDA, cl.exe not found (nvcc host compiler)"
@@ -126,8 +153,10 @@ let resolveCompile (caps: Capabilities) (req: BackendReq) : CompilePlan =
 let isSkipError (e: string) =
     e = "Skipped" || e.StartsWith("Skipped:")
 
-/// Compile a C++ file with g++
-let compileCpp (cppFile: string) (outputDir: string) : Result<string, string> =
+/// Compile a C++ file with g++. `extraLinkInputs` are appended after the
+/// source (linker order) — e.g. the hybrid mpi+cuda build passes the
+/// nvcc-built device DLL here (MinGW links DLL export tables directly).
+let compileCppWithExtra (extraLinkInputs: string list) (cppFile: string) (outputDir: string) : Result<string, string> =
     try
         let exeExt = if RuntimeInformation.IsOSPlatform(OSPlatform.Windows) then ".exe" else ".out"
         let exeFile = Path.ChangeExtension(cppFile, exeExt)
@@ -167,6 +196,15 @@ let compileCpp (cppFile: string) (outputDir: string) : Result<string, string> =
         // add nothing.
         let needsNetcdf =
             try (File.ReadAllText cppFullPath).Contains "#include <netcdf.h>" with _ -> false
+
+        // MPI programs (mpiEmitMode codegen) include <mpi.h> and call the MPI C
+        // API — link MS-MPI. The MSYS2 mingw-w64 msmpi package puts mpi.h and
+        // libmsmpi.a on g++'s default search paths, so a bare -lmsmpi suffices
+        // (mirrors the bare -lnetcdf convention above). Linker inputs go AFTER
+        // the source.
+        let needsMpi =
+            try (File.ReadAllText cppFullPath).Contains "#include <mpi.h>" with _ -> false
+        let mpiFlags = if needsMpi then " -lmsmpi" else ""
         let netcdfFlags =
             if not needsNetcdf then ""
             else
@@ -189,7 +227,8 @@ let compileCpp (cppFile: string) (outputDir: string) : Result<string, string> =
                               | None -> sprintf " -L\"%s\" -lnetcdf" (Path.Combine(dir, "lib")))
                      incFlag + linkFlag)
 
-        let args = sprintf "-std=c++17 -O2 %s %s -o \"%s\" \"%s\"%s" ompFlag safetyFlags exeFullPath cppFullPath netcdfFlags
+        let extraFlags = extraLinkInputs |> List.map (fun p -> sprintf " \"%s\"" (Path.GetFullPath p)) |> String.concat ""
+        let args = sprintf "-std=c++17 -O2 %s %s -o \"%s\" \"%s\"%s%s%s" ompFlag safetyFlags exeFullPath cppFullPath extraFlags netcdfFlags mpiFlags
         
         let psi = ProcessStartInfo("g++", args)
         psi.RedirectStandardOutput <- true
@@ -225,6 +264,10 @@ let compileCpp (cppFile: string) (outputDir: string) : Result<string, string> =
                 Error (sprintf "Compilation failed (exit %d):\n%s\nCommand: g++ %s" proc.ExitCode allOutput args)
     with ex ->
         Error (sprintf "Compilation exception: %s\n%s" ex.Message ex.StackTrace)
+
+/// Compile a C++ file with g++ (no extra link inputs).
+let compileCpp (cppFile: string) (outputDir: string) : Result<string, string> =
+    compileCppWithExtra [] cppFile outputDir
 
 /// Compile a CUDA (.cu) file with nvcc. nvcc auto-selects the host compiler
 /// (cl.exe on Windows, g++ on Linux). Host-side warning flags are passed
@@ -358,6 +401,29 @@ let compileCudaSplit (cuFile: string) (cppFile: string) (outputDir: string) : Re
                 | Error e -> Error e
                 | Ok () -> Ok exeFull
 
+/// Hybrid mpi+cuda build (MixedParallelismPlan.md phase 3): the .cu becomes
+/// a SELF-CONTAINED MSVC DLL (nvcc -shared drives cl.exe; the hybrid launch
+/// wrappers are dllexport'd extern "C"), and the host .cpp takes the proven
+/// g++ path (-fopenmp, -lmsmpi via the mpi.h scan) linking the DLL directly
+/// — MinGW reads DLL export tables (the same mechanism the netcdf.dll link
+/// uses) — so no MS-MPI SDK import lib and no cross-ABI OBJECT link is
+/// needed; the ABI boundary is the C-ABI wrapper calls. The DLL lands next
+/// to the exe, so it resolves at run time.
+let compileCudaMpiHybrid (cuFile: string) (cppFile: string) (outputDir: string) : Result<string, string> =
+    let caps = capabilities.Value
+    if not caps.HasNvcc then Error "Skipped: requires CUDA, nvcc not found"
+    elif caps.Platform = PWindows && not caps.HasCl then Error "Skipped: requires CUDA, cl.exe not found (nvcc host compiler)"
+    elif not caps.HasGpp then Error "Skipped: requires g++, not found"
+    else
+        let cuFull = Path.GetFullPath cuFile
+        let dllExt = if caps.Platform = PWindows then ".dll" else ".so"
+        let dllFull = Path.Combine(Path.GetFullPath outputDir, Path.GetFileNameWithoutExtension cuFile + "_cuda" + dllExt)
+        let sharedFlags = if caps.Platform = PWindows then "-shared" else "-shared -Xcompiler -fPIC"
+        let nvccArgs = sprintf "-std=c++17 -O2 %s -o \"%s\" \"%s\"" sharedFlags dllFull cuFull
+        match runProc "nvcc" nvccArgs 180000 with
+        | Error e -> Error e
+        | Ok () -> compileCppWithExtra [dllFull] cppFile outputDir
+
 /// Compile a generated source file according to its backend requirement,
 /// resolved against the environment's capabilities. Returns the existing
 /// `Result<exePath, message>` shape; a skip is reported as
@@ -395,6 +461,92 @@ let runExecutable (exeFile: string) : Result<int * string, string> =
             Error "Execution timed out after 30s"
     with ex ->
         Error (sprintf "Execution exception: %s" ex.Message)
+
+// ============================================================================
+// MPI launch support (mpiexec resolution + wrapped execution)
+// ============================================================================
+
+/// Locate mpiexec. The MS-MPI installer updates the MACHINE-scope PATH and
+/// MSMPI_BIN, which already-running processes never see — so a bare PATH
+/// lookup is the last resort, not the first. Probe order: process-env
+/// MSMPI_BIN → machine-scope MSMPI_BIN → the well-known install path → bare
+/// "mpiexec" (marker-probed; MS-MPI mpiexec's exit codes are untrustworthy).
+/// Lazy: resolved once, and only when something MPI actually runs.
+let mpiexecPath : Lazy<string option> =
+    lazy (
+        let fromEnv (scope: EnvironmentVariableTarget option) =
+            try
+                let v =
+                    match scope with
+                    | Some s -> Environment.GetEnvironmentVariable("MSMPI_BIN", s)
+                    | None -> Environment.GetEnvironmentVariable("MSMPI_BIN")
+                match v with
+                | null | "" -> None
+                | d -> Some (Path.Combine(d, "mpiexec.exe"))
+            with _ -> None
+        let onWindows = RuntimeInformation.IsOSPlatform(OSPlatform.Windows)
+        [ fromEnv None
+          (if onWindows then fromEnv (Some EnvironmentVariableTarget.Machine) else None)
+          (if onWindows then Some @"C:\Program Files\Microsoft MPI\Bin\mpiexec.exe" else None)
+          Some "mpiexec" ]
+        |> List.choose id
+        |> List.tryFind (fun exe ->
+            if Path.IsPathRooted exe then File.Exists exe
+            else probeToolLoose exe "-help" "mpi"))
+
+/// Whether g++ can compile+link an MPI program (-lmsmpi resolvable — i.e. the
+/// MSYS2 msmpi package or equivalent is installed). One real link probe in a
+/// temp dir; lazy so ordinary invocations never pay for it.
+let hasMpiLink : Lazy<bool> =
+    lazy (
+        try
+            let dir = Path.Combine(Path.GetTempPath(), "blade_mpi_probe")
+            Directory.CreateDirectory(dir) |> ignore
+            let src = Path.Combine(dir, "mpi_probe.cpp")
+            File.WriteAllText(src,
+                "#include <mpi.h>\nint main(int argc, char** argv){ MPI_Init(&argc,&argv); MPI_Finalize(); return 0; }\n")
+            let exe = Path.Combine(dir, "mpi_probe.exe")
+            let psi = ProcessStartInfo("g++", sprintf "-std=c++17 \"%s\" -lmsmpi -o \"%s\"" src exe)
+            psi.RedirectStandardOutput <- true
+            psi.RedirectStandardError <- true
+            psi.UseShellExecute <- false
+            psi.CreateNoWindow <- true
+            use proc = Process.Start(psi)
+            proc.StandardOutput.ReadToEnd() |> ignore
+            proc.StandardError.ReadToEnd() |> ignore
+            proc.WaitForExit(30000) |> ignore
+            proc.ExitCode = 0
+        with _ -> false)
+
+/// Run a compiled MPI executable under `mpiexec -n <ranks>`. Same
+/// stream/timeout discipline as runExecutable; mpiexec propagates a failing
+/// rank's exit code (verified against MS-MPI), so the exit-code contract is
+/// unchanged. 60s timeout (multi-process startup is slower than a bare exe).
+let runExecutableMpi (ranks: int) (exeFile: string) : Result<int * string, string> =
+    match mpiexecPath.Value with
+    | None -> Error "mpiexec not found (install the MS-MPI runtime)"
+    | Some mpiexec ->
+        try
+            let exeFullPath = Path.GetFullPath(exeFile)
+            let psi = ProcessStartInfo(mpiexec, sprintf "-n %d \"%s\"" ranks exeFullPath)
+            psi.RedirectStandardOutput <- true
+            psi.RedirectStandardError <- true
+            psi.UseShellExecute <- false
+            psi.CreateNoWindow <- true
+            psi.WorkingDirectory <- Path.GetDirectoryName(exeFullPath)
+            use proc = Process.Start(psi)
+            let stdoutTask = proc.StandardOutput.ReadToEndAsync()
+            let stderrTask = proc.StandardError.ReadToEndAsync()
+            if proc.WaitForExit(60000) then
+                let stdout = stdoutTask.Result
+                let stderr = stderrTask.Result
+                let output = if String.IsNullOrEmpty(stderr) then stdout else stdout + "\n[stderr]: " + stderr
+                Ok (proc.ExitCode, output)
+            else
+                try proc.Kill() with _ -> ()
+                Error "Execution timed out after 60s (mpiexec)"
+        with ex ->
+            Error (sprintf "Execution exception: %s" ex.Message)
 
 /// Sanitize a test name for use as a filename (cross-platform)
 let sanitizeFileName (name: string) : string =

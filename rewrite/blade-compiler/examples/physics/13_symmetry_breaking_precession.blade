@@ -1,0 +1,63 @@
+// TEST: Physics -- Symmetry Breaking: A Precessing Orbit
+import ppl as ppl
+// ============================================================================
+// Perturb Kepler by a small inverse-square term: V(r) = -1/r - beta/r^2, with
+// beta = 0.05. The force is still central and time-independent, so ENERGY and
+// ANGULAR MOMENTUM survive -- but the HIDDEN symmetry breaks: the orbit is a
+// precessing ellipse and the Laplace-Runge-Lenz vector no longer stands still.
+// Exact solution (L = 1, e = 0.5, Ltilde = sqrt(0.9), k = Ltilde/L = sqrt(0.9)):
+//   r = 0.9 / (1 + 0.5 cos(k phi)),  vr = (e/Ltilde) sin(k phi),  vphi = 1/r,
+//   vx = vr cos phi - vphi sin phi,  vy = vr sin phi + vphi cos phi.
+// Fuzz the orbit angle phi and the detector shows the split cleanly:
+//   * E_pert (the TRUE energy) and Lz stay sharp -- INVARIANT;
+//   * E_kepler (the naive -1/r energy) and the LRL components A_x, A_y spread
+//     -- VARIANT. The detector is now a SYMMETRY-BREAKING METER: the size of
+//     the A-dispersion measures how badly the hidden symmetry is broken, and
+//     tools/symmetry_breaking.ps1 sweeps beta to show it scales with beta and
+//     vanishes as beta -> 0 (recovering the exact Kepler invariants).
+// Verdicts accept absolute degeneracy (|k2| < 1e-20) before the relative
+// test -- see the zero-mean-invariant note in 10_invariant_detector_kepler.
+// ============================================================================
+type TimeIdx = Idx<7>
+let PHI: Array<Float64 like Idx<1>, TimeIdx> = [[0.856967028599, 1.15259015823, 1.33932953124, 1.5, 1.66067046876, 1.84740984177, 2.1430329714]]
+let d = ppl.dist(PHI, 6)
+
+// vx(phi), vy(phi) as reusable sub-expressions (1/r = (1+0.5 cos k phi)/0.9,
+// vphi = 1/r, vr = 0.527046276695 sin(k phi), k = 0.948683298051):
+//   vx = 0.527046276695 sin(k t) cos t - ((1+0.5 cos k t)/0.9) sin t
+//   vy = 0.527046276695 sin(k t) sin t + ((1+0.5 cos k t)/0.9) cos t
+
+// --- TRUE energy E_pert = 1/2 v^2 - 1/r - beta/r^2  (INVARIANT) ---
+let Ep_d  = ppl.dist_map(d, 2, 3, lambda(t) -> 0.5 * ((0.527046276695 * sin(0.948683298051 * t) * cos(t) - ((1.0 + 0.5 * cos(0.948683298051 * t)) / 0.9) * sin(t)) * (0.527046276695 * sin(0.948683298051 * t) * cos(t) - ((1.0 + 0.5 * cos(0.948683298051 * t)) / 0.9) * sin(t)) + (0.527046276695 * sin(0.948683298051 * t) * sin(t) + ((1.0 + 0.5 * cos(0.948683298051 * t)) / 0.9) * cos(t)) * (0.527046276695 * sin(0.948683298051 * t) * sin(t) + ((1.0 + 0.5 * cos(0.948683298051 * t)) / 0.9) * cos(t))) - ((1.0 + 0.5 * cos(0.948683298051 * t)) / 0.9) - 0.05 * ((1.0 + 0.5 * cos(0.948683298051 * t)) / 0.9) * ((1.0 + 0.5 * cos(0.948683298051 * t)) / 0.9))
+let Ep_k1 = ppl.cumulant(Ep_d, 1)
+let Ep_k2 = ppl.cumulant(Ep_d, 2)
+let Ep_disp = sqrt(Ep_k2(0) * Ep_k2(0)) / (sqrt(Ep_k1(0) * Ep_k1(0)) + 0.000000001)
+let Ep_V = if sqrt(Ep_k2(0) * Ep_k2(0)) < 1.0e-20 then "INVARIANT" else (if Ep_disp < 0.000001 then "INVARIANT" else "VARIANT")
+
+// --- NAIVE Kepler energy E_kepler = 1/2 v^2 - 1/r  (VARIANT: not conserved) ---
+let Ek_d  = ppl.dist_map(d, 2, 3, lambda(t) -> 0.5 * ((0.527046276695 * sin(0.948683298051 * t) * cos(t) - ((1.0 + 0.5 * cos(0.948683298051 * t)) / 0.9) * sin(t)) * (0.527046276695 * sin(0.948683298051 * t) * cos(t) - ((1.0 + 0.5 * cos(0.948683298051 * t)) / 0.9) * sin(t)) + (0.527046276695 * sin(0.948683298051 * t) * sin(t) + ((1.0 + 0.5 * cos(0.948683298051 * t)) / 0.9) * cos(t)) * (0.527046276695 * sin(0.948683298051 * t) * sin(t) + ((1.0 + 0.5 * cos(0.948683298051 * t)) / 0.9) * cos(t))) - ((1.0 + 0.5 * cos(0.948683298051 * t)) / 0.9))
+let Ek_k1 = ppl.cumulant(Ek_d, 1)
+let Ek_k2 = ppl.cumulant(Ek_d, 2)
+let Ek_disp = sqrt(Ek_k2(0) * Ek_k2(0)) / (sqrt(Ek_k1(0) * Ek_k1(0)) + 0.000000001)
+let Ek_V = if sqrt(Ek_k2(0) * Ek_k2(0)) < 1.0e-20 then "INVARIANT" else (if Ek_disp < 0.000001 then "INVARIANT" else "VARIANT")
+
+// --- LRL x-component A_x = vy*Lz - x/r = vy - cos t  (Lz = 1 here)  (VARIANT: precesses) ---
+let Ax_d  = ppl.dist_map(d, 2, 3, lambda(t) -> (0.527046276695 * sin(0.948683298051 * t) * sin(t) + ((1.0 + 0.5 * cos(0.948683298051 * t)) / 0.9) * cos(t)) - cos(t))
+let Ax_k1 = ppl.cumulant(Ax_d, 1)
+let Ax_k2 = ppl.cumulant(Ax_d, 2)
+let Ax_disp = sqrt(Ax_k2(0) * Ax_k2(0)) / (sqrt(Ax_k1(0) * Ax_k1(0)) + 0.000000001)
+let Ax_V = if sqrt(Ax_k2(0) * Ax_k2(0)) < 1.0e-20 then "INVARIANT" else (if Ax_disp < 0.000001 then "INVARIANT" else "VARIANT")
+
+// --- LRL y-component A_y = -vx*Lz - y/r = -vx - sin t  (VARIANT: precesses) ---
+let Ay_d  = ppl.dist_map(d, 2, 3, lambda(t) -> (0.0 - (0.527046276695 * sin(0.948683298051 * t) * cos(t) - ((1.0 + 0.5 * cos(0.948683298051 * t)) / 0.9) * sin(t))) - sin(t))
+let Ay_k1 = ppl.cumulant(Ay_d, 1)
+let Ay_k2 = ppl.cumulant(Ay_d, 2)
+let Ay_disp = sqrt(Ay_k2(0) * Ay_k2(0)) / (sqrt(Ay_k1(0) * Ay_k1(0)) + 0.000000001)
+let Ay_V = if sqrt(Ay_k2(0) * Ay_k2(0)) < 1.0e-20 then "INVARIANT" else (if Ay_disp < 0.000001 then "INVARIANT" else "VARIANT")
+
+// energy and angular momentum survive; the LRL vector precesses:
+// EXPECT: Ep_k1 = [-0.416666666667]
+// EXPECT: Ep_V = "INVARIANT"
+// EXPECT: Ek_V = "VARIANT"
+// EXPECT: Ax_V = "VARIANT"
+// EXPECT: Ay_V = "VARIANT"

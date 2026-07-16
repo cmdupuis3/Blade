@@ -1,14 +1,15 @@
 // TEST: Dist Fused Tower
+import ppl as ppl
 // dist(B, 3) emits ONE fused compute — (L1 <@> q1) <&> (L2 <@> q2) <&>
 // (L3 <@> q3) |> compute — destructured into the κ_1..κ_3 components (the
 // <&> tower construction, elaborator-emitted). Values must match the
 // standalone cumulants() formers / the prototype oracle (data B).
 type TimeIdx = Idx<3>
 let B: Array<Float64 like Idx<2>, TimeIdx> = [[1.0, 2.0, 4.0], [3.0, 5.0, 4.0]]
-let d = dist(B, 3)
-let d1 = cumulant(d, 1)
-let d2 = cumulant(d, 2)
-let d3 = cumulant(d, 3)
+let d = ppl.dist(B, 3)
+let d1 = ppl.cumulant(d, 1)
+let d2 = ppl.cumulant(d, 2)
+let d3 = ppl.cumulant(d, 3)
 // EXPECT: d1 = [2.33333333333, 4.0]
 // EXPECT: d2 = [1.55555555556, 0.333333333333, 0.666666666667]
 // EXPECT: d3 = [0.740740740741, -0.555555555556, -0.555555555556, 0.0]

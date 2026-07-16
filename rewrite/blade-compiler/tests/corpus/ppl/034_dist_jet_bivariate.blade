@@ -1,0 +1,27 @@
+// TEST: Dist Jet Bivariate
+import ppl as ppl
+// A multivariate input dist through a scalar map: g(x, y) = x·y on the
+// 2-dimensional dist of B, exact degree-2 jet at the mean — g0 = mx·my,
+// D1 = [my, mx] (inline array literal, canonical lex cells), D2 =
+// [0, 1, 0] (cells (0,0), (0,1), (1,1); literal zeros prune their terms).
+// q = 3 through s = 2 needs input order 6 — strict budget exactly met.
+// Two routes again: the pushforward equals the cumulants of the
+// elementwise product data (prototype dump-jet J2: jet2 = ref2).
+type TimeIdx = Idx<3>
+let B: Array<Float64 like Idx<2>, TimeIdx> = [[1.0, 2.0, 4.0], [3.0, 5.0, 4.0]]
+let P: Array<Float64 like Idx<1>, TimeIdx> = [[3.0, 10.0, 16.0]]
+let db = ppl.dist(B, 6)
+let m = ppl.cumulant(db, 1)
+let dy = ppl.dist_jet(db, 3, m(0) * m(1), [m(1), m(0)], [0.0, 1.0, 0.0])
+let y1 = ppl.cumulant(dy, 1)
+let y2 = ppl.cumulant(dy, 2)
+let y3 = ppl.cumulant(dy, 3)
+let r1 = ppl.cumulants(P, 1)
+let r2 = ppl.cumulants(P, 2)
+let r3 = ppl.cumulants(P, 3)
+// EXPECT: y1 = [9.66666666667]
+// EXPECT: y2 = [28.2222222222]
+// EXPECT: y3 = [-14.074074074]
+// EXPECT: r1 = [9.66666666667]
+// EXPECT: r2 = [28.2222222222]
+// EXPECT: r3 = [-14.074074074]

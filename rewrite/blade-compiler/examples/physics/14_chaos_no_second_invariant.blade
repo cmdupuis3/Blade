@@ -1,0 +1,71 @@
+// TEST: Physics -- The Honest Negative: Chaos Has No Second Invariant
+import ppl as ppl
+// ============================================================================
+// The discovery engine, pointed at systems whose invariants are NOT known in
+// advance (tools/unknown_invariants.ps1), finds a SECOND constant of motion
+// for an integrable system and NOTHING beyond energy for a chaotic one. Here
+// the Blade tower confirms that split directly on real, symplectically
+// integrated trajectory data (24 samples each):
+//
+//   QUARTIC  H = 1/2 p^2 + 1/2 r^2 + 0.1 (x^4+y^4)  -- integrable (x,y decouple)
+//     E and E_x - E_y both conserved; angular momentum Lz is not.
+//   HENON-HEILES  H = 1/2 p^2 + 1/2 r^2 + (x^2 y - y^3/3)  -- chaotic (E ~ 0.127)
+//     ONLY E is conserved; E_x - E_y and Lz both spread.
+//
+// cumulants(series, k) reads the tower of each candidate's time-series; a
+// dispersion below 1e-4 (the symplectic integrator's conservation floor) is
+// INVARIANT, above it VARIANT. The tower says: the integrable system keeps a
+// second invariant; the chaotic system does not.
+// Verdicts accept absolute degeneracy first (|k2| < 1e-12, i.e. spread below
+// ~1e-6, the symplectic conservation floor) -- see the zero-mean-invariant
+// note in 10_invariant_detector_kepler.
+// ============================================================================
+type TimeIdx = Idx<24>
+
+// ---------- (A) SEPARABLE QUARTIC (integrable) ----------
+let qE: Array<Float64 like Idx<1>, TimeIdx> = [[0.383770000084, 0.383770025804, 0.383770008775, 0.383769971435, 0.383769949042, 0.383769961638, 0.383770001375, 0.383770024556, 0.383770007047, 0.383769970951, 0.383769949597, 0.383769963367, 0.383770002551, 0.383770023192, 0.383770005372, 0.383769970532, 0.383769950219, 0.383769965142, 0.383770003601, 0.383770021722, 0.383770003755, 0.383769970177, 0.38376995091, 0.383769966957]]
+let qD: Array<Float64 like Idx<1>, TimeIdx> = [[0.0421500000125, 0.0421499794445, 0.0421499368207, 0.0421499329311, 0.0421499542262, 0.0421499803616, 0.0421500013693, 0.0421499782852, 0.0421499350832, 0.0421499323548, 0.042149954726, 0.0421499820943, 0.0421500026101, 0.0421499770095, 0.0421499333982, 0.0421499318437, 0.0421499552925, 0.0421499838736, 0.042150003726, 0.0421499756273, 0.0421499317709, 0.0421499313963, 0.0421499559271, 0.0421499856929]]
+let qL: Array<Float64 like Idx<1>, TimeIdx> = [[0.240019457251, 0.250584212476, 0.250725383163, 0.244850420185, 0.244276954757, 0.244025360836, 0.248945750978, 0.259516589703, 0.25911616886, 0.253204443184, 0.25280847017, 0.252486517773, 0.257634447234, 0.268166637041, 0.267227688583, 0.261328423972, 0.26111248351, 0.260709715861, 0.266075024807, 0.276524325568, 0.275054547588, 0.269216624454, 0.269180389949, 0.268686071546]]
+
+let qE1 = ppl.cumulants(qE, 1)
+let qE2 = ppl.cumulants(qE, 2)
+let qE_disp = sqrt(qE2(0) * qE2(0)) / (sqrt(qE1(0) * qE1(0)) + 0.000000001)
+let qE_V = if sqrt(qE2(0) * qE2(0)) < 1.0e-12 then "INVARIANT" else (if qE_disp < 0.0001 then "INVARIANT" else "VARIANT")
+
+let qD1 = ppl.cumulants(qD, 1)
+let qD2 = ppl.cumulants(qD, 2)
+let qD_disp = sqrt(qD2(0) * qD2(0)) / (sqrt(qD1(0) * qD1(0)) + 0.000000001)
+let qD_V = if sqrt(qD2(0) * qD2(0)) < 1.0e-12 then "INVARIANT" else (if qD_disp < 0.0001 then "INVARIANT" else "VARIANT")
+
+let qL1 = ppl.cumulants(qL, 1)
+let qL2 = ppl.cumulants(qL, 2)
+let qL_disp = sqrt(qL2(0) * qL2(0)) / (sqrt(qL1(0) * qL1(0)) + 0.000000001)
+let qL_V = if sqrt(qL2(0) * qL2(0)) < 1.0e-12 then "INVARIANT" else (if qL_disp < 0.0001 then "INVARIANT" else "VARIANT")
+
+// ---------- (B) HENON-HEILES (chaotic) ----------
+let hE: Array<Float64 like Idx<1>, TimeIdx> = [[0.127399999979, 0.127400001944, 0.127400028267, 0.127400035713, 0.127400009775, 0.127399997735, 0.127400009239, 0.127400020266, 0.127400023251, 0.127400023689, 0.127400023862, 0.12740002323, 0.127400023298, 0.127400022705, 0.127400014916, 0.127400000694, 0.127400000971, 0.127400026865, 0.127400036395, 0.127400011007, 0.127399997293, 0.127400008335, 0.127400020456, 0.127400023723]]
+let hD: Array<Float64 like Idx<1>, TimeIdx> = [[0.0489999999643, 0.0464099883216, 0.0366905018449, 0.0354291246031, 0.0488851511017, 0.0580619935967, 0.0576287602282, 0.0595059603087, 0.0678518982862, 0.0775567651887, 0.0838621363916, 0.0848491227808, 0.0804066963921, 0.0731042082209, 0.0689278810795, 0.0696912945187, 0.0657577290204, 0.0527039733356, 0.0459787761386, 0.050652458851, 0.0526544322342, 0.0536103050944, 0.0659952254825, 0.0905034727596]]
+let hL: Array<Float64 like Idx<1>, TimeIdx> = [[0.0000000000000123480056475, 0.000357718159865, 0.00443005417296, 0.0146173432291, 0.0251584719985, 0.0289958250474, 0.0294188698193, 0.0338768825281, 0.037325150513, 0.0255647328271, -0.00339071602349, -0.0322291012247, -0.0428415231672, -0.0362634678313, -0.0280054819606, -0.0262457887927, -0.0251655761639, -0.0205898245819, -0.0178312652378, -0.0199505734284, -0.0219934145504, -0.0223412495104, -0.0273373709128, -0.0372568134609]]
+
+let hE1 = ppl.cumulants(hE, 1)
+let hE2 = ppl.cumulants(hE, 2)
+let hE_disp = sqrt(hE2(0) * hE2(0)) / (sqrt(hE1(0) * hE1(0)) + 0.000000001)
+let hE_V = if sqrt(hE2(0) * hE2(0)) < 1.0e-12 then "INVARIANT" else (if hE_disp < 0.0001 then "INVARIANT" else "VARIANT")
+
+let hD1 = ppl.cumulants(hD, 1)
+let hD2 = ppl.cumulants(hD, 2)
+let hD_disp = sqrt(hD2(0) * hD2(0)) / (sqrt(hD1(0) * hD1(0)) + 0.000000001)
+let hD_V = if sqrt(hD2(0) * hD2(0)) < 1.0e-12 then "INVARIANT" else (if hD_disp < 0.0001 then "INVARIANT" else "VARIANT")
+
+let hL1 = ppl.cumulants(hL, 1)
+let hL2 = ppl.cumulants(hL, 2)
+let hL_disp = sqrt(hL2(0) * hL2(0)) / (sqrt(hL1(0) * hL1(0)) + 0.000000001)
+let hL_V = if sqrt(hL2(0) * hL2(0)) < 1.0e-12 then "INVARIANT" else (if hL_disp < 0.0001 then "INVARIANT" else "VARIANT")
+
+// integrable: E and E_x-E_y conserved, Lz not.  chaotic: only E conserved.
+// EXPECT: qE_V = "INVARIANT"
+// EXPECT: qD_V = "INVARIANT"
+// EXPECT: qL_V = "VARIANT"
+// EXPECT: hE_V = "INVARIANT"
+// EXPECT: hD_V = "VARIANT"
+// EXPECT: hL_V = "VARIANT"

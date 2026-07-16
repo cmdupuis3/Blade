@@ -1,0 +1,12 @@
+// TEST: ML Ops IrrepsIdx Wrong Spec (rejects)
+import ml as ml
+// ============================================================================
+// v2 reject: annotating an op result with a DIFFERENT spec of the SAME
+// total_dim must be refused — gated(s2, ...) returns the irreps space
+// [(0,0,2)] (payload "0,0,2"), the annotation claims [(0,1,2)] (parity
+// flipped, still 2 cells). Extent comparison can never catch this; the
+// irreps identity arm does.
+// ============================================================================
+let static s2 = [(0, 0, 2)]
+let static wrong = [(0, 1, 2)]
+let bad: Array<Float like IrrepsIdx<wrong>> = ml.gated(s2, [0.0, 2.0])

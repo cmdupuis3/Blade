@@ -1,0 +1,13 @@
+// TEST: Fusion Soft Join Omp
+// <&> is a SOFT loop join: a leaf with no backend clause defers to an
+// explicit sibling. Here mean is unannotated and cov requests omp, so the
+// shared outer loop of the merged staggered nest becomes omp — one
+// annotation configures the shared header. Values are unchanged by the
+// backend choice; this pins that the join computes correctly (and compiles
+// under -fopenmp with the outer #pragma omp parallel for).
+let A = [1.0, 2.0, 3.0]
+let mean = lambda(x) -> x
+let cov = lambda(x, y) where omp(x: 1) -> x * y
+let (m1, m2) = (object_for(mean) <@> (A)) <&> (object_for(cov) <@> (A, A)) |> compute
+// EXPECT: m1 = [1.0, 2.0, 3.0]
+// EXPECT: m2 = [1.0, 2.0, 3.0, 2.0, 4.0, 6.0, 3.0, 6.0, 9.0]

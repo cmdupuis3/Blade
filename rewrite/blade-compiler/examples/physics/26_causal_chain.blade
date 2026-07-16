@@ -1,0 +1,81 @@
+// TEST: Physics -- The Causal Chain: Factorization, Coupling, and Entropy
+// ============================================================================
+// Eight balls, two cascades driven inward by projectiles from both ends,
+// masses fuzzy, radii R = 0.5 m^(1/3) (tools/causal_chain.ps1: full 3^6
+// product grid, 729 exact event-driven cascades, ties = 0, ~20 events each).
+// What many balls show that three cannot:
+//   * A MULTIVARIATE ORDER TOWER: several races run concurrently -- IL
+//     (left block: does bond 0 re-fire before bond 1?), IR (the mirror race
+//     on the right), KM (ball 3's final direction). Three balls had ONE
+//     ambiguous bit; here the S_n measure has a second-moment sector.
+//   * SPACELIKE FACTORIZATION, EXACTLY: over this embedded 81-realization
+//     product sub-grid (m1, m2 x m5, m6 fuzzy), IL depends on left masses
+//     only and IR on right masses only -- their covariance is EXACTLY zero
+//     (the joint cell probability equals the product to machine precision):
+//     the tower factorizes outside the causal diamond. The post-merge bit
+//     KM couples to both sides: cov(IL, KM) = -0.0055. The full-grid run
+//     shows the diamond is ENSEMBLE-DEPENDENT: widen the mass fuzz (m0, m7
+//     fuzzy too) and the races grow timelike tails -- cov(BL, BR) = -0.005,
+//     I = 1.6e-3 bits. "Spacelike" is a property of the epistemic state,
+//     not of the configuration.
+//   * THE FUZZY CONE THICKENS: left-front arrival std grows 0.043 -> 0.254
+//     -> 0.325 along bonds 0, 1, 2 -- the causal boundary disperses.
+//   * CAUSAL ENTROPY PRODUCTION: itinerary prefix entropy grows 0 -> 6.35
+//     bits over the first 12 events (162 distinct causal histories from six
+//     3-point mass jets); the event COUNT itself is fuzzy (mean 20.4,
+//     std 2.4). The chain is an amplifier converting parameter fuzz into
+//     causal-structure entropy at ~1 bit per collision.
+// ============================================================================
+let IL = [0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0]
+let IR = [0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 1.0, 0.0, 0.0]
+let KM = [0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 0.0, 1.0, 1.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0]
+let T12 = [3.90035512659, 3.90035512659, 3.90035512659, 3.90035512659, 3.90035512659, 3.90035512659, 3.90035512659, 3.90035512659, 3.90035512659, 3.86809812161, 3.86809812161, 3.86809812161, 3.86809812161, 3.86809812161, 3.86809812161, 3.86809812161, 3.86809812161, 3.86809812161, 3.83335031636, 3.83335031636, 3.83335031636, 3.83335031636, 3.83335031636, 3.83335031636, 3.83335031636, 3.83335031636, 3.83335031636, 4.03584111664, 4.03584111664, 4.03584111664, 4.03584111664, 4.03584111664, 4.03584111664, 4.03584111664, 4.03584111664, 4.03584111664, 4.0, 4.0, 4.0, 4.0, 4.0, 4.0, 4.0, 4.0, 4.0, 3.96139132749, 3.96139132749, 3.96139132749, 3.96139132749, 3.96139132749, 3.96139132749, 3.96139132749, 3.96139132749, 3.96139132749, 4.20827782714, 4.20827782714, 4.20827782714, 4.20827782714, 4.20827782714, 4.20827782714, 4.20827782714, 4.20827782714, 4.20827782714, 4.16795657092, 4.16795657092, 4.16795657092, 4.16795657092, 4.16795657092, 4.16795657092, 4.16795657092, 4.16795657092, 4.16795657092, 4.12452181435, 4.12452181435, 4.12452181435, 4.12452181435, 4.12452181435, 4.12452181435, 4.12452181435, 4.12452181435, 4.12452181435]
+let CN = [6.0, 6.0, 6.0, 7.0, 5.0, 6.0, 6.0, 6.0, 6.0, 6.0, 7.0, 6.0, 7.0, 5.0, 6.0, 6.0, 6.0, 7.0, 5.0, 5.0, 6.0, 4.0, 4.0, 5.0, 5.0, 5.0, 5.0, 6.0, 7.0, 6.0, 8.0, 7.0, 7.0, 6.0, 6.0, 7.0, 5.0, 7.0, 5.0, 5.0, 3.0, 5.0, 5.0, 5.0, 5.0, 5.0, 6.0, 6.0, 5.0, 3.0, 6.0, 5.0, 6.0, 6.0, 6.0, 6.0, 6.0, 6.0, 5.0, 6.0, 6.0, 6.0, 6.0, 6.0, 7.0, 7.0, 7.0, 5.0, 6.0, 6.0, 7.0, 7.0, 6.0, 7.0, 6.0, 7.0, 3.0, 6.0, 6.0, 6.0, 6.0]
+
+// --- the three order bits: marginals ---
+let S_IL = reduce(method_for(IL) <@> lambda(x) -> x, (+))
+let S_IR = reduce(method_for(IR) <@> lambda(x) -> x, (+))
+let S_KM = reduce(method_for(KM) <@> lambda(x) -> x, (+))
+let P_IL = S_IL / 81.0
+let P_IR = S_IR / 81.0
+let P_KM = S_KM / 81.0
+
+// --- spacelike pair: joint cell vs product of marginals ---
+let S_LR = reduce(method_for(zip(IL, IR)) <@> lambda(a, b) -> a * b, (+))
+let p11 = S_LR / 81.0
+let covLR = p11 - P_IL * P_IR
+let space_V = if sqrt(covLR * covLR) < 0.000000000001 then "FACTORIZED" else "COUPLED"
+
+// --- timelike pair: the post-merge bit knows the left race ---
+let S_LK = reduce(method_for(zip(IL, KM)) <@> lambda(a, b) -> a * b, (+))
+let covLK = S_LK / 81.0 - P_IL * P_KM
+let time_V = if sqrt(covLK * covLK) < 0.000000000001 then "FACTORIZED" else "COUPLED"
+
+// --- the fuzzy cone: bond-1 arrival tower ---
+let T1s = reduce(method_for(T12) <@> lambda(x) -> x, (+))
+let T2s = reduce(method_for(T12) <@> lambda(x) -> x * x, (+))
+let T_k1 = T1s / 81.0
+let T_k2 = T2s / 81.0 - T_k1 * T_k1
+
+// --- fuzzy event count: middle-bond collisions ---
+let C1s = reduce(method_for(CN) <@> lambda(x) -> x, (+))
+let C2s = reduce(method_for(CN) <@> lambda(x) -> x * x, (+))
+let CN_k1 = C1s / 81.0
+let CN_k2 = C2s / 81.0 - CN_k1 * CN_k1
+let count_V = if CN_k2 > 0.1 then "EVENT_SET_FUZZY" else "EVENT_SET_SHARP"
+
+// outside the diamond the tower factorizes exactly; inside it couples; the
+// cone edge disperses and the event set itself is a distribution:
+// EXPECT: P_IL = 0.111111111111111
+// EXPECT: P_IR = 0.222222222222222
+// EXPECT: P_KM = 0.0493827160493827
+// EXPECT: p11 = 0.0246913580246914
+// EXPECT: covLR = 0.0
+// EXPECT: space_V = "FACTORIZED"
+// EXPECT: covLK = -0.00548696844993141
+// EXPECT: time_V = "COUPLED"
+// EXPECT: T_k1 = 4.01108802456666
+// EXPECT: T_k2 = 0.0159847539172659
+// EXPECT: CN_k1 = 5.81481481481481
+// EXPECT: CN_k2 = 0.89163237311385
+// EXPECT: count_V = "EVENT_SET_FUZZY"

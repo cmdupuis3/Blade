@@ -1,0 +1,9 @@
+// TEST: Struct Dependent Bound Violated (aborts)
+// The spec's own example: l_out = 5 > l1 + l2 fires the guard at runtime.
+// ABORT: Constraint violation in CGPath
+struct CGPath {
+    l1: Int,
+    l2: Int,
+    l_out: Int in abs(l1 - l2) .. l1 + l2 + 1
+}
+let p = CGPath { l1 = 1, l2 = 2, l_out = 5 }

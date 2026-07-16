@@ -1,0 +1,11 @@
+// TEST: Parallel: omp+mpi Mutual Exclusion (rejects)
+// Mixed parallelism is ORDERED (outer, inner): `mpi, omp(...)` is the
+// supported hybrid (ranks outer, threads within each rank). The reverse —
+// OpenMP-outer / MPI-inner — is impossible (MPI ranks are processes fixed
+// at mpiexec launch; they cannot nest inside host threads) and rejects at
+// parse time with steering to `mpi, omp(...)`.
+let A = [1.0, 2.0, 3.0]
+let L = method_for(A, A)
+let f = lambda(x, y) where comm(x, y), omp(x: 1), mpi -> x * y
+let result = L <@> f |> compute
+// EXPECT: parse failure — OpenMP-outer / MPI-inner is not supported; did you mean `where mpi, omp(...)`?

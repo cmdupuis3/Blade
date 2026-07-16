@@ -1,0 +1,15 @@
+// TEST: Parallel: hybrid mpi+omp accepted, inert without gates
+// `where mpi, omp(...)` — the MPI-outer/OpenMP-inner hybrid — parses and
+// runs. In an ORDINARY compile the mpi emit gate is off, so the mpi half
+// is inert and the kernel degrades to the plain omp nest (deterministic
+// pointwise output, byte-comparable to a serial run). This pins the
+// degradation invariant: hybrid clauses cost nothing outside their modes.
+type VarIdx = Idx<4>
+type TimeIdx = Idx<3>
+let A: Array<Float64 like VarIdx, TimeIdx> = [
+    [1.0, 2.0, 3.0],
+    [2.0, 4.0, 6.0],
+    [4.0, 3.0, 2.0],
+    [5.0, 5.0, 5.0]]
+let m2 = method_for(A, A) <@> lambda(x: Array<Float64 like TimeIdx>, y: Array<Float64 like TimeIdx>) where comm(x, y), mpi, omp(x: 1) -> prodsum(x, y) / 3.0 |> compute
+// EXPECT: m2 = [4.66666666666667, 9.33333333333333, 5.33333333333333, 10, 18.6666666666667, 10.6666666666667, 20, 9.66666666666667, 15, 25]

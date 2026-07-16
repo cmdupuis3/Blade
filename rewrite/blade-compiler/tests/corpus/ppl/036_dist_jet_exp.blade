@@ -1,0 +1,19 @@
+// TEST: Dist Jet Exp
+import ppl as ppl
+// A genuinely NONLINEAR smooth map: Y = exp(X) as its degree-3 jet at the
+// mean — every derivative is exp(m), a runtime scalar expression (the
+// derivative VALUES are runtime, the contraction structure is static).
+// The jet is a deliberate degree-3 TRUNCATION of exp; the oracle computes
+// the same truncated pushforward (prototype dump-jet J4), so agreement
+// pins the semantics: dist_jet is exact for the jet you hand it.
+// q = 2 through s = 3 needs input order 6 — strict budget exactly met.
+type TimeIdx = Idx<6>
+let A: Array<Float64 like Idx<1>, TimeIdx> = [[1.0, 2.0, 4.0, 6.0, 0.0, 3.0]]
+let xd = ppl.dist(A, 6)
+let k1 = ppl.cumulant(xd, 1)
+let e = exp(k1(0))
+let dy = ppl.dist_jet(xd, 2, e, e, e, e)
+let y1 = ppl.cumulant(dy, 1)
+let y2 = ppl.cumulant(dy, 2)
+// EXPECT: y1 = [48.5949265682]
+// EXPECT: y2 = [7127.9191697]

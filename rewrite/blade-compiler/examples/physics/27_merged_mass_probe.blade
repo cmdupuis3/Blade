@@ -1,0 +1,76 @@
+// TEST: Physics -- Probing a Merged Pair: How Much Mass Does C Encounter?
+// ============================================================================
+// Two balls A (far) and B (near) with masses from the SAME overlapping jet
+// sit close together -- a "merged" pair: the unordered mass pair is known,
+// which-is-where is not. A probe C (m_C = 1 sharp, u = 2) strikes the pair,
+// and we ask its recoil what it hit, via the single-scatter inversion
+//     m_eff = m_C (u - v_f)/(u + v_f).
+// (tools/merged_probe.ps1 runs the 25 exact cascades; every statistic below
+// is computed in-language.) Three answers:
+//   * NEVER THE SUM. E[m_eff] = 1.454 sits between the near ball alone
+//     (1.08, the single-hit model) and m_A + m_B (2.16, the rigid-composite
+//     model), 0.71 away from the sum: an unbound pair is encountered as a
+//     CASCADE, not as a mass. Momentum bookkeeping sees the total mass;
+//     kinematic inversion never does -- "how much mass" depends on which
+//     question the probe asks.
+//   * A TOWER, NOT A NUMBER. The cascade branch is itself fuzzy (14/25
+//     single hit, 11/25 double -- B rattles back into C), so m_eff is a
+//     branch mixture; its variance (0.169) carries the branch structure.
+//     Quantum contrast: scattering off two centers SUPERPOSES the path
+//     amplitudes (A-first/B-first interfere); classically the cascade
+//     orders only mix -- cumulants, not fringes.
+//   * THE PROBE RE-SHARPENS MERGED IDENTITY. The merged record erased
+//     which-is-where; the cascade did not -- it strikes the NEAR ball
+//     first. Heavy-near and light-near sub-ensembles report different
+//     effective masses (1.40 vs 1.64: a LIGHT near ball mediates MORE of
+//     the far ball's inertia into the probe). A collision is a measurement
+//     (ex 06), and it can recover information the record lost.
+// ============================================================================
+let MA = [0.5, 0.75, 1.0, 1.35, 1.8, 0.5, 0.75, 1.0, 1.35, 1.8, 0.5, 0.75, 1.0, 1.35, 1.8, 0.5, 0.75, 1.0, 1.35, 1.8, 0.5, 0.75, 1.0, 1.35, 1.8]
+let MB = [0.5, 0.5, 0.5, 0.5, 0.5, 0.75, 0.75, 0.75, 0.75, 0.75, 1.0, 1.0, 1.0, 1.0, 1.0, 1.35, 1.35, 1.35, 1.35, 1.35, 1.8, 1.8, 1.8, 1.8, 1.8]
+let VF = [0.222222222222, -0.133333333333, -0.37037037037, -0.594594594595, -0.782608695652, 0.285714285714, 0.0408163265306, -0.239067055394, -0.518950437318, -0.765906362545, 0.0, 0.0, 0.0, -0.297872340426, -0.571428571429, -0.297872340426, -0.297872340426, -0.297872340426, -0.297872340426, -0.297872340426, -0.571428571429, -0.571428571429, -0.571428571429, -0.571428571429, -0.571428571429]
+let NC = [2.0, 2.0, 2.0, 2.0, 2.0, 1.0, 2.0, 2.0, 2.0, 2.0, 1.0, 1.0, 1.0, 2.0, 2.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0]
+
+// --- m_eff tower from the probe's recoil ---
+let M1s = reduce(method_for(VF) <@> lambda(v) -> 1.0 * (2.0 - v) / (2.0 + v), (+))
+let M2s = reduce(method_for(VF) <@> lambda(v) -> (1.0 * (2.0 - v) / (2.0 + v)) * (1.0 * (2.0 - v) / (2.0 + v)), (+))
+let meff_k1 = M1s / 25.0
+let meff_k2 = M2s / 25.0 - meff_k1 * meff_k1
+
+// --- the two naive models ---
+let Bs = reduce(method_for(MB) <@> lambda(b) -> b, (+))
+let near_k1 = Bs / 25.0
+let Ss = reduce(method_for(zip(MA, MB)) <@> lambda(a, b) -> a + b, (+))
+let sum_k1 = Ss / 25.0
+let gap_sum = sum_k1 - meff_k1
+let gap_near = meff_k1 - near_k1
+let sum_V = if sqrt(gap_sum * gap_sum) > 0.3 then "NOT_THE_SUM" else "SUM_LIKE"
+let near_V = if sqrt(gap_near * gap_near) > 0.3 then "NOT_ONE_BALL" else "SINGLE_HIT_LIKE"
+
+// --- the cascade branch is fuzzy: rattle probability ---
+let R2 = reduce(method_for(NC) <@> lambda(n) -> (if n > 1.5 then 1.0 else 0.0), (+))
+let P_rattle = R2 / 25.0
+
+// --- the probe re-measures which-is-where ---
+let Hs = reduce(method_for(zip(VF, MA, MB)) <@> lambda(v, a, b) -> (if b - a > 0.001 then 1.0 * (2.0 - v) / (2.0 + v) else 0.0), (+))
+let Hn = reduce(method_for(zip(MA, MB)) <@> lambda(a, b) -> (if b - a > 0.001 then 1.0 else 0.0), (+))
+let Ls = reduce(method_for(zip(VF, MA, MB)) <@> lambda(v, a, b) -> (if a - b > 0.001 then 1.0 * (2.0 - v) / (2.0 + v) else 0.0), (+))
+let Ln = reduce(method_for(zip(MA, MB)) <@> lambda(a, b) -> (if a - b > 0.001 then 1.0 else 0.0), (+))
+let meff_heavyNear = Hs / Hn
+let meff_lightNear = Ls / Ln
+let resharpen = meff_lightNear - meff_heavyNear
+let id_V = if sqrt(resharpen * resharpen) > 0.05 then "PROBE_RESHARPENS_IDENTITY" else "IDENTITY_STAYS_MERGED"
+
+// an unbound pair is a cascade, not a mass; the answer is a tower; and the
+// probe recovers the which-is-where bit the merged record erased:
+// EXPECT: meff_k1 = 1.454113057834
+// EXPECT: meff_k2 = 0.169008314557382
+// EXPECT: near_k1 = 1.08
+// EXPECT: sum_k1 = 2.16
+// EXPECT: gap_sum = 0.705886942166005
+// EXPECT: sum_V = "NOT_THE_SUM"
+// EXPECT: P_rattle = 0.44
+// EXPECT: near_V = "NOT_ONE_BALL"
+// EXPECT: meff_heavyNear = 1.40000000000055
+// EXPECT: meff_lightNear = 1.64428264458427
+// EXPECT: id_V = "PROBE_RESHARPENS_IDENTITY"

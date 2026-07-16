@@ -1,4 +1,5 @@
 // TEST: AD Nested Loops With Construction
+import ad as ad
 // ============================================================================
 // y = W x built by element construction in nested loops, then s = ||y||^2
 // read back in a second loop. Exercises: element writes (construction),
@@ -22,7 +23,7 @@ function q(w: Array<Float like Idx<2>>) -> Float = {
 }
 let wq = [1.0, 0.5]
 let mut dq = [0.0, 0.0]
-let qv = grad(q)(wq, dq)
+let qv = ad.grad(q)(wq, dq)
 // y = [2, 5, 8]; s = 93; dq0 = 4*1+10*3+16*5 = 114; dq1 = 4*2+10*4+16*6 = 144
 // EXPECT: qv = 93.0
 // EXPECT: dq = [114.0, 144.0]

@@ -1,0 +1,72 @@
+// TEST: Physics -- Invariant Detector (Second System: 2D Oscillator)
+import ppl as ppl
+// ============================================================================
+// The detector generalizes to a different system. A 2D isotropic harmonic
+// oscillator (omega = 1) on the elliptical orbit
+//   x = cos t + 0.3 sin t,   y = 0.4 cos t + 0.9 sin t
+//   vx = -sin t + 0.3 cos t, vy = -0.4 sin t + 0.9 cos t
+// Fuzz the phase t and the tower flags the conserved quantities: energy,
+// angular momentum, and the two components of the FRADKIN TENSOR (T1, T2) --
+// whose Poisson-bracket algebra is the SU(2) that makes the oscillator's
+// levels degenerate (see tools/group_recovery.ps1). Position/velocity spread.
+// The invariants are polynomial in the state, so the pushforward is exact.
+// Verdicts accept absolute degeneracy (|k2| < 1e-20) before the relative
+// test -- see the zero-mean-invariant note in 10_invariant_detector_kepler.
+// ============================================================================
+type TimeIdx = Idx<7>
+let T: Array<Float64 like Idx<1>, TimeIdx> = [[0.237346150024, 0.496016388451, 0.659413339833, 0.8, 0.940586660167, 1.10398361155, 1.36265384998]]
+let d = ppl.dist(T, 6)
+
+// --- position x -- expected VARIANT ---
+let x_d  = ppl.dist_map(d, 2, 3, lambda(t) -> cos(t) + 0.3 * sin(t))
+let x_k1 = ppl.cumulant(x_d, 1)
+let x_k2 = ppl.cumulant(x_d, 2)
+let x_disp = sqrt(x_k2(0) * x_k2(0)) / (sqrt(x_k1(0) * x_k1(0)) + 0.000000001)
+let x_V = if sqrt(x_k2(0) * x_k2(0)) < 1.0e-20 then "INVARIANT" else (if x_disp < 0.000001 then "INVARIANT" else "VARIANT")
+
+// --- velocity vx -- expected VARIANT ---
+let vx_d  = ppl.dist_map(d, 2, 3, lambda(t) -> 0.0 - sin(t) + 0.3 * cos(t))
+let vx_k1 = ppl.cumulant(vx_d, 1)
+let vx_k2 = ppl.cumulant(vx_d, 2)
+let vx_disp = sqrt(vx_k2(0) * vx_k2(0)) / (sqrt(vx_k1(0) * vx_k1(0)) + 0.000000001)
+let vx_V = if sqrt(vx_k2(0) * vx_k2(0)) < 1.0e-20 then "INVARIANT" else (if vx_disp < 0.000001 then "INVARIANT" else "VARIANT")
+
+// --- ENERGY E = 1/2 v^2 + 1/2 r^2 ---
+let E_d  = ppl.dist_map(d, 2, 3, lambda(t) -> 0.5 * ((0.0 - sin(t) + 0.3 * cos(t)) * (0.0 - sin(t) + 0.3 * cos(t)) + (0.0 - 0.4 * sin(t) + 0.9 * cos(t)) * (0.0 - 0.4 * sin(t) + 0.9 * cos(t))) + 0.5 * ((cos(t) + 0.3 * sin(t)) * (cos(t) + 0.3 * sin(t)) + (0.4 * cos(t) + 0.9 * sin(t)) * (0.4 * cos(t) + 0.9 * sin(t))))
+let E_k1 = ppl.cumulant(E_d, 1)
+let E_k2 = ppl.cumulant(E_d, 2)
+let E_disp = sqrt(E_k2(0) * E_k2(0)) / (sqrt(E_k1(0) * E_k1(0)) + 0.000000001)
+let E_V = if sqrt(E_k2(0) * E_k2(0)) < 1.0e-20 then "INVARIANT" else (if E_disp < 0.000001 then "INVARIANT" else "VARIANT")
+
+// --- ANGULAR MOMENTUM Lz = x vy - y vx ---
+let Lz_d  = ppl.dist_map(d, 2, 3, lambda(t) -> (cos(t) + 0.3 * sin(t)) * (0.0 - 0.4 * sin(t) + 0.9 * cos(t)) - (0.4 * cos(t) + 0.9 * sin(t)) * (0.0 - sin(t) + 0.3 * cos(t)))
+let Lz_k1 = ppl.cumulant(Lz_d, 1)
+let Lz_k2 = ppl.cumulant(Lz_d, 2)
+let Lz_disp = sqrt(Lz_k2(0) * Lz_k2(0)) / (sqrt(Lz_k1(0) * Lz_k1(0)) + 0.000000001)
+let Lz_V = if sqrt(Lz_k2(0) * Lz_k2(0)) < 1.0e-20 then "INVARIANT" else (if Lz_disp < 0.000001 then "INVARIANT" else "VARIANT")
+
+// --- FRADKIN T1 = 1/2(vx^2 - vy^2) + 1/2(x^2 - y^2) ---
+let T1_d  = ppl.dist_map(d, 2, 3, lambda(t) -> 0.5 * ((0.0 - sin(t) + 0.3 * cos(t)) * (0.0 - sin(t) + 0.3 * cos(t)) - (0.0 - 0.4 * sin(t) + 0.9 * cos(t)) * (0.0 - 0.4 * sin(t) + 0.9 * cos(t))) + 0.5 * ((cos(t) + 0.3 * sin(t)) * (cos(t) + 0.3 * sin(t)) - (0.4 * cos(t) + 0.9 * sin(t)) * (0.4 * cos(t) + 0.9 * sin(t))))
+let T1_k1 = ppl.cumulant(T1_d, 1)
+let T1_k2 = ppl.cumulant(T1_d, 2)
+let T1_disp = sqrt(T1_k2(0) * T1_k2(0)) / (sqrt(T1_k1(0) * T1_k1(0)) + 0.000000001)
+let T1_V = if sqrt(T1_k2(0) * T1_k2(0)) < 1.0e-20 then "INVARIANT" else (if T1_disp < 0.000001 then "INVARIANT" else "VARIANT")
+
+// --- FRADKIN T2 = vx vy + x y ---
+let T2_d  = ppl.dist_map(d, 2, 3, lambda(t) -> (0.0 - sin(t) + 0.3 * cos(t)) * (0.0 - 0.4 * sin(t) + 0.9 * cos(t)) + (cos(t) + 0.3 * sin(t)) * (0.4 * cos(t) + 0.9 * sin(t)))
+let T2_k1 = ppl.cumulant(T2_d, 1)
+let T2_k2 = ppl.cumulant(T2_d, 2)
+let T2_disp = sqrt(T2_k2(0) * T2_k2(0)) / (sqrt(T2_k1(0) * T2_k1(0)) + 0.000000001)
+let T2_V = if sqrt(T2_k2(0) * T2_k2(0)) < 1.0e-20 then "INVARIANT" else (if T2_disp < 0.000001 then "INVARIANT" else "VARIANT")
+
+// invariants are pinned to their constant values; verdicts confirm the split:
+// EXPECT: E_k1 = [1.03]
+// EXPECT: Lz_k1 = [0.78]
+// EXPECT: T1_k1 = [0.06]
+// EXPECT: T2_k1 = [0.67]
+// EXPECT: x_V = "VARIANT"
+// EXPECT: vx_V = "VARIANT"
+// EXPECT: E_V = "INVARIANT"
+// EXPECT: Lz_V = "INVARIANT"
+// EXPECT: T1_V = "INVARIANT"
+// EXPECT: T2_V = "INVARIANT"

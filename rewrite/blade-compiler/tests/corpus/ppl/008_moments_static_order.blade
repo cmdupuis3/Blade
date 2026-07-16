@@ -1,9 +1,10 @@
 // TEST: Moments Static Order
+import ppl as ppl
 // The order argument is any statically-evaluable integer (same contract as
 // the replicate count, replicate/005): a `let static` value drives the
 // k-fold former. Same values as 001.
 type TimeIdx = Idx<2>
 let static r = 2
 let A: Array<Float64 like Idx<2>, TimeIdx> = [[1.0, 2.0], [3.0, 4.0]]
-let m2 = moments(A, r)
+let m2 = ppl.moments(A, r)
 // EXPECT: m2 = [2.5, 5.5, 12.5]

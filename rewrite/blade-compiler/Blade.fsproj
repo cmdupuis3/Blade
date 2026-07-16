@@ -7,13 +7,19 @@
   </PropertyGroup>
 
   <ItemGroup>
+    <Compile Include="Runtime.fs" />
     <Compile Include="Ast.fs" />
     <Compile Include="Types.fs" />
     <Compile Include="Lexer.fs" />
     <Compile Include="Parser.fs" />
     <Compile Include="Grad.fs" />
     <Compile Include="IR.fs" />
+    <!-- Provider registry: the core<->provider seam (ProviderSpec records
+         keyed by surface module name). Compiles after IR.fs and before the
+         provider implementations that register into it. -->
+    <Compile Include="providers/ProviderRegistry.fs" />
     <Compile Include="providers/NetcdfProvider.fs" />
+    <Compile Include="providers/ZarrProvider.fs" />
     <Compile Include="TypedAst.fs" />
     <Compile Include="StaticEval.fs" />
     <!-- Provider-backed statics bridge: registers the NetCDF compile-time
@@ -90,6 +96,9 @@
     <Compile Include="tests/OmpTests.fs" />
     <Compile Include="tests/AllocTests.fs" />
     <Compile Include="tests/NetcdfTests.fs" />
+    <Compile Include="tests/ZarrTests.fs" />
+    <Compile Include="tests/MpiTests.fs" />
+    <Compile Include="tests/HybridTests.fs" />
     <Compile Include="tests/DiffOracle.fs" />
     <Compile Include="tests/RunAll.fs" />
     <Compile Include="Cli.fs" />

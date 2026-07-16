@@ -1,6 +1,6 @@
 // NetCDF provider tests. Tests against a mock NcFile run always; live-load
 // tests need sample.nc + libnetcdf and skip otherwise. Extracted verbatim
-// from Main.fs (audit §2.3).
+// from Main.fs (audit Â§2.3).
 module Blade.Tests.NetcdfTests
 
 open System
@@ -38,7 +38,7 @@ let runNetcdfTests () =
             printfn "  PASS: %s" name
             passed <- passed + 1
         else
-            printfn "  FAIL: %s — %s" name detail
+            printfn "  FAIL: %s â€” %s" name detail
             failed <- failed + 1
 
     // ---------------------------------------------------------------
@@ -91,7 +91,7 @@ let runNetcdfTests () =
     // Helper to find structs by name
     let findStruct name (m: IRModule) =
         m.Types |> List.tryPick (function
-            | IRTDStruct (n, fields, _) when n = name -> Some fields
+            | IRTDStruct (n, fields) when n = name -> Some fields
             | _ -> None)
 
     check "Module name is 'sample'"
@@ -181,7 +181,7 @@ let runNetcdfTests () =
 
     let fieldOf structName fieldName =
         match lookupTypeDef structName envP with
-        | Some (TDIStruct (_, _, fields)) ->
+        | Some (TDIStruct (_, _, fields, _)) ->
             fields |> List.tryPick (fun (n, t) -> if n = fieldName then Some t else None)
         | _ -> None
 
@@ -203,7 +203,7 @@ let runNetcdfTests () =
     // Test 3c: load_compound view transform (compoundViewType)
     // Pure type transform -- a bool mask covering all of a variable's dims
     // (matched by index Id) collapses them into one CompoundIdx, i.e. a scalar
-    // Compound<T, RANK>. No data read; that happens at |> read.
+    // Compound<T, RANK>. No data read; that happens at |> NetCDF.read.
     // ---------------------------------------------------------------
     printfn "\n--- load_compound view transform (compoundViewType) ---"
 
@@ -765,7 +765,7 @@ let runNetcdfTests () =
                 | IRTDIndexType (name, idx) ->
                     let ext = match idx.Extent with IRLit (IRLitInt n) -> sprintf "%d" n | _ -> "?"
                     printfn "      type %s = Idx<%s>" name ext
-                | IRTDStruct (name, fields, _) ->
+                | IRTDStruct (name, fields) ->
                     printfn "      struct %s = {" name
                     for (fname, ftype) in fields do
                         printfn "        %s: %s" fname (ppIRTypeIn names ftype)
@@ -785,7 +785,7 @@ let runNetcdfTests () =
     printfn "\n--- Blade Program Import (sample.nc) ---"
 
     let bladeSource = """
-import Providers.NetCDF as NetCDF
+import netcdf as NetCDF
 
 let sample = NetCDF.load("sample.nc")
 """
@@ -801,8 +801,8 @@ let sample = NetCDF.load("sample.nc")
             (sprintf "got %A" decls.[0])
         
         check "Import has correct qualified name"
-            (match decls.[0] with 
-             | DeclImport (["Providers"; "NetCDF"], ImportQualified (Some "NetCDF")) -> true 
+            (match decls.[0] with
+             | DeclImport (["netcdf"], ImportQualified (Some "NetCDF")) -> true
              | _ -> false)
             (sprintf "got %A" decls.[0])
 
@@ -825,7 +825,7 @@ let sample = NetCDF.load("sample.nc")
                     | IRTDIndexType (name, idx) ->
                         let ext = match idx.Extent with IRLit (IRLitInt n) -> sprintf "%d" n | _ -> "?"
                         printfn "    type %s = Idx<%s>" name ext
-                    | IRTDStruct (name, fields, _) ->
+                    | IRTDStruct (name, fields) ->
                         printfn "    struct %s = {" name
                         for (fname, ftype) in fields do
                             printfn "      %s: %s" fname (ppIRTypeIn names ftype)
@@ -837,16 +837,16 @@ let sample = NetCDF.load("sample.nc")
                 check "Provider produced index types"
                     (idxTypes.Length >= 3) (sprintf "got %A" idxTypes)
 
-                let hasVarsStruct = modul.Types |> List.exists (function IRTDStruct ("vars", _, _) -> true | _ -> false)
+                let hasVarsStruct = modul.Types |> List.exists (function IRTDStruct ("vars", _) -> true | _ -> false)
                 check "Provider produced vars struct" hasVarsStruct ""
 
-                let hasDimsStruct = modul.Types |> List.exists (function IRTDStruct ("dims", _, _) -> true | _ -> false)
+                let hasDimsStruct = modul.Types |> List.exists (function IRTDStruct ("dims", _) -> true | _ -> false)
                 check "Provider produced dims struct" hasDimsStruct ""
 
                 // Verify vars struct has field A
                 let varAExists =
                     modul.Types |> List.exists (function
-                        | IRTDStruct ("vars", fields, _) ->
+                        | IRTDStruct ("vars", fields) ->
                             fields |> List.exists (fun (n, _) -> n = "A")
                         | _ -> false)
                 check "vars struct has field A" varAExists ""
@@ -866,7 +866,7 @@ let sample = NetCDF.load("sample.nc")
         check "Parse succeeds" false (sprintf "%d:%d %s" e.Line e.Col e.Message)
 
     // ---------------------------------------------------------------
-    // load_compound |> read: full lowering + codegen wiring (slice 2b).
+    // load_compound |> NetCDF.read: full lowering + codegen wiring (slice 2b).
     // Needs sample.nc (with a data variable B and an integer mask B_mask, the
     // mask covering a leading prefix of B's dims) + libnetcdf; skips gracefully
     // otherwise. When the fixture is present this asserts that lowering recorded
@@ -875,12 +875,12 @@ let sample = NetCDF.load("sample.nc")
     // exercising tryCompoundRead -> ProviderReads carrier -> genReadCompoundVar
     // end to end, which the isolated unit tests above do not.
     // ---------------------------------------------------------------
-    printfn "\n--- load_compound |> read (sample.nc) ---"
+    printfn "\n--- load_compound |> NetCDF.read (sample.nc) ---"
     let lcSource = """
-import Providers.NetCDF as NetCDF
+import netcdf as NetCDF
 
 let sample = NetCDF.load("sample.nc")
-let data = NetCDF.load_compound(sample.vars.B, sample.vars.B_mask) |> read
+let data = NetCDF.load_compound(sample.vars.B, sample.vars.B_mask) |> NetCDF.read
 """
     try
         match lower lcSource with
@@ -944,10 +944,10 @@ let data = NetCDF.load_compound(sample.vars.B, sample.vars.B_mask) |> read
     // and the program compiles + runs.
     printfn "\n--- compound map: method_for(data) <@> (x -> x+x) (sample.nc) ---"
     let lcMapSource = """
-import Providers.NetCDF as NetCDF
+import netcdf as NetCDF
 
 let sample = NetCDF.load("sample.nc")
-let data = NetCDF.load_compound(sample.vars.B, sample.vars.B_mask) |> read
+let data = NetCDF.load_compound(sample.vars.B, sample.vars.B_mask) |> NetCDF.read
 let out = method_for(data) <@> lambda(x) -> x + x |> compute
 """
     try
@@ -982,7 +982,7 @@ let out = method_for(data) <@> lambda(x) -> x + x |> compute
     | ex -> printfn "  SKIP compound map: %s" ex.Message
 
     // ---------------------------------------------------------------
-    // Dense provider read: method_for(sample.vars.A |> read) <@> (x -> x+x).
+    // Dense provider read: method_for(sample.vars.A |> NetCDF.read) <@> (x -> x+x).
     // The dense analog of the compound path -- exercises tryPlainRead (a maskless
     // ProviderReadSpec) -> the genBinding ProviderReads intercept -> genReadVar,
     // which now materializes a nested Array (allocate + flat->nested copy) that a
@@ -995,12 +995,12 @@ let out = method_for(data) <@> lambda(x) -> x + x |> compute
     // at runtime exits nonzero with a NetCDF error instead of printing the
     // uninitialized buffer.
     // ---------------------------------------------------------------
-    printfn "\n--- dense read: method_for(sample.vars.A |> read) <@> (x -> x+x) (sample.nc) ---"
+    printfn "\n--- dense read: method_for(sample.vars.A |> NetCDF.read) <@> (x -> x+x) (sample.nc) ---"
     let denseReadSource = """
-import Providers.NetCDF as NetCDF
+import netcdf as NetCDF
 
 let sample = NetCDF.load("sample.nc")
-let A = sample.vars.A |> read
+let A = sample.vars.A |> NetCDF.read
 let out = method_for(A) <@> lambda(x) -> x + x |> compute
 """
     try
@@ -1161,14 +1161,14 @@ let out = method_for(A) <@> lambda(x) -> x + x |> compute
      let scalar = Blade.ProviderStatics.shapeValue [] (fun _ -> Blade.StaticEval.SVFloat 7.5)
      check "shapeValue: rank-0 folds to the bare scalar" (scalar = Blade.StaticEval.SVFloat 7.5) (sprintf "got %A" scalar))
 
-    // Live fold: `let static xd = sample.dims.xdim |> read` folds through
+    // Live fold: `let static xd = sample.dims.xdim |> NetCDF.read` folds through
     // libnetcdf; xdim = 1..20 in the fixture, so length = 20 and the
     // static prodsum is sum i^2 = 2870. Skips without libnetcdf/sample.nc.
     let foldSource = """
-import Providers.NetCDF as NetCDF
+import netcdf as NetCDF
 
 let sample = NetCDF.load("sample.nc")
-let static xd = sample.dims.xdim |> read
+let static xd = sample.dims.xdim |> NetCDF.read
 let static n = length(xd)
 let static ps = prodsum(xd, xd)
 let a = n

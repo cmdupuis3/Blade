@@ -1,4 +1,5 @@
 // TEST: Cumulants Pair
+import ppl as ppl
 // cumulants(A, 2): the partition-lattice expander at order 2 — the kernel
 // is the Möbius-weighted sum over set partitions of [2]:
 // κ2 = E[ab] - E[a]E[b] (partitions {12} and {1}{2}, weights +1 and -1).
@@ -6,5 +7,5 @@
 // `dotnet run -- dump-cumulants` (data A).
 type TimeIdx = Idx<2>
 let A: Array<Float64 like Idx<2>, TimeIdx> = [[1.0, 2.0], [3.0, 4.0]]
-let k2 = cumulants(A, 2)
+let k2 = ppl.cumulants(A, 2)
 // EXPECT: k2 = [0.25, 0.25, 0.25]

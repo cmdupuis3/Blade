@@ -1,0 +1,37 @@
+// TEST: Physics -- Pendulum Period Under A 10% Length Tolerance
+import ppl as ppl
+// ============================================================================
+// T = 2*pi*sqrt(L/g), with L ~ (1.0 m, (0.10 m)^2) on a symmetric 3-point
+// ensemble. The freshman error-propagation formula sigma_T = |dT/dL| sigma_L
+// is exactly the DEGREE-1 slice of this tower. Degree 2 adds the concavity
+// bias -- sqrt is concave, so length jitter makes the pendulum run FAST on
+// average (mean period 2.00355 below the plug-in 2.00607) -- and degree 3
+// the (negative) skew.
+// EXPECT values checked vs an independent PowerShell ensemble.
+// ============================================================================
+type TimeIdx = Idx<3>
+let LD: Array<Float64 like Idx<1>, TimeIdx> = [[0.877525512861, 1.0, 1.12247448714]]
+let d = ppl.dist(LD, 6)
+
+let dT = ppl.dist_map(d, 3, 2, lambda(l) -> 6.28318530718 * sqrt(l / 9.81))
+let t1 = ppl.cumulant(dT, 1)
+let t2 = ppl.cumulant(dT, 2)
+let t3 = ppl.cumulant(dT, 3)
+
+// deeper jet for the refined variance
+let dTb = ppl.dist_map(d, 2, 3, lambda(l) -> 6.28318530718 * sqrt(l / 9.81))
+let u2 = ppl.cumulant(dTb, 2)
+
+// exact route: empirical cumulants of the 3 transformed periods
+let TD: Array<Float64 like Idx<1>, TimeIdx> = [[1.87920967879, 2.00606668071, 2.12536538931]]
+let e1 = ppl.cumulants(TD, 1)
+let e2 = ppl.cumulants(TD, 2)
+let e3 = ppl.cumulants(TD, 3)
+
+// EXPECT: t1 = [2.00355909736021]
+// EXPECT: t2 = [0.0100639028058264]
+// EXPECT: t3 = [-0.0000378383450569921]
+// EXPECT: u2 = [0.0101016660212524]
+// EXPECT: e1 = [2.00354724960333]
+// EXPECT: e2 = [0.0101019460701517]
+// EXPECT: e3 = [-0.0000381607435784304]

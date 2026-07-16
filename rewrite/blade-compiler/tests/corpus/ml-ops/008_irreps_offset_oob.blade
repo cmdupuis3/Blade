@@ -1,0 +1,9 @@
+// TEST: ML Ops IrrepsIdx Offset OOB (rejects)
+import ml as ml
+// ============================================================================
+// v3 reject: block index out of range is a static-evaluation error —
+// spec_h has 3 blocks (0..2), so irreps_offset(spec_h, 3) must refuse at
+// compile time, not read past the offset table.
+// ============================================================================
+let static spec_h = [(0, 0, 2), (1, 1, 2), (2, 0, 1)]
+let static bad = ml.irreps_offset(spec_h, 3)

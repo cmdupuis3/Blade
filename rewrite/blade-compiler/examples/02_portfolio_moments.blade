@@ -1,4 +1,5 @@
 // TEST: Example Portfolio Moment Analytics
+import ppl as ppl
 // ============================================================================
 // Two-asset return analytics on Blade's moment algebra and symmetric index
 // types. The estimators come from three different subsystems and are pinned
@@ -28,8 +29,8 @@ let R: Array<Float64 like Idx<2>, DayIdx> = [
 // central covariance, printed as its canonical upper-triangle cells
 // (var0, cov, var1).
 // ============================================================================
-let mu = moments(R, 1)
-let C = comoments(R, 2)
+let mu = ppl.moments(R, 1)
+let C = ppl.comoments(R, 2)
 // EXPECT: mu = [0.5, 0.366666666666667]
 // EXPECT: C = [3.16666666666667, -0.258333333333333, 0.108888888888889]
 
@@ -39,8 +40,8 @@ let C = comoments(R, 2)
 // cumulant (the three sigma-squared pairings subtracted), not the central
 // fourth moment.
 // ============================================================================
-let k3 = cumulants(R, 3)
-let k4 = cumulants(R, 4)
+let k3 = ppl.cumulants(R, 3)
+let k4 = ppl.cumulants(R, 4)
 // EXPECT: k3 = [-0.75, -0.223611111111111, 0.0469444444444444, -0.0174074074074075]
 // EXPECT: k4 = [-13.5416666666667, 0.339583333333333, 0.12037037037037, -0.0156388888888888, -0.0111185185185185]
 
@@ -106,15 +107,15 @@ let X: Array<Float64 like Idx<2>, FDayIdx> = [
 let Y: Array<Float64 like Idx<2>, FDayIdx> = [
     [0.2, 0.4, 0.2, 0.4],
     [1.0, 3.0, 2.0, 2.0]]
-let _ = independent(X, Y)
-let dx = dist(X, 3)
-let dy = dist(Y, 3)
+let _ = ppl.independent(X, Y)
+let dx = ppl.dist(X, 3)
+let dy = ppl.dist(Y, 3)
 let sx = 0.6 * dx
 let sy = 0.4 * dy
 let port = sx + sy
-let c1 = cumulant(port, 1)
-let c2 = cumulant(port, 2)
-let c3 = cumulant(port, 3)
+let c1 = ppl.cumulant(port, 1)
+let c2 = ppl.cumulant(port, 2)
+let c3 = ppl.cumulant(port, 3)
 // kappa_k(port) = 0.6^k kappa_k(X) + 0.4^k kappa_k(Y); Y is mean-symmetric
 // so its odd cumulants vanish and the portfolio skew is X's, scaled.
 // EXPECT: c1 = [1.32, 1.4]
@@ -125,12 +126,12 @@ let c3 = cumulant(port, 3)
 // admits + on the Dist parameters inside the body, and each call site must
 // discharge the license against its actuals' declared sources.
 function combine(a: Dist<3, Float64 like Idx<2>>, b: Dist<3, Float64 like Idx<2>>)
-  where indep(a, b) -> Dist<3, Float64 like Idx<2>> =
+  where ppl.indep(a, b) -> Dist<3, Float64 like Idx<2>> =
   a + b
 
 let total = combine(dx, dy)
-let t1 = cumulant(total, 1)
-let t2 = cumulant(total, 2)
+let t1 = ppl.cumulant(total, 1)
+let t2 = ppl.cumulant(total, 2)
 // unweighted sum: kappa_k(X) + kappa_k(Y)
 // EXPECT: t1 = [2.3, 3.0]
 // EXPECT: t2 = [0.51, 0.175, 0.625]
@@ -144,8 +145,8 @@ let t2 = cumulant(total, 2)
 // the return history.
 // ============================================================================
 let W: Array<Float64 like Idx<2>, Idx<2>> = [[1.0, -0.5], [0.0, 1.0]]
-let dR = dist(R, 3)
-let (h1, h2, h3) = dist_affine(W, dR)
+let dR = ppl.dist(R, 3)
+let (h1, h2, h3) = ppl.dist_affine(W, dR)
 // EXPECT: h1 = [0.316666666666667, 0.366666666666667]
 // EXPECT: h2 = [3.45222222222222, -0.312777777777778, 0.108888888888889]
 // EXPECT: h3 = [-0.377199074074074, -0.274907407407407, 0.0556481481481482, -0.0174074074074075]

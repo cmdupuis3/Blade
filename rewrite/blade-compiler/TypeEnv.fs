@@ -73,10 +73,27 @@ type VarInfo = {
 /// Registered type definition
 type TypeDefInfo =
     | TDIAlias of IRType
-    | TDIStruct of name: string * typeParams: string list * fields: (string * IRType) list
+    | TDIStruct of name: string * typeParams: string list * fields: (string * IRType) list * constraints: Expr list
     | TDIVariant of name: string * typeParams: string list * variants: (string * IRType option) list
     | TDIIndexType of name: string * idx: IRIndexType * body: TypeExpr
     | TDIEnumIdx of name: string * idx: IRIndexType * values: EnumValue list * body: TypeExpr
+
+/// What a mutual-group member aliases: a registered struct (constraints
+/// reference its fields as `P.f`) or a scalar type (referenced bare).
+type MutualMemberKind =
+    | MMStruct of structName: string
+    | MMScalar of IRType
+
+/// A `type P1 = T1 and P2 = T2 where ...` group. Members stay transparent
+/// aliases; this record carries the joint constraint for binding-site checks.
+type MutualGroupInfo = {
+    /// First member's name — doubles as the group's display id.
+    GroupId: string
+    /// Members in declaration order.
+    Members: (string * MutualMemberKind) list
+    /// Untyped where-conjuncts, validated at declaration time.
+    Constraints: Expr list
+}
 
 /// Exported bindings from a type-checked module, for cross-module imports
 type TypeModuleExport = {
@@ -151,6 +168,15 @@ type TypeEnv = {
     /// funcName → (paramNames, conjuncts). Populated by checkFunctionDecl;
     /// consulted at call sites for constraint discharge.
     FuncConstraints: System.Collections.Generic.Dictionary<string, string list * (string * string list) list>
+    /// Mutually constrained alias groups: groupId → group info.
+    MutualGroups: Map<string, MutualGroupInfo>
+    /// Member alias name → owning groupId, for annotation scanning.
+    MutualMembers: Map<string, string>
+    /// Functions whose declared return type introduces a mutual group
+    /// (e.g. `-> (P1, P2)`): funcName → groupId. The joint check is emitted
+    /// at the return site, so annotated callers don't re-check. Mutable
+    /// dictionary shared by reference, like FuncConstraints.
+    MutualReturnFuncs: System.Collections.Generic.Dictionary<string, string>
 }
 
 let emptyEnv () = {
@@ -172,6 +198,9 @@ let emptyEnv () = {
     Warnings = ResizeArray<string>()
     Provenance = System.Collections.Generic.Dictionary<IRId, Set<string>>()
     FuncConstraints = System.Collections.Generic.Dictionary<string, string list * (string * string list) list>()
+    MutualGroups = Map.empty
+    MutualMembers = Map.empty
+    MutualReturnFuncs = System.Collections.Generic.Dictionary<string, string>()
 }
 
 /// Append a non-fatal diagnostic to the env's warnings collector.
@@ -284,9 +313,9 @@ let registerProviderModule (env: TypeEnv) (name: string) (pm: IRModule) : TypeEn
     let envS =
         pm.Types |> List.fold (fun e td ->
             match td with
-            | IRTDStruct (n, fields, _) -> registerTypeDef n (TDIStruct (n, [], fields)) e
+            | IRTDStruct (n, fields) -> registerTypeDef n (TDIStruct (n, [], fields, [])) e
             | _ -> e) env
-    let moduleStruct = TDIStruct (name, [], [("dims", IRTNamed "dims"); ("vars", IRTNamed "vars")])
+    let moduleStruct = TDIStruct (name, [], [("dims", IRTNamed "dims"); ("vars", IRTNamed "vars")], [])
     (registerTypeDef name moduleStruct envS, IRTNamed name)
 
 

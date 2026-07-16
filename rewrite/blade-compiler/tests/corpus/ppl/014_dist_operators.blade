@@ -1,4 +1,5 @@
 // TEST: Dist Operators
+import ppl as ppl
 // Operator surface on dist bindings (elaboration-level; typed Dist<r, τ>
 // dispatch is the successor): + and - are per-order cumulant combination
 // (independence-gated; κ_k(−Y) = (−1)^k κ_k(Y) so even orders ADD under
@@ -7,16 +8,16 @@
 type TimeIdx = Idx<2>
 let X: Array<Float64 like Idx<2>, TimeIdx> = [[1.0, 2.0], [3.0, 4.0]]
 let Y: Array<Float64 like Idx<2>, TimeIdx> = [[2.0, 2.0], [1.0, 3.0]]
-let _ = independent(X, Y)
-let dx = dist(X, 2)
-let dy = dist(Y, 2)
+let _ = ppl.independent(X, Y)
+let dx = ppl.dist(X, 2)
+let dy = ppl.dist(Y, 2)
 let s = dx + dy
 let w = dx - dy
 let h = 2.0 * dx
-let s2 = cumulant(s, 2)
-let w1 = cumulant(w, 1)
-let w2 = cumulant(w, 2)
-let h2 = cumulant(h, 2)
+let s2 = ppl.cumulant(s, 2)
+let w1 = ppl.cumulant(w, 1)
+let w2 = ppl.cumulant(w, 2)
+let h2 = ppl.cumulant(h, 2)
 // EXPECT: s2 = [0.25, 0.25, 1.25]
 // EXPECT: w1 = [-0.5, 1.5]
 // EXPECT: w2 = [0.25, 0.25, 1.25]

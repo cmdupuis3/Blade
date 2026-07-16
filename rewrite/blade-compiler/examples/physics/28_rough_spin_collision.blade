@@ -1,0 +1,147 @@
+// TEST: Physics -- Rough Spin: Glancing Fuzz and the Hidden Register
+// ============================================================================
+// Rotation enters the fuzzy world. 2D disks, perfectly rough elastic contact
+// (slip reverses; I = m R^2 / 2), radii R = 0.5 m^(1/3). Ball 1 (m = 1,
+// u = 1, no spin) is aimed with a PERFECT fixed offset d = 0.55 at ball 2
+// (mass fuzzy, 7-point jet; initial spin 0 or 4 -- 14-realization product):
+// the impact GEOMETRY is fuzzy only through the sizes, sin(phi) = d/(R1+R2).
+// Everything below is computed in Blade: the collision is closed-form, so
+// staged kernel columns carry the whole formula chain, and CONSERVATION IS
+// THE ORACLE -- the total-energy, momentum, and angular-momentum deviation
+// towers must come out degenerate at machine zero or the physics is wrong
+// (plus an in-file analytic self-test: the head-on equal-mass limit must
+// give exactly v1' = 0, v2' = 1). Findings:
+//   * A NEW INVARIANT, A NEW VARIANT. Total J and E stay CONSERVED under
+//     the fuzz (towers ~1e-32), but the translational energy ALONE -- an
+//     invariant of the entire smooth arc -- becomes VARIANT: glancing
+//     contact opens a fuzzy channel into rotation, and the trans/rot
+//     PARTITION inherits the mass jet.
+//   * SPIN-ORBIT CORRELATION FROM NOTHING. In the spinless sub-ensemble the
+//     collision manufactures Cov(omega_2', sin theta_1) != 0: who spins how
+//     fast is correlated with who deflects where -- new law-carrying
+//     structure stored, as always, in cross-cumulants.
+//   * THE HIDDEN REGISTER. Between contacts, spin does not touch the
+//     trajectory: the two sub-ensembles (spin 0 vs spin 4) have IDENTICAL
+//     records up to the moment of contact -- and sharply different
+//     deflection towers after it. Spin is internal state invisible to the
+//     position record, revealed only by touch: the classical seed of an
+//     internal quantum number, carried here as a mixture (no phases).
+//   * ANGLES LIVE ON THE CIRCLE. The deflection tower's natural moments are
+//     E[cos k theta], E[sin k theta] -- trigonometric moments, whose
+//     realizability is a TOEPLITZ (not Hankel) positivity condition: after
+//     the half-line gap tower (25) and the S_n order tower (22), the third
+//     moment-problem geometry enters the arc. The resultant length
+//     rho = |E e^(i theta)| < 1 measures angular dephasing.
+// Formula chain (n-t frame, n from 1 to 2): normal = 1D elastic; slip
+// s = (v1t - v2t) + R1 w1 + R2 w2 reverses via J_t = -2 mu_t s with
+// 1/mu_t = 3(1/m1 + 1/m2); dw_i = 2 J_t / (m_i R_i).
+// ============================================================================
+let M2 = [0.6, 0.75, 0.9, 1.0, 1.15, 1.3, 1.5, 0.6, 0.75, 0.9, 1.0, 1.15, 1.3, 1.5]
+let SP = [0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 4.0, 4.0, 4.0, 4.0, 4.0, 4.0, 4.0]
+
+// --- staged geometry and collision columns ---
+let R2C = method_for(M2) <@> lambda(m) -> 0.5 * exp(log(m) / 3.0) |> compute
+let SFC = method_for(R2C) <@> lambda(r) -> 0.55 / (0.5 + r) |> compute
+let CFC = method_for(SFC) <@> lambda(s) -> sqrt(1.0 - s * s) |> compute
+let Q1N = method_for(zip(M2, CFC)) <@> lambda(m, c) -> (1.0 - m) * c / (1.0 + m) |> compute
+let Q2N = method_for(zip(M2, CFC)) <@> lambda(m, c) -> 2.0 * c / (1.0 + m) |> compute
+let S0C = method_for(zip(SFC, R2C, SP)) <@> lambda(s, r, w) -> 0.0 - s + r * w |> compute
+let JTC = method_for(zip(M2, S0C)) <@> lambda(m, s) -> 0.0 - 2.0 * (m / (3.0 * (1.0 + m))) * s |> compute
+let Q1T = method_for(zip(SFC, JTC)) <@> lambda(s, j) -> 0.0 - s + j |> compute
+let Q2T = method_for(zip(M2, JTC)) <@> lambda(m, j) -> 0.0 - j / m |> compute
+let W1C = method_for(JTC) <@> lambda(j) -> 4.0 * j |> compute
+let W2C = method_for(zip(SP, M2, R2C, JTC)) <@> lambda(w, m, r, j) -> w + 2.0 * j / (m * r) |> compute
+let V1X = method_for(zip(Q1N, Q1T, CFC, SFC)) <@> lambda(qn, qt, c, s) -> qn * c - qt * s |> compute
+let V1Y = method_for(zip(Q1N, Q1T, CFC, SFC)) <@> lambda(qn, qt, c, s) -> qn * s + qt * c |> compute
+let V2X = method_for(zip(Q2N, Q2T, CFC, SFC)) <@> lambda(qn, qt, c, s) -> qn * c - qt * s |> compute
+let V2Y = method_for(zip(Q2N, Q2T, CFC, SFC)) <@> lambda(qn, qt, c, s) -> qn * s + qt * c |> compute
+
+// --- the oracle: conservation towers (must be degenerate at machine zero) ---
+let MDEV = method_for(zip(V1X, V2X, V1Y, V2Y, M2)) <@> lambda(ax, bx, ay, by, m) -> (ax + m * bx - 1.0) * (ax + m * bx - 1.0) + (ay + m * by) * (ay + m * by) |> compute
+let PM1 = reduce(method_for(MDEV) <@> lambda(x) -> x, (+))
+let P_V = if PM1 / 14.0 < 0.000000000000000000001 then "CONSERVED" else "LEAKS"
+let ETR = method_for(zip(V1X, V1Y, V2X, V2Y, M2)) <@> lambda(ax, ay, bx, by, m) -> 0.5 * (ax * ax + ay * ay) + 0.5 * m * (bx * bx + by * by) |> compute
+let ERO = method_for(zip(W1C, W2C, M2, R2C)) <@> lambda(wa, wb, m, r) -> 0.0625 * wa * wa + 0.25 * m * r * r * wb * wb |> compute
+let E0C = method_for(zip(M2, R2C, SP)) <@> lambda(m, r, w) -> 0.5 + 0.25 * m * r * r * w * w |> compute
+let EDEV = method_for(zip(ETR, ERO, E0C)) <@> lambda(a, b, c) -> (a + b - c) * (a + b - c) |> compute
+let ED1 = reduce(method_for(EDEV) <@> lambda(x) -> x, (+))
+let E_V = if ED1 / 14.0 < 0.000000000000000000001 then "CONSERVED" else "LEAKS"
+let R2CF = method_for(zip(R2C, CFC)) <@> lambda(r, c) -> r * c |> compute
+let R2SF = method_for(zip(R2C, SFC)) <@> lambda(r, s) -> r * s |> compute
+let L0C = method_for(zip(SFC, M2, R2C, SP)) <@> lambda(s, m, r, w) -> 0.5 * s + 0.5 * m * r * r * w |> compute
+let LP1 = method_for(zip(CFC, SFC, V1X, V1Y, W1C)) <@> lambda(c, s, ax, ay, wa) -> 0.5 * s * ax - 0.5 * c * ay + 0.125 * wa |> compute
+let LO2 = method_for(zip(R2CF, R2SF, V2X, V2Y, M2)) <@> lambda(rc, rs, bx, by, m) -> m * (rc * by - rs * bx) |> compute
+let LS2 = method_for(zip(M2, R2C, W2C)) <@> lambda(m, r, wb) -> 0.5 * m * r * r * wb |> compute
+let LDEV = method_for(zip(LP1, LO2, LS2, L0C)) <@> lambda(a, b, c, d) -> (a + b + c - d) * (a + b + c - d) |> compute
+let LD1 = reduce(method_for(LDEV) <@> lambda(x) -> x, (+))
+let J_V = if LD1 / 14.0 < 0.000000000000000000001 then "CONSERVED" else "LEAKS"
+
+// --- analytic self-test: head-on (d = 0), equal masses, smooth reduction ---
+let t_sf = 0.0
+let t_cf = 1.0
+let t_q1n = (1.0 - 1.0) * t_cf / 2.0
+let t_q2n = 2.0 * t_cf / 2.0
+let t_jt = 0.0 - 2.0 * (1.0 / 6.0) * (0.0 - t_sf)
+let test0_v1 = t_q1n * t_cf - (0.0 - t_sf + t_jt) * t_sf
+let test0_v2 = t_q2n * t_cf - (0.0 - t_jt / 1.0) * t_sf
+
+// --- the new variant: the translational/rotational partition is fuzzy ---
+let ET1 = reduce(method_for(ETR) <@> lambda(x) -> x, (+))
+let ET2 = reduce(method_for(ETR) <@> lambda(x) -> x * x, (+))
+let ETR_k1 = ET1 / 14.0
+let ETR_k2 = ET2 / 14.0 - ETR_k1 * ETR_k1
+let trans_V = if ETR_k2 > 0.0001 then "VARIANT" else "INVARIANT"
+
+// --- circular tower of the deflection (spinless sub-ensemble) ---
+let SIN1 = method_for(zip(V1X, V1Y)) <@> lambda(ax, ay) -> ay / sqrt(ax * ax + ay * ay) |> compute
+let COS1 = method_for(zip(V1X, V1Y)) <@> lambda(ax, ay) -> ax / sqrt(ax * ax + ay * ay) |> compute
+let S0n = reduce(method_for(SP) <@> lambda(w) -> (if w < 0.5 then 1.0 else 0.0), (+))
+let Ssin0 = reduce(method_for(zip(SIN1, SP)) <@> lambda(x, w) -> (if w < 0.5 then x else 0.0), (+))
+let Scos0 = reduce(method_for(zip(COS1, SP)) <@> lambda(x, w) -> (if w < 0.5 then x else 0.0), (+))
+let sin0_mean = Ssin0 / S0n
+let cos0_mean = Scos0 / S0n
+let rho0 = sqrt(sin0_mean * sin0_mean + cos0_mean * cos0_mean)
+
+// --- spin-orbit correlation manufactured from nothing (spinless rows) ---
+let Sw0 = reduce(method_for(zip(W2C, SP)) <@> lambda(x, w) -> (if w < 0.5 then x else 0.0), (+))
+let Sws = reduce(method_for(zip(W2C, SIN1, SP)) <@> lambda(x, y, w) -> (if w < 0.5 then x * y else 0.0), (+))
+let so_cov = Sws / S0n - (Sw0 / S0n) * sin0_mean
+let so_V = if sqrt(so_cov * so_cov) > 0.0001 then "CORRELATED" else "UNCORRELATED"
+
+// --- the hidden register: spin is invisible until touch, decisive at it.
+// Subtlety found here: near equal masses the deflection ANGLE is almost
+// spin-blind (the direction depends on the velocity ratio, which cancels
+// the spin) -- the register shouts in the SPEED channel instead. Which
+// observables an internal register couples to is itself structured. ---
+let Ssin4 = reduce(method_for(zip(SIN1, SP)) <@> lambda(x, w) -> (if w > 0.5 then x else 0.0), (+))
+let sin4_mean = Ssin4 / (14.0 - S0n)
+let reg_ang = sin4_mean - sin0_mean
+let SPD1 = method_for(zip(V1X, V1Y)) <@> lambda(ax, ay) -> sqrt(ax * ax + ay * ay) |> compute
+let Sspd0 = reduce(method_for(zip(SPD1, SP)) <@> lambda(x, w) -> (if w < 0.5 then x else 0.0), (+))
+let Sspd4 = reduce(method_for(zip(SPD1, SP)) <@> lambda(x, w) -> (if w > 0.5 then x else 0.0), (+))
+let spd0_mean = Sspd0 / S0n
+let spd4_mean = Sspd4 / (14.0 - S0n)
+let reg_spd = spd4_mean - spd0_mean
+let reg_V = if sqrt(reg_spd * reg_spd) > 0.05 then "TOUCH_REVEALS_SPIN" else "REGISTER_SILENT"
+let ang_V = if sqrt(reg_ang * reg_ang) < 0.05 then "ANGLE_NEARLY_BLIND" else "ANGLE_SEES_SPIN"
+
+// conservation is the oracle; the partition blurs; spin-orbit structure is
+// manufactured; the internal register is silent until contact:
+// EXPECT: P_V = "CONSERVED"
+// EXPECT: E_V = "CONSERVED"
+// EXPECT: J_V = "CONSERVED"
+// EXPECT: test0_v1 = 0.0
+// EXPECT: test0_v2 = 1.0
+// EXPECT: ETR_k1 = 0.723845811777554
+// EXPECT: ETR_k2 = 0.0984822033708783
+// EXPECT: trans_V = "VARIANT"
+// EXPECT: sin0_mean = -0.801115180689865
+// EXPECT: rho0 = 0.943831734371311
+// EXPECT: so_cov = 0.039374050851542
+// EXPECT: so_V = "CORRELATED"
+// EXPECT: reg_ang = -0.0153078693588212
+// EXPECT: spd0_mean = 0.388493688566566
+// EXPECT: spd4_mean = 1.04896528329883
+// EXPECT: reg_spd = 0.660471594732269
+// EXPECT: reg_V = "TOUCH_REVEALS_SPIN"
+// EXPECT: ang_V = "ANGLE_NEARLY_BLIND"

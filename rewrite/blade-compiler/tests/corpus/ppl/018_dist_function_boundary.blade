@@ -1,4 +1,5 @@
 // TEST: Dist Function Boundary
+import ppl as ppl
 // The typed-Dist arc's headline: a dist is a first-class VALUE of nominal
 // type Dist<r, τ like axes> (elaboration binds it via the __dist_pack
 // intrinsic; the checker types it; zonk erases it to the κ_1..κ_r component
@@ -8,13 +9,13 @@
 // ppl/014's oracle: κ1(X) = means, κ2(X) = packed pair comoments.
 type TimeIdx = Idx<2>
 let X: Array<Float64 like Idx<2>, TimeIdx> = [[1.0, 2.0], [3.0, 4.0]]
-let dx = dist(X, 2)
+let dx = ppl.dist(X, 2)
 
 function meanOf(d: Dist<2, Float64 like Idx<2>>) -> Array<Float64 like Idx<2>> =
-  cumulant(d, 1)
+  ppl.cumulant(d, 1)
 
 function variances(d: Dist<2, Float64 like Idx<2>>) -> Array<Float64 like SymIdx<2, 2>> =
-  cumulant(d, 2)
+  ppl.cumulant(d, 2)
 
 let m = meanOf(dx)
 let c = variances(dx)

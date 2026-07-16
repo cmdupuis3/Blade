@@ -66,9 +66,11 @@ and Keyword =
     | KwMatch
     | KwWith
     | KwWhere
+    | KwAnd
     | KwComm
     | KwOmp
     | KwCuda
+    | KwMpi
     | KwReynolds
     | KwTrue
     | KwFalse
@@ -87,6 +89,7 @@ and Keyword =
     | KwEnumIdx
     | KwDepIdx
     | KwRaggedIdx
+    | KwIrrepsIdx
     | KwMethodFor
     | KwObjectFor
     | KwRange
@@ -97,7 +100,8 @@ and Keyword =
     | KwDecompact
     | KwPure
     | KwCompute
-    | KwRead
+    // (`read` is NOT a keyword: provider reads are module-qualified
+    // `alias.read(...)`, so `read` must lex as a plain identifier/field.)
     | KwGuard
     | KwSequence
     | KwReplicate
@@ -152,9 +156,11 @@ let keywords =
       "match", KwMatch
       "with", KwWith
       "where", KwWhere
+      "and", KwAnd
       "comm", KwComm
       "omp", KwOmp
       "cuda", KwCuda
+      "mpi", KwMpi
       "reynolds", KwReynolds
       "true", KwTrue
       "false", KwFalse
@@ -175,6 +181,7 @@ let keywords =
       "EnumIdx", KwEnumIdx
       "DepIdx", KwDepIdx
       "RaggedIdx", KwRaggedIdx
+      "IrrepsIdx", KwIrrepsIdx
       "method_for", KwMethodFor
       "object_for", KwObjectFor
       "range", KwRange
@@ -185,7 +192,6 @@ let keywords =
       "decompact", KwDecompact
       "pure", KwPure
       "compute", KwCompute
-      "read", KwRead
       "guard", KwGuard
       "sequence", KwSequence
       "replicate", KwReplicate

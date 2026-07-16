@@ -1,0 +1,16 @@
+// TEST: Dist Map Bivariate
+import ppl as ppl
+// Multivariate symbolic jet: lambda(x, y) -> x * y over the 2-dimensional
+// dist of B. The mixed partial ∂²/∂x∂y = 1 and both pure seconds vanish —
+// the derived D2 = [0, 1, 0] prunes exactly like ppl/034's hand-written
+// literal, and the values reproduce dump-jet J2.
+type TimeIdx = Idx<3>
+let B: Array<Float64 like Idx<2>, TimeIdx> = [[1.0, 2.0, 4.0], [3.0, 5.0, 4.0]]
+let db = ppl.dist(B, 6)
+let dy = ppl.dist_map(db, 3, lambda(x, y) -> x * y)
+let y1 = ppl.cumulant(dy, 1)
+let y2 = ppl.cumulant(dy, 2)
+let y3 = ppl.cumulant(dy, 3)
+// EXPECT: y1 = [9.66666666667]
+// EXPECT: y2 = [28.2222222222]
+// EXPECT: y3 = [-14.074074074]

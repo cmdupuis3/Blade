@@ -107,6 +107,7 @@ let rec zonkExpr (subst: Subst) (expr: TypedExpr) : TypedExpr =
         | TExprZero -> TExprZero
         | TExprReplicate (c, b) -> TExprReplicate (z c, z b)
         | TExprAssign (l, r) -> TExprAssign (z l, z r)
+        | TExprConstraintCheck (c, msg) -> TExprConstraintCheck (z c, msg)
         | TExprPartialApp (op, arg, isL) -> TExprPartialApp (op, z arg, isL)
         // Ternary
         | TExprIf (c, t, e) -> TExprIf (z c, z t, z e)
@@ -184,7 +185,8 @@ and zonkBinding (subst: Subst) (b: TypedBinding) : TypedBinding =
     { b with
         Type = zt b.Type
         Value = zonkExpr subst b.Value
-        SubBindings = b.SubBindings |> List.map (fun (n, id, ty) -> (n, id, zt ty)) }
+        SubBindings = b.SubBindings |> List.map (fun (n, id, ty) -> (n, id, zt ty))
+        PostChecks = b.PostChecks |> List.map (fun (id, e) -> (id, zonkExpr subst e)) }
 
 and zonkLambdaInfo (subst: Subst) (info: TypedLambdaInfo) : TypedLambdaInfo =
     { info with
@@ -205,15 +207,16 @@ let zonkTypeDef (subst: Subst) (td: TypedTypeDef) : TypedTypeDef =
     let zt = zonkType subst
     match td with
     | TTDAlias (n, tp, ty) -> TTDAlias (n, tp, zt ty)
-    | TTDStruct (n, tp, flds, inv) ->
-        TTDStruct (n, tp, flds |> List.map (fun (fn, ft) -> (fn, zt ft)),
-                   inv |> Option.map (zonkExpr subst))
+    | TTDStruct (n, tp, flds) ->
+        TTDStruct (n, tp, flds |> List.map (fun (fn, ft) -> (fn, zt ft)))
     | TTDVariant (n, tp, vs) ->
         TTDVariant (n, tp, vs |> List.map (fun (vn, vt) -> (vn, vt |> Option.map zt)))
     | TTDIndexType _ | TTDEnumIdx _ ->
         // Index aliases carry concrete extents (literal int) and (for EnumIdx)
         // concrete value lists. No inference variables to resolve, pass through.
         td
+    | TTDMutualGroup members ->
+        TTDMutualGroup (members |> List.map (fun (n, ty) -> (n, zt ty)))
 
 /// Zonk a TypedDecl
 let zonkDecl (subst: Subst) (decl: TypedDecl) : TypedDecl =

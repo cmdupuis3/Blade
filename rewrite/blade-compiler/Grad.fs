@@ -1,10 +1,13 @@
 /// grad() — reverse-mode automatic differentiation as an AST-level source
-/// transform (pre-typecheck).
+/// transform (pre-typecheck), surfaced through the `ad` module.
 ///
-/// Surface form:  `grad(f)` where `f` is a top-level function in the same
-/// module returning a Float scalar. The expression rewrites to a reference
-/// to a synthesized function `f__grad`, so `grad(f)(args..., buffers...)`
-/// and `let g = grad(f)` both work. The synthesized function:
+/// Surface form:  `import ad as ad` then `ad.grad(f)` where `f` is a
+/// top-level function in the same module returning a Float scalar. The pass
+/// is import-gated (no `import ad` → no-op; bare `grad(...)` is unbound —
+/// same module rule as the ml/ppl surfaces). The expression rewrites to a
+/// reference to a synthesized function `f__grad`, so
+/// `ad.grad(f)(args..., buffers...)` and `let g = ad.grad(f)` both work.
+/// The synthesized function:
 ///
 ///   function f__grad(p1, ..., pn,                     // originals
 ///                    __g_pA: mut <type of pA>, ...)   // one out-buffer per
@@ -1010,16 +1013,19 @@ let private synthesize (ctx: Ctx) (fd: FunctionDecl) : Result<FunctionDecl, stri
 // Call-site rewriting + program expansion
 // ============================================================================
 
-/// Rewrite grad(f) call sites in an expression; collect requested names.
+/// Rewrite alias.grad(f) call sites in an expression; collect requested names.
 let rec private rewriteExpr (requested: System.Collections.Generic.HashSet<string>)
-                            (declNames: Set<string>) (e: Expr) : Result<Expr, string> =
-    let r = rewriteExpr requested declNames
+                            (declNames: Set<string>) (aliases: Set<string>) (e: Expr) : Result<Expr, string> =
+    let r = rewriteExpr requested declNames aliases
     let rList es =
         es |> List.fold (fun acc x ->
             acc |> Result.bind (fun xs -> r x |> Result.map (fun x' -> xs @ [x'])))
             (Ok [])
     match e with
-    | ExprApp (ExprVar "grad", args) when not (Set.contains "grad" declNames) ->
+    // Qualified: `alias.grad(f)` with alias bound by `import ad`. Bare
+    // `grad(...)` is no longer recognized — the AD surface is a module,
+    // not a language-wide name (same rule as the ml/ppl surfaces).
+    | ExprApp (ExprField (ExprVar alias, "grad"), args) when Set.contains alias aliases ->
         (match args with
          | [ExprVar fname] ->
              if Set.contains fname declNames then
@@ -1027,7 +1033,7 @@ let rec private rewriteExpr (requested: System.Collections.Generic.HashSet<strin
                  Ok (ExprVar (fname + gradSuffix))
              else
                  Error (sprintf "grad: '%s' is not a top-level function in this module (grad differentiates same-module named functions)" fname)
-         | [_] -> Error "grad: argument must be a named top-level function (e.g. grad(loss))"
+         | [_] -> Error "grad: argument must be a named top-level function (e.g. ad.grad(loss))"
          | _ -> Error "grad: expects exactly one argument, the function to differentiate")
     | ExprLit _ | ExprVar _ -> Ok e
     | ExprApp (f, args) ->
@@ -1080,8 +1086,32 @@ let rec private rewriteExpr (requested: System.Collections.Generic.HashSet<strin
             |> Result.map (fun cs' -> ExprMatch (s', cs')))
     | other -> Ok other   // exotic containers: grad not expected inside
 
-/// Expand grad() over one module's declarations.
+/// `import ad [as _]` — the module this transform is surfaced through.
+let private isAdImport (d: Located<Decl>) =
+    match d.Value with
+    | DeclImport (["ad"], _) -> true
+    | _ -> false
+
+/// Aliases bound to `ad` in this decl list. Errors on a selective
+/// `from ad import ...` (it would reintroduce a global name).
+let private adAliasesOf (decls: Located<Decl> list) : Result<Set<string>, string> =
+    decls |> List.fold (fun acc d ->
+        acc |> Result.bind (fun set ->
+            match d.Value with
+            | DeclImport (["ad"], ImportQualified aliasOpt) ->
+                Ok (Set.add (aliasOpt |> Option.defaultValue "ad") set)
+            | DeclImport (["ad"], ImportSelective _) ->
+                Error "`ad` supports only `import ad [as <alias>]`; a selective `from ad import ...` would reintroduce global names"
+            | _ -> Ok set))
+        (Ok Set.empty)
+
+/// Expand alias.grad() over one module's declarations. Import-gated: with no
+/// `import ad`, the pass is a no-op and bare `grad(...)` is simply unbound.
 let private expandModule (decls: Located<Decl> list) : Result<Located<Decl> list, string> =
+    adAliasesOf decls |> Result.bind (fun aliases ->
+    if Set.isEmpty aliases then Ok decls
+    else
+    let decls = decls |> List.filter (not << isAdImport)
     let funcDecls =
         decls |> List.choose (fun d ->
             match d.Value with
@@ -1089,9 +1119,6 @@ let private expandModule (decls: Located<Decl> list) : Result<Located<Decl> list
             | _ -> None)
         |> Map.ofList
     let declNames = funcDecls |> Map.toSeq |> Seq.map fst |> Set.ofSeq
-    // If the user defined their own `grad`, the special form is disabled.
-    if Set.contains "grad" declNames then Ok decls
-    else
     let requested = System.Collections.Generic.HashSet<string>()
     // rewrite call sites everywhere
     let rewritten =
@@ -1100,13 +1127,13 @@ let private expandModule (decls: Located<Decl> list) : Result<Located<Decl> list
                 let mapped =
                     match d.Value with
                     | DeclFunction fd ->
-                        rewriteExpr requested declNames fd.Body
+                        rewriteExpr requested declNames aliases fd.Body
                         |> Result.map (fun b -> DeclFunction { fd with Body = b })
                     | DeclLet binding ->
-                        rewriteExpr requested declNames binding.Value
+                        rewriteExpr requested declNames aliases binding.Value
                         |> Result.map (fun v' -> DeclLet { binding with Value = v' })
                     | DeclStatic binding ->
-                        rewriteExpr requested declNames binding.Value
+                        rewriteExpr requested declNames aliases binding.Value
                         |> Result.map (fun v' -> DeclStatic { binding with Value = v' })
                     | other -> Ok other
                 mapped |> Result.map (fun value -> ds @ [{ d with Value = value }])))
@@ -1128,7 +1155,7 @@ let private expandModule (decls: Located<Decl> list) : Result<Located<Decl> list
                     match d.Value with
                     | DeclFunction fd when Map.containsKey fd.Name made ->
                         [d; { d with Value = DeclFunction made.[fd.Name] }]
-                    | _ -> [d])))
+                    | _ -> [d]))))
 
 /// Entry point: expand grad() across a program. Errors are compile errors.
 let expand (program: Program) : Result<Program, string> =

@@ -106,7 +106,12 @@ type IxKind =
     | IxKGroupOuter         // "__group_outer": group_by outer (per-group) slot
     | IxKGroupMember        // "__group_member": group_by member slot
     | IxKSeq                // "__seq": sequence-combinator-produced dimension
+    | IxKIrreps             // "__irreps:<name>:<payload>": block-structured dense
+                            // index over an equivariant irreps spec; the tag is
+                            // PARAMETERIZED (spec payload + optional alias name),
+                            // so the kind maps from the prefix, not one sentinel
     | IxKErrorRaggedNoPrior // "__error_ragged_no_prior": typecheck error marker
+    | IxKErrorIrrepsBadSpec // "__error_irreps_bad_spec": typecheck error marker
 
 /// The legacy Tag sentinel for a kind (None for IxKPlain). The single
 /// source of the kind<->sentinel correspondence, used by constructors that
@@ -125,7 +130,51 @@ let ixKindSentinel (k: IxKind) : string option =
     | IxKGroupOuter -> Some "__group_outer"
     | IxKGroupMember -> Some "__group_member"
     | IxKSeq -> Some "__seq"
+    | IxKIrreps -> None     // parameterized tag (mkIrrepsTag), no single sentinel;
+                            // an IxKIrreps record whose Tag is missing the prefix
+                            // then FAILS the validator agreement check — intended
     | IxKErrorRaggedNoPrior -> Some "__error_ragged_no_prior"
+    | IxKErrorIrrepsBadSpec -> Some "__error_irreps_bad_spec"
+
+// ----------------------------------------------------------------------------
+// IrrepsIdx tag encoding. The spec payload rides IN the Tag string — Tag
+// equality is already index-space identity everywhere (unification, SIdx
+// slot matching, group matching), so spec identity needs no side registry
+// and no new IRIndexTypeG field. Format: "__irreps:<name>:<payload>" where
+// <name> is the nominative alias name ("" for anonymous IrrepsIdx<spec>)
+// and <payload> is "l,p,m|l,p,m|..." in spec order. Pure string ops only —
+// core stays ML-free; Blade.ML owns StaticValue->spec decoding.
+// ----------------------------------------------------------------------------
+
+let irrepsTagPrefix = "__irreps:"
+
+/// Serialize an irreps spec (+ optional alias name) into its canonical Tag.
+let mkIrrepsTag (aliasName: string option) (spec: (int * int * int) list) : string =
+    let payload =
+        spec |> List.map (fun (l, p, m) -> sprintf "%d,%d,%d" l p m) |> String.concat "|"
+    sprintf "%s%s:%s" irrepsTagPrefix (defaultArg aliasName "") payload
+
+/// Parse an irreps Tag back into (alias name option, (l, parity, mult) list).
+/// Total: any string not produced by mkIrrepsTag yields None.
+let (|IrrepsTag|_|) (tag: string) : (string option * (int * int * int) list) option =
+    if not (tag.StartsWith irrepsTagPrefix) then None
+    else
+        let rest = tag.Substring irrepsTagPrefix.Length
+        match rest.IndexOf ':' with
+        | -1 -> None
+        | sep ->
+            let name = rest.Substring(0, sep)
+            let entryOf (s: string) =
+                match s.Split ',' with
+                | [| l; p; m |] ->
+                    match System.Int32.TryParse l, System.Int32.TryParse p, System.Int32.TryParse m with
+                    | (true, lv), (true, pv), (true, mv) -> Some (lv, pv, mv)
+                    | _ -> None
+                | _ -> None
+            let entries = rest.Substring(sep + 1).Split '|' |> Array.toList |> List.map entryOf
+            if List.forall Option.isSome entries then
+                Some ((if name = "" then None else Some name), List.map Option.get entries)
+            else None
 
 /// Derive the kind from a (possibly user-supplied) Tag value: sentinel
 /// strings map to their kind, anything else — user names, "__anon"
@@ -145,6 +194,8 @@ let ixKindOfTag (tag: string option) : IxKind =
     | Some "__group_member" -> IxKGroupMember
     | Some "__seq" -> IxKSeq
     | Some "__error_ragged_no_prior" -> IxKErrorRaggedNoPrior
+    | Some "__error_irreps_bad_spec" -> IxKErrorIrrepsBadSpec
+    | Some t when t.StartsWith irrepsTagPrefix -> IxKIrreps
     | _ -> IxKPlain
 
 /// Ragged FAMILY: dimensions whose extent varies per outer row.
@@ -437,5 +488,28 @@ and LoopTypeG<'Ext> = {
     ArrayTypes: IRTypeG<'Ext> list  // Types of bound arrays (for MethodLoop)
     KernelType: IRTypeG<'Ext> option  // Type of bound kernel (for ObjectLoop)
 }
+
+/// Render an IxKIrreps index record's identity for diagnostics: the
+/// round-trippable long form IrrepsIdx<[(l, p, m), ...]> — error messages
+/// must show WHICH spec mismatched — prefixed with the nominative alias
+/// name when the tag carries one. None for non-irreps records, so printers
+/// use it as a pre-match arm ahead of their Symmetry dispatch.
+let (|IrrepsIdxLike|_|) (ix: IRIndexTypeG<'Ext>) : string option =
+    if ix.IxKind <> IxKIrreps then None
+    else
+        match ix.Tag with
+        | Some (IrrepsTag (nameOpt, triples)) ->
+            let payload =
+                triples
+                |> List.map (fun (l, p, m) -> sprintf "(%d, %d, %d)" l p m)
+                |> String.concat ", "
+            let core = sprintf "IrrepsIdx<[%s]>" payload
+            Some (match nameOpt with
+                  | Some n -> sprintf "%s (= %s)" n core
+                  | None -> core)
+        | _ ->
+            // Kind says irreps but the tag is missing/unparseable — a state
+            // validateIR rejects; render a placeholder rather than crash.
+            Some "IrrepsIdx<?>"
 
 /// Literal values
