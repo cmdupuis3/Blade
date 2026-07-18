@@ -17,16 +17,17 @@ let M1: Array<Float64 like Idx<1>, TimeIdx> = [[0.598104392874, 0.782868848894, 
 let d = ppl.dist(M1, 6)
 
 // our recoil velocity
-let dv1 = ppl.dist_map(d, 3, 2, lambda(m) -> (m - 2.0) / (m + 2.0))
+function v(m) = (m - 2.0) / (m + 2.0)
+let dv1 = ppl.dist_map(d, 3, 2, v)
 let v1 = ppl.cumulant(dv1, 1)
 
 // fraction of energy WE keep (naive plug-in = 0.1111; true mean 0.1296 here)
-let dR = ppl.dist_map(d, 3, 2, lambda(m) -> ((m - 2.0) / (m + 2.0)) * ((m - 2.0) / (m + 2.0)))
+let dR = ppl.dist_map(d, 3, 2, lambda(m) -> v(m) * v(m))
 let R1 = ppl.cumulant(dR, 1)
 let R2 = ppl.cumulant(dR, 2)
 
 // relative velocity: SHARP even though we don't know our own mass
-let drel = ppl.dist_map(d, 3, 2, lambda(m) -> (m - 2.0) / (m + 2.0) - 2.0 * m / (m + 2.0))
+let drel = ppl.dist_map(d, 3, 2, lambda(m) -> v(m) - 2.0 * m / (m + 2.0))
 let rel1 = ppl.cumulant(drel, 1)
 let rel2 = ppl.cumulant(drel, 2)
 

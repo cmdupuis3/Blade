@@ -1,0 +1,86 @@
+// TEST: Math hosvd: core slice norms + all-orthogonality
+// The HOSVD core's mode-n slices are mutually orthogonal with descending
+// norms (the "higher-order singular values"). Norm pins from
+// math/OracleDump.fs; the cross-slice dot deviation pins at 0.0.
+import math as m
+let X: Array<Float64 like Idx<3>, Idx<3>, Idx<3>> = [[[2.0, 2.5, 4.0], [3.0, 3.5, 5.0], [4.0, 4.5, 6.0]], [[4.0, 4.5, 6.0], [6.0, 6.75, 8.5], [8.0, 9.0, 11.0]], [[6.0, 6.5, 8.0], [9.0, 10.0, 12.0], [12.0, 13.5, 16.0]]]
+let (G, U0, U1, U2) = m.hosvd(X)
+let norms0 = {
+    let mut ns = [0.0, 0.0, 0.0]
+    let mut acc = 0.0
+    for a in 0..3 {
+        acc = 0.0
+        for b in 0..3 {
+            for c in 0..3 {
+                acc = acc + G(a, b, c) * G(a, b, c)
+            }
+        }
+        ns(a) = sqrt(acc)
+    }
+    ns
+}
+let norms1 = {
+    let mut ns = [0.0, 0.0, 0.0]
+    let mut acc = 0.0
+    for b in 0..3 {
+        acc = 0.0
+        for a in 0..3 {
+            for c in 0..3 {
+                acc = acc + G(a, b, c) * G(a, b, c)
+            }
+        }
+        ns(b) = sqrt(acc)
+    }
+    ns
+}
+let norms2 = {
+    let mut ns = [0.0, 0.0, 0.0]
+    let mut acc = 0.0
+    for c in 0..3 {
+        acc = 0.0
+        for a in 0..3 {
+            for b in 0..3 {
+                acc = acc + G(a, b, c) * G(a, b, c)
+            }
+        }
+        ns(c) = sqrt(acc)
+    }
+    ns
+}
+let ortho = {
+    let mut acc = 0.0
+    let mut dot = 0.0
+    for a in 0..3 {
+        for a2 in 0..3 {
+            dot = 0.0
+            for b in 0..3 {
+                for c in 0..3 {
+                    dot = dot + G(a, b, c) * G(a2, b, c)
+                }
+            }
+            let contrib = if a < a2 then dot * dot else 0.0
+            acc = acc + contrib
+            dot = 0.0
+            for b in 0..3 {
+                for c in 0..3 {
+                    dot = dot + G(b, a, c) * G(b, a2, c)
+                }
+            }
+            let contrib1 = if a < a2 then dot * dot else 0.0
+            acc = acc + contrib1
+            dot = 0.0
+            for b in 0..3 {
+                for c in 0..3 {
+                    dot = dot + G(b, c, a) * G(b, c, a2)
+                }
+            }
+            let contrib2 = if a < a2 then dot * dot else 0.0
+            acc = acc + contrib2
+        }
+    }
+    acc
+}
+// EXPECT: norms0 = [41.041458598976831, 1.382452917271221, 0.0]
+// EXPECT: norms1 = [41.051944010145107, 1.0248868171229528, 0.0]
+// EXPECT: norms2 = [41.046129407020864, 1.2218315698315489, 0.18678414563781814]
+// EXPECT: ortho = 0.0

@@ -1,0 +1,27 @@
+// TEST: Math svd: 4x3 fixture vs oracle + reconstruction
+// Pins from math/OracleDump.fs (BladeMath reference Jacobi, same sweep
+// schedule/sort/sign conventions — dotnet run --project math/BladeMath.fsproj).
+// The residual ‖A − U·diag(S)·Vᵀ‖² is computed in-program and pins at 0.0
+// (actual ~2e-29, inside the near-zero absolute tolerance).
+import math as m
+let A: Array<Float64 like Idx<4>, Idx<3>> = [[1.0, 2.0, 3.0], [4.0, 5.0, 6.0], [7.0, 8.0, 10.0], [2.0, 1.0, 0.0]]
+let (U, S, V) = m.svd(A)
+let resid = {
+    let mut acc = 0.0
+    let mut rc = 0.0
+    for i in 0..4 {
+        for j in 0..3 {
+            rc = 0.0
+            for k in 0..3 {
+                rc = rc + U(i, k) * S(k) * V(j, k)
+            }
+            let d = rc - A(i, j)
+            acc = acc + d * d
+        }
+    }
+    acc
+}
+// EXPECT: S = [17.476135064729419, 1.8800750442989205, 0.22365381092041997]
+// EXPECT: U = [0.20817283453492813, -0.46393963199244637, 0.27341803554582883, 0.50199378144452933, -0.0446637219097583, 0.76114435468544572, 0.83506330011524943, 0.051917974236364066, -0.54769864775423838, 0.085648112374672916, 0.88321554207513431, 0.21430828359378748]
+// EXPECT: V = [0.47109313674765907, 0.79106543575654875, -0.39023932767028124, 0.55461170640358837, 0.078380627879305595, 0.82840951967812737, 0.68591334119504577, -0.60668933856179452, -0.4018095753539247]
+// EXPECT: resid = 0.0

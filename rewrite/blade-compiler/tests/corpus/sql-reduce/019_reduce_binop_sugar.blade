@@ -1,0 +1,27 @@
+// TEST: Reduce Over Array-Binop Sugar
+// `A * B` desugars to a FORCED combinator apply (compute(method_for(zip(A,B))
+// <@> lambda)). In an expression slot that fell to a legacy 2-array IIFE which
+// hardcoded one loop PER OPERAND — a Cartesian all-pairs sum rather than
+// co-iteration — and returned a scalar the array-typed parent then re-indexed
+// (`(...)[0]`, `.extents[0]`), which g++ rejects outright. So `reduce(A * A,
+// (+))` failed to compile, and would have summed all 9 pairs (36) rather than
+// the 3 squares (14) even if it had. isInlineForm now lifts the forced apply to
+// a let-RHS, routing it through the co-iterating statement path. The explicit
+// method_for spelling is 017; this pins the sugar it should agree with.
+let A = [1.0, 2.0, 3.0]
+let B = [4.0, 5.0, 6.0]
+// self dot: 1 + 4 + 9 = 14 (NOT (1+2+3)^2 = 36)
+let selfdot = reduce(A * A, (+))
+// dot: 4 + 10 + 18 = 32 (NOT (1+2+3)*(4+5+6) = 90)
+let dot = reduce(A * B, (+))
+// the lifted product must still be materializable on its own
+let prod = A * B
+// sugar and explicit method_for must agree
+let dot_explicit = reduce(method_for(zip(A, B)) <@> lambda(x, y) -> x * y, (+))
+// non-let position: the lift has to reach nested slots too
+let scaled = reduce(A * B, (+)) / 2.0
+// EXPECT: selfdot = 14.0
+// EXPECT: dot = 32.0
+// EXPECT: prod = [4, 10, 18]
+// EXPECT: dot_explicit = 32.0
+// EXPECT: scaled = 16.0

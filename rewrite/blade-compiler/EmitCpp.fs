@@ -19,9 +19,12 @@ module Blade.EmitCpp
 let forLoop (ind: string) (var: string) (bound: string) : string =
     sprintf "%sfor (size_t %s = 0; %s < %s; %s++) {" ind var var bound var
 
-/// `for (size_t VAR = START; VAR < BOUND; VAR++) {`
+/// `for (int64_t VAR = START; VAR < BOUND; VAR++) {` — the for-in loop.
+/// int64_t, not size_t (unlike forLoop's internal counters): VAR is the
+/// user's Int64 for-in variable, and an unsigned binding wraps negative
+/// intermediates in body arithmetic (e.g. 0.5 * (k - 1) at k=0).
 let forLoopFrom (ind: string) (var: string) (start: string) (bound: string) : string =
-    sprintf "%sfor (size_t %s = %s; %s < %s; %s++) {" ind var start var bound var
+    sprintf "%sfor (int64_t %s = %s; %s < %s; %s++) {" ind var start var bound var
 
 // ----------------------------------------------------------------------------
 // Array allocation

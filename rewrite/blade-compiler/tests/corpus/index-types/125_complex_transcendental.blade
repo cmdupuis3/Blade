@@ -1,0 +1,9 @@
+// TEST: Complex Transcendental
+// exp/sqrt on complex operands now resolve to the std::complex overloads and
+// preserve the complex type. sqrt(complex(-1,0)) = i; exp(complex(1,0)) = (e, 0).
+let n = complex(-1.0, 0.0)
+let s = sqrt(n)
+let r = complex(1.0, 0.0)
+let e = exp(r)
+// EXPECT: s = (0,1)
+// EXPECT: e = (2.718281828459045,0)

@@ -1,15 +1,11 @@
 // TEST: Conj Scalar
 // ----------------------------------------------------------------------------
 // conj — built-in unary complex-conjugate op.
-//   conj((a, b) : Complex128) = (a, -b);  conj(real) = real (identity).
+//   conj(complex(a, b)) = complex(a, -b);  conj(real) = real (identity).
 // Lowers to IRUnaryOp(IRConj, _); codegen emits std::conj for complex
 // operands and the bare operand for reals.
 // ----------------------------------------------------------------------------
-// conj — built-in unary complex-conjugate op.
-//   conj((a, b) : Complex128) = (a, -b);  conj(real) = real (identity).
-// Lowers to IRUnaryOp(IRConj, _); codegen emits std::conj for complex
-// operands and the bare operand for reals.
 // Conjugate a complex scalar: negates the imaginary part.
-let z = (3.0, 4.0) : Complex128
+let z = complex(3.0, 4.0)
 let zc = conj(z)
 // EXPECT: zc = (3,-4)

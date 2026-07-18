@@ -1,0 +1,21 @@
+// TEST: Dist Jet Vector Affine Consistency
+import ppl as ppl
+// A degree-1 VECTOR jet IS the affine pushforward: g(x, y) = (x + y, x − y)
+// as a 1-jet (D1 = [1, 1 | 1, −1] coordinate-major) against dist_affine
+// with the same W — the m > 1-output precedent, cell-for-cell.
+type TimeIdx = Idx<3>
+let B: Array<Float64 like Idx<2>, TimeIdx> = [[1.0, 2.0, 4.0], [3.0, 5.0, 4.0]]
+let W: Array<Float64 like Idx<2>, Idx<2>> = [[1.0, 1.0], [1.0, -1.0]]
+let db = ppl.dist(B, 3)
+let m = ppl.cumulant(db, 1)
+let dy = ppl.dist_jet(db, 3, [m(0) + m(1), m(0) - m(1)], [1.0, 1.0, 1.0, -1.0])
+let y1 = ppl.cumulant(dy, 1)
+let y2 = ppl.cumulant(dy, 2)
+let y3 = ppl.cumulant(dy, 3)
+let (a1, a2, a3) = ppl.dist_affine(W, db)
+// EXPECT: y1 = [6.33333333333, -1.66666666667]
+// EXPECT: y2 = [2.88888888889, 0.888888888889, 1.55555555556]
+// EXPECT: y3 = [-2.59259259259, 0.740740740741, 1.85185185185, 0.740740740741]
+// EXPECT: a1 = [6.33333333333, -1.66666666667]
+// EXPECT: a2 = [2.88888888889, 0.888888888889, 1.55555555556]
+// EXPECT: a3 = [-2.59259259259, 0.740740740741, 1.85185185185, 0.740740740741]

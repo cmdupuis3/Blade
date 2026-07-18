@@ -75,6 +75,7 @@ let rec zonkExpr (subst: Subst) (expr: TypedExpr) : TypedExpr =
         | TExprCompute e -> TExprCompute (z e)
         | TExprRead e -> TExprRead (z e)
         | TExprFillRandom e -> TExprFillRandom (z e)
+        | TExprRandGen (k, key, dims) -> TExprRandGen (k, z key, dims)
         | TExprRank e -> TExprRank (z e)
         | TExprDotDot (lo, hi) -> TExprDotDot (z lo, z hi)
         | TExprReynolds (k, a) -> TExprReynolds (z k, a)

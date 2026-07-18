@@ -406,6 +406,527 @@ register couples to is itself structured; (4) deflection angles live on the
 realizability, the third moment-problem geometry in the arc, with the
 resultant length ρ = 0.944 as the angular-dephasing meter.
 
+## Fishing for q: does the classical world deform its partition lattice?
+
+The q-deformation question (Bożejko–Speicher: weight pair-partitions by
+q^crossings; q = 1 classical Wick, q = 0 free/non-crossing) cast as two
+Blade-only experiments — one at the dynamics, one at the observer.
+
+Example `29` (dynamics; no external data — the 3^6 = 729 ensemble is built
+in-language from `range` + `floor` digits): a 7-ball fixed-itinerary cradle
+with alternating wide/tight mass jets, observables = the transmitted front
+velocities X₁..X₆, and for each of the 15 time-ordered quadruples the
+connected 4-cumulant and its attribution to the crossing (interleaved,
+"out-of-time-order") pairing channel. **All fifteen κ₄ are negative — but
+it is not crossing suppression.** The would-be deformation constant spans
+q̂ = −0.37..+5.50 with sign changes (near-null *anticorrelated* covariance
+channels: consecutive collisions share a mass whose two roles partially
+cancel), 2/5 of the clean quadruples land *below free* (the deficit exceeds
+the entire crossing product — no q ∈ [0,1] can produce it), and the
+cross/nested normalizers never separate (ratios 0.97..1.03: multiplicative
+cascades nearly factorize their covariance, so the channel question is
+dynamically ill-posed). The control nails the mechanism: reweight the SAME
+grid from platykurtic (digit kurtosis −2/3) to leptokurtic jets (+1/12) and
+**all fifteen κ₄ flip positive** — kurtosis in, kurtosis out. Verdict:
+`INHERITED_NOT_DYNAMICAL`. Classical few-body dynamics transports the
+input tower's shape; it does not deform partitions. (In quantum chaos,
+crossing-suppressed correlators — the free structure of ETH, OTOC decay —
+are a hallmark of the *dynamics*; classically that signature simply is not
+available without phases. That claim is tested, and confirmed, in
+example 42.)
+
+Example `30` (the observer; ±1 LCG tables as embedded literals, matrix
+algebra as chained row-fiber `prodsum` products — `T = XXᵀ` exact in
+integers, powers `M₂ = T·T`, `M₃ = M₂·T`, traces as Frobenius zips): the
+internal observer estimating a d = 48-register covariance tower from N
+samples. The estimate's *spectral* noise is where q lives, and its law is
+pinned: **q̂ = d/N** — measured (0.976, 0.637, 0.121) at sample budgets
+giving γ = (1, ½, ¼), one dataset read at three budgets. The noise's free
+cumulants are flat (γ, γ², γ³) — free Poisson / Marchenko–Pastur: at γ = ¼
+the third free cumulant lands at 0.0631 vs γ² = 0.0625 — while the
+*classical* fourth cumulant of the same data is negative: flat in the free
+lattice, wrong in the classical one. The species is decided at third order
+(b₃ = γ² > 0: skewed free-Poisson; every q-Gaussian is symmetric — the
+lure was q-Gaussian, the fish is free-Poisson). One matrix, two readings:
+ENTRIES are classical (kurtosis-q = 0.955 ≈ 1, the CLT) while the SPECTRUM
+is deformed (q = 0.637 ≈ γ) — the deformation is invisible basis-aware and
+unavoidable basis-blind. And freeness itself is measured in-language:
+independent noises compose by *free* convolution (free-cumulant additivity
+holds, miss −0.10; classical additivity fails by the predicted 2γ_Aγ_B,
+miss −0.65; a dependent copy would give 16×, the measured value sits at
+the independent 2×). The counterpoint to 29: the ±1 inputs are themselves
+platykurtic, yet the spectrum comes out free-Poisson regardless —
+**dynamics transports, spectra emerge** (Marchenko–Pastur universality).
+Consequence for the whole arc: every spectral/invariant object here —
+Jacobian ranks, discovered-generator spectra, Hankel/Stieltjes tests —
+carries FREE error bars in the register-rich regime; honest tower
+inference there is free deconvolution (subtract the flat γ-tower), and the
+non-crossing lattice already in the language (`free_cumulants`, ppl) is
+the physically correct calculus for the tower-of-towers. A noncommutative
+probability arising classically, from epistemics alone: no phases, no
+dynamics — just finitely many looks at too many registers.
+
+## Free deconvolution: the observer's calculus, used
+
+Example `31` puts example 30's law to work on the arc's noise-robustness
+gap. An internal observer estimates the covariance tower of the 96
+bond-transmission registers rt_j = 2m_j/(m_j+m_{j+1}) of a **97-ball fuzzy
+chain** from N = 192 realizations (γ = ½). Bond-locality makes the true
+covariance *exactly* tridiagonal Toeplitz, so the truth is fully analytic
+and computed in-language: entries as exact 9- and 27-term digit sums,
+spectrum λ_k = v0 + 2v1·cos(πk/97) — path-graph cosine bands (and
+v1/v0 = −0.4999997: the transfer kernel is log-additive to O(w⁴); any
+additive antisymmetric bond kernel gives exactly −½). The estimated
+spectrum is badly biased (m2 +33.5%, m3 +103%, m4 +129%); **free
+deconvolution** — inverting the free forward model, a triangular system in
+the moments — recovers the exact spectral moments to 0.45%/2.7%/5.8%
+(improvement 74×/38×/40×), while the **classical-additive noise model
+fails structurally** (residuals 12.5×/15.5× the free ones at k = 3/4: the
+signal-noise coupling terms 3γm1m2 and γ(4m1m3+2m2²) are invisible to
+eigenvalue-additive thinking — spectral noise is additive on free
+cumulants, not on eigenvalues). The forward model is confirmed in-data to
+0.05% at k = 2. Honest boundary, kept in the file: a first attempt on the
+6-mass cascade's 24 lag-family registers barely improved (~1.4×) — a
+~6-spike truth (24 observables of 6 latents) puts its error in spike
+*fluctuation*, not MP bias; flat-bulk truths are where moment-level
+cleaning shines, spiked ones need eigenvector-resolved estimators
+(Ledoit–Péché), the next rung. Arc consequence: every downstream verdict
+that runs on an *estimated* spectrum — invariant detection, Hankel rank,
+generator spectra — should run on free-deconvolved moments whenever
+registers are many and looks are few.
+
+## The calibration ladder: a classical uncertainty floor
+
+Example `32` closes the loop on the observer (gap #3 of the arc): every
+mass is measured by colliding a calibrated probe, every probe was itself
+calibrated by an earlier collision, and the pedigree floats on one exact
+anchor. The estimate is a product of noisy factors, so relative variances
+**add along the ladder** (measured on the full 3⁶ noise grid to 0.03% of
+the linearized law). With an instrument of absolute velocity resolution σ
+and a fixed collision budget N, weighing M from the anchor costs
+r = (2σ²/3)·K²g(ρ)²/N with g(ρ) = (1+ρ)²/2ρ and K = ln M/ln ρ rungs — a
+**ln²M law with a universal optimal step ρ\* = 4.68** (A\* = 4.99, pinned
+by an in-language h-scan; the measured ρ = 4/8/16/64 sweep confirms the
+valley, and the ρ = 4 ladder beats the single jump by 1.2×10⁴ — while the
+jump's own simulation *breaks*: the signal falls below the resolution and
+the readout returns negative masses; the catastrophe is not a big
+variance, it's no measurement at all). And the **pedigree floor**:
+averaging repeated reads with the same probe shrinks only the instrument
+part — the within-probe variance falls by exactly 0.3333333333 with three
+reads (the multiplicative pedigree makes between/within splitting exact)
+while the inherited probe fuzz stays put. The classical, resource-shaped
+shadow of a quantum measurement limit: no ħ, but a floor priced in anchor
+pedigree and collisions. Bonus: reading through noise systematically
+overweighs (E[1/v̂] > 1/v) — the ladder's mean sits +1.25e-4 above truth,
+example 20's contact bias reborn as instrument epistemics.
+
+## The tower that cannot be deepened: quantum as truncation
+
+Example `33` builds, as a plain degree-2 moment object, the **Tsirelson
+tower**: four ±1 values, means 0, correlations (q, q, q, −q)/q = 1/√2 —
+exactly what a packed `Dist<2,·>` literal carries. An explicit rank-2
+Euclidean realization certifies degree-2 realizability (extremal, on the
+cone's boundary); its CHSH functional is 2√2. Then the wall, from one
+variance: over all 16 sign assignments the CHSH observable satisfies
+**B² = 4 identically** (pinned on the full hypercube — the six degree-4
+cross terms cancel pairwise), so *every* extendable tower has E[B²] = 4,
+and any depth-4 extension of the Tsirelson tower would need
+Var(B) = 4 − 8 = **−4**: realizable at depth 2, provably no depth-4
+extension — a quantum-shaped state living entirely in truncation. The
+classical CHSH bound is rederived as *variance positivity* (|s| ≤ 2, with
+Var = 0 exactly at s = 2 — ex 23's classical wall), and switching on the
+commutator term (B² = 4 + K, |K| ≤ 4, identically zero in any commuting
+world) gives |s| ≤ 2√2 — **the Tsirelson bound from the same inequality**;
+at maximal violation the variance is exactly zero (the quantum state is a
+B-eigenstate). The supra-classical shell 2 < s ≤ 2√2 is mapped two-sided
+at s = 2.4: an explicit rank-4 realization certifies depth-2 legality
+while Var = −1.76 kills extension. The arc's "missing phases" now have an
+exact algebraic address — the commutator — and "extendable" is revealed
+as a refinement type on `Dist` values: the compiler slot where the
+classical/quantum boundary literally type-checks.
+
+## Collisions as channels: composing towers without ensembles
+
+Example `34` closes the composition gap — the reconstruction program's
+missing operation. Conditioning on the shared mass turns the transmitted-
+front collision into an **exact linear operator on towers**:
+M′[j][p] = ⅓Σᵢ ρᵢⱼᵖ M[i][p], one 3×3 transfer matrix per moment order,
+stacked into a block-diagonal 12×12 channel. Composition = matrix powers
+(five squarings to depth 20). The channel matches the exact 3⁶-grid
+ensemble at depth 6 to ~3×10⁻¹⁵ — it *is* the ensemble's tower,
+transported — and then keeps going to depth 20, where a grid would need
+3²⁰ = 3.5×10⁹ realizations, with a state that is 12 numbers at every
+depth. The spectrum hands over the physics: the naive model's
+mean-transfer identity E[ρ] = 1 (ρᵢⱼ + ρⱼᵢ = 2, pinned exact) is broken
+by coupling at exactly the **AM–GM tax**: λ₁ = 1 − v0/2 (half of ex 31's
+bond variance — that cell's third appearance, with E[ρ²] − 1 = v0 pinned
+too). And the hierarchy is nearly **marginal**: λ₂/λ₁² − 1 = 1.7×10⁻⁶,
+because consecutive log-ratios anticorrelate with the exact −½ additive
+structure (ex 31's v1/v0) — the cascade's log-variance *telescopes* to an
+endpoint effect (relative variance saturates: 0.00108 at depth 6 → 0.00110
+at depth 20) instead of random-walking. A cascade of fuzzy masses forgets
+its interior; the surviving fuzz belongs to the first and last balls, and
+the intermittent residue sits at fourth order in the jet width. Part B
+isolates the **closure dial** where exactness must end (rational maps on
+continuous-support noise): jet channels truncated at r = 1/2/4 against an
+exact 5-point reference show monotone truncation errors (κ₁: 1.2e-5 →
+3.9e-10 → 2.2e-14) compounding additively with depth. The language angle:
+these conditional-representation transfer matrices are the compiled form
+of what a vector-valued `dist_map`/dist-through-pool should generate —
+towers meeting dynamics without ever touching realizations.
+
+## The observer inside the cascade: kick + Bayes, tower-native
+
+Example `35` is the arc's two halves running as one loop — ex 34's channel
+(the kick) and the ppl tower-Bayes primitives (the bookkeeping), with **no
+ensemble anywhere in the inference path**. A hidden ball (mass ∈ {0.92, 1,
+1.08}, uniform prior) is buried behind four layers of fresh fuzzy medium;
+each shot drives a projectile through the chain into it, and the observer
+reads the target's exit velocity through a σ = 0.03 instrument (knock-on
+spectroscopy). First, a pinned negative that ex 34 predicted:
+**identifiability is positional** — an *interior* hidden ball is gauge to
+the far-end observer (hypothesis means collapse to within 0.00017, the
+telescope cancelling its two roles to O(w²)) while the *endpoint* ball
+separates fully (0.080 — **467×** more signal). The chain forgets its
+interior; you can only weigh what the product cannot cancel. Then the
+loop: per-hypothesis predictive towers fall out of the channel's
+conditional state (conditioning on the last-struck mass *is* the branch
+representation — the hypothesis bank was already in the state), exact vs
+3⁴ grids to 7e-16; the likelihood of each noisy read is an *expectation
+under the predictive tower* (jet-smeared instrument: σ_eff² = σ² + κ₂ +
+non-Gaussian corrections), matching exact grid likelihoods **19,216×**
+closer than the spread-blind mean-field — towers make better observers,
+not just better predictions; and Bayes on the 3-point latent is *exact* by
+`dist_reweight` with Lagrange-interpolated runtime coefficients.
+**Conditioning spends stochastic order**: the depth-6 prior affords
+exactly two quadratic observations (6 → 4 → 2), and the surviving order-2
+posterior is spent whole on the categorical readout (`dist_expect` of the
+degree-2 Lagrange indicators, partitioning unity exactly). Result: the
+true hypothesis at 83.3%, posterior mean 1.0666 ± 0.030, within **1e-7**
+of the exact all-ensemble Bayes posterior. A third shot would need order
+the tower no longer has — the elaborator refuses (ppl/048): an observer's
+evidence budget is the depth of their tower.
+
+## Adaptive protocols: aiming each shot from the posterior
+
+Example `36` puts experiment design inside the loop (the Fisher-dual
+thread). A hidden mass ∈ {1.0, 1.3, 512.0} packs a *coarse* question and a
+*vernier* question into one latent; the knock-on read w = 2p/(p+M)
+resolves a pair only near its matched probe p\* = √(MᵢMⱼ), so which probe
+you fire decides what you can learn. Pinned: the posterior-weighted
+**design surface follows the posterior** (argmax at p = 25 under the
+prior — the coarse pair's matched point — moving to p = 1.14 after shot
+one, the vernier's); the greedy rule p_next = exp(E_post[ln M]) **retunes**
+the probe 8.73 → 1.20 → 1.28, opening the close pair's read gap from 1.1σ
+to 2.6σ; and on identical noise draws the adaptive observer ends at
+belief 0.99828 in the truth vs 0.80985 for the repeated ex-ante-optimal
+probe — **110× less residual doubt**, with the fixed protocol's second
+shot provably moving *backward* (its vernier gap sits under the noise).
+New composition en route: **order renewal** — each quadratic likelihood
+spends two of the prior's four orders, but a finite-support posterior *is*
+its categorical readout, so the observer re-lifts after every shot
+(probabilities out via `dist_expect` of the Lagrange indicators, point
+towers back in via `dist_mix`; relift exact at 9e-16). The
+disintegrate-remix round trip of ppl/047, promoted to the recursion that
+makes unbounded sequential inference legal on finite support — ex 35's
+budget wall binds only irreducibly continuous latents.
+
+## The wall from inside: a quantum family crosses the boundary
+
+Example `37` approaches the edge from the quantum side. A Werner state
+ρ(v) = v|Bell⟩⟨Bell| + (1−v)I/4 with optimal CHSH settings walks the dial
+v = 0.2 → 1, and every structural meter the arc owns is computed in
+closed form along the way — including the *underneath* view: the
+minimal-negativity depth-4 extension of the behavior (the zero-coefficient
+Fourier ansatz has cells (1 ± 2c)/16 and achieves the LP bound
+N = max(0, (s−2)/4) by duality). The verdict on discontinuity: **there is
+none.** The behavior tower is analytic in v; the required-classical
+variance 4 − 8v² crosses zero transversally at v\* = 1/√2; the extension
+does not cease to exist at the wall — its smallest cell passes through
+zero and continues *negative* (a signed quasi-distribution), with
+negativity onset N ≈ 0.707·(v − v\*): a **second-order transition**
+(continuous, derivative kink). Only binary verdicts ("extendable?") jump —
+the discontinuity lives in the questions, not the physics. Sharper still:
+**quantumness has no threshold** — the commutator excess ⟨B²⟩ − 4 = 4v
+violates the hypercube identity at *every* v > 0, deep inside the
+"classical" region; the wall is merely where variance positivity stops
+being able to hide it (|⟨B⟩| crosses 2 exactly where negativity leaves
+zero, pinned equal). Both walls carry the same inside signature —
+**extremality = zero variance** (classical: deterministic points at
+s = 2; quantum: Var_q(B) = 4 + 4v − 8v² hits zero at v = 1, the maximal
+violator is a B-eigenstate) — because positivity boundaries are always
+met as some smooth variance's transversal zero. The TLM/Tsirelson
+criterion 4·asin(v/√2) − π (arcsine by in-language Newton) reaches zero
+exactly at v = 1: for CHSH correlations the quantum edge *is* the cone
+edge, so the strict quantum-vs-cone gap needs richer scenarios (the
+I3322 expedition, next). And the three boundaries sit at three places —
+separability v = 1/3, local model v\* = 0.7071, cone edge v = 1: the
+tower only ever sees the second.
+
+## The top wall exists: I3322 and the supra-quantum shell
+
+Example `38` exhibits the strict gap that CHSH cannot show (there,
+quantum edge = cone edge). In the I3322 scenario (3×3 binary settings)
+all three strata land in one file: the **classical wall certified
+in-language** (the I3322 functional swept over all 64 deterministic
+strategies: max = 0, exactly 20 saturating — ex 33's hypercube sweep one
+scenario up); a **quantum point constructed** (maximally entangled qubits
+with explicit Bloch frames: I = (√2−1)/2 ≈ 0.20711 — any zero-marginal 3D
+dot-product correlation is singlet-realizable); and a **tower point
+beyond everything quantum**: seven explicit unit vectors in ℝ⁴ whose Gram
+is a legal degree-2 moment matrix (realization = certificate, norms
+pinned) with I3322 = **0.34090** — past the quantum supremum 0.2508754
+(the one imported anchor: Pál–Vértesi 2010). The supra-quantum shell
+T \ Q is *inhabited*, by an explicit object the `Dist` type would accept.
+The exit is shallow: along the tilt dial connecting the two constructed
+points, the path crosses the quantum ceiling at s\* ≈ 0.048 — a
+five-percent marginal tilt of a perfectly quantum correlation pattern
+already exceeds anything quantum mechanics can do in this scenario.
+Honest scope: the tilt family is a level-1 ansatz, not the cone's true
+edge (~0.366); whether the quantum edge here shows ex 37's variance-death
+signature needs in-language SDP certificates — the certificate machine is
+the named next build.
+
+## Quasi-distributions as values (ppl)
+
+The signed-extension finding of ex 37 is now compiler machinery:
+`dist_atoms(r, x1, w1, ...)` builds the order-r tower of a possibly
+**signed** atomic measure (non-classical towers become carryable,
+reweightable, mixable values; all-positive weights subsume the
+point-tower renewal of ex 36), and `dist_negativity(d, x1, ..., xs)`
+reads the L1 negativity off a claimed support (Lagrange cells, strict
+order accounting) — **the classical wall as a meter reading**. The
+Tsirelson B-marginal is corpus test ppl/050: a 2-atom quasi-tower
+carrying κ₁ = 2√2 and κ₂ = **−4** as first-class values, with negativity
+0.2071 = ex 37's order parameter at v = 1, N = (s−2)/4 in the shell, and
+exactly zero inside the wall.
+
+## The certificate machine: walls proven, not imported
+
+Example `39` builds the missing instrument — an in-language verifier for
+positive-semidefiniteness (guarded LDLᵀ pivots with zero-pivot residual
+checks) and for dual sum-of-squares certificates. Four pinned
+demonstrations: the negative-variance Hankel **refuted by pivot** (second
+pivot −4); the Tsirelson moment matrix verified **extremal PSD rank 3**
+(pivots 1,1,1,0,0, zero residuals) — ex 33's boundary point machine-
+audited rather than exhibited; ex 38's supra-quantum Gram verified
+**rank-4 PSD** (four positive pivots, three exact zeros — how any claimed
+tower state gets audited from here on); and the star: **Tsirelson's bound
+certified in-language** — the analytic dual Λ = (p₁p₁ᵀ + p₂p₂ᵀ)/√2 checks
+out PSD (rank 2), matches the negated CHSH coefficients to 5e-15 with no
+spurious cells (the anticommutator cancellation, verified numerically),
+and has tr Λ = 2√2, so ⟨Λ, M⟩ = 2√2 − CHSH(M) ≥ 0 for every unit-diagonal
+moment matrix: the quantum ceiling of the arc's central scenario is now a
+*checked proof*, not a trusted constant — and the Tsirelson tower
+saturates it exactly (complementary slackness at 2e-15). Still imported:
+only I3322's ceiling; its dual verifier is this same machine at 10×10+,
+awaiting a certificate from an external solve.
+
+## Negativity flow: what channels do to nonclassicality
+
+Example `40` runs ex 37's order parameter against ex 34's channels, the
+whole loop in four ppl primitives (cells out via `dist_expect`, kernel
+arithmetic, rebuild via `dist_atoms`, re-meter via `dist_negativity`).
+Pinned: **physical channels only destroy negativity** — a stochastic
+kernel contracts the signed tower N = 0.2 → 0.075 → 0 (full
+classicalization in two steps; data processing for nonclassicality: a
+column-stochastic map is an L1-contraction on the negative part — N is a
+monotone under classical dynamics, the resource-theory shadow of
+CP-divisibility). **Unlawful kernels manufacture it** — one signed column
+creates N = 0.1 from a perfectly classical point tower: kernel positivity
+⇔ negativity monotonicity; "physical" and "cannot create nonclassicality"
+are the same predicate. And **observation is exempt: Bayes amplifies** —
+a legal positive likelihood emphasizing the negative cell turns N = 0.2
+into N = 5.0 (25×, evidence Z = 0.04): the less likely the observation
+under the quasi-model, the more nonclassical the conditioned state —
+post-selection distillation, the classical shadow of weak-value
+amplification, diverging as Z → 0. Negativity behaves exactly like a
+resource: monotone under free operations, creatable only by leaving the
+theory, concentratable by post-selection. The wall, restated one last
+time: classical worlds are the ones whose dynamics can never push this
+meter off zero.
+
+## The ceiling, certified: I3322 without import
+
+Example `41` retires the arc's last trusted constant. An untrusted
+external solve (alternating projections; `scratchpad` F# script) produced
+a dual certificate for the NPA level-1+AB relaxation of I3322; the file
+embeds only its **Gram factor G** and proves everything else from
+scratch. The certificate matrix Λ = GGᵀ is computed in-language by one
+row-fiber prodsum — **PSD by construction**, nothing to eliminate or
+eigensolve. A 58×256 histogram values-product collapses Λ's cells into
+its 58 moment-label sums (LBL tags which cells share a moment: basis
+words reduced by involution, symmetrized by joint reversal), and the
+measured deviation from the targets (t′, −Bell, 0, …) is **absorbed into
+the bound, not waved away**: since every non-identity word is a product
+of ±1 observables, |⟨W⟩| ≤ 1, so quantum I3322 ≤ (t′ + Σ|dev|)/4 − 1.
+Pinned: t′ = 5.08000000025, Σ|dev| = 1.7e-9 (matching the external
+oracle's residual exactly), **ceiling 0.2700000005** — strictly below
+ex 38's constructed tower point 0.3409 (recomputed here; margin 0.0709).
+The sandwich classical (0.25) < quantum (≤ 0.27) < tower (0.3409) is now
+self-contained: every wall in the arc is checked in-language, none
+trusted. (Tighter ceilings — level-1+AB's optimum ≈ 0.2513, higher NPA
+→ 0.2508754 — drop into the same file unchanged; 5.08 buys a fat 1e-4
+interior margin, robustness over sharpness.) Engineering note: the first
+version verified PSD via an unguarded 16×16 LDLᵀ scalar chain and never
+compiled — deep scalar dependency chains with high fan-out inline
+exponentially in codegen. The Gram-factor design *is* the fix: the
+factor is the certificate.
+
+## The dynamical q: quantum chaos reshapes the partition lattice
+
+Example `42` closes the dichotomy example 29 opened. Ex 29's parenthetical
+claim — dynamical crossing suppression is a genuinely quantum signature —
+is tested with ex 29's own estimator and ex 29's own mirrored control, on
+an exactly diagonalized quantum spin chain (mixed-field Ising, L = 6,
+d = 64, irregular fields to kill reflection parity; the h = 0 twin is
+free-fermion integrable). Everything is in-language via the arc's
+established moves: H, A = σx₁, B = σz₆ built from Int64 bit algebra (ex
+29's digit idiom), the eigenfactors embedded but **certified in-file** (ex
+41's pattern — residuals |HV − VE|² and |VVᵀ − I|² pinned at ~1e-24, so
+the external solve's provenance is proof-irrelevant), and time evolution
+with no matrix exponential: in the eigenbasis A(t) = X + iY with
+X = Ã ∘ cos(ΔE·t), Y = Ã ∘ sin(ΔE·t), every trace real by symmetry. The
+estimator is the crossing channel verbatim on the time-ordered quadruple
+(A(t), B, A(t), B) — the crossing pairing (13)(24) *is* the
+out-of-time-order contraction, so q̂ is the normalized OTOC. Findings,
+all pinned: **q̂(0) = 1 exactly and cannot fall before the Lieb-Robinson
+front arrives** (q̂(0.5) = 1 to twelve digits — ex 26's causal cone,
+quantum side); under chaotic evolution it **collapses to the scrambling
+floor and equilibrates** (six incommensurate late times: mean 0.0891,
+variance 1.5e-4); the same six times in the integrable twin give mean
+0.470, variance 0.146 — **950× the variance, swinging −0.17..+0.96**:
+unitarity alone does not scramble the crossing channel (ex 17's
+persistence dichotomy at fourth order). The bulk gap-ratio statistic,
+computed from the same embedded spectrum, agrees: r = 0.4731 (toward GOE
+0.536) vs 0.2919 (below Poisson — exact free-fermion degeneracies). And
+the mirrored control: deform the state's shape exactly as ex 29 deformed
+the jets (thermal e^{−0.3E} and a spectrally leptokurtic reweight, both
+computed in-language from the certified spectrum) — the floor moves
+(0.089 → 0.080 / 0.172) but **every κ₄ stays negative, 12/12 sign
+checks**, where the identical move in ex 29 flipped 15/15. Verdict:
+`DYNAMICAL_NOT_INHERITED`, the exact mirror of ex 29's
+`INHERITED_NOT_DYNAMICAL`. Classical mixing transports kurtosis and
+cannot suppress crossings; quantum chaos suppresses crossings and the
+state cannot restore them. (Honest scope: freeness-from-ETH/OTOC decay is
+known physics; what is new is the same estimator + control run on both
+sides of the divide, exact and pinned. Every number was verified against
+an independent complex-matmul route, agreement ~1e-14, before pinning.)
+
+## Cleaning the spikes: eigenvector-resolved estimation
+
+Example `43` crosses ex 31's honest boundary — free deconvolution cleans
+flat-bulk spectra but gained only ~1.4× on spiked truths, because the
+error lives in spike *rotation* and moments carry no basis information.
+The named next rung was Ledoit–Péché eigenvector-resolved cleaning; it
+needed an eigensolver, and the math module now supplies one (`m.eigh`).
+Setup: a fuzzy chain of d = 40 registers whose collective modes are the
+chain's sine normal modes (exactly orthogonal by the DST identity, built
+in-language from `sin`), four latent modes with strengths ℓ = (10, 5,
+2.5, 1.3) on unit white register fuzz, N = 160 looks (γ = 1/4). Pinned:
+the **BBP wall, measured** — modes 1–3 emerge biased (λ̂ = ℓ(1+γ/(ℓ−1)))
+and rotated (squared overlaps 0.961/0.909/0.716 vs the BBP law), while
+mode 4 (ℓ = 1.3 < 1+√γ) is *swallowed*: best overlap with any sample
+eigenvector 0.133, top bulk eigenvalue under the edge — below the wall a
+collective mode is invisible to the observer's spectrum. Spike strengths
+recovered to 1.4–2.9% by inverting the BBP map in-language. The
+**cleaning ladder**: raw 18.09 > naive-with-true-strengths 8.53 > RIE
+8.26 > oracle bound 8.15 — eigenvector-resolved cleaning improves raw
+2.19× and lands within 1.3% of the information bound. The moral pin:
+**RIE beats god-given true strengths** — sample eigenvectors are rotated
+and the Ledoit–Péché value prices the rotation in; plugging in the truth
+overshoots. And ex 31's route, run here for contrast: free deconvolution
+fixes the spectral moment (13.2% → 1.9% error) and cannot move the matrix
+error at all. The 2.19× came from basis information alone.
+
+## The detector that survives noise: TICA/VAC in-language
+
+Example `44` closes review-gap 3 and retires a structural weakness of the
+arc's oldest instrument: the invariant detector (ex 09–16) reads
+conservation as *zero variance*, a criterion that dies at any
+measurement-noise floor. The noise-robust reformulation is the
+generalized eigenproblem C(τ)v = λC(0)v (TICA/VAC): white observation
+noise is lag-uncorrelated, so it inflates C(0) *only*. This file is also
+the arc's first fully **in-language dynamics**: 8 velocity-Verlet
+trajectories of the 2D isotropic oscillator (12,000 symplectic steps)
+with an exact-double LCG observation channel, run inside the new
+imperative blocks — no external data, not even emitted tables. The clean
+VAC spectrum of the 14-monomial dictionary is exactly {1×4, cos τ ×4,
+cos 2τ ×6} — the eigenvalue-1 quartet is the u(2) invariant algebra
+{E_x+E_y, E_x−E_y, L_z, xy+p_xp_y} (superintegrability made spectral) —
+and the measured clusters land on the predicted cosines. Pinned: σ = 0.1
+observation noise lifts the per-trajectory dispersion of E three orders
+(the zero-variance verdict flips VARIANT — the old detector is blind
+here), while the invariant quartet's eigenvalues drop but **plateau in
+τ** (top-4 lag-12 vs lag-24 differences sum to 0.014 while the 5th
+eigenvalue moves 0.46). The per-quantity verdict is reborn as a Rayleigh
+quotient in the whitened metric: the energy direction reads 0.881/0.884
+at the two lags (plateau) while the oscillating probe swings +0.35 → −0.72.
+τ-independence, not magnitude, is the invariant's signature — and C(τ)
+never saw the noise. (Koopman *eigenvalues* for non-symmetric generators
+remain open — `eigh` is symmetric-only.)
+
+## The spectrum of the law: Koopman eigenvalues
+
+Example `45` retires the EDMD thread's oldest limitation: the fitted
+generator's *kernel* found invariants (ex 15–16), but the rest of its
+spectrum was unreadable without a non-symmetric eigensolver. `m.eig`
+(Francis QR) reads it. Generator EDMD — L = (Σḋdᵀ)(Σddᵀ)⁻¹ over the 9
+monomials of degree ≤ 3 in (x, p), a dictionary *exactly* closed under
+linear flow, with exact chain-rule derivatives and closed-form
+trajectories — makes the whole experiment analytic. Pinned: the
+conservative oscillator's spectrum is exactly {±3i, ±2i, ±i (twice), 0}
+— the harmonic ladder plus the invariant at zero, real parts at 1e-15;
+the damped twin's eigenvalues land on the exact lattice aμ₊ + bμ₋ with
+μ± = −γ ± i√(1−γ²); and **the invariant's eigenvalue is displaced to
+exactly μ₊ + μ₋ = −2γ** — the zero-variance/kernel verdict of the old
+detector is the γ → 0 limit of an eigenvalue displacement the spectrum
+now measures directly. Frequencies from data, no FFT, no phase unwrap.
+
+## The Ehrenfest loop: Bohr frequencies from expectation data
+
+Example `46` closes review item 7 — the arc's only never-closed loop.
+Ehrenfest makes d⟨A⟩/dt a linear flow on expectation values, so the same
+operator machinery that reads classical laws should read a quantum
+spectrum from nothing but ⟨x(t)⟩. It does: the 16-level anharmonic
+oscillator (H built in-language from ladder formulas, eigenfactor
+certified in-file at 1e-25), a wavepacket's ⟨x(t)⟩ generated from the
+certified spectrum, delay-embedded and fitted; `m.eig` of the transfer
+operator returns e^{±i·gap·δ} — the **Bohr gaps, on the unit circle**,
+matching cos(gap·δ) from the same file's certified eigenvalues to 5e-4.
+The anharmonic ladder's unevenness (gap₁₂ − gap₀₁ = 0.0998) is resolved
+at 400× the instrument precision, and the Δn = 3 satellite line — 250×
+weaker, ex 18's forbidden-line territory — appears within 6e-4 of its
+certified position (two instruments, one spectrum: ex 18 read these gaps
+from moment towers). The classical twin — a 32-trajectory Verlet
+ensemble's ⟨x(t)⟩ — dephases (ex 05), and its fitted operator has every
+eigenvalue strictly inside the disk, the top modulus *being* the
+dephasing meter e^{−δ/τ}. Planck's discreteness, read as a
+Koopman-modulus dichotomy: the spectral face of ex 42's verdict.
+
+## The tower counts, locates, and weighs: flat extension
+
+Example `47` prototypes the flat-extension guard (Curto–Fialkow) — the
+compiler slot the arc has pointed at since ex 33. Golub–Welsch runs
+in-language end to end: moments → Chebyshev recursion → Jacobi
+tridiagonal → `m.eigh`; eigenvalues are the atoms, first-row eigenvector
+squares the weights, Hankel rank the count. Pinned: six moments of a
+3-atom law return its atoms and weights to 1e-15, with **flatness
+certifying exactness** (the 4×4 Hankel's smallest eigenvalue ~1e-17 —
+rank stalls at 3 — while the 3×3's is finite): rank stall = "the
+extension is flat" = the tower *is* a measure — the exact complement of
+ex 33, where no extension of any depth exists. The physics payoff closes
+review-gap 4: 24 damped double-well trajectories integrated in-language
+leave a t→∞ ensemble whose tower is 2-atomic — rank **counts** the
+attractors, nodes land on the wells at ±1 to 1e-7 (the residual is the
+e^{−γt} ring-down, physics not error), and the recovered weights equal
+the directly-counted basin fractions to 1e-14 (**weighs** — an even
+split off an asymmetric grid, a fact of the interleaved spiral basins).
+And the guard refuses: the Tsirelson B-marginal's Hankel has eigenvalue
+−0.7016 — no measure, no atoms, refusal by spectrum. Atoms for classical
+towers, obstructions for quantum ones: that pair of behaviors is the
+flat-extension guard the compiler slot wants.
+
 ## Running
 
 
@@ -418,4 +939,4 @@ powershell examples/physics/tools/validate_examples.ps1   # all EXPECT pins
 
 Run on the Release build (`bin/Release`); the deep `dist_map` chains overflow
 the Debug stack. `tools/validate_examples.ps1` checks every example against
-its pins (229 EXPECTs across 28 files).
+its pins (710 EXPECTs across 47 files).

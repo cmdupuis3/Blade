@@ -1,0 +1,6 @@
+// TEST: Spectra ifft: real argument steers to the complex spectrum (rejects)
+// ifft takes the complex spectrum (Array<Complex128 like Idx<n>>); a real
+// signal is rejected with steering toward the annotated-rebind idiom.
+import spectra as sp
+let x: Array<Float64 like Idx<8>> = [1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0]
+let y = sp.ifft(x)

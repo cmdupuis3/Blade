@@ -1,0 +1,366 @@
+// TEST: Physics -- Fishing for q: Time-Ordered Crossings in a Classical Cascade
+// ============================================================================
+// The q-deformation question, cast at the DYNAMICS. In free probability the
+// fourth mixed moment of a family weights pair partitions by q^(#crossings):
+//   E[x_i x_j x_k x_l] = c_ij c_kl + q * c_ik c_jl + c_il c_jk   (i<j<k<l),
+// q = 1 classical (Wick), q = 0 free (non-crossing only). For TIME-ordered
+// observables the crossing pairing (ik)(jl) is the interleaved -- "out of
+// time order" -- contraction. Question: does a classical fuzzy cascade
+// suppress (q < 1) or enhance (q > 1) its crossing channel, and is the
+// deformation a CONSTANT (a bona fide q) across quadruples?
+// Setup, entirely in Blade (no external data): a 7-ball Newton's-cradle
+// cascade, projectile m0 = 1 sharp at u = 1; six target masses carry 3-point
+// jets with ALTERNATING wide/tight widths (heterogeneity breaks the
+// exponential-kernel degeneracy c_ik c_jl = c_il c_jk that would make the
+// crossing channel unidentifiable). Ensemble = the full 3^6 = 729 product
+// grid, built in-language from range + floor digits. Observables: the
+// transmitted front velocities X_1..X_6 (closed-form chain, exact per
+// realization; the front outruns every follower -- guarded below -- so no
+// event loop and no order ambiguity: this cascade's itinerary is sharp by
+// design, isolating the CUMULANT structure from the order gauge of 21-26).
+// For each of the 15 time-ordered quadruples: connected 4-cumulant kappa4,
+// then the deformation read through each pairing channel,
+//   g = kappa4 / (channel product),  q_hat = 1 + kappa4 / (c_ik c_jl).
+// FINDINGS (pinned below):
+//   * ALL FIFTEEN CONNECTED 4-CUMULANTS ARE NEGATIVE -- a uniform deficit
+//     below the Wick sum -- but it is NOT crossing suppression. Attributed
+//     to the crossing channel, the would-be deformation ranges over
+//     q_hat = -0.37 .. +5.50 with sign changes (rsd of the deformation
+//     constant = 1.23): NOT_A_Q_FAMILY. The sign changes come from
+//     near-null, ANTICORRELATED covariance channels (consecutive collisions
+//     share a mass, and its two roles -- receiving slow, passing fast --
+//     partially cancel): the would-be normalizer itself dies.
+//   * BELOW FREE: on the well-conditioned quadruples 2/5 land at q_hat < 0
+//     -- the deficit EXCEEDS the entire crossing product, so no q in [0,1]
+//     (the whole classical-to-free interpolation) can produce it. The
+//     structure is not a partition-channel deformation at all.
+//   * THE CONTROL NAILS THE MECHANISM. Reweight the SAME grid, SAME
+//     dynamics from uniform (digit kurtosis -2/3, platykurtic) to
+//     leptokurtic jets (p = 1/12, kurtosis +1/12): ALL 15 kappa4 flip
+//     positive (15/15). Kurtosis in, kurtosis out: the cascade TRANSPORTS
+//     the jet's fourth cumulant. Verdict: INHERITED_NOT_DYNAMICAL.
+//   * THE CHANNELS NEVER SEPARATE. Cross/nested normalizer ratios sit at
+//     0.97..1.03: a multiplicative cascade's covariance nearly factorizes,
+//     so "which pairing channel" is dynamically ill-posed here -- the
+//     deformation statistics are channel-blind (rsd 1.233 vs 1.225).
+//   * Verdict for the arc: classical few-body fuzz carries NO q. Where a
+//     genuine, universal q-deformation does live is the OBSERVER's own
+//     spectral noise -- example 30.
+// Quantum contrast: in quantum chaos, crossing-suppressed multi-time
+// correlators (the free-probability structure of ETH, OTOC decay) are a
+// hallmark of the DYNAMICS itself. Classically, mixing without phases
+// transports the input tower's shape but cannot reshape the partition
+// lattice: dynamical crossing suppression is a genuinely quantum signature.
+// ============================================================================
+
+// --- the 3^6 product grid from digits (uniform 3-point jets per mass) ---
+let D1 = method_for(range<Idx<729>>) <@> lambda(r) -> r - 3.0 * floor(r / 3.0) |> compute
+let D2 = method_for(range<Idx<729>>) <@> lambda(r) -> floor(r / 3.0) - 3.0 * floor(r / 9.0) |> compute
+let D3 = method_for(range<Idx<729>>) <@> lambda(r) -> floor(r / 9.0) - 3.0 * floor(r / 27.0) |> compute
+let D4 = method_for(range<Idx<729>>) <@> lambda(r) -> floor(r / 27.0) - 3.0 * floor(r / 81.0) |> compute
+let D5 = method_for(range<Idx<729>>) <@> lambda(r) -> floor(r / 81.0) - 3.0 * floor(r / 243.0) |> compute
+let D6 = method_for(range<Idx<729>>) <@> lambda(r) -> floor(r / 243.0) - 3.0 * floor(r / 729.0) |> compute
+
+// --- masses: centers ~1, ALTERNATING wide/tight jets (all within [0.85,1.15]) ---
+let M1 = method_for(D1) <@> lambda(d) -> 1.05 + 0.10 * (d - 1.0) |> compute
+let M2 = method_for(D2) <@> lambda(d) -> 0.94 + 0.025 * (d - 1.0) |> compute
+let M3 = method_for(D3) <@> lambda(d) -> 1.07 + 0.08 * (d - 1.0) |> compute
+let M4 = method_for(D4) <@> lambda(d) -> 0.96 + 0.03 * (d - 1.0) |> compute
+let M5 = method_for(D5) <@> lambda(d) -> 1.04 + 0.11 * (d - 1.0) |> compute
+let M6 = method_for(D6) <@> lambda(d) -> 0.93 + 0.02 * (d - 1.0) |> compute
+
+// --- transmitted-front chain: X_k = X_{k-1} * 2 m_{k-1} / (m_{k-1} + m_k) ---
+let X1 = method_for(M1) <@> lambda(m) -> 2.0 / (1.0 + m) |> compute
+let X2 = method_for(zip(X1, M1, M2)) <@> lambda(x, a, b) -> x * 2.0 * a / (a + b) |> compute
+let X3 = method_for(zip(X2, M2, M3)) <@> lambda(x, a, b) -> x * 2.0 * a / (a + b) |> compute
+let X4 = method_for(zip(X3, M3, M4)) <@> lambda(x, a, b) -> x * 2.0 * a / (a + b) |> compute
+let X5 = method_for(zip(X4, M4, M5)) <@> lambda(x, a, b) -> x * 2.0 * a / (a + b) |> compute
+let X6 = method_for(zip(X5, M5, M6)) <@> lambda(x, a, b) -> x * 2.0 * a / (a + b) |> compute
+
+// --- followers F_k = X_{k-1} (m_{k-1} - m_k)/(m_{k-1} + m_k); guard: the
+//     front outruns every follower in every realization (X_k exact) ---
+let F1 = method_for(M1) <@> lambda(m) -> (1.0 - m) / (1.0 + m) |> compute
+let F2 = method_for(zip(X1, M1, M2)) <@> lambda(x, a, b) -> x * (a - b) / (a + b) |> compute
+let F3 = method_for(zip(X2, M2, M3)) <@> lambda(x, a, b) -> x * (a - b) / (a + b) |> compute
+let F4 = method_for(zip(X3, M3, M4)) <@> lambda(x, a, b) -> x * (a - b) / (a + b) |> compute
+let F5 = method_for(zip(X4, M4, M5)) <@> lambda(x, a, b) -> x * (a - b) / (a + b) |> compute
+let F6 = method_for(zip(X5, M5, M6)) <@> lambda(x, a, b) -> x * (a - b) / (a + b) |> compute
+let W2 = method_for(zip(F1, F2)) <@> lambda(a, b) -> (if sqrt(a * a) > sqrt(b * b) then sqrt(a * a) else sqrt(b * b)) |> compute
+let W3 = method_for(zip(W2, F3)) <@> lambda(a, b) -> (if a > sqrt(b * b) then a else sqrt(b * b)) |> compute
+let W4 = method_for(zip(W3, F4)) <@> lambda(a, b) -> (if a > sqrt(b * b) then a else sqrt(b * b)) |> compute
+let W5 = method_for(zip(W4, F5)) <@> lambda(a, b) -> (if a > sqrt(b * b) then a else sqrt(b * b)) |> compute
+let W6 = method_for(zip(W5, F6)) <@> lambda(a, b) -> (if a > sqrt(b * b) then a else sqrt(b * b)) |> compute
+let GUARD = reduce(method_for(zip(W6, X6)) <@> lambda(w, x) -> (if w < x then 0.0 else 1.0), (+))
+let guard_V = if GUARD < 0.5 then "FRONT_OUTRUNS_ALL" else "ITINERARY_AT_RISK"
+
+// --- centered columns ---
+let mu1 = reduce(method_for(X1) <@> lambda(x) -> x, (+)) / 729.0
+let mu2 = reduce(method_for(X2) <@> lambda(x) -> x, (+)) / 729.0
+let mu3 = reduce(method_for(X3) <@> lambda(x) -> x, (+)) / 729.0
+let mu4 = reduce(method_for(X4) <@> lambda(x) -> x, (+)) / 729.0
+let mu5 = reduce(method_for(X5) <@> lambda(x) -> x, (+)) / 729.0
+let mu6 = reduce(method_for(X6) <@> lambda(x) -> x, (+)) / 729.0
+let Y1 = method_for(X1) <@> lambda(x) -> x - mu1 |> compute
+let Y2 = method_for(X2) <@> lambda(x) -> x - mu2 |> compute
+let Y3 = method_for(X3) <@> lambda(x) -> x - mu3 |> compute
+let Y4 = method_for(X4) <@> lambda(x) -> x - mu4 |> compute
+let Y5 = method_for(X5) <@> lambda(x) -> x - mu5 |> compute
+let Y6 = method_for(X6) <@> lambda(x) -> x - mu6 |> compute
+
+// --- the 15 pair covariances (exact ensemble sums) ---
+let c12 = reduce(method_for(zip(Y1, Y2)) <@> lambda(a, b) -> a * b, (+)) / 729.0
+let c13 = reduce(method_for(zip(Y1, Y3)) <@> lambda(a, b) -> a * b, (+)) / 729.0
+let c14 = reduce(method_for(zip(Y1, Y4)) <@> lambda(a, b) -> a * b, (+)) / 729.0
+let c15 = reduce(method_for(zip(Y1, Y5)) <@> lambda(a, b) -> a * b, (+)) / 729.0
+let c16 = reduce(method_for(zip(Y1, Y6)) <@> lambda(a, b) -> a * b, (+)) / 729.0
+let c23 = reduce(method_for(zip(Y2, Y3)) <@> lambda(a, b) -> a * b, (+)) / 729.0
+let c24 = reduce(method_for(zip(Y2, Y4)) <@> lambda(a, b) -> a * b, (+)) / 729.0
+let c25 = reduce(method_for(zip(Y2, Y5)) <@> lambda(a, b) -> a * b, (+)) / 729.0
+let c26 = reduce(method_for(zip(Y2, Y6)) <@> lambda(a, b) -> a * b, (+)) / 729.0
+let c34 = reduce(method_for(zip(Y3, Y4)) <@> lambda(a, b) -> a * b, (+)) / 729.0
+let c35 = reduce(method_for(zip(Y3, Y5)) <@> lambda(a, b) -> a * b, (+)) / 729.0
+let c36 = reduce(method_for(zip(Y3, Y6)) <@> lambda(a, b) -> a * b, (+)) / 729.0
+let c45 = reduce(method_for(zip(Y4, Y5)) <@> lambda(a, b) -> a * b, (+)) / 729.0
+let c46 = reduce(method_for(zip(Y4, Y6)) <@> lambda(a, b) -> a * b, (+)) / 729.0
+let c56 = reduce(method_for(zip(Y5, Y6)) <@> lambda(a, b) -> a * b, (+)) / 729.0
+
+// --- central 4-point moments for the 15 time-ordered quadruples ---
+let p1234 = reduce(method_for(zip(Y1, Y2, Y3, Y4)) <@> lambda(a, b, c, d) -> a * b * c * d, (+)) / 729.0
+let p1235 = reduce(method_for(zip(Y1, Y2, Y3, Y5)) <@> lambda(a, b, c, d) -> a * b * c * d, (+)) / 729.0
+let p1236 = reduce(method_for(zip(Y1, Y2, Y3, Y6)) <@> lambda(a, b, c, d) -> a * b * c * d, (+)) / 729.0
+let p1245 = reduce(method_for(zip(Y1, Y2, Y4, Y5)) <@> lambda(a, b, c, d) -> a * b * c * d, (+)) / 729.0
+let p1246 = reduce(method_for(zip(Y1, Y2, Y4, Y6)) <@> lambda(a, b, c, d) -> a * b * c * d, (+)) / 729.0
+let p1256 = reduce(method_for(zip(Y1, Y2, Y5, Y6)) <@> lambda(a, b, c, d) -> a * b * c * d, (+)) / 729.0
+let p1345 = reduce(method_for(zip(Y1, Y3, Y4, Y5)) <@> lambda(a, b, c, d) -> a * b * c * d, (+)) / 729.0
+let p1346 = reduce(method_for(zip(Y1, Y3, Y4, Y6)) <@> lambda(a, b, c, d) -> a * b * c * d, (+)) / 729.0
+let p1356 = reduce(method_for(zip(Y1, Y3, Y5, Y6)) <@> lambda(a, b, c, d) -> a * b * c * d, (+)) / 729.0
+let p1456 = reduce(method_for(zip(Y1, Y4, Y5, Y6)) <@> lambda(a, b, c, d) -> a * b * c * d, (+)) / 729.0
+let p2345 = reduce(method_for(zip(Y2, Y3, Y4, Y5)) <@> lambda(a, b, c, d) -> a * b * c * d, (+)) / 729.0
+let p2346 = reduce(method_for(zip(Y2, Y3, Y4, Y6)) <@> lambda(a, b, c, d) -> a * b * c * d, (+)) / 729.0
+let p2356 = reduce(method_for(zip(Y2, Y3, Y5, Y6)) <@> lambda(a, b, c, d) -> a * b * c * d, (+)) / 729.0
+let p2456 = reduce(method_for(zip(Y2, Y4, Y5, Y6)) <@> lambda(a, b, c, d) -> a * b * c * d, (+)) / 729.0
+let p3456 = reduce(method_for(zip(Y3, Y4, Y5, Y6)) <@> lambda(a, b, c, d) -> a * b * c * d, (+)) / 729.0
+
+// --- connected 4-cumulants: kappa4 = p - seq - cross - nest ---
+let k1234 = p1234 - c12 * c34 - c13 * c24 - c14 * c23
+let k1235 = p1235 - c12 * c35 - c13 * c25 - c15 * c23
+let k1236 = p1236 - c12 * c36 - c13 * c26 - c16 * c23
+let k1245 = p1245 - c12 * c45 - c14 * c25 - c15 * c24
+let k1246 = p1246 - c12 * c46 - c14 * c26 - c16 * c24
+let k1256 = p1256 - c12 * c56 - c15 * c26 - c16 * c25
+let k1345 = p1345 - c13 * c45 - c14 * c35 - c15 * c34
+let k1346 = p1346 - c13 * c46 - c14 * c36 - c16 * c34
+let k1356 = p1356 - c13 * c56 - c15 * c36 - c16 * c35
+let k1456 = p1456 - c14 * c56 - c15 * c46 - c16 * c45
+let k2345 = p2345 - c23 * c45 - c24 * c35 - c25 * c34
+let k2346 = p2346 - c23 * c46 - c24 * c36 - c26 * c34
+let k2356 = p2356 - c23 * c56 - c25 * c36 - c26 * c35
+let k2456 = p2456 - c24 * c56 - c25 * c46 - c26 * c45
+let k3456 = p3456 - c34 * c56 - c35 * c46 - c36 * c45
+
+// --- deformation constants per channel: g = kappa4 / (channel product) ---
+// crossing channel (ik)(jl): the interleaved, "out-of-time-order" pairing
+let g1234 = k1234 / (c13 * c24)
+let g1235 = k1235 / (c13 * c25)
+let g1236 = k1236 / (c13 * c26)
+let g1245 = k1245 / (c14 * c25)
+let g1246 = k1246 / (c14 * c26)
+let g1256 = k1256 / (c15 * c26)
+let g1345 = k1345 / (c14 * c35)
+let g1346 = k1346 / (c14 * c36)
+let g1356 = k1356 / (c15 * c36)
+let g1456 = k1456 / (c15 * c46)
+let g2345 = k2345 / (c24 * c35)
+let g2346 = k2346 / (c24 * c36)
+let g2356 = k2356 / (c25 * c36)
+let g2456 = k2456 / (c25 * c46)
+let g3456 = k3456 / (c35 * c46)
+// nested channel (il)(jk), for the collapse comparison
+let h1234 = k1234 / (c14 * c23)
+let h1235 = k1235 / (c15 * c23)
+let h1236 = k1236 / (c16 * c23)
+let h1245 = k1245 / (c15 * c24)
+let h1246 = k1246 / (c16 * c24)
+let h1256 = k1256 / (c16 * c25)
+let h1345 = k1345 / (c15 * c34)
+let h1346 = k1346 / (c16 * c34)
+let h1356 = k1356 / (c16 * c35)
+let h1456 = k1456 / (c16 * c45)
+let h2345 = k2345 / (c25 * c34)
+let h2346 = k2346 / (c26 * c34)
+let h2356 = k2356 / (c26 * c35)
+let h2456 = k2456 / (c26 * c45)
+let h3456 = k3456 / (c36 * c45)
+
+// --- collapse statistics: is there ONE q? which channel collapses tighter? ---
+let gbar = (g1234 + g1235 + g1236 + g1245 + g1246 + g1256 + g1345 + g1346 + g1356 + g1456 + g2345 + g2346 + g2356 + g2456 + g3456) / 15.0
+let gvar = ((g1234 - gbar) * (g1234 - gbar) + (g1235 - gbar) * (g1235 - gbar) + (g1236 - gbar) * (g1236 - gbar) + (g1245 - gbar) * (g1245 - gbar) + (g1246 - gbar) * (g1246 - gbar) + (g1256 - gbar) * (g1256 - gbar) + (g1345 - gbar) * (g1345 - gbar) + (g1346 - gbar) * (g1346 - gbar) + (g1356 - gbar) * (g1356 - gbar) + (g1456 - gbar) * (g1456 - gbar) + (g2345 - gbar) * (g2345 - gbar) + (g2346 - gbar) * (g2346 - gbar) + (g2356 - gbar) * (g2356 - gbar) + (g2456 - gbar) * (g2456 - gbar) + (g3456 - gbar) * (g3456 - gbar)) / 15.0
+let g_rsd = sqrt(gvar) / sqrt(gbar * gbar)
+let hbar = (h1234 + h1235 + h1236 + h1245 + h1246 + h1256 + h1345 + h1346 + h1356 + h1456 + h2345 + h2346 + h2356 + h2456 + h3456) / 15.0
+let hvar = ((h1234 - hbar) * (h1234 - hbar) + (h1235 - hbar) * (h1235 - hbar) + (h1236 - hbar) * (h1236 - hbar) + (h1245 - hbar) * (h1245 - hbar) + (h1246 - hbar) * (h1246 - hbar) + (h1256 - hbar) * (h1256 - hbar) + (h1345 - hbar) * (h1345 - hbar) + (h1346 - hbar) * (h1346 - hbar) + (h1356 - hbar) * (h1356 - hbar) + (h1456 - hbar) * (h1456 - hbar) + (h2345 - hbar) * (h2345 - hbar) + (h2346 - hbar) * (h2346 - hbar) + (h2356 - hbar) * (h2356 - hbar) + (h2456 - hbar) * (h2456 - hbar) + (h3456 - hbar) * (h3456 - hbar)) / 15.0
+let h_rsd = sqrt(hvar) / sqrt(hbar * hbar)
+
+// --- sign census and extremes of q_hat = 1 + g ---
+let npos = (if k1234 > 0.0 then 1.0 else 0.0) + (if k1235 > 0.0 then 1.0 else 0.0) + (if k1236 > 0.0 then 1.0 else 0.0) + (if k1245 > 0.0 then 1.0 else 0.0) + (if k1246 > 0.0 then 1.0 else 0.0) + (if k1256 > 0.0 then 1.0 else 0.0) + (if k1345 > 0.0 then 1.0 else 0.0) + (if k1346 > 0.0 then 1.0 else 0.0) + (if k1356 > 0.0 then 1.0 else 0.0) + (if k1456 > 0.0 then 1.0 else 0.0) + (if k2345 > 0.0 then 1.0 else 0.0) + (if k2346 > 0.0 then 1.0 else 0.0) + (if k2356 > 0.0 then 1.0 else 0.0) + (if k2456 > 0.0 then 1.0 else 0.0) + (if k3456 > 0.0 then 1.0 else 0.0)
+let gmin1 = (if g1234 < g1235 then g1234 else g1235)
+let gmin2 = (if gmin1 < g1236 then gmin1 else g1236)
+let gmin3 = (if gmin2 < g1245 then gmin2 else g1245)
+let gmin4 = (if gmin3 < g1246 then gmin3 else g1246)
+let gmin5 = (if gmin4 < g1256 then gmin4 else g1256)
+let gmin6 = (if gmin5 < g1345 then gmin5 else g1345)
+let gmin7 = (if gmin6 < g1346 then gmin6 else g1346)
+let gmin8 = (if gmin7 < g1356 then gmin7 else g1356)
+let gmin9 = (if gmin8 < g1456 then gmin8 else g1456)
+let gmin10 = (if gmin9 < g2345 then gmin9 else g2345)
+let gmin11 = (if gmin10 < g2346 then gmin10 else g2346)
+let gmin12 = (if gmin11 < g2356 then gmin11 else g2356)
+let gmin13 = (if gmin12 < g2456 then gmin12 else g2456)
+let g_min = (if gmin13 < g3456 then gmin13 else g3456)
+let gmax1 = (if g1234 > g1235 then g1234 else g1235)
+let gmax2 = (if gmax1 > g1236 then gmax1 else g1236)
+let gmax3 = (if gmax2 > g1245 then gmax2 else g1245)
+let gmax4 = (if gmax3 > g1246 then gmax3 else g1246)
+let gmax5 = (if gmax4 > g1256 then gmax4 else g1256)
+let gmax6 = (if gmax5 > g1345 then gmax5 else g1345)
+let gmax7 = (if gmax6 > g1346 then gmax6 else g1346)
+let gmax8 = (if gmax7 > g1356 then gmax7 else g1356)
+let gmax9 = (if gmax8 > g1456 then gmax8 else g1456)
+let gmax10 = (if gmax9 > g2345 then gmax9 else g2345)
+let gmax11 = (if gmax10 > g2346 then gmax10 else g2346)
+let gmax12 = (if gmax11 > g2356 then gmax11 else g2356)
+let gmax13 = (if gmax12 > g2456 then gmax12 else g2456)
+let g_max = (if gmax13 > g3456 then gmax13 else g3456)
+let qhat_min = 1.0 + g_min
+let qhat_max = 1.0 + g_max
+
+// --- degeneracy meter: the design must separate cross from nested products ---
+let r1234 = (c13 * c24) / (c14 * c23)
+let r1256 = (c15 * c26) / (c16 * c25)
+let r1345 = (c14 * c35) / (c15 * c34)
+let r2456 = (c25 * c46) / (c26 * c45)
+let r3456 = (c35 * c46) / (c36 * c45)
+
+// --- clean-family statistics (quadruples avoiding the near-null ball-2 channels) ---
+let gcbar = (g1345 + g1346 + g1356 + g1456 + g3456) / 5.0
+let gcvar = ((g1345 - gcbar) * (g1345 - gcbar) + (g1346 - gcbar) * (g1346 - gcbar) + (g1356 - gcbar) * (g1356 - gcbar) + (g1456 - gcbar) * (g1456 - gcbar) + (g3456 - gcbar) * (g3456 - gcbar)) / 5.0
+let gc_rsd = sqrt(gcvar) / sqrt(gcbar * gcbar)
+let n_below_free = (if g1345 < -1.0 then 1.0 else 0.0) + (if g1346 < -1.0 then 1.0 else 0.0) + (if g1356 < -1.0 then 1.0 else 0.0) + (if g1456 < -1.0 then 1.0 else 0.0) + (if g3456 < -1.0 then 1.0 else 0.0)
+
+// --- THE CONTROL: same grid, same dynamics, LEPTOKURTIC jet weights.
+//     Reweight each digit (p, 1-2p, p) with p = 1/12: per-digit kurtosis
+//     flips from -2/3 (uniform, platykurtic) to +1/12 (leptokurtic).
+//     If the kappa4 tower flips sign wholesale, the 4-cumulant structure is
+//     INPUT-INHERITED -- transported jet shape -- not dynamical deformation. ---
+let U1 = method_for(D1) <@> lambda(d) -> (if d > 0.5 then (if d < 1.5 then 2.5 else 0.25) else 0.25) |> compute
+let U2 = method_for(D2) <@> lambda(d) -> (if d > 0.5 then (if d < 1.5 then 2.5 else 0.25) else 0.25) |> compute
+let U3 = method_for(D3) <@> lambda(d) -> (if d > 0.5 then (if d < 1.5 then 2.5 else 0.25) else 0.25) |> compute
+let U4 = method_for(D4) <@> lambda(d) -> (if d > 0.5 then (if d < 1.5 then 2.5 else 0.25) else 0.25) |> compute
+let U5 = method_for(D5) <@> lambda(d) -> (if d > 0.5 then (if d < 1.5 then 2.5 else 0.25) else 0.25) |> compute
+let U6 = method_for(D6) <@> lambda(d) -> (if d > 0.5 then (if d < 1.5 then 2.5 else 0.25) else 0.25) |> compute
+let WA = method_for(zip(U1, U2, U3)) <@> lambda(a, b, c) -> a * b * c |> compute
+let WB = method_for(zip(U4, U5, U6)) <@> lambda(a, b, c) -> a * b * c |> compute
+let WT = method_for(zip(WA, WB)) <@> lambda(a, b) -> a * b |> compute
+let wsum = reduce(method_for(WT) <@> lambda(w) -> w, (+))
+
+let mw1 = reduce(method_for(zip(WT, X1)) <@> lambda(w, x) -> w * x, (+)) / 729.0
+let mw2 = reduce(method_for(zip(WT, X2)) <@> lambda(w, x) -> w * x, (+)) / 729.0
+let mw3 = reduce(method_for(zip(WT, X3)) <@> lambda(w, x) -> w * x, (+)) / 729.0
+let mw4 = reduce(method_for(zip(WT, X4)) <@> lambda(w, x) -> w * x, (+)) / 729.0
+let mw5 = reduce(method_for(zip(WT, X5)) <@> lambda(w, x) -> w * x, (+)) / 729.0
+let mw6 = reduce(method_for(zip(WT, X6)) <@> lambda(w, x) -> w * x, (+)) / 729.0
+let Z1 = method_for(X1) <@> lambda(x) -> x - mw1 |> compute
+let Z2 = method_for(X2) <@> lambda(x) -> x - mw2 |> compute
+let Z3 = method_for(X3) <@> lambda(x) -> x - mw3 |> compute
+let Z4 = method_for(X4) <@> lambda(x) -> x - mw4 |> compute
+let Z5 = method_for(X5) <@> lambda(x) -> x - mw5 |> compute
+let Z6 = method_for(X6) <@> lambda(x) -> x - mw6 |> compute
+
+let w12 = reduce(method_for(zip(WT, Z1, Z2)) <@> lambda(w, a, b) -> w * a * b, (+)) / 729.0
+let w13 = reduce(method_for(zip(WT, Z1, Z3)) <@> lambda(w, a, b) -> w * a * b, (+)) / 729.0
+let w14 = reduce(method_for(zip(WT, Z1, Z4)) <@> lambda(w, a, b) -> w * a * b, (+)) / 729.0
+let w15 = reduce(method_for(zip(WT, Z1, Z5)) <@> lambda(w, a, b) -> w * a * b, (+)) / 729.0
+let w16 = reduce(method_for(zip(WT, Z1, Z6)) <@> lambda(w, a, b) -> w * a * b, (+)) / 729.0
+let w23 = reduce(method_for(zip(WT, Z2, Z3)) <@> lambda(w, a, b) -> w * a * b, (+)) / 729.0
+let w24 = reduce(method_for(zip(WT, Z2, Z4)) <@> lambda(w, a, b) -> w * a * b, (+)) / 729.0
+let w25 = reduce(method_for(zip(WT, Z2, Z5)) <@> lambda(w, a, b) -> w * a * b, (+)) / 729.0
+let w26 = reduce(method_for(zip(WT, Z2, Z6)) <@> lambda(w, a, b) -> w * a * b, (+)) / 729.0
+let w34 = reduce(method_for(zip(WT, Z3, Z4)) <@> lambda(w, a, b) -> w * a * b, (+)) / 729.0
+let w35 = reduce(method_for(zip(WT, Z3, Z5)) <@> lambda(w, a, b) -> w * a * b, (+)) / 729.0
+let w36 = reduce(method_for(zip(WT, Z3, Z6)) <@> lambda(w, a, b) -> w * a * b, (+)) / 729.0
+let w45 = reduce(method_for(zip(WT, Z4, Z5)) <@> lambda(w, a, b) -> w * a * b, (+)) / 729.0
+let w46 = reduce(method_for(zip(WT, Z4, Z6)) <@> lambda(w, a, b) -> w * a * b, (+)) / 729.0
+let w56 = reduce(method_for(zip(WT, Z5, Z6)) <@> lambda(w, a, b) -> w * a * b, (+)) / 729.0
+
+let s1234 = reduce(method_for(zip(WT, Z1, Z2, Z3, Z4)) <@> lambda(w, a, b, c, d) -> w * a * b * c * d, (+)) / 729.0
+let s1235 = reduce(method_for(zip(WT, Z1, Z2, Z3, Z5)) <@> lambda(w, a, b, c, d) -> w * a * b * c * d, (+)) / 729.0
+let s1236 = reduce(method_for(zip(WT, Z1, Z2, Z3, Z6)) <@> lambda(w, a, b, c, d) -> w * a * b * c * d, (+)) / 729.0
+let s1245 = reduce(method_for(zip(WT, Z1, Z2, Z4, Z5)) <@> lambda(w, a, b, c, d) -> w * a * b * c * d, (+)) / 729.0
+let s1246 = reduce(method_for(zip(WT, Z1, Z2, Z4, Z6)) <@> lambda(w, a, b, c, d) -> w * a * b * c * d, (+)) / 729.0
+let s1256 = reduce(method_for(zip(WT, Z1, Z2, Z5, Z6)) <@> lambda(w, a, b, c, d) -> w * a * b * c * d, (+)) / 729.0
+let s1345 = reduce(method_for(zip(WT, Z1, Z3, Z4, Z5)) <@> lambda(w, a, b, c, d) -> w * a * b * c * d, (+)) / 729.0
+let s1346 = reduce(method_for(zip(WT, Z1, Z3, Z4, Z6)) <@> lambda(w, a, b, c, d) -> w * a * b * c * d, (+)) / 729.0
+let s1356 = reduce(method_for(zip(WT, Z1, Z3, Z5, Z6)) <@> lambda(w, a, b, c, d) -> w * a * b * c * d, (+)) / 729.0
+let s1456 = reduce(method_for(zip(WT, Z1, Z4, Z5, Z6)) <@> lambda(w, a, b, c, d) -> w * a * b * c * d, (+)) / 729.0
+let s2345 = reduce(method_for(zip(WT, Z2, Z3, Z4, Z5)) <@> lambda(w, a, b, c, d) -> w * a * b * c * d, (+)) / 729.0
+let s2346 = reduce(method_for(zip(WT, Z2, Z3, Z4, Z6)) <@> lambda(w, a, b, c, d) -> w * a * b * c * d, (+)) / 729.0
+let s2356 = reduce(method_for(zip(WT, Z2, Z3, Z5, Z6)) <@> lambda(w, a, b, c, d) -> w * a * b * c * d, (+)) / 729.0
+let s2456 = reduce(method_for(zip(WT, Z2, Z4, Z5, Z6)) <@> lambda(w, a, b, c, d) -> w * a * b * c * d, (+)) / 729.0
+let s3456 = reduce(method_for(zip(WT, Z3, Z4, Z5, Z6)) <@> lambda(w, a, b, c, d) -> w * a * b * c * d, (+)) / 729.0
+
+let kw1234 = s1234 - w12 * w34 - w13 * w24 - w14 * w23
+let kw1235 = s1235 - w12 * w35 - w13 * w25 - w15 * w23
+let kw1236 = s1236 - w12 * w36 - w13 * w26 - w16 * w23
+let kw1245 = s1245 - w12 * w45 - w14 * w25 - w15 * w24
+let kw1246 = s1246 - w12 * w46 - w14 * w26 - w16 * w24
+let kw1256 = s1256 - w12 * w56 - w15 * w26 - w16 * w25
+let kw1345 = s1345 - w13 * w45 - w14 * w35 - w15 * w34
+let kw1346 = s1346 - w13 * w46 - w14 * w36 - w16 * w34
+let kw1356 = s1356 - w13 * w56 - w15 * w36 - w16 * w35
+let kw1456 = s1456 - w14 * w56 - w15 * w46 - w16 * w45
+let kw2345 = s2345 - w23 * w45 - w24 * w35 - w25 * w34
+let kw2346 = s2346 - w23 * w46 - w24 * w36 - w26 * w34
+let kw2356 = s2356 - w23 * w56 - w25 * w36 - w26 * w35
+let kw2456 = s2456 - w24 * w56 - w25 * w46 - w26 * w45
+let kw3456 = s3456 - w34 * w56 - w35 * w46 - w36 * w45
+let nposW = (if kw1234 > 0.0 then 1.0 else 0.0) + (if kw1235 > 0.0 then 1.0 else 0.0) + (if kw1236 > 0.0 then 1.0 else 0.0) + (if kw1245 > 0.0 then 1.0 else 0.0) + (if kw1246 > 0.0 then 1.0 else 0.0) + (if kw1256 > 0.0 then 1.0 else 0.0) + (if kw1345 > 0.0 then 1.0 else 0.0) + (if kw1346 > 0.0 then 1.0 else 0.0) + (if kw1356 > 0.0 then 1.0 else 0.0) + (if kw1456 > 0.0 then 1.0 else 0.0) + (if kw2345 > 0.0 then 1.0 else 0.0) + (if kw2346 > 0.0 then 1.0 else 0.0) + (if kw2356 > 0.0 then 1.0 else 0.0) + (if kw2456 > 0.0 then 1.0 else 0.0) + (if kw3456 > 0.0 then 1.0 else 0.0)
+
+// --- verdicts ---
+let sign_V = if npos < 0.5 then "ALL_K4_NEGATIVE" else (if npos > 14.5 then "ALL_K4_POSITIVE" else "MIXED_SIGNS")
+let collapse_V = if g_rsd < 0.25 then "CONSTANT_Q" else "NOT_A_Q_FAMILY"
+let below_V = if n_below_free > 0.5 then "DEFICIT_EXCEEDS_CROSSING_CHANNEL" else "WITHIN_Q_RANGE"
+let flip_V = if nposW > 14.5 then "K4_FLIPS_WITH_JET_SHAPE" else (if nposW < 0.5 then "K4_SIGN_ROBUST" else "PARTIAL_FLIP")
+let verdict_V = if nposW > 14.5 then "INHERITED_NOT_DYNAMICAL" else "DYNAMICAL_STRUCTURE"
+
+// itinerary sharp; all fifteen 4-cumulants negative yet no q fits (sign-
+// changing, below-free); the leptokurtic reweighting flips all fifteen:
+// the cascade transports jet kurtosis, it does not deform partitions:
+// EXPECT: GUARD = 0
+// EXPECT: guard_V = "FRONT_OUTRUNS_ALL"
+// EXPECT: mu1 = 0.977161113292714
+// EXPECT: c24 = -3.5012903526175e-06
+// EXPECT: c34 = 0.000123559375534494
+// EXPECT: c56 = 0.000200177543354424
+// EXPECT: k1345 = -1.1075006147166e-09
+// EXPECT: k3456 = -1.77047640617364e-09
+// EXPECT: npos = 0
+// EXPECT: g1345 = -0.0815388688880832
+// EXPECT: g1456 = -1.14327540947602
+// EXPECT: g3456 = -1.36880649543928
+// EXPECT: g_rsd = 1.23287864289238
+// EXPECT: h_rsd = 1.22536115263124
+// EXPECT: qhat_min = -0.36880649543928
+// EXPECT: qhat_max = 5.49678099037086
+// EXPECT: r1234 = 1.03018858959444
+// EXPECT: r3456 = 0.974555461264268
+// EXPECT: gcbar = -0.552949835052889
+// EXPECT: gc_rsd = 1.04619278954239
+// EXPECT: n_below_free = 2
+// EXPECT: wsum = 729
+// EXPECT: kw1345 = 3.62563580758112e-10
+// EXPECT: kw3456 = 3.75291383123026e-10
+// EXPECT: nposW = 15
+// EXPECT: sign_V = "ALL_K4_NEGATIVE"
+// EXPECT: collapse_V = "NOT_A_Q_FAMILY"
+// EXPECT: below_V = "DEFICIT_EXCEEDS_CROSSING_CHANNEL"
+// EXPECT: flip_V = "K4_FLIPS_WITH_JET_SHAPE"
+// EXPECT: verdict_V = "INHERITED_NOT_DYNAMICAL"

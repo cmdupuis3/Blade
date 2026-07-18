@@ -1,0 +1,35 @@
+// TEST: Negative Variance Tower (the Tsirelson B-marginal as a value)
+import ppl as ppl
+// Example 33's obstruction, carried: the CHSH observable's marginal under
+// the minimal signed extension is the 2-atom quasi-distribution
+// w(+-2) = (1 +- s/2)/2 at CHSH value s. At the Tsirelson point
+// s = 2 sqrt 2 the weights are ((1 + sqrt2)/2, (1 - sqrt2)/2) — one
+// NEGATIVE — and the carried tower has kappa1 = 2 sqrt 2,
+// kappa2 = 4 - 8 = -4: the negative variance as a first-class value.
+// dist_negativity reads the L1 negativity off the claimed support:
+// 0.2071 at Tsirelson (= ex 37's order parameter at v = 1), 0.1 at
+// s = 2.4, and EXACTLY ZERO at s = 1.6 (inside the classical wall):
+// the wall is the meter's zero.
+let ts = ppl.dist_atoms(2, 2.0, 1.20710678118655, -2.0, -0.207106781186548)
+let t1 = ppl.cumulant(ts, 1)
+let t2 = ppl.cumulant(ts, 2)
+let tneg = ppl.dist_negativity(ts, -2.0, 2.0)
+let mid = ppl.dist_atoms(2, 2.0, 0.6, -2.0, 0.4)
+let m1 = ppl.cumulant(mid, 1)
+let mneg = ppl.dist_negativity(mid, -2.0, 2.0)
+let shell = ppl.dist_atoms(2, 2.0, 0.8, -2.0, 0.2)
+let sneg = ppl.dist_negativity(shell, -2.0, 2.0)
+// s = 2.4: w = (1.1, -0.1)/1: negativity 0.1
+let gap = ppl.dist_atoms(2, 2.0, 1.1, -2.0, -0.1)
+let g1 = ppl.cumulant(gap, 1)
+let g2 = ppl.cumulant(gap, 2)
+let gneg = ppl.dist_negativity(gap, -2.0, 2.0)
+// EXPECT: t1 = [2.82842712474619]
+// EXPECT: t2 = [-4.00000000000001]
+// EXPECT: tneg = 0.207106781186548
+// EXPECT: m1 = [0.4]
+// EXPECT: mneg = 0.0
+// EXPECT: sneg = 0.0
+// EXPECT: g1 = [2.4]
+// EXPECT: g2 = [-1.76]
+// EXPECT: gneg = 0.1

@@ -1,0 +1,18 @@
+// TEST: Math eig: companion matrix, real spectrum via Francis chase
+// Companion of (λ−1)(λ−2)(λ−3): a genuine bulge-chase case (no zero
+// subdiagonals). Pins from math/OracleDump.fs; the in-program trace
+// identity Σ RE = tr(A) = 6 pins at 0.0.
+import math as m
+let A: Array<Float64 like Idx<3>, Idx<3>> = [[0.0, 1.0, 0.0], [0.0, 0.0, 1.0], [6.0, -11.0, 6.0]]
+let (RE, IM) = m.eig(A)
+let trdev = {
+    let mut s = 0.0
+    for k in 0..3 {
+        s = s + RE(k)
+    }
+    let d = s - 6.0
+    d * d
+}
+// EXPECT: RE = [3.0000000000000107, 2.0000000000039417, 0.9999999999960475]
+// EXPECT: IM = [0, 0, 0]
+// EXPECT: trdev = 0.0

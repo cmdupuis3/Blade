@@ -1,0 +1,5 @@
+// TEST: Spectra fft: inline array argument steers to annotated let (rejects)
+// Spectra ops read the DECLARED shape: the argument must be a plain
+// variable naming a module-level let with a full Array annotation.
+import spectra as sp
+let X = sp.fft([1.0, 2.0, 3.0, 4.0])

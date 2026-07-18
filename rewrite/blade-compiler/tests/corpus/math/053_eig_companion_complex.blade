@@ -1,0 +1,9 @@
+// TEST: Math eig: companion matrix with complex pair
+// Companion of (λ−0.5)(λ²−λ+0.625): roots 0.5 ± i√0.375 (modulus √0.625)
+// and 0.5 — a complex pair through a real Francis chase, sorted by
+// descending modulus with +im first. Pins from math/OracleDump.fs.
+import math as m
+let A: Array<Float64 like Idx<3>, Idx<3>> = [[0.0, 1.0, 0.0], [0.0, 0.0, 1.0], [0.3125, -1.125, 1.5]]
+let (RE, IM) = m.eig(A)
+// EXPECT: RE = [0.49999999999993788, 0.49999999999993788, 0.50000000000012523]
+// EXPECT: IM = [0.61237243569579025, -0.61237243569579025, 0]

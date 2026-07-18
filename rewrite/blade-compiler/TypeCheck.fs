@@ -980,7 +980,42 @@ let inferArrayLitType (builder: IRBuilder) (exprs: TypedExpr list) : IRArrayType
                 | first :: rest -> rest |> List.exists (fun n -> n <> first)
             | _ -> false
 
-    if isRaggedAtSecondLevel then
+    // Array-valued element expressions: when the outer literal's entries are
+    // not bracket sub-literals but expressions whose TYPE is already an array
+    // (computed rows bound to names, e.g. `method_for(..) |> compute`
+    // results), the bracket contributes only the outer dimension — the inner
+    // index structure comes from the elements' own array type. Without this,
+    // getShape below (which walks TExprArrayLit nesting only) inferred a
+    // rank-1 array of scalars, and codegen assigned Array wrappers into
+    // scalar slots. Restricted to plain dense element index types (rank-1
+    // per index, no symmetry/dependencies, not virtual); exotic element
+    // shapes keep the previous behavior.
+    let rowTypedElemArr =
+        match exprs with
+        | first :: _ ->
+            match first.Kind, first.Type with
+            | TExprArrayLit _, _ -> None
+            | _, ArrayElem elemArr when
+                not elemArr.IsVirtual
+                && not elemArr.IndexTypes.IsEmpty
+                && elemArr.IndexTypes |> List.forall (fun ix ->
+                    ix.Rank = 1 && ix.Symmetry = SymNone && ix.Dependencies.IsEmpty) ->
+                Some elemArr
+            | _ -> None
+        | [] -> None
+
+    if rowTypedElemArr.IsSome then
+        let elemArr = rowTypedElemArr.Value
+        let outerIdx = {
+            Id = builder.FreshId(); Rank = 1; Extent = IRLit (IRLitInt (int64 exprs.Length))
+            Symmetry = SymNone; Tag = None; IxKind = IxKPlain; Kind = SDimension; Dependencies = []
+        }
+        // Fresh Ids: the literal's dimensions are new index-space occurrences,
+        // not the source rows' (mirrors the fresh-Id policy of the
+        // rectangular branch below). Extent/Tag/Kind carry over.
+        let innerIdxs = elemArr.IndexTypes |> List.map (fun ix -> { ix with Id = builder.FreshId() })
+        { ElemType = elemArr.ElemType; IndexTypes = outerIdx :: innerIdxs; IsVirtual = false; Identity = None }
+    elif isRaggedAtSecondLevel then
         // Build a RaggedIdx-typed array. Outer index has extent = number of
         // entries (rectangular at outer level). Inner index is RaggedIdx with
         // an IRRaggedLookup whose lengths reference is synthesized from the
@@ -1402,7 +1437,7 @@ let private compoundResidualType (headSlot: IRIndexType) (parentIR: IRExpr) (j: 
             Symmetry = SymNone; Tag = Some "__compoundidx"; IxKind = IxKCompound
             Kind = SDimension; Dependencies = [] } ]
 
-let private dispatchAppOrIndex (env: TypeEnv) (tFunc: TypedExpr) (tArgs: TypedExpr list) : TypeResult<TypedExpr> =
+let rec private dispatchAppOrIndex (env: TypeEnv) (tFunc: TypedExpr) (tArgs: TypedExpr list) : TypeResult<TypedExpr> =
     match tFunc.Type with
     | ArrayElem arrTy when tArgs.Length <= arrTy.IndexTypes.Length ->
         validateCompoundIndex env arrTy tArgs
@@ -1559,7 +1594,34 @@ let private dispatchAppOrIndex (env: TypeEnv) (tFunc: TypedExpr) (tArgs: TypedEx
                 "argument %d: IrrepsIdx mismatch: the parameter expects %s but the argument carries %s. IrrepsIdx identity is the spec (plus nominative alias name) — equal total_dim does not make two irreps spaces interchangeable."
                 (i + 1) (ppIndexType pi) (ppIndexType ai)))
         | None ->
-            Ok (mkTyped (TExprApp (tFunc, tArgs)) retTy)
+            // A Poly<T^r> pack param makes the arrow variadic — its declared
+            // param count says nothing about legal call-site arg counts, so
+            // arity accounting stands down (monomorphization owns the call).
+            let isVariadic =
+                paramTys |> List.exists (fun t ->
+                    match env.Subst.Resolve t with IRTPoly _ -> true | _ -> false)
+            if isVariadic then
+                Ok (mkTyped (TExprApp (tFunc, tArgs)) retTy)
+            elif tArgs.Length > paramTys.Length then
+                // Curried over-application: this arrow consumes its declared
+                // params; the remainder re-dispatches against the result
+                // type — a function result curries on, an array result falls
+                // into dimensional indexing. A scalar result makes the
+                // surplus a plain arity error.
+                let now, rest = List.splitAt paramTys.Length tArgs
+                let head = mkTyped (TExprApp (tFunc, now)) retTy
+                match env.Subst.Resolve retTy with
+                | FuncElem _ | ArrayElem _ -> dispatchAppOrIndex env head rest
+                | _ -> Error (ArityMismatch (paramTys.Length, tArgs.Length))
+            elif tArgs.Length < paramTys.Length then
+                // Under-application reaching dispatch is NOT partial
+                // application: the ExprApp arm eta-expands 0 < k < n before
+                // dispatching, so this is either a zero-arg call `f()` of an
+                // n-ary function or an under-applied function-typed struct
+                // field (deferred feature) — both genuine arity errors.
+                Error (ArityMismatch (paramTys.Length, tArgs.Length))
+            else
+                Ok (mkTyped (TExprApp (tFunc, tArgs)) retTy)
     | _ ->
         let retTy = env.Subst.Fresh()
         Ok (mkTyped (TExprApp (tFunc, tArgs)) retTy)
@@ -1609,6 +1671,7 @@ let private typedExprChildren (expr: TypedExpr) : TypedExpr list =
         | TExprBlocked (_, bs) -> [bs]
         | TExprPure e | TExprCompute e | TExprRead e | TExprFillRandom e | TExprRank e
         | TExprExtents e | TExprReynolds (e, _) -> [e]
+        | TExprRandGen (_, key, _) -> [key]
         | TExprGuard (c, b) -> [c; b]
         | TExprMask (a, p) | TExprIntersect (a, p) | TExprUnion (a, p)
         | TExprGroupBy (a, p) | TExprSort (a, p)
@@ -1675,6 +1738,9 @@ let rec private revalidateBodyTagChecks (env: TypeEnv) (expr: TypedExpr) : TypeR
 /// names for static contexts.
 let isMathIntrinsic (name: string) : bool = Blade.Grad.isMathIntrinsic name
 
+/// Whitelist subset permitted on complex operands (has a std::complex overload).
+let isComplexMathIntrinsic (name: string) : bool = Blade.Grad.isComplexMathIntrinsic name
+
 /// A variable is a provider-module alias when it is bound opaque to a
 /// registered provider's module name (`import netcdf as nc` binds
 /// nc : IRTNamed "netcdf"). Returns the registry name for dispatch.
@@ -1697,6 +1763,12 @@ let rec inferExpr (env: TypeEnv) (expr: Expr) : TypeResult<TypedExpr> =
     // B((a, _, c))). The compound-index dispatch reads the wildcard positions;
     // any other context that reaches lowering with a TExprWildcard is an error.
     | ExprWildcard -> Ok (mkTyped TExprWildcard (env.Subst.Fresh()))
+
+    // ---- Static former marker ----
+    // Produced by the parser, eliminated by the Unfold pass before
+    // typechecking; reaching here means the pipeline skipped unfolding.
+    | ExprStatic _ ->
+        Error (Other "internal: static former survived unfolding (the Unfold pass did not run)")
 
     // ---- Variables ----
     | ExprVar name ->
@@ -1862,7 +1934,13 @@ let rec inferExpr (env: TypeEnv) (expr: Expr) : TypeResult<TypedExpr> =
                     "%s applies to scalars; map it over the array elementwise (e.g. method_for(A) <@> lambda(x) -> %s(x) |> compute)."
                     name name))
             | IRTScalar (ETComplex64 | ETComplex128) ->
-                Error (Other (sprintf "%s is not defined for complex operands (yet)." name))
+                // exp/log/sqrt and the trig/hyperbolic families have std::complex
+                // overloads and preserve the complex type; floor/ceil have no
+                // complex overload and stay rejected.
+                if isComplexMathIntrinsic name then
+                    Ok (mkTyped (TExprUnaryOp (OpMath name, tArg)) tArg.Type)
+                else
+                    Error (Other (sprintf "%s is not defined for complex operands." name))
             | IRTScalar ETBool | IRTScalar ETString ->
                 Error (Other (sprintf "%s expects a numeric operand." name))
             | IRTInfer _ ->
@@ -1884,10 +1962,55 @@ let rec inferExpr (env: TypeEnv) (expr: Expr) : TypeResult<TypedExpr> =
             match env.Subst.Resolve tArg.Type with
             | IRTScalar (ETInt32 | ETInt64 | ETFloat32 | ETFloat64) as sc ->
                 Ok (mkTyped (TExprUnaryOp (OpMath "abs", tArg)) sc)
+            | IRTScalar (ETComplex64 | ETComplex128) ->
+                // abs of a complex is its real magnitude (std::abs(complex<T>)
+                // returns T); type the result Float64 (IRMath "abs" reports
+                // Float64 at the IR level, which is correct for both widths).
+                Ok (mkTyped (TExprUnaryOp (OpMath "abs", tArg)) (IRTScalar ETFloat64))
             | IRTInfer _ ->
                 Ok (mkTyped (TExprUnaryOp (OpMath "abs", tArg)) tArg.Type)
             | other ->
                 Error (Other (sprintf "abs expects a numeric scalar operand, got %s" (ppIRType other))))
+
+    // ---- real(z) / imag(z) / arg(z): complex component/phase accessors ----
+    // Plain-call intrinsics (shadowable by a user binding, like abs). Require a
+    // complex scalar operand — real/imag on a real value is trivially the
+    // identity/zero and a likely mistake, so we steer instead. real/imag yield
+    // the component width (Complex128 -> Float64, Complex64 -> Float32); arg is
+    // a Float64 angle. Emit std::real/std::imag/std::arg via the generic unary
+    // codegen arm.
+    | ExprApp (ExprVar (("real" | "imag" | "arg") as name), [arg]) when (lookupVar name env).IsNone ->
+        inferExpr env arg |> Result.bind (fun tArg ->
+            let op = match name with
+                     | "real" -> OpReal
+                     | "imag" -> OpImag
+                     | _ -> OpArg
+            match env.Subst.Resolve tArg.Type with
+            | IRTScalar ETComplex64 ->
+                let resTy = if name = "arg" then IRTScalar ETFloat64 else IRTScalar ETFloat32
+                Ok (mkTyped (TExprUnaryOp (op, tArg)) resTy)
+            | IRTScalar ETComplex128 ->
+                Ok (mkTyped (TExprUnaryOp (op, tArg)) (IRTScalar ETFloat64))
+            | ArrayElem _ ->
+                Error (Other (sprintf "%s applies to complex scalars; map it over the array elementwise (e.g. method_for(A) <@> lambda(z) -> %s(z) |> compute)." name name))
+            | other ->
+                Error (Other (sprintf "%s expects a complex operand, got %s" name (ppIRType other))))
+
+    // ---- complex(re, im): complex literal constructor ----
+    // The one way to construct a complex value (the earlier 2-tuple cast
+    // form `(re, im) : Complex128` is retired — as a plain call this
+    // composes under any operator without the precedence trap where
+    // `a * (re, im) : T` bound the cast outside the multiply). Plain-call
+    // intrinsic, shadowable like abs/real. Components must be float-typed
+    // (no implicit int -> float promotion at construction time, same rule
+    // as the retired form). Infers Complex128; checking against an
+    // expected Complex64 adopts the narrow width (checkExpr arm).
+    | ExprApp (ExprVar "complex", [reExpr; imExpr]) when (lookupVar "complex" env).IsNone ->
+        checkExpr env (IRTScalar ETFloat64) reExpr |> Result.bind (fun tRe ->
+        checkExpr env (IRTScalar ETFloat64) imExpr |> Result.map (fun tIm ->
+            mkTyped (TExprComplexLit (tRe, tIm)) (IRTScalar ETComplex128)))
+    | ExprApp (ExprVar "complex", args) when (lookupVar "complex" env).IsNone ->
+        Error (Other (sprintf "complex expects exactly two float components — complex(re, im) — got %d argument(s)" args.Length))
 
     // ---- prodsum(x1, ..., xk): fused fiber product-sum ----
     // Σ_t Π_ℓ xℓ(t) over rank-1 arrays of equal extent — the k-fold
@@ -1907,6 +2030,33 @@ let rec inferExpr (env: TypeEnv) (expr: Expr) : TypeResult<TypedExpr> =
     | ExprApp (ExprVar "__dist_pack", args) when not args.IsEmpty ->
         inferDistPack env args
 
+    // ---- __rand_uniform / __rand_normal(key, d1, ..., dn): rand module ----
+    // Compiler-internal (double-underscore reserved): emitted by the `rand`
+    // elaboration stage from `alias.uniform/normal(key, shape)`. `key` is an
+    // Int64 stream key; the trailing args are the (elaborator-resolved) static
+    // extents. Self-typed as a dense Float64 array of that shape — no annotation
+    // needed. Lowering records (kind, key) in RandomInits; codegen emits
+    // allocate<> + the runtime blade_rand fill.
+    | ExprApp (ExprVar (("__rand_uniform" | "__rand_normal") as fn), (keyE :: dimArgs)) when not dimArgs.IsEmpty ->
+        let kind = if fn = "__rand_uniform" then "uniform" else "normal"
+        // Extents must be static ints (the elaborator resolves them to literals).
+        let dimResults =
+            dimArgs |> List.map (fun d ->
+                match d with
+                | ExprLit (LitInt n) when n > 0L -> Ok (int n)
+                | ExprLit (LitInt n) -> Error (sprintf "rand.%s: shape extents must be positive (got %d)" kind n)
+                | _ -> Error (sprintf "rand.%s: shape must be a static positive int (or list of them)" kind))
+        match dimResults |> List.fold (fun acc r -> match acc, r with Ok xs, Ok x -> Ok (xs @ [x]) | Error e, _ -> Error e | _, Error e -> Error e) (Ok []) with
+        | Error e -> Error (Other e)
+        | Ok dims ->
+            checkExpr env (IRTScalar ETInt64) keyE |> Result.map (fun tKey ->
+                let indices =
+                    dims |> List.map (fun n ->
+                        { Id = env.Builder.FreshId(); Rank = 1; Extent = IRLit (IRLitInt (int64 n))
+                          Symmetry = SymNone; Tag = None; IxKind = IxKPlain; Kind = SDimension; Dependencies = [] })
+                let arrTy = mkArrayArrow indices (IRTScalar ETFloat64) None
+                mkTyped (TExprRandGen (kind, tKey, dims)) arrTy)
+
     // ---- cumulant(d, k): dist component projection, order-guarded ----
     // The order guard as a TYPE error (ppl/NOTES.md typed-Dist arc): k must
     // be a static int in 1..r where r is the dist's carried order. Works in
@@ -1920,32 +2070,90 @@ let rec inferExpr (env: TypeEnv) (expr: Expr) : TypeResult<TypedExpr> =
 
     | ExprApp (func, args) ->
         inferExpr env func |> Result.bind (fun tFunc ->
-        args |> List.map (inferExpr env) |> sequenceResults |> Result.bind (fun tArgs ->
-            // Call-site constraint DISCHARGE: if the callee declared custom
-            // where-clause conjuncts (e.g. PPL's `indep(a, b)`), the caller
-            // must prove them for the actual arguments — each registered
-            // handler gets the callee's conjunct args plus a provenance
-            // oracle mapping callee param names to the actuals' provenance.
-            let dischargeErr =
-                match func with
-                | ExprVar fname ->
-                    match env.FuncConstraints.TryGetValue fname with
-                    | true, (paramNames, conjuncts) ->
-                        let provOf (pname: string) : Set<string> =
-                            match List.tryFindIndex ((=) pname) paramNames with
-                            | Some i when i < args.Length -> provenanceOfSurface env args.[i]
-                            | _ -> Set.empty
-                        conjuncts |> List.tryPick (fun (cname, cargs) ->
-                            Blade.Constraints.lookupConstraint cname
-                            |> Option.bind (fun h ->
-                                match h.Discharge fname cargs provOf with
-                                | Ok () -> None
-                                | Error msg -> Some msg))
+        // Prefix partial application (formalism 6.2.3): applying an n-ary
+        // FUNCTION to 0 < k < n args eta-expands to a lambda over the
+        // residual params — lambda(__pa..) -> f(a1..ak, __pa..) — so the
+        // residual value rides the entire existing lambda pipeline
+        // (inferLambda captures, lowerTypedLambda lifting, std::function
+        // value emission, resolveCallable kernel wrappers). The FuncElem
+        // guard keeps arrays on their own dimensional-currying path below.
+        // Bound args are inlined into the lambda body (each appears exactly
+        // once), so they re-evaluate per call of the residual and their
+        // free locals become ordinary lambda captures — the same semantics
+        // as a user-written lambda. `func` is inferred a second time inside
+        // the body; inference of an application head is pure, so the
+        // discarded detection pass above costs nothing.
+        // A Poly<T^r> pack param makes the arrow variadic: its declared
+        // param count says nothing about legal call-site arg counts, so
+        // both the placeholder desugar and the under-application
+        // eta-expansion must stand down (monomorphization owns those calls).
+        let hasPolyParam (paramTys: IRType list) =
+            paramTys |> List.exists (fun t ->
+                match env.Subst.Resolve t with IRTPoly _ -> true | _ -> false)
+        match env.Subst.Resolve tFunc.Type with
+        // Single `_` placeholder (formalism 6.2.3): one hole in an
+        // otherwise-full application binds every other parameter and
+        // leaves the hole's parameter free — f(_, b) ≡ lambda(x) -> f(x, b).
+        // FuncElem-gated: array wildcard-indexing (the 4.5 currying table,
+        // where MULTIPLE holes are legal) stays on the ArrayElem path.
+        | FuncElem (paramTys, retTy) when not (hasPolyParam paramTys) && args |> List.exists (fun a -> match a with ExprWildcard -> true | _ -> false) ->
+            let wildPositions =
+                args |> List.mapi (fun i a -> (i, a))
+                     |> List.choose (fun (i, a) -> match a with ExprWildcard -> Some i | _ -> None)
+            if wildPositions.Length > 1 then
+                Error (Other "function partial application takes a single `_` placeholder only (formalism 6.2.3) — bind the rest with prefix partial application or a lambda")
+            elif args.Length <> paramTys.Length then
+                Error (Other (sprintf "the `_` placeholder needs every other parameter bound: this call supplies %d of %d args. Combine with prefix partial application in two steps, or use a lambda." args.Length paramTys.Length))
+            else
+                let wildPos = wildPositions.Head
+                let uid = env.Builder.FreshId()
+                let name = sprintf "__pa%d_w" uid
+                let newArgs = args |> List.mapi (fun i a -> if i = wildPos then ExprVar name else a)
+                inferLambda env [{ Name = name; Type = None }] None (ExprApp (func, newArgs))
+                |> Result.bind (fun tLam ->
+                    unify env.Subst tLam.Type (mkFuncArrow [paramTys.[wildPos]] retTy)
+                    |> Result.map (fun () -> tLam))
+        | FuncElem (paramTys, retTy) when not (hasPolyParam paramTys) && not args.IsEmpty && args.Length < paramTys.Length ->
+            let residual = paramTys |> List.skip args.Length
+            let uid = env.Builder.FreshId()
+            let names = residual |> List.mapi (fun i _ -> sprintf "__pa%d_%d" uid i)
+            let lamParams = names |> List.map (fun n -> { Name = n; Type = None } : LambdaParam)
+            let bodyApp = ExprApp (func, args @ (names |> List.map ExprVar))
+            inferLambda env lamParams None bodyApp
+            |> Result.bind (fun tLam ->
+                // Pin the residual param types to the callee's declared
+                // ones: direct application keeps its historical looseness
+                // (no param-vs-arg unification), so nothing else would
+                // resolve the lambda's fresh param inference vars.
+                unify env.Subst tLam.Type (mkFuncArrow residual retTy)
+                |> Result.map (fun () -> tLam))
+        | _ ->
+            args |> List.map (inferExpr env) |> sequenceResults |> Result.bind (fun tArgs ->
+                // Call-site constraint DISCHARGE: if the callee declared custom
+                // where-clause conjuncts (e.g. PPL's `indep(a, b)`), the caller
+                // must prove them for the actual arguments — each registered
+                // handler gets the callee's conjunct args plus a provenance
+                // oracle mapping callee param names to the actuals' provenance.
+                let dischargeErr =
+                    match func with
+                    | ExprVar fname ->
+                        match env.FuncConstraints.TryGetValue fname with
+                        | true, (paramNames, conjuncts) ->
+                            let provOf (pname: string) : Set<string> =
+                                match List.tryFindIndex ((=) pname) paramNames with
+                                | Some i when i < args.Length -> provenanceOfSurface env args.[i]
+                                | _ -> Set.empty
+                            conjuncts |> List.tryPick (fun (cname, cargs) ->
+                                Blade.Constraints.lookupConstraint cname
+                                |> Option.bind (fun h ->
+                                    match h.Discharge fname cargs provOf with
+                                    | Ok () -> None
+                                    | Error msg -> Some msg))
+                        | _ -> None
                     | _ -> None
-                | _ -> None
-            match dischargeErr with
-            | Some msg -> Error (Other msg)
-            | None -> dispatchAppOrIndex env tFunc tArgs))
+                match dischargeErr with
+                | Some msg -> Error (Other msg)
+                | None -> dispatchAppOrIndex env tFunc tArgs))
 
     // ---- Poly-tuple indexing OR array indexing (brackets) ----
     // `e[i]` is parsed as ExprTupleIndex regardless of e's type. Disambiguate
@@ -2237,11 +2445,12 @@ let rec inferExpr (env: TypeEnv) (expr: Expr) : TypeResult<TypedExpr> =
     | ExprTyped (e, tyAnno) ->
         // Route through bidirectional checkExpr so the annotation pushes
         // down into literal/constructor positions. The motivating case
-        // is `(re, im) : Complex128`: a 2-tuple checked against Complex
-        // produces a TExprComplexLit (preserving scalar nature) rather
-        // than synthesizing as a tuple-of-floats and failing to unify.
-        // For non-special-cased shapes, checkExpr falls through to
-        // inferExpr + unify, preserving the prior plain-cast behavior.
+        // is `complex(re, im) : Complex64`: the constructor checked
+        // against a Complex width adopts it (and the retired 2-tuple
+        // complex form gets its steering error there rather than a
+        // generic unify failure). For non-special-cased shapes, checkExpr
+        // falls through to inferExpr + unify, preserving plain-cast
+        // behavior.
         let annoTy = lowerTypeExpr env tyAnno
         checkExpr env annoTy e |> Result.map (fun tE ->
             { tE with Type = annoTy })
@@ -3201,6 +3410,15 @@ and inferUnaryOp (env: TypeEnv) op operand : TypeResult<TypedExpr> =
                         | OpNot -> IRTScalar ETBool
                         | OpNeg -> tOp.Type
                         | OpConj -> tOp.Type
+                        // OpReal/OpImag project a complex to its component
+                        // width (identity on a real operand); OpArg is a real
+                        // angle. Synthesized by the intrinsic intercept below.
+                        | OpReal | OpImag ->
+                            (match tOp.Type with
+                             | IRTScalar ETComplex64 -> IRTScalar ETFloat32
+                             | IRTScalar ETComplex128 -> IRTScalar ETFloat64
+                             | other -> other)
+                        | OpArg -> IRTScalar ETFloat64
                         // OpMath is synthesized by the ExprApp intrinsic
                         // intercept, never parsed as ExprUnaryOp — this arm
                         // is exhaustiveness only.
@@ -3815,10 +4033,18 @@ and inferArithType mode op leftTy rightTy : TypeResult<IRType> =
         // Element-type promotion for array<->scalar broadcast: same rule as
         // the scalar-scalar cases below.
         let promoteElem (elemTy: IRType) (scalarTy: IRType) =
-            match elemTy, scalarTy with
-            | IRTScalar ETFloat64, _ | _, IRTScalar ETFloat64 -> IRTScalar ETFloat64
-            | IRTScalar ETFloat32, _ | _, IRTScalar ETFloat32 -> IRTScalar ETFloat32
-            | _ -> elemTy
+            match IR.stripUnits elemTy, IR.stripUnits scalarTy with
+            // Complex mixed with real (or mixed-width complex) widens to the
+            // appropriate complex type — otherwise the element type would fall
+            // back to the real side and the array would be typed real.
+            | IRTScalar le, IRTScalar re
+                when (match IR.promoteElemType le re with Some (ETComplex64 | ETComplex128) -> true | _ -> false) ->
+                IRTScalar (IR.promoteElemType le re |> Option.get)
+            | _ ->
+                match elemTy, scalarTy with
+                | IRTScalar ETFloat64, _ | _, IRTScalar ETFloat64 -> IRTScalar ETFloat64
+                | IRTScalar ETFloat32, _ | _, IRTScalar ETFloat32 -> IRTScalar ETFloat32
+                | _ -> elemTy
         let bareResult =
             match mode with
             | Outer ->
@@ -3841,6 +4067,11 @@ and inferArithType mode op leftTy rightTy : TypeResult<IRType> =
                     mkArrayLike { arrL with ElemType = promoteElem arrL.ElemType s }
                 | (IRTScalar _ as s), ArrayElem arrR ->
                     mkArrayLike { arrR with ElemType = promoteElem arrR.ElemType s }
+                // Scalar complex promotion (mixed real/complex or mixed-width
+                // complex): must precede the float rules so complex wins.
+                | IRTScalar le, IRTScalar re
+                    when (match IR.promoteElemType le re with Some (ETComplex64 | ETComplex128) -> true | _ -> false) ->
+                    IRTScalar (IR.promoteElemType le re |> Option.get)
                 | IRTScalar ETFloat64, _ | _, IRTScalar ETFloat64 -> IRTScalar ETFloat64
                 | IRTScalar ETFloat32, _ | _, IRTScalar ETFloat32 -> IRTScalar ETFloat32
                 | _ -> lBare
@@ -4676,19 +4907,17 @@ and checkExpr (env: TypeEnv) (expected: IRType) (expr: Expr) : TypeResult<TypedE
         |> Result.map (fun tExprs ->
             mkTyped (TExprTuple tExprs) (IRTTuple (tExprs |> List.map (fun e -> e.Type))))
 
-    // Complex literal construction. A 2-tuple checked against Complex64
-    // or Complex128 — typically `(re, im) : Complex128` — produces a
-    // TExprComplexLit (NOT TExprTuple) typed as the scalar Complex type.
-    // The TExprTuple form would lower to IRTuple and lose the scalar
-    // nature, leading downstream code to potentially flatten the "tuple"
-    // into the surrounding array's shape (an N-element Complex array
-    // becoming an N x 2 doubles array). TExprComplexLit lowers to
-    // IRLitComplex, a scalar IR node that codegen renders as
-    // std::complex<double>(re, im). Per the design rule, both components
-    // must be float-typed (no implicit int → float promotion at literal
-    // construction time) — this is enforced by checkExpr recursing into
-    // each component with the corresponding float type.
-    | ExprTuple [reExpr; imExpr], IRTScalar (ETComplex64 | ETComplex128 as cet) ->
+    // Complex literal construction checked against an expected Complex
+    // width: `complex(re, im)` adopts the width (Complex64 components are
+    // Float32, Complex128 components Float64), so
+    // `let z: Complex64 = complex(a, b)` works without a distinct
+    // narrow-width constructor. Produces TExprComplexLit (NOT TExprTuple)
+    // — the tuple form would lower to IRTuple and lose the scalar nature,
+    // flattening an N-element Complex array into N x 2 doubles.
+    // TExprComplexLit lowers to IRComplex, a scalar IR node rendered as
+    // std::complex<double>(re, im). Both components must be float-typed
+    // (no implicit int → float promotion at literal construction time).
+    | ExprApp (ExprVar "complex", [reExpr; imExpr]), IRTScalar (ETComplex64 | ETComplex128 as cet) when (lookupVar "complex" env).IsNone ->
         let componentTy =
             match cet with
             | ETComplex64 -> IRTScalar ETFloat32
@@ -4696,6 +4925,15 @@ and checkExpr (env: TypeEnv) (expected: IRType) (expr: Expr) : TypeResult<TypedE
         checkExpr env componentTy reExpr |> Result.bind (fun tRe ->
         checkExpr env componentTy imExpr |> Result.map (fun tIm ->
             mkTyped (TExprComplexLit (tRe, tIm)) (IRTScalar cet)))
+
+    // The retired 2-tuple complex-literal form gets a steering error
+    // rather than a generic mismatch: `(re, im) : Complex128` (and the
+    // let-annotation variant) was replaced by the complex(re, im)
+    // constructor call, which composes cleanly inside larger expressions
+    // (the cast form had a precedence trap: `a * (re, im) : T` bound the
+    // cast OUTSIDE the multiply, and the bare tuple operand miscompiled).
+    | ExprTuple [_; _], IRTScalar (ETComplex64 | ETComplex128) ->
+        Error (Other "complex values are constructed with complex(re, im); the tuple form `(re, im) : Complex128` is no longer supported")
 
     // Default: synthesize, then unify. This is the path that handles variables,
     // function calls, complex expressions, and any case the special-cases miss.
@@ -5460,14 +5698,19 @@ and inferForExpr env source kernelOpt : TypeResult<TypedExpr> =
         // All arrays share the iteration space from the in-clause
         arrays |> List.map (inferExpr env) |> sequenceResults |> Result.bind (fun tArrays ->
         inferExpr env inClause |> Result.bind (fun tVirtual ->
-            // Extract the shared index type from the virtual array
-            let sharedIdx =
-                match tVirtual.Type with
-                | ArrayElem at when at.IndexTypes.Length > 0 -> at.IndexTypes.[0]
-                | _ -> { Id = env.Builder.FreshId(); Rank = 1
-                         Extent = IRLit (IRLitInt 1L); Symmetry = SymNone
-                         Tag = None; IxKind = IxKPlain; Kind = SDimension; Dependencies = [] }
-            
+            // The `in` clause supplies the shared iteration index, so it must
+            // be a VIRTUAL array (range<...>, reverse<...>, blocked<...>) —
+            // its type is an all-SIdxVirt arrow (ArrayElem's IsVirtual). A
+            // stored array, zip, or loop object is rejected here: co-iterating
+            // stored arrays is `for (A, B)` with no `in` clause (≡
+            // method_for(A, B)); zipping them is method_for(zip(A, B)).
+            let sharedIdxRes =
+                match env.Subst.Resolve(tVirtual.Type) with
+                | ArrayElem at when at.IsVirtual && at.IndexTypes.Length > 0 -> Ok at.IndexTypes.[0]
+                | resolved ->
+                    Error (Other (sprintf "the `in` clause of `for (...) in <source>` must be a virtual array (range<...>, reverse<...>, or blocked<...>) — it supplies the shared iteration index; got %s. Drop the `in` clause to co-iterate stored arrays (for (A, B) ≡ method_for(A, B)), or use method_for(zip(A, B)) to zip them." (ppIRType resolved)))
+            sharedIdxRes |> Result.bind (fun sharedIdx ->
+
             let identities = arrays |> List.map (fun arr ->
                 match arr with ExprVar name -> AIDVariable name | _ -> AIDLiteral (env.Builder.FreshId()))
             // For co-iteration, all arrays use the shared index type
@@ -5541,8 +5784,8 @@ and inferForExpr env source kernelOpt : TypeResult<TypedExpr> =
                     | _ ->
                         // Fallback: treat as generic apply
                         inferApply env tLoop tK)
-            | None -> Ok tLoop))
-    
+            | None -> Ok tLoop)))
+
     | ForArrays (arrays, None) ->
         // No in-clause: equivalent to method_for(arrays)
         inferMethodFor env arrays |> Result.bind (fun tLoop ->
@@ -6864,6 +7107,15 @@ let typeCheck (program: Program) : Result<TypedProgram * IRBuilder * string list
     // ANY resolveStatics pass runs (the ML and PPL elaborations each run
     // their own; all inherit the fold through StaticEval's hook).
     Blade.ProviderStatics.install ()
+    // Staged-former unfold FIRST: `static method_for/object_for/for`
+    // argument lists elaborate to plain formers before any other stage
+    // (ML/PPL/math/grad and the checker never see ExprStatic).
+    match Blade.Unfold.expand program with
+    | Error msg ->
+        Error [ { Error = Other msg
+                  Span = { StartLine = 0; StartCol = 0; EndLine = 0; EndCol = 0; File = None }
+                  Context = ["static unfold"] } ]
+    | Ok program ->
     match Blade.ML.Elaborate.expand program with
     | Error msg ->
         Error [ { Error = Other msg
@@ -6875,6 +7127,24 @@ let typeCheck (program: Program) : Result<TypedProgram * IRBuilder * string list
         Error [ { Error = Other msg
                   Span = { StartLine = 0; StartCol = 0; EndLine = 0; EndCol = 0; File = None }
                   Context = ["PPL elaboration"] } ]
+    | Ok program ->
+    match Blade.Math.Elaborate.expand program with
+    | Error msg ->
+        Error [ { Error = Other msg
+                  Span = { StartLine = 0; StartCol = 0; EndLine = 0; EndCol = 0; File = None }
+                  Context = ["math elaboration"] } ]
+    | Ok program ->
+    match Blade.Rand.Elaborate.expand program with
+    | Error msg ->
+        Error [ { Error = Other msg
+                  Span = { StartLine = 0; StartCol = 0; EndLine = 0; EndCol = 0; File = None }
+                  Context = ["rand elaboration"] } ]
+    | Ok program ->
+    match Blade.Spectra.Elaborate.expand program with
+    | Error msg ->
+        Error [ { Error = Other msg
+                  Span = { StartLine = 0; StartCol = 0; EndLine = 0; EndCol = 0; File = None }
+                  Context = ["spectra elaboration"] } ]
     | Ok program ->
     match Blade.Grad.expand program with
     | Error msg ->

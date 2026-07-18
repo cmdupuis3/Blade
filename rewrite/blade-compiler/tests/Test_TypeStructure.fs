@@ -161,8 +161,8 @@ let private assertBindingType (testName: string) (src: string) (bindingName: str
 let private test_gram_hermitian_type () =
     let src =
         "let A: Array<Complex128 like Idx<2>, Idx<3>> = [\n" +
-        "    [(1.0, 1.0) : Complex128, (2.0, 0.0) : Complex128, (0.0, 1.0) : Complex128],\n" +
-        "    [(3.0, -1.0) : Complex128, (1.0, 2.0) : Complex128, (2.0, 0.0) : Complex128]\n" +
+        "    [complex(1.0, 1.0), complex(2.0, 0.0), complex(0.0, 1.0)],\n" +
+        "    [complex(3.0, -1.0), complex(1.0, 2.0), complex(2.0, 0.0)]\n" +
         "]\n" +
         "let result = gram(A, A)\n"
     assertBindingType "gram(A,A) complex" src "result"
@@ -189,8 +189,8 @@ let private test_gram_dense_type () =
 let private test_hermitian_adjoint_type () =
     let src =
         "let A: Array<Complex128 like Idx<2>, Idx<3>> = [\n" +
-        "    [(1.0, 2.0) : Complex128, (3.0, -1.0) : Complex128, (0.0, 5.0) : Complex128],\n" +
-        "    [(2.0, 1.0) : Complex128, (-1.0, 4.0) : Complex128, (6.0, 0.0) : Complex128]\n" +
+        "    [complex(1.0, 2.0), complex(3.0, -1.0), complex(0.0, 5.0)],\n" +
+        "    [complex(2.0, 1.0), complex(-1.0, 4.0), complex(6.0, 0.0)]\n" +
         "]\n" +
         "let result = hermitian(A)\n"
     assertBindingType "hermitian(A)" src "result"
@@ -257,8 +257,8 @@ let private test_elementwise_over_antisym_type () =
 let private test_elementwise_over_hermitian_type () =
     let src =
         "let A: Array<Complex128 like Idx<2>, Idx<3>> = [\n" +
-        "    [(1.0, 2.0) : Complex128, (3.0, -1.0) : Complex128, (0.0, 5.0) : Complex128],\n" +
-        "    [(2.0, 1.0) : Complex128, (-1.0, 4.0) : Complex128, (6.0, 0.0) : Complex128]\n" +
+        "    [complex(1.0, 2.0), complex(3.0, -1.0), complex(0.0, 5.0)],\n" +
+        "    [complex(2.0, 1.0), complex(-1.0, 4.0), complex(6.0, 0.0)]\n" +
         "]\n" +
         "let herm = gram(A, A)\n" +
         "let h = lambda(e) -> e + e\n" +

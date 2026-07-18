@@ -1,0 +1,31 @@
+// TEST: Dist Jet Vector
+import ppl as ppl
+// The mixed-block Faà di Bruno: VECTOR g(x, y) = (x + y, x·y) on the
+// 2-dimensional dist of B. g0 is an m = 2 array literal (vector mode);
+// each D_k is coordinate-major flat (m outer × canonical cells over d):
+// D1 = [1, 1 | my, mx], D2 = [0, 0, 0 | 0, 1, 0] (zeros prune). q = 3
+// through s = 2, input order 6 — strict budget exactly met. The result is
+// the JOINT output cumulant tower, flat canonical lex over m: cross-cells
+// pinned by the prototype's jetPushforwardVec (dump-jet J5), diagonals
+// cross-checked in-file against cumulants of the transformed rows.
+type TimeIdx = Idx<3>
+let B: Array<Float64 like Idx<2>, TimeIdx> = [[1.0, 2.0, 4.0], [3.0, 5.0, 4.0]]
+let S: Array<Float64 like Idx<1>, TimeIdx> = [[4.0, 7.0, 8.0]]
+let P: Array<Float64 like Idx<1>, TimeIdx> = [[3.0, 10.0, 16.0]]
+let db = ppl.dist(B, 6)
+let m = ppl.cumulant(db, 1)
+let dy = ppl.dist_jet(db, 3, [m(0) + m(1), m(0) * m(1)], [1.0, 1.0, m(1), m(0)], [0.0, 0.0, 0.0, 0.0, 1.0, 0.0])
+let y1 = ppl.cumulant(dy, 1)
+let y2 = ppl.cumulant(dy, 2)
+let y3 = ppl.cumulant(dy, 3)
+let s2 = ppl.cumulants(S, 2)
+let s3 = ppl.cumulants(S, 3)
+let p2 = ppl.cumulants(P, 2)
+let p3 = ppl.cumulants(P, 3)
+// EXPECT: y1 = [6.33333333333, 9.66666666667]
+// EXPECT: y2 = [2.88888888889, 8.77777777778, 28.2222222222]
+// EXPECT: y3 = [-2.59259259259, -6.18518518518, -12.2592592593, -14.074074074]
+// EXPECT: s2 = [2.88888888889]
+// EXPECT: s3 = [-2.59259259259]
+// EXPECT: p2 = [28.2222222222]
+// EXPECT: p3 = [-14.074074074]

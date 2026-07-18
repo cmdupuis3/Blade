@@ -16,11 +16,14 @@ let AD: Array<Float64 like Idx<1>, TimeIdx> = [[0.243079772728, 0.35, 0.45692022
 let d = ppl.dist(AD, 6)
 
 // polynomial map => q=1 pushforward is exact (no degree argument needed)
-let dT = ppl.dist_map(d, 1, lambda(a) -> 1.0 + a * a / 16.0 + 11.0 * a * a * a * a / 3072.0)
+function func(a: Float64) -> Float64 = {
+    1.0 + a * a / 16.0 + 11.0 * a * a * a * a / 3072.0
+}
+let dT = ppl.dist_map(d, 1, func)
 let m1 = ppl.cumulant(dT, 1)
 
 // spread of the rate: q=2 wants order 8, dist carries 6 -- opt into closure
-let dTb = ppl.dist_map_closed(d, 2, 4, lambda(a) -> 1.0 + a * a / 16.0 + 11.0 * a * a * a * a / 3072.0)
+let dTb = ppl.dist_map_closed(d, 2, 4, func)
 let w2 = ppl.cumulant(dTb, 2)
 
 // exact route

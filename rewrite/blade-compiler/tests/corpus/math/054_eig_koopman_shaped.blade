@@ -1,0 +1,16 @@
+// TEST: Math eig: Koopman-shaped spectrum (damped rotation + decay modes)
+// A = S·D·S⁻¹ with D = rot(0.9, θ=0.7) ⊕ diag(0.7, 0.4) and S unit lower
+// bidiagonal — the EDMD shape: a complex pair 0.9e^{±0.7i} (modulus 0.9)
+// plus real decay modes, fully coupled. Fixture entries and pins from
+// math/OracleDump.fs; the leading-modulus identity |λ₀|² = 0.81 pins in
+// program at 0.0.
+import math as m
+let A: Array<Float64 like Idx<4>, Idx<4>> = [[1.2681538870699618, -0.57979591851392198, 0.0, 0.0], [1.1595918370278442, 0.10856205004211772, 0.0, 0.0], [0.59143794995788224, -0.011642031443960255, 0.69999999999999996, 0.0], [0.29999999999999993, -0.29999999999999993, 0.29999999999999993, 0.40000000000000002]]
+let (RE, IM) = m.eig(A)
+let moddev = {
+    let d = RE(0) * RE(0) + IM(0) * IM(0) - 0.81
+    d * d
+}
+// EXPECT: RE = [0.68835796855603226, 0.68835796855603226, 0.70000000000001406, 0.40000000000000013]
+// EXPECT: IM = [0.57979591851392043, -0.57979591851392043, 0, 0]
+// EXPECT: moddev = 0.0

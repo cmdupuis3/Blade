@@ -92,6 +92,9 @@ type UnaryOp =
     | OpNeg       // -
     | OpNot       // !
     | OpConj      // conj(x) — complex conjugate (identity on real)
+    | OpReal      // real(z) — real part of a complex (identity on real)
+    | OpImag      // imag(z) — imaginary part of a complex (0 on real)
+    | OpArg       // arg(z) — phase angle of a complex
     | OpMath of string  // scalar math intrinsic: exp/log/sqrt/sin/cos/... —
                         // surface form is a plain call `exp(x)`; TypeCheck
                         // rewrites unbound whitelisted names to this op
@@ -345,7 +348,12 @@ and Expr =
     | ExprAssign of lhs: Expr * rhs: Expr
     // For-loop expression (loop object construction)
     | ExprFor of source: ForSource * whereClauses: Constraint list * kernel: Expr option
-    
+    // Static former marker: `static method_for/object_for/for (...)` — the
+    // wrapped former's ARGUMENT LIST elaborates at compile time. Produced by
+    // the parser, consumed and ELIMINATED by the Unfold pass (Unfold.fs)
+    // before any elaboration or typechecking; downstream stages never see it.
+    | ExprStatic of Expr
+
 and ForSource =
     | ForArrays of arrays: Expr list * inClause: Expr option  // (A, B) [in virtualArray]
     | ForKernel of kernel: Expr  // lambda(...) -> ...

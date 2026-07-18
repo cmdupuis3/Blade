@@ -1,0 +1,17 @@
+// TEST: Dist Map Named Function
+import ppl as ppl
+// dist_map's map slot accepts a same-module top-level function name (grad's
+// declNames precedent): the body is inlined at elaboration and the params
+// become the jet coordinates. Must reproduce 039's lambda-form values
+// exactly — same body, same jet.
+function sq(x) = x * x
+type TimeIdx = Idx<6>
+let A: Array<Float64 like Idx<1>, TimeIdx> = [[1.0, 2.0, 4.0, 6.0, 0.0, 3.0]]
+let xd = ppl.dist(A, 6)
+let dy = ppl.dist_map(xd, 3, sq)
+let y1 = ppl.cumulant(dy, 1)
+let y2 = ppl.cumulant(dy, 2)
+let y3 = ppl.cumulant(dy, 3)
+// EXPECT: y1 = [11.0]
+// EXPECT: y2 = [154.0]
+// EXPECT: y3 = [2178.0]

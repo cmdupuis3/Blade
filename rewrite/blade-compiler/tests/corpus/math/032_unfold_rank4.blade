@@ -1,0 +1,7 @@
+// TEST: Math unfold: rank-4 mode-2
+// X: 2x2x2x2 with X(i,j,k,l) = 8i + 4j + 2k + l (the flat row-major index
+// as value). Mode-2 unfolding: rows = i2, j = i0·1 + i1·2 + i3·4.
+import math as m
+let X: Array<Float64 like Idx<2>, Idx<2>, Idx<2>, Idx<2>> = [[[[0.0, 1.0], [2.0, 3.0]], [[4.0, 5.0], [6.0, 7.0]]], [[[8.0, 9.0], [10.0, 11.0]], [[12.0, 13.0], [14.0, 15.0]]]]
+let M2 = m.unfold(X, 2)
+// EXPECT: M2 = [0, 8, 4, 12, 1, 9, 5, 13, 2, 10, 6, 14, 3, 11, 7, 15]

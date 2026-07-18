@@ -19,8 +19,12 @@ let At: Array<Float64 like Idx<2>, TimeIdx> = [
 let d0 = ppl.dist(A0, 6)
 let dt = ppl.dist(At, 6)
 
-let dE0 = ppl.dist_map(d0, 3, lambda(x, p) -> (x * x + p * p) / 2.0)
-let dEt = ppl.dist_map(dt, 3, lambda(x, p) -> (x * x + p * p) / 2.0)
+function xp(x: Float64, p: Float64) -> Float64 = {
+  (x * x + p * p) / 2.0
+}
+
+let dE0 = ppl.dist_map(d0, 3, xp)
+let dEt = ppl.dist_map(dt, 3, xp)
 let a1 = ppl.cumulant(dE0, 1)
 let a2 = ppl.cumulant(dE0, 2)
 let a3 = ppl.cumulant(dE0, 3)

@@ -1,0 +1,11 @@
+// TEST: Static Kernel Tuple Select
+// A staged static tuple of lambdas: compile-time only (the decl is consumed
+// by the unfold pass, never reaching the fold-or-fail assertion), with
+// qs[k] kernel selection at a static index — in kernel position, outside
+// the former's argument list.
+let static qs = (lambda(x) -> x + 1.0, lambda(x) -> x * x)
+let A = [1.0, 2.0, 3.0]
+let inc = static method_for(A) <@> qs[0] |> compute
+let sq = static method_for(A) <@> qs[1] |> compute
+// EXPECT: inc = [2.0, 3.0, 4.0]
+// EXPECT: sq = [1.0, 4.0, 9.0]

@@ -1,0 +1,12 @@
+// TEST: FA T12: computed-row extent mismatch guard (aborts)
+// ----------------------------------------------------------------------------
+// T12: annotation-vs-actual extent mismatch on a computed row. unify does not
+// (yet) reject Idx<5> against a computed length-4 array (pre-existing
+// annotation laxity: plain `let B: Array<Float64 like Idx<5>> = Y1` also
+// passes), and T11's copy loops take their bounds from the DECLARED extents.
+// So the emitted per-row guard must catch the mismatch at runtime and exit(1)
+// loudly rather than read past the row's buffer.
+// ABORT: array literal row [0] of 'M' has extent 4
+let A = [1.0, 2.0, 3.0, 4.0]
+let Y1 = method_for(A) <@> lambda(x) -> x - 2.5 |> compute
+let M: Array<Float64 like Idx<2>, Idx<5>> = [Y1, Y1]

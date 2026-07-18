@@ -1,0 +1,7 @@
+// TEST: Math svd: known 2x2 spectrum
+// A = [[3,0],[4,5]]: AᵀA = [[25,20],[20,25]], eigenvalues 45 and 5, so
+// σ = (3√5, √5) — hand-computable, convention-independent.
+import math as m
+let A: Array<Float64 like Idx<2>, Idx<2>> = [[3.0, 0.0], [4.0, 5.0]]
+let (U, S, V) = m.svd(A)
+// EXPECT: S = [6.7082039324993694, 2.2360679774997894]

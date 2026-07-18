@@ -1000,11 +1000,12 @@ and parseAssignment (tokens: Token list) : ParseResult<Expr> =
 /// Sits between parseAssignment and parseNamedInfix in the precedence chain.
 /// The cast binds tighter than `=` (so `x = e: T` parses as `x = (e: T)`)
 /// but looser than every operator below it (so `a + b : Int` parses as
-/// `(a + b) : Int`). The motivating use case is complex literal construction
-/// — `(re, im) : Complex128` — but the form is general; TypeCheck applies
-/// it to the surrounding expression and unifies the inferred type with
-/// the annotation, with a special case for Complex that recognizes a
-/// 2-tuple of float literals.
+/// `(a + b) : Int`). The motivating use case is width adoption on
+/// constructor calls — `complex(re, im) : Complex64` — but the form is
+/// general; TypeCheck applies it to the surrounding expression via
+/// bidirectional checkExpr and falls back to inferExpr + unify. (The
+/// historical 2-tuple complex-literal cast `(re, im) : Complex128` is
+/// retired; TypeCheck now steers it to the complex() constructor.)
 and parseTyped (tokens: Token list) : ParseResult<Expr> =
     parseNamedInfix tokens >>= fun expr rest ->
     match peek rest with
@@ -1343,29 +1344,31 @@ and parsePrimary (tokens: Token list) : ParseResult<Expr> =
     // method_for
     | Some (TokKeyword KwMethodFor) ->
         parseMethodFor (advance tokens)
-    
+
     // for (A, B) in virtualArray — co-iteration construct
     | Some (TokKeyword KwFor) ->
-        let afterFor = advance tokens
-        match peek afterFor with
-        | Some TokLParen ->
-            // Parse array list: (A, B, C)
-            advance afterFor |> sepBy parseExprImpl TokComma >>= fun arrays afterArrays ->
-            expect TokRParen afterArrays >>= fun _ afterRParen ->
-            // Check for 'in' clause
-            match peek afterRParen with
-            | Some (TokKeyword KwIn) ->
-                // Parse virtual array expression at arrayProduct level (stops before <@>)
-                parseArrayProduct (advance afterRParen) >>= fun inExpr afterIn ->
-                success (ExprFor (ForArrays (arrays, Some inExpr), [], None)) afterIn
-            | _ ->
-                // No in-clause: equivalent to method_for(A, B)
-                success (ExprFor (ForArrays (arrays, None), [], None)) afterRParen
+        parseForConstruct (advance tokens)
+
+    // static method_for / static object_for / static for — the staged-former
+    // marker: the wrapped former's ARGUMENT LIST elaborates at compile time
+    // (the Unfold pass eliminates ExprStatic before typechecking). `static`
+    // in expression position is only valid immediately before a former.
+    | Some (TokKeyword KwStatic) ->
+        let afterStatic = advance tokens
+        match peek afterStatic with
+        | Some (TokKeyword KwMethodFor) ->
+            parseMethodFor (advance afterStatic) >>= fun former remaining ->
+            success (ExprStatic former) remaining
+        | Some (TokKeyword KwObjectFor) ->
+            parseObjectFor (advance afterStatic) >>= fun former remaining ->
+            success (ExprStatic former) remaining
+        | Some (TokKeyword KwFor) ->
+            parseForConstruct (advance afterStatic) >>= fun former remaining ->
+            success (ExprStatic former) remaining
         | _ ->
-            // for lambda(...) → ForKernel
-            parseExprImpl afterFor >>= fun kernel remaining ->
-            success (ExprFor (ForKernel kernel, [], None)) remaining
-    
+            let (line, col) = currentPos afterStatic
+            error "Expected 'method_for', 'object_for', or 'for' after 'static' in expression position" line col
+
     // object_for
     | Some (TokKeyword KwObjectFor) ->
         parseObjectFor (advance tokens)
@@ -1882,6 +1885,29 @@ and parseMethodFor (tokens: Token list) : ParseResult<Expr> =
     sepBy parseExprImpl TokComma afterLParen >>= fun arrays afterArrays ->
     expect TokRParen afterArrays >>= fun _ remaining ->
     success (ExprMethodFor arrays) remaining
+
+/// The body of a `for` expression (tokens start AFTER the `for` keyword):
+/// `for (A, B) [in virt]` → ForArrays; `for lambda(...)` → ForKernel.
+/// Shared by the plain and `static`-marked spellings.
+and parseForConstruct (tokens: Token list) : ParseResult<Expr> =
+    match peek tokens with
+    | Some TokLParen ->
+        // Parse array list: (A, B, C)
+        advance tokens |> sepBy parseExprImpl TokComma >>= fun arrays afterArrays ->
+        expect TokRParen afterArrays >>= fun _ afterRParen ->
+        // Check for 'in' clause
+        match peek afterRParen with
+        | Some (TokKeyword KwIn) ->
+            // Parse virtual array expression at arrayProduct level (stops before <@>)
+            parseArrayProduct (advance afterRParen) >>= fun inExpr afterIn ->
+            success (ExprFor (ForArrays (arrays, Some inExpr), [], None)) afterIn
+        | _ ->
+            // No in-clause: equivalent to method_for(A, B)
+            success (ExprFor (ForArrays (arrays, None), [], None)) afterRParen
+    | _ ->
+        // for lambda(...) → ForKernel
+        parseExprImpl tokens >>= fun kernel remaining ->
+        success (ExprFor (ForKernel kernel, [], None)) remaining
 
 and parseObjectFor (tokens: Token list) : ParseResult<Expr> =
     expect TokLParen tokens >>= fun _ afterLParen ->

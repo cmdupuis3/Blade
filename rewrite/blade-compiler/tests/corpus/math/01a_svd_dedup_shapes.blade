@@ -1,0 +1,13 @@
+// TEST: Math svd: dedup across same-shape calls, distinct shapes coexist
+// Two svd calls on the SAME shape share one generated function (ensure
+// fingerprint dedup); a different shape gets its own. All results correct.
+import math as m
+let A: Array<Float64 like Idx<3>, Idx<2>> = [[2.0, 0.0], [0.0, 3.0], [0.0, 0.0]]
+let B: Array<Float64 like Idx<3>, Idx<2>> = [[4.0, 0.0], [0.0, 1.0], [0.0, 0.0]]
+let D: Array<Float64 like Idx<2>, Idx<2>> = [[5.0, 0.0], [0.0, 2.0]]
+let (UA, SA, VA) = m.svd(A)
+let (UB, SB, VB) = m.svd(B)
+let (UD, SD, VD) = m.svd(D)
+// EXPECT: SA = [3, 2]
+// EXPECT: SB = [4, 1]
+// EXPECT: SD = [5, 2]

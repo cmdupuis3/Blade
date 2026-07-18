@@ -1,0 +1,8 @@
+// TEST: FA T20: Over-application of scalar-returning function (rejects)
+// ----------------------------------------------------------------------------
+// A 2-ary function applied to 3 args, with a scalar result to re-dispatch
+// the surplus into: a plain arity error (the first one Blade ever raised —
+// historically this silently typed as the return type and died in C++).
+// ----------------------------------------------------------------------------
+function cos_tw(t, w) = cos(w * t)
+let bad = cos_tw(1.0, 2.0, 3.0)

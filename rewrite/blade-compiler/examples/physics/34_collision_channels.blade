@@ -1,0 +1,214 @@
+// TEST: Physics -- Collisions as Channels: Composing Towers Without Ensembles
+// ============================================================================
+// The composition gap (the review's #2, the reconstruction program's missing
+// piece): every experiment so far ran parameters -> realizations ->
+// statistics; the ensemble grew 3^K with depth. Here the collision becomes
+// an OPERATOR ON TOWERS, and cascades compose at the tower level with a
+// state that never grows.
+// The move: condition on the shared mass. For the transmitted-front chain
+// v' = v * rho(m, m'), rho_ij = 2 A_i/(A_i + A_j), with every mass an iid
+// 3-point jet {0.92, 1.0, 1.08}, the tower state after each collision is
+// the 3-branch conditional moment vector M[j][p] = E[v^p | last mass = j],
+// and one collision acts EXACTLY and LINEARLY:
+//     M'[j][p] = (1/3) sum_i rho_ij^p M[i][p].
+// Each moment order rides its own 3x3 transfer matrix; the four orders
+// stack into one block-diagonal 12x12 channel U. Composition = matrix
+// powers (repeated squaring, five doublings to depth 20). FINDINGS:
+//   * EXACT COMPOSITION, ZERO ENSEMBLES: at depth 6 the channel's four
+//     moments match the exact 3^6-grid ensemble to ~1e-15 relative --
+//     the channel is not an approximation of the ensemble, it IS the
+//     ensemble's tower, transported. (Polynomial-in-v map + finite-support
+//     jets => the hierarchy closes exactly order by order.)
+//   * BEYOND ANY ENSEMBLE: the same state pushed to depth 20 -- where the
+//     grid would need 3^20 = 3,486,784,401 realizations -- costs five
+//     squarings of a 12x12 matrix. Pinned: E[v_20^p], p = 1..4. The
+//     channel state is 12 numbers at every depth.
+//   * A MEAN-TRANSFER IDENTITY AND THE AM-GM TAX: the naive independent-
+//     factor model predicts E[rho] = 1 EXACTLY (rho_ij + rho_ji = 2,
+//     pinned) -- mean front velocity conserved. The channel's true top
+//     eigenvalue says otherwise: lambda_1 = 0.998930 = 1 - v0/2. Paired
+//     transfers obey rho_ij rho_ji = 1 - f^2, so each collision taxes the
+//     mean by HALF THE BOND VARIANCE of example 31 -- that spectrum's v0,
+//     re-measured here as a decay rate. (And E[rho^2] - 1 = v0 exactly,
+//     pinned: the same cell, third appearance.)
+//   * THE FUZZ TELESCOPES: the moment hierarchy is nearly MARGINAL --
+//     lambda_2/lambda_1^2 - 1 = 1.7e-6. Consecutive log-ratios
+//     anticorrelate with the exact -1/2 additive structure (ex 31's
+//     v1/v0 = -0.4999997), so the cascade's log-variance TELESCOPES to an
+//     endpoint effect instead of random-walking: relative variance
+//     saturates (0.00108 at depth 6 -> 0.00110 at depth 20, pinned)
+//     instead of growing ~K. The intermittent residue exists -- but at
+//     FOURTH order in the jet width, the same O(w^4) that broke
+//     log-additivity in ex 31. A cascade of fuzzy masses forgets its
+//     interior: only the first and last balls' fuzz survives in the
+//     front velocity's tower.
+//   * THE CLOSURE DIAL, ISOLATED: channels stay exact only while maps are
+//     polynomial-reducible on the state. Part B pushes the observer's
+//     RATIONAL inference increment ln[(2-v-eta)/(v+eta)] through jet
+//     channels truncated at order r = 1, 2, 4 against the exact 5-point
+//     noise: truncation errors fall monotonically in r cell by cell
+//     (kappa1: 1.2e-5 -> 9.4e-11; kappa2: 4.6e-8 -> 1.4e-10) and compound
+//     additively with depth. Where extension fails, the dial -- not the
+//     ensemble -- is the honest object.
+// The language angle: this file hand-rolls what a vector-valued dist_map /
+// dist-through-pool should generate -- conditional-representation transfer
+// matrices ARE the compiled form of "push a Dist through a collision".
+// The channel calculus is the reconstruction program's missing operation:
+// with it, towers meet dynamics without ever touching realizations.
+// No external data; everything is range grids, table gathers, and the
+// row-fiber matrix idiom (transposes maintained as product pairs).
+// ============================================================================
+
+let MVAL = [0.92, 1.0, 1.08]
+
+// ---- the block channel U (12x12): order p = J/3 + 1, branches j = J%3 ----
+let U1 = method_for(range<Idx<12>>) <*> method_for(range<Idx<12>>) <@> lambda(J: Int64, I: Int64) -> (if J / 3 < I / 3 + 1 then (if I / 3 < J / 3 + 1 then (if J / 3 < 1 then 2.0 * MVAL(I % 3) / (MVAL(I % 3) + MVAL(J % 3)) else (if J / 3 < 2 then 2.0 * MVAL(I % 3) / (MVAL(I % 3) + MVAL(J % 3)) * (2.0 * MVAL(I % 3) / (MVAL(I % 3) + MVAL(J % 3))) else (if J / 3 < 3 then 2.0 * MVAL(I % 3) / (MVAL(I % 3) + MVAL(J % 3)) * (2.0 * MVAL(I % 3) / (MVAL(I % 3) + MVAL(J % 3))) * (2.0 * MVAL(I % 3) / (MVAL(I % 3) + MVAL(J % 3))) else 2.0 * MVAL(I % 3) / (MVAL(I % 3) + MVAL(J % 3)) * (2.0 * MVAL(I % 3) / (MVAL(I % 3) + MVAL(J % 3))) * (2.0 * MVAL(I % 3) / (MVAL(I % 3) + MVAL(J % 3))) * (2.0 * MVAL(I % 3) / (MVAL(I % 3) + MVAL(J % 3)))))) / 3.0 else 0.0) else 0.0) |> compute
+let U1T = method_for(range<Idx<12>>) <*> method_for(range<Idx<12>>) <@> lambda(J: Int64, I: Int64) -> (if J / 3 < I / 3 + 1 then (if I / 3 < J / 3 + 1 then (if J / 3 < 1 then 2.0 * MVAL(J % 3) / (MVAL(J % 3) + MVAL(I % 3)) else (if J / 3 < 2 then 2.0 * MVAL(J % 3) / (MVAL(J % 3) + MVAL(I % 3)) * (2.0 * MVAL(J % 3) / (MVAL(J % 3) + MVAL(I % 3))) else (if J / 3 < 3 then 2.0 * MVAL(J % 3) / (MVAL(J % 3) + MVAL(I % 3)) * (2.0 * MVAL(J % 3) / (MVAL(J % 3) + MVAL(I % 3))) * (2.0 * MVAL(J % 3) / (MVAL(J % 3) + MVAL(I % 3))) else 2.0 * MVAL(J % 3) / (MVAL(J % 3) + MVAL(I % 3)) * (2.0 * MVAL(J % 3) / (MVAL(J % 3) + MVAL(I % 3))) * (2.0 * MVAL(J % 3) / (MVAL(J % 3) + MVAL(I % 3))) * (2.0 * MVAL(J % 3) / (MVAL(J % 3) + MVAL(I % 3)))))) / 3.0 else 0.0) else 0.0) |> compute
+
+// ---- powers by repeated squaring, transposes maintained as product pairs:
+//      P2 = mf(P, PT), P2T = mf(PT, P); (A.B)T = mf(BT, A) ----
+let U2 = method_for(U1, U1T) <@> lambda(u: Array<Float64 like Idx<12>>, v: Array<Float64 like Idx<12>>) -> prodsum(u, v) |> compute
+let U2T = method_for(U1T, U1) <@> lambda(u: Array<Float64 like Idx<12>>, v: Array<Float64 like Idx<12>>) -> prodsum(u, v) |> compute
+let U4 = method_for(U2, U2T) <@> lambda(u: Array<Float64 like Idx<12>>, v: Array<Float64 like Idx<12>>) -> prodsum(u, v) |> compute
+let U4T = method_for(U2T, U2) <@> lambda(u: Array<Float64 like Idx<12>>, v: Array<Float64 like Idx<12>>) -> prodsum(u, v) |> compute
+let U8 = method_for(U4, U4T) <@> lambda(u: Array<Float64 like Idx<12>>, v: Array<Float64 like Idx<12>>) -> prodsum(u, v) |> compute
+let U8T = method_for(U4T, U4) <@> lambda(u: Array<Float64 like Idx<12>>, v: Array<Float64 like Idx<12>>) -> prodsum(u, v) |> compute
+let U16 = method_for(U8, U8T) <@> lambda(u: Array<Float64 like Idx<12>>, v: Array<Float64 like Idx<12>>) -> prodsum(u, v) |> compute
+let U16T = method_for(U8T, U8) <@> lambda(u: Array<Float64 like Idx<12>>, v: Array<Float64 like Idx<12>>) -> prodsum(u, v) |> compute
+let U18 = method_for(U16, U2T) <@> lambda(u: Array<Float64 like Idx<12>>, v: Array<Float64 like Idx<12>>) -> prodsum(u, v) |> compute
+let U19 = method_for(U18, U1T) <@> lambda(u: Array<Float64 like Idx<12>>, v: Array<Float64 like Idx<12>>) -> prodsum(u, v) |> compute
+let U5 = method_for(U4, U1T) <@> lambda(u: Array<Float64 like Idx<12>>, v: Array<Float64 like Idx<12>>) -> prodsum(u, v) |> compute
+
+// ---- initial state (depth 1: sharp projectile hits the first jet) ----
+let M1R = method_for(range<Idx<1>>) <*> method_for(range<Idx<12>>) <@> lambda(z: Int64, J: Int64) -> (if J / 3 < 1 then 2.0 / (1.0 + MVAL(J % 3)) else (if J / 3 < 2 then 2.0 / (1.0 + MVAL(J % 3)) * (2.0 / (1.0 + MVAL(J % 3))) else (if J / 3 < 3 then 2.0 / (1.0 + MVAL(J % 3)) * (2.0 / (1.0 + MVAL(J % 3))) * (2.0 / (1.0 + MVAL(J % 3))) else 2.0 / (1.0 + MVAL(J % 3)) * (2.0 / (1.0 + MVAL(J % 3))) * (2.0 / (1.0 + MVAL(J % 3))) * (2.0 / (1.0 + MVAL(J % 3)))))) |> compute
+// row-form matvec: (M1 . U^k as rows) has (S)_J = sum_I M1[I] U^k[J][I],
+// exactly the conditional update iterated k times
+let S6 = method_for(M1R, U5) <@> lambda(u: Array<Float64 like Idx<12>>, v: Array<Float64 like Idx<12>>) -> prodsum(u, v) |> compute
+let S19 = method_for(M1R, U18) <@> lambda(u: Array<Float64 like Idx<12>>, v: Array<Float64 like Idx<12>>) -> prodsum(u, v) |> compute
+let S20 = method_for(M1R, U19) <@> lambda(u: Array<Float64 like Idx<12>>, v: Array<Float64 like Idx<12>>) -> prodsum(u, v) |> compute
+
+// ---- per-order sums via masks ----
+let MK1: Array<Float64 like Idx<1>, Idx<12>> = [[1.0, 1.0, 1.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0]]
+let MK2: Array<Float64 like Idx<1>, Idx<12>> = [[0.0, 0.0, 0.0, 1.0, 1.0, 1.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0]]
+let MK3: Array<Float64 like Idx<1>, Idx<12>> = [[0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 1.0, 1.0, 1.0, 0.0, 0.0, 0.0]]
+let MK4: Array<Float64 like Idx<1>, Idx<12>> = [[0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 1.0, 1.0, 1.0]]
+let c6p1 = reduce(method_for(zip(S6, MK1)) <@> lambda(u: Array<Float64 like Idx<12>>, v: Array<Float64 like Idx<12>>) -> prodsum(u, v), (+)) / 3.0
+let c6p2 = reduce(method_for(zip(S6, MK2)) <@> lambda(u: Array<Float64 like Idx<12>>, v: Array<Float64 like Idx<12>>) -> prodsum(u, v), (+)) / 3.0
+let c6p3 = reduce(method_for(zip(S6, MK3)) <@> lambda(u: Array<Float64 like Idx<12>>, v: Array<Float64 like Idx<12>>) -> prodsum(u, v), (+)) / 3.0
+let c6p4 = reduce(method_for(zip(S6, MK4)) <@> lambda(u: Array<Float64 like Idx<12>>, v: Array<Float64 like Idx<12>>) -> prodsum(u, v), (+)) / 3.0
+let c19p1 = reduce(method_for(zip(S19, MK1)) <@> lambda(u: Array<Float64 like Idx<12>>, v: Array<Float64 like Idx<12>>) -> prodsum(u, v), (+)) / 3.0
+let c19p2 = reduce(method_for(zip(S19, MK2)) <@> lambda(u: Array<Float64 like Idx<12>>, v: Array<Float64 like Idx<12>>) -> prodsum(u, v), (+)) / 3.0
+let c20p1 = reduce(method_for(zip(S20, MK1)) <@> lambda(u: Array<Float64 like Idx<12>>, v: Array<Float64 like Idx<12>>) -> prodsum(u, v), (+)) / 3.0
+let c20p2 = reduce(method_for(zip(S20, MK2)) <@> lambda(u: Array<Float64 like Idx<12>>, v: Array<Float64 like Idx<12>>) -> prodsum(u, v), (+)) / 3.0
+let c20p3 = reduce(method_for(zip(S20, MK3)) <@> lambda(u: Array<Float64 like Idx<12>>, v: Array<Float64 like Idx<12>>) -> prodsum(u, v), (+)) / 3.0
+let c20p4 = reduce(method_for(zip(S20, MK4)) <@> lambda(u: Array<Float64 like Idx<12>>, v: Array<Float64 like Idx<12>>) -> prodsum(u, v), (+)) / 3.0
+
+// ---- the exact 3^6 grid (the old way), for the cross-check ----
+let GM1 = method_for(range<Idx<729>>) <@> lambda(r: Int64) -> MVAL(r % 3) |> compute
+let GM2 = method_for(range<Idx<729>>) <@> lambda(r: Int64) -> MVAL((r / 3) % 3) |> compute
+let GM3 = method_for(range<Idx<729>>) <@> lambda(r: Int64) -> MVAL((r / 9) % 3) |> compute
+let GM4 = method_for(range<Idx<729>>) <@> lambda(r: Int64) -> MVAL((r / 27) % 3) |> compute
+let GM5 = method_for(range<Idx<729>>) <@> lambda(r: Int64) -> MVAL((r / 81) % 3) |> compute
+let GM6 = method_for(range<Idx<729>>) <@> lambda(r: Int64) -> MVAL((r / 243) % 3) |> compute
+let GX1 = method_for(GM1) <@> lambda(m) -> 2.0 / (1.0 + m) |> compute
+let GX2 = method_for(zip(GX1, GM1, GM2)) <@> lambda(x, a, b) -> x * 2.0 * a / (a + b) |> compute
+let GX3 = method_for(zip(GX2, GM2, GM3)) <@> lambda(x, a, b) -> x * 2.0 * a / (a + b) |> compute
+let GX4 = method_for(zip(GX3, GM3, GM4)) <@> lambda(x, a, b) -> x * 2.0 * a / (a + b) |> compute
+let GX5 = method_for(zip(GX4, GM4, GM5)) <@> lambda(x, a, b) -> x * 2.0 * a / (a + b) |> compute
+let GX6 = method_for(zip(GX5, GM5, GM6)) <@> lambda(x, a, b) -> x * 2.0 * a / (a + b) |> compute
+let g6p1 = reduce(method_for(GX6) <@> lambda(x) -> x, (+)) / 729.0
+let g6p2 = reduce(method_for(GX6) <@> lambda(x) -> x * x, (+)) / 729.0
+let g6p3 = reduce(method_for(GX6) <@> lambda(x) -> x * x * x, (+)) / 729.0
+let g6p4 = reduce(method_for(GX6) <@> lambda(x) -> x * x * x * x, (+)) / 729.0
+let relgap1 = sqrt((c6p1 / g6p1 - 1.0) * (c6p1 / g6p1 - 1.0))
+let relgap2 = sqrt((c6p2 / g6p2 - 1.0) * (c6p2 / g6p2 - 1.0))
+let relgap3 = sqrt((c6p3 / g6p3 - 1.0) * (c6p3 / g6p3 - 1.0))
+let relgap4 = sqrt((c6p4 / g6p4 - 1.0) * (c6p4 / g6p4 - 1.0))
+
+// ---- spectral readout: growth rates, the mean-transfer identity, naive gap ----
+let erho1 = reduce(method_for(range<Idx<3>>) <*> method_for(range<Idx<3>>) <@> lambda(i: Int64, j: Int64) -> 2.0 * MVAL(i) / (MVAL(i) + MVAL(j)), (+)) / 9.0
+let erho2 = reduce(method_for(range<Idx<3>>) <*> method_for(range<Idx<3>>) <@> lambda(i: Int64, j: Int64) -> 2.0 * MVAL(i) / (MVAL(i) + MVAL(j)) * (2.0 * MVAL(i) / (MVAL(i) + MVAL(j))), (+)) / 9.0
+let lam1 = c20p1 / c19p1
+let lam2 = c20p2 / c19p2
+let itm = lam2 / (lam1 * lam1)
+let grid20 = 3486784401.0
+let rv6 = c6p2 / (c6p1 * c6p1) - 1.0
+let rv20 = c20p2 / (c20p1 * c20p1) - 1.0
+let amgm_tax = (1.0 - lam1) * 2.0
+
+// ---- part B: the closure dial on a rational (inference) channel ----
+// one calibration rung at v = 0.4: increment X = ln((2-v-eta)/(v+eta)) -
+// ln((2-v)/v), noise = exact 5-point binomial (nodes +-2h, +-h, 0; h = 2e-3)
+let NW = [1.0, 4.0, 6.0, 4.0, 1.0]
+let NE = [-0.004, -0.002, 0.0, 0.002, 0.004]
+let xe1 = reduce(method_for(range<Idx<5>>) <@> lambda(k: Int64) -> NW(k) * (log((1.6 - NE(k)) / (0.4 + NE(k))) - log(4.0)), (+)) / 16.0
+let xe2 = reduce(method_for(range<Idx<5>>) <@> lambda(k: Int64) -> NW(k) * (log((1.6 - NE(k)) / (0.4 + NE(k))) - log(4.0)) * (log((1.6 - NE(k)) / (0.4 + NE(k))) - log(4.0)), (+)) / 16.0
+let ke1 = xe1
+let ke2 = xe2 - xe1 * xe1
+// r = 1 channel: X = h1 eta, h1 = -(1/(2-v) + 1/v) = -3.125
+let xa1 = reduce(method_for(range<Idx<5>>) <@> lambda(k: Int64) -> NW(k) * (0.0 - 3.125) * NE(k), (+)) / 16.0
+let xa2 = reduce(method_for(range<Idx<5>>) <@> lambda(k: Int64) -> NW(k) * (0.0 - 3.125) * NE(k) * ((0.0 - 3.125) * NE(k)), (+)) / 16.0
+let ka1 = xa1
+let ka2 = xa2 - xa1 * xa1
+// r = 2 channel: X += h2 eta^2 / 2, h2 = 1/v^2 - 1/(2-v)^2 = 5.859375
+let xb1 = reduce(method_for(range<Idx<5>>) <@> lambda(k: Int64) -> NW(k) * ((0.0 - 3.125) * NE(k) + 2.9296875 * NE(k) * NE(k)), (+)) / 16.0
+let xb2 = reduce(method_for(range<Idx<5>>) <@> lambda(k: Int64) -> NW(k) * ((0.0 - 3.125) * NE(k) + 2.9296875 * NE(k) * NE(k)) * ((0.0 - 3.125) * NE(k) + 2.9296875 * NE(k) * NE(k)), (+)) / 16.0
+let kb1 = xb1
+let kb2 = xb2 - xb1 * xb1
+// r = 4 channel: X += h3 eta^3/6 + h4 eta^4/24, h3 = -31.73828125,
+// h4 = 233.45947265625
+let xc1 = reduce(method_for(range<Idx<5>>) <@> lambda(k: Int64) -> NW(k) * ((0.0 - 3.125) * NE(k) + 2.9296875 * NE(k) * NE(k) - 5.28971354166667 * NE(k) * NE(k) * NE(k) + 9.72747802734375 * NE(k) * NE(k) * NE(k) * NE(k)), (+)) / 16.0
+let xc2 = reduce(method_for(range<Idx<5>>) <@> lambda(k: Int64) -> NW(k) * ((0.0 - 3.125) * NE(k) + 2.9296875 * NE(k) * NE(k) - 5.28971354166667 * NE(k) * NE(k) * NE(k) + 9.72747802734375 * NE(k) * NE(k) * NE(k) * NE(k)) * ((0.0 - 3.125) * NE(k) + 2.9296875 * NE(k) * NE(k) - 5.28971354166667 * NE(k) * NE(k) * NE(k) + 9.72747802734375 * NE(k) * NE(k) * NE(k) * NE(k)), (+)) / 16.0
+let kc1 = xc1
+let kc2 = xc2 - xc1 * xc1
+// truncation errors per cell and the dial
+let ea1 = sqrt((ka1 - ke1) * (ka1 - ke1))
+let eb1 = sqrt((kb1 - ke1) * (kb1 - ke1))
+let ec1 = sqrt((kc1 - ke1) * (kc1 - ke1))
+let ea2 = sqrt((ka2 - ke2) * (ka2 - ke2))
+let eb2 = sqrt((kb2 - ke2) * (kb2 - ke2))
+let ec2 = sqrt((kc2 - ke2) * (kc2 - ke2))
+let chain4_err = 4.0 * eb2
+
+// ---- verdicts ----
+let exact_V = if relgap1 < 0.0000000001 then (if relgap2 < 0.0000000001 then (if relgap3 < 0.0000000001 then (if relgap4 < 0.0000000001 then "CHANNEL_MATCHES_GRID_EXACTLY" else "NO") else "NO") else "NO") else "NO"
+let mean_V = if sqrt((erho1 - 1.0) * (erho1 - 1.0)) < 0.000000000000001 then "MEAN_TRANSFER_IDENTITY" else "NO"
+let drag_V = if lam1 < 1.0 then "COUPLING_DRAGS_THE_MEAN" else "NO"
+let itm_V = if itm > 1.0 then "INTERMITTENT_MOMENT_HIERARCHY" else "NO"
+let dial_V = if ec1 < eb1 then (if eb1 < ea1 then (if ec2 < eb2 then (if eb2 < ea2 then "CLOSURE_DIAL_MONOTONE" else "NO") else "NO") else "NO") else "NO"
+
+// the channel IS the ensemble's tower (machine-exact), composed to depths
+// no grid can reach; the mean pays the AM-GM tax v0/2; the fuzz
+// telescopes; the closure dial is monotone where exactness ends:
+// EXPECT: c6p1 = 0.995727638387712
+// EXPECT: c6p2 = 0.992543586494714
+// EXPECT: c6p3 = 0.990435785692873
+// EXPECT: c6p4 = 0.98939401357713
+// EXPECT: relgap1 = 2.66453525910038e-15
+// EXPECT: c20p1 = 0.980921519310032
+// EXPECT: c20p2 = 0.96326863660244
+// EXPECT: c20p3 = 0.946975408123225
+// EXPECT: c20p4 = 0.931979999063015
+// EXPECT: grid20 = 3486784401
+// EXPECT: erho1 = 1
+// EXPECT: erho2 = 1.00213675578932
+// EXPECT: lam1 = 0.99893047883924
+// EXPECT: lam2 = 0.997863813720907
+// EXPECT: itm = 1.0000017158352
+// EXPECT: amgm_tax = 0.00213904232151996
+// EXPECT: rv6 = 0.00107925891446414
+// EXPECT: rv20 = 0.00110330680103088
+// EXPECT: ke1 = 1.17191391212912e-05
+// EXPECT: ke2 = 3.9064028525626e-05
+// EXPECT: ea1 = 1.1719139121291e-05
+// EXPECT: eb1 = 3.89121291286855e-10
+// EXPECT: ec1 = 2.21700912836353e-14
+// EXPECT: ea2 = 1.52852562594966e-09
+// EXPECT: eb2 = 1.32253197361099e-09
+// EXPECT: ec2 = 6.64790284995477e-14
+// EXPECT: chain4_err = 5.29012789444398e-09
+// EXPECT: exact_V = "CHANNEL_MATCHES_GRID_EXACTLY"
+// EXPECT: mean_V = "MEAN_TRANSFER_IDENTITY"
+// EXPECT: drag_V = "COUPLING_DRAGS_THE_MEAN"
+// EXPECT: itm_V = "INTERMITTENT_MOMENT_HIERARCHY"
+// EXPECT: dial_V = "CLOSURE_DIAL_MONOTONE"

@@ -1,0 +1,10 @@
+// TEST: FA T19: Partial application in kernel position
+// ----------------------------------------------------------------------------
+// The residual of a partial application is a lifted lambda, so it resolves
+// as a combinator kernel like any other: <@> add3(100.0, 10.0) maps the
+// 1-ary residual over the array.
+// ----------------------------------------------------------------------------
+function add3(a, b, c) = a + b + c
+let A = [1.0, 2.0, 3.0]
+let scaled = method_for(A) <@> add3(100.0, 10.0) |> compute
+// EXPECT: scaled = [111, 112, 113]

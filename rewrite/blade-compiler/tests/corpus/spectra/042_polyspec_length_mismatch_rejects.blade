@@ -1,0 +1,6 @@
+// TEST: Spectra polyspec: signals of different lengths (rejects)
+// All signals of one polyspec call must share one static length.
+import spectra as sp
+let x: Array<Float64 like Idx<8>> = [1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0]
+let y: Array<Float64 like Idx<6>> = [1.0, 2.0, 3.0, 4.0, 5.0, 6.0]
+let P = sp.polyspec(x, y)

@@ -31,6 +31,10 @@ open Blade.Tests.ValidateArrow
 open Blade.Tests.ExprAttrs
 open Blade.Tests.CodeGenSubst
 open Blade.Tests.FuncArrays
+open Blade.Tests.Ppl
+open Blade.Tests.Math
+open Blade.Tests.Rand
+open Blade.Tests.Spectra
 open Blade.Lowering
 
 module TH = Blade.Tests.TestHarness
@@ -823,6 +827,10 @@ let private dispatchTest (rest: string list) : int =
             | "units" -> Some ("Units", unitTests)
             | "mutability" -> Some ("Mutability", mutabilityTests)
             | "funcarrays" | "fa" -> Some ("Func Arrays", funcArrayTests)
+            | "ppl" -> Some ("PPL", pplTests)
+            | "math" -> Some ("Math", mathTests)
+            | "rand" -> Some ("Rand", randTests)
+            | "spectra" -> Some ("Spectra", spectraTests)
             | "sqlish" | "sql" -> Some ("SQL-ish", foreignKeyTests @ maskTests @ setOpTests @ groupByTests @ sortTests @ reduceTests @ extentsTests @ extentsMultiRankTests @ regressionTests @ sqlCombinedTests)
             | _ -> None
         match categoryTests with

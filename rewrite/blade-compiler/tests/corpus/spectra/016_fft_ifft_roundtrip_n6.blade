@@ -1,0 +1,17 @@
+// TEST: Spectra ifft: round-trip at n=6 (DFT fallback both ways)
+// Same round-trip as 015 on the non-power-of-two path: forward table-DFT,
+// inverse synthesis, residual pins at 0.0.
+import spectra as sp
+let x: Array<Float64 like Idx<6>> = [1.5, -0.25, 0.0, 2.75, -1.0, 0.5]
+let X = sp.fft(x)
+let X2: Array<Complex128 like Idx<6>> = X
+let y = sp.ifft(X2)
+let resid = {
+    let mut acc = 0.0
+    for i in 0..6 {
+        let d = y(i) - x(i)
+        acc = acc + d * d
+    }
+    acc
+}
+// EXPECT: resid = 0.0

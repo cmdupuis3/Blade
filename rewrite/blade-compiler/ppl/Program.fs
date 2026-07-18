@@ -195,6 +195,56 @@ let testJetPushforward () =
     let direct : Dist.T = { Dim = 1; Order = 3; Kappa = computeCumulants [| a1 |> Array.map (fun x -> x * x) |] 3 }
     checkArrayClose "empirical push x² = cumulants of squared data" 1e-9 (univCumulants direct) (univCumulants pushed)
 
+let testJetPushforwardVec () =
+    section "vector jet pushforward (mixed-block Faà di Bruno, joint output cumulants)"
+    // The running map: g(x,y) = (x + y, x·y) on the empirical dist of data B.
+    let b = [| [| 1.0; 2.0; 4.0 |]; [| 3.0; 5.0; 4.0 |] |]
+    let distB6 : Dist.T = { Dim = 2; Order = 6; Kappa = computeCumulants b 6 }
+    let mx = SymTensor.get distB6.Kappa.[0] [| 0 |]
+    let my = SymTensor.get distB6.Kappa.[0] [| 1 |]
+    // coordinate 0 (x + y): degree-1 jet — deliberately RAGGED (s_0 = 1)
+    let d1sum = SymTensor.create 2 1
+    SymTensor.set d1sum [| 0 |] 1.0
+    SymTensor.set d1sum [| 1 |] 1.0
+    // coordinate 1 (x·y): D1 = [∂x, ∂y] = [y, x] at the mean; D2 = ∂x∂y = 1
+    let d1prod = SymTensor.create 2 1
+    SymTensor.set d1prod [| 0 |] my
+    SymTensor.set d1prod [| 1 |] mx
+    let d2prod = SymTensor.create 2 2
+    SymTensor.set d2prod [| 0; 1 |] 1.0
+    let g0 = [| mx + my; mx * my |]
+    let jets = [| [| d1sum |]; [| d1prod; d2prod |] |]
+    let vec = Dist.jetPushforwardVec distB6 g0 jets 3 false
+    // 1) m = 1 regression: the vec path with one coordinate IS jetPushforward.
+    let a1 = [| 1.0; 2.0; 4.0; 6.0; 0.0; 3.0 |]
+    let distA1 : Dist.T = { Dim = 1; Order = 6; Kappa = computeCumulants [| a1 |] 6 }
+    let m1 = SymTensor.get distA1.Kappa.[0] [| 0 |]
+    let scalarJet = Dist.jetPushforward distA1 (m1 * m1) (univJet [| 2.0 * m1; 2.0 |]) 3 false
+    let vecOne = Dist.jetPushforwardVec distA1 [| m1 * m1 |] [| univJet [| 2.0 * m1; 2.0 |] |] 3 false
+    checkArrayClose "m=1 vec = scalar jet (x² on A1)" 1e-12 (univCumulants scalarJet) (univCumulants vecOne)
+    // 2) The linear coordinate's marginal tower = the affine pushforward.
+    let viaAffine = Dist.affine [| [| 1.0; 1.0 |] |] [| 0.0 |] distB6
+    let sumMarginal = Array.init 3 (fun k -> SymTensor.get vec.Kappa.[k] (Array.create (k + 1) 0))
+    checkArrayClose "vec coord 0 marginal = affine x+y" 1e-9 (univCumulants viaAffine |> Array.take 3) sumMarginal
+    // 3) The product coordinate's marginal diagonal = the scalar J2 jet.
+    let scalarProd = Dist.jetPushforward distB6 (mx * my) [| d1prod; d2prod |] 3 false
+    let prodMarginal = Array.init 3 (fun k -> SymTensor.get vec.Kappa.[k] (Array.create (k + 1) 1))
+    checkArrayClose "vec coord 1 marginal = scalar x·y jet" 1e-9 (univCumulants scalarProd) prodMarginal
+    // 4) THE EMPIRICAL IDENTITY, vectorized — the load-bearing check: joint
+    //    cumulants of the transformed 2-row data equal the pushed JOINT
+    //    tower, cross-cumulants included (nothing univariate pins those).
+    let transformed = [| Array.map2 (+) b.[0] b.[1]; Array.map2 (*) b.[0] b.[1] |]
+    let direct = computeCumulants transformed 3
+    for k in 1 .. 3 do
+        checkArrayClose (sprintf "vec empirical identity rank %d" k) 1e-9 direct.[k - 1].Data vec.Kappa.[k - 1].Data
+    // 5) Guards: the strict order budget, and a mis-shaped derivative slot.
+    let distB4 : Dist.T = { Dim = 2; Order = 4; Kappa = computeCumulants b 4 }
+    checkThrows "vec order guard (q·s = 6 > 4 strict)"
+        (fun () -> Dist.jetPushforwardVec distB4 g0 jets 3 false |> ignore)
+    let badD2 = SymTensor.create 1 2
+    checkThrows "vec shape guard (D_2 over wrong dim)"
+        (fun () -> Dist.jetPushforwardVec distB6 g0 [| [| d1sum |]; [| d1prod; badD2 |] |] 3 false |> ignore)
+
 // ---------------------------------------------------------------------------
 
 let private compareAcc (name: string) (relTol: float) (absTol: float) (reference: Streaming.Acc) (acc: Streaming.Acc) =
@@ -491,6 +541,28 @@ let main argv =
         let e = exp m1
         printfn "-- J4: exp(x) (degree-3 jet) on A1, dist order 6, q=2 strict"
         printfn "jet4 = [%s]" (fmt (Dist.jetPushforward distA1 e (univJet [| e; e; e |]) 2 false))
+        // J5/J6: VECTOR map g(x,y) = (x + y, x·y) on data B — the mixed-block
+        // Faà di Bruno oracle. Joint output cumulant tensors printed per
+        // order as flat cells in SymTensor.enumerate (canonical lex) order,
+        // which is exactly the corpus flat-ArrayLit cell order.
+        let fmtJoint (dist: Dist.T) (k: int) =
+            SymTensor.enumerate dist.Dim k
+            |> Seq.map (fun labels -> sprintf "%.12g" (SymTensor.get dist.Kappa.[k - 1] labels))
+            |> String.concat ", "
+        let jv1sum = SymTensor.create 2 1
+        SymTensor.set jv1sum [| 0 |] 1.0
+        SymTensor.set jv1sum [| 1 |] 1.0
+        let g0v = [| mx + my; mx * my |]
+        let jetsV = [| [| jv1sum |]; [| jd1; jd2 |] |]
+        printfn "-- J5: (x+y, x·y) on B, dist order 6, q=3 strict (joint output)"
+        let jv5 = Dist.jetPushforwardVec distB6 g0v jetsV 3 false
+        for k in 1 .. 3 do printfn "jv5_k%d = [%s]" k (fmtJoint jv5 k)
+        let transformed = [| Array.map2 (+) b.[0] b.[1]; Array.map2 (*) b.[0] b.[1] |]
+        let rv5 : Dist.T = { Dim = 2; Order = 3; Kappa = computeCumulants transformed 3 }
+        for k in 1 .. 3 do printfn "rv5_k%d = [%s] (cumulants of transformed data — must agree)" k (fmtJoint rv5 k)
+        printfn "-- J6: (x+y, x·y) on B, dist order 4, q=3 CLOSED"
+        let jv6 = Dist.jetPushforwardVec distB4 g0v jetsV 3 true
+        for k in 1 .. 3 do printfn "jv6_k%d = [%s]" k (fmtJoint jv6 k)
         0
     | _ ->
     testCombinatorics ()
@@ -498,6 +570,7 @@ let main argv =
     testMomentCumulant ()
     testDistTower ()
     testJetPushforward ()
+    testJetPushforwardVec ()
     testStreaming ()
     testStability ()
     demoDerivedFormulas ()

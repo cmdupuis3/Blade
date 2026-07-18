@@ -1,0 +1,24 @@
+// TEST: AD Power General Exponent
+import ad as ad
+// ============================================================================
+// `^` with a non-integer-literal exponent. d(b^e)/db = e*b^(e-1), so these
+// no longer need the exp(log(x)/3.0) hand-rolling the physics corpus used
+// to reach for.
+//   r(x) = x^0.5        at 4 -> 2      ; r' = 0.5*4^-0.5   = 0.25
+//   c(x) = x^(1/3)      at 8 -> 2      ; c' = (1/3)*8^-2/3 = 0.0833...
+//   n(x) = x^-2         at 2 -> 0.25   ; n' = -2*2^-3      = -0.25
+// ============================================================================
+function r(x: Float) -> Float = x ^ 0.5
+let (rv, drdx) = ad.grad(r)(4.0)
+// EXPECT: rv = 2.0
+// EXPECT: drdx = 0.25
+
+function c(x: Float) -> Float = x ^ (1.0 / 3.0)
+let (cv, dcdx) = ad.grad(c)(8.0)
+// EXPECT: cv = 2.0
+// EXPECT: dcdx = 0.08333333333333333
+
+function n(x: Float) -> Float = x ^ (0.0 - 2.0)
+let (nv, dndx) = ad.grad(n)(2.0)
+// EXPECT: nv = 0.25
+// EXPECT: dndx = -0.25

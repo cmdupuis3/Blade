@@ -1,0 +1,8 @@
+// TEST: FA T23: Two `_` placeholders (rejects)
+// ----------------------------------------------------------------------------
+// Formalism §6.2.3 allows a SINGLE `_` on functions (unlike compound array
+// indexing, whose 4.5 currying table requires multiple holes). Two holes
+// must steer to prefix partial application or a lambda.
+// ----------------------------------------------------------------------------
+function add3(a, b, c) = a + b + c
+let bad = add3(_, 2.0, _)

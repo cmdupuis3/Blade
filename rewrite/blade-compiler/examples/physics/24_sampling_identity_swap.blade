@@ -46,14 +46,14 @@ let P_eps1 = C1 / 49.0
 let P_eps3 = C3 / 49.0
 
 // --- the crossing window w = (R_A + R_B)/10, R = m^(1/3) ---
-let W1 = reduce(method_for(zip(MA, MB)) <@> lambda(a, b) -> (exp(log(a) / 3.0) + exp(log(b) / 3.0)) / 10.0, (+))
+let W1 = reduce(method_for(zip(MA, MB)) <@> lambda(a, b) -> (a ^ (1.0 / 3.0) + b ^ (1.0 / 3.0)) / 10.0, (+))
 let w_mean = W1 / 49.0
 
 // --- Nyquist for events: P_undecidable(Delta) = mean over pairs of
 //     1(D < 3) * max(0, 1 - w/Delta)  (miss the window AND records agree) ---
-let U01 = reduce(method_for(zip(MA, MB)) <@> lambda(a, b) -> (if 20.0 * sqrt((a - b) * (a - b)) / (a + b) < 3.0 then (if 1.0 - ((exp(log(a) / 3.0) + exp(log(b) / 3.0)) / 10.0) / 0.1 < 0.0 then 0.0 else 1.0 - ((exp(log(a) / 3.0) + exp(log(b) / 3.0)) / 10.0) / 0.1) else 0.0), (+))
-let U1 = reduce(method_for(zip(MA, MB)) <@> lambda(a, b) -> (if 20.0 * sqrt((a - b) * (a - b)) / (a + b) < 3.0 then (if 1.0 - ((exp(log(a) / 3.0) + exp(log(b) / 3.0)) / 10.0) / 1.0 < 0.0 then 0.0 else 1.0 - ((exp(log(a) / 3.0) + exp(log(b) / 3.0)) / 10.0) / 1.0) else 0.0), (+))
-let U4 = reduce(method_for(zip(MA, MB)) <@> lambda(a, b) -> (if 20.0 * sqrt((a - b) * (a - b)) / (a + b) < 3.0 then (if 1.0 - ((exp(log(a) / 3.0) + exp(log(b) / 3.0)) / 10.0) / 4.0 < 0.0 then 0.0 else 1.0 - ((exp(log(a) / 3.0) + exp(log(b) / 3.0)) / 10.0) / 4.0) else 0.0), (+))
+let U01 = reduce(method_for(zip(MA, MB)) <@> lambda(a, b) -> (if 20.0 * sqrt((a - b) * (a - b)) / (a + b) < 3.0 then (if 1.0 - ((a ^ (1.0 / 3.0) + b ^ (1.0 / 3.0)) / 10.0) / 0.1 < 0.0 then 0.0 else 1.0 - ((a ^ (1.0 / 3.0) + b ^ (1.0 / 3.0)) / 10.0) / 0.1) else 0.0), (+))
+let U1 = reduce(method_for(zip(MA, MB)) <@> lambda(a, b) -> (if 20.0 * sqrt((a - b) * (a - b)) / (a + b) < 3.0 then (if 1.0 - ((a ^ (1.0 / 3.0) + b ^ (1.0 / 3.0)) / 10.0) / 1.0 < 0.0 then 0.0 else 1.0 - ((a ^ (1.0 / 3.0) + b ^ (1.0 / 3.0)) / 10.0) / 1.0) else 0.0), (+))
+let U4 = reduce(method_for(zip(MA, MB)) <@> lambda(a, b) -> (if 20.0 * sqrt((a - b) * (a - b)) / (a + b) < 3.0 then (if 1.0 - ((a ^ (1.0 / 3.0) + b ^ (1.0 / 3.0)) / 10.0) / 4.0 < 0.0 then 0.0 else 1.0 - ((a ^ (1.0 / 3.0) + b ^ (1.0 / 3.0)) / 10.0) / 4.0) else 0.0), (+))
 let P_undec_fast = U01 / 49.0
 let P_undec_mid = U1 / 49.0
 let P_undec_slow = U4 / 49.0
@@ -64,7 +64,7 @@ let slow_V = if P_undec_slow > 0.3 then "EVENT_FADES" else "EVENT_CERTAIN"
 let G1 = reduce(method_for(zip(MA, MB)) <@> lambda(a, b) -> (if sqrt((a - b) * (a - b)) < 0.000000000001 then 20.0 * sqrt((a - b) * (a - b)) / (a + b) else 0.0), (+))
 let gauge_V = if G1 < 0.000000000001 then "EXISTENCE_IS_GAUGE" else "DECIDABLE"
 // ...where the last discriminator is one contact diameter of position:
-let G2 = reduce(method_for(zip(MA, MB)) <@> lambda(a, b) -> (if sqrt((a - b) * (a - b)) < 0.000000000001 then exp(log(a) / 3.0) + exp(log(b) / 3.0) else 0.0), (+))
+let G2 = reduce(method_for(zip(MA, MB)) <@> lambda(a, b) -> (if sqrt((a - b) * (a - b)) < 0.000000000001 then a ^ (1.0 / 3.0) + b ^ (1.0 / 3.0) else 0.0), (+))
 let diag_diam = G2 / 7.0
 
 // sampled fast: the collision is always certifiable; sampled slow, with

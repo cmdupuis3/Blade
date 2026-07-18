@@ -1,0 +1,18 @@
+// TEST: Math probe: nested array literal from runtime scalars
+// Probes the rank-2 return-assembly strategy for generated kernels: a 2x2
+// nested literal whose elements are runtime scalars (loop-computed),
+// returned from a function and indexed by the caller.
+function mk2(x: Float64) -> Array<Float64 like Idx<2>, Idx<2>> = {
+    let mut acc = 0.0
+    for k in 0..4 {
+        acc = acc + x
+    }
+    let a = acc + 1.0
+    let b = x * 2.0
+    [[a, b], [b, a]]
+}
+
+let M = mk2(3.0)
+let t = M(0, 0) + M(1, 0)
+// EXPECT: M = [13, 6, 6, 13]
+// EXPECT: t = 19

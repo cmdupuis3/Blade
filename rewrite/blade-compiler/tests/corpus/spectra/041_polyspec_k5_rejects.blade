@@ -1,0 +1,6 @@
+// TEST: Spectra polyspec: five arguments exceed the v1 order cap (rejects)
+// k is capped at 4 (trispectrum) in v1 for test budget; the generator
+// itself is order-generic.
+import spectra as sp
+let x: Array<Float64 like Idx<4>> = [1.0, 2.0, 3.0, 4.0]
+let P = sp.polyspec(x, x, x, x, x)

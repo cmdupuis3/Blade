@@ -1,0 +1,10 @@
+// TEST: Static Method For Rep Tower
+// static function rep(x, k) builds a staged k-tuple of array refs; splicing
+// it into a static method_for yields the arity-k former (the unfold pass's
+// uncurrying rule) — pinned against the plain method_for(A, A, A) spelling.
+static function rep(x, k) = if k == 1 then x else (x, rep(x, k - 1))
+let A = [1.0, 2.0, 3.0]
+let s3 = static method_for(rep(A, 3)) <@> lambda(x, y, z) -> x * y * z |> compute
+let p3 = method_for(A, A, A) <@> lambda(x, y, z) -> x * y * z |> compute
+// EXPECT: s3 = [1, 2, 3, 2, 4, 6, 3, 6, 9, 2, 4, 6, 4, 8, 12, 6, 12, 18, 3, 6, 9, 6, 12, 18, 9, 18, 27]
+// EXPECT: p3 = [1, 2, 3, 2, 4, 6, 3, 6, 9, 2, 4, 6, 4, 8, 12, 6, 12, 18, 3, 6, 9, 6, 12, 18, 9, 18, 27]

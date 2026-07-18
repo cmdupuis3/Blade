@@ -1,0 +1,10 @@
+// TEST: Spectra polyspec k=2: cross-spectrum of two rand streams, n=8
+// Order = call-site arity: two distinct signals give the cross-power
+// P(f) = X(f) * conj(Y(f)), a rank-1 complex array. Streams are rand keys
+// 1 and 2 (oracle mirrors the exact draws). Pins from spectra/OracleDump.fs.
+import rand as r
+import spectra as sp
+let x: Array<Float64 like Idx<8>> = r.uniform(1, 8)
+let y: Array<Float64 like Idx<8>> = r.uniform(2, 8)
+let P = sp.polyspec(x, y)
+// EXPECT: P = [(17.158266179759035, 0), (0.36698113330831983, -0.11052357805455941), (-0.14542234220072114, 0.079860672909885536), (0.23372398771841615, -0.032467041534736785), (0.21154470139868695, 0), (0.23372398771841607, 0.032467041534736854), (-0.14542234220072114, -0.079860672909885536), (0.36698113330831994, 0.1105235780545593)]

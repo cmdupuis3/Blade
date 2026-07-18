@@ -1,0 +1,11 @@
+// TEST: Range Multi Index Basic
+// A multi-index range<I, J> is ONE virtual array spanning a product of index
+// types; the slots uncurry into nested loop levels and the kernel gets one
+// param per slot (TypeCheck.expandedRows). Contrast 011_range_basic.blade
+// (single index type) and the rank rule, where a single MULTI-RANK index type
+// (SymIdx<2,N>) also yields two params -- a different generalization.
+//
+// EXPECT is FLAT: a rank-2 result prints flattened, and tests/Expect.fs skips
+// [[..]] 2-D expectations outright, so a nested form would check nothing.
+let R = method_for(range<Idx<2>, Idx<3>>) <@> lambda(i, j) -> i * 10 + j |> compute
+// EXPECT: R = [0, 1, 2, 10, 11, 12]

@@ -1,0 +1,113 @@
+// TEST: Physics -- Negativity Flow: What Channels Do to Nonclassicality
+// ============================================================================
+// Ex 37/ppl-050 made negativity the order parameter of the classical wall;
+// ex 34 made channels operators on towers. This example runs them against
+// each other: HOW DOES NONCLASSICALITY FLOW under lawful dynamics, under
+// unlawful dynamics, and under observation? The state space: signed atomic
+// towers on the support {-2, 0, 2} (dist_atoms), read by dist_negativity;
+// channels act on the CELLS (three dist_expect Lagrange reads, a 3x3
+// kernel, dist_atoms to rebuild) -- the full loop is four ppl primitives
+// composing. FINDINGS (pinned):
+//   * PHYSICAL CHANNELS ONLY DESTROY NEGATIVITY. A stochastic kernel
+//     (entries >= 0, columns summing to 1 -- the cell-level form of every
+//     mixture-of-pushforwards, i.e. of every fuzzy collision) contracts
+//     the signed tower (0.7, 0.5, -0.2): N = 0.2 -> 0.075 -> 0 -> 0 --
+//     full classicalization in two steps (the second output is already
+//     entrywise positive). The general fact is data processing for
+//     nonclassicality: a column-stochastic map on signed measures is an
+//     L1-contraction on the negative part -- N is a monotone under
+//     classical dynamics, the resource-theory shadow of CP-divisibility.
+//   * UNLAWFUL KERNELS MANUFACTURE IT. A trace-preserving but SIGNED
+//     kernel (one negative entry) applied to a PERFECTLY CLASSICAL point
+//     tower creates N = 0.1 from nothing. The boundary is exact:
+//     kernel positivity <=> negativity monotonicity -- "physical" and
+//     "cannot create nonclassicality" are the same predicate on the
+//     kernel, read at the cell level.
+//   * OBSERVATION IS EXEMPT: BAYES CAN AMPLIFY. dist_reweight with a
+//     legal positive likelihood (w = 0.2 + 0.2x + 0.1x^2, emphasizing
+//     the negative cell's support point) turns N = 0.2 into N = 5.0 --
+//     a 25x amplification, because conditioning divides by the evidence
+//     Z = 0.04: THE LESS LIKELY THE OBSERVATION UNDER THE QUASI-MODEL,
+//     THE MORE NONCLASSICAL THE CONDITIONED STATE (post-selection
+//     distillation, the classical shadow of weak-value amplification;
+//     as Z -> 0 the amplification diverges). Bayes is not a channel: it
+//     is linear only before normalization, and the normalization is
+//     where the resource concentrates.
+// Together: negativity behaves exactly like a resource -- monotone under
+// the free operations (stochastic kernels), creatable only by leaving
+// the theory (signed kernels), and concentratable by post-selection.
+// The classical/quantum wall, restated one last time: classical worlds
+// are the ones whose dynamics can never push this meter off zero.
+// ============================================================================
+
+import ppl as ppl
+// Lagrange rows for support {-2, 0, 2} (columns 1, m, m^2):
+// l_minus = (0, -1/4, 1/8), l_zero = (1, 0, -1/4), l_plus = (0, 1/4, 1/8)
+
+// ---- the signed start: cells (0.7, 0.5, -0.2) on (-2, 0, 2) ----
+let q0 = ppl.dist_atoms(4, -2.0, 0.7, 0.0, 0.5, 2.0, -0.2)
+let n0 = ppl.dist_negativity(q0, -2.0, 0.0, 2.0)
+
+// ---- the physical channel: stochastic kernel K (columns sum to 1) ----
+// K = [[0.8, 0.1, 0.05], [0.15, 0.8, 0.15], [0.05, 0.1, 0.8]]
+let c0m = ppl.dist_expect(q0, 0.0, -0.25, 0.125)
+let c0z = ppl.dist_expect(q0, 1.0, 0.0, -0.25)
+let c0p = ppl.dist_expect(q0, 0.0, 0.25, 0.125)
+let c1m = 0.8 * c0m + 0.1 * c0z + 0.05 * c0p
+let c1z = 0.15 * c0m + 0.8 * c0z + 0.15 * c0p
+let c1p = 0.05 * c0m + 0.1 * c0z + 0.8 * c0p
+let q1 = ppl.dist_atoms(4, -2.0, c1m, 0.0, c1z, 2.0, c1p)
+let n1 = ppl.dist_negativity(q1, -2.0, 0.0, 2.0)
+let c2m = 0.8 * c1m + 0.1 * c1z + 0.05 * c1p
+let c2z = 0.15 * c1m + 0.8 * c1z + 0.15 * c1p
+let c2p = 0.05 * c1m + 0.1 * c1z + 0.8 * c1p
+let q2 = ppl.dist_atoms(4, -2.0, c2m, 0.0, c2z, 2.0, c2p)
+let n2 = ppl.dist_negativity(q2, -2.0, 0.0, 2.0)
+let c3m = 0.8 * c2m + 0.1 * c2z + 0.05 * c2p
+let c3z = 0.15 * c2m + 0.8 * c2z + 0.15 * c2p
+let c3p = 0.05 * c2m + 0.1 * c2z + 0.8 * c2p
+let q3 = ppl.dist_atoms(4, -2.0, c3m, 0.0, c3z, 2.0, c3p)
+let n3 = ppl.dist_negativity(q3, -2.0, 0.0, 2.0)
+let mono_V = if n1 < n0 then (if n2 < n1 then (if n3 < 0.000000000001 then "PHYSICAL_CHANNELS_DESTROY_NEGATIVITY" else "NO") else "NO") else "NO"
+// mass preservation along the flow (columns sum to 1)
+let mass3 = c3m + c3z + c3p
+
+// ---- the unlawful kernel: signed column manufactures nonclassicality ----
+// S column for the +2 atom: (-0.1, 0.0, 1.1); apply to the CLASSICAL
+// point tower at +2
+let pt = ppl.dist_atoms(4, -2.0, 0.0, 0.0, 0.0, 2.0, 1.0)
+let ptn = ppl.dist_negativity(pt, -2.0, 0.0, 2.0)
+let bm = 0.0 - 0.1
+let bz = 0.0
+let bp = 1.1
+let qb = ppl.dist_atoms(4, -2.0, bm, 0.0, bz, 2.0, bp)
+let nb = ppl.dist_negativity(qb, -2.0, 0.0, 2.0)
+let unlawful_V = if ptn < 0.000000000001 then (if nb > 0.09 then "SIGNED_KERNELS_MANUFACTURE_NONCLASSICALITY" else "NO") else "NO"
+
+// ---- observation: Bayes amplifies (post-selection distillation) ----
+// likelihood w(x) = 0.2 + 0.2 x + 0.1 x^2: values (0.2, 0.2, 1.0) on the
+// support -- a LEGAL positive likelihood emphasizing the negative cell
+let post = ppl.dist_reweight(q0, 0.2, 0.2, 0.1)
+let evid = ppl.dist_expect(q0, 0.2, 0.2, 0.1)
+let npost = ppl.dist_negativity(post, -2.0, 0.0, 2.0)
+let amp = npost / n0
+let bayes_V = if amp > 20.0 then "BAYES_AMPLIFIES_NEGATIVITY" else "NO"
+
+// contraction under lawful kernels, creation under signed ones,
+// concentration under conditioning:
+// EXPECT: n0 = 0.2
+// EXPECT: c1m = 0.6
+// EXPECT: n1 = 0.0750000000000001
+// EXPECT: n2 = 0.0
+// EXPECT: n3 = 0.0
+// EXPECT: c3m = 0.46575
+// EXPECT: c3p = 0.0860625
+// EXPECT: mass3 = 1.0
+// EXPECT: mono_V = "PHYSICAL_CHANNELS_DESTROY_NEGATIVITY"
+// EXPECT: ptn = 0.0
+// EXPECT: nb = 0.1
+// EXPECT: unlawful_V = "SIGNED_KERNELS_MANUFACTURE_NONCLASSICALITY"
+// EXPECT: evid = 0.04
+// EXPECT: npost = 5.0
+// EXPECT: amp = 25.0
+// EXPECT: bayes_V = "BAYES_AMPLIFIES_NEGATIVITY"

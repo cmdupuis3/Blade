@@ -1,0 +1,7 @@
+// TEST: Math svd: non-static SWEEPS rejects (rejects)
+// The sweep budget must be a `let static` binding or an int literal — a
+// plain runtime let is refused with steering.
+import math as m
+let k = 5
+let A: Array<Float64 like Idx<2>, Idx<2>> = [[3.0, 0.0], [4.0, 5.0]]
+let (U, S, V) = m.svd(A, k)

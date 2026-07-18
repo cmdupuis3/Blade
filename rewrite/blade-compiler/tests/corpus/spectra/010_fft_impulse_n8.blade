@@ -1,0 +1,8 @@
+// TEST: Spectra fft: unit impulse, n=8 radix-2 path
+// FFT of the delta at 0 is identically (1, 0) across all bins — exact in
+// floating point, and it exercises the bit-reversal copy-in and every
+// butterfly stage (any dropped/garbled index would break flatness).
+import spectra as sp
+let x: Array<Float64 like Idx<8>> = [1.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0]
+let X = sp.fft(x)
+// EXPECT: X = [(1, 0), (1, 0), (1, 0), (1, 0), (1, 0), (1, 0), (1, 0), (1, 0)]

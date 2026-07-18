@@ -1,0 +1,1 @@
+{"zarr_format": 2, "shape": [5, 7], "chunks": [2, 3], "dtype": "<f8", "compressor": null, "fill_value": -1, "order": "C", "filters": null}

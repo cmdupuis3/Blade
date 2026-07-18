@@ -1,0 +1,8 @@
+// TEST: Static Method For Runtime Count (rejects)
+// The count driving a staged rep must be compile-time: a runtime n makes
+// the inlined if-condition unfoldable — located "does not evaluate at
+// compile time" error from the unfold pass.
+static function rep(x, k) = if k == 1 then x else (x, rep(x, k - 1))
+let A = [1.0, 2.0]
+let n = 3
+let s = static method_for(rep(A, n)) <@> lambda(x, y, z) -> x * y * z |> compute

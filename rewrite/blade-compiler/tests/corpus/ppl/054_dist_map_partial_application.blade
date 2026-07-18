@@ -1,0 +1,22 @@
+// TEST: Dist Map Partial Application
+import ppl as ppl
+// The motivating example: cos_tw(1.0) binds t and leaves w as the jet
+// coordinate — a prefix partial application inlined at elaboration, the
+// bound arg a constant w.r.t. the symbolic derivative tower. cos is
+// non-polynomial, so the explicit truncation degree s is required; the
+// degree-2 value is checked by hand (g(mu) + g''(mu)/2 * k2 =
+// cos(8/3) - cos(8/3)/2 * 35/9 = 0.8399...), and the degree-6 mean
+// approaches the exact E[cos(X)] = 0.0735 for this dist.
+function cos_tw(t, w) = cos(w * t)
+type TimeIdx = Idx<6>
+let A: Array<Float64 like Idx<1>, TimeIdx> = [[1.0, 2.0, 4.0, 6.0, 0.0, 3.0]]
+let xd = ppl.dist(A, 6)
+let da2 = ppl.dist_map(xd, 1, 2, cos_tw(1.0))
+let m2 = ppl.cumulant(da2, 1)
+let da4 = ppl.dist_map(xd, 1, 4, cos_tw(1.0))
+let m4 = ppl.cumulant(da4, 1)
+let da6 = ppl.dist_map(xd, 1, 6, cos_tw(1.0))
+let m6 = ppl.cumulant(da6, 1)
+// EXPECT: m2 = [0.83991953664565]
+// EXPECT: m4 = [-0.105717339686813]
+// EXPECT: m6 = [0.086143131181908]

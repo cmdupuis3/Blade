@@ -1,0 +1,18 @@
+// TEST: Math eig vs eigh: symmetric cross-check differential
+// On a symmetric matrix the general eigensolver must reproduce eigh's
+// spectrum with exactly real eigenvalues: Σ(RE_k − LAM_k)² + Σ IM² pins
+// at 0.0 (two entirely different algorithms — Francis QR vs cyclic
+// Jacobi — agreeing to ~1e-14).
+import math as m
+let S: Array<Float64 like Idx<4>, Idx<4>> = [[4.0, 1.0, 0.0, 2.0], [1.0, 3.0, 1.0, 0.0], [0.0, 1.0, 2.0, 1.0], [2.0, 0.0, 1.0, 5.0]]
+let (RE, IM) = m.eig(S)
+let (Q, LAM) = m.eigh(S)
+let dev = {
+    let mut acc = 0.0
+    for k in 0..4 {
+        let d = RE(k) - LAM(k)
+        acc = acc + d * d + IM(k) * IM(k)
+    }
+    acc
+}
+// EXPECT: dev = 0.0

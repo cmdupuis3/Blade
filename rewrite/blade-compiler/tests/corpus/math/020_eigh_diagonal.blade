@@ -1,0 +1,8 @@
+// TEST: Math eigh: diagonal matrix, exact permutation
+// Diagonal input never rotates; the result is the sorted diagonal with Q
+// the matching column permutation.
+import math as m
+let S: Array<Float64 like Idx<3>, Idx<3>> = [[1.0, 0.0, 0.0], [0.0, 5.0, 0.0], [0.0, 0.0, 3.0]]
+let (Q, LAM) = m.eigh(S)
+// EXPECT: LAM = [5, 3, 1]
+// EXPECT: Q = [0, 0, 1, 1, 0, 0, 0, 1, 0]

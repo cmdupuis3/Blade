@@ -1,0 +1,10 @@
+// TEST: Dist Map Partial All Bound (rejects)
+import ppl as ppl
+// A "partial" application that supplies every parameter leaves no
+// coordinate to map over — reject with steering rather than jetting a
+// constant.
+function cos_tw(t, w) = cos(w * t)
+type TimeIdx = Idx<3>
+let A: Array<Float64 like Idx<1>, TimeIdx> = [[0.0, 1.0, 2.0]]
+let xd = ppl.dist(A, 2)
+let dy = ppl.dist_map(xd, 1, 2, cos_tw(1.0, 2.0))

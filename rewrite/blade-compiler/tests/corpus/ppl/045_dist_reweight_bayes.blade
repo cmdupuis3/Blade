@@ -1,0 +1,18 @@
+// TEST: Dist Reweight Bayes Posterior
+import ppl as ppl
+// Bayes proper, with a RUNTIME-centered likelihood: prior over {0, 1, 2},
+// observation vhat = 1.6, quadratic likelihood L(x) = 1 - 0.2 (x - vhat)^2
+// expanded to coefficients that mention the runtime scalar. Evidence
+// Z = E[L] = 2.384/3; posterior mean = (0.928 + 2*0.968)/2.384. The
+// degree-2 weight spends two orders: order-4 prior -> order-2 posterior.
+type TimeIdx = Idx<3>
+let A: Array<Float64 like Idx<1>, TimeIdx> = [[0.0, 1.0, 2.0]]
+let vhat = 1.6
+let d = ppl.dist(A, 4)
+let evidence = ppl.dist_expect(d, 1.0 - 0.2 * vhat * vhat, 0.4 * vhat, 0.0 - 0.2)
+let post = ppl.dist_reweight(d, 1.0 - 0.2 * vhat * vhat, 0.4 * vhat, 0.0 - 0.2)
+let p1 = ppl.cumulant(post, 1)
+let p2 = ppl.cumulant(post, 2)
+// EXPECT: evidence = 0.794666666666667
+// EXPECT: p1 = [1.20134228187919]
+// EXPECT: p2 = [0.570199540561236]

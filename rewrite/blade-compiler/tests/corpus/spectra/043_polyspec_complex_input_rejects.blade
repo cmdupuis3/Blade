@@ -1,0 +1,12 @@
+// TEST: Spectra polyspec: complex input signals are rejected (rejects)
+// polyspec takes REAL signals (it computes the FFTs itself); a complex
+// array argument steers to the Float64-elements requirement.
+import spectra as sp
+let x: Array<Float64 like Idx<4>> = [1.0, 2.0, 3.0, 4.0]
+let z: Array<Complex128 like Idx<4>> = [
+    complex(1.0, 0.0),
+    complex(0.0, 1.0),
+    complex(1.0, 1.0),
+    complex(0.0, 0.0)
+]
+let P = sp.polyspec(x, z)

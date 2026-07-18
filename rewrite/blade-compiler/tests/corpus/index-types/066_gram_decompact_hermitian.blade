@@ -4,8 +4,8 @@
 // decompact(gram(A,A), d) on a rank-2 Hermitian -> dense n×n with the lower
 // triangle conjugated (diagonal kept, real). H = [[7, 4+2i],[4-2i, 19]].
 let A: Array<Complex128 like Idx<2>, Idx<3>> = [
-    [(1.0, 1.0) : Complex128, (2.0, 0.0) : Complex128, (0.0, 1.0) : Complex128],
-    [(3.0, -1.0) : Complex128, (1.0, 2.0) : Complex128, (2.0, 0.0) : Complex128]
+    [complex(1.0, 1.0), complex(2.0, 0.0), complex(0.0, 1.0)],
+    [complex(3.0, -1.0), complex(1.0, 2.0), complex(2.0, 0.0)]
 ]
 let H = gram(A, A)
 let result = decompact(H, 0)

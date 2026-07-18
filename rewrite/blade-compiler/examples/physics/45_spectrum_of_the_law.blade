@@ -1,0 +1,191 @@
+// TEST: Physics -- The Spectrum of the Law: Koopman Eigenvalues In-Language
+// ============================================================================
+// The arc's EDMD thread (ex 15-16, tools/koopman_edmd.ps1) used only the
+// KERNEL of the fitted generator -- invariants live at eigenvalue zero --
+// because no general eigensolver existed. math.eig (Francis QR, real +
+// imaginary parts, descending modulus) retires that limit: this file reads
+// the WHOLE spectrum of the law, in-language, and pins it against closed
+// forms. Design: generator EDMD, L = (sum ddot d^T)(sum d d^T)^{-1}, over
+// the 9 monomials of degree <= 3 in (x, p) -- a dictionary that is EXACTLY
+// invariant under linear flow, so the fit is exact to rounding and the
+// spectrum is analytic. Derivatives are exact (chain rule through the
+// equations of motion; no finite differences). Trajectories are closed
+// form, sampled in imperative blocks; G^{-1} via m.eigh whitening; the
+// eigenvalue read via m.eig.
+// FINDINGS (pinned):
+//   * THE FREQUENCY ALGEBRA, MEASURED. Conservative oscillator (three
+//     amplitudes; isochronism keeps the ladder sharp): the fitted L's
+//     spectrum is EXACTLY {±3i, ±2i, ±i (twice), 0} -- the harmonic
+//     ladder of the flow, plus the invariant at zero. Every real part
+//     pins at ~1e-12: frequencies from data, no FFT, no phase unwrap.
+//   * DISSIPATION SHIFTS THE LATTICE. Damped oscillator (gamma = 0.15,
+//     one spiral fills the plane): eigenvalues land on the exact lattice
+//     a mu+ + b mu- with mu± = -gamma ± i sqrt(1-gamma^2), a+b <= 3:
+//     pairs at -0.15 ± 0.9887i, -0.45 ± 2.9661i, -0.30 ± 1.9774i, ...
+//   * THE DETECTOR READS DAMPING AS DISPLACEMENT. The energy-like
+//     combination that sat at eigenvalue 0 in the conservative run
+//     appears at EXACTLY mu+ + mu- = -2 gamma = -0.3 + 0i (the smallest-
+//     modulus eigenvalue, purely real): the zero-variance/kernel verdict
+//     of ex 15-16 is the gamma -> 0 limit of an eigenvalue displacement
+//     the spectrum now measures directly.
+// Two-route: the dictionary closure makes truth ANALYTIC (the lattice
+// above); an independent F# route confirmed the fitted L reproduces
+// d/dt on fresh samples to ~1e-12 before pinning.
+// ============================================================================
+import math as m
+
+let AMPI: Array<Float64 like Idx<3>> = [0.0, 1.0, 2.0]
+
+let SGC = {
+    let mut st = [0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0]
+    let mut d = [0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0]
+    let mut dd = [0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0]
+    let mut tf = 0.0
+    for a in 0..3 {
+        let amp = 0.8 + 0.2 * AMPI(a)
+        tf = 0.0
+        for k in 0..500 {
+            let x = amp * cos(tf)
+            let p = 0.0 - amp * sin(tf)
+            let f = 0.0 - x
+            d(0) = x
+            d(1) = p
+            d(2) = x * x
+            d(3) = x * p
+            d(4) = p * p
+            d(5) = x * x * x
+            d(6) = x * x * p
+            d(7) = x * p * p
+            d(8) = p * p * p
+            dd(0) = p
+            dd(1) = f
+            dd(2) = 2.0 * x * p
+            dd(3) = p * p + x * f
+            dd(4) = 2.0 * p * f
+            dd(5) = 3.0 * x * x * p
+            dd(6) = 2.0 * x * p * p + x * x * f
+            dd(7) = p * p * p + 2.0 * x * p * f
+            dd(8) = 3.0 * p * p * f
+            for i in 0..9 {
+                for j in 0..9 {
+                    st(i * 9 + j) = st(i * 9 + j) + d(i) * d(j)
+                    st(81 + i * 9 + j) = st(81 + i * 9 + j) + dd(i) * d(j)
+                }
+            }
+            tf = tf + 0.05
+        }
+    }
+    st
+}
+
+let SGD = {
+    let mut st = [0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0]
+    let mut d = [0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0]
+    let mut dd = [0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0]
+    let mut tf = 0.0
+    for k in 0..240 {
+        let e = exp(0.0 - 0.15 * tf)
+        let x = 1.2 * e * (cos(0.98868599666425949 * tf) + 0.15171652122725207 * sin(0.98868599666425949 * tf))
+        let p = 0.0 - 1.2 * e * sin(0.98868599666425949 * tf) / 0.98868599666425949
+        let f = 0.0 - x - 0.3 * p
+        d(0) = x
+        d(1) = p
+        d(2) = x * x
+        d(3) = x * p
+        d(4) = p * p
+        d(5) = x * x * x
+        d(6) = x * x * p
+        d(7) = x * p * p
+        d(8) = p * p * p
+        dd(0) = p
+        dd(1) = f
+        dd(2) = 2.0 * x * p
+        dd(3) = p * p + x * f
+        dd(4) = 2.0 * p * f
+        dd(5) = 3.0 * x * x * p
+        dd(6) = 2.0 * x * p * p + x * x * f
+        dd(7) = p * p * p + 2.0 * x * p * f
+        dd(8) = 3.0 * p * p * f
+        for i in 0..9 {
+            for j in 0..9 {
+                st(i * 9 + j) = st(i * 9 + j) + d(i) * d(j)
+                st(81 + i * 9 + j) = st(81 + i * 9 + j) + dd(i) * d(j)
+            }
+        }
+        tf = tf + 0.05
+    }
+    st
+}
+
+// ---- fit L and read the spectrum, conservative ----
+let GMC: Array<Float64 like Idx<9>, Idx<9>> = method_for(range<Idx<9>>) <*> method_for(range<Idx<9>>) <@> lambda(i: Int64, j: Int64) -> SGC(i * 9 + j) |> compute
+let AMC = method_for(range<Idx<9>>) <*> method_for(range<Idx<9>>) <@> lambda(i: Int64, j: Int64) -> SGC(81 + i * 9 + j) |> compute
+let (QGC, LGC) = m.eigh(GMC)
+let QDC = method_for(range<Idx<9>>) <*> method_for(range<Idx<9>>) <@> lambda(i: Int64, k: Int64) -> QGC(i, k) / LGC(k) |> compute
+let GIC = method_for(QDC, QGC) <@> lambda(u: Array<Float64 like Idx<9>>, v: Array<Float64 like Idx<9>>) -> prodsum(u, v) |> compute
+let LKC: Array<Float64 like Idx<9>, Idx<9>> = method_for(AMC, GIC) <@> lambda(u: Array<Float64 like Idx<9>>, v: Array<Float64 like Idx<9>>) -> prodsum(u, v) |> compute
+let (REC, IMC) = m.eig(LKC)
+
+// ---- fit L and read the spectrum, damped ----
+let GMD: Array<Float64 like Idx<9>, Idx<9>> = method_for(range<Idx<9>>) <*> method_for(range<Idx<9>>) <@> lambda(i: Int64, j: Int64) -> SGD(i * 9 + j) |> compute
+let AMD = method_for(range<Idx<9>>) <*> method_for(range<Idx<9>>) <@> lambda(i: Int64, j: Int64) -> SGD(81 + i * 9 + j) |> compute
+let (QGD, LGD) = m.eigh(GMD)
+let QDD = method_for(range<Idx<9>>) <*> method_for(range<Idx<9>>) <@> lambda(i: Int64, k: Int64) -> QGD(i, k) / LGD(k) |> compute
+let GID = method_for(QDD, QGD) <@> lambda(u: Array<Float64 like Idx<9>>, v: Array<Float64 like Idx<9>>) -> prodsum(u, v) |> compute
+let LKD: Array<Float64 like Idx<9>, Idx<9>> = method_for(AMD, GID) <@> lambda(u: Array<Float64 like Idx<9>>, v: Array<Float64 like Idx<9>>) -> prodsum(u, v) |> compute
+let (RED, IMD) = m.eig(LKD)
+
+// ---- the ladder and the lattice, read off ----
+let imc0 = IMC(0)
+let imc2 = IMC(2)
+let imc4 = IMC(4)
+let imc6 = IMC(6)
+let rec8 = REC(8)
+let imc8 = IMC(8)
+let maxreC = {
+    let mut worst = 0.0
+    for k in 0..9 {
+        let a = sqrt(REC(k) * REC(k))
+        worst = if a > worst then a else worst
+    }
+    worst
+}
+let devL = sqrt((IMC(0) - 3.0) * (IMC(0) - 3.0)) + sqrt((IMC(2) - 2.0) * (IMC(2) - 2.0)) + sqrt((IMC(4) - 1.0) * (IMC(4) - 1.0)) + sqrt((IMC(6) - 1.0) * (IMC(6) - 1.0))
+let red0 = RED(0)
+let imd0 = IMD(0)
+let red2 = RED(2)
+let imd2 = IMD(2)
+let red6 = RED(6)
+let imd6 = IMD(6)
+let red8 = RED(8)
+let imd8 = IMD(8)
+let devD = sqrt((RED(0) + 0.45) * (RED(0) + 0.45)) + sqrt((IMD(0) - 2.9660579899927786) * (IMD(0) - 2.9660579899927786)) + sqrt((RED(2) + 0.3) * (RED(2) + 0.3)) + sqrt((IMD(2) - 1.977371993328519) * (IMD(2) - 1.977371993328519)) + sqrt((RED(6) + 0.15) * (RED(6) + 0.15)) + sqrt((IMD(6) - 0.98868599666425949) * (IMD(6) - 0.98868599666425949))
+
+// ---- verdicts ----
+let ladderV = if maxreC < 0.000000000001 then (if devL < 0.000000000001 then "IMAGINARY_LADDER_MEASURED" else "NO") else "NO"
+let invV = if sqrt(rec8 * rec8) < 0.000000000001 then (if sqrt(imc8 * imc8) < 0.000000000001 then "INVARIANT_AT_ZERO" else "NO") else "NO"
+let lattV = if devD < 0.0000000001 then "DAMPED_LATTICE_EXACT" else "NO"
+let dispV = if sqrt((red8 + 0.3) * (red8 + 0.3)) < 0.0000000001 then (if sqrt(imd8 * imd8) < 0.000000000001 then "INVARIANT_DISPLACED_TO_MINUS_2GAMMA" else "NO") else "NO"
+
+// the ladder, the kernel, the lattice, the displacement:
+// EXPECT: imc0 = 3
+// EXPECT: imc2 = 2
+// EXPECT: imc4 = 0.999999999999999
+// EXPECT: imc6 = 0.999999999999998
+// EXPECT: rec8 = -1.54427505080323e-16
+// EXPECT: imc8 = 0
+// EXPECT: maxreC = 9.436895676534e-16
+// EXPECT: devL = 9.65894031423886e-15
+// EXPECT: ladderV = "IMAGINARY_LADDER_MEASURED"
+// EXPECT: invV = "INVARIANT_AT_ZERO"
+// EXPECT: red0 = -0.449999999999983
+// EXPECT: imd0 = 2.96605798999278
+// EXPECT: red2 = -0.300000000000001
+// EXPECT: imd2 = 1.97737199332852
+// EXPECT: red6 = -0.149999999999999
+// EXPECT: imd6 = 0.988685996664264
+// EXPECT: red8 = -0.300000000000004
+// EXPECT: imd8 = 0
+// EXPECT: devD = 2.93376434257198e-14
+// EXPECT: lattV = "DAMPED_LATTICE_EXACT"
+// EXPECT: dispV = "INVARIANT_DISPLACED_TO_MINUS_2GAMMA"

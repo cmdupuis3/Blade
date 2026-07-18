@@ -40,7 +40,7 @@ let M2 = [0.6, 0.75, 0.9, 1.0, 1.15, 1.3, 1.5, 0.6, 0.75, 0.9, 1.0, 1.15, 1.3, 1
 let SP = [0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 4.0, 4.0, 4.0, 4.0, 4.0, 4.0, 4.0]
 
 // --- staged geometry and collision columns ---
-let R2C = method_for(M2) <@> lambda(m) -> 0.5 * exp(log(m) / 3.0) |> compute
+let R2C = method_for(M2) <@> lambda(m) -> 0.5 * m ^ (1.0 / 3.0) |> compute
 let SFC = method_for(R2C) <@> lambda(r) -> 0.55 / (0.5 + r) |> compute
 let CFC = method_for(SFC) <@> lambda(s) -> sqrt(1.0 - s * s) |> compute
 let Q1N = method_for(zip(M2, CFC)) <@> lambda(m, c) -> (1.0 - m) * c / (1.0 + m) |> compute

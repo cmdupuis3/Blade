@@ -1,0 +1,10 @@
+// TEST: Math svd: diagonal matrix, exact permutation
+// A diagonal input never rotates (every column pair is already orthogonal,
+// the convergence guard fires on all pairs), so the result is exactly the
+// sorted diagonal: S descending, U and V the matching column permutations.
+import math as m
+let A: Array<Float64 like Idx<3>, Idx<3>> = [[2.0, 0.0, 0.0], [0.0, 3.0, 0.0], [0.0, 0.0, 1.0]]
+let (U, S, V) = m.svd(A)
+// EXPECT: S = [3, 2, 1]
+// EXPECT: U = [0, 1, 0, 1, 0, 0, 0, 0, 1]
+// EXPECT: V = [0, 1, 0, 1, 0, 0, 0, 0, 1]

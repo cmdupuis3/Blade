@@ -1,0 +1,26 @@
+// TEST: Math hosvd: truncated exact on low-multilinear-rank tensor
+// X(i,j,k) = c_k·(a_i·b_j + a'_i·b'_j) has multilinear rank (2,2,1), so
+// hosvd(X, 2, 2, 1) reconstructs it exactly: resid pins at 0.0.
+import math as m
+let X: Array<Float64 like Idx<3>, Idx<3>, Idx<3>> = [[[2.0, 4.0, 4.0], [2.0, 4.0, 4.0], [1.0, 2.0, 2.0]], [[4.0, 8.0, 8.0], [2.0, 4.0, 4.0], [0.0, 0.0, 0.0]], [[6.0, 12.0, 12.0], [4.0, 8.0, 8.0], [1.0, 2.0, 2.0]]]
+let (G, U0, U1, U2) = m.hosvd(X, 2, 2, 1)
+let resid = {
+    let mut acc = 0.0
+    let mut rc = 0.0
+    for i in 0..3 {
+        for j in 0..3 {
+            for k in 0..3 {
+                rc = 0.0
+                for a in 0..2 {
+                    for b in 0..2 {
+                        rc = rc + G(a, b, 0) * U0(i, a) * U1(j, b) * U2(k, 0)
+                    }
+                }
+                let d = rc - X(i, j, k)
+                acc = acc + d * d
+            }
+        }
+    }
+    acc
+}
+// EXPECT: resid = 0.0

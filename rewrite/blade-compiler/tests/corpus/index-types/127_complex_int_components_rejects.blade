@@ -1,0 +1,6 @@
+// TEST: Complex Int Components (rejects)
+// complex(re, im) components must be float-typed — no implicit
+// int -> float promotion at literal construction time (same design rule
+// as the retired tuple form). complex(0, 0) is rejected; write
+// complex(0.0, 0.0).
+let x = complex(0, 0)

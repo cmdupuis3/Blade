@@ -1,0 +1,6 @@
+// TEST: Math svd: unannotated argument rejects with steering (rejects)
+// Math ops read the DECLARED shape: the array argument must be a
+// module-level let with a full Array<Float64 like Idx<...>, ...> annotation.
+import math as m
+let A = [[3.0, 0.0], [4.0, 5.0]]
+let (U, S, V) = m.svd(A)

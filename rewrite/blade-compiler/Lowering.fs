@@ -100,7 +100,8 @@ type TypedLowerEnv = {
     /// Deferred random-fill constructors accumulated during lowering, keyed by
     /// the receiving binding's IRId. Value is the lowered modulus expr. Copied
     /// into IRModule.RandomInits at module assembly and consumed at codegen.
-    RandomInits: Map<IRId, IRExpr>
+    /// Value is a RandomFillSpec (fill_random modulus, or a rand key).
+    RandomInits: Map<IRId, RandomFillSpec>
     /// Deferred compound-construction constructors (compound(dense, mask))
     /// accumulated during lowering, keyed by the receiving binding's IRId.
     /// Value is (loweredDense, loweredMask). Copied into IRModule.CompoundInits
@@ -188,6 +189,9 @@ let rec lowerTypedExpr (env: TypedLowerEnv) (texpr: TypedExpr) : IRExpr =
         | OpNeg -> IRUnaryOp (IRNeg, e)
         | OpNot -> IRUnaryOp (IRNot, e)
         | OpConj -> IRUnaryOp (IRConj, e)
+        | OpReal -> IRUnaryOp (IRReal, e)
+        | OpImag -> IRUnaryOp (IRImag, e)
+        | OpArg -> IRUnaryOp (IRArg, e)
         | OpMath name -> IRUnaryOp (IRMath name, e)
     
     | TExprApp (func, args) ->
@@ -404,7 +408,14 @@ let rec lowerTypedExpr (env: TypedLowerEnv) (texpr: TypedExpr) : IRExpr =
         // Reaching here means it was used inline / in a nested let, which has no
         // annotation to supply the shape.
         failwith "fill_random(mod) is only valid as an annotated top-level let-binding value (let A: Array<..> = fill_random(mod))"
-    
+
+    | TExprRandGen _ ->
+        // rand.uniform/normal(key, shape) is materialized only as a top-level
+        // let-binding value, where the TDeclLet loop intercepts it (it records
+        // the key/kind in RandomInits and allocates the self-typed array).
+        // Reaching here means it was used inline / in a nested let.
+        failwith "rand.uniform/normal(...) is only valid as a top-level let-binding value (let A = rand.uniform(key, n))"
+
     | TExprCompound _ ->
         // compound(dense, mask) is only meaningful as a top-level let-binding
         // value, where the TDeclLet loop intercepts it (it records the lowered
@@ -1657,7 +1668,29 @@ let lowerTypedModule (env: TypedLowerEnv) (modul: TypedModule) (rawDecls: Locate
             }
             bindings <- bindings @ [bd]
             currentEnv <- bindTypedVar binding.Name binding.VarId currentEnv
-            currentEnv <- { currentEnv with RandomInits = Map.add binding.VarId modIR currentEnv.RandomInits }
+            currentEnv <- { currentEnv with RandomInits = Map.add binding.VarId (FillModulus modIR) currentEnv.RandomInits }
+        | TDeclLet binding when (match binding.Value.Kind with TExprRandGen _ -> true | _ -> false) ->
+            // rand.uniform/normal(key, shape): the binding holds a deterministic
+            // random array, materialized in codegen via allocate<> + the runtime
+            // blade_rand fill (the RandomInits/RandGen intercept in genBinding).
+            // Value is a unit placeholder; the array type/shape comes from
+            // typecheck (self-typed from the shape arg). The key is lowered and
+            // recorded. Mirrors the fill_random arm.
+            let kind, keyIR =
+                match binding.Value.Kind with
+                | TExprRandGen (k, key, _) -> k, lowerTypedExpr currentEnv key
+                | _ -> "uniform", IRLit (IRLitInt 0L)  // unreachable: guarded by the `when` above
+            let bd = {
+                Id = binding.VarId
+                Name = binding.Name
+                Type = binding.Type
+                Value = IRLit IRLitUnit
+                IsConst = true
+                IsMutable = binding.IsMutable
+            }
+            bindings <- bindings @ [bd]
+            currentEnv <- bindTypedVar binding.Name binding.VarId currentEnv
+            currentEnv <- { currentEnv with RandomInits = Map.add binding.VarId (RandGen (kind, keyIR)) currentEnv.RandomInits }
         | TDeclLet binding when (match binding.Value.Kind with TExprCompound _ -> true | _ -> false) ->
             // Compound-construction constructor (`let B = compound(dense, mask)`):
             // the binding holds a CompoundIdx-typed compact array, materialized in

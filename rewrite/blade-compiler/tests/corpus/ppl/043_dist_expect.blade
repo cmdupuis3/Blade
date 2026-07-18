@@ -1,0 +1,16 @@
+// TEST: Dist Expect
+import ppl as ppl
+// The evidence/normalizer primitive: dist_expect(d, c0, ..., cq) is
+// E[c0 + c1 X + ... + cq X^q], a scalar built from the moments(d, k)
+// reconstruction. A = {0, 1, 2}: m1 = 1, m2 = 5/3, m4 = 17/3.
+type TimeIdx = Idx<3>
+let A: Array<Float64 like Idx<1>, TimeIdx> = [[0.0, 1.0, 2.0]]
+let d = ppl.dist(A, 4)
+let e_mean = ppl.dist_expect(d, 0.0, 1.0)
+let e_m2 = ppl.dist_expect(d, 0.0, 0.0, 1.0)
+let e_m4 = ppl.dist_expect(d, 0.0, 0.0, 0.0, 0.0, 1.0)
+let e_poly = ppl.dist_expect(d, 2.0, 3.0, 1.0)
+// EXPECT: e_mean = 1.0
+// EXPECT: e_m2 = 1.66666666666667
+// EXPECT: e_m4 = 5.66666666666667
+// EXPECT: e_poly = 6.66666666666667

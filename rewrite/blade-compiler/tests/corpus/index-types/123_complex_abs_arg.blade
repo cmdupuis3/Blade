@@ -1,0 +1,9 @@
+// TEST: Complex Abs Arg
+// abs(z) is the real magnitude (std::abs(complex)->double); arg(z) is the
+// phase angle. abs(complex(3,4)) = 5; arg(complex(1,1)) = pi/4.
+let z = complex(3.0, 4.0)
+let m = abs(z)
+let w = complex(1.0, 1.0)
+let a = arg(w)
+// EXPECT: m = 5
+// EXPECT: a = 0.7853981633974483

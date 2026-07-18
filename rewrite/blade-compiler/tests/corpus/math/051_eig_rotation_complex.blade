@@ -1,0 +1,9 @@
+// TEST: Math eig: rotation matrix, complex conjugate pair
+// A 2x2 rotation by theta = 0.3 has eigenvalues cos θ ± i·sin θ — the 2x2
+// extraction solves the quadratic exactly (no iteration at n = 2), so the
+// pins equal the matrix entries to the bit. Conjugate order: +im first.
+import math as m
+let A: Array<Float64 like Idx<2>, Idx<2>> = [[0.95533648912560598, -0.29552020666133955], [0.29552020666133955, 0.95533648912560598]]
+let (RE, IM) = m.eig(A)
+// EXPECT: RE = [0.95533648912560598, 0.95533648912560598]
+// EXPECT: IM = [0.29552020666133955, -0.29552020666133955]

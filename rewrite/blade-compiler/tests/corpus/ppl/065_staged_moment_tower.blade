@@ -1,0 +1,20 @@
+// TEST: Staged Moment Tower
+import ppl as ppl
+// The staged-tower capstone (Phase 1 scope): userland static recursion
+// reproduces the built-in `moments` former's own lowering. rep(X, k)
+// builds the arity-k array pack, `static method_for(rep(X, k))` splices it
+// into the k-ary co-iteration former, and a prodsum kernel folds the fibers
+// to the raw k-th moment Σ_t Π x(t) / N — pinned cell-for-cell against
+// ppl.moments(X, k) at k = 1 and k = 2. (The full tower/fuse program is the
+// staging arc's Phase 2, deliberately not attempted here.)
+static function rep(x, k) = if k == 1 then x else (x, rep(x, k - 1))
+type TimeIdx = Idx<6>
+let X: Array<Float64 like Idx<1>, TimeIdx> = [[1.0, 2.0, 4.0, 6.0, 0.0, 3.0]]
+let m1 = static method_for(rep(X, 1)) <@> lambda(a: Array<Float64 like TimeIdx>) -> prodsum(a) / 6.0 |> compute
+let m2 = static method_for(rep(X, 2)) <@> lambda(a: Array<Float64 like TimeIdx>, b: Array<Float64 like TimeIdx>) where comm(a, b) -> prodsum(a, b) / 6.0 |> compute
+let r1 = ppl.moments(X, 1)
+let r2 = ppl.moments(X, 2)
+// EXPECT: m1 = [2.66666666667]
+// EXPECT: m2 = [11.0]
+// EXPECT: r1 = [2.66666666667]
+// EXPECT: r2 = [11.0]

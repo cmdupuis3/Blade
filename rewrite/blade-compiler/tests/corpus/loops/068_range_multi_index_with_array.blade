@@ -1,0 +1,10 @@
+// TEST: Range Multi Index With Array
+// Multi-index range mixed with a real array, mirroring the single-index
+// 013_range_with_array.blade. Sources co-iterate as a PRODUCT, so the nest is
+// A (2) x I (2) x J (3) = 12 elements, and the kernel takes one param for the
+// real array plus one per range slot (a, i, j).
+let A: Array<Float64 like Idx<2>> = [1.0, 2.0]
+let L = method_for(A, range<Idx<2>, Idx<3>>)
+let f = lambda(a, i, j) -> a * 100.0 + i * 10 + j
+let result = L <@> f |> compute
+// EXPECT: result = [100, 101, 102, 110, 111, 112, 200, 201, 202, 210, 211, 212]

@@ -1,0 +1,149 @@
+// TEST: Physics -- The Top Wall Exists: I3322 and the Supra-Quantum Shell
+// ============================================================================
+// Examples 33 and 37 established the sandwich classical < quantum < tower
+// but could not EXHIBIT the top gap: for CHSH correlations the quantum
+// edge IS the cone edge (Tsirelson). The gap needs three settings per
+// side. This example works in the I3322 scenario (3x3 binary settings)
+// and pins all three strata in one place, constructively where the
+// language can certify and flagged where a value must be imported:
+//   * THE CLASSICAL WALL, CERTIFIED IN-LANGUAGE: the I3322 functional
+//     (Collins-Gisin form, converted to +-1 variables:
+//     I = -1 + (a1 + a2)/4 - (b1 + b2)/4 + [c11 + c12 + c13 + c21 + c22
+//     - c23 + c31 - c32]/4) is swept over ALL 64 deterministic
+//     strategies: max = 0, with exactly 20 strategies saturating --
+//     the local bound as an exhaustive computation, ex 33's hypercube
+//     sweep one scenario up.
+//   * A QUANTUM POINT, CONSTRUCTED: maximally entangled qubits with
+//     Bloch frames a_1 = (h, 1/2, 1/2), a_2 = (h, -1/2, -1/2),
+//     a_3 = (0, h, -h) and b_j the same with the last coordinate
+//     negated (h = 1/sqrt2) give correlations c_ij = a_i . b_j and zero
+//     marginals: I = (sqrt2 - 1)/2 = 0.20711. (Any 3D dot-product
+//     correlation with zero marginals is singlet-realizable: this point
+//     is quantum by construction.)
+//   * A TOWER POINT BEYOND EVERYTHING QUANTUM: tilt the same frames off
+//     the marginal axis -- seven explicit unit vectors in R^4
+//     (u; alpha_i = s e0 + rho a_i; beta_j = -s e0 + rho b_j with
+//     s = 1/4, rho = sqrt(15)/4; alpha_3, beta_3 purely transverse).
+//     Their Gram IS a legal degree-2 moment matrix (realization =
+//     certificate, unit norms pinned), i.e. a tower state; its I3322
+//     value, computed in-language from the dot products, is
+//     0.34090 -- past the QUANTUM SUPREMUM 0.2508754 (imported anchor:
+//     Pal-Vertesi 2010, infinite-dimensional optimum; the one number
+//     this file does not derive). The supra-quantum shell T \ Q is
+//     INHABITED, by an explicit object the Dist type would accept.
+//   * THE EXIT IS SHALLOW: along the tilt dial I(s) = -1 + s - s^2 +
+//     (1 - s^2)/2 + h sqrt(1 - s^2), the path leaves the quantum
+//     ceiling at s* ~ 0.048: a FIVE-PERCENT marginal tilt of a
+//     perfectly quantum correlation pattern already exceeds everything
+//     quantum mechanics can do in this scenario. The top wall is not
+//     far away in state space; it is a hair's breadth off the
+//     zero-marginal slice.
+//   * HONEST SCOPE: our tilt family is a level-1 ansatz, not the
+//     level-1 optimum (the true cone edge sits higher, ~0.366); and
+//     whether the quantum edge here shows ex 37's variance-death
+//     signature needs in-language SDP certificates -- the certificate
+//     machine is the named next build. What THIS file settles: the
+//     sandwich's top inclusion is strict, by construction, one
+//     imported constant away from fully self-contained.
+// ============================================================================
+
+// shared constants
+let h = 0.707106781186548
+let s = 0.25
+let r = sqrt(0.9375)
+
+// ---- the classical wall: all 64 deterministic strategies ----
+let SGN = [-1.0, 1.0]
+let POS = reduce(method_for(range<Idx<64>>) <@> lambda(g: Int64) -> (if 0.0 - 1.0 + (SGN(g % 2) + SGN((g / 2) % 2)) / 4.0 - (SGN((g / 8) % 2) + SGN((g / 16) % 2)) / 4.0 + (SGN(g % 2) * SGN((g / 8) % 2) + SGN(g % 2) * SGN((g / 16) % 2) + SGN(g % 2) * SGN(g / 32) + SGN((g / 2) % 2) * SGN((g / 8) % 2) + SGN((g / 2) % 2) * SGN((g / 16) % 2) - SGN((g / 2) % 2) * SGN(g / 32) + SGN((g / 4) % 2) * SGN((g / 8) % 2) - SGN((g / 4) % 2) * SGN((g / 16) % 2)) / 4.0 > 0.000000001 then 1.0 else 0.0), (+))
+let SAT = reduce(method_for(range<Idx<64>>) <@> lambda(g: Int64) -> (if sqrt((0.0 - 1.0 + (SGN(g % 2) + SGN((g / 2) % 2)) / 4.0 - (SGN((g / 8) % 2) + SGN((g / 16) % 2)) / 4.0 + (SGN(g % 2) * SGN((g / 8) % 2) + SGN(g % 2) * SGN((g / 16) % 2) + SGN(g % 2) * SGN(g / 32) + SGN((g / 2) % 2) * SGN((g / 8) % 2) + SGN((g / 2) % 2) * SGN((g / 16) % 2) - SGN((g / 2) % 2) * SGN(g / 32) + SGN((g / 4) % 2) * SGN((g / 8) % 2) - SGN((g / 4) % 2) * SGN((g / 16) % 2)) / 4.0) * (0.0 - 1.0 + (SGN(g % 2) + SGN((g / 2) % 2)) / 4.0 - (SGN((g / 8) % 2) + SGN((g / 16) % 2)) / 4.0 + (SGN(g % 2) * SGN((g / 8) % 2) + SGN(g % 2) * SGN((g / 16) % 2) + SGN(g % 2) * SGN(g / 32) + SGN((g / 2) % 2) * SGN((g / 8) % 2) + SGN((g / 2) % 2) * SGN((g / 16) % 2) - SGN((g / 2) % 2) * SGN(g / 32) + SGN((g / 4) % 2) * SGN((g / 8) % 2) - SGN((g / 4) % 2) * SGN((g / 16) % 2)) / 4.0)) < 0.000000001 then 1.0 else 0.0), (+))
+let local_V = if POS < 0.5 then "LOCAL_BOUND_ZERO_CERTIFIED" else "NO"
+
+// ---- the quantum point: singlet Bloch frames, zero marginals ----
+// a1 = (h, 1/2, 1/2), a2 = (h, -1/2, -1/2), a3 = (0, h, -h);
+// b_j = a_j with third coordinate negated
+let qc11 = h * h + 0.5 * 0.5 - 0.5 * 0.5
+let qc12 = h * h - 0.25 + 0.25
+let qc13 = 0.5 * h + 0.5 * h
+let qc21 = h * h - 0.25 + 0.25
+let qc22 = h * h + 0.25 - 0.25
+let qc23 = 0.0 - 0.5 * h - 0.5 * h
+let qc31 = h * 0.5 + h * 0.5
+let qc32 = 0.0 - h * 0.5 - h * 0.5
+let qval = 0.0 - 1.0 + (qc11 + qc12 + qc13 + qc21 + qc22 - qc23 + qc31 - qc32) / 4.0
+
+// ---- the tower point: seven explicit unit vectors in R^4 ----
+// u = e0; alpha_i = s e0 + r a_i; beta_j = -s e0 + r b_j (i, j = 1, 2);
+// alpha_3 = (0, a_3), beta_3 = (0, b_3)
+let a1x = s
+let a1p = r * h
+let a1q = r * 0.5
+let a1s = r * 0.5
+let a2x = s
+let a2p = r * h
+let a2q = 0.0 - r * 0.5
+let a2s = 0.0 - r * 0.5
+let a3q = h
+let a3s = 0.0 - h
+let b1x = 0.0 - s
+let b1p = r * h
+let b1q = r * 0.5
+let b1s = 0.0 - r * 0.5
+let b2x = 0.0 - s
+let b2p = r * h
+let b2q = 0.0 - r * 0.5
+let b2s = r * 0.5
+let b3q = h
+let b3s = h
+// unit norms (the PSD certificate is the realization itself)
+let n_a1 = a1x * a1x + a1p * a1p + a1q * a1q + a1s * a1s
+let n_a3 = a3q * a3q + a3s * a3s
+let n_b2 = b2x * b2x + b2p * b2p + b2q * b2q + b2s * b2s
+// marginals and correlations from the dot products
+let tm_a1 = a1x
+let tm_b1 = b1x
+let tc11 = a1x * b1x + a1p * b1p + a1q * b1q + a1s * b1s
+let tc12 = a1x * b2x + a1p * b2p + a1q * b2q + a1s * b2s
+let tc13 = a1q * b3q + a1s * b3s
+let tc21 = a2x * b1x + a2p * b1p + a2q * b1q + a2s * b1s
+let tc22 = a2x * b2x + a2p * b2p + a2q * b2q + a2s * b2s
+let tc23 = a2q * b3q + a2s * b3s
+let tc31 = a3q * b1q + a3s * b1s
+let tc32 = a3q * b2q + a3s * b2s
+let tval = 0.0 - 1.0 + (a1x + a2x) / 4.0 - (b1x + b2x) / 4.0 + (tc11 + tc12 + tc13 + tc21 + tc22 - tc23 + tc31 - tc32) / 4.0
+
+// ---- the imported anchor and the strata verdicts ----
+// quantum supremum for I3322: 0.2508754 (Pal-Vertesi 2010; the one
+// number this file does not derive)
+let q_sup = 0.2508754
+let strata_V = if qval > 0.0 then (if q_sup > qval then (if tval > q_sup then "STRICT_SANDWICH_EXHIBITED" else "NO") else "NO") else "NO"
+let gap = tval - q_sup
+
+// ---- the tilt dial: how far off the quantum slice is the wall? ----
+let SGRID = [0.0, 0.0482, 0.1, 0.18, 0.25]
+let IS = method_for(SGRID) <@> lambda(t) -> 0.0 - 1.0 + t - t * t + (1.0 - t * t) / 2.0 + 0.707106781186548 * sqrt(1.0 - t * t) |> compute
+let exit_V = if IS(0) < q_sup then (if IS(1) > q_sup then "QUANTUM_CEILING_EXITS_AT_5PC_TILT" else "NO") else "NO"
+let dial_match0 = sqrt((IS(0) - qval) * (IS(0) - qval))
+let dial_match4 = sqrt((IS(4) - tval) * (IS(4) - tval))
+
+// the classical wall by exhaustion; the quantum point by construction;
+// the tower point by realization; the strict sandwich; the shallow exit:
+// EXPECT: POS = 0
+// EXPECT: SAT = 20
+// EXPECT: local_V = "LOCAL_BOUND_ZERO_CERTIFIED"
+// EXPECT: qc13 = 0.707106781186548
+// EXPECT: qval = 0.207106781186549
+// EXPECT: n_a1 = 1.0
+// EXPECT: n_a3 = 1.0
+// EXPECT: n_b2 = 1.0
+// EXPECT: tm_a1 = 0.25
+// EXPECT: tm_b1 = -0.25
+// EXPECT: tc11 = 0.406250000000001
+// EXPECT: tc13 = 0.684653196881458
+// EXPECT: tval = 0.340903196881459
+// EXPECT: q_sup = 0.2508754
+// EXPECT: gap = 0.0900277968814588
+// EXPECT: strata_V = "STRICT_SANDWICH_EXHIBITED"
+// EXPECT: IS = [0.207106781186548, 0.251000054181239, 0.288562363973515, 0.326957330491168, 0.340903196881458]
+// EXPECT: exit_V = "QUANTUM_CEILING_EXITS_AT_5PC_TILT"
+// EXPECT: dial_match0 = 5.55111512312578e-16
+// EXPECT: dial_match4 = 7.7715611723761e-16

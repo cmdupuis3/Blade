@@ -1,0 +1,17 @@
+// TEST: Dist Map Vector
+import ppl as ppl
+// Vector symbolic jet: a TUPLE-valued lambda(x, y) -> (x + y, x·y) derives
+// one polynomial tower per output component (s inferred per component,
+// shorter towers zero-filled) and delegates to the vector dist_jet — the
+// derived coordinate-major D-slots reproduce ppl/058's hand-written
+// literals and the same dump-jet J5 joint cumulants.
+type TimeIdx = Idx<3>
+let B: Array<Float64 like Idx<2>, TimeIdx> = [[1.0, 2.0, 4.0], [3.0, 5.0, 4.0]]
+let db = ppl.dist(B, 6)
+let dy = ppl.dist_map(db, 3, lambda(x, y) -> (x + y, x * y))
+let y1 = ppl.cumulant(dy, 1)
+let y2 = ppl.cumulant(dy, 2)
+let y3 = ppl.cumulant(dy, 3)
+// EXPECT: y1 = [6.33333333333, 9.66666666667]
+// EXPECT: y2 = [2.88888888889, 8.77777777778, 28.2222222222]
+// EXPECT: y3 = [-2.59259259259, -6.18518518518, -12.2592592593, -14.074074074]

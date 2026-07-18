@@ -1,11 +1,11 @@
 // TEST: Complex Lit In Array
-// Array of Complex128 elements, each constructed via the literal form.
+// Array of Complex128 elements, each constructed via complex(re, im).
 // The array is rank-1 (Idx<3>) — Complex elements do NOT add a phantom
 // dimension. Runtime layout is std::complex<double>[3] = 3 elements,
 // each storing a (real, imag) pair internally; the array's rank stays 1.
 let arr: Array<Complex128 like Idx<3>> = [
-    (1.0, 0.0) : Complex128,
-    (0.0, 1.0) : Complex128,
-    (1.0, 1.0) : Complex128
+    complex(1.0, 0.0),
+    complex(0.0, 1.0),
+    complex(1.0, 1.0)
 ]
 // EXPECT: arr = [(1, 0), (0, 1), (1, 1)]

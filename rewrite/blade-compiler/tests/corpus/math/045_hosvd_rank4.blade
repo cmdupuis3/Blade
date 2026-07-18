@@ -1,0 +1,68 @@
+// TEST: Math hosvd: rank-4 full pipeline
+// The rank-generic generators at N = 4: 5-tuple return (core + 4 factors),
+// Frobenius-norm invariance (Σ G² = Σ X² = Σ_{0..15} v² = 1240), factor
+// orthogonality on every mode, and full reconstruction — all in one
+// program (also the compile-budget canary for the deepest nests).
+import math as m
+let X: Array<Float64 like Idx<2>, Idx<2>, Idx<2>, Idx<2>> = [[[[0.0, 1.0], [2.0, 3.0]], [[4.0, 5.0], [6.0, 7.0]]], [[[8.0, 9.0], [10.0, 11.0]], [[12.0, 13.0], [14.0, 15.0]]]]
+let (G, U0, U1, U2, U3) = m.hosvd(X)
+let normdev = {
+    let mut sg = 0.0
+    let mut sx = 0.0
+    for a in 0..2 {
+        for b in 0..2 {
+            for c in 0..2 {
+                for d in 0..2 {
+                    sg = sg + G(a, b, c, d) * G(a, b, c, d)
+                    sx = sx + X(a, b, c, d) * X(a, b, c, d)
+                }
+            }
+        }
+    }
+    let dd = sg - sx
+    dd * dd
+}
+let odev = {
+    let mut acc = 0.0
+    let mut dot = 0.0
+    for a in 0..2 {
+        for b in 0..2 {
+            dot = 0.0
+            for i in 0..2 {
+                dot = dot + U0(i, a) * U0(i, b) + U1(i, a) * U1(i, b) + U2(i, a) * U2(i, b) + U3(i, a) * U3(i, b)
+            }
+            let target = if a == b then 4.0 else 0.0
+            let d = dot - target
+            acc = acc + d * d
+        }
+    }
+    acc
+}
+let resid = {
+    let mut acc = 0.0
+    let mut rc = 0.0
+    for i in 0..2 {
+        for j in 0..2 {
+            for k in 0..2 {
+                for l in 0..2 {
+                    rc = 0.0
+                    for a in 0..2 {
+                        for b in 0..2 {
+                            for c in 0..2 {
+                                for d in 0..2 {
+                                    rc = rc + G(a, b, c, d) * U0(i, a) * U1(j, b) * U2(k, c) * U3(l, d)
+                                }
+                            }
+                        }
+                    }
+                    let dd = rc - X(i, j, k, l)
+                    acc = acc + dd * dd
+                }
+            }
+        }
+    }
+    acc
+}
+// EXPECT: normdev = 0.0
+// EXPECT: odev = 0.0
+// EXPECT: resid = 0.0

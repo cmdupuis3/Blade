@@ -1,0 +1,137 @@
+// TEST: Physics -- The Wall from Inside: a Quantum Family Crosses the Boundary
+// ============================================================================
+// Examples 33-36 mapped the walls from the classical side. This example
+// walks a genuine QUANTUM family through them and asks the question the
+// map cannot answer from outside: approaching the edge from inside the
+// quantum system, is there a discontinuity -- and of what kind?
+// The dial: a Werner state rho(v) = v |Bell><Bell| + (1 - v) I/4 with the
+// optimal CHSH settings; visibility v runs 0.2 -> 1. Everything below is
+// closed-form scalar physics of that family: behavior correlations
+// c(v) = v/sqrt2 (symmetric CHSH family), <B> = 2 sqrt2 v,
+// <B^2> = 4 + 4v (the commutator term contributes 4v), the quantum
+// variance Var_q(B) = 4 + 4v - 8v^2, entanglement (concurrence
+// max(0, (3v-1)/2)), and -- the underneath view -- the MINIMAL-NEGATIVITY
+// depth-4 extension of the behavior, in closed form: the Fourier ansatz
+// with free coefficients zero has cells (1 +- 2c)/16, achieves the LP
+// bound N(s) = max(0, (s-2)/4) (dual: s <= 2(1 + 2N)), and its smallest
+// cell (1 - 2c)/16 crosses zero EXACTLY at the classical wall.
+// FINDINGS (pinned):
+//   * NO DISCONTINUITY EXISTS. Every continuous meter is smooth through
+//     the classical wall v* = 1/sqrt2: the behavior tower is analytic in
+//     v; the required-classical variance 4 - 8v^2 crosses zero
+//     TRANSVERSALLY; the extension does not cease to exist -- its
+//     smallest cell passes through zero and continues NEGATIVE (a signed
+//     quasi-distribution), with negativity onset N ~ (sqrt2/2)(v - v*):
+//     a SECOND-ORDER transition (continuous, derivative kink), not a
+//     jump. The only discontinuous objects are binary verdicts
+//     ("extendable?", "local?") -- the discontinuity lives in the
+//     questions, not the physics.
+//   * QUANTUMNESS HAS NO THRESHOLD; VISIBILITY DOES. The hypercube
+//     identity E[B^2] = 4 is violated by the commutator excess
+//     <B^2> - 4 = 4v at EVERY v > 0 -- deep inside the "classical"
+//     region included. The wall at v* is not where quantumness turns
+//     on; it is where variance positivity stops being able to hide an
+//     excess that was always there: |<B>| crosses 2 exactly when the
+//     extension's negativity leaves zero (both at v*, pinned equal).
+//   * BOTH WALLS CARRY THE SAME INSIDE SIGNATURE: EXTREMALITY = ZERO
+//     VARIANCE. The classical set meets its wall in deterministic
+//     points (Var = 0 at s = 2, ex 33); the quantum family meets ITS
+//     outer edge the same way -- Var_q(B) = 4 + 4v - 8v^2 hits zero at
+//     v = 1: the maximally violating state is a B-eigenstate. Walls in
+//     this regime are positivity boundaries, and positivity boundaries
+//     are approached as some smooth variance's transversal zero -- from
+//     either side.
+//   * WHERE THE TOP WALL ISN'T: the TLM/Tsirelson cone-edge criterion
+//     4 asin(v/sqrt2) - pi (arcsine by in-language Newton) reaches zero
+//     exactly at v = 1: for CHSH correlations the quantum edge and the
+//     tower-cone edge COINCIDE (Tsirelson's theorem) -- the strict
+//     Q-vs-cone gap needs richer scenarios (three settings, marginals:
+//     the I3322 expedition, named as the next cast).
+//   * THREE BOUNDARIES, THREE PLACES: separability ends at v = 1/3
+//     (concurrence kink), the local model at v* = 0.7071 (negativity
+//     onset), the cone at v = 1 (eigenstate) -- the quantum system's
+//     own structural transitions do NOT align with the behavioral wall:
+//     "how entangled" and "how nonlocal" are different dials, and the
+//     tower only ever sees the second.
+// ============================================================================
+
+// the visibility grid: below separability, at separability, mid, at the
+// classical wall, in the violating shell, at the Tsirelson point
+let VG = [0.2, 0.333333333333333, 0.5, 0.707106781186548, 0.85, 1.0]
+
+// behavior and operator meters along the family
+let CHSH = method_for(VG) <@> lambda(v) -> 2.82842712474619 * v |> compute
+let VARC = method_for(VG) <@> lambda(v) -> 4.0 - 8.0 * v * v |> compute
+let EXC = method_for(VG) <@> lambda(v) -> 4.0 * v |> compute
+let VARQ = method_for(VG) <@> lambda(v) -> 4.0 + 4.0 * v - 8.0 * v * v |> compute
+let CONC = method_for(VG) <@> lambda(v) -> (if 3.0 * v > 1.0 then (3.0 * v - 1.0) / 2.0 else 0.0) |> compute
+
+// the minimal extension underneath: smallest cell and L1 negativity
+let MC = method_for(VG) <@> lambda(v) -> (1.0 - 2.0 * v * 0.707106781186548) / 16.0 |> compute
+let NEG = method_for(VG) <@> lambda(v) -> (if 2.82842712474619 * v > 2.0 then (2.82842712474619 * v - 2.0) / 4.0 else 0.0) |> compute
+
+// the same negativity measured cell-by-cell over the hypercube (the
+// ex-33 idiom), one exact 16-cell sweep per dial value
+let SGN = [-1.0, 1.0]
+let ng1 = reduce(method_for(range<Idx<16>>) <@> lambda(g: Int64) -> (if (1.0 + 0.141421356237310 * (SGN(g % 2) * SGN((g / 4) % 2) + SGN(g % 2) * SGN(g / 8) + SGN((g / 2) % 2) * SGN((g / 4) % 2) - SGN((g / 2) % 2) * SGN(g / 8))) / 16.0 < 0.0 then 1.0 else 0.0), (+))
+let ng4 = reduce(method_for(range<Idx<16>>) <@> lambda(g: Int64) -> (if (1.0 + 0.5 * (SGN(g % 2) * SGN((g / 4) % 2) + SGN(g % 2) * SGN(g / 8) + SGN((g / 2) % 2) * SGN((g / 4) % 2) - SGN((g / 2) % 2) * SGN(g / 8))) / 16.0 < 0.0 then 1.0 else 0.0), (+))
+let ng5 = reduce(method_for(range<Idx<16>>) <@> lambda(g: Int64) -> (if (1.0 + 0.601040764008567 * (SGN(g % 2) * SGN((g / 4) % 2) + SGN(g % 2) * SGN(g / 8) + SGN((g / 2) % 2) * SGN((g / 4) % 2) - SGN((g / 2) % 2) * SGN(g / 8))) / 16.0 < 0.0 then 1.0 else 0.0), (+))
+let ng6 = reduce(method_for(range<Idx<16>>) <@> lambda(g: Int64) -> (if (1.0 + 0.707106781186548 * (SGN(g % 2) * SGN((g / 4) % 2) + SGN(g % 2) * SGN(g / 8) + SGN((g / 2) % 2) * SGN((g / 4) % 2) - SGN((g / 2) % 2) * SGN(g / 8))) / 16.0 < 0.0 then 1.0 else 0.0), (+))
+
+// the cone-edge criterion: TLM(v) = 4 asin(v/sqrt2) - pi, arcsine by
+// Newton on sin (five unrolled steps, ex-18 idiom)
+let AX = method_for(VG) <@> lambda(v) -> v * 0.707106781186548 |> compute
+let AT0 = method_for(AX) <@> lambda(x) -> x + x * x * x / 6.0 |> compute
+let AT1 = method_for(zip(AT0, AX)) <@> lambda(t, x) -> t + (x - sin(t)) / cos(t) |> compute
+let AT2 = method_for(zip(AT1, AX)) <@> lambda(t, x) -> t + (x - sin(t)) / cos(t) |> compute
+let AT3 = method_for(zip(AT2, AX)) <@> lambda(t, x) -> t + (x - sin(t)) / cos(t) |> compute
+let AT4 = method_for(zip(AT3, AX)) <@> lambda(t, x) -> t + (x - sin(t)) / cos(t) |> compute
+let TLM = method_for(AT4) <@> lambda(t) -> 4.0 * t - 3.14159265358979 |> compute
+
+// ---- the meters at the marked dial points ----
+let chsh_star = CHSH(3)
+let varc_star = VARC(3)
+let mc_star = MC(3)
+let neg_shell = NEG(4)
+let onset_slope = NEG(4) / (0.85 - 0.707106781186548)
+let excess_deep = EXC(0)
+let varq_edge = VARQ(5)
+let tlm_edge = TLM(5)
+let conc_kink = CONC(1)
+
+// ---- verdicts ----
+let coincide_V = if sqrt(varc_star * varc_star) < 0.0000000001 then (if sqrt(mc_star * mc_star) < 0.0000000001 then "WALLS_COINCIDE_AT_VSTAR" else "NO") else "NO"
+let onset_V = if sqrt((onset_slope - 0.707106781186548) * (onset_slope - 0.707106781186548)) < 0.0000000001 then "SECOND_ORDER_ONSET" else "NO"
+let nojump_V = if ng4 < 0.5 then (if ng5 > 7.5 then (if ng5 < 8.5 then "CELLS_CROSS_ZERO_SMOOTHLY" else "NO") else "NO") else "NO"
+let excess_V = if excess_deep > 0.5 then "COMMUTATOR_EXCESS_HAS_NO_THRESHOLD" else "NO"
+let eigen_V = if sqrt(varq_edge * varq_edge) < 0.0000000001 then "EDGE_IS_AN_EIGENSTATE" else "NO"
+let cone_V = if sqrt(tlm_edge * tlm_edge) < 0.0000000001 then "QUANTUM_EDGE_MEETS_CONE_EDGE" else "NO"
+let misalign_V = if conc_kink < 0.0000000001 then (if CONC(2) > 0.2 then "RESOURCE_AND_BEHAVIOR_WALLS_MISALIGNED" else "NO") else "NO"
+
+// EXPECT: CHSH = [0.565685424949238, 0.942809041582062, 1.41421356237309, 2.0, 2.40416305603426, 2.82842712474619]
+// EXPECT: VARC = [3.68, 3.11111111111111, 2.0, -5.32907051820075e-15, -1.78, -4.0]
+// EXPECT: EXC = [0.8, 1.33333333333333, 2.0, 2.82842712474619, 3.4, 4.0]
+// EXPECT: VARQ = [4.48, 4.44444444444444, 4.0, 2.82842712474619, 1.62, 0.0]
+// EXPECT: CONC = [0.0, 0.0, 0.25, 0.560660171779822, 0.775, 1.0]
+// EXPECT: MC = [0.0448223304703363, 0.0330372174505605, 0.0183058261758407, -8.32667268468867e-17, -0.0126300955010707, -0.0258883476483185]
+// EXPECT: NEG = [0.0, 0.0, 0.0, 3.33066907387547e-16, 0.101040764008565, 0.207106781186547]
+// EXPECT: ng1 = 0
+// EXPECT: ng4 = 0
+// EXPECT: ng5 = 8
+// EXPECT: ng6 = 8
+// EXPECT: chsh_star = 2.0
+// EXPECT: varc_star = -5.32907051820075e-15
+// EXPECT: mc_star = -8.32667268468867e-17
+// EXPECT: neg_shell = 0.101040764008565
+// EXPECT: onset_slope = 0.70710678118655
+// EXPECT: excess_deep = 0.8
+// EXPECT: varq_edge = 0.0
+// EXPECT: tlm_edge = 5.77315972805081e-15
+// EXPECT: conc_kink = 0.0
+// EXPECT: coincide_V = "WALLS_COINCIDE_AT_VSTAR"
+// EXPECT: onset_V = "SECOND_ORDER_ONSET"
+// EXPECT: nojump_V = "CELLS_CROSS_ZERO_SMOOTHLY"
+// EXPECT: excess_V = "COMMUTATOR_EXCESS_HAS_NO_THRESHOLD"
+// EXPECT: eigen_V = "EDGE_IS_AN_EIGENSTATE"
+// EXPECT: cone_V = "QUANTUM_EDGE_MEETS_CONE_EDGE"
+// EXPECT: misalign_V = "RESOURCE_AND_BEHAVIOR_WALLS_MISALIGNED"

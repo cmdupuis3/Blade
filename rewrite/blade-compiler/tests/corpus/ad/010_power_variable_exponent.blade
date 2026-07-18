@@ -1,0 +1,21 @@
+// TEST: AD Power Variable Exponent
+import ad as ad
+// ============================================================================
+// An ACTIVE exponent picks up the second term of the rule:
+//   d(b^e) = e*b^(e-1) db + b^e*log(b) de
+// p(x, y) = x^y at (2, 3) -> 8
+//   dp/dx = 3*2^2   = 12
+//   dp/dy = 8*ln(2) = 5.545177444479562
+// ============================================================================
+function p(x: Float, y: Float) -> Float = x ^ y
+let (pv, dpdx, dpdy) = ad.grad(p)(2.0, 3.0)
+// EXPECT: pv = 8.0
+// EXPECT: dpdx = 12.0
+// EXPECT: dpdy = 5.545177444479562
+
+// The log term must NOT appear when the exponent is inactive: q's second
+// param is Int, so only dq/dx exists and a negative base stays finite.
+function q(x: Float, k: Int) -> Float = x ^ k
+let (qv, dqdx) = ad.grad(q)(0.0 - 2.0, 3)
+// EXPECT: qv = -8.0
+// EXPECT: dqdx = 12.0

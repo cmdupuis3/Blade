@@ -1,0 +1,19 @@
+// TEST: Math eigh vs svd: cross-op differential
+// Needs no oracle: the eigenvalues of G = MᵀM are exactly the squared
+// singular values of M. Also exercises op COMPOSITION through annotated
+// module-level intermediates (MT = transpose copy, G = matmul result).
+import math as m
+let M: Array<Float64 like Idx<4>, Idx<3>> = [[1.0, 2.0, 3.0], [4.0, 5.0, 6.0], [7.0, 8.0, 10.0], [2.0, 1.0, 0.0]]
+let MT: Array<Float64 like Idx<3>, Idx<4>> = transpose(M, [0, 1])
+let G: Array<Float64 like Idx<3>, Idx<3>> = m.matmul(MT, M)
+let (U, S, V) = m.svd(M)
+let (Q, LAM) = m.eigh(G)
+let dev = {
+    let mut acc = 0.0
+    for k in 0..3 {
+        let d = LAM(k) - S(k) * S(k)
+        acc = acc + d * d
+    }
+    acc
+}
+// EXPECT: dev = 0.0

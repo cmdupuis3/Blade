@@ -1,0 +1,12 @@
+// TEST: FA T13: Partial application of named function
+// ----------------------------------------------------------------------------
+// Prefix partial application (formalism §6.2.3): applying a 2-ary function to
+// one arg yields the residual Float -> Float of the remaining parameter —
+// the function-side mirror of array dimensional currying.
+// ----------------------------------------------------------------------------
+function scale_add(a, b) = a * 10.0 + b
+let f = scale_add(2.0)
+let r1 = f(5.0)
+let r2 = f(0.5)
+// EXPECT: r1 = 25
+// EXPECT: r2 = 20.5

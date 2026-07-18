@@ -1,0 +1,131 @@
+// TEST: Physics -- The Tower That Cannot Be Deepened: Quantum as Truncation
+// ============================================================================
+// Every tower in this arc so far was backed by an ensemble -- realized, and
+// therefore extendable to every moment order. This example builds, as a
+// plain degree-2 moment object, a tower that is REALIZABLE AT DEPTH 2 AND
+// PROVABLY HAS NO DEPTH-4 EXTENSION -- and shows that the classical CHSH
+// bound, the Tsirelson bound, and the quantum state space are all read off
+// one variance.
+// The object: four +-1-bounded values a0, a1, b0, b1 with means 0, unit
+// second moments, and correlations E[a_i b_j] = (q, q, q, -q), q = 1/sqrt2;
+// E[a0 a1] = E[b0 b1] = 0. This is exactly what a packed Dist<2,.> literal
+// carries. FINDINGS (pinned):
+//   * DEPTH-2 REALIZABLE, EXTREMALLY: an explicit rank-2 Euclidean
+//     realization (a0 = e1, a1 = e2, b0 = (e1+e2)/sqrt2, b1 = (e1-e2)/sqrt2)
+//     reproduces every cell exactly -- the moment matrix is PSD with rank
+//     2: a boundary (extreme) point of the degree-2 cone. The CHSH
+//     functional of the tower is 4q = 2 sqrt 2 = 2.8284...
+//   * THE HYPERCUBE IDENTITY: over all 16 sign assignments, the CHSH
+//     observable B = a0 b0 + a0 b1 + a1 b0 - a1 b1 satisfies B^2 = 4
+//     IDENTICALLY (pinned: min = max = 4 over the full cube; the six
+//     degree-4 cross terms cancel pairwise). Hence EVERY distribution on
+//     the cube -- i.e. every extendable tower -- has E[B^2] = 4, no
+//     matter what its degree-4 cells are.
+//   * THE OBSTRUCTION IS A NEGATIVE VARIANCE: any depth-4 extension of
+//     our tower must assign Var(B) = E[B^2] - E[B]^2 = 4 - 8 = -4 < 0.
+//     No PSD tower does that: the Tsirelson tower is a legal degree-2
+//     state with NO underlying joint distribution -- a quantum-shaped
+//     object living entirely in truncation. (Blade's realizability
+//     guards at degree 2 accept it; what rejects it is extension --
+//     "extendable" is a refinement type, and this is the value that
+//     separates the two.)
+//   * BOTH WALLS FROM ONE VARIANCE: for a symmetric tower with CHSH
+//     value s, extension demands Var(B) = 4 - s^2 >= 0, i.e. |s| <= 2:
+//     THE CLASSICAL BOUND IS VARIANCE POSITIVITY (at s = 2 exactly,
+//     Var = 0 -- the deterministic local strategies, matching ex 23's
+//     classical CHSH = 2 exact). And with noncommuting values,
+//     B^2 = 4 + K where K = -[a0,a1][b0,b1] is bounded by 4: variance
+//     positivity then gives |s| <= sqrt 8 = 2 sqrt 2 -- THE TSIRELSON
+//     BOUND FROM THE SAME INEQUALITY, with the commutator switched on.
+//     At maximal violation Var_q(B) = 8 - 8 = 0: the quantum state is a
+//     B-eigenstate. The arc's "missing phases" now have an exact
+//     algebraic address: the commutator term K, identically zero in
+//     every classical (commuting) world.
+//   * THE GAP ZONE IS TWO-SIDED: at s = 2.4 an explicit rank-4
+//     realization certifies degree-2 realizability (pinned cell match)
+//     while Var(B) = 4 - 5.76 = -1.76 < 0 kills extension: the stratum
+//     2 < s <= 2 sqrt 2 is exactly "deep-2 legal, depth-4 impossible" --
+//     the supra-classical shell mapped from inside the type.
+// No data, no generator: the tower is a literal, the certificates are
+// scalar arithmetic, the hypercube identity is a 16-point exact ensemble.
+// ============================================================================
+
+// ---- the tower (degree-2 cells; q = 1/sqrt2 exact) ----
+let q = sqrt(0.5)
+let c_a0b0 = q
+let c_a0b1 = q
+let c_a1b0 = q
+let c_a1b1 = 0.0 - q
+let c_a0a1 = 0.0
+let c_b0b1 = 0.0
+let chsh = c_a0b0 + c_a0b1 + c_a1b0 - c_a1b1
+
+// ---- constructive depth-2 certificate: rank-2 realization ----
+// a0 = (1,0), a1 = (0,1), b0 = (q,q), b1 = (q,-q)
+let n_a0 = 1.0 * 1.0 + 0.0 * 0.0
+let n_a1 = 0.0 * 0.0 + 1.0 * 1.0
+let n_b0 = q * q + q * q
+let n_b1 = q * q + q * q
+let g_a0b0 = 1.0 * q + 0.0 * q
+let g_a0b1 = 1.0 * q + 0.0 * (0.0 - q)
+let g_a1b0 = 0.0 * q + 1.0 * q
+let g_a1b1 = 0.0 * q + 1.0 * (0.0 - q)
+let g_a0a1 = 1.0 * 0.0 + 0.0 * 1.0
+let g_b0b1 = q * q + q * (0.0 - q)
+let cert2 = sqrt((g_a0b0 - c_a0b0) * (g_a0b0 - c_a0b0)) + sqrt((g_a0b1 - c_a0b1) * (g_a0b1 - c_a0b1)) + sqrt((g_a1b0 - c_a1b0) * (g_a1b0 - c_a1b0)) + sqrt((g_a1b1 - c_a1b1) * (g_a1b1 - c_a1b1)) + sqrt((g_a0a1 - c_a0a1) * (g_a0a1 - c_a0a1)) + sqrt((g_b0b1 - c_b0b1) * (g_b0b1 - c_b0b1)) + sqrt((n_a0 - 1.0) * (n_a0 - 1.0)) + sqrt((n_a1 - 1.0) * (n_a1 - 1.0)) + sqrt((n_b0 - 1.0) * (n_b0 - 1.0)) + sqrt((n_b1 - 1.0) * (n_b1 - 1.0))
+let depth2_V = if cert2 < 0.000000000001 then "DEGREE2_REALIZABLE_RANK2" else "CELLS_MISMATCH"
+
+// ---- the hypercube identity: B^2 = 4 on all 16 sign assignments ----
+let SGN = [-1.0, 1.0]
+let BSQ = method_for(range<Idx<16>>) <@> lambda(g: Int64) -> (SGN(g % 2) * SGN((g / 4) % 2) + SGN(g % 2) * SGN(g / 8) + SGN((g / 2) % 2) * SGN((g / 4) % 2) - SGN((g / 2) % 2) * SGN(g / 8)) * (SGN(g % 2) * SGN((g / 4) % 2) + SGN(g % 2) * SGN(g / 8) + SGN((g / 2) % 2) * SGN((g / 4) % 2) - SGN((g / 2) % 2) * SGN(g / 8)) |> compute
+let bsq_sum = reduce(method_for(BSQ) <@> lambda(x) -> x, (+))
+let bsq_dev = reduce(method_for(BSQ) <@> lambda(x) -> sqrt((x - 4.0) * (x - 4.0)), (+))
+let cube_V = if bsq_dev < 0.000000000001 then "IDENTITY_ON_THE_HYPERCUBE" else "NOT_AN_IDENTITY"
+
+// ---- the obstruction: any extension must give Var(B) = 4 - chsh^2 ----
+let var_needed = 4.0 - chsh * chsh
+let ext_V = if var_needed < 0.0 then "EXTENSION_NEEDS_NEGATIVE_VARIANCE" else "EXTENDABLE_MAYBE"
+
+// ---- both walls from one variance ----
+let var_at_1 = 4.0 - 1.0
+let var_at_2 = 4.0 - 4.0
+let var_at_24 = 4.0 - 2.4 * 2.4
+let wall_V = if var_at_2 < 0.000000000001 then (if var_at_2 > 0.0 - 0.000000000001 then "CLASSICAL_BOUND_IS_VARIANCE_POSITIVITY" else "NO") else "NO"
+// quantum rescue: B^2 = 4 + K, |K| <= 4 => |s| <= sqrt 8; at the top the
+// state is a B-eigenstate (variance exactly zero)
+let tsirelson = sqrt(8.0)
+let var_q_at_max = 4.0 + 4.0 - tsirelson * tsirelson
+let rescue_V = if sqrt((tsirelson - chsh) * (tsirelson - chsh)) < 0.000000000001 then "PHASES_RESCUE_THE_VARIANCE" else "NO"
+
+// ---- the gap zone at s = 2.4: rank-4 realization vs no extension ----
+// a0 = e1, a1 = e2, b0 = (t, t, p, 0), b1 = (t, -t, 0, p), t = s/4,
+// p = sqrt(1 - s^2/8)
+let t = 2.4 / 4.0
+let p = sqrt(1.0 - 2.4 * 2.4 / 8.0)
+let z_b0 = t * t + t * t + p * p
+let z_b1 = t * t + t * t + p * p
+let z_b0b1 = t * t - t * t + 0.0 + 0.0
+let z_a0b0 = t
+let z_a1b1 = 0.0 - t
+let gap_cert = sqrt((z_b0 - 1.0) * (z_b0 - 1.0)) + sqrt((z_b1 - 1.0) * (z_b1 - 1.0)) + sqrt(z_b0b1 * z_b0b1) + sqrt((z_a0b0 - 0.6) * (z_a0b0 - 0.6)) + sqrt((z_a1b1 + 0.6) * (z_a1b1 + 0.6))
+let gap2_V = if gap_cert < 0.000000000001 then "GAP_ZONE_DEGREE2_REALIZABLE" else "NO"
+let gap4_V = if var_at_24 < 0.0 then "GAP_ZONE_NOT_EXTENDABLE" else "NO"
+
+// depth-2 legal, depth-4 impossible; both bounds from Var(B) >= 0:
+// EXPECT: chsh = 2.82842712474619
+// EXPECT: cert2 = 0
+// EXPECT: depth2_V = "DEGREE2_REALIZABLE_RANK2"
+// EXPECT: bsq_sum = 64
+// EXPECT: bsq_dev = 0
+// EXPECT: cube_V = "IDENTITY_ON_THE_HYPERCUBE"
+// EXPECT: var_needed = -4
+// EXPECT: ext_V = "EXTENSION_NEEDS_NEGATIVE_VARIANCE"
+// EXPECT: var_at_2 = 0
+// EXPECT: var_at_24 = -1.76
+// EXPECT: wall_V = "CLASSICAL_BOUND_IS_VARIANCE_POSITIVITY"
+// EXPECT: tsirelson = 2.82842712474619
+// EXPECT: var_q_at_max = 0
+// EXPECT: rescue_V = "PHASES_RESCUE_THE_VARIANCE"
+// EXPECT: gap_cert = 0
+// EXPECT: gap2_V = "GAP_ZONE_DEGREE2_REALIZABLE"
+// EXPECT: gap4_V = "GAP_ZONE_NOT_EXTENDABLE"

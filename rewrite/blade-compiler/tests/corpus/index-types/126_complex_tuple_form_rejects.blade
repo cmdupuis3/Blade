@@ -1,0 +1,7 @@
+// TEST: Complex Tuple Form Retired (rejects)
+// The historical 2-tuple complex-literal cast `(re, im) : Complex128` is
+// retired in favor of the complex(re, im) constructor call (the cast form
+// had a precedence trap: `a * (re, im) : T` bound the cast OUTSIDE the
+// multiply and the bare tuple operand miscompiled). The old form now gets
+// a steering error from checkExpr, not a silent reinterpretation.
+let x = (1.0, 2.0) : Complex128

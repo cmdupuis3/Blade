@@ -1,0 +1,185 @@
+// TEST: Physics -- The Calibration Ladder: a Classical Uncertainty Floor
+// ============================================================================
+// The observer joins the world (the arc's gap #3): every mass is measured by
+// colliding a calibrated probe into it, every probe was itself calibrated by
+// an earlier collision, and the whole pedigree floats on one exact anchor.
+// This example derives and MEASURES the metrology law of that world.
+// Protocol per rung: reference mass p (estimate in hand) is fired at u = 1
+// into the next, unknown mass m; the observer reads the transmitted velocity
+// v = 2p/(p+m) through an instrument with ABSOLUTE resolution sigma (3-point
+// jet, sigma = 0.002) and inverts: m_hat = p_hat (2 - v_hat)/v_hat. The
+// estimate is a PRODUCT of noisy factors, so relative variances ADD along
+// the ladder -- the pedigree is a random walk in log-mass. Per-rung cost:
+// d(ln m)/dv = -2/((2-v)v) = -g(rho)/1, g(rho) = (1+rho)^2 / (2 rho) for a
+// step ratio rho: extreme steps are insensitive (v -> 0), tiny steps waste
+// collisions. FINDINGS (pinned):
+//   * ADDITIVITY, MEASURED: a rho = 4, K = 6 ladder (M = 4096) over the
+//     full 3^6 noise grid gives relative variance within 0.03% of the
+//     linearized law K g^2 (2 sigma^2/3) -- log-additive pedigree.
+//   * THE LADDER LAW: at fixed collision budget N, spreading N over K
+//     rungs of ratio rho costs  r = (2 sigma^2/3) K^2 g(rho)^2 / N  with
+//     K = ln M / ln rho: the cost of weighing M from the anchor scales as
+//     ln^2 M, with a UNIVERSAL optimal step minimizing g(rho)^2/ln^2 rho:
+//     rho* = 4.68 (h(rho) = g/ln rho stationary), A* = h(rho*)^2 = 4.98.
+//     The measured sweep (rho = 4, 8, 16, 64 ladders to M = 4096, fixed
+//     N = 12) confirms the valley: the rho = 4 ladder beats 8/16/64 and
+//     the analytic single-jump by 1.2e4 -- and the simulation itself
+//     BREAKS at rho = 4096 (signal v = 4.9e-4 below the resolution
+//     2e-3: the readout returns negative masses -- the catastrophe is
+//     not a big variance, it is no measurement at all).
+//   * THE PEDIGREE FLOOR: averaging repeated reads with the SAME probe
+//     shrinks only the instrument part; the probe's own mass fuzz is a
+//     SYSTEMATIC that no repetition of this experiment removes. Measured:
+//     within-probe variance falls 3.00x with 3 reads while the between-
+//     probe (pedigree) component stays put -- var(mean) -> floor. The
+//     floor is set by the calibration CHAIN, not the apparatus: the
+//     classical, resource-shaped shadow of a quantum limit (WAY-flavored:
+//     there the conserved-charge floor is ħ-priced and irreducible; here
+//     it is priced in anchor pedigree and collisions, and vanishes only
+//     as the whole CHAIN is refined -- you can always buy more looks,
+//     but every look is through the same inherited fuzz).
+//   * CONVEXITY BIAS, free extra: reading through noise systematically
+//     overweighs (E[1/v_hat] > 1/v): the K = 6 ladder's mean estimate
+//     sits +1.25e-4 above truth -- a lawful epistemic bias with the same
+//     jet origin as example 20's contact-plane shift. And the floor
+//     decomposition is EXACT: the within-probe part shrinks by
+//     0.3333333333 with three reads -- the multiplicative pedigree makes
+//     between/within variance splitting exact, not approximate.
+// Everything below is in-language: noise ensembles are exact 3^K digit
+// grids (range + integer index algebra), rung formulas are staged columns,
+// verdicts are tower arithmetic. No external data, no generator.
+// ============================================================================
+
+// noise tables (absolute velocity resolution; probe mass fuzz for D2)
+let NTAB = [-0.002, 0.0, 0.002]
+let PTAB = [-0.005, 0.0, 0.005]
+
+// ---- D1: the rho = 4, K = 6 ladder over the full 3^6 grid ----
+// true rung velocity v = 2/(1+rho) = 0.4; per-rung ratio F/rho with
+// F = (2 - v_hat)/v_hat
+let AF1 = method_for(range<Idx<729>>) <@> lambda(r: Int64) -> (2.0 - (0.4 + NTAB(r % 3))) / (0.4 + NTAB(r % 3)) / 4.0 |> compute
+let AF2 = method_for(range<Idx<729>>) <@> lambda(r: Int64) -> (2.0 - (0.4 + NTAB((r / 3) % 3))) / (0.4 + NTAB((r / 3) % 3)) / 4.0 |> compute
+let AF3 = method_for(range<Idx<729>>) <@> lambda(r: Int64) -> (2.0 - (0.4 + NTAB((r / 9) % 3))) / (0.4 + NTAB((r / 9) % 3)) / 4.0 |> compute
+let AF4 = method_for(range<Idx<729>>) <@> lambda(r: Int64) -> (2.0 - (0.4 + NTAB((r / 27) % 3))) / (0.4 + NTAB((r / 27) % 3)) / 4.0 |> compute
+let AF5 = method_for(range<Idx<729>>) <@> lambda(r: Int64) -> (2.0 - (0.4 + NTAB((r / 81) % 3))) / (0.4 + NTAB((r / 81) % 3)) / 4.0 |> compute
+let AF6 = method_for(range<Idx<729>>) <@> lambda(r: Int64) -> (2.0 - (0.4 + NTAB((r / 243) % 3))) / (0.4 + NTAB((r / 243) % 3)) / 4.0 |> compute
+let AP2 = method_for(zip(AF1, AF2)) <@> lambda(a, b) -> a * b |> compute
+let AP3 = method_for(zip(AP2, AF3)) <@> lambda(a, b) -> a * b |> compute
+let AP4 = method_for(zip(AP3, AF4)) <@> lambda(a, b) -> a * b |> compute
+let AP5 = method_for(zip(AP4, AF5)) <@> lambda(a, b) -> a * b |> compute
+let ARM = method_for(zip(AP5, AF6)) <@> lambda(a, b) -> a * b |> compute
+let AS1 = reduce(method_for(ARM) <@> lambda(x) -> x, (+))
+let AS2 = reduce(method_for(ARM) <@> lambda(x) -> x * x, (+))
+let amean = AS1 / 729.0
+let avar = AS2 / 729.0 - amean * amean
+// linearized law: K g^2 Var(eta), g(4) = 25/8, Var(eta) = 2 sigma^2 / 3
+let r_lin = 6.0 * (25.0 / 8.0) * (25.0 / 8.0) * (2.0 * 0.002 * 0.002 / 3.0)
+let add_gap = (avar - r_lin) / r_lin
+
+// ---- the sweep: one-read ladders to M = 4096 at rho = 8, 16, 64 ----
+let BF1 = method_for(range<Idx<81>>) <@> lambda(r: Int64) -> (2.0 - (2.0 / 9.0 + NTAB(r % 3))) / (2.0 / 9.0 + NTAB(r % 3)) / 8.0 |> compute
+let BF2 = method_for(range<Idx<81>>) <@> lambda(r: Int64) -> (2.0 - (2.0 / 9.0 + NTAB((r / 3) % 3))) / (2.0 / 9.0 + NTAB((r / 3) % 3)) / 8.0 |> compute
+let BF3 = method_for(range<Idx<81>>) <@> lambda(r: Int64) -> (2.0 - (2.0 / 9.0 + NTAB((r / 9) % 3))) / (2.0 / 9.0 + NTAB((r / 9) % 3)) / 8.0 |> compute
+let BF4 = method_for(range<Idx<81>>) <@> lambda(r: Int64) -> (2.0 - (2.0 / 9.0 + NTAB((r / 27) % 3))) / (2.0 / 9.0 + NTAB((r / 27) % 3)) / 8.0 |> compute
+let BP2 = method_for(zip(BF1, BF2)) <@> lambda(a, b) -> a * b |> compute
+let BP3 = method_for(zip(BP2, BF3)) <@> lambda(a, b) -> a * b |> compute
+let BRM = method_for(zip(BP3, BF4)) <@> lambda(a, b) -> a * b |> compute
+let BS1 = reduce(method_for(BRM) <@> lambda(x) -> x, (+))
+let BS2 = reduce(method_for(BRM) <@> lambda(x) -> x * x, (+))
+let bvar = BS2 / 81.0 - (BS1 / 81.0) * (BS1 / 81.0)
+let CF1 = method_for(range<Idx<27>>) <@> lambda(r: Int64) -> (2.0 - (2.0 / 17.0 + NTAB(r % 3))) / (2.0 / 17.0 + NTAB(r % 3)) / 16.0 |> compute
+let CF2 = method_for(range<Idx<27>>) <@> lambda(r: Int64) -> (2.0 - (2.0 / 17.0 + NTAB((r / 3) % 3))) / (2.0 / 17.0 + NTAB((r / 3) % 3)) / 16.0 |> compute
+let CF3 = method_for(range<Idx<27>>) <@> lambda(r: Int64) -> (2.0 - (2.0 / 17.0 + NTAB((r / 9) % 3))) / (2.0 / 17.0 + NTAB((r / 9) % 3)) / 16.0 |> compute
+let CP2 = method_for(zip(CF1, CF2)) <@> lambda(a, b) -> a * b |> compute
+let CRM = method_for(zip(CP2, CF3)) <@> lambda(a, b) -> a * b |> compute
+let CS1 = reduce(method_for(CRM) <@> lambda(x) -> x, (+))
+let CS2 = reduce(method_for(CRM) <@> lambda(x) -> x * x, (+))
+let cvar = CS2 / 27.0 - (CS1 / 27.0) * (CS1 / 27.0)
+let DF1 = method_for(range<Idx<9>>) <@> lambda(r: Int64) -> (2.0 - (2.0 / 65.0 + NTAB(r % 3))) / (2.0 / 65.0 + NTAB(r % 3)) / 64.0 |> compute
+let DF2 = method_for(range<Idx<9>>) <@> lambda(r: Int64) -> (2.0 - (2.0 / 65.0 + NTAB((r / 3) % 3))) / (2.0 / 65.0 + NTAB((r / 3) % 3)) / 64.0 |> compute
+let DRM = method_for(zip(DF1, DF2)) <@> lambda(a, b) -> a * b |> compute
+let DS1 = reduce(method_for(DRM) <@> lambda(x) -> x, (+))
+let DS2 = reduce(method_for(DRM) <@> lambda(x) -> x * x, (+))
+let dvar = DS2 / 9.0 - (DS1 / 9.0) * (DS1 / 9.0)
+
+// fixed-budget projection (N = 12 collisions, N/K reads averaged per rung):
+// r_fixed = r_one_read * K / N
+let rfix4 = avar * 6.0 / 12.0
+let rfix8 = bvar * 4.0 / 12.0
+let rfix16 = cvar * 3.0 / 12.0
+let rfix64 = dvar * 2.0 / 12.0
+// analytic K^2 g^2 ladder costs (units of 2 sigma^2/(3N)), incl. the two
+// un-simulatable ends: rho = 2 (K = 12) and the single jump rho = 4096
+let kg2_2 = 144.0 * (9.0 / 4.0) * (9.0 / 4.0)
+let kg2_4 = 36.0 * (25.0 / 8.0) * (25.0 / 8.0)
+let kg2_8 = 16.0 * (81.0 / 16.0) * (81.0 / 16.0)
+let kg2_16 = 9.0 * (289.0 / 32.0) * (289.0 / 32.0)
+let kg2_64 = 4.0 * (4225.0 / 128.0) * (4225.0 / 128.0)
+let kg2_jump = (16785409.0 / 8192.0) * (16785409.0 / 8192.0)
+let jump_ratio = kg2_jump / kg2_4
+// the universal optimum: h(rho) = g/ln(rho) stationary at rho* (in-language
+// golden-ish scan refined by the analytic stationarity g'/g = 1/(rho ln rho))
+let h44 = (5.4 * 5.4 / (2.0 * 4.4)) / log(4.4)
+let h46 = (5.6 * 5.6 / (2.0 * 4.6)) / log(4.6)
+let h468 = (5.68 * 5.68 / (2.0 * 4.68)) / log(4.68)
+let h48 = (5.8 * 5.8 / (2.0 * 4.8)) / log(4.8)
+let h50 = (6.0 * 6.0 / (2.0 * 5.0)) / log(5.0)
+let Astar = h468 * h468
+
+// ---- D2: the pedigree floor -- same probe, repeated reads ----
+// probe p carries its own calibration fuzz (relative, PTAB); three fresh
+// instrument reads of the same target m = 4 (v = 0.4); grid 3^4 = 81
+let G1 = method_for(range<Idx<81>>) <@> lambda(r: Int64) -> (1.0 + PTAB(r % 3)) * (2.0 - (0.4 + NTAB((r / 3) % 3))) / (0.4 + NTAB((r / 3) % 3)) / 4.0 |> compute
+let G2 = method_for(range<Idx<81>>) <@> lambda(r: Int64) -> (1.0 + PTAB(r % 3)) * (2.0 - (0.4 + NTAB((r / 9) % 3))) / (0.4 + NTAB((r / 9) % 3)) / 4.0 |> compute
+let G3 = method_for(range<Idx<81>>) <@> lambda(r: Int64) -> (1.0 + PTAB(r % 3)) * (2.0 - (0.4 + NTAB((r / 27) % 3))) / (0.4 + NTAB((r / 27) % 3)) / 4.0 |> compute
+let GB = method_for(zip(G1, G2, G3)) <@> lambda(a, b, c) -> (a + b + c) / 3.0 |> compute
+let E1 = reduce(method_for(G1) <@> lambda(x) -> x, (+))
+let E1s = reduce(method_for(G1) <@> lambda(x) -> x * x, (+))
+let var1 = E1s / 81.0 - (E1 / 81.0) * (E1 / 81.0)
+let EB = reduce(method_for(GB) <@> lambda(x) -> x, (+))
+let EBs = reduce(method_for(GB) <@> lambda(x) -> x * x, (+))
+let var3 = EBs / 81.0 - (EB / 81.0) * (EB / 81.0)
+// pedigree (between-probe) component: variance of the probe-conditional mean
+let g0 = reduce(method_for(zip(GB, range<Idx<81>>)) <@> lambda(x, r: Int64) -> (if r % 3 < 1 then x else 0.0), (+)) / 27.0
+let g1 = reduce(method_for(zip(GB, range<Idx<81>>)) <@> lambda(x, r: Int64) -> (if r % 3 < 2 then (if r % 3 > 0 then x else 0.0) else 0.0), (+)) / 27.0
+let g2 = reduce(method_for(zip(GB, range<Idx<81>>)) <@> lambda(x, r: Int64) -> (if r % 3 > 1 then x else 0.0), (+)) / 27.0
+let gm = (g0 + g1 + g2) / 3.0
+let floor_var = (g0 * g0 + g1 * g1 + g2 * g2) / 3.0 - gm * gm
+let shrink = (var3 - floor_var) / (var1 - floor_var)
+let floor_share = floor_var / var3
+
+// ---- verdicts ----
+let add_V = if sqrt(add_gap * add_gap) < 0.1 then "LINEAR_ADDITIVITY_CONFIRMED" else "NONLINEAR"
+let valley_V = if rfix4 < rfix8 then (if rfix8 < rfix16 then (if rfix16 < rfix64 then "MEASURED_VALLEY_CONFIRMS" else "NO") else "NO") else "NO"
+let interior_V = if kg2_4 < kg2_2 then (if kg2_4 < kg2_8 then "OPTIMAL_STEP_INTERIOR" else "NO") else "NO"
+let hmin_V = if h468 < h44 then (if h468 < h46 then (if h468 < h48 then (if h468 < h50 then "RHO_STAR_4P68" else "NO") else "NO") else "NO") else "NO"
+let jump_V = if jump_ratio > 1000.0 then "LADDER_BEATS_JUMP_BY_1E4" else "NO"
+let floor_V = if shrink < 0.4 then (if floor_share > 0.3 then "AVERAGING_HITS_PEDIGREE_FLOOR" else "NO") else "NO"
+
+// pedigree additivity, the ladder law with its interior optimum, the
+// jump catastrophe, and the floor no averaging removes:
+// EXPECT: amean = 1.000125009636
+// EXPECT: avar = 0.000156301848544427
+// EXPECT: r_lin = 0.00015625
+// EXPECT: add_gap = 0.000331830684331333
+// EXPECT: rfix4 = 7.81509242722134e-05
+// EXPECT: rfix8 = 9.11848018612845e-05
+// EXPECT: rfix16 = 0.000163406294212576
+// EXPECT: rfix64 = 0.000985132155336799
+// EXPECT: kg2_2 = 729
+// EXPECT: kg2_4 = 351.5625
+// EXPECT: kg2_8 = 410.0625
+// EXPECT: jump_ratio = 11942.1198229167
+// EXPECT: h468 = 2.23342307274318
+// EXPECT: Astar = 4.98817862186158
+// EXPECT: var1 = 4.27109810121618e-05
+// EXPECT: var3 = 2.53485677614851e-05
+// EXPECT: floor_var = 1.66673611357027e-05
+// EXPECT: shrink = 0.333333333344701
+// EXPECT: floor_share = 0.657526740466467
+// EXPECT: add_V = "LINEAR_ADDITIVITY_CONFIRMED"
+// EXPECT: valley_V = "MEASURED_VALLEY_CONFIRMS"
+// EXPECT: interior_V = "OPTIMAL_STEP_INTERIOR"
+// EXPECT: hmin_V = "RHO_STAR_4P68"
+// EXPECT: jump_V = "LADDER_BEATS_JUMP_BY_1E4"
+// EXPECT: floor_V = "AVERAGING_HITS_PEDIGREE_FLOOR"

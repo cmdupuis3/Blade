@@ -126,7 +126,7 @@ let private diffCaseGramHermitian (outputDir: string) : bool =
         // `%g` (which prints 2.0 as "2") would make the literal ill-typed.
         let fl (x: float) = sprintf "%.1f" x
         let rowLit i =
-            [ for j in 0 .. k-1 -> sprintf "(%s, %s) : Complex128" (fl re.[i,j]) (fl im.[i,j]) ]
+            [ for j in 0 .. k-1 -> sprintf "complex(%s, %s)" (fl re.[i,j]) (fl im.[i,j]) ]
             |> String.concat ", "
         let arrLit =
             [ for i in 0 .. m-1 -> sprintf "    [%s]" (rowLit i) ] |> String.concat ",\n"
@@ -208,7 +208,7 @@ let private diffCaseDecompact (outputDir: string) : bool =
                     // lower triangle (H[j][i] = conj(H[i][j])), so no extra flip.
                     yield hAt i j ]
         let fl (x: float) = sprintf "%.1f" x
-        let rowLit i = [ for j in 0 .. k-1 -> sprintf "(%s, %s) : Complex128" (fl re.[i,j]) (fl im.[i,j]) ] |> String.concat ", "
+        let rowLit i = [ for j in 0 .. k-1 -> sprintf "complex(%s, %s)" (fl re.[i,j]) (fl im.[i,j]) ] |> String.concat ", "
         let arrLit = [ for i in 0 .. m-1 -> sprintf "    [%s]" (rowLit i) ] |> String.concat ",\n"
         let expectLit = dense |> List.map (fun (r,i) -> sprintf "(%g, %g)" r i) |> String.concat ", "
         let src =

@@ -1,0 +1,4 @@
+// TEST: Math eig: non-square rejects (rejects)
+import math as m
+let A: Array<Float64 like Idx<2>, Idx<3>> = [[1.0, 2.0, 3.0], [4.0, 5.0, 6.0]]
+let (RE, IM) = m.eig(A)

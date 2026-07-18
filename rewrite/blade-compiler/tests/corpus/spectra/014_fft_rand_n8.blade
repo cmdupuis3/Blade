@@ -1,0 +1,10 @@
+// TEST: Spectra fft: rand-driven fixture, key 12345, n=8
+// The input is drawn from `import rand` (elaborated BEFORE spectra, so the
+// annotated let is all spectra reads); the oracle mirrors the exact stream
+// (SplitMix64 -> mt19937_64 -> top-53-bit map, spectra/Rand.fs) and then
+// the exact FFT, so the pins are ulp-tight. Pins from spectra/OracleDump.fs.
+import rand as r
+import spectra as sp
+let x: Array<Float64 like Idx<8>> = r.uniform(12345, 8)
+let X = sp.fft(x)
+// EXPECT: X = [(4.7097848169991181, 0), (0.37609307780337298, -0.3467386550136351), (0.49352415176599829, -0.2622154361290846), (-0.7045242162897063, -0.46001890629729664), (0.8728887148704958, 0), (-0.70452421628970641, 0.46001890629729658), (0.49352415176599829, 0.2622154361290846), (0.37609307780337287, 0.34673865501363516)]

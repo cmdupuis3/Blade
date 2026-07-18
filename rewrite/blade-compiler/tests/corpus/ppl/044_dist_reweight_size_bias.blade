@@ -1,0 +1,20 @@
+// TEST: Dist Reweight Size Bias
+import ppl as ppl
+// Bayes as reweighting, simplest physical case: flux/size-biased
+// observation, w(x) = x. A = {0, 1, 2} uniform; the biased law puts
+// weight {0, 1/3, 2/3} on {0, 1, 2}: kappa1 = 5/3, kappa2 = 2/9,
+// kappa3 = -2/27. Order accounting: degree-1 weight on an order-4 prior
+// leaves an order-3 posterior; the reweighted dist is registered and
+// composes (dist_expect on it reads the biased mean back).
+type TimeIdx = Idx<3>
+let A: Array<Float64 like Idx<1>, TimeIdx> = [[0.0, 1.0, 2.0]]
+let d = ppl.dist(A, 4)
+let sb = ppl.dist_reweight(d, 0.0, 1.0)
+let y1 = ppl.cumulant(sb, 1)
+let y2 = ppl.cumulant(sb, 2)
+let y3 = ppl.cumulant(sb, 3)
+let chk = ppl.dist_expect(sb, 0.0, 1.0)
+// EXPECT: y1 = [1.66666666666667]
+// EXPECT: y2 = [0.222222222222222]
+// EXPECT: y3 = [-0.0740740740740741]
+// EXPECT: chk = 1.66666666666667

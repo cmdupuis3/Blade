@@ -1,0 +1,13 @@
+// TEST: FA T22: Single `_` placeholder partial application
+// ----------------------------------------------------------------------------
+// Formalism §6.2.3: one `_` hole in an otherwise-full application binds
+// every other parameter — cos_tw(_, 2.0) ≡ lambda(t) -> cos_tw(t, 2.0).
+// Reaches the non-prefix parameter that prefix currying can't.
+// ----------------------------------------------------------------------------
+function scale_add(a, b) = a * 10.0 + b
+let addb = scale_add(_, 5.0)
+let r1 = addb(2.0)
+let bind_first = scale_add(3.0, _)
+let r2 = bind_first(0.25)
+// EXPECT: r1 = 25
+// EXPECT: r2 = 30.25

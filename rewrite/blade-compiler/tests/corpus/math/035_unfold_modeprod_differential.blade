@@ -1,0 +1,23 @@
+// TEST: Math unfold/mode_product/matmul differential
+// The Kolda-Bader identity: unfold(X ×ₙ U, n) = U · unfold(X, n). Both
+// sides computed through the module (annotated intermediates), compared
+// in-program; the contraction orders match term-for-term so the deviation
+// is exactly zero.
+import math as m
+let X: Array<Float64 like Idx<3>, Idx<4>, Idx<2>> = [[[1.0, 13.0], [4.0, 16.0], [7.0, 19.0], [10.0, 22.0]], [[2.0, 14.0], [5.0, 17.0], [8.0, 20.0], [11.0, 23.0]], [[3.0, 15.0], [6.0, 18.0], [9.0, 21.0], [12.0, 24.0]]]
+let U: Array<Float64 like Idx<2>, Idx<3>> = [[1.0, 0.5, 0.25], [2.0, 1.0, 0.0]]
+let Y: Array<Float64 like Idx<2>, Idx<4>, Idx<2>> = m.mode_product(X, U, 0)
+let MX: Array<Float64 like Idx<3>, Idx<8>> = m.unfold(X, 0)
+let LHS = m.unfold(Y, 0)
+let RHS = m.matmul(U, MX)
+let dev = {
+    let mut acc = 0.0
+    for i in 0..2 {
+        for j in 0..8 {
+            let d = LHS(i, j) - RHS(i, j)
+            acc = acc + d * d
+        }
+    }
+    acc
+}
+// EXPECT: dev = 0.0

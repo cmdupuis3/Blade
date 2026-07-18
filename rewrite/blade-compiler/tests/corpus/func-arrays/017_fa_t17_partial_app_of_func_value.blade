@@ -1,0 +1,11 @@
+// TEST: FA T17: Partial application of a first-class function value
+// ----------------------------------------------------------------------------
+// The callee need not be a named top-level function: a let-bound function
+// value (std::function at runtime) partially applies the same way.
+// ----------------------------------------------------------------------------
+function add3(a, b, c) = a + b + c
+let f3 = add3
+let g = f3(1.0)
+let gg = g(2.0)
+let r = gg(4.0)
+// EXPECT: r = 7

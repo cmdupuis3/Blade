@@ -80,6 +80,21 @@ let mathIntrinsics : Set<string> =
 
 let isMathIntrinsic (name: string) : bool = Set.contains name mathIntrinsics
 
+/// Subset of the intrinsics that have std::complex overloads in <complex> and
+/// so are permitted on complex operands (result is complex, same width). exp/
+/// log/sqrt and the trig/hyperbolic families qualify; floor/ceil do not (no
+/// complex overload — they stay real-only and reject complex). Differentiation
+/// of complex intrinsics is out of scope (see the adjoint note in Grad).
+let complexMathIntrinsics : Set<string> =
+    Set.ofList [
+        "exp"; "log"; "sqrt"
+        "sin"; "cos"; "tan"
+        "sinh"; "cosh"; "tanh"
+        "asin"; "acos"; "atan"
+    ]
+
+let isComplexMathIntrinsic (name: string) : bool = Set.contains name complexMathIntrinsics
+
 // ============================================================================
 // Expression construction helpers
 // ============================================================================
@@ -91,6 +106,7 @@ let private add a b = ExprBinOp (Elementwise, OpAdd, a, b)
 let private sub a b = ExprBinOp (Elementwise, OpSub, a, b)
 let private mul a b = ExprBinOp (Elementwise, OpMul, a, b)
 let private div a b = ExprBinOp (Elementwise, OpDiv, a, b)
+let private pow a b = ExprBinOp (Elementwise, OpCaret, a, b)
 let private neg a = ExprUnaryOp (OpNeg, a)
 let private call name args = ExprApp (ExprVar name, args)
 
@@ -770,17 +786,29 @@ let rec private adjointOf (rc: RevCtx) (e: Expr) (cot: Expr) : Result<NStmt list
         let pre, c = bindCot rc cot
         adjointOf rc l (div c r) |> Result.bind (fun sl ->
         adjointOf rc r (neg (div (mul c l) (mul r r))) |> Result.map (fun sr -> pre @ sl @ sr))
-    | ExprBinOp (_, OpCaret, b, ExprLit (LitInt n)) ->
+    | ExprBinOp (_, OpCaret, b, ExprLit (LitInt n)) when int n >= 0 ->
+        // Constant natural exponent: emit the closed form directly rather
+        // than routing through the general rule, which would leave a
+        // pow(b, 2.0 - 1.0) in the output.
         let n' = int n
-        if n' < 1 then Ok []
+        if n' = 0 then Ok []
         else
             let dterm =
                 if n' = 1 then fLit 1.0
                 elif n' = 2 then mul (fLit 2.0) b
-                else mul (fLit (float n')) (ExprBinOp (Elementwise, OpCaret, b, iLit (int64 (n' - 1))))
+                else mul (fLit (float n')) (pow b (iLit (int64 (n' - 1))))
             adjointOf rc b (mul cot dterm)
-    | ExprBinOp (_, OpCaret, _, _) ->
-        err rc.Fname "`^` is differentiable only with an integer-literal exponent (v1)"
+    | ExprBinOp (_, OpCaret, b, e) ->
+        // d(b^e) = e*b^(e-1) db  +  b^e*log(b) de.
+        // The base term keeps the power form instead of the equivalent
+        // e*b^e/b so that b = 0 stays finite. The log term is reachable
+        // only when `e` is itself active — a constant exponent takes the
+        // ExprLit/inactive-var path to Ok [] and never evaluates log(b),
+        // so a negative base still differentiates.
+        let pre, c = bindCot rc cot
+        adjointOf rc b (mul c (mul e (pow b (sub e (fLit 1.0))))) |> Result.bind (fun sb ->
+        adjointOf rc e (mul c (mul (pow b e) (call "log" [b]))) |> Result.map (fun se ->
+            pre @ sb @ se))
     | ExprBinOp (_, (OpEq | OpNeq | OpLt | OpLe | OpGt | OpGe | OpAnd | OpOr), _, _) ->
         Ok []   // boolean-valued: no adjoint
     | ExprBinOp (_, OpMod, _, _) -> Ok []  // int-valued

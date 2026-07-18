@@ -1,0 +1,6 @@
+// TEST: Math matmul: identity fixpoint
+import math as m
+let A: Array<Float64 like Idx<2>, Idx<3>> = [[1.0, 2.0, 3.0], [4.0, 5.0, 6.0]]
+let I3: Array<Float64 like Idx<3>, Idx<3>> = [[1.0, 0.0, 0.0], [0.0, 1.0, 0.0], [0.0, 0.0, 1.0]]
+let C = m.matmul(A, I3)
+// EXPECT: C = [1, 2, 3, 4, 5, 6]

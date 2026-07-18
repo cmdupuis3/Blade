@@ -1,0 +1,10 @@
+// TEST: Rand Determinism
+// rand.uniform(key, n) is a pure function of the key: the same key yields the
+// same draws. The pinned values are a CHANGE-DETECTOR for the RNG algorithm
+// (mt19937_64 bits + our bits_to_unit map), not an independent correctness
+// proof — the statistical tests (002-003) carry that. All draws lie in [0,1).
+import rand as r
+let u = r.uniform(12345, 4)
+let u2 = r.uniform(12345, 4)
+// EXPECT: u = [0.739107444803618, 0.878809761522638, 0.546133090721287, 0.365646135197759]
+// EXPECT: u2 = [0.739107444803618, 0.878809761522638, 0.546133090721287, 0.365646135197759]

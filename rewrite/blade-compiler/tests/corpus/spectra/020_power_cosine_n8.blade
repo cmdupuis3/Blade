@@ -1,0 +1,8 @@
+// TEST: Spectra power: |FFT|^2 of the bin-2 cosine, n=8
+// Power spectrum peaks at (n/2)^2 = 16 in bins 2 and 6; the off-peak bins
+// are squared leakage noise (~1e-31), pinned exactly from the oracle.
+// Pins from spectra/OracleDump.fs.
+import spectra as sp
+let x: Array<Float64 like Idx<8>> = [1.0, 6.123233995736766E-17, -1.0, -1.8369701987210297E-16, 1.0, 3.0616169978683831E-16, -1.0, -4.2862637970157361E-16]
+let P = sp.power(x)
+// EXPECT: P = [5.9990391306474261E-32, 1.1998078261294865E-31, 16, 1.1998078261294861E-31, 5.9990391306474261E-32, 1.1998078261294865E-31, 16, 1.1998078261294861E-31]

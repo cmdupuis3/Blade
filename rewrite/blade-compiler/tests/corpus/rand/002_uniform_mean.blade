@@ -1,0 +1,11 @@
+// TEST: Rand Uniform Mean
+// Statistical property (independently derivable, robust to any correct U[0,1)
+// RNG): the mean of 10000 uniform draws is ~0.5. The RNG is deterministic, so
+// this boolean is a definite pass/fail, not a flaky probabilistic check. The
+// tolerance 0.02 is ~7 standard errors (SE = 1/sqrt(12*10000) ~ 0.0029).
+import rand as r
+let u = r.uniform(42, 10000)
+let s = reduce(u, (+))
+let mean = s / 10000.0
+let meanOk = abs(mean - 0.5) < 0.02
+// EXPECT: meanOk = true

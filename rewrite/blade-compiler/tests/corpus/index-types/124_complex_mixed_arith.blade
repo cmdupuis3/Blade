@@ -1,0 +1,16 @@
+// TEST: Complex Mixed Arithmetic
+// Mixed real/complex binops promote to complex (promoteElemType), with CodeGen
+// inserting the casts std::complex's same-type operators require:
+//   2.0 * z   (double * complex)      -> passthrough
+//   z + 1.0   (complex + double)      -> passthrough
+//   3 * z     (int  * complex)        -> (double) cast on the int
+//   z * z     (complex * complex)     -> same type
+let z = complex(1.0, 2.0)
+let dz = 2.0 * z
+let zp = z + 1.0
+let iz = 3 * z
+let z2 = z * z
+// EXPECT: dz = (2,4)
+// EXPECT: zp = (2,2)
+// EXPECT: iz = (3,6)
+// EXPECT: z2 = (-3,4)

@@ -1,0 +1,7 @@
+// TEST: Math mode_product: identity-U fixpoint
+// X ×₀ I3 = X for the 3x4x2 tensor.
+import math as m
+let X: Array<Float64 like Idx<3>, Idx<4>, Idx<2>> = [[[1.0, 13.0], [4.0, 16.0], [7.0, 19.0], [10.0, 22.0]], [[2.0, 14.0], [5.0, 17.0], [8.0, 20.0], [11.0, 23.0]], [[3.0, 15.0], [6.0, 18.0], [9.0, 21.0], [12.0, 24.0]]]
+let I3: Array<Float64 like Idx<3>, Idx<3>> = [[1.0, 0.0, 0.0], [0.0, 1.0, 0.0], [0.0, 0.0, 1.0]]
+let Y = m.mode_product(X, I3, 0)
+// EXPECT: Y = [1, 13, 4, 16, 7, 19, 10, 22, 2, 14, 5, 17, 8, 20, 11, 23, 3, 15, 6, 18, 9, 21, 12, 24]

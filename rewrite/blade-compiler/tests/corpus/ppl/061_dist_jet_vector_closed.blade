@@ -1,0 +1,17 @@
+// TEST: Dist Jet Vector Closed
+import ppl as ppl
+// The same vector map as ppl/058 but the dist carries only order 4 —
+// CLOSED mode (q·s = 6 > 4; partition blocks past order 4 drop). Orders 1
+// and 2 agree with strict (their budget fits); order 3's product-heavy
+// cells absorb the truncation — pinned by dump-jet J6.
+type TimeIdx = Idx<3>
+let B: Array<Float64 like Idx<2>, TimeIdx> = [[1.0, 2.0, 4.0], [3.0, 5.0, 4.0]]
+let db = ppl.dist(B, 4)
+let m = ppl.cumulant(db, 1)
+let dy = ppl.dist_jet_closed(db, 3, [m(0) + m(1), m(0) * m(1)], [1.0, 1.0, m(1), m(0)], [0.0, 0.0, 0.0, 0.0, 1.0, 0.0])
+let y1 = ppl.cumulant(dy, 1)
+let y2 = ppl.cumulant(dy, 2)
+let y3 = ppl.cumulant(dy, 3)
+// EXPECT: y1 = [6.33333333333, 9.66666666667]
+// EXPECT: y2 = [2.88888888889, 8.77777777778, 28.2222222222]
+// EXPECT: y3 = [-2.59259259259, -6.18518518518, -16.3333333333, -54.2962962963]

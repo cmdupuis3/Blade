@@ -1,0 +1,40 @@
+// TEST: Math eigh: 4x4 fixture reconstruction + orthogonality
+// LAM pins from math/OracleDump.fs; ‖S − Q·diag(LAM)·Qᵀ‖² and
+// ‖QᵀQ − I‖² computed in-program pin at 0.0.
+import math as m
+let S: Array<Float64 like Idx<4>, Idx<4>> = [[4.0, 1.0, 0.0, 2.0], [1.0, 3.0, 1.0, 0.0], [0.0, 1.0, 2.0, 1.0], [2.0, 0.0, 1.0, 5.0]]
+let (Q, LAM) = m.eigh(S)
+let resid = {
+    let mut acc = 0.0
+    let mut rc = 0.0
+    for i in 0..4 {
+        for j in 0..4 {
+            rc = 0.0
+            for k in 0..4 {
+                rc = rc + Q(i, k) * LAM(k) * Q(j, k)
+            }
+            let d = rc - S(i, j)
+            acc = acc + d * d
+        }
+    }
+    acc
+}
+let devQ = {
+    let mut acc = 0.0
+    let mut dot = 0.0
+    for a in 0..4 {
+        for b in 0..4 {
+            dot = 0.0
+            for i in 0..4 {
+                dot = dot + Q(i, a) * Q(i, b)
+            }
+            let target = if a == b then 1.0 else 0.0
+            let d = dot - target
+            acc = acc + d * d
+        }
+    }
+    acc
+}
+// EXPECT: LAM = [6.8556347898995877, 3.5483784891384529, 2.7838233348352084, 0.81216338612674621]
+// EXPECT: resid = 0.0
+// EXPECT: devQ = 0.0

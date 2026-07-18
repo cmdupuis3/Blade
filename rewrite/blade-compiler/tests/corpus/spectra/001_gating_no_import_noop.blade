@@ -1,0 +1,7 @@
+// TEST: Spectra gating: no import, user fft untouched
+// The spectra elaborator is import-gated: without `import spectra` the pass
+// is a strict no-op, so a user's own function named `fft` (or `power`, ...)
+// is never rewritten or shadowed.
+function fft(x: Float64) -> Float64 = x * 2.0
+let r = fft(3.0)
+// EXPECT: r = 6

@@ -1,0 +1,11 @@
+// TEST: Dist Reweight Needs Order (rejects)
+import ppl as ppl
+// Conditioning is not free: a degree-q likelihood consumes q orders of
+// the tower (each posterior moment reads q extra prior moments). A
+// degree-2 weight on an order-2 prior would leave nothing — the
+// elaborator refuses with steering rather than emitting a truncated
+// posterior silently.
+type TimeIdx = Idx<3>
+let A: Array<Float64 like Idx<1>, TimeIdx> = [[0.0, 1.0, 2.0]]
+let d = ppl.dist(A, 2)
+let post = ppl.dist_reweight(d, 1.0, 0.0, -0.2)

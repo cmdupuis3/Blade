@@ -1,0 +1,29 @@
+// TEST: Math hosvd: rank-3 full reconstruction
+// X ≈ G ×₀ U0 ×₁ U1 ×₂ U2 with the full (untruncated) HOSVD is exact;
+// ‖X − X̂‖² computed in-program pins at 0.0. Fixture: 3x3x3 with
+// X(i,j,k) = (i+1)(j+2) + 0.5k² + 0.25ijk (math/OracleDump.fs).
+import math as m
+let X: Array<Float64 like Idx<3>, Idx<3>, Idx<3>> = [[[2.0, 2.5, 4.0], [3.0, 3.5, 5.0], [4.0, 4.5, 6.0]], [[4.0, 4.5, 6.0], [6.0, 6.75, 8.5], [8.0, 9.0, 11.0]], [[6.0, 6.5, 8.0], [9.0, 10.0, 12.0], [12.0, 13.5, 16.0]]]
+let (G, U0, U1, U2) = m.hosvd(X)
+let resid = {
+    let mut acc = 0.0
+    let mut rc = 0.0
+    for i in 0..3 {
+        for j in 0..3 {
+            for k in 0..3 {
+                rc = 0.0
+                for a in 0..3 {
+                    for b in 0..3 {
+                        for c in 0..3 {
+                            rc = rc + G(a, b, c) * U0(i, a) * U1(j, b) * U2(k, c)
+                        }
+                    }
+                }
+                let d = rc - X(i, j, k)
+                acc = acc + d * d
+            }
+        }
+    }
+    acc
+}
+// EXPECT: resid = 0.0

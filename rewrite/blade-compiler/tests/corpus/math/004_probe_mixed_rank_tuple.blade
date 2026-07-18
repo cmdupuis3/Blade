@@ -1,0 +1,21 @@
+// TEST: Math probe: mixed-rank 4-tuple across function boundary
+// Probes the hosvd return shape (rank-3 core + rank-2/rank-1 companions)
+// before any generator relies on it: a 4-tuple mixing ranks must cross a
+// function boundary, destructure, and print with correct values.
+type I2 = Idx<2>
+
+function mk() -> (Array<Float64 like I2, I2, I2>, Array<Float64 like I2, I2>, Array<Float64 like I2>, Array<Float64 like I2, I2>) = {
+    let g = [[[1.0, 2.0], [3.0, 4.0]], [[5.0, 6.0], [7.0, 8.0]]]
+    let u1 = [[1.0, 0.0], [0.0, 1.0]]
+    let s = [9.0, 10.0]
+    let u2 = [[0.5, 0.25], [0.125, 0.0625]]
+    (g, u1, s, u2)
+}
+
+let (g, u1, s, u2) = mk()
+let x = g(1, 0, 1) + u1(1, 1) + s(0) + u2(0, 1)
+// EXPECT: g = [1, 2, 3, 4, 5, 6, 7, 8]
+// EXPECT: u1 = [1, 0, 0, 1]
+// EXPECT: s = [9, 10]
+// EXPECT: u2 = [0.5, 0.25, 0.125, 0.0625]
+// EXPECT: x = 16.25

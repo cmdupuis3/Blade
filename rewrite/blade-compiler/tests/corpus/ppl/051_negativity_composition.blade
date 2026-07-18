@@ -1,0 +1,25 @@
+// TEST: Negativity Composition
+import ppl as ppl
+// The meter composes with the calculus: (1) a data dist read on its own
+// support has negativity EXACTLY zero; (2) positive mixing is negativity-
+// convex — mixing a signed tower with enough genuine probability heals
+// it (N of the mix < weighted N, and hits zero at finite weight);
+// (3) dist_atoms + dist_mix chain: a half-and-half mix of the Tsirelson
+// quasi-tower with a point tower at +2 has weights (1.104, -0.104)/1:
+// still signed, N = 0.1036 = ex 37's healing at half visibility... the
+// wall reappears where the mixed weights turn positive.
+type TimeIdx = Idx<3>
+let A: Array<Float64 like Idx<1>, TimeIdx> = [[0.0, 1.0, 2.0]]
+let d = ppl.dist(A, 4)
+let dneg = ppl.dist_negativity(d, 0.0, 1.0, 2.0)
+let ts = ppl.dist_atoms(2, 2.0, 1.20710678118655, -2.0, -0.207106781186548)
+let pt = ppl.dist_atoms(2, 2.0, 1.0, -2.0, 0.0)
+let half = ppl.dist_mix(1.0, ts, 1.0, pt)
+let h1 = ppl.cumulant(half, 1)
+let hneg = ppl.dist_negativity(half, -2.0, 2.0)
+let tneg = ppl.dist_negativity(ts, -2.0, 2.0)
+let convex_gap = tneg / 2.0 - hneg
+// EXPECT: dneg = 0.0
+// EXPECT: h1 = [2.41421356237309]
+// EXPECT: hneg = 0.103553390593274
+// EXPECT: convex_gap = 0.0

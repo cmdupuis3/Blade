@@ -31,13 +31,18 @@ let denseSlice = [ "basic"; "loops"; "guards"; "for-in" ]
 /// shape. Ground truth is the hand-computed EXPECT values in the corpus,
 /// never the oracle.
 ///
-/// EMPTY since the 2026-07-12 re-pin: the arc-1 joint-product-symmetry
+/// Was empty since the 2026-07-12 re-pin: the arc-1 joint-product-symmetry
 /// names (symmetry/012–016, functions/001) served against the pre-arc-1
 /// pin and were retired when the oracle advanced past the correction —
 /// those semantics are now IN the oracle and pinned by corpus EXPECTs.
-/// Repopulate this set for the next intentional value-semantics change,
-/// and retire it again at the following re-pin.
-let correctedSlice : Set<string> = Set.empty
+/// Repopulated 2026-07-16 for the signed-iteration-variable fix: virtual-
+/// source kernel params (range/lo..hi/reverse) and for-in loop vars were
+/// bound size_t in the emitted C++, wrapping negative intermediates
+/// unsigned before Float64 promotion and in signed division (loops/066).
+/// Oracles pinned before the fix reproduce the wrap. Retire at the next
+/// re-pin.
+let correctedSlice : Set<string> =
+    Set.ofList [ "Negative Int64 Mixed Arithmetic" ]
 
 /// Run `<exe> run <srcFile>` and capture stdout. The generous timeout covers
 /// the g++ compile that `blade run` performs internally.

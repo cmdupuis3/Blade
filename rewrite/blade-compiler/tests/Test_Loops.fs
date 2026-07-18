@@ -9,40 +9,38 @@ open Blade.Tests.Corpus
 let loopTests = category "loops"
 
 // ============================================================================
-// R1 (FUTURE, not yet implemented): multi-index-type range<I, J, ...>
+// Multi-index-type range<I, J, ...> -- IMPLEMENTED
 // ----------------------------------------------------------------------------
-// Breadcrumb for future compiler work. The desirable ergonomic is collapsing a
-// classic nested for-loop into a single co-iterated range over a PRODUCT of
-// several independent index types:
+// This block previously described multi-index range as future work ("R1"); it
+// landed and the note went stale. One range<> spans a PRODUCT of independent
+// index types, uncurried into nested loop levels, one kernel param per slot:
 //
-//     for (A, B) in range<LatIdx, LonIdx> <@> lambda(lat, lon) -> A(lat, lon)
+//     method_for(range<Lat, Lon>) <@> lambda(lat, lon) -> A(lat, lon)
 //
-// Current state (verified): range<> parses and typechecks EXACTLY ONE index
-// type. TExprRange carries a single idx and produces mkVirtualArrayArrow [idx];
-// a comma-separated range<I, J> does not parse today. The single index type MAY
-// be multi-position (SymIdx<2,N>, CompoundIdx<mask>), which is a DIFFERENT
-// generalization from the multi-index-type product wanted here.
+// Layers: Parser.fs (sepBy over the type list), TypeCheck.fs ExprRange
+// (mkVirtualArrayArrow over all slots) and expandedRows (per-slot params, each
+// tagged via elemTypeForIterationIndex), IRRange (index-type LIST), CodeGen's
+// VirtualRange arm (binds each level's loop index).
 //
-// Work required for R1 (three layers):
-//   (1) Parser: accept a comma-separated list inside range< ... >.
-//   (2) TypeCheck: build a multi-slot virtual array (mkVirtualArrayArrow over
-//       the list), each listed index type contributing one product axis.
-//   (3) CodeGen: rectangular co-iteration over the product (nested loops), with
-//       the kernel receiving one bound variable per axis.
+// Coverage: corpus loops/067 (basic), loops/068 (mixed with a real array),
+// index-types/120 (per-slot named tags) + 121 (swapped tags reject, which is
+// what proves the tags are distinct rather than uniformly the last slot's).
 //
-// Interaction with CompoundIdx: a CompoundIdx appearing as ONE element of a
-// multi-index range is where partial-indexing result types bite -- the rank-2
-// (-> Idx) vs rank-3+ (-> smaller CompoundIdx) degeneration governs what a
-// partially-resolved compound axis contributes to the product space. That
-// corner should get its own coverage once R1 and compound-range iteration both
-// exist.
+// Distinct generalization, do not conflate: a SINGLE multi-rank index type
+// (SymIdx<2,N>) also yields two params, by the rank rule rather than the
+// product rule.
 //
-// Skeleton (commented out; does not compile as Blade until R1 lands):
+// Live restrictions:
+//   - A CompoundIdx slot IS the whole iteration space, so it cannot share a
+//     range<> with other index types (TypeCheck.fs ExprRange, formalism 4.5;
+//     corpus index-types/017). A sole compound slot is fine.
+//   - reverse<I> and blocked<I, K> remain SINGLE-index; blocked has no parser
+//     arm at all today (AST/typecheck/codegen only).
 //
-// let r1_multiIndexRange = """
-// let A: Array<Float like LatIdx, LonIdx> = fill_random(range<LatIdx, LonIdx>, gen)
-// let out = for (a) in range<LatIdx, LonIdx> <@> lambda(lat, lon) -> A(lat, lon)
-// """
-// EXPECT (once implemented): rectangular co-iteration over LatIdx x LonIdx,
-// element-wise, no product blow-up beyond the two declared axes.
+// Still open -- interaction with CompoundIdx: if the sole-compound restriction
+// is ever lifted, a CompoundIdx as ONE element of a multi-index range is where
+// partial-indexing result types bite: the rank-2 (-> Idx) vs rank-3+ (-> smaller
+// CompoundIdx) degeneration governs what a partially-resolved compound axis
+// contributes to the product space. That corner needs its own coverage if and
+// when it becomes reachable.
 // ============================================================================

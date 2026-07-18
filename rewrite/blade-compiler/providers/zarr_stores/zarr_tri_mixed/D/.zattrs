@@ -1,0 +1,1 @@
+{"_ARRAY_DIMENSIONS": ["cells", "t"], "blade": {"spec_version": 1, "layout": "packed", "order": "ascending-lex", "index_types": [{"kind": "sym", "rank": 2, "extent": 3}, {"kind": "dense", "extent": 2}], "decomposition": {"scheme": "flat-ranges"}}}

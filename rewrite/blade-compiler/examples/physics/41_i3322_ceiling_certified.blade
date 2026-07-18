@@ -1,0 +1,122 @@
+// TEST: Physics -- The Ceiling, Certified: I3322's Quantum Bound Without Import
+// ============================================================================
+// Example 38 exhibited the supra-quantum shell but leaned on one imported
+// number: the I3322 quantum supremum. This example retires the import.
+// Below is a Gram factor G for a 16x16 dual certificate of the NPA
+// level-1+AB relaxation (basis {1, A_i, B_j, A_i B_j}). The certificate
+// matrix is LAM2 := G G^T, computed IN-LANGUAGE by one row-fiber
+// prodsum -- so LAM2 is positive semidefinite BY CONSTRUCTION (it is a
+// Gram matrix; no elimination, no eigensolve, nothing to trust). What
+// remains to check is linear algebra this file does from scratch:
+//   (1) the 58 label sums of LAM2 (each moment-matrix cell group; LBL
+//       tags which of the 256 cells share a moment) equal the targets
+//       (t', -Bell coefficients, zeros) up to a measured deviation
+//       devtotal = sum_l |dev_l| ~ 1e-9 from rounding G to 10 decimals;
+//   (2) every non-identity basis word W is a product of +-1 observables,
+//       so |<W>| <= 1 for any quantum state, and therefore
+//       0 <= <LAM2, M> = t' - 4(I3322 + 1) + sum_l dev_l <W_l> gives the
+//       RIGOROUS ceiling  quantum I3322 <= (t' + devtotal)/4 - 1 -- the
+//       rounding error is absorbed into the bound, not waved away;
+//   (3) that ceiling (0.2700000005) sits strictly below the constructed
+//       tower point of ex 38 (0.34090, recomputed here): the sandwich
+//       classical < quantum < tower is now SELF-CONTAINED -- every wall
+//       in the arc is checked in-language, none trusted.
+// The numbers in G came from an untrusted external solve (alternating
+// projections onto the affine label constraints and the PSD cone with an
+// interior margin of 1e-4, then an eigenfactor); their provenance is
+// irrelevant, because the proof is the verification below, which uses
+// nothing but arithmetic, gathers, and prodsums. The label structure
+// (LBL) encodes moment identity: products of basis words, reduced by
+// involution, symmetrized by joint reversal -- 58 distinct moments; the
+// identity of cells within a label is what collapses <LAM2, M> to the
+// linear form in (2).
+// (Tighter ceilings are available at the same machine: the level-1+AB
+// optimum is ~0.2513, and higher NPA levels approach 0.2508754; any such
+// certificate drops into this file unchanged. t' = 5.08 is chosen for a
+// fat interior margin -- robustness over sharpness.)
+// ============================================================================
+
+// The two nominal axes of the certificate. The 16 basis words deliberately
+// stay an ANONYMOUS Idx<16>: the label histogram below drives a flat cell
+// index c and reads the moment matrix at (c / 16, c % 16), and a nominal
+// tag does not survive that ravel -- a Nat<CellIdx> is rightly refused as
+// an index into a basis-tagged slot, and there is no unlinearize surface
+// that would hand the basis tag back.
+type LabelIdx = Idx<58>    // the 58 distinct moments the 256 cells collapse onto
+type CellIdx = Idx<256>    // those cells, raveled row-major out of 16 x 16
+
+let G: Array<Float64 like Idx<16>, Idx<16>> = [
+  [0.9064392166, 0.4253059286, 0.0000000000, 0.0000000000, -0.0000000000, 0.0000000000, 0.0000000000, -0.0110389999, -0.0000000000, -0.0000000006, 0.0054954795, 0.0000000004, 0.0000000003, 0.0000000046, -0.0000000004, 0.0000000000],
+  [-0.3524989459, 0.3844300689, -0.5107948377, 0.0930139916, 0.0379462589, 0.0249425287, -0.0218229003, -0.0209970685, -0.0000000000, 0.0049541585, 0.0004707679, -0.0018746969, -0.0041513136, 0.0001596231, 0.0000235634, 0.0000000000],
+  [-0.3524989459, 0.3844300689, 0.5107948377, -0.0930139916, 0.0379462589, -0.0249425287, 0.0218229003, -0.0209970685, -0.0000000000, 0.0049541584, 0.0004707675, 0.0018746974, 0.0041513137, -0.0001596222, -0.0000235551, 0.0000000000],
+  [-0.0000000000, -0.0000000000, 0.0965218865, 0.5300587635, 0.0000000000, -0.0817998395, -0.0934932943, 0.0000000000, 0.0000000000, -0.0000000003, -0.0000000003, 0.0066840604, -0.0030184636, -0.0000014269, 0.0000096674, 0.0000000000],
+  [0.3524989459, -0.3844300689, -0.0930139916, -0.5107948377, 0.0379462589, 0.0218229003, 0.0249425287, 0.0209970685, 0.0000000000, 0.0049541582, -0.0004707669, 0.0041513138, -0.0018746972, -0.0000235599, 0.0001596275, 0.0000000000],
+  [0.3524989459, -0.3844300689, 0.0930139916, 0.5107948377, 0.0379462589, -0.0218229003, -0.0249425287, 0.0209970685, 0.0000000000, 0.0049541588, -0.0004707665, -0.0041513134, 0.0018746972, 0.0000235592, -0.0001596191, 0.0000000000],
+  [-0.0000000000, -0.0000000000, 0.5300587635, -0.0965218865, 0.0000000000, -0.0934932943, 0.0817998395, -0.0000000000, 0.0000000000, 0.0000000001, 0.0000000005, -0.0030184636, -0.0066840604, 0.0000096664, 0.0000014263, 0.0000000000],
+  [-0.2346436145, -0.0371934872, -0.1102984499, 0.1594117550, -0.0000000000, -0.0104559702, 0.1567423680, 0.0444070458, -0.0620698679, 0.0000000018, 0.0032053769, 0.0011920653, 0.0004503600, 0.0034930673, -0.0025945633, 0.0000000000],
+  [-0.2346436145, -0.0371934872, -0.1594117550, -0.1102984499, 0.0000000000, -0.1567423680, -0.0104559702, 0.0444070458, 0.0620698679, -0.0000000033, 0.0032053782, -0.0004503602, 0.0011920647, 0.0025945660, 0.0034930643, 0.0000000000],
+  [-0.1241033299, -0.2450013761, -0.1632750922, 0.0297318354, 0.2782303825, -0.0916945483, 0.0802260675, -0.0444785070, -0.0000000000, -0.0006756691, 0.0026370215, 0.0003526653, 0.0007809390, -0.0055116788, -0.0008134954, 0.0000000000],
+  [-0.2346436145, -0.0371934872, 0.1594117550, 0.1102984499, -0.0000000000, 0.1567423680, 0.0104559702, 0.0444070458, 0.0620698679, 0.0000000026, 0.0032053821, 0.0004503606, -0.0011920644, -0.0025945606, -0.0034930647, 0.0000000000],
+  [-0.2346436145, -0.0371934872, 0.1102984499, -0.1594117550, 0.0000000000, 0.0104559702, -0.1567423680, 0.0444070458, -0.0620698679, -0.0000000025, 0.0032053834, -0.0011920648, -0.0004503597, -0.0034930618, 0.0025945629, 0.0000000000],
+  [0.1241033299, 0.2450013761, -0.1632750922, 0.0297318354, -0.2782303825, -0.0916945483, 0.0802260675, 0.0444785070, 0.0000000000, 0.0006756704, -0.0026370125, 0.0003526650, 0.0007809387, -0.0055116833, -0.0008134938, 0.0000000000],
+  [-0.1241033299, -0.2450013761, 0.0297318354, 0.1632750922, -0.2782303825, 0.0802260675, 0.0916945483, -0.0444785070, -0.0000000000, 0.0006756645, 0.0026370182, 0.0007809382, -0.0003526650, -0.0008134924, 0.0055116816, 0.0000000000],
+  [0.1241033299, 0.2450013761, 0.0297318354, 0.1632750922, 0.2782303825, 0.0802260675, 0.0916945483, 0.0444785070, 0.0000000000, -0.0006756739, -0.0026370161, 0.0007809378, -0.0003526652, -0.0008134969, 0.0055116808, 0.0000000000],
+  [0.0000000000, 0.0000000000, 0.0000000000, 0.0000000000, 0.0000000000, 0.0000000000, 0.0000000000, 0.0000000000, 0.0000000000, 0.0000000000, 0.0000000000, 0.0000000000, 0.0000000000, 0.0000000000, 0.0000000000, 0.0100000000]
+]
+let LBL: Array<Int64 like Idx<16>, Idx<16>> = [
+  [0, 7, 34, 51, 1, 4, 6, 8, 11, 13, 35, 38, 40, 52, 55, 57],
+  [7, 0, 14, 24, 8, 11, 13, 1, 4, 6, 15, 18, 21, 25, 28, 31],
+  [34, 14, 0, 41, 35, 38, 40, 15, 18, 21, 1, 4, 6, 42, 45, 48],
+  [51, 24, 41, 0, 52, 55, 57, 25, 28, 31, 42, 45, 48, 1, 4, 6],
+  [1, 8, 35, 52, 0, 2, 3, 7, 9, 10, 34, 36, 37, 51, 53, 54],
+  [4, 11, 38, 55, 2, 0, 5, 9, 7, 12, 36, 34, 39, 53, 51, 56],
+  [6, 13, 40, 57, 3, 5, 0, 10, 12, 7, 37, 39, 34, 54, 56, 51],
+  [8, 1, 15, 25, 7, 9, 10, 0, 2, 3, 14, 16, 17, 24, 26, 27],
+  [11, 4, 18, 28, 9, 7, 12, 2, 0, 5, 19, 14, 20, 29, 24, 30],
+  [13, 6, 21, 31, 10, 12, 7, 3, 5, 0, 22, 23, 14, 32, 33, 24],
+  [35, 15, 1, 42, 34, 36, 37, 14, 19, 22, 0, 2, 3, 41, 43, 44],
+  [38, 18, 4, 45, 36, 34, 39, 16, 14, 23, 2, 0, 5, 46, 41, 47],
+  [40, 21, 6, 48, 37, 39, 34, 17, 20, 14, 3, 5, 0, 49, 50, 41],
+  [52, 25, 42, 1, 51, 53, 54, 24, 29, 32, 41, 46, 49, 0, 2, 3],
+  [55, 28, 45, 4, 53, 51, 56, 26, 24, 33, 43, 41, 50, 2, 0, 5],
+  [57, 31, 48, 6, 54, 56, 51, 27, 30, 24, 44, 47, 41, 3, 5, 0]
+]
+let BELLT: Array<Float64 like LabelIdx> = [
+  5.080000000000, 1.000000000000, -0.000000000000, -0.000000000000, 1.000000000000, -0.000000000000, -0.000000000000, -1.000000000000, -1.000000000000, -0.000000000000, -0.000000000000, -1.000000000000, -0.000000000000, -1.000000000000, -0.000000000000, -0.000000000000, -0.000000000000, -0.000000000000, -0.000000000000, -0.000000000000, -0.000000000000, -0.000000000000, -0.000000000000, -0.000000000000, -0.000000000000, -0.000000000000, -0.000000000000, -0.000000000000, -0.000000000000, -0.000000000000, -0.000000000000, -0.000000000000, -0.000000000000, -0.000000000000, -1.000000000000, -1.000000000000, -0.000000000000, -0.000000000000, -1.000000000000, -0.000000000000, 1.000000000000, -0.000000000000, -0.000000000000, -0.000000000000, -0.000000000000, -0.000000000000, -0.000000000000, -0.000000000000, -0.000000000000, -0.000000000000, -0.000000000000, -0.000000000000, -1.000000000000, -0.000000000000, -0.000000000000, 1.000000000000, -0.000000000000, -0.000000000000]
+
+// ---- (1) the certificate matrix: LAM2 = G G^T, PSD BY CONSTRUCTION
+//      (a Gram matrix -- no elimination or eigensolve needed) ----
+let LAM2 = method_for(G, G) <@> lambda(x: Array<Float64 like Idx<16>>, y: Array<Float64 like Idx<16>>) -> prodsum(x, y) |> compute
+
+// ---- (2) the 58 label sums of LAM2 vs targets (t', -Bell, 0, ...):
+//      one histogram product (58 x 256) + row-sum prodsums ----
+function LAM2_cell(l: Int64, lbl: Int64, lam2: Float64) -> Float64 =
+  if lbl < l + 1 then (if lbl > l - 1 then lam2 else 0.0) else 0.0
+
+let HIST = method_for(range<LabelIdx>) <*> method_for(range<CellIdx>) <@> lambda(l, c) -> LAM2_cell(l, LBL(c / 16, c % 16), LAM2(c / 16, c % 16)) |> compute
+let ONES: Array<Float64 like CellIdx> = replicate(256, 1.0) |> compute
+let LS = method_for(HIST) <@> lambda(u: Array<Float64 like CellIdx>) -> prodsum(u, ONES) |> compute
+
+// ---- (3) the rigorous ceiling: every non-identity word W is a
+//      product of +-1 observables, so |<W>| <= 1 and
+//      F <= t' + sum_l |dev_l| for ANY quantum state ----
+let tcert = LS((0 : LabelIdx))
+// Label 0 is the identity cell group, whose sum IS t' -- it is read off as
+// tcert above, not approximated, so it carries no deviation to absorb; the
+// fold covers the other 57 labels, the ones multiplied by an unknown <W_l>.
+let devtotal = reduce(method_for(range<LabelIdx>) <@> lambda(l) -> if l < 1 then 0.0 else abs(LS(l) - BELLT(l)), (+))
+let bound_i3322 = (tcert + devtotal) / 4.0 - 1.0
+let tval = 0.0 - 1.0 + 0.25 - 0.0625 + (1.0 - 0.0625) / 2.0 + 0.707106781186548 * sqrt(0.9375)
+let margin = tval - bound_i3322
+let match_V = if devtotal < 0.000001 then "LABEL_SUMS_MATCH_WITHIN_TOLERANCE" else "NO"
+let ceiling_V = if devtotal < 0.000001 then (if bound_i3322 < tval then "QUANTUM_CEILING_CERTIFIED_IN_LANGUAGE" else "NO") else "NO"
+
+// the certified sandwich: local 0.25 (ex 38's 64-sweep) < quantum
+// <= 0.2700000005 (this certificate) < tower 0.3409 (ex 38's Gram point)
+// EXPECT: tcert = 5.08000000024706
+// EXPECT: devtotal = 1.70324753714632e-09
+// EXPECT: bound_i3322 = 0.270000000487578
+// EXPECT: tval = 0.340903196881458
+// EXPECT: margin = 0.0709031963938805
+// EXPECT: match_V = "LABEL_SUMS_MATCH_WITHIN_TOLERANCE"
+// EXPECT: ceiling_V = "QUANTUM_CEILING_CERTIFIED_IN_LANGUAGE"

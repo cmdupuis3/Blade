@@ -1,0 +1,11 @@
+// TEST: Range Multi Index Swapped Tags (rejects)
+// The teeth behind 120. If a multi-index range gave every slot the SAME tag
+// (e.g. the arrow's last-slot ElemType leaking into param typing), 120 would
+// still pass -- both params would carry Lon and A(lat, lon) would typecheck by
+// accident. Swapping the arguments must therefore be REJECTED: it proves the
+// two slots carry genuinely distinct per-slot tags.
+type Lat = Idx<2>
+type Lon = Idx<3>
+let A: Array<Float64 like Lat, Lon> = [[1.0, 2.0, 3.0], [4.0, 5.0, 6.0]]
+let bad = method_for(range<Lat, Lon>) <@> lambda(lat, lon) -> A(lon, lat) * 2.0 |> compute
+// EXPECT: typecheck failure — Array index tag mismatch: slot expects 'Lat' but argument has type 'Lon'.

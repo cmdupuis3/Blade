@@ -1,7 +1,7 @@
 // TEST: Complex Lit Via Let Annotation
-// When a let binding has an explicit Complex128 annotation, the tuple
-// form (re, im) is recognized via bidirectional checkExpr without a
-// trailing : Complex128 cast. This exercises the same checkExpr rule
-// reached from a different entry point.
-let x: Complex128 = (5.0, -7.0)
+// When a let binding has an explicit Complex128 annotation, the
+// complex(re, im) constructor is routed through bidirectional checkExpr
+// (the width-adopting arm) rather than plain inference. This exercises
+// the checkExpr rule reached from the let-annotation entry point.
+let x: Complex128 = complex(5.0, -7.0)
 // EXPECT: x = (5,-7)

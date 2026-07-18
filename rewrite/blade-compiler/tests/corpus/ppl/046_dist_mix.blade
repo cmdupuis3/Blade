@@ -1,0 +1,22 @@
+// TEST: Dist Mix
+import ppl as ppl
+// Mixtures: raw moments mix linearly, cumulants do not — the mixture's
+// kappa2 (40/9) exceeds the weighted kappa2s (8/9) by the between-branch
+// variance (law of total variance, as a former). Weights 1:2 normalize
+// internally; no independence is demanded (mixing is always lawful).
+// A = {0, 1, 2}: m = (1, 5/3, 3); B = {4, 6}: m = (5, 26, 140).
+// Mixture: m1 = 11/3, m2 = (5/3 + 2*26)/3 = 161/9,
+// m3 = (3 + 2*140)/3 = 283/3; kappa2 = 40/9, kappa3 = -104/27.
+type TimeIdx = Idx<3>
+type PairIdx = Idx<2>
+let A: Array<Float64 like Idx<1>, TimeIdx> = [[0.0, 1.0, 2.0]]
+let B: Array<Float64 like Idx<1>, PairIdx> = [[4.0, 6.0]]
+let d1 = ppl.dist(A, 3)
+let d2 = ppl.dist(B, 3)
+let mx = ppl.dist_mix(1.0, d1, 2.0, d2)
+let k1 = ppl.cumulant(mx, 1)
+let k2 = ppl.cumulant(mx, 2)
+let k3 = ppl.cumulant(mx, 3)
+// EXPECT: k1 = [3.66666666666667]
+// EXPECT: k2 = [4.44444444444444]
+// EXPECT: k3 = [-3.85185185185185]

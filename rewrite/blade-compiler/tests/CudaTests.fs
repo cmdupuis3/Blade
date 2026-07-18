@@ -476,6 +476,26 @@ let A = [1.0, 2.0, 3.0]
 let B = [4.0, 5.0, 6.0]
 let (p, q) = (method_for(A, B) <@> lambda(x, y) where cuda(block: 64) -> x * y) <&!> (method_for(A, B) <@> lambda(x, y) where cuda(block: 64) -> x + y) |> compute
 """
+        // <&> SOFT JOIN over independent cuda leaves: leaves that cannot
+        // co-fuse (different extents / block sizes / arities) still run as
+        // per-leaf kernels, launched via split begin/end wrappers with
+        // round-robin device assignment inside the .cu (one device => the
+        // default stream serializes; more => the begin pass overlaps). The
+        // SAME source serves as its own host oracle (clauses inert gate-off).
+        let softRect = """
+let A = [1.0, 2.0, 3.0, 4.0, 5.0, 6.0]
+let B = [10.0, 20.0, 30.0, 40.0]
+let (u, v) = (method_for(A) <@> lambda(x) where cuda(block: 64) -> x * 2.0) <&> (method_for(B) <@> lambda(y) where cuda(block: 32) -> y + 100.0) |> compute
+"""
+        let softSimp = """
+let A = [1.0, 2.0, 3.0, 4.0, 5.0]
+let B = [2.0, 4.0, 6.0]
+let (m2a, m2b) = (method_for(A, A) <@> lambda(x, y) where comm(x, y), cuda(block: 32) -> x * y) <&> (method_for(B, B) <@> lambda(x, y) where comm(x, y), cuda(block: 64) -> x * y + 1.0) |> compute
+"""
+        let softMixed = """
+let A = [1.0, 2.0, 3.0, 4.0]
+let (u, m2) = (method_for(A) <@> lambda(x) where cuda(block: 64) -> x * 3.0) <&> (method_for(A, A) <@> lambda(x, y) where comm(x, y), cuda(block: 32) -> x * y) |> compute
+"""
         let cases =
             [ ("rank1", rank1Host, rank1Cuda)
               ("cofuse_rank1", cofuse1Host, cofuse1Cuda)
@@ -494,7 +514,10 @@ let (p, q) = (method_for(A, B) <@> lambda(x, y) where cuda(block: 64) -> x * y) 
               ("anti4_simplex", anti4Host, anti4Cuda)
               ("sym5_simplex", sym5Host, sym5Cuda)
               ("anti5_simplex", anti5Host, anti5Cuda)
-              ("joint_2d", joint2dHost, joint2dCuda) ]
+              ("joint_2d", joint2dHost, joint2dCuda)
+              ("softjoin_rect", softRect, softRect)
+              ("softjoin_simplicial", softSimp, softSimp)
+              ("softjoin_mixed", softMixed, softMixed) ]
 
         let mutable failures = 0
         let mutable passed = 0
@@ -512,5 +535,79 @@ let (p, q) = (method_for(A, B) <@> lambda(x, y) where cuda(block: 64) -> x * y) 
         let symRc = runHostCompileCase "sym_output" symHost "R = ["
         if symRc = 0 then passed <- passed + 1
         else (failures <- failures + 1; failedNames <- failedNames @ ["sym_output"])
+        // Soft-join STRUCTURE: the .cu must carry per-leaf kernels + split
+        // begin/end wrappers with in-wrapper device selection, and the host
+        // must sequence EVERY begin before the FIRST end (that ordering is
+        // what multi-device overlap exploits). Call sites are distinguished
+        // from the extern-C protos by their pool_base(...) arguments.
+        let softStructRc =
+            let label = "softjoin_structure"
+            try
+                CodeGen.setCudaEmitMode true
+                let outcome =
+                    match genVariant "cuda_softjoin_struct" softRect with
+                    | Error e -> Error e
+                    | Ok (_, None) -> Error "no .cu emitted for the soft join"
+                    | Ok (cppFile, Some cuFile) ->
+                        let cu = File.ReadAllText cuFile
+                        let cpp = File.ReadAllText cppFile
+                        let countOf (hay: string) (needle: string) =
+                            let mutable c = 0
+                            let mutable i = hay.IndexOf needle
+                            while i >= 0 do
+                                c <- c + 1
+                                i <- hay.IndexOf(needle, i + needle.Length)
+                            c
+                        let kernels = countOf cu "__global__ void __cuda_"
+                        let lastBegin = cpp.LastIndexOf "_begin(pool_base"
+                        let firstEnd = cpp.IndexOf "_end(pool_base"
+                        if kernels <> 2 then Error (sprintf "expected 2 kernels, .cu has %d" kernels)
+                        elif not (cu.Contains "cudaGetDeviceCount") then Error "no in-wrapper device query"
+                        elif countOf cu "_begin(" < 2 || countOf cu "_end(" < 2 then Error "missing split wrappers"
+                        elif lastBegin < 0 || firstEnd < 0 then Error "host begin/end calls not found"
+                        elif lastBegin > firstEnd then Error "host does not sequence all begins before ends"
+                        else Ok ()
+                CodeGen.setCudaEmitMode false
+                match outcome with
+                | Ok () ->
+                    Blade.Tests.TestHarness.resultLine Blade.Tests.TestHarness.Pass label "per-leaf begin/end + device round-robin emitted"
+                    0
+                | Error e ->
+                    Blade.Tests.TestHarness.resultLine Blade.Tests.TestHarness.Fail label e
+                    1
+            with ex ->
+                CodeGen.setCudaEmitMode false
+                Blade.Tests.TestHarness.resultLine Blade.Tests.TestHarness.Fail label ex.Message
+                1
+        if softStructRc = 0 then passed <- passed + 1
+        else (failures <- failures + 1; failedNames <- failedNames @ ["softjoin_structure"])
+        // <&!> stays HARD: the same unfusable pair under mandatory fusion is
+        // still a loud codegen diagnostic, not a silent soft-join.
+        let hardRc =
+            let label = "softjoin_not_for_hard_join"
+            let hardSrc = softRect.Replace("<&>", "<&!>")
+            try
+                CodeGen.setCudaEmitMode true
+                let outcome =
+                    match genVariant "cuda_softjoin_hard" hardSrc with
+                    | Error e -> Error e
+                    | Ok (cppFile, _) ->
+                        let cpp = File.ReadAllText cppFile
+                        if cpp.Contains "cannot fuse" then Ok ()
+                        else Error "expected the <&!> cannot-fuse diagnostic in the emitted host code"
+                CodeGen.setCudaEmitMode false
+                match outcome with
+                | Ok () ->
+                    Blade.Tests.TestHarness.resultLine Blade.Tests.TestHarness.Pass label "<&!> still rejects loudly"
+                    0
+                | Error e ->
+                    Blade.Tests.TestHarness.resultLine Blade.Tests.TestHarness.Fail label e
+                    1
+            with ex ->
+                CodeGen.setCudaEmitMode false
+                Blade.Tests.TestHarness.resultLine Blade.Tests.TestHarness.Fail label ex.Message
+                1
+        if hardRc = 0 then passed <- passed + 1
+        else (failures <- failures + 1; failedNames <- failedNames @ ["softjoin_not_for_hard_join"])
         printFooter "CUDA Kernel" [sprintf "%d passed" passed; sprintf "%d failure(s)" failures]
         { Block = "CUDA Kernel"; Passed = passed; Failed = failures; Skipped = 0; FailedNames = failedNames }

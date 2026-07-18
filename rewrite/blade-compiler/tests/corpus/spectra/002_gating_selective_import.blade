@@ -1,0 +1,6 @@
+// TEST: Spectra gating: selective import steers to qualified (rejects)
+// `from spectra import ...` would reintroduce the global names the module
+// system removes; the elaborator rejects it with steering toward
+// `import spectra [as <alias>]`.
+from spectra import fft
+let r = 1.0

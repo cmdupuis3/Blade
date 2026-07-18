@@ -26,6 +26,10 @@
          data reader into StaticEval's provider hook (fold + provenance).
          Must follow both NetcdfProvider.fs and StaticEval.fs. -->
     <Compile Include="ProviderStatics.fs" />
+    <!-- Staged-former unfold pass (staged tower Phase 1): eliminates
+         `static method_for/object_for/for` before every elaboration stage.
+         Needs Ast + StaticEval only; runs first in typeCheck's pipeline. -->
+    <Compile Include="Unfold.fs" />
     <!-- Open where-clause constraint registry: extension modules register
          handlers for constraint keywords (PPL: indep); the checker
          dispatches WhereClause.Custom conjuncts through it. -->
@@ -45,6 +49,21 @@
          (a SEPARATE fsproj); core touchpoint is the PplElaborate.expand
          pipeline stage in TypeCheck.typeCheck. -->
     <Compile Include="ppl/compiler/PplElaborate.fs" />
+    <!-- Math compiler layer (Blade.Math.*): tensor decompositions
+         (Jacobi SVD/eigh, mode-n unfolding, HOSVD) elaborated to plain
+         Blade source. Lives under math/compiler/ beside the BladeMath
+         reference project (a SEPARATE fsproj); core touchpoint is the
+         MathElaborate.expand pipeline stage in TypeCheck.typeCheck. -->
+    <Compile Include="math/compiler/MathDecls.fs" />
+    <Compile Include="math/compiler/MathElaborate.fs" />
+    <Compile Include="rand/compiler/RandElaborate.fs" />
+    <!-- Spectra compiler layer (Blade.Spectra.*): FFT + arity-polymorphic
+         polyspectra elaborated to plain Blade source. Lives under
+         spectra/compiler/ beside the BladeSpectra oracle (a SEPARATE
+         fsproj); core touchpoint is the SpectraElaborate.expand pipeline
+         stage in TypeCheck.typeCheck. -->
+    <Compile Include="spectra/compiler/SpectraDecls.fs" />
+    <Compile Include="spectra/compiler/SpectraElaborate.fs" />
     <Compile Include="IndexTypeValidator.fs" />
     <Compile Include="Unify.fs" />
     <Compile Include="TypeEnv.fs" />
@@ -90,6 +109,9 @@
     <Compile Include="tests/Test_Oracles.fs" />
     <Compile Include="tests/Test_WignerTables.fs" />
     <Compile Include="tests/Test_Ppl.fs" />
+    <Compile Include="tests/Test_Math.fs" />
+    <Compile Include="tests/Test_Rand.fs" />
+    <Compile Include="tests/Test_Spectra.fs" />
     <Compile Include="tests/Differential.fs" />
     <Compile Include="tests/Benchmarks.fs" />
     <Compile Include="tests/CudaTests.fs" />
@@ -137,6 +159,10 @@
     </None>
     <None Include="cpp/linearized_storage.hpp">
       <Link>cpp/linearized_storage.hpp</Link>
+      <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
+    </None>
+    <None Include="cpp/rand_runtime.hpp">
+      <Link>cpp/rand_runtime.hpp</Link>
       <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
     </None>
   </ItemGroup>

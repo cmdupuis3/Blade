@@ -1,0 +1,8 @@
+// TEST: Spectra fft: DC (all-ones), n=8
+// FFT of a constant is n at bin 0 and exactly zero elsewhere — the zeros
+// propagate exactly through every butterfly stage (a twiddle times zero is
+// zero), so the pins are analytic, not oracle-derived.
+import spectra as sp
+let x: Array<Float64 like Idx<8>> = [1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0]
+let X = sp.fft(x)
+// EXPECT: X = [(8, 0), (0, 0), (0, 0), (0, 0), (0, 0), (0, 0), (0, 0), (0, 0)]

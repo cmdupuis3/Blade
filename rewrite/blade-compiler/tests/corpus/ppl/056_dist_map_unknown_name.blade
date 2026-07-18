@@ -1,0 +1,9 @@
+// TEST: Dist Map Unknown Function Name (rejects)
+import ppl as ppl
+// The map slot only resolves same-module top-level functions (grad's
+// rule); an unknown name is a parse-shape error with the full steering
+// message, not a silent fall-through.
+type TimeIdx = Idx<3>
+let A: Array<Float64 like Idx<1>, TimeIdx> = [[0.0, 1.0, 2.0]]
+let xd = ppl.dist(A, 2)
+let dy = ppl.dist_map(xd, 1, nonexistent)

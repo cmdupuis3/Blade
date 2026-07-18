@@ -1,0 +1,8 @@
+// TEST: Math eig: triangular matrix, exact diagonal spectrum
+// A triangular input has its eigenvalues on the diagonal; the l-scan
+// freezes every window without a single chase, so the result is exact.
+import math as m
+let A: Array<Float64 like Idx<3>, Idx<3>> = [[3.0, 1.0, 2.0], [0.0, 1.0, 5.0], [0.0, 0.0, 2.0]]
+let (RE, IM) = m.eig(A)
+// EXPECT: RE = [3, 2, 1]
+// EXPECT: IM = [0, 0, 0]

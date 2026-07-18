@@ -1,0 +1,20 @@
+// TEST: Dist Atoms
+import ppl as ppl
+// The signed-atomic constructor: dist_atoms(r, x1, w1, ...) carries the
+// order-r tower of sum w_i delta(x_i) / sum w. Positive weights subsume
+// the point-tower renewal (one call instead of chained mixes); the
+// constructor is deliberately sign-agnostic (ppl/050 uses that).
+// Weights (1/4, 1/2, 1/4) on {0, 1, 2}: kappa = (1, 1/2, 0, -1/4).
+let qd = ppl.dist_atoms(4, 0.0, 0.25, 1.0, 0.5, 2.0, 0.25)
+let k1 = ppl.cumulant(qd, 1)
+let k2 = ppl.cumulant(qd, 2)
+let k3 = ppl.cumulant(qd, 3)
+let k4 = ppl.cumulant(qd, 4)
+// and it composes: size-bias the atoms (ppl/044's reweight on a built dist)
+let sb = ppl.dist_reweight(qd, 0.0, 1.0)
+let sb1 = ppl.cumulant(sb, 1)
+// EXPECT: k1 = [1.0]
+// EXPECT: k2 = [0.5]
+// EXPECT: k3 = [0.0]
+// EXPECT: k4 = [-0.25]
+// EXPECT: sb1 = [1.5]

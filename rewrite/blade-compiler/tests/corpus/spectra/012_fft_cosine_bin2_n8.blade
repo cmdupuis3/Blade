@@ -1,0 +1,8 @@
+// TEST: Spectra fft: pure cosine at bin 2, n=8 radix-2 path
+// x(i) = cos(2pi*2*i/8) concentrates at bins 2 and 6 with weight n/2 = 4.
+// Inputs are the G17 literals the oracle evaluated (bit-identical doubles);
+// pins from spectra/OracleDump.fs (dotnet run --project spectra/BladeSpectra.fsproj).
+import spectra as sp
+let x: Array<Float64 like Idx<8>> = [1.0, 6.123233995736766E-17, -1.0, -1.8369701987210297E-16, 1.0, 3.0616169978683831E-16, -1.0, -4.2862637970157361E-16]
+let X = sp.fft(x)
+// EXPECT: X = [(-2.4492935982947054E-16, 0), (-3.4638242249419736E-16, 0), (4, -9.7971743931788257E-16), (3.4638242249419731E-16, 4.9303806576313238E-32), (2.4492935982947054E-16, 0), (3.4638242249419736E-16, 0), (4, 9.7971743931788257E-16), (-3.4638242249419731E-16, -4.9303806576313238E-32)]

@@ -1,0 +1,9 @@
+// TEST: Dist Jet Vector Shape (rejects)
+import ppl as ppl
+// A vector D2 must carry m·C(d+1, 2) = 2·3 = 6 coordinate-major cells —
+// 5 is a located shape error naming the expected layout.
+type TimeIdx = Idx<3>
+let B: Array<Float64 like Idx<2>, TimeIdx> = [[1.0, 2.0, 4.0], [3.0, 5.0, 4.0]]
+let db = ppl.dist(B, 6)
+let m = ppl.cumulant(db, 1)
+let dy = ppl.dist_jet(db, 3, [m(0) + m(1), m(0) * m(1)], [1.0, 1.0, m(1), m(0)], [0.0, 0.0, 0.0, 0.0, 1.0])

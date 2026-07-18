@@ -19,8 +19,12 @@ them as assets: edit deliberately, never regenerate mechanically.
   the compiler refuses it. Renaming a test changes its semantics; see the
   guard-combinators/007 header for a cautionary tale about duplicate names.
 - `// EXPECT: <var> = <value>` lines are parsed by tests/Expect.fs and checked
-  against the program's printed output. Arrays, 2-D arrays, complex pairs
-  `(re, im)`, and quoted strings are supported.
+  against the program's printed output. Scalars, 1-D arrays, complex pairs
+  `(re, im)`, and quoted strings are checked.
+- **2-D `[[..]]` expectations parse but are NOT checked** — Expect.fs matches
+  `ExpectedArray2D` and returns "no failure" unconditionally, so a nested EXPECT
+  silently asserts nothing. Multi-dimensional results print FLAT anyway, so pin
+  them as a flat 1-D list, which is really checked.
 - Files run in ordinal filename order — keep the `NNN_` prefix.
 
 ## Categories

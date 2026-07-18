@@ -42,8 +42,9 @@ type CodeGenContext = {
     StreamedArrays: Map<string, ProviderReadSpec>
     /// Deferred random-fill constructors, keyed by the receiving binding's IRId,
     /// lifted from IRModule.RandomInits. Consumed by genBinding to emit
-    /// allocate<> + the runtime fill_random. Value is the modulus expression.
-    RandomInits: Map<IRId, IRExpr>
+    /// allocate<> + a pool fill. Value is a RandomFillSpec (fill_random modulus,
+    /// or a rand.uniform/normal key).
+    RandomInits: Map<IRId, RandomFillSpec>
     /// Deferred compound-construction constructors (compound(dense, mask)), keyed
     /// by the receiving binding's IRId, lifted from IRModule.CompoundInits.
     /// Consumed by genBinding to emit P0 index materialization + a dense->compact
@@ -765,6 +766,13 @@ let unaryOpToCpp = function
     | IRConj -> "std::conj"   // function-call form; exprToCppCore/exprToCppSimple
                               // special-case IRConj for the complex-vs-real
                               // decision (real conj is the identity)
+    // std::real/std::imag/std::arg are <complex> free functions with C++11
+    // arithmetic-type overloads (std::real(double)=x, std::imag(double)=0,
+    // std::arg(double)=0/pi), so they render through the generic unary arm on
+    // both complex and real operands with no special-casing.
+    | IRReal -> "std::real"
+    | IRImag -> "std::imag"
+    | IRArg -> "std::arg"
     | IRMath name -> "std::" + name  // function-call form via the generic
                                      // `op(expr)` unary arm
 
@@ -776,6 +784,54 @@ let rec isComplexType (t: IRType) : bool =
     | IRTIdxTagged (inner, _) -> isComplexType inner
     | IRTUnitAnnotated (inner, _) -> isComplexType inner
     | _ -> false
+
+/// Project an IRType to its underlying scalar element type, if any.
+let rec scalarElemOf (t: IRType) : ElemType option =
+    match t with
+    | IRTScalar et -> Some et
+    | IRTIdxTagged (inner, _) -> scalarElemOf inner
+    | IRTUnitAnnotated (inner, _) -> scalarElemOf inner
+    | _ -> None
+
+/// Coerce a rendered scalar operand so it matches the C++ std::complex operator
+/// overload set for a complex-typed binop result. std::complex's arithmetic
+/// operators are same-type only: `complex<double> * 2` and `complex<double> *
+/// floatVar` both fail template deduction (T deduces to two types), and
+/// `complex<double> ⊕ complex<float>` has no overload. So any operand whose
+/// element type is not exactly the result's component type is cast: integers
+/// and mismatched-width floats to the component real type; a narrower complex
+/// is widened via std::complex's converting constructor. A matching-width real
+/// float or same-width complex passes through unchanged.
+let coerceComplexOperand (resultElem: ElemType) (operandElem: ElemType) (rendered: string) : string =
+    match resultElem with
+    | ETComplex128 ->
+        match operandElem with
+        | ETComplex128 | ETFloat64 -> rendered
+        | ETComplex64 -> sprintf "std::complex<double>(%s)" rendered
+        | ETFloat32 | ETInt64 | ETInt32 -> sprintf "(double)(%s)" rendered
+        | _ -> rendered
+    | ETComplex64 ->
+        match operandElem with
+        | ETComplex64 | ETFloat32 -> rendered
+        | ETInt64 | ETInt32 -> sprintf "(float)(%s)" rendered
+        | _ -> rendered
+    | _ -> rendered
+
+/// Emit a binop, inserting complex-operand coercions when the promoted result
+/// is complex. `renderBin` is the caller's fallback (`(l op r)`), used verbatim
+/// for the common non-complex path so nothing changes there.
+let emitBinOpWithComplexCoercion
+        (op: IRBinOp) (l: IRExpr) (r: IRExpr) (lStr: string) (rStr: string)
+        (inferTy: IRExpr -> IRType) (binToCpp: IRBinOp -> string) : string =
+    match scalarElemOf (inferTy l), scalarElemOf (inferTy r) with
+    | Some le, Some re ->
+        match promoteElemType le re with
+        | Some ((ETComplex64 | ETComplex128) as resElem) ->
+            let lC = coerceComplexOperand resElem le lStr
+            let rC = coerceComplexOperand resElem re rStr
+            sprintf "(%s %s %s)" lC (binToCpp op) rC
+        | _ -> sprintf "(%s %s %s)" lStr (binToCpp op) rStr
+    | _ -> sprintf "(%s %s %s)" lStr (binToCpp op) rStr
 
 /// Render a float as a C++ double literal. Two invariants the old
 /// `sprintf "%g"` violated (silently, at every literal site):
@@ -830,7 +886,7 @@ let rec exprToCppSimple (names: Map<IRId, string>) (expr: IRExpr) : string =
         let lStr = exprToCppSimple names l
         let rStr = exprToCppSimple names r
         if op = IRCaret then sprintf "pow(%s, %s)" lStr rStr
-        else sprintf "(%s %s %s)" lStr (binOpToCpp op) rStr
+        else emitBinOpWithComplexCoercion op l r lStr rStr inferExprType binOpToCpp
     | IRUnaryOp (IRConj, e) ->
         let inner = exprToCppSimple names e
         if isComplexType (inferExprType e) then sprintf "std::conj(%s)" inner
@@ -1070,10 +1126,40 @@ let rec evalDepIdxExtent (outerId: IRId) (i: int) (expr: IRExpr) : int option =
 let rec exprToCppCore (subst: SubstMap) (names: Map<IRId, string>) (expr: IRExpr) : string =
     match expr with
     | IRLit lit -> litToCpp lit
-    | IRVar (id, _) -> 
-        match Map.tryFind id names with
-        | Some name -> name
-        | None -> sprintf "__v%d" id
+    | IRVar (id, _) ->
+        // A reference to a lifted callable WITH captures cannot stand bare
+        // in value position: the lifted C++ function carries trailing
+        // capture params, so the bare name neither converts to a
+        // std::function of the surface arity nor direct-calls correctly.
+        // Close the captures with an inline forwarding closure — the same
+        // [&]-by-name chain as genCallableWrapper/genVarAliasBinding, valid
+        // in any scope where the captured locals are visible (i.e. wherever
+        // the lambda literal / partial application appeared). Capture-free
+        // callables keep the bare name (a plain function converts fine).
+        // The `callable.Id = id` guard matters: resolveCallable also sees
+        // THROUGH let-aliases, but an alias var is already a std::function
+        // of the surface arity with captures closed (genVarAliasBinding) —
+        // render it by name; only the direct lifted-callable reference
+        // needs the closure.
+        match resolveCallable expr with
+        | Some callable when callable.Id = id && not (List.isEmpty callable.Captures) ->
+            let safeName = sanitizeCppName callable.Name
+            let paramSig =
+                callable.Params
+                |> List.map (fun p ->
+                    match p.Type with
+                    | ArrayElem arr -> sprintf "%s %s" (cppArrayTypeStr arr) p.Name
+                    | _ -> sprintf "%s %s" (irTypeToCpp p.Type) p.Name)
+                |> String.concat ", "
+            let allArgs =
+                (callable.Params |> List.map (fun p -> p.Name))
+                @ (callable.Captures |> List.map (fun c -> c.Name))
+                |> String.concat ", "
+            sprintf "[&](%s) { return %s(%s); }" paramSig safeName allArgs
+        | _ ->
+            match Map.tryFind id names with
+            | Some name -> name
+            | None -> sprintf "__v%d" id
     | IRParam (name, _, _) -> name
     | IRBinOp (_, op, l, r) ->
         let lStr = exprToCppCore subst names l
@@ -1081,7 +1167,7 @@ let rec exprToCppCore (subst: SubstMap) (names: Map<IRId, string>) (expr: IRExpr
         if op = IRCaret then
             sprintf "pow(%s, %s)" lStr rStr
         else
-            sprintf "(%s %s %s)" lStr (binOpToCpp op) rStr
+            emitBinOpWithComplexCoercion op l r lStr rStr inferExprType binOpToCpp
     | IRUnaryOp (IRConj, e) ->
         // conj is std::conj on complex operands; the identity on reals
         // (mathematically conj(x)=x for real x, and std::conj(double) would
@@ -1145,14 +1231,25 @@ let rec exprToCppCore (subst: SubstMap) (names: Map<IRId, string>) (expr: IRExpr
         // as-is (the wrapper carries its own shape via .extents/.lens/
         // .offsets); no companion-arg synthesis. Non-array args render
         // through exprToCpp normally.
-        let funcStr = exprToCppCore subst names func
+        // A callee that IS a lifted callable with captures (direct
+        // reference, not a let-alias: resolveCallable sees through aliases,
+        // but an alias var is already a std::function with captures closed
+        // — call that by name) is called directly with the capture args
+        // appended, since the lifted signature is regular params + capture
+        // params.
+        let funcStr, captureArgs =
+            match func, resolveCallable func with
+            | IRVar (fid, _), Some callable when callable.Id = fid && not (List.isEmpty callable.Captures) ->
+                (sanitizeCppName callable.Name,
+                 callable.Captures |> List.map (fun c -> c.Name))
+            | _ -> (exprToCppCore subst names func, [])
         let argStrs =
             args |> List.collect (fun a ->
                 let argStr = exprToCppCore subst names a
                 match a, inferExprType a with
                 | (IRVar _ | IRParam _), ArrayElem _ -> [argStr]
                 | _ -> [argStr])
-        sprintf "%s(%s)" funcStr (argStrs |> String.concat ", ")
+        sprintf "%s(%s)" funcStr (argStrs @ captureArgs |> String.concat ", ")
     | IRLet (id, value, body) ->
         renderLetExpr subst names id value body
     | IRMethodFor _ -> exprError "loop object used as value"
@@ -1903,15 +2000,17 @@ and renderUnitStmts (subst: SubstMap) (names: Map<IRId, string>) (expr: IRExpr) 
         sprintf "if (!(%s)) { std::cerr << \"%s\" << std::endl; std::exit(1); }"
             (exprToCppCore subst names cond) message
     | IRForRange (vid, lo, hi, body) ->
-        // Same loop-var naming (__k<id>) and size_t convention as
+        // Same loop-var naming (__k<id>) and int64_t convention as
         // genForRangeBinding / EmitCpp.forLoopFrom, so inlined kernel
-        // loops read like their module-level counterparts.
+        // loops read like their module-level counterparts. int64_t, not
+        // size_t: the loop var is the user's Int64 for-in variable, and an
+        // unsigned binding wraps negative intermediates in body arithmetic.
         let varName = sprintf "__k%d" vid
         let names' = Map.add vid varName names
         let loStr = exprToCppCore subst names lo
         let hiStr = exprToCppCore subst names hi
         let bodyStmts = renderUnitStmts subst names' body
-        sprintf "for (size_t %s = %s; %s < %s; %s++) { %s }" varName loStr varName hiStr varName bodyStmts
+        sprintf "for (int64_t %s = %s; %s < %s; %s++) { %s }" varName loStr varName hiStr varName bodyStmts
     | IRLet (letId, value, body) ->
         // Statement-position let chain (a nested block): declare non-unit
         // values, splice unit statements, continue down the chain. Inline
@@ -2831,17 +2930,22 @@ let genElementBindingNew (level: LoopIndexBinding) (elem: ElementBinding) (curre
         // materialization step (genCompoundIndexFromMask) before the nest.
         // Offsets are not meaningful on a masked product space; TypeCheck
         // never produces one for a compound range slot.
-        let code = sprintf "size_t %s = %s_cidx->unhash(%s)[%d];"
+        let code = sprintf "int64_t %s = %s_cidx->unhash(%s)[%d];"
                            elem.ParamName elem.ArrayName level.IndexName elem.RankComponent
         (code, elem.ParamName)
     | VirtualRange offset ->
-        // range<I>: kernel param gets the loop index, plus offset if present
+        // range<I>: kernel param gets the loop index, plus offset if present.
+        // The binding must be int64_t, NOT size_t: the param is Int64-typed in
+        // Blade (and the standalone lambda signature), and a size_t binding
+        // makes negative intermediates wrap unsigned before any Float64
+        // conversion — 0.5 * (i - 1) at i=0 came out as 0.5 * 2^64-1.
+        // Same signedness rule for the unhash and reverse arms above/below.
         let valueExpr =
             match offset with
             | None -> level.IndexName
             | Some (IRLit (IRLitInt n)) -> sprintf "(%s + %dL)" level.IndexName n
             | Some off -> sprintf "(%s + %s)" level.IndexName (exprToCpp Map.empty off)
-        let code = sprintf "size_t %s = %s;" elem.ParamName valueExpr
+        let code = sprintf "int64_t %s = %s;" elem.ParamName valueExpr
         (code, elem.ParamName)
     | VirtualReverse ->
         // reverse<I>: kernel param gets (extent - 1 - i)
@@ -2849,7 +2953,7 @@ let genElementBindingNew (level: LoopIndexBinding) (elem: ElementBinding) (curre
             match level.Extent with
             | IRLit (IRLitInt n) -> sprintf "%d" n
             | _ -> sprintf "%s.extents[%d]" elem.ArrayName elem.DimIndex
-        let code = sprintf "size_t %s = (%s - 1 - %s);" elem.ParamName extentStr level.IndexName
+        let code = sprintf "int64_t %s = (%s - 1 - %s);" elem.ParamName extentStr level.IndexName
         (code, elem.ParamName)
     | RealArray when level.FusedRank.IsSome ->
         // Arc 1 fused JOINT level (see IR.fuseJointSLevels): this single loop
@@ -3798,6 +3902,7 @@ let genIncludes () : string list =
      "// Note: OpenMP disabled for portability"
      (if ompTestModeEnabled () then "#include <omp.h>  // omp-coverage test-mode instrumentation" else "// #include <omp.h>")
      "#include \"nested_array_utilities.cpp\""
+     "#include \"rand_runtime.hpp\""
      "using namespace nested_array_utilities;"
      "using std::cout;"
      "using std::endl;"
@@ -3876,7 +3981,11 @@ let runtimeHeaderNames : string list =
       // Host combinadic linearize/unlinearize â€” included only by MPI-mode
       // programs (genMpiNestSimplicial), but deployed unconditionally so the
       // deploy/cleanup bookkeeping stays uniform.
-      "linearized_storage.hpp" ]
+      "linearized_storage.hpp"
+      // `rand` module runtime (blade_rand::uniform/normal). Deployed
+      // unconditionally (header-only, cheap); referenced by every program's
+      // include list.
+      "rand_runtime.hpp" ]
 
 /// Deploy every C++ runtime header next to a generated .cpp so its `#include`s
 /// resolve at g++ time with no -I flag. These are pre-existing static files in
@@ -3906,6 +4015,7 @@ let genIncludesExternal () : string list =
      "#include <omp.h>"
      "#include \"nested_array_utilities.hpp\""
      "#include \"nested_array_types.hpp\""
+     "#include \"rand_runtime.hpp\""
      "using std::cout;"
      "using std::endl;"
      ""
@@ -4142,9 +4252,40 @@ let genArrayLiteral (ctx: CodeGenContext) (varName: string) (elements: IRExpr li
             [extentsDecl; lensDecl; offsetsDecl; flatDecl; rowPtrsDecl] @ rowPtrsInit @ [wrapperDecl]
     else
         // Rectangular path: existing behavior.
-        let dims = computeArrayDims (IRArrayLit (elements, arrType))
+        let structuralDims = computeArrayDims (IRArrayLit (elements, arrType))
+        // Rows-of-computed-arrays: when the literal's nesting is shallower
+        // than the declared rank — elements are array-VALUED expressions
+        // (e.g. `method_for(..) |> compute` results bound to names) rather
+        // than nested bracket literals — computeArrayDims only sees the
+        // bracket levels. The missing inner extents come from the array
+        // type's trailing IndexTypes (the typechecker has already verified
+        // each element against exactly those index types). Without this,
+        // the extents table was emitted short ({2} for a rank-2 array, so
+        // extents[1] read as 0) and every downstream shape consumer — the
+        // auto-print loop, method_for fibers over rows — saw zero-length
+        // rows: a silent miscompile (M = [], prodsum = 0).
+        let dims =
+            if structuralDims.Length >= rank then structuralDims
+            elif arrType.IndexTypes |> List.forall (fun ix -> ix.Rank = 1) then
+                let tail =
+                    arrType.IndexTypes
+                    |> List.skip structuralDims.Length
+                    |> List.map (fun ix ->
+                        match ix.Extent with
+                        | IRLit (IRLitInt n) -> Some (int n)
+                        | _ -> None)
+                if tail |> List.forall Option.isSome
+                then structuralDims @ (tail |> List.map Option.get)
+                else structuralDims
+            else structuralDims
         if dims.IsEmpty then
             [sprintf "%s// Empty array literal" ind]
+        elif dims.Length < rank then
+            // Inner extents couldn't be recovered statically (parametric or
+            // compound index types). Refuse loudly rather than emit the
+            // short-extents table that silently reads as empty.
+            [sprintf "%s#error \"Blade codegen: array literal for '%s' nests %d level(s) but the declared rank is %d, and the missing inner extents are not static — bind the rows to a fully-literal array or annotate with static Idx<n> extents\""
+                ind varName dims.Length rank]
         else
             // Generate extents declaration
             let extentsValues = dims |> List.map string |> String.concat ", "
@@ -4220,8 +4361,43 @@ let genArrayLiteral (ctx: CodeGenContext) (varName: string) (elements: IRExpr li
                     // Per-element path: walk the nested IRArrayLit. Index path
                     // accumulates as we descend; leaves render via exprToCpp.
                     walkLeaves [] (IRArrayLit (elements, arrType))
-                    |> List.map (fun (path, leaf) ->
-                        sprintf "%s%s%s = %s;" ind varName (formatIndexPath path) (exprToCpp ctx.VarNames leaf))
+                    |> List.collect (fun (path, leaf) ->
+                        if path.Length >= rank then
+                            [sprintf "%s%s%s = %s;" ind varName (formatIndexPath path) (exprToCpp ctx.VarNames leaf)]
+                        else
+                            // Array-valued leaf (a computed row): deep-copy the
+                            // remaining dims elementwise. Assigning the Array
+                            // wrapper into the row slot would alias the row to
+                            // the source's buffer instead of copying (and for
+                            // deeper rank gaps doesn't even compile).
+                            //
+                            // The loop bounds come from the DECLARED extents;
+                            // annotation-vs-actual extent mismatches are not
+                            // (yet) rejected by unify for computed arrays, so
+                            // guard each copied dim at runtime — a mismatch
+                            // must be a loud exit(1), not an OOB read.
+                            let subDims = dims |> List.skip path.Length
+                            let srcName = sprintf "__cpsrc_%s" (path |> List.map string |> String.concat "_")
+                            let loopVars = subDims |> List.mapi (fun j _ -> sprintf "__cp%d" j)
+                            let idxSuffix = loopVars |> List.map (sprintf "[%s]") |> String.concat ""
+                            let srcDecl =
+                                sprintf "%s    const auto& %s = (%s);" ind srcName (exprToCpp ctx.VarNames leaf)
+                            let guards =
+                                subDims |> List.mapi (fun j n ->
+                                    sprintf "%s    if (%s.extents[%d] != %d) { std::cerr << \"Blade runtime: array literal row %s of '%s' has extent \" << %s.extents[%d] << \" in dim %d, but the declared type expects %d\" << std::endl; std::exit(1); }"
+                                        ind srcName j n (formatIndexPath path) varName srcName j j n)
+                            let opens =
+                                List.zip loopVars subDims
+                                |> List.mapi (fun j (v, n) ->
+                                    sprintf "%s    %sfor (size_t %s = 0; %s < %d; %s++) {" ind (String.replicate j "    ") v v n v)
+                            let body =
+                                sprintf "%s    %s%s%s%s = %s%s;"
+                                    ind (String.replicate subDims.Length "    ")
+                                    varName (formatIndexPath path) idxSuffix
+                                    srcName idxSuffix
+                            let closes =
+                                [for j in subDims.Length - 1 .. -1 .. 0 -> sprintf "%s    %s}" ind (String.replicate j "    ")]
+                            [sprintf "%s{" ind] @ [srcDecl] @ guards @ opens @ [body] @ closes @ [sprintf "%s}" ind])
             
             [extentsDecl; allocDecl] @ initCode
 
@@ -4472,7 +4648,7 @@ let buildSimpleApplyInfo (arrays: IRExpr list) (kernel: IRExpr) (outputType: IRT
 /// self-contained MSVC DLL (nvcc -shared) that the g++/-lmsmpi host links
 /// directly (the netcdf.dll trick), avoiding any cross-ABI object link.
 /// With mpiRange = false the emission is byte-identical to before.
-let genCudaKernelSimplicial (mpiRange: bool) (codeGen: LoopNestCodeGen) (name: string) (blockSize: int) : string list option =
+let genCudaKernelSimplicial (mpiRange: bool) (softSplit: bool) (codeGen: LoopNestCodeGen) (name: string) (blockSize: int) : string list option =
     // Detect a single S-dim symmetry group of arity >= 2 (sym or antisym).
     let grpOpt =
         match codeGen.OutputType with
@@ -4630,6 +4806,33 @@ let genCudaKernelSimplicial (mpiRange: bool) (codeGen: LoopNestCodeGen) (name: s
               sprintf "    cudaMemcpy(__blade_host_out + __blade_rlo, __blade_d_out + __blade_rlo, (__blade_rhi - __blade_rlo) * sizeof(%s), cudaMemcpyDeviceToHost);" elemCpp
               sprintf "    cudaFree(__blade_d_%s);" srcName
               "    cudaFree(__blade_d_out);"; "}" ]
+        elif softSplit then
+            // <&> soft-join split wrappers (see genCudaKernel's softSplit arm):
+            // begin = H2D + ASYNC launch on a round-robin device, end = sync +
+            // D2H + free. Device selection lives HERE (the g++ host half never
+            // touches the CUDA API); one device => default-stream serialization.
+            let sdPrefix = sprintf "__blade_sd_%s" (sanitizeCppName name)
+            [ sprintf "static %s* %s_d_src = nullptr;" elemCpp sdPrefix
+              sprintf "static %s* %s_d_out = nullptr;" elemCpp sdPrefix
+              sprintf "static int %s_dev = 0;" sdPrefix
+              sprintf "extern \"C\" void %s_begin(const %s* %s, int __blade_leaf) {" launchName elemCpp srcName
+              "    int __blade_dc = 1; cudaGetDeviceCount(&__blade_dc); if (__blade_dc < 1) __blade_dc = 1;"
+              sprintf "    %s_dev = __blade_leaf %% __blade_dc;" sdPrefix
+              sprintf "    cudaSetDevice(%s_dev);" sdPrefix
+              sprintf "    size_t __blade_card = %dUL;" card
+              sprintf "    cudaMalloc(&%s_d_src, %dUL * sizeof(%s));" sdPrefix n elemCpp
+              sprintf "    cudaMemcpy(%s_d_src, %s, %dUL * sizeof(%s), cudaMemcpyHostToDevice);" sdPrefix srcName n elemCpp
+              sprintf "    cudaMalloc(&%s_d_out, __blade_card * sizeof(%s));" sdPrefix elemCpp
+              sprintf "    size_t __blade_blocks = (__blade_card + %dUL - 1UL) / %dUL;" blockSize blockSize
+              sprintf "    %s<<<(unsigned)__blade_blocks, %d>>>(%s_d_src, %s_d_out, __blade_card);" kernelName blockSize sdPrefix sdPrefix
+              "}"
+              sprintf "extern \"C\" void %s_end(%s* __blade_host_out) {" launchName elemCpp
+              sprintf "    cudaSetDevice(%s_dev);" sdPrefix
+              "    cudaDeviceSynchronize();"
+              sprintf "    cudaMemcpy(__blade_host_out, %s_d_out, %dUL * sizeof(%s), cudaMemcpyDeviceToHost);" sdPrefix card elemCpp
+              sprintf "    cudaFree(%s_d_src);" sdPrefix
+              sprintf "    cudaFree(%s_d_out);" sdPrefix
+              "    cudaSetDevice(0);"; "}" ]
         else
             [ sprintf "extern \"C\" void %s(const %s* %s, %s* __blade_host_out) {" launchName elemCpp srcName elemCpp
               sprintf "    size_t __blade_card = %dUL;" card
@@ -4721,8 +4924,11 @@ let genCudaKernelSimplicial (mpiRange: bool) (codeGen: LoopNestCodeGen) (name: s
     else
     let inlineLines =
         extentDecls
-        @ [ allocLine
-            sprintf "    %s(pool_base(%s.data), pool_base(%s.data));" launchName srcName name ]
+        @ [ allocLine ]
+        // Soft-join caller sequences the begin/end calls itself; return the
+        // host output allocation only.
+        @ (if softSplit then []
+           else [ sprintf "    %s(pool_base(%s.data), pool_base(%s.data));" launchName srcName name ])
     Some inlineLines
 
 /// MPI flat-cell-range decomposition of a single-S-group symmetric or
@@ -4884,7 +5090,7 @@ let genMpiNestSimplicial (innerOmp: bool) (codeGen: LoopNestCodeGen) (name: stri
 /// Gates: every binding rectangular const-extent RealArray scalar-leaf; array
 /// output with boundary-safe elem type; no Reynolds. Only flat T*/size_t cross
 /// the extern "C" boundary (pool_base supplies flat host pointers).
-let genCudaKernel (codeGen: LoopNestCodeGen) (name: string) (blockSize: int) : string list option =
+let genCudaKernel (softSplit: bool) (codeGen: LoopNestCodeGen) (name: string) (blockSize: int) : string list option =
     let bindings = codeGen.Bindings
     let nDims = List.length bindings
     let rectOk =
@@ -4949,7 +5155,38 @@ let genCudaKernel (codeGen: LoopNestCodeGen) (name: string) (blockSize: int) : s
         @ [ sprintf "    __blade_out[__blade_i] = %s;" reynolds.CppExpr; "}" ]
     let wrapInParams =
         codeGen.InputArrayNames |> List.map (fun n -> sprintf "const %s* %s" elemCpp n) |> String.concat ", "
+    let sdPrefix = sprintf "__blade_sd_%s" (sanitizeCppName name)
     let wrapper =
+        if softSplit then
+            // <&> soft-join split wrappers: begin = H2D + ASYNC launch on a
+            // round-robin device (leaf % deviceCount, queried HERE so the host
+            // half never touches the CUDA API); end = per-device sync + D2H +
+            // free. One device => the default stream serializes the leaves.
+            [ for n in codeGen.InputArrayNames -> sprintf "static %s* %s_d_%s = nullptr;" elemCpp sdPrefix n ]
+            @ [ sprintf "static %s* %s_d_out = nullptr;" elemCpp sdPrefix
+                sprintf "static int %s_dev = 0;" sdPrefix
+                sprintf "extern \"C\" void %s_begin(%s, int __blade_leaf) {" launchName wrapInParams
+                "    int __blade_dc = 1; cudaGetDeviceCount(&__blade_dc); if (__blade_dc < 1) __blade_dc = 1;"
+                sprintf "    %s_dev = __blade_leaf %% __blade_dc;" sdPrefix
+                sprintf "    cudaSetDevice(%s_dev);" sdPrefix
+                sprintf "    size_t __blade_card = %dUL;" cardinality ]
+            @ [ for (i, n) in List.mapi (fun i n -> (i, n)) codeGen.InputArrayNames do
+                  let sz = extentLits.[i]
+                  yield sprintf "    cudaMalloc(&%s_d_%s, %dUL * sizeof(%s));" sdPrefix n sz elemCpp
+                  yield sprintf "    cudaMemcpy(%s_d_%s, %s, %dUL * sizeof(%s), cudaMemcpyHostToDevice);" sdPrefix n n sz elemCpp ]
+            @ [ sprintf "    cudaMalloc(&%s_d_out, __blade_card * sizeof(%s));" sdPrefix elemCpp
+                sprintf "    size_t __blade_blocks = (__blade_card + %dUL - 1UL) / %dUL;" blockSize blockSize
+                sprintf "    %s<<<(unsigned)__blade_blocks, %d>>>(%s, %s_d_out, __blade_card);" kernelName blockSize
+                  (codeGen.InputArrayNames |> List.map (fun n -> sprintf "%s_d_%s" sdPrefix n) |> String.concat ", ") sdPrefix
+                "}"
+                sprintf "extern \"C\" void %s_end(%s* __blade_host_out) {" launchName elemCpp
+                sprintf "    cudaSetDevice(%s_dev);" sdPrefix
+                "    cudaDeviceSynchronize();"
+                sprintf "    cudaMemcpy(__blade_host_out, %s_d_out, %dUL * sizeof(%s), cudaMemcpyDeviceToHost);" sdPrefix cardinality elemCpp ]
+            @ [ for n in codeGen.InputArrayNames -> sprintf "    cudaFree(%s_d_%s);" sdPrefix n ]
+            @ [ sprintf "    cudaFree(%s_d_out);" sdPrefix
+                "    cudaSetDevice(0);"; "}" ]
+        else
         [ sprintf "extern \"C\" void %s(%s, %s* __blade_host_out) {" launchName wrapInParams elemCpp
           sprintf "    size_t __blade_card = %dUL;" cardinality ]
         @ [ for (i, n) in List.mapi (fun i n -> (i, n)) codeGen.InputArrayNames do
@@ -4992,6 +5229,11 @@ let genCudaKernel (codeGen: LoopNestCodeGen) (name: string) (blockSize: int) : s
                 // bare pointers; the self-contained program uses wrappers.)
                 (codeGen.InputArrayNames |> List.map (fun n -> sprintf "pool_base(%s.data)" n) |> String.concat ", ")
                 name ]
+    if softSplit then
+        // Soft-join caller sequences the begin/end calls itself; return the
+        // host output allocation only (everything but the final call line).
+        Some (inlineLines |> List.filter (fun l -> not (l.Contains (launchName + "("))))
+    else
     Some inlineLines
 
 /// CUDA CO-FUSION: one `__global__` computing EVERY leaf's output on a single
@@ -5572,7 +5814,7 @@ let genApplyCombinator (ctx: CodeGenContext) (name: string) (info: ApplyInfo) (b
             | Some bs ->
                 // `where mpi, cuda(...)`: rank-scoped device launch over
                 // this rank's flat cell-range + cell-range Allgatherv.
-                (match genCudaKernelSimplicial true codeGen name bs with
+                (match genCudaKernelSimplicial true false codeGen name bs with
                  | Some lines -> preCode @ [""] @ lines
                  | None -> mpiError "mpi+cuda hybrid: kernel shape is not device-eligible (single sym/antisym group, literal extent, MPI-datatype element required)")
             | None ->
@@ -5610,8 +5852,8 @@ let genApplyCombinator (ctx: CodeGenContext) (name: string) (info: ApplyInfo) (b
                     // One general simplicial kernel handles any single S-group of
                     // arity >= 2 (symmetric inclusive / antisymmetric strict, any
                     // rank); then the rectangular pointwise path; None => host loop.
-                    genCudaKernelSimplicial false codeGen name rk.Callable.CudaBlockSize
-                    |> Option.orElseWith (fun () -> genCudaKernel codeGen name rk.Callable.CudaBlockSize)
+                    genCudaKernelSimplicial false false codeGen name rk.Callable.CudaBlockSize
+                    |> Option.orElseWith (fun () -> genCudaKernel false codeGen name rk.Callable.CudaBlockSize)
                 | _ -> None
             match cudaInline with
             | Some launchLines -> preCode @ [""] @ launchLines
@@ -5873,8 +6115,9 @@ let checkMergeCompatible (leafCgs: LoopNestCodeGen list) : Result<LoopNestCodeGe
 /// `mpiSlabVar`, when Some sv, makes the OUTER shared level iterate this
 /// rank's slab [__blade_mpi_lo_<sv>, __blade_mpi_hi_<sv>) instead of the full
 /// extent (MPI co-fusion â€” every leaf's output is then a contiguous outer-row
-/// slab restored by a per-leaf Allgatherv). omp and mpi are not combined here
-/// (hybrid is deferred), so a slab nest is emitted with hostParallel = false.
+/// slab restored by a per-leaf Allgatherv). Under mpi+omp hybrid co-fusion
+/// (the all-mpi fusion arm), hostParallel = true additionally puts a bare
+/// `#pragma omp parallel for` on the cell loop inside each rank's slab.
 let genFusedLoopNestStreamed (streamed: Map<string, ProviderReadSpec>) (leafCgs: LoopNestCodeGen list) (outerNames: Map<int, string>) (indent: int) (hostParallel: bool) (mpiSlabVar: string option) : string list =
     let ind n = String.replicate n "    "
     let primary = leafCgs |> List.maxBy (fun cg -> cg.Bindings.Length)
@@ -6439,6 +6682,64 @@ let tryGenMergedCompute (ctx: CodeGenContext) (name: string) (infos: ApplyInfo l
                 let names = backends |> List.map backendName |> List.distinct |> String.concat ", "
                 Error (sprintf "leaves request different execution backends (%s) â€” a fused nest has one backend per shared level; force the differing leaves separately with |> compute" names))
 
+/// <&> SOFT JOIN over independent cuda leaves that cannot share one nest:
+/// each leaf keeps its OWN kernel (own block size, arity, inputs) and the
+/// launches are split into a begin pass (H2D + async launch) and an end pass
+/// (sync + D2H), with leaves assigned round-robin across visible devices
+/// INSIDE the .cu wrappers (leaf % deviceCount â€” the host half never touches
+/// the CUDA API, so the g++ split build needs no cudart link). One device =>
+/// the default stream serializes the leaves (correct, no overlap â€” exactly
+/// the soft join's "run the rest in serial"); multiple devices => the begin
+/// pass genuinely overlaps them. Returns None when any leaf is not
+/// device-eligible (caller falls back to fully independent nests; kernels
+/// already appended for earlier leaves become dead-but-harmless .cu defs).
+let tryGenCudaSoftJoin (ctx: CodeGenContext) (name: string) (infos: ApplyInfo list) (builder: IRBuilder) : (string list * string * Map<string, string list>) option =
+    let backends = infos |> List.map classifyLeafBackend
+    if infos.Length < 2
+       || not (backends |> List.forall (function BkCuda _ -> true | _ -> false))
+       || infos |> List.exists (fun info -> info.Arrays.IsEmpty) then None
+    else
+    let arrayNamesOf (info: ApplyInfo) =
+        info.Arrays |> List.mapi (fun i arr ->
+            match arr with
+            | IRVar (id, _) -> Map.tryFind id ctx.VarNames |> Option.defaultValue (sprintf "arr%d" i)
+            | IRRange _ -> sprintf "__range%d" i
+            | IRVirtualReverse _ -> sprintf "__rev%d" i
+            | IRBlocked _ -> sprintf "__blk%d" i
+            | _ -> sprintf "arr%d" i)
+    let leafNames = infos |> List.mapi (fun i _ -> sprintf "%s_%d" name i)
+    let leafCgs = infos |> List.mapi (fun i info ->
+        buildLoopNestCodeGen info (arrayNamesOf info) leafNames.[i] builder)
+    let blocks = backends |> List.map (function BkCuda b -> b | _ -> 256)
+    // Per-leaf emission in split mode: simplicial first, then rectangular
+    // (the single-kernel dispatch order). Each returns the host output
+    // allocation lines; the wrapper takes ONLY the arrays it actually reads
+    // (simplicial = the first input; rectangular = all inputs).
+    let pieces =
+        List.zip3 leafCgs leafNames blocks
+        |> List.map (fun (cg, lname, bs) ->
+            match genCudaKernelSimplicial false true cg lname bs with
+            | Some alloc -> Some (alloc, [List.head cg.InputArrayNames], lname)
+            | None ->
+                genCudaKernel true cg lname bs
+                |> Option.map (fun alloc -> (alloc, cg.InputArrayNames, lname)))
+    if pieces |> List.exists Option.isNone then None
+    else
+    let pieces = pieces |> List.map Option.get
+    let header =
+        [ sprintf "    // <&> soft join: %d independent cuda kernels. Begin pass launches" pieces.Length
+          "    // async round-robin over devices (inside the wrappers); end pass syncs." ]
+    let allocs = pieces |> List.collect (fun (alloc, _, _) -> alloc)
+    let begins =
+        pieces |> List.mapi (fun k (_, args, lname) ->
+            let argStr = args |> List.map (fun n -> sprintf "pool_base(%s.data)" n) |> String.concat ", "
+            sprintf "    __launch_%s_begin(%s, %d);" (sanitizeCppName lname) argStr k)
+    let ends =
+        pieces |> List.map (fun (_, _, lname) ->
+            sprintf "    __launch_%s_end(pool_base(%s.data));" (sanitizeCppName lname) lname)
+    let tupleLine = sprintf "    auto %s = std::make_tuple(%s);" name (leafNames |> String.concat ", ")
+    Some (header @ allocs @ begins @ ends @ [""; tupleLine], name, Map.ofList [name, leafNames])
+
 /// Recursively generate code for a parallel composition tree (<&>).
 /// When every leaf is an unforced loop application whose loop structures can
 /// legally share one nest, the leaves are MERGED into a single (possibly
@@ -6484,7 +6785,12 @@ let rec genParallelTree (ctx: CodeGenContext) (name: string) (expr: IRExpr) (bui
             if mergeInfos.Length = leaves.Length && mergeInfos.Length >= 2 then
                 match tryGenMergedCompute ctx name mergeInfos false builder with
                 | Ok result -> Some result
-                | Error _ -> None
+                | Error _ ->
+                    // <&> is a SOFT join: leaves that cannot share one nest
+                    // still run. Independent cuda leaves get the multi-device
+                    // begin/end driver; anything else falls through to the
+                    // fully independent per-leaf nests below.
+                    tryGenCudaSoftJoin ctx name mergeInfos builder
             else None
         match merged with
         | Some result -> result
@@ -6708,7 +7014,9 @@ let rec genBinding (ctx: CodeGenContext) (binding: IRBinding) (builder: IRBuilde
     | _ when Map.containsKey binding.Id ctx.ProviderWrites ->
         genProviderWriteBinding ctx binding builder
     | _ when Map.containsKey binding.Id ctx.RandomInits ->
-        genRandomInitBinding ctx binding builder 
+        match ctx.RandomInits.[binding.Id] with
+        | RandGen _ -> genRandGenBinding ctx binding builder
+        | FillModulus _ -> genRandomInitBinding ctx binding builder
     | _ when Map.containsKey binding.Id ctx.CompoundInits ->
         genCompoundInitBinding ctx binding builder 
     | IRMask (arrExpr, predExpr) ->
@@ -7843,6 +8151,41 @@ and genProviderWriteBinding (ctx: CodeGenContext) (binding: IRBinding) (builder:
     (guardProviderWrite ind (flatten @ writeCode @ cleanup), ctx)
 
 
+/// rand.uniform/normal(key, shape): allocate the dense Float64 array (self-typed
+/// from the shape) and fill its flat contiguous pool with `card` deterministic
+/// draws keyed by `key`, via the blade_rand runtime. All rand arrays are dense
+/// SymNone, so pool_base gives the full pool and the draw count is the product
+/// of extents. Mirrors the fill_random dense path but uses a flat pool fill.
+and genRandGenBinding (ctx: CodeGenContext) (binding: IRBinding) (builder: IRBuilder) : string list * CodeGenContext =
+    let ind = indentStr ctx
+    let name = bindingCppName binding
+    let kind, keyExpr =
+        match ctx.RandomInits.[binding.Id] with
+        | RandGen (k, key) -> k, key
+        | FillModulus _ -> "uniform", IRLit (IRLitInt 0L)  // unreachable: dispatch guards this
+    match binding.Type with
+    | ArrayElem arrTy ->
+        let elemCpp = elemTypeToCpp arrTy.ElemType
+        let extents = arrTy.IndexTypes |> List.collect (fun idx -> List.replicate idx.Rank idx.Extent)
+        let rank = extents.Length
+        let nonLiteral = extents |> List.exists (fun e -> match e with IRLit (IRLitInt _) -> false | _ -> true)
+        if nonLiteral then
+            ([sprintf "%s#error \"rand binding '%s' requires literal extents\"" ind name], addVarName binding.Id name ctx)
+        else
+            let extentTerms = extents |> List.map (fun e -> match e with IRLit (IRLitInt n) -> string n | _ -> "0")
+            let extentsName = sprintf "%s_extents" name
+            let extentsArr = sprintf "%ssize_t %s[] = { %s };" ind extentsName (String.concat ", " extentTerms)
+            let card = extents |> List.fold (fun acc e -> match e with IRLit (IRLitInt n) -> acc * n | _ -> acc) 1L
+            let allocLine =
+                sprintf "%sArray<%s, %d> %s = { allocate<typename promote<%s, %d>::type, nullptr>(%s), %s };"
+                    ind elemCpp rank name elemCpp rank extentsName extentsName
+            let fillLine =
+                sprintf "%sblade_rand::%s(nested_array_utilities::pool_base(%s.data), (size_t)%dLL, (int64_t)(%s));"
+                    ind kind name card (exprToCpp ctx.VarNames keyExpr)
+            ([extentsArr; allocLine; fillLine], addVarName binding.Id name ctx)
+    | _ ->
+        ([sprintf "%s#error \"rand binding '%s' is not an array type\"" ind name], addVarName binding.Id name ctx)
+
 and genRandomInitBinding (ctx: CodeGenContext) (binding: IRBinding) (builder: IRBuilder) : string list * CodeGenContext =
     let ind = indentStr ctx
     let name = bindingCppName binding
@@ -7853,7 +8196,10 @@ and genRandomInitBinding (ctx: CodeGenContext) (binding: IRBinding) (builder: IR
     // SYMM defaults to nullptr. fill_random deduces its type from the first
     // arg, so pass the raw nested pointer (.data), not the Array wrapper --
     // the wrapper would deduce as a scalar leaf and never recurse.
-    let modExpr = ctx.RandomInits.[binding.Id]
+    let modExpr =
+        match ctx.RandomInits.[binding.Id] with
+        | FillModulus m -> m
+        | RandGen _ -> IRLit (IRLitInt 1L)  // unreachable: dispatch routes RandGen to genRandGenBinding
     (match binding.Type with
      | ArrayElem arrTy ->
          let elemCpp = elemTypeToCpp arrTy.ElemType

@@ -18,17 +18,21 @@ type TimeIdx = Idx<7>
 let M2: Array<Float64 like Idx<1>, TimeIdx> = [[0.356967028599, 0.65259015823, 0.839329531238, 1.0, 1.16067046876, 1.34740984177, 1.6430329714]]
 let d = ppl.dist(M2, 6)
 
+function v(m) = (1.0 - m) / (1.0 + m)
+
 // outgoing velocities as towers
-let dv1 = ppl.dist_map(d, 3, 2, lambda(m) -> (1.0 - m) / (1.0 + m))
+let dv1 = ppl.dist_map(d, 3, 2, lambda(m) -> v(m))
 let v1_1 = ppl.cumulant(dv1, 1)
 
 // total momentum p = v1 + m2 v2  (identically 1) -> degenerate tower
-let dP = ppl.dist_map(d, 3, 2, lambda(m) -> (1.0 - m) / (1.0 + m) + (m * 2.0) / (1.0 + m))
+function ptot(m) = v(m) + (m * 2.0) / (1.0 + m)
+let dP = ppl.dist_map(d, 3, 2, ptot)
 let P1 = ppl.cumulant(dP, 1)
 let P2 = ppl.cumulant(dP, 2)
 
 // total kinetic energy x2:  v1^2 + m2 v2^2  (identically 1) -> degenerate
-let dK = ppl.dist_map(d, 3, 2, lambda(m) -> ((1.0 - m) / (1.0 + m)) * ((1.0 - m) / (1.0 + m)) + m * ((2.0 / (1.0 + m)) * (2.0 / (1.0 + m))))
+function ktot(m) = v(m) * v(m) + m * ((2.0 / (1.0 + m)) * (2.0 / (1.0 + m)))
+let dK = ppl.dist_map(d, 3, 2, ktot)
 let K1 = ppl.cumulant(dK, 1)
 let K2 = ppl.cumulant(dK, 2)
 

@@ -1,0 +1,27 @@
+// TEST: Spectra differential: power(x) == real(polyspec(x, x)), imag == 0
+// The order-2 auto-polyspectrum is X(f)*conj(X(f)): its real part equals
+// re^2 + im^2 BIT-FOR-BIT (the naive complex multiply computes re*re -
+// im*(-im), and a sign flip then subtract rounds identically to add), and
+// its imaginary part is exactly +-0. Both residuals pin at 0.0 with no
+// tolerance slack consumed.
+import spectra as sp
+let x: Array<Float64 like Idx<8>> = [0.5, -1.25, 2.0, 0.75, -0.5, 1.5, -2.25, 3.0]
+let P = sp.power(x)
+let Q = sp.polyspec(x, x)
+let residRe = {
+    let mut acc = 0.0
+    for k in 0..8 {
+        let d = P(k) - real(Q(k))
+        acc = acc + d * d
+    }
+    acc
+}
+let residIm = {
+    let mut acc = 0.0
+    for k in 0..8 {
+        acc = acc + imag(Q(k)) * imag(Q(k))
+    }
+    acc
+}
+// EXPECT: residRe = 0.0
+// EXPECT: residIm = 0.0

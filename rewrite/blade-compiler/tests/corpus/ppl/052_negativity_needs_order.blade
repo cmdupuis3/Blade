@@ -1,0 +1,7 @@
+// TEST: Dist Negativity Needs Order (rejects)
+import ppl as ppl
+// Reading s cells needs the degree-(s-1) Lagrange indicators exactly:
+// four claimed support points against an order-2 tower is refused with
+// steering rather than silently closed over.
+let qd = ppl.dist_atoms(2, 0.0, 0.5, 1.0, 0.5)
+let n = ppl.dist_negativity(qd, 0.0, 1.0, 2.0, 3.0)

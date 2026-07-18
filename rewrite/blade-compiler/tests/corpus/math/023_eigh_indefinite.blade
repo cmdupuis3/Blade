@@ -1,0 +1,10 @@
+// TEST: Math eigh: indefinite matrix, negative eigenvalue ordering
+// S = [[0,2],[2,0]] has eigenvalues ±2 (zero diagonal exercises the
+// absolute floor in the convergence guard; the negative eigenvalue
+// exercises descending sort across signs). Eigenvectors are (1, 1)/√2 and
+// (1, −1)/√2 after the sign fix.
+import math as m
+let S: Array<Float64 like Idx<2>, Idx<2>> = [[0.0, 2.0], [2.0, 0.0]]
+let (Q, LAM) = m.eigh(S)
+// EXPECT: LAM = [2, -2]
+// EXPECT: Q = [0.7071067811865475, 0.7071067811865475, 0.7071067811865475, -0.7071067811865475]

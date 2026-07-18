@@ -174,7 +174,7 @@ and TypedExprKind =
     // Tuple construction
     | TExprTuple of TypedExpr list
     
-    // Complex literal: `(re, im) : Complex128`
+    // Complex literal: `complex(re, im)`
     // Distinct from TExprTuple to preserve scalar nature in IR.
     // The runtime layout is two floats (matching std::complex<double>),
     // but the type system treats this as a scalar (IRTScalar ETComplex64
@@ -219,6 +219,12 @@ and TypedExprKind =
     // records it in RandomInits; codegen emits allocate<> + the runtime
     // fill_random. `modulus` is the argument to rand() % modulus.
     | TExprFillRandom of modulus: TypedExpr
+    // rand.uniform/normal(key, shape): internal builtin — a deterministic
+    // random-array constructor. Self-typed from the (static) shape argument, so
+    // it needs no annotation. Lowering records (kind, key) in RandomInits;
+    // codegen emits allocate<> + the runtime blade_rand fill. `kind` is
+    // "uniform" | "normal"; `dims` are the static extents.
+    | TExprRandGen of kind: string * key: TypedExpr * dims: int list
     | TExprGuard of cond: TypedExpr * body: TypedExpr
     | TExprZero
     | TExprReynolds of kernel: TypedExpr * isAntisymmetric: bool

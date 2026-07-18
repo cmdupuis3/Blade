@@ -1,0 +1,20 @@
+// TEST: Spectra ifft: round-trip ifft(fft(x)) = x, n=8
+// The inverse synthesis carries the 1/n, so the round-trip reproduces the
+// signal to machine precision; the squared residual pins at 0.0 through the
+// near-zero absolute tolerance (actual ~1e-30). The annotated rebind X2 is
+// the required idiom: spectra ops read declared shapes, and a bare
+// function-result binding carries no annotation.
+import spectra as sp
+let x: Array<Float64 like Idx<8>> = [0.5, -1.25, 2.0, 0.75, -0.5, 1.5, -2.25, 3.0]
+let X = sp.fft(x)
+let X2: Array<Complex128 like Idx<8>> = X
+let y = sp.ifft(X2)
+let resid = {
+    let mut acc = 0.0
+    for i in 0..8 {
+        let d = y(i) - x(i)
+        acc = acc + d * d
+    }
+    acc
+}
+// EXPECT: resid = 0.0

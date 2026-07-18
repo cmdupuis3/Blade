@@ -1,0 +1,10 @@
+// TEST: Math eigh: known tridiagonal spectrum
+// S = tridiag(1, 2, 1) at n = 3 has analytic eigenvalues 2 + √2, 2, 2 − √2
+// with eigenvectors (1, ±√2, 1)/2 and (1, 0, −1)/√2. Pins from
+// math/OracleDump.fs (same-algorithm reference; agrees with the analytic
+// values to ~2e-15).
+import math as m
+let S: Array<Float64 like Idx<3>, Idx<3>> = [[2.0, 1.0, 0.0], [1.0, 2.0, 1.0], [0.0, 1.0, 2.0]]
+let (Q, LAM) = m.eigh(S)
+// EXPECT: LAM = [3.4142135623730927, 1.9999999999999998, 0.58578643762690497]
+// EXPECT: Q = [0.49999999999999972, 0.70710678118654768, -0.49999999999999994, 0.70710678118654746, 0.0, 0.70710678118654746, 0.50000000000000011, -0.70710678118654757, -0.50000000000000011]

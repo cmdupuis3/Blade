@@ -35,8 +35,12 @@ type IRBinOpMode =
 /// Unary operations
 type IRUnaryOp =
     | IRNeg | IRNot | IRConj
+    | IRReal | IRImag | IRArg  // complex component/phase accessors
+                              // (real/imag: identity/0 on real operands)
     | IRMath of string  // scalar math intrinsic (exp/log/sqrt/...);
                         // renders as std::<name>(arg), result Float64
+                        // (complex operand preserves the complex type,
+                        //  except abs which always yields the real magnitude)
 
 /// IR Expressions - SSA-like representation
 type IRExpr =
@@ -53,11 +57,11 @@ type IRExpr =
     | IRTuple of IRExpr list
     // Complex literal construction: std::complex<double>(re, im) at codegen.
     // Distinct from IRTuple to preserve scalar nature — Complex is a scalar
-    // throughout the IR; the tuple-shaped surface syntax is consumed
+    // throughout the IR; the surface constructor call is consumed
     // entirely between Parser and TypeCheck. Components are arbitrary
     // float-typed IRExpr (matching what checkExpr accepts), not just
-    // literal floats; this supports both `(1.0, 0.0): Complex128` and
-    // `(x, y): Complex128` for x, y: Float64.
+    // literal floats; this supports both `complex(1.0, 0.0)` and
+    // `complex(x, y)` for x, y: Float64.
     | IRComplex of re: IRExpr * im: IRExpr
     | IRTupleProj of IRExpr * int * bool  // expr, index, isFlat (true=flat leaf index, false=structural type index)
     | IRTupleCons of head: IRExpr * tail: IRExpr
@@ -415,6 +419,16 @@ let promoteElemType (a: ElemType) (b: ElemType) : ElemType option =
         | ETInt64, ETFloat32 | ETFloat32, ETInt64 -> Some ETFloat64
         | ETInt64, ETFloat64 | ETFloat64, ETInt64 -> Some ETFloat64
         | ETFloat32, ETFloat64 | ETFloat64, ETFloat32 -> Some ETFloat64
+        // Complex mixed with a real (int/float) or a narrower complex widens to
+        // the appropriate complex width. Complex64 mixed with Float64 or with
+        // Complex128 widens to Complex128 (component precision follows the wider
+        // operand). CodeGen inserts the explicit casts std::complex's same-type
+        // operators require (see coerceComplexOperand).
+        | ETComplex128, (ETFloat64 | ETFloat32 | ETInt64 | ETInt32 | ETComplex64 | ETComplex128)
+        | (ETFloat64 | ETFloat32 | ETInt64 | ETInt32 | ETComplex64), ETComplex128 -> Some ETComplex128
+        | ETComplex64, (ETFloat32 | ETInt64 | ETInt32 | ETComplex64)
+        | (ETFloat32 | ETInt64 | ETInt32), ETComplex64 -> Some ETComplex64
+        | ETComplex64, ETFloat64 | ETFloat64, ETComplex64 -> Some ETComplex128
         | _ -> None
 
 /// Active pattern for assignment target (lvalue) classification
@@ -1724,6 +1738,15 @@ type ProviderWriteSpec = {
     DimNames: string list
 }
 
+/// Deferred array-fill constructor spec, keyed in RandomInits by the receiving
+/// binding's IRId. `fill_random(mod)` records a FillModulus (rand() % mod, C
+/// rand(), nondeterministic); `rand.uniform/normal(key)` records a RandGen
+/// (deterministic mt19937_64-based runtime, keyed by `key`). Both allocate the
+/// binding's array type and fill its pool at codegen.
+type RandomFillSpec =
+    | FillModulus of IRExpr              // fill_random(mod)
+    | RandGen of kind: string * key: IRExpr   // rand.<kind>(key), kind = "uniform" | "normal"
+
 type IRModule = {
     Name: string
     Types: IRTypeDef list
@@ -1744,9 +1767,10 @@ type IRModule = {
     ProviderWrites: Map<IRId, ProviderWriteSpec>
     /// Deferred random-fill array constructors, keyed by the receiving binding's
     /// IRId. Populated during lowering (at `let A: Array<..> = fill_random(mod)`)
-    /// and consumed at codegen to emit allocate<> + the runtime fill_random. The
-    /// value is the (lowered) modulus expression. Empty for modules with none.
-    RandomInits: Map<IRId, IRExpr>
+    /// and consumed at codegen to emit allocate<> + a pool fill. The value is a
+    /// RandomFillSpec (fill_random modulus, or a rand.uniform/normal key). Empty
+    /// for modules with none.
+    RandomInits: Map<IRId, RandomFillSpec>
     /// Deferred compound-construction constructors (compound(dense, mask)),
     /// keyed by the receiving binding's IRId. Populated during lowering and
     /// consumed at codegen to emit P0 index materialization + a dense->compact
@@ -4405,7 +4429,23 @@ let rec typeOf (expr: IRExpr) : IRType =
          | IRNot -> IRTScalar ETBool
          | IRNeg -> typeOf operand
          | IRConj -> typeOf operand
-         | IRMath _ -> IRTScalar ETFloat64)
+         // real/imag project a complex to its component width (identity on a
+         // real operand); arg is a real angle. Complex128 -> Float64,
+         // Complex64 -> Float32.
+         | IRReal | IRImag ->
+             (match typeOf operand with
+              | IRTScalar ETComplex64 -> IRTScalar ETFloat32
+              | IRTScalar ETComplex128 -> IRTScalar ETFloat64
+              | other -> other)
+         | IRArg -> IRTScalar ETFloat64
+         // abs always yields the real magnitude (Float64); other intrinsics on
+         // a complex operand preserve the complex type (std::exp(complex)->
+         // complex), and stay Float64 on a real operand.
+         | IRMath "abs" -> IRTScalar ETFloat64
+         | IRMath _ ->
+             (match typeOf operand with
+              | IRTScalar (ETComplex64 | ETComplex128) as ct -> ct
+              | _ -> IRTScalar ETFloat64))
     | IRTuple exprs -> IRTTuple (exprs |> List.map typeOf)
     | IRComplex (re, _) ->
         // Complex type derived from component width: Float32 → Complex64,
@@ -4692,11 +4732,22 @@ let rec typeOf (expr: IRExpr) : IRType =
 /// exactly as writing that intermediate `let` by hand would (embedded reduces
 /// are always single-leaf scalars; a fused tree only ever appears as a directly
 /// destructured binding RHS, which is a blessed position and is not lifted).
+/// IRCompute (IRApplyCombinator …) — a FORCED combinator apply, as produced by
+/// desugaring array-vs-array binops (`A * B` → compute(method_for(zip(A,B)) <@>
+/// lambda)) — is included: its only correct rendering is the statement-form loop
+/// nest at a let-RHS. In an expression slot it falls to a legacy 2-array IIFE
+/// that hardcodes one loop per operand (a Cartesian sum, not co-iteration) and
+/// yields a scalar the array-typed parent then re-indexes. Lifting normalizes
+/// `reduce(A * B, (+))` to `let __t = A * B in reduce(__t, (+))`, exactly as
+/// writing that intermediate `let` by hand would. Note the bare (unwrapped)
+/// IRApplyCombinator is deliberately NOT lifted — that one is genuinely deferred
+/// and has no materialized value.
 let isInlineForm (e: IRExpr) : bool =
     match e with
     | IRMask _ | IRSort _ | IRIntersect _ | IRUnion _ | IRUnique _
     | IRGroupBy _ | IRGroupKeys _ | IRTranspose _ | IRDecompact _ | IRArrayNegate _ | IRArrayConjugate _
     | IRReduceCompute _ -> true
+    | IRCompute (IRApplyCombinator _) -> true
     | _ -> false
 
 /// Path B / Phase D: peel any IRLet chain that descendant lifts produced.
@@ -5343,6 +5394,9 @@ let ppUnaryOp = function
     | IRNeg -> "-"
     | IRNot -> "!"
     | IRConj -> "conj"
+    | IRReal -> "real"
+    | IRImag -> "imag"
+    | IRArg -> "arg"
     | IRMath name -> name
 
 /// Pretty print IR expressions with optional name mapping for variables

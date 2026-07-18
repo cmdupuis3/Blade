@@ -1,0 +1,17 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <OutputType>Exe</OutputType>
+    <TargetFramework>net7.0</TargetFramework>
+    <RootNamespace>BladeMath</RootNamespace>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <Compile Include="Jacobi.fs" />
+    <Compile Include="Eig.fs" />
+    <Compile Include="Tensor.fs" />
+    <Compile Include="OracleDump.fs" />
+    <Compile Include="Program.fs" />
+  </ItemGroup>
+
+</Project>

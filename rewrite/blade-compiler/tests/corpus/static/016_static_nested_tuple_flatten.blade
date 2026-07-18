@@ -1,0 +1,12 @@
+// TEST: Static Nested Tuple Flatten
+// ((A, B), C) built through a static function splices to arity 3 — the
+// uncurrying rule flattens recursively in static-former argument position,
+// so nesting shape is immaterial: ((A,B),C) ≡ (A,(B,C)) ≡ (A,B,C).
+static function pair2(x, y) = (x, y)
+let A = [1.0, 2.0]
+let B = [10.0, 20.0]
+let C = [100.0, 200.0]
+let s = static method_for((pair2(A, B), C)) <@> lambda(x, y, z) -> x + y + z |> compute
+let p = method_for(A, B, C) <@> lambda(x, y, z) -> x + y + z |> compute
+// EXPECT: s = [111, 211, 121, 221, 112, 212, 122, 222]
+// EXPECT: p = [111, 211, 121, 221, 112, 212, 122, 222]

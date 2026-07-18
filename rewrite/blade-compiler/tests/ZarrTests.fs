@@ -38,6 +38,12 @@ let runZarrTests () =
         | Error e -> e.Contains needle
         | Ok _ -> false
 
+    // Fixture stores live under providers/zarr_stores/ (not the repo root).
+    // The SAME relative string resolves at the compiler cwd (compile-time
+    // metadata loads) and, mirrored under generated_cpp_tests, at the exe
+    // cwd (runtime reads/writes) — ZarrWrite/create_directories make parents.
+    let fixStore (name: string) = "providers/zarr_stores/" + name
+
     // ---------------------------------------------------------------
     // 1. Dtype mapping (pure)
     // ---------------------------------------------------------------
@@ -327,7 +333,7 @@ let runZarrTests () =
     // 9. Static fold e2e (hermetic — needs no g++, no external library)
     // ---------------------------------------------------------------
     printfn "\n--- provider statics: zarr fold + ceiling ---"
-    (let foldRoot = "zarr_fold_store"
+    (let foldRoot = fixStore "zarr_fold_store"
      (try Directory.Delete(foldRoot, true) with _ -> ())
      ZarrWrite.writeStoreV2 foldRoot [
         { Name = "x"; DimNames = Some ["x"]; Shape = [6L]; Chunks = [3L]
@@ -337,7 +343,7 @@ let runZarrTests () =
      let foldSource = """
 import zarr as z
 
-let sample = z.load("zarr_fold_store")
+let sample = z.load("providers/zarr_stores/zarr_fold_store")
 let static xd = sample.dims.x |> z.read
 let static n = length(xd)
 let static ps = prodsum(xd, xd)
@@ -365,7 +371,7 @@ let b = ps
                  | Error e -> check "zarr fold: resolveStatics" false e
       with ex -> check "zarr fold: runs" false ex.Message)
      // Fold ceiling: 70000 > 65536 elements refuses with steering.
-     let bigRoot = "zarr_fold_big"
+     let bigRoot = fixStore "zarr_fold_big"
      (try Directory.Delete(bigRoot, true) with _ -> ())
      ZarrWrite.writeStoreV2 bigRoot [
         { Name = "big"; DimNames = Some ["n"]; Shape = [70000L]; Chunks = [70000L]
@@ -373,7 +379,7 @@ let b = ps
      let bigSource = """
 import zarr as z
 
-let sample = z.load("zarr_fold_big")
+let sample = z.load("providers/zarr_stores/zarr_fold_big")
 let static v = sample.vars.big |> z.read
 """
      (try
@@ -397,7 +403,7 @@ let static v = sample.vars.big |> z.read
     let e2eDir = "./generated_cpp_tests"
     if not (Directory.Exists e2eDir) then Directory.CreateDirectory e2eDir |> ignore
     for (version, writer) in [ (2, ZarrWrite.writeStoreV2); (3, ZarrWrite.writeStoreV3) ] do
-        let storeName = sprintf "zarr_e2e_v%d" version
+        let storeName = fixStore (sprintf "zarr_e2e_v%d" version)
         let storeInDir = Path.Combine(e2eDir, storeName)
         let e2eVars : ZarrWrite.WriteVar list = [
             { Name = "A"; DimNames = Some ["x"; "y"]; Shape = [5L; 7L]; Chunks = [2L; 3L]
@@ -488,8 +494,8 @@ let out = method_for(A) <@> lambda(x) -> x + x |> compute
     // 11. Write -> read roundtrip e2e (the Blade-side writer)
     // ---------------------------------------------------------------
     printfn "\n--- write e2e: z.read |> z.write -> F# reads it back ---"
-    (let inStore = "zarr_wrt_in"
-     let outStore = "zarr_wrt_out"
+    (let inStore = fixStore "zarr_wrt_in"
+     let outStore = fixStore "zarr_wrt_out"
      let inDirFull = Path.Combine(e2eDir, inStore)
      let outDirFull = Path.Combine(e2eDir, outStore)
      let wrtVars : ZarrWrite.WriteVar list = [
@@ -553,7 +559,7 @@ let w = z.write("%s", A)
     // 12. load_compound rejection at codegen (zarr has no compound reader)
     // ---------------------------------------------------------------
     printfn "\n--- load_compound: loud zarr rejection ---"
-    (let lcStore = "zarr_lc"
+    (let lcStore = fixStore "zarr_lc"
      (try Directory.Delete(lcStore, true) with _ -> ())
      ZarrWrite.writeStoreV2 lcStore [
         { Name = "A"; DimNames = Some ["x"]; Shape = [4L]; Chunks = [4L]
@@ -563,7 +569,7 @@ let w = z.write("%s", A)
      let lcSource = """
 import zarr as z
 
-let sample = z.load("zarr_lc")
+let sample = z.load("providers/zarr_stores/zarr_lc")
 let data = z.load_compound(sample.vars.A, sample.vars.M) |> z.read
 """
      match lower lcSource with
@@ -661,7 +667,7 @@ let data = z.load_compound(sample.vars.A, sample.vars.M) |> z.read
              for j in (if strict then i + 1 else i) .. n - 1 ->
                float ((i + 1) * 10 + (j + 1)) |]
     // Fold rejection first (hermetic, no g++): packed vars refuse to fold.
-    (let foldTri = "zarr_tri_foldreject"
+    (let foldTri = fixStore "zarr_tri_foldreject"
      (try Directory.Delete(foldTri, true) with _ -> ())
      ZarrWrite.writeStoreV2 foldTri [
         { Name = "C"; DimNames = None; Shape = [10L]; Chunks = [10L]
@@ -678,8 +684,8 @@ let data = z.load_compound(sample.vars.A, sample.vars.M) |> z.read
         let n = 4
         let pool = triOracle strict n
         let card = int64 pool.Length
-        let inStore = sprintf "zarr_tri_%s" kind
-        let outStore = sprintf "zarr_tri_%s_out" kind
+        let inStore = fixStore (sprintf "zarr_tri_%s" kind)
+        let outStore = fixStore (sprintf "zarr_tri_%s_out" kind)
         let layout : BladeLayout = { Group = { Sym = sym; Rank = 2; Extent = int64 n }; DenseDims = []; Blocks = None }
         let triVars : ZarrWrite.WriteVar list = [
             { Name = "C"; DimNames = None; Shape = [card]; Chunks = [card]
@@ -786,8 +792,8 @@ let w = z.write("%s", C)
         { Name = "D"; DimNames = Some ["cells"; "t"]; Shape = [card; int64 trail]; Chunks = [card; int64 trail]
           FillValue = FillFloat 0.0; Data = ZarrWrite.WF64 pool; OmitChunks = []
           Blade = Some layout } ]
-     let inStore = "zarr_tri_mixed"
-     let outStore = "zarr_tri_mixed_out"
+     let inStore = fixStore "zarr_tri_mixed"
+     let outStore = fixStore "zarr_tri_mixed_out"
      (try Directory.Delete(inStore, true) with _ -> ())
      (try Directory.Delete(Path.Combine(e2eDir, inStore), true) with _ -> ())
      (try Directory.Delete(Path.Combine(e2eDir, outStore), true) with _ -> ())
@@ -992,8 +998,8 @@ let w = z.write("%s", D)
     let sbE2E (name: string) (sym, strict) (n: int64) (tile: int64) order =
         let layout = sbLayout sym strict 2 n tile order
         let pool = sbPool strict n
-        let inStore = sprintf "zarr_sb_%s" name
-        let outStore = sprintf "zarr_sb_%s_out" name
+        let inStore = fixStore (sprintf "zarr_sb_%s" name)
+        let outStore = fixStore (sprintf "zarr_sb_%s_out" name)
         let vars : ZarrWrite.WriteVar list = [
             { Name = "C"; DimNames = None; Shape = [int64 pool.Length]; Chunks = [int64 pool.Length]
               FillValue = FillFloat -9.0; Data = ZarrWrite.WF64 pool; OmitChunks = []
@@ -1054,8 +1060,8 @@ let w = z.write("%s", C)
      for (label, blocks) in [ ("blocks", Some { Tile = 2L; Grid = 3L; Order = OrderLex }); ("flat", None) ] do
         let layout : BladeLayout = { Group = { Sym = SymSymmetric; Rank = 2; Extent = n }; DenseDims = []; Blocks = blocks }
         let pool = sbPool false n
-        let inStore = sprintf "zarr_win_%s" label
-        let outStore = sprintf "zarr_win_%s_out" label
+        let inStore = fixStore (sprintf "zarr_win_%s" label)
+        let outStore = fixStore (sprintf "zarr_win_%s_out" label)
         let vars : ZarrWrite.WriteVar list = [
             { Name = "C"; DimNames = None; Shape = [int64 pool.Length]; Chunks = [int64 pool.Length]
               FillValue = FillFloat 0.0; Data = ZarrWrite.WF64 pool; OmitChunks = []
@@ -1115,11 +1121,11 @@ let w = z.write("%s", W)
             | Error e -> check (sprintf "window %s: lowers" label) false e
         with ex -> check (sprintf "window %s e2e" label) false ex.Message)
     check "window: out-of-range bounds rejected at typecheck"
-        ((typeErrOf "import zarr as z\nlet s = z.load(\"zarr_win_blocks\")\nlet W = z.read_window(s.vars.C, 2, 7)\n").Contains "bounds")
-        (typeErrOf "import zarr as z\nlet s = z.load(\"zarr_win_blocks\")\nlet W = z.read_window(s.vars.C, 2, 7)\n")
+        ((typeErrOf "import zarr as z\nlet s = z.load(\"providers/zarr_stores/zarr_win_blocks\")\nlet W = z.read_window(s.vars.C, 2, 7)\n").Contains "bounds")
+        (typeErrOf "import zarr as z\nlet s = z.load(\"providers/zarr_stores/zarr_win_blocks\")\nlet W = z.read_window(s.vars.C, 2, 7)\n")
     check "window: dense variables rejected with steering"
-        ((typeErrOf "import zarr as z\nlet s = z.load(\"zarr_e2e_v2\")\nlet W = z.read_window(s.vars.A, 0, 2)\n").Contains "PACKED")
-        (typeErrOf "import zarr as z\nlet s = z.load(\"zarr_e2e_v2\")\nlet W = z.read_window(s.vars.A, 0, 2)\n")
+        ((typeErrOf "import zarr as z\nlet s = z.load(\"providers/zarr_stores/zarr_e2e_v2\")\nlet W = z.read_window(s.vars.A, 0, 2)\n").Contains "PACKED")
+        (typeErrOf "import zarr as z\nlet s = z.load(\"providers/zarr_stores/zarr_e2e_v2\")\nlet W = z.read_window(s.vars.A, 0, 2)\n")
 
     // ---------------------------------------------------------------
     // 23. MPI-distributed packed read (Phase 3a; needs mpiexec, skips
@@ -1139,8 +1145,8 @@ let w = z.write("%s", W)
         { Name = "C"; DimNames = None; Shape = [int64 mpiPool.Length]; Chunks = [int64 mpiPool.Length]
           FillValue = FillFloat 0.0; Data = ZarrWrite.WF64 mpiPool; OmitChunks = []
           Blade = Some mpiLayout } ]
-     let inStore = "zarr_mpi_in"
-     let outStore = "zarr_mpi_out"
+     let inStore = fixStore "zarr_mpi_in"
+     let outStore = fixStore "zarr_mpi_out"
      let outFull = Path.Combine(e2eDir, outStore)
      (try Directory.Delete(inStore, true) with _ -> ())
      (try Directory.Delete(Path.Combine(e2eDir, inStore), true) with _ -> ())
@@ -1241,19 +1247,21 @@ let w = z.write("%s", C)
      let strmVars : ZarrWrite.WriteVar list = [
         { Name = "A"; DimNames = Some ["s"; "t"]; Shape = [4L; 3L]; Chunks = [2L; 2L]
           FillValue = FillFloat 0.0; Data = ZarrWrite.WF64 strmData; OmitChunks = []; Blade = None } ]
-     (try Directory.Delete("zarr_strm", true) with _ -> ())
-     (try Directory.Delete(Path.Combine(e2eDir, "zarr_strm"), true) with _ -> ())
-     ZarrWrite.writeStoreV2 "zarr_strm" strmVars
-     ZarrWrite.writeStoreV2 (Path.Combine(e2eDir, "zarr_strm")) strmVars
+     let strmStore = fixStore "zarr_strm"
+     (try Directory.Delete(strmStore, true) with _ -> ())
+     (try Directory.Delete(Path.Combine(e2eDir, strmStore), true) with _ -> ())
+     ZarrWrite.writeStoreV2 strmStore strmVars
+     ZarrWrite.writeStoreV2 (Path.Combine(e2eDir, strmStore)) strmVars
      // 2D-site store for the fused joint-symmetry case.
      let strm2Data = [| for i in 0 .. 17 -> float ((i * 5) % 11) + 0.25 |]
      let strm2Vars : ZarrWrite.WriteVar list = [
         { Name = "B"; DimNames = Some ["p"; "q"; "t"]; Shape = [3L; 2L; 3L]; Chunks = [2L; 2L; 2L]
           FillValue = FillFloat 0.0; Data = ZarrWrite.WF64 strm2Data; OmitChunks = []; Blade = None } ]
-     (try Directory.Delete("zarr_strm2", true) with _ -> ())
-     (try Directory.Delete(Path.Combine(e2eDir, "zarr_strm2"), true) with _ -> ())
-     ZarrWrite.writeStoreV2 "zarr_strm2" strm2Vars
-     ZarrWrite.writeStoreV2 (Path.Combine(e2eDir, "zarr_strm2")) strm2Vars
+     let strm2Store = fixStore "zarr_strm2"
+     (try Directory.Delete(strm2Store, true) with _ -> ())
+     (try Directory.Delete(Path.Combine(e2eDir, strm2Store), true) with _ -> ())
+     ZarrWrite.writeStoreV2 strm2Store strm2Vars
+     ZarrWrite.writeStoreV2 (Path.Combine(e2eDir, strm2Store)) strm2Vars
 
      // Compare COMPUTE outputs only: the .read build additionally prints
      // the materialized source array (A/B = [...]), which the streamed
@@ -1302,7 +1310,7 @@ let w = z.write("%s", C)
 import zarr as z
 
 type TimeIdx = Idx<3>
-let sd = z.load("zarr_strm")
+let sd = z.load("providers/zarr_stores/zarr_strm")
 let A = sd.vars.A |> z.%s
 let m2 = method_for(A, A) <@> lambda(x: Array<Float64 like TimeIdx>, y: Array<Float64 like TimeIdx>) where comm(x, y) -> prodsum(x, y) / 3.0 |> compute
 """
@@ -1312,7 +1320,7 @@ let m2 = method_for(A, A) <@> lambda(x: Array<Float64 like TimeIdx>, y: Array<Fl
 import zarr as z
 
 type TimeIdx = Idx<3>
-let sd = z.load("zarr_strm")
+let sd = z.load("providers/zarr_stores/zarr_strm")
 let A = sd.vars.A |> z.%s
 let m3 = method_for(A, A, A) <@> lambda(x: Array<Float64 like TimeIdx>, y: Array<Float64 like TimeIdx>, z2: Array<Float64 like TimeIdx>) where comm(x, y, z2) -> prodsum(x, y, z2) / 3.0 |> compute
 """
@@ -1323,7 +1331,7 @@ let m3 = method_for(A, A, A) <@> lambda(x: Array<Float64 like TimeIdx>, y: Array
 import zarr as z
 
 type TimeIdx = Idx<3>
-let sd = z.load("zarr_strm")
+let sd = z.load("providers/zarr_stores/zarr_strm")
 let A = sd.vars.A |> z.%s
 let mu = method_for(A) <@> lambda(x: Array<Float64 like TimeIdx>) -> prodsum(x, x) / 3.0 |> compute
 """
@@ -1334,7 +1342,7 @@ let mu = method_for(A) <@> lambda(x: Array<Float64 like TimeIdx>) -> prodsum(x, 
 import zarr as z
 
 type TimeIdx = Idx<3>
-let sd = z.load("zarr_strm2")
+let sd = z.load("providers/zarr_stores/zarr_strm2")
 let B = sd.vars.B |> z.%s
 let m2 = method_for(B, B) <@> lambda(x: Array<Float64 like TimeIdx>, y: Array<Float64 like TimeIdx>) where comm(x, y) -> prodsum(x, y) / 3.0 |> compute
 """
@@ -1348,7 +1356,7 @@ let m2 = method_for(B, B) <@> lambda(x: Array<Float64 like TimeIdx>, y: Array<Fl
 import zarr as z
 
 type TimeIdx = Idx<3>
-let sd = z.load("zarr_strm")
+let sd = z.load("providers/zarr_stores/zarr_strm")
 let A = sd.vars.A |> z.%s
 let (mu, m2) = (method_for(A) <@> lambda(x: Array<Float64 like TimeIdx>) -> prodsum(x, x) / 3.0) <&!> (method_for(A, A) <@> lambda(x: Array<Float64 like TimeIdx>, y: Array<Float64 like TimeIdx>) where comm(x, y) -> prodsum(x, y) / 3.0) |> compute
 """
@@ -1372,7 +1380,7 @@ let (mu, m2) = (method_for(A) <@> lambda(x: Array<Float64 like TimeIdx>) -> prod
 import zarr as z
 
 type TimeIdx = Idx<3>
-let sd = z.load("zarr_strm")
+let sd = z.load("providers/zarr_stores/zarr_strm")
 let A = sd.vars.A |> z.%s
 let (m2a, m2b) = (method_for(A, A) <@> lambda(x: Array<Float64 like TimeIdx>, y: Array<Float64 like TimeIdx>) where comm(x, y) -> prodsum(x, y) / 3.0) <&> (method_for(A, A) <@> lambda(x: Array<Float64 like TimeIdx>, y: Array<Float64 like TimeIdx>) where comm(x, y) -> prodsum(x, y) * 2.0) |> compute
 """
@@ -1390,7 +1398,7 @@ let (m2a, m2b) = (method_for(A, A) <@> lambda(x: Array<Float64 like TimeIdx>, y:
      (let src = """
 import zarr as z
 
-let sd = z.load("zarr_strm")
+let sd = z.load("providers/zarr_stores/zarr_strm")
 let A = sd.vars.A |> z.stream
 let out = method_for(A) <@> lambda(x) -> x + x |> compute
 """

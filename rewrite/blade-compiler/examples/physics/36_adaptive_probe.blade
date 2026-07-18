@@ -1,0 +1,192 @@
+// TEST: Physics -- Adaptive Protocols: Aiming Each Shot from the Posterior
+// ============================================================================
+// Experiment design enters the loop (the Fisher-dual thread): the observer
+// now CHOOSES each probe from the current posterior. A hidden mass is one
+// of {1.0, 1.3, 512.0} (prior uniform) -- a COARSE question (is it the
+// half-tonne?) and a VERNIER question (1.0 or 1.3?) in one latent. The
+// knock-on read w = 2p/(p + M) (probe mass p, unit speed, instrument
+// sigma = 0.05) resolves a pair only near its matched probe
+// p* = sqrt(M_i M_j): mismatched, the pair's read gap collapses below the
+// noise. Greedy rule: p_next = exp(E_posterior[ln M]) -- impedance-match
+// the probe to the posterior bulk. Truth: M = 1.3. FINDINGS (pinned):
+//   * THE DESIGN SURFACE FOLLOWS THE POSTERIOR. The posterior-weighted
+//     pairwise-separation objective D(p) over a probe menu peaks at
+//     p = 25 under the prior (matched to the heavy-pair question,
+//     sqrt(1.3 x 512) = 25.8) and at p = 1.14 after shot one (matched to
+//     the surviving close pair, sqrt(1 x 1.3) = 1.14): coarse first,
+//     vernier after -- Bayesian experiment design as tower arithmetic.
+//   * THE GREEDY OBSERVER RETUNES: probe sequence 8.73 -> 1.20 -> 1.28.
+//     Shot one (anywhere in the decades) annihilates the 512 hypothesis;
+//     the rule then walks the probe INTO the close pair's matched point,
+//     where the 0.054-wide read gap the first probe left (1.1 sigma)
+//     opens to 0.13 (2.6 sigma).
+//   * ADAPTATION BEATS THE REPEATED PROBE 110x: both protocols take the
+//     SAME three noise draws (-0.012, +0.031, -0.006) and the same first
+//     shot; the fixed protocol repeats it, the adaptive one retunes.
+//     Final belief in the truth: adaptive 0.99828 vs fixed 0.81000 --
+//     the fixed observer's residual doubt is 110x the adaptive one's,
+//     entirely because its vernier gap stays under the noise (its shot 2
+//     even moves BACKWARD: the +0.031 draw lands nearer the wrong
+//     hypothesis when the gap is 0.054).
+//   * ORDER RENEWAL, THE MOVE THAT MAKES IT LEGAL: each quadratic
+//     likelihood spends two of the prior's four orders; the finite-
+//     support posterior is then its categorical readout, so the observer
+//     re-lifts after each shot -- probabilities out (dist_expect of the
+//     Lagrange indicators, exact at the surviving order), point towers
+//     back in (dist_mix of one-sample dists) -- an EXACT order-4 tower
+//     again (relift pinned at 1e-15). ppl/047's disintegrate-remix round
+//     trip, promoted to the recursion that makes unbounded sequential
+//     inference legal on finite support; ex 35's budget wall binds only
+//     irreducibly continuous latents.
+// The adaptive path runs entirely on the ppl tower primitives (reweight /
+// expect / mix, runtime Lagrange coefficients computed in-language from
+// the nodes); the fixed baseline is the same exact Bayes arithmetic in
+// scalar form (finite support makes them identical -- and keeps this
+// file inside the compile budget). No ensembles anywhere.
+// ============================================================================
+
+// Lagrange rows for nodes {1.0, 1.3, 512.0} (columns 1, m, m^2), exact
+// in-language: l_j(m) = prod_{k != j}(m - M_k) / prod(M_j - M_k)
+let dA = (1.0 - 1.3) * (1.0 - 512.0)
+let lAc2 = 1.0 / dA
+let lAc1 = (0.0 - (1.3 + 512.0)) / dA
+let lAc0 = 1.3 * 512.0 / dA
+let dB = (1.3 - 1.0) * (1.3 - 512.0)
+let lBc2 = 1.0 / dB
+let lBc1 = (0.0 - (1.0 + 512.0)) / dB
+let lBc0 = 1.0 * 512.0 / dB
+let dC = (512.0 - 1.0) * (512.0 - 1.3)
+let lCc2 = 1.0 / dC
+let lCc1 = (0.0 - (1.0 + 1.3)) / dC
+let lCc0 = 1.0 * 1.3 / dC
+let unity_c0 = lAc0 + lBc0 + lCc0
+
+// ---- the design surface D(p) = sum_{i<j} w_i w_j (read_i - read_j)^2,
+//      probe menu {1.14, 3, 8.73, 25, 72}, prior and post-shot-1 weights ----
+let Dp1 = ((2.0 * 1.14 / 2.14 - 2.0 * 1.14 / 2.44) * (2.0 * 1.14 / 2.14 - 2.0 * 1.14 / 2.44) + (2.0 * 1.14 / 2.14 - 2.0 * 1.14 / 513.14) * (2.0 * 1.14 / 2.14 - 2.0 * 1.14 / 513.14) + (2.0 * 1.14 / 2.44 - 2.0 * 1.14 / 513.14) * (2.0 * 1.14 / 2.44 - 2.0 * 1.14 / 513.14)) / 9.0
+let Dp2 = ((2.0 * 3.0 / 4.0 - 2.0 * 3.0 / 4.3) * (2.0 * 3.0 / 4.0 - 2.0 * 3.0 / 4.3) + (2.0 * 3.0 / 4.0 - 2.0 * 3.0 / 515.0) * (2.0 * 3.0 / 4.0 - 2.0 * 3.0 / 515.0) + (2.0 * 3.0 / 4.3 - 2.0 * 3.0 / 515.0) * (2.0 * 3.0 / 4.3 - 2.0 * 3.0 / 515.0)) / 9.0
+let Dp3 = ((2.0 * 8.73 / 9.73 - 2.0 * 8.73 / 10.03) * (2.0 * 8.73 / 9.73 - 2.0 * 8.73 / 10.03) + (2.0 * 8.73 / 9.73 - 2.0 * 8.73 / 520.73) * (2.0 * 8.73 / 9.73 - 2.0 * 8.73 / 520.73) + (2.0 * 8.73 / 10.03 - 2.0 * 8.73 / 520.73) * (2.0 * 8.73 / 10.03 - 2.0 * 8.73 / 520.73)) / 9.0
+let Dp4 = ((2.0 * 25.0 / 26.0 - 2.0 * 25.0 / 26.3) * (2.0 * 25.0 / 26.0 - 2.0 * 25.0 / 26.3) + (2.0 * 25.0 / 26.0 - 2.0 * 25.0 / 537.0) * (2.0 * 25.0 / 26.0 - 2.0 * 25.0 / 537.0) + (2.0 * 25.0 / 26.3 - 2.0 * 25.0 / 537.0) * (2.0 * 25.0 / 26.3 - 2.0 * 25.0 / 537.0)) / 9.0
+let Dp5 = ((2.0 * 72.0 / 73.0 - 2.0 * 72.0 / 73.3) * (2.0 * 72.0 / 73.0 - 2.0 * 72.0 / 73.3) + (2.0 * 72.0 / 73.0 - 2.0 * 72.0 / 584.0) * (2.0 * 72.0 / 73.0 - 2.0 * 72.0 / 584.0) + (2.0 * 72.0 / 73.3 - 2.0 * 72.0 / 584.0) * (2.0 * 72.0 / 73.3 - 2.0 * 72.0 / 584.0)) / 9.0
+let design_prior_V = if Dp4 > Dp1 then (if Dp4 > Dp2 then (if Dp4 > Dp3 then (if Dp4 > Dp5 then "PRIOR_DESIGN_WANTS_THE_COARSE_PAIR" else "NO") else "NO") else "NO") else "NO"
+
+// ============================ ADAPTIVE ====================================
+import ppl as ppl
+let MD: Array<Float64 like Idx<1>, Idx<3>> = [[1.0, 1.3, 512.0]]
+let prior = ppl.dist(MD, 4)
+let PAa: Array<Float64 like Idx<1>, Idx<1>> = [[1.0]]
+let PBa: Array<Float64 like Idx<1>, Idx<1>> = [[1.3]]
+let PCa: Array<Float64 like Idx<1>, Idx<1>> = [[512.0]]
+let PDA = ppl.dist(PAa, 4)
+let PDB = ppl.dist(PBa, 4)
+let PDC = ppl.dist(PCa, 4)
+
+// shot 1: p1 = prior geometric mean (1 * 1.3 * 512)^(1/3)
+let pa1 = exp((log(1.3) + log(512.0)) / 3.0)
+let a1wA = 2.0 * pa1 / (pa1 + 1.0)
+let a1wB = 2.0 * pa1 / (pa1 + 1.3)
+let a1wC = 2.0 * pa1 / (pa1 + 512.0)
+let a1r = 2.0 * pa1 / (pa1 + 1.3) - 0.012
+let a1LA = exp(0.0 - (a1r - a1wA) * (a1r - a1wA) / 0.005)
+let a1LB = exp(0.0 - (a1r - a1wB) * (a1r - a1wB) / 0.005)
+let a1LC = exp(0.0 - (a1r - a1wC) * (a1r - a1wC) / 0.005)
+let apost1 = ppl.dist_reweight(prior, a1LA * lAc0 + a1LB * lBc0 + a1LC * lCc0, a1LA * lAc1 + a1LB * lBc1 + a1LC * lCc1, a1LA * lAc2 + a1LB * lBc2 + a1LC * lCc2)
+let aq1A = ppl.dist_expect(apost1, lAc0, lAc1, lAc2)
+let aq1B = ppl.dist_expect(apost1, lBc0, lBc1, lBc2)
+let aq1C = ppl.dist_expect(apost1, lCc0, lCc1, lCc2)
+let am1 = ppl.dist_mix(aq1A, PDA, aq1B, PDB)
+let apri2 = ppl.dist_mix(aq1A + aq1B, am1, aq1C, PDC)
+let relift_k1 = ppl.cumulant(apri2, 1)
+let relift_gap = sqrt((relift_k1(0) - (aq1A * 1.0 + aq1B * 1.3 + aq1C * 512.0)) * (relift_k1(0) - (aq1A * 1.0 + aq1B * 1.3 + aq1C * 512.0)))
+let relift_V = if relift_gap < 0.0000000001 then "ORDER_RENEWED_EXACTLY" else "NO"
+// post-shot-1 design surface: the argmax moves to the vernier probe
+let Eq1 = ((2.0 * 1.14 / 2.14 - 2.0 * 1.14 / 2.44) * (2.0 * 1.14 / 2.14 - 2.0 * 1.14 / 2.44)) * aq1A * aq1B + ((2.0 * 1.14 / 2.14 - 2.0 * 1.14 / 513.14) * (2.0 * 1.14 / 2.14 - 2.0 * 1.14 / 513.14)) * aq1A * aq1C + ((2.0 * 1.14 / 2.44 - 2.0 * 1.14 / 513.14) * (2.0 * 1.14 / 2.44 - 2.0 * 1.14 / 513.14)) * aq1B * aq1C
+let Eq3 = ((2.0 * 8.73 / 9.73 - 2.0 * 8.73 / 10.03) * (2.0 * 8.73 / 9.73 - 2.0 * 8.73 / 10.03)) * aq1A * aq1B + ((2.0 * 8.73 / 9.73 - 2.0 * 8.73 / 520.73) * (2.0 * 8.73 / 9.73 - 2.0 * 8.73 / 520.73)) * aq1A * aq1C + ((2.0 * 8.73 / 10.03 - 2.0 * 8.73 / 520.73) * (2.0 * 8.73 / 10.03 - 2.0 * 8.73 / 520.73)) * aq1B * aq1C
+let Eq4 = ((2.0 * 25.0 / 26.0 - 2.0 * 25.0 / 26.3) * (2.0 * 25.0 / 26.0 - 2.0 * 25.0 / 26.3)) * aq1A * aq1B + ((2.0 * 25.0 / 26.0 - 2.0 * 25.0 / 537.0) * (2.0 * 25.0 / 26.0 - 2.0 * 25.0 / 537.0)) * aq1A * aq1C + ((2.0 * 25.0 / 26.3 - 2.0 * 25.0 / 537.0) * (2.0 * 25.0 / 26.3 - 2.0 * 25.0 / 537.0)) * aq1B * aq1C
+let design_post_V = if Eq1 > Eq3 then (if Eq1 > Eq4 then "POSTERIOR_DESIGN_WANTS_THE_VERNIER" else "NO") else "NO"
+
+// shot 2: retune to the posterior geometric mean
+let pa2 = exp(aq1B * log(1.3) + aq1C * log(512.0))
+let a2wA = 2.0 * pa2 / (pa2 + 1.0)
+let a2wB = 2.0 * pa2 / (pa2 + 1.3)
+let a2wC = 2.0 * pa2 / (pa2 + 512.0)
+let a2r = 2.0 * pa2 / (pa2 + 1.3) + 0.031
+let a2LA = exp(0.0 - (a2r - a2wA) * (a2r - a2wA) / 0.005)
+let a2LB = exp(0.0 - (a2r - a2wB) * (a2r - a2wB) / 0.005)
+let a2LC = exp(0.0 - (a2r - a2wC) * (a2r - a2wC) / 0.005)
+let apost2 = ppl.dist_reweight(apri2, a2LA * lAc0 + a2LB * lBc0 + a2LC * lCc0, a2LA * lAc1 + a2LB * lBc1 + a2LC * lCc1, a2LA * lAc2 + a2LB * lBc2 + a2LC * lCc2)
+let aq2A = ppl.dist_expect(apost2, lAc0, lAc1, lAc2)
+let aq2B = ppl.dist_expect(apost2, lBc0, lBc1, lBc2)
+let aq2C = ppl.dist_expect(apost2, lCc0, lCc1, lCc2)
+let bm1 = ppl.dist_mix(aq2A, PDA, aq2B, PDB)
+let apri3 = ppl.dist_mix(aq2A + aq2B, bm1, aq2C, PDC)
+// shot 3
+let pa3 = exp(aq2B * log(1.3) + aq2C * log(512.0))
+let a3wA = 2.0 * pa3 / (pa3 + 1.0)
+let a3wB = 2.0 * pa3 / (pa3 + 1.3)
+let a3wC = 2.0 * pa3 / (pa3 + 512.0)
+let a3r = 2.0 * pa3 / (pa3 + 1.3) - 0.006
+let a3LA = exp(0.0 - (a3r - a3wA) * (a3r - a3wA) / 0.005)
+let a3LB = exp(0.0 - (a3r - a3wB) * (a3r - a3wB) / 0.005)
+let a3LC = exp(0.0 - (a3r - a3wC) * (a3r - a3wC) / 0.005)
+let apost3 = ppl.dist_reweight(apri3, a3LA * lAc0 + a3LB * lBc0 + a3LC * lCc0, a3LA * lAc1 + a3LB * lBc1 + a3LC * lCc1, a3LA * lAc2 + a3LB * lBc2 + a3LC * lCc2)
+let afinA = ppl.dist_expect(apost3, lAc0, lAc1, lAc2)
+let afinB = ppl.dist_expect(apost3, lBc0, lBc1, lBc2)
+let afinC = ppl.dist_expect(apost3, lCc0, lCc1, lCc2)
+let asum = afinA + afinB + afinC
+let apostvar = ppl.cumulant(apost3, 2)
+
+// ============================ FIXED (scalar Bayes) ========================
+// same first probe, repeated; same noise draws; finite support makes the
+// scalar arithmetic exactly the Bayes the towers perform
+let f2r = 2.0 * pa1 / (pa1 + 1.3) + 0.031
+let f2LA = exp(0.0 - (f2r - a1wA) * (f2r - a1wA) / 0.005)
+let f2LB = exp(0.0 - (f2r - a1wB) * (f2r - a1wB) / 0.005)
+let f2LC = exp(0.0 - (f2r - a1wC) * (f2r - a1wC) / 0.005)
+let f3r = 2.0 * pa1 / (pa1 + 1.3) - 0.006
+let f3LA = exp(0.0 - (f3r - a1wA) * (f3r - a1wA) / 0.005)
+let f3LB = exp(0.0 - (f3r - a1wB) * (f3r - a1wB) / 0.005)
+let f3LC = exp(0.0 - (f3r - a1wC) * (f3r - a1wC) / 0.005)
+let fzn = a1LA * f2LA * f3LA + a1LB * f2LB * f3LB + a1LC * f2LC * f3LC
+let ffinA = a1LA * f2LA * f3LA / fzn
+let ffinB = a1LB * f2LB * f3LB / fzn
+let ffinC = a1LC * f2LC * f3LC / fzn
+
+// ---- verdicts ----
+let doubt_ratio = (1.0 - ffinB) / (1.0 - afinB)
+let adapt_V = if afinB > ffinB then (if doubt_ratio > 20.0 then "ADAPTATION_WINS" else "ADAPTIVE_AHEAD") else "NO"
+let vernier_V = if pa2 > 1.1 then (if pa2 < 1.35 then (if pa3 > 1.1 then (if pa3 < 1.35 then "RETUNES_TO_THE_SURVIVING_PAIR" else "NO") else "NO") else "NO") else "NO"
+let truth_V = if afinB > 0.99 then "TRUTH_RESOLVED" else "NO"
+let p1B = a1LB / (a1LA + a1LB + a1LC)
+let p2fB = a1LB * f2LB / (a1LA * f2LA + a1LB * f2LB + a1LC * f2LC)
+let backward_V = if p2fB < p1B then "FIXED_SHOT2_MOVED_BACKWARD" else "NO"
+
+// the design surface follows the posterior; the probe retunes; renewal is
+// exact; adaptation wins 110x on identical noise:
+// EXPECT: unity_c0 = 1
+// EXPECT: Dp1 = 0.223077864791015
+// EXPECT: Dp4 = 0.73535956026074
+// EXPECT: design_prior_V = "PRIOR_DESIGN_WANTS_THE_COARSE_PAIR"
+// EXPECT: pa1 = 8.73114306448885
+// EXPECT: aq1A = 0.302877349651935
+// EXPECT: aq1B = 0.697122650348135
+// EXPECT: Eq1 = 0.00362310561503027
+// EXPECT: Eq3 = 0.000608246237970767
+// EXPECT: design_post_V = "POSTERIOR_DESIGN_WANTS_THE_VERNIER"
+// EXPECT: relift_gap = 8.88178419700125e-16
+// EXPECT: relift_V = "ORDER_RENEWED_EXACTLY"
+// EXPECT: pa2 = 1.20069441837562
+// EXPECT: pa3 = 1.27743158698646
+// EXPECT: afinA = 0.00172464500069422
+// EXPECT: afinB = 0.998275354999307
+// EXPECT: asum = 1
+// EXPECT: apostvar = [0.000154950354028571]
+// EXPECT: ffinA = 0.190151626227127
+// EXPECT: ffinB = 0.809848373772873
+// EXPECT: doubt_ratio = 110.255517019839
+// EXPECT: adapt_V = "ADAPTATION_WINS"
+// EXPECT: vernier_V = "RETUNES_TO_THE_SURVIVING_PAIR"
+// EXPECT: truth_V = "TRUTH_RESOLVED"
+// EXPECT: p1B = 0.697122650022557
+// EXPECT: p2fB = 0.677912035514085
+// EXPECT: backward_V = "FIXED_SHOT2_MOVED_BACKWARD"

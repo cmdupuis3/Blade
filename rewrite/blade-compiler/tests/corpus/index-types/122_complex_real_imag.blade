@@ -1,0 +1,9 @@
+// TEST: Complex Real Imag Accessors
+// real(z)/imag(z) project a Complex128 to its Float64 components. Plain-call
+// intrinsics (shadowable), emitting std::real/std::imag. Result is a real
+// scalar, not a complex.
+let z = complex(3.0, 4.0)
+let re = real(z)
+let im = imag(z)
+// EXPECT: re = 3
+// EXPECT: im = 4

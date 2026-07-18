@@ -1,0 +1,10 @@
+// TEST: Dist Map Vector Needs Degree (rejects)
+import ppl as ppl
+// Without an explicit s EVERY component of a vector map must be polynomial
+// (its derivative tower must terminate) — exp(x) in the second slot makes
+// the truncation a modeling choice the program must own (the 042 rule,
+// componentwise).
+type TimeIdx = Idx<3>
+let B: Array<Float64 like Idx<2>, TimeIdx> = [[1.0, 2.0, 4.0], [3.0, 5.0, 4.0]]
+let db = ppl.dist(B, 6)
+let dy = ppl.dist_map(db, 2, lambda(x, y) -> (x + y, exp(x)))

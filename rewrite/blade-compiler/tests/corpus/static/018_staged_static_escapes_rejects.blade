@@ -1,0 +1,7 @@
+// TEST: Staged Static Escapes (rejects)
+// A staged static (tuple of lambdas) holds compile-time-only values; any
+// reference outside a static former / staged-tuple index is an error.
+let static qs = (lambda(x) -> x + 1.0, lambda(x) -> x * x)
+let A = [1.0, 2.0]
+let inc = static method_for(A) <@> qs[0] |> compute
+let leak = qs

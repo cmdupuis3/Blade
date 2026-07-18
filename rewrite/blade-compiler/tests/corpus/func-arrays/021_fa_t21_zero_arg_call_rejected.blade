@@ -1,0 +1,8 @@
+// TEST: FA T21: Zero-arg call of n-ary function (rejects)
+// ----------------------------------------------------------------------------
+// f() is not partial application (the residual would just be f itself) —
+// it is an arity error. Use the bare name `f` to pass the function as a
+// value.
+// ----------------------------------------------------------------------------
+function cos_tw(t, w) = cos(w * t)
+let bad = cos_tw()

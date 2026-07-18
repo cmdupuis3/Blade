@@ -8,10 +8,10 @@
 // Parse HermitianIdx in a function signature. Hermitian arrays require
 // complex element types (the Hermitian property A[i,j] = conj(A[j,i])
 // is meaningful only over C), so signature uses Complex128 throughout
-// and body returns an explicit Complex128 zero literal via the postfix
-// type annotation form `(re, im) : Complex128`. Both components are
-// float-typed (decimal-point literals) per the design rule that complex
-// literals require explicit floating-point real/imaginary parts.
+// and body returns an explicit Complex128 zero via the complex(re, im)
+// constructor. Both components are float-typed (decimal-point literals)
+// per the design rule that complex literals require explicit
+// floating-point real/imaginary parts.
 function trace(H: Array<Complex128 like HermitianIdx<n>>) -> Complex128 = {
-    (0.0, 0.0) : Complex128
+    complex(0.0, 0.0)
 }

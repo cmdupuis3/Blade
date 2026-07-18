@@ -1,0 +1,15 @@
+// TEST: Spectra dedup: fft + power + polyspec at one n share one FFT
+// All three ops at n=4 fingerprint the same ("fft", 4) helper, so the
+// program contains exactly one generated FFT (dedup smoke — values would
+// still pass with duplicates, but the shared decl is the design contract).
+// Pins from spectra/OracleDump.fs.
+import spectra as sp
+let x: Array<Float64 like Idx<4>> = [1.0, 2.0, 3.0, 4.0]
+let y: Array<Float64 like Idx<4>> = [4.0, 3.0, 2.0, 1.0]
+let z: Array<Float64 like Idx<4>> = [1.0, 0.0, 2.0, 0.0]
+let X = sp.fft(x)
+let P = sp.power(x)
+let B = sp.polyspec(x, y, z)
+// EXPECT: X = [(10, 0), (-2, 2), (-2, 0), (-1.9999999999999998, -2)]
+// EXPECT: P = [100, 8, 4, 7.9999999999999991]
+// EXPECT: B = [(300, 0), (-20, 20), (60, 0), (-19.999999999999996, -20), (20, -20), (0, 24), (4, -4), (-24, -1.3322676295501878E-15), (-60, 0), (4, -4), (-12, 0), (3.9999999999999996, 4), (19.999999999999996, 20), (-24, -1.3322676295501878E-15), (3.9999999999999996, 4), (2.6645352591003757E-15, -23.999999999999996)]

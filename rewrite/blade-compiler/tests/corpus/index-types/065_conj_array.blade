@@ -2,9 +2,9 @@
 // conj applied elementwise inside a kernel over a complex array. Each element
 // (a, b) becomes (a, -b).
 let A: Array<Complex128 like Idx<3>> = [
-    (1.0, 2.0) : Complex128,
-    (3.0, -4.0) : Complex128,
-    (0.0, 5.0) : Complex128
+    complex(1.0, 2.0),
+    complex(3.0, -4.0),
+    complex(0.0, 5.0)
 ]
 let L = method_for(A)
 let f = lambda(z) -> conj(z)

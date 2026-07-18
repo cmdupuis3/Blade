@@ -1,0 +1,9 @@
+// TEST: FA T14: Partial application with residual type annotation
+// ----------------------------------------------------------------------------
+// The residual of a partial application unifies with an explicit function
+// type annotation on the binding.
+// ----------------------------------------------------------------------------
+function cos_tw(t, w) = cos(w * t)
+let g: Float64 -> Float64 = cos_tw(1.0)
+let r = g(0.0)
+// EXPECT: r = 1

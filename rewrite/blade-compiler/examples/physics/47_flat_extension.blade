@@ -1,0 +1,167 @@
+// TEST: Physics -- The Tower Counts, Locates, and Weighs: Flat Extension
+// ============================================================================
+// The flat-extension guard (Curto-Fialkow), prototyped in userland -- the
+// compiler slot the arc has pointed at since ex 33 ('extendable' as a
+// refinement type on Dist). The question a truncated tower must answer:
+// is there a MEASURE behind these numbers? For atomic measures the whole
+// answer is spectral, and with m.eigh it runs in-language end to end:
+// moments -> Chebyshev recursion -> Jacobi tridiagonal -> eigh =
+// Golub-Welsch: eigenvalues are the ATOMS, first-row eigenvector squares
+// are the WEIGHTS, and Hankel rank certifies the count.
+// FINDINGS (pinned):
+//   * SIX MOMENTS ARE THE MEASURE. From m0..m6 of a 3-atom law the
+//     machine returns the atoms (-1.1, 0.4, 1.7) and weights (0.2, 0.5,
+//     0.3) to ~1e-13 -- and FLATNESS certifies exactness: the 4x4 Hankel's
+//     smallest eigenvalue is ~1e-16 (rank stalls at 3) while the 3x3's
+//     is finite. Rank stall = 'the extension is flat' = the tower IS a
+//     3-atom measure, no deeper story required (contrast ex 33, where no
+//     extension of any depth exists).
+//   * THE t -> infinity TOWER IS THE ATTRACTOR PORTRAIT (review-gap 4
+//     closed): 24 damped double-well trajectories, integrated in-language
+//     to t = 60, leave an ensemble whose moment tower is 2-atomic: rank
+//     stalls at 2 (COUNTS the attractors), Golub-Welsch nodes land on
+//     the wells at Â±1 to ~1e-7 (LOCATES them -- the residual is the
+//     e^{-gamma t} ring-down, physics not error), and the recovered
+//     weights equal the DIRECTLY COUNTED basin fractions -- 12/24 each, an
+//     even split off an ASYMMETRIC grid (interleaved spiral basins),
+//     matched at 1e-14 (WEIGHS). Detect -> count -> locate -> weigh,
+//     all from one moment tower.
+//   * THE GUARD REFUSES NONCLASSICAL TOWERS. The Tsirelson B-marginal
+//     (m0, m1, m2) = (1, 2 sqrt 2, 4) of ex 33/39: its Hankel has a
+//     NEGATIVE eigenvalue (-0.7016) -- no measure, no atoms, refusal by
+//     spectrum. The same machine that hands back atoms for classical
+//     towers hands back the obstruction for quantum ones: this pair of
+//     behaviors IS the flat-extension guard the compiler slot wants.
+// Two-route: every number verified against an independent F# route
+// (Chebyshev + Jacobi eigh) before pinning; the 3-atom case's truth is
+// analytic.
+// ============================================================================
+import math as m
+
+// ---- (a) the 3-atom tower: moments in-language, Chebyshev, Jacobi ----
+let AT: Array<Float64 like Idx<3>> = [-1.1, 0.4, 1.7]
+let WT: Array<Float64 like Idx<3>> = [0.2, 0.5, 0.3]
+let MM = {
+    let mut mv = [0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0]
+    let mut pw = [0.0, 0.0, 0.0]
+    for i in 0..3 { pw(i) = WT(i) }
+    for k in 0..7 {
+        let s = pw(0) + pw(1) + pw(2)
+        mv(k) = s
+        for i in 0..3 { pw(i) = pw(i) * AT(i) }
+    }
+    mv
+}
+let ja0 = MM(1) / MM(0)
+let s11 = MM(2) - ja0 * MM(1)
+let s12 = MM(3) - ja0 * MM(2)
+let s13 = MM(4) - ja0 * MM(3)
+let s14 = MM(5) - ja0 * MM(4)
+let jb1 = s11 / MM(0)
+let ja1 = s12 / s11 - ja0
+let s22 = s13 - ja1 * s12 - jb1 * MM(2)
+let s23 = s14 - ja1 * s13 - jb1 * MM(3)
+let jb2 = s22 / s11
+let ja2 = s23 / s22 - s12 / s11
+let JM: Array<Float64 like Idx<3>, Idx<3>> = [[ja0, sqrt(jb1), 0.0], [sqrt(jb1), ja1, sqrt(jb2)], [0.0, sqrt(jb2), ja2]]
+let (QJ, ND) = m.eigh(JM)
+let nd0 = ND(0)
+let nd1 = ND(1)
+let nd2 = ND(2)
+let w0 = MM(0) * QJ(0, 0) * QJ(0, 0)
+let w1 = MM(0) * QJ(0, 1) * QJ(0, 1)
+let w2 = MM(0) * QJ(0, 2) * QJ(0, 2)
+let atomDev = sqrt((nd0 - 1.7) * (nd0 - 1.7)) + sqrt((nd1 - 0.4) * (nd1 - 0.4)) + sqrt((nd2 + 1.1) * (nd2 + 1.1)) + sqrt((w0 - 0.3) * (w0 - 0.3)) + sqrt((w1 - 0.5) * (w1 - 0.5)) + sqrt((w2 - 0.2) * (w2 - 0.2))
+
+// ---- (b) flatness: rank stalls exactly at the atom count ----
+let H3: Array<Float64 like Idx<4>, Idx<4>> = [[MM(0), MM(1), MM(2), MM(3)], [MM(1), MM(2), MM(3), MM(4)], [MM(2), MM(3), MM(4), MM(5)], [MM(3), MM(4), MM(5), MM(6)]]
+let H2: Array<Float64 like Idx<3>, Idx<3>> = [[MM(0), MM(1), MM(2)], [MM(1), MM(2), MM(3)], [MM(2), MM(3), MM(4)]]
+let (QH3, L3) = m.eigh(H3)
+let (QH2, L2) = m.eigh(H2)
+let flat3 = sqrt(L3(3) * L3(3))
+let firm2 = L2(2)
+
+// ---- (c) the attractor portrait: damped double-well, in-language ----
+let IC24 = method_for(range<Idx<24>>) <@> lambda(j) -> 0.0 - 2.1 + 4.6 * j / 23.0 |> compute
+let FIN = {
+    let mut fv = [0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0]
+    let mut x = 0.0
+    let mut p = 0.0
+    for j in 0..24 {
+        x = IC24(j)
+        p = 0.0
+        for t in 0..6000 {
+            let f0 = x - x * x * x - 0.5 * p
+            let ph = p + 0.005 * f0
+            x = x + 0.01 * ph
+            let f1 = x - x * x * x - 0.5 * ph
+            p = ph + 0.005 * f1
+        }
+        fv(j) = x
+    }
+    fv
+}
+let em0 = 1.0
+let em1 = reduce(method_for(FIN) <@> lambda(x) -> x, (+)) / 24.0
+let em2 = reduce(method_for(FIN) <@> lambda(x) -> x * x, (+)) / 24.0
+let em3 = reduce(method_for(FIN) <@> lambda(x) -> x * x * x, (+)) / 24.0
+let em4 = reduce(method_for(FIN) <@> lambda(x) -> x * x * x * x, (+)) / 24.0
+let nRight = reduce(method_for(FIN) <@> lambda(x) -> (if x > 0.0 then 1.0 else 0.0), (+))
+let ea0 = em1
+let t11 = em2 - ea0 * em1
+let t12 = em3 - ea0 * em2
+let eb1 = t11
+let ea1 = t12 / t11 - ea0
+let J2M: Array<Float64 like Idx<2>, Idx<2>> = [[ea0, sqrt(eb1)], [sqrt(eb1), ea1]]
+let (QA, NA) = m.eigh(J2M)
+let an0 = NA(0)
+let an1 = NA(1)
+let aw0 = QA(0, 0) * QA(0, 0)
+let aw1 = QA(0, 1) * QA(0, 1)
+let wellDev = sqrt((an0 - 1.0) * (an0 - 1.0)) + sqrt((an1 + 1.0) * (an1 + 1.0))
+let countDev = sqrt((aw0 - nRight / 24.0) * (aw0 - nRight / 24.0))
+let EH2: Array<Float64 like Idx<3>, Idx<3>> = [[1.0, em1, em2], [em1, em2, em3], [em2, em3, em4]]
+let (QE, LE) = m.eigh(EH2)
+let aflat = sqrt(LE(2) * LE(2))
+let afirm = (if LE(1) > 0.0 then LE(1) else 0.0 - LE(1))
+
+// ---- (d) the guard refuses the Tsirelson tower ----
+let TS: Array<Float64 like Idx<2>, Idx<2>> = [[1.0, 2.82842712474619], [2.82842712474619, 4.0]]
+let (QT, LT) = m.eigh(TS)
+let tneg = LT(1)
+
+// ---- verdicts ----
+let atomsV = if atomDev < 0.000000000001 then "SIX_MOMENTS_ARE_THE_MEASURE" else "NO"
+let flatV = if flat3 < 0.00000000001 then (if firm2 > 0.01 then "RANK_STALLS_AT_THE_ATOM_COUNT" else "NO") else "NO"
+let wellsV = if wellDev < 0.00001 then "WELLS_LOCATED" else "NO"
+let basinV = if countDev < 0.00000001 then "WEIGHTS_ARE_BASIN_FRACTIONS" else "NO"
+let aflatV = if aflat < 0.0000000001 then (if afirm > 0.5 then "ATTRACTORS_COUNTED" else "NO") else "NO"
+let guardV = if tneg < 0.0 then "TSIRELSON_REFUSED_NEGATIVE_EIGENVALUE" else "NO"
+
+// atoms out of moments; rank = count, nodes = places, weights = basins;
+// and on the quantum tower, the spectral refusal:
+// EXPECT: nd0 = 1.7
+// EXPECT: nd1 = 0.400000000000001
+// EXPECT: nd2 = -1.1
+// EXPECT: w0 = 0.3
+// EXPECT: w1 = 0.5
+// EXPECT: w2 = 0.2
+// EXPECT: atomDev = 1.2490009027033e-15
+// EXPECT: atomsV = "SIX_MOMENTS_ARE_THE_MEASURE"
+// EXPECT: flat3 = 5.7728687742232e-17
+// EXPECT: firm2 = 0.361014849269617
+// EXPECT: flatV = "RANK_STALLS_AT_THE_ATOM_COUNT"
+// EXPECT: nRight = 12
+// EXPECT: an0 = 0.999999937492779
+// EXPECT: an1 = -0.999999973120443
+// EXPECT: aw0 = 0.500000000000014
+// EXPECT: aw1 = 0.499999999999986
+// EXPECT: wellDev = 8.93867779794277e-08
+// EXPECT: countDev = 1.3988810110277e-14
+// EXPECT: aflat = 1.0492907946876e-13
+// EXPECT: afirm = 0.999999910613223
+// EXPECT: wellsV = "WELLS_LOCATED"
+// EXPECT: basinV = "WEIGHTS_ARE_BASIN_FRACTIONS"
+// EXPECT: aflatV = "ATTRACTORS_COUNTED"
+// EXPECT: tneg = -0.701562118716424
+// EXPECT: guardV = "TSIRELSON_REFUSED_NEGATIVE_EIGENVALUE"

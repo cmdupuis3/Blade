@@ -1,0 +1,5 @@
+// TEST: Spectra polyspec: one argument is below the order range (rejects)
+// The argument count IS the polyspectrum order; k=1 has no free frequency.
+import spectra as sp
+let x: Array<Float64 like Idx<8>> = [1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0]
+let P = sp.polyspec(x)

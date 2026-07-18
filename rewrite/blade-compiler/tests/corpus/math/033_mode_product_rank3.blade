@@ -1,0 +1,8 @@
+// TEST: Math mode_product: rank-3 known values
+// Y = X ×₀ U with X the 3x4x2 Kolda-Bader tensor and U 2x3; pins from
+// math/Tensor.fs (BladeMath oracle). Output dims (2, 4, 2), printed flat.
+import math as m
+let X: Array<Float64 like Idx<3>, Idx<4>, Idx<2>> = [[[1.0, 13.0], [4.0, 16.0], [7.0, 19.0], [10.0, 22.0]], [[2.0, 14.0], [5.0, 17.0], [8.0, 20.0], [11.0, 23.0]], [[3.0, 15.0], [6.0, 18.0], [9.0, 21.0], [12.0, 24.0]]]
+let U: Array<Float64 like Idx<2>, Idx<3>> = [[1.0, 0.5, 0.25], [2.0, 1.0, 0.0]]
+let Y = m.mode_product(X, U, 0)
+// EXPECT: Y = [2.75, 23.75, 8, 29, 13.25, 34.25, 18.5, 39.5, 4, 40, 13, 49, 22, 58, 31, 67]

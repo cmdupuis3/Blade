@@ -455,11 +455,14 @@ let private collectTypedBindings (srcFuncs: Map<string, FunctionDecl>) (tp: Type
                   EWhere = whereConjuncts f.WhereClause }
         for p in f.Params do add f.Name p.Name "param" (pp p.Type)
         walkFuncBody f.Name f.Body
+    // Module-level let types by name, for rebuilding erased dists below.
+    let moduleLets = Dictionary<string, IRType>()
     for m in tp.Modules do
         for d in m.Decls do
             match d with
             | TDeclLet b ->
                 add "" b.Name "let" (ppVal b.Type)
+                moduleLets.[b.Name] <- b.Type
                 for (n, _, t) in b.SubBindings do add "" n "let" (ppVal t)
             | TDeclStatic b ->
                 add "" b.Name "static" (ppVal b.Type)
@@ -467,6 +470,21 @@ let private collectTypedBindings (srcFuncs: Map<string, FunctionDecl>) (tp: Type
             | TDeclFunction f -> addFunc f
             | TDeclImpl impl -> for f in impl.Methods do addFunc f
             | _ -> ()
+    // Erased dists: the flat pushforward formers (dist_map/dist_jet/...) are
+    // register-only — PPL elaboration emits their κ components but no decl
+    // under the user's name, so the walk above never sees them and the name
+    // would hover as nothing. Rebuild Dist<order, elem like axes> from κ_1's
+    // inferred type (distComponentType 1 = the array over the variable axes,
+    // so this inverts exactly). Names the walk DID find are left alone.
+    let named = HashSet<string>(acc |> Seq.filter (fun e -> e.Scope = "") |> Seq.map (fun e -> e.EName))
+    for (name, order, comps) in Blade.Ppl.Elaborate.IdeDists.entries () do
+        if not (named.Contains name) then
+            match comps with
+            | k1 :: _ ->
+                match moduleLets.TryGetValue k1 with
+                | true, ArrayElem arr -> add "" name "let" (ppVal (IRTDist (order, arr.ElemType, arr.IndexTypes)))
+                | _ -> ()
+            | [] -> ()
     acc
 
 /// Join typed bindings to source spans by (scope, name), consuming spans in

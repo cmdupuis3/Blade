@@ -1,0 +1,34 @@
+// TEST: FA T11: rank-2 literal of computed rank-1 rows
+// ----------------------------------------------------------------------------
+// T11: a rank-2 array literal whose elements are COMPUTED rank-1 arrays
+// (method_for pipelines materialized via |> compute and bound to names) must
+// materialize as a real matrix. computeArrayDims walks bracket nesting only,
+// so `[Y1, Y2]` used to emit a short extents table ({2} for a rank-2 array --
+// the inner extent read as 0) and assigned the Array wrappers into row slots:
+// every downstream shape consumer saw zero-length rows (M printed as [],
+// fibers over rows prodsummed to 0) with no error anywhere. Fixed 2026-07-16:
+// the missing inner extents come from the trailing IndexTypes of the declared
+// (or, unannotated, the row-inferred) array type, and array-valued leaves
+// deep-copy elementwise -- no row aliasing.
+// Covers: annotated rows-of-computed-arrays (M), unannotated inference from
+// the row exprs' own array types (U), mixed computed/literal rows (W), a
+// downstream fiber over the built matrix (G = Gram matrix of the staged
+// compute columns), and rank-3 from rank-2 row variables (C).
+let A = [1.0, 2.0, 3.0, 4.0]
+let Y1 = method_for(A) <@> lambda(x) -> x - 2.5 |> compute
+let Y2 = method_for(A) <@> lambda(x) -> x * x |> compute
+let M: Array<Float64 like Idx<2>, Idx<4>> = [Y1, Y2]
+let U = [Y2, Y1]
+let W: Array<Float64 like Idx<2>, Idx<4>> = [Y1, [9.0, 8.0, 7.0, 6.0]]
+let G = method_for(M, M) <@> lambda(u: Array<Float64 like Idx<4>>, v: Array<Float64 like Idx<4>>) -> prodsum(u, v) |> compute
+let S: Array<Float64 like Idx<2>, Idx<3>> = [[1.0, 2.0, 3.0], [4.0, 5.0, 6.0]]
+let C: Array<Float64 like Idx<2>, Idx<2>, Idx<3>> = [S, S]
+// EXPECT: A = [1, 2, 3, 4]
+// EXPECT: Y1 = [-1.5, -0.5, 0.5, 1.5]
+// EXPECT: Y2 = [1, 4, 9, 16]
+// EXPECT: M = [-1.5, -0.5, 0.5, 1.5, 1, 4, 9, 16]
+// EXPECT: U = [1, 4, 9, 16, -1.5, -0.5, 0.5, 1.5]
+// EXPECT: W = [-1.5, -0.5, 0.5, 1.5, 9, 8, 7, 6]
+// EXPECT: G = [5, 25, 25, 354]
+// EXPECT: S = [1, 2, 3, 4, 5, 6]
+// EXPECT: C = [1, 2, 3, 4, 5, 6, 1, 2, 3, 4, 5, 6]

@@ -1,0 +1,7 @@
+// TEST: Math gating: no import, user svd untouched
+// The math elaborator is import-gated: without `import math` the pass is a
+// strict no-op, so a user's own function named `svd` (or `matmul`, ...) is
+// never rewritten or shadowed.
+function svd(x: Float64) -> Float64 = x * 2.0
+let r = svd(3.0)
+// EXPECT: r = 6

@@ -1,0 +1,26 @@
+// TEST: Math hosvd: rank-1 tensor concentrates the core
+// X = a ⊗ b ⊗ c has multilinear rank (1,1,1): the core's single nonzero
+// entry is ‖a‖·‖b‖·‖c‖ at (0,0,0) (positive under the sign convention),
+// everything else is zero. a=(1,2,3), b=(1,.5,.25), c=(2,1,.5):
+// ‖a‖²‖b‖²‖c‖² = 14 · 1.3125 · 5.25 = 96.46875.
+import math as m
+let X: Array<Float64 like Idx<3>, Idx<3>, Idx<3>> = [[[2.0, 1.0, 0.5], [1.0, 0.5, 0.25], [0.5, 0.25, 0.125]], [[4.0, 2.0, 1.0], [2.0, 1.0, 0.5], [1.0, 0.5, 0.25]], [[6.0, 3.0, 1.5], [3.0, 1.5, 0.75], [1.5, 0.75, 0.375]]]
+let (G, U0, U1, U2) = m.hosvd(X)
+let d0 = G(0, 0, 0) * G(0, 0, 0) - 96.46875
+let dev = d0 * d0
+let pos = if G(0, 0, 0) > 0.0 then 1.0 else 0.0
+let offd = {
+    let mut acc = 0.0
+    for a in 0..3 {
+        for b in 0..3 {
+            for c in 0..3 {
+                let keep = if a + b + c > 0 then 1.0 else 0.0
+                acc = acc + keep * G(a, b, c) * G(a, b, c)
+            }
+        }
+    }
+    acc
+}
+// EXPECT: dev = 0.0
+// EXPECT: pos = 1
+// EXPECT: offd = 0.0

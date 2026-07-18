@@ -1,10 +1,12 @@
 // TEST: Range Compound Mixed (rejects)
-// A compound range slot cannot (yet) be combined with other index types in
-// one range<>; the gate is a codegen-stage #error, so the probe passes by
-// failing at compile.
-// A compound range slot cannot (yet) be combined with other index types in
-// one range<>; the gate is a codegen-stage #error, so the probe passes by
-// failing at compile.
+// A CompoundIdx slot IS the whole (masked product) iteration space, so it
+// cannot share a range<> with other index types -- unlike ordinary index
+// types, which DO combine freely (see loops/067). The gate is a TYPECHECK
+// rejection (TypeCheck.fs ExprRange, formalism 4.5); rejecting there keeps a
+// codegen #error plus a cascade of undeclared-variable errors out of the
+// generated C++. CodeGen keeps its own #error for the same condition as
+// deliberate defense-in-depth, so this is two gates, not one.
+// A sole compound slot, range<CompoundIdx<m>>, is fine -- see 015.
 type Lat = Idx<2>
 type Lon = Idx<3>
 type K = Idx<4>

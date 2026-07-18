@@ -1,0 +1,6 @@
+// TEST: Math gating: unknown op rejects with steering (rejects)
+// Any alias-qualified call is claimed by the elaborator, so an unknown op
+// gets a clean "unknown op (available: ...)" error instead of an
+// unbound-module type error downstream.
+import math as m
+let r = m.bogus(1.0)

@@ -1,0 +1,10 @@
+// TEST: Dist Map Residual Arity (rejects)
+import ppl as ppl
+// A bare 2-ary function on a 1-dimensional dist: the residual coordinate
+// count must equal the dist dimension (the existing lambda rule, now
+// checked against the inlined function's residual params).
+function cos_tw(t, w) = cos(w * t)
+type TimeIdx = Idx<3>
+let A: Array<Float64 like Idx<1>, TimeIdx> = [[0.0, 1.0, 2.0]]
+let xd = ppl.dist(A, 2)
+let dy = ppl.dist_map(xd, 1, 2, cos_tw)

@@ -1,0 +1,9 @@
+// TEST: FA T15: Partial application passed as function argument
+// ----------------------------------------------------------------------------
+// A partial application is an ordinary function value: it binds to a
+// function-typed parameter of another function.
+// ----------------------------------------------------------------------------
+function add3(a, b, c) = a + b + c
+function apply_twice(h: Float64 -> Float64, x: Float64) -> Float64 = h(h(x))
+let r = apply_twice(add3(1.0, 2.0), 4.0)
+// EXPECT: r = 10

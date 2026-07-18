@@ -1,0 +1,16 @@
+// TEST: Rand Normal Moments
+// Statistical properties of 10000 standard-normal draws: sample mean ~ 0 and
+// sample variance ~ 1. Deterministic RNG => definite pass/fail. Tolerances are
+// several standard errors (mean SE ~ 0.01, variance SE ~ 0.014). Variance is
+// computed as E[x^2] - E[x]^2 over the sample.
+import rand as r
+let n = r.normal(7, 10000)
+let s = reduce(n, (+))
+let mean = s / 10000.0
+let sq = method_for(n) <@> lambda(x) -> x * x |> compute
+let ss = reduce(sq, (+))
+let var = ss / 10000.0 - mean * mean
+let meanOk = abs(mean) < 0.05
+let varOk = abs(var - 1.0) < 0.1
+// EXPECT: meanOk = true
+// EXPECT: varOk = true

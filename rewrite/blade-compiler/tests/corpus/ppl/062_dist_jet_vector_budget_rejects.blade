@@ -1,0 +1,10 @@
+// TEST: Dist Jet Vector Budget (rejects)
+import ppl as ppl
+// Strict vector jet over an order-4 dist with q·s = 6: insufficient
+// stochastic order — same budget contract as the scalar path (m does not
+// enter the moment budget).
+type TimeIdx = Idx<3>
+let B: Array<Float64 like Idx<2>, TimeIdx> = [[1.0, 2.0, 4.0], [3.0, 5.0, 4.0]]
+let db = ppl.dist(B, 4)
+let m = ppl.cumulant(db, 1)
+let dy = ppl.dist_jet(db, 3, [m(0) + m(1), m(0) * m(1)], [1.0, 1.0, m(1), m(0)], [0.0, 0.0, 0.0, 0.0, 1.0, 0.0])

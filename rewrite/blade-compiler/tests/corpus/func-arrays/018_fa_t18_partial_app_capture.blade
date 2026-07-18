@@ -1,0 +1,12 @@
+// TEST: FA T18: Partial application capturing a local
+// ----------------------------------------------------------------------------
+// Bound-arg expressions are inlined into the residual's body, so locals they
+// reference become ordinary lambda captures — same semantics as a
+// user-written lambda(c) -> add3(a0, b0 * 2.0, c).
+// ----------------------------------------------------------------------------
+function add3(a, b, c) = a + b + c
+let a0 = 7.0
+let b0 = 0.5
+let addl = add3(a0, b0 * 2.0)
+let r = addl(2.0)
+// EXPECT: r = 10

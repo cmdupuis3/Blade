@@ -1,0 +1,1 @@
+{"blade": {"spec_version": 1, "layout": "packed-blocks", "order": "ascending-lex", "index_types": [{"kind": "sym", "rank": 2, "extent": 8}], "decomposition": {"scheme": "simplex-blocks", "tile": 2, "grid": 4, "block_order": "path"}}}
