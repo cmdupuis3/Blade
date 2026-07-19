@@ -44,6 +44,54 @@ let allValidOutputs (cfg: TPConfig) : bool =
     let reachable = tpPaths cfg |> List.map (fun (_, _, bo) -> bo) |> Set.ofList
     Set.count reachable = cfg.SpecOut.Length
 
+/// Full Clebsch-Gordan decomposition of s1 ⊗ s2, merged-canonical: every
+/// entry pair (e1, e2) contributes l ∈ [|l1-l2| .. l1+l2] with parity
+/// p1*p2 and multiplicity m1*m2; contributions are aggregated by
+/// (l, parity) and ordered ascending by (l, parity). Spec identity is
+/// order-sensitive, so this canonicalization IS the definition of the
+/// tp_spec surface builtin — stable to write in annotations.
+/// Completeness: totalDim (tpSpec s1 s2) = totalDim s1 * totalDim s2.
+let tpSpec (s1: Spec) (s2: Spec) : Spec =
+    [ for e1 in s1 do
+        for e2 in s2 do
+          for l in abs (e1.L - e2.L) .. e1.L + e2.L ->
+            { L = l; Parity = parityMul e1.Parity e2.Parity; Mult = e1.Mult * e2.Mult } ]
+    |> List.groupBy (fun e -> (e.L, e.Parity))
+    |> List.sortBy fst
+    |> List.map (fun ((l, p), es) -> { L = l; Parity = p; Mult = es |> List.sumBy (fun e -> e.Mult) })
+
+/// Total multiplicity per (l, parity). Duplicate spec entries AGGREGATE
+/// here — Linear.findBlock's first-match rule makes later duplicates
+/// unreachable for `linear` (finding F3), but hom-space dimension counting
+/// must not inherit that quirk.
+let aggregateByIrrep (s: Spec) : Map<int * int, int> =
+    (Map.empty, s) ||> List.fold (fun m e ->
+        m |> Map.change (e.L, e.Parity) (fun cur -> Some (defaultArg cur 0 + e.Mult)))
+
+/// dim Hom_G(V_in, V_out) by Schur's lemma: an equivariant linear map can
+/// only connect irreps of identical (l, parity), contributing one free
+/// parameter per (input copy, output copy) pair — Σ_{(l,p)} multIn * multOut
+/// over aggregated multiplicities. homDim = 0 ⇔ every equivariant map is 0.
+let homDim (sIn: Spec) (sOut: Spec) : int =
+    let aIn = aggregateByIrrep sIn
+    aggregateByIrrep sOut
+    |> Map.fold (fun acc k mOut ->
+        match Map.tryFind k aIn with
+        | Some mIn -> acc + mIn * mOut
+        | None -> acc) 0
+
+/// The complete Schur basis of Hom_G as block pairs: ALL (input, output)
+/// block pairs of equal (l, parity) — the all-pairs generalization of
+/// linearBlocks' first-match rule (duplicate input irreps become reachable,
+/// finding F3). Output-major pair order; never fails — an output block with
+/// no matching input is simply absent (derive_linear zero-fills it).
+/// Σ multOut*multIn over these pairs = homDim (per-(l,p) product of sums).
+let homBlocks (sIn: Spec) (sOut: Spec) : (int * int * SpecEntry * SpecEntry) list =
+    [ for bo in 0 .. sOut.Length - 1 do
+        for bi in 0 .. sIn.Length - 1 do
+          if sIn.[bi].L = sOut.[bo].L && sIn.[bi].Parity = sOut.[bo].Parity then
+            yield (bi, bo, sOut.[bo], sIn.[bi]) ]
+
 let tpWeightDim (cfg: TPConfig) : int =
     tpPaths cfg
     |> List.sumBy (fun (b1, b2, bo) ->

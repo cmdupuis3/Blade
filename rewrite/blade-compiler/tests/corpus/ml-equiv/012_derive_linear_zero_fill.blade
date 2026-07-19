@@ -1,0 +1,21 @@
+// TEST: ML Equiv Derive Linear Zero Fill And Duplicates
+import ml as ml
+// ============================================================================
+// Two things linear's first-match layout cannot express:
+// 1. An output block with NO matching input irrep: derive_linear zero-fills
+//    it — the unique equivariant completion (Schur: the only map is zero).
+// 2. DUPLICATE input irreps: every copy is reachable (finding F3) — the
+//    two 0e copies both feed the output through their own weights.
+// ============================================================================
+let static SIN = [(0, 0, 1)]
+let static SOUT = [(0, 0, 1), (1, 1, 1)]
+let zf: Array<Float like IrrepsIdx<SOUT>> = ml.derive_linear(SIN, SOUT, [3.0], [2.0])
+// EXPECT: zf = [6.0, 0.0, 0.0, 0.0]
+
+let static DIN = [(0, 0, 1), (0, 0, 1)]
+let static DOUT = [(0, 0, 1)]
+let static DWD = ml.hom_dim(DIN, DOUT)
+let dwd = DWD
+// EXPECT: dwd = 2
+let dup: Array<Float like IrrepsIdx<DOUT>> = ml.derive_linear(DIN, DOUT, [2.0, 0.5], [3.0, 4.0])
+// EXPECT: dup = [8.0]

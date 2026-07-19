@@ -1,0 +1,10 @@
+// TEST: ML Ops Schur No Equivariant Map (rejects)
+import ml as ml
+// ============================================================================
+// linear between specs sharing NO (l, parity): hom_dim = 0, so by Schur's
+// lemma every equivariant map is zero — refused at elaboration with BL4007
+// ("no equivariant map exists"), not silently accepted as a zero layer.
+// ============================================================================
+let static SIN = [(0, 0, 2), (2, 0, 1)]
+let static SOUT = [(1, 1, 3)]
+let bad = ml.linear(SIN, SOUT, [0.0], [1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0])

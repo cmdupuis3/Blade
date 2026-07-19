@@ -66,6 +66,27 @@ module Tests_Autodiff =
             (fun x -> Linear.linear specA specB wLin x) xLin
             (fun u -> snd (Autodiff.vjpLinear specA specB wLin xLin u))
 
+        // ---- homLinear (derive_linear's complete Schur basis) ----
+        // Duplicate input irrep + an unmatched output block: exactly the
+        // cases linear's first-match layout cannot express.
+        let specHIn = Irreps.mkSpec [ (0, Even, 2); (1, Odd, 1); (1, Odd, 2) ]
+        let specHOut = Irreps.mkSpec [ (1, Odd, 2); (2, Even, 1); (0, Even, 1) ]
+        let wHom = randArray (Linear.homWeightDim specHIn specHOut)
+        let xHom = randArray (Irreps.totalDim specHIn)
+        checkVjpAgainstFd "homLinear: dW"
+            (fun w -> Linear.homLinear specHIn specHOut w xHom) wHom
+            (fun u -> fst (Autodiff.vjpHomLinear specHIn specHOut wHom xHom u))
+        checkVjpAgainstFd "homLinear: dX"
+            (fun x -> Linear.homLinear specHIn specHOut wHom x) xHom
+            (fun u -> snd (Autodiff.vjpHomLinear specHIn specHOut wHom xHom u))
+
+        // ---- norms (invariant exit) ----
+        let specN = Irreps.mkSpec [ (0, Even, 2); (1, Odd, 2); (2, Even, 1) ]
+        let xN = randArray (Irreps.totalDim specN)
+        checkVjpAgainstFd "norms: dX"
+            (fun x -> Activations.norms specN x) xN
+            (fun u -> Autodiff.vjpNorms specN xN u)
+
         // ---- tensor product ----
         let cfg : TPConfig =
             { Spec1 = specA

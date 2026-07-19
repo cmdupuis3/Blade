@@ -1,0 +1,16 @@
+// TEST: Kernel Functional Update Return
+// Functional update `{ f = v, ..r }` in kernel return position: the kernel
+// reads struct rows and returns updated structs, materializing a new
+// Array<P3> with the unlisted fields copied per element.
+struct P3 { x: Float64, y: Float64, z: Float64 }
+type NIdx = Idx<2>
+let ps: Array<P3 like NIdx> = [P3 { x = 1.0, y = 2.0, z = 3.0 }, P3 { x = 4.0, y = 5.0, z = 6.0 }]
+let moved = method_for(ps) <@> lambda(p) -> P3 { x = p.x + 10.0, ..p } |> compute
+let m0x = moved((0 : NIdx)).x
+let m0y = moved((0 : NIdx)).y
+let m1x = moved((1 : NIdx)).x
+let m1z = moved((1 : NIdx)).z
+// EXPECT: m0x = 11
+// EXPECT: m0y = 2
+// EXPECT: m1x = 14
+// EXPECT: m1z = 6

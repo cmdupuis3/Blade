@@ -1,0 +1,7 @@
+// TEST: Diag Equiv Gated Parity Premise (diag)
+// ERROR: BL4008 @ 6:3
+// ERROR-CONTAINS: pseudoscalar gates flip under improper rotations
+import ml as ml
+let static SODD = [(0, 1, 1), (1, 1, 1)]
+function bad(x: Array<Float like IrrepsIdx<SODD>>) where ml.equiv(O3) -> Array<Float like IrrepsIdx<SODD>> =
+  ml.gated(SODD, x)

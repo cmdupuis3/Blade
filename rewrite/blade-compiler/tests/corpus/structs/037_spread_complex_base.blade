@@ -1,0 +1,9 @@
+// TEST: Struct Spread Complex Base (rejects)
+// v1 restriction: the base must be a variable or field path (re-evaluated
+// per copied field, so it must be pure) — bind call results with let first.
+struct Point {
+    x: Float,
+    y: Float
+}
+function mk() -> Point = Point { x = 1.0, y = 2.0 }
+let q = Point { x = 3.0, ..mk() }

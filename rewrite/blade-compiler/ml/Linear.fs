@@ -57,3 +57,49 @@ module Linear =
                         for c in 0 .. d - 1 do
                             out.[dst + c] <- out.[dst + c] + w * x.[src + c]
         out
+
+    // ------------------------------------------------------------------
+    // Complete Schur basis (derive_linear reference, 2026-07-18): ALL
+    // (l, parity)-matched block pairs — duplicate input irreps become
+    // reachable (F3), unmatched output blocks stay exactly zero (the
+    // unique equivariant completion). The compiler's derive_linear bakes
+    // EXACTLY this loop order (pairs -> mo -> mi -> c).
+    // ------------------------------------------------------------------
+
+    /// All (input, output) block pairs of equal irrep, output-major.
+    let homPairs (specIn: SpecEntry[]) (specOut: SpecEntry[]) : (int * int)[] =
+        [| for bo in 0 .. specOut.Length - 1 do
+             for bi in 0 .. specIn.Length - 1 do
+               if specIn.[bi].Ir = specOut.[bo].Ir then yield (bi, bo) |]
+
+    /// dim Hom_G — pair-summed; equals Irreps.homDim (product of aggregated
+    /// multiplicities per (l, parity)).
+    let homWeightDim (specIn: SpecEntry[]) (specOut: SpecEntry[]) : int =
+        homPairs specIn specOut
+        |> Array.sumBy (fun (bi, bo) -> specOut.[bo].Mult * specIn.[bi].Mult)
+
+    /// The complete-basis equivariant linear map: weight layout pair-major
+    /// (homPairs order), (multOut x multIn) row-major per pair, accumulating
+    /// across pairs feeding the same output block.
+    let homLinear (specIn: SpecEntry[]) (specOut: SpecEntry[]) (weights: float[]) (x: float[]) : float[] =
+        if x.Length <> Irreps.totalDim specIn then
+            invalidArg "x" "input length does not match specIn"
+        if weights.Length <> homWeightDim specIn specOut then
+            invalidArg "weights" (sprintf "weight length %d, expected %d" weights.Length (homWeightDim specIn specOut))
+        let sIn = IrrepsIdx.blockStarts specIn
+        let sOut = IrrepsIdx.blockStarts specOut
+        let out = Array.zeroCreate (Irreps.totalDim specOut)
+        let mutable wOff = 0
+        for (bi, bo) in homPairs specIn specOut do
+            let eo = specOut.[bo]
+            let ei = specIn.[bi]
+            let d = Irreps.dim eo.Ir
+            for muO in 0 .. eo.Mult - 1 do
+                for muI in 0 .. ei.Mult - 1 do
+                    let w = weights.[wOff + muO * ei.Mult + muI]
+                    let src = sIn.[bi] + muI * d
+                    let dst = sOut.[bo] + muO * d
+                    for c in 0 .. d - 1 do
+                        out.[dst + c] <- out.[dst + c] + w * x.[src + c]
+            wOff <- wOff + eo.Mult * ei.Mult
+        out

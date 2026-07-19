@@ -253,6 +253,13 @@ struct compound_index_t : abstract_sorted_hashed_idx_t<RANK> {
 		this->cardinality = this->rank_to_tuple.size();
 	}
 
+	// Presence (allocation) query for the <|:> allocated-fallback read: does
+	// this compound hold a cell for the full tuple? The mask bit IS the
+	// allocation record of the compact buffer (absent cells have no storage).
+	bool present(const IDX& t) const {
+		return mask[mask_offset(t)];
+	}
+
 	std::pair<size_t, size_t> prefix_range(const IDX& prefix, size_t plen) const {
 		size_t n = this->rank_to_tuple.size();
 		size_t lo, hi;

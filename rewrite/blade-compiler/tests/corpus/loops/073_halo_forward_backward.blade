@@ -1,0 +1,11 @@
+// TEST: Halo Forward and Backward Difference
+// The SIGN of an offset is the direction and the offset set fixes the center:
+// [0, 1] is "this & next" (center = ordinal i), [-1, 0] is "prev & this"
+// (center = ordinal i+1). Both shrink the 5-element domain to 4 interior cells
+// and compute the same first difference A[k+1]-A[k], proving next/previous are
+// distinguished purely by the signed offsets with no separate center marker.
+let A: Array<Float64 like Idx<5>> = [1.0, 2.0, 4.0, 7.0, 11.0]
+let fwd = method_for(halo<Idx<5>, [0, 1]>) <@> lambda(w) -> A(w(1)) - A(w(0)) |> compute
+let bwd = method_for(halo<Idx<5>, [-1, 0]>) <@> lambda(w) -> A(w(0)) - A(w(-1)) |> compute
+// EXPECT: fwd = [1, 2, 3, 4]
+// EXPECT: bwd = [1, 2, 3, 4]

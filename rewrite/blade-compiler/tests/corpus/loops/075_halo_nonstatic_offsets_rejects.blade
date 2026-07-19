@@ -1,0 +1,6 @@
+// TEST: Halo Non-Static Offsets (rejects)
+// The halo offset set is a compile-time stencil: it must fold via StaticEval.
+// A plain (runtime) let binding is not a static value, so halo<Idx<5>, offs>
+// is rejected — the offsets cannot be resolved to a constant array.
+let offs = [0, 1]
+let bad = method_for(halo<Idx<5>, offs>) <@> lambda(w) -> A(w(0)) |> compute

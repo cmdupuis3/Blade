@@ -1,0 +1,15 @@
+// TEST: Kernel Materializes Join Rows
+// Two same-index arrays co-iterate and the kernel combines both columns
+// into a materialized row struct — the Array<Row> output is the seam for
+// SQL join materialization (sql-coverage.md gap G1).
+struct Row { id: Int64, price: Float64 }
+type OrderIdx = Idx<3>
+let ids: Array<Int64 like OrderIdx> = [10, 20, 30]
+let prices: Array<Float64 like OrderIdx> = [1.5, 2.5, 3.5]
+let rows = method_for(zip(ids, prices)) <@> lambda(i, p) -> Row { id = i, price = p } |> compute
+let r1id = rows((1 : OrderIdx)).id
+let r2price = rows((2 : OrderIdx)).price
+let r0price = rows((0 : OrderIdx)).price
+// EXPECT: r1id = 20
+// EXPECT: r2price = 3.5
+// EXPECT: r0price = 1.5

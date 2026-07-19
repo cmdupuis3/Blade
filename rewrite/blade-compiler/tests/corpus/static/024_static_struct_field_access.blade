@@ -1,0 +1,14 @@
+// TEST: Static Struct Field Access
+// A `let static` struct literal folds to SVStruct (name + named fields), so
+// it splices back as a designated struct literal — runtime field access on
+// the folded value is well-typed C++ member access, and a further
+// `let static` field read folds at compile time.
+struct P { x: Int, y: Int }
+let static ok = P { x = 1, y = 2 }
+let static sx = ok.x
+let v = ok.x
+let w = ok.y
+let s = sx + 10
+// EXPECT: v = 1
+// EXPECT: w = 2
+// EXPECT: s = 11

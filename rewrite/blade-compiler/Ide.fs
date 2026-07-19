@@ -64,6 +64,8 @@ type private Diag = {
     EndLine: int
     EndCol: int
     Message: string
+    /// BLxxxx diagnostic code; "" = none (the JSON field is omitted).
+    Code: string
 }
 
 type private ParamInfo = {
@@ -99,8 +101,11 @@ let private renderJson (diags: Diag list) (bindings: BindingInfo list) =
     |> List.iteri (fun i d ->
         if i > 0 then sb.Append ',' |> ignore
         sb.AppendFormat(
-            "{{\"severity\":\"{0}\",\"line\":{1},\"col\":{2},\"endLine\":{3},\"endCol\":{4},\"message\":\"{5}\"}}",
-            d.Severity, d.Line, d.Col, d.EndLine, d.EndCol, jsonEscape d.Message) |> ignore)
+            "{{\"severity\":\"{0}\",\"line\":{1},\"col\":{2},\"endLine\":{3},\"endCol\":{4},\"message\":\"{5}\"",
+            d.Severity, d.Line, d.Col, d.EndLine, d.EndCol, jsonEscape d.Message) |> ignore
+        if d.Code <> "" then
+            sb.AppendFormat(",\"code\":\"{0}\"", jsonEscape d.Code) |> ignore
+        sb.Append '}' |> ignore)
     sb.Append "],\"bindings\":[" |> ignore
     bindings
     |> List.iteri (fun i b ->
@@ -315,15 +320,15 @@ let private paramDocIn (doc: string) (pname: string) : string =
 // ----------------------------------------------------------------------------
 
 let rec private patternNames (p: Pattern) : string list =
-    match p with
-    | PatVar name -> [name]
-    | PatTuple ps -> ps |> List.collect patternNames
-    | PatCons (a, b) -> patternNames a @ patternNames b
-    | PatTyped (inner, _) -> patternNames inner
-    | PatGuarded (inner, _) -> patternNames inner
-    | PatStruct (_, fields) -> fields |> List.collect (snd >> patternNames)
-    | PatVariant (_, inner) -> inner |> Option.map patternNames |> Option.defaultValue []
-    | PatWildcard | PatLit _ -> []
+    match p.Kind with
+    | PatternKind.PatVar name -> [name]
+    | PatternKind.PatTuple ps -> ps |> List.collect patternNames
+    | PatternKind.PatCons (a, b) -> patternNames a @ patternNames b
+    | PatternKind.PatTyped (inner, _) -> patternNames inner
+    | PatternKind.PatGuarded (inner, _) -> patternNames inner
+    | PatternKind.PatStruct (_, fields) -> fields |> List.collect (snd >> patternNames)
+    | PatternKind.PatVariant (_, inner) -> inner |> Option.map patternNames |> Option.defaultValue []
+    | PatternKind.PatWildcard | PatternKind.PatLit _ -> []
 
 /// Binding-keyword kind from the surface syntax. TypedBinding.IsMutable is
 /// not usable for this — module-level bindings come back mutable regardless
@@ -351,8 +356,8 @@ let private collectSourceBindings (prog: Ast.Program) =
                 walkStmts scope body span
             | _ -> ()
     let walkFuncBody (scope: string) (body: Expr) (declSpan: Span) =
-        match body with
-        | ExprBlock (stmts, _) -> walkStmts scope stmts declSpan
+        match body.Kind with
+        | ExprKind.ExprBlock (stmts, _) -> walkStmts scope stmts declSpan
         | _ -> ()
     let addFunc (f: FunctionDecl) (span: Span) =
         acc.Add("", f.Name, span, None)
@@ -564,34 +569,37 @@ let ideCheck (filePath: string) : int =
     let mutable bindings = []
     if not (File.Exists filePath) then
         diags.Add { Severity = "error"; Line = 1; Col = 1; EndLine = 1; EndCol = 1
-                    Message = sprintf "File not found: %s" filePath }
+                    Message = sprintf "File not found: %s" filePath; Code = "" }
         exitCode <- 1
     else
         let source = File.ReadAllText filePath
-        match Blade.Parser.parseProgram source with
+        match Blade.Parser.parseProgramWithFile (Some filePath) source with
         | Error e ->
             let line = max 1 e.Line
             let col = max 1 e.Col
-            diags.Add { Severity = "error"; Line = line; Col = col; EndLine = line; EndCol = col
-                        Message = e.Message }
+            let endLine = max line e.EndLine
+            let endCol = if e.EndCol >= 1 then e.EndCol else col
+            diags.Add { Severity = "error"; Line = line; Col = col; EndLine = endLine; EndCol = endCol
+                        Message = e.Message; Code = e.Code }
             exitCode <- 1
         | Ok program ->
             match Blade.TypeCheck.typeCheck program with
             | Error errors ->
                 for e in errors do
                     let (line, col, endLine, endCol) = clampSpan e.Span
+                    let code = (Blade.TypeEnv.diagnosticOfCompileError e).Code
                     let msg =
                         let baseMsg = Blade.TypeEnv.formatTypeError e.Error
                         match e.Context with
                         | [] -> baseMsg
                         | ctx -> sprintf "%s (%s)" baseMsg (String.concat "; " (List.rev ctx))
                     diags.Add { Severity = "error"; Line = line; Col = col
-                                EndLine = endLine; EndCol = endCol; Message = msg }
+                                EndLine = endLine; EndCol = endCol; Message = msg; Code = code }
                 exitCode <- 1
             | Ok (typedProg, _, warnings) ->
                 for w in warnings do
                     diags.Add { Severity = "warning"; Line = 1; Col = 1; EndLine = 1; EndCol = 1
-                                Message = w }
+                                Message = w; Code = "" }
                 let sourceLines = source.Replace("\r\n", "\n").Split('\n')
                 bindings <- joinBindings program typedProg sourceLines
     printfn "%s" (renderJson (List.ofSeq diags) bindings)

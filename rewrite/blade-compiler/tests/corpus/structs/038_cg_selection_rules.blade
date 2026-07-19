@@ -1,0 +1,19 @@
+// TEST: Struct CG Selection Rules
+// Corpus twin of examples/06_cg_selection_rules.blade: dependent bound
+// (triangle inequality) + named parity predicate + functional update +
+// static fold, all on one record.
+static function parity_ok(p1: Int, p2: Int, po: Int) -> Bool =
+    po == (p1 + p2) % 2
+struct CGPath {
+    l1: Int,
+    p1: Int,
+    l2: Int,
+    p2: Int,
+    l_out: Int in abs(l1 - l2) .. l1 + l2 + 1,
+    p_out: Int
+} where parity_ok(p1, p2, p_out)
+let static origin = CGPath { l1 = 0, p1 = 0, l2 = 0, p2 = 0, l_out = 0, p_out = 0 }
+let path4 = CGPath { l1 = 1, p1 = 1, l2 = 1, p2 = 1, l_out = 0, p_out = 0 }
+let path5 = CGPath { l_out = 2, p_out = 0, ..path4 }
+let max_l = path5.l_out
+// EXPECT: max_l = 2

@@ -94,6 +94,7 @@ and Keyword =
     | KwObjectFor
     | KwRange
     | KwReverse
+    | KwHalo
     | KwTranspose
     | KwHermitian
     | KwGram
@@ -131,6 +132,13 @@ type Token = {
     Line: int
     Col: int
     Length: int
+    // Exclusive end position: the source position immediately AFTER the lexeme
+    // (i.e. where the next token's scan begins, before whitespace). For a
+    // single-line lexeme EndLine = Line and EndCol = Col + Length; for a
+    // multi-line lexeme (e.g. a string literal spanning lines) they track the
+    // post-lexeme cursor. Length is retained unchanged for existing consumers.
+    EndLine: int
+    EndCol: int
 }
 
 // ============================================================================
@@ -186,6 +194,7 @@ let keywords =
       "object_for", KwObjectFor
       "range", KwRange
       "reverse", KwReverse
+      "halo", KwHalo
       "transpose", KwTranspose
       "hermitian", KwHermitian
       "gram", KwGram
@@ -294,7 +303,11 @@ let advance (state: LexerState) =
 
 let emit (state: LexerState) startLine startCol kind =
     let len = state.Col - startCol
-    let tok = { Kind = kind; Line = startLine; Col = startCol; Length = max 1 len }
+    // state.Line/state.Col sit immediately after the just-consumed lexeme, so
+    // they are the natural exclusive end — correct even for multi-line lexemes.
+    // For a zero-width token (EOF), End = Start.
+    let tok = { Kind = kind; Line = startLine; Col = startCol; Length = max 1 len
+                EndLine = state.Line; EndCol = state.Col }
     state.Tokens <- state.Tokens @ [tok]
 
 // ============================================================================

@@ -28,7 +28,7 @@ type FullTestResult = {
     RunResult: Result<int * string, string>  // Ok(exitCode, stdout) or Error(message)
     ValueCheckResult: Result<unit, string list>  // Ok() or Error(list of mismatches)
     HasExpectedValues: bool  // Whether the test had EXPECT comments
-    AbortExpectation: string option  // "(aborts)" probes: expected output substring from // ABORT:
+    AbortExpectation: string list  // "(aborts)" probes: expected output substrings from // ABORT: (all must match)
 }
 
 let testLower source =
@@ -116,7 +116,7 @@ let private runFsharpPipelineLocked (source: string) (testName: string) (outputD
 let runFullTest (testName: string) (source: string) (outputDir: string) (compileAndRun: bool) : FullTestResult =
     // Parse expected values from source comments
     let expectedValues = parseExpectedValues source
-    let abortExpectation = parseAbortExpectation source
+    let abortExpectation = parseAbortExpectations source
 
     // F# pipeline (lower + codegen) runs under a lock to avoid cache
     // races. C++ compile and run (below) stay outside the lock so they
@@ -209,9 +209,7 @@ let isAbortProbe (result: FullTestResult) =
 let isExpectedAbort (result: FullTestResult) =
     match result.IRResult, result.CompileResult, result.RunResult with
     | Ok _, Ok _, Ok (code, output) when code <> 0 ->
-        match result.AbortExpectation with
-        | Some sub -> output.Contains sub
-        | None -> true
+        result.AbortExpectation |> List.forall (fun sub -> output.Contains sub)
     | _ -> false
 
 /// Print a full test result
@@ -272,10 +270,10 @@ let printFullTestResult (result: FullTestResult) (verbose: bool) (showFullError:
         elif isAbort then
             match result.RunResult with
             | Ok (code, output) when code <> 0 ->
-                match result.AbortExpectation with
-                | Some sub when not (output.Contains sub) ->
+                match result.AbortExpectation |> List.tryFind (fun sub -> not (output.Contains sub)) with
+                | Some sub ->
                     sprintf "aborted (exit %d) but output lacks '%s'" code sub
-                | _ -> sprintf "aborted as expected (exit %d)" code
+                | None -> sprintf "aborted as expected (exit %d)" code
             | Ok (0, _) -> "expected runtime abort but exited 0"
             | _ ->
                 match stages |> List.tryFind (fun (_, s) -> s = "FAIL" || s = "SKIP") with

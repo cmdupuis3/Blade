@@ -1,0 +1,23 @@
+// TEST: Mutual Predicate Conjunct OK
+// Bare-call predicate over struct-typed members: the conjunct passes the
+// WHOLE members to a static predicate instead of inlining field paths.
+struct Particle {
+    vel: Float,
+    mass: Float
+}
+// (Self-contained body: a predicate that captures module statics cannot yet
+// be called from a guard inside a free function — known codegen limitation
+// with main-local closure lifting, tracked separately.)
+static function conserved(a: Particle, b: Particle) -> Bool =
+    a.vel * a.mass + b.vel * b.mass == 4.0
+type P1 = Particle
+and P2 = Particle
+where conserved(P1, P2)
+function make() -> (P1, P2) = {
+    let a = Particle { vel = 1.0, mass = 2.0 }
+    let b = Particle { vel = 2.0, mass = 1.0 }
+    (a, b)
+}
+let (p1, p2): (P1, P2) = make()
+let v = p1.vel
+// EXPECT: v = 1

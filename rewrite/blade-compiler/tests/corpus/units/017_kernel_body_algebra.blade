@@ -1,0 +1,16 @@
+// TEST: Unit Kernel Body Algebra
+// User-written kernel bodies get real unit algebra: the unit-only second
+// pass in buildApplyInfo (kernelBodyUnits) recomputes the signature
+// bottom-up AFTER param unification, so `t * t` over meters elements
+// produces a meters^2-element output — compatible with a declared area
+// unit. (The body's cached node types predate param binding and would
+// otherwise leak plain meters.)
+Unit meters
+Unit area = meters^2
+type SIdx = Idx<2>
+let A: Array<Float<meters> like SIdx> = [3.0, 4.0]
+let sq = method_for(A) <@> lambda(t) -> t * t |> compute
+let ar: Float<area> = 100.0
+let total = sq((0 : SIdx)) + ar
+// EXPECT: sq = [9.0, 16.0]
+// EXPECT: total = 109

@@ -1,0 +1,11 @@
+// TEST: Unit Kernel Zip Mismatch (rejects)
+// A HAND-WRITTEN zip kernel adding meters to seconds rejects, the same
+// as the operator spelling A + B (units/011). The kernel-body unit walk
+// sees the params' post-unification element types, so the a + b inside
+// hits the same unitRulesForOp table as the scalar path.
+Unit meters
+Unit seconds
+type SIdx = Idx<2>
+let A: Array<Float<meters> like SIdx> = [1.0, 2.0]
+let B: Array<Float<seconds> like SIdx> = [1.0, 2.0]
+let bad = method_for(zip(A, B)) <@> lambda(a, b) -> a + b |> compute

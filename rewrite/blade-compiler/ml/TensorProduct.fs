@@ -22,24 +22,31 @@ type TPPath = { B1: int; B2: int; BOut: int }
 
 module TensorProduct =
 
+    /// Single-source CG selection rules: the enumerator lives in
+    /// Blade.ML.Spec.tpPaths (the compiler's static model — the same source
+    /// file is compiled into this project); the reference impl delegates and
+    /// maps the triples back to TPPath. Parity maps Even -> 0 / Odd -> 1;
+    /// both sides are lexicographic in (B1, B2, BOut).
+    let private toSpecEntry (e: SpecEntry) : Blade.ML.Spec.SpecEntry =
+        { L = e.Ir.L
+          Parity = (match e.Ir.P with Even -> 0 | Odd -> 1)
+          Mult = e.Mult }
+
+    let private toSpecCfg (cfg: TPConfig) : Blade.ML.Spec.TPConfig =
+        { Spec1 = cfg.Spec1 |> Array.toList |> List.map toSpecEntry
+          Spec2 = cfg.Spec2 |> Array.toList |> List.map toSpecEntry
+          SpecOut = cfg.SpecOut |> Array.toList |> List.map toSpecEntry }
+
     /// All valid paths for a config, lexicographic in (B1, B2, BOut).
     let paths (cfg: TPConfig) : TPPath[] =
-        [| for b1 in 0 .. cfg.Spec1.Length - 1 do
-             for b2 in 0 .. cfg.Spec2.Length - 1 do
-               for bo in 0 .. cfg.SpecOut.Length - 1 do
-                 let i1 = cfg.Spec1.[b1].Ir
-                 let i2 = cfg.Spec2.[b2].Ir
-                 let io = cfg.SpecOut.[bo].Ir
-                 if io.L >= abs (i1.L - i2.L)
-                    && io.L <= i1.L + i2.L
-                    && io.P = Irreps.parityMul i1.P i2.P then
-                   yield { B1 = b1; B2 = b2; BOut = bo } |]
+        Blade.ML.Spec.tpPaths (toSpecCfg cfg)
+        |> List.map (fun (b1, b2, bo) -> { B1 = b1; B2 = b2; BOut = bo })
+        |> Array.ofList
 
     /// Type-check from ml-spec section 11.1: every output block must be
     /// reachable from some input block pair.
     let allValidOutputs (cfg: TPConfig) : bool =
-        let reachable = paths cfg |> Array.map (fun p -> p.BOut) |> Set.ofArray
-        Set.count reachable = cfg.SpecOut.Length
+        Blade.ML.Spec.allValidOutputs (toSpecCfg cfg)
 
     let pathWeightCount (cfg: TPConfig) (p: TPPath) : int =
         cfg.SpecOut.[p.BOut].Mult * cfg.Spec1.[p.B1].Mult * cfg.Spec2.[p.B2].Mult

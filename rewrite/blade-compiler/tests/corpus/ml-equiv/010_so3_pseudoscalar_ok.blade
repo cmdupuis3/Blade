@@ -1,0 +1,18 @@
+// TEST: ML Equiv SO3 Pseudoscalar Accept
+import ml as ml
+// ============================================================================
+// The SO3/O3 split in action: under equiv(SO3) pseudoscalars ARE invariants
+// (proper rotations never flip them), so gating from an (l=0, odd) block
+// and statically reading l=0 components are both admissible — the same
+// programs 008 rejects under O3. Values: silu(0)=0, silu(2) pinned in
+// ml-ops/005; l=1 gate = sigmoid(x(0)) = sigmoid(0) = 0.5 exactly.
+// ============================================================================
+let static SODD = [(0, 1, 2), (1, 1, 1)]
+function act(x: Array<Float like IrrepsIdx<SODD>>) where ml.equiv(SO3) -> Array<Float like IrrepsIdx<SODD>> =
+  ml.gated(SODD, x)
+function read0(x: Array<Float like IrrepsIdx<SODD>>) where ml.equiv(SO3) -> Float =
+  x(0) + x(1)
+let g = act([0.0, 2.0, 1.0, 1.0, 1.0])
+// EXPECT: g = [0.0, 1.7615941559557646, 0.5, 0.5, 0.5]
+let s = read0([5.0, 7.0, 0.0, 0.0, 0.0])
+// EXPECT: s = 12

@@ -1,0 +1,25 @@
+// TEST: Mut Array Copy Semantics
+// Regression probe for the mut-aliasing bug: a block-level `let mut a = Z`
+// where Z is a COMPUTED array used to bind the Array wrapper by value —
+// sharing Z's data pointer — so mutations through `a` silently corrupted Z
+// (Z printed [0,1,2,3,4,5] here pre-fix). Assignable bindings initialized
+// from an existing dense array now DEEP-COPY the storage (fresh allocate<>
+// + pool copy; interpreter mirrors with a store copy). This also enables
+// the "computed zeros buffer" pattern: a large mut scratch buffer built by
+// compute instead of an N-zero literal.
+let Z = method_for(range<Idx<6>>) <@> lambda(i) -> 0.0 |> compute
+let T = {
+    let mut a = Z
+    for i in 0..6 { a(i) = 1.0 * i }
+    a
+}
+// Plain `let` is assignable too (only `static` is read-only), so the same
+// copy semantics protect the non-mut spelling.
+let S = {
+    let b = Z
+    for i in 0..6 { b(i) = 10.0 + 1.0 * i }
+    b
+}
+// EXPECT: Z = [0, 0, 0, 0, 0, 0]
+// EXPECT: T = [0, 1, 2, 3, 4, 5]
+// EXPECT: S = [10, 11, 12, 13, 14, 15]

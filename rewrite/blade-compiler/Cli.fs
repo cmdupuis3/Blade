@@ -35,6 +35,7 @@ open Blade.Tests.Ppl
 open Blade.Tests.Math
 open Blade.Tests.Rand
 open Blade.Tests.Spectra
+open Blade.Tests.Fallback
 open Blade.Lowering
 
 module TH = Blade.Tests.TestHarness
@@ -76,6 +77,7 @@ let printUsage () =
     printfn "  test zarr                         Run the Zarr provider block (hermetic; g++ for the e2e parts)"
     printfn "  test timing                       Run the differential timing block standalone"
     printfn "  test diff-oracle [category]       Diff printed values against the pinned ./oracle build"
+    printfn "  test interp [category]            Diff the tree-walking interpreter against the compiled binary"
     printfn ""
     printfn "Options:"
     printfn "  -o <path>      Output file path"
@@ -96,11 +98,20 @@ let compileFile (filePath: string) (verbose: bool) : Result<string * string list
     else
         let source = File.ReadAllText(filePath)
         let testName = Path.GetFileNameWithoutExtension(filePath)
-        match lower source with
-        | Error e -> Error e
-        | Ok ir ->
+        // Errors come back as coded, spanned Diagnostics and are rendered
+        // here (rustc-style, with source snippets) into the string channel.
+        let useColor = not Console.IsErrorRedirected
+        match lowerDiag (Some filePath) source with
+        | Error ds, sm -> Error (Blade.Diagnostics.Render.renderAll useColor (Some sm) ds)
+        | Ok (ir, tcWarnings), sm ->
+            for w in tcWarnings do
+                eprintfn "[TypeCheck Warning] %s" w
             match IR.validateIR ir with
-            | Error errs -> Error (errs |> String.concat "\n")
+            | Error errs ->
+                let ds =
+                    errs |> List.map (fun s ->
+                        Blade.Diagnostics.mkError "BL6001" Blade.Diagnostics.PhIRValidate Blade.Ast.noSpan s)
+                Error (Blade.Diagnostics.Render.renderAll useColor (Some sm) ds)
             | Ok ir ->
                 let (cppCode, warnings) = CodeGen.genSelfContainedProgramFromIR ir testName
                 if verbose then
@@ -166,7 +177,7 @@ let runFile (filePath: string) (verbose: bool) (mpiRanks: int option) : int =
     | None ->
         match compileToExe filePath None verbose with
         | Error e ->
-            eprintfn "Error: %s" e
+            eprintfn "%s" e
             1
         | Ok exePath ->
             match runExecutable exePath with
@@ -181,7 +192,7 @@ let runFile (filePath: string) (verbose: bool) (mpiRanks: int option) : int =
         try
             match compileToExe filePath None verbose with
             | Error e ->
-                eprintfn "Error: %s" e
+                eprintfn "%s" e
                 1
             | Ok exePath ->
                 match runExecutableMpi ranks exePath with
@@ -201,10 +212,13 @@ let runFile (filePath: string) (verbose: bool) (mpiRanks: int option) : int =
 // Blade has no interpreter, but `blade run` semantics give REPL behavior for
 // free: every top-level binding prints its value. The REPL accumulates a
 // session program in a temp file; each submitted snippet re-compiles and
-// re-runs the WHOLE session, printing only output lines that are new or
-// changed since the previous run. Rebinding a top-level name replaces the
-// earlier definition (duplicate lets are a C++ redeclaration error), and the
-// diff display then shows the updated values of everything downstream.
+// re-runs the WHOLE session, but echoes ONLY the value of the snippet's LAST
+// top-level binding — its "return value", as in a function body. Earlier
+// bindings, and the many synthetic `__`-internal bindings that a single
+// `ppl.dist`/module call expands into, stay hidden. Rebinding a top-level name
+// replaces the earlier definition (duplicate lets are a C++ redeclaration
+// error) so downstream snippets still see it; the echo then shows that
+// snippet's own last value, recomputed.
 //
 // A snippet that is not a declaration is a bare EXPRESSION (`a`, `a + 1`) —
 // the file-level "return a value by naming it" idiom. Top-level source only
@@ -294,53 +308,58 @@ module ReplTypes =
         let ps = tf.Params |> List.map (fun p -> pp p.Type)
         sprintf "(%s) -> %s" (String.concat ", " ps) (pp tf.ReturnType)
 
-    /// Parse + typecheck session source (no codegen) and return top-level
-    /// name -> display info. Failures yield an empty map — values still
-    /// print, just unannotated (shouldn't happen for source that just
-    /// compiled successfully).
+    /// Build the top-level name -> display info map from an ALREADY-lowered
+    /// session (Blade.Interp.Repl.LoweredSession) — the SAME front-end pass the
+    /// interpreter runs on in compileRunEcho, so the candidate path never lowers
+    /// twice. Value bindings prefer the LOWERED types: calls to HM-polymorphic
+    /// functions monomorphize during lowering, so the typed AST can still carry
+    /// T?n inference vars where the IR is concrete (`let r = id(3.5)` is Float64
+    /// only in IR). Pure map assembly — no parse/typecheck/lower here.
+    let sessionInfoOf (lowered: Blade.Interp.Repl.LoweredSession) : Map<string, Info> =
+        let prog = lowered.Prog
+        let tp = lowered.Typed
+        let srcFuncs =
+            [ for m in prog.Modules do
+                for ld in m.Decls do
+                    match ld.Value with
+                    | DeclFunction f -> yield (f.Name, f)
+                    | _ -> () ]
+            |> Map.ofList
+        let irTypes =
+            Map.ofList
+                [ for m in lowered.Ir.Modules do
+                    for b in m.Bindings do
+                        yield (b.Name, b.Type) ]
+        let valTy (name: string) (fallback: IRType) =
+            match Map.tryFind name irTypes with
+            | Some t -> t
+            | None -> fallback
+        let mutable acc = Map.empty
+        for m in tp.Modules do
+            for d in m.Decls do
+                match d with
+                | TDeclLet b | TDeclStatic b ->
+                    acc <- Map.add b.Name (RVal (valTy b.Name b.Type)) acc
+                    for (n, _, t) in b.SubBindings do
+                        acc <- Map.add n (RVal (valTy n t)) acc
+                | TDeclFunction f ->
+                    acc <- Map.add f.Name
+                               (RFunc (funcSig (Map.tryFind f.Name srcFuncs) f)) acc
+                | _ -> ()
+        acc
+
+    /// Parse + typecheck + lower session source (one pass) and return top-level
+    /// name -> display info. Failures yield an empty map — values still print,
+    /// just unannotated (shouldn't happen for source that just compiled
+    /// successfully). Used for the bare-identifier "is this a session function?"
+    /// probe on the CURRENT session; the candidate path reuses the interpreter's
+    /// own LoweredSession via sessionInfoOf, so it never lowers twice.
     let sessionInfo (source: string) : Map<string, Info> =
-        match Blade.Parser.parseProgram source with
-        | Error _ -> Map.empty
-        | Ok prog ->
-            match Blade.TypeCheck.typeCheck prog with
+        try
+            match Blade.Interp.Repl.lowerSession None false source with
             | Error _ -> Map.empty
-            | Ok (tp, builder, _) ->
-                let srcFuncs =
-                    [ for m in prog.Modules do
-                        for ld in m.Decls do
-                            match ld.Value with
-                            | DeclFunction f -> yield (f.Name, f)
-                            | _ -> () ]
-                    |> Map.ofList
-                // Value bindings prefer the LOWERED types: calls to
-                // HM-polymorphic functions monomorphize during lowering, so
-                // the typed AST can still carry T?n inference vars where the
-                // IR is concrete (`let r = id(3.5)` is Float64 only in IR).
-                let irTypes =
-                    try
-                        let ir = Blade.Lowering.lowerTypedProgram tp (Some prog) builder
-                        Map.ofList
-                            [ for m in ir.Modules do
-                                for b in m.Bindings do
-                                    yield (b.Name, b.Type) ]
-                    with _ -> Map.empty
-                let valTy (name: string) (fallback: IRType) =
-                    match Map.tryFind name irTypes with
-                    | Some t -> t
-                    | None -> fallback
-                let mutable acc = Map.empty
-                for m in tp.Modules do
-                    for d in m.Decls do
-                        match d with
-                        | TDeclLet b | TDeclStatic b ->
-                            acc <- Map.add b.Name (RVal (valTy b.Name b.Type)) acc
-                            for (n, _, t) in b.SubBindings do
-                                acc <- Map.add n (RVal (valTy n t)) acc
-                        | TDeclFunction f ->
-                            acc <- Map.add f.Name
-                                       (RFunc (funcSig (Map.tryFind f.Name srcFuncs) f)) acc
-                        | _ -> ()
-                acc
+            | Ok lowered -> sessionInfoOf lowered
+        with _ -> Map.empty
 
     /// Primitive = annotate inline ("Int64: 5"); everything else goes on the
     /// next line, tabbed.
@@ -375,7 +394,7 @@ module ReplTypes =
             | None -> if isTransient then value else line
 
 let replLoop () : int =
-    printfn "Blade REPL (v%s) — every top-level binding prints its (typed) value." compilerVersion
+    printfn "Blade REPL (v%s) — each submission echoes its last binding's (typed) value." compilerVersion
     printfn "A bare expression (e.g. `a`, `a + 1`) evaluates and echoes without joining the session."
     printfn "Commands: :reset (clear session)  :show (print session)  :quit"
     printfn "Multi-line: unbalanced brackets continue on the next line, or use :paste ... :end"
@@ -406,39 +425,97 @@ let replLoop () : int =
             @"^\s*(let|static|function|type|struct|interface|impl|unit|import|from|module)\b")
     let identRe =
         System.Text.RegularExpressions.Regex(@"^[A-Za-z_][A-Za-z0-9_]*$")
-    let funcDeclRe =
-        System.Text.RegularExpressions.Regex(@"^\s*(static\s+)?function\b")
 
-    /// Compile + run `candidate`, printing output lines that are new or
-    /// changed vs `lastLines` through `display`. Some (lines, printedCount)
-    /// on a clean exit; None means the snippet must not be kept.
-    let compileRunDiff (candidate: ResizeArray<string>) (display: string -> string) =
-        File.WriteAllText(srcPath, String.concat "\n\n" candidate + "\n")
-        match compileToExe srcPath None false with
-        | Error e ->
-            eprintfn "%s" e
+    // A raw run-output line is `name = value`; grab the leading name so we can
+    // single out just the one binding we mean to echo.
+    let outNameRe =
+        System.Text.RegularExpressions.Regex(
+            @"^([A-Za-z_][A-Za-z0-9_]*) = ",
+            System.Text.RegularExpressions.RegexOptions.Compiled)
+
+    /// Evaluate `candidate` and echo ONLY `targetName`'s value line — the
+    /// submission's "return value" — type-annotated. Every earlier user binding,
+    /// and every synthetic `__`-internal binding (a single `ppl.dist` expands
+    /// into dozens), stays hidden.
+    ///
+    /// INTERP-FIRST (the payoff of the interpreter arc): the candidate lowers
+    /// ONCE (Repl.lowerSession — shared with the type-annotation map below), then
+    /// runs under the tree-walking interpreter. On a supported exit (0, or a
+    /// Blade guard panic 1) its output is authoritative and NO g++ is invoked —
+    /// a typical turn drops from ~1-5 s to <100 ms. If the interpreter cannot yet
+    /// evaluate some node (125) or hits its own bug (70) it FALLS BACK to the
+    /// historical g++ compile+run for this one input (a single notice on stderr),
+    /// with identical filtering/annotation. A front-end/validate rejection is
+    /// surfaced exactly as the old compileToExe Error arm did.
+    ///
+    /// `transient` is the synthetic name a bare expression was wrapped in (its
+    /// prefix is stripped in display), else None. Returns Some (lines,
+    /// printedCount, info) on a clean exit — info is the SAME LoweredSession's
+    /// annotation map, so the caller reuses it without lowering again — or None
+    /// (snippet must not be kept).
+    let compileRunEcho (candidate: ResizeArray<string>) (targetName: string option) (transient: string option)
+        : (string[] * int * Map<string, ReplTypes.Info>) option =
+        let src = String.concat "\n\n" candidate + "\n"
+        File.WriteAllText(srcPath, src)
+        let useColor = not Console.IsErrorRedirected
+        match Blade.Interp.Repl.lowerSession (Some srcPath) useColor src with
+        | Error rendered ->
+            // Front-end / validate rejection — identical to the old
+            // compileToExe Error arm (both render the same diagnostics).
+            eprintfn "%s" rendered
             eprintfn "[snippet not kept]"
             None
-        | Ok exePath ->
-            match runExeIn userCwd exePath with
-            | Error e ->
-                eprintfn "Runtime error: %s" e
-                eprintfn "[snippet not kept]"
-                None
-            | Ok (code, stdout, stderr) ->
+        | Ok lowered ->
+            let info = ReplTypes.sessionInfoOf lowered
+            let display l = ReplTypes.annotate info transient l
+            // Given a process-like (code, stdout, stderr) triple from EITHER the
+            // interpreter or the compiled fallback, filter to targetName and
+            // echo — this is the historical tail of compileRunEcho, unchanged.
+            let emit (code: int) (stdout: string) (stderr: string) =
                 let lines =
                     stdout.Replace("\r\n", "\n").Split('\n')
                     |> Array.filter (fun l -> not (isTimingLine l))
                 let mutable printed = 0
-                for i in 0 .. lines.Length - 1 do
-                    if lines.[i].Trim() <> "" && (i >= lastLines.Length || lines.[i] <> lastLines.[i]) then
-                        printfn "%s" (display lines.[i])
-                        printed <- printed + 1
+                match targetName with
+                | Some tgt ->
+                    lines
+                    |> Array.tryFind (fun l ->
+                        let m = outNameRe.Match l
+                        m.Success && m.Groups.[1].Value = tgt)
+                    |> Option.iter (fun l -> printfn "%s" (display l); printed <- 1)
+                | None -> ()
                 if stderr.Trim() <> "" then eprintfn "%s" (stderr.Trim())
-                if code = 0 then Some (lines, printed)
+                if code = 0 then Some (lines, printed, info)
                 else
                     eprintfn "[exit %d — snippet not kept]" code
                     None
+            // Historical g++ compile+run for this ONE input (the fallback lane).
+            let viaCompiled () =
+                match compileToExe srcPath None false with
+                | Error e ->
+                    eprintfn "%s" e
+                    eprintfn "[snippet not kept]"
+                    None
+                | Ok exePath ->
+                    match runExeIn userCwd exePath with
+                    | Error e ->
+                        eprintfn "Runtime error: %s" e
+                        eprintfn "[snippet not kept]"
+                        None
+                    | Ok (code, stdout, stderr) -> emit code stdout stderr
+            match Blade.Interp.Repl.evalSession lowered "session" with
+            | Blade.Interp.Repl.InterpDone r ->
+                // Interpreter is authoritative (exit 0 or guard panic 1). Surface
+                // the same TypeCheck warnings compileFile prints on the g++ path.
+                for w in lowered.Warnings do eprintfn "[TypeCheck Warning] %s" w
+                emit r.ExitCode r.Stdout r.Stderr
+            | Blade.Interp.Repl.InterpFellShort _ ->
+                // The interpreter can't evaluate this input yet — one-time notice
+                // so the user understands the latency spike, then the g++ path
+                // (whose stdout the SAME targetName filter isolates — no
+                // suppression regression). Warnings print via compileFile there.
+                eprintfn "-- falling back to compiled evaluation for this input --"
+                viaCompiled ()
 
     // Classification looks at the first non-comment, non-blank line so a
     // doc-commented declaration isn't mistaken for a bare expression.
@@ -463,22 +540,26 @@ let replLoop () : int =
                 let idx = candidate.FindIndex(fun s -> bindingName s = Some name)
                 if idx >= 0 then candidate.[idx] <- trimmed else candidate.Add trimmed
             | None -> candidate.Add trimmed
-            let info = lazy (ReplTypes.sessionInfo (String.concat "\n\n" candidate + "\n"))
-            match compileRunDiff candidate (fun l -> ReplTypes.annotate info.Value None l) with
+            // The submission's "return value" is its LAST top-level binding
+            // (a :paste block may declare several); echo only that one.
+            let lastTarget =
+                trimmed.Replace("\r\n", "\n").Split('\n')
+                |> Array.choose bindingName
+                |> Array.tryLast
+            match compileRunEcho candidate lastTarget None with
             | None -> ()
-            | Some (lines, printed) ->
+            | Some (lines, printed, info) ->
                 let mutable printed = printed
-                // Function definitions produce no run output — echo the
-                // signature (abstract unless inference bound it concrete).
-                if funcDeclRe.IsMatch trimmed then
-                    match bindingName trimmed with
-                    | Some name ->
-                        match Map.tryFind name info.Value with
-                        | Some (ReplTypes.RFunc s) ->
-                            printfn "%s\n\t%s" name s
-                            printed <- printed + 1
-                        | _ -> ()
-                    | None -> ()
+                // A final function/type binding produces no run output — echo
+                // its signature (abstract unless inference bound it concrete).
+                match lastTarget with
+                | Some name when printed = 0 ->
+                    match Map.tryFind name info with
+                    | Some (ReplTypes.RFunc s) ->
+                        printfn "%s\n\t%s" name s
+                        printed <- printed + 1
+                    | _ -> ()
+                | _ -> ()
                 if printed = 0 then printfn "(ok)"   // defs print nothing new
                 session.Clear()
                 session.AddRange candidate
@@ -508,14 +589,13 @@ let replLoop () : int =
                     |> Seq.find (fun n -> not (Set.contains n inUse))
                 let candidate = ResizeArray(session)
                 candidate.Add (sprintf "let %s = %s" transient trimmed)
-                let info = lazy (ReplTypes.sessionInfo (String.concat "\n\n" candidate + "\n"))
-                match compileRunDiff candidate (fun l -> ReplTypes.annotate info.Value (Some transient) l) with
+                match compileRunEcho candidate (Some transient) (Some transient) with
                 | None -> ()
-                | Some (_, printed) ->
+                | Some (_, printed, info) ->
                     if printed = 0 then
                         // Nothing printable (unit, deferred computation,
                         // function value): show the type alone if known.
-                        match Map.tryFind transient info.Value with
+                        match Map.tryFind transient info with
                         | Some (ReplTypes.RVal t) -> printfn "\t%s" (Blade.Ide.ppType t)
                         | _ -> printfn "(ok)"
 
@@ -632,15 +712,18 @@ let checkFile (filePath: string) : int =
         1
     else
         let source = File.ReadAllText(filePath)
-        match Blade.Parser.parseProgram source with
+        let useColor = not Console.IsErrorRedirected
+        let sm = Blade.Diagnostics.SourceMap.ofSources [ filePath, source ]
+        match Blade.Parser.parseProgramWithFile (Some filePath) source with
         | Error e ->
-            eprintfn "Parse error at %d:%d: %s" e.Line e.Col e.Message
+            eprintfn "%s" (Blade.Diagnostics.Render.render useColor (Some sm)
+                               (Blade.Parser.diagnosticOfParseError (Some filePath) e))
             1
         | Ok program ->
             match Blade.TypeCheck.typeCheck program with
             | Error errors ->
-                for e in errors do
-                    eprintfn "%s" (Blade.TypeEnv.formatCompileError e)
+                let ds = errors |> List.map Blade.TypeEnv.diagnosticOfCompileError
+                eprintfn "%s" (Blade.Diagnostics.Render.renderAll useColor (Some sm) ds)
                 1
             | Ok (_, _, warnings) ->
                 for w in warnings do
@@ -652,7 +735,7 @@ let checkFile (filePath: string) : int =
 let emitFile (filePath: string) (outputPath: string option) (verbose: bool) : int =
     match compileFile filePath verbose with
     | Error e ->
-        eprintfn "Error: %s" e
+        eprintfn "%s" e
         1
     | Ok (cppCode, _) ->
         match outputPath with
@@ -740,11 +823,27 @@ let private dispatchTest (rest: string list) : int =
         // Single corpus category against the pinned oracle.
         let failed = (Blade.Tests.DiffOracle.runDiffOracleTests "./oracle/Blade.exe" [cat]).Failed
         if failed = 0 then 0 else 1
+    | [ "interp" ] ->
+        // Interpreter differential gate: the tree-walking IR interpreter vs the
+        // compiled binary over the supported corpus slice — byte-identical
+        // normalized stdout required. Slice grows per interpreter milestone.
+        let failed = (Blade.Tests.InterpDiff.runInterpDiffTests Blade.Tests.InterpDiff.currentSlice).Failed
+        if failed = 0 then 0 else 1
+    | [ "interp"; cat ] ->
+        // Single corpus category through the interpreter differential gate.
+        let failed = (Blade.Tests.InterpDiff.runInterpDiffTests [cat]).Failed
+        if failed = 0 then 0 else 1
     | [ "spans" ] ->
         // Error-location tests (§3.4 / Phase 2 gate): deliberately broken
         // sources, asserting the reported line. No C++ pipeline.
         let failed = (Blade.Tests.Spans.runSpanTests ()).Failed
         if failed = 0 then 0 else 1
+    | [ "diagnostics" ] ->
+        // Diagnostics core (renderer + registry) and the diagnostics corpus
+        // (broken sources with pinned codes/spans). No C++ pipeline.
+        let core = (Blade.Tests.DiagnosticsCore.runDiagnosticsCoreTests ()).Failed
+        let corpus = (Blade.Tests.DiagCorpus.runDiagCorpusTests ()).Failed
+        if core + corpus = 0 then 0 else 1
     | [ "oracles" ] ->
         // Phase 0.2 review block: the differential-harness oracles checked
         // against hand-computed / analytic values. No Blade source pipeline.
@@ -831,6 +930,10 @@ let private dispatchTest (rest: string list) : int =
             | "math" -> Some ("Math", mathTests)
             | "rand" -> Some ("Rand", randTests)
             | "spectra" -> Some ("Spectra", spectraTests)
+            | "fallback" -> Some ("Fallback", fallbackTests)
+            | "ml-ops" | "mlops" -> Some ("ML Ops", mlOpsTests)
+            | "ml-e2e" | "mle2e" -> Some ("ML E2E", mlE2eTests)
+            | "ml-equiv" | "mlequiv" | "equiv" -> Some ("ML Equiv", mlEquivTests)
             | "sqlish" | "sql" -> Some ("SQL-ish", foreignKeyTests @ maskTests @ setOpTests @ groupByTests @ sortTests @ reduceTests @ extentsTests @ extentsMultiRankTests @ regressionTests @ sqlCombinedTests)
             | _ -> None
         match categoryTests with
@@ -841,7 +944,7 @@ let private dispatchTest (rest: string list) : int =
     | _ -> printUsage (); 1
 
 /// Top-level command dispatch (the body of the old Main.fs entry point).
-let dispatch (args: string[]) : int =
+let private dispatchInner (args: string[]) : int =
     // Share the compiler version with the test-harness output helpers so every
     // block header reads "(vX.Y.Z)" consistently, including standalone runs.
     Blade.Tests.TestHarness.version <- compilerVersion
@@ -874,11 +977,11 @@ let dispatch (args: string[]) : int =
     | [| "compile"; file |] ->
         match compileToExe file None false with
         | Ok path -> printfn "%s" path; 0
-        | Error e -> eprintfn "Error: %s" e; 1
+        | Error e -> eprintfn "%s" e; 1
     | [| "compile"; file; "-o"; output |] ->
         match compileToExe file (Some output) false with
         | Ok path -> printfn "%s" path; 0
-        | Error e -> eprintfn "Error: %s" e; 1
+        | Error e -> eprintfn "%s" e; 1
 
     | [| "emit"; file |] -> emitFile file None false
     | [| "emit"; file; "-o"; output |] -> emitFile file (Some output) false
@@ -903,3 +1006,25 @@ let dispatch (args: string[]) : int =
     | [| "--full" |] -> runFullSuite defaultFullSuiteOptions
     | [| "--help" |] -> printUsage (); 0
     | _ -> printUsage (); 1
+
+/// Top-level error boundary. Runs the real dispatch and turns any escaping
+/// exception into a rendered diagnostic on stderr (exit 1) instead of a raw
+/// .NET stack trace: a typed BladeDiagnosticException renders as itself, any
+/// other exception becomes a BL9001 internal compiler error (the .NET stack is
+/// shown only under --verbose). Successful and existing eprintfn error paths
+/// inside dispatchInner are untouched — this only catches what used to crash.
+let dispatch (args: string[]) : int =
+    let verbose = args |> Array.contains "--verbose"
+    try
+        dispatchInner args
+    with
+    | Blade.Diagnostics.BladeDiagnosticException d ->
+        let useColor = not System.Console.IsErrorRedirected
+        eprintfn "%s" (Blade.Diagnostics.Render.render useColor None d)
+        1
+    | ex ->
+        let d = Blade.Diagnostics.Codes.ice ex.Message
+        let useColor = not System.Console.IsErrorRedirected
+        eprintfn "%s" (Blade.Diagnostics.Render.render useColor None d)
+        if verbose then eprintfn "%s" (ex.ToString())
+        1

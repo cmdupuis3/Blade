@@ -1,0 +1,14 @@
+// TEST: Kernel Returns Tuple
+// A kernel returning a tuple materializes an array of tuple elements
+// (IRTTuple flows through outputElemType like IRTNamed). Tuple-element
+// arrays are not auto-printed (std::tuple has no operator<<); values are
+// checked through destructuring reads.
+type NIdx = Idx<3>
+let xs: Array<Float64 like NIdx> = [1.0, 2.0, 3.0]
+let T = method_for(xs) <@> lambda(x) -> (x, x * 10.0) |> compute
+let (t2a, t2b) = T((2 : NIdx))
+let (t0a, t0b) = T((0 : NIdx))
+// EXPECT: t2a = 3
+// EXPECT: t2b = 30
+// EXPECT: t0a = 1
+// EXPECT: t0b = 10

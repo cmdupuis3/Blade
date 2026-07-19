@@ -7,6 +7,9 @@
   </PropertyGroup>
 
   <ItemGroup>
+    <!-- Single-source CG path enumerator shared with the compiler's static
+         model (Blade.fsproj compiles the same file). Zero opens; first. -->
+    <Compile Include="compiler/MLSpec.fs" />
     <Compile Include="MathUtils.fs" />
     <Compile Include="Irreps.fs" />
     <Compile Include="IrrepsIdx.fs" />

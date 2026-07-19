@@ -1,0 +1,8 @@
+// TEST: Fallback Extent Mismatch (rejects)
+// Dense-dense fallback requires the SAME index space: the operands' array
+// types unify outright, so an extent mismatch is a BL3001 type error.
+type AIdx = Idx<4>
+type BIdx = Idx<3>
+let A: Array<Float64 like AIdx> = [1.0, 2.0, 3.0, 4.0]
+let B: Array<Float64 like BIdx> = [9.0, 9.0, 9.0]
+let C = A <|:> B |> compute

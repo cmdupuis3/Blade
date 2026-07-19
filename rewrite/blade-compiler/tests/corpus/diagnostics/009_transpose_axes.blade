@@ -1,0 +1,5 @@
+// TEST: Diag Transpose Equal Axes (diag)
+// ERROR: BL4004 @ 4:19
+// ERROR-CONTAINS: the two axes must differ
+let A = [[1.0, 2.0], [3.0, 4.0]]
+let B = transpose(A, [0, 0])

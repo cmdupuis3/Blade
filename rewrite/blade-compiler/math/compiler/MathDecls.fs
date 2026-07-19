@@ -27,25 +27,25 @@ open Blade.Ast
 // AST construction helpers (mirroring MLElaborate's style)
 // ============================================================================
 
-let v (n: string) = ExprVar n
-let fLit (x: float) = ExprLit (LitFloat x)
-let iLit (n: int) = ExprLit (LitInt (int64 n))
-let add a b = ExprBinOp (Elementwise, OpAdd, a, b)
-let sub a b = ExprBinOp (Elementwise, OpSub, a, b)
-let mul a b = ExprBinOp (Elementwise, OpMul, a, b)
-let divE a b = ExprBinOp (Elementwise, OpDiv, a, b)
-let idx (arr: string) (i: Expr) = ExprApp (ExprVar arr, [i])
-let sLet n value = StmtLet { Pattern = PatVar n; Type = None; Value = value; Mutability = BindLet }
-let sLetMut n value = StmtLet { Pattern = PatVar n; Type = None; Value = value; Mutability = BindMut }
-let sAccum lhs e = StmtExpr (ExprAssign (lhs, add lhs e))
-let sAssign lhs e = StmtExpr (ExprAssign (lhs, e))
-let sFor var lo hi body = StmtForIn (var, ExprDotDot (iLit lo, iLit hi), body)
+let v (n: string) = syn (ExprVar n)
+let fLit (x: float) = syn (ExprLit (LitFloat x))
+let iLit (n: int) = syn (ExprLit (LitInt (int64 n)))
+let add a b = syn (ExprBinOp (Elementwise, OpAdd, a, b))
+let sub a b = syn (ExprBinOp (Elementwise, OpSub, a, b))
+let mul a b = syn (ExprBinOp (Elementwise, OpMul, a, b))
+let divE a b = syn (ExprBinOp (Elementwise, OpDiv, a, b))
+let idx (arr: string) (i: Expr) = syn (ExprApp (v arr, [i]))
+let sLet n value = StmtLet { Pattern = synPat (PatVar n); Type = None; Value = value; Mutability = BindLet }
+let sLetMut n value = StmtLet { Pattern = synPat (PatVar n); Type = None; Value = value; Mutability = BindMut }
+let sAccum lhs e = StmtExpr (syn (ExprAssign (lhs, add lhs e)))
+let sAssign lhs e = StmtExpr (syn (ExprAssign (lhs, e)))
+let sFor var lo hi body = StmtForIn (var, syn (ExprDotDot (iLit lo, iLit hi)), body)
 /// for-in with expression bounds (runtime lower bounds are proven: ml's
 /// tpDecl iterates table-driven ranges).
-let sForE var loE hiE body = StmtForIn (var, ExprDotDot (loE, hiE), body)
-let zerosLit (n: int) = ExprArrayLit (List.replicate n (fLit 0.0))
+let sForE var loE hiE body = StmtForIn (var, syn (ExprDotDot (loE, hiE)), body)
+let zerosLit (n: int) = syn (ExprArrayLit (List.replicate n (fLit 0.0)))
 let tyFloat = TyNamed ("Float", [])
-let tyFloatArr (n: int) = TyArray (tyFloat, [ TyIdx (ExprLit (LitInt (int64 n))) ])
+let tyFloatArr (n: int) = TyArray (tyFloat, [ TyIdx (iLit n) ])
 
 let mkFunc name (ps: (string * TypeExpr) list) retTy body : FunctionDecl =
     { Name = name
@@ -56,21 +56,21 @@ let mkFunc name (ps: (string * TypeExpr) list) retTy body : FunctionDecl =
       Body = body
       IsStatic = false }
 
-let absE e = ExprApp (v "abs", [e])
-let sqrtE e = ExprApp (v "sqrt", [e])
-let negOne = ExprUnaryOp (OpNeg, fLit 1.0)
-let cmp op a b = ExprBinOp (Elementwise, op, a, b)
+let absE e = syn (ExprApp (v "abs", [e]))
+let sqrtE e = syn (ExprApp (v "sqrt", [e]))
+let negOne = syn (ExprUnaryOp (OpNeg, fLit 1.0))
+let cmp op a b = syn (ExprBinOp (Elementwise, op, a, b))
 /// a(i, j) — multi-subscript read (runtime indices proven, func-arrays/010).
-let idx2 (arr: string) (i: Expr) (j: Expr) = ExprApp (ExprVar arr, [i; j])
+let idx2 (arr: string) (i: Expr) (j: Expr) = syn (ExprApp (v arr, [i; j]))
 /// Flat row-major cell arr(i*stride + j) of a rank-1 work array.
 let flat (arr: string) (stride: int) (i: Expr) (j: Expr) =
     idx arr (add (mul i (iLit stride)) j)
 /// Rank-2 nested literal of runtime reads over a flat work array
 /// ([[c(0), c(1)], [c(2), c(3)]] — proven by corpus math/005).
 let nestedFromFlat (arr: string) (rows: int) (cols: int) : Expr =
-    ExprArrayLit
+    syn (ExprArrayLit
         [ for i in 0 .. rows - 1 ->
-            ExprArrayLit [ for j in 0 .. cols - 1 -> idx arr (iLit (i * cols + j)) ] ]
+            syn (ExprArrayLit [ for j in 0 .. cols - 1 -> idx arr (iLit (i * cols + j)) ]) ])
 let tyFloatMat (rows: int) (cols: int) =
     TyArray (tyFloat, [ TyIdx (iLit rows); TyIdx (iLit cols) ])
 
@@ -88,13 +88,19 @@ let tyFloatTensor (dims: int list) =
 let rec nestedFromFlatN (arr: string) (dims: int list) (offset: int) : Expr =
     match dims with
     | [] -> failwith "nestedFromFlatN: empty dims"
-    | [last] -> ExprArrayLit [ for i in 0 .. last - 1 -> idx arr (iLit (offset + i)) ]
+    | [last] -> syn (ExprArrayLit [ for i in 0 .. last - 1 -> idx arr (iLit (offset + i)) ])
     | d :: rest ->
         let stride = prodInts rest
-        ExprArrayLit [ for i in 0 .. d - 1 -> nestedFromFlatN arr rest (offset + i * stride) ]
+        syn (ExprArrayLit [ for i in 0 .. d - 1 -> nestedFromFlatN arr rest (offset + i * stride) ])
 /// N-deep loop nest: vars/extents outermost first, around the given body.
 let loopNest (vars: string list) (extents: int list) (body: Stmt list) : Stmt list =
     List.foldBack2 (fun name extent acc -> [ sFor name 0 extent acc ]) vars extents body
+
+// Span-stamping wrappers for the raw combinators used in decl bodies (full-
+// span AST): each attributes to the ambient synthSpan the elaborator stamps.
+let ifE (c, t, f) = syn (ExprIf (c, t, f))
+let blockE (stmts, fin) = syn (ExprBlock (stmts, fin))
+let tupleE (xs: Expr list) = syn (ExprTuple xs)
 
 // ============================================================================
 // matmul
@@ -104,7 +110,7 @@ let loopNest (vars: string list) (extents: int list) (body: Stmt list) : Stmt li
 /// accumulator + triple nest; the result is a nested literal of reads.
 let matmulDecl (name: string) (m: int) (k: int) (n: int) : FunctionDecl =
     let body =
-        ExprBlock (
+        blockE (
             [ sLetMut "c" (zerosLit (m * n))
               sFor "i" 0 m
                 [ sFor "j" 0 n
@@ -139,7 +145,7 @@ let svdDecl (name: string) (m: int) (n: int) (sweeps: int) : FunctionDecl =
     let vAt = flat "vv" n
     let uAt = flat "u" n
     let body =
-        ExprBlock (
+        blockE (
             [ // working copy of a (row-major flat, stride n)
               sLetMut "w" (zerosLit (m * n))
               sFor "i" 0 m
@@ -169,13 +175,13 @@ let svdDecl (name: string) (m: int) (n: int) (sweeps: int) : FunctionDecl =
                           sLet "conv" (cmp OpLe (absE (v "cc"))
                                                 (mul (fLit 1.0e-15) (sqrtE (mul (v "aa") (v "bb")))))
                           sLet "zeta" (divE (sub (v "bb") (v "aa"))
-                                            (ExprIf (v "conv", fLit 1.0, mul (fLit 2.0) (v "cc"))))
-                          sLet "tt" (divE (ExprIf (cmp OpGe (v "zeta") (fLit 0.0), fLit 1.0, negOne))
+                                            (ifE (v "conv", fLit 1.0, mul (fLit 2.0) (v "cc"))))
+                          sLet "tt" (divE (ifE (cmp OpGe (v "zeta") (fLit 0.0), fLit 1.0, negOne))
                                           (add (absE (v "zeta"))
                                                (sqrtE (add (fLit 1.0) (mul (v "zeta") (v "zeta"))))))
-                          sLet "cs" (ExprIf (v "conv", fLit 1.0,
+                          sLet "cs" (ifE (v "conv", fLit 1.0,
                                              divE (fLit 1.0) (sqrtE (add (fLit 1.0) (mul (v "tt") (v "tt"))))))
-                          sLet "sn" (ExprIf (v "conv", fLit 0.0, mul (v "cs") (v "tt")))
+                          sLet "sn" (ifE (v "conv", fLit 0.0, mul (v "cs") (v "tt")))
                           // rotate columns p, q of w (scalar-buffered, no aliasing)
                           sFor "i" 0 m
                             [ sLet "tp" (wAt (v "i") (v "p"))
@@ -201,7 +207,7 @@ let svdDecl (name: string) (m: int) (n: int) (sweeps: int) : FunctionDecl =
               sFor "kk" 0 n
                 [ sAssign (v "best") (v "kk")
                   sForE "j" (add (v "kk") (iLit 1)) (iLit n)
-                    [ sAssign (v "best") (ExprIf (cmp OpGt (idx "s" (v "j")) (idx "s" (v "best")), v "j", v "best")) ]
+                    [ sAssign (v "best") (ifE (cmp OpGt (idx "s" (v "j")) (idx "s" (v "best")), v "j", v "best")) ]
                   sLet "ts" (idx "s" (v "kk"))
                   sAssign (idx "s" (v "kk")) (idx "s" (v "best"))
                   sAssign (idx "s" (v "best")) (v "ts")
@@ -216,7 +222,7 @@ let svdDecl (name: string) (m: int) (n: int) (sweeps: int) : FunctionDecl =
               // U = normalized columns (zero σ -> zero column, documented)
               sLetMut "u" (zerosLit (m * n))
               sFor "j" 0 n
-                [ sLet "inv" (ExprIf (cmp OpGt (idx "s" (v "j")) (fLit 1.0e-300),
+                [ sLet "inv" (ifE (cmp OpGt (idx "s" (v "j")) (fLit 1.0e-300),
                                       divE (fLit 1.0) (idx "s" (v "j")), fLit 0.0))
                   sFor "i" 0 m [ sAssign (uAt (v "i") (v "j")) (mul (wAt (v "i") (v "j")) (v "inv")) ] ]
               // sign fix: first row attaining max |entry| per U column made
@@ -227,9 +233,9 @@ let svdDecl (name: string) (m: int) (n: int) (sweeps: int) : FunctionDecl =
                   sAssign (v "best") (iLit 0)
                   sFor "i" 0 m
                     [ sLet "mag" (absE (uAt (v "i") (v "j")))
-                      sAssign (v "best") (ExprIf (cmp OpGt (v "mag") (v "bigv"), v "i", v "best"))
-                      sAssign (v "bigv") (ExprIf (cmp OpGt (v "mag") (v "bigv"), v "mag", v "bigv")) ]
-                  sLet "flip" (ExprIf (cmp OpLt (uAt (v "best") (v "j")) (fLit 0.0), negOne, fLit 1.0))
+                      sAssign (v "best") (ifE (cmp OpGt (v "mag") (v "bigv"), v "i", v "best"))
+                      sAssign (v "bigv") (ifE (cmp OpGt (v "mag") (v "bigv"), v "mag", v "bigv")) ]
+                  sLet "flip" (ifE (cmp OpLt (uAt (v "best") (v "j")) (fLit 0.0), negOne, fLit 1.0))
                   sFor "i" 0 m [ sAssign (uAt (v "i") (v "j")) (mul (uAt (v "i") (v "j")) (v "flip")) ]
                   sFor "i" 0 n [ sAssign (vAt (v "i") (v "j")) (mul (vAt (v "i") (v "j")) (v "flip")) ] ]
               // assemble rank-2 outputs as named lets: array literals are
@@ -237,7 +243,7 @@ let svdDecl (name: string) (m: int) (n: int) (sweeps: int) : FunctionDecl =
               // IRArrayLit gap) — tuple-of-variables is the proven boundary
               sLet "uo" (nestedFromFlat "u" m n)
               sLet "vo" (nestedFromFlat "vv" n n) ],
-            Some (ExprTuple [ v "uo"; v "s"; v "vo" ]))
+            Some (tupleE [ v "uo"; v "s"; v "vo" ]))
     mkFunc name [ ("a", tyFloatMat m n) ]
         (TyTuple [ tyFloatMat m n; tyFloatArr n; tyFloatMat n n ]) body
 
@@ -263,7 +269,7 @@ let eighDecl (name: string) (n: int) (sweeps: int) : FunctionDecl =
     let aAt = flat "aw" n
     let qAt = flat "qm" n
     let body =
-        ExprBlock (
+        blockE (
             [ // working copy of the symmetric input
               sLetMut "aw" (zerosLit (n * n))
               sFor "i" 0 n
@@ -285,13 +291,13 @@ let eighDecl (name: string) (n: int) (sweeps: int) : FunctionDecl =
                                                 (mul (fLit 1.0e-15)
                                                      (sqrtE (add (absE (mul (v "app") (v "aqq"))) (fLit 1.0e-300)))))
                           sLet "theta" (divE (sub (v "aqq") (v "app"))
-                                             (ExprIf (v "conv", fLit 1.0, mul (fLit 2.0) (v "apq"))))
-                          sLet "tt" (divE (ExprIf (cmp OpGe (v "theta") (fLit 0.0), fLit 1.0, negOne))
+                                             (ifE (v "conv", fLit 1.0, mul (fLit 2.0) (v "apq"))))
+                          sLet "tt" (divE (ifE (cmp OpGe (v "theta") (fLit 0.0), fLit 1.0, negOne))
                                           (add (absE (v "theta"))
                                                (sqrtE (add (fLit 1.0) (mul (v "theta") (v "theta"))))))
-                          sLet "cs" (ExprIf (v "conv", fLit 1.0,
+                          sLet "cs" (ifE (v "conv", fLit 1.0,
                                              divE (fLit 1.0) (sqrtE (add (fLit 1.0) (mul (v "tt") (v "tt"))))))
-                          sLet "sn" (ExprIf (v "conv", fLit 0.0, mul (v "cs") (v "tt")))
+                          sLet "sn" (ifE (v "conv", fLit 0.0, mul (v "cs") (v "tt")))
                           // AW ← AW·R (columns p, qq), scalar-buffered
                           sFor "i" 0 n
                             [ sLet "tp" (aAt (v "i") (v "p"))
@@ -318,7 +324,7 @@ let eighDecl (name: string) (n: int) (sweeps: int) : FunctionDecl =
               sFor "kk" 0 n
                 [ sAssign (v "best") (v "kk")
                   sForE "j" (add (v "kk") (iLit 1)) (iLit n)
-                    [ sAssign (v "best") (ExprIf (cmp OpGt (idx "lam" (v "j")) (idx "lam" (v "best")), v "j", v "best")) ]
+                    [ sAssign (v "best") (ifE (cmp OpGt (idx "lam" (v "j")) (idx "lam" (v "best")), v "j", v "best")) ]
                   sLet "tl" (idx "lam" (v "kk"))
                   sAssign (idx "lam" (v "kk")) (idx "lam" (v "best"))
                   sAssign (idx "lam" (v "best")) (v "tl")
@@ -332,13 +338,13 @@ let eighDecl (name: string) (n: int) (sweeps: int) : FunctionDecl =
                   sAssign (v "best") (iLit 0)
                   sFor "i" 0 n
                     [ sLet "mag" (absE (qAt (v "i") (v "j")))
-                      sAssign (v "best") (ExprIf (cmp OpGt (v "mag") (v "bigv"), v "i", v "best"))
-                      sAssign (v "bigv") (ExprIf (cmp OpGt (v "mag") (v "bigv"), v "mag", v "bigv")) ]
-                  sLet "flip" (ExprIf (cmp OpLt (qAt (v "best") (v "j")) (fLit 0.0), negOne, fLit 1.0))
+                      sAssign (v "best") (ifE (cmp OpGt (v "mag") (v "bigv"), v "i", v "best"))
+                      sAssign (v "bigv") (ifE (cmp OpGt (v "mag") (v "bigv"), v "mag", v "bigv")) ]
+                  sLet "flip" (ifE (cmp OpLt (qAt (v "best") (v "j")) (fLit 0.0), negOne, fLit 1.0))
                   sFor "i" 0 n [ sAssign (qAt (v "i") (v "j")) (mul (qAt (v "i") (v "j")) (v "flip")) ] ]
               // tuple-of-variables boundary (IRArrayLit-in-tuple gap)
               sLet "qo" (nestedFromFlat "qm" n n) ],
-            Some (ExprTuple [ v "qo"; v "lam" ]))
+            Some (tupleE [ v "qo"; v "lam" ]))
     mkFunc name [ ("a", tyFloatMat n n) ]
         (TyTuple [ tyFloatMat n n; tyFloatArr n ]) body
 
@@ -366,7 +372,7 @@ let eighDecl (name: string) (n: int) (sweeps: int) : FunctionDecl =
 /// budget; generic data-derived matrices (Koopman/EDMD) converge normally.
 let eigDecl (name: string) (n: int) (maxIter: int) : FunctionDecl =
     let hAt = flat "hw" n
-    let bint c = ExprIf (c, iLit 1, iLit 0)
+    let bint c = ifE (c, iLit 1, iLit 0)
     let isOne e = cmp OpEq e (iLit 1)
     let one_ = iLit 1
     let epsE = fLit 1.0e-12
@@ -400,8 +406,8 @@ let eigDecl (name: string) (n: int) (maxIter: int) : FunctionDecl =
                   sAccum (v "acc") (mul (v "hik") (v "hik")) ]
               sLet "nrm" (sqrtE (v "acc"))
               sLet "fok" (bint (cmp OpGt (v "nrm") tinyE))
-              sLet "alpha" (ExprIf (cmp OpGe (hAt kp1 (v "k")) (fLit 0.0),
-                                    ExprUnaryOp (OpNeg, v "nrm"), v "nrm"))
+              sLet "alpha" (ifE (cmp OpGe (hAt kp1 (v "k")) (fLit 0.0),
+                                    syn (ExprUnaryOp (OpNeg, v "nrm")), v "nrm"))
               sFor "i" 0 n [ sAssign (idx "hv" (v "i")) (fLit 0.0) ]
               sAssign (idx "hv" kp1) (sub (hAt kp1 (v "k")) (v "alpha"))
               sForE "i" kp2 (iLit n) [ sAssign (idx "hv" (v "i")) (hAt (v "i") (v "k")) ]
@@ -409,7 +415,7 @@ let eigDecl (name: string) (n: int) (maxIter: int) : FunctionDecl =
               sForE "i" kp1 (iLit n)
                 [ sLet "hvi" (idx "hv" (v "i"))
                   sAccum (v "acc") (mul (v "hvi") (v "hvi")) ]
-              sLet "beta" (ExprIf (isOne (mul (v "fok") (bint (cmp OpGt (v "acc") tinyE))),
+              sLet "beta" (ifE (isOne (mul (v "fok") (bint (cmp OpGt (v "acc") tinyE))),
                                    divE (fLit 2.0) (v "acc"), fLit 0.0))
               // H <- (I - beta v vT) H
               sFor "j" 0 n
@@ -426,9 +432,9 @@ let eigDecl (name: string) (n: int) (maxIter: int) : FunctionDecl =
                     [ sAssign (hAt (v "i") (v "j"))
                               (sub (hAt (v "i") (v "j")) (mul (mul (v "beta") (v "sm")) (idx "hv" (v "j")))) ] ]
               // exact zeros below the subdiagonal in column k
-              sAssign (hAt kp1 (v "k")) (ExprIf (isOne (v "fok"), v "alpha", hAt kp1 (v "k")))
+              sAssign (hAt kp1 (v "k")) (ifE (isOne (v "fok"), v "alpha", hAt kp1 (v "k")))
               sForE "i" kp2 (iLit n)
-                [ sAssign (hAt (v "i") (v "k")) (ExprIf (isOne (v "fok"), fLit 0.0, hAt (v "i") (v "k"))) ] ] ]
+                [ sAssign (hAt (v "i") (v "k")) (ifE (isOne (v "fok"), fLit 0.0, hAt (v "i") (v "k"))) ] ] ]
     // ---- windowed Francis double-shift QR (emitted only for n >= 3) ----
     let francis =
         if n < 3 then [] else
@@ -438,12 +444,12 @@ let eigDecl (name: string) (n: int) (maxIter: int) : FunctionDecl =
               sForE "k" one_ (v "hi")
                 [ sLet "sd" (absE (hAt (v "k") km1))
                   sLet "thr" (add (mul epsE (add (absE (hAt km1 km1)) (absE (hAt (v "k") (v "k"))))) tinyE)
-                  sAssign (v "l") (ExprIf (cmp OpLe (v "sd") (v "thr"), v "k", v "l")) ]
+                  sAssign (v "l") (ifE (cmp OpLe (v "sd") (v "thr"), v "k", v "l")) ]
               sLet "fact" (bint (cmp OpGe (v "hi") (iLit 2)))
               sLet "fchase" (mul (v "fact") (bint (cmp OpGt (sub (v "hi") (v "l")) (iLit 2))))
               // clamped window bounds: in-bounds dummies when not chasing
-              sLet "lc" (ExprIf (isOne (v "fchase"), v "l", iLit 0))
-              sLet "ec" (ExprIf (isOne (v "fchase"), sub (v "hi") one_, iLit 2))
+              sLet "lc" (ifE (isOne (v "fchase"), v "l", iLit 0))
+              sLet "ec" (ifE (isOne (v "fchase"), sub (v "hi") one_, iLit 2))
               // double shift from the trailing 2x2 of the window
               sLet "sv" (add (hAt ecm1 ecm1) (hAt (v "ec") (v "ec")))
               sLet "tv" (sub (mul (hAt ecm1 ecm1) (hAt (v "ec") (v "ec")))
@@ -457,15 +463,15 @@ let eigDecl (name: string) (n: int) (maxIter: int) : FunctionDecl =
                                    (sub (add (hAt (v "lc") (v "lc")) (hAt (add (v "lc") one_) (add (v "lc") one_))) (v "sv")))
               sAssign (v "z") (mul (hAt (add (v "lc") (iLit 2)) (add (v "lc") one_)) (hAt (add (v "lc") one_) (v "lc")))
               // bulge chase (empty range when not chasing)
-              sForE "k" (v "lc") (ExprIf (isOne (v "fchase"), sub (v "ec") one_, v "lc"))
+              sForE "k" (v "lc") (ifE (isOne (v "fchase"), sub (v "ec") one_, v "lc"))
                 [ sLet "cn" (sqrtE (add (add (mul (v "x") (v "x")) (mul (v "y") (v "y"))) (mul (v "z") (v "z"))))
                   sLet "okc" (bint (cmp OpGt (v "cn") tinyE))
-                  sLet "calpha" (ExprIf (cmp OpGe (v "x") (fLit 0.0), ExprUnaryOp (OpNeg, v "cn"), v "cn"))
+                  sLet "calpha" (ifE (cmp OpGe (v "x") (fLit 0.0), syn (ExprUnaryOp (OpNeg, v "cn")), v "cn"))
                   sLet "w0" (sub (v "x") (v "calpha"))
                   sLet "w1" (v "y")
                   sLet "w2" (v "z")
                   sLet "cvv" (add (add (mul (v "w0") (v "w0")) (mul (v "w1") (v "w1"))) (mul (v "w2") (v "w2")))
-                  sLet "cbeta" (ExprIf (isOne (mul (v "okc") (bint (cmp OpGt (v "cvv") tinyE))),
+                  sLet "cbeta" (ifE (isOne (mul (v "okc") (bint (cmp OpGt (v "cvv") tinyE))),
                                         divE (fLit 2.0) (v "cvv"), fLit 0.0))
                   // rows k..k+2 from the left
                   sFor "j" 0 n
@@ -487,17 +493,17 @@ let eigDecl (name: string) (n: int) (maxIter: int) : FunctionDecl =
                   // the k = 0 flat index (k+1)·n + (k−1) = n−1 is in-bounds,
                   // and the guard self-assigns there)
                   sLet "fclean" (mul (v "okc") (bint (cmp OpGt (v "k") (v "lc"))))
-                  sAssign (hAt kp1 km1) (ExprIf (isOne (v "fclean"), fLit 0.0, hAt kp1 km1))
-                  sAssign (hAt kp2 km1) (ExprIf (isOne (v "fclean"), fLit 0.0, hAt kp2 km1))
+                  sAssign (hAt kp1 km1) (ifE (isOne (v "fclean"), fLit 0.0, hAt kp1 km1))
+                  sAssign (hAt kp2 km1) (ifE (isOne (v "fclean"), fLit 0.0, hAt kp2 km1))
                   sAssign (v "x") (hAt kp1 (v "k"))
                   sAssign (v "y") (hAt kp2 (v "k"))
-                  sAssign (v "z") (ExprIf (cmp OpLt (v "k") (sub (v "ec") (iLit 2)), hAt kp3 (v "k"), fLit 0.0)) ]
+                  sAssign (v "z") (ifE (cmp OpLt (v "k") (sub (v "ec") (iLit 2)), hAt kp3 (v "k"), fLit 0.0)) ]
               // final Givens on (x, y) over rows/cols ec-1, ec (identity
               // rotation at clamped dummy indices when not chasing)
               sLet "gn" (sqrtE (add (mul (v "x") (v "x")) (mul (v "y") (v "y"))))
               sLet "okg" (mul (v "fchase") (bint (cmp OpGt (v "gn") tinyE)))
-              sLet "cs" (ExprIf (isOne (v "okg"), divE (v "x") (v "gn"), fLit 1.0))
-              sLet "sn" (ExprIf (isOne (v "okg"), divE (v "y") (v "gn"), fLit 0.0))
+              sLet "cs" (ifE (isOne (v "okg"), divE (v "x") (v "gn"), fLit 1.0))
+              sLet "sn" (ifE (isOne (v "okg"), divE (v "y") (v "gn"), fLit 0.0))
               sFor "j" 0 n
                 [ sLet "tp" (hAt ecm1 (v "j"))
                   sLet "tq" (hAt (v "ec") (v "j"))
@@ -509,10 +515,10 @@ let eigDecl (name: string) (n: int) (maxIter: int) : FunctionDecl =
                   sAssign (hAt (v "i") ecm1) (add (mul (v "cs") (v "tp")) (mul (v "sn") (v "tq")))
                   sAssign (hAt (v "i") (v "ec")) (sub (mul (v "cs") (v "tq")) (mul (v "sn") (v "tp"))) ]
               sAssign (hAt (v "ec") (sub (v "ec") (iLit 2)))
-                      (ExprIf (isOne (v "okg"), fLit 0.0, hAt (v "ec") (sub (v "ec") (iLit 2))))
+                      (ifE (isOne (v "okg"), fLit 0.0, hAt (v "ec") (sub (v "ec") (iLit 2))))
               // freeze windows of size <= 2 (extraction solves them exactly)
               sLet "ffreeze" (mul (v "fact") (bint (cmp OpLe (sub (v "hi") (v "l")) (iLit 2))))
-              sAssign (v "hi") (ExprIf (isOne (v "ffreeze"), v "l", v "hi")) ] ]
+              sAssign (v "hi") (ifE (isOne (v "ffreeze"), v "l", v "hi")) ] ]
     // ---- extraction: 1x1 blocks real, 2x2 blocks via the quadratic ----
     let extract =
         [ sLetMut "lre" (zerosLit n)
@@ -520,14 +526,14 @@ let eigDecl (name: string) (n: int) (maxIter: int) : FunctionDecl =
           sFor "k" 0 n
             [ sLet "fhand" (v "skip")
               sLet "flast" (bint (cmp OpEq (v "k") (iLit (n - 1))))
-              sLet "sd" (ExprIf (isOne (v "flast"), fLit 0.0, absE (hAt kp1 (v "k"))))
-              sLet "thr" (ExprIf (isOne (v "flast"), fLit 1.0,
+              sLet "sd" (ifE (isOne (v "flast"), fLit 0.0, absE (hAt kp1 (v "k"))))
+              sLet "thr" (ifE (isOne (v "flast"), fLit 1.0,
                                   add (mul epsE (add (absE (hAt (v "k") (v "k"))) (absE (hAt kp1 kp1)))) tinyE))
-              sLet "freal" (ExprIf (isOne (v "flast"), iLit 1, bint (cmp OpLe (v "sd") (v "thr"))))
+              sLet "freal" (ifE (isOne (v "flast"), iLit 1, bint (cmp OpLe (v "sd") (v "thr"))))
               sLet "a2" (hAt (v "k") (v "k"))
-              sLet "b2" (ExprIf (isOne (v "flast"), fLit 0.0, hAt (v "k") kp1))
-              sLet "c2" (ExprIf (isOne (v "flast"), fLit 0.0, hAt kp1 (v "k")))
-              sLet "d2" (ExprIf (isOne (v "flast"), fLit 0.0, hAt kp1 kp1))
+              sLet "b2" (ifE (isOne (v "flast"), fLit 0.0, hAt (v "k") kp1))
+              sLet "c2" (ifE (isOne (v "flast"), fLit 0.0, hAt kp1 (v "k")))
+              sLet "d2" (ifE (isOne (v "flast"), fLit 0.0, hAt kp1 kp1))
               sLet "pp" (mul (fLit 0.5) (add (v "a2") (v "d2")))
               sLet "disc" (add (mul (mul (fLit 0.25) (sub (v "a2") (v "d2"))) (sub (v "a2") (v "d2")))
                                (mul (v "b2") (v "c2")))
@@ -536,22 +542,22 @@ let eigDecl (name: string) (n: int) (maxIter: int) : FunctionDecl =
               sLet "fnothand" (sub one_ (v "fhand"))
               sLet "fpair" (mul (v "fnothand") (sub one_ (v "freal")))
               sAssign (idx "lre" (v "k"))
-                      (ExprIf (isOne (v "fnothand"),
-                               ExprIf (isOne (v "freal"), v "a2",
-                                       ExprIf (isOne (v "fdpos"), add (v "pp") (v "rt"), v "pp")),
+                      (ifE (isOne (v "fnothand"),
+                               ifE (isOne (v "freal"), v "a2",
+                                       ifE (isOne (v "fdpos"), add (v "pp") (v "rt"), v "pp")),
                                idx "lre" (v "k")))
               sAssign (idx "lim" (v "k"))
-                      (ExprIf (isOne (mul (v "fpair") (sub one_ (v "fdpos"))), v "rt",
-                               ExprIf (isOne (v "fnothand"), fLit 0.0, idx "lim" (v "k"))))
+                      (ifE (isOne (mul (v "fpair") (sub one_ (v "fdpos"))), v "rt",
+                               ifE (isOne (v "fnothand"), fLit 0.0, idx "lim" (v "k"))))
               // second of pair (safe self-index when not a pair)
-              sLet "k2" (ExprIf (isOne (v "fpair"), kp1, v "k"))
+              sLet "k2" (ifE (isOne (v "fpair"), kp1, v "k"))
               sAssign (idx "lre" (v "k2"))
-                      (ExprIf (isOne (v "fpair"),
-                               ExprIf (isOne (v "fdpos"), sub (v "pp") (v "rt"), v "pp"),
+                      (ifE (isOne (v "fpair"),
+                               ifE (isOne (v "fdpos"), sub (v "pp") (v "rt"), v "pp"),
                                idx "lre" (v "k2")))
               sAssign (idx "lim" (v "k2"))
-                      (ExprIf (isOne (v "fpair"),
-                               ExprIf (isOne (v "fdpos"), fLit 0.0, ExprUnaryOp (OpNeg, v "rt")),
+                      (ifE (isOne (v "fpair"),
+                               ifE (isOne (v "fdpos"), fLit 0.0, syn (ExprUnaryOp (OpNeg, v "rt"))),
                                idx "lim" (v "k2")))
               sAssign (v "skip") (v "fpair") ]
           // selection sort by modulus^2 descending (pair swap keeps re/im
@@ -561,7 +567,7 @@ let eigDecl (name: string) (n: int) (maxIter: int) : FunctionDecl =
               sForE "j" (add (v "kk") one_) (iLit n)
                 [ sLet "kj" (add (mul (idx "lre" (v "j")) (idx "lre" (v "j"))) (mul (idx "lim" (v "j")) (idx "lim" (v "j"))))
                   sLet "kb" (add (mul (idx "lre" (v "best")) (idx "lre" (v "best"))) (mul (idx "lim" (v "best")) (idx "lim" (v "best"))))
-                  sAssign (v "best") (ExprIf (cmp OpGt (v "kj") (v "kb"), v "j", v "best")) ]
+                  sAssign (v "best") (ifE (cmp OpGt (v "kj") (v "kb"), v "j", v "best")) ]
               sLet "tr" (idx "lre" (v "kk"))
               sAssign (idx "lre" (v "kk")) (idx "lre" (v "best"))
               sAssign (idx "lre" (v "best")) (v "tr")
@@ -569,8 +575,8 @@ let eigDecl (name: string) (n: int) (maxIter: int) : FunctionDecl =
               sAssign (idx "lim" (v "kk")) (idx "lim" (v "best"))
               sAssign (idx "lim" (v "best")) (v "ti") ] ]
     let body =
-        ExprBlock (copyIn @ scratch @ hess @ francis @ extract,
-                   Some (ExprTuple [ v "lre"; v "lim" ]))
+        blockE (copyIn @ scratch @ hess @ francis @ extract,
+                   Some (tupleE [ v "lre"; v "lim" ]))
     mkFunc name [ ("a", tyFloatMat n n) ] (TyTuple [ tyFloatArr n; tyFloatArr n ]) body
 
 // ============================================================================
@@ -597,9 +603,9 @@ let unfoldDecl (name: string) (dims: int list) (mode: int) : FunctionDecl =
             if k <> mode then yield mul (v ivars.[k]) (iLit jw.[k]) ]
         |> List.reduce add
     let flatIdx = add (mul (v ivars.[mode]) (iLit cols)) colIdx
-    let inner = [ sAssign (idx "o" flatIdx) (ExprApp (v "x", ivars |> List.map v)) ]
+    let inner = [ sAssign (idx "o" flatIdx) (syn (ExprApp (v "x", ivars |> List.map v))) ]
     let body =
-        ExprBlock (
+        blockE (
             sLetMut "o" (zerosLit (rows * cols)) :: loopNest ivars dims inner,
             Some (nestedFromFlat "o" rows cols))
     mkFunc name [ ("x", tyFloatTensor dims) ] (tyFloatMat rows cols) body
@@ -618,13 +624,13 @@ let modeProductDecl (name: string) (dims: int list) (mode: int) (jOut: int) : Fu
         [ for k in 0 .. nRank - 1 -> mul (v ovars.[k]) (iLit outStrides.[k]) ]
         |> List.reduce add
     let readX =
-        ExprApp (v "x", [ for k in 0 .. nRank - 1 -> if k = mode then v "t" else v ovars.[k] ])
+        syn (ExprApp (v "x", [ for k in 0 .. nRank - 1 -> if k = mode then v "t" else v ovars.[k] ]))
     let inner =
         [ sAssign (v "acc") (fLit 0.0)
           sFor "t" 0 iMode [ sAccum (v "acc") (mul (idx2 "u" (v ovars.[mode]) (v "t")) readX) ]
           sAssign (idx "o" flatOut) (v "acc") ]
     let body =
-        ExprBlock (
+        blockE (
             sLetMut "o" (zerosLit (prodInts outDims))
             :: sLetMut "acc" (fLit 0.0)
             :: loopNest ovars outDims inner,
@@ -646,10 +652,10 @@ let gramDecl (name: string) (dims: int list) (mode: int) : FunctionDecl =
     let otherVars = [ for k in 0 .. nRank - 1 do if k <> mode then yield sprintf "i%d" k ]
     let otherExts = [ for k in 0 .. nRank - 1 do if k <> mode then yield dims.[k] ]
     let readAt (modeVar: string) =
-        ExprApp (v "x", [ for k in 0 .. nRank - 1 -> if k = mode then v modeVar else v (sprintf "i%d" k) ])
+        syn (ExprApp (v "x", [ for k in 0 .. nRank - 1 -> if k = mode then v modeVar else v (sprintf "i%d" k) ]))
     let othersNest = loopNest otherVars otherExts [ sAccum (v "acc") (mul (readAt "a") (readAt "b")) ]
     let body =
-        ExprBlock (
+        blockE (
             [ sLetMut "gm" (zerosLit (g * g))
               sLetMut "acc" (fLit 0.0)
               sFor "a" 0 g
@@ -674,13 +680,13 @@ let modeProdTDecl (name: string) (dims: int list) (mode: int) (rOut: int) : Func
         [ for k in 0 .. nRank - 1 -> mul (v ovars.[k]) (iLit outStrides.[k]) ]
         |> List.reduce add
     let readX =
-        ExprApp (v "x", [ for k in 0 .. nRank - 1 -> if k = mode then v "t" else v ovars.[k] ])
+        syn (ExprApp (v "x", [ for k in 0 .. nRank - 1 -> if k = mode then v "t" else v ovars.[k] ]))
     let inner =
         [ sAssign (v "acc") (fLit 0.0)
           sFor "t" 0 iMode [ sAccum (v "acc") (mul (idx2 "q" (v "t") (v ovars.[mode])) readX) ]
           sAssign (idx "o" flatOut) (v "acc") ]
     let body =
-        ExprBlock (
+        blockE (
             sLetMut "o" (zerosLit (prodInts outDims))
             :: sLetMut "acc" (fLit 0.0)
             :: loopNest ovars outDims inner,
@@ -704,25 +710,25 @@ let hosvdDecl (name: string) (dims: int list) (ranks: int list)
     let nRank = dims.Length
     let stmts =
         [ for mode in 0 .. nRank - 1 do
-            yield sLet (sprintf "g%d" mode) (ExprApp (v gramNames.[mode], [ v "x" ]))
-            yield StmtLet { Pattern = PatTuple [ PatVar (sprintf "q%d" mode); PatVar (sprintf "l%d" mode) ]
+            yield sLet (sprintf "g%d" mode) (syn (ExprApp (v gramNames.[mode], [ v "x" ])))
+            yield StmtLet { Pattern = synPat (PatTuple [ synPat (PatVar (sprintf "q%d" mode)); synPat (PatVar (sprintf "l%d" mode)) ])
                             Type = None
-                            Value = ExprApp (v eighNames.[mode], [ v (sprintf "g%d" mode) ])
+                            Value = syn (ExprApp (v eighNames.[mode], [ v (sprintf "g%d" mode) ]))
                             Mutability = BindLet } ]
         @ [ for mode in 0 .. nRank - 1 ->
               let src = if mode = 0 then "x" else sprintf "c%d" (mode - 1)
-              sLet (sprintf "c%d" mode) (ExprApp (v mptNames.[mode], [ v src; v (sprintf "q%d" mode) ])) ]
+              sLet (sprintf "c%d" mode) (syn (ExprApp (v mptNames.[mode], [ v src; v (sprintf "q%d" mode) ]))) ]
         @ [ for mode in 0 .. nRank - 1 ->
               // U_mode = leading ranks[mode] columns of q_mode (literal-index
               // reads; bound to a let — tuple-of-variables boundary)
               sLet (sprintf "u%d" mode)
-                   (ExprArrayLit
+                   (syn (ExprArrayLit
                         [ for i in 0 .. dims.[mode] - 1 ->
-                            ExprArrayLit
+                            syn (ExprArrayLit
                                 [ for r in 0 .. ranks.[mode] - 1 ->
-                                    idx2 (sprintf "q%d" mode) (iLit i) (iLit r) ] ]) ]
+                                    idx2 (sprintf "q%d" mode) (iLit i) (iLit r) ]) ])) ]
     let retTuple =
-        ExprTuple (v (sprintf "c%d" (nRank - 1)) :: [ for mode in 0 .. nRank - 1 -> v (sprintf "u%d" mode) ])
+        tupleE(v (sprintf "c%d" (nRank - 1)) :: [ for mode in 0 .. nRank - 1 -> v (sprintf "u%d" mode) ])
     let retTy =
         TyTuple (tyFloatTensor ranks :: [ for mode in 0 .. nRank - 1 -> tyFloatMat dims.[mode] ranks.[mode] ])
-    mkFunc name [ ("x", tyFloatTensor dims) ] retTy (ExprBlock (stmts, Some retTuple))
+    mkFunc name [ ("x", tyFloatTensor dims) ] retTy (blockE (stmts, Some retTuple))

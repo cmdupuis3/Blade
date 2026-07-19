@@ -1,0 +1,19 @@
+// TEST: Halo Lag-Stats Pool
+// The single-pass lagged-statistics sweep: one halo source shared by
+// per-statistic kernels, <&!>-chained, folded by the reduction terminal —
+// mean/second-moment/autocovariance numerators at two lags in ONE pass.
+// The offset set [-2, -4] does NOT contain 0: the center w(0) is implicitly
+// readable (reach always includes 0), so lag kernels read w(0)*w(-k).
+type TimeIdx = Idx<8>
+let A: Array<Float64 like TimeIdx> = [1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0]
+let L = method_for(halo<TimeIdx, [-2, -4]>)
+let k_mean = lambda(w) -> A(w(0))
+let k_C0 = lambda(w) -> A(w(0)) * A(w(0))
+let k_lag2 = lambda(w) -> A(w(0)) * A(w(-2))
+let k_lag4 = lambda(w) -> A(w(0)) * A(w(-4))
+let (s_mean, s_C0, s_lag2, s_lag4) = reduce((L <@> k_mean) <&!> (L <@> k_C0) <&!> (L <@> k_lag2) <&!> (L <@> k_lag4), (+))
+// centers = ordinals 4..7 -> values 5,6,7,8
+// EXPECT: s_mean = 26.0
+// EXPECT: s_C0 = 174.0
+// EXPECT: s_lag2 = 122.0
+// EXPECT: s_lag4 = 70.0

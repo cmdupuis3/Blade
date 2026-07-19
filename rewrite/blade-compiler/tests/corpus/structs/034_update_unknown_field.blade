@@ -1,0 +1,8 @@
+// TEST: Struct Update Unknown Field (rejects)
+// The explicit fields of a spread literal still validate against the decl.
+struct Point {
+    x: Float,
+    y: Float
+}
+let p = Point { x = 1.0, y = 2.0 }
+let q = Point { w = 9.0, ..p }

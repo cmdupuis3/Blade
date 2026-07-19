@@ -1,0 +1,5 @@
+// TEST: Diag Math Elaboration Argument (diag)
+// ERROR: BL5200 @ 4:1
+// ERROR-CONTAINS: svd: the array argument must be a plain variable
+import math as m
+let s = m.svd(1.0)

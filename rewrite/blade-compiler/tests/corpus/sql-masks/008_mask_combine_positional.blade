@@ -1,0 +1,23 @@
+// TEST: Mask Combine Positional
+// Positional Bool combination of masks — the sql.md WHERE-AND/OR form.
+// `m1 && m2` / `m1 || m2` lift elementwise over Bool arrays (pseudo-native
+// operator lifting), so mask conjunction needs no zip+kernel detour.
+// NOTE: compound() must stay a top-level let binding — the inline
+// `extents(compound(A, m))` form is rejected (BL9001) today.
+type SIdx = Idx<6>
+let temps: Array<Float64 like SIdx> = [21.0, 26.0, 31.0, 24.0, 28.0, 33.0]
+let hot = mask(temps, lambda(t) -> t > 25.0)
+let mild = mask(temps, lambda(t) -> t < 32.0)
+let both = hot && mild
+let either = hot || mild
+let sel = compound(temps, both)
+let sel2 = compound(temps, either)
+let n = extents(sel)
+let s = reduce(sel, (+))
+let n2 = extents(sel2)
+// (Bool arrays print but the Expect harness parses numeric arrays only:
+//  both = [false, true, true, false, true, false], either = all-true.
+//  The numeric pins below fully determine the AND/OR semantics.)
+// EXPECT: n = 3
+// EXPECT: s = 85
+// EXPECT: n2 = 6

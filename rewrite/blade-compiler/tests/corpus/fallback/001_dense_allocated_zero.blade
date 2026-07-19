@@ -1,0 +1,12 @@
+// TEST: Fallback Dense Allocated Zero
+// THE distinguisher between <|:> (storage-keyed) and <|> (value-keyed) on the
+// same operands: a compiler-built dense array is FULLY allocated, so
+// A <|:> B == A verbatim — its zeros are allocated cells and survive.
+// A <|> B tests VALUES and replaces those zeros with B's cells.
+type SIdx = Idx<4>
+let A: Array<Float64 like SIdx> = [1.0, 0.0, 3.0, 0.0]
+let B: Array<Float64 like SIdx> = [9.0, 8.0, 7.0, 6.0]
+let fb = A <|:> B |> compute
+let ch = A <|> B |> compute
+// EXPECT: fb = [1.0, 0.0, 3.0, 0.0]
+// EXPECT: ch = [1.0, 8.0, 3.0, 6.0]

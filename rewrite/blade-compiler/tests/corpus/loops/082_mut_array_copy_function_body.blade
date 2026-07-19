@@ -1,0 +1,26 @@
+// TEST: Mut Array Copy In Function Body
+// Companion to loops/081: the same copy-not-alias rule inside a FUNCTION
+// body (genFuncBody's let unroller routes the mut array let through
+// genVarAliasBinding's copy path). `stamp` scribbles over a local mut copy
+// of the module-level computed array Z; Z must be unchanged afterward —
+// pre-fix, each call corrupted Z through the shared data pointer. The
+// top-level rename `let U = Z` is likewise a snapshot (assignable binding),
+// so it stays all-2s no matter what later code does with Z or the copies.
+let Z = method_for(range<Idx<4>>) <@> lambda(i) -> 2.0 |> compute
+let U = Z
+
+function stamp(x: Float64) -> Float64 = {
+    let mut a = Z
+    for i in 0..4 { a(i) = x + 1.0 * i }
+    a(3)
+}
+
+let r1 = stamp(10.0)
+let r2 = stamp(20.0)
+let z0 = Z(0)
+let z3 = Z(3)
+// EXPECT: r1 = 13
+// EXPECT: r2 = 23
+// EXPECT: z0 = 2
+// EXPECT: z3 = 2
+// EXPECT: U = [2, 2, 2, 2]

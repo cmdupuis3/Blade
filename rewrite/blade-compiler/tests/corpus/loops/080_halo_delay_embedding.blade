@@ -1,0 +1,28 @@
+// TEST: Halo Delay Embedding
+// Dense-first mixed range<Idx, halo<...>> with SLOT-COMPUTED window offsets:
+// w(0 - i) where i is the outer (delay) slot param. This is the
+// delay-embedded EDMD idiom (examples/physics/46): embedding row i is the
+// signal at lag i over the halo interior, the one-step-lead copy reads
+// w(1 - i), and Gram / cross-Gram cells are row-pair prodsum sweeps.
+// Dense-halo w(o) lowers to index+offset, so a computed in-reach offset is
+// legal (compound-inner halos still require literal offsets).
+let S: Array<Float64 like Idx<8>> = [1.0, 2.0, 4.0, 8.0, 3.0, 5.0, 7.0, 9.0]
+// delays 0..2 + one-step lead: reach [-2, 1] -> interior t = 2..6 (5 cells)
+let E = method_for(range<Idx<3>, halo<Idx<8>, [-2, 1]>>) <@> lambda(i, w) -> S(w(0 - i)) |> compute
+let E1 = method_for(range<Idx<3>, halo<Idx<8>, [-2, 1]>>) <@> lambda(i, w) -> S(w(1 - i)) |> compute
+let G = method_for(E, E) <@> lambda(u: Array<Float64 like Idx<5>>, v: Array<Float64 like Idx<5>>) -> prodsum(u, v) |> compute
+let A = method_for(E1, E) <@> lambda(u: Array<Float64 like Idx<5>>, v: Array<Float64 like Idx<5>>) -> prodsum(u, v) |> compute
+// scalar pins (the Expect harness skips rank-2 arrays):
+let g00 = G(0, 0)
+let g01 = G(0, 1)
+let g12 = G(1, 2)
+let g22 = G(2, 2)
+let a00 = A(0, 0)
+let a21 = A(2, 1)
+// E rows: [4,8,3,5,7] / [2,4,8,3,5] / [1,2,4,8,3]; E1 row0 = [8,3,5,7,9]
+// EXPECT: g00 = 163.0
+// EXPECT: g01 = 114.0
+// EXPECT: g12 = 81.0
+// EXPECT: g22 = 94.0
+// EXPECT: a00 = 169.0
+// EXPECT: a21 = 118.0

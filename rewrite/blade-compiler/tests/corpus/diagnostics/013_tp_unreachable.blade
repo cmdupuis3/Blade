@@ -1,0 +1,6 @@
+// TEST: Diag TP Unreachable Output (diag)
+// ERROR: BL4007 @ 5:1
+// ERROR-CONTAINS: unreachable from the inputs
+import ml as ml
+let static BAD = ([(0, 0, 1)], [(0, 0, 1)], [(1, 1, 1)])
+let bad = ml.tensor_product(BAD, [1.0], [1.0], [1.0])

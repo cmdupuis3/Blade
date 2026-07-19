@@ -1,0 +1,45 @@
+// TEST: ML Equiv Derive Training
+import ml as ml
+import ad as ad
+// ============================================================================
+// The vision end-to-end: a model built ENTIRELY from compiler-derived
+// layers inside a certified function (derive_linear -> norms readout),
+// trained with grad() — the weight buffer is a plain array grad() sees
+// like any other. Loss trajectory + final weights pinned to the ml/ F#
+// oracle (dump-oracle, derive training section: vjpHomLinear/vjpNorms SGD).
+// ============================================================================
+let static SIN = [(0, 0, 2), (1, 1, 1)]
+let static SOUT = [(0, 0, 1), (1, 1, 2)]
+let static WD = ml.hom_dim(SIN, SOUT)
+
+let xg = [0.5, -1.2, 0.8, 0.3, -0.6]
+let tgt = [1.0, 0.5, 0.25]
+
+function model(w: Array<Float like Idx<WD>>, x: Array<Float like IrrepsIdx<SIN>>) where ml.equiv(O3) -> Array<Float like Idx<3>> = {
+    let h = ml.derive_linear(SIN, SOUT, w, x)
+    ml.norms(SOUT, h)
+}
+
+function loss(w: Array<Float like Idx<WD>>) -> Float = {
+    let o = model(w, xg)
+    let mut acc = 0.0
+    for k in 0..3 {
+        acc = acc + (o(k) - tgt(k)) * (o(k) - tgt(k))
+    }
+    acc
+}
+
+let mut wv = [0.4, -0.3, 0.2, 0.1]
+let mut dw = [0.0, 0.0, 0.0, 0.0]
+let mut losses = [0.0, 0.0, 0.0, 0.0, 0.0, 0.0]
+let trained = {
+    for s in 0..6 {
+        for i in 0..4 { dw(i) = 0.0 }
+        let lv = ad.grad(loss)(wv, dw)
+        losses(s) = lv
+        for i in 0..4 { wv(i) -= 0.1 * dw(i) }
+    }
+    0.0
+}
+// EXPECT: losses = [0.29959233727723616, 0.1496608964611247, 0.07681945507354075, 0.04053397577270731, 0.021963908390851307, 0.012194035471703144]
+// EXPECT: wv = [0.5192207102889806, -0.5861297046935535, 0.4151294736025543, 0.20756473680127716]

@@ -1,0 +1,11 @@
+// TEST: Unit Array Elementwise Mismatch (rejects)
+// Elementwise + of a meters-array and a seconds-array is a unit error —
+// the same rule as the scalar dist + time. The check happens at the zip
+// kernel-synthesis site in inferBinOp (the synthesized lambda's body is
+// inferred against unresolved params, so it cannot check units itself).
+Unit meters
+Unit seconds
+type SIdx = Idx<3>
+let A: Array<Float<meters> like SIdx> = [1.0, 2.0, 3.0]
+let B: Array<Float<seconds> like SIdx> = [1.0, 1.0, 1.0]
+let bad = A + B

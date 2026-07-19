@@ -43,8 +43,8 @@ let private collectArrays (decls: Located<Decl> list) : Map<string, TypeExpr * T
     decls |> List.fold (fun acc d ->
         match d.Value with
         | DeclLet b | DeclStatic b ->
-            match b.Pattern, b.Type with
-            | PatVar name, Some (TyArray (elem, idxs)) -> Map.add name (elem, idxs) acc
+            match b.Pattern.Kind, b.Type with
+            | PatternKind.PatVar name, Some (TyArray (elem, idxs)) -> Map.add name (elem, idxs) acc
             | _ -> acc
         | _ -> acc) Map.empty
 
@@ -69,8 +69,8 @@ let rec private resolveExtent (ctx: Ctx) (ty: TypeExpr) : int option =
 /// statically known. The argument must be a plain variable naming an
 /// annotated module-level let.
 let private arrayShape (ctx: Ctx) (what: string) (e: Expr) : Result<string * int list, string> =
-    match e with
-    | ExprVar name ->
+    match e.Kind with
+    | ExprKind.ExprVar name ->
         match Map.tryFind name ctx.Arrays with
         | None ->
             Error (sprintf "%s: '%s' must be a module-level let with an Array<Float64 like Idx<...>, ...> annotation (math ops read the declared shape)" what name)
@@ -86,9 +86,9 @@ let private arrayShape (ctx: Ctx) (what: string) (e: Expr) : Result<string * int
 /// Resolve a static-argument expression: a plain variable naming a
 /// `let static` binding, or an inline int literal (ml's staticArg contract).
 let private staticArg (statics: StaticEnv) (what: string) (e: Expr) : Result<StaticValue, string> =
-    match e with
-    | ExprLit (LitInt n) -> Ok (SVInt n)
-    | ExprVar name ->
+    match e.Kind with
+    | ExprKind.ExprLit (LitInt n) -> Ok (SVInt n)
+    | ExprKind.ExprVar name ->
         match Map.tryFind name statics.Values with
         | Some sv -> Ok sv
         | None -> Error (sprintf "%s: '%s' is not a `let static` binding (math op configs must be static)" what name)
@@ -161,7 +161,7 @@ let private elabOp (st: ElabState) (ctx: Ctx) (op: string) (args: Expr list) : R
             match aDims, bDims with
             | [m; k], [k2; n] when k = k2 ->
                 ensure st (fingerprint "matmul" (box (m, k, n))) (fun nm -> Ok (matmulDecl nm m k n))
-                |> Result.map (fun nm -> ExprApp (v nm, [aE; bE]))
+                |> Result.map (fun nm -> syn (ExprApp (v nm, [aE; bE])))
             | [_; k], [k2; _] ->
                 Error (sprintf "matmul: inner extents disagree (A is ..×%d, B is %d×..)" k k2)
             | _ -> Error "matmul: both arguments must be rank-2 (m×k · k×n)"))
@@ -172,7 +172,7 @@ let private elabOp (st: ElabState) (ctx: Ctx) (op: string) (args: Expr list) : R
             match dims with
             | [m; n] when m >= n ->
                 ensure st (fingerprint "svd" (box (m, n, sweeps))) (fun nm -> Ok (svdDecl nm m n sweeps))
-                |> Result.map (fun nm -> ExprApp (v nm, [aE]))
+                |> Result.map (fun nm -> syn (ExprApp (v nm, [aE])))
             | [m; n] ->
                 Error (sprintf "svd: m < n unsupported in v1 (%d×%d); svd the transpose (transpose(A, [0, 1])) and swap U/V" m n)
             | _ -> Error "svd: the argument must be rank-2 (Array<Float64 like Idx<m>, Idx<n>>)"))
@@ -183,7 +183,7 @@ let private elabOp (st: ElabState) (ctx: Ctx) (op: string) (args: Expr list) : R
             match dims with
             | [n; n2] when n = n2 ->
                 ensure st (fingerprint "eigh" (box (n, sweeps))) (fun nm -> Ok (eighDecl nm n sweeps))
-                |> Result.map (fun nm -> ExprApp (v nm, [aE]))
+                |> Result.map (fun nm -> syn (ExprApp (v nm, [aE])))
             | [n; n2] -> Error (sprintf "eigh: the argument must be square (got %d×%d); symmetry is assumed, not checked" n n2)
             | _ -> Error "eigh: the argument must be rank-2 square (Array<Float64 like Idx<n>, Idx<n>>, symmetric)"))
     | "eigh", _ -> Error "eigh: expected eigh(S) or eigh(S, SWEEPS)"
@@ -200,7 +200,7 @@ let private elabOp (st: ElabState) (ctx: Ctx) (op: string) (args: Expr list) : R
                     | _ -> Error "eig: at most one MAXITER argument"
                 maxIterRes |> Result.bind (fun maxIter ->
                     ensure st (fingerprint "eig" (box (n, maxIter))) (fun nm -> Ok (eigDecl nm n maxIter))
-                    |> Result.map (fun nm -> ExprApp (v nm, [aE])))
+                    |> Result.map (fun nm -> syn (ExprApp (v nm, [aE]))))
             | [n; n2] -> Error (sprintf "eig: the argument must be square (got %d×%d)" n n2)
             | _ -> Error "eig: the argument must be rank-2 square (Array<Float64 like Idx<n>, Idx<n>>)")
     | "eig", _ -> Error "eig: expected eig(A) or eig(A, MAXITER) — returns (LRE, LIM) by descending modulus"
@@ -214,7 +214,7 @@ let private elabOp (st: ElabState) (ctx: Ctx) (op: string) (args: Expr list) : R
                 Error (sprintf "unfold: MODE must be in 0..%d for a rank-%d tensor (got %d)" (r - 1) r mode)
             else
                 ensure st (fingerprint "unfold" (box (dims, mode))) (fun nm -> Ok (unfoldDecl nm dims mode))
-                |> Result.map (fun nm -> ExprApp (v nm, [xE]))))
+                |> Result.map (fun nm -> syn (ExprApp (v nm, [xE])))))
     | "unfold", _ -> Error "unfold: expected unfold(X, MODE) with a static MODE"
     | "mode_product", [xE; uE; modeE] ->
         staticInt ctx.Statics "mode_product MODE" modeE |> Result.bind (fun mode ->
@@ -230,7 +230,7 @@ let private elabOp (st: ElabState) (ctx: Ctx) (op: string) (args: Expr list) : R
                 | [jOut; im] when im = dims.[mode] ->
                     ensure st (fingerprint "mode_product" (box (dims, mode, jOut)))
                         (fun nm -> Ok (modeProductDecl nm dims mode jOut))
-                    |> Result.map (fun nm -> ExprApp (v nm, [xE; uE]))
+                    |> Result.map (fun nm -> syn (ExprApp (v nm, [xE; uE])))
                 | [_; im] ->
                     Error (sprintf "mode_product: U's second extent must match the mode-%d extent (U is ..×%d, mode extent is %d)" mode im dims.[mode])
                 | _ -> Error "mode_product: U must be rank-2 (Array<Float64 like Idx<j>, Idx<i_mode>>)")))
@@ -275,7 +275,7 @@ let private elabOp (st: ElabState) (ctx: Ctx) (op: string) (args: Expr list) : R
                                 nm ]
                         ensure st (fingerprint "hosvd" (box (dims, ranks)))
                             (fun nm -> Ok (hosvdDecl nm dims ranks gramNames eighNames mptNames))
-                        |> Result.map (fun nm -> ExprApp (v nm, [xE]))))
+                        |> Result.map (fun nm -> syn (ExprApp (v nm, [xE])))))
     | "hosvd", _ -> Error "hosvd: expected hosvd(X) or hosvd(X, R1, ..., RN) with static ranks"
     | _ -> Error (sprintf "math: unknown op '%s' (available: %s)" op opList)
 
@@ -290,33 +290,33 @@ let rec private rewriteExpr (st: ElabState) (ctx: Ctx) (aliases: Set<string>) (e
         es |> List.fold (fun acc x ->
             acc |> Result.bind (fun xs -> r x |> Result.map (fun x' -> xs @ [x'])))
             (Ok [])
-    match e with
+    match e.Kind with
     // Qualified math op: `alias.svd(...)` -> generated specialized function.
     // Any alias-qualified call is claimed here so an unknown op gets a
     // steering error instead of an unbound-module type error downstream.
-    | ExprApp (ExprField (ExprVar alias, op), args) when Set.contains alias aliases ->
+    | ExprKind.ExprApp ({ Kind = ExprKind.ExprField ({ Kind = ExprKind.ExprVar alias }, op) }, args) when Set.contains alias aliases ->
         rList args |> Result.bind (fun args' -> elabOp st ctx op args')
-    | ExprLit _ | ExprVar _ -> Ok e
-    | ExprApp (f, args) ->
-        r f |> Result.bind (fun f' -> rList args |> Result.map (fun args' -> ExprApp (f', args')))
-    | ExprBinOp (m, op, l, rr) ->
-        r l |> Result.bind (fun l' -> r rr |> Result.map (fun r' -> ExprBinOp (m, op, l', r')))
-    | ExprUnaryOp (op, inner) -> r inner |> Result.map (fun i -> ExprUnaryOp (op, i))
-    | ExprTyped (inner, t) -> r inner |> Result.map (fun i -> ExprTyped (i, t))
-    | ExprAssign (l, rr) ->
-        r l |> Result.bind (fun l' -> r rr |> Result.map (fun r' -> ExprAssign (l', r')))
-    | ExprTuple es -> rList es |> Result.map ExprTuple
-    | ExprArrayLit es -> rList es |> Result.map ExprArrayLit
-    | ExprDotDot (l, h) ->
-        r l |> Result.bind (fun l' -> r h |> Result.map (fun h' -> ExprDotDot (l', h')))
-    | ExprIf (c, t, f) ->
+    | ExprKind.ExprLit _ | ExprKind.ExprVar _ -> Ok e
+    | ExprKind.ExprApp (f, args) ->
+        r f |> Result.bind (fun f' -> rList args |> Result.map (fun args' -> inheritSpan e (ExprApp (f', args'))))
+    | ExprKind.ExprBinOp (m, op, l, rr) ->
+        r l |> Result.bind (fun l' -> r rr |> Result.map (fun r' -> inheritSpan e (ExprBinOp (m, op, l', r'))))
+    | ExprKind.ExprUnaryOp (op, inner) -> r inner |> Result.map (fun i -> inheritSpan e (ExprUnaryOp (op, i)))
+    | ExprKind.ExprTyped (inner, t) -> r inner |> Result.map (fun i -> inheritSpan e (ExprTyped (i, t)))
+    | ExprKind.ExprAssign (l, rr) ->
+        r l |> Result.bind (fun l' -> r rr |> Result.map (fun r' -> inheritSpan e (ExprAssign (l', r'))))
+    | ExprKind.ExprTuple es -> rList es |> Result.map (fun es' -> inheritSpan e (ExprTuple es'))
+    | ExprKind.ExprArrayLit es -> rList es |> Result.map (fun es' -> inheritSpan e (ExprArrayLit es'))
+    | ExprKind.ExprDotDot (l, h) ->
+        r l |> Result.bind (fun l' -> r h |> Result.map (fun h' -> inheritSpan e (ExprDotDot (l', h'))))
+    | ExprKind.ExprIf (c, t, f) ->
         r c |> Result.bind (fun c' ->
         r t |> Result.bind (fun t' ->
-        r f |> Result.map (fun f' -> ExprIf (c', t', f'))))
-    | ExprLet (binding, body) ->
+        r f |> Result.map (fun f' -> inheritSpan e (ExprIf (c', t', f')))))
+    | ExprKind.ExprLet (binding, body) ->
         r binding.Value |> Result.bind (fun v' ->
-        r body |> Result.map (fun b' -> ExprLet ({ binding with Value = v' }, b')))
-    | ExprBlock (stmts, finalE) ->
+        r body |> Result.map (fun b' -> inheritSpan e (ExprLet ({ binding with Value = v' }, b'))))
+    | ExprKind.ExprBlock (stmts, finalE) ->
         let rec rStmt (s: Stmt) : Result<Stmt, string> =
             match s with
             | StmtSpanned (inner, sp) -> rStmt inner |> Result.map (fun i -> StmtSpanned (i, sp))
@@ -335,17 +335,17 @@ let rec private rewriteExpr (st: ElabState) (ctx: Ctx) (aliases: Set<string>) (e
             (Ok [])
         |> Result.bind (fun stmts' ->
             match finalE with
-            | Some fe -> r fe |> Result.map (fun fe' -> ExprBlock (stmts', Some fe'))
-            | None -> Ok (ExprBlock (stmts', None)))
-    | ExprLambda (ps, w, body) -> r body |> Result.map (fun b -> ExprLambda (ps, w, b))
-    | ExprMatch (scrut, cases) ->
+            | Some fe -> r fe |> Result.map (fun fe' -> inheritSpan e (ExprBlock (stmts', Some fe')))
+            | None -> Ok (inheritSpan e (ExprBlock (stmts', None))))
+    | ExprKind.ExprLambda (ps, w, body) -> r body |> Result.map (fun b -> inheritSpan e (ExprLambda (ps, w, b)))
+    | ExprKind.ExprMatch (scrut, cases) ->
         r scrut |> Result.bind (fun s' ->
             cases |> List.fold (fun acc c ->
                 acc |> Result.bind (fun cs ->
                     r c.Body |> Result.map (fun b -> cs @ [{ c with Body = b }])))
                 (Ok [])
-            |> Result.map (fun cs' -> ExprMatch (s', cs')))
-    | other -> Ok other
+            |> Result.map (fun cs' -> inheritSpan e (ExprMatch (s', cs'))))
+    | _ -> Ok e
 
 // ============================================================================
 // Gating + program expansion
@@ -390,6 +390,10 @@ let private expandModule (decls: Located<Decl> list) : Result<Located<Decl> list
             let mapped =
                 declsNoImport |> List.fold (fun acc d ->
                     acc |> Result.bind (fun out ->
+                        // Stamp the user decl's span so every syn-built node
+                        // (generated function bodies + synthesized call sites)
+                        // attributes to this declaration's source line.
+                        Blade.Ast.synthSpan <- d.Span
                         let mapped =
                             match d.Value with
                             | DeclFunction fd ->
@@ -416,10 +420,19 @@ let private expandModule (decls: Located<Decl> list) : Result<Located<Decl> list
 
 /// Entry point: elaborate math ops across a program (after ML/PPL
 /// elaboration, before Grad expansion).
-let expand (program: Program) : Result<Program, string> =
+let private expandStr (program: Program) : Result<Program, string> =
     program.Modules
     |> List.fold (fun acc m ->
         acc |> Result.bind (fun ms ->
             expandModule m.Decls |> Result.map (fun ds -> ms @ [{ m with Decls = ds }])))
         (Ok [])
     |> Result.map (fun ms -> { program with Modules = ms })
+
+/// Boundary: string-errored internals -> coded diagnostics. The span is the
+/// ambient synthSpan -- stamped per-decl by expandStr, so a mid-elaboration
+/// failure points at the offending declaration.
+let expand (program: Program) : Result<Program, Blade.Diagnostics.Diagnostic list> =
+    Blade.Ast.synthSpan <- Blade.Ast.noSpan
+    expandStr program
+    |> Result.mapError (fun msg ->
+        [ Blade.Diagnostics.mkError "BL5200" (Blade.Diagnostics.Codes.phaseOfCode "BL5200") Blade.Ast.synthSpan msg ])

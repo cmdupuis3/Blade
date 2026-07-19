@@ -1,0 +1,42 @@
+// TEST: CG Selection Rules
+// The Clebsch-Gordan selection rules as a dependent record. The triangle
+// inequality lives in l_out's range refinement (`..` is half-open, hence
+// the + 1); the parity rule is a named static predicate referenced from
+// the where clause. Constructing a path outside the valid set panics:
+// the record guards ARE the selection rules.
+//
+// The five constructions below are exactly the valid paths of
+// sh_spec(1) (x) sh_spec(1) -> sh_spec(2)  (mirrors Blade.ML.Spec.tpPaths:
+// (0,0,0), (0,1,1), (1,0,1), (1,1,0), (1,1,2) — five paths).
+
+static function parity_ok(p1: Int, p2: Int, po: Int) -> Bool =
+    po == (p1 + p2) % 2
+
+struct CGPath {
+    l1: Int,
+    p1: Int,
+    l2: Int,
+    p2: Int,
+    l_out: Int in abs(l1 - l2) .. l1 + l2 + 1,
+    p_out: Int
+} where parity_ok(p1, p2, p_out)
+
+// Compile-time world: a `let static` path folds with the same conjuncts
+// checked at fold time (a violation would be a compile error, not a panic).
+let static origin = CGPath { l1 = 0, p1 = 0, l2 = 0, p2 = 0, l_out = 0, p_out = 0 }
+
+let path1 = CGPath { l1 = 0, p1 = 0, l2 = 0, p2 = 0, l_out = 0, p_out = 0 }
+let path2 = CGPath { l1 = 0, p1 = 0, l2 = 1, p2 = 1, l_out = 1, p_out = 1 }
+let path3 = CGPath { l1 = 1, p1 = 1, l2 = 0, p2 = 0, l_out = 1, p_out = 1 }
+let path4 = CGPath { l1 = 1, p1 = 1, l2 = 1, p2 = 1, l_out = 0, p_out = 0 }
+
+// Functional update: copy path4's inputs, retarget the output block. The
+// guard re-checks triangle AND parity on the mixed field values.
+let path5 = CGPath { l_out = 2, p_out = 0, ..path4 }
+
+let n_paths = 5
+let max_l = path5.l_out
+let mirror_l = path3.l_out
+// EXPECT: n_paths = 5
+// EXPECT: max_l = 2
+// EXPECT: mirror_l = 1

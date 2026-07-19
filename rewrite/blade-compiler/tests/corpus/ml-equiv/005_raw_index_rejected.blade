@@ -1,0 +1,11 @@
+// TEST: ML Equiv Raw Index Rejected (rejects)
+import ml as ml
+// ============================================================================
+// Indexing into an l>0 component reads a basis-dependent number — under a
+// rotation that component mixes with its siblings. Offsets 0..1 are the
+// (l=0, even) scalars (admissible); offset 2 is the first l=1 component.
+// BL4008.
+// ============================================================================
+let static S = [(0, 0, 2), (1, 1, 1)]
+function bad(x: Array<Float like IrrepsIdx<S>>) where ml.equiv(O3) -> Float =
+  x(2)

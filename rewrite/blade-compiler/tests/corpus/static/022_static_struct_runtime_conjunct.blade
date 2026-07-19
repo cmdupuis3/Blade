@@ -1,0 +1,9 @@
+// TEST: Static Struct Runtime Conjunct (rejects)
+// A conjunct calling a NON-static function cannot fold: fine for runtime
+// guards, but a `let static` of the struct must reject with a message
+// naming the callee.
+function runtime_ok(a: Int) -> Bool = a > 0
+struct Gated {
+    a: Int
+} where runtime_ok(a)
+let static bad = Gated { a = 1 }

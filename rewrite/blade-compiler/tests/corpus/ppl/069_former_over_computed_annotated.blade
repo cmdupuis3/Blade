@@ -1,0 +1,12 @@
+// TEST: Former Over Computed Array (Annotated)
+import ppl as ppl
+// The ANNOTATED computed-source shape: typecheck always accepted this, but
+// codegen emitted C++ referencing the deferred producer by name before its
+// materialization ("'BH' was not declared in this scope") — the PPL pool
+// sweep's row slices `BH(i)` never forced the deferred computation. The row
+// slice binding now materializes its base first (the rearrangement
+// combinators' forceDeferredArrayInput contract). Same doubles as 068.
+let X: Array<Float64 like Idx<8>> = [1.0, 3.0, 2.0, 5.0, 4.0, 7.0, 6.0, 9.0]
+let BH: Array<Float64 like Idx<2>, Idx<6>> = method_for(range<Idx<2>, halo<Idx<8>, [2]>>) <@> lambda(v, w) -> if v < 1 then X(w(0)) else X(w(2)) |> compute
+let ch = ppl.cumulants(BH, 2)
+// EXPECT: ch = [3.888888888888889, 4.333333333333334, 4.916666666666667]

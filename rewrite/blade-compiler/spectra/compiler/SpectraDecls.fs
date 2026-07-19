@@ -30,16 +30,16 @@ open Blade.Math.Decls
 /// complex(re, im) from arbitrary Float64 exprs — the surface constructor
 /// call (typecheck intrinsic, infers Complex128). Generated decls never
 /// shadow the name, so the intrinsic always resolves.
-let cplx (re: Expr) (im: Expr) = ExprApp (ExprVar "complex", [re; im])
+let cplx (re: Expr) (im: Expr) = syn (ExprApp (v "complex", [re; im]))
 let cplxLit (re: float) (im: float) = cplx (fLit re) (fLit im)
-let cplxZerosLit (n: int) = ExprArrayLit (List.replicate n (cplxLit 0.0 0.0))
+let cplxZerosLit (n: int) = syn (ExprArrayLit (List.replicate n (cplxLit 0.0 0.0)))
 let cplxArrLit (pairs: (float * float) list) =
-    ExprArrayLit (pairs |> List.map (fun (re, im) -> cplxLit re im))
-let intArrLit (xs: int list) = ExprArrayLit (xs |> List.map iLit)
-let conjE e = ExprUnaryOp (OpConj, e)
-let realE e = ExprApp (v "real", [e])
-let imagE e = ExprApp (v "imag", [e])
-let modE a b = ExprBinOp (Elementwise, OpMod, a, b)
+    syn (ExprArrayLit (pairs |> List.map (fun (re, im) -> cplxLit re im)))
+let intArrLit (xs: int list) = syn (ExprArrayLit (xs |> List.map iLit))
+let conjE e = syn (ExprUnaryOp (OpConj, e))
+let realE e = syn (ExprApp (v "real", [e]))
+let imagE e = syn (ExprApp (v "imag", [e]))
+let modE a b = syn (ExprBinOp (Elementwise, OpMod, a, b))
 let tyCplxArr (n: int) = TyArray (TyComplex128, [ TyIdx (iLit n) ])
 /// Rank-N dense complex tensor type.
 let tyCplxTensor (dims: int list) =
@@ -115,7 +115,7 @@ let fftDecl (name: string) (n: int) : FunctionDecl =
                               sLet "p0" (idx "sx" (v "p"))
                               sAssign (idx "sx" (v "p")) (add (v "p0") (v "t"))
                               sAssign (idx "sx" (v "q")) (sub (v "p0") (v "t")) ] ] ]
-            ExprBlock (stmts, Some (v "sx"))
+            blockE (stmts, Some (v "sx"))
         else
             // Naive DFT: X(k) = Σ_i x(i) · e^{-2πi·k·i/n}, twiddle by table
             // at (k·i) mod n — nonnegative Int %, C++ semantics match F#.
@@ -127,7 +127,7 @@ let fftDecl (name: string) (n: int) : FunctionDecl =
                         [ sLet "t" (modE (mul (v "k") (v "i")) (iLit n))
                           sAccum (idx "sx" (v "k"))
                                  (mul (cplx (idx "x" (v "i")) (fLit 0.0)) (idx "tw" (v "t"))) ] ] ]
-            ExprBlock (stmts, Some (v "sx"))
+            blockE (stmts, Some (v "sx"))
     mkFunc name [ ("x", tyFloatArr n) ] (tyCplxArr n) body
 
 // ============================================================================
@@ -145,7 +145,7 @@ let ifftDecl (name: string) (n: int) : FunctionDecl =
               // Post-loop rescale: non-additive ARRAY-cell write (Grad-legal;
               // only scalars carry the additive-accumulation restriction).
               sAssign (idx "xo" (v "i")) (divE (idx "xo" (v "i")) (fLit (float n))) ] ]
-    mkFunc name [ ("xs", tyCplxArr n) ] (tyFloatArr n) (ExprBlock (stmts, Some (v "xo")))
+    mkFunc name [ ("xs", tyCplxArr n) ] (tyFloatArr n) (blockE (stmts, Some (v "xo")))
 
 // ============================================================================
 // power — |FFT(x)|² per bin (real)
@@ -154,12 +154,12 @@ let ifftDecl (name: string) (n: int) : FunctionDecl =
 let powerDecl (name: string) (n: int) (fftName: string) : FunctionDecl =
     let xk = idx "sx" (v "k")
     let stmts =
-        [ sLet "sx" (ExprApp (v fftName, [ v "x" ]))
+        [ sLet "sx" (syn (ExprApp (v fftName, [ v "x" ])))
           sLetMut "p" (zerosLit n)
           sFor "k" 0 n
             [ sAssign (idx "p" (v "k"))
                       (add (mul (realE xk) (realE xk)) (mul (imagE xk) (imagE xk))) ] ]
-    mkFunc name [ ("x", tyFloatArr n) ] (tyFloatArr n) (ExprBlock (stmts, Some (v "p")))
+    mkFunc name [ ("x", tyFloatArr n) ] (tyFloatArr n) (blockE (stmts, Some (v "p")))
 
 // ============================================================================
 // polyspec — order-k cross-polyspectrum (order = call-site arity)
@@ -178,7 +178,7 @@ let polyspecDecl (name: string) (n: int) (k: int) (fftName: string) : FunctionDe
         List.map2 (fun fv st -> mul (v fv) (iLit st)) fvars strides
         |> List.reduce add
     let ffts =
-        [ for i in 1 .. k -> sLet (sprintf "s%d" i) (ExprApp (v fftName, [ v (sprintf "x%d" i) ])) ]
+        [ for i in 1 .. k -> sLet (sprintf "s%d" i) (syn (ExprApp (v fftName, [ v (sprintf "x%d" i) ]))) ]
     let chain =
         [ yield sLet "a1" (idx "s1" (v "f0"))
           for j in 2 .. k - 1 do
@@ -196,11 +196,11 @@ let polyspecDecl (name: string) (n: int) (k: int) (fftName: string) : FunctionDe
     let body =
         if k = 2 then
             // Rank-1 output: the flat mut IS the result.
-            ExprBlock (stmts, Some (v "pp"))
+            blockE (stmts, Some (v "pp"))
         else
             // Rank-(k-1): reshape the flat work array through a nested
             // literal of runtime reads (element-type-agnostic, so the
             // MathDecls helper serves complex cells too).
-            ExprBlock (stmts @ [ sLet "po" (nestedFromFlatN "pp" outDims 0) ], Some (v "po"))
+            blockE (stmts @ [ sLet "po" (nestedFromFlatN "pp" outDims 0) ], Some (v "po"))
     let ps = [ for i in 1 .. k -> (sprintf "x%d" i, tyFloatArr n) ]
     mkFunc name ps (tyCplxTensor outDims) body

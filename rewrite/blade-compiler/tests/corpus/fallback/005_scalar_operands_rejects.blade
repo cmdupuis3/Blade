@@ -1,0 +1,4 @@
+// TEST: Fallback Scalar Operands (rejects)
+// <|:> reads STORAGE allocation, which scalars don't have — BL3007 steers
+// value-level choice to <|>.
+let x = 5.0 <|:> 3.0

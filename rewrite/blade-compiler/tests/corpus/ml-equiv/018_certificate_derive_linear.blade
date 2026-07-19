@@ -1,0 +1,31 @@
+// TEST: ML Equiv Certificate Derive Linear
+import ml as ml
+// ============================================================================
+// The rotation CERTIFICATE, evaluated inside compiled Blade: for the fixed
+// proper rotation R = Rz(0.7)·Ry(1.1), the compiler-derived layer satisfies
+// f(D_in·x) = D_out·f(x) — both routes computed here and pinned against the
+// ml/ oracle (`dump-oracle`... `dump-equiv` section; oracle-side residual 0).
+// D matrices are the block-diagonal Wigner action, baked as flat literals;
+// the plain matvec reproduces the oracle's applyRep to the ulp.
+// This validates the DISCIPLINE once — user networks' certificate is the
+// `where ml.equiv(G)` type check, not an empirical test.
+// ============================================================================
+let static SIN = [(0, 0, 2), (1, 1, 1)]
+let static SOUT = [(0, 0, 1), (1, 1, 2)]
+let w = [0.5, -1.0, 2.0, 0.25]
+
+let lhs: Array<Float like IrrepsIdx<SOUT>> = ml.derive_linear(SIN, SOUT, w, [1.0, 2.0, 1.8665023396478675, -0.8991998014562959, -2.440821323479036])
+// EXPECT: lhs = [-1.5, 3.733004679295735, -1.7983996029125917, -4.881642646958072, 0.4666255849119669, -0.22479995036407396, -0.610205330869759]
+
+let fx: Array<Float like IrrepsIdx<SOUT>> = ml.derive_linear(SIN, SOUT, w, [1.0, 2.0, 3.0, -1.0, 0.5])
+let dout = [1.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.7648421872844888, 0.5741315443479849, 0.2922146442847723, 0.0, 0.0, 0.0, 0.0, 0.0, 0.45359612142557815, -0.8912073600614354, 0.0, 0.0, 0.0, 0.0, -0.6442176872376895, 0.6816329865934172, 0.34692944965489897, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.7648421872844888, 0.5741315443479849, 0.2922146442847723, 0.0, 0.0, 0.0, 0.0, 0.0, 0.45359612142557815, -0.8912073600614354, 0.0, 0.0, 0.0, 0.0, -0.6442176872376895, 0.6816329865934172, 0.34692944965489897]
+let mut rhs = [0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0]
+let done1 = {
+    for i in 0..7 {
+        for j in 0..7 {
+            rhs(i) += dout(i * 7 + j) * fx(j)
+        }
+    }
+    0.0
+}
+// EXPECT: rhs = [-1.5, 3.733004679295735, -1.7983996029125917, -4.881642646958072, 0.4666255849119669, -0.22479995036407396, -0.610205330869759]

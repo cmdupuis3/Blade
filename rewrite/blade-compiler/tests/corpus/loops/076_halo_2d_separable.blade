@@ -1,0 +1,13 @@
+// TEST: Halo 2-D Separable
+// n-D stencils compose SEPARABLY as range<> slots: each halo slot wraps one
+// axis, contributes its own loop level + window param, and shrinks its own
+// axis to the interior. The 5-point Laplacian reads the product window at the
+// cross positions. A halo slot also mixes freely with plain slots (dr: halo
+// on Lat only). EXPECT is FLAT (rank-2 results print flattened).
+type Lat = Idx<3>
+type Lon = Idx<4>
+let A: Array<Float64 like Lat, Lon> = [[1.0, 2.0, 4.0, 7.0], [3.0, 5.0, 8.0, 12.0], [6.0, 9.0, 13.0, 18.0]]
+let lap = method_for(range<halo<Lat, [-1, 0, 1]>, halo<Lon, [-1, 0, 1]>>) <@> lambda(wr, wc) -> A(wr(-1), wc(0)) + A(wr(1), wc(0)) + A(wr(0), wc(-1)) + A(wr(0), wc(1)) - 4.0 * A(wr(0), wc(0)) |> compute
+// EXPECT: lap = [2, 2]
+let dr = method_for(range<halo<Lat, [-1, 0, 1]>, Lon>) <@> lambda(wr, j) -> A(wr(1), j) - A(wr(-1), j) |> compute
+// EXPECT: dr = [5, 7, 9, 11]

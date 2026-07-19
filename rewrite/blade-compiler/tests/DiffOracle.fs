@@ -42,7 +42,20 @@ let denseSlice = [ "basic"; "loops"; "guards"; "for-in" ]
 /// Oracles pinned before the fix reproduce the wrap. Retire at the next
 /// re-pin.
 let correctedSlice : Set<string> =
-    Set.ofList [ "Negative Int64 Mixed Arithmetic" ]
+    Set.ofList
+        [ "Negative Int64 Mixed Arithmetic"
+          // Pinned oracle predates the merged-nest fusion fix: it reads the
+          // FIRST leaf's array for every kernel, so v = [2, 4, 6] instead of
+          // the correct [20, 40, 60] (the test's own EXPECT pins the fix).
+          // Retire at the next re-pin.
+          "Fusion Different Arrays"
+          // Pinned oracle predates the mut-array copy-semantics fix: an
+          // assignable binding initialized from an existing array (`let mut
+          // a = Z`) used to ALIAS Z's storage, so the oracle prints the
+          // corrupted Z (and stale U/z reads). Divergence confirms the
+          // fix; corpus EXPECTs are ground truth. Retire at the next re-pin.
+          "Mut Array Copy Semantics"
+          "Mut Array Copy In Function Body" ]
 
 /// Run `<exe> run <srcFile>` and capture stdout. The generous timeout covers
 /// the g++ compile that `blade run` performs internally.
@@ -123,7 +136,7 @@ let runDiffOracleTests (oracleExe: string) (categories: string list) : BlockResu
                     | Ok mine, Ok theirs when Set.contains name correctedSlice ->
                         // Corrected-semantics slice: this divergence is the point.
                         passed <- passed + 1
-                        resultLine Pass name "INTENTIONAL divergence from pre-arc-1 oracle confirmed (corrected product symmetry)"
+                        resultLine Pass name "INTENTIONAL divergence from pinned oracle confirmed (corrected semantics; corpus EXPECTs are ground truth)"
                     | Ok mine, Ok theirs ->
                         failed <- failed + 1
                         failedNames <- failedNames @ [name]

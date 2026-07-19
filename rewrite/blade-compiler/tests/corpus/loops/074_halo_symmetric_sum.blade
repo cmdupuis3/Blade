@@ -1,0 +1,7 @@
+// TEST: Halo Symmetric 3-Point Sum
+// A symmetric window [-1, 0, 1] centered at ordinal i+1 sums a cell and both
+// neighbors: out[i] = A[i] + A[i+1] + A[i+2]. Reads the same window `w` at
+// three offsets, so the interior has 5 - 1 - 1 = 3 cells.
+let A: Array<Float64 like Idx<5>> = [1.0, 2.0, 4.0, 7.0, 11.0]
+let s = method_for(halo<Idx<5>, [-1, 0, 1]>) <@> lambda(w) -> A(w(-1)) + A(w(0)) + A(w(1)) |> compute
+// EXPECT: s = [7, 13, 22]

@@ -1,0 +1,30 @@
+// TEST: Unit Scalar Intrinsics
+// Scalar-position intrinsics use the same unary unit table as the
+// kernel-body walk (unitRulesForUnaryOp): sqrt halves all-even exponents
+// (sqrt(velocity^2) = velocity), abs preserves the annotation (it used to
+// ERROR on a unitful operand), and transcendentals are dimensionless-out.
+// Also pins the negative unit exponent grammar: seconds^-1.
+Unit meters
+Unit seconds
+Unit velocity = meters / seconds
+Unit hz = seconds^-1
+let vx: Float<velocity> = 3.0
+let vy: Float<velocity> = 4.0
+let speed = sqrt(vx * vx + vy * vy)
+let vcap: Float<velocity> = 10.0
+let margin = vcap - speed
+// EXPECT: speed = 5
+// EXPECT: margin = 5
+
+let d: Float<meters> = -3.0
+let a = abs(d)
+let m: Float<meters> = 1.0
+let s = a + m
+// EXPECT: s = 4
+
+// A reciprocal-unit value composes like any other signature:
+// hz * seconds is dimensionless-compatible arithmetic against velocity/velocity.
+let f: Float<hz> = 2.0
+let t: Float<seconds> = 3.0
+let cycles = f * t
+// EXPECT: cycles = 6

@@ -1,0 +1,13 @@
+// TEST: Struct Where Predicate OK
+// Named static predicate referenced from a where clause (bare-call form):
+// define the constraint once, reference it by name instead of inlining.
+static function triangle(a: Int, b: Int, c: Int) -> Bool =
+    abs(a - b) <= c && c <= a + b
+struct CGPath {
+    l1: Int,
+    l2: Int,
+    l_out: Int
+} where triangle(l1, l2, l_out)
+let p = CGPath { l1 = 1, l2 = 2, l_out = 2 }
+let v = p.l_out
+// EXPECT: v = 2

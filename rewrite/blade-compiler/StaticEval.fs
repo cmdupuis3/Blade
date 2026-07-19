@@ -14,12 +14,27 @@ type StaticValue =
     | SVString of string
     | SVUnit
     | SVTuple of StaticValue list
+    /// A folded struct literal: the type name plus (field, value) pairs in
+    /// DECLARATION order (when the struct registry is in scope — always the
+    /// case for module-level folds). Keeping the name and field names lets
+    /// splice-back emit a designated struct literal instead of a tuple, so
+    /// runtime field access on a `let static` struct stays well-typed.
+    | SVStruct of name: string * fields: (string * StaticValue) list
 
 /// A static function definition (unevaluated — applied during evaluation)
 type StaticFuncDef = {
     Name: string
     Params: string list
     Body: Expr
+}
+
+/// Struct constraint info for fold-time checks: field names in declaration
+/// order plus the FULL conjunct list (declared where-conjuncts + desugared
+/// field bounds, built with Ast.structConjuncts — the same helper the type
+/// checker uses, so the two worlds cannot drift).
+type StructStaticInfo = {
+    Fields: string list
+    Conjuncts: Expr list
 }
 
 /// Environment for static evaluation
@@ -34,6 +49,9 @@ type StaticEnv = {
     /// clause 1: a closed input is an argument the program was applied
     /// to, so a `let static` read may fold its payload at compile time.
     ProviderRoots: Map<string, string * string>
+    /// Constrained-struct registry for fold-time conjunct checks. Empty in
+    /// contexts that never fold user struct literals (angle-bracket args).
+    Structs: Map<string, StructStaticInfo>
 }
 
 // ============================================================================
@@ -43,23 +61,23 @@ type StaticEnv = {
 /// Collect all free variable names referenced in an expression.
 /// Does NOT descend into type annotations (those are handled in Phase 4).
 let rec collectFreeNames (expr: Expr) : Set<string> =
-    match expr with
-    | ExprLit _ -> Set.empty
-    | ExprVar name -> Set.singleton name
-    | ExprBinOp (_, _, l, r) -> Set.union (collectFreeNames l) (collectFreeNames r)
-    | ExprUnaryOp (_, e) -> collectFreeNames e
-    | ExprApp (f, args) ->
+    match expr.Kind with
+    | ExprKind.ExprLit _ -> Set.empty
+    | ExprKind.ExprVar name -> Set.singleton name
+    | ExprKind.ExprBinOp (_, _, l, r) -> Set.union (collectFreeNames l) (collectFreeNames r)
+    | ExprKind.ExprUnaryOp (_, e) -> collectFreeNames e
+    | ExprKind.ExprApp (f, args) ->
         Set.union (collectFreeNames f) (args |> List.map collectFreeNames |> Set.unionMany)
-    | ExprIf (c, t, e) ->
+    | ExprKind.ExprIf (c, t, e) ->
         [c; t; e] |> List.map collectFreeNames |> Set.unionMany
-    | ExprTuple es | ExprArrayLit es ->
+    | ExprKind.ExprTuple es | ExprKind.ExprArrayLit es ->
         es |> List.map collectFreeNames |> Set.unionMany
-    | ExprField (obj, _) -> collectFreeNames obj
-    | ExprLet (binding, body) ->
+    | ExprKind.ExprField (obj, _) -> collectFreeNames obj
+    | ExprKind.ExprLet (binding, body) ->
         let valRefs = collectFreeNames binding.Value
-        let boundName = match binding.Pattern with PatVar n -> Set.singleton n | _ -> Set.empty
+        let boundName = match binding.Pattern.Kind with PatternKind.PatVar n -> Set.singleton n | _ -> Set.empty
         Set.union valRefs (Set.difference (collectFreeNames body) boundName)
-    | ExprMatch (scrut, cases) ->
+    | ExprKind.ExprMatch (scrut, cases) ->
         let scrutRefs = collectFreeNames scrut
         let caseRefs = cases |> List.map (fun c ->
             let patBinds = collectPatternBindings c.Pattern
@@ -67,24 +85,25 @@ let rec collectFreeNames (expr: Expr) : Set<string> =
             let bodyRefs = collectFreeNames c.Body
             Set.union guardRefs (Set.difference bodyRefs patBinds)) |> Set.unionMany
         Set.union scrutRefs caseRefs
-    | ExprBlock (stmts, finalExpr) ->
+    | ExprKind.ExprBlock (stmts, finalExpr) ->
         let stmtRefs = stmts |> List.map collectStmtNames |> Set.unionMany
         let finalRefs = finalExpr |> Option.map collectFreeNames |> Option.defaultValue Set.empty
         Set.union stmtRefs finalRefs
-    | ExprStruct (_, fields) ->
-        fields |> List.map (snd >> collectFreeNames) |> Set.unionMany
-    | ExprTyped (e, _) -> collectFreeNames e
-    | ExprLambda (_, _, body) -> collectFreeNames body  // params are local
+    | ExprKind.ExprStruct (_, fields, spread) ->
+        let spreadRefs = spread |> Option.map collectFreeNames |> Option.defaultValue Set.empty
+        Set.union spreadRefs (fields |> List.map (snd >> collectFreeNames) |> Set.unionMany)
+    | ExprKind.ExprTyped (e, _) -> collectFreeNames e
+    | ExprKind.ExprLambda (_, _, body) -> collectFreeNames body  // params are local
     | _ -> Set.empty  // conservative for loop/combinator forms
 
 and collectPatternBindings (pat: Pattern) : Set<string> =
-    match pat with
-    | PatVar name -> Set.singleton name
-    | PatTuple pats -> pats |> List.map collectPatternBindings |> Set.unionMany
-    | PatVariant (_, Some p) -> collectPatternBindings p
-    | PatStruct (_, fields) -> fields |> List.map (snd >> collectPatternBindings) |> Set.unionMany
-    | PatGuarded (p, _) -> collectPatternBindings p
-    | PatTyped (p, _) -> collectPatternBindings p
+    match pat.Kind with
+    | PatternKind.PatVar name -> Set.singleton name
+    | PatternKind.PatTuple pats -> pats |> List.map collectPatternBindings |> Set.unionMany
+    | PatternKind.PatVariant (_, Some p) -> collectPatternBindings p
+    | PatternKind.PatStruct (_, fields) -> fields |> List.map (snd >> collectPatternBindings) |> Set.unionMany
+    | PatternKind.PatGuarded (p, _) -> collectPatternBindings p
+    | PatternKind.PatTyped (p, _) -> collectPatternBindings p
     | _ -> Set.empty
 
 and collectStmtNames (stmt: Stmt) : Set<string> =
@@ -178,9 +197,9 @@ let maxSteps = 100_000
 /// form (`alias.read(inner)`) and the legacy ExprRead node.
 let private foldProviderRead (env: StaticEnv) (inner: Expr) : Result<StaticValue, string> =
     let resolved =
-        match inner with
-        | ExprField (ExprField (ExprVar root, _), varName)
-        | ExprField (ExprVar root, varName) ->
+        match inner.Kind with
+        | ExprKind.ExprField ({ Kind = ExprKind.ExprField ({ Kind = ExprKind.ExprVar root }, _) }, varName)
+        | ExprKind.ExprField ({ Kind = ExprKind.ExprVar root }, varName) ->
             Map.tryFind root env.ProviderRoots
             |> Option.map (fun (provider, path) -> (provider, path, varName))
         | _ -> None
@@ -195,26 +214,26 @@ let rec evalExpr (env: StaticEnv) (fuel: int) (expr: Expr) : Result<StaticValue,
     if fuel <= 0 then
         Error "Static evaluation: step limit exceeded (possible infinite recursion)"
     else
-    match expr with
-    | ExprLit (LitInt n) -> Ok (SVInt n)
-    | ExprLit (LitFloat f) -> Ok (SVFloat f)
-    | ExprLit (LitBool b) -> Ok (SVBool b)
-    | ExprLit (LitString s) -> Ok (SVString s)
-    | ExprLit LitUnit -> Ok SVUnit
+    match expr.Kind with
+    | ExprKind.ExprLit (LitInt n) -> Ok (SVInt n)
+    | ExprKind.ExprLit (LitFloat f) -> Ok (SVFloat f)
+    | ExprKind.ExprLit (LitBool b) -> Ok (SVBool b)
+    | ExprKind.ExprLit (LitString s) -> Ok (SVString s)
+    | ExprKind.ExprLit LitUnit -> Ok SVUnit
 
-    | ExprVar name ->
+    | ExprKind.ExprVar name ->
         match Map.tryFind name env.Values with
         | Some v -> Ok v
         | None ->
             // Could be a static function used as a value (shouldn't happen normally)
             Error (sprintf "Static evaluation: undefined variable '%s'" name)
 
-    | ExprBinOp (_, op, l, r) ->
+    | ExprKind.ExprBinOp (_, op, l, r) ->
         evalExpr env (fuel - 1) l |> Result.bind (fun lv ->
         evalExpr env (fuel - 1) r |> Result.bind (fun rv ->
             evalBinOp op lv rv))
 
-    | ExprUnaryOp (op, e) ->
+    | ExprKind.ExprUnaryOp (op, e) ->
         evalExpr env (fuel - 1) e |> Result.bind (fun v ->
             match op, v with
             | OpNeg, SVInt n -> Ok (SVInt (-n))
@@ -222,7 +241,7 @@ let rec evalExpr (env: StaticEnv) (fuel: int) (expr: Expr) : Result<StaticValue,
             | OpNot, SVBool b -> Ok (SVBool (not b))
             | _ -> Error (sprintf "Static evaluation: cannot apply %A to %A" op v))
 
-    | ExprApp (ExprVar fname, args) ->
+    | ExprKind.ExprApp ({ Kind = ExprKind.ExprVar fname }, args) ->
         match Map.tryFind fname env.Functions with
         | Some funcDef ->
             env.CalledFunctions.Value <- Set.add fname env.CalledFunctions.Value
@@ -248,56 +267,131 @@ let rec evalExpr (env: StaticEnv) (fuel: int) (expr: Expr) : Result<StaticValue,
     // cost (clause 1). Matched by the "read" field name; the operand's
     // root decides the provider, so a non-provider `alias.read(...)`
     // falls out with foldProviderRead's steering error.
-    | ExprApp (ExprField (ExprVar _alias, "read"), [inner]) ->
+    | ExprKind.ExprApp ({ Kind = ExprKind.ExprField ({ Kind = ExprKind.ExprVar _alias }, "read") }, [inner]) ->
         foldProviderRead env inner
 
-    | ExprApp (func, args) ->
+    | ExprKind.ExprApp (func, args) ->
         // Non-variable function position — try evaluating
         Error (sprintf "Static evaluation: unsupported function form in call")
 
-    | ExprIf (cond, thenBr, elseBr) ->
+    | ExprKind.ExprIf (cond, thenBr, elseBr) ->
         evalExpr env (fuel - 1) cond |> Result.bind (fun cv ->
             match cv with
             | SVBool true -> evalExpr env (fuel - 1) thenBr
             | SVBool false -> evalExpr env (fuel - 1) elseBr
             | _ -> Error "Static evaluation: if condition must be Bool")
 
-    | ExprTuple es ->
+    | ExprKind.ExprTuple es ->
         evalArgs env (fuel - 1) es |> Result.map SVTuple
 
-    | ExprArrayLit es ->
+    | ExprKind.ExprArrayLit es ->
         evalArgs env (fuel - 1) es |> Result.map SVTuple  // static arrays as tuples
 
-    | ExprLet (binding, body) ->
+    | ExprKind.ExprLet (binding, body) ->
         evalExpr env (fuel - 1) binding.Value |> Result.bind (fun v ->
             let env' = bindPattern env binding.Pattern v
             evalExpr env' (fuel - 1) body)
 
-    | ExprMatch (scrutinee, cases) ->
+    | ExprKind.ExprMatch (scrutinee, cases) ->
         evalExpr env (fuel - 1) scrutinee |> Result.bind (fun sv ->
             evalMatch env (fuel - 1) sv cases)
 
-    | ExprBlock (stmts, finalExpr) ->
+    | ExprKind.ExprBlock (stmts, finalExpr) ->
         evalBlock env (fuel - 1) stmts finalExpr
 
     // Module-qualified static access (`M.k`): imported statics are seeded
     // into Values under their qualified name by checkModule's pre-pass
     // (TypeModuleExport.StaticValues) — consult that before treating the
     // field access as a structural read.
-    | ExprField (ExprVar objName, field) when Map.containsKey (sprintf "%s.%s" objName field) env.Values ->
+    | ExprKind.ExprField ({ Kind = ExprKind.ExprVar objName }, field) when Map.containsKey (sprintf "%s.%s" objName field) env.Values ->
         Ok env.Values.[sprintf "%s.%s" objName field]
 
-    | ExprField (obj, field) ->
+    | ExprKind.ExprField (obj, field) ->
         evalExpr env (fuel - 1) obj |> Result.bind (fun ov ->
-            Error (sprintf "Static evaluation: field access '%s' not supported on static values" field))
+            match ov with
+            | SVStruct (sname, sfields) ->
+                match sfields |> List.tryFind (fun (fn, _) -> fn = field) with
+                | Some (_, v) -> Ok v
+                | None -> Error (sprintf "Static evaluation: struct %s has no field '%s'" sname field)
+            | _ -> Error (sprintf "Static evaluation: field access '%s' not supported on static values" field))
 
-    | ExprStruct (name, fields) ->
-        // Evaluate all field values — store as tuple for now
-        fields |> List.map (fun (_, e) -> evalExpr env (fuel - 1) e)
-        |> seqResults
-        |> Result.map SVTuple
+    | ExprKind.ExprStruct (name, fields, spread) ->
+        // Evaluate all field values — stored as an SVStruct (name + named
+        // fields) so the folded value keeps nominal identity and splices
+        // back as a designated struct literal. A `..base` spread folds the
+        // base and inherits its missing fields by name. A CONSTRAINED struct
+        // folding here is in the
+        // compile-time world: run its conjuncts with the field values bound
+        // by name, and fail the fold on violation (let-static assertion
+        // semantics) instead of waiting for a runtime guard.
+        let providedR =
+            fields |> List.map (fun (fn, e) -> evalExpr env (fuel - 1) e |> Result.map (fun v -> (fn, v)))
+            |> List.fold (fun acc r ->
+                acc |> Result.bind (fun xs -> r |> Result.map (fun x -> xs @ [x]))) (Ok [])
+        let fieldValsR =
+            providedR |> Result.bind (fun provided ->
+                match spread with
+                | None -> Ok provided
+                | Some baseExpr ->
+                    match Map.tryFind name env.Structs with
+                    | None -> Error (sprintf "Static evaluation: cannot fold '..' spread for struct %s (unknown field layout)" name)
+                    | Some info ->
+                        evalExpr env (fuel - 1) baseExpr |> Result.bind (fun bv ->
+                            match bv with
+                            | SVStruct (_, bfields) when bfields.Length = info.Fields.Length ->
+                                let providedNames = provided |> List.map fst
+                                let inherited =
+                                    bfields |> List.filter (fun (fn, _) -> not (List.contains fn providedNames))
+                                Ok (provided @ inherited)
+                            | SVTuple bvals when bvals.Length = info.Fields.Length ->
+                                let providedNames = provided |> List.map fst
+                                let inherited =
+                                    List.zip info.Fields bvals
+                                    |> List.filter (fun (fn, _) -> not (List.contains fn providedNames))
+                                Ok (provided @ inherited)
+                            | _ -> Error (sprintf "Static evaluation: '..' spread base for struct %s did not fold to a %d-field struct" name info.Fields.Length)))
+        fieldValsR
+        |> Result.bind (fun fieldVals ->
+            // Field order follows DECLARATION order when known (the spread
+            // path requires it, and splice-back emits C++ designated
+            // initializers which demand it); plain literals with an unknown
+            // layout keep written order, matching the pre-spread behavior.
+            let orderedFields =
+                match Map.tryFind name env.Structs with
+                | Some info when info.Fields.Length = fieldVals.Length
+                              && (info.Fields |> List.forall (fun f -> fieldVals |> List.exists (fun (fn, _) -> fn = f))) ->
+                    info.Fields |> List.map (fun f -> fieldVals |> List.find (fun (fn, _) -> fn = f))
+                | _ -> fieldVals
+            let result = SVStruct (name, orderedFields)
+            match Map.tryFind name env.Structs with
+            | Some info when not info.Conjuncts.IsEmpty ->
+                let bodyEnv =
+                    { env with Values = fieldVals |> List.fold (fun m (fn, v) -> Map.add fn v m) env.Values }
+                let total = info.Conjuncts.Length
+                let rec checkAll i cs =
+                    match cs with
+                    | [] -> Ok result
+                    | (c: Expr) :: rest ->
+                        // PPL license conjuncts (`__ppl_indep(...)`) are
+                        // static licenses, not value predicates — present
+                        // only at the pre-elaborator Unfold call site; skip.
+                        let isPplLicense =
+                            match c.Kind with
+                            | ExprKind.ExprApp ({ Kind = ExprKind.ExprVar f }, _) -> f.StartsWith "__ppl_"
+                            | _ -> false
+                        if isPplLicense then checkAll (i + 1) rest
+                        else
+                            match evalExpr bodyEnv (fuel - 1) c with
+                            | Ok (SVBool true) -> checkAll (i + 1) rest
+                            | Ok (SVBool false) ->
+                                if total = 1 then Error (sprintf "Constraint violation in %s (static)" name)
+                                else Error (sprintf "Constraint violation in %s (static, conjunct %d)" name i)
+                            | Ok _ -> Error (sprintf "constraint of %s is not a boolean at compile time" name)
+                            | Error why -> Error (sprintf "constraint of %s cannot fold: %s" name why)
+                checkAll 1 info.Conjuncts
+            | _ -> Ok result)
 
-    | ExprRead inner ->
+    | ExprKind.ExprRead inner ->
         // Legacy AST node (no longer produced by the parser); folds the
         // same way as the qualified-application form above.
         foldProviderRead env inner
@@ -316,15 +410,27 @@ and seqResults (results: Result<StaticValue, string> list) : Result<StaticValue 
         | _, Error e -> Error e) (Ok [])
 
 and bindPattern (env: StaticEnv) (pat: Pattern) (value: StaticValue) : StaticEnv =
-    match pat with
-    | PatVar name -> { env with Values = Map.add name value env.Values }
-    | PatTuple pats ->
+    match pat.Kind with
+    | PatternKind.PatVar name -> { env with Values = Map.add name value env.Values }
+    | PatternKind.PatTuple pats ->
         match value with
         | SVTuple vs when vs.Length = pats.Length ->
             (pats, vs) ||> List.zip |> List.fold (fun e (p, v) -> bindPattern e p v) env
+        // Positional destructure of a folded struct — the pre-SVStruct
+        // behavior (structs folded as bare tuples), kept for compatibility.
+        | SVStruct (_, fs) when fs.Length = pats.Length ->
+            (pats, fs |> List.map snd) ||> List.zip |> List.fold (fun e (p, v) -> bindPattern e p v) env
         | _ -> env
-    | PatTyped (p, _) -> bindPattern env p value
-    | PatWildcard -> env
+    | PatternKind.PatStruct (_, fieldPats) ->
+        match value with
+        | SVStruct (_, fs) ->
+            fieldPats |> List.fold (fun e (fn, p) ->
+                match fs |> List.tryFind (fun (n, _) -> n = fn) with
+                | Some (_, v) -> bindPattern e p v
+                | None -> e) env
+        | _ -> env
+    | PatternKind.PatTyped (p, _) -> bindPattern env p value
+    | PatternKind.PatWildcard -> env
     | _ -> env  // other patterns: no binding in static context
 
 and evalMatch env fuel (scrutinee: StaticValue) (cases: MatchCase list) : Result<StaticValue, string> =
@@ -348,10 +454,10 @@ and evalMatch env fuel (scrutinee: StaticValue) (cases: MatchCase list) : Result
             evalMatch env fuel scrutinee rest
 
 and tryMatchPattern (value: StaticValue) (pat: Pattern) : (string * StaticValue) list option =
-    match pat with
-    | PatWildcard -> Some []
-    | PatVar name -> Some [(name, value)]
-    | PatLit lit ->
+    match pat.Kind with
+    | PatternKind.PatWildcard -> Some []
+    | PatternKind.PatVar name -> Some [(name, value)]
+    | PatternKind.PatLit lit ->
         let matches =
             match lit, value with
             | LitInt n, SVInt m -> n = m
@@ -360,15 +466,32 @@ and tryMatchPattern (value: StaticValue) (pat: Pattern) : (string * StaticValue)
             | LitString a, SVString b -> a = b
             | _ -> false
         if matches then Some [] else None
-    | PatTuple pats ->
-        match value with
-        | SVTuple vs when vs.Length = pats.Length ->
+    | PatternKind.PatTuple pats ->
+        let elems =
+            match value with
+            | SVTuple vs -> Some vs
+            // Positional match against a folded struct (pre-SVStruct compat).
+            | SVStruct (_, fs) -> Some (fs |> List.map snd)
+            | _ -> None
+        match elems with
+        | Some vs when vs.Length = pats.Length ->
             let results = (pats, vs) ||> List.zip |> List.map (fun (p, v) -> tryMatchPattern v p)
             if results |> List.forall Option.isSome then
                 Some (results |> List.choose id |> List.concat)
             else None
         | _ -> None
-    | PatVariant (tag, payloadPat) ->
+    | PatternKind.PatStruct (pname, fieldPats) ->
+        match value with
+        | SVStruct (sname, fs) when pname = sname ->
+            let results =
+                fieldPats |> List.map (fun (fn, p) ->
+                    fs |> List.tryFind (fun (n, _) -> n = fn)
+                       |> Option.bind (fun (_, v) -> tryMatchPattern v p))
+            if results |> List.forall Option.isSome then
+                Some (results |> List.choose id |> List.concat)
+            else None
+        | _ -> None
+    | PatternKind.PatVariant (tag, payloadPat) ->
         // For static evaluation of sum types — match on tag name
         // This is a simplified approach; full variant matching would need
         // the static value to carry a tag
@@ -519,9 +642,9 @@ type private PendingStatic = {
 /// A lambda-valued `let static` declares a function (the marker means
 /// immutability there), not a foldable value — the fold assertion skips it.
 let rec private isLambdaExpr (expr: Expr) : bool =
-    match expr with
-    | ExprLambda _ -> true
-    | ExprTyped (e, _) -> isLambdaExpr e
+    match expr.Kind with
+    | ExprKind.ExprLambda _ -> true
+    | ExprKind.ExprTyped (e, _) -> isLambdaExpr e
     | _ -> false
 
 /// Resolve all static declarations in a module.
@@ -534,6 +657,8 @@ let resolveStatics (decls: Located<Decl> list) : Result<StaticEnv * StaticFailur
     let mutable staticFuncs : Map<string, StaticFuncDef> = Map.empty
     let mutable pendingRev : PendingStatic list = []
 
+    let mutable structInfos : Map<string, StructStaticInfo> = Map.empty
+
     for locDecl in decls do
         match locDecl.Value with
         | DeclFunction fd when fd.IsStatic ->
@@ -542,6 +667,14 @@ let resolveStatics (decls: Located<Decl> list) : Result<StaticEnv * StaticFailur
                 Params = fd.Params |> List.map (fun p -> p.Name)
                 Body = fd.Body
             } staticFuncs
+        | DeclType (TyDeclStruct (sname, _, sfields, sconstraints)) ->
+            // Full pre-scan (struct/static decl order is irrelevant): the
+            // fold-time conjunct list mirrors the checker's via the shared
+            // Ast.structConjuncts helper.
+            structInfos <- Map.add sname {
+                Fields = sfields |> List.map (fun f -> f.Name)
+                Conjuncts = structConjuncts sfields sconstraints
+            } structInfos
         | DeclStatic binding ->
             // Any pattern that binds at least one name participates; a
             // pure-wildcard static asserts nothing observable.
@@ -572,8 +705,8 @@ let resolveStatics (decls: Located<Decl> list) : Result<StaticEnv * StaticFailur
     let providerRoots =
         decls |> List.fold (fun acc d ->
             match d.Value with
-            | DeclLet { Pattern = PatVar root; Value = ExprApp (ExprField (ExprVar alias, "load"), [ExprLit (LitString path)]) }
-            | DeclStatic { Pattern = PatVar root; Value = ExprApp (ExprField (ExprVar alias, "load"), [ExprLit (LitString path)]) }
+            | DeclLet { Pattern = { Kind = PatternKind.PatVar root }; Value = { Kind = ExprKind.ExprApp ({ Kind = ExprKind.ExprField ({ Kind = ExprKind.ExprVar alias }, "load") }, [{ Kind = ExprKind.ExprLit (LitString path) }]) } }
+            | DeclStatic { Pattern = { Kind = PatternKind.PatVar root }; Value = { Kind = ExprKind.ExprApp ({ Kind = ExprKind.ExprField ({ Kind = ExprKind.ExprVar alias }, "load") }, [{ Kind = ExprKind.ExprLit (LitString path) }]) } }
                 when Map.containsKey alias providerAliases ->
                 Map.add root (providerAliases.[alias], path) acc
             | _ -> acc) Map.empty
@@ -603,7 +736,7 @@ let resolveStatics (decls: Located<Decl> list) : Result<StaticEnv * StaticFailur
             |> List.collect (fun pd -> pd.Names |> List.map (fun n -> (n, pd)))
             |> Map.ofList
         let calledRef = ref Set.empty
-        let mutable env = { Values = Map.empty; Functions = staticFuncs; CalledFunctions = calledRef; ProviderRoots = providerRoots }
+        let mutable env = { Values = Map.empty; Functions = staticFuncs; CalledFunctions = calledRef; ProviderRoots = providerRoots; Structs = structInfos }
         let mutable failures : StaticFailure list = []
         let mutable evaluated = Set.empty
 
@@ -632,3 +765,5 @@ let rec ppStaticValue (v: StaticValue) : string =
     | SVString s -> sprintf "\"%s\"" s
     | SVUnit -> "()"
     | SVTuple vs -> sprintf "(%s)" (vs |> List.map ppStaticValue |> String.concat ", ")
+    | SVStruct (n, fs) ->
+        sprintf "%s { %s }" n (fs |> List.map (fun (fn, v) -> sprintf "%s = %s" fn (ppStaticValue v)) |> String.concat ", ")

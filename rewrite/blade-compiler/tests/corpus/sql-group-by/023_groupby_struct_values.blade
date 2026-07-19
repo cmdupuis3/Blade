@@ -1,0 +1,13 @@
+// TEST: GroupBy Struct Values
+// group_by with a STRUCT values array: the ragged per-group kernel receives
+// Array<R like RaggedIdx<_>> rows of struct elements, and field access
+// composes through the group peel (g(0).v). Keys stay scalar (dynamic
+// discovery, Case 3).
+struct R { v: Float64 }
+type NIdx = Idx<4>
+let keys: Array<Int64 like NIdx> = [0, 1, 0, 1]
+let vals: Array<R like NIdx> = [R { v = 1.0 }, R { v = 2.0 }, R { v = 3.0 }, R { v = 4.0 }]
+let gk = group_keys(keys)
+let grouped = group_by(vals, gk)
+let firsts = method_for(grouped) <@> lambda(g: Array<R like RaggedIdx<_>>) -> g(0).v |> compute
+// EXPECT: firsts = [1, 2]

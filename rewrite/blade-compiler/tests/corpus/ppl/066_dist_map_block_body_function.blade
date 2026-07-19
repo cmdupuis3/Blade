@@ -1,0 +1,20 @@
+// TEST: Dist Map Block Body Function
+import ppl as ppl
+// A named map function with a BLOCK body `= { expr }` (and typed params) is
+// normalized before differentiation: the trivial block unwraps to its result
+// expression. Must reproduce 039/053's values exactly — same body, same jet.
+// (Before the fix this failed as "the map is constant in the coordinates":
+// the block node hid the coordinate mention from the differentiator.)
+function sq(x: Float64) -> Float64 = {
+    x * x
+}
+type TimeIdx = Idx<6>
+let A: Array<Float64 like Idx<1>, TimeIdx> = [[1.0, 2.0, 4.0, 6.0, 0.0, 3.0]]
+let xd = ppl.dist(A, 6)
+let dy = ppl.dist_map(xd, 3, sq)
+let y1 = ppl.cumulant(dy, 1)
+let y2 = ppl.cumulant(dy, 2)
+let y3 = ppl.cumulant(dy, 3)
+// EXPECT: y1 = [11.0]
+// EXPECT: y2 = [154.0]
+// EXPECT: y3 = [2178.0]

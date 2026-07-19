@@ -48,6 +48,19 @@ let range_vac = vx0 * t_flight
 // EXPECT: apex = 19.62
 // EXPECT: range_vac = 60.0
 
+// The same closed form, lifted to an ARRAY of sample instants. Units flow
+// through the array operators exactly as through the scalar ones: the
+// scalar-by-array broadcasts compose signatures elementwise (velocity *
+// seconds = meters; acceleration * seconds = velocity, * seconds again =
+// meters), the elementwise - requires both sides to agree, and the
+// Float<meters> annotation on the result is CHECKED against the composed
+// signature -- annotating it as, say, Float<seconds> would not compile.
+type TIdx = Idx<3>
+let ts: Array<Float<seconds> like TIdx> = [1.0, 2.0, 3.0]
+let heights: Array<Float<meters> like TIdx> = vy0 * ts - 0.5 * grav * ts * ts
+// h(t) = 19.62 t - 4.905 t^2: the t = 2.0 sample is the apex above.
+// EXPECT: heights = [14.715, 19.62, 14.715]
+
 // ============================================================================
 // Part B -- differentiable drag-loss estimate.
 // Power dissipated by quadratic drag is c_d |v|^3; integrating over the
@@ -90,23 +103,34 @@ let fd_vy = (drag_loss(15.0, 19.62001) - drag_loss(15.0, 19.61999)) / 0.00002
 // right tool -- this is the imperative subset earning its keep at runtime.
 // The airborne indicator gates every update, freezing the state at
 // touchdown without control flow.
+//
+// The recurrence is UNIT-CHECKED end to end: the drag coefficient carries
+// its reciprocal-length unit (so c_d * v * |v| is an acceleration), sqrt
+// carries velocity^2 back to velocity through the speed, and every
+// accumulator's annotation is enforced against what its update computes --
+// dropping the * dt from a velocity update would be a compile error, not
+// a silently wrong trajectory.
 // ============================================================================
+Unit per_meter = meters^-1
+let c_d: Float<per_meter> = 0.002
+let dt: Float<seconds> = 0.01
+
 let sim = {
-    let mut x = 0.0
-    let mut y = 0.0
-    let mut vx = 15.0
-    let mut vy = 19.62
-    let mut ft = 0.0
+    let mut x: Float<meters> = 0.0
+    let mut y: Float<meters> = 0.0
+    let mut vx: Float<velocity> = 15.0
+    let mut vy: Float<velocity> = 19.62
+    let mut ft: Float<seconds> = 0.0
     for i in 0..450 {
         let airborne = if vy > 0.0 || y > 0.0 then 1.0 else 0.0
         let speed = sqrt(vx * vx + vy * vy)
-        let ax = 0.0 - 0.002 * vx * speed
-        let ay = 0.0 - 9.81 - 0.002 * vy * speed
-        x += airborne * vx * 0.01
-        y += airborne * vy * 0.01
-        vx += airborne * ax * 0.01
-        vy += airborne * ay * 0.01
-        ft += airborne * 0.01
+        let ax = 0.0 - c_d * vx * speed
+        let ay = 0.0 - grav - c_d * vy * speed
+        x += airborne * vx * dt
+        y += airborne * vy * dt
+        vx += airborne * ax * dt
+        vy += airborne * ay * dt
+        ft += airborne * dt
     }
     x
 }
@@ -114,19 +138,19 @@ let sim = {
 // EXPECT: sim = 54.7425173674639
 
 let sim_time = {
-    let mut y = 0.0
-    let mut vx = 15.0
-    let mut vy = 19.62
-    let mut ft = 0.0
+    let mut y: Float<meters> = 0.0
+    let mut vx: Float<velocity> = 15.0
+    let mut vy: Float<velocity> = 19.62
+    let mut ft: Float<seconds> = 0.0
     for i in 0..450 {
         let airborne = if vy > 0.0 || y > 0.0 then 1.0 else 0.0
         let speed = sqrt(vx * vx + vy * vy)
-        let ax = 0.0 - 0.002 * vx * speed
-        let ay = 0.0 - 9.81 - 0.002 * vy * speed
-        y += airborne * vy * 0.01
-        vx += airborne * ax * 0.01
-        vy += airborne * ay * 0.01
-        ft += airborne * 0.01
+        let ax = 0.0 - c_d * vx * speed
+        let ay = 0.0 - grav - c_d * vy * speed
+        y += airborne * vy * dt
+        vx += airborne * ax * dt
+        vy += airborne * ay * dt
+        ft += airborne * dt
     }
     ft
 }

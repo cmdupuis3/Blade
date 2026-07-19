@@ -176,6 +176,52 @@ let (|IrrepsTag|_|) (tag: string) : (string option * (int * int * int) list) opt
                 Some ((if name = "" then None else Some name), List.map Option.get entries)
             else None
 
+// ----------------------------------------------------------------------------
+// Halo window tag encoding. Like IrrepsIdx above, the halo slot's payload
+// rides IN the Tag string: "__halowin|<k>:<innerName>|<o1,o2,..>" where
+// <k> is 'd' (dense inner) or 'c' (compound inner: ordinals walk PRESENT
+// cells), <innerName> is the wrapped index's alias name ("" for anonymous /
+// compound) and the csv is the static signed offset set (center = 0, sign =
+// direction). Loop building re-derives the center's start offset from it
+// (per-slot — the single shared IRRange offset cannot express multi-slot
+// ranges), window reads re-derive the offset set and inner kind. Pure string
+// ops; no new IRIndexTypeG field.
+// ----------------------------------------------------------------------------
+
+let haloWinTagPrefix = "__halowin|"
+
+/// Parse a halo window Tag into (isCompound, inner alias name, offset list).
+/// Total: any string not shaped like a halo tag yields None.
+let (|HaloWinTag|_|) (tag: string) : (bool * string * int list) option =
+    if not (tag.StartsWith haloWinTagPrefix) then None
+    else
+        match tag.Split '|' with
+        | [| _; marked; csv |] when marked.Length >= 2 && (marked.[0] = 'd' || marked.[0] = 'c') && marked.[1] = ':' ->
+            let offs =
+                csv.Split ',' |> Array.toList
+                |> List.map (fun s -> match System.Int32.TryParse s with true, v -> Some v | _ -> None)
+            if List.forall Option.isSome offs && not offs.IsEmpty then
+                Some (marked.[0] = 'c', marked.Substring 2, List.map Option.get offs)
+            else None
+        | _ -> None
+
+/// The center's first valid ordinal for a halo slot: max(0, -min(offsets ∪ {0})).
+/// The loop over the SHRUNK slot starts at 0; adding this to the loop index
+/// yields the true center ordinal in the inner index's space.
+let haloStartOffsetOfTag (tag: string) : int64 option =
+    match tag with
+    | HaloWinTag (_, _, offs) -> Some (int64 (max 0 (- (min 0 (List.min offs)))))
+    | _ -> None
+
+/// Interior loss of a halo slot: (-min(offsets ∪ {0})) + max(offsets ∪ {0}).
+/// Dense slots fold this into the extent at typecheck; compound slots (whose
+/// extent is the runtime mask cardinality) subtract it at the loop bound.
+let haloShrinkOfTag (tag: string) : int64 option =
+    match tag with
+    | HaloWinTag (_, _, offs) ->
+        Some (int64 ((- (min 0 (List.min offs))) + (max 0 (List.max offs))))
+    | _ -> None
+
 /// Derive the kind from a (possibly user-supplied) Tag value: sentinel
 /// strings map to their kind, anything else — user names, "__anon"
 /// placeholders, None — is IxKPlain. For construction sites whose tag is
@@ -196,6 +242,10 @@ let ixKindOfTag (tag: string option) : IxKind =
     | Some "__error_ragged_no_prior" -> IxKErrorRaggedNoPrior
     | Some "__error_irreps_bad_spec" -> IxKErrorIrrepsBadSpec
     | Some t when t.StartsWith irrepsTagPrefix -> IxKIrreps
+    // A compound-inner halo slot keeps IxKCompound: the compound machinery
+    // (cidx materialization, cardinality bound) must still engage. Dense
+    // halo slots fall through to IxKPlain like any other "__" placeholder.
+    | Some t when t.StartsWith (haloWinTagPrefix + "c:") -> IxKCompound
     | _ -> IxKPlain
 
 /// Ragged FAMILY: dimensions whose extent varies per outer row.

@@ -1,0 +1,9 @@
+// TEST: Unit Function Argument Mismatch (rejects)
+// Passing a seconds value to a meters parameter is a unit error. Direct
+// application does not unify args against params, so this is checked at
+// the dispatch seam (next to the IrrepsIdx strictness check).
+Unit meters
+Unit seconds
+function twice(d: Float<meters>) -> Float<meters> = d * 2.0
+let t: Float<seconds> = 5.0
+let r = twice(t)

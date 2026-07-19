@@ -22,13 +22,13 @@ module Blade.Rand.Elaborate
 open Blade.Ast
 open Blade.StaticEval
 
-let private v (name: string) : Expr = ExprVar name
+let private v (name: string) : Expr = syn (ExprVar name)
 
 /// Resolve a static-int argument: an int literal or a `let static` name.
 let private staticInt (statics: StaticEnv) (what: string) (e: Expr) : Result<int, string> =
-    match e with
-    | ExprLit (LitInt n) -> Ok (int n)
-    | ExprVar name ->
+    match e.Kind with
+    | ExprKind.ExprLit (LitInt n) -> Ok (int n)
+    | ExprKind.ExprVar name ->
         match Map.tryFind name statics.Values with
         | Some (SVInt n) -> Ok (int n)
         | Some _ -> Error (sprintf "%s: '%s' is not a static int" what name)
@@ -38,9 +38,9 @@ let private staticInt (statics: StaticEnv) (what: string) (e: Expr) : Result<int
 /// Resolve a shape argument to its list of positive extents.
 let private resolveShape (statics: StaticEnv) (what: string) (shapeE: Expr) : Result<int list, string> =
     let dims =
-        match shapeE with
-        | ExprArrayLit elems -> elems
-        | single -> [ single ]
+        match shapeE.Kind with
+        | ExprKind.ExprArrayLit elems -> elems
+        | _ -> [ shapeE ]
     dims
     |> List.fold (fun acc d ->
         acc |> Result.bind (fun xs ->
@@ -55,7 +55,7 @@ let private elabOp (statics: StaticEnv) (op: string) (args: Expr list) : Result<
     let build fn keyE shapeE =
         resolveShape statics (sprintf "rand.%s" op) shapeE
         |> Result.map (fun dims ->
-            ExprApp (v fn, keyE :: (dims |> List.map (fun n -> ExprLit (LitInt (int64 n))))))
+            syn (ExprApp (v fn, keyE :: (dims |> List.map (fun n -> syn (ExprLit (LitInt (int64 n))))))))
     match op, args with
     | "uniform", [keyE; shapeE] -> build "__rand_uniform" keyE shapeE
     | "normal",  [keyE; shapeE] -> build "__rand_normal"  keyE shapeE
@@ -73,30 +73,30 @@ let rec private rewriteExpr (statics: StaticEnv) (aliases: Set<string>) (e: Expr
         es |> List.fold (fun acc x ->
             acc |> Result.bind (fun xs -> r x |> Result.map (fun x' -> xs @ [x'])))
             (Ok [])
-    match e with
-    | ExprApp (ExprField (ExprVar alias, op), args) when Set.contains alias aliases ->
+    match e.Kind with
+    | ExprKind.ExprApp ({ Kind = ExprKind.ExprField ({ Kind = ExprKind.ExprVar alias }, op) }, args) when Set.contains alias aliases ->
         rList args |> Result.bind (fun args' -> elabOp statics op args')
-    | ExprLit _ | ExprVar _ -> Ok e
-    | ExprApp (f, args) ->
-        r f |> Result.bind (fun f' -> rList args |> Result.map (fun args' -> ExprApp (f', args')))
-    | ExprBinOp (m, op, l, rr) ->
-        r l |> Result.bind (fun l' -> r rr |> Result.map (fun r' -> ExprBinOp (m, op, l', r')))
-    | ExprUnaryOp (op, inner) -> r inner |> Result.map (fun i -> ExprUnaryOp (op, i))
-    | ExprTyped (inner, t) -> r inner |> Result.map (fun i -> ExprTyped (i, t))
-    | ExprAssign (l, rr) ->
-        r l |> Result.bind (fun l' -> r rr |> Result.map (fun r' -> ExprAssign (l', r')))
-    | ExprTuple es -> rList es |> Result.map ExprTuple
-    | ExprArrayLit es -> rList es |> Result.map ExprArrayLit
-    | ExprDotDot (l, h) ->
-        r l |> Result.bind (fun l' -> r h |> Result.map (fun h' -> ExprDotDot (l', h')))
-    | ExprIf (c, t, f) ->
+    | ExprKind.ExprLit _ | ExprKind.ExprVar _ -> Ok e
+    | ExprKind.ExprApp (f, args) ->
+        r f |> Result.bind (fun f' -> rList args |> Result.map (fun args' -> inheritSpan e (ExprApp (f', args'))))
+    | ExprKind.ExprBinOp (m, op, l, rr) ->
+        r l |> Result.bind (fun l' -> r rr |> Result.map (fun r' -> inheritSpan e (ExprBinOp (m, op, l', r'))))
+    | ExprKind.ExprUnaryOp (op, inner) -> r inner |> Result.map (fun i -> inheritSpan e (ExprUnaryOp (op, i)))
+    | ExprKind.ExprTyped (inner, t) -> r inner |> Result.map (fun i -> inheritSpan e (ExprTyped (i, t)))
+    | ExprKind.ExprAssign (l, rr) ->
+        r l |> Result.bind (fun l' -> r rr |> Result.map (fun r' -> inheritSpan e (ExprAssign (l', r'))))
+    | ExprKind.ExprTuple es -> rList es |> Result.map (fun es' -> inheritSpan e (ExprTuple es'))
+    | ExprKind.ExprArrayLit es -> rList es |> Result.map (fun es' -> inheritSpan e (ExprArrayLit es'))
+    | ExprKind.ExprDotDot (l, h) ->
+        r l |> Result.bind (fun l' -> r h |> Result.map (fun h' -> inheritSpan e (ExprDotDot (l', h'))))
+    | ExprKind.ExprIf (c, t, f) ->
         r c |> Result.bind (fun c' ->
         r t |> Result.bind (fun t' ->
-        r f |> Result.map (fun f' -> ExprIf (c', t', f'))))
-    | ExprLet (binding, body) ->
+        r f |> Result.map (fun f' -> inheritSpan e (ExprIf (c', t', f')))))
+    | ExprKind.ExprLet (binding, body) ->
         r binding.Value |> Result.bind (fun v' ->
-        r body |> Result.map (fun b' -> ExprLet ({ binding with Value = v' }, b')))
-    | ExprBlock (stmts, finalE) ->
+        r body |> Result.map (fun b' -> inheritSpan e (ExprLet ({ binding with Value = v' }, b'))))
+    | ExprKind.ExprBlock (stmts, finalE) ->
         let rec rStmt (s: Stmt) : Result<Stmt, string> =
             match s with
             | StmtSpanned (inner, sp) -> rStmt inner |> Result.map (fun i -> StmtSpanned (i, sp))
@@ -115,17 +115,17 @@ let rec private rewriteExpr (statics: StaticEnv) (aliases: Set<string>) (e: Expr
             (Ok [])
         |> Result.bind (fun stmts' ->
             match finalE with
-            | Some fe -> r fe |> Result.map (fun fe' -> ExprBlock (stmts', Some fe'))
-            | None -> Ok (ExprBlock (stmts', None)))
-    | ExprLambda (ps, w, body) -> r body |> Result.map (fun b -> ExprLambda (ps, w, b))
-    | ExprMatch (scrut, cases) ->
+            | Some fe -> r fe |> Result.map (fun fe' -> inheritSpan e (ExprBlock (stmts', Some fe')))
+            | None -> Ok (inheritSpan e (ExprBlock (stmts', None))))
+    | ExprKind.ExprLambda (ps, w, body) -> r body |> Result.map (fun b -> inheritSpan e (ExprLambda (ps, w, b)))
+    | ExprKind.ExprMatch (scrut, cases) ->
         r scrut |> Result.bind (fun s' ->
             cases |> List.fold (fun acc c ->
                 acc |> Result.bind (fun cs ->
                     r c.Body |> Result.map (fun b -> cs @ [{ c with Body = b }])))
                 (Ok [])
-            |> Result.map (fun cs' -> ExprMatch (s', cs')))
-    | other -> Ok other
+            |> Result.map (fun cs' -> inheritSpan e (ExprMatch (s', cs'))))
+    | _ -> Ok e
 
 // ============================================================================
 // Gating + program expansion
@@ -158,6 +158,9 @@ let private expandModule (decls: Located<Decl> list) : Result<Located<Decl> list
         | Ok (statics, _) ->
             declsNoImport |> List.fold (fun acc d ->
                 acc |> Result.bind (fun out ->
+                    // Stamp the user decl's span so every syn-built node
+                    // attributes to this declaration's source line.
+                    Blade.Ast.synthSpan <- d.Span
                     let mapped =
                         match d.Value with
                         | DeclFunction fd ->
@@ -175,10 +178,19 @@ let private expandModule (decls: Located<Decl> list) : Result<Located<Decl> list
 
 /// Entry point: elaborate rand ops across a program (after Math elaboration,
 /// before Grad expansion).
-let expand (program: Program) : Result<Program, string> =
+let private expandStr (program: Program) : Result<Program, string> =
     program.Modules
     |> List.fold (fun acc m ->
         acc |> Result.bind (fun ms ->
             expandModule m.Decls |> Result.map (fun ds -> ms @ [{ m with Decls = ds }])))
         (Ok [])
     |> Result.map (fun ms -> { program with Modules = ms })
+
+/// Boundary: string-errored internals -> coded diagnostics. The span is the
+/// ambient synthSpan -- stamped per-decl by expandStr, so a mid-elaboration
+/// failure points at the offending declaration.
+let expand (program: Program) : Result<Program, Blade.Diagnostics.Diagnostic list> =
+    Blade.Ast.synthSpan <- Blade.Ast.noSpan
+    expandStr program
+    |> Result.mapError (fun msg ->
+        [ Blade.Diagnostics.mkError "BL5300" (Blade.Diagnostics.Codes.phaseOfCode "BL5300") Blade.Ast.synthSpan msg ])

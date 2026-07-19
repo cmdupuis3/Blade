@@ -1,0 +1,13 @@
+// TEST: Fallback Compound Present Zero
+// Compound-left <|:>: the CompoundIdx mask IS the allocation record. Present
+// cells read the compact buffer — including the PRESENT 0.0 at index 0, which
+// value-keyed <|> could not preserve — and absent cells read the dense
+// fallback. The result is the dense expansion of the sparse overlay.
+type SIdx = Idx<4>
+let vals: Array<Float64 like SIdx> = [0.0, 20.0, 30.0, 40.0]
+let m = mask(vals, lambda(v) -> v < 25.0)
+let S = compound(vals, m)
+let D: Array<Float64 like SIdx> = [7.0, 7.0, 7.0, 7.0]
+let C = S <|:> D |> compute
+// present: idx 0 (value 0.0) and idx 1 (value 20.0); absent: idx 2, 3
+// EXPECT: C = [0.0, 20.0, 7.0, 7.0]

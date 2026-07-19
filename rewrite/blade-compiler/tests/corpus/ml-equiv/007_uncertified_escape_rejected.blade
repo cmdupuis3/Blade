@@ -1,0 +1,13 @@
+// TEST: ML Equiv Uncertified Escape Rejected (rejects)
+import ml as ml
+// ============================================================================
+// A representation-typed value may not flow into a function without an
+// equiv certificate — the compiler cannot prove anything about what the
+// callee does with the components. Certify the callee or pass invariants.
+// BL4008.
+// ============================================================================
+let static S = [(0, 0, 2), (1, 1, 1)]
+function helper(a: Array<Float like Idx<5>>) -> Float =
+  a(0)
+function bad(x: Array<Float like IrrepsIdx<S>>) where ml.equiv(O3) -> Float =
+  helper(x)

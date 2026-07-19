@@ -1,0 +1,13 @@
+// TEST: ML Equiv Layer Binding Wrong Spec (rejects)
+import ml as ml
+// ============================================================================
+// Calling a derived layer with an argument annotated at a DIFFERENT spec of
+// the SAME total_dim: the IrrepsIdx identity seam refuses it (BL4003) —
+// extent comparison could never catch this; spec identity does.
+// ============================================================================
+let static SIN = [(0, 0, 2), (1, 1, 1)]
+let static SOUT = [(0, 0, 1), (1, 1, 2)]
+let static SFLIP = [(0, 1, 2), (1, 1, 1)]
+let layer1 = ml.derive_linear(SIN, SOUT)
+let badx: Array<Float like IrrepsIdx<SFLIP>> = [1.0, 2.0, 3.0, -1.0, 0.5]
+let out = layer1([0.5, -1.0, 2.0, 0.25], badx)

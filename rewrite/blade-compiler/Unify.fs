@@ -19,6 +19,117 @@ type TypeError =
     | InvalidArrayCapture of varName: string
     | InvalidApplication of funcType: IRType
     | PatternTypeMismatch of pattern: string * expected: IRType
+    // ---- Promoted from Other (Stage 5 burn-down). FIELDS = sprintf args;
+    //      formatTypeError (TypeEnv.fs) renders each verbatim. ----
+    // Index-type violations (BL4003)
+    | IndexTagMismatchNamed of expected: string * actual: string
+    | IndexTagMismatchAnon of expected: string
+    | CrossNominalIndexArith of left: string * right: string
+    | CrossAnonIndexArith of left: int * right: int
+    | IndexTypeArithForbidden of name: string
+    | IrrepsIdxArgMismatch of pos: int * expected: string * actual: string
+    | CompoundBareWildcard of rank: int
+    | CompoundWildcardArity of rank: int * tupleLen: int
+    | CompoundAllFree of rank: int
+    | CompoundOverSupplied of rank: int * got: int
+    | CompoundNeedsTuple of rank: int
+    | RaggedIdxNeedsPrior of func: string
+    | IrrepsIdxSpec of detail: string
+    | IrrepsIdxSpecFn of func: string * detail: string
+    // Symmetry / compact-group violations (BL4004)
+    | DecompactDimRange of dim: int * totalDims: int
+    | DecompactPlainAxis of dim: int
+    | DecompactLastSlotOnly of slots: int * slot: int
+    | TransposeAxisRange of axis: int * totalDims: int
+    | TransposeAxesEqual of axisA: int * axisB: int
+    | TransposeWithinGroup of rank: int
+    // Unit mismatch (BL3006)
+    | UnitMismatch of context: string * left: string * right: string
+    // Invalid builtin/intrinsic argument (BL3007)
+    | IntrinsicBindArrayFailed of op: string
+    | IntrinsicNeedsArray of op: string
+    | IntrinsicScalarOnly of name: string
+    | IntrinsicNotComplex of name: string
+    | IntrinsicNeedsNumeric of name: string
+    | AbsNeedsNumericScalar of got: string
+    | IntrinsicComplexScalarOnly of name: string
+    | IntrinsicNeedsComplex of name: string * got: string
+    | ComplexArity of got: int
+    | ReduceEmptyArray of extent: int64
+    | ProdsumExtentMismatch of a: int64 * b: int64
+    | GramNeedsRank2 of leftRank: int * rightRank: int
+    | ArrayLitLength of got: int * expected: int * axisTag: string option
+    | ObjectForKernel of got: string
+    | ChainOpNeedsMethodFor of leftDesc: string
+    | PlaceholderNeedsAllBound of got: int * total: int
+    | GroupKeysRank1
+    | CumulantOrderPositive of order: int
+    | CumulantOrderExceeds of order: int * carried: int
+    | CumulantNeedsDist of got: string
+    | DistOrderDisagree of op: string * leftOrder: int * rightOrder: int
+    | DistNotIndependent of op: string * source1: string * source2: string * steering: string
+    | DistOpUndefined of left: string * right: string
+    | EnumIdxMixedKinds of name: string
+    | ImplMissingMethods of iface: string * typeName: string * methods: string
+    // <|:> allocated-fallback operand violations (BL3007)
+    | FallbackNeedsArrays of leftDesc: string * rightDesc: string
+    | FallbackSymmetricLeft
+    | FallbackRightNotDense of what: string
+    | FallbackRankMismatch of leftRank: int * rightRank: int
+    // Struct construction (BL3008)
+    | StructFieldDuplicate of structName: string * field: string
+    | StructNoField of structName: string * field: string
+    | StructSpreadBase of structName: string
+    | StructSpreadNotStruct of structName: string * got: string
+    | StructSpreadRedundant of structName: string
+    | StructMissingField of structName: string * field: string
+    | StructFieldType of structName: string * field: string * expected: string * actual: string
+    | UnknownStructType of name: string
+    | StructBoundScope of structName: string * field: string * bad: string
+    // Constraint / where-clause violations (BL4001)
+    | StructWhereNotBool of structName: string * got: string
+    | StructWhereError of structName: string * inner: string
+    | WherePredicateUnannotated of owner: string * func: string
+    | PplConstraintNeedsImport of func: string * bare: string
+    | UnknownWhereConstraint of func: string * name: string * vocab: string
+    // Static-evaluation requirement (BL4002)
+    | DistOrderCompileTime of func: string
+    // Mutability violations (BL4005)
+    | ImmutableStaticAssign of name: string
+    | MutParamNotArray of func: string * param: string
+    // Mutual-group binding / constraint violations (BL4006)
+    | MutualBindJointly of typeName: string * describe: string * lowerNames: string
+    | MutualDirectElementsOnly of describe: string
+    | MutualMixedGroups
+    | MutualDuplicateMember of describe: string
+    | MutualIncompleteAnnotation of describe: string
+    | MutualJointAnnotationOnly of describe: string
+    | MutualParamMemberType of func: string * param: string * memberName: string
+    | MutualBindTuple of names: string
+    | MutualReturnTupleElements of describe: string
+    | StructFieldMutualType of structName: string * field: string * memberName: string
+    | MutualMemberDupGroup of memberName: string
+    | MutualMemberNotStruct of memberName: string * name: string
+    | MutualMemberBadAlias of memberName: string * got: string
+    | MutualUnknownField of memberName: string * field: string * structName: string
+    | MutualScalarBare of memberName: string * field: string
+    | MutualStructNeedsField of memberName: string
+    | MutualUnknownIdent of name: string
+    | MutualUnsupportedExpr
+    | MutualConstraintNotBool of groupId: string * got: string
+    | MutualConstraintError of groupId: string * inner: string
+    // Provider (import/read/write/stream) argument errors (BL3007 / BL2003)
+    | ProviderStreamNeedsVar of alias: string
+    | ProviderReadWindowBounds of alias: string * lo: int64 * hi: int64 * n: int64
+    | ProviderReadWindowLiteralExtent of alias: string
+    | ProviderReadWindowPacked of alias: string
+    | ProviderReadWindowNeedsVar of alias: string
+    | ProviderReadWindowArgs of alias: string
+    | ProviderWriteNeedsArray of alias: string
+    | ProviderWriteNamedBinding of alias: string
+    | ProviderWriteArgs of alias: string
+    | ProviderImportByModule of suggestion: string * providers: string
+    | ProviderNoSelectiveImport of pname: string
     | Other of string
 
 /// A compile error with source location and context stack
@@ -26,6 +137,9 @@ type CompileError = {
     Error: TypeError
     Span: Span
     Context: string list  // e.g., ["in function 'foo'"; "in let binding 'x'"]
+    /// BLxxxx diagnostic code when the raiser knows it (elaborators, index
+    /// validation). None = derive from the TypeError variant at render time.
+    Code: string option
 }
 
 type TypeResult<'T> = Result<'T, TypeError>
@@ -392,8 +506,16 @@ let rec unify (subst: Subst) (t1: IRType) (t2: IRType) : TypeResult<unit> =
                 | _ -> Error (TypeMismatch (t1, t2)))
         List.zip s1 s2 |> List.fold unifySlot (Ok ())
         |> Result.bind (fun () -> unify subst r1 r2)
-    // Unit-annotated types: unify inner types (unit checking is separate)
-    | IRTUnitAnnotated (inner1, _), IRTUnitAnnotated (inner2, _) -> unify subst inner1 inner2
+    // Unit-annotated types: when BOTH sides carry a unit signature the
+    // signatures must agree — this is what makes bindings and function
+    // boundaries unit-checked (`let d: Float<meters> = t` with t in
+    // seconds, or passing a seconds value to a meters parameter). The
+    // asymmetric arms stay permissive: bare values flow freely into and
+    // out of annotated positions (that is how units are introduced —
+    // `let d: Float<meters> = 100.0`).
+    | IRTUnitAnnotated (inner1, u1), IRTUnitAnnotated (inner2, u2) ->
+        if unitCompatible u1 u2 then unify subst inner1 inner2
+        else Error (UnitMismatch ("assignment", ppUnitSig u1, ppUnitSig u2))
     | IRTUnitAnnotated (inner, _), other | other, IRTUnitAnnotated (inner, _) -> unify subst inner other
     | _ -> Error (TypeMismatch (t1, t2))
 

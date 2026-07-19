@@ -29,8 +29,8 @@ let V2 = ppl.cumulant(dV, 2)
 let V3 = ppl.cumulant(dV, 3)
 
 // outgoing velocities: affine images of V, so v1 and v2 share higher cumulants
-function v1(m1, m2) = (2.0 * v(m1, m2) - 2.0) / (m1 + m2)
-function v2(m1, m2) = (2.0 * v(m1, m2) + 1.0) / (m1 + m2)
+function v1(m1, m2) = 2.0 * v(m1, m2) - 2.0
+function v2(m1, m2) = 2.0 * v(m1, m2) + 1.0
 let dv1 = ppl.dist_map(d, 3, 2, v1)
 let dv2 = ppl.dist_map(d, 3, 2, v2)
 let a2 = ppl.cumulant(dv1, 2)

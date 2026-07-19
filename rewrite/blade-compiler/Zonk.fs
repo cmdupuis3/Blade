@@ -86,6 +86,7 @@ let rec zonkExpr (subst: Subst) (expr: TypedExpr) : TypedExpr =
         | TExprFusion (a, b) -> TExprFusion (z a, z b)
         | TExprFunctorMap (f, c) -> TExprFunctorMap (z f, z c)
         | TExprChoice (a, b) -> TExprChoice (z a, z b)
+        | TExprFallback (a, b) -> TExprFallback (z a, z b)
         | TExprCompose (op, a, b) -> TExprCompose (op, z a, z b)
         | TExprGuard (c, b) -> TExprGuard (z c, z b)
         | TExprMask (a, p) -> TExprMask (z a, z p)

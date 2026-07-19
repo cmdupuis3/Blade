@@ -1,0 +1,20 @@
+// TEST: Struct Guard Predicate Captures Module Static
+// A where-clause predicate that references a module-level static is a
+// capturing function (main-local std::function). A free function that
+// constructs the struct calls the predicate through the construction
+// guard, so it must be pulled into main() too — transitive main-locality
+// (computeMainLocalFuncIds in CodeGen.fs). Previously this emitted a free
+// C++ `mk` referencing the main-scoped predicate and failed to compile.
+let static CAP = 10
+static function under_cap(a: Int, b: Int) -> Bool = a + b < CAP
+struct Pair {
+    a: Int,
+    b: Int
+} where under_cap(a, b)
+function mk(a: Int, b: Int) -> Pair = {
+    let r = Pair { a = a, b = b }
+    r
+}
+let x = mk(3, 4)
+let t = x.a + x.b
+// EXPECT: t = 7

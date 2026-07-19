@@ -1,0 +1,11 @@
+// TEST: Struct Above Predicate
+// Declaration order: static functions register in a pre-pass before decl
+// checking, so a struct declared ABOVE its predicate still resolves it.
+struct Ordered {
+    lo: Int,
+    hi: Int
+} where leq(lo, hi)
+static function leq(a: Int, b: Int) -> Bool = a <= b
+let o = Ordered { lo = 1, hi = 9 }
+let h = o.hi
+// EXPECT: h = 9

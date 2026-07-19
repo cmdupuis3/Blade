@@ -28,26 +28,26 @@ open Blade.TypeEnv
 open Blade.Zonk
 
 let rec evalConstExpr (env: TypeEnv) (expr: Expr) : int64 option =
-    match expr with
-    | ExprLit (LitInt n) -> Some n
-    | ExprLit (LitFloat f) -> Some (int64 f)
-    | ExprVar name ->
+    match expr.Kind with
+    | ExprKind.ExprLit (LitInt n) -> Some n
+    | ExprKind.ExprLit (LitFloat f) -> Some (int64 f)
+    | ExprKind.ExprVar name ->
         match lookupVar name env with
         | Some info ->
             match info.Type with
             | IRTNat (Some n) -> Some (int64 n)
             | _ -> None
         | None -> None
-    | ExprBinOp (_, OpAdd, l, r) ->
+    | ExprKind.ExprBinOp (_, OpAdd, l, r) ->
         match evalConstExpr env l, evalConstExpr env r with
         | Some a, Some b -> Some (a + b) | _ -> None
-    | ExprBinOp (_, OpSub, l, r) ->
+    | ExprKind.ExprBinOp (_, OpSub, l, r) ->
         match evalConstExpr env l, evalConstExpr env r with
         | Some a, Some b -> Some (a - b) | _ -> None
-    | ExprBinOp (_, OpMul, l, r) ->
+    | ExprKind.ExprBinOp (_, OpMul, l, r) ->
         match evalConstExpr env l, evalConstExpr env r with
         | Some a, Some b -> Some (a * b) | _ -> None
-    | ExprBinOp (_, OpDiv, l, r) ->
+    | ExprKind.ExprBinOp (_, OpDiv, l, r) ->
         match evalConstExpr env l, evalConstExpr env r with
         | Some a, Some b when b <> 0L -> Some (a / b) | _ -> None
     | _ -> None
@@ -68,7 +68,8 @@ let staticEnvOf (env: TypeEnv) : StaticEval.StaticEnv =
               StaticEval.Params = fd.Params |> List.map (fun p -> p.Name)
               StaticEval.Body = fd.Body })
       CalledFunctions = ref Set.empty
-      ProviderRoots = Map.empty }
+      ProviderRoots = Map.empty
+      Structs = Map.empty }
 
 let evalStaticIntExpr (env: TypeEnv) (expr: Expr) : int option =
     match evalConstExpr env expr with
@@ -96,23 +97,23 @@ let evalStaticValueExpr (env: TypeEnv) (expr: Expr) : Result<StaticEval.StaticVa
 let rec provenanceOfSurface (env: TypeEnv) (e: Expr) : Set<string> =
     let prov = provenanceOfSurface env
     let unionMany es = es |> List.map prov |> List.fold Set.union Set.empty
-    match e with
-    | ExprVar n ->
+    match e.Kind with
+    | ExprKind.ExprVar n ->
         (match lookupVar n env with
          | Some vi ->
              match env.Provenance.TryGetValue vi.VarId with
              | true, s -> s
              | _ -> Set.empty
          | None -> Set.empty)
-    | ExprBinOp (_, _, l, r) -> Set.union (prov l) (prov r)
-    | ExprUnaryOp (_, x) -> prov x
-    | ExprApp (ExprVar "__ppl_cumulant", _) -> Set.empty   // a projected component is an ARRAY, not a dist
-    | ExprApp (_, args) -> unionMany args            // call result: union of Dist-relevant args (conservative)
-    | ExprTyped (x, _) -> prov x
-    | ExprTuple es -> unionMany es
-    | ExprIf (_, t, f) -> Set.union (prov t) (prov f)
-    | ExprLet (b, body) -> Set.union (prov b.Value) (prov body)
-    | ExprBlock (stmts, fin) ->
+    | ExprKind.ExprBinOp (_, _, l, r) -> Set.union (prov l) (prov r)
+    | ExprKind.ExprUnaryOp (_, x) -> prov x
+    | ExprKind.ExprApp ({ Kind = ExprKind.ExprVar "__ppl_cumulant" }, _) -> Set.empty   // a projected component is an ARRAY, not a dist
+    | ExprKind.ExprApp (_, args) -> unionMany args            // call result: union of Dist-relevant args (conservative)
+    | ExprKind.ExprTyped (x, _) -> prov x
+    | ExprKind.ExprTuple es -> unionMany es
+    | ExprKind.ExprIf (_, t, f) -> Set.union (prov t) (prov f)
+    | ExprKind.ExprLet (b, body) -> Set.union (prov b.Value) (prov body)
+    | ExprKind.ExprBlock (stmts, fin) ->
         let stmtProv s =
             let rec go s =
                 match s with
@@ -131,9 +132,9 @@ let lowerExtentExpr (env: TypeEnv) (expr: Expr) : IRExpr =
     match evalConstExpr env expr with
     | Some n -> IRLit (IRLitInt n)
     | None ->
-        match expr with
-        | ExprVar name -> IRParam (name, 0, IRTNat None)
-        | ExprLit (LitInt n) -> IRLit (IRLitInt n)
+        match expr.Kind with
+        | ExprKind.ExprVar name -> IRParam (name, 0, IRTNat None)
+        | ExprKind.ExprLit (LitInt n) -> IRLit (IRLitInt n)
         | _ -> IRParam ("?", 0, IRTNat None)
 
 /// Lower an extent expression with one bound parameter substituted for an IR
@@ -146,16 +147,16 @@ let lowerExtentExpr (env: TypeEnv) (expr: Expr) : IRExpr =
 /// extent expression is consumed directly at the iteration-bound emission
 /// site, so the expression structure must survive.
 let rec substituteAndLowerExtent (env: TypeEnv) (paramName: Ident) (subst: IRExpr) (expr: Expr) : IRExpr =
-    match expr with
-    | ExprVar n when n = paramName -> subst
+    match expr.Kind with
+    | ExprKind.ExprVar n when n = paramName -> subst
     | _ ->
         match evalConstExpr env expr with
         | Some k -> IRLit (IRLitInt k)
         | None ->
-            match expr with
-            | ExprVar name -> IRParam (name, 0, IRTNat None)
-            | ExprLit (LitInt n) -> IRLit (IRLitInt n)
-            | ExprBinOp (_mode, op, l, r) ->
+            match expr.Kind with
+            | ExprKind.ExprVar name -> IRParam (name, 0, IRTNat None)
+            | ExprKind.ExprLit (LitInt n) -> IRLit (IRLitInt n)
+            | ExprKind.ExprBinOp (_mode, op, l, r) ->
                 let l' = substituteAndLowerExtent env paramName subst l
                 let r' = substituteAndLowerExtent env paramName subst r
                 let irOpOpt =
@@ -169,7 +170,7 @@ let rec substituteAndLowerExtent (env: TypeEnv) (paramName: Ident) (subst: IRExp
                 match irOpOpt with
                 | Some irOp -> IRBinOp (IRElementwise, irOp, l', r')
                 | None -> IRParam ("?", 0, IRTNat None)
-            | ExprUnaryOp (OpNeg, e) ->
+            | ExprKind.ExprUnaryOp (OpNeg, e) ->
                 IRUnaryOp (IRNeg, substituteAndLowerExtent env paramName subst e)
             | _ ->
                 IRParam ("?", 0, IRTNat None)
@@ -209,7 +210,10 @@ let rec lowerTypeExpr (env: TypeEnv) (ty: TypeExpr) : IRType =
         | "Complex128" -> tryResolveUnitArg (IRTScalar ETComplex128) args
         | "Bool" -> IRTScalar ETBool
         | "Void" -> IRTUnit
-        | "Nat" -> IRTNat None
+        // Nat resolves a unit arg like the other numeric bases so
+        // `Nat<angular_momentum>` carries its tag instead of silently
+        // dropping it (non-unit args keep returning bare Nat, as before).
+        | "Nat" -> tryResolveUnitArg (IRTNat None) args
         | "String" -> IRTScalar ETString
         | "Char" -> IRTScalar ETInt32
         | "Poly" ->
@@ -441,9 +445,9 @@ let rec lowerTypeExpr (env: TypeEnv) (ty: TypeExpr) : IRType =
         // run by registerTypeDecl and surfaces a clean error when aliased; an
         // unaliased mixed-list slips through silently with ETInt64.
         let isAllString =
-            match valuesExpr with
-            | ExprArrayLit elems when not elems.IsEmpty ->
-                elems |> List.forall (function ExprLit (LitString _) -> true | _ -> false)
+            match valuesExpr.Kind with
+            | ExprKind.ExprArrayLit elems when not elems.IsEmpty ->
+                elems |> List.forall (fun el -> match el.Kind with ExprKind.ExprLit (LitString _) -> true | _ -> false)
             | _ -> false
         if isAllString then IRTScalar ETString else IRTScalar ETInt64
 
@@ -456,6 +460,13 @@ let rec lowerTypeExpr (env: TypeEnv) (ty: TypeExpr) : IRType =
         // irreps identity tag for IrrepsIdx).
         let idx = lowerIndexType env 0 ty
         mkArrayArrow [idx] (IRTScalar ETFloat64) None
+
+    | TyHalo _ ->
+        // halo<Inner, [offs]> is legal only as a range<> slot (handled in the
+        // ExprRange arm via haloSlotOf). In any other type position there is
+        // no value meaning; degrade to the iteration value (int64) — the slot
+        // path never routes here.
+        IRTScalar ETInt64
 
     | TyPoly inner ->
         // Fresh arity-variable name per Poly occurrence. See the TyNamed "Poly"
@@ -503,9 +514,9 @@ and lowerElemType env ty : IRType =
         // Mirror of the value-position handling: all-string values → ETString,
         // otherwise → ETInt64. Same anonymous-tag-loss caveat as above.
         let isAllString =
-            match valuesExpr with
-            | ExprArrayLit elems when not elems.IsEmpty ->
-                elems |> List.forall (function ExprLit (LitString _) -> true | _ -> false)
+            match valuesExpr.Kind with
+            | ExprKind.ExprArrayLit elems when not elems.IsEmpty ->
+                elems |> List.forall (fun el -> match el.Kind with ExprKind.ExprLit (LitString _) -> true | _ -> false)
             | _ -> false
         if isAllString then IRTScalar ETString else IRTScalar ETInt64
     | _ ->
@@ -528,8 +539,8 @@ and lowerIndexType env (_position: int) (ty: TypeExpr) : IRIndexType =
           Symmetry = SymHermitian; Tag = None; IxKind = IxKPlain; Kind = SDimension; Dependencies = [] }
     | TyEnumIdx valuesExpr ->
         let nValues =
-            match valuesExpr with
-            | ExprArrayLit elems -> int64 elems.Length
+            match valuesExpr.Kind with
+            | ExprKind.ExprArrayLit elems -> int64 elems.Length
             | _ -> 0L
         { Id = id; Rank = 1; Extent = IRLit (IRLitInt nValues); Symmetry = SymNone
           Tag = None; IxKind = IxKPlain; Kind = SDimension; Dependencies = [] }
@@ -612,8 +623,8 @@ and lowerIndexType env (_position: int) (ty: TypeExpr) : IRIndexType =
         // fall back to a rank-1 degraded placeholder for now (no producer relies on
         // them yet). Nested matches are parenthesized to avoid outer-arm absorption.
         let maskIR, rank =
-            match maskExpr with
-            | ExprVar name ->
+            match maskExpr.Kind with
+            | ExprKind.ExprVar name ->
                 (match lookupVar name env with
                  | Some vi ->
                      let rank =
@@ -682,9 +693,9 @@ and lowerIndexTypeList (env: TypeEnv) (position: int) (ty: TypeExpr) : IRIndexTy
                     // the inline form `function f(x) = e`.
                     let funcParamName = funcDecl.Params.[0].Name
                     let bodyExpr =
-                        match funcDecl.Body with
-                        | ExprBlock ([], Some e) -> e
-                        | other -> other
+                        match funcDecl.Body.Kind with
+                        | ExprKind.ExprBlock ([], Some e) -> e
+                        | _ -> funcDecl.Body
                     substituteAndLowerExtent env funcParamName outerVarRef bodyExpr
                 | _ ->
                     IRParam ("__depidx_inner", 0, IRTNat None)
@@ -778,10 +789,107 @@ and lowerIndexTypeList (env: TypeEnv) (position: int) (ty: TypeExpr) : IRIndexTy
 /// `Nat<LatIdx>` from this element type — no manual annotation needed.
 let elemTypeForIterationIndex (idx: IRIndexType) : IRType =
     match idx.Tag with
+    | Some name when name.StartsWith("__halowin|") ->
+        // Halo window param: the kernel receives this as `w`, and w(o) neighbor
+        // reads dispatch on the "__halowin|" tag (offsets + inner name encoded
+        // in it). Carried as a tagged int index so it erases to int64 in C++.
+        IRTIdxTagged (IRTScalar ETInt64, IRefNamed name)
     | Some name when not (name.StartsWith("__")) ->
         IRTIdxTagged (IRTScalar ETInt64, IRefNamed name)
     | _ ->
         IRTScalar ETInt64
+
+/// halo<Inner, offsets> slot construction — shared by the expression form
+/// (`method_for(halo<..>)`) and the range<> slot form (`range<halo<..>, ..>`).
+/// The offsets payload is either
+///   - a FLAT int array `[-1, 0, 1]`  -> ONE slot (a 1-D halo), or
+///   - an array of per-axis int arrays `[[-1,0,1],[0],[-1,0,1]]` -> k slots
+///     over the SAME inner index (arity = sub-array count), the n-D product
+///     window written as one halo.
+/// Each slot is the inner index SHRUNK to its interior (BndShrink: every
+/// declared neighbor of every iterated center is in-bounds, so window reads
+/// need no guards) and tagged "__halowin|<d|c>:<innerName>|<o1,o2,..>". The
+/// center's start offset (max(0, -min offsets∪{0})) is re-derived from the
+/// tag at loop-building time (IR mkElement via Types.haloStartOffsetOfTag) —
+/// per-slot, which the single shared IRRange offset cannot express for
+/// multi-slot ranges.
+let haloSlotsOf (env: TypeEnv) (innerTy: TypeExpr) (offsetsExpr: Expr) : TypeResult<IRIndexType list> =
+    let inner = lowerIndexType env 0 innerTy
+    // One slot from one flat per-axis offset set.
+    let slotOfInts (offsets: int list) : TypeResult<IRIndexType> =
+        if List.isEmpty offsets then Error (Other "halo<...>: offsets array must be non-empty")
+        elif inner.Rank <> 1 then
+            Error (Other "halo<...>: the inner index must be rank-1 (n-D = per-axis offset arrays [[..],[..],..] or separate range<halo<..>, ..> slots)")
+        else
+        let offCsv = offsets |> List.map string |> String.concat ","
+        match inner.Extent with
+        | IRCompoundMask _ ->
+            // Compound inner: ordinals walk the PRESENT cells, so "next"
+            // is the next present cell (the hashed-index generalization).
+            // The mask cardinality is runtime — the interior shrink can't
+            // fold into the extent here; it rides the tag and is applied
+            // at the loop bound (buildLoopNestCodeGen StrictOffset).
+            // IxKCompound is KEPT so the cidx materialization and
+            // cardinality-bound machinery still engage.
+            Ok { inner with
+                    Id = env.Builder.FreshId()
+                    Extent = inner.Extent
+                    Tag = Some (sprintf "__halowin|c:|%s" offCsv)
+                    IxKind = IxKCompound }
+        | _ ->
+            // Dense inner. Reach includes the implicit center 0: w(0) is
+            // always readable even when 0 is not in the declared set
+            // (e.g. lag sets [-12,-24]).
+            let lo = min 0 (List.min offsets)
+            let hi = max 0 (List.max offsets)
+            let shrink = int64 (-lo + hi)
+            let shrunkExtent =
+                match inner.Extent with
+                | IRLit (IRLitInt n) -> IRLit (IRLitInt (n - shrink))
+                | e -> IRBinOp (IRElementwise, IRSub, e, IRLit (IRLitInt shrink))
+            let innerName =
+                match inner.Tag with
+                | Some n when not (n.StartsWith("__")) -> n
+                | _ -> ""
+            Ok { inner with
+                    Id = env.Builder.FreshId()
+                    Extent = shrunkExtent
+                    Tag = Some (sprintf "__halowin|d:%s|%s" innerName offCsv)
+                    IxKind = IxKPlain }
+    match evalStaticValueExpr env offsetsExpr with
+    | Error msg -> Error (Other (sprintf "halo<...>: offsets must be a compile-time int array (%s)" msg))
+    | Ok sv ->
+        let asInt = function StaticEval.SVInt n -> Some (int n) | _ -> None
+        match sv with
+        | StaticEval.SVInt n -> slotOfInts [int n] |> Result.map List.singleton
+        | StaticEval.SVTuple vs when not vs.IsEmpty ->
+            let flat = vs |> List.map asInt
+            if List.forall Option.isSome flat then
+                // Flat form: one axis.
+                slotOfInts (flat |> List.map Option.get) |> Result.map List.singleton
+            else
+                // Nested form: every entry must be a non-empty int array;
+                // each becomes one slot over the same inner index.
+                let perAxis =
+                    vs |> List.map (function
+                        | StaticEval.SVTuple xs ->
+                            let os = xs |> List.map asInt
+                            if List.forall Option.isSome os && not os.IsEmpty
+                            then Some (os |> List.map Option.get) else None
+                        | _ -> None)
+                if List.forall Option.isSome perAxis then
+                    // (local sequencer: TypeCheck's sequenceResults is defined
+                    // further down the file, out of scope here)
+                    perAxis
+                    |> List.map (Option.get >> slotOfInts)
+                    |> List.fold (fun acc r ->
+                        match acc, r with
+                        | Ok xs, Ok x -> Ok (xs @ [x])
+                        | Error e, _ -> Error e
+                        | _, Error e -> Error e) (Ok [])
+                else
+                    Error (Other "halo<...>: offsets must be a flat int array [-1,0,1] or an array of per-axis int arrays [[-1,0,1],[0],[-1,0,1]] (no mixing, no empty axes)")
+        | _ -> Error (Other "halo<...>: offsets must be a compile-time array of integer literals, e.g. [-1, 0, 1]")
 
 // ============================================================================
 // 5. Capture Analysis
@@ -789,28 +897,28 @@ let elemTypeForIterationIndex (idx: IRIndexType) : IRType =
 
 /// Collect free variables in an expression (names not bound in local scope).
 let rec collectFreeVars (bound: Set<string>) (expr: Expr) : Set<string> =
-    match expr with
-    | ExprVar name ->
+    match expr.Kind with
+    | ExprKind.ExprVar name ->
         if Set.contains name bound then Set.empty else Set.singleton name
-    | ExprLit _ -> Set.empty
-    | ExprBinOp (_, _, l, r) ->
+    | ExprKind.ExprLit _ -> Set.empty
+    | ExprKind.ExprBinOp (_, _, l, r) ->
         Set.union (collectFreeVars bound l) (collectFreeVars bound r)
-    | ExprUnaryOp (_, e) -> collectFreeVars bound e
-    | ExprApp (f, args) ->
+    | ExprKind.ExprUnaryOp (_, e) -> collectFreeVars bound e
+    | ExprKind.ExprApp (f, args) ->
         Set.unionMany (collectFreeVars bound f :: (args |> List.map (collectFreeVars bound)))
-    | ExprLambda (parms, _, body) ->
+    | ExprKind.ExprLambda (parms, _, body) ->
         let bound' = parms |> List.fold (fun s p -> Set.add p.Name s) bound
         collectFreeVars bound' body
-    | ExprLet (binding, body) ->
+    | ExprKind.ExprLet (binding, body) ->
         let valFree = collectFreeVars bound binding.Value
         let names = patternNames binding.Pattern
         let bound' = names |> List.fold (fun s n -> Set.add n s) bound
         Set.union valFree (collectFreeVars bound' body)
-    | ExprIf (c, t, e) ->
+    | ExprKind.ExprIf (c, t, e) ->
         Set.unionMany [collectFreeVars bound c; collectFreeVars bound t; collectFreeVars bound e]
-    | ExprTuple es | ExprArrayLit es | ExprZip es | ExprStack es | ExprSequence es ->
+    | ExprKind.ExprTuple es | ExprKind.ExprArrayLit es | ExprKind.ExprZip es | ExprKind.ExprStack es | ExprKind.ExprSequence es ->
         es |> List.map (collectFreeVars bound) |> Set.unionMany
-    | ExprMatch (scr, cases) ->
+    | ExprKind.ExprMatch (scr, cases) ->
         let scrFree = collectFreeVars bound scr
         let caseFree = cases |> List.map (fun c ->
             let names = patternNames c.Pattern
@@ -819,7 +927,7 @@ let rec collectFreeVars (bound: Set<string>) (expr: Expr) : Set<string> =
                             |> Option.defaultValue Set.empty
             Set.union guardFree (collectFreeVars bound' c.Body))
         Set.union scrFree (Set.unionMany caseFree)
-    | ExprBlock (stmts, finalExpr) ->
+    | ExprKind.ExprBlock (stmts, finalExpr) ->
         let mutable b = bound
         let mutable free = Set.empty
         for stmt in stmts do
@@ -857,34 +965,36 @@ let rec collectFreeVars (bound: Set<string>) (expr: Expr) : Set<string> =
         match finalExpr with
         | Some e -> Set.union free (collectFreeVars b e)
         | None -> free
-    | ExprMethodFor arrays -> arrays |> List.map (collectFreeVars bound) |> Set.unionMany
-    | ExprObjectFor kernel -> collectFreeVars bound kernel
-    | ExprPure e | ExprCompute e | ExprRead e | ExprRank e -> collectFreeVars bound e
-    | ExprGuard (c, b) -> Set.union (collectFreeVars bound c) (collectFreeVars bound b)
-    | ExprMask (a, p) -> Set.union (collectFreeVars bound a) (collectFreeVars bound p)
-    | ExprCompound (d, m) -> Set.union (collectFreeVars bound d) (collectFreeVars bound m)
-    | ExprIntersect (a, b) -> Set.union (collectFreeVars bound a) (collectFreeVars bound b)
-    | ExprUnion (a, b) -> Set.union (collectFreeVars bound a) (collectFreeVars bound b)
-    | ExprUnique a -> collectFreeVars bound a
-    | ExprContains (a, v) -> Set.union (collectFreeVars bound a) (collectFreeVars bound v)
-    | ExprGroupBy (v, k) -> Set.union (collectFreeVars bound v) (collectFreeVars bound k)
-    | ExprGroupKeys ks -> ks |> List.map (collectFreeVars bound) |> Set.unionMany
-    | ExprSort (a, k) -> Set.union (collectFreeVars bound a) (collectFreeVars bound k)
-    | ExprReduce (a, k, i) ->
+    | ExprKind.ExprMethodFor arrays -> arrays |> List.map (collectFreeVars bound) |> Set.unionMany
+    | ExprKind.ExprObjectFor kernel -> collectFreeVars bound kernel
+    | ExprKind.ExprPure e | ExprKind.ExprCompute e | ExprKind.ExprRead e | ExprKind.ExprRank e -> collectFreeVars bound e
+    | ExprKind.ExprGuard (c, b) -> Set.union (collectFreeVars bound c) (collectFreeVars bound b)
+    | ExprKind.ExprMask (a, p) -> Set.union (collectFreeVars bound a) (collectFreeVars bound p)
+    | ExprKind.ExprCompound (d, m) -> Set.union (collectFreeVars bound d) (collectFreeVars bound m)
+    | ExprKind.ExprIntersect (a, b) -> Set.union (collectFreeVars bound a) (collectFreeVars bound b)
+    | ExprKind.ExprUnion (a, b) -> Set.union (collectFreeVars bound a) (collectFreeVars bound b)
+    | ExprKind.ExprUnique a -> collectFreeVars bound a
+    | ExprKind.ExprContains (a, v) -> Set.union (collectFreeVars bound a) (collectFreeVars bound v)
+    | ExprKind.ExprGroupBy (v, k) -> Set.union (collectFreeVars bound v) (collectFreeVars bound k)
+    | ExprKind.ExprGroupKeys ks -> ks |> List.map (collectFreeVars bound) |> Set.unionMany
+    | ExprKind.ExprSort (a, k) -> Set.union (collectFreeVars bound a) (collectFreeVars bound k)
+    | ExprKind.ExprReduce (a, k, i) ->
         let baseVars = Set.union (collectFreeVars bound a) (collectFreeVars bound k)
         match i with
         | Some e -> Set.union baseVars (collectFreeVars bound e)
         | None -> baseVars
-    | ExprExtents a -> collectFreeVars bound a
-    | ExprReynolds (k, _) -> collectFreeVars bound k
-    | ExprField (e, _) -> collectFreeVars bound e
-    | ExprTupleIndex (t, i) -> Set.union (collectFreeVars bound t) (collectFreeVars bound i)
-    | ExprStruct (_, fields) -> fields |> List.map (snd >> collectFreeVars bound) |> Set.unionMany
-    | ExprReplicate (n, b) -> Set.union (collectFreeVars bound n) (collectFreeVars bound b)
-    | ExprDotDot (lo, hi) -> Set.union (collectFreeVars bound lo) (collectFreeVars bound hi)
-    | ExprTyped (e, _) -> collectFreeVars bound e
-    | ExprAssign (l, r) -> Set.union (collectFreeVars bound l) (collectFreeVars bound r)
-    | ExprFor (src, _, kernelOpt) ->
+    | ExprKind.ExprExtents a -> collectFreeVars bound a
+    | ExprKind.ExprReynolds (k, _) -> collectFreeVars bound k
+    | ExprKind.ExprField (e, _) -> collectFreeVars bound e
+    | ExprKind.ExprTupleIndex (t, i) -> Set.union (collectFreeVars bound t) (collectFreeVars bound i)
+    | ExprKind.ExprStruct (_, fields, spread) ->
+        let spreadRefs = spread |> Option.map (collectFreeVars bound) |> Option.defaultValue Set.empty
+        Set.union spreadRefs (fields |> List.map (snd >> collectFreeVars bound) |> Set.unionMany)
+    | ExprKind.ExprReplicate (n, b) -> Set.union (collectFreeVars bound n) (collectFreeVars bound b)
+    | ExprKind.ExprDotDot (lo, hi) -> Set.union (collectFreeVars bound lo) (collectFreeVars bound hi)
+    | ExprKind.ExprTyped (e, _) -> collectFreeVars bound e
+    | ExprKind.ExprAssign (l, r) -> Set.union (collectFreeVars bound l) (collectFreeVars bound r)
+    | ExprKind.ExprFor (src, _, kernelOpt) ->
         let srcFree = match src with
                       | ForArrays (arrs, inOpt) -> 
                           let arrFree = arrs |> List.map (collectFreeVars bound) |> Set.unionMany
@@ -893,22 +1003,22 @@ let rec collectFreeVars (bound: Set<string>) (expr: Expr) : Set<string> =
                       | ForKernel k -> collectFreeVars bound k
         let kFree = kernelOpt |> Option.map (collectFreeVars bound) |> Option.defaultValue Set.empty
         Set.union srcFree kFree
-    | ExprAlign (es, _) -> es |> List.map (collectFreeVars bound) |> Set.unionMany
+    | ExprKind.ExprAlign (es, _) -> es |> List.map (collectFreeVars bound) |> Set.unionMany
     | _ -> Set.empty
 
 /// Extract variable names bound by a pattern.
 and patternNames (pat: Pattern) : string list =
-    match pat with
-    | PatWildcard -> []
-    | PatVar name -> [name]
-    | PatLit _ -> []
-    | PatTuple pats -> pats |> List.collect patternNames
-    | PatCons (h, t) -> patternNames h @ patternNames t
-    | PatStruct (_, fields) -> fields |> List.collect (fun (_, p) -> patternNames p)
-    | PatVariant (_, Some p) -> patternNames p
-    | PatVariant (_, None) -> []
-    | PatGuarded (p, _) -> patternNames p
-    | PatTyped (p, _) -> patternNames p
+    match pat.Kind with
+    | PatternKind.PatWildcard -> []
+    | PatternKind.PatVar name -> [name]
+    | PatternKind.PatLit _ -> []
+    | PatternKind.PatTuple pats -> pats |> List.collect patternNames
+    | PatternKind.PatCons (h, t) -> patternNames h @ patternNames t
+    | PatternKind.PatStruct (_, fields) -> fields |> List.collect (fun (_, p) -> patternNames p)
+    | PatternKind.PatVariant (_, Some p) -> patternNames p
+    | PatternKind.PatVariant (_, None) -> []
+    | PatternKind.PatGuarded (p, _) -> patternNames p
+    | PatternKind.PatTyped (p, _) -> patternNames p
 
 /// Build TypedVarInfo capture list from free variable names.
 let buildCaptures (env: TypeEnv) (freeVars: Set<string>) : TypedVarInfo list =
@@ -1051,8 +1161,8 @@ let inferArrayLitType (builder: IRBuilder) (exprs: TypedExpr list) : IRArrayType
         { ElemType = elemType; IndexTypes = indexTypes; IsVirtual = false; Identity = None }
 
 let getArrayType (env: TypeEnv) (expr: Expr) : IRArrayType =
-    match expr with
-    | ExprVar name ->
+    match expr.Kind with
+    | ExprKind.ExprVar name ->
         match lookupVar name env with
         | Some info ->
             match info.Type with
@@ -1103,18 +1213,18 @@ let inferLiteralType lit =
 /// whose Bindings list contains every (name, varId, type) introduced.
 let rec checkPattern (env: TypeEnv) (expected: IRType) (pat: Pattern)
     : TypeResult<TypedPattern> =
-    match pat with
-    | PatWildcard ->
+    match pat.Kind with
+    | PatternKind.PatWildcard ->
         Ok { Kind = TPatWild; Type = expected; Bindings = [] }
 
-    | PatVar name ->
+    | PatternKind.PatVar name ->
         // Check if this name is a registered variant tag (enum constructor without data).
         // The parser can't distinguish `| North -> ...` (variant match) from `| x -> ...` (variable binding)
         // because it doesn't have type information. We resolve the ambiguity here.
         match Map.tryFind name env.VariantTags with
         | Some (parentName, None) ->
             // This is a no-payload variant constructor — treat as PatVariant
-            checkPattern env expected (PatVariant (name, None))
+            checkPattern env expected (inheritPatSpan pat (PatVariant (name, None)))
         | Some (parentName, Some _) ->
             // Variant with payload but used without — treat as variable (may shadow)
             let varId = env.Builder.FreshId()
@@ -1125,12 +1235,12 @@ let rec checkPattern (env: TypeEnv) (expected: IRType) (pat: Pattern)
             Ok { Kind = TPatVar (name, varId); Type = expected
                  Bindings = [(name, varId, expected)] }
 
-    | PatLit lit ->
+    | PatternKind.PatLit lit ->
         let litTy = inferLiteralType lit
         unify env.Subst litTy expected |> Result.map (fun () ->
             { Kind = TPatLit lit; Type = expected; Bindings = [] })
 
-    | PatTuple pats ->
+    | PatternKind.PatTuple pats ->
         match env.Subst.Resolve expected with
         | IRTTuple tys when tys.Length = pats.Length ->
             List.zip pats tys |> List.map (fun (p, t) -> checkPattern env t p)
@@ -1146,7 +1256,7 @@ let rec checkPattern (env: TypeEnv) (expected: IRType) (pat: Pattern)
                     { Kind = TPatTuple tPats; Type = expected
                       Bindings = tPats |> List.collect (fun p -> p.Bindings) }))
 
-    | PatCons (headPat, tailPat) ->
+    | PatternKind.PatCons (headPat, tailPat) ->
         let headTy = env.Subst.Fresh()
         let tailTy = env.Subst.Fresh()
         checkPattern env headTy headPat |> Result.bind (fun tHead ->
@@ -1154,7 +1264,7 @@ let rec checkPattern (env: TypeEnv) (expected: IRType) (pat: Pattern)
             Ok { Kind = TPatCons (tHead, tTail); Type = expected
                  Bindings = tHead.Bindings @ tTail.Bindings }))
 
-    | PatVariant (tag, payloadPat) ->
+    | PatternKind.PatVariant (tag, payloadPat) ->
         match Map.tryFind tag env.VariantTags with
         | Some (parentName, payloadTy) ->
             let isEnum = isEnumType env parentName
@@ -1183,7 +1293,7 @@ let rec checkPattern (env: TypeEnv) (expected: IRType) (pat: Pattern)
             | None ->
                 Ok { Kind = TPatVariant (tag, None, false); Type = expected; Bindings = [] }
 
-    | PatStruct (typeName, fieldPats) ->
+    | PatternKind.PatStruct (typeName, fieldPats) ->
         let fieldTypes =
             match lookupTypeDef typeName env with
             | Some (TDIStruct (_, _, fields, _)) ->
@@ -1197,13 +1307,13 @@ let rec checkPattern (env: TypeEnv) (expected: IRType) (pat: Pattern)
               Type = (if Map.isEmpty fieldTypes then expected else IRTNamed typeName)
               Bindings = tFields |> List.collect (fun (_, p) -> p.Bindings) })
 
-    | PatGuarded (innerPat, _guardExpr) ->
+    | PatternKind.PatGuarded (innerPat, _guardExpr) ->
         // Guard expression is type-checked in inferMatch when we have full env
         checkPattern env expected innerPat |> Result.map (fun tInner ->
             { Kind = TPatGuarded (tInner, mkTyped (TExprLit (LitBool true)) (IRTScalar ETBool))
               Type = expected; Bindings = tInner.Bindings })
 
-    | PatTyped (innerPat, tyAnnotation) ->
+    | PatternKind.PatTyped (innerPat, tyAnnotation) ->
         let annotTy = lowerTypeExpr env tyAnnotation
         unify env.Subst annotTy expected |> Result.bind (fun () ->
             checkPattern env annotTy innerPat)
@@ -1262,9 +1372,9 @@ let requireArrayArg (env: TypeEnv) (tArr: TypedExpr) (opName: string) : TypeResu
             // some other constraint already in the substitution.
             match env.Subst.Resolve(tArr.Type) with
             | ArrayElem a -> Ok a
-            | _ -> Error (Other (sprintf "%s(): failed to bind array type after unification" opName)))
+            | _ -> Error (IntrinsicBindArrayFailed opName))
     | _ ->
-        Error (Other (sprintf "%s() requires an array as argument" opName))
+        Error (IntrinsicNeedsArray opName)
 
 /// Tag-check helper: validate that each index argument's nominal tag (if any)
 /// agrees with the corresponding array slot's nominal tag. Slot tags starting
@@ -1285,13 +1395,9 @@ let private checkArrayIndexTags (env: TypeEnv) (arrTy: IRArrayType) (tArgs: Type
                 | IRTIdxTagged (_, IRefNamed argName)
                     when argName = tagName -> None
                 | IRTIdxTagged (_, IRefNamed argName) ->
-                    Some (Other (sprintf
-                        "Array index tag mismatch: slot expects '%s' but argument has type '%s'."
-                        tagName argName))
+                    Some (IndexTagMismatchNamed (tagName, argName))
                 | IRTIdxTagged (_, IRefAnon _) ->
-                    Some (Other (sprintf
-                        "Array index tag mismatch: slot expects named tag '%s' but argument is an anonymous index value."
-                        tagName))
+                    Some (IndexTagMismatchAnon tagName)
                 | IRTScalar (ETInt32 | ETInt64) ->
                     emitWarning env (sprintf
                         "Array indexed with untagged integer where slot expects tag '%s'. Consider an explicit cast like `(expr : %s)` or iterate via `range<%s>` to flow the tag automatically."
@@ -1357,22 +1463,16 @@ let private validateCompoundIndex (env: TypeEnv) (arrTy: IRArrayType) (tArgs: Ty
                 // hole). It pins nothing: on a rank-1 compound the "residual"
                 // would be the whole array, and on rank >= 2 it is not even a
                 // tuple. Reject rather than let the hole flow as a coordinate.
-                Error (Other (sprintf
-                    "A bare wildcard `_` cannot index a compound axis: it pins no coordinate (the result would just be the array itself). Index with a full %d-tuple, pinning at least one coordinate."
-                    k))
+                Error (CompoundBareWildcard k)
             | _, (_ :: _) ->
                 let tupleLen =
                     match firstArg.Kind with
                     | TExprTuple es -> es.Length
                     | _ -> 0
                 if tupleLen <> k then
-                    Error (Other (sprintf
-                        "Wildcard compound indexing must use a FULL-arity tuple: this compound axis has rank %d, so write all %d coordinates with `_` marking each free axis (got a %d-tuple). Short tuples (without wildcards) pin a leading prefix instead: B((c0, ..., cj))."
-                        k k tupleLen))
+                    Error (CompoundWildcardArity (k, tupleLen))
                 elif wildcardPositions.Length = k then
-                    Error (Other (sprintf
-                        "Compound index with all %d coordinates free (`_`) pins nothing -- the result is the array itself. Drop the index, or pin at least one coordinate."
-                        k))
+                    Error (CompoundAllFree k)
                 else Ok ()
             | _, [] ->
               (match env.Subst.Resolve firstArg.Type with
@@ -1382,17 +1482,13 @@ let private validateCompoundIndex (env: TypeEnv) (arrTy: IRArrayType) (tArgs: Ty
                 // codegen reconstitutes it as a shared window (rank >= 2) or a
                 // dense window (rank 1).
                | IRTTuple tys ->
-                   Error (Other (sprintf
-                       "Compound index over-supplied: this array's compound axis has rank %d (mask is %d-dimensional), so it takes at most a %d-tuple like B((c0, ..., c%d)); got a %d-tuple."
-                       k k k (k - 1) tys.Length))
+                   Error (CompoundOverSupplied (k, tys.Length))
                | _ when k = 1 -> Ok ()  // rank-1 compound: bare scalar index is fine
                | _ ->
                    // k >= 2 but the first arg is not a tuple. This is the flat
                    // currying form B(c0, c1, ...) or a single scalar -- reject and
                    // point at the canonical tuple form.
-                   Error (Other (sprintf
-                       "Compound index must be a single tuple: write B((c0, ..., cj)) with inner parentheses, not the flat form B(c0, ..., cj). A CompoundIdx<mask> axis of rank %d is indexed as one joint tuple, full or partial (formalism 4.5 / poly-indexing 5.4)."
-                       k)))
+                   Error (CompoundNeedsTuple k))
     | _ -> Ok ()
 
 /// The residual index-type fragment (formalism 4.5 currying table) that
@@ -1588,12 +1684,30 @@ let rec private dispatchAppOrIndex (env: TypeEnv) (tFunc: TypedExpr) (tArgs: Typ
                             Some (i, pi, ai)
                         | _ -> None)
                 | _ -> None)
-        match irrepsClash with
-        | Some (i, pi, ai) ->
-            Error (Other (sprintf
-                "argument %d: IrrepsIdx mismatch: the parameter expects %s but the argument carries %s. IrrepsIdx identity is the spec (plus nominative alias name) — equal total_dim does not make two irreps spaces interchangeable."
-                (i + 1) (ppIndexType pi) (ppIndexType ai)))
-        | None ->
+        // Unit strictness at DIRECT APPLICATION, same seam as the irreps
+        // check above: since args are not unified against params, unit
+        // signatures would otherwise never meet at a call site. When BOTH
+        // sides carry a signature (scalar position or array-element
+        // position) they must agree; bare<->annotated stays permissive —
+        // that is how unitful values are introduced from literals.
+        let unitClash =
+            let n = min paramTys.Length tArgs.Length
+            let sigOf t =
+                match env.Subst.Resolve t with
+                | ArrayElem at -> IR.getUnits at.ElemType
+                | resolved -> IR.getUnits resolved
+            List.zip (List.truncate n paramTys) (List.truncate n tArgs)
+            |> List.mapi (fun i (pTy, arg) -> (i, sigOf pTy, sigOf arg.Type))
+            |> List.tryPick (fun (i, pu, au) ->
+                match pu, au with
+                | Some pu, Some au when not (unitCompatible pu au) -> Some (i, pu, au)
+                | _ -> None)
+        match irrepsClash, unitClash with
+        | Some (i, pi, ai), _ ->
+            Error (IrrepsIdxArgMismatch (i + 1, ppIndexType pi, ppIndexType ai))
+        | None, Some (i, pu, au) ->
+            Error (UnitMismatch (sprintf "argument %d" (i + 1), ppUnitSig pu, ppUnitSig au))
+        | None, None ->
             // A Poly<T^r> pack param makes the arrow variadic — its declared
             // param count says nothing about legal call-site arg counts, so
             // arity accounting stands down (monomorphization owns the call).
@@ -1665,6 +1779,7 @@ let private typedExprChildren (expr: TypedExpr) : TypedExpr list =
         | TExprApply info -> info.Loop :: info.Kernel :: info.Arrays
         | TExprBind (a, b) | TExprParallel (a, b) | TExprFusion (a, b)
         | TExprChoice (a, b) -> [a; b]
+        | TExprFallback (a, b) -> [a; b]
         | TExprFunctorMap (f, c) -> [f; c]
         | TExprCompose (_, l, r) -> [l; r]
         | TExprDotDot (lo, hi) -> [lo; hi]
@@ -1752,26 +1867,36 @@ let providerAliasName (env: TypeEnv) (alias: string) : string option =
          | _ -> None)
     | None -> None
 
+/// Entry for every expression: stamps the ambient expression span (for
+/// error location, see TypeEnv.locateError) and back-fills the source span
+/// onto the typed node so TypedExpr.Span is live (full-span AST).
 let rec inferExpr (env: TypeEnv) (expr: Expr) : TypeResult<TypedExpr> =
-    match expr with
+    if expr.Span.StartLine > 0 then setCurrentExprSpan expr.Span
+    match inferExprInner env expr with
+    | Ok te when te.Span.StartLine = 0 && expr.Span.StartLine > 0 ->
+        Ok { te with Span = expr.Span }
+    | r -> r
+
+and inferExprInner (env: TypeEnv) (expr: Expr) : TypeResult<TypedExpr> =
+    match expr.Kind with
     // ---- Literals ----
-    | ExprLit lit -> Ok (mkTyped (TExprLit lit) (inferLiteralType lit))
+    | ExprKind.ExprLit lit -> Ok (mkTyped (TExprLit lit) (inferLiteralType lit))
 
     // ---- Wildcard hole ----
     // `_` in expression position. Not a value; carries a fresh hole type so it
     // passes through tuple inference (e.g. a free axis in a compound index
     // B((a, _, c))). The compound-index dispatch reads the wildcard positions;
     // any other context that reaches lowering with a TExprWildcard is an error.
-    | ExprWildcard -> Ok (mkTyped TExprWildcard (env.Subst.Fresh()))
+    | ExprKind.ExprWildcard -> Ok (mkTyped TExprWildcard (env.Subst.Fresh()))
 
     // ---- Static former marker ----
     // Produced by the parser, eliminated by the Unfold pass before
     // typechecking; reaching here means the pipeline skipped unfolding.
-    | ExprStatic _ ->
+    | ExprKind.ExprStatic _ ->
         Error (Other "internal: static former survived unfolding (the Unfold pass did not run)")
 
     // ---- Variables ----
-    | ExprVar name ->
+    | ExprKind.ExprVar name ->
         match lookupVar name env with
         | Some info ->
             // If this variable has a polymorphic scheme, instantiate it
@@ -1791,18 +1916,18 @@ let rec inferExpr (env: TypeEnv) (expr: Expr) : TypeResult<TypedExpr> =
                             (mkFuncArrow [payloadTy] (IRTNamed parentName)))
             | None -> Error (UnboundVariable name)
 
-    | ExprQualified names ->
+    | ExprKind.ExprQualified names ->
         // Qualified name resolution — limited for now
         Ok (mkTyped (TExprQualified names) IRTUnit)
 
     // ---- Binary operations (dispatch to helper) ----
-    | ExprBinOp (mode, op, left, right) ->
+    | ExprKind.ExprBinOp (mode, op, left, right) ->
         inferBinOp env mode op left right
 
     // ---- Unary operations ----
-    | ExprUnaryOp (op, operand) ->
+    | ExprKind.ExprUnaryOp (op, operand) ->
         inferUnaryOp env op operand
-    | ExprApp (ExprField (ExprVar alias, "load_compound"), [varE; maskE])
+    | ExprKind.ExprApp ({ Kind = ExprKind.ExprField ({ Kind = ExprKind.ExprVar alias }, "load_compound") }, [varE; maskE])
         when (providerAliasName env alias).IsSome ->
         inferExpr env varE |> Result.bind (fun tVar ->
         inferExpr env maskE |> Result.bind (fun tMask ->
@@ -1822,7 +1947,7 @@ let rec inferExpr (env: TypeEnv) (expr: Expr) : TypeResult<TypedExpr> =
     // application). The result is the operand's type unchanged; the typed
     // node is TExprRead, which lowering's tryPlainRead/tryCompoundRead
     // intercept to record the deferred ProviderReadSpec.
-    | ExprApp (ExprField (ExprVar alias, "read"), [operand])
+    | ExprKind.ExprApp ({ Kind = ExprKind.ExprField ({ Kind = ExprKind.ExprVar alias }, "read") }, [operand])
         when (providerAliasName env alias).IsSome ->
         inferExpr env operand |> Result.bind (fun tE ->
             Ok (mkTyped (TExprRead tE) tE.Type))
@@ -1832,7 +1957,7 @@ let rec inferExpr (env: TypeEnv) (expr: Expr) : TypeResult<TypedExpr> =
     // generic application shape so lowering records a STREAMED spec: no
     // materialization at the binding; consuming loop nests inline per-fiber
     // store reads at the S/T boundary instead.
-    | ExprApp (ExprField (ExprVar alias, "stream"), [operand])
+    | ExprKind.ExprApp ({ Kind = ExprKind.ExprField ({ Kind = ExprKind.ExprVar alias }, "stream") }, [operand])
         when (providerAliasName env alias).IsSome ->
         inferExpr env operand |> Result.bind (fun tE ->
             match env.Subst.Resolve tE.Type with
@@ -1841,16 +1966,16 @@ let rec inferExpr (env: TypeEnv) (expr: Expr) : TypeResult<TypedExpr> =
                 let tAlias = mkTyped (TExprVar (alias, aliasVi.VarId, aliasVi.Identity)) aliasVi.Type
                 let tField = mkTyped (TExprField (tAlias, "stream", 0)) tE.Type
                 Ok (mkTyped (TExprApp (tField, [tE])) tE.Type)
-            | _ -> Error (Other (sprintf "%s.stream expects a provider array variable" alias)))
+            | _ -> Error (ProviderStreamNeedsVar alias))
 
     // ---- Windowed packed read: alias.read_window(view, lo, hi) ----
     // Materializes only the cells with every coordinate in [lo, hi): a
     // translated sub-simplex, typed with leading packed extent hi-lo.
     // Bounds are integer literals (the window is a compile-time shape).
-    | ExprApp (ExprField (ExprVar alias, "read_window"), args)
+    | ExprKind.ExprApp ({ Kind = ExprKind.ExprField ({ Kind = ExprKind.ExprVar alias }, "read_window") }, args)
         when (providerAliasName env alias).IsSome ->
         (match args with
-         | [operand; ExprLit (LitInt lo); ExprLit (LitInt hi)] ->
+         | [operand; { Kind = ExprKind.ExprLit (LitInt lo) }; { Kind = ExprKind.ExprLit (LitInt hi) }] ->
              inferExpr env operand |> Result.bind (fun tE ->
                  match env.Subst.Resolve tE.Type with
                  | ArrayElem at ->
@@ -1868,13 +1993,13 @@ let rec inferExpr (env: TypeEnv) (expr: Expr) : TypeResult<TypedExpr> =
                                let tHi = mkTyped (TExprLit (LitInt hi)) (IRTScalar ETInt64)
                                Ok (mkTyped (TExprApp (tField, [tE; tLo; tHi])) winTy)
                            | IRLit (IRLitInt n) ->
-                               Error (Other (sprintf "%s.read_window bounds [%d, %d) must satisfy 0 <= lo < hi <= %d (the packed extent)" alias lo hi n))
+                               Error (ProviderReadWindowBounds (alias, lo, hi, n))
                            | _ ->
-                               Error (Other (sprintf "%s.read_window needs a literal packed extent" alias)))
+                               Error (ProviderReadWindowLiteralExtent alias))
                       | _ ->
-                          Error (Other (sprintf "%s.read_window applies to PACKED variables (leading SymIdx/AntisymIdx); use %s.read for dense variables" alias alias)))
-                 | _ -> Error (Other (sprintf "%s.read_window expects a provider array variable as its first argument" alias)))
-         | _ -> Error (Other (sprintf "%s.read_window expects (variable, lo, hi) with integer-literal bounds" alias)))
+                          Error (ProviderReadWindowPacked alias))
+                 | _ -> Error (ProviderReadWindowNeedsVar alias))
+         | _ -> Error (ProviderReadWindowArgs alias))
 
     // ---- Provider write: alias.write("path", A) ----
     // The source must be a named array binding (the store variable takes
@@ -1882,12 +2007,12 @@ let rec inferExpr (env: TypeEnv) (expr: Expr) : TypeResult<TypedExpr> =
     // at a compile-time-known location, mirroring alias.load). Types as
     // unit; the generic application node is kept — lowering's
     // tryProviderWrite intercepts the shape into a ProviderWriteSpec.
-    | ExprApp (ExprField (ExprVar alias, "write"), args)
+    | ExprKind.ExprApp ({ Kind = ExprKind.ExprField ({ Kind = ExprKind.ExprVar alias }, "write") }, args)
         when (providerAliasName env alias).IsSome ->
         (match args with
-         | [ExprLit (LitString path); valueE] ->
-             (match valueE with
-              | ExprVar _ ->
+         | [{ Kind = ExprKind.ExprLit (LitString path) }; valueE] ->
+             (match valueE.Kind with
+              | ExprKind.ExprVar _ ->
                   inferExpr env valueE |> Result.bind (fun tValue ->
                       match env.Subst.Resolve(tValue.Type) with
                       | ArrayElem _ ->
@@ -1896,11 +2021,11 @@ let rec inferExpr (env: TypeEnv) (expr: Expr) : TypeResult<TypedExpr> =
                           let tField = mkTyped (TExprField (tAlias, "write", 0)) IRTUnit
                           let tPath = mkTyped (TExprLit (LitString path)) (IRTScalar ETString)
                           Ok (mkTyped (TExprApp (tField, [tPath; tValue])) IRTUnit)
-                      | _ -> Error (Other (sprintf "%s.write expects an array as its second argument (the variable to store)" alias)))
-              | _ -> Error (Other (sprintf "%s.write stores a NAMED array binding (its name becomes the store variable's name): bind the value first (let A = ...; %s.write(\"path\", A))" alias alias)))
-         | _ -> Error (Other (sprintf "%s.write expects (\"path\", array): a string-literal store path and the array to write" alias)))
+                      | _ -> Error (ProviderWriteNeedsArray alias))
+              | _ -> Error (ProviderWriteNamedBinding alias))
+         | _ -> Error (ProviderWriteArgs alias))
 
-    | ExprApp (ExprField (ExprVar n, field), args)
+    | ExprKind.ExprApp ({ Kind = ExprKind.ExprField ({ Kind = ExprKind.ExprVar n }, field) }, args)
         when (lookupVar (sprintf "%s.%s" n field) env).IsSome ->
         let qualName = sprintf "%s.%s" n field
         let info = (lookupVar qualName env).Value
@@ -1917,7 +2042,7 @@ let rec inferExpr (env: TypeEnv) (expr: Expr) : TypeResult<TypedExpr> =
             Ok (mkTyped (TExprApp (tFunc, tArgs)) retTy))
 
     // ---- Method call: obj.method(args) → impl resolution ----
-    | ExprApp (ExprField (obj, method), args) ->
+    | ExprKind.ExprApp ({ Kind = ExprKind.ExprField (obj, method) }, args) ->
         inferMethodCall env obj method args
     // ---- Scalar math intrinsics: exp(x), sqrt(x), ... ----
     // Surface form is a plain call; the name is rewritten to OpMath only
@@ -1926,13 +2051,11 @@ let rec inferExpr (env: TypeEnv) (expr: Expr) : TypeResult<TypedExpr> =
     // an array is a kernel's job, so an array operand is a type error with
     // steering. Result is Float64 (Float32 operands widen; Int operands are
     // promoted by the C++ overload set).
-    | ExprApp (ExprVar name, [arg]) when isMathIntrinsic name && (lookupVar name env).IsNone ->
+    | ExprKind.ExprApp ({ Kind = ExprKind.ExprVar name }, [arg]) when isMathIntrinsic name && (lookupVar name env).IsNone ->
         inferExpr env arg |> Result.bind (fun tArg ->
             match env.Subst.Resolve tArg.Type with
             | ArrayElem _ ->
-                Error (Other (sprintf
-                    "%s applies to scalars; map it over the array elementwise (e.g. method_for(A) <@> lambda(x) -> %s(x) |> compute)."
-                    name name))
+                Error (IntrinsicScalarOnly name)
             | IRTScalar (ETComplex64 | ETComplex128) ->
                 // exp/log/sqrt and the trig/hyperbolic families have std::complex
                 // overloads and preserve the complex type; floor/ceil have no
@@ -1940,16 +2063,24 @@ let rec inferExpr (env: TypeEnv) (expr: Expr) : TypeResult<TypedExpr> =
                 if isComplexMathIntrinsic name then
                     Ok (mkTyped (TExprUnaryOp (OpMath name, tArg)) tArg.Type)
                 else
-                    Error (Other (sprintf "%s is not defined for complex operands." name))
+                    Error (IntrinsicNotComplex name)
             | IRTScalar ETBool | IRTScalar ETString ->
-                Error (Other (sprintf "%s expects a numeric operand." name))
+                Error (IntrinsicNeedsNumeric name)
             | IRTInfer _ ->
                 // Unresolved operand (e.g. an unannotated lambda parameter):
                 // pin it to Float64, the intrinsic's natural domain.
                 unify env.Subst tArg.Type (IRTScalar ETFloat64) |> Result.bind (fun () ->
                 Ok (mkTyped (TExprUnaryOp (OpMath name, tArg)) (IRTScalar ETFloat64)))
-            | _ ->
-                Ok (mkTyped (TExprUnaryOp (OpMath name, tArg)) (IRTScalar ETFloat64)))
+            | resolvedArg ->
+                // Unit propagation at scalar position, same table as the
+                // kernel-body walk (unitRulesForUnaryOp): sqrt halves
+                // all-even exponents, floor/ceil preserve, transcendentals
+                // are dimensionless-out.
+                let resTy =
+                    match unitRulesForUnaryOp (OpMath name) (IR.getUnits resolvedArg) with
+                    | Some u -> IRTUnitAnnotated (IRTScalar ETFloat64, u)
+                    | None -> IRTScalar ETFloat64
+                Ok (mkTyped (TExprUnaryOp (OpMath name, tArg)) resTy))
 
     // ---- abs(x): polymorphic numeric intrinsic ----
     // Deliberately NOT in mathIntrinsics (those are real-valued, typed
@@ -1957,7 +2088,7 @@ let rec inferExpr (env: TypeEnv) (expr: Expr) : TypeResult<TypedExpr> =
     // numeric type and renders as std::abs, whose C++ overload set covers
     // int64 and double. Ubiquitous in dependent field bounds
     // (`in abs(l1 - l2) .. l1 + l2 + 1`).
-    | ExprApp (ExprVar "abs", [arg]) when (lookupVar "abs" env).IsNone ->
+    | ExprKind.ExprApp ({ Kind = ExprKind.ExprVar "abs" }, [arg]) when (lookupVar "abs" env).IsNone ->
         inferExpr env arg |> Result.bind (fun tArg ->
             match env.Subst.Resolve tArg.Type with
             | IRTScalar (ETInt32 | ETInt64 | ETFloat32 | ETFloat64) as sc ->
@@ -1969,8 +2100,13 @@ let rec inferExpr (env: TypeEnv) (expr: Expr) : TypeResult<TypedExpr> =
                 Ok (mkTyped (TExprUnaryOp (OpMath "abs", tArg)) (IRTScalar ETFloat64))
             | IRTInfer _ ->
                 Ok (mkTyped (TExprUnaryOp (OpMath "abs", tArg)) tArg.Type)
+            | IRTUnitAnnotated (IRTScalar (ETInt32 | ETInt64 | ETFloat32 | ETFloat64), _) as t ->
+                // abs preserves the operand's unit annotation (it previously
+                // fell through to the error arm — a unitful scalar is a
+                // perfectly good abs operand).
+                Ok (mkTyped (TExprUnaryOp (OpMath "abs", tArg)) t)
             | other ->
-                Error (Other (sprintf "abs expects a numeric scalar operand, got %s" (ppIRType other))))
+                Error (AbsNeedsNumericScalar (ppIRType other)))
 
     // ---- real(z) / imag(z) / arg(z): complex component/phase accessors ----
     // Plain-call intrinsics (shadowable by a user binding, like abs). Require a
@@ -1979,7 +2115,7 @@ let rec inferExpr (env: TypeEnv) (expr: Expr) : TypeResult<TypedExpr> =
     // the component width (Complex128 -> Float64, Complex64 -> Float32); arg is
     // a Float64 angle. Emit std::real/std::imag/std::arg via the generic unary
     // codegen arm.
-    | ExprApp (ExprVar (("real" | "imag" | "arg") as name), [arg]) when (lookupVar name env).IsNone ->
+    | ExprKind.ExprApp ({ Kind = ExprKind.ExprVar (("real" | "imag" | "arg") as name) }, [arg]) when (lookupVar name env).IsNone ->
         inferExpr env arg |> Result.bind (fun tArg ->
             let op = match name with
                      | "real" -> OpReal
@@ -1992,9 +2128,9 @@ let rec inferExpr (env: TypeEnv) (expr: Expr) : TypeResult<TypedExpr> =
             | IRTScalar ETComplex128 ->
                 Ok (mkTyped (TExprUnaryOp (op, tArg)) (IRTScalar ETFloat64))
             | ArrayElem _ ->
-                Error (Other (sprintf "%s applies to complex scalars; map it over the array elementwise (e.g. method_for(A) <@> lambda(z) -> %s(z) |> compute)." name name))
+                Error (IntrinsicComplexScalarOnly name)
             | other ->
-                Error (Other (sprintf "%s expects a complex operand, got %s" name (ppIRType other))))
+                Error (IntrinsicNeedsComplex (name, ppIRType other)))
 
     // ---- complex(re, im): complex literal constructor ----
     // The one way to construct a complex value (the earlier 2-tuple cast
@@ -2005,12 +2141,12 @@ let rec inferExpr (env: TypeEnv) (expr: Expr) : TypeResult<TypedExpr> =
     // (no implicit int -> float promotion at construction time, same rule
     // as the retired form). Infers Complex128; checking against an
     // expected Complex64 adopts the narrow width (checkExpr arm).
-    | ExprApp (ExprVar "complex", [reExpr; imExpr]) when (lookupVar "complex" env).IsNone ->
+    | ExprKind.ExprApp ({ Kind = ExprKind.ExprVar "complex" }, [reExpr; imExpr]) when (lookupVar "complex" env).IsNone ->
         checkExpr env (IRTScalar ETFloat64) reExpr |> Result.bind (fun tRe ->
         checkExpr env (IRTScalar ETFloat64) imExpr |> Result.map (fun tIm ->
             mkTyped (TExprComplexLit (tRe, tIm)) (IRTScalar ETComplex128)))
-    | ExprApp (ExprVar "complex", args) when (lookupVar "complex" env).IsNone ->
-        Error (Other (sprintf "complex expects exactly two float components — complex(re, im) — got %d argument(s)" args.Length))
+    | ExprKind.ExprApp ({ Kind = ExprKind.ExprVar "complex" }, args) when (lookupVar "complex" env).IsNone ->
+        Error (ComplexArity args.Length)
 
     // ---- prodsum(x1, ..., xk): fused fiber product-sum ----
     // Σ_t Π_ℓ xℓ(t) over rank-1 arrays of equal extent — the k-fold
@@ -2018,7 +2154,7 @@ let rec inferExpr (env: TypeEnv) (expr: Expr) : TypeResult<TypedExpr> =
     // moment formers elaborate to. Surface form is a plain call,
     // shadowable like the math intrinsics. Empty extent folds to 0 (sum
     // identity), so no non-empty check.
-    | ExprApp (ExprVar "prodsum", args) when not args.IsEmpty && (lookupVar "prodsum" env).IsNone ->
+    | ExprKind.ExprApp ({ Kind = ExprKind.ExprVar "prodsum" }, args) when not args.IsEmpty && (lookupVar "prodsum" env).IsNone ->
         inferProdSum env args
 
     // ---- __dist_pack(κ1, ..., κr): typed-dist construction intrinsic ----
@@ -2027,7 +2163,7 @@ let rec inferExpr (env: TypeEnv) (expr: Expr) : TypeResult<TypedExpr> =
     // written by users. Packs the component arrays into a value of nominal
     // type Dist<r, τ like axes>; the typed node is a plain TExprTuple (the
     // representation a Dist erases to at zonk), only the TYPE is nominal.
-    | ExprApp (ExprVar "__dist_pack", args) when not args.IsEmpty ->
+    | ExprKind.ExprApp ({ Kind = ExprKind.ExprVar "__dist_pack" }, args) when not args.IsEmpty ->
         inferDistPack env args
 
     // ---- __rand_uniform / __rand_normal(key, d1, ..., dn): rand module ----
@@ -2037,14 +2173,14 @@ let rec inferExpr (env: TypeEnv) (expr: Expr) : TypeResult<TypedExpr> =
     // extents. Self-typed as a dense Float64 array of that shape — no annotation
     // needed. Lowering records (kind, key) in RandomInits; codegen emits
     // allocate<> + the runtime blade_rand fill.
-    | ExprApp (ExprVar (("__rand_uniform" | "__rand_normal") as fn), (keyE :: dimArgs)) when not dimArgs.IsEmpty ->
+    | ExprKind.ExprApp ({ Kind = ExprKind.ExprVar (("__rand_uniform" | "__rand_normal") as fn) }, (keyE :: dimArgs)) when not dimArgs.IsEmpty ->
         let kind = if fn = "__rand_uniform" then "uniform" else "normal"
         // Extents must be static ints (the elaborator resolves them to literals).
         let dimResults =
             dimArgs |> List.map (fun d ->
-                match d with
-                | ExprLit (LitInt n) when n > 0L -> Ok (int n)
-                | ExprLit (LitInt n) -> Error (sprintf "rand.%s: shape extents must be positive (got %d)" kind n)
+                match d.Kind with
+                | ExprKind.ExprLit (LitInt n) when n > 0L -> Ok (int n)
+                | ExprKind.ExprLit (LitInt n) -> Error (sprintf "rand.%s: shape extents must be positive (got %d)" kind n)
                 | _ -> Error (sprintf "rand.%s: shape must be a static positive int (or list of them)" kind))
         match dimResults |> List.fold (fun acc r -> match acc, r with Ok xs, Ok x -> Ok (xs @ [x]) | Error e, _ -> Error e | _, Error e -> Error e) (Ok []) with
         | Error e -> Error (Other e)
@@ -2065,10 +2201,10 @@ let rec inferExpr (env: TypeEnv) (expr: Expr) : TypeResult<TypedExpr> =
     // `cumulant` is part of the `ppl` module surface: the ppl elaborator
     // rewrites a qualified `p.cumulant(d, k)` to this internal marker, so a
     // bare `cumulant(...)` no longer resolves (import-gated, not language-wide).
-    | ExprApp (ExprVar "__ppl_cumulant", [dExpr; kExpr]) when (lookupVar "__ppl_cumulant" env).IsNone ->
+    | ExprKind.ExprApp ({ Kind = ExprKind.ExprVar "__ppl_cumulant" }, [dExpr; kExpr]) when (lookupVar "__ppl_cumulant" env).IsNone ->
         inferCumulantProj env dExpr kExpr
 
-    | ExprApp (func, args) ->
+    | ExprKind.ExprApp (func, args) ->
         inferExpr env func |> Result.bind (fun tFunc ->
         // Prefix partial application (formalism 6.2.3): applying an n-ary
         // FUNCTION to 0 < k < n args eta-expands to a lambda over the
@@ -2096,20 +2232,20 @@ let rec inferExpr (env: TypeEnv) (expr: Expr) : TypeResult<TypedExpr> =
         // leaves the hole's parameter free — f(_, b) ≡ lambda(x) -> f(x, b).
         // FuncElem-gated: array wildcard-indexing (the 4.5 currying table,
         // where MULTIPLE holes are legal) stays on the ArrayElem path.
-        | FuncElem (paramTys, retTy) when not (hasPolyParam paramTys) && args |> List.exists (fun a -> match a with ExprWildcard -> true | _ -> false) ->
+        | FuncElem (paramTys, retTy) when not (hasPolyParam paramTys) && args |> List.exists (fun a -> match a.Kind with ExprKind.ExprWildcard -> true | _ -> false) ->
             let wildPositions =
                 args |> List.mapi (fun i a -> (i, a))
-                     |> List.choose (fun (i, a) -> match a with ExprWildcard -> Some i | _ -> None)
+                     |> List.choose (fun (i, a) -> match a.Kind with ExprKind.ExprWildcard -> Some i | _ -> None)
             if wildPositions.Length > 1 then
                 Error (Other "function partial application takes a single `_` placeholder only (formalism 6.2.3) — bind the rest with prefix partial application or a lambda")
             elif args.Length <> paramTys.Length then
-                Error (Other (sprintf "the `_` placeholder needs every other parameter bound: this call supplies %d of %d args. Combine with prefix partial application in two steps, or use a lambda." args.Length paramTys.Length))
+                Error (PlaceholderNeedsAllBound (args.Length, paramTys.Length))
             else
                 let wildPos = wildPositions.Head
                 let uid = env.Builder.FreshId()
                 let name = sprintf "__pa%d_w" uid
-                let newArgs = args |> List.mapi (fun i a -> if i = wildPos then ExprVar name else a)
-                inferLambda env [{ Name = name; Type = None }] None (ExprApp (func, newArgs))
+                let newArgs = args |> List.mapi (fun i a -> if i = wildPos then inheritSpan a (ExprVar name) else a)
+                inferLambda env [{ Name = name; Type = None }] None (inheritSpan func (ExprApp (func, newArgs)))
                 |> Result.bind (fun tLam ->
                     unify env.Subst tLam.Type (mkFuncArrow [paramTys.[wildPos]] retTy)
                     |> Result.map (fun () -> tLam))
@@ -2118,7 +2254,7 @@ let rec inferExpr (env: TypeEnv) (expr: Expr) : TypeResult<TypedExpr> =
             let uid = env.Builder.FreshId()
             let names = residual |> List.mapi (fun i _ -> sprintf "__pa%d_%d" uid i)
             let lamParams = names |> List.map (fun n -> { Name = n; Type = None } : LambdaParam)
-            let bodyApp = ExprApp (func, args @ (names |> List.map ExprVar))
+            let bodyApp = inheritSpan func (ExprApp (func, args @ (names |> List.map (fun n -> inheritSpan func (ExprVar n)))))
             inferLambda env lamParams None bodyApp
             |> Result.bind (fun tLam ->
                 // Pin the residual param types to the callee's declared
@@ -2135,8 +2271,8 @@ let rec inferExpr (env: TypeEnv) (expr: Expr) : TypeResult<TypedExpr> =
                 // handler gets the callee's conjunct args plus a provenance
                 // oracle mapping callee param names to the actuals' provenance.
                 let dischargeErr =
-                    match func with
-                    | ExprVar fname ->
+                    match func.Kind with
+                    | ExprKind.ExprVar fname ->
                         match env.FuncConstraints.TryGetValue fname with
                         | true, (paramNames, conjuncts) ->
                             let provOf (pname: string) : Set<string> =
@@ -2166,9 +2302,9 @@ let rec inferExpr (env: TypeEnv) (expr: Expr) : TypeResult<TypedExpr> =
     // Pre-fix: arrays of named types (Phase D) would always render as
     // `std::get<n>(arr)` since no test before Phase D exercised bracket-
     // indexed reads on a real array.
-    | ExprTupleIndex (tuple, index) ->
+    | ExprKind.ExprTupleIndex (tuple, index) ->
         inferTupleIndex env tuple index
-    | ExprField (ExprVar n, field)
+    | ExprKind.ExprField ({ Kind = ExprKind.ExprVar n }, field)
         when (lookupVar (sprintf "%s.%s" n field) env).IsSome ->
         // Module-qualified value access (e.g. `let tau = Math.pi * 2.0`).
         // Same rationale as the qualified application case above.
@@ -2180,7 +2316,7 @@ let rec inferExpr (env: TypeEnv) (expr: Expr) : TypeResult<TypedExpr> =
             | None -> info.Type
         Ok (mkTyped (TExprVar (qualName, info.VarId, info.Identity)) useTy)
 
-    | ExprField (obj, field) ->
+    | ExprKind.ExprField (obj, field) ->
         inferExpr env obj |> Result.bind (fun tObj ->
             let (fieldTy, fieldIdx) =
                 match tObj.Type with
@@ -2196,16 +2332,16 @@ let rec inferExpr (env: TypeEnv) (expr: Expr) : TypeResult<TypedExpr> =
             Ok (mkTyped (TExprField (tObj, field, fieldIdx)) fieldTy))
 
     // ---- Lambda ----
-    | ExprLambda (parms, whereClause, body) -> inferLambda env parms whereClause body
+    | ExprKind.ExprLambda (parms, whereClause, body) -> inferLambda env parms whereClause body
 
     // ---- Let ----
-    | ExprLet (binding, body) -> inferLetBinding env binding body
+    | ExprKind.ExprLet (binding, body) -> inferLetBinding env binding body
 
     // ---- Match ----
-    | ExprMatch (scrutinee, cases) -> inferMatch env scrutinee cases
+    | ExprKind.ExprMatch (scrutinee, cases) -> inferMatch env scrutinee cases
 
     // ---- If-then-else ----
-    | ExprIf (cond, thenBr, elseBr) ->
+    | ExprKind.ExprIf (cond, thenBr, elseBr) ->
         inferExpr env cond |> Result.bind (fun tCond ->
         inferExpr env thenBr |> Result.bind (fun tThen ->
         inferExpr env elseBr |> Result.bind (fun tElse ->
@@ -2213,22 +2349,22 @@ let rec inferExpr (env: TypeEnv) (expr: Expr) : TypeResult<TypedExpr> =
             Ok (mkTyped (TExprIf (tCond, tThen, tElse)) tThen.Type))))
 
     // ---- Tuple ----
-    | ExprTuple exprs ->
+    | ExprKind.ExprTuple exprs ->
         exprs |> List.map (inferExpr env) |> sequenceResults |> Result.bind (fun tExprs ->
             Ok (mkTyped (TExprTuple tExprs) (IRTTuple (tExprs |> List.map (fun e -> e.Type)))))
 
     // ---- Array literal ----
-    | ExprArrayLit elems ->
+    | ExprKind.ExprArrayLit elems ->
         elems |> List.map (inferExpr env) |> sequenceResults |> Result.bind (fun tElems ->
             let arrTy = inferArrayLitType env.Builder tElems
             Ok (mkTyped (TExprArrayLit (tElems, arrTy)) (mkArrayLike arrTy)))
 
     // ---- Block ----
-    | ExprBlock (stmts, finalExpr) -> inferBlock env stmts finalExpr
+    | ExprKind.ExprBlock (stmts, finalExpr) -> inferBlock env stmts finalExpr
 
     // ---- Loop constructs ----
-    | ExprMethodFor arrays -> inferMethodFor env arrays
-    | ExprObjectFor kernel -> inferObjectFor env kernel
+    | ExprKind.ExprMethodFor arrays -> inferMethodFor env arrays
+    | ExprKind.ExprObjectFor kernel -> inferObjectFor env kernel
 
     // ---- Virtual arrays ----
     // Iteration-tagging: when the source index type carries a user-named tag
@@ -2240,8 +2376,19 @@ let rec inferExpr (env: TypeEnv) (expr: Expr) : TypeResult<TypedExpr> =
     // Anonymous index types (`Idx<5>`, etc., Tag=None) and synthetic tags
     // (prefixed "__") keep the bare int64 element type, matching gap 1's
     // asymmetric treatment of named vs anonymous element-position tags.
-    | ExprRange idxTys ->
-        let idxs = idxTys |> List.map (lowerIndexType env 0)
+    | ExprKind.ExprRange idxTys ->
+        // A TyHalo slot builds through haloSlotsOf (static-offset validation +
+        // interior shrink + "__halowin|" tag) and may SPLICE several slots
+        // (nested per-axis offsets); every other slot lowers as before. n-D
+        // separable stencils are ranges of halo slots — one window per slot.
+        (idxTys
+         |> List.map (fun ty ->
+             match ty with
+             | TyHalo (innerTy, offsetsExpr) -> haloSlotsOf env innerTy offsetsExpr
+             | _ -> Ok [lowerIndexType env 0 ty])
+         |> sequenceResults)
+        |> Result.map List.concat
+        |> Result.bind (fun idxs ->
         // A CompoundIdx slot (masked product space, formalism 4.5) IS the whole
         // iteration space, so it cannot share a range<> with other index types.
         // Reject range<CompoundIdx<m>, J> HERE at typecheck (EXPECT: typecheck
@@ -2262,8 +2409,8 @@ let rec inferExpr (env: TypeEnv) (expr: Expr) : TypeResult<TypedExpr> =
             match List.tryLast idxs with
             | Some i -> elemTypeForIterationIndex i
             | None -> IRTScalar ETInt64
-        Ok (mkTyped (TExprRange idxs) (mkVirtualArrayArrow idxs elemType))
-    | ExprDotDot (lo, hi) ->
+        Ok (mkTyped (TExprRange idxs) (mkVirtualArrayArrow idxs elemType)))
+    | ExprKind.ExprDotDot (lo, hi) ->
         inferExpr env lo |> Result.bind (fun tLo ->
         inferExpr env hi |> Result.bind (fun tHi ->
             // Compute extent from literals when possible
@@ -2284,38 +2431,48 @@ let rec inferExpr (env: TypeEnv) (expr: Expr) : TypeResult<TypedExpr> =
             // ExprDotDot has no index-type annotation, so element type
             // stays bare int64 (no name to tag with).
             Ok (mkTyped (TExprDotDot (tLo, tHi)) (mkVirtualArrayArrow [idx] (IRTScalar ETInt64)))))
-    | ExprReverse idxTy ->
+    | ExprKind.ExprReverse idxTy ->
         let idx = lowerIndexType env 0 idxTy
         let elemType = elemTypeForIterationIndex idx
         Ok (mkTyped (TExprReverse idx) (mkVirtualArrayArrow [idx] elemType))
-    | ExprBlocked (idxTy, blockSize) ->
+    | ExprKind.ExprBlocked (idxTy, blockSize) ->
         let idx = lowerIndexType env 0 idxTy
         inferExpr env blockSize |> Result.bind (fun tBS ->
             let elemType = elemTypeForIterationIndex idx
             Ok (mkTyped (TExprBlocked (idx, tBS)) (mkVirtualArrayArrow [idx] elemType)))
 
+    | ExprKind.ExprHalo (innerTy, offsetsExpr) ->
+        // halo<Inner, offsets> in expression position — a range over the halo
+        // slot(s): one slot for a flat offset array, k slots for the nested
+        // per-axis form [[..],[..],..] (arity = sub-array count). All halo
+        // semantics live in the slots (haloSlotsOf); per-slot center offsets
+        // are re-derived from the tags at loop building.
+        haloSlotsOf env innerTy offsetsExpr
+        |> Result.map (fun slots ->
+            mkTyped (TExprRange slots) (mkVirtualArrayArrow slots (elemTypeForIterationIndex (List.last slots))))
+
     // ---- Zip / Stack ----
-    | ExprZip exprs ->
+    | ExprKind.ExprZip exprs ->
         inferZip env exprs
-    | ExprStack exprs ->
+    | ExprKind.ExprStack exprs ->
         exprs |> List.map (inferExpr env) |> sequenceResults |> Result.bind (fun tExprs ->
             let elemTy = if tExprs.IsEmpty then IRTUnit else tExprs.[0].Type
             Ok (mkTyped (TExprStack tExprs) elemTy))
 
     // ---- Computation combinators ----
-    | ExprPure e ->
+    | ExprKind.ExprPure e ->
         inferExpr env e |> Result.bind (fun tE ->
             Ok (mkTyped (TExprPure tE) (IRTComputation tE.Type)))
-    | ExprCompute e ->
+    | ExprKind.ExprCompute e ->
         inferExpr env e |> Result.bind (fun tE ->
             let inner = match tE.Type with IRTComputation t -> t | t -> t
             Ok (mkTyped (TExprCompute tE) inner))
-    | ExprRead e ->
+    | ExprKind.ExprRead e ->
         // |> read forces a deferred provider read; the result is the operand's
         // (possibly view-modified) array, so the type passes through unchanged.
         inferExpr env e |> Result.bind (fun tE ->
             Ok (mkTyped (TExprRead tE) tE.Type))
-    | ExprGuard (cond, body) ->
+    | ExprKind.ExprGuard (cond, body) ->
         inferExpr env cond |> Result.bind (fun tC ->
         inferExpr env body |> Result.bind (fun tB ->
             Ok (mkTyped (TExprGuard (tC, tB)) tB.Type)))
@@ -2333,9 +2490,9 @@ let rec inferExpr (env: TypeEnv) (expr: Expr) : TypeResult<TypedExpr> =
     // Ids/Tags) — index-space identity is what compoundViewType checks, so a
     // freshly-derived mask must provably live over A's space even when A's
     // indices are anonymous.
-    | ExprMask (array, pred) ->
+    | ExprKind.ExprMask (array, pred) ->
         inferMask env array pred
-    | ExprCompound (dense, mask) ->
+    | ExprKind.ExprCompound (dense, mask) ->
         inferExpr env dense |> Result.bind (fun tDense ->
         inferExpr env mask |> Result.bind (fun tMask ->
             match env.Subst.Resolve(tDense.Type), env.Subst.Resolve(tMask.Type) with
@@ -2347,8 +2504,8 @@ let rec inferExpr (env: TypeEnv) (expr: Expr) : TypeResult<TypedExpr> =
             | _ -> Error (Other "compound(dense, mask) expects two array arguments: a dense array and a bool mask covering its leading dimensions")))
 
     // intersect(A, B) / union(A, B) — set operations on arrays
-    | ExprIntersect (a, b) | ExprUnion (a, b) ->
-        let isIntersect = match expr with ExprIntersect _ -> true | _ -> false
+    | ExprKind.ExprIntersect (a, b) | ExprKind.ExprUnion (a, b) ->
+        let isIntersect = match expr.Kind with ExprKind.ExprIntersect _ -> true | _ -> false
         let opName = if isIntersect then "intersect" else "union"
         inferExpr env a |> Result.bind (fun tA ->
         inferExpr env b |> Result.bind (fun tB ->
@@ -2368,7 +2525,7 @@ let rec inferExpr (env: TypeEnv) (expr: Expr) : TypeResult<TypedExpr> =
 
     // unique(A) — deduplicate, preserving first-occurrence order. Same
     // element type as input, dynamic extent (≤ input extent).
-    | ExprUnique a ->
+    | ExprKind.ExprUnique a ->
         inferExpr env a |> Result.bind (fun tA ->
             requireArrayArg env tA "unique" |> Result.bind (fun arrTy ->
                 let resultIdx = {
@@ -2383,7 +2540,7 @@ let rec inferExpr (env: TypeEnv) (expr: Expr) : TypeResult<TypedExpr> =
     // contains(A, x) — membership test. Returns Bool. The value's type
     // must unify with the array's element type; mismatch (e.g., looking
     // for a Float64 in an Int64 array) is a hard error.
-    | ExprContains (a, value) ->
+    | ExprKind.ExprContains (a, value) ->
         inferExpr env a |> Result.bind (fun tA ->
         inferExpr env value |> Result.bind (fun tValue ->
             requireArrayArg env tA "contains" |> Result.bind (fun arrTy ->
@@ -2400,11 +2557,11 @@ let rec inferExpr (env: TypeEnv) (expr: Expr) : TypeResult<TypedExpr> =
     // is determined by which tuples actually appear in the data.
     // Precondition: all key arrays share the same outer index (same length;
     // i-th element of each represents the same record).
-    | ExprGroupKeys keys ->
+    | ExprKind.ExprGroupKeys keys ->
         inferGroupKeys env keys
-    | ExprGroupBy (values, grouping) ->
+    | ExprKind.ExprGroupBy (values, grouping) ->
         inferGroupBy env values grouping
-    | ExprSort (array, key) ->
+    | ExprKind.ExprSort (array, key) ->
         inferExpr env array |> Result.bind (fun tArr ->
         inferExpr env key |> Result.bind (fun tKey ->
             requireArrayArg env tArr "sort" |> Result.bind (fun arrTy ->
@@ -2423,26 +2580,26 @@ let rec inferExpr (env: TypeEnv) (expr: Expr) : TypeResult<TypedExpr> =
                     let resultType = mkArrayArrow [resultIdx] arrTy.ElemType None
                     Ok (mkTyped (TExprSort (tArr, tKey)) resultType))))
 
-    | ExprTranspose (array, d1, d2) ->
+    | ExprKind.ExprTranspose (array, d1, d2) ->
         inferTranspose env array d1 d2
-    | ExprGram (leftE, rightE) ->
+    | ExprKind.ExprGram (leftE, rightE) ->
         inferGram env leftE rightE
-    | ExprDecompact (array, d) ->
+    | ExprKind.ExprDecompact (array, d) ->
         inferDecompact env array d
-    | ExprReduce (array, kernel, init) ->
+    | ExprKind.ExprReduce (array, kernel, init) ->
         inferReduce env array kernel init
-    | ExprExtents array ->
+    | ExprKind.ExprExtents array ->
         inferExtents env array
-    | ExprSequence exprs ->
+    | ExprKind.ExprSequence exprs ->
         inferSequence env exprs
-    | ExprReplicate (count, body) ->
+    | ExprKind.ExprReplicate (count, body) ->
         inferReplicate env count body
-    | ExprReynolds (kernel, isAntisym) ->
+    | ExprKind.ExprReynolds (kernel, isAntisym) ->
         inferExpr env kernel |> Result.bind (fun tK ->
             Ok (mkTyped (TExprReynolds (tK, isAntisym)) tK.Type))
 
     // ---- Type annotation ----
-    | ExprTyped (e, tyAnno) ->
+    | ExprKind.ExprTyped (e, tyAnno) ->
         // Route through bidirectional checkExpr so the annotation pushes
         // down into literal/constructor positions. The motivating case
         // is `complex(re, im) : Complex64`: the constructor checked
@@ -2456,30 +2613,30 @@ let rec inferExpr (env: TypeEnv) (expr: Expr) : TypeResult<TypedExpr> =
             { tE with Type = annoTy })
 
     // ---- Arity special forms ----
-    | ExprArity paramName -> Ok (mkTyped (TExprArity paramName) (IRTScalar ETInt64))
-    | ExprNth -> Ok (mkTyped (TExprLit (LitInt 0L)) (IRTScalar ETInt64))
-    | ExprZero ->
+    | ExprKind.ExprArity paramName -> Ok (mkTyped (TExprArity paramName) (IRTScalar ETInt64))
+    | ExprKind.ExprNth -> Ok (mkTyped (TExprLit (LitInt 0L)) (IRTScalar ETInt64))
+    | ExprKind.ExprZero ->
         // zero gets a fresh type variable — unifies with int, float, bool context
         let ty = env.Subst.Fresh()
         Ok (mkTyped TExprZero ty)
-    | ExprRank e ->
+    | ExprKind.ExprRank e ->
         inferExpr env e |> Result.bind (fun tE ->
             Ok (mkTyped (TExprRank tE) (IRTScalar ETInt64)))
 
     // ---- Struct construction ----
-    | ExprStruct (name, fields) -> inferStructConstruction env name fields
+    | ExprKind.ExprStruct (name, fields, spread) -> inferStructConstruction env name fields spread
 
     // ---- Sectioned operators ----
-    | ExprSection op ->
+    | ExprKind.ExprSection op ->
         let paramTy = env.Subst.Fresh()
         Ok (mkTyped (TExprSection op) (mkFuncArrow [paramTy; paramTy] paramTy))
-    | ExprPartialApp (op, arg, isLeft) ->
+    | ExprKind.ExprPartialApp (op, arg, isLeft) ->
         inferExpr env arg |> Result.bind (fun tArg ->
             Ok (mkTyped (TExprPartialApp (op, tArg, isLeft))
                         (mkFuncArrow [tArg.Type] tArg.Type)))
 
     // ---- Assignment ----
-    | ExprAssign (lhs, rhs) ->
+    | ExprKind.ExprAssign (lhs, rhs) ->
         inferExpr env lhs |> Result.bind (fun tL ->
         // Bidirectional: check the RHS against the target's type so literals
         // adapt (Int64 literal into an Int32 field) as in every other
@@ -2491,7 +2648,7 @@ let rec inferExpr (env: TypeEnv) (expr: Expr) : TypeResult<TypedExpr> =
                 | TExprVar (name, _, _) ->
                     match lookupVar name env with
                     | Some info when info.Assign = ReadOnly ->
-                        Some (Other (sprintf "Cannot assign to '%s': static bindings are immutable" name))
+                        Some (ImmutableStaticAssign name)
                     | _ -> None
                 | _ -> None  // array element assignment etc. — allowed
             match assignErr with
@@ -2508,11 +2665,11 @@ let rec inferExpr (env: TypeEnv) (expr: Expr) : TypeResult<TypedExpr> =
                 | Error _ -> Error (TypeMismatch (tL.Type, tR.Type))))
 
     // ---- For expression ----
-    | ExprFor (source, _constraints, kernelOpt) ->
+    | ExprKind.ExprFor (source, _constraints, kernelOpt) ->
         inferForExpr env source kernelOpt
 
     // ---- Align ----
-    | ExprAlign (exprs, spec) ->
+    | ExprKind.ExprAlign (exprs, spec) ->
         exprs |> List.map (inferExpr env) |> sequenceResults |> Result.bind (fun tExprs ->
             let ty = if tExprs.IsEmpty then IRTUnit else tExprs.[0].Type
             Ok (mkTyped (TExprAlign (tExprs, spec)) ty))
@@ -2737,7 +2894,7 @@ and inferReduce (env: TypeEnv) array kernel (init: Expr option) : TypeResult<Typ
             // is simply init), so statically-empty inputs are legal.
             match tryEvalIntIR arrTy.IndexTypes.[0].Extent with
             | Some n when n <= 0L && tInitOpt.IsNone ->
-                Error (Other (sprintf "reduce() rejects statically empty arrays (extent = %d). Empty input has no defined reduction without an identity; supply one with the 3-arg form `reduce(arr, op, init)`." n))
+                Error (ReduceEmptyArray n)
             | _ ->
                 // Stage 3c.2 follow-on: unify the kernel's param types
                 // with the array's element type. The kernel arrives as
@@ -2805,7 +2962,7 @@ and inferProdSum (env: TypeEnv) (args: Expr list) : TypeResult<TypedExpr> =
                     let thisN = tryEvalIntIR arrTy.IndexTypes.[0].Extent
                     (match staticN, thisN with
                      | Some a, Some b when a <> b ->
-                         Error (Other (sprintf "prodsum() operands must share one extent: got %d and %d" a b))
+                         Error (ProdsumExtentMismatch (a, b))
                      | _ ->
                         let unifyElem =
                             match elemTy with
@@ -2854,15 +3011,15 @@ and inferCumulantProj (env: TypeEnv) (dExpr: Expr) (kExpr: Expr) : TypeResult<Ty
              | None ->
                  Error (Other "cumulant: the order must be a compile-time integer (a literal, `let static`, or static-function call)")
              | Some k when k < 1 ->
-                 Error (Other (sprintf "cumulant: order must be >= 1, got %d" k))
+                 Error (CumulantOrderPositive k)
              | Some k when k > order ->
-                 Error (Other (sprintf "cumulant: order %d exceeds the dist's carried order %d — insufficient stochastic order. Construct with a higher order (dist(A, %d)) or project a carried component." k order k))
+                 Error (CumulantOrderExceeds (k, order))
              | Some k ->
                  let compTy = distComponentType k elem axes
                  let idxLit = mkTyped (TExprLit (LitInt (int64 (k - 1)))) (IRTScalar ETInt64)
                  Ok (mkTyped (TExprTupleIndex (tD, idxLit)) compTy))
         | t ->
-            Error (Other (sprintf "cumulant expects cumulant(d, k) where d is a Dist value (a dist(...) binding or Dist-typed parameter); got %s" (ppIRType t))))
+            Error (CumulantNeedsDist (ppIRType t)))
 
 // extents(array) — extent(s) along each dimension as Int64.
 // Rank-1 → scalar Int64 (the single dim's extent).
@@ -2890,7 +3047,7 @@ and inferDecompact (env: TypeEnv) array d : TypeResult<TypedExpr> =
             let totalDims = arrTy.IndexTypes |> List.sumBy (fun ix -> max 1 ix.Rank)
             let dimToSlot (dd: int) : Result<int * int * int, TypeError> =
                 if dd < 0 || dd >= totalDims then
-                    Error (Other (sprintf "decompact: dimension %d is out of range for a rank-%d array (valid dims 0..%d)" dd totalDims (totalDims - 1)))
+                    Error (DecompactDimRange (dd, totalDims))
                 else
                     let rec walk slotIdx acc remaining =
                         match remaining with
@@ -2903,7 +3060,7 @@ and inferDecompact (env: TypeEnv) array d : TypeResult<TypedExpr> =
             dimToSlot d |> Result.bind (fun (slot, r, posInSlot) ->
                 let ix = arrTy.IndexTypes.[slot]
                 if r < 2 || ix.Symmetry = SymNone then
-                    Error (Other (sprintf "decompact: dimension %d is a plain (rank-1, non-symmetric) axis; there is nothing to decompact. decompact pulls a component out of a compact group (SymIdx/AntisymIdx/HermitianIdx)." d))
+                    Error (DecompactPlainAxis d)
                 else
                 // Codegen scope: the compact group being decompacted must be
                 // the LAST index slot, with any preceding slots being plain
@@ -2922,7 +3079,7 @@ and inferDecompact (env: TypeEnv) array d : TypeResult<TypedExpr> =
                 let leadingAllFreeSingletons =
                     leadingSlots |> List.forall (fun s -> (max 1 s.Rank) = 1 && s.Symmetry = SymNone)
                 if not (groupIsLast && leadingAllFreeSingletons) then
-                    Error (Other (sprintf "decompact: only a compact group in the LAST index slot, optionally preceded by plain free Idx dimensions, is supported by codegen (the chained to-the-right peel shape). The array here has %d index slots with the compact group at slot %d." arrTy.IndexTypes.Length slot))
+                    Error (DecompactLastSlotOnly (arrTy.IndexTypes.Length, slot))
                 elif leadingSlots.Length > 0 && ix.Symmetry <> SymSymmetric then
                     // Surrounding-dim wrapping is currently wired only for the
                     // symmetric fission scatter (the gather form). Antisym /
@@ -3004,7 +3161,7 @@ and inferGram (env: TypeEnv) leftE rightE : TypeResult<TypedExpr> =
             let lDims = lTy.IndexTypes |> List.sumBy (fun ix -> max 1 ix.Rank)
             let rDims = rTy.IndexTypes |> List.sumBy (fun ix -> max 1 ix.Rank)
             if lDims <> 2 || rDims <> 2 then
-                Error (Other (sprintf "gram(A, B): both operands must be rank-2 (matrix) arrays; got rank-%d and rank-%d. gram contracts the trailing axis: A (m x n), B (p x n) -> m x p." lDims rDims))
+                Error (GramNeedsRank2 (lDims, rDims))
             else
                 // Extents: outer (m / p) and inner contracted (n) per operand.
                 let lOuter = lTy.IndexTypes.[0].Extent
@@ -3066,7 +3223,7 @@ and inferTranspose (env: TypeEnv) array d1 d2 : TypeResult<TypedExpr> =
             let totalDims = arrTy.IndexTypes |> List.sumBy (fun ix -> max 1 ix.Rank)
             let dimToSlot (d: int) : Result<int * int * int, TypeError> =
                 if d < 0 || d >= totalDims then
-                    Error (Other (sprintf "transpose: axis %d is out of range for a rank-%d array (valid axes 0..%d)" d totalDims (totalDims - 1)))
+                    Error (TransposeAxisRange (d, totalDims))
                 else
                     let rec walk slotIdx acc remaining =
                         match remaining with
@@ -3077,7 +3234,7 @@ and inferTranspose (env: TypeEnv) array d1 d2 : TypeResult<TypedExpr> =
                             else walk (slotIdx + 1) (acc + ar) rest
                     walk 0 0 arrTy.IndexTypes
             if d1 = d2 then
-                Error (Other (sprintf "transpose: the two axes must differ (got [%d, %d]); swapping an axis with itself is the identity" d1 d2))
+                Error (TransposeAxesEqual (d1, d2))
             else
                 dimToSlot d1 |> Result.bind (fun (slot1, ar1, _) ->
                 dimToSlot d2 |> Result.bind (fun (slot2, ar2, _) ->
@@ -3103,7 +3260,7 @@ and inferTranspose (env: TypeEnv) array d1 d2 : TypeResult<TypedExpr> =
                             // within itself: a genuine dimensional swap inside a
                             // rectangular compound. Not yet emitted (the data-
                             // move materializer handles cross-slot rank-1 only).
-                            Error (Other (sprintf "transpose: swapping two dimensions within a single rectangular index group (rank %d) is not yet supported." ar1))
+                            Error (TransposeWithinGroup ar1)
                          | TRequiresDecompaction reason ->
                             Error (Other (sprintf "transpose: %s" reason)))
                     else
@@ -3242,9 +3399,7 @@ and inferGroupKeys (env: TypeEnv) keys : TypeResult<TypedExpr> =
                     ty.IndexTypes.Length = 1
                     && ty.IndexTypes.[0].Extent = firstSource.Extent)
             if not allShareOuter then
-                Error (Other (
-                    "group_keys: all key arrays must be rank-1 and share the same outer index (same length). " +
-                    "Compound grouping requires each i-th element of every key array to refer to the same record."))
+                Error (GroupKeysRank1)
             else
                 // Compound outer: dynamic extent, tagged so codegen
                 // recognizes "this is compound-dynamic, dispatch via
@@ -3293,7 +3448,8 @@ and inferReplicate (env: TypeEnv) count body : TypeResult<TypedExpr> =
                               StaticEval.Params = fd.Params |> List.map (fun p -> p.Name)
                               StaticEval.Body = fd.Body })
                       CalledFunctions = ref Set.empty
-                      ProviderRoots = Map.empty }
+                      ProviderRoots = Map.empty
+                      Structs = Map.empty }
                 match StaticEval.evalExpr staticEnv StaticEval.maxSteps count with
                 | Ok (StaticEval.SVInt v) -> Some (int v)
                 | _ -> None
@@ -3353,13 +3509,9 @@ and inferTupleIndex (env: TypeEnv) tuple index : TypeResult<TypedExpr> =
                         match env.Subst.Resolve tI.Type with
                         | IRTIdxTagged (_, IRefNamed argName) when argName = tagName -> None
                         | IRTIdxTagged (_, IRefNamed argName) ->
-                            Some (Other (sprintf
-                                "Array index tag mismatch: slot expects '%s' but argument has type '%s'."
-                                tagName argName))
+                            Some (IndexTagMismatchNamed (tagName, argName))
                         | IRTIdxTagged (_, IRefAnon _) ->
-                            Some (Other (sprintf
-                                "Array index tag mismatch: slot expects named tag '%s' but argument is an anonymous index value."
-                                tagName))
+                            Some (IndexTagMismatchAnon tagName)
                         | IRTScalar (ETInt32 | ETInt64) ->
                             emitWarning env (sprintf
                                 "Array indexed with untagged integer where slot expects tag '%s'. Consider an explicit cast like `(expr : %s)` or iterate via `range<%s>` to flow the tag automatically."
@@ -3725,11 +3877,69 @@ and inferBinOp env mode op left right : TypeResult<TypedExpr> =
                 }
                 Ok (mkTyped (TExprBinOp (mode, op, tL, tR)) loopTy)))
 
-    | OpChoice | OpFallback ->
+    | OpChoice ->
         inferExpr env left |> Result.bind (fun tL ->
         inferExpr env right |> Result.bind (fun tR ->
             let _ = unify env.Subst tL.Type tR.Type
             Ok (mkTyped (TExprChoice (tL, tR)) tL.Type)))
+
+    // <|:> allocated-fallback (formalism 2.6): read A where its STORAGE holds
+    // the cell, else B. Storage-keyed, unlike <|>'s value-keyed zero test —
+    // an allocated zero survives fallback but not choice.
+    //   * compound-left: the CompoundIdx mask IS the allocation record (absent
+    //     cells have no storage). Result = the dense expansion: B's type, with
+    //     A overlaid on present cells. B must be dense over the compound's
+    //     underlying dims (+ trailing dims); extent agreement vs the runtime
+    //     mask is guarded in generated code.
+    //   * dense-left: allocation = the nested-pointer chain, checked per curry
+    //     level in codegen (nullptr-robust reads; compiler-built arrays are
+    //     fully allocated — partially-allocated arrays arrive via the
+    //     C++-level partial-depth allocation API). Result = A's type.
+    // Scalars/computations/loop objects reject (steer to <|>); symmetric left
+    // rejects (symmetric allocation is not verifiable — v1).
+    | OpFallback ->
+        inferExpr env left |> Result.bind (fun tL ->
+        inferExpr env right |> Result.bind (fun tR ->
+            let describe (t: IRType) =
+                match env.Subst.Resolve t with
+                | ArrayElem _ -> "an array"
+                | IRTScalar _ -> "a scalar"
+                | IRTComputation _ -> "a computation"
+                | IRTLoop _ -> "a loop object"
+                | _ -> "a non-array value"
+            let isPlainDense (a: IRArrayType) =
+                a.IndexTypes |> List.forall (fun ix ->
+                    ix.IxKind = IxKPlain && ix.Symmetry = SymNone && ix.Rank <= 1)
+            let hasSym (a: IRArrayType) =
+                a.IndexTypes |> List.exists (fun ix -> ix.Symmetry <> SymNone)
+            match env.Subst.Resolve tL.Type, env.Subst.Resolve tR.Type with
+            | ArrayElem aL, ArrayElem aR ->
+                if hasSym aL then Error FallbackSymmetricLeft
+                elif not (isPlainDense aR) then
+                    Error (FallbackRightNotDense
+                            (if hasSym aR then "a symmetric array" else "a compound/non-dense array"))
+                else
+                    (match aL.IndexTypes with
+                     | head :: trailing when head.IxKind = IxKCompound ->
+                         // Compound-left: B spans the mask's underlying dims
+                         // plus A's trailing regular dims.
+                         let leftSpan = head.Rank + trailing.Length
+                         let rightRank = aR.IndexTypes.Length
+                         if rightRank <> leftSpan then
+                             Error (FallbackRankMismatch (leftSpan, rightRank))
+                         else
+                             unify env.Subst aL.ElemType aR.ElemType
+                             |> Result.map (fun () ->
+                                 mkTyped (TExprFallback (tL, tR)) tR.Type)
+                     | _ when isPlainDense aL ->
+                         // Dense-left: same index space required outright.
+                         unify env.Subst tL.Type tR.Type
+                         |> Result.map (fun () ->
+                             mkTyped (TExprFallback (tL, tR)) tL.Type)
+                     | _ ->
+                         Error (Other "<|:> left operand must be a plain dense array or a compound(A, mask) array; ragged/dynamic-compound left operands are not supported."))
+            | _ ->
+                Error (FallbackNeedsArrays (describe tL.Type, describe tR.Type))))
 
     | OpComposeMeth ->
         // @>> : Computation α × Computation β → Computation β
@@ -3815,6 +4025,16 @@ and inferBinOp env mode op left right : TypeResult<TypedExpr> =
                 | OpEq | OpNeq | OpLt | OpLe | OpGt | OpGe
                 | OpAnd | OpOr -> true
                 | _ -> false
+            // Unit judgment for the synthesized kernel paths below happens
+            // at THIS site, not in the kernel body: the lambda parameters
+            // are still unresolved inference variables when the body's
+            // binop is inferred (they only unify with the element types
+            // later, in buildApplyInfo), so inferArithType's unit rules
+            // see no units there. The operand ELEMENT units are visible
+            // here — unitRulesForOp checks/composes them and the result
+            // element type is stamped over the inferred pipeline type.
+            let elemUnits t =
+                match t with ArrayElem at -> IR.getUnits at.ElemType | _ -> None
             if mode = Elementwise && bothArrays && isZipOp then
                 // One index record per operand = zip-able: dense rank-1, or
                 // packed symmetry-class storage of any logical rank (the
@@ -3825,12 +4045,15 @@ and inferBinOp env mode op left right : TypeResult<TypedExpr> =
                 let singleRecord t =
                     match t with ArrayElem at -> at.IndexTypes.Length = 1 | _ -> false
                 if singleRecord lRes && singleRecord rRes then
-                    let synth =
-                        ExprCompute (ExprBinOp (Elementwise, OpApply,
-                            ExprMethodFor [ExprZip [left; right]],
-                            ExprLambda ([{ Name = "__zl"; Type = None }; { Name = "__zr"; Type = None }], None,
-                                        ExprBinOp (Elementwise, op, ExprVar "__zl", ExprVar "__zr"))))
-                    inferExpr env synth
+                    match unitRulesForOp op (elemUnits lRes) (elemUnits rRes) with
+                    | Error e -> Error e
+                    | Ok resUnits ->
+                        let sp = mergeSpan left.Span right.Span
+                        let kbody = mkExpr sp (ExprBinOp (Elementwise, op, mkExpr sp (ExprVar "__zl"), mkExpr sp (ExprVar "__zr")))
+                        let klam = mkExpr sp (ExprLambda ([{ Name = "__zl"; Type = None }; { Name = "__zr"; Type = None }], None, kbody))
+                        let kzip = mkExpr sp (ExprMethodFor [mkExpr sp (ExprZip [left; right])])
+                        let synth = mkExpr sp (ExprCompute (mkExpr sp (ExprBinOp (Elementwise, OpApply, kzip, klam))))
+                        inferExpr env synth |> Result.map (stampElemUnits env resUnits)
                 else
                     Error (Other "elementwise operators on multi-axis arrays are deferred: co-iteration currently spans one index record per operand (dense rank-1 or packed symmetric storage)")
             else
@@ -3855,9 +4078,21 @@ and inferBinOp env mode op left right : TypeResult<TypedExpr> =
                 | _ -> None
             match arrayScalar with
             | Some arrayOnLeft when mode = Elementwise && isZipOp ->
+                // Same synthesis-site unit judgment as the zip path above:
+                // the kernel param annotation deliberately strips units
+                // (elemAnn below), so the body's binop checks nothing —
+                // judge the array's ELEMENT units against the scalar
+                // operand's units here, in operand order.
+                let arrU = elemUnits (if arrayOnLeft then lRes else rRes)
+                let scalU = IR.getUnits (if arrayOnLeft then rRes else lRes)
+                let luB, ruB = if arrayOnLeft then (arrU, scalU) else (scalU, arrU)
+                match unitRulesForOp op luB ruB with
+                | Error e -> Error e
+                | Ok resUnits ->
+                let sp = mergeSpan left.Span right.Span
                 let (arrExpr, body) =
-                    if arrayOnLeft then (left, ExprBinOp (Elementwise, op, ExprVar "__bx", right))
-                    else (right, ExprBinOp (Elementwise, op, left, ExprVar "__bx"))
+                    if arrayOnLeft then (left, mkExpr sp (ExprBinOp (Elementwise, op, mkExpr sp (ExprVar "__bx"), right)))
+                    else (right, mkExpr sp (ExprBinOp (Elementwise, op, left, mkExpr sp (ExprVar "__bx"))))
                 // Annotate the kernel param with the array's element type:
                 // at body-inference time an unannotated param is still an
                 // unresolved infer var, and inferArithType's promotion rules
@@ -3878,10 +4113,10 @@ and inferBinOp env mode op left right : TypeResult<TypedExpr> =
                         | _ -> None
                     | _ -> None
                 let synth =
-                    ExprCompute (ExprBinOp (Elementwise, OpApply,
-                        ExprMethodFor [arrExpr],
-                        ExprLambda ([{ Name = "__bx"; Type = elemAnn }], None, body)))
-                inferExpr env synth
+                    mkExpr sp (ExprCompute (mkExpr sp (ExprBinOp (Elementwise, OpApply,
+                        mkExpr sp (ExprMethodFor [arrExpr]),
+                        mkExpr sp (ExprLambda ([{ Name = "__bx"; Type = elemAnn }], None, body))))))
+                inferExpr env synth |> Result.map (stampElemUnits env resUnits)
             | _ ->
             inferArithType mode op tL.Type tR.Type |> Result.map (fun resTy ->
                 mkTyped (TExprBinOp (mode, op, tL, tR)) resTy)))
@@ -3916,7 +4151,7 @@ and inferDistBinOp (env: TypeEnv) (op: BinOp) (left: Expr) (right: Expr) (lTy: I
         // active `where indep` licenses (PPL-owned state). Empty provenance
         // is un-provable, not vacuously independent.
         if lo <> ro then
-            Error (Other (sprintf "dist %s: orders disagree (%d vs %d) — carry the same stochastic order on both sides" (if op = OpAdd then "+" else "-") lo ro))
+            Error (DistOrderDisagree ((if op = OpAdd then "+" else "-"), lo, ro))
         else
         let provL = provenanceOfSurface env left
         let provR = provenanceOfSurface env right
@@ -3937,12 +4172,160 @@ and inferDistBinOp (env: TypeEnv) (op: BinOp) (left: Expr) (right: Expr) (lTy: I
                         "add a `where <alias>.indep(...)` license (with `import ppl as <alias>`) naming the two parameters to the enclosing function's signature"
                     else
                         sprintf "declare `let _ = ppl.independent(%s, %s)` (module level) or a struct `where ppl.indep(...)`" s1 s2
-                Error (Other (sprintf "dist %s: cumulants combine only for independent distributions — sources '%s' and '%s' are not declared independent; %s" (if op = OpAdd then "+" else "-") s1 s2 steering))
+                Error (DistNotIndependent ((if op = OpAdd then "+" else "-"), s1, s2, steering))
             | [] ->
                 let weight = if op = OpAdd then (fun _ -> 1.0) else (fun k -> if k % 2 = 0 then 1.0 else -1.0)
                 inferExpr env (Blade.Ppl.Elaborate.DistSynth.combineExpr (env.Builder.FreshId()) weight left right lo)
     | _ ->
-        Error (Other (sprintf "this operator is not defined on Dist values (left: %s, right: %s): dists support scalar * (multilinearity), + and - of independent dists, and component projection via cumulant(d, k)" (ppIRType lTy) (ppIRType rTy)))
+        Error (DistOpUndefined (ppIRType lTy, ppIRType rTy))
+
+/// Unit rules for one binary op, shared by scalar arithmetic
+/// (inferArithType) and the array kernel-synthesis paths in inferBinOp
+/// (both-array zip, array<->scalar broadcast). The synthesized kernels
+/// infer their bodies against unresolved parameter types — the params
+/// only unify with the element types later, in buildApplyInfo — so the
+/// unit judgment must happen at the synthesis site, where the operand
+/// units are still visible. Returns the RESULT unit signature (None =
+/// no annotation): +/−/comparison require agreement, * and / compose
+/// signatures, everything else (^, &&, ||, ...) drops units.
+and unitRulesForOp (op: BinOp) (lUnits: UnitSig option) (rUnits: UnitSig option) : TypeResult<UnitSig option> =
+    match op with
+    | OpAdd | OpSub ->
+        match lUnits, rUnits with
+        | Some lu, Some ru ->
+            if unitCompatible lu ru then Ok (Some lu)
+            else Error (UnitMismatch ((if op = OpAdd then "addition" else "subtraction"), ppUnitSig lu, ppUnitSig ru))
+        | Some u, None | None, Some u -> Ok (Some u)
+        | None, None -> Ok None
+    | OpMul ->
+        match lUnits, rUnits with
+        | Some lu, Some ru -> Ok (Some (unitMul lu ru))
+        | Some u, None | None, Some u -> Ok (Some u)
+        | None, None -> Ok None
+    | OpDiv | OpMod ->
+        match lUnits, rUnits with
+        | Some lu, Some ru -> Ok (Some (unitDiv lu ru))
+        | Some u, None -> Ok (Some u)
+        | None, Some u -> Ok (Some (unitDiv unitDimensionless u))
+        | None, None -> Ok None
+    | OpEq | OpNeq | OpLt | OpLe | OpGt | OpGe ->
+        match lUnits, rUnits with
+        | Some lu, Some ru when not (unitCompatible lu ru) ->
+            Error (UnitMismatch ("comparison", ppUnitSig lu, ppUnitSig ru))
+        | _ -> Ok None
+    | _ -> Ok None
+
+/// Overwrite the ELEMENT unit annotation of an array-typed result from a
+/// synthesized kernel pipeline with the signature the unit rules computed.
+/// Without this the kernel return type leaks the LEFT operand's unit
+/// through * and / (meters * meters would stay meters). None strips —
+/// comparisons produce Bool elements and ^ drops units like the scalar
+/// path.
+and stampElemUnits env (resUnits: UnitSig option) (t: TypedExpr) : TypedExpr =
+    match env.Subst.Resolve t.Type with
+    | ArrayElem arr ->
+        let bare = IR.stripUnits arr.ElemType
+        let elem =
+            match resUnits with
+            | Some u -> IRTUnitAnnotated (bare, u)
+            | None -> bare
+        { t with Type = mkArrayLike { arr with ElemType = elem } }
+    | _ -> t
+
+/// Unit rules for the unary and math-intrinsic ops, shared by
+/// scalar-position intrinsic inference (the ExprApp intrinsic arms) and
+/// the kernel-body walk below: negation, abs/floor/ceil and the complex
+/// component projections preserve the signature; sqrt halves the
+/// exponents when they are all even (sqrt(meters^2) = meters — an odd
+/// exponent has no integer-signature representation, so the claim is
+/// dropped); everything else (transcendentals, logical not, phase angle)
+/// is dimensionless-out.
+and unitRulesForUnaryOp (op: UnaryOp) (u: UnitSig option) : UnitSig option =
+    match op with
+    | OpNeg | OpConj | OpReal | OpImag -> u
+    | OpNot | OpArg -> None
+    | OpMath ("abs" | "floor" | "ceil") -> u
+    | OpMath "sqrt" ->
+        match u with
+        | Some s ->
+            let n = unitNormalize s
+            if n |> Map.forall (fun _ ex -> ex % 2 = 0)
+            then Some (n |> Map.map (fun _ ex -> ex / 2))
+            else None
+        | None -> None
+    | OpMath _ -> None
+
+/// Unit-only second pass over a KERNEL BODY, run by buildApplyInfo after
+/// parameter unification has bound the parameter types. The body was
+/// type-inferred while its params were still unresolved inference
+/// variables, so the cached node types carry no unit information (or a
+/// leaked left-operand annotation) — this walk recomputes the signature
+/// bottom-up with the same per-op table the scalar path uses
+/// (unitRulesForOp), so `t * t` over meters elements comes out meters^2
+/// and a mismatched `a + b` over a hand-written zip REJECTS. `bound`
+/// carries walk-computed signatures for kernel-local lets (their cached
+/// var types are as stale as the intermediate nodes). Constructs the walk
+/// doesn't model return None (no claim) — only op rules error.
+and kernelBodyUnits (env: TypeEnv) (bound: Map<IRId, UnitSig option>) (e: TypedExpr) : TypeResult<UnitSig option> =
+    let combineBranches context (a: UnitSig option) (b: UnitSig option) =
+        match a, b with
+        | Some ua, Some ub ->
+            if unitCompatible ua ub then Ok (Some ua)
+            else Error (UnitMismatch (context, ppUnitSig ua, ppUnitSig ub))
+        | Some u, None | None, Some u -> Ok (Some u)
+        | None, None -> Ok None
+    let ofType (t: IRType) = IR.getUnits (env.Subst.Resolve t)
+    let elemOfType (t: IRType) =
+        match env.Subst.Resolve t with
+        | ArrayElem at -> IR.getUnits at.ElemType
+        | resolved -> IR.getUnits resolved
+    // Walk a subtree only for its ERRORS (mismatched ops inside call args,
+    // assignment right-hand sides, conditions), discarding the signature.
+    let errorsOnly sub = kernelBodyUnits env bound sub |> Result.map ignore
+    match e.Kind with
+    | TExprLit _ | TExprComplexLit _ -> Ok None
+    | TExprVar (_, varId, _) ->
+        match Map.tryFind varId bound with
+        | Some u -> Ok u
+        | None -> Ok (ofType e.Type)
+    | TExprBinOp (_, op, l, r) ->
+        kernelBodyUnits env bound l |> Result.bind (fun lu ->
+        kernelBodyUnits env bound r |> Result.bind (fun ru ->
+        unitRulesForOp op lu ru))
+    | TExprUnaryOp (op, inner) ->
+        kernelBodyUnits env bound inner |> Result.map (unitRulesForUnaryOp op)
+    | TExprIf (cond, thenBr, elseBr) ->
+        errorsOnly cond |> Result.bind (fun () ->
+        kernelBodyUnits env bound thenBr |> Result.bind (fun tu ->
+        kernelBodyUnits env bound elseBr |> Result.bind (fun eu ->
+        combineBranches "conditional branches" tu eu)))
+    | TExprLet (_, varId, value, body) ->
+        kernelBodyUnits env bound value |> Result.bind (fun vu ->
+        kernelBodyUnits env (Map.add varId vu bound) body)
+    | TExprBlock (stmts, finalOpt) ->
+        let foldStmt acc stmt =
+            acc |> Result.bind (fun (b: Map<IRId, UnitSig option>) ->
+                match stmt with
+                | TStmtLet binding ->
+                    kernelBodyUnits env b binding.Value
+                    |> Result.map (fun vu -> Map.add binding.VarId vu b)
+                | TStmtAssign (_, rhs) ->
+                    kernelBodyUnits env b rhs |> Result.map (fun _ -> b)
+                | TStmtExpr sub ->
+                    kernelBodyUnits env b sub |> Result.map (fun _ -> b)
+                | TStmtForIn _ -> Ok b)
+        stmts |> List.fold foldStmt (Ok bound) |> Result.bind (fun b ->
+            match finalOpt with
+            | Some f -> kernelBodyUnits env b f
+            | None -> Ok None)
+    | TExprApp (_, args) ->
+        args |> List.fold (fun acc a ->
+            acc |> Result.bind (fun () -> errorsOnly a)) (Ok ())
+        |> Result.map (fun () -> None)
+    | TExprIndex (arr, _, _) -> Ok (elemOfType arr.Type)
+    | TExprReduce (arr, _, _) -> Ok (elemOfType arr.Type)
+    | TExprField _ | TExprTupleIndex _ -> Ok (ofType e.Type)
+    | _ -> Ok None
 
 and inferArithType mode op leftTy rightTy : TypeResult<IRType> =
     // Elementwise boolean/comparison over two ARRAYS lifts to a Bool-element
@@ -3965,13 +4348,10 @@ and inferArithType mode op leftTy rightTy : TypeResult<IRType> =
         | _ -> IRTScalar ETBool
     match op with
     | OpEq | OpNeq | OpLt | OpLe | OpGt | OpGe ->
-        // Comparisons require compatible units
-        let lUnits = IR.getUnits leftTy
-        let rUnits = IR.getUnits rightTy
-        match lUnits, rUnits with
-        | Some lu, Some ru when not (unitCompatible lu ru) ->
-            Error (Other (sprintf "Unit mismatch in comparison: %s vs %s" (ppUnitSig lu) (ppUnitSig ru)))
-        | _ -> Ok elementwiseBoolTy
+        // Comparisons require compatible units (unitRulesForOp errors on
+        // mismatch; the result carries no annotation)
+        unitRulesForOp op (IR.getUnits leftTy) (IR.getUnits rightTy)
+        |> Result.map (fun _ -> elementwiseBoolTy)
     | OpAnd | OpOr -> Ok elementwiseBoolTy
     | _ ->
         // Extract unit annotations if present
@@ -4002,14 +4382,14 @@ and inferArithType mode op leftTy rightTy : TypeResult<IRType> =
         let indexArithErr =
             match lBare, rBare with
             | IRTIdxTagged (_, IRefNamed ln), IRTIdxTagged (_, IRefNamed rn) when ln <> rn ->
-                Some (Other (sprintf "Cross-nominal index-type arithmetic: cannot combine values of distinct index domains '%s' and '%s'." ln rn))
+                Some (CrossNominalIndexArith (ln, rn))
             | IRTIdxTagged (_, IRefNamed ln), IRTIdxTagged (_, IRefNamed rn) when ln <> rn ->
-                Some (Other (sprintf "Cross-nominal index-type arithmetic: cannot combine values of distinct index domains '%s' and '%s'." ln rn))
+                Some (CrossNominalIndexArith (ln, rn))
             | IRTIdxTagged (_, IRefAnon (lid, _)), IRTIdxTagged (_, IRefAnon (rid, _)) when lid <> rid ->
-                Some (Other (sprintf "Cross-nominal index-type arithmetic: cannot combine values of distinct anonymous index domains (#%d vs #%d)." lid rid))
+                Some (CrossAnonIndexArith (lid, rid))
             | l, r when isIndexType l || isIndexType r ->
                 let n = if isIndexType l then indexTypeName l else indexTypeName r
-                Some (Other (sprintf "Arithmetic on index type '%s' is not permitted. Index types are nominal labels — for value-level arithmetic on positions, use virtual array iteration (which produces plain ints); for new index types derived from arithmetic, type-level construction is a separate workstream not yet implemented." n))
+                Some (IndexTypeArithForbidden n)
             | _ -> None
         match indexArithErr with
         | Some err -> Error err
@@ -4075,31 +4455,11 @@ and inferArithType mode op leftTy rightTy : TypeResult<IRType> =
                 | IRTScalar ETFloat64, _ | _, IRTScalar ETFloat64 -> IRTScalar ETFloat64
                 | IRTScalar ETFloat32, _ | _, IRTScalar ETFloat32 -> IRTScalar ETFloat32
                 | _ -> lBare
-        // Apply unit rules based on operation
-        match op with
-        | OpAdd | OpSub ->
-            // Addition/subtraction: units must match
-            match lUnits, rUnits with
-            | Some lu, Some ru ->
-                if unitCompatible lu ru then Ok (IRTUnitAnnotated (bareResult, lu))
-                else
-                    Error (Other (sprintf "Unit mismatch in %s: %s vs %s"
-                        (if op = OpAdd then "addition" else "subtraction")
-                        (ppUnitSig lu) (ppUnitSig ru)))
-            | Some u, None | None, Some u -> Ok (IRTUnitAnnotated (bareResult, u))
-            | None, None -> Ok bareResult
-        | OpMul ->
-            match lUnits, rUnits with
-            | Some lu, Some ru -> Ok (IRTUnitAnnotated (bareResult, unitMul lu ru))
-            | Some u, None | None, Some u -> Ok (IRTUnitAnnotated (bareResult, u))
-            | None, None -> Ok bareResult
-        | OpDiv | OpMod ->
-            match lUnits, rUnits with
-            | Some lu, Some ru -> Ok (IRTUnitAnnotated (bareResult, unitDiv lu ru))
-            | Some u, None -> Ok (IRTUnitAnnotated (bareResult, u))
-            | None, Some u -> Ok (IRTUnitAnnotated (bareResult, unitDiv unitDimensionless u))
-            | None, None -> Ok bareResult
-        | _ -> Ok bareResult
+        // Apply unit rules based on operation (shared with the array
+        // kernel-synthesis paths in inferBinOp)
+        unitRulesForOp op lUnits rUnits |> Result.map (function
+            | Some u -> IRTUnitAnnotated (bareResult, u)
+            | None -> bareResult)
 
 // ============================================================================
 // 10b. <@> Application with Symmetry Analysis
@@ -4243,10 +4603,19 @@ and inferApply (env: TypeEnv) (tLeft: TypedExpr) (tRight: TypedExpr) : TypeResul
                     mkTyped (TExprFunctorMap (f, acc)) outputType
                 let result : TypedExpr = funcs |> List.rev |> List.fold applyFmap comp
                 Ok result
-            | OpChoice | OpFallback ->
+            | OpChoice ->
                 // object_for(<|>) <@> (c1, c2, ...) → left-fold producing TExprChoice
                 let folder (acc: TypedExpr) (elem: TypedExpr) : TypedExpr =
                     mkTyped (TExprChoice (acc, elem)) acc.Type
+                Ok (elems |> List.tail |> List.fold folder (List.head elems))
+            | OpFallback ->
+                // object_for(<|:>) <@> (A1, A2, ...) → left-fold of allocated-
+                // fallback. Each intermediate is a fully-allocated dense array,
+                // so only the FIRST operand's allocation (compound mask /
+                // pointer chain) can defer to later ones — later dense results
+                // never fall through. That is the correct left-fold semantics.
+                let folder (acc: TypedExpr) (elem: TypedExpr) : TypedExpr =
+                    mkTyped (TExprFallback (acc, elem)) elem.Type
                 Ok (elems |> List.tail |> List.fold folder (List.head elems))
             | _ ->
                 // Standard left-associative fold: (((c1 op c2) op c3) op ...)
@@ -4359,7 +4728,7 @@ and inferApply (env: TypeEnv) (tLeft: TypedExpr) (tRight: TypedExpr) : TypeResul
                 Parallel = []  // synthesized (object_for zero kernel): no clause
             }
             buildApplyInfo env flatArrays identities arrayTypes sDimsPerArray sharedIdx lambdaInfo tLeft (mkTyped (TExprLambda lambdaInfo) (IRTScalar elemType)) false false
-        | _ -> Error (Other (sprintf "object_for kernel must be a lambda, reynolds, or zero, but got %A" (resolvedKernel.Kind.GetType().Name)))
+        | _ -> Error (ObjectForKernel (resolvedKernel.Kind.GetType().Name))
 
     // Composed ObjectLoop: (o1 >>@ o2) <@> A
     | TExprCompose (OpComposeObj, _, _), _ ->
@@ -4395,7 +4764,7 @@ and inferApply (env: TypeEnv) (tLeft: TypedExpr) (tRight: TypedExpr) : TypeResul
             match rL.Kind with
             | TExprVar (name, _, _) -> sprintf "variable '%s'" name
             | _ -> sprintf "%A" (rL.Kind.GetType().Name)
-        Error (Other (sprintf "<@> requires method_for or object_for on the left side, but got %s" leftDesc))
+        Error (ChainOpNeedsMethodFor leftDesc)
 
 and buildApplyInfo (env: TypeEnv)
     (arrays: TypedExpr list) (identities: ArrayIdentity list)
@@ -4627,19 +4996,37 @@ and buildApplyInfo (env: TypeEnv)
         // typechecking. See revalidateBodyTagChecks for rationale.
         revalidateBodyTagChecks env lambdaInfo.Body
         |> Result.bind (fun () ->
+        // Unit-only second pass over the kernel body, now that the params
+        // are bound to the input element types (see kernelBodyUnits). The
+        // computed signature replaces whatever annotation the return type
+        // resolution leaked, and op mismatches inside the body reject here.
+        kernelBodyUnits env Map.empty lambdaInfo.Body
+        |> Result.bind (fun bodyUnits ->
         // Infer output element type from kernel return type, falling back to input arrays.
         // Returns IRType (Phase B2). Primitives are wrapped IRTScalar.
+        let restampScalar (t: IRType) =
+            match IR.stripUnits t with
+            | IRTScalar _ as bare ->
+                match bodyUnits with
+                | Some u -> IRTUnitAnnotated (bare, u)
+                | None -> bare
+            | _ -> t
         let outputElemType =
             let resolved = env.Subst.Resolve(lambdaInfo.ReturnType)
             match resolved with
-            | IRTScalar _ as t -> t                                // pass through
+            | IRTScalar _ as t -> restampScalar t                  // stamp walk-computed units
             | ArrayElem arr -> arr.ElemType                         // already IRType
-            | IRTUnitAnnotated (IRTScalar _, _) as t -> t          // preserve unit annotation
+            | IRTUnitAnnotated (IRTScalar _, _) as t -> restampScalar t
+            | IRTNamed _ as t -> t                                 // struct/sum rows: Array<Struct> output
+            | IRTTuple _ as t -> t                                 // tuple rows: Array<(..,..)> output
             | _ ->
-                // S3 tag: relic. Fall back to common element type of input arrays.
-                // The input arrays' elem types are already IRType post-B2.
+                // S3 tag: relic. Fall back to common element type of input arrays
+                // when the return type is unresolved (IRTInfer) or has no
+                // element-position meaning. The input arrays' elem types are
+                // already IRType post-B2.
                 arrayTypes |> List.tryPick (fun at -> Some at.ElemType)
                 |> Option.defaultValue (IRTScalar ETFloat64)
+                |> restampScalar
         // A kernel CONSUMES an inner dimension when it has an array-typed
         // parameter of rank > 0 (e.g. reduce over a ragged row). A purely
         // elementwise kernel (all scalar params) consumes nothing, so the
@@ -4707,7 +5094,7 @@ and buildApplyInfo (env: TypeEnv)
             IsCoIteration = isCoIter
             IsComposeApply = false
         }
-        Ok (mkTyped (TExprApply info) outputType))
+        Ok (mkTyped (TExprApply info) outputType)))
 
 // ============================================================================
 // 10c. Lambda, Let, Match, Block, MethodFor, ObjectFor, Struct, For
@@ -4829,46 +5216,55 @@ and inferLambda env parms whereClause body : TypeResult<TypedExpr> =
 //  - No 0/false coercion, no float/int silent narrowing
 //
 and checkExpr (env: TypeEnv) (expected: IRType) (expr: Expr) : TypeResult<TypedExpr> =
+    // Stamp the ambient expression span (mirrors inferExpr) so errors raised
+    // here — and in recursive checkExpr calls on sub-expressions — anchor to
+    // the innermost offending node (e.g. the specific array-literal row whose
+    // length is wrong) instead of the enclosing declaration's whole span.
+    if expr.Span.StartLine > 0 then setCurrentExprSpan expr.Span
     let resolved = env.Subst.Resolve expected
-    match expr, resolved with
+    match expr.Kind, resolved with
 
     // Numeric/scalar literals retype to the expected scalar (numbers stay numbers,
     // bools stay bools — no implicit 0<->false). The literal carries its source-
     // level value but its IRType matches the annotation.
-    | ExprLit (LitInt _ as lit), IRTScalar et ->
+    | ExprKind.ExprLit (LitInt _ as lit), IRTScalar et ->
         match et with
         | ETInt32 | ETInt64 ->
             Ok (mkTyped (TExprLit lit) (IRTScalar et))
         | _ ->
             Error (TypeMismatch (resolved, IRTScalar ETInt64))
-    | ExprLit (LitInt _ as lit), IRTIdxTagged (IRTScalar (ETInt32 | ETInt64), _) ->
+    | ExprKind.ExprLit (LitInt _ as lit), IRTIdxTagged (IRTScalar (ETInt32 | ETInt64), _) ->
         // §4.18.3: untyped int literal acquires the index tag from annotation
         // context. `let i: Idx<3> = 0` works; the 0 becomes Nat<Idx<3>>.
         // Strict in the OTHER direction: a bare `Nat` value cannot flow to
         // Nat<I> position without explicit cast — but a LITERAL has no
         // pre-committed type, so context-driven typing applies here.
         Ok (mkTyped (TExprLit lit) resolved)
-    | ExprLit (LitString _ as lit), IRTScalar et ->
+    | ExprKind.ExprLit (LitInt _ as lit), (IRTNat _ | IRTUnitAnnotated (IRTNat _, _)) ->
+        // Same context-driven rule for Nat targets, unit-annotated or bare:
+        // `l1: Nat<angular_momentum> = 1` retypes the literal to the target.
+        Ok (mkTyped (TExprLit lit) resolved)
+    | ExprKind.ExprLit (LitString _ as lit), IRTScalar et ->
         match et with
         | ETString ->
             Ok (mkTyped (TExprLit lit) (IRTScalar et))
         | _ ->
             Error (TypeMismatch (resolved, IRTScalar ETString))
-    | ExprLit (LitString _ as lit), IRTIdxTagged (IRTScalar ETString, _) ->
+    | ExprKind.ExprLit (LitString _ as lit), IRTIdxTagged (IRTScalar ETString, _) ->
         // §4.18.3 parallel for string-valued index tags (EnumIdx with
         // string values). Same context-driven coercion as the int case.
         Ok (mkTyped (TExprLit lit) resolved)
-    | ExprLit (LitFloat _ as lit), IRTScalar et ->
+    | ExprKind.ExprLit (LitFloat _ as lit), IRTScalar et ->
         match et with
         | ETFloat32 | ETFloat64 -> Ok (mkTyped (TExprLit lit) (IRTScalar et))
         | _ -> Error (TypeMismatch (resolved, IRTScalar ETFloat64))
-    | ExprLit (LitBool _ as lit), IRTScalar ETBool ->
+    | ExprKind.ExprLit (LitBool _ as lit), IRTScalar ETBool ->
         Ok (mkTyped (TExprLit lit) (IRTScalar ETBool))
 
     // Array literal: extract per-rank shape from the annotation and recurse.
     // Outer index supplies the literal's length; inner index types form the
     // element annotation. Elements are checked individually against this.
-    | ExprArrayLit elems, ArrayElem arrTy when not arrTy.IndexTypes.IsEmpty ->
+    | ExprKind.ExprArrayLit elems, ArrayElem arrTy when not arrTy.IndexTypes.IsEmpty ->
         let outerIdx = arrTy.IndexTypes.Head
         let innerIdxs = arrTy.IndexTypes.Tail
         // Length check: if extent is a literal, the count must match.
@@ -4879,7 +5275,13 @@ and checkExpr (env: TypeEnv) (expected: IRType) (expr: Expr) : TypeResult<TypedE
         if not lengthOk then
             let expectedN =
                 match outerIdx.Extent with IRLit (IRLitInt n) -> int n | _ -> -1
-            Error (Other (sprintf "Array literal has %d elements, but annotation expects %d" elems.Length expectedN))
+            // Name the offending axis by its index tag; suppress synthetic
+            // (__anon / __-prefixed) tags, which carry no user-facing name.
+            let axisTag =
+                match outerIdx.Tag with
+                | Some t when not (t.StartsWith("__")) -> Some t
+                | _ -> None
+            Error (ArrayLitLength (elems.Length, expectedN, axisTag))
         else
             // Build the element annotation: just the elem type if no inner
             // index types, otherwise an array with the remaining index types.
@@ -4897,12 +5299,12 @@ and checkExpr (env: TypeEnv) (expected: IRType) (expr: Expr) : TypeResult<TypedE
     // synthesizes as an unbound name. The modulus is the argument to
     // rand() % mod and must be an integer. Lowering records it in RandomInits;
     // codegen emits allocate<> + the runtime fill_random.
-    | ExprApp (ExprVar "fill_random", [modE]), ArrayElem _ ->
+    | ExprKind.ExprApp ({ Kind = ExprKind.ExprVar "fill_random" }, [modE]), ArrayElem _ ->
         checkExpr env (IRTScalar ETInt64) modE |> Result.map (fun tMod ->
             mkTyped (TExprFillRandom tMod) resolved)
 
     // Tuple literal: zip components against expected component types.
-    | ExprTuple exprs, IRTTuple ts when exprs.Length = ts.Length ->
+    | ExprKind.ExprTuple exprs, IRTTuple ts when exprs.Length = ts.Length ->
         List.zip exprs ts |> List.map (fun (e, t) -> checkExpr env t e) |> sequenceResults
         |> Result.map (fun tExprs ->
             mkTyped (TExprTuple tExprs) (IRTTuple (tExprs |> List.map (fun e -> e.Type))))
@@ -4917,7 +5319,7 @@ and checkExpr (env: TypeEnv) (expected: IRType) (expr: Expr) : TypeResult<TypedE
     // TExprComplexLit lowers to IRComplex, a scalar IR node rendered as
     // std::complex<double>(re, im). Both components must be float-typed
     // (no implicit int → float promotion at literal construction time).
-    | ExprApp (ExprVar "complex", [reExpr; imExpr]), IRTScalar (ETComplex64 | ETComplex128 as cet) when (lookupVar "complex" env).IsNone ->
+    | ExprKind.ExprApp ({ Kind = ExprKind.ExprVar "complex" }, [reExpr; imExpr]), IRTScalar (ETComplex64 | ETComplex128 as cet) when (lookupVar "complex" env).IsNone ->
         let componentTy =
             match cet with
             | ETComplex64 -> IRTScalar ETFloat32
@@ -4932,7 +5334,7 @@ and checkExpr (env: TypeEnv) (expected: IRType) (expr: Expr) : TypeResult<TypedE
     // constructor call, which composes cleanly inside larger expressions
     // (the cast form had a precedence trap: `a * (re, im) : T` bound the
     // cast OUTSIDE the multiply, and the bare tuple operand miscompiled).
-    | ExprTuple [_; _], IRTScalar (ETComplex64 | ETComplex128) ->
+    | ExprKind.ExprTuple [_; _], IRTScalar (ETComplex64 | ETComplex128) ->
         Error (Other "complex values are constructed with complex(re, im); the tuple form `(re, im) : Complex128` is no longer supported")
 
     // Default: synthesize, then unify. This is the path that handles variables,
@@ -5029,8 +5431,23 @@ and inferLetBindingValue (env: TypeEnv) (binding: Binding) : TypeResult<TypedExp
         else
         let badIrreps = irTypeBadIrrepsDetail annotTy
         if badIrreps.IsSome then
-            Error (Other (sprintf "IrrepsIdx: %s. The spec must be a static array of (l, parity, mult) int triples — a `let static` binding or an inline literal like IrrepsIdx<[(0, 0, 2), (1, 1, 2)]>." badIrreps.Value))
+            Error (IrrepsIdxSpec badIrreps.Value)
         else
+        // Nested-function desugar (parseNestedFunction): `function f(x) -> T
+        // = body` becomes a let of a lambda whose binding annotation is the
+        // declared RETURN type — there is no surface TypeExpr spelling for
+        // "function of unannotated params". Read it accordingly: infer the
+        // lambda, then unify its return type with the annotation (a genuine
+        // function-type annotation on a lambda still checks structurally
+        // below).
+        match binding.Value.Kind with
+        | ExprKind.ExprLambda _ when (match annotTy with FuncElem _ -> false | _ -> true) ->
+            inferExpr env binding.Value |> Result.bind (fun tv ->
+                (match env.Subst.Resolve tv.Type with
+                 | FuncElem (_, ret) -> unify env.Subst ret annotTy |> Result.map (fun () -> tv)
+                 | _ -> Ok tv)
+                |> Result.bind rejectEscapedWildcard)
+        | _ ->
         checkExpr env annotTy binding.Value |> Result.bind (fun tv ->
             // Prefer the annotation as the canonical type — it can be more
             // specific than what the value synthesized to.
@@ -5064,13 +5481,13 @@ and inferLetBinding env binding body : TypeResult<TypedExpr> =
     let valueResult = inferLetBindingValue env binding
     valueResult |> Result.bind (fun tValue ->
         let assign = assignOfBindingMut binding.Mutability
-        match binding.Pattern with
-        | PatVar name ->
+        match binding.Pattern.Kind with
+        | PatternKind.PatVar name ->
             let (varId, env') = bindLetPatVar env name (Some (AIDVariable name)) assign tValue
             inferExpr env' body |> Result.map (fun tBody ->
                 mkTyped (TExprLet (name, varId, tValue, tBody)) tBody.Type)
 
-        | PatTuple pats ->
+        | PatternKind.PatTuple pats ->
             let mutable env' = env
             // Resolve type and determine binding list
             let resolvedTy = env.Subst.Resolve(tValue.Type)
@@ -5084,23 +5501,23 @@ and inferLetBinding env binding body : TypeResult<TypedExpr> =
                         else ts
                 | _ -> []
             pats |> List.iteri (fun i p ->
-                match p with
-                | PatVar n ->
+                match p.Kind with
+                | PatternKind.PatVar n ->
                     let vid = env.Builder.FreshId()
                     let eTy =
                         if i < typeList.Length then env.Subst.Resolve(typeList.[i])
                         else env.Subst.Fresh()
                     env' <- bindVarSimple n vid eTy env'
-                | PatWildcard -> ()
+                | PatternKind.PatWildcard -> ()
                 | _ ->
                     for n in patternNames p do
                         env' <- bindVarSimple n (env.Builder.FreshId()) (env.Subst.Fresh()) env')
             inferExpr env' body |> Result.map (fun tBody ->
-                let name = pats |> List.tryPick (function PatVar n -> Some n | _ -> None)
+                let name = pats |> List.tryPick (fun p -> match p.Kind with PatternKind.PatVar n -> Some n | _ -> None)
                            |> Option.defaultValue "_"
                 mkTyped (TExprLet (name, env.Builder.FreshId(), tValue, tBody)) tBody.Type)
 
-        | PatCons (headPat, tailPat) ->
+        | PatternKind.PatCons (headPat, tailPat) ->
             let mutable env' = env
             for n in patternNames headPat @ patternNames tailPat do
                 env' <- bindVarSimple n (env.Builder.FreshId()) (env.Subst.Fresh()) env'
@@ -5158,11 +5575,18 @@ and inferBlock env stmts finalExpr : TypeResult<TypedExpr> =
                 // stripped just above. Loud failure beats a skipped statement.
                 failwith "inferBlock: nested StmtSpanned"
             | StmtLet binding ->
-                match inferExpr curEnv binding.Value with
+                // Shared annotation handler (inferLetBindingValue): block
+                // lets previously called plain inferExpr and IGNORED the
+                // annotation entirely — `let mut vy: Float<velocity> = 19.62`
+                // bound vy at the bare synthesized type. Routing through the
+                // shared handler gives blocks the same bidirectional
+                // checking and annotation-as-canonical-type behavior as
+                // top-level and expression-form lets.
+                match inferLetBindingValue curEnv binding with
                 | Ok tValue ->
-                    let name = match binding.Pattern with PatVar n -> n | _ -> "_"
+                    let name = match binding.Pattern.Kind with PatternKind.PatVar n -> n | _ -> "_"
                     let varId = curEnv.Builder.FreshId()
-                    let identity = match binding.Pattern with PatVar n -> Some (AIDVariable n) | _ -> None
+                    let identity = match binding.Pattern.Kind with PatternKind.PatVar n -> Some (AIDVariable n) | _ -> None
                     let assign = assignOfBindingMut binding.Mutability
                     curEnv <- bindVarFull name varId tValue.Type identity assign (Some tValue) curEnv
                     // Dist provenance: in-block dist lets (e.g. `let h =
@@ -5180,8 +5604,8 @@ and inferBlock env stmts finalExpr : TypeResult<TypedExpr> =
                     // never introduced in the IR — dangling VarId at
                     // validation for any in-body `let (x, y) = p`.
                     let mutable subBindings : (string * IRId * IRType) list = []
-                    (match binding.Pattern with
-                     | PatTuple pats ->
+                    (match binding.Pattern.Kind with
+                     | PatternKind.PatTuple pats ->
                         let resolvedTy = curEnv.Subst.Resolve(tValue.Type)
                         let typeList =
                             match resolvedTy with
@@ -5193,8 +5617,8 @@ and inferBlock env stmts finalExpr : TypeResult<TypedExpr> =
                                     if pats.Length = flat.Length then flat else ts
                             | _ -> []
                         pats |> List.iteri (fun i p ->
-                            match p with
-                            | PatVar n ->
+                            match p.Kind with
+                            | PatternKind.PatVar n ->
                                 let eTy =
                                     if i < typeList.Length then curEnv.Subst.Resolve(typeList.[i])
                                     else curEnv.Subst.Fresh()
@@ -5209,8 +5633,7 @@ and inferBlock env stmts finalExpr : TypeResult<TypedExpr> =
                                     curEnv <- bindVarSimple n subId eTy curEnv)
                      | _ -> ())
                     // Mutual-group check-point (block-level twin of the
-                    // top-level DeclLet hook). Block-let inference otherwise
-                    // ignores the annotation; only the mutual path reads it.
+                    // top-level DeclLet hook).
                     let mutualChecks =
                         match mutualBindingObligation curEnv binding with
                         | Ok None -> []
@@ -5221,9 +5644,9 @@ and inferBlock env stmts finalExpr : TypeResult<TypedExpr> =
                         | Error e -> err <- Some e; []
                     // Constrained-struct binding: check at every assignment.
                     let structChecks =
-                        match binding.Pattern with
-                        | PatVar n ->
-                            match synthesizeStructChecks curEnv tValue.Type (ExprVar n) with
+                        match binding.Pattern.Kind with
+                        | PatternKind.PatVar n ->
+                            match synthesizeStructChecks curEnv tValue.Type (mkExpr binding.Pattern.Span (ExprVar n)) with
                             | Ok cs -> cs |> List.map (fun c -> (curEnv.Builder.FreshId(), c))
                             | Error e -> err <- Some e; []
                         | _ -> []
@@ -5249,7 +5672,7 @@ and inferBlock env stmts finalExpr : TypeResult<TypedExpr> =
                     | TExprVar (name, _, _) ->
                         match lookupVar name curEnv with
                         | Some info when info.Assign = ReadOnly ->
-                            err <- Some (Other (sprintf "Cannot assign to '%s': static bindings are immutable" name))
+                            err <- Some (ImmutableStaticAssign name)
                         | _ ->
                             let _ = unify curEnv.Subst tL.Type tR.Type
                             typedStmts <- typedStmts @ [TStmtAssign (tL, tR)] @ assignChecks ()
@@ -5279,8 +5702,8 @@ and inferBlock env stmts finalExpr : TypeResult<TypedExpr> =
 /// The loop variable binds as Int64 in the body scope; body lets stay local
 /// to the loop (they do NOT leak past it), matching block-scope rules.
 and inferForIn (env: TypeEnv) (varName: string) (rangeExpr: Expr) (bodyStmts: Stmt list) : TypeResult<TypedStmt> =
-    match rangeExpr with
-    | ExprDotDot (lo, hi) ->
+    match rangeExpr.Kind with
+    | ExprKind.ExprDotDot (lo, hi) ->
         match inferExpr env lo, inferExpr env hi with
         | Error e, _ | _, Error e -> Error e
         | Ok tLo, Ok tHi ->
@@ -5301,7 +5724,7 @@ and inferForIn (env: TypeEnv) (varName: string) (rangeExpr: Expr) (bodyStmts: St
                     | StmtLet binding ->
                         match inferExpr bodyEnv binding.Value with
                         | Ok tValue ->
-                            let bName = match binding.Pattern with PatVar n -> n | _ -> "_"
+                            let bName = match binding.Pattern.Kind with PatternKind.PatVar n -> n | _ -> "_"
                             let bId = bodyEnv.Builder.FreshId()
                             let assign = assignOfBindingMut binding.Mutability
                             bodyEnv <- bindVarFull bName bId tValue.Type None assign (Some tValue) bodyEnv
@@ -5339,10 +5762,10 @@ and inferForIn (env: TypeEnv) (varName: string) (rangeExpr: Expr) (bodyStmts: St
 and inferMethodFor env arrays : TypeResult<TypedExpr> =
     // Detect method_for(zip(A, B, ...)) — expand zip into co-iteration
     match arrays with
-    | [ExprZip zipExprs] ->
+    | [{ Kind = ExprKind.ExprZip zipExprs }] ->
         zipExprs |> List.map (inferExpr env) |> sequenceResults |> Result.bind (fun tZipArrays ->
             let identities = zipExprs |> List.map (fun arr ->
-                match arr with ExprVar name -> AIDVariable name | _ -> AIDLiteral (env.Builder.FreshId()))
+                match arr.Kind with ExprKind.ExprVar name -> AIDVariable name | _ -> AIDLiteral (env.Builder.FreshId()))
             let arrayTypes = tZipArrays |> List.mapi (fun i ta ->
                 match ta.Type with
                 | ArrayElem at -> at
@@ -5401,7 +5824,7 @@ and inferMethodFor env arrays : TypeResult<TypedExpr> =
             | _ -> failwith "unreachable"
         | _ ->
         let identities = arrays |> List.map (fun arr ->
-            match arr with ExprVar name -> AIDVariable name | _ -> AIDLiteral (env.Builder.FreshId()))
+            match arr.Kind with ExprKind.ExprVar name -> AIDVariable name | _ -> AIDLiteral (env.Builder.FreshId()))
         let arrayTypes = tArrays |> List.mapi (fun i ta ->
             match ta.Type with
             | ArrayElem at -> at
@@ -5439,10 +5862,61 @@ and inferObjectFor env kernel : TypeResult<TypedExpr> =
         }
         Ok (mkTyped (TExprObjectFor info) loopTy))
 
-and inferStructConstruction env name fields : TypeResult<TypedExpr> =
+and inferStructConstruction env name fields (spread: Expr option) : TypeResult<TypedExpr> =
     match lookupTypeDef name env with
     | Some (TDIStruct (_, _, declFields, _)) ->
         let declNames = declFields |> List.map fst
+        // Functional update: `S { f = v, ..base }` desugars the MISSING
+        // fields to `base.f` reads and falls into the ordinary construction
+        // path (dup/unknown/missing checks, per-field bidirectional check,
+        // decl-order emission, assignment-site guards — all unchanged).
+        let desugared =
+            match spread with
+            | None -> Ok fields
+            | Some baseExpr ->
+                // v1 base restriction: a variable / field path / typed wrap —
+                // pure, so re-evaluating it once per copied field is safe and
+                // no temp binding (with its IRId-ordering interactions) is
+                // needed. Anything else: bind it with let first.
+                let rec pureBase (e: Expr) =
+                    match e.Kind with
+                    | ExprKind.ExprVar _ -> true
+                    | ExprKind.ExprField (o, _) -> pureBase o
+                    | ExprKind.ExprTyped (i, _) -> pureBase i
+                    | _ -> false
+                if not (pureBase baseExpr) then Error (StructSpreadBase name)
+                else
+                    inferExpr env baseExpr |> Result.bind (fun tBase ->
+                        let resolved =
+                            match env.Subst.Resolve tBase.Type with
+                            | IRTNamed n ->
+                                // Chase one transparent-alias level so a base
+                                // typed by an alias of this struct passes.
+                                (match lookupTypeDef n env with
+                                 | Some (TDIAlias (IRTNamed t)) -> IRTNamed t
+                                 | _ -> IRTNamed n)
+                            | other -> other
+                        let acceptBase () =
+                            let providedNames = fields |> List.map fst
+                            let missing = declNames |> List.filter (fun f -> not (List.contains f providedNames))
+                            if missing.IsEmpty then Error (StructSpreadRedundant name)
+                            else
+                                Ok (fields @ (missing |> List.map (fun f ->
+                                    (f, inheritSpan baseExpr (ExprField (baseExpr, f))))))
+                        match resolved with
+                        | IRTNamed n when n = name -> acceptBase ()
+                        | IRTInfer _ ->
+                            // Unresolved base (e.g. a kernel param whose type
+                            // unifies with the iterated array's elem type only
+                            // later, in buildApplyInfo): the spread base of an
+                            // `S { .. }` construction must BE an S, so bind
+                            // the variable now and let the constraint flow
+                            // back to the param.
+                            (match unify env.Subst resolved (IRTNamed name) with
+                             | Ok () -> acceptBase ()
+                             | Error _ -> Error (StructSpreadNotStruct (name, ppIRType resolved)))
+                        | other -> Error (StructSpreadNotStruct (name, ppIRType other)))
+        desugared |> Result.bind (fun fields ->
         let providedNames = fields |> List.map fst
         let duplicate =
             providedNames |> List.countBy id
@@ -5450,9 +5924,9 @@ and inferStructConstruction env name fields : TypeResult<TypedExpr> =
         let unknown = providedNames |> List.tryFind (fun n -> not (List.contains n declNames))
         let missing = declNames |> List.tryFind (fun n -> not (List.contains n providedNames))
         match duplicate, unknown, missing with
-        | Some d, _, _ -> Error (Other (sprintf "struct %s: field '%s' assigned more than once" name d))
-        | _, Some u, _ -> Error (Other (sprintf "struct %s has no field '%s'" name u))
-        | _, _, Some m -> Error (Other (sprintf "struct %s: missing field '%s' in constructor" name m))
+        | Some d, _, _ -> Error (StructFieldDuplicate (name, d))
+        | _, Some u, _ -> Error (StructNoField (name, u))
+        | _, _, Some m -> Error (StructMissingField (name, m))
         | None, None, None ->
             fields |> List.map (fun (fname, fexpr) ->
                 // Bidirectional: check the field expr against the declared
@@ -5462,20 +5936,19 @@ and inferStructConstruction env name fields : TypeResult<TypedExpr> =
                 match checkExpr env eTy fexpr with
                 | Ok tFE -> Ok (fname, tFE)
                 | Error (TypeMismatch (exp, act)) ->
-                    Error (Other (sprintf "struct %s, field '%s': expected %s, got %s"
-                                      name fname (ppIRType exp) (ppIRType act)))
+                    Error (StructFieldType (name, fname, ppIRType exp, ppIRType act))
                 | Error e -> Error e)
             |> sequenceResults |> Result.map (fun tFields ->
                 // Emit fields in DECLARATION order: C++ designated
                 // initializers require it, and evaluation order becomes
                 // deterministic regardless of the literal's field order.
                 let ordered = declNames |> List.map (fun n -> tFields |> List.find (fun (fn, _) -> fn = n))
-                mkTyped (TExprStruct (name, ordered)) (IRTNamed name))
+                mkTyped (TExprStruct (name, ordered)) (IRTNamed name)))
     | Some (TDIAlias (IRTNamed target)) when target <> name ->
         // Transparent alias naming a struct: construct through it.
-        inferStructConstruction env target fields
+        inferStructConstruction env target fields spread
     | _ ->
-        Error (Other (sprintf "unknown struct type '%s' in constructor" name))
+        Error (UnknownStructType name)
 
 // ---- Mutual-group binding-site machinery -----------------------------------
 // The joint check attaches exactly where a group's type-tuple is INTRODUCED:
@@ -5516,41 +5989,40 @@ and tryMutualAnnotation (env: TypeEnv) (annot: TypeExpr) : TypeResult<MutualGrou
         let describe = groupNames |> String.concat ", "
         match annot with
         | TyNamed (n, []) ->
-            Error (Other (sprintf "type '%s' belongs to mutual group (%s); bind the group jointly: let (%s): (%s) = ..."
-                              n describe (groupNames |> List.map (fun s -> s.ToLower()) |> String.concat ", ") describe))
+            Error (MutualBindJointly (n, describe, (groupNames |> List.map (fun s -> s.ToLower()) |> String.concat ", ")))
         | TyTuple elems ->
             let directNames =
                 elems |> List.choose (function
                     | TyNamed (n, []) when env.MutualMembers.ContainsKey n -> Some n
                     | _ -> None)
             if directNames.Length <> allOccurrences.Length then
-                Error (Other (sprintf "mutual member types (group %s) may appear only as direct elements of a joint tuple annotation" describe))
+                Error (MutualDirectElementsOnly describe)
             elif directNames |> List.exists (fun n -> env.MutualMembers.[n] <> groupId) then
-                Error (Other "annotation mixes members of different mutual groups")
+                Error MutualMixedGroups
             elif (directNames |> List.distinct |> List.length) <> directNames.Length then
-                Error (Other (sprintf "duplicate mutual member in annotation (group %s)" describe))
+                Error (MutualDuplicateMember describe)
             elif Set.ofList directNames <> Set.ofList groupNames then
-                Error (Other (sprintf "mutual group (%s) is incomplete in this annotation; all group members must appear together" describe))
+                Error (MutualIncompleteAnnotation describe)
             else Ok (Some group)
         | _ ->
-            Error (Other (sprintf "mutual member types (group %s) may appear only in a joint let annotation or a function's declared return type" describe))
+            Error (MutualJointAnnotationOnly describe)
 
 /// Rename member references in a decl-validated conjunct to a binding's leaf
 /// variable names (bare scalar refs and field-path bases alike).
 and renameMutualRefs (mapping: Map<string, string>) (e: Expr) : Expr =
     let r = renameMutualRefs mapping
-    match e with
-    | ExprVar n when mapping.ContainsKey n -> ExprVar mapping.[n]
-    | ExprVar _ | ExprLit _ -> e
-    | ExprField (o, f) -> ExprField (r o, f)
-    | ExprApp (f, args) -> ExprApp (r f, args |> List.map r)
-    | ExprBinOp (mode, op, l, rr) -> ExprBinOp (mode, op, r l, r rr)
-    | ExprUnaryOp (op, i) -> ExprUnaryOp (op, r i)
-    | ExprIf (c, t, f) -> ExprIf (r c, r t, r f)
-    | ExprTuple es -> ExprTuple (es |> List.map r)
-    | ExprArrayLit es -> ExprArrayLit (es |> List.map r)
-    | ExprTyped (i, ty) -> ExprTyped (r i, ty)
-    | other -> other  // decl-time validation restricts conjuncts to the forms above
+    match e.Kind with
+    | ExprKind.ExprVar n when mapping.ContainsKey n -> inheritSpan e (ExprVar mapping.[n])
+    | ExprKind.ExprVar _ | ExprKind.ExprLit _ -> e
+    | ExprKind.ExprField (o, f) -> inheritSpan e (ExprField (r o, f))
+    | ExprKind.ExprApp (f, args) -> inheritSpan e (ExprApp (r f, args |> List.map r))
+    | ExprKind.ExprBinOp (mode, op, l, rr) -> inheritSpan e (ExprBinOp (mode, op, r l, r rr))
+    | ExprKind.ExprUnaryOp (op, i) -> inheritSpan e (ExprUnaryOp (op, r i))
+    | ExprKind.ExprIf (c, t, f) -> inheritSpan e (ExprIf (r c, r t, r f))
+    | ExprKind.ExprTuple es -> inheritSpan e (ExprTuple (es |> List.map r))
+    | ExprKind.ExprArrayLit es -> inheritSpan e (ExprArrayLit (es |> List.map r))
+    | ExprKind.ExprTyped (i, ty) -> inheritSpan e (ExprTyped (r i, ty))
+    | _ -> e  // decl-time validation restricts conjuncts to the forms above
 
 /// Synthesize the joint runtime checks at a binding site. `env` must already
 /// have the leaf variables bound; the check IRIds are allocated HERE, after
@@ -5561,7 +6033,7 @@ and synthesizeMutualChecks (env: TypeEnv) (group: MutualGroupInfo) (memberToLeaf
         inferExpr env renamed |> Result.map (fun tCond ->
             let checkId = env.Builder.FreshId()
             let msg = sprintf "Mutual constraint violation (%s)" group.GroupId
-            (checkId, mkTyped (TExprConstraintCheck (tCond, msg)) IRTUnit)))
+            (checkId, mkTypedSpan (TExprConstraintCheck (tCond, msg)) IRTUnit tCond.Span)))
     |> sequenceResults
 
 /// Binding side of the check-point rule for an annotated let. Ok None — no
@@ -5576,24 +6048,24 @@ and mutualBindingObligation (env: TypeEnv) (binding: Binding) : TypeResult<(Mutu
         tryMutualAnnotation env annot |> Result.bind (function
             | None -> Ok None
             | Some group ->
-                match binding.Pattern, annot with
-                | PatTuple pats, TyTuple elems when
+                match binding.Pattern.Kind, annot with
+                | PatternKind.PatTuple pats, TyTuple elems when
                         pats.Length = elems.Length &&
-                        pats |> List.forall (function PatVar _ -> true | _ -> false) ->
+                        pats |> List.forall (fun p -> match p.Kind with PatternKind.PatVar _ -> true | _ -> false) ->
                     let memberToLeaf =
                         List.zip elems pats
                         |> List.choose (fun (t, p) ->
-                            match t, p with
-                            | TyNamed (n, []), PatVar leaf when group.Members |> List.exists (fun (m, _) -> m = n) ->
+                            match t, p.Kind with
+                            | TyNamed (n, []), PatternKind.PatVar leaf when group.Members |> List.exists (fun (m, _) -> m = n) ->
                                 Some (n, leaf)
                             | _ -> None)
                         |> Map.ofList
                     // A call to a declared-return function was already checked
                     // at its return site — the single verification point.
-                    let rec stripT e = match e with ExprTyped (i, _) -> stripT i | _ -> e
+                    let rec stripT (e: Expr) = match e.Kind with ExprKind.ExprTyped (i, _) -> stripT i | _ -> e
                     let alreadyChecked =
-                        match stripT binding.Value with
-                        | ExprApp (ExprVar f, _) ->
+                        match (stripT binding.Value).Kind with
+                        | ExprKind.ExprApp ({ Kind = ExprKind.ExprVar f }, _) ->
                             match env.MutualReturnFuncs.TryGetValue f with
                             | true, gid -> gid = group.GroupId
                             | _ -> false
@@ -5602,7 +6074,7 @@ and mutualBindingObligation (env: TypeEnv) (binding: Binding) : TypeResult<(Mutu
                     else Ok (Some (group, memberToLeaf))
                 | _ ->
                     let names = group.Members |> List.map fst |> String.concat ", "
-                    Error (Other (sprintf "a mutual group (%s) must be bound jointly with a tuple of variables: let (x, y): (%s) = ..." names names)))
+                    Error (MutualBindTuple names))
 
 /// Struct where-constraint checks for an assignment target: substitute each
 /// field name with `<target>.<field>`, infer, and wrap as inlined guards.
@@ -5616,25 +6088,25 @@ and synthesizeStructChecks (env: TypeEnv) (targetTy: IRType) (targetSurface: Exp
         match lookupTypeDef sname env with
         | Some (TDIStruct (_, _, declFields, constraints)) when not constraints.IsEmpty ->
             let fieldNames = declFields |> List.map fst |> Set.ofList
-            let rec subst e =
-                match e with
-                | ExprVar n when fieldNames.Contains n -> ExprField (targetSurface, n)
-                | ExprVar _ | ExprLit _ -> e
-                | ExprField (o, f) -> ExprField (subst o, f)
-                | ExprApp (f, args) -> ExprApp (subst f, args |> List.map subst)
-                | ExprBinOp (m, op, l, r) -> ExprBinOp (m, op, subst l, subst r)
-                | ExprUnaryOp (op, i) -> ExprUnaryOp (op, subst i)
-                | ExprIf (c, t, f) -> ExprIf (subst c, subst t, subst f)
-                | ExprTuple es -> ExprTuple (es |> List.map subst)
-                | ExprArrayLit es -> ExprArrayLit (es |> List.map subst)
-                | ExprTyped (i, ty) -> ExprTyped (subst i, ty)
-                | other -> other
+            let rec subst (e: Expr) =
+                match e.Kind with
+                | ExprKind.ExprVar n when fieldNames.Contains n -> inheritSpan e (ExprField (targetSurface, n))
+                | ExprKind.ExprVar _ | ExprKind.ExprLit _ -> e
+                | ExprKind.ExprField (o, f) -> inheritSpan e (ExprField (subst o, f))
+                | ExprKind.ExprApp (f, args) -> inheritSpan e (ExprApp (subst f, args |> List.map subst))
+                | ExprKind.ExprBinOp (m, op, l, r) -> inheritSpan e (ExprBinOp (m, op, subst l, subst r))
+                | ExprKind.ExprUnaryOp (op, i) -> inheritSpan e (ExprUnaryOp (op, subst i))
+                | ExprKind.ExprIf (c, t, f) -> inheritSpan e (ExprIf (subst c, subst t, subst f))
+                | ExprKind.ExprTuple es -> inheritSpan e (ExprTuple (es |> List.map subst))
+                | ExprKind.ExprArrayLit es -> inheritSpan e (ExprArrayLit (es |> List.map subst))
+                | ExprKind.ExprTyped (i, ty) -> inheritSpan e (ExprTyped (subst i, ty))
+                | _ -> e
             constraints |> List.mapi (fun i c ->
                 inferExpr env (subst c) |> Result.map (fun tCond ->
                     let msg =
                         if constraints.Length = 1 then sprintf "Constraint violation in %s" sname
                         else sprintf "Constraint violation in %s (conjunct %d)" sname (i + 1)
-                    mkTyped (TExprConstraintCheck (tCond, msg)) IRTUnit))
+                    mkTypedSpan (TExprConstraintCheck (tCond, msg)) IRTUnit tCond.Span))
             |> sequenceResults
         | _ -> Ok []
     | _ -> Ok []
@@ -5643,8 +6115,8 @@ and synthesizeStructChecks (env: TypeEnv) (targetTy: IRType) (targetSurface: Exp
 /// re-checks the OBJECT's constraints; any other target checks the assigned
 /// value's own struct type.
 and structChecksForAssign (env: TypeEnv) (lhsSurface: Expr) (tL: TypedExpr) : TypeResult<TypedExpr list> =
-    match lhsSurface, tL.Kind with
-    | ExprField (objSurface, _), TExprField (tObj, _, _) ->
+    match lhsSurface.Kind, tL.Kind with
+    | ExprKind.ExprField (objSurface, _), TExprField (tObj, _, _) ->
         synthesizeStructChecks env tObj.Type objSurface
     | _ ->
         synthesizeStructChecks env tL.Type lhsSurface
@@ -5667,8 +6139,7 @@ and wrapMutualReturnBody (env: TypeEnv) (retAnnot: TypeExpr) (group: MutualGroup
                 | _ -> None)
         | _ -> []
     if memberSlots.Length <> group.Members.Length then
-        Error (Other (sprintf "mutual group (%s): declared return type must list every member as a direct tuple element"
-                          (group.Members |> List.map fst |> String.concat ", ")))
+        Error (MutualReturnTupleElements (group.Members |> List.map fst |> String.concat ", "))
     else
         let rid = env.Builder.FreshId()
         let retVar = mkTyped (TExprVar ("__mg_ret", rid, None)) retTy
@@ -5712,7 +6183,7 @@ and inferForExpr env source kernelOpt : TypeResult<TypedExpr> =
             sharedIdxRes |> Result.bind (fun sharedIdx ->
 
             let identities = arrays |> List.map (fun arr ->
-                match arr with ExprVar name -> AIDVariable name | _ -> AIDLiteral (env.Builder.FreshId()))
+                match arr.Kind with ExprKind.ExprVar name -> AIDVariable name | _ -> AIDLiteral (env.Builder.FreshId()))
             // For co-iteration, all arrays use the shared index type
             let arrayTypes = tArrays |> List.mapi (fun i ta ->
                 match ta.Type with
@@ -5813,7 +6284,7 @@ and checkDecl (env: TypeEnv) (decl: Decl) : TypeResult<TypedDecl * TypeEnv> =
         // that we surface destructured sub-vars to Lowering and wrap in a
         // TypedBinding rather than recursing into a body expression.
         inferLetBindingValue env binding |> Result.bind (fun tValue ->
-            let name = match binding.Pattern with PatVar n -> n | _ -> "_"
+            let name = match binding.Pattern.Kind with PatternKind.PatVar n -> n | _ -> "_"
             // Provider load (e.g. `let sample = NetCDF.load("f.nc")`): resolve the
             // module's real struct type at compile time by reading the file
             // metadata, then register the dims/vars structs plus a top-level
@@ -5824,8 +6295,8 @@ and checkDecl (env: TypeEnv) (decl: Decl) : TypeResult<TypedDecl * TypeEnv> =
             // detection still fires. Ordinary (opaque) inference is the fallback
             // when the receiver is not a provider alias or the file can't be read.
             let (env, tValue) =
-                match binding.Value with
-                | ExprApp (ExprField (ExprVar alias, "load"), [ExprLit (LitString path)]) ->
+                match binding.Value.Kind with
+                | ExprKind.ExprApp ({ Kind = ExprKind.ExprField ({ Kind = ExprKind.ExprVar alias }, "load") }, [{ Kind = ExprKind.ExprLit (LitString path) }]) ->
                     match providerAliasName env alias with
                     | None -> (env, tValue)
                     | Some pname ->
@@ -5839,7 +6310,7 @@ and checkDecl (env: TypeEnv) (decl: Decl) : TypeResult<TypedDecl * TypeEnv> =
                             (envM, { tValue with Type = moduleTy })
                         with _ -> (env, tValue)
                 | _ -> (env, tValue)
-            let identity = match binding.Pattern with PatVar n -> Some (AIDVariable n) | _ -> None
+            let identity = match binding.Pattern.Kind with PatternKind.PatVar n -> Some (AIDVariable n) | _ -> None
             let assign = assignOfBindingMut binding.Mutability
             let (varId, env') = bindLetPatVar env name identity assign tValue
 
@@ -5860,8 +6331,8 @@ and checkDecl (env: TypeEnv) (decl: Decl) : TypeResult<TypedDecl * TypeEnv> =
             // Handle destructuring at top level — collect sub-bindings for Lowering
             let mutable subBindings : (string * IRId * IRType) list = []
             let env' =
-                match binding.Pattern with
-                | PatTuple pats ->
+                match binding.Pattern.Kind with
+                | PatternKind.PatTuple pats ->
                     // Resolve and determine which type list to use for binding
                     let resolvedTy = env.Subst.Resolve(tValue.Type)
                     let typeList =
@@ -5878,8 +6349,8 @@ and checkDecl (env: TypeEnv) (decl: Decl) : TypeResult<TypedDecl * TypeEnv> =
                         | _ -> []
                     pats |> List.mapi (fun i p -> (i, p))
                     |> List.fold (fun e (i, p) ->
-                        match p with
-                        | PatVar n ->
+                        match p.Kind with
+                        | PatternKind.PatVar n ->
                             let eTy =
                                 if i < typeList.Length then env.Subst.Resolve(typeList.[i])
                                 else env.Subst.Fresh()
@@ -5891,7 +6362,7 @@ and checkDecl (env: TypeEnv) (decl: Decl) : TypeResult<TypedDecl * TypeEnv> =
                             let eTy = env.Subst.Fresh()
                             subBindings <- subBindings @ [(n, subId, eTy)]
                             bindVarSimple n subId eTy e2) e) env'
-                | PatCons (h, t) ->
+                | PatternKind.PatCons (h, t) ->
                     let e1 = patternNames h |> List.fold (fun e n ->
                         let subId = env.Builder.FreshId()
                         let eTy = env.Subst.Fresh()
@@ -5902,7 +6373,7 @@ and checkDecl (env: TypeEnv) (decl: Decl) : TypeResult<TypedDecl * TypeEnv> =
                         let eTy = env.Subst.Fresh()
                         subBindings <- subBindings @ [(n, subId, eTy)]
                         bindVarSimple n subId eTy e) e1
-                | PatStruct (structName, fieldPats) ->
+                | PatternKind.PatStruct (structName, fieldPats) ->
                     // Look up struct field types from the type definition
                     let structFields =
                         match env.Subst.Resolve(tValue.Type) with
@@ -5913,8 +6384,8 @@ and checkDecl (env: TypeEnv) (decl: Decl) : TypeResult<TypedDecl * TypeEnv> =
                         | _ -> []
                     let fieldTypeMap = Map.ofList structFields
                     fieldPats |> List.fold (fun e (fieldName, pat) ->
-                        match pat with
-                        | PatVar n ->
+                        match pat.Kind with
+                        | PatternKind.PatVar n ->
                             let subId = env.Builder.FreshId()
                             let eTy = Map.tryFind fieldName fieldTypeMap
                                       |> Option.defaultWith (fun () -> env.Subst.Fresh())
@@ -5939,8 +6410,8 @@ and checkDecl (env: TypeEnv) (decl: Decl) : TypeResult<TypedDecl * TypeEnv> =
             mutualChecksR |> Result.bind (fun mutualChecks ->
             // Constrained-struct binding: check at every assignment site.
             let structChecksR =
-                match binding.Pattern with
-                | PatVar n -> synthesizeStructChecks env' tValue.Type (ExprVar n)
+                match binding.Pattern.Kind with
+                | PatternKind.PatVar n -> synthesizeStructChecks env' tValue.Type (mkExpr binding.Pattern.Span (ExprVar n))
                 | _ -> Ok []
             structChecksR |> Result.map (fun structChecks ->
             let postChecks =
@@ -5968,8 +6439,8 @@ and checkDecl (env: TypeEnv) (decl: Decl) : TypeResult<TypedDecl * TypeEnv> =
         // their call expressions would fail with "unbound variable" even
         // though the static evaluator handled them fine.
         let staticShortcut =
-            match binding.Pattern with
-            | PatVar n ->
+            match binding.Pattern.Kind with
+            | PatternKind.PatVar n ->
                 match Map.tryFind n env.StaticValues with
                 | Some sv ->
                     let rec svToTyped (v: StaticEval.StaticValue) : TypedExpr =
@@ -5982,6 +6453,12 @@ and checkDecl (env: TypeEnv) (decl: Decl) : TypeResult<TypedDecl * TypeEnv> =
                         | StaticEval.SVTuple vs ->
                             let ts = vs |> List.map svToTyped
                             mkTyped (TExprTuple ts) (IRTTuple (ts |> List.map (fun t -> t.Type)))
+                        | StaticEval.SVStruct (sname, sfields) ->
+                            // Fields are already in declaration order (the
+                            // ExprStruct fold orders them via the struct
+                            // registry), as C++ designated initializers require.
+                            let tFields = sfields |> List.map (fun (fn, fv) -> (fn, svToTyped fv))
+                            mkTyped (TExprStruct (sname, tFields)) (IRTNamed sname)
                     Some (svToTyped sv)
                 | None -> None
             | _ -> None
@@ -5990,7 +6467,7 @@ and checkDecl (env: TypeEnv) (decl: Decl) : TypeResult<TypedDecl * TypeEnv> =
             | Some tv -> Ok tv
             | None -> inferLetBindingValue env binding
         inferred |> Result.bind (fun tValue ->
-            let name = match binding.Pattern with PatVar n -> n | _ -> "_"
+            let name = match binding.Pattern.Kind with PatternKind.PatVar n -> n | _ -> "_"
             // Reuse pre-pass varId if this static was already pre-registered
             let varId =
                 match lookupVar name env with
@@ -6014,8 +6491,8 @@ and checkDecl (env: TypeEnv) (decl: Decl) : TypeResult<TypedDecl * TypeEnv> =
             // for static bindings is not yet covered (no test pressure yet).
             let mutable subBindings : (string * IRId * IRType) list = []
             let env'' =
-                match binding.Pattern with
-                | PatTuple pats ->
+                match binding.Pattern.Kind with
+                | PatternKind.PatTuple pats ->
                     let resolvedTy = env.Subst.Resolve(tValue.Type)
                     let typeList =
                         match resolvedTy with
@@ -6027,8 +6504,8 @@ and checkDecl (env: TypeEnv) (decl: Decl) : TypeResult<TypedDecl * TypeEnv> =
                         | _ -> []
                     pats |> List.mapi (fun i p -> (i, p))
                     |> List.fold (fun e (i, p) ->
-                        match p with
-                        | PatVar n ->
+                        match p.Kind with
+                        | PatternKind.PatVar n ->
                             let eTy =
                                 if i < typeList.Length then env.Subst.Resolve(typeList.[i])
                                 else env.Subst.Fresh()
@@ -6123,7 +6600,7 @@ and checkDecl (env: TypeEnv) (decl: Decl) : TypeResult<TypedDecl * TypeEnv> =
                 match missing with
                 | _ :: _ ->
                     let names = missing |> List.map (fun m -> m.Name) |> String.concat ", "
-                    Error (Other (sprintf "impl %s for %s is missing required methods: %s" implDecl.Interface tName names))
+                    Error (ImplMissingMethods (implDecl.Interface, tName, names))
                 | [] -> Ok ()
             | None -> Ok ()
             |> Result.bind (fun () ->
@@ -6186,13 +6663,12 @@ and checkDecl (env: TypeEnv) (decl: Decl) : TypeResult<TypedDecl * TypeEnv> =
             match qname with
             | [_; sub] -> sub.ToLowerInvariant()
             | _ -> "netcdf"
-        Error (Other (sprintf "provider modules are imported by module name — write `import %s as <alias>` (the Providers.* spelling was removed; registered providers: %s)"
-                          suggestion (Blade.ProviderRegistry.names () |> String.concat ", ")))
+        Error (ProviderImportByModule (suggestion, (Blade.ProviderRegistry.names () |> String.concat ", ")))
     | DeclImport ([pname], ImportSelective _) when (Blade.ProviderRegistry.tryFind pname).IsSome
                                                    && not (Map.containsKey pname env.ModuleExports) ->
         // Providers expose load/read/write through a qualified alias only;
         // there are no free-standing names to import selectively.
-        Error (Other (sprintf "provider module '%s' does not support selective import — use `import %s as <alias>` and call <alias>.load/read/write" pname pname))
+        Error (ProviderNoSelectiveImport pname)
     | DeclImport (qname, style) ->
         let fullName = String.concat "." qname
         let env' =
@@ -6262,13 +6738,13 @@ and checkFunctionDecl (env: TypeEnv) (funcDecl: FunctionDecl) : TypeResult<Typed
                   | Some t -> lowerTypeExpr env t
                   | None -> env.Subst.Fresh()
     if (paramTypes |> List.exists irTypeHasRaggedNoPrior) || irTypeHasRaggedNoPrior retType then
-        Error (Other (sprintf "function '%s': RaggedIdx requires at least one prior index in the array's index list -- the ragged extent is a per-row function of the OUTER iteration position (formalism 4.4). Add an outer index, e.g. Array<T like Idx<n>, RaggedIdx<lens>>." funcDecl.Name))
+        Error (RaggedIdxNeedsPrior funcDecl.Name)
     elif (paramTypes |> List.exists irTypeHasBadDistOrder) || irTypeHasBadDistOrder retType then
-        Error (Other (sprintf "function '%s': Dist order must be a compile-time integer >= 1 (a literal, `let static`, or static-function call): Dist<order, Elem like I1, ..., Ik>" funcDecl.Name))
+        Error (DistOrderCompileTime funcDecl.Name)
     else
     let badIrreps = (paramTypes @ [retType]) |> List.tryPick irTypeBadIrrepsDetail
     if badIrreps.IsSome then
-        Error (Other (sprintf "function '%s': IrrepsIdx: %s. The spec must be a static array of (l, parity, mult) int triples — a `let static` binding or an inline literal like IrrepsIdx<[(0, 0, 2), (1, 1, 2)]>." funcDecl.Name badIrreps.Value))
+        Error (IrrepsIdxSpecFn (funcDecl.Name, badIrreps.Value))
     else
     let funcType = mkFuncArrow paramTypes retType
     // Reuse pre-pass varId if this function was already pre-registered (static functions)
@@ -6291,9 +6767,7 @@ and checkFunctionDecl (env: TypeEnv) (funcDecl: FunctionDecl) : TypeResult<Typed
                 let i = funcDecl.Params |> List.findIndex (fun q -> q.Name = p.Name)
                 match env.Subst.Resolve paramTypes.[i] with
                 | ArrayElem _ -> None
-                | _ -> Some (Other (sprintf
-                            "function '%s': parameter '%s' is `mut` but not array-typed. Only array parameters can be mutated in place (scalars pass by value); return the new scalar instead."
-                            funcDecl.Name p.Name))
+                | _ -> Some (MutParamNotArray (funcDecl.Name, p.Name))
             else None)
     match mutParamErr with
     | Some e ->
@@ -6311,9 +6785,7 @@ and checkFunctionDecl (env: TypeEnv) (funcDecl: FunctionDecl) : TypeResult<Typed
             | Some t ->
                 match mutualMemberNamesIn env t with
                 | [] -> None
-                | n :: _ -> Some (Other (sprintf
-                                "function '%s': parameter '%s' uses mutual member type '%s'; mutual member types may appear only in a joint let annotation or a function's declared return type"
-                                funcDecl.Name p.Name n))
+                | n :: _ -> Some (MutualParamMemberType (funcDecl.Name, p.Name, n))
             | None -> None)
     match mutualParamErr with
     | Some e ->
@@ -6348,13 +6820,16 @@ and checkFunctionDecl (env: TypeEnv) (funcDecl: FunctionDecl) : TypeResult<Typed
                 // hint; the vocabulary list shows the module spelling.
                 let bare = match cname.Split('.') with [| _; n |] -> n | _ -> cname
                 if (Blade.Constraints.lookupConstraint ("__ppl_" + bare)).IsSome then
-                    Some (Other (sprintf "function '%s': constraint '%s' belongs to the ppl module — add `import ppl as <alias>` and write `where <alias>.%s(...)`" funcDecl.Name bare bare))
+                    Some (PplConstraintNeedsImport (funcDecl.Name, bare))
                 else
                 let known =
                     Blade.Constraints.registeredConstraintNames ()
-                    |> List.map (fun n -> if n.StartsWith "__ppl_" then "ppl." + n.Substring 6 else n)
+                    |> List.map (fun n ->
+                        if n.StartsWith "__ppl_" then "ppl." + n.Substring 6
+                        elif n.StartsWith "__ml_" then "ml." + n.Substring 5
+                        else n)
                 let vocab = if known.IsEmpty then "none registered" else String.concat ", " known
-                Some (Other (sprintf "function '%s': unknown where-clause constraint '%s' (registered constraints: %s)" funcDecl.Name cname vocab))
+                Some (UnknownWhereConstraint (funcDecl.Name, cname, vocab))
             | Some h ->
                 match h.Validate funcDecl.Name paramNames cargs with
                 | Ok () -> None
@@ -6451,6 +6926,35 @@ and checkFunctionDecl (env: TypeEnv) (funcDecl: FunctionDecl) : TypeResult<Typed
     env.Subst.PopTypeVarScope(savedScope)
     result
 
+/// Where-clause predicate contract: a static function called from a
+/// struct/mutual where-conjunct must have fully annotated params + return.
+/// Its pre-pass type is created ONCE (shared tyvars across every call
+/// site), so an unannotated predicate unified against one owner's field
+/// types would silently over-constrain the next — annotations pin the
+/// contract instead.
+and private wherePredicateAnnotationCheck (env: TypeEnv) (owner: string) (conjuncts: Expr list) : TypeResult<unit> =
+    let rec heads (e: Expr) : string list =
+        match e.Kind with
+        | ExprKind.ExprApp ({ Kind = ExprKind.ExprVar f }, args) -> f :: (args |> List.collect heads)
+        | ExprKind.ExprApp (h, args) -> heads h @ (args |> List.collect heads)
+        | ExprKind.ExprBinOp (_, _, l, r) -> heads l @ heads r
+        | ExprKind.ExprUnaryOp (_, i) -> heads i
+        | ExprKind.ExprIf (c, t, f) -> heads c @ heads t @ heads f
+        | ExprKind.ExprTuple es | ExprKind.ExprArrayLit es -> es |> List.collect heads
+        | ExprKind.ExprTyped (i, _) -> heads i
+        | ExprKind.ExprField (o, _) -> heads o
+        | _ -> []
+    let offender =
+        conjuncts |> List.collect heads |> List.distinct
+        |> List.tryPick (fun f ->
+            match Map.tryFind f env.StaticFunctions with
+            | Some fd when fd.ReturnType.IsNone
+                        || fd.Params |> List.exists (fun p -> p.Type.IsNone) -> Some f
+            | _ -> None)
+    match offender with
+    | Some f -> Error (WherePredicateUnannotated (owner, f))
+    | None -> Ok ()
+
 and registerTypeDecl (env: TypeEnv) (typeDecl: TypeDecl) : TypeResult<TypeEnv> =
     match typeDecl with
     | TyDeclAlias (name, _typeParams, body) ->
@@ -6503,19 +7007,19 @@ and registerTypeDecl (env: TypeEnv) (typeDecl: TypeDecl) : TypeResult<TypeEnv> =
                 // or a string literal. Mixed kinds are a type error — the two
                 // backings (int64_t vs std::string) cannot share one EnumIdx.
                 let raw =
-                    match valuesExpr with
-                    | ExprArrayLit elems ->
+                    match valuesExpr.Kind with
+                    | ExprKind.ExprArrayLit elems ->
                         elems |> List.choose (fun e ->
-                            match e with
-                            | ExprLit (LitInt n) -> Some (EVInt n)
-                            | ExprUnaryOp (OpNeg, ExprLit (LitInt n)) -> Some (EVInt (-n))
-                            | ExprLit (LitString s) -> Some (EVString s)
+                            match e.Kind with
+                            | ExprKind.ExprLit (LitInt n) -> Some (EVInt n)
+                            | ExprKind.ExprUnaryOp (OpNeg, { Kind = ExprKind.ExprLit (LitInt n) }) -> Some (EVInt (-n))
+                            | ExprKind.ExprLit (LitString s) -> Some (EVString s)
                             | _ -> None)
                     | _ -> []
                 let hasInt = raw |> List.exists (function EVInt _ -> true | _ -> false)
                 let hasString = raw |> List.exists (function EVString _ -> true | _ -> false)
                 if hasInt && hasString then
-                    Error (Other (sprintf "EnumIdx '%s' has mixed value kinds: integer and string literals in the same EnumIdx<[...]> aren't allowed. The runtime backing must be one or the other (int64_t or std::string)." name))
+                    Error (EnumIdxMixedKinds name)
                 else
                     let extent = int64 raw.Length
                     let idx = {
@@ -6535,7 +7039,7 @@ and registerTypeDecl (env: TypeEnv) (typeDecl: TypeDecl) : TypeResult<TypeEnv> =
             fields |> List.tryPick (fun f ->
                 match mutualMemberNamesIn env f.Type with
                 | [] -> None
-                | n :: _ -> Some (Other (sprintf "struct %s, field '%s': mutual member type '%s' may not be used as a field type" name f.Name n)))
+                | n :: _ -> Some (StructFieldMutualType (name, f.Name, n)))
         match memberMisuse with
         | Some e -> Error e
         | None ->
@@ -6561,8 +7065,7 @@ and registerTypeDecl (env: TypeEnv) (typeDecl: TypeDecl) : TypeResult<TypeEnv> =
                             |> Set.toList
                             |> List.tryHead
                             |> Option.map (fun bad ->
-                                Other (sprintf "struct %s, field '%s': bound references '%s' — bounds may reference only earlier fields and statics"
-                                           name f.Name bad))
+                                StructBoundScope (name, f.Name, bad))
                         let err =
                             match f.Bound with
                             | Some b -> [b.Lo; b.Hi] |> List.choose id |> List.tryPick checkRefs
@@ -6574,16 +7077,10 @@ and registerTypeDecl (env: TypeEnv) (typeDecl: TypeDecl) : TypeResult<TypeEnv> =
             match boundScopeErr with
             | Some e -> Error e
             | None ->
-            // Desugar bounds into constraint conjuncts (`..` is half-open:
-            // lo <= f, f < hi) alongside the declared where-conjuncts.
-            let boundConjuncts =
-                fields |> List.collect (fun f ->
-                    match f.Bound with
-                    | Some b ->
-                        (b.Lo |> Option.map (fun lo -> ExprBinOp (Elementwise, OpLe, lo, ExprVar f.Name)) |> Option.toList)
-                        @ (b.Hi |> Option.map (fun hi -> ExprBinOp (Elementwise, OpLt, ExprVar f.Name, hi)) |> Option.toList)
-                    | None -> [])
-            let allConstraints = constraints @ boundConjuncts
+            // Full conjunct list (declared where + desugared field bounds)
+            // via the SHARED helper — StaticEval uses the same one for
+            // fold-time checks, so the two worlds cannot drift.
+            let allConstraints = structConjuncts fields constraints
             // Validate all conjuncts at declaration: fields bound, each
             // conjunct must typecheck to Bool. Hard errors — a malformed
             // constraint is a compile error, not a silently dropped check.
@@ -6599,13 +7096,13 @@ and registerTypeDecl (env: TypeEnv) (typeDecl: TypeDecl) : TypeResult<TypeEnv> =
                             match unify conjEnv.Subst tC.Type (IRTScalar ETBool) with
                             | Ok () -> Ok ()
                             | Error _ ->
-                                Error (Other (sprintf "struct %s: where-constraint must be a boolean expression, got %s"
-                                                  name (ppIRType tC.Type)))
+                                Error (StructWhereNotBool (name, ppIRType tC.Type))
                         | Error e ->
-                            Error (Other (sprintf "struct %s where-constraint: %s" name (formatTypeError e)))))
+                            Error (StructWhereError (name, formatTypeError e))))
                     (Ok ())
+            wherePredicateAnnotationCheck env name allConstraints |> Result.bind (fun () ->
             conjCheck |> Result.map (fun () ->
-                registerTypeDef name (TDIStruct (name, typeParams, fieldTypes, allConstraints)) env)
+                registerTypeDef name (TDIStruct (name, typeParams, fieldTypes, allConstraints)) env))
 
     | TyDeclSum (name, typeParams, variants) ->
         let variantTypes = variants |> List.map (fun v ->
@@ -6623,7 +7120,7 @@ and registerTypeDecl (env: TypeEnv) (typeDecl: TypeDecl) : TypeResult<TypeEnv> =
             members |> List.fold (fun acc (mname, mty) ->
                 acc |> Result.bind (fun e ->
                     if e.MutualMembers.ContainsKey mname || e.MutualGroups.ContainsKey mname then
-                        Error (Other (sprintf "mutual-group member '%s' is already part of another group" mname))
+                        Error (MutualMemberDupGroup mname)
                     else registerTypeDecl e (TyDeclAlias (mname, [], mty)))) (Ok env)
         envAfterMembers |> Result.bind (fun env1 ->
             // Resolve each member to a struct or scalar kind.
@@ -6633,12 +7130,11 @@ and registerTypeDecl (env: TypeEnv) (typeDecl: TypeDecl) : TypeResult<TypeEnv> =
                     | IRTNamed s ->
                         match Map.tryFind s env1.TypeDefs with
                         | Some (TDIStruct _) -> Ok (mname, MMStruct s)
-                        | _ -> Error (Other (sprintf "mutual-group member '%s': '%s' is not a declared struct" mname s))
+                        | _ -> Error (MutualMemberNotStruct (mname, s))
                     | (IRTScalar _ | IRTUnitAnnotated _ | IRTIdxTagged _ | IRTNat _) as sc ->
                         Ok (mname, MMScalar sc)
                     | otherTy ->
-                        Error (Other (sprintf "mutual-group member '%s' must alias a struct or scalar type, got %s"
-                                          mname (ppIRType otherTy))))
+                        Error (MutualMemberBadAlias (mname, ppIRType otherTy)))
                 |> sequenceResults
             memberKindsR |> Result.bind (fun memberKindList ->
                 let memberKinds = Map.ofList memberKindList
@@ -6646,42 +7142,50 @@ and registerTypeDecl (env: TypeEnv) (typeDecl: TypeDecl) : TypeResult<TypeEnv> =
                     match Map.tryFind s env1.TypeDefs with
                     | Some (TDIStruct (_, _, fields, _)) -> fields |> List.map fst |> Set.ofList
                     | _ -> Set.empty
-                let callables =
-                    Set.union (StaticEval.knownBuiltinNames ())
-                              (env1.StaticFunctions |> Map.toSeq |> Seq.map fst |> Set.ofSeq)
                 // Position-sensitive reference validation: member field paths,
-                // bare scalar members, folded statics, static-evaluable calls.
-                let rec walkConjunct e =
-                    match e with
-                    | ExprLit _ -> Ok ()
-                    | ExprField (ExprVar m, f) when memberKinds.ContainsKey m ->
+                // bare scalar members, folded statics. Call HEADS are open —
+                // guards are inlined runtime code on the backend, so any
+                // Bool-typed callable is legal (the conjunct typecheck below
+                // rejects unknown/ill-typed callees); args still classify.
+                let rec walkConjunct (e: Expr) =
+                    match e.Kind with
+                    | ExprKind.ExprLit _ -> Ok ()
+                    | ExprKind.ExprField ({ Kind = ExprKind.ExprVar m }, f) when memberKinds.ContainsKey m ->
                         (match memberKinds.[m] with
                          | MMStruct s when (structFields s).Contains f -> Ok ()
-                         | MMStruct s -> Error (Other (sprintf "mutual constraint references unknown field '%s.%s' (struct %s)" m f s))
-                         | MMScalar _ -> Error (Other (sprintf "'%s' aliases a scalar; reference it bare, not '%s.%s'" m m f)))
-                    | ExprVar m when memberKinds.ContainsKey m ->
+                         | MMStruct s -> Error (MutualUnknownField (m, f, s))
+                         | MMScalar _ -> Error (MutualScalarBare (m, f)))
+                    | ExprKind.ExprVar m when memberKinds.ContainsKey m ->
                         (match memberKinds.[m] with
                          | MMScalar _ -> Ok ()
-                         | MMStruct _ -> Error (Other (sprintf "'%s' aliases a struct; reference one of its fields as '%s.<field>'" m m)))
-                    | ExprVar n ->
+                         | MMStruct _ -> Error (MutualStructNeedsField m))
+                    | ExprKind.ExprVar n ->
                         if env1.StaticValues.ContainsKey n then Ok ()
-                        else Error (Other (sprintf "identifier '%s' in a mutual-group constraint must be a group member, a member field path, or a static" n))
-                    | ExprApp (ExprVar f, args) ->
-                        if callables.Contains f then walkAll args
-                        else Error (Other (sprintf "call to '%s' in a mutual-group constraint: only statically-evaluable functions may be called" f))
-                    | ExprBinOp (_, _, l, r) -> walkConjunct l |> Result.bind (fun () -> walkConjunct r)
-                    | ExprUnaryOp (_, inner) -> walkConjunct inner
-                    | ExprIf (c, t, f) -> walkAll [c; t; f]
-                    | ExprTuple es | ExprArrayLit es -> walkAll es
-                    | ExprTyped (inner, _) -> walkConjunct inner
-                    | _ -> Error (Other "unsupported expression form in a mutual-group constraint")
+                        else Error (MutualUnknownIdent n)
+                    | ExprKind.ExprApp ({ Kind = ExprKind.ExprVar _ }, args) ->
+                        // A call argument may pass a WHOLE member (predicates
+                        // take struct-typed params: conserved(P1, P2)); other
+                        // args classify as usual.
+                        let walkArg (a: Expr) =
+                            match a.Kind with
+                            | ExprKind.ExprVar m when memberKinds.ContainsKey m -> Ok ()
+                            | _ -> walkConjunct a
+                        args |> List.fold (fun acc a -> acc |> Result.bind (fun () -> walkArg a)) (Ok ())
+                    | ExprKind.ExprBinOp (_, _, l, r) -> walkConjunct l |> Result.bind (fun () -> walkConjunct r)
+                    | ExprKind.ExprUnaryOp (_, inner) -> walkConjunct inner
+                    | ExprKind.ExprIf (c, t, f) -> walkAll [c; t; f]
+                    | ExprKind.ExprTuple es | ExprKind.ExprArrayLit es -> walkAll es
+                    | ExprKind.ExprTyped (inner, _) -> walkConjunct inner
+                    | _ -> Error MutualUnsupportedExpr
                 and walkAll es =
                     match es with
                     | [] -> Ok ()
                     | e :: rest -> walkConjunct e |> Result.bind (fun () -> walkAll rest)
                 let refCheck =
                     constraints |> List.fold (fun acc c -> acc |> Result.bind (fun () -> walkConjunct c)) (Ok ())
-                refCheck |> Result.bind (fun () ->
+                refCheck
+                |> Result.bind (fun () -> wherePredicateAnnotationCheck env1 groupId constraints)
+                |> Result.bind (fun () ->
                     // Typecheck each conjunct with members bound (struct
                     // members as their nominal type, scalars as themselves)
                     // and require Bool.
@@ -6698,10 +7202,9 @@ and registerTypeDecl (env: TypeEnv) (typeDecl: TypeDecl) : TypeResult<TypeEnv> =
                                     match unify conjEnv.Subst tC.Type (IRTScalar ETBool) with
                                     | Ok () -> Ok ()
                                     | Error _ ->
-                                        Error (Other (sprintf "mutual-group constraint (group %s) must be a boolean expression, got %s"
-                                                          groupId (ppIRType tC.Type)))
+                                        Error (MutualConstraintNotBool (groupId, ppIRType tC.Type))
                                 | Error e ->
-                                    Error (Other (sprintf "mutual-group constraint (group %s): %s" groupId (formatTypeError e)))))
+                                    Error (MutualConstraintError (groupId, formatTypeError e))))
                             (Ok ())
                     typeCheckAll |> Result.map (fun () ->
                         let info = { GroupId = groupId; Members = memberKindList; Constraints = constraints }
@@ -6735,13 +7238,13 @@ and registerTypeDecl (env: TypeEnv) (typeDecl: TypeDecl) : TypeResult<TypeEnv> =
 // can't see, e.g. `let x: Array<EnumIdx<[1, "two"]> like ...> = ...`.
 
 let private isMixedEnumIdxValues (valuesExpr: Expr) : bool =
-    match valuesExpr with
-    | ExprArrayLit elems ->
-        let isInt e =
-            match e with
-            | ExprLit (LitInt _) | ExprUnaryOp (OpNeg, ExprLit (LitInt _)) -> true
+    match valuesExpr.Kind with
+    | ExprKind.ExprArrayLit elems ->
+        let isInt (e: Expr) =
+            match e.Kind with
+            | ExprKind.ExprLit (LitInt _) | ExprKind.ExprUnaryOp (OpNeg, { Kind = ExprKind.ExprLit (LitInt _) }) -> true
             | _ -> false
-        let isString e = match e with ExprLit (LitString _) -> true | _ -> false
+        let isString (e: Expr) = match e.Kind with ExprKind.ExprLit (LitString _) -> true | _ -> false
         let hasInt = elems |> List.exists isInt
         let hasString = elems |> List.exists isString
         hasInt && hasString
@@ -6837,14 +7340,16 @@ let collectMixedEnumIdxInDecl (decl: Decl) : Expr list =
 /// TypedExpr analog of this conversion (checkDecl's DeclStatic
 /// "RESOLVED-VALUE SHORTCUT") runs one stage later, on already-typed trees;
 /// this one runs pre-typing, directly on the surface AST.
-let rec private staticValueToImportExpr (v: StaticEval.StaticValue) : Expr =
+let rec private staticValueToImportExpr sp (v: StaticEval.StaticValue) : Expr =
     match v with
-    | StaticEval.SVInt i -> ExprLit (LitInt i)
-    | StaticEval.SVFloat f -> ExprLit (LitFloat f)
-    | StaticEval.SVBool b -> ExprLit (LitBool b)
-    | StaticEval.SVString s -> ExprLit (LitString s)
-    | StaticEval.SVUnit -> ExprLit LitUnit
-    | StaticEval.SVTuple vs -> ExprTuple (vs |> List.map staticValueToImportExpr)
+    | StaticEval.SVInt i -> mkExpr sp (ExprLit (LitInt i))
+    | StaticEval.SVFloat f -> mkExpr sp (ExprLit (LitFloat f))
+    | StaticEval.SVBool b -> mkExpr sp (ExprLit (LitBool b))
+    | StaticEval.SVString s -> mkExpr sp (ExprLit (LitString s))
+    | StaticEval.SVUnit -> mkExpr sp (ExprLit LitUnit)
+    | StaticEval.SVTuple vs -> mkExpr sp (ExprTuple (vs |> List.map (staticValueToImportExpr sp)))
+    | StaticEval.SVStruct (n, fs) ->
+        mkExpr sp (ExprStruct (n, fs |> List.map (fun (fn, v) -> (fn, staticValueToImportExpr sp v)), None))
 
 /// Substitute references to cross-module static values (keyed in `seed` as
 /// "alias.name" for a qualified import, "name" for a selective one) with
@@ -6861,36 +7366,36 @@ let rec private rewriteImportedStaticRefs (seed: Map<string, StaticEval.StaticVa
     let goWithout (boundNames: string list) (e: Expr) =
         let seed' = boundNames |> List.fold (fun (s: Map<string, StaticEval.StaticValue>) n -> Map.remove n s) seed
         rewriteImportedStaticRefs seed' e
-    match expr with
-    | ExprVar name ->
+    match expr.Kind with
+    | ExprKind.ExprVar name ->
         match Map.tryFind name seed with
-        | Some sv -> staticValueToImportExpr sv
+        | Some sv -> staticValueToImportExpr expr.Span sv
         | None -> expr
-    | ExprField (ExprVar alias, field) ->
+    | ExprKind.ExprField ({ Kind = ExprKind.ExprVar alias }, field) ->
         match Map.tryFind (sprintf "%s.%s" alias field) seed with
-        | Some sv -> staticValueToImportExpr sv
+        | Some sv -> staticValueToImportExpr expr.Span sv
         | None -> expr
-    | ExprField (obj, field) -> ExprField (go obj, field)
-    | ExprBinOp (mode, op, l, r) -> ExprBinOp (mode, op, go l, go r)
-    | ExprUnaryOp (op, e) -> ExprUnaryOp (op, go e)
-    | ExprApp (f, args) -> ExprApp (go f, args |> List.map go)
-    | ExprIf (c, t, e) -> ExprIf (go c, go t, go e)
-    | ExprTuple es -> ExprTuple (es |> List.map go)
-    | ExprArrayLit es -> ExprArrayLit (es |> List.map go)
-    | ExprLet (binding, body) ->
+    | ExprKind.ExprField (obj, field) -> inheritSpan expr (ExprField (go obj, field))
+    | ExprKind.ExprBinOp (mode, op, l, r) -> inheritSpan expr (ExprBinOp (mode, op, go l, go r))
+    | ExprKind.ExprUnaryOp (op, e) -> inheritSpan expr (ExprUnaryOp (op, go e))
+    | ExprKind.ExprApp (f, args) -> inheritSpan expr (ExprApp (go f, args |> List.map go))
+    | ExprKind.ExprIf (c, t, e) -> inheritSpan expr (ExprIf (go c, go t, go e))
+    | ExprKind.ExprTuple es -> inheritSpan expr (ExprTuple (es |> List.map go))
+    | ExprKind.ExprArrayLit es -> inheritSpan expr (ExprArrayLit (es |> List.map go))
+    | ExprKind.ExprLet (binding, body) ->
         let bound = StaticEval.collectPatternBindings binding.Pattern |> Set.toList
-        ExprLet ({ binding with Value = go binding.Value }, goWithout bound body)
-    | ExprMatch (scrut, cases) ->
-        ExprMatch (go scrut, cases |> List.map (fun c ->
+        inheritSpan expr (ExprLet ({ binding with Value = go binding.Value }, goWithout bound body))
+    | ExprKind.ExprMatch (scrut, cases) ->
+        inheritSpan expr (ExprMatch (go scrut, cases |> List.map (fun c ->
             let bound = StaticEval.collectPatternBindings c.Pattern |> Set.toList
-            { c with Guard = c.Guard |> Option.map (goWithout bound); Body = goWithout bound c.Body }))
-    | ExprBlock (stmts, finalExpr) ->
-        ExprBlock (stmts |> List.map (rewriteImportedStaticRefsStmt seed), finalExpr |> Option.map go)
-    | ExprStruct (name, fields) -> ExprStruct (name, fields |> List.map (fun (n, e) -> (n, go e)))
-    | ExprTyped (e, t) -> ExprTyped (go e, t)
-    | ExprLambda (parms, whereClause, body) ->
+            { c with Guard = c.Guard |> Option.map (goWithout bound); Body = goWithout bound c.Body })))
+    | ExprKind.ExprBlock (stmts, finalExpr) ->
+        inheritSpan expr (ExprBlock (stmts |> List.map (rewriteImportedStaticRefsStmt seed), finalExpr |> Option.map go))
+    | ExprKind.ExprStruct (name, fields, spread) -> inheritSpan expr (ExprStruct (name, fields |> List.map (fun (n, e) -> (n, go e)), spread |> Option.map go))
+    | ExprKind.ExprTyped (e, t) -> inheritSpan expr (ExprTyped (go e, t))
+    | ExprKind.ExprLambda (parms, whereClause, body) ->
         let bound = parms |> List.map (fun p -> p.Name)
-        ExprLambda (parms, whereClause, goWithout bound body)
+        inheritSpan expr (ExprLambda (parms, whereClause, goWithout bound body))
     | _ -> expr
 and private rewriteImportedStaticRefsStmt (seed: Map<string, StaticEval.StaticValue>) (stmt: Stmt) : Stmt =
     match stmt with
@@ -7006,7 +7511,7 @@ let checkModule (env: TypeEnv) (modul: ModuleDecl) : TypedModule * TypeEnv * Com
                 // this function appears in an eta-reduced DepIdx position.
                 { e' with StaticFunctions = Map.add funcDecl.Name funcDecl e'.StaticFunctions }
             | DeclStatic binding ->
-                let name = match binding.Pattern with PatVar n -> n | _ -> "_"
+                let name = match binding.Pattern.Kind with PatternKind.PatVar n -> n | _ -> "_"
                 let varId = e.Builder.FreshId()
                 bindVarSimple name varId (e.Subst.Fresh()) e
             | _ -> e) env
@@ -7029,8 +7534,8 @@ let checkModule (env: TypeEnv) (modul: ModuleDecl) : TypedModule * TypeEnv * Com
 
         let declName =
             match d.Value with
-            | DeclLet b -> sprintf "in let binding '%s'" (match b.Pattern with PatVar n -> n | _ -> "_")
-            | DeclStatic b -> sprintf "in static binding '%s'" (match b.Pattern with PatVar n -> n | _ -> "_")
+            | DeclLet b -> sprintf "in let binding '%s'" (match b.Pattern.Kind with PatternKind.PatVar n -> n | _ -> "_")
+            | DeclStatic b -> sprintf "in static binding '%s'" (match b.Pattern.Kind with PatternKind.PatVar n -> n | _ -> "_")
             | DeclFunction f -> sprintf "in function '%s'" f.Name
             | DeclType td ->
                 match td with
@@ -7050,8 +7555,25 @@ let checkModule (env: TypeEnv) (modul: ModuleDecl) : TypedModule * TypeEnv * Com
         | Error err ->
             let ce = locateError d.Span currentEnv err
             errors <- ce :: errors
-            // Continue with pre-failure env — the failed decl is skipped
-    
+            // Continue with pre-failure env, but bind the failed decl's
+            // name(s) to a FRESH inference var so downstream references
+            // resolve to *some* type instead of erroring `Unbound variable`.
+            // Without this, one bad annotation smears ~N spurious
+            // Unbound-variable diagnostics across the rest of the module and
+            // buries the real root cause. A fresh (unsolved) var unifies with
+            // anything, so it silences the cascade without manufacturing a
+            // second layer of false errors the way binding the *annotation*
+            // type would. (Value bindings only — type/interface/impl/import/
+            // unit decls don't produce value-scope names that cascade here.)
+            let recoveryNames =
+                match d.Value with
+                | DeclLet b | DeclStatic b -> patternNames b.Pattern
+                | DeclFunction f -> [f.Name]
+                | _ -> []
+            for n in recoveryNames do
+                let varId = currentEnv.Builder.FreshId()
+                currentEnv <- bindVarSimple n varId (currentEnv.Subst.Fresh()) currentEnv
+
     let typedModule = { Name = Some modul.Name; Decls = List.rev decls }
     // Zonk: resolve all IRTInfer through the substitution, default unsolved to Float64
     let zonked = zonkModule currentEnv.Subst typedModule
@@ -7111,52 +7633,31 @@ let typeCheck (program: Program) : Result<TypedProgram * IRBuilder * string list
     // argument lists elaborate to plain formers before any other stage
     // (ML/PPL/math/grad and the checker never see ExprStatic).
     match Blade.Unfold.expand program with
-    | Error msg ->
-        Error [ { Error = Other msg
-                  Span = { StartLine = 0; StartCol = 0; EndLine = 0; EndCol = 0; File = None }
-                  Context = ["static unfold"] } ]
+    | Error diags -> Error (diags |> List.map (compileErrorOfDiagnostic ["static unfold"]))
     | Ok program ->
     match Blade.ML.Elaborate.expand program with
-    | Error msg ->
-        Error [ { Error = Other msg
-                  Span = { StartLine = 0; StartCol = 0; EndLine = 0; EndCol = 0; File = None }
-                  Context = ["ML elaboration"] } ]
+    | Error diags -> Error (diags |> List.map (compileErrorOfDiagnostic ["ML elaboration"]))
     | Ok program ->
     match Blade.Ppl.Elaborate.expand program with
-    | Error msg ->
-        Error [ { Error = Other msg
-                  Span = { StartLine = 0; StartCol = 0; EndLine = 0; EndCol = 0; File = None }
-                  Context = ["PPL elaboration"] } ]
+    | Error diags -> Error (diags |> List.map (compileErrorOfDiagnostic ["PPL elaboration"]))
     | Ok program ->
     match Blade.Math.Elaborate.expand program with
-    | Error msg ->
-        Error [ { Error = Other msg
-                  Span = { StartLine = 0; StartCol = 0; EndLine = 0; EndCol = 0; File = None }
-                  Context = ["math elaboration"] } ]
+    | Error diags -> Error (diags |> List.map (compileErrorOfDiagnostic ["math elaboration"]))
     | Ok program ->
     match Blade.Rand.Elaborate.expand program with
-    | Error msg ->
-        Error [ { Error = Other msg
-                  Span = { StartLine = 0; StartCol = 0; EndLine = 0; EndCol = 0; File = None }
-                  Context = ["rand elaboration"] } ]
+    | Error diags -> Error (diags |> List.map (compileErrorOfDiagnostic ["rand elaboration"]))
     | Ok program ->
     match Blade.Spectra.Elaborate.expand program with
-    | Error msg ->
-        Error [ { Error = Other msg
-                  Span = { StartLine = 0; StartCol = 0; EndLine = 0; EndCol = 0; File = None }
-                  Context = ["spectra elaboration"] } ]
+    | Error diags -> Error (diags |> List.map (compileErrorOfDiagnostic ["spectra elaboration"]))
     | Ok program ->
     match Blade.Grad.expand program with
-    | Error msg ->
-        Error [ { Error = Other msg
-                  Span = { StartLine = 0; StartCol = 0; EndLine = 0; EndCol = 0; File = None }
-                  Context = ["grad expansion"] } ]
+    | Error diags -> Error (diags |> List.map (compileErrorOfDiagnostic ["grad expansion"]))
     | Ok program ->
     let validationErrors = IndexTypeValidator.validateProgram program
     if not validationErrors.IsEmpty then
         let compileErrors =
             validationErrors |> List.map (fun e ->
-                { Error = Other e.Message; Span = e.Span; Context = [e.DeclName] })
+                { Error = Other e.Message; Span = e.Span; Context = [e.DeclName]; Code = Some "BL4003" })
         Error compileErrors
     else
         let (tp, builder, errors, warnings) = checkProgram program

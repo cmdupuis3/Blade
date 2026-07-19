@@ -1,0 +1,24 @@
+// TEST: ML Equiv Certified Pipeline
+import ml as ml
+// ============================================================================
+// A full certified pipeline: y_to -> tensor_product -> gated -> linear ->
+// norms, all inside one `where ml.equiv(O3)` function. Every step is
+// equivariance-preserving by construction; norms is the invariant exit, so
+// the declared return is a plain array. Value pins:
+// `dotnet run --project ml -- dump-oracle` (equiv pipeline section).
+// ============================================================================
+let static SH2 = ml.sh_spec(2)
+let static CFG = (SH2, SH2, SH2)
+let static WTP = ml.tp_weight_dim(CFG)
+let static WL = ml.linear_weight_dim(SH2, SH2)
+
+function pipe(px: Float, py: Float, pz: Float, wtp: Array<Float like Idx<WTP>>, wl: Array<Float like Idx<WL>>) where ml.equiv(O3) -> Array<Float like Idx<3>> = {
+    let sh = ml.y_to(2, px, py, pz)
+    let t = ml.tensor_product(CFG, sh, sh, wtp)
+    let g = ml.gated(SH2, t)
+    let lo = ml.linear(SH2, SH2, wl, g)
+    ml.norms(SH2, lo)
+}
+
+let res = pipe(1.0, 2.0, 3.0, [0.1, 0.2, 0.30000000000000004, 0.4, 0.5, 0.6000000000000001, 0.7000000000000001, 0.8, 0.9, 1.0, 1.1], [0.5, -0.7, 0.25])
+// EXPECT: res = [16.95974840380404, 11.219441716877398, 10.36902564919477]

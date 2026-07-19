@@ -1,0 +1,11 @@
+// TEST: Fallback Compound Right (rejects)
+// The right operand supplies a value for EVERY cell the left side lacks, so
+// it must be dense — a compound right operand cannot guarantee coverage
+// (BL3007).
+type SIdx = Idx<4>
+let vals: Array<Float64 like SIdx> = [0.0, 20.0, 30.0, 40.0]
+let m1 = mask(vals, lambda(v) -> v < 5.0)
+let S1 = compound(vals, m1)
+let m2 = mask(vals, lambda(v) -> v > 25.0)
+let S2 = compound(vals, m2)
+let C = S1 <|:> S2 |> compute

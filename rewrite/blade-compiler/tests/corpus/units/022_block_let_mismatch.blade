@@ -1,0 +1,10 @@
+// TEST: Unit Block Let Mismatch (rejects)
+// A block-scoped annotated binding rejects a differently-united
+// initializer, exactly like the top-level form (units/014).
+Unit meters
+Unit seconds
+let t: Float<seconds> = 5.0
+let bad = {
+    let d: Float<meters> = t
+    d
+}

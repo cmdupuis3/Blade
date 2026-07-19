@@ -1,0 +1,14 @@
+// TEST: Static Struct Constraint OK
+// A constrained struct in `let static` folds with its conjuncts (incl. a
+// named predicate) checked at compile time. (Field access on the folded
+// value is covered by 024 — static structs fold to SVStruct and keep
+// nominal identity.) This pins fold-check + program-runs.
+static function balanced(a: Int, b: Int, t: Int) -> Bool = a + b == t
+struct Balanced {
+    a: Int,
+    b: Int,
+    total: Int
+} where balanced(a, b, total)
+let static ok = Balanced { a = 1, b = 2, total = 3 }
+let alive = 1
+// EXPECT: alive = 1

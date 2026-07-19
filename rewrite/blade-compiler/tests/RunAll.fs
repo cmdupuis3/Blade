@@ -24,6 +24,7 @@ open Blade.Tests.Ppl
 open Blade.Tests.Math
 open Blade.Tests.Rand
 open Blade.Tests.Spectra
+open Blade.Tests.Fallback
 open Blade.Tests.Units
 open Blade.Tests.Sqlish
 open Blade.Tests.InferenceProbes
@@ -46,9 +47,9 @@ open Blade.Tests.Benchmarks
 
 /// All tests combined
 let allTests =
-    basicTests @ intrinsicsTests @ adTests @ mlE2eTests @ mlOpsTests @ loopTests @ symmetryTests @ reynoldsTests @ arityTests @ functionTests
+    basicTests @ intrinsicsTests @ adTests @ mlE2eTests @ mlOpsTests @ mlEquivTests @ loopTests @ symmetryTests @ reynoldsTests @ arityTests @ functionTests
     @ structTests @ structAbortTests @ structMutualTests @ sumTypeTests @ interfaceTests @ moduleTests @ guardTests @ guardCombinatorTests @ zeroCombinatorTests @ sequenceCombinatorTests @ tupleViewTests @ replicateTests @ anonRangeTests @ forInTests @ bracketedTests
-    @ indexTypeTests @ mutabilityTests @ staticTests @ pplTests @ mathTests @ randTests @ spectraTests @ unitTests
+    @ indexTypeTests @ mutabilityTests @ staticTests @ pplTests @ mathTests @ randTests @ spectraTests @ fallbackTests @ unitTests
     @ foreignKeyTests @ maskTests @ setOpTests @ uniqueContainsTests @ semijoinTests @ groupByTests @ sortTests @ reduceTests @ extentsTests @ extentsMultiRankTests @ regressionTests @ sqlCombinedTests @ v24dProbes
     @ inferenceProbes
     @ funcArrayTests
@@ -97,6 +98,10 @@ let runAllTestsFullWith (extraBlocks: (unit -> Blade.Tests.TestHarness.BlockResu
     let wigner = Blade.Tests.WignerTablesReview.runWignerTablesTests ()
     // Error locations: parse/type errors point at the right line (§3.4).
     let spans = Blade.Tests.Spans.runSpanTests ()
+    // Diagnostics core: renderer golden shapes + BLxxxx registry contract.
+    let diagCore = Blade.Tests.DiagnosticsCore.runDiagnosticsCoreTests ()
+    // Diagnostics corpus: broken sources with pinned codes/spans (strict).
+    let diagCorpus = Blade.Tests.DiagCorpus.runDiagCorpusTests ()
     // C++ runtime-layout tests for the contiguous-backing allocate<>.
     // Verifies layout invariants the value-checking source tests cannot catch.
     // Skips cleanly if g++ absent.
@@ -144,7 +149,7 @@ let runAllTestsFullWith (extraBlocks: (unit -> Blade.Tests.TestHarness.BlockResu
 
     // Grand-total roll-up (#4): one line per block, a total, and failed names.
     let blocks =
-        [ yield r1; yield r2; yield attrs; yield subst; yield shape; yield oracles; yield wigner; yield spans; yield alloc
+        [ yield r1; yield r2; yield attrs; yield subst; yield shape; yield oracles; yield wigner; yield spans; yield diagCore; yield diagCorpus; yield alloc
           match omp with Some b -> yield b | None -> ()
           yield bufType
           match cuda with Some b -> yield b | None -> ()

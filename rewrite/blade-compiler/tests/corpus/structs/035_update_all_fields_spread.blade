@@ -1,0 +1,8 @@
+// TEST: Struct Update All Fields Spread (rejects)
+// Providing every field explicitly makes the spread dead — reject it.
+struct Point {
+    x: Float,
+    y: Float
+}
+let p = Point { x = 1.0, y = 2.0 }
+let q = Point { x = 3.0, y = 4.0, ..p }

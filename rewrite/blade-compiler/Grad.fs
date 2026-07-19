@@ -99,16 +99,18 @@ let isComplexMathIntrinsic (name: string) : bool = Set.contains name complexMath
 // Expression construction helpers
 // ============================================================================
 
-let private fLit (v: float) = ExprLit (LitFloat v)
-let private iLit (n: int64) = ExprLit (LitInt n)
-let private v (name: string) = ExprVar name
-let private add a b = ExprBinOp (Elementwise, OpAdd, a, b)
-let private sub a b = ExprBinOp (Elementwise, OpSub, a, b)
-let private mul a b = ExprBinOp (Elementwise, OpMul, a, b)
-let private div a b = ExprBinOp (Elementwise, OpDiv, a, b)
-let private pow a b = ExprBinOp (Elementwise, OpCaret, a, b)
-let private neg a = ExprUnaryOp (OpNeg, a)
-let private call name args = ExprApp (ExprVar name, args)
+// Span-free derivative-synthesis builders: `syn` stamps each node with the
+// ambient `synthSpan` (set to the differentiated decl's span in expand).
+let private fLit (v: float) = syn (ExprLit (LitFloat v))
+let private iLit (n: int64) = syn (ExprLit (LitInt n))
+let private v (name: string) = syn (ExprVar name)
+let private add a b = syn (ExprBinOp (Elementwise, OpAdd, a, b))
+let private sub a b = syn (ExprBinOp (Elementwise, OpSub, a, b))
+let private mul a b = syn (ExprBinOp (Elementwise, OpMul, a, b))
+let private div a b = syn (ExprBinOp (Elementwise, OpDiv, a, b))
+let private pow a b = syn (ExprBinOp (Elementwise, OpCaret, a, b))
+let private neg a = syn (ExprUnaryOp (OpNeg, a))
+let private call name args = syn (ExprApp (v name, args))
 
 /// d/du of intrinsic(u), as a function of the FORWARD expression u.
 /// Returns None for zero-derivative intrinsics (floor/ceil).
@@ -165,12 +167,12 @@ let rec private convertStmts (fname: string) (stmts: Stmt list) : Result<NStmt l
             match unwrapStmt stmt with
             | StmtSpanned _ -> err fname "internal: unwrapStmt left a span"
             | StmtLet binding ->
-                match binding.Pattern with
-                | PatVar name ->
+                match binding.Pattern.Kind with
+                | PatternKind.PatVar name ->
                     let isMut = (binding.Mutability = BindMut)
                     Ok (converted @ [NLet (name, isMut, binding.Value)])
                 | _ -> err fname "tuple/struct patterns in let are not differentiable (v1); bind names individually"
-            | StmtExpr (ExprAssign (lhs, rhs)) ->
+            | StmtExpr { Kind = ExprKind.ExprAssign (lhs, rhs) } ->
                 Ok (converted @ [NAssign (lhs, rhs)])
             | StmtAssign (lhs, op, rhs) ->
                 // Defensive: the parser emits ExprAssign, but normalize
@@ -185,7 +187,7 @@ let rec private convertStmts (fname: string) (stmts: Stmt list) : Result<NStmt l
                 Ok (converted @ [NAssign (lhs, rhs')])
             | StmtExpr _ ->
                 err fname "bare expression statements are not supported in differentiated code"
-            | StmtForIn (var, ExprDotDot (lo, hi), body) ->
+            | StmtForIn (var, { Kind = ExprKind.ExprDotDot (lo, hi) }, body) ->
                 convertStmts fname body |> Result.map (fun nbody ->
                     converted @ [NFor (var, lo, hi, nbody)])
             | StmtForIn _ ->
@@ -194,12 +196,12 @@ let rec private convertStmts (fname: string) (stmts: Stmt list) : Result<NStmt l
 
 /// A function body is either a block or a bare expression.
 let private convertBody (fname: string) (body: Expr) : Result<NStmt list * Expr, string> =
-    match body with
-    | ExprBlock (stmts, Some finalE) ->
+    match body.Kind with
+    | ExprKind.ExprBlock (stmts, Some finalE) ->
         convertStmts fname stmts |> Result.map (fun ns -> (ns, finalE))
-    | ExprBlock (_, None) ->
+    | ExprKind.ExprBlock (_, None) ->
         err fname "function body has no final expression (must return a Float)"
-    | e -> Ok ([], e)
+    | _ -> Ok ([], body)
 
 // ============================================================================
 // Expression validation + variable collection over the AD-able fragment
@@ -212,13 +214,14 @@ let private convertBody (fname: string) (body: Expr) : Result<NStmt list * Expr,
 /// an array-literal equivalent wherever ExprArrayLit initializers are.
 /// Captures (count expr, fill literal).
 let private (|ConstFill|_|) (e: Expr) =
-    match e with
-    | ExprCompute (ExprReplicate (cnt, ExprPure (ExprLit lit))) -> Some (cnt, lit)
+    match e.Kind with
+    | ExprKind.ExprCompute { Kind = ExprKind.ExprReplicate (cnt, { Kind = ExprKind.ExprPure { Kind = ExprKind.ExprLit lit } }) } -> Some (cnt, lit)
     | _ -> None
 
 /// A ConstFill of the same count with the fill value zeroed.
 let private zeroFill (cnt: Expr) : Expr =
-    ExprCompute (ExprReplicate (cnt, ExprPure (ExprLit (LitFloat 0.0))))
+    let re k = inheritSpan cnt k
+    re (ExprCompute (re (ExprReplicate (cnt, re (ExprPure (re (ExprLit (LitFloat 0.0))))))))
 
 /// Walk an expression, validating it stays inside the differentiable
 /// fragment, and call `onVar` for every variable REFERENCE (not index
@@ -226,31 +229,31 @@ let private zeroFill (cnt: Expr) : Expr =
 /// visit them for taint bookkeeping of index vars; harmless).
 let rec private walkExpr (fname: string) (ctx: Ctx) (onVar: string -> unit) (e: Expr) : Result<unit, string> =
     match e with
-    | ExprLit _ -> Ok ()
-    | ExprVar name -> onVar name; Ok ()
-    | ExprTyped (inner, _) -> walkExpr fname ctx onVar inner
-    | ExprUnaryOp (OpNeg, inner) -> walkExpr fname ctx onVar inner
-    | ExprUnaryOp (OpNot, inner) -> walkExpr fname ctx onVar inner
-    | ExprUnaryOp _ -> err fname "unsupported unary operator in differentiated code"
-    | ExprBinOp (_, _, l, r) ->
+    | { Kind = ExprKind.ExprLit _ } -> Ok ()
+    | { Kind = ExprKind.ExprVar name } -> onVar name; Ok ()
+    | { Kind = ExprKind.ExprTyped (inner, _) } -> walkExpr fname ctx onVar inner
+    | { Kind = ExprKind.ExprUnaryOp (OpNeg, inner) } -> walkExpr fname ctx onVar inner
+    | { Kind = ExprKind.ExprUnaryOp (OpNot, inner) } -> walkExpr fname ctx onVar inner
+    | { Kind = ExprKind.ExprUnaryOp _ } -> err fname "unsupported unary operator in differentiated code"
+    | { Kind = ExprKind.ExprBinOp (_, _, l, r) } ->
         walkExpr fname ctx onVar l |> Result.bind (fun () -> walkExpr fname ctx onVar r)
-    | ExprApp (ExprVar name, args) ->
+    | { Kind = ExprKind.ExprApp ({ Kind = ExprKind.ExprVar name }, args) } ->
         // intrinsic, user call (inlined earlier), or array read — all fine
         // structurally; recurse into arguments.
         args |> List.fold (fun acc a -> acc |> Result.bind (fun () -> walkExpr fname ctx onVar a))
                           (Ok (onVar name))
-    | ExprApp _ -> err fname "only named calls and array reads are supported in differentiated code"
-    | ExprArrayLit elems ->
+    | { Kind = ExprKind.ExprApp _ } -> err fname "only named calls and array reads are supported in differentiated code"
+    | { Kind = ExprKind.ExprArrayLit elems } ->
         elems |> List.fold (fun acc a -> acc |> Result.bind (fun () -> walkExpr fname ctx onVar a)) (Ok ())
-    | ExprIf _ -> err fname "if/else is not supported in differentiated code yet"
-    | ExprMatch _ -> err fname "match is not supported in differentiated code"
-    | ExprBlock _ -> err fname "nested block expressions are not supported in differentiated code"
-    | ExprLet _ -> err fname "expression-level let is not supported in differentiated code"
+    | { Kind = ExprKind.ExprIf _ } -> err fname "if/else is not supported in differentiated code yet"
+    | { Kind = ExprKind.ExprMatch _ } -> err fname "match is not supported in differentiated code"
+    | { Kind = ExprKind.ExprBlock _ } -> err fname "nested block expressions are not supported in differentiated code"
+    | { Kind = ExprKind.ExprLet _ } -> err fname "expression-level let is not supported in differentiated code"
     | ConstFill _ -> Ok ()   // literal fill: computes nothing, reads nothing
-    | ExprLambda _ | ExprMethodFor _ | ExprObjectFor _ | ExprCompute _ | ExprPure _ ->
+    | { Kind = ExprKind.ExprLambda _ } | { Kind = ExprKind.ExprMethodFor _ } | { Kind = ExprKind.ExprObjectFor _ } | { Kind = ExprKind.ExprCompute _ } | { Kind = ExprKind.ExprPure _ } ->
         err fname "loop-object combinators are not supported in differentiated code (write explicit for-in loops)"
-    | ExprTuple _ -> err fname "tuple values are not supported in differentiated code"
-    | ExprField _ -> err fname "struct field access is not supported in differentiated code"
+    | { Kind = ExprKind.ExprTuple _ } -> err fname "tuple values are not supported in differentiated code"
+    | { Kind = ExprKind.ExprField _ } -> err fname "struct field access is not supported in differentiated code"
     | _ -> err fname "unsupported expression form in differentiated code"
 
 // ============================================================================
@@ -262,22 +265,23 @@ let rec private walkExpr (fname: string) (ctx: Ctx) (onVar: string -> unit) (e: 
 /// the statement forms; used on ALREADY-VALIDATED callee bodies.
 let rec private renameExpr (ren: Map<string, string>) (e: Expr) : Expr =
     let rn n = Map.tryFind n ren |> Option.defaultValue n
-    match e with
-    | ExprLit _ -> e
-    | ExprVar name -> ExprVar (rn name)
-    | ExprTyped (inner, t) -> ExprTyped (renameExpr ren inner, t)
-    | ExprUnaryOp (op, inner) -> ExprUnaryOp (op, renameExpr ren inner)
-    | ExprBinOp (m, op, l, r) -> ExprBinOp (m, op, renameExpr ren l, renameExpr ren r)
-    | ExprApp (f, args) -> ExprApp (renameExpr ren f, args |> List.map (renameExpr ren))
-    | ExprArrayLit elems -> ExprArrayLit (elems |> List.map (renameExpr ren))
-    | ExprAssign (l, r) -> ExprAssign (renameExpr ren l, renameExpr ren r)
-    | ExprDotDot (l, h) -> ExprDotDot (renameExpr ren l, renameExpr ren h)
+    let re k = inheritSpan e k
+    match e.Kind with
+    | ExprKind.ExprLit _ -> e
+    | ExprKind.ExprVar name -> re (ExprVar (rn name))
+    | ExprKind.ExprTyped (inner, t) -> re (ExprTyped (renameExpr ren inner, t))
+    | ExprKind.ExprUnaryOp (op, inner) -> re (ExprUnaryOp (op, renameExpr ren inner))
+    | ExprKind.ExprBinOp (m, op, l, r) -> re (ExprBinOp (m, op, renameExpr ren l, renameExpr ren r))
+    | ExprKind.ExprApp (f, args) -> re (ExprApp (renameExpr ren f, args |> List.map (renameExpr ren)))
+    | ExprKind.ExprArrayLit elems -> re (ExprArrayLit (elems |> List.map (renameExpr ren)))
+    | ExprKind.ExprAssign (l, r) -> re (ExprAssign (renameExpr ren l, renameExpr ren r))
+    | ExprKind.ExprDotDot (l, h) -> re (ExprDotDot (renameExpr ren l, renameExpr ren h))
     // constant-fill constructors ride through inlined callee bodies; the
     // count may reference renamed statics-in-scope, so rename inside
-    | ExprCompute inner -> ExprCompute (renameExpr ren inner)
-    | ExprReplicate (c, b) -> ExprReplicate (renameExpr ren c, renameExpr ren b)
-    | ExprPure inner -> ExprPure (renameExpr ren inner)
-    | other -> other
+    | ExprKind.ExprCompute inner -> re (ExprCompute (renameExpr ren inner))
+    | ExprKind.ExprReplicate (c, b) -> re (ExprReplicate (renameExpr ren c, renameExpr ren b))
+    | ExprKind.ExprPure inner -> re (ExprPure (renameExpr ren inner))
+    | _ -> e
 
 let rec private renameNStmts (ren: Map<string, string>) (stmts: NStmt list) : NStmt list =
     stmts |> List.map (fun s ->
@@ -307,8 +311,9 @@ let rec private boundNames (stmts: NStmt list) : string list =
 /// Intrinsics and array reads stay in place.
 let rec private hoistCalls (fname: string) (ctx: Ctx) (e: Expr) : Result<NStmt list * Expr, string> =
     let recurse = hoistCalls fname ctx
-    match e with
-    | ExprApp (ExprVar name, args) when Map.containsKey name ctx.Decls ->
+    let re k = inheritSpan e k
+    match e.Kind with
+    | ExprKind.ExprApp ({ Kind = ExprKind.ExprVar name }, args) when Map.containsKey name ctx.Decls ->
         // hoist arguments first (post-order), then this call
         let folded =
             args |> List.fold (fun acc a ->
@@ -317,29 +322,29 @@ let rec private hoistCalls (fname: string) (ctx: Ctx) (e: Expr) : Result<NStmt l
                 (Ok ([], []))
         folded |> Result.map (fun (stmts, args') ->
             let tmp = fresh ctx "__t"
-            (stmts @ [NLet (tmp, false, ExprApp (ExprVar name, args'))], ExprVar tmp))
-    | ExprApp (f, args) ->
+            (stmts @ [NLet (tmp, false, re (ExprApp (re (ExprVar name), args')))], re (ExprVar tmp)))
+    | ExprKind.ExprApp (f, args) ->
         let folded =
             args |> List.fold (fun acc a ->
                 acc |> Result.bind (fun (stmts, args') ->
                     recurse a |> Result.map (fun (s, a') -> (stmts @ s, args' @ [a']))))
                 (Ok ([], []))
-        folded |> Result.map (fun (stmts, args') -> (stmts, ExprApp (f, args')))
-    | ExprBinOp (m, op, l, r) ->
+        folded |> Result.map (fun (stmts, args') -> (stmts, re (ExprApp (f, args'))))
+    | ExprKind.ExprBinOp (m, op, l, r) ->
         recurse l |> Result.bind (fun (sl, l') ->
-        recurse r |> Result.map (fun (sr, r') -> (sl @ sr, ExprBinOp (m, op, l', r'))))
-    | ExprUnaryOp (op, inner) ->
-        recurse inner |> Result.map (fun (s, i') -> (s, ExprUnaryOp (op, i')))
-    | ExprTyped (inner, t) ->
-        recurse inner |> Result.map (fun (s, i') -> (s, ExprTyped (i', t)))
-    | ExprArrayLit elems ->
+        recurse r |> Result.map (fun (sr, r') -> (sl @ sr, re (ExprBinOp (m, op, l', r')))))
+    | ExprKind.ExprUnaryOp (op, inner) ->
+        recurse inner |> Result.map (fun (s, i') -> (s, re (ExprUnaryOp (op, i'))))
+    | ExprKind.ExprTyped (inner, t) ->
+        recurse inner |> Result.map (fun (s, i') -> (s, re (ExprTyped (i', t))))
+    | ExprKind.ExprArrayLit elems ->
         let folded =
             elems |> List.fold (fun acc a ->
                 acc |> Result.bind (fun (stmts, es) ->
                     recurse a |> Result.map (fun (s, e') -> (stmts @ s, es @ [e']))))
                 (Ok ([], []))
-        folded |> Result.map (fun (stmts, es) -> (stmts, ExprArrayLit es))
-    | other -> Ok ([], other)
+        folded |> Result.map (fun (stmts, es) -> (stmts, re (ExprArrayLit es)))
+    | _ -> Ok ([], e)
 
 /// Normalize + inline a function body to the flat NStmt fragment:
 /// all user calls inlined, all statements validated.
@@ -359,7 +364,7 @@ let rec private normalizeBody (fname: string) (ctx: Ctx) (depth: int) (fd: Funct
                 // position — hoist only inside its ARGUMENTS, then inline.
                 // (Hoisting the call itself would create `let tmp = f(..)`
                 // and re-normalizing that let would hoist again, forever.)
-                | NLet (name, isMut, ExprApp (ExprVar callee, args)) when Map.containsKey callee ctx.Decls ->
+                | NLet (name, isMut, { Kind = ExprKind.ExprApp ({ Kind = ExprKind.ExprVar callee }, args) }) when Map.containsKey callee ctx.Decls ->
                     let argsFolded =
                         args |> List.fold (fun acc2 a ->
                             acc2 |> Result.bind (fun (stmts, args') ->
@@ -412,8 +417,8 @@ and private inlineCall (fname: string) (ctx: Ctx) (depth: int)
         let paramBinds =
             List.zip fd.Params args
             |> List.map (fun (p, a) ->
-                match a with
-                | ExprVar argName -> (p.Name, argName, None)
+                match a.Kind with
+                | ExprKind.ExprVar argName -> (p.Name, argName, None)
                 | _ -> (p.Name, sprintf "%s_%s" tag p.Name, Some a))
         let paramRen =
             paramBinds |> List.map (fun (pn, target, _) -> (pn, target)) |> Map.ofList
@@ -428,8 +433,8 @@ and private inlineCall (fname: string) (ctx: Ctx) (depth: int)
         let paramLets =
             paramBinds |> List.choose (fun (_, target, argOpt) ->
                 argOpt |> Option.map (fun a -> NLet (target, false, a)))
-        match renFinal with
-        | ExprVar localName when (localRen |> Map.exists (fun _ v2 -> v2 = localName)) ->
+        match renFinal.Kind with
+        | ExprKind.ExprVar localName when (localRen |> Map.exists (fun _ v2 -> v2 = localName)) ->
             // Final expr is a callee-local: rename that local to the target
             // name instead of emitting `let target = local` (array-alias).
             let ren2 = Map.ofList [(localName, target)]
@@ -462,12 +467,12 @@ let private classifyParam (fname: string) (p: ParamDecl) : Result<ParamClass, st
 /// Zero value matching an array literal's (or constant fill's) shape.
 let rec private zerosLikeLiteral (e: Expr) : Expr option =
     match e with
-    | ExprArrayLit elems ->
+    | { Kind = ExprKind.ExprArrayLit elems } ->
         let zs = elems |> List.map (fun el ->
             match zerosLikeLiteral el with
             | Some z -> z
             | None -> fLit 0.0)
-        Some (ExprArrayLit zs)
+        Some (inheritSpan e (ExprArrayLit zs))
     | ConstFill (cnt, _) -> Some (zeroFill cnt)
     | _ -> None
 
@@ -482,14 +487,14 @@ let private zerosOfType (fname: string) (t: TypeExpr) : Result<Expr, string> =
             let extents =
                 idxs |> List.map (fun ix ->
                     match ix with
-                    | TyIdx (ExprLit (LitInt n)) -> Ok (int n)
+                    | TyIdx { Kind = ExprKind.ExprLit (LitInt n) } -> Ok (int n)
                     | _ -> err fname "differentiable arrays need literal Idx<n> extents (v1)")
             let folded =
                 extents |> List.fold (fun acc r ->
                     acc |> Result.bind (fun ns -> r |> Result.map (fun n -> ns @ [n]))) (Ok [])
             folded |> Result.bind (fun ns ->
                 go elem |> Result.map (fun z ->
-                    ns |> List.rev |> List.fold (fun inner n -> ExprArrayLit (List.replicate n inner)) z))
+                    ns |> List.rev |> List.fold (fun inner n -> syn (ExprArrayLit (List.replicate n inner))) z))
         | _ -> err fname "cannot build a zero cotangent for this type"
     go t
 
@@ -515,8 +520,8 @@ let private analyze (fname: string) (ctx: Ctx)
                 match s with
                 | NLet (name, _, value) ->
                     (match value with
-                     | ExprArrayLit _ | ConstFill _ -> arrays <- Set.add name arrays
-                     | ExprVar src when Set.contains src arrays ->
+                     | { Kind = ExprKind.ExprArrayLit _ } | ConstFill _ -> arrays <- Set.add name arrays
+                     | { Kind = ExprKind.ExprVar src } when Set.contains src arrays ->
                          arrays <- Set.add name arrays
                      | _ -> ())
                     // FLOAT array literals are differentiable carriers even
@@ -524,23 +529,23 @@ let private analyze (fname: string) (ctx: Ctx)
                     // must exist). Int-literal tables (index/offset data,
                     // e.g. ML-elaboration path tables) are not — their
                     // reads only ever appear in index and bound positions.
-                    let rec isFloatLit e =
-                        match e with
-                        | ExprArrayLit es -> es |> List.forall isFloatLit
-                        | ExprLit (LitFloat _) -> true
+                    let rec isFloatLit (e: Expr) =
+                        match e.Kind with
+                        | ExprKind.ExprArrayLit es -> es |> List.forall isFloatLit
+                        | ExprKind.ExprLit (LitFloat _) -> true
                         | _ -> false
                     touches value |> Result.map (fun t ->
                         if t then diff <- Set.add name diff
                         match value with
-                        | ExprArrayLit _ when isFloatLit value -> diff <- Set.add name diff
+                        | { Kind = ExprKind.ExprArrayLit _ } when isFloatLit value -> diff <- Set.add name diff
                         | ConstFill (_, LitFloat _) -> diff <- Set.add name diff
                         | _ -> ())
                 | NAssign (lhs, rhs) ->
                     touches rhs |> Result.map (fun t ->
                         if t then
-                            match lhs with
-                            | ExprVar n -> diff <- Set.add n diff
-                            | ExprApp (ExprVar a, _) -> diff <- Set.add a diff
+                            match lhs.Kind with
+                            | ExprKind.ExprVar n -> diff <- Set.add n diff
+                            | ExprKind.ExprApp ({ Kind = ExprKind.ExprVar a }, _) -> diff <- Set.add a diff
                             | _ -> ())
                 | NFor (_, _, _, body) -> pass body))
             (Ok ())
@@ -561,8 +566,8 @@ let rec private assignedNames (stmts: NStmt list) : Set<string> =
     stmts |> List.fold (fun acc s ->
         match s with
         | NLet _ -> acc
-        | NAssign (ExprVar n, _) -> Set.add n acc
-        | NAssign (ExprApp (ExprVar a, _), _) -> Set.add a acc
+        | NAssign ({ Kind = ExprKind.ExprVar n }, _) -> Set.add n acc
+        | NAssign ({ Kind = ExprKind.ExprApp ({ Kind = ExprKind.ExprVar a }, _) }, _) -> Set.add a acc
         | NAssign _ -> acc
         | NFor (_, _, _, body) -> Set.union acc (assignedNames body)) Set.empty
 
@@ -572,18 +577,18 @@ let rec private assignedNames (stmts: NStmt list) : Set<string> =
 let private additiveSelf (lhs: Expr) (rhs: Expr) : (float * Expr) option =
     let rec sameLhs (a: Expr) (b: Expr) =
         match a, b with
-        | ExprVar x, ExprVar y -> x = y
-        | ExprApp (ExprVar x, ix), ExprApp (ExprVar y, iy) ->
+        | { Kind = ExprKind.ExprVar x }, { Kind = ExprKind.ExprVar y } -> x = y
+        | { Kind = ExprKind.ExprApp ({ Kind = ExprKind.ExprVar x }, ix) }, { Kind = ExprKind.ExprApp ({ Kind = ExprKind.ExprVar y }, iy) } ->
             x = y && ix.Length = iy.Length && List.forall2 sameLhs ix iy
-        | ExprLit l1, ExprLit l2 -> l1 = l2
-        | ExprBinOp (_, o1, a1, b1), ExprBinOp (_, o2, a2, b2) ->
+        | { Kind = ExprKind.ExprLit l1 }, { Kind = ExprKind.ExprLit l2 } -> l1 = l2
+        | { Kind = ExprKind.ExprBinOp (_, o1, a1, b1) }, { Kind = ExprKind.ExprBinOp (_, o2, a2, b2) } ->
             o1 = o2 && sameLhs a1 a2 && sameLhs b1 b2
-        | ExprTyped (i1, _), i2 | i1, ExprTyped (i2, _) -> sameLhs i1 i2
+        | { Kind = ExprKind.ExprTyped (i1, _) }, i2 | i1, { Kind = ExprKind.ExprTyped (i2, _) } -> sameLhs i1 i2
         | _ -> false
-    match rhs with
-    | ExprBinOp (_, OpAdd, l, e) when sameLhs l lhs -> Some (1.0, e)
-    | ExprBinOp (_, OpAdd, e, l) when sameLhs l lhs -> Some (1.0, e)
-    | ExprBinOp (_, OpSub, l, e) when sameLhs l lhs -> Some (-1.0, e)
+    match rhs.Kind with
+    | ExprKind.ExprBinOp (_, OpAdd, l, e) when sameLhs l lhs -> Some (1.0, e)
+    | ExprKind.ExprBinOp (_, OpAdd, e, l) when sameLhs l lhs -> Some (1.0, e)
+    | ExprKind.ExprBinOp (_, OpSub, l, e) when sameLhs l lhs -> Some (-1.0, e)
     | _ -> None
 
 /// Straight-line ordering discipline: the adjoint sweep re-evaluates
@@ -599,8 +604,8 @@ let private checkWriteAfterRead (fname: string) (ctx: Ctx) (stmts: NStmt list) :
         let record n = lastWrite.[n] <- i
         match s with
         | NLet _ -> ()
-        | NAssign (ExprVar n, _) -> record n
-        | NAssign (ExprApp (ExprVar a, _), _) -> record a
+        | NAssign ({ Kind = ExprKind.ExprVar n }, _) -> record n
+        | NAssign ({ Kind = ExprKind.ExprApp ({ Kind = ExprKind.ExprVar a }, _) }, _) -> record a
         | NAssign _ -> ()
         | NFor (_, _, _, body) -> assignedNames body |> Set.iter record)
     let checkExprAt (i: int) (e: Expr) : Result<unit, string> =
@@ -624,8 +629,8 @@ let private checkWriteAfterRead (fname: string) (ctx: Ctx) (stmts: NStmt list) :
                  | None -> checkExprAt i rhs)
                 |> Result.bind (fun () ->
                     // index expressions of an element write
-                    match lhs with
-                    | ExprApp (_, idxs) ->
+                    match lhs.Kind with
+                    | ExprKind.ExprApp (_, idxs) ->
                         idxs |> List.fold (fun a ix -> a |> Result.bind (fun () -> checkExprAt i ix)) (Ok ())
                     | _ -> Ok ())
             | NFor (_, lo, hi, body) ->
@@ -660,8 +665,8 @@ let private checkNoScalarOverwrite (fname: string) (diff: Set<string>) (stmts: N
         ss |> List.fold (fun acc s ->
             acc |> Result.bind (fun () ->
                 match s with
-                | NAssign (ExprVar x, rhs) when Set.contains x diff ->
-                    (match additiveSelf (ExprVar x) rhs with
+                | NAssign (({ Kind = ExprKind.ExprVar x } as lhs), rhs) when Set.contains x diff ->
+                    (match additiveSelf lhs rhs with
                      | Some _ -> Ok ()
                      | None -> err fname (sprintf "non-additive reassignment of '%s' is not differentiable (the reverse sweep sees final values); bind a fresh `let` instead" x))
                 | NFor (_, _, _, body) -> check body
@@ -699,10 +704,10 @@ let private checkLoopDiscipline (fname: string) (ctx: Ctx) (loops: NStmt list) :
                             | Some n -> err fname (sprintf "accumulation reads accumulator '%s' mutated in the same loop; restructure" n)
                             | None -> Ok ())
                     | None ->
-                        match lhs with
-                        | ExprVar x ->
+                        match lhs.Kind with
+                        | ExprKind.ExprVar x ->
                             err fname (sprintf "loop-carried reassignment of '%s' is not additive (`%s = %s ± e`); only additive accumulation is differentiable in loops (v1)" x x x)
-                        | ExprApp (ExprVar a, _) ->
+                        | ExprKind.ExprApp ({ Kind = ExprKind.ExprVar a }, _) ->
                             // plain element write inside a loop: allowed as
                             // construction, but the rhs may not read the
                             // array being written (array recurrence)
@@ -743,50 +748,50 @@ let private accum (target: Expr) (cot: Expr) : NStmt =
 /// operands reference a variable, not a duplicated tree. Returns the
 /// prefix statement(s) and the expression to use as the cotangent.
 let private bindCot (rc: RevCtx) (cot: Expr) : NStmt list * Expr =
-    match cot with
-    | ExprLit _ | ExprVar _ -> [], cot
+    match cot.Kind with
+    | ExprKind.ExprLit _ | ExprKind.ExprVar _ -> [], cot
     | _ ->
         let c = fresh rc.Ctx "__c"
-        [NLet (c, false, cot)], ExprVar c
+        [NLet (c, false, cot)], inheritSpan cot (ExprVar c)
 
 /// Adjoint statements for expression `e` with cotangent `cot`.
 /// Every returned statement accumulates into a `__g_*` target.
 let rec private adjointOf (rc: RevCtx) (e: Expr) (cot: Expr) : Result<NStmt list, string> =
-    match e with
-    | ExprLit _ -> Ok []
-    | ExprTyped (inner, _) -> adjointOf rc inner cot
-    | ExprVar x ->
+    match e.Kind with
+    | ExprKind.ExprLit _ -> Ok []
+    | ExprKind.ExprTyped (inner, _) -> adjointOf rc inner cot
+    | ExprKind.ExprVar x ->
         if Set.contains x rc.Diff then Ok [accum (v (dName x)) cot] else Ok []
-    | ExprApp (ExprVar a, idxs) when Set.contains a rc.Arrays ->
+    | ExprKind.ExprApp ({ Kind = ExprKind.ExprVar a }, idxs) when Set.contains a rc.Arrays ->
         if Set.contains a rc.Diff then
-            Ok [accum (ExprApp (v (dName a), idxs)) cot]
+            Ok [accum (inheritSpan e (ExprApp (v (dName a), idxs))) cot]
         else Ok []
-    | ExprApp (ExprVar name, [u]) when isMathIntrinsic name
+    | ExprKind.ExprApp ({ Kind = ExprKind.ExprVar name }, [u]) when isMathIntrinsic name
                                        && not (Map.containsKey name rc.Ctx.Decls) ->
         (match derivRule name u with
          | None -> Ok []   // floor/ceil: zero derivative
          | Some d ->
              let pre, c = bindCot rc cot
              adjointOf rc u (mul c d) |> Result.map (fun ss -> pre @ ss))
-    | ExprApp (ExprVar _, _) ->
+    | ExprKind.ExprApp ({ Kind = ExprKind.ExprVar _ }, _) ->
         // array read of a non-diff array, or int-typed call — no adjoint
         Ok []
-    | ExprUnaryOp (OpNeg, inner) -> adjointOf rc inner (neg cot)
-    | ExprBinOp (_, OpAdd, l, r) ->
+    | ExprKind.ExprUnaryOp (OpNeg, inner) -> adjointOf rc inner (neg cot)
+    | ExprKind.ExprBinOp (_, OpAdd, l, r) ->
         adjointOf rc l cot |> Result.bind (fun sl ->
         adjointOf rc r cot |> Result.map (fun sr -> sl @ sr))
-    | ExprBinOp (_, OpSub, l, r) ->
+    | ExprKind.ExprBinOp (_, OpSub, l, r) ->
         adjointOf rc l cot |> Result.bind (fun sl ->
         adjointOf rc r (neg cot) |> Result.map (fun sr -> sl @ sr))
-    | ExprBinOp (_, OpMul, l, r) ->
+    | ExprKind.ExprBinOp (_, OpMul, l, r) ->
         let pre, c = bindCot rc cot
         adjointOf rc l (mul c r) |> Result.bind (fun sl ->
         adjointOf rc r (mul c l) |> Result.map (fun sr -> pre @ sl @ sr))
-    | ExprBinOp (_, OpDiv, l, r) ->
+    | ExprKind.ExprBinOp (_, OpDiv, l, r) ->
         let pre, c = bindCot rc cot
         adjointOf rc l (div c r) |> Result.bind (fun sl ->
         adjointOf rc r (neg (div (mul c l) (mul r r))) |> Result.map (fun sr -> pre @ sl @ sr))
-    | ExprBinOp (_, OpCaret, b, ExprLit (LitInt n)) when int n >= 0 ->
+    | ExprKind.ExprBinOp (_, OpCaret, b, { Kind = ExprKind.ExprLit (LitInt n) }) when int n >= 0 ->
         // Constant natural exponent: emit the closed form directly rather
         // than routing through the general rule, which would leave a
         // pow(b, 2.0 - 1.0) in the output.
@@ -798,7 +803,7 @@ let rec private adjointOf (rc: RevCtx) (e: Expr) (cot: Expr) : Result<NStmt list
                 elif n' = 2 then mul (fLit 2.0) b
                 else mul (fLit (float n')) (pow b (iLit (int64 (n' - 1))))
             adjointOf rc b (mul cot dterm)
-    | ExprBinOp (_, OpCaret, b, e) ->
+    | ExprKind.ExprBinOp (_, OpCaret, b, e) ->
         // d(b^e) = e*b^(e-1) db  +  b^e*log(b) de.
         // The base term keeps the power form instead of the equivalent
         // e*b^e/b so that b = 0 stays finite. The log term is reachable
@@ -809,10 +814,10 @@ let rec private adjointOf (rc: RevCtx) (e: Expr) (cot: Expr) : Result<NStmt list
         adjointOf rc b (mul c (mul e (pow b (sub e (fLit 1.0))))) |> Result.bind (fun sb ->
         adjointOf rc e (mul c (mul (pow b e) (call "log" [b]))) |> Result.map (fun se ->
             pre @ sb @ se))
-    | ExprBinOp (_, (OpEq | OpNeq | OpLt | OpLe | OpGt | OpGe | OpAnd | OpOr), _, _) ->
+    | ExprKind.ExprBinOp (_, (OpEq | OpNeq | OpLt | OpLe | OpGt | OpGe | OpAnd | OpOr), _, _) ->
         Ok []   // boolean-valued: no adjoint
-    | ExprBinOp (_, OpMod, _, _) -> Ok []  // int-valued
-    | ExprArrayLit _ ->
+    | ExprKind.ExprBinOp (_, OpMod, _, _) -> Ok []  // int-valued
+    | ExprKind.ExprArrayLit _ ->
         err rc.Fname "array literals may only appear as let initializers in differentiated code"
     | _ -> err rc.Fname "unsupported expression form in differentiated code (adjoint)"
 
@@ -823,16 +828,16 @@ let rec private adjointOfStmt (rc: RevCtx) (s: NStmt) : Result<NStmt list, strin
         if not (Set.contains x rc.Diff) then Ok []
         else
             (match value with
-             | ExprArrayLit _ | ConstFill _ -> Ok []   // literal/fill init: nothing flows back
+             | { Kind = ExprKind.ExprArrayLit _ } | ConstFill _ -> Ok []   // literal/fill init: nothing flows back
              | _ -> adjointOf rc value (v (dName x)))
     | NAssign (lhs, rhs) ->
         (match additiveSelf lhs rhs with
          | Some (sign, e) ->
              let cotBase =
-                 match lhs with
-                 | ExprVar x when Set.contains x rc.Diff -> Some (v (dName x))
-                 | ExprApp (ExprVar a, idxs) when Set.contains a rc.Diff ->
-                     Some (ExprApp (v (dName a), idxs))
+                 match lhs.Kind with
+                 | ExprKind.ExprVar x when Set.contains x rc.Diff -> Some (v (dName x))
+                 | ExprKind.ExprApp ({ Kind = ExprKind.ExprVar a }, idxs) when Set.contains a rc.Diff ->
+                     Some (inheritSpan lhs (ExprApp (v (dName a), idxs)))
                  | _ -> None
              match cotBase with
              | None -> Ok []
@@ -842,16 +847,16 @@ let rec private adjointOfStmt (rc: RevCtx) (s: NStmt) : Result<NStmt list, strin
          | None ->
              // general overwrite: save cotangent, zero it, then flow into rhs
              let target =
-                 match lhs with
-                 | ExprVar x when Set.contains x rc.Diff -> Some (v (dName x))
-                 | ExprApp (ExprVar a, idxs) when Set.contains a rc.Diff ->
-                     Some (ExprApp (v (dName a), idxs))
+                 match lhs.Kind with
+                 | ExprKind.ExprVar x when Set.contains x rc.Diff -> Some (v (dName x))
+                 | ExprKind.ExprApp ({ Kind = ExprKind.ExprVar a }, idxs) when Set.contains a rc.Diff ->
+                     Some (inheritSpan lhs (ExprApp (v (dName a), idxs)))
                  | _ -> None
              match target with
              | None -> Ok []
              | Some t ->
                  let c = fresh rc.Ctx "__c"
-                 adjointOf rc rhs (ExprVar c) |> Result.map (fun flow ->
+                 adjointOf rc rhs (inheritSpan lhs (ExprVar c)) |> Result.map (fun flow ->
                      [NLet (c, false, t); NAssign (t, fLit 0.0)] @ flow))
     | NFor (var, lo, hi, body) ->
         // Same-direction adjoint loop: REPLAY THE WHOLE BODY (fresh
@@ -899,12 +904,12 @@ let rec private toStmts (ns: NStmt list) : Stmt list =
     ns |> List.map (fun s ->
         match s with
         | NLet (n, isMut, value) ->
-            StmtLet { Pattern = PatVar n
+            StmtLet { Pattern = synPat (PatVar n)
                       Type = None
                       Value = value
                       Mutability = if isMut then BindMut else BindLet }
-        | NAssign (lhs, rhs) -> StmtExpr (ExprAssign (lhs, rhs))
-        | NFor (var, lo, hi, body) -> StmtForIn (var, ExprDotDot (lo, hi), toStmts body))
+        | NAssign (lhs, rhs) -> StmtExpr (mkExpr (mergeSpan lhs.Span rhs.Span) (ExprAssign (lhs, rhs)))
+        | NFor (var, lo, hi, body) -> StmtForIn (var, mkExpr (mergeSpan lo.Span hi.Span) (ExprDotDot (lo, hi)), toStmts body))
 
 // ============================================================================
 // Synthesize f__grad
@@ -975,7 +980,7 @@ let private synthesize (ctx: Ctx) (fd: FunctionDecl) : Result<FunctionDecl, stri
             | NLet (n, _, value) when Set.contains n diff ->
                 if Set.contains n arrays then
                     match value with
-                    | ExprArrayLit _ | ConstFill _ ->
+                    | { Kind = ExprKind.ExprArrayLit _ } | ConstFill _ ->
                         zerosLikeLiteral value |> Option.map (fun z -> NLet (dName n, true, z))
                     | _ -> None   // rejected below
                 else Some (NLet (dName n, true, fLit 0.0))
@@ -986,8 +991,8 @@ let private synthesize (ctx: Ctx) (fd: FunctionDecl) : Result<FunctionDecl, stri
             match s with
             | NLet (n, _, value) when Set.contains n diff && Set.contains n arrays ->
                 (match value with
-                 | ExprArrayLit _ | ConstFill _ -> None
-                 | ExprVar _ -> Some n   // alias — cotangent identity untrackable
+                 | { Kind = ExprKind.ExprArrayLit _ } | ConstFill _ -> None
+                 | { Kind = ExprKind.ExprVar _ } -> Some n   // alias — cotangent identity untrackable
                  | _ -> Some n)
             | _ -> None)
     match badArrayLocal with
@@ -1008,7 +1013,7 @@ let private synthesize (ctx: Ctx) (fd: FunctionDecl) : Result<FunctionDecl, stri
 
     // assemble: forward + primal + cot decls + seed + reverse + return
     let primalName = "__primal"
-    let fwd = toStmts stmts @ [ StmtLet { Pattern = PatVar primalName
+    let fwd = toStmts stmts @ [ StmtLet { Pattern = synPat (PatVar primalName)
                                           Type = None
                                           Value = finalE
                                           Mutability = BindLet } ]
@@ -1017,7 +1022,7 @@ let private synthesize (ctx: Ctx) (fd: FunctionDecl) : Result<FunctionDecl, stri
     let retExpr =
         match scalarDiff with
         | [] -> v primalName
-        | ss -> ExprTuple (v primalName :: (ss |> List.map (fun p -> v (dName p))))
+        | ss -> syn (ExprTuple (v primalName :: (ss |> List.map (fun p -> v (dName p)))))
     let retTy =
         match scalarDiff with
         | [] -> fd.ReturnType
@@ -1034,7 +1039,7 @@ let private synthesize (ctx: Ctx) (fd: FunctionDecl) : Result<FunctionDecl, stri
       Params = gradParams
       WhereClause = None
       ReturnType = retTy
-      Body = ExprBlock (fwd @ cotDecls @ revStmts, Some retExpr)
+      Body = inheritSpan fd.Body (ExprBlock (fwd @ cotDecls @ revStmts, Some retExpr))
       IsStatic = false }))))))))))
 
 // ============================================================================
@@ -1049,41 +1054,42 @@ let rec private rewriteExpr (requested: System.Collections.Generic.HashSet<strin
         es |> List.fold (fun acc x ->
             acc |> Result.bind (fun xs -> r x |> Result.map (fun x' -> xs @ [x'])))
             (Ok [])
-    match e with
+    let re k = inheritSpan e k
+    match e.Kind with
     // Qualified: `alias.grad(f)` with alias bound by `import ad`. Bare
     // `grad(...)` is no longer recognized — the AD surface is a module,
     // not a language-wide name (same rule as the ml/ppl surfaces).
-    | ExprApp (ExprField (ExprVar alias, "grad"), args) when Set.contains alias aliases ->
+    | ExprKind.ExprApp ({ Kind = ExprKind.ExprField ({ Kind = ExprKind.ExprVar alias }, "grad") }, args) when Set.contains alias aliases ->
         (match args with
-         | [ExprVar fname] ->
+         | [{ Kind = ExprKind.ExprVar fname }] ->
              if Set.contains fname declNames then
                  requested.Add fname |> ignore
-                 Ok (ExprVar (fname + gradSuffix))
+                 Ok (re (ExprVar (fname + gradSuffix)))
              else
                  Error (sprintf "grad: '%s' is not a top-level function in this module (grad differentiates same-module named functions)" fname)
          | [_] -> Error "grad: argument must be a named top-level function (e.g. ad.grad(loss))"
          | _ -> Error "grad: expects exactly one argument, the function to differentiate")
-    | ExprLit _ | ExprVar _ -> Ok e
-    | ExprApp (f, args) ->
-        r f |> Result.bind (fun f' -> rList args |> Result.map (fun args' -> ExprApp (f', args')))
-    | ExprBinOp (m, op, l, rr) ->
-        r l |> Result.bind (fun l' -> r rr |> Result.map (fun r' -> ExprBinOp (m, op, l', r')))
-    | ExprUnaryOp (op, inner) -> r inner |> Result.map (fun i -> ExprUnaryOp (op, i))
-    | ExprTyped (inner, t) -> r inner |> Result.map (fun i -> ExprTyped (i, t))
-    | ExprAssign (l, rr) ->
-        r l |> Result.bind (fun l' -> r rr |> Result.map (fun r' -> ExprAssign (l', r')))
-    | ExprTuple es -> rList es |> Result.map ExprTuple
-    | ExprArrayLit es -> rList es |> Result.map ExprArrayLit
-    | ExprDotDot (l, h) ->
-        r l |> Result.bind (fun l' -> r h |> Result.map (fun h' -> ExprDotDot (l', h')))
-    | ExprIf (c, t, f) ->
+    | ExprKind.ExprLit _ | ExprKind.ExprVar _ -> Ok e
+    | ExprKind.ExprApp (f, args) ->
+        r f |> Result.bind (fun f' -> rList args |> Result.map (fun args' -> re (ExprApp (f', args'))))
+    | ExprKind.ExprBinOp (m, op, l, rr) ->
+        r l |> Result.bind (fun l' -> r rr |> Result.map (fun r' -> re (ExprBinOp (m, op, l', r'))))
+    | ExprKind.ExprUnaryOp (op, inner) -> r inner |> Result.map (fun i -> re (ExprUnaryOp (op, i)))
+    | ExprKind.ExprTyped (inner, t) -> r inner |> Result.map (fun i -> re (ExprTyped (i, t)))
+    | ExprKind.ExprAssign (l, rr) ->
+        r l |> Result.bind (fun l' -> r rr |> Result.map (fun r' -> re (ExprAssign (l', r'))))
+    | ExprKind.ExprTuple es -> rList es |> Result.map (fun es' -> re (ExprTuple es'))
+    | ExprKind.ExprArrayLit es -> rList es |> Result.map (fun es' -> re (ExprArrayLit es'))
+    | ExprKind.ExprDotDot (l, h) ->
+        r l |> Result.bind (fun l' -> r h |> Result.map (fun h' -> re (ExprDotDot (l', h'))))
+    | ExprKind.ExprIf (c, t, f) ->
         r c |> Result.bind (fun c' ->
         r t |> Result.bind (fun t' ->
-        r f |> Result.map (fun f' -> ExprIf (c', t', f'))))
-    | ExprLet (binding, body) ->
+        r f |> Result.map (fun f' -> re (ExprIf (c', t', f')))))
+    | ExprKind.ExprLet (binding, body) ->
         r binding.Value |> Result.bind (fun v' ->
-        r body |> Result.map (fun b' -> ExprLet ({ binding with Value = v' }, b')))
-    | ExprBlock (stmts, finalE) ->
+        r body |> Result.map (fun b' -> re (ExprLet ({ binding with Value = v' }, b'))))
+    | ExprKind.ExprBlock (stmts, finalE) ->
         let rec rStmt (s: Stmt) : Result<Stmt, string> =
             match s with
             | StmtSpanned (inner, sp) -> rStmt inner |> Result.map (fun i -> StmtSpanned (i, sp))
@@ -1102,17 +1108,17 @@ let rec private rewriteExpr (requested: System.Collections.Generic.HashSet<strin
             (Ok [])
         |> Result.bind (fun stmts' ->
             match finalE with
-            | Some fe -> r fe |> Result.map (fun fe' -> ExprBlock (stmts', Some fe'))
-            | None -> Ok (ExprBlock (stmts', None)))
-    | ExprLambda (ps, w, body) -> r body |> Result.map (fun b -> ExprLambda (ps, w, b))
-    | ExprMatch (scrut, cases) ->
+            | Some fe -> r fe |> Result.map (fun fe' -> re (ExprBlock (stmts', Some fe')))
+            | None -> Ok (re (ExprBlock (stmts', None))))
+    | ExprKind.ExprLambda (ps, w, body) -> r body |> Result.map (fun b -> re (ExprLambda (ps, w, b)))
+    | ExprKind.ExprMatch (scrut, cases) ->
         r scrut |> Result.bind (fun s' ->
             cases |> List.fold (fun acc c ->
                 acc |> Result.bind (fun cs ->
                     r c.Body |> Result.map (fun b -> cs @ [{ c with Body = b }])))
                 (Ok [])
-            |> Result.map (fun cs' -> ExprMatch (s', cs')))
-    | other -> Ok other   // exotic containers: grad not expected inside
+            |> Result.map (fun cs' -> re (ExprMatch (s', cs'))))
+    | _ -> Ok e   // exotic containers: grad not expected inside
 
 /// `import ad [as _]` — the module this transform is surfaced through.
 let private isAdImport (d: Located<Decl>) =
@@ -1146,6 +1152,14 @@ let private expandModule (decls: Located<Decl> list) : Result<Located<Decl> list
             | DeclFunction fd -> Some (fd.Name, fd)
             | _ -> None)
         |> Map.ofList
+    // Source span per differentiable function, for stamping synthSpan so the
+    // syn-based derivative builders carry the differentiated decl's location.
+    let funcSpans =
+        decls |> List.choose (fun d ->
+            match d.Value with
+            | DeclFunction fd -> Some (fd.Name, d.Span)
+            | _ -> None)
+        |> Map.ofList
     let declNames = funcDecls |> Map.toSeq |> Seq.map fst |> Set.ofSeq
     let requested = System.Collections.Generic.HashSet<string>()
     // rewrite call sites everywhere
@@ -1174,9 +1188,14 @@ let private expandModule (decls: Located<Decl> list) : Result<Located<Decl> list
             let synthesized =
                 requested |> Seq.sort |> Seq.fold (fun acc fname ->
                     acc |> Result.bind (fun (made: Map<string, FunctionDecl>) ->
+                        // Stamp the ambient synthesis span with this decl's
+                        // span before building its derivative (syn/syn-based
+                        // builders read it).
+                        Blade.Ast.synthSpan <- (Map.tryFind fname funcSpans |> Option.defaultValue noSpan)
                         synthesize ctx funcDecls.[fname]
                         |> Result.map (fun gd -> Map.add fname gd made)))
                     (Ok Map.empty)
+            Blade.Ast.synthSpan <- noSpan
             synthesized |> Result.map (fun made ->
                 // splice each f__grad immediately after its source decl
                 decls' |> List.collect (fun d ->
@@ -1186,10 +1205,19 @@ let private expandModule (decls: Located<Decl> list) : Result<Located<Decl> list
                     | _ -> [d]))))
 
 /// Entry point: expand grad() across a program. Errors are compile errors.
-let expand (program: Program) : Result<Program, string> =
+let private expandStr (program: Program) : Result<Program, string> =
     program.Modules
     |> List.fold (fun acc m ->
         acc |> Result.bind (fun ms ->
             expandModule m.Decls |> Result.map (fun ds -> ms @ [{ m with Decls = ds }])))
         (Ok [])
     |> Result.map (fun ms -> { program with Modules = ms })
+
+/// Boundary: string-errored internals -> coded diagnostics. The span is the
+/// ambient synthSpan -- stamped per-decl by expandStr, so a mid-elaboration
+/// failure points at the offending declaration.
+let expand (program: Program) : Result<Program, Blade.Diagnostics.Diagnostic list> =
+    Blade.Ast.synthSpan <- Blade.Ast.noSpan
+    expandStr program
+    |> Result.mapError (fun msg ->
+        [ Blade.Diagnostics.mkError "BL5500" (Blade.Diagnostics.Codes.phaseOfCode "BL5500") Blade.Ast.synthSpan msg ])

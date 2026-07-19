@@ -1,0 +1,11 @@
+// TEST: Nat Unit Tag
+// Nat<unit> carries its unit annotation (previously the argument was
+// silently dropped — the one numeric base that skipped unit resolution).
+Unit angular_momentum
+struct Pair {
+    l1: Nat<angular_momentum>,
+    l2: Nat<angular_momentum>
+}
+let p = Pair { l1 = 1, l2 = 2 }
+let ok = p.l2 > p.l1
+// EXPECT: ok = true

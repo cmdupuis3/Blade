@@ -9,6 +9,10 @@
   <ItemGroup>
     <Compile Include="Runtime.fs" />
     <Compile Include="Ast.fs" />
+    <!-- Unified diagnostics: the Diagnostic record + BLxxxx registry +
+         renderers. Needs only Ast.Span; every later phase constructs
+         these directly. -->
+    <Compile Include="Diagnostics.fs" />
     <Compile Include="Types.fs" />
     <Compile Include="Lexer.fs" />
     <Compile Include="Parser.fs" />
@@ -42,6 +46,7 @@
     <Compile Include="ml/compiler/MLSpec.fs" />
     <Compile Include="ml/compiler/WignerTables.fs" />
     <Compile Include="ml/compiler/MLStatics.fs" />
+    <Compile Include="ml/compiler/MLEquiv.fs" />
     <Compile Include="ml/compiler/MLElaborate.fs" />
     <!-- PPL compiler layer (Blade.Ppl.*): moment/comoment formers and
          declared independence, elaborated to plain Blade source. Lives
@@ -72,12 +77,33 @@
     <Compile Include="Ide.fs" />
     <Compile Include="Lowering.fs" />
     <Compile Include="EmitCpp.fs" />
+    <!-- Reynolds permutation term-plan (enumeration/dedup/ordering), extracted
+         from CodeGen so a future IR interpreter can reuse the exact plan. Pure
+         int/list logic; no IR/Types dependency, so it can precede CodeGen. -->
+    <Compile Include="ReynoldsCore.fs" />
     <Compile Include="CodeGen.fs" />
+    <!-- Tree-walking IR interpreter (differential twin of CodeGen; output must
+         byte-match compiled binaries). Value = runtime value universe;
+         CppFormat = iostream-parity printing; Numerics = bit-exact scalar and
+         complex arithmetic; RandMirror = bit-exact blade_rand mirror. -->
+    <Compile Include="Interp/Value.fs" />
+    <Compile Include="Interp/CppFormat.fs" />
+    <Compile Include="Interp/Numerics.fs" />
+    <Compile Include="Interp/RandMirror.fs" />
+    <Compile Include="Interp/ArrayOps.fs" />
+    <Compile Include="Interp/Core.fs" />
+    <Compile Include="Interp/Loops.fs" />
+    <Compile Include="Interp/Print.fs" />
+    <Compile Include="Interp/Run.fs" />
+    <!-- Interpreter-backed REPL seam: lowerSession (one shared front-end pass)
+         wraps Interp/Run.fs; consumed by Cli.replLoop. -->
+    <Compile Include="Interp/Repl.fs" />
     <Compile Include="Build.fs" />
     <Compile Include="tests/TestHarness.fs" />
     <Compile Include="tests/Expect.fs" />
     <Compile Include="tests/Corpus.fs" />
     <Compile Include="tests/Runner.fs" />
+    <Compile Include="tests/InterpDiff.fs" />
     <Compile Include="tests/Test_Basic.fs" />
     <Compile Include="tests/Test_Loops.fs" />
     <Compile Include="tests/Test_Symmetry.fs" />
@@ -105,6 +131,8 @@
     <Compile Include="tests/Test_TypeStructure.fs" />
     <Compile Include="tests/Test_Shape.fs" />
     <Compile Include="tests/Test_Spans.fs" />
+    <Compile Include="tests/Test_Diagnostics.fs" />
+    <Compile Include="tests/Test_DiagCorpus.fs" />
     <Compile Include="tests/Oracles.fs" />
     <Compile Include="tests/Test_Oracles.fs" />
     <Compile Include="tests/Test_WignerTables.fs" />
@@ -112,6 +140,7 @@
     <Compile Include="tests/Test_Math.fs" />
     <Compile Include="tests/Test_Rand.fs" />
     <Compile Include="tests/Test_Spectra.fs" />
+    <Compile Include="tests/Test_Fallback.fs" />
     <Compile Include="tests/Differential.fs" />
     <Compile Include="tests/Benchmarks.fs" />
     <Compile Include="tests/CudaTests.fs" />
@@ -163,6 +192,10 @@
     </None>
     <None Include="cpp/rand_runtime.hpp">
       <Link>cpp/rand_runtime.hpp</Link>
+      <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
+    </None>
+    <None Include="cpp/blade_runtime.hpp">
+      <Link>cpp/blade_runtime.hpp</Link>
       <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
     </None>
   </ItemGroup>

@@ -202,18 +202,61 @@ let parseExpectedValues (source: string) : ExpectedValue list =
         else None)
     |> Array.toList
 
-/// Parse the expected-abort message substring from test source comments.
-/// Format: // ABORT: <substring>
+/// Parse the expected-abort message substrings from test source comments.
+/// Format: // ABORT: <substring>   (repeatable — ALL pins must be contained)
 /// Used by "(aborts)" probes: the test must compile, run, and exit nonzero
-/// with <substring> present in its output (runExecutable merges stderr into
-/// the output, so std::cerr abort messages are visible here).
-let parseAbortExpectation (source: string) : string option =
+/// with every <substring> present in its output (runExecutable merges stderr
+/// into the output, so std::cerr abort messages are visible here). Multiple
+/// pins let stack-trace probes assert message + frame lines together.
+let parseAbortExpectations (source: string) : string list =
     source.Split([|'\n'; '\r'|], StringSplitOptions.RemoveEmptyEntries)
-    |> Array.tryPick (fun line ->
+    |> Array.choose (fun line ->
         let trimmed = line.Trim()
         if trimmed.StartsWith("// ABORT:") then
             Some (trimmed.Substring(9).Trim())
         else None)
+    |> Array.toList
+
+/// Diagnostics-corpus pins (tests/corpus/diagnostics). Formats:
+///   // ERROR: BL2001                     code only
+///   // ERROR: BL2001 @ 4:12              code + start position
+///   // ERROR: BL2001 @ 4:12-4:20         code + full span
+///   // ERROR-CONTAINS: <substring>       message substring (any diagnostic)
+/// Line/col are 1-based positions in the source as the corpus loader returns
+/// it (the // TEST: line is stripped; pin comment lines themselves count).
+type DiagPin = {
+    PinCode: string
+    PinStart: (int * int) option
+    PinEnd: (int * int) option
+}
+
+let parseDiagPins (source: string) : DiagPin list * string list =
+    let parseLC (s: string) =
+        match s.Split(':') with
+        | [| l; c |] ->
+            match Int32.TryParse l, Int32.TryParse c with
+            | (true, l), (true, c) -> Some (l, c)
+            | _ -> None
+        | _ -> None
+    let pins = ResizeArray<DiagPin>()
+    let contains = ResizeArray<string>()
+    for raw in source.Split('\n') do
+        let t = raw.TrimEnd('\r').Trim()
+        if t.StartsWith "// ERROR-CONTAINS:" then
+            contains.Add (t.Substring(18).Trim())
+        elif t.StartsWith "// ERROR:" then
+            let spec = t.Substring(9).Trim()
+            let parts = spec.Split([|'@'|], 2)
+            let pin = { PinCode = parts.[0].Trim(); PinStart = None; PinEnd = None }
+            let pin =
+                if parts.Length = 2 then
+                    let ends = parts.[1].Trim().Split([|'-'|], 2)
+                    let pin = { pin with PinStart = parseLC (ends.[0].Trim()) }
+                    if ends.Length = 2 then { pin with PinEnd = parseLC (ends.[1].Trim()) }
+                    else pin
+                else pin
+            pins.Add pin
+    (List.ofSeq pins, List.ofSeq contains)
 
 /// Parse actual values from program output
 /// Looks for lines like "varname = value" or "varname = [...]"

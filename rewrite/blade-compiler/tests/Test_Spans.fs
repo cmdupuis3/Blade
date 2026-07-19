@@ -11,6 +11,7 @@
 module Blade.Tests.Spans
 
 open Blade
+open Blade.Ast
 open Blade.Tests.TestHarness
 
 let runSpanTests () : BlockResult =
@@ -141,6 +142,102 @@ let runSpanTests () : BlockResult =
     check "static assertion: destructured static folds without error"
         (firstErr tupleSrc = None)
         (sprintf "got %A" (firstErr tupleSrc))
+
+    // ====================================================================
+    // Stage 2: token end positions, real statement/decl span ranges,
+    // File threading, and coded ParseErrors (BL1001/BL1002/BL1999).
+    // ====================================================================
+
+    // (a) Statement spans are REAL ranges, not zero-width points. Collect the
+    //     StmtSpanned annotations from inside a multi-line function block.
+    let collectStmtSpans (src: string) : Span list =
+        match Parser.parseProgram src with
+        | Error _ -> []
+        | Ok prog ->
+            let acc = System.Collections.Generic.List<Span>()
+            let rec walkExpr (e: Expr) =
+                match e.Kind with
+                | ExprKind.ExprBlock (stmts, fin) ->
+                    stmts |> List.iter (fun s ->
+                        match s with
+                        | StmtSpanned (_, sp) -> acc.Add sp
+                        | _ -> ())
+                    match fin with Some fe -> walkExpr fe | None -> ()
+                | ExprKind.ExprLambda (_, _, body) -> walkExpr body
+                | _ -> ()
+            for m in prog.Modules do
+                for d in m.Decls do
+                    match d.Value with
+                    | DeclFunction f -> walkExpr f.Body
+                    | DeclLet b | DeclStatic b -> walkExpr b.Value
+                    | _ -> ()
+            List.ofSeq acc
+    let stmtRangeSrc =
+        "function f(x: Float64) -> Float64 = {\n" +
+        "    let a = x + 1.0\n" +
+        "    let bee = a * 2.0 + a\n" +
+        "    bee\n" +
+        "}\n"
+    let stmtSpans = collectStmtSpans stmtRangeSrc
+    check "statement spans: real ranges (end tracked, not zero-width)"
+        (stmtSpans.Length >= 2 &&
+         stmtSpans |> List.forall (fun sp ->
+            sp.EndLine >= sp.StartLine &&
+            (sp.EndLine > sp.StartLine || sp.EndCol > sp.StartCol)))
+        (sprintf "got %A" (stmtSpans |> List.map (fun sp -> sp.StartLine, sp.StartCol, sp.EndLine, sp.EndCol)))
+    check "statement spans: first stmt starts on its own line (line 2)"
+        (match stmtSpans with sp :: _ -> sp.StartLine = 2 && sp.EndCol > sp.StartCol | [] -> false)
+        (sprintf "got %A" (stmtSpans |> List.tryHead))
+
+    // (b) parseMultiSource stamps File onto decl spans.
+    let declFiles (fname: string) (src: string) : string option list =
+        match Parser.parseMultiSource [(fname, src)] with
+        | Error _ -> []
+        | Ok prog -> [ for m in prog.Modules do for d in m.Decls -> d.Span.File ]
+    let stampedFiles = declFiles "mymod.blade" "let a = 1\nlet b = 2\n"
+    check "parseMultiSource stamps File onto decl spans"
+        (stampedFiles = [ Some "mymod.blade"; Some "mymod.blade" ])
+        (sprintf "got %A" stampedFiles)
+    // The single-source entry point keeps File = None (unchanged signature).
+    check "parseProgram leaves decl-span File unset"
+        (match Parser.parseProgram "let a = 1\n" with
+         | Ok prog -> prog.Modules |> List.forall (fun m -> m.Decls |> List.forall (fun d -> d.Span.File = None))
+         | Error _ -> false)
+        ""
+
+    // (c) An EOF parse error reports the END of input (last line), not 0:0.
+    check "parse error at EOF reports a real line, not 0"
+        (match parseErrLine "let x = (1 + 2" with Some n -> n > 0 | None -> false)
+        (sprintf "got %A" (parseErrLine "let x = (1 + 2"))
+    check "parse error at EOF reports the LAST line (multi-line source)"
+        (parseErrLine "let a = 1\nfunction f(x" = Some 2)
+        (sprintf "got %A" (parseErrLine "let a = 1\nfunction f(x"))
+
+    // (d) Expected-token errors read like prose — no raw DU noise (TokLParen…).
+    let parseErrMsg (src: string) : string =
+        match Parser.parseProgram src with Error e -> e.Message | Ok _ -> ""
+    let expMsg = parseErrMsg "function f(x y) -> Int64 = 1\n"
+    check "expected-token message is humanized (identifier 'y', not TokIdent)"
+        (expMsg.Contains "Expected ')'" && expMsg.Contains "identifier 'y'" && not (expMsg.Contains "Tok"))
+        (sprintf "got: %s" expMsg)
+    let unexpMsg = parseErrMsg "let x = )\n"
+    check "unexpected-token message carries no raw DU constructor name"
+        (unexpMsg.Contains "')'" && not (unexpMsg.Contains "Tok"))
+        (sprintf "got: %s" unexpMsg)
+
+    // (e) ParseError.Code is classified: BL1001 expected-token, BL1002 EOF,
+    //     BL1999 generic.
+    let parseErrCode (src: string) : string =
+        match Parser.parseProgram src with Error e -> e.Code | Ok _ -> "OK"
+    check "parse error code: BL1001 (expected token)"
+        (parseErrCode "function f(x y) -> Int64 = 1\n" = "BL1001")
+        (sprintf "got %s" (parseErrCode "function f(x y) -> Int64 = 1\n"))
+    check "parse error code: BL1002 (unexpected EOF)"
+        (parseErrCode "function f(x" = "BL1002")
+        (sprintf "got %s" (parseErrCode "function f(x"))
+    check "parse error code: BL1999 (generic)"
+        (parseErrCode "let x = )\n" = "BL1999")
+        (sprintf "got %s" (parseErrCode "let x = )\n"))
 
     printFooter "Error Locations" [sprintf "%d passed" passed; sprintf "%d failure(s)" failed]
     { Block = "Error Locations"; Passed = passed; Failed = failed; Skipped = 0; FailedNames = failedNames }

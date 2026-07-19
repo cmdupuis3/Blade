@@ -178,6 +178,13 @@ type TypeExpr =
     | TyAntisymIdx of rank: int * extent: Expr
     | TyBoundedIdx of lower: Expr * upper: Expr
     | TyCompoundIdx of mask: Expr
+    // Dormant scaffolding for a GENERAL group-parameterized rep index. For
+    // O(3)/SO(3) the transforms-as feature shipped (2026-07-18) on
+    // IrrepsIdx + the `where ml.equiv(G)` function constraint
+    // (ml/compiler/MLEquiv.fs) instead — the spec IS the rep, parity
+    // distinguishes the groups. Surface this form only when a second group
+    // family (finite groups via Reynolds) arrives; IrrepsIdx<spec> is then
+    // reinterpretable as TyEquivIdx(total_dim(spec), O3, spec).
     | TyEquivIdx of dim: Expr * group: TypeExpr * rep: TypeExpr
     | TyHermitianIdx of extent: Expr
     | TyEnumIdx of values: Expr  // EnumIdx<[v1, v2, ...]> — dependent on static array
@@ -201,6 +208,12 @@ type TypeExpr =
     // no compression) — the spec matters for type IDENTITY, not storage.
     // The spec is an expression resolved at typecheck via StaticEval.
     | TyIrrepsIdx of spec: Expr
+    // halo<Inner, [offsets]> in TYPE position — a stencil traversal
+    // transformer wrapping an inner index type, legal ONLY as a range<> slot
+    // (n-D separable composition: range<halo<Lat,[..]>, halo<Lon,[..]>>).
+    // Not a storage dimension: rejected in Array<... like ...> lists. The
+    // offsets are a static signed-int array (center = 0, sign = direction).
+    | TyHalo of inner: TypeExpr * offsets: Expr
     // With constraints
     | TyConstrained of TypeExpr * Constraint list
     // Poly type for arity polymorphism
@@ -210,7 +223,11 @@ and Constraint =
     | CnComm of Ident list              // comm(a, b, c)
     | CnAntisymm of Ident list          // antisymm(a, b)
     | CnReynolds of Ident list * bool   // reynolds([a,b], antisym?)
-    | CnEquiv of Ident * TypeExpr       // equiv(G, rho)
+    // equiv(G, rho) — superseded by WhereClause.Custom + the Blade.Constraints
+    // registry: `where ml.equiv(O3|SO3)` parses as a Custom conjunct and is
+    // judged by ml/compiler/MLEquiv.fs. Retained as documentation of the
+    // original design; no constructor site exists.
+    | CnEquiv of Ident * TypeExpr
 
 and WhereClause = {
     Commutativity: Ident list list        // comm(a,b), comm(c,d)
@@ -247,7 +264,7 @@ and TDimSpec = {
 // Patterns
 // ============================================================================
 
-and Pattern =
+and PatternKind =
     | PatWildcard                           // _
     | PatVar of Ident                       // x
     | PatLit of Literal                     // 42, "hello", etc.
@@ -262,7 +279,7 @@ and Pattern =
 // Expressions
 // ============================================================================
 
-and Expr =
+and ExprKind =
     // Literals
     | ExprLit of Literal
     // Wildcard hole `_` in expression position. A general discard/hole token
@@ -305,6 +322,7 @@ and Expr =
     | ExprDotDot of lo: Expr * hi: Expr  // a..b — anonymous range sugar
     | ExprReverse of TypeExpr              // reverse<I>
     | ExprBlocked of TypeExpr * Expr       // blocked<I, K>
+    | ExprHalo of inner: TypeExpr * offsets: Expr  // halo<I, [o..]> — stencil traversal transformer over I (signed ordinal offsets, center = 0)
     // Zip and align
     | ExprZip of Expr list
     | ExprAlign of Expr list * AlignSpec option
@@ -340,7 +358,7 @@ and Expr =
     | ExprGram of left: Expr * right: Expr  // gram(A, B) = A * B^H: result[i][j] = sum_k A[i][k]*conj(B[j][k]). Square+Hermitian/symmetric when A,B same array; dense otherwise.
     | ExprExtents of array: Expr                   // extents(A) - innermost dim extent (rank-1 only for now)
     // Struct construction
-    | ExprStruct of Ident * (Ident * Expr) list  // Point { x = 1, y = 2 }
+    | ExprStruct of Ident * (Ident * Expr) list * spread: Expr option  // Point { x = 1, ..p }
     // Sectioned operators
     | ExprSection of BinOp                 // (+), (*), etc.
     | ExprPartialApp of BinOp * Expr * bool  // (+ 1) or (1 +), bool = is left section
@@ -353,6 +371,14 @@ and Expr =
     // the parser, consumed and ELIMINATED by the Unfold pass (Unfold.fs)
     // before any elaboration or typechecking; downstream stages never see it.
     | ExprStatic of Expr
+
+/// Every expression carries its source span (full-span AST). Construct via
+/// mkExpr / inheritSpan / syn (defined after this type group); match on
+/// `e.Kind` with qualified `ExprKind.Case` patterns.
+and Expr = { Kind: ExprKind; Span: Span }
+
+/// Every pattern carries its source span. Construct via mkPat.
+and Pattern = { Kind: PatternKind; Span: Span }
 
 and ForSource =
     | ForArrays of arrays: Expr list * inClause: Expr option  // (A, B) [in virtualArray]
@@ -543,3 +569,55 @@ let rec unwrapStmt (s: Stmt) : Stmt =
     match s with
     | StmtSpanned (inner, _) -> unwrapStmt inner
     | _ -> s
+
+// ============================================================================
+// Span-carrying constructors (full-span AST)
+// ============================================================================
+
+let mkExpr (span: Span) (kind: ExprKind) : Expr = { Kind = kind; Span = span }
+let mkPat (span: Span) (kind: PatternKind) : Pattern = { Kind = kind; Span = span }
+
+/// Rewriters (Unfold/Grad/StaticEval/elaborators) synthesize nodes from an
+/// existing one: the new node inherits the source node's span.
+let inheritSpan (src: Expr) (kind: ExprKind) : Expr = { Kind = kind; Span = src.Span }
+let inheritPatSpan (src: Pattern) (kind: PatternKind) : Pattern = { Kind = kind; Span = src.Span }
+
+/// Ambient span for synthesized AST: elaborators (ml/ppl/math/rand/spectra/
+/// grad) build many nodes on behalf of ONE user declaration. The expansion
+/// entry stamps that decl's span here; `syn`/`synPat` read it, so builder
+/// helpers stay span-free. Elaboration is single-threaded (typeCheck
+/// pipeline), so a plain mutable is safe.
+let mutable synthSpan : Span = noSpan
+let syn (kind: ExprKind) : Expr = { Kind = kind; Span = synthSpan }
+let synPat (kind: PatternKind) : Pattern = { Kind = kind; Span = synthSpan }
+
+/// A struct's FULL constraint-conjunct list: the declared where-conjuncts
+/// plus the desugared field range refinements (`f: T in lo .. hi` — `..`
+/// is half-open, so `lo <= f` and `f < hi`). ONE definition shared by the
+/// type checker (registration + guard synthesis) and the static evaluator
+/// (fold-time checks) so the two worlds cannot drift.
+let structConjuncts (fields: FieldDecl list) (declared: Expr list) : Expr list =
+    let boundConjuncts =
+        fields |> List.collect (fun f ->
+            match f.Bound with
+            | Some b ->
+                (b.Lo |> Option.map (fun lo -> inheritSpan lo (ExprBinOp (Elementwise, OpLe, lo, inheritSpan lo (ExprVar f.Name)))) |> Option.toList)
+                @ (b.Hi |> Option.map (fun hi -> inheritSpan hi (ExprBinOp (Elementwise, OpLt, inheritSpan hi (ExprVar f.Name), hi))) |> Option.toList)
+            | None -> [])
+    declared @ boundConjuncts
+
+/// Union of two spans: min start, max end. noSpan is the identity; the
+/// filename comes from whichever side has one.
+let mergeSpan (a: Span) (b: Span) : Span =
+    if a.StartLine = 0 then b
+    elif b.StartLine = 0 then a
+    else
+        let sL, sC =
+            if (a.StartLine, a.StartCol) <= (b.StartLine, b.StartCol)
+            then a.StartLine, a.StartCol else b.StartLine, b.StartCol
+        let eL, eC =
+            if (a.EndLine, a.EndCol) >= (b.EndLine, b.EndCol)
+            then a.EndLine, a.EndCol else b.EndLine, b.EndCol
+        { StartLine = sL; StartCol = sC; EndLine = eL; EndCol = eC
+          File = match a.File with Some _ -> a.File | None -> b.File }
+

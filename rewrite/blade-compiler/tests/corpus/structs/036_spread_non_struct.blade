@@ -1,0 +1,8 @@
+// TEST: Struct Spread Non Struct (rejects)
+// The spread base must be a value of the SAME struct type.
+struct Point {
+    x: Float,
+    y: Float
+}
+let n = 5
+let q = Point { x = 1.0, ..n }

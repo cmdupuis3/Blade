@@ -1,0 +1,15 @@
+// TEST: Struct Update Violates Constraint (aborts)
+// A functional update is a new construction: its guard re-checks the
+// conjuncts against the mixed (provided + inherited) field values.
+// ABORT: Constraint violation in Balanced
+struct Balanced {
+    a: Int,
+    b: Int,
+    total: Int
+} where a + b == total
+function go() -> Int = {
+    let x = Balanced { a = 1, b = 2, total = 3 }
+    let y = Balanced { a = 5, ..x }
+    y.total
+}
+let t = go()

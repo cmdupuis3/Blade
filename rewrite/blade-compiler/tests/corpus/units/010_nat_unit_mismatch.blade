@@ -1,0 +1,8 @@
+// TEST: Nat Unit Mismatch (rejects)
+// Mixing differently-tagged Nats in arithmetic is a unit error (the same
+// enforcement point as Float<meters> + Float<seconds>).
+Unit angular_momentum
+Unit charge
+let l: Nat<angular_momentum> = 1
+let q: Nat<charge> = 2
+let bad = l + q

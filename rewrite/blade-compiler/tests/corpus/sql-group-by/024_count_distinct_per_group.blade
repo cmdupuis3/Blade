@@ -1,0 +1,17 @@
+// TEST: Count Distinct Per Group
+// SQL's COUNT(DISTINCT v) GROUP BY k as two-level grouping: compound
+// group_keys(k, v) buckets distinct (k, v) pairs (first-occurrence order);
+// peeling each bucket's k back out and regrouping by it counts the distinct
+// v per k via extents(g) group sizes.
+type NIdx = Idx<6>
+let k: Array<Int64 like NIdx> = [0, 0, 0, 1, 1, 1]
+let v: Array<Int64 like NIdx> = [5, 5, 7, 8, 8, 8]
+let gk2 = group_keys(k, v)
+let kg = group_by(k, gk2)
+let kk = method_for(kg) <@> lambda(g: Array<Int64 like RaggedIdx<_>>) -> g(0) |> compute
+let gk3 = group_keys(kk)
+let kg2 = group_by(kk, gk3)
+let counts = method_for(kg2) <@> lambda(g: Array<Int64 like RaggedIdx<_>>) -> extents(g) |> compute
+// distinct (k,v) pairs first-occurrence: (0,5),(0,7),(1,8) -> kk = [0,0,1]
+// EXPECT: kk = [0, 0, 1]
+// EXPECT: counts = [2, 1]

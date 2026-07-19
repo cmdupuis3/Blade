@@ -257,9 +257,9 @@ let U3 = method_for(D3) <@> lambda(d) -> (if d > 0.5 then (if d < 1.5 then 2.5 e
 let U4 = method_for(D4) <@> lambda(d) -> (if d > 0.5 then (if d < 1.5 then 2.5 else 0.25) else 0.25) |> compute
 let U5 = method_for(D5) <@> lambda(d) -> (if d > 0.5 then (if d < 1.5 then 2.5 else 0.25) else 0.25) |> compute
 let U6 = method_for(D6) <@> lambda(d) -> (if d > 0.5 then (if d < 1.5 then 2.5 else 0.25) else 0.25) |> compute
-let WA = method_for(zip(U1, U2, U3)) <@> lambda(a, b, c) -> a * b * c |> compute
-let WB = method_for(zip(U4, U5, U6)) <@> lambda(a, b, c) -> a * b * c |> compute
-let WT = method_for(zip(WA, WB)) <@> lambda(a, b) -> a * b |> compute
+let WA = U1 * U2 * U3
+let WB = U4 * U5 * U6
+let WT = WA * WB
 let wsum = reduce(method_for(WT) <@> lambda(w) -> w, (+))
 
 let mw1 = reduce(method_for(zip(WT, X1)) <@> lambda(w, x) -> w * x, (+)) / 729.0

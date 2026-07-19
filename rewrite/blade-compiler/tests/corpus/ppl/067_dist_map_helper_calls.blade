@@ -1,0 +1,21 @@
+// TEST: Dist Map Helper Calls
+import ppl as ppl
+// Map bodies may CALL other same-module top-level functions: helper calls
+// are inlined transitively (budgeted against recursion) before
+// differentiation, so `quad -> twice -> sq` presents one closed expression.
+// quad(x) = 3 x^2, so vs 039's jet: kappa_k scales by 3^k.
+// (Before the fix a coordinate-mentioning helper call was opaque to
+// diffExpr and errored as "cannot differentiate the map".)
+function sq(x) = x * x
+function twice(x) = sq(x) + sq(x)
+function quad(x) = twice(x) + sq(x)
+type TimeIdx = Idx<6>
+let A: Array<Float64 like Idx<1>, TimeIdx> = [[1.0, 2.0, 4.0, 6.0, 0.0, 3.0]]
+let xd = ppl.dist(A, 6)
+let dy = ppl.dist_map(xd, 3, quad)
+let y1 = ppl.cumulant(dy, 1)
+let y2 = ppl.cumulant(dy, 2)
+let y3 = ppl.cumulant(dy, 3)
+// EXPECT: y1 = [33.0]
+// EXPECT: y2 = [1386.0]
+// EXPECT: y3 = [58806.0]

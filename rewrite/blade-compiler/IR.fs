@@ -86,6 +86,9 @@ type IRExpr =
     | IRParallel of IRExpr * IRExpr * fusionDepth: int option
     | IRFusion of IRExpr * IRExpr
     | IRChoice of IRExpr * IRExpr
+    // <|:> allocated-fallback: left where storage holds the cell, else right.
+    // Distinct from IRChoice (value-level zero test) — see TExprFallback.
+    | IRFallback of IRExpr * IRExpr
     | IRArrayProduct of IRExpr * IRExpr
     | IRComposeObj of IRExpr * IRExpr
     | IRComposeMeth of IRExpr * IRExpr
@@ -133,6 +136,12 @@ type IRExpr =
     | IRRange of IRIndexTypeG<IRExpr> list * offset: IRExpr option
     | IRVirtualReverse of IRIndexTypeG<IRExpr>
     | IRBlocked of IRIndexTypeG<IRExpr> * blockSize: IRExpr
+    // halo<CompoundIdx<m>> window read w(o): the COORDINATE of the present
+    // cell at ordinal (window + offset). Renders via the peel-emitted local
+    // alias `<w>_hcidx` of the materialized compound index (dense halo reads
+    // stay plain `(w + o)` arithmetic and never build this node). This node
+    // is also the future carousel seam: buffered reads replace its rendering.
+    | IRHaloUnhash of window: IRExpr * offset: int64
     | IRArity of resolved: int option * paramName: string  // None = unresolved (use paramName), Some n = bound
     | IRNth
     | IRZero
@@ -205,10 +214,15 @@ type IRExpr =
     | IRAssign of target: IRExpr * value: IRExpr
     | IRForRange of varId: IRId * lo: IRExpr * hi: IRExpr * body: IRExpr
     /// Runtime constraint guard, statement-positioned:
-    /// `if (!(cond)) { std::cerr << message << std::endl; std::abort(); }`.
+    /// `if (!(cond)) { blade_rt::panic("BL8001", message, file, line); }`.
     /// Synthesized (mutual-group joint checks, struct constraint checks);
-    /// value type is unit.
-    | IRConstraintCheck of cond: IRExpr * message: string
+    /// value type is unit. The span carries the source provenance of the
+    /// guarded constraint (Stage 6 runtime traces); noSpan is allowed and the
+    /// panic emission degrades to a nullptr file / 0 line. NOTE: adding this
+    /// span to a single IRExpr case is safe (IRConstraintCheck is a
+    /// statement-positioned node, never compared in the structural `=`
+    /// fast paths that other IRExpr cases flow through).
+    | IRConstraintCheck of cond: IRExpr * message: string * span: Blade.Ast.Span
 
 /// Abstract callable in IR. The merged form of source-level functions
 /// and lambdas. Lives in the IRExpr mutual-recursion group because
@@ -1776,6 +1790,14 @@ type IRModule = {
     /// consumed at codegen to emit P0 index materialization + a dense->compact
     /// scatter. Value is (loweredDense, loweredMask). Empty for modules with none.
     CompoundInits: Map<IRId, IRExpr * IRExpr>
+    /// Block-level `let mut` bindings of ARRAY type, by binding IRId. IRLet
+    /// erases the surface mutability flag, but codegen needs it: a mut binding
+    /// initialized from an existing array (`let mut a = Z`) must DEEP-COPY the
+    /// storage — binding the Array wrapper by value shares the data pointer,
+    /// so mutations through `a` would silently corrupt `Z`. Populated during
+    /// lowering (lowerTypedBlock TStmtLet); consumed by CodeGen (fresh alloc +
+    /// pool copy) and the interpreter (store deep-copy) at the binding site.
+    MutableArrayLets: Set<IRId>
 }
 
 /// IR Program
@@ -2011,8 +2033,21 @@ let deduceOutputType
                             result <- result @ [{ rep with Rank = groupRank; Symmetry = groupSymmetry; Id = builder.FreshId() }]
                         else
                             // size-1 group: verbatim copy (preserve Rank, Symmetry,
-                            // ragged/dep structure), refresh Id only.
-                            result <- result @ [{ rep with Id = builder.FreshId() }]
+                            // ragged/dep structure), refresh Id only. EXCEPT a halo
+                            // slot: the output axis is the plain dense INTERIOR of
+                            // the wrapped index (the window structure is consumed
+                            // by iteration, like the Tag=None raveling rule above).
+                            // A compound-inner halo output in particular must NOT
+                            // stay IxKCompound — its cell count is cardinality
+                            // minus the shrink, not the mask cardinality, so it
+                            // allocates as a dense Array (extent filled from the
+                            // loop binding by CodeGen's extentsFill).
+                            let rep' =
+                                match rep.Tag with
+                                | Some t when t.StartsWith "__halowin|" ->
+                                    { rep with Tag = None; IxKind = IxKPlain }
+                                | _ -> rep
+                            result <- result @ [{ rep' with Id = builder.FreshId() }]
             result
             // Drop indices tagged as "consumed by the kernel" — but ONLY when
             // the kernel actually consumes an inner dimension (it has an
@@ -2091,6 +2126,11 @@ type ElementBinding = {
     ArrayRank: int
     /// Virtual array kind (range, reverse, or real)
     Virtual: VirtualKind
+    /// The iterated slot's Tag (None for real arrays / untagged slots).
+    /// Carries the "__halowin|" payload to the element peel, which needs to
+    /// distinguish a halo window over a compound domain (ordinal + cidx
+    /// alias) from a plain compound coordinate binding.
+    SlotTag: string option
 }
 
 /// A single loop level: how to iterate + what to peel
@@ -2878,10 +2918,32 @@ let buildLoopNestCodeGen
         // resultRank = ArrayRank - levelsConsumed relies on this level count.
         let arrRank = arrType |> Option.map (fun t -> t.IndexTypes |> List.sumBy (fun i -> match i with IxCompound -> 1 | _ -> i.Rank))
                               |> Option.defaultValue 1
+        // This level's slot within its source, by rank component (rank-1
+        // slots: component == slot position; multi-rank slots consume one
+        // component per rank, mirroring flatParamIdx below).
+        let slotAt (idxs: IRIndexType list) (rc: int) =
+            let rec go rem acc =
+                match rem with
+                | [] -> None
+                | (ix: IRIndexType) :: rest ->
+                    if rc < acc + ix.Rank then Some ix else go rest (acc + ix.Rank)
+            go idxs 0
+        let slotTag =
+            arrType
+            |> Option.bind (fun t -> slotAt t.IndexTypes rankComponent)
+            |> Option.bind (fun ix -> ix.Tag)
         let virtualKind =
             if arrayPos < arrays.Length then
                 match arrays.[arrayPos] with
-                | IRRange (_, offset) -> VirtualRange offset
+                | IRRange (_, offset) ->
+                    // Halo slot: the center's start offset rides the slot's
+                    // "__halowin|" TAG (per-slot — IRRange's single offset is
+                    // shared by all slots, which multi-slot ranges like
+                    // range<halo<Lat,..>, halo<Lon,..>> cannot use).
+                    match slotTag |> Option.bind haloStartOffsetOfTag with
+                    | Some s when s > 0L -> VirtualRange (Some (IRLit (IRLitInt s)))
+                    | Some _ -> VirtualRange offset
+                    | None -> VirtualRange offset
                 | IRVirtualReverse _ -> VirtualReverse
                 | _ -> RealArray
             else RealArray
@@ -2914,6 +2976,7 @@ let buildLoopNestCodeGen
             ArrayElemType = elemType
             ArrayRank = arrRank
             Virtual = virtualKind
+            SlotTag = slotTag
         }
     
     let bindings =
@@ -3042,7 +3105,19 @@ let buildLoopNestCodeGen
                     if isTriangular &&
                        (levelInfo.IndexSpace.Symmetry = SymAntisymmetric || isAntisymmetric)
                     then List.length deps
-                    else 0
+                    else
+                        // Compound-inner halo: the interior shrink cannot fold
+                        // into the extent (the mask cardinality is runtime),
+                        // so it rides the bound subtraction. Safe here: this
+                        // level's elements are virtual window peels, so no
+                        // array subscript couples to StrictOffset. Dense halo
+                        // slots pre-shrink their extent at typecheck and stay 0.
+                        match levelInfo.IndexSpace.Tag, levelInfo.IndexSpace.Extent with
+                        | Some tag, IRCompoundMask _ ->
+                            match haloShrinkOfTag tag with
+                            | Some s -> int s
+                            | None -> 0
+                        | _ -> 0
                 
                 // A compound VIRTUAL source (range<CompoundIdx<m>>) is ONE loop
                 // level (present-cell axis) but spans SourceRank kernel params
@@ -3160,6 +3235,7 @@ let (|ExprShape|) (expr: IRExpr) : IRExpr list * (IRExpr list -> IRExpr) =
     | IRReynolds (e, anti) -> [e], (function [e'] -> IRReynolds (e', anti) | _ -> badChildren "IRReynolds")
     | IRTranspose (e, d1, d2) -> [e], (function [e'] -> IRTranspose (e', d1, d2) | _ -> badChildren "IRTranspose")
     | IRDecompact (e, d) -> [e], (function [e'] -> IRDecompact (e', d) | _ -> badChildren "IRDecompact")
+    | IRHaloUnhash (w, o) -> [w], (function [w'] -> IRHaloUnhash (w', o) | _ -> badChildren "IRHaloUnhash")
     | IRArrayNegate e -> [e], (function [e'] -> IRArrayNegate e' | _ -> badChildren "IRArrayNegate")
     | IRArrayConjugate e -> [e], (function [e'] -> IRArrayConjugate e' | _ -> badChildren "IRArrayConjugate")
     | IRReverse (e, d) -> [e], (function [e'] -> IRReverse (e', d) | _ -> badChildren "IRReverse")
@@ -3180,6 +3256,7 @@ let (|ExprShape|) (expr: IRExpr) : IRExpr list * (IRExpr list -> IRExpr) =
     | IRParallel (a, b, d) -> [a; b], (function [a'; b'] -> IRParallel (a', b', d) | _ -> badChildren "IRParallel")
     | IRFusion (a, b) -> [a; b], (function [a'; b'] -> IRFusion (a', b') | _ -> badChildren "IRFusion")
     | IRChoice (a, b) -> [a; b], (function [a'; b'] -> IRChoice (a', b') | _ -> badChildren "IRChoice")
+    | IRFallback (a, b) -> [a; b], (function [a'; b'] -> IRFallback (a', b') | _ -> badChildren "IRFallback")
     | IRArrayProduct (a, b) -> [a; b], (function [a'; b'] -> IRArrayProduct (a', b') | _ -> badChildren "IRArrayProduct")
     | IRComposeObj (a, b) -> [a; b], (function [a'; b'] -> IRComposeObj (a', b') | _ -> badChildren "IRComposeObj")
     | IRComposeMeth (a, b) -> [a; b], (function [a'; b'] -> IRComposeMeth (a', b') | _ -> badChildren "IRComposeMeth")
@@ -3199,7 +3276,7 @@ let (|ExprShape|) (expr: IRExpr) : IRExpr list * (IRExpr list -> IRExpr) =
     | IRProdSum args -> args, (fun args' -> IRProdSum args')
     | IRPolyIndex (p, i) -> [p; i], (function [p'; i'] -> IRPolyIndex (p', i') | _ -> badChildren "IRPolyIndex")
     | IRAssign (t, v) -> [t; v], (function [t'; v'] -> IRAssign (t', v') | _ -> badChildren "IRAssign")
-    | IRConstraintCheck (c, msg) -> [c], (function [c'] -> IRConstraintCheck (c', msg) | _ -> badChildren "IRConstraintCheck")
+    | IRConstraintCheck (c, msg, sp) -> [c], (function [c'] -> IRConstraintCheck (c', msg, sp) | _ -> badChildren "IRConstraintCheck")
     | IRCurry (arr, idx, r) -> [arr; idx], (function [arr'; idx'] -> IRCurry (arr', idx', r) | _ -> badChildren "IRCurry")
     | IRGram (l, r, same) -> [l; r], (function [l'; r'] -> IRGram (l', r', same) | _ -> badChildren "IRGram")
     | IRLet (id, v, b) -> [v; b], (function [v'; b'] -> IRLet (id, v', b') | _ -> badChildren "IRLet")
@@ -4322,6 +4399,9 @@ let (|TypeVia|_|) (expr: IRExpr) : IRExpr option =
     | IRCompute a | IRPure a
     // Control flow: the type of the canonical branch/body.
     | IRLet (_, _, a) | IRIf (_, a, _) | IRGuard (_, a) | IRChoice (a, _)
+    // <|:> result is the dense expansion; the RIGHT side already carries the
+    // dense type (compound-left widens to it, dense-left unified with it).
+    | IRFallback (_, a)
     // @>> composition: the right side's type.
     | IRComposeMeth (_, a) ->
         Some a
@@ -4663,6 +4743,9 @@ let rec typeOf (expr: IRExpr) : IRType =
                 let s1 = { pOuter with Rank = 1; Symmetry = SymNone }
                 mkArrayLike { la with ElemType = outElem; IndexTypes = [s0; s1] }
          | t, _ -> t)
+    | IRHaloUnhash _ ->
+        // A window neighbor read yields the inner index's coordinate: int64.
+        IRTScalar ETInt64
     | IRReduce (arr, _, _) ->
         // Reduces innermost dim by 1. For rank-1 input, result is a scalar.
         (match typeOf arr with
@@ -4713,7 +4796,7 @@ let rec typeOf (expr: IRExpr) : IRType =
         unreachableTyping "CarriedType" expr
     | IRSort _ | IRArrayNegate _ | IRArrayConjugate _ | IRIntersect _
     | IRUnion _ | IRUnique _ | IRCompute _ | IRPure _ | IRLet _ | IRIf _
-    | IRGuard _ | IRChoice _ | IRComposeMeth _ | IRMatch _ ->
+    | IRGuard _ | IRChoice _ | IRFallback _ | IRComposeMeth _ | IRMatch _ ->
         unreachableTyping "TypeVia" expr
     | IRArity _ | IRNth | IRRank _ | IRExtent _ | IRRaggedLookup _
     | IRCompoundMask _ | IRCompoundProject _ | IROpaqueExtent | IRRange _ ->
@@ -4748,6 +4831,23 @@ let isInlineForm (e: IRExpr) : bool =
     | IRGroupBy _ | IRGroupKeys _ | IRTranspose _ | IRDecompact _ | IRArrayNegate _ | IRArrayConjugate _
     | IRReduceCompute _ -> true
     | IRCompute (IRApplyCombinator _) -> true
+    | _ -> false
+
+/// A loop-form array operand (in a method_for / apply-combinator / compose-apply
+/// `Arrays` list) that is itself a forced or inline elementwise computation —
+/// e.g. the left input `A * B` of a chained positional op `A * B * C`, which
+/// lowers to `IRCompute(IRApplyCombinator …)`. Unlike the blessed inline forms
+/// (mask/intersect/union/unique), these have NO codegen-side auto-materialize
+/// path, so the loop-nest builder names them `arr0` and reads an array it never
+/// declared (`error: 'arr0' was not declared in this scope`). They must be
+/// hoisted to their own let-RHS so codegen materializes each into a real temp
+/// before the outer loop consumes it — exactly as writing the intermediate
+/// `let` by hand would. Deliberately narrow: it does NOT list the blessed inline
+/// forms, so their existing auto-materialize path stays untouched.
+let private isNestedLoopComputeArg (e: IRExpr) : bool =
+    match e with
+    | IRCompute _ -> true
+    | IRApp (IRObjectFor _, _, _) -> true
     | _ -> false
 
 /// Path B / Phase D: peel any IRLet chain that descendant lifts produced.
@@ -4957,6 +5057,9 @@ let rec liftExpr (builder: IRBuilder) (expr: IRExpr) : IRExpr =
         let arr' = liftExpr builder arr
         let (binds, arrFinal) = liftChild builder arr'
         wrapLets binds (IRDecompact (arrFinal, d))
+    | IRHaloUnhash (w, o) ->
+        // Scalar coordinate read; the window is a param var — nothing to lift.
+        IRHaloUnhash (liftExpr builder w, o)
     | IRGram (l, r, s) ->
         let l' = liftExpr builder l
         let r' = liftExpr builder r
@@ -5084,12 +5187,24 @@ let rec liftExpr (builder: IRBuilder) (expr: IRExpr) : IRExpr =
     | IRGuard (c, b) -> IRGuard (liftExpr builder c, liftExpr builder b)
     | IRReplicate (c, b) -> IRReplicate (liftExpr builder c, liftExpr builder b)
     | IRPure e -> IRPure (liftExpr builder e)
-    | IRCompute e -> IRCompute (liftExpr builder e)
+    | IRCompute e ->
+        // Drain any let-chain that lifting the inner expression produced OUT
+        // of the IRCompute wrapper. A hoisted array operand (e.g. the inner
+        // `A * B` of `A * B * C`, lifted from the wrapped combinator's Arrays)
+        // must land at an enclosing statement position: genComputeBinding has
+        // no IRLet arm, so a let left inside IRCompute falls to the scalar
+        // exprToCpp path and emits BLADE_CODEGEN_ERROR_UNEVALUATED_COMPUTATION.
+        // Peeling it out yields `let __t = A * B in (… |> compute)`, which
+        // genLetChainBinding materializes as ordered statement bindings.
+        let e' = liftExpr builder e
+        let (peeled, inner) = peelLetChain e'
+        wrapLets peeled (IRCompute inner)
     | IRReynolds (e, a) -> IRReynolds (liftExpr builder e, a)
     | IRBind (c, k) -> IRBind (liftExpr builder c, liftExpr builder k)
     | IRParallel (a, b, d) -> IRParallel (liftExpr builder a, liftExpr builder b, d)
     | IRFusion (a, b) -> IRFusion (liftExpr builder a, liftExpr builder b)
     | IRChoice (a, b) -> IRChoice (liftExpr builder a, liftExpr builder b)
+    | IRFallback (a, b) -> IRFallback (liftExpr builder a, liftExpr builder b)
     | IRArrayProduct (a, b) -> IRArrayProduct (liftExpr builder a, liftExpr builder b)
     | IRComposeObj (a, b) -> IRComposeObj (liftExpr builder a, liftExpr builder b)
     | IRComposeMeth (a, b) -> IRComposeMeth (liftExpr builder a, liftExpr builder b)
@@ -5100,7 +5215,7 @@ let rec liftExpr (builder: IRBuilder) (expr: IRExpr) : IRExpr =
     | IRCompoundMask mk -> IRCompoundMask (liftExpr builder mk)
     | IRCompoundProject (parent, plen) -> IRCompoundProject (liftExpr builder parent, plen)
     | IRAssign (t, v) -> IRAssign (t, liftExpr builder v)
-    | IRConstraintCheck (c, msg) -> IRConstraintCheck (liftExpr builder c, msg)
+    | IRConstraintCheck (c, msg, sp) -> IRConstraintCheck (liftExpr builder c, msg, sp)
     | IRForRange (vid, lo, hi, body) ->
         IRForRange (vid, liftExpr builder lo, liftExpr builder hi, liftExpr builder body)
     | IRBlocked (it, bs) -> IRBlocked (it, liftExpr builder bs)
@@ -5115,7 +5230,7 @@ let rec liftExpr (builder: IRBuilder) (expr: IRExpr) : IRExpr =
         let (binds, arraysFinal) =
             arrays' |> List.fold (fun (accB, accA) a ->
                 let (peeled, inner) = peelLetChain a
-                if isArrayFieldAccess inner then
+                if isArrayFieldAccess inner || isNestedLoopComputeArg inner then
                     let id = builder.FreshId()
                     let ty = typeOf inner
                     (accB @ peeled @ [(id, ty, inner)], accA @ [IRVar (id, ty)])
@@ -5131,7 +5246,7 @@ let rec liftExpr (builder: IRBuilder) (expr: IRExpr) : IRExpr =
         let (binds, arraysFinal) =
             arrays' |> List.fold (fun (accB, accA) a ->
                 let (peeled, inner) = peelLetChain a
-                if isArrayFieldAccess inner then
+                if isArrayFieldAccess inner || isNestedLoopComputeArg inner then
                     let id = builder.FreshId()
                     let ty = typeOf inner
                     (accB @ peeled @ [(id, ty, inner)], accA @ [IRVar (id, ty)])
@@ -5147,7 +5262,7 @@ let rec liftExpr (builder: IRBuilder) (expr: IRExpr) : IRExpr =
         let (binds, arraysFinal) =
             arrays' |> List.fold (fun (accB, accA) a ->
                 let (peeled, inner) = peelLetChain a
-                if isArrayFieldAccess inner then
+                if isArrayFieldAccess inner || isNestedLoopComputeArg inner then
                     let id = builder.FreshId()
                     let ty = typeOf inner
                     (accB @ peeled @ [(id, ty, inner)], accA @ [IRVar (id, ty)])
@@ -5488,13 +5603,15 @@ let rec ppIRExprWithNames (names: Map<int, string>) indent (expr: IRExpr) =
     | IRPolyIndex (pack, idx) -> sprintf "%s[%s]" (pp pack) (pp idx)
     | IRChoice (a, b) ->
         sprintf "(%s <|> %s)" (pp a) (pp b)
+    | IRFallback (a, b) ->
+        sprintf "(%s <|:> %s)" (pp a) (pp b)
     | IRCompose (f, g) ->
         sprintf "(%s >> %s)" (pp f) (pp g)
     | IRComposeObj (f, g) ->
         sprintf "(%s >>@ %s)" (pp f) (pp g)
     | IRComposeMeth (f, g) ->
         sprintf "(%s @>> %s)" (pp f) (pp g)
-    | IRConstraintCheck (c, msg) ->
+    | IRConstraintCheck (c, msg, _) ->
         sprintf "check(%s, \"%s\")" (pp c) msg
     | IRAssign (target, v) ->
         let targetStr =
@@ -5967,6 +6084,7 @@ let validateModule (externalIds: Set<IRId>) (modul: IRModule) : IRValidationErro
         | IRSort (a, k) -> checkScope scope ctx a; checkScope scope ctx k
         | IRTranspose (a, _, _) -> checkScope scope ctx a
         | IRDecompact (a, _) -> checkScope scope ctx a
+        | IRHaloUnhash (w, _) -> checkScope scope ctx w
         | IRArrayNegate a -> checkScope scope ctx a
         | IRArrayConjugate a -> checkScope scope ctx a
         | IRReduce (a, k, i) ->
@@ -5983,13 +6101,14 @@ let validateModule (externalIds: Set<IRId>) (modul: IRModule) : IRValidationErro
         | IRParallel (a, b, _) -> checkScope scope ctx a; checkScope scope ctx b
         | IRFusion (a, b) -> checkScope scope ctx a; checkScope scope ctx b
         | IRChoice (a, b) -> checkScope scope ctx a; checkScope scope ctx b
+        | IRFallback (a, b) -> checkScope scope ctx a; checkScope scope ctx b
         | IRBind (c, k) -> checkScope scope ctx c; checkScope scope ctx k
         | IRFunctorMap (f, c) -> checkScope scope ctx f; checkScope scope ctx c
         | IRGuard (c, b) -> checkScope scope ctx c; checkScope scope ctx b
         | IRSequence es -> es |> List.iter (checkScope scope ctx)
         | IRPure e -> checkScope scope ctx e
         | IRAssign (t, v) -> checkScope scope ctx t; checkScope scope ctx v
-        | IRConstraintCheck (c, _) -> checkScope scope ctx c
+        | IRConstraintCheck (c, _, _) -> checkScope scope ctx c
         | _ -> ()  // Literals, params, etc. — no var refs
     
     let mutable cumulativeScope = moduleIds
@@ -6104,6 +6223,7 @@ let validateModule (externalIds: Set<IRId>) (modul: IRModule) : IRValidationErro
         | IRParallel (a, b, _) -> checkApplyInfo ctx a; checkApplyInfo ctx b
         | IRFusion (a, b) -> checkApplyInfo ctx a; checkApplyInfo ctx b
         | IRChoice (a, b) -> checkApplyInfo ctx a; checkApplyInfo ctx b
+        | IRFallback (a, b) -> checkApplyInfo ctx a; checkApplyInfo ctx b
         | IRBind (c, k) -> checkApplyInfo ctx c; checkApplyInfo ctx k
         | IRFunctorMap (f, c) -> checkApplyInfo ctx f; checkApplyInfo ctx c
         | IRGuard (_, b) -> checkApplyInfo ctx b

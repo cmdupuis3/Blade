@@ -1,0 +1,22 @@
+// TEST: Unit Block Let Annotation
+// Block-scoped let annotations are enforced via the shared annotation
+// handler (they were previously IGNORED — inferBlock called plain
+// inferExpr): the mut accumulator carries Float<meters>, each update
+// composes velocity * seconds = meters against it, and the block result
+// keeps the signature.
+Unit meters
+Unit seconds
+Unit velocity = meters / seconds
+let v: Float<velocity> = 5.0
+let dt: Float<seconds> = 0.5
+let dist = {
+    let mut x: Float<meters> = 0.0
+    for i in 0..4 {
+        x += v * dt
+    }
+    x
+}
+let m: Float<meters> = 1.0
+let probe = dist + m
+// EXPECT: dist = 10
+// EXPECT: probe = 11

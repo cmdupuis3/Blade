@@ -1,4 +1,4 @@
-// TEST: Physics -- The Ehrenfest Loop: Bohr Frequencies From Expectation Data
+﻿// TEST: Physics -- The Ehrenfest Loop: Bohr Frequencies From Expectation Data
 // ============================================================================
 // Review item 7 -- the arc's only never-closed loop -- asked for the quantum
 // side of EDMD: Ehrenfest makes d<A>/dt a linear flow on expectation values,
@@ -10,7 +10,7 @@
 // (ex 42's move). A low wavepacket's <x(t)> is generated in-language from
 // the certified spectrum (400 samples at delta = 0.35), delay-embedded
 // (D = 10), and the transfer operator K = C1 C0^{-1} is fitted and
-// diagonalized: its eigenvalues are e^{±i (E_m - E_n) delta} -- the BOHR
+// diagonalized: its eigenvalues are e^{Â±i (E_m - E_n) delta} -- the BOHR
 // GAPS, on the unit circle.
 // FINDINGS (pinned):
 //   * THE BOHR LINES, ON THE CIRCLE. The two dominant eigenvalue pairs
@@ -130,20 +130,15 @@ let SIGC = {
 }
 
 // ---- delay-embedded EDMD, quantum ----
-let STQ = {
-    let mut st = [0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0]
-    for t in 9..399 {
-        for i in 0..10 {
-            for j in 0..10 {
-                st(i * 10 + j) = st(i * 10 + j) + SIGQ(t - i) * SIGQ(t - j)
-                st(100 + i * 10 + j) = st(100 + i * 10 + j) + SIGQ(t + 1 - i) * SIGQ(t - j)
-            }
-        }
-    }
-    st
-}
-let GQ: Array<Float64 like Idx<10>, Idx<10>> = method_for(range<Idx<10>>) <*> method_for(range<Idx<10>>) <@> lambda(i: Int64, j: Int64) -> STQ(i * 10 + j) |> compute
-let AQ = method_for(range<Idx<10>>) <*> method_for(range<Idx<10>>) <@> lambda(i: Int64, j: Int64) -> STQ(100 + i * 10 + j) |> compute
+// The 10-delay embedding is a halo view: reach [-9, +1] shrinks the 400-sample
+// signal to its 390-cell interior (t = 9..398, exactly the old hand-loop
+// bounds), and embedding row i reads the window at offset -i (the one-step
+// lead copy at 1 - i). The Gram and cross-Gram are then row-pair prodsum
+// sweeps -- no flat stat vector, no ring reads, no pack/unpack offsets.
+let EQ = method_for(range<Idx<10>, halo<Idx<400>, [-9, 1]>>) <@> lambda(i, w) -> SIGQ(w(0 - i)) |> compute
+let E1Q = method_for(range<Idx<10>, halo<Idx<400>, [-9, 1]>>) <@> lambda(i, w) -> SIGQ(w(1 - i)) |> compute
+let GQ: Array<Float64 like Idx<10>, Idx<10>> = method_for(EQ, EQ) <@> lambda(u: Array<Float64 like Idx<390>>, v: Array<Float64 like Idx<390>>) -> prodsum(u, v) |> compute
+let AQ = method_for(E1Q, EQ) <@> lambda(u: Array<Float64 like Idx<390>>, v: Array<Float64 like Idx<390>>) -> prodsum(u, v) |> compute
 let (QGQ, LGQ) = m.eigh(GQ)
 // spectrally truncated inverse: directions below resolution go to zero, not leakage
 let QDQ = method_for(range<Idx<10>>) <*> method_for(range<Idx<10>>) <@> lambda(i: Int64, k: Int64) -> QGQ(i, k) * (if LGQ(k) > LGQ(0) * 0.000000001 then 1.0 / LGQ(k) else 0.0) |> compute
@@ -152,20 +147,11 @@ let KMQ: Array<Float64 like Idx<10>, Idx<10>> = method_for(AQ, GIQ) <@> lambda(u
 let (REQ, IMQ) = m.eig(KMQ)
 
 // ---- delay-embedded EDMD, classical ----
-let STC = {
-    let mut st = [0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0]
-    for t in 9..399 {
-        for i in 0..10 {
-            for j in 0..10 {
-                st(i * 10 + j) = st(i * 10 + j) + SIGC(t - i) * SIGC(t - j)
-                st(100 + i * 10 + j) = st(100 + i * 10 + j) + SIGC(t + 1 - i) * SIGC(t - j)
-            }
-        }
-    }
-    st
-}
-let GC: Array<Float64 like Idx<10>, Idx<10>> = method_for(range<Idx<10>>) <*> method_for(range<Idx<10>>) <@> lambda(i: Int64, j: Int64) -> STC(i * 10 + j) |> compute
-let AC = method_for(range<Idx<10>>) <*> method_for(range<Idx<10>>) <@> lambda(i: Int64, j: Int64) -> STC(100 + i * 10 + j) |> compute
+// Same halo embedding over the classical ensemble mean.
+let EC = method_for(range<Idx<10>, halo<Idx<400>, [-9, 1]>>) <@> lambda(i, w) -> SIGC(w(0 - i)) |> compute
+let E1C = method_for(range<Idx<10>, halo<Idx<400>, [-9, 1]>>) <@> lambda(i, w) -> SIGC(w(1 - i)) |> compute
+let GC: Array<Float64 like Idx<10>, Idx<10>> = method_for(EC, EC) <@> lambda(u: Array<Float64 like Idx<390>>, v: Array<Float64 like Idx<390>>) -> prodsum(u, v) |> compute
+let AC = method_for(E1C, EC) <@> lambda(u: Array<Float64 like Idx<390>>, v: Array<Float64 like Idx<390>>) -> prodsum(u, v) |> compute
 let (QGC, LGC) = m.eigh(GC)
 // spectrally truncated inverse: directions below resolution go to zero, not leakage
 let QDC = method_for(range<Idx<10>>) <*> method_for(range<Idx<10>>) <@> lambda(i: Int64, k: Int64) -> QGC(i, k) * (if LGC(k) > LGC(0) * 0.000000001 then 1.0 / LGC(k) else 0.0) |> compute

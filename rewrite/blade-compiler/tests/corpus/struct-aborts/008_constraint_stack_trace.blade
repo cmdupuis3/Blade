@@ -1,0 +1,18 @@
+// TEST: Struct Constraint Stack Trace (aborts)
+// A violation two calls deep must print the coded panic, the source
+// location of the violated constraint, and the Blade call stack
+// innermost-first (shadow-stack frames from blade_runtime.hpp).
+// ABORT: error[BL8001]: Constraint violation in Pos
+// ABORT: at inner
+// ABORT: at outer
+struct Pos {
+    v: Float64
+} where v >= 0.0
+function inner(x: Float64) -> Float64 = {
+    let p = Pos { v = x }
+    p.v
+}
+function outer(x: Float64) -> Float64 = {
+    inner(x - 10.0)
+}
+let r = outer(3.0)

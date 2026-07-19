@@ -1,0 +1,10 @@
+// TEST: Unit Broadcast Scalar Mismatch (rejects)
+// Array + mismatched unitful scalar broadcast is a unit error — the
+// array-scalar kernel-map path judges the array's ELEMENT units against
+// the scalar operand at synthesis time.
+Unit meters
+Unit seconds
+type SIdx = Idx<2>
+let A: Array<Float<meters> like SIdx> = [1.0, 2.0]
+let t: Float<seconds> = 3.0
+let bad = A + t

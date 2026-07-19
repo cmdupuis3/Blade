@@ -1,0 +1,13 @@
+// TEST: Former Over Computed Array (Unannotated)
+import ppl as ppl
+// A PPL former consuming a COMPUTED array — the source is a halo-pair built
+// by method_for(range<..., halo<...>>), not a literal-backed let, and carries
+// NO annotation. The formers now infer the declared shape from the iteration
+// space itself (one axis per range slot, halo slots shrunk to the interior:
+// Idx<2> x Idx<6> here). Before the fix this was rejected with BL5100
+// ("must be a module-level let with an Array<...> annotation").
+// Values are the lag-2 pair statistics of X: row0 = X[0..5], row1 = X[2..7].
+let X: Array<Float64 like Idx<8>> = [1.0, 3.0, 2.0, 5.0, 4.0, 7.0, 6.0, 9.0]
+let BH = method_for(range<Idx<2>, halo<Idx<8>, [2]>>) <@> lambda(v, w) -> if v < 1 then X(w(0)) else X(w(2)) |> compute
+let ch = ppl.cumulants(BH, 2)
+// EXPECT: ch = [3.888888888888889, 4.333333333333334, 4.916666666666667]

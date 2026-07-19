@@ -1,0 +1,15 @@
+// TEST: Unit Array Elementwise Algebra
+// Elementwise * composes unit signatures like the scalar path does:
+// meters-array * meters-array has meters^2 elements, which are compatible
+// with a declared area unit. (Before the synthesis-site unit stamping,
+// the result silently kept the LEFT operand's unit — bare meters.)
+Unit meters
+Unit area = meters^2
+type SIdx = Idx<3>
+let A: Array<Float<meters> like SIdx> = [1.0, 2.0, 3.0]
+let B: Array<Float<meters> like SIdx> = [4.0, 5.0, 6.0]
+let C = A * B
+let ar: Float<area> = 100.0
+let total = C((0 : SIdx)) + C((1 : SIdx)) + C((2 : SIdx)) + ar
+// EXPECT: C = [4.0, 10.0, 18.0]
+// EXPECT: total = 132

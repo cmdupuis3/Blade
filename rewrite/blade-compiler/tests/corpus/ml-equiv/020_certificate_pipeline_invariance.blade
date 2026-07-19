@@ -1,0 +1,28 @@
+// TEST: ML Equiv Certificate Pipeline Invariance
+import ml as ml
+// ============================================================================
+// The full certified pipeline (002) has an INVARIANT readout (norms), so
+// its certificate reads: pipe(R·p, w) = pipe(p, w). Both evaluations pinned
+// from dump-equiv (oracle residual 3.6e-15). No D matrices needed — the
+// input rotates exactly, the output must not move.
+// ============================================================================
+let static SH2 = ml.sh_spec(2)
+let static CFG = (SH2, SH2, SH2)
+let static WTP = ml.tp_weight_dim(CFG)
+let static WL = ml.linear_weight_dim(SH2, SH2)
+
+function pipe(px: Float, py: Float, pz: Float, wtp: Array<Float like Idx<WTP>>, wl: Array<Float like Idx<WL>>) where ml.equiv(O3) -> Array<Float like Idx<3>> = {
+    let sh = ml.y_to(2, px, py, pz)
+    let t = ml.tensor_product(CFG, sh, sh, wtp)
+    let g = ml.gated(SH2, t)
+    let lo = ml.linear(SH2, SH2, wl, g)
+    ml.norms(SH2, lo)
+}
+
+let wtpv = [0.1, 0.2, 0.30000000000000004, 0.4, 0.5, 0.6000000000000001, 0.7000000000000001, 0.8, 0.9, 1.0, 1.1]
+let wlv = [0.5, -0.7, 0.25]
+
+let base_out = pipe(1.0, 2.0, 3.0, wtpv, wlv)
+// EXPECT: base_out = [16.95974840380404, 11.219441716877398, 10.36902564919477]
+let rot_out = pipe(1.1033930349597858, 3.5442936518977075, 0.4695810042152966, wtpv, wlv)
+// EXPECT: rot_out = [16.959748403804042, 11.219441716877398, 10.36902564919477]

@@ -62,65 +62,66 @@ let rec mapExprPre (f: Expr -> Expr option) (e: Expr) : Expr =
     | Some r -> r
     | None ->
         let g = mapExprPre f
-        match e with
-        | ExprLit _ | ExprWildcard | ExprVar _ | ExprQualified _ -> e
-        | ExprBinOp (m, op, l, r) -> ExprBinOp (m, op, g l, g r)
-        | ExprUnaryOp (op, x) -> ExprUnaryOp (op, g x)
-        | ExprApp (fn, args) -> ExprApp (g fn, List.map g args)
-        | ExprTupleIndex (t, i) -> ExprTupleIndex (g t, g i)
-        | ExprField (x, id) -> ExprField (g x, id)
-        | ExprLambda (ps, wc, body) -> ExprLambda (ps, wc, g body)
-        | ExprLet (b, body) -> ExprLet ({ b with Value = g b.Value }, g body)
-        | ExprMatch (scrut, cases) ->
-            ExprMatch (g scrut, cases |> List.map (fun c ->
-                { c with Guard = Option.map g c.Guard; Body = g c.Body }))
-        | ExprIf (c, t, el) -> ExprIf (g c, g t, g el)
-        | ExprTuple es -> ExprTuple (List.map g es)
-        | ExprArrayLit es -> ExprArrayLit (List.map g es)
-        | ExprBlock (stmts, fin) -> ExprBlock (stmts |> List.map (mapStmtPre f), Option.map g fin)
-        | ExprMethodFor arrays -> ExprMethodFor (List.map g arrays)
-        | ExprObjectFor k -> ExprObjectFor (g k)
-        | ExprRange _ | ExprReverse _ -> e
-        | ExprDotDot (lo, hi) -> ExprDotDot (g lo, g hi)
-        | ExprBlocked (ty, x) -> ExprBlocked (ty, g x)
-        | ExprZip es -> ExprZip (List.map g es)
-        | ExprAlign (es, spec) -> ExprAlign (List.map g es, spec)
-        | ExprStack es -> ExprStack (List.map g es)
-        | ExprPure x -> ExprPure (g x)
-        | ExprCompute x -> ExprCompute (g x)
-        | ExprRead x -> ExprRead (g x)
-        | ExprGuard (c, b) -> ExprGuard (g c, g b)
-        | ExprSequence es -> ExprSequence (List.map g es)
-        | ExprReplicate (c, b) -> ExprReplicate (g c, g b)
-        | ExprReynolds (k, anti) -> ExprReynolds (g k, anti)
-        | ExprTyped (x, ty) -> ExprTyped (g x, ty)
-        | ExprArity _ | ExprNth | ExprZero -> e
-        | ExprRank x -> ExprRank (g x)
-        | ExprMask (a, p) -> ExprMask (g a, g p)
-        | ExprCompound (d, m) -> ExprCompound (g d, g m)
-        | ExprIntersect (a, b) -> ExprIntersect (g a, g b)
-        | ExprUnion (a, b) -> ExprUnion (g a, g b)
-        | ExprUnique a -> ExprUnique (g a)
-        | ExprContains (a, v) -> ExprContains (g a, g v)
-        | ExprGroupBy (v, gk) -> ExprGroupBy (g v, g gk)
-        | ExprGroupKeys ks -> ExprGroupKeys (List.map g ks)
-        | ExprSort (a, k) -> ExprSort (g a, g k)
-        | ExprReduce (a, k, init) -> ExprReduce (g a, g k, Option.map g init)
-        | ExprTranspose (a, d1, d2) -> ExprTranspose (g a, d1, d2)
-        | ExprDecompact (a, d) -> ExprDecompact (g a, d)
-        | ExprGram (l, r) -> ExprGram (g l, g r)
-        | ExprExtents a -> ExprExtents (g a)
-        | ExprStruct (id, fields) -> ExprStruct (id, fields |> List.map (fun (n, x) -> (n, g x)))
-        | ExprSection _ -> e
-        | ExprPartialApp (op, x, left) -> ExprPartialApp (op, g x, left)
-        | ExprAssign (l, r) -> ExprAssign (g l, g r)
-        | ExprFor (src, wcs, kern) ->
+        let re k = inheritSpan e k
+        match e.Kind with
+        | ExprKind.ExprLit _ | ExprKind.ExprWildcard | ExprKind.ExprVar _ | ExprKind.ExprQualified _ -> e
+        | ExprKind.ExprBinOp (m, op, l, r) -> re (ExprBinOp (m, op, g l, g r))
+        | ExprKind.ExprUnaryOp (op, x) -> re (ExprUnaryOp (op, g x))
+        | ExprKind.ExprApp (fn, args) -> re (ExprApp (g fn, List.map g args))
+        | ExprKind.ExprTupleIndex (t, i) -> re (ExprTupleIndex (g t, g i))
+        | ExprKind.ExprField (x, id) -> re (ExprField (g x, id))
+        | ExprKind.ExprLambda (ps, wc, body) -> re (ExprLambda (ps, wc, g body))
+        | ExprKind.ExprLet (b, body) -> re (ExprLet ({ b with Value = g b.Value }, g body))
+        | ExprKind.ExprMatch (scrut, cases) ->
+            re (ExprMatch (g scrut, cases |> List.map (fun c ->
+                { c with Guard = Option.map g c.Guard; Body = g c.Body })))
+        | ExprKind.ExprIf (c, t, el) -> re (ExprIf (g c, g t, g el))
+        | ExprKind.ExprTuple es -> re (ExprTuple (List.map g es))
+        | ExprKind.ExprArrayLit es -> re (ExprArrayLit (List.map g es))
+        | ExprKind.ExprBlock (stmts, fin) -> re (ExprBlock (stmts |> List.map (mapStmtPre f), Option.map g fin))
+        | ExprKind.ExprMethodFor arrays -> re (ExprMethodFor (List.map g arrays))
+        | ExprKind.ExprObjectFor k -> re (ExprObjectFor (g k))
+        | ExprKind.ExprRange _ | ExprKind.ExprReverse _ | ExprKind.ExprHalo _ -> e
+        | ExprKind.ExprDotDot (lo, hi) -> re (ExprDotDot (g lo, g hi))
+        | ExprKind.ExprBlocked (ty, x) -> re (ExprBlocked (ty, g x))
+        | ExprKind.ExprZip es -> re (ExprZip (List.map g es))
+        | ExprKind.ExprAlign (es, spec) -> re (ExprAlign (List.map g es, spec))
+        | ExprKind.ExprStack es -> re (ExprStack (List.map g es))
+        | ExprKind.ExprPure x -> re (ExprPure (g x))
+        | ExprKind.ExprCompute x -> re (ExprCompute (g x))
+        | ExprKind.ExprRead x -> re (ExprRead (g x))
+        | ExprKind.ExprGuard (c, b) -> re (ExprGuard (g c, g b))
+        | ExprKind.ExprSequence es -> re (ExprSequence (List.map g es))
+        | ExprKind.ExprReplicate (c, b) -> re (ExprReplicate (g c, g b))
+        | ExprKind.ExprReynolds (k, anti) -> re (ExprReynolds (g k, anti))
+        | ExprKind.ExprTyped (x, ty) -> re (ExprTyped (g x, ty))
+        | ExprKind.ExprArity _ | ExprKind.ExprNth | ExprKind.ExprZero -> e
+        | ExprKind.ExprRank x -> re (ExprRank (g x))
+        | ExprKind.ExprMask (a, p) -> re (ExprMask (g a, g p))
+        | ExprKind.ExprCompound (d, m) -> re (ExprCompound (g d, g m))
+        | ExprKind.ExprIntersect (a, b) -> re (ExprIntersect (g a, g b))
+        | ExprKind.ExprUnion (a, b) -> re (ExprUnion (g a, g b))
+        | ExprKind.ExprUnique a -> re (ExprUnique (g a))
+        | ExprKind.ExprContains (a, v) -> re (ExprContains (g a, g v))
+        | ExprKind.ExprGroupBy (v, gk) -> re (ExprGroupBy (g v, g gk))
+        | ExprKind.ExprGroupKeys ks -> re (ExprGroupKeys (List.map g ks))
+        | ExprKind.ExprSort (a, k) -> re (ExprSort (g a, g k))
+        | ExprKind.ExprReduce (a, k, init) -> re (ExprReduce (g a, g k, Option.map g init))
+        | ExprKind.ExprTranspose (a, d1, d2) -> re (ExprTranspose (g a, d1, d2))
+        | ExprKind.ExprDecompact (a, d) -> re (ExprDecompact (g a, d))
+        | ExprKind.ExprGram (l, r) -> re (ExprGram (g l, g r))
+        | ExprKind.ExprExtents a -> re (ExprExtents (g a))
+        | ExprKind.ExprStruct (id, fields, spread) -> re (ExprStruct (id, fields |> List.map (fun (n, x) -> (n, g x)), spread |> Option.map g))
+        | ExprKind.ExprSection _ -> e
+        | ExprKind.ExprPartialApp (op, x, left) -> re (ExprPartialApp (op, g x, left))
+        | ExprKind.ExprAssign (l, r) -> re (ExprAssign (g l, g r))
+        | ExprKind.ExprFor (src, wcs, kern) ->
             let src' =
                 match src with
                 | ForArrays (arrays, inOpt) -> ForArrays (List.map g arrays, Option.map g inOpt)
                 | ForKernel k -> ForKernel (g k)
-            ExprFor (src', wcs, Option.map g kern)
-        | ExprStatic x -> ExprStatic (g x)
+            re (ExprFor (src', wcs, Option.map g kern))
+        | ExprKind.ExprStatic x -> re (ExprStatic (g x))
 
 and mapStmtPre (f: Expr -> Expr option) (s: Stmt) : Stmt =
     let g = mapExprPre f
@@ -137,7 +138,7 @@ and mapStmtPre (f: Expr -> Expr option) (s: Stmt) : Stmt =
 let private collectAllVars (e: Expr) : Set<string> =
     let mutable seen = Set.empty
     mapExprPre (fun x ->
-        (match x with ExprVar n -> seen <- Set.add n seen | _ -> ())
+        (match x.Kind with ExprKind.ExprVar n -> seen <- Set.add n seen | _ -> ())
         None) e |> ignore
     seen
 
@@ -145,7 +146,7 @@ let private collectAllVars (e: Expr) : Set<string> =
 let private containsStatic (e: Expr) : bool =
     let mutable found = false
     mapExprPre (fun x ->
-        (match x with ExprStatic _ -> found <- true | _ -> ())
+        (match x.Kind with ExprKind.ExprStatic _ -> found <- true | _ -> ())
         None) e |> ignore
     found
 
@@ -159,19 +160,19 @@ let rec private substFree (m: Map<string, Expr>) (e: Expr) : Expr =
     let without (names: Set<string>) (mm: Map<string, Expr>) =
         names |> Set.fold (fun acc n -> Map.remove n acc) mm
     mapExprPre (fun x ->
-        match x with
-        | ExprVar n -> Map.tryFind n m
-        | ExprLambda (ps, wc, body) ->
+        match x.Kind with
+        | ExprKind.ExprVar n -> Map.tryFind n m
+        | ExprKind.ExprLambda (ps, wc, body) ->
             let m' = without (ps |> List.map (fun p -> p.Name) |> Set.ofList) m
-            Some (ExprLambda (ps, wc, substFree m' body))
-        | ExprLet (b, body) ->
+            Some (inheritSpan x (ExprLambda (ps, wc, substFree m' body)))
+        | ExprKind.ExprLet (b, body) ->
             let m' = without (collectPatternBindings b.Pattern) m
-            Some (ExprLet ({ b with Value = substFree m b.Value }, substFree m' body))
-        | ExprMatch (scrut, cases) ->
-            Some (ExprMatch (substFree m scrut, cases |> List.map (fun c ->
+            Some (inheritSpan x (ExprLet ({ b with Value = substFree m b.Value }, substFree m' body)))
+        | ExprKind.ExprMatch (scrut, cases) ->
+            Some (inheritSpan x (ExprMatch (substFree m scrut, cases |> List.map (fun c ->
                 let m' = without (collectPatternBindings c.Pattern) m
-                { c with Guard = Option.map (substFree m') c.Guard; Body = substFree m' c.Body })))
-        | ExprBlock (stmts, fin) ->
+                { c with Guard = Option.map (substFree m') c.Guard; Body = substFree m' c.Body }))))
+        | ExprKind.ExprBlock (stmts, fin) ->
             // statements bind sequentially — thread the shrinking map
             let rec goStmt mm s =
                 match s with
@@ -192,7 +193,7 @@ let rec private substFree (m: Map<string, Expr>) (e: Expr) : Expr =
             let (stmtsRev, mFin) =
                 stmts |> List.fold (fun (acc, mcur) st ->
                     let (st', m') = goStmt mcur st in (st' :: acc, m')) ([], m)
-            Some (ExprBlock (List.rev stmtsRev, Option.map (substFree mFin) fin))
+            Some (inheritSpan x (ExprBlock (List.rev stmtsRev, Option.map (substFree mFin) fin)))
         | _ -> None) e
 
 /// Alpha-rename every binder introduced inside an inlined static-function
@@ -204,26 +205,26 @@ let rec private freshenBinders (prefix: string) (counter: int ref) (e: Expr) : E
         counter.Value <- n + 1
         sprintf "%s%s_%d" prefix orig n
     let renamePat (pat: Pattern) : Pattern * Map<string, Expr> =
-        let rec go pat (acc: Map<string, Expr>) =
-            match pat with
-            | PatVar n -> let nn = fresh n in (PatVar nn, Map.add n (ExprVar nn) acc)
-            | PatTuple ps ->
+        let rec go (pat: Pattern) (acc: Map<string, Expr>) =
+            match pat.Kind with
+            | PatternKind.PatVar n -> let nn = fresh n in (inheritPatSpan pat (PatVar nn), Map.add n (mkExpr pat.Span (ExprVar nn)) acc)
+            | PatternKind.PatTuple ps ->
                 let (ps', acc') = ps |> List.fold (fun (rs, a) p -> let (p', a') = go p a in (p' :: rs, a')) ([], acc)
-                (PatTuple (List.rev ps'), acc')
-            | PatTyped (p, ty) -> let (p', a') = go p acc in (PatTyped (p', ty), a')
-            | other -> (other, acc)
+                (inheritPatSpan pat (PatTuple (List.rev ps')), acc')
+            | PatternKind.PatTyped (p, ty) -> let (p', a') = go p acc in (inheritPatSpan pat (PatTyped (p', ty)), a')
+            | _ -> (pat, acc)
         go pat Map.empty
     mapExprPre (fun x ->
-        match x with
-        | ExprLambda (ps, wc, body) ->
+        match x.Kind with
+        | ExprKind.ExprLambda (ps, wc, body) ->
             let renames = ps |> List.map (fun p -> (p.Name, fresh p.Name))
             let ps' = (ps, renames) ||> List.zip |> List.map (fun (p, (_, nn)) -> { p with Name = nn })
-            let m = renames |> List.map (fun (o, nn) -> (o, ExprVar nn)) |> Map.ofList
-            Some (ExprLambda (ps', wc, freshenBinders prefix counter (substFree m body)))
-        | ExprLet (b, body) ->
+            let m = renames |> List.map (fun (o, nn) -> (o, inheritSpan x (ExprVar nn))) |> Map.ofList
+            Some (inheritSpan x (ExprLambda (ps', wc, freshenBinders prefix counter (substFree m body))))
+        | ExprKind.ExprLet (b, body) ->
             let (pat', m) = renamePat b.Pattern
             let b' = { b with Pattern = pat'; Value = freshenBinders prefix counter b.Value }
-            Some (ExprLet (b', freshenBinders prefix counter (substFree m body)))
+            Some (inheritSpan x (ExprLet (b', freshenBinders prefix counter (substFree m body))))
         | _ -> None) e
 
 // ============================================================================
@@ -237,20 +238,24 @@ type private UValue =
     | UOpaque of Expr
     | UTuple of UValue list
 
+// StaticValue/UValue carry no span; folded ground literals spliced back into
+// the AST take the ambient `synthSpan` (stamped to the enclosing decl's span
+// in unfoldModule). Opaque leaves keep their own original spans.
 let rec private staticValueToExpr (sv: StaticValue) : Expr =
     match sv with
-    | SVInt n -> ExprLit (LitInt n)
-    | SVFloat f -> ExprLit (LitFloat f)
-    | SVBool b -> ExprLit (LitBool b)
-    | SVString s -> ExprLit (LitString s)
-    | SVUnit -> ExprLit LitUnit
-    | SVTuple vs -> ExprTuple (vs |> List.map staticValueToExpr)
+    | SVInt n -> syn (ExprLit (LitInt n))
+    | SVFloat f -> syn (ExprLit (LitFloat f))
+    | SVBool b -> syn (ExprLit (LitBool b))
+    | SVString s -> syn (ExprLit (LitString s))
+    | SVUnit -> syn (ExprLit LitUnit)
+    | SVTuple vs -> syn (ExprTuple (vs |> List.map staticValueToExpr))
+    | SVStruct (n, fs) -> syn (ExprStruct (n, fs |> List.map (fun (fn, v) -> (fn, staticValueToExpr v)), None))
 
 let rec private uvalueToExpr (v: UValue) : Expr =
     match v with
     | UGround sv -> staticValueToExpr sv
     | UOpaque e -> e
-    | UTuple vs -> ExprTuple (vs |> List.map uvalueToExpr)
+    | UTuple vs -> syn (ExprTuple (vs |> List.map uvalueToExpr))
 
 /// Recursive tuple flatten — the uncurrying rule, applied ONLY in
 /// static-former argument position.
@@ -270,15 +275,15 @@ let rec private isStagedValue (v: UValue) : bool =
             | UOpaque _ -> true
             | UTuple _ -> isStagedValue x
             | UGround _ -> false)
-    | UOpaque (ExprMethodFor _) | UOpaque (ExprObjectFor _) | UOpaque (ExprFor _) -> true
+    | UOpaque { Kind = ExprKind.ExprMethodFor _ } | UOpaque { Kind = ExprKind.ExprObjectFor _ } | UOpaque { Kind = ExprKind.ExprFor _ } -> true
     | _ -> false
 
 /// A lambda-valued `let static` declares a function — same exemption as
 /// StaticEval's fold assertion (its helper is private there).
 let rec private isLambdaValued (e: Expr) : bool =
-    match e with
-    | ExprLambda _ -> true
-    | ExprTyped (inner, _) -> isLambdaValued inner
+    match e.Kind with
+    | ExprKind.ExprLambda _ -> true
+    | ExprKind.ExprTyped (inner, _) -> isLambdaValued inner
     | _ -> false
 
 // ============================================================================
@@ -307,10 +312,10 @@ let rec private ueval (ctx: UCtx) (staged: Map<string, UValue>)
     | Ok sv -> UGround sv
     | Error _ ->
         let recur = ueval ctx staged inInline (fuel - 1)
-        match expr with
-        | ExprVar n when Map.containsKey n staged -> staged.[n]
-        | ExprTuple es -> UTuple (es |> List.map recur)
-        | ExprTupleIndex (head, idxE) ->
+        match expr.Kind with
+        | ExprKind.ExprVar n when Map.containsKey n staged -> staged.[n]
+        | ExprKind.ExprTuple es -> UTuple (es |> List.map recur)
+        | ExprKind.ExprTupleIndex (head, idxE) ->
             (match recur head with
              | UTuple vs ->
                  (match evalExpr ctx.Env maxSteps idxE with
@@ -320,7 +325,7 @@ let rec private ueval (ctx: UCtx) (staged: Map<string, UValue>)
                   | _ ->
                       raise (UnfoldError "static unfolding: an index into a staged tuple must be a compile-time integer"))
              | _ -> UOpaque expr)  // Poly-tuple indexing on a runtime value — not ours
-        | ExprApp (ExprVar fname, args) when Map.containsKey fname ctx.Env.Functions ->
+        | ExprKind.ExprApp ({ Kind = ExprKind.ExprVar fname }, args) when Map.containsKey fname ctx.Env.Functions ->
             // A static function whose ground evaluation failed: at least one
             // argument (or an intermediate) is staged — inline the body.
             let fd = ctx.Env.Functions.[fname]
@@ -333,14 +338,14 @@ let rec private ueval (ctx: UCtx) (staged: Map<string, UValue>)
             let body = freshenBinders (sprintf "__unf_%s_%d_" fname inst) ctx.Counter fd.Body
             let substMap = (fd.Params, argVals |> List.map uvalueToExpr) ||> List.zip |> Map.ofList
             ueval ctx staged true (fuel - 1) (substFree substMap body)
-        | ExprIf (c, t, el) when inInline ->
+        | ExprKind.ExprIf (c, t, el) when inInline ->
             (match evalExpr ctx.Env maxSteps c with
              | Ok (SVBool true) -> recur t
              | Ok (SVBool false) -> recur el
              | Ok _ -> raise (UnfoldError "static unfolding: an `if` condition inside a static function must be a compile-time Bool")
              | Error why ->
                  raise (UnfoldError (sprintf "static unfolding: an `if` condition inside a static function does not evaluate at compile time (%s)" why)))
-        | ExprLet ({ Pattern = PatVar n } as b, body) when inInline ->
+        | ExprKind.ExprLet (({ Pattern = { Kind = PatternKind.PatVar n } } as b), body) when inInline ->
             // let inside an inlined body: bind (possibly staged), continue
             let v = recur b.Value
             ueval ctx (Map.add n v staged) true (fuel - 1) body
@@ -356,15 +361,15 @@ let private unfoldFormer (ctx: UCtx) (staged: Map<string, UValue>) (inner: Expr)
         match flattenU (uevalArg e) with
         | [k] -> k
         | many -> raise (UnfoldError (sprintf "static %s: the kernel elaborated to %d expressions — exactly one is required (select from a staged tuple with an index: qs[k])" what many.Length))
-    match inner with
-    | ExprMethodFor args ->
-        ExprMethodFor (args |> List.collect (uevalArg >> flattenU))
-    | ExprObjectFor kernel ->
-        ExprObjectFor (single "object_for" kernel)
-    | ExprFor (ForArrays (arrays, inOpt), wcs, kern) ->
-        ExprFor (ForArrays (arrays |> List.collect (uevalArg >> flattenU), inOpt), wcs, kern)
-    | ExprFor (ForKernel k, wcs, kern) ->
-        ExprFor (ForKernel (single "for" k), wcs, kern)
+    match inner.Kind with
+    | ExprKind.ExprMethodFor args ->
+        inheritSpan inner (ExprMethodFor (args |> List.collect (uevalArg >> flattenU)))
+    | ExprKind.ExprObjectFor kernel ->
+        inheritSpan inner (ExprObjectFor (single "object_for" kernel))
+    | ExprKind.ExprFor (ForArrays (arrays, inOpt), wcs, kern) ->
+        inheritSpan inner (ExprFor (ForArrays (arrays |> List.collect (uevalArg >> flattenU), inOpt), wcs, kern))
+    | ExprKind.ExprFor (ForKernel k, wcs, kern) ->
+        inheritSpan inner (ExprFor (ForKernel (single "for" k), wcs, kern))
     | _ ->
         raise (UnfoldError "internal: `static` wraps a non-former expression (parser invariant violated)")
 
@@ -388,8 +393,11 @@ let private unfoldModule (m: ModuleDecl) : ModuleDecl =
     // keep their existing paths untouched.
     let mutable staged : Map<string, UValue> = Map.empty
     for d in m.Decls do
+        // Ground literals folded during staged-static classification take this
+        // decl's span (staticValueToExpr / uvalueToExpr read the ambient).
+        Blade.Ast.synthSpan <- d.Span
         match d.Value with
-        | DeclStatic ({ Pattern = PatVar name } as b)
+        | DeclStatic (({ Pattern = { Kind = PatternKind.PatVar name } } as b))
             when not (Map.containsKey name senv.Values) && not (isLambdaValued b.Value) ->
             let v =
                 try Some (ueval ctx staged false unfoldFuel b.Value)
@@ -404,23 +412,23 @@ let private unfoldModule (m: ModuleDecl) : ModuleDecl =
     // carry the enclosing declaration's line.
     let rec rewriteExpr (e: Expr) : Expr =
         mapExprPre (fun x ->
-            match x with
+            match x.Kind with
             // Kernel selection `qs[k]` on a staged tuple resolves ANYWHERE in
             // the module (the kernel slot of `static method_for(A) <@> qs[1]`
             // sits outside the former's argument list) — k must be a
             // compile-time integer; the selected element splices in place.
-            | ExprTupleIndex (ExprVar n, _) when Map.containsKey n staged ->
+            | ExprKind.ExprTupleIndex ({ Kind = ExprKind.ExprVar n }, _) when Map.containsKey n staged ->
                 Some (uvalueToExpr (ueval ctx staged false unfoldFuel x))
-            | ExprStatic inner ->
+            | ExprKind.ExprStatic inner ->
                 let inner' =
-                    match inner with
-                    | ExprMethodFor args -> ExprMethodFor (List.map rewriteExpr args)
-                    | ExprObjectFor k -> ExprObjectFor (rewriteExpr k)
-                    | ExprFor (ForArrays (arrays, inOpt), wcs, kern) ->
-                        ExprFor (ForArrays (List.map rewriteExpr arrays, Option.map rewriteExpr inOpt), wcs, Option.map rewriteExpr kern)
-                    | ExprFor (ForKernel k, wcs, kern) ->
-                        ExprFor (ForKernel (rewriteExpr k), wcs, Option.map rewriteExpr kern)
-                    | other -> rewriteExpr other
+                    match inner.Kind with
+                    | ExprKind.ExprMethodFor args -> inheritSpan inner (ExprMethodFor (List.map rewriteExpr args))
+                    | ExprKind.ExprObjectFor k -> inheritSpan inner (ExprObjectFor (rewriteExpr k))
+                    | ExprKind.ExprFor (ForArrays (arrays, inOpt), wcs, kern) ->
+                        inheritSpan inner (ExprFor (ForArrays (List.map rewriteExpr arrays, Option.map rewriteExpr inOpt), wcs, Option.map rewriteExpr kern))
+                    | ExprKind.ExprFor (ForKernel k, wcs, kern) ->
+                        inheritSpan inner (ExprFor (ForKernel (rewriteExpr k), wcs, Option.map rewriteExpr kern))
+                    | _ -> rewriteExpr inner
                 Some (unfoldFormer ctx staged inner')
             | _ -> None) e
     let rewriteIn (spanLine: int) (e: Expr) : Expr =
@@ -428,6 +436,8 @@ let private unfoldModule (m: ModuleDecl) : ModuleDecl =
         with UnfoldError msg -> raise (UnfoldError (sprintf "%s (line %d)" msg spanLine))
     let rewritten =
         m.Decls |> List.map (fun d ->
+            // Spliced ground literals in this decl take its span (ambient).
+            Blade.Ast.synthSpan <- d.Span
             let line = d.Span.StartLine
             let value' =
                 match d.Value with
@@ -443,7 +453,7 @@ let private unfoldModule (m: ModuleDecl) : ModuleDecl =
         for d in rewritten do
             let isStagedDecl =
                 match d.Value with
-                | DeclStatic { Pattern = PatVar n } -> Map.containsKey n staged
+                | DeclStatic { Pattern = { Kind = PatternKind.PatVar n } } -> Map.containsKey n staged
                 | _ -> false
             if not isStagedDecl then
                 let vars =
@@ -462,7 +472,7 @@ let private unfoldModule (m: ModuleDecl) : ModuleDecl =
     let declsAfterStaged =
         rewritten |> List.filter (fun d ->
             match d.Value with
-            | DeclStatic { Pattern = PatVar n } -> not (Map.containsKey n staged)
+            | DeclStatic { Pattern = { Kind = PatternKind.PatVar n } } -> not (Map.containsKey n staged)
             | _ -> true)
     let referencedElsewhere (fname: string) =
         declsAfterStaged |> List.exists (fun d ->
@@ -470,18 +480,33 @@ let private unfoldModule (m: ModuleDecl) : ModuleDecl =
             | DeclFunction fd when fd.Name = fname -> false  // self-recursion doesn't count
             | DeclFunction fd -> Set.contains fname (collectAllVars fd.Body)
             | DeclLet b | DeclStatic b -> Set.contains fname (collectAllVars b.Value)
+            | DeclType (TyDeclStruct (_, _, fields, constraints)) ->
+                // Where-conjuncts, field-bound exprs, and field defaults are
+                // real references: the checker synthesizes runtime guards
+                // that CALL these functions at every assignment site.
+                let fieldExprs =
+                    fields |> List.collect (fun f ->
+                        (match f.Bound with
+                         | Some fb -> [fb.Lo; fb.Hi] |> List.choose id
+                         | None -> [])
+                        @ Option.toList f.Default)
+                constraints @ fieldExprs
+                |> List.exists (fun e -> Set.contains fname (collectAllVars e))
+            | DeclType (TyDeclMutualGroup (_, constraints)) ->
+                constraints |> List.exists (fun e -> Set.contains fname (collectAllVars e))
             | _ -> false)
     let decls' =
         declsAfterStaged |> List.filter (fun d ->
             match d.Value with
             | DeclFunction fd when fd.IsStatic && ctx.Inlined.Contains fd.Name && not (referencedElsewhere fd.Name) -> false
             | _ -> true)
+    Blade.Ast.synthSpan <- noSpan
     { m with Decls = decls' }
 
 /// The pass entry point — same shape as the other elaborators. Modules
 /// without any static former pass through untouched (so existing `let
 /// static` semantics, including fold-or-fail rejects, are byte-identical).
-let expand (program: Program) : Result<Program, string> =
+let private expandStr (program: Program) : Result<Program, string> =
     try
         let usesStaticFormers (m: ModuleDecl) =
             m.Decls |> List.exists (fun d ->
@@ -493,3 +518,12 @@ let expand (program: Program) : Result<Program, string> =
             program.Modules |> List.map (fun m -> if usesStaticFormers m then unfoldModule m else m)
         Ok { program with Modules = modules' }
     with UnfoldError msg -> Error msg
+
+/// Boundary: string-errored internals -> coded diagnostics. The span is the
+/// ambient synthSpan -- stamped per-decl by expandStr, so a mid-elaboration
+/// failure points at the offending declaration.
+let expand (program: Program) : Result<Program, Blade.Diagnostics.Diagnostic list> =
+    Blade.Ast.synthSpan <- Blade.Ast.noSpan
+    expandStr program
+    |> Result.mapError (fun msg ->
+        [ Blade.Diagnostics.mkError "BL4002" (Blade.Diagnostics.Codes.phaseOfCode "BL4002") Blade.Ast.synthSpan msg ])

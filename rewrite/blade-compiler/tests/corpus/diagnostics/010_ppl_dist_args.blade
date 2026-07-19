@@ -1,0 +1,5 @@
+// TEST: Diag PPL Dist Arguments (diag)
+// ERROR: BL5100 @ 4:1
+// ERROR-CONTAINS: dist expects dist(A, r)
+import ppl as p
+let d = p.dist(1.0, 2)

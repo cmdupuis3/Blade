@@ -1,0 +1,9 @@
+// TEST: Diag Equiv Uncertified Escape (diag)
+// ERROR: BL4008 @ 8:10
+// ERROR-CONTAINS: carries no equiv certificate
+import ml as ml
+let static S = [(0, 0, 2), (1, 1, 1)]
+function helper(a: Array<Float like Idx<5>>) -> Float =
+  a(0)
+function bad(x: Array<Float like IrrepsIdx<S>>) where ml.equiv(O3) -> Float =
+  helper(x)

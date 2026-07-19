@@ -20,3 +20,7 @@ let mlE2eTests = category "ml-e2e"
 
 /// Elaborated ML ops (MLElaborate.fs): op-level value pins + reject probes
 let mlOpsTests = category "ml-ops"
+
+/// The `where ml.equiv(G)` discipline (MLEquiv.fs): certified-accept value
+/// pins + BL4008 reject probes
+let mlEquivTests = category "ml-equiv"

@@ -106,3 +106,43 @@ module Rotations =
                         acc <- acc + dm.[i].[j] * feat.[s + j]
                     out.[s + i] <- acc
         out
+
+    /// Apply an IMPROPER O(3) element (inversion ∘ R, R proper) to an
+    /// IrrepsIdx<spec> feature vector: each (l, p) block transforms by
+    /// paritySign(p) · D_l(R) — the parity extension promised in the header
+    /// (added 2026-07-18 for the equiv(O3) certificate tests).
+    let applyRepImproper (spec: SpecEntry[]) (r: float[][]) (feat: float[]) : float[] =
+        let starts = IrrepsIdx.blockStarts spec
+        let out = applyRep spec r feat
+        for b in 0 .. spec.Length - 1 do
+            let e = spec.[b]
+            if e.Ir.P = Odd then
+                for i in starts.[b] .. starts.[b] + Irreps.blockDim e - 1 do
+                    out.[i] <- -out.[i]
+        out
+
+    /// Dense (totalDim x totalDim) block-diagonal matrix of the PROPER
+    /// action of R on IrrepsIdx<spec> — for baking into Blade certificate
+    /// tests as a flat row-major literal. A full matvec over it reproduces
+    /// applyRep to the ulp (the off-block zeros contribute exact +0.0).
+    let repMatrix (spec: SpecEntry[]) (r: float[][]) : float[] =
+        let n = Irreps.totalDim spec
+        let starts = IrrepsIdx.blockStarts spec
+        let m = Array.zeroCreate (n * n)
+        let cache = Dictionary<int, float[][]>()
+        for b in 0 .. spec.Length - 1 do
+            let e = spec.[b]
+            let d = 2 * e.Ir.L + 1
+            let dm =
+                match cache.TryGetValue e.Ir.L with
+                | true, v -> v
+                | _ ->
+                    let v = wignerD e.Ir.L r
+                    cache.[e.Ir.L] <- v
+                    v
+            for mu in 0 .. e.Mult - 1 do
+                let s = starts.[b] + mu * d
+                for i in 0 .. d - 1 do
+                    for j in 0 .. d - 1 do
+                        m.[(s + i) * n + (s + j)] <- dm.[i].[j]
+        m

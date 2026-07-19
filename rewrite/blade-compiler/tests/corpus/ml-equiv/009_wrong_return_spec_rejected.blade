@@ -1,0 +1,12 @@
+// TEST: ML Equiv Wrong Return Spec (rejects)
+import ml as ml
+// ============================================================================
+// The certificate requires the body's representation to match the declared
+// return: returning an IrrepsIdx<SIN>-transforming value from a function
+// declared to return IrrepsIdx<SOUT> would falsify the signature other
+// certified functions trust. BL4008.
+// ============================================================================
+let static SIN = [(0, 0, 1), (1, 1, 1)]
+let static SOUT = [(0, 0, 1)]
+function bad(x: Array<Float like IrrepsIdx<SIN>>) where ml.equiv(O3) -> Array<Float like IrrepsIdx<SOUT>> =
+  x

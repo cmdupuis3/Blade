@@ -1,0 +1,32 @@
+// TEST: ML Ops tp_spec Full Decomposition
+import ml as ml
+// ============================================================================
+// CG-typed contraction: ml.tp_spec(s1, s2) computes the FULL Clebsch-Gordan
+// decomposition spec, merged-canonical (multiplicities aggregated by
+// (l, parity), sorted ascending; completeness: total_dim multiplies). The
+// output type of a full tensor product is thereby expressible — the result
+// annotation below round-trips through IrrepsIdx tag identity.
+// Value pins: `dotnet run --project ml -- dump-oracle` (tp_spec section).
+// Statics hand-checked: 1o (x) 1o = 0e + 1e + 2e (cross product lands in
+// l=1 EVEN); sh1 (x) sh1 = 2x0e + 1x1e + 2x1o + 1x2e, total_dim 16.
+// ============================================================================
+let static S1O = [(1, 1, 1)]
+let static SFULL = ml.tp_spec(S1O, S1O)
+let static CFG = (S1O, S1O, SFULL)
+let static TD = ml.total_dim(SFULL)
+let static WD = ml.tp_weight_dim(CFG)
+let td = TD
+// EXPECT: td = 9
+let wd = WD
+// EXPECT: wd = 3
+
+let static SH1 = ml.sh_spec(1)
+let static SFULL2 = ml.tp_spec(SH1, SH1)
+let static TD2 = ml.total_dim(SFULL2)
+let td2 = TD2
+// EXPECT: td2 = 16
+
+let x: Array<Float like IrrepsIdx<S1O>> = [1.0, 2.0, 3.0]
+let y: Array<Float like IrrepsIdx<S1O>> = [0.5, -1.0, 2.0]
+let out: Array<Float like IrrepsIdx<SFULL>> = ml.tensor_product(CFG, x, y, [1.0, 1.0, 1.0])
+// EXPECT: out = [-2.598076211353315, 4.949747468305832, -0.35355339059327373, -1.4142135623730947, 2.4748737341529154, 0.0, -4.286607049870561, 0.7071067811865475, 3.8890872965260104]

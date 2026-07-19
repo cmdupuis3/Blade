@@ -1,0 +1,14 @@
+// TEST: ML Equiv Certified Calls Certified
+import ml as ml
+// ============================================================================
+// Composition: a certified function may call another certified function of
+// the SAME group; the callee's declared signature is trusted (its own body
+// was judged). Same-spec addition scales through.
+// ============================================================================
+let static S = [(0, 0, 1), (1, 1, 1)]
+function double(x: Array<Float like IrrepsIdx<S>>) where ml.equiv(O3) -> Array<Float like IrrepsIdx<S>> =
+  x + x
+function quad(x: Array<Float like IrrepsIdx<S>>) where ml.equiv(O3) -> Array<Float like IrrepsIdx<S>> =
+  double(double(x))
+let out = quad([1.0, 2.0, 3.0, 4.0])
+// EXPECT: out = [4.0, 8.0, 12.0, 16.0]

@@ -77,3 +77,39 @@ module Tests_Core =
         checkThrows "offsetOf rejects bad mult" (fun () -> IrrepsIdx.offsetOf spec60 (0, 16, 0) |> ignore)
         checkThrows "offsetOf rejects bad m" (fun () -> IrrepsIdx.offsetOf spec60 (1, 0, 3) |> ignore)
         checkThrows "ofOffset rejects extent" (fun () -> IrrepsIdx.ofOffset spec60 60 |> ignore)
+
+        section "core: tensor-product spec algebra (tp_spec / hom_dim)"
+
+        // Completeness of the CG decomposition: dim(V1 ⊗ V2) is preserved.
+        let sh1 = shSpec 1
+        let sh2 = shSpec 2
+        check "tpSpec completeness (sh1 ⊗ sh1)"
+            (totalDim (tpSpec sh1 sh1) = totalDim sh1 * totalDim sh1)
+        check "tpSpec completeness (spec60 ⊗ sh2)"
+            (totalDim (tpSpec spec60 sh2) = totalDim spec60 * totalDim sh2)
+        check "tpSpec completeness (asymmetric mults)"
+            (let a = mkSpec [ (1, Odd, 2) ]
+             let b = mkSpec [ (2, Even, 3) ]
+             totalDim (tpSpec a b) = totalDim a * totalDim b)
+
+        // Hand-computed canonical decomposition of sh_spec(1) ⊗ sh_spec(1):
+        // (0e+1o) ⊗ (0e+1o) = 0e·0e + 2·(0e·1o) + 1o·1o
+        //                   = 0e + 2×1o + (0e+1e+2e) → 2×0e, 1×1e, 2×1o, 1×2e.
+        check "tpSpec (sh1 ⊗ sh1) canonical value"
+            (tpSpec sh1 sh1 = mkSpec [ (0, Even, 2); (1, Even, 1); (1, Odd, 2); (2, Even, 1) ])
+
+        // 1o ⊗ 1o = 0e + 1e + 2e: the cross product lands in l=1 EVEN
+        // (axial vector) — the physics smoke test of the parity rule.
+        let cross = tpSpec (mkSpec [ (1, Odd, 1) ]) (mkSpec [ (1, Odd, 1) ])
+        check "tpSpec (1o ⊗ 1o) = 0e + 1e + 2e"
+            (cross = mkSpec [ (0, Even, 1); (1, Even, 1); (2, Even, 1) ])
+
+        // Schur dimension of Hom_G.
+        check "homDim spec60 -> spec60 = 336" (homDim spec60 spec60 = 16*16 + 8*8 + 4*4)
+        check "homDim symmetric" (homDim spec60 sh2 = homDim sh2 spec60)
+        check "homDim disjoint parity = 0"
+            (homDim (mkSpec [ (0, Even, 2) ]) (mkSpec [ (0, Odd, 2) ]) = 0)
+        check "homDim partial overlap"
+            (homDim (mkSpec [ (0, Even, 2); (1, Odd, 3) ]) (mkSpec [ (1, Odd, 4); (2, Even, 1) ]) = 12)
+        check "homDim duplicate entries aggregate"
+            (homDim (mkSpec [ (0, Even, 1); (0, Even, 2) ]) (mkSpec [ (0, Even, 3) ]) = 9)

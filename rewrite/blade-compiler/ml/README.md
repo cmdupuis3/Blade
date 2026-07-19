@@ -41,13 +41,27 @@ as language-wide bare names.
 
 Both the ops (`y_to`, `tensor_product`, `linear`, `gated`, `linear_rows`,
 `gated_rows`) and the static sizing builtins (`total_dim`, `sh_spec`,
-`tp_weight_dim`, `linear_weight_dim`, `irreps_len`, `irreps_*`) are called as
+`tp_weight_dim`, `linear_weight_dim`, `tp_spec`, `hom_dim`, `irreps_len`,
+`irreps_*`) are called as
 `<alias>.<name>(...)`. The elaborator is import-gated: with no `import ml` in
 the module, these names are unbound (no longer injected globally), and
 `from ml import ...` is rejected — a selective import would reintroduce global
 names. Internally, qualified sizing calls normalize to mangled registry names
 (`Blade.ML.Statics.statName`, e.g. `__ml_stat_total_dim`); a bare
 `total_dim(...)` no longer resolves.
+
+CG-typed contraction surface (2026-07-18): `ml.tp_spec(s1, s2)` computes the
+FULL Clebsch-Gordan decomposition spec of `s1 ⊗ s2` — merged-canonical
+(multiplicities aggregated per `(l, parity)`, sorted ascending; completeness
+`total_dim(tp_spec(a,b)) = total_dim(a)·total_dim(b)`) — and
+`ml.hom_dim(sIn, sOut)` the Schur dimension of `Hom_G(V_in, V_out)`
+(aggregated `Σ multIn·multOut`; `0` ⇔ only the zero map is equivariant).
+Like `sh_spec`, both appear in VALUE position (`let static SOUT =
+ml.tp_spec(S1, S2)`), never inside a type annotation — the annotation then
+names the static (`IrrepsIdx<SOUT>`). Schur violations are first-class
+diagnostics: `BL4007 "no equivariant map exists"` fires for `linear` over
+specs sharing no `(l, parity)` (with the all-blocks-vs-some-blocks grades)
+and for `tensor_product` output blocks unreachable by any CG path.
 
 ---
 
@@ -265,16 +279,59 @@ central finite differences, the gather/scatter adjoint duality, the
 backward), and rotation invariance of loss AND gradients. `OracleDump.fs`
 prints everything (`-- dump-oracle`).
 
-## 6. Not implemented (deliberately)
+## 6. The equiv certificate (implemented 2026-07-18)
 
-- **Part I annotation hook** (`with equiv`, inference rules, the five
-  compile-time error classes): a type-checker feature of the core compiler,
-  not a library. When it lands in `TypeCheck.fs`, its test corpus should
-  assert the §3 error taxonomy; this project supplies the ground-truth
-  values.
+The Part I deferral is over: `where <alias>.equiv(O3)` / `equiv(SO3)` on a
+function makes the compiler PROVE the body composes only
+equivariance-preserving operations. Machinery (all compiler-side, in
+`ml/compiler/MLEquiv.fs`, invoked by `MLElaborate.expand` at the seam
+between sizing normalization and op rewriting, where `ml.*` calls are still
+surface-visible):
+
+- **Judgment**: abstract interpretation over the surface AST with the
+  domain `Rep spec | Inv | Opaque`. Params/return seed from annotations
+  (certified functions must be fully annotated; `Array<_ like
+  IrrepsIdx<spec>>` → `Rep`, scalars/plain arrays → `Inv`). Admissible on
+  reps: the ml ops (with their premises — under O3, `gated`/`scalars` need
+  parity-even l=0 blocks), same-spec `+`/`-`, scaling by invariants,
+  static reads inside invariant l=0 blocks, calls to same-group certified
+  functions, and the invariant exits `ml.scalars`/`ml.norms`. Everything
+  else — Hadamard products, componentwise nonlinearities, raw l>0 reads,
+  escapes to uncertified callees, rep-capturing lambdas, destructuring —
+  is **BL4008** at the offending expression's span. Schur violations
+  (`hom_dim = 0` requests, unreachable TP outputs) are **BL4007**.
+- **The certificate is a conditional theorem**: IF every rep-typed argument
+  actually transforms as its declared spec (and y_to's coordinate scalars
+  are the components of the standard vector), with invariants held fixed,
+  THEN the output transforms as its declared spec. The plain-array seam
+  (irreps-tag vs untagged unify) means uncertified callers can feed
+  anything — that does not break the theorem, only its premise.
+- **Derived layers**: `ml.derive_linear(SIN, SOUT[, w, x])` synthesizes the
+  COMPLETE Schur basis of Hom_G (all (l,parity)-matched block pairs,
+  pair-major weights, `hom_dim` total, unmatched output blocks zero-filled;
+  duplicate input irreps reachable — F3 resolved);
+  `ml.derive_tp(S1, S2[, x, y, w])` derives the full-CG output spec. The
+  2-argument forms return the layer as a function value
+  (`let layer = ml.derive_linear(SIN, SOUT)`). Weight buffers stay plain
+  arrays, so `grad()` trains them unchanged.
+- **Validated once, not per network**: `Rotations.applyRepImproper` (the
+  parity extension) + O(3) improper-equivariance oracle tests (including
+  the gated-odd-head COUNTEREXAMPLE showing the premise is real), and the
+  corpus certificate tests (`tests/corpus/ml-equiv/018-021`) evaluating
+  `f(D·x)` vs `D·f(x)` inside compiled Blade against `dump-equiv` pins.
+  User networks need no empirical equivariance tests — their certificate is
+  the type check.
+- Grad interaction: adjoints are not re-judged (equivariance of the
+  gradient is a theorem given the primal); ml-equiv/021 pins it.
+
+Still deliberately absent:
 - **normAct VJP**: the e2e example uses `gated`; add when consumed.
 - **Open items** §13 / module doc §12: path filtering, attention, GPU fused
   kernels, r ≥ 3 Schur-component storage — all future work.
+- Pseudoscalar algebra on invariants (an `InvOdd` status admitting
+  odd×odd→even under O3), `y_to_v` (closing the coordinate premise into the
+  type via a `[(1,1,1)]`-typed argument), rows variants inside certified
+  bodies, `TyEquivIdx` generalization to further groups (Reynolds/finite).
 
 ## 7. Integration path into the compiler
 

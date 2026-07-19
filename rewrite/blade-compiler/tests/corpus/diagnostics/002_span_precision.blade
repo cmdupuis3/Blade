@@ -1,0 +1,7 @@
+// TEST: Diag Span Precision Sub-Expression (diag)
+// ERROR: BL2001 @ 4:17
+function f(x: Float64) -> Float64 = {
+    let a = x + 1.0
+    let c = a * missing_name + 2.0
+    c
+}

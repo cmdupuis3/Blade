@@ -1,0 +1,9 @@
+// TEST: Diag Where Predicate Unannotated (diag)
+// ERROR: BL4001 @ 7:18
+// ERROR: BL3008 @ 8:9
+static function loose(a, b) = a + b < 10
+struct S {
+    a: Int,
+    b: Int
+} where loose(a, b)
+let x = S { a = 1, b = 2 }

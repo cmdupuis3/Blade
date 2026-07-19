@@ -45,6 +45,44 @@ module Activations =
                         out.[i] <- g * feat.[i]
         out
 
+    // ------------------------------------------------------------------
+    // Invariant-exit ops (equiv-discipline surface, 2026-07-18): the two
+    // sanctioned ways OUT of representation land inside a certified body.
+    // The compiler elaborates ml.scalars / ml.norms with EXACTLY these loop
+    // orders (ulp contract).
+    // ------------------------------------------------------------------
+
+    /// scalars(spec, x): copies the l=0 blocks' entries (all parities) into
+    /// a plain array, block order then multiplicity order. Under equiv(O3)
+    /// the judgment only admits calls on specs with no (l=0, odd) blocks —
+    /// pseudoscalars are SO(3)- but not O(3)-invariant.
+    let scalars (spec: SpecEntry[]) (feat: float[]) : float[] =
+        if feat.Length <> Irreps.totalDim spec then
+            invalidArg "feat" "feature vector length does not match spec"
+        let starts = IrrepsIdx.blockStarts spec
+        [| for b in 0 .. spec.Length - 1 do
+             if spec.[b].Ir.L = 0 then
+                 for mu in 0 .. spec.[b].Mult - 1 do
+                     yield feat.[starts.[b] + mu] |]
+
+    /// norms(spec, x): per-(block, multiplicity) 2-norms — sqrt of the sum
+    /// of squares over the 2l+1 components, ascending component order, in
+    /// (block, mu) order. O(3)-invariant for every parity (squares kill the
+    /// parity sign).
+    let norms (spec: SpecEntry[]) (feat: float[]) : float[] =
+        if feat.Length <> Irreps.totalDim spec then
+            invalidArg "feat" "feature vector length does not match spec"
+        let starts = IrrepsIdx.blockStarts spec
+        [| for b in 0 .. spec.Length - 1 do
+             let e = spec.[b]
+             let d = 2 * e.Ir.L + 1
+             for mu in 0 .. e.Mult - 1 do
+                 let s = starts.[b] + mu * d
+                 let mutable acc = 0.0
+                 for c in 0 .. d - 1 do
+                     acc <- acc + feat.[s + c] * feat.[s + c]
+                 yield sqrt acc |]
+
     /// Norm activation (ml-spec section 8.2): higher-L copies are scaled by
     /// silu(||v||) / (||v|| + 1e-8); scalars get silu directly.
     let normAct (spec: SpecEntry[]) (feat: float[]) : float[] =

@@ -8,6 +8,8 @@ module Blade.Tests.WignerTablesReview
 open Blade.Tests.TestHarness
 open Blade.ML.WignerTables
 
+module MLS = Blade.ML.Spec
+
 let private close (a: float) (b: float) = abs (a - b) < 1e-12
 
 let runWignerTablesTests () : BlockResult =
@@ -90,6 +92,23 @@ let runWignerTablesTests () : BlockResult =
         |> Array.forall (fun (a, b) ->
             (a.C1, a.C2, a.C3) < (b.C1, b.C2, b.C3))
     check "sparse entries in lexicographic (c1,c2,c3) order" sorted ""
+
+    // ---- spec algebra: tpSpec / homDim vs hand-computed truth -----------
+    // The SAME hand values pin the ml/ reference (Tests_Core): both
+    // implementations are pinned to the truth, never to each other.
+    let mkS triples =
+        triples |> List.map (fun (l, p, m) -> ({ L = l; Parity = p; Mult = m } : MLS.SpecEntry))
+    let sh1 = MLS.shSpec 1
+    let spec60 = mkS [ (0, 0, 16); (1, 1, 8); (2, 0, 4) ]
+    check "tpSpec (sh1 x sh1) canonical value"
+          (MLS.tpSpec sh1 sh1 = mkS [ (0, 0, 2); (1, 0, 1); (1, 1, 2); (2, 0, 1) ]) ""
+    check "tpSpec completeness (spec60 x sh1)"
+          (MLS.totalDim (MLS.tpSpec spec60 sh1) = MLS.totalDim spec60 * MLS.totalDim sh1) ""
+    check "homDim spec60 -> spec60 = 336" (MLS.homDim spec60 spec60 = 336) ""
+    check "homDim disjoint parity = 0"
+          (MLS.homDim (mkS [ (0, 0, 2) ]) (mkS [ (0, 1, 2) ]) = 0) ""
+    check "homDim duplicate entries aggregate"
+          (MLS.homDim (mkS [ (0, 0, 1); (0, 0, 2) ]) (mkS [ (0, 0, 3) ]) = 9) ""
 
     printFooter "Wigner Tables" [ sprintf "%d passed" passed; sprintf "%d failed" failed ]
     { Block = "Wigner Tables"; Passed = passed; Failed = failed; Skipped = 0; FailedNames = failedNames }

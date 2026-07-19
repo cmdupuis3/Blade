@@ -14,21 +14,169 @@ type ParseError = {
     Message: string
     Line: int
     Col: int
+    // Exclusive end of the offending span (defaults to a point at Line/Col for
+    // legacy call sites). Stable BLxxxx code for classification: BL1001
+    // expected-token, BL1002 unexpected-EOF, BL1999 generic parse error.
+    EndLine: int
+    EndCol: int
+    Code: string
 }
 
 type ParseResult<'T> = Result<'T * Token list, ParseError>
+
+// ============================================================================
+// Parser-wide mutable state (per-parse)
+// ============================================================================
+
+/// The source file currently being parsed. Set by parseMultiSource /
+/// parseProgramWithFile before parsing each file and reset afterwards; every
+/// span the parser constructs stamps this into Span.File.
+let mutable private currentFile : string option = None
+
+/// End position (line, col) of the input, used to report EOF errors at the end
+/// of the last token instead of 0:0. Refreshed per file when tokenizing.
+let mutable private lastTokenEnd : int * int = (0, 0)
+
+let private setEofFrom (tokens: Token list) =
+    match List.tryLast tokens with
+    | Some t -> lastTokenEnd <- (t.EndLine, t.EndCol)
+    | None -> lastTokenEnd <- (0, 0)
 
 // ============================================================================
 // Basic Combinators
 // ============================================================================
 
 let success value remaining : ParseResult<'T> = Ok (value, remaining)
-let error msg line col : ParseResult<'T> = Error { Message = msg; Line = line; Col = col }
+
+/// Generic parse error (BL1999), end defaults to a point at line:col.
+let error msg line col : ParseResult<'T> =
+    Error { Message = msg; Line = line; Col = col; EndLine = line; EndCol = col; Code = "BL1999" }
+
+/// Coded parse error with a caller-supplied BLxxxx code; point end at line:col.
+let errorC code msg line col : ParseResult<'T> =
+    Error { Message = msg; Line = line; Col = col; EndLine = line; EndCol = col; Code = code }
+
+/// Coded parse error with an explicit end span.
+let errorFull code msg line col endLine endCol : ParseResult<'T> =
+    Error { Message = msg; Line = line; Col = col; EndLine = endLine; EndCol = endCol; Code = code }
+
+/// ParseError -> unified Diagnostic. The file is supplied by the parse
+/// entry point (the error record does not carry it).
+let diagnosticOfParseError (file: string option) (e: ParseError) : Blade.Diagnostics.Diagnostic =
+    let span : Span =
+        { StartLine = e.Line; StartCol = e.Col
+          EndLine = e.EndLine; EndCol = e.EndCol; File = file }
+    Blade.Diagnostics.mkError e.Code Blade.Diagnostics.PhParse span e.Message
+
+/// Unexpected-EOF error (BL1002) reported at the end of the last token.
+let errorEof msg : ParseResult<'T> =
+    let (l, c) = lastTokenEnd
+    Error { Message = msg; Line = l; Col = c; EndLine = l; EndCol = c; Code = "BL1002" }
+
+/// Human-readable rendering of a token kind for error messages, e.g.
+///   keyword 'let'   '('   identifier 'foo'   integer literal 42   end of file
+/// Avoids leaking raw DU constructor names (TokLParen, TokKeyword …).
+let private keywordText =
+    // Reverse of Lexer.keywords (a Map string->Keyword): canonical spelling per keyword.
+    keywords |> Map.toList |> List.map (fun (s, k) -> (k, s)) |> Map.ofList
+let describeToken (kind: TokenKind) : string =
+    match kind with
+    | TokInt v -> sprintf "integer literal %d" v
+    | TokFloat v -> sprintf "float literal %g" v
+    | TokString s -> sprintf "string literal \"%s\"" s
+    | TokChar c -> sprintf "character literal '%c'" c
+    | TokBool b -> sprintf "boolean literal %b" b
+    | TokIdent n -> sprintf "identifier '%s'" n
+    | TokKeyword kw ->
+        match Map.tryFind kw keywordText with
+        | Some s -> sprintf "keyword '%s'" s
+        | None -> sprintf "keyword %A" kw
+    | TokOp s -> sprintf "'%s'" s
+    | TokNamedInfix s -> sprintf "operator ':%s:'" s
+    | TokLParen -> "'('"
+    | TokRParen -> "')'"
+    | TokLBracket -> "'['"
+    | TokRBracket -> "']'"
+    | TokLBrace -> "'{'"
+    | TokRBrace -> "'}'"
+    | TokComma -> "','"
+    | TokSemi -> "';'"
+    | TokColon -> "':'"
+    | TokColonColon -> "'::'"
+    | TokDot -> "'.'"
+    | TokDotDot -> "'..'"
+    | TokPipe -> "'|'"
+    | TokUnderscore -> "'_'"
+    | TokAt -> "'@'"
+    | TokHash -> "'#'"
+    | TokQuestion -> "'?'"
+    | TokNewline -> "end of line"
+    | TokEOF -> "end of file"
+    | TokError s -> sprintf "invalid token (%s)" s
 
 let currentPos (tokens: Token list) =
     match tokens with
     | t :: _ -> t.Line, t.Col
-    | [] -> 0, 0
+    | [] -> lastTokenEnd
+
+/// End position (line, col) of the last meaningful (non-terminator) token
+/// consumed in advancing from `before` to `after`. `after` must be a suffix of
+/// `before` (recursive descent only drops tokens from the front). Newline/semi
+/// terminators are excluded so the span stops at the statement's real end
+/// rather than overshooting to the next token's start. Falls back to the given
+/// start position when nothing meaningful was consumed.
+let consumedEnd (before: Token list) (after: Token list) (fallbackLine: int) (fallbackCol: int) : int * int =
+    let n = List.length before - List.length after
+    if n <= 0 then (fallbackLine, fallbackCol)
+    else
+        let meaningful =
+            before
+            |> List.truncate n
+            |> List.filter (fun t -> match t.Kind with TokNewline | TokSemi -> false | _ -> true)
+        match List.tryLast meaningful with
+        | Some t -> (t.EndLine, t.EndCol)
+        | None -> (fallbackLine, fallbackCol)
+
+/// Build a Span from a single token, stamped with the current file.
+let spanOfToken (t: Token) : Span =
+    { StartLine = t.Line; StartCol = t.Col; EndLine = t.EndLine; EndCol = t.EndCol; File = currentFile }
+
+/// Span of the head token of `tokens` (single-token productions: ExprVar,
+/// ExprLit, PatVar, keyword atoms). noSpan when the list is empty (unreachable
+/// for the call sites, which already matched a `Some` head).
+let private headSpan (tokens: Token list) : Span =
+    match tokens with
+    | t :: _ -> spanOfToken t
+    | [] -> noSpan
+
+/// Real span for a multi-token production: from the first token of `startToks`
+/// to the last meaningful (non-terminator) token consumed in reaching
+/// `remaining` (a suffix of startToks). Stamped with the current file. This is
+/// the natural range for delimited/keyword-led forms (calls, blocks, formers).
+let private rangeSpan (startToks: Token list) (remaining: Token list) : Span =
+    let sL, sC = currentPos startToks
+    let eL, eC = consumedEnd startToks remaining sL sC
+    { StartLine = sL; StartCol = sC; EndLine = eL; EndCol = eC; File = currentFile }
+
+/// Build an Expr whose span covers the production from `startToks` to `remaining`.
+let private mkE (startToks: Token list) (remaining: Token list) (kind: ExprKind) : Expr =
+    mkExpr (rangeSpan startToks remaining) kind
+
+/// Build a Pattern whose span covers the production from `startToks` to `remaining`.
+let private mkP (startToks: Token list) (remaining: Token list) (kind: PatternKind) : Pattern =
+    mkPat (rangeSpan startToks remaining) kind
+
+/// Expected-token error: `expected` is the wanted kind, `tokens` the stream
+/// (head = actual token, empty = EOF). Humanized message + BL1001, except
+/// "got end of file" which is classified BL1002.
+let expectedError (expected: TokenKind) (tokens: Token list) : ParseResult<'T> =
+    let msg actual = sprintf "Expected %s but got %s" (describeToken expected) (describeToken actual)
+    match tokens with
+    | t :: _ when t.Kind = TokEOF -> errorFull "BL1002" (msg TokEOF) t.Line t.Col t.EndLine t.EndCol
+    | t :: _ -> errorFull "BL1001" (msg t.Kind) t.Line t.Col t.EndLine t.EndCol
+    | [] ->
+        let (l, c) = lastTokenEnd
+        errorFull "BL1002" (msg TokEOF) l c l c
 
 let peek (tokens: Token list) =
     match tokens with
@@ -72,16 +220,16 @@ let peekContinuation (tokens: Token list) : TokenKind option * Token list =
 let expect kind (tokens: Token list) : ParseResult<Token> =
     match tokens with
     | t :: rest when t.Kind = kind -> Ok (t, rest)
-    | t :: _ -> error (sprintf "Expected %A but got %A" kind t.Kind) t.Line t.Col
-    | [] -> error (sprintf "Expected %A but got EOF" kind) 0 0
+    | _ -> expectedError kind tokens
 
 let expectIdent (tokens: Token list) : ParseResult<string> =
     match tokens with
     | t :: rest ->
         match t.Kind with
         | TokIdent name -> Ok (name, rest)
-        | _ -> error (sprintf "Expected identifier but got %A" t.Kind) t.Line t.Col
-    | [] -> error "Expected identifier but got EOF" 0 0
+        | TokEOF -> errorFull "BL1002" (sprintf "Expected identifier but got %s" (describeToken TokEOF)) t.Line t.Col t.EndLine t.EndCol
+        | _ -> errorFull "BL1001" (sprintf "Expected identifier but got %s" (describeToken t.Kind)) t.Line t.Col t.EndLine t.EndCol
+    | [] -> errorEof "Expected identifier but got end of file"
 
 /// Expect a closing > for type parameters.
 /// Handles >> (compose token) by splitting: consume one > and leave one >.
@@ -95,8 +243,9 @@ let expectGt (tokens: Token list) : ParseResult<unit> =
         // Split >>: consume first >, leave second > with adjusted position
         let remainingGt = { t with Kind = TokOp ">"; Col = t.Col + 1; Length = 1 }
         Ok ((), remainingGt :: rest)
-    | t :: _ -> error (sprintf "Expected '>' but got %A" t.Kind) t.Line t.Col
-    | [] -> error "Expected '>' but got EOF" 0 0
+    | t :: _ when t.Kind = TokEOF -> errorFull "BL1002" (sprintf "Expected '>' but got %s" (describeToken TokEOF)) t.Line t.Col t.EndLine t.EndCol
+    | t :: _ -> errorFull "BL1001" (sprintf "Expected '>' but got %s" (describeToken t.Kind)) t.Line t.Col t.EndLine t.EndCol
+    | [] -> errorEof "Expected '>' but got end of file"
 
 // Bind operator for chaining parsers
 let (>>=) (result: ParseResult<'a>) (f: 'a -> Token list -> ParseResult<'b>) : ParseResult<'b> =
@@ -105,7 +254,7 @@ let (>>=) (result: ParseResult<'a>) (f: 'a -> Token list -> ParseResult<'b>) : P
     | Error e -> Error e
 
 // Forward reference for body parser (inline or block)
-let parseBodyRef : (Token list -> ParseResult<Expr>) ref = ref (fun _ -> Error { Message = "Not initialized"; Line = 0; Col = 0 })
+let parseBodyRef : (Token list -> ParseResult<Expr>) ref = ref (fun _ -> Error { Message = "Not initialized"; Line = 0; Col = 0; EndLine = 0; EndCol = 0; Code = "BL1999" })
 let parseBody tokens = !parseBodyRef tokens
 
 // ============================================================================
@@ -302,10 +451,10 @@ and parseSimpleAdditive (tokens: Token list) : ParseResult<Expr> =
         match peek toks with
         | Some (TokOp "+") ->
             advance toks |> parseSimpleMultiplicative >>= fun right remaining ->
-            loop (ExprBinOp (Elementwise, OpAdd, acc, right)) remaining
+            loop (mkExpr (mergeSpan acc.Span right.Span) (ExprBinOp (Elementwise, OpAdd, acc, right))) remaining
         | Some (TokOp "-") ->
             advance toks |> parseSimpleMultiplicative >>= fun right remaining ->
-            loop (ExprBinOp (Elementwise, OpSub, acc, right)) remaining
+            loop (mkExpr (mergeSpan acc.Span right.Span) (ExprBinOp (Elementwise, OpSub, acc, right))) remaining
         | _ -> success acc toks
     loop left rest
 
@@ -315,17 +464,24 @@ and parseSimpleMultiplicative (tokens: Token list) : ParseResult<Expr> =
         match peek toks with
         | Some (TokOp "*") ->
             advance toks |> parseSimplePrimary >>= fun right remaining ->
-            loop (ExprBinOp (Elementwise, OpMul, acc, right)) remaining
+            loop (mkExpr (mergeSpan acc.Span right.Span) (ExprBinOp (Elementwise, OpMul, acc, right))) remaining
         | Some (TokOp "/") ->
             advance toks |> parseSimplePrimary >>= fun right remaining ->
-            loop (ExprBinOp (Elementwise, OpDiv, acc, right)) remaining
+            loop (mkExpr (mergeSpan acc.Span right.Span) (ExprBinOp (Elementwise, OpDiv, acc, right))) remaining
         | _ -> success acc toks
     loop left rest
 
 and parseSimplePrimary (tokens: Token list) : ParseResult<Expr> =
     match peek tokens with
-    | Some (LiteralTok lit) -> success (ExprLit lit) (advance tokens)
-    | Some (TokIdent name) -> success (ExprVar name) (advance tokens)
+    | Some (TokOp "-") ->
+        // Unary minus on a simple operand: needed for signed static payloads
+        // such as halo<I, [-1, 0, 1]> (and negative EnumIdx keys). Binds
+        // tighter than the additive/multiplicative loops, matching normal
+        // unary-minus precedence; folds via StaticEval's OpNeg arm.
+        advance tokens |> parseSimplePrimary >>= fun operand remaining ->
+        success (mkExpr (mergeSpan (headSpan tokens) operand.Span) (ExprUnaryOp (OpNeg, operand))) remaining
+    | Some (LiteralTok lit) -> success (mkExpr (headSpan tokens) (ExprLit lit)) (advance tokens)
+    | Some (TokIdent name) -> success (mkExpr (headSpan tokens) (ExprVar name)) (advance tokens)
     | Some TokLParen ->
         // Parenthesized simple expression OR tuple of simple expressions.
         // The tuple form serves static index-type arguments whose payload is
@@ -339,17 +495,17 @@ and parseSimplePrimary (tokens: Token list) : ParseResult<Expr> =
             let line, col = currentPos tokens
             error "Expected simple expression inside parentheses" line col
         | [single] -> success single remaining
-        | many -> success (ExprTuple many) remaining
+        | many -> success (mkE tokens remaining (ExprTuple many)) remaining
     | Some TokLBracket ->
         // Array literal inside simple expression context (e.g., EnumIdx<[1, 2, 3]>)
         advance tokens |> sepBy parseSimpleExpr TokComma >>= fun elems afterElems ->
         expect TokRBracket afterElems >>= fun _ remaining ->
-        success (ExprArrayLit elems) remaining
+        success (mkE tokens remaining (ExprArrayLit elems)) remaining
     | Some kind ->
         let line, col = currentPos tokens
-        error (sprintf "Expected simple expression but got %A" kind) line col
+        error (sprintf "Expected simple expression but got %s" (describeToken kind)) line col
     | None ->
-        error "Expected expression but got EOF" 0 0
+        errorEof "Expected expression but got end of file"
 
 // ============================================================================
 // Literal Parsing
@@ -365,7 +521,7 @@ let parseLiteral (tokens: Token list) : ParseResult<Literal> =
         | TokString v -> success (LitString v) rest
         | TokChar v -> success (LitChar v) rest
         | _ -> error "Expected literal" t.Line t.Col
-    | [] -> error "Expected literal but got EOF" 0 0
+    | [] -> errorEof "Expected literal but got end of file"
 
 // ============================================================================
 // Type Expression Parsing
@@ -375,9 +531,9 @@ let parseLiteral (tokens: Token list) : ParseResult<Literal> =
 /// Can be: integer literal, arity keyword, or simple identifier
 let parseRankExpr (tokens: Token list) : ParseResult<Expr> =
     match peek tokens with
-    | Some (TokInt n) -> 
-        success (ExprLit (LitInt n)) (advance tokens)
-    | Some (TokKeyword KwArity) -> 
+    | Some (TokInt n) ->
+        success (mkExpr (headSpan tokens) (ExprLit (LitInt n))) (advance tokens)
+    | Some (TokKeyword KwArity) ->
         let afterArity = advance tokens
         match peek afterArity with
         | Some TokLParen ->
@@ -385,20 +541,20 @@ let parseRankExpr (tokens: Token list) : ParseResult<Expr> =
             match peek afterLParen with
             | Some (TokIdent paramName) ->
                 advance afterLParen |> expect TokRParen >>= fun _ remaining ->
-                success (ExprArity paramName) remaining
+                success (mkE tokens remaining (ExprArity paramName)) remaining
             | _ ->
                 let line, col = currentPos afterLParen
                 error "Expected parameter name in arity()" line col
         | _ ->
             let line, col = currentPos afterArity
             error "arity requires parameter name: arity(paramName)" line col
-    | Some (TokIdent name) -> 
-        success (ExprVar name) (advance tokens)
+    | Some (TokIdent name) ->
+        success (mkExpr (headSpan tokens) (ExprVar name)) (advance tokens)
     | Some t ->
         let line, col = currentPos tokens
-        error (sprintf "Expected rank expression (integer, arity, or identifier), got %A" t) line col
+        error (sprintf "Expected rank expression (integer, arity, or identifier), got %s" (describeToken t)) line col
     | None ->
-        error "Expected rank expression but got EOF" 0 0
+        errorEof "Expected rank expression but got end of file"
 
 let rec parseTypeExpr (tokens: Token list) : ParseResult<TypeExpr> =
     parseTypeAtom tokens >>= fun first rest ->
@@ -462,7 +618,18 @@ and parseTypeAtom (tokens: Token list) : ParseResult<TypeExpr> =
     | Some (TokKeyword KwIrrepsIdx) ->
         // IrrepsIdx in standalone position. Same rationale as KwDepIdx above.
         parseIndexType tokens
-    
+
+    | Some (TokKeyword KwHalo) ->
+        // halo<Inner, [offsets]> in TYPE position — a range<> slot only.
+        // Deliberately NOT in parseIndexType: `Array<T like halo<..>>` must
+        // stay illegal (a halo is a traversal transformer, not storage).
+        advance tokens |> expect (TokOp "<") >>= fun _ afterLt ->
+        parseTypeExpr afterLt >>= fun inner afterInner ->
+        expect TokComma afterInner >>= fun _ afterComma ->
+        parseSimpleExpr afterComma >>= fun offsets afterOffsets ->
+        expectGt afterOffsets >>= fun _ remaining ->
+        success (TyHalo (inner, offsets)) remaining
+
     | Some (TokKeyword KwVoid) ->
         // Void type (the unit type — no value)
         success (TyNamed ("Void", [])) (advance tokens)
@@ -502,8 +669,8 @@ and parseTypeAtom (tokens: Token list) : ParseResult<TypeExpr> =
             // The caret is the syntactic marker for type variables.
             // T^0 = scalar type var, T^2 = rank-2 array type var, T^r = variable-rank
             advance afterName |> parseRankExpr >>= fun rankExpr remaining ->
-            match rankExpr with
-            | ExprLit (LitInt n) ->
+            match rankExpr.Kind with
+            | ExprKind.ExprLit (LitInt n) ->
                 success (TyVar (name, Some (int n))) remaining
             | _ ->
                 // Non-literal rank (T^r where r is a variable)
@@ -519,10 +686,10 @@ and parseTypeAtom (tokens: Token list) : ParseResult<TypeExpr> =
     
     | Some kind ->
         let line, col = currentPos tokens
-        error (sprintf "Unexpected token in type: %A" kind) line col
+        error (sprintf "Unexpected token in type: %s" (describeToken kind)) line col
     
     | None ->
-        error "Expected type but got EOF" 0 0
+        errorEof "Expected type but got end of file"
 
 // Parse index types specifically - Idx<extent> or SymIdx<arity, extent>
 // These are self-contained with their own < > brackets
@@ -678,10 +845,10 @@ and parseIndexType (tokens: Token list) : ParseResult<TypeExpr> =
     
     | Some kind ->
         let line, col = currentPos tokens
-        error (sprintf "Expected index type (Idx, SymIdx, AntisymIdx, HermitianIdx, EnumIdx, DepIdx, RaggedIdx, IrrepsIdx, or a named index type alias) but got %A" kind) line col
+        error (sprintf "Expected index type (Idx, SymIdx, AntisymIdx, HermitianIdx, EnumIdx, DepIdx, RaggedIdx, IrrepsIdx, or a named index type alias) but got %s" (describeToken kind)) line col
     
     | None ->
-        error "Expected index type but got EOF" 0 0
+        errorEof "Expected index type but got end of file"
 
 // ============================================================================
 // Pattern Parsing
@@ -692,14 +859,14 @@ let rec parsePattern (tokens: Token list) : ParseResult<Pattern> =
     match peek rest with
     | Some TokColonColon ->
         advance rest |> parsePattern >>= fun right remaining ->
-        success (PatCons (left, right)) remaining
+        success (mkPat (mergeSpan left.Span right.Span) (PatCons (left, right))) remaining
     | _ -> success left rest
 
 and parseAtomicPattern (tokens: Token list) : ParseResult<Pattern> =
     match peek tokens with
     | Some TokUnderscore ->
-        success PatWildcard (advance tokens)
-    
+        success (mkPat (headSpan tokens) PatWildcard) (advance tokens)
+
     | Some (TokIdent name) ->
         let afterName = advance tokens
         match peek afterName with
@@ -710,35 +877,35 @@ and parseAtomicPattern (tokens: Token list) : ParseResult<Pattern> =
             // Variant pattern with data: Some(x)
             advance afterName |> parsePattern >>= fun inner afterInner ->
             expect TokRParen afterInner >>= fun _ remaining ->
-            success (PatVariant (name, Some inner)) remaining
+            success (mkP tokens remaining (PatVariant (name, Some inner))) remaining
         | _ ->
             // Could be a variant without data (like None) or a variable
             // For now, treat as variable - variant detection happens at type checking
-            success (PatVar name) afterName
-    
+            success (mkPat (headSpan tokens) (PatVar name)) afterName
+
     | Some (TokInt v) ->
-        success (PatLit (LitInt v)) (advance tokens)
-    
+        success (mkPat (headSpan tokens) (PatLit (LitInt v))) (advance tokens)
+
     | Some (TokBool v) ->
-        success (PatLit (LitBool v)) (advance tokens)
-    
+        success (mkPat (headSpan tokens) (PatLit (LitBool v))) (advance tokens)
+
     | Some (TokString v) ->
-        success (PatLit (LitString v)) (advance tokens)
-    
+        success (mkPat (headSpan tokens) (PatLit (LitString v))) (advance tokens)
+
     | Some TokLParen ->
         advance tokens |> sepBy parsePattern TokComma >>= fun pats afterPats ->
         expect TokRParen afterPats >>= fun _ remaining ->
         match pats with
-        | [] -> success (PatLit LitUnit) remaining
+        | [] -> success (mkP tokens remaining (PatLit LitUnit)) remaining
         | [single] -> success single remaining
-        | _ -> success (PatTuple pats) remaining
+        | _ -> success (mkP tokens remaining (PatTuple pats)) remaining
     
     | Some kind ->
         let line, col = currentPos tokens
-        error (sprintf "Unexpected token in pattern: %A" kind) line col
+        error (sprintf "Unexpected token in pattern: %s" (describeToken kind)) line col
     
     | None ->
-        error "Expected pattern but got EOF" 0 0
+        errorEof "Expected pattern but got end of file"
 
 /// Parse struct pattern: Name { field1, field2: pat, ... }
 and parseStructPattern (name: string) (tokens: Token list) : ParseResult<Pattern> =
@@ -767,10 +934,10 @@ and parseStructPattern (name: string) (tokens: Token list) : ParseResult<Pattern
             | Some TokComma ->
                 // shorthand: field (binds to variable of same name)
                 parseFieldPats (advance afterFieldName) >>= fun rest remaining ->
-                success ((fieldName, PatVar fieldName) :: rest) remaining
+                success ((fieldName, mkPat (headSpan toks) (PatVar fieldName)) :: rest) remaining
             | Some TokRBrace ->
                 // shorthand: field
-                success [(fieldName, PatVar fieldName)] (advance afterFieldName)
+                success [(fieldName, mkPat (headSpan toks) (PatVar fieldName))] (advance afterFieldName)
             | _ ->
                 let line, col = currentPos afterFieldName
                 error "Expected ':' or ',' in struct pattern" line col
@@ -779,7 +946,9 @@ and parseStructPattern (name: string) (tokens: Token list) : ParseResult<Pattern
             error "Expected field name or '}' in struct pattern" line col
     
     parseFieldPats afterBrace >>= fun fields remaining ->
-    success (PatStruct (name, fields)) remaining
+    // Span covers the `{ ... }` body (the type name is consumed by the caller
+    // before this function is entered, so it is not part of this range).
+    success (mkP tokens remaining (PatStruct (name, fields))) remaining
 
 // ============================================================================
 // Expression Parsing - Precedence Climbing
@@ -817,7 +986,7 @@ let parseIdentList (tokens: Token list) : ParseResult<string list> =
         | _ -> 
             if List.isEmpty acc then
                 let line, col = currentPos toks
-                Error { Message = "Expected identifier"; Line = line; Col = col }
+                errorC "BL1001" "Expected identifier" line col
             else
                 Ok (List.rev acc, toks)
     loop [] tokens
@@ -836,8 +1005,8 @@ let rec private parseOmpArgs (acc: (string * int) list) (tokens: Token list) : P
             match rest with
             | t2 :: rest2 when t2.Kind = TokComma -> parseOmpArgs acc' rest2
             | _ -> Ok (List.rev acc', rest)
-        | _ -> error (sprintf "Expected integer in omp(...) but got %A" t.Kind) t.Line t.Col
-    | [] -> error "Expected integer in omp(...) but got EOF" 0 0
+        | _ -> error (sprintf "Expected integer in omp(...) but got %s" (describeToken t.Kind)) t.Line t.Col
+    | [] -> errorEof "Expected integer in omp(...) but got end of file"
 
 let parseWhereClause (tokens: Token list) : ParseResult<WhereClause> =
     // `par` accumulates parallelization strategy assignments as a LIST (see
@@ -916,8 +1085,8 @@ let parseWhereClause (tokens: Token list) : ParseResult<WhereClause> =
                             | TokInt n ->
                                 expect TokRParen rest >>= fun _ remaining ->
                                 loop comms (par @ [Cuda { BlockSize = int n }]) custom remaining
-                            | _ -> error (sprintf "Expected integer block size but got %A" t.Kind) t.Line t.Col
-                        | [] -> error "Expected integer block size but got EOF" 0 0
+                            | _ -> error (sprintf "Expected integer block size but got %s" (describeToken t.Kind)) t.Line t.Col
+                        | [] -> errorEof "Expected integer block size but got end of file"
                 | _ ->
                     // bare `cuda` => default block size
                     loop comms (par @ [Cuda { BlockSize = 256 }]) custom afterCuda
@@ -980,20 +1149,24 @@ and parseAssignment (tokens: Token list) : ParseResult<Expr> =
     match peek rest with
     | Some (TokOp "=") ->
         advance rest |> parseAssignment >>= fun right remaining ->
-        success (ExprAssign (left, right)) remaining
+        success (mkExpr (mergeSpan left.Span right.Span) (ExprAssign (left, right))) remaining
     // Compound assignment: desugar x += y to x = x + y
     | Some (TokOp "+=") ->
         advance rest |> parseAssignment >>= fun right remaining ->
-        success (ExprAssign (left, ExprBinOp (Elementwise, OpAdd, left, right))) remaining
+        let sp = mergeSpan left.Span right.Span
+        success (mkExpr sp (ExprAssign (left, mkExpr sp (ExprBinOp (Elementwise, OpAdd, left, right))))) remaining
     | Some (TokOp "-=") ->
         advance rest |> parseAssignment >>= fun right remaining ->
-        success (ExprAssign (left, ExprBinOp (Elementwise, OpSub, left, right))) remaining
+        let sp = mergeSpan left.Span right.Span
+        success (mkExpr sp (ExprAssign (left, mkExpr sp (ExprBinOp (Elementwise, OpSub, left, right))))) remaining
     | Some (TokOp "*=") ->
         advance rest |> parseAssignment >>= fun right remaining ->
-        success (ExprAssign (left, ExprBinOp (Elementwise, OpMul, left, right))) remaining
+        let sp = mergeSpan left.Span right.Span
+        success (mkExpr sp (ExprAssign (left, mkExpr sp (ExprBinOp (Elementwise, OpMul, left, right))))) remaining
     | Some (TokOp "/=") ->
         advance rest |> parseAssignment >>= fun right remaining ->
-        success (ExprAssign (left, ExprBinOp (Elementwise, OpDiv, left, right))) remaining
+        let sp = mergeSpan left.Span right.Span
+        success (mkExpr sp (ExprAssign (left, mkExpr sp (ExprBinOp (Elementwise, OpDiv, left, right))))) remaining
     | _ -> success left rest
 
 /// Postfix type annotation: `expr : Type`
@@ -1011,19 +1184,21 @@ and parseTyped (tokens: Token list) : ParseResult<Expr> =
     match peek rest with
     | Some TokColon ->
         advance rest |> parseTypeExpr >>= fun ty remaining ->
-        success (ExprTyped (expr, ty)) remaining
+        // Span runs from the base expression through the annotated type.
+        success (mkExpr (mergeSpan expr.Span (rangeSpan rest remaining)) (ExprTyped (expr, ty))) remaining
     | _ -> success expr rest
 
 /// Named infix operators: a :name: b -> name(a, b)
 /// Lowest precedence, left-associative
 and parseNamedInfix (tokens: Token list) : ParseResult<Expr> =
     parsePipeline tokens >>= fun left rest ->
-    let rec loop acc toks =
+    let rec loop (acc: Expr) toks =
         match peek toks with
         | Some (TokNamedInfix name) ->
             advance toks |> parsePipeline >>= fun right remaining ->
             // Desugar :name: to function application: name(a, b)
-            let call = ExprApp (ExprVar name, [acc; right])
+            let fn = mkExpr (headSpan toks) (ExprVar name)
+            let call = mkExpr (mergeSpan acc.Span right.Span) (ExprApp (fn, [acc; right]))
             loop call remaining
         | _ -> success acc toks
     loop left rest
@@ -1035,16 +1210,16 @@ and parsePipeline (tokens: Token list) : ParseResult<Expr> =
         match peeked with
         | Some (TokOp "|>") ->
             advance toks' |> parseChoice >>= fun right remaining ->
-            match right with
-            | ExprVar "compute" -> loop (ExprCompute acc) remaining
+            match right.Kind with
+            | ExprKind.ExprVar "compute" -> loop (mkExpr (mergeSpan acc.Span right.Span) (ExprCompute acc)) remaining
             // Provider reads are module-qualified (`x |> alias.read`), so they
             // take the generic pipe-application desugar below; the checker's
             // provider-read arm rewrites the application to TExprRead.
-            | _ -> loop (ExprApp (right, [acc])) remaining
+            | _ -> loop (mkExpr (mergeSpan acc.Span right.Span) (ExprApp (right, [acc]))) remaining
         | Some (TokOp "|@>") ->
             // Pipe-apply: a |@> b  desugars to  b <@> a
             advance toks' |> parseChoice >>= fun right remaining ->
-            loop (ExprBinOp (Elementwise, OpApply, right, acc)) remaining
+            loop (mkExpr (mergeSpan acc.Span right.Span) (ExprBinOp (Elementwise, OpApply, right, acc))) remaining
         | _ -> success acc toks
     loop left rest
 
@@ -1055,7 +1230,7 @@ and parseChoice (tokens: Token list) : ParseResult<Expr> =
         match peeked with
         | Some (ChoiceOp op) ->
             advance toks' |> parseParallel >>= fun right remaining ->
-            loop (ExprBinOp (Elementwise, op, acc, right)) remaining
+            loop (mkExpr (mergeSpan acc.Span right.Span) (ExprBinOp (Elementwise, op, acc, right))) remaining
         | _ -> success acc toks
     loop left rest
 
@@ -1066,7 +1241,7 @@ and parseParallel (tokens: Token list) : ParseResult<Expr> =
         match peeked with
         | Some (ParallelOp op) ->
             advance toks' |> parseBind >>= fun right remaining ->
-            loop (ExprBinOp (Elementwise, op, acc, right)) remaining
+            loop (mkExpr (mergeSpan acc.Span right.Span) (ExprBinOp (Elementwise, op, acc, right))) remaining
         | _ -> success acc toks
     loop left rest
 
@@ -1077,11 +1252,11 @@ and parseBind (tokens: Token list) : ParseResult<Expr> =
         match peeked with
         | Some (BindOp op) ->
             advance toks' |> parseApply >>= fun right remaining ->
-            loop (ExprBinOp (Elementwise, op, acc, right)) remaining
+            loop (mkExpr (mergeSpan acc.Span right.Span) (ExprBinOp (Elementwise, op, acc, right))) remaining
         // >> is now a single token from the lexer
         | Some (TokOp ">>") ->
             advance toks' |> parseApply >>= fun right remaining ->
-            loop (ExprBinOp (Elementwise, OpCompose, acc, right)) remaining
+            loop (mkExpr (mergeSpan acc.Span right.Span) (ExprBinOp (Elementwise, OpCompose, acc, right))) remaining
         | _ -> success acc toks
     loop left rest
 
@@ -1092,7 +1267,7 @@ and parseApply (tokens: Token list) : ParseResult<Expr> =
         match peeked with
         | Some (ApplyOp op) ->
             advance toks' |> parseArrayProduct >>= fun right remaining ->
-            loop (ExprBinOp (Elementwise, op, acc, right)) remaining
+            loop (mkExpr (mergeSpan acc.Span right.Span) (ExprBinOp (Elementwise, op, acc, right))) remaining
         | _ -> success acc toks
     loop left rest
 
@@ -1103,7 +1278,7 @@ and parseArrayProduct (tokens: Token list) : ParseResult<Expr> =
         match peeked with
         | Some (ArrayProductOp op) ->
             advance toks' |> parseOr >>= fun right remaining ->
-            loop (ExprBinOp (Elementwise, op, acc, right)) remaining
+            loop (mkExpr (mergeSpan acc.Span right.Span) (ExprBinOp (Elementwise, op, acc, right))) remaining
         | _ -> success acc toks
     loop left rest
 
@@ -1113,7 +1288,7 @@ and parseOr (tokens: Token list) : ParseResult<Expr> =
         match peek toks with
         | Some (OrOp (mode, op)) ->
             advance toks |> parseAnd >>= fun right remaining ->
-            loop (ExprBinOp (mode, op, acc, right)) remaining
+            loop (mkExpr (mergeSpan acc.Span right.Span) (ExprBinOp (mode, op, acc, right))) remaining
         | _ -> success acc toks
     loop left rest
 
@@ -1123,7 +1298,7 @@ and parseAnd (tokens: Token list) : ParseResult<Expr> =
         match peek toks with
         | Some (AndOp (mode, op)) ->
             advance toks |> parseEquality >>= fun right remaining ->
-            loop (ExprBinOp (mode, op, acc, right)) remaining
+            loop (mkExpr (mergeSpan acc.Span right.Span) (ExprBinOp (mode, op, acc, right))) remaining
         | _ -> success acc toks
     loop left rest
 
@@ -1132,7 +1307,7 @@ and parseEquality (tokens: Token list) : ParseResult<Expr> =
     match peek rest with
     | Some (EqualityOp (mode, op)) ->
         advance rest |> parseComparison >>= fun right remaining ->
-        success (ExprBinOp (mode, op, left, right)) remaining
+        success (mkExpr (mergeSpan left.Span right.Span) (ExprBinOp (mode, op, left, right))) remaining
     | _ -> success left rest
 
 and parseComparison (tokens: Token list) : ParseResult<Expr> =
@@ -1140,7 +1315,7 @@ and parseComparison (tokens: Token list) : ParseResult<Expr> =
     match peek rest with
     | Some (ComparisonOp (mode, op)) ->
         advance rest |> parseCons >>= fun right remaining ->
-        success (ExprBinOp (mode, op, left, right)) remaining
+        success (mkExpr (mergeSpan left.Span right.Span) (ExprBinOp (mode, op, left, right))) remaining
     | _ -> success left rest
 
 and parseCons (tokens: Token list) : ParseResult<Expr> =
@@ -1148,7 +1323,7 @@ and parseCons (tokens: Token list) : ParseResult<Expr> =
     match peek rest with
     | Some TokColonColon ->
         advance rest |> parseDotDot >>= fun right remaining ->
-        success (ExprBinOp (Elementwise, OpCons, left, right)) remaining
+        success (mkExpr (mergeSpan left.Span right.Span) (ExprBinOp (Elementwise, OpCons, left, right))) remaining
     | _ -> success left rest
 
 and parseDotDot (tokens: Token list) : ParseResult<Expr> =
@@ -1156,7 +1331,7 @@ and parseDotDot (tokens: Token list) : ParseResult<Expr> =
     match peek rest with
     | Some TokDotDot ->
         advance rest |> parseAdditive >>= fun right remaining ->
-        success (ExprDotDot (left, right)) remaining
+        success (mkExpr (mergeSpan left.Span right.Span) (ExprDotDot (left, right))) remaining
     | _ -> success left rest
 
 and parseAdditive (tokens: Token list) : ParseResult<Expr> =
@@ -1165,7 +1340,7 @@ and parseAdditive (tokens: Token list) : ParseResult<Expr> =
         match peek toks with
         | Some (AdditiveOp (mode, op)) ->
             advance toks |> parseMultiplicative >>= fun right remaining ->
-            loop (ExprBinOp (mode, op, acc, right)) remaining
+            loop (mkExpr (mergeSpan acc.Span right.Span) (ExprBinOp (mode, op, acc, right))) remaining
         | _ -> success acc toks
     loop left rest
 
@@ -1175,7 +1350,7 @@ and parseMultiplicative (tokens: Token list) : ParseResult<Expr> =
         match peek toks with
         | Some (MultiplicativeOp (mode, op)) ->
             advance toks |> parsePower >>= fun right remaining ->
-            loop (ExprBinOp (mode, op, acc, right)) remaining
+            loop (mkExpr (mergeSpan acc.Span right.Span) (ExprBinOp (mode, op, acc, right))) remaining
         | _ -> success acc toks
     loop left rest
 
@@ -1184,14 +1359,14 @@ and parsePower (tokens: Token list) : ParseResult<Expr> =
     match peek rest with
     | Some (PowerOp (mode, op)) ->
         advance rest |> parsePower >>= fun right remaining ->
-        success (ExprBinOp (mode, op, left, right)) remaining
+        success (mkExpr (mergeSpan left.Span right.Span) (ExprBinOp (mode, op, left, right))) remaining
     | _ -> success left rest
 
 and parseUnary (tokens: Token list) : ParseResult<Expr> =
     match peek tokens with
     | Some (UnaryOp op) ->
         advance tokens |> parseUnary >>= fun expr remaining ->
-        success (ExprUnaryOp (op, expr)) remaining
+        success (mkExpr (mergeSpan (headSpan tokens) expr.Span) (ExprUnaryOp (op, expr))) remaining
     | _ -> parsePostfix tokens
 
 /// Parse struct construction: Name { field1 = val1, field2 = val2 }
@@ -1201,7 +1376,17 @@ and parseStructExpr (name: string) (tokens: Token list) : ParseResult<Expr> =
     let rec parseFieldInits toks =
         let toks = skipNL toks
         match peek toks with
-        | Some TokRBrace -> success [] (advance toks)
+        | Some TokRBrace -> success ([], None) (advance toks)
+        | Some TokDotDot ->
+            // Functional update: `..base` copies the remaining fields from
+            // base. Must be the LAST entry (nothing may follow it).
+            parseExprImpl (advance toks) >>= fun baseExpr afterBase ->
+            let afterBase = skipNL afterBase
+            (match peek afterBase with
+             | Some TokRBrace -> success ([], Some baseExpr) (advance afterBase)
+             | _ ->
+                 let line, col = currentPos afterBase
+                 error "'..base' must be the last entry in a struct literal" line col)
         | Some (TokIdent fieldName) ->
             let afterFieldName = advance toks
             match peek afterFieldName with
@@ -1211,29 +1396,31 @@ and parseStructExpr (name: string) (tokens: Token list) : ParseResult<Expr> =
                 let afterValue = skipNL afterValue
                 match peek afterValue with
                 | Some TokComma ->
-                    parseFieldInits (advance afterValue) >>= fun rest remaining ->
-                    success ((fieldName, value) :: rest) remaining
+                    parseFieldInits (advance afterValue) >>= fun (rest, spread) remaining ->
+                    success ((fieldName, value) :: rest, spread) remaining
                 | Some TokRBrace ->
-                    success [(fieldName, value)] (advance afterValue)
+                    success ([(fieldName, value)], None) (advance afterValue)
                 | _ ->
                     let line, col = currentPos afterValue
                     error "Expected ',' or '}' in struct expression" line col
             | Some TokComma ->
                 // shorthand: field (same as field = field)
-                parseFieldInits (advance afterFieldName) >>= fun rest remaining ->
-                success ((fieldName, ExprVar fieldName) :: rest) remaining
+                parseFieldInits (advance afterFieldName) >>= fun (rest, spread) remaining ->
+                success ((fieldName, mkExpr (headSpan toks) (ExprVar fieldName)) :: rest, spread) remaining
             | Some TokRBrace ->
                 // shorthand: field (same as field = field)
-                success [(fieldName, ExprVar fieldName)] (advance afterFieldName)
+                success ([(fieldName, mkExpr (headSpan toks) (ExprVar fieldName))], None) (advance afterFieldName)
             | _ ->
                 let line, col = currentPos afterFieldName
                 error "Expected '=' or ',' in struct field" line col
         | _ ->
             let line, col = currentPos toks
-            error "Expected field name or '}'" line col
-    
-    parseFieldInits afterBrace >>= fun fields remaining ->
-    success (ExprStruct (name, fields)) remaining
+            error "Expected field name, '..base', or '}'" line col
+
+    parseFieldInits afterBrace >>= fun (fields, spread) remaining ->
+    // Span covers the `{ ... }` body (the type name is consumed by the caller
+    // before this function is entered, so it is not part of this range).
+    success (mkE tokens remaining (ExprStruct (name, fields, spread))) remaining
 
 and parsePostfix (tokens: Token list) : ParseResult<Expr> =
     parsePrimary tokens >>= fun left rest ->
@@ -1260,29 +1447,29 @@ and parsePostfix (tokens: Token list) : ParseResult<Expr> =
             // Function call (delimited: struct literals re-enabled)
             allowingStructLiterals (fun () -> advance toks |> sepBy parseExprImpl TokComma) >>= fun args afterArgs ->
             expect TokRParen afterArgs >>= fun _ remaining ->
-            loop (ExprApp (acc, args)) remaining
+            loop (mkExpr (mergeSpan acc.Span (rangeSpan toks remaining)) (ExprApp (acc, args))) remaining
         | Some TokLBracket when not (opensOnLaterLine (List.head toks)) ->
             // Poly-tuple indexing: args[k] (delimited: struct literals re-enabled)
             allowingStructLiterals (fun () -> advance toks |> parseExprImpl) >>= fun index afterIndex ->
             expect TokRBracket afterIndex >>= fun _ remaining ->
-            loop (ExprTupleIndex (acc, index)) remaining
+            loop (mkExpr (mergeSpan acc.Span (rangeSpan toks remaining)) (ExprTupleIndex (acc, index))) remaining
         | Some TokDot ->
             // Field access
             advance toks |> expectIdent >>= fun field remaining ->
-            loop (ExprField (acc, field)) remaining
+            loop (mkExpr (mergeSpan acc.Span (rangeSpan toks remaining)) (ExprField (acc, field))) remaining
         | _ -> success acc toks
     loop left rest
 
 and parsePrimary (tokens: Token list) : ParseResult<Expr> =
     match peek tokens with
     // Literals (most common case first)
-    | Some (LiteralTok lit) -> success (ExprLit lit) (advance tokens)
+    | Some (LiteralTok lit) -> success (mkExpr (headSpan tokens) (ExprLit lit)) (advance tokens)
 
     // Wildcard hole `_` in expression position (e.g. a free axis in a compound
     // index B((a, _, c))). A general token; the consuming context gives it
     // meaning, and unconsumed uses are rejected in typecheck.
-    | Some TokUnderscore -> success ExprWildcard (advance tokens)
-    
+    | Some TokUnderscore -> success (mkExpr (headSpan tokens) ExprWildcard) (advance tokens)
+
     // Variables or struct construction
     | Some (TokIdent name) ->
         let afterName = advance tokens
@@ -1290,13 +1477,15 @@ and parsePrimary (tokens: Token list) : ParseResult<Expr> =
         | Some TokLBrace when not noStructLiteralCtx.Value ->
             // Struct construction: Name { field1 = val1, field2 = val2 }
             // (suppressed in for-in range headers, where the brace is the
-            // loop body — see noStructLiteralCtx)
-            parseStructExpr name afterName
+            // loop body — see noStructLiteralCtx). Widen the struct-body span
+            // to include the leading type name.
+            parseStructExpr name afterName >>= fun e remaining ->
+            success { e with Span = rangeSpan tokens remaining } remaining
         | _ ->
-            success (ExprVar name) afterName
-    
+            success (mkExpr (headSpan tokens) (ExprVar name)) afterName
+
     // Arity - requires arity(paramName) syntax
-    | Some (TokKeyword KwArity) -> 
+    | Some (TokKeyword KwArity) ->
         let afterArity = advance tokens
         match peek afterArity with
         | Some TokLParen ->
@@ -1304,50 +1493,57 @@ and parsePrimary (tokens: Token list) : ParseResult<Expr> =
             match peek afterLParen with
             | Some (TokIdent paramName) ->
                 advance afterLParen |> expect TokRParen >>= fun _ remaining ->
-                success (ExprArity paramName) remaining
+                success (mkE tokens remaining (ExprArity paramName)) remaining
             | _ ->
                 let line, col = currentPos afterLParen
                 error "Expected parameter name in arity()" line col
         | _ ->
             let line, col = currentPos afterArity
             error "arity requires parameter name: arity(paramName)" line col
-    | Some (TokKeyword KwNth) -> success ExprNth (advance tokens)
-    | Some (TokKeyword KwZero) -> success ExprZero (advance tokens)
-    
+    | Some (TokKeyword KwNth) -> success (mkExpr (headSpan tokens) ExprNth) (advance tokens)
+    | Some (TokKeyword KwZero) -> success (mkExpr (headSpan tokens) ExprZero) (advance tokens)
+
     // rank(expr) - get rank of array
     | Some (TokKeyword KwRank) ->
         advance tokens |> expect TokLParen >>= fun _ afterLParen ->
         parseExprImpl afterLParen >>= fun expr afterExpr ->
         expect TokRParen afterExpr >>= fun _ remaining ->
-        success (ExprRank expr) remaining
-    
+        success (mkE tokens remaining (ExprRank expr)) remaining
+
     // compute - standalone keyword (used after |>)
     | Some (TokKeyword KwCompute) ->
-        success (ExprVar "compute") (advance tokens)
+        success (mkExpr (headSpan tokens) (ExprVar "compute")) (advance tokens)
 
     // Lambda
     | Some (TokKeyword KwLambda) ->
-        parseLambda (advance tokens)
-    
+        // Widen the lambda's span to include the leading `lambda` keyword.
+        parseLambda (advance tokens) >>= fun e remaining ->
+        success { e with Span = rangeSpan tokens remaining } remaining
+
     // Let expression
     | Some (TokKeyword KwLet) ->
-        parseLet (advance tokens)
-    
+        parseLet (advance tokens) >>= fun e remaining ->
+        success { e with Span = rangeSpan tokens remaining } remaining
+
     // If expression
     | Some (TokKeyword KwIf) ->
-        parseIf (advance tokens)
-    
+        parseIf (advance tokens) >>= fun e remaining ->
+        success { e with Span = rangeSpan tokens remaining } remaining
+
     // Match expression
     | Some (TokKeyword KwMatch) ->
-        parseMatch (advance tokens)
-    
+        parseMatch (advance tokens) >>= fun e remaining ->
+        success { e with Span = rangeSpan tokens remaining } remaining
+
     // method_for
     | Some (TokKeyword KwMethodFor) ->
-        parseMethodFor (advance tokens)
+        parseMethodFor (advance tokens) >>= fun e remaining ->
+        success { e with Span = rangeSpan tokens remaining } remaining
 
     // for (A, B) in virtualArray — co-iteration construct
     | Some (TokKeyword KwFor) ->
-        parseForConstruct (advance tokens)
+        parseForConstruct (advance tokens) >>= fun e remaining ->
+        success { e with Span = rangeSpan tokens remaining } remaining
 
     // static method_for / static object_for / static for — the staged-former
     // marker: the wrapped former's ARGUMENT LIST elaborates at compile time
@@ -1358,41 +1554,42 @@ and parsePrimary (tokens: Token list) : ParseResult<Expr> =
         match peek afterStatic with
         | Some (TokKeyword KwMethodFor) ->
             parseMethodFor (advance afterStatic) >>= fun former remaining ->
-            success (ExprStatic former) remaining
+            success (mkE tokens remaining (ExprStatic former)) remaining
         | Some (TokKeyword KwObjectFor) ->
             parseObjectFor (advance afterStatic) >>= fun former remaining ->
-            success (ExprStatic former) remaining
+            success (mkE tokens remaining (ExprStatic former)) remaining
         | Some (TokKeyword KwFor) ->
             parseForConstruct (advance afterStatic) >>= fun former remaining ->
-            success (ExprStatic former) remaining
+            success (mkE tokens remaining (ExprStatic former)) remaining
         | _ ->
             let (line, col) = currentPos afterStatic
             error "Expected 'method_for', 'object_for', or 'for' after 'static' in expression position" line col
 
     // object_for
     | Some (TokKeyword KwObjectFor) ->
-        parseObjectFor (advance tokens)
+        parseObjectFor (advance tokens) >>= fun e remaining ->
+        success { e with Span = rangeSpan tokens remaining } remaining
     
     // zip(a, b, ...)
     | Some (TokKeyword KwZip) ->
         advance tokens |> expect TokLParen >>= fun _ afterLParen ->
         sepBy parseExprImpl TokComma afterLParen >>= fun exprs afterExprs ->
         expect TokRParen afterExprs >>= fun _ remaining ->
-        success (ExprZip exprs) remaining
+        success (mkE tokens remaining (ExprZip exprs)) remaining
     
     // stack(a, b, ...)
     | Some (TokKeyword KwStack) ->
         advance tokens |> expect TokLParen >>= fun _ afterLParen ->
         sepBy parseExprImpl TokComma afterLParen >>= fun exprs afterExprs ->
         expect TokRParen afterExprs >>= fun _ remaining ->
-        success (ExprStack exprs) remaining
+        success (mkE tokens remaining (ExprStack exprs)) remaining
     
     // sequence(a, b, ...)
     | Some (TokKeyword KwSequence) ->
         advance tokens |> expect TokLParen >>= fun _ afterLParen ->
         sepBy parseExprImpl TokComma afterLParen >>= fun exprs afterExprs ->
         expect TokRParen afterExprs >>= fun _ remaining ->
-        success (ExprSequence exprs) remaining
+        success (mkE tokens remaining (ExprSequence exprs)) remaining
     
     // replicate(n, expr)
     | Some (TokKeyword KwReplicate) ->
@@ -1401,7 +1598,7 @@ and parsePrimary (tokens: Token list) : ParseResult<Expr> =
         expect TokComma afterCount >>= fun _ afterComma ->
         parseExprImpl afterComma >>= fun body afterBody ->
         expect TokRParen afterBody >>= fun _ remaining ->
-        success (ExprReplicate (count, body)) remaining
+        success (mkE tokens remaining (ExprReplicate (count, body))) remaining
     
     // guard(cond, body)
     | Some (TokKeyword KwGuard) ->
@@ -1410,7 +1607,7 @@ and parsePrimary (tokens: Token list) : ParseResult<Expr> =
         expect TokComma afterCond >>= fun _ afterComma ->
         parseExprImpl afterComma >>= fun body afterBody ->
         expect TokRParen afterBody >>= fun _ remaining ->
-        success (ExprGuard (cond, body)) remaining
+        success (mkE tokens remaining (ExprGuard (cond, body))) remaining
     
     // mask(array, pred)
     | Some (TokKeyword KwMask) ->
@@ -1419,7 +1616,7 @@ and parsePrimary (tokens: Token list) : ParseResult<Expr> =
         expect TokComma afterArr >>= fun _ afterComma ->
         parseExprImpl afterComma >>= fun pred afterPred ->
         expect TokRParen afterPred >>= fun _ remaining ->
-        success (ExprMask (arr, pred)) remaining
+        success (mkE tokens remaining (ExprMask (arr, pred))) remaining
 
     | Some (TokKeyword KwCompound) ->
         advance tokens |> expect TokLParen >>= fun _ afterLParen ->
@@ -1427,7 +1624,7 @@ and parsePrimary (tokens: Token list) : ParseResult<Expr> =
         expect TokComma afterDense >>= fun _ afterComma ->
         parseExprImpl afterComma >>= fun mask afterMask ->
         expect TokRParen afterMask >>= fun _ remaining ->
-        success (ExprCompound (dense, mask)) remaining
+        success (mkE tokens remaining (ExprCompound (dense, mask))) remaining
     
     // intersect(A, B)
     | Some (TokKeyword KwIntersect) ->
@@ -1436,7 +1633,7 @@ and parsePrimary (tokens: Token list) : ParseResult<Expr> =
         expect TokComma afterA >>= fun _ afterComma ->
         parseExprImpl afterComma >>= fun b afterB ->
         expect TokRParen afterB >>= fun _ remaining ->
-        success (ExprIntersect (a, b)) remaining
+        success (mkE tokens remaining (ExprIntersect (a, b))) remaining
     
     // union(A, B)
     | Some (TokKeyword KwUnion) ->
@@ -1445,14 +1642,14 @@ and parsePrimary (tokens: Token list) : ParseResult<Expr> =
         expect TokComma afterA >>= fun _ afterComma ->
         parseExprImpl afterComma >>= fun b afterB ->
         expect TokRParen afterB >>= fun _ remaining ->
-        success (ExprUnion (a, b)) remaining
+        success (mkE tokens remaining (ExprUnion (a, b))) remaining
     
     // unique(A) — dedup, first-occurrence order
     | Some (TokKeyword KwUnique) ->
         advance tokens |> expect TokLParen >>= fun _ afterLParen ->
         parseExprImpl afterLParen >>= fun arr afterArr ->
         expect TokRParen afterArr >>= fun _ remaining ->
-        success (ExprUnique arr) remaining
+        success (mkE tokens remaining (ExprUnique arr)) remaining
     
     // contains(A, x) — membership test, returns Bool
     | Some (TokKeyword KwContains) ->
@@ -1461,7 +1658,7 @@ and parsePrimary (tokens: Token list) : ParseResult<Expr> =
         expect TokComma afterArr >>= fun _ afterComma ->
         parseExprImpl afterComma >>= fun value afterValue ->
         expect TokRParen afterValue >>= fun _ remaining ->
-        success (ExprContains (arr, value)) remaining
+        success (mkE tokens remaining (ExprContains (arr, value))) remaining
     
     // group_by(values, keys)
     | Some (TokKeyword KwGroupBy) ->
@@ -1470,7 +1667,7 @@ and parsePrimary (tokens: Token list) : ParseResult<Expr> =
         expect TokComma afterVals >>= fun _ afterComma ->
         parseExprImpl afterComma >>= fun keys afterKeys ->
         expect TokRParen afterKeys >>= fun _ remaining ->
-        success (ExprGroupBy (vals, keys)) remaining
+        success (mkE tokens remaining (ExprGroupBy (vals, keys))) remaining
     
     // group_keys(keys1, keys2, ...) — single key for ordinary grouping;
     // multiple keys triggers compound (tuple-keyed) grouping.
@@ -1478,7 +1675,7 @@ and parsePrimary (tokens: Token list) : ParseResult<Expr> =
         advance tokens |> expect TokLParen >>= fun _ afterLParen ->
         sepBy parseExprImpl TokComma afterLParen >>= fun keys afterKeys ->
         expect TokRParen afterKeys >>= fun _ remaining ->
-        success (ExprGroupKeys keys) remaining
+        success (mkE tokens remaining (ExprGroupKeys keys)) remaining
     
     // sort(array, key) — stable sort by ascending key
     | Some (TokKeyword KwSort) ->
@@ -1487,7 +1684,7 @@ and parsePrimary (tokens: Token list) : ParseResult<Expr> =
         expect TokComma afterArr >>= fun _ afterComma ->
         parseExprImpl afterComma >>= fun key afterKey ->
         expect TokRParen afterKey >>= fun _ remaining ->
-        success (ExprSort (array, key)) remaining
+        success (mkE tokens remaining (ExprSort (array, key))) remaining
 
     // transpose(A, [d1, d2]) — swap exactly two axes. The axis list must be
     // EXACTLY two integer literals; any other shape is a parse error (no
@@ -1507,7 +1704,7 @@ and parsePrimary (tokens: Token list) : ParseResult<Expr> =
                 let afterD2 = advance afterComma2
                 expect TokRBracket afterD2 >>= fun _ afterRBrack ->
                 expect TokRParen afterRBrack >>= fun _ remaining ->
-                success (ExprTranspose (array, int d1, int d2)) remaining
+                success (mkE tokens remaining (ExprTranspose (array, int d1, int d2))) remaining
              | _ ->
                 let line, col = currentPos afterComma2
                 error "transpose expects exactly two integer axis indices: transpose(A, [d1, d2])" line col)
@@ -1526,7 +1723,8 @@ and parsePrimary (tokens: Token list) : ParseResult<Expr> =
         advance tokens |> expect TokLParen >>= fun _ afterLParen ->
         parseExprImpl afterLParen >>= fun array afterArr ->
         expect TokRParen afterArr >>= fun _ remaining ->
-        success (ExprUnaryOp (OpConj, ExprTranspose (array, 0, 1))) remaining
+        let sp = rangeSpan tokens remaining
+        success (mkExpr sp (ExprUnaryOp (OpConj, mkExpr sp (ExprTranspose (array, 0, 1))))) remaining
 
     // gram(A, B) = A * B^H — the (conjugate) Gram product:
     //   result[i][j] = sum_k A[i][k] * conj(B[j][k])
@@ -1540,7 +1738,7 @@ and parsePrimary (tokens: Token list) : ParseResult<Expr> =
         expect TokComma afterLeft >>= fun _ afterComma ->
         parseExprImpl afterComma >>= fun right afterRight ->
         expect TokRParen afterRight >>= fun _ remaining ->
-        success (ExprGram (left, right)) remaining
+        success (mkE tokens remaining (ExprGram (left, right))) remaining
 
     | Some (TokKeyword KwDecompact) ->
         advance tokens |> expect TokLParen >>= fun _ afterLParen ->
@@ -1550,7 +1748,7 @@ and parsePrimary (tokens: Token list) : ParseResult<Expr> =
          | Some (TokInt d) ->
             let afterD = advance afterComma
             expect TokRParen afterD >>= fun _ remaining ->
-            success (ExprDecompact (array, int d)) remaining
+            success (mkE tokens remaining (ExprDecompact (array, int d))) remaining
          | _ ->
             let line, col = currentPos afterComma
             error "decompact expects a single integer dimension index: decompact(A, d)" line col)
@@ -1568,19 +1766,20 @@ and parsePrimary (tokens: Token list) : ParseResult<Expr> =
         | Some TokRParen ->
             // 1-arg form: reduce(arr) ≡ reduce(arr, (+))
             expect TokRParen afterArr >>= fun _ remaining ->
-            success (ExprReduce (array, ExprSection OpAdd, None)) remaining
+            let sp = rangeSpan tokens remaining
+            success (mkExpr sp (ExprReduce (array, mkExpr sp (ExprSection OpAdd), None))) remaining
         | _ ->
             expect TokComma afterArr >>= fun _ afterComma ->
             parseExprImpl afterComma >>= fun op afterOp ->
             match peek afterOp with
             | Some TokRParen ->
                 expect TokRParen afterOp >>= fun _ remaining ->
-                success (ExprReduce (array, op, None)) remaining
+                success (mkE tokens remaining (ExprReduce (array, op, None))) remaining
             | _ ->
                 expect TokComma afterOp >>= fun _ afterComma2 ->
                 parseExprImpl afterComma2 >>= fun initE afterInit ->
                 expect TokRParen afterInit >>= fun _ remaining ->
-                success (ExprReduce (array, op, Some initE)) remaining
+                success (mkE tokens remaining (ExprReduce (array, op, Some initE))) remaining
 
     // conj(x) — complex conjugate. Built-in unary op (identity on real,
     // conjugate on complex). Function-call surface form; lowers to the
@@ -1589,21 +1788,21 @@ and parsePrimary (tokens: Token list) : ParseResult<Expr> =
         advance tokens |> expect TokLParen >>= fun _ afterLParen ->
         parseExprImpl afterLParen >>= fun arg afterArg ->
         expect TokRParen afterArg >>= fun _ remaining ->
-        success (ExprUnaryOp (OpConj, arg)) remaining
+        success (mkE tokens remaining (ExprUnaryOp (OpConj, arg))) remaining
 
     // extents(array) — innermost-dim extent. Rank-1 returns scalar Int64.
     | Some (TokKeyword KwExtents) ->
         advance tokens |> expect TokLParen >>= fun _ afterLParen ->
         parseExprImpl afterLParen >>= fun array afterArr ->
         expect TokRParen afterArr >>= fun _ remaining ->
-        success (ExprExtents array) remaining
+        success (mkE tokens remaining (ExprExtents array)) remaining
     
     // pure(expr)
     | Some (TokKeyword KwPure) ->
         advance tokens |> expect TokLParen >>= fun _ afterLParen ->
         parseExprImpl afterLParen >>= fun expr afterExpr ->
         expect TokRParen afterExpr >>= fun _ remaining ->
-        success (ExprPure expr) remaining
+        success (mkE tokens remaining (ExprPure expr)) remaining
     
     // reynolds(kernel) or reynolds(kernel, Antisymmetric)
     | Some (TokKeyword KwReynolds) ->
@@ -1619,7 +1818,7 @@ and parsePrimary (tokens: Token list) : ParseResult<Expr> =
                 | _ -> false, afterKernel
             | _ -> false, afterKernel
         expect TokRParen afterSpec >>= fun _ remaining ->
-        success (ExprReynolds (kernel, isAntisym)) remaining
+        success (mkE tokens remaining (ExprReynolds (kernel, isAntisym))) remaining
     
     // range<T> or range<T1, ..., Tn> (multi-index: one virtual array spanning
     // all listed index types, uncurried into nested loop levels in IR)
@@ -1627,27 +1826,42 @@ and parsePrimary (tokens: Token list) : ParseResult<Expr> =
         advance tokens |> expect (TokOp "<") >>= fun _ afterLt ->
         afterLt |> sepBy parseTypeExpr TokComma >>= fun tys afterTys ->
         expectGt afterTys >>= fun _ remaining ->
-        success (ExprRange tys) remaining
+        success (mkE tokens remaining (ExprRange tys)) remaining
     
     // reverse<T>
     | Some (TokKeyword KwReverse) ->
         advance tokens |> expect (TokOp "<") >>= fun _ afterLt ->
         parseTypeExpr afterLt >>= fun ty afterTy ->
         expectGt afterTy >>= fun _ remaining ->
-        success (ExprReverse ty) remaining
+        success (mkE tokens remaining (ExprReverse ty)) remaining
+
+    // halo<Inner, [offsets]> — stencil/halo traversal transformer. At each
+    // ordinal position of the inner index type, the static signed offsets
+    // select the neighborhood (center = 0, sign = direction). Composes inside
+    // range<...> for n-D. Offsets parse via parseSimpleExpr (an array literal),
+    // like the other static index-type payloads (e.g. IrrepsIdx<[...]>).
+    | Some (TokKeyword KwHalo) ->
+        advance tokens |> expect (TokOp "<") >>= fun _ afterLt ->
+        parseTypeExpr afterLt >>= fun inner afterInner ->
+        expect TokComma afterInner >>= fun _ afterComma ->
+        parseSimpleExpr afterComma >>= fun offsets afterOffsets ->
+        expectGt afterOffsets >>= fun _ remaining ->
+        success (mkE tokens remaining (ExprHalo (inner, offsets))) remaining
     
     // Parenthesized expression or tuple (delimited: struct literals
     // re-enabled inside — the for-in range-header suppression applies to
-    // the top nesting level only)
+    // the top nesting level only). The top node's span is widened to cover
+    // both parentheses (`(` .. `)`); child spans are untouched.
     | Some TokLParen ->
-        allowingStructLiterals (fun () -> advance tokens |> parseParenExpr)
+        allowingStructLiterals (fun () -> advance tokens |> parseParenExpr) >>= fun e remaining ->
+        success { e with Span = rangeSpan tokens remaining } remaining
 
     // Array literal (delimited: struct literals re-enabled)
     | Some TokLBracket ->
         allowingStructLiterals (fun () ->
             advance tokens |> sepBy parseExprImpl TokComma >>= fun elems afterElems ->
             expect TokRBracket afterElems >>= fun _ remaining ->
-            success (ExprArrayLit elems) remaining)
+            success (mkE tokens remaining (ExprArrayLit elems)) remaining)
     
     // Block
     | Some TokLBrace ->
@@ -1655,10 +1869,10 @@ and parsePrimary (tokens: Token list) : ParseResult<Expr> =
     
     | Some kind ->
         let line, col = currentPos tokens
-        error (sprintf "Unexpected token: %A" kind) line col
+        error (sprintf "Unexpected token: %s" (describeToken kind)) line col
     
     | None ->
-        error "Unexpected end of input" 0 0
+        errorEof "Unexpected end of input"
 
 // ============================================================================
 // Compound Expression Parsers
@@ -1689,12 +1903,12 @@ and parseLambda (tokens: Token list) : ParseResult<Expr> =
     | Some TokLBrace ->
         // Block body
         parseBlock (advance afterArrow) >>= fun body remaining ->
-        success (ExprLambda (parms, whereClause, body)) remaining
+        success (mkE tokens remaining (ExprLambda (parms, whereClause, body))) remaining
     | _ ->
         // Inline body - parse at Apply precedence level so |> isn't consumed
         // This means: lambda(x) -> a <@> b |> compute parses as (lambda(x) -> a <@> b) |> compute
         parseApply afterArrow >>= fun body remaining ->
-        success (ExprLambda (parms, whereClause, body)) remaining
+        success (mkE tokens remaining (ExprLambda (parms, whereClause, body))) remaining
 
 and parseLambdaParam (tokens: Token list) : ParseResult<LambdaParam> =
     expectIdent tokens >>= fun name afterName ->
@@ -1733,12 +1947,16 @@ and parseLet (tokens: Token list) : ParseResult<Expr> =
         // Block value
         parseBlock (advance afterEq) >>= fun value afterValue ->
         let binding = { Mutability = mutability; Pattern = pat; Type = ty; Value = value }
-        success (ExprLet (binding, ExprLit LitUnit)) afterValue
+        // Blade has no `let ... in`; the body is a synthesized unit placeholder
+        // spanning the same source region as the let.
+        let sp = rangeSpan tokens afterValue
+        success (mkExpr sp (ExprLet (binding, mkExpr sp (ExprLit LitUnit)))) afterValue
     | _ ->
         // Inline value
         parseExprImpl afterEq >>= fun value afterValue ->
         let binding = { Mutability = mutability; Pattern = pat; Type = ty; Value = value }
-        success (ExprLet (binding, ExprLit LitUnit)) afterValue
+        let sp = rangeSpan tokens afterValue
+        success (mkExpr sp (ExprLet (binding, mkExpr sp (ExprLit LitUnit)))) afterValue
 
 and parseIf (tokens: Token list) : ParseResult<Expr> =
     parseExprImpl tokens >>= fun cond afterCond ->
@@ -1746,13 +1964,13 @@ and parseIf (tokens: Token list) : ParseResult<Expr> =
     parseExprImpl afterThen >>= fun thenBr afterThenBr ->
     expect (TokKeyword KwElse) afterThenBr >>= fun _ afterElse ->
     parseExprImpl afterElse >>= fun elseBr remaining ->
-    success (ExprIf (cond, thenBr, elseBr)) remaining
+    success (mkE tokens remaining (ExprIf (cond, thenBr, elseBr))) remaining
 
 and parseMatch (tokens: Token list) : ParseResult<Expr> =
     parseExprImpl tokens >>= fun scrutinee afterScrutinee ->
     expect (TokKeyword KwWith) afterScrutinee >>= fun _ afterWith ->
     many parseMatchCase (skipNL afterWith) >>= fun cases remaining ->
-    success (ExprMatch (scrutinee, cases)) remaining
+    success (mkE tokens remaining (ExprMatch (scrutinee, cases))) remaining
 
 // FIXED: Properly propagate errors from guard parsing instead of swallowing them
 and parseMatchCase (tokens: Token list) : ParseResult<MatchCase> =
@@ -1789,7 +2007,7 @@ and parseGuardOr (tokens: Token list) : ParseResult<Expr> =
         match peek toks with
         | Some (TokOp "||") ->
             advance toks |> parseGuardAnd >>= fun right remaining ->
-            loop (ExprBinOp (Elementwise, OpOr, acc, right)) remaining
+            loop (mkExpr (mergeSpan acc.Span right.Span) (ExprBinOp (Elementwise, OpOr, acc, right))) remaining
         | _ -> success acc toks
     loop left rest
 
@@ -1799,7 +2017,7 @@ and parseGuardAnd (tokens: Token list) : ParseResult<Expr> =
         match peek toks with
         | Some (TokOp "&&") ->
             advance toks |> parseGuardComparison >>= fun right remaining ->
-            loop (ExprBinOp (Elementwise, OpAnd, acc, right)) remaining
+            loop (mkExpr (mergeSpan acc.Span right.Span) (ExprBinOp (Elementwise, OpAnd, acc, right))) remaining
         | _ -> success acc toks
     loop left rest
 
@@ -1808,22 +2026,22 @@ and parseGuardComparison (tokens: Token list) : ParseResult<Expr> =
     match peek rest with
     | Some (TokOp "==") ->
         advance rest |> parseGuardAdditive >>= fun right remaining ->
-        success (ExprBinOp (Elementwise, OpEq, left, right)) remaining
+        success (mkExpr (mergeSpan left.Span right.Span) (ExprBinOp (Elementwise, OpEq, left, right))) remaining
     | Some (TokOp "!=") ->
         advance rest |> parseGuardAdditive >>= fun right remaining ->
-        success (ExprBinOp (Elementwise, OpNeq, left, right)) remaining
+        success (mkExpr (mergeSpan left.Span right.Span) (ExprBinOp (Elementwise, OpNeq, left, right))) remaining
     | Some (TokOp "<") ->
         advance rest |> parseGuardAdditive >>= fun right remaining ->
-        success (ExprBinOp (Elementwise, OpLt, left, right)) remaining
+        success (mkExpr (mergeSpan left.Span right.Span) (ExprBinOp (Elementwise, OpLt, left, right))) remaining
     | Some (TokOp "<=") ->
         advance rest |> parseGuardAdditive >>= fun right remaining ->
-        success (ExprBinOp (Elementwise, OpLe, left, right)) remaining
+        success (mkExpr (mergeSpan left.Span right.Span) (ExprBinOp (Elementwise, OpLe, left, right))) remaining
     | Some (TokOp ">") ->
         advance rest |> parseGuardAdditive >>= fun right remaining ->
-        success (ExprBinOp (Elementwise, OpGt, left, right)) remaining
+        success (mkExpr (mergeSpan left.Span right.Span) (ExprBinOp (Elementwise, OpGt, left, right))) remaining
     | Some (TokOp ">=") ->
         advance rest |> parseGuardAdditive >>= fun right remaining ->
-        success (ExprBinOp (Elementwise, OpGe, left, right)) remaining
+        success (mkExpr (mergeSpan left.Span right.Span) (ExprBinOp (Elementwise, OpGe, left, right))) remaining
     | _ -> success left rest
 
 and parseGuardAdditive (tokens: Token list) : ParseResult<Expr> =
@@ -1832,10 +2050,10 @@ and parseGuardAdditive (tokens: Token list) : ParseResult<Expr> =
         match peek toks with
         | Some (TokOp "+") ->
             advance toks |> parseGuardMultiplicative >>= fun right remaining ->
-            loop (ExprBinOp (Elementwise, OpAdd, acc, right)) remaining
+            loop (mkExpr (mergeSpan acc.Span right.Span) (ExprBinOp (Elementwise, OpAdd, acc, right))) remaining
         | Some (TokOp "-") ->
             advance toks |> parseGuardMultiplicative >>= fun right remaining ->
-            loop (ExprBinOp (Elementwise, OpSub, acc, right)) remaining
+            loop (mkExpr (mergeSpan acc.Span right.Span) (ExprBinOp (Elementwise, OpSub, acc, right))) remaining
         | _ -> success acc toks
     loop left rest
 
@@ -1845,46 +2063,47 @@ and parseGuardMultiplicative (tokens: Token list) : ParseResult<Expr> =
         match peek toks with
         | Some (TokOp "*") ->
             advance toks |> parseGuardPrimary >>= fun right remaining ->
-            loop (ExprBinOp (Elementwise, OpMul, acc, right)) remaining
+            loop (mkExpr (mergeSpan acc.Span right.Span) (ExprBinOp (Elementwise, OpMul, acc, right))) remaining
         | Some (TokOp "/") ->
             advance toks |> parseGuardPrimary >>= fun right remaining ->
-            loop (ExprBinOp (Elementwise, OpDiv, acc, right)) remaining
+            loop (mkExpr (mergeSpan acc.Span right.Span) (ExprBinOp (Elementwise, OpDiv, acc, right))) remaining
         | _ -> success acc toks
     loop left rest
 
 and parseGuardPrimary (tokens: Token list) : ParseResult<Expr> =
     match peek tokens with
-    | Some (LiteralTok lit) -> success (ExprLit lit) (advance tokens)
-    | Some (TokIdent name) -> 
+    | Some (LiteralTok lit) -> success (mkExpr (headSpan tokens) (ExprLit lit)) (advance tokens)
+    | Some (TokIdent name) ->
         let afterName = advance tokens
         // Allow function calls in guards
         match peek afterName with
         | Some TokLParen ->
             advance afterName |> sepBy parseGuardExpr TokComma >>= fun args afterArgs ->
             expect TokRParen afterArgs >>= fun _ remaining ->
-            success (ExprApp (ExprVar name, args)) remaining
-        | _ -> success (ExprVar name) afterName
+            let fn = mkExpr (headSpan tokens) (ExprVar name)
+            success (mkE tokens remaining (ExprApp (fn, args))) remaining
+        | _ -> success (mkExpr (headSpan tokens) (ExprVar name)) afterName
     | Some TokLParen ->
         advance tokens |> parseGuardExpr >>= fun expr afterExpr ->
         expect TokRParen afterExpr >>= fun _ remaining ->
         success expr remaining
     | Some (TokOp "-") ->
         advance tokens |> parseGuardPrimary >>= fun expr remaining ->
-        success (ExprUnaryOp (OpNeg, expr)) remaining
+        success (mkExpr (mergeSpan (headSpan tokens) expr.Span) (ExprUnaryOp (OpNeg, expr))) remaining
     | Some (TokOp "!") ->
         advance tokens |> parseGuardPrimary >>= fun expr remaining ->
-        success (ExprUnaryOp (OpNot, expr)) remaining
+        success (mkExpr (mergeSpan (headSpan tokens) expr.Span) (ExprUnaryOp (OpNot, expr))) remaining
     | Some kind ->
         let line, col = currentPos tokens
-        error (sprintf "Unexpected token in guard: %A" kind) line col
+        error (sprintf "Unexpected token in guard: %s" (describeToken kind)) line col
     | None ->
-        error "Expected guard expression but got EOF" 0 0
+        errorEof "Expected guard expression but got end of file"
 
 and parseMethodFor (tokens: Token list) : ParseResult<Expr> =
     expect TokLParen tokens >>= fun _ afterLParen ->
     sepBy parseExprImpl TokComma afterLParen >>= fun arrays afterArrays ->
     expect TokRParen afterArrays >>= fun _ remaining ->
-    success (ExprMethodFor arrays) remaining
+    success (mkE tokens remaining (ExprMethodFor arrays)) remaining
 
 /// The body of a `for` expression (tokens start AFTER the `for` keyword):
 /// `for (A, B) [in virt]` → ForArrays; `for lambda(...)` → ForKernel.
@@ -1900,14 +2119,14 @@ and parseForConstruct (tokens: Token list) : ParseResult<Expr> =
         | Some (TokKeyword KwIn) ->
             // Parse virtual array expression at arrayProduct level (stops before <@>)
             parseArrayProduct (advance afterRParen) >>= fun inExpr afterIn ->
-            success (ExprFor (ForArrays (arrays, Some inExpr), [], None)) afterIn
+            success (mkE tokens afterIn (ExprFor (ForArrays (arrays, Some inExpr), [], None))) afterIn
         | _ ->
             // No in-clause: equivalent to method_for(A, B)
-            success (ExprFor (ForArrays (arrays, None), [], None)) afterRParen
+            success (mkE tokens afterRParen (ExprFor (ForArrays (arrays, None), [], None))) afterRParen
     | _ ->
         // for lambda(...) → ForKernel
         parseExprImpl tokens >>= fun kernel remaining ->
-        success (ExprFor (ForKernel kernel, [], None)) remaining
+        success (mkE tokens remaining (ExprFor (ForKernel kernel, [], None))) remaining
 
 and parseObjectFor (tokens: Token list) : ParseResult<Expr> =
     expect TokLParen tokens >>= fun _ afterLParen ->
@@ -1926,10 +2145,14 @@ and parseObjectFor (tokens: Token list) : ParseResult<Expr> =
                 | "<@>" -> Some OpApply
                 | "<$>" -> Some OpFunctor
                 | "<|>" -> Some OpChoice
+                | "<|:>" -> Some OpFallback
                 | ">>=" -> Some OpBind
                 | _ -> stringToBinOp op  // fall back to scalar ops (+, *, etc.)
             match binOp with
-            | Some b -> success (ExprObjectFor (ExprSection b)) (advance afterOp)
+            | Some b ->
+                let remaining = advance afterOp
+                let sp = rangeSpan tokens remaining
+                success (mkExpr sp (ExprObjectFor (mkExpr sp (ExprSection b)))) remaining
             | None ->
                 let line, col = currentPos afterLParen
                 error (sprintf "Unknown operator in object_for: %s" op) line col
@@ -1937,16 +2160,17 @@ and parseObjectFor (tokens: Token list) : ParseResult<Expr> =
             // Not a section — fall back to normal expression parsing
             parseExprImpl afterLParen >>= fun kernel afterKernel ->
             expect TokRParen afterKernel >>= fun _ remaining ->
-            success (ExprObjectFor kernel) remaining
+            success (mkE tokens remaining (ExprObjectFor kernel)) remaining
     | _ ->
         parseExprImpl afterLParen >>= fun kernel afterKernel ->
         expect TokRParen afterKernel >>= fun _ remaining ->
-        success (ExprObjectFor kernel) remaining
+        success (mkE tokens remaining (ExprObjectFor kernel)) remaining
 
 and parseParenExpr (tokens: Token list) : ParseResult<Expr> =
     match peek tokens with
     | Some TokRParen ->
-        success (ExprTuple []) (advance tokens)
+        let remaining = advance tokens
+        success (mkE tokens remaining (ExprTuple [])) remaining
     // Check for operator section: (+), (*), etc.
     | Some (TokOp op) ->
         let afterOp = advance tokens
@@ -1954,8 +2178,10 @@ and parseParenExpr (tokens: Token list) : ParseResult<Expr> =
         | Some TokRParen ->
             // It's a section like (+) or (*)
             match stringToBinOp op with
-            | Some binOp -> success (ExprSection binOp) (advance afterOp)
-            | None -> 
+            | Some binOp ->
+                let remaining = advance afterOp
+                success (mkE tokens remaining (ExprSection binOp)) remaining
+            | None ->
                 let line, col = currentPos tokens
                 error (sprintf "Unknown operator in section: %s" op) line col
         | _ ->
@@ -1967,10 +2193,10 @@ and parseParenExpr (tokens: Token list) : ParseResult<Expr> =
             | Some TokComma ->
                 advance afterFirst |> sepBy parseExprImpl TokComma >>= fun rest afterRest ->
                 expect TokRParen afterRest >>= fun _ remaining ->
-                success (ExprTuple (first :: rest)) remaining
+                success (mkE tokens remaining (ExprTuple (first :: rest))) remaining
             | _ ->
                 let line, col = currentPos afterFirst
-                error "Expected ')' or ',' in parenthesized expression" line col
+                errorC "BL1001" "Expected ')' or ',' in parenthesized expression" line col
     | _ ->
         parseExprImpl tokens >>= fun first afterFirst ->
         match peek afterFirst with
@@ -1979,10 +2205,10 @@ and parseParenExpr (tokens: Token list) : ParseResult<Expr> =
         | Some TokComma ->
             advance afterFirst |> sepBy parseExprImpl TokComma >>= fun rest afterRest ->
             expect TokRParen afterRest >>= fun _ remaining ->
-            success (ExprTuple (first :: rest)) remaining
+            success (mkE tokens remaining (ExprTuple (first :: rest))) remaining
         | _ ->
             let line, col = currentPos afterFirst
-            error "Expected ')' or ',' in parenthesized expression" line col
+            errorC "BL1001" "Expected ')' or ',' in parenthesized expression" line col
 
 /// Convert operator string to BinOp
 and stringToBinOp (op: string) : BinOp option =
@@ -2007,11 +2233,14 @@ and parseBlock (tokens: Token list) : ParseResult<Expr> =
     let rec loop stmts toks =
         let toks = skipNL toks
         // Statement span (audit §3.4): the position of the statement's first
-        // token. End position is not tracked yet — a start line/col is what
-        // error messages need; widening to full ranges is rewrite work.
+        // token; the end is filled in by `spanned` once the statement is parsed.
         let sLine, sCol = currentPos toks
-        let spanned (stmt: Stmt) =
-            StmtSpanned (stmt, { StartLine = sLine; StartCol = sCol; EndLine = sLine; EndCol = sCol; File = None })
+        let spanned (remaining: Token list) (stmt: Stmt) =
+            // Real range: Start = statement's first token; End = the last
+            // meaningful token consumed (not the next token's start, which would
+            // overshoot across whitespace/comments). File carries currentFile.
+            let eLine, eCol = consumedEnd toks remaining sLine sCol
+            StmtSpanned (stmt, { StartLine = sLine; StartCol = sCol; EndLine = eLine; EndCol = eCol; File = currentFile })
         match peek toks with
         | Some TokRBrace ->
             // End of block - last expression (if any) is the return value
@@ -2021,7 +2250,9 @@ and parseBlock (tokens: Token list) : ParseResult<Expr> =
                 | StmtSpanned (StmtExpr e, _) :: rest
                 | StmtExpr e :: rest -> List.rev rest, Some e
                 | all -> List.rev all, None
-            success (ExprBlock (statements, finalExpr)) (advance toks)
+            // Span runs from the first statement token to the closing brace
+            // (`tokens` is positioned just after the opening `{`).
+            success (mkE tokens (advance toks) (ExprBlock (statements, finalExpr))) (advance toks)
         | Some TokSemi ->
             // Explicit semicolon - skip it
             loop stmts (advance toks)
@@ -2029,12 +2260,12 @@ and parseBlock (tokens: Token list) : ParseResult<Expr> =
             advance toks |> parseLetStmt >>= fun stmt remaining ->
             // Consume optional terminator (newline or semicolon)
             let remaining = skipTerminator remaining
-            loop (spanned stmt :: stmts) remaining
+            loop (spanned remaining stmt :: stmts) remaining
         | Some (TokKeyword KwFunction) ->
             // Nested function declaration - parse as let binding of lambda
             advance toks |> parseNestedFunction >>= fun stmt remaining ->
             let remaining = skipTerminator remaining
-            loop (spanned stmt :: stmts) remaining
+            loop (spanned remaining stmt :: stmts) remaining
         | Some (TokKeyword KwFor) ->
             // Check for imperative for-in loop: for IDENT in EXPR { STMTS }
             let afterFor = advance toks
@@ -2053,7 +2284,7 @@ and parseBlock (tokens: Token list) : ParseResult<Expr> =
                         // Parse body as block of statements
                         advance afterRange |> parseForInBody >>= fun bodyStmts remaining ->
                         let remaining = skipTerminator remaining
-                        loop (spanned (StmtForIn (varName, rangeExpr, bodyStmts)) :: stmts) remaining
+                        loop (spanned remaining (StmtForIn (varName, rangeExpr, bodyStmts)) :: stmts) remaining
                     | _ ->
                         let line, col = currentPos afterRange
                         error "Expected '{' after for-in range expression" line col
@@ -2061,18 +2292,18 @@ and parseBlock (tokens: Token list) : ParseResult<Expr> =
                     // Not a for-in, fall through to expression parser
                     parseExprImpl toks >>= fun expr remaining ->
                     let remaining = skipTerminator remaining
-                    loop (spanned (StmtExpr expr) :: stmts) remaining
+                    loop (spanned remaining (StmtExpr expr) :: stmts) remaining
             | _ ->
                 // Not a for-in, fall through to expression parser
                 parseExprImpl toks >>= fun expr remaining ->
                 let remaining = skipTerminator remaining
-                loop (spanned (StmtExpr expr) :: stmts) remaining
+                loop (spanned remaining (StmtExpr expr) :: stmts) remaining
         | Some _ ->
             parseExprImpl toks >>= fun expr remaining ->
             let remaining = skipTerminator remaining
-            loop (spanned (StmtExpr expr) :: stmts) remaining
+            loop (spanned remaining (StmtExpr expr) :: stmts) remaining
         | None ->
-            error "Unexpected EOF in block" 0 0
+            errorEof "Unexpected end of input in block"
     loop [] tokens
 
 and skipTerminator toks =
@@ -2089,8 +2320,12 @@ and parseForInBody (tokens: Token list) : ParseResult<Stmt list> =
     let rec loop stmts toks =
         let toks = skipNL toks
         let sLine, sCol = currentPos toks
-        let spanned (stmt: Stmt) =
-            StmtSpanned (stmt, { StartLine = sLine; StartCol = sCol; EndLine = sLine; EndCol = sCol; File = None })
+        let spanned (remaining: Token list) (stmt: Stmt) =
+            // Real range: Start = statement's first token; End = the last
+            // meaningful token consumed (not the next token's start, which would
+            // overshoot across whitespace/comments). File carries currentFile.
+            let eLine, eCol = consumedEnd toks remaining sLine sCol
+            StmtSpanned (stmt, { StartLine = sLine; StartCol = sCol; EndLine = eLine; EndCol = eCol; File = currentFile })
         match peek toks with
         | Some TokRBrace ->
             success (List.rev stmts) (advance toks)
@@ -2099,7 +2334,7 @@ and parseForInBody (tokens: Token list) : ParseResult<Stmt list> =
         | Some (TokKeyword KwLet) ->
             advance toks |> parseLetStmt >>= fun stmt remaining ->
             let remaining = skipTerminator remaining
-            loop (spanned stmt :: stmts) remaining
+            loop (spanned remaining stmt :: stmts) remaining
         | Some (TokKeyword KwFor) ->
             // Nested for-in: same disambiguation as parseBlock (an actual
             // `for IDENT in` starts an imperative loop; anything else falls
@@ -2119,25 +2354,25 @@ and parseForInBody (tokens: Token list) : ParseResult<Stmt list> =
                     | Some TokLBrace ->
                         advance afterRange |> parseForInBody >>= fun bodyStmts remaining ->
                         let remaining = skipTerminator remaining
-                        loop (spanned (StmtForIn (varName, rangeExpr, bodyStmts)) :: stmts) remaining
+                        loop (spanned remaining (StmtForIn (varName, rangeExpr, bodyStmts)) :: stmts) remaining
                     | _ ->
                         let line, col = currentPos afterRange
                         error "Expected '{' after for-in range expression" line col
                 | _ ->
                     parseExprImpl toks >>= fun expr remaining ->
                     let remaining = skipTerminator remaining
-                    loop (spanned (StmtExpr expr) :: stmts) remaining
+                    loop (spanned remaining (StmtExpr expr) :: stmts) remaining
             | _ ->
                 parseExprImpl toks >>= fun expr remaining ->
                 let remaining = skipTerminator remaining
-                loop (spanned (StmtExpr expr) :: stmts) remaining
+                loop (spanned remaining (StmtExpr expr) :: stmts) remaining
         | Some _ ->
             // Parse expression (includes assignments via parseAssignment)
             parseExprImpl toks >>= fun expr remaining ->
             let remaining = skipTerminator remaining
-            loop (spanned (StmtExpr expr) :: stmts) remaining
+            loop (spanned remaining (StmtExpr expr) :: stmts) remaining
         | None ->
-            error "Unexpected EOF in for-in body" 0 0
+            errorEof "Unexpected end of input in for-in body"
     loop [] tokens
 
 and parseNestedFunction (tokens: Token list) : ParseResult<Stmt> =
@@ -2177,9 +2412,9 @@ and parseNestedFunction (tokens: Token list) : ParseResult<Stmt> =
     parseInlineOrBlock afterEq >>= fun body remaining ->
     
     // Create a let binding: let name = lambda(params) where ... -> body
-    let lambda = ExprLambda (parms, whereClause, body)
+    let lambda = mkExpr (rangeSpan tokens remaining) (ExprLambda (parms, whereClause, body))
     let binding = {
-        Pattern = PatVar name
+        Pattern = mkPat (headSpan tokens) (PatVar name)
         Type = retType
         Value = lambda
         Mutability = BindConst
@@ -2642,6 +2877,16 @@ and parseUnitTerm (tokens: Token list) : ParseResult<UnitExpr> =
         let afterCaret = advance rest
         match peek afterCaret with
         | Some (TokInt n) -> success (UnitPow (atom, int n)) (advance afterCaret)
+        // Negative exponent (`seconds^-1`, `meters^-2`): the lexer emits
+        // the minus as its own operator token, so glue it back on here —
+        // reciprocal units (frequencies, decay coefficients) are too
+        // common to force through the a/b spelling.
+        | Some (TokOp "-") ->
+            (match peek (advance afterCaret) with
+             | Some (TokInt n) -> success (UnitPow (atom, -(int n))) (advance (advance afterCaret))
+             | _ ->
+                 let line, col = currentPos (advance afterCaret)
+                 error "Expected integer exponent after '^' in unit expression" line col)
         | _ ->
             let line, col = currentPos afterCaret
             error "Expected integer exponent after '^' in unit expression" line col
@@ -2737,9 +2982,9 @@ let parseDecl (tokens: Token list) : ParseResult<Decl> =
         parseUnitDecl (advance tokens)
     | Some kind ->
         let line, col = currentPos tokens
-        error (sprintf "Expected declaration but got %A" kind) line col
+        error (sprintf "Expected declaration but got %s" (describeToken kind)) line col
     | None ->
-        error "Expected declaration but got EOF" 0 0
+        errorEof "Expected declaration but got end of file"
 
 // ============================================================================
 // Module and Program Parsing
@@ -2761,6 +3006,7 @@ let rec skipToNextDecl (tokens: Token list) : Token list =
 /// Parse a module, accumulating errors and recovering at declaration boundaries.
 /// Returns the module (with successfully parsed declarations) and any parse errors.
 let parseModuleRecovering (tokens: Token list) : (ModuleDecl * ParseError list) * Token list =
+    setEofFrom tokens
     let tokens = skipNL tokens
     
     // Check for optional module declaration
@@ -2786,9 +3032,9 @@ let parseModuleRecovering (tokens: Token list) : (ModuleDecl * ParseError list) 
             let (startLine, startCol) = currentPos toks
             match parseDecl toks with
             | Ok (decl, remaining) ->
-                let (endLine, endCol) = currentPos remaining
+                let (endLine, endCol) = consumedEnd toks remaining startLine startCol
                 let span = { StartLine = startLine; StartCol = startCol
-                             EndLine = endLine; EndCol = endCol; File = None }
+                             EndLine = endLine; EndCol = endCol; File = currentFile }
                 let located = { Value = decl; Span = span }
                 decls <- located :: decls
                 toks <- remaining
@@ -2802,6 +3048,7 @@ let parseModuleRecovering (tokens: Token list) : (ModuleDecl * ParseError list) 
 
 /// Non-recovering version for backward compatibility
 let parseModule (tokens: Token list) : ParseResult<ModuleDecl> =
+    setEofFrom tokens
     let tokens = skipNL tokens
     
     // Check for optional module declaration
@@ -2821,9 +3068,9 @@ let parseModule (tokens: Token list) : ParseResult<ModuleDecl> =
         | _ ->
             let (startLine, startCol) = currentPos toks
             parseDecl toks >>= fun decl remaining ->
-            let (endLine, endCol) = currentPos remaining
+            let (endLine, endCol) = consumedEnd toks remaining startLine startCol
             let span = { StartLine = startLine; StartCol = startCol
-                         EndLine = endLine; EndCol = endCol; File = None }
+                         EndLine = endLine; EndCol = endCol; File = currentFile }
             let located = { Value = decl; Span = span }
             loop (located :: decls) remaining
     
@@ -2834,11 +3081,21 @@ let parseModule (tokens: Token list) : ParseResult<ModuleDecl> =
         Decls = decls
     } remaining
 
+/// Parse a single source, stamping the given file into every span it builds.
+let parseProgramWithFile (file: string option) (source: string) : Result<Program, ParseError> =
+    currentFile <- file
+    try
+        let tokens = tokenizeWithNewlines source
+        setEofFrom tokens
+        match parseModule tokens with
+        | Ok (modul, _) -> Ok { Modules = [modul] }
+        | Error e -> Error e
+    finally
+        currentFile <- None
+
+/// Backward-compatible entry point: parse a single anonymous source (File=None).
 let parseProgram (source: string) : Result<Program, ParseError> =
-    let tokens = tokenizeWithNewlines source
-    match parseModule tokens with
-    | Ok (modul, _) -> Ok { Modules = [modul] }
-    | Error e -> Error e
+    parseProgramWithFile None source
 
 /// Parse multiple source files into a single Program.
 /// Each entry is (fileName, sourceCode). If a source has a `module` declaration,
@@ -2846,9 +3103,12 @@ let parseProgram (source: string) : Result<Program, ParseError> =
 let parseMultiSource (sources: (string * string) list) : Result<Program, ParseError> =
     let rec go acc remaining =
         match remaining with
-        | [] -> Ok { Modules = List.rev acc }
+        | [] -> currentFile <- None; Ok { Modules = List.rev acc }
         | (fileName, source) :: rest ->
+            // Stamp this file into every span the parser builds for it.
+            currentFile <- (if fileName <> "" then Some fileName else None)
             let tokens = tokenizeWithNewlines source
+            setEofFrom tokens
             match parseModule tokens with
             | Ok (modul, _) ->
                 // If module name is "Main" (default) and fileName is provided, use fileName
@@ -2857,7 +3117,9 @@ let parseMultiSource (sources: (string * string) list) : Result<Program, ParseEr
                         { modul with Name = [fileName] }
                     else modul
                 go (modul' :: acc) rest
-            | Error e -> Error { e with Message = sprintf "[%s] %s" fileName e.Message }
+            | Error e ->
+                currentFile <- None
+                Error { e with Message = sprintf "[%s] %s" fileName e.Message }
     go [] sources
 
 // ============================================================================

@@ -1,0 +1,15 @@
+// TEST: Struct Functional Update
+// `S { f = v, ..base }` copies the unlisted fields from base.
+struct Point {
+    x: Float,
+    y: Float,
+    z: Float
+}
+let p = Point { x = 1.0, y = 2.0, z = 3.0 }
+let q = Point { x = 10.0, ..p }
+let qx = q.x
+let qy = q.y
+let qz = q.z
+// EXPECT: qx = 10
+// EXPECT: qy = 2
+// EXPECT: qz = 3

@@ -1,8 +1,8 @@
 /// The ML module's static-evaluation layer: StaticValue <-> spec/config
 /// conversions and the sizing builtins (sh_spec, total_dim, tp_weight_dim,
-/// linear_weight_dim), registered into the core evaluator through
-/// StaticEval's external-builtin registry so StaticEval.fs itself stays
-/// ML-free.
+/// linear_weight_dim, tp_spec, hom_dim), registered into the core evaluator
+/// through StaticEval's external-builtin registry so StaticEval.fs itself
+/// stays ML-free.
 ///
 /// `install()` is idempotent and is invoked at the top of
 /// MLElaborate.expand — the first ML-aware stop of every compilation — so
@@ -83,6 +83,31 @@ let install () =
                 specOfStatic "linear_weight_dim specOut" sOut |> Result.bind (fun b ->
                 linearWeightDim a b |> Result.map (int64 >> SVInt)))
             | _ -> Error "linear_weight_dim: expected (specIn, specOut) static arguments")
+        // CG-typed contraction surface: the full decomposition spec of
+        // s1 ⊗ s2 (merged-canonical, see MLSpec.tpSpec) and the Schur
+        // dimension of Hom_G — both pure spec arithmetic, so output types
+        // and weight-space sizes are expressible in `let static` land.
+        registerStaticBuiltin (statName "tp_spec") (fun args ->
+            match args with
+            | [ s1; s2 ] ->
+                specOfStatic "tp_spec spec1" s1 |> Result.bind (fun a ->
+                specOfStatic "tp_spec spec2" s2 |> Result.map (fun b ->
+                    specToStatic (tpSpec a b)))
+            | _ -> Error "tp_spec: expected (spec1, spec2) static arguments")
+        registerStaticBuiltin (statName "hom_dim") (fun args ->
+            match args with
+            | [ sIn; sOut ] ->
+                specOfStatic "hom_dim specIn" sIn |> Result.bind (fun a ->
+                specOfStatic "hom_dim specOut" sOut |> Result.map (fun b ->
+                    SVInt (int64 (homDim a b))))
+            | _ -> Error "hom_dim: expected (specIn, specOut) static arguments")
+        registerStaticBuiltin (statName "tp_full_weight_dim") (fun args ->
+            match args with
+            | [ s1; s2 ] ->
+                specOfStatic "tp_full_weight_dim spec1" s1 |> Result.bind (fun a ->
+                specOfStatic "tp_full_weight_dim spec2" s2 |> Result.map (fun b ->
+                    SVInt (int64 (tpWeightDim { Spec1 = a; Spec2 = b; SpecOut = tpSpec a b }))))
+            | _ -> Error "tp_full_weight_dim: expected (spec1, spec2) static arguments")
         // Block-navigation builtins (IrrepsIdx v3): fully static per-block
         // accessors so users write block-structured loop nests —
         //   x(irreps_offset(spec, b) + mu * irreps_dim(spec, b) + m)

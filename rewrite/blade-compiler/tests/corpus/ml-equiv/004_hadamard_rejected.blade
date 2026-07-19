@@ -1,0 +1,10 @@
+// TEST: ML Equiv Hadamard Rejected (rejects)
+import ml as ml
+// ============================================================================
+// The elementwise product of two representation-typed values is NOT
+// equivariant (it is basis-dependent); the sanctioned bilinear operation is
+// the Clebsch-Gordan-typed ml.tensor_product. BL4008.
+// ============================================================================
+let static S = [(0, 0, 1), (1, 1, 1)]
+function bad(x: Array<Float like IrrepsIdx<S>>, y: Array<Float like IrrepsIdx<S>>) where ml.equiv(O3) -> Array<Float like IrrepsIdx<S>> =
+  x * y

@@ -1,0 +1,9 @@
+// TEST: Halo Central Difference
+// halo<I, [offsets]> is a stencil traversal transformer: at each ordinal
+// position of I it exposes a WINDOW `w`, and w(o) reads the neighbor at signed
+// offset o (center = 0). It reuses the range machinery — the inner index is
+// shrunk to its interior (BndShrink) and the produced value carries the center
+// offset — so central difference over a 5-element array yields 3 interior cells.
+let A: Array<Float64 like Idx<5>> = [1.0, 2.0, 4.0, 7.0, 11.0]
+let d = method_for(halo<Idx<5>, [-1, 0, 1]>) <@> lambda(w) -> A(w(1)) - A(w(-1)) |> compute
+// EXPECT: d = [3, 5, 7]

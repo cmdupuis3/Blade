@@ -1,0 +1,10 @@
+// TEST: ML Equiv Nonlinearity Rejected (rejects)
+import ml as ml
+// ============================================================================
+// A scalar nonlinearity applied componentwise to a representation-typed
+// value is not equivariant (exp does not commute with the block-diagonal
+// Wigner action). Gate with ml.gated, or extract invariants first. BL4008.
+// ============================================================================
+let static S = [(0, 0, 1), (1, 1, 1)]
+function bad(x: Array<Float like IrrepsIdx<S>>) where ml.equiv(O3) -> Array<Float like IrrepsIdx<S>> =
+  exp(x)

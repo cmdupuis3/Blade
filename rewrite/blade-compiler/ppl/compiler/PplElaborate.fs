@@ -24,10 +24,14 @@
 ///                       central pair comoments; the cumulant tower will
 ///                       extend this to higher orders.)
 ///
-/// A moment-formed array must be a module-level `let`/`let static` with an
-/// Array annotation (`Array<Elem like I1, ..., Ik, SampleIdx>`) whose index
-/// extents resolve statically (directly or through type aliases) — the
-/// binding-time contract: shape is compile-time, data rides through.
+/// A moment-formed array must be a module-level `let`/`let static` whose
+/// shape is compile-time: either an Array annotation
+/// (`Array<Elem like I1, ..., Ik, SampleIdx>`) whose index extents resolve
+/// statically (directly or through type aliases), or — for COMPUTED arrays —
+/// an un-annotated `method_for(range<...>) <@> kernel [|> compute]` RHS,
+/// whose iteration space is the shape (one axis per dense range slot, halo
+/// slots shrunk to their interior; see computedShapeOf). The binding-time
+/// contract stands: shape is compile-time, data rides through.
 module Blade.Ppl.Elaborate
 
 open Blade.Ast
@@ -37,29 +41,41 @@ open Blade.StaticEval
 // AST construction helpers (mirroring MLElaborate.fs / Grad.fs style)
 // ============================================================================
 
-let private v (n: string) = ExprVar n
-let private fLit (x: float) = ExprLit (LitFloat x)
-let private addE a b = ExprBinOp (Elementwise, OpAdd, a, b)
-let private divE a b = ExprBinOp (Elementwise, OpDiv, a, b)
-let private mulE a b = ExprBinOp (Elementwise, OpMul, a, b)
-let private subE a b = ExprBinOp (Elementwise, OpSub, a, b)
-let private powE a b = ExprBinOp (Elementwise, OpCaret, a, b)
-let private sLet n value = StmtLet { Pattern = PatVar n; Type = None; Value = value; Mutability = BindLet }
-let private meanE arr n = divE (ExprReduce (arr, ExprSection OpAdd, None)) (fLit n)
-let private prodsumE args = ExprApp (v "prodsum", args)
+let private v (n: string) = syn (ExprVar n)
+let private fLit (x: float) = syn (ExprLit (LitFloat x))
+let private addE a b = syn (ExprBinOp (Elementwise, OpAdd, a, b))
+let private divE a b = syn (ExprBinOp (Elementwise, OpDiv, a, b))
+let private mulE a b = syn (ExprBinOp (Elementwise, OpMul, a, b))
+let private subE a b = syn (ExprBinOp (Elementwise, OpSub, a, b))
+let private powE a b = syn (ExprBinOp (Elementwise, OpCaret, a, b))
+let private sLet n value = StmtLet { Pattern = synPat (PatVar n); Type = None; Value = value; Mutability = BindLet }
+let private meanE arr n = divE (syn (ExprReduce (arr, syn (ExprSection OpAdd), None))) (fLit n)
+let private prodsumE args = syn (ExprApp (v "prodsum", args))
 let private commWhere (names: string list) =
     Some { Commutativity = [names]; Parallel = []; TDims = []; Custom = [] }
+// Full-span construction wrappers (stamp the ambient synthSpan the module
+// expansion sets per user decl). Structural combinators only — the scalar
+// helpers above already wrap.
+let private appE f args = syn (ExprApp (f, args))
+let private arrLitE (cells: Expr list) = syn (ExprArrayLit cells)
+let private methodForE (arrs: Expr list) = syn (ExprMethodFor arrs)
+let private lambdaE ps w body = syn (ExprLambda (ps, w, body))
+let private applyE l k = syn (ExprBinOp (Elementwise, OpApply, l, k))
+let private computeE e = syn (ExprCompute e)
+let private reduceAddE e = syn (ExprReduce (e, syn (ExprSection OpAdd), None))
+let private pvar n = synPat (PatVar n)
+let private ptuple (ps: Pattern list) = synPat (PatTuple ps)
 /// Inline co-iteration pipeline over same-shape (packed included) arrays:
 /// method_for(zip(a, b)) <@> lambda(u, w) -> body |> compute — the corpus-
 /// blessed one-binding form (sql-set-ops/004).
 let private zipMap2 (a: Expr) (b: Expr) (body: Expr) =
-    ExprCompute (ExprBinOp (Elementwise, OpApply,
-        ExprMethodFor [ExprZip [a; b]],
-        ExprLambda ([{ Name = "__u"; Type = None }; { Name = "__w"; Type = None }], None, body)))
+    computeE (applyE
+        (methodForE [syn (ExprZip [a; b])])
+        (lambdaE [{ Name = "__u"; Type = None }; { Name = "__w"; Type = None }] None body))
 let private map1 (a: Expr) (body: Expr) =
-    ExprCompute (ExprBinOp (Elementwise, OpApply,
-        ExprMethodFor [a],
-        ExprLambda ([{ Name = "__u"; Type = None }], None, body)))
+    computeE (applyE
+        (methodForE [a])
+        (lambdaE [{ Name = "__u"; Type = None }] None body))
 
 // NOTE: "cumulant" is deliberately NOT a former name anymore — cumulant(d, k)
 // is a checker-level projection on Dist-typed values (TypeCheck's
@@ -108,7 +124,7 @@ let private nonemptySubsets (k: int) : int list list =
 // per-cell pipeline path.
 // ============================================================================
 
-let private iLit (n: int) = ExprLit (LitInt (int64 n))
+let private iLit (n: int) = syn (ExprLit (LitInt (int64 n)))
 
 /// Canonical (non-decreasing) label tuples of rank p over dim d, lex order.
 let private canonicalTuples (d: int) (p: int) : int list list =
@@ -130,7 +146,7 @@ let private poolRead (pool: PoolInfo) (s: int list) : Expr =
 
 /// The raw moment E[Π_{ℓ∈S} x_ℓ] = P_S / N.
 let private poolMoment (pool: PoolInfo) (s: int list) : Expr =
-    ExprBinOp (Elementwise, OpDiv, poolRead pool s, ExprLit (LitFloat pool.N))
+    divE (poolRead pool s) (fLit pool.N)
 
 /// Emit the single-pass pool over a shared row list. `uniq` seeds binding
 /// names (the former's output name keeps them unique per former); `rows` =
@@ -140,14 +156,14 @@ let private poolMoment (pool: PoolInfo) (s: int list) : Expr =
 let private poolDecls (span: Span) (uniq: string) (rows: Expr list)
     (needed: int list list) (n: float) : Located<Decl> list * PoolInfo =
     let mkDecl name value =
-        { Value = DeclLet { Pattern = PatVar name; Type = None; Value = value; Mutability = BindLet }; Span = span }
+        { Value = DeclLet { Pattern = pvar name; Type = None; Value = value; Mutability = BindLet }; Span = span }
     let rowName i = sprintf "__ppl_row_%s_%d" uniq i
     let rowDecls = rows |> List.mapi (fun i e -> mkDecl (rowName i) e)
     let lName = sprintf "__ppl_poolL_%s" uniq
     let lValue =
         match rows with
-        | [_] -> ExprMethodFor [v (rowName 0)]
-        | _ -> ExprMethodFor [ExprZip [ for i in 0 .. rows.Length - 1 -> v (rowName i) ]]
+        | [_] -> methodForE [v (rowName 0)]
+        | _ -> methodForE [syn (ExprZip [ for i in 0 .. rows.Length - 1 -> v (rowName i) ])]
     let sets = needed |> List.map List.sort |> List.distinct |> List.sortBy (fun s -> (s.Length, s))
     let tag (s: int list) = s |> List.map string |> String.concat "_"
     let pName s = sprintf "__ppl_P_%s_%s" uniq (tag s)
@@ -157,25 +173,25 @@ let private poolDecls (span: Span) (uniq: string) (rows: Expr list)
     let kDecls =
         sets |> List.map (fun s ->
             let body = s |> List.map (fun i -> v (xName i)) |> List.reduce mulE
-            mkDecl (kName s) (ExprLambda (ps, None, body)))
-    let applied = sets |> List.map (fun s -> ExprBinOp (Elementwise, OpApply, v lName, v (kName s)))
+            mkDecl (kName s) (lambdaE ps None body))
+    let applied = sets |> List.map (fun s -> applyE (v lName) (v (kName s)))
     let chain =
         match applied with
-        | first :: rest -> rest |> List.fold (fun acc e -> ExprBinOp (Elementwise, OpFusion, acc, e)) first
+        | first :: rest -> rest |> List.fold (fun acc e -> syn (ExprBinOp (Elementwise, OpFusion, acc, e))) first
         | [] -> failwith "poolDecls: empty multiset list"
     let outPat =
         match sets with
-        | [one] -> PatVar (pName one)
-        | _ -> PatTuple (sets |> List.map (pName >> PatVar))
+        | [one] -> pvar (pName one)
+        | _ -> ptuple (sets |> List.map (fun s -> pvar (pName s)))
     let outDecl = { Value = DeclLet { Pattern = outPat; Type = None
-                                      Value = ExprReduce (chain, ExprSection OpAdd, None)
+                                      Value = reduceAddE chain
                                       Mutability = BindLet }; Span = span }
     let names = sets |> List.map (fun s -> (s, pName s)) |> Map.ofList
     (rowDecls @ [mkDecl lName lValue] @ kDecls @ [outDecl], { Names = names; N = n })
 
 /// Row slices of a single-leading-axis array: A(0) .. A(d-1).
 let private rowSlices (aName: string) (d: int) : Expr list =
-    [ for i in 0 .. d - 1 -> ExprApp (v aName, [ExprLit (LitInt (int64 i))]) ]
+    [ for i in 0 .. d - 1 -> appE (v aName) [iLit i] ]
 
 /// The order-r cumulant cell at `labels`, straight-line over the pool:
 /// Σ over set partitions π of [r]: (-1)^(|π|-1)(|π|-1)! · Π_B E[Π x_B].
@@ -200,7 +216,7 @@ let private collectArrays (decls: Located<Decl> list) : Map<string, TypeExpr * T
         match d.Value with
         | DeclLet b | DeclStatic b ->
             match b.Pattern, b.Type with
-            | PatVar name, Some (TyArray (elem, idxs)) -> Map.add name (elem, idxs) acc
+            | { Kind = PatternKind.PatVar name }, Some (TyArray (elem, idxs)) -> Map.add name (elem, idxs) acc
             | _ -> acc
         | _ -> acc) Map.empty
 
@@ -221,6 +237,71 @@ let rec private resolveExtent (aliases: Map<string, TypeExpr>) (statics: StaticE
         Map.tryFind name aliases |> Option.bind (resolveExtent aliases statics)
     | _ -> None
 
+/// Shape inference for COMPUTED source arrays: an UN-annotated module-level
+/// `let A = method_for(range<...>) <@> kernel [|> compute]` carries no
+/// declared TyArray, but its iteration space IS its shape — one axis per
+/// range slot, halo slots shrunk to their interior (the same dense arithmetic
+/// as TypeCheck.haloSlotsOf: reach includes the implicit center 0, interior =
+/// n - (hi - lo)). Only statically-resolvable dense slots qualify; compound /
+/// unresolvable slots return None and keep the annotation-required contract.
+/// The element type is Float64 — the formers' sample algebra is Float64
+/// throughout, and an annotated binding always takes precedence.
+let private computedShapeOf (aliases: Map<string, TypeExpr>) (statics: StaticEnv) (value: Expr) : (TypeExpr * TypeExpr list) option =
+    // Interior extents of one halo slot: flat offsets -> [n - reach]; nested
+    // per-axis form [[..],[..]] -> one shrunk extent per axis (same inner).
+    let haloExtents (innerTy: TypeExpr) (offsetsExpr: Expr) : int list option =
+        resolveExtent aliases statics innerTy |> Option.bind (fun n ->
+            let asInt = function SVInt v -> Some (int v) | _ -> None
+            let shrunk (offs: int list) =
+                if List.isEmpty offs then None
+                else
+                    let lo = min 0 (List.min offs)
+                    let hi = max 0 (List.max offs)
+                    Some (n - (hi - lo))
+            match evalExpr statics maxSteps offsetsExpr with
+            | Ok (SVInt v) -> shrunk [int v] |> Option.map List.singleton
+            | Ok (SVTuple vs) when not vs.IsEmpty ->
+                let flat = vs |> List.map asInt
+                if List.forall Option.isSome flat then
+                    // Flat form: one axis.
+                    shrunk (flat |> List.map Option.get) |> Option.map List.singleton
+                else
+                    // Nested per-axis form: every entry a non-empty int array.
+                    let perAxis =
+                        vs |> List.map (function
+                            | SVTuple xs ->
+                                let os = xs |> List.map asInt
+                                if List.forall Option.isSome os && not os.IsEmpty
+                                then shrunk (os |> List.map Option.get) else None
+                            | _ -> None)
+                    if List.forall Option.isSome perAxis
+                    then Some (perAxis |> List.map Option.get) else None
+            | _ -> None)
+    let slotExtents (ty: TypeExpr) : int list option =
+        match ty with
+        | TyHalo (inner, offs) -> haloExtents inner offs
+        | _ -> resolveExtent aliases statics ty |> Option.map List.singleton
+    // Unwrap |> compute and walk down the <@> application to the loop source.
+    let rec sourceOf (e: Expr) : Expr option =
+        match e.Kind with
+        | ExprKind.ExprCompute inner -> sourceOf inner
+        | ExprKind.ExprBinOp (_, OpApply, l, _) -> sourceOf l
+        | ExprKind.ExprMethodFor [src] -> Some src
+        | _ -> None
+    sourceOf value |> Option.bind (fun src ->
+        let slots =
+            match src.Kind with
+            | ExprKind.ExprRange idxTys -> Some idxTys
+            | ExprKind.ExprHalo (inner, offs) -> Some [TyHalo (inner, offs)]
+            | _ -> None
+        slots |> Option.bind (fun tys ->
+            if List.isEmpty tys then None else
+            let exts = tys |> List.map slotExtents
+            if List.forall Option.isSome exts then
+                let idxs = exts |> List.collect Option.get |> List.map (fun n -> TyIdx (iLit n))
+                Some (TyNamed ("Float64", []), idxs)
+            else None))
+
 // ============================================================================
 // Misplaced-use detection (v1 contract: formers are decl-RHS only)
 // ============================================================================
@@ -228,18 +309,18 @@ let rec private resolveExtent (aliases: Map<string, TypeExpr>) (statics: StaticE
 let rec private anyExpr (p: Expr -> bool) (e: Expr) : bool =
     if p e then true else
     let any = anyExpr p
-    match e with
-    | ExprBinOp (_, _, l, r) -> any l || any r
-    | ExprUnaryOp (_, x) -> any x
-    | ExprApp (f, args) -> any f || List.exists any args
-    | ExprTupleIndex (t, i) -> any t || any i
-    | ExprField (o, _) -> any o
-    | ExprLambda (_, _, b) -> any b
-    | ExprLet (bind, body) -> any bind.Value || any body
-    | ExprMatch (s, cases) -> any s || (cases |> List.exists (fun c -> any c.Body || (c.Guard |> Option.map any |> Option.defaultValue false)))
-    | ExprIf (c, t, f) -> any c || any t || any f
-    | ExprTuple es | ExprArrayLit es | ExprZip es | ExprStack es | ExprSequence es -> List.exists any es
-    | ExprBlock (stmts, fin) ->
+    match e.Kind with
+    | ExprKind.ExprBinOp (_, _, l, r) -> any l || any r
+    | ExprKind.ExprUnaryOp (_, x) -> any x
+    | ExprKind.ExprApp (f, args) -> any f || List.exists any args
+    | ExprKind.ExprTupleIndex (t, i) -> any t || any i
+    | ExprKind.ExprField (o, _) -> any o
+    | ExprKind.ExprLambda (_, _, b) -> any b
+    | ExprKind.ExprLet (bind, body) -> any bind.Value || any body
+    | ExprKind.ExprMatch (s, cases) -> any s || (cases |> List.exists (fun c -> any c.Body || (c.Guard |> Option.map any |> Option.defaultValue false)))
+    | ExprKind.ExprIf (c, t, f) -> any c || any t || any f
+    | ExprKind.ExprTuple es | ExprKind.ExprArrayLit es | ExprKind.ExprZip es | ExprKind.ExprStack es | ExprKind.ExprSequence es -> List.exists any es
+    | ExprKind.ExprBlock (stmts, fin) ->
         let stmtAny s =
             let rec go s =
                 match s with
@@ -250,24 +331,25 @@ let rec private anyExpr (p: Expr -> bool) (e: Expr) : bool =
                 | StmtForIn (_, r, body) -> any r || List.exists go body
             go s
         List.exists stmtAny stmts || (fin |> Option.map any |> Option.defaultValue false)
-    | ExprStruct (_, fields) -> fields |> List.exists (snd >> any)
-    | ExprTyped (x, _) -> any x
-    | ExprMethodFor arrays -> List.exists any arrays
-    | ExprObjectFor k -> any k
-    | ExprAlign (es, _) -> List.exists any es
-    | ExprPure x | ExprCompute x | ExprRead x | ExprUnique x | ExprRank x | ExprExtents x -> any x
-    | ExprGuard (c, b) -> any c || any b
-    | ExprReplicate (c, b) -> any c || any b
-    | ExprMask (a, pr) | ExprCompound (a, pr) | ExprGroupBy (a, pr)
-    | ExprIntersect (a, pr) | ExprUnion (a, pr) | ExprContains (a, pr)
-    | ExprSort (a, pr) | ExprGram (a, pr) -> any a || any pr
-    | ExprReduce (a, k, i) -> any a || any k || (i |> Option.map any |> Option.defaultValue false)
-    | ExprAssign (l, r) -> any l || any r
+    | ExprKind.ExprStruct (_, fields, spread) ->
+        fields |> List.exists (snd >> any) || (spread |> Option.map any |> Option.defaultValue false)
+    | ExprKind.ExprTyped (x, _) -> any x
+    | ExprKind.ExprMethodFor arrays -> List.exists any arrays
+    | ExprKind.ExprObjectFor k -> any k
+    | ExprKind.ExprAlign (es, _) -> List.exists any es
+    | ExprKind.ExprPure x | ExprKind.ExprCompute x | ExprKind.ExprRead x | ExprKind.ExprUnique x | ExprKind.ExprRank x | ExprKind.ExprExtents x -> any x
+    | ExprKind.ExprGuard (c, b) -> any c || any b
+    | ExprKind.ExprReplicate (c, b) -> any c || any b
+    | ExprKind.ExprMask (a, pr) | ExprKind.ExprCompound (a, pr) | ExprKind.ExprGroupBy (a, pr)
+    | ExprKind.ExprIntersect (a, pr) | ExprKind.ExprUnion (a, pr) | ExprKind.ExprContains (a, pr)
+    | ExprKind.ExprSort (a, pr) | ExprKind.ExprGram (a, pr) -> any a || any pr
+    | ExprKind.ExprReduce (a, k, i) -> any a || any k || (i |> Option.map any |> Option.defaultValue false)
+    | ExprKind.ExprAssign (l, r) -> any l || any r
     | _ -> false
 
 let private isFormerCallOf (activeNames: Set<string>) (e: Expr) =
-    match e with
-    | ExprApp (ExprVar n, _) -> Set.contains n activeNames
+    match e.Kind with
+    | ExprKind.ExprApp ({ Kind = ExprKind.ExprVar n }, _) -> Set.contains n activeNames
     | _ -> false
 
 // ============================================================================
@@ -281,20 +363,20 @@ let private isFormerCallOf (activeNames: Set<string>) (e: Expr) =
 /// Split a struct where-invariant into indep(...) conjuncts and the
 /// residual runtime expression (None when indep was the whole invariant).
 let rec private splitInvariant (e: Expr) : (string * string) list * Expr option =
-    match e with
-    | ExprBinOp (m, OpAnd, l, r) ->
+    match e.Kind with
+    | ExprKind.ExprBinOp (m, OpAnd, l, r) ->
         let (il, le) = splitInvariant l
         let (ir, re) = splitInvariant r
         let residual =
             match le, re with
-            | Some a, Some b -> Some (ExprBinOp (m, OpAnd, a, b))
+            | Some a, Some b -> Some (inheritSpan e (ExprBinOp (m, OpAnd, a, b)))
             | Some a, None | None, Some a -> Some a
             | None, None -> None
         (il @ ir, residual)
     // Normalized from `where <alias>.indep(X, Y)` by stripQualified before
     // the core passes run.
-    | ExprApp (ExprVar "__ppl_indep", [ExprVar x; ExprVar y]) -> ([(x, y)], None)
-    | other -> ([], Some other)
+    | ExprKind.ExprApp ({ Kind = ExprKind.ExprVar "__ppl_indep" }, [{ Kind = ExprKind.ExprVar x }; { Kind = ExprKind.ExprVar y }]) -> ([(x, y)], None)
+    | _ -> ([], Some e)
 
 /// Deterministic alias binding name for a struct-field array path m.f —
 /// formers iterate named bindings (method_for over a raw field access
@@ -358,7 +440,7 @@ let private arrayShape (ctx: Ctx) (what: string) (name: string) : Result<TypeExp
 let private elabMoments (ctx: Ctx) (span: Span) (outName: string) (binding: Binding) (args: Expr list)
     : Result<Located<Decl> list, string> =
     match args with
-    | [ExprVar aName; kExpr] ->
+    | [{ Kind = ExprKind.ExprVar aName }; kExpr] ->
         let k =
             match evalExpr ctx.Statics maxSteps kExpr with
             | Ok (SVInt n) when n >= 1L -> Ok (int n)
@@ -373,7 +455,7 @@ let private elabMoments (ctx: Ctx) (span: Span) (outName: string) (binding: Bind
                 let d = (resolveExtent ctx.Aliases ctx.Statics ix).Value
                 let (pd, pool) = acquirePool ctx span aName d (float n) k
                 let cells = [ for labels in canonicalTuples d k -> poolMoment pool labels ]
-                pd @ [ { Value = DeclLet { binding with Value = ExprArrayLit cells }; Span = span } ]
+                pd @ [ { Value = DeclLet { binding with Value = arrLitE cells }; Span = span } ]
             | _ ->
                 // Multiaxis / unresolvable leading extent: per-cell pipeline.
                 let paramNames = [ for i in 1 .. k -> sprintf "__x%d" i ]
@@ -382,30 +464,30 @@ let private elabMoments (ctx: Ctx) (span: Span) (outName: string) (binding: Bind
                 let body = divE (prodsumE (paramNames |> List.map v)) (fLit (float n))
                 let lName = sprintf "__ppl_L_%s" outName
                 let kName = sprintf "__ppl_k_%s" outName
-                let mk value = { Pattern = PatVar ""; Type = None; Value = value; Mutability = BindLet }
-                [ { Value = DeclLet { mk (ExprMethodFor (List.replicate k (v aName))) with Pattern = PatVar lName }; Span = span }
-                  { Value = DeclLet { mk (ExprLambda (ps, whereC, body)) with Pattern = PatVar kName }; Span = span }
-                  { Value = DeclLet { binding with Value = ExprCompute (ExprBinOp (Elementwise, OpApply, v lName, v kName)) }; Span = span } ]))
+                let mk value = { Pattern = pvar ""; Type = None; Value = value; Mutability = BindLet }
+                [ { Value = DeclLet { mk (methodForE (List.replicate k (v aName))) with Pattern = pvar lName }; Span = span }
+                  { Value = DeclLet { mk (lambdaE ps whereC body) with Pattern = pvar kName }; Span = span }
+                  { Value = DeclLet { binding with Value = computeE (applyE (v lName) (v kName)) }; Span = span } ]))
     | _ ->
         Error "moments expects moments(A, k): an annotated module-level array and a static order"
 
 /// Central pair kernel body: E[ab] - ma*mb, spelled over reduce/prodsum
 /// (both proven kernel-position primitives; no elementwise fiber algebra).
 let private centralPairBody (n: float) =
-    ExprBlock (
+    syn (ExprBlock (
         [ sLet "__ma" (meanE (v "__x1") n)
           sLet "__mb" (meanE (v "__x2") n) ],
-        Some (subE (divE (prodsumE [v "__x1"; v "__x2"]) (fLit n)) (mulE (v "__ma") (v "__mb"))))
+        Some (subE (divE (prodsumE [v "__x1"; v "__x2"]) (fLit n)) (mulE (v "__ma") (v "__mb")))))
 
 /// comoments(A, 2) same-array | comoments(X, Y) cross-block.
 let private elabComoments (ctx: Ctx) (span: Span) (outName: string) (binding: Binding) (args: Expr list)
     : Result<Located<Decl> list, string> =
     let lName = sprintf "__ppl_L_%s" outName
     let kName = sprintf "__ppl_k_%s" outName
-    let mkDecl pat value = { Value = DeclLet { Pattern = PatVar pat; Type = None; Value = value; Mutability = BindLet }; Span = span }
+    let mkDecl pat value = { Value = DeclLet { Pattern = pvar pat; Type = None; Value = value; Mutability = BindLet }; Span = span }
     match args with
     // Same-array central comoment of static order (only 2 for now)
-    | [ExprVar aName; kExpr] when (match evalExpr ctx.Statics maxSteps kExpr with Ok (SVInt _) -> true | _ -> false) ->
+    | [{ Kind = ExprKind.ExprVar aName }; kExpr] when (match evalExpr ctx.Statics maxSteps kExpr with Ok (SVInt _) -> true | _ -> false) ->
         match evalExpr ctx.Statics maxSteps kExpr with
         | Ok (SVInt 2L) ->
             arrayShape ctx "comoments" aName |> Result.map (fun (elem, leading, fiber, n) ->
@@ -421,16 +503,16 @@ let private elabComoments (ctx: Ctx) (span: Span) (outName: string) (binding: Bi
                             match labels with
                             | [i; j] -> subE (poolMoment pool labels) (mulE (poolMoment pool [i]) (poolMoment pool [j]))
                             | _ -> fLit 0.0 ]
-                    pd @ [ { Value = DeclLet { binding with Value = ExprArrayLit cells }; Span = span } ]
+                    pd @ [ { Value = DeclLet { binding with Value = arrLitE cells }; Span = span } ]
                 | _ ->
                     let ps = ["__x1"; "__x2"] |> List.map (fun p -> { Name = p; Type = Some (TyArray (elem, [fiber])) })
-                    [ mkDecl lName (ExprMethodFor [v aName; v aName])
-                      mkDecl kName (ExprLambda (ps, commWhere ["__x1"; "__x2"], centralPairBody (float n)))
-                      { Value = DeclLet { binding with Value = ExprCompute (ExprBinOp (Elementwise, OpApply, v lName, v kName)) }; Span = span } ])
+                    [ mkDecl lName (methodForE [v aName; v aName])
+                      mkDecl kName (lambdaE ps (commWhere ["__x1"; "__x2"]) (centralPairBody (float n)))
+                      { Value = DeclLet { binding with Value = computeE (applyE (v lName) (v kName)) }; Span = span } ])
         | _ ->
             Error "comoments: only order 2 (covariance) is supported so far; higher central orders await the subset-lattice expansion over prodsums"
     // Cross block between two distinct arrays
-    | [ExprVar xName; ExprVar yName] ->
+    | [{ Kind = ExprKind.ExprVar xName }; { Kind = ExprKind.ExprVar yName }] ->
         if xName = yName then
             Error "comoments(X, X): use comoments(X, 2) for the same-array (packed) form"
         else
@@ -446,7 +528,7 @@ let private elabComoments (ctx: Ctx) (span: Span) (outName: string) (binding: Bi
                 | [ix], [iy] ->
                     match resolveExtent ctx.Aliases ctx.Statics ix, resolveExtent ctx.Aliases ctx.Statics iy with
                     | Some dx, Some dy ->
-                        let zeros = ExprArrayLit (List.replicate dx (ExprArrayLit (List.replicate dy (fLit 0.0))))
+                        let zeros = arrLitE (List.replicate dx (arrLitE (List.replicate dy (fLit 0.0))))
                         Ok [ { Value = DeclLet { binding with Value = zeros }; Span = span } ]
                     | _ -> Error (sprintf "comoments: independent zero block needs static variable-axis extents for '%s' and '%s'" xName yName)
                 | _ -> Error "comoments: independent zero blocks support one variable axis per array so far (multi-axis blocks deferred)"
@@ -468,9 +550,9 @@ let private elabComoments (ctx: Ctx) (span: Span) (outName: string) (binding: Bi
                         @ [ for i in 0 .. dx - 1 do for j in 0 .. dy - 1 -> [i; dx + j] ]
                     let (pd, pool) = poolDecls span outName rows needed (float nX)
                     let cells =
-                        ExprArrayLit
+                        arrLitE
                             [ for i in 0 .. dx - 1 ->
-                                ExprArrayLit
+                                arrLitE
                                     [ for j in 0 .. dy - 1 ->
                                         subE (poolMoment pool [i; dx + j])
                                              (mulE (poolMoment pool [i]) (poolMoment pool [dx + j])) ] ]
@@ -478,9 +560,9 @@ let private elabComoments (ctx: Ctx) (span: Span) (outName: string) (binding: Bi
                 | _ ->
                     let px = { Name = "__x1"; Type = Some (TyArray (elemX, [fibX])) }
                     let py = { Name = "__x2"; Type = Some (TyArray (elemY, [fibY])) }
-                    Ok [ mkDecl lName (ExprMethodFor [v xName; v yName])
-                         mkDecl kName (ExprLambda ([px; py], None, centralPairBody (float nX)))
-                         { Value = DeclLet { binding with Value = ExprCompute (ExprBinOp (Elementwise, OpApply, v lName, v kName)) }; Span = span } ]))
+                    Ok [ mkDecl lName (methodForE [v xName; v yName])
+                         mkDecl kName (lambdaE [px; py] None (centralPairBody (float nX)))
+                         { Value = DeclLet { binding with Value = computeE (applyE (v lName) (v kName)) }; Span = span } ]))
     | _ ->
         Error "comoments expects comoments(A, 2) (same-array covariance) or comoments(X, Y) (cross block)"
 
@@ -503,7 +585,7 @@ let private cumulantKernelBody (r: int) (n: float) : Expr =
             let b = p.Length
             let w = (if b % 2 = 1 then 1.0 else -1.0) * factorial (b - 1)
             p |> List.fold (fun acc blk -> mulE acc (v (blockName (List.sort blk)))) (fLit w))
-    ExprBlock (lets, Some (terms |> List.reduce addE))
+    syn (ExprBlock (lets, Some (terms |> List.reduce addE)))
 
 /// The proven three-decl former pipeline over ONE array:
 /// L = method_for(A ×k); kernel = lambda over annotated fiber params
@@ -515,20 +597,20 @@ let private formerPipeline (span: Span) (outName: string) (outBinding: Binding o
     let paramNames = [ for i in 1 .. k -> sprintf "__x%d" i ]
     let ps = paramNames |> List.map (fun p -> { Name = p; Type = Some (TyArray (elem, [fiber])) })
     let whereC = if k >= 2 then commWhere paramNames else None
-    let outValue = ExprCompute (ExprBinOp (Elementwise, OpApply, v lName, v kName))
+    let outValue = computeE (applyE (v lName) (v kName))
     let outDecl =
         match outBinding with
         | Some b -> DeclLet { b with Value = outValue }
-        | None -> DeclLet { Pattern = PatVar outName; Type = None; Value = outValue; Mutability = BindLet }
-    [ { Value = DeclLet { Pattern = PatVar lName; Type = None; Value = ExprMethodFor (List.replicate k (v aName)); Mutability = BindLet }; Span = span }
-      { Value = DeclLet { Pattern = PatVar kName; Type = None; Value = ExprLambda (ps, whereC, body); Mutability = BindLet }; Span = span }
+        | None -> DeclLet { Pattern = pvar outName; Type = None; Value = outValue; Mutability = BindLet }
+    [ { Value = DeclLet { Pattern = pvar lName; Type = None; Value = methodForE (List.replicate k (v aName)); Mutability = BindLet }; Span = span }
+      { Value = DeclLet { Pattern = pvar kName; Type = None; Value = lambdaE ps whereC body; Mutability = BindLet }; Span = span }
       { Value = outDecl; Span = span } ]
 
 /// cumulants(A, r): the order-r joint cumulant tensor, SymIdx<r, D> packed.
 let private elabCumulants (ctx: Ctx) (span: Span) (outName: string) (binding: Binding) (args: Expr list)
     : Result<Located<Decl> list, string> =
     match args with
-    | [ExprVar aName; rExpr] ->
+    | [{ Kind = ExprKind.ExprVar aName }; rExpr] ->
         let r =
             match evalExpr ctx.Statics maxSteps rExpr with
             | Ok (SVInt n) when n >= 1L && n <= 6L -> Ok (int n)
@@ -548,7 +630,7 @@ let private elabCumulants (ctx: Ctx) (span: Span) (outName: string) (binding: Bi
                 let cells =
                     [ for labels in canonicalTuples d r ->
                         cumulantCellExpr pool (List.toArray labels) r ]
-                pd @ [ { Value = DeclLet { binding with Value = ExprArrayLit cells }; Span = span } ]
+                pd @ [ { Value = DeclLet { binding with Value = arrLitE cells }; Span = span } ]
             | _ ->
                 // Multiaxis / unresolvable leading extent: the per-cell
                 // pipeline path (fused leading axes, kernel prodsum lets).
@@ -590,15 +672,15 @@ let private distComponentName (dName: string) (k: int) = sprintf "__dist_%s_k%d"
 /// back to this same component tuple at zonk), so `d` is first-class — it
 /// crosses function boundaries and cumulant(d, k) projects it anywhere.
 let private distPackDecl (span: Span) (dName: string) (info: DistInfo) : Located<Decl> =
-    { Value = DeclLet { Pattern = PatVar dName; Type = None
-                        Value = ExprApp (v "__dist_pack", info.Components |> List.map v)
+    { Value = DeclLet { Pattern = pvar dName; Type = None
+                        Value = appE (v "__dist_pack") (info.Components |> List.map v)
                         Mutability = BindLet }
       Span = span }
 
 let private elabDist (ctx: Ctx) (span: Span) (dName: string) (args: Expr list)
     : Result<Located<Decl> list * DistInfo, string> =
     match args with
-    | [ExprVar aName; rExpr] ->
+    | [{ Kind = ExprKind.ExprVar aName }; rExpr] ->
         let r =
             match evalExpr ctx.Statics maxSteps rExpr with
             | Ok (SVInt n) when n >= 1L && n <= 6L -> Ok (int n)
@@ -618,18 +700,18 @@ let private elabDist (ctx: Ctx) (span: Span) (dName: string) (args: Expr list)
                     let paramNames = [ for i in 1 .. k -> sprintf "__x%d" i ]
                     let ps = paramNames |> List.map (fun p -> { Name = p; Type = Some (TyArray (elem, [fiber])) })
                     let whereC = if k >= 2 then commWhere paramNames else None
-                    yield { Value = DeclLet { Pattern = PatVar (lName k); Type = None; Value = ExprMethodFor (List.replicate k (v aName)); Mutability = BindLet }; Span = span }
-                    yield { Value = DeclLet { Pattern = PatVar (kName k); Type = None; Value = ExprLambda (ps, whereC, cumulantKernelBody k (float n)); Mutability = BindLet }; Span = span } ]
-            let applied = [ for k in 1 .. r -> ExprBinOp (Elementwise, OpApply, v (lName k), v (kName k)) ]
+                    yield { Value = DeclLet { Pattern = pvar (lName k); Type = None; Value = methodForE (List.replicate k (v aName)); Mutability = BindLet }; Span = span }
+                    yield { Value = DeclLet { Pattern = pvar (kName k); Type = None; Value = lambdaE ps whereC (cumulantKernelBody k (float n)); Mutability = BindLet }; Span = span } ]
+            let applied = [ for k in 1 .. r -> applyE (v (lName k)) (v (kName k)) ]
             let fusedVal =
                 match applied with
-                | [one] -> ExprCompute one
-                | first :: restA -> ExprCompute (restA |> List.fold (fun acc e -> ExprBinOp (Elementwise, OpParallel, acc, e)) first)
-                | [] -> ExprCompute (v aName)  // unreachable: r >= 1
+                | [one] -> computeE one
+                | first :: restA -> computeE (restA |> List.fold (fun acc e -> syn (ExprBinOp (Elementwise, OpParallel, acc, e))) first)
+                | [] -> computeE (v aName)  // unreachable: r >= 1
             let outPat =
                 match comps with
-                | [one] -> PatVar one
-                | _ -> PatTuple (comps |> List.map PatVar)
+                | [one] -> pvar one
+                | _ -> ptuple (comps |> List.map pvar)
             let fusedDecl = { Value = DeclLet { Pattern = outPat; Type = None; Value = fusedVal; Mutability = BindLet }; Span = span }
             (stageDecls @ [fusedDecl], { Order = r; Components = comps; Sources = Set.singleton aName; Dim = None; Flat = false })))
     | _ ->
@@ -643,7 +725,7 @@ let private elabDistCombine (opName: string) (weight: int -> float) (ctx: Ctx) (
     (dists: Map<string, DistInfo>) (args: Expr list)
     : Result<Located<Decl> list * DistInfo, string> =
     match args with
-    | [ExprVar n1; ExprVar n2] ->
+    | [{ Kind = ExprKind.ExprVar n1 }; { Kind = ExprKind.ExprVar n2 }] ->
         match Map.tryFind n1 dists, Map.tryFind n2 dists with
         | Some d1, Some d2 when d1.Order = d2.Order ->
             let missing =
@@ -660,7 +742,7 @@ let private elabDistCombine (opName: string) (weight: int -> float) (ctx: Ctx) (
                         let contrib =
                             if weight k = 1.0 then v "__w"
                             else mulE (fLit (weight k)) (v "__w")
-                        { Value = DeclLet { Pattern = PatVar outN; Type = None
+                        { Value = DeclLet { Pattern = pvar outN; Type = None
                                             Value = zipMap2 (v d1.Components.[k - 1]) (v d2.Components.[k - 1]) (addE (v "__u") contrib)
                                             Mutability = BindLet }
                           Span = span } ]
@@ -681,7 +763,7 @@ let private elabDistScale (ctx: Ctx) (span: Span) (dName: string)
     (dists: Map<string, DistInfo>) (args: Expr list)
     : Result<Located<Decl> list * DistInfo, string> =
     match args with
-    | [cExpr; ExprVar dn] ->
+    | [cExpr; { Kind = ExprKind.ExprVar dn }] ->
         match Map.tryFind dn dists with
         | Some d ->
             // κ_k(c·X) = c^k κ_k(X): multilinearity, spelled as k repeated
@@ -690,7 +772,7 @@ let private elabDistScale (ctx: Ctx) (span: Span) (dName: string)
                 [ for k in 1 .. d.Order ->
                     let outN = distComponentName dName k
                     let scaled = List.replicate k cExpr |> List.fold mulE (v "__u")
-                    { Value = DeclLet { Pattern = PatVar outN; Type = None
+                    { Value = DeclLet { Pattern = pvar outN; Type = None
                                         Value = map1 (v d.Components.[k - 1]) scaled
                                         Mutability = BindLet }
                       Span = span } ]
@@ -716,7 +798,7 @@ let private elabDistScale (ctx: Ctx) (span: Span) (dName: string)
 let private elabComomentsMerge (ctx: Ctx) (span: Span) (outName: string) (binding: Binding) (args: Expr list)
     : Result<Located<Decl> list, string> =
     match args with
-    | [ExprVar cA; ExprVar mA; nAExpr; ExprVar cB; ExprVar mB; nBExpr] ->
+    | [{ Kind = ExprKind.ExprVar cA }; { Kind = ExprKind.ExprVar mA }; nAExpr; { Kind = ExprKind.ExprVar cB }; { Kind = ExprKind.ExprVar mB }; nBExpr] ->
         let staticN what e =
             match evalExpr ctx.Statics maxSteps e with
             | Ok (SVInt n) when n >= 1L -> Ok (float n)
@@ -728,7 +810,7 @@ let private elabComomentsMerge (ctx: Ctx) (span: Span) (outName: string) (bindin
             let ddLN = sprintf "__ppl_ddL_%s" outName
             let ddKN = sprintf "__ppl_ddk_%s" outName
             let ddN = sprintf "__ppl_dd_%s" outName
-            let mkDecl pat value = { Value = DeclLet { Pattern = PatVar pat; Type = None; Value = value; Mutability = BindLet }; Span = span }
+            let mkDecl pat value = { Value = DeclLet { Pattern = pvar pat; Type = None; Value = value; Mutability = BindLet }; Span = span }
             // δ = mB − mA (lockstep over the mean vectors)
             let deltaDecl = mkDecl deltaN (zipMap2 (v mA) (v mB) (subE (v "__w") (v "__u")))
             match Map.tryFind cA ctx.FlatDims.Value, Map.tryFind cB ctx.FlatDims.Value with
@@ -737,35 +819,35 @@ let private elabComomentsMerge (ctx: Ctx) (span: Span) (outName: string) (bindin
                 // fully cell-wise merge — δδᵀ inlined per cell, flat lex
                 // reads on both chunks (the mstate_merge house style).
                 let d = dA
-                let dRead i = ExprApp (v deltaN, [iLit i])
+                let dRead i = appE (v deltaN) [iLit i]
                 let cells = canonicalTuples d 2
                 let merged =
-                    ExprArrayLit
+                    arrLitE
                         [ for k in 0 .. cells.Length - 1 ->
                             let (i, j) = (match cells.[k] with [i; j] -> (i, j) | _ -> (0, 0))
                             addE
-                                (divE (addE (mulE (fLit nA) (ExprApp (v cA, [iLit k])))
-                                            (mulE (fLit nB) (ExprApp (v cB, [iLit k])))) (fLit n))
+                                (divE (addE (mulE (fLit nA) (appE (v cA) [iLit k]))
+                                            (mulE (fLit nB) (appE (v cB) [iLit k]))) (fLit n))
                                 (mulE (fLit (nA * nB / (n * n))) (mulE (dRead i) (dRead j))) ]
                 ctx.FlatDims.Value <- Map.add outName d ctx.FlatDims.Value
                 [ deltaDecl
                   { Value = DeclLet { binding with Value = merged }; Span = span } ]
             | _ ->
                 // δδᵀ as a packed symmetric outer square (scalar comm kernel)
-                let ddL = mkDecl ddLN (ExprMethodFor [v deltaN; v deltaN])
-                let ddK = mkDecl ddKN (ExprLambda ([{ Name = "__a"; Type = None }; { Name = "__b"; Type = None }],
-                                                   commWhere ["__a"; "__b"],
-                                                   mulE (v "__a") (v "__b")))
-                let dd = mkDecl ddN (ExprCompute (ExprBinOp (Elementwise, OpApply, v ddLN, v ddKN)))
+                let ddL = mkDecl ddLN (methodForE [v deltaN; v deltaN])
+                let ddK = mkDecl ddKN (lambdaE [{ Name = "__a"; Type = None }; { Name = "__b"; Type = None }]
+                                               (commWhere ["__a"; "__b"])
+                                               (mulE (v "__a") (v "__b")))
+                let dd = mkDecl ddN (computeE (applyE (v ddLN) (v ddKN)))
                 // merged = (nA·CA + nB·CB)/n + (nA·nB/n²)·δδᵀ, three-way lockstep
                 let body =
                     addE
                         (divE (addE (mulE (fLit nA) (v "__ca")) (mulE (fLit nB) (v "__cb"))) (fLit n))
                         (mulE (fLit (nA * nB / (n * n))) (v "__dd"))
                 let merged =
-                    ExprCompute (ExprBinOp (Elementwise, OpApply,
-                        ExprMethodFor [ExprZip [v cA; v cB; v ddN]],
-                        ExprLambda ([{ Name = "__ca"; Type = None }; { Name = "__cb"; Type = None }; { Name = "__dd"; Type = None }], None, body)))
+                    computeE (applyE
+                        (methodForE [syn (ExprZip [v cA; v cB; v ddN])])
+                        (lambdaE [{ Name = "__ca"; Type = None }; { Name = "__cb"; Type = None }; { Name = "__dd"; Type = None }] None body))
                 [ deltaDecl; ddL; ddK; dd
                   { Value = DeclLet { binding with Value = merged }; Span = span } ]))
     | _ ->
@@ -813,8 +895,8 @@ let private mstateComponent (sName: string) (what: string) = sprintf "__mst_%s_%
 let private mReadExpr (info: MStateInfo) (labels: int list) : Expr =
     let p = labels.Length
     let name = info.Ms.[p - 2]
-    if info.Packed then ExprApp (v name, labels |> List.map iLit)
-    else ExprApp (v name, [iLit (lexOffsetOf info.Dim p labels)])
+    if info.Packed then appE (v name) (labels |> List.map iLit)
+    else appE (v name) [iLit (lexOffsetOf info.Dim p labels)]
 
 // (centralSumKernelBody — the per-cell kernel expansion of the central
 // comoment sum — was deleted with the single-pass pool: elabMState now
@@ -823,7 +905,7 @@ let private mReadExpr (info: MStateInfo) (labels: int list) : Expr =
 let private elabMState (ctx: Ctx) (span: Span) (sName: string) (args: Expr list)
     : Result<Located<Decl> list * MStateInfo, string> =
     match args with
-    | [ExprVar aName; rExpr] ->
+    | [{ Kind = ExprKind.ExprVar aName }; rExpr] ->
         let r =
             match evalExpr ctx.Statics maxSteps rExpr with
             | Ok (SVInt x) when x >= 2L && x <= 6L -> Ok (int x)
@@ -845,8 +927,8 @@ let private elabMState (ctx: Ctx) (span: Span) (sName: string) (args: Expr list)
                     let (pd, pool) = acquirePool ctx span aName d (float n) r
                     let meanN = mstateComponent sName "mean"
                     let mN p = mstateComponent sName (sprintf "m%d" p)
-                    let mkDecl name value = { Value = DeclLet { Pattern = PatVar name; Type = None; Value = value; Mutability = BindLet }; Span = span }
-                    let meanDecl = mkDecl meanN (ExprArrayLit [ for i in 0 .. d - 1 -> poolMoment pool [i] ])
+                    let mkDecl name value = { Value = DeclLet { Pattern = pvar name; Type = None; Value = value; Mutability = BindLet }; Span = span }
+                    let meanDecl = mkDecl meanN (arrLitE [ for i in 0 .. d - 1 -> poolMoment pool [i] ])
                     let mDecls =
                         [ for p in 2 .. r ->
                             let cells =
@@ -861,7 +943,7 @@ let private elabMState (ctx: Ctx) (span: Span) (sName: string) (args: Expr list)
                                             let muProd = inK |> List.fold (fun acc i -> mulE acc (poolMoment pool [i])) (fLit sign)
                                             mulE muProd ps ]
                                     terms |> List.reduce addE ]
-                            mkDecl (mN p) (ExprArrayLit cells) ]
+                            mkDecl (mN p) (arrLitE cells) ]
                     Ok (pd @ [meanDecl] @ mDecls, { Order = r; Dim = d; N = float n; Mean = meanN; Ms = [ for p in 2 .. r -> mN p ]; Packed = false })
                 | None -> Error "mstate: the variable-axis extent must be statically known"
             | _ -> Error "mstate: one variable axis per array so far (multi-axis states deferred)"))
@@ -872,7 +954,7 @@ let private elabMStateMerge (ctx: Ctx) (span: Span) (outName: string)
     (mstates: Map<string, MStateInfo>) (args: Expr list)
     : Result<Located<Decl> list * MStateInfo, string> =
     match args with
-    | [ExprVar sa; ExprVar sb] ->
+    | [{ Kind = ExprKind.ExprVar sa }; { Kind = ExprKind.ExprVar sb }] ->
         match Map.tryFind sa mstates, Map.tryFind sb mstates with
         | Some a, Some b when a.Order = b.Order && a.Dim = b.Dim ->
             let n = a.N + b.N
@@ -881,10 +963,10 @@ let private elabMStateMerge (ctx: Ctx) (span: Span) (outName: string)
             let deltaN = mstateComponent outName "delta"
             let meanN = mstateComponent outName "mean"
             let mN p = mstateComponent outName (sprintf "m%d" p)
-            let dRead lbl = ExprApp (v deltaN, [iLit lbl])
+            let dRead lbl = appE (v deltaN) [iLit lbl]
             let mSide (info: MStateInfo) (labels: int list) =
                 if labels.IsEmpty then fLit info.N else mReadExpr info labels
-            let mkDecl name value = { Value = DeclLet { Pattern = PatVar name; Type = None; Value = value; Mutability = BindLet }; Span = span }
+            let mkDecl name value = { Value = DeclLet { Pattern = pvar name; Type = None; Value = value; Mutability = BindLet }; Span = span }
             let deltaDecl = mkDecl deltaN (zipMap2 (v a.Mean) (v b.Mean) (subE (v "__w") (v "__u")))
             let meanDecl = mkDecl meanN (zipMap2 (v a.Mean) (v b.Mean) (addE (v "__u") (mulE (fLit (b.N / n)) (subE (v "__w") (v "__u")))))
             let mDecls =
@@ -902,7 +984,7 @@ let private elabMStateMerge (ctx: Ctx) (span: Span) (outName: string)
                                         yield addE (mulE (mSide a rest) (deltaProd cA))
                                                    (mulE (mSide b rest) (deltaProd cB)) ]
                             terms |> List.reduce addE ]
-                    mkDecl (mN p) (ExprArrayLit cells) ]
+                    mkDecl (mN p) (arrLitE cells) ]
             let info = { Order = a.Order; Dim = a.Dim; N = n; Mean = meanN; Ms = [ for p in 2 .. a.Order -> mN p ]; Packed = false }
             Ok ([deltaDecl; meanDecl] @ mDecls, info)
         | Some a, Some b ->
@@ -920,19 +1002,19 @@ let private elabMStateCumulants (ctx: Ctx) (span: Span) (binding: Binding)
     (mstates: Map<string, MStateInfo>) (args: Expr list)
     : Result<Located<Decl> list, string> =
     match args with
-    | [ExprVar sn] ->
+    | [{ Kind = ExprKind.ExprVar sn }] ->
         match Map.tryFind sn mstates with
         | Some s ->
             let compNames =
-                match binding.Pattern with
-                | PatTuple pats when pats.Length = s.Order ->
-                    let names = pats |> List.map (function PatVar nm -> Some nm | _ -> None)
+                match binding.Pattern.Kind with
+                | PatternKind.PatTuple pats when pats.Length = s.Order ->
+                    let names = pats |> List.map (fun p -> match p.Kind with PatternKind.PatVar nm -> Some nm | _ -> None)
                     if names |> List.forall Option.isSome then Ok (names |> List.map Option.get)
                     else Error "mstate_cumulants: destructure into plain names"
                 | _ ->
                     Error (sprintf "mstate_cumulants: destructure the result — `let (k1, ..., k%d) = mstate_cumulants(%s)`" s.Order sn)
             compNames |> Result.map (fun names ->
-                let mkDecl name value = { Value = DeclLet { Pattern = PatVar name; Type = None; Value = value; Mutability = BindLet }; Span = span }
+                let mkDecl name value = { Value = DeclLet { Pattern = pvar name; Type = None; Value = value; Mutability = BindLet }; Span = span }
                 let muE (labels: int list) = divE (mReadExpr s labels) (fLit s.N)
                 let kDecl p name =
                     if p = 1 then mkDecl name (v s.Mean)
@@ -950,7 +1032,7 @@ let private elabMStateCumulants (ctx: Ctx) (span: Span) (binding: Binding)
                                         pt |> List.fold (fun acc blk ->
                                             mulE acc (muE (blk |> List.map (fun pos -> labArr.[pos])))) (fLit w) ]
                                 terms |> List.reduce addE ]
-                        mkDecl name (ExprArrayLit cells)
+                        mkDecl name (arrLitE cells)
                 names |> List.mapi (fun i nm -> kDecl (i + 1) nm))
         | None ->
             Error "mstate_cumulants expects a previously declared mstate(...) binding"
@@ -973,9 +1055,9 @@ let private distKappaRead (info: DistInfo) (labels: int list) : Expr =
     let q = labels.Length
     if info.Flat && q >= 2 then
         let d = defaultArg info.Dim 1
-        ExprApp (v info.Components.[q - 1], [iLit (lexOffsetOf d q labels)])
+        appE (v info.Components.[q - 1]) [iLit (lexOffsetOf d q labels)]
     else
-        ExprApp (v info.Components.[q - 1], labels |> List.map iLit)
+        appE (v info.Components.[q - 1]) (labels |> List.map iLit)
 
 /// moments(d, k) on a dist binding: reconstruct the order-k RAW moment
 /// tensor from carried cumulants — μ_S = Σ over set partitions of S:
@@ -1002,7 +1084,7 @@ let private elabMomentsOfDist (ctx: Ctx) (span: Span) (binding: Binding)
                 match terms with
                 | [] -> fLit 0.0   // every partition needs a block > carried order
                 | _ -> terms |> List.reduce addE ]
-        Ok [ { Value = DeclLet { binding with Value = ExprArrayLit cells }; Span = span } ]
+        Ok [ { Value = DeclLet { binding with Value = arrLitE cells }; Span = span } ]
     | _ -> Error "moments: on a dist, the order must be a compile-time integer in 1..8"
 
 /// The dist's variable dimension: an explicit override (pushforward
@@ -1032,7 +1114,7 @@ let private distDim (ctx: Ctx) (info: DistInfo) : Result<int, string> =
 let private elabMixedCumulants (ctx: Ctx) (span: Span) (outName: string) (binding: Binding) (args: Expr list)
     : Result<Located<Decl> list, string> =
     match args with
-    | [ExprVar xName; ExprVar yName; pExpr; qExpr] ->
+    | [{ Kind = ExprKind.ExprVar xName }; { Kind = ExprKind.ExprVar yName }; pExpr; qExpr] ->
         let staticOrd what e =
             match evalExpr ctx.Statics maxSteps e with
             | Ok (SVInt x) when x >= 1L && x <= 5L -> Ok (int x)
@@ -1052,7 +1134,7 @@ let private elabMixedCumulants (ctx: Ctx) (span: Span) (outName: string) (bindin
                     | Some dx, Some dy ->
                         let cellCount =
                             (canonicalTuples dx p |> List.length) * (canonicalTuples dy q |> List.length)
-                        let zeros = ExprArrayLit (List.replicate cellCount (fLit 0.0))
+                        let zeros = arrLitE (List.replicate cellCount (fLit 0.0))
                         Ok [ { Value = DeclLet { binding with Value = zeros }; Span = span } ]
                     | _ -> Error "mixed_cumulants: independent zero block needs static variable-axis extents"
                 | _ -> Error "mixed_cumulants: independent zero blocks support one variable axis per array so far"
@@ -1080,7 +1162,7 @@ let private elabMixedCumulants (ctx: Ctx) (span: Span) (outName: string) (bindin
                                 pt |> List.map (fun blk -> blk |> List.map (fun pos -> labArr.[pos]) |> List.sort)))
                     let (pd, pool) = poolDecls span outName rows needed (float nX)
                     let cells = [ for labArr in cellLabels -> cumulantCellExpr pool labArr r ]
-                    Ok (pd @ [ { Value = DeclLet { binding with Value = ExprArrayLit cells }; Span = span } ])
+                    Ok (pd @ [ { Value = DeclLet { binding with Value = arrLitE cells }; Span = span } ])
                 | _ ->
                     let lName = sprintf "__ppl_L_%s" outName
                     let kName = sprintf "__ppl_k_%s" outName
@@ -1093,10 +1175,10 @@ let private elabMixedCumulants (ctx: Ctx) (span: Span) (outName: string) (bindin
                     let whereC =
                         if commGroups.IsEmpty then None
                         else Some { Commutativity = commGroups; Parallel = []; TDims = []; Custom = [] }
-                    let mkDecl name value = { Value = DeclLet { Pattern = PatVar name; Type = None; Value = value; Mutability = BindLet }; Span = span }
-                    Ok [ mkDecl lName (ExprMethodFor ((List.replicate p (v xName)) @ (List.replicate q (v yName))))
-                         mkDecl kName (ExprLambda (ps, whereC, cumulantKernelBody r (float nX)))
-                         { Value = DeclLet { binding with Value = ExprCompute (ExprBinOp (Elementwise, OpApply, v lName, v kName)) }; Span = span } ]))))
+                    let mkDecl name value = { Value = DeclLet { Pattern = pvar name; Type = None; Value = value; Mutability = BindLet }; Span = span }
+                    Ok [ mkDecl lName (methodForE ((List.replicate p (v xName)) @ (List.replicate q (v yName))))
+                         mkDecl kName (lambdaE ps whereC (cumulantKernelBody r (float nX)))
+                         { Value = DeclLet { binding with Value = computeE (applyE (v lName) (v kName)) }; Span = span } ]))))
     | _ ->
         Error "mixed_cumulants expects mixed_cumulants(X, Y, p, q): two annotated arrays and static per-array orders"
 
@@ -1109,7 +1191,7 @@ let private elabDistAffine (ctx: Ctx) (span: Span) (binding: Binding)
     (dists: Map<string, DistInfo>) (args: Expr list)
     : Result<Located<Decl> list, string> =
     match args with
-    | [ExprVar wName; ExprVar dn] ->
+    | [{ Kind = ExprKind.ExprVar wName }; { Kind = ExprKind.ExprVar dn }] ->
         match Map.tryFind dn dists with
         | None -> Error "dist_affine expects dist_affine(W, d) with a previously declared dist binding d"
         | Some info ->
@@ -1119,14 +1201,14 @@ let private elabDistAffine (ctx: Ctx) (span: Span) (binding: Binding)
                 match resolveExtent ctx.Aliases ctx.Statics im, resolveExtent ctx.Aliases ctx.Statics inn with
                 | Some m, Some nCols when nCols = n ->
                     let compNames =
-                        match binding.Pattern with
-                        | PatTuple pats when pats.Length = info.Order ->
-                            let names = pats |> List.map (function PatVar nm -> Some nm | _ -> None)
+                        match binding.Pattern.Kind with
+                        | PatternKind.PatTuple pats when pats.Length = info.Order ->
+                            let names = pats |> List.map (fun p -> match p.Kind with PatternKind.PatVar nm -> Some nm | _ -> None)
                             if names |> List.forall Option.isSome then Ok (names |> List.map Option.get)
                             else Error "dist_affine: destructure into plain names"
                         | _ -> Error (sprintf "dist_affine: destructure the result — `let (p1, ..., p%d) = dist_affine(%s, %s)`" info.Order wName dn)
                     compNames |> Result.map (fun names ->
-                        let wRead i j = ExprApp (v wName, [iLit i; iLit j])
+                        let wRead i j = appE (v wName) [iLit i; iLit j]
                         // all index tuples over [0, n)^k (order matters for the
                         // W factors; κ reads canonicalize the j-tuple)
                         let rec jTuples k = if k = 0 then [ [] ] else [ for j in 0 .. n - 1 do for rest in jTuples (k - 1) -> j :: rest ]
@@ -1143,7 +1225,7 @@ let private elabDistAffine (ctx: Ctx) (span: Span) (binding: Binding)
                                                 |> List.fold (fun acc l -> mulE acc (wRead iArr.[l] jArr.[l])) (fLit 1.0)
                                             mulE wProd (distKappaRead info (List.sort js)) ]
                                     terms |> List.reduce addE ]
-                            { Value = DeclLet { Pattern = PatVar nm; Type = None; Value = ExprArrayLit cells; Mutability = BindLet }; Span = span }))
+                            { Value = DeclLet { Pattern = pvar nm; Type = None; Value = arrLitE cells; Mutability = BindLet }; Span = span }))
                 | Some _, Some nCols ->
                     Error (sprintf "dist_affine: W's column count (%d) must match the dist's dimension (%d)" nCols n)
                 | _ -> Error "dist_affine: W's extents must be statically known"
@@ -1204,24 +1286,25 @@ let private elabDistJetVec (closed: bool) (former: string) (ctx: Ctx) (span: Spa
             else
                 let cellsOf k = canonicalTuples dim k |> List.length
                 let g0Read (a: int) : Expr =
-                    match g0Expr with
-                    | ExprArrayLit cells -> cells.[a]
-                    | _ -> ExprApp (g0Expr, [iLit a])   // named rank-1 array of extent m
+                    match g0Expr.Kind with
+                    | ExprKind.ExprArrayLit cells -> cells.[a]
+                    | _ -> appE g0Expr [iLit a]   // named rank-1 array of extent m
                 let dReadOf (k: int) (dArg: Expr) : Result<(int -> int list -> Expr option), string> =
                     let want = m * cellsOf k
-                    match dArg with
-                    | ExprArrayLit cells when cells.Length = want ->
+                    match dArg.Kind with
+                    | ExprKind.ExprArrayLit cells when cells.Length = want ->
                         let cellArr = List.toArray cells
                         Ok (fun a labels ->
-                            match cellArr.[a * cellsOf k + lexOffsetOf dim k labels] with
-                            | ExprLit (LitFloat 0.0) -> None
-                            | e -> Some e)
-                    | ExprArrayLit cells ->
+                            let cell = cellArr.[a * cellsOf k + lexOffsetOf dim k labels]
+                            match cell.Kind with
+                            | ExprKind.ExprLit (LitFloat 0.0) -> None
+                            | _ -> Some cell)
+                    | ExprKind.ExprArrayLit cells ->
                         Error (sprintf "%s: vector D%d needs %d cells (coordinate-major: m = %d outer × %d canonical cells over dim %d), got %d" former k want m (cellsOf k) dim cells.Length)
-                    | ExprVar w ->
+                    | ExprKind.ExprVar w ->
                         (match Map.tryFind w ctx.Arrays with
                          | Some (_, [ix]) when resolveExtent ctx.Aliases ctx.Statics ix = Some want ->
-                             Ok (fun a labels -> Some (ExprApp (v w, [iLit (a * cellsOf k + lexOffsetOf dim k labels)])))
+                             Ok (fun a labels -> Some (appE (v w) [iLit (a * cellsOf k + lexOffsetOf dim k labels)]))
                          | Some _ ->
                              Error (sprintf "%s: vector D%d ('%s') must be a rank-1 array of %d coordinate-major cells" former k w want)
                          | None ->
@@ -1236,7 +1319,7 @@ let private elabDistJetVec (closed: bool) (former: string) (ctx: Ctx) (span: Spa
                 dReadsRes |> Result.map (fun dReadFns ->
                     let dRead (k: int) (a: int) (labels: int list) = dReadFns.[k - 1] a labels
                     let mkDecl name value =
-                        { Value = DeclLet { Pattern = PatVar name; Type = None; Value = value; Mutability = BindLet }; Span = span }
+                        { Value = DeclLet { Pattern = pvar name; Type = None; Value = value; Mutability = BindLet }; Span = span }
                     let kappaName kk ci = sprintf "__ppl_jetk_%s_o%d_c%d" dName kk ci
                     let cmName t ci = sprintf "__ppl_jetcm_%s_t%d_c%d" dName t ci
                     let myName k ci = sprintf "__ppl_jetmy_%s_o%d_c%d" dName k ci
@@ -1327,7 +1410,7 @@ let private elabDistJetVec (closed: bool) (former: string) (ctx: Ctx) (span: Spa
                                                 mulE acc (myRead (blk |> List.map (fun pos -> oArr.[pos]) |> List.sort))) (fLit w))
                                         |> List.reduce addE
                                     if k = 1 then addE mobius (g0Read oArr.[0]) else mobius ]
-                            mkDecl (distComponentName dName k) (ExprArrayLit cells) ]
+                            mkDecl (distComponentName dName k) (arrLitE cells) ]
                     let outInfo = { Order = q
                                     Components = [ for k in 1 .. q -> distComponentName dName k ]
                                     Sources = info.Sources
@@ -1339,7 +1422,7 @@ let private elabDistJet (closed: bool) (former: string) (ctx: Ctx) (span: Span) 
     (dists: Map<string, DistInfo>) (args: Expr list)
     : Result<Located<Decl> list * DistInfo, string> =
     match args with
-    | ExprVar dn :: qExpr :: g0Expr :: dArgs when not dArgs.IsEmpty ->
+    | { Kind = ExprKind.ExprVar dn } :: qExpr :: g0Expr :: dArgs when not dArgs.IsEmpty ->
         match Map.tryFind dn dists with
         | None -> Error (sprintf "%s expects %s(d, q, g0, D1, ..., Ds) with a previously declared dist binding d" former former)
         | Some info ->
@@ -1349,9 +1432,9 @@ let private elabDistJet (closed: bool) (former: string) (ctx: Ctx) (span: Span) 
             // means g : R^dim → R^m with joint output cumulants; a scalar
             // g0 expression keeps the univariate path byte-identical.
             let vecM =
-                match g0Expr with
-                | ExprArrayLit cells -> Some cells.Length
-                | ExprVar w ->
+                match g0Expr.Kind with
+                | ExprKind.ExprArrayLit cells -> Some cells.Length
+                | ExprKind.ExprVar w ->
                     (match Map.tryFind w ctx.Arrays with
                      | Some (_, [ix]) -> resolveExtent ctx.Aliases ctx.Statics ix
                      | _ -> None)
@@ -1379,23 +1462,24 @@ let private elabDistJet (closed: bool) (former: string) (ctx: Ctx) (span: Span) 
                 let cellsOf k = canonicalTuples dim k |> List.length
                 let dReadOf (k: int) (dArg: Expr) : Result<(int list -> Expr option), string> =
                     if dim = 1 then
-                        match dArg with
-                        | ExprLit (LitFloat 0.0) -> Ok (fun _ -> None)
-                        | e -> Ok (fun _ -> Some e)
+                        match dArg.Kind with
+                        | ExprKind.ExprLit (LitFloat 0.0) -> Ok (fun _ -> None)
+                        | _ -> Ok (fun _ -> Some dArg)
                     else
-                        match dArg with
-                        | ExprArrayLit cells when cells.Length = cellsOf k ->
+                        match dArg.Kind with
+                        | ExprKind.ExprArrayLit cells when cells.Length = cellsOf k ->
                             let cellArr = List.toArray cells
                             Ok (fun labels ->
-                                match cellArr.[lexOffsetOf dim k labels] with
-                                | ExprLit (LitFloat 0.0) -> None
-                                | e -> Some e)
-                        | ExprArrayLit cells ->
+                                let cell = cellArr.[lexOffsetOf dim k labels]
+                                match cell.Kind with
+                                | ExprKind.ExprLit (LitFloat 0.0) -> None
+                                | _ -> Some cell)
+                        | ExprKind.ExprArrayLit cells ->
                             Error (sprintf "%s: D%d needs %d cells in canonical lex order over dim %d, got %d" former k (cellsOf k) dim cells.Length)
-                        | ExprVar w ->
+                        | ExprKind.ExprVar w ->
                             (match Map.tryFind w ctx.Arrays with
                              | Some (_, [ix]) when resolveExtent ctx.Aliases ctx.Statics ix = Some (cellsOf k) ->
-                                 Ok (fun labels -> Some (ExprApp (v w, [iLit (lexOffsetOf dim k labels)])))
+                                 Ok (fun labels -> Some (appE (v w) [iLit (lexOffsetOf dim k labels)]))
                              | Some _ ->
                                  Error (sprintf "%s: D%d ('%s') must be a rank-1 array of %d cells (canonical lex order over dim %d)" former k w (cellsOf k) dim)
                              | None ->
@@ -1410,7 +1494,7 @@ let private elabDistJet (closed: bool) (former: string) (ctx: Ctx) (span: Span) 
                 dReadsRes |> Result.map (fun dReadFns ->
                     let dRead (k: int) (labels: int list) = dReadFns.[k - 1] labels
                     let mkDecl name value =
-                        { Value = DeclLet { Pattern = PatVar name; Type = None; Value = value; Mutability = BindLet }; Span = span }
+                        { Value = DeclLet { Pattern = pvar name; Type = None; Value = value; Mutability = BindLet }; Span = span }
                     let kappaName kk ci = sprintf "__ppl_jetk_%s_o%d_c%d" dName kk ci
                     let cmName t ci = sprintf "__ppl_jetcm_%s_t%d_c%d" dName t ci
                     let myName m = sprintf "__ppl_jetmy_%s_m%d" dName m
@@ -1502,7 +1586,7 @@ let private elabDistJet (closed: bool) (former: string) (ctx: Ctx) (span: Span) 
                                     pt |> List.fold (fun acc blk -> mulE acc (v (myName blk.Length))) (fLit w))
                                 |> List.reduce addE
                             let value = if m = 1 then addE mobius g0Expr else mobius
-                            mkDecl (distComponentName dName m) (ExprArrayLit [ value ]) ]
+                            mkDecl (distComponentName dName m) (arrLitE [ value ]) ]
                     let outInfo = { Order = q
                                     Components = [ for k in 1 .. q -> distComponentName dName k ]
                                     Sources = info.Sources
@@ -1567,7 +1651,7 @@ let private rawMomentDecls (span: Span) (tag: string) (info: DistInfo) (top: int
                     pt |> List.fold (fun acc blk ->
                         mulE acc (distKappaRead info (List.replicate blk.Length 0))) (fLit 1.0) ]
             let value = match terms with [] -> fLit 0.0 | _ -> terms |> List.reduce addE
-            { Value = DeclLet { Pattern = PatVar (mName j); Type = None; Value = value; Mutability = BindLet }
+            { Value = DeclLet { Pattern = pvar (mName j); Type = None; Value = value; Mutability = BindLet }
               Span = span } ]
     let read j = if j = 0 then fLit 1.0 else v (mName j)
     (decls, read)
@@ -1584,8 +1668,8 @@ let private mobiusComponentDecls (span: Span) (dName: string) (r: int) (mRead: i
                 let w = (if b % 2 = 1 then 1.0 else -1.0) * factorial (b - 1)
                 pt |> List.fold (fun acc blk -> mulE acc (mRead blk.Length)) (fLit w))
             |> List.reduce addE
-        { Value = DeclLet { Pattern = PatVar (distComponentName dName m); Type = None
-                            Value = ExprArrayLit [ value ]; Mutability = BindLet }
+        { Value = DeclLet { Pattern = pvar (distComponentName dName m); Type = None
+                            Value = arrLitE [ value ]; Mutability = BindLet }
           Span = span } ]
 
 let private univariateOnly (former: string) (ctx: Ctx) (info: DistInfo) : Result<unit, string> =
@@ -1597,7 +1681,7 @@ let private elabDistExpect (ctx: Ctx) (span: Span) (binding: Binding)
     (dists: Map<string, DistInfo>) (args: Expr list)
     : Result<Located<Decl> list, string> =
     match args, binding.Pattern with
-    | ExprVar dn :: coeffs, PatVar outName when not coeffs.IsEmpty ->
+    | { Kind = ExprKind.ExprVar dn } :: coeffs, { Kind = PatternKind.PatVar outName } when not coeffs.IsEmpty ->
         match Map.tryFind dn dists with
         | None -> Error "dist_expect expects dist_expect(d, c0, ..., cq) with a previously declared dist binding d"
         | Some info ->
@@ -1618,7 +1702,7 @@ let private elabDistReweight (ctx: Ctx) (span: Span) (dName: string)
     (dists: Map<string, DistInfo>) (args: Expr list)
     : Result<Located<Decl> list * DistInfo, string> =
     match args with
-    | ExprVar dn :: coeffs when not coeffs.IsEmpty ->
+    | { Kind = ExprKind.ExprVar dn } :: coeffs when not coeffs.IsEmpty ->
         match Map.tryFind dn dists with
         | None -> Error "dist_reweight expects dist_reweight(d, c0, ..., cq) with a previously declared dist binding d"
         | Some info ->
@@ -1634,7 +1718,7 @@ let private elabDistReweight (ctx: Ctx) (span: Span) (dName: string)
                     coeffs
                     |> List.mapi (fun c cf -> if c = 0 then cf else mulE cf (mRead c))
                     |> List.reduce addE
-                let zDecl = { Value = DeclLet { Pattern = PatVar zName; Type = None; Value = zVal; Mutability = BindLet }; Span = span }
+                let zDecl = { Value = DeclLet { Pattern = pvar zName; Type = None; Value = zVal; Mutability = BindLet }; Span = span }
                 let wName j = sprintf "__ppl_tb_rw_%s_w%d" dName j
                 let wDecls =
                     [ for j in 1 .. rOut ->
@@ -1642,7 +1726,7 @@ let private elabDistReweight (ctx: Ctx) (span: Span) (dName: string)
                             coeffs
                             |> List.mapi (fun c cf -> mulE cf (mRead (j + c)))
                             |> List.reduce addE
-                        { Value = DeclLet { Pattern = PatVar (wName j); Type = None
+                        { Value = DeclLet { Pattern = pvar (wName j); Type = None
                                             Value = divE num (v zName); Mutability = BindLet }
                           Span = span } ]
                 let wRead j = if j = 0 then fLit 1.0 else v (wName j)
@@ -1660,7 +1744,7 @@ let private elabDistMix (ctx: Ctx) (span: Span) (dName: string)
     (dists: Map<string, DistInfo>) (args: Expr list)
     : Result<Located<Decl> list * DistInfo, string> =
     match args with
-    | [w1; ExprVar n1; w2; ExprVar n2] ->
+    | [w1; { Kind = ExprKind.ExprVar n1 }; w2; { Kind = ExprKind.ExprVar n2 }] ->
         match Map.tryFind n1 dists, Map.tryFind n2 dists with
         | Some d1, Some d2 ->
             univariateOnly "dist_mix" ctx d1 |> Result.bind (fun () ->
@@ -1669,7 +1753,7 @@ let private elabDistMix (ctx: Ctx) (span: Span) (dName: string)
             let w1Name = sprintf "__ppl_tb_mx_%s_w1" dName
             let w2Name = sprintf "__ppl_tb_mx_%s_w2" dName
             let wsName = sprintf "__ppl_tb_mx_%s_ws" dName
-            let bind n vl = { Value = DeclLet { Pattern = PatVar n; Type = None; Value = vl; Mutability = BindLet }; Span = span }
+            let bind n vl = { Value = DeclLet { Pattern = pvar n; Type = None; Value = vl; Mutability = BindLet }; Span = span }
             let m1Decls, m1Read = rawMomentDecls span ("mxa_" + dName) d1 rOut
             let m2Decls, m2Read = rawMomentDecls span ("mxb_" + dName) d2 rOut
             let mixName j = sprintf "__ppl_tb_mx_%s_m%d" dName j
@@ -1726,7 +1810,7 @@ let private elabDistAtoms (ctx: Ctx) (span: Span) (dName: string) (args: Expr li
             let k = rest.Length / 2
             let xName i = sprintf "__ppl_tb_at_%s_x%d" dName i
             let wName i = sprintf "__ppl_tb_at_%s_w%d" dName i
-            let bind n vl = { Value = DeclLet { Pattern = PatVar n; Type = None; Value = vl; Mutability = BindLet }; Span = span }
+            let bind n vl = { Value = DeclLet { Pattern = pvar n; Type = None; Value = vl; Mutability = BindLet }; Span = span }
             let bindDecls =
                 [ for i in 0 .. k - 1 do
                     yield bind (xName i) rest.[2 * i]
@@ -1755,7 +1839,7 @@ let private elabDistNegativity (ctx: Ctx) (span: Span) (binding: Binding)
     (dists: Map<string, DistInfo>) (args: Expr list)
     : Result<Located<Decl> list, string> =
     match args, binding.Pattern with
-    | ExprVar dn :: xs, PatVar outName when xs.Length >= 2 ->
+    | { Kind = ExprKind.ExprVar dn } :: xs, { Kind = PatternKind.PatVar outName } when xs.Length >= 2 ->
         match Map.tryFind dn dists with
         | None -> Error "dist_negativity expects dist_negativity(d, x1, ..., xs) with a previously declared dist binding d"
         | Some info ->
@@ -1765,7 +1849,7 @@ let private elabDistNegativity (ctx: Ctx) (span: Span) (binding: Binding)
                 Error (sprintf "dist_negativity: reading %d cells needs the degree-%d Lagrange indicators but '%s' carries order %d — insufficient stochastic order. Carry more, or claim fewer support points." sPts (sPts - 1) dn info.Order)
             else
                 let xName i = sprintf "__ppl_tb_ng_%s_x%d" outName i
-                let bind n vl = { Value = DeclLet { Pattern = PatVar n; Type = None; Value = vl; Mutability = BindLet }; Span = span }
+                let bind n vl = { Value = DeclLet { Pattern = pvar n; Type = None; Value = vl; Mutability = BindLet }; Span = span }
                 let xDecls = [ for i in 0 .. sPts - 1 -> bind (xName i) xs.[i] ]
                 let mDecls, mRead = rawMomentDecls span ("ng_" + outName) info (sPts - 1)
                 let cellName j = sprintf "__ppl_tb_ng_%s_c%d" outName j
@@ -1789,7 +1873,7 @@ let private elabDistNegativity (ctx: Ctx) (span: Span) (binding: Binding)
                         bind (cellName j) (divE num den) ]
                 let negTerm j =
                     let c = v (cellName j)
-                    divE (subE (ExprApp (v "sqrt", [ mulE c c ])) c) (fLit 2.0)
+                    divE (subE (appE (v "sqrt") [ mulE c c ]) c) (fLit 2.0)
                 let total = [ for j in 0 .. sPts - 1 -> negTerm j ] |> List.reduce addE
                 Ok (xDecls @ mDecls @ cellDecls
                     @ [ { Value = DeclLet { binding with Value = total }; Span = span } ]))
@@ -1808,38 +1892,38 @@ let private elabDistNegativity (ctx: Ctx) (span: Span) (binding: Binding)
 /// Structural constant folding — enough for polynomial derivative chains
 /// to terminate in literal zeros (0·e, e·0, 0±e drop; literals fold).
 let rec private simplifyExpr (e: Expr) : Expr =
-    match e with
-    | ExprBinOp (m, op, a0, b0) ->
+    match e.Kind with
+    | ExprKind.ExprBinOp (m, op, a0, b0) ->
         let a = simplifyExpr a0
         let b = simplifyExpr b0
-        (match op, a, b with
-         | OpAdd, ExprLit (LitFloat 0.0), x -> x
-         | OpAdd, x, ExprLit (LitFloat 0.0) -> x
-         | OpSub, x, ExprLit (LitFloat 0.0) -> x
-         | OpMul, ExprLit (LitFloat 0.0), _ -> fLit 0.0
-         | OpMul, _, ExprLit (LitFloat 0.0) -> fLit 0.0
-         | OpMul, ExprLit (LitFloat 1.0), x -> x
-         | OpMul, x, ExprLit (LitFloat 1.0) -> x
-         | OpDiv, ExprLit (LitFloat 0.0), _ -> fLit 0.0
-         | OpDiv, x, ExprLit (LitFloat 1.0) -> x
-         | _, ExprLit (LitFloat x), ExprLit (LitFloat y) ->
+        (match op, a.Kind, b.Kind with
+         | OpAdd, ExprKind.ExprLit (LitFloat 0.0), _ -> b
+         | OpAdd, _, ExprKind.ExprLit (LitFloat 0.0) -> a
+         | OpSub, _, ExprKind.ExprLit (LitFloat 0.0) -> a
+         | OpMul, ExprKind.ExprLit (LitFloat 0.0), _ -> fLit 0.0
+         | OpMul, _, ExprKind.ExprLit (LitFloat 0.0) -> fLit 0.0
+         | OpMul, ExprKind.ExprLit (LitFloat 1.0), _ -> b
+         | OpMul, _, ExprKind.ExprLit (LitFloat 1.0) -> a
+         | OpDiv, ExprKind.ExprLit (LitFloat 0.0), _ -> fLit 0.0
+         | OpDiv, _, ExprKind.ExprLit (LitFloat 1.0) -> a
+         | _, ExprKind.ExprLit (LitFloat x), ExprKind.ExprLit (LitFloat y) ->
              (match op with
               | OpAdd -> fLit (x + y)
               | OpSub -> fLit (x - y)
               | OpMul -> fLit (x * y)
               | OpDiv when y <> 0.0 -> fLit (x / y)
-              | _ -> ExprBinOp (m, op, a, b))
-         | _ -> ExprBinOp (m, op, a, b))
-    | ExprApp (f, args) -> ExprApp (f, args |> List.map simplifyExpr)
+              | _ -> inheritSpan e (ExprBinOp (m, op, a, b)))
+         | _ -> inheritSpan e (ExprBinOp (m, op, a, b)))
+    | ExprKind.ExprApp (f, args) -> inheritSpan e (ExprApp (f, args |> List.map simplifyExpr))
     | _ -> e
 
-let private isZeroE (e: Expr) = match e with ExprLit (LitFloat 0.0) -> true | _ -> false
+let private isZeroE (e: Expr) = match e.Kind with ExprKind.ExprLit (LitFloat 0.0) -> true | _ -> false
 
 let rec private containsVar (n: string) (e: Expr) : bool =
-    match e with
-    | ExprVar m -> m = n
-    | ExprBinOp (_, _, a, b) -> containsVar n a || containsVar n b
-    | ExprApp (f, args) -> containsVar n f || args |> List.exists (containsVar n)
+    match e.Kind with
+    | ExprKind.ExprVar m -> m = n
+    | ExprKind.ExprBinOp (_, _, a, b) -> containsVar n a || containsVar n b
+    | ExprKind.ExprApp (f, args) -> containsVar n f || args |> List.exists (containsVar n)
     | _ -> false
 
 /// ∂e/∂param over the supported grammar: arithmetic and exp/log/sqrt/
@@ -1848,32 +1932,32 @@ let rec private containsVar (n: string) (e: Expr) : bool =
 let rec private diffExpr (param: string) (e: Expr) : Result<Expr, string> =
     if not (containsVar param e) then Ok (fLit 0.0)
     else
-        match e with
-        | ExprVar _ -> Ok (fLit 1.0)   // containsVar ⇒ it IS the param
-        | ExprBinOp (_, OpAdd, a, b) ->
+        match e.Kind with
+        | ExprKind.ExprVar _ -> Ok (fLit 1.0)   // containsVar ⇒ it IS the param
+        | ExprKind.ExprBinOp (_, OpAdd, a, b) ->
             diffExpr param a |> Result.bind (fun da ->
             diffExpr param b |> Result.map (fun db -> addE da db))
-        | ExprBinOp (_, OpSub, a, b) ->
+        | ExprKind.ExprBinOp (_, OpSub, a, b) ->
             diffExpr param a |> Result.bind (fun da ->
             diffExpr param b |> Result.map (fun db -> subE da db))
-        | ExprBinOp (_, OpMul, a, b) ->
+        | ExprKind.ExprBinOp (_, OpMul, a, b) ->
             diffExpr param a |> Result.bind (fun da ->
             diffExpr param b |> Result.map (fun db -> addE (mulE da b) (mulE a db)))
-        | ExprBinOp (_, OpDiv, a, b) ->
+        | ExprKind.ExprBinOp (_, OpDiv, a, b) ->
             diffExpr param a |> Result.bind (fun da ->
             diffExpr param b |> Result.map (fun db ->
                 divE (subE (mulE da b) (mulE a db)) (mulE b b)))
-        | ExprApp (ExprVar "exp", [a]) ->
-            diffExpr param a |> Result.map (fun da -> mulE da (ExprApp (v "exp", [a])))
-        | ExprApp (ExprVar "log", [a]) ->
+        | ExprKind.ExprApp ({ Kind = ExprKind.ExprVar "exp" }, [a]) ->
+            diffExpr param a |> Result.map (fun da -> mulE da (appE (v "exp") [a]))
+        | ExprKind.ExprApp ({ Kind = ExprKind.ExprVar "log" }, [a]) ->
             diffExpr param a |> Result.map (fun da -> divE da a)
-        | ExprApp (ExprVar "sqrt", [a]) ->
-            diffExpr param a |> Result.map (fun da -> divE da (mulE (fLit 2.0) (ExprApp (v "sqrt", [a]))))
-        | ExprApp (ExprVar "sin", [a]) ->
-            diffExpr param a |> Result.map (fun da -> mulE da (ExprApp (v "cos", [a])))
-        | ExprApp (ExprVar "cos", [a]) ->
-            diffExpr param a |> Result.map (fun da -> subE (fLit 0.0) (mulE da (ExprApp (v "sin", [a]))))
-        | ExprBinOp (_, OpCaret, b, e) ->
+        | ExprKind.ExprApp ({ Kind = ExprKind.ExprVar "sqrt" }, [a]) ->
+            diffExpr param a |> Result.map (fun da -> divE da (mulE (fLit 2.0) (appE (v "sqrt") [a])))
+        | ExprKind.ExprApp ({ Kind = ExprKind.ExprVar "sin" }, [a]) ->
+            diffExpr param a |> Result.map (fun da -> mulE da (appE (v "cos") [a]))
+        | ExprKind.ExprApp ({ Kind = ExprKind.ExprVar "cos" }, [a]) ->
+            diffExpr param a |> Result.map (fun da -> subE (fLit 0.0) (mulE da (appE (v "sin") [a])))
+        | ExprKind.ExprBinOp (_, OpCaret, b, e) ->
             // d(b^e) = e*b^(e-1)*b' + b^e*log(b)*e'. The base term keeps the
             // power form (not e*b^e/b) so b=0 stays finite; the log term is
             // pruned by simplifyExpr whenever e is constant (e'=0), which is
@@ -1883,17 +1967,59 @@ let rec private diffExpr (param: string) (e: Expr) : Result<Expr, string> =
             diffExpr param b |> Result.bind (fun db ->
             diffExpr param e |> Result.map (fun de ->
                 let baseTerm = mulE (mulE e (powE b (subE e (fLit 1.0)))) db
-                let expTerm  = mulE (mulE (powE b e) (ExprApp (v "log", [b]))) de
+                let expTerm  = mulE (mulE (powE b e) (appE (v "log") [b])) de
                 addE baseTerm expTerm))
         | _ ->
             Error "dist_map: cannot differentiate the map — supported: +, -, *, /, ^ and exp/log/sqrt/sin/cos of the coordinates (opaque subterms are fine when they don't mention a coordinate)"
 
 let rec private substVars (map: Map<string, Expr>) (e: Expr) : Expr =
-    match e with
-    | ExprVar n -> (match Map.tryFind n map with Some r -> r | None -> e)
-    | ExprBinOp (m, op, a, b) -> ExprBinOp (m, op, substVars map a, substVars map b)
-    | ExprApp (f, args) -> ExprApp (substVars map f, args |> List.map (substVars map))
+    match e.Kind with
+    | ExprKind.ExprVar n -> (match Map.tryFind n map with Some r -> r | None -> e)
+    | ExprKind.ExprBinOp (m, op, a, b) -> inheritSpan e (ExprBinOp (m, op, substVars map a, substVars map b))
+    | ExprKind.ExprApp (f, args) -> inheritSpan e (ExprApp (substVars map f, args |> List.map (substVars map)))
     | _ -> e
+
+/// dist_map body normalization, applied before differentiation: unwrap
+/// trivial `{ expr }` function bodies and inline full-arity calls to
+/// same-module top-level functions — transitively, so helper reuse like
+/// `function v(m) = ...` / `function ptot(m) = v(m) + ...` presents
+/// diffExpr with one closed expression in the coordinates. The budget
+/// counts function EXPANSIONS (not expression nodes) and breaks recursive
+/// helper cycles. Like the partial-application path, substitution is the
+/// binder-free substVars: helper bodies are expected to be closed over
+/// their own parameters (a module-level free variable in a helper that
+/// collides with a map coordinate would be captured).
+let private normalizeMapBody (former: string) (funcs: Map<string, FunctionDecl>) (body: Expr) : Result<Expr, string> =
+    let rec unwrap (e: Expr) : Expr =
+        match e.Kind with
+        | ExprKind.ExprBlock ([], Some r) -> unwrap r
+        | _ -> e
+    let rec goList (n: int) (acc: Expr list) (es: Expr list) : Result<int * Expr list, string> =
+        match es with
+        | [] -> Ok (n, List.rev acc)
+        | x :: rest -> go n x |> Result.bind (fun (n2, x') -> goList n2 (x' :: acc) rest)
+    and go (n: int) (e: Expr) : Result<int * Expr, string> =
+        let e = unwrap e
+        match e.Kind with
+        | ExprKind.ExprApp ({ Kind = ExprKind.ExprVar f }, args) when Map.containsKey f funcs ->
+            let fd = funcs.[f]
+            if args.Length <> fd.Params.Length then
+                Error (sprintf "%s: helper '%s' is called with %d argument(s) but takes %d" former f args.Length fd.Params.Length)
+            elif n <= 0 then
+                Error (sprintf "%s: the map's helper-call chain is too deep — is a helper function recursive?" former)
+            else
+                goList (n - 1) [] args |> Result.bind (fun (n2, args') ->
+                    let bindMap = List.zip (fd.Params |> List.map (fun p -> p.Name)) args' |> Map.ofList
+                    go n2 (substVars bindMap (unwrap fd.Body)))
+        | ExprKind.ExprBinOp (m, op, a, b) ->
+            go n a |> Result.bind (fun (n2, a') ->
+                go n2 b |> Result.map (fun (n3, b') -> (n3, inheritSpan e (ExprBinOp (m, op, a', b')))))
+        | ExprKind.ExprApp (f, args) ->
+            goList n [] args |> Result.map (fun (n2, args') -> (n2, inheritSpan e (ExprApp (f, args'))))
+        | ExprKind.ExprTuple es ->
+            goList n [] es |> Result.map (fun (n2, es') -> (n2, inheritSpan e (ExprTuple es')))
+        | _ -> Ok (n, e)
+    go 256 body |> Result.map snd
 
 /// dist_map(d, q, lambda(x...) -> e) / dist_map(d, q, s, lambda(x...) -> e):
 /// derive the jet symbolically — the lambda takes one coordinate per dist
@@ -1913,15 +2039,15 @@ let private elabDistMap (closed: bool) (ctx: Ctx) (span: Span) (dName: string)
     // bound prefix args are constants w.r.t. diffExpr since differentiation
     // is by coordinate name only.
     let asCoordLambda (e: Expr) : Result<(LambdaParam list * Expr) option, string> =
-        match e with
-        | ExprLambda (ps, None, body) -> Ok (Some (ps, body))
-        | ExprVar f ->
+        match e.Kind with
+        | ExprKind.ExprLambda (ps, None, body) -> Ok (Some (ps, body))
+        | ExprKind.ExprVar f ->
             match Map.tryFind f funcs with
             | Some fd ->
                 let ps = fd.Params |> List.map (fun p -> { Name = p.Name; Type = None } : LambdaParam)
                 Ok (Some (ps, fd.Body))
             | None -> Ok None
-        | ExprApp (ExprVar f, prefixArgs) when Map.containsKey f funcs ->
+        | ExprKind.ExprApp ({ Kind = ExprKind.ExprVar f }, prefixArgs) when Map.containsKey f funcs ->
             let fd = funcs.[f]
             if prefixArgs.Length >= fd.Params.Length then
                 Error (sprintf "%s: partial application of '%s' supplies %d of its %d parameter(s) — leave at least one free to map over"
@@ -1950,13 +2076,17 @@ let private elabDistMap (closed: bool) (ctx: Ctx) (span: Span) (dName: string)
             former former former
     let parsed =
         match args with
-        | [ExprVar dn; qExpr; fArg] ->
+        | [{ Kind = ExprKind.ExprVar dn }; qExpr; fArg] ->
             asCoordLambda fArg |> Result.bind (function
-                | Some (ps, body) -> Ok (dn, qExpr, None, ps, body)
+                | Some (ps, body) ->
+                    normalizeMapBody former funcs body
+                    |> Result.map (fun body' -> (dn, qExpr, None, ps, body'))
                 | None -> Error parseErr)
-        | [ExprVar dn; qExpr; sExpr; fArg] ->
+        | [{ Kind = ExprKind.ExprVar dn }; qExpr; sExpr; fArg] ->
             asCoordLambda fArg |> Result.bind (function
-                | Some (ps, body) -> Ok (dn, qExpr, Some sExpr, ps, body)
+                | Some (ps, body) ->
+                    normalizeMapBody former funcs body
+                    |> Result.map (fun body' -> (dn, qExpr, Some sExpr, ps, body'))
                 | None -> Error parseErr)
         | _ -> Error parseErr
     parsed |> Result.bind (fun (dn, qExpr, sOpt, ps, body) ->
@@ -1981,8 +2111,8 @@ let private elabDistMap (closed: bool) (ctx: Ctx) (span: Span) (dName: string)
         // component, delegated to the vector dist_jet (joint output
         // cumulants). A single-expression body keeps the scalar path.
         let comps =
-            match body with
-            | ExprTuple es when es.Length >= 2 -> es
+            match body.Kind with
+            | ExprKind.ExprTuple es when es.Length >= 2 -> es
             | _ -> [body]
         // level k for one component: canonical tuple (i1 ≤ ... ≤ ik) → ∂^k f,
         // symbolic in the coordinates; each cell differentiates the
@@ -2019,8 +2149,8 @@ let private elabDistMap (closed: bool) (ctx: Ctx) (span: Span) (dName: string)
         let muName i = sprintf "__ppl_jetmu_%s_%d" dName i
         let muDecls =
             [ for i in 0 .. dim - 1 ->
-                { Value = DeclLet { Pattern = PatVar (muName i); Type = None
-                                    Value = ExprApp (v info.Components.[0], [iLit i])
+                { Value = DeclLet { Pattern = pvar (muName i); Type = None
+                                    Value = appE (v info.Components.[0]) [iLit i]
                                     Mutability = BindLet }
                   Span = span } ]
         let subst = Map.ofList [ for i in 0 .. dim - 1 -> (paramNames.[i], v (muName i)) ]
@@ -2033,21 +2163,21 @@ let private elabDistMap (closed: bool) (ctx: Ctx) (span: Span) (dName: string)
                     [ for k in 1 .. s ->
                         let lv = levels.[k - 1]
                         if dim = 1 then atMean lv.[List.replicate k 0]
-                        else ExprArrayLit [ for t in canonicalTuples dim k -> atMean lv.[t] ] ]
+                        else arrLitE [ for t in canonicalTuples dim k -> atMean lv.[t] ] ]
                 (atMean single, dArgs)
             | _ ->
                 // vector: g0 = the m atMean cells; D_k = coordinate-major
                 // flat cells, zero-filled where a shorter component tower
                 // has no level k (its polynomial terminated earlier)
-                let g0 = ExprArrayLit (comps |> List.map atMean)
+                let g0 = arrLitE (comps |> List.map atMean)
                 let dArgs =
                     [ for k in 1 .. s ->
-                        ExprArrayLit
+                        arrLitE
                             [ for (a, tower) in List.indexed towers do
                                 for t in canonicalTuples dim k do
                                     yield (if k <= sPer.[a] then atMean tower.[k - 1].[t] else fLit 0.0) ] ]
                 (g0, dArgs)
-        elabDistJet closed former ctx span dName dists (ExprVar dn :: qExpr :: g0 :: dArgs)
+        elabDistJet closed former ctx span dName dists (v dn :: qExpr :: g0 :: dArgs)
         |> Result.map (fun (nds, outInfo) -> (muDecls @ nds, outInfo))))))
 
 // ============================================================================
@@ -2076,7 +2206,7 @@ let private isNonCrossing (partition: int list list) : bool =
 let private elabFreeCumulants (ctx: Ctx) (span: Span) (binding: Binding) (args: Expr list)
     : Result<Located<Decl> list, string> =
     match args with
-    | [ExprVar aName; rExpr] ->
+    | [{ Kind = ExprKind.ExprVar aName }; rExpr] ->
         let r =
             match evalExpr ctx.Statics maxSteps rExpr with
             | Ok (SVInt x) when x >= 1L && x <= 6L -> Ok (int x)
@@ -2089,9 +2219,9 @@ let private elabFreeCumulants (ctx: Ctx) (span: Span) (binding: Binding) (args: 
                 | None -> Error "free_cumulants: the variable-axis extent must be statically known"
                 | Some d ->
                     let compNames =
-                        match binding.Pattern with
-                        | PatTuple pats when pats.Length = r ->
-                            let names = pats |> List.map (function PatVar nm -> Some nm | _ -> None)
+                        match binding.Pattern.Kind with
+                        | PatternKind.PatTuple pats when pats.Length = r ->
+                            let names = pats |> List.map (fun p -> match p.Kind with PatternKind.PatVar nm -> Some nm | _ -> None)
                             if names |> List.forall Option.isSome then Ok (names |> List.map Option.get)
                             else Error "free_cumulants: destructure into plain names"
                         | _ -> Error (sprintf "free_cumulants: destructure the result — `let (f1, ..., f%d) = free_cumulants(%s, %d)`" r aName r)
@@ -2105,12 +2235,12 @@ let private elabFreeCumulants (ctx: Ctx) (span: Span) (binding: Binding) (args: 
                         // fk tensors ascending; fk_1 = μ_1; flat lex reads on
                         // earlier fk outputs
                         let fkRead (kIdx: int) (labels: int list) =
-                            if labels.Length = 1 then ExprApp (v fkNames.[0], labels |> List.map iLit)
-                            else ExprApp (v fkNames.[labels.Length - 1], [iLit (lexOffsetOf d labels.Length labels)])
+                            if labels.Length = 1 then appE (v fkNames.[0]) (labels |> List.map iLit)
+                            else appE (v fkNames.[labels.Length - 1]) [iLit (lexOffsetOf d labels.Length labels)]
                         let fkDecl p nm =
                             if p = 1 then
-                                { Value = DeclLet { Pattern = PatVar nm; Type = None
-                                                    Value = ExprArrayLit [ for i in 0 .. d - 1 -> poolMoment pool [i] ]
+                                { Value = DeclLet { Pattern = pvar nm; Type = None
+                                                    Value = arrLitE [ for i in 0 .. d - 1 -> poolMoment pool [i] ]
                                                     Mutability = BindLet }; Span = span }
                             else
                                 let cells =
@@ -2126,7 +2256,7 @@ let private elabFreeCumulants (ctx: Ctx) (span: Span) (binding: Binding) (args: 
                                         match subtracted with
                                         | [] -> muRead labels
                                         | _ -> subE (muRead labels) (subtracted |> List.reduce addE) ]
-                                { Value = DeclLet { Pattern = PatVar nm; Type = None; Value = ExprArrayLit cells; Mutability = BindLet }; Span = span }
+                                { Value = DeclLet { Pattern = pvar nm; Type = None; Value = arrLitE cells; Mutability = BindLet }; Span = span }
                         muDecls @ (fkNames |> List.mapi (fun i nm -> fkDecl (i + 1) nm)))
             | _ -> Error "free_cumulants: one variable axis per array so far"))
     | _ ->
@@ -2304,11 +2434,11 @@ module DistSynth =
         let stmts =
             [ sLet dN d ]
             @ [ for k in 1 .. order ->
-                  sLet (kN k) (ExprApp (v "__ppl_cumulant", [v dN; ExprLit (LitInt (int64 k))])) ]
+                  sLet (kN k) (appE (v "__ppl_cumulant") [v dN; iLit k]) ]
             @ [ for k in 1 .. order ->
                   let scaled = List.replicate k c |> List.fold mulE (v "__u")
                   sLet (sN k) (map1 (v (kN k)) scaled) ]
-        ExprBlock (stmts, Some (ExprApp (v "__dist_pack", [ for k in 1 .. order -> v (sN k) ])))
+        syn (ExprBlock (stmts, Some (appE (v "__dist_pack") [ for k in 1 .. order -> v (sN k) ])))
 
     /// l ± r for independent dists: per-order c_k = a_k + weight(k)·b_k —
     /// addition is weight ≡ 1; subtraction is weight k = (−1)^k
@@ -2329,14 +2459,14 @@ module DistSynth =
         let stmts =
             [ sLet lN l; sLet rN r ]
             @ [ for k in 1 .. order do
-                  yield sLet (aN k) (ExprApp (v "__ppl_cumulant", [v lN; ExprLit (LitInt (int64 k))]))
-                  yield sLet (bN k) (ExprApp (v "__ppl_cumulant", [v rN; ExprLit (LitInt (int64 k))])) ]
+                  yield sLet (aN k) (appE (v "__ppl_cumulant") [v lN; iLit k])
+                  yield sLet (bN k) (appE (v "__ppl_cumulant") [v rN; iLit k]) ]
             @ [ for k in 1 .. order ->
                   let contrib =
                       if weight k = 1.0 then v "__w"
                       else mulE (fLit (weight k)) (v "__w")
                   sLet (sN k) (zipMap2 (v (aN k)) (v (bN k)) (addE (v "__u") contrib)) ]
-        ExprBlock (stmts, Some (ExprApp (v "__dist_pack", [ for k in 1 .. order -> v (sN k) ])))
+        syn (ExprBlock (stmts, Some (appE (v "__dist_pack") [ for k in 1 .. order -> v (sN k) ])))
 
 // ============================================================================
 // Module expansion
@@ -2378,32 +2508,32 @@ let rec private stripQualified (aliases: Set<string>) (e: Expr) : Expr =
             | StmtForIn (var, range, body) -> StmtForIn (var, r range, List.map go body)
             | StmtSpanned (inner, sp) -> StmtSpanned (go inner, sp)
         go s
-    match e with
-    | ExprField (ExprVar a, name)
+    match e.Kind with
+    | ExprKind.ExprField ({ Kind = ExprKind.ExprVar a }, name)
         when Set.contains a aliases
              && (name = "cumulant" || name = "indep" || Set.contains name formerNames) ->
         match name with
-        | "cumulant" -> ExprVar "__ppl_cumulant"
+        | "cumulant" -> inheritSpan e (ExprVar "__ppl_cumulant")
         // `indep` appears qualified in struct where-invariants
         // (`where p.indep(X, Y)`); normalize to the registered internal
         // constraint name (splitInvariant and the checker match it).
-        | "indep" -> ExprVar "__ppl_indep"
-        | _ -> ExprVar name
-    | ExprApp (f, args) -> ExprApp (r f, List.map r args)
-    | ExprBinOp (m, op, a, b) -> ExprBinOp (m, op, r a, r b)
-    | ExprUnaryOp (op, a) -> ExprUnaryOp (op, r a)
-    | ExprTyped (a, t) -> ExprTyped (r a, t)
-    | ExprAssign (l, rr) -> ExprAssign (r l, r rr)
-    | ExprTuple es -> ExprTuple (List.map r es)
-    | ExprArrayLit es -> ExprArrayLit (List.map r es)
-    | ExprDotDot (a, b) -> ExprDotDot (r a, r b)
-    | ExprIf (c, t, f) -> ExprIf (r c, r t, r f)
-    | ExprLet (b, body) -> ExprLet ({ b with Value = r b.Value }, r body)
-    | ExprLambda (ps, w, body) -> ExprLambda (ps, w, r body)
-    | ExprMatch (s, cases) ->
-        ExprMatch (r s, cases |> List.map (fun c -> { c with Body = r c.Body }))
-    | ExprBlock (stmts, fin) -> ExprBlock (List.map rStmt stmts, Option.map r fin)
-    | other -> other
+        | "indep" -> inheritSpan e (ExprVar "__ppl_indep")
+        | _ -> inheritSpan e (ExprVar name)
+    | ExprKind.ExprApp (f, args) -> inheritSpan e (ExprApp (r f, List.map r args))
+    | ExprKind.ExprBinOp (m, op, a, b) -> inheritSpan e (ExprBinOp (m, op, r a, r b))
+    | ExprKind.ExprUnaryOp (op, a) -> inheritSpan e (ExprUnaryOp (op, r a))
+    | ExprKind.ExprTyped (a, t) -> inheritSpan e (ExprTyped (r a, t))
+    | ExprKind.ExprAssign (l, rr) -> inheritSpan e (ExprAssign (r l, r rr))
+    | ExprKind.ExprTuple es -> inheritSpan e (ExprTuple (List.map r es))
+    | ExprKind.ExprArrayLit es -> inheritSpan e (ExprArrayLit (List.map r es))
+    | ExprKind.ExprDotDot (a, b) -> inheritSpan e (ExprDotDot (r a, r b))
+    | ExprKind.ExprIf (c, t, f) -> inheritSpan e (ExprIf (r c, r t, r f))
+    | ExprKind.ExprLet (b, body) -> inheritSpan e (ExprLet ({ b with Value = r b.Value }, r body))
+    | ExprKind.ExprLambda (ps, w, body) -> inheritSpan e (ExprLambda (ps, w, r body))
+    | ExprKind.ExprMatch (s, cases) ->
+        inheritSpan e (ExprMatch (r s, cases |> List.map (fun c -> { c with Body = r c.Body })))
+    | ExprKind.ExprBlock (stmts, fin) -> inheritSpan e (ExprBlock (List.map rStmt stmts, Option.map r fin))
+    | _ -> e
 
 /// Normalize a qualified constraint-conjunct name (`"<alias>.indep"` from the
 /// parser's dotted where-clause arm) to the registered internal name.
@@ -2493,7 +2623,7 @@ let private expandModuleCore (decls: Located<Decl> list) : Result<Located<Decl> 
         let instances =
             decls |> List.fold (fun acc d ->
                 match d.Value with
-                | DeclLet { Pattern = PatVar iname; Value = ExprStruct (sname, _) } when Map.containsKey sname structFields ->
+                | DeclLet { Pattern = { Kind = PatternKind.PatVar iname }; Value = { Kind = ExprKind.ExprStruct (sname, _, _) } } when Map.containsKey sname structFields ->
                     Map.add iname sname acc
                 | _ -> acc) Map.empty
         let aliasArrays =
@@ -2515,20 +2645,20 @@ let private expandModuleCore (decls: Located<Decl> list) : Result<Located<Decl> 
             decls |> List.collect (fun d ->
                 let normArgs (args: Expr list) : Expr list * Located<Decl> list =
                     args |> List.fold (fun (acc, ads) a ->
-                        match a with
-                        | ExprField (ExprVar m, f) when Map.containsKey m instances ->
+                        match a.Kind with
+                        | ExprKind.ExprField ({ Kind = ExprKind.ExprVar m }, f) when Map.containsKey m instances ->
                             let al = aliasOf m f
                             let newDecls =
                                 if Set.contains al emittedAliases then []
                                 else
                                     emittedAliases <- Set.add al emittedAliases
-                                    [ { Value = DeclLet { Pattern = PatVar al; Type = None; Value = a; Mutability = BindLet }; Span = d.Span } ]
-                            (acc @ [v al], ads @ newDecls)
-                        | other -> (acc @ [other], ads)) ([], [])
+                                    [ { Value = DeclLet { Pattern = mkPat d.Span (PatVar al); Type = None; Value = a; Mutability = BindLet }; Span = d.Span } ]
+                            (acc @ [mkExpr d.Span (ExprVar al)], ads @ newDecls)
+                        | _ -> (acc @ [a], ads)) ([], [])
                 match d.Value with
-                | DeclLet ({ Value = ExprApp (ExprVar n, args) } as b) when Set.contains n formerNames && active n ->
+                | DeclLet ({ Value = { Kind = ExprKind.ExprApp ({ Kind = ExprKind.ExprVar n }, args) } } as b) when Set.contains n formerNames && active n ->
                     let (args', aliasDecls) = normArgs args
-                    aliasDecls @ [ { d with Value = DeclLet { b with Value = ExprApp (ExprVar n, args') } } ]
+                    aliasDecls @ [ { d with Value = DeclLet { b with Value = mkExpr d.Span (ExprApp (mkExpr d.Span (ExprVar n), args')) } } ]
                 | _ -> [d])
         // Pass 1: consume `let _ = independent(X, Y)` declarations.
         let mutable indep = structPairIndep
@@ -2536,11 +2666,11 @@ let private expandModuleCore (decls: Located<Decl> list) : Result<Located<Decl> 
         let mutable err = None
         for d in decls do
             match d.Value with
-            | DeclLet { Value = ExprApp (ExprVar "independent", args) } when active "independent" ->
+            | DeclLet { Value = { Kind = ExprKind.ExprApp ({ Kind = ExprKind.ExprVar "independent" }, args) } } when active "independent" ->
                 match args with
-                | [ExprVar x; ExprVar y] when x <> y ->
+                | [{ Kind = ExprKind.ExprVar x }; { Kind = ExprKind.ExprVar y }] when x <> y ->
                     indep <- Set.add (indepKey x y) indep
-                | [ExprVar x; ExprVar y] when x = y ->
+                | [{ Kind = ExprKind.ExprVar x }; { Kind = ExprKind.ExprVar y }] when x = y ->
                     if err.IsNone then err <- Some (sprintf "independent(%s, %s): an array is not independent of itself" x y)
                 | _ ->
                     if err.IsNone then err <- Some "independent expects two array names (or struct fields): `let _ = ppl.independent(X, Y)`"
@@ -2548,7 +2678,25 @@ let private expandModuleCore (decls: Located<Decl> list) : Result<Located<Decl> 
         match err with
         | Some e -> Error e
         | None ->
-        let arrays = aliasArrays |> Map.fold (fun acc k s -> Map.add k s acc) (collectArrays rest)
+        let aliases = collectAliases rest
+        // Inferred shapes for UN-annotated computed arrays (method_for over
+        // range/halo slots) seed the map; explicit annotations and struct-
+        // field aliases override them.
+        let inferredArrays =
+            rest |> List.fold (fun acc d ->
+                match d.Value with
+                | DeclLet b | DeclStatic b ->
+                    match b.Pattern, b.Type with
+                    | { Kind = PatternKind.PatVar name }, None ->
+                        match computedShapeOf aliases statics b.Value with
+                        | Some shape -> Map.add name shape acc
+                        | None -> acc
+                    | _ -> acc
+                | _ -> acc) Map.empty
+        let arrays =
+            collectArrays rest
+            |> Map.fold (fun acc k s -> Map.add k s acc) inferredArrays
+            |> fun annotated -> aliasArrays |> Map.fold (fun acc k s -> Map.add k s acc) annotated
         // Pre-scan: the maximal multiset size each source array needs across
         // ALL its single-array formers in this module, so the first former
         // emits ONE maximal pool the rest reuse (cross-former single-pass).
@@ -2557,14 +2705,14 @@ let private expandModuleCore (decls: Located<Decl> list) : Result<Located<Decl> 
         let poolMax =
             rest |> List.choose (fun d ->
                 match d.Value with
-                | DeclLet { Value = ExprApp (ExprVar f, [ExprVar a; kExpr]) }
+                | DeclLet { Value = { Kind = ExprKind.ExprApp ({ Kind = ExprKind.ExprVar f }, [{ Kind = ExprKind.ExprVar a }; kExpr]) } }
                     when (List.contains f ["moments"; "cumulants"; "free_cumulants"; "mstate"; "comoments"]) && active f ->
                     (match evalExpr statics maxSteps kExpr with
                      | Ok (SVInt k) when k >= 1L && k <= 8L -> Some (a, int k)
                      | _ -> None)
                 | _ -> None)
             |> List.fold (fun m (a, k) -> Map.add a (max k (defaultArg (Map.tryFind a m) 0)) m) Map.empty
-        let ctx = { Arrays = arrays; Aliases = collectAliases rest; Statics = statics; Indep = indep
+        let ctx = { Arrays = arrays; Aliases = aliases; Statics = statics; Indep = indep
                     Pools = ref Map.empty; PoolMax = poolMax; FlatDims = ref Map.empty }
         // Pass 2: rewrite decl-RHS former calls, threading the dist registry
         // (dist bindings are compile-time objects: consumed here, their
@@ -2572,32 +2720,35 @@ let private expandModuleCore (decls: Located<Decl> list) : Result<Located<Decl> 
         let expanded =
             rest |> List.fold (fun acc d ->
                 acc |> Result.bind (fun (ds, dists, mstates) ->
+                    // Stamp the user decl's span so every syn-built node
+                    // (former-generated decls) attributes to this decl's line.
+                    Blade.Ast.synthSpan <- d.Span
                     match d.Value with
                     // moments(d, k) on a DIST binding: reconstruction (κ→μ,
                     // Wick under the carried-order closure) — dispatched by
                     // registry membership, ahead of the data-array form.
-                    | DeclLet ({ Pattern = PatVar _; Value = ExprApp (ExprVar "moments", [ExprVar dn; kExpr]) } as b) when active "moments" && Map.containsKey dn dists ->
+                    | DeclLet ({ Pattern = { Kind = PatternKind.PatVar _ }; Value = { Kind = ExprKind.ExprApp ({ Kind = ExprKind.ExprVar "moments" }, [{ Kind = ExprKind.ExprVar dn }; kExpr]) } } as b) when active "moments" && Map.containsKey dn dists ->
                         let info = dists.[dn]
                         distDim ctx info
                         |> Result.bind (fun dim -> elabMomentsOfDist ctx d.Span b info dim kExpr)
                         |> Result.map (fun nds -> (ds @ nds, dists, mstates))
-                    | DeclLet ({ Pattern = PatVar outName; Value = ExprApp (ExprVar "moments", args) } as b) when active "moments" ->
+                    | DeclLet ({ Pattern = { Kind = PatternKind.PatVar outName }; Value = { Kind = ExprKind.ExprApp ({ Kind = ExprKind.ExprVar "moments" }, args) } } as b) when active "moments" ->
                         elabMoments ctx d.Span outName b args |> Result.map (fun nds -> (ds @ nds, dists, mstates))
-                    | DeclLet ({ Pattern = PatVar outName; Value = ExprApp (ExprVar "mixed_cumulants", args) } as b) when active "mixed_cumulants" ->
+                    | DeclLet ({ Pattern = { Kind = PatternKind.PatVar outName }; Value = { Kind = ExprKind.ExprApp ({ Kind = ExprKind.ExprVar "mixed_cumulants" }, args) } } as b) when active "mixed_cumulants" ->
                         elabMixedCumulants ctx d.Span outName b args |> Result.map (fun nds -> (ds @ nds, dists, mstates))
-                    | DeclLet ({ Value = ExprApp (ExprVar "dist_affine", args) } as b) when active "dist_affine" ->
+                    | DeclLet ({ Value = { Kind = ExprKind.ExprApp ({ Kind = ExprKind.ExprVar "dist_affine" }, args) } } as b) when active "dist_affine" ->
                         elabDistAffine ctx d.Span b dists args |> Result.map (fun nds -> (ds @ nds, dists, mstates))
-                    | DeclLet ({ Value = ExprApp (ExprVar "free_cumulants", args) } as b) when active "free_cumulants" ->
+                    | DeclLet ({ Value = { Kind = ExprKind.ExprApp ({ Kind = ExprKind.ExprVar "free_cumulants" }, args) } } as b) when active "free_cumulants" ->
                         elabFreeCumulants ctx d.Span b args |> Result.map (fun nds -> (ds @ nds, dists, mstates))
-                    | DeclLet ({ Pattern = PatVar outName; Value = ExprApp (ExprVar "comoments", args) } as b) when active "comoments" ->
+                    | DeclLet ({ Pattern = { Kind = PatternKind.PatVar outName }; Value = { Kind = ExprKind.ExprApp ({ Kind = ExprKind.ExprVar "comoments" }, args) } } as b) when active "comoments" ->
                         elabComoments ctx d.Span outName b args |> Result.map (fun nds -> (ds @ nds, dists, mstates))
-                    | DeclLet ({ Pattern = PatVar outName; Value = ExprApp (ExprVar "cumulants", args) } as b) when active "cumulants" ->
+                    | DeclLet ({ Pattern = { Kind = PatternKind.PatVar outName }; Value = { Kind = ExprKind.ExprApp ({ Kind = ExprKind.ExprVar "cumulants" }, args) } } as b) when active "cumulants" ->
                         elabCumulants ctx d.Span outName b args |> Result.map (fun nds -> (ds @ nds, dists, mstates))
-                    | DeclLet ({ Pattern = PatVar outName; Value = ExprApp (ExprVar "comoments_merge", args) } as b) when active "comoments_merge" ->
+                    | DeclLet ({ Pattern = { Kind = PatternKind.PatVar outName }; Value = { Kind = ExprKind.ExprApp ({ Kind = ExprKind.ExprVar "comoments_merge" }, args) } } as b) when active "comoments_merge" ->
                         elabComomentsMerge ctx d.Span outName b args |> Result.map (fun nds -> (ds @ nds, dists, mstates))
-                    | DeclLet { Pattern = PatVar dName; Value = ExprApp (ExprVar "dist", args) } when active "dist" ->
+                    | DeclLet { Pattern = { Kind = PatternKind.PatVar dName }; Value = { Kind = ExprKind.ExprApp ({ Kind = ExprKind.ExprVar "dist" }, args) } } when active "dist" ->
                         elabDist ctx d.Span dName args |> Result.map (fun (nds, info) -> (ds @ nds @ [distPackDecl d.Span dName info], Map.add dName info dists, mstates))
-                    | DeclLet { Pattern = PatVar dName; Value = ExprApp (ExprVar "dist_add", args) } when active "dist_add" ->
+                    | DeclLet { Pattern = { Kind = PatternKind.PatVar dName }; Value = { Kind = ExprKind.ExprApp ({ Kind = ExprKind.ExprVar "dist_add" }, args) } } when active "dist_add" ->
                         elabDistCombine "+" (fun _ -> 1.0) ctx d.Span dName dists args |> Result.map (fun (nds, info) -> (ds @ nds @ [distPackDecl d.Span dName info], Map.add dName info dists, mstates))
                     // Dist OPERATORS (+ / − / scalar *) flow through
                     // untouched: dists are VALUES (distPackDecl), and the
@@ -2607,7 +2758,7 @@ let private expandModuleCore (decls: Located<Decl> list) : Result<Located<Decl> 
                     // (Independence.addDeclared/addSources below). The
                     // elaboration-level operator rewrites this replaced
                     // lived here until the typed-Dist arc's phase 5.
-                    | DeclLet { Pattern = PatVar dName; Value = ExprApp (ExprVar "dist_scale", args) } when active "dist_scale" ->
+                    | DeclLet { Pattern = { Kind = PatternKind.PatVar dName }; Value = { Kind = ExprKind.ExprApp ({ Kind = ExprKind.ExprVar "dist_scale" }, args) } } when active "dist_scale" ->
                         elabDistScale ctx d.Span dName dists args |> Result.map (fun (nds, info) -> (ds @ nds @ [distPackDecl d.Span dName info], Map.add dName info dists, mstates))
                     // The Faà di Bruno pushforward: a univariate order-q
                     // dist with FLAT 1-cell components. Registered (it
@@ -2618,32 +2769,32 @@ let private expandModuleCore (decls: Located<Decl> list) : Result<Located<Decl> 
                     // packed-literal arc upgrades this to a first-class
                     // typed Dist; until then cumulant(d, k) on flat dists
                     // projects at elaboration (arm below).
-                    | DeclLet { Pattern = PatVar dName; Value = ExprApp (ExprVar "dist_jet", args) } when active "dist_jet" ->
+                    | DeclLet { Pattern = { Kind = PatternKind.PatVar dName }; Value = { Kind = ExprKind.ExprApp ({ Kind = ExprKind.ExprVar "dist_jet" }, args) } } when active "dist_jet" ->
                         elabDistJet false "dist_jet" ctx d.Span dName dists args |> Result.map (fun (nds, info) -> (ds @ nds, Map.add dName info dists, mstates))
-                    | DeclLet { Pattern = PatVar dName; Value = ExprApp (ExprVar "dist_jet_closed", args) } when active "dist_jet_closed" ->
+                    | DeclLet { Pattern = { Kind = PatternKind.PatVar dName }; Value = { Kind = ExprKind.ExprApp ({ Kind = ExprKind.ExprVar "dist_jet_closed" }, args) } } when active "dist_jet_closed" ->
                         elabDistJet true "dist_jet_closed" ctx d.Span dName dists args |> Result.map (fun (nds, info) -> (ds @ nds, Map.add dName info dists, mstates))
                     // dist_map: the symbolic front-end — same registration
                     // and flat-component representation as dist_jet.
-                    | DeclLet { Pattern = PatVar dName; Value = ExprApp (ExprVar "dist_map", args) } when active "dist_map" ->
+                    | DeclLet { Pattern = { Kind = PatternKind.PatVar dName }; Value = { Kind = ExprKind.ExprApp ({ Kind = ExprKind.ExprVar "dist_map" }, args) } } when active "dist_map" ->
                         elabDistMap false ctx d.Span dName funcDecls dists args |> Result.map (fun (nds, info) -> (ds @ nds, Map.add dName info dists, mstates))
-                    | DeclLet { Pattern = PatVar dName; Value = ExprApp (ExprVar "dist_map_closed", args) } when active "dist_map_closed" ->
+                    | DeclLet { Pattern = { Kind = PatternKind.PatVar dName }; Value = { Kind = ExprKind.ExprApp ({ Kind = ExprKind.ExprVar "dist_map_closed" }, args) } } when active "dist_map_closed" ->
                         elabDistMap true ctx d.Span dName funcDecls dists args |> Result.map (fun (nds, info) -> (ds @ nds, Map.add dName info dists, mstates))
                     // Tower Bayes: dist_expect is a scalar projection;
                     // dist_reweight / dist_mix register flat univariate
                     // dists exactly like the jet results above (composable
                     // with moments-on-dist, further reweights, and
                     // cumulant(d, k) via the flat-projection arm below).
-                    | DeclLet ({ Value = ExprApp (ExprVar "dist_expect", args) } as b) when active "dist_expect" ->
+                    | DeclLet ({ Value = { Kind = ExprKind.ExprApp ({ Kind = ExprKind.ExprVar "dist_expect" }, args) } } as b) when active "dist_expect" ->
                         elabDistExpect ctx d.Span b dists args |> Result.map (fun nds -> (ds @ nds, dists, mstates))
-                    | DeclLet { Pattern = PatVar dName; Value = ExprApp (ExprVar "dist_reweight", args) } when active "dist_reweight" ->
+                    | DeclLet { Pattern = { Kind = PatternKind.PatVar dName }; Value = { Kind = ExprKind.ExprApp ({ Kind = ExprKind.ExprVar "dist_reweight" }, args) } } when active "dist_reweight" ->
                         elabDistReweight ctx d.Span dName dists args |> Result.map (fun (nds, info) -> (ds @ nds, Map.add dName info dists, mstates))
-                    | DeclLet { Pattern = PatVar dName; Value = ExprApp (ExprVar "dist_mix", args) } when active "dist_mix" ->
+                    | DeclLet { Pattern = { Kind = PatternKind.PatVar dName }; Value = { Kind = ExprKind.ExprApp ({ Kind = ExprKind.ExprVar "dist_mix" }, args) } } when active "dist_mix" ->
                         elabDistMix ctx d.Span dName dists args |> Result.map (fun (nds, info) -> (ds @ nds, Map.add dName info dists, mstates))
                     // Signed atomic towers: quasi-dists as registered
                     // values; negativity as a scalar meter.
-                    | DeclLet { Pattern = PatVar dName; Value = ExprApp (ExprVar "dist_atoms", args) } when active "dist_atoms" ->
+                    | DeclLet { Pattern = { Kind = PatternKind.PatVar dName }; Value = { Kind = ExprKind.ExprApp ({ Kind = ExprKind.ExprVar "dist_atoms" }, args) } } when active "dist_atoms" ->
                         elabDistAtoms ctx d.Span dName args |> Result.map (fun (nds, info) -> (ds @ nds, Map.add dName info dists, mstates))
-                    | DeclLet ({ Value = ExprApp (ExprVar "dist_negativity", args) } as b) when active "dist_negativity" ->
+                    | DeclLet ({ Value = { Kind = ExprKind.ExprApp ({ Kind = ExprKind.ExprVar "dist_negativity" }, args) } } as b) when active "dist_negativity" ->
                         elabDistNegativity ctx d.Span b dists args |> Result.map (fun nds -> (ds @ nds, dists, mstates))
                     // cumulant(d, k) on a FLAT registry dist (a pushforward
                     // result): no packed value exists for the checker's
@@ -2651,12 +2802,12 @@ let private expandModuleCore (decls: Located<Decl> list) : Result<Located<Decl> 
                     // order guard is an elaboration error with the checker
                     // arm's steering. DELETE when packed literals land and
                     // jet results __dist_pack like everything else.
-                    | DeclLet ({ Value = ExprApp (ExprVar "__ppl_cumulant", [ExprVar dn; kExpr]) } as b)
+                    | DeclLet ({ Value = { Kind = ExprKind.ExprApp ({ Kind = ExprKind.ExprVar "__ppl_cumulant" }, [{ Kind = ExprKind.ExprVar dn }; kExpr]) } } as b)
                         when Map.containsKey dn dists && dists.[dn].Flat ->
                         let info = dists.[dn]
                         (match evalExpr ctx.Statics maxSteps kExpr with
                          | Ok (SVInt k) when k >= 1L && int k <= info.Order ->
-                             Ok (ds @ [ { d with Value = DeclLet { b with Value = ExprVar info.Components.[int k - 1] } } ], dists, mstates)
+                             Ok (ds @ [ { d with Value = DeclLet { b with Value = mkExpr d.Span (ExprVar info.Components.[int k - 1]) } } ], dists, mstates)
                          | Ok (SVInt k) ->
                              Error (sprintf "cumulant: order %d exceeds the dist's carried order %d — insufficient stochastic order. Construct with a higher order or project a carried component." k info.Order)
                          | _ ->
@@ -2665,11 +2816,11 @@ let private expandModuleCore (decls: Located<Decl> list) : Result<Located<Decl> 
                     // contract, arbitrary order): mstate/mstate_merge bind
                     // compile-time state objects; mstate_cumulants freezes
                     // one into destructured cumulant tensors.
-                    | DeclLet { Pattern = PatVar sName; Value = ExprApp (ExprVar "mstate", args) } when active "mstate" ->
+                    | DeclLet { Pattern = { Kind = PatternKind.PatVar sName }; Value = { Kind = ExprKind.ExprApp ({ Kind = ExprKind.ExprVar "mstate" }, args) } } when active "mstate" ->
                         elabMState ctx d.Span sName args |> Result.map (fun (nds, info) -> (ds @ nds, dists, Map.add sName info mstates))
-                    | DeclLet { Pattern = PatVar outName; Value = ExprApp (ExprVar "mstate_merge", args) } when active "mstate_merge" ->
+                    | DeclLet { Pattern = { Kind = PatternKind.PatVar outName }; Value = { Kind = ExprKind.ExprApp ({ Kind = ExprKind.ExprVar "mstate_merge" }, args) } } when active "mstate_merge" ->
                         elabMStateMerge ctx d.Span outName mstates args |> Result.map (fun (nds, info) -> (ds @ nds, dists, Map.add outName info mstates))
-                    | DeclLet ({ Value = ExprApp (ExprVar "mstate_cumulants", args) } as b) when active "mstate_cumulants" ->
+                    | DeclLet ({ Value = { Kind = ExprKind.ExprApp ({ Kind = ExprKind.ExprVar "mstate_cumulants" }, args) } } as b) when active "mstate_cumulants" ->
                         elabMStateCumulants ctx d.Span b mstates args |> Result.map (fun nds -> (ds @ nds, dists, mstates))
                     // cumulant(d, k) flows through untouched: it is a
                     // checker-level projection on the Dist-typed value that
@@ -2722,7 +2873,7 @@ let private expandModule (decls: Located<Decl> list) : Result<Located<Decl> list
 /// Entry point: elaborate PPL formers across a program. Runs after ML-op
 /// elaboration and before grad expansion, so grad() differentiates the
 /// generated pipelines as plain Blade source.
-let expand (program: Program) : Result<Program, string> =
+let private expandStr (program: Program) : Result<Program, string> =
     // Register the `indep` where-clause handler (idempotent) and start a
     // fresh independence state for this compilation — expand always runs
     // before checkProgram in the same async flow, so the checker sees this
@@ -2736,3 +2887,12 @@ let expand (program: Program) : Result<Program, string> =
             expandModule m.Decls |> Result.map (fun ds -> ms @ [{ m with Decls = ds }])))
         (Ok [])
     |> Result.map (fun ms -> { program with Modules = ms })
+
+/// Boundary: string-errored internals -> coded diagnostics. The span is the
+/// ambient synthSpan -- stamped per-decl by expandStr, so a mid-elaboration
+/// failure points at the offending declaration.
+let expand (program: Program) : Result<Program, Blade.Diagnostics.Diagnostic list> =
+    Blade.Ast.synthSpan <- Blade.Ast.noSpan
+    expandStr program
+    |> Result.mapError (fun msg ->
+        [ Blade.Diagnostics.mkError "BL5100" (Blade.Diagnostics.Codes.phaseOfCode "BL5100") Blade.Ast.synthSpan msg ])

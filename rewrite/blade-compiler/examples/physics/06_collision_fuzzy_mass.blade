@@ -1,5 +1,5 @@
 // TEST: Physics -- Elastic Collision With A Fuzzy Target Mass
-import ppl as ppl
+
 // ============================================================================
 // Cue ball (m1 = 1, u1 = 1) strikes a target at rest whose MASS is a moment
 // jet: m2 ~ (1.0, 0.4), straddling the equal-mass bifurcation. The outgoing
@@ -14,6 +14,7 @@ import ppl as ppl
 // the sign of the outcome genuinely uncertain across the ensemble.
 // EXPECT values checked vs an independent PowerShell ensemble.
 // ============================================================================
+import ppl as ppl
 type TimeIdx = Idx<7>
 let M2: Array<Float64 like Idx<1>, TimeIdx> = [[0.356967028599, 0.65259015823, 0.839329531238, 1.0, 1.16067046876, 1.34740984177, 1.6430329714]]
 let d = ppl.dist(M2, 6)
@@ -21,7 +22,7 @@ let d = ppl.dist(M2, 6)
 function v(m) = (1.0 - m) / (1.0 + m)
 
 // outgoing velocities as towers
-let dv1 = ppl.dist_map(d, 3, 2, lambda(m) -> v(m))
+let dv1 = ppl.dist_map(d, 3, 2, v)
 let v1_1 = ppl.cumulant(dv1, 1)
 
 // total momentum p = v1 + m2 v2  (identically 1) -> degenerate tower

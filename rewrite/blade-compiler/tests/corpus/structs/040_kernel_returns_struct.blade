@@ -1,0 +1,16 @@
+// TEST: Kernel Returns Struct Literal
+// A method_for kernel may return a struct value: the kernel's resolved
+// IRTNamed return type flows through to the output Array element type
+// (TypeCheck.buildApplyInfo outputElemType), so the result is Array<Pair>.
+// Previously the relic fallback reused the input array's elem type and the
+// generated C++ assigned a Pair into a double slot.
+struct Pair { a: Float64, b: Float64 }
+type NIdx = Idx<3>
+let xs: Array<Float64 like NIdx> = [1.0, 2.0, 3.0]
+let P = method_for(xs) <@> lambda(x) -> Pair { a = x, b = x * 2.0 } |> compute
+let p0a = P((0 : NIdx)).a
+let p1b = P((1 : NIdx)).b
+let p2b = P((2 : NIdx)).b
+// EXPECT: p0a = 1
+// EXPECT: p1b = 4
+// EXPECT: p2b = 6

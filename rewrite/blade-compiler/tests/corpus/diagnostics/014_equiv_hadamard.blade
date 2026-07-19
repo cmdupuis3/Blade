@@ -1,0 +1,7 @@
+// TEST: Diag Equiv Hadamard (diag)
+// ERROR: BL4008 @ 6:3
+// ERROR-CONTAINS: elementwise product of representation-typed values
+import ml as ml
+let static S = [(0, 0, 1), (1, 1, 1)]
+function bad(x: Array<Float like IrrepsIdx<S>>, y: Array<Float like IrrepsIdx<S>>) where ml.equiv(O3) -> Array<Float like IrrepsIdx<S>> =
+  x * y

@@ -197,6 +197,10 @@ and TypedExprKind =
     | TExprFusion of TypedExpr * TypedExpr
     | TExprFunctorMap of func: TypedExpr * comp: TypedExpr
     | TExprChoice of TypedExpr * TypedExpr
+    // <|:> allocated-fallback: read left where its storage has the cell,
+    // else right. Distinct from TExprChoice (zero-vs-nonzero on VALUES):
+    // fallback keys on STORAGE (compound mask bit / dense pointer chain).
+    | TExprFallback of TypedExpr * TypedExpr
     | TExprCompose of BinOp * TypedExpr * TypedExpr
     
     // Virtual arrays
@@ -204,6 +208,9 @@ and TypedExprKind =
     | TExprDotDot of lo: TypedExpr * hi: TypedExpr
     | TExprReverse of indexType: IRIndexType
     | TExprBlocked of indexType: IRIndexType * blockSize: TypedExpr
+    // NOTE: halo<Inner, [offsets]> has NO typed node — it typechecks to a
+    // TExprRange over a "__halowin|"-tagged slot (TypeCheck.haloSlotOf); the
+    // per-slot center offset is re-derived from the tag at loop building.
     
     // Zip and stack
     | TExprZip of TypedExpr list

@@ -1,0 +1,53 @@
+// TEST: ML Equiv Certificate Grad Invariance
+import ml as ml
+import ad as ad
+// ============================================================================
+// The certificate survives differentiation: for the certified model of 017
+// (invariant loss), BOTH the loss and its weight gradient are unchanged
+// when the input rotates — grad() differentiates the synthesized layers and
+// inherits their equivariance. Pins from dump-equiv (oracle: loss diff 0,
+// max dw diff 2.2e-16).
+// ============================================================================
+let static SIN = [(0, 0, 2), (1, 1, 1)]
+let static SOUT = [(0, 0, 1), (1, 1, 2)]
+let static WD = ml.hom_dim(SIN, SOUT)
+
+let xg = [0.5, -1.2, 0.8, 0.3, -0.6]
+let xg_rot = [0.5, -1.2, 0.6087844265611232, 0.6708032524645346, -0.5190419236050658]
+let tgt = [1.0, 0.5, 0.25]
+let wv = [0.4, -0.3, 0.2, 0.1]
+
+function model(w: Array<Float like Idx<WD>>, x: Array<Float like IrrepsIdx<SIN>>) where ml.equiv(O3) -> Array<Float like Idx<3>> = {
+    let h = ml.derive_linear(SIN, SOUT, w, x)
+    ml.norms(SOUT, h)
+}
+
+function loss(w: Array<Float like Idx<WD>>) -> Float = {
+    let o = model(w, xg)
+    let mut acc = 0.0
+    for k in 0..3 {
+        let d = o(k) - tgt(k)
+        acc = acc + d * d
+    }
+    acc
+}
+
+function loss_rot(w: Array<Float like Idx<WD>>) -> Float = {
+    let o = model(w, xg_rot)
+    let mut acc = 0.0
+    for k in 0..3 {
+        let d = o(k) - tgt(k)
+        acc = acc + d * d
+    }
+    acc
+}
+
+let mut dw = [0.0, 0.0, 0.0, 0.0]
+let lv = ad.grad(loss)(wv, dw)
+// EXPECT: lv = 0.29959233727723616
+// EXPECT: dw = [-0.43999999999999995, 1.0559999999999998, -0.6080306508910549, -0.30401532544552745]
+
+let mut dw_rot = [0.0, 0.0, 0.0, 0.0]
+let lv_rot = ad.grad(loss_rot)(wv, dw_rot)
+// EXPECT: lv_rot = 0.29959233727723616
+// EXPECT: dw_rot = [-0.43999999999999995, 1.0559999999999998, -0.6080306508910551, -0.30401532544552756]

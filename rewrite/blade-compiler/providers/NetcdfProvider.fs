@@ -359,6 +359,7 @@ let ncFileToModule
         ProviderWrites = Map.empty
         RandomInits = Map.empty
         CompoundInits = Map.empty
+        MutableArrayLets = Set.empty
     }
 
 /// Convenience: load a file and produce a module in one step.

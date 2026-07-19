@@ -1,0 +1,16 @@
+// TEST: Fallback Nested And Object For
+// Composition: a fallback whose RIGHT side is itself a fallback (layered
+// defaults — S1 over S2 over D), and the object_for(<|:>) left-fold form.
+type SIdx = Idx<4>
+let vals: Array<Float64 like SIdx> = [0.0, 20.0, 30.0, 40.0]
+let m1 = mask(vals, lambda(v) -> v < 5.0)
+let S1 = compound(vals, m1)
+let m2 = mask(vals, lambda(v) -> v > 25.0)
+let S2 = compound(vals, m2)
+let D: Array<Float64 like SIdx> = [7.0, 7.0, 7.0, 7.0]
+let C1 = S1 <|:> (S2 <|:> D) |> compute
+let C2 = object_for(<|:>) <@> (S2, D) |> compute
+// S1 present: idx 0 (0.0). S2 present: idx 2 (30.0), idx 3 (40.0).
+// inner S2 <|:> D = [7, 7, 30, 40]; S1 overlays idx 0 with its allocated 0.0
+// EXPECT: C1 = [0.0, 7.0, 30.0, 40.0]
+// EXPECT: C2 = [7.0, 7.0, 30.0, 40.0]

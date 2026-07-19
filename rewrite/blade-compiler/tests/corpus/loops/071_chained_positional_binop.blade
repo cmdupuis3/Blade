@@ -1,0 +1,28 @@
+// TEST: Chained Positional Elementwise Binop
+// A chained 3-way (and longer) positional elementwise operator `A * B * C`
+// lowers to nested loop-form applications: the outer op's left input is
+// itself an inline elementwise computation. It must be hoisted to its own
+// let-RHS and materialized before the outer loop consumes it — otherwise the
+// loop-nest builder names it `arr0` and reads an array it never declared
+// (g++: `error: 'arr0' was not declared in this scope`). Regression pin for
+// the isNestedLoopComputeArg lift-hoist (IR.liftExpr) + the IRCompute
+// let-chain drain. Two-way `A * B` already worked; the chain is the fix.
+let A: Array<Float64 like Idx<3>> = [1.0, 2.0, 3.0]
+let B: Array<Float64 like Idx<3>> = [4.0, 5.0, 6.0]
+let C: Array<Float64 like Idx<3>> = [7.0, 8.0, 9.0]
+let D: Array<Float64 like Idx<3>> = [2.0, 2.0, 2.0]
+// three-way product and sum
+let m3 = A * B * C
+let a3 = A + B + C
+// four-way, mixed precedence, and nesting on both operands
+let m4 = A * B * C * D
+let mix = A + B * C
+let cmp = (A * B) * (C * D)
+// two-way still fine (regression)
+let two = A * B
+// EXPECT: m3 = [28.0, 80.0, 162.0]
+// EXPECT: a3 = [12.0, 15.0, 18.0]
+// EXPECT: m4 = [56.0, 160.0, 324.0]
+// EXPECT: mix = [29.0, 42.0, 57.0]
+// EXPECT: cmp = [56.0, 160.0, 324.0]
+// EXPECT: two = [4.0, 10.0, 18.0]

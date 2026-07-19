@@ -1,0 +1,8 @@
+// TEST: Diag Immutable Static Assign (diag)
+// ERROR: BL4005
+// ERROR-CONTAINS: static bindings are immutable
+let static s = 2
+function f() -> Int64 = {
+    s = 3
+    s
+}

@@ -1,0 +1,7 @@
+// TEST: Diag Schur No Equivariant Map (diag)
+// ERROR: BL4007 @ 6:1
+// ERROR-CONTAINS: no equivariant linear map exists
+import ml as ml
+let static SIN = [(0, 0, 2)]
+let static SOUT = [(1, 1, 1)]
+let bad = ml.linear(SIN, SOUT, [0.0], [1.0, 1.0])

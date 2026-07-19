@@ -313,10 +313,10 @@ and validateChildren (env: AliasEnv) (declName: string) (span: Span)
 
 /// Format a binding name from a pattern (best-effort, for context strings).
 let private patternName (pat: Pattern) : string =
-    match pat with
-    | PatVar n -> n
-    | PatTuple pats ->
-        let names = pats |> List.choose (function PatVar n -> Some n | _ -> None)
+    match pat.Kind with
+    | PatternKind.PatVar n -> n
+    | PatternKind.PatTuple pats ->
+        let names = pats |> List.choose (fun p -> match p.Kind with PatternKind.PatVar n -> Some n | _ -> None)
         sprintf "(%s)" (String.concat ", " names)
     | _ -> "_"
 

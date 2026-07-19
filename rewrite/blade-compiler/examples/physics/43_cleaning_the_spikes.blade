@@ -121,20 +121,23 @@ let lam3 = LAM(2)
 let lam4 = LAM(3)
 
 // ---- overlaps with the true modes (squared; sign-immune) ----
+// each overlap is an eigenvector-column * true-mode inner product, squared:
+// materialize column c of Q in index order, then prodsum reproduces the
+// by-hand dot product exactly (same summation order).
 let o1 = {
-    let mut s = 0.0
-    for i in 0..40 { s = s + Q(i, 0) * U1(i) }
-    s * s
+    let c = method_for(range<Idx<40>>) <@> lambda(i) -> Q(i, 0) |> compute
+    let v = prodsum(c, U1)
+    v * v
 }
 let o2 = {
-    let mut s = 0.0
-    for i in 0..40 { s = s + Q(i, 1) * U2(i) }
-    s * s
+    let c = method_for(range<Idx<40>>) <@> lambda(i) -> Q(i, 1) |> compute
+    let v = prodsum(c, U2)
+    v * v
 }
 let o3 = {
-    let mut s = 0.0
-    for i in 0..40 { s = s + Q(i, 2) * U3(i) }
-    s * s
+    let c = method_for(range<Idx<40>>) <@> lambda(i) -> Q(i, 2) |> compute
+    let v = prodsum(c, U3)
+    v * v
 }
 // sub-threshold mode: best overlap with ANY sample eigenvector
 let omax4 = {
@@ -228,16 +231,8 @@ let errORC = {
 let impF = errRaw / errRIE
 
 // ---- ex 31's route, for contrast: moments clean fine, the matrix does not move ----
-let em1 = {
-    let mut s = 0.0
-    for k in 0..40 { s = s + LAM(k) }
-    s / 40.0
-}
-let em2 = {
-    let mut s = 0.0
-    for k in 0..40 { s = s + LAM(k) * LAM(k) }
-    s / 40.0
-}
+let em1 = reduce(LAM, (+)) / 40.0
+let em2 = prodsum(LAM, LAM) / 40.0
 let dm2 = em2 - 0.25 * em1 * em1
 let tm2 = {
     let mut s = 0.0

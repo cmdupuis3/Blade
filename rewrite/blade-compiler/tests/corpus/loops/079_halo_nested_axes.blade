@@ -1,0 +1,12 @@
+// TEST: Halo Nested Per-Axis Offsets
+// One halo declares an n-D product window: the offsets payload is an array of
+// per-axis int arrays, arity = the sub-array count, every axis over the SAME
+// inner index. halo<G, [[-1,0,1],[-1,0,1]]> is the terse spelling of
+// range<halo<G,[-1,0,1]>, halo<G,[-1,0,1]>> — one window param per axis.
+// A [0] axis contributes no shrink (center-only). EXPECT is FLAT.
+type G = Idx<3>
+let A: Array<Float64 like G, G> = [[1.0, 2.0, 4.0], [3.0, 5.0, 8.0], [6.0, 9.0, 13.0]]
+let lap = method_for(halo<G, [[-1, 0, 1], [-1, 0, 1]]>) <@> lambda(wr, wc) -> A(wr(-1), wc(0)) + A(wr(1), wc(0)) + A(wr(0), wc(-1)) + A(wr(0), wc(1)) - 4.0 * A(wr(0), wc(0)) |> compute
+// EXPECT: lap = [2]
+let dv = method_for(halo<G, [[0, 1], [0]]>) <@> lambda(wr, wc) -> A(wr(1), wc(0)) - A(wr(0), wc(0)) |> compute
+// EXPECT: dv = [2, 3, 4, 3, 4, 5]

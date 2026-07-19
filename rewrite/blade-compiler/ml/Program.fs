@@ -8,6 +8,11 @@ let main argv =
         // copy-pasteable form for authoring the Blade e2e example.
         OracleDump.dump ()
         0
+    | [| "dump-equiv" |] ->
+        // Print the rotation-certificate fixtures (baked Wigner-D matrices,
+        // both-ways evaluations) for the ml-equiv certificate corpus tests.
+        OracleDump.dumpEquiv ()
+        0
     | _ ->
         printfn "BladeML reference implementation — equivariant ML module tests"
         printfn ""

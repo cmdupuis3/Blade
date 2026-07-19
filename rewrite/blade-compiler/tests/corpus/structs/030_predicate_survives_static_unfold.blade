@@ -1,0 +1,15 @@
+// TEST: Struct Predicate Survives Static Unfold
+// A where-clause is a real reference: the unfold pass's static-function
+// DCE must scan struct constraints (it once deleted functions referenced
+// only from where-clauses, leaving the runtime guard calling nothing).
+static function cap(k: Int) -> Int = k + 1
+static function rep(x, k) = if k == 1 then x else (x, rep(x, k - 1))
+struct Bounded {
+    n: Int
+} where n < cap(10)
+let A = [1.0, 2.0]
+let s2 = static method_for(rep(A, 2)) <@> lambda(x, y) -> x * y |> compute
+let b = Bounded { n = 5 }
+let m = b.n
+// EXPECT: m = 5
+// EXPECT: s2 = [1, 2, 2, 4]

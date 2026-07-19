@@ -71,6 +71,55 @@ module Autodiff =
                         dX.[src + c] <- dX.[src + c] + w * dOut.[dst + c]
         dW, dX
 
+    /// VJP of Linear.homLinear (the complete Schur basis — derive_linear's
+    /// reference): the same pair-major traversal, both cotangents.
+    let vjpHomLinear (specIn: SpecEntry[]) (specOut: SpecEntry[])
+                     (weights: float[]) (x: float[]) (dOut: float[])
+                     : float[] * float[] =
+        if dOut.Length <> Irreps.totalDim specOut then
+            invalidArg "dOut" "cotangent length does not match specOut"
+        let sIn = IrrepsIdx.blockStarts specIn
+        let sOut = IrrepsIdx.blockStarts specOut
+        let dW = Array.zeroCreate weights.Length
+        let dX = Array.zeroCreate x.Length
+        let mutable wOff = 0
+        for (bi, bo) in Linear.homPairs specIn specOut do
+            let eo = specOut.[bo]
+            let ei = specIn.[bi]
+            let d = Irreps.dim eo.Ir
+            for muO in 0 .. eo.Mult - 1 do
+                for muI in 0 .. ei.Mult - 1 do
+                    let wi = wOff + muO * ei.Mult + muI
+                    let w = weights.[wi]
+                    let src = sIn.[bi] + muI * d
+                    let dst = sOut.[bo] + muO * d
+                    for c in 0 .. d - 1 do
+                        dW.[wi] <- dW.[wi] + x.[src + c] * dOut.[dst + c]
+                        dX.[src + c] <- dX.[src + c] + w * dOut.[dst + c]
+            wOff <- wOff + eo.Mult * ei.Mult
+        dW, dX
+
+    /// VJP of Activations.norms: out_k = ||x_slot||  ⇒  dX_slot = dOut_k · x_slot / ||x_slot||
+    /// (zero-norm slots get zero cotangent — the subgradient convention).
+    let vjpNorms (spec: SpecEntry[]) (feat: float[]) (dOut: float[]) : float[] =
+        let starts = IrrepsIdx.blockStarts spec
+        let dX = Array.zeroCreate feat.Length
+        let mutable k = 0
+        for b in 0 .. spec.Length - 1 do
+            let e = spec.[b]
+            let d = 2 * e.Ir.L + 1
+            for mu in 0 .. e.Mult - 1 do
+                let s = starts.[b] + mu * d
+                let mutable acc = 0.0
+                for c in 0 .. d - 1 do
+                    acc <- acc + feat.[s + c] * feat.[s + c]
+                let nrm = sqrt acc
+                if nrm > 0.0 then
+                    for c in 0 .. d - 1 do
+                        dX.[s + c] <- dX.[s + c] + dOut.[k] * feat.[s + c] / nrm
+                k <- k + 1
+        dX
+
     // ---- tensor product ----
 
     /// VJP of TensorProduct.tensorProduct: returns (dWeights, dX, dY).

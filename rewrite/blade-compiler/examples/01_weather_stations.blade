@@ -20,14 +20,22 @@
 // Station codes appear as *values* in the readings log and the audit list,
 // so the code-keyed columns stay plain-Int-indexed (a nominally tagged slot
 // only accepts literal-coerced or range-flowed tags, not dynamic Ints).
+// The physical columns carry UNITS on their element types: elevations are
+// meters, temperatures are celsius. The annotations survive the whole SQL
+// surface below -- mask/compound views, reduce, and element reads all keep
+// the element signature, so a later `sum_good + elevation_m((0 : StationIdx))`
+// would be a compile-time unit error, while dimensionless derivations
+// (counts, means over counts) flow freely.
+Unit meters
+Unit celsius
 type StationIdx = Idx<6>
-let elevation_m: Array<Float64 like StationIdx> = [42.0, 388.0, 1204.0, 15.0, 730.0, 2210.0]
+let elevation_m: Array<Float<meters> like StationIdx> = [42.0, 388.0, 1204.0, 15.0, 730.0, 2210.0]
 let region = [0, 1, 2, 0, 1, 2]
 
 // ---- readings log (18 readings, 3 per station, station-major order) --------
 type ReadIdx = Idx<18>
 let r_station: Array<Int like ReadIdx> = [0, 0, 0, 1, 1, 1, 2, 2, 2, 3, 3, 3, 4, 4, 4, 5, 5, 5]
-let r_temp: Array<Float64 like ReadIdx> = [14.0, 16.0, 18.0, 11.0, 13.0, 12.0, 3.0, 5.0, 4.0, 17.0, 15.0, 19.0, 10.0, 14.0, 12.0, -2.0, 0.0, -1.0]
+let r_temp: Array<Float<celsius> like ReadIdx> = [14.0, 16.0, 18.0, 11.0, 13.0, 12.0, 3.0, 5.0, 4.0, 17.0, 15.0, 19.0, 10.0, 14.0, 12.0, -2.0, 0.0, -1.0]
 let r_qc: Array<Int like ReadIdx> = [0, 0, 0, 0, 1, 0, 0, 0, 0, 2, 0, 0, 0, 0, 1, 0, 0, 0]
 
 // ============================================================================
@@ -45,8 +53,9 @@ let sum_good = reduce(good_temps, (+))
 
 // ============================================================================
 // (b) Semijoin -- readings that belong to audited stations.
-// mask(A, contains(B, x)) is recognized and rewritten to a hash semijoin,
-// so this is O(|readings| + |audited|), not a nested scan.
+// mask(A, contains(B, x)) is the semijoin idiom (multiplicity-preserving).
+// Today each contains() is a linear scan, so this is O(|readings|*|audited|);
+// the O(|A|+|B|) hash-set fusion is a planned optimization (future.md 1.1).
 // ============================================================================
 let audited = [1, 4, 5]
 let from_audited = mask(r_station, lambda(s) -> contains(audited, s))
@@ -103,12 +112,13 @@ let warmest_first = sort(station_means, lambda(x) -> -x)
 // ============================================================================
 // (f) Composed filters -- positional mask algebra and value set-ops.
 // WHERE ... AND ... is elementwise Bool AND of two presence masks over the
-// same named index space; OR is the union filter. Both zip the masks and
-// compact once at the end.
+// same named index space; OR is the union filter. `&&`/`||` lift positionally
+// over Bool arrays (pseudo-native operator lifting), so mask conjunction needs
+// no zip+kernel detour -- one compaction at the end (pinned by sql-masks/008).
 // ============================================================================
 // SQL: SELECT SUM(temp), COUNT(*) FROM readings WHERE temp > 12 AND qc = 0
 let warm = mask(r_temp, lambda(t) -> t > 12.0)
-let warm_and_good = method_for(zip(warm, qc_ok)) <@> lambda(a, b) -> a && b |> compute
+let warm_and_good = warm && qc_ok
 let warm_good_temps = compound(r_temp, warm_and_good)
 let n_warm_good = extents(warm_good_temps)
 let sum_warm_good = reduce(warm_good_temps, (+))
@@ -118,7 +128,7 @@ let sum_warm_good = reduce(warm_good_temps, (+))
 // SQL: ... WHERE temp < 0 OR qc <> 0   (readings needing review)
 let freezing = mask(r_temp, lambda(t) -> t < 0.0)
 let qc_flagged = mask(r_qc, lambda(q) -> q > 0)
-let needs_review = method_for(zip(freezing, qc_flagged)) <@> lambda(a, b) -> a || b |> compute
+let needs_review = freezing || qc_flagged
 let review_temps = compound(r_temp, needs_review)
 let n_review = extents(review_temps)
 let sum_review = reduce(review_temps, (+))
@@ -144,8 +154,8 @@ let station_qc_score = method_for(by_station_qc)
 let uniq_stations = unique(r_station)
 let audited_mask = mask(uniq_stations, lambda(s) -> contains(audited, s))
 let troubled_mask = mask(uniq_stations, lambda(s) -> station_qc_score(s) > 0)
-let audited_and_troubled = method_for(zip(audited_mask, troubled_mask)) <@> lambda(a, b) -> a && b |> compute
-let audited_or_troubled = method_for(zip(audited_mask, troubled_mask)) <@> lambda(a, b) -> a || b |> compute
+let audited_and_troubled = audited_mask && troubled_mask
+let audited_or_troubled = audited_mask || troubled_mask
 let watchlist = compound(uniq_stations, audited_and_troubled)
 let contactlist = compound(uniq_stations, audited_or_troubled)
 let n_watch = extents(watchlist)

@@ -1,0 +1,16 @@
+// TEST: ML Equiv Derive Linear Values
+import ml as ml
+// ============================================================================
+// derive_linear(SIN, SOUT, w, x): the compiler derives the COMPLETE Schur
+// basis of Hom_G — pair-major weights over all (l, parity)-matched block
+// pairs. Weights chosen as exact binary fractions, so the pins are exact:
+// out block 0e: w(0)*x0 + w(1)*x1 = 0.5*1 + (-1)*2 = -1.5
+// out block 1o copy 0: 2.0  * (3, -1, 0.5); copy 1: 0.25 * (3, -1, 0.5).
+// ============================================================================
+let static SIN = [(0, 0, 2), (1, 1, 1)]
+let static SOUT = [(0, 0, 1), (1, 1, 2)]
+let static WD = ml.hom_dim(SIN, SOUT)
+let wd = WD
+// EXPECT: wd = 4
+let out: Array<Float like IrrepsIdx<SOUT>> = ml.derive_linear(SIN, SOUT, [0.5, -1.0, 2.0, 0.25], [1.0, 2.0, 3.0, -1.0, 0.5])
+// EXPECT: out = [-1.5, 6.0, -2.0, 1.0, 0.75, -0.25, 0.125]

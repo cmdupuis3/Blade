@@ -1,0 +1,31 @@
+// TEST: ML Ops hom_dim Schur Dimension
+import ml as ml
+// ============================================================================
+// ml.hom_dim(sIn, sOut) = dim Hom_G(V_in, V_out) by Schur's lemma:
+// Σ_{(l,p)} multIn(l,p) * multOut(l,p) over AGGREGATED multiplicities
+// (duplicate entries of the same irrep pool together). 0 means the only
+// equivariant linear map is zero. Hand-computed pins, mirrored in the
+// ml/ oracle (Tests_Core) and the compiler port (Wigner Tables block).
+// ============================================================================
+let static SPEC60 = [(0, 0, 16), (1, 1, 8), (2, 0, 4)]
+let static A = ml.hom_dim(SPEC60, SPEC60)
+let a = A
+// EXPECT: a = 336
+
+let static D1 = [(0, 0, 2)]
+let static D2 = [(0, 1, 2)]
+let static Z = ml.hom_dim(D1, D2)
+let z = Z
+// EXPECT: z = 0
+
+let static P1 = [(0, 0, 2), (1, 1, 3)]
+let static P2 = [(1, 1, 4), (2, 0, 1)]
+let static P = ml.hom_dim(P1, P2)
+let p = P
+// EXPECT: p = 12
+
+let static DUP1 = [(0, 0, 1), (0, 0, 2)]
+let static DUP2 = [(0, 0, 3)]
+let static DUP = ml.hom_dim(DUP1, DUP2)
+let d = DUP
+// EXPECT: d = 9

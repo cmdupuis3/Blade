@@ -1,0 +1,13 @@
+// TEST: ML Equiv Certified Identity
+import ml as ml
+// ============================================================================
+// The smallest certificate: `where ml.equiv(O3)` on an identity function.
+// The judgment (Blade.ML.Equiv) seeds x as representation-typed from its
+// IrrepsIdx annotation and requires the body's status to equal the declared
+// return status — an identity trivially satisfies it.
+// ============================================================================
+let static S = [(0, 0, 2), (1, 1, 1)]
+function f(x: Array<Float like IrrepsIdx<S>>) where ml.equiv(O3) -> Array<Float like IrrepsIdx<S>> =
+  x
+let out = f([1.0, 2.0, 3.0, 4.0, 5.0])
+// EXPECT: out = [1.0, 2.0, 3.0, 4.0, 5.0]

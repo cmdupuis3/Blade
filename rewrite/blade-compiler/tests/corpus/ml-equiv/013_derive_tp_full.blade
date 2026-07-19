@@ -1,0 +1,18 @@
+// TEST: ML Equiv Derive TP Full Decomposition
+import ml as ml
+// ============================================================================
+// derive_tp(S1, S2, x, y, w): the output spec is DERIVED as the full CG
+// decomposition tp_spec(S1, S2) — no output declaration, no reachability
+// question (every block arises from some path by construction). Same
+// generated kernel as an explicit full-config tensor_product, so the pins
+// equal ml-ops/009's (oracle dump, tp_spec section).
+// ============================================================================
+let static S1O = [(1, 1, 1)]
+let static SFULL = ml.tp_spec(S1O, S1O)
+let static FWD = ml.tp_full_weight_dim(S1O, S1O)
+let fwd = FWD
+// EXPECT: fwd = 3
+let x: Array<Float like IrrepsIdx<S1O>> = [1.0, 2.0, 3.0]
+let y: Array<Float like IrrepsIdx<S1O>> = [0.5, -1.0, 2.0]
+let out: Array<Float like IrrepsIdx<SFULL>> = ml.derive_tp(S1O, S1O, x, y, [1.0, 1.0, 1.0])
+// EXPECT: out = [-2.598076211353315, 4.949747468305832, -0.35355339059327373, -1.4142135623730947, 2.4748737341529154, 0.0, -4.286607049870561, 0.7071067811865475, 3.8890872965260104]

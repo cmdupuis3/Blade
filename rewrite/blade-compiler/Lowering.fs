@@ -54,6 +54,7 @@ let rec staticValueToIR (v: StaticEval.StaticValue) : IRExpr =
     | StaticEval.SVString _ -> IRLit IRLitUnit  // strings not in IR literals yet
     | StaticEval.SVUnit -> IRLit IRLitUnit
     | StaticEval.SVTuple vs -> IRTuple (vs |> List.map staticValueToIR)
+    | StaticEval.SVStruct (n, fs) -> IRStructLit (n, fs |> List.map (fun (fn, v) -> (fn, staticValueToIR v)))
 
 // (The duplicated resolveUnitExpr that lived here is gone — audit Phase 0.3.
 // The one definition is TypeEnv.resolveUnitExpr; the single use below
@@ -121,6 +122,13 @@ type TypedLowerEnv = {
     /// accumulate into the module's single list. Reset per-module
     /// at the start of lowerTypedModule.
     LiftedCallables: ResizeArray<IRCallable>
+    /// Block-level `let mut` bindings of ARRAY type, accumulated during
+    /// lowering (lowerTypedBlock TStmtLet — IRLet erases the mutability
+    /// flag, so it is recorded here by IRId). Copied into
+    /// IRModule.MutableArrayLets at module assembly; consumed by codegen and
+    /// the interpreter to give such bindings copy (not alias) semantics.
+    /// Mutable shared state like LiftedCallables; reset per-module.
+    MutableArrayLets: ResizeArray<IRId>
 }
 
 let emptyTypedEnv () : TypedLowerEnv = {
@@ -144,6 +152,7 @@ let emptyTypedEnv () : TypedLowerEnv = {
     RandomInits = Map.empty
     CompoundInits = Map.empty
     LiftedCallables = ResizeArray<IRCallable>()
+    MutableArrayLets = ResizeArray<IRId>()
 }
 
 let bindTypedVar name id (env: TypedLowerEnv) : TypedLowerEnv =
@@ -194,6 +203,33 @@ let rec lowerTypedExpr (env: TypedLowerEnv) (texpr: TypedExpr) : IRExpr =
         | OpArg -> IRUnaryOp (IRArg, e)
         | OpMath name -> IRUnaryOp (IRMath name, e)
     
+    | TExprApp (func, args) when
+        (match func.Type, args with
+         | IRTIdxTagged (_, IRefNamed tag), [_] -> tag.StartsWith("__halowin|")
+         | _ -> false) ->
+        // halo window read: w(o). `w` is bound to the true CENTER ordinal by the
+        // underlying range slot's VirtualRange peel (int64 w = i + startOffset),
+        // so the neighbor ordinal is (w + o); BndShrink guarantees in-bounds.
+        //  - dense inner ("__halowin|d:"): the ordinal IS the index — plain add.
+        //  - compound inner ("__halowin|c:"): the neighbor is the (w+o)-th
+        //    PRESENT cell; IRHaloUnhash renders its coordinate through the
+        //    peel-emitted cidx alias. The offset must be an integer literal
+        //    (the static-offset contract; nothing else can be proven in-reach).
+        let tag = match func.Type with IRTIdxTagged (_, IRefNamed t) -> t | _ -> ""
+        let f = lowerTypedExpr env func
+        let offArg = List.head args
+        if tag.StartsWith "__halowin|c:" then
+            let staticOff =
+                match offArg.Kind with
+                | TExprLit (LitInt n) -> Some n
+                | TExprUnaryOp (OpNeg, { Kind = TExprLit (LitInt n) }) -> Some (-n)
+                | _ -> None
+            match staticOff with
+            | Some o -> IRHaloUnhash (f, o)
+            | None -> failwith "halo window read over a masked domain: the offset must be an integer literal (e.g. w(-1), w(0), w(1))"
+        else
+            IRBinOp (IRElementwise, IRAdd, f, lowerTypedExpr env offArg)
+
     | TExprApp (func, args) ->
         let f = lowerTypedExpr env func
         let as' = args |> List.map (lowerTypedExpr env)
@@ -330,6 +366,9 @@ let rec lowerTypedExpr (env: TypedLowerEnv) (texpr: TypedExpr) : IRExpr =
     
     | TExprChoice (l, r) ->
         IRChoice (lowerTypedExpr env l, lowerTypedExpr env r)
+
+    | TExprFallback (l, r) ->
+        IRFallback (lowerTypedExpr env l, lowerTypedExpr env r)
     
     | TExprCompose (op, l, r) ->
         let lIR = lowerTypedExpr env l
@@ -526,7 +565,9 @@ let rec lowerTypedExpr (env: TypedLowerEnv) (texpr: TypedExpr) : IRExpr =
         IRAssign (lowerTypedExpr env lhs, lowerTypedExpr env rhs)
 
     | TExprConstraintCheck (cond, message) ->
-        IRConstraintCheck (lowerTypedExpr env cond, message)
+        // Carry the constraint's source span into IR so the runtime panic
+        // (BL8001) can report file:line. texpr is the whole node in hand.
+        IRConstraintCheck (lowerTypedExpr env cond, message, texpr.Span)
     
     | TExprSequence exprs ->
         // sequence(c1, c2, ..., cn) → IRSequence (flat n-ary parallel)
@@ -664,6 +705,14 @@ and lowerTypedBlock env (stmts: TypedStmt list) (finalExpr: TypedExpr option) : 
         match stmt with
         | TStmtLet binding ->
             let value = lowerTypedExpr env binding.Value
+            // IRLet has no mutability slot, so record mut ARRAY lets in the
+            // module side table — codegen/interp give them copy semantics
+            // (a mut binding initialized from an existing array must not
+            // alias its storage; see IRModule.MutableArrayLets).
+            (match binding.Type with
+             | ArrayElem _ when binding.IsMutable ->
+                 env.MutableArrayLets.Add binding.VarId
+             | _ -> ())
             let env' = bindTypedVar binding.Name binding.VarId env
             if binding.SubBindings.IsEmpty && binding.PostChecks.IsEmpty then
                 let body = lowerTypedBlock env' rest finalExpr
@@ -995,7 +1044,7 @@ and lowerTypedBinOp env mode op l r leftExpr rightExpr resultType =
         | _ -> IRArrayProduct (l, r)  // fallback for non-method_for operands
     | OpFunctor -> IRFunctorMap (l, r)
     | OpChoice -> IRChoice (l, r)
-    | OpFallback -> IRChoice (l, r)
+    | OpFallback -> IRFallback (l, r)
     | OpComposeObj -> IRComposeObj (l, r)
     | OpComposeMeth -> IRComposeMeth (l, r)
     | OpCompose -> IRCompose (l, r)
@@ -1165,6 +1214,7 @@ let lowerTypedDecl (env: TypedLowerEnv) (decl: TypedDecl) : (Choice<IRFuncDef, I
                          | StaticEval.SVInt _ -> IRTScalar ETInt64
                          | StaticEval.SVFloat _ -> IRTScalar ETFloat64
                          | StaticEval.SVBool _ -> IRTScalar ETBool
+                         | StaticEval.SVStruct (n, _) -> IRTNamed n
                          | _ -> IRTUnit
                 let bd = { Id = binding.VarId; Name = binding.Name; Type = ty; Value = irValue; IsConst = true; IsMutable = false }
                 let env' = bindTypedVar binding.Name binding.VarId env
@@ -1467,9 +1517,11 @@ let tryProviderWrite (env: TypedLowerEnv) (typeDefs: IRTypeDef list) (binding: T
 
 /// Lower a typed module
 let lowerTypedModule (env: TypedLowerEnv) (modul: TypedModule) (rawDecls: Located<Decl> list option) : IRModule * ModuleExport =
-    // Fresh LiftedCallables for this module. Lifted lambdas from a
-    // previous module's lowering must not leak into this one.
-    let env = { env with LiftedCallables = ResizeArray<IRCallable>() }
+    // Fresh LiftedCallables / MutableArrayLets for this module. Lifted lambdas
+    // and mut-let records from a previous module's lowering must not leak into
+    // this one.
+    let env = { env with LiftedCallables = ResizeArray<IRCallable>()
+                         MutableArrayLets = ResizeArray<IRId>() }
     // Phase 0: Resolve static values/functions from raw declarations
     let mutable currentEnv =
         match rawDecls with
@@ -1801,6 +1853,7 @@ let lowerTypedModule (env: TypedLowerEnv) (modul: TypedModule) (rawDecls: Locate
         ProviderWrites = currentEnv.ProviderWrites
         RandomInits = currentEnv.RandomInits
         CompoundInits = currentEnv.CompoundInits
+        MutableArrayLets = Set.ofSeq currentEnv.MutableArrayLets
     }
     (irModule, moduleExport)
 
@@ -1866,6 +1919,25 @@ let lower (source: string) : Result<IRProgram, string> =
             let msgs = errors |> List.map Blade.TypeEnv.formatCompileError
             Error (String.concat "\n" msgs)
     | Error e -> Error (sprintf "Parse error at %d:%d: %s" e.Line e.Col e.Message)
+
+/// Structured-diagnostics entry: like `lower`, but errors stay as coded,
+/// spanned Diagnostics, warnings come back structured, and the retained
+/// source text returns as a SourceMap for snippet rendering. `fileName`
+/// (when known) is stamped into spans and keys the SourceMap.
+let lowerDiag (fileName: string option) (source: string)
+    : Result<IRProgram * string list, Blade.Diagnostics.Diagnostic list> * Blade.Diagnostics.SourceMap =
+    let key = defaultArg fileName "<input>"
+    let sm = Blade.Diagnostics.SourceMap.ofSources [ key, source ]
+    let result =
+        match Blade.Parser.parseProgramWithFile fileName source with
+        | Error e -> Error [ Blade.Parser.diagnosticOfParseError fileName e ]
+        | Ok program ->
+            match Blade.TypeCheck.typeCheck program with
+            | Error errors ->
+                Error (errors |> List.map Blade.TypeEnv.diagnosticOfCompileError)
+            | Ok (typedProgram, builder, warnings) ->
+                Ok (lowerTypedProgram typedProgram (Some program) builder, warnings)
+    result, sm
 
 /// Lower multiple source files into a single IR program with cross-module imports
 let lowerMultiSource (sources: (string * string) list) : Result<IRProgram, string> =

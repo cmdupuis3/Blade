@@ -41,7 +41,7 @@ let private collectArrays (decls: Located<Decl> list) : Map<string, TypeExpr * T
         match d.Value with
         | DeclLet b | DeclStatic b ->
             match b.Pattern, b.Type with
-            | PatVar name, Some (TyArray (elem, idxs)) -> Map.add name (elem, idxs) acc
+            | { Kind = PatternKind.PatVar name }, Some (TyArray (elem, idxs)) -> Map.add name (elem, idxs) acc
             | _ -> acc
         | _ -> acc) Map.empty
 
@@ -72,8 +72,8 @@ let private classifyElem (ty: TypeExpr) : ElemClass =
 
 /// The declared shape AND element class of an op's array argument.
 let private arrayShape (ctx: Ctx) (what: string) (e: Expr) : Result<string * ElemClass * int list, string> =
-    match e with
-    | ExprVar name ->
+    match e.Kind with
+    | ExprKind.ExprVar name ->
         match Map.tryFind name ctx.Arrays with
         | None ->
             Error (sprintf "%s: '%s' must be a module-level let with a full Array<... like Idx<...>> annotation (spectra ops read the declared shape; rebind the value with an annotated let first)" what name)
@@ -144,14 +144,14 @@ let private elabOp (st: ElabState) (ctx: Ctx) (op: string) (args: Expr list) : R
     match op, args with
     | "fft", [xE] ->
         realSignal ctx "fft" xE |> Result.bind (fun n ->
-            Ok (ensureFft st n) |> Result.map (fun nm -> ExprApp (ExprVar nm, [xE])))
+            Ok (ensureFft st n) |> Result.map (fun nm -> syn (ExprApp (syn (ExprVar nm), [xE]))))
     | "fft", _ -> Error "fft: expected fft(X) — the unnormalized forward DFT of a real signal"
     | "ifft", [xE] ->
         arrayShape ctx "ifft" xE |> Result.bind (fun (name, elem, dims) ->
             match elem, dims with
             | ElemComplex, [n] ->
                 ensure st (fingerprint "ifft" (box n)) (fun nm -> Ok (ifftDecl nm n))
-                |> Result.map (fun nm -> ExprApp (ExprVar nm, [xE]))
+                |> Result.map (fun nm -> syn (ExprApp (syn (ExprVar nm), [xE])))
             | ElemComplex, _ -> Error (sprintf "ifft: '%s' must be rank-1 (Array<Complex128 like Idx<n>>)" name)
             | _, _ -> Error (sprintf "ifft: '%s' must have Complex128 elements (ifft takes the complex spectrum; rebind the fft result with a full Array<Complex128 like Idx<n>> annotation first)" name))
     | "ifft", _ -> Error "ifft: expected ifft(X) — real inverse synthesis of a complex spectrum (carries the 1/n)"
@@ -159,7 +159,7 @@ let private elabOp (st: ElabState) (ctx: Ctx) (op: string) (args: Expr list) : R
         realSignal ctx "power" xE |> Result.bind (fun n ->
             let fftName = ensureFft st n
             ensure st (fingerprint "power" (box n)) (fun nm -> Ok (powerDecl nm n fftName))
-            |> Result.map (fun nm -> ExprApp (ExprVar nm, [xE])))
+            |> Result.map (fun nm -> syn (ExprApp (syn (ExprVar nm), [xE]))))
     | "power", _ -> Error "power: expected power(X) — |FFT(X)|² per bin"
     | "polyspec", args when args.Length >= 2 && args.Length <= 4 ->
         let k = args.Length
@@ -176,7 +176,7 @@ let private elabOp (st: ElabState) (ctx: Ctx) (op: string) (args: Expr list) : R
                 else
                     let fftName = ensureFft st n
                     ensure st (fingerprint "polyspec" (box (n, k))) (fun nm -> Ok (polyspecDecl nm n k fftName))
-                    |> Result.map (fun nm -> ExprApp (ExprVar nm, args))
+                    |> Result.map (fun nm -> syn (ExprApp (syn (ExprVar nm), args)))
             | _ ->
                 Error (sprintf "polyspec: all signals must share one static length (got %s)"
                                (ns |> List.map string |> String.concat ", ")))
@@ -195,33 +195,33 @@ let rec private rewriteExpr (st: ElabState) (ctx: Ctx) (aliases: Set<string>) (e
         es |> List.fold (fun acc x ->
             acc |> Result.bind (fun xs -> r x |> Result.map (fun x' -> xs @ [x'])))
             (Ok [])
-    match e with
+    match e.Kind with
     // Qualified spectra op: `alias.fft(...)` -> generated specialized
     // function. Any alias-qualified call is claimed here so an unknown op
     // gets a steering error instead of an unbound-module type error.
-    | ExprApp (ExprField (ExprVar alias, op), args) when Set.contains alias aliases ->
+    | ExprKind.ExprApp ({ Kind = ExprKind.ExprField ({ Kind = ExprKind.ExprVar alias }, op) }, args) when Set.contains alias aliases ->
         rList args |> Result.bind (fun args' -> elabOp st ctx op args')
-    | ExprLit _ | ExprVar _ -> Ok e
-    | ExprApp (f, args) ->
-        r f |> Result.bind (fun f' -> rList args |> Result.map (fun args' -> ExprApp (f', args')))
-    | ExprBinOp (m, op, l, rr) ->
-        r l |> Result.bind (fun l' -> r rr |> Result.map (fun r' -> ExprBinOp (m, op, l', r')))
-    | ExprUnaryOp (op, inner) -> r inner |> Result.map (fun i -> ExprUnaryOp (op, i))
-    | ExprTyped (inner, t) -> r inner |> Result.map (fun i -> ExprTyped (i, t))
-    | ExprAssign (l, rr) ->
-        r l |> Result.bind (fun l' -> r rr |> Result.map (fun r' -> ExprAssign (l', r')))
-    | ExprTuple es -> rList es |> Result.map ExprTuple
-    | ExprArrayLit es -> rList es |> Result.map ExprArrayLit
-    | ExprDotDot (l, h) ->
-        r l |> Result.bind (fun l' -> r h |> Result.map (fun h' -> ExprDotDot (l', h')))
-    | ExprIf (c, t, f) ->
+    | ExprKind.ExprLit _ | ExprKind.ExprVar _ -> Ok e
+    | ExprKind.ExprApp (f, args) ->
+        r f |> Result.bind (fun f' -> rList args |> Result.map (fun args' -> inheritSpan e (ExprApp (f', args'))))
+    | ExprKind.ExprBinOp (m, op, l, rr) ->
+        r l |> Result.bind (fun l' -> r rr |> Result.map (fun r' -> inheritSpan e (ExprBinOp (m, op, l', r'))))
+    | ExprKind.ExprUnaryOp (op, inner) -> r inner |> Result.map (fun i -> inheritSpan e (ExprUnaryOp (op, i)))
+    | ExprKind.ExprTyped (inner, t) -> r inner |> Result.map (fun i -> inheritSpan e (ExprTyped (i, t)))
+    | ExprKind.ExprAssign (l, rr) ->
+        r l |> Result.bind (fun l' -> r rr |> Result.map (fun r' -> inheritSpan e (ExprAssign (l', r'))))
+    | ExprKind.ExprTuple es -> rList es |> Result.map (fun es' -> inheritSpan e (ExprTuple es'))
+    | ExprKind.ExprArrayLit es -> rList es |> Result.map (fun es' -> inheritSpan e (ExprArrayLit es'))
+    | ExprKind.ExprDotDot (l, h) ->
+        r l |> Result.bind (fun l' -> r h |> Result.map (fun h' -> inheritSpan e (ExprDotDot (l', h'))))
+    | ExprKind.ExprIf (c, t, f) ->
         r c |> Result.bind (fun c' ->
         r t |> Result.bind (fun t' ->
-        r f |> Result.map (fun f' -> ExprIf (c', t', f'))))
-    | ExprLet (binding, body) ->
+        r f |> Result.map (fun f' -> inheritSpan e (ExprIf (c', t', f')))))
+    | ExprKind.ExprLet (binding, body) ->
         r binding.Value |> Result.bind (fun v' ->
-        r body |> Result.map (fun b' -> ExprLet ({ binding with Value = v' }, b')))
-    | ExprBlock (stmts, finalE) ->
+        r body |> Result.map (fun b' -> inheritSpan e (ExprLet ({ binding with Value = v' }, b'))))
+    | ExprKind.ExprBlock (stmts, finalE) ->
         let rec rStmt (s: Stmt) : Result<Stmt, string> =
             match s with
             | StmtSpanned (inner, sp) -> rStmt inner |> Result.map (fun i -> StmtSpanned (i, sp))
@@ -240,17 +240,17 @@ let rec private rewriteExpr (st: ElabState) (ctx: Ctx) (aliases: Set<string>) (e
             (Ok [])
         |> Result.bind (fun stmts' ->
             match finalE with
-            | Some fe -> r fe |> Result.map (fun fe' -> ExprBlock (stmts', Some fe'))
-            | None -> Ok (ExprBlock (stmts', None)))
-    | ExprLambda (ps, w, body) -> r body |> Result.map (fun b -> ExprLambda (ps, w, b))
-    | ExprMatch (scrut, cases) ->
+            | Some fe -> r fe |> Result.map (fun fe' -> inheritSpan e (ExprBlock (stmts', Some fe')))
+            | None -> Ok (inheritSpan e (ExprBlock (stmts', None))))
+    | ExprKind.ExprLambda (ps, w, body) -> r body |> Result.map (fun b -> inheritSpan e (ExprLambda (ps, w, b)))
+    | ExprKind.ExprMatch (scrut, cases) ->
         r scrut |> Result.bind (fun s' ->
             cases |> List.fold (fun acc c ->
                 acc |> Result.bind (fun cs ->
                     r c.Body |> Result.map (fun b -> cs @ [{ c with Body = b }])))
                 (Ok [])
-            |> Result.map (fun cs' -> ExprMatch (s', cs')))
-    | other -> Ok other
+            |> Result.map (fun cs' -> inheritSpan e (ExprMatch (s', cs'))))
+    | _ -> Ok e
 
 // ============================================================================
 // Gating + program expansion
@@ -289,6 +289,9 @@ let private expandModule (decls: Located<Decl> list) : Result<Located<Decl> list
             let mapped =
                 declsNoImport |> List.fold (fun acc d ->
                     acc |> Result.bind (fun out ->
+                        // Stamp the user decl's span so every syn-built node
+                        // attributes to this declaration's source line.
+                        Blade.Ast.synthSpan <- d.Span
                         let mapped =
                             match d.Value with
                             | DeclFunction fd ->
@@ -315,10 +318,19 @@ let private expandModule (decls: Located<Decl> list) : Result<Located<Decl> list
 
 /// Entry point: elaborate spectra ops across a program (after ML/PPL/Math/
 /// Rand elaboration, before Grad expansion).
-let expand (program: Program) : Result<Program, string> =
+let private expandStr (program: Program) : Result<Program, string> =
     program.Modules
     |> List.fold (fun acc m ->
         acc |> Result.bind (fun ms ->
             expandModule m.Decls |> Result.map (fun ds -> ms @ [{ m with Decls = ds }])))
         (Ok [])
     |> Result.map (fun ms -> { program with Modules = ms })
+
+/// Boundary: string-errored internals -> coded diagnostics. The span is the
+/// ambient synthSpan -- stamped per-decl by expandStr, so a mid-elaboration
+/// failure points at the offending declaration.
+let expand (program: Program) : Result<Program, Blade.Diagnostics.Diagnostic list> =
+    Blade.Ast.synthSpan <- Blade.Ast.noSpan
+    expandStr program
+    |> Result.mapError (fun msg ->
+        [ Blade.Diagnostics.mkError "BL5400" (Blade.Diagnostics.Codes.phaseOfCode "BL5400") Blade.Ast.synthSpan msg ])

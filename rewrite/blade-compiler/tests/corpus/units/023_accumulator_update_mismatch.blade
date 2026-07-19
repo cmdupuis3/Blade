@@ -1,0 +1,16 @@
+// TEST: Unit Accumulator Update Mismatch (rejects)
+// x += v with x in meters and v in velocity rejects: the desugared
+// x = x + v hits the addition unit rule against the accumulator's
+// (now-enforced) block annotation. This is the "forgot the * dt in an
+// Euler step" bug caught at compile time.
+Unit meters
+Unit seconds
+Unit velocity = meters / seconds
+let v: Float<velocity> = 5.0
+let bad = {
+    let mut x: Float<meters> = 0.0
+    for i in 0..4 {
+        x += v
+    }
+    x
+}

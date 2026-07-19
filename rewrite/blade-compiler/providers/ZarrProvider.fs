@@ -1132,6 +1132,7 @@ let zarrStoreToModule
         ProviderWrites = Map.empty
         RandomInits = Map.empty
         CompoundInits = Map.empty
+        MutableArrayLets = Set.empty
     }
 
 /// Convenience: load a store and produce a module in one step (contract).

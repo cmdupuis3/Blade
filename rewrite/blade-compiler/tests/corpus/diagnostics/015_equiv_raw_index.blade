@@ -1,0 +1,7 @@
+// TEST: Diag Equiv Raw Index (diag)
+// ERROR: BL4008 @ 6:3
+// ERROR-CONTAINS: raw indexing into an l>0
+import ml as ml
+let static S = [(0, 0, 2), (1, 1, 1)]
+function bad(x: Array<Float like IrrepsIdx<S>>) where ml.equiv(O3) -> Float =
+  x(2)

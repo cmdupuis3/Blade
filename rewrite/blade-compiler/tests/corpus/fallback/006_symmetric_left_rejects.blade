@@ -1,0 +1,10 @@
+// TEST: Fallback Symmetric Left (rejects)
+// Symmetric A requires symmetric allocation (formalism 2.6), which the
+// compiler cannot yet verify — compact symmetric storage is rejected with a
+// decompact steering message (BL3007).
+let A = [1.0, 2.0, 3.0]
+let L = method_for(A, A)
+let f = lambda(x, y) where comm(x, y) -> x * y
+let S = L <@> f |> compute
+let T = L <@> f |> compute
+let C = S <|:> T |> compute

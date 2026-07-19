@@ -1,0 +1,15 @@
+// TEST: Halo Over Compound (present cells)
+// halo<CompoundIdx<m>, [..]>: ordinals walk the PRESENT cells, so "next" is
+// the next present cell — the hashed-index generalization of the stencil.
+// w(o) yields the COORDINATE of the (center+o)-th present cell (via the
+// compound index's rank_to_tuple table), usable against any array over the
+// base axis. The output is a plain dense array over the interior ordinals
+// (cardinality - shrink cells), NOT a compound.
+type T = Idx<8>
+let dense: Array<Float64 like T> = [1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0]
+let m: Array<Bool like T> = [true, false, true, true, false, true, true, false]
+// present coords: [0, 2, 3, 5, 6]
+let d = method_for(halo<CompoundIdx<m>, [0, 1]>) <@> lambda(w) -> dense(w(1)) - dense(w(0)) |> compute
+// EXPECT: d = [2, 1, 2, 1]
+let s = reduce(d, (+))
+// EXPECT: s = 6.0

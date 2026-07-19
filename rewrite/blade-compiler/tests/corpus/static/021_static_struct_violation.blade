@@ -1,0 +1,9 @@
+// TEST: Static Struct Violation (rejects)
+// A violated conjunct fails the fold — a compile error under let-static
+// assertion semantics, not a runtime abort.
+struct Balanced {
+    a: Int,
+    b: Int,
+    total: Int
+} where a + b == total
+let static bad = Balanced { a = 1, b = 2, total = 9 }

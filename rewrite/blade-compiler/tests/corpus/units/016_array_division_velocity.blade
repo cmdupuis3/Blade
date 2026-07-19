@@ -1,0 +1,20 @@
+// TEST: Unit Array Division Velocity
+// The full unitful-array flow: distances / time-scalar broadcast gives
+// velocity-signature elements (meters/seconds), compatible with a
+// declared velocity unit; reduce keeps element units; an array function
+// argument with MATCHING element units is accepted.
+Unit meters
+Unit seconds
+Unit velocity = meters / seconds
+type SIdx = Idx<3>
+let dists: Array<Float<meters> like SIdx> = [10.0, 20.0, 30.0]
+let dt: Float<seconds> = 2.0
+let vels = dists / dt
+let vcap: Float<velocity> = 100.0
+let fastest = vels((2 : SIdx))
+let margin = vcap - fastest
+function total_v(v: Array<Float<velocity> like SIdx>) -> Float<velocity> = reduce(v, (+))
+let vsum = total_v(vels)
+// EXPECT: vels = [5.0, 10.0, 15.0]
+// EXPECT: margin = 85
+// EXPECT: vsum = 30
