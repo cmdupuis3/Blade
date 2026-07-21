@@ -1,0 +1,12 @@
+// TEST: Compose Obj Let-Bound Composition
+// Regression: like 096, but the `>>@` composition itself is also let-bound.
+// Exercises both resolveDeferred hops: the composition var (via
+// DeferredComputations) AND the object-var leaves (via ObjectLoopBindings).
+let A = [1.0, 2.0, 3.0]
+let f = lambda(x) -> x + 1.0
+let g = lambda(x) -> x * 2.0
+let o1 = object_for(f)
+let o2 = object_for(g)
+let p = o1 >>@ o2
+let result = p <@> A |> compute
+// EXPECT: result = [4.0, 6.0, 8.0]

@@ -305,6 +305,7 @@ let formatTypeError (err: TypeError) : string =
         sprintf "Array literal%s has %d elements, but the annotation's extent is %d" axis got expected
     | ObjectForKernel got -> sprintf "object_for kernel must be a lambda, reynolds, or zero, but got %A" got
     | ChainOpNeedsMethodFor leftDesc -> sprintf "<@> requires method_for or object_for on the left side, but got %s" leftDesc
+    | ChainOpBadKernel rightDesc -> sprintf "<@> kernel must be a lambda, operator section, named function, reynolds(...), or zero, but got %s" rightDesc
     | PlaceholderNeedsAllBound (got, total) -> sprintf "the `_` placeholder needs every other parameter bound: this call supplies %d of %d args. Combine with prefix partial application in two steps, or use a lambda." got total
     | GroupKeysRank1 -> "group_keys: all key arrays must be rank-1 and share the same outer index (same length). Compound grouping requires each i-th element of every key array to refer to the same record."
     | FallbackNeedsArrays (leftDesc, rightDesc) -> sprintf "<|:> (allocated-fallback) reads the LEFT array where its storage holds a cell and the right array elsewhere, so both operands must be arrays; got %s and %s. For value-level choice (first nonzero wins) over scalars or computations, use <|>." leftDesc rightDesc
@@ -315,6 +316,8 @@ let formatTypeError (err: TypeError) : string =
     | CumulantNeedsDist got -> sprintf "cumulant expects cumulant(d, k) where d is a Dist value (a dist(...) binding or Dist-typed parameter); got %s" got
     | DistOpUndefined (left, right) -> sprintf "this operator is not defined on Dist values (left: %s, right: %s): dists support scalar * (multilinearity), + and - of independent dists, and component projection via cumulant(d, k)" left right
     | EnumIdxMixedKinds name -> sprintf "EnumIdx '%s' has mixed value kinds: integer and string literals in the same EnumIdx<[...]> aren't allowed. The runtime backing must be one or the other (int64_t or std::string)." name
+    | EnumIdxUnknownLabel (enumName, label, available) ->
+        sprintf "'%s' is not a value of EnumIdx '%s'. Available: %s." label enumName (available |> String.concat ", ")
     | ImplMissingMethods (iface, typeName, methods) -> sprintf "impl %s for %s is missing required methods: %s" iface typeName methods
     | StructFieldDuplicate (structName, field) -> sprintf "struct %s: field '%s' assigned more than once" structName field
     | StructNoField (structName, field) -> sprintf "struct %s has no field '%s'" structName field
@@ -412,10 +415,11 @@ let diagnosticOfCompileError (e: CompileError) : Blade.Diagnostics.Diagnostic =
             | IntrinsicNotComplex _ | IntrinsicNeedsNumeric _ | AbsNeedsNumericScalar _
             | IntrinsicComplexScalarOnly _ | IntrinsicNeedsComplex _ | ComplexArity _
             | ReduceEmptyArray _ | ProdsumExtentMismatch _ | GramNeedsRank2 _
-            | ArrayLitLength _ | ObjectForKernel _ | ChainOpNeedsMethodFor _
+            | ArrayLitLength _ | ObjectForKernel _ | ChainOpNeedsMethodFor _ | ChainOpBadKernel _
             | PlaceholderNeedsAllBound _ | GroupKeysRank1 | CumulantOrderPositive _
             | CumulantOrderExceeds _ | CumulantNeedsDist _ | DistOrderDisagree _
             | DistNotIndependent _ | DistOpUndefined _ | EnumIdxMixedKinds _
+            | EnumIdxUnknownLabel _
             | ImplMissingMethods _
             | FallbackNeedsArrays _ | FallbackSymmetricLeft
             | FallbackRightNotDense _ | FallbackRankMismatch _ -> "BL3007"
@@ -503,8 +507,31 @@ let registerProviderModule (env: TypeEnv) (name: string) (pm: IRModule) : TypeEn
         pm.Types |> List.fold (fun e td ->
             match td with
             | IRTDStruct (n, fields) -> registerTypeDef n (TDIStruct (n, [], fields, [])) e
+            | IRTDEnumIdx (n, idx, values) ->
+                // Provider-synthesized column enums (CSV headered mode): the
+                // registration makes string-literal column subscripts fold to
+                // ordinals at the indexing site (dispatchAppOrIndex). The
+                // TDIEnumIdx body is a synthesized surface TypeExpr — no
+                // source declaration exists for a provider enum.
+                let bodyExpr =
+                    mkExpr noSpan (ExprKind.ExprArrayLit (
+                        values |> List.map (fun v ->
+                            match v with
+                            | EVString s -> mkExpr noSpan (ExprKind.ExprLit (LitString s))
+                            | EVInt n -> mkExpr noSpan (ExprKind.ExprLit (LitInt n)))))
+                registerTypeDef n (TDIEnumIdx (n, idx, values, TyEnumIdx bodyExpr)) e
             | _ -> e) env
-    let moduleStruct = TDIStruct (name, [], [("dims", IRTNamed "dims"); ("vars", IRTNamed "vars")], [])
+    // Module-struct fields point at the actual dims/vars struct decls the
+    // provider emitted. netcdf/zarr use the literal names "dims"/"vars";
+    // csv emits "<binding>__dims"/"<binding>__vars" so several loads in one
+    // program don't clobber each other in the TypeDefs map.
+    let structNames = pm.Types |> List.choose (function IRTDStruct (n, _) -> Some n | _ -> None)
+    let fieldFor (label: string) =
+        structNames
+        |> List.tryFind (fun n -> n = label || n = sprintf "%s__%s" name label)
+        |> Option.map (fun n -> (label, IRTNamed n))
+    let moduleFields = [fieldFor "dims"; fieldFor "vars"] |> List.choose id
+    let moduleStruct = TDIStruct (name, [], moduleFields, [])
     (registerTypeDef name moduleStruct envS, IRTNamed name)
 
 

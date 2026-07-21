@@ -1,4 +1,4 @@
-// TEST: Physics -- The Causal Chain: Factorization, Coupling, and Entropy
+﻿// TEST: Physics -- The Causal Chain: Factorization, Coupling, and Entropy
 // ============================================================================
 // Eight balls, two cascades driven inward by projectiles from both ends,
 // masses fuzzy, radii R = 0.5 m^(1/3) (tools/causal_chain.ps1: full 3^6
@@ -48,13 +48,13 @@ let S_LR = reduce(P_LR, (+))
 
 let p11 = S_LR / 81.0
 let covLR = p11 - P_IL * P_IR
-let space_V = if sqrt(covLR * covLR) < 0.000000000001 then "FACTORIZED" else "COUPLED"
+let space_V = if abs(covLR) < 0.000000000001 then "FACTORIZED" else "COUPLED"
 
 // --- timelike pair: the post-merge bit knows the left race ---
 let P_LK = for (IL, KM) in range<Idx81> <@> (*) |> compute
 let S_LK = reduce(P_LK, (+))
 let covLK = S_LK / 81.0 - P_IL * P_KM
-let time_V = if sqrt(covLK * covLK) < 0.000000000001 then "FACTORIZED" else "COUPLED"
+let time_V = if abs(covLK) < 0.000000000001 then "FACTORIZED" else "COUPLED"
 
 // --- the fuzzy cone: bond-1 arrival tower ---
 

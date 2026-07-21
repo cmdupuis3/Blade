@@ -1,0 +1,9 @@
+// TEST: Functor Map Over Concrete Array
+// `f <$> A` where A is a plain (already-materialized) array, NOT a deferred
+// computation. Previously the classifier eagerly materialized this WITHOUT any
+// |> compute, and the force path dropped the functor wrapper entirely (result was
+// just A). Now it defers like `<@>` and materializes correctly on |> compute.
+let A = [1.0, 2.0, 3.0]
+let negate = lambda(x) -> 0.0 - x
+let result = (negate <$> A) |> compute
+// EXPECT: result = [-1.0, -2.0, -3.0]

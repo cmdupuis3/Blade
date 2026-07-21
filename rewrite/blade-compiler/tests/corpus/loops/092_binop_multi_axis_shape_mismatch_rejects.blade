@@ -1,0 +1,9 @@
+// TEST: Binop Multi Axis Shape Mismatch (rejects)
+// Elementwise binop on rank-2 arrays with DIFFERENT index shapes (Lat,Lon
+// vs Lon,Lat — swapped axis tags) must reject at typecheck with the
+// matching-shapes steer, not miscompile an off-shape loop.
+type Lat = Idx<2>
+type Lon = Idx<3>
+let A: Array<Float64 like Lat, Lon> = [[1.0, 2.0, 3.0], [4.0, 5.0, 6.0]]
+let B: Array<Float64 like Lon, Lat> = [[1.0, 2.0], [3.0, 4.0], [5.0, 6.0]]
+let bad = A * B

@@ -1,4 +1,4 @@
-// TEST: Physics -- Collision-Time Ambiguity and Noether Immunity
+﻿// TEST: Physics -- Collision-Time Ambiguity and Noether Immunity
 // ============================================================================
 // Both billiards fuzzy (m ~ 1 +/- 0.14 each, 5x5 product ensemble), density
 // known, so both RADII are fuzzy: the contact time t* = (10 - m1^(1/3) -
@@ -33,42 +33,42 @@ let X2M = [10.0, 10.0, 10.0, 10.0, 10.0, 10.0, 10.0, 10.0, 10.0, 10.0241268175, 
 
 // --- Noether immunity: X_cm(12) minus free flight, per realization ---
 let XD1 = reduce(method_for(zip(M1, X1L, M2, X2L)) <@> lambda(a, b, c, d) -> (a * b + c * d) / (a + c) - (a * 12.0 + c * 10.0) / (a + c), (+))
-let XD2 = reduce(method_for(zip(M1, X1L, M2, X2L)) <@> lambda(a, b, c, d) -> ((a * b + c * d) / (a + c) - (a * 12.0 + c * 10.0) / (a + c)) * ((a * b + c * d) / (a + c) - (a * 12.0 + c * 10.0) / (a + c)), (+))
+let XD2 = reduce(method_for(zip(M1, X1L, M2, X2L)) <@> lambda(a, b, c, d) -> ((a * b + c * d) / (a + c) - (a * 12.0 + c * 10.0) / (a + c)) ^ 2.0, (+))
 let XD_k1 = XD1 / 25.0
 let XD_k2 = XD2 / 25.0 - XD_k1 * XD_k1
-let XD_V = if sqrt(XD_k2 * XD_k2) < 1.0e-20 then "INVISIBLE" else "VISIBLE"
+let XD_V = if abs(XD_k2) < 1.0e-20 then "INVISIBLE" else "VISIBLE"
 
 // --- the same statement as the boost law: G(T) - G(0), P = m1 u1 ---
 let GD1 = reduce(method_for(zip(M1, X1L, M2, X2L)) <@> lambda(a, b, c, d) -> a * b + c * d - a * 12.0 - c * 10.0, (+))
-let GD2 = reduce(method_for(zip(M1, X1L, M2, X2L)) <@> lambda(a, b, c, d) -> (a * b + c * d - a * 12.0 - c * 10.0) * (a * b + c * d - a * 12.0 - c * 10.0), (+))
+let GD2 = reduce(method_for(zip(M1, X1L, M2, X2L)) <@> lambda(a, b, c, d) -> (a * b + c * d - a * 12.0 - c * 10.0) ^ 2.0, (+))
 let GD_k1 = GD1 / 25.0
 let GD_k2 = GD2 / 25.0 - GD_k1 * GD_k1
-let GD_V = if sqrt(GD_k2 * GD_k2) < 1.0e-20 then "INVISIBLE" else "VISIBLE"
+let GD_V = if abs(GD_k2) < 1.0e-20 then "INVISIBLE" else "VISIBLE"
 
 // --- x2 towers at T = 7.5 (before), 8.0 (inside band), 12 (after) ---
-let E1 = reduce(method_for(X2E) <@> lambda(x) -> x, (+))
-let E2 = reduce(method_for(X2E) <@> lambda(x) -> x * x, (+))
+let E1 = reduce(X2E, (+))
+let E2 = prodsum(X2E, X2E)
 let E_k1 = E1 / 25.0
 let E_k2 = E2 / 25.0 - E_k1 * E_k1
-let E_V = if sqrt(E_k2 * E_k2) < 1.0e-20 then "NOT_YET" else "MOVED"
+let E_V = if abs(E_k2) < 1.0e-20 then "NOT_YET" else "MOVED"
 
-let Mm1 = reduce(method_for(X2M) <@> lambda(x) -> x, (+))
-let Mm2 = reduce(method_for(X2M) <@> lambda(x) -> x * x, (+))
+let Mm1 = reduce(X2M, (+))
+let Mm2 = prodsum(X2M, X2M)
 let Mm3 = reduce(method_for(X2M) <@> lambda(x) -> x * x * x, (+))
 let M_k1 = Mm1 / 25.0
 let M_k2 = Mm2 / 25.0 - M_k1 * M_k1
 let M_k3 = Mm3 / 25.0 - 3.0 * M_k1 * (Mm2 / 25.0) + 2.0 * M_k1 * M_k1 * M_k1
 let M_skew = M_k3 / (sqrt(M_k2) * M_k2)
-let M_V = if sqrt(M_skew * M_skew) > 0.5 then "AMBIGUOUS" else "DEFINITE"
+let M_V = if abs(M_skew) > 0.5 then "AMBIGUOUS" else "DEFINITE"
 
-let L1 = reduce(method_for(X2L) <@> lambda(x) -> x, (+))
-let L2 = reduce(method_for(X2L) <@> lambda(x) -> x * x, (+))
+let L1 = reduce(X2L, (+))
+let L2 = prodsum(X2L, X2L)
 let L3 = reduce(method_for(X2L) <@> lambda(x) -> x * x * x, (+))
 let L_k1 = L1 / 25.0
 let L_k2 = L2 / 25.0 - L_k1 * L_k1
 let L_k3 = L3 / 25.0 - 3.0 * L_k1 * (L2 / 25.0) + 2.0 * L_k1 * L_k1 * L_k1
 let L_skew = L_k3 / (sqrt(L_k2) * L_k2)
-let L_V = if sqrt(L_skew * L_skew) > 0.5 then "AMBIGUOUS" else "DEFINITE"
+let L_V = if abs(L_skew) > 0.5 then "AMBIGUOUS" else "DEFINITE"
 
 // the collision is invisible to the invariants; "has it happened yet" is a
 // fuzzy proposition exactly inside the contact band. (The ~1e-22 residual

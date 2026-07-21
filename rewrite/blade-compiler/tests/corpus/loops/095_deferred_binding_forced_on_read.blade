@@ -1,0 +1,28 @@
+// TEST: Deferred Binding Forced On Read
+// A bare kernel binding (no |> compute) stays DEFERRED; consumers force it
+// wherever it is read: as a method_for/binop input (llsq = ll^2 over the
+// deferred ll — the desugar's method_for input forcing), through a chain
+// (k2 sums two forced tables via an operator-section kernel — positional
+// method_for = outer product), and as a MUT initializer (deep copy needs a
+// materialized source). Mirrors the examples/09 table idiom.
+// A deferred binding that ENDS UP MATERIALIZED (forced by any consumer)
+// joins the auto-print list like an eager binding — the ll and k2 EXPECTs
+// pin that; a binding that stays deferred through the whole program prints
+// nothing. k2 is SYMMETRIC (same input twice), so it prints the packed
+// upper triangle (j >= i, row-major): rows [0,1,4,1] / [2,5,2] / [8,5] / [2].
+type Y = Idx<4>
+let ll = method_for(range<Y>) <@> lambda(m) -> if m < 2 then 1.0 * m else 1.0 * m - 4.0
+let llsq = ll^2
+let k2 = method_for(llsq, llsq) <@> (+)
+let mut q = llsq
+let s0 = q((0 : Y)) + q((1 : Y)) + q((2 : Y)) + q((3 : Y))
+// Scalar reads force k2 (deferred, no |> compute): k2(i,j) = llsq(i)+llsq(j).
+let k2s = k2((1 : Y), (2 : Y)) + k2((3 : Y), (0 : Y))
+let k2d = k2((2 : Y), (2 : Y))
+
+// EXPECT: ll = [0, 1, -2, -1]
+// EXPECT: llsq = [0, 1, 4, 1]
+// EXPECT: k2 = [0, 1, 4, 1, 2, 5, 2, 8, 5, 2]
+// EXPECT: s0 = 6
+// EXPECT: k2s = 6
+// EXPECT: k2d = 8

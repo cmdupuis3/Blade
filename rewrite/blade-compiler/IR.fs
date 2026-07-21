@@ -306,7 +306,7 @@ and MethodForInfo = {
     ArrayTypes: IRArrayTypeG<IRExpr> list
     SDimsPerArray: int list
     TotalSDims: int
-    SharedIndexType: IRIndexTypeG<IRExpr> option  // For co-iteration: shared index space from 'in' clause
+    SharedIndexTypes: IRIndexTypeG<IRExpr> list  // For co-iteration: shared iteration records (empty = not co-iteration; multi = product space)
 }
 
 /// Information about an object_for construction
@@ -324,7 +324,7 @@ and ApplyInfo = {
     Arrays: IRExpr list                     // The actual array expressions
     Identities: ArrayIdentity list          // Array identity tracking (for symmetry)
     ArrayTypes: IRArrayTypeG<IRExpr> list            // Array type info
-    SharedIndexType: IRIndexTypeG<IRExpr> option     // For co-iteration (zip)
+    SharedIndexTypes: IRIndexTypeG<IRExpr> list      // For co-iteration (zip): shared records (empty = not co-iteration)
     SymcomStates: SymcomState list
     TriangularLevels: bool list
     SDimsPerArray: int list
@@ -2256,17 +2256,15 @@ let isRectangularConstBuffer (bt: DeviceBufferType) : bool =
 ///   - ETString (std::string): a non-POD C++ object — never crosses.
 ///   - ETUnit (void): not a data element.
 ///
-/// FUTURE / std::complex (it matters — first-class numeric type): the eventual
-/// path is DEFINED, not speculative. The C++ standard guarantees
-/// std::complex<double> is layout-compatible with double[2] (array-oriented
-/// access via reinterpret is well-defined), and CUDA's cuDoubleComplex /
-/// cuFloatComplex share that layout. So complex support crosses the boundary as
-/// a `double*` (the complex pool reinterpreted as cardinality*2 doubles); the
-/// kernel operates on cuDoubleComplex over the same bytes; the inverse
-/// reinterprets back. Excluded from the FIRST kernel only because it adds the
-/// reinterpret-cast boundary convention + a CUDA-complex codegen mapping, which
-/// shouldn't ride along on the first kernel — but it is a known, well-defined
-/// extension, not a wall.
+/// std::complex (2026-07-19, complex-over-CUDA arc): boundary-safe. The C++
+/// standard guarantees std::complex<T> is layout-compatible with T[2], and
+/// thrust::complex<T> shares that layout. The extern "C" wrapper SIGNATURES
+/// keep the std::complex spelling (they are text-copied into the host .cpp as
+/// prototypes, so both TUs agree); inside the .cu the device buffers and the
+/// __global__ kernel use thrust::complex (std::complex's operators/functions
+/// are host-only under nvcc), and cudaMemcpy's void* parameters perform the
+/// layout-compatible reinterpret with no casts. Kernel bodies render in the
+/// thrust device dialect (CodeGen's cudaDeviceDialect cell).
 ///
 /// A non-boundary-safe element type makes the kernel fall back to the host loop
 /// (gate, don't emit an unlinkable kernel). Uses AnyPrimElem so a unit-annotated
@@ -2276,7 +2274,8 @@ let isCudaBoundarySafeElem (ty: IRType) : bool =
     match ty with
     | AnyPrimElem ETInt32 | AnyPrimElem ETInt64
     | AnyPrimElem ETFloat32 | AnyPrimElem ETFloat64
-    | AnyPrimElem ETBool -> true
+    | AnyPrimElem ETBool
+    | AnyPrimElem ETComplex64 | AnyPrimElem ETComplex128 -> true
     | _ -> false
 
 /// Binomial C(n, k) as int64. Incremental multiplicative form; each partial
@@ -2981,20 +2980,36 @@ let buildLoopNestCodeGen
     
     let bindings =
         if info.IsCoIteration then
-            // Co-iteration: build levels from shared index type, all arrays peel at every level
-            let sharedIdx = info.SharedIndexType
-            match sharedIdx with
-            | Some idx ->
-                let numLevels = idx.Rank
-                let isSymmetric = idx.Symmetry = SymSymmetric
-                let isAntisymmetric = idx.Symmetry = SymAntisymmetric
-                let isTriangular = isSymmetric || isAntisymmetric
-                
-                [0 .. numLevels - 1] |> List.map (fun level ->
+            // Co-iteration over the PRODUCT of the shared records. A plain
+            // rank-1 record contributes ONE level at its own extent; a packed
+            // symmetric/antisymmetric record contributes Rank triangular levels
+            // over its flat canonical cells (bounds depend on the record's own
+            // earlier levels, strict offset for antisym) — byte-identical to
+            // the historical single-record behavior when the list is [packed].
+            // All operands peel at EVERY level. Each level's extent/dim-ref
+            // comes from its record and the record's cumulative base dim, so
+            // non-square products (range<Lat, Lon> with Lat ≠ Lon) bound
+            // correctly — the old single-record branch hardcoded dim 0.
+            let sharedRecords = info.SharedIndexTypes
+            // Reference first real array for extent lookups
+            let refArrayName = if arrayNames.Length > 0 then arrayNames.[0] else "arr0"
+            // Base dim in refArray's extents for each record = cumulative prior
+            // rank; also equals the record's base global loop level.
+            let baseDims =
+                sharedRecords
+                |> List.scan (fun acc sr -> acc + sr.Rank) 0
+                |> List.take sharedRecords.Length
+            List.zip sharedRecords baseDims
+            |> List.collect (fun (sr, baseDim) ->
+                let isAntisymmetric = sr.Symmetry = SymAntisymmetric
+                let isTriangular = sr.Symmetry = SymSymmetric || isAntisymmetric
+                [0 .. sr.Rank - 1] |> List.map (fun k ->
+                    let level = baseDim + k
                     let indexName = sprintf "__i%d" level
-                    let deps = if isTriangular && level > 0 then [0 .. level - 1] else []
+                    // Triangular bounds chain within the RECORD's own levels only.
+                    let deps = if isTriangular && k > 0 then [baseDim .. level - 1] else []
                     let strictOffset =
-                        if isTriangular && isAntisymmetric then level
+                        if isTriangular && isAntisymmetric then k
                         else 0
                     // Outer level is the parallelization candidate, but ONLY if
                     // the kernel opted into OpenMP via an `omp(...)` clause. No
@@ -3004,10 +3019,8 @@ let buildLoopNestCodeGen
                     // genNestPragma picks the safe strategy (collapse vs dynamic).
                     let isParallel = level = 0 && kernelRequestedOmp
                     let state =
-                        if isTriangular && level > 0 then SCSymmetric
+                        if isTriangular && k > 0 then SCSymmetric
                         else SCNeither
-                    // Reference first real array for extent lookups
-                    let refArrayName = if arrayNames.Length > 0 then arrayNames.[0] else "arr0"
                     // All arrays peel at this level
                     let elements =
                         [0 .. arrayNames.Length - 1] |> List.map (fun arrIdx ->
@@ -3015,17 +3028,16 @@ let buildLoopNestCodeGen
                     {
                         Level = level
                         IndexName = indexName
-                        Extent = idx.Extent
+                        Extent = sr.Extent
                         ExtentArrayRef = refArrayName
-                        ExtentDimRef = 0  // Shared index: all dims have same extent
+                        ExtentDimRef = baseDim  // record's base dim (packed: all k share it)
                         BoundDependencies = deps
                         StrictOffset = strictOffset
                         FusedRank = None
                         IsParallel = isParallel
                         State = state
                         Elements = elements
-                    })
-            | None -> []  // Should not happen
+                    }))
         else
             // Outer product: one element per level
             let loopLevels = buildLoopLevelStructure identities commGroups arrayTypes sDimsPerArray

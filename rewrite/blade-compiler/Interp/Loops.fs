@@ -238,7 +238,30 @@ let private evalArrayLit (st: InterpState) (env: Env) (elems: IRExpr list) (arrT
 /// Public Force hook: drive a possibly-deferred Value to a concrete one.
 let rec force (st: InterpState) (env: Env) (v: Value) : Value =
     match v with
-    | VDeferred (expr, denv) -> forceExpr st denv expr
+    | VDeferred (expr, denv) ->
+        // Forced-on-read auto-print parity: a payload that IS a module-level
+        // binding's Value node (reference hit in DeferredBindingIndex) means
+        // this force materializes that binding "under its own name" — the
+        // value-space twin of CodeGen's forceDeferredArrayInput IRVar arm.
+        // Record the id (Print adds it to the render list) and memoize the
+        // result into the ROOT cell so later consumers — and Print — see the
+        // materialized value, exactly as the C++ names the materialized array
+        // once. Sub-expression VDeferreds miss the index and force as before.
+        // NB: resolveComp/forceTreeShaped PEEL through root VDeferreds without
+        // calling force — mirroring resolveComputation's inline resolution,
+        // which does NOT materialize the source binding either.
+        (match st.DeferredBindingIndex.TryGetValue expr with
+         | true, id ->
+             let fv = forceExpr st denv expr
+             st.ForcedDeferred.Add id |> ignore
+             (match st.Global with
+              | Some g ->
+                  (match envTryFind g id with
+                   | Some cell -> cell.V <- fv
+                   | None -> ())
+              | None -> ())
+             fv
+         | _ -> forceExpr st denv expr)
     | other -> other
 
 // ----------------------------------------------------------------------------
@@ -284,6 +307,33 @@ and private extractInlinableKernel (st: InterpState) (env: Env) (e: IRExpr) : IR
         | None -> None
     | _ -> None
 
+/// Apply resolveComp-collected functor / compose wrappers (innermost-first) to a
+/// concrete value — the value-space twin of applyFunctorWrappers for a base that
+/// bottomed out at a CONCRETE array (or scalar), e.g. `f <$> A` where A is a plain
+/// array (not an IRApplyCombinator). Mirrors materializeComposeApply's wrapAll fold
+/// (IRCompose(k,f) = f∘k) and its INPUT-element-type allocation so the result
+/// matches `method_for(A) <@> f |> compute` byte-for-byte.
+and private applyWrappersToValue (st: InterpState) (env: Env) (wrappers: IRExpr list) (v: Value) : Value =
+    if List.isEmpty wrappers then v else
+    let rec wrapperFn (w: IRExpr) : (Value -> Value) =
+        match w with
+        | IRCompose (k, f) -> let kf = wrapperFn k in let ff = wrapperFn f in (fun x -> ff (kf x))
+        | _ -> resolveUnaryKernel st w
+    let wrapAll = wrappers |> List.fold (fun acc w -> let wf = wrapperFn w in (fun x -> wf (acc x))) id
+    match v with
+    | VArray a ->
+        let out = A.allocDense a.ElemType a.IndexTypes a.Extents
+        let rank = a.Extents.Length
+        let rec walk (level: int) (acc: int64 list) =
+            if level = rank then
+                let coords = List.rev acc
+                A.writeCell out coords (wrapAll (A.readCell a coords))
+            else
+                for i in 0L .. a.Extents.[level] - 1L do walk (level + 1) (i :: acc)
+        walk 0 []
+        VArray out
+    | scalar -> wrapAll scalar
+
 /// Force an IRExpr (the deferred payload) to a concrete Value. Mirrors
 /// genComputeBinding's resolveComputation + dispatch.
 and private forceExpr (st: InterpState) (env: Env) (expr: IRExpr) : Value =
@@ -304,12 +354,15 @@ and private forceExpr (st: InterpState) (env: Env) (expr: IRExpr) : Value =
     // force the projected element (itself possibly a deferred computation).
     | IRTupleProj (inner, i, isFlat) ->
         let tv = forceExpr st renv inner
-        force st renv (projectValue tv i isFlat)
+        applyWrappersToValue st renv wrappers (force st renv (projectValue tv i isFlat))
     | IRVar (id, _) ->
+        // A base that bottomed out at a CONCRETE array/scalar (resolveComp already
+        // followed any VDeferred alias); apply the trailing functor wrappers here —
+        // `f <$> A` over a plain array A (previously the wrappers were dropped).
         match envTryFind renv id with
-        | Some cell -> force st renv cell.V
+        | Some cell -> applyWrappersToValue st renv wrappers (force st renv cell.V)
         | None -> raise (InterpUnsupported "force of unbound var")
-    | other -> Core.evalExpr st renv other
+    | other -> applyWrappersToValue st renv wrappers (Core.evalExpr st renv other)
 
 // ----------------------------------------------------------------------------
 // Parallel / fusion: collect leaves (flatten <&>/<&!>, resolve deferred vars),
@@ -426,7 +479,26 @@ and private forceGuard (st: InterpState) (env: Env) (cond: IRExpr) (body: IRExpr
             registerSyntheticCallable synthetic
         let wrappedKernel = mapKernelInner buildGuarded info.Kernel
         materializeApply st renv { info with Kernel = wrappedKernel } allWrappers
-    | _ -> raise (InterpUnsupported "guard over a non-apply computation (parallel/fusion)")
+    | IRParallel _ | IRFusion _ ->
+        raise (InterpUnsupported "guard over a parallel/fusion computation")
+    | _ ->
+        // guard over a CONCRETE array / scalar (or choice/sequence) body: the
+        // predicate is a scalar here (it cannot reference per-cell values without a
+        // kernel), so evaluate it once — true ⇒ the (wrapper-applied) materialized
+        // body, false ⇒ a zero array/scalar of the same shape. Mirrors CodeGen's
+        // non-apply guard materialization.
+        let bodyVal = applyWrappersToValue st renv allWrappers (forceExpr st renv resolved)
+        if isNonZero (Core.evalExpr st env cond) then bodyVal
+        else
+            match bodyVal with
+            | VArray a -> VArray (A.allocDense a.ElemType a.IndexTypes a.Extents)
+            | VFloat _ -> VFloat 0.0
+            | VFloat32 _ -> VFloat32 0.0f
+            | VInt _ -> VInt 0L
+            | VInt32 _ -> VInt32 0
+            | VComplex _ -> VComplex (0.0, 0.0)
+            | VBool _ -> VBool false
+            | other -> other
 
 // ----------------------------------------------------------------------------
 // Sequence (genSequenceBinding 7928): n children of same shape stacked into a
@@ -523,7 +595,14 @@ and private materializeComposeApply (st: InterpState) (env: Env) (cinfo: Compose
         match e with
         | IRVar (id, _) ->
             match envTryFind en id with
-            | Some cell -> (match cell.V with VDeferred (e2, en2) -> resolveDef e2 en2 | _ -> (e, en))
+            | Some cell ->
+                match cell.V with
+                | VDeferred (e2, en2) -> resolveDef e2 en2
+                // A let-bound object (`let o = object_for(f)`) is a VLoopObj, not
+                // a VDeferred; unwrap to its IRObjectFor provenance so kernelOf can
+                // reach `.Kernel`. Mirrors the codegen ObjectLoopBindings chase.
+                | VLoopObj lo -> resolveDef lo.Provenance lo.Captured
+                | _ -> (e, en)
             | None -> (e, en)
         | _ -> (e, en)
     let (comp, cenv) = resolveDef cinfo.Composition env

@@ -24,6 +24,7 @@
     <Compile Include="providers/ProviderRegistry.fs" />
     <Compile Include="providers/NetcdfProvider.fs" />
     <Compile Include="providers/ZarrProvider.fs" />
+    <Compile Include="providers/CsvProvider.fs" />
     <Compile Include="TypedAst.fs" />
     <Compile Include="StaticEval.fs" />
     <!-- Provider-backed statics bridge: registers the NetCDF compile-time
@@ -44,9 +45,11 @@
          not compile these); core touchpoints are StaticEval's builtin
          registry and the MLElaborate.expand pipeline stage. -->
     <Compile Include="ml/compiler/MLSpec.fs" />
+    <Compile Include="ml/compiler/CartesianBridge.fs" />
     <Compile Include="ml/compiler/WignerTables.fs" />
     <Compile Include="ml/compiler/MLStatics.fs" />
     <Compile Include="ml/compiler/MLEquiv.fs" />
+    <Compile Include="ml/compiler/MLGalilean.fs" />
     <Compile Include="ml/compiler/MLElaborate.fs" />
     <!-- PPL compiler layer (Blade.Ppl.*): moment/comoment formers and
          declared independence, elaborated to plain Blade source. Lives
@@ -69,6 +72,16 @@
          stage in TypeCheck.typeCheck. -->
     <Compile Include="spectra/compiler/SpectraDecls.fs" />
     <Compile Include="spectra/compiler/SpectraElaborate.fs" />
+    <!-- sgs compiler layer (Blade.Sgs.*): subgrid-closure field formers
+         (central-difference gradient, box filter, exact subgrid stress)
+         elaborated to plain Blade source. Lives under sgs/compiler/ beside
+         the BladeSgs physics oracle (a SEPARATE fsproj); reuses the
+         Blade.Math.Decls AST helpers and the Blade.ML.CartesianBridge pack
+         order (compile order), while its PIPELINE stage runs between ML and
+         PPL (TypeCheck.typeCheck) so `where ml.galilean` bodies are judged
+         with surface `sgs.*` calls still visible at ML's seam. -->
+    <Compile Include="sgs/compiler/SgsDecls.fs" />
+    <Compile Include="sgs/compiler/SgsElaborate.fs" />
     <Compile Include="IndexTypeValidator.fs" />
     <Compile Include="Unify.fs" />
     <Compile Include="TypeEnv.fs" />
@@ -136,11 +149,13 @@
     <Compile Include="tests/Oracles.fs" />
     <Compile Include="tests/Test_Oracles.fs" />
     <Compile Include="tests/Test_WignerTables.fs" />
+    <Compile Include="tests/Test_CartesianBridge.fs" />
     <Compile Include="tests/Test_Ppl.fs" />
     <Compile Include="tests/Test_Math.fs" />
     <Compile Include="tests/Test_Rand.fs" />
     <Compile Include="tests/Test_Spectra.fs" />
     <Compile Include="tests/Test_Fallback.fs" />
+    <Compile Include="tests/Test_Sgs.fs" />
     <Compile Include="tests/Differential.fs" />
     <Compile Include="tests/Benchmarks.fs" />
     <Compile Include="tests/CudaTests.fs" />
@@ -148,6 +163,7 @@
     <Compile Include="tests/AllocTests.fs" />
     <Compile Include="tests/NetcdfTests.fs" />
     <Compile Include="tests/ZarrTests.fs" />
+    <Compile Include="tests/CsvTests.fs" />
     <Compile Include="tests/MpiTests.fs" />
     <Compile Include="tests/HybridTests.fs" />
     <Compile Include="tests/DiffOracle.fs" />

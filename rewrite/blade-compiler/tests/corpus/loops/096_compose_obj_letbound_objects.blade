@@ -1,0 +1,12 @@
+// TEST: Compose Obj Let-Bound Objects
+// Regression: `>>@` over object_for values BOUND TO LET VARIABLES first.
+// Previously emitted the object binding names (o1/o2) as undeclared C++ symbols
+// because IRObjectFor bindings were not registered where genComposeApply's
+// resolveDeferred could chase the composed leaf back to its kernel.
+let A = [1.0, 2.0, 3.0]
+let f = lambda(x) -> x + 1.0
+let g = lambda(x) -> x * 2.0
+let o1 = object_for(f)
+let o2 = object_for(g)
+let result = (o1 >>@ o2) <@> A |> compute
+// EXPECT: result = [4.0, 6.0, 8.0]

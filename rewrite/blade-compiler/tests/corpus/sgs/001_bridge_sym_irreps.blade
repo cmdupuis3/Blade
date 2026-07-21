@@ -1,0 +1,104 @@
+// TEST: SGS Bridge Symmetric Certificate
+// ============================================================================
+// The Cartesian<->irreps bridge for SYMMETRIC rank-2 tensors, in userland:
+// packed [s00, s01, s02, s11, s12, s22] -> TAUSPEC = l=0 (+) l=2 (dim 6),
+// rows ORTHONORMAL over the Frobenius inner product (off-diagonals weighted
+// sqrt(2) in packed form), so |S|_F = |sym_to_irr(S)|.
+//
+// Constants were DERIVED BY FIT against the compiler's own real solid
+// harmonics (ml/ `dump-cartesian`: fitted-vs-closed row dev ~1e-15, one
+// Schur ratio sqrt(15/8pi) across all five l=2 rows) — never transcribed by
+// hand: the real-basis m-order (xy, yz, 3z^2-r^2, xz, x^2-y^2) is a trap.
+//
+// Rotation CERTIFICATE, both routes inside compiled Blade, at the house
+// rotation R = Rz(0.7)·Ry(1.1):
+//   cart route:   sym_to_irr(packSym(R S R^T))
+//   irreps route: D_tau · sym_to_irr(packSym(S)),  D_tau = 1 (+) D_2 baked
+// (oracle-side residual 1.6e-15; each route pinned against the oracle).
+//
+// SOUNDNESS WART (the Phase-1a motivation): this userland bridge cannot be
+// certified `ml.equiv` (it indexes rep components — BL4008 by design), yet
+// its output annotation is exactly what downstream certificates trust, and
+// equiv's call-site discharge is a no-op. A wrong constant here typechecks
+// everywhere and silently voids every certificate downstream — which is why
+// the constants belong in the compiler (ml.sym_to_irreps / ml.irreps_to_sym).
+// ============================================================================
+
+let b_fwd = [0.5773502691896258, 0.0, 0.0, 0.5773502691896258, 0.0, 0.5773502691896258, 0.0, 1.4142135623730951, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 1.4142135623730951, 0.0, -0.4082482904638631, 0.0, 0.0, -0.4082482904638631, 0.0, 0.8164965809277261, 0.0, 0.0, 1.4142135623730951, 0.0, 0.0, 0.0, 0.7071067811865475, 0.0, 0.0, -0.7071067811865475, 0.0, 0.0]
+let b_inv = [0.5773502691896258, 0.0, 0.0, -0.4082482904638631, 0.0, 0.7071067811865475, 0.0, 0.7071067811865475, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.7071067811865475, 0.0, 0.5773502691896258, 0.0, 0.0, -0.4082482904638631, 0.0, -0.7071067811865475, 0.0, 0.0, 0.7071067811865475, 0.0, 0.0, 0.0, 0.5773502691896258, 0.0, 0.0, 0.8164965809277261, 0.0, 0.0]
+let rot = [0.34692944965489897, -0.644217687237691, 0.681632986593423, 0.2922146442847723, 0.7648421872844885, 0.5741315443479861, -0.8912073600614354, 0.0, 0.4535961214255773]
+let d_tau = [1.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.07709643678933609, 0.15147596872130908, 0.6778328861277059, 0.3983662814203284, 0.594102730717048, 0.0, -0.6816329865934229, 0.34692944965489897, 0.4510673253341625, -0.37912282869503605, -0.26042384170432337, 0.0, -8.326672684688674e-17, -3.3306690738754696e-16, -0.19137583794150892, -0.7001784245761277, 0.687841160741547, 0.0, 0.5741315443479862, -0.2922146442847727, 0.5355259977422124, -0.45011048174094404, -0.309186078954509, 0.0, -0.4469961753826479, -0.87824005233627, 0.11691039686042598, 0.06870891190116774, 0.1024688938018079]
+let s_fix = [1.0, 0.5, -0.3, 2.0, 0.7, -1.0]
+
+function mv6(b: Array<Float like Idx<36>>, s: Array<Float like Idx<6>>) -> Array<Float like Idx<6>> = {
+    let mut o = [0.0, 0.0, 0.0, 0.0, 0.0, 0.0]
+    for i in 0..6 {
+        for j in 0..6 {
+            o(i) += b(i * 6 + j) * s(j)
+        }
+    }
+    o
+}
+
+// (a) forward bridge
+let cert_s = mv6(b_fwd, s_fix)
+// EXPECT: cert_s = [1.154700538379252, 0.7071067811865476, 0.9899494936611666, -2.041241452319315, -0.4242640687119285, -0.7071067811865475]
+
+// (b) orthogonality: Frobenius norm of S equals the 2-norm of its irreps form
+let mut nrm = [0.0, 0.0]
+let nrm_done = {
+    nrm(0) = s_fix(0) * s_fix(0) + 2.0 * s_fix(1) * s_fix(1) + 2.0 * s_fix(2) * s_fix(2) + s_fix(3) * s_fix(3) + 2.0 * s_fix(4) * s_fix(4) + s_fix(5) * s_fix(5)
+    for k in 0..6 {
+        nrm(1) += cert_s(k) * cert_s(k)
+    }
+    0.0
+}
+let cert_s_frob = sqrt(nrm(0))
+// EXPECT: cert_s_frob = 2.767670500619609
+let cert_s_norm = sqrt(nrm(1))
+// EXPECT: cert_s_norm = 2.7676705006196096
+
+// (c) rotation certificate — cart route: R S R^T in-language (operation
+// order mirrors the oracle: m1 = S·R^T, m2 = R·m1, t ascending), then bridge
+let sd = [s_fix(0), s_fix(1), s_fix(2), s_fix(1), s_fix(3), s_fix(4), s_fix(2), s_fix(4), s_fix(5)]
+let mut m1 = [0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0]
+let mut m2 = [0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0]
+let rot_done = {
+    for i in 0..3 {
+        for j in 0..3 {
+            for t in 0..3 {
+                m1(i * 3 + j) += sd(i * 3 + t) * rot(j * 3 + t)
+            }
+        }
+    }
+    for i in 0..3 {
+        for j in 0..3 {
+            for t in 0..3 {
+                m2(i * 3 + j) += rot(i * 3 + t) * m1(t * 3 + j)
+            }
+        }
+    }
+    0.0
+}
+let s_rot = [m2(0), m2(1), m2(2), m2(4), m2(5), m2(8)]
+let cert_s_lhs = mv6(b_fwd, s_rot)
+// EXPECT: cert_s_lhs = [1.154700538379252, -1.7682581821170573, -0.7142863380420188, 0.20132769147395502, -0.566850018804074, -1.5257368423672735]
+
+// (d) irreps route: baked D_tau = 1 (+) D_2 acting on the unrotated bridge
+let cert_s_rhs = mv6(d_tau, cert_s)
+// EXPECT: cert_s_rhs = [1.154700538379252, -1.7682581821170569, -0.7142863380420182, 0.2013276914739534, -0.5668500188040747, -1.5257368423672737]
+
+// (e) the certificate: both routes agree (squared distance below 1e-18)
+let mut dd = [0.0]
+let dd_done = {
+    for k in 0..6 {
+        dd(0) += (cert_s_lhs(k) - cert_s_rhs(k)) * (cert_s_lhs(k) - cert_s_rhs(k))
+    }
+    0.0
+}
+let cert_agree = if dd(0) < 0.000000000000000001 then 1.0 else 0.0
+// EXPECT: cert_agree = 1.0
+
+// (f) round-trip: irr_to_sym recovers the packed tensor
+let cert_s_back = mv6(b_inv, cert_s)
+// EXPECT: cert_s_back = [1.0000000000000004, 0.5, -0.3, 2.0000000000000004, 0.7, -1.0]

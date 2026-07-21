@@ -148,6 +148,7 @@ module Codes =
             "BL5300", "rand elaboration error"
             "BL5400", "spectra elaboration error"
             "BL5500", "grad elaboration error"
+            "BL5600", "sgs elaboration error"
             // BL6xxx — IR validation
             "BL6001", "IR validation error"
             // BL7xxx — backend limits
@@ -187,6 +188,7 @@ module Codes =
                 | "BL5300" -> PhElaborate "rand"
                 | "BL5400" -> PhElaborate "spectra"
                 | "BL5500" -> PhElaborate "grad"
+                | "BL5600" -> PhElaborate "sgs"
                 | _ -> PhElaborate "ml"
             | '6' -> PhIRValidate
             | '7' -> PhBackend
@@ -202,6 +204,7 @@ module Codes =
         | "rand" -> "BL5300"
         | "spectra" -> "BL5400"
         | "grad" -> "BL5500"
+        | "sgs" -> "BL5600"
         | _ -> "BL5000"
 
     let ice (message: string) : Diagnostic =

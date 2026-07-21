@@ -278,8 +278,39 @@ let (u, v) = (method_for(A) <@> lambda(x) where mpi -> x * 2.0 + 1.0) <&!> (meth
 let A = [1.0, 2.0, 3.0, 4.0, 5.0]
 let (m1, m2) = (method_for(A) <@> lambda(x) where mpi -> x) <&!> (method_for(A, A) <@> lambda(x, y) where mpi -> x * y) |> compute
 """
+        // COMPLEX dense slab: MPI_C_DOUBLE_COMPLEX Allgatherv over the
+        // std::complex pool (layout-compatible with double[2]; probed against
+        // MS-MPI at -n 1/2/4). n = 5 exercises the remainder split.
+        let denseComplex = """
+let Z = [complex(1.0, 2.0), complex(-0.5, 0.25), complex(3.0, -1.0), complex(0.0, 1.0), complex(2.0, 2.0)]
+let R = method_for(Z) <@> lambda(z) where mpi -> z * conj(z) + 2.0 * z |> compute
+"""
+        // Complex TRANSCENDENTAL under mpi: every rank runs the same host
+        // libm, so values are bit-identical across ranks — the differential
+        // pins pure data movement of computed complex values.
+        let denseComplexExp = """
+let Z = [complex(0.1, 0.2), complex(-0.3, 0.4), complex(0.5, -0.5)]
+let R = method_for(Z) <@> lambda(z) where mpi -> exp(z) |> compute
+"""
+        // COMPLEX symmetric simplex: packed-pool cell-range Allgatherv with
+        // the complex datatype.
+        let symComplex = """
+let Z = [complex(1.0, 1.0), complex(2.0, -1.0), complex(0.5, 3.0), complex(-1.0, 2.0)]
+let R = method_for(Z, Z) <@> lambda(x, y) where comm(x, y), mpi -> x * y + conj(x) * conj(y) |> compute
+"""
+        // Downstream consumption of a gathered COMPLEX output: S is only
+        // correct on rank 0 if the Allgatherv restored all of R there.
+        let complexDownstream = """
+let Z = [complex(1.0, 2.0), complex(3.0, -1.0), complex(-2.0, 0.5), complex(0.0, 1.0)]
+let R = method_for(Z) <@> lambda(z) where mpi -> z * 2.0 |> compute
+let S = method_for(R) <@> lambda(r) -> r + complex(0.5, 0.5) |> compute
+"""
         runMpiCase "cofuse_same_arity" cofuseSameArity
         runMpiCase "cofuse_staggered" cofuseStaggered
+        runMpiCase "dense_complex" denseComplex
+        runMpiCase "dense_complex_exp" denseComplexExp
+        runMpiCase "sym_complex" symComplex
+        runMpiCase "complex_downstream" complexDownstream
         runMpiCase "dense_rank1" denseRank1
         runMpiCase "dense_rank1_remainder" denseRemainder
         runMpiCase "dense_small_n" denseSmallN

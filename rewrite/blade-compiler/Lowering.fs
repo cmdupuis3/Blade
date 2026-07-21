@@ -307,7 +307,7 @@ let rec lowerTypedExpr (env: TypedLowerEnv) (texpr: TypedExpr) : IRExpr =
             ArrayTypes = info.ArrayTypes
             SDimsPerArray = info.SDimsPerArray
             TotalSDims = info.TotalSDims
-            SharedIndexType = info.SharedIndexType
+            SharedIndexTypes = info.SharedIndexTypes
         }
     
     | TExprObjectFor info ->
@@ -338,7 +338,7 @@ let rec lowerTypedExpr (env: TypedLowerEnv) (texpr: TypedExpr) : IRExpr =
             Arrays = info.Arrays |> List.map (lowerTypedExpr env)
             Identities = info.Identities
             ArrayTypes = info.ArrayTypes
-            SharedIndexType = info.SharedIndexType
+            SharedIndexTypes = info.SharedIndexTypes
             SymcomStates = info.SymcomStates
             TriangularLevels = info.TriangularLevels
             SDimsPerArray = info.SDimsPerArray
@@ -1012,7 +1012,7 @@ and lowerTypedBinOp env mode op l r leftExpr rightExpr resultType =
         IRApplyCombinator {
             Loop = l
             Kernel = r
-            Arrays = []; Identities = []; ArrayTypes = []; SharedIndexType = None
+            Arrays = []; Identities = []; ArrayTypes = []; SharedIndexTypes = []
             SymcomStates = []
             TriangularLevels = []
             SDimsPerArray = []
@@ -1039,7 +1039,7 @@ and lowerTypedBinOp env mode op l r leftExpr rightExpr resultType =
                 ArrayTypes = m1.ArrayTypes @ m2.ArrayTypes
                 SDimsPerArray = m1.SDimsPerArray @ m2.SDimsPerArray
                 TotalSDims = m1.TotalSDims + m2.TotalSDims
-                SharedIndexType = None
+                SharedIndexTypes = []
             }
         | _ -> IRArrayProduct (l, r)  // fallback for non-method_for operands
     | OpFunctor -> IRFunctorMap (l, r)

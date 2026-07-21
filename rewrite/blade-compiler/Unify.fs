@@ -61,6 +61,7 @@ type TypeError =
     | ArrayLitLength of got: int * expected: int * axisTag: string option
     | ObjectForKernel of got: string
     | ChainOpNeedsMethodFor of leftDesc: string
+    | ChainOpBadKernel of rightDesc: string
     | PlaceholderNeedsAllBound of got: int * total: int
     | GroupKeysRank1
     | CumulantOrderPositive of order: int
@@ -70,6 +71,7 @@ type TypeError =
     | DistNotIndependent of op: string * source1: string * source2: string * steering: string
     | DistOpUndefined of left: string * right: string
     | EnumIdxMixedKinds of name: string
+    | EnumIdxUnknownLabel of enumName: string * label: string * available: string list
     | ImplMissingMethods of iface: string * typeName: string * methods: string
     // <|:> allocated-fallback operand violations (BL3007)
     | FallbackNeedsArrays of leftDesc: string * rightDesc: string

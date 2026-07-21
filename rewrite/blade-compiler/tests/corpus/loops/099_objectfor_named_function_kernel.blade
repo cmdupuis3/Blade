@@ -1,0 +1,7 @@
+// TEST: object_for with a named top-level function as its kernel
+// Symmetric with 098: object_for(inc) eta-expands the named function to
+// lambda(x) -> inc(x) so `object_for(fn) <@> A` works like a lambda kernel.
+function inc(x: Float64) -> Float64 = x + 10.0
+let A = [1.0, 2.0, 3.0]
+let r = object_for(inc) <@> A |> compute
+// EXPECT: r = [11.0, 12.0, 13.0]

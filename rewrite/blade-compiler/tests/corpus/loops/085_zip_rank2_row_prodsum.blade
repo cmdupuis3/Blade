@@ -1,0 +1,15 @@
+// TEST: Zip Rank-2 Row Prodsum
+// Positive companion to 086/087: the SUPPORTED row-mode idiom over a rank-2
+// zip. Each ROW param `ra`/`rb` is a rank-1 slice over X, and the kernel body
+// reduces the pair to a SCALAR with prodsum -> the apply's output is rank-1
+// (one scalar per outer Y row). This is exactly what the 086 rejection steers
+// toward, and it must keep compiling and giving the right values.
+//   P(0) = 1*10 + 2*20 + 3*30 = 140
+//   P(1) = 4*40 + 5*50 + 6*60 = 770
+type Y = Idx<2>
+type X = Idx<3>
+let A: Array<Float64 like Y, X> = [[1.0, 2.0, 3.0], [4.0, 5.0, 6.0]]
+let B: Array<Float64 like Y, X> = [[10.0, 20.0, 30.0], [40.0, 50.0, 60.0]]
+let P = method_for(zip(A, B)) <@> lambda(ra: Array<Float64 like X>, rb: Array<Float64 like X>) -> prodsum(ra, rb) |> compute
+
+// EXPECT: P = [140, 770]

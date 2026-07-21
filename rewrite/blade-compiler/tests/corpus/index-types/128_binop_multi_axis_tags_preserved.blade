@@ -1,0 +1,13 @@
+// TEST: Binop Multi Axis Tags Preserved
+// The result of a rank-2 elementwise binop keeps the operands' nominal
+// axis tags: P = A * B is Array<Float64 like Lat, Lon>, so tagged literal
+// subscripts (the (n : Tag) coercion rule) index it directly.
+type Lat = Idx<2>
+type Lon = Idx<3>
+let A: Array<Float64 like Lat, Lon> = [[1.0, 2.0, 3.0], [4.0, 5.0, 6.0]]
+let B: Array<Float64 like Lat, Lon> = [[10.0, 10.0, 10.0], [2.0, 2.0, 2.0]]
+let P = A * B
+let v = P((1 : Lat), (2 : Lon))
+
+// EXPECT: P = [10, 20, 30, 8, 10, 12]
+// EXPECT: v = 12

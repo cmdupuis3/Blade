@@ -241,9 +241,12 @@ let compileCppWithExtra (extraLinkInputs: string list) (cppFile: string) (output
         let stdoutTask = proc.StandardOutput.ReadToEndAsync()
         let stderrTask = proc.StandardError.ReadToEndAsync()
         
-        if not (proc.WaitForExit(60000)) then
+        // 300s: spectra-scale generated programs (rank-2 transforms carry
+        // O(cells) initializers and nested-literal outputs, capped at 65536
+        // cells) legitimately push g++ -O2 past the old 60s budget.
+        if not (proc.WaitForExit(300000)) then
             try proc.Kill() with _ -> ()
-            Error "Compilation timed out after 60s"
+            Error "Compilation timed out after 300s"
         else
         
         let stdout = stdoutTask.Result
@@ -285,7 +288,11 @@ let compileCuda (cuFile: string) (outputDir: string) : Result<string, string> =
         // spellings; on Windows we drop the g++-specific ones and rely on
         // nvcc/cl defaults — refine once a Windows CUDA box is exercised.)
         let hostWarn =
-            if RuntimeInformation.IsOSPlatform(OSPlatform.Windows) then ""
+            if RuntimeInformation.IsOSPlatform(OSPlatform.Windows) then
+                // CCCL (thrust/complex.h, pulled in by complex kernels) refuses
+                // MSVC's traditional preprocessor; the conforming one is safe
+                // for all generated CUDA code, so pass it unconditionally.
+                "-Xcompiler /Zc:preprocessor"
             else "-Xcompiler -Werror=float-conversion,-Werror=narrowing"
 
         // -std=c++17 matches the CPU path. nvcc accepts it directly.
@@ -372,7 +379,10 @@ let compileCudaSplit (cuFile: string) (cppFile: string) (outputDir: string) : Re
         // Requires cl.exe on PATH — run from the VS x64 Native Tools prompt.
         // No OpenMP here: the rank-1 cuda host half has no parallel host loop,
         // so we avoid the MSVC /openmp vs g++ -fopenmp flag-spelling divergence.
-        let nvccCu  = sprintf "-std=c++17 -O2 -c -o \"%s\" \"%s\"" cuObj cuFull
+        // /Zc:preprocessor: CCCL (thrust/complex.h, pulled in by complex
+        // kernels) refuses MSVC's traditional preprocessor. Applied to the .cu
+        // compile only â€” the host .cpp never includes CCCL headers.
+        let nvccCu  = sprintf "-std=c++17 -O2 -Xcompiler /Zc:preprocessor -c -o \"%s\" \"%s\"" cuObj cuFull
         let nvccCpp = sprintf "-std=c++17 -O2 -c -o \"%s\" \"%s\"" cppObj cppFull
         let nvccLink = sprintf "-std=c++17 -O2 -o \"%s\" \"%s\" \"%s\"" exeFull cuObj cppObj
         match runProc "nvcc" nvccCu 120000 with
@@ -418,7 +428,11 @@ let compileCudaMpiHybrid (cuFile: string) (cppFile: string) (outputDir: string) 
         let cuFull = Path.GetFullPath cuFile
         let dllExt = if caps.Platform = PWindows then ".dll" else ".so"
         let dllFull = Path.Combine(Path.GetFullPath outputDir, Path.GetFileNameWithoutExtension cuFile + "_cuda" + dllExt)
-        let sharedFlags = if caps.Platform = PWindows then "-shared" else "-shared -Xcompiler -fPIC"
+        // /Zc:preprocessor on Windows: CCCL (thrust/complex.h) refuses MSVC's
+        // traditional preprocessor (see compileCudaSplit).
+        let sharedFlags =
+            if caps.Platform = PWindows then "-shared -Xcompiler /Zc:preprocessor"
+            else "-shared -Xcompiler -fPIC"
         let nvccArgs = sprintf "-std=c++17 -O2 %s -o \"%s\" \"%s\"" sharedFlags dllFull cuFull
         match runProc "nvcc" nvccArgs 180000 with
         | Error e -> Error e
@@ -451,14 +465,18 @@ let runExecutable (exeFile: string) : Result<int * string, string> =
         let stdoutTask = proc.StandardOutput.ReadToEndAsync()
         let stderrTask = proc.StandardError.ReadToEndAsync()
         
-        if proc.WaitForExit(30000) then
+        // 120s: simulation-scale examples (thousands of spectral steps)
+        // legitimately outlive the old 30s budget; corpus tests still
+        // finish in well under a second, so the longer leash only affects
+        // genuinely long runs.
+        if proc.WaitForExit(120000) then
             let stdout = stdoutTask.Result
             let stderr = stderrTask.Result
             let output = if String.IsNullOrEmpty(stderr) then stdout else stdout + "\n[stderr]: " + stderr
             Ok (proc.ExitCode, output)
         else
             try proc.Kill() with _ -> ()
-            Error "Execution timed out after 30s"
+            Error "Execution timed out after 120s"
     with ex ->
         Error (sprintf "Execution exception: %s" ex.Message)
 

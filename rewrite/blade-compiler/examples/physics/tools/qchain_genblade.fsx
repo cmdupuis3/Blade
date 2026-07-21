@@ -1,5 +1,14 @@
 // qchain_genblade.fsx — generates examples/physics/42_dynamical_q.blade
 // from qchain_literals.blade.txt (emitted by qchain_oracle.fsx).
+//
+// RETIRED (2026-07-19): 42_dynamical_q.blade is now CSV-backed — its
+// eigenfactors live in examples/physics/data/42_{EC,VC,EI,VI}.csv and load
+// via `import csv as csvd` (see providers/CsvProviderSpec.md). Rerunning
+// this script would clobber the converted example with the old inline-
+// literal form. If the oracle data ever needs regenerating, emit the four
+// CSV files instead (tools/csv_convert.fsx shows the exact row layout:
+// 1-D payloads as one row, matrices as R rows).
+failwith "RETIRED: 42_dynamical_q.blade is CSV-backed now — see the header note."
 open System
 open System.Text
 

@@ -1,0 +1,33 @@
+// TEST: ML Dual Equiv Galilean Certificate
+import ml as ml
+// ============================================================================
+// ONE function under BOTH judgments — the full type-constrained hypothesis
+// space of the closure arc:
+//   where ml.equiv(O3), ml.galilean(v, w)
+// The two theorems are independent hypotheses in orthogonal domains: v and
+// w are plain arrays to the equiv judgment (Inv) but velocities to the
+// galilean judgment (BVar); their difference d = v - w is Inv/BInv in both;
+// d's components then enter ml.y_to as the coordinate premise (rep
+// introduction), and the norm exit returns an invariant Float.
+// Certified conclusion: rel_speed is unchanged by rotating the frame AND by
+// boosting it. The boost shadow is inline and exact (integer components);
+// the rotation certificate is the ml-equiv/020-style theorem, held by type.
+// ============================================================================
+let static SH1 = ml.sh_spec(1)
+
+function rel_speed(v: Array<Float like Idx<3>>, w: Array<Float like Idx<3>>) where ml.equiv(O3), ml.galilean(v, w) -> Float = {
+    let d = v - w
+    let sh = ml.y_to(1, d(0), d(1), d(2))
+    let n = ml.norms(SH1, sh)
+    n(1)
+}
+
+// d = (3, 4, 0), |d| = 5: rel_speed = 0.4886025119029199 * 5 (to the ulp)
+let r = rel_speed([4.0, 5.0, 1.0], [1.0, 1.0, 1.0])
+let ratio_ok = if (r / 0.4886025119029199 - 5.0) * (r / 0.4886025119029199 - 5.0) < 0.000000000000000000000001 then 1.0 else 0.0
+// EXPECT: ratio_ok = 1.0
+
+// the boost shadow: both velocities shifted by U0 = (10, 20, 30)
+let rb = rel_speed([14.0, 25.0, 31.0], [11.0, 21.0, 31.0])
+let boost_ok = if (r - rb) * (r - rb) < 0.000000000000000000000000000001 then 1.0 else 0.0
+// EXPECT: boost_ok = 1.0

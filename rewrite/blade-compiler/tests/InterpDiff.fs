@@ -161,7 +161,14 @@ let m5Slice =
 /// (index types once its ragged/complex fixes land, ...). Kept as its own name
 /// so the Cli arm (`... runInterpDiffTests currentSlice ...`) never needs
 /// editing again as milestones land — only this binding grows.
-let currentSlice = m1Slice @ m2Slice @ m3Slice @ randSlice @ m4aSlice @ fallbackSlice @ m5Slice @ indexTypesSlice
+/// deferred-concrete: `<$>` / `<|>` / sequence / guard applied to CONCRETE arrays
+/// (a plain array operand, not a deferred computation). Regression coverage for the
+/// fix that makes these defer like `<@>` (materialize only at |> compute) instead of
+/// eagerly evaluating, plus the force-path repairs (functor wrapper actually applied,
+/// array-shaped guard). Both parity (interp == compiled) and EXPECT values verified.
+let deferredConcreteSlice = [ "deferred-concrete" ]
+
+let currentSlice = m1Slice @ m2Slice @ m3Slice @ randSlice @ m4aSlice @ fallbackSlice @ m5Slice @ indexTypesSlice @ deferredConcreteSlice
 
 /// Output-line normalizer, shared in spirit with DiffOracle.normalize
 /// (DiffOracle.fs:79-85), widened for the split-timing wrapper:

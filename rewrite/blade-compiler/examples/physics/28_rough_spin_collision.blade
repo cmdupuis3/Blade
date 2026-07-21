@@ -1,4 +1,4 @@
-// TEST: Physics -- Rough Spin: Glancing Fuzz and the Hidden Register
+﻿// TEST: Physics -- Rough Spin: Glancing Fuzz and the Hidden Register
 // ============================================================================
 // Rotation enters the fuzzy world. 2D disks, perfectly rough elastic contact
 // (slip reverses; I = m R^2 / 2), radii R = 0.5 m^(1/3). Ball 1 (m = 1,
@@ -39,41 +39,42 @@
 let M2 = [0.6, 0.75, 0.9, 1.0, 1.15, 1.3, 1.5, 0.6, 0.75, 0.9, 1.0, 1.15, 1.3, 1.5]
 let SP = [0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 4.0, 4.0, 4.0, 4.0, 4.0, 4.0, 4.0]
 
-// --- staged geometry and collision columns ---
-let R2C = method_for(M2) <@> lambda(m) -> 0.5 * m ^ (1.0 / 3.0) |> compute
-let SFC = method_for(R2C) <@> lambda(r) -> 0.55 / (0.5 + r) |> compute
-let CFC = method_for(SFC) <@> lambda(s) -> sqrt(1.0 - s * s) |> compute
-let Q1N = method_for(zip(M2, CFC)) <@> lambda(m, c) -> (1.0 - m) * c / (1.0 + m) |> compute
-let Q2N = method_for(zip(M2, CFC)) <@> lambda(m, c) -> 2.0 * c / (1.0 + m) |> compute
-let S0C = method_for(zip(SFC, R2C, SP)) <@> lambda(s, r, w) -> 0.0 - s + r * w |> compute
-let JTC = method_for(zip(M2, S0C)) <@> lambda(m, s) -> 0.0 - 2.0 * (m / (3.0 * (1.0 + m))) * s |> compute
-let Q1T = method_for(zip(SFC, JTC)) <@> lambda(s, j) -> 0.0 - s + j |> compute
-let Q2T = method_for(zip(M2, JTC)) <@> lambda(m, j) -> 0.0 - j / m |> compute
-let W1C = method_for(JTC) <@> lambda(j) -> 4.0 * j |> compute
-let W2C = method_for(zip(SP, M2, R2C, JTC)) <@> lambda(w, m, r, j) -> w + 2.0 * j / (m * r) |> compute
-let V1X = method_for(zip(Q1N, Q1T, CFC, SFC)) <@> lambda(qn, qt, c, s) -> qn * c - qt * s |> compute
-let V1Y = method_for(zip(Q1N, Q1T, CFC, SFC)) <@> lambda(qn, qt, c, s) -> qn * s + qt * c |> compute
-let V2X = method_for(zip(Q2N, Q2T, CFC, SFC)) <@> lambda(qn, qt, c, s) -> qn * c - qt * s |> compute
-let V2Y = method_for(zip(Q2N, Q2T, CFC, SFC)) <@> lambda(qn, qt, c, s) -> qn * s + qt * c |> compute
+// --- staged geometry and collision columns: pseudo-native positional
+//     operator lifting carries the whole formula chain -- no zip+kernel ---
+let R2C = 0.5 * M2 ^ (1.0 / 3.0)
+let SFC = 0.55 / (0.5 + R2C)
+let CFC = method_for(SFC) <@> lambda(s) -> sqrt(1.0 - s ^ 2.0) |> compute
+let Q1N = (1.0 - M2) * CFC / (1.0 + M2)
+let Q2N = 2.0 * CFC / (1.0 + M2)
+let S0C = 0.0 - SFC + R2C * SP
+let JTC = 0.0 - 2.0 * (M2 / (3.0 * (1.0 + M2))) * S0C
+let Q1T = 0.0 - SFC + JTC
+let Q2T = 0.0 - JTC / M2
+let W1C = 4.0 * JTC
+let W2C = SP + 2.0 * JTC / (M2 * R2C)
+let V1X = Q1N * CFC - Q1T * SFC
+let V1Y = Q1N * SFC + Q1T * CFC
+let V2X = Q2N * CFC - Q2T * SFC
+let V2Y = Q2N * SFC + Q2T * CFC
 
 // --- the oracle: conservation towers (must be degenerate at machine zero) ---
-let MDEV = method_for(zip(V1X, V2X, V1Y, V2Y, M2)) <@> lambda(ax, bx, ay, by, m) -> (ax + m * bx - 1.0) * (ax + m * bx - 1.0) + (ay + m * by) * (ay + m * by) |> compute
-let PM1 = reduce(method_for(MDEV) <@> lambda(x) -> x, (+))
+let MDEV = ((V1X + M2 * V2X - 1.0) ^ 2.0) + ((V1Y + M2 * V2Y) ^ 2.0)
+let PM1 = reduce(MDEV, (+))
 let P_V = if PM1 / 14.0 < 0.000000000000000000001 then "CONSERVED" else "LEAKS"
-let ETR = method_for(zip(V1X, V1Y, V2X, V2Y, M2)) <@> lambda(ax, ay, bx, by, m) -> 0.5 * (ax * ax + ay * ay) + 0.5 * m * (bx * bx + by * by) |> compute
-let ERO = method_for(zip(W1C, W2C, M2, R2C)) <@> lambda(wa, wb, m, r) -> 0.0625 * wa * wa + 0.25 * m * r * r * wb * wb |> compute
-let E0C = method_for(zip(M2, R2C, SP)) <@> lambda(m, r, w) -> 0.5 + 0.25 * m * r * r * w * w |> compute
-let EDEV = method_for(zip(ETR, ERO, E0C)) <@> lambda(a, b, c) -> (a + b - c) * (a + b - c) |> compute
-let ED1 = reduce(method_for(EDEV) <@> lambda(x) -> x, (+))
+let ETR = 0.5 * ((V1X ^ 2.0) + (V1Y ^ 2.0)) + 0.5 * M2 * ((V2X ^ 2.0) + (V2Y ^ 2.0))
+let ERO = 0.0625 * W1C * W1C + 0.25 * M2 * R2C * R2C * W2C * W2C
+let E0C = 0.5 + 0.25 * M2 * R2C * R2C * SP * SP
+let EDEV = (ETR + ERO - E0C) ^ 2.0
+let ED1 = reduce(EDEV, (+))
 let E_V = if ED1 / 14.0 < 0.000000000000000000001 then "CONSERVED" else "LEAKS"
-let R2CF = method_for(zip(R2C, CFC)) <@> lambda(r, c) -> r * c |> compute
-let R2SF = method_for(zip(R2C, SFC)) <@> lambda(r, s) -> r * s |> compute
-let L0C = method_for(zip(SFC, M2, R2C, SP)) <@> lambda(s, m, r, w) -> 0.5 * s + 0.5 * m * r * r * w |> compute
-let LP1 = method_for(zip(CFC, SFC, V1X, V1Y, W1C)) <@> lambda(c, s, ax, ay, wa) -> 0.5 * s * ax - 0.5 * c * ay + 0.125 * wa |> compute
-let LO2 = method_for(zip(R2CF, R2SF, V2X, V2Y, M2)) <@> lambda(rc, rs, bx, by, m) -> m * (rc * by - rs * bx) |> compute
-let LS2 = method_for(zip(M2, R2C, W2C)) <@> lambda(m, r, wb) -> 0.5 * m * r * r * wb |> compute
-let LDEV = method_for(zip(LP1, LO2, LS2, L0C)) <@> lambda(a, b, c, d) -> (a + b + c - d) * (a + b + c - d) |> compute
-let LD1 = reduce(method_for(LDEV) <@> lambda(x) -> x, (+))
+let R2CF = R2C * CFC
+let R2SF = R2C * SFC
+let L0C = 0.5 * SFC + 0.5 * M2 * R2C * R2C * SP
+let LP1 = 0.5 * SFC * V1X - 0.5 * CFC * V1Y + 0.125 * W1C
+let LO2 = M2 * (R2CF * V2Y - R2SF * V2X)
+let LS2 = 0.5 * M2 * R2C * R2C * W2C
+let LDEV = (LP1 + LO2 + LS2 - L0C) ^ 2.0
+let LD1 = reduce(LDEV, (+))
 let J_V = if LD1 / 14.0 < 0.000000000000000000001 then "CONSERVED" else "LEAKS"
 
 // --- analytic self-test: head-on (d = 0), equal masses, smooth reduction ---
@@ -86,27 +87,27 @@ let test0_v1 = t_q1n * t_cf - (0.0 - t_sf + t_jt) * t_sf
 let test0_v2 = t_q2n * t_cf - (0.0 - t_jt / 1.0) * t_sf
 
 // --- the new variant: the translational/rotational partition is fuzzy ---
-let ET1 = reduce(method_for(ETR) <@> lambda(x) -> x, (+))
-let ET2 = reduce(method_for(ETR) <@> lambda(x) -> x * x, (+))
+let ET1 = reduce(ETR, (+))
+let ET2 = prodsum(ETR, ETR)
 let ETR_k1 = ET1 / 14.0
-let ETR_k2 = ET2 / 14.0 - ETR_k1 * ETR_k1
+let ETR_k2 = ET2 / 14.0 - (ETR_k1 ^ 2.0)
 let trans_V = if ETR_k2 > 0.0001 then "VARIANT" else "INVARIANT"
 
 // --- circular tower of the deflection (spinless sub-ensemble) ---
-let SIN1 = method_for(zip(V1X, V1Y)) <@> lambda(ax, ay) -> ay / sqrt(ax * ax + ay * ay) |> compute
-let COS1 = method_for(zip(V1X, V1Y)) <@> lambda(ax, ay) -> ax / sqrt(ax * ax + ay * ay) |> compute
+let SIN1 = method_for(zip(V1X, V1Y)) <@> lambda(ax, ay) -> ay / sqrt((ax ^ 2.0) + (ay ^ 2.0)) |> compute
+let COS1 = method_for(zip(V1X, V1Y)) <@> lambda(ax, ay) -> ax / sqrt((ax ^ 2.0) + (ay ^ 2.0)) |> compute
 let S0n = reduce(method_for(SP) <@> lambda(w) -> (if w < 0.5 then 1.0 else 0.0), (+))
 let Ssin0 = reduce(method_for(zip(SIN1, SP)) <@> lambda(x, w) -> (if w < 0.5 then x else 0.0), (+))
 let Scos0 = reduce(method_for(zip(COS1, SP)) <@> lambda(x, w) -> (if w < 0.5 then x else 0.0), (+))
 let sin0_mean = Ssin0 / S0n
 let cos0_mean = Scos0 / S0n
-let rho0 = sqrt(sin0_mean * sin0_mean + cos0_mean * cos0_mean)
+let rho0 = sqrt((sin0_mean ^ 2.0) + (cos0_mean ^ 2.0))
 
 // --- spin-orbit correlation manufactured from nothing (spinless rows) ---
 let Sw0 = reduce(method_for(zip(W2C, SP)) <@> lambda(x, w) -> (if w < 0.5 then x else 0.0), (+))
 let Sws = reduce(method_for(zip(W2C, SIN1, SP)) <@> lambda(x, y, w) -> (if w < 0.5 then x * y else 0.0), (+))
 let so_cov = Sws / S0n - (Sw0 / S0n) * sin0_mean
-let so_V = if sqrt(so_cov * so_cov) > 0.0001 then "CORRELATED" else "UNCORRELATED"
+let so_V = if abs(so_cov) > 0.0001 then "CORRELATED" else "UNCORRELATED"
 
 // --- the hidden register: spin is invisible until touch, decisive at it.
 // Subtlety found here: near equal masses the deflection ANGLE is almost
@@ -116,14 +117,14 @@ let so_V = if sqrt(so_cov * so_cov) > 0.0001 then "CORRELATED" else "UNCORRELATE
 let Ssin4 = reduce(method_for(zip(SIN1, SP)) <@> lambda(x, w) -> (if w > 0.5 then x else 0.0), (+))
 let sin4_mean = Ssin4 / (14.0 - S0n)
 let reg_ang = sin4_mean - sin0_mean
-let SPD1 = method_for(zip(V1X, V1Y)) <@> lambda(ax, ay) -> sqrt(ax * ax + ay * ay) |> compute
+let SPD1 = method_for(zip(V1X, V1Y)) <@> lambda(ax, ay) -> sqrt((ax ^ 2.0) + (ay ^ 2.0)) |> compute
 let Sspd0 = reduce(method_for(zip(SPD1, SP)) <@> lambda(x, w) -> (if w < 0.5 then x else 0.0), (+))
 let Sspd4 = reduce(method_for(zip(SPD1, SP)) <@> lambda(x, w) -> (if w > 0.5 then x else 0.0), (+))
 let spd0_mean = Sspd0 / S0n
 let spd4_mean = Sspd4 / (14.0 - S0n)
 let reg_spd = spd4_mean - spd0_mean
-let reg_V = if sqrt(reg_spd * reg_spd) > 0.05 then "TOUCH_REVEALS_SPIN" else "REGISTER_SILENT"
-let ang_V = if sqrt(reg_ang * reg_ang) < 0.05 then "ANGLE_NEARLY_BLIND" else "ANGLE_SEES_SPIN"
+let reg_V = if abs(reg_spd) > 0.05 then "TOUCH_REVEALS_SPIN" else "REGISTER_SILENT"
+let ang_V = if abs(reg_ang) < 0.05 then "ANGLE_NEARLY_BLIND" else "ANGLE_SEES_SPIN"
 
 // conservation is the oracle; the partition blurs; spin-orbit structure is
 // manufactured; the internal register is silent until contact:

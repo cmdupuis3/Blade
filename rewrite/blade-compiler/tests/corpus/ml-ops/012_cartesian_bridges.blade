@@ -1,0 +1,24 @@
+// TEST: ML Ops Cartesian Bridges
+import ml as ml
+// ============================================================================
+// The Cartesian<->irreps bridge ops (rank-2, 3-D): compiler-written
+// orthonormal changes of basis, constants from ml/compiler/CartesianBridge.fs
+// (fit-certified against the solid harmonics by ml/ `dump-cartesian`).
+//   tensor_to_irreps : flat row-major 3x3 -> IrrepsIdx<[(0,0,1),(1,0,1),(2,0,1)]>
+//   sym_to_irreps    : packed [s00,s01,s02,s11,s12,s22] -> IrrepsIdx<[(0,0,1),(2,0,1)]>
+//   irreps_to_sym    : the exact inverse of sym_to_irreps
+// Pins are the SAME oracle values as the userland-bridge tests sgs/001-003
+// (identical matvec semantics) — the compiler op replaces the hand-baked
+// constant tables, closing the Phase-0 soundness wart.
+// ============================================================================
+let g_fix = [0.6, -1.1, 0.4, 0.9, 0.3, -0.7, -0.2, 0.8, 1.2]
+let s_fix = [1.0, 0.5, -0.3, 2.0, 0.7, -1.0]
+
+let cg = ml.tensor_to_irreps(g_fix)
+// EXPECT: cg = [1.2124355652982142, 0.4242640687119285, 1.414213562373095, 1.0606601717798212, -0.14142135623730956, 0.07071067811865483, 0.6123724356957946, 0.1414213562373095, 0.21213203435596423]
+
+let cs = ml.sym_to_irreps(s_fix)
+// EXPECT: cs = [1.154700538379252, 0.7071067811865476, 0.9899494936611666, -2.041241452319315, -0.4242640687119285, -0.7071067811865475]
+
+let back = ml.irreps_to_sym(cs)
+// EXPECT: back = [1.0000000000000004, 0.5, -0.3, 2.0000000000000004, 0.7, -1.0]

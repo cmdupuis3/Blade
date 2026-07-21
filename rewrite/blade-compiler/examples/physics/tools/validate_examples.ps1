@@ -26,6 +26,12 @@ function Num-Match([double]$got, [double]$want) {
 
 $grandPass = 0; $grandFail = 0; $badFiles = 0
 $bladeFiles = @(Get-ChildItem (Join-Path $physDir "*.blade") | Where-Object { $_.Name -like "$Filter*" } | Sort-Object Name)
+# Run from the examples directory: CSV-backed examples (42, 30, 31, 43, 17)
+# load data with paths relative to it ("data/42_EC.csv"), and the compiler
+# resolves those against ITS cwd at compile time (see CsvProviderSpec.md's
+# resolution contract).
+Push-Location $physDir
+try {
 foreach ($bfile in $bladeFiles) {
     $pins = @()
     foreach ($lineTxt in (Get-Content $bfile.FullName)) {
@@ -77,6 +83,7 @@ foreach ($bfile in $bladeFiles) {
     if ($nFail -eq 0) { Write-Host ("{0}: PASS {1}/{1}" -f $bfile.Name, $nPass) }
     else { Write-Host ("{0}: FAIL ({1} pass, {2} fail)" -f $bfile.Name, $nPass, $nFail); $badFiles++ }
 }
+} finally { Pop-Location }
 Write-Host ""
 Write-Host ("TOTAL: {0} pass, {1} fail across {2} files" -f $grandPass, $grandFail, $bladeFiles.Count)
 if ($grandFail -gt 0) { exit 1 } else { exit 0 }

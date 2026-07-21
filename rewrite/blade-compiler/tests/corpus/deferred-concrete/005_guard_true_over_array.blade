@@ -1,0 +1,8 @@
+// TEST: Guard True Over Concrete Array
+// `guard(cond, A)` over a concrete array with a true scalar predicate yields A.
+// Previously eagerly materialized via a scalar ternary `(cond ? A : 0.0)` that did
+// not type-check over an array (g++ error); now defers and materializes correctly.
+let A = [1.0, 2.0, 3.0]
+let cond = true
+let result = guard(cond, A) |> compute
+// EXPECT: result = [1.0, 2.0, 3.0]

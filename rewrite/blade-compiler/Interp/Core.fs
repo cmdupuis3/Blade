@@ -128,6 +128,21 @@ and InterpState = {
     /// CodeGen's fresh-alloc + pool-copy path (genVarAliasBinding), so
     /// mutations through the binding never corrupt the source array.
     MutableArrayLets: Set<IRId>
+    // ---- Forced-deferred print parity (forced-on-read auto-print) --------
+    /// REFERENCE-keyed index from a module-level binding's Value expression
+    /// object to its binding id. A root-cell VDeferred always carries the
+    /// binding's own Value node as its payload (evalBinding stores
+    /// `VDeferred (b.Value, env)`), so a reference hit in Loops.force means
+    /// "the deferred payload of module binding <id> is being forced" — the
+    /// value-space twin of forceDeferredArrayInput's IRVar arm. Sub-expression
+    /// VDeferreds (kernel bodies, scalar choice operands, ...) miss the index
+    /// and are ignored. Built once by makeState over the merged module.
+    DeferredBindingIndex: Dictionary<IRExpr, IRId>
+    /// Module-level deferred bindings actually FORCED during evaluation.
+    /// Print consults this: a deferred binding that ended up materialized
+    /// auto-prints (mirroring genPrintStatements' forcedDeferredIdsCell); one
+    /// that stayed deferred prints nothing. Populated by Loops.force.
+    ForcedDeferred: HashSet<IRId>
 }
 
 /// The header's fixed frame-store size (cpp/blade_runtime.hpp: `Frame stack[64]`).
@@ -157,7 +172,14 @@ let makeState (modul: IRModule) (limits: InterpLimits) : InterpState =
       Global = None
       Builder = builder
       Hooks = None
-      MutableArrayLets = modul.MutableArrayLets }
+      MutableArrayLets = modul.MutableArrayLets
+      DeferredBindingIndex =
+        // Reference identity, deliberately: the SAME Value node stored into a
+        // root VDeferred must hit; a structurally-equal node elsewhere must not.
+        let d = Dictionary<IRExpr, IRId>(HashIdentity.Reference)
+        for b in modul.Bindings do d.[b.Value] <- b.Id
+        d
+      ForcedDeferred = HashSet<IRId>() }
 
 // ============================================================================
 // Shadow call stack push/pop + panic-time capture — mirrors blade_runtime.hpp
@@ -350,7 +372,11 @@ let private isDeferredOperand (env: Env) (e: IRExpr) : bool =
 /// (via computeDeferredIds) would skip it. NB: IRMethodFor/IRObjectFor are NOT
 /// deferred here (evalBinding treats them as loop objects — VLoopObj — before
 /// consulting this, matching genBinding and Print's explicit skip of them).
-let private shouldDeferBinding (env: Env) (value: IRExpr) : bool =
+let private shouldDeferBinding (env: Env) (ty: IRType) (value: IRExpr) : bool =
+    // Mirror computeDeferredIds' resultIsArray rule: an array-typed combinator is a
+    // deferred computation whatever its operands (materializes only at |> compute);
+    // scalar `<|>` / guard stay eager ternaries.
+    let resultIsArray = match stripUnits ty with ArrayElem _ -> true | _ -> false
     match value with
     | IRApplyCombinator _ | IRComposeApply _ | IRParallel _ | IRFusion _ -> true
     | IRZip _ -> true
@@ -359,10 +385,10 @@ let private shouldDeferBinding (env: Env) (value: IRExpr) : bool =
     // the Loops backend) — defer so the eager branch doesn't force it. The
     // binding is function-typed, so Print skips it on both sides regardless.
     | IRCompose _ -> true
-    | IRBind (comp, _) -> isDeferredOperand env comp
-    | IRComposeMeth (left, right) -> isDeferredOperand env left || isDeferredOperand env right
-    | IRFunctorMap (_, inner) -> isDeferredOperand env inner
-    | IRChoice (left, right) -> isDeferredOperand env left || isDeferredOperand env right
+    | IRBind (comp, _) -> resultIsArray || isDeferredOperand env comp
+    | IRComposeMeth (left, right) -> resultIsArray || isDeferredOperand env left || isDeferredOperand env right
+    | IRFunctorMap (_, inner) -> resultIsArray || isDeferredOperand env inner
+    | IRChoice (left, right) -> resultIsArray || isDeferredOperand env left || isDeferredOperand env right
     // <|:> always defers at binding level (CodeGen.genFallbackBinding /
     // computeDeferredIds agree) — its operands are arrays, never scalars.
     | IRFallback _ -> true
@@ -371,8 +397,8 @@ let private shouldDeferBinding (env: Env) (value: IRExpr) : bool =
             match e with
             | IRGuard (_, inner) -> leafIsDeferred inner
             | _ -> isDeferredOperand env e
-        leafIsDeferred body
-    | IRSequence elems -> elems |> List.exists (isDeferredOperand env)
+        resultIsArray || leafIsDeferred body
+    | IRSequence elems -> resultIsArray || (elems |> List.exists (isDeferredOperand env))
     | IRTuple elems -> elems |> List.forall (isDeferredOperand env)
     | IRTupleProj (IRVar (pid, _), _, _) ->
         match envTryFind env pid with
@@ -1011,7 +1037,7 @@ let evalBinding (st: InterpState) (env: Env) (b: IRBinding) : Value =
     // the bare IRGroupKeys node does not carry.
     | IRGroupKeys keys ->
         buildGroupKeysValue st env keys b.Type
-    | v when shouldDeferBinding env v ->
+    | v when shouldDeferBinding env b.Type v ->
         VDeferred (b.Value, env)
     | _ ->
         // Force after eager evaluation: evalExpr's unconditional-defer arms

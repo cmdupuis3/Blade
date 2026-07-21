@@ -138,5 +138,6 @@ let private readAndFold (provider: string) (path: string) (varName: string) : Re
 let install () =
     Blade.ProviderRegistry.register netcdfSpec
     Blade.ProviderRegistry.register Blade.ZarrProvider.spec
+    Blade.ProviderRegistry.register Blade.CsvProvider.spec
     registerProviderReader readAndFold
     registerProviderNames (Blade.ProviderRegistry.names () |> Set.ofList)

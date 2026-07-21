@@ -1,0 +1,33 @@
+// TEST: ML Galilean Array Stencil And Call Chain
+import ml as ml
+// ============================================================================
+// Boost-variance is per-component and index-stable: indexing a velocity
+// ARRAY (with boost-invariant indices, runtime included) yields boost-
+// variant elements, so userland stencils judge with no special cases. Also:
+// galilean-certified functions may call galilean-certified functions — the
+// callee's boost-variant parameters require boost-variant arguments.
+// Values are exact integer arithmetic; the +10 boost shadows are inline.
+// ============================================================================
+function du(u: Array<Float like Idx<8>>, i: Int, j: Int) where ml.galilean(u) -> Float =
+  u(i) - u(j)
+
+function fluct_energy(u: Array<Float like Idx<8>>, um: Float) where ml.galilean(u, um) -> Float = {
+    let mut acc = 0.0
+    for k in 0..8 {
+        let d = u(k) - um
+        acc = acc + d * d
+    }
+    acc
+}
+
+function pair_diff(u: Array<Float like Idx<8>>) where ml.galilean(u) -> Float =
+  du(u, 3, 1) * du(u, 2, 0)
+
+let e = fluct_energy([1.0, 2.0, 4.0, 8.0, 3.0, 5.0, 7.0, 9.0], 4.0)
+// EXPECT: e = 65.0
+let e_boosted = fluct_energy([11.0, 12.0, 14.0, 18.0, 13.0, 15.0, 17.0, 19.0], 14.0)
+// EXPECT: e_boosted = 65.0
+let p = pair_diff([1.0, 2.0, 4.0, 8.0, 3.0, 5.0, 7.0, 9.0])
+// EXPECT: p = 18.0
+let p_boosted = pair_diff([11.0, 12.0, 14.0, 18.0, 13.0, 15.0, 17.0, 19.0])
+// EXPECT: p_boosted = 18.0

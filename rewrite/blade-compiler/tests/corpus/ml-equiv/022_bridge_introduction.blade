@@ -1,0 +1,33 @@
+// TEST: ML Equiv Bridge Introduction
+import ml as ml
+// ============================================================================
+// The Cartesian bridges as rep-INTRODUCTION forms inside certified bodies
+// (the y_to shape): an INVARIANT argument — the flat Cartesian components
+// of a physical rank-2 tensor — enters, a representation-typed value comes
+// out, under the documented conditional premise. This is what closes the
+// Phase-0 soundness wart: the basis constants are the compiler's one
+// implementation, certified once against the harmonics fit, instead of a
+// hand-transcribed table whose transposition would silently void every
+// downstream certificate.
+// The inverse direction (irreps_to_sym) is a rep ESCAPE and is REJECTED in
+// certified bodies (ml-equiv/023); here it runs in uncertified assembly
+// code, where feeding a solver is exactly its job.
+// ============================================================================
+let static GSPEC = [(0, 0, 1), (1, 0, 1), (2, 0, 1)]
+let static TAUSPEC = [(0, 0, 1), (2, 0, 1)]
+
+function bridge_g(g9: Array<Float like Idx<9>>) where ml.equiv(O3) -> Array<Float like IrrepsIdx<GSPEC>> =
+  ml.tensor_to_irreps(g9)
+
+function bridge_s(s6: Array<Float like Idx<6>>) where ml.equiv(O3) -> Array<Float like IrrepsIdx<TAUSPEC>> =
+  ml.sym_to_irreps(s6)
+
+let cg = bridge_g([0.6, -1.1, 0.4, 0.9, 0.3, -0.7, -0.2, 0.8, 1.2])
+// EXPECT: cg = [1.2124355652982142, 0.4242640687119285, 1.414213562373095, 1.0606601717798212, -0.14142135623730956, 0.07071067811865483, 0.6123724356957946, 0.1414213562373095, 0.21213203435596423]
+
+let cs = bridge_s([1.0, 0.5, -0.3, 2.0, 0.7, -1.0])
+// EXPECT: cs = [1.154700538379252, 0.7071067811865476, 0.9899494936611666, -2.041241452319315, -0.4242640687119285, -0.7071067811865475]
+
+// uncertified assembly: the escape back to Cartesian is fine out here
+let back = ml.irreps_to_sym(cs)
+// EXPECT: back = [1.0000000000000004, 0.5, -0.3, 2.0000000000000004, 0.7, -1.0]

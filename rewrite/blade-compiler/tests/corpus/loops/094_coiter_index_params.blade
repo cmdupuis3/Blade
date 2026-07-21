@@ -1,0 +1,20 @@
+// TEST: Coiter Index Params
+// Co-iteration kernels may take N + R parameters: one value per co-iterated
+// array PLUS the R shared iteration indices (the in-clause range rides as a
+// trailing virtual operand; its per-slot params bind to the loop indices and
+// carry the slots' nominal tags, so W(i) tag-checks against Lat). Covers the
+// 2-operand, single-operand, and rank-1 forms.
+type Lat = Idx<2>
+type Lon = Idx<3>
+let A: Array<Float64 like Lat, Lon> = [[1.0, 2.0, 3.0], [4.0, 5.0, 6.0]]
+let B: Array<Float64 like Lat, Lon> = [[10.0, 10.0, 10.0], [2.0, 2.0, 2.0]]
+let W: Array<Float64 like Lat> = [100.0, 200.0]
+
+let F = for (A, B) in range<Lat, Lon> <@> lambda(a, b, i, j) -> a * b + W(i) + 1.0 * j |> compute
+let G = for (A) in range<Lat, Lon> <@> lambda(a, i, j) -> a + W(i) |> compute
+let V: Array<Float64 like Lat> = [7.0, 9.0]
+let H = for (V) in range<Lat> <@> lambda(v, i) -> v * W(i) |> compute
+
+// EXPECT: F = [110, 121, 132, 208, 211, 214]
+// EXPECT: G = [101, 102, 103, 204, 205, 206]
+// EXPECT: H = [700, 1800]

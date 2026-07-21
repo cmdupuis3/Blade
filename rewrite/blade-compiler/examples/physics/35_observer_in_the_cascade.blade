@@ -1,4 +1,4 @@
-// TEST: Physics -- The Observer Inside the Cascade: Kick + Bayes, Tower-Native
+﻿// TEST: Physics -- The Observer Inside the Cascade: Kick + Bayes, Tower-Native
 // ============================================================================
 // The arc's two halves meet: example 34 made collisions OPERATORS ON TOWERS
 // (the kick); the ppl tower-Bayes primitives make conditioning an operator
@@ -77,7 +77,7 @@ let S5E = method_for(M1R, U4) <@> lambda(u: Array<Float64 like Idx<12>>, v: Arra
 let mu0 = S5E(0, 0)
 let mu1 = S5E(0, 1)
 let mu2 = S5E(0, 2)
-let end_sep = sqrt((mu0 - mu2) * (mu0 - mu2))
+let end_sep = abs(mu0 - mu2)
 let pos_ratio = end_sep / int_sep
 let pos_V = if pos_ratio > 20.0 then "INTERIOR_IS_GAUGE_ENDPOINT_IS_VISIBLE" else "NO"
 let cm2_0 = S5E(0, 3) - mu0 * mu0
@@ -94,9 +94,9 @@ let cm4_2 = S5E(0, 11) - 4.0 * mu2 * S5E(0, 8) + 6.0 * mu2 * mu2 * S5E(0, 5) - 3
 let GA = method_for(range<Idx<81>>) <@> lambda(r: Int64) -> 2.0 / (1.0 + MVAL(r % 3)) * (2.0 * MVAL(r % 3) / (MVAL(r % 3) + MVAL((r / 3) % 3))) * (2.0 * MVAL((r / 3) % 3) / (MVAL((r / 3) % 3) + MVAL((r / 9) % 3))) * (2.0 * MVAL((r / 9) % 3) / (MVAL((r / 9) % 3) + MVAL(r / 27))) * (2.0 * MVAL(r / 27) / (MVAL(r / 27) + MVAL(0))) |> compute
 let GB = method_for(range<Idx<81>>) <@> lambda(r: Int64) -> 2.0 / (1.0 + MVAL(r % 3)) * (2.0 * MVAL(r % 3) / (MVAL(r % 3) + MVAL((r / 3) % 3))) * (2.0 * MVAL((r / 3) % 3) / (MVAL((r / 3) % 3) + MVAL((r / 9) % 3))) * (2.0 * MVAL((r / 9) % 3) / (MVAL((r / 9) % 3) + MVAL(r / 27))) * (2.0 * MVAL(r / 27) / (MVAL(r / 27) + MVAL(1))) |> compute
 let GC = method_for(range<Idx<81>>) <@> lambda(r: Int64) -> 2.0 / (1.0 + MVAL(r % 3)) * (2.0 * MVAL(r % 3) / (MVAL(r % 3) + MVAL((r / 3) % 3))) * (2.0 * MVAL((r / 3) % 3) / (MVAL((r / 3) % 3) + MVAL((r / 9) % 3))) * (2.0 * MVAL((r / 9) % 3) / (MVAL((r / 9) % 3) + MVAL(r / 27))) * (2.0 * MVAL(r / 27) / (MVAL(r / 27) + MVAL(2))) |> compute
-let gmu0 = reduce(method_for(GA) <@> lambda(x) -> x, (+)) / 81.0
-let gmu2 = reduce(method_for(GC) <@> lambda(x) -> x, (+)) / 81.0
-let chan_gap = sqrt((mu0 - gmu0) * (mu0 - gmu0)) + sqrt((mu2 - gmu2) * (mu2 - gmu2))
+let gmu0 = reduce(GA, (+)) / 81.0
+let gmu2 = reduce(GC, (+)) / 81.0
+let chan_gap = abs(mu0 - gmu0) + abs(mu2 - gmu2)
 let chan_V = if chan_gap < 0.000000000001 then "CHANNEL_MATCHES_GRID" else "NO"
 
 // ---- the observations (two shots, fresh medium; sigma = 0.03, so
@@ -132,8 +132,8 @@ let T12 = g12 * (1.0 + (e12 * e12 / 0.00000081 - 1.0 / 0.0009) * cm2_2 / 2.0 - (
 let T20 = g20 * (1.0 + (e20 * e20 / 0.00000081 - 1.0 / 0.0009) * cm2_0 / 2.0 - (0.0 - e20 * e20 * e20 / 0.000000000729 + 3.0 * e20 / 0.00000081) * cm3_0 / 6.0 + (e20 * e20 * e20 * e20 / 0.0000000000006561 - 6.0 * e20 * e20 / 0.000000000729 + 3.0 / 0.00000081) * cm4_0 / 24.0)
 let T21 = g21 * (1.0 + (e21 * e21 / 0.00000081 - 1.0 / 0.0009) * cm2_1 / 2.0 - (0.0 - e21 * e21 * e21 / 0.000000000729 + 3.0 * e21 / 0.00000081) * cm3_1 / 6.0 + (e21 * e21 * e21 * e21 / 0.0000000000006561 - 6.0 * e21 * e21 / 0.000000000729 + 3.0 / 0.00000081) * cm4_1 / 24.0)
 let T22 = g22 * (1.0 + (e22 * e22 / 0.00000081 - 1.0 / 0.0009) * cm2_2 / 2.0 - (0.0 - e22 * e22 * e22 / 0.000000000729 + 3.0 * e22 / 0.00000081) * cm3_2 / 6.0 + (e22 * e22 * e22 * e22 / 0.0000000000006561 - 6.0 * e22 * e22 / 0.000000000729 + 3.0 / 0.00000081) * cm4_2 / 24.0)
-let jet_err = sqrt((T10 / La1 - 1.0) * (T10 / La1 - 1.0)) + sqrt((T11 / Lb1 - 1.0) * (T11 / Lb1 - 1.0)) + sqrt((T12 / Lc1 - 1.0) * (T12 / Lc1 - 1.0))
-let mf_err = sqrt((g10 / La1 - 1.0) * (g10 / La1 - 1.0)) + sqrt((g11 / Lb1 - 1.0) * (g11 / Lb1 - 1.0)) + sqrt((g12 / Lc1 - 1.0) * (g12 / Lc1 - 1.0))
+let jet_err = abs(T10 / La1 - 1.0) + abs(T11 / Lb1 - 1.0) + abs(T12 / Lc1 - 1.0)
+let mf_err = abs(g10 / La1 - 1.0) + abs(g11 / Lb1 - 1.0) + abs(g12 / Lc1 - 1.0)
 let dial_ratio = mf_err / jet_err
 let dial_V = if dial_ratio > 10.0 then "TOWER_MAKES_BETTER_OBSERVERS" else "NO"
 
@@ -160,10 +160,10 @@ let psum = p_092 + p_100 + p_108
 // ---- the oracle Bayes: exact grid likelihoods, hand-normalized ----
 let oz = La1 * La2 + Lb1 * Lb2 + Lc1 * Lc2
 let o_108 = Lc1 * Lc2 / oz
-let bayes_gap = sqrt((p_108 - o_108) * (p_108 - o_108))
+let bayes_gap = abs(p_108 - o_108)
 let bayes_V = if bayes_gap < 0.002 then "TOWER_BAYES_MATCHES_ORACLE" else "NO"
 let win_V = if p_108 > p_100 then (if p_108 > p_092 then (if p_108 > 0.5 then "TRUE_HYPOTHESIS_WINS" else "NO") else "NO") else "NO"
-let unity_V = if sqrt((psum - 1.0) * (psum - 1.0)) < 0.0000000001 then "INDICATORS_PARTITION_UNITY" else "NO"
+let unity_V = if abs(psum - 1.0) < 0.0000000001 then "INDICATORS_PARTITION_UNITY" else "NO"
 
 // positional identifiability; channel exactness; the likelihood dial;
 // tower Bayes vs the all-ensemble oracle; the budget spent to the last

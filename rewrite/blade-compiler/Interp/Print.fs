@@ -155,13 +155,18 @@ let private formatScalar (name: string) (et: ElemType) (v: Value) : string =
 ///               "001_basic_expression" for 001_basic_expression.blade); used
 ///               only for the (gate-stripped) `<progName> completed in 0s` line.
 ///   lookup    — fetches a binding's evaluated Value by its IRId.
+///   forcedIds — module-level DEFERRED bindings that were actually FORCED
+///               during evaluation (InterpState.ForcedDeferred): a deferred
+///               binding that ended up materialized auto-prints, mirroring
+///               CodeGen's forcedDeferredIdsCell in genPrintStatements; one
+///               that stayed deferred prints nothing.
 ///   irModule  — the lowered module whose Bindings drive the print order and the
 ///               same skip/kind decisions CodeGen.genPrintStatements makes.
 ///   sb        — output sink; lines are '\n'-terminated (see module header).
 ///
 /// Raises PrintUnsupported for binding kinds not handled in M0 (arrays, or a
 /// scalar binding with a missing / mistyped value) so the caller can classify.
-let printBindings (progName: string) (lookup: IRId -> Value option) (irModule: IRModule) (sb: StringBuilder) : unit =
+let printBindings (progName: string) (lookup: IRId -> Value option) (forcedIds: System.Collections.Generic.HashSet<IRId>) (irModule: IRModule) (sb: StringBuilder) : unit =
     // Timing line first — mirrors genMainWrapper, where `timing` precedes
     // `printCode`. Constant elapsed (gate-stripped); see module header.
     sb.Append(progName).Append(" completed in 0s").Append('\n') |> ignore
@@ -355,7 +360,7 @@ let printBindings (progName: string) (lookup: IRId -> Value option) (irModule: I
         // (IRMethodFor / IRObjectFor / a bare IRCompute of a non-combinator).
         // IRCompute of a combinator IS materialized and prints (an array — M2).
         let isPrintable =
-            if Set.contains b.Id deferredIds then false
+            if Set.contains b.Id deferredIds && not (forcedIds.Contains b.Id) then false
             elif (match Map.tryFind b.Id irModule.ProviderReads with
                   | Some spec -> spec.Streamed
                   | None -> false) then false

@@ -1,0 +1,144 @@
+// TEST: SGS Burgers LES A Posteriori
+import ml as ml
+// ============================================================================
+// The a posteriori closure loop, end to end, in one program:
+//   DNS: viscous Burgers, nD=64, periodic, advective form, 80 steps
+//   filter: W=4 box -> nL=16; exact 1-D subgrid stress tau = mean(u^2)-ubar^2
+//   a priori: Smagorinsky-form shape g = -2 Delta^2 |S| S, S = d(ubar)/dx,
+//             C learned by least squares over samples at t = 0,10,...,70
+//   closure: tau_model = C g — CERTIFIED `where ml.galilean(up, um)`: the
+//            velocity samples enter only through their difference, so the
+//            model term is provably frame-invariant (the resolved advection
+//            is legitimately frame-dependent; the CLOSURE must not be)
+//   a posteriori: coarse LES with and without the model vs filtered DNS.
+// PAYOFF PIN: err_model < err_nomodel — the no-model run rings at the shock
+// (a -2.42 spike); the learned closure damps it (0.488 vs 2.002).
+// Pins from the sgs/ oracle (`dump-burgers`), initial condition baked, all
+// arithmetic mirrored term for term — bit-exact through 80 nonlinear steps.
+// ============================================================================
+let pi = 3.141592653589793
+let u0 = [0.41266780745483916, 0.447677510598231, 0.46830600316099974, 0.4765561438702567, 0.4748523764520039, 0.46592115755171093, 0.452660553824885, 0.4380042663075381, 0.4247855444890299, 0.4156064446225211, 0.4127176671410404, 0.41791378517932154, 0.43244806654079837, 0.45697031859957027, 0.49149027948043295, 0.5353680744449058, 0.5873321925451609, 0.6455243564035266, 0.7075695992583589, 0.7706688691164143, 0.8317105884243723, 0.8873968436226417, 0.934379291497262, 0.9693994712188443, 0.9894280178840651, 0.9917972929038612, 0.9743221781811069, 0.9354042159950311, 0.8741148983355782, 0.790254694387101, 0.6843853229389262, 0.557833792556852, 0.41266780745483944, 0.25164322993911, 0.07812535912874319, -0.10401321063866739, -0.2905144882781752, -0.47687231610028424, -0.6584799122143186, -0.8307823020197528, -0.9894280178840649, -1.130414462102952, -1.2502215574640498, -1.3459287435173883, -1.4153109984817749, -1.4569103528648475, -1.4700802813260279, -1.455001378899488, -1.4126678074548393, -1.3448450969408678, -1.254000961548102, -1.1432118023480038, -1.0160484765982007, -0.8764456850740685, -0.728559933107829, -0.5766214355066295, -0.42478554448903033, -0.2769892754234306, -0.13681828785809746, -0.007389257656964632, 0.10874803360539786, 0.20968533987817617, 0.2942046789066689, 0.3617995118977306]
+
+// the ONE certified piece: the closure model term at a coarse cell, from
+// the two neighboring filtered-velocity samples
+function tau_model(up: Float, um: Float, hl: Float, c: Float) where ml.galilean(up, um) -> Float = {
+    let s = (up - um) / (2.0 * hl)
+    c * (-2.0 * hl * hl * abs(s) * s)
+}
+
+let mut u = [0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0]
+let mut un = [0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0]
+let mut ub = [0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0]
+let mut reg = [0.0, 0.0]
+
+// ---- DNS with interleaved a priori sampling: 8 x (sample; 10 steps) ----
+let dns_done = {
+    let hd = 2.0 * pi / 64.0
+    let hl = 2.0 * pi / 16.0
+    for i in 0..64 { u(i) = u0(i) }
+    for b in 0..8 {
+        for j in 0..16 {
+            let mut s = 0.0
+            for d in 0..4 { s += u(j * 4 + d) }
+            ub(j) = s / 4.0
+        }
+        for j in 0..16 {
+            let mut ps = 0.0
+            for d in 0..4 { ps += u(j * 4 + d) * u(j * 4 + d) }
+            let tau = ps / 4.0 - ub(j) * ub(j)
+            let jp = (j + 1) % 16
+            let jm = (j + 15) % 16
+            let sb = (ub(jp) - ub(jm)) / (2.0 * hl)
+            let g = -2.0 * hl * hl * abs(sb) * sb
+            reg(0) += tau * g
+            reg(1) += g * g
+        }
+        for tt in 0..10 {
+            for i in 0..64 {
+                let ip = (i + 1) % 64
+                let im = (i + 63) % 64
+                un(i) = u(i) + 0.01 * (0.05 * ((u(ip) - 2.0 * u(i) + u(im)) / (hd * hd)) - u(i) * ((u(ip) - u(im)) / (2.0 * hd)) - 0.0)
+            }
+            for i in 0..64 { u(i) = un(i) }
+        }
+    }
+    0.0
+}
+let c_learned = reg(0) / reg(1)
+// EXPECT: c_learned = 0.10247926333564443
+
+let mut dns_bar = [0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0]
+let bar_done = {
+    for j in 0..16 {
+        let mut s = 0.0
+        for d in 0..4 { s += u(j * 4 + d) }
+        dns_bar(j) = s / 4.0
+    }
+    0.0
+}
+// EXPECT: dns_bar = [0.3106288260701199, 0.42367258478749803, 0.4448532433129827, 0.4420370390195009, 0.5019661852184347, 0.6250871517093046, 0.773738281648543, 0.8977721610505398, -0.09129081277855333, -1.330026444654224, -1.1329260848315503, -0.8881521955334666, -0.6268948443326589, -0.36350955740184915, -0.10929060699123225, 0.12233507370660954]
+
+// ---- a posteriori LES, with the learned closure and without ----
+let mut lm = [0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0]
+let mut ln = [0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0]
+let mut lt = [0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0]
+let les_model_done = {
+    let hl = 2.0 * pi / 16.0
+    for j in 0..16 {
+        let mut s = 0.0
+        for d in 0..4 { s += u0(j * 4 + d) }
+        lm(j) = s / 4.0
+    }
+    for t in 0..80 {
+        for j in 0..16 {
+            let jp = (j + 1) % 16
+            let jm = (j + 15) % 16
+            let jpp = (j + 2) % 16
+            let jmm = (j + 14) % 16
+            let tp = tau_model(lm(jpp), lm(j), hl, c_learned)
+            let tm = tau_model(lm(j), lm(jmm), hl, c_learned)
+            lt(j) = lm(j) + 0.01 * (0.05 * ((lm(jp) - 2.0 * lm(j) + lm(jm)) / (hl * hl)) - lm(j) * ((lm(jp) - lm(jm)) / (2.0 * hl)) - (tp - tm) / (2.0 * hl))
+        }
+        for j in 0..16 { lm(j) = lt(j) }
+    }
+    0.0
+}
+// EXPECT: lm = [0.2954861658488696, 0.40729845563967637, 0.42471230456899406, 0.43702055106048715, 0.5119473544509064, 0.6391857818138728, 0.7889572339057705, 0.9410133520417426, 0.38956225292345326, -1.830598668172149, -1.08810109158179, -0.8929099991910181, -0.6317145724729729, -0.3735970349403537, -0.12375186423936332, 0.10548977834387468]
+
+let les_nomodel_done = {
+    let hl = 2.0 * pi / 16.0
+    for j in 0..16 {
+        let mut s = 0.0
+        for d in 0..4 { s += u0(j * 4 + d) }
+        ln(j) = s / 4.0
+    }
+    for t in 0..80 {
+        for j in 0..16 {
+            let jp = (j + 1) % 16
+            let jm = (j + 15) % 16
+            let jpp = (j + 2) % 16
+            let jmm = (j + 14) % 16
+            let tp = tau_model(ln(jpp), ln(j), hl, 0.0)
+            let tm = tau_model(ln(j), ln(jmm), hl, 0.0)
+            lt(j) = ln(j) + 0.01 * (0.05 * ((ln(jp) - 2.0 * ln(j) + ln(jm)) / (hl * hl)) - ln(j) * ((ln(jp) - ln(jm)) / (2.0 * hl)) - (tp - tm) / (2.0 * hl))
+        }
+        for j in 0..16 { ln(j) = lt(j) }
+    }
+    0.0
+}
+// EXPECT: ln = [0.3097274068829204, 0.41547636738827926, 0.4264237453126189, 0.4340005024029604, 0.5073117764753461, 0.6383743464064993, 0.77521705584994, 1.0839214967466042, 0.7854856081425711, -2.4219683793696634, -1.0610010872224989, -0.8952179583706537, -0.6355824185021679, -0.3690477359769344, -0.11327765437803439, 0.12015692821221231]
+
+let mut errs = [0.0, 0.0]
+let err_done = {
+    for j in 0..16 {
+        errs(0) += (lm(j) - dns_bar(j)) * (lm(j) - dns_bar(j))
+        errs(1) += (ln(j) - dns_bar(j)) * (ln(j) - dns_bar(j))
+    }
+    0.0
+}
+let err_model = errs(0)
+// EXPECT: err_model = 0.4877700644327492
+let err_nomodel = errs(1)
+// EXPECT: err_nomodel = 2.001755107285999
+let closure_improves_les = if err_model < err_nomodel then 1.0 else 0.0
+// EXPECT: closure_improves_les = 1.0

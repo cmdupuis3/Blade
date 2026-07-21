@@ -1,0 +1,8 @@
+// TEST: Functor Map Chain Over Concrete Array
+// Nested `g <$> (h <$> A)` over a concrete array folds both wrappers into one
+// elementwise pass: g(h(x)). Exercises the wrapper-composition (restWrappers) path.
+let A = [1.0, 2.0, 3.0]
+let h = lambda(x) -> x + 100.0
+let negate = lambda(x) -> 0.0 - x
+let result = (negate <$> (h <$> A)) |> compute
+// EXPECT: result = [-101.0, -102.0, -103.0]

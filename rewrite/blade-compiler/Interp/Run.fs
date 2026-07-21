@@ -295,7 +295,7 @@ let private execProgram (state: Core.InterpState) (merged: IRModule) (program: I
         | None -> None
 
     let sb = StringBuilder()
-    Print.printBindings testName lookup merged sb
+    Print.printBindings testName lookup state.ForcedDeferred merged sb
 
     // state.Err collects any non-fatal interpreter diagnostics -> stderr.
     { ExitCode = ExitOk; Stdout = sb.ToString(); Stderr = state.Err.ToString() }

@@ -1,4 +1,4 @@
-// TEST: Physics -- The Spectrum of the Law: Koopman Eigenvalues In-Language
+﻿// TEST: Physics -- The Spectrum of the Law: Koopman Eigenvalues In-Language
 // ============================================================================
 // The arc's EDMD thread (ex 15-16, tools/koopman_edmd.ps1) used only the
 // KERNEL of the fitted generator -- invariants live at eigenvalue zero --
@@ -15,13 +15,13 @@
 // FINDINGS (pinned):
 //   * THE FREQUENCY ALGEBRA, MEASURED. Conservative oscillator (three
 //     amplitudes; isochronism keeps the ladder sharp): the fitted L's
-//     spectrum is EXACTLY {±3i, ±2i, ±i (twice), 0} -- the harmonic
+//     spectrum is EXACTLY {Â±3i, Â±2i, Â±i (twice), 0} -- the harmonic
 //     ladder of the flow, plus the invariant at zero. Every real part
 //     pins at ~1e-12: frequencies from data, no FFT, no phase unwrap.
 //   * DISSIPATION SHIFTS THE LATTICE. Damped oscillator (gamma = 0.15,
 //     one spiral fills the plane): eigenvalues land on the exact lattice
-//     a mu+ + b mu- with mu± = -gamma ± i sqrt(1-gamma^2), a+b <= 3:
-//     pairs at -0.15 ± 0.9887i, -0.45 ± 2.9661i, -0.30 ± 1.9774i, ...
+//     a mu+ + b mu- with muÂ± = -gamma Â± i sqrt(1-gamma^2), a+b <= 3:
+//     pairs at -0.15 Â± 0.9887i, -0.45 Â± 2.9661i, -0.30 Â± 1.9774i, ...
 //   * THE DETECTOR READS DAMPING AS DISPLACEMENT. The energy-like
 //     combination that sat at eigenvalue 0 in the conservative run
 //     appears at EXACTLY mu+ + mu- = -2 gamma = -0.3 + 0i (the smallest-
@@ -163,9 +163,9 @@ let devD = sqrt((RED(0) + 0.45) * (RED(0) + 0.45)) + sqrt((IMD(0) - 2.9660579899
 
 // ---- verdicts ----
 let ladderV = if maxreC < 0.000000000001 then (if devL < 0.000000000001 then "IMAGINARY_LADDER_MEASURED" else "NO") else "NO"
-let invV = if sqrt(rec8 * rec8) < 0.000000000001 then (if sqrt(imc8 * imc8) < 0.000000000001 then "INVARIANT_AT_ZERO" else "NO") else "NO"
+let invV = if abs(rec8) < 0.000000000001 then (if abs(imc8) < 0.000000000001 then "INVARIANT_AT_ZERO" else "NO") else "NO"
 let lattV = if devD < 0.0000000001 then "DAMPED_LATTICE_EXACT" else "NO"
-let dispV = if sqrt((red8 + 0.3) * (red8 + 0.3)) < 0.0000000001 then (if sqrt(imd8 * imd8) < 0.000000000001 then "INVARIANT_DISPLACED_TO_MINUS_2GAMMA" else "NO") else "NO"
+let dispV = if abs(red8 + 0.3) < 0.0000000001 then (if abs(imd8) < 0.000000000001 then "INVARIANT_DISPLACED_TO_MINUS_2GAMMA" else "NO") else "NO"
 
 // the ladder, the kernel, the lattice, the displacement:
 // EXPECT: imc0 = 3

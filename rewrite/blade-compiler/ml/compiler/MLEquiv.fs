@@ -497,6 +497,20 @@ and private judgeApp (ctx: Ctx) (env: Map<string, RepStatus>) (e: Expr) (f: Expr
             reject (sprintf "%s: inside an equiv-certified body use the full call form — the 2-argument binding form is for uncertified assembly code" op)
         | ("linear_rows" | "gated_rows"), _ ->
             reject (sprintf "%s is not admitted in equiv-certified bodies (row-stacked buffers are not representation spaces); apply the single-vector op per row" op)
+        // --- Cartesian bridges: rep-INTRODUCTION forms (the y_to shape).
+        // Conditional premise: the invariant input really is the flat
+        // row-major 3x3 (resp. packed symmetric) Cartesian tensor of a
+        // physical rank-2 quantity; then the result transforms as declared.
+        | "tensor_to_irreps", [ gE ] ->
+            requireInv "tensor_to_irreps input (flat row-major 3x3 Cartesian tensor)" gE
+            |> Result.map (fun () -> Rep Blade.ML.CartesianBridge.gradSpec)
+        | "sym_to_irreps", [ sE ] ->
+            requireInv "sym_to_irreps input (packed symmetric Cartesian tensor)" sE
+            |> Result.map (fun () -> Rep Blade.ML.CartesianBridge.tauSpec)
+        | "irreps_to_sym", _ ->
+            reject "irreps_to_sym reads basis-dependent Cartesian components out of a representation — a rep escape, for uncertified assembly code only (e.g. feeding a solver); inside a certified body stay in irreps space"
+        | ("tensor_to_irreps" | "sym_to_irreps"), _ ->
+            reject (sprintf "%s: unrecognized call shape inside an equiv-certified body" op)
         | ("tensor_product" | "linear" | "gated" | "scalars" | "norms" | "y_to"), _ ->
             reject (sprintf "%s: unrecognized call shape inside an equiv-certified body" op)
         | _ ->

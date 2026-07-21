@@ -69,7 +69,7 @@ and TypedMethodForInfo = {
     ArrayTypes: IRArrayType list
     SDimsPerArray: int list
     TotalSDims: int
-    SharedIndexType: IRIndexType option  // For co-iteration: shared index space from 'in' clause
+    SharedIndexTypes: IRIndexType list  // For co-iteration: shared iteration records (empty = not co-iteration; multi = product space)
 }
 
 // ============================================================================
@@ -93,7 +93,7 @@ and TypedApplyInfo = {
     Arrays: TypedExpr list                  // The actual array expressions
     Identities: ArrayIdentity list          // Array identity tracking (for symmetry)
     ArrayTypes: IRArrayType list            // Array type info
-    SharedIndexType: IRIndexType option     // For co-iteration (zip)
+    SharedIndexTypes: IRIndexType list      // For co-iteration (zip): shared records (empty = not co-iteration)
     SymcomStates: SymcomState list
     TriangularLevels: bool list
     SDimsPerArray: int list

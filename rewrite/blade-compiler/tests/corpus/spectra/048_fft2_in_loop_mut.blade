@@ -1,0 +1,25 @@
+// TEST: Spectra fft2: transform of an evolving mut field inside a for loop
+// The pseudo-spectral seam: a module-level ANNOTATED `let mut` field is
+// rewritten each pass of a runtime loop and re-transformed. fft2's shape
+// discovery reads the declared annotation (mutability is irrelevant to it),
+// and the rewrite walker reaches call sites inside for bodies — so the
+// call sits legally inside the recurrence. f(i,j) = (s+1)*(4i+j); the DC
+// bin is (s+1)*120 and the (2,1) bin's imaginary part is exactly 0 by
+// symmetry (the column phase sum vanishes), so acc = 120+240+360 = 720
+// exactly. Pin cross-checked against spectra/OracleDump.fs.
+import spectra as sp
+let mut f: Array<Float64 like Idx<4>, Idx<4>> = [[0.0, 0.0, 0.0, 0.0], [0.0, 0.0, 0.0, 0.0], [0.0, 0.0, 0.0, 0.0], [0.0, 0.0, 0.0, 0.0]]
+let acc = {
+    let mut a = 0.0
+    for s in 0..3 {
+        for i in 0..4 {
+            for j in 0..4 {
+                f(i, j) = 1.0 * (s + 1) * (i * 4 + j)
+            }
+        }
+        let X = sp.fft2(f)
+        a = a + real(X(0, 0)) + imag(X(2, 1))
+    }
+    a
+}
+// EXPECT: acc = 720

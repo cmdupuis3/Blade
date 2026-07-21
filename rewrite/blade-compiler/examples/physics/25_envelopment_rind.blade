@@ -1,4 +1,4 @@
-// TEST: Physics -- The Rind: Enveloped in a Ball That Might Be There
+﻿// TEST: Physics -- The Rind: Enveloped in a Ball That Might Be There
 // ============================================================================
 // Two balls at known density, mass ratio 1000. The big one (M = 1000,
 // R_B = 10, sharp) rests at the origin; the small one's mass is known only
@@ -42,8 +42,8 @@ let RP = [0.368403149864, 0.531329284591, 0.736806299728, 1.0, 1.39247665008, 1.
 let CJ = reduce(method_for(zip(XS, XB, RS)) <@> lambda(x, b, r) -> (if x - b - 10.0 - r < 0.0 then 1.0 else 0.0), (+))
 let P_joint = CJ / 7.0
 let J1s = reduce(method_for(zip(XS, XB, RS)) <@> lambda(x, b, r) -> x - b - 10.0 - r, (+))
-let J2s = reduce(method_for(zip(XS, XB, RS)) <@> lambda(x, b, r) -> (x - b - 10.0 - r) * (x - b - 10.0 - r), (+))
-let J3s = reduce(method_for(zip(XS, XB, RS)) <@> lambda(x, b, r) -> (x - b - 10.0 - r) * (x - b - 10.0 - r) * (x - b - 10.0 - r), (+))
+let J2s = reduce(method_for(zip(XS, XB, RS)) <@> lambda(x, b, r) -> (x - b - 10.0 - r) ^ 2.0, (+))
+let J3s = reduce(method_for(zip(XS, XB, RS)) <@> lambda(x, b, r) -> ((x - b - 10.0 - r) ^ 2.0) * (x - b - 10.0 - r), (+))
 let Jm1 = J1s / 7.0
 let Jm2 = J2s / 7.0
 let Jm3 = J3s / 7.0
@@ -57,8 +57,8 @@ let P_prod = CP / 49.0
 let DP = reduce(method_for(zip(XP, BP, RP)) <@> lambda(x, b, r) -> (if x - b - 10.0 - r < 0.0 then 0.0 - (x - b - 10.0 - r) else 0.0), (+))
 let meanDepth = DP / CP
 let PR1 = reduce(method_for(zip(XP, BP, RP)) <@> lambda(x, b, r) -> x - b - 10.0 - r, (+))
-let PR2 = reduce(method_for(zip(XP, BP, RP)) <@> lambda(x, b, r) -> (x - b - 10.0 - r) * (x - b - 10.0 - r), (+))
-let PR3 = reduce(method_for(zip(XP, BP, RP)) <@> lambda(x, b, r) -> (x - b - 10.0 - r) * (x - b - 10.0 - r) * (x - b - 10.0 - r), (+))
+let PR2 = reduce(method_for(zip(XP, BP, RP)) <@> lambda(x, b, r) -> (x - b - 10.0 - r) ^ 2.0, (+))
+let PR3 = reduce(method_for(zip(XP, BP, RP)) <@> lambda(x, b, r) -> ((x - b - 10.0 - r) ^ 2.0) * (x - b - 10.0 - r), (+))
 let Pm1 = PR1 / 49.0
 let Pm2 = PR2 / 49.0
 let Pm3 = PR3 / 49.0

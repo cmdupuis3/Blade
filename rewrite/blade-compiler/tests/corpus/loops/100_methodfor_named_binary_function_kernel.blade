@@ -1,0 +1,10 @@
+// TEST: method_for with a named BINARY function kernel (multi-param eta-expansion)
+// Eta-expands to lambda(a, b) -> combine(a, b), exercising the >1 arity path.
+// method_for(A, B) with a 2-arg kernel is a rank-2 co-iteration (all pairs),
+// so the result is the 3x3 outer product of combine over A x B — identical to
+// the inline `lambda(a, b) -> a * b + 1.0` kernel.
+function combine(a: Float64, b: Float64) -> Float64 = a * b + 1.0
+let A = [1.0, 2.0, 3.0]
+let B = [10.0, 20.0, 30.0]
+let c = method_for(A, B) <@> combine |> compute
+// EXPECT: c = [11.0, 21.0, 31.0, 21.0, 41.0, 61.0, 31.0, 61.0, 91.0]

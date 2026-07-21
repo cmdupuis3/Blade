@@ -388,13 +388,33 @@ let private normsDecl (name: string) (spec: Spec) : FunctionDecl =
     mkFunc name [ ("x", tyIrrepsArr spec) ] (tyFloatArr slots.Length)
         (syn (ExprBlock (stmts, Some (v "out"))))
 
+/// Cartesian<->irreps bridge ops (rank-2, 3-D, v1): a dense matvec over the
+/// baked orthonormal closed-form table (Blade.ML.CartesianBridge — the
+/// single source of truth, fit-certified against SphericalHarmonics by the
+/// ml/ `dump-cartesian` oracle). Loop order mirrors the oracle's matvec
+/// (i ascending, j ascending) for ulp agreement with the sgs corpus pins.
+let private bridgeDecl (name: string) (table: float list) (n: int)
+                       (pName: string) (tyIn: TypeExpr) (tyOut: TypeExpr) : FunctionDecl =
+    let body =
+        syn (ExprBlock (
+            [ sLetMut "out" (zerosLit n)
+              sLet "__b" (floatArrLit table)
+              sFor "i" 0 n
+                [ sFor "j" 0 n
+                    [ sAccum (idx "out" (v "i"))
+                             (mul (idx "__b" (add (mul (v "i") (iLit n)) (v "j")))
+                                  (idx pName (v "j"))) ] ] ],
+            Some (v "out")))
+    mkFunc name [ (pName, tyIn) ] tyOut body
+
 // ============================================================================
 // Call-site recognition + program expansion
 // ============================================================================
 
 let private opNames =
     Set.ofList [ "y_to"; "tensor_product"; "linear"; "gated"; "linear_rows"; "gated_rows"
-                 "scalars"; "norms"; "derive_linear"; "derive_tp" ]
+                 "scalars"; "norms"; "derive_linear"; "derive_tp"
+                 "tensor_to_irreps"; "sym_to_irreps"; "irreps_to_sym" ]
 
 /// Static sizing builtins that make up the rest of the ML surface (used in
 /// `let static` positions). Registered in the static evaluator under mangled
@@ -618,6 +638,24 @@ let rec private rewriteExpr (st: ElabState) (statics: StaticEnv) (aliases: Set<s
                 elabDeriveTp st statics s1E s2E
                 |> Result.map (fun n -> inheritSpan e (ExprVar n))
             | "derive_tp", _ -> Error (err5000 "derive_tp: expected derive_tp(SPEC1, SPEC2[, x, y, w])")
+            | "tensor_to_irreps", [ gE ] ->
+                ensure st (fingerprint "tensor_to_irreps" (box ())) (fun n ->
+                    Ok (bridgeDecl n Blade.ML.CartesianBridge.bridge9Flat 9 "g"
+                            (tyFloatArr 9) (tyIrrepsArr Blade.ML.CartesianBridge.gradSpec)))
+                |> Result.map (fun n -> inheritSpan e (ExprApp (v n, [ gE ])))
+            | "tensor_to_irreps", _ -> Error (err5000 "tensor_to_irreps: expected tensor_to_irreps(g) with g the flat row-major 3x3 Cartesian tensor (Idx<9>)")
+            | "sym_to_irreps", [ sE ] ->
+                ensure st (fingerprint "sym_to_irreps" (box ())) (fun n ->
+                    Ok (bridgeDecl n Blade.ML.CartesianBridge.symToIrrFlat 6 "s"
+                            (tyFloatArr 6) (tyIrrepsArr Blade.ML.CartesianBridge.tauSpec)))
+                |> Result.map (fun n -> inheritSpan e (ExprApp (v n, [ sE ])))
+            | "sym_to_irreps", _ -> Error (err5000 "sym_to_irreps: expected sym_to_irreps(s) with s the packed symmetric tensor [s00, s01, s02, s11, s12, s22] (Idx<6>)")
+            | "irreps_to_sym", [ tE ] ->
+                ensure st (fingerprint "irreps_to_sym" (box ())) (fun n ->
+                    Ok (bridgeDecl n Blade.ML.CartesianBridge.irrToSymFlat 6 "t"
+                            (tyIrrepsArr Blade.ML.CartesianBridge.tauSpec) (tyFloatArr 6)))
+                |> Result.map (fun n -> inheritSpan e (ExprApp (v n, [ tE ])))
+            | "irreps_to_sym", _ -> Error (err5000 "irreps_to_sym: expected irreps_to_sym(t) with t transforming as IrrepsIdx<[(0,0,1), (2,0,1)]>")
             | _ -> Error (err5000 (sprintf "%s: unrecognized ML-op call shape" op)))
     | ExprKind.ExprLit _ | ExprKind.ExprVar _ -> Ok e
     | ExprKind.ExprApp (f, args) ->
@@ -708,6 +746,7 @@ let private expandModule (decls: Located<Decl> list) : Result<Located<Decl> list
         let normalizeConjunct (cname: string) =
             match cname.Split('.') with
             | [| a; "equiv" |] when Set.contains a aliases -> "__ml_equiv"
+            | [| a; "galilean" |] when Set.contains a aliases -> "__ml_galilean"
             | _ -> cname
         let declsNoImport =
             declsNoImport |> List.map (fun d ->
@@ -777,6 +816,27 @@ let private expandModule (decls: Located<Decl> list) : Result<Located<Decl> list
             match judged with
             | Error ds -> Error (Choice2Of2 ds)
             | Ok () ->
+            // The galilean judgment runs at the SAME seam (surface `sgs.*`
+            // former calls are still visible — sgs elaborates after ml).
+            // It is independent of the equiv judgment: a function may carry
+            // both conjuncts, each judged in its own domain.
+            let judgedGal =
+                match Blade.ML.Galilean.buildCertTable decls1 with
+                | Error d -> Error [ d ]
+                | Ok gcerts when Map.isEmpty gcerts -> Ok ()
+                | Ok gcerts ->
+                    let sgsAliases = Blade.ML.Galilean.sgsAliasesOf decls1
+                    let diags =
+                        decls1
+                        |> List.collect (fun d ->
+                            match d.Value with
+                            | DeclFunction fd ->
+                                Blade.ML.Galilean.judgeFunction gcerts aliases sgsAliases fd
+                            | _ -> [])
+                    if diags.IsEmpty then Ok () else Error diags
+            match judgedGal with
+            | Error ds -> Error (Choice2Of2 ds)
+            | Ok () ->
             // Pass 2: rewrite qualified ops into generated specialized functions.
             (mapDecls statics true decls1 |> Result.mapError Choice1Of2) |> Result.map (fun decls2 ->
                 if st.Decls.IsEmpty then decls2
@@ -797,6 +857,7 @@ let private expandModule (decls: Located<Decl> list) : Result<Located<Decl> list
 let private expandStr (program: Program) : Result<Program, ExpandFailure> =
     Blade.ML.Statics.install ()
     Blade.ML.Equiv.register ()
+    Blade.ML.Galilean.register ()
     program.Modules
     |> List.fold (fun acc m ->
         acc |> Result.bind (fun ms ->

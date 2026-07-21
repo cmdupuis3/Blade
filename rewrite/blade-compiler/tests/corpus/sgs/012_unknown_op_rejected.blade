@@ -1,0 +1,6 @@
+// TEST: SGS Unknown Op Rejected (rejects)
+import sgs as sgs
+// An unknown alias-qualified op is claimed by the elaborator and steered
+// with the available vocabulary (grad, box_filter, stress) — BL5600.
+let U: Array<Float64 like Idx<3>, Idx<2>, Idx<2>, Idx<2>> = [[[[1.0, 1.0], [1.0, 1.0]], [[1.0, 1.0], [1.0, 1.0]]], [[[2.0, 2.0], [2.0, 2.0]], [[2.0, 2.0], [2.0, 2.0]]], [[[3.0, 3.0], [3.0, 3.0]], [[3.0, 3.0], [3.0, 3.0]]]]
+let X = sgs.laplacian(U)

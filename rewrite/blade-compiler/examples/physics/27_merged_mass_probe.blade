@@ -1,4 +1,4 @@
-// TEST: Physics -- Probing a Merged Pair: How Much Mass Does C Encounter?
+﻿// TEST: Physics -- Probing a Merged Pair: How Much Mass Does C Encounter?
 // ============================================================================
 // Two balls A (far) and B (near) with masses from the SAME overlapping jet
 // sit close together -- a "merged" pair: the unordered mass pair is known,
@@ -33,19 +33,19 @@ let NC = [2.0, 2.0, 2.0, 2.0, 2.0, 1.0, 2.0, 2.0, 2.0, 2.0, 1.0, 1.0, 1.0, 2.0, 
 
 // --- m_eff tower from the probe's recoil ---
 let M1s = reduce(method_for(VF) <@> lambda(v) -> 1.0 * (2.0 - v) / (2.0 + v), (+))
-let M2s = reduce(method_for(VF) <@> lambda(v) -> (1.0 * (2.0 - v) / (2.0 + v)) * (1.0 * (2.0 - v) / (2.0 + v)), (+))
+let M2s = reduce(method_for(VF) <@> lambda(v) -> (1.0 * (2.0 - v) / (2.0 + v)) ^ 2.0, (+))
 let meff_k1 = M1s / 25.0
 let meff_k2 = M2s / 25.0 - meff_k1 * meff_k1
 
 // --- the two naive models ---
-let Bs = reduce(method_for(MB) <@> lambda(b) -> b, (+))
+let Bs = reduce(MB, (+))
 let near_k1 = Bs / 25.0
-let Ss = reduce(method_for(zip(MA, MB)) <@> lambda(a, b) -> a + b, (+))
+let Ss = reduce(MA + MB, (+))
 let sum_k1 = Ss / 25.0
 let gap_sum = sum_k1 - meff_k1
 let gap_near = meff_k1 - near_k1
-let sum_V = if sqrt(gap_sum * gap_sum) > 0.3 then "NOT_THE_SUM" else "SUM_LIKE"
-let near_V = if sqrt(gap_near * gap_near) > 0.3 then "NOT_ONE_BALL" else "SINGLE_HIT_LIKE"
+let sum_V = if abs(gap_sum) > 0.3 then "NOT_THE_SUM" else "SUM_LIKE"
+let near_V = if abs(gap_near) > 0.3 then "NOT_ONE_BALL" else "SINGLE_HIT_LIKE"
 
 // --- the cascade branch is fuzzy: rattle probability ---
 let R2 = reduce(method_for(NC) <@> lambda(n) -> (if n > 1.5 then 1.0 else 0.0), (+))
@@ -59,7 +59,7 @@ let Ln = reduce(method_for(zip(MA, MB)) <@> lambda(a, b) -> (if a - b > 0.001 th
 let meff_heavyNear = Hs / Hn
 let meff_lightNear = Ls / Ln
 let resharpen = meff_lightNear - meff_heavyNear
-let id_V = if sqrt(resharpen * resharpen) > 0.05 then "PROBE_RESHARPENS_IDENTITY" else "IDENTITY_STAYS_MERGED"
+let id_V = if abs(resharpen) > 0.05 then "PROBE_RESHARPENS_IDENTITY" else "IDENTITY_STAYS_MERGED"
 
 // an unbound pair is a cascade, not a mass; the answer is a tower; and the
 // probe recovers the which-is-where bit the merged record erased:

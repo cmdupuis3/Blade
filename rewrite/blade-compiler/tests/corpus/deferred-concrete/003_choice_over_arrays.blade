@@ -1,0 +1,8 @@
+// TEST: Choice Over Concrete Arrays
+// `A <|> B` over two materialized arrays: elementwise (lhs != 0 ? lhs : rhs).
+// Previously eagerly materialized (through a scalar-shaped path that took the whole
+// RHS); now defers and materializes elementwise on |> compute.
+let A = [1.0, 0.0, 3.0]
+let B = [10.0, 20.0, 30.0]
+let result = (A <|> B) |> compute
+// EXPECT: result = [1.0, 20.0, 3.0]

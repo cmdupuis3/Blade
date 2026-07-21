@@ -1,0 +1,11 @@
+// TEST: Binop Mixed Dense Packed (rejects)
+// Elementwise binop on arrays whose shape mixes a dense record with a
+// packed-symmetric record ([Y; SymIdx<2,3>]) must reject: the packed
+// record's triangular walk cannot interleave a foreign dense axis in one
+// co-iteration product. (Single-record operands — dense rank-1 OR a sole
+// packed record — remain zip-able as before.)
+type Y = Idx<2>
+function f(p: Array<Float64 like Y, SymIdx<2, 3>>, q: Array<Float64 like Y, SymIdx<2, 3>>) -> Float64 = {
+    let bad = p * q
+    bad((0 : Y), 0, 0)
+}

@@ -1,4 +1,4 @@
-// TEST: Physics -- The Certificate Machine: Walls Proven, Not Imported
+﻿// TEST: Physics -- The Certificate Machine: Walls Proven, Not Imported
 // ============================================================================
 // The arc's verdicts have leaned on three kinds of authority: exhaustive
 // sweeps (classical walls), constructions (membership), and one imported
@@ -67,7 +67,7 @@ let td4 = 1.0 - tL42 * tL42 * td2 - tL43 * tL43 * td3
 let tr54 = 0.0 - tL42 * h - tL43 * (0.0 - h)
 let tL54 = 0.0
 let td5 = 1.0 - h * h - h * h - tL54 * tL54 * td4
-let tsir_V = if sqrt(td4 * td4) < 0.000000000001 then (if sqrt(td5 * td5) < 0.000000000001 then (if sqrt(tr54 * tr54) < 0.000000000001 then "TSIRELSON_PSD_RANK3_EXTREMAL" else "NO") else "NO") else "NO"
+let tsir_V = if abs(td4) < 0.000000000001 then (if abs(td5) < 0.000000000001 then (if abs(tr54) < 0.000000000001 then "TSIRELSON_PSD_RANK3_EXTREMAL" else "NO") else "NO") else "NO"
 
 // ---- (3) rank-4 membership: ex 38's 7x7 supra-quantum Gram ----
 // basis {u, a1, a2, a3, b1, b2, b3}; entries from the R^4 construction:
@@ -105,7 +105,7 @@ let gnum75 = 0.0 - gL72 * gL52 * gd2 - gL73 * gL53 * gd3 - gL74 * gL54
 let gd6 = 1.0 - gL61 * gL61 - gL62 * gL62 * gd2 - gL63 * gL63 * gd3 - gL64 * gL64
 let gr76 = 0.0 - gL72 * gL62 * gd2 - gL73 * gL63 * gd3 - gL74 * gL64
 let gd7 = 1.0 - gL72 * gL72 * gd2 - gL73 * gL73 * gd3 - gL74 * gL74
-let gzero = sqrt(gd5 * gd5) + sqrt(gd6 * gd6) + sqrt(gd7 * gd7) + sqrt(gnum65 * gnum65) + sqrt(gnum75 * gnum75) + sqrt(gr76 * gr76)
+let gzero = abs(gd5) + abs(gd6) + abs(gd7) + abs(gnum65) + abs(gnum75) + abs(gr76)
 let gram_V = if gd2 > 0.0 then (if gd3 > 0.0 then (if gzero < 0.000000000001 then "SUPRA_POINT_PSD_RANK4" else "NO") else "NO") else "NO"
 
 // ---- (4) the dual certificate: Tsirelson's bound proven ----
@@ -124,21 +124,21 @@ let lL53 = LAM(4, 2) / ld3
 let ld4 = LAM(3, 3) - lL42 * lL42 * ld2 - lL43 * lL43 * ld3
 let lr54 = LAM(4, 3) - lL52 * lL42 * ld2 - lL53 * lL43 * ld3
 let ld5 = LAM(4, 4) - lL52 * lL52 * ld2 - lL53 * lL53 * ld3
-let lam_psd_V = if LAM(0, 0) < 0.000000000001 then (if ld2 > 0.0 then (if ld3 > 0.0 then (if sqrt(ld4 * ld4) < 0.000000000001 then (if sqrt(lr54 * lr54) < 0.000000000001 then (if sqrt(ld5 * ld5) < 0.000000000001 then "LAMBDA_PSD_RANK2" else "NO") else "NO") else "NO") else "NO") else "NO") else "NO"
+let lam_psd_V = if LAM(0, 0) < 0.000000000001 then (if ld2 > 0.0 then (if ld3 > 0.0 then (if abs(ld4) < 0.000000000001 then (if abs(lr54) < 0.000000000001 then (if abs(ld5) < 0.000000000001 then "LAMBDA_PSD_RANK2" else "NO") else "NO") else "NO") else "NO") else "NO") else "NO"
 // (b) coefficient matching: off-diagonals reproduce -CHSH, nothing else
 let match_a0b0 = 2.0 * LAM(1, 3) + 1.0
 let match_a0b1 = 2.0 * LAM(1, 4) + 1.0
 let match_a1b0 = 2.0 * LAM(2, 3) + 1.0
 let match_a1b1 = 2.0 * LAM(2, 4) - 1.0
 let spurious = sqrt(LAM(1, 2) * LAM(1, 2)) + sqrt(LAM(3, 4) * LAM(3, 4)) + sqrt(LAM(0, 1) * LAM(0, 1)) + sqrt(LAM(0, 2) * LAM(0, 2)) + sqrt(LAM(0, 3) * LAM(0, 3)) + sqrt(LAM(0, 4) * LAM(0, 4))
-let coeff_gap = sqrt(match_a0b0 * match_a0b0) + sqrt(match_a0b1 * match_a0b1) + sqrt(match_a1b0 * match_a1b0) + sqrt(match_a1b1 * match_a1b1) + spurious
+let coeff_gap = abs(match_a0b0) + abs(match_a0b1) + abs(match_a1b0) + abs(match_a1b1) + spurious
 // (c) the bound: <Lambda, M> = tr(Lambda) - CHSH(M) for unit-diagonal M
 let lam_tr = LAM(0, 0) + LAM(1, 1) + LAM(2, 2) + LAM(3, 3) + LAM(4, 4)
-let bound_gap = sqrt((lam_tr - 2.82842712474619) * (lam_tr - 2.82842712474619))
+let bound_gap = abs(lam_tr - 2.82842712474619)
 let cert_V = if coeff_gap < 0.000000000001 then (if bound_gap < 0.000000000001 then "TSIRELSON_BOUND_CERTIFIED_IN_LANGUAGE" else "NO") else "NO"
 // complementary slackness: the Tsirelson tower saturates the certificate
 let slack = lam_tr + 2.0 * (LAM(1, 3) * h + LAM(1, 4) * h + LAM(2, 3) * h + LAM(2, 4) * (0.0 - h))
-let slack_V = if sqrt(slack * slack) < 0.000000000001 then "EXTREMAL_POINT_SATURATES" else "NO"
+let slack_V = if abs(slack) < 0.000000000001 then "EXTREMAL_POINT_SATURATES" else "NO"
 
 // refute by pivot; verify membership at two boundary ranks; certify the
 // quantum ceiling; watch the extremal point saturate it:

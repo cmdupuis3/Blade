@@ -1,4 +1,4 @@
-// TEST: Physics -- Collisions as Channels: Composing Towers Without Ensembles
+﻿// TEST: Physics -- Collisions as Channels: Composing Towers Without Ensembles
 // ============================================================================
 // The composition gap (the review's #2, the reconstruction program's missing
 // piece): every experiment so far ran parameters -> realizations ->
@@ -111,19 +111,19 @@ let GM4 = method_for(range<Idx<729>>) <@> lambda(r: Int64) -> MVAL((r / 27) % 3)
 let GM5 = method_for(range<Idx<729>>) <@> lambda(r: Int64) -> MVAL((r / 81) % 3) |> compute
 let GM6 = method_for(range<Idx<729>>) <@> lambda(r: Int64) -> MVAL((r / 243) % 3) |> compute
 let GX1 = method_for(GM1) <@> lambda(m) -> 2.0 / (1.0 + m) |> compute
-let GX2 = method_for(zip(GX1, GM1, GM2)) <@> lambda(x, a, b) -> x * 2.0 * a / (a + b) |> compute
-let GX3 = method_for(zip(GX2, GM2, GM3)) <@> lambda(x, a, b) -> x * 2.0 * a / (a + b) |> compute
-let GX4 = method_for(zip(GX3, GM3, GM4)) <@> lambda(x, a, b) -> x * 2.0 * a / (a + b) |> compute
-let GX5 = method_for(zip(GX4, GM4, GM5)) <@> lambda(x, a, b) -> x * 2.0 * a / (a + b) |> compute
-let GX6 = method_for(zip(GX5, GM5, GM6)) <@> lambda(x, a, b) -> x * 2.0 * a / (a + b) |> compute
-let g6p1 = reduce(method_for(GX6) <@> lambda(x) -> x, (+)) / 729.0
-let g6p2 = reduce(method_for(GX6) <@> lambda(x) -> x * x, (+)) / 729.0
+let GX2 = GX1 * 2.0 * GM1 / (GM1 + GM2)
+let GX3 = GX2 * 2.0 * GM2 / (GM2 + GM3)
+let GX4 = GX3 * 2.0 * GM3 / (GM3 + GM4)
+let GX5 = GX4 * 2.0 * GM4 / (GM4 + GM5)
+let GX6 = GX5 * 2.0 * GM5 / (GM5 + GM6)
+let g6p1 = reduce(GX6, (+)) / 729.0
+let g6p2 = prodsum(GX6, GX6) / 729.0
 let g6p3 = reduce(method_for(GX6) <@> lambda(x) -> x * x * x, (+)) / 729.0
 let g6p4 = reduce(method_for(GX6) <@> lambda(x) -> x * x * x * x, (+)) / 729.0
-let relgap1 = sqrt((c6p1 / g6p1 - 1.0) * (c6p1 / g6p1 - 1.0))
-let relgap2 = sqrt((c6p2 / g6p2 - 1.0) * (c6p2 / g6p2 - 1.0))
-let relgap3 = sqrt((c6p3 / g6p3 - 1.0) * (c6p3 / g6p3 - 1.0))
-let relgap4 = sqrt((c6p4 / g6p4 - 1.0) * (c6p4 / g6p4 - 1.0))
+let relgap1 = abs(c6p1 / g6p1 - 1.0)
+let relgap2 = abs(c6p2 / g6p2 - 1.0)
+let relgap3 = abs(c6p3 / g6p3 - 1.0)
+let relgap4 = abs(c6p4 / g6p4 - 1.0)
 
 // ---- spectral readout: growth rates, the mean-transfer identity, naive gap ----
 let erho1 = reduce(method_for(range<Idx<3>>) <*> method_for(range<Idx<3>>) <@> lambda(i: Int64, j: Int64) -> 2.0 * MVAL(i) / (MVAL(i) + MVAL(j)), (+)) / 9.0
@@ -162,17 +162,17 @@ let xc2 = reduce(method_for(range<Idx<5>>) <@> lambda(k: Int64) -> NW(k) * ((0.0
 let kc1 = xc1
 let kc2 = xc2 - xc1 * xc1
 // truncation errors per cell and the dial
-let ea1 = sqrt((ka1 - ke1) * (ka1 - ke1))
-let eb1 = sqrt((kb1 - ke1) * (kb1 - ke1))
-let ec1 = sqrt((kc1 - ke1) * (kc1 - ke1))
-let ea2 = sqrt((ka2 - ke2) * (ka2 - ke2))
-let eb2 = sqrt((kb2 - ke2) * (kb2 - ke2))
-let ec2 = sqrt((kc2 - ke2) * (kc2 - ke2))
+let ea1 = abs(ka1 - ke1)
+let eb1 = abs(kb1 - ke1)
+let ec1 = abs(kc1 - ke1)
+let ea2 = abs(ka2 - ke2)
+let eb2 = abs(kb2 - ke2)
+let ec2 = abs(kc2 - ke2)
 let chain4_err = 4.0 * eb2
 
 // ---- verdicts ----
 let exact_V = if relgap1 < 0.0000000001 then (if relgap2 < 0.0000000001 then (if relgap3 < 0.0000000001 then (if relgap4 < 0.0000000001 then "CHANNEL_MATCHES_GRID_EXACTLY" else "NO") else "NO") else "NO") else "NO"
-let mean_V = if sqrt((erho1 - 1.0) * (erho1 - 1.0)) < 0.000000000000001 then "MEAN_TRANSFER_IDENTITY" else "NO"
+let mean_V = if abs(erho1 - 1.0) < 0.000000000000001 then "MEAN_TRANSFER_IDENTITY" else "NO"
 let drag_V = if lam1 < 1.0 then "COUPLING_DRAGS_THE_MEAN" else "NO"
 let itm_V = if itm > 1.0 then "INTERMITTENT_MOMENT_HIERARCHY" else "NO"
 let dial_V = if ec1 < eb1 then (if eb1 < ea1 then (if ec2 < eb2 then (if eb2 < ea2 then "CLOSURE_DIAL_MONOTONE" else "NO") else "NO") else "NO") else "NO"

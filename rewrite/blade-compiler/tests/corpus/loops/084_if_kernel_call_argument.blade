@@ -1,0 +1,59 @@
+// TEST: If-Bodied Kernel Passed Whole To A Function
+// Companion to loops/083: same parseIf precedence swallow (`... else b |>
+// compute` traps the pipe in the else branch, so the module-level binding
+// stays a DEFERRED IRApplyCombinator), but here the deferred kernel is read
+// WHOLE rather than positionally -- passed as a function-call argument
+// (`f(A)`) or assigned whole (`w = B`). Both render the array by NAME in the
+// emitted C++, so pre-fix they referenced an undeclared symbol (g++ "'A' was
+// not declared in this scope" at `double s = f(A);`). The fix extends
+// collectDeferredPositionalReads in CodeGen.fs to also note bare deferred
+// IRVars in IRApp argument position and as IRAssign RHS. Tuple elements and
+// let RHSes are deliberately NOT noted (those feed deliberately-deferred
+// forms: the deferred-computation-tuple arm, alias bindings).
+
+// Core repro: 1-D if-bodied kernel passed whole to a user function.
+// A = [1, 1, 2, 2].
+let A = method_for(range<Idx<4>>) <@> lambda(m) -> if m < 2 then 1.0 else 2.0 |> compute
+
+function total(u: Array<Float64 like Idx<4>>) -> Float64 = {
+    let mut acc = 0.0
+    for m in 0..4 {
+        acc = acc + u(m)
+    }
+    acc
+}
+
+let s = total(A)
+
+// Double consumer: positional read of the SAME binding after the call-arg
+// force -- must see the materialized array, not re-force a C++ redefinition.
+let tail = A(3)
+
+// 2-D if-bodied kernel as a call argument. B(i,j) = i+j for i<j else 0.
+let B = method_for(range<Idx<3>, Idx<3>>) <@> lambda(i, j) -> if i < j then (i + j) * 1.0 else 0.0 |> compute
+
+function gsum(u: Array<Float64 like Idx<3>, Idx<3>>) -> Float64 = {
+    let mut acc = 0.0
+    for i in 0..3 {
+        for j in 0..3 {
+            acc = acc + u(i, j)
+        }
+    }
+    acc
+}
+
+let sB = gsum(B)
+
+// Whole-array assignment RHS inside a block: `w = C` reads C whole, so the
+// still-deferred C must be forced before the block. C = [5, 7, 7, 7].
+let C = method_for(range<Idx<4>>) <@> lambda(m) -> if m < 1 then 5.0 else 7.0 |> compute
+let t = {
+    let mut w = A
+    w = C
+    w(0) + w(3)
+}
+
+// EXPECT: s = 6
+// EXPECT: tail = 2
+// EXPECT: sB = 6
+// EXPECT: t = 12

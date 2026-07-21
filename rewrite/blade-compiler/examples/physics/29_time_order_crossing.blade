@@ -1,4 +1,4 @@
-// TEST: Physics -- Fishing for q: Time-Ordered Crossings in a Classical Cascade
+﻿// TEST: Physics -- Fishing for q: Time-Ordered Crossings in a Classical Cascade
 // ============================================================================
 // The q-deformation question, cast at the DYNAMICS. In free probability the
 // fourth mixed moment of a family weights pair partitions by q^(#crossings):
@@ -71,35 +71,35 @@ let M6 = method_for(D6) <@> lambda(d) -> 0.93 + 0.02 * (d - 1.0) |> compute
 
 // --- transmitted-front chain: X_k = X_{k-1} * 2 m_{k-1} / (m_{k-1} + m_k) ---
 let X1 = method_for(M1) <@> lambda(m) -> 2.0 / (1.0 + m) |> compute
-let X2 = method_for(zip(X1, M1, M2)) <@> lambda(x, a, b) -> x * 2.0 * a / (a + b) |> compute
-let X3 = method_for(zip(X2, M2, M3)) <@> lambda(x, a, b) -> x * 2.0 * a / (a + b) |> compute
-let X4 = method_for(zip(X3, M3, M4)) <@> lambda(x, a, b) -> x * 2.0 * a / (a + b) |> compute
-let X5 = method_for(zip(X4, M4, M5)) <@> lambda(x, a, b) -> x * 2.0 * a / (a + b) |> compute
-let X6 = method_for(zip(X5, M5, M6)) <@> lambda(x, a, b) -> x * 2.0 * a / (a + b) |> compute
+let X2 = X1 * 2.0 * M1 / (M1 + M2)
+let X3 = X2 * 2.0 * M2 / (M2 + M3)
+let X4 = X3 * 2.0 * M3 / (M3 + M4)
+let X5 = X4 * 2.0 * M4 / (M4 + M5)
+let X6 = X5 * 2.0 * M5 / (M5 + M6)
 
 // --- followers F_k = X_{k-1} (m_{k-1} - m_k)/(m_{k-1} + m_k); guard: the
 //     front outruns every follower in every realization (X_k exact) ---
 let F1 = method_for(M1) <@> lambda(m) -> (1.0 - m) / (1.0 + m) |> compute
-let F2 = method_for(zip(X1, M1, M2)) <@> lambda(x, a, b) -> x * (a - b) / (a + b) |> compute
-let F3 = method_for(zip(X2, M2, M3)) <@> lambda(x, a, b) -> x * (a - b) / (a + b) |> compute
-let F4 = method_for(zip(X3, M3, M4)) <@> lambda(x, a, b) -> x * (a - b) / (a + b) |> compute
-let F5 = method_for(zip(X4, M4, M5)) <@> lambda(x, a, b) -> x * (a - b) / (a + b) |> compute
-let F6 = method_for(zip(X5, M5, M6)) <@> lambda(x, a, b) -> x * (a - b) / (a + b) |> compute
-let W2 = method_for(zip(F1, F2)) <@> lambda(a, b) -> (if sqrt(a * a) > sqrt(b * b) then sqrt(a * a) else sqrt(b * b)) |> compute
-let W3 = method_for(zip(W2, F3)) <@> lambda(a, b) -> (if a > sqrt(b * b) then a else sqrt(b * b)) |> compute
-let W4 = method_for(zip(W3, F4)) <@> lambda(a, b) -> (if a > sqrt(b * b) then a else sqrt(b * b)) |> compute
-let W5 = method_for(zip(W4, F5)) <@> lambda(a, b) -> (if a > sqrt(b * b) then a else sqrt(b * b)) |> compute
-let W6 = method_for(zip(W5, F6)) <@> lambda(a, b) -> (if a > sqrt(b * b) then a else sqrt(b * b)) |> compute
+let F2 = X1 * (M1 - M2) / (M1 + M2)
+let F3 = X2 * (M2 - M3) / (M2 + M3)
+let F4 = X3 * (M3 - M4) / (M3 + M4)
+let F5 = X4 * (M4 - M5) / (M4 + M5)
+let F6 = X5 * (M5 - M6) / (M5 + M6)
+let W2 = method_for(zip(F1, F2)) <@> lambda(a, b) -> (if abs(a) > abs(b) then abs(a) else abs(b)) |> compute
+let W3 = method_for(zip(W2, F3)) <@> lambda(a, b) -> (if a > abs(b) then a else abs(b)) |> compute
+let W4 = method_for(zip(W3, F4)) <@> lambda(a, b) -> (if a > abs(b) then a else abs(b)) |> compute
+let W5 = method_for(zip(W4, F5)) <@> lambda(a, b) -> (if a > abs(b) then a else abs(b)) |> compute
+let W6 = method_for(zip(W5, F6)) <@> lambda(a, b) -> (if a > abs(b) then a else abs(b)) |> compute
 let GUARD = reduce(method_for(zip(W6, X6)) <@> lambda(w, x) -> (if w < x then 0.0 else 1.0), (+))
 let guard_V = if GUARD < 0.5 then "FRONT_OUTRUNS_ALL" else "ITINERARY_AT_RISK"
 
 // --- centered columns ---
-let mu1 = reduce(method_for(X1) <@> lambda(x) -> x, (+)) / 729.0
-let mu2 = reduce(method_for(X2) <@> lambda(x) -> x, (+)) / 729.0
-let mu3 = reduce(method_for(X3) <@> lambda(x) -> x, (+)) / 729.0
-let mu4 = reduce(method_for(X4) <@> lambda(x) -> x, (+)) / 729.0
-let mu5 = reduce(method_for(X5) <@> lambda(x) -> x, (+)) / 729.0
-let mu6 = reduce(method_for(X6) <@> lambda(x) -> x, (+)) / 729.0
+let mu1 = reduce(X1, (+)) / 729.0
+let mu2 = reduce(X2, (+)) / 729.0
+let mu3 = reduce(X3, (+)) / 729.0
+let mu4 = reduce(X4, (+)) / 729.0
+let mu5 = reduce(X5, (+)) / 729.0
+let mu6 = reduce(X6, (+)) / 729.0
 let Y1 = method_for(X1) <@> lambda(x) -> x - mu1 |> compute
 let Y2 = method_for(X2) <@> lambda(x) -> x - mu2 |> compute
 let Y3 = method_for(X3) <@> lambda(x) -> x - mu3 |> compute
@@ -108,38 +108,38 @@ let Y5 = method_for(X5) <@> lambda(x) -> x - mu5 |> compute
 let Y6 = method_for(X6) <@> lambda(x) -> x - mu6 |> compute
 
 // --- the 15 pair covariances (exact ensemble sums) ---
-let c12 = reduce(method_for(zip(Y1, Y2)) <@> lambda(a, b) -> a * b, (+)) / 729.0
-let c13 = reduce(method_for(zip(Y1, Y3)) <@> lambda(a, b) -> a * b, (+)) / 729.0
-let c14 = reduce(method_for(zip(Y1, Y4)) <@> lambda(a, b) -> a * b, (+)) / 729.0
-let c15 = reduce(method_for(zip(Y1, Y5)) <@> lambda(a, b) -> a * b, (+)) / 729.0
-let c16 = reduce(method_for(zip(Y1, Y6)) <@> lambda(a, b) -> a * b, (+)) / 729.0
-let c23 = reduce(method_for(zip(Y2, Y3)) <@> lambda(a, b) -> a * b, (+)) / 729.0
-let c24 = reduce(method_for(zip(Y2, Y4)) <@> lambda(a, b) -> a * b, (+)) / 729.0
-let c25 = reduce(method_for(zip(Y2, Y5)) <@> lambda(a, b) -> a * b, (+)) / 729.0
-let c26 = reduce(method_for(zip(Y2, Y6)) <@> lambda(a, b) -> a * b, (+)) / 729.0
-let c34 = reduce(method_for(zip(Y3, Y4)) <@> lambda(a, b) -> a * b, (+)) / 729.0
-let c35 = reduce(method_for(zip(Y3, Y5)) <@> lambda(a, b) -> a * b, (+)) / 729.0
-let c36 = reduce(method_for(zip(Y3, Y6)) <@> lambda(a, b) -> a * b, (+)) / 729.0
-let c45 = reduce(method_for(zip(Y4, Y5)) <@> lambda(a, b) -> a * b, (+)) / 729.0
-let c46 = reduce(method_for(zip(Y4, Y6)) <@> lambda(a, b) -> a * b, (+)) / 729.0
-let c56 = reduce(method_for(zip(Y5, Y6)) <@> lambda(a, b) -> a * b, (+)) / 729.0
+let c12 = prodsum(Y1, Y2) / 729.0
+let c13 = prodsum(Y1, Y3) / 729.0
+let c14 = prodsum(Y1, Y4) / 729.0
+let c15 = prodsum(Y1, Y5) / 729.0
+let c16 = prodsum(Y1, Y6) / 729.0
+let c23 = prodsum(Y2, Y3) / 729.0
+let c24 = prodsum(Y2, Y4) / 729.0
+let c25 = prodsum(Y2, Y5) / 729.0
+let c26 = prodsum(Y2, Y6) / 729.0
+let c34 = prodsum(Y3, Y4) / 729.0
+let c35 = prodsum(Y3, Y5) / 729.0
+let c36 = prodsum(Y3, Y6) / 729.0
+let c45 = prodsum(Y4, Y5) / 729.0
+let c46 = prodsum(Y4, Y6) / 729.0
+let c56 = prodsum(Y5, Y6) / 729.0
 
 // --- central 4-point moments for the 15 time-ordered quadruples ---
-let p1234 = reduce(method_for(zip(Y1, Y2, Y3, Y4)) <@> lambda(a, b, c, d) -> a * b * c * d, (+)) / 729.0
-let p1235 = reduce(method_for(zip(Y1, Y2, Y3, Y5)) <@> lambda(a, b, c, d) -> a * b * c * d, (+)) / 729.0
-let p1236 = reduce(method_for(zip(Y1, Y2, Y3, Y6)) <@> lambda(a, b, c, d) -> a * b * c * d, (+)) / 729.0
-let p1245 = reduce(method_for(zip(Y1, Y2, Y4, Y5)) <@> lambda(a, b, c, d) -> a * b * c * d, (+)) / 729.0
-let p1246 = reduce(method_for(zip(Y1, Y2, Y4, Y6)) <@> lambda(a, b, c, d) -> a * b * c * d, (+)) / 729.0
-let p1256 = reduce(method_for(zip(Y1, Y2, Y5, Y6)) <@> lambda(a, b, c, d) -> a * b * c * d, (+)) / 729.0
-let p1345 = reduce(method_for(zip(Y1, Y3, Y4, Y5)) <@> lambda(a, b, c, d) -> a * b * c * d, (+)) / 729.0
-let p1346 = reduce(method_for(zip(Y1, Y3, Y4, Y6)) <@> lambda(a, b, c, d) -> a * b * c * d, (+)) / 729.0
-let p1356 = reduce(method_for(zip(Y1, Y3, Y5, Y6)) <@> lambda(a, b, c, d) -> a * b * c * d, (+)) / 729.0
-let p1456 = reduce(method_for(zip(Y1, Y4, Y5, Y6)) <@> lambda(a, b, c, d) -> a * b * c * d, (+)) / 729.0
-let p2345 = reduce(method_for(zip(Y2, Y3, Y4, Y5)) <@> lambda(a, b, c, d) -> a * b * c * d, (+)) / 729.0
-let p2346 = reduce(method_for(zip(Y2, Y3, Y4, Y6)) <@> lambda(a, b, c, d) -> a * b * c * d, (+)) / 729.0
-let p2356 = reduce(method_for(zip(Y2, Y3, Y5, Y6)) <@> lambda(a, b, c, d) -> a * b * c * d, (+)) / 729.0
-let p2456 = reduce(method_for(zip(Y2, Y4, Y5, Y6)) <@> lambda(a, b, c, d) -> a * b * c * d, (+)) / 729.0
-let p3456 = reduce(method_for(zip(Y3, Y4, Y5, Y6)) <@> lambda(a, b, c, d) -> a * b * c * d, (+)) / 729.0
+let p1234 = reduce(Y1 * Y2 * Y3 * Y4, (+)) / 729.0
+let p1235 = reduce(Y1 * Y2 * Y3 * Y5, (+)) / 729.0
+let p1236 = reduce(Y1 * Y2 * Y3 * Y6, (+)) / 729.0
+let p1245 = reduce(Y1 * Y2 * Y4 * Y5, (+)) / 729.0
+let p1246 = reduce(Y1 * Y2 * Y4 * Y6, (+)) / 729.0
+let p1256 = reduce(Y1 * Y2 * Y5 * Y6, (+)) / 729.0
+let p1345 = reduce(Y1 * Y3 * Y4 * Y5, (+)) / 729.0
+let p1346 = reduce(Y1 * Y3 * Y4 * Y6, (+)) / 729.0
+let p1356 = reduce(Y1 * Y3 * Y5 * Y6, (+)) / 729.0
+let p1456 = reduce(Y1 * Y4 * Y5 * Y6, (+)) / 729.0
+let p2345 = reduce(Y2 * Y3 * Y4 * Y5, (+)) / 729.0
+let p2346 = reduce(Y2 * Y3 * Y4 * Y6, (+)) / 729.0
+let p2356 = reduce(Y2 * Y3 * Y5 * Y6, (+)) / 729.0
+let p2456 = reduce(Y2 * Y4 * Y5 * Y6, (+)) / 729.0
+let p3456 = reduce(Y3 * Y4 * Y5 * Y6, (+)) / 729.0
 
 // --- connected 4-cumulants: kappa4 = p - seq - cross - nest ---
 let k1234 = p1234 - c12 * c34 - c13 * c24 - c14 * c23
@@ -195,10 +195,10 @@ let h3456 = k3456 / (c36 * c45)
 // --- collapse statistics: is there ONE q? which channel collapses tighter? ---
 let gbar = (g1234 + g1235 + g1236 + g1245 + g1246 + g1256 + g1345 + g1346 + g1356 + g1456 + g2345 + g2346 + g2356 + g2456 + g3456) / 15.0
 let gvar = ((g1234 - gbar) * (g1234 - gbar) + (g1235 - gbar) * (g1235 - gbar) + (g1236 - gbar) * (g1236 - gbar) + (g1245 - gbar) * (g1245 - gbar) + (g1246 - gbar) * (g1246 - gbar) + (g1256 - gbar) * (g1256 - gbar) + (g1345 - gbar) * (g1345 - gbar) + (g1346 - gbar) * (g1346 - gbar) + (g1356 - gbar) * (g1356 - gbar) + (g1456 - gbar) * (g1456 - gbar) + (g2345 - gbar) * (g2345 - gbar) + (g2346 - gbar) * (g2346 - gbar) + (g2356 - gbar) * (g2356 - gbar) + (g2456 - gbar) * (g2456 - gbar) + (g3456 - gbar) * (g3456 - gbar)) / 15.0
-let g_rsd = sqrt(gvar) / sqrt(gbar * gbar)
+let g_rsd = sqrt(gvar) / abs(gbar)
 let hbar = (h1234 + h1235 + h1236 + h1245 + h1246 + h1256 + h1345 + h1346 + h1356 + h1456 + h2345 + h2346 + h2356 + h2456 + h3456) / 15.0
 let hvar = ((h1234 - hbar) * (h1234 - hbar) + (h1235 - hbar) * (h1235 - hbar) + (h1236 - hbar) * (h1236 - hbar) + (h1245 - hbar) * (h1245 - hbar) + (h1246 - hbar) * (h1246 - hbar) + (h1256 - hbar) * (h1256 - hbar) + (h1345 - hbar) * (h1345 - hbar) + (h1346 - hbar) * (h1346 - hbar) + (h1356 - hbar) * (h1356 - hbar) + (h1456 - hbar) * (h1456 - hbar) + (h2345 - hbar) * (h2345 - hbar) + (h2346 - hbar) * (h2346 - hbar) + (h2356 - hbar) * (h2356 - hbar) + (h2456 - hbar) * (h2456 - hbar) + (h3456 - hbar) * (h3456 - hbar)) / 15.0
-let h_rsd = sqrt(hvar) / sqrt(hbar * hbar)
+let h_rsd = sqrt(hvar) / abs(hbar)
 
 // --- sign census and extremes of q_hat = 1 + g ---
 let npos = (if k1234 > 0.0 then 1.0 else 0.0) + (if k1235 > 0.0 then 1.0 else 0.0) + (if k1236 > 0.0 then 1.0 else 0.0) + (if k1245 > 0.0 then 1.0 else 0.0) + (if k1246 > 0.0 then 1.0 else 0.0) + (if k1256 > 0.0 then 1.0 else 0.0) + (if k1345 > 0.0 then 1.0 else 0.0) + (if k1346 > 0.0 then 1.0 else 0.0) + (if k1356 > 0.0 then 1.0 else 0.0) + (if k1456 > 0.0 then 1.0 else 0.0) + (if k2345 > 0.0 then 1.0 else 0.0) + (if k2346 > 0.0 then 1.0 else 0.0) + (if k2356 > 0.0 then 1.0 else 0.0) + (if k2456 > 0.0 then 1.0 else 0.0) + (if k3456 > 0.0 then 1.0 else 0.0)
@@ -243,7 +243,7 @@ let r3456 = (c35 * c46) / (c36 * c45)
 // --- clean-family statistics (quadruples avoiding the near-null ball-2 channels) ---
 let gcbar = (g1345 + g1346 + g1356 + g1456 + g3456) / 5.0
 let gcvar = ((g1345 - gcbar) * (g1345 - gcbar) + (g1346 - gcbar) * (g1346 - gcbar) + (g1356 - gcbar) * (g1356 - gcbar) + (g1456 - gcbar) * (g1456 - gcbar) + (g3456 - gcbar) * (g3456 - gcbar)) / 5.0
-let gc_rsd = sqrt(gcvar) / sqrt(gcbar * gcbar)
+let gc_rsd = sqrt(gcvar) / abs(gcbar)
 let n_below_free = (if g1345 < -1.0 then 1.0 else 0.0) + (if g1346 < -1.0 then 1.0 else 0.0) + (if g1356 < -1.0 then 1.0 else 0.0) + (if g1456 < -1.0 then 1.0 else 0.0) + (if g3456 < -1.0 then 1.0 else 0.0)
 
 // --- THE CONTROL: same grid, same dynamics, LEPTOKURTIC jet weights.
@@ -260,14 +260,14 @@ let U6 = method_for(D6) <@> lambda(d) -> (if d > 0.5 then (if d < 1.5 then 2.5 e
 let WA = U1 * U2 * U3
 let WB = U4 * U5 * U6
 let WT = WA * WB
-let wsum = reduce(method_for(WT) <@> lambda(w) -> w, (+))
+let wsum = reduce(WT, (+))
 
-let mw1 = reduce(method_for(zip(WT, X1)) <@> lambda(w, x) -> w * x, (+)) / 729.0
-let mw2 = reduce(method_for(zip(WT, X2)) <@> lambda(w, x) -> w * x, (+)) / 729.0
-let mw3 = reduce(method_for(zip(WT, X3)) <@> lambda(w, x) -> w * x, (+)) / 729.0
-let mw4 = reduce(method_for(zip(WT, X4)) <@> lambda(w, x) -> w * x, (+)) / 729.0
-let mw5 = reduce(method_for(zip(WT, X5)) <@> lambda(w, x) -> w * x, (+)) / 729.0
-let mw6 = reduce(method_for(zip(WT, X6)) <@> lambda(w, x) -> w * x, (+)) / 729.0
+let mw1 = prodsum(WT, X1) / 729.0
+let mw2 = prodsum(WT, X2) / 729.0
+let mw3 = prodsum(WT, X3) / 729.0
+let mw4 = prodsum(WT, X4) / 729.0
+let mw5 = prodsum(WT, X5) / 729.0
+let mw6 = prodsum(WT, X6) / 729.0
 let Z1 = method_for(X1) <@> lambda(x) -> x - mw1 |> compute
 let Z2 = method_for(X2) <@> lambda(x) -> x - mw2 |> compute
 let Z3 = method_for(X3) <@> lambda(x) -> x - mw3 |> compute
@@ -275,37 +275,37 @@ let Z4 = method_for(X4) <@> lambda(x) -> x - mw4 |> compute
 let Z5 = method_for(X5) <@> lambda(x) -> x - mw5 |> compute
 let Z6 = method_for(X6) <@> lambda(x) -> x - mw6 |> compute
 
-let w12 = reduce(method_for(zip(WT, Z1, Z2)) <@> lambda(w, a, b) -> w * a * b, (+)) / 729.0
-let w13 = reduce(method_for(zip(WT, Z1, Z3)) <@> lambda(w, a, b) -> w * a * b, (+)) / 729.0
-let w14 = reduce(method_for(zip(WT, Z1, Z4)) <@> lambda(w, a, b) -> w * a * b, (+)) / 729.0
-let w15 = reduce(method_for(zip(WT, Z1, Z5)) <@> lambda(w, a, b) -> w * a * b, (+)) / 729.0
-let w16 = reduce(method_for(zip(WT, Z1, Z6)) <@> lambda(w, a, b) -> w * a * b, (+)) / 729.0
-let w23 = reduce(method_for(zip(WT, Z2, Z3)) <@> lambda(w, a, b) -> w * a * b, (+)) / 729.0
-let w24 = reduce(method_for(zip(WT, Z2, Z4)) <@> lambda(w, a, b) -> w * a * b, (+)) / 729.0
-let w25 = reduce(method_for(zip(WT, Z2, Z5)) <@> lambda(w, a, b) -> w * a * b, (+)) / 729.0
-let w26 = reduce(method_for(zip(WT, Z2, Z6)) <@> lambda(w, a, b) -> w * a * b, (+)) / 729.0
-let w34 = reduce(method_for(zip(WT, Z3, Z4)) <@> lambda(w, a, b) -> w * a * b, (+)) / 729.0
-let w35 = reduce(method_for(zip(WT, Z3, Z5)) <@> lambda(w, a, b) -> w * a * b, (+)) / 729.0
-let w36 = reduce(method_for(zip(WT, Z3, Z6)) <@> lambda(w, a, b) -> w * a * b, (+)) / 729.0
-let w45 = reduce(method_for(zip(WT, Z4, Z5)) <@> lambda(w, a, b) -> w * a * b, (+)) / 729.0
-let w46 = reduce(method_for(zip(WT, Z4, Z6)) <@> lambda(w, a, b) -> w * a * b, (+)) / 729.0
-let w56 = reduce(method_for(zip(WT, Z5, Z6)) <@> lambda(w, a, b) -> w * a * b, (+)) / 729.0
+let w12 = reduce(WT * Z1 * Z2, (+)) / 729.0
+let w13 = reduce(WT * Z1 * Z3, (+)) / 729.0
+let w14 = reduce(WT * Z1 * Z4, (+)) / 729.0
+let w15 = reduce(WT * Z1 * Z5, (+)) / 729.0
+let w16 = reduce(WT * Z1 * Z6, (+)) / 729.0
+let w23 = reduce(WT * Z2 * Z3, (+)) / 729.0
+let w24 = reduce(WT * Z2 * Z4, (+)) / 729.0
+let w25 = reduce(WT * Z2 * Z5, (+)) / 729.0
+let w26 = reduce(WT * Z2 * Z6, (+)) / 729.0
+let w34 = reduce(WT * Z3 * Z4, (+)) / 729.0
+let w35 = reduce(WT * Z3 * Z5, (+)) / 729.0
+let w36 = reduce(WT * Z3 * Z6, (+)) / 729.0
+let w45 = reduce(WT * Z4 * Z5, (+)) / 729.0
+let w46 = reduce(WT * Z4 * Z6, (+)) / 729.0
+let w56 = reduce(WT * Z5 * Z6, (+)) / 729.0
 
-let s1234 = reduce(method_for(zip(WT, Z1, Z2, Z3, Z4)) <@> lambda(w, a, b, c, d) -> w * a * b * c * d, (+)) / 729.0
-let s1235 = reduce(method_for(zip(WT, Z1, Z2, Z3, Z5)) <@> lambda(w, a, b, c, d) -> w * a * b * c * d, (+)) / 729.0
-let s1236 = reduce(method_for(zip(WT, Z1, Z2, Z3, Z6)) <@> lambda(w, a, b, c, d) -> w * a * b * c * d, (+)) / 729.0
-let s1245 = reduce(method_for(zip(WT, Z1, Z2, Z4, Z5)) <@> lambda(w, a, b, c, d) -> w * a * b * c * d, (+)) / 729.0
-let s1246 = reduce(method_for(zip(WT, Z1, Z2, Z4, Z6)) <@> lambda(w, a, b, c, d) -> w * a * b * c * d, (+)) / 729.0
-let s1256 = reduce(method_for(zip(WT, Z1, Z2, Z5, Z6)) <@> lambda(w, a, b, c, d) -> w * a * b * c * d, (+)) / 729.0
-let s1345 = reduce(method_for(zip(WT, Z1, Z3, Z4, Z5)) <@> lambda(w, a, b, c, d) -> w * a * b * c * d, (+)) / 729.0
-let s1346 = reduce(method_for(zip(WT, Z1, Z3, Z4, Z6)) <@> lambda(w, a, b, c, d) -> w * a * b * c * d, (+)) / 729.0
-let s1356 = reduce(method_for(zip(WT, Z1, Z3, Z5, Z6)) <@> lambda(w, a, b, c, d) -> w * a * b * c * d, (+)) / 729.0
-let s1456 = reduce(method_for(zip(WT, Z1, Z4, Z5, Z6)) <@> lambda(w, a, b, c, d) -> w * a * b * c * d, (+)) / 729.0
-let s2345 = reduce(method_for(zip(WT, Z2, Z3, Z4, Z5)) <@> lambda(w, a, b, c, d) -> w * a * b * c * d, (+)) / 729.0
-let s2346 = reduce(method_for(zip(WT, Z2, Z3, Z4, Z6)) <@> lambda(w, a, b, c, d) -> w * a * b * c * d, (+)) / 729.0
-let s2356 = reduce(method_for(zip(WT, Z2, Z3, Z5, Z6)) <@> lambda(w, a, b, c, d) -> w * a * b * c * d, (+)) / 729.0
-let s2456 = reduce(method_for(zip(WT, Z2, Z4, Z5, Z6)) <@> lambda(w, a, b, c, d) -> w * a * b * c * d, (+)) / 729.0
-let s3456 = reduce(method_for(zip(WT, Z3, Z4, Z5, Z6)) <@> lambda(w, a, b, c, d) -> w * a * b * c * d, (+)) / 729.0
+let s1234 = reduce(WT * Z1 * Z2 * Z3 * Z4, (+)) / 729.0
+let s1235 = reduce(WT * Z1 * Z2 * Z3 * Z5, (+)) / 729.0
+let s1236 = reduce(WT * Z1 * Z2 * Z3 * Z6, (+)) / 729.0
+let s1245 = reduce(WT * Z1 * Z2 * Z4 * Z5, (+)) / 729.0
+let s1246 = reduce(WT * Z1 * Z2 * Z4 * Z6, (+)) / 729.0
+let s1256 = reduce(WT * Z1 * Z2 * Z5 * Z6, (+)) / 729.0
+let s1345 = reduce(WT * Z1 * Z3 * Z4 * Z5, (+)) / 729.0
+let s1346 = reduce(WT * Z1 * Z3 * Z4 * Z6, (+)) / 729.0
+let s1356 = reduce(WT * Z1 * Z3 * Z5 * Z6, (+)) / 729.0
+let s1456 = reduce(WT * Z1 * Z4 * Z5 * Z6, (+)) / 729.0
+let s2345 = reduce(WT * Z2 * Z3 * Z4 * Z5, (+)) / 729.0
+let s2346 = reduce(WT * Z2 * Z3 * Z4 * Z6, (+)) / 729.0
+let s2356 = reduce(WT * Z2 * Z3 * Z5 * Z6, (+)) / 729.0
+let s2456 = reduce(WT * Z2 * Z4 * Z5 * Z6, (+)) / 729.0
+let s3456 = reduce(WT * Z3 * Z4 * Z5 * Z6, (+)) / 729.0
 
 let kw1234 = s1234 - w12 * w34 - w13 * w24 - w14 * w23
 let kw1235 = s1235 - w12 * w35 - w13 * w25 - w15 * w23

@@ -1,0 +1,8 @@
+// TEST: Sequence Over Concrete Arrays
+// `sequence(A, B)` over two materialized arrays stacks them into a rank-2 result
+// [N, child_extents...]; prints flattened row-major. Previously eagerly materialized
+// (to the wrong value); now defers and materializes correctly on |> compute.
+let A = [1.0, 2.0, 3.0]
+let B = [10.0, 20.0, 30.0]
+let result = sequence(A, B) |> compute
+// EXPECT: result = [1.0, 2.0, 3.0, 10.0, 20.0, 30.0]

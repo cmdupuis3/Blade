@@ -1,0 +1,6 @@
+// TEST: ML Galilean Sum Rejected (rejects)
+import ml as ml
+// Adding two boost-variant values doubles the U0-coefficient: u + v shifts
+// by 2 U0 under the boost. BL4009.
+function bad(ul: Float, ur: Float) where ml.galilean(ul, ur) -> Float =
+  ul + ur

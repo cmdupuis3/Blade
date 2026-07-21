@@ -204,3 +204,114 @@ let polyspecDecl (name: string) (n: int) (k: int) (fftName: string) : FunctionDe
             blockE (stmts @ [ sLet "po" (nestedFromFlatN "pp" outDims 0) ], Some (v "po"))
     let ps = [ for i in 1 .. k -> (sprintf "x%d" i, tyFloatArr n) ]
     mkFunc name ps (tyCplxTensor outDims) body
+
+// ============================================================================
+// fft2 / ifft2 — separable 2-D DFT over a rank-2 field (rows, then columns)
+// ============================================================================
+//
+// Both passes work on flat row-major complex buffers of size r*c (MathDecls
+// house style); the rank-2 result is the nested-literal-of-reads convention.
+// Each axis independently takes the radix-2 path when pow2 (>= 2) and the
+// naive table DFT otherwise — the same per-axis contract as the 1-D fft,
+// and the same ulp discipline: twiddles baked, naive complex multiply, and
+// loop structure textually parallel with rowPass2/colPass2 in spectra/Fft.fs.
+
+/// Row pass: DFT along axis 1 of an r×c field into the flat complex work
+/// array `sa`. `readIn i j` builds the complex read of input cell (i, j);
+/// `mkTw` is fwdTwiddles or invTwiddles.
+let private rowPass2 (r: int) (c: int) (mkTw: int -> int -> (float * float) list)
+                     (readIn: Expr -> Expr -> Expr) : Stmt list =
+    let flatIJ i j = add (mul i (iLit c)) j
+    if isPow2 c && c >= 2 then
+        let stages = fftStages c
+        let perm = [ for j in 0 .. c - 1 -> bitrev stages j ]
+        [ sLet "brc" (intArrLit perm)
+          sLet "twc" (cplxArrLit (mkTw c (c / 2)))
+          sLetMut "sa" (cplxZerosLit (r * c))
+          // Gather copy-in through the per-row bit-reversal permutation.
+          sFor "i" 0 r
+            [ sFor "j" 0 c
+                [ sAssign (idx "sa" (flatIJ (v "i") (v "j")))
+                          (readIn (v "i") (idx "brc" (v "j"))) ] ] ]
+        @ [ for st in 1 .. stages do
+              let len = 1 <<< st
+              let half = len / 2
+              let tstr = c / len
+              yield sFor "i" 0 r
+                [ sFor "b" 0 (c / len)
+                    [ sFor "t" 0 half
+                        [ sLet "p" (add (mul (v "i") (iLit c)) (add (mul (v "b") (iLit len)) (v "t")))
+                          sLet "q" (add (v "p") (iLit half))
+                          sLet "tt" (mul (idx "twc" (mul (v "t") (iLit tstr))) (idx "sa" (v "q")))
+                          sLet "p0" (idx "sa" (v "p"))
+                          sAssign (idx "sa" (v "p")) (add (v "p0") (v "tt"))
+                          sAssign (idx "sa" (v "q")) (sub (v "p0") (v "tt")) ] ] ] ]
+    else
+        [ sLet "twc" (cplxArrLit (mkTw c c))
+          sLetMut "sa" (cplxZerosLit (r * c))
+          sFor "i" 0 r
+            [ sFor "k" 0 c
+                [ sFor "j" 0 c
+                    [ sLet "t" (modE (mul (v "k") (v "j")) (iLit c))
+                      sAccum (idx "sa" (flatIJ (v "i") (v "k")))
+                             (mul (readIn (v "i") (v "j")) (idx "twc" (v "t"))) ] ] ] ]
+
+/// Column pass: DFT along axis 0, `sa` -> `sb` (both flat row-major r×c).
+let private colPass2 (r: int) (c: int) (mkTw: int -> int -> (float * float) list) : Stmt list =
+    let flatIJ i j = add (mul i (iLit c)) j
+    if isPow2 r && r >= 2 then
+        let stages = fftStages r
+        let perm = [ for i in 0 .. r - 1 -> bitrev stages i ]
+        [ sLet "brr" (intArrLit perm)
+          sLet "twr" (cplxArrLit (mkTw r (r / 2)))
+          sLetMut "sb" (cplxZerosLit (r * c))
+          // Gather copy-in through the per-column bit-reversal permutation.
+          sFor "i" 0 r
+            [ sFor "j" 0 c
+                [ sAssign (idx "sb" (flatIJ (v "i") (v "j")))
+                          (idx "sa" (flatIJ (idx "brr" (v "i")) (v "j"))) ] ] ]
+        @ [ for st in 1 .. stages do
+              let len = 1 <<< st
+              let half = len / 2
+              let tstr = r / len
+              yield sFor "j" 0 c
+                [ sFor "b" 0 (r / len)
+                    [ sFor "t" 0 half
+                        [ sLet "p" (add (mul (add (mul (v "b") (iLit len)) (v "t")) (iLit c)) (v "j"))
+                          sLet "q" (add (v "p") (iLit (half * c)))
+                          sLet "tt" (mul (idx "twr" (mul (v "t") (iLit tstr))) (idx "sb" (v "q")))
+                          sLet "p0" (idx "sb" (v "p"))
+                          sAssign (idx "sb" (v "p")) (add (v "p0") (v "tt"))
+                          sAssign (idx "sb" (v "q")) (sub (v "p0") (v "tt")) ] ] ] ]
+    else
+        [ sLet "twr" (cplxArrLit (mkTw r r))
+          sLetMut "sb" (cplxZerosLit (r * c))
+          sFor "k" 0 r
+            [ sFor "j" 0 c
+                [ sFor "i" 0 r
+                    [ sLet "t" (modE (mul (v "k") (v "i")) (iLit r))
+                      sAccum (idx "sb" (flatIJ (v "k") (v "j")))
+                             (mul (idx "sa" (flatIJ (v "i") (v "j"))) (idx "twr" (v "t"))) ] ] ] ]
+
+/// fft2 — unnormalized forward 2-D DFT of a real r×c field, complex output.
+let fft2Decl (name: string) (r: int) (c: int) : FunctionDecl =
+    let stmts =
+        rowPass2 r c fwdTwiddles (fun i j -> cplx (idx2 "x" i j) (fLit 0.0))
+        @ colPass2 r c fwdTwiddles
+        @ [ sLet "po" (nestedFromFlatN "sb" [ r; c ] 0) ]
+    mkFunc name [ ("x", tyFloatTensor [ r; c ]) ] (tyCplxTensor [ r; c ]) (blockE (stmts, Some (v "po")))
+
+/// ifft2 — real inverse synthesis of an r×c complex spectrum (carries the
+/// 1/(r·c), applied once at copy-out).
+let ifft2Decl (name: string) (r: int) (c: int) : FunctionDecl =
+    let flatIJ i j = add (mul i (iLit c)) j
+    let stmts =
+        rowPass2 r c invTwiddles (fun i j -> idx2 "xs" i j)
+        @ colPass2 r c invTwiddles
+        @ [ sLetMut "xo" (zerosLit (r * c))
+            sFor "i" 0 r
+              [ sFor "j" 0 c
+                  [ sAssign (idx "xo" (flatIJ (v "i") (v "j")))
+                            (divE (realE (idx "sb" (flatIJ (v "i") (v "j")))) (fLit (float (r * c)))) ] ]
+            sLet "po" (nestedFromFlatN "xo" [ r; c ] 0) ]
+    mkFunc name [ ("xs", tyCplxTensor [ r; c ]) ] (tyFloatTensor [ r; c ]) (blockE (stmts, Some (v "po")))

@@ -1,4 +1,4 @@
-// TEST: Physics -- The Tower That Cannot Be Deepened: Quantum as Truncation
+﻿// TEST: Physics -- The Tower That Cannot Be Deepened: Quantum as Truncation
 // ============================================================================
 // Every tower in this arc so far was backed by an ensemble -- realized, and
 // therefore extendable to every moment order. This example builds, as a
@@ -72,14 +72,14 @@ let g_a1b0 = 0.0 * q + 1.0 * q
 let g_a1b1 = 0.0 * q + 1.0 * (0.0 - q)
 let g_a0a1 = 1.0 * 0.0 + 0.0 * 1.0
 let g_b0b1 = q * q + q * (0.0 - q)
-let cert2 = sqrt((g_a0b0 - c_a0b0) * (g_a0b0 - c_a0b0)) + sqrt((g_a0b1 - c_a0b1) * (g_a0b1 - c_a0b1)) + sqrt((g_a1b0 - c_a1b0) * (g_a1b0 - c_a1b0)) + sqrt((g_a1b1 - c_a1b1) * (g_a1b1 - c_a1b1)) + sqrt((g_a0a1 - c_a0a1) * (g_a0a1 - c_a0a1)) + sqrt((g_b0b1 - c_b0b1) * (g_b0b1 - c_b0b1)) + sqrt((n_a0 - 1.0) * (n_a0 - 1.0)) + sqrt((n_a1 - 1.0) * (n_a1 - 1.0)) + sqrt((n_b0 - 1.0) * (n_b0 - 1.0)) + sqrt((n_b1 - 1.0) * (n_b1 - 1.0))
+let cert2 = abs(g_a0b0 - c_a0b0) + abs(g_a0b1 - c_a0b1) + abs(g_a1b0 - c_a1b0) + abs(g_a1b1 - c_a1b1) + abs(g_a0a1 - c_a0a1) + abs(g_b0b1 - c_b0b1) + abs(n_a0 - 1.0) + abs(n_a1 - 1.0) + abs(n_b0 - 1.0) + abs(n_b1 - 1.0)
 let depth2_V = if cert2 < 0.000000000001 then "DEGREE2_REALIZABLE_RANK2" else "CELLS_MISMATCH"
 
 // ---- the hypercube identity: B^2 = 4 on all 16 sign assignments ----
 let SGN = [-1.0, 1.0]
 let BSQ = method_for(range<Idx<16>>) <@> lambda(g: Int64) -> (SGN(g % 2) * SGN((g / 4) % 2) + SGN(g % 2) * SGN(g / 8) + SGN((g / 2) % 2) * SGN((g / 4) % 2) - SGN((g / 2) % 2) * SGN(g / 8)) * (SGN(g % 2) * SGN((g / 4) % 2) + SGN(g % 2) * SGN(g / 8) + SGN((g / 2) % 2) * SGN((g / 4) % 2) - SGN((g / 2) % 2) * SGN(g / 8)) |> compute
-let bsq_sum = reduce(method_for(BSQ) <@> lambda(x) -> x, (+))
-let bsq_dev = reduce(method_for(BSQ) <@> lambda(x) -> sqrt((x - 4.0) * (x - 4.0)), (+))
+let bsq_sum = reduce(BSQ, (+))
+let bsq_dev = reduce(method_for(BSQ) <@> lambda(x) -> abs(x - 4.0), (+))
 let cube_V = if bsq_dev < 0.000000000001 then "IDENTITY_ON_THE_HYPERCUBE" else "NOT_AN_IDENTITY"
 
 // ---- the obstruction: any extension must give Var(B) = 4 - chsh^2 ----
@@ -95,7 +95,7 @@ let wall_V = if var_at_2 < 0.000000000001 then (if var_at_2 > 0.0 - 0.0000000000
 // state is a B-eigenstate (variance exactly zero)
 let tsirelson = sqrt(8.0)
 let var_q_at_max = 4.0 + 4.0 - tsirelson * tsirelson
-let rescue_V = if sqrt((tsirelson - chsh) * (tsirelson - chsh)) < 0.000000000001 then "PHASES_RESCUE_THE_VARIANCE" else "NO"
+let rescue_V = if abs(tsirelson - chsh) < 0.000000000001 then "PHASES_RESCUE_THE_VARIANCE" else "NO"
 
 // ---- the gap zone at s = 2.4: rank-4 realization vs no extension ----
 // a0 = e1, a1 = e2, b0 = (t, t, p, 0), b1 = (t, -t, 0, p), t = s/4,
@@ -107,7 +107,7 @@ let z_b1 = t * t + t * t + p * p
 let z_b0b1 = t * t - t * t + 0.0 + 0.0
 let z_a0b0 = t
 let z_a1b1 = 0.0 - t
-let gap_cert = sqrt((z_b0 - 1.0) * (z_b0 - 1.0)) + sqrt((z_b1 - 1.0) * (z_b1 - 1.0)) + sqrt(z_b0b1 * z_b0b1) + sqrt((z_a0b0 - 0.6) * (z_a0b0 - 0.6)) + sqrt((z_a1b1 + 0.6) * (z_a1b1 + 0.6))
+let gap_cert = abs(z_b0 - 1.0) + abs(z_b1 - 1.0) + abs(z_b0b1) + abs(z_a0b0 - 0.6) + abs(z_a1b1 + 0.6)
 let gap2_V = if gap_cert < 0.000000000001 then "GAP_ZONE_DEGREE2_REALIZABLE" else "NO"
 let gap4_V = if var_at_24 < 0.0 then "GAP_ZONE_NOT_EXTENDABLE" else "NO"
 

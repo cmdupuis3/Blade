@@ -103,3 +103,90 @@ let power (x: float[]) : float[] =
     let sx = fft x
     [| for k in 0 .. x.Length - 1 ->
          sx.[k].Re * sx.[k].Re + sx.[k].Im * sx.[k].Im |]
+
+// ---- fft2 / ifft2: separable 2-D DFT (rows, then columns) ------------------
+// Flat row-major buffers of size r*c; each axis takes the radix-2 path when
+// pow2 (>= 2) and the naive table DFT otherwise. MUST stay textually
+// parallel with rowPass2/colPass2 in SpectraDecls.fs (the ulp contract).
+
+/// Row pass: DFT along axis 1 into a fresh flat buffer. `readIn i j` reads
+/// input cell (i, j); `mkTw` is fwdTwiddles or invTwiddles.
+let private rowPass2 (r: int) (c: int) (mkTw: int -> int -> Cplx[]) (readIn: int -> int -> Cplx) : Cplx[] =
+    let sa = Array.create (r * c) (cplx 0.0 0.0)
+    if isPow2 c && c >= 2 then
+        let stages = fftStages c
+        let perm = [| for j in 0 .. c - 1 -> bitrev stages j |]
+        let twc = mkTw c (c / 2)
+        // Gather copy-in through the per-row bit-reversal permutation.
+        for i in 0 .. r - 1 do
+            for j in 0 .. c - 1 do
+                sa.[i * c + j] <- readIn i perm.[j]
+        for st in 1 .. stages do
+            let len = 1 <<< st
+            let half = len / 2
+            let tstr = c / len
+            for i in 0 .. r - 1 do
+                for b in 0 .. c / len - 1 do
+                    for t in 0 .. half - 1 do
+                        let p = i * c + (b * len + t)
+                        let q = p + half
+                        let tt = cmul twc.[t * tstr] sa.[q]
+                        let p0 = sa.[p]
+                        sa.[p] <- cadd p0 tt
+                        sa.[q] <- csub p0 tt
+        sa
+    else
+        let twc = mkTw c c
+        for i in 0 .. r - 1 do
+            for k in 0 .. c - 1 do
+                for j in 0 .. c - 1 do
+                    let t = (k * j) % c
+                    sa.[i * c + k] <- cadd sa.[i * c + k] (cmul (readIn i j) twc.[t])
+        sa
+
+/// Column pass: DFT along axis 0, `sa` -> fresh `sb` (flat row-major r×c).
+let private colPass2 (r: int) (c: int) (mkTw: int -> int -> Cplx[]) (sa: Cplx[]) : Cplx[] =
+    let sb = Array.create (r * c) (cplx 0.0 0.0)
+    if isPow2 r && r >= 2 then
+        let stages = fftStages r
+        let perm = [| for i in 0 .. r - 1 -> bitrev stages i |]
+        let twr = mkTw r (r / 2)
+        // Gather copy-in through the per-column bit-reversal permutation.
+        for i in 0 .. r - 1 do
+            for j in 0 .. c - 1 do
+                sb.[i * c + j] <- sa.[perm.[i] * c + j]
+        for st in 1 .. stages do
+            let len = 1 <<< st
+            let half = len / 2
+            let tstr = r / len
+            for j in 0 .. c - 1 do
+                for b in 0 .. r / len - 1 do
+                    for t in 0 .. half - 1 do
+                        let p = (b * len + t) * c + j
+                        let q = p + half * c
+                        let tt = cmul twr.[t * tstr] sb.[q]
+                        let p0 = sb.[p]
+                        sb.[p] <- cadd p0 tt
+                        sb.[q] <- csub p0 tt
+        sb
+    else
+        let twr = mkTw r r
+        for k in 0 .. r - 1 do
+            for j in 0 .. c - 1 do
+                for i in 0 .. r - 1 do
+                    let t = (k * i) % r
+                    sb.[k * c + j] <- cadd sb.[k * c + j] (cmul sa.[i * c + j] twr.[t])
+        sb
+
+/// fft2: unnormalized forward 2-D DFT of a real r×c field (flat row-major).
+let fft2 (r: int) (c: int) (x: float[]) : Cplx[] =
+    rowPass2 r c fwdTwiddles (fun i j -> cplx x.[i * c + j] 0.0)
+    |> colPass2 r c fwdTwiddles
+
+/// ifft2: real inverse synthesis of an r×c complex spectrum (carries the
+/// 1/(r·c), applied once at copy-out).
+let ifft2 (r: int) (c: int) (xs: Cplx[]) : float[] =
+    let sb =
+        rowPass2 r c invTwiddles (fun i j -> xs.[i * c + j])
+        |> colPass2 r c invTwiddles
+    [| for t in 0 .. r * c - 1 -> sb.[t].Re / float (r * c) |]

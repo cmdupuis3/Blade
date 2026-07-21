@@ -1,0 +1,11 @@
+// TEST: ML Equiv Bridge Escape Rejected (rejects)
+import ml as ml
+// ============================================================================
+// irreps_to_sym reads basis-dependent Cartesian components out of a
+// representation — a rep escape, admissible only in uncertified assembly
+// code. Inside an equiv-certified body it is BL4008 (the same discipline
+// that forbids raw component indexing).
+// ============================================================================
+let static TAUSPEC = [(0, 0, 1), (2, 0, 1)]
+function bad(t: Array<Float like IrrepsIdx<TAUSPEC>>) where ml.equiv(O3) -> Array<Float like Idx<6>> =
+  ml.irreps_to_sym(t)

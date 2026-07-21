@@ -1,4 +1,4 @@
-// TEST: Physics -- The Detector That Survives Noise: TICA/VAC In-Language
+﻿// TEST: Physics -- The Detector That Survives Noise: TICA/VAC In-Language
 // ============================================================================
 // Review-gap 3, closed. The arc's invariant detector (ex 09-16) reads
 // conserved quantities as ZERO-VARIANCE combinations -- a criterion that
@@ -6,12 +6,21 @@
 // the generalized eigenproblem C(tau) v = lambda C(0) v (TICA/VAC):
 // white observation noise is lag-uncorrelated, so it inflates C(0) ONLY;
 // invariants keep a tau-INDEPENDENT eigenvalue (a plateau) while every
-// oscillating direction's eigenvalue moves with tau. It needed an
-// eigensolver; math.eigh is here, and so -- via the new imperative
-// blocks -- is the arc's first fully IN-LANGUAGE dynamics: 8 velocity-
-// Verlet trajectories of the 2D isotropic oscillator (12,000 symplectic
-// steps, h = 0.05) with an exact-double LCG observation channel, no
-// external data at all -- not even emitted tables.
+// oscillating direction's eigenvalue moves with tau.
+// ARCHITECTURE (halo rewrite): the ONLY imperative loop left is the
+// integrator -- 8 velocity-Verlet trajectories of the 2D isotropic
+// oscillator (12,000 symplectic steps, h = 0.05) with an exact-double LCG
+// observation channel, emitted as one interleaved record (scan's future
+// home). EVERY statistic is a pure sweep over that record:
+//   * interior + lagged coordinate views via halo<Idx<1500>, [-12, -24]>
+//     -- the reach shrinks each collision to its 1476-step interior
+//     (t = 24..1499, the old hand-gate g and ring buffer, now in the type);
+//   * the 14 linear+quadratic monomial features from pa/pb pair tables;
+//   * Gram / lagged cross-Gram matrices as row-pair prodsum sweeps;
+//   * per-collision energy stats as halo row reduces;
+//   * Rayleigh quotients and the dispersion maximum as flat-raveled
+//     reduce folds (accumulation order identical to the old scalar loops,
+//     so every pin below is bit-for-bit unchanged).
 // Dictionary: all 14 linear+quadratic monomials of (x, y, px, py).
 // The clean VAC spectrum of this system is EXACTLY {1 x4, cos(tau) x4,
 // cos(2 tau) x6}: the eigenvalue-1 subspace is the u(2) invariant algebra
@@ -57,14 +66,17 @@ let ICS: Array<Float64 like Idx<8>, Idx<4>> = [
   [0.1, 1.7, 0.1, -1.2]
 ]
 
-// ---- integrate + accumulate, sigma = 0.0 (stats: mean 0..13, C0-raw 14..209,
-//      lag12-raw 210..405, lag24-raw 406..601, E-sums 602..609, E-sq 610..617) ----
-let STC = {
-    let mut st = [0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0]
-    let mut ring = [0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0]
-    let mut dv = [0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0]
-    let mut dl = [0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0]
-    let mut dm = [0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0]
+// ---- the 14-monomial dictionary as pair tables: feature f is coordinate
+//      pa(f) for f < 4 (pb = -1 sentinel), else coord pa(f) * coord pb(f) ----
+let pa = [0, 1, 2, 3, 0, 1, 2, 3, 0, 0, 0, 1, 1, 2]
+let pb = [-1, -1, -1, -1, 0, 1, 2, 3, 1, 2, 3, 2, 3, 3]
+
+// ---- integrate + emit, sigma = 0.0: the ONLY imperative loop (a genuine
+//      recurrence -- scan's future home). The observed record is one
+//      interleaved buffer, cell 4*(1500 k + t) + c for coordinate c. ----
+let TRC = {
+    let z = method_for(range<Idx<48000>>) <@> lambda(u) -> 0.0 |> compute
+    let mut tr = z
     let mut s = 20260717.0
     let mut x = 0.0
     let mut y = 0.0
@@ -83,181 +95,75 @@ let STC = {
             px = pxh - 0.025 * x
             py = pyh - 0.025 * y
             s = s * 48271.0 - floor(s * 48271.0 / 2147483647.0) * 2147483647.0
-            let xo = x + (s / 2147483647.0 - 0.5) * 3.46410161513775 * 0.0
+            tr(4 * (1500 * k + t)) = x + (s / 2147483647.0 - 0.5) * 3.46410161513775 * 0.0
             s = s * 48271.0 - floor(s * 48271.0 / 2147483647.0) * 2147483647.0
-            let yo = y + (s / 2147483647.0 - 0.5) * 3.46410161513775 * 0.0
+            tr(4 * (1500 * k + t) + 1) = y + (s / 2147483647.0 - 0.5) * 3.46410161513775 * 0.0
             s = s * 48271.0 - floor(s * 48271.0 / 2147483647.0) * 2147483647.0
-            let pxo = px + (s / 2147483647.0 - 0.5) * 3.46410161513775 * 0.0
+            tr(4 * (1500 * k + t) + 2) = px + (s / 2147483647.0 - 0.5) * 3.46410161513775 * 0.0
             s = s * 48271.0 - floor(s * 48271.0 / 2147483647.0) * 2147483647.0
-            let pyo = py + (s / 2147483647.0 - 0.5) * 3.46410161513775 * 0.0
-            let slot = t - (t / 24) * 24
-            let slotL = (t + 12) - ((t + 12) / 24) * 24
-            let g = if t > 23 then 1.0 else 0.0
-                dv(0) = xo
-                dv(1) = yo
-                dv(2) = pxo
-                dv(3) = pyo
-                dv(4) = xo * xo
-                dv(5) = yo * yo
-                dv(6) = pxo * pxo
-                dv(7) = pyo * pyo
-                dv(8) = xo * yo
-                dv(9) = xo * pxo
-                dv(10) = xo * pyo
-                dv(11) = yo * pxo
-                dv(12) = yo * pyo
-                dv(13) = pxo * pyo
-                dm(0) = ring(4 * slot)
-                dm(1) = ring(4 * slot + 1)
-                dm(2) = ring(4 * slot + 2)
-                dm(3) = ring(4 * slot + 3)
-                dm(4) = dm(0) * dm(0)
-                dm(5) = dm(1) * dm(1)
-                dm(6) = dm(2) * dm(2)
-                dm(7) = dm(3) * dm(3)
-                dm(8) = dm(0) * dm(1)
-                dm(9) = dm(0) * dm(2)
-                dm(10) = dm(0) * dm(3)
-                dm(11) = dm(1) * dm(2)
-                dm(12) = dm(1) * dm(3)
-                dm(13) = dm(2) * dm(3)
-                dl(0) = ring(4 * slotL)
-                dl(1) = ring(4 * slotL + 1)
-                dl(2) = ring(4 * slotL + 2)
-                dl(3) = ring(4 * slotL + 3)
-                dl(4) = dl(0) * dl(0)
-                dl(5) = dl(1) * dl(1)
-                dl(6) = dl(2) * dl(2)
-                dl(7) = dl(3) * dl(3)
-                dl(8) = dl(0) * dl(1)
-                dl(9) = dl(0) * dl(2)
-                dl(10) = dl(0) * dl(3)
-                dl(11) = dl(1) * dl(2)
-                dl(12) = dl(1) * dl(3)
-                dl(13) = dl(2) * dl(3)
-                for i in 0..14 {
-                    st(i) = st(i) + g * dv(i)
-                    for j in 0..14 {
-                        st(14 + i * 14 + j) = st(14 + i * 14 + j) + g * dv(i) * dv(j)
-                        st(210 + i * 14 + j) = st(210 + i * 14 + j) + g * dl(i) * dv(j)
-                        st(406 + i * 14 + j) = st(406 + i * 14 + j) + g * dm(i) * dv(j)
-                    }
-                }
-                let eo = 0.5 * (dv(4) + dv(5) + dv(6) + dv(7))
-                st(602 + k) = st(602 + k) + g * eo
-                st(610 + k) = st(610 + k) + g * eo * eo
-            ring(4 * slot) = xo
-            ring(4 * slot + 1) = yo
-            ring(4 * slot + 2) = pxo
-            ring(4 * slot + 3) = pyo
+            tr(4 * (1500 * k + t) + 3) = py + (s / 2147483647.0 - 0.5) * 3.46410161513775 * 0.0
         }
     }
-    st
+    tr
 }
 
-// ---- integrate + accumulate, sigma = 0.1 (stats: mean 0..13, C0-raw 14..209,
-//      lag12-raw 210..405, lag24-raw 406..601, E-sums 602..609, E-sq 610..617) ----
-let STN = {
-    let mut st = [0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0]
-    let mut ring = [0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0]
-    let mut dv = [0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0]
-    let mut dl = [0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0]
-    let mut dm = [0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0]
-    let mut s = 20260717.0
-    let mut x = 0.0
-    let mut y = 0.0
-    let mut px = 0.0
-    let mut py = 0.0
-    for k in 0..8 {
-        x = ICS(k, 0)
-        y = ICS(k, 1)
-        px = ICS(k, 2)
-        py = ICS(k, 3)
-        for t in 0..1500 {
-            let pxh = px - 0.025 * x
-            let pyh = py - 0.025 * y
-            x = x + 0.05 * pxh
-            y = y + 0.05 * pyh
-            px = pxh - 0.025 * x
-            py = pyh - 0.025 * y
-            s = s * 48271.0 - floor(s * 48271.0 / 2147483647.0) * 2147483647.0
-            let xo = x + (s / 2147483647.0 - 0.5) * 3.46410161513775 * 0.1
-            s = s * 48271.0 - floor(s * 48271.0 / 2147483647.0) * 2147483647.0
-            let yo = y + (s / 2147483647.0 - 0.5) * 3.46410161513775 * 0.1
-            s = s * 48271.0 - floor(s * 48271.0 / 2147483647.0) * 2147483647.0
-            let pxo = px + (s / 2147483647.0 - 0.5) * 3.46410161513775 * 0.1
-            s = s * 48271.0 - floor(s * 48271.0 / 2147483647.0) * 2147483647.0
-            let pyo = py + (s / 2147483647.0 - 0.5) * 3.46410161513775 * 0.1
-            let slot = t - (t / 24) * 24
-            let slotL = (t + 12) - ((t + 12) / 24) * 24
-            let g = if t > 23 then 1.0 else 0.0
-                dv(0) = xo
-                dv(1) = yo
-                dv(2) = pxo
-                dv(3) = pyo
-                dv(4) = xo * xo
-                dv(5) = yo * yo
-                dv(6) = pxo * pxo
-                dv(7) = pyo * pyo
-                dv(8) = xo * yo
-                dv(9) = xo * pxo
-                dv(10) = xo * pyo
-                dv(11) = yo * pxo
-                dv(12) = yo * pyo
-                dv(13) = pxo * pyo
-                dm(0) = ring(4 * slot)
-                dm(1) = ring(4 * slot + 1)
-                dm(2) = ring(4 * slot + 2)
-                dm(3) = ring(4 * slot + 3)
-                dm(4) = dm(0) * dm(0)
-                dm(5) = dm(1) * dm(1)
-                dm(6) = dm(2) * dm(2)
-                dm(7) = dm(3) * dm(3)
-                dm(8) = dm(0) * dm(1)
-                dm(9) = dm(0) * dm(2)
-                dm(10) = dm(0) * dm(3)
-                dm(11) = dm(1) * dm(2)
-                dm(12) = dm(1) * dm(3)
-                dm(13) = dm(2) * dm(3)
-                dl(0) = ring(4 * slotL)
-                dl(1) = ring(4 * slotL + 1)
-                dl(2) = ring(4 * slotL + 2)
-                dl(3) = ring(4 * slotL + 3)
-                dl(4) = dl(0) * dl(0)
-                dl(5) = dl(1) * dl(1)
-                dl(6) = dl(2) * dl(2)
-                dl(7) = dl(3) * dl(3)
-                dl(8) = dl(0) * dl(1)
-                dl(9) = dl(0) * dl(2)
-                dl(10) = dl(0) * dl(3)
-                dl(11) = dl(1) * dl(2)
-                dl(12) = dl(1) * dl(3)
-                dl(13) = dl(2) * dl(3)
-                for i in 0..14 {
-                    st(i) = st(i) + g * dv(i)
-                    for j in 0..14 {
-                        st(14 + i * 14 + j) = st(14 + i * 14 + j) + g * dv(i) * dv(j)
-                        st(210 + i * 14 + j) = st(210 + i * 14 + j) + g * dl(i) * dv(j)
-                        st(406 + i * 14 + j) = st(406 + i * 14 + j) + g * dm(i) * dv(j)
-                    }
-                }
-                let eo = 0.5 * (dv(4) + dv(5) + dv(6) + dv(7))
-                st(602 + k) = st(602 + k) + g * eo
-                st(610 + k) = st(610 + k) + g * eo * eo
-            ring(4 * slot) = xo
-            ring(4 * slot + 1) = yo
-            ring(4 * slot + 2) = pxo
-            ring(4 * slot + 3) = pyo
-        }
-    }
-    st
-}
+// ---- interior + lagged coordinate views, sigma = 0.0: per-collision
+//      boundary by halo construction (390-free: 1500 - 24 = 1476 cells) ----
+let XAC = method_for(range<Idx<8>, halo<Idx<1500>, [-12, -24]>>) <@> lambda(k, w) -> TRC(4 * (1500 * k + w(0))) |> compute
+let YAC = method_for(range<Idx<8>, halo<Idx<1500>, [-12, -24]>>) <@> lambda(k, w) -> TRC(4 * (1500 * k + w(0)) + 1) |> compute
+let PAC = method_for(range<Idx<8>, halo<Idx<1500>, [-12, -24]>>) <@> lambda(k, w) -> TRC(4 * (1500 * k + w(0)) + 2) |> compute
+let QAC = method_for(range<Idx<8>, halo<Idx<1500>, [-12, -24]>>) <@> lambda(k, w) -> TRC(4 * (1500 * k + w(0)) + 3) |> compute
+let XLC = method_for(range<Idx<8>, halo<Idx<1500>, [-12, -24]>>) <@> lambda(k, w) -> TRC(4 * (1500 * k + w(-12))) |> compute
+let YLC = method_for(range<Idx<8>, halo<Idx<1500>, [-12, -24]>>) <@> lambda(k, w) -> TRC(4 * (1500 * k + w(-12)) + 1) |> compute
+let PLC = method_for(range<Idx<8>, halo<Idx<1500>, [-12, -24]>>) <@> lambda(k, w) -> TRC(4 * (1500 * k + w(-12)) + 2) |> compute
+let QLC = method_for(range<Idx<8>, halo<Idx<1500>, [-12, -24]>>) <@> lambda(k, w) -> TRC(4 * (1500 * k + w(-12)) + 3) |> compute
+let XMC = method_for(range<Idx<8>, halo<Idx<1500>, [-12, -24]>>) <@> lambda(k, w) -> TRC(4 * (1500 * k + w(-24))) |> compute
+let YMC = method_for(range<Idx<8>, halo<Idx<1500>, [-12, -24]>>) <@> lambda(k, w) -> TRC(4 * (1500 * k + w(-24)) + 1) |> compute
+let PMC = method_for(range<Idx<8>, halo<Idx<1500>, [-12, -24]>>) <@> lambda(k, w) -> TRC(4 * (1500 * k + w(-24)) + 2) |> compute
+let QMC = method_for(range<Idx<8>, halo<Idx<1500>, [-12, -24]>>) <@> lambda(k, w) -> TRC(4 * (1500 * k + w(-24)) + 3) |> compute
+
+// ---- feature matrices (14 x 11808), sigma = 0.0: current, lag-12, lag-24 ----
+let JIC = method_for(range<Idx<14>, Idx<11808>>) <@> lambda(f, u) -> {
+    let k = u / 1476
+    let t = u - 1476 * k
+    let va = if pa(f) < 1 then XAC(k, t) else (if pa(f) < 2 then YAC(k, t) else (if pa(f) < 3 then PAC(k, t) else QAC(k, t)))
+    let vb = if pb(f) < 1 then XAC(k, t) else (if pb(f) < 2 then YAC(k, t) else (if pb(f) < 3 then PAC(k, t) else QAC(k, t)))
+    if pb(f) < 0 then va else va * vb
+} |> compute
+let JLC = method_for(range<Idx<14>, Idx<11808>>) <@> lambda(f, u) -> {
+    let k = u / 1476
+    let t = u - 1476 * k
+    let va = if pa(f) < 1 then XLC(k, t) else (if pa(f) < 2 then YLC(k, t) else (if pa(f) < 3 then PLC(k, t) else QLC(k, t)))
+    let vb = if pb(f) < 1 then XLC(k, t) else (if pb(f) < 2 then YLC(k, t) else (if pb(f) < 3 then PLC(k, t) else QLC(k, t)))
+    if pb(f) < 0 then va else va * vb
+} |> compute
+let JMC = method_for(range<Idx<14>, Idx<11808>>) <@> lambda(f, u) -> {
+    let k = u / 1476
+    let t = u - 1476 * k
+    let va = if pa(f) < 1 then XMC(k, t) else (if pa(f) < 2 then YMC(k, t) else (if pa(f) < 3 then PMC(k, t) else QMC(k, t)))
+    let vb = if pb(f) < 1 then XMC(k, t) else (if pb(f) < 2 then YMC(k, t) else (if pb(f) < 3 then PMC(k, t) else QMC(k, t)))
+    if pb(f) < 0 then va else va * vb
+} |> compute
+
+// ---- raw stat sweeps, sigma = 0.0: feature sums, Gram, lagged cross-Grams ----
+let SUC = method_for(JIC) <@> lambda(r: Array<Float64 like Idx<11808>>) -> reduce(r, (+)) |> compute
+let S0C = method_for(JIC, JIC) <@> lambda(ua: Array<Float64 like Idx<11808>>, ub: Array<Float64 like Idx<11808>>) -> prodsum(ua, ub) |> compute
+let SLC = method_for(JLC, JIC) <@> lambda(ua: Array<Float64 like Idx<11808>>, ub: Array<Float64 like Idx<11808>>) -> prodsum(ua, ub) |> compute
+let SMC = method_for(JMC, JIC) <@> lambda(ua: Array<Float64 like Idx<11808>>, ub: Array<Float64 like Idx<11808>>) -> prodsum(ua, ub) |> compute
+
+// ---- per-collision energy stats, sigma = 0.0 (halo row reduces) ----
+let EOC = method_for(range<Idx<8>, halo<Idx<1500>, [-12, -24]>>) <@> lambda(k, w) -> {
+    let g = 4 * (1500 * k + w(0))
+    0.5 * ((TRC(g) ^ 2.0) + (TRC(g + 1) ^ 2.0) + (TRC(g + 2) ^ 2.0) + (TRC(g + 3) ^ 2.0))
+} |> compute
+let ESC = method_for(EOC) <@> lambda(r: Array<Float64 like Idx<1476>>) -> reduce(r, (+)) |> compute
+let EQC = method_for(EOC) <@> lambda(r: Array<Float64 like Idx<1476>>) -> prodsum(r, r) |> compute
 
 // ---- TICA pipeline, clean ----
-let MUC = method_for(range<Idx<14>>) <@> lambda(i: Int64) -> STC(i) / 11808.0 |> compute
-let C0C: Array<Float64 like Idx<14>, Idx<14>> = method_for(range<Idx<14>>) <*> method_for(range<Idx<14>>) <@> lambda(i: Int64, j: Int64) -> STC(14 + i * 14 + j) / 11808.0 - MUC(i) * MUC(j) |> compute
-let CT12C = method_for(range<Idx<14>>) <*> method_for(range<Idx<14>>) <@> lambda(i: Int64, j: Int64) -> (STC(210 + i * 14 + j) + STC(210 + j * 14 + i)) / 2.0 / 11808.0 - MUC(i) * MUC(j) |> compute
-let CT24C = method_for(range<Idx<14>>) <*> method_for(range<Idx<14>>) <@> lambda(i: Int64, j: Int64) -> (STC(406 + i * 14 + j) + STC(406 + j * 14 + i)) / 2.0 / 11808.0 - MUC(i) * MUC(j) |> compute
+let MUC = method_for(range<Idx<14>>) <@> lambda(i: Int64) -> SUC(i) / 11808.0 |> compute
+let C0C: Array<Float64 like Idx<14>, Idx<14>> = method_for(range<Idx<14>>) <*> method_for(range<Idx<14>>) <@> lambda(i: Int64, j: Int64) -> S0C(i, j) / 11808.0 - MUC(i) * MUC(j) |> compute
+let CT12C = method_for(range<Idx<14>>) <*> method_for(range<Idx<14>>) <@> lambda(i: Int64, j: Int64) -> (SLC(i, j) + SLC(j, i)) / 2.0 / 11808.0 - MUC(i) * MUC(j) |> compute
+let CT24C = method_for(range<Idx<14>>) <*> method_for(range<Idx<14>>) <@> lambda(i: Int64, j: Int64) -> (SMC(i, j) + SMC(j, i)) / 2.0 / 11808.0 - MUC(i) * MUC(j) |> compute
 let (Q0C, L0C) = m.eigh(C0C)
 let QSC = method_for(range<Idx<14>>) <*> method_for(range<Idx<14>>) <@> lambda(i: Int64, k: Int64) -> Q0C(i, k) / sqrt(L0C(k)) |> compute
 let WHC = method_for(QSC, Q0C) <@> lambda(u: Array<Float64 like Idx<14>>, v: Array<Float64 like Idx<14>>) -> prodsum(u, v) |> compute
@@ -267,69 +173,141 @@ let T24C = method_for(WHC, CT24C) <@> lambda(u: Array<Float64 like Idx<14>>, v: 
 let M24C: Array<Float64 like Idx<14>, Idx<14>> = method_for(T24C, WHC) <@> lambda(u: Array<Float64 like Idx<14>>, v: Array<Float64 like Idx<14>>) -> prodsum(u, v) |> compute
 let (U12C, LT12C) = m.eigh(M12C)
 let (U24C, LT24C) = m.eigh(M24C)
-let plC = sqrt((LT12C(0) - LT24C(0)) * (LT12C(0) - LT24C(0))) + sqrt((LT12C(1) - LT24C(1)) * (LT12C(1) - LT24C(1))) + sqrt((LT12C(2) - LT24C(2)) * (LT12C(2) - LT24C(2))) + sqrt((LT12C(3) - LT24C(3)) * (LT12C(3) - LT24C(3)))
-let omC = sqrt((LT12C(4) - LT24C(4)) * (LT12C(4) - LT24C(4)))
+let plC = sqrt((LT12C(0) - LT24C(0)) ^ 2.0) + sqrt((LT12C(1) - LT24C(1)) ^ 2.0) + sqrt((LT12C(2) - LT24C(2)) ^ 2.0) + sqrt((LT12C(3) - LT24C(3)) ^ 2.0)
+let omC = sqrt((LT12C(4) - LT24C(4)) ^ 2.0)
 let QTC = method_for(range<Idx<14>>) <*> method_for(range<Idx<14>>) <@> lambda(i: Int64, k: Int64) -> Q0C(i, k) * sqrt(L0C(k)) |> compute
 let W1C = method_for(QTC, Q0C) <@> lambda(u: Array<Float64 like Idx<14>>, v: Array<Float64 like Idx<14>>) -> prodsum(u, v) |> compute
 let VEC = method_for(range<Idx<14>>) <@> lambda(i: Int64) -> 0.5 * (W1C(i, 4) + W1C(i, 5) + W1C(i, 6) + W1C(i, 7)) |> compute
 let VOC = method_for(range<Idx<14>>) <@> lambda(i: Int64) -> W1C(i, 4) - W1C(i, 6) |> compute
-let rE12C = {
-    let mut num = 0.0
-    let mut den = 0.0
-    for i in 0..14 { den = den + VEC(i) * VEC(i) }
-    for i in 0..14 {
-        for j in 0..14 { num = num + VEC(i) * M12C(i, j) * VEC(j) }
-    }
-    num / den
-}
-let rE24C = {
-    let mut num = 0.0
-    let mut den = 0.0
-    for i in 0..14 { den = den + VEC(i) * VEC(i) }
-    for i in 0..14 {
-        for j in 0..14 { num = num + VEC(i) * M24C(i, j) * VEC(j) }
-    }
-    num / den
-}
-let rO12C = {
-    let mut num = 0.0
-    let mut den = 0.0
-    for i in 0..14 { den = den + VOC(i) * VOC(i) }
-    for i in 0..14 {
-        for j in 0..14 { num = num + VOC(i) * M12C(i, j) * VOC(j) }
-    }
-    num / den
-}
-let rO24C = {
-    let mut num = 0.0
-    let mut den = 0.0
-    for i in 0..14 { den = den + VOC(i) * VOC(i) }
-    for i in 0..14 {
-        for j in 0..14 { num = num + VOC(i) * M24C(i, j) * VOC(j) }
-    }
-    num / den
-}
-let dmaxC = {
-    let mut best = 0.0
-    for k in 0..8 {
-        let em = STC(602 + k) / 1476.0
-        let ev = STC(610 + k) / 1476.0 - em * em
-        let rel = sqrt(sqrt(ev * ev)) / em
-        best = if rel > best then rel else best
-    }
-    best
-}
+// Rayleigh quotients as flat-raveled triple-product folds (i-major,
+// j-inner -- the exact scalar accumulation order, no imperative loop)
+let WE12C = method_for(range<Idx<196>>) <@> lambda(u) -> {
+    let i = u / 14
+    let j = u - 14 * i
+    VEC(i) * M12C(i, j) * VEC(j)
+} |> compute
+let rE12C = reduce(WE12C, (+)) / prodsum(VEC, VEC)
+let WE24C = method_for(range<Idx<196>>) <@> lambda(u) -> {
+    let i = u / 14
+    let j = u - 14 * i
+    VEC(i) * M24C(i, j) * VEC(j)
+} |> compute
+let rE24C = reduce(WE24C, (+)) / prodsum(VEC, VEC)
+let WO12C = method_for(range<Idx<196>>) <@> lambda(u) -> {
+    let i = u / 14
+    let j = u - 14 * i
+    VOC(i) * M12C(i, j) * VOC(j)
+} |> compute
+let rO12C = reduce(WO12C, (+)) / prodsum(VOC, VOC)
+let WO24C = method_for(range<Idx<196>>) <@> lambda(u) -> {
+    let i = u / 14
+    let j = u - 14 * i
+    VOC(i) * M24C(i, j) * VOC(j)
+} |> compute
+let rO24C = reduce(WO24C, (+)) / prodsum(VOC, VOC)
+// per-collision relative E dispersion, max-folded (no imperative scan)
+let RELC = method_for(range<Idx<8>>) <@> lambda(k: Int64) -> {
+    let em = ESC(k) / 1476.0
+    let ev = EQC(k) / 1476.0 - (em ^ 2.0)
+    sqrt(abs(ev)) / em
+} |> compute
+let dmaxC = reduce(RELC, lambda(a, b) -> if a > b then a else b)
 let lt12aC = LT12C(0)
 let lt12dC = LT12C(3)
 let lt12eC = LT12C(4)
 let lt12iC = LT12C(8)
 let lt24eC = LT24C(4)
 
+// ---- integrate + emit, sigma = 0.1 (same recurrence, noisy channel) ----
+let TRN = {
+    let z = method_for(range<Idx<48000>>) <@> lambda(u) -> 0.0 |> compute
+    let mut tr = z
+    let mut s = 20260717.0
+    let mut x = 0.0
+    let mut y = 0.0
+    let mut px = 0.0
+    let mut py = 0.0
+    for k in 0..8 {
+        x = ICS(k, 0)
+        y = ICS(k, 1)
+        px = ICS(k, 2)
+        py = ICS(k, 3)
+        for t in 0..1500 {
+            let pxh = px - 0.025 * x
+            let pyh = py - 0.025 * y
+            x = x + 0.05 * pxh
+            y = y + 0.05 * pyh
+            px = pxh - 0.025 * x
+            py = pyh - 0.025 * y
+            s = s * 48271.0 - floor(s * 48271.0 / 2147483647.0) * 2147483647.0
+            tr(4 * (1500 * k + t)) = x + (s / 2147483647.0 - 0.5) * 3.46410161513775 * 0.1
+            s = s * 48271.0 - floor(s * 48271.0 / 2147483647.0) * 2147483647.0
+            tr(4 * (1500 * k + t) + 1) = y + (s / 2147483647.0 - 0.5) * 3.46410161513775 * 0.1
+            s = s * 48271.0 - floor(s * 48271.0 / 2147483647.0) * 2147483647.0
+            tr(4 * (1500 * k + t) + 2) = px + (s / 2147483647.0 - 0.5) * 3.46410161513775 * 0.1
+            s = s * 48271.0 - floor(s * 48271.0 / 2147483647.0) * 2147483647.0
+            tr(4 * (1500 * k + t) + 3) = py + (s / 2147483647.0 - 0.5) * 3.46410161513775 * 0.1
+        }
+    }
+    tr
+}
+
+// ---- interior + lagged coordinate views, sigma = 0.1 ----
+let XAN = method_for(range<Idx<8>, halo<Idx<1500>, [-12, -24]>>) <@> lambda(k, w) -> TRN(4 * (1500 * k + w(0))) |> compute
+let YAN = method_for(range<Idx<8>, halo<Idx<1500>, [-12, -24]>>) <@> lambda(k, w) -> TRN(4 * (1500 * k + w(0)) + 1) |> compute
+let PAN = method_for(range<Idx<8>, halo<Idx<1500>, [-12, -24]>>) <@> lambda(k, w) -> TRN(4 * (1500 * k + w(0)) + 2) |> compute
+let QAN = method_for(range<Idx<8>, halo<Idx<1500>, [-12, -24]>>) <@> lambda(k, w) -> TRN(4 * (1500 * k + w(0)) + 3) |> compute
+let XLN = method_for(range<Idx<8>, halo<Idx<1500>, [-12, -24]>>) <@> lambda(k, w) -> TRN(4 * (1500 * k + w(-12))) |> compute
+let YLN = method_for(range<Idx<8>, halo<Idx<1500>, [-12, -24]>>) <@> lambda(k, w) -> TRN(4 * (1500 * k + w(-12)) + 1) |> compute
+let PLN = method_for(range<Idx<8>, halo<Idx<1500>, [-12, -24]>>) <@> lambda(k, w) -> TRN(4 * (1500 * k + w(-12)) + 2) |> compute
+let QLN = method_for(range<Idx<8>, halo<Idx<1500>, [-12, -24]>>) <@> lambda(k, w) -> TRN(4 * (1500 * k + w(-12)) + 3) |> compute
+let XMN = method_for(range<Idx<8>, halo<Idx<1500>, [-12, -24]>>) <@> lambda(k, w) -> TRN(4 * (1500 * k + w(-24))) |> compute
+let YMN = method_for(range<Idx<8>, halo<Idx<1500>, [-12, -24]>>) <@> lambda(k, w) -> TRN(4 * (1500 * k + w(-24)) + 1) |> compute
+let PMN = method_for(range<Idx<8>, halo<Idx<1500>, [-12, -24]>>) <@> lambda(k, w) -> TRN(4 * (1500 * k + w(-24)) + 2) |> compute
+let QMN = method_for(range<Idx<8>, halo<Idx<1500>, [-12, -24]>>) <@> lambda(k, w) -> TRN(4 * (1500 * k + w(-24)) + 3) |> compute
+
+// ---- feature matrices, sigma = 0.1 ----
+let JIN = method_for(range<Idx<14>, Idx<11808>>) <@> lambda(f, u) -> {
+    let k = u / 1476
+    let t = u - 1476 * k
+    let va = if pa(f) < 1 then XAN(k, t) else (if pa(f) < 2 then YAN(k, t) else (if pa(f) < 3 then PAN(k, t) else QAN(k, t)))
+    let vb = if pb(f) < 1 then XAN(k, t) else (if pb(f) < 2 then YAN(k, t) else (if pb(f) < 3 then PAN(k, t) else QAN(k, t)))
+    if pb(f) < 0 then va else va * vb
+} |> compute
+let JLN = method_for(range<Idx<14>, Idx<11808>>) <@> lambda(f, u) -> {
+    let k = u / 1476
+    let t = u - 1476 * k
+    let va = if pa(f) < 1 then XLN(k, t) else (if pa(f) < 2 then YLN(k, t) else (if pa(f) < 3 then PLN(k, t) else QLN(k, t)))
+    let vb = if pb(f) < 1 then XLN(k, t) else (if pb(f) < 2 then YLN(k, t) else (if pb(f) < 3 then PLN(k, t) else QLN(k, t)))
+    if pb(f) < 0 then va else va * vb
+} |> compute
+let JMN = method_for(range<Idx<14>, Idx<11808>>) <@> lambda(f, u) -> {
+    let k = u / 1476
+    let t = u - 1476 * k
+    let va = if pa(f) < 1 then XMN(k, t) else (if pa(f) < 2 then YMN(k, t) else (if pa(f) < 3 then PMN(k, t) else QMN(k, t)))
+    let vb = if pb(f) < 1 then XMN(k, t) else (if pb(f) < 2 then YMN(k, t) else (if pb(f) < 3 then PMN(k, t) else QMN(k, t)))
+    if pb(f) < 0 then va else va * vb
+} |> compute
+
+// ---- raw stat sweeps, sigma = 0.1 ----
+let SUN = method_for(JIN) <@> lambda(r: Array<Float64 like Idx<11808>>) -> reduce(r, (+)) |> compute
+let S0N = method_for(JIN, JIN) <@> lambda(ua: Array<Float64 like Idx<11808>>, ub: Array<Float64 like Idx<11808>>) -> prodsum(ua, ub) |> compute
+let SLN = method_for(JLN, JIN) <@> lambda(ua: Array<Float64 like Idx<11808>>, ub: Array<Float64 like Idx<11808>>) -> prodsum(ua, ub) |> compute
+let SMN = method_for(JMN, JIN) <@> lambda(ua: Array<Float64 like Idx<11808>>, ub: Array<Float64 like Idx<11808>>) -> prodsum(ua, ub) |> compute
+
+// ---- per-collision energy stats, sigma = 0.1 ----
+let EON = method_for(range<Idx<8>, halo<Idx<1500>, [-12, -24]>>) <@> lambda(k, w) -> {
+    let g = 4 * (1500 * k + w(0))
+    0.5 * ((TRN(g) ^ 2.0) + (TRN(g + 1) ^ 2.0) + (TRN(g + 2) ^ 2.0) + (TRN(g + 3) ^ 2.0))
+} |> compute
+let ESN = method_for(EON) <@> lambda(r: Array<Float64 like Idx<1476>>) -> reduce(r, (+)) |> compute
+let EQN = method_for(EON) <@> lambda(r: Array<Float64 like Idx<1476>>) -> prodsum(r, r) |> compute
+
 // ---- TICA pipeline, noisy ----
-let MUN = method_for(range<Idx<14>>) <@> lambda(i: Int64) -> STN(i) / 11808.0 |> compute
-let C0N: Array<Float64 like Idx<14>, Idx<14>> = method_for(range<Idx<14>>) <*> method_for(range<Idx<14>>) <@> lambda(i: Int64, j: Int64) -> STN(14 + i * 14 + j) / 11808.0 - MUN(i) * MUN(j) |> compute
-let CT12N = method_for(range<Idx<14>>) <*> method_for(range<Idx<14>>) <@> lambda(i: Int64, j: Int64) -> (STN(210 + i * 14 + j) + STN(210 + j * 14 + i)) / 2.0 / 11808.0 - MUN(i) * MUN(j) |> compute
-let CT24N = method_for(range<Idx<14>>) <*> method_for(range<Idx<14>>) <@> lambda(i: Int64, j: Int64) -> (STN(406 + i * 14 + j) + STN(406 + j * 14 + i)) / 2.0 / 11808.0 - MUN(i) * MUN(j) |> compute
+let MUN = method_for(range<Idx<14>>) <@> lambda(i: Int64) -> SUN(i) / 11808.0 |> compute
+let C0N: Array<Float64 like Idx<14>, Idx<14>> = method_for(range<Idx<14>>) <*> method_for(range<Idx<14>>) <@> lambda(i: Int64, j: Int64) -> S0N(i, j) / 11808.0 - MUN(i) * MUN(j) |> compute
+let CT12N = method_for(range<Idx<14>>) <*> method_for(range<Idx<14>>) <@> lambda(i: Int64, j: Int64) -> (SLN(i, j) + SLN(j, i)) / 2.0 / 11808.0 - MUN(i) * MUN(j) |> compute
+let CT24N = method_for(range<Idx<14>>) <*> method_for(range<Idx<14>>) <@> lambda(i: Int64, j: Int64) -> (SMN(i, j) + SMN(j, i)) / 2.0 / 11808.0 - MUN(i) * MUN(j) |> compute
 let (Q0N, L0N) = m.eigh(C0N)
 let QSN = method_for(range<Idx<14>>) <*> method_for(range<Idx<14>>) <@> lambda(i: Int64, k: Int64) -> Q0N(i, k) / sqrt(L0N(k)) |> compute
 let WHN = method_for(QSN, Q0N) <@> lambda(u: Array<Float64 like Idx<14>>, v: Array<Float64 like Idx<14>>) -> prodsum(u, v) |> compute
@@ -339,58 +317,42 @@ let T24N = method_for(WHN, CT24N) <@> lambda(u: Array<Float64 like Idx<14>>, v: 
 let M24N: Array<Float64 like Idx<14>, Idx<14>> = method_for(T24N, WHN) <@> lambda(u: Array<Float64 like Idx<14>>, v: Array<Float64 like Idx<14>>) -> prodsum(u, v) |> compute
 let (U12N, LT12N) = m.eigh(M12N)
 let (U24N, LT24N) = m.eigh(M24N)
-let plN = sqrt((LT12N(0) - LT24N(0)) * (LT12N(0) - LT24N(0))) + sqrt((LT12N(1) - LT24N(1)) * (LT12N(1) - LT24N(1))) + sqrt((LT12N(2) - LT24N(2)) * (LT12N(2) - LT24N(2))) + sqrt((LT12N(3) - LT24N(3)) * (LT12N(3) - LT24N(3)))
-let omN = sqrt((LT12N(4) - LT24N(4)) * (LT12N(4) - LT24N(4)))
+let plN = sqrt((LT12N(0) - LT24N(0)) ^ 2.0) + sqrt((LT12N(1) - LT24N(1)) ^ 2.0) + sqrt((LT12N(2) - LT24N(2)) ^ 2.0) + sqrt((LT12N(3) - LT24N(3)) ^ 2.0)
+let omN = sqrt((LT12N(4) - LT24N(4)) ^ 2.0)
 let QTN = method_for(range<Idx<14>>) <*> method_for(range<Idx<14>>) <@> lambda(i: Int64, k: Int64) -> Q0N(i, k) * sqrt(L0N(k)) |> compute
 let W1N = method_for(QTN, Q0N) <@> lambda(u: Array<Float64 like Idx<14>>, v: Array<Float64 like Idx<14>>) -> prodsum(u, v) |> compute
 let VEN = method_for(range<Idx<14>>) <@> lambda(i: Int64) -> 0.5 * (W1N(i, 4) + W1N(i, 5) + W1N(i, 6) + W1N(i, 7)) |> compute
 let VON = method_for(range<Idx<14>>) <@> lambda(i: Int64) -> W1N(i, 4) - W1N(i, 6) |> compute
-let rE12N = {
-    let mut num = 0.0
-    let mut den = 0.0
-    for i in 0..14 { den = den + VEN(i) * VEN(i) }
-    for i in 0..14 {
-        for j in 0..14 { num = num + VEN(i) * M12N(i, j) * VEN(j) }
-    }
-    num / den
-}
-let rE24N = {
-    let mut num = 0.0
-    let mut den = 0.0
-    for i in 0..14 { den = den + VEN(i) * VEN(i) }
-    for i in 0..14 {
-        for j in 0..14 { num = num + VEN(i) * M24N(i, j) * VEN(j) }
-    }
-    num / den
-}
-let rO12N = {
-    let mut num = 0.0
-    let mut den = 0.0
-    for i in 0..14 { den = den + VON(i) * VON(i) }
-    for i in 0..14 {
-        for j in 0..14 { num = num + VON(i) * M12N(i, j) * VON(j) }
-    }
-    num / den
-}
-let rO24N = {
-    let mut num = 0.0
-    let mut den = 0.0
-    for i in 0..14 { den = den + VON(i) * VON(i) }
-    for i in 0..14 {
-        for j in 0..14 { num = num + VON(i) * M24N(i, j) * VON(j) }
-    }
-    num / den
-}
-let dmaxN = {
-    let mut best = 0.0
-    for k in 0..8 {
-        let em = STN(602 + k) / 1476.0
-        let ev = STN(610 + k) / 1476.0 - em * em
-        let rel = sqrt(sqrt(ev * ev)) / em
-        best = if rel > best then rel else best
-    }
-    best
-}
+let WE12N = method_for(range<Idx<196>>) <@> lambda(u) -> {
+    let i = u / 14
+    let j = u - 14 * i
+    VEN(i) * M12N(i, j) * VEN(j)
+} |> compute
+let rE12N = reduce(WE12N, (+)) / prodsum(VEN, VEN)
+let WE24N = method_for(range<Idx<196>>) <@> lambda(u) -> {
+    let i = u / 14
+    let j = u - 14 * i
+    VEN(i) * M24N(i, j) * VEN(j)
+} |> compute
+let rE24N = reduce(WE24N, (+)) / prodsum(VEN, VEN)
+let WO12N = method_for(range<Idx<196>>) <@> lambda(u) -> {
+    let i = u / 14
+    let j = u - 14 * i
+    VON(i) * M12N(i, j) * VON(j)
+} |> compute
+let rO12N = reduce(WO12N, (+)) / prodsum(VON, VON)
+let WO24N = method_for(range<Idx<196>>) <@> lambda(u) -> {
+    let i = u / 14
+    let j = u - 14 * i
+    VON(i) * M24N(i, j) * VON(j)
+} |> compute
+let rO24N = reduce(WO24N, (+)) / prodsum(VON, VON)
+let RELN = method_for(range<Idx<8>>) <@> lambda(k: Int64) -> {
+    let em = ESN(k) / 1476.0
+    let ev = EQN(k) / 1476.0 - (em ^ 2.0)
+    sqrt(abs(ev)) / em
+} |> compute
+let dmaxN = reduce(RELN, lambda(a, b) -> if a > b then a else b)
 let lt12aN = LT12N(0)
 let lt12dN = LT12N(3)
 let lt12eN = LT12N(4)
@@ -399,10 +361,10 @@ let lt24eN = LT24N(4)
 
 // ---- verdicts ----
 let cleanV = if lt12dC > 0.99 then (if lt12eC < 0.9 then "FOUR_INVARIANTS_AT_ONE" else "NO") else "NO"
-let cosV = if sqrt((lt12eC - 0.825336) * (lt12eC - 0.825336)) < 0.05 then (if sqrt((lt12iC - 0.362358) * (lt12iC - 0.362358)) < 0.08 then "COS_CLUSTERS_AS_PREDICTED" else "NO") else "NO"
+let cosV = if abs(lt12eC - 0.825336) < 0.05 then (if abs(lt12iC - 0.362358) < 0.08 then "COS_CLUSTERS_AS_PREDICTED" else "NO") else "NO"
 let killV = if dmaxC < 0.001 then (if dmaxN > 0.05 then "ZERO_VARIANCE_DETECTOR_KILLED" else "NO") else "NO"
 let plateauV = if plN < 0.05 then (if omN > 0.1 then "INVARIANTS_PLATEAU_UNDER_NOISE" else "NO") else "NO"
-let rayV = if sqrt((rE12N - rE24N) * (rE12N - rE24N)) < 0.02 then (if rE12N > 0.8 then (if sqrt((rO12N - rO24N) * (rO12N - rO24N)) > 0.5 then "ENERGY_PLATEAUS_OSCILLATOR_MOVES" else "NO") else "NO") else "NO"
+let rayV = if abs(rE12N - rE24N) < 0.02 then (if rE12N > 0.8 then (if abs(rO12N - rO24N) > 0.5 then "ENERGY_PLATEAUS_OSCILLATOR_MOVES" else "NO") else "NO") else "NO"
 
 // the spectrum, the kill, the plateau, the recovery:
 // EXPECT: lt12aC = 1.00636317473505

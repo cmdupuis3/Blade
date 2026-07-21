@@ -1,0 +1,7 @@
+// TEST: ML Galilean Scale Rejected (rejects)
+import ml as ml
+// Scaling a boost-variant value scales its U0-coefficient: 0.5 * u shifts
+// by 0.5 U0 — even inside a stencil that is invariant as a whole (v1 has no
+// rational coefficient tracking; write differences instead). BL4009.
+function bad(ul: Float, uc: Float, ur: Float) where ml.galilean(ul, uc, ur) -> Float =
+  ur - 2.0 * uc + ul

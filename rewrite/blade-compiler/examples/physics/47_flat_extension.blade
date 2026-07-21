@@ -1,4 +1,4 @@
-// TEST: Physics -- The Tower Counts, Locates, and Weighs: Flat Extension
+﻿// TEST: Physics -- The Tower Counts, Locates, and Weighs: Flat Extension
 // ============================================================================
 // The flat-extension guard (Curto-Fialkow), prototyped in userland -- the
 // compiler slot the arc has pointed at since ex 33 ('extendable' as a
@@ -20,7 +20,7 @@
 //     closed): 24 damped double-well trajectories, integrated in-language
 //     to t = 60, leave an ensemble whose moment tower is 2-atomic: rank
 //     stalls at 2 (COUNTS the attractors), Golub-Welsch nodes land on
-//     the wells at Â±1 to ~1e-7 (LOCATES them -- the residual is the
+//     the wells at Ã‚Â±1 to ~1e-7 (LOCATES them -- the residual is the
 //     e^{-gamma t} ring-down, physics not error), and the recovered
 //     weights equal the DIRECTLY COUNTED basin fractions -- 12/24 each, an
 //     even split off an ASYMMETRIC grid (interleaved spiral basins),
@@ -71,7 +71,7 @@ let nd2 = ND(2)
 let w0 = MM(0) * QJ(0, 0) * QJ(0, 0)
 let w1 = MM(0) * QJ(0, 1) * QJ(0, 1)
 let w2 = MM(0) * QJ(0, 2) * QJ(0, 2)
-let atomDev = sqrt((nd0 - 1.7) * (nd0 - 1.7)) + sqrt((nd1 - 0.4) * (nd1 - 0.4)) + sqrt((nd2 + 1.1) * (nd2 + 1.1)) + sqrt((w0 - 0.3) * (w0 - 0.3)) + sqrt((w1 - 0.5) * (w1 - 0.5)) + sqrt((w2 - 0.2) * (w2 - 0.2))
+let atomDev = abs(nd0 - 1.7) + abs(nd1 - 0.4) + abs(nd2 + 1.1) + abs(w0 - 0.3) + abs(w1 - 0.5) + abs(w2 - 0.2)
 
 // ---- (b) flatness: rank stalls exactly at the atom count ----
 let H3: Array<Float64 like Idx<4>, Idx<4>> = [[MM(0), MM(1), MM(2), MM(3)], [MM(1), MM(2), MM(3), MM(4)], [MM(2), MM(3), MM(4), MM(5)], [MM(3), MM(4), MM(5), MM(6)]]
@@ -102,8 +102,8 @@ let FIN = {
     fv
 }
 let em0 = 1.0
-let em1 = reduce(method_for(FIN) <@> lambda(x) -> x, (+)) / 24.0
-let em2 = reduce(method_for(FIN) <@> lambda(x) -> x * x, (+)) / 24.0
+let em1 = reduce(FIN, (+)) / 24.0
+let em2 = prodsum(FIN, FIN) / 24.0
 let em3 = reduce(method_for(FIN) <@> lambda(x) -> x * x * x, (+)) / 24.0
 let em4 = reduce(method_for(FIN) <@> lambda(x) -> x * x * x * x, (+)) / 24.0
 let nRight = reduce(method_for(FIN) <@> lambda(x) -> (if x > 0.0 then 1.0 else 0.0), (+))
@@ -118,8 +118,8 @@ let an0 = NA(0)
 let an1 = NA(1)
 let aw0 = QA(0, 0) * QA(0, 0)
 let aw1 = QA(0, 1) * QA(0, 1)
-let wellDev = sqrt((an0 - 1.0) * (an0 - 1.0)) + sqrt((an1 + 1.0) * (an1 + 1.0))
-let countDev = sqrt((aw0 - nRight / 24.0) * (aw0 - nRight / 24.0))
+let wellDev = abs(an0 - 1.0) + abs(an1 + 1.0)
+let countDev = abs(aw0 - nRight / 24.0)
 let EH2: Array<Float64 like Idx<3>, Idx<3>> = [[1.0, em1, em2], [em1, em2, em3], [em2, em3, em4]]
 let (QE, LE) = m.eigh(EH2)
 let aflat = sqrt(LE(2) * LE(2))

@@ -36,6 +36,7 @@ open Blade.Tests.Math
 open Blade.Tests.Rand
 open Blade.Tests.Spectra
 open Blade.Tests.Fallback
+open Blade.Tests.Sgs
 open Blade.Lowering
 
 module TH = Blade.Tests.TestHarness
@@ -426,6 +427,16 @@ let replLoop () : int =
     let identRe =
         System.Text.RegularExpressions.Regex(@"^[A-Za-z_][A-Za-z0-9_]*$")
 
+    // A reassignment `x = e` (or `x[i] = e`, `x.f = e`, `x += e`, …): an lvalue
+    // followed by an assignment operator. `=(?!=)` matches a single `=` but not
+    // `==`; `<=`/`>=`/`!=` never match here because their `<`/`>`/`!` is not part
+    // of the lvalue — so `b == 1`, `b <= 1`, `b != 1` stay bare expressions. The
+    // leading identifier (group 1) is the ROOT variable to echo. Checked AFTER
+    // declRe so `let …` stays a declaration.
+    let assignRe =
+        System.Text.RegularExpressions.Regex(
+            @"^\s*([A-Za-z_][A-Za-z0-9_]*)(?:\.[A-Za-z_][A-Za-z0-9_]*|\[[^\]]*\])*\s*(?:\+=|-=|\*=|/=|=(?!=))")
+
     // A raw run-output line is `name = value`; grab the leading name so we can
     // single out just the one binding we mean to echo.
     let outNameRe =
@@ -564,6 +575,31 @@ let replLoop () : int =
                 session.Clear()
                 session.AddRange candidate
                 lastLines <- lines
+        elif assignRe.IsMatch (classifyTarget trimmed) then
+            // Reassignment (`b = b + 1`, `b += 1`, …): a bare assignment does not
+            // parse at top level, but wrapping it in a hidden binding does — the
+            // wrapper's value IS the ExprAssign, which mutates the target's
+            // existing cell. Unlike the bare-expression path we KEEP the wrapper,
+            // so the mutation persists into the re-run session. Successive
+            // assignments append (never rebind-replace) under fresh __assignN
+            // names, so `b = b + 1` twice accumulates 1->2->3. The echo targets
+            // the ROOT variable, whose end-of-program auto-print already reflects
+            // the final value (both backends print bindings after the whole body
+            // runs), so no re-read is needed.
+            let candidate = ResizeArray(session)
+            let hidden =
+                let inUse = candidate |> Seq.choose bindingName |> Set.ofSeq
+                Seq.initInfinite (fun i -> if i = 0 then "__assign" else sprintf "__assign%d" i)
+                |> Seq.find (fun n -> not (Set.contains n inUse))
+            candidate.Add (sprintf "let %s = %s" hidden trimmed)
+            let root = (assignRe.Match trimmed).Groups.[1].Value
+            match compileRunEcho candidate (Some root) None with
+            | None -> ()                                    // static/unknown/etc → not kept
+            | Some (lines, printed, _) ->
+                if printed = 0 then printfn "(ok)"          // e.g. array reassign isn't auto-printed
+                session.Clear()
+                session.AddRange candidate
+                lastLines <- lines
         else
             // Bare expression: `blade run` semantics only print top-level
             // BINDINGS, so wrap the expression in a transient one, run, and
@@ -635,8 +671,14 @@ let replLoop () : int =
             lastLines <- [||]
             printfn "(session cleared)"
         | line when buffer.Count = 0 && line.Trim() = ":show" ->
-            if session.Count = 0 then printfn "(empty session)"
-            else printfn "%s" (String.concat "\n\n" session)
+            // Hide the synthetic `let __assign… = <reassignment>` wrappers the
+            // assignment path appends — the user sees only what they typed.
+            let visible =
+                session
+                |> Seq.filter (fun s -> bindingName s |> Option.forall (fun n -> not (n.StartsWith "__assign")))
+                |> List.ofSeq
+            if List.isEmpty visible then printfn "(empty session)"
+            else printfn "%s" (String.concat "\n\n" visible)
         | line ->
             buffer.Add line
             if bracketBalance (String.concat "\n" buffer) <= 0 then
@@ -897,6 +939,12 @@ let private dispatchTest (rest: string list) : int =
         // g++ (and skip without it). Kept out of the default aggregate like
         // netcdf; returns an exit code directly.
         Blade.Tests.ZarrTests.runZarrTests ()
+    | [ "csv" ] ->
+        // CSV provider tests. Fully hermetic: fixtures are plain-text files
+        // written on the fly, so only the e2e compile+run blocks need g++
+        // (and skip without it). Kept out of the default aggregate like
+        // netcdf/zarr; returns an exit code directly.
+        Blade.Tests.CsvTests.runCsvTests ()
     | [ "hybrid" ] ->
         // Mixed-parallelism tests (MixedParallelismPlan.md): order-table
         // parse checks + gate-off degradation run always; the mpi+omp
@@ -931,6 +979,7 @@ let private dispatchTest (rest: string list) : int =
             | "rand" -> Some ("Rand", randTests)
             | "spectra" -> Some ("Spectra", spectraTests)
             | "fallback" -> Some ("Fallback", fallbackTests)
+            | "sgs" -> Some ("SGS", sgsTests)
             | "ml-ops" | "mlops" -> Some ("ML Ops", mlOpsTests)
             | "ml-e2e" | "mle2e" -> Some ("ML E2E", mlE2eTests)
             | "ml-equiv" | "mlequiv" | "equiv" -> Some ("ML Equiv", mlEquivTests)

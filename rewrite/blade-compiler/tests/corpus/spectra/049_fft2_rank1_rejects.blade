@@ -1,0 +1,6 @@
+// TEST: Spectra fft2: rank-1 argument steers to rank-2 (rejects)
+// fft2 requires a rank-2 real field (Array<Float64 like Idx<r>, Idx<c>>);
+// a rank-1 signal belongs to fft.
+import spectra as sp
+let x: Array<Float64 like Idx<8>> = [1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0]
+let X = sp.fft2(x)

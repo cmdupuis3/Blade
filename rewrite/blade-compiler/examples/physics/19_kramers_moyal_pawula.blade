@@ -1,4 +1,4 @@
-// TEST: Physics -- Kramers-Moyal: the Generator is the Jet of the Propagator
+﻿// TEST: Physics -- Kramers-Moyal: the Generator is the Jet of the Propagator
 import ppl as ppl
 // ============================================================================
 // The deterministic arc fitted d/dt <g> = L g. For STOCHASTIC dynamics the
@@ -29,14 +29,14 @@ let o2 = ppl.cumulants(DO, 2)
 let o4 = ppl.cumulants(DO, 4)
 let ou_diff = o2(0) / 0.01
 let ou_kurt = o4(0) / (o2(0) * o2(0))
-let ou_V = if sqrt(ou_kurt * ou_kurt) < 1.0 then "DIFFUSION (jet order 2)" else "JUMPS (no finite order)"
+let ou_V = if abs(ou_kurt) < 1.0 then "DIFFUSION (jet order 2)" else "JUMPS (no finite order)"
 
 // --- jump-process increments: kappa_4/kappa_2^2 ~ 3/(rho tau) = 120 ---
 let j2 = ppl.cumulants(DJ, 2)
 let j4 = ppl.cumulants(DJ, 4)
 let jp_diff = j2(0) / 0.01
 let jp_kurt = j4(0) / (j2(0) * j2(0))
-let jp_V = if sqrt(jp_kurt * jp_kurt) < 1.0 then "DIFFUSION (jet order 2)" else "JUMPS (no finite order)"
+let jp_V = if abs(jp_kurt) < 1.0 then "DIFFUSION (jet order 2)" else "JUMPS (no finite order)"
 
 // same diffusion, wildly different fourth cumulant -- the jet order verdict:
 // EXPECT: ou_diff = 0.237591792571145

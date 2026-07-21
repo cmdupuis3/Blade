@@ -1,0 +1,23 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <OutputType>Exe</OutputType>
+    <TargetFramework>net7.0</TargetFramework>
+    <RootNamespace>BladeSgs</RootNamespace>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <Compile Include="Oracle.fs" />
+    <Compile Include="TrainingOracle.fs" />
+    <Compile Include="Burgers.fs" />
+    <Compile Include="Program.fs" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <!-- Rep-theory reference (bridge fits, TP/gated/linear + VJPs, Wigner
+         rotations) — the sgs oracle reuses BladeML rather than duplicating
+         the machinery; only the PHYSICS lives here. -->
+    <ProjectReference Include="..\ml\BladeML.fsproj" />
+  </ItemGroup>
+
+</Project>

@@ -36,19 +36,29 @@ type private Ctx = {
     Statics: StaticEnv
 }
 
-let private collectArrays (decls: Located<Decl> list) : Map<string, TypeExpr * TypeExpr list> =
-    decls |> List.fold (fun acc d ->
-        match d.Value with
-        | DeclLet b | DeclStatic b ->
-            match b.Pattern, b.Type with
-            | { Kind = PatternKind.PatVar name }, Some (TyArray (elem, idxs)) -> Map.add name (elem, idxs) acc
-            | _ -> acc
-        | _ -> acc) Map.empty
-
 let private collectAliases (decls: Located<Decl> list) : Map<string, TypeExpr> =
     decls |> List.fold (fun acc d ->
         match d.Value with
         | DeclType (TyDeclAlias (name, _, body)) -> Map.add name body acc
+        | _ -> acc) Map.empty
+
+/// Annotations may name a whole-array type alias (`type Field = Array<...>`;
+/// `let mut q: Field = ...`) — resolve top-level aliases (cycle-bounded)
+/// before matching for TyArray, so aliased transform arguments are found.
+let private collectArrays (aliases: Map<string, TypeExpr>) (decls: Located<Decl> list) : Map<string, TypeExpr * TypeExpr list> =
+    let rec resolveTop (fuel: int) (ty: TypeExpr) =
+        match ty with
+        | TyNamed (n, []) when fuel > 0 ->
+            match Map.tryFind n aliases with
+            | Some body -> resolveTop (fuel - 1) body
+            | None -> ty
+        | _ -> ty
+    decls |> List.fold (fun acc d ->
+        match d.Value with
+        | DeclLet b | DeclStatic b ->
+            match b.Pattern, b.Type |> Option.map (resolveTop 8) with
+            | { Kind = PatternKind.PatVar name }, Some (TyArray (elem, idxs)) -> Map.add name (elem, idxs) acc
+            | _ -> acc
         | _ -> acc) Map.empty
 
 let rec private resolveExtent (ctx: Ctx) (ty: TypeExpr) : int option =
@@ -133,7 +143,7 @@ let private ensureFft (st: ElabState) (n: int) : string =
 // Op elaboration
 // ============================================================================
 
-let private opList = "fft, ifft, power, polyspec"
+let private opList = "fft, ifft, fft2, ifft2, power, polyspec"
 
 /// v1 cap on the polyspectrum output (the zeros literal and the C++
 /// initializer both scale with n^(k-1); steer before g++ meets a
@@ -155,6 +165,30 @@ let private elabOp (st: ElabState) (ctx: Ctx) (op: string) (args: Expr list) : R
             | ElemComplex, _ -> Error (sprintf "ifft: '%s' must be rank-1 (Array<Complex128 like Idx<n>>)" name)
             | _, _ -> Error (sprintf "ifft: '%s' must have Complex128 elements (ifft takes the complex spectrum; rebind the fft result with a full Array<Complex128 like Idx<n>> annotation first)" name))
     | "ifft", _ -> Error "ifft: expected ifft(X) — real inverse synthesis of a complex spectrum (carries the 1/n)"
+    | "fft2", [xE] ->
+        arrayShape ctx "fft2" xE |> Result.bind (fun (name, elem, dims) ->
+            match elem, dims with
+            | ElemFloat, [r; c] ->
+                if r * c > maxOutCells then
+                    Error (sprintf "fft2: the %dx%d field has %d cells; v1 caps spectra outputs at %d (the generated initializers scale with it) — reduce the grid" r c (r * c) maxOutCells)
+                else
+                    ensure st (fingerprint "fft2" (box (r, c))) (fun nm -> Ok (fft2Decl nm r c))
+                    |> Result.map (fun nm -> syn (ExprApp (syn (ExprVar nm), [xE])))
+            | ElemFloat, _ -> Error (sprintf "fft2: '%s' must be rank-2 (Array<Float64 like Idx<r>, Idx<c>>)" name)
+            | _, _ -> Error (sprintf "fft2: '%s' must have Float64 elements (a real 2-D field)" name))
+    | "fft2", _ -> Error "fft2: expected fft2(X) — the unnormalized forward 2-D DFT of a real rank-2 field"
+    | "ifft2", [xE] ->
+        arrayShape ctx "ifft2" xE |> Result.bind (fun (name, elem, dims) ->
+            match elem, dims with
+            | ElemComplex, [r; c] ->
+                if r * c > maxOutCells then
+                    Error (sprintf "ifft2: the %dx%d spectrum has %d cells; v1 caps spectra outputs at %d (the generated initializers scale with it) — reduce the grid" r c (r * c) maxOutCells)
+                else
+                    ensure st (fingerprint "ifft2" (box (r, c))) (fun nm -> Ok (ifft2Decl nm r c))
+                    |> Result.map (fun nm -> syn (ExprApp (syn (ExprVar nm), [xE])))
+            | ElemComplex, _ -> Error (sprintf "ifft2: '%s' must be rank-2 (Array<Complex128 like Idx<r>, Idx<c>>)" name)
+            | _, _ -> Error (sprintf "ifft2: '%s' must have Complex128 elements (ifft2 takes the complex spectrum; rebind the fft2 result with a full Array<Complex128 like Idx<r>, Idx<c>> annotation first)" name))
+    | "ifft2", _ -> Error "ifft2: expected ifft2(X) — real inverse synthesis of a rank-2 complex spectrum (carries the 1/(r*c))"
     | "power", [xE] ->
         realSignal ctx "power" xE |> Result.bind (fun n ->
             let fftName = ensureFft st n
@@ -282,8 +316,9 @@ let private expandModule (decls: Located<Decl> list) : Result<Located<Decl> list
         match resolveStatics declsNoImport with
         | Error e -> Error (sprintf "spectra elaboration: static resolution failed: %s" e)
         | Ok (statics, _) ->
-            let ctx = { Arrays = collectArrays declsNoImport
-                        Aliases = collectAliases declsNoImport
+            let tyAliases = collectAliases declsNoImport
+            let ctx = { Arrays = collectArrays tyAliases declsNoImport
+                        Aliases = tyAliases
                         Statics = statics }
             let st = { Counter = 0; Made = Map.empty; Decls = [] }
             let mapped =

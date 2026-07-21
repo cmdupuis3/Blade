@@ -13,6 +13,11 @@ let main argv =
         // both-ways evaluations) for the ml-equiv certificate corpus tests.
         OracleDump.dumpEquiv ()
         0
+    | [| "dump-cartesian" |] ->
+        // Print the Cartesian<->irreps bridge constants and certificates
+        // (fit-derived, Wigner-consistent) for the sgs corpus tests.
+        OracleDump.dumpCartesian ()
+        0
     | _ ->
         printfn "BladeML reference implementation — equivariant ML module tests"
         printfn ""

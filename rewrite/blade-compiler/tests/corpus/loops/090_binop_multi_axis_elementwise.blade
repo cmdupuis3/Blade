@@ -1,0 +1,14 @@
+// TEST: Binop Multi Axis Elementwise
+// Elementwise binops on rank-2 dense arrays — the BL3999 "co-iteration
+// currently spans one index record per operand" limitation, removed: the
+// binop desugars to the zip co-iteration, which now spans the product of
+// the operands' (structurally matching) index records. Non-square 2×3.
+type Lat = Idx<2>
+type Lon = Idx<3>
+let A: Array<Float64 like Lat, Lon> = [[1.0, 2.0, 3.0], [4.0, 5.0, 6.0]]
+let B: Array<Float64 like Lat, Lon> = [[10.0, 10.0, 10.0], [2.0, 2.0, 2.0]]
+let P = A * B
+let S = A + B
+
+// EXPECT: P = [10, 20, 30, 8, 10, 12]
+// EXPECT: S = [11, 12, 13, 6, 7, 8]

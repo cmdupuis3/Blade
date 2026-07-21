@@ -1,0 +1,14 @@
+// TEST: Coiter Multi Axis Basic
+// Multi-axis co-iteration: `for (A, B) in range<Lat, Lon>` spans the FULL
+// Lat×Lon product space (2 loop levels, each at its own axis extent — the
+// non-square 2×3 shape is deliberate: the old single-record co-iteration
+// hardcoded every level to dim 0's extent). Both operands peel to scalars
+// at every level; output is Array<Float64 like Lat, Lon>.
+// EXPECT is FLAT: rank-2 results print flattened row-major.
+type Lat = Idx<2>
+type Lon = Idx<3>
+let A: Array<Float64 like Lat, Lon> = [[1.0, 2.0, 3.0], [4.0, 5.0, 6.0]]
+let B: Array<Float64 like Lat, Lon> = [[10.0, 10.0, 10.0], [2.0, 2.0, 2.0]]
+let F = for (A, B) in range<Lat, Lon> <@> lambda(a, b) -> a * 2.0 + b |> compute
+
+// EXPECT: F = [12, 14, 16, 10, 12, 14]

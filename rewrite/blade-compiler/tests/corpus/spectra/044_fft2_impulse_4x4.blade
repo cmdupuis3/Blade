@@ -1,0 +1,8 @@
+// TEST: Spectra fft2: impulse at (0,0), 4x4 radix-2 x radix-2
+// The 2-D DFT of the origin impulse is 1 in every bin — exact through the
+// radix-2 butterflies (every twiddle product multiplies a zero cell).
+// Pins from spectra/OracleDump.fs (dotnet run --project spectra/BladeSpectra.fsproj).
+import spectra as sp
+let x: Array<Float64 like Idx<4>, Idx<4>> = [[1.0, 0.0, 0.0, 0.0], [0.0, 0.0, 0.0, 0.0], [0.0, 0.0, 0.0, 0.0], [0.0, 0.0, 0.0, 0.0]]
+let X = sp.fft2(x)
+// EXPECT: X = [(1, 0), (1, 0), (1, 0), (1, 0), (1, 0), (1, 0), (1, 0), (1, 0), (1, 0), (1, 0), (1, 0), (1, 0), (1, 0), (1, 0), (1, 0), (1, 0)]

@@ -1,0 +1,6 @@
+// TEST: Spectra ifft2: real argument steers to complex spectrum (rejects)
+// ifft2 takes the rank-2 complex spectrum; a real field is rejected with
+// the annotated-rebind steer.
+import spectra as sp
+let x: Array<Float64 like Idx<4>, Idx<4>> = [[1.0, 2.0, 3.0, 4.0], [5.0, 6.0, 7.0, 8.0], [9.0, 10.0, 11.0, 12.0], [13.0, 14.0, 15.0, 16.0]]
+let y = sp.ifft2(x)

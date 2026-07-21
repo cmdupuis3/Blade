@@ -1,4 +1,4 @@
-// TEST: Physics -- The Wall from Inside: a Quantum Family Crosses the Boundary
+﻿// TEST: Physics -- The Wall from Inside: a Quantum Family Crosses the Boundary
 // ============================================================================
 // Examples 33-36 mapped the walls from the classical side. This example
 // walks a genuine QUANTUM family through them and asks the question the
@@ -100,12 +100,12 @@ let tlm_edge = TLM(5)
 let conc_kink = CONC(1)
 
 // ---- verdicts ----
-let coincide_V = if sqrt(varc_star * varc_star) < 0.0000000001 then (if sqrt(mc_star * mc_star) < 0.0000000001 then "WALLS_COINCIDE_AT_VSTAR" else "NO") else "NO"
-let onset_V = if sqrt((onset_slope - 0.707106781186548) * (onset_slope - 0.707106781186548)) < 0.0000000001 then "SECOND_ORDER_ONSET" else "NO"
+let coincide_V = if abs(varc_star) < 0.0000000001 then (if abs(mc_star) < 0.0000000001 then "WALLS_COINCIDE_AT_VSTAR" else "NO") else "NO"
+let onset_V = if abs(onset_slope - 0.707106781186548) < 0.0000000001 then "SECOND_ORDER_ONSET" else "NO"
 let nojump_V = if ng4 < 0.5 then (if ng5 > 7.5 then (if ng5 < 8.5 then "CELLS_CROSS_ZERO_SMOOTHLY" else "NO") else "NO") else "NO"
 let excess_V = if excess_deep > 0.5 then "COMMUTATOR_EXCESS_HAS_NO_THRESHOLD" else "NO"
-let eigen_V = if sqrt(varq_edge * varq_edge) < 0.0000000001 then "EDGE_IS_AN_EIGENSTATE" else "NO"
-let cone_V = if sqrt(tlm_edge * tlm_edge) < 0.0000000001 then "QUANTUM_EDGE_MEETS_CONE_EDGE" else "NO"
+let eigen_V = if abs(varq_edge) < 0.0000000001 then "EDGE_IS_AN_EIGENSTATE" else "NO"
+let cone_V = if abs(tlm_edge) < 0.0000000001 then "QUANTUM_EDGE_MEETS_CONE_EDGE" else "NO"
 let misalign_V = if conc_kink < 0.0000000001 then (if CONC(2) > 0.2 then "RESOURCE_AND_BEHAVIOR_WALLS_MISALIGNED" else "NO") else "NO"
 
 // EXPECT: CHSH = [0.565685424949238, 0.942809041582062, 1.41421356237309, 2.0, 2.40416305603426, 2.82842712474619]

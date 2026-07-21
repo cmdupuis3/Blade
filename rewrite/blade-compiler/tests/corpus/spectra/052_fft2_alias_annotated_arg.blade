@@ -1,0 +1,11 @@
+// TEST: Spectra fft2: whole-array type alias on the annotated argument
+// `type Field = Array<...>` aliases resolve during spectra shape discovery,
+// so an alias-annotated module-level mut is a legal transform argument.
+// Impulse at (0,0): every bin is exactly (1, 0) (cf. spectra/044).
+import spectra as sp
+type Y = Idx<4>
+type X = Idx<4>
+type Field = Array<Float64 like Y, X>
+let mut x: Field = [[1.0, 0.0, 0.0, 0.0], [0.0, 0.0, 0.0, 0.0], [0.0, 0.0, 0.0, 0.0], [0.0, 0.0, 0.0, 0.0]]
+let X2 = sp.fft2(x)
+// EXPECT: X2 = [(1, 0), (1, 0), (1, 0), (1, 0), (1, 0), (1, 0), (1, 0), (1, 0), (1, 0), (1, 0), (1, 0), (1, 0), (1, 0), (1, 0), (1, 0), (1, 0)]

@@ -49,6 +49,13 @@ type CodeGenContext = {
     /// Computations (L <@> f) are only materialized when |> compute forces them.
     /// Combinators like <&!> look through variables to find the original ApplyInfo for fusion.
     DeferredComputations: Map<IRId, IRExpr>
+    /// Map from IRId to let-bound loop-object provenances (`let o = object_for(f)`).
+    /// Kept SEPARATE from DeferredComputations so the ~40 force/collect/print
+    /// consumers never observe a bare loop object in an array position. Only
+    /// genComposeApply reads this, to chase a composed object leaf `IRVar(o)`
+    /// back to its `IRObjectFor` (and thence `.Kernel`) — the fix for
+    /// `(o1 >>@ o2) <@> A` over let-bound objects.
+    ObjectLoopBindings: Map<IRId, IRExpr>
     /// Deferred provider reads, keyed by the receiving binding's IRId, lifted
     /// from IRModule.ProviderReads. Consumed by genBinding to emit the
     /// provider's reader (registry-dispatched genReadVar / genReadCompoundVar).
@@ -109,6 +116,26 @@ let exprWarningsCell () : string list ref =
     if isNull (box v) then
         let fresh = ref []
         exprWarningsStorage.Value <- fresh
+        fresh
+    else v
+
+/// Ids of module-level DEFERRED bindings that codegen actually FORCED —
+/// materialized under their own name at main's top level (Indent = 0) by
+/// forceDeferredArrayInput's IRVar arm. Consulted by genPrintStatements: a
+/// deferred binding that ended up materialized auto-prints like any eager
+/// binding, while one that stayed deferred through the whole program prints
+/// nothing. Nested-scope forcing (function bodies, Indent > 0) is NOT
+/// recorded — the materialized C++ variable is block-scoped there and a
+/// main-end print would not compile. Reset per program assembly; AsyncLocal
+/// for the same per-parallel-test-task isolation as exprWarningsCell.
+let private forcedDeferredIdsStorage =
+    System.Threading.AsyncLocal<Set<int> ref>()
+
+let forcedDeferredIdsCell () : Set<int> ref =
+    let v = forcedDeferredIdsStorage.Value
+    if isNull (box v) then
+        let fresh = ref Set.empty
+        forcedDeferredIdsStorage.Value <- fresh
         fresh
     else v
 
@@ -361,14 +388,22 @@ let mpiEmitModeEnabled () : bool =
     (mpiEmitModeCell ()).Value
 
 /// The MPI datatype constant for an element type, or None when the type has
-/// no direct MPI datatype (bool, complex, structs) â€” such outputs are not
-/// MPI-eligible in v1 (the Allgatherv needs a native datatype).
+/// no direct MPI datatype (bool, structs) â€” such outputs are not
+/// MPI-eligible in v1 (the Allgatherv needs a native datatype). Complex uses
+/// the MPI-2.2 C complex datatypes: std::complex<T> is layout-compatible with
+/// the C `T _Complex` layout (T[2]), and MS-MPI defines both constants
+/// (probed 2026-07-19: MPI_IN_PLACE Allgatherv over std::complex pools is
+/// byte-correct at -n 1/2/4). Every use site is pure data movement
+/// (Allgatherv) â€” reductions are MPI-ineligible upfront â€” so no reduction-op
+/// support is assumed of the MPI implementation.
 let mpiDatatypeOf (et: ElemType) : string option =
     match et with
     | ETFloat64 -> Some "MPI_DOUBLE"
     | ETFloat32 -> Some "MPI_FLOAT"
     | ETInt64 -> Some "MPI_LONG_LONG"
     | ETInt32 -> Some "MPI_INT"
+    | ETComplex128 -> Some "MPI_C_DOUBLE_COMPLEX"
+    | ETComplex64 -> Some "MPI_C_FLOAT_COMPLEX"
     | _ -> None
 
 /// Whether any callable in the module requested MPI decomposition. A PURE
@@ -460,6 +495,7 @@ let emptyContext () = {
     StaticDecls = []
     TupleChildren = Map.empty
     DeferredComputations = Map.empty
+    ObjectLoopBindings = Map.empty
     ProviderReads = Map.empty
     ProviderWrites = Map.empty
     StreamedArrays = Map.empty
@@ -737,6 +773,62 @@ and arrowSlotTypeForFuncSig (ty: IRType) : string =
     | _ -> irTypeToCpp ty
 
 
+// ============================================================================
+// CUDA device dialect (complex over CUDA)
+// ============================================================================
+// std::complex's operators and <complex> functions are HOST-ONLY under nvcc:
+// calling them in a __global__ body is a compile error. Device code therefore
+// speaks thrust::complex (layout-compatible with std::complex â€” both are
+// T[2] â€” with __host__ __device__ operators and the full conj/abs/arg/exp/...
+// vocabulary). The extern "C" wrapper SIGNATURES keep the std:: spelling:
+// they are text-copied into the host .cpp as prototypes, so both TUs must
+// agree on host-legal types; cudaMemcpy's void* parameters perform the
+// layout-compatible std/thrust reinterpret with no casts. The dialect gate
+// below is consulted by the scalar expression renderers so kernel BODIES
+// (rendered via genKernelExprWithReynolds inside the CUDA generators) emit
+// the thrust vocabulary while all host rendering is byte-identical to before.
+
+/// AsyncLocal dialect gate (mirrors the other per-flow emission cells).
+let private cudaDeviceDialectStorage =
+    System.Threading.AsyncLocal<bool ref>()
+
+let private cudaDeviceDialectCell () : bool ref =
+    let v = cudaDeviceDialectStorage.Value
+    if isNull (box v) then
+        let fresh = ref false
+        cudaDeviceDialectStorage.Value <- fresh
+        fresh
+    else v
+
+/// Whether device-dialect (thrust) complex rendering is active.
+let inCudaDeviceDialect () : bool = (cudaDeviceDialectCell ()).Value
+
+/// Run `f` with device-dialect complex rendering ON, restoring on exit.
+let withCudaDeviceDialect (f: unit -> 'a) : 'a =
+    let cell = cudaDeviceDialectCell ()
+    let prev = cell.Value
+    cell.Value <- true
+    try f () finally cell.Value <- prev
+
+/// Device (.cu kernel / device-buffer) spelling of an element type: complex
+/// maps to thrust::complex; everything else matches elemTypeToCpp. Matched
+/// via AnyPrimElem FIRST so a unit-annotated or idx-tagged complex erases to
+/// the thrust type (the .cu has no host typedef aliases).
+let cudaDevElemTypeToCpp (ty: IRType) : string =
+    match ty with
+    | AnyPrimElem ETComplex64 -> "thrust::complex<float>"
+    | AnyPrimElem ETComplex128 -> "thrust::complex<double>"
+    | _ -> elemTypeToCpp ty
+
+/// Spelling of a complex scalar type in the current dialect.
+let complexCppTypeName (et: ElemType) : string =
+    match et, inCudaDeviceDialect () with
+    | ETComplex64, false -> "std::complex<float>"
+    | ETComplex64, true -> "thrust::complex<float>"
+    | _, false -> "std::complex<double>"
+    | _, true -> "thrust::complex<double>"
+
+
 /// Extract the element type from an expression that should be array-shaped or scalar.
 /// On failure (type not array/scalar after upstream inference), record a codegen
 /// warning and emit a `#error` line as the rendered code. The point is to fail
@@ -817,6 +909,11 @@ let unaryOpToCpp = function
     | IRMath name -> "std::" + name  // function-call form via the generic
                                      // `op(expr)` unary arm
 
+/// Namespace-qualified spelling of a <complex>-vocabulary function in the
+/// current dialect (std:: on the host, thrust:: inside CUDA device bodies).
+let complexFnName (name: string) : string =
+    (if inCudaDeviceDialect () then "thrust::" else "std::") + name
+
 /// True iff a type's underlying scalar is a complex element type. Used to
 /// decide whether conj must emit std::conj (complex) or is the identity (real).
 let rec isComplexType (t: IRType) : bool =
@@ -834,6 +931,32 @@ let rec scalarElemOf (t: IRType) : ElemType option =
     | IRTUnitAnnotated (inner, _) -> scalarElemOf inner
     | _ -> None
 
+/// Render a function-call unary op, choosing the spelling by operand type and
+/// the active dialect. Host rendering is unchanged (unaryOpToCpp verbatim).
+/// In the CUDA device dialect:
+///   - complex operands: the <complex> vocabulary comes from thrust::
+///     (thrust has no free real()/imag(), so those emit the __host__
+///     __device__ member accessors instead);
+///   - real operands: math intrinsics emit UNQUALIFIED (`exp(x)`) â€” CUDA's
+///     device math overloads live in the global namespace, and std::-qualified
+///     math on arithmetic types in device code is not something we rely on.
+/// Shared by exprToCppCore and exprToCppSimple so both renderers agree.
+let renderUnaryOpTyped (op: IRUnaryOp) (operandTy: IRType) (inner: string) : string =
+    if inCudaDeviceDialect () then
+        if isComplexType operandTy then
+            match op with
+            | IRReal -> sprintf "(%s).real()" inner
+            | IRImag -> sprintf "(%s).imag()" inner
+            | IRArg -> sprintf "thrust::arg(%s)" inner
+            | IRMath name -> sprintf "thrust::%s(%s)" name inner
+            | _ -> sprintf "%s(%s)" (unaryOpToCpp op) inner
+        else
+            match op with
+            | IRMath name -> sprintf "%s(%s)" name inner
+            | _ -> sprintf "%s(%s)" (unaryOpToCpp op) inner
+    else
+        sprintf "%s(%s)" (unaryOpToCpp op) inner
+
 /// Coerce a rendered scalar operand so it matches the C++ std::complex operator
 /// overload set for a complex-typed binop result. std::complex's arithmetic
 /// operators are same-type only: `complex<double> * 2` and `complex<double> *
@@ -848,7 +971,7 @@ let coerceComplexOperand (resultElem: ElemType) (operandElem: ElemType) (rendere
     | ETComplex128 ->
         match operandElem with
         | ETComplex128 | ETFloat64 -> rendered
-        | ETComplex64 -> sprintf "std::complex<double>(%s)" rendered
+        | ETComplex64 -> sprintf "%s(%s)" (complexCppTypeName ETComplex128) rendered
         | ETFloat32 | ETInt64 | ETInt32 -> sprintf "(double)(%s)" rendered
         | _ -> rendered
     | ETComplex64 ->
@@ -930,9 +1053,9 @@ let rec exprToCppSimple (names: Map<IRId, string>) (expr: IRExpr) : string =
         else emitBinOpWithComplexCoercion op l r lStr rStr inferExprType binOpToCpp
     | IRUnaryOp (IRConj, e) ->
         let inner = exprToCppSimple names e
-        if isComplexType (inferExprType e) then sprintf "std::conj(%s)" inner
+        if isComplexType (inferExprType e) then sprintf "%s(%s)" (complexFnName "conj") inner
         else inner
-    | IRUnaryOp (op, e) -> sprintf "%s(%s)" (unaryOpToCpp op) (exprToCppSimple names e)
+    | IRUnaryOp (op, e) -> renderUnaryOpTyped op (inferExprType e) (exprToCppSimple names e)
     | IRGuard (cond, body) ->
         sprintf "(%s ? %s : 0.0)" (exprToCppSimple names cond) (exprToCppSimple names body)
     | other -> sprintf "BLADE_UNSUPPORTED_EXPR_%s" (other.GetType().Name.ToUpper())
@@ -1221,14 +1344,15 @@ let rec exprToCppCore (subst: SubstMap) (names: Map<IRId, string>) (expr: IRExpr
         else
             emitBinOpWithComplexCoercion op l r lStr rStr inferExprType binOpToCpp
     | IRUnaryOp (IRConj, e) ->
-        // conj is std::conj on complex operands; the identity on reals
-        // (mathematically conj(x)=x for real x, and std::conj(double) would
-        // wrongly promote to std::complex<double>, so emit the operand bare).
+        // conj is std::conj/thrust::conj on complex operands; the identity on
+        // reals (mathematically conj(x)=x for real x, and std::conj(double)
+        // would wrongly promote to std::complex<double>, so emit the operand
+        // bare).
         let inner = exprToCppCore subst names e
-        if isComplexType (inferExprType e) then sprintf "std::conj(%s)" inner
+        if isComplexType (inferExprType e) then sprintf "%s(%s)" (complexFnName "conj") inner
         else inner
     | IRUnaryOp (op, e) ->
-        sprintf "%s(%s)" (unaryOpToCpp op) (exprToCppCore subst names e)
+        renderUnaryOpTyped op (inferExprType e) (exprToCppCore subst names e)
     | IRIf (cond, thenBr, elseBr) ->
         sprintf "(%s ? %s : %s)" 
             (exprToCppCore subst names cond) 
@@ -1243,8 +1367,8 @@ let rec exprToCppCore (subst: SubstMap) (names: Map<IRId, string>) (expr: IRExpr
         // the corresponding C++ template instantiation.
         let cppType =
             match inferExprType re with
-            | IRTScalar ETFloat32 -> "std::complex<float>"
-            | _ -> "std::complex<double>"  // Float64 default
+            | IRTScalar ETFloat32 -> complexCppTypeName ETComplex64
+            | _ -> complexCppTypeName ETComplex128  // Float64 default
         sprintf "%s(%s, %s)" cppType (exprToCppCore subst names re) (exprToCppCore subst names im)
     | IRTupleProj (e, i, isFlat) ->
         if not isFlat then
@@ -2158,29 +2282,17 @@ and genApplyCombinatorExpr (subst: SubstMap) (names: Map<IRId, string>) (info: A
     // accumulation is the iteration structure, not the kernel itself.
     // (See audit item 4 for the open question on whether this peel is
     // actually correctness-preserving.)
-    let (kernelInner, _) = peelReynolds info.Kernel
-
-    // Infer output element type from ApplyInfo
-    let elemTypeStr =
-        match info.OutputType with
-        | IRTScalar et -> primTypeToCpp et
-        | ArrayElem arr -> elemTypeToCpp arr.ElemType
-        | t -> irTypeToCpp t
-
-    // For scalar output (simple accumulation), generate inline loop
-    // This is a simplified version - full version would use LoopNestCodeGen
-    match resolveCallable kernelInner with
-    | Some callable when callable.Params.Length = 2 && arrayNames.Length = 2 ->
-        let arr1 = arrayNames.[0]
-        let arr2 = arrayNames.[1]
-        let (wrapperCode, wname) = genCallableWrapper "" callable
-        let wrapperStr = wrapperCode |> String.concat " "
-        // Generate as IIFE with nested loops.
-        sprintf "([&]() { %s%s __result = 0; for (size_t __i0 = 0; __i0 < %s.extents[0]; __i0++) { for (size_t __i1 = 0; __i1 < %s.extents[0]; __i1++) { __result += %s(%s[__i0], %s[__i1]); } } return __result; }())"
-            wrapperStr elemTypeStr arr1 arr2 wname arr1 arr2
-    | _ ->
-        // Fallback - can't generate inline code
-        exprError (sprintf "inline combinator not supported for %d arrays" arrayNames.Length)
+    // This inline expression-position path is reached only for an
+    // apply-combinator nested inside a kernel body: top-level and
+    // function-body applies route through the statement-form
+    // genApplyCombinator (see genFuncBody's IRCompute(IRApplyCombinator)
+    // arm and genBinding). It historically emitted a 2-array Cartesian
+    // sum-reduce; for a co-iteration (zip) kernel body such as `ra * rb`
+    // between two row params that was a SILENT MISCOMPILE, producing
+    // (sum ra)(sum rb) instead of the elementwise row. No correct program
+    // reaches here (verified: no corpus/examples kernel has an array-valued
+    // elementwise body), so reject loudly rather than emit wrong code.
+    exprError (sprintf "array-valued elementwise kernel body not supported inside a kernel (%d-array inline combinator); reduce the row to a scalar with prodsum or reduce, or compute the elementwise product at top level" arrayNames.Length)
 
 /// Convert IRExpr to C++ with an additional variable binding
 and exprToCppWithVarCore (subst: SubstMap) (names: Map<IRId, string>) (varId: IRId) (varName: string) (expr: IRExpr) : string =
@@ -4856,13 +4968,13 @@ let buildSimpleApplyInfo (arrays: IRExpr list) (kernel: IRExpr) (outputType: IRT
             ArrayTypes = arrayTypes
             SDimsPerArray = sDims
             TotalSDims = totalSDims
-            SharedIndexType = None
+            SharedIndexTypes = []
         }
         Kernel = kernel
         Arrays = arrays
         Identities = identities
         ArrayTypes = arrayTypes
-        SharedIndexType = None
+        SharedIndexTypes = []
         SymcomStates = List.replicate totalSDims SCNeither
         TriangularLevels = List.replicate totalSDims false
         SDimsPerArray = sDims
@@ -4952,6 +5064,18 @@ let genCudaKernelSimplicial (mpiRange: bool) (softSplit: bool) (codeGen: LoopNes
     if srcName = "" then None
     else
     let elemCpp = elemTypeToCpp outElemTy
+    // Device spellings (.cu internals): complex renders as thrust::complex.
+    // Wrapper SIGNATURES keep the host (std::) spelling â€” they are text-copied
+    // into the host .cpp as prototypes. The source array's element type is
+    // taken from the peeled elements (it can differ from the output's, e.g. a
+    // complex source with a real-valued kernel).
+    let devElemCpp = cudaDevElemTypeToCpp outElemTy
+    let srcElemTy =
+        bindings |> List.collect (fun b -> b.Elements)
+        |> List.tryHead |> Option.map (fun e -> e.ArrayElemType)
+        |> Option.defaultValue outElemTy
+    let srcHostCpp = elemTypeToCpp srcElemTy
+    let srcDevCpp = cudaDevElemTypeToCpp srcElemTy
     let r = int grpRank
     // card = C(neff, R), neff = strict ? N : N+R-1
     let neff = if strict then n else n + int64 r - 1L
@@ -4984,15 +5108,17 @@ let genCudaKernelSimplicial (mpiRange: bool) (softSplit: bool) (codeGen: LoopNes
             // (duplicate declarations were an nvcc redefinition error).
             for elem in b.Elements |> List.distinctBy (fun e -> e.ArrayPosition) do
                 let readName = sprintf "__blade_op_%d_%d" b.Level elem.ArrayPosition
-                let etStr = elemTypeToCpp elem.ArrayElemType
+                let etStr = cudaDevElemTypeToCpp elem.ArrayElemType
                 paramFinalNames <- Map.add elem.ParamVarId readName paramFinalNames
                 yield sprintf "    %s %s = %s[%s];" etStr readName srcName idxVar ]
     let nameMap =
         codeGen.Captures |> List.fold (fun acc c -> Map.add c.Id c.Name acc) paramFinalNames
     // Antisym: Reynolds fold (true,true) emits the signed antisymmetrization.
-    // Symmetric: raw comm kernel (false,false).
+    // Symmetric: raw comm kernel (false,false). Rendered in the CUDA device
+    // dialect (thrust complex vocabulary) â€” this is __global__ body text.
     let reynolds =
-        genKernelExprWithReynolds codeGen.KernelExpr codeGen.KernelParams strict strict nameMap paramFinalNames
+        withCudaDeviceDialect (fun () ->
+            genKernelExprWithReynolds codeGen.KernelExpr codeGen.KernelParams strict strict nameMap paramFinalNames)
     // Device combinadic unrank loop. Emits idx_0..idx_{r-1} as absolute indices.
     //
     // Per level, the count of cells whose value is < v has the closed form
@@ -5041,19 +5167,19 @@ let genCudaKernelSimplicial (mpiRange: bool) (softSplit: bool) (codeGen: LoopNes
               else
                   yield sprintf "    size_t %s = (size_t)(__blade_vf_%d - %d);" (idxVarOf pos) pos pos
               yield sprintf "    __blade_x = __blade_vf_%d + 1;" pos ]
-    let kernelParams = sprintf "const %s* %s" elemCpp srcName
+    let kernelParams = sprintf "const %s* %s" srcDevCpp srcName
     let kernelDef =
         if mpiRange then
             // Rank-scoped: thread t computes ABSOLUTE cell lo + t for
             // t in [0, hi - lo); the unrank below consumes __blade_i.
-            [ sprintf "__global__ void %s(%s, %s* __blade_out, size_t __blade_rlo, size_t __blade_rhi) {" kernelName kernelParams elemCpp
+            [ sprintf "__global__ void %s(%s, %s* __blade_out, size_t __blade_rlo, size_t __blade_rhi) {" kernelName kernelParams devElemCpp
               "    size_t __blade_tid = (size_t)blockIdx.x * blockDim.x + threadIdx.x;"
               "    if (__blade_tid >= __blade_rhi - __blade_rlo) return;"
               "    size_t __blade_i = __blade_rlo + __blade_tid;" ]
             @ unrank @ readBinds
             @ [ sprintf "    __blade_out[__blade_i] = %s;" reynolds.CppExpr; "}" ]
         else
-            [ sprintf "__global__ void %s(%s, %s* __blade_out, size_t __blade_card) {" kernelName kernelParams elemCpp
+            [ sprintf "__global__ void %s(%s, %s* __blade_out, size_t __blade_card) {" kernelName kernelParams devElemCpp
               "    size_t __blade_i = (size_t)blockIdx.x * blockDim.x + threadIdx.x;"
               "    if (__blade_i >= __blade_card) return;" ]
             @ unrank @ readBinds
@@ -5062,18 +5188,18 @@ let genCudaKernelSimplicial (mpiRange: bool) (softSplit: bool) (codeGen: LoopNes
         if mpiRange then
             // dllexport'd: the hybrid build ships the .cu as a self-contained
             // MSVC DLL the g++ host links directly.
-            [ sprintf "extern \"C\" __declspec(dllexport) void %s(const %s* %s, %s* __blade_host_out, size_t __blade_rlo, size_t __blade_rhi, int __blade_rank) {" launchName elemCpp srcName elemCpp
+            [ sprintf "extern \"C\" __declspec(dllexport) void %s(const %s* %s, %s* __blade_host_out, size_t __blade_rlo, size_t __blade_rhi, int __blade_rank) {" launchName srcHostCpp srcName elemCpp
               "    int __blade_dc = 1; cudaGetDeviceCount(&__blade_dc); if (__blade_dc < 1) __blade_dc = 1;"
               "    cudaSetDevice(__blade_rank % __blade_dc);"
               "    if (__blade_rhi <= __blade_rlo) return;"
               sprintf "    size_t __blade_card = %dUL;" card
-              sprintf "    %s* __blade_d_%s; cudaMalloc(&__blade_d_%s, %dUL * sizeof(%s));" elemCpp srcName srcName n elemCpp
-              sprintf "    cudaMemcpy(__blade_d_%s, %s, %dUL * sizeof(%s), cudaMemcpyHostToDevice);" srcName srcName n elemCpp
-              sprintf "    %s* __blade_d_out; cudaMalloc(&__blade_d_out, __blade_card * sizeof(%s));" elemCpp elemCpp
+              sprintf "    %s* __blade_d_%s; cudaMalloc(&__blade_d_%s, %dUL * sizeof(%s));" srcDevCpp srcName srcName n srcDevCpp
+              sprintf "    cudaMemcpy(__blade_d_%s, %s, %dUL * sizeof(%s), cudaMemcpyHostToDevice);" srcName srcName n srcDevCpp
+              sprintf "    %s* __blade_d_out; cudaMalloc(&__blade_d_out, __blade_card * sizeof(%s));" devElemCpp devElemCpp
               sprintf "    size_t __blade_blocks = ((__blade_rhi - __blade_rlo) + %dUL - 1UL) / %dUL;" blockSize blockSize
               sprintf "    %s<<<(unsigned)__blade_blocks, %d>>>(__blade_d_%s, __blade_d_out, __blade_rlo, __blade_rhi);" kernelName blockSize srcName
               "    cudaDeviceSynchronize();"
-              sprintf "    cudaMemcpy(__blade_host_out + __blade_rlo, __blade_d_out + __blade_rlo, (__blade_rhi - __blade_rlo) * sizeof(%s), cudaMemcpyDeviceToHost);" elemCpp
+              sprintf "    cudaMemcpy(__blade_host_out + __blade_rlo, __blade_d_out + __blade_rlo, (__blade_rhi - __blade_rlo) * sizeof(%s), cudaMemcpyDeviceToHost);" devElemCpp
               sprintf "    cudaFree(__blade_d_%s);" srcName
               "    cudaFree(__blade_d_out);"; "}" ]
         elif softSplit then
@@ -5082,37 +5208,37 @@ let genCudaKernelSimplicial (mpiRange: bool) (softSplit: bool) (codeGen: LoopNes
             // D2H + free. Device selection lives HERE (the g++ host half never
             // touches the CUDA API); one device => default-stream serialization.
             let sdPrefix = sprintf "__blade_sd_%s" (sanitizeCppName name)
-            [ sprintf "static %s* %s_d_src = nullptr;" elemCpp sdPrefix
-              sprintf "static %s* %s_d_out = nullptr;" elemCpp sdPrefix
+            [ sprintf "static %s* %s_d_src = nullptr;" srcDevCpp sdPrefix
+              sprintf "static %s* %s_d_out = nullptr;" devElemCpp sdPrefix
               sprintf "static int %s_dev = 0;" sdPrefix
-              sprintf "extern \"C\" void %s_begin(const %s* %s, int __blade_leaf) {" launchName elemCpp srcName
+              sprintf "extern \"C\" void %s_begin(const %s* %s, int __blade_leaf) {" launchName srcHostCpp srcName
               "    int __blade_dc = 1; cudaGetDeviceCount(&__blade_dc); if (__blade_dc < 1) __blade_dc = 1;"
               sprintf "    %s_dev = __blade_leaf %% __blade_dc;" sdPrefix
               sprintf "    cudaSetDevice(%s_dev);" sdPrefix
               sprintf "    size_t __blade_card = %dUL;" card
-              sprintf "    cudaMalloc(&%s_d_src, %dUL * sizeof(%s));" sdPrefix n elemCpp
-              sprintf "    cudaMemcpy(%s_d_src, %s, %dUL * sizeof(%s), cudaMemcpyHostToDevice);" sdPrefix srcName n elemCpp
-              sprintf "    cudaMalloc(&%s_d_out, __blade_card * sizeof(%s));" sdPrefix elemCpp
+              sprintf "    cudaMalloc(&%s_d_src, %dUL * sizeof(%s));" sdPrefix n srcDevCpp
+              sprintf "    cudaMemcpy(%s_d_src, %s, %dUL * sizeof(%s), cudaMemcpyHostToDevice);" sdPrefix srcName n srcDevCpp
+              sprintf "    cudaMalloc(&%s_d_out, __blade_card * sizeof(%s));" sdPrefix devElemCpp
               sprintf "    size_t __blade_blocks = (__blade_card + %dUL - 1UL) / %dUL;" blockSize blockSize
               sprintf "    %s<<<(unsigned)__blade_blocks, %d>>>(%s_d_src, %s_d_out, __blade_card);" kernelName blockSize sdPrefix sdPrefix
               "}"
               sprintf "extern \"C\" void %s_end(%s* __blade_host_out) {" launchName elemCpp
               sprintf "    cudaSetDevice(%s_dev);" sdPrefix
               "    cudaDeviceSynchronize();"
-              sprintf "    cudaMemcpy(__blade_host_out, %s_d_out, %dUL * sizeof(%s), cudaMemcpyDeviceToHost);" sdPrefix card elemCpp
+              sprintf "    cudaMemcpy(__blade_host_out, %s_d_out, %dUL * sizeof(%s), cudaMemcpyDeviceToHost);" sdPrefix card devElemCpp
               sprintf "    cudaFree(%s_d_src);" sdPrefix
               sprintf "    cudaFree(%s_d_out);" sdPrefix
               "    cudaSetDevice(0);"; "}" ]
         else
-            [ sprintf "extern \"C\" void %s(const %s* %s, %s* __blade_host_out) {" launchName elemCpp srcName elemCpp
+            [ sprintf "extern \"C\" void %s(const %s* %s, %s* __blade_host_out) {" launchName srcHostCpp srcName elemCpp
               sprintf "    size_t __blade_card = %dUL;" card
-              sprintf "    %s* __blade_d_%s; cudaMalloc(&__blade_d_%s, %dUL * sizeof(%s));" elemCpp srcName srcName n elemCpp
-              sprintf "    cudaMemcpy(__blade_d_%s, %s, %dUL * sizeof(%s), cudaMemcpyHostToDevice);" srcName srcName n elemCpp
-              sprintf "    %s* __blade_d_out; cudaMalloc(&__blade_d_out, __blade_card * sizeof(%s));" elemCpp elemCpp
+              sprintf "    %s* __blade_d_%s; cudaMalloc(&__blade_d_%s, %dUL * sizeof(%s));" srcDevCpp srcName srcName n srcDevCpp
+              sprintf "    cudaMemcpy(__blade_d_%s, %s, %dUL * sizeof(%s), cudaMemcpyHostToDevice);" srcName srcName n srcDevCpp
+              sprintf "    %s* __blade_d_out; cudaMalloc(&__blade_d_out, __blade_card * sizeof(%s));" devElemCpp devElemCpp
               sprintf "    size_t __blade_blocks = (__blade_card + %dUL - 1UL) / %dUL;" blockSize blockSize
               sprintf "    %s<<<(unsigned)__blade_blocks, %d>>>(__blade_d_%s, __blade_d_out, __blade_card);" kernelName blockSize srcName
               "    cudaDeviceSynchronize();"
-              sprintf "    cudaMemcpy(__blade_host_out, __blade_d_out, __blade_card * sizeof(%s), cudaMemcpyDeviceToHost);" elemCpp
+              sprintf "    cudaMemcpy(__blade_host_out, __blade_d_out, __blade_card * sizeof(%s), cudaMemcpyDeviceToHost);" devElemCpp
               sprintf "    cudaFree(__blade_d_%s);" srcName
               "    cudaFree(__blade_d_out);"; "}" ]
     // Emit the __device__ binomial helper once per .cu. Idempotency is keyed on
@@ -5376,6 +5502,21 @@ let genCudaKernel (softSplit: bool) (codeGen: LoopNestCodeGen) (name: string) (b
     else
     let outElemTy = outElemTyOpt.Value
     let elemCpp = elemTypeToCpp outElemTy
+    // Device spellings (.cu internals): complex renders as thrust::complex;
+    // wrapper SIGNATURES keep the host (std::) spelling (they are text-copied
+    // into the host .cpp as prototypes). Inputs are typed PER POSITION from
+    // the peeled elements â€” a kernel can mix e.g. a complex and a real input,
+    // and the output element type is not the input's in general.
+    let devElemCpp = cudaDevElemTypeToCpp outElemTy
+    let inputElemTys =
+        codeGen.InputArrayNames |> List.mapi (fun pos _ ->
+            bindings
+            |> List.collect (fun b -> b.Elements)
+            |> List.tryFind (fun e -> e.ArrayPosition = pos)
+            |> Option.map (fun e -> e.ArrayElemType)
+            |> Option.defaultValue outElemTy)
+    let inputHostCpp = inputElemTys |> List.map elemTypeToCpp
+    let inputDevCpp = inputElemTys |> List.map cudaDevElemTypeToCpp
     let extentLits =
         bindings |> List.map (fun b -> match b.Extent with IRLit (IRLitInt n) -> n | _ -> 0L)
     let cardinality = extentLits |> List.fold (fun a n -> a * n) 1L
@@ -5390,7 +5531,7 @@ let genCudaKernel (softSplit: bool) (codeGen: LoopNestCodeGen) (name: string) (b
             for elem in b.Elements do
                 let cur = Map.tryFind elem.ArrayPosition currentNames |> Option.defaultValue elem.ArrayName
                 let newName = sprintf "%s__%s" cur b.IndexName
-                let etStr = elemTypeToCpp elem.ArrayElemType
+                let etStr = cudaDevElemTypeToCpp elem.ArrayElemType
                 currentNames <- Map.add elem.ArrayPosition newName currentNames
                 paramFinalNames <- Map.add elem.ParamVarId newName paramFinalNames
                 // Self-zip: two operand slots on the same (array, index) peel
@@ -5400,7 +5541,10 @@ let genCudaKernel (softSplit: bool) (codeGen: LoopNestCodeGen) (name: string) (b
                     yield sprintf "    %s %s = %s[%s];" etStr newName cur b.IndexName ]
     let nameMap =
         codeGen.Captures |> List.fold (fun acc c -> Map.add c.Id c.Name acc) paramFinalNames
-    let reynolds = genKernelExprWithReynolds codeGen.KernelExpr codeGen.KernelParams false false nameMap paramFinalNames
+    // Kernel-body text lives in the __global__ â€” render in the device dialect.
+    let reynolds =
+        withCudaDeviceDialect (fun () ->
+            genKernelExprWithReynolds codeGen.KernelExpr codeGen.KernelParams false false nameMap paramFinalNames)
     let recover =
         [ yield "    size_t __blade_g = __blade_i;"
           for i in (nDims - 1) .. -1 .. 0 do
@@ -5409,7 +5553,7 @@ let genCudaKernel (softSplit: bool) (codeGen: LoopNestCodeGen) (name: string) (b
             yield sprintf "    size_t %s = __blade_g %% %dUL;" b.IndexName e
             if i > 0 then yield sprintf "    __blade_g /= %dUL;" e ]
     let kernelParams =
-        codeGen.InputArrayNames |> List.map (fun n -> sprintf "const %s* %s" elemCpp n) |> String.concat ", "
+        (codeGen.InputArrayNames, inputDevCpp) ||> List.map2 (fun n et -> sprintf "const %s* %s" et n) |> String.concat ", "
     let kernelDef =
         // NOTE on naming: generated CUDA-internal identifiers use a `__blade_`
         // prefix. The plain `__out` originally chosen collided with MSVC's SAL
@@ -5418,13 +5562,13 @@ let genCudaKernel (softSplit: bool) (codeGen: LoopNestCodeGen) (name: string) (b
         // `[__i] = ...` that nvcc/cl rejected as a bad attribute. `__in/__inout/
         // __out` are MSVC macros; `__blade_*` cannot collide with SAL or other
         // implementation-reserved names.
-        [ sprintf "__global__ void %s(%s, %s* __blade_out, size_t __blade_card) {" kernelName kernelParams elemCpp
+        [ sprintf "__global__ void %s(%s, %s* __blade_out, size_t __blade_card) {" kernelName kernelParams devElemCpp
           "    size_t __blade_i = (size_t)blockIdx.x * blockDim.x + threadIdx.x;"
           "    if (__blade_i >= __blade_card) return;" ]
         @ recover @ bodyBinds
         @ [ sprintf "    __blade_out[__blade_i] = %s;" reynolds.CppExpr; "}" ]
     let wrapInParams =
-        codeGen.InputArrayNames |> List.map (fun n -> sprintf "const %s* %s" elemCpp n) |> String.concat ", "
+        (codeGen.InputArrayNames, inputHostCpp) ||> List.map2 (fun n et -> sprintf "const %s* %s" et n) |> String.concat ", "
     let sdPrefix = sprintf "__blade_sd_%s" (sanitizeCppName name)
     let wrapper =
         if softSplit then
@@ -5432,8 +5576,8 @@ let genCudaKernel (softSplit: bool) (codeGen: LoopNestCodeGen) (name: string) (b
             // round-robin device (leaf % deviceCount, queried HERE so the host
             // half never touches the CUDA API); end = per-device sync + D2H +
             // free. One device => the default stream serializes the leaves.
-            [ for n in codeGen.InputArrayNames -> sprintf "static %s* %s_d_%s = nullptr;" elemCpp sdPrefix n ]
-            @ [ sprintf "static %s* %s_d_out = nullptr;" elemCpp sdPrefix
+            [ for (n, et) in List.zip codeGen.InputArrayNames inputDevCpp -> sprintf "static %s* %s_d_%s = nullptr;" et sdPrefix n ]
+            @ [ sprintf "static %s* %s_d_out = nullptr;" devElemCpp sdPrefix
                 sprintf "static int %s_dev = 0;" sdPrefix
                 sprintf "extern \"C\" void %s_begin(%s, int __blade_leaf) {" launchName wrapInParams
                 "    int __blade_dc = 1; cudaGetDeviceCount(&__blade_dc); if (__blade_dc < 1) __blade_dc = 1;"
@@ -5442,9 +5586,10 @@ let genCudaKernel (softSplit: bool) (codeGen: LoopNestCodeGen) (name: string) (b
                 sprintf "    size_t __blade_card = %dUL;" cardinality ]
             @ [ for (i, n) in List.mapi (fun i n -> (i, n)) codeGen.InputArrayNames do
                   let sz = extentLits.[i]
-                  yield sprintf "    cudaMalloc(&%s_d_%s, %dUL * sizeof(%s));" sdPrefix n sz elemCpp
-                  yield sprintf "    cudaMemcpy(%s_d_%s, %s, %dUL * sizeof(%s), cudaMemcpyHostToDevice);" sdPrefix n n sz elemCpp ]
-            @ [ sprintf "    cudaMalloc(&%s_d_out, __blade_card * sizeof(%s));" sdPrefix elemCpp
+                  let et = inputDevCpp.[i]
+                  yield sprintf "    cudaMalloc(&%s_d_%s, %dUL * sizeof(%s));" sdPrefix n sz et
+                  yield sprintf "    cudaMemcpy(%s_d_%s, %s, %dUL * sizeof(%s), cudaMemcpyHostToDevice);" sdPrefix n n sz et ]
+            @ [ sprintf "    cudaMalloc(&%s_d_out, __blade_card * sizeof(%s));" sdPrefix devElemCpp
                 sprintf "    size_t __blade_blocks = (__blade_card + %dUL - 1UL) / %dUL;" blockSize blockSize
                 sprintf "    %s<<<(unsigned)__blade_blocks, %d>>>(%s, %s_d_out, __blade_card);" kernelName blockSize
                   (codeGen.InputArrayNames |> List.map (fun n -> sprintf "%s_d_%s" sdPrefix n) |> String.concat ", ") sdPrefix
@@ -5452,7 +5597,7 @@ let genCudaKernel (softSplit: bool) (codeGen: LoopNestCodeGen) (name: string) (b
                 sprintf "extern \"C\" void %s_end(%s* __blade_host_out) {" launchName elemCpp
                 sprintf "    cudaSetDevice(%s_dev);" sdPrefix
                 "    cudaDeviceSynchronize();"
-                sprintf "    cudaMemcpy(__blade_host_out, %s_d_out, %dUL * sizeof(%s), cudaMemcpyDeviceToHost);" sdPrefix cardinality elemCpp ]
+                sprintf "    cudaMemcpy(__blade_host_out, %s_d_out, %dUL * sizeof(%s), cudaMemcpyDeviceToHost);" sdPrefix cardinality devElemCpp ]
             @ [ for n in codeGen.InputArrayNames -> sprintf "    cudaFree(%s_d_%s);" sdPrefix n ]
             @ [ sprintf "    cudaFree(%s_d_out);" sdPrefix
                 "    cudaSetDevice(0);"; "}" ]
@@ -5461,14 +5606,15 @@ let genCudaKernel (softSplit: bool) (codeGen: LoopNestCodeGen) (name: string) (b
           sprintf "    size_t __blade_card = %dUL;" cardinality ]
         @ [ for (i, n) in List.mapi (fun i n -> (i, n)) codeGen.InputArrayNames do
               let sz = extentLits.[i]
-              yield sprintf "    %s* __blade_d_%s; cudaMalloc(&__blade_d_%s, %dUL * sizeof(%s));" elemCpp n n sz elemCpp
-              yield sprintf "    cudaMemcpy(__blade_d_%s, %s, %dUL * sizeof(%s), cudaMemcpyHostToDevice);" n n sz elemCpp ]
-        @ [ sprintf "    %s* __blade_d_out; cudaMalloc(&__blade_d_out, __blade_card * sizeof(%s));" elemCpp elemCpp
+              let et = inputDevCpp.[i]
+              yield sprintf "    %s* __blade_d_%s; cudaMalloc(&__blade_d_%s, %dUL * sizeof(%s));" et n n sz et
+              yield sprintf "    cudaMemcpy(__blade_d_%s, %s, %dUL * sizeof(%s), cudaMemcpyHostToDevice);" n n sz et ]
+        @ [ sprintf "    %s* __blade_d_out; cudaMalloc(&__blade_d_out, __blade_card * sizeof(%s));" devElemCpp devElemCpp
             sprintf "    size_t __blade_blocks = (__blade_card + %dUL - 1UL) / %dUL;" blockSize blockSize
             sprintf "    %s<<<(unsigned)__blade_blocks, %d>>>(%s, __blade_d_out, __blade_card);" kernelName blockSize
               (codeGen.InputArrayNames |> List.map (sprintf "__blade_d_%s") |> String.concat ", ")
             "    cudaDeviceSynchronize();"
-            sprintf "    cudaMemcpy(__blade_host_out, __blade_d_out, __blade_card * sizeof(%s), cudaMemcpyDeviceToHost);" elemCpp ]
+            sprintf "    cudaMemcpy(__blade_host_out, __blade_d_out, __blade_card * sizeof(%s), cudaMemcpyDeviceToHost);" devElemCpp ]
         @ [ for n in codeGen.InputArrayNames -> sprintf "    cudaFree(__blade_d_%s);" n ]
         @ [ "    cudaFree(__blade_d_out);"; "}" ]
     let cell = cudaKernelDefsCell ()
@@ -5538,15 +5684,21 @@ let genCudaCoFusion (leafCgs: LoopNestCodeGen list) (leafNames: string list) (na
     else
     let extentLits = bindings |> List.map (fun b -> match b.Extent with IRLit (IRLitInt n) -> n | _ -> 0L)
     let cardinality = extentLits |> List.fold (fun a n -> a * n) 1L
-    // Per-input cpp elem type (from the primary's element bindings by array
-    // position), so mixed-type inputs are declared correctly.
-    let inputElemCpp =
+    // Per-input elem type (from the primary's element bindings by array
+    // position), so mixed-type inputs are declared correctly. Host (std::)
+    // spelling for the extern "C" wrapper signature (text-copied into the
+    // host .cpp as a prototype); device (thrust::) spelling for the kernel
+    // signature and the device buffers.
+    let inputElemTys =
         primary.InputArrayNames |> List.mapi (fun pos _ ->
             primary.Bindings
             |> List.collect (fun b -> b.Elements)
             |> List.tryFind (fun e -> e.ArrayPosition = pos)
-            |> Option.map (fun e -> elemTypeToCpp e.ArrayElemType)
-            |> Option.defaultValue "double")
+            |> Option.map (fun e -> e.ArrayElemType))
+    let inputElemCpp =
+        inputElemTys |> List.map (Option.map elemTypeToCpp >> Option.defaultValue "double")
+    let inputDevCpp =
+        inputElemTys |> List.map (Option.map cudaDevElemTypeToCpp >> Option.defaultValue "double")
     let kernelName = sprintf "__cuda_%s" (sanitizeCppName name)
     let launchName = sprintf "__launch_%s" (sanitizeCppName name)
     // Shared coordinate recovery (row-major unflatten of the flat thread id).
@@ -5567,7 +5719,7 @@ let genCudaCoFusion (leafCgs: LoopNestCodeGen list) (leafNames: string list) (na
             for elem in b.Elements do
                 let cur = Map.tryFind elem.ArrayPosition currentNames |> Option.defaultValue elem.ArrayName
                 let newName = sprintf "%s__%s" cur b.IndexName
-                let etStr = elemTypeToCpp elem.ArrayElemType
+                let etStr = cudaDevElemTypeToCpp elem.ArrayElemType
                 currentNames <- Map.add elem.ArrayPosition newName currentNames
                 sharedFinal <- Map.add elem.ArrayPosition newName sharedFinal
                 // Self-zip: two operand slots on the same (array, index) peel
@@ -5584,13 +5736,16 @@ let genCudaCoFusion (leafCgs: LoopNestCodeGen list) (leafNames: string list) (na
                 |> List.choose (fun e -> Map.tryFind e.ArrayPosition sharedFinal |> Option.map (fun nm -> (e.ParamVarId, nm)))
                 |> Map.ofList
             let nameMap = cg.Captures |> List.fold (fun acc c -> Map.add c.Id c.Name acc) pfn
-            let rr = genKernelExprWithReynolds cg.KernelExpr cg.KernelParams false false nameMap pfn
+            // __global__ body text: render in the device dialect.
+            let rr =
+                withCudaDeviceDialect (fun () ->
+                    genKernelExprWithReynolds cg.KernelExpr cg.KernelParams false false nameMap pfn)
             sprintf "    __blade_out_%d[__blade_i] = %s;" k rr.CppExpr)
     let sharedInParams =
-        (primary.InputArrayNames, inputElemCpp) ||> List.map2 (fun n et -> sprintf "const %s* %s" et n) |> String.concat ", "
+        (primary.InputArrayNames, inputDevCpp) ||> List.map2 (fun n et -> sprintf "const %s* %s" et n) |> String.concat ", "
     let outParams =
         leafCgs |> List.mapi (fun k cg ->
-            let et = (outElemOpt cg).Value |> elemTypeToCpp
+            let et = (outElemOpt cg).Value |> cudaDevElemTypeToCpp
             sprintf "%s* __blade_out_%d" et k) |> String.concat ", "
     let kernelDef =
         [ sprintf "__global__ void %s(%s, %s, size_t __blade_card) {" kernelName sharedInParams outParams
@@ -5608,11 +5763,11 @@ let genCudaCoFusion (leafCgs: LoopNestCodeGen list) (leafNames: string list) (na
           sprintf "    size_t __blade_card = %dUL;" cardinality ]
         @ [ for (i, n) in List.mapi (fun i n -> (i, n)) primary.InputArrayNames do
               let sz = extentLits |> List.fold (fun a n -> a * n) 1L  // inputs span the same grid cardinality
-              let et = inputElemCpp.[i]
+              let et = inputDevCpp.[i]
               yield sprintf "    %s* __blade_d_%s; cudaMalloc(&__blade_d_%s, %dUL * sizeof(%s));" et n n sz et
               yield sprintf "    cudaMemcpy(__blade_d_%s, %s, %dUL * sizeof(%s), cudaMemcpyHostToDevice);" n n sz et ]
         @ [ for k in 0 .. leafCgs.Length - 1 do
-              let et = (outElemOpt leafCgs.[k]).Value |> elemTypeToCpp
+              let et = (outElemOpt leafCgs.[k]).Value |> cudaDevElemTypeToCpp
               yield sprintf "    %s* __blade_d_out_%d; cudaMalloc(&__blade_d_out_%d, __blade_card * sizeof(%s));" et k k et ]
         @ [ sprintf "    size_t __blade_blocks = (__blade_card + %dUL - 1UL) / %dUL;" blockSize blockSize
             sprintf "    %s<<<(unsigned)__blade_blocks, %d>>>(%s, %s, __blade_card);"
@@ -5621,7 +5776,7 @@ let genCudaCoFusion (leafCgs: LoopNestCodeGen list) (leafNames: string list) (na
                 (List.init leafCgs.Length (sprintf "__blade_d_out_%d") |> String.concat ", ")
             "    cudaDeviceSynchronize();" ]
         @ [ for k in 0 .. leafCgs.Length - 1 do
-              let et = (outElemOpt leafCgs.[k]).Value |> elemTypeToCpp
+              let et = (outElemOpt leafCgs.[k]).Value |> cudaDevElemTypeToCpp
               yield sprintf "    cudaMemcpy(__blade_host_out_%d, __blade_d_out_%d, __blade_card * sizeof(%s), cudaMemcpyDeviceToHost);" k k et ]
         @ [ for n in primary.InputArrayNames -> sprintf "    cudaFree(__blade_d_%s);" n ]
         @ [ for k in 0 .. leafCgs.Length - 1 -> sprintf "    cudaFree(__blade_d_out_%d);" k ]
@@ -6663,7 +6818,14 @@ let genComposeApply
         | IRVar (id, _) ->
             match Map.tryFind id ctx.DeferredComputations with
             | Some d -> resolveDeferred d
-            | None -> e
+            | None ->
+                // A let-bound object leaf (`let o = object_for(f)`) lives in
+                // ObjectLoopBindings, not DeferredComputations; chase it here so
+                // `kernel1 = o.Kernel` succeeds instead of falling through to the
+                // object var (emitted as an undeclared C++ symbol).
+                match Map.tryFind id ctx.ObjectLoopBindings with
+                | Some d -> resolveDeferred d
+                | None -> e
         | _ -> e
     let resolvedComposition = resolveDeferred info.Composition
     match resolvedComposition with
@@ -7282,6 +7444,80 @@ let genPackedPoolCopy (arrTy: IRArrayType) (arrayCpp: string) (flatBase: string)
         @ trailClose
         @ [ "}" ]
 
+/// Collect the DISTINCT ids of deferred-computation bindings that `root` reads
+/// POSITIONALLY — as the base array of an IRIndex / IRExtent / IRContains —
+/// or WHOLE — as a function-call argument (`f(A)`) or the RHS of an
+/// assignment (`x = A`) — anywhere in the tree. Such reads render the array
+/// by NAME (`A[i]`, `A.extents[..]`, `f(A)`), so the deferred producer must
+/// be materialized in scope before the reading binding is emitted. This
+/// generalizes the single-read guard in genScalarExprBinding's IRIndex arm to
+/// reads nested inside imperative blocks / for-in loops / compound scalar
+/// expressions.
+///
+/// The motivating case: `let A = method_for(...) <@> lambda(m) -> if c then a
+/// else b |> compute` — parseIf swallows the trailing `|> compute` into the
+/// else branch (the 2026-07-13 gotcha), so the module-level A binding never
+/// gets `compute` applied and stays a deferred IRApplyCombinator; a later
+/// imperative `A(m)` read inside a `{ for .. }` block then referenced the
+/// symbol without ever declaring it. Forcing the read here closes that hole
+/// exactly as |> compute / the rearrangement combinators would.
+///
+/// Only positional reads whose base is a deferred IRVar are collected; bare
+/// combinator/loop-object children are NOT descended (they force/absorb their
+/// own inputs), so a nested still-deferred binding is never eagerly forced.
+let collectDeferredPositionalReads (ctx: CodeGenContext) (root: IRExpr) : IRId list =
+    let ordered = System.Collections.Generic.List<IRId>()
+    let seen = System.Collections.Generic.HashSet<IRId>()
+    let note (baseExpr: IRExpr) =
+        match baseExpr with
+        | IRVar (id, _) when Map.containsKey id ctx.DeferredComputations ->
+            if seen.Add id then ordered.Add id
+        | _ -> ()
+    let rec walk (e: IRExpr) =
+        match e with
+        | IRIndex (a, idxs, _) -> note a; walk a; List.iter walk idxs
+        | IRExtent (a, _) -> note a; walk a
+        | IRContains (a, v) -> note a; walk a; walk v
+        // Statement / block forms. An assignment RHS that is a whole deferred
+        // array (`x = A`) renders A by name, so note it like a positional read.
+        | IRLet (_, v, b) -> walk v; walk b
+        | IRForRange (_, lo, hi, body) -> walk lo; walk hi; walk body
+        | IRAssign (t, v) -> walk t; note v; walk v
+        | IRSequence es -> List.iter walk es
+        | IRConstraintCheck (c, _, _) -> walk c
+        | IRReplicate (count, body) -> walk count; walk body
+        | IRGuard (c, b) -> walk c; walk b
+        // Scalar / compound-expression forms.
+        | IRBinOp (_, _, l, r) -> walk l; walk r
+        | IRUnaryOp (_, x) -> walk x
+        | IRIf (c, t, el) -> walk c; walk t; walk el
+        // A whole deferred array passed as a call argument (`f(A)`) renders A
+        // by name in the argument list, so the producer must be forced first.
+        // Bare IRVars in OTHER whole positions (tuple elements, let RHSes) are
+        // deliberately NOT noted — those flow into deliberately-deferred forms
+        // (the deferred-computation-tuple arm, alias bindings).
+        | IRApp (f, args, _) -> walk f; List.iter (fun a -> note a; walk a) args
+        | IRTuple es | IRArrayLit (es, _) | IRProdSum es | IRStack es | IRZip es -> List.iter walk es
+        | IRComplex (re, im) -> walk re; walk im
+        | IRFieldAccess (o, _) -> walk o
+        | IRTupleProj (x, _, _) -> walk x
+        | IRTupleCons (h, t) -> walk h; walk t
+        | IRTupleDecons t -> walk t
+        | IRSlice (a, _, s, e2) -> walk a; walk s; walk e2
+        | IRCurry (a, i, _) -> walk a; walk i
+        | IRSubset (a, _, s, l) -> walk a; walk s; walk l
+        | IRPolyIndex (p, i) -> walk p; walk i
+        | IRPure x | IRCompute x -> walk x
+        | IRMatch (s, cases) ->
+            walk s
+            cases |> List.iter (fun c -> Option.iter walk c.Guard; walk c.Body)
+        // Rearrangement / reduction inputs (their array operands render by name).
+        | IRReduce (a, k, initOpt) -> walk a; walk k; Option.iter walk initOpt
+        | IRReduceCompute (comp, k, init) -> walk comp; walk k; walk init
+        | _ -> ()
+    walk root
+    List.ofSeq ordered
+
 let rec genBinding (ctx: CodeGenContext) (binding: IRBinding) (builder: IRBuilder) : string list * CodeGenContext =
     let ind = indentStr ctx
     let name = bindingCppName binding
@@ -7381,8 +7617,13 @@ let rec genBinding (ctx: CodeGenContext) (binding: IRBinding) (builder: IRBuilde
         ([sprintf "%s// %s = method_for(...) [loop object]" ind name], ctx')
     
     | IRObjectFor _ ->
-        // object_for creates a loop object - no runtime code needed
+        // object_for creates a loop object - no runtime code needed.
+        // Register the provenance in ObjectLoopBindings (NOT DeferredComputations)
+        // so genComposeApply can chase a composed leaf `IRVar(o)` back to this
+        // IRObjectFor; without it, `(o1 >>@ o2) <@> A` over let-bound objects
+        // emits the object binding name as an undeclared C++ callable.
         let ctx' = addVarName binding.Id name ctx
+        let ctx' = { ctx' with ObjectLoopBindings = Map.add binding.Id binding.Value ctx'.ObjectLoopBindings }
         ([sprintf "%s// %s = object_for(...) [loop object]" ind name], ctx')
     
     | IRApp (IRObjectFor objInfo, args, _) ->
@@ -7467,7 +7708,16 @@ let rec genBinding (ctx: CodeGenContext) (binding: IRBinding) (builder: IRBuilde
 and genScalarExprBinding (ctx: CodeGenContext) (binding: IRBinding) (builder: IRBuilder) : string list * CodeGenContext =
     let ind = indentStr ctx
     let name = bindingCppName binding
+    // Force deferred producers read positionally inside a compound scalar
+    // expression (`let x = A(0) + A(1)`, `if A(0) > 0.0 then ...`). The direct
+    // single-read case (`let x = A(i)`) is handled by the dedicated IRIndex arm
+    // below; this pre-pass covers reads nested in binops / ifs / calls / match.
+    // After forcing, those bases are no longer in DeferredComputations, so the
+    // IRIndex arm's guard falls through to the plain by-name render.
+    let (forceCode, ctx) = forceDeferredPositionalReads ctx builder (sprintf "%s__def" name) binding.Value
+    let prepend (code, ctx') = (forceCode @ code, ctx')
     // Check if it's a tuple of deferred computations
+    prepend <|
     match binding.Value with
     | IRTuple elems when elems |> List.forall (fun e ->
         match e with
@@ -7918,9 +8168,24 @@ and genComputeBinding (ctx: CodeGenContext) (binding: IRBinding) (builder: IRBui
         // that previously distinguished IRComposeObj from normal
         // applies is no longer needed.
         let info' = applyFunctorWrappers info functorWrappers
+        // Force any DEFERRED method_for inputs first: `let llsq = ll^2` over
+        // a deliberately-deferred `ll` (a bare kernel binding with no
+        // |> compute) reads ll by NAME inside the emitted nest, so the
+        // producer must be materialized (under its own name, dropped from
+        // the deferred map) before this nest renders — exactly what the
+        // rearrangement combinators do for their inputs. Recursion through
+        // genBinding handles chains: forcing k2i forces llsq/kksq first.
+        let (forceCode, ctx) =
+            info'.Arrays
+            |> List.fold (fun (accCode, accCtx: CodeGenContext) arr ->
+                match arr with
+                | IRVar (id, _) when Map.containsKey id accCtx.DeferredComputations ->
+                    let (fcode, fctx, _) = forceDeferredArrayInput accCtx builder (sprintf "%s__in%d" name id) arr
+                    (accCode @ fcode, fctx)
+                | _ -> (accCode, accCtx)) ([], ctx)
         let code = genApplyCombinator ctx name info' builder
         let ctx' = addVarName binding.Id name ctx
-        (code, ctx')
+        (forceCode @ code, ctx')
 
     | IRComposeApply info ->
         // Slot-inverted apply: (object_for(f) >>@ object_for(g)) <@> A.
@@ -8227,12 +8492,52 @@ and genComputeBinding (ctx: CodeGenContext) (binding: IRBinding) (builder: IRBui
                 let ctx' = addVarName binding.Id name ctx
                 (code, ctx')
         else
-            // Scalar guard: treat as scalar expression via exprToCpp
-            let guardExpr = IRGuard (cond, body)
-            let code = genScalarBinding ctx name guardExpr binding.Type
-            let ctx' = addVarName binding.Id name ctx
-            (code, ctx')
-    
+            // guard over a NON-computation body. An ARRAY-typed body (a CONCRETE
+            // array) gets an element-wise array guard `name[idx] = cond ? body[idx]
+            // : 0` — the predicate is a scalar here (no kernel params), so it holds
+            // for every cell; this mirrors the interpreter's guard-over-concrete
+            // (cond ? A : zeros). A scalar body keeps the exprToCpp ternary (the
+            // historical `(cond ? A : 0.0)` emission was a type error over arrays).
+            match binding.Type with
+            | ArrayElem arr ->
+                let bodyName = sprintf "%s__gbody" name
+                let bodyId = builder.FreshId()
+                let bodyBinding = { Id = bodyId; Name = bodyName; Type = binding.Type; Value = IRCompute body; IsConst = true; IsMutable = false }
+                let (codeB, ctxB) = genBinding ctx bodyBinding builder
+                // Materialize the scalar predicate once into its own temp.
+                let condName = sprintf "%s__gcond" name
+                let condId = builder.FreshId()
+                let condBinding = { Id = condId; Name = condName; Type = inferExprType cond; Value = cond; IsConst = true; IsMutable = false }
+                let (codeC, ctxC) = genBinding ctxB condBinding builder
+                let elemType = elemTypeToCpp arr.ElemType
+                let rank = arrayRank arr
+                let zeroStr =
+                    match arr.ElemType with
+                    | IRTScalar ETBool -> "false"
+                    | IRTScalar (ETInt64 | ETInt32) -> "0L"
+                    | IRTIdxTagged (IRTScalar (ETInt64 | ETInt32), _) -> "0L"
+                    | _ -> "0.0"
+                let extentsAlias = sprintf "%sconst size_t* %s_extents = %s.extents;" ind name bodyName
+                let allocDecl = sprintf "%sArray<%s, %d> %s = { allocate<typename promote<%s, %d>::type, nullptr>(%s_extents), %s_extents };" ind elemType rank name elemType rank name name
+                let mutable loopLines = []
+                let mutable depth = ctx.Indent
+                let indD d = String.replicate d "    "
+                for i in 0 .. rank - 1 do
+                    loopLines <- loopLines @ [sprintf "%sfor (size_t __i%d = 0; __i%d < %s.extents[%d]; __i%d++) {" (indD depth) i i name i i]
+                    depth <- depth + 1
+                let idxStr = [for i in 0 .. rank - 1 -> sprintf "[__i%d]" i] |> String.concat ""
+                loopLines <- loopLines @ [sprintf "%s%s%s = (%s) ? %s%s : %s;" (indD depth) name idxStr condName bodyName idxStr zeroStr]
+                for _ in 0 .. rank - 1 do
+                    depth <- depth - 1
+                    loopLines <- loopLines @ [sprintf "%s}" (indD depth)]
+                let ctx' = addVarName binding.Id name ctxC
+                (codeB @ codeC @ [""] @ [extentsAlias; allocDecl; ""] @ loopLines, ctx')
+            | _ ->
+                let guardExpr = IRGuard (cond, body)
+                let code = genScalarBinding ctx name guardExpr binding.Type
+                let ctx' = addVarName binding.Id name ctx
+                (code, ctx')
+
     | IRSequence elems ->
         // Homogeneous n-ary parallel: each child produces same type
         // Result is array indexed by Idx<N> containing the child results
@@ -8284,6 +8589,20 @@ and genComputeBinding (ctx: CodeGenContext) (binding: IRBinding) (builder: IRBui
         let ctx' = { ctx with VarNames = Map.add binding.Id name mergedVarNames }
         (allCode @ childTypeErrCode @ [extentsDecl; allocDecl] @ assignLines, ctx')
     
+    | _ when not functorWrappers.IsEmpty && (match inferExprType resolved with ArrayElem _ -> true | _ -> false) ->
+        // `f <$> A` where A is a CONCRETE array (not a computation): materialize as
+        // `method_for(A) <@> f` so the functor wrappers apply ELEMENTWISE instead of
+        // being dropped (the historical `Array<T,N> name = A;` bug — the wrappers
+        // never reached the kernel). Same treatment `<@>` already gets, and the
+        // value-space twin of the interpreter's applyWrappersToValue.
+        let firstWrapper = List.head functorWrappers
+        let restWrappers = List.tail functorWrappers
+        let baseInfo = buildSimpleApplyInfo [resolved] firstWrapper binding.Type
+        let finalInfo = applyFunctorWrappers baseInfo restWrappers
+        let code = genApplyCombinator ctx name finalInfo builder
+        let ctx' = addVarName binding.Id name ctx
+        (code, ctx')
+
     | _ ->
         // Other compute expressions - treat as scalar
         let code = genScalarBinding ctx name resolved binding.Type
@@ -8665,6 +8984,12 @@ and forceDeferredArrayInput (ctx: CodeGenContext) (builder: IRBuilder) (tmpBase:
         let matBinding = { Id = srcId; Name = srcName; Type = ty; Value = IRCompute (IRVar (srcId, ty)); IsConst = true; IsMutable = false }
         let (code, ctx1) = genBinding ctx matBinding builder
         let ctx1 = { ctx1 with DeferredComputations = Map.remove srcId ctx1.DeferredComputations }
+        // A module-level binding materialized here at main's top level joins
+        // the auto-print list (genPrintStatements consults the cell); a
+        // nested-scope force (Indent > 0) stays block-scoped and unprintable.
+        if ctx.Indent = 0 then
+            let cell = forcedDeferredIdsCell ()
+            cell.Value <- Set.add srcId cell.Value
         (code @ [""], ctx1, expr)
     | IRApplyCombinator _ | IRComposeApply _ | IRParallel _ | IRFusion _ | IRFunctorMap _ | IRComposeMeth _ | IRBind _ | IRCompute _ ->
         // Inline computation as the array argument: materialize into a
@@ -8675,6 +9000,27 @@ and forceDeferredArrayInput (ctx: CodeGenContext) (builder: IRBuilder) (tmpBase:
         let (code, ctx1) = genBinding ctx matBinding builder
         (code @ [""], ctx1, IRVar (tmpId, ty))
     | _ -> ([], ctx, expr)
+
+
+/// Force every deferred-computation binding that `value` reads positionally
+/// (see collectDeferredPositionalReads) so it is materialized in scope before
+/// the by-name reads are emitted. Returns the prelude force-code plus a ctx
+/// with those bindings dropped from DeferredComputations. Idempotent: a binding
+/// already forced (removed from the map) is skipped by the collector, so this
+/// composes cleanly with the per-input forcing the rearrangement combinators do.
+and forceDeferredPositionalReads (ctx: CodeGenContext) (builder: IRBuilder) (tmpBase: string) (value: IRExpr) : string list * CodeGenContext =
+    let ids = collectDeferredPositionalReads ctx value
+    ids |> List.fold (fun (accCode, accCtx) id ->
+        // Recover the array type from the deferred computation so the
+        // materialized binding is typed correctly (forceDeferredArrayInput's
+        // IRVar arm carries the IRVar's type onto the synthesized binding).
+        let ty =
+            match Map.tryFind id accCtx.DeferredComputations with
+            | Some defExpr -> inferExprType defExpr
+            | None -> IRTUnit
+        let (code, ctx', _) = forceDeferredArrayInput accCtx builder (sprintf "%s_%d" tmpBase id) (IRVar (id, ty))
+        (accCode @ code, ctx')
+    ) ([], ctx)
 
 
 and genMaskBinding (ctx: CodeGenContext) (binding: IRBinding) (builder: IRBuilder) (arrExpr: IRExpr) (predExpr: IRExpr) : string list * CodeGenContext =
@@ -9222,8 +9568,15 @@ and genTupleProjBinding (ctx: CodeGenContext) (binding: IRBinding) (builder: IRB
 and genVarAliasBinding (ctx: CodeGenContext) (binding: IRBinding) (builder: IRBuilder) (srcId: IRId) : string list * CodeGenContext =
     let ind = indentStr ctx
     let name = bindingCppName binding
-    // Check if source is deferred â€” propagate deferral
+    // Check if source is deferred â€” propagate deferral (but a MUTABLE
+    // binding deep-copies its initializer's storage, so a deferred source
+    // must be FORCED first: propagating would leave both unmaterialized
+    // while later assignments/reads use them by name).
     match Map.tryFind srcId ctx.DeferredComputations with
+    | Some _ when binding.IsMutable || Set.contains binding.Id ctx.MutableArrayLets ->
+        let (fcode, fctx, _) = forceDeferredArrayInput ctx builder (sprintf "%s__src" name) (IRVar (srcId, binding.Type))
+        let (code, ctx') = genVarAliasBinding fctx binding builder srcId
+        (fcode @ code, ctx')
     | Some deferred ->
         let ctx' = addVarName binding.Id name ctx
         let ctx' = { ctx' with DeferredComputations = Map.add binding.Id deferred ctx'.DeferredComputations }
@@ -9516,6 +9869,11 @@ and genSequenceBinding (ctx: CodeGenContext) (binding: IRBinding) (builder: IRBu
 and genForRangeBinding (ctx: CodeGenContext) (binding: IRBinding) (builder: IRBuilder) (vid: IRId) (lo: IRExpr) (hi: IRExpr) (body: IRExpr) : string list * CodeGenContext =
     let ind = indentStr ctx
     let name = bindingCppName binding
+    // Force any deferred producer this loop reads positionally BEFORE the loop
+    // header, so the materialization is not re-run each iteration. When this
+    // for-range is nested inside a block, genLetChainBinding already forced it
+    // (dropped from DeferredComputations) and the collector finds nothing.
+    let (forceCode, ctx) = forceDeferredPositionalReads ctx builder (sprintf "%s__def" name) body
     // Imperative for-range loop
     let loStr = exprToCppCtx ctx lo
     let hiStr = exprToCppCtx ctx hi
@@ -9534,7 +9892,8 @@ and genForRangeBinding (ctx: CodeGenContext) (binding: IRBinding) (builder: IRBu
             (accCode @ code, { ctx' with Indent = ctx.Indent })
         ) ([], innerCtx)
     let code =
-        [forLoopFrom ind varName loStr hiStr]
+        forceCode
+        @ [forLoopFrom ind varName loStr hiStr]
         @ bodyCode
         @ [sprintf "%s}" ind]
     let ctx' = addVarName binding.Id name ctx
@@ -9566,6 +9925,11 @@ and genBindChainBinding (ctx: CodeGenContext) (binding: IRBinding) (builder: IRB
 and genLetChainBinding (ctx: CodeGenContext) (binding: IRBinding) (builder: IRBuilder) : string list * CodeGenContext =
     let ind = indentStr ctx
     let name = bindingCppName binding
+    // Force any deferred producer this block reads positionally (`A(i)` over a
+    // still-deferred computed array) at the block's OUTER indent, before any
+    // block statement is emitted — materializing inside the block/loop body
+    // would re-run the producer per iteration or dangle its loop var.
+    let (forceCode, ctx) = forceDeferredPositionalReads ctx builder (sprintf "%s__def" name) binding.Value
     // Block expression: unroll the IRLet chain into sequential bindings
     let (lets, finalExpr) = unrollLetChain binding.Value
     let (allCode, foldCtx) =
@@ -9584,7 +9948,7 @@ and genLetChainBinding (ctx: CodeGenContext) (binding: IRBinding) (builder: IRBu
         Value = finalExpr; IsConst = binding.IsConst; IsMutable = binding.IsMutable
     }
     let (finalCode, finalCtx) = genBinding foldCtx finalBinding builder
-    (allCode @ finalCode, finalCtx)
+    (forceCode @ allCode @ finalCode, finalCtx)
 
 
 let genFuncBody (ctx: CodeGenContext) (builder: IRBuilder) (names: Map<IRId, string>) (indent: string) (body: IRExpr) : string list =
@@ -10338,15 +10702,23 @@ let computeDeferredIds (bindings: IRBinding list) : Set<int> =
         | IRVar (id, _) -> Set.contains id ids
         | _ -> false
     bindings |> List.fold (fun ids b ->
+        // A combinator whose RESULT TYPE is an array is a deferred computation
+        // regardless of whether its operands are already deferred — it materializes
+        // only at |> compute, exactly like `<@>` (which always defers). Without this,
+        // `<$>` / sequence / `<|>` / guard / `>>=` / `>>@` applied to CONCRETE arrays
+        // fell through to `| _ -> false` and were eagerly materialized (and printed)
+        // with no |> compute. Scalar `<|>` / guard stay eager ternaries (result type
+        // is IRTScalar, so resultIsArray is false).
+        let resultIsArray = match IR.stripUnits b.Type with ArrayElem _ -> true | _ -> false
         let shouldDefer =
             match b.Value with
             | IRApplyCombinator _ | IRComposeApply _ | IRParallel _ | IRFusion _ -> true
             | IRZip _ -> true
             | IRComposeObj _ -> true
-            | IRBind (comp, _) -> isDeferred ids comp
-            | IRComposeMeth (left, right) -> isDeferred ids left || isDeferred ids right
-            | IRFunctorMap (_, inner) -> isDeferred ids inner
-            | IRChoice (left, right) -> isDeferred ids left || isDeferred ids right
+            | IRBind (comp, _) -> resultIsArray || isDeferred ids comp
+            | IRComposeMeth (left, right) -> resultIsArray || isDeferred ids left || isDeferred ids right
+            | IRFunctorMap (_, inner) -> resultIsArray || isDeferred ids inner
+            | IRChoice (left, right) -> resultIsArray || isDeferred ids left || isDeferred ids right
             // <|:> operands are arrays, so the binding ALWAYS defers
             // (genFallbackBinding) — materialization happens at |> compute.
             | IRFallback _ -> true
@@ -10355,8 +10727,8 @@ let computeDeferredIds (bindings: IRBinding list) : Set<int> =
                     match e with
                     | IRGuard (_, inner) -> leafIsDeferred inner
                     | _ -> isDeferred ids e
-                leafIsDeferred body
-            | IRSequence elems -> elems |> List.exists (isDeferred ids)
+                resultIsArray || leafIsDeferred body
+            | IRSequence elems -> resultIsArray || (elems |> List.exists (isDeferred ids))
             | IRTuple elems -> elems |> List.forall (isDeferred ids)
             | IRTupleProj (IRVar (pid, _), _, _) -> Set.contains pid ids
             | IRVar (srcId, _) -> Set.contains srcId ids
@@ -10366,9 +10738,16 @@ let computeDeferredIds (bindings: IRBinding list) : Set<int> =
 
 let genPrintStatements (modul: IRModule) : string list =
     let deferredIds = computeDeferredIds modul.Bindings
+    // A deferred binding that a consumer FORCED (forceDeferredArrayInput
+    // materialized it under its own name at main's top level) is a real
+    // array by program end and prints like any eager binding; one that
+    // stayed deferred through the whole program prints nothing. The cell is
+    // populated during genModule, so callers must assemble print code AFTER
+    // body generation.
+    let forcedIds = (forcedDeferredIdsCell ()).Value
     modul.Bindings |> List.collect (fun b ->
         let isPrintable =
-            if Set.contains b.Id deferredIds then false
+            if Set.contains b.Id deferredIds && not (Set.contains b.Id forcedIds) then false
             // A STREAMED provider read has no materialized array (fiber
             // reads happen inside consuming nests) — nothing to print.
             elif (match Map.tryFind b.Id modul.ProviderReads with
@@ -10729,6 +11108,7 @@ let genMainProgram (modul: IRModule) (testName: string) : string =
     (cudaKernelDefsCell ()).Value <- []
     (symmDeclsCell ()).Value <- []
     (streamBufDeclsCell ()).Value <- Set.empty
+    (forcedDeferredIdsCell ()).Value <- Set.empty
     let builder = IRBuilder()
     // Codegen-synthesized ids (sequence children, __s1 stages, __ret temps)
     // must not collide with typecheck/lowering ids arriving in the module â€”
@@ -10774,11 +11154,19 @@ let getCudaFileContent () : string option =
     match (cudaKernelDefsCell ()).Value with
     | [] -> None
     | defs ->
+        // Complex kernels: <complex> for the extern "C" wrapper signatures
+        // (std::complex, the host side of the boundary) and thrust/complex.h
+        // for the device dialect in kernel bodies/buffers. Conditional so
+        // non-complex programs keep the previous byte-identical .cu.
+        let usesComplex =
+            defs |> List.exists (fun (l: string) ->
+                l.Contains "std::complex" || l.Contains "thrust::complex")
         let header =
             [ "// Generated CUDA kernels (.cu) â€” compiled by nvcc, linked with the .cpp."
               "#include <cstddef>"
-              "#include <cstdint>"
-              "" ]
+              "#include <cstdint>" ]
+            @ (if usesComplex then ["#include <complex>"; "#include <thrust/complex.h>"] else [])
+            @ [ "" ]
         Some ((header @ defs) |> String.concat "\n")
 
 /// Generate a complete C++ program from an IR program (all modules)
@@ -10838,7 +11226,11 @@ let genSelfContainedProgram (modul: IRModule) (testName: string) : string =
     // scope symm arrays during genModule, emitted in the preamble below.
     (symmDeclsCell ()).Value <- []
     (streamBufDeclsCell ()).Value <- Set.empty
-    
+    // Reset the forced-deferred collector; forceDeferredArrayInput populates it
+    // during genModule and genPrintStatements (called AFTER body generation)
+    // reads it to auto-print deferred bindings that ended up materialized.
+    (forcedDeferredIdsCell ()).Value <- Set.empty
+
     let includes =
         // Provider reads/writes emit provider-specific runtime calls (nc_*,
         // fstream chunk I/O, ...) needing their own headers. Added only when
@@ -10846,8 +11238,8 @@ let genSelfContainedProgram (modul: IRModule) (testName: string) : string =
         // no extra dependency (registry-dispatched per provider).
         genIncludesExternal () @ providerIncludes modul
     // MPI scaffolding: only when the emit gate is on AND the module has an
-    // mpi kernel (a PURE predicate â€” includes/printCode are computed before
-    // genModule runs, so an emission-time cell would not work here). Adds
+    // mpi kernel (a PURE predicate â€” includes are computed before genModule
+    // runs, so an emission-time cell would not work here). Adds
     // <mpi.h> and the namespace-scope rank/size globals (loop nests are also
     // emitted inside top-level function bodies, so main() locals can't work).
     // Defaults 0/1 keep any pre-Init execution serially correct.
@@ -10860,20 +11252,23 @@ let genSelfContainedProgram (modul: IRModule) (testName: string) : string =
               "static int __blade_mpi_size = 1;" ]
         else []
     let typeDefs = genTypeDefs modul
-    let printCode = genPrintStatements modul
 
     // Split-timing mode emits two clock checkpoints (input allocation vs
     // compute) via genModuleSplit + genMainWrapperSplit; default mode emits the
     // single whole-body clock. Both share the same CUDA-proto / symm-decl
     // preamble, computed after generation (genModule* populates the cells).
+    // Print code is assembled AFTER body generation: genPrintStatements reads
+    // the forced-deferred collector genModule* populates.
     let mainFunc =
         if splitTimingModeEnabled () then
             let (funcDefs, setupCode, computeCode) = genModuleSplit modul builder
+            let printCode = genPrintStatements modul
             let setupIndented = setupCode |> List.map (fun s -> "    " + s)
             let computeIndented = computeCode |> List.map (fun s -> "    " + s)
             (funcDefs, genMainWrapperSplit (mpiOn, mpiOn && moduleHybridMpiOmp modul) testName setupIndented computeIndented printCode)
         else
             let (funcDefs, bindCode) = genModule modul builder
+            let printCode = genPrintStatements modul
             let bodyIndented = bindCode |> List.map (fun s -> "    " + s)
             (funcDefs, genMainWrapper (mpiOn, mpiOn && moduleHybridMpiOmp modul) testName bodyIndented printCode)
     let (funcDefs, mainBody) = mainFunc
@@ -10914,6 +11309,9 @@ let genProgramWithExternalRuntime (modul: IRModule) (testName: string) : string 
               "static int __blade_mpi_size = 1;" ]
         else []
     let typeDefs = genTypeDefs modul
+    // Reset the forced-deferred collector before body generation; the
+    // genPrintStatements call below (correctly AFTER genModule) reads it.
+    (forcedDeferredIdsCell ()).Value <- Set.empty
     let (funcDefs, bindCode) = genModule modul builder
 
     let bodyIndented = bindCode |> List.map (fun s -> "    " + s)

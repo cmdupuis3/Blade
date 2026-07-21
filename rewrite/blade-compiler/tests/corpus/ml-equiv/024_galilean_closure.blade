@@ -1,0 +1,26 @@
+// TEST: ML Galilean Certified Closure
+import ml as ml
+// ============================================================================
+// The `where ml.galilean(u, ...)` certificate: the conjunct names the
+// boost-variant (velocity) parameters, and the judgment proves the body
+// combines them only boost-invariantly — differences of velocities are the
+// sanctioned entry (BVar - BVar -> BInv), so a Burgers-style stencil
+// closure certifies, and shifting every velocity by the same U0 cannot
+// change the result. Note the v1 coefficient discipline in action: the
+// second-difference stencil is written ((ur - uc) - (uc - ul)), NOT
+// ur - 2*uc + ul — scaling a velocity (2*uc) scales its U0-coefficient and
+// is BL4009 even though the full stencil is invariant (v2's rational
+// coefficient tracking will admit the direct spelling).
+// The numerical shadow is inline: the same call boosted by U0 = 10 returns
+// the identical value (all-exact arithmetic, so the EXPECTs are hand-derived).
+// ============================================================================
+function closure(ul: Float, uc: Float, ur: Float, dx: Float, c: Float) where ml.galilean(ul, uc, ur) -> Float = {
+    let g = (ur - ul) / (2.0 * dx)
+    let lap = ((ur - uc) - (uc - ul)) / (dx * dx)
+    c * g * g + lap
+}
+
+let out = closure(1.5, 2.0, 3.0, 0.5, 2.0)
+// EXPECT: out = 6.5
+let out_boosted = closure(11.5, 12.0, 13.0, 0.5, 2.0)
+// EXPECT: out_boosted = 6.5

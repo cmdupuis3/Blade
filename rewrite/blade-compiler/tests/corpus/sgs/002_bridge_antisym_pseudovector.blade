@@ -1,0 +1,96 @@
+// TEST: SGS Bridge Gradient Parity Certificate
+// ============================================================================
+// The full-gradient bridge under PROPER and IMPROPER O(3) elements — the
+// test that pins vorticity's parity assignment.
+//
+// bridge9: 3x3 Cartesian (flat row-major, G_ij = d_j u_i) -> GSPEC =
+// [(0,e,1), (1,e,1), (2,e,1)] (dim 9). The l=1 block is the AXIAL
+// pseudovector (vorticity) in Y1 component order (y, z, x), a_x = g21 - g12.
+// Gradient of a true vector = odd (x) odd = parity-EVEN throughout.
+//
+// Proper certificate (house R = Rz(0.7)·Ry(1.1)): bridge9(R G R^T) equals
+// D_g · bridge9(G) with D_g = 1 (+) D_1 (+) D_2 baked.
+//
+// Improper certificate: under inversion∘R the Cartesian route is UNCHANGED
+// ((-R) G (-R)^T = R G R^T — gradients are parity-even), so the correct
+// parity-even irreps route equals the proper one, while the WRONG assignment
+// (vorticity as l=1 ODD, i.e. a true vector) flips the l=1 block and
+// disagrees with the Cartesian route by O(1). Assigning (1, odd) here is
+// exactly the inadmissible-physics bug the type discipline exists to forbid.
+// ============================================================================
+
+let b9 = [0.5773502691896258, 0.0, 0.0, 0.0, 0.5773502691896258, 0.0, 0.0, 0.0, 0.5773502691896258, 0.0, 0.0, 0.7071067811865475, 0.0, 0.0, 0.0, -0.7071067811865475, 0.0, 0.0, 0.0, -0.7071067811865475, 0.0, 0.7071067811865475, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, -0.7071067811865475, 0.0, 0.7071067811865475, 0.0, 0.0, 0.7071067811865475, 0.0, 0.7071067811865475, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.7071067811865475, 0.0, 0.7071067811865475, 0.0, -0.4082482904638631, 0.0, 0.0, 0.0, -0.4082482904638631, 0.0, 0.0, 0.0, 0.8164965809277261, 0.0, 0.0, 0.7071067811865475, 0.0, 0.0, 0.0, 0.7071067811865475, 0.0, 0.0, 0.7071067811865475, 0.0, 0.0, 0.0, -0.7071067811865475, 0.0, 0.0, 0.0, 0.0]
+let d_g = [1.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.7648421872844888, 0.5741315443479849, 0.2922146442847723, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.45359612142557815, -0.8912073600614354, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, -0.6442176872376895, 0.6816329865934172, 0.34692944965489897, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.07709643678933609, 0.15147596872130908, 0.6778328861277059, 0.3983662814203284, 0.594102730717048, 0.0, 0.0, 0.0, 0.0, -0.6816329865934229, 0.34692944965489897, 0.4510673253341625, -0.37912282869503605, -0.26042384170432337, 0.0, 0.0, 0.0, 0.0, -8.326672684688674e-17, -3.3306690738754696e-16, -0.19137583794150892, -0.7001784245761277, 0.687841160741547, 0.0, 0.0, 0.0, 0.0, 0.5741315443479862, -0.2922146442847727, 0.5355259977422124, -0.45011048174094404, -0.309186078954509, 0.0, 0.0, 0.0, 0.0, -0.4469961753826479, -0.87824005233627, 0.11691039686042598, 0.06870891190116774, 0.1024688938018079]
+let rot = [0.34692944965489897, -0.644217687237691, 0.681632986593423, 0.2922146442847723, 0.7648421872844885, 0.5741315443479861, -0.8912073600614354, 0.0, 0.4535961214255773]
+let g_fix = [0.6, -1.1, 0.4, 0.9, 0.3, -0.7, -0.2, 0.8, 1.2]
+
+function mv9(b: Array<Float like Idx<81>>, x: Array<Float like Idx<9>>) -> Array<Float like Idx<9>> = {
+    let mut o = [0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0]
+    for i in 0..9 {
+        for j in 0..9 {
+            o(i) += b(i * 9 + j) * x(j)
+        }
+    }
+    o
+}
+
+// (a) bridge of the unrotated gradient
+let cert_g = mv9(b9, g_fix)
+// EXPECT: cert_g = [1.2124355652982142, 0.4242640687119285, 1.414213562373095, 1.0606601717798212, -0.14142135623730956, 0.07071067811865483, 0.6123724356957946, 0.1414213562373095, 0.21213203435596423]
+
+// (b) cart route: R G R^T in-language (oracle operation order), then bridge
+let mut m1 = [0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0]
+let mut m2 = [0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0]
+let rot_done = {
+    for i in 0..3 {
+        for j in 0..3 {
+            for t in 0..3 {
+                m1(i * 3 + j) += g_fix(i * 3 + t) * rot(j * 3 + t)
+            }
+        }
+    }
+    for i in 0..3 {
+        for j in 0..3 {
+            for t in 0..3 {
+                m2(i * 3 + j) += rot(i * 3 + t) * m1(t * 3 + j)
+            }
+        }
+    }
+    0.0
+}
+let cert_g_lhs = mv9(b9, m2)
+// EXPECT: cert_g_lhs = [1.2124355652982144, 1.446380109706646, -0.3037863648543184, 1.0586304467440892, 0.5972597819690029, 0.28828997079211693, -0.07030032568335232, 0.09684069559433117, 0.10416040259446074]
+
+// (c) irreps route: baked D_g acting on the unrotated bridge
+let cert_g_rhs = mv9(d_g, cert_g)
+// EXPECT: cert_g_rhs = [1.2124355652982142, 1.446380109706644, -0.3037863648543173, 1.058630446744082, 0.597259781969003, 0.28828997079211693, -0.07030032568335201, 0.09684069559433137, 0.10416040259446054]
+
+// (d) proper certificate: both routes agree
+let mut dd = [0.0, 0.0]
+let dd_done = {
+    for k in 0..9 {
+        dd(0) += (cert_g_lhs(k) - cert_g_rhs(k)) * (cert_g_lhs(k) - cert_g_rhs(k))
+    }
+    0.0
+}
+let cert_agree = if dd(0) < 0.000000000000000001 then 1.0 else 0.0
+// EXPECT: cert_agree = 1.0
+
+// (e) improper certificate. Cartesian route: (-R) G (-R)^T = R G R^T — the
+// signs cancel, so the cart route IS cert_g_lhs unchanged. Correct
+// parity-even irreps route: no parity flip, IS cert_g_rhs unchanged —
+// agreement already pinned in (d). The WRONG assignment (vorticity as a
+// true vector, l=1 odd) flips the l=1 block under the improper element:
+let cert_g_improper_wrong = [cert_g_rhs(0), 0.0 - cert_g_rhs(1), 0.0 - cert_g_rhs(2), 0.0 - cert_g_rhs(3), cert_g_rhs(4), cert_g_rhs(5), cert_g_rhs(6), cert_g_rhs(7), cert_g_rhs(8)]
+// EXPECT: cert_g_improper_wrong = [1.2124355652982142, -1.446380109706644, 0.3037863648543173, -1.058630446744082, 0.597259781969003, 0.28828997079211693, -0.07030032568335201, 0.09684069559433137, 0.10416040259446054]
+
+// (f) ... and disagrees with the Cartesian route by O(1): the improper
+// element DETECTS the wrong parity (oracle residual 2.89276)
+let wrong_detected = {
+    for k in 0..9 {
+        dd(1) += (cert_g_lhs(k) - cert_g_improper_wrong(k)) * (cert_g_lhs(k) - cert_g_improper_wrong(k))
+    }
+    0.0
+}
+let cert_wrong_parity_detected = if dd(1) > 1.0 then 1.0 else 0.0
+// EXPECT: cert_wrong_parity_detected = 1.0

@@ -174,8 +174,8 @@ let devCos = {
     for k in 0..4 {
         let md = sqrt(REQ(k) * REQ(k) + IMQ(k) * IMQ(k))
         let cv = REQ(k) / md
-        let d1 = sqrt((cv - cg1) * (cv - cg1))
-        let d2 = sqrt((cv - cg2) * (cv - cg2))
+        let d1 = abs(cv - cg1)
+        let d2 = abs(cv - cg2)
         let best = amin2(d1, d2)
         worst = if best > worst then best else worst
     }
@@ -186,7 +186,7 @@ let devMod = {
     let mut worst = 0.0
     for k in 0..4 {
         let md = sqrt(REQ(k) * REQ(k) + IMQ(k) * IMQ(k))
-        let d = sqrt((md - 1.0) * (md - 1.0))
+        let d = abs(md - 1.0)
         worst = if d > worst then d else worst
     }
     worst
@@ -198,7 +198,7 @@ let hitS = {
     for k in 0..10 {
         let md = sqrt(REQ(k) * REQ(k) + IMQ(k) * IMQ(k))
         let cv = REQ(k) / (if md > 0.000001 then md else 1.0)
-        let d = sqrt((cv - cgB) * (cv - cgB))
+        let d = abs(cv - cgB)
         best = if d < best then d else best
     }
     best

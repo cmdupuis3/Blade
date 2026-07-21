@@ -87,6 +87,39 @@ namespace nested_array_utilities {
     }
 
     // ========================================================================
+    // fallback_copy<>: the <|:> allocated-fallback read (formalism 2.6)
+    // ========================================================================
+    //
+    // dst[i...] = a[i...] where a's pointer chain to the cell is fully
+    // non-null, else b[i...]. The allocation check runs PER CURRY LEVEL while
+    // descending, so a missing subtree (nullptr at any interior level, or a
+    // null leaf row) falls back to b's whole corresponding subtree.
+    //
+    // Compiler-built arrays are fully allocated (allocate<> never leaves a
+    // null row), for which this degenerates to a copy of `a`; partially-
+    // allocated arrays enter from the C++-level partial-depth allocation API
+    // (user-managed sparsity — Blade is not a sparse-tensor system, formalism
+    // §9). dst and b must be fully allocated over the shared extents.
+    //
+    // T and N are explicit at the call site (promote<> in a parameter
+    // position is non-deducible): fallback_copy<double, 2>(dst, a, b, ext).
+    template<typename T, size_t N>
+    void fallback_copy(typename promote<T, N>::type dst,
+                       typename promote<T, N>::type a,   // may be null at any level
+                       typename promote<T, N>::type b,
+                       const size_t* ext) {
+        if constexpr (N == 1) {
+            for (size_t i = 0; i < ext[0]; i++)
+                dst[i] = a ? a[i] : b[i];
+        } else {
+            for (size_t i = 0; i < ext[0]; i++)
+                fallback_copy<T, N - 1>(dst[i],
+                                        a ? a[i] : (typename promote<T, N - 1>::type) nullptr,
+                                        b[i], ext + 1);
+        }
+    }
+
+    // ========================================================================
     // allocate<>: contiguous-backing allocation
     // ========================================================================
     //

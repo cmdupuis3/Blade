@@ -1,0 +1,91 @@
+// TEST: SGS Exact Stress Is A Comoment
+import ppl as ppl
+// ============================================================================
+// The data half of the closure loop, full circle: the exact subgrid stress
+//   tau_ij = mean(u_i u_j | tile) - mean(u_i | tile) mean(u_j | tile)
+// IS the second central comoment of velocity under the filter-cell measure —
+// so it is computed here BY the comoment machinery, two independent routes:
+//   (1) the raw combinator algebra: method_for(A, A) with a comm-licensed
+//       prodsum kernel -> rank-2 symmetric (SymIdx-packed) second moments
+//       (scalar pins: the Expect harness skips rank-2 arrays), means
+//       subtracted;
+//   (2) the ppl former: ppl.comoments(A, 2) (central, population, flat pool).
+// Data: the origin W=2 tile (T = 8 samples, t = i*4+j*2+k) of the N=4
+// divergence-free field of sgs/004, values baked as oracle-printed literals
+// (bit-exact downstream — no runtime trig).
+//
+// THE GALILEAN PIN (previews the Phase-2 `ml.galilean` judgment): boosting
+// u -> u + U0 (U0 = (0.3,-0.2,0.5)) moves the RAW second moments by O(1)
+// but leaves the CENTRAL comoment tau unchanged to fp noise — tau is
+// boost-invariant BY CONSTRUCTION, which is exactly the axiom the judgment
+// assigns to `sgs.stress` (Var -> Inv).
+// (Coarse-grid gradient invariance is deferred to the Phase-1b sgs.grad
+// tests: at N_coarse = 2 the periodic central difference is degenerate.)
+// ============================================================================
+type TimeIdx = Idx<8>
+let A: Array<Float64 like Idx<3>, TimeIdx> = [[0.4502502767118629, -0.2542796605492269, 0.30415439769464864, -0.4003755395664412, 0.15435992254473935, -0.5501700147163504, -0.49111216032904575, -1.1956420975901356], [0.05567577700150628, 0.901111701714814, 0.8509423350252009, 1.6963782597385086, -1.2408999337951738, -0.39546400908186596, -0.94500957962805, -0.0995736549147423], [0.07830235689985615, 0.07830235689985615, -1.6525188727304907, -1.6525188727304907, 1.1475662360440144, 1.1475662360440144, 0.1658093121985236, 0.1658093121985236]]
+let V: Array<Float64 like Idx<3>, TimeIdx> = [[0.7502502767118628, 0.045720339450773084, 0.6041543976946486, -0.10037553956644119, 0.45435992254473934, -0.2501700147163504, -0.19111216032904577, -0.8956420975901356], [-0.14432422299849373, 0.7011117017148141, 0.6509423350252008, 1.4963782597385087, -1.4408999337951738, -0.5954640090818659, -1.14500957962805, -0.2995736549147423], [0.5783023568998562, 0.5783023568998562, -1.1525188727304907, -1.1525188727304907, 1.6475662360440144, 1.6475662360440144, 0.6658093121985236, 0.6658093121985236]]
+
+// (1) raw combinator route: packed second moments via the comm license
+let m2 = method_for(A, A) <@> lambda(x: Array<Float64 like TimeIdx>, y: Array<Float64 like TimeIdx>) where comm(x, y) -> prodsum(x, y) / 8.0 |> compute
+let m00 = m2(0, 0)
+// EXPECT: m00 = 0.3146823922627576
+let m01 = m2(0, 1)
+// EXPECT: m01 = -0.0019061849321631453
+let m02 = m2(0, 2)
+// EXPECT: m02 = -0.06994320587345675
+let m11 = m2(1, 1)
+// EXPECT: m11 = 0.8770108244096892
+let m12 = m2(1, 2)
+// EXPECT: m12 = -0.7732017851856906
+let m22 = m2(2, 2)
+// EXPECT: m22 = 1.0203377194866246
+
+let r0 = A(0)
+let r1 = A(1)
+let r2 = A(2)
+let mu0 = reduce(r0, (+)) / 8.0
+// EXPECT: mu0 = -0.24785185947499364
+let mu1 = reduce(r1, (+)) / 8.0
+let mu2 = reduce(r2, (+)) / 8.0
+
+let tau = [m00 - mu0 * mu0, m01 - mu0 * mu1, m02 - mu0 * mu2, m11 - mu1 * mu1, m12 - mu1 * mu2, m22 - mu2 * mu2]
+// EXPECT: tau = [0.25325184801754563, 0.023596559909789594, -0.08610568558444831, 0.8664234203346481, -0.7664919700416585, 1.0160853438383561]
+
+// (2) the ppl former route: same tensor, one call, flat packed pool
+let c2 = ppl.comoments(A, 2)
+// EXPECT: c2 = [0.25325184801754563, 0.023596559909789594, -0.08610568558444831, 0.8664234203346481, -0.7664919700416585, 1.0160853438383561]
+
+let mut agree = [0.0]
+let agree_done = {
+    for p in 0..6 {
+        agree(0) += (tau(p) - c2(p)) * (tau(p) - c2(p))
+    }
+    0.0
+}
+let routes_agree = if agree(0) < 0.000000000000000000000001 then 1.0 else 0.0
+// EXPECT: routes_agree = 1.0
+
+// (3) the Galilean pin: same stress on the boosted field
+let m2v = method_for(V, V) <@> lambda(x: Array<Float64 like TimeIdx>, y: Array<Float64 like TimeIdx>) where comm(x, y) -> prodsum(x, y) / 8.0 |> compute
+let s0 = V(0)
+let s1 = V(1)
+let s2 = V(2)
+let nu0 = reduce(s0, (+)) / 8.0
+let nu1 = reduce(s1, (+)) / 8.0
+let nu2 = reduce(s2, (+)) / 8.0
+let tau_shift = [m2v(0, 0) - nu0 * nu0, m2v(0, 1) - nu0 * nu1, m2v(0, 2) - nu0 * nu2, m2v(1, 1) - nu1 * nu1, m2v(1, 2) - nu1 * nu2, m2v(2, 2) - nu2 * nu2]
+// EXPECT: tau_shift = [0.2532518480175457, 0.02359655990978959, -0.08610568558444831, 0.8664234203346481, -0.7664919700416586, 1.0160853438383564]
+
+let mut gal = [0.0, 0.0]
+let gal_done = {
+    for p in 0..6 {
+        gal(0) += (tau(p) - tau_shift(p)) * (tau(p) - tau_shift(p))
+    }
+    gal(1) = (m00 - m2v(0, 0)) * (m00 - m2v(0, 0)) + (m22 - m2v(2, 2)) * (m22 - m2v(2, 2))
+    0.0
+}
+let tau_is_boost_invariant = if gal(0) < 0.000000000000000000000000000001 then 1.0 else 0.0
+// EXPECT: tau_is_boost_invariant = 1.0
+let raw_moments_are_not = if gal(1) > 0.001 then 1.0 else 0.0
+// EXPECT: raw_moments_are_not = 1.0

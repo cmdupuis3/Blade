@@ -1,0 +1,11 @@
+// TEST: Unit Multi Axis Binop Mismatch (rejects)
+// Rank-2 analog of units/011: elementwise + of a meters-array and a
+// seconds-array is a unit error, judged at the binop synthesis site
+// BEFORE the multi-axis zip pipeline is synthesized.
+Unit meters
+Unit seconds
+type Lat = Idx<2>
+type Lon = Idx<3>
+let A: Array<Float<meters> like Lat, Lon> = [[1.0, 2.0, 3.0], [4.0, 5.0, 6.0]]
+let B: Array<Float<seconds> like Lat, Lon> = [[1.0, 1.0, 1.0], [1.0, 1.0, 1.0]]
+let bad = A + B

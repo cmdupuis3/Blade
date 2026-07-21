@@ -1,0 +1,6 @@
+// TEST: Guard False Over Concrete Array
+// A false scalar predicate zero-fills the whole array (same shape as the body).
+let A = [1.0, 2.0, 3.0]
+let cond = false
+let result = guard(cond, A) |> compute
+// EXPECT: result = [0.0, 0.0, 0.0]

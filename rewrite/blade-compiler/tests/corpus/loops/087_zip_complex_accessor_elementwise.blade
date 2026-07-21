@@ -1,0 +1,15 @@
+// TEST: Zip Complex Accessor Elementwise
+// HISTORY: this file used to be `..._on_row_rejects` — under single-record
+// co-iteration a rank-2 zip co-iterated only the OUTER axis, promoted the
+// unannotated params to rank-1 rows, and `real(z)` on a row was a clean
+// reject (steering to an elementwise map). Multi-axis co-iteration makes
+// the steer's target the DIRECT behavior: the zip spans the full Y×X
+// product, the params are SCALAR elements, and the complex accessors are
+// simply correct. Positive pin of the upgraded semantics.
+type Y = Idx<2>
+type X = Idx<3>
+let A: Array<Float64 like Y, X> = [[1.0, 2.0, 3.0], [4.0, 5.0, 6.0]]
+let ZC: Array<Complex128 like Y, X> = [[complex(1.0, 2.0), complex(3.0, 4.0), complex(5.0, 6.0)], [complex(7.0, 8.0), complex(9.0, 10.0), complex(11.0, 12.0)]]
+let good = method_for(zip(A, ZC)) <@> lambda(a, z) -> a * real(z) + imag(z) |> compute
+
+// EXPECT: good = [3, 10, 21, 36, 55, 78]

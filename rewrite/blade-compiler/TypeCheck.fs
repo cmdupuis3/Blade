@@ -799,6 +799,58 @@ let elemTypeForIterationIndex (idx: IRIndexType) : IRType =
     | _ ->
         IRTScalar ETInt64
 
+// ============================================================================
+// Co-iteration shape agreement (multi-axis co-iteration arc)
+// ============================================================================
+
+/// A plain dense rank-1 index record — the kind that can share a co-iteration
+/// product axis. Mirrors the isPlainDense predicate used by the fallback
+/// operator's operand checks.
+let isPlainDenseIx (ix: IRIndexType) : bool =
+    ix.IxKind = IxKPlain && ix.Symmetry = SymNone && ix.Rank <= 1
+
+/// Structural agreement of two index records for co-iteration purposes.
+/// Compares shape-bearing fields only — the nominal Id is EXCLUDED because
+/// every occurrence of an index type gets a fresh Id; two Array<F64 like
+/// Lat, Lon> annotations must agree.
+let indexRecordsAgree (a: IRIndexType) (b: IRIndexType) : bool =
+    a.Rank = b.Rank && a.Symmetry = b.Symmetry && a.IxKind = b.IxKind
+    && a.Kind = b.Kind && a.Tag = b.Tag && a.Extent = b.Extent
+
+/// Whole-shape agreement: same record count, records pairwise agree.
+let indexShapesAgree (xs: IRIndexType list) (ys: IRIndexType list) : bool =
+    xs.Length = ys.Length && List.forall2 indexRecordsAgree xs ys
+
+/// A record list co-iteration can span: exactly one record (dense rank-1 OR
+/// packed symmetric of any logical rank — walked as flat canonical cells), or
+/// several records ALL plain dense (the product space). Mixed dense+packed
+/// multi-record shapes are rejected — the packed record's triangular walk
+/// cannot interleave a foreign dense axis.
+let coIterableRecords (recs: IRIndexType list) : bool =
+    recs.Length = 1 || recs |> List.forall isPlainDenseIx
+
+/// Shared iteration records for a zip co-iteration, from the operands' array
+/// types. Single-record operands (dense rank-1, packed symmetric) keep the
+/// HISTORICAL first-record rule with no agreement check — byte-compatible
+/// with every pre-existing zip. Multi-record operands (dense rank ≥ 2) span
+/// the FULL product of records and require structural agreement + all-plain-
+/// dense records (mixed dense/packed multi-axis rejects).
+let zipSharedRecords (arrayTypes: IRArrayType list) : Result<IRIndexType list, TypeError> =
+    match arrayTypes with
+    | [] -> Ok []
+    | first :: rest ->
+        let shape0 = first.IndexTypes
+        let minRank = arrayTypes |> List.map (fun at -> at.IndexTypes.Length) |> List.min
+        if shape0.Length <= 1 || minRank <= 1 then
+            // Historical single-record rule (first array's first record).
+            Ok (if minRank > 0 then [shape0.Head] else [])
+        elif not (rest |> List.forall (fun at -> indexShapesAgree at.IndexTypes shape0)) then
+            Error (Other "co-iteration over multi-axis arrays requires all operands to have identical index shapes (same records: tags, extents, symmetry)")
+        elif not (coIterableRecords shape0) then
+            Error (Other "co-iteration spans one index record per operand (dense rank-1 or packed symmetric), or a product of plain-dense records; mixed dense/packed multi-axis shapes are not supported")
+        else
+            Ok shape0
+
 /// halo<Inner, offsets> slot construction — shared by the expression form
 /// (`method_for(halo<..>)`) and the range<> slot form (`range<halo<..>, ..>`).
 /// The offsets payload is either
@@ -1410,6 +1462,36 @@ let private checkArrayIndexTags (env: TypeEnv) (arrTy: IRArrayType) (tArgs: Type
     | None -> Ok ()
 
 /// Dispatch a typed function/array expression with typed args into either
+/// EnumIdx label subscript: a STRING LITERAL index into an axis whose index
+/// type is a registered EnumIdx folds to its ordinal HERE, so lowering,
+/// codegen, and the interpreter all see a plain constant subscript — the
+/// CSV headered-column access idiom `obs.vars.data[i, "temp"]`. The folded
+/// literal is retyped IRTIdxTagged so the nominal tag check accepts it.
+/// Deliberately restricted to STRING literals: int-valued EnumIdx keys are
+/// stored raw (foreign-key semantics, sql-foreign-keys corpus) and are not
+/// position-folded. An unknown label is a type error naming the available
+/// labels. Runtime (non-literal) label subscripts stay unsupported.
+let private foldEnumIdxLabels (env: TypeEnv) (arrTy: IRArrayType) (tArgs: TypedExpr list) : TypeResult<TypedExpr list> =
+    tArgs
+    |> List.mapi (fun i a ->
+        if i >= arrTy.IndexTypes.Length then Ok a
+        else
+            match a.Kind, arrTy.IndexTypes.[i].Tag with
+            | TExprLit (LitString s), Some tagName ->
+                (match Map.tryFind tagName env.TypeDefs with
+                 | Some (TDIEnumIdx (_, _, values, _)) ->
+                     (match values |> List.tryFindIndex ((=) (EVString s)) with
+                      | Some ord ->
+                          Ok { a with
+                                Kind = TExprLit (LitInt (int64 ord))
+                                Type = IRTIdxTagged (IRTScalar ETInt64, IRefNamed tagName) }
+                      | None ->
+                          let avail = values |> List.map (function EVString v -> v | EVInt n -> string n)
+                          Error (EnumIdxUnknownLabel (tagName, s, avail)))
+                 | _ -> Ok a)
+            | _ -> Ok a)
+    |> sequenceResults
+
 /// TExprIndex (array indexing) or TExprApp (function call), with nominal
 /// tag-checking on array slots. Shared between the general ExprApp handler
 /// and the method-call (ExprField) handler so that indexing through a
@@ -1538,6 +1620,8 @@ let rec private dispatchAppOrIndex (env: TypeEnv) (tFunc: TypedExpr) (tArgs: Typ
     | ArrayElem arrTy when tArgs.Length <= arrTy.IndexTypes.Length ->
         validateCompoundIndex env arrTy tArgs
         |> Result.bind (fun () ->
+        foldEnumIdxLabels env arrTy tArgs
+        |> Result.bind (fun tArgs ->
         checkArrayIndexTags env arrTy tArgs
         |> Result.bind (fun () ->
             let identity = match tFunc.Kind with TExprVar (_, _, id) -> id | _ -> None
@@ -1659,7 +1743,7 @@ let rec private dispatchAppOrIndex (env: TypeEnv) (tFunc: TypedExpr) (tArgs: Typ
             else
                 let remaining = arrTy.IndexTypes |> List.skip tArgs.Length
                 Ok (mkTyped (TExprIndex (tFunc, tArgs, identity))
-                            (mkArrayLike { arrTy with IndexTypes = remaining }))))
+                            (mkArrayLike { arrTy with IndexTypes = remaining })))))
     | FuncElem (paramTys, retTy) ->
         // IrrepsIdx strictness at DIRECT APPLICATION: plain function calls do
         // not unify parameter types against argument types (historically the
@@ -2066,9 +2150,19 @@ and inferExprInner (env: TypeEnv) (expr: Expr) : TypeResult<TypedExpr> =
                     Error (IntrinsicNotComplex name)
             | IRTScalar ETBool | IRTScalar ETString ->
                 Error (IntrinsicNeedsNumeric name)
+            | IRTInfer _ when isComplexMathIntrinsic name ->
+                // Unresolved operand (e.g. an unannotated kernel/lambda
+                // parameter): DEFER — the apply-site unification may later
+                // bind it to a COMPLEX element type (exp/log/sqrt/trig
+                // preserve complex), so pinning Float64 here would reject
+                // complex kernels. The node carries the operand's type
+                // variable; the kernel re-stamp in buildApplyInfo rewrites it
+                // to the resolved result type (complex-preserving, else
+                // Float64).
+                Ok (mkTyped (TExprUnaryOp (OpMath name, tArg)) tArg.Type)
             | IRTInfer _ ->
-                // Unresolved operand (e.g. an unannotated lambda parameter):
-                // pin it to Float64, the intrinsic's natural domain.
+                // floor/ceil have no complex overload — the operand really is
+                // real; pin it to Float64, the intrinsic's natural domain.
                 unify env.Subst tArg.Type (IRTScalar ETFloat64) |> Result.bind (fun () ->
                 Ok (mkTyped (TExprUnaryOp (OpMath name, tArg)) (IRTScalar ETFloat64)))
             | resolvedArg ->
@@ -2126,6 +2220,14 @@ and inferExprInner (env: TypeEnv) (expr: Expr) : TypeResult<TypedExpr> =
                 let resTy = if name = "arg" then IRTScalar ETFloat64 else IRTScalar ETFloat32
                 Ok (mkTyped (TExprUnaryOp (op, tArg)) resTy)
             | IRTScalar ETComplex128 ->
+                Ok (mkTyped (TExprUnaryOp (op, tArg)) (IRTScalar ETFloat64))
+            | IRTInfer _ ->
+                // Unresolved operand (unannotated kernel/lambda parameter):
+                // DEFER the complex requirement — the apply-site unification
+                // binds the param to the iterated element type. Result is
+                // provisionally Float64 (the Complex128-operand answer); the
+                // kernel re-stamp corrects the Complex64 width (-> Float32
+                // components).
                 Ok (mkTyped (TExprUnaryOp (op, tArg)) (IRTScalar ETFloat64))
             | ArrayElem _ ->
                 Error (IntrinsicComplexScalarOnly name)
@@ -3777,8 +3879,15 @@ and inferSequence (env: TypeEnv) exprs : TypeResult<TypedExpr> =
 and inferBinOp env mode op left right : TypeResult<TypedExpr> =
     match op with
     | OpApply ->
+        // A bare named-function reference on the kernel side (the right
+        // operand of <@>) is eta-expanded to lambda(__k..) -> f(__k..) so it
+        // matches the existing TExprLambda kernel arm in inferApply.
+        let rightResult =
+            match etaExpandFunctionKernel env right with
+            | Some r -> r
+            | None -> inferExpr env right
         inferExpr env left |> Result.bind (fun tL ->
-        inferExpr env right |> Result.bind (fun tR ->
+        rightResult |> Result.bind (fun tR ->
             inferApply env tL tR))
 
     | OpBind ->
@@ -3853,7 +3962,7 @@ and inferBinOp env mode op left right : TypeResult<TypedExpr> =
                     ArrayTypes = m1.ArrayTypes @ m2.ArrayTypes
                     SDimsPerArray = m1.SDimsPerArray @ m2.SDimsPerArray
                     TotalSDims = m1.TotalSDims + m2.TotalSDims
-                    SharedIndexType = None
+                    SharedIndexTypes = []
                 }
                 let loopTy = IRTLoop {
                     Kind = LKMethod
@@ -4036,15 +4145,23 @@ and inferBinOp env mode op left right : TypeResult<TypedExpr> =
             let elemUnits t =
                 match t with ArrayElem at -> IR.getUnits at.ElemType | _ -> None
             if mode = Elementwise && bothArrays && isZipOp then
-                // One index record per operand = zip-able: dense rank-1, or
-                // packed symmetry-class storage of any logical rank (the
-                // co-iteration walks its flat canonical cells). Multiple
-                // index records (dense multi-axis) exceed the zip builder —
-                // reject clearly rather than letting codegen emit a
-                // loop-object error.
-                let singleRecord t =
-                    match t with ArrayElem at -> at.IndexTypes.Length = 1 | _ -> false
-                if singleRecord lRes && singleRecord rRes then
+                // Zip-able operand shapes: one index record per operand (dense
+                // rank-1, or packed symmetry-class storage of any logical rank —
+                // the co-iteration walks its flat canonical cells), or BOTH
+                // operands multi-record all-plain-dense with structurally
+                // matching shapes (dense rank ≥ 2 — the co-iteration spans the
+                // full product of the shared records). Mismatched or mixed
+                // dense/packed multi-axis shapes reject clearly rather than
+                // letting codegen emit a loop-object error.
+                let zipable =
+                    match lRes, rRes with
+                    | ArrayElem aL, ArrayElem aR ->
+                        (aL.IndexTypes.Length = 1 && aR.IndexTypes.Length = 1)
+                        || (aL.IndexTypes |> List.forall isPlainDenseIx
+                            && aR.IndexTypes |> List.forall isPlainDenseIx
+                            && indexShapesAgree aL.IndexTypes aR.IndexTypes)
+                    | _ -> false
+                if zipable then
                     match unitRulesForOp op (elemUnits lRes) (elemUnits rRes) with
                     | Error e -> Error e
                     | Ok resUnits ->
@@ -4055,7 +4172,7 @@ and inferBinOp env mode op left right : TypeResult<TypedExpr> =
                         let synth = mkExpr sp (ExprCompute (mkExpr sp (ExprBinOp (Elementwise, OpApply, kzip, klam))))
                         inferExpr env synth |> Result.map (stampElemUnits env resUnits)
                 else
-                    Error (Other "elementwise operators on multi-axis arrays are deferred: co-iteration currently spans one index record per operand (dense rank-1 or packed symmetric storage)")
+                    Error (Other "elementwise operators on multi-axis arrays require both operands to have matching plain-dense index shapes (same axis tags and extents); mixed dense/packed or mismatched shapes are not zip-able")
             else
             // Elementwise op on ARRAY <-> SCALAR (`A + a`, `2.0 / A`,
             // `A > t`): re-synthesize as a 1-param kernel map over the array
@@ -4475,6 +4592,53 @@ and resolveTypedExpr (env: TypeEnv) (texpr: TypedExpr) : TypedExpr =
         | None -> texpr
     | _ -> texpr
 
+/// Eta-expand a bare named-function reference used in KERNEL position:
+///   lkm  ==>  lambda(__k0..__kn) -> lkm(__k0..__kn)
+/// A top-level `function` is bound with TypedValue = None (bindVarSimple),
+/// so resolveTypedExpr can never surface it as a TExprLambda — hence
+/// `method_for(...) <@> lkm` and `object_for(lkm)` never match a kernel arm.
+/// This mirrors the prefix partial-application eta-expansion (the FuncElem
+/// arm of the ExprApp case) but for the 0-args case that path deliberately
+/// excludes, so the synthesized lambda rides the entire existing lambda
+/// pipeline (captures, lifting, std::function emission, kernel wrappers).
+/// Returns None when `kernelExpr` is not a bare function reference — callers
+/// then fall back to their ordinary `inferExpr env kernelExpr`. Gated to
+/// kernel positions only, so bare function VALUES elsewhere are unaffected.
+and etaExpandFunctionKernel (env: TypeEnv) (kernelExpr: Expr) : TypeResult<TypedExpr> option =
+    match kernelExpr.Kind with
+    | ExprKind.ExprVar name ->
+        match lookupVar name env with
+        // TypedValue = None is exactly the case resolveTypedExpr cannot turn
+        // into a lambda: a top-level `function` (bindVarSimple) or a
+        // function-typed parameter. A let-bound `lambda` carries
+        // TypedValue = Some and MUST keep its existing resolve-at-apply path
+        // (eta-wrapping it would turn the lambda into a std::function capture
+        // and break compose chains like `object_for(f) >>@ object_for(g)`).
+        | Some info when Option.isNone info.TypedValue ->
+            match env.Subst.Resolve info.Type with
+            | FuncElem (paramTys, retTy)
+                    when not paramTys.IsEmpty
+                         && not (paramTys |> List.exists (fun t -> match env.Subst.Resolve t with IRTPoly _ -> true | _ -> false)) ->
+                let uid = env.Builder.FreshId()
+                let names = paramTys |> List.mapi (fun i _ -> sprintf "__k%d_%d" uid i)
+                let lamParams = names |> List.map (fun n -> { Name = n; Type = None } : LambdaParam)
+                let bodyApp =
+                    inheritSpan kernelExpr
+                        (ExprApp (kernelExpr, names |> List.map (fun n -> inheritSpan kernelExpr (ExprVar n))))
+                Some (
+                    inferLambda env lamParams None bodyApp
+                    |> Result.bind (fun tLam ->
+                        // Pin the residual param types to the callee's declared
+                        // ones: direct application keeps its historical looseness
+                        // (no param-vs-arg unification), mirroring the prefix
+                        // partial-application eta-expansion.
+                        unify env.Subst tLam.Type (mkFuncArrow paramTys retTy)
+                        |> Result.map (fun () -> tLam)))
+            | _ -> None
+        | Some _ -> None   // let-bound value (lambda etc.): use the existing path
+        | None -> None
+    | _ -> None
+
 /// Pick the zero literal for an element type. ETIndexRef _ requires looking up
 /// the alias in env.TypeDefs: a string-valued EnumIdx needs LitString "" (the
 /// empty string is the natural zero for std::string), an int-valued EnumIdx
@@ -4497,7 +4661,7 @@ and inferApply (env: TypeEnv) (tLeft: TypedExpr) (tRight: TypedExpr) : TypeResul
 
     match rL.Kind, rR.Kind with
     | TExprMethodFor mfInfo, TExprLambda lambdaInfo ->
-        buildApplyInfo env mfInfo.Arrays mfInfo.Identities mfInfo.ArrayTypes mfInfo.SDimsPerArray mfInfo.SharedIndexType lambdaInfo tLeft tRight false false
+        buildApplyInfo env mfInfo.Arrays mfInfo.Identities mfInfo.ArrayTypes mfInfo.SDimsPerArray mfInfo.SharedIndexTypes lambdaInfo tLeft tRight false false
 
     | TExprMethodFor mfInfo, TExprSection op ->
         // Synthesize a TypedLambdaInfo from the operator section
@@ -4518,12 +4682,12 @@ and inferApply (env: TypeEnv) (tLeft: TypedExpr) (tRight: TypedExpr) : TypeResul
             Captures = []; IsCommutative = isComm
             Parallel = []  // synthesized (operator section): no user clause
         }
-        buildApplyInfo env mfInfo.Arrays mfInfo.Identities mfInfo.ArrayTypes mfInfo.SDimsPerArray mfInfo.SharedIndexType lambdaInfo tLeft tRight false false
+        buildApplyInfo env mfInfo.Arrays mfInfo.Identities mfInfo.ArrayTypes mfInfo.SDimsPerArray mfInfo.SharedIndexTypes lambdaInfo tLeft tRight false false
 
     | TExprMethodFor mfInfo, TExprReynolds (innerKernel, isReynoldsAntisym) ->
         let resolvedInner = resolveTypedExpr env innerKernel
         match resolvedInner.Kind with
-        | TExprLambda li -> buildApplyInfo env mfInfo.Arrays mfInfo.Identities mfInfo.ArrayTypes mfInfo.SDimsPerArray mfInfo.SharedIndexType li tLeft tRight true isReynoldsAntisym
+        | TExprLambda li -> buildApplyInfo env mfInfo.Arrays mfInfo.Identities mfInfo.ArrayTypes mfInfo.SDimsPerArray mfInfo.SharedIndexTypes li tLeft tRight true isReynoldsAntisym
         | _ -> Error (Other "reynolds() requires a lambda kernel, but the inner expression could not be resolved to a lambda")
 
     | TExprMethodFor mfInfo, TExprZero ->
@@ -4561,7 +4725,7 @@ and inferApply (env: TypeEnv) (tLeft: TypedExpr) (tRight: TypedExpr) : TypeResul
             Parallel = []  // synthesized (zero kernel): no user clause
         }
         let tZeroKernel = mkTyped (TExprLambda lambdaInfo) (IRTScalar elemType)
-        buildApplyInfo env mfInfo.Arrays mfInfo.Identities mfInfo.ArrayTypes mfInfo.SDimsPerArray mfInfo.SharedIndexType lambdaInfo tLeft tZeroKernel false false
+        buildApplyInfo env mfInfo.Arrays mfInfo.Identities mfInfo.ArrayTypes mfInfo.SDimsPerArray mfInfo.SharedIndexTypes lambdaInfo tLeft tZeroKernel false false
 
     // object_for(<combinator>) <@> (c1, c2, ...) → left-fold or map+combine
     | TExprObjectFor objInfo, _ when
@@ -4647,7 +4811,7 @@ and inferApply (env: TypeEnv) (tLeft: TypedExpr) (tRight: TypedExpr) : TypeResul
         let hasZip = resolvedExprs |> List.exists (fun e ->
             match e.Kind with TExprZip _ -> true | _ -> false)
 
-        let (flatArrays, sharedIdx) =
+        let (flatArrays, sharedRecords) =
             if hasZip then
                 let mutable arrays : TypedExpr list = []
                 let mutable isCoIterGroup : bool list = []
@@ -4664,13 +4828,23 @@ and inferApply (env: TypeEnv) (tLeft: TypedExpr) (tRight: TypedExpr) : TypeResul
                     | ArrayElem at -> at
                     | _ -> { ElemType = IRTScalar ETFloat64; IndexTypes = []; IsVirtual = false; Identity = None })
                 let allCoIter = isCoIterGroup |> List.forall id
-                let idx =
+                let recs =
                     if allCoIter then
-                        let minRank = arrTypes |> List.map (fun at -> at.IndexTypes.Length) |> List.min
-                        if minRank > 0 then Some arrTypes.[0].IndexTypes.[0] else None
-                    else None
-                (arrays, idx)
-            else (rawExprs, None)
+                        // Shared records: the FULL common index shape when the
+                        // operands agree and the shape is co-iterable (all plain
+                        // dense, or a single packed record); the historical
+                        // first-record-only fallback otherwise (buildApplyInfo's
+                        // row-rank trim keeps row-mode kernels working either way).
+                        match arrTypes with
+                        | first :: rest when not first.IndexTypes.IsEmpty ->
+                            let shape0 = first.IndexTypes
+                            if rest |> List.forall (fun at -> indexShapesAgree at.IndexTypes shape0)
+                               && coIterableRecords shape0 then shape0
+                            else [shape0.Head]
+                        | _ -> []
+                    else []
+                (arrays, recs)
+            else (rawExprs, [])
 
         let identities = flatArrays |> List.map (fun arr ->
             match arr.Kind with
@@ -4680,20 +4854,22 @@ and inferApply (env: TypeEnv) (tLeft: TypedExpr) (tRight: TypedExpr) : TypeResul
             match arr.Type with
             | ArrayElem at -> at
             | _ -> { ElemType = IRTScalar ETFloat64; IndexTypes = []; IsVirtual = false; Identity = None })
-        let sDimsPerArray =
-            if sharedIdx.IsSome then arrayTypes |> List.map (fun _ -> 1)
-            else computeSDimsPerArray arrayTypes
+        // Real per-array S-dim counts in BOTH modes: the co-iteration case needs
+        // them so buildApplyInfo's IRTInfer fallback computes the kernel slice
+        // rank against the true array rank (a scalar kernel over rank-2 zips
+        // must yield kR = 0 → full-product co-iteration, not a mis-trim).
+        let sDimsPerArray = computeSDimsPerArray arrayTypes
 
         // Resolve kernel and build ApplyInfo with object_for as provenance
         let resolvedKernel = resolveTypedExpr env objInfo.Kernel
         match resolvedKernel.Kind with
         | TExprLambda lambdaInfo ->
-            buildApplyInfo env flatArrays identities arrayTypes sDimsPerArray sharedIdx lambdaInfo tLeft objInfo.Kernel false false
+            buildApplyInfo env flatArrays identities arrayTypes sDimsPerArray sharedRecords lambdaInfo tLeft objInfo.Kernel false false
         | TExprReynolds (innerK, isReynoldsAntisym) ->
             let resolvedInnerK = resolveTypedExpr env innerK
             match resolvedInnerK.Kind with
             | TExprLambda li ->
-                buildApplyInfo env flatArrays identities arrayTypes sDimsPerArray sharedIdx li tLeft objInfo.Kernel true isReynoldsAntisym
+                buildApplyInfo env flatArrays identities arrayTypes sDimsPerArray sharedRecords li tLeft objInfo.Kernel true isReynoldsAntisym
             | _ -> Error (Other "reynolds() requires a lambda kernel, but the inner expression could not be resolved to a lambda")
         | TExprZero ->
             // object_for(zero) <@> arrays: synthesize zero-returning lambda
@@ -4727,7 +4903,7 @@ and inferApply (env: TypeEnv) (tLeft: TypedExpr) (tRight: TypedExpr) : TypeResul
                 Captures = []; IsCommutative = true
                 Parallel = []  // synthesized (object_for zero kernel): no clause
             }
-            buildApplyInfo env flatArrays identities arrayTypes sDimsPerArray sharedIdx lambdaInfo tLeft (mkTyped (TExprLambda lambdaInfo) (IRTScalar elemType)) false false
+            buildApplyInfo env flatArrays identities arrayTypes sDimsPerArray sharedRecords lambdaInfo tLeft (mkTyped (TExprLambda lambdaInfo) (IRTScalar elemType)) false false
         | _ -> Error (ObjectForKernel (resolvedKernel.Kind.GetType().Name))
 
     // Composed ObjectLoop: (o1 >>@ o2) <@> A
@@ -4747,7 +4923,7 @@ and inferApply (env: TypeEnv) (tLeft: TypedExpr) (tRight: TypedExpr) : TypeResul
                 match a.Type with
                 | ArrayElem at -> at
                 | _ -> { ElemType = IRTScalar ETFloat64; IndexTypes = []; IsVirtual = false; Identity = None })
-            SharedIndexType = None
+            SharedIndexTypes = []
             SymcomStates = []; TriangularLevels = []
             SDimsPerArray = []
             KernelInputRanks = []; KernelOutputRank = 0
@@ -4760,22 +4936,63 @@ and inferApply (env: TypeEnv) (tLeft: TypedExpr) (tRight: TypedExpr) : TypeResul
         Ok (mkTyped (TExprApply info) outputType)
 
     | _ ->
-        let leftDesc = 
-            match rL.Kind with
+        // Name the real culprit. When the LEFT already is a valid
+        // method_for/object_for, the unmatched operand is the RIGHT (the
+        // kernel) — reporting the left here is what produced the historical
+        // "requires method_for … but got TExprMethodFor" red herring.
+        let describeKind (k: TypedExprKind) =
+            match k with
             | TExprVar (name, _, _) -> sprintf "variable '%s'" name
-            | _ -> sprintf "%A" (rL.Kind.GetType().Name)
-        Error (ChainOpNeedsMethodFor leftDesc)
+            | _ -> k.GetType().Name.Replace("TExpr", "")
+        match rL.Kind with
+        | TExprMethodFor _ | TExprObjectFor _ ->
+            Error (ChainOpBadKernel (describeKind rR.Kind))
+        | _ ->
+            Error (ChainOpNeedsMethodFor (describeKind rL.Kind))
 
 and buildApplyInfo (env: TypeEnv)
     (arrays: TypedExpr list) (identities: ArrayIdentity list)
     (arrayTypes: IRArrayType list) (sDimsPerArray: int list)
-    (sharedIndexType: IRIndexType option)
+    (sharedIndexTypes: IRIndexType list)
     (lambdaInfo: TypedLambdaInfo)
     (tLoop: TypedExpr) (tKernel: TypedExpr)
     (isReynolds: bool) (isReynoldsAntisym: bool)
     : TypeResult<TypedExpr> =
 
     let commGroups = lambdaInfo.CommGroups
+
+    // Co-iteration INDEX-PARAM form: a co-iterated kernel may declare
+    // N + R parameters — one value per co-iterated array plus the R shared
+    // iteration indices — e.g. `for (uq, ph) in range<Y, X> <@>
+    // lambda(zu, zp, i, j) -> ...`. The indices ride as a TRAILING synthetic
+    // range<...> operand over the shared records: expandedRows then expands
+    // it to one tagged Nat<...> param per slot (unifying + tag-checking the
+    // index params exactly like an explicit range<> source), and the loop
+    // builder's VirtualRange elements bind them to the loop indices. The
+    // virtual operand is appended LAST so the value params keep their
+    // positions. Values-only kernels (arity N) are untouched, as is every
+    // non-co-iteration apply.
+    let (arrays, identities, arrayTypes, sDimsPerArray) =
+        let idxParamCount = sharedIndexTypes |> List.sumBy (fun r -> r.Rank)
+        let alreadyVirtual = arrayTypes |> List.exists (fun at -> at.IsVirtual)
+        if not sharedIndexTypes.IsEmpty
+           && idxParamCount > 0
+           && not alreadyVirtual
+           && lambdaInfo.Params.Length = arrays.Length + idxParamCount then
+            let elemT =
+                match List.tryLast sharedIndexTypes with
+                | Some i -> elemTypeForIterationIndex i
+                | None -> IRTScalar ETInt64
+            let vExpr = mkTyped (TExprRange sharedIndexTypes) (mkVirtualArrayArrow sharedIndexTypes elemT)
+            let vAt =
+                match vExpr.Type with
+                | ArrayElem at -> at
+                | _ -> { ElemType = elemT; IndexTypes = sharedIndexTypes; IsVirtual = true; Identity = None }
+            (arrays @ [vExpr],
+             identities @ [AIDLiteral (env.Builder.FreshId())],
+             arrayTypes @ [vAt],
+             sDimsPerArray @ [idxParamCount])
+        else (arrays, identities, arrayTypes, sDimsPerArray)
 
     // Phase 2 (Gap 2.5 fix): resolve param types through Subst before
     // reading rank. A kernel param may have started as IRTInfer at lambda
@@ -4987,6 +5204,41 @@ and buildApplyInfo (env: TypeEnv)
     match kernelParamUnifyResult with
     | Error e -> Error e
     | Ok () ->
+        // Reject unsupported / miscompiling kernel-body shapes now that the
+        // params are bound to the iterated element/row types.
+        //
+        // (1) Complex accessor on a ROW param: `real(z)`/`imag(z)`/`arg(z)`
+        //     whose operand unified to an ARRAY (e.g. a zip row). Such an
+        //     accessor was DEFERRED at body-inference time — the operand was
+        //     still an unresolved infer var, so it typed as a scalar Float64
+        //     without constraining the operand (see the IRTInfer arm of the
+        //     accessor intrinsics). Lowering then synthesized an array<->scalar
+        //     broadcast kernel embedding the uncaptured param, giving an IR
+        //     dangling-VarId (BL6001). Re-check here and steer to a scalar-per-
+        //     element map, exactly as the resolved-array operand already does.
+        //
+        // (2) Array-valued ELEMENTWISE kernel body: `ra * rb` between two row
+        //     params re-synthesizes (inferBinOp both-array arm) into a nested
+        //     compute(method_for(zip ...)) with output rank >= 1. In expression
+        //     position codegen collapses it to (sum ra)(sum rb) — a silent
+        //     miscompile. A bare array-param passthrough (`lambda(row) -> row`,
+        //     Kind = TExprVar) is fine and untouched. Reject and steer to a
+        //     scalar row reduction (prodsum/reduce).
+        let rec findBadComplexAccessor (e: TypedExpr) : string option =
+            match e.Kind with
+            | TExprUnaryOp ((OpReal | OpImag | OpArg) as op, operand)
+                    when (match env.Subst.Resolve operand.Type with ArrayElem _ -> true | _ -> false) ->
+                Some (match op with OpReal -> "real" | OpImag -> "imag" | _ -> "arg")
+            | _ -> typedExprChildren e |> List.tryPick findBadComplexAccessor
+        let arrayValuedComputeBody =
+            kernelOutputRank >= 1 &&
+            (match lambdaInfo.Body.Kind with TExprCompute _ -> true | _ -> false)
+        match findBadComplexAccessor lambdaInfo.Body with
+        | Some name -> Error (IntrinsicComplexScalarOnly name)
+        | None ->
+        if arrayValuedComputeBody then
+            Error (Other "array-valued elementwise kernel body is not supported inside a kernel; reduce the row to a scalar with prodsum or reduce, or compute the elementwise product at top level")
+        else
         // After param-type unification, inference variables that flowed into
         // the body's TExprIndex sites may now resolve to nominally-tagged
         // types (e.g., `r` in `lambda(r) -> by_country(r)` is unified with
@@ -5011,8 +5263,104 @@ and buildApplyInfo (env: TypeEnv)
                 | Some u -> IRTUnitAnnotated (bare, u)
                 | None -> bare
             | _ -> t
+        // Post-unification COMPLEX re-stamp. The kernel body was typed while
+        // its params were still unresolved inference variables, so scalar
+        // promotion against a concrete real collapsed prematurely to the real
+        // side: `lambda(z) -> z * 2.0` over a complex array stamped Float64
+        // on the binop (and hence the return/output elem) because z had not
+        // yet unified with Complex128. Now that the params ARE unified, redo
+        // the promotion bottom-up with resolved operand types. Conservative
+        // by construction: a node is re-stamped ONLY when the recomputed
+        // element type is complex and the stamped one is a real scalar —
+        // every non-complex kernel re-stamps to itself unchanged.
+        let restampedBody =
+            let elemOfType (ty: IRType) : ElemType option =
+                match IR.stripUnits (env.Subst.Resolve ty) with
+                | IRTScalar et -> Some et
+                | _ -> None
+            let isComplexElem = function ETComplex64 | ETComplex128 -> true | _ -> false
+            let isRealScalar = function
+                | Some (ETFloat32 | ETFloat64 | ETInt32 | ETInt64) -> true
+                | _ -> false
+            // Upgrade a node's scalar type, preserving a unit-annotation wrapper.
+            let withElem (node: TypedExpr) (et: ElemType) : TypedExpr =
+                let newTy =
+                    match node.Type with
+                    | IRTUnitAnnotated (_, u) -> IRTUnitAnnotated (IRTScalar et, u)
+                    | _ -> IRTScalar et
+                { node with Type = newTy }
+            // Upgrade `node` iff its stamp is a real scalar and `computed` is
+            // complex; otherwise keep it (byte-identical for real kernels).
+            let maybeUpgrade (node: TypedExpr) (computed: ElemType option) : TypedExpr =
+                match computed, elemOfType node.Type with
+                | Some ce, cur when isComplexElem ce && isRealScalar cur -> withElem node ce
+                | _ -> node
+            let rec walk (t: TypedExpr) : TypedExpr =
+                match t.Kind with
+                | TExprBinOp (bmode, ((OpAdd | OpSub | OpMul | OpDiv | OpCaret) as bop), l, r) ->
+                    let l2, r2 = walk l, walk r
+                    let node = { t with Kind = TExprBinOp (bmode, bop, l2, r2) }
+                    match elemOfType l2.Type, elemOfType r2.Type with
+                    | Some le, Some re ->
+                        match IR.promoteElemType le re with
+                        | Some pe when isComplexElem pe -> maybeUpgrade node (Some pe)
+                        | _ -> node
+                    | _ -> node
+                | TExprUnaryOp (((OpNeg | OpConj) as uop), e) ->
+                    let e2 = walk e
+                    let node = { t with Kind = TExprUnaryOp (uop, e2) }
+                    maybeUpgrade node (elemOfType e2.Type)
+                | TExprUnaryOp (OpMath name, e) ->
+                    let e2 = walk e
+                    let node = { t with Kind = TExprUnaryOp (OpMath name, e2) }
+                    match name, elemOfType e2.Type with
+                    // abs of a complex is the real magnitude: correct a
+                    // deferred stamp (the operand's variable, now resolved
+                    // complex) to Float64.
+                    | "abs", Some (ETComplex64 | ETComplex128) ->
+                        (match elemOfType node.Type with
+                         | Some ETFloat64 -> node
+                         | _ -> withElem node ETFloat64)
+                    | "abs", _ -> node
+                    // Transcendentals preserve a complex operand's type.
+                    | _, Some ((ETComplex64 | ETComplex128) as ce) ->
+                        maybeUpgrade node (Some ce)
+                    // Deferred REAL operand (see the intrinsic's IRTInfer
+                    // arm): the real intrinsics are Float64-valued.
+                    | _, Some (ETInt32 | ETInt64 | ETFloat32 | ETFloat64) ->
+                        (match elemOfType node.Type with
+                         | Some ETFloat64 -> node
+                         | _ -> withElem node ETFloat64)
+                    | _ -> node
+                | TExprUnaryOp (((OpReal | OpImag) as uop), e) ->
+                    // Deferred-width correction: real/imag of a Complex64
+                    // yield Float32 components (the deferred arm stamped the
+                    // Complex128 answer, Float64).
+                    let e2 = walk e
+                    let node = { t with Kind = TExprUnaryOp (uop, e2) }
+                    (match elemOfType e2.Type, elemOfType node.Type with
+                     | Some ETComplex64, Some ETFloat64 -> withElem node ETFloat32
+                     | _ -> node)
+                | TExprIf (c, a, b) ->
+                    let a2, b2 = walk a, walk b
+                    let node = { t with Kind = TExprIf (c, a2, b2) }
+                    match elemOfType a2.Type, elemOfType b2.Type with
+                    | Some le, Some re -> maybeUpgrade node (IR.promoteElemType le re)
+                    | _ -> node
+                | TExprLet (name, vid, value, body) ->
+                    let v2, b2 = walk value, walk body
+                    let node = { t with Kind = TExprLet (name, vid, v2, b2) }
+                    maybeUpgrade node (elemOfType b2.Type)
+                | _ -> t
+            walk lambdaInfo.Body
         let outputElemType =
-            let resolved = env.Subst.Resolve(lambdaInfo.ReturnType)
+            let resolved =
+                let r = env.Subst.Resolve(lambdaInfo.ReturnType)
+                // Adopt the re-stamped body's complex type when the collapse
+                // hit the return type too.
+                match IR.stripUnits r, IR.stripUnits restampedBody.Type with
+                | IRTScalar (ETFloat32 | ETFloat64 | ETInt32 | ETInt64), (IRTScalar (ETComplex64 | ETComplex128) as ct) -> ct
+                | _ -> r
             match resolved with
             | IRTScalar _ as t -> restampScalar t                  // stamp walk-computed units
             | ArrayElem arr -> arr.ElemType                         // already IRType
@@ -5058,7 +5406,15 @@ and buildApplyInfo (env: TypeEnv)
                 Params =
                     lambdaInfo.Params |> List.map (fun p ->
                         { p with Type = env.Subst.Resolve p.Type })
-                ReturnType = env.Subst.Resolve lambdaInfo.ReturnType }
+                // The complex re-stamp above must flow into the lifted lambda
+                // too: with a stale Float64 stamp the lifted C++ function
+                // would declare a double return around a std::complex body.
+                Body = restampedBody
+                ReturnType =
+                    let r = env.Subst.Resolve lambdaInfo.ReturnType
+                    match IR.stripUnits r, IR.stripUnits restampedBody.Type with
+                    | IRTScalar (ETFloat32 | ETFloat64 | ETInt32 | ETInt64), (IRTScalar (ETComplex64 | ETComplex128) as ct) -> ct
+                    | _ -> r }
 
         // Store the kernel with resolved types in the typed AST. Lowering
         // walks this typed lambda and emits a lifted IRCallable referenced
@@ -5068,19 +5424,35 @@ and buildApplyInfo (env: TypeEnv)
             if isReynolds then mkTyped (TExprReynolds (lambdaExpr, isReynoldsAntisym)) tKernel.Type
             else lambdaExpr
 
-        let isCoIter = sharedIndexType.IsSome
-        // For co-iteration, output type is array with shared index (not outer product)
+        // Co-iterated records = the leading (nRecords − kernelSliceRank) shared
+        // records; the kernel consumes the trailing kernelSliceRank records as a
+        // per-iteration slice. This one trim serves all three shapes uniformly:
+        //   - scalar kernel (A op B, for (A,B) in range<I,J>): kR = 0 → the FULL
+        //     product of records is co-iterated (multi-axis, the new case);
+        //   - row-mode kernel (loops/085: lambda(ra: Array<X>, rb: Array<X>)):
+        //     kR = 1 → only the outer record(s) co-iterate, the inner record
+        //     rides into the kernel as a rank-1 slice (historical behavior);
+        //   - single packed record (SymIdx co-iteration): kR = 0 → that record,
+        //     walked as its Rank flat canonical levels (historical behavior).
+        // Operand shape agreement is enforced where the records are collected
+        // (zip arms / for-in), so kernelInputRanks.[0] is representative.
+        let coIterSharedRecords =
+            match sharedIndexTypes with
+            | [] -> []
+            | full ->
+                let kR = kernelInputRanks |> List.tryHead |> Option.defaultValue 0
+                let nShared = full.Length - kR
+                if nShared <= 0 then [] else full |> List.truncate nShared
+        let isCoIter = not (List.isEmpty coIterSharedRecords)
+        // For co-iteration, output type spans the co-iterated records (not the
+        // operands' outer product).
         let outputType =
-            if isCoIter then
-                match sharedIndexType with
-                | Some sharedIdx ->
-                    mkArrayArrow [sharedIdx] outputElemType None
-                | None -> outputType
+            if isCoIter then mkArrayArrow coIterSharedRecords outputElemType None
             else outputType
         let info : TypedApplyInfo = {
             Loop = tLoop; Kernel = resolvedKernel
             Arrays = arrays; Identities = identities
-            ArrayTypes = gridArrayTypes; SharedIndexType = sharedIndexType
+            ArrayTypes = gridArrayTypes; SharedIndexTypes = coIterSharedRecords
             SymcomStates = states; TriangularLevels = triLevels
             // Grid S-dim count from the fiber-retagged array types (consumed
             // fiber dims are now TDimension, excluded from the count). Matches
@@ -5091,7 +5463,7 @@ and buildApplyInfo (env: TypeEnv)
             KernelTDims = kernelTDims
             SpeedupFactor = speedup; ReynoldsSpeedup = reynoldsSpeedup
             HasReynolds = isReynolds; OutputType = outputType
-            IsCoIteration = isCoIter
+            IsCoIteration = isCoIter  // derived: non-empty co-iterated records
             IsComposeApply = false
         }
         Ok (mkTyped (TExprApply info) outputType)))
@@ -5770,19 +6142,27 @@ and inferMethodFor env arrays : TypeResult<TypedExpr> =
                 match ta.Type with
                 | ArrayElem at -> at
                 | _ -> getArrayType env zipExprs.[i])
-            // Shared index type: intersection of prefix indices (use first array's indices,
-            // with extent = min of all arrays at that position)
-            let minRank = arrayTypes |> List.map (fun at -> at.IndexTypes.Length) |> List.min
-            let sharedIdx =
-                if minRank > 0 then Some arrayTypes.[0].IndexTypes.[0]
-                else None
-            let sDimsPerArray = arrayTypes |> List.map (fun _ -> 1)  // Each contributes 1 s-dim (shared)
+            // Shared iteration records. Single-record operands (dense rank-1 or
+            // packed symmetric) keep the historical first-record rule unchecked.
+            // MULTI-record operands (dense rank ≥ 2) co-iterate the FULL product
+            // of records — all operands must agree structurally and every record
+            // must be plain dense. buildApplyInfo trims the co-iterated prefix
+            // by the kernel's slice rank, so row-mode kernels (loops/085) keep
+            // receiving their inner-record slice.
+            match zipSharedRecords arrayTypes with
+            | Error e -> Error e
+            | Ok sharedRecords ->
+            // Real per-array S-dim counts: buildApplyInfo's IRTInfer fallback
+            // computes the kernel slice rank as (records − sDims); a scalar
+            // kernel over rank-2 operands must see kR = 0 (full product), which
+            // the historical per-array 1 would mis-trim to row mode.
+            let sDimsPerArray = computeSDimsPerArray arrayTypes
             let totalSDims = List.sum sDimsPerArray
 
             let info : TypedMethodForInfo = {
                 Arrays = tZipArrays; Identities = identities; ArrayTypes = arrayTypes
                 SDimsPerArray = sDimsPerArray; TotalSDims = totalSDims
-                SharedIndexType = sharedIdx
+                SharedIndexTypes = sharedRecords
             }
             let loopTy = IRTLoop {
                 Kind = LKMethod; Arity = Some zipExprs.Length
@@ -5805,16 +6185,15 @@ and inferMethodFor env arrays : TypeResult<TypedExpr> =
                     match te.Type with
                     | ArrayElem at -> at
                     | _ -> { ElemType = IRTScalar ETFloat64; IndexTypes = []; IsVirtual = false; Identity = None })
-                let minRank = arrayTypes |> List.map (fun at -> at.IndexTypes.Length) |> List.min
-                let sharedIdx =
-                    if minRank > 0 then Some arrayTypes.[0].IndexTypes.[0]
-                    else None
-                let sDimsPerArray = arrayTypes |> List.map (fun _ -> 1)
+                match zipSharedRecords arrayTypes with
+                | Error e -> Error e
+                | Ok sharedRecords ->
+                let sDimsPerArray = computeSDimsPerArray arrayTypes
                 let totalSDims = List.sum sDimsPerArray
                 let info : TypedMethodForInfo = {
                     Arrays = zipExprs; Identities = identities; ArrayTypes = arrayTypes
                     SDimsPerArray = sDimsPerArray; TotalSDims = totalSDims
-                    SharedIndexType = sharedIdx
+                    SharedIndexTypes = sharedRecords
                 }
                 let loopTy = IRTLoop {
                     Kind = LKMethod; Arity = Some zipExprs.Length
@@ -5835,7 +6214,7 @@ and inferMethodFor env arrays : TypeResult<TypedExpr> =
         let info : TypedMethodForInfo = {
             Arrays = tArrays; Identities = identities; ArrayTypes = arrayTypes
             SDimsPerArray = sDimsPerArray; TotalSDims = totalSDims
-            SharedIndexType = None
+            SharedIndexTypes = []
         }
         let loopTy = IRTLoop {
             Kind = LKMethod; Arity = Some arrays.Length
@@ -5844,7 +6223,14 @@ and inferMethodFor env arrays : TypeResult<TypedExpr> =
         Ok (mkTyped (TExprMethodFor info) loopTy))
 
 and inferObjectFor env kernel : TypeResult<TypedExpr> =
-    inferExpr env kernel |> Result.bind (fun tKernel ->
+    // A bare named-function reference used as an object_for kernel is
+    // eta-expanded to lambda(__k..) -> f(__k..), so `object_for(lkm) <@> ...`
+    // works symmetrically with `method_for(...) <@> lkm`.
+    let kernelResult =
+        match etaExpandFunctionKernel env kernel with
+        | Some r -> r
+        | None -> inferExpr env kernel
+    kernelResult |> Result.bind (fun tKernel ->
         let (commGroups, inputRanks, outputRank) =
             match tKernel.Kind with
             | TExprLambda info ->
@@ -6175,27 +6561,37 @@ and inferForExpr env source kernelOpt : TypeResult<TypedExpr> =
             // stored array, zip, or loop object is rejected here: co-iterating
             // stored arrays is `for (A, B)` with no `in` clause (≡
             // method_for(A, B)); zipping them is method_for(zip(A, B)).
-            let sharedIdxRes =
+            let sharedRecordsRes =
                 match env.Subst.Resolve(tVirtual.Type) with
-                | ArrayElem at when at.IsVirtual && at.IndexTypes.Length > 0 -> Ok at.IndexTypes.[0]
+                | ArrayElem at when at.IsVirtual && at.IndexTypes.Length > 0 ->
+                    // ALL of the in-clause's slots become shared iteration
+                    // records — `for (A, B) in range<Lat, Lon>` co-iterates the
+                    // full Lat×Lon product space. Multi-slot spaces require
+                    // every slot plain dense (a sole packed/compound slot is
+                    // fine — its Rank levels walk the flat canonical cells).
+                    if coIterableRecords at.IndexTypes then Ok at.IndexTypes
+                    else Error (Other "for (...) in range<...>: a multi-slot iteration space must consist of plain dense index types (a packed or compound slot cannot share the product with other slots)")
                 | resolved ->
                     Error (Other (sprintf "the `in` clause of `for (...) in <source>` must be a virtual array (range<...>, reverse<...>, or blocked<...>) — it supplies the shared iteration index; got %s. Drop the `in` clause to co-iterate stored arrays (for (A, B) ≡ method_for(A, B)), or use method_for(zip(A, B)) to zip them." (ppIRType resolved)))
-            sharedIdxRes |> Result.bind (fun sharedIdx ->
+            sharedRecordsRes |> Result.bind (fun sharedRecords ->
 
             let identities = arrays |> List.map (fun arr ->
                 match arr.Kind with ExprKind.ExprVar name -> AIDVariable name | _ -> AIDLiteral (env.Builder.FreshId()))
-            // For co-iteration, all arrays use the shared index type
+            // For co-iteration, all arrays use the shared index space
             let arrayTypes = tArrays |> List.mapi (fun i ta ->
                 match ta.Type with
                 | ArrayElem at -> at
                 | _ -> getArrayType env arrays.[i])
-            let sDimsPerArray = arrayTypes |> List.map (fun _ -> 1)  // Each contributes 1 s-dim (shared)
+            // Real per-array S-dim counts (see the zip arms: the IRTInfer
+            // fallback in buildApplyInfo needs true ranks to compute the
+            // kernel slice rank when this loop reaches it via inferApply).
+            let sDimsPerArray = computeSDimsPerArray arrayTypes
             let totalSDims = sDimsPerArray |> List.sum
 
             let mfInfo : TypedMethodForInfo = {
                 Arrays = tArrays; Identities = identities; ArrayTypes = arrayTypes
                 SDimsPerArray = sDimsPerArray; TotalSDims = totalSDims
-                SharedIndexType = Some sharedIdx
+                SharedIndexTypes = sharedRecords
             }
             let loopTy = IRTLoop {
                 Kind = LKMethod; Arity = Some arrays.Length
@@ -6210,6 +6606,68 @@ and inferForExpr env source kernelOpt : TypeResult<TypedExpr> =
                     let resolvedKernel = resolveTypedExpr env tK
                     match resolvedKernel.Kind with
                     | TExprLambda lambdaInfo ->
+                        // Kernel arity: N (one value param per co-iterated array)
+                        // or N + R (values plus the R shared iteration indices).
+                        // In the N + R form the in-clause virtual source rides
+                        // along as a TRAILING operand — its per-slot params bind
+                        // to the loop indices through the same VirtualRange
+                        // element machinery the outer-product path uses for
+                        // range<...> slots, so `for (uq, ph) in range<Y, X> <@>
+                        // lambda(zu, zp, i, j) -> ...` gives the kernel both the
+                        // co-iterated values and the (i, j) coordinates.
+                        let nOperands = tArrays.Length
+                        let idxSlotTypes =
+                            sharedRecords |> List.collect (fun r -> List.replicate r.Rank (elemTypeForIterationIndex r))
+                        let idxParamCount = idxSlotTypes.Length
+                        let wantsIndices = lambdaInfo.Params.Length = nOperands + idxParamCount
+                        if not wantsIndices && lambdaInfo.Params.Length <> nOperands then
+                            Error (Other (sprintf "for (...) in co-iteration kernel takes %d parameter(s) (one per co-iterated array) or %d (values plus the %d shared iteration indices), got %d" nOperands (nOperands + idxParamCount) idxParamCount lambdaInfo.Params.Length))
+                        else
+                        // Bind the kernel params to their iterated types: value
+                        // params to the operands' ELEMENT types, index params to
+                        // the tagged Nat<...> slot types. The body was inferred
+                        // against unresolved vars, so deferred intrinsics (e.g.
+                        // imag(zp) on a complex operand) only resolve correctly
+                        // once the params are unified here — the same post-body
+                        // unification buildApplyInfo performs for <@> applies.
+                        let paramUnifyResult =
+                            let valueTypes = arrayTypes |> List.map (fun at -> at.ElemType)
+                            let rowTypes = if wantsIndices then valueTypes @ idxSlotTypes else valueTypes
+                            if lambdaInfo.Params.Length = rowTypes.Length then
+                                List.zip lambdaInfo.Params rowTypes
+                                |> List.fold (fun acc (p, row) ->
+                                    acc |> Result.bind (fun () -> unify env.Subst (env.Subst.Resolve p.Type) row))
+                                    (Ok ())
+                            else Ok ()
+                        match paramUnifyResult with
+                        | Error e -> Error e
+                        | Ok () ->
+                        // Extended operand lists: the virtual source appended
+                        // LAST so the real arrays keep their param positions.
+                        let (exArrays, exIdentities, exTypes) =
+                            if wantsIndices then
+                                let vAt =
+                                    match env.Subst.Resolve tVirtual.Type with
+                                    | ArrayElem at -> at
+                                    | _ -> { ElemType = IRTScalar ETInt64; IndexTypes = sharedRecords; IsVirtual = true; Identity = None }
+                                (tArrays @ [tVirtual],
+                                 identities @ [AIDLiteral (env.Builder.FreshId())],
+                                 arrayTypes @ [vAt])
+                            else (tArrays, identities, arrayTypes)
+                        let exSDims = computeSDimsPerArray exTypes
+                        let exTotalSDims = List.sum exSDims
+                        let exMfInfo : TypedMethodForInfo = {
+                            mfInfo with
+                                Arrays = exArrays; Identities = exIdentities; ArrayTypes = exTypes
+                                SDimsPerArray = exSDims; TotalSDims = exTotalSDims
+                        }
+                        // Carry the resolved param types into the stored kernel
+                        // (records are immutable — the substitution refinements
+                        // above don't rewrite lambdaInfo.Params in place).
+                        let resolvedLambdaInfo =
+                            { lambdaInfo with
+                                Params = lambdaInfo.Params |> List.map (fun p -> { p with Type = env.Subst.Resolve p.Type }) }
+                        let storedKernel = mkTyped (TExprLambda resolvedLambdaInfo) tK.Type
                         // Infer element type: prefer kernel return type, fall back to arrays.
                         // Phase B2: returns IRType.
                         let elemType =
@@ -6230,19 +6688,19 @@ and inferForExpr env source kernelOpt : TypeResult<TypedExpr> =
                                 let tDims = arr.IndexTypes |> List.map (fun idx -> { idx with Kind = TDimension })
                                 (tDims, tDims.Length)
                             | _ -> ([], 0)
-                        let outputIndexTypes = [sharedIdx] @ (kernelTDims |> List.map (fun idx -> { idx with Id = env.Builder.FreshId() }))
+                        let outputIndexTypes = sharedRecords @ (kernelTDims |> List.map (fun idx -> { idx with Id = env.Builder.FreshId() }))
                         let outputType = mkArrayArrow outputIndexTypes elemType None
                         // Note: SymcomStates/TriangularLevels/SpeedupFactor are unused
                         // by the co-iteration codegen path — it derives loop structure
-                        // directly from SharedIndexType
+                        // directly from SharedIndexTypes
                         let info : TypedApplyInfo = {
-                            Loop = mkTyped (TExprMethodFor mfInfo) loopTy
-                            Kernel = resolvedKernel
-                            Arrays = tArrays; Identities = identities
-                            ArrayTypes = arrayTypes; SharedIndexType = Some sharedIdx
-                            SymcomStates = List.replicate totalSDims SCNeither
-                            TriangularLevels = List.replicate totalSDims false
-                            SDimsPerArray = sDimsPerArray
+                            Loop = mkTyped (TExprMethodFor exMfInfo) loopTy
+                            Kernel = storedKernel
+                            Arrays = exArrays; Identities = exIdentities
+                            ArrayTypes = exTypes; SharedIndexTypes = sharedRecords
+                            SymcomStates = List.replicate exTotalSDims SCNeither
+                            TriangularLevels = List.replicate exTotalSDims false
+                            SDimsPerArray = exSDims
                             KernelInputRanks = lambdaInfo.Params |> List.map (fun _ -> 0)
                             KernelOutputRank = kernelOutputRank
                             KernelTDims = kernelTDims
@@ -7637,6 +8095,12 @@ let typeCheck (program: Program) : Result<TypedProgram * IRBuilder * string list
     | Ok program ->
     match Blade.ML.Elaborate.expand program with
     | Error diags -> Error (diags |> List.map (compileErrorOfDiagnostic ["ML elaboration"]))
+    | Ok program ->
+    // sgs runs AFTER ML so the (future) ml.galilean judgment sees surface
+    // `sgs.*` op calls at ML's seam, and before PPL/Math/Grad so its
+    // generated plain source flows through them untouched.
+    match Blade.Sgs.Elaborate.expand program with
+    | Error diags -> Error (diags |> List.map (compileErrorOfDiagnostic ["sgs elaboration"]))
     | Ok program ->
     match Blade.Ppl.Elaborate.expand program with
     | Error diags -> Error (diags |> List.map (compileErrorOfDiagnostic ["PPL elaboration"]))

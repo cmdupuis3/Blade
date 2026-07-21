@@ -1,0 +1,73 @@
+// TEST: SGS Bridge Gradient Decompose
+// ============================================================================
+// The physics reading of the gradient bridge: divergence / vorticity /
+// strain extracted from bridge9(G) match their direct Cartesian definitions,
+// the map is an ORTHOGONAL bijection (|G|_F = |bridge9 G|, transpose
+// inverts), and the block structure is the closure-model input GSPEC:
+//   slot 0     = div(u)/sqrt(3)            (l=0)
+//   slots 1..3 = vorticity/sqrt(2) in Y1 order (w_y, w_z, w_x)  (l=1, even)
+//   slots 4..8 = sqrt(2)-weighted deviatoric strain in Y2 order (l=2)
+// with G_ij = d_j u_i, w = curl u: w_x = g21 - g12, w_y = g02 - g20,
+// w_z = g10 - g01.
+// ============================================================================
+
+let b9 = [0.5773502691896258, 0.0, 0.0, 0.0, 0.5773502691896258, 0.0, 0.0, 0.0, 0.5773502691896258, 0.0, 0.0, 0.7071067811865475, 0.0, 0.0, 0.0, -0.7071067811865475, 0.0, 0.0, 0.0, -0.7071067811865475, 0.0, 0.7071067811865475, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, -0.7071067811865475, 0.0, 0.7071067811865475, 0.0, 0.0, 0.7071067811865475, 0.0, 0.7071067811865475, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.7071067811865475, 0.0, 0.7071067811865475, 0.0, -0.4082482904638631, 0.0, 0.0, 0.0, -0.4082482904638631, 0.0, 0.0, 0.0, 0.8164965809277261, 0.0, 0.0, 0.7071067811865475, 0.0, 0.0, 0.0, 0.7071067811865475, 0.0, 0.0, 0.7071067811865475, 0.0, 0.0, 0.0, -0.7071067811865475, 0.0, 0.0, 0.0, 0.0]
+let g_fix = [0.6, -1.1, 0.4, 0.9, 0.3, -0.7, -0.2, 0.8, 1.2]
+
+function mv9(b: Array<Float like Idx<81>>, x: Array<Float like Idx<9>>) -> Array<Float like Idx<9>> = {
+    let mut o = [0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0]
+    for i in 0..9 {
+        for j in 0..9 {
+            o(i) += b(i * 9 + j) * x(j)
+        }
+    }
+    o
+}
+
+let cert_g = mv9(b9, g_fix)
+// EXPECT: cert_g = [1.2124355652982142, 0.4242640687119285, 1.414213562373095, 1.0606601717798212, -0.14142135623730956, 0.07071067811865483, 0.6123724356957946, 0.1414213562373095, 0.21213203435596423]
+
+// (a) physics identities: direct Cartesian formulas vs bridge slots
+let sqrt2 = sqrt(2.0)
+let sqrt3 = sqrt(3.0)
+let div_direct = g_fix(0) + g_fix(4) + g_fix(8)
+let wx_direct = g_fix(7) - g_fix(5)
+let wy_direct = g_fix(2) - g_fix(6)
+let wz_direct = g_fix(3) - g_fix(1)
+let mut idn = [0.0]
+let idn_done = {
+    let d0 = div_direct - sqrt3 * cert_g(0)
+    let d1 = wy_direct - sqrt2 * cert_g(1)
+    let d2 = wz_direct - sqrt2 * cert_g(2)
+    let d3 = wx_direct - sqrt2 * cert_g(3)
+    idn(0) = d0 * d0 + d1 * d1 + d2 * d2 + d3 * d3
+    0.0
+}
+let physics_identities = if idn(0) < 0.000000000000000001 then 1.0 else 0.0
+// EXPECT: physics_identities = 1.0
+
+// (b) orthogonality: Frobenius norm preserved
+let mut nrm = [0.0, 0.0]
+let nrm_done = {
+    for k in 0..9 {
+        nrm(0) += g_fix(k) * g_fix(k)
+        nrm(1) += cert_g(k) * cert_g(k)
+    }
+    0.0
+}
+let cert_g_frob = sqrt(nrm(0))
+// EXPECT: cert_g_frob = 2.2891046284519194
+let cert_g_norm = sqrt(nrm(1))
+// EXPECT: cert_g_norm = 2.289104628451919
+
+// (c) the transpose inverts (orthogonal matrix): back(j) = sum_i b9(i,j) c(i)
+let mut back = [0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0]
+let back_done = {
+    for j in 0..9 {
+        for i in 0..9 {
+            back(j) += b9(i * 9 + j) * cert_g(i)
+        }
+    }
+    0.0
+}
+// EXPECT: back = [0.6000000000000001, -1.0999999999999999, 0.39999999999999997, 0.8999999999999997, 0.30000000000000016, -0.6999999999999998, -0.2, 0.7999999999999999, 1.2000000000000002]

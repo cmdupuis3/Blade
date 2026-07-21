@@ -1,0 +1,15 @@
+// TEST: Zip Rank-2 Elementwise Kernel Body (rejects)
+// `ra * rb` between two rank-1 ROW params is an elementwise array-valued kernel
+// body. The both-array binop arm re-synthesizes it into a nested
+// compute(method_for(zip(ra, rb)) <@> lambda(zl, zr) -> zl * zr), whose output
+// rank is 1. In expression position (inside the outer kernel) the inline
+// codegen used to collapse this to (sum ra)(sum rb) -- a SILENT MISCOMPILE
+// (P was [360, 2250] = [6*60, 15*150] instead of the elementwise rows). It is
+// now rejected at type-check; reduce the row to a scalar (prodsum/reduce), or
+// compute the elementwise product at top level. See loops/085 for the
+// supported form.
+type Y = Idx<2>
+type X = Idx<3>
+let A: Array<Float64 like Y, X> = [[1.0, 2.0, 3.0], [4.0, 5.0, 6.0]]
+let B: Array<Float64 like Y, X> = [[10.0, 20.0, 30.0], [40.0, 50.0, 60.0]]
+let bad = method_for(zip(A, B)) <@> lambda(ra: Array<Float64 like X>, rb: Array<Float64 like X>) -> ra * rb |> compute

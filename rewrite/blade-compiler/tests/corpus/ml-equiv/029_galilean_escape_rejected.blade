@@ -1,0 +1,6 @@
+// TEST: ML Galilean Escape Rejected (rejects)
+import ml as ml
+// A boost-variant value escaping to an uncertified callee (here a scalar
+// nonlinearity) leaves the discipline: sqrt(u) is frame-dependent. BL4009.
+function bad(uc: Float) where ml.galilean(uc) -> Float =
+  sqrt(uc)

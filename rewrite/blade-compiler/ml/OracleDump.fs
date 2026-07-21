@@ -248,3 +248,180 @@ module OracleDump =
         printfn "cert_grad_loss_rot = %s" (f2s l1)
         arr "cert_grad_dw" g0
         arr "cert_grad_dw_rot" g1
+
+    /// dump-cartesian: the Cartesian<->irreps bridge — constants,
+    /// orthogonality, and rotation/parity certificates (corpus sgs/001-003;
+    /// later the pins for the compiler's CartesianBridge.fs).
+    ///
+    /// FROZEN CONVENTIONS (single source of truth for the whole sgs arc):
+    ///  - Symmetric pack order: [s00, s01, s02, s11, s12, s22] (upper
+    ///    triangle, row-major).
+    ///  - 3x3 Cartesian tensors flatten row-major: g[3i+j] = G_ij. For a
+    ///    velocity-gradient field, G_ij = d_j u_i (row = component,
+    ///    col = derivative axis).
+    ///  - GSPEC = [(0,e,1); (1,e,1); (2,e,1)] (dim 9). The gradient of a true
+    ///    vector is odd (x) odd = parity-EVEN throughout; the l=1 block is
+    ///    the axial pseudovector (vorticity) in Y1 component order (y, z, x),
+    ///    with a_x = g21 - g12 (the curl convention for G_ij = d_j u_i).
+    ///  - TAUSPEC = [(0,e,1); (2,e,1)] (dim 6).
+    ///  - Bridge rows are ORTHONORMAL over R^9 with the Frobenius inner
+    ///    product: |G|_F = |bridge9 G|, |S|_F = |sym_to_irr packSym(S)| (the
+    ///    packed-6 form weights off-diagonals by sqrt(2)).
+    ///  - The l=2 rows are DERIVED BY FIT against SphericalHarmonics.eval
+    ///    (never hand-transcribed): the fitted-and-normalized rows must equal
+    ///    the closed forms with one Schur ratio sqrt(15/8pi) across all five.
+    let dumpCartesian () =
+        let sqrt2 = sqrt 2.0
+        let sqrt3 = sqrt 3.0
+        let sqrt6 = sqrt 6.0
+        let mkRow (entries: (int * int * float) list) : float[] =
+            let r = Array.zeroCreate 9
+            for (i, j, c) in entries do r.[3 * i + j] <- c
+            r
+        // Rows in irreps order: l=0 | l=1 (Y1 order y,z,x of the axial) | l=2
+        // (Y2 order xy, yz, 3z^2-r^2, xz, x^2-y^2).
+        let bridge9 : float[][] =
+            [| mkRow [ (0, 0, 1.0 / sqrt3); (1, 1, 1.0 / sqrt3); (2, 2, 1.0 / sqrt3) ]
+               mkRow [ (0, 2, 1.0 / sqrt2); (2, 0, -1.0 / sqrt2) ]                       // a_y = (g02-g20)/sqrt2
+               mkRow [ (1, 0, 1.0 / sqrt2); (0, 1, -1.0 / sqrt2) ]                       // a_z = (g10-g01)/sqrt2
+               mkRow [ (2, 1, 1.0 / sqrt2); (1, 2, -1.0 / sqrt2) ]                       // a_x = (g21-g12)/sqrt2
+               mkRow [ (0, 1, 1.0 / sqrt2); (1, 0, 1.0 / sqrt2) ]                        // xy
+               mkRow [ (1, 2, 1.0 / sqrt2); (2, 1, 1.0 / sqrt2) ]                        // yz
+               mkRow [ (0, 0, -1.0 / sqrt6); (1, 1, -1.0 / sqrt6); (2, 2, 2.0 / sqrt6) ] // 3z^2-r^2
+               mkRow [ (0, 2, 1.0 / sqrt2); (2, 0, 1.0 / sqrt2) ]                        // xz
+               mkRow [ (0, 0, 1.0 / sqrt2); (1, 1, -1.0 / sqrt2) ] |]                    // x^2-y^2
+        // Packed-6 forms for symmetric tensors (order [t0, xy, yz, z2, xz, x2y2]).
+        let symToIrr : float[][] =
+            [| [| 1.0 / sqrt3; 0.0; 0.0; 1.0 / sqrt3; 0.0; 1.0 / sqrt3 |]
+               [| 0.0; sqrt2; 0.0; 0.0; 0.0; 0.0 |]
+               [| 0.0; 0.0; 0.0; 0.0; sqrt2; 0.0 |]
+               [| -1.0 / sqrt6; 0.0; 0.0; -1.0 / sqrt6; 0.0; 2.0 / sqrt6 |]
+               [| 0.0; 0.0; sqrt2; 0.0; 0.0; 0.0 |]
+               [| 1.0 / sqrt2; 0.0; 0.0; -1.0 / sqrt2; 0.0; 0.0 |] |]
+        let irrToSym : float[][] =
+            [| [| 1.0 / sqrt3; 0.0; 0.0; -1.0 / sqrt6; 0.0; 1.0 / sqrt2 |]   // s00
+               [| 0.0; 1.0 / sqrt2; 0.0; 0.0; 0.0; 0.0 |]                     // s01
+               [| 0.0; 0.0; 0.0; 0.0; 1.0 / sqrt2; 0.0 |]                     // s02
+               [| 1.0 / sqrt3; 0.0; 0.0; -1.0 / sqrt6; 0.0; -1.0 / sqrt2 |]   // s11
+               [| 0.0; 0.0; 1.0 / sqrt2; 0.0; 0.0; 0.0 |]                     // s12
+               [| 1.0 / sqrt3; 0.0; 0.0; 2.0 / sqrt6; 0.0; 0.0 |] |]          // s22
+        let flatten9 (g: float[][]) : float[] =
+            [| for i in 0 .. 2 do for j in 0 .. 2 do yield g.[i].[j] |]
+        let packSymM (s: float[][]) : float[] =
+            [| s.[0].[0]; s.[0].[1]; s.[0].[2]; s.[1].[1]; s.[1].[2]; s.[2].[2] |]
+        let conj (r: float[][]) (g: float[][]) : float[][] =
+            MathUtils.matMul r (MathUtils.matMul g (MathUtils.transpose r))
+        let vnorm (v: float[]) : float = sqrt (Array.sumBy (fun x -> x * x) v)
+        let vvT (v: float[]) : float[][] =
+            Array.init 3 (fun i -> Array.init 3 (fun j -> v.[i] * v.[j]))
+        let matvecFlat (n: int) (m: float[]) (x: float[]) : float[] =
+            // EXACTLY the loop the Blade tests bake: i ascending, j ascending.
+            [| for i in 0 .. n - 1 ->
+                 let mutable acc = 0.0
+                 for j in 0 .. n - 1 do
+                     acc <- acc + m.[i * n + j] * x.[j]
+                 acc |]
+
+        printfn "// ===== cartesian bridge (sgs/001-003; CartesianBridge.fs pins) ====="
+
+        // ---- derive l=2 by fit against the harmonics (the anti-transcription
+        // discipline), then check the closed forms against the fit ----
+        let rng = System.Random(20260719)
+        let mutable b2 = Unchecked.defaultof<float[][]>
+        let mutable fitted = false
+        let mutable attempt = 0
+        while not fitted && attempt < 10 do
+            try
+                let pts = Array.init 6 (fun _ -> Rotations.randomUnitVector rng)
+                let pMat = pts |> Array.map (fun v -> packSymM (vvT v))
+                let yMat = pts |> Array.map (fun v -> SphericalHarmonics.eval 2 v.[0] v.[1] v.[2])
+                let cand = MathUtils.transpose (MathUtils.solve pMat yMat)   // 5x6
+                let mutable resid = 0.0
+                for _ in 1 .. 4 do
+                    let v = Rotations.randomUnitVector rng
+                    resid <- max resid (MathUtils.maxAbsDiff
+                                            (MathUtils.matVec cand (packSymM (vvT v)))
+                                            (SphericalHarmonics.eval 2 v.[0] v.[1] v.[2]))
+                if resid < 1e-9 then
+                    b2 <- cand
+                    fitted <- true
+            with _ -> ()
+            attempt <- attempt + 1
+        if not fitted then failwith "dump-cartesian: could not fit B2"
+        let packIdx = [| (0, 0); (0, 1); (0, 2); (1, 1); (1, 2); (2, 2) |]
+        let embedRow (row: float[]) : float[] =
+            let r = Array.zeroCreate 9
+            for k in 0 .. 5 do
+                let (i, j) = packIdx.[k]
+                if i = j then r.[3 * i + j] <- row.[k]
+                else
+                    r.[3 * i + j] <- row.[k] / 2.0
+                    r.[3 * j + i] <- row.[k] / 2.0
+            r
+        let mutable ratioMin = infinity
+        let mutable ratioMax = 0.0
+        let mutable rowDev = 0.0
+        for k in 0 .. 4 do
+            let e = embedRow b2.[k]
+            let n = vnorm e
+            ratioMin <- min ratioMin n
+            ratioMax <- max ratioMax n
+            rowDev <- max rowDev (MathUtils.maxAbsDiff (Array.map (fun x -> x / n) e) bridge9.[4 + k])
+        printfn "// fit check: |normalized fitted l2 row - closed row|_max = %g" rowDev
+        printfn "// fit check: Schur ratio in [%.15g, %.15g]; sqrt(15/8pi) = %.15g"
+            ratioMin ratioMax (sqrt (15.0 / (8.0 * System.Math.PI)))
+
+        // ---- specs, house rotation, fixed fixtures ----
+        let gspec = Irreps.mkSpec [ (0, Even, 1); (1, Even, 1); (2, Even, 1) ]
+        let tspec = Irreps.mkSpec [ (0, Even, 1); (2, Even, 1) ]
+        let gspecWrong = Irreps.mkSpec [ (0, Even, 1); (1, Odd, 1); (2, Even, 1) ]
+        let r = MathUtils.matMul (Rotations.rotZ 0.7) (Rotations.rotY 1.1)
+        let gFix = [| [| 0.6; -1.1; 0.4 |]; [| 0.9; 0.3; -0.7 |]; [| -0.2; 0.8; 1.2 |] |]
+        let sFix = [| [| 1.0; 0.5; -0.3 |]; [| 0.5; 2.0; 0.7 |]; [| -0.3; 0.7; -1.0 |] |]
+        arr "rot" (r |> Array.concat)
+        arr "bridge9" (bridge9 |> Array.concat)
+        arr "sym_to_irr" (symToIrr |> Array.concat)
+        arr "irr_to_sym" (irrToSym |> Array.concat)
+        arr "g_fix" (flatten9 gFix)
+        arr "s_fix_packed" (packSymM sFix)
+        arr "d_gspec" (Rotations.repMatrix gspec r)
+        arr "d_tauspec" (Rotations.repMatrix tspec r)
+
+        // ---- 001: symmetric bridge — round-trip + rotation certificate ----
+        let bS = MathUtils.matVec symToIrr (packSymM sFix)
+        let lhsS = MathUtils.matVec symToIrr (packSymM (conj r sFix))
+        let rhsS = matvecFlat 6 (Rotations.repMatrix tspec r) bS
+        let backS = MathUtils.matVec irrToSym bS
+        printfn "// 001 sym bridge: |cart route - irreps route|_max = %g" (MathUtils.maxAbsDiff lhsS rhsS)
+        printfn "// 001 round-trip: |irr_to_sym(sym_to_irr s) - s|_max = %g" (MathUtils.maxAbsDiff backS (packSymM sFix))
+        let frobS = sqrt (packSymM sFix |> Array.mapi (fun k x -> if fst packIdx.[k] = snd packIdx.[k] then x * x else 2.0 * x * x) |> Array.sum)
+        printfn "// 001 orthogonality: |S|_F = %s, |sym_to_irr(S)| = %s" (f2s frobS) (f2s (vnorm bS))
+        arr "cert_s" bS
+        arr "cert_s_lhs" lhsS
+        arr "cert_s_rhs" rhsS
+        arr "cert_s_back" backS
+        printfn "cert_s_frob = %s" (f2s frobS)
+        printfn "cert_s_norm = %s" (f2s (vnorm bS))
+
+        // ---- 002/003: full-gradient bridge — certificate + improper contrast ----
+        let bG = MathUtils.matVec bridge9 (flatten9 gFix)
+        let lhsG = MathUtils.matVec bridge9 (flatten9 (conj r gFix))
+        let rhsG = matvecFlat 9 (Rotations.repMatrix gspec r) bG
+        printfn "// 003 grad bridge: |cart route - irreps route|_max = %g" (MathUtils.maxAbsDiff lhsG rhsG)
+        printfn "// 003 orthogonality: |G|_F = %s, |bridge9(G)| = %s"
+            (f2s (vnorm (flatten9 gFix))) (f2s (vnorm bG))
+        arr "cert_g" bG
+        arr "cert_g_lhs" lhsG
+        arr "cert_g_rhs" rhsG
+        arr "cert_g_back" (MathUtils.matVec (MathUtils.transpose bridge9) bG)
+        printfn "cert_g_frob = %s" (f2s (vnorm (flatten9 gFix)))
+        printfn "cert_g_norm = %s" (f2s (vnorm bG))
+        // Improper element inversion.R: Cartesian route is UNCHANGED
+        // ((-R) G (-R)^T = R G R^T — gradients are parity-even), so the
+        // right-parity irreps route must equal the proper one, while the
+        // WRONG assignment (vorticity as (1, odd)) flips the l=1 block.
+        let impRight = Rotations.applyRepImproper gspec r bG
+        let impWrong = Rotations.applyRepImproper gspecWrong r bG
+        printfn "// 002 improper: right-parity resid = %g; wrong-parity resid = %g (must be LARGE)"
+            (MathUtils.maxAbsDiff lhsG impRight) (MathUtils.maxAbsDiff lhsG impWrong)
+        arr "cert_g_improper_wrong" impWrong

@@ -150,7 +150,7 @@ let rec zonkExpr (subst: Subst) (expr: TypedExpr) : TypedExpr =
                             Arrays = zs info.Arrays
                             ArrayTypes = info.ArrayTypes |> List.map (fun at ->
                                 { at with IndexTypes = at.IndexTypes |> List.map (zonkIndexType subst) })
-                            SharedIndexType = info.SharedIndexType |> Option.map (zonkIndexType subst)
+                            SharedIndexTypes = info.SharedIndexTypes |> List.map (zonkIndexType subst)
                             OutputType = zt info.OutputType }
     { expr with Kind = kind; Type = zt expr.Type }
 

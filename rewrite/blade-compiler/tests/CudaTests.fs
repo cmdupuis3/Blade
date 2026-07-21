@@ -88,7 +88,11 @@ let runBufferTypeTests () : Blade.Tests.TestHarness.BlockResult =
     checkBnd "i64" (IRTScalar ETInt64) true
     checkBnd "i32" (IRTScalar ETInt32) true
     checkBnd "bool" (IRTScalar ETBool) true
-    checkBnd "complex128" (IRTScalar ETComplex128) false
+    // Complex crosses since the 2026-07-19 complex-over-CUDA arc: std::complex
+    // signatures at the extern "C" boundary, thrust::complex device dialect
+    // inside the .cu (both layout-compatible with T[2]).
+    checkBnd "complex128" (IRTScalar ETComplex128) true
+    checkBnd "complex64" (IRTScalar ETComplex64) true
     checkBnd "string" (IRTScalar ETString) false
     printFooter "Buffer Type" [sprintf "%d passed" passed; sprintf "%d failure(s)" failures]
     { Block = "Buffer Type"; Passed = passed; Failed = failures; Skipped = 0; FailedNames = failedNames }
@@ -496,8 +500,70 @@ let (m2a, m2b) = (method_for(A, A) <@> lambda(x, y) where comm(x, y), cuda(block
 let A = [1.0, 2.0, 3.0, 4.0]
 let (u, m2) = (method_for(A) <@> lambda(x) where cuda(block: 64) -> x * 3.0) <&> (method_for(A, A) <@> lambda(x, y) where comm(x, y), cuda(block: 32) -> x * y) |> compute
 """
+        // COMPLEX cases (thrust device dialect). The differential demands
+        // byte-identical stdout, so these use EXACT complex arithmetic only
+        // (mul/add/conj/real/imag on small exact values) — device libm
+        // transcendentals differ from the host's by ~1 ulp and get their own
+        // structure+run case below instead of a value differential.
+        let cxHost = """
+let Z = [complex(1.0, 2.0), complex(-0.5, 0.25), complex(3.0, -1.0), complex(0.0, 1.0)]
+let R = method_for(Z) <@> lambda(z) -> z * conj(z) + 2.0 * z |> compute
+"""
+        let cxCuda = """
+let Z = [complex(1.0, 2.0), complex(-0.5, 0.25), complex(3.0, -1.0), complex(0.0, 1.0)]
+let R = method_for(Z) <@> lambda(z) where cuda(block: 64) -> z * conj(z) + 2.0 * z |> compute
+"""
+        // MIXED input element types: a complex and a real input in one kernel
+        // (rank-2 outer product) — pins the per-position input typing on both
+        // sides of the extern "C" boundary.
+        let cxMixHost = """
+let Z = [complex(1.0, 1.0), complex(2.0, -1.0), complex(-3.0, 0.5)]
+let X = [2.0, 3.0, 4.0]
+let R = method_for(Z, X) <@> lambda(z, x) -> z * x + conj(z) |> compute
+"""
+        let cxMixCuda = """
+let Z = [complex(1.0, 1.0), complex(2.0, -1.0), complex(-3.0, 0.5)]
+let X = [2.0, 3.0, 4.0]
+let R = method_for(Z, X) <@> lambda(z, x) where cuda(block: 64) -> z * x + conj(z) |> compute
+"""
+        // complex() constructor + real/imag accessors in the kernel body: the
+        // device dialect renders thrust::complex<double>(...) and the member
+        // .real()/.imag() forms (thrust has no free real/imag).
+        let cxPartsHost = """
+let Z = [complex(1.5, -2.0), complex(0.25, 4.0), complex(-1.0, 3.0)]
+let R = method_for(Z) <@> lambda(z) -> complex(imag(z), real(z) * 2.0) |> compute
+"""
+        let cxPartsCuda = """
+let Z = [complex(1.5, -2.0), complex(0.25, 4.0), complex(-1.0, 3.0)]
+let R = method_for(Z) <@> lambda(z) where cuda(block: 32) -> complex(imag(z), real(z) * 2.0) |> compute
+"""
+        // COMPLEX symmetric triangular (simplicial unrank path with a complex
+        // source/output): kernel symmetric under swap, exact products.
+        let cxSymHost = """
+let Z = [complex(1.0, 1.0), complex(2.0, -1.0), complex(0.5, 3.0), complex(-1.0, 2.0)]
+let R = method_for(Z, Z) <@> lambda(x, y) where comm(x, y) -> x * y + conj(x) * conj(y) |> compute
+"""
+        let cxSymCuda = """
+let Z = [complex(1.0, 1.0), complex(2.0, -1.0), complex(0.5, 3.0), complex(-1.0, 2.0)]
+let R = method_for(Z, Z) <@> lambda(x, y) where comm(x, y), cuda(block: 32) -> x * y + conj(x) * conj(y) |> compute
+"""
+        // COMPLEX co-fusion: two complex leaves over the same input, one
+        // device launch with two complex output buffers.
+        let cxCofuseHost = """
+let Z = [complex(1.0, 2.0), complex(3.0, -1.0), complex(-2.0, 0.5), complex(0.0, 1.0)]
+let (u, v) = (method_for(Z) <@> lambda(z) -> z * 2.0) <&!> (method_for(Z) <@> lambda(z) -> z + conj(z)) |> compute
+"""
+        let cxCofuseCuda = """
+let Z = [complex(1.0, 2.0), complex(3.0, -1.0), complex(-2.0, 0.5), complex(0.0, 1.0)]
+let (u, v) = (method_for(Z) <@> lambda(z) where cuda(block: 64) -> z * 2.0) <&!> (method_for(Z) <@> lambda(z) where cuda(block: 64) -> z + conj(z)) |> compute
+"""
         let cases =
             [ ("rank1", rank1Host, rank1Cuda)
+              ("complex_rank1", cxHost, cxCuda)
+              ("complex_mixed_inputs", cxMixHost, cxMixCuda)
+              ("complex_ctor_parts", cxPartsHost, cxPartsCuda)
+              ("complex_sym_triangular", cxSymHost, cxSymCuda)
+              ("complex_cofuse", cxCofuseHost, cxCofuseCuda)
               ("cofuse_rank1", cofuse1Host, cofuse1Cuda)
               ("cofuse_rank2", cofuse2Host, cofuse2Cuda)
               ("rank2_outer", rank2Host, rank2Cuda)
@@ -609,5 +675,55 @@ let (u, m2) = (method_for(A) <@> lambda(x) where cuda(block: 64) -> x * 3.0) <&>
                 1
         if hardRc = 0 then passed <- passed + 1
         else (failures <- failures + 1; failedNames <- failedNames @ ["softjoin_not_for_hard_join"])
+        // COMPLEX transcendental on device: exp/conj via thrust. Deliberately
+        // NOT a value differential — device libm transcendentals differ from
+        // the host's by ~1 ulp, which the byte-identical stdout comparison
+        // would flag. Pins STRUCTURE (thrust vocabulary + includes in the
+        // .cu) plus that the kernel split-compiles and RUNS on the GPU; value
+        // correctness of the complex vocabulary is pinned by the exact-
+        // arithmetic differentials above.
+        let cxExpRc =
+            let label = "complex_exp_device"
+            let src = """
+let Z = [complex(0.1, 0.2), complex(-0.3, 0.4), complex(0.5, -0.5)]
+let R = method_for(Z) <@> lambda(z) where cuda(block: 32) -> exp(z) * conj(z) |> compute
+"""
+            for ext in [".cu"; ".cpp"; ".cu.obj"; ".cpp.obj"; ".cu.o"; ".cpp.o"; ".exe"; ".out"] do
+                let f = Path.Combine(outputDir, "cuda_complex_exp" + ext)
+                try if File.Exists f then File.Delete f with _ -> ()
+            try
+                CodeGen.setCudaEmitMode true
+                let outcome =
+                    match genVariant "cuda_complex_exp" src with
+                    | Error e -> Error e
+                    | Ok (_, None) -> Error "no .cu emitted for the complex exp kernel"
+                    | Ok (cppFile, Some cuFile) ->
+                        let cu = File.ReadAllText cuFile
+                        if not (cu.Contains "thrust::exp") then Error ".cu does not use thrust::exp"
+                        elif not (cu.Contains "#include <thrust/complex.h>") then Error ".cu missing the thrust include"
+                        elif not (cu.Contains "thrust::complex<double>") then Error ".cu missing thrust::complex device buffers"
+                        else
+                            match compileCudaSplit cuFile cppFile outputDir with
+                            | Error e -> Error (sprintf "cuda split-compile: %s" e)
+                            | Ok exe ->
+                                match runExecutable exe with
+                                | Error e -> Error (sprintf "run: %s" e)
+                                | Ok (0, out) when out.Contains "R = [" -> Ok ()
+                                | Ok (0, _) -> Error "output missing the R array"
+                                | Ok (code, out) -> Error (sprintf "exit %d:\n%s" code out)
+                CodeGen.setCudaEmitMode false
+                match outcome with
+                | Ok () ->
+                    Blade.Tests.TestHarness.resultLine Blade.Tests.TestHarness.Pass label "thrust transcendental kernel compiles and runs on device"
+                    0
+                | Error e ->
+                    Blade.Tests.TestHarness.resultLine Blade.Tests.TestHarness.Fail label e
+                    1
+            with ex ->
+                CodeGen.setCudaEmitMode false
+                Blade.Tests.TestHarness.resultLine Blade.Tests.TestHarness.Fail label ex.Message
+                1
+        if cxExpRc = 0 then passed <- passed + 1
+        else (failures <- failures + 1; failedNames <- failedNames @ ["complex_exp_device"])
         printFooter "CUDA Kernel" [sprintf "%d passed" passed; sprintf "%d failure(s)" failures]
         { Block = "CUDA Kernel"; Passed = passed; Failed = failures; Skipped = 0; FailedNames = failedNames }

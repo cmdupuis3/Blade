@@ -1,4 +1,4 @@
-// TEST: Physics -- Bohr Spectroscopy from the Moment Tower
+﻿// TEST: Physics -- Bohr Spectroscopy from the Moment Tower
 // ============================================================================
 // The lagged-cumulant sequence of any quasiperiodic signal, C(n*Delta) =
 // sum_k w_k cos(omega_k n Delta), IS a moment tower: cos(n*theta) =
@@ -46,10 +46,10 @@ let Am4 = (CA(4) + 4.0 * CA(2) + 3.0 * CA(0)) / 8.0
 // --- Hankel determinants: rank of the spectral measure ---
 let Hdet2 = (Hm0 * Hm2 - Hm1 * Hm1) / (Hm0 * Hm0)
 let Hdet3 = (Hm0 * (Hm2 * Hm4 - Hm3 * Hm3) - Hm1 * (Hm1 * Hm4 - Hm3 * Hm2) + Hm2 * (Hm1 * Hm3 - Hm2 * Hm2)) / (Hm0 * Hm0 * Hm0)
-let H_V = if sqrt(Hdet2 * Hdet2) < 0.000000001 then "RANK1" else "SPLIT"
+let H_V = if abs(Hdet2) < 0.000000001 then "RANK1" else "SPLIT"
 let Adet2 = (Am0 * Am2 - Am1 * Am1) / (Am0 * Am0)
 let Adet3 = (Am0 * (Am2 * Am4 - Am3 * Am3) - Am1 * (Am1 * Am4 - Am3 * Am2) + Am2 * (Am1 * Am3 - Am2 * Am2)) / (Am0 * Am0 * Am0)
-let A_V = if sqrt(Adet2 * Adet2) < 0.000000001 then "RANK1" else "SPLIT"
+let A_V = if abs(Adet2) < 0.000000001 then "RANK1" else "SPLIT"
 
 // --- harmonic line: lambda = m1/m0, omega = arccos(lambda)/Delta (Newton) ---
 let Hlam = Hm1 / Hm0

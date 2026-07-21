@@ -1,0 +1,15 @@
+// TEST: Binop Multi Axis Chain
+// Chained elementwise binops on rank-2 arrays: the result of A * B is a
+// stored Array<Float64 like Lat, Lon> (the co-iterated records are copied
+// into the output type), so it re-enters the same binop path for the next
+// op. Proves record preservation through the pipeline.
+type Lat = Idx<2>
+type Lon = Idx<3>
+let A: Array<Float64 like Lat, Lon> = [[1.0, 2.0, 3.0], [4.0, 5.0, 6.0]]
+let B: Array<Float64 like Lat, Lon> = [[10.0, 10.0, 10.0], [2.0, 2.0, 2.0]]
+let C: Array<Float64 like Lat, Lon> = [[100.0, 100.0, 100.0], [200.0, 200.0, 200.0]]
+let T = A * B * C
+let M = A * B + A
+
+// EXPECT: T = [1000, 2000, 3000, 1600, 2000, 2400]
+// EXPECT: M = [11, 22, 33, 12, 15, 18]

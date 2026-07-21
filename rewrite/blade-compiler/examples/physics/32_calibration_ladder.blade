@@ -1,4 +1,4 @@
-// TEST: Physics -- The Calibration Ladder: a Classical Uncertainty Floor
+﻿// TEST: Physics -- The Calibration Ladder: a Classical Uncertainty Floor
 // ============================================================================
 // The observer joins the world (the arc's gap #3): every mass is measured by
 // colliding a calibrated probe into it, every probe was itself calibrated by
@@ -34,7 +34,7 @@
 //     probe (pedigree) component stays put -- var(mean) -> floor. The
 //     floor is set by the calibration CHAIN, not the apparatus: the
 //     classical, resource-shaped shadow of a quantum limit (WAY-flavored:
-//     there the conserved-charge floor is ħ-priced and irreducible; here
+//     there the conserved-charge floor is Ä§-priced and irreducible; here
 //     it is priced in anchor pedigree and collisions, and vanishes only
 //     as the whole CHAIN is refined -- you can always buy more looks,
 //     but every look is through the same inherited fuzz).
@@ -68,8 +68,8 @@ let AP3 = AP2 * AF3
 let AP4 = AP3 * AF4
 let AP5 = AP4 * AF5
 let ARM = AP5 * AF6
-let AS1 = reduce(method_for(ARM) <@> lambda(x) -> x, (+))
-let AS2 = reduce(method_for(ARM) <@> lambda(x) -> x * x, (+))
+let AS1 = reduce(ARM, (+))
+let AS2 = prodsum(ARM, ARM)
 let amean = AS1 / 729.0
 let avar = AS2 / 729.0 - amean * amean
 // linearized law: K g^2 Var(eta), g(4) = 25/8, Var(eta) = 2 sigma^2 / 3
@@ -84,22 +84,22 @@ let BF4 = method_for(range<Idx<81>>) <@> lambda(r: Int64) -> (2.0 - (2.0 / 9.0 +
 let BP2 = BF1 * BF2
 let BP3 = BP2 * BF3
 let BRM = BP3 * BF4
-let BS1 = reduce(method_for(BRM) <@> lambda(x) -> x, (+))
-let BS2 = reduce(method_for(BRM) <@> lambda(x) -> x * x, (+))
+let BS1 = reduce(BRM, (+))
+let BS2 = prodsum(BRM, BRM)
 let bvar = BS2 / 81.0 - (BS1 / 81.0) * (BS1 / 81.0)
 let CF1 = method_for(range<Idx<27>>) <@> lambda(r: Int64) -> (2.0 - (2.0 / 17.0 + NTAB(r % 3))) / (2.0 / 17.0 + NTAB(r % 3)) / 16.0 |> compute
 let CF2 = method_for(range<Idx<27>>) <@> lambda(r: Int64) -> (2.0 - (2.0 / 17.0 + NTAB((r / 3) % 3))) / (2.0 / 17.0 + NTAB((r / 3) % 3)) / 16.0 |> compute
 let CF3 = method_for(range<Idx<27>>) <@> lambda(r: Int64) -> (2.0 - (2.0 / 17.0 + NTAB((r / 9) % 3))) / (2.0 / 17.0 + NTAB((r / 9) % 3)) / 16.0 |> compute
 let CP2 = CF1 * CF2
 let CRM = CP2 * CF3
-let CS1 = reduce(method_for(CRM) <@> lambda(x) -> x, (+))
-let CS2 = reduce(method_for(CRM) <@> lambda(x) -> x * x, (+))
+let CS1 = reduce(CRM, (+))
+let CS2 = prodsum(CRM, CRM)
 let cvar = CS2 / 27.0 - (CS1 / 27.0) * (CS1 / 27.0)
 let DF1 = method_for(range<Idx<9>>) <@> lambda(r: Int64) -> (2.0 - (2.0 / 65.0 + NTAB(r % 3))) / (2.0 / 65.0 + NTAB(r % 3)) / 64.0 |> compute
 let DF2 = method_for(range<Idx<9>>) <@> lambda(r: Int64) -> (2.0 - (2.0 / 65.0 + NTAB((r / 3) % 3))) / (2.0 / 65.0 + NTAB((r / 3) % 3)) / 64.0 |> compute
 let DRM = DF1 * DF2
-let DS1 = reduce(method_for(DRM) <@> lambda(x) -> x, (+))
-let DS2 = reduce(method_for(DRM) <@> lambda(x) -> x * x, (+))
+let DS1 = reduce(DRM, (+))
+let DS2 = prodsum(DRM, DRM)
 let dvar = DS2 / 9.0 - (DS1 / 9.0) * (DS1 / 9.0)
 
 // fixed-budget projection (N = 12 collisions, N/K reads averaged per rung):
@@ -132,12 +132,12 @@ let Astar = h468 * h468
 let G1 = method_for(range<Idx<81>>) <@> lambda(r: Int64) -> (1.0 + PTAB(r % 3)) * (2.0 - (0.4 + NTAB((r / 3) % 3))) / (0.4 + NTAB((r / 3) % 3)) / 4.0 |> compute
 let G2 = method_for(range<Idx<81>>) <@> lambda(r: Int64) -> (1.0 + PTAB(r % 3)) * (2.0 - (0.4 + NTAB((r / 9) % 3))) / (0.4 + NTAB((r / 9) % 3)) / 4.0 |> compute
 let G3 = method_for(range<Idx<81>>) <@> lambda(r: Int64) -> (1.0 + PTAB(r % 3)) * (2.0 - (0.4 + NTAB((r / 27) % 3))) / (0.4 + NTAB((r / 27) % 3)) / 4.0 |> compute
-let GB = method_for(zip(G1, G2, G3)) <@> lambda(a, b, c) -> (a + b + c) / 3.0 |> compute
-let E1 = reduce(method_for(G1) <@> lambda(x) -> x, (+))
-let E1s = reduce(method_for(G1) <@> lambda(x) -> x * x, (+))
+let GB = (G1 + G2 + G3) / 3.0
+let E1 = reduce(G1, (+))
+let E1s = prodsum(G1, G1)
 let var1 = E1s / 81.0 - (E1 / 81.0) * (E1 / 81.0)
-let EB = reduce(method_for(GB) <@> lambda(x) -> x, (+))
-let EBs = reduce(method_for(GB) <@> lambda(x) -> x * x, (+))
+let EB = reduce(GB, (+))
+let EBs = prodsum(GB, GB)
 let var3 = EBs / 81.0 - (EB / 81.0) * (EB / 81.0)
 // pedigree (between-probe) component: variance of the probe-conditional mean
 let g0 = reduce(method_for(zip(GB, range<Idx<81>>)) <@> lambda(x, r: Int64) -> (if r % 3 < 1 then x else 0.0), (+)) / 27.0
@@ -149,7 +149,7 @@ let shrink = (var3 - floor_var) / (var1 - floor_var)
 let floor_share = floor_var / var3
 
 // ---- verdicts ----
-let add_V = if sqrt(add_gap * add_gap) < 0.1 then "LINEAR_ADDITIVITY_CONFIRMED" else "NONLINEAR"
+let add_V = if abs(add_gap) < 0.1 then "LINEAR_ADDITIVITY_CONFIRMED" else "NONLINEAR"
 let valley_V = if rfix4 < rfix8 then (if rfix8 < rfix16 then (if rfix16 < rfix64 then "MEASURED_VALLEY_CONFIRMS" else "NO") else "NO") else "NO"
 let interior_V = if kg2_4 < kg2_2 then (if kg2_4 < kg2_8 then "OPTIMAL_STEP_INTERIOR" else "NO") else "NO"
 let hmin_V = if h468 < h44 then (if h468 < h46 then (if h468 < h48 then (if h468 < h50 then "RHO_STAR_4P68" else "NO") else "NO") else "NO") else "NO"

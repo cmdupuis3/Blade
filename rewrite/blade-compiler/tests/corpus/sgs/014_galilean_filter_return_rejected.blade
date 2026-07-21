@@ -1,0 +1,10 @@
+// TEST: SGS Galilean Filter Return Rejected (rejects)
+import ml as ml
+import sgs as sgs
+// sgs.box_filter PRESERVES boost status (its weights sum to 1): the
+// filtered velocity is still a velocity, and returning it from a
+// galilean-certified function is BL4009 (v1 certifies boost-invariant
+// results only).
+let U: Array<Float64 like Idx<3>, Idx<2>, Idx<2>, Idx<2>> = [[[[1.0, 1.0], [1.0, 1.0]], [[1.0, 1.0], [1.0, 1.0]]], [[[2.0, 2.0], [2.0, 2.0]], [[2.0, 2.0], [2.0, 2.0]]], [[[3.0, 3.0], [3.0, 3.0]], [[3.0, 3.0], [3.0, 3.0]]]]
+function bad(u: Array<Float64 like Idx<3>, Idx<2>, Idx<2>, Idx<2>>) where ml.galilean(u) -> Array<Float64 like Idx<3>, Idx<2>, Idx<2>, Idx<2>> =
+  sgs.box_filter(u, 2)
