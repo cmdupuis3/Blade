@@ -73,9 +73,10 @@ v7 test category in `_blade-compiler/tests/corpus/`; `ml-spec §n` =
 | Combinator | Status | Notes / sources |
 |-----------|--------|-----------------|
 | `zip` (n-ary, tuple elements, symmetry intersection) | Core | v10 §3.6; keyword present in v7; used by elementwise operator desugaring |
-| `stack` (new leftmost dimension, fresh symmetry class) | Core | v10 §3.6; keyword present in v7 |
+| `stack` (new leftmost dimension, fresh symmetry class) | Core | v10 §3.6; `corpus/stack-join` 001–003, 006–008. Rank r → r+1 over same-shaped dense operands; materializes an independent pool (copy, not pointer aliasing) so a later write to a source cannot leak in. Operands must be dense (plain `Idx`) on every axis |
 | `transpose` (hard transpose; permutation composition laws) | Core | v10 §3.6–3.7; `corpus/index-types` 027–033 incl. symmetric identity and antisym negation |
-| `diag`, `join`, `subset`, `split`, `reverse` (array op), `shift` | Spec-only | v10 §3.6–3.7; no v7 keywords/tests found |
+| `join` (concatenate along dimension d) | Core | v10 §3.6–3.7; `corpus/stack-join` 004–006, 009–010. n-ary `join(A, B, ..., d)`; rank-preserving, extents on d add, every other axis must agree. The `split`/`subset` half of the round-trip is still spec-only, so `split(join(A,B,d), d, i)` is not yet expressible |
+| `diag`, `subset`, `split`, `reverse` (array op), `shift` | Spec-only | v10 §3.6–3.7; no v7 keywords/tests found |
 | `align` / `stencil` (sugar) with `StencilSpec`, boundary modes | Spec-only | v10 §3.6; kernel receives N separate args (vs zip's one tuple) |
 | Array fallback `<\|:>` (nullptr-safe sparse access) | Spec-only | v10 §3.6, §11.7; partial-depth allocation is a C++-level API |
 | `decompact` — expand symmetric/antisymmetric compact storage to dense along an axis | **v7-only** | `corpus/index-types` 034–049: sym and antisym sources, peel first/mid/last, chained to full dense, sign handling for antisym, reject on plain axes. Differential oracle exists (`tests/Oracles.fs`). Not in v10 |
@@ -137,7 +138,7 @@ bijection, and enumeration order (v10 §4.2).
 | Virtual arrays: `range<I>`, `reverse<I>` | Core | v10 §9.8; erase completely in codegen |
 | `blocked<I, K>` cache-blocked traversal | Spec-only | v10 §9.8; no v7 keyword |
 | Anonymous ranges (zero-based, offset, literal) | **v7-only** | `corpus/anon-ranges` (4 tests); range forms without named index typedefs |
-| `for` syntax (dual forms; `in` clause takes virtual arrays only; let-bound loops) | Core | v10 §9.9; `corpus/for-in` incl. poly-pack form |
+| `for` combinator forms (method_for `for (A, B) in range<I> <@> ...`; let-bound loop objects; `in` clause takes virtual arrays only) | Core | v10 §9.9; loop-object surface. The imperative `for x in RANGE { body }` statement was removed — sequential recurrences are recursive arrays (`corpus/recursive-arrays`, §7.5) |
 | Arity polymorphism: `Poly<T^k>` kernels; arity determines output rank, nesting depth, symmetry | Core | v10 §10; `corpus/arity` (14 tests); distinct from rank polymorphism and from variadics (fixed output type) |
 | Poly-pack destructuring `let (head, tail) = args`, `args[k]`, `arity`, `nth`; nested tuples; identity groups (neighboring identical arrays only) | Core | v10 §10.4, §10.7 |
 | Kernel signatures live in T-world (kernels see slices, never S-dims) | Core | v10 §10.8 |

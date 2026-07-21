@@ -613,6 +613,95 @@ let op   = for lambda(a, b) where comm -> a * b             // let-bound, awaits
 for args in SymIdx<arity(args), N> where comm(args) <@> lambda(is, xs) -> ...  // poly
 ```
 
+### 7.5 Recursive arrays
+
+Arrays are functions (§4.3) and functions recurse, so arrays recurse. A
+sequential recurrence — time-stepping, training epochs, an RNG stream — is a
+**self-referential array definition by structural induction on the extent**,
+not imperative control flow:
+
+```blade
+type Times = Idx<1600>
+let rec qh: Array<Complex128 like Times, Y, X> =
+    match qh with
+    | zero        -> zero                            // extent 0: the empty array
+    | zero :: s   -> zero :: initial_field(...)      // extent 1: the seed slice
+    | prefix :: n -> prefix :: step(n, prefix)       // extent n+1 from extent n
+```
+
+Semantics: the binding denotes a family `(n : ℕ) → Array<T like Idx<n>, ...>`
+— arrays-as-functions lifted one level, to functions of the extent. The match
+destructures the family: `prefix` binds the same array at extent n, `n` the
+new step ordinal. Reading the binding at its declared extent (or any smaller
+one) instantiates the family; interior reads `qh(k)` and final-segment reads
+compose with every combinator.
+
+Rules, all checked syntactically:
+
+- **Recursion axis = the leading axis, always.** Match destructuring is
+  co-currying: application `A(i)` peels the first dimension going down, the
+  pattern `prefix :: slice` peels it going up. No axis annotation exists.
+  Multi-dimensional recurrences nest: the slice expression may itself be a
+  `let rec` over *its* leading axis, capturing `prefix` (DP tables).
+- **Productivity**: the inductive arm must literally have the shape
+  `prefix :: e` with `e` one rank-reduced slice — exactly one new slice per
+  step, the inverse of the pattern. `::` is array snoc along the leading
+  axis and exists only inside these arms; `join` (§2.6) remains the general
+  concatenation.
+- **Termination by construction**: the recursive occurrence sits at a
+  strictly smaller extent, and extents are finite — the definition walks
+  down to the base case. There is no lag arithmetic to verify and no
+  halting question to answer; ill-founded definitions are unwritable, not
+  detected.
+- **Base cases**: `| zero -> zero` is required (the empty array is the §10.4
+  monadic zero along the recursion axis); one `| zero :: s -> zero :: seed`
+  arm may follow. A definition without a seed arm must handle the empty
+  prefix inside the slice expression.
+- **Implicit zero history.** A prefix read that falls outside the prefix
+  built so far denotes the element type's **zero** — `prefix(n - k)` at
+  `n < k` is a zero slice, and so is a read at or beyond the current step
+  (`prefix(n)`, `prefix(n + 1)`), where nothing has been written yet. This
+  extends the base case rather than adding a rule: the empty-array boundary
+  yields zero slices, so §10.4's monadic zero governs not just the whole
+  axis but every read that runs off its start. It is the array-side twin of
+  §8.2's implicit identity base case for recursive kernels (`f(())` returns
+  f's identity element).
+
+  The consequence is that a multi-lag scheme states its startup transient in
+  its *weights* instead of defending it at the call site. An AB3 integrator
+  writes `prefix(n - 3)` unconditionally — the zero-weight bootstrap
+  annihilates the term — where a hand-guarded
+  `if n >= 3 then prefix(n - 3) else ZERO` says the same thing twice.
+
+  This is a guarantee about the language, not about the current storage: it
+  compiles to a bounds test on the recursion ordinal, and it holds
+  independently of the storage policy below. The rolling window in
+  particular must preserve it — under a K+1-slot buffer an out-of-range lag
+  must still read zero, not a recycled slot.
+- **Sequentiality is derived, not commanded.** The prefix dependence forces
+  serial enumeration of the recursion axis; the compiler schedules the
+  scheme as one serial sweep. Storage is policy, not semantics: consumers
+  that read only a trailing segment get a rolling window; materializing
+  consumers (delay embedding, `|> compute`) get the full trajectory.
+- **Compilation is tail-call elimination, totally.** The productivity rule
+  makes every definition tail-recursive *modulo the snoc* (TRMC): the
+  inductive arm is a tail call wrapped in one constructor whose result
+  position is known. The scheme therefore compiles to a constant-stack
+  sweep writing each slice into its contiguous block of one pre-allocated
+  buffer — no recursion frames, no prefix copies — and this is guaranteed
+  for every well-formed definition, not best-effort. The rolling window is
+  the same elimination applied to storage: when the prefix's consumption
+  is bounded at depth K, the buffer itself shrinks to K+1 reused slots.
+- **v1 bounds** (the decidability fence): the declared extent is static;
+  the annotation is mandatory (a self-referential definition cannot infer
+  its own type — recursive functions declare return types for the same
+  reason).
+
+Running diagnostics ride the same sweep: a `reduce` over the recursive
+array (a CFL max, a loss trace) folds in enumeration order without a second
+pass. State continuation is a second definition seeded from the first's
+final slice.
+
 ## 8. Arity Polymorphism
 
 ### 8.1 The concept
@@ -642,8 +731,9 @@ where comm(a)
 `Poly<T^k>`: a pack of rank-k slices. In the body: destructuring
 `let (head, tail) = args` (left-associative; excess names bind `()`; warning
 outside poly scope), indexing `args[k]` (`[]` = structural access), scope
-variables `arity` (pack size) and `nth` (recursion depth), iteration
-`for k in 0..arity`. Recursive kernels need no explicit base case: `f(())`
+variables `arity` (pack size) and `nth` (recursion depth), and iteration over
+the pack via the poly former `method_for(range<Idx<arity(p)>>)`. Recursive
+kernels need no explicit base case: `f(())`
 returns f's identity element. Nested tuples preserve structure (`arity` counts
 top level; `comm` does not penetrate sub-tuples; no deep indexing —
 destructure instead).
@@ -1126,13 +1216,10 @@ library concern.
 - `match ... with | pat -> expr` (values, tuples, guards, sum-type payloads,
   brace blocks); match is an expression; `if c then a else b` is sugar for
   Bool match.
-- Imperative `for x in RANGE { body }` statements (blocks/function bodies):
-  the range header is a **no-struct-literal context** — the next top-level
-  `{` after the range expression is the loop body, so `for k in 0..n {`
-  reads `n` as a variable, never as struct construction `n { ... }`.
-  Delimited sub-expressions (parentheses, call arguments, index brackets)
-  re-enable struct literals inside the header. The rule extends to any
-  future brace-headed literal form (e.g. anonymous structs).
+- Sequential recurrences: there is no imperative `for x in RANGE { body }`
+  statement — it is expressed as a recursive array (structural induction on
+  extent; see §7.5), with folds as `reduce(...)` and parallel maps as
+  `method_for(range<...>) <@> lambda(...)`.
 - Tuples: `(a, b)` literals; destructuring exact / wildcard / `head :: tail`;
   `()` unit; `(e)` is grouping, not a 1-tuple.
 - Sum types: `type Option<T> = Some : T | None`; construction `Some(42)`;

@@ -233,10 +233,10 @@ enters by module-scope capture, so a loss function's parameters are exactly
 its trainables.
 
 **v1 subset** (clean errors outside it): lets, additive accumulation
-(`+=`/`-=`, scalar and array-element), element construction writes, nested
-`for-in` over int ranges, scalar arithmetic and the math intrinsics, array
-reads at data-dependent indices (gather; adjoint is scatter), and calls to
-other AD-able functions (inlined). Adjoint loops run in the same direction
+(`+=`/`-=`, scalar and array-element), element construction writes, additive
+`reduce(..., (+))` folds and rank-1 additive recursive arrays, scalar
+arithmetic and the math intrinsics, array reads at data-dependent indices
+(gather; adjoint is scatter), and calls to other AD-able functions (inlined). Adjoint loops run in the same direction
 — exact for the accumulation subset; the discipline that makes it exact is
 enforced (no non-additive scalar overwrites, no reads of loop-outliving
 accumulators mid-loop, no array recurrences, no read-then-later-write).
