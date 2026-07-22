@@ -1,6 +1,13 @@
 // TEST: Zero Kernel Symmetric
-// method_for(A, A) <@> zero with symmetric arrays
+// method_for(A, A) <@> zero over the same array twice.
+// The zero kernel is SYNTHESIZED by TypeCheck (TExprMethodFor/TExprZero) with
+// CommGroups = [], so no comm licence reaches computeAxisGroups: the two
+// levels stay in distinct axis groups and the nest is the FULL 3x3 product,
+// not the triangular 6-element packing a `where comm(x, y)` kernel would get
+// (contrast loops/003, which pins 9 values, against reynolds/004's 6).
+// Every element is the Float64 zero literal.
+// EXPECT is FLAT: a rank-2 result prints flattened row-major.
 let A = [1.0, 2.0, 3.0]
 let L = method_for(A, A)
 let result = L <@> zero |> compute
-// EXPECT: result [symmetric]
+// EXPECT: result = [0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0]

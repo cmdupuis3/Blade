@@ -1,0 +1,29 @@
+// TEST: Static Struct Destructure
+// `let static Sample { count, scale } = ...`. checkDecl's DeclStatic arm used to
+// handle PatTuple and PatCons only, so a struct pattern under `let static`
+// recorded no sub-bindings and both field names surfaced as UnboundVariable.
+//
+// Note the contrast with the cons form (026): StaticEval.bindPattern DOES have a
+// PatStruct case, so each leaf had ALREADY been folded to a compile-time value
+// and sat in env.StaticValues with nothing to attach it to. The sub-binding the
+// checker now records is what gives that folded value its name, IRId and type,
+// and Lowering's TDeclStatic path then prefers the constant over a field
+// projection.
+//
+// Field types come from the struct's DECLARED field list (structFieldTypesOf,
+// shared with the DeclLet arm), so the mixed pair below has to survive intact:
+// `scale` is a Float64 leaf carrying 2.5, not an Int leaf truncating it to 2.
+//
+// A struct-typed binding prints nothing (`IRTNamed _ -> []` in
+// genPrintStatements), and static leaves are pinned through plain lets by
+// convention (013, 024), so each leaf is re-bound before being observed.
+struct Sample {
+    count: Int,
+    scale: Float64
+}
+let static Sample { count, scale } = Sample { count = 6, scale = 2.5 }
+let n = count
+let s = scale
+// count = 6 and scale = 2.5, read out of the folded struct by field name.
+// EXPECT: n = 6
+// EXPECT: s = 2.5

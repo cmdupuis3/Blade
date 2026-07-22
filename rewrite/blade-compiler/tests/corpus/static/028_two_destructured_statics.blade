@@ -1,0 +1,36 @@
+// TEST: Two Destructured Statics In One Module
+// REGRESSION for a latent varId collision, and the reason this file exists at
+// all: no corpus module had TWO destructured statics, so the defect could not
+// show up anywhere.
+//
+// checkModule's pre-pass registers every `let static` under a key taken from its
+// pattern — the real name for `let static x`, the synthetic "_" for ANY
+// destructuring pattern — and checkDecl's DeclStatic arm adopted whatever
+// `lookupVar "_"` returned. With ONE destructured static per module that read
+// back its own entry and happened to work. With two, the second adopted the
+// FIRST one's varId: both module bindings then shared a single IRId (one C++
+// `__tup_N`, emitted twice) and the `unify` that exists to resolve forward
+// references welded their two unrelated types together. DeclStatic now takes a
+// fresh id whenever the pattern destructures, because the pre-pass entry for "_"
+// never carried any forward reference worth adopting — it registers none of the
+// pattern's real leaf names.
+//
+// The two statics below are deliberately different SHAPES and different TYPES
+// (a 2-tuple positional split and a 3-tuple cons split), so a shared id or a
+// shared type cannot accidentally still produce the right answers.
+//
+// Leaf semantics are unchanged from the single-static forms: 013 for the tuple
+// rule, 026 for the cons rule (head is element 0, tail is the REMAINDER, not
+// element 1). A tuple-typed binding prints nothing, so `tail` is re-destructured
+// into scalars to be observed.
+let static (a, b) = (1, 2)
+let static head :: tail = (10, 20, 30)
+let s1 = a * 10 + b
+let h = head
+let (t0, t1) = tail
+// a = 1 and b = 2, so s1 = 1*10 + 2 = 12.
+// head = 10 and tail = (20, 30), so t0 = 20 and t1 = 30.
+// EXPECT: s1 = 12
+// EXPECT: h = 10
+// EXPECT: t0 = 20
+// EXPECT: t1 = 30

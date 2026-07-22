@@ -1,9 +1,10 @@
 // TEST: Inference: Unannotated Sort
 // Probe C: sort() on an unannotated kernel param. Reduced to first-element
 // for a concrete check.
-// Expected to fail at typecheck — sort inspects the array arg's type.
+// Originally expected to fail at typecheck (sort inspects the array arg's
+// type); it now infers, so the probe documents working behavior.
 let r = [[3.0, 1.0, 2.0], [5.0, 4.0], [6.0]]
 let mins = method_for(r) <@> lambda(g) -> reduce(sort(g, lambda(x) -> x), (+)) |> compute
 // Sort each row ascending, sum (sort doesn't change sum, just order)
 // Sums: 6, 9, 6
-// If this ever passes: EXPECT: mins = [6, 9, 6]
+// EXPECT: mins = [6, 9, 6]

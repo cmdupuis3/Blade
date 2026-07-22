@@ -1,0 +1,36 @@
+// TEST: Struct Destructure In Block
+// Block-scoped `let Point { x, y } = p`. inferBlock's TStmtLet handling used to
+// record SubBindings for PatTuple and PatCons ONLY, so a struct pattern inside a
+// block bound nothing at all and both field names surfaced later in the block as
+// UnboundVariable. Semantics are identical to the top-level form
+// (structs/003_struct_pattern): each leaf takes the field of its OWN name.
+//
+// The second block is the by-name probe. Projection is BY NAME, never by
+// position — Lowering emits IRFieldAccess keyed on the leaf's own name, and the
+// checker now reads the leaf's declared TYPE the same way (structFieldTypesOf,
+// shared with checkDecl's DeclLet arm). `swapped` writes the two fields in the
+// OPPOSITE order from the declaration and must still bind x to field `x` and y
+// to field `y`; a positional rule would shear them past each other.
+//
+// Block-local names are never auto-printed (only module-level bindings are), and
+// a struct-typed binding prints nothing in any case (genPrintStatements has an
+// `IRTNamed _ -> []` arm), so each block returns a digit-weighted scalar that
+// pins both leaves at once.
+struct Point {
+    x: Int,
+    y: Int
+}
+let p = Point { x = 4, y = 7 }
+let result = {
+    let Point { x, y } = p
+    x * 100 + y
+}
+let swapped = {
+    let Point { y, x } = p
+    x * 100 + y
+}
+// x = 4 and y = 7 in BOTH blocks, so both scalars are 4*100 + 7 = 407.
+// Under a positional rule the second block would bind y = 4 and x = 7, and
+// `swapped` would come out 7*100 + 4 = 704 instead.
+// EXPECT: result = 407
+// EXPECT: swapped = 407

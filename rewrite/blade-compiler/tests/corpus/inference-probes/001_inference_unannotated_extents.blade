@@ -42,8 +42,10 @@
 //      pass criterion.
 // ============================================================================
 // Probe A: extents() on an unannotated kernel param.
-// Expected to fail at typecheck with "extents requires array" or similar
-// — same pattern reduce had before the recent fix.
+// Originally expected to fail at typecheck with "extents requires array" —
+// same pattern reduce had before the recent fix. It now infers, so the
+// probe documents working behavior: extents(g) is each row's length.
 let r = [[1.0, 2.0, 3.0], [4.0, 5.0], [6.0]]
 let sizes = method_for(r) <@> lambda(g) -> extents(g) |> compute
-// If this ever passes: EXPECT: sizes = [3, 2, 1]
+// Row lengths of the ragged literal: 3, 2, 1
+// EXPECT: sizes = [3, 2, 1]

@@ -1,0 +1,18 @@
+// TEST: Cons Destructure In Block
+// Block-scoped `let head :: tail = t`. inferBlock's TStmtLet handling used to
+// record SubBindings for PatTuple ONLY, so a cons pattern inside a block bound
+// nothing at all and both names surfaced later as UnboundVariable. Semantics
+// are identical to the top-level form (010_cons_destructure): head is element
+// 0 and tail is the REMAINDER — the 2-tuple (2, 3), not element 1.
+// Block-local names are never auto-printed (only module-level bindings are),
+// and a tuple-typed binding prints nothing in any case, so the block returns a
+// digit-weighted scalar that pins all three leaves at once.
+let result = {
+    let t = (1, 2, 3)
+    let head :: tail = t
+    let (t0, t1) = tail
+    head * 100 + t0 * 10 + t1
+}
+// head = 1, tail = (2, 3), so t0 = 2 and t1 = 3.
+// 1*100 + 2*10 + 3 = 123.
+// EXPECT: result = 123

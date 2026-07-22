@@ -2,7 +2,10 @@
 // <&!> requires identical backends at the shared level. mean is serial (no
 // clause) and cov requests omp — a mismatch. Mandatory fusion cannot silently
 // pick one, so the compiler rejects loudly with steering to <&> (which would
-// let the serial leaf defer to the omp sibling instead).
+// let the serial leaf defer to the omp sibling instead). The mismatch is
+// caught in codegen: lowering succeeds and the emitted C++ carries an #error
+// naming the mixed serial/omp leaves, so the C++ compile is what fails.
+// REJECT-AT: codegen
 let A = [1.0, 2.0, 3.0]
 let mean = lambda(x) -> x
 let cov = lambda(x, y) where omp(x: 1) -> x * y

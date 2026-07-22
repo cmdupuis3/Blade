@@ -331,12 +331,37 @@ and TypedBinding = {
     Value: TypedExpr
     /// Destructured sub-bindings: (name, varId, type) for PatTuple/PatCons/PatStruct
     SubBindings: (string * IRId * IRType) list
+    /// How Lowering must derive each SubBindings entry from the primary value.
+    /// See DestructureShape — without it a cons pattern is indistinguishable
+    /// from a tuple pattern by the time lowering runs, and `head :: tail`
+    /// miscompiles into two positional projections.
+    Destructure: DestructureShape
     /// Constraint guards to run right after this binding (mutual-group joint
     /// checks). IRIds are allocated by the checker directly after the
     /// SubBinding ids — module emission is IRId-ordered, so lowering-time
     /// fresh ids would sort to the end and run too late.
     PostChecks: (IRId * TypedExpr) list
 }
+
+/// How a TypedBinding's SubBindings relate to the primary binding's value.
+///
+/// The tag lives on the BINDING rather than on each sub-binding entry because
+/// SubBindings' element shape `(name, varId, type)` is consumed positionally by
+/// Cli.fs, Ide.fs and Zonk.fs; widening the tuple would ripple through all of
+/// them for information only Lowering needs.
+and DestructureShape =
+    /// Sub-binding i is element i of a tuple (or, for a struct scrutinee, the
+    /// field with the sub-binding's own name). Also the shape of a binding with
+    /// no destructuring at all.
+    | DSPositional
+    /// Cons split over a tuple scrutinee. `::` is right-associative, so a chain
+    /// `a :: b :: rest` is flattened by the checker into leading leaves [a; b]
+    /// plus one REST leaf. Every leaf but the LAST is positional as usual; the
+    /// last one takes the whole remainder — all elements from its own index
+    /// onward, re-tupled — rather than the single element at its index. A
+    /// one-element remainder binds that element bare, because Blade has no
+    /// 1-tuple: `(x)` is just `x`.
+    | DSConsRest
 
 and TypedFunctionDecl = {
     Name: string
