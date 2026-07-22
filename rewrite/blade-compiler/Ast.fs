@@ -202,6 +202,17 @@ type TypeExpr =
     // TyRaggedIdx because it carries no lengths expression — there is nothing
     // to look up; the extent is whatever the loop binding provides.
     | TyRaggedIdxOpaque
+    // The tag wildcard `_`, legal ONLY as the sole type argument of a numeric
+    // base: `Nat<_>`, `Int64<_>`, `Float64<_>`. Reads as "any tag" — the
+    // parameter accepts a value carrying any nominal index tag, any unit
+    // signature, or none at all. Never appears bare: the parser only produces
+    // it from the `Base<_>` two-token lookahead, so it cannot leak into
+    // arbitrary type positions (element types, tuple slots, arrows).
+    //
+    // Lowers to `IRTIdxTagged (base, IRefAny)`; legal in PARAMETER position
+    // only, since a wildcard has no tag to hand back to a consumer (see
+    // irTypeHasTagWildcard's use sites in TypeCheck).
+    | TyWildcard
     // IrrepsIdx<spec> — block-structured dense index over an equivariant-NN
     // irreps spec (a static array of (l, parity, mult) int triples). Extent
     // is total_dim(spec) = Σ mult*(2l+1); every cell is stored (flat dense,
@@ -328,6 +339,8 @@ and ExprKind =
     | ExprAlign of Expr list * AlignSpec option
     // Stack
     | ExprStack of Expr list
+    // Join — concatenate n same-rank arrays along dimension d (formalism §2.6)
+    | ExprJoin of arrays: Expr list * dim: int
     // Combinators
     | ExprPure of Expr
     | ExprCompute of Expr                  // expr |> compute
@@ -371,11 +384,38 @@ and ExprKind =
     // the parser, consumed and ELIMINATED by the Unfold pass (Unfold.fs)
     // before any elaboration or typechecking; downstream stages never see it.
     | ExprStatic of Expr
+    // Recursive array definition (structural induction on the leading-axis
+    // extent — formalism: arrays are functions, functions recurse). Appears
+    // ONLY as the Value of a `let rec NAME : TYPE = match NAME with ...`
+    // binding; the parser validates the arm shapes (productivity is
+    // syntactic: the inductive arm is literally `prefix :: slice`) and
+    // structures them here. The `| zero -> zero` base arm is validated and
+    // implied, not stored. Sequentiality is DERIVED (each slice depends on
+    // the prefix); lowering compiles the scheme to a serial loop.
+    | ExprRecArray of RecArrayDef
 
 /// Every expression carries its source span (full-span AST). Construct via
 /// mkExpr / inheritSpan / syn (defined after this type group); match on
 /// `e.Kind` with qualified `ExprKind.Case` patterns.
 and Expr = { Kind: ExprKind; Span: Span }
+
+/// The structured arms of a recursive-array definition:
+///   let rec q: Array<T like Step, ...> = match q with
+///   | zero        -> zero                    // required base (extent 0)
+///   | zero :: n   -> zero :: SEED            // optional seed (extent 1)
+///   | prefix :: n -> prefix :: SLICE         // required inductive arm
+/// PrefixVar binds the smaller family, StepVar the new step ordinal (the
+/// extent of the prefix). SLICE may read prefix at earlier ordinals
+/// (curried leading-axis reads) and use StepVar for step-dependent
+/// coefficients. SeedArm, when present, carries its own step-var name
+/// (always bound to 0) and the seed slice expression.
+and RecArrayDef = {
+    Name: Ident
+    SeedArm: (Ident * Expr) option
+    PrefixVar: Ident
+    StepVar: Ident
+    SliceExpr: Expr
+}
 
 /// Every pattern carries its source span. Construct via mkPat.
 and Pattern = { Kind: PatternKind; Span: Span }

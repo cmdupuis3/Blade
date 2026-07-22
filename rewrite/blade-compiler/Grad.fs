@@ -250,8 +250,12 @@ let rec private walkExpr (fname: string) (ctx: Ctx) (onVar: string -> unit) (e: 
     | { Kind = ExprKind.ExprBlock _ } -> err fname "nested block expressions are not supported in differentiated code"
     | { Kind = ExprKind.ExprLet _ } -> err fname "expression-level let is not supported in differentiated code"
     | ConstFill _ -> Ok ()   // literal fill: computes nothing, reads nothing
+    | { Kind = ExprKind.ExprReduce _ } ->
+        err fname "differentiable code supports straight-line arithmetic, additive `reduce`, and rank-1 recursive arrays (v1); this reduce could not be normalized (only `reduce(A, (+)[, init])` over an array variable or inline literal is differentiable)"
+    | { Kind = ExprKind.ExprRecArray _ } ->
+        err fname "differentiable code supports straight-line arithmetic, additive `reduce`, and rank-1 recursive arrays (v1); a recursive array is differentiable only as a top-level `let rec` binding in the body"
     | { Kind = ExprKind.ExprLambda _ } | { Kind = ExprKind.ExprMethodFor _ } | { Kind = ExprKind.ExprObjectFor _ } | { Kind = ExprKind.ExprCompute _ } | { Kind = ExprKind.ExprPure _ } ->
-        err fname "loop-object combinators are not supported in differentiated code (write explicit for-in loops)"
+        err fname "differentiable code supports straight-line arithmetic, additive `reduce`, and rank-1 recursive arrays (v1); loop-object combinators (lambda/method_for/object_for/compute/pure) are not differentiable"
     | { Kind = ExprKind.ExprTuple _ } -> err fname "tuple values are not supported in differentiated code"
     | { Kind = ExprKind.ExprField _ } -> err fname "struct field access is not supported in differentiated code"
     | _ -> err fname "unsupported expression form in differentiated code"
@@ -346,6 +350,278 @@ let rec private hoistCalls (fname: string) (ctx: Ctx) (e: Expr) : Result<NStmt l
         folded |> Result.map (fun (stmts, es) -> (stmts, re (ExprArrayLit es)))
     | _ -> Ok ([], e)
 
+// ============================================================================
+// Pre-normalization of the imperative-free surface constructs
+// ============================================================================
+//
+// `for x in a..b {}` is being retired from the surface language; its
+// replacements (recursive arrays, `reduce`) reach grad as ExprRecArray /
+// ExprReduce nodes the NFor pipeline never learned to read. This pass is a
+// SOURCE-TO-SOURCE rewrite over each differentiated function body that lowers
+// those forms into the ACCUMULATION and CONSTRUCTION statement shapes grad
+// already differentiates — additive-only, keeping the BL5500 discipline. It
+// runs BEFORE convertStmts, so downstream sees only familiar for-in loops,
+// element writes, and additive `+=`.
+
+/// Float-ness of a type annotation (mirrors isFloatTy, needed earlier).
+let private preIsFloatTy (t: TypeExpr) : bool =
+    match t with
+    | TyFloat64 | TyFloat32 -> true
+    | TyNamed (("Float" | "Float64" | "Float32"), []) -> true
+    | _ -> false
+
+/// Read the static per-axis extents of an `Array<Float like Idx<n>, ...>`
+/// annotation. Returns (elem-is-Float, extents) when every axis is a literal
+/// `Idx<n>`; None otherwise (non-literal extents / non-array type). v1 admits
+/// literal extents only — named/derived index extents are rejected upstream.
+let private arrayLiteralExtents (t: TypeExpr) : (bool * int list) option =
+    match t with
+    | TyArray (elem, idxs) ->
+        let exts =
+            idxs |> List.map (fun ix ->
+                match ix with
+                | TyIdx { Kind = ExprKind.ExprLit (LitInt n) } -> Some (int n)
+                | _ -> None)
+        if not idxs.IsEmpty && exts |> List.forall Option.isSome then
+            Some (preIsFloatTy elem, exts |> List.map Option.get)
+        else None
+    | _ -> None
+
+/// Does `e` reference the variable `name` anywhere (over the arithmetic +
+/// array-read fragment recursive-array slices live in)?
+let rec private mentionsVar (name: string) (e: Expr) : bool =
+    match e.Kind with
+    | ExprKind.ExprVar n -> n = name
+    | ExprKind.ExprLit _ -> false
+    | ExprKind.ExprTyped (inner, _) | ExprKind.ExprUnaryOp (_, inner) -> mentionsVar name inner
+    | ExprKind.ExprBinOp (_, _, l, r) | ExprKind.ExprDotDot (l, r) -> mentionsVar name l || mentionsVar name r
+    | ExprKind.ExprApp (f, args) -> mentionsVar name f || List.exists (mentionsVar name) args
+    | ExprKind.ExprArrayLit elems -> List.exists (mentionsVar name) elems
+    | _ -> false
+
+/// Substitute free references to `name` with the expression `repl` over the
+/// same fragment (used to bind a recurrence's step ordinal / prefix name).
+let rec private substVar (name: string) (repl: Expr) (e: Expr) : Expr =
+    let re k = inheritSpan e k
+    match e.Kind with
+    | ExprKind.ExprVar n when n = name -> repl
+    | ExprKind.ExprVar _ | ExprKind.ExprLit _ -> e
+    | ExprKind.ExprTyped (inner, t) -> re (ExprTyped (substVar name repl inner, t))
+    | ExprKind.ExprUnaryOp (op, inner) -> re (ExprUnaryOp (op, substVar name repl inner))
+    | ExprKind.ExprBinOp (m, op, l, r) -> re (ExprBinOp (m, op, substVar name repl l, substVar name repl r))
+    | ExprKind.ExprApp (f, args) -> re (ExprApp (substVar name repl f, args |> List.map (substVar name repl)))
+    | ExprKind.ExprArrayLit elems -> re (ExprArrayLit (elems |> List.map (substVar name repl)))
+    | ExprKind.ExprDotDot (l, h) -> re (ExprDotDot (substVar name repl l, substVar name repl h))
+    | _ -> e
+
+/// Expand a rank-1 recursive-array `let` into the buffer + element-write /
+/// accumulation statements the NFor differentiation pipeline handles.
+/// Returns the emitted statements and the buffer's leading extent (for the
+/// ambient reduce-source extent env). The bound NAME is reused as the buffer
+/// so downstream reads of it keep resolving.
+///
+///   * additive prefix recurrence `prefix :: prefix(n-1) + INC` (with a
+///     `zero :: n` seed arm, INC prefix-free) -> a TRIANGULAR accumulation
+///     `s(k) += INC[n:=m]` over `m in 1..k+1`. A same-direction adjoint loop
+///     is wrong for a genuine scan, so the scan is unrolled into independent
+///     scatter-adds — semantically identical, and exactly differentiable.
+///   * prefix-free construction `prefix :: f(n)` -> direct element writes.
+///   * anything else (nonlinear recurrence, rank >= 2, no seed) is rejected.
+let private expandRecArray (fname: string) (ctx: Ctx)
+                           (name: string) (annot: TypeExpr) (def: RecArrayDef)
+    : Result<Stmt list * int, string> =
+    match arrayLiteralExtents annot with
+    | None ->
+        err fname (sprintf "recursive array '%s': a differentiable recursive array needs an `Array<Float like Idx<n>>` annotation with a literal extent (v1)" name)
+    | Some (false, _) ->
+        err fname (sprintf "recursive array '%s': only Float-element recursive arrays are differentiable (v1)" name)
+    | Some (true, [n]) ->
+        let bufName = name
+        let bufVar = syn (ExprVar bufName)
+        let sAt (idxE: Expr) = syn (ExprApp (bufVar, [idxE]))
+        let zeros = syn (ExprArrayLit (List.replicate n (fLit 0.0)))
+        let bufLet = StmtLet { Mutability = BindMut; Pattern = synPat (PatVar bufName); Type = None; Value = zeros }
+        let stepVar = def.StepVar
+        let prefixVar = def.PrefixVar
+        // `x` is exactly the immediate-predecessor read `prefix(stepVar - 1)`?
+        let isPrevPrefixRead (x: Expr) =
+            match x.Kind with
+            | ExprKind.ExprApp ({ Kind = ExprKind.ExprVar p }, [idx]) when p = prefixVar ->
+                (match idx.Kind with
+                 | ExprKind.ExprBinOp (_, OpSub, { Kind = ExprKind.ExprVar s }, { Kind = ExprKind.ExprLit (LitInt 1L) }) -> s = stepVar
+                 | _ -> false)
+            | _ -> false
+        let hasPrefix (e: Expr) = mentionsVar prefixVar e
+        // additive-prefix slice `prefix(n-1) + REST` / `REST + prefix(n-1)`,
+        // REST prefix-free -> Some REST (the per-step increment).
+        let additiveRest =
+            match def.SliceExpr.Kind with
+            | ExprKind.ExprBinOp (_, OpAdd, a, b) when isPrevPrefixRead a && not (hasPrefix b) -> Some b
+            | ExprKind.ExprBinOp (_, OpAdd, a, b) when isPrevPrefixRead b && not (hasPrefix a) -> Some a
+            | _ -> None
+        match additiveRest, def.SeedArm with
+        | Some rest, Some (seedStep, seedExpr) ->
+            let seeded = substVar seedStep (iLit 0L) seedExpr
+            let isZeroSeed = (match seeded.Kind with ExprKind.ExprLit (LitFloat 0.0) -> true | _ -> false)
+            let kVar = fresh ctx "__rk"
+            let mVar = fresh ctx "__rm"
+            let restM = substVar stepVar (v mVar) rest
+            let innerLoop =
+                StmtForIn (mVar,
+                           syn (ExprDotDot (iLit 1L, add (v kVar) (iLit 1L))),
+                           [ StmtExpr (syn (ExprAssign (sAt (v kVar), add (sAt (v kVar)) restM))) ])
+            let seedCarry =
+                if isZeroSeed then []
+                else [ StmtExpr (syn (ExprAssign (sAt (v kVar), add (sAt (v kVar)) seeded))) ]
+            let outerLoop =
+                StmtForIn (kVar, syn (ExprDotDot (iLit 1L, iLit (int64 n))), seedCarry @ [innerLoop])
+            let seedWrite =
+                if isZeroSeed then []
+                else [ StmtExpr (syn (ExprAssign (sAt (iLit 0L), seeded))) ]
+            Ok (bufLet :: (seedWrite @ [outerLoop]), n)
+        | None, _ when not (hasPrefix def.SliceExpr) ->
+            // Pure construction (no carried state): direct element writes.
+            let loopStart, seedStmts =
+                match def.SeedArm with
+                | Some (seedStep, seedExpr) ->
+                    1L, [ StmtExpr (syn (ExprAssign (sAt (iLit 0L), substVar seedStep (iLit 0L) seedExpr))) ]
+                | None -> 0L, []
+            let loop =
+                StmtForIn (stepVar,
+                           syn (ExprDotDot (iLit loopStart, iLit (int64 n))),
+                           [ StmtExpr (syn (ExprAssign (sAt (v stepVar), def.SliceExpr))) ])
+            Ok (bufLet :: (seedStmts @ [loop]), n)
+        | _ ->
+            err fname (sprintf "recursive array '%s' is not differentiable (v1): only additive prefix recurrences `prefix :: prefix(n-1) + <increment>` (with a `zero :: n` seed arm and a prefix-free increment) and prefix-free construction are supported" name)
+    | Some (true, exts) ->
+        err fname (sprintf "recursive array '%s': only rank-1 (scalar-slice) recursive arrays are differentiable (v1); a rank-%d recursive array is not supported" name exts.Length)
+
+/// Rewrite additive `reduce(SRC, (+)[, init])` occurrences inside `e` into an
+/// accumulator loop (returned as a prefix of statements) plus a reference to
+/// the accumulator. Reject non-additive kernels and non-array-literal /
+/// non-variable sources (deferred/former reductions) — the additive subset
+/// matching grad v1. `extents` maps in-scope array names to their extents.
+let rec private hoistReduces (fname: string) (ctx: Ctx) (extents: Map<string, int>) (e: Expr)
+    : Result<Stmt list * Expr, string> =
+    let re k = inheritSpan e k
+    let recurse = hoistReduces fname ctx extents
+    match e.Kind with
+    | ExprKind.ExprReduce (src, kernel, initOpt) ->
+        (match kernel.Kind with
+         | ExprKind.ExprSection OpAdd -> Ok ()
+         | ExprKind.ExprSection _ -> err fname "reduce in differentiated code supports only the additive kernel `(+)` (v1)"
+         | _ -> err fname "reduce in differentiated code supports only the additive kernel `(+)`; lambda and product kernels are not differentiable (v1)")
+        |> Result.bind (fun () ->
+        recurse src |> Result.bind (fun (srcPre, src') ->
+        let initE = match initOpt with Some ie -> ie | None -> fLit 0.0
+        let accName = fresh ctx "__red"
+        let accLet = StmtLet { Mutability = BindMut; Pattern = synPat (PatVar accName); Type = None; Value = initE }
+        match src'.Kind with
+        | ExprKind.ExprArrayLit elems ->
+            // Inline literal: UNROLL to per-element scalar accumulations. A
+            // read-loop over a bound literal would lose the cotangent — grad
+            // treats array-literal lets as constant inits (nothing flows back
+            // to the elements) — so keep each active element in scalar
+            // accumulation position, which grad differentiates exactly.
+            let adds =
+                elems |> List.map (fun el ->
+                    StmtExpr (syn (ExprAssign (v accName, add (v accName) el))))
+            Ok (srcPre @ [accLet] @ adds, v accName)
+        | ExprKind.ExprVar nm ->
+            (match Map.tryFind nm extents with
+             | Some cnt ->
+                 let kVar = fresh ctx "__rik"
+                 let readK = syn (ExprApp (syn (ExprVar nm), [v kVar]))
+                 let loop =
+                     StmtForIn (kVar,
+                                syn (ExprDotDot (iLit 0L, iLit (int64 cnt))),
+                                [ StmtExpr (syn (ExprAssign (v accName, add (v accName) readK))) ])
+                 Ok (srcPre @ [accLet; loop], v accName)
+             | None -> err fname (sprintf "reduce source '%s' has no statically-known extent in differentiated code; reduce over a param/let array with an `Idx<n>` extent or over an inline array literal (v1)" nm))
+        | _ -> err fname "reduce in differentiated code requires an array-variable or inline-array-literal source; deferred/former reductions are not differentiable (v1)"))
+    | ExprKind.ExprBinOp (m, op, l, r) ->
+        recurse l |> Result.bind (fun (pl, l') ->
+        recurse r |> Result.map (fun (pr, r') -> (pl @ pr, re (ExprBinOp (m, op, l', r')))))
+    | ExprKind.ExprUnaryOp (op, inner) ->
+        recurse inner |> Result.map (fun (p, i') -> (p, re (ExprUnaryOp (op, i'))))
+    | ExprKind.ExprTyped (inner, t) ->
+        recurse inner |> Result.map (fun (p, i') -> (p, re (ExprTyped (i', t))))
+    | ExprKind.ExprAssign (l, r) ->
+        recurse r |> Result.map (fun (pr, r') -> (pr, re (ExprAssign (l, r'))))
+    | ExprKind.ExprApp (f, args) ->
+        args |> List.fold (fun acc a ->
+            acc |> Result.bind (fun (ps, args') ->
+                recurse a |> Result.map (fun (p, a') -> (ps @ p, args' @ [a']))))
+            (Ok ([], []))
+        |> Result.map (fun (ps, args') -> (ps, re (ExprApp (f, args'))))
+    | ExprKind.ExprArrayLit elems ->
+        elems |> List.fold (fun acc a ->
+            acc |> Result.bind (fun (ps, es) ->
+                recurse a |> Result.map (fun (p, a') -> (ps @ p, es @ [a']))))
+            (Ok ([], []))
+        |> Result.map (fun (ps, es) -> (ps, re (ExprArrayLit es)))
+    | _ -> Ok ([], e)
+
+/// The pre-pass proper: rewrite one function body's statements, expanding
+/// recursive-array lets and hoisting reduces, threading an extent env so
+/// reduce sources can recover their loop bound.
+let private preNormalizeBody (fname: string) (ctx: Ctx) (fd: FunctionDecl) : Result<Expr, string> =
+    let paramExtents =
+        fd.Params |> List.choose (fun p ->
+            match p.Type with
+            | Some t -> (match arrayLiteralExtents t with Some (true, [n]) -> Some (p.Name, n) | _ -> None)
+            | None -> None)
+        |> Map.ofList
+    let stmts0, finalOpt =
+        match fd.Body.Kind with
+        | ExprKind.ExprBlock (ss, fe) -> ss, fe
+        | _ -> [], Some fd.Body
+    let rec goStmts (env: Map<string, int>) (ss: Stmt list) : Result<Map<string, int> * Stmt list, string> =
+        ss |> List.fold (fun acc s ->
+            acc |> Result.bind (fun (env, outp) ->
+                match unwrapStmt s with
+                | StmtLet { Value = { Kind = ExprKind.ExprRecArray def }; Type = Some annot; Pattern = { Kind = PatternKind.PatVar nm } } ->
+                    expandRecArray fname ctx nm annot def
+                    |> Result.map (fun (emitted, ext) -> (Map.add nm ext env, outp @ emitted))
+                | StmtLet { Value = { Kind = ExprKind.ExprRecArray _ } } ->
+                    err fname "recursive array must bind a single annotated name to be differentiable (v1)"
+                | StmtLet ({ Pattern = { Kind = PatternKind.PatVar nm } } as b) ->
+                    hoistReduces fname ctx env b.Value |> Result.map (fun (pre, value') ->
+                        let env' =
+                            let byAnn =
+                                match b.Type with
+                                | Some t -> (match arrayLiteralExtents t with Some (true, [n]) -> Some n | _ -> None)
+                                | None -> None
+                            let byLit =
+                                match value'.Kind with
+                                | ExprKind.ExprArrayLit elems -> Some elems.Length
+                                | _ -> None
+                            match (match byAnn with Some _ -> byAnn | None -> byLit) with
+                            | Some cnt -> Map.add nm cnt env
+                            | None -> env
+                        (env', outp @ pre @ [StmtLet { b with Value = value' }]))
+                | StmtLet b ->
+                    hoistReduces fname ctx env b.Value |> Result.map (fun (pre, value') ->
+                        (env, outp @ pre @ [StmtLet { b with Value = value' }]))
+                | StmtExpr ex ->
+                    hoistReduces fname ctx env ex |> Result.map (fun (pre, ex') ->
+                        (env, outp @ pre @ [StmtExpr ex']))
+                | StmtAssign (lhs, op, rhs) ->
+                    hoistReduces fname ctx env rhs |> Result.map (fun (pre, rhs') ->
+                        (env, outp @ pre @ [StmtAssign (lhs, op, rhs')]))
+                | StmtForIn (var, range, body) ->
+                    goStmts env body |> Result.map (fun (_, body') ->
+                        (env, outp @ [StmtForIn (var, range, body')]))
+                | StmtSpanned _ -> Ok (env, outp @ [s])))
+            (Ok (env, []))
+    goStmts paramExtents stmts0 |> Result.bind (fun (env, stmts') ->
+        match finalOpt with
+        | Some fe ->
+            hoistReduces fname ctx env fe |> Result.map (fun (pre, fe') ->
+                inheritSpan fd.Body (ExprBlock (stmts' @ pre, Some fe')))
+        | None ->
+            Ok (inheritSpan fd.Body (ExprBlock (stmts', None))))
+
 /// Normalize + inline a function body to the flat NStmt fragment:
 /// all user calls inlined, all statements validated.
 let rec private normalizeBody (fname: string) (ctx: Ctx) (depth: int) (fd: FunctionDecl)
@@ -353,7 +629,10 @@ let rec private normalizeBody (fname: string) (ctx: Ctx) (depth: int) (fd: Funct
     if depth > 32 then
         err fname "call inlining exceeded depth 32 (recursive functions are not differentiable)"
     else
-    convertBody fname fd.Body |> Result.bind (fun (stmts, finalE) ->
+    // Lower the imperative-free surface constructs (recursive arrays, reduce)
+    // into accumulation/construction statements before the NFor pipeline runs.
+    preNormalizeBody fname ctx fd |> Result.bind (fun body' ->
+    convertBody fname body' |> Result.bind (fun (stmts, finalE) ->
     // hoist calls inside the final expression too
     hoistCalls fname ctx finalE |> Result.bind (fun (finalHoist, finalE') ->
     let rec normStmts (ss: NStmt list) : Result<NStmt list, string> =
@@ -389,7 +668,7 @@ let rec private normalizeBody (fname: string) (ctx: Ctx) (depth: int) (fd: Funct
                     normStmts body |> Result.map (fun body' ->
                         outStmts @ [NFor (var, lo, hi, body')])))
             (Ok [])
-    normStmts (stmts @ finalHoist) |> Result.map (fun ns -> (ns, finalE'))))
+    normStmts (stmts @ finalHoist) |> Result.map (fun ns -> (ns, finalE')))))
 
 /// Inline `let target = callee(args)`: bind arguments to fresh param names,
 /// splice the callee's own normalized body with all its binders renamed,

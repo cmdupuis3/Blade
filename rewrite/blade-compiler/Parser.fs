@@ -482,6 +482,20 @@ and parseSimplePrimary (tokens: Token list) : ParseResult<Expr> =
         success (mkExpr (mergeSpan (headSpan tokens) operand.Span) (ExprUnaryOp (OpNeg, operand))) remaining
     | Some (LiteralTok lit) -> success (mkExpr (headSpan tokens) (ExprLit lit)) (advance tokens)
     | Some (TokIdent name) -> success (mkExpr (headSpan tokens) (ExprVar name)) (advance tokens)
+    | Some (TokKeyword KwArity) ->
+        // `arity(p)` in a static payload position: `Idx<arity(args)>` — the
+        // poly-pack former's extent (formalism §7.4). Resolves to a literal
+        // at pack monomorphization (Ir.specializeFunction's IRArity rewrite).
+        let afterArity = advance tokens
+        expect TokLParen afterArity >>= fun _ afterLParen ->
+        (match peek afterLParen with
+         | Some (TokIdent packName) -> success packName (advance afterLParen)
+         | _ ->
+            let line, col = currentPos afterLParen
+            error "Expected a pack parameter name in arity(...)" line col)
+        >>= fun packName afterName ->
+        expect TokRParen afterName >>= fun _ remaining ->
+        success (mkE tokens remaining (ExprArity packName)) remaining
     | Some TokLParen ->
         // Parenthesized simple expression OR tuple of simple expressions.
         // The tuple form serves static index-type arguments whose payload is
@@ -555,6 +569,19 @@ let parseRankExpr (tokens: Token list) : ParseResult<Expr> =
         error (sprintf "Expected rank expression (integer, arity, or identifier), got %s" (describeToken t)) line col
     | None ->
         errorEof "Expected rank expression but got end of file"
+
+/// Two-token lookahead for the tag wildcard `Base<_>`: TokUnderscore
+/// immediately followed by `>` or `>>` (expectGt splits the latter). Same
+/// context-sensitivity discipline as `RaggedIdx<_>` below — `_` only means
+/// "any tag" when it is the SOLE type argument, so `_ + 1`, `_, x`, and
+/// identifiers merely starting with `_` are left for the ordinary parsers.
+/// `tokens` is positioned just after the opening `<`.
+let isTagWildcardArg (tokens: Token list) : bool =
+    match tokens with
+    | t1 :: t2 :: _ when
+        t1.Kind = TokUnderscore &&
+        (t2.Kind = TokOp ">" || t2.Kind = TokOp ">>") -> true
+    | _ -> false
 
 let rec parseTypeExpr (tokens: Token list) : ParseResult<TypeExpr> =
     parseTypeAtom tokens >>= fun first rest ->
@@ -676,14 +703,21 @@ and parseTypeAtom (tokens: Token list) : ParseResult<TypeExpr> =
                 // Non-literal rank (T^r where r is a variable)
                 success (TyAbstractArray (TyVar (name, None), rankExpr, None)) remaining
         | Some (TokOp "<") ->
+            let afterLt = advance afterName
+            if isTagWildcardArg afterLt then
+                // Tag wildcard: `Nat<_>`, `Int64<_>`, `Float64<_>`. Legality
+                // per base type and per position is settled at lowering.
+                expectGt (advance afterLt) >>= fun _ remaining ->
+                success (TyNamed (name, [TyWildcard])) remaining
+            else
             // Parameterized type: Array<T>, MyStruct<Int>, etc.
-            advance afterName |> sepBy parseTypeExpr TokComma >>= fun args afterArgs ->
+            afterLt |> sepBy parseTypeExpr TokComma >>= fun args afterArgs ->
             expectGt afterArgs >>= fun _ remaining ->
             success (TyNamed (name, args)) remaining
         | _ ->
             // Bare name without caret: always a named type / type constructor
             success (TyNamed (name, [])) afterName
-    
+
     | Some kind ->
         let line, col = currentPos tokens
         error (sprintf "Unexpected token in type: %s" (describeToken kind)) line col
@@ -836,8 +870,16 @@ and parseIndexType (tokens: Token list) : ParseResult<TypeExpr> =
         let afterName = advance tokens
         match peek afterName with
         | Some (TokOp "<") ->
+            let afterLt = advance afterName
+            if isTagWildcardArg afterLt then
+                // A wildcard in a storage-index slot is illegal, but parsing it
+                // lets lowerIndexType report the position error with a real span
+                // instead of a bare "unexpected token" from the token stream.
+                expectGt (advance afterLt) >>= fun _ remaining ->
+                success (TyNamed (name, [TyWildcard])) remaining
+            else
             // Parameterized named type: still acceptable here.
-            advance afterName |> sepBy parseTypeExpr TokComma >>= fun args afterArgs ->
+            afterLt |> sepBy parseTypeExpr TokComma >>= fun args afterArgs ->
             expectGt afterArgs >>= fun _ remaining ->
             success (TyNamed (name, args)) remaining
         | _ ->
@@ -1583,7 +1625,25 @@ and parsePrimary (tokens: Token list) : ParseResult<Expr> =
         sepBy parseExprImpl TokComma afterLParen >>= fun exprs afterExprs ->
         expect TokRParen afterExprs >>= fun _ remaining ->
         success (mkE tokens remaining (ExprStack exprs)) remaining
-    
+
+    // join(A, B, ..., d) — concatenate along dimension d. The dimension is the
+    // LAST argument and must be an integer literal (it selects an index-type
+    // slot, so it is compile-time data, exactly like transpose's axis pair).
+    | Some (TokKeyword KwJoin) ->
+        advance tokens |> expect TokLParen >>= fun _ afterLParen ->
+        sepBy parseExprImpl TokComma afterLParen >>= fun exprs afterExprs ->
+        expect TokRParen afterExprs >>= fun _ remaining ->
+        let line, col = currentPos afterExprs
+        (match List.rev exprs with
+         | last :: revArrays when revArrays.Length >= 2 ->
+            (match last.Kind with
+             | ExprKind.ExprLit (LitInt d) ->
+                success (mkE tokens remaining (ExprJoin (List.rev revArrays, int d))) remaining
+             | _ ->
+                error "join expects an integer dimension as its last argument: join(A, B, d)" line col)
+         | _ ->
+            error "join expects at least two arrays and a dimension: join(A, B, d)" line col)
+
     // sequence(a, b, ...)
     | Some (TokKeyword KwSequence) ->
         advance tokens |> expect TokLParen >>= fun _ afterLParen ->
@@ -2267,34 +2327,29 @@ and parseBlock (tokens: Token list) : ParseResult<Expr> =
             let remaining = skipTerminator remaining
             loop (spanned remaining stmt :: stmts) remaining
         | Some (TokKeyword KwFor) ->
-            // Check for imperative for-in loop: for IDENT in EXPR { STMTS }
+            // The imperative `for IDENT in a..b { }` statement was REMOVED
+            // from the surface language (recursive-arrays arc): iteration is
+            // loop objects (parallel structure) and recursive arrays
+            // (sequential structure). The disambiguation shell stays so the
+            // shape gets a steering diagnostic instead of a confusing
+            // misparse at `in`. (Internal generators construct StmtForIn
+            // directly — this is a surface-only removal.)
             let afterFor = advance toks
             match peek afterFor with
-            | Some (TokIdent varName) ->
+            | Some (TokIdent _) ->
                 let afterIdent = advance afterFor
                 match peek afterIdent with
                 | Some (TokKeyword KwIn) ->
-                    // Parse range expression (struct literals suppressed:
-                    // the next top-level `{` is the loop body)
-                    let afterIn = advance afterIdent
-                    suppressingStructLiterals (fun () -> parseExprImpl afterIn) >>= fun rangeExpr afterRange ->
-                    let afterRange = skipNL afterRange
-                    match peek afterRange with
-                    | Some TokLBrace ->
-                        // Parse body as block of statements
-                        advance afterRange |> parseForInBody >>= fun bodyStmts remaining ->
-                        let remaining = skipTerminator remaining
-                        loop (spanned remaining (StmtForIn (varName, rangeExpr, bodyStmts)) :: stmts) remaining
-                    | _ ->
-                        let line, col = currentPos afterRange
-                        error "Expected '{' after for-in range expression" line col
+                    let line, col = currentPos toks
+                    errorC "BL1003"
+                        "The imperative `for x in a..b { ... }` statement has been removed. Re-express sequential recurrences as a recursive array (`let rec q: Array<T like Step, ...> = match q with | zero -> zero | prefix :: n -> prefix :: <slice>`), folds as `reduce(...)`, and parallel maps as `method_for(range<...>) <@> lambda(...)`. See formalism 7.5."
+                        line col
                 | _ ->
-                    // Not a for-in, fall through to expression parser
+                    // Loop-object `for` expression — the surviving form
                     parseExprImpl toks >>= fun expr remaining ->
                     let remaining = skipTerminator remaining
                     loop (spanned remaining (StmtExpr expr) :: stmts) remaining
             | _ ->
-                // Not a for-in, fall through to expression parser
                 parseExprImpl toks >>= fun expr remaining ->
                 let remaining = skipTerminator remaining
                 loop (spanned remaining (StmtExpr expr) :: stmts) remaining
@@ -2311,69 +2366,6 @@ and skipTerminator toks =
     | Some TokNewline -> advance toks
     | Some TokSemi -> advance toks
     | _ -> toks
-
-/// Parse the body of a for-in loop: { stmt; stmt; ... }
-/// Accepts the same statement forms as parseBlock, including NESTED for-in
-/// loops (required by the ML-module layers and the grad transform, whose
-/// generated adjoint loops mirror the forward nesting).
-and parseForInBody (tokens: Token list) : ParseResult<Stmt list> =
-    let rec loop stmts toks =
-        let toks = skipNL toks
-        let sLine, sCol = currentPos toks
-        let spanned (remaining: Token list) (stmt: Stmt) =
-            // Real range: Start = statement's first token; End = the last
-            // meaningful token consumed (not the next token's start, which would
-            // overshoot across whitespace/comments). File carries currentFile.
-            let eLine, eCol = consumedEnd toks remaining sLine sCol
-            StmtSpanned (stmt, { StartLine = sLine; StartCol = sCol; EndLine = eLine; EndCol = eCol; File = currentFile })
-        match peek toks with
-        | Some TokRBrace ->
-            success (List.rev stmts) (advance toks)
-        | Some TokSemi ->
-            loop stmts (advance toks)
-        | Some (TokKeyword KwLet) ->
-            advance toks |> parseLetStmt >>= fun stmt remaining ->
-            let remaining = skipTerminator remaining
-            loop (spanned remaining stmt :: stmts) remaining
-        | Some (TokKeyword KwFor) ->
-            // Nested for-in: same disambiguation as parseBlock (an actual
-            // `for IDENT in` starts an imperative loop; anything else falls
-            // through to the expression parser, e.g. loop-object `for`).
-            let afterFor = advance toks
-            match peek afterFor with
-            | Some (TokIdent varName) ->
-                let afterIdent = advance afterFor
-                match peek afterIdent with
-                | Some (TokKeyword KwIn) ->
-                    let afterIn = advance afterIdent
-                    // struct literals suppressed in the range header (see
-                    // noStructLiteralCtx / the parseBlock site)
-                    suppressingStructLiterals (fun () -> parseExprImpl afterIn) >>= fun rangeExpr afterRange ->
-                    let afterRange = skipNL afterRange
-                    match peek afterRange with
-                    | Some TokLBrace ->
-                        advance afterRange |> parseForInBody >>= fun bodyStmts remaining ->
-                        let remaining = skipTerminator remaining
-                        loop (spanned remaining (StmtForIn (varName, rangeExpr, bodyStmts)) :: stmts) remaining
-                    | _ ->
-                        let line, col = currentPos afterRange
-                        error "Expected '{' after for-in range expression" line col
-                | _ ->
-                    parseExprImpl toks >>= fun expr remaining ->
-                    let remaining = skipTerminator remaining
-                    loop (spanned remaining (StmtExpr expr) :: stmts) remaining
-            | _ ->
-                parseExprImpl toks >>= fun expr remaining ->
-                let remaining = skipTerminator remaining
-                loop (spanned remaining (StmtExpr expr) :: stmts) remaining
-        | Some _ ->
-            // Parse expression (includes assignments via parseAssignment)
-            parseExprImpl toks >>= fun expr remaining ->
-            let remaining = skipTerminator remaining
-            loop (spanned remaining (StmtExpr expr) :: stmts) remaining
-        | None ->
-            errorEof "Unexpected end of input in for-in body"
-    loop [] tokens
 
 and parseNestedFunction (tokens: Token list) : ParseResult<Stmt> =
     // Parse: function name(params) where ... -> Type = body
@@ -2421,13 +2413,124 @@ and parseNestedFunction (tokens: Token list) : ParseResult<Stmt> =
     }
     success (StmtLet binding) remaining
 
+/// Parse the binding tail of `let rec NAME : TYPE = match NAME with ...`
+/// (tokens start at NAME). Shared by the block-level and top-level let
+/// paths. The arm shapes are validated HERE — productivity is syntactic:
+///   | zero        -> zero              required base (extent 0)
+///   | zero :: n   -> zero :: SEED      optional seed (extent 1)
+///   | prefix :: n -> prefix :: SLICE   required inductive arm
+/// The snoc `::` exists ONLY inside these arm bodies (no general array-cons
+/// expression operator), so the inductive arm literally cannot produce more
+/// or less than one new slice.
+and parseRecArrayBinding (tokens: Token list) : ParseResult<Binding> =
+    let errHere toks msg =
+        let line, col = currentPos toks
+        errorC "BL1003" msg line col
+    expectIdent tokens >>= fun name afterName ->
+    // Type annotation is REQUIRED: a self-referential definition cannot
+    // infer its own type from its body (mirrors recursive functions
+    // declaring return types).
+    match peek afterName with
+    | Some TokColon ->
+        parseTypeExpr (advance afterName) >>= fun ty afterTy ->
+        expect (TokOp "=") afterTy >>= fun _ afterEq ->
+        let afterEq = skipNL afterEq
+        match peek afterEq with
+        | Some (TokKeyword KwMatch) ->
+            let afterMatch = advance afterEq
+            (match peek afterMatch with
+             | Some (TokIdent scrut) when scrut = name -> success () (advance afterMatch)
+             | _ -> errHere afterMatch (sprintf "recursive array '%s': the match scrutinee must be the array being defined (`match %s with`)" name name))
+            >>= fun () afterScrut ->
+            expect (TokKeyword KwWith) afterScrut >>= fun _ afterWith ->
+            // --- arm 1 (required): | zero -> zero
+            let afterWith = skipNL afterWith
+            expect TokPipe afterWith >>= fun _ a1 ->
+            (match peek a1 with
+             | Some (TokKeyword KwZero) -> success () (advance a1)
+             | _ -> errHere a1 (sprintf "recursive array '%s': the first arm must be the base case `| zero -> zero` (extent 0 is the empty array)" name))
+            >>= fun () a2 ->
+            expect (TokOp "->") a2 >>= fun _ a3 ->
+            (match peek a3 with
+             | Some (TokKeyword KwZero) -> success () (advance a3)
+             | _ -> errHere a3 (sprintf "recursive array '%s': the base arm's body must be `zero`" name))
+            >>= fun () afterBase ->
+            // --- arm 2 (optional seed) / arm 3 (required inductive):
+            //     | zero :: n -> zero :: SEED
+            //     | prefix :: n -> prefix :: SLICE
+            let parseConsArm (toks: Token list) : ParseResult<bool * Ident * Ident * Expr> =
+                // returns (isSeedArm, prefixOrZeroName, stepVar, sliceExpr)
+                expect TokPipe (skipNL toks) >>= fun _ t1 ->
+                let isSeed, pfxName, t2res =
+                    match peek t1 with
+                    | Some (TokKeyword KwZero) -> true, "", Ok (advance t1)
+                    | Some (TokIdent p) -> false, p, Ok (advance t1)
+                    | _ -> false, "", Error ()
+                match t2res with
+                | Error () -> errHere t1 (sprintf "recursive array '%s': expected `zero :: n` (seed arm) or `prefix :: n` (inductive arm) pattern" name)
+                | Ok t2 ->
+                expect TokColonColon t2 >>= fun _ t3 ->
+                expectIdent t3 >>= fun stepVar t4 ->
+                expect (TokOp "->") t4 >>= fun _ t5 ->
+                // Body must open with the SAME constructor head: `zero ::` /
+                // `prefix ::` — this is the productivity check.
+                let headOk, t6res =
+                    match peek t5, isSeed with
+                    | Some (TokKeyword KwZero), true -> true, Ok (advance t5)
+                    | Some (TokIdent p), false when p = pfxName -> true, Ok (advance t5)
+                    | _ -> false, Error ()
+                match t6res with
+                | Error () ->
+                    let expected = if isSeed then "zero :: <seed slice>" else sprintf "%s :: <slice expr>" pfxName
+                    errHere t5 (sprintf "recursive array '%s': the arm body must produce exactly one new slice — `%s`" name expected)
+                | Ok t6 ->
+                let _ = headOk
+                expect TokColonColon t6 >>= fun _ t7 ->
+                suppressingStructLiterals (fun () -> parseExprImpl t7) >>= fun slice t8 ->
+                success (isSeed, pfxName, stepVar, slice) t8
+            parseConsArm afterBase >>= fun (isSeed1, pfx1, step1, slice1) afterArm2 ->
+            if isSeed1 then
+                // seed arm present; inductive arm must follow
+                parseConsArm afterArm2 >>= fun (isSeed2, pfx2, step2, slice2) afterArm3 ->
+                if isSeed2 then
+                    errHere afterArm2 (sprintf "recursive array '%s': only one seed arm (`zero :: n`) is allowed; expected the inductive arm `prefix :: n -> prefix :: <slice>`" name)
+                else
+                    let sp = rangeSpan tokens afterArm3
+                    success {
+                        Mutability = BindLet
+                        Pattern = mkPat sp (PatVar name)
+                        Type = Some ty
+                        Value = mkExpr sp (ExprRecArray {
+                            Name = name; SeedArm = Some (step1, slice1)
+                            PrefixVar = pfx2; StepVar = step2; SliceExpr = slice2 })
+                    } afterArm3
+            else
+                let sp = rangeSpan tokens afterArm2
+                success {
+                    Mutability = BindLet
+                    Pattern = mkPat sp (PatVar name)
+                    Type = Some ty
+                    Value = mkExpr sp (ExprRecArray {
+                        Name = name; SeedArm = None
+                        PrefixVar = pfx1; StepVar = step1; SliceExpr = slice1 })
+                } afterArm2
+        | _ ->
+            errHere afterEq (sprintf "recursive array '%s': the body must be `match %s with | zero -> zero | prefix :: n -> prefix :: <slice>`" name name)
+    | _ ->
+        errHere afterName (sprintf "recursive array '%s' requires an explicit type annotation (`let rec %s: Array<T like Step, ...> = ...`) — a self-referential definition cannot infer its own type" name name)
+
 and parseLetStmt (tokens: Token list) : ParseResult<Stmt> =
+    match peek tokens with
+    | Some (TokKeyword KwRec) ->
+        parseRecArrayBinding (advance tokens) >>= fun binding remaining ->
+        success (StmtLet binding) remaining
+    | _ ->
     let mutability, afterMut =
         match peek tokens with
         | Some (TokKeyword KwConst) -> BindConst, advance tokens
         | Some (TokKeyword KwMut) -> BindMut, advance tokens
         | _ -> BindLet, tokens
-    
+
     parsePattern afterMut >>= fun pat afterPat ->
     let ty, afterTy =
         match peek afterPat with
@@ -2436,10 +2539,10 @@ and parseLetStmt (tokens: Token list) : ParseResult<Stmt> =
             | Ok (t, rest) -> Some t, rest
             | Error _ -> None, afterPat
         | _ -> None, afterPat
-    
+
     expect (TokOp "=") afterTy >>= fun _ afterEq ->
     parseExprImpl afterEq >>= fun value remaining ->
-    
+
     success (StmtLet {
         Mutability = mutability
         Pattern = pat
@@ -2517,6 +2620,11 @@ let parseFunctionDecl (tokens: Token list) : ParseResult<Decl> =
     }) remaining
 
 let parseTopLevelLet (tokens: Token list) : ParseResult<Decl> =
+    match peek tokens with
+    | Some (TokKeyword KwRec) ->
+        parseRecArrayBinding (advance tokens) >>= fun binding remaining ->
+        success (DeclLet binding) remaining
+    | _ ->
     let mutability, afterMut =
         match peek tokens with
         | Some (TokKeyword KwConst) -> BindConst, advance tokens

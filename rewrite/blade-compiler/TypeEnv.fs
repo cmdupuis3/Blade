@@ -282,12 +282,19 @@ let formatTypeError (err: TypeError) : string =
     | CompoundOverSupplied (rank, got) -> sprintf "Compound index over-supplied: this array's compound axis has rank %d (mask is %d-dimensional), so it takes at most a %d-tuple like B((c0, ..., c%d)); got a %d-tuple." rank rank rank (rank - 1) got
     | CompoundNeedsTuple rank -> sprintf "Compound index must be a single tuple: write B((c0, ..., cj)) with inner parentheses, not the flat form B(c0, ..., cj). A CompoundIdx<mask> axis of rank %d is indexed as one joint tuple, full or partial (formalism 4.5 / poly-indexing 5.4)." rank
     | RaggedIdxNeedsPrior func -> sprintf "function '%s': RaggedIdx requires at least one prior index in the array's index list -- the ragged extent is a per-row function of the OUTER iteration position (formalism 4.4). Add an outer index, e.g. Array<T like Idx<n>, RaggedIdx<lens>>." func
+    | TagWildcardNotParam where_ -> sprintf "%s: the tag wildcard `_` is legal in PARAMETER position only. A parameter may decline to constrain its argument's index tag or unit, but this position has to PRODUCE one -- a wildcard here would erase the tag rather than relax it. Write the concrete index type (e.g. Nat<LatIdx>) or the bare base type." where_
     | DecompactDimRange (dim, totalDims) -> sprintf "decompact: dimension %d is out of range for a rank-%d array (valid dims 0..%d)" dim totalDims (totalDims - 1)
     | DecompactPlainAxis dim -> sprintf "decompact: dimension %d is a plain (rank-1, non-symmetric) axis; there is nothing to decompact. decompact pulls a component out of a compact group (SymIdx/AntisymIdx/HermitianIdx)." dim
     | DecompactLastSlotOnly (slots, slot) -> sprintf "decompact: only a compact group in the LAST index slot, optionally preceded by plain free Idx dimensions, is supported by codegen (the chained to-the-right peel shape). The array here has %d index slots with the compact group at slot %d." slots slot
     | TransposeAxisRange (axis, totalDims) -> sprintf "transpose: axis %d is out of range for a rank-%d array (valid axes 0..%d)" axis totalDims (totalDims - 1)
     | TransposeAxesEqual (axisA, axisB) -> sprintf "transpose: the two axes must differ (got [%d, %d]); swapping an axis with itself is the identity" axisA axisB
     | TransposeWithinGroup rank -> sprintf "transpose: swapping two dimensions within a single rectangular index group (rank %d) is not yet supported." rank
+    | StackNeedsArrays (pos, got) -> sprintf "stack: argument %d has type %s, not an array. stack(A1, ..., An) adds a fresh LEADING axis over n arrays of the SAME shape; to build a rank-1 array from scalars write the array literal [a, b, c] instead." pos got
+    | StackShapeMismatch (pos, detail) -> sprintf "stack: argument %d does not match argument 1 (%s). stack(A1, ..., An) requires every operand to have the same rank, extents, and element type -- the fresh leading axis selects among them." pos detail
+    | JoinNeedsArrays (pos, got) -> sprintf "join: argument %d has type %s, not an array. join(A, B, d) concatenates arrays along dimension d." pos got
+    | JoinDimRange (dim, totalDims) -> sprintf "join: dimension %d is out of range for a rank-%d array (valid dims 0..%d)" dim totalDims (totalDims - 1)
+    | JoinShapeMismatch (pos, detail) -> sprintf "join: argument %d does not match argument 1 (%s). join(A, B, d) requires equal rank, equal element type, and equal extents on EVERY axis except the joined dimension d." pos detail
+    | StackJoinCompactSlot (op, slot) -> sprintf "%s: index slot %d is a compact, ragged, or compound group. %s materializes a dense rectangular result, so its operands must be dense (plain Idx) on every axis -- decompact the axis first." op slot op
     | UnitMismatch (context, left, right) -> sprintf "Unit mismatch in %s: %s vs %s" context left right
     | IntrinsicBindArrayFailed op -> sprintf "%s(): failed to bind array type after unification" op
     | IntrinsicNeedsArray op -> sprintf "%s() requires an array as argument" op
@@ -434,9 +441,11 @@ let diagnosticOfCompileError (e: CompileError) : Blade.Diagnostics.Diagnostic =
             | CrossAnonIndexArith _ | IndexTypeArithForbidden _ | IrrepsIdxArgMismatch _
             | CompoundBareWildcard _ | CompoundWildcardArity _ | CompoundAllFree _
             | CompoundOverSupplied _ | CompoundNeedsTuple _ | RaggedIdxNeedsPrior _
-            | IrrepsIdxSpec _ | IrrepsIdxSpecFn _ -> "BL4003"
+            | IrrepsIdxSpec _ | IrrepsIdxSpecFn _ | TagWildcardNotParam _ -> "BL4003"
             | DecompactDimRange _ | DecompactPlainAxis _ | DecompactLastSlotOnly _
-            | TransposeAxisRange _ | TransposeAxesEqual _ | TransposeWithinGroup _ -> "BL4004"
+            | TransposeAxisRange _ | TransposeAxesEqual _ | TransposeWithinGroup _
+            | StackNeedsArrays _ | StackShapeMismatch _ | JoinNeedsArrays _
+            | JoinDimRange _ | JoinShapeMismatch _ | StackJoinCompactSlot _ -> "BL4004"
             | ImmutableStaticAssign _ | MutParamNotArray _ -> "BL4005"
             | MutualBindJointly _ | MutualDirectElementsOnly _ | MutualMixedGroups
             | MutualDuplicateMember _ | MutualIncompleteAnnotation _ | MutualJointAnnotationOnly _

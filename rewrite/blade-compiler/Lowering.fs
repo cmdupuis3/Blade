@@ -411,6 +411,9 @@ let rec lowerTypedExpr (env: TypedLowerEnv) (texpr: TypedExpr) : IRExpr =
     
     | TExprStack exprs ->
         IRStack (exprs |> List.map (lowerTypedExpr env))
+
+    | TExprJoin (exprs, dim) ->
+        IRJoin ((exprs |> List.map (lowerTypedExpr env)), dim)
     
     | TExprPure e ->
         IRPure (lowerTypedExpr env e)
@@ -500,8 +503,18 @@ let rec lowerTypedExpr (env: TypedLowerEnv) (texpr: TypedExpr) : IRExpr =
             IRReduceCompute (lowerTypedExpr env array, lowerTypedExpr env kernel,
                              lowerTypedExpr env seed)
          | _ ->
-            IRReduce (lowerTypedExpr env array, lowerTypedExpr env kernel,
-                      init |> Option.map (lowerTypedExpr env)))
+            let srcIR = lowerTypedExpr env array
+            let kernelIR = lowerTypedExpr env kernel
+            let initIR = init |> Option.map (lowerTypedExpr env)
+            match srcIR with
+            | IRArrayLit _ ->
+                // Array-LITERAL source (`reduce([a, b, c], op)`): the fold
+                // codegen NAMES its source (extents + element reads), which
+                // an inline literal cannot provide — bind it to a fresh id
+                // and fold over the binding.
+                let srcId = env.Builder.FreshId()
+                IRLet (srcId, srcIR, IRReduce (IRVar (srcId, array.Type), kernelIR, initIR))
+            | _ -> IRReduce (srcIR, kernelIR, initIR))
 
     | TExprProdSum args ->
         IRProdSum (args |> List.map (lowerTypedExpr env))

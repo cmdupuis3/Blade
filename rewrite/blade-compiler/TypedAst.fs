@@ -215,6 +215,7 @@ and TypedExprKind =
     // Zip and stack
     | TExprZip of TypedExpr list
     | TExprStack of TypedExpr list
+    | TExprJoin of arrays: TypedExpr list * dim: int
     
     // Special forms
     | TExprPure of TypedExpr

@@ -49,6 +49,7 @@ type TokenKind =
 
 and Keyword =
     | KwLet
+    | KwRec
     | KwConst
     | KwMut
     | KwStatic
@@ -108,6 +109,7 @@ and Keyword =
     | KwReplicate
     | KwZip
     | KwStack
+    | KwJoin
     | KwArity
     | KwNth
     | KwZero
@@ -147,6 +149,7 @@ type Token = {
 
 let keywords = 
     [ "let", KwLet
+      "rec", KwRec
       "const", KwConst
       "mut", KwMut
       "static", KwStatic
@@ -206,6 +209,7 @@ let keywords =
       "replicate", KwReplicate
       "zip", KwZip
       "stack", KwStack
+      "join", KwJoin
       "arity", KwArity
       "nth", KwNth
       "zero", KwZero

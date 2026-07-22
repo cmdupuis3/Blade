@@ -36,6 +36,8 @@ type TypeError =
     | RaggedIdxNeedsPrior of func: string
     | IrrepsIdxSpec of detail: string
     | IrrepsIdxSpecFn of func: string * detail: string
+    /// `Base<_>` outside parameter position. `where` names the site.
+    | TagWildcardNotParam of where_: string
     // Symmetry / compact-group violations (BL4004)
     | DecompactDimRange of dim: int * totalDims: int
     | DecompactPlainAxis of dim: int
@@ -43,6 +45,13 @@ type TypeError =
     | TransposeAxisRange of axis: int * totalDims: int
     | TransposeAxesEqual of axisA: int * axisB: int
     | TransposeWithinGroup of rank: int
+    // stack / join shape violations (BL4004)
+    | StackNeedsArrays of pos: int * got: string
+    | StackShapeMismatch of pos: int * detail: string
+    | JoinNeedsArrays of pos: int * got: string
+    | JoinDimRange of dim: int * totalDims: int
+    | JoinShapeMismatch of pos: int * detail: string
+    | StackJoinCompactSlot of op: string * slot: int
     // Unit mismatch (BL3006)
     | UnitMismatch of context: string * left: string * right: string
     // Invalid builtin/intrinsic argument (BL3007)
@@ -299,6 +308,14 @@ let rec findLeafInferScalar (subst: Subst) (ty: IRType) : int option =
         | _ -> None                        // bound to non-scalar — leave alone
     | _ -> None
 
+/// Strip one layer of tag/unit annotation. Used by the wildcard arm to reach
+/// the value type underneath whatever the concrete side is carrying.
+let stripTagAnnotation (ty: IRType) : IRType =
+    match ty with
+    | IRTIdxTagged (inner, _) -> inner
+    | IRTUnitAnnotated (inner, _) -> inner
+    | other -> other
+
 /// Unify two types under the current substitution. Mutates `subst` to
 /// bind inference variables as needed.
 ///
@@ -454,6 +471,27 @@ let rec unify (subst: Subst) (t1: IRType) (t2: IRType) : TypeResult<unit> =
     | IRTLoop l1, IRTLoop l2 when l1.Kind = l2.Kind -> Ok ()
     | IRTComputation t1, IRTComputation t2 -> unify subst t1 t2
     | IRTNat _, IRTNat _ -> Ok ()
+    // The tag WILDCARD `Base<_>` (IRefAny). Deliberately ahead of both the
+    // strict IRTIdxTagged arm below and the IRTUnitAnnotated arms further
+    // down — the top-down match order is what makes the wildcard permissive
+    // without loosening anything else. It matches:
+    //   - any other tagged value (Nat<Y>, Nat<X>, an anonymous Idx tag),
+    //   - any unit-annotated value (Float<meters>),
+    //   - a bare untagged scalar (an anonymous `range<Idx<n>>` element).
+    // In every case only the VALUE types have to unify; the tag/unit itself
+    // is exactly what the parameter declined to constrain.
+    //
+    // The wildcard does NOT absorb the concrete tag it met: the parameter's
+    // type stays `Base<_>` and erases to its inner type at codegen (the
+    // eta-expanded kernel params render as `int64_t`, not the index typedef).
+    // So a wildcard-typed value carries no more tag guarantee downstream than
+    // an untagged int, which is why checkArrayIndexTags gives the two the same
+    // warn-and-allow treatment. Propagating the tag instead would need the
+    // parameter to sit behind a rebindable inference variable — that is the
+    // tag-VARIABLE feature, not this one.
+    | IRTIdxTagged (wInner, IRefAny), other
+    | other, IRTIdxTagged (wInner, IRefAny) ->
+        unify subst wInner (stripTagAnnotation other)
     // IRTIdxTagged unification (parallel to IRTUnitAnnotated below):
     //   1. Inner types must unify (so an int64 tag won't accidentally
     //      match a float-tagged value, even if both have the same IdxRef).

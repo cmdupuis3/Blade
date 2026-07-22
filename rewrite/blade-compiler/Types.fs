@@ -412,6 +412,30 @@ and IdxRefG<'Ext> =
     /// emits this value. Extent preserved for diagnostics / pretty-
     /// printing only; NOT part of identity for unification.
     | IRefAnon of nominalId: int * extent: 'Ext
+    /// The tag WILDCARD `Nat<_>` / `Int64<_>` / `Float64<_>`: matches a value
+    /// carrying any nominal index tag, any unit signature, or none at all.
+    ///
+    /// Unlike the other two cases this carries NO identity — it is not a tag a
+    /// value can have, it is a tag a PARAMETER declines to constrain. It only
+    /// ever originates from a declared parameter type; no producer (iteration
+    /// tagging, literal coercion, provider lowering) ever emits one.
+    ///
+    /// Consequences that keep it sound:
+    ///   - Legal in parameter position only. A return type, let annotation,
+    ///     struct field or array index slot has no incoming value to source a
+    ///     tag from, so a wildcard there would be a silent hole; those sites
+    ///     reject it via irTypeHasTagWildcard (BL4003).
+    ///   - Unification is permissive in BOTH directions (Unify's wildcard arm
+    ///     runs ahead of the strict named-vs-named arm), but the wildcard does
+    ///     NOT absorb the tag it matched — the parameter's type stays
+    ///     `Base<_>`. A wildcard-typed value therefore carries no more tag
+    ///     guarantee than an untagged int, and checkArrayIndexTags treats the
+    ///     two identically (warn, allow). Making the tag flow onward is the
+    ///     tag-VARIABLE feature, which this is not.
+    ///   - Arithmetic-transparent: inferBinOp strips it, so `1.0 * m` works on
+    ///     a wildcard param even though it is refused for a concrete `Nat<Y>`.
+    ///   - Erases to the inner type at codegen; there is no `using` alias.
+    | IRefAny
 
 /// IR Types
 and IRTypeG<'Ext> =

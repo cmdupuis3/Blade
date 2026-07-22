@@ -680,6 +680,9 @@ and irTypeToCpp = function
         | IRefNamed name when name.StartsWith("__") -> irTypeToCpp inner
         | IRefNamed name -> name
         | IRefAnon _ -> irTypeToCpp inner
+        // The `Base<_>` wildcard names no index type, so there is no `using`
+        // alias to render — erase to the inner type, same as IRefAnon.
+        | IRefAny -> irTypeToCpp inner
     | IRTDist _ ->
         // Dist<r, Ï„> is erased at lowering (a Dist value lowers to the tuple
         // of its packed cumulant component arrays); reaching codegen means
@@ -869,6 +872,10 @@ let inferInlineElemTypeStr (opName: string) (form: IRExpr) : string =
         | IRSort (a, _)
         | IRIntersect (a, _) | IRUnion (a, _) -> a
         | IRUnique a -> a
+        // stack/join carry no type of their own (Ir.CarriedType leaves the
+        // rank-changing assembly combinators untyped); their result element
+        // type is their operands', which TypeCheck has already unified.
+        | IRStack (a :: _) | IRJoin (a :: _, _) -> a
         | _ -> form
     match inferExprType arrExpr with
     | ArrayElem a -> elemTypeToCpp a.ElemType
@@ -1501,8 +1508,12 @@ let rec exprToCppCore (subst: SubstMap) (names: Map<IRId, string>) (expr: IRExpr
     | IRZip arrs ->
         // In expression context (e.g. inside a kernel body), zip produces a tuple
         sprintf "std::make_tuple(%s)" (arrs |> List.map (exprToCppCore subst names) |> String.concat ", ")
-    | IRStack arrs ->
-        exprError "stack not yet implemented in codegen"
+    | IRStack _ ->
+        // Statement-shaped (declares a pool + copy nests, like transpose).
+        // Reached only when a stack lands in a bare expression position.
+        exprError "stack(...) must be bound to a let before it is used in an expression"
+    | IRJoin _ ->
+        exprError "join(...) must be bound to a let before it is used in an expression"
     | IRSlice (arr, dim, start, stop) ->
         exprError "slice not yet implemented in codegen"
     | IRCurry (arr, idx, resultRank) ->
@@ -1834,12 +1845,50 @@ and renderIndexExpr (subst: SubstMap) (names: Map<IRId, string>) arr indices : s
                         Some (sprintf "%s.row(%s)%s" arrStr coordArr restSubs)
             | _ -> None  // compound array but first index isn't a tuple (shouldn't reach: TypeCheck enforces the tuple form)
         | _ -> None
+    // Plain dense PARTIAL positional read in EXPRESSION position: `A(i)` with
+    // fewer subscripts than the rank denotes a row/slab sub-view, but the raw
+    // subscript `A[i]` is `Array<T,R>::operator[]` -> `data[i]`, a bare pointer
+    // that has lost `.extents`. Anywhere the residual is consumed as an array
+    // (a function ARGUMENT typed Array<T,R-1>, a `let` in a function body, a
+    // reduce/extents consumer) that pointer is a type error or a silently
+    // shape-less value -- the "foreign rank-N row-peels render as raw pointers"
+    // gap. Emit the same sub-view aggregate the BINDING path builds
+    // (densePartialSubview) as a prvalue: data steps through the consumed
+    // leading dims, extents shifts past them.
+    //
+    // Same scoping as the binding path -- fully plain-dense rectangular
+    // (IxKPlain / SymNone / SDimension / arity-1) so consumed-dims equals the
+    // subscript count and the extents shift is exact. Compound reads are
+    // handled by compoundRead above; ragged/packed-symmetric peels return
+    // storage-specific row pointers that must NOT be re-wrapped, and their
+    // axes fail the predicate.
+    let densePartialSubviewExpr () : string option =
+        if List.isEmpty indices
+           || indices |> List.exists (function IRTuple _ -> true | _ -> false) then None
+        else
+            match inferExprType arr with
+            | ArrayElem arrTy
+                    when arrTy.IndexTypes.Length > indices.Length
+                         && arrTy.IndexTypes |> List.forall (fun ix ->
+                                ix.IxKind = IxKPlain && ix.Symmetry = SymNone
+                                && ix.Kind = SDimension && ix.Rank = 1) ->
+                let residTy = { arrTy with IndexTypes = List.skip indices.Length arrTy.IndexTypes }
+                let subscripts =
+                    indices
+                    |> List.map (fun i -> sprintf "[%s]" (exprToCppCore subst names i))
+                    |> String.concat ""
+                Some (sprintf "%s{ %s.data%s, %s.extents + %d }"
+                          (cppArrayTypeStr residTy) arrStr subscripts arrStr indices.Length)
+            | _ -> None
     match compoundRead () with
     | Some code -> code
     | None ->
         (match lazyCompactRead () with
          | Some code -> code
-         | None -> rawSubscript ())
+         | None ->
+            match densePartialSubviewExpr () with
+            | Some code -> code
+            | None -> rawSubscript ())
 
 
 and renderMatchExpr (subst: SubstMap) (names: Map<IRId, string>) scrutinee cases : string =
@@ -2345,6 +2394,10 @@ and materializeInlineForm (subst: SubstMap) (names: Map<IRId, string>) (varName:
         materializeSortForm subst names varName elemTypeStr arrExpr keyExpr
     | IRTranspose (arrExpr, d1, d2) ->
         materializeTransposeForm subst names varName elemTypeStr arrExpr d1 d2
+    | IRStack arrs ->
+        materializeStackForm subst names varName elemTypeStr arrs
+    | IRJoin (arrs, dim) ->
+        materializeJoinForm subst names varName elemTypeStr arrs dim
     | IRDecompact (arrExpr, dimArg) ->
         materializeDecompactForm subst names varName elemTypeStr arrExpr dimArg
     | IRArrayNegate arrExpr | IRArrayConjugate arrExpr ->
@@ -2584,6 +2637,104 @@ and materializeTransposeForm (subst: SubstMap) (names: Map<IRId, string>) (varNa
         let closeLoops = [ for d in rank - 1 .. -1 .. 0 -> sprintf "%s}" (String.replicate d "    ") ]
         Some (extentDecl @ [allocDecl] @ openLoops @ body @ closeLoops)
      | _ -> None)
+
+
+and materializeStackForm (subst: SubstMap) (names: Map<IRId, string>) (varName: string) (elemTypeStr: string) (arrs: IRExpr list) : string list option =
+    // stack(A1, ..., An) (formalism 2.6): a FRESH LEADING AXIS of extent n over
+    // n same-shaped arrays, so `stack(A,B,C)(k)` selects array k. Rank r -> r+1.
+    //
+    // Materialized as an independent dense pool plus a per-source copy nest —
+    // deliberately NOT a pointer-aliasing assembly (`out[k] = Ak`, which is what
+    // the sibling IRSequence emitter does). `let` bindings are assignable in
+    // Blade, so an aliased stack would see later writes to any source; copying
+    // makes the combinator a value, matching transpose/decompact/gram.
+    //
+    // Extents come from the FIRST source at runtime (TypeCheck has already
+    // proven every operand has the same rank/extents/element type, and that
+    // every slot is a plain dense Idx).
+    match arrs with
+    | [] -> None
+    | first :: _ ->
+        let srcNames = arrs |> List.map (exprToCppCore subst names)
+        let firstName = List.head srcNames
+        (match inferExprType first with
+         | ArrayElem at ->
+            let srcRank = at.IndexTypes.Length
+            let outRank = srcRank + 1
+            let extentsName = sprintf "%s_extents" varName
+            let extentDecl =
+                [ sprintf "size_t %s[%d];" extentsName outRank
+                  sprintf "%s[0] = %d;" extentsName arrs.Length ]
+                @ [ for d in 0 .. srcRank - 1 ->
+                        sprintf "%s[%d] = %s.extents[%d];" extentsName (d + 1) firstName d ]
+            let allocDecl =
+                arrayAlloc { Ind = ""; Elem = elemTypeStr; Rank = outRank; Name = varName
+                             Symm = "nullptr"; Strict = None; Extents = extentsName }
+            // One copy nest per source. The loop variables are declared in each
+            // `for` init, so sibling nests at the same level reuse the names
+            // without colliding.
+            let loopVar d = sprintf "__sk%s_%d" varName d
+            let copyNest (k: int) (srcName: string) =
+                let opens =
+                    [ for d in 0 .. srcRank - 1 ->
+                        let ind = String.replicate d "    "
+                        sprintf "%sfor (size_t %s = 0; %s < %s.extents[%d]; %s++) {"
+                            ind (loopVar d) (loopVar d) srcName d (loopVar d) ]
+                let srcIdx = [ for d in 0 .. srcRank - 1 -> sprintf "[%s]" (loopVar d) ] |> String.concat ""
+                let bodyInd = String.replicate srcRank "    "
+                let body = [ sprintf "%s%s[%d]%s = %s%s;" bodyInd varName k srcIdx srcName srcIdx ]
+                let closes = [ for d in srcRank - 1 .. -1 .. 0 -> sprintf "%s}" (String.replicate d "    ") ]
+                opens @ body @ closes
+            Some (extentDecl @ [allocDecl] @ (srcNames |> List.mapi copyNest |> List.concat))
+         | _ -> None)
+
+
+and materializeJoinForm (subst: SubstMap) (names: Map<IRId, string>) (varName: string) (elemTypeStr: string) (arrs: IRExpr list) (dim: int) : string list option =
+    // join(A, B, ..., d) (formalism 2.6): concatenate along dimension d. Rank is
+    // preserved; extents[d] is the sum of the sources' extents[d] and every
+    // other axis agrees. `split(A, d, i)` = two `subset`s, so `join` is the
+    // inverse half of the split-join round-trip.
+    //
+    // Emitted as one dense allocation plus a per-source copy nest offset by a
+    // running cursor along d — the same fresh-pool discipline as stack.
+    match arrs with
+    | [] -> None
+    | first :: _ ->
+        let srcNames = arrs |> List.map (exprToCppCore subst names)
+        let firstName = List.head srcNames
+        (match inferExprType first with
+         | ArrayElem at ->
+            let rank = at.IndexTypes.Length
+            let extentsName = sprintf "%s_extents" varName
+            let joinedExtent = srcNames |> List.map (fun s -> sprintf "%s.extents[%d]" s dim) |> String.concat " + "
+            let extentDecl =
+                [ sprintf "size_t %s[%d];" extentsName rank ]
+                @ [ for d in 0 .. rank - 1 ->
+                        if d = dim then sprintf "%s[%d] = %s;" extentsName d joinedExtent
+                        else sprintf "%s[%d] = %s.extents[%d];" extentsName d firstName d ]
+            let allocDecl =
+                arrayAlloc { Ind = ""; Elem = elemTypeStr; Rank = rank; Name = varName
+                             Symm = "nullptr"; Strict = None; Extents = extentsName }
+            let offName = sprintf "%s_joff" varName
+            let loopVar d = sprintf "__jn%s_%d" varName d
+            let copyNest (srcName: string) =
+                let opens =
+                    [ for d in 0 .. rank - 1 ->
+                        let ind = String.replicate d "    "
+                        sprintf "%sfor (size_t %s = 0; %s < %s.extents[%d]; %s++) {"
+                            ind (loopVar d) (loopVar d) srcName d (loopVar d) ]
+                let srcIdx = [ for d in 0 .. rank - 1 -> sprintf "[%s]" (loopVar d) ] |> String.concat ""
+                let dstIdx =
+                    [ for d in 0 .. rank - 1 ->
+                        if d = dim then sprintf "[%s + %s]" (loopVar d) offName
+                        else sprintf "[%s]" (loopVar d) ] |> String.concat ""
+                let bodyInd = String.replicate rank "    "
+                let body = [ sprintf "%s%s%s = %s%s;" bodyInd varName dstIdx srcName srcIdx ]
+                let closes = [ for d in rank - 1 .. -1 .. 0 -> sprintf "%s}" (String.replicate d "    ") ]
+                opens @ body @ closes @ [ sprintf "%s += %s.extents[%d];" offName srcName dim ]
+            Some (extentDecl @ [allocDecl; sprintf "size_t %s = 0;" offName]
+                  @ (srcNames |> List.collect copyNest))
+         | _ -> None)
 
 
 and materializeDecompactForm (subst: SubstMap) (names: Map<IRId, string>) (varName: string) (elemTypeStr: string) (arrExpr: IRExpr) (dimArg: int) : string list option =
@@ -7498,6 +7649,7 @@ let collectDeferredPositionalReads (ctx: CodeGenContext) (root: IRExpr) : IRId l
         // (the deferred-computation-tuple arm, alias bindings).
         | IRApp (f, args, _) -> walk f; List.iter (fun a -> note a; walk a) args
         | IRTuple es | IRArrayLit (es, _) | IRProdSum es | IRStack es | IRZip es -> List.iter walk es
+        | IRJoin (es, _) -> List.iter walk es
         | IRComplex (re, im) -> walk re; walk im
         | IRFieldAccess (o, _) -> walk o
         | IRTupleProj (x, _, _) -> walk x
@@ -7549,6 +7701,10 @@ let rec genBinding (ctx: CodeGenContext) (binding: IRBinding) (builder: IRBuilde
         genSortBinding ctx binding builder arrExpr keyExpr
     | IRTranspose (arrExpr, d1, d2) ->
         genTransposeBinding ctx binding builder arrExpr d1 d2
+    | IRStack arrs ->
+        genStackJoinBinding ctx binding builder arrs None
+    | IRJoin (arrs, dim) ->
+        genStackJoinBinding ctx binding builder arrs (Some dim)
     | IRDecompact (arrExpr, d) ->
         genDecompactBinding ctx binding builder arrExpr d
     | IRArrayNegate arrExpr | IRArrayConjugate arrExpr ->
@@ -9210,6 +9366,34 @@ and genTransposeBinding (ctx: CodeGenContext) (binding: IRBinding) (builder: IRB
 
 
 
+and genStackJoinBinding (ctx: CodeGenContext) (binding: IRBinding) (builder: IRBuilder) (arrs: IRExpr list) (joinDim: int option) : string list * CodeGenContext =
+    let ind = indentStr ctx
+    let name = bindingCppName binding
+    let opName = match joinDim with Some _ -> "join" | None -> "stack"
+    // Eager materialization (same phase-1 strategy as transpose/decompact): a
+    // fresh dense pool plus per-source copy nests. Every source is forced first
+    // so a deferred producer materializes under its own name before the copy.
+    let (forceCode, ctx, arrs) =
+        arrs |> List.mapi (fun i a -> (i, a))
+        |> List.fold (fun (accCode, accCtx, accArrs) (i, a) ->
+            let (code, ctx', a') = forceDeferredArrayInput accCtx builder (sprintf "%s__src%d" name i) a
+            (accCode @ code, ctx', accArrs @ [a'])) ([], ctx, [])
+    let (elemET, elemErrCode) = inferElemTypeStrict ctx ind (List.head arrs) opName
+    let elemStr = elemTypeToCpp elemET
+    let form = match joinDim with Some d -> IRJoin (arrs, d) | None -> IRStack arrs
+    let matStmts =
+        match materializeInlineForm emptySubst ctx.VarNames name elemStr form with
+        | Some s -> s
+        | None -> []
+    let note =
+        match joinDim with
+        | Some d -> sprintf "%s// join: dense alloc (summed extent on dim %d) + per-source offset copy" ind d
+        | None -> sprintf "%s// stack: fresh leading axis (dense alloc + per-source copy)" ind
+    let code = forceCode @ elemErrCode @ [note] @ (matStmts |> List.map (fun s -> ind + s))
+    let ctx' = addVarName binding.Id name ctx
+    (code, ctx')
+
+
 and genDecompactBinding (ctx: CodeGenContext) (binding: IRBinding) (builder: IRBuilder) (arrExpr: IRExpr) (d: int) : string list * CodeGenContext =
     let ind = indentStr ctx
     let name = bindingCppName binding
@@ -10055,7 +10239,8 @@ let genFuncBody (ctx: CodeGenContext) (builder: IRBuilder) (names: Map<IRId, str
             let (code, _) = genBinding bodyCtx tempBinding builder
             currentNames <- Map.add id varName currentNames
             code
-        | IRMask _ | IRIntersect _ | IRUnion _ | IRSort _ | IRUnique _ | IRTranspose _ | IRDecompact _ | IRArrayNegate _ | IRArrayConjugate _ | IRGram _ ->
+        | IRMask _ | IRIntersect _ | IRUnion _ | IRSort _ | IRUnique _ | IRTranspose _ | IRDecompact _ | IRArrayNegate _ | IRArrayConjugate _ | IRGram _
+        | IRStack _ | IRJoin _ ->
             // Phase C lift pass can place an inline form as a let value at
             // function-body level. The same materialization helper used by
             // exprToCpp's IRLet (for kernel-body IIFEs) produces format-

@@ -124,6 +124,7 @@ let rec zonkExpr (subst: Subst) (expr: TypedExpr) : TypedExpr =
         | TExprArrayLit (es, arrTy) -> TExprArrayLit (zs es, arrTy)
         | TExprZip es -> TExprZip (zs es)
         | TExprStack es -> TExprStack (zs es)
+        | TExprJoin (es, d) -> TExprJoin (zs es, d)
         | TExprSequence es -> TExprSequence (zs es)
         | TExprAlign (es, sp) -> TExprAlign (zs es, sp)
         | TExprBlocked (it, bs) -> TExprBlocked (it, z bs)

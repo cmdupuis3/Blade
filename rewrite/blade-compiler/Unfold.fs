@@ -87,6 +87,7 @@ let rec mapExprPre (f: Expr -> Expr option) (e: Expr) : Expr =
         | ExprKind.ExprZip es -> re (ExprZip (List.map g es))
         | ExprKind.ExprAlign (es, spec) -> re (ExprAlign (List.map g es, spec))
         | ExprKind.ExprStack es -> re (ExprStack (List.map g es))
+        | ExprKind.ExprJoin (es, d) -> re (ExprJoin (List.map g es, d))
         | ExprKind.ExprPure x -> re (ExprPure (g x))
         | ExprKind.ExprCompute x -> re (ExprCompute (g x))
         | ExprKind.ExprRead x -> re (ExprRead (g x))
@@ -122,6 +123,10 @@ let rec mapExprPre (f: Expr -> Expr option) (e: Expr) : Expr =
                 | ForKernel k -> ForKernel (g k)
             re (ExprFor (src', wcs, Option.map g kern))
         | ExprKind.ExprStatic x -> re (ExprStatic (g x))
+        | ExprKind.ExprRecArray def ->
+            re (ExprRecArray { def with
+                                SeedArm = def.SeedArm |> Option.map (fun (v, s) -> (v, g s))
+                                SliceExpr = g def.SliceExpr })
 
 and mapStmtPre (f: Expr -> Expr option) (s: Stmt) : Stmt =
     let g = mapExprPre f
@@ -155,7 +160,10 @@ let private containsStatic (e: Expr) : bool =
 // ============================================================================
 
 /// Substitute free variables by expressions, stopping at shadowing binders.
-let rec private substFree (m: Map<string, Expr>) (e: Expr) : Expr =
+// (public: also reused by TypeCheck.inferRecArray to substitute the prefix /
+// step-ordinal names into the slice expression during the recursive-array
+// desugar.)
+let rec substFree (m: Map<string, Expr>) (e: Expr) : Expr =
     if Map.isEmpty m then e else
     let without (names: Set<string>) (mm: Map<string, Expr>) =
         names |> Set.fold (fun acc n -> Map.remove n acc) mm

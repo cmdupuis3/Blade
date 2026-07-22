@@ -4118,7 +4118,7 @@ let collectPolyCallSites (polyFuncMap: Map<IRId, IRFuncDef>) (expr: IRExpr) : (I
 /// Create a monomorphized copy of a poly function for a list of slot arities.
 /// `arities` carries one arity per Poly slot, in declaration order — packs
 /// are independent, so different slots may have different sizes.
-let specializeFunction (func: IRFuncDef) (arities: int list) (builder: IRBuilder) : IRFuncDef =
+let specializeFunction (func: IRFuncDef) (arities: int list) (funcMap: Map<IRId, IRFuncDef>) (builder: IRBuilder) : IRFuncDef =
     let polyIndices = findPolyParamIndices func
     if List.isEmpty polyIndices then func  // Not actually poly — shouldn't happen
     elif List.length arities <> List.length polyIndices then func  // arity-count mismatch
@@ -4234,6 +4234,97 @@ let specializeFunction (func: IRFuncDef) (arities: int list) (builder: IRBuilder
             | IRLet (id, v, b) -> IRLet (id, unrollForRanges v, unrollForRanges b)
             | _ -> expr
         let newBody = unrollForRanges newBody
+
+        // ----------------------------------------------------------------
+        // Pack-former unrolling pass (poly-specialization only).
+        //
+        // Recognizes a let-bound former whose iteration source is a single
+        // virtual range and whose kernel — a lifted lambda — reads THIS
+        // function's pack via a dynamic `IRPolyIndex` (`args[k]`). Two things
+        // block ordinary codegen for such a former after arity is known:
+        //   (1) the kernel keeps the dynamic subscript `args[k]`, invalid once
+        //       the pack has been split into scalar params; and
+        //   (2) the range extent lowered to an opaque `IRParam` placeholder
+        //       (not an `IRArity`), so `rewrite` never resolves it and codegen
+        //       emits an undeclared `__range0.extents[0]`.
+        // The pack size is exactly the slot arity, so we sidestep the extent
+        // entirely and unroll the former into an n-element ARRAY LITERAL:
+        // element k = the kernel body with its ordinal param substituted to
+        // `Lit k`, then re-run through `rewrite` so `IRPolyIndex(pack, Lit k)`
+        // becomes the k-th monomorphized param. Downstream (array-literal
+        // codegen, the `reduce` over the binding) then works unchanged.
+        //
+        // Tightly scoped: fires ONLY when the kernel lambda body references a
+        // pack slot of this function (the `aliasToSlot` membership test).
+        // Every other former is left byte-for-byte untouched, so the pass has
+        // zero blast radius outside poly specialization.
+        let unrollPackFormers expr =
+            let tryUnroll (info: ApplyInfo) : IRExpr option =
+                // The virtual source must be a single range with no real data
+                // arrays threaded in (a pure ordinal iteration).
+                let pureRange =
+                    match info.Arrays with
+                    | [IRRange _] -> true
+                    | _ -> false
+                match info.Kernel with
+                | IRVar (lamId, _) when pureRange && Map.containsKey lamId funcMap ->
+                    let lam = funcMap.[lamId]
+                    match lam.Params with
+                    | [ordinalParam] ->
+                        // Which pack slot (if any) does the lambda body read?
+                        let mutable packSlot = None
+                        mapIRExpr (fun e ->
+                            match e with
+                            | IRPolyIndex (IRVar (pid, _), _) when Map.containsKey pid aliasToSlot ->
+                                packSlot <- Some aliasToSlot.[pid]
+                                e
+                            | _ -> e) lam.Body |> ignore
+                        match packSlot with
+                        | Some slotIdx ->
+                            let n = aritiesArr.[slotIdx]
+                            // Element type + index-type shape from the former's
+                            // deduced OutputType arrow; the extent is replaced
+                            // with the (now literal) pack size.
+                            let (idxRec, elemTy) =
+                                match info.OutputType with
+                                | IRTArrow ([SIdx ix], et, _) -> (ix, et)
+                                | IRTArrow ([SIdxVirt ix], et, _) -> (ix, et)
+                                | _ ->
+                                    ({ Id = builder.FreshId(); Rank = 1
+                                       Extent = IRLit (IRLitInt (int64 n))
+                                       Symmetry = SymNone; Tag = None
+                                       Kind = SDimension; IxKind = IxKPlain
+                                       Dependencies = [] }, baseTypeBySlot.[slotIdx])
+                            let arrTy : IRArrayTypeG<IRExpr> =
+                                { ElemType = elemTy
+                                  IndexTypes = [ { idxRec with Extent = IRLit (IRLitInt (int64 n)) } ]
+                                  IsVirtual = false
+                                  Identity = None }
+                            let elems =
+                                [ for k in 0 .. n - 1 ->
+                                    let substituted =
+                                        mapIRExpr (fun e ->
+                                            match e with
+                                            | IRVar (vid, _) when vid = ordinalParam.VarId ->
+                                                IRLit (IRLitInt (int64 k))
+                                            | _ -> e) lam.Body
+                                    mapIRExpr rewrite substituted ]
+                            Some (IRArrayLit (elems, arrTy))
+                        | None -> None
+                    | _ -> None
+                | _ -> None
+            mapIRExpr (fun e ->
+                match e with
+                | IRLet (id, IRCompute (IRApplyCombinator info), rest) ->
+                    (match tryUnroll info with
+                     | Some arrLit -> IRLet (id, arrLit, rest)
+                     | None -> e)
+                | IRLet (id, IRApplyCombinator info, rest) ->
+                    (match tryUnroll info with
+                     | Some arrLit -> IRLet (id, arrLit, rest)
+                     | None -> e)
+                | _ -> e) expr
+        let newBody = unrollPackFormers newBody
 
         let newRetType =
             match func.RetType with
@@ -5314,11 +5405,14 @@ let monomorphizeModule (modul: IRModule) (builder: IRBuilder) : IRModule =
     let uniqueCallSites =
         (callSitesFromFuncs @ callSitesFromBindings) |> List.distinct
 
-    // 3. Generate specialized functions
+    // 3. Generate specialized functions. The pack-former unroller inside
+    //    specializeFunction inlines lifted kernel lambdas by id, so it needs
+    //    the whole-module function map (lambdas live in modul.Functions).
+    let funcMap = modul.Functions |> List.map (fun f -> (f.Id, f)) |> Map.ofList
     let specializations =
         uniqueCallSites |> List.map (fun (funcId, arity) ->
             let origFunc = polyFuncMap.[funcId]
-            let spec = specializeFunction origFunc arity builder
+            let spec = specializeFunction origFunc arity funcMap builder
             ((funcId, arity), spec))
     let specMap = specializations |> Map.ofList
 
@@ -5350,8 +5444,30 @@ let monomorphizeModule (modul: IRModule) (builder: IRBuilder) : IRModule =
         |> List.map (fun b -> { b with Value = mapIRExpr rewriteCallSite b.Value })
     let specFuncs = specializations |> List.map snd
 
+    // Prune lifted kernel lambdas that captured a poly PACK and are now dead.
+    // The pack-former unroller inlines such a lambda's body into the specialized
+    // caller, leaving the original lambda unreferenced — and un-codegen-able,
+    // since its body still subscripts the Poly-typed pack (`args[k]`) that no
+    // longer exists as a scalar. Drop it once nothing references it. The gate is
+    // deliberately narrow (name is a synthesized "__lambda_", has a Poly-typed
+    // capture, AND is unreferenced), so no live function is ever removed.
+    let allFuncs = newFunctions @ specFuncs
+    let referencedIds =
+        (allFuncs |> List.map (fun f -> f.Body))
+        @ (newBindings |> List.map (fun b -> b.Value))
+        |> List.map collectVarRefsIR
+        |> Set.unionMany
+    let capturesPolyPack (f: IRFuncDef) =
+        f.Captures |> List.exists (fun c ->
+            match c.Type with IRTPoly _ -> true | _ -> false)
+    let prunedFuncs =
+        allFuncs |> List.filter (fun f ->
+            not (f.Name.StartsWith("__lambda_")
+                 && capturesPolyPack f
+                 && not (Set.contains f.Id referencedIds)))
+
     { modul with
-        Functions = newFunctions @ specFuncs
+        Functions = prunedFuncs
         Bindings = newBindings }
 
 // ============================================================================
@@ -5395,6 +5511,7 @@ let rec ppIRType = function
                     | IRVar (vid, _) -> sprintf "v%d" vid
                     | _ -> "?"
                 sprintf "Idx<%s>#%d" extentStr id
+            | IRefAny -> "_"
         match inner with
         | IRTScalar ETInt64 | IRTScalar ETInt32 -> sprintf "Nat<%s>" tagStr
         | other -> sprintf "(%s)<%s>" (ppIRType other) tagStr

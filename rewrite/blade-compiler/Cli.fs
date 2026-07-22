@@ -979,6 +979,7 @@ let private dispatchTest (rest: string list) : int =
             | "rand" -> Some ("Rand", randTests)
             | "spectra" -> Some ("Spectra", spectraTests)
             | "fallback" -> Some ("Fallback", fallbackTests)
+            | "stack-join" | "stackjoin" -> Some ("Stack/Join", stackJoinTests)
             | "sgs" -> Some ("SGS", sgsTests)
             | "ml-ops" | "mlops" -> Some ("ML Ops", mlOpsTests)
             | "ml-e2e" | "mle2e" -> Some ("ML E2E", mlE2eTests)
