@@ -7,19 +7,8 @@ import spectra as sp
 let x: Array<Float64 like Idx<6>, Idx<4>> = [[-3.0, -2.5, -2.0, -1.5], [-1.0, -0.5, 0.0, 0.5], [1.0, 1.5, 2.0, 2.5], [3.0, 3.5, 4.0, 4.5], [5.0, 5.5, 6.0, 6.5], [7.0, 7.5, 8.0, 8.5]]
 let X = sp.fft2(x)
 let resid = {
-    let mut sx = 0.0
-    for i in 0..6 {
-        for j in 0..4 {
-            sx = sx + x(i, j) * x(i, j)
-        }
-    }
-    let mut sX = 0.0
-    for i in 0..6 {
-        for j in 0..4 {
-            let z = X(i, j)
-            sX = sX + real(z) * real(z) + imag(z) * imag(z)
-        }
-    }
+    let sx = reduce(method_for(range<Idx<6>>) <*> method_for(range<Idx<4>>) <@> lambda(i, j) -> x(i, j) * x(i, j), (+), 0.0)
+    let sX = reduce(method_for(range<Idx<6>>) <*> method_for(range<Idx<4>>) <@> lambda(i, j) -> real(X(i, j)) * real(X(i, j)) + imag(X(i, j)) * imag(X(i, j)), (+), 0.0)
     sX - 24.0 * sx
 }
 // EXPECT: resid = 0.0

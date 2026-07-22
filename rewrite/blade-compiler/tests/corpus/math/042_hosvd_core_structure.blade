@@ -5,80 +5,39 @@
 import math as m
 let X: Array<Float64 like Idx<3>, Idx<3>, Idx<3>> = [[[2.0, 2.5, 4.0], [3.0, 3.5, 5.0], [4.0, 4.5, 6.0]], [[4.0, 4.5, 6.0], [6.0, 6.75, 8.5], [8.0, 9.0, 11.0]], [[6.0, 6.5, 8.0], [9.0, 10.0, 12.0], [12.0, 13.5, 16.0]]]
 let (G, U0, U1, U2) = m.hosvd(X)
+// Mode-n slice norm = Frobenius norm of the mode-n slice of the core. Build
+// the squared core with the sliced mode as the LEADING axis (choosing which
+// range slot indexes which core mode), then collapse each trailing 3×3 face
+// with a reduce and take the root.
 let norms0 = {
-    let mut ns = [0.0, 0.0, 0.0]
-    let mut acc = 0.0
-    for a in 0..3 {
-        acc = 0.0
-        for b in 0..3 {
-            for c in 0..3 {
-                acc = acc + G(a, b, c) * G(a, b, c)
-            }
-        }
-        ns(a) = sqrt(acc)
-    }
-    ns
+    let Gsq = method_for(range<Idx<3>, Idx<3>, Idx<3>>) <@> lambda(a, b, c) -> G(a, b, c) * G(a, b, c) |> compute
+    method_for(Gsq) <@> lambda(face: Array<Float64 like Idx<3>, Idx<3>>) -> sqrt(reduce(face, (+))) |> compute
 }
 let norms1 = {
-    let mut ns = [0.0, 0.0, 0.0]
-    let mut acc = 0.0
-    for b in 0..3 {
-        acc = 0.0
-        for a in 0..3 {
-            for c in 0..3 {
-                acc = acc + G(a, b, c) * G(a, b, c)
-            }
-        }
-        ns(b) = sqrt(acc)
-    }
-    ns
+    let Gsq = method_for(range<Idx<3>, Idx<3>, Idx<3>>) <@> lambda(b, a, c) -> G(a, b, c) * G(a, b, c) |> compute
+    method_for(Gsq) <@> lambda(face: Array<Float64 like Idx<3>, Idx<3>>) -> sqrt(reduce(face, (+))) |> compute
 }
 let norms2 = {
-    let mut ns = [0.0, 0.0, 0.0]
-    let mut acc = 0.0
-    for c in 0..3 {
-        acc = 0.0
-        for a in 0..3 {
-            for b in 0..3 {
-                acc = acc + G(a, b, c) * G(a, b, c)
-            }
-        }
-        ns(c) = sqrt(acc)
-    }
-    ns
+    let Gsq = method_for(range<Idx<3>, Idx<3>, Idx<3>>) <@> lambda(c, a, b) -> G(a, b, c) * G(a, b, c) |> compute
+    method_for(Gsq) <@> lambda(face: Array<Float64 like Idx<3>, Idx<3>>) -> sqrt(reduce(face, (+))) |> compute
 }
+// All-orthogonality: for each mode, the Gram matrix of the flattened mode-n
+// slices must be diagonal. Build each Gram via a rank-4 cross-slice term
+// tensor collapsed to (a,a2), mask off the diagonal+lower with a strict-upper
+// selector (elementwise, at top level — so the large diagonal never enters the
+// square sum), then accumulate the squared strictly-upper entries over modes.
 let ortho = {
-    let mut acc = 0.0
-    let mut dot = 0.0
-    for a in 0..3 {
-        for a2 in 0..3 {
-            dot = 0.0
-            for b in 0..3 {
-                for c in 0..3 {
-                    dot = dot + G(a, b, c) * G(a2, b, c)
-                }
-            }
-            let contrib = if a < a2 then dot * dot else 0.0
-            acc = acc + contrib
-            dot = 0.0
-            for b in 0..3 {
-                for c in 0..3 {
-                    dot = dot + G(b, a, c) * G(b, a2, c)
-                }
-            }
-            let contrib1 = if a < a2 then dot * dot else 0.0
-            acc = acc + contrib1
-            dot = 0.0
-            for b in 0..3 {
-                for c in 0..3 {
-                    dot = dot + G(b, c, a) * G(b, c, a2)
-                }
-            }
-            let contrib2 = if a < a2 then dot * dot else 0.0
-            acc = acc + contrib2
-        }
-    }
-    acc
+    let up: Array<Float64 like Idx<3>, Idx<3>> = [[0.0, 1.0, 1.0], [0.0, 0.0, 1.0], [0.0, 0.0, 0.0]]
+    let M0 = method_for(range<Idx<3>, Idx<3>, Idx<3>, Idx<3>>) <@> lambda(a, a2, b, c) -> G(a, b, c) * G(a2, b, c) |> compute
+    let Gram0 = method_for(M0) <@> lambda(face: Array<Float64 like Idx<3>, Idx<3>>) -> reduce(face, (+)) |> compute
+    let up0 = Gram0 * up
+    let M1 = method_for(range<Idx<3>, Idx<3>, Idx<3>, Idx<3>>) <@> lambda(a, a2, b, c) -> G(b, a, c) * G(b, a2, c) |> compute
+    let Gram1 = method_for(M1) <@> lambda(face: Array<Float64 like Idx<3>, Idx<3>>) -> reduce(face, (+)) |> compute
+    let up1 = Gram1 * up
+    let M2 = method_for(range<Idx<3>, Idx<3>, Idx<3>, Idx<3>>) <@> lambda(a, a2, b, c) -> G(b, c, a) * G(b, c, a2) |> compute
+    let Gram2 = method_for(M2) <@> lambda(face: Array<Float64 like Idx<3>, Idx<3>>) -> reduce(face, (+)) |> compute
+    let up2 = Gram2 * up
+    reduce(up0, lambda(acc, x) -> acc + x * x, 0.0) + reduce(up1, lambda(acc, x) -> acc + x * x, 0.0) + reduce(up2, lambda(acc, x) -> acc + x * x, 0.0)
 }
 // EXPECT: norms0 = [41.041458598976831, 1.382452917271221, 0.0]
 // EXPECT: norms1 = [41.051944010145107, 1.0248868171229528, 0.0]

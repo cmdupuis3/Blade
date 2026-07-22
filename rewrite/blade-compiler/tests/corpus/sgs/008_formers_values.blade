@@ -32,14 +32,11 @@ let g22_123 = G(2, 2, 1, 2, 3)
 // divergence via the op's own difference operator: trace(G) = 0 pointwise
 let mut dv = [0.0]
 let div_done = {
-    for i in 0..4 {
-        for j in 0..4 {
-            for k in 0..4 {
-                let d = G(0, 0, i, j, k) + G(1, 1, i, j, k) + G(2, 2, i, j, k)
-                dv(0) += d * d
-            }
-        }
-    }
+    let s_dv0 = reduce(method_for(range<Idx<4>>) <*> method_for(range<Idx<4>>) <*> method_for(range<Idx<4>>) <@> lambda(i, j, k) -> {
+        let d = G(0, 0, i, j, k) + G(1, 1, i, j, k) + G(2, 2, i, j, k)
+        d * d
+    }, (+), 0.0)
+    dv(0) = s_dv0
     0.0
 }
 let field_is_divergence_free = if dv(0) < 0.00000000000000000000000001 then 1.0 else 0.0

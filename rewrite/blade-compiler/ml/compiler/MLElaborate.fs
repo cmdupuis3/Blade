@@ -542,6 +542,10 @@ let rec private rewriteExpr (st: ElabState) (statics: StaticEnv) (aliases: Set<s
         es |> List.fold (fun acc x ->
             acc |> Result.bind (fun xs -> r x |> Result.map (fun x' -> xs @ [x'])))
             (Ok [])
+    let rOpt (o: Expr option) =
+        match o with
+        | None -> Ok None
+        | Some x -> r x |> Result.map Some
     match e.Kind with
     // Qualified ML sizing builtin: `alias.total_dim(...)` -> the mangled
     // internal registry name so the static evaluator folds it (and a bare
@@ -703,10 +707,91 @@ let rec private rewriteExpr (st: ElabState) (statics: StaticEnv) (aliases: Set<s
         r scrut |> Result.bind (fun s' ->
             cases |> List.fold (fun acc c ->
                 acc |> Result.bind (fun cs ->
-                    r c.Body |> Result.map (fun b -> cs @ [{ c with Body = b }])))
+                    rOpt c.Guard |> Result.bind (fun g' ->
+                    r c.Body |> Result.map (fun b -> cs @ [{ c with Guard = g'; Body = b }]))))
                 (Ok [])
             |> Result.map (fun cs' -> inheritSpan e (ExprMatch (s', cs'))))
-    | _ -> Ok e
+    // Recursive array (`let rec q: T = match q with ...`): the seed and
+    // inductive slices are ordinary expressions and may contain qualified
+    // ops. Without this arm they fell through untouched, and since this pass
+    // DELETES the import that would bind the alias, the call reached the
+    // checker as an unbound variable.
+    | ExprKind.ExprRecArray def ->
+        rOpt (def.SeedArm |> Option.map snd) |> Result.bind (fun seedE ->
+        r def.SliceExpr |> Result.map (fun slice' ->
+            let seed' = Option.map2 (fun (sv, _) se -> (sv, se)) def.SeedArm seedE
+            inheritSpan e (ExprRecArray { def with SeedArm = seed'; SliceExpr = slice' })))
+    // The rest of the expression algebra. Every constructor holding a
+    // sub-expression is walked, and the catch-all wildcard is deliberately
+    // GONE: an unhandled case is an FS0025 incomplete-match warning at build
+    // time rather than a qualified call silently surviving unrewritten.
+    | ExprKind.ExprCompute inner -> r inner |> Result.map (fun i -> inheritSpan e (ExprCompute i))
+    | ExprKind.ExprRead inner -> r inner |> Result.map (fun i -> inheritSpan e (ExprRead i))
+    | ExprKind.ExprPure inner -> r inner |> Result.map (fun i -> inheritSpan e (ExprPure i))
+    | ExprKind.ExprStatic inner -> r inner |> Result.map (fun i -> inheritSpan e (ExprStatic i))
+    | ExprKind.ExprRank inner -> r inner |> Result.map (fun i -> inheritSpan e (ExprRank i))
+    | ExprKind.ExprExtents inner -> r inner |> Result.map (fun i -> inheritSpan e (ExprExtents i))
+    | ExprKind.ExprUnique inner -> r inner |> Result.map (fun i -> inheritSpan e (ExprUnique i))
+    | ExprKind.ExprObjectFor k -> r k |> Result.map (fun k' -> inheritSpan e (ExprObjectFor k'))
+    | ExprKind.ExprReynolds (k, anti) -> r k |> Result.map (fun k' -> inheritSpan e (ExprReynolds (k', anti)))
+    | ExprKind.ExprField (obj, fld) -> r obj |> Result.map (fun o -> inheritSpan e (ExprField (o, fld)))
+    | ExprKind.ExprPartialApp (op, inner, isLeft) -> r inner |> Result.map (fun i -> inheritSpan e (ExprPartialApp (op, i, isLeft)))
+    | ExprKind.ExprTranspose (a, d1, d2) -> r a |> Result.map (fun a' -> inheritSpan e (ExprTranspose (a', d1, d2)))
+    | ExprKind.ExprDecompact (a, d) -> r a |> Result.map (fun a' -> inheritSpan e (ExprDecompact (a', d)))
+    | ExprKind.ExprBlocked (t, inner) -> r inner |> Result.map (fun i -> inheritSpan e (ExprBlocked (t, i)))
+    | ExprKind.ExprHalo (t, offs) -> r offs |> Result.map (fun o -> inheritSpan e (ExprHalo (t, o)))
+    | ExprKind.ExprMethodFor es -> rList es |> Result.map (fun es' -> inheritSpan e (ExprMethodFor es'))
+    | ExprKind.ExprZip es -> rList es |> Result.map (fun es' -> inheritSpan e (ExprZip es'))
+    | ExprKind.ExprStack es -> rList es |> Result.map (fun es' -> inheritSpan e (ExprStack es'))
+    | ExprKind.ExprSequence es -> rList es |> Result.map (fun es' -> inheritSpan e (ExprSequence es'))
+    | ExprKind.ExprGroupKeys es -> rList es |> Result.map (fun es' -> inheritSpan e (ExprGroupKeys es'))
+    | ExprKind.ExprAlign (es, spec) -> rList es |> Result.map (fun es' -> inheritSpan e (ExprAlign (es', spec)))
+    | ExprKind.ExprJoin (es, d) -> rList es |> Result.map (fun es' -> inheritSpan e (ExprJoin (es', d)))
+    | ExprKind.ExprTupleIndex (t, i) ->
+        r t |> Result.bind (fun t' -> r i |> Result.map (fun i' -> inheritSpan e (ExprTupleIndex (t', i'))))
+    | ExprKind.ExprGuard (c, b) ->
+        r c |> Result.bind (fun c' -> r b |> Result.map (fun b' -> inheritSpan e (ExprGuard (c', b'))))
+    | ExprKind.ExprReplicate (c, b) ->
+        r c |> Result.bind (fun c' -> r b |> Result.map (fun b' -> inheritSpan e (ExprReplicate (c', b'))))
+    | ExprKind.ExprMask (a, p) ->
+        r a |> Result.bind (fun a' -> r p |> Result.map (fun p' -> inheritSpan e (ExprMask (a', p'))))
+    | ExprKind.ExprCompound (d, m) ->
+        r d |> Result.bind (fun d' -> r m |> Result.map (fun m' -> inheritSpan e (ExprCompound (d', m'))))
+    | ExprKind.ExprIntersect (a, b) ->
+        r a |> Result.bind (fun a' -> r b |> Result.map (fun b' -> inheritSpan e (ExprIntersect (a', b'))))
+    | ExprKind.ExprUnion (a, b) ->
+        r a |> Result.bind (fun a' -> r b |> Result.map (fun b' -> inheritSpan e (ExprUnion (a', b'))))
+    | ExprKind.ExprContains (a, v) ->
+        r a |> Result.bind (fun a' -> r v |> Result.map (fun v' -> inheritSpan e (ExprContains (a', v'))))
+    | ExprKind.ExprGroupBy (v, g) ->
+        r v |> Result.bind (fun v' -> r g |> Result.map (fun g' -> inheritSpan e (ExprGroupBy (v', g'))))
+    | ExprKind.ExprSort (a, k) ->
+        r a |> Result.bind (fun a' -> r k |> Result.map (fun k' -> inheritSpan e (ExprSort (a', k'))))
+    | ExprKind.ExprGram (l, rr) ->
+        r l |> Result.bind (fun l' -> r rr |> Result.map (fun r' -> inheritSpan e (ExprGram (l', r'))))
+    | ExprKind.ExprReduce (a, k, init) ->
+        r a |> Result.bind (fun a' ->
+        r k |> Result.bind (fun k' ->
+        rOpt init |> Result.map (fun init' -> inheritSpan e (ExprReduce (a', k', init')))))
+    | ExprKind.ExprStruct (nm, fields, spread) ->
+        fields |> List.fold (fun acc (fn, fe) ->
+            acc |> Result.bind (fun fs -> r fe |> Result.map (fun fe' -> fs @ [(fn, fe')])))
+            (Ok [])
+        |> Result.bind (fun fields' ->
+        rOpt spread |> Result.map (fun spread' -> inheritSpan e (ExprStruct (nm, fields', spread'))))
+    | ExprKind.ExprFor (src, cs, kern) ->
+        (match src with
+         | ForArrays (arrs, inClause) ->
+             rList arrs |> Result.bind (fun arrs' ->
+             rOpt inClause |> Result.map (fun ic' -> ForArrays (arrs', ic')))
+         | ForKernel k -> r k |> Result.map ForKernel)
+        |> Result.bind (fun src' ->
+        rOpt kern |> Result.map (fun kern' -> inheritSpan e (ExprFor (src', cs, kern'))))
+    // Leaves: no sub-expressions. Index/type arguments (range<I>, reverse<I>)
+    // carry TypeExprs, not Exprs, and are never rewritten.
+    | ExprKind.ExprWildcard | ExprKind.ExprQualified _ | ExprKind.ExprRange _
+    | ExprKind.ExprReverse _ | ExprKind.ExprArity _ | ExprKind.ExprNth
+    | ExprKind.ExprZero | ExprKind.ExprSection _ -> Ok e
 
 /// `import ml [as _]` — the module this layer owns.
 let private isMlImport (d: Located<Decl>) =

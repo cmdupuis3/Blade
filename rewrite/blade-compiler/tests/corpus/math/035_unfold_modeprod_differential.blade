@@ -11,13 +11,8 @@ let MX: Array<Float64 like Idx<3>, Idx<8>> = m.unfold(X, 0)
 let LHS = m.unfold(Y, 0)
 let RHS = m.matmul(U, MX)
 let dev = {
-    let mut acc = 0.0
-    for i in 0..2 {
-        for j in 0..8 {
-            let d = LHS(i, j) - RHS(i, j)
-            acc = acc + d * d
-        }
-    }
-    acc
+    let E = LHS - RHS
+    let rowsums = method_for(E) <@> lambda(er: Array<Float64 like Idx<8>>) -> prodsum(er, er) |> compute
+    reduce(rowsums, (+))
 }
 // EXPECT: dev = 0.0

@@ -1,0 +1,40 @@
+// TEST: Stack Join Value Semantics
+// Two properties of the assembly combinators, pinned together.
+//
+// (1) DEFERRED SOURCES: a source that is still an unmaterialized computation is
+//     FORCED by the stack/join consumer (the same forceDeferredArrayInput path
+//     transpose/decompact use), so no `|> compute` is required at the source.
+//     Forcing at main's top level also puts dbl/trp on the auto-print list.
+//
+// (2) COPY, NOT ALIAS: stack/join materialize an INDEPENDENT pool. `let` is
+//     assignable in Blade, so an aliasing assembly would let a later write to a
+//     source leak into the assembled array. Writing 99.0 into m(0) after the
+//     assembly leaves s and j holding the pre-write value.
+type SIdx = Idx<2>
+type TIdx = Idx<2>
+let base1: Array<Float64 like SIdx, TIdx> = [[1.0, 2.0], [3.0, 4.0]]
+let dbl = method_for(base1) <@> lambda(x) -> x * 2.0
+let trp = method_for(base1) <@> lambda(x) -> x * 3.0
+let st = stack(dbl, trp)
+let jn = join(dbl, trp, 1)
+let st101 = st(1, (0 : SIdx), (1 : TIdx))
+let jn03 = jn((0 : SIdx), 3)
+
+let mut m: Array<Float64 like SIdx> = [1.0, 2.0]
+let k: Array<Float64 like SIdx> = [7.0, 8.0]
+let s = stack(m, k)
+let j = join(m, k, 0)
+let overwritten = {
+    m((0 : SIdx)) = 99.0
+    m((0 : SIdx))
+}
+// EXPECT: dbl = [2.0, 4.0, 6.0, 8.0]
+// EXPECT: trp = [3.0, 6.0, 9.0, 12.0]
+// EXPECT: st = [2.0, 4.0, 6.0, 8.0, 3.0, 6.0, 9.0, 12.0]
+// EXPECT: jn = [2.0, 4.0, 3.0, 6.0, 6.0, 8.0, 9.0, 12.0]
+// EXPECT: st101 = 6
+// EXPECT: jn03 = 6
+// EXPECT: overwritten = 99
+// EXPECT: m = [99.0, 2.0]
+// EXPECT: s = [1.0, 2.0, 7.0, 8.0]
+// EXPECT: j = [1.0, 2.0, 7.0, 8.0]

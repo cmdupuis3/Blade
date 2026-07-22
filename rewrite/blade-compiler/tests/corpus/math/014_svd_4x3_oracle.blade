@@ -7,19 +7,11 @@ import math as m
 let A: Array<Float64 like Idx<4>, Idx<3>> = [[1.0, 2.0, 3.0], [4.0, 5.0, 6.0], [7.0, 8.0, 10.0], [2.0, 1.0, 0.0]]
 let (U, S, V) = m.svd(A)
 let resid = {
-    let mut acc = 0.0
-    let mut rc = 0.0
-    for i in 0..4 {
-        for j in 0..3 {
-            rc = 0.0
-            for k in 0..3 {
-                rc = rc + U(i, k) * S(k) * V(j, k)
-            }
-            let d = rc - A(i, j)
-            acc = acc + d * d
-        }
-    }
-    acc
+    let US = method_for(range<Idx<4>, Idx<3>>) <@> lambda(i, k) -> U(i, k) * S(k) |> compute
+    let Rhat = method_for(US, V) <@> lambda(u: Array<Float64 like Idx<3>>, v: Array<Float64 like Idx<3>>) -> prodsum(u, v) |> compute
+    let E = Rhat - A
+    let rowsums = method_for(E) <@> lambda(er: Array<Float64 like Idx<3>>) -> prodsum(er, er) |> compute
+    reduce(rowsums, (+))
 }
 // EXPECT: S = [17.476135064729419, 1.8800750442989205, 0.22365381092041997]
 // EXPECT: U = [0.20817283453492813, -0.46393963199244637, 0.27341803554582883, 0.50199378144452933, -0.0446637219097583, 0.76114435468544572, 0.83506330011524943, 0.051917974236364066, -0.54769864775423838, 0.085648112374672916, 0.88321554207513431, 0.21430828359378748]

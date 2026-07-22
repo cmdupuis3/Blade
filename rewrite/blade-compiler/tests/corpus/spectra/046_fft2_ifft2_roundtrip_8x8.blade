@@ -9,14 +9,5 @@ let x: Array<Float64 like Idx<8>, Idx<8>> = [[0.0, 1.0, 2.0, 3.0, 4.0, 5.0, 6.0,
 let X = sp.fft2(x)
 let X2: Array<Complex128 like Idx<8>, Idx<8>> = X
 let y = sp.ifft2(X2)
-let resid = {
-    let mut acc = 0.0
-    for i in 0..8 {
-        for j in 0..8 {
-            let d = y(i, j) - x(i, j)
-            acc = acc + d * d
-        }
-    }
-    acc
-}
+let resid = reduce(method_for(range<Idx<8>>) <*> method_for(range<Idx<8>>) <@> lambda(i, j) -> (y(i, j) - x(i, j)) * (y(i, j) - x(i, j)), (+), 0.0)
 // EXPECT: resid = 0.0

@@ -779,6 +779,63 @@ let transposeArray (arr: BladeArray) (d1: int) (d2: int) : BladeArray =
     loop 0 []
     out
 
+/// stack(A1..An): fresh LEADING axis of extent n over n same-shaped arrays,
+/// so `stack(A,B,C)(k)` selects array k (formalism 2.6). Rank r -> r+1.
+///
+/// Mirrors CodeGen.materializeStackForm: a fresh dense pool plus a per-source
+/// element COPY — never an aliasing assembly, so writing through a source after
+/// the stack cannot reach it. The output IndexTypes reuse the child's (the
+/// extra leading Idx<n> is not reflected there, exactly as forceSequence does;
+/// printing keys off the binding type).
+let stackArrays (arrs: BladeArray list) : BladeArray =
+    match arrs with
+    | [] -> raise (ArrayOpUnsupported "stack: no operands")
+    | first :: _ ->
+        let srcRank = first.Extents.Length
+        let outExtents = Array.append [| int64 arrs.Length |] first.Extents
+        let out = allocDense first.ElemType first.IndexTypes outExtents
+        arrs |> List.iteri (fun k src ->
+            let rec loop (dim: int) (acc: int64 list) =
+                if dim = srcRank then
+                    let coords = List.rev acc
+                    writeCell out (int64 k :: coords) (readCell src coords)
+                else
+                    let mutable i = 0L
+                    while i < src.Extents.[dim] do
+                        loop (dim + 1) (i :: acc)
+                        i <- i + 1L
+            loop 0 [])
+        out
+
+/// join(A1..An, d): concatenate along dimension d (formalism 2.6) — rank is
+/// preserved, extents[d] is the sum of the operands' extents[d], every other
+/// axis agrees. Mirrors CodeGen.materializeJoinForm's running-offset copy.
+let joinArrays (arrs: BladeArray list) (dim: int) : BladeArray =
+    match arrs with
+    | [] -> raise (ArrayOpUnsupported "join: no operands")
+    | first :: _ ->
+        let r = first.Extents.Length
+        if dim < 0 || dim >= r then
+            raise (ArrayOpUnsupported "join: dimension index out of range")
+        let outExtents = Array.copy first.Extents
+        outExtents.[dim] <- arrs |> List.sumBy (fun a -> a.Extents.[dim])
+        let out = allocDense first.ElemType first.IndexTypes outExtents
+        let mutable offset = 0L
+        for src in arrs do
+            let rec loop (dim2: int) (acc: int64 list) =
+                if dim2 = r then
+                    let coords = List.rev acc
+                    let dst = coords |> List.mapi (fun d i -> if d = dim then i + offset else i)
+                    writeCell out dst (readCell src coords)
+                else
+                    let mutable i = 0L
+                    while i < src.Extents.[dim2] do
+                        loop (dim2 + 1) (i :: acc)
+                        i <- i + 1L
+            loop 0 []
+            offset <- offset + src.Extents.[dim]
+        out
+
 // ============================================================================
 // §6.5 Symmetry producers — decompact / gram / negate / conjugate (M7-β)
 // ============================================================================

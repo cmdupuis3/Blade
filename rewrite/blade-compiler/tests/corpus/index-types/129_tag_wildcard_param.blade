@@ -1,0 +1,24 @@
+// TEST: Tag Wildcard Param
+// The `Base<_>` tag wildcard: a parameter that declines to constrain its
+// argument's nominal index tag, so ONE named kernel serves ranges over
+// DIFFERENT index types.
+//
+// Without it this program cannot be written at all. `range<Row>` yields
+// elements typed Nat<Row> and `range<Col>` yields Nat<Col>
+// (elemTypeForIterationIndex), and IRTIdxTagged unification is nominative —
+// so no concrete parameter type accepts both, and the shared kernel has to be
+// duplicated as two inline lambdas.
+//
+// The seam that used to reject this is etaExpandFunctionKernel: `<@>` over a
+// bare top-level `function` eta-expands to `lambda(k) -> wrap(k)` and then
+// PINS the residual param to the callee's declared type, which buildApplyInfo
+// afterwards unifies against the source element type.
+type Row = Idx<4>
+type Col = Idx<3>
+
+function wrap(m: Nat<_>) -> Float64 = if m < 2 then 1.0 * m else 1.0 * m - 10.0
+
+let r = method_for(range<Row>) <@> wrap |> compute
+let c = method_for(range<Col>) <@> wrap |> compute
+// EXPECT: r = [0, 1, -8, -7]
+// EXPECT: c = [0, 1, -8]

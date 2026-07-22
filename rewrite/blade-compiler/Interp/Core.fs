@@ -749,6 +749,13 @@ let rec evalExpr (st: InterpState) (env: Env) (expr: IRExpr) : Value =
     | IRMask _ | IRSort _ | IRUnique _ | IRIntersect _ | IRUnion _ | IRTranspose _ ->
         evalArrayNode st env expr
 
+    // ---- Rank-changing assembly (formalism 2.6): stack adds a fresh leading
+    //      axis over same-shaped operands; join concatenates along a dimension.
+    //      Both materialize a fresh dense pool by copying (never aliasing) their
+    //      operands, mirroring CodeGen's materialize{Stack,Join}Form.
+    | IRStack _ | IRJoin _ ->
+        evalArrayNode st env expr
+
     // ---- Symmetry producers (M7-β): decompact fission, gram A·Bᴴ, whole-array
     //      negate/conjugate. Like the eager set/reshape ops they MATERIALIZE a
     //      fresh array (forcing deferred inputs first), so route to the Loops

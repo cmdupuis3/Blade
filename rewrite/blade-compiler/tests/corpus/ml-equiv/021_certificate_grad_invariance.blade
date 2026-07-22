@@ -7,6 +7,11 @@ import ad as ad
 // when the input rotates — grad() differentiates the synthesized layers and
 // inherits their equivariance. Pins from dump-equiv (oracle: loss diff 0,
 // max dw diff 2.2e-16).
+//
+// The squared-error loss is an additive `reduce` over the per-component
+// residuals (no imperative for-in); grad's pre-normalization turns the
+// additive reduce into the same accumulation the old fold produced, so the
+// weight gradient is identical.
 // ============================================================================
 let static SIN = [(0, 0, 2), (1, 1, 1)]
 let static SOUT = [(0, 0, 1), (1, 1, 2)]
@@ -24,22 +29,12 @@ function model(w: Array<Float like Idx<WD>>, x: Array<Float like IrrepsIdx<SIN>>
 
 function loss(w: Array<Float like Idx<WD>>) -> Float = {
     let o = model(w, xg)
-    let mut acc = 0.0
-    for k in 0..3 {
-        let d = o(k) - tgt(k)
-        acc = acc + d * d
-    }
-    acc
+    reduce([(o(0) - tgt(0)) * (o(0) - tgt(0)), (o(1) - tgt(1)) * (o(1) - tgt(1)), (o(2) - tgt(2)) * (o(2) - tgt(2))], (+))
 }
 
 function loss_rot(w: Array<Float like Idx<WD>>) -> Float = {
     let o = model(w, xg_rot)
-    let mut acc = 0.0
-    for k in 0..3 {
-        let d = o(k) - tgt(k)
-        acc = acc + d * d
-    }
-    acc
+    reduce([(o(0) - tgt(0)) * (o(0) - tgt(0)), (o(1) - tgt(1)) * (o(1) - tgt(1)), (o(2) - tgt(2)) * (o(2) - tgt(2))], (+))
 }
 
 let mut dw = [0.0, 0.0, 0.0, 0.0]

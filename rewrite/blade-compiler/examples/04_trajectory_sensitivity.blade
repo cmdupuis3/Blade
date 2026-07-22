@@ -9,17 +9,18 @@ import ad as ad
 //      dimensionally wrong formula cannot typecheck.
 //   B. A DIFFERENTIABLE drag-loss estimate: energy lost to quadratic drag,
 //      integrated by midpoint quadrature over the closed-form vacuum
-//      velocity profile. grad() generates the reverse pass; the example
+//      velocity profile. The quadrature is a RECURSIVE ARRAY carrying the
+//      running partial sum; grad() generates the reverse pass; the example
 //      prints the AD sensitivities next to finite-difference quotients
 //      computed in-file, and they must agree.
-//      (AD discipline: the accumulator update reads only the loop index,
-//      the parameters, and fresh per-step lets -- grad() rejects loops
-//      whose update reads mut state mutated in the same loop, so the
-//      integrand is derived from the closed form, not a recurrence.)
-//   C. The TRUE dynamics with drag, integrated imperatively -- a for-in
-//      Euler recurrence over mutable state is exactly what the imperative
-//      subset is for at runtime. Landing is handled by gating each update
-//      with an airborne indicator (no break statement needed).
+//      (AD discipline: the additive carry reads only the step ordinal and
+//      the parameters, so the integrand is the closed form, not mutated
+//      state -- exactly the prefix-sum shape grad() re-homes onto a
+//      triangular scatter-add.)
+//   C. The TRUE dynamics with drag, as a RECURSIVE ARRAY over time -- an
+//      Euler recurrence whose each slice steps the whole packed state
+//      vector once. Landing is handled by gating each update with an
+//      airborne indicator (no break statement needed).
 //
 // EXPECT values verified against an independent PowerShell implementation
 // of the same quadrature and simulation, plus the in-file FD self-checks.
@@ -65,21 +66,20 @@ let heights: Array<Float<meters> like TIdx> = vy0 * ts - 0.5 * grav * ts * ts
 // Part B -- differentiable drag-loss estimate.
 // Power dissipated by quadratic drag is c_d |v|^3; integrating over the
 // vacuum profile v(t) = (vx0, vy0 - g t) with N = 40 midpoint steps gives a
-// first-order estimate of the energy lost per unit mass. The whole function
-// is closed-form per step (fresh lets from the loop index and parameters
-// feeding one additive accumulator), which is precisely the loop shape
-// grad() differentiates.
+// first-order estimate of the energy lost per unit mass. The quadrature is a
+// RECURSIVE ARRAY carrying the running partial sum: s(0) = 0, s(n) = s(n-1) +
+// integrand(n-1), read at the final ordinal -- the additive-carry shape grad()
+// differentiates (it re-expresses the prefix sum as a triangular scatter-add).
+// The integrand is closed-form per step (built from the step ordinal and the
+// parameters), so no state is mutated in the recurrence the reverse pass reads.
 // ============================================================================
 function drag_loss(ux: Float, uy: Float) -> Float = {
-    let mut s = 0.0
-    for t in 0..40 {
-        let dt = 2.0 * uy / (9.81 * 40.0)
-        let tm = (1.0 * t + 0.5) * dt
-        let vy = uy - 9.81 * tm
-        let sp2 = ux * ux + vy * vy
-        s += sqrt(sp2) * sp2 * dt
-    }
-    0.02 * s
+    let rec s: Array<Float like Idx<41>> =
+        match s with
+        | zero -> zero
+        | zero :: n -> zero :: 0.0
+        | prefix :: n -> prefix :: prefix(n - 1) + sqrt(ux * ux + (uy - 9.81 * ((1.0 * (n - 1) + 0.5) * (2.0 * uy / (9.81 * 40.0)))) * (uy - 9.81 * ((1.0 * (n - 1) + 0.5) * (2.0 * uy / (9.81 * 40.0))))) * (ux * ux + (uy - 9.81 * ((1.0 * (n - 1) + 0.5) * (2.0 * uy / (9.81 * 40.0)))) * (uy - 9.81 * ((1.0 * (n - 1) + 0.5) * (2.0 * uy / (9.81 * 40.0))))) * (2.0 * uy / (9.81 * 40.0))
+    0.02 * s(40)
 }
 
 let (E_drag, dE_dvx0, dE_dvy0) = ad.grad(drag_loss)(15.0, 19.62)
@@ -97,62 +97,65 @@ let fd_vy = (drag_loss(15.0, 19.62001) - drag_loss(15.0, 19.61999)) / 0.00002
 // EXPECT: fd_vy = 61.3783583617078
 
 // ============================================================================
-// Part C -- the true dynamics, imperatively. Euler integration of the
-// drag-coupled equations is a genuine recurrence (each velocity update
-// reads the current velocity), so a for-in loop over mutable state is the
-// right tool -- this is the imperative subset earning its keep at runtime.
-// The airborne indicator gates every update, freezing the state at
-// touchdown without control flow.
+// Part C -- the true dynamics, as a RECURSIVE ARRAY. Euler integration of the
+// drag-coupled equations is a genuine recurrence (each velocity update reads
+// the current velocity), so the state trajectory is a recursive array: the
+// leading axis is time, each slice is the whole (x, y, vx, vy, ft) state
+// vector stepped once from the prior slice. The airborne indicator gates every
+// update, freezing the state at touchdown without control flow. The trajectory
+// is block-local -- only the extracted landing quantities surface.
 //
-// The recurrence is UNIT-CHECKED end to end: the drag coefficient carries
-// its reciprocal-length unit (so c_d * v * |v| is an acceleration), sqrt
-// carries velocity^2 back to velocity through the speed, and every
-// accumulator's annotation is enforced against what its update computes --
-// dropping the * dt from a velocity update would be a compile error, not
-// a silently wrong trajectory.
+// The state is packed into one Float64 component vector (recursion needs a
+// homogeneous element type), so the per-component unit checking of the scalar
+// spelling is traded for the recursive form; the drag/gravity/dt constants are
+// inlined as the literals declared below. The physics is unchanged: c_d * v *
+// |v| is the quadratic-drag acceleration, sqrt carries speed from velocity^2,
+// and dropping a * 0.01 from any update would change the trajectory, not slip
+// past a checker.
 // ============================================================================
 Unit per_meter = meters^-1
 let c_d: Float<per_meter> = 0.002
 let dt: Float<seconds> = 0.01
 
-let sim = {
-    let mut x: Float<meters> = 0.0
-    let mut y: Float<meters> = 0.0
-    let mut vx: Float<velocity> = 15.0
-    let mut vy: Float<velocity> = 19.62
-    let mut ft: Float<seconds> = 0.0
-    for i in 0..450 {
+// one Euler step of the packed state [x, y, vx, vy, ft]
+function estep(prev: Array<Float64 like Idx<5>>) -> Array<Float64 like Idx<5>> =
+    (method_for(range<Idx<5>>) <@> lambda(c: Int64) -> {
+        let x = prev(0)
+        let y = prev(1)
+        let vx = prev(2)
+        let vy = prev(3)
+        let ft = prev(4)
         let airborne = if vy > 0.0 || y > 0.0 then 1.0 else 0.0
         let speed = sqrt(vx * vx + vy * vy)
-        let ax = 0.0 - c_d * vx * speed
-        let ay = 0.0 - grav - c_d * vy * speed
-        x += airborne * vx * dt
-        y += airborne * vy * dt
-        vx += airborne * ax * dt
-        vy += airborne * ay * dt
-        ft += airborne * dt
-    }
-    x
+        let ax = 0.0 - 0.002 * vx * speed
+        let ay = 0.0 - 9.81 - 0.002 * vy * speed
+        if c < 1 then x + airborne * vx * 0.01
+        else if c < 2 then y + airborne * vy * 0.01
+        else if c < 3 then vx + airborne * ax * 0.01
+        else if c < 4 then vy + airborne * ay * 0.01
+        else ft + airborne * 0.01
+    }) |> compute
+
+let sim: Float<meters> = {
+    let rec traj: Array<Float64 like Idx<451>, Idx<5>> =
+        match traj with
+        | zero -> zero
+        | zero :: s -> zero :: [0.0, 0.0, 15.0, 19.62, 0.0]
+        | prefix :: n -> prefix :: estep(prefix(n - 1))
+    let landing = traj(450)
+    landing(0)
 }
 // Drag shortens the vacuum range (60 m) by about nine percent.
 // EXPECT: sim = 54.7425173674639
 
-let sim_time = {
-    let mut y: Float<meters> = 0.0
-    let mut vx: Float<velocity> = 15.0
-    let mut vy: Float<velocity> = 19.62
-    let mut ft: Float<seconds> = 0.0
-    for i in 0..450 {
-        let airborne = if vy > 0.0 || y > 0.0 then 1.0 else 0.0
-        let speed = sqrt(vx * vx + vy * vy)
-        let ax = 0.0 - c_d * vx * speed
-        let ay = 0.0 - grav - c_d * vy * speed
-        y += airborne * vy * dt
-        vx += airborne * ax * dt
-        vy += airborne * ay * dt
-        ft += airborne * dt
-    }
-    ft
+let sim_time: Float<seconds> = {
+    let rec traj: Array<Float64 like Idx<451>, Idx<5>> =
+        match traj with
+        | zero -> zero
+        | zero :: s -> zero :: [0.0, 0.0, 15.0, 19.62, 0.0]
+        | prefix :: n -> prefix :: estep(prefix(n - 1))
+    let landing = traj(450)
+    landing(4)
 }
 // ...and the flight time (4.0 s in vacuum) accordingly.
 // EXPECT: sim_time = 3.90999999999996

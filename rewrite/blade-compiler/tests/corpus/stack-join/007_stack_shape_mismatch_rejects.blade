@@ -1,0 +1,9 @@
+// TEST: Stack Shape Mismatch (rejects)
+// The fresh leading axis SELECTS among the operands, so a ragged selection has
+// no rank-(r+1) type at all. Operands of different extent are a BL4004 shape
+// error naming the offending argument position.
+type AIdx = Idx<3>
+type BIdx = Idx<4>
+let a: Array<Float64 like AIdx> = [1.0, 2.0, 3.0]
+let b: Array<Float64 like BIdx> = [1.0, 2.0, 3.0, 4.0]
+let s = stack(a, b)

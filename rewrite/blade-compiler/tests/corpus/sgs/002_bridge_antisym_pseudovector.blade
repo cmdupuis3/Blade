@@ -25,39 +25,25 @@ let rot = [0.34692944965489897, -0.644217687237691, 0.681632986593423, 0.2922146
 let g_fix = [0.6, -1.1, 0.4, 0.9, 0.3, -0.7, -0.2, 0.8, 1.2]
 
 function mv9(b: Array<Float like Idx<81>>, x: Array<Float like Idx<9>>) -> Array<Float like Idx<9>> = {
-    let mut o = [0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0]
-    for i in 0..9 {
-        for j in 0..9 {
-            o(i) += b(i * 9 + j) * x(j)
-        }
-    }
-    o
+    let brows = method_for(range<Idx<9>>) <*> method_for(range<Idx<9>>) <@> lambda(i, j) -> b(i * 9 + j) |> compute
+    method_for(brows) <@> lambda(row: Array<Float like Idx<9>>) -> prodsum(row, x) |> compute
 }
 
 // (a) bridge of the unrotated gradient
 let cert_g = mv9(b9, g_fix)
 // EXPECT: cert_g = [1.2124355652982142, 0.4242640687119285, 1.414213562373095, 1.0606601717798212, -0.14142135623730956, 0.07071067811865483, 0.6123724356957946, 0.1414213562373095, 0.21213203435596423]
 
-// (b) cart route: R G R^T in-language (oracle operation order), then bridge
-let mut m1 = [0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0]
-let mut m2 = [0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0]
-let rot_done = {
-    for i in 0..3 {
-        for j in 0..3 {
-            for t in 0..3 {
-                m1(i * 3 + j) += g_fix(i * 3 + t) * rot(j * 3 + t)
-            }
-        }
-    }
-    for i in 0..3 {
-        for j in 0..3 {
-            for t in 0..3 {
-                m2(i * 3 + j) += rot(i * 3 + t) * m1(t * 3 + j)
-            }
-        }
-    }
-    0.0
-}
+// (b) cart route: R G R^T in-language (oracle operation order), then bridge.
+// Two rank-2 matmuls as in-order grid formers over the flat 3x3 operands
+// (sum over the contracted index, t = 0,1,2, in the oracle's order), then
+// flattened row-major so the flat-Idx<9> bridge consumer mv9 is unchanged.
+// m1 = G R^T : m1(i,j) = sum_t g_fix(i,t) * rot(j,t)
+let m1r = method_for(range<Idx<3>>) <*> method_for(range<Idx<3>>) <@> lambda(i, j) ->
+    g_fix(i * 3 + 0) * rot(j * 3 + 0) + g_fix(i * 3 + 1) * rot(j * 3 + 1) + g_fix(i * 3 + 2) * rot(j * 3 + 2) |> compute
+// m2 = R m1 : m2(i,j) = sum_t rot(i,t) * m1(t,j)
+let m2r = method_for(range<Idx<3>>) <*> method_for(range<Idx<3>>) <@> lambda(i, j) ->
+    rot(i * 3 + 0) * m1r(0, j) + rot(i * 3 + 1) * m1r(1, j) + rot(i * 3 + 2) * m1r(2, j) |> compute
+let m2 = method_for(range<Idx<9>>) <@> lambda(k) -> m2r(k / 3, k % 3) |> compute
 let cert_g_lhs = mv9(b9, m2)
 // EXPECT: cert_g_lhs = [1.2124355652982144, 1.446380109706646, -0.3037863648543184, 1.0586304467440892, 0.5972597819690029, 0.28828997079211693, -0.07030032568335232, 0.09684069559433117, 0.10416040259446074]
 
@@ -68,9 +54,8 @@ let cert_g_rhs = mv9(d_g, cert_g)
 // (d) proper certificate: both routes agree
 let mut dd = [0.0, 0.0]
 let dd_done = {
-    for k in 0..9 {
-        dd(0) += (cert_g_lhs(k) - cert_g_rhs(k)) * (cert_g_lhs(k) - cert_g_rhs(k))
-    }
+    let s_dd0 = reduce(method_for(range<Idx<9>>) <@> lambda(k) -> (cert_g_lhs(k) - cert_g_rhs(k)) * (cert_g_lhs(k) - cert_g_rhs(k)), (+), 0.0)
+    dd(0) = s_dd0
     0.0
 }
 let cert_agree = if dd(0) < 0.000000000000000001 then 1.0 else 0.0
@@ -87,9 +72,8 @@ let cert_g_improper_wrong = [cert_g_rhs(0), 0.0 - cert_g_rhs(1), 0.0 - cert_g_rh
 // (f) ... and disagrees with the Cartesian route by O(1): the improper
 // element DETECTS the wrong parity (oracle residual 2.89276)
 let wrong_detected = {
-    for k in 0..9 {
-        dd(1) += (cert_g_lhs(k) - cert_g_improper_wrong(k)) * (cert_g_lhs(k) - cert_g_improper_wrong(k))
-    }
+    let s_dd1 = reduce(method_for(range<Idx<9>>) <@> lambda(k) -> (cert_g_lhs(k) - cert_g_improper_wrong(k)) * (cert_g_lhs(k) - cert_g_improper_wrong(k)), (+), 0.0)
+    dd(1) = s_dd1
     0.0
 }
 let cert_wrong_parity_detected = if dd(1) > 1.0 then 1.0 else 0.0

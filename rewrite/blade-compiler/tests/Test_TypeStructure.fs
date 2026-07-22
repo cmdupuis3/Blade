@@ -84,7 +84,7 @@ let rec formatBladeElem (ty: IRType) : string =
     // `IRTIdxTagged (inner, IRefNamed name)`; show `name` (the alias the user
     // wrote), falling back to the inner element type for an anonymous tag.
     | IRTIdxTagged (_, IRefNamed name) -> name
-    | IRTIdxTagged (inner, IRefAnon _) -> formatBladeElem inner
+    | IRTIdxTagged (inner, (IRefAnon _ | IRefAny)) -> formatBladeElem inner
     | _ -> formatBladeType ty   // nested arrays / arrows fall through to the full printer
 
 /// Render an index type's extent. A concrete integer literal is shown as-is

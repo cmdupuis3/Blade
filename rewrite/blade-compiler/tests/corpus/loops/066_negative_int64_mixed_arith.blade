@@ -1,12 +1,13 @@
 // TEST: Negative Int64 Mixed Arithmetic
 // Iteration variables — virtual-source kernel params (range<I>, lo..hi,
-// reverse<I>) and for-in loop vars — are Int64-typed in Blade, so codegen
-// must bind them SIGNED in the emitted C++. They were bound size_t, so a
-// negative intermediate wrapped unsigned before the Float64 conversion in
-// mixed arithmetic: 0.5 * (i - 1) at i=0 gave 0.5 * (2^64 - 1) ~ 9.22e18
-// instead of -0.5. Two's-complement +/-/* survive the unsigned round-trip,
-// so only value-changing ops (Int64->Float64 promotion, signed division)
-// expose the wrap — which is what these pins cover.
+// reverse<I>) and recursive-array step ordinals — are Int64-typed in Blade,
+// so codegen must bind them SIGNED in the emitted C++. They were bound
+// size_t, so a negative intermediate wrapped unsigned before the Float64
+// conversion in mixed arithmetic: 0.5 * (i - 1) at i=0 gave
+// 0.5 * (2^64 - 1) ~ 9.22e18 instead of -0.5. Two's-complement +/-/*
+// survive the unsigned round-trip, so only value-changing ops (Int64->
+// Float64 promotion, signed division) expose the wrap — which is what these
+// pins cover.
 let PR = method_for(range<Idx<3>>) <@> lambda(i: Int64) -> 0.5 * (i - 1) |> compute
 // EXPECT: PR = [-0.5, 0.0, 0.5]
 let DD = method_for(0..3) <@> lambda(i: Int64) -> 0.5 * (i - 1) |> compute
@@ -17,12 +18,16 @@ let RV = method_for(reverse<Idx<3>>) <@> lambda(i: Int64) -> 0.5 * (i - 1) |> co
 // Unsigned division of the wrapped operand gave ~4.6e18 quotients.
 let QD = method_for(range<Idx<3>>) <@> lambda(i: Int64) -> (i - 3) / 2 |> compute
 // EXPECT: QD = [-1.0, -1.0, 0.0]
-// For-in loop variable: same signedness rule. sum 0.5*(k-1), k=0..3 -> 1.0
-let FI = {
-    let mut acc = 0.0
-    for k in 0..4 {
-        acc = acc + 0.5 * (k - 1)
-    }
-    acc
-}
+// Recursive-array step ordinal: same signedness rule. The prefix sum
+// FIacc(n) = FIacc(n-1) + 0.5 * ((n-1) - 1) accumulates 0.5*(k-1) for
+// k=0..3, so the read at the last element is sum 0.5*(k-1) -> 1.0. The
+// slice's `(n - 1) - 1` produces the negative intermediate the size_t bug
+// wrapped unsigned before promotion.
+let rec FIacc: Array<Float like Idx<5>> =
+    match FIacc with
+    | zero -> zero
+    | zero :: s -> zero :: 0.0
+    | prefix :: n -> prefix :: prefix(n - 1) + 0.5 * ((n - 1) - 1)
+// EXPECT: FIacc = [0, -0.5, -0.5, 0, 1]
+let FI = FIacc(4)
 // EXPECT: FI = 1.0

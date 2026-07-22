@@ -28,27 +28,9 @@ let static len2 = ml.irreps_mult(spec_h, 2) * ml.irreps_dim(spec_h, 2)
 // EXPECT: len2 = 5
 
 let x: Array<Float like IrrepsIdx<spec_h>> = [1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0, 9.0, 10.0, 11.0, 12.0, 13.0]
-let s0 = {
-    let mut acc = 0.0
-    for k in 0..2 {
-        acc = acc + x(k)
-    }
-    acc
-}
-let s1 = {
-    let mut acc = 0.0
-    for k in 0..len1 {
-        acc = acc + x(off1 + k)
-    }
-    acc
-}
-let s2 = {
-    let mut acc = 0.0
-    for k in 0..len2 {
-        acc = acc + x(off2 + k)
-    }
-    acc
-}
+let s0 = reduce(method_for(range<Idx<2>>) <@> lambda(k) -> x(k), (+), 0.0)
+let s1 = reduce(method_for(range<Idx<6>>) <@> lambda(k) -> x(off1 + k), (+), 0.0)
+let s2 = reduce(method_for(range<Idx<5>>) <@> lambda(k) -> x(off2 + k), (+), 0.0)
 // EXPECT: s0 = 3.0
 // EXPECT: s1 = 33.0
 // EXPECT: s2 = 55.0

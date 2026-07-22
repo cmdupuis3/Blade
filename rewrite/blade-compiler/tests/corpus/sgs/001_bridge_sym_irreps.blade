@@ -31,13 +31,8 @@ let d_tau = [1.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.07709643678933609, 0.151475968
 let s_fix = [1.0, 0.5, -0.3, 2.0, 0.7, -1.0]
 
 function mv6(b: Array<Float like Idx<36>>, s: Array<Float like Idx<6>>) -> Array<Float like Idx<6>> = {
-    let mut o = [0.0, 0.0, 0.0, 0.0, 0.0, 0.0]
-    for i in 0..6 {
-        for j in 0..6 {
-            o(i) += b(i * 6 + j) * s(j)
-        }
-    }
-    o
+    let brows = method_for(range<Idx<6>>) <*> method_for(range<Idx<6>>) <@> lambda(i, j) -> b(i * 6 + j) |> compute
+    method_for(brows) <@> lambda(row: Array<Float like Idx<6>>) -> prodsum(row, s) |> compute
 }
 
 // (a) forward bridge
@@ -48,9 +43,8 @@ let cert_s = mv6(b_fwd, s_fix)
 let mut nrm = [0.0, 0.0]
 let nrm_done = {
     nrm(0) = s_fix(0) * s_fix(0) + 2.0 * s_fix(1) * s_fix(1) + 2.0 * s_fix(2) * s_fix(2) + s_fix(3) * s_fix(3) + 2.0 * s_fix(4) * s_fix(4) + s_fix(5) * s_fix(5)
-    for k in 0..6 {
-        nrm(1) += cert_s(k) * cert_s(k)
-    }
+    let s_nrm1 = reduce(method_for(range<Idx<6>>) <@> lambda(k) -> cert_s(k) * cert_s(k), (+), 0.0)
+    nrm(1) = s_nrm1
     0.0
 }
 let cert_s_frob = sqrt(nrm(0))
@@ -61,26 +55,20 @@ let cert_s_norm = sqrt(nrm(1))
 // (c) rotation certificate — cart route: R S R^T in-language (operation
 // order mirrors the oracle: m1 = S·R^T, m2 = R·m1, t ascending), then bridge
 let sd = [s_fix(0), s_fix(1), s_fix(2), s_fix(1), s_fix(3), s_fix(4), s_fix(2), s_fix(4), s_fix(5)]
-let mut m1 = [0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0]
-let mut m2 = [0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0]
-let rot_done = {
-    for i in 0..3 {
-        for j in 0..3 {
-            for t in 0..3 {
-                m1(i * 3 + j) += sd(i * 3 + t) * rot(j * 3 + t)
-            }
-        }
-    }
-    for i in 0..3 {
-        for j in 0..3 {
-            for t in 0..3 {
-                m2(i * 3 + j) += rot(i * 3 + t) * m1(t * 3 + j)
-            }
-        }
-    }
-    0.0
+// m1 = S·R^T : m1(i,j) = sum_t sd(i,t)·rot(j,t)  (row·row = prodsum over the co-iterated grid)
+let m1 = {
+    let sdrows = method_for(range<Idx<3>>) <*> method_for(range<Idx<3>>) <@> lambda(i, t) -> sd(i * 3 + t) |> compute
+    let rotrows = method_for(range<Idx<3>>) <*> method_for(range<Idx<3>>) <@> lambda(j, t) -> rot(j * 3 + t) |> compute
+    method_for(sdrows, rotrows) <@> lambda(u: Array<Float like Idx<3>>, v: Array<Float like Idx<3>>) -> prodsum(u, v) |> compute
 }
-let s_rot = [m2(0), m2(1), m2(2), m2(4), m2(5), m2(8)]
+// m2 = R·m1 : m2(i,j) = sum_t rot(i,t)·m1(t,j)  (rot rows against m1 columns)
+let m2 = {
+    let rotrows = method_for(range<Idx<3>>) <*> method_for(range<Idx<3>>) <@> lambda(i, t) -> rot(i * 3 + t) |> compute
+    let m1cols = method_for(range<Idx<3>>) <*> method_for(range<Idx<3>>) <@> lambda(j, t) -> m1(t, j) |> compute
+    method_for(rotrows, m1cols) <@> lambda(u: Array<Float like Idx<3>>, v: Array<Float like Idx<3>>) -> prodsum(u, v) |> compute
+}
+let rot_done = 0.0
+let s_rot = [m2(0, 0), m2(0, 1), m2(0, 2), m2(1, 1), m2(1, 2), m2(2, 2)]
 let cert_s_lhs = mv6(b_fwd, s_rot)
 // EXPECT: cert_s_lhs = [1.154700538379252, -1.7682581821170573, -0.7142863380420188, 0.20132769147395502, -0.566850018804074, -1.5257368423672735]
 
@@ -91,9 +79,8 @@ let cert_s_rhs = mv6(d_tau, cert_s)
 // (e) the certificate: both routes agree (squared distance below 1e-18)
 let mut dd = [0.0]
 let dd_done = {
-    for k in 0..6 {
-        dd(0) += (cert_s_lhs(k) - cert_s_rhs(k)) * (cert_s_lhs(k) - cert_s_rhs(k))
-    }
+    let s_dd0 = reduce(method_for(range<Idx<6>>) <@> lambda(k) -> (cert_s_lhs(k) - cert_s_rhs(k)) * (cert_s_lhs(k) - cert_s_rhs(k)), (+), 0.0)
+    dd(0) = s_dd0
     0.0
 }
 let cert_agree = if dd(0) < 0.000000000000000001 then 1.0 else 0.0

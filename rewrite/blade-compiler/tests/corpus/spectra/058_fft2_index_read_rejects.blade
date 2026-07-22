@@ -1,0 +1,10 @@
+// TEST: Spectra fft2 partial index read (rejects)
+// Guards the index-vs-call discrimination in the widened gate. In Blade arrays
+// ARE functions, so `A3(0)` (a partial read yielding a rank-2 row) and
+// `flux(...)` (a call) are the SAME AST node. The function-return-type arm must
+// therefore exclude names that are known arrays, or a partial read would be
+// misresolved as a call and silently handed the whole array's rank-3 shape.
+// A3 is a known array, so this stays on the rejection path.
+import spectra as sp
+let A3: Array<Float64 like Idx<2>, Idx<4>, Idx<4>> = [[[1.0, 2.0, 3.0, 4.0], [5.0, 6.0, 7.0, 8.0], [9.0, 10.0, 11.0, 12.0], [13.0, 14.0, 15.0, 16.0]], [[1.0, 2.0, 3.0, 4.0], [5.0, 6.0, 7.0, 8.0], [9.0, 10.0, 11.0, 12.0], [13.0, 14.0, 15.0, 16.0]]]
+let X = sp.fft2(A3(0))

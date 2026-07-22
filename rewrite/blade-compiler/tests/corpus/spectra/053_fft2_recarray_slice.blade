@@ -1,0 +1,23 @@
+// TEST: Spectra fft2: qualified call in a recursive-array slice (plain arg)
+// Part A in isolation: the ARGUMENT is a plain module-level annotated let, so
+// no shape widening is involved -- this pins only that the module alias `sp`
+// resolves inside a `let rec` slice. (The elaborators delete the import decl
+// and rewrite qualified calls in an AST walker; before the ExprRecArray
+// traversal case existed, the slice was skipped and `sp` reached the checker
+// unbound as BL2001.) The step scaling is applied OUTSIDE the transform, so
+// the per-step contribution is the constant DC bin 120: acc(3) = 120*(1+2+3).
+import spectra as sp
+type Steps = Idx<4>
+type RF4 = Array<Float64 like Idx<4>, Idx<4>>
+type CF4 = Array<Complex128 like Idx<4>, Idx<4>>
+let f: RF4 = method_for(range<Idx<4>>) <*> method_for(range<Idx<4>>) <@> lambda(i, j) -> 1.0 * (i * 4 + j) |> compute
+function dcbin(X: CF4) -> Float64 = real(X(0, 0)) + imag(X(2, 1))
+let acc = {
+    let rec acc_arr: Array<Float64 like Steps> =
+        match acc_arr with
+        | zero -> zero
+        | zero :: s -> zero :: 0.0
+        | prefix :: n -> prefix :: prefix(n - 1) + (1.0 * n) * dcbin(sp.fft2(f))
+    acc_arr(3)
+}
+// EXPECT: acc = 720

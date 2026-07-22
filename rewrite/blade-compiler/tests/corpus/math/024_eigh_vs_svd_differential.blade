@@ -8,12 +8,5 @@ let MT: Array<Float64 like Idx<3>, Idx<4>> = transpose(M, [0, 1])
 let G: Array<Float64 like Idx<3>, Idx<3>> = m.matmul(MT, M)
 let (U, S, V) = m.svd(M)
 let (Q, LAM) = m.eigh(G)
-let dev = {
-    let mut acc = 0.0
-    for k in 0..3 {
-        let d = LAM(k) - S(k) * S(k)
-        acc = acc + d * d
-    }
-    acc
-}
+let dev = reduce(method_for(zip(LAM, S)) <@> lambda(l, s) -> (l - s * s) * (l - s * s), (+))
 // EXPECT: dev = 0.0

@@ -1,25 +1,27 @@
-// TEST: Spectra fft2: transform of an evolving mut field inside a for loop
-// The pseudo-spectral seam: a module-level ANNOTATED `let mut` field is
-// rewritten each pass of a runtime loop and re-transformed. fft2's shape
-// discovery reads the declared annotation (mutability is irrelevant to it),
-// and the rewrite walker reaches call sites inside for bodies — so the
-// call sits legally inside the recurrence. f(i,j) = (s+1)*(4i+j); the DC
-// bin is (s+1)*120 and the (2,1) bin's imaginary part is exactly 0 by
-// symmetry (the column phase sum vanishes), so acc = 120+240+360 = 720
-// exactly. Pin cross-checked against spectra/OracleDump.fs.
+// TEST: Spectra fft2: per-step transform inside a recursive-array slice
+// The pseudo-spectral seam: a transform driven PER STEP from a sequential
+// context, with the sequence spelled as a RECURSIVE ARRAY (no imperative
+// loop). Each step scales the base field f(i,j) = 4i + j by the step ordinal
+// and transforms the result, so `sp.fft2` genuinely re-runs every step on a
+// step-dependent argument -- the module alias resolves inside the slice, and
+// the shape comes from `scaled`'s annotated return type rather than a staging
+// binding. Per step the DC bin of n*f is exactly 120n (bin 0 multiplies only
+// by w^0 = 1) and Im X(2,1) is exactly 0 by symmetry (both phase sums vanish),
+// so acc(3) = 120*(1 + 2 + 3) = 720 exactly. Pinned against spectra/OracleDump.fs,
+// which computes the same per-pass fft2 over an evolving field.
 import spectra as sp
-let mut f: Array<Float64 like Idx<4>, Idx<4>> = [[0.0, 0.0, 0.0, 0.0], [0.0, 0.0, 0.0, 0.0], [0.0, 0.0, 0.0, 0.0], [0.0, 0.0, 0.0, 0.0]]
+type Steps = Idx<4>
+type RF4 = Array<Float64 like Idx<4>, Idx<4>>
+type CF4 = Array<Complex128 like Idx<4>, Idx<4>>
+let f: RF4 = method_for(range<Idx<4>>) <*> method_for(range<Idx<4>>) <@> lambda(i, j) -> 1.0 * (i * 4 + j) |> compute
+function scaled(g: RF4, s: Float64) -> RF4 = g * s
+function dcbin(X: CF4) -> Float64 = real(X(0, 0)) + imag(X(2, 1))
 let acc = {
-    let mut a = 0.0
-    for s in 0..3 {
-        for i in 0..4 {
-            for j in 0..4 {
-                f(i, j) = 1.0 * (s + 1) * (i * 4 + j)
-            }
-        }
-        let X = sp.fft2(f)
-        a = a + real(X(0, 0)) + imag(X(2, 1))
-    }
-    a
+    let rec acc_arr: Array<Float64 like Steps> =
+        match acc_arr with
+        | zero -> zero
+        | zero :: s -> zero :: 0.0
+        | prefix :: n -> prefix :: prefix(n - 1) + dcbin(sp.fft2(scaled(f, 1.0 * n)))
+    acc_arr(3)
 }
 // EXPECT: acc = 720

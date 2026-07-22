@@ -15,13 +15,8 @@ let b9 = [0.5773502691896258, 0.0, 0.0, 0.0, 0.5773502691896258, 0.0, 0.0, 0.0, 
 let g_fix = [0.6, -1.1, 0.4, 0.9, 0.3, -0.7, -0.2, 0.8, 1.2]
 
 function mv9(b: Array<Float like Idx<81>>, x: Array<Float like Idx<9>>) -> Array<Float like Idx<9>> = {
-    let mut o = [0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0]
-    for i in 0..9 {
-        for j in 0..9 {
-            o(i) += b(i * 9 + j) * x(j)
-        }
-    }
-    o
+    let brows = method_for(range<Idx<9>>) <*> method_for(range<Idx<9>>) <@> lambda(i, j) -> b(i * 9 + j) |> compute
+    method_for(brows) <@> lambda(row: Array<Float like Idx<9>>) -> prodsum(row, x) |> compute
 }
 
 let cert_g = mv9(b9, g_fix)
@@ -49,10 +44,10 @@ let physics_identities = if idn(0) < 0.000000000000000001 then 1.0 else 0.0
 // (b) orthogonality: Frobenius norm preserved
 let mut nrm = [0.0, 0.0]
 let nrm_done = {
-    for k in 0..9 {
-        nrm(0) += g_fix(k) * g_fix(k)
-        nrm(1) += cert_g(k) * cert_g(k)
-    }
+    let s_nrm0 = reduce(method_for(range<Idx<9>>) <@> lambda(k) -> g_fix(k) * g_fix(k), (+), 0.0)
+    let s_nrm1 = reduce(method_for(range<Idx<9>>) <@> lambda(k) -> cert_g(k) * cert_g(k), (+), 0.0)
+    nrm(0) = s_nrm0
+    nrm(1) = s_nrm1
     0.0
 }
 let cert_g_frob = sqrt(nrm(0))
@@ -61,13 +56,10 @@ let cert_g_norm = sqrt(nrm(1))
 // EXPECT: cert_g_norm = 2.289104628451919
 
 // (c) the transpose inverts (orthogonal matrix): back(j) = sum_i b9(i,j) c(i)
-let mut back = [0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0]
-let back_done = {
-    for j in 0..9 {
-        for i in 0..9 {
-            back(j) += b9(i * 9 + j) * cert_g(i)
-        }
-    }
-    0.0
+// back(j) = sum_i b9(i,j)·cert_g(i) = prodsum(b9 column j, cert_g)  (transpose inverts)
+let back = {
+    let b9cols = method_for(range<Idx<9>>) <*> method_for(range<Idx<9>>) <@> lambda(j, i) -> b9(i * 9 + j) |> compute
+    method_for(b9cols) <@> lambda(col: Array<Float like Idx<9>>) -> prodsum(col, cert_g) |> compute
 }
+let back_done = 0.0
 // EXPECT: back = [0.6000000000000001, -1.0999999999999999, 0.39999999999999997, 0.8999999999999997, 0.30000000000000016, -0.6999999999999998, -0.2, 0.7999999999999999, 1.2000000000000002]

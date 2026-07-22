@@ -10,8 +10,9 @@
 // invariant under linear flow, so the fit is exact to rounding and the
 // spectrum is analytic. Derivatives are exact (chain rule through the
 // equations of motion; no finite differences). Trajectories are closed
-// form, sampled in imperative blocks; G^{-1} via m.eigh whitening; the
-// eigenvalue read via m.eig.
+// form, sampled as block-local former tables with the Gram/cross-Gram read
+// off by prodsum sweeps; G^{-1} via m.eigh whitening; the eigenvalue read
+// via m.eig.
 // FINDINGS (pinned):
 //   * THE FREQUENCY ALGEBRA, MEASURED. Conservative oscillator (three
 //     amplitudes; isochronism keeps the ladder sharp): the fitted L's
@@ -36,99 +37,99 @@ import math as m
 
 let AMPI: Array<Float64 like Idx<3>> = [0.0, 1.0, 2.0]
 
-let SGC = {
-    let mut st = [0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0]
-    let mut d = [0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0]
-    let mut dd = [0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0]
-    let mut tf = 0.0
-    for a in 0..3 {
-        let amp = 0.8 + 0.2 * AMPI(a)
-        tf = 0.0
-        for k in 0..500 {
-            let x = amp * cos(tf)
-            let p = 0.0 - amp * sin(tf)
-            let f = 0.0 - x
-            d(0) = x
-            d(1) = p
-            d(2) = x * x
-            d(3) = x * p
-            d(4) = p * p
-            d(5) = x * x * x
-            d(6) = x * x * p
-            d(7) = x * p * p
-            d(8) = p * p * p
-            dd(0) = p
-            dd(1) = f
-            dd(2) = 2.0 * x * p
-            dd(3) = p * p + x * f
-            dd(4) = 2.0 * p * f
-            dd(5) = 3.0 * x * x * p
-            dd(6) = 2.0 * x * p * p + x * x * f
-            dd(7) = p * p * p + 2.0 * x * p * f
-            dd(8) = 3.0 * p * p * f
-            for i in 0..9 {
-                for j in 0..9 {
-                    st(i * 9 + j) = st(i * 9 + j) + d(i) * d(j)
-                    st(81 + i * 9 + j) = st(81 + i * 9 + j) + dd(i) * d(j)
-                }
-            }
-            tf = tf + 0.05
-        }
-    }
-    st
-}
+// ---- dictionary time series as FORMERS, Gram/cross-Gram as prodsum sweeps ----
+// The old imperative scatter-add (accumulating st(i*9+j) += d(i)*d(j) over the
+// sampled trajectory) becomes: build the 9 monomial time series d_i(s) as the
+// rows of a rank-2 table, then the Gram G(i,j) = sum_s d_i(s) d_j(s) and the
+// cross-Gram A(i,j) = sum_s dd_i(s) d_j(s) are row-pair prodsum folds over the
+// sample axis -- the physics/44 Gram idiom. The sample tables are block-local
+// so they do not surface. Conservative run: 3 amplitudes x 500 steps = 1500
+// closed-form samples (sample s -> amplitude s/500, phase 0.05*(s mod 500)).
 
-let SGD = {
-    let mut st = [0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0]
-    let mut d = [0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0]
-    let mut dd = [0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0]
-    let mut tf = 0.0
-    for k in 0..240 {
-        let e = exp(0.0 - 0.15 * tf)
-        let x = 1.2 * e * (cos(0.98868599666425949 * tf) + 0.15171652122725207 * sin(0.98868599666425949 * tf))
-        let p = 0.0 - 1.2 * e * sin(0.98868599666425949 * tf) / 0.98868599666425949
-        let f = 0.0 - x - 0.3 * p
-        d(0) = x
-        d(1) = p
-        d(2) = x * x
-        d(3) = x * p
-        d(4) = p * p
-        d(5) = x * x * x
-        d(6) = x * x * p
-        d(7) = x * p * p
-        d(8) = p * p * p
-        dd(0) = p
-        dd(1) = f
-        dd(2) = 2.0 * x * p
-        dd(3) = p * p + x * f
-        dd(4) = 2.0 * p * f
-        dd(5) = 3.0 * x * x * p
-        dd(6) = 2.0 * x * p * p + x * x * f
-        dd(7) = p * p * p + 2.0 * x * p * f
-        dd(8) = 3.0 * p * p * f
-        for i in 0..9 {
-            for j in 0..9 {
-                st(i * 9 + j) = st(i * 9 + j) + d(i) * d(j)
-                st(81 + i * 9 + j) = st(81 + i * 9 + j) + dd(i) * d(j)
-            }
-        }
-        tf = tf + 0.05
-    }
-    st
+// ---- Gram matrices, conservative ----
+let GMC: Array<Float64 like Idx<9>, Idx<9>> = {
+    let D = method_for(range<Idx<9>, Idx<1500>>) <@> lambda(i: Int64, s: Int64) -> {
+        let a = s / 500
+        let kk = s - 500 * a
+        let amp = 0.8 + 0.2 * AMPI(a)
+        let tf = 0.05 * (1.0 * kk)
+        let x = amp * cos(tf)
+        let p = 0.0 - amp * sin(tf)
+        if i < 1 then x else if i < 2 then p else if i < 3 then x * x
+        else if i < 4 then x * p else if i < 5 then p * p else if i < 6 then x * x * x
+        else if i < 7 then x * x * p else if i < 8 then x * p * p else p * p * p
+    } |> compute
+    method_for(D, D) <@> lambda(ua: Array<Float64 like Idx<1500>>, ub: Array<Float64 like Idx<1500>>) -> prodsum(ua, ub) |> compute
+}
+let AMC = {
+    let D = method_for(range<Idx<9>, Idx<1500>>) <@> lambda(i: Int64, s: Int64) -> {
+        let a = s / 500
+        let kk = s - 500 * a
+        let amp = 0.8 + 0.2 * AMPI(a)
+        let tf = 0.05 * (1.0 * kk)
+        let x = amp * cos(tf)
+        let p = 0.0 - amp * sin(tf)
+        if i < 1 then x else if i < 2 then p else if i < 3 then x * x
+        else if i < 4 then x * p else if i < 5 then p * p else if i < 6 then x * x * x
+        else if i < 7 then x * x * p else if i < 8 then x * p * p else p * p * p
+    } |> compute
+    let DD = method_for(range<Idx<9>, Idx<1500>>) <@> lambda(i: Int64, s: Int64) -> {
+        let a = s / 500
+        let kk = s - 500 * a
+        let amp = 0.8 + 0.2 * AMPI(a)
+        let tf = 0.05 * (1.0 * kk)
+        let x = amp * cos(tf)
+        let p = 0.0 - amp * sin(tf)
+        let f = 0.0 - x
+        if i < 1 then p else if i < 2 then f else if i < 3 then 2.0 * x * p
+        else if i < 4 then p * p + x * f else if i < 5 then 2.0 * p * f else if i < 6 then 3.0 * x * x * p
+        else if i < 7 then 2.0 * x * p * p + x * x * f else if i < 8 then p * p * p + 2.0 * x * p * f else 3.0 * p * p * f
+    } |> compute
+    method_for(DD, D) <@> lambda(ua: Array<Float64 like Idx<1500>>, ub: Array<Float64 like Idx<1500>>) -> prodsum(ua, ub) |> compute
 }
 
 // ---- fit L and read the spectrum, conservative ----
-let GMC: Array<Float64 like Idx<9>, Idx<9>> = method_for(range<Idx<9>>) <*> method_for(range<Idx<9>>) <@> lambda(i: Int64, j: Int64) -> SGC(i * 9 + j) |> compute
-let AMC = method_for(range<Idx<9>>) <*> method_for(range<Idx<9>>) <@> lambda(i: Int64, j: Int64) -> SGC(81 + i * 9 + j) |> compute
 let (QGC, LGC) = m.eigh(GMC)
 let QDC = method_for(range<Idx<9>>) <*> method_for(range<Idx<9>>) <@> lambda(i: Int64, k: Int64) -> QGC(i, k) / LGC(k) |> compute
 let GIC = method_for(QDC, QGC) <@> lambda(u: Array<Float64 like Idx<9>>, v: Array<Float64 like Idx<9>>) -> prodsum(u, v) |> compute
 let LKC: Array<Float64 like Idx<9>, Idx<9>> = method_for(AMC, GIC) <@> lambda(u: Array<Float64 like Idx<9>>, v: Array<Float64 like Idx<9>>) -> prodsum(u, v) |> compute
 let (REC, IMC) = m.eig(LKC)
 
-// ---- fit L and read the spectrum, damped ----
-let GMD: Array<Float64 like Idx<9>, Idx<9>> = method_for(range<Idx<9>>) <*> method_for(range<Idx<9>>) <@> lambda(i: Int64, j: Int64) -> SGD(i * 9 + j) |> compute
-let AMD = method_for(range<Idx<9>>) <*> method_for(range<Idx<9>>) <@> lambda(i: Int64, j: Int64) -> SGD(81 + i * 9 + j) |> compute
+// ---- Gram matrices, damped (240 closed-form samples, phase 0.05*k) ----
+let GMD: Array<Float64 like Idx<9>, Idx<9>> = {
+    let D = method_for(range<Idx<9>, Idx<240>>) <@> lambda(i: Int64, k: Int64) -> {
+        let tf = 0.05 * (1.0 * k)
+        let e = exp(0.0 - 0.15 * tf)
+        let x = 1.2 * e * (cos(0.98868599666425949 * tf) + 0.15171652122725207 * sin(0.98868599666425949 * tf))
+        let p = 0.0 - 1.2 * e * sin(0.98868599666425949 * tf) / 0.98868599666425949
+        if i < 1 then x else if i < 2 then p else if i < 3 then x * x
+        else if i < 4 then x * p else if i < 5 then p * p else if i < 6 then x * x * x
+        else if i < 7 then x * x * p else if i < 8 then x * p * p else p * p * p
+    } |> compute
+    method_for(D, D) <@> lambda(ua: Array<Float64 like Idx<240>>, ub: Array<Float64 like Idx<240>>) -> prodsum(ua, ub) |> compute
+}
+let AMD = {
+    let D = method_for(range<Idx<9>, Idx<240>>) <@> lambda(i: Int64, k: Int64) -> {
+        let tf = 0.05 * (1.0 * k)
+        let e = exp(0.0 - 0.15 * tf)
+        let x = 1.2 * e * (cos(0.98868599666425949 * tf) + 0.15171652122725207 * sin(0.98868599666425949 * tf))
+        let p = 0.0 - 1.2 * e * sin(0.98868599666425949 * tf) / 0.98868599666425949
+        if i < 1 then x else if i < 2 then p else if i < 3 then x * x
+        else if i < 4 then x * p else if i < 5 then p * p else if i < 6 then x * x * x
+        else if i < 7 then x * x * p else if i < 8 then x * p * p else p * p * p
+    } |> compute
+    let DD = method_for(range<Idx<9>, Idx<240>>) <@> lambda(i: Int64, k: Int64) -> {
+        let tf = 0.05 * (1.0 * k)
+        let e = exp(0.0 - 0.15 * tf)
+        let x = 1.2 * e * (cos(0.98868599666425949 * tf) + 0.15171652122725207 * sin(0.98868599666425949 * tf))
+        let p = 0.0 - 1.2 * e * sin(0.98868599666425949 * tf) / 0.98868599666425949
+        let f = 0.0 - x - 0.3 * p
+        if i < 1 then p else if i < 2 then f else if i < 3 then 2.0 * x * p
+        else if i < 4 then p * p + x * f else if i < 5 then 2.0 * p * f else if i < 6 then 3.0 * x * x * p
+        else if i < 7 then 2.0 * x * p * p + x * x * f else if i < 8 then p * p * p + 2.0 * x * p * f else 3.0 * p * p * f
+    } |> compute
+    method_for(DD, D) <@> lambda(ua: Array<Float64 like Idx<240>>, ub: Array<Float64 like Idx<240>>) -> prodsum(ua, ub) |> compute
+}
 let (QGD, LGD) = m.eigh(GMD)
 let QDD = method_for(range<Idx<9>>) <*> method_for(range<Idx<9>>) <@> lambda(i: Int64, k: Int64) -> QGD(i, k) / LGD(k) |> compute
 let GID = method_for(QDD, QGD) <@> lambda(u: Array<Float64 like Idx<9>>, v: Array<Float64 like Idx<9>>) -> prodsum(u, v) |> compute
@@ -142,14 +143,7 @@ let imc4 = IMC(4)
 let imc6 = IMC(6)
 let rec8 = REC(8)
 let imc8 = IMC(8)
-let maxreC = {
-    let mut worst = 0.0
-    for k in 0..9 {
-        let a = sqrt(REC(k) * REC(k))
-        worst = if a > worst then a else worst
-    }
-    worst
-}
+let maxreC = reduce(method_for(range<Idx<9>>) <@> lambda(k) -> sqrt(REC(k) * REC(k)), lambda(a, b) -> if a > b then a else b, 0.0)
 let devL = sqrt((IMC(0) - 3.0) * (IMC(0) - 3.0)) + sqrt((IMC(2) - 2.0) * (IMC(2) - 2.0)) + sqrt((IMC(4) - 1.0) * (IMC(4) - 1.0)) + sqrt((IMC(6) - 1.0) * (IMC(6) - 1.0))
 let red0 = RED(0)
 let imd0 = IMD(0)
@@ -170,22 +164,22 @@ let dispV = if abs(red8 + 0.3) < 0.0000000001 then (if abs(imd8) < 0.00000000000
 // the ladder, the kernel, the lattice, the displacement:
 // EXPECT: imc0 = 3
 // EXPECT: imc2 = 2
-// EXPECT: imc4 = 0.999999999999999
-// EXPECT: imc6 = 0.999999999999998
-// EXPECT: rec8 = -1.54427505080323e-16
+// EXPECT: imc4 = 1
+// EXPECT: imc6 = 1
+// EXPECT: rec8 = -1.30620433196725e-17
 // EXPECT: imc8 = 0
-// EXPECT: maxreC = 9.436895676534e-16
-// EXPECT: devL = 9.65894031423886e-15
+// EXPECT: maxreC = 3.75567632548979e-16
+// EXPECT: devL = 3.99680288865056e-15
 // EXPECT: ladderV = "IMAGINARY_LADDER_MEASURED"
 // EXPECT: invV = "INVARIANT_AT_ZERO"
-// EXPECT: red0 = -0.449999999999983
-// EXPECT: imd0 = 2.96605798999278
-// EXPECT: red2 = -0.300000000000001
+// EXPECT: red0 = -0.449999999999991
+// EXPECT: imd0 = 2.96605798999277
+// EXPECT: red2 = -0.3
 // EXPECT: imd2 = 1.97737199332852
-// EXPECT: red6 = -0.149999999999999
-// EXPECT: imd6 = 0.988685996664264
-// EXPECT: red8 = -0.300000000000004
+// EXPECT: red6 = -0.150000000000001
+// EXPECT: imd6 = 0.988685996664263
+// EXPECT: red8 = -0.299999999999994
 // EXPECT: imd8 = 0
-// EXPECT: devD = 2.93376434257198e-14
+// EXPECT: devD = 2.56739074444567e-14
 // EXPECT: lattV = "DAMPED_LATTICE_EXACT"
 // EXPECT: dispV = "INVARIANT_DISPLACED_TO_MINUS_2GAMMA"

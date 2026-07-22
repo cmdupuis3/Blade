@@ -5,22 +5,13 @@ import math as m
 let X: Array<Float64 like Idx<3>, Idx<3>, Idx<3>> = [[[2.0, 4.0, 4.0], [2.0, 4.0, 4.0], [1.0, 2.0, 2.0]], [[4.0, 8.0, 8.0], [2.0, 4.0, 4.0], [0.0, 0.0, 0.0]], [[6.0, 12.0, 12.0], [4.0, 8.0, 8.0], [1.0, 2.0, 2.0]]]
 let (G, U0, U1, U2) = m.hosvd(X, 2, 2, 1)
 let resid = {
-    let mut acc = 0.0
-    let mut rc = 0.0
-    for i in 0..3 {
-        for j in 0..3 {
-            for k in 0..3 {
-                rc = 0.0
-                for a in 0..2 {
-                    for b in 0..2 {
-                        rc = rc + G(a, b, 0) * U0(i, a) * U1(j, b) * U2(k, 0)
-                    }
-                }
-                let d = rc - X(i, j, k)
-                acc = acc + d * d
-            }
-        }
-    }
-    acc
+    // Truncated reconstruction X̂ = G ×₀ U0 ×₁ U1 ×₂ U2 at multilinear rank
+    // (2,2,1): the contracted core modes carry the truncated extents
+    // (a,b ∈ Idx<2>, c ∈ Idx<1>). Build the term tensor with the output modes
+    // (i,j,k) leading and collapse each (a,b,c) core fibre.
+    let T = method_for(range<Idx<3>, Idx<3>, Idx<3>, Idx<2>, Idx<2>, Idx<1>>) <@> lambda(i, j, k, a, b, c) -> G(a, b, c) * U0(i, a) * U1(j, b) * U2(k, c) |> compute
+    let Xhat = method_for(T) <@> lambda(sub: Array<Float64 like Idx<2>, Idx<2>, Idx<1>>) -> reduce(sub, (+)) |> compute
+    let E = Xhat - X
+    reduce(E, lambda(acc, x) -> acc + x * x, 0.0)
 }
 // EXPECT: resid = 0.0

@@ -212,6 +212,11 @@ let rec private judge (ctx: Ctx) (env: Map<string, BoostStatus>) (e: Expr)
             | BInv -> Ok BInv
             | BVar -> reject "negating a boost-variant value flips its U0-coefficient to -1 — difference two velocities instead (v2's coefficient tracking will admit this)"
             | BOpaque -> Ok BOpaque)
+    // Former application must dispatch BEFORE the general binop arithmetic
+    // arm (OpApply is a BinOp constructor): the kernel lambda is judged with
+    // param-bound source statuses, never as an escaping value.
+    | ExprKind.ExprBinOp (_, OpApply, loop, kern) ->
+        judgeFormerApply ctx env e loop kern
     | ExprKind.ExprBinOp (_, op, l, r) ->
         j l |> Result.bind (fun sl ->
         j r |> Result.bind (fun sr ->
@@ -280,6 +285,51 @@ let rec private judge (ctx: Ctx) (env: Map<string, BoostStatus>) (e: Expr)
             | None -> Ok BInv)
     | ExprKind.ExprApp (f, args) -> judgeApp ctx env e f args
     | ExprKind.ExprField (_, _) -> Ok BOpaque
+    // --- functional iteration (the post-imperative surface) ---------------
+    // Virtual arrays enumerate indices: frame-independent by nature.
+    | ExprKind.ExprRange _ | ExprKind.ExprReverse _ | ExprKind.ExprHalo _ -> Ok BInv
+    // compute is a scheduling boundary, not a value transform.
+    | ExprKind.ExprCompute x -> judge ctx env x
+    // Additive fold over boost-invariant values is boost-invariant; a fold
+    // over boost-variant values SCALES the frame shift (documented v2) and
+    // is rejected rather than mis-certified.
+    | ExprKind.ExprReduce (src, _, init) ->
+        judge ctx env src |> Result.bind (fun ss ->
+            (match init with
+             | Some i -> judge ctx env i
+             | None -> Ok BInv) |> Result.bind (fun si ->
+                match ss, si with
+                | BInv, BInv -> Ok BInv
+                | BVar, _ | _, BVar ->
+                    Error (bl4009 e.Span (sprintf "function '%s': reduce over a boost-variant value scales the frame shift — fold only boost-invariant combinations (differences, sgs.grad, sgs.stress)" ctx.FuncName))
+                | _ -> Ok BOpaque))
+    | _ -> Ok BOpaque
+
+/// `loop <@> kernel` under the galilean judgment: sources from
+/// method_for(...) / `for (A, ...) in virt`, statuses bound to the kernel's
+/// leading params (one per source array; any remaining params are the
+/// co-iteration ordinals, boost-invariant). Non-former applies (compose
+/// chains, object_for) stay opaque in v1.
+and private judgeFormerApply (ctx: Ctx) (env: Map<string, BoostStatus>) (e: Expr) (loop: Expr) (kern: Expr)
+    : Result<BoostStatus, Blade.Diagnostics.Diagnostic> =
+    let srcsOf (l: Expr) =
+        match l.Kind with
+        | ExprKind.ExprMethodFor arrays -> Some arrays
+        | ExprKind.ExprFor (ForArrays (arrays, _), _, _) -> Some arrays
+        | _ -> None
+    match srcsOf loop, kern.Kind with
+    | Some arrays, ExprKind.ExprLambda (ps, _, body) ->
+        arrays
+        |> List.fold (fun acc a ->
+            acc |> Result.bind (fun sts -> judge ctx env a |> Result.map (fun s -> sts @ [ s ])))
+            (Ok [])
+        |> Result.bind (fun srcSts ->
+            let env' =
+                ps |> List.mapi (fun i p -> (i, p.Name))
+                   |> List.fold (fun m (i, name) ->
+                        let st = if i < srcSts.Length then srcSts.[i] else BInv
+                        Map.add name st m) env
+            judge ctx env' body)
     | _ -> Ok BOpaque
 
 and private judgeStmts (ctx: Ctx) (env: Map<string, BoostStatus>) (stmts: Stmt list)

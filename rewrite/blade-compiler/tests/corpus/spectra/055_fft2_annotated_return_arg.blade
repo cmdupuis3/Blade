@@ -1,0 +1,13 @@
+// TEST: Spectra fft2: shape from an annotated function RETURN type
+// The ops need (element type, extents) at compile time, but a DECLARED shape
+// is a declared shape wherever it lives: a function annotated `-> RF4` witnesses
+// its result's shape just as well as an annotated let, so the transform argument
+// need not be staged through a binding. dcbin(fft2(2*f)) = 2 * 120.
+import spectra as sp
+type RF4 = Array<Float64 like Idx<4>, Idx<4>>
+type CF4 = Array<Complex128 like Idx<4>, Idx<4>>
+let f: RF4 = method_for(range<Idx<4>>) <*> method_for(range<Idx<4>>) <@> lambda(i, j) -> 1.0 * (i * 4 + j) |> compute
+function scaled(g: RF4, s: Float64) -> RF4 = g * s
+function dcbin(X: CF4) -> Float64 = real(X(0, 0)) + imag(X(2, 1))
+let viaCall = dcbin(sp.fft2(scaled(f, 2.0)))
+// EXPECT: viaCall = 240

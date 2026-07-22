@@ -1,0 +1,14 @@
+// TEST: Tag Wildcard Return Position (rejects)
+// The wildcard is legal in PARAMETER position only. A parameter may decline to
+// constrain the tag of a value flowing IN; a return type has to PRODUCE one,
+// and a wildcard there has nothing to produce — it would erase the tag
+// discipline for every caller rather than relax it for this callee.
+//
+// Making the return position work needs real tag VARIABLES (so `-> Nat<_>`
+// could be linked to a parameter's tag), which is a different feature.
+// Rejected as BL4003.
+type Row = Idx<4>
+
+function identity(m: Nat<_>) -> Nat<_> = m
+
+let r = method_for(range<Row>) <@> identity |> compute

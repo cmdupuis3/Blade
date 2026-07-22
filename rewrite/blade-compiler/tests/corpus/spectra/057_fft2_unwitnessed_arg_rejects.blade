@@ -1,0 +1,9 @@
+// TEST: Spectra fft2 unwitnessed argument (rejects)
+// The widened gate accepts four kinds of DECLARED shape, and nothing else: a
+// bare arithmetic expression still carries no compile-time shape, so it is
+// rejected with the steer listing the four. (`sp.fft2((f * 2.0 : RF4))` is the
+// one-token fix -- pinned as the positive case in 056.)
+import spectra as sp
+type RF4 = Array<Float64 like Idx<4>, Idx<4>>
+let f: RF4 = method_for(range<Idx<4>>) <*> method_for(range<Idx<4>>) <@> lambda(i, j) -> 1.0 * (i * 4 + j) |> compute
+let X = sp.fft2(f * 2.0)

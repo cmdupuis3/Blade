@@ -21,7 +21,10 @@ open Blade.Tests.Corpus
 
 /// Phase 4's dense slice: literals, scalar bindings, dense method_for,
 /// compute, printing. Categories grow as later phases claim more surface.
-let denseSlice = [ "basic"; "loops"; "guards"; "for-in" ]
+/// (The 2026-07-21 re-pin absorbed recursive-arrays and stack-join: the
+/// oracle now parses `let rec` and compiles stack/join, so their former
+/// capability-skips diff for real.)
+let denseSlice = [ "basic"; "loops"; "guards"; "recursive-arrays"; "stack-join" ]
 
 /// Corrected-semantics slice: corpus tests whose values INTENTIONALLY
 /// diverge from the pinned oracle after a semantics correction — the
@@ -31,31 +34,16 @@ let denseSlice = [ "basic"; "loops"; "guards"; "for-in" ]
 /// shape. Ground truth is the hand-computed EXPECT values in the corpus,
 /// never the oracle.
 ///
-/// Was empty since the 2026-07-12 re-pin: the arc-1 joint-product-symmetry
-/// names (symmetry/012–016, functions/001) served against the pre-arc-1
-/// pin and were retired when the oracle advanced past the correction —
-/// those semantics are now IN the oracle and pinned by corpus EXPECTs.
-/// Repopulated 2026-07-16 for the signed-iteration-variable fix: virtual-
-/// source kernel params (range/lo..hi/reverse) and for-in loop vars were
-/// bound size_t in the emitted C++, wrapping negative intermediates
-/// unsigned before Float64 promotion and in signed division (loops/066).
-/// Oracles pinned before the fix reproduce the wrap. Retire at the next
-/// re-pin.
-let correctedSlice : Set<string> =
-    Set.ofList
-        [ "Negative Int64 Mixed Arithmetic"
-          // Pinned oracle predates the merged-nest fusion fix: it reads the
-          // FIRST leaf's array for every kernel, so v = [2, 4, 6] instead of
-          // the correct [20, 40, 60] (the test's own EXPECT pins the fix).
-          // Retire at the next re-pin.
-          "Fusion Different Arrays"
-          // Pinned oracle predates the mut-array copy-semantics fix: an
-          // assignable binding initialized from an existing array (`let mut
-          // a = Z`) used to ALIAS Z's storage, so the oracle prints the
-          // corrupted Z (and stale U/z reads). Divergence confirms the
-          // fix; corpus EXPECTs are ground truth. Retire at the next re-pin.
-          "Mut Array Copy Semantics"
-          "Mut Array Copy In Function Body" ]
+/// EMPTY since the 2026-07-21 re-pin (post imperative-removal arc). The
+/// three entries that served against the 2026-07-12 pin — "Fusion
+/// Different Arrays" (merged-nest fusion fix) and the two "Mut Array
+/// Copy" names (deep-copy semantics fix) — were retired with it: those
+/// corrections are now IN the oracle and pinned by corpus EXPECTs, so the
+/// divergences they asserted can no longer occur. (History: the arc-1
+/// joint-product-symmetry names retired at the 2026-07-12 pin; the
+/// signed-iteration loops/066 entry retired mid-arc when the file moved
+/// to `let rec` and capability-skipped the old oracle.)
+let correctedSlice : Set<string> = Set.empty
 
 /// Run `<exe> run <srcFile>` and capture stdout. The generous timeout covers
 /// the g++ compile that `blade run` performs internally.

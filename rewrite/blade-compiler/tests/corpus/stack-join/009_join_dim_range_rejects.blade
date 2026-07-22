@@ -1,0 +1,8 @@
+// TEST: Join Dimension Out Of Range (rejects)
+// The joined dimension selects an index slot, so it is compile-time data and is
+// range-checked against the operands' rank (BL4004), exactly like transpose's
+// axis pair. Rank-1 operands admit only d = 0.
+type SIdx = Idx<3>
+let a: Array<Float64 like SIdx> = [1.0, 2.0, 3.0]
+let b: Array<Float64 like SIdx> = [4.0, 5.0, 6.0]
+let j = join(a, b, 1)

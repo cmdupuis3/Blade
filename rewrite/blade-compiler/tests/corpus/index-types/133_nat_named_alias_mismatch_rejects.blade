@@ -1,0 +1,20 @@
+// TEST: Nat Named Alias Mismatch (rejects)
+// The negative half of 132: now that `Nat<Alias>` genuinely carries its tag,
+// it must also genuinely REJECT a differently-tagged argument. Without this
+// pin the 132 fix could regress to "annotation accepted, tag still dropped"
+// and 132 would keep passing.
+//
+// `Nat<_>` is the way to accept both (see 129); `Nat<Lat>` is not.
+//
+// The body mirrors 132's (an INDEXING read, not arithmetic) on purpose: a
+// concrete `Nat<Lat>` still cannot be used in arithmetic at all, so a `1.0 * i`
+// body would reject before the tags ever met and the pin would prove nothing.
+type Lat = Idx<3>
+type Lon = Idx<3>
+let A: Array<Float64 like Lat> = [10.0, 20.0, 30.0]
+
+function needsLat(i: Nat<Lat>) -> Float64 = A(i) + 1.0
+
+// range<Lon> yields Nat<Lon>; the nominative rule refuses it even though both
+// aliases are Idx<3>.
+let r = method_for(range<Lon>) <@> needsLat |> compute

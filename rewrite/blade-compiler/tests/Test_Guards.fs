@@ -13,4 +13,8 @@ let sequenceCombinatorTests = category "sequence-combinators"
 let tupleViewTests = category "tuple-views"
 let replicateTests = category "replicate"
 let anonRangeTests = category "anon-ranges"
-let forInTests = category "for-in"
+let recursiveArrayTests = category "recursive-arrays"
+
+/// stack / join — the rank-changing array-assembly combinators (formalism 2.6):
+/// a fresh leading selector axis, and concatenation along a dimension.
+let stackJoinTests = category "stack-join"

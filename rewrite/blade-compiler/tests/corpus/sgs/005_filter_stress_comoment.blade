@@ -58,9 +58,8 @@ let c2 = ppl.comoments(A, 2)
 
 let mut agree = [0.0]
 let agree_done = {
-    for p in 0..6 {
-        agree(0) += (tau(p) - c2(p)) * (tau(p) - c2(p))
-    }
+    let s_agree = reduce(method_for(range<Idx<6>>) <@> lambda(p) -> (tau(p) - c2(p)) * (tau(p) - c2(p)), (+), 0.0)
+    agree(0) = s_agree
     0.0
 }
 let routes_agree = if agree(0) < 0.000000000000000000000001 then 1.0 else 0.0
@@ -79,9 +78,8 @@ let tau_shift = [m2v(0, 0) - nu0 * nu0, m2v(0, 1) - nu0 * nu1, m2v(0, 2) - nu0 *
 
 let mut gal = [0.0, 0.0]
 let gal_done = {
-    for p in 0..6 {
-        gal(0) += (tau(p) - tau_shift(p)) * (tau(p) - tau_shift(p))
-    }
+    let s_gal0 = reduce(method_for(range<Idx<6>>) <@> lambda(p) -> (tau(p) - tau_shift(p)) * (tau(p) - tau_shift(p)), (+), 0.0)
+    gal(0) = s_gal0
     gal(1) = (m00 - m2v(0, 0)) * (m00 - m2v(0, 0)) + (m22 - m2v(2, 2)) * (m22 - m2v(2, 2))
     0.0
 }

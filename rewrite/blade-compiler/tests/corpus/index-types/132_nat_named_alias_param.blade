@@ -1,0 +1,22 @@
+// TEST: Nat Named Alias Param
+// `Nat<LatIdx>` is the explicit spelling of the type elemTypeForIterationIndex
+// hands a kernel for `range<LatIdx>` — an int64 tagged with the index type's
+// nominal name.
+//
+// It used to DEGRADE SILENTLY: the "Nat" arm of lowerTypeExpr only resolved
+// its argument against the unit table, so a non-unit argument was dropped and
+// `Nat<Lat>` lowered to a bare type-level Nat with no tag at all. The tag now
+// survives, which is what makes `Nat<_>` a generalization of a form that can
+// actually be written.
+//
+// Unit arguments keep priority (see units/009_nat_unit_tag), so this arm only
+// fires when the name is not a unit.
+type Lat = Idx<3>
+let A: Array<Float64 like Lat> = [10.0, 20.0, 30.0]
+
+// The annotation is the tag: `i` indexes A's Lat slot with no cast and no
+// warning, exactly as an unannotated kernel param inheriting the tag would.
+function look(i: Nat<Lat>) -> Float64 = A(i) + 1.0
+
+let r = method_for(range<Lat>) <@> look |> compute
+// EXPECT: r = [11, 21, 31]

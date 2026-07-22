@@ -1,0 +1,17 @@
+// TEST: AD Array Dot Via Additive Reduce
+import ad as ad
+// ============================================================================
+// The ad/003 dot-product gradient, re-homed off the imperative `for-in` loop
+// onto the additive `reduce` that replaces it. `reduce([...], (+))` over an
+// inline array literal of the per-term products is normalized (pre-grad) into
+// the same scalar-accumulation shape the old loop produced, so the adjoint is
+// identical: dh(i) = xs(i). Same numbers as ad/003 (xs=[4,5,6], w0=[1,2,3]).
+// ============================================================================
+let xs = [4.0, 5.0, 6.0]
+function h(w: Array<Float like Idx<3>>) -> Float =
+    reduce([w(0) * xs(0), w(1) * xs(1), w(2) * xs(2)], (+))
+let w0 = [1.0, 2.0, 3.0]
+let mut dh = [0.0, 0.0, 0.0]
+let hv = ad.grad(h)(w0, dh)
+// EXPECT: hv = 32.0
+// EXPECT: dh = [4.0, 5.0, 6.0]

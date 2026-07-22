@@ -1,0 +1,7 @@
+// TEST: Stack Scalars (rejects)
+// stack is an ARRAY combinator: it adds an axis over arrays. Building a rank-1
+// array out of scalars is the array literal's job, and the BL4004 message says
+// so rather than silently accepting a second spelling of `[x, y]`.
+let x = 1.0
+let y = 2.0
+let s = stack(x, y)

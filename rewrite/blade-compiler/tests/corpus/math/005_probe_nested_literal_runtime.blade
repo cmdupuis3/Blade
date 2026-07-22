@@ -3,10 +3,7 @@
 // nested literal whose elements are runtime scalars (loop-computed),
 // returned from a function and indexed by the caller.
 function mk2(x: Float64) -> Array<Float64 like Idx<2>, Idx<2>> = {
-    let mut acc = 0.0
-    for k in 0..4 {
-        acc = acc + x
-    }
+    let acc = reduce(method_for(range<Idx<4>>) <@> lambda(k) -> x |> compute, (+))
     let a = acc + 1.0
     let b = x * 2.0
     [[a, b], [b, a]]

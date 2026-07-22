@@ -91,42 +91,64 @@ let CT = method_for(VT) <@> lambda(row: Array<Float64 like Idx<16>>) -> prodsum(
 let XE1 = method_for(VT, XL) <@> lambda(u: Array<Float64 like Idx<16>>, v: Array<Float64 like Idx<16>>) -> prodsum(u, v) |> compute
 let XE = method_for(XE1, VT) <@> lambda(u: Array<Float64 like Idx<16>>, v: Array<Float64 like Idx<16>>) -> prodsum(u, v) |> compute
 let AMPM = method_for(range<Idx<16>>) <*> method_for(range<Idx<16>>) <@> lambda(i: Int64, j: Int64) -> CT(i) * CT(j) * XE(i, j) |> compute
+// <x(t_k)> = sum_{i,j} AMPM(i,j) cos((E_i - E_j) t_k) at t_k = 0.35 k, k = 0..399.
+// The old double-loop scatter becomes a former: a block-local weighted-cosine
+// table WCOS(k, 16i+j) = AMPM(i,j) cos((E_i - E_j) t_k), then the signal is a
+// per-row reduce over the 256 (i,j) pairs (i-major, j-inner -- the original
+// accumulation order). No imperative loop, no mutable running sum.
 let SIGQ = {
-    let mut s = [0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0]
-    let mut tf = 0.0
-    let mut acc = 0.0
-    for k in 0..400 {
-        acc = 0.0
-        for i in 0..16 {
-            for j in 0..16 { acc = acc + AMPM(i, j) * cos((EV(i) - EV(j)) * tf) }
-        }
-        s(k) = acc
-        tf = tf + 0.34999999999999998
-    }
-    s
+    let WCOS = method_for(range<Idx<400>, Idx<256>>) <@> lambda(k: Int64, u: Int64) -> {
+        let i = u / 16
+        let j = u - 16 * i
+        AMPM(i, j) * cos((EV(i) - EV(j)) * (0.34999999999999998 * (1.0 * k)))
+    } |> compute
+    method_for(WCOS) <@> lambda(row: Array<Float64 like Idx<256>>) -> reduce(row, (+)) |> compute
 }
 
 // ---- the classical twin: Verlet ensemble mean, in-language ----
 let AMPS = method_for(range<Idx<32>>) <@> lambda(j) -> 1.0 + j / 31.0 |> compute
-let SIGC = {
-    let mut s = [0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0]
-    let mut x = 0.0
-    let mut p = 0.0
-    for j in 0..32 {
-        x = AMPS(j)
-        p = 0.0
-        for t in 0..14000 {
-            let sm = t - (t / 35) * 35
-            let g = if sm < 1 then 1.0 else 0.0
-            s(t / 35) = s(t / 35) + g * x / 32.0
-            let f0 = 0.0 - x - 0.2 * x * x * x
-            let ph = p + 0.005 * f0
-            x = x + 0.01 * ph
-            let f1 = 0.0 - x - 0.2 * x * x * x
-            p = ph + 0.005 * f1
+// one anharmonic velocity-Verlet step over the packed 32-trajectory state
+// (packed index u = 2j + c: slot 2j holds x_j, slot 2j+1 holds p_j)
+function vstepE(prev: Array<Float64 like Idx<64>>) -> Array<Float64 like Idx<64>> =
+    (method_for(range<Idx<64>>) <@> lambda(u: Int64) -> {
+        let j = u / 2
+        let c = u - 2 * j
+        let x = prev(2 * j)
+        let p = prev(2 * j + 1)
+        let f0 = 0.0 - x - 0.2 * x * x * x
+        let ph = p + 0.005 * f0
+        let xn = x + 0.01 * ph
+        if c < 1 then xn else {
+            let f1 = 0.0 - xn - 0.2 * xn * xn * xn
+            ph + 0.005 * f1
         }
-    }
-    s
+    }) |> compute
+// The ensemble mean <x(t)> is a RECURSIVE ARRAY whose leading axis is the 400
+// bins (one every 35 steps): each super-step advances the whole 32-trajectory
+// ensemble 35 Verlet sub-steps via a nested recursive array, so super-state b
+// is the state at t = 35 b -- exactly the sampled instants the old scatter
+// s(t/35) += x/32 wrote. The binning is then a per-bin ensemble mean; the
+// trajectory is block-local, only the 400-sample signal surfaces.
+let SIGC = {
+    let initE = method_for(range<Idx<64>>) <@> lambda(u: Int64) -> {
+        let j = u / 2
+        let c = u - 2 * j
+        if c < 1 then AMPS(j) else 0.0
+    } |> compute
+    let rec superT: Array<Float64 like Idx<400>, Idx<64>> =
+        match superT with
+        | zero -> zero
+        | zero :: s -> zero :: initE
+        | prefix :: n -> prefix :: {
+            let start = prefix(n - 1)
+            let rec inner: Array<Float64 like Idx<36>, Idx<64>> =
+                match inner with
+                | zero -> zero
+                | zero :: s2 -> zero :: start
+                | pre2 :: m -> pre2 :: vstepE(pre2(m - 1))
+            inner(35)
+        }
+    method_for(superT) <@> lambda(row: Array<Float64 like Idx<64>>) -> (row(0) + row(2) + row(4) + row(6) + row(8) + row(10) + row(12) + row(14) + row(16) + row(18) + row(20) + row(22) + row(24) + row(26) + row(28) + row(30) + row(32) + row(34) + row(36) + row(38) + row(40) + row(42) + row(44) + row(46) + row(48) + row(50) + row(52) + row(54) + row(56) + row(58) + row(60) + row(62)) / 32.0 |> compute
 }
 
 // ---- delay-embedded EDMD, quantum ----
@@ -168,50 +190,39 @@ let cgA = cos((EV(3) - EV(0)) * 0.35)
 let cgB = cos((EV(4) - EV(1)) * 0.35)
 let agap = (EV(2) - EV(1)) - (EV(1) - EV(0))
 function amin2(a: Float64, b: Float64) -> Float64 = if a < b then a else b
-// the two dominant pairs: cosines vs the certified adjacent gaps, tight
-let devCos = {
-    let mut worst = 0.0
-    for k in 0..4 {
-        let md = sqrt(REQ(k) * REQ(k) + IMQ(k) * IMQ(k))
-        let cv = REQ(k) / md
-        let d1 = abs(cv - cg1)
-        let d2 = abs(cv - cg2)
-        let best = amin2(d1, d2)
-        worst = if best > worst then best else worst
-    }
-    worst
-}
-// unitarity of the two dominant pairs
-let devMod = {
-    let mut worst = 0.0
-    for k in 0..4 {
-        let md = sqrt(REQ(k) * REQ(k) + IMQ(k) * IMQ(k))
-        let d = abs(md - 1.0)
-        worst = if d > worst then d else worst
-    }
-    worst
-}
-// resolution meter: best match anywhere in the spectrum to the
-// Delta-n = 3 satellite gap of the certified ladder (the ex 18 line)
-let hitS = {
-    let mut best = 1.0
-    for k in 0..10 {
-        let md = sqrt(REQ(k) * REQ(k) + IMQ(k) * IMQ(k))
-        let cv = REQ(k) / (if md > 0.000001 then md else 1.0)
-        let d = abs(cv - cgB)
-        best = if d < best then d else best
-    }
-    best
-}
-// classical: the LARGEST modulus of the fitted operator
-let maxModC = {
-    let mut worst = 0.0
-    for k in 0..10 {
-        let md = sqrt(REC(k) * REC(k) + IMC(k) * IMC(k))
-        worst = if md > worst then md else worst
-    }
-    worst
-}
+function amax2(a: Float64, b: Float64) -> Float64 = if a > b then a else b
+// Per-eigenvalue meter tables. The pairing is `zip`: entry k must be the
+// k-th eigenvalue's OWN real and imaginary parts. Positional
+// method_for(REQ, IMQ) would span the 10 x 10 PRODUCT of the two lists and
+// mate unrelated eigenvalues. The modulus guard covers the directions the
+// spectral truncation sends to exactly zero (see below).
+let COSQ = method_for(zip(REQ, IMQ)) <@> lambda(reqk, imqk) -> {
+    let md = sqrt(reqk^2 + imqk^2)
+    let cv = reqk / (if md > 0.000001 then md else 1.0)
+    amin2(abs(cv - cg1), abs(cv - cg2))
+} |> compute
+let MODQ = method_for(zip(REQ, IMQ)) <@> lambda(reqk, imqk) -> abs(sqrt(reqk^2 + imqk^2) - 1.0) |> compute
+// the two dominant pairs: cosines vs the certified adjacent gaps, tight.
+// m.eig returns eigenvalues in DESCENDING modulus, so the two dominant
+// pairs are entries 0-3 and the fold is a max over exactly those four --
+// which is the whole claim: rank 8 is what 400 samples resolve, the
+// residual tail is the honest limit, and the truncated inverse sends two
+// directions to EXACTLY zero (eigenvalues 8, 9 at ~1e-10, modulus 0, not
+// on any circle). Folding those in would meter the truncation, not the
+// spectrum.
+let devCos = amax2(amax2(COSQ(0), COSQ(1)), amax2(COSQ(2), COSQ(3)))
+// unitarity of the same two dominant pairs (max of |modulus - 1|)
+let devMod = amax2(amax2(MODQ(0), MODQ(1)), amax2(MODQ(2), MODQ(3)))
+// resolution meter: best match ANYWHERE in the spectrum to the Delta-n = 3
+// satellite gap of the certified ladder (min-fold over all ten, seeded 1.0)
+let hitS = reduce(method_for(zip(REQ, IMQ)) <@> lambda(reqk, imqk) -> {
+    let md = sqrt(reqk^2 + imqk^2)
+    let cv = reqk / (if md > 0.000001 then md else 1.0)
+    abs(cv - cgB)
+}, lambda(a: Float64, b: Float64) -> if a < b then a else b, 1.0)
+// classical: the LARGEST modulus of the fitted operator -- over ALL ten,
+// since the dephasing verdict is that the WHOLE spectrum is inside the disk
+let maxModC = reduce(method_for(zip(REC, IMC)) <@> lambda(reck, imck) -> sqrt(reck^2 + imck^2), lambda(a: Float64, b: Float64) -> if a > b then a else b, 0.0)
 
 // ---- verdicts ----
 let certV = if certQ < 0.0000000000000001 then (if orthQ < 0.0000000000000001 then "EIGENFACTOR_CERTIFIED" else "NO") else "NO"
@@ -233,13 +244,13 @@ let imq2 = IMQ(2)
 // EXPECT: cg2 = 0.910133438195426
 // EXPECT: cgB = 0.205771409687602
 // EXPECT: agap = 0.0997504841086803
-// EXPECT: req0 = 0.923650640883653
-// EXPECT: imq0 = 0.383208068138303
-// EXPECT: req2 = 0.908773550543766
-// EXPECT: imq2 = 0.41496602949535
-// EXPECT: devCos = 0.00047990518626595
-// EXPECT: devMod = 0.000967382012449947
-// EXPECT: hitS = 0.000769166181181002
+// EXPECT: req0 = 0.923650642976152
+// EXPECT: imq0 = 0.383208045201399
+// EXPECT: req2 = 0.90877355177104
+// EXPECT: imq2 = 0.4149660518969
+// EXPECT: devCos = 0.000479913446734703
+// EXPECT: devMod = 0.000967371591171995
+// EXPECT: hitS = 0.000769164633241143
 // EXPECT: maxModC = 0.991380338109228
 // EXPECT: circleV = "BOHR_LINES_ON_UNIT_CIRCLE"
 // EXPECT: gapsV = "GAPS_MATCH_CERTIFIED_SPECTRUM"

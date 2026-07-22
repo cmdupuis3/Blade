@@ -4,15 +4,14 @@
 // the array; writes land in the caller's buffer (all params pass by
 // reference — the wrapper's data pointer is shared). Used as the gradient
 // out-buffer ABI by grad(). Scalar `mut` params are rejected (by-value in
-// the C++ ABI, writes would drop silently).
+// the C++ ABI, writes would drop silently). Element-wise assignments (no
+// imperative loop) exercise the write-back path per index.
 // ============================================================================
 function accumulate_into(x: Array<Float like Idx<3>>, out: mut Array<Float like Idx<3>>) -> Float = {
-    let mut s = 0.0
-    for i in 0..3 {
-        out(i) += x(i) * 2.0
-        s += x(i)
-    }
-    s
+    out(0) += x(0) * 2.0
+    out(1) += x(1) * 2.0
+    out(2) += x(2) * 2.0
+    x(0) + x(1) + x(2)
 }
 let w = [1.0, 2.0, 3.0]
 let mut g = [0.0, 0.0, 0.0]

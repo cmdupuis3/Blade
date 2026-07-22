@@ -1,0 +1,25 @@
+// TEST: Join Leading Axis
+// join(A, B, d) (formalism 2.6) concatenates along dimension d: rank is
+// preserved, extents[d] add, every other axis agrees. d = 0 stacks rows.
+type SIdx = Idx<3>
+let a: Array<Float64 like SIdx> = [1.0, 2.0, 3.0]
+let b: Array<Float64 like SIdx> = [4.0, 5.0, 6.0]
+let j1 = join(a, b, 0)
+// Rank-1 join is plain concatenation; the seam is at index 3.
+let before = j1(2)
+let after = j1(3)
+// Rank-2 join along the LEADING axis: (2,3) + (2,3) = (4,3).
+type YIdx = Idx<2>
+type XIdx = Idx<3>
+let p: Array<Float64 like YIdx, XIdx> = [[1.0, 2.0, 3.0], [4.0, 5.0, 6.0]]
+let q: Array<Float64 like YIdx, XIdx> = [[10.0, 20.0, 30.0], [40.0, 50.0, 60.0]]
+let jrow = join(p, q, 0)
+let jr30 = jrow(3, (0 : XIdx))
+// n-ary: join takes any number of operands before the dimension.
+let j3 = join(a, b, a, 0)
+// EXPECT: j1 = [1.0, 2.0, 3.0, 4.0, 5.0, 6.0]
+// EXPECT: before = 3
+// EXPECT: after = 4
+// EXPECT: jrow = [1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 10.0, 20.0, 30.0, 40.0, 50.0, 60.0]
+// EXPECT: jr30 = 40
+// EXPECT: j3 = [1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 1.0, 2.0, 3.0]

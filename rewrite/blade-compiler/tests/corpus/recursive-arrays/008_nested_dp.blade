@@ -1,0 +1,27 @@
+// TEST: Recursive Array Nested DP
+// ============================================================================
+// Nested/multi-axis recursion by composition: Pascal's triangle rows as a
+// recursive array over rows, where each row's slice function reads the
+// previous ROW at neighboring positions (a DP-table recurrence). The outer
+// recursion supplies row r-1; the within-row combination is an ordinary
+// former over the row axis — no axis annotations anywhere, recursion is
+// always the leading axis of the thing being defined.
+// Rows (width-5, zero-padded): [1,0,0,0,0], [1,1,0,0,0], [1,2,1,0,0],
+// [1,3,3,1,0], [1,4,6,4,1]
+// ============================================================================
+type R = Idx<5>
+type C = Idx<5>
+function next_row(prev: Array<Float like C>) -> Array<Float like C> =
+    (for (prev) in range<C> <@> lambda(p, j) -> {
+        let above_left = if j > 0 then prev(j - 1) else 0.0
+        above_left + p
+    }) |> compute
+
+let rec pascal: Array<Float like R, C> =
+    match pascal with
+    | zero -> zero
+    | zero :: s -> zero :: [1.0, 0.0, 0.0, 0.0, 0.0]
+    | prefix :: n -> prefix :: next_row(prefix(n - 1))
+// EXPECT: pascal = [1, 0, 0, 0, 0, 1, 1, 0, 0, 0, 1, 2, 1, 0, 0, 1, 3, 3, 1, 0, 1, 4, 6, 4, 1]
+let last_row = pascal(4)
+// EXPECT: last_row = [1, 4, 6, 4, 1]

@@ -10,16 +10,13 @@ let d0 = G(0, 0, 0) * G(0, 0, 0) - 96.46875
 let dev = d0 * d0
 let pos = if G(0, 0, 0) > 0.0 then 1.0 else 0.0
 let offd = {
-    let mut acc = 0.0
-    for a in 0..3 {
-        for b in 0..3 {
-            for c in 0..3 {
-                let keep = if a + b + c > 0 then 1.0 else 0.0
-                acc = acc + keep * G(a, b, c) * G(a, b, c)
-            }
-        }
-    }
-    acc
+    // Energy outside the (0,0,0) corner: square the core, zero the corner with
+    // an elementwise selector (so the single large entry never enters the sum),
+    // then reduce. A rank-1 core concentrates everything at (0,0,0), so this is
+    // exactly zero.
+    let Gsq = method_for(range<Idx<3>, Idx<3>, Idx<3>>) <@> lambda(a, b, c) -> G(a, b, c) * G(a, b, c) |> compute
+    let keep: Array<Float64 like Idx<3>, Idx<3>, Idx<3>> = [[[0.0, 1.0, 1.0], [1.0, 1.0, 1.0], [1.0, 1.0, 1.0]], [[1.0, 1.0, 1.0], [1.0, 1.0, 1.0], [1.0, 1.0, 1.0]], [[1.0, 1.0, 1.0], [1.0, 1.0, 1.0], [1.0, 1.0, 1.0]]]
+    reduce(Gsq * keep, (+))
 }
 // EXPECT: dev = 0.0
 // EXPECT: pos = 1

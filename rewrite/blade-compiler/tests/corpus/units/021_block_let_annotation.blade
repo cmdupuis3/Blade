@@ -3,7 +3,8 @@
 // handler (they were previously IGNORED — inferBlock called plain
 // inferExpr): the mut accumulator carries Float<meters>, each update
 // composes velocity * seconds = meters against it, and the block result
-// keeps the signature.
+// keeps the signature. The updates are written out (no imperative loop);
+// each `x += v * dt` still unit-checks against the block annotation.
 Unit meters
 Unit seconds
 Unit velocity = meters / seconds
@@ -11,9 +12,10 @@ let v: Float<velocity> = 5.0
 let dt: Float<seconds> = 0.5
 let dist = {
     let mut x: Float<meters> = 0.0
-    for i in 0..4 {
-        x += v * dt
-    }
+    x += v * dt
+    x += v * dt
+    x += v * dt
+    x += v * dt
     x
 }
 let m: Float<meters> = 1.0

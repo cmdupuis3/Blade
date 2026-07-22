@@ -1,0 +1,28 @@
+// TEST: AD Recursive Array Additive Carry
+import ad as ad
+// ============================================================================
+// Gradient through a rank-1 recursive array carrying additive state:
+//   s(0) = 0;  s(n) = s(n-1) + w(n-1) * xs(n-1)   (a prefix sum)
+// read at the final element hv = s(2) = w0*xs0 + w1*xs1.
+//
+// A same-direction adjoint loop is wrong for a genuine scan, so grad's
+// pre-pass unrolls the additive prefix recurrence into an equivalent
+// triangular scatter-add (each s(k) an independent accumulation of its
+// increments) — semantically identical, and exactly differentiable by the
+// existing loop machinery. dh(i) = xs(i) for the read prefix, 0 past it.
+// Verified against a central finite-difference check: [4, 5, 0].
+// ============================================================================
+let xs = [4.0, 5.0, 6.0]
+function h(w: Array<Float like Idx<3>>) -> Float = {
+    let rec s: Array<Float like Idx<3>> =
+        match s with
+        | zero -> zero
+        | zero :: n -> zero :: 0.0
+        | prefix :: n -> prefix :: prefix(n - 1) + w(n - 1) * xs(n - 1)
+    s(2)
+}
+let w0 = [1.0, 2.0, 3.0]
+let mut dh = [0.0, 0.0, 0.0]
+let hv = ad.grad(h)(w0, dh)
+// EXPECT: hv = 14.0
+// EXPECT: dh = [4.0, 5.0, 0.0]

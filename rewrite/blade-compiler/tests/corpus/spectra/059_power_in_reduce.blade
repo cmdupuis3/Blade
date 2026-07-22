@@ -1,0 +1,11 @@
+// TEST: Spectra power: qualified call inside a reduce
+// `reduce`'s array operand was one of the many expression positions the
+// elaborators' walkers never descended into, so a qualified call there was
+// silently left unrewritten and failed later as an unbound alias -- the same
+// defect class as the recursive-array slice, just a different node. The walkers
+// are now exhaustive over ExprKind. Value: by Parseval for the unnormalized
+// DFT, sum_k |X_k|^2 = n * sum_i x_i^2 = 4 * (1+4+9+16) = 120, exactly.
+import spectra as sp
+let sig: Array<Float64 like Idx<4>> = [1.0, 2.0, 3.0, 4.0]
+let tot = reduce(sp.power(sig), (+))
+// EXPECT: tot = 120

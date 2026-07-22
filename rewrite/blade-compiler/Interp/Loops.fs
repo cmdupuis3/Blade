@@ -1479,6 +1479,15 @@ let rec evalArrayNode (st: InterpState) (env: Env) (expr: IRExpr) : Value =
     | IRTranspose (arrExpr, d1, d2) ->
         VArray (A.transposeArray (forceInputArray st env arrExpr) d1 d2)
 
+    // -- Rank-changing assembly (formalism 2.6). Each operand is FORCED first
+    //    (a deferred producer materializes once), then copied into a fresh
+    //    dense pool: stack adds a leading selector axis, join concatenates
+    //    along dim d. Pinned to CodeGen's materialize{Stack,Join}Form.
+    | IRStack arrs ->
+        VArray (A.stackArrays (arrs |> List.map (forceInputArray st env)))
+    | IRJoin (arrs, dim) ->
+        VArray (A.joinArrays (arrs |> List.map (forceInputArray st env)) dim)
+
     // -- Symmetry producers (M7-β). Each FORCES its input(s) first (so a deferred
     //    reynolds/gram source materializes once — 109/110/066), then materializes
     //    a fresh output. `typeOf expr` carries the fission / gram / preserved

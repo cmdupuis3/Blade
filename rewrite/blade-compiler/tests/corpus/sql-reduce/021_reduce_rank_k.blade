@@ -1,0 +1,21 @@
+// TEST: Reduce Rank-K Dense Fold
+// ============================================================================
+// reduce() over rank >= 2 dense arrays: every element folds through the
+// kernel in DECLARED (row-major) element order with one scalar accumulator
+// — the desugared internal nest is byte-identical to the imperative
+// accumulation loops it replaces (hosvd residuals, binning sums). Seeds:
+// (+) -> 0, (*) -> 1, otherwise the explicit 3-arg init.
+// ============================================================================
+type R = Idx<2>
+type C = Idx<3>
+let M: Array<Float like R, C> = [[1.0, 2.0, 3.0], [4.0, 5.0, 6.0]]
+let s = reduce(M, (+))
+// EXPECT: s = 21.0
+let p = reduce(M, (*))
+// EXPECT: p = 720.0
+let m = reduce(M, lambda(a, x) -> if x > a then x else a, 0.0)
+// EXPECT: m = 6.0
+type Z = Idx<2>
+let T3: Array<Float like Z, Z, Z> = [[[1.0, 2.0], [3.0, 4.0]], [[5.0, 6.0], [7.0, 8.0]]]
+let s3 = reduce(T3, (+))
+// EXPECT: s3 = 36.0

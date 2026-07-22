@@ -1,0 +1,15 @@
+// TEST: Recursive Array Scalar LCG
+// ============================================================================
+// The physics/44 LCG stream as a recursive array: s_{n} = (s_{n-1} * 48271)
+// mod 2147483647, seed 7. An inherently serial scalar recurrence — the
+// canonical Category-D shape. Sequentiality is DERIVED from the prefix
+// dependence; no imperative loop appears.
+// Stream pinned from the float-mod formula (matches physics/44's spelling).
+// ============================================================================
+type Draw = Idx<4>
+let rec lcg: Array<Float like Draw> =
+    match lcg with
+    | zero -> zero
+    | zero :: s -> zero :: 7.0
+    | prefix :: n -> prefix :: prefix(n - 1) * 48271.0 - floor(prefix(n - 1) * 48271.0 / 2147483647.0) * 2147483647.0
+// EXPECT: lcg = [7, 337897, 1278240558, 449829614]

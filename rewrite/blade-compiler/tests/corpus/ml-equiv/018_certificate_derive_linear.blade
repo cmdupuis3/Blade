@@ -19,13 +19,10 @@ let lhs: Array<Float like IrrepsIdx<SOUT>> = ml.derive_linear(SIN, SOUT, w, [1.0
 
 let fx: Array<Float like IrrepsIdx<SOUT>> = ml.derive_linear(SIN, SOUT, w, [1.0, 2.0, 3.0, -1.0, 0.5])
 let dout = [1.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.7648421872844888, 0.5741315443479849, 0.2922146442847723, 0.0, 0.0, 0.0, 0.0, 0.0, 0.45359612142557815, -0.8912073600614354, 0.0, 0.0, 0.0, 0.0, -0.6442176872376895, 0.6816329865934172, 0.34692944965489897, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.7648421872844888, 0.5741315443479849, 0.2922146442847723, 0.0, 0.0, 0.0, 0.0, 0.0, 0.45359612142557815, -0.8912073600614354, 0.0, 0.0, 0.0, 0.0, -0.6442176872376895, 0.6816329865934172, 0.34692944965489897]
-let mut rhs = [0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0]
-let done1 = {
-    for i in 0..7 {
-        for j in 0..7 {
-            rhs(i) += dout(i * 7 + j) * fx(j)
-        }
-    }
-    0.0
+// rhs(i) = sum_j dout(i,j)·fx(j) : reshape dout into rows, prodsum each with fx
+let rhs = {
+    let drows = method_for(range<Idx<7>>) <*> method_for(range<Idx<7>>) <@> lambda(i, j) -> dout(i * 7 + j) |> compute
+    method_for(drows) <@> lambda(row: Array<Float like Idx<7>>) -> prodsum(row, fx) |> compute
 }
+let done1 = 0.0
 // EXPECT: rhs = [-1.5, 3.733004679295735, -1.7983996029125917, -4.881642646958072, 0.4666255849119669, -0.22479995036407396, -0.610205330869759]

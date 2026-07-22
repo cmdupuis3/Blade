@@ -21,25 +21,36 @@
 let pi = 3.141592653589793
 let h = pi / 2.0
 
-let mut u0 = [0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0]
-let mut u1 = [0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0]
-let mut u2 = [0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0]
-let build_done = {
-    for i in 0..4 {
-        for j in 0..4 {
-            for k in 0..4 {
-                let x = i * h
-                let y = j * h
-                let z = k * h
-                let t = i * 16 + j * 4 + k
-                u0(t) = 0.7 * cos(y + 1.1) + 0.6 * cos(x + 3.0 * y + 2.0) + 0.5 * cos(z + 0.7)
-                u1(t) = 0.8 * cos(x + 0.3) + 0.6 * cos(x + 3.0 * y + 2.0) - 0.6 * cos(z + 0.7)
-                u2(t) = 0.0 - 0.5 * cos(x + 0.3) + 0.4 * cos(y + 1.1) - 0.9 * cos(x + 3.0 * y + 2.0)
-            }
-        }
-    }
-    0.0
-}
+// Each field is a per-point element map over the flat 64-cell grid
+// (t = i*16 + j*4 + k), i, j, k recovered from the linear index.
+let u0 = method_for(range<Idx<64>>) <@> lambda(t) -> {
+    let i = t / 16
+    let j = (t / 4) % 4
+    let k = t % 4
+    let x = i * h
+    let y = j * h
+    let z = k * h
+    0.7 * cos(y + 1.1) + 0.6 * cos(x + 3.0 * y + 2.0) + 0.5 * cos(z + 0.7)
+} |> compute
+let u1 = method_for(range<Idx<64>>) <@> lambda(t) -> {
+    let i = t / 16
+    let j = (t / 4) % 4
+    let k = t % 4
+    let x = i * h
+    let y = j * h
+    let z = k * h
+    0.8 * cos(x + 0.3) + 0.6 * cos(x + 3.0 * y + 2.0) - 0.6 * cos(z + 0.7)
+} |> compute
+let u2 = method_for(range<Idx<64>>) <@> lambda(t) -> {
+    let i = t / 16
+    let j = (t / 4) % 4
+    let k = t % 4
+    let x = i * h
+    let y = j * h
+    let z = k * h
+    0.0 - 0.5 * cos(x + 0.3) + 0.4 * cos(y + 1.1) - 0.9 * cos(x + 3.0 * y + 2.0)
+} |> compute
+let build_done = 0.0
 
 // (a) probe values vs the sgs/ oracle (squared-error tolerance: libm ulps)
 let mut pr = [0.0]
@@ -62,22 +73,19 @@ let probes_match_oracle = if pr(0) < 0.0000000000000000000000000001 then 1.0 els
 // (b) discrete divergence: sum of div^2 over all 64 points ~ 1e-31 per point
 let mut dv = [0.0, 0.0]
 let div_done = {
-    for i in 0..4 {
-        for j in 0..4 {
-            for k in 0..4 {
-                let ip = (i + 1) % 4
-                let im = (i + 3) % 4
-                let jp = (j + 1) % 4
-                let jm = (j + 3) % 4
-                let kp = (k + 1) % 4
-                let km = (k + 3) % 4
-                let d = (u0(ip * 16 + j * 4 + k) - u0(im * 16 + j * 4 + k)) / (2.0 * h)
-                      + (u1(i * 16 + jp * 4 + k) - u1(i * 16 + jm * 4 + k)) / (2.0 * h)
-                      + (u2(i * 16 + j * 4 + kp) - u2(i * 16 + j * 4 + km)) / (2.0 * h)
-                dv(0) += d * d
-            }
-        }
-    }
+    let s_dv0 = reduce(method_for(range<Idx<4>>) <*> method_for(range<Idx<4>>) <*> method_for(range<Idx<4>>) <@> lambda(i, j, k) -> {
+        let ip = (i + 1) % 4
+        let im = (i + 3) % 4
+        let jp = (j + 1) % 4
+        let jm = (j + 3) % 4
+        let kp = (k + 1) % 4
+        let km = (k + 3) % 4
+        let d = (u0(ip * 16 + j * 4 + k) - u0(im * 16 + j * 4 + k)) / (2.0 * h)
+              + (u1(i * 16 + jp * 4 + k) - u1(i * 16 + jm * 4 + k)) / (2.0 * h)
+              + (u2(i * 16 + j * 4 + kp) - u2(i * 16 + j * 4 + km)) / (2.0 * h)
+        d * d
+    }, (+), 0.0)
+    dv(0) = s_dv0
     0.0
 }
 let field_is_divergence_free = if dv(0) < 0.00000000000000000000000001 then 1.0 else 0.0
@@ -86,16 +94,13 @@ let field_is_divergence_free = if dv(0) < 0.00000000000000000000000001 then 1.0 
 // (c) negative control: a mode with amplitude PARALLEL to kappa
 // (v = cos(x + 0.15) e_x) is loudly non-solenoidal on the same grid
 let ctrl_done = {
-    for i in 0..4 {
-        for j in 0..4 {
-            for k in 0..4 {
-                let ip = (i + 1) % 4
-                let im = (i + 3) % 4
-                let d = (cos(ip * h + 0.15) - cos(im * h + 0.15)) / (2.0 * h)
-                dv(1) += d * d
-            }
-        }
-    }
+    let s_dv1 = reduce(method_for(range<Idx<4>>) <*> method_for(range<Idx<4>>) <*> method_for(range<Idx<4>>) <@> lambda(i, j, k) -> {
+        let ip = (i + 1) % 4
+        let im = (i + 3) % 4
+        let d = (cos(ip * h + 0.15) - cos(im * h + 0.15)) / (2.0 * h)
+        d * d
+    }, (+), 0.0)
+    dv(1) = s_dv1
     0.0
 }
 let control_is_not_divergence_free = if dv(1) > 0.01 then 1.0 else 0.0

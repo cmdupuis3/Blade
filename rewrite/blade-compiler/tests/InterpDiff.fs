@@ -57,8 +57,9 @@ let m1Slice =
 /// arity-poly, function arrays). These are CORPUS DIRECTORY names (Corpus.category
 /// loads them), reconciled against tests/corpus/ — ALL TWELVE of the m2-design.md
 /// §8 build-plan categories EXIST verbatim as directories, so no name corrections
-/// were needed:
-///   loops for-in bracketed anon-ranges replicate tuple-views
+/// were needed (the imperative-removal arc deleted the for-in category — its
+/// sequential-recurrence surface is now the recursive-arrays category):
+///   loops recursive-arrays bracketed anon-ranges replicate tuple-views
 ///   zero-combinators sequence-combinators guard-combinators
 ///   func-arrays arity inference-probes
 /// Reject-probes ("(rejects)") and the single func-arrays abort-probe
@@ -68,7 +69,7 @@ let m1Slice =
 /// (Until the interpreter's array/loop evaluation lands, most members classify
 /// SKIP-UNSUPPORTED; this slice makes the future passes visible per checkpoint.)
 let m2Slice =
-    [ "loops"; "for-in"; "bracketed"; "anon-ranges"; "replicate"; "tuple-views"
+    [ "loops"; "recursive-arrays"; "bracketed"; "anon-ranges"; "replicate"; "tuple-views"
       "zero-combinators"; "sequence-combinators"; "guard-combinators"
       "func-arrays"; "arity"; "inference-probes" ]
 
@@ -152,8 +153,12 @@ let indexTypesSlice = [ "index-types" ]
 /// ml-equiv ride grad()'s core imperative reverse pass. The ppl halo formers
 /// (068,069) materialize through the general range machinery — no halo-specific
 /// interp code is needed and they PASS. ml-e2e's two 30-step training loops are
-/// the only heavy members (~16s / ~26s measured interp wall time), well inside the
-/// 120s runInterpTimed ceiling — no timeout.
+/// the only heavy members. Their cost is BUILD-CONFIG SENSITIVE — measured idle,
+/// in isolation: 001 <5s Release / 11.36s Debug, 002 25.41s Release / 146.97s
+/// Debug. Quote BOTH configs for any timing claim here: the Release-only figures
+/// this comment used to carry made the old 120s runInterpTimed ceiling look safe,
+/// and 002 then blew it under the Debug build that `dotnet run` produces. See the
+/// interpTimeoutMs note.
 let m5Slice =
     [ "ad"; "spectra"; "math"; "ml-ops"; "ml-equiv"; "ml-e2e"; "ppl" ]
 
@@ -168,7 +173,12 @@ let m5Slice =
 /// array-shaped guard). Both parity (interp == compiled) and EXPECT values verified.
 let deferredConcreteSlice = [ "deferred-concrete" ]
 
-let currentSlice = m1Slice @ m2Slice @ m3Slice @ randSlice @ m4aSlice @ fallbackSlice @ m5Slice @ indexTypesSlice @ deferredConcreteSlice
+/// stack-join: the rank-changing assembly combinators (formalism 2.6). The
+/// interpreter's ArrayOps.stackArrays / joinArrays are pinned to CodeGen's
+/// materialize{Stack,Join}Form, so every member must agree byte-for-byte.
+let stackJoinSlice = [ "stack-join" ]
+
+let currentSlice = m1Slice @ m2Slice @ m3Slice @ randSlice @ m4aSlice @ fallbackSlice @ m5Slice @ indexTypesSlice @ deferredConcreteSlice @ stackJoinSlice
 
 /// Output-line normalizer, shared in spirit with DiffOracle.normalize
 /// (DiffOracle.fs:79-85), widened for the split-timing wrapper:
@@ -196,14 +206,59 @@ let private unsupportedFeature (r: Run.InterpResult) =
     let prefix = "interp-unsupported: "
     if s.StartsWith prefix then s.Substring(prefix.Length).Trim() else s
 
-/// Run the interpreter under a wall-clock ceiling (~120s). runProgram already
+/// Wall-clock ceiling for one interpreter walk, in milliseconds.
+///
+/// 300s, NOT the historical 120s. The ceiling has to clear the slowest walk in
+/// the slice under a DEBUG build, because `dotnet run -- test interp` (the
+/// documented workflow) is Debug. Measured on this machine, idle, ml-e2e in
+/// isolation:
+///
+///     ML E2E Ops Elaboration Training     Release  25.41s   Debug  146.97s
+///     ML E2E Invariant Regression Training Release  <5s     Debug   11.36s
+///
+/// i.e. the tree-walker pays ~5.8x in Debug on an allocation-heavy grad()-
+/// expanded training loop. At 120s that ONE test failed the gate under Debug
+/// and passed under Release — a build-config artifact that reads exactly like a
+/// code regression and cost a session to chase (the m5Slice comment below records
+/// only the Release figures, which is what made 120s look safe). 300s keeps ~2x
+/// headroom over the worst Debug walk while staying a real runaway backstop, and
+/// matches the precedent set by Build.fs's compile/run timeouts.
+///
+/// Override with BLADE_INTERP_TIMEOUT_MS to let a DIAGNOSTIC run record a slow
+/// test's TRUE wall time instead of the value clipped at the ceiling. (Knowing
+/// whether a test takes 130s or 800s is the difference between "this build is
+/// just slow" and "something is superlinear".)
+let private defaultInterpTimeoutMs = 300000
+
+let private interpTimeoutMs : int =
+    match Environment.GetEnvironmentVariable "BLADE_INTERP_TIMEOUT_MS" with
+    | null | "" -> defaultInterpTimeoutMs
+    | s ->
+        // A malformed value falls back to the SAME default as an unset one — a
+        // typo must never silently install a different (shorter) ceiling.
+        match Int32.TryParse s with
+        | true, v when v > 0 -> v
+        | _ -> defaultInterpTimeoutMs
+
+/// Run the interpreter under the wall-clock ceiling above. runProgram already
 /// recurses on the large stack and its InterpLimits bound the step/cell budget;
 /// this Task guard is the outer backstop so a pathological non-terminating walk
 /// cannot hang the whole gate.
+///
+/// CAVEAT on timeout: `Task.Wait` returning false only ABANDONS the wait — the
+/// interpreter's 64 MB worker thread (Runtime.runOnLargeStack) keeps running,
+/// burning a core and holding its heap for the REST of the gate. There is no
+/// safe way to kill it from here (cooperative cancellation would need a check
+/// in the InterpLimits step counter). So every timing recorded AFTER the first
+/// timeout — including the SLOW INTERP table below — is contended and must not
+/// be read as a clean measurement. The warning is printed so that is never
+/// silently forgotten.
 let private runInterpTimed (program: IRProgram) (name: string) : Result<Run.InterpResult, string> =
     let task = Task.Run(fun () -> Run.runProgram program name Blade.Interp.Value.defaultLimits)
-    if task.Wait(120000) then Ok task.Result
-    else Error "interp timed out (>120s)"
+    if task.Wait(interpTimeoutMs) then Ok task.Result
+    else
+        printfn "    WARNING: interpreter thread ABANDONED (still running); later timings in this run are contended"
+        Error (sprintf "interp timed out (>%gs)" (float interpTimeoutMs / 1000.0))
 
 /// Corpus categories that are ENTIRELY negative tests: every source is meant
 /// to be refused by the compiled front-end (a type/lower/unit error), yet
@@ -261,12 +316,22 @@ let runInterpDiffTests (categories: string list) : BlockResult =
         // array/loop interpretation can be slow, and M5 adds heavy categories;
         // this surfaces any test whose interp walk exceeds 5s so the cost is
         // visible per checkpoint rather than discovered as a gate-wide slowdown.
-        let interpTimes = System.Collections.Generic.List<string * float>()
+        // Alongside the wall time we record the MANAGED-HEAP context of each walk:
+        // the live heap on ENTRY and the gen2 collections the walk itself
+        // triggered. A gate this long (~900 tests in one process) accumulates a
+        // large, fragmented gen2, and an allocation-heavy walk late in the slice
+        // can cost far more than the SAME walk run in isolation. Without these two
+        // numbers a slow test looks like a code regression when it is really
+        // process-lifetime heap pressure — exactly the confusion this
+        // instrumentation exists to settle.
+        let interpTimes = System.Collections.Generic.List<string * float * float * int>()
         let runInterpTimedRec (program: IRProgram) (name: string) : Result<Run.InterpResult, string> =
+            let heapMbBefore = float (GC.GetTotalMemory false) / 1048576.0
+            let gen2Before = GC.CollectionCount 2
             let sw = System.Diagnostics.Stopwatch.StartNew()
             let r = runInterpTimed program name
             sw.Stop()
-            interpTimes.Add(name, sw.Elapsed.TotalSeconds)
+            interpTimes.Add(name, sw.Elapsed.TotalSeconds, heapMbBefore, GC.CollectionCount 2 - gen2Before)
             r
 
         let pass name detail =
@@ -484,15 +549,16 @@ let runInterpDiffTests (categories: string list) : BlockResult =
         let slowThreshold = 5.0
         let slow =
             interpTimes
-            |> Seq.filter (fun (_, t) -> t > slowThreshold)
-            |> Seq.sortByDescending snd
+            |> Seq.filter (fun (_, t, _, _) -> t > slowThreshold)
+            |> Seq.sortByDescending (fun (_, t, _, _) -> t)
             |> Seq.toList
         if not (List.isEmpty slow) then
             printfn ""
-            printfn "  SLOW INTERP (>%.0fs): %d test(s)" slowThreshold (List.length slow)
+            printfn "  SLOW INTERP (>%.0fs): %d test(s)   [heap = live managed heap ON ENTRY; gen2 = full GCs during the walk]" slowThreshold (List.length slow)
             slow
             |> List.truncate 5
-            |> List.iter (fun (n, t) -> printfn "    %7.2fs  %s" t n)
+            |> List.iter (fun (n, t, heapMb, gen2) ->
+                printfn "    %7.2fs  heap %6.0f MB  gen2 %3d  %s" t heapMb gen2 n)
         printFooter blockName
             [ sprintf "%d passed" passed
               sprintf "%d failed" failed

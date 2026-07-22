@@ -1,0 +1,18 @@
+// TEST: Stack Rank-1 Fresh Leading Axis
+// stack(A1..An) (formalism 2.6) adds a FRESH LEADING axis of extent n over n
+// same-shaped arrays, so stack(a,b,c)(k) selects array k. Three rank-1 sources
+// of extent 3 give a rank-2 (3, 3) result, which prints flattened row-major.
+type SIdx = Idx<3>
+let a: Array<Float64 like SIdx> = [1.0, 2.0, 3.0]
+let b: Array<Float64 like SIdx> = [4.0, 5.0, 6.0]
+let c: Array<Float64 like SIdx> = [7.0, 8.0, 9.0]
+let s = stack(a, b, c)
+// The leading index SELECTS the source; the trailing index is the source's own.
+let pick0 = s(0, (2 : SIdx))
+let pick2 = s(2, (0 : SIdx))
+// Two sources are just as legal as three.
+let s2 = stack(a, c)
+// EXPECT: s = [1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0, 9.0]
+// EXPECT: pick0 = 3
+// EXPECT: pick2 = 7
+// EXPECT: s2 = [1.0, 2.0, 3.0, 7.0, 8.0, 9.0]

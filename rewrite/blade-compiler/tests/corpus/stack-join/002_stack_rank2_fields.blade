@@ -1,0 +1,22 @@
+// TEST: Stack Rank-2 Field Assembly
+// The field-stacked state shape: assemble several (Y, X) fields into one rank-3
+// (F, Y, X) slice. This is what stack exists for — before it was implemented
+// there was no way to build a multi-field slice, and a nested let rec assembly
+// produced corrupt extents.
+type YIdx = Idx<2>
+type XIdx = Idx<3>
+let p: Array<Float64 like YIdx, XIdx> = [[1.0, 2.0, 3.0], [4.0, 5.0, 6.0]]
+let q: Array<Float64 like YIdx, XIdx> = [[10.0, 20.0, 30.0], [40.0, 50.0, 60.0]]
+let r: Array<Float64 like YIdx, XIdx> = [[100.0, 200.0, 300.0], [400.0, 500.0, 600.0]]
+let fields = stack(p, q, r)
+// fields(f, y, x): the fresh leading axis selects the field.
+let f_p10 = fields(0, (1 : YIdx), (0 : XIdx))
+let f_q02 = fields(1, (0 : YIdx), (2 : XIdx))
+let f_r11 = fields(2, (1 : YIdx), (1 : XIdx))
+// A stacked array is an ORDINARY dense array — the rank-3 result peels its
+// leading TWO axes against a rank-1 kernel param, one row sum per (field, y).
+let rowsums = method_for(fields) <@> lambda(row: Array<Float64 like XIdx>) -> reduce(row, (+)) |> compute
+// EXPECT: f_p10 = 4
+// EXPECT: f_q02 = 30
+// EXPECT: f_r11 = 500
+// EXPECT: rowsums = [6.0, 15.0, 60.0, 150.0, 600.0, 1500.0]

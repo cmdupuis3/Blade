@@ -49,8 +49,8 @@ open Blade.Tests.Benchmarks
 /// All tests combined
 let allTests =
     basicTests @ intrinsicsTests @ adTests @ mlE2eTests @ mlOpsTests @ mlEquivTests @ loopTests @ symmetryTests @ reynoldsTests @ arityTests @ functionTests
-    @ structTests @ structAbortTests @ structMutualTests @ sumTypeTests @ interfaceTests @ moduleTests @ guardTests @ guardCombinatorTests @ zeroCombinatorTests @ sequenceCombinatorTests @ tupleViewTests @ replicateTests @ anonRangeTests @ forInTests @ bracketedTests
-    @ indexTypeTests @ mutabilityTests @ staticTests @ pplTests @ mathTests @ randTests @ spectraTests @ fallbackTests @ sgsTests @ unitTests
+    @ structTests @ structAbortTests @ structMutualTests @ sumTypeTests @ interfaceTests @ moduleTests @ guardTests @ guardCombinatorTests @ zeroCombinatorTests @ sequenceCombinatorTests @ tupleViewTests @ replicateTests @ anonRangeTests @ recursiveArrayTests @ bracketedTests
+    @ indexTypeTests @ mutabilityTests @ staticTests @ pplTests @ mathTests @ randTests @ spectraTests @ fallbackTests @ stackJoinTests @ sgsTests @ unitTests
     @ foreignKeyTests @ maskTests @ setOpTests @ uniqueContainsTests @ semijoinTests @ groupByTests @ sortTests @ reduceTests @ extentsTests @ extentsMultiRankTests @ regressionTests @ sqlCombinedTests @ v24dProbes
     @ inferenceProbes
     @ funcArrayTests

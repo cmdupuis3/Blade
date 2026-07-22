@@ -41,16 +41,17 @@ import math as m
 // ---- (a) the 3-atom tower: moments in-language, Chebyshev, Jacobi ----
 let AT: Array<Float64 like Idx<3>> = [-1.1, 0.4, 1.7]
 let WT: Array<Float64 like Idx<3>> = [0.2, 0.5, 0.3]
+// the power tower pw(k) = WT .* AT^k is a RECURSIVE ARRAY over the moment
+// order: pw(0) = WT, pw(k) = pw(k-1) .* AT (one elementwise multiply per
+// order); moment m(k) = sum of that row -- no imperative accumulation.
+function scaleAT(u: Array<Float64 like Idx<3>>) -> Array<Float64 like Idx<3>> = u * AT
 let MM = {
-    let mut mv = [0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0]
-    let mut pw = [0.0, 0.0, 0.0]
-    for i in 0..3 { pw(i) = WT(i) }
-    for k in 0..7 {
-        let s = pw(0) + pw(1) + pw(2)
-        mv(k) = s
-        for i in 0..3 { pw(i) = pw(i) * AT(i) }
-    }
-    mv
+    let rec pw: Array<Float64 like Idx<7>, Idx<3>> =
+        match pw with
+        | zero -> zero
+        | zero :: s -> zero :: WT
+        | prefix :: n -> prefix :: scaleAT(prefix(n - 1))
+    method_for(pw) <@> lambda(row: Array<Float64 like Idx<3>>) -> reduce(row, (+)) |> compute
 }
 let ja0 = MM(1) / MM(0)
 let s11 = MM(2) - ja0 * MM(1)
@@ -82,30 +83,40 @@ let flat3 = sqrt(L3(3) * L3(3))
 let firm2 = L2(2)
 
 // ---- (c) the attractor portrait: damped double-well, in-language ----
+// The 24-trajectory ensemble is a RECURSIVE ARRAY over time: the leading axis
+// is the 6000 Verlet steps, each slice is the whole (24 trajectories x [x, p])
+// field stepped once, so the ensemble marches together. The trajectory is
+// block-local; only the final positions FIN(j) = x_j(t=60) surface, read from
+// the last time slice.
 let IC24 = method_for(range<Idx<24>>) <@> lambda(j) -> 0.0 - 2.1 + 4.6 * j / 23.0 |> compute
-let FIN = {
-    let mut fv = [0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0]
-    let mut x = 0.0
-    let mut p = 0.0
-    for j in 0..24 {
-        x = IC24(j)
-        p = 0.0
-        for t in 0..6000 {
-            let f0 = x - x * x * x - 0.5 * p
-            let ph = p + 0.005 * f0
-            x = x + 0.01 * ph
-            let f1 = x - x * x * x - 0.5 * ph
-            p = ph + 0.005 * f1
+// one velocity-Verlet step of the damped double-well, per trajectory row
+function dwstep(prev: Array<Float64 like Idx<24>, Idx<2>>) -> Array<Float64 like Idx<24>, Idx<2>> =
+    (method_for(range<Idx<24>, Idx<2>>) <@> lambda(e: Int64, c: Int64) -> {
+        let x = prev(e, 0)
+        let p = prev(e, 1)
+        let f0 = x - x^3 - 0.5 * p
+        let ph = p + 0.005 * f0
+        let xn = x + 0.01 * ph
+        if c < 1 then xn else {
+            let f1 = xn - xn^3 - 0.5 * ph
+            ph + 0.005 * f1
         }
-        fv(j) = x
-    }
-    fv
+    }) |> compute
+let FIN = {
+    let initDW: Array<Float64 like Idx<24>, Idx<2>> = method_for(range<Idx<24>, Idx<2>>) <@> lambda(j: Int64, c: Int64) -> if c < 1 then IC24(j) else 0.0 |> compute
+    let rec traj: Array<Float64 like Idx<6001>, Idx<24>, Idx<2>> =
+        match traj with
+        | zero -> zero
+        | zero :: s -> zero :: initDW
+        | prefix :: n -> prefix :: dwstep(prefix(n - 1))
+    let landing = traj(6000)
+    method_for(landing) <@> lambda(row: Array<Float64 like Idx<2>>) -> row(0) |> compute
 }
 let em0 = 1.0
 let em1 = reduce(FIN, (+)) / 24.0
 let em2 = prodsum(FIN, FIN) / 24.0
-let em3 = reduce(method_for(FIN) <@> lambda(x) -> x * x * x, (+)) / 24.0
-let em4 = reduce(method_for(FIN) <@> lambda(x) -> x * x * x * x, (+)) / 24.0
+let em3 = reduce(method_for(FIN) <@> lambda(x) -> x^3, (+)) / 24.0
+let em4 = reduce(method_for(FIN) <@> lambda(x) -> x^4, (+)) / 24.0
 let nRight = reduce(method_for(FIN) <@> lambda(x) -> (if x > 0.0 then 1.0 else 0.0), (+))
 let ea0 = em1
 let t11 = em2 - ea0 * em1

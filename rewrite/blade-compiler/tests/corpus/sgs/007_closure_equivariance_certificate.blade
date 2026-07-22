@@ -35,12 +35,9 @@ function model(w1: Array<Float like Idx<W1>>, w2: Array<Float like Idx<W2>>, g: 
 
 function sq6(w1: Array<Float like Idx<W1>>, w2: Array<Float like Idx<W2>>, g: Array<Float like IrrepsIdx<GSPEC>>, t: Array<Float like Idx<6>>) -> Float = {
     let p = model(w1, w2, g)
-    let mut a = 0.0
-    for k in 0..6 {
-        let d = p(k) - t(k)
-        a = a + d * d
-    }
-    a
+    let d = method_for(zip(p, t)) <@> lambda(pk, tk) -> pk - tk |> compute
+    let r = prodsum(d, d)
+    r
 }
 
 // route 2 first: predicted stress of the unrotated input...
@@ -48,15 +45,12 @@ let p = model(w1f, w2f, g0)
 // EXPECT: p = [0.5457512988846802, 0.398420459899552, -0.3698709609150312, -0.0764598986569079, 0.1789991516970975, -0.1992041485567362]
 
 // ...pushed through the baked D_tau
-let mut p_dtau = [0.0, 0.0, 0.0, 0.0, 0.0, 0.0]
-let dtau_done = {
-    for i in 0..6 {
-        for j in 0..6 {
-            p_dtau(i) += d_tau(i * 6 + j) * p(j)
-        }
-    }
-    0.0
+// p_dtau(i) = sum_j d_tau(i,j)·p(j) : reshape d_tau into rows, prodsum each with p
+let p_dtau = {
+    let drows = method_for(range<Idx<6>>) <*> method_for(range<Idx<6>>) <@> lambda(i, j) -> d_tau(i * 6 + j) |> compute
+    method_for(drows) <@> lambda(row: Array<Float like Idx<6>>) -> prodsum(row, p) |> compute
 }
+let dtau_done = 0.0
 // EXPECT: p_dtau = [0.5457512988846802, -0.12417730027266104, -0.4503693739721612, -0.24771957962914537, 0.2769029569036364, 0.12969072140750093]
 
 // route 1: the closure applied to the rotated input
@@ -66,9 +60,8 @@ let p_rot = model(w1f, w2f, g0r)
 // the certificate: both routes agree (oracle residual 7.8e-16)
 let mut dd = [0.0]
 let dd_done = {
-    for k in 0..6 {
-        dd(0) += (p_rot(k) - p_dtau(k)) * (p_rot(k) - p_dtau(k))
-    }
+    let s_dd0 = reduce(method_for(range<Idx<6>>) <@> lambda(k) -> (p_rot(k) - p_dtau(k)) * (p_rot(k) - p_dtau(k)), (+), 0.0)
+    dd(0) = s_dd0
     0.0
 }
 let cert_agree = if dd(0) < 0.0000000000000000000000000001 then 1.0 else 0.0

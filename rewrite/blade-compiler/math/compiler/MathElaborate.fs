@@ -1,10 +1,13 @@
 /// Math-module elaboration: dense linear algebra and tensor decompositions
 /// as compile-time source synthesis, mirroring the ml/ppl elaborators.
 ///
-/// Surface (reachable only through `import math [as <alias>]`; array
-/// arguments must be module-level `let`s with full Array annotations — the
-/// ops read the declared shape; config ints are `let static` names or
-/// literals):
+/// Surface (reachable only through `import math [as <alias>]`; config ints are
+/// `let static` names or literals). The ops read the DECLARED shape — this pass
+/// runs before type inference and the generated routine is specialized to the
+/// extents — so an array argument must carry an annotation. It may come from
+/// any of: a variable bound by an annotated `let` (module-level or block-local),
+/// an annotated parameter, a call of a function with an annotated array return
+/// type, or an ascription `(expr : Array<...>)`.
 ///
 ///   m.matmul(A, B)                 -- m×k · k×n -> m×n
 ///   m.svd(A) | m.svd(A, SWEEPS)    -- thin SVD, m >= n -> (U, S, V), S descending
@@ -30,29 +33,73 @@ open Blade.Math.Decls
 // Module-level context: annotated array shapes, aliases, statics
 // ============================================================================
 
-/// Shape/static context the op elaborations read. Only annotated
-/// module-level bindings participate — the ops read the declared shape,
-/// they never infer one (PplElaborate's contract).
+/// A name -> declared array shape map (the module-level tables).
+type private Shapes = Map<string, TypeExpr * TypeExpr list>
+
+/// The LEXICAL scope threaded through the walker: parameters and block-local
+/// lets. A binder is recorded even when it is NOT array-annotated (as `None`),
+/// because it still SHADOWS an outer name — without that, an unannotated local
+/// `let f = ...` over a module-level annotated `f` would fall through to the
+/// module-level shape and silently run at the wrong extents.
+type private Scope = Map<string, (TypeExpr * TypeExpr list) option>
+
+/// Shape/static context the op elaborations read. The ops read a DECLARED
+/// shape, never an inferred one (this pass runs before type inference) — but
+/// the declaration may live on a let, a parameter, a function return type or
+/// an ascription (SpectraElaborate's contract).
 type private Ctx = {
-    Arrays: Map<string, TypeExpr * TypeExpr list>
+    Arrays: Shapes                              // module-level annotated lets
+    Funcs: Shapes                               // top-level fns with an annotated array return type
     Aliases: Map<string, TypeExpr>
     Statics: StaticEnv
 }
-
-let private collectArrays (decls: Located<Decl> list) : Map<string, TypeExpr * TypeExpr list> =
-    decls |> List.fold (fun acc d ->
-        match d.Value with
-        | DeclLet b | DeclStatic b ->
-            match b.Pattern.Kind, b.Type with
-            | PatternKind.PatVar name, Some (TyArray (elem, idxs)) -> Map.add name (elem, idxs) acc
-            | _ -> acc
-        | _ -> acc) Map.empty
 
 let private collectAliases (decls: Located<Decl> list) : Map<string, TypeExpr> =
     decls |> List.fold (fun acc d ->
         match d.Value with
         | DeclType (TyDeclAlias (name, _, body)) -> Map.add name body acc
         | _ -> acc) Map.empty
+
+/// Annotations may name a whole-array type alias (`type Field = Array<...>`) —
+/// resolve top-level aliases (cycle-bounded) before matching for TyArray.
+let rec private resolveTop (aliases: Map<string, TypeExpr>) (fuel: int) (ty: TypeExpr) =
+    match ty with
+    | TyNamed (n, []) when fuel > 0 ->
+        match Map.tryFind n aliases with
+        | Some body -> resolveTop aliases (fuel - 1) body
+        | None -> ty
+    | _ -> ty
+
+/// An annotation, alias-resolved, if it denotes an array.
+let private arrayAnnot (aliases: Map<string, TypeExpr>) (ty: TypeExpr option) : (TypeExpr * TypeExpr list) option =
+    match ty |> Option.map (resolveTop aliases 8) with
+    | Some (TyArray (elem, idxs)) -> Some (elem, idxs)
+    | _ -> None
+
+let private collectArrays (aliases: Map<string, TypeExpr>) (decls: Located<Decl> list) : Shapes =
+    decls |> List.fold (fun acc d ->
+        match d.Value with
+        | DeclLet b | DeclStatic b ->
+            match b.Pattern.Kind, arrayAnnot aliases b.Type with
+            | PatternKind.PatVar name, Some shape -> Map.add name shape acc
+            | _ -> acc
+        | _ -> acc) Map.empty
+
+/// Top-level functions whose annotated RETURN type is an array: a call of one
+/// is as good a shape witness as an annotated let.
+let private collectFuncs (aliases: Map<string, TypeExpr>) (decls: Located<Decl> list) : Shapes =
+    decls |> List.fold (fun acc d ->
+        match d.Value with
+        | DeclFunction fd ->
+            match arrayAnnot aliases fd.ReturnType with
+            | Some shape -> Map.add fd.Name shape acc
+            | None -> acc
+        | _ -> acc) Map.empty
+
+/// Params of a function / lambda, as a lexical scope seed. Unannotated params
+/// are recorded as shadowing entries (see Scope).
+let private paramShapes (aliases: Map<string, TypeExpr>) (ps: (string * TypeExpr option) list) : Scope =
+    ps |> List.fold (fun acc (nm, ty) -> Map.add nm (arrayAnnot aliases ty) acc) Map.empty
 
 /// Resolve an index TypeExpr to its static extent, following alias chains.
 let rec private resolveExtent (ctx: Ctx) (ty: TypeExpr) : int option =
@@ -65,23 +112,50 @@ let rec private resolveExtent (ctx: Ctx) (ty: TypeExpr) : int option =
         Map.tryFind name ctx.Aliases |> Option.bind (resolveExtent ctx)
     | _ -> None
 
+/// The steer appended to every "no declared shape here" rejection.
+let private shapeSources =
+    "math ops read the DECLARED shape at compile time (the generated routine is specialized to the extents), so the argument must carry an annotation"
+
 /// The declared shape of an op's array argument: every axis extent must be
-/// statically known. The argument must be a plain variable naming an
-/// annotated module-level let.
-let private arrayShape (ctx: Ctx) (what: string) (e: Expr) : Result<string * int list, string> =
+/// statically known. `scope` carries the lexical shapes in force here
+/// (annotated params and block-local annotated lets). The returned label is
+/// what the op-level messages quote.
+let private arrayShape (ctx: Ctx) (scope: Scope) (what: string) (e: Expr) : Result<string * int list, string> =
+    let finish (label: string) ((_, idxs): TypeExpr * TypeExpr list) =
+        let extents = idxs |> List.map (resolveExtent ctx)
+        if extents |> List.forall Option.isSome then
+            Ok (label, extents |> List.map Option.get)
+        else
+            Error (sprintf "%s: every axis extent of %s must be statically known (Idx<n> directly or through aliases)" what label)
+    let noShape name = Error (sprintf "%s: '%s' has no declared array shape — %s" what name shapeSources)
     match e.Kind with
+    // A name: the innermost binder wins. A local binder with no array
+    // annotation shadows an outer one rather than falling through to it.
     | ExprKind.ExprVar name ->
-        match Map.tryFind name ctx.Arrays with
+        match Map.tryFind name scope with
+        | Some (Some shape) -> finish (sprintf "'%s'" name) shape
+        | Some None -> noShape name
         | None ->
-            Error (sprintf "%s: '%s' must be a module-level let with an Array<Float64 like Idx<...>, ...> annotation (math ops read the declared shape)" what name)
-        | Some (_, idxs) ->
-            let extents = idxs |> List.map (resolveExtent ctx)
-            if extents |> List.forall Option.isSome then
-                Ok (name, extents |> List.map Option.get)
-            else
-                Error (sprintf "%s: every axis extent of '%s' must be statically known (Idx<n> directly or through aliases)" what name)
+            match Map.tryFind name ctx.Arrays with
+            | Some shape -> finish (sprintf "'%s'" name) shape
+            | None -> noShape name
+    // An ascription: the universal escape hatch for a shape this pass cannot
+    // otherwise see (it runs before type inference).
+    | ExprKind.ExprTyped (_, ty) ->
+        match resolveTop ctx.Aliases 8 ty with
+        | TyArray (elem, idxs) -> finish "the ascribed expression" (elem, idxs)
+        | _ -> Error (sprintf "%s: the ascription must name an array type (Array<Float64 like Idx<...>, ...>)" what)
+    // A call whose function has an annotated array return type. GUARD: in
+    // Blade arrays ARE functions, so `A(i)` and `f(x)` are the same node —
+    // exclude known array names so an index read stays on the error path
+    // instead of being misread as a call and given the array's own shape.
+    | ExprKind.ExprApp ({ Kind = ExprKind.ExprVar f }, _)
+            when not (Map.containsKey f scope) && not (Map.containsKey f ctx.Arrays) ->
+        match Map.tryFind f ctx.Funcs with
+        | Some shape -> finish (sprintf "the result of '%s'" f) shape
+        | None -> Error (sprintf "%s: '%s' has no annotated array return type — %s" what f shapeSources)
     | _ ->
-        Error (sprintf "%s: the array argument must be a plain variable naming an annotated module-level let (bind the expression first)" what)
+        Error (sprintf "%s: the array argument must be a plain variable naming an annotated let, an annotated parameter, a call of a function with an annotated array return type, or an ascription `(expr : Array<Float64 like Idx<...>, ...>)` — %s" what shapeSources)
 
 /// Resolve a static-argument expression: a plain variable naming a
 /// `let static` binding, or an inline int literal (ml's staticArg contract).
@@ -153,11 +227,11 @@ let private sweepsArg (statics: StaticEnv) (what: string) (rest: Expr list) : Re
     | _ -> Error (sprintf "%s: at most one SWEEPS argument" what)
 
 /// Elaborate one qualified op call. Arguments arrive already rewritten.
-let private elabOp (st: ElabState) (ctx: Ctx) (op: string) (args: Expr list) : Result<Expr, string> =
+let private elabOp (st: ElabState) (ctx: Ctx) (scope: Scope) (op: string) (args: Expr list) : Result<Expr, string> =
     match op, args with
     | "matmul", [aE; bE] ->
-        arrayShape ctx "matmul" aE |> Result.bind (fun (_, aDims) ->
-        arrayShape ctx "matmul" bE |> Result.bind (fun (_, bDims) ->
+        arrayShape ctx scope "matmul" aE |> Result.bind (fun (_, aDims) ->
+        arrayShape ctx scope "matmul" bE |> Result.bind (fun (_, bDims) ->
             match aDims, bDims with
             | [m; k], [k2; n] when k = k2 ->
                 ensure st (fingerprint "matmul" (box (m, k, n))) (fun nm -> Ok (matmulDecl nm m k n))
@@ -168,7 +242,7 @@ let private elabOp (st: ElabState) (ctx: Ctx) (op: string) (args: Expr list) : R
     | "matmul", _ -> Error "matmul: expected matmul(A, B)"
     | "svd", (aE :: rest) ->
         sweepsArg ctx.Statics "svd" rest |> Result.bind (fun sweeps ->
-        arrayShape ctx "svd" aE |> Result.bind (fun (_, dims) ->
+        arrayShape ctx scope "svd" aE |> Result.bind (fun (_, dims) ->
             match dims with
             | [m; n] when m >= n ->
                 ensure st (fingerprint "svd" (box (m, n, sweeps))) (fun nm -> Ok (svdDecl nm m n sweeps))
@@ -179,7 +253,7 @@ let private elabOp (st: ElabState) (ctx: Ctx) (op: string) (args: Expr list) : R
     | "svd", _ -> Error "svd: expected svd(A) or svd(A, SWEEPS)"
     | "eigh", (aE :: rest) ->
         sweepsArg ctx.Statics "eigh" rest |> Result.bind (fun sweeps ->
-        arrayShape ctx "eigh" aE |> Result.bind (fun (_, dims) ->
+        arrayShape ctx scope "eigh" aE |> Result.bind (fun (_, dims) ->
             match dims with
             | [n; n2] when n = n2 ->
                 ensure st (fingerprint "eigh" (box (n, sweeps))) (fun nm -> Ok (eighDecl nm n sweeps))
@@ -188,7 +262,7 @@ let private elabOp (st: ElabState) (ctx: Ctx) (op: string) (args: Expr list) : R
             | _ -> Error "eigh: the argument must be rank-2 square (Array<Float64 like Idx<n>, Idx<n>>, symmetric)"))
     | "eigh", _ -> Error "eigh: expected eigh(S) or eigh(S, SWEEPS)"
     | "eig", (aE :: rest) ->
-        arrayShape ctx "eig" aE |> Result.bind (fun (_, dims) ->
+        arrayShape ctx scope "eig" aE |> Result.bind (fun (_, dims) ->
             match dims with
             | [n; n2] when n = n2 ->
                 let maxIterRes =
@@ -206,7 +280,7 @@ let private elabOp (st: ElabState) (ctx: Ctx) (op: string) (args: Expr list) : R
     | "eig", _ -> Error "eig: expected eig(A) or eig(A, MAXITER) — returns (LRE, LIM) by descending modulus"
     | "unfold", [xE; modeE] ->
         staticInt ctx.Statics "unfold MODE" modeE |> Result.bind (fun mode ->
-        arrayShape ctx "unfold" xE |> Result.bind (fun (_, dims) ->
+        arrayShape ctx scope "unfold" xE |> Result.bind (fun (_, dims) ->
             let r = dims.Length
             if r < 2 || r > 4 then
                 Error (sprintf "unfold: tensor rank must be 2..4 in v1 (got rank %d); the generator is rank-generic — raise the cap when needed" r)
@@ -218,8 +292,8 @@ let private elabOp (st: ElabState) (ctx: Ctx) (op: string) (args: Expr list) : R
     | "unfold", _ -> Error "unfold: expected unfold(X, MODE) with a static MODE"
     | "mode_product", [xE; uE; modeE] ->
         staticInt ctx.Statics "mode_product MODE" modeE |> Result.bind (fun mode ->
-        arrayShape ctx "mode_product" xE |> Result.bind (fun (_, dims) ->
-        arrayShape ctx "mode_product" uE |> Result.bind (fun (_, uDims) ->
+        arrayShape ctx scope "mode_product" xE |> Result.bind (fun (_, dims) ->
+        arrayShape ctx scope "mode_product" uE |> Result.bind (fun (_, uDims) ->
             let r = dims.Length
             if r < 2 || r > 4 then
                 Error (sprintf "mode_product: tensor rank must be 2..4 in v1 (got rank %d)" r)
@@ -236,7 +310,7 @@ let private elabOp (st: ElabState) (ctx: Ctx) (op: string) (args: Expr list) : R
                 | _ -> Error "mode_product: U must be rank-2 (Array<Float64 like Idx<j>, Idx<i_mode>>)")))
     | "mode_product", _ -> Error "mode_product: expected mode_product(X, U, MODE) with a static MODE"
     | "hosvd", (xE :: rankArgs) ->
-        arrayShape ctx "hosvd" xE |> Result.bind (fun (_, dims) ->
+        arrayShape ctx scope "hosvd" xE |> Result.bind (fun (_, dims) ->
             let r = dims.Length
             if r < 2 || r > 4 then
                 Error (sprintf "hosvd: tensor rank must be 2..4 in v1 (got rank %d)" r)
@@ -283,19 +357,33 @@ let private elabOp (st: ElabState) (ctx: Ctx) (op: string) (args: Expr list) : R
 // Rewrite walker (same shape as MLElaborate.rewriteExpr)
 // ============================================================================
 
-let rec private rewriteExpr (st: ElabState) (ctx: Ctx) (aliases: Set<string>) (e: Expr)
+let rec private rewriteExpr (st: ElabState) (ctx: Ctx) (aliases: Set<string>) (scope: Scope) (e: Expr)
     : Result<Expr, string> =
-    let r = rewriteExpr st ctx aliases
+    let r = rewriteExpr st ctx aliases scope
+    // Same walk under an EXTENDED lexical scope (a binder came into view).
+    let rIn (sc: Scope) = rewriteExpr st ctx aliases sc
+    // Every binder is recorded, annotated or not: an unannotated one must
+    // SHADOW an outer array of the same name, not fall through to it.
+    let bind (sc: Scope) (nm: string) (ty: TypeExpr option) =
+        Map.add nm (arrayAnnot ctx.Aliases ty) sc
+    let bindPat (sc: Scope) (b: Binding) =
+        match b.Pattern.Kind with
+        | PatternKind.PatVar nm -> bind sc nm b.Type
+        | _ -> sc
     let rList es =
         es |> List.fold (fun acc x ->
             acc |> Result.bind (fun xs -> r x |> Result.map (fun x' -> xs @ [x'])))
             (Ok [])
+    let rOpt (o: Expr option) =
+        match o with
+        | None -> Ok None
+        | Some x -> r x |> Result.map Some
     match e.Kind with
     // Qualified math op: `alias.svd(...)` -> generated specialized function.
     // Any alias-qualified call is claimed here so an unknown op gets a
     // steering error instead of an unbound-module type error downstream.
     | ExprKind.ExprApp ({ Kind = ExprKind.ExprField ({ Kind = ExprKind.ExprVar alias }, op) }, args) when Set.contains alias aliases ->
-        rList args |> Result.bind (fun args' -> elabOp st ctx op args')
+        rList args |> Result.bind (fun args' -> elabOp st ctx scope op args')
     | ExprKind.ExprLit _ | ExprKind.ExprVar _ -> Ok e
     | ExprKind.ExprApp (f, args) ->
         r f |> Result.bind (fun f' -> rList args |> Result.map (fun args' -> inheritSpan e (ExprApp (f', args'))))
@@ -314,38 +402,127 @@ let rec private rewriteExpr (st: ElabState) (ctx: Ctx) (aliases: Set<string>) (e
         r t |> Result.bind (fun t' ->
         r f |> Result.map (fun f' -> inheritSpan e (ExprIf (c', t', f')))))
     | ExprKind.ExprLet (binding, body) ->
+        // The value is checked in the OUTER scope; the body sees the binder.
         r binding.Value |> Result.bind (fun v' ->
-        r body |> Result.map (fun b' -> inheritSpan e (ExprLet ({ binding with Value = v' }, b'))))
+        rIn (bindPat scope binding) body
+        |> Result.map (fun b' -> inheritSpan e (ExprLet ({ binding with Value = v' }, b'))))
     | ExprKind.ExprBlock (stmts, finalE) ->
-        let rec rStmt (s: Stmt) : Result<Stmt, string> =
+        // Statements thread the scope forward: an annotated `let` inside the
+        // block is a shape witness for everything after it.
+        let rec rStmt (sc: Scope) (s: Stmt) : Result<Stmt * Scope, string> =
             match s with
-            | StmtSpanned (inner, sp) -> rStmt inner |> Result.map (fun i -> StmtSpanned (i, sp))
-            | StmtLet binding -> r binding.Value |> Result.map (fun v' -> StmtLet { binding with Value = v' })
-            | StmtExpr e2 -> r e2 |> Result.map StmtExpr
+            | StmtSpanned (inner, sp) -> rStmt sc inner |> Result.map (fun (i, sc') -> (StmtSpanned (i, sp), sc'))
+            | StmtLet binding ->
+                rIn sc binding.Value |> Result.map (fun v' -> (StmtLet { binding with Value = v' }, bindPat sc binding))
+            | StmtExpr e2 -> rIn sc e2 |> Result.map (fun x -> (StmtExpr x, sc))
             | StmtAssign (l, op, rr) ->
-                r l |> Result.bind (fun l' -> r rr |> Result.map (fun r' -> StmtAssign (l', op, r')))
+                rIn sc l |> Result.bind (fun l' -> rIn sc rr |> Result.map (fun r' -> (StmtAssign (l', op, r'), sc)))
             | StmtForIn (var, range, body) ->
-                r range |> Result.bind (fun range' ->
+                rIn sc range |> Result.bind (fun range' ->
                     body |> List.fold (fun acc bs ->
-                        acc |> Result.bind (fun ss -> rStmt bs |> Result.map (fun s' -> ss @ [s'])))
-                        (Ok [])
-                    |> Result.map (fun body' -> StmtForIn (var, range', body')))
+                        acc |> Result.bind (fun (ss, s0) -> rStmt s0 bs |> Result.map (fun (s', s1) -> (ss @ [s'], s1))))
+                        (Ok ([], sc))
+                    // Bindings made inside the loop body do not escape it.
+                    |> Result.map (fun (body', _) -> (StmtForIn (var, range', body'), sc)))
         stmts |> List.fold (fun acc s ->
-            acc |> Result.bind (fun ss -> rStmt s |> Result.map (fun s' -> ss @ [s'])))
-            (Ok [])
-        |> Result.bind (fun stmts' ->
+            acc |> Result.bind (fun (ss, sc) -> rStmt sc s |> Result.map (fun (s', sc') -> (ss @ [s'], sc'))))
+            (Ok ([], scope))
+        |> Result.bind (fun (stmts', sc) ->
             match finalE with
-            | Some fe -> r fe |> Result.map (fun fe' -> inheritSpan e (ExprBlock (stmts', Some fe')))
+            | Some fe -> rIn sc fe |> Result.map (fun fe' -> inheritSpan e (ExprBlock (stmts', Some fe')))
             | None -> Ok (inheritSpan e (ExprBlock (stmts', None))))
-    | ExprKind.ExprLambda (ps, w, body) -> r body |> Result.map (fun b -> inheritSpan e (ExprLambda (ps, w, b)))
+    | ExprKind.ExprLambda (ps, w, body) ->
+        let sc = ps |> List.fold (fun acc (p: LambdaParam) -> bind acc p.Name p.Type) scope
+        rIn sc body |> Result.map (fun b -> inheritSpan e (ExprLambda (ps, w, b)))
     | ExprKind.ExprMatch (scrut, cases) ->
         r scrut |> Result.bind (fun s' ->
             cases |> List.fold (fun acc c ->
                 acc |> Result.bind (fun cs ->
-                    r c.Body |> Result.map (fun b -> cs @ [{ c with Body = b }])))
+                    rOpt c.Guard |> Result.bind (fun g' ->
+                    r c.Body |> Result.map (fun b -> cs @ [{ c with Guard = g'; Body = b }]))))
                 (Ok [])
             |> Result.map (fun cs' -> inheritSpan e (ExprMatch (s', cs'))))
-    | _ -> Ok e
+    // Recursive array (`let rec q: T = match q with ...`): the seed and
+    // inductive slices are ordinary expressions and may contain qualified
+    // ops. Without this arm they fell through untouched, and since this pass
+    // DELETES the import that would bind the alias, the call reached the
+    // checker as an unbound variable.
+    | ExprKind.ExprRecArray def ->
+        rOpt (def.SeedArm |> Option.map snd) |> Result.bind (fun seedE ->
+        r def.SliceExpr |> Result.map (fun slice' ->
+            let seed' = Option.map2 (fun (sv, _) se -> (sv, se)) def.SeedArm seedE
+            inheritSpan e (ExprRecArray { def with SeedArm = seed'; SliceExpr = slice' })))
+    // The rest of the expression algebra. Every constructor holding a
+    // sub-expression is walked, and the catch-all wildcard is deliberately
+    // GONE: an unhandled case is an FS0025 incomplete-match warning at build
+    // time rather than a qualified call silently surviving unrewritten.
+    | ExprKind.ExprCompute inner -> r inner |> Result.map (fun i -> inheritSpan e (ExprCompute i))
+    | ExprKind.ExprRead inner -> r inner |> Result.map (fun i -> inheritSpan e (ExprRead i))
+    | ExprKind.ExprPure inner -> r inner |> Result.map (fun i -> inheritSpan e (ExprPure i))
+    | ExprKind.ExprStatic inner -> r inner |> Result.map (fun i -> inheritSpan e (ExprStatic i))
+    | ExprKind.ExprRank inner -> r inner |> Result.map (fun i -> inheritSpan e (ExprRank i))
+    | ExprKind.ExprExtents inner -> r inner |> Result.map (fun i -> inheritSpan e (ExprExtents i))
+    | ExprKind.ExprUnique inner -> r inner |> Result.map (fun i -> inheritSpan e (ExprUnique i))
+    | ExprKind.ExprObjectFor k -> r k |> Result.map (fun k' -> inheritSpan e (ExprObjectFor k'))
+    | ExprKind.ExprReynolds (k, anti) -> r k |> Result.map (fun k' -> inheritSpan e (ExprReynolds (k', anti)))
+    | ExprKind.ExprField (obj, fld) -> r obj |> Result.map (fun o -> inheritSpan e (ExprField (o, fld)))
+    | ExprKind.ExprPartialApp (op, inner, isLeft) -> r inner |> Result.map (fun i -> inheritSpan e (ExprPartialApp (op, i, isLeft)))
+    | ExprKind.ExprTranspose (a, d1, d2) -> r a |> Result.map (fun a' -> inheritSpan e (ExprTranspose (a', d1, d2)))
+    | ExprKind.ExprDecompact (a, d) -> r a |> Result.map (fun a' -> inheritSpan e (ExprDecompact (a', d)))
+    | ExprKind.ExprBlocked (t, inner) -> r inner |> Result.map (fun i -> inheritSpan e (ExprBlocked (t, i)))
+    | ExprKind.ExprHalo (t, offs) -> r offs |> Result.map (fun o -> inheritSpan e (ExprHalo (t, o)))
+    | ExprKind.ExprMethodFor es -> rList es |> Result.map (fun es' -> inheritSpan e (ExprMethodFor es'))
+    | ExprKind.ExprZip es -> rList es |> Result.map (fun es' -> inheritSpan e (ExprZip es'))
+    | ExprKind.ExprStack es -> rList es |> Result.map (fun es' -> inheritSpan e (ExprStack es'))
+    | ExprKind.ExprSequence es -> rList es |> Result.map (fun es' -> inheritSpan e (ExprSequence es'))
+    | ExprKind.ExprGroupKeys es -> rList es |> Result.map (fun es' -> inheritSpan e (ExprGroupKeys es'))
+    | ExprKind.ExprAlign (es, spec) -> rList es |> Result.map (fun es' -> inheritSpan e (ExprAlign (es', spec)))
+    | ExprKind.ExprJoin (es, d) -> rList es |> Result.map (fun es' -> inheritSpan e (ExprJoin (es', d)))
+    | ExprKind.ExprTupleIndex (t, i) ->
+        r t |> Result.bind (fun t' -> r i |> Result.map (fun i' -> inheritSpan e (ExprTupleIndex (t', i'))))
+    | ExprKind.ExprGuard (c, b) ->
+        r c |> Result.bind (fun c' -> r b |> Result.map (fun b' -> inheritSpan e (ExprGuard (c', b'))))
+    | ExprKind.ExprReplicate (c, b) ->
+        r c |> Result.bind (fun c' -> r b |> Result.map (fun b' -> inheritSpan e (ExprReplicate (c', b'))))
+    | ExprKind.ExprMask (a, p) ->
+        r a |> Result.bind (fun a' -> r p |> Result.map (fun p' -> inheritSpan e (ExprMask (a', p'))))
+    | ExprKind.ExprCompound (d, m) ->
+        r d |> Result.bind (fun d' -> r m |> Result.map (fun m' -> inheritSpan e (ExprCompound (d', m'))))
+    | ExprKind.ExprIntersect (a, b) ->
+        r a |> Result.bind (fun a' -> r b |> Result.map (fun b' -> inheritSpan e (ExprIntersect (a', b'))))
+    | ExprKind.ExprUnion (a, b) ->
+        r a |> Result.bind (fun a' -> r b |> Result.map (fun b' -> inheritSpan e (ExprUnion (a', b'))))
+    | ExprKind.ExprContains (a, v) ->
+        r a |> Result.bind (fun a' -> r v |> Result.map (fun v' -> inheritSpan e (ExprContains (a', v'))))
+    | ExprKind.ExprGroupBy (v, g) ->
+        r v |> Result.bind (fun v' -> r g |> Result.map (fun g' -> inheritSpan e (ExprGroupBy (v', g'))))
+    | ExprKind.ExprSort (a, k) ->
+        r a |> Result.bind (fun a' -> r k |> Result.map (fun k' -> inheritSpan e (ExprSort (a', k'))))
+    | ExprKind.ExprGram (l, rr) ->
+        r l |> Result.bind (fun l' -> r rr |> Result.map (fun r' -> inheritSpan e (ExprGram (l', r'))))
+    | ExprKind.ExprReduce (a, k, init) ->
+        r a |> Result.bind (fun a' ->
+        r k |> Result.bind (fun k' ->
+        rOpt init |> Result.map (fun init' -> inheritSpan e (ExprReduce (a', k', init')))))
+    | ExprKind.ExprStruct (nm, fields, spread) ->
+        fields |> List.fold (fun acc (fn, fe) ->
+            acc |> Result.bind (fun fs -> r fe |> Result.map (fun fe' -> fs @ [(fn, fe')])))
+            (Ok [])
+        |> Result.bind (fun fields' ->
+        rOpt spread |> Result.map (fun spread' -> inheritSpan e (ExprStruct (nm, fields', spread'))))
+    | ExprKind.ExprFor (src, cs, kern) ->
+        (match src with
+         | ForArrays (arrs, inClause) ->
+             rList arrs |> Result.bind (fun arrs' ->
+             rOpt inClause |> Result.map (fun ic' -> ForArrays (arrs', ic')))
+         | ForKernel k -> r k |> Result.map ForKernel)
+        |> Result.bind (fun src' ->
+        rOpt kern |> Result.map (fun kern' -> inheritSpan e (ExprFor (src', cs, kern'))))
+    // Leaves: no sub-expressions. Index/type arguments (range<I>, reverse<I>)
+    // carry TypeExprs, not Exprs, and are never rewritten.
+    | ExprKind.ExprWildcard | ExprKind.ExprQualified _ | ExprKind.ExprRange _
+    | ExprKind.ExprReverse _ | ExprKind.ExprArity _ | ExprKind.ExprNth
+    | ExprKind.ExprZero | ExprKind.ExprSection _ -> Ok e
 
 // ============================================================================
 // Gating + program expansion
@@ -383,8 +560,10 @@ let private expandModule (decls: Located<Decl> list) : Result<Located<Decl> list
         match resolveStatics declsNoImport with
         | Error e -> Error (sprintf "math elaboration: static resolution failed: %s" e)
         | Ok (statics, _) ->
-            let ctx = { Arrays = collectArrays declsNoImport
-                        Aliases = collectAliases declsNoImport
+            let tyAliases = collectAliases declsNoImport
+            let ctx = { Arrays = collectArrays tyAliases declsNoImport
+                        Funcs = collectFuncs tyAliases declsNoImport
+                        Aliases = tyAliases
                         Statics = statics }
             let st = { Counter = 0; Made = Map.empty; Decls = [] }
             let mapped =
@@ -397,13 +576,16 @@ let private expandModule (decls: Located<Decl> list) : Result<Located<Decl> list
                         let mapped =
                             match d.Value with
                             | DeclFunction fd ->
-                                rewriteExpr st ctx aliases fd.Body
+                                // Annotated array PARAMS are shape witnesses
+                                // inside the body.
+                                let pscope = paramShapes tyAliases (fd.Params |> List.map (fun p -> (p.Name, p.Type)))
+                                rewriteExpr st ctx aliases pscope fd.Body
                                 |> Result.map (fun b -> DeclFunction { fd with Body = b })
                             | DeclLet binding ->
-                                rewriteExpr st ctx aliases binding.Value
+                                rewriteExpr st ctx aliases Map.empty binding.Value
                                 |> Result.map (fun v' -> DeclLet { binding with Value = v' })
                             | DeclStatic binding ->
-                                rewriteExpr st ctx aliases binding.Value
+                                rewriteExpr st ctx aliases Map.empty binding.Value
                                 |> Result.map (fun v' -> DeclStatic { binding with Value = v' })
                             | other -> Ok other
                         mapped |> Result.map (fun value -> out @ [{ d with Value = value }])))

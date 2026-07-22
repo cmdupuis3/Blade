@@ -4,52 +4,28 @@ import math as m
 let X: Array<Float64 like Idx<3>, Idx<3>, Idx<3>> = [[[2.0, 2.5, 4.0], [3.0, 3.5, 5.0], [4.0, 4.5, 6.0]], [[4.0, 4.5, 6.0], [6.0, 6.75, 8.5], [8.0, 9.0, 11.0]], [[6.0, 6.5, 8.0], [9.0, 10.0, 12.0], [12.0, 13.5, 16.0]]]
 let (G, U0, U1, U2) = m.hosvd(X)
 let dev0 = {
-    let mut acc = 0.0
-    let mut dot = 0.0
-    for a in 0..3 {
-        for b in 0..3 {
-            dot = 0.0
-            for i in 0..3 {
-                dot = dot + U0(i, a) * U0(i, b)
-            }
-            let target = if a == b then 1.0 else 0.0
-            let d = dot - target
-            acc = acc + d * d
-        }
-    }
-    acc
+    let UT = transpose(U0, [0, 1])
+    let Gram = method_for(UT, UT) <@> lambda(ca: Array<Float64 like Idx<3>>, cb: Array<Float64 like Idx<3>>) -> prodsum(ca, cb) |> compute
+    let Id: Array<Float64 like Idx<3>, Idx<3>> = [[1.0, 0.0, 0.0], [0.0, 1.0, 0.0], [0.0, 0.0, 1.0]]
+    let E = Gram - Id
+    let rowsums = method_for(E) <@> lambda(er: Array<Float64 like Idx<3>>) -> prodsum(er, er) |> compute
+    reduce(rowsums, (+))
 }
 let dev1 = {
-    let mut acc = 0.0
-    let mut dot = 0.0
-    for a in 0..3 {
-        for b in 0..3 {
-            dot = 0.0
-            for i in 0..3 {
-                dot = dot + U1(i, a) * U1(i, b)
-            }
-            let target = if a == b then 1.0 else 0.0
-            let d = dot - target
-            acc = acc + d * d
-        }
-    }
-    acc
+    let UT = transpose(U1, [0, 1])
+    let Gram = method_for(UT, UT) <@> lambda(ca: Array<Float64 like Idx<3>>, cb: Array<Float64 like Idx<3>>) -> prodsum(ca, cb) |> compute
+    let Id: Array<Float64 like Idx<3>, Idx<3>> = [[1.0, 0.0, 0.0], [0.0, 1.0, 0.0], [0.0, 0.0, 1.0]]
+    let E = Gram - Id
+    let rowsums = method_for(E) <@> lambda(er: Array<Float64 like Idx<3>>) -> prodsum(er, er) |> compute
+    reduce(rowsums, (+))
 }
 let dev2 = {
-    let mut acc = 0.0
-    let mut dot = 0.0
-    for a in 0..3 {
-        for b in 0..3 {
-            dot = 0.0
-            for i in 0..3 {
-                dot = dot + U2(i, a) * U2(i, b)
-            }
-            let target = if a == b then 1.0 else 0.0
-            let d = dot - target
-            acc = acc + d * d
-        }
-    }
-    acc
+    let UT = transpose(U2, [0, 1])
+    let Gram = method_for(UT, UT) <@> lambda(ca: Array<Float64 like Idx<3>>, cb: Array<Float64 like Idx<3>>) -> prodsum(ca, cb) |> compute
+    let Id: Array<Float64 like Idx<3>, Idx<3>> = [[1.0, 0.0, 0.0], [0.0, 1.0, 0.0], [0.0, 0.0, 1.0]]
+    let E = Gram - Id
+    let rowsums = method_for(E) <@> lambda(er: Array<Float64 like Idx<3>>) -> prodsum(er, er) |> compute
+    reduce(rowsums, (+))
 }
 // EXPECT: dev0 = 0.0
 // EXPECT: dev1 = 0.0

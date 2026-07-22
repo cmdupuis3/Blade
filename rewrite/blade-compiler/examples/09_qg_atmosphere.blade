@@ -1,64 +1,45 @@
-﻿// TEST: Example QG Atmosphere
+// TEST: Example QG Atmosphere
 // ============================================================================
 // A quasigeostrophic atmosphere in three acts, ported from pyqg's
-// pseudo-spectral kernel (github.com/pyqg â€” model.py / kernel.pyx) and
+// pseudo-spectral kernel (github.com/pyqg — model.py / kernel.pyx) and
 // driven by the spectra module's 2-D transforms:
 //
-//   A1. A single westward ROSSBY WAVE on a beta-plane â€” the linear heart of
-//       large-scale atmospheric dynamics. Spectral derivatives are exact,
-//       so the wave translates at the analytic phase speed c = -beta/kappa^2
-//       up to AB3 time error, pinned as a verdict against the baked
-//       analytic translation.
-//   A2. McWILLIAMS (1984) decaying 2-D turbulence â€” pyqg's flagship
-//       example: a band-limited random field self-organizes into coherent
-//       vortices. SELECTIVE DECAY is the checked physics: energy survives
-//       (ratio ~0.88) while enstrophy collapses (~0.08) under the filter.
-//   B.  TWO-LAYER BAROCLINIC INSTABILITY â€” pyqg's QGModel with default
-//       L = 1e6 m, rd = 15 km, delta = 0.25, beta = 1.5e-11, rek = 5.787e-7,
-//       dt = 7200 s, and U1 = 0.05 (2x the pyqg default, so the exponential
-//       growth is visible in a 1600-step demo); upper-layer eddy energy
-//       grows ~8x between steps 800 and 1600 (pinned as a verdict).
+//   A1. A single westward ROSSBY WAVE on a beta-plane.
+//   A2. McWILLIAMS (1984) decaying 2-D turbulence — SELECTIVE DECAY.
+//   B.  TWO-LAYER BAROCLINIC INSTABILITY — upper-layer eddy energy grows ~8x.
 //
-// STRUCTURE â€” the S/T surface, construct by construct:
-//   - NOMINAL AXES: `type Y` (meridional) and `type X` (zonal) tag every
-//     field, and the wavenumber vectors live per axis (ll over Y, kk over
-//     X) â€” a y-index can never address a zonal table. Field aliases RF/CF
-//     keep every signature terse. Probes index with typed literals
-//     ((0 : Y)); nothing in this file indexes with an untagged integer.
-//   - SPECTRAL TABLES are data-driven: squared wavenumbers are unary maps
-//     over ll/kk, the kappa^2 grids are OUTER PRODUCTS
-//     (method_for(a) <*> method_for(b)), and every inversion multiplier is
-//     a unary map over its kappa^2 grid. `range<Y>`/`range<X>` appear
-//     exactly twice â€” for ll/kk themselves, values that ARE functions of
-//     the index.
-//   - STAGES are named functions (invert / uhat / vhat / flux / tendency /
-//     ab3_fold), each a method_for kernel over range<Y, X> reading its
-//     array parameters positionally. This is the one place iteration is
-//     index-driven by necessity: v1 defers rank-2 multi-array
-//     co-iteration (BL3999 â€” `ainvA * qh` and zip-with-scalar-kernels
-//     over rank 2 are not yet implemented), so cell-wise combination of
-//     several fields has no data-driven spelling yet.
-//   - REDUCTIONS are native: |z|^2 is a reusable object_for kernel
-//     (`mag2`), weighted spectral sums are row kernels over zip +
-//     prodsum + reduce, and max-abs is a unary map + row-max reduce
-//     tower. No imperative accumulators.
-//   - The AB3 history is three rotating CF buffers moved by whole-array
-//     assignment; seeds are whole-array assignments from provider fields.
-//   - The ONLY imperative loops are the three time loops â€” a genuine
-//     recurrence (each step reads the state the previous step wrote) is
-//     exactly what the imperative subset is for.
+// TIME INTEGRATION — recursive arrays, not imperative loops:
+//   Each time integration is a RECURSIVE ARRAY; sequentiality is DERIVED from
+//   the prefix dependence (structural induction on the extent, let rec +
+//   match/snoc). No `for` loop.
 //
-// Initial fields and the filter load from the committed zarr store
-// data/qg_init_zarr (import zarr) â€” regenerate with
-//   dotnet fsi examples/tools/make_qg_zarr.fsx
-// The filter is BAKED because it needs exp() and the C++ runtime's libm is
-// not bit-identical to .NET's; with it baked (and the fft twiddles baked
-// at elaboration â€” the spectra ulp contract) this program is
-// transcendental-free, so every EXPECT pin below mirrors the independent
-// oracle (dotnet fsi examples/tools/qg_reference.fsx) to the last ulp.
+//   One slice = one step = the FIELD-STACKED AB3 state, assembled with stack():
+//     Part A:  (q_n, H_{n-1}, H_{n-2})                        3 fields
+//     Part B:  (q1_n, q2_n, H1_{n-1}, H1_{n-2}, H2_{n-1}, H2_{n-2})   6 fields
+//   which is exactly the Adams-Bashforth state vector: the current vorticity
+//   plus the two tendency lags AB3 still needs. A step reads ONLY prefix(n-1),
+//   peels its fields, evaluates this step's tendency ONCE from the previous
+//   state, folds, and re-stacks. The three-term ladder ROTATION *is* the stack:
+//   the new H enters at the front and the oldest lag falls off the end, so
+//   there are no multi-lag prefix reads and no bootstrap guards anywhere.
 //
-// Run from the examples/ directory (the zarr path resolves at both the
-// compiler cwd and the exe cwd there):
+//   The seed slice carries ZERO tendency fields, which is all the AB3 bootstrap
+//   needs: the step-indexed weights are (dt, 0, 0) at step 0 and (1.5dt, -0.5dt,
+//   0) at step 1, so the unwritten lags are annihilated by construction.
+//
+//   Part B is ONE continuous trajectory: run_b1 -> ke1_mid -> run_b2 needs no
+//   restart; the mid-run diagnostic reads the joint state at step 800.
+//   The CFL maximum is accumulated inside the tendency (which already forms
+//   the velocities) into a running-max mut, so no velocity pass is repeated.
+//   Trajectories are BLOCK-LOCAL so the full histories never auto-print.
+//
+// spectra's fft2/ifft2 read the DECLARED shape of their argument, but the
+// declaration may live on the callee: uhat/vhat/flux are annotated `-> CF`/`-> RF`
+// and qs/q1/q2 are annotated parameters, so each transform takes its producer
+// directly and no staging binding is needed.
+//
+// Initial fields / filter load from the committed zarr store (import zarr).
+// Run from the examples/ directory:
 //   cd examples && dotnet run --project .. -- run 09_qg_atmosphere.blade
 // ============================================================================
 import spectra as sp
@@ -71,6 +52,16 @@ type CF = Array<Complex128 like Y, X>   // spectral (complex) field
 type RY = Array<Float64 like Y>
 type RX = Array<Float64 like X>
 
+// The stacked AB3 state: one slice per step, one field per leading ordinal.
+type FA = Idx<3>                        // A: q, H(-1), H(-2)
+type FB = Idx<6>                        // B: q1, q2, H1(-1), H1(-2), H2(-1), H2(-2)
+type SLA = Array<Complex128 like FA, Y, X>
+type SLB = Array<Complex128 like FB, Y, X>
+
+type StepsA1 = Idx<1001>                // A1: 1000 steps
+type StepsA2 = Idx<1501>                // A2: 1500 steps
+type StepsB = Idx<1601>                 // B:  1600 steps
+
 let store = z.load("data/qg_init_zarr")
 let QR0: RF = store.vars.q_rossby |> z.read
 let QPRED: RX = store.vars.q_pred_rossby |> z.read
@@ -79,172 +70,141 @@ let Q1B0: RF = store.vars.q1_init |> z.read
 let FILTR: RF = store.vars.filtr |> z.read
 
 // ---------------------------------------------------------------------------
-// Spectral tables. ll/kk are the per-axis signed wavenumber indices in
-// full-spectrum FFT ordering [0..31, -32..-1] (L = 2pi for Part A, so index
-// units ARE physical wavenumbers there); everything downstream of them is a
-// unary map or an outer product. (The parens around the if-bodied kernels
-// make `compute` apply to the method_for â€” unparenthesized, the pipe parses
-// into the else branch and the kernel stays deferred.)
+// Spectral tables (forced to concrete arrays: the tendency functions read
+// them, and deferred combinators are not visible inside function bodies).
 // ---------------------------------------------------------------------------
-
-function lkm(m: Int64) -> Float64 = if m < 32 then 1.0 * m else 1.0 * m - 64.0
+function lkm(m: Nat<_>) -> Float64 = if m < 32 then 1.0 * m else 1.0 * m - 64.0
 let ll = method_for(range<Y>) <@> lkm
 let kk = method_for(range<X>) <@> lkm
 let k2i = ll^2 [+] kk^2
-let ainvA = method_for(k2i) <@> lambda(v) -> if v > 0.0 then -(1.0 / v) else 0.0
-let ZERO2 = method_for(k2i) <@> lambda(v) -> 0.0
-let ZC = method_for(k2i) <@> lambda(v) -> complex(0.0, 0.0)
+let ainvA = (method_for(k2i) <@> lambda(v) -> if v > 0.0 then -(1.0 / v) else 0.0) |> compute
+let ZERO2 = (method_for(k2i) <@> lambda(v) -> 0.0) |> compute
+let ZC = (method_for(k2i) <@> lambda(v) -> complex(0.0, 0.0)) |> compute
 
 let mag2 = object_for(lambda(z) -> real(z)^2 + imag(z)^2)
 
 // ---------------------------------------------------------------------------
-// The pyqg step, stage by stage. Each stage is a kernel over range<Y, X>
-// reading its parameters positionally (see the header note on why).
+// Stages (each a kernel over range<Y, X> reading its parameters positionally).
 // ---------------------------------------------------------------------------
 function ab3_d1(s: Int64, dt: Float64) -> Float64 = if s == 0 then dt else (if s == 1 then 1.5 * dt else (23.0 / 12.0) * dt)
 function ab3_d2(s: Int64, dt: Float64) -> Float64 = if s == 0 then 0.0 else (if s == 1 then -0.5 * dt else (-16.0 / 12.0) * dt)
 function ab3_d3(s: Int64, dt: Float64) -> Float64 = if s < 2 then 0.0 else (5.0 / 12.0) * dt
 
-// psi_hat = aa*qa + ab*qb (barotropic passes ab = ZERO2).
-function invert(aa: RF, qa: CF, ab: RF, qb: CF) -> CF = aa * qa + ab * qb 
-
-// u_hat = -i*l*psi_hat, v_hat = i*k*psi_hat: multiply-by-i is a component
-// swap, so both stages are real arithmetic on the per-axis wavenumbers.
-function uhat(l: RY, ph: CF) -> CF = for (ph) in range<Y, X> <@> lambda(zp, i, j) -> {
-    complex(l(i) * imag(zp), -(l(i) * real(zp)))
-}
-function vhat(k: RX, ph: CF) -> CF = for (ph) in range<Y, X> <@> lambda(zp, i, j) -> {
-    complex(-(k(j) * imag(zp)), k(j) * real(zp))
-}
-    
-// Real-space advection flux (u + Ubg) * q the mean flow folds into the
-// advecting velocity exactly as in pyqg's kernel.
-function flux(u: RF, ubg: Float64, q: RF) -> RF = (u + ubg) * q
-
-// Spectral PV tendency: -(ik*uq_hat + il*vq_hat + ik*Qy*psi_hat)
-// + rek*kappa^2*psi_hat (bottom friction; rek = 0 elsewhere).
-function tendency(k: RX, l: RY, k2: RF, qy: Float64, rek: Float64, uq: CF, vq: CF, ph: CF) -> CF = {
-    for (k2, uq, vq, ph) in range<Y, X> <@> lambda(k2ij, zu, zv, zp, i, j) -> {
-        complex(k(j) * imag(zu) + l(i) * imag(zv) + qy * k(j) * imag(zp) + rek * k2 * real(zp),
-                -(k(j) * real(zu)) - l(i) * real(zv) - qy * k(j) * real(zp) + rek * k2 * imag(zp))
+function invert(aa: RF, qa: CF, ab: RF, qb: CF) -> CF = aa * qa + ab * qb
+function uhat(l: RY, ph: CF) -> CF = {
+    for (ph) in range<Y, X> <@> lambda(zp, i, j) -> {
+        complex(l(i) * imag(zp), -(l(i) * real(zp)))
     } |> compute
 }
-
-// The AB3 + filter fold: q_hat <- filtr * (q_hat + d1*h + d2*h_p + d3*h_pp).
+function vhat(k: RX, ph: CF) -> CF = {
+    for (ph) in range<Y, X> <@> lambda(zp, i, j) -> {
+        complex(-(k(j) * imag(zp)), k(j) * real(zp))
+    } |> compute
+}
+function flux(u: RF, ubg: Float64, q: RF) -> RF = (u + ubg) * q
+function tendency(k: RX, l: RY, k2: RF, qy: Float64, rek: Float64, uq: CF, vq: CF, ph: CF) -> CF = {
+    for (k2, uq, vq, ph) in range<Y, X> <@> lambda(k2ij, zu, zv, zp, i, j) -> {
+        complex(k(j) * imag(zu) + l(i) * imag(zv) + qy * k(j) * imag(zp) + rek * k2ij * real(zp),
+                -(k(j) * real(zu)) - l(i) * real(zv) - qy * k(j) * real(zp) + rek * k2ij * imag(zp))
+    } |> compute
+}
 function ab3_fold(filt: RF, q: CF, h0: CF, h1: CF, h2: CF, d1: Float64, d2: Float64, d3: Float64) -> CF = {
-    filt * (q + d1 * h0 + d2 * h1 + d3 * h2) 
-} 
+    filt * (q + d1 * h0 + d2 * h1 + d3 * h2)
+}
 
-// ---------------------------------------------------------------------------
-// Reductions â€” native row towers: rows via method_for over the field,
-// prodsum/reduce inside, reduce across rows. 16777216 = M^2 = (64*64)^2.
-// ---------------------------------------------------------------------------
-
-// 0.5 * sum w * f2 / M^2 over the field (energy with w = kappa^2 and
-// f2 = |psi_hat|^2; f2 comes from the mag2 kernel object at call sites).
+// Reductions.
+function fmax(a: Float64, b: Float64) -> Float64 = if a > b then a else b
 function spec_sum(w: RF, f2: RF) -> Float64 = {
     let rows = method_for(zip(w, f2)) <@> lambda(rw: RX, rf: RX) -> prodsum(rw, rf) |> compute
     0.5 * reduce(rows, (+)) / 16777216.0
 }
-
-// 0.5 * sum f2 / M^2 (enstrophy: unweighted).
 function half_mean2(f2: RF) -> Float64 = {
     let rows = method_for(f2) <@> lambda(row: RX) -> reduce(row, (+)) |> compute
     0.5 * reduce(rows, (+)) / 16777216.0
 }
-
-// max over a field (fed with |u|-shaped unary maps at call sites).
 function maxall(f: RF) -> Float64 = {
-    let rows = method_for(f) <@> lambda(row: RX) -> reduce(row, lambda(a, b) -> if a > b then a else b) |> compute
-    reduce(rows, lambda(a, b) -> if a > b then a else b)
+    let rows = method_for(f) <@> lambda(row: RX) -> reduce(row, fmax) |> compute
+    reduce(rows, fmax)
 }
 let absv = object_for(lambda(x) -> abs(x))
 let absv_u1 = object_for(lambda(x) -> abs(x + 0.05))
 
-// ---------------------------------------------------------------------------
-// Solver state: spectral fields and transform staging. The transforms read
-// declared shapes off module-level lets, so their inputs are annotated muts
-// (whole-array type aliases resolve); all three runs reuse them in
-// sequence, each stage refreshing one by function call.
-// ---------------------------------------------------------------------------
-let mut qh: CF = ZC        // layer-1 / barotropic q_hat
-let mut qh2: CF = ZC       // layer-2 q_hat (Part B)
-let mut phw: CF = ZC       // psi_hat (layer 1)
-let mut ph2w: CF = ZC      // psi_hat (layer 2)
-let mut uhw: CF = ZC       // u_hat staging for ifft2
-let mut vhw: CF = ZC       // v_hat staging for ifft2
-let mut uqw: RF = ZERO2    // u*q staging for fft2
-let mut vqw: RF = ZERO2    // v*q staging for fft2
-let mut hcur: CF = ZC      // AB3 tendency history, rotated by
-let mut hp: CF = ZC        // whole-array assignment each step
-let mut hpp: CF = ZC
-let mut hcur2: CF = ZC     // layer-2 history
-let mut hp2: CF = ZC
-let mut hpp2: CF = ZC
+// CFL running-max accumulator (reset before each run).
+let mut cflAcc: Float64 = 0.0
 
 // ===========================================================================
-// Part A1 â€” Rossby wave: psi0 = cos(2x) (KE = 1), beta = 20, rek = 0,
-// dt = 0.001, 1000 steps on L = 2pi.
+// Part A — single barotropic layer. H_single(q) is one spectral tendency;
+// while forming the velocities it folds this step's max speed into cflAcc.
 // ===========================================================================
-let seed_a1 = {
-    uqw = QR0
-    let S = sp.fft2(uqw)
-    qh = S
-    0.0
+function H_single(qs: CF, beta: Float64) -> CF = {
+    let ph = invert(ainvA, qs, ZERO2, ZC)
+    let u = sp.ifft2(uhat(ll, ph))
+    let v = sp.ifft2(vhat(kk, ph))
+    let qr = sp.ifft2(qs)
+    let mu = maxall(absv <@> (u) |> compute)
+    let mv = maxall(absv <@> (v) |> compute)
+    cflAcc = fmax(cflAcc, fmax(mu, mv))
+    let UQ = sp.fft2(flux(u, 0.0, qr))
+    let VQ = sp.fft2(flux(v, 0.0, qr))
+    tendency(kk, ll, k2i, beta, 0.0, UQ, VQ, ph)
 }
+// Seed: the initial vorticity with an EMPTY tendency ladder.
+function seed_a(q0: CF) -> SLA = {
+    let sl = stack(q0, ZC, ZC)
+    sl
+}
+// Step n: read the previous state, take its tendency (= H_{n-1}), fold it with
+// the two stored lags, and re-stack — the new H displaces the oldest lag.
+function astep(n: Int64, st: SLA, beta: Float64, dt: Float64) -> SLA = {
+    let qp = st((0 : FA))
+    let h1 = st((1 : FA))
+    let h2 = st((2 : FA))
+    let hn = H_single(qp, beta)
+    let s = n - 1
+    let qn = ab3_fold(FILTR, qp, hn, h1, h2, ab3_d1(s, dt), ab3_d2(s, dt), ab3_d3(s, dt))
+    let sl = stack(qn, hn, h1)
+    sl
+}
+
+let QH0_A1: CF = sp.fft2(QR0)
 let ea1_0 = {
-    phw = invert(ainvA, qh, ZERO2, qh2)
-    let m = mag2 <@> (phw) |> compute
+    let ph = invert(ainvA, QH0_A1, ZERO2, ZC)
+    let m = mag2 <@> (ph) |> compute
     spec_sum(k2i, m)
 }
 let za1_0 = {
-    let m = mag2 <@> (qh) |> compute
+    let m = mag2 <@> (QH0_A1) |> compute
     half_mean2(m)
 }
 // EXPECT: ea1_0 = 1
 // EXPECT: za1_0 = 4
 
-let run_a1 = {
-    let mut cflmax = 0.0
-    for s in 0..1000 {
-        phw = invert(ainvA, qh, ZERO2, qh2)
-        uhw = uhat(ll, phw)
-        vhw = vhat(kk, phw)
-        let u = sp.ifft2(uhw)
-        let v = sp.ifft2(vhw)
-        let qr = sp.ifft2(qh)
-        uqw = flux(u, 0.0, qr)
-        vqw = flux(v, 0.0, qr)
-        let mu = maxall(absv <@> (u) |> compute)
-        let mv = maxall(absv <@> (v) |> compute)
-        cflmax = if mu > cflmax then mu else cflmax
-        cflmax = if mv > cflmax then mv else cflmax
-        let UQ = sp.fft2(uqw)
-        let VQ = sp.fft2(vqw)
-        hpp = hp
-        hp = hcur
-        hcur = tendency(kk, ll, k2i, 20.0, 0.0, UQ, VQ, phw)
-        qh = ab3_fold(FILTR, qh, hcur, hp, hpp, ab3_d1(s, 0.001), ab3_d2(s, 0.001), ab3_d3(s, 0.001))
-    }
-    cflmax
+let QHT_A1: CF = {
+    cflAcc = 0.0
+    let rec qsA1: Array<Complex128 like StepsA1, FA, Y, X> =
+        match qsA1 with
+        | zero -> zero
+        | zero :: s -> zero :: seed_a(QH0_A1)
+        | prefix :: n -> prefix :: astep(n, prefix(n - 1), 20.0, 0.001)
+    let fin = qsA1(1000)
+    fin((0 : FA))
 }
-let cfl_a1 = run_a1 * 0.001 / (6.283185307179586 / 64.0)
+let cfl_a1 = cflAcc * 0.001 / (6.283185307179586 / 64.0)
 // EXPECT: cfl_a1 = 0.0203728431496975
 
 let ea1_T = {
-    phw = invert(ainvA, qh, ZERO2, qh2)
-    let m = mag2 <@> (phw) |> compute
+    let ph = invert(ainvA, QHT_A1, ZERO2, ZC)
+    let m = mag2 <@> (ph) |> compute
     spec_sum(k2i, m)
 }
 let za1_T = {
-    let m = mag2 <@> (qh) |> compute
+    let m = mag2 <@> (QHT_A1) |> compute
     half_mean2(m)
 }
-// AB3 is not exactly energy-conserving; the drift over 1000 steps is ~9e-5.
 // EXPECT: ea1_T = 1.00009251739649
 // EXPECT: za1_T = 4.00037006958596
 
-let QF1: RF = sp.ifft2(qh)
+let QF1: RF = sp.ifft2(QHT_A1)
 let qa1_p0 = QF1((0 : Y), (0 : X))
 let qa1_p1 = QF1((0 : Y), (16 : X))
 let qa1_p2 = QF1((32 : Y), (40 : X))
@@ -252,9 +212,6 @@ let qa1_p2 = QF1((32 : Y), (40 : X))
 // EXPECT: qa1_p1 = -3.12697533490402
 // EXPECT: qa1_p2 = -2.49469547906056
 
-// The wave translated westward by c*T = -5 domain radians; q_pred_rossby is
-// the baked analytic translation of row 0. Row extraction is dimensional
-// currying; the residual is a rank-1 zip kernel; the norms are prodsums.
 let row0 = QF1((0 : Y))
 let DERR = method_for(zip(row0, QPRED)) <@> (-) |> compute
 let rossby_err = prodsum(DERR, DERR) / prodsum(QPRED, QPRED)
@@ -266,92 +223,64 @@ let a1_energy_ok = if abs(a1drift) < 0.001 then 1.0 else 0.0
 // EXPECT: a1_energy_ok = 1
 
 // ===========================================================================
-// Part A2 â€” McWilliams 1984 decaying turbulence: beta = 0, rek = 0,
-// dt = 0.005, 1500 steps; the exponential filter is the only dissipation.
+// Part A2 — McWilliams decaying turbulence: beta = 0, dt = 0.005, 1500 steps.
 // ===========================================================================
-let seed_a2 = {
-    uqw = QM0
-    let S = sp.fft2(uqw)
-    qh = S
-    0.0
-}
+let QH0_A2: CF = sp.fft2(QM0)
 let ea2_0 = {
-    phw = invert(ainvA, qh, ZERO2, qh2)
-    let m = mag2 <@> (phw) |> compute
+    let ph = invert(ainvA, QH0_A2, ZERO2, ZC)
+    let m = mag2 <@> (ph) |> compute
     spec_sum(k2i, m)
 }
 let za2_0 = {
-    let m = mag2 <@> (qh) |> compute
+    let m = mag2 <@> (QH0_A2) |> compute
     half_mean2(m)
 }
 // EXPECT: ea2_0 = 0.999999999999999
 // EXPECT: za2_0 = 79.4173198931809
 
-let run_a2 = {
-    let mut cflmax = 0.0
-    for s in 0..1500 {
-        phw = invert(ainvA, qh, ZERO2, qh2)
-        uhw = uhat(ll, phw)
-        vhw = vhat(kk, phw)
-        let u = sp.ifft2(uhw)
-        let v = sp.ifft2(vhw)
-        let qr = sp.ifft2(qh)
-        uqw = flux(u, 0.0, qr)
-        vqw = flux(v, 0.0, qr)
-        let mu = maxall(absv <@> (u) |> compute)
-        let mv = maxall(absv <@> (v) |> compute)
-        cflmax = if mu > cflmax then mu else cflmax
-        cflmax = if mv > cflmax then mv else cflmax
-        let UQ = sp.fft2(uqw)
-        let VQ = sp.fft2(vqw)
-        hpp = hp
-        hp = hcur
-        hcur = tendency(kk, ll, k2i, 0.0, 0.0, UQ, VQ, phw)
-        qh = ab3_fold(FILTR, qh, hcur, hp, hpp, ab3_d1(s, 0.005), ab3_d2(s, 0.005), ab3_d3(s, 0.005))
-    }
-    cflmax
+let QHT_A2: CF = {
+    cflAcc = 0.0
+    let rec qsA2: Array<Complex128 like StepsA2, FA, Y, X> =
+        match qsA2 with
+        | zero -> zero
+        | zero :: s -> zero :: seed_a(QH0_A2)
+        | prefix :: n -> prefix :: astep(n, prefix(n - 1), 0.0, 0.005)
+    let fin = qsA2(1500)
+    fin((0 : FA))
 }
-let cfl_a2 = run_a2 * 0.005 / (6.283185307179586 / 64.0)
+let cfl_a2 = cflAcc * 0.005 / (6.283185307179586 / 64.0)
 // EXPECT: cfl_a2 = 0.223418123291554
 
 let ea2_T = {
-    phw = invert(ainvA, qh, ZERO2, qh2)
-    let m = mag2 <@> (phw) |> compute
+    let ph = invert(ainvA, QHT_A2, ZERO2, ZC)
+    let m = mag2 <@> (ph) |> compute
     spec_sum(k2i, m)
 }
 let za2_T = {
-    let m = mag2 <@> (qh) |> compute
+    let m = mag2 <@> (QHT_A2) |> compute
     half_mean2(m)
 }
 // EXPECT: ea2_T = 0.877444565351286
 // EXPECT: za2_T = 6.74008551785885
 
-let QF2: RF = sp.ifft2(qh)
+let QF2: RF = sp.ifft2(QHT_A2)
 let qa2_p0 = QF2((5 : Y), (12 : X))
 let qa2_p1 = QF2((33 : Y), (47 : X))
 // EXPECT: qa2_p0 = -1.46346198225956
 // EXPECT: qa2_p1 = -1.58881233623573
 
-// SELECTIVE DECAY â€” the signature of 2-D turbulence: the inverse cascade
-// carries energy to large (filter-untouched) scales while enstrophy drains
-// at small scales. E keeps ~88%, Z keeps ~8.5%.
 let a2_energy_ok = if ea2_T > 0.8 * ea2_0 then 1.0 else 0.0
 let a2_enstrophy_ok = if za2_T < 0.2 * za2_0 then 1.0 else 0.0
 // EXPECT: a2_energy_ok = 1
 // EXPECT: a2_enstrophy_ok = 1
 
 // ===========================================================================
-// Part B â€” two-layer baroclinic instability. q1 = q1_init noise, q2 = 0;
-// coupled inversion via the four multipliers a11..a22 (pyqg's exact
-// inversion matrix, det-masked at kappa = 0) â€” every table a unary map
-// over the physical kappa^2 grid; friction on layer 2 only.
+// Part B — two-layer baroclinic instability.
 // ===========================================================================
 let dkB = 6.283185307179586 / 1000000.0
 let llB = method_for(ll) <@> lambda(v) -> v * dkB |> compute
 let kkB = method_for(kk) <@> lambda(v) -> v * dkB |> compute
-let llBsq = method_for(llB) <@> lambda(v) -> v * v |> compute
-let kkBsq = method_for(kkB) <@> lambda(v) -> v * v |> compute
-let k2B = method_for(llBsq) <*> method_for(kkBsq) <@> (+) |> compute
+let k2B = llB^2 [+] kkB^2
 let rdi2 = 1.0 / (15000.0 * 15000.0)
 let f1 = rdi2 / (1.0 + 0.25)
 let f2 = 0.25 * f1
@@ -362,141 +291,102 @@ let a12B = (method_for(k2B) <@> lambda(v) -> if v > 0.0 then -(f1) / (v * (v + f
 let a21B = (method_for(k2B) <@> lambda(v) -> if v > 0.0 then -(f2) / (v * (v + f1 + f2)) else 0.0) |> compute
 let a22B = (method_for(k2B) <@> lambda(v) -> if v > 0.0 then -(v + f1) / (v * (v + f1 + f2)) else 0.0) |> compute
 
-let seed_b = {
-    uqw = Q1B0
-    let S = sp.fft2(uqw)
-    qh = S
-    qh2 = ZC
-    0.0
+let QH0_B: CF = sp.fft2(Q1B0)
+
+// Coupled per-layer tendencies from the joint (q1, q2) state; each folds this
+// step's layer speeds into cflAcc (layer 1 carries the +0.05 mean flow).
+function tend1_b(q1: CF, q2: CF) -> CF = {
+    let ph = invert(a11B, q1, a12B, q2)
+    let u = sp.ifft2(uhat(llB, ph))
+    let v = sp.ifft2(vhat(kkB, ph))
+    let qr = sp.ifft2(q1)
+    let mu = maxall(absv_u1 <@> (u) |> compute)
+    let mv = maxall(absv <@> (v) |> compute)
+    cflAcc = fmax(cflAcc, fmax(mu, mv))
+    let UQ = sp.fft2(flux(u, 0.05, qr))
+    let VQ = sp.fft2(flux(v, 0.0, qr))
+    tendency(kkB, llB, k2B, qy1, 0.0, UQ, VQ, ph)
+}
+function tend2_b(q1: CF, q2: CF) -> CF = {
+    let ph = invert(a21B, q1, a22B, q2)
+    let u = sp.ifft2(uhat(llB, ph))
+    let v = sp.ifft2(vhat(kkB, ph))
+    let qr = sp.ifft2(q2)
+    let mu = maxall(absv <@> (u) |> compute)
+    let mv = maxall(absv <@> (v) |> compute)
+    cflAcc = fmax(cflAcc, fmax(mu, mv))
+    let UQ = sp.fft2(flux(u, 0.0, qr))
+    let VQ = sp.fft2(flux(v, 0.0, qr))
+    tendency(kkB, llB, k2B, qy2, 5.787e-7, UQ, VQ, ph)
+}
+// Seed: layer 1 from the zarr field, layer 2 at rest, empty tendency ladders.
+function seed_b(q10: CF) -> SLB = {
+    let sl = stack(q10, ZC, ZC, ZC, ZC, ZC)
+    sl
+}
+// Step n: both layer tendencies come from the SAME previous joint state, so
+// each layer folds independently and the two ladders rotate together.
+function bstep(n: Int64, st: SLB) -> SLB = {
+    let q1p = st((0 : FB))
+    let q2p = st((1 : FB))
+    let g1 = st((2 : FB))
+    let g2 = st((3 : FB))
+    let j1 = st((4 : FB))
+    let j2 = st((5 : FB))
+    let h1n = tend1_b(q1p, q2p)
+    let h2n = tend2_b(q1p, q2p)
+    let s = n - 1
+    let d1 = ab3_d1(s, 7200.0)
+    let d2 = ab3_d2(s, 7200.0)
+    let d3 = ab3_d3(s, 7200.0)
+    let q1n = ab3_fold(FILTR, q1p, h1n, g1, g2, d1, d2, d3)
+    let q2n = ab3_fold(FILTR, q2p, h2n, j1, j2, d1, d2, d3)
+    let sl = stack(q1n, q2n, h1n, g1, h2n, j1)
+    sl
 }
 
-// First 800 steps, then sample upper-layer eddy KE, then 800 more: the two
-// blocks share all state, and the rotating tendency buffers carry the AB3
-// ladder seamlessly across the diagnostic.
-let run_b1 = {
-    let mut cflmax = 0.0
-    for s in 0..800 {
-        phw = invert(a11B, qh, a12B, qh2)
-        ph2w = invert(a21B, qh, a22B, qh2)
-        // ---- layer 1 ----
-        uhw = uhat(llB, phw)
-        vhw = vhat(kkB, phw)
-        let u1 = sp.ifft2(uhw)
-        let v1 = sp.ifft2(vhw)
-        let q1r = sp.ifft2(qh)
-        uqw = flux(u1, 0.05, q1r)
-        vqw = flux(v1, 0.0, q1r)
-        let mu1 = maxall(absv_u1 <@> (u1) |> compute)
-        let mv1 = maxall(absv <@> (v1) |> compute)
-        cflmax = if mu1 > cflmax then mu1 else cflmax
-        cflmax = if mv1 > cflmax then mv1 else cflmax
-        let UQ1 = sp.fft2(uqw)
-        let VQ1 = sp.fft2(vqw)
-        hpp = hp
-        hp = hcur
-        hcur = tendency(kkB, llB, k2B, qy1, 0.0, UQ1, VQ1, phw)
-        // ---- layer 2 ----
-        uhw = uhat(llB, ph2w)
-        vhw = vhat(kkB, ph2w)
-        let u2 = sp.ifft2(uhw)
-        let v2 = sp.ifft2(vhw)
-        let q2r = sp.ifft2(qh2)
-        uqw = flux(u2, 0.0, q2r)
-        vqw = flux(v2, 0.0, q2r)
-        let mu2 = maxall(absv <@> (u2) |> compute)
-        let mv2 = maxall(absv <@> (v2) |> compute)
-        cflmax = if mu2 > cflmax then mu2 else cflmax
-        cflmax = if mv2 > cflmax then mv2 else cflmax
-        let UQ2 = sp.fft2(uqw)
-        let VQ2 = sp.fft2(vqw)
-        hpp2 = hp2
-        hp2 = hcur2
-        hcur2 = tendency(kkB, llB, k2B, qy2, 5.787e-7, UQ2, VQ2, ph2w)
-        // ---- AB3 + filter, both layers ----
-        qh = ab3_fold(FILTR, qh, hcur, hp, hpp, ab3_d1(s, 7200.0), ab3_d2(s, 7200.0), ab3_d3(s, 7200.0))
-        qh2 = ab3_fold(FILTR, qh2, hcur2, hp2, hpp2, ab3_d1(s, 7200.0), ab3_d2(s, 7200.0), ab3_d3(s, 7200.0))
-    }
-    cflmax
+let mut ke1mid_s: Float64 = 0.0
+let mut ke1end_s: Float64 = 0.0
+let mut ke2end_s: Float64 = 0.0
+let QHT_B: CF = {
+    cflAcc = 0.0
+    let rec jtB: Array<Complex128 like StepsB, FB, Y, X> =
+        match jtB with
+        | zero -> zero
+        | zero :: s -> zero :: seed_b(QH0_B)
+        | prefix :: n -> prefix :: bstep(n, prefix(n - 1))
+    let mid = jtB(800)
+    let q1m = mid((0 : FB))
+    let q2m = mid((1 : FB))
+    let phm = invert(a11B, q1m, a12B, q2m)
+    let mm = mag2 <@> (phm) |> compute
+    ke1mid_s = spec_sum(k2B, mm)
+    let fin = jtB(1600)
+    let q1e = fin((0 : FB))
+    let q2e = fin((1 : FB))
+    let p1e = invert(a11B, q1e, a12B, q2e)
+    let m1e = mag2 <@> (p1e) |> compute
+    ke1end_s = spec_sum(k2B, m1e)
+    let p2e = invert(a21B, q1e, a22B, q2e)
+    let m2e = mag2 <@> (p2e) |> compute
+    ke2end_s = spec_sum(k2B, m2e)
+    q1e
 }
-
-let ke1_mid = {
-    phw = invert(a11B, qh, a12B, qh2)
-    let m = mag2 <@> (phw) |> compute
-    spec_sum(k2B, m)
-}
+let ke1_mid = ke1mid_s
 // EXPECT: ke1_mid = 7.33511827941687e-08
-
-let run_b2 = {
-    let mut cflmax = 0.0
-    for s2 in 0..800 {
-        let s = s2 + 800
-        phw = invert(a11B, qh, a12B, qh2)
-        ph2w = invert(a21B, qh, a22B, qh2)
-        // ---- layer 1 ----
-        uhw = uhat(llB, phw)
-        vhw = vhat(kkB, phw)
-        let u1 = sp.ifft2(uhw)
-        let v1 = sp.ifft2(vhw)
-        let q1r = sp.ifft2(qh)
-        uqw = flux(u1, 0.05, q1r)
-        vqw = flux(v1, 0.0, q1r)
-        let mu1 = maxall(absv_u1 <@> (u1) |> compute)
-        let mv1 = maxall(absv <@> (v1) |> compute)
-        cflmax = if mu1 > cflmax then mu1 else cflmax
-        cflmax = if mv1 > cflmax then mv1 else cflmax
-        let UQ1 = sp.fft2(uqw)
-        let VQ1 = sp.fft2(vqw)
-        hpp = hp
-        hp = hcur
-        hcur = tendency(kkB, llB, k2B, qy1, 0.0, UQ1, VQ1, phw)
-        // ---- layer 2 ----
-        uhw = uhat(llB, ph2w)
-        vhw = vhat(kkB, ph2w)
-        let u2 = sp.ifft2(uhw)
-        let v2 = sp.ifft2(vhw)
-        let q2r = sp.ifft2(qh2)
-        uqw = flux(u2, 0.0, q2r)
-        vqw = flux(v2, 0.0, q2r)
-        let mu2 = maxall(absv <@> (u2) |> compute)
-        let mv2 = maxall(absv <@> (v2) |> compute)
-        cflmax = if mu2 > cflmax then mu2 else cflmax
-        cflmax = if mv2 > cflmax then mv2 else cflmax
-        let UQ2 = sp.fft2(uqw)
-        let VQ2 = sp.fft2(vqw)
-        hpp2 = hp2
-        hp2 = hcur2
-        hcur2 = tendency(kkB, llB, k2B, qy2, 5.787e-7, UQ2, VQ2, ph2w)
-        // ---- AB3 + filter, both layers ----
-        qh = ab3_fold(FILTR, qh, hcur, hp, hpp, ab3_d1(s, 7200.0), ab3_d2(s, 7200.0), ab3_d3(s, 7200.0))
-        qh2 = ab3_fold(FILTR, qh2, hcur2, hp2, hpp2, ab3_d1(s, 7200.0), ab3_d2(s, 7200.0), ab3_d3(s, 7200.0))
-    }
-    cflmax
-}
-let cfl_b = (if run_b1 > run_b2 then run_b1 else run_b2) * 7200.0 / (1000000.0 / 64.0)
-// EXPECT: cfl_b = 0.0236600874418345
-
-let ke1_end = {
-    phw = invert(a11B, qh, a12B, qh2)
-    let m = mag2 <@> (phw) |> compute
-    spec_sum(k2B, m)
-}
-let ke2_end = {
-    ph2w = invert(a21B, qh, a22B, qh2)
-    let m = mag2 <@> (ph2w) |> compute
-    spec_sum(k2B, m)
-}
+let ke1_end = ke1end_s
+let ke2_end = ke2end_s
 // EXPECT: ke1_end = 6.08763518387509e-07
 // EXPECT: ke2_end = 3.87002370937918e-08
+let cfl_b = cflAcc * 7200.0 / (1000000.0 / 64.0)
+// EXPECT: cfl_b = 0.0236600874418345
 
-let QF3: RF = sp.ifft2(qh)
+let QF3: RF = sp.ifft2(QHT_B)
 let qb_p0 = QF3((7 : Y), (9 : X))
 let qb_p1 = QF3((50 : Y), (3 : X))
 // EXPECT: qb_p0 = -1.78279068753764e-07
 // EXPECT: qb_p1 = 8.85921910157939e-08
 
-// Upper-layer eddy energy grows ~8.3x between steps 800 and 1600 â€” the
-// baroclinic instability extracting energy from the mean shear. The lower
-// layer spins up from rest to ~6% of the upper layer on the way.
 let b_growth_ok = if ke1_end > 4.0 * ke1_mid then 1.0 else 0.0
 let cfl_ok = if cfl_a1 < 1.0 && cfl_a2 < 1.0 && cfl_b < 1.0 then 1.0 else 0.0
 // EXPECT: b_growth_ok = 1

@@ -8,20 +8,7 @@ import spectra as sp
 let x: Array<Float64 like Idx<8>> = [0.5, -1.25, 2.0, 0.75, -0.5, 1.5, -2.25, 3.0]
 let P = sp.power(x)
 let Q = sp.polyspec(x, x)
-let residRe = {
-    let mut acc = 0.0
-    for k in 0..8 {
-        let d = P(k) - real(Q(k))
-        acc = acc + d * d
-    }
-    acc
-}
-let residIm = {
-    let mut acc = 0.0
-    for k in 0..8 {
-        acc = acc + imag(Q(k)) * imag(Q(k))
-    }
-    acc
-}
+let residRe = reduce(method_for(range<Idx<8>>) <@> lambda(k) -> (P(k) - real(Q(k))) * (P(k) - real(Q(k))), (+), 0.0)
+let residIm = reduce(method_for(range<Idx<8>>) <@> lambda(k) -> imag(Q(k)) * imag(Q(k)), (+), 0.0)
 // EXPECT: residRe = 0.0
 // EXPECT: residIm = 0.0

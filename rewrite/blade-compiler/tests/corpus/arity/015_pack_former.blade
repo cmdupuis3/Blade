@@ -1,0 +1,10 @@
+// TEST: Pack Former Sum
+// method_for/<@> former over range<Idx<arity(args)>> reading the poly pack,
+// forced with |> compute and folded with reduce. The former unrolls into an
+// n-element array literal (element k = args[k]) at pack monomorphization.
+function polySum(args: Poly<T^0>) -> T^0 = {
+    let terms = method_for(range<Idx<arity(args)>>) <@> lambda(k) -> args[k] |> compute
+    reduce(terms, (+))
+}
+let result = polySum(10, 20, 30)
+// EXPECT: result = 60

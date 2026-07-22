@@ -1,0 +1,21 @@
+// TEST: Recursive Array With Running Reduce
+// ============================================================================
+// A damped recurrence x_n = x_{n-1} * 0.5 + 1.0 (fixed point 2.0) consumed
+// two ways: the final-segment read (last element) and a whole-trajectory
+// reduction — the ex-09 cflmax shape (recurrence + running fold) with no
+// imperative loop. Also exercises step-ordinal use in the slice (n * 0.0
+// keeps the dependence explicit but value-neutral).
+// x: 1, 1.5, 1.75, 1.875, 1.9375, 1.96875
+// sum = 10.03125; last = 1.96875
+// ============================================================================
+type Step = Idx<6>
+let rec x: Array<Float like Step> =
+    match x with
+    | zero -> zero
+    | zero :: s -> zero :: 1.0
+    | prefix :: n -> prefix :: prefix(n - 1) * 0.5 + 1.0
+// EXPECT: x = [1, 1.5, 1.75, 1.875, 1.9375, 1.96875]
+let total = reduce(x, (+))
+// EXPECT: total = 10.03125
+let last = x(5)
+// EXPECT: last = 1.96875

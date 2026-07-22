@@ -2,26 +2,24 @@
 import ml as ml
 import ad as ad
 // ============================================================================
-// The SAME network, task, dataset, and training run as ml-e2e/001 — but the
-// equivariant ops come from the compiler's ML elaboration (MLElaborate.fs)
-// instead of hand-written loops: static specs + y_to / tensor_product /
-// linear_rows / gated_rows calls, with real-basis CG tables computed by the
-// compiler (WignerTables.fs) and grad() differentiating THROUGH the
-// generated ops.
+// The SAME network, task, dataset, and training run as ml-e2e/001 -- but the
+// equivariant ops come from the compiler's ML elaboration (MLElaborate.fs):
+// static specs + ml.y_to / ml.tensor_product / ml.linear_rows / ml.gated_rows,
+// with real-basis CG tables computed by the compiler, and grad() differentiating
+// THROUGH the generated ops. Also imperative-free: ZERO for-in loops.
 //
-// Style notes (this file doubles as the idiom showcase):
-//   - dimensions are DERIVED from the specs (total_dim / *_weight_dim and
-//     static arithmetic) and used in annotations (Idx<w1dim>) and bare
-//     loop bounds (for c in 0..dh { — the range header suppresses struct
-//     literals, so no parentheses needed);
-//   - zero buffers use the constant-fill idiom replicate(N, pure(0.0)),
-//     admitted by grad() inside differentiated code;
-//   - per-node activation/mixing uses the BATCHED ops (gated_rows /
-//     linear_rows) — no row-extract/write-back copy loops;
-//   - step-0 gradients go to dedicated buffers (no snapshot copies).
+// The only restructure vs the elaborated original is the message-passing SCATTER
+// out(tgt(e)*dh+c) += msg(c). Because the graph is static we precompute the
+// per-node incoming-edge table (in_edges, inverse of edge_tgt in increasing edge
+// order) and read each conv output slot as the SUM over that node's incoming
+// edges of the elaborated-TP message component -- a gather (additive over static
+// indices) that grad differentiates (gather adjoint = scatter). Each conv is a
+// per-slot recursive-array construction; the batched ml.gated_rows / ml.linear_rows
+// stay as single elaborated ops. The per-edge messages and node edge-sums keep
+// the ORIGINAL order, so every pin reproduces the ml/TrainingOracle bit-for-bit.
 //
-// Every EXPECT below is the same pin as 001 (the ml/TrainingOracle values):
-// elaboration must reproduce the hand-written formulation exactly.
+// SGD is a recursive array over epochs (state-vector idiom); trajectories are
+// block-local (never auto-printed).
 // ============================================================================
 
 // ---- static specs, configs, and derived dimensions --------------------------
@@ -50,6 +48,8 @@ let static w3dim = ml.tp_weight_dim(cfg2)              // 10
 // ---- graph structure: complete digraph on 5 nodes -------------------------
 let edge_src = [0, 0, 0, 0, 1, 1, 1, 1, 2, 2, 2, 2, 3, 3, 3, 3, 4, 4, 4, 4]
 let edge_tgt = [1, 2, 3, 4, 0, 2, 3, 4, 0, 1, 3, 4, 0, 1, 2, 4, 0, 1, 2, 3]
+// incoming edges per node (inverse of edge_tgt, increasing edge order = scatter order)
+let in_edges = [4, 8, 12, 16, 0, 9, 13, 17, 1, 5, 14, 18, 2, 6, 10, 19, 3, 7, 11, 15]
 
 // ---- dataset (identical to ml-e2e/001) -------------------------------------
 let all_pos = [
@@ -64,148 +64,234 @@ let all_feat = [
     -0.6126505060180325, 0.4905172742393413, -0.4472091977704359, -0.49060247628511977, -0.8025084611971436]
 let targets = [2.4891719023683296, 2.4811582292885235, 3.238512152035927, 2.0886398140556697]
 
-let all_ev = {
-    let mut ev = replicate(evs_all, pure(0.0)) |> compute
-    for s in 0..ng {
-        for e in 0..ne {
-            for c in 0..3 {
-                ev(s * ev_len + e * 3 + c) = all_pos(s * 15 + edge_src(e) * 3 + c) - all_pos(s * 15 + edge_tgt(e) * 3 + c)
-            }
-        }
-    }
-    ev
-}
-
-// ---- pristine initial weights (for the rotation-invariance check) ----------
 let w1_init = [-0.3482108222545175, 0.2680045951940141, -0.1638447049371175, 0.08167740543451041, -0.48241225582659814]
 let w2_init = [-0.1499458540463568, -0.42221854204415277, -0.3077518380283154, -0.38518397271874544, 0.060956569184063225, 0.3270919950805101, -0.07314545501635666, -0.47438434277399644, -0.39994124225338046]
 let w3_init = [0.4674427131970612, 0.019242270625774882, -0.2090272203595504, 0.2385805904579259, -0.08804323877582476, -0.4737834064167847, 0.0910533706615928, -0.24711189267556738, -0.17869719242616428, -0.2123539390565613]
 let wr_init = [-0.34236242381965853, -0.03847419262792645]
 let br_init = [0.0]
+let rot = [0.34692944965489897, -0.644217687237691, 0.681632986593423, 0.29221464428477228, 0.7648421872844885, 0.57413154434798608, -0.89120736006143542, 0.0, 0.45359612142557731]
+
+// edge-vector buffer: ev(s*60+e*3+c) = pos(src) - pos(tgt), built per flat slot.
+function evslot(i: Int) -> Float = {
+    let s = i / ev_len
+    let rem = i - s * ev_len
+    let ed = rem / 3
+    let c = rem - ed * 3
+    all_pos(s * 15 + edge_src(ed) * 3 + c) - all_pos(s * 15 + edge_tgt(ed) * 3 + c)
+}
+let all_ev = {
+    let rec ev: Array<Float like Idx<240>> =
+        match ev with
+        | zero -> zero
+        | prefix :: i -> prefix :: evslot(i)
+    ev
+}
 
 // ---- the network, via elaborated ops ---------------------------------------
 
-// conv layer: gather source features per edge, expand the edge vector in
-// Y<=2, tensor-product into a message, scatter-add onto the target.
-function conv1(feat: Array<Float like Idx<nn>>, ev: Array<Float like Idx<ev_len>>, w: Array<Float like Idx<w1dim>>) -> Array<Float like Idx<dh_all>> = {
-    let mut out = replicate(dh_all, pure(0.0)) |> compute
-    for e in 0..ne {
-        let sh = ml.y_to(2, ev(e * 3), ev(e * 3 + 1), ev(e * 3 + 2))
-        let mut xf = [0.0]
-        xf(0) = feat(edge_src(e))
-        let msg = ml.tensor_product(cfg1, xf, sh, w)
-        for c in 0..dh {
-            out(edge_tgt(e) * dh + c) += msg(c)
-        }
-    }
+// conv1: gather source scalar per incoming edge, expand the edge vector in Y<=2,
+// tensor-product into a 13-dim message. Slot j (node j/dh, component c=j%dh) is
+// the sum over the node's incoming edges of the elaborated-TP message(c).
+function conv1_slot(evs: Array<Float like Idx<240>>, w: Array<Float like Idx<5>>, s: Int, j: Int) -> Float = {
+    let node = j / dh
+    let c = j - node * dh
+    let vb = s * ev_len
+    let fb = s * nn
+    let e0 = in_edges(node * 4 + 0)
+    let e1 = in_edges(node * 4 + 1)
+    let e2 = in_edges(node * 4 + 2)
+    let e3 = in_edges(node * 4 + 3)
+    let sh0 = ml.y_to(2, evs(vb + e0 * 3), evs(vb + e0 * 3 + 1), evs(vb + e0 * 3 + 2))
+    let sh1 = ml.y_to(2, evs(vb + e1 * 3), evs(vb + e1 * 3 + 1), evs(vb + e1 * 3 + 2))
+    let sh2v = ml.y_to(2, evs(vb + e2 * 3), evs(vb + e2 * 3 + 1), evs(vb + e2 * 3 + 2))
+    let sh3 = ml.y_to(2, evs(vb + e3 * 3), evs(vb + e3 * 3 + 1), evs(vb + e3 * 3 + 2))
+    let xf0 = [all_feat(fb + edge_src(e0))]
+    let xf1 = [all_feat(fb + edge_src(e1))]
+    let xf2 = [all_feat(fb + edge_src(e2))]
+    let xf3 = [all_feat(fb + edge_src(e3))]
+    let m0 = ml.tensor_product(cfg1, xf0, sh0, w)
+    let m1 = ml.tensor_product(cfg1, xf1, sh1, w)
+    let m2 = ml.tensor_product(cfg1, xf2, sh2v, w)
+    let m3 = ml.tensor_product(cfg1, xf3, sh3, w)
+    m0(c) + m1(c) + m2(c) + m3(c)
+}
+function conv1(evs: Array<Float like Idx<240>>, w: Array<Float like Idx<5>>, s: Int) -> Array<Float like Idx<65>> = {
+    let rec out: Array<Float like Idx<65>> =
+        match out with
+        | zero -> zero
+        | prefix :: j -> prefix :: conv1_slot(evs, w, s, j)
     out
 }
 
-function conv2(h: Array<Float like Idx<dh_all>>, ev: Array<Float like Idx<ev_len>>, w: Array<Float like Idx<w3dim>>) -> Array<Float like Idx<dout_all>> = {
-    let mut out = replicate(dout_all, pure(0.0)) |> compute
-    for e in 0..ne {
-        let sh = ml.y_to(2, ev(e * 3), ev(e * 3 + 1), ev(e * 3 + 2))
-        let mut xf = replicate(dh, pure(0.0)) |> compute
-        for c in 0..dh {
-            xf(c) = h(edge_src(e) * dh + c)
-        }
-        let msg = ml.tensor_product(cfg2, xf, sh, w)
-        for c in 0..dout {
-            out(edge_tgt(e) * dout + c) += msg(c)
-        }
-    }
+// the source node's 13-dim feature block, built by construction so grad's
+// cotangent flows back into h (an array literal would not carry it).
+function hblock(h: Array<Float like Idx<65>>, sb: Int) -> Array<Float like Idx<13>> = {
+    let rec r: Array<Float like Idx<13>> =
+        match r with
+        | zero -> zero
+        | prefix :: c -> prefix :: h(sb + c)
+    r
+}
+// conv2: specH (x) Y<=2 -> specOut, gathered per node. Slot k (node k/dout,
+// component mo=k%dout) is the sum over incoming edges of the elaborated-TP
+// message(mo) built from the source node's h-block.
+function conv2_slot(h: Array<Float like Idx<65>>, evs: Array<Float like Idx<240>>, w: Array<Float like Idx<10>>, s: Int, kk: Int) -> Float = {
+    let node = kk / dout
+    let mo = kk - node * dout
+    let vb = s * ev_len
+    let e0 = in_edges(node * 4 + 0)
+    let e1 = in_edges(node * 4 + 1)
+    let e2 = in_edges(node * 4 + 2)
+    let e3 = in_edges(node * 4 + 3)
+    let sh0 = ml.y_to(2, evs(vb + e0 * 3), evs(vb + e0 * 3 + 1), evs(vb + e0 * 3 + 2))
+    let sh1 = ml.y_to(2, evs(vb + e1 * 3), evs(vb + e1 * 3 + 1), evs(vb + e1 * 3 + 2))
+    let sh2v = ml.y_to(2, evs(vb + e2 * 3), evs(vb + e2 * 3 + 1), evs(vb + e2 * 3 + 2))
+    let sh3 = ml.y_to(2, evs(vb + e3 * 3), evs(vb + e3 * 3 + 1), evs(vb + e3 * 3 + 2))
+    let xf0 = hblock(h, edge_src(e0) * dh)
+    let xf1 = hblock(h, edge_src(e1) * dh)
+    let xf2 = hblock(h, edge_src(e2) * dh)
+    let xf3 = hblock(h, edge_src(e3) * dh)
+    let m0 = ml.tensor_product(cfg2, xf0, sh0, w)
+    let m1 = ml.tensor_product(cfg2, xf1, sh1, w)
+    let m2 = ml.tensor_product(cfg2, xf2, sh2v, w)
+    let m3 = ml.tensor_product(cfg2, xf3, sh3, w)
+    m0(mo) + m1(mo) + m2(mo) + m3(mo)
+}
+function conv2(h: Array<Float like Idx<65>>, evs: Array<Float like Idx<240>>, w: Array<Float like Idx<10>>, s: Int) -> Array<Float like Idx<10>> = {
+    let rec out: Array<Float like Idx<10>> =
+        match out with
+        | zero -> zero
+        | prefix :: kk -> prefix :: conv2_slot(h, evs, w, s, kk)
     out
 }
 
-function loss_ev(w1: Array<Float like Idx<w1dim>>, w2: Array<Float like Idx<w2dim>>, w3: Array<Float like Idx<w3dim>>, wr: Array<Float like Idx<dout>>, brA: Array<Float like Idx<1>>, evs: Array<Float like Idx<evs_all>>) -> Float = {
-    let mut acc = 0.0
-    for s in 0..ng {
-        let mut feat_s = replicate(nn, pure(0.0)) |> compute
-        for i in 0..nn {
-            feat_s(i) = all_feat(s * nn + i)
-        }
-        let mut ev_s = replicate(ev_len, pure(0.0)) |> compute
-        for k in 0..ev_len {
-            ev_s(k) = evs(s * ev_len + k)
-        }
-        let f1 = conv1(feat_s, ev_s, w1)
-        let g1 = ml.gated_rows(spec_h, nn, f1)
-        let h = ml.linear_rows(spec_h, spec_h, nn, w2, g1)
-        let f2 = conv2(h, ev_s, w3)
-        let g2 = ml.gated_rows(spec_out, nn, f2)
-        let mut pred = brA(0)
-        for i in 0..nn {
-            for c in 0..dout {
-                pred += wr(c) * g2(i * dout + c)
-            }
-        }
-        let d = pred - targets(s)
-        acc += d * d
-    }
-    acc / 4.0
+// invariant readout: pred = br + sum_k wr(k%dout) * g2(k), in original order.
+function readout(wr: Array<Float like Idx<2>>, br: Float, g2: Array<Float like Idx<10>>) -> Float =
+    br + wr(0) * g2(0) + wr(1) * g2(1) + wr(0) * g2(2) + wr(1) * g2(3) + wr(0) * g2(4) + wr(1) * g2(5) + wr(0) * g2(6) + wr(1) * g2(7) + wr(0) * g2(8) + wr(1) * g2(9)
+
+// per-graph squared error: the full elaborated pipeline for graph s.
+function graph_sqerr(w1: Array<Float like Idx<5>>, w2: Array<Float like Idx<9>>, w3: Array<Float like Idx<10>>, wr: Array<Float like Idx<2>>, brA: Array<Float like Idx<1>>, evs: Array<Float like Idx<240>>, s: Int) -> Float = {
+    let f1 = conv1(evs, w1, s)
+    let g1 = ml.gated_rows(spec_h, nn, f1)
+    let h = ml.linear_rows(spec_h, spec_h, nn, w2, g1)
+    let f2 = conv2(h, evs, w3, s)
+    let g2 = ml.gated_rows(spec_out, nn, f2)
+    let pred = readout(wr, brA(0), g2)
+    let d = pred - targets(s)
+    d * d
 }
 
-function loss(w1: Array<Float like Idx<w1dim>>, w2: Array<Float like Idx<w2dim>>, w3: Array<Float like Idx<w3dim>>, wr: Array<Float like Idx<dout>>, brA: Array<Float like Idx<1>>) -> Float =
+// full-batch MSE: additive reduce over the 4 per-graph errors.
+function loss_ev(w1: Array<Float like Idx<5>>, w2: Array<Float like Idx<9>>, w3: Array<Float like Idx<10>>, wr: Array<Float like Idx<2>>, brA: Array<Float like Idx<1>>, evs: Array<Float like Idx<240>>) -> Float = {
+    let rec errs: Array<Float like Idx<4>> =
+        match errs with
+        | zero -> zero
+        | prefix :: s -> prefix :: graph_sqerr(w1, w2, w3, wr, brA, evs, s)
+    reduce(errs, (+)) / 4.0
+}
+
+function loss(w1: Array<Float like Idx<5>>, w2: Array<Float like Idx<9>>, w3: Array<Float like Idx<10>>, wr: Array<Float like Idx<2>>, brA: Array<Float like Idx<1>>) -> Float =
     loss_ev(w1, w2, w3, wr, brA, all_ev)
 
 // ---- step-0 gradients: dedicated buffers (same pins as ml-e2e/001) ---------
-let mut w1v = [-0.3482108222545175, 0.2680045951940141, -0.1638447049371175, 0.08167740543451041, -0.48241225582659814]
-let mut w2v = [-0.1499458540463568, -0.42221854204415277, -0.3077518380283154, -0.38518397271874544, 0.060956569184063225, 0.3270919950805101, -0.07314545501635666, -0.47438434277399644, -0.39994124225338046]
-let mut w3v = [0.4674427131970612, 0.019242270625774882, -0.2090272203595504, 0.2385805904579259, -0.08804323877582476, -0.4737834064167847, 0.0910533706615928, -0.24711189267556738, -0.17869719242616428, -0.2123539390565613]
-let mut wrv = [-0.34236242381965853, -0.03847419262792645]
-let mut brv = [0.0]
-
 let mut dw1_s0 = replicate(w1dim, pure(0.0)) |> compute
 let mut dw2_s0 = replicate(w2dim, pure(0.0)) |> compute
 let mut dw3_s0 = replicate(w3dim, pure(0.0)) |> compute
 let mut dwr_s0 = [0.0, 0.0]
 let mut dbr_b = [0.0]
-
-let step0_loss = ad.grad(loss)(w1v, w2v, w3v, wrv, brv, dw1_s0, dw2_s0, dw3_s0, dwr_s0, dbr_b)
+let step0_loss = ad.grad(loss)(w1_init, w2_init, w3_init, wr_init, br_init, dw1_s0, dw2_s0, dw3_s0, dwr_s0, dbr_b)
 let dbr_s0 = dbr_b(0)
 
 // ---- training: 30 steps of full-batch gradient descent, lr = 0.1 -----------
-let mut dw1 = replicate(w1dim, pure(0.0)) |> compute
-let mut dw2 = replicate(w2dim, pure(0.0)) |> compute
-let mut dw3 = replicate(w3dim, pure(0.0)) |> compute
-let mut dwr = [0.0, 0.0]
-let mut dbr = [0.0]
-let mut traj = replicate(31, pure(0.0)) |> compute
-
-let final_loss = {
-    for step in 0..nsteps {
-        for k in 0..w1dim { dw1(k) = 0.0 }
-        for k in 0..w2dim { dw2(k) = 0.0 }
-        for k in 0..w3dim { dw3(k) = 0.0 }
-        for k in 0..dout { dwr(k) = 0.0 }
-        dbr(0) = 0.0
-        let lossv = ad.grad(loss)(w1v, w2v, w3v, wrv, brv, dw1, dw2, dw3, dwr, dbr)
-        traj(step) = lossv
-        for k in 0..w1dim { w1v(k) -= 0.1 * dw1(k) }
-        for k in 0..w2dim { w2v(k) -= 0.1 * dw2(k) }
-        for k in 0..w3dim { w3v(k) -= 0.1 * dw3(k) }
-        for k in 0..dout { wrv(k) -= 0.1 * dwr(k) }
-        brv(0) -= 0.1 * dbr(0)
-    }
-    let lv = loss(w1v, w2v, w3v, wrv, brv)
-    traj(nsteps) = lv
-    lv
+// state row = [w1(5), w2(9), w3(10), wr(2), br(1), loss(1)] = 28 slots.
+type Epochs = Idx<32>
+type State = Idx<28>
+function sgd_step(s: Array<Float like State>) -> Array<Float like State> = {
+    let w1 = [s(0), s(1), s(2), s(3), s(4)]
+    let w2 = [s(5), s(6), s(7), s(8), s(9), s(10), s(11), s(12), s(13)]
+    let w3 = [s(14), s(15), s(16), s(17), s(18), s(19), s(20), s(21), s(22), s(23)]
+    let wr = [s(24), s(25)]
+    let br = [s(26)]
+    let mut dw1 = replicate(w1dim, pure(0.0)) |> compute
+    let mut dw2 = replicate(w2dim, pure(0.0)) |> compute
+    let mut dw3 = replicate(w3dim, pure(0.0)) |> compute
+    let mut dwr = [0.0, 0.0]
+    let mut dbr = [0.0]
+    let lv = ad.grad(loss)(w1, w2, w3, wr, br, dw1, dw2, dw3, dwr, dbr)
+    let n1 = w1 - 0.1 * dw1
+    let n2 = w2 - 0.1 * dw2
+    let n3 = w3 - 0.1 * dw3
+    let nr = wr - 0.1 * dwr
+    let nb = br - 0.1 * dbr
+    [n1(0), n1(1), n1(2), n1(3), n1(4), n2(0), n2(1), n2(2), n2(3), n2(4), n2(5), n2(6), n2(7), n2(8), n3(0), n3(1), n3(2), n3(3), n3(4), n3(5), n3(6), n3(7), n3(8), n3(9), nr(0), nr(1), nb(0), lv]
 }
 
-// ---- equivariance: rotate the geometry by R = Rz(0.7)·Ry(1.1) --------------
-let rot = [0.34692944965489897, -0.644217687237691, 0.681632986593423, 0.29221464428477228, 0.7648421872844885, 0.57413154434798608, -0.89120736006143542, 0.0, 0.45359612142557731]
+// single training pass drives every training pin: extracting each pin in its own
+// block would rerun the whole 30-step descent per binding, which is fine
+// compiled but blows the interpreter's step budget on the grad-through-network
+// forward+reverse. So one recursive-array trajectory is computed once and packed
+// as [loss(rows 1..31), final weights(row 30 slots 0..26)] = 58 slots; the pins
+// are plain reads of it. (Row n carries the loss at row n-1's weights, so
+// train_out(0..29) are the pre-step losses and train_out(30) is the final loss.)
+let train_out = {
+    let rec wtraj: Array<Float like Epochs, State> =
+        match wtraj with
+        | zero -> zero
+        | zero :: n -> zero :: [-0.3482108222545175, 0.2680045951940141, -0.1638447049371175, 0.08167740543451041, -0.48241225582659814, -0.1499458540463568, -0.42221854204415277, -0.3077518380283154, -0.38518397271874544, 0.060956569184063225, 0.3270919950805101, -0.07314545501635666, -0.47438434277399644, -0.39994124225338046, 0.4674427131970612, 0.019242270625774882, -0.2090272203595504, 0.2385805904579259, -0.08804323877582476, -0.4737834064167847, 0.0910533706615928, -0.24711189267556738, -0.17869719242616428, -0.2123539390565613, -0.34236242381965853, -0.03847419262792645, 0.0, 0.0]
+        | prefix :: n -> prefix :: sgd_step(prefix(n - 1))
+    let r1 = wtraj(1)
+    let r2 = wtraj(2)
+    let r3 = wtraj(3)
+    let r4 = wtraj(4)
+    let r5 = wtraj(5)
+    let r6 = wtraj(6)
+    let r7 = wtraj(7)
+    let r8 = wtraj(8)
+    let r9 = wtraj(9)
+    let r10 = wtraj(10)
+    let r11 = wtraj(11)
+    let r12 = wtraj(12)
+    let r13 = wtraj(13)
+    let r14 = wtraj(14)
+    let r15 = wtraj(15)
+    let r16 = wtraj(16)
+    let r17 = wtraj(17)
+    let r18 = wtraj(18)
+    let r19 = wtraj(19)
+    let r20 = wtraj(20)
+    let r21 = wtraj(21)
+    let r22 = wtraj(22)
+    let r23 = wtraj(23)
+    let r24 = wtraj(24)
+    let r25 = wtraj(25)
+    let r26 = wtraj(26)
+    let r27 = wtraj(27)
+    let r28 = wtraj(28)
+    let r29 = wtraj(29)
+    let r30 = wtraj(30)
+    let r31 = wtraj(31)
+    let wf = wtraj(30)
+    [r1(27), r2(27), r3(27), r4(27), r5(27), r6(27), r7(27), r8(27), r9(27), r10(27), r11(27), r12(27), r13(27), r14(27), r15(27), r16(27), r17(27), r18(27), r19(27), r20(27), r21(27), r22(27), r23(27), r24(27), r25(27), r26(27), r27(27), r28(27), r29(27), r30(27), r31(27), wf(0), wf(1), wf(2), wf(3), wf(4), wf(5), wf(6), wf(7), wf(8), wf(9), wf(10), wf(11), wf(12), wf(13), wf(14), wf(15), wf(16), wf(17), wf(18), wf(19), wf(20), wf(21), wf(22), wf(23), wf(24), wf(25), wf(26)]
+}
+let traj = [train_out(0), train_out(1), train_out(2), train_out(3), train_out(4), train_out(5), train_out(6), train_out(7), train_out(8), train_out(9), train_out(10), train_out(11), train_out(12), train_out(13), train_out(14), train_out(15), train_out(16), train_out(17), train_out(18), train_out(19), train_out(20), train_out(21), train_out(22), train_out(23), train_out(24), train_out(25), train_out(26), train_out(27), train_out(28), train_out(29), train_out(30)]
+let final_loss = train_out(30)
+let w1v = [train_out(31), train_out(32), train_out(33), train_out(34), train_out(35)]
+let w2v = [train_out(36), train_out(37), train_out(38), train_out(39), train_out(40), train_out(41), train_out(42), train_out(43), train_out(44)]
+let w3v = [train_out(45), train_out(46), train_out(47), train_out(48), train_out(49), train_out(50), train_out(51), train_out(52), train_out(53), train_out(54)]
+let wrv = [train_out(55), train_out(56)]
+let brv = [train_out(57)]
 
+// ---- equivariance: rotate the geometry by R = Rz(0.7) . Ry(1.1) ------------
+function rotslot(evsrc: Array<Float like Idx<240>>, i: Int) -> Float = {
+    let kk = i / 3
+    let r = i - kk * 3
+    rot(r * 3 + 0) * evsrc(kk * 3 + 0) + rot(r * 3 + 1) * evsrc(kk * 3 + 1) + rot(r * 3 + 2) * evsrc(kk * 3 + 2)
+}
 let rot_loss = {
-    let mut ev_r = replicate(evs_all, pure(0.0)) |> compute
-    for k in 0..80 {
-        for r in 0..3 {
-            let mut a = 0.0
-            for c in 0..3 {
-                a += rot(r * 3 + c) * all_ev(k * 3 + c)
-            }
-            ev_r(k * 3 + r) = a
-        }
-    }
+    let rec ev_r: Array<Float like Idx<240>> =
+        match ev_r with
+        | zero -> zero
+        | prefix :: i -> prefix :: rotslot(all_ev, i)
     loss_ev(w1_init, w2_init, w3_init, wr_init, br_init, ev_r)
 }
 

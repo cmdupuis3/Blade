@@ -1,0 +1,14 @@
+// TEST: Stack Complex Elements
+// stack is element-type agnostic: the copy runs over whatever the operands
+// hold. Complex128 sources exercise the SComplex store in the interpreter and
+// the std::complex pool in the emitted C++.
+type ZIdx = Idx<2>
+let z1: Array<Complex128 like ZIdx> = [complex(1.0, 2.0), complex(3.0, 4.0)]
+let z2: Array<Complex128 like ZIdx> = [complex(5.0, 6.0), complex(7.0, 8.0)]
+let z3: Array<Complex128 like ZIdx> = [complex(-1.0, 0.0), complex(0.0, -1.0)]
+let zs = stack(z1, z2, z3)
+let zre = real(zs(1, (0 : ZIdx)))
+let zim = imag(zs(2, (1 : ZIdx)))
+// EXPECT: zs = [(1, 2), (3, 4), (5, 6), (7, 8), (-1, 0), (0, -1)]
+// EXPECT: zre = 5
+// EXPECT: zim = -1

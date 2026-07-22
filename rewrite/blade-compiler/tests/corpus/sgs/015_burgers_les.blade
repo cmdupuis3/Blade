@@ -13,132 +13,169 @@ import ml as ml
 //   a posteriori: coarse LES with and without the model vs filtered DNS.
 // PAYOFF PIN: err_model < err_nomodel — the no-model run rings at the shock
 // (a -2.42 spike); the learned closure damps it (0.488 vs 2.002).
-// Pins from the sgs/ oracle (`dump-burgers`), initial condition baked, all
-// arithmetic mirrored term for term — bit-exact through 80 nonlinear steps.
+// The time stepping is RECURSIVE ARRAYS: every trajectory u(t) = step(u(t-1))
+// is a `let rec` whose slice IS the update (sequentiality derived from the
+// prefix dependence, no imperative loop, no double buffer); periodic stencils
+// read the field through module-level wrap tables; the folds are formers +
+// reduces. Pins from the sgs/ oracle (`dump-burgers`), initial condition baked.
 // ============================================================================
+type XD = Idx<64>
+type L = Idx<16>
+type Blk = Idx<9>
+type LT = Idx<81>
+
 let pi = 3.141592653589793
-let u0 = [0.41266780745483916, 0.447677510598231, 0.46830600316099974, 0.4765561438702567, 0.4748523764520039, 0.46592115755171093, 0.452660553824885, 0.4380042663075381, 0.4247855444890299, 0.4156064446225211, 0.4127176671410404, 0.41791378517932154, 0.43244806654079837, 0.45697031859957027, 0.49149027948043295, 0.5353680744449058, 0.5873321925451609, 0.6455243564035266, 0.7075695992583589, 0.7706688691164143, 0.8317105884243723, 0.8873968436226417, 0.934379291497262, 0.9693994712188443, 0.9894280178840651, 0.9917972929038612, 0.9743221781811069, 0.9354042159950311, 0.8741148983355782, 0.790254694387101, 0.6843853229389262, 0.557833792556852, 0.41266780745483944, 0.25164322993911, 0.07812535912874319, -0.10401321063866739, -0.2905144882781752, -0.47687231610028424, -0.6584799122143186, -0.8307823020197528, -0.9894280178840649, -1.130414462102952, -1.2502215574640498, -1.3459287435173883, -1.4153109984817749, -1.4569103528648475, -1.4700802813260279, -1.455001378899488, -1.4126678074548393, -1.3448450969408678, -1.254000961548102, -1.1432118023480038, -1.0160484765982007, -0.8764456850740685, -0.728559933107829, -0.5766214355066295, -0.42478554448903033, -0.2769892754234306, -0.13681828785809746, -0.007389257656964632, 0.10874803360539786, 0.20968533987817617, 0.2942046789066689, 0.3617995118977306]
+let hd = 2.0 * pi / 64.0
+let hl = 2.0 * pi / 16.0
+
+// periodic wrap tables: neighbour indices for the two grids (kernels index
+// these module-level arrays; conditional in-kernel neighbour reads are a C++
+// operator[] ambiguity, so the shifts are precomputed as data, like the DNS).
+let ipa: Array<Int64 like XD> = [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27, 28, 29, 30, 31, 32, 33, 34, 35, 36, 37, 38, 39, 40, 41, 42, 43, 44, 45, 46, 47, 48, 49, 50, 51, 52, 53, 54, 55, 56, 57, 58, 59, 60, 61, 62, 63, 0]
+let ima: Array<Int64 like XD> = [63, 0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27, 28, 29, 30, 31, 32, 33, 34, 35, 36, 37, 38, 39, 40, 41, 42, 43, 44, 45, 46, 47, 48, 49, 50, 51, 52, 53, 54, 55, 56, 57, 58, 59, 60, 61, 62]
+let jpa: Array<Int64 like L> = [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 0]
+let jma: Array<Int64 like L> = [15, 0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14]
+let jppa: Array<Int64 like L> = [2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 0, 1]
+let jmma: Array<Int64 like L> = [14, 15, 0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13]
+
+let u0: Array<Float like XD> = [0.41266780745483916, 0.447677510598231, 0.46830600316099974, 0.4765561438702567, 0.4748523764520039, 0.46592115755171093, 0.452660553824885, 0.4380042663075381, 0.4247855444890299, 0.4156064446225211, 0.4127176671410404, 0.41791378517932154, 0.43244806654079837, 0.45697031859957027, 0.49149027948043295, 0.5353680744449058, 0.5873321925451609, 0.6455243564035266, 0.7075695992583589, 0.7706688691164143, 0.8317105884243723, 0.8873968436226417, 0.934379291497262, 0.9693994712188443, 0.9894280178840651, 0.9917972929038612, 0.9743221781811069, 0.9354042159950311, 0.8741148983355782, 0.790254694387101, 0.6843853229389262, 0.557833792556852, 0.41266780745483944, 0.25164322993911, 0.07812535912874319, -0.10401321063866739, -0.2905144882781752, -0.47687231610028424, -0.6584799122143186, -0.8307823020197528, -0.9894280178840649, -1.130414462102952, -1.2502215574640498, -1.3459287435173883, -1.4153109984817749, -1.4569103528648475, -1.4700802813260279, -1.455001378899488, -1.4126678074548393, -1.3448450969408678, -1.254000961548102, -1.1432118023480038, -1.0160484765982007, -0.8764456850740685, -0.728559933107829, -0.5766214355066295, -0.42478554448903033, -0.2769892754234306, -0.13681828785809746, -0.007389257656964632, 0.10874803360539786, 0.20968533987817617, 0.2942046789066689, 0.3617995118977306]
+
+// one explicit-Euler DNS step of viscous Burgers (advective form), periodic
+function burgers_step(u: Array<Float like XD>, ip: Array<Int64 like XD>, im: Array<Int64 like XD>, h: Float) -> Array<Float like XD> =
+    (method_for(range<XD>) <@> lambda(i) ->
+        u(i) + 0.01 * (0.05 * ((u(ip(i)) - 2.0 * u(i) + u(im(i))) / (h * h)) - u(i) * ((u(ip(i)) - u(im(i))) / (2.0 * h)))
+    ) |> compute
+
+// ten DNS steps = one sampling block
+function dns10(u: Array<Float like XD>, ip: Array<Int64 like XD>, im: Array<Int64 like XD>, h: Float) -> Array<Float like XD> = {
+    let u1 = burgers_step(u, ip, im, h)
+    let u2 = burgers_step(u1, ip, im, h)
+    let u3 = burgers_step(u2, ip, im, h)
+    let u4 = burgers_step(u3, ip, im, h)
+    let u5 = burgers_step(u4, ip, im, h)
+    let u6 = burgers_step(u5, ip, im, h)
+    let u7 = burgers_step(u6, ip, im, h)
+    let u8 = burgers_step(u7, ip, im, h)
+    let u9 = burgers_step(u8, ip, im, h)
+    burgers_step(u9, ip, im, h)
+}
+
+// W=4 box filter, 64 -> 16
+function filter16(f: Array<Float like XD>) -> Array<Float like L> =
+    (method_for(range<L>) <@> lambda(j) ->
+        (f(4 * j + 0) + f(4 * j + 1) + f(4 * j + 2) + f(4 * j + 3)) / 4.0
+    ) |> compute
+
+// Smagorinsky-form shape g = -2 Delta^2 |S| S, S = d(ubar)/dx (central)
+function smag_g(ub: Array<Float like L>, jp: Array<Int64 like L>, jm: Array<Int64 like L>, h: Float) -> Array<Float like L> =
+    (method_for(range<L>) <@> lambda(j) -> {
+        let sb = (ub(jp(j)) - ub(jm(j))) / (2.0 * h)
+        let gv = -2.0 * h * h * abs(sb) * sb
+        gv
+    }) |> compute
+
+// per-sample a-priori regression contribution [sum_j tau*g, sum_j g*g]:
+// tau = mean(u^2 | tile) - ubar^2 is the exact subgrid stress (a comoment)
+function contrib(f: Array<Float like XD>, jp: Array<Int64 like L>, jm: Array<Int64 like L>, h: Float) -> Array<Float like Idx<2>> = {
+    let ub = filter16(f)
+    let fsq = f * f
+    let msq = filter16(fsq)
+    let ub2 = ub * ub
+    let tau = msq - ub2
+    let g = smag_g(ub, jp, jm, h)
+    [prodsum(tau, g), prodsum(g, g)]
+}
 
 // the ONE certified piece: the closure model term at a coarse cell, from
 // the two neighboring filtered-velocity samples
-function tau_model(up: Float, um: Float, hl: Float, c: Float) where ml.galilean(up, um) -> Float = {
-    let s = (up - um) / (2.0 * hl)
-    c * (-2.0 * hl * hl * abs(s) * s)
+function tau_model(up: Float, um: Float, h: Float, c: Float) where ml.galilean(up, um) -> Float = {
+    let s = (up - um) / (2.0 * h)
+    c * (-2.0 * h * h * abs(s) * s)
 }
 
-let mut u = [0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0]
-let mut un = [0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0]
-let mut ub = [0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0]
-let mut reg = [0.0, 0.0]
+// one coarse LES step (advective form + closure-stress divergence)
+function les_step(v: Array<Float like L>, jp: Array<Int64 like L>, jm: Array<Int64 like L>, jpp: Array<Int64 like L>, jmm: Array<Int64 like L>, h: Float, c: Float) -> Array<Float like L> =
+    (method_for(range<L>) <@> lambda(j) -> {
+        let tp = tau_model(v(jpp(j)), v(j), h, c)
+        let tm = tau_model(v(j), v(jmm(j)), h, c)
+        v(j) + 0.01 * (0.05 * ((v(jp(j)) - 2.0 * v(j) + v(jm(j))) / (h * h)) - v(j) * ((v(jp(j)) - v(jm(j))) / (2.0 * h)) - (tp - tm) / (2.0 * h))
+    }) |> compute
 
-// ---- DNS with interleaved a priori sampling: 8 x (sample; 10 steps) ----
-let dns_done = {
-    let hd = 2.0 * pi / 64.0
-    let hl = 2.0 * pi / 16.0
-    for i in 0..64 { u(i) = u0(i) }
-    for b in 0..8 {
-        for j in 0..16 {
-            let mut s = 0.0
-            for d in 0..4 { s += u(j * 4 + d) }
-            ub(j) = s / 4.0
-        }
-        for j in 0..16 {
-            let mut ps = 0.0
-            for d in 0..4 { ps += u(j * 4 + d) * u(j * 4 + d) }
-            let tau = ps / 4.0 - ub(j) * ub(j)
-            let jp = (j + 1) % 16
-            let jm = (j + 15) % 16
-            let sb = (ub(jp) - ub(jm)) / (2.0 * hl)
-            let g = -2.0 * hl * hl * abs(sb) * sb
-            reg(0) += tau * g
-            reg(1) += g * g
-        }
-        for tt in 0..10 {
-            for i in 0..64 {
-                let ip = (i + 1) % 64
-                let im = (i + 63) % 64
-                un(i) = u(i) + 0.01 * (0.05 * ((u(ip) - 2.0 * u(i) + u(im)) / (hd * hd)) - u(i) * ((u(ip) - u(im)) / (2.0 * hd)) - 0.0)
-            }
-            for i in 0..64 { u(i) = un(i) }
-        }
-    }
-    0.0
+// ---- DNS as a recursive array: blk(b) is the field after 10b steps, so the
+// a-priori samples are blk(0..7) (t = 0, 10, ..., 70) and the final field is
+// blk(8). C = <tau g>/<g g> folds the 8 per-sample contributions. ----
+let c_learned = {
+    let rec blk: Array<Float like Blk, XD> =
+        match blk with
+        | zero -> zero
+        | zero :: s -> zero :: u0
+        | prefix :: n -> prefix :: dns10(prefix(n - 1), ipa, ima, hd)
+    let s0 = blk(0)
+    let s1 = blk(1)
+    let s2 = blk(2)
+    let s3 = blk(3)
+    let s4 = blk(4)
+    let s5 = blk(5)
+    let s6 = blk(6)
+    let s7 = blk(7)
+    let c0 = contrib(s0, jpa, jma, hl)
+    let c1 = contrib(s1, jpa, jma, hl)
+    let c2 = contrib(s2, jpa, jma, hl)
+    let c3 = contrib(s3, jpa, jma, hl)
+    let c4 = contrib(s4, jpa, jma, hl)
+    let c5 = contrib(s5, jpa, jma, hl)
+    let c6 = contrib(s6, jpa, jma, hl)
+    let c7 = contrib(s7, jpa, jma, hl)
+    let reg = c0 + c1 + c2 + c3 + c4 + c5 + c6 + c7
+    reg(0) / reg(1)
 }
-let c_learned = reg(0) / reg(1)
 // EXPECT: c_learned = 0.10247926333564443
 
-let mut dns_bar = [0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0]
-let bar_done = {
-    for j in 0..16 {
-        let mut s = 0.0
-        for d in 0..4 { s += u(j * 4 + d) }
-        dns_bar(j) = s / 4.0
-    }
-    0.0
+// filtered final DNS field, the a-posteriori reference
+let dns_bar = {
+    let rec blk: Array<Float like Blk, XD> =
+        match blk with
+        | zero -> zero
+        | zero :: s -> zero :: u0
+        | prefix :: n -> prefix :: dns10(prefix(n - 1), ipa, ima, hd)
+    let uf = blk(8)
+    filter16(uf)
 }
 // EXPECT: dns_bar = [0.3106288260701199, 0.42367258478749803, 0.4448532433129827, 0.4420370390195009, 0.5019661852184347, 0.6250871517093046, 0.773738281648543, 0.8977721610505398, -0.09129081277855333, -1.330026444654224, -1.1329260848315503, -0.8881521955334666, -0.6268948443326589, -0.36350955740184915, -0.10929060699123225, 0.12233507370660954]
 
-// ---- a posteriori LES, with the learned closure and without ----
-let mut lm = [0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0]
-let mut ln = [0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0]
-let mut lt = [0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0]
-let les_model_done = {
-    let hl = 2.0 * pi / 16.0
-    for j in 0..16 {
-        let mut s = 0.0
-        for d in 0..4 { s += u0(j * 4 + d) }
-        lm(j) = s / 4.0
-    }
-    for t in 0..80 {
-        for j in 0..16 {
-            let jp = (j + 1) % 16
-            let jm = (j + 15) % 16
-            let jpp = (j + 2) % 16
-            let jmm = (j + 14) % 16
-            let tp = tau_model(lm(jpp), lm(j), hl, c_learned)
-            let tm = tau_model(lm(j), lm(jmm), hl, c_learned)
-            lt(j) = lm(j) + 0.01 * (0.05 * ((lm(jp) - 2.0 * lm(j) + lm(jm)) / (hl * hl)) - lm(j) * ((lm(jp) - lm(jm)) / (2.0 * hl)) - (tp - tm) / (2.0 * hl))
-        }
-        for j in 0..16 { lm(j) = lt(j) }
-    }
-    0.0
+// ---- a-posteriori LES: each field is a recursive array over 80 coarse steps,
+// lm with the learned closure, ln with none (c = 0) ----
+let lm = {
+    let lm0 = filter16(u0)
+    let rec lm_traj: Array<Float like LT, L> =
+        match lm_traj with
+        | zero -> zero
+        | zero :: s -> zero :: lm0
+        | prefix :: n -> prefix :: les_step(prefix(n - 1), jpa, jma, jppa, jmma, hl, c_learned)
+    lm_traj(80)
 }
 // EXPECT: lm = [0.2954861658488696, 0.40729845563967637, 0.42471230456899406, 0.43702055106048715, 0.5119473544509064, 0.6391857818138728, 0.7889572339057705, 0.9410133520417426, 0.38956225292345326, -1.830598668172149, -1.08810109158179, -0.8929099991910181, -0.6317145724729729, -0.3735970349403537, -0.12375186423936332, 0.10548977834387468]
 
-let les_nomodel_done = {
-    let hl = 2.0 * pi / 16.0
-    for j in 0..16 {
-        let mut s = 0.0
-        for d in 0..4 { s += u0(j * 4 + d) }
-        ln(j) = s / 4.0
-    }
-    for t in 0..80 {
-        for j in 0..16 {
-            let jp = (j + 1) % 16
-            let jm = (j + 15) % 16
-            let jpp = (j + 2) % 16
-            let jmm = (j + 14) % 16
-            let tp = tau_model(ln(jpp), ln(j), hl, 0.0)
-            let tm = tau_model(ln(j), ln(jmm), hl, 0.0)
-            lt(j) = ln(j) + 0.01 * (0.05 * ((ln(jp) - 2.0 * ln(j) + ln(jm)) / (hl * hl)) - ln(j) * ((ln(jp) - ln(jm)) / (2.0 * hl)) - (tp - tm) / (2.0 * hl))
-        }
-        for j in 0..16 { ln(j) = lt(j) }
-    }
-    0.0
+let ln = {
+    let ln0 = filter16(u0)
+    let rec ln_traj: Array<Float like LT, L> =
+        match ln_traj with
+        | zero -> zero
+        | zero :: s -> zero :: ln0
+        | prefix :: n -> prefix :: les_step(prefix(n - 1), jpa, jma, jppa, jmma, hl, 0.0)
+    ln_traj(80)
 }
 // EXPECT: ln = [0.3097274068829204, 0.41547636738827926, 0.4264237453126189, 0.4340005024029604, 0.5073117764753461, 0.6383743464064993, 0.77521705584994, 1.0839214967466042, 0.7854856081425711, -2.4219683793696634, -1.0610010872224989, -0.8952179583706537, -0.6355824185021679, -0.3690477359769344, -0.11327765437803439, 0.12015692821221231]
 
-let mut errs = [0.0, 0.0]
-let err_done = {
-    for j in 0..16 {
-        errs(0) += (lm(j) - dns_bar(j)) * (lm(j) - dns_bar(j))
-        errs(1) += (ln(j) - dns_bar(j)) * (ln(j) - dns_bar(j))
-    }
-    0.0
+let err_model = {
+    let d = lm - dns_bar
+    prodsum(d, d)
 }
-let err_model = errs(0)
 // EXPECT: err_model = 0.4877700644327492
-let err_nomodel = errs(1)
+let err_nomodel = {
+    let d = ln - dns_bar
+    prodsum(d, d)
+}
 // EXPECT: err_nomodel = 2.001755107285999
 let closure_improves_les = if err_model < err_nomodel then 1.0 else 0.0
 // EXPECT: closure_improves_les = 1.0

@@ -320,6 +320,7 @@ let rec private anyExpr (p: Expr -> bool) (e: Expr) : bool =
     | ExprKind.ExprMatch (s, cases) -> any s || (cases |> List.exists (fun c -> any c.Body || (c.Guard |> Option.map any |> Option.defaultValue false)))
     | ExprKind.ExprIf (c, t, f) -> any c || any t || any f
     | ExprKind.ExprTuple es | ExprKind.ExprArrayLit es | ExprKind.ExprZip es | ExprKind.ExprStack es | ExprKind.ExprSequence es -> List.exists any es
+    | ExprKind.ExprJoin (es, _) -> List.exists any es
     | ExprKind.ExprBlock (stmts, fin) ->
         let stmtAny s =
             let rec go s =
@@ -2531,9 +2532,65 @@ let rec private stripQualified (aliases: Set<string>) (e: Expr) : Expr =
     | ExprKind.ExprLet (b, body) -> inheritSpan e (ExprLet ({ b with Value = r b.Value }, r body))
     | ExprKind.ExprLambda (ps, w, body) -> inheritSpan e (ExprLambda (ps, w, r body))
     | ExprKind.ExprMatch (s, cases) ->
-        inheritSpan e (ExprMatch (r s, cases |> List.map (fun c -> { c with Body = r c.Body })))
+        inheritSpan e (ExprMatch (r s, cases |> List.map (fun c -> { c with Guard = Option.map r c.Guard; Body = r c.Body })))
     | ExprKind.ExprBlock (stmts, fin) -> inheritSpan e (ExprBlock (List.map rStmt stmts, Option.map r fin))
-    | _ -> e
+    // Recursive array (`let rec q: T = match q with ...`): the seed and
+    // inductive slices are ordinary expressions and may carry qualified names.
+    | ExprKind.ExprRecArray def ->
+        inheritSpan e (ExprRecArray { def with
+                                        SeedArm = def.SeedArm |> Option.map (fun (sv, se) -> (sv, r se))
+                                        SliceExpr = r def.SliceExpr })
+    // The rest of the expression algebra. The wildcard is deliberately gone so
+    // FS0025 flags AST growth here rather than leaving a qualified name to fail
+    // downstream as an unbound variable.
+    | ExprKind.ExprCompute a -> inheritSpan e (ExprCompute (r a))
+    | ExprKind.ExprRead a -> inheritSpan e (ExprRead (r a))
+    | ExprKind.ExprPure a -> inheritSpan e (ExprPure (r a))
+    | ExprKind.ExprStatic a -> inheritSpan e (ExprStatic (r a))
+    | ExprKind.ExprRank a -> inheritSpan e (ExprRank (r a))
+    | ExprKind.ExprExtents a -> inheritSpan e (ExprExtents (r a))
+    | ExprKind.ExprUnique a -> inheritSpan e (ExprUnique (r a))
+    | ExprKind.ExprObjectFor k -> inheritSpan e (ExprObjectFor (r k))
+    | ExprKind.ExprReynolds (k, anti) -> inheritSpan e (ExprReynolds (r k, anti))
+    | ExprKind.ExprField (obj, fld) -> inheritSpan e (ExprField (r obj, fld))
+    | ExprKind.ExprPartialApp (op, a, isLeft) -> inheritSpan e (ExprPartialApp (op, r a, isLeft))
+    | ExprKind.ExprTranspose (a, d1, d2) -> inheritSpan e (ExprTranspose (r a, d1, d2))
+    | ExprKind.ExprDecompact (a, d) -> inheritSpan e (ExprDecompact (r a, d))
+    | ExprKind.ExprBlocked (t, a) -> inheritSpan e (ExprBlocked (t, r a))
+    | ExprKind.ExprHalo (t, offs) -> inheritSpan e (ExprHalo (t, r offs))
+    | ExprKind.ExprMethodFor es -> inheritSpan e (ExprMethodFor (List.map r es))
+    | ExprKind.ExprZip es -> inheritSpan e (ExprZip (List.map r es))
+    | ExprKind.ExprStack es -> inheritSpan e (ExprStack (List.map r es))
+    | ExprKind.ExprSequence es -> inheritSpan e (ExprSequence (List.map r es))
+    | ExprKind.ExprGroupKeys es -> inheritSpan e (ExprGroupKeys (List.map r es))
+    | ExprKind.ExprAlign (es, spec) -> inheritSpan e (ExprAlign (List.map r es, spec))
+    | ExprKind.ExprJoin (es, d) -> inheritSpan e (ExprJoin (List.map r es, d))
+    | ExprKind.ExprTupleIndex (t, i) -> inheritSpan e (ExprTupleIndex (r t, r i))
+    | ExprKind.ExprGuard (c, b) -> inheritSpan e (ExprGuard (r c, r b))
+    | ExprKind.ExprReplicate (c, b) -> inheritSpan e (ExprReplicate (r c, r b))
+    | ExprKind.ExprMask (a, p) -> inheritSpan e (ExprMask (r a, r p))
+    | ExprKind.ExprCompound (d, m) -> inheritSpan e (ExprCompound (r d, r m))
+    | ExprKind.ExprIntersect (a, b) -> inheritSpan e (ExprIntersect (r a, r b))
+    | ExprKind.ExprUnion (a, b) -> inheritSpan e (ExprUnion (r a, r b))
+    | ExprKind.ExprContains (a, v) -> inheritSpan e (ExprContains (r a, r v))
+    | ExprKind.ExprGroupBy (v, g) -> inheritSpan e (ExprGroupBy (r v, r g))
+    | ExprKind.ExprSort (a, k) -> inheritSpan e (ExprSort (r a, r k))
+    | ExprKind.ExprGram (l, rr) -> inheritSpan e (ExprGram (r l, r rr))
+    | ExprKind.ExprReduce (a, k, init) -> inheritSpan e (ExprReduce (r a, r k, Option.map r init))
+    | ExprKind.ExprStruct (nm, fields, spread) ->
+        inheritSpan e (ExprStruct (nm, fields |> List.map (fun (fn, fe) -> (fn, r fe)), Option.map r spread))
+    | ExprKind.ExprFor (src, cs, kern) ->
+        let src' =
+            match src with
+            | ForArrays (arrs, inClause) -> ForArrays (List.map r arrs, Option.map r inClause)
+            | ForKernel k -> ForKernel (r k)
+        inheritSpan e (ExprFor (src', cs, Option.map r kern))
+    // Leaves: no sub-expressions. Index/type arguments (range<I>, reverse<I>)
+    // carry TypeExprs, not Exprs, and are never rewritten.
+    | ExprKind.ExprLit _ | ExprKind.ExprVar _ | ExprKind.ExprWildcard
+    | ExprKind.ExprQualified _ | ExprKind.ExprRange _ | ExprKind.ExprReverse _
+    | ExprKind.ExprArity _ | ExprKind.ExprNth | ExprKind.ExprZero
+    | ExprKind.ExprSection _ -> e
 
 /// Normalize a qualified constraint-conjunct name (`"<alias>.indep"` from the
 /// parser's dotted where-clause arm) to the registered internal name.

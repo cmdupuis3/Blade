@@ -12,12 +12,14 @@ function du(u: Array<Float like Idx<8>>, i: Int, j: Int) where ml.galilean(u) ->
   u(i) - u(j)
 
 function fluct_energy(u: Array<Float like Idx<8>>, um: Float) where ml.galilean(u, um) -> Float = {
-    let mut acc = 0.0
-    for k in 0..8 {
-        let d = u(k) - um
-        acc = acc + d * d
-    }
-    acc
+    // The fluctuation d = u(k) - um is a BVar - BVar difference — the boost
+    // cancels INSIDE the kernel, certified by the former-transparent
+    // galilean judgment (kernel params carry the source arrays' statuses).
+    let dsq = (for (u) in range<Idx<8>> <@> lambda(x, k) -> {
+        let d = x - um
+        d * d
+    }) |> compute
+    reduce(dsq, (+))
 }
 
 function pair_diff(u: Array<Float like Idx<8>>) where ml.galilean(u) -> Float =

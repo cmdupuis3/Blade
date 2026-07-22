@@ -1,0 +1,70 @@
+// TEST: Recursive Array Implicit Zero History
+// ============================================================================
+// Formalism 7.5 / 10.4: a prefix read that falls OUTSIDE the prefix built so
+// far resolves to the element type's ZERO. The empty-array boundary yields
+// zero slices, mirroring the identity base case of recursive kernels (8.2).
+// So `prefix(n - 3)` at n < 3 is zero BY SPECIFICATION and needs no
+// hand-written `if n >= 3 then ... else ZERO` guard at the call site.
+//
+// This is a real guarantee, not an artifact of the zero-prefilled v1 buffer:
+// the desugared read indexes before the buffer, so before the guard landed
+// these lags returned heap-allocator garbage (`b` below read -1.3e+69).
+// Any future storage change — the rolling window in particular — must keep
+// these values.
+// ============================================================================
+type Draw = Idx<6>
+type D2 = Idx<6>
+type IStep = Idx<5>
+type CStep = Idx<5>
+type Step = Idx<6>
+type C = Idx<3>
+
+// --- rank-1, read RAW so nothing can absorb a stray denormal ---------------
+// a(0) = 1 (seed); a(1) = a(-2) = 0; a(2) = a(-1) = 0; a(3) = a(0) = 1; ...
+let rec a: Array<Float like Draw> =
+    match a with
+    | zero -> zero
+    | zero :: s -> zero :: 1.0
+    | prefix :: n -> prefix :: prefix(n - 3)
+// EXPECT: a = [1, 0, 0, 1, 0, 0]
+
+// --- the same stream amplified by 1e300 ------------------------------------
+// The distinguisher: a denormal or heap-metadata bit pattern scales into a
+// visible number here, an exact zero stays zero.
+let rec b: Array<Float like D2> =
+    match b with
+    | zero -> zero
+    | zero :: s -> zero :: 1.0
+    | prefix :: n -> prefix :: prefix(n - 3) * 1.0e300
+// EXPECT: b = [1, 0, 0, 1e+300, 0, 0]
+
+// --- integer elements ------------------------------------------------------
+// c(1) = c(-1) + 1 = 1, c(3) = c(1) + 1 = 2.
+let rec c: Array<Int like IStep> =
+    match c with
+    | zero -> zero
+    | zero :: s -> zero :: 5
+    | prefix :: n -> prefix :: prefix(n - 2) + 1
+// EXPECT: c = [5, 1, 6, 2, 7]
+
+// --- complex elements (the QG spectral field's type) -----------------------
+// The out-of-prefix read is complex(0, 0), so z alternates seed / zero.
+let rec z: Array<Complex128 like CStep> =
+    match z with
+    | zero -> zero
+    | zero :: s -> zero :: complex(2.0, 3.0)
+    | prefix :: n -> prefix :: prefix(n - 2)
+// EXPECT: z = [(2,3), (0,0), (2,3), (0,0), (2,3)]
+
+// --- rank 2: an out-of-prefix read yields a zero SLICE ---------------------
+// row(n) = row(n-1) + row(n-3), so rows 1 and 2 just carry the seed forward
+// (their lag-3 rows are before the base) and row 3 is the first real sum.
+function addrows(p: Array<Float like C>, q: Array<Float like C>) -> Array<Float like C> =
+    (method_for(zip(p, q)) <@> lambda(x, y) -> x + y) |> compute
+
+let rec m: Array<Float like Step, C> =
+    match m with
+    | zero -> zero
+    | zero :: s -> zero :: [1.0, 2.0, 3.0]
+    | prefix :: n -> prefix :: addrows(prefix(n - 1), prefix(n - 3))
+// EXPECT: m = [1, 2, 3, 1, 2, 3, 1, 2, 3, 2, 4, 6, 3, 6, 9, 4, 8, 12]

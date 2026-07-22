@@ -1,0 +1,14 @@
+// TEST: Recursive Array Complex Rotation
+// ============================================================================
+// Complex-element recursive array: z_n = z_{n-1} * i (quarter rotation),
+// seed 1+0i. Exercises the complex(0,0) zero-fill and complex arithmetic in
+// the slice expression — the element type the QG spectral fields carry.
+// z: 1+0i, 0+1i, -1+0i, 0-1i
+// ============================================================================
+type Step = Idx<4>
+let rec z: Array<Complex128 like Step> =
+    match z with
+    | zero -> zero
+    | zero :: s -> zero :: complex(1.0, 0.0)
+    | prefix :: n -> prefix :: prefix(n - 1) * complex(0.0, 1.0)
+// EXPECT: z = [(1, 0), (0, 1), (-1, 0), (-0, -1)]

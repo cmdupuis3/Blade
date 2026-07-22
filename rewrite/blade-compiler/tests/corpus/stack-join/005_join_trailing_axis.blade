@@ -1,0 +1,22 @@
+// TEST: Join Trailing Axis
+// Joining the TRAILING axis interleaves at the row level: (2,3) + (2,3) along
+// d = 1 is (2,6), each output row being A's row followed by B's row. The
+// row-major print makes the difference from a leading-axis join visible.
+type YIdx = Idx<2>
+type XIdx = Idx<3>
+let p: Array<Float64 like YIdx, XIdx> = [[1.0, 2.0, 3.0], [4.0, 5.0, 6.0]]
+let q: Array<Float64 like YIdx, XIdx> = [[10.0, 20.0, 30.0], [40.0, 50.0, 60.0]]
+let jcol = join(p, q, 1)
+let seam_left = jcol((0 : YIdx), 2)
+let seam_right = jcol((0 : YIdx), 3)
+let row1_tail = jcol((1 : YIdx), 5)
+// Complex elements ride the same copy.
+type ZIdx = Idx<2>
+let z1: Array<Complex128 like ZIdx> = [complex(1.0, 2.0), complex(3.0, 4.0)]
+let z2: Array<Complex128 like ZIdx> = [complex(5.0, 6.0), complex(7.0, 8.0)]
+let zj = join(z1, z2, 0)
+// EXPECT: jcol = [1.0, 2.0, 3.0, 10.0, 20.0, 30.0, 4.0, 5.0, 6.0, 40.0, 50.0, 60.0]
+// EXPECT: seam_left = 3
+// EXPECT: seam_right = 10
+// EXPECT: row1_tail = 60
+// EXPECT: zj = [(1, 2), (3, 4), (5, 6), (7, 8)]

@@ -7,11 +7,12 @@
 // white observation noise is lag-uncorrelated, so it inflates C(0) ONLY;
 // invariants keep a tau-INDEPENDENT eigenvalue (a plateau) while every
 // oscillating direction's eigenvalue moves with tau.
-// ARCHITECTURE (halo rewrite): the ONLY imperative loop left is the
-// integrator -- 8 velocity-Verlet trajectories of the 2D isotropic
-// oscillator (12,000 symplectic steps, h = 0.05) with an exact-double LCG
-// observation channel, emitted as one interleaved record (scan's future
-// home). EVERY statistic is a pure sweep over that record:
+// ARCHITECTURE (halo rewrite): NO imperative loop remains -- the integrator
+// is a RECURSIVE ARRAY. 8 velocity-Verlet trajectories of the 2D isotropic
+// oscillator (1500 symplectic steps, h = 0.05) step together as a rank-3
+// trajectory TRC(t, k, c); the exact-double LCG observation channel is a
+// second recursive array (LCGS), and the noisy record TRN is the clean field
+// plus each cell's own draw. EVERY statistic is a pure sweep over that record:
 //   * interior + lagged coordinate views via halo<Idx<1500>, [-12, -24]>
 //     -- the reach shrinks each collision to its 1476-step interior
 //     (t = 24..1499, the old hand-gate g and ring buffer, now in the type);
@@ -71,56 +72,50 @@ let ICS: Array<Float64 like Idx<8>, Idx<4>> = [
 let pa = [0, 1, 2, 3, 0, 1, 2, 3, 0, 0, 0, 1, 1, 2]
 let pb = [-1, -1, -1, -1, 0, 1, 2, 3, 1, 2, 3, 2, 3, 3]
 
-// ---- integrate + emit, sigma = 0.0: the ONLY imperative loop (a genuine
-//      recurrence -- scan's future home). The observed record is one
-//      interleaved buffer, cell 4*(1500 k + t) + c for coordinate c. ----
-let TRC = {
-    let z = method_for(range<Idx<48000>>) <@> lambda(u) -> 0.0 |> compute
-    let mut tr = z
-    let mut s = 20260717.0
-    let mut x = 0.0
-    let mut y = 0.0
-    let mut px = 0.0
-    let mut py = 0.0
-    for k in 0..8 {
-        x = ICS(k, 0)
-        y = ICS(k, 1)
-        px = ICS(k, 2)
-        py = ICS(k, 3)
-        for t in 0..1500 {
-            let pxh = px - 0.025 * x
-            let pyh = py - 0.025 * y
-            x = x + 0.05 * pxh
-            y = y + 0.05 * pyh
-            px = pxh - 0.025 * x
-            py = pyh - 0.025 * y
-            s = s * 48271.0 - floor(s * 48271.0 / 2147483647.0) * 2147483647.0
-            tr(4 * (1500 * k + t)) = x + (s / 2147483647.0 - 0.5) * 3.46410161513775 * 0.0
-            s = s * 48271.0 - floor(s * 48271.0 / 2147483647.0) * 2147483647.0
-            tr(4 * (1500 * k + t) + 1) = y + (s / 2147483647.0 - 0.5) * 3.46410161513775 * 0.0
-            s = s * 48271.0 - floor(s * 48271.0 / 2147483647.0) * 2147483647.0
-            tr(4 * (1500 * k + t) + 2) = px + (s / 2147483647.0 - 0.5) * 3.46410161513775 * 0.0
-            s = s * 48271.0 - floor(s * 48271.0 / 2147483647.0) * 2147483647.0
-            tr(4 * (1500 * k + t) + 3) = py + (s / 2147483647.0 - 0.5) * 3.46410161513775 * 0.0
-        }
-    }
-    tr
-}
+// ---- integrate + emit, sigma = 0.0: the integrator is now a RECURSIVE
+//      ARRAY (the imperative for-in is gone). Coordinate c of trajectory k at
+//      step t lives at TRC(t, k, c) -- the same interleaved record as the old
+//      flat cell 4*(1500 k + t) + c, indexed rank-3. ----
+// one symplectic velocity-Verlet step of all 8 oscillators at once: each row
+// of the 8 x 4 field carries one trajectory's (x, y, px, py); the substituted
+// closed form of the leapfrog (px' reads the already-updated x) is written out
+// per component.
+function vstep8(prev: Array<Float64 like Idx<8>, Idx<4>>) -> Array<Float64 like Idx<8>, Idx<4>> =
+    (method_for(range<Idx<8>, Idx<4>>) <@> lambda(k: Int64, c: Int64) -> {
+        let x = prev(k, 0)
+        let y = prev(k, 1)
+        let px = prev(k, 2)
+        let py = prev(k, 3)
+        let pxh = px - 0.025 * x
+        let pyh = py - 0.025 * y
+        let xn = x + 0.05 * pxh
+        let yn = y + 0.05 * pyh
+        if c < 1 then xn else if c < 2 then yn else if c < 3 then pxh - 0.025 * xn else pyh - 0.025 * yn
+    }) |> compute
+// the 8 velocity-Verlet trajectories as a recursive array over time: leading
+// axis is the 1500 symplectic steps, each slice is the whole 8 x 4 ensemble
+// stepped once from the previous slice (seeded by one step off the ICS). The
+// sigma = 0 channel is exactly this clean field (the old noise term was * 0.0).
+let rec TRC: Array<Float64 like Idx<1500>, Idx<8>, Idx<4>> =
+    match TRC with
+    | zero -> zero
+    | zero :: s -> zero :: vstep8(ICS)
+    | prefix :: n -> prefix :: vstep8(prefix(n - 1))
 
 // ---- interior + lagged coordinate views, sigma = 0.0: per-collision
 //      boundary by halo construction (390-free: 1500 - 24 = 1476 cells) ----
-let XAC = method_for(range<Idx<8>, halo<Idx<1500>, [-12, -24]>>) <@> lambda(k, w) -> TRC(4 * (1500 * k + w(0))) |> compute
-let YAC = method_for(range<Idx<8>, halo<Idx<1500>, [-12, -24]>>) <@> lambda(k, w) -> TRC(4 * (1500 * k + w(0)) + 1) |> compute
-let PAC = method_for(range<Idx<8>, halo<Idx<1500>, [-12, -24]>>) <@> lambda(k, w) -> TRC(4 * (1500 * k + w(0)) + 2) |> compute
-let QAC = method_for(range<Idx<8>, halo<Idx<1500>, [-12, -24]>>) <@> lambda(k, w) -> TRC(4 * (1500 * k + w(0)) + 3) |> compute
-let XLC = method_for(range<Idx<8>, halo<Idx<1500>, [-12, -24]>>) <@> lambda(k, w) -> TRC(4 * (1500 * k + w(-12))) |> compute
-let YLC = method_for(range<Idx<8>, halo<Idx<1500>, [-12, -24]>>) <@> lambda(k, w) -> TRC(4 * (1500 * k + w(-12)) + 1) |> compute
-let PLC = method_for(range<Idx<8>, halo<Idx<1500>, [-12, -24]>>) <@> lambda(k, w) -> TRC(4 * (1500 * k + w(-12)) + 2) |> compute
-let QLC = method_for(range<Idx<8>, halo<Idx<1500>, [-12, -24]>>) <@> lambda(k, w) -> TRC(4 * (1500 * k + w(-12)) + 3) |> compute
-let XMC = method_for(range<Idx<8>, halo<Idx<1500>, [-12, -24]>>) <@> lambda(k, w) -> TRC(4 * (1500 * k + w(-24))) |> compute
-let YMC = method_for(range<Idx<8>, halo<Idx<1500>, [-12, -24]>>) <@> lambda(k, w) -> TRC(4 * (1500 * k + w(-24)) + 1) |> compute
-let PMC = method_for(range<Idx<8>, halo<Idx<1500>, [-12, -24]>>) <@> lambda(k, w) -> TRC(4 * (1500 * k + w(-24)) + 2) |> compute
-let QMC = method_for(range<Idx<8>, halo<Idx<1500>, [-12, -24]>>) <@> lambda(k, w) -> TRC(4 * (1500 * k + w(-24)) + 3) |> compute
+let XAC = method_for(range<Idx<8>, halo<Idx<1500>, [-12, -24]>>) <@> lambda(k, w) -> TRC(w(0), k, 0) |> compute
+let YAC = method_for(range<Idx<8>, halo<Idx<1500>, [-12, -24]>>) <@> lambda(k, w) -> TRC(w(0), k, 1) |> compute
+let PAC = method_for(range<Idx<8>, halo<Idx<1500>, [-12, -24]>>) <@> lambda(k, w) -> TRC(w(0), k, 2) |> compute
+let QAC = method_for(range<Idx<8>, halo<Idx<1500>, [-12, -24]>>) <@> lambda(k, w) -> TRC(w(0), k, 3) |> compute
+let XLC = method_for(range<Idx<8>, halo<Idx<1500>, [-12, -24]>>) <@> lambda(k, w) -> TRC(w(-12), k, 0) |> compute
+let YLC = method_for(range<Idx<8>, halo<Idx<1500>, [-12, -24]>>) <@> lambda(k, w) -> TRC(w(-12), k, 1) |> compute
+let PLC = method_for(range<Idx<8>, halo<Idx<1500>, [-12, -24]>>) <@> lambda(k, w) -> TRC(w(-12), k, 2) |> compute
+let QLC = method_for(range<Idx<8>, halo<Idx<1500>, [-12, -24]>>) <@> lambda(k, w) -> TRC(w(-12), k, 3) |> compute
+let XMC = method_for(range<Idx<8>, halo<Idx<1500>, [-12, -24]>>) <@> lambda(k, w) -> TRC(w(-24), k, 0) |> compute
+let YMC = method_for(range<Idx<8>, halo<Idx<1500>, [-12, -24]>>) <@> lambda(k, w) -> TRC(w(-24), k, 1) |> compute
+let PMC = method_for(range<Idx<8>, halo<Idx<1500>, [-12, -24]>>) <@> lambda(k, w) -> TRC(w(-24), k, 2) |> compute
+let QMC = method_for(range<Idx<8>, halo<Idx<1500>, [-12, -24]>>) <@> lambda(k, w) -> TRC(w(-24), k, 3) |> compute
 
 // ---- feature matrices (14 x 11808), sigma = 0.0: current, lag-12, lag-24 ----
 let JIC = method_for(range<Idx<14>, Idx<11808>>) <@> lambda(f, u) -> {
@@ -153,8 +148,7 @@ let SMC = method_for(JMC, JIC) <@> lambda(ua: Array<Float64 like Idx<11808>>, ub
 
 // ---- per-collision energy stats, sigma = 0.0 (halo row reduces) ----
 let EOC = method_for(range<Idx<8>, halo<Idx<1500>, [-12, -24]>>) <@> lambda(k, w) -> {
-    let g = 4 * (1500 * k + w(0))
-    0.5 * ((TRC(g) ^ 2.0) + (TRC(g + 1) ^ 2.0) + (TRC(g + 2) ^ 2.0) + (TRC(g + 3) ^ 2.0))
+    0.5 * ((TRC(w(0), k, 0) ^ 2.0) + (TRC(w(0), k, 1) ^ 2.0) + (TRC(w(0), k, 2) ^ 2.0) + (TRC(w(0), k, 3) ^ 2.0))
 } |> compute
 let ESC = method_for(EOC) <@> lambda(r: Array<Float64 like Idx<1476>>) -> reduce(r, (+)) |> compute
 let EQC = method_for(EOC) <@> lambda(r: Array<Float64 like Idx<1476>>) -> prodsum(r, r) |> compute
@@ -218,53 +212,32 @@ let lt12eC = LT12C(4)
 let lt12iC = LT12C(8)
 let lt24eC = LT24C(4)
 
-// ---- integrate + emit, sigma = 0.1 (same recurrence, noisy channel) ----
-let TRN = {
-    let z = method_for(range<Idx<48000>>) <@> lambda(u) -> 0.0 |> compute
-    let mut tr = z
-    let mut s = 20260717.0
-    let mut x = 0.0
-    let mut y = 0.0
-    let mut px = 0.0
-    let mut py = 0.0
-    for k in 0..8 {
-        x = ICS(k, 0)
-        y = ICS(k, 1)
-        px = ICS(k, 2)
-        py = ICS(k, 3)
-        for t in 0..1500 {
-            let pxh = px - 0.025 * x
-            let pyh = py - 0.025 * y
-            x = x + 0.05 * pxh
-            y = y + 0.05 * pyh
-            px = pxh - 0.025 * x
-            py = pyh - 0.025 * y
-            s = s * 48271.0 - floor(s * 48271.0 / 2147483647.0) * 2147483647.0
-            tr(4 * (1500 * k + t)) = x + (s / 2147483647.0 - 0.5) * 3.46410161513775 * 0.1
-            s = s * 48271.0 - floor(s * 48271.0 / 2147483647.0) * 2147483647.0
-            tr(4 * (1500 * k + t) + 1) = y + (s / 2147483647.0 - 0.5) * 3.46410161513775 * 0.1
-            s = s * 48271.0 - floor(s * 48271.0 / 2147483647.0) * 2147483647.0
-            tr(4 * (1500 * k + t) + 2) = px + (s / 2147483647.0 - 0.5) * 3.46410161513775 * 0.1
-            s = s * 48271.0 - floor(s * 48271.0 / 2147483647.0) * 2147483647.0
-            tr(4 * (1500 * k + t) + 3) = py + (s / 2147483647.0 - 0.5) * 3.46410161513775 * 0.1
-        }
-    }
-    tr
-}
+// ---- integrate + emit, sigma = 0.1: the SAME clean field plus an LCG noise
+//      channel. The observation-noise LCG (physics/44's serial recurrence) is
+//      itself a RECURSIVE ARRAY over the emitted-cell index: LCGS(v) is the
+//      (v+1)-th draw from seed 20260717 (cell 4*(1500 k + t) + c uses draw
+//      4*(1500 k + t) + c, matching the old in-order advance). ----
+let rec LCGS: Array<Float64 like Idx<48000>> =
+    match LCGS with
+    | zero -> zero
+    | zero :: s -> zero :: 20260717.0 * 48271.0 - floor(20260717.0 * 48271.0 / 2147483647.0) * 2147483647.0
+    | prefix :: n -> prefix :: prefix(n - 1) * 48271.0 - floor(prefix(n - 1) * 48271.0 / 2147483647.0) * 2147483647.0
+// the noisy record: clean coordinate + this cell's own scaled LCG draw
+let TRN: Array<Float64 like Idx<1500>, Idx<8>, Idx<4>> = method_for(range<Idx<1500>, Idx<8>, Idx<4>>) <@> lambda(t: Int64, k: Int64, c: Int64) -> TRC(t, k, c) + (LCGS(4 * (1500 * k + t) + c) / 2147483647.0 - 0.5) * 3.46410161513775 * 0.1 |> compute
 
 // ---- interior + lagged coordinate views, sigma = 0.1 ----
-let XAN = method_for(range<Idx<8>, halo<Idx<1500>, [-12, -24]>>) <@> lambda(k, w) -> TRN(4 * (1500 * k + w(0))) |> compute
-let YAN = method_for(range<Idx<8>, halo<Idx<1500>, [-12, -24]>>) <@> lambda(k, w) -> TRN(4 * (1500 * k + w(0)) + 1) |> compute
-let PAN = method_for(range<Idx<8>, halo<Idx<1500>, [-12, -24]>>) <@> lambda(k, w) -> TRN(4 * (1500 * k + w(0)) + 2) |> compute
-let QAN = method_for(range<Idx<8>, halo<Idx<1500>, [-12, -24]>>) <@> lambda(k, w) -> TRN(4 * (1500 * k + w(0)) + 3) |> compute
-let XLN = method_for(range<Idx<8>, halo<Idx<1500>, [-12, -24]>>) <@> lambda(k, w) -> TRN(4 * (1500 * k + w(-12))) |> compute
-let YLN = method_for(range<Idx<8>, halo<Idx<1500>, [-12, -24]>>) <@> lambda(k, w) -> TRN(4 * (1500 * k + w(-12)) + 1) |> compute
-let PLN = method_for(range<Idx<8>, halo<Idx<1500>, [-12, -24]>>) <@> lambda(k, w) -> TRN(4 * (1500 * k + w(-12)) + 2) |> compute
-let QLN = method_for(range<Idx<8>, halo<Idx<1500>, [-12, -24]>>) <@> lambda(k, w) -> TRN(4 * (1500 * k + w(-12)) + 3) |> compute
-let XMN = method_for(range<Idx<8>, halo<Idx<1500>, [-12, -24]>>) <@> lambda(k, w) -> TRN(4 * (1500 * k + w(-24))) |> compute
-let YMN = method_for(range<Idx<8>, halo<Idx<1500>, [-12, -24]>>) <@> lambda(k, w) -> TRN(4 * (1500 * k + w(-24)) + 1) |> compute
-let PMN = method_for(range<Idx<8>, halo<Idx<1500>, [-12, -24]>>) <@> lambda(k, w) -> TRN(4 * (1500 * k + w(-24)) + 2) |> compute
-let QMN = method_for(range<Idx<8>, halo<Idx<1500>, [-12, -24]>>) <@> lambda(k, w) -> TRN(4 * (1500 * k + w(-24)) + 3) |> compute
+let XAN = method_for(range<Idx<8>, halo<Idx<1500>, [-12, -24]>>) <@> lambda(k, w) -> TRN(w(0), k, 0) |> compute
+let YAN = method_for(range<Idx<8>, halo<Idx<1500>, [-12, -24]>>) <@> lambda(k, w) -> TRN(w(0), k, 1) |> compute
+let PAN = method_for(range<Idx<8>, halo<Idx<1500>, [-12, -24]>>) <@> lambda(k, w) -> TRN(w(0), k, 2) |> compute
+let QAN = method_for(range<Idx<8>, halo<Idx<1500>, [-12, -24]>>) <@> lambda(k, w) -> TRN(w(0), k, 3) |> compute
+let XLN = method_for(range<Idx<8>, halo<Idx<1500>, [-12, -24]>>) <@> lambda(k, w) -> TRN(w(-12), k, 0) |> compute
+let YLN = method_for(range<Idx<8>, halo<Idx<1500>, [-12, -24]>>) <@> lambda(k, w) -> TRN(w(-12), k, 1) |> compute
+let PLN = method_for(range<Idx<8>, halo<Idx<1500>, [-12, -24]>>) <@> lambda(k, w) -> TRN(w(-12), k, 2) |> compute
+let QLN = method_for(range<Idx<8>, halo<Idx<1500>, [-12, -24]>>) <@> lambda(k, w) -> TRN(w(-12), k, 3) |> compute
+let XMN = method_for(range<Idx<8>, halo<Idx<1500>, [-12, -24]>>) <@> lambda(k, w) -> TRN(w(-24), k, 0) |> compute
+let YMN = method_for(range<Idx<8>, halo<Idx<1500>, [-12, -24]>>) <@> lambda(k, w) -> TRN(w(-24), k, 1) |> compute
+let PMN = method_for(range<Idx<8>, halo<Idx<1500>, [-12, -24]>>) <@> lambda(k, w) -> TRN(w(-24), k, 2) |> compute
+let QMN = method_for(range<Idx<8>, halo<Idx<1500>, [-12, -24]>>) <@> lambda(k, w) -> TRN(w(-24), k, 3) |> compute
 
 // ---- feature matrices, sigma = 0.1 ----
 let JIN = method_for(range<Idx<14>, Idx<11808>>) <@> lambda(f, u) -> {
@@ -297,8 +270,7 @@ let SMN = method_for(JMN, JIN) <@> lambda(ua: Array<Float64 like Idx<11808>>, ub
 
 // ---- per-collision energy stats, sigma = 0.1 ----
 let EON = method_for(range<Idx<8>, halo<Idx<1500>, [-12, -24]>>) <@> lambda(k, w) -> {
-    let g = 4 * (1500 * k + w(0))
-    0.5 * ((TRN(g) ^ 2.0) + (TRN(g + 1) ^ 2.0) + (TRN(g + 2) ^ 2.0) + (TRN(g + 3) ^ 2.0))
+    0.5 * ((TRN(w(0), k, 0) ^ 2.0) + (TRN(w(0), k, 1) ^ 2.0) + (TRN(w(0), k, 2) ^ 2.0) + (TRN(w(0), k, 3) ^ 2.0))
 } |> compute
 let ESN = method_for(EON) <@> lambda(r: Array<Float64 like Idx<1476>>) -> reduce(r, (+)) |> compute
 let EQN = method_for(EON) <@> lambda(r: Array<Float64 like Idx<1476>>) -> prodsum(r, r) |> compute

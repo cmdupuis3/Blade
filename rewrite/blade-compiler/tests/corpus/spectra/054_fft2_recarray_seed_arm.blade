@@ -1,0 +1,20 @@
+// TEST: Spectra fft2: qualified call in a recursive-array SEED arm
+// The seed arm and the inductive arm are separate fields of RecArrayDef, so a
+// traversal fix that only walked the slice would pass 048/053 and still drop
+// the alias here. The seed (extent 1) transforms the field once for the DC bin
+// 120; each later step adds 1, so acc(3) = 120 + 3 = 123.
+import spectra as sp
+type Steps = Idx<4>
+type RF4 = Array<Float64 like Idx<4>, Idx<4>>
+type CF4 = Array<Complex128 like Idx<4>, Idx<4>>
+let f: RF4 = method_for(range<Idx<4>>) <*> method_for(range<Idx<4>>) <@> lambda(i, j) -> 1.0 * (i * 4 + j) |> compute
+function dcbin(X: CF4) -> Float64 = real(X(0, 0)) + imag(X(2, 1))
+let acc = {
+    let rec acc_arr: Array<Float64 like Steps> =
+        match acc_arr with
+        | zero -> zero
+        | zero :: s -> zero :: dcbin(sp.fft2(f))
+        | prefix :: n -> prefix :: prefix(n - 1) + 1.0
+    acc_arr(3)
+}
+// EXPECT: acc = 123

@@ -7,12 +7,5 @@ import math as m
 let S: Array<Float64 like Idx<4>, Idx<4>> = [[4.0, 1.0, 0.0, 2.0], [1.0, 3.0, 1.0, 0.0], [0.0, 1.0, 2.0, 1.0], [2.0, 0.0, 1.0, 5.0]]
 let (RE, IM) = m.eig(S)
 let (Q, LAM) = m.eigh(S)
-let dev = {
-    let mut acc = 0.0
-    for k in 0..4 {
-        let d = RE(k) - LAM(k)
-        acc = acc + d * d + IM(k) * IM(k)
-    }
-    acc
-}
+let dev = reduce(method_for(zip(RE, LAM, IM)) <@> lambda(re, lam, im) -> (re - lam) * (re - lam) + im * im, (+))
 // EXPECT: dev = 0.0

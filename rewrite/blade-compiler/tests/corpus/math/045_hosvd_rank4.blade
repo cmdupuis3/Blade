@@ -7,61 +7,38 @@ import math as m
 let X: Array<Float64 like Idx<2>, Idx<2>, Idx<2>, Idx<2>> = [[[[0.0, 1.0], [2.0, 3.0]], [[4.0, 5.0], [6.0, 7.0]]], [[[8.0, 9.0], [10.0, 11.0]], [[12.0, 13.0], [14.0, 15.0]]]]
 let (G, U0, U1, U2, U3) = m.hosvd(X)
 let normdev = {
-    let mut sg = 0.0
-    let mut sx = 0.0
-    for a in 0..2 {
-        for b in 0..2 {
-            for c in 0..2 {
-                for d in 0..2 {
-                    sg = sg + G(a, b, c, d) * G(a, b, c, d)
-                    sx = sx + X(a, b, c, d) * X(a, b, c, d)
-                }
-            }
-        }
-    }
+    // Frobenius-norm invariance: ‖G‖² = ‖X‖². Both are total energies, so a
+    // single all-element reduce with a square-accumulating kernel gives each.
+    let sg = reduce(G, lambda(acc, x) -> acc + x * x, 0.0)
+    let sx = reduce(X, lambda(acc, x) -> acc + x * x, 0.0)
     let dd = sg - sx
     dd * dd
 }
 let odev = {
-    let mut acc = 0.0
-    let mut dot = 0.0
-    for a in 0..2 {
-        for b in 0..2 {
-            dot = 0.0
-            for i in 0..2 {
-                dot = dot + U0(i, a) * U0(i, b) + U1(i, a) * U1(i, b) + U2(i, a) * U2(i, b) + U3(i, a) * U3(i, b)
-            }
-            let target = if a == b then 4.0 else 0.0
-            let d = dot - target
-            acc = acc + d * d
-        }
-    }
-    acc
+    // Every factor has orthonormal columns, so each Grammian UnᵀUn = I₂ and the
+    // four sum to 4·I₂. Form each column-Gram as row prodsums of the transposed
+    // factor, add them elementwise, and measure the deviation from 4·I₂.
+    let U0T = transpose(U0, [0, 1])
+    let U1T = transpose(U1, [0, 1])
+    let U2T = transpose(U2, [0, 1])
+    let U3T = transpose(U3, [0, 1])
+    let g0 = method_for(U0T, U0T) <@> lambda(u: Array<Float64 like Idx<2>>, v: Array<Float64 like Idx<2>>) -> prodsum(u, v) |> compute
+    let g1 = method_for(U1T, U1T) <@> lambda(u: Array<Float64 like Idx<2>>, v: Array<Float64 like Idx<2>>) -> prodsum(u, v) |> compute
+    let g2 = method_for(U2T, U2T) <@> lambda(u: Array<Float64 like Idx<2>>, v: Array<Float64 like Idx<2>>) -> prodsum(u, v) |> compute
+    let g3 = method_for(U3T, U3T) <@> lambda(u: Array<Float64 like Idx<2>>, v: Array<Float64 like Idx<2>>) -> prodsum(u, v) |> compute
+    let S = g0 + g1 + g2 + g3
+    let FourI: Array<Float64 like Idx<2>, Idx<2>> = [[4.0, 0.0], [0.0, 4.0]]
+    let E = S - FourI
+    reduce(E, lambda(acc, x) -> acc + x * x, 0.0)
 }
 let resid = {
-    let mut acc = 0.0
-    let mut rc = 0.0
-    for i in 0..2 {
-        for j in 0..2 {
-            for k in 0..2 {
-                for l in 0..2 {
-                    rc = 0.0
-                    for a in 0..2 {
-                        for b in 0..2 {
-                            for c in 0..2 {
-                                for d in 0..2 {
-                                    rc = rc + G(a, b, c, d) * U0(i, a) * U1(j, b) * U2(k, c) * U3(l, d)
-                                }
-                            }
-                        }
-                    }
-                    let dd = rc - X(i, j, k, l)
-                    acc = acc + dd * dd
-                }
-            }
-        }
-    }
-    acc
+    // Full rank-4 reconstruction X̂ = G ×₀ U0 ×₁ U1 ×₂ U2 ×₃ U3 : the rank-8
+    // term tensor with output modes (i,j,k,l) leading and core modes (a,b,c,d)
+    // trailing, each core fibre collapsed by a reduce to recover X̂.
+    let T = method_for(range<Idx<2>, Idx<2>, Idx<2>, Idx<2>, Idx<2>, Idx<2>, Idx<2>, Idx<2>>) <@> lambda(i, j, k, l, a, b, c, d) -> G(a, b, c, d) * U0(i, a) * U1(j, b) * U2(k, c) * U3(l, d) |> compute
+    let Xhat = method_for(T) <@> lambda(sub: Array<Float64 like Idx<2>, Idx<2>, Idx<2>, Idx<2>>) -> reduce(sub, (+)) |> compute
+    let E = Xhat - X
+    reduce(E, lambda(acc, x) -> acc + x * x, 0.0)
 }
 // EXPECT: normdev = 0.0
 // EXPECT: odev = 0.0

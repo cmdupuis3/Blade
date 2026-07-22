@@ -1,0 +1,27 @@
+// TEST: Tag Wildcard Accepts Bare And Unit
+// `Base<_>` is a wildcard over the whole `Base<...>` slot, which Blade
+// overloads for BOTH nominal index tags and unit signatures. So one wildcard
+// parameter accepts all three shapes a value can arrive in:
+//
+//   1. a nominal index tag       — Nat<Tagged>, from range<Tagged>
+//   2. NO tag at all             — plain Int64, from an anonymous range<Idx<n>>
+//   3. a unit signature          — Nat<charge>, i.e. IRTUnitAnnotated
+//
+// Case 2 is why the wildcard does not require a tag to be present: an
+// anonymous index type keeps the bare int64 element type, and a kernel that
+// works for any tag must work for none as well.
+Unit charge
+type Tagged = Idx<3>
+
+function twice(m: Nat<_>) -> Float64 = 2.0 * m
+
+// 1. named tag
+let a = method_for(range<Tagged>) <@> twice |> compute
+// 2. anonymous index type — elements are untagged Int64
+let b = method_for(range<Idx<3>>) <@> twice |> compute
+// 3. unit-annotated argument through a direct call
+let q: Nat<charge> = 5
+let c = twice(q)
+// EXPECT: a = [0, 2, 4]
+// EXPECT: b = [0, 2, 4]
+// EXPECT: c = 10

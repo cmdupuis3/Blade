@@ -6,10 +6,7 @@ import math as m
 let A: Array<Float64 like Idx<3>, Idx<3>> = [[0.0, 1.0, 0.0], [0.0, 0.0, 1.0], [6.0, -11.0, 6.0]]
 let (RE, IM) = m.eig(A)
 let trdev = {
-    let mut s = 0.0
-    for k in 0..3 {
-        s = s + RE(k)
-    }
+    let s = reduce(RE, (+))
     let d = s - 6.0
     d * d
 }

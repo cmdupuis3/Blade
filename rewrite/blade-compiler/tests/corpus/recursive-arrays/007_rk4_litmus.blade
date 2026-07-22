@@ -1,0 +1,29 @@
+// TEST: Recursive Array RK4 Litmus
+// ============================================================================
+// The user-mandated litmus: classic RK4 time-stepping as a recursive array.
+// du/dt = -u elementwise (linear), h = 0.1: one RK4 step multiplies each
+// element by 1 - h + h^2/2 - h^3/6 + h^4/24 = 0.9048375 exactly.
+// The slice function holds the full four-stage ladder as DEFERRED
+// intermediate array lets (k1..k4) — the multi-stage kernel-body shape the
+// ex-09/ex-08 ports need — materialized only at the final expression.
+// u0 = [1, 2]; step1 = [0.9048375, 1.809675];
+// step2 = [0.81873090140625, 1.6374618028125]  (0.9048375^2 exact)
+// ============================================================================
+type X = Idx<2>
+type T = Idx<3>
+function rk4(u: Array<Float like X>) -> Array<Float like X> = {
+    let k1 = 0.0 - u
+    let k2 = 0.0 - (u + 0.05 * k1)
+    let k3 = 0.0 - (u + 0.05 * k2)
+    let k4 = 0.0 - (u + 0.1 * k3)
+    u + (0.1 / 6.0) * (k1 + 2.0 * k2 + 2.0 * k3 + k4)
+}
+
+let rec traj: Array<Float like T, X> =
+    match traj with
+    | zero -> zero
+    | zero :: s -> zero :: [1.0, 2.0]
+    | prefix :: n -> prefix :: rk4(prefix(n - 1))
+// EXPECT: traj = [1, 2, 0.9048375, 1.809675, 0.81873090140625, 1.6374618028125]
+let final = traj(2)
+// EXPECT: final = [0.81873090140625, 1.6374618028125]

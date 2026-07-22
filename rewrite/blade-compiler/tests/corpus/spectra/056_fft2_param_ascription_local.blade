@@ -1,0 +1,24 @@
+// TEST: Spectra fft2: shape from a parameter, an ascription, a block-local let
+// The other three places a DECLARED shape can live, besides a module-level let
+// and a function return type. The ascription is the universal escape hatch: it
+// states the shape for an expression the elaborator (which runs before type
+// inference) could not otherwise see. Values are multiples of the DC bin 120.
+import spectra as sp
+type RF4 = Array<Float64 like Idx<4>, Idx<4>>
+type CF4 = Array<Complex128 like Idx<4>, Idx<4>>
+let f: RF4 = method_for(range<Idx<4>>) <*> method_for(range<Idx<4>>) <@> lambda(i, j) -> 1.0 * (i * 4 + j) |> compute
+function scaled(g: RF4, s: Float64) -> RF4 = g * s
+function dcbin(X: CF4) -> Float64 = real(X(0, 0)) + imag(X(2, 1))
+// An annotated PARAMETER.
+function viaParamF(g: RF4) -> Float64 = dcbin(sp.fft2(g))
+let viaParam = viaParamF(f)
+// An ASCRIPTION on an expression with no other shape witness.
+let viaAscribe = dcbin(sp.fft2((f * 3.0 : RF4)))
+// A BLOCK-LOCAL annotated let.
+let viaLocal = {
+    let g: RF4 = scaled(f, 4.0)
+    dcbin(sp.fft2(g))
+}
+// EXPECT: viaParam = 120
+// EXPECT: viaAscribe = 360
+// EXPECT: viaLocal = 480
