@@ -6,3 +6,6 @@ let L2 = method_for(B, B)
 let f = lambda(x, y) -> x + y
 // Parallel composition
 let parallel = (L1 <@> f) <&> (L2 <@> f)
+// parallel is deferred (no |> compute); the input arrays print
+// EXPECT: A = [1, 2]
+// EXPECT: B = [3, 4]

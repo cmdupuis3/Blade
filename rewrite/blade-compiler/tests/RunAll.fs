@@ -2,7 +2,12 @@
 // Extracted from Main.fs (audit §2.3). The OpenMP-coverage and CUDA blocks
 // are OPT-IN here: CUDA needs nvcc + a GPU + (on Windows) cl.exe on PATH —
 // i.e. a run from the "x64 Native Tools Command Prompt for VS" — and the
-// OpenMP block forces multi-threaded runs. Everything else always runs.
+// OpenMP block forces multi-threaded runs. The MPI, timing, interpreter-
+// differential and pinned-oracle blocks are opt-in for the same reason:
+// each needs a resource the build does not produce (mpiexec, a quiet machine,
+// a second full pipeline per test, a pinned ./oracle/Blade.exe).
+// Everything else — including every pure in-process F# unit block — always
+// runs, so the grand total is the whole cheap suite by default.
 module Blade.Tests.RunAll
 
 open Blade.Tests.Basic
@@ -59,17 +64,31 @@ let allTests =
 /// All default to OFF: the CUDA block needs the x64 Native Tools prompt on
 /// Windows, the OpenMP-coverage block forces multi-threaded runs, and the
 /// differential-timing block compiles and repeatedly runs large programs
-/// (it dominates the suite's wall time). Enable with
-/// `blade test --omp --cuda --timing`, or run the blocks standalone
-/// (`blade test omp-coverage`, `blade test cuda`, `blade test timing`).
+/// (it dominates the suite's wall time). The two differential gates are off
+/// for the same reason plus an external-resource one: the interpreter gate
+/// compiles AND interprets the whole supported corpus slice (two full
+/// pipelines per test), and the pinned-oracle gate needs a second Blade build
+/// sitting at ./oracle/Blade.exe that only a release-gating workflow pins.
+/// Enable with `blade test --omp --cuda --timing --mpi --interp --diff-oracle`,
+/// or run the blocks standalone (`blade test omp-coverage`, `blade test cuda`,
+/// `blade test timing`, `blade test mpi`, `blade test interp`,
+/// `blade test diff-oracle`).
 type FullSuiteOptions = {
-    IncludeOmp    : bool
-    IncludeCuda   : bool
-    IncludeTiming : bool
-    IncludeMpi    : bool
+    IncludeOmp        : bool
+    IncludeCuda       : bool
+    IncludeTiming     : bool
+    IncludeMpi        : bool
+    IncludeInterpDiff : bool
+    IncludeDiffOracle : bool
 }
 
-let defaultFullSuiteOptions = { IncludeOmp = false; IncludeCuda = false; IncludeTiming = false; IncludeMpi = false }
+let defaultFullSuiteOptions =
+    { IncludeOmp = false
+      IncludeCuda = false
+      IncludeTiming = false
+      IncludeMpi = false
+      IncludeInterpDiff = false
+      IncludeDiffOracle = false }
 
 /// Includes both the single-file test corpus (`allTests`) and the multi-file
 /// module/import corpus (`multiFileTests`). External-dependency tests
@@ -91,6 +110,24 @@ let runAllTestsFullWith (extraBlocks: (unit -> Blade.Tests.TestHarness.BlockResu
     let attrs = runAttrsTests ()
     // Phase C Step 2: F# unit tests for the codegen substitution mechanism.
     let subst = runCodeGenSubstTests ()
+    // IR-level F# unit tests for the type normalizer (splitting mixed-kind
+    // groups, idempotence, flat-vs-nested equivalence). Constructs IRType
+    // values directly and calls normalize — no Blade source, no C++ toolchain —
+    // so it belongs with the other in-process unit blocks and always runs.
+    // (Also reachable standalone as `blade test normalize`.)
+    let normalize = runNormalizeTests ()
+    // TypeCheck-level F# unit tests for the unify §5.3 fast path: flat-vs-split
+    // arrows, inference-var binding, dist-type ordering/axis-tag rejection.
+    // Same shape as the normalize block — pure IRType construction plus a call
+    // to unify, so it is cheap and unconditional here.
+    // (Also reachable standalone as `blade test unify`.)
+    let unify = runUnifyTests ()
+    // IR-level F# unit tests for the validateArrowShape gate at
+    // mkVirtualArrayArrow entry: which array/arrow shapes the constructor must
+    // refuse. Pure in-process construction, no pipeline, so it runs alongside
+    // the normalize/unify blocks rather than only on demand.
+    // (Also reachable standalone as `blade test validate-arrow`.)
+    let validateArrow = runValidateArrowTests ()
     // Canonical ExprShape traversal: round-trips, walker completeness (§3.2).
     let shape = Blade.Tests.Shape.runShapeTests ()
     // Oracle review: differential-harness oracles vs hand-computed truth (Phase 0.2).
@@ -148,18 +185,47 @@ let runAllTestsFullWith (extraBlocks: (unit -> Blade.Tests.TestHarness.BlockResu
         else
             printfn "Differential timing: not run (opt-in; enable with 'blade test --timing' or run 'blade test timing')."
             None
+    // Interpreter differential gate: the tree-walking IR interpreter vs the
+    // compiled binary over the supported corpus slice, byte-identical
+    // normalized stdout required. Opt-in: it runs BOTH pipelines for every test
+    // in the slice (compile+link+run, then a full interpreter walk), so it
+    // roughly doubles the corpus cost of a suite run. When requested it still
+    // skips cleanly if g++ is absent — the compiled binary is its reference.
+    let interpDiff =
+        if opts.IncludeInterpDiff then
+            Some (Blade.Tests.InterpDiff.runInterpDiffTests Blade.Tests.InterpDiff.currentSlice)
+        else
+            printfn "Interpreter differential: not run (opt-in; enable with 'blade test --interp' or run 'blade test interp')."
+            None
+    // Pinned-oracle differential gate: this binary vs the pinned ./oracle build
+    // over the dense corpus slice, identical printed VALUES required. Opt-in
+    // because it depends on an external resource nothing in the build produces:
+    // a second, previously-gated Blade at ./oracle/Blade.exe. It reports a
+    // clean SKIP (not a failure) when that exe or g++ is missing, so enabling
+    // it on a machine without a pinned oracle is harmless — it is off by
+    // default so a plain `blade test` doesn't spend the corpus twice.
+    let diffOracle =
+        if opts.IncludeDiffOracle then
+            Some (Blade.Tests.DiffOracle.runDiffOracleTests "./oracle/Blade.exe" Blade.Tests.DiffOracle.denseSlice)
+        else
+            printfn "Diff vs pinned oracle: not run (opt-in; enable with 'blade test --diff-oracle' or run 'blade test diff-oracle'; needs a pinned ./oracle/Blade.exe, else it skips)."
+            None
     // Caller-supplied blocks (see doc comment): currently the CLI smoke test.
     let extras = extraBlocks |> List.map (fun run -> run ())
 
     // Grand-total roll-up (#4): one line per block, a total, and failed names.
     let blocks =
-        [ yield r1; yield r2; yield attrs; yield subst; yield shape; yield oracles; yield wigner; yield cartBridge; yield spans; yield diagCore; yield diagCorpus; yield alloc
+        [ yield r1; yield r2; yield attrs; yield subst
+          yield normalize; yield unify; yield validateArrow
+          yield shape; yield oracles; yield wigner; yield cartBridge; yield spans; yield diagCore; yield diagCorpus; yield alloc
           match omp with Some b -> yield b | None -> ()
           yield bufType
           match cuda with Some b -> yield b | None -> ()
           match mpi with Some b -> yield b | None -> ()
           yield diff; yield typeStruct
           match timing with Some b -> yield b | None -> ()
+          match interpDiff with Some b -> yield b | None -> ()
+          match diffOracle with Some b -> yield b | None -> ()
           yield! extras ]
     Blade.Tests.TestHarness.printGrandTotal blocks
     let anyFailed = blocks |> List.sumBy (fun b -> b.Failed)

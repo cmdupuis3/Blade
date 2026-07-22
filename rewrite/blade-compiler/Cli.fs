@@ -68,7 +68,11 @@ let printUsage () =
     printfn "  test --mpi                        ... including the MPI decomposition block"
     printfn "                                    (needs mingw msmpi + the MS-MPI runtime)"
     printfn "  test --timing                     ... including the differential timing block (slow)"
-    printfn "                                    (the --omp/--cuda/--timing/--mpi flags combine)"
+    printfn "  test --interp                     ... including the interpreter differential block (slow)"
+    printfn "  test --diff-oracle                ... including the pinned-oracle differential block"
+    printfn "                                    (skips cleanly without ./oracle/Blade.exe)"
+    printfn "                                    (the --omp/--cuda/--timing/--mpi/--interp/"
+    printfn "                                     --diff-oracle flags combine)"
     printfn "  test --ir-only                    Run IR-only tests (fast, no C++ compilation)"
     printfn "  test alloc                        Run C++ allocation-layout tests (contiguity/cardinality)"
     printfn "  test omp-coverage                 Run the OpenMP thread-coverage block standalone"
@@ -801,16 +805,22 @@ let private runFullSuite opts = runAllTestsFullWith [runCliSmokeTests] opts
 
 /// Dispatch the `test` subcommand. `rest` is everything after "test".
 let private dispatchTest (rest: string list) : int =
-    // `--omp` / `--cuda` / `--timing` opt the corresponding blocks into the
-    // full suite; they may appear in any order and combine.
-    let isSuiteFlag f = f = "--omp" || f = "--cuda" || f = "--timing" || f = "--mpi"
+    // `--omp` / `--cuda` / `--timing` / `--mpi` / `--interp` / `--diff-oracle`
+    // opt the corresponding blocks into the full suite; they may appear in any
+    // order and combine. Each has a standalone arm below too; the flag form
+    // exists so an opt-in block still lands in the grand total.
+    let isSuiteFlag f =
+        f = "--omp" || f = "--cuda" || f = "--timing" || f = "--mpi"
+        || f = "--interp" || f = "--diff-oracle"
     match rest with
     | [] -> runFullSuite defaultFullSuiteOptions
     | flags when flags |> List.forall isSuiteFlag ->
         runFullSuite { IncludeOmp = List.contains "--omp" flags
                        IncludeCuda = List.contains "--cuda" flags
                        IncludeTiming = List.contains "--timing" flags
-                       IncludeMpi = List.contains "--mpi" flags }
+                       IncludeMpi = List.contains "--mpi" flags
+                       IncludeInterpDiff = List.contains "--interp" flags
+                       IncludeDiffOracle = List.contains "--diff-oracle" flags }
     | [ "--ir-only" ] -> runAllTests ()
     | [ "--gen" ] -> runAllTestsGenOnly ()
     | [ "normalize" ] ->

@@ -1,5 +1,10 @@
 // TEST: Zero ObjectFor
-// object_for(zero) <@> arrays
+// object_for(zero) <@> arrays — the object_for spelling of 005.
+// The synthesized zero kernel carries CommGroups = [], so the two operands
+// are not comm-partnered and the nest is the FULL 3x3 product (same shape
+// loops/062's `object_for(k2) <@> (A, A)` pins with 9 values), every element
+// the Float64 zero literal.
+// EXPECT is FLAT: a rank-2 result prints flattened row-major.
 let A = [1.0, 2.0, 3.0]
 let result = object_for(zero) <@> (A, A) |> compute
-// EXPECT: result [symmetric]
+// EXPECT: result = [0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0]

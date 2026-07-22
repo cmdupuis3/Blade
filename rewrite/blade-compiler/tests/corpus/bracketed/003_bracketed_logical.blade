@@ -4,3 +4,10 @@ let P = [true, false, true]
 let Q = [true, true, false]
 let and_result = P [&&] Q
 let or_result = P [||] Q
+// Each result is the 3x3 outer product P(i) <op> Q(j). Rank-2 arrays print
+// FLAT in row-major order (genPrintArrayFlat), so each pin is 9 values --
+// three per row of P.  P = T,F,T   Q = T,T,F
+// and: P(0)=T -> [T,T,F]; P(1)=F -> [F,F,F]; P(2)=T -> [T,T,F]
+// EXPECT: and_result = [true, true, false, false, false, false, true, true, false]
+// or:  P(0)=T -> [T,T,T]; P(1)=F -> [T,T,F]; P(2)=T -> [T,T,T]
+// EXPECT: or_result = [true, true, true, true, true, false, true, true, true]

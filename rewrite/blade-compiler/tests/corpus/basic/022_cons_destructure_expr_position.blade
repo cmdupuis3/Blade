@@ -1,0 +1,17 @@
+// TEST: Cons Destructure In Expression Position
+// A `let` written where an EXPRESSION is expected (here, the RHS of another
+// let) parses as ExprLet, not StmtLet. Blade has no `let ... in`, so
+// Parser.parseLet gives that form a synthesized UNIT body — the leaves are
+// consequently dead, and nothing observable can be pinned on them. What this
+// probe pins is that the form type-checks and lowers at all: the checker used
+// to give every cons leaf a fresh type variable and emit a single TExprLet
+// whose varId bound NONE of the leaves, so a leaf reference lowered to an IRId
+// that nothing introduces. It now desugars to a nested chain of TExprLets (one
+// temp for the scrutinee, one let per leaf), and `after` proves the rest of
+// the program still compiles and runs around it.
+let t = (1, 2, 3)
+let probe = let head :: tail = t
+let after = 7
+// `probe` is Unit-typed (the synthesized body is the unit literal) and Unit
+// bindings are not auto-printed, so only `after` can be pinned.
+// EXPECT: after = 7

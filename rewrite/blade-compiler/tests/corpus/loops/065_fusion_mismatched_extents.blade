@@ -3,6 +3,7 @@
 // cannot share a nest, and the compiler must say so loudly (#error with a
 // steering diagnostic pointing at <&>) rather than emit a nest that reads
 // past C's extent or silently fall back to independent loops.
+// REJECT-AT: codegen
 let A = [1.0, 2.0, 3.0]
 let C = [10.0, 20.0]
 let f = lambda(x) -> x + 1.0

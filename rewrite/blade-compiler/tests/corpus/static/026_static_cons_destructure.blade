@@ -1,0 +1,20 @@
+// TEST: Static Cons Destructure
+// `let static head :: tail = (...)`. checkDecl's DeclStatic arm used to handle
+// PatTuple only and hardcode DSPositional, so cons leaves under `let static`
+// were never bound at all. Semantics match the plain top-level form
+// (basic/010_cons_destructure): head is element 0, tail is the REMAINDER — the
+// 2-tuple (20, 30), not element 1.
+//
+// Unlike `let static (m, n) = ...` (013), these leaves are NOT compile-time
+// constants: StaticEval.bindPattern has no PatCons case, so nothing lands in
+// env.StaticValues for them and Lowering's TDeclStatic path takes its
+// projection fallback, driven by the DSConsRest tag.
+//
+// A tuple-typed binding prints nothing (std::tuple has no operator<<), so tail
+// is re-destructured into scalars to observe it.
+let static head :: tail = (10, 20, 30)
+let h = head
+let (t0, t1) = tail
+// EXPECT: h = 10
+// EXPECT: t0 = 20
+// EXPECT: t1 = 30

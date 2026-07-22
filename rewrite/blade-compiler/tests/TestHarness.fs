@@ -105,6 +105,10 @@ type BlockResult =
       Skipped: int
       FailedNames: string list }
 
+/// How many failed-test names the grand-total roll-up lists before summarizing
+/// the rest as a count. One constant so the cap is tunable in one place.
+let failedRollUpCap = 40
+
 /// Print the final grand-total report across all blocks.
 let printGrandTotal (blocks: BlockResult list) =
     let rule = String.replicate ruleWidth "="
@@ -124,9 +128,18 @@ let printGrandTotal (blocks: BlockResult list) =
     printfn "%s" (String.replicate ruleWidth "-")
     let skipTotal = if totalSkipped > 0 then sprintf ", %d skipped" totalSkipped else ""
     printfn "  TOTAL: %d passed, %d failed%s" totalPassed totalFailed skipTotal
-    // Failed-test roll-up.
+    // Failed-test roll-up. Capped: this is an INDEX into the per-block output
+    // above (every failure already printed its own "[FAIL]: ..." line with the
+    // detail), not the report of record. A broad regression can fail hundreds
+    // of corpus tests at once, and an unbounded list scrolls the TOTAL line —
+    // the one line a reader checks — off the screen, which is exactly how a red
+    // run gets misread as green. Show the first `failedRollUpCap` and say how
+    // many more there are.
     let allFailed = blocks |> List.collect (fun b -> b.FailedNames |> List.map (fun n -> b.Block, n))
     if not allFailed.IsEmpty then
         printfn "\n  Failed tests:"
-        for (blk, nm) in allFailed do
+        for (blk, nm) in allFailed |> List.truncate failedRollUpCap do
             printfn "    [%s] %s" blk nm
+        let hidden = allFailed.Length - failedRollUpCap
+        if hidden > 0 then
+            printfn "    ... and %d more (see the per-block [FAIL] lines above)" hidden

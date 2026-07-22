@@ -1,0 +1,12 @@
+// TEST: Cons Non-Tuple Scrutinee (rejects)
+// `head :: tail` splits a TUPLE into leading elements plus a non-empty
+// remainder. A scalar scrutinee has nothing to split, so the checker reports
+// PatternTypeMismatch (BL3004) instead of binding both names to fresh,
+// unconstrained type variables. That silent shape is the original defect:
+// unconstrained leaf vars zonked to the default Float64 while Lowering
+// projected positionally, so `tail` bound element 1 of whatever it found.
+// `s` is defined so the ONLY failure reason is the unsplittable pattern (not
+// an undefined name).
+let s = 5
+let head :: tail = s
+// EXPECT: typecheck failure — `head :: tail` requires a tuple scrutinee.

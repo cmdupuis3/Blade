@@ -158,6 +158,36 @@ let emptyTypedEnv () : TypedLowerEnv = {
 let bindTypedVar name id (env: TypedLowerEnv) : TypedLowerEnv =
     { env with Variables = Map.add name id env.Variables }
 
+/// Value expression for destructured sub-binding #i of `binding`.
+///
+/// Positional destructuring reads element i of the tuple (or, for a struct
+/// scrutinee, the field carrying the sub-binding's own name). A CONS binding
+/// differs in exactly one place — its LAST leaf. `let head :: tail = (1, 2, 3)`
+/// binds `tail` to the REMAINDER (2, 3), so that leaf lowers to a re-built
+/// tuple of projections 1.. rather than to projection 1. Emitting a plain
+/// projection there is the miscompile this helper exists to prevent: `tail`
+/// used to come out as the single element 2.
+///
+/// A one-element remainder degrades to the bare element, because Blade has no
+/// 1-tuple — `(x)` is just `x`. TypeCheck's PatCons arm types the leaf by the
+/// identical rule, so the declared type and this value always agree.
+///
+/// `isFlat` only ever applies to positional projections: a cons binding has
+/// fewer leaves than the tuple has slots, so checkDecl's flat-vs-structural
+/// test never selects flat for one, and the remainder must index the scrutinee
+/// structurally in any case.
+let subBindingValue (binding: TypedBinding) (isStruct: bool) (isFlat: bool) (i: int) (name: string) : IRExpr =
+    let baseVar = IRVar (binding.VarId, binding.Type)
+    let isConsBinding = match binding.Destructure with DSConsRest -> true | DSPositional -> false
+    let isRestLeaf = isConsBinding && i = binding.SubBindings.Length - 1
+    if isStruct then IRFieldAccess (baseVar, name)
+    else
+        match binding.Type with
+        | IRTTuple ts when isRestLeaf && ts.Length > i ->
+            let rest = [ for j in i .. ts.Length - 1 -> IRTupleProj (baseVar, j, false) ]
+            if rest.Length = 1 then rest.Head else IRTuple rest
+        | _ -> IRTupleProj (baseVar, i, isFlat)
+
 /// Lower a TypedExpr to IRExpr
 let rec lowerTypedExpr (env: TypedLowerEnv) (texpr: TypedExpr) : IRExpr =
     match texpr.Kind with
@@ -754,9 +784,7 @@ and lowerTypedBlock env (stmts: TypedStmt list) (finalExpr: TypedExpr option) : 
                     binding.SubBindings |> List.mapi (fun i (name, subId, _subTy) -> (i, name, subId))
                 let chained =
                     List.foldBack (fun (i, name, subId) acc ->
-                        let projExpr =
-                            if isStruct then IRFieldAccess (IRVar (binding.VarId, binding.Type), name)
-                            else IRTupleProj (IRVar (binding.VarId, binding.Type), i, isFlat)
+                        let projExpr = subBindingValue binding isStruct isFlat i name
                         IRLet (subId, projExpr, acc)) indexedSubs withChecks
                 IRLet (binding.VarId, value, chained)
         | TStmtAssign (lhs, rhs) ->
@@ -1195,9 +1223,7 @@ let lowerTypedDecl (env: TypedLowerEnv) (decl: TypedDecl) : (Choice<IRFuncDef, I
                 binding.SubBindings.Length = flatCount && binding.SubBindings.Length <> structCount
             | _ -> false
         let subIRBindings = binding.SubBindings |> List.mapi (fun i (name, subId, subTy) ->
-            let projExpr =
-                if isStruct then IRFieldAccess (IRVar (binding.VarId, binding.Type), name)
-                else IRTupleProj (IRVar (binding.VarId, binding.Type), i, isFlat)
+            let projExpr = subBindingValue binding isStruct isFlat i name
             let env' = bindTypedVar name subId env'
             { Id = subId; Name = name; Type = subTy; Value = projExpr; IsConst = true; IsMutable = false })
         let env'' = binding.SubBindings |> List.fold (fun e (name, subId, _) -> bindTypedVar name subId e) env'
@@ -1263,9 +1289,7 @@ let lowerTypedDecl (env: TypedLowerEnv) (decl: TypedDecl) : (Choice<IRFuncDef, I
                           IsConst = true; IsMutable = false }
                     | None ->
                         // Projection fallback — same shape as TDeclLet's branch.
-                        let projExpr =
-                            if isStruct then IRFieldAccess (IRVar (binding.VarId, binding.Type), name)
-                            else IRTupleProj (IRVar (binding.VarId, binding.Type), i, isFlat)
+                        let projExpr = subBindingValue binding isStruct isFlat i name
                         { Id = subId; Name = name; Type = subTy; Value = projExpr
                           IsConst = true; IsMutable = false }
                 (acc @ [bd], bindTypedVar name subId e)

@@ -3,3 +3,6 @@ let kernel = lambda(a, b) -> a * b + 1.0
 let O = object_for(kernel)
 let A = [1.0, 2.0, 3.0]
 let B = [4.0, 5.0, 6.0]
+// O is a loop object (nothing materialized); the input arrays print
+// EXPECT: A = [1, 2, 3]
+// EXPECT: B = [4, 5, 6]

@@ -4513,7 +4513,10 @@ and inferBinOp env mode op left right : TypeResult<TypedExpr> =
                         mkExpr sp (ExprLambda ([{ Name = "__bx"; Type = elemAnn }], None, body))))))
                 inferExpr env synth |> Result.map (stampElemUnits env resUnits)
             | _ ->
-            inferArithType mode op tL.Type tR.Type |> Result.map (fun resTy ->
+            // env.Builder: inferArithType mints fresh index-type ids for a
+            // synthesized outer-product result (same allocator deduceOutputType
+            // uses for the method_for output type).
+            inferArithType env.Builder mode op tL.Type tR.Type |> Result.map (fun resTy ->
                 mkTyped (TExprBinOp (mode, op, tL, tR)) resTy)))
 
 /// Checker-level Dist operator dispatch (typed-Dist arc phase 4).
@@ -4722,15 +4725,81 @@ and kernelBodyUnits (env: TypeEnv) (bound: Map<IRId, UnitSig option>) (e: TypedE
     | TExprField _ | TExprTupleIndex _ -> Ok (ofType e.Type)
     | _ -> Ok None
 
-and inferArithType mode op leftTy rightTy : TypeResult<IRType> =
-    // Elementwise boolean/comparison over two ARRAYS lifts to a Bool-element
-    // array of the same shape (mask algebra: `above2 && below5`, `A < B`).
-    // The lowering already synthesizes the object_for with a Bool kernel
-    // (lowerTypedBinOp maps these ops and sets kernelRetType = ETBool), so only
-    // the RESULT TYPE needs to become the array here. Scalars keep scalar Bool;
-    // Outer mode and array<->scalar broadcast are intentionally out of scope for
-    // now and also keep scalar Bool.
-    let elementwiseBoolTy =
+and inferArithType (builder: IRBuilder) mode op leftTy rightTy : TypeResult<IRType> =
+    // Result type for an OUTER (bracketed) op over two arrays, shared by the
+    // comparison/logical branch (`boolResultTy`) and the arithmetic branch
+    // (`bareResult`). Both used to spell this as `mkArrayLike { arrL with ... }`,
+    // which silently smuggled three of the LEFT OPERAND's properties onto a value
+    // that is not the left operand:
+    //
+    //   - Identity. `IRArrayType.Identity` is the handle that says "this type
+    //     describes THAT array". An outer product is a freshly synthesized array
+    //     with no source-level name yet, so it has no identity to claim; wearing
+    //     `arrL`'s makes two genuinely different arrays indistinguishable at the
+    //     type level. `None` is the same answer `deduceOutputType` gives (it
+    //     builds through `mkArrayArrow ... None`) and the same answer the nested-
+    //     array flattener gives when it absorbs an inner array's identity.
+    //
+    //   - IsVirtual. A virtual array (range/reverse) has NO storage — its
+    //     elements are computed from the index. An outer product is materialized:
+    //     codegen's `genObjectForApplication` allocates an `Array<T,2>` and fills
+    //     it from the kernel. So the result is stored even when the left operand
+    //     was virtual; inheriting `true` would have described real storage as
+    //     virtual (and routed the rebuild through `mkVirtualArrayArrow`, whose
+    //     shape gate is meant for index-derived arrays).
+    //
+    //   - Index-type Ids. `IRIndexType.Id` is per-OCCURRENCE identity, minted
+    //     from the builder. Copying operand records verbatim hands the result the
+    //     operands' own ids, so an axis of the product and an axis of an operand
+    //     compare equal by id (the `d.Id = m.Id` shortcut in IR's compound/mask
+    //     prefix check is one consumer; the provider-write dim-name lookup in
+    //     Lowering is another). `deduceOutputType` refreshes ids on every record
+    //     it emits — verbatim copies included — for exactly this reason, and this
+    //     is the same synthesis step, so it follows the same rule.
+    //
+    // Like `deduceOutputType`, the refresh does NOT remap intra-record
+    // back-references (a DepIdx inner extent formula naming its outer record's
+    // id, or a non-empty `Dependencies` list). That is safe here because the
+    // outer-product emitter only ever handles rank-1 plain-dense operands
+    // (`arrA.extents[0]`/`arrB.extents[0]`, a two-deep dense loop), so a
+    // ragged/dependent operand cannot reach this arm at all; if that emitter is
+    // ever generalized, the id refresh must become a substitution.
+    let mkOuterResult (arrL: IRArrayType) (arrR: IRArrayType) (elemTy: IRType) : IRType =
+        mkArrayLike
+            { arrL with
+                ElemType = elemTy
+                IndexTypes =
+                    (arrL.IndexTypes @ arrR.IndexTypes)
+                    |> List.map (fun ix -> { ix with Id = builder.FreshId() })
+                IsVirtual = false
+                Identity = None }
+    // Boolean/comparison ops over ARRAYS lift to a Bool-ELEMENT array; only the
+    // SHAPE rule differs per mode (mask algebra: `above2 && below5`, `A < B`,
+    // `A [<] B`). The lowering already synthesizes the object_for with a Bool
+    // kernel (lowerTypedBinOp maps these ops and sets kernelRetType = ETBool),
+    // so only the RESULT TYPE needs to become the array here.
+    //
+    // Outer mode is the CROSS product of the two operands' index spaces —
+    // `A [<] B` with |A| = 5, |B| = 3 is a 5x3 Bool array, exactly the shape
+    // codegen's deduceOutputType builds (`{A.extents[0], B.extents[0]}`), and
+    // the same concatenation rule the ARITHMETIC Outer branch below already
+    // applies. It used to fall through to the scalar `IRTScalar ETBool` arm,
+    // which was a silent miscompile rather than a missing feature: the loop
+    // nest and the Array<bool,2> allocation were emitted correctly, but the
+    // binding's IR type said "scalar Bool", so genPrintStatements took the
+    // scalar `cout << x` path — and Array's implicit `operator
+    // promote<T,N>::type()` (cpp/nested_array_types.hpp) silently converted the
+    // wrapper to a pointer, printing an ADDRESS. Nothing downstream ever saw
+    // the real values, so the corpus tests passed while emitting garbage.
+    //
+    // Array<->scalar broadcast in Outer mode has no cross axis to build (there
+    // is only one index space), so it still degrades to the scalar Bool arm.
+    //
+    // A FUNCTION, not a value: the Outer-over-two-arrays arm mints fresh index
+    // ids, and an eagerly-bound `let` would burn a pair of them on every
+    // ARITHMETIC binop too (which never reads this), needlessly shifting every
+    // later id — and thus every generated C++ name derived from one.
+    let boolResultTy () =
         match mode, IR.stripUnits leftTy, IR.stripUnits rightTy with
         | Elementwise, ArrayElem arrL, ArrayElem _ ->
             mkArrayLike { arrL with ElemType = IRTScalar ETBool }
@@ -4740,14 +4809,20 @@ and inferArithType mode op leftTy rightTy : TypeResult<IRType> =
         | Elementwise, _, ArrayElem arrR ->
             // scalar <op> array broadcast (`2.0 < A`): result shape follows the array
             mkArrayLike { arrR with ElemType = IRTScalar ETBool }
+        | Outer, ArrayElem arrL, ArrayElem arrR ->
+            // Outer (bracketed) comparison / logical over two arrays: index
+            // spaces concatenate (left axes then right axes), elements are Bool.
+            // Mirrors the arithmetic Outer rule in `bareResult` below, which
+            // keeps the left operand's ElemType instead.
+            mkOuterResult arrL arrR (IRTScalar ETBool)
         | _ -> IRTScalar ETBool
     match op with
     | OpEq | OpNeq | OpLt | OpLe | OpGt | OpGe ->
         // Comparisons require compatible units (unitRulesForOp errors on
         // mismatch; the result carries no annotation)
         unitRulesForOp op (IR.getUnits leftTy) (IR.getUnits rightTy)
-        |> Result.map (fun _ -> elementwiseBoolTy)
-    | OpAnd | OpOr -> Ok elementwiseBoolTy
+        |> Result.map (fun _ -> boolResultTy ())
+    | OpAnd | OpOr -> Ok (boolResultTy ())
     | _ ->
         // Extract unit annotations if present
         let lUnits = IR.getUnits leftTy
@@ -4797,8 +4872,6 @@ and inferArithType mode op leftTy rightTy : TypeResult<IRType> =
             match lBare, rBare with
             | IRTIdxTagged (_, IRefNamed ln), IRTIdxTagged (_, IRefNamed rn) when ln <> rn ->
                 Some (CrossNominalIndexArith (ln, rn))
-            | IRTIdxTagged (_, IRefNamed ln), IRTIdxTagged (_, IRefNamed rn) when ln <> rn ->
-                Some (CrossNominalIndexArith (ln, rn))
             | IRTIdxTagged (_, IRefAnon (lid, _)), IRTIdxTagged (_, IRefAnon (rid, _)) when lid <> rid ->
                 Some (CrossAnonIndexArith (lid, rid))
             | l, r when isIndexType l || isIndexType r ->
@@ -4844,7 +4917,11 @@ and inferArithType mode op leftTy rightTy : TypeResult<IRType> =
             | Outer ->
                 match lBare, rBare with
                 | ArrayElem arrL, ArrayElem arrR ->
-                    mkArrayLike { arrL with IndexTypes = arrL.IndexTypes @ arrR.IndexTypes }
+                    // Element type stays the LEFT operand's (the historical
+                    // arithmetic-Outer convention, matched by lowering's
+                    // kernelRetType = IRTScalar elemTypeL); everything else about
+                    // the result is synthesized fresh — see mkOuterResult.
+                    mkOuterResult arrL arrR arrL.ElemType
                 | _ -> lBare
             | Elementwise ->
                 match lBare, rBare with
@@ -6421,6 +6498,148 @@ and bindLetPatVar (env: TypeEnv) (name: string) (identity: ArrayIdentity option)
         | None -> bindVarFull name varId tValue.Type identity assign (Some tValue) env
     (varId, env')
 
+/// Leaf (name, type) list for a `head :: tail` destructure of `scrutTy`.
+///
+/// SINGLE SOURCE OF TRUTH for cons-pattern typing. Four call sites need it —
+/// top-level `let` (checkDecl/DeclLet), block-scoped `let` (inferBlock's
+/// TStmtLet), `let static` (checkDecl/DeclStatic) and let-as-expression
+/// (inferLetBinding) — and the rules below MUST NOT drift between them: the
+/// original defect was that only one site knew them, so the other three handed
+/// every leaf a fresh, unconstrained type variable (which then zonked to the
+/// default Float64) and let Lowering project positionally (so `tail` bound
+/// element 1 rather than the remainder).
+///
+/// The rules, all of which Lowering.subBindingValue mirrors on the VALUE side:
+///   * `::` is right-associative (Parser.parsePattern), so `a :: b :: rest`
+///     arrives as PatCons(a, PatCons(b, rest)). The chain is flattened to k
+///     leading leaves plus exactly ONE rest leaf.
+///   * Leading leaf i takes tuple element i; the rest leaf takes the whole
+///     REMAINDER, re-tupled.
+///   * A one-element remainder binds BARE: Blade has no 1-tuple (`(x)` is a
+///     parenthesized expression, and no surface pattern could take one apart).
+///   * Anything else is a hard error, never a silent fresh type var: the
+///     scrutinee is not a tuple, or it is too short to yield both the leading
+///     elements and a non-empty remainder, or a leaf is not a plain variable
+///     (a nested tuple / wildcard / literal leaf contributes a name count that
+///     no longer matches "one sub-binding per tuple slot", and the positional
+///     rule would silently shear against it).
+and consDestructureLeaves (env: TypeEnv) (scrutTy: IRType) (h: Pattern) (t: Pattern)
+                          : TypeResult<(string * IRType) list> =
+    let rec flattenCons (hp: Pattern) (tp: Pattern) : Pattern list * Pattern =
+        match tp.Kind with
+        | PatternKind.PatCons (h2, t2) ->
+            let (heads, rest) = flattenCons h2 t2
+            (hp :: heads, rest)
+        | _ -> ([hp], tp)
+    let (headPats, restPat) = flattenCons h t
+    let leafPats = headPats @ [restPat]
+    let resolvedTy = env.Subst.Resolve scrutTy
+    let leafNames =
+        leafPats |> List.map (fun p ->
+            match p.Kind with PatternKind.PatVar n -> Some n | _ -> None)
+    match resolvedTy with
+    | IRTTuple ts when ts.Length > headPats.Length
+                       && leafNames |> List.forall Option.isSome ->
+        let names = leafNames |> List.map Option.get
+        let k = headPats.Length
+        let tailTy =
+            match ts |> List.skip k with
+            | [single] -> single
+            | many -> IRTTuple many
+        let leafTys = (ts |> List.truncate k) @ [tailTy]
+        Ok (List.zip names (leafTys |> List.map (fun ty -> env.Subst.Resolve ty)))
+    | _ ->
+        let patText =
+            leafPats
+            |> List.map (fun p ->
+                match p.Kind with
+                | PatternKind.PatVar n -> n
+                | PatternKind.PatWildcard -> "_"
+                | _ -> "<pattern>")
+            |> String.concat " :: "
+        Error (PatternTypeMismatch (patText, resolvedTy))
+
+/// Declared field list of a struct-typed scrutinee, or [] when the type is not
+/// a registered struct. Shared by the PatStruct destructuring arms so they all
+/// read field types from the same place.
+and structFieldTypesOf (env: TypeEnv) (scrutTy: IRType) : (string * IRType) list =
+    match env.Subst.Resolve scrutTy with
+    | IRTNamed sName ->
+        match Map.tryFind sName env.TypeDefs with
+        | Some (TDIStruct (_, _, fields, _)) -> fields
+        | _ -> []
+    | _ -> []
+
+/// Flat leaves of a (possibly nested) tuple type, as (path, leafType) pairs in
+/// flat left-to-right order. `path` is the list of STRUCTURAL indices from the
+/// root down to that leaf, OUTERMOST FIRST: for ((α, β), γ) the leaves are
+/// ([0; 0], α), ([0; 1], β), ([1], γ) — i.e. get<0>(get<0>(x)), get<1>(get<0>(x)),
+/// get<1>(x). A non-tuple is one leaf reached by the empty path (the value
+/// itself).
+///
+/// WHY paths instead of a flat index: a flat projection IS the composition of
+/// the structural projections along that path. Expressing it that way lets
+/// expression position destructure a flat pattern with ordinary chained
+/// TExprTupleIndex nodes — TypedAst's node has no `isFlat` flag (only
+/// Lowering's IRTupleProj does), and adding one would ripple through TypedAst,
+/// Lowering, Zonk and five sites in this file. CodeGen's flat IRTupleProj arm
+/// already computes exactly this path at emit time and folds std::get over it
+/// in the same order, so the two agree on what a flat projection means.
+///
+/// LEAF ORDER MUST MATCH IR.flattenTupleLeaves. Declaration position takes its
+/// flat leaf TYPES from that function (checkDecl's PatTuple arm) while
+/// expression position takes its leaf PATHS from this one; if the orders
+/// disagreed, the same source text would destructure differently at top level
+/// and inside an expression — worse than the missing binding this exists to
+/// fix. The recursion below is deliberately the same shape (left-to-right
+/// collect over the elements, non-tuple = exactly one leaf), so
+///     flatTupleLeafPaths ty |> List.map snd = IR.flattenTupleLeaves ty
+/// holds for every type by structural induction.
+and flatTupleLeafPaths (ty: IRType) : (int list * IRType) list =
+    match ty with
+    | IRTTuple ts ->
+        ts
+        |> List.mapi (fun i t ->
+               flatTupleLeafPaths t |> List.map (fun (path, leafTy) -> (i :: path, leafTy)))
+        |> List.concat
+    | _ -> [([], ty)]
+
+/// Desugar a destructuring `let` in EXPRESSION position into a CHAIN of
+/// single-name `TExprLet`s: one temp bound to the scrutinee, then one let per
+/// leaf bound to its projection out of that temp, innermost-out.
+///
+/// WHY a chain instead of the SubBindings mechanism the declaration and
+/// statement forms use: `TExprLet` is `name * varId * value * body` — one
+/// name, no sub-binding slot — and widening it would ripple through ~13 use
+/// sites across TypeCheck, Lowering and Zonk. wrapMutualReturnBody already
+/// binds its return-tuple leaves with exactly this nested-let shape, so the
+/// desugar needs no DU change, no Zonk change and no Lowering change.
+///
+/// What it fixes: every leaf previously got a fresh type variable and a varId
+/// that the single emitted `TExprLet` did NOT bind, so any body reference to a
+/// leaf lowered to an IRId that nothing introduces.
+///
+/// Each leaf supplies its own value-builder rather than a positional index, so
+/// wildcard slots (which bind nothing) cannot shift the projections of the
+/// leaves after them, and struct leaves can project by field instead.
+and destructureLetChain (env: TypeEnv) (tValue: TypedExpr)
+                        (leaves: (string * IRType * (TypedExpr -> TypedExpr)) list)
+                        (body: Expr) : TypeResult<TypedExpr> =
+    let scrutTy = env.Subst.Resolve tValue.Type
+    let tmpId = env.Builder.FreshId()
+    let tmpName = "__destructure_src"
+    let tmpVar = mkTyped (TExprVar (tmpName, tmpId, None)) scrutTy
+    let prepared =
+        leaves |> List.map (fun (n, ty, mkValue) -> (n, ty, env.Builder.FreshId(), mkValue tmpVar))
+    let mutable env' = env
+    for (n, ty, leafId, _) in prepared do
+        env' <- bindVarSimple n leafId ty env'
+    inferExpr env' body |> Result.map (fun tBody ->
+        let withLeaves =
+            List.foldBack (fun (n, _ty, leafId, leafValue) acc ->
+                mkTyped (TExprLet (n, leafId, leafValue, acc)) tBody.Type) prepared tBody
+        mkTyped (TExprLet (tmpName, tmpId, tValue, withLeaves)) tBody.Type)
+
 and inferLetBinding env binding body : TypeResult<TypedExpr> =
     // Bidirectional checking pushes annotations into literal/constructor
     // positions — see inferLetBindingValue. Then dispatch on the binding
@@ -6435,49 +6654,145 @@ and inferLetBinding env binding body : TypeResult<TypedExpr> =
                 mkTyped (TExprLet (name, varId, tValue, tBody)) tBody.Type)
 
         | PatternKind.PatTuple pats ->
-            let mutable env' = env
-            // Resolve type and determine binding list
+            // A tuple destructure in expression position desugars to a nested
+            // let chain (see destructureLetChain). TWO pattern shapes are
+            // desugared, tried in the same priority order the declaration
+            // position uses (checkDecl's PatTuple arm):
+            //   STRUCTURAL — (w, z) against ((α, β), γ): one leaf per top-level
+            //     slot, each reached by ONE projection.
+            //   FLAT — (x, y, z) against ((α, β), γ): one leaf per FLATTENED
+            //     leaf, each reached by a PATH of projections. This shape used
+            //     to fall through to letValueOnlyChain and bind NOTHING, so
+            //     every name in it resurfaced later as UnboundVariable.
+            // Structural wins the tie (a flat tuple is its own flattening), so
+            // no program that already type-checked changes meaning here.
+            //
+            // WHY a path rather than a flat projection node: TypedAst's
+            // TExprTupleIndex has no flat flag (only Lowering's IRTupleProj
+            // does, and that node is reachable from the SubBindings path, not
+            // from expression position) — but a flat projection IS the
+            // composition of the structural projections along the path from the
+            // root to the leaf, so chaining ordinary TExprTupleIndex nodes says
+            // exactly the same thing with no DU change, no Lowering change and
+            // no Zonk change. flatTupleLeafPaths documents why its leaf order
+            // must (and does) agree with IR.flattenTupleLeaves, which is what
+            // the declaration-position arm flattens with.
             let resolvedTy = env.Subst.Resolve(tValue.Type)
-            let typeList =
+            let intLit i = mkTyped (TExprLit (LitInt (int64 i))) (IRTScalar ETInt64)
+            // Fold one leaf's path into chained projections, innermost first.
+            // Each intermediate node is given the type it actually has, read
+            // back out of its parent's resolved tuple type: Lowering's
+            // TExprTupleIndex arm only emits a static IRTupleProj when the
+            // OPERAND's type is an IRTTuple, so an intermediate typed wrongly
+            // would silently divert the rest of the chain onto the poly-pack
+            // path (IRPolyIndex) — a fresh miscompile rather than a fix.
+            let projectPath (path: int list) (src: TypedExpr) : TypedExpr =
+                path |> List.fold (fun (acc: TypedExpr) idx ->
+                    let elemTy =
+                        match env.Subst.Resolve acc.Type with
+                        | IRTTuple ts when idx < ts.Length -> ts.[idx]
+                        // Unreachable: every path here was produced FROM this
+                        // very type. Keeping the parent's type (rather than a
+                        // fresh variable) at least leaves the node internally
+                        // consistent if that ever stops holding.
+                        | other -> other
+                    mkTyped (TExprTupleIndex (acc, intLit idx)) elemTy) src
+            let structural =
                 match resolvedTy with
-                | IRTTuple ts ->
-                    if pats.Length = ts.Length then ts
-                    else
-                        let flat = IR.flattenTupleLeaves resolvedTy
-                        if pats.Length = flat.Length then flat
-                        else ts
-                | _ -> []
-            pats |> List.iteri (fun i p ->
-                match p.Kind with
-                | PatternKind.PatVar n ->
-                    let vid = env.Builder.FreshId()
-                    let eTy =
-                        if i < typeList.Length then env.Subst.Resolve(typeList.[i])
-                        else env.Subst.Fresh()
-                    env' <- bindVarSimple n vid eTy env'
-                | PatternKind.PatWildcard -> ()
-                | _ ->
-                    for n in patternNames p do
-                        env' <- bindVarSimple n (env.Builder.FreshId()) (env.Subst.Fresh()) env')
-            inferExpr env' body |> Result.map (fun tBody ->
-                let name = pats |> List.tryPick (fun p -> match p.Kind with PatternKind.PatVar n -> Some n | _ -> None)
-                           |> Option.defaultValue "_"
-                mkTyped (TExprLet (name, env.Builder.FreshId(), tValue, tBody)) tBody.Type)
+                | IRTTuple ts when ts.Length = pats.Length ->
+                    Some (ts |> List.mapi (fun i t -> ([i], t)))
+                | _ -> None
+            // Flat leaves are only consulted when the structural arity does NOT
+            // match, and only when the pattern supplies exactly one leaf per
+            // flat leaf — the same test checkDecl's PatTuple arm applies before
+            // it switches to IR.flattenTupleLeaves.
+            let flat =
+                match structural, resolvedTy with
+                | None, IRTTuple _ ->
+                    let leaves = flatTupleLeafPaths resolvedTy
+                    if leaves.Length = pats.Length then Some leaves else None
+                | _ -> None
+            // Wildcards and compound leaves bind no let, in EITHER shape. A
+            // compound leaf would need a recursive desugar; leaving its names
+            // unbound turns a silent dangling-IRId miscompile into an honest
+            // UnboundVariable.
+            let leavesOf (leafInfo: (int list * IRType) list) =
+                pats
+                |> List.mapi (fun i p -> (i, p))
+                |> List.choose (fun (i, p) ->
+                    match p.Kind with
+                    | PatternKind.PatVar n ->
+                        let (path, leafTy) = leafInfo.[i]
+                        Some (n, env.Subst.Resolve leafTy, projectPath path)
+                    | _ -> None)
+            let chosen = if structural.IsSome then structural else flat
+            match chosen with
+            | Some leafInfo -> destructureLetChain env tValue (leavesOf leafInfo) body
+            | None -> letValueOnlyChain env tValue body
 
         | PatternKind.PatCons (headPat, tailPat) ->
-            let mutable env' = env
-            for n in patternNames headPat @ patternNames tailPat do
-                env' <- bindVarSimple n (env.Builder.FreshId()) (env.Subst.Fresh()) env'
-            inferExpr env' body |> Result.map (fun tBody ->
-                let name = patternNames headPat |> List.tryHead |> Option.defaultValue "_"
-                mkTyped (TExprLet (name, env.Builder.FreshId(), tValue, tBody)) tBody.Type)
+            // `let head :: tail = t` in expression position. Same leaf rules as
+            // every other cons site (consDestructureLeaves), and the same hard
+            // error when the scrutinee cannot be split — binding fresh type
+            // vars instead is exactly the miscompile the shared helper exists
+            // to prevent.
+            consDestructureLeaves env tValue.Type headPat tailPat
+            |> Result.bind (fun leafTys ->
+                let resolvedTy = env.Subst.Resolve(tValue.Type)
+                let elemTys = match resolvedTy with IRTTuple ts -> ts | _ -> []
+                let intLit i = mkTyped (TExprLit (LitInt (int64 i))) (IRTScalar ETInt64)
+                let lastIdx = leafTys.Length - 1
+                let leaves =
+                    leafTys
+                    |> List.mapi (fun i (n, ty) ->
+                        let mkValue (src: TypedExpr) =
+                            if i = lastIdx then
+                                // REST leaf: the remainder, re-tupled from its
+                                // own index onward — bare when one element
+                                // (Blade has no 1-tuple). Identical rule to
+                                // Lowering.subBindingValue, so the leaf's
+                                // declared type and its value always agree.
+                                let rest =
+                                    [ for j in i .. elemTys.Length - 1 ->
+                                        mkTyped (TExprTupleIndex (src, intLit j)) elemTys.[j] ]
+                                match rest with
+                                | [single] -> single
+                                | many -> mkTyped (TExprTuple many) ty
+                            else mkTyped (TExprTupleIndex (src, intLit i)) ty
+                        (n, ty, mkValue))
+                destructureLetChain env tValue leaves body)
+
+        | PatternKind.PatStruct (_, fieldPats) ->
+            // `let Point { x, y } = p` in expression position. Field leaves
+            // project by NAME (TExprField), so a missing/extra field cannot
+            // shift the others the way a positional index would.
+            let fieldTypes = structFieldTypesOf env tValue.Type
+            if fieldTypes.IsEmpty then letValueOnlyChain env tValue body
+            else
+                let leaves =
+                    fieldPats
+                    |> List.choose (fun (fieldName, p) ->
+                        match p.Kind, fieldTypes |> List.tryFindIndex (fun (fn, _) -> fn = fieldName) with
+                        | PatternKind.PatVar n, Some idx ->
+                            let fTy = env.Subst.Resolve (snd fieldTypes.[idx])
+                            Some (n, fTy, fun (src: TypedExpr) ->
+                                     mkTyped (TExprField (src, fieldName, idx)) fTy)
+                        | _ -> None)
+                destructureLetChain env tValue leaves body
 
         | _ ->
-            let mutable env' = env
-            for n in patternNames binding.Pattern do
-                env' <- bindVarSimple n (env.Builder.FreshId()) (env.Subst.Fresh()) env'
-            inferExpr env' body |> Result.map (fun tBody ->
-                mkTyped (TExprLet ("_", env.Builder.FreshId(), tValue, tBody)) tBody.Type))
+            letValueOnlyChain env tValue body)
+
+/// Fallback for a destructuring `let` in expression position whose pattern the
+/// leaf desugar cannot describe (a tuple pattern whose arity matches NEITHER
+/// the scrutinee's structural slot count NOR its flat leaf count, a scrutinee
+/// that is not a tuple at all, an unregistered struct type, wildcard/literal/
+/// variant patterns). The VALUE is still bound to a temp so
+/// its effects and type survive; no leaf name is bound, because the only
+/// alternative on offer is the fresh-type-var-plus-unbound-varId shape that
+/// destructureLetChain exists to replace.
+and letValueOnlyChain (env: TypeEnv) (tValue: TypedExpr) (body: Expr) : TypeResult<TypedExpr> =
+    destructureLetChain env tValue [] body
 
 and inferMatch env scrutinee cases : TypeResult<TypedExpr> =
     inferExpr env scrutinee |> Result.bind (fun tScrutinee ->
@@ -6543,42 +6858,30 @@ and inferBlock env stmts finalExpr : TypeResult<TypedExpr> =
                          let prov = provenanceOfSurface curEnv binding.Value
                          if not (Set.isEmpty prov) then curEnv.Provenance.[varId] <- prov
                      | _ -> ())
-                    // Tuple destructuring in a block: bind the leaves AND
-                    // record them as SubBindings so Lowering emits their
-                    // projection lets (mirrors checkDecl's PatTuple path).
-                    // Previously SubBindings was left empty here, so the
-                    // leaf VarIds referenced by the rest of the block were
-                    // never introduced in the IR — dangling VarId at
-                    // validation for any in-body `let (x, y) = p`.
+                    // Destructuring in a block: bind the leaves AND record them
+                    // as SubBindings so Lowering emits their projection lets
+                    // (mirrors checkDecl's DeclLet path). Previously SubBindings
+                    // was left empty here, so the leaf VarIds referenced by the
+                    // rest of the block were never introduced in the IR —
+                    // dangling VarId at validation for any in-body
+                    // `let (x, y) = p`; and even after the tuple and cons arms
+                    // landed, a STRUCT pattern (`let Point { x, y } = p`) still
+                    // fell through and bound nothing at all, so both field names
+                    // surfaced later in the block as UnboundVariable.
+                    //
+                    // All three shapes now live in stmtDestructureBindings,
+                    // shared with the for-in body path (inferForIn) because a
+                    // loop body IS a block scope: the two must never disagree
+                    // about what a pattern binds or at what types.
                     let mutable subBindings : (string * IRId * IRType) list = []
-                    (match binding.Pattern.Kind with
-                     | PatternKind.PatTuple pats ->
-                        let resolvedTy = curEnv.Subst.Resolve(tValue.Type)
-                        let typeList =
-                            match resolvedTy with
-                            | IRTTuple ts ->
-                                if pats.Length = ts.Length then ts
-                                else
-                                    // Flat match: (x, y, z) against ((α,β), γ)
-                                    let flat = IR.flattenTupleLeaves resolvedTy
-                                    if pats.Length = flat.Length then flat else ts
-                            | _ -> []
-                        pats |> List.iteri (fun i p ->
-                            match p.Kind with
-                            | PatternKind.PatVar n ->
-                                let eTy =
-                                    if i < typeList.Length then curEnv.Subst.Resolve(typeList.[i])
-                                    else curEnv.Subst.Fresh()
-                                let subId = curEnv.Builder.FreshId()
-                                subBindings <- subBindings @ [(n, subId, eTy)]
-                                curEnv <- bindVarSimple n subId eTy curEnv
-                            | _ ->
-                                for n in patternNames p do
-                                    let subId = curEnv.Builder.FreshId()
-                                    let eTy = curEnv.Subst.Fresh()
-                                    subBindings <- subBindings @ [(n, subId, eTy)]
-                                    curEnv <- bindVarSimple n subId eTy curEnv)
-                     | _ -> ())
+                    // Shape tag handed to Lowering (see TypedAst.DestructureShape).
+                    let mutable destructure = DSPositional
+                    (match stmtDestructureBindings curEnv binding.Pattern tValue.Type with
+                     | Error e -> err <- Some e
+                     | Ok (leafEnv, leaves, shape) ->
+                        curEnv <- leafEnv
+                        subBindings <- leaves
+                        destructure <- shape)
                     // Mutual-group check-point (block-level twin of the
                     // top-level DeclLet hook).
                     let mutualChecks =
@@ -6602,6 +6905,7 @@ and inferBlock env stmts finalExpr : TypeResult<TypedExpr> =
                         Name = name; VarId = varId; Type = tValue.Type
                         Identity = identity; IsMutable = (assign <> ReadOnly); Value = tValue
                         SubBindings = subBindings |> List.map (fun (n, id, ty) -> (n, id, curEnv.Subst.Resolve ty))
+                        Destructure = destructure
                         PostChecks = postChecks
                     }
                     typedStmts <- typedStmts @ [TStmtLet tb]
@@ -6644,6 +6948,94 @@ and inferBlock env stmts finalExpr : TypeResult<TypedExpr> =
             mkTyped (TExprBlock (typedStmts, Some tF)) tF.Type)
         | None -> Ok (mkTyped (TExprBlock (typedStmts, None)) IRTUnit)
 
+/// Leaf bindings for a destructuring `let` in STATEMENT position. Returns the
+/// environment extended with every leaf, the (name, id, type) sub-binding list
+/// Lowering projects from (Lowering.subBindingValue), and the shape tag telling
+/// it HOW to project (TypedAst.DestructureShape).
+///
+/// WHY it is shared: a for-in body is a block scope, so inferBlock's TStmtLet
+/// and inferForIn's StmtLet must answer identically about what a pattern binds
+/// and at what types. They previously did not — inferBlock handled tuple and
+/// cons but not struct, and inferForIn hardcoded `SubBindings = []` for every
+/// shape — and the failure mode of a missing arm is silent: the primary binding
+/// takes the synthetic "_", no leaf id is ever introduced, and each leaf name
+/// resurfaces far away as UnboundVariable (or, if something else happens to
+/// bind the name, as an IRId that nothing declares).
+///
+/// The leaf TYPES come from the same helpers checkDecl/DeclLet reads
+/// (consDestructureLeaves for cons, structFieldTypesOf for struct) so statement
+/// position and declaration position cannot drift apart on the typing rules.
+///
+/// A non-destructuring pattern records nothing: the primary binding already
+/// covers a plain name, and a wildcard/literal binds no name at all.
+and stmtDestructureBindings (env: TypeEnv) (pat: Pattern) (valueTy: IRType)
+                            : TypeResult<TypeEnv * (string * IRId * IRType) list * DestructureShape> =
+    let mutable e = env
+    let mutable subs : (string * IRId * IRType) list = []
+    let bindLeaf (n: string) (ty: IRType) =
+        let subId = e.Builder.FreshId()
+        subs <- subs @ [(n, subId, ty)]
+        e <- bindVarSimple n subId ty e
+    // A compound leaf (nested tuple/struct pattern) is not recursively
+    // destructured here; its names bind at fresh type vars so a later reference
+    // resolves to *something* instead of cascading UnboundVariable errors.
+    // Same conservative rule as checkDecl/DeclLet.
+    let bindCompound (p: Pattern) =
+        for n in patternNames p do bindLeaf n (e.Subst.Fresh())
+    match pat.Kind with
+    | PatternKind.PatTuple pats ->
+        let resolvedTy = e.Subst.Resolve valueTy
+        let typeList =
+            match resolvedTy with
+            | IRTTuple ts ->
+                if pats.Length = ts.Length then ts
+                else
+                    // Flat match: (x, y, z) against ((α,β), γ)
+                    let flat = IR.flattenTupleLeaves resolvedTy
+                    if pats.Length = flat.Length then flat else ts
+            | _ -> []
+        pats |> List.iteri (fun i p ->
+            match p.Kind with
+            | PatternKind.PatVar n ->
+                let eTy =
+                    if i < typeList.Length then e.Subst.Resolve(typeList.[i])
+                    else e.Subst.Fresh()
+                bindLeaf n eTy
+            | _ -> bindCompound p)
+        Ok (e, subs, DSPositional)
+    | PatternKind.PatCons (h, t) ->
+        // `let head :: tail = tup`. The flatten/typing/reject rules live in
+        // consDestructureLeaves, shared with the top-level, `let static` and
+        // expression-position forms. A scrutinee that cannot be split is a hard
+        // error, never a set of fresh type vars: unconstrained leaf vars zonk to
+        // the default Float64 while Lowering projects positionally, which is the
+        // exact silent miscompile that helper exists to prevent.
+        consDestructureLeaves env valueTy h t
+        |> Result.map (fun leaves ->
+            for (n, ty) in leaves do bindLeaf n ty
+            (e, subs, DSConsRest))
+    | PatternKind.PatStruct (_, fieldPats) ->
+        // `let Point { x, y } = p`. Leaves are matched BY NAME, never by
+        // position: Lowering.subBindingValue projects a struct sub-binding with
+        // IRFieldAccess on the leaf's OWN name, so a missing or extra field
+        // pattern must not shift the field any other leaf reads — and the
+        // declared type has to be looked up the same way for the two to agree.
+        // structFieldTypesOf returns [] for a scrutinee that is not a registered
+        // struct, so every leaf then falls back to a fresh var rather than
+        // silently taking some other field's type.
+        let fieldTypeMap = Map.ofList (structFieldTypesOf env valueTy)
+        for (fieldName, p) in fieldPats do
+            (match p.Kind with
+             | PatternKind.PatVar n ->
+                let eTy =
+                    match Map.tryFind fieldName fieldTypeMap with
+                    | Some ty -> e.Subst.Resolve ty
+                    | None -> e.Subst.Fresh()
+                bindLeaf n eTy
+             | _ -> bindCompound p)
+        Ok (e, subs, DSPositional)
+    | _ -> Ok (env, [], DSPositional)
+
 /// Infer one for-in loop statement. Recursive so loops nest to any depth
 /// (required by the ML-module layers and grad-generated adjoint loops).
 /// The loop variable binds as Int64 in the body scope; body lets stay local
@@ -6675,10 +7067,28 @@ and inferForIn (env: TypeEnv) (varName: string) (rangeExpr: Expr) (bodyStmts: St
                             let bId = bodyEnv.Builder.FreshId()
                             let assign = assignOfBindingMut binding.Mutability
                             bodyEnv <- bindVarFull bName bId tValue.Type None assign (Some tValue) bodyEnv
+                            // Destructuring inside a loop body. This path used
+                            // to hardcode `SubBindings = []` / DSPositional, so
+                            // EVERY destructuring shape — tuple, cons and
+                            // struct alike — bound nothing: the primary took
+                            // the synthetic "_" and each leaf name resurfaced
+                            // later in the loop as UnboundVariable. Routed
+                            // through the same stmtDestructureBindings
+                            // inferBlock uses, because a loop body IS a block
+                            // scope and the two must not answer differently.
+                            let mutable subBindings : (string * IRId * IRType) list = []
+                            let mutable destructure = DSPositional
+                            (match stmtDestructureBindings bodyEnv binding.Pattern tValue.Type with
+                             | Error e -> bodyErr <- Some e
+                             | Ok (leafEnv, leaves, shape) ->
+                                bodyEnv <- leafEnv
+                                subBindings <- leaves
+                                destructure <- shape)
                             let tb : TypedBinding = {
                                 Name = bName; VarId = bId; Type = tValue.Type
                                 Identity = None; IsMutable = (assign <> ReadOnly); Value = tValue
-                                SubBindings = []; PostChecks = []
+                                SubBindings = subBindings |> List.map (fun (n, id, ty) -> (n, id, bodyEnv.Subst.Resolve ty))
+                                Destructure = destructure; PostChecks = []
                             }
                             typedBodyStmts <- typedBodyStmts @ [TStmtLet tb]
                         | Error e -> bodyErr <- Some e
@@ -7363,6 +7773,15 @@ and checkDecl (env: TypeEnv) (decl: Decl) : TypeResult<TypedDecl * TypeEnv> =
 
             // Handle destructuring at top level — collect sub-bindings for Lowering
             let mutable subBindings : (string * IRId * IRType) list = []
+            // Shape tag handed to Lowering (see TypedAst.DestructureShape). Only
+            // the PatCons arm below moves it off DSPositional.
+            let mutable destructure = DSPositional
+            // A destructuring pattern that cannot be satisfied by the scrutinee's
+            // real type is a type ERROR, but the env-building fold below is a pure
+            // expression with nowhere to return one from. Park it here and surface
+            // it just before the binding is assembled; silently binding fresh type
+            // vars instead is exactly how `head :: tail` used to miscompile.
+            let mutable patternError : TypeError option = None
             let env' =
                 match binding.Pattern.Kind with
                 | PatternKind.PatTuple pats ->
@@ -7396,25 +7815,34 @@ and checkDecl (env: TypeEnv) (decl: Decl) : TypeResult<TypedDecl * TypeEnv> =
                             subBindings <- subBindings @ [(n, subId, eTy)]
                             bindVarSimple n subId eTy e2) e) env'
                 | PatternKind.PatCons (h, t) ->
-                    let e1 = patternNames h |> List.fold (fun e n ->
-                        let subId = env.Builder.FreshId()
-                        let eTy = env.Subst.Fresh()
-                        subBindings <- subBindings @ [(n, subId, eTy)]
-                        bindVarSimple n subId eTy e) env'
-                    patternNames t |> List.fold (fun e n ->
-                        let subId = env.Builder.FreshId()
-                        let eTy = env.Subst.Fresh()
-                        subBindings <- subBindings @ [(n, subId, eTy)]
-                        bindVarSimple n subId eTy e) e1
+                    // `let head :: tail = tup` splits an n-tuple into element 0
+                    // and the REMAINDER — `tail` is the (n-1)-tuple (2, 3), not
+                    // the single element 2. This arm used to hand every name a
+                    // fresh type variable and let Lowering project positionally,
+                    // which produced both defects at once: `tail` bound element
+                    // 1, and nothing ever constrained either type variable so
+                    // both zonked to the default Float64.
+                    //
+                    // The flatten/typing/reject rules now live in
+                    // consDestructureLeaves, shared with the block-scoped,
+                    // `let static` and expression-position forms so the four
+                    // sites cannot drift apart.
+                    match consDestructureLeaves env tValue.Type h t with
+                    | Error e ->
+                        patternError <- Some e
+                        env'
+                    | Ok leaves ->
+                        destructure <- DSConsRest
+                        leaves
+                        |> List.fold (fun e (n, ty) ->
+                            let subId = env.Builder.FreshId()
+                            subBindings <- subBindings @ [(n, subId, ty)]
+                            bindVarSimple n subId ty e) env'
                 | PatternKind.PatStruct (structName, fieldPats) ->
                     // Look up struct field types from the type definition
-                    let structFields =
-                        match env.Subst.Resolve(tValue.Type) with
-                        | IRTNamed sName ->
-                            match Map.tryFind sName env.TypeDefs with
-                            | Some (TDIStruct (_, _, fields, _)) -> fields
-                            | _ -> []
-                        | _ -> []
+                    // (shared with the expression-position PatStruct arm so
+                    // both read the field list from the same place).
+                    let structFields = structFieldTypesOf env tValue.Type
                     let fieldTypeMap = Map.ofList structFields
                     fieldPats |> List.fold (fun e (fieldName, pat) ->
                         match pat.Kind with
@@ -7431,6 +7859,11 @@ and checkDecl (env: TypeEnv) (decl: Decl) : TypeResult<TypedDecl * TypeEnv> =
                             bindVarSimple n subId eTy e2) e) env'
                 | _ -> env'
 
+            // Surface a destructuring pattern that the scrutinee's type cannot
+            // satisfy (see patternError above) before anything else is built —
+            // the sub-binding ids are already allocated at this point, but a
+            // failed decl never reaches Lowering so they simply go unused.
+            if patternError.IsSome then Error patternError.Value else
             // Mutual-group check-point: an annotation naming a group makes
             // this let the introduce-site (unless the RHS is a call already
             // checked at its declared return). Check IRIds allocate after
@@ -7453,6 +7886,7 @@ and checkDecl (env: TypeEnv) (decl: Decl) : TypeResult<TypedDecl * TypeEnv> =
                 Name = name; VarId = varId; Type = env.Subst.Resolve(tValue.Type)
                 Identity = identity; IsMutable = (assign <> ReadOnly); Value = tValue
                 SubBindings = subBindings |> List.map (fun (n, id, ty) -> (n, id, env.Subst.Resolve ty))
+                Destructure = destructure
                 PostChecks = postChecks
             }
             (TDeclLet tb, env')))))
@@ -7501,9 +7935,37 @@ and checkDecl (env: TypeEnv) (decl: Decl) : TypeResult<TypedDecl * TypeEnv> =
             | None -> inferLetBindingValue env binding
         inferred |> Result.bind (fun tValue ->
             let name = match binding.Pattern.Kind with PatternKind.PatVar n -> n | _ -> "_"
-            // Reuse pre-pass varId if this static was already pre-registered
+            // Reuse the pre-pass varId if this static was already pre-registered
+            // — but ONLY for a plain `let static x = ...`.
+            //
+            // checkModule's pre-pass (the fold that "registers static functions
+            // and static values with placeholder types") exists so a FORWARD
+            // reference resolves: `let static a = b + 1` written before
+            // `let static b = 2` needs `b` bound at a placeholder type whose
+            // varId the real decl then adopts, which is what the unify below
+            // accomplishes. The pre-pass derives its key from the binding's
+            // pattern exactly as this arm does — PatVar gives the real name,
+            // every other pattern gives the synthetic "_".
+            //
+            // For a DESTRUCTURING static that pre-registration is both useless
+            // and actively wrong. Useless: no source reference can name "_", and
+            // the pre-pass registers NONE of the pattern's real leaf names, so
+            // it buys no forward reference for `head`/`x`/`y`. Wrong: every
+            // destructured static in a module registers under the SAME key "_",
+            // so with two of them the second's `lookupVar "_"` finds the FIRST
+            // one's varId. The two module bindings then share one IRId (one
+            // C++ `__tup_N` per CodeGen.bindingCppName, emitted twice) and, at
+            // least as bad, the `unify` below welds their two unrelated types
+            // together. Allocating a fresh id whenever the pattern destructures
+            // is the fix at the one place that can distinguish the two cases;
+            // the pre-pass's "_" entry is simply left unconsulted, which is what
+            // it always effectively was for this shape.
+            let preRegistered =
+                match binding.Pattern.Kind with
+                | PatternKind.PatVar _ -> lookupVar name env
+                | _ -> None
             let varId =
-                match lookupVar name env with
+                match preRegistered with
                 | Some existing ->
                     // Unify pre-pass type with checked type so forward references resolve
                     let _ = unify env.Subst existing.Type tValue.Type
@@ -7518,11 +7980,26 @@ and checkDecl (env: TypeEnv) (decl: Decl) : TypeResult<TypedDecl * TypeEnv> =
                 | Some s -> bindVarPoly name varId tValue.Type None ReadOnly (Some tValue) s env
                 | None -> bindVarFull name varId tValue.Type None ReadOnly (Some tValue) env
 
-            // Tuple destructuring for `let static (a, b) = expr`. Mirrors the
-            // PatTuple branch of DeclLet — sub-bindings become individually
-            // resolvable names downstream. PatCons / PatStruct destructuring
-            // for static bindings is not yet covered (no test pressure yet).
+            // Tuple, cons and struct destructuring for `let static (a, b) =
+            // expr` / `let static head :: tail = expr` / `let static
+            // Point { x, y } = expr`. Mirrors the corresponding branches of
+            // DeclLet — sub-bindings become individually resolvable names
+            // downstream.
+            //
+            // Note the division of labour with StaticEval: its bindPattern
+            // folds PatVar/PatTuple/PatStruct leaves into env.StaticValues, so
+            // those leaves lower to compile-time constants. It has no PatCons
+            // case, so cons leaves get no static value and Lowering's
+            // TDeclStatic path falls back to projecting them out of the primary
+            // binding (subBindingValue) — which is exactly what DSConsRest
+            // below tells it to do.
             let mutable subBindings : (string * IRId * IRType) list = []
+            let mutable destructure = DSPositional
+            // Same parking spot as DeclLet's: the env-building fold is a pure
+            // expression with nowhere to return an error from, so a
+            // non-splittable cons pattern is surfaced just before the binding
+            // is assembled.
+            let mutable patternError : TypeError option = None
             let env'' =
                 match binding.Pattern.Kind with
                 | PatternKind.PatTuple pats ->
@@ -7550,12 +8027,58 @@ and checkDecl (env: TypeEnv) (decl: Decl) : TypeResult<TypedDecl * TypeEnv> =
                             let eTy = env.Subst.Fresh()
                             subBindings <- subBindings @ [(n, subId, eTy)]
                             bindVarSimple n subId eTy e2) e) env'
+                | PatternKind.PatCons (h, t) ->
+                    match consDestructureLeaves env tValue.Type h t with
+                    | Error e ->
+                        patternError <- Some e
+                        env'
+                    | Ok leaves ->
+                        destructure <- DSConsRest
+                        leaves
+                        |> List.fold (fun e (n, ty) ->
+                            let subId = env.Builder.FreshId()
+                            subBindings <- subBindings @ [(n, subId, ty)]
+                            bindVarSimple n subId ty e) env'
+                | PatternKind.PatStruct (_, fieldPats) ->
+                    // `let static Point { x, y } = Point { x = 3, y = 4 }`.
+                    // This arm did not exist, so a struct pattern under
+                    // `let static` recorded no sub-bindings at all and both
+                    // field names surfaced as UnboundVariable — even though
+                    // StaticEval.bindPattern had already folded each leaf to a
+                    // compile-time value. That fold is what Lowering's
+                    // TDeclStatic path prefers (a direct constant per leaf);
+                    // the sub-binding recorded here is what gives that constant
+                    // its name, IRId and type, so without it the value existed
+                    // with nothing to attach it to.
+                    //
+                    // Field types come from structFieldTypesOf — the same
+                    // declared-field list DeclLet reads — and leaves are matched
+                    // BY NAME, so a missing or extra field pattern cannot shift
+                    // the field any other leaf projects (Lowering's struct
+                    // sub-binding emits IRFieldAccess on the leaf's own name).
+                    let fieldTypeMap = Map.ofList (structFieldTypesOf env tValue.Type)
+                    fieldPats |> List.fold (fun e (fieldName, p) ->
+                        match p.Kind with
+                        | PatternKind.PatVar n ->
+                            let subId = env.Builder.FreshId()
+                            let eTy =
+                                Map.tryFind fieldName fieldTypeMap
+                                |> Option.defaultWith (fun () -> env.Subst.Fresh())
+                            subBindings <- subBindings @ [(n, subId, eTy)]
+                            bindVarSimple n subId eTy e
+                        | _ -> patternNames p |> List.fold (fun e2 n ->
+                            let subId = env.Builder.FreshId()
+                            let eTy = env.Subst.Fresh()
+                            subBindings <- subBindings @ [(n, subId, eTy)]
+                            bindVarSimple n subId eTy e2) e) env'
                 | _ -> env'
 
+            if patternError.IsSome then Error patternError.Value else
             let tb : TypedBinding = {
                 Name = name; VarId = varId; Type = env.Subst.Resolve(tValue.Type)
                 Identity = None; IsMutable = false; Value = tValue
                 SubBindings = subBindings |> List.map (fun (n, id, ty) -> (n, id, env.Subst.Resolve ty))
+                Destructure = destructure
                 PostChecks = []
             }
             Ok (TDeclStatic tb, env''))

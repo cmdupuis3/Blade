@@ -2,3 +2,12 @@
 // :: destructuring pattern
 let t = (1, 2, 3)
 let head :: tail = t
+// head binds tuple element 0; tail binds the REMAINDER — the 2-tuple (2, 3),
+// NOT element 1. (It used to bind element 1, and both names came out Float64
+// because the checker gave every cons leaf a fresh, unconstrained type var.)
+// Tuple-typed bindings are not auto-printed (std::tuple has no operator<<),
+// so tail is re-destructured to pin its contents element by element.
+let (t0, t1) = tail
+// EXPECT: head = 1
+// EXPECT: t0 = 2
+// EXPECT: t1 = 3

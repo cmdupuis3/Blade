@@ -1,0 +1,52 @@
+// TEST: Flat Tuple Destructure In Expression Position
+// A `let` written where an EXPRESSION is expected (here, the RHS of another
+// let) parses as ExprLet, not StmtLet. Blade has no `let ... in`, so
+// Parser.parseLet gives that form a synthesized UNIT body — its leaves are
+// dead, and NOTHING about their values can be observed at run time. Same hard
+// constraint as 022_cons_destructure_expr_position; see the honest accounting
+// of what is and is not asserted at the bottom of this file.
+//
+// The gap this probe covers: `(a, b, c)` against ((Int, Int), Int) is a FLAT
+// match — three names against TWO structural slots. Expression position used
+// to desugar the STRUCTURAL shape only and drop a flat pattern into the
+// value-only fallback, which binds no leaf at all, so a, b and c would surface
+// later as UnboundVariable. It now emits one let per FLAT leaf, each reached by
+// a PATH of ordinary tuple projections:
+//     a = get<0>(get<0>(y))   b = get<1>(get<0>(y))   c = get<1>(y)
+// which is what a flat projection means, and is the same leaf order
+// IR.flattenTupleLeaves hands the declaration-position path.
+let x = (1, 2)
+let y = (x, 3)
+let probe = let (a, b, c) = y
+
+// The DECLARATION-position flat destructure of the very same scrutinee, pinned
+// by value. This is the order contract the expression-position desugar above
+// must agree with (and the only side of it that a running program can see):
+// y is ((1, 2), 3), whose flat leaves left-to-right are 1, 2, 3, so a three-name
+// pattern takes them in that order. Scalar-tuple mirror of
+// tuple-views/004_tuple_view_scalar_flat, kept here so this file states the
+// contract it is about in one place.
+let (d, e, f) = y
+// EXPECT: d = 1
+// EXPECT: e = 2
+// EXPECT: f = 3
+
+let after = 7
+// EXPECT: after = 7
+
+// WHAT THIS FILE ASSERTS, precisely:
+//   * d/e/f pin flat leaf ORDER for the shape ((1, 2), 3) — really checked.
+//   * `after` pins that the expression-position flat destructure above did not
+//     break the program: it type-checks, lowers, emits and runs, and the
+//     bindings around it are untouched. The desugar now emits CHAINED
+//     projections (get<_>(get<_>(...))) where it previously emitted none; an
+//     intermediate node carrying the wrong type would fall off Lowering's
+//     static IRTupleProj arm onto the poly-pack path instead, so this is a real
+//     guard on new code even though the leaves themselves are dead.
+//   * It does NOT assert the values of a, b, c. It CANNOT: the synthesized unit
+//     body has no reference to them, so both the old (bind nothing) and the new
+//     (bind three leaves) behaviour produce a program that runs identically.
+//     Nothing short of a `let ... in` form, or a block-scoped let (see
+//     021_cons_destructure_block for that variant), can observe them.
+//   * `probe` is Unit-typed — the synthesized body is the unit literal — and
+//     Unit bindings are not auto-printed, so it cannot be pinned either.

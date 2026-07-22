@@ -1,3 +1,5 @@
 // TEST: Method For
 let A = [1.0, 2.0, 3.0]
 let L = method_for(A, A)
+// L is deferred (no |> compute), so only the input array prints
+// EXPECT: A = [1, 2, 3]
