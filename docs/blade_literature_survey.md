@@ -15,6 +15,15 @@ A curated bibliography of work relevant to Blade-DSL's design and positioning.
 **Henriksen, T., Serup, N. G. W., Elsman, M., Henglein, F., & Oancea, C. E. (2017).** Futhark: Purely Functional GPU-programming with Nested Parallelism and In-place Array Updates. *PLDI 2017*.
 - Functional GPU language with SOACs (map, reduce, scan). Nested parallelism via compiler flattening, not user-facing loop composition. Loops are sequential syntax.
 
+**Strickland, T. S., Tobin-Hochstadt, S., & Felleisen, M. (2009).** Practical Variable-Arity Polymorphism. *ESOP 2009*.
+- Adds variable-arity polymorphism to a typed Scheme, giving uniform types to functions whose behavior varies with the number of arguments (e.g., `map`, `list`). Arity varies in the type system but does not drive output rank/symmetry the way Blade's arity polymorphism does; no notion of loop reification, commutativity, or symmetric storage.
+
+**Moggi, E. (2000).** Arity Polymorphism and Dependent Types. *DTP 2000 (Workshop on Dependent Types in Programming)*.
+- A four-level stratified type theory (Type ≻ Kind > Arity ≻ Kind′) giving arity-polymorphic functions (generic matrix multiply, zip) dependent types indexed by an `Arity` universe, with decidable typing and extensional type equality via prime coverings. Arities and indexes carry computational content (unlike DML), enabling case analysis over arity. Closest prior formalization of "arity" as a first-class type-level quantity; unlike Blade, arity here is a type-system device for uniform signatures over argument count, with no loop reification, no commutativity/identity-group detection, and no connection to symmetric storage or triangular iteration.
+
+**Dzeng, H. & Haynes, C. T. (1994).** Type Reconstruction for Variable-Arity Procedures. *LFP 1994 (ACM Conference on LISP and Functional Programming)*.
+- Encodes variable-arity procedures (optional arguments, arbitrarily-long argument sequences) in a core-ML variant using infinitary tuples, with an algebra of infinitary tuples, a unification algorithm over it, and a terminating type-reconstruction algorithm preserving principal typings. Earliest of the variable-arity lineage here; arity variation is handled entirely at the level of ML-style type inference for procedure arguments, with no array/tensor semantics, no output rank dependence, and no notion of loop objects, commutativity, or symmetry.
+
 ---
 
 ## Loop Abstractions and Scheduling
@@ -141,6 +150,9 @@ The mathematical fact underlying Blade's (r!)^d speedup is classical: the volume
 | Remora (Slepak 2014) | Rank polymorphism; Blade adds arity polymorphism |
 | Dex (Paszke 2021) | Arrays as functions; Blade adds composable loop objects |
 | Futhark (Henriksen 2017) | Functional parallelism; Blade adds loop composition |
+| Strickland et al. (2009) | Variable-arity polymorphism in types; Blade ties arity to output rank/symmetry via loop objects |
+| Moggi (2000) | Arity as a dependent-type universe; Blade ties arity to loop reification, commutativity, symmetric storage |
+| Dzeng & Haynes (1994) | Variable-arity procedures via infinitary-tuple type inference; Blade ties arity to array rank/symmetry |
 | Halide (Ragan-Kelley 2013) | Schedule separation; Blade adds algebraic combinators |
 | Polyhedral (Bastoul, Bondhugula) | Compiler IR; Blade makes loops user-facing |
 | Kokkos/RAJA | Single-loop parallelism; Blade handles nested loops |
@@ -170,6 +182,9 @@ For the formalism document, use:
 [Bastoul04] Bastoul, "Code Generation in the Polyhedral Model," PACT 2004.
 [Kjolstad17] Kjolstad et al., "The Tensor Algebra Compiler," OOPSLA 2017.
 [Slepak14] Slepak et al., "An array-oriented language with static rank polymorphism," ESOP 2014.
+[Strickland09] Strickland, Tobin-Hochstadt, & Felleisen, "Practical Variable-Arity Polymorphism," ESOP 2009.
+[Moggi00] Moggi, "Arity Polymorphism and Dependent Types," DTP 2000.
+[Dzeng94] Dzeng & Haynes, "Type Reconstruction for Variable-Arity Procedures," LFP 1994.
 [Kolda09] Kolda & Bader, "Tensor Decompositions and Applications," SIAM Review 2009.
 [Ahlander03] Ahlander, "Supporting Tensor Symmetries in EinSum," Comput. Math. Appl. 2003.
 [Schatz14] Schatz et al., "Exploiting Symmetry in Tensors for High Performance," SIAM J. Sci. Comput. 2014.
