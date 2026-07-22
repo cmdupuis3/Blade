@@ -2,9 +2,9 @@
 This repository is for Blade, an array-oriented, functional language. Here, you will find the Blade compiler, Coq proofs, and general prose and user guides.
 
 # Documentation Map
-* [All-purpose Formalism](rewrite/blade_formalism_v10.md) - Large, but useful to skim for general info about specific topics.
-* [Proofs](rewrite/proofs) - A collection of proofs demonstrating most of Blade's design principles. Shorter than the formalism, but more abstract.
-* [Equivarient ML Speculation](rewrite/blade_ml_spec.md) - Exploratory syntax for supporting machine learning applications.
+* [All-purpose Formalism](docs/formalism.md) - Large, but useful to skim for general info about specific topics.
+* [Proofs](proofs) - A collection of proofs demonstrating most of Blade's design principles. Shorter than the formalism, but more abstract.
+* [Equivarient ML Speculation](docs/features/equivariant-nn.md) - Exploratory syntax for supporting machine learning applications.
 
 # Important Rules & Conventions
 
@@ -21,6 +21,6 @@ ALso, depending on the state of the repo, certain bits may contradict each other
 4. Speculative markdowns
 
 # Key Files
-* [Compiler](rewrite/blade-compiler) - Root directory for all the compiler files.
-* `rewrite/QUICKSTART` - Intro to Blade, assuming a new user coming from the Python/numpy world.
-* `rewrite/QUICKSTARTp2` - Intro to more complex features in Blade.
+* [Compiler](src) - Root directory for all the compiler files.
+* `docs/quickstart-1.md` - Intro to Blade, assuming a new user coming from the Python/numpy world.
+* `docs/quickstart-2.md` - Intro to more complex features in Blade.

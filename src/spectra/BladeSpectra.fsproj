@@ -1,0 +1,16 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <OutputType>Exe</OutputType>
+    <RootNamespace>BladeSpectra</RootNamespace>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <Compile Include="Rand.fs" />
+    <Compile Include="Fft.fs" />
+    <Compile Include="Polyspec.fs" />
+    <Compile Include="OracleDump.fs" />
+    <Compile Include="Program.fs" />
+  </ItemGroup>
+
+</Project>

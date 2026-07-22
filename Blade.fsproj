@@ -1,0 +1,218 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <OutputType>Exe</OutputType>
+    <RootNamespace>Blade</RootNamespace>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <Compile Include="src/Runtime.fs" />
+    <Compile Include="src/Ast.fs" />
+    <!-- Unified diagnostics: the Diagnostic record + BLxxxx registry +
+         renderers. Needs only Ast.Span; every later phase constructs
+         these directly. -->
+    <Compile Include="src/Diagnostics.fs" />
+    <Compile Include="src/Types.fs" />
+    <Compile Include="src/Lexer.fs" />
+    <Compile Include="src/Parser.fs" />
+    <Compile Include="src/Grad.fs" />
+    <Compile Include="src/IR.fs" />
+    <!-- Provider registry: the core<->provider seam (ProviderSpec records
+         keyed by surface module name). Compiles after IR.fs and before the
+         provider implementations that register into it. -->
+    <Compile Include="src/providers/ProviderRegistry.fs" />
+    <Compile Include="src/providers/NetcdfProvider.fs" />
+    <Compile Include="src/providers/ZarrProvider.fs" />
+    <Compile Include="src/providers/CsvProvider.fs" />
+    <Compile Include="src/TypedAst.fs" />
+    <Compile Include="src/StaticEval.fs" />
+    <!-- Provider-backed statics bridge: registers the NetCDF compile-time
+         data reader into StaticEval's provider hook (fold + provenance).
+         Must follow both NetcdfProvider.fs and StaticEval.fs. -->
+    <Compile Include="src/ProviderStatics.fs" />
+    <!-- Staged-former unfold pass (staged tower Phase 1): eliminates
+         `static method_for/object_for/for` before every elaboration stage.
+         Needs Ast + StaticEval only; runs first in typeCheck's pipeline. -->
+    <Compile Include="src/Unfold.fs" />
+    <!-- Open where-clause constraint registry: extension modules register
+         handlers for constraint keywords (PPL: indep); the checker
+         dispatches WhereClause.Custom conjuncts through it. -->
+    <Compile Include="src/Constraints.fs" />
+    <!-- ML compiler layer (Blade.ML.*): spec model, CG tables, static
+         builtins, ops elaboration. Lives under ml/compiler/ beside the
+         BladeML reference project (which is a SEPARATE fsproj and does
+         not compile these); core touchpoints are StaticEval's builtin
+         registry and the MLElaborate.expand pipeline stage. -->
+    <Compile Include="src/ml/compiler/MLSpec.fs" />
+    <Compile Include="src/ml/compiler/CartesianBridge.fs" />
+    <Compile Include="src/ml/compiler/WignerTables.fs" />
+    <Compile Include="src/ml/compiler/MLStatics.fs" />
+    <Compile Include="src/ml/compiler/MLEquiv.fs" />
+    <Compile Include="src/ml/compiler/MLGalilean.fs" />
+    <Compile Include="src/ml/compiler/MLElaborate.fs" />
+    <!-- PPL compiler layer (Blade.Ppl.*): moment/comoment formers and
+         declared independence, elaborated to plain Blade source. Lives
+         under ppl/compiler/ beside the MomentAlgebra reference project
+         (a SEPARATE fsproj); core touchpoint is the PplElaborate.expand
+         pipeline stage in TypeCheck.typeCheck. -->
+    <Compile Include="src/ppl/compiler/PplElaborate.fs" />
+    <!-- Math compiler layer (Blade.Math.*): tensor decompositions
+         (Jacobi SVD/eigh, mode-n unfolding, HOSVD) elaborated to plain
+         Blade source. Lives under math/compiler/ beside the BladeMath
+         reference project (a SEPARATE fsproj); core touchpoint is the
+         MathElaborate.expand pipeline stage in TypeCheck.typeCheck. -->
+    <Compile Include="src/math/compiler/MathDecls.fs" />
+    <Compile Include="src/math/compiler/MathElaborate.fs" />
+    <Compile Include="src/rand/compiler/RandElaborate.fs" />
+    <!-- Spectra compiler layer (Blade.Spectra.*): FFT + arity-polymorphic
+         polyspectra elaborated to plain Blade source. Lives under
+         spectra/compiler/ beside the BladeSpectra oracle (a SEPARATE
+         fsproj); core touchpoint is the SpectraElaborate.expand pipeline
+         stage in TypeCheck.typeCheck. -->
+    <Compile Include="src/spectra/compiler/SpectraDecls.fs" />
+    <Compile Include="src/spectra/compiler/SpectraElaborate.fs" />
+    <!-- sgs compiler layer (Blade.Sgs.*): subgrid-closure field formers
+         (central-difference gradient, box filter, exact subgrid stress)
+         elaborated to plain Blade source. Lives under sgs/compiler/ beside
+         the BladeSgs physics oracle (a SEPARATE fsproj); reuses the
+         Blade.Math.Decls AST helpers and the Blade.ML.CartesianBridge pack
+         order (compile order), while its PIPELINE stage runs between ML and
+         PPL (TypeCheck.typeCheck) so `where ml.galilean` bodies are judged
+         with surface `sgs.*` calls still visible at ML's seam. -->
+    <Compile Include="src/sgs/compiler/SgsDecls.fs" />
+    <Compile Include="src/sgs/compiler/SgsElaborate.fs" />
+    <Compile Include="src/IndexTypeValidator.fs" />
+    <Compile Include="src/Unify.fs" />
+    <Compile Include="src/TypeEnv.fs" />
+    <Compile Include="src/Zonk.fs" />
+    <Compile Include="src/TypeCheck.fs" />
+    <Compile Include="src/Ide.fs" />
+    <Compile Include="src/Lowering.fs" />
+    <Compile Include="src/EmitCpp.fs" />
+    <!-- Reynolds permutation term-plan (enumeration/dedup/ordering), extracted
+         from CodeGen so a future IR interpreter can reuse the exact plan. Pure
+         int/list logic; no IR/Types dependency, so it can precede CodeGen. -->
+    <Compile Include="src/ReynoldsCore.fs" />
+    <Compile Include="src/CodeGen.fs" />
+    <!-- Tree-walking IR interpreter (differential twin of CodeGen; output must
+         byte-match compiled binaries). Value = runtime value universe;
+         CppFormat = iostream-parity printing; Numerics = bit-exact scalar and
+         complex arithmetic; RandMirror = bit-exact blade_rand mirror. -->
+    <Compile Include="src/Interp/Value.fs" />
+    <Compile Include="src/Interp/CppFormat.fs" />
+    <Compile Include="src/Interp/Numerics.fs" />
+    <Compile Include="src/Interp/RandMirror.fs" />
+    <Compile Include="src/Interp/ArrayOps.fs" />
+    <Compile Include="src/Interp/Core.fs" />
+    <Compile Include="src/Interp/Loops.fs" />
+    <Compile Include="src/Interp/Print.fs" />
+    <Compile Include="src/Interp/Run.fs" />
+    <!-- Interpreter-backed REPL seam: lowerSession (one shared front-end pass)
+         wraps Interp/Run.fs; consumed by Cli.replLoop. -->
+    <Compile Include="src/Interp/Repl.fs" />
+    <Compile Include="src/Build.fs" />
+    <Compile Include="tests/TestHarness.fs" />
+    <Compile Include="tests/Expect.fs" />
+    <Compile Include="tests/Corpus.fs" />
+    <Compile Include="tests/Runner.fs" />
+    <Compile Include="tests/InterpDiff.fs" />
+    <Compile Include="tests/Test_Basic.fs" />
+    <Compile Include="tests/Test_Loops.fs" />
+    <Compile Include="tests/Test_Symmetry.fs" />
+    <Compile Include="tests/Test_Reynolds.fs" />
+    <Compile Include="tests/Test_Arity.fs" />
+    <Compile Include="tests/Test_Functions.fs" />
+    <Compile Include="tests/Test_Structs.fs" />
+    <Compile Include="tests/Test_SumTypes.fs" />
+    <Compile Include="tests/Test_Interfaces.fs" />
+    <Compile Include="tests/Test_Modules.fs" />
+    <Compile Include="tests/Test_Guards.fs" />
+    <Compile Include="tests/Test_Bracketed.fs" />
+    <Compile Include="tests/Test_IndexTypes.fs" />
+    <Compile Include="tests/Test_Mutability.fs" />
+    <Compile Include="tests/Test_Static.fs" />
+    <Compile Include="tests/Test_Units.fs" />
+    <Compile Include="tests/Test_Sqlish.fs" />
+    <Compile Include="tests/Test_InferenceProbes.fs" />
+    <Compile Include="tests/Test_FuncArrays.fs" />
+    <Compile Include="tests/Test_Normalize.fs" />
+    <Compile Include="tests/Test_Unify.fs" />
+    <Compile Include="tests/Test_ValidateArrow.fs" />
+    <Compile Include="tests/Test_ExprAttrs.fs" />
+    <Compile Include="tests/Test_CodeGenSubst.fs" />
+    <Compile Include="tests/Test_TypeStructure.fs" />
+    <Compile Include="tests/Test_Shape.fs" />
+    <Compile Include="tests/Test_Spans.fs" />
+    <Compile Include="tests/Test_Diagnostics.fs" />
+    <Compile Include="tests/Test_DiagCorpus.fs" />
+    <Compile Include="tests/Oracles.fs" />
+    <Compile Include="tests/Test_Oracles.fs" />
+    <Compile Include="tests/Test_WignerTables.fs" />
+    <Compile Include="tests/Test_CartesianBridge.fs" />
+    <Compile Include="tests/Test_Ppl.fs" />
+    <Compile Include="tests/Test_Math.fs" />
+    <Compile Include="tests/Test_Rand.fs" />
+    <Compile Include="tests/Test_Spectra.fs" />
+    <Compile Include="tests/Test_Fallback.fs" />
+    <Compile Include="tests/Test_Sgs.fs" />
+    <Compile Include="tests/Differential.fs" />
+    <Compile Include="tests/Benchmarks.fs" />
+    <Compile Include="tests/CudaTests.fs" />
+    <Compile Include="tests/OmpTests.fs" />
+    <Compile Include="tests/AllocTests.fs" />
+    <Compile Include="tests/NetcdfTests.fs" />
+    <Compile Include="tests/ZarrTests.fs" />
+    <Compile Include="tests/CsvTests.fs" />
+    <Compile Include="tests/MpiTests.fs" />
+    <Compile Include="tests/HybridTests.fs" />
+    <Compile Include="tests/DiffOracle.fs" />
+    <Compile Include="tests/RunAll.fs" />
+    <Compile Include="src/Cli.fs" />
+    <Compile Include="src/Main.fs" />
+  </ItemGroup>
+
+  <!-- C++ runtime headers. Read at codegen time via AppContext.BaseDirectory.
+       PreserveNewest copies on first build and on file change. The Link
+       directive controls the destination subpath inside the output dir,
+       so headers end up at bin/<config>/net7.0/cpp/ regardless of where
+       dotnet run is invoked from. -->
+  <!-- On-disk .blade test corpus (tests/Corpus.fs loads it). Copied next to
+       the binary so the suite runs regardless of the working directory. -->
+  <ItemGroup>
+    <None Include="tests/corpus/**/*.blade">
+      <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
+    </None>
+  </ItemGroup>
+
+  <ItemGroup>
+    <None Include="src/cpp/nested_array_utilities.hpp">
+      <Link>cpp/nested_array_utilities.hpp</Link>
+      <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
+    </None>
+    <None Include="src/cpp/nested_array_types.hpp">
+      <Link>cpp/nested_array_types.hpp</Link>
+      <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
+    </None>
+    <None Include="src/cpp/index_types.h">
+      <Link>cpp/index_types.h</Link>
+      <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
+    </None>
+    <None Include="src/cpp/alloc_layout_tests.cpp">
+      <Link>cpp/alloc_layout_tests.cpp</Link>
+      <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
+    </None>
+    <None Include="src/cpp/linearized_storage.hpp">
+      <Link>cpp/linearized_storage.hpp</Link>
+      <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
+    </None>
+    <None Include="src/cpp/rand_runtime.hpp">
+      <Link>cpp/rand_runtime.hpp</Link>
+      <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
+    </None>
+    <None Include="src/cpp/blade_runtime.hpp">
+      <Link>cpp/blade_runtime.hpp</Link>
+      <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
+    </None>
+  </ItemGroup>
+
+</Project>

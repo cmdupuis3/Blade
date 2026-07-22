@@ -1,0 +1,50 @@
+# ---- .NET ----
+bin/
+obj/
+*.user
+*.suo
+*.userprefs
+.vs/
+.idea/
+*.binlog
+
+# ---- F# scripting ----
+.fake/
+.ionide/
+
+# ---- Coq (proofs/) ----
+*.vo
+*.vok
+*.vos
+*.glob
+*.aux
+.*.aux
+.lia.cache
+.nia.cache
+CoqMakefile*
+!CoqMakefile.local
+
+# ---- Blade compiler output ----
+# The C++ the compiler emits, plus the compile+run scratch the test harness
+# creates beside the binary.
+generated_cpp_tests/
+
+# The compiler deploys its C++ runtime headers next to every generated .cpp,
+# and `blade build` with no -o writes them into the current directory -- which
+# is how copies end up beside the corpus sources. src/cpp/ is canonical; these
+# trees hold only .blade programs and data.
+/tests/corpus/**/*.h
+/tests/corpus/**/*.hpp
+/tests/corpus/**/*.cpp
+/examples/**/*.h
+/examples/**/*.hpp
+/examples/**/*.cpp
+*.obj
+*.ilk
+*.pdb
+*.exp
+*.lib
+
+# ---- OS ----
+Thumbs.db
+.DS_Store

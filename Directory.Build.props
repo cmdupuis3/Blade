@@ -1,0 +1,18 @@
+<Project>
+
+  <!-- Shared settings for every project in the repo: Blade.fsproj (the
+       compiler, at the root) and the five reference/oracle projects under
+       src/. Imported ahead of each .fsproj body, so any project can still
+       override an individual property. -->
+  <PropertyGroup>
+    <TargetFramework>net7.0</TargetFramework>
+
+    <!-- Blade.fsproj sits at the REPO root, so the SDK's default item globs
+         would sweep docs/, proofs/, examples/, legacy/ and the test fixtures
+         into the None group on every evaluation. Every project here lists its
+         Compile items explicitly (F# requires ordered compilation anyway), so
+         the defaults buy nothing. -->
+    <EnableDefaultItems>false</EnableDefaultItems>
+  </PropertyGroup>
+
+</Project>

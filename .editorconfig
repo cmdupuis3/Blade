@@ -1,0 +1,45 @@
+root = true
+
+[*]
+charset = utf-8
+end_of_line = crlf
+insert_final_newline = true
+trim_trailing_whitespace = true
+indent_style = space
+indent_size = 4
+
+[*.{fs,fsi,fsx}]
+indent_size = 4
+# F# is whitespace-significant; never let an editor retab these.
+indent_style = space
+
+[*.{cpp,hpp,h,cu}]
+indent_size = 4
+
+[*.{fsproj,props,targets,sln,slnx,json,xml}]
+indent_size = 2
+
+[*.{md,txt}]
+indent_size = 2
+# Two trailing spaces are a hard line break in Markdown.
+trim_trailing_whitespace = false
+
+[*.v]
+indent_size = 2
+
+[*.{yml,yaml}]
+indent_size = 2
+
+[*.ps1]
+indent_size = 4
+
+# On-disk test corpus and example programs: content is compared byte-for-byte
+# against pinned expectations, so nothing may rewrite them.
+[{tests/corpus/**,examples/**}]
+trim_trailing_whitespace = false
+insert_final_newline = false
+
+# Binary/committed fixtures.
+[tests/fixtures/**]
+trim_trailing_whitespace = false
+insert_final_newline = false
