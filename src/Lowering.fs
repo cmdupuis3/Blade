@@ -195,6 +195,31 @@ let subBindingValue (binding: TypedBinding) (isStruct: bool) (isFlat: bool) (i: 
             if rest.Length = 1 then rest.Head else IRTuple rest
         | _ -> IRTupleProj (baseVar, i, isFlat)
 
+/// Map a callable's parallelization-strategy list (from a function's
+/// where-clause or a lambda's `Parallel` list) into the five IRCallable
+/// parallelism fields: (Parallelism, IsOmpParallel, IsCudaKernel,
+/// CudaBlockSize, IsMpiParallel). `paramNames` resolves an omp clause's
+/// named vars to param indices. omp/cuda/mpi are mutually exclusive today,
+/// so at most one of the three flags is true; all false = serial host loop.
+/// Shared by lowerTypedLambda and lowerTypedFuncDecl so the extraction lives
+/// in one place.
+let extractParallelism (strategies: ParallelStrategy list) (paramNames: string list)
+    : (int * int) list * bool * bool * int * bool =
+    let omp = strategies |> List.tryPick (function Omp o -> Some o | _ -> None)
+    let parallelism =
+        match omp with
+        | Some o ->
+            o.Vars |> List.choose (fun (name, dims) ->
+                paramNames |> List.tryFindIndex (fun n -> n = name)
+                |> Option.map (fun idx -> (idx, dims)))
+        | None -> []
+    let isOmp = Option.isSome omp
+    let cuda = strategies |> List.tryPick (function Cuda c -> Some c | _ -> None)
+    let isCuda = Option.isSome cuda
+    let cudaBlock = match cuda with Some c -> c.BlockSize | None -> 256
+    let isMpi = strategies |> List.exists (function Mpi -> true | _ -> false)
+    (parallelism, isOmp, isCuda, cudaBlock, isMpi)
+
 /// Lower a TypedExpr to IRExpr
 let rec lowerTypedExpr (env: TypedLowerEnv) (texpr: TypedExpr) : IRExpr =
     match texpr.Kind with
@@ -681,29 +706,24 @@ and lowerTypedLambda env (info: TypedLambdaInfo) : IRExpr =
     // Build unified IRCallable. info.ReturnType comes from TypeCheck,
     // so the lambda has a concrete return type. The body's IRExpr type
     // matches it (modulo inference); we trust TypeCheck's annotation.
-    // Lambda-level parallelism: find the Omp assignment (if any) in the strategy
-    // list and map its named Vars to param indices. (Today the list has 0 or 1
-    // element; List.tryPick generalizes cleanly to the future mixed case where
-    // omp and cuda assignments coexist.) Cuda/none => no omp parallelism here.
-    let lamOmp = info.Parallel |> List.tryPick (function Omp o -> Some o | _ -> None)
-    let lamParallelism =
-        match lamOmp with
-        | Some omp ->
-            omp.Vars |> List.choose (fun (name, dims) ->
-                info.Params |> List.tryFindIndex (fun p -> p.Name = name)
-                |> Option.map (fun idx -> (idx, dims)))
-        | None -> []
-    let lamIsOmp = Option.isSome lamOmp
-    // Lambda-level cuda: find a Cuda assignment (if any) and its block size.
-    let lamCuda = info.Parallel |> List.tryPick (function Cuda c -> Some c | _ -> None)
-    let lamIsCuda = Option.isSome lamCuda
-    let lamBlock = match lamCuda with Some c -> c.BlockSize | None -> 256
-    // Lambda-level mpi: bare flag (rank count is a launch-time property).
-    let lamIsMpi = info.Parallel |> List.exists (function Mpi -> true | _ -> false)
+    // Lambda-level parallelism flows TypedLambdaInfo.Parallel -> here via
+    // the shared extractor (same logic a function's where-clause uses).
+    let (lamParallelism, lamIsOmp, lamIsCuda, lamBlock, lamIsMpi) =
+        extractParallelism info.Parallel (info.Params |> List.map (fun p -> p.Name))
+    // A named, recursive lambda (`let const name = lambda ...` whose body refers
+    // to itself) carries a self-binding: give the lifted callable the real name
+    // and the id the body's self-reference resolves to, so the emitted top-level
+    // C++ function can call itself. An anonymous lambda gets the default
+    // synthesized "__lambda_<id>" name and a fresh id.
+    let lamOpts =
+        match info.SelfBinding with
+        | Some (selfName, selfId) ->
+            { defaultLambdaOptions with NameOverride = Some selfName; IdOverride = Some selfId }
+        | None -> defaultLambdaOptions
     let callable =
-        mkLambdaCallable env.Builder paramInfos bodyWrapped info.ReturnType
-                         captures info.IsCommutative info.CommGroups
-                         lamParallelism lamIsOmp lamIsCuda lamBlock lamIsMpi
+        mkCallable env.Builder lamOpts paramInfos bodyWrapped info.ReturnType
+                   captures info.IsCommutative info.CommGroups
+                   lamParallelism lamIsOmp lamIsCuda lamBlock lamIsMpi
     // Emit IRVar(callable.Id, funcType) — the callable lives in
     // LiftedCallables → module.Functions; the IRVar carries just the
     // function type for type-inference and consumer dispatch.
@@ -758,6 +778,19 @@ and lowerTypedBlock env (stmts: TypedStmt list) (finalExpr: TypedExpr option) : 
         match stmt with
         | TStmtLet binding ->
             let value = lowerTypedExpr env binding.Value
+            // A named, recursive lambda binding (`let const f = lambda ... f ...`,
+            // incl. the nested-`function` desugar) lifts to a module-level
+            // callable whose id IS binding.VarId, so `f` resolves to that callable
+            // everywhere — its own body (recursion) and the rest of the block. The
+            // lowered value is then a bare self-reference IRVar(binding.VarId);
+            // wrapping it in an IRLet would create a degenerate self-alias and a
+            // stray main-local shadow of the top-level function. Skip the IRLet —
+            // the callable was already registered by lowerTypedExpr above.
+            let isSelfBoundLambda =
+                match binding.Value.Kind with
+                | TExprLambda info ->
+                    (match info.SelfBinding with Some (_, id) -> id = binding.VarId | None -> false)
+                | _ -> false
             // IRLet has no mutability slot, so record mut ARRAY lets in the
             // module side table — codegen/interp give them copy semantics
             // (a mut binding initialized from an existing array must not
@@ -767,7 +800,9 @@ and lowerTypedBlock env (stmts: TypedStmt list) (finalExpr: TypedExpr option) : 
                  env.MutableArrayLets.Add binding.VarId
              | _ -> ())
             let env' = bindTypedVar binding.Name binding.VarId env
-            if binding.SubBindings.IsEmpty && binding.PostChecks.IsEmpty then
+            if isSelfBoundLambda then
+                lowerTypedBlock env' rest finalExpr
+            elif binding.SubBindings.IsEmpty && binding.PostChecks.IsEmpty then
                 let body = lowerTypedBlock env' rest finalExpr
                 IRLet (binding.VarId, value, body)
             else
@@ -1110,45 +1145,12 @@ let lowerTypedFuncDecl (env: TypedLowerEnv) (decl: TypedFunctionDecl) : IRFuncDe
         | _ -> None)
     let isArityPoly = not polyParamNames.IsEmpty
 
-    // Extract parallelism from where clause. The AST carries a ParallelStrategy
-    // LIST; find the Omp assignment (if any) and map its named vars + dim counts
-    // into the IRCallable.Parallelism (int*int) shape (param-index, level). Cuda
-    // does not populate this field (its IR channel is added in a later phase).
-    // No omp assignment => [] (serial), the default. (List.tryPick generalizes
-    // to the future mixed omp+cuda case.)
-    let declOmp =
-        match decl.WhereClause with
-        | Some wc -> wc.Parallel |> List.tryPick (function Omp o -> Some o | _ -> None)
-        | None -> None
-    let parallelism =
-        match declOmp with
-        | Some omp ->
-            omp.Vars |> List.choose (fun (name, dims) ->
-                decl.Params |> List.tryFindIndex (fun p -> p.Name = name)
-                |> Option.map (fun idx -> (idx, dims)))
-        | None -> []
-
-    // The opt-in OpenMP signal: true iff the where-clause carried an `omp(...)`
-    // assignment. Distinguishes omp from cuda and from serial, so loop
-    // parallelization keys on this, not on Parallelism-list emptiness.
-    let isOmpParallel = Option.isSome declOmp
-
-    // The opt-in CUDA signal: find a Cuda assignment in the strategy list. When
-    // present, codegen emits a flat-launch kernel (following increment). Carries
-    // the launch block size; default 256 if no Cuda assignment.
-    let declCuda =
-        match decl.WhereClause with
-        | Some wc -> wc.Parallel |> List.tryPick (function Cuda c -> Some c | _ -> None)
-        | None -> None
-    let isCudaKernel = Option.isSome declCuda
-    let cudaBlockSize = match declCuda with Some c -> c.BlockSize | None -> 256
-
-    // The opt-in MPI signal: bare `mpi` in the strategy list. Rank count is a
-    // launch-time property (mpiexec -n N), so there is no payload to carry.
-    let isMpiParallel =
-        match decl.WhereClause with
-        | Some wc -> wc.Parallel |> List.exists (function Mpi -> true | _ -> false)
-        | None -> false
+    // Extract parallelism from the where-clause strategy list via the shared
+    // extractor (same logic a lambda's Parallel list uses): omp -> per-param
+    // (index, level) detail + flag, cuda -> flag + block size, mpi -> flag.
+    let declParallel = match decl.WhereClause with Some wc -> wc.Parallel | None -> []
+    let (parallelism, isOmpParallel, isCudaKernel, cudaBlockSize, isMpiParallel) =
+        extractParallelism declParallel (decl.Params |> List.map (fun p -> p.Name))
 
     // Bind parameters in environment for body lowering
     let mutable paramEnv = { env with PolyParamNames = polyParamNames }
@@ -1158,27 +1160,20 @@ let lowerTypedFuncDecl (env: TypedLowerEnv) (decl: TypedFunctionDecl) : IRFuncDe
 
     let body = lowerTypedExpr paramEnv decl.Body
 
-    let funcDef : IRCallable = {
-        Id = decl.FuncId
-        Name = decl.Name
-        Params = irParams
-        RetType = decl.ReturnType
-        Body = body
-        IsStatic = decl.IsStatic
-        IsCommutative = not decl.CommGroups.IsEmpty
-        CommGroups = decl.CommGroups
-        Parallelism = parallelism
-        IsOmpParallel = isOmpParallel
-        IsCudaKernel = isCudaKernel
-        CudaBlockSize = cudaBlockSize
-        IsMpiParallel = isMpiParallel
-        IsArityPoly = isArityPoly
-        ArityParam = polyParamNames |> List.tryHead
-        // Source-level functions live at top level and have no enclosing
-        // scope to capture from. Lifted lambdas (handled separately in
-        // Stage 4) populate Captures from the lambda's free variables.
-        Captures = []
-    }
+    // Source-level functions live at top level and have no enclosing scope to
+    // capture from, so Captures = []. The function-only metadata (name, id,
+    // static, arity-poly) is supplied via CallableOptions; everything else is
+    // shared with the lambda-construction path through mkCallable.
+    let funcOpts : CallableOptions =
+        { NameOverride = Some decl.Name
+          IdOverride   = Some decl.FuncId
+          IsStatic     = decl.IsStatic
+          IsArityPoly  = isArityPoly
+          ArityParam   = polyParamNames |> List.tryHead }
+    let funcDef =
+        mkCallable env.Builder funcOpts irParams body decl.ReturnType []
+                   (not decl.CommGroups.IsEmpty) decl.CommGroups
+                   parallelism isOmpParallel isCudaKernel cudaBlockSize isMpiParallel
 
     let env' = bindTypedVar decl.Name decl.FuncId env
     (funcDef, env')
@@ -1967,8 +1962,11 @@ let lower (source: string) : Result<IRProgram, string> =
             // here we don't have a structured channel.
             for w in warnings do
                 eprintfn "[TypeCheck Warning] %s" w
-            Ok (lowerTypedProgram typedProgram (Some program) builder)
-        | Error errors -> 
+            // Lowering can THROW on a failed compile-time provider load; keep
+            // this convenience entry point from surfacing an unhandled exception.
+            (try Ok (lowerTypedProgram typedProgram (Some program) builder)
+             with ex -> Error ex.Message)
+        | Error errors ->
             let msgs = errors |> List.map Blade.TypeEnv.formatCompileError
             Error (String.concat "\n" msgs)
     | Error e -> Error (sprintf "Parse error at %d:%d: %s" e.Line e.Col e.Message)
@@ -1989,7 +1987,13 @@ let lowerDiag (fileName: string option) (source: string)
             | Error errors ->
                 Error (errors |> List.map Blade.TypeEnv.diagnosticOfCompileError)
             | Ok (typedProgram, builder, warnings) ->
-                Ok (lowerTypedProgram typedProgram (Some program) builder, warnings)
+                // Lowering can THROW when a compile-time provider load fails
+                // (e.g. `netcdf.load("missing.nc")` raises from
+                // tryInvokeProvider). Convert it to a coded diagnostic so the
+                // compile driver reports it cleanly instead of crashing.
+                try Ok (lowerTypedProgram typedProgram (Some program) builder, warnings)
+                with ex ->
+                    Error [ Blade.Diagnostics.mkError "BL6002" Blade.Diagnostics.PhIRValidate Blade.Ast.noSpan ex.Message ]
     result, sm
 
 /// Lower multiple source files into a single IR program with cross-module imports
@@ -2000,7 +2004,9 @@ let lowerMultiSource (sources: (string * string) list) : Result<IRProgram, strin
         | Ok (typedProgram, builder, warnings) ->
             for w in warnings do
                 eprintfn "[TypeCheck Warning] %s" w
-            Ok (lowerTypedProgram typedProgram (Some program) builder)
+            // Lowering can THROW on a failed compile-time provider load.
+            (try Ok (lowerTypedProgram typedProgram (Some program) builder)
+             with ex -> Error ex.Message)
         | Error errors ->
             let msgs = errors |> List.map Blade.TypeEnv.formatCompileError
             Error (String.concat "\n" msgs)

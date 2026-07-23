@@ -1271,6 +1271,36 @@ let b = ps
      | ex -> printfn "  SKIP provider static fold: %s" ex.Message)
 
     // ---------------------------------------------------------------
+    // Missing file at COMPILE time: `NetCDF.load("<absent>")` must fail
+    // cleanly THROUGH the lowering boundary (Result.Error), not throw an
+    // unhandled exception. The unguarded throw used to escape lowering and
+    // kill the REPL / compile driver outright. Hermetic: the path is
+    // intentionally absent, so neither libnetcdf nor sample.nc is required.
+    // ---------------------------------------------------------------
+    printfn "\n--- missing file: NetCDF.load of an absent path fails cleanly at compile time ---"
+    (try
+        Blade.ProviderStatics.install ()
+        let missingSource = """
+import netcdf as NetCDF
+
+let arrays = NetCDF.load("definitely_absent_9f3a.nc")
+"""
+        match lower missingSource with
+        | Ok _ ->
+            check "missing file: lowering rejects an absent netcdf path" false
+                "expected Error, got Ok"
+        | Error msg ->
+            check "missing file: lowering returns Error (no unhandled exception)" true ""
+            check "missing file: error names the missing file and cwd"
+                (msg.Contains "not found" && msg.Contains "definitely_absent_9f3a.nc")
+                (sprintf "got: %s" msg)
+     with
+     | ex ->
+        // The whole point of the fix: lowering must NOT throw here.
+        check "missing file: lowering does not throw an unhandled exception" false
+            (sprintf "unexpected exception: %s" ex.Message))
+
+    // ---------------------------------------------------------------
     // Summary
     // ---------------------------------------------------------------
     printFooter "NetCDF Provider" [sprintf "%d passed" passed; sprintf "%d failed" failed]

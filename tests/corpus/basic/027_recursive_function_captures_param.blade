@@ -1,0 +1,11 @@
+// TEST: Recursive Function Captures Outer Param
+// Recursion AND a genuine capture together. `addK` recurses (its own name is
+// excluded from the capture set — it is the function, not a captured value)
+// while capturing the enclosing parameter `k` (which IS retained). Proves the
+// self-name capture-exclusion is surgical: addK(2) = k + k + k with k = 10.
+function outer(k: Int64) -> Int64 = {
+    function addK(n: Int64) -> Int64 = if n == 0 then k else k + addK(n - 1)
+    addK(2)
+}
+let result = outer(10)
+// EXPECT: result = 30

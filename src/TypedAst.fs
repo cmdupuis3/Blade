@@ -57,6 +57,15 @@ type TypedLambdaInfo = {
     // Propagated from the lambda's where-clause so lambda-level omp/cuda take
     // effect. Today 0 or 1 element.
     Parallel: ParallelStrategy list
+    // Self-binding for a NAMED, recursive lambda: Some (name, id) when this
+    // lambda is the value of `let const name = lambda(...)` (including the
+    // nested-`function` desugar) AND its body refers to itself. The name and
+    // id are threaded to Lowering so the lifted callable takes the real name
+    // and an id equal to the one the body's self-reference resolves to (so the
+    // top-level C++ function can call itself). None for an anonymous lambda,
+    // for which self-reference is impossible. See Lowering.lowerTypedLambda /
+    // lowerTypedBlock and TypeCheck.inferBlock's self-binding branch.
+    SelfBinding: (string * IRId) option
 }
 
 // ============================================================================

@@ -242,8 +242,11 @@ type IRExpr =
 ///     functions; populated for lambdas by lambda-lifting.
 ///   - IsCommutative, CommGroups: kernel symmetry annotations.
 ///     IsCommutative=false, CommGroups=[] when not annotated.
-///   - Parallelism, IsStatic, IsArityPoly, ArityParam: function-only
-///     metadata; empty/false/None for lambdas.
+///   - Parallelism (+ IsOmpParallel/IsCudaKernel/CudaBlockSize/IsMpiParallel):
+///     populated for both kinds — omp/cuda/mpi clauses on either a function's
+///     where-clause or a lambda's strategy list flow through identically.
+///   - IsStatic, IsArityPoly, ArityParam: function-only metadata;
+///     false/None for lambdas.
 ///   - RetType: explicit return type. Functions get it from declaration;
 ///     lambdas get it from inference at construction time.
 ///
@@ -1856,16 +1859,80 @@ type IRBuilder() =
         let id = this.FreshId()
         IRLet(id, value, bodyFn id)
 
-/// Build a fresh IRCallable for an inline lambda with sensible defaults
-/// for the lambda case: synthesized "__lambda_<id>" name, no parallelism
-/// hints, not arity-polymorphic, not static. Function-style metadata
-/// fields default to their identity values so lambdas and functions can
-/// share the same record type without spurious distinction.
+/// Caller-supplied fields that distinguish a named source-level function
+/// from an anonymous lambda when building an IRCallable. Everything else
+/// (params, body, captures, commutativity, parallelism) is the same for
+/// both and is passed positionally to `mkCallable`.
 ///
-/// Used by every lambda-construction site in Lowering.fs to avoid
-/// repeating boilerplate. The captures list, return type, and
-/// commutativity metadata are caller-supplied because they depend on
-/// the specific lambda being built.
+///   - NameOverride: Some name for a source function or a named let-bound
+///     lambda; None synthesizes "__lambda_<id>" for a truly anonymous one.
+///   - IdOverride: Some id when the callable's IRId was allocated up front
+///     (a source function's FuncId, or a named lambda that must be bound in
+///     scope before its body is lowered for self-reference); None allocates
+///     a fresh id here.
+///   - IsStatic / IsArityPoly / ArityParam: function-only metadata; the
+///     anonymous-lambda default (`defaultLambdaOptions`) leaves them off.
+type CallableOptions =
+    { NameOverride : string option
+      IdOverride   : IRId option
+      IsStatic     : bool
+      IsArityPoly  : bool
+      ArityParam   : string option }
+
+/// Options for an anonymous lambda: no name, fresh id, no function-only
+/// metadata. The single construction point for every lambda-shaped callable
+/// in Lowering.fs (real lambdas, operator sections, partial applications,
+/// synthesized binop kernels).
+let defaultLambdaOptions : CallableOptions =
+    { NameOverride = None; IdOverride = None; IsStatic = false; IsArityPoly = false; ArityParam = None }
+
+/// The single builder for an IRCallable — the merged construction point for
+/// source-level functions and lambdas. `opts` carries the only fields that
+/// differ between the two (name, id, static, arity-poly); the captures list,
+/// return type, commutativity, and parallelism are caller-supplied because
+/// they depend on the specific callable being built. Parallelism is
+/// populated for both kinds: omp/cuda/mpi clauses on either a function's
+/// where-clause or a lambda's strategy list flow through here identically.
+let mkCallable
+    (builder: IRBuilder)
+    (opts: CallableOptions)
+    (parms: IRParam list)
+    (body: IRExpr)
+    (retType: IRType)
+    (captures: CaptureInfo list)
+    (isCommutative: bool)
+    (commGroups: int list list)
+    (parallelism: (int * int) list)
+    (isOmpParallel: bool)
+    (isCudaKernel: bool)
+    (cudaBlockSize: int)
+    (isMpiParallel: bool)
+    : IRCallable =
+    let id = match opts.IdOverride with Some i -> i | None -> builder.FreshId()
+    {
+        Id = id
+        Name = match opts.NameOverride with Some n -> n | None -> sprintf "__lambda_%d" id
+        Params = parms
+        RetType = retType
+        Body = body
+        IsStatic = opts.IsStatic
+        IsCommutative = isCommutative
+        CommGroups = commGroups
+        Parallelism = parallelism
+        IsOmpParallel = isOmpParallel
+        IsCudaKernel = isCudaKernel
+        CudaBlockSize = cudaBlockSize
+        IsMpiParallel = isMpiParallel
+        IsArityPoly = opts.IsArityPoly
+        ArityParam = opts.ArityParam
+        Captures = captures
+    }
+
+/// Build a fresh IRCallable for an anonymous inline lambda: synthesized
+/// "__lambda_<id>" name, fresh id, not static, not arity-polymorphic.
+/// A thin wrapper over `mkCallable` with `defaultLambdaOptions`, kept for
+/// the anonymous construction sites (operator sections, partial
+/// applications, synthesized binop kernels) that never carry a name.
 let mkLambdaCallable
     (builder: IRBuilder)
     (parms: IRParam list)
@@ -1880,29 +1947,9 @@ let mkLambdaCallable
     (cudaBlockSize: int)
     (isMpiParallel: bool)
     : IRCallable =
-    let id = builder.FreshId()
-    {
-        Id = id
-        Name = sprintf "__lambda_%d" id
-        Params = parms
-        RetType = retType
-        Body = body
-        IsStatic = false
-        IsCommutative = isCommutative
-        CommGroups = commGroups
-        // Lambda-level parallelism IS propagated: omp/cuda/mpi clauses on a
-        // lambda flow TypedLambdaInfo.Parallel -> here. Callers supply the omp
-        // detail + flag, the cuda flag + block size, and the mpi flag (mutually
-        // exclusive today).
-        Parallelism = parallelism
-        IsOmpParallel = isOmpParallel
-        IsCudaKernel = isCudaKernel
-        CudaBlockSize = cudaBlockSize
-        IsMpiParallel = isMpiParallel
-        IsArityPoly = false
-        ArityParam = None
-        Captures = captures
-    }
+    mkCallable builder defaultLambdaOptions parms body retType captures
+               isCommutative commGroups parallelism isOmpParallel
+               isCudaKernel cudaBlockSize isMpiParallel
 
 /// Deduce output array type from loop application
 /// According to formalism section 10.9:
