@@ -470,6 +470,12 @@ let rec unify (subst: Subst) (t1: IRType) (t2: IRType) : TypeResult<unit> =
     | IRTNamed n1, IRTNamed n2 when n1 = n2 -> Ok ()
     | IRTLoop l1, IRTLoop l2 when l1.Kind = l2.Kind -> Ok ()
     | IRTComputation t1, IRTComputation t2 -> unify subst t1 t2
+    // Two parameter packs unify by their base (element) type; the arity
+    // variable NAME is diagnostics-only and doesn't drive specialization
+    // (each Poly occurrence mints a fresh `r%d`). This is what lets a
+    // recursive call on the `tail` sub-pack — `Poly<base, fresh>` — flow into
+    // a parameter declared `Poly<base, r_orig>`.
+    | IRTPoly (b1, _), IRTPoly (b2, _) -> unify subst b1 b2
     | IRTNat _, IRTNat _ -> Ok ()
     // The tag WILDCARD `Base<_>` (IRefAny). Deliberately ahead of both the
     // strict IRTIdxTagged arm below and the IRTUnitAnnotated arms further

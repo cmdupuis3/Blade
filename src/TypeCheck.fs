@@ -1900,6 +1900,7 @@ let private typedExprChildren (expr: TypedExpr) : TypedExpr list =
         | TExprBinOp (_, _, l, r) -> [l; r]
         | TExprApp (f, args) -> f :: args
         | TExprTupleIndex (t, i) -> [t; i]
+        | TExprPolyTail (p, _) -> [p]
         | TExprField (e, _, _) -> [e]
         | TExprLambda info -> [info.Body]
         | TExprLet (_, _, v, b) -> [v; b]
@@ -6548,6 +6549,21 @@ and consDestructureLeaves (env: TypeEnv) (scrutTy: IRType) (h: Pattern) (t: Patt
             | many -> IRTTuple many
         let leafTys = (ts |> List.truncate k) @ [tailTy]
         Ok (List.zip names (leafTys |> List.map (fun ty -> env.Subst.Resolve ty)))
+    | IRTPoly (baseTy, _) when leafNames |> List.forall Option.isSome ->
+        // Destructuring a parameter pack: `let head :: tail = A` where
+        // `A : Poly<baseTy^r>`. Each leading head binds one pack element (the
+        // base type); the rest leaf binds the remaining sub-pack, which is
+        // still arity-polymorphic (a fresh arity variable — its concrete size
+        // is only fixed at monomorphization, where specializeFunction expands
+        // the pack and IRPolyTail resolves to the remainder tuple). Unlike the
+        // tuple arm there is no length check: `r` is symbolic here, and an
+        // over-long destructure is caught at specialization time (the user's
+        // own `match arity(A)` base case guards the empty pack).
+        let names = leafNames |> List.map Option.get
+        let k = headPats.Length
+        let freshArity = sprintf "r%d" (env.Builder.FreshId())
+        let leafTys = List.replicate k baseTy @ [ IRTPoly (baseTy, freshArity) ]
+        Ok (List.zip names (leafTys |> List.map (fun ty -> env.Subst.Resolve ty)))
     | _ ->
         let patText =
             leafPats
@@ -6739,6 +6755,7 @@ and inferLetBinding env binding body : TypeResult<TypedExpr> =
             consDestructureLeaves env tValue.Type headPat tailPat
             |> Result.bind (fun leafTys ->
                 let resolvedTy = env.Subst.Resolve(tValue.Type)
+                let isPoly = match resolvedTy with IRTPoly _ -> true | _ -> false
                 let elemTys = match resolvedTy with IRTTuple ts -> ts | _ -> []
                 let intLit i = mkTyped (TExprLit (LitInt (int64 i))) (IRTScalar ETInt64)
                 let lastIdx = leafTys.Length - 1
@@ -6747,17 +6764,27 @@ and inferLetBinding env binding body : TypeResult<TypedExpr> =
                     |> List.mapi (fun i (n, ty) ->
                         let mkValue (src: TypedExpr) =
                             if i = lastIdx then
-                                // REST leaf: the remainder, re-tupled from its
-                                // own index onward — bare when one element
-                                // (Blade has no 1-tuple). Identical rule to
-                                // Lowering.subBindingValue, so the leaf's
-                                // declared type and its value always agree.
-                                let rest =
-                                    [ for j in i .. elemTys.Length - 1 ->
-                                        mkTyped (TExprTupleIndex (src, intLit j)) elemTys.[j] ]
-                                match rest with
-                                | [single] -> single
-                                | many -> mkTyped (TExprTuple many) ty
+                                if isPoly then
+                                    // REST leaf over a pack: the sub-pack after
+                                    // dropping the i leading elements. Stays a
+                                    // pack (TExprPolyTail -> IRPolyTail) so a
+                                    // recursive call on `tail` sees a shorter
+                                    // pack. A head leaf (i < lastIdx) reads one
+                                    // element via TExprTupleIndex, which lowers
+                                    // to IRPolyIndex for a pack-typed source.
+                                    mkTyped (TExprPolyTail (src, i)) ty
+                                else
+                                    // REST leaf: the remainder, re-tupled from its
+                                    // own index onward — bare when one element
+                                    // (Blade has no 1-tuple). Identical rule to
+                                    // Lowering.subBindingValue, so the leaf's
+                                    // declared type and its value always agree.
+                                    let rest =
+                                        [ for j in i .. elemTys.Length - 1 ->
+                                            mkTyped (TExprTupleIndex (src, intLit j)) elemTys.[j] ]
+                                    match rest with
+                                    | [single] -> single
+                                    | many -> mkTyped (TExprTuple many) ty
                             else mkTyped (TExprTupleIndex (src, intLit i)) ty
                         (n, ty, mkValue))
                 destructureLetChain env tValue leaves body)

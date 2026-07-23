@@ -155,7 +155,12 @@ and TypedExprKind =
     
     // Poly-tuple indexing: args[k]
     | TExprTupleIndex of tuple: TypedExpr * index: TypedExpr
-    
+
+    // Sub-pack after dropping the first `drop` elements of a parameter pack —
+    // the value bound to `tail` in `let head :: tail = pack`. Lowers to
+    // IRPolyTail and is resolved at monomorphization; compile-time only.
+    | TExprPolyTail of pack: TypedExpr * drop: int
+
     // Field access
     | TExprField of TypedExpr * field: string * fieldIndex: int
     

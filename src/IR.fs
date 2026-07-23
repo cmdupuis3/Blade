@@ -147,6 +147,13 @@ type IRExpr =
     | IRZero
     | IRRank of array: IRExpr
     | IRPolyIndex of pack: IRExpr * index: IRExpr  // Dynamic poly-pack indexing: args[k]
+    // Sub-pack after dropping the first `drop` elements of a parameter pack —
+    // the value side of `let head :: tail = pack`. Compile-time only: it exists
+    // solely between Lowering and monomorphization. `specializeFunction`
+    // rewrites it to the concrete remainder tuple (bare element if one remains,
+    // empty tuple if none) once the pack's arity is known; it must never reach
+    // codegen or the interpreter (like a bare Poly type).
+    | IRPolyTail of pack: IRExpr * drop: int
     | IRExtent of array: IRExpr * dim: int
     // Ragged-extent marker: at the position this appears as an IRIndexTypeG<IRExpr>'s
     // Extent, the codegen emits a lookup into the lengths array using the
@@ -3240,6 +3247,7 @@ let (|ExprShape|) (expr: IRExpr) : IRExpr list * (IRExpr list -> IRExpr) =
     // -- One child ----------------------------------------------------------
     | IRUnaryOp (op, e) -> [e], (function [e'] -> IRUnaryOp (op, e') | _ -> badChildren "IRUnaryOp")
     | IRTupleProj (e, i, flat) -> [e], (function [e'] -> IRTupleProj (e', i, flat) | _ -> badChildren "IRTupleProj")
+    | IRPolyTail (e, n) -> [e], (function [e'] -> IRPolyTail (e', n) | _ -> badChildren "IRPolyTail")
     | IRTupleDecons e -> [e], (function [e'] -> IRTupleDecons e' | _ -> badChildren "IRTupleDecons")
     | IRFieldAccess (e, fld) -> [e], (function [e'] -> IRFieldAccess (e', fld) | _ -> badChildren "IRFieldAccess")
     | IRPure e -> [e], (function [e'] -> IRPure e' | _ -> badChildren "IRPure")
@@ -4057,9 +4065,14 @@ let computePolyArity (func: IRFuncDef) (args: IRExpr list) : int list option =
     let polyIndices = findPolyParamIndices func
     match polyIndices with
     | [] -> None
-    | [pidx] when func.Params.Length = 1 ->
-        // Variadic — args are the pack elements directly
-        Some [args.Length]
+    | [_] when func.Params.Length = 1 ->
+        match args with
+        // A single tuple argument IS the pack (tuple-as-pack) — the shape a
+        // recursive call produces when it passes a `tail` sub-pack. Its arity
+        // is the tuple's length (0 for the empty base pack).
+        | [IRTuple elems] -> Some [elems.Length]
+        // Otherwise variadic — the positional args are the pack elements.
+        | _ -> Some [args.Length]
     | _ ->
         // Tuple-as-pack at every Poly slot. args.Length must equal the
         // formal arity (no variadic spreading when free params or multiple
@@ -4083,7 +4096,13 @@ let flattenAtPolyPosition (func: IRFuncDef) (args: IRExpr list) : IRExpr list =
     let polyIndices = findPolyParamIndices func
     match polyIndices with
     | [] -> args
-    | [_] when func.Params.Length = 1 -> args  // variadic — already flat
+    | [_] when func.Params.Length = 1 ->
+        match args with
+        // Single tuple-as-pack: splice its elements into the flat arg list so
+        // they line up with the specialization's expanded params (mirrors
+        // computePolyArity's single-tuple case). Variadic args are already flat.
+        | [IRTuple elems] -> elems
+        | _ -> args
     | _ ->
         if args.Length <> func.Params.Length then args
         else
@@ -4153,14 +4172,25 @@ let specializeFunction (func: IRFuncDef) (arities: int list) (funcMap: Map<IRId,
             |> List.concat
             |> List.mapi (fun newIdx p -> { p with Index = newIdx })
 
-        // Collect transitive let-aliases of each Poly param's VarId.
-        let collectLetAliases (rootId: IRId) (expr: IRExpr) : Set<IRId> =
-            let mutable aliases = Set.singleton rootId
+        // Collect transitive let-aliases of each Poly param's VarId, each with
+        // a DROP offset relative to the pack root. A plain rebind
+        // (`let ys = xs`) keeps the offset; a cons-tail (`let tail =
+        // IRPolyTail(xs, n)`, the value side of `let head :: tail = xs`) adds
+        // `n`, so `tail` denotes the sub-pack starting at element n. This is
+        // what lets a recursive call on `tail` resolve to the shorter pack.
+        let collectLetAliases (rootId: IRId) (expr: IRExpr) : Map<IRId, int> =
+            let mutable aliases = Map.ofList [ (rootId, 0) ]
             let rec walk expr =
                 match expr with
                 | IRLet (id, IRVar (srcId, _), body) ->
-                    if Set.contains srcId aliases then
-                        aliases <- Set.add id aliases
+                    (match Map.tryFind srcId aliases with
+                     | Some d -> aliases <- Map.add id d aliases
+                     | None -> ())
+                    walk body
+                | IRLet (id, IRPolyTail (IRVar (srcId, _), n), body) ->
+                    (match Map.tryFind srcId aliases with
+                     | Some d -> aliases <- Map.add id (d + n) aliases
+                     | None -> ())
                     walk body
                 | IRLet (_, value, body) -> walk value; walk body
                 | IRIf (c, t, e) -> walk c; walk t; walk e
@@ -4171,13 +4201,14 @@ let specializeFunction (func: IRFuncDef) (arities: int list) (funcMap: Map<IRId,
             walk expr
             aliases
 
-        // Map alias VarId → slot index, so the IRPolyIndex rewrite knows
-        // which newParams set to draw from for a given xs/ys/zs reference.
+        // Map alias VarId → (slot index, drop offset), so the pack rewrite
+        // knows which newParams set to draw from — and, for a cons tail, from
+        // which element onward — for a given xs/ys/tail reference.
         let aliasToSlot =
             slotInfo
             |> List.mapi (fun slotIdx (_, polyParam, _, _) ->
                 let aliases = collectLetAliases polyParam.VarId func.Body
-                aliases |> Set.toList |> List.map (fun aid -> (aid, slotIdx)))
+                aliases |> Map.toList |> List.map (fun (aid, drop) -> (aid, (slotIdx, drop))))
             |> List.concat
             |> Map.ofList
 
@@ -4195,24 +4226,60 @@ let specializeFunction (func: IRFuncDef) (arities: int list) (funcMap: Map<IRId,
             slotInfo |> List.map (fun (_, _, bt, _) -> bt) |> List.toArray
         let aritiesArr = arities |> List.toArray
 
-        // Rewrite body: replace IRPolyIndex (per-slot lookup) and IRArity
-        // (per-slot arity literal). Each Poly slot is handled independently.
+        // The sub-pack of `slotIdx` from element `drop` onward, as a concrete
+        // tuple of the monomorphized params. A whole-pack reference (a pack
+        // used as a value, e.g. passed to a recursive poly call) expands to
+        // this; `IRPolyIndex`/`IRPolyTail` over it then fold to a param / a
+        // shorter tuple. Empty when the sub-pack has no elements.
+        let remainderTuple slotIdx drop =
+            let ps = newParamsBySlot.[slotIdx]
+            let n = aritiesArr.[slotIdx]
+            IRTuple [ for k in drop .. n - 1 -> IRVar (ps.[k].VarId, baseTypeBySlot.[slotIdx]) ]
+
+        // Rewrite body. mapIRExpr is post-order, so a pack-alias `IRVar` is
+        // expanded to its remainder tuple BEFORE its parent node sees it:
+        //   * a bare pack reference becomes the tuple (whole-pack value);
+        //   * `IRPolyIndex(tuple, Lit k)` then folds to the k-th param;
+        //   * `IRPolyTail(tuple, n)` folds to the tuple dropping n elements.
+        // `IRArity` resolves to the (now literal) per-slot arity. Each Poly
+        // slot is handled independently.
         let rewrite e =
             match e with
-            | IRPolyIndex (IRVar (id, _), IRLit (IRLitInt k)) when Map.containsKey id aliasToSlot ->
-                let slotIdx = aliasToSlot.[id]
-                let slotArity = aritiesArr.[slotIdx]
-                let kInt = int k
-                if kInt >= 0 && kInt < slotArity then
-                    IRVar (newParamsBySlot.[slotIdx].[kInt].VarId, baseTypeBySlot.[slotIdx])
-                else e
-            | IRPolyIndex (IRVar (id, _), _) when Map.containsKey id aliasToSlot ->
-                e  // Dynamic index — can't monomorphize, leave as-is
+            | IRVar (id, _) when Map.containsKey id aliasToSlot ->
+                let (slotIdx, drop) = aliasToSlot.[id]
+                remainderTuple slotIdx drop
+            | IRPolyIndex (IRTuple elems, IRLit (IRLitInt k)) when int k >= 0 && int k < elems.Length ->
+                elems.[int k]
+            | IRPolyTail (IRTuple elems, n) when n >= 0 && n <= elems.Length ->
+                IRTuple (elems |> List.skip n)
             | IRArity (_, name) when Map.containsKey name paramNameToSlot ->
                 let slotIdx = paramNameToSlot.[name]
                 IRLit (IRLitInt (int64 aritiesArr.[slotIdx]))
             | _ -> e
+
+        // Fold a `match`/`if` whose scrutinee/condition has become a literal
+        // (typically `arity(A)` after resolution): pick the taken arm and drop
+        // the rest. Essential for the recursion's base case — at arity 0 the
+        // `_` arm's `head :: tail` over an empty pack must be eliminated, not
+        // left for codegen — and it also keeps the recursive-call discovery
+        // below from walking dead arms into a nonterminating specialization.
+        let foldLitBranch e =
+            match e with
+            | IRMatch (IRLit lit, cases) when cases |> List.forall (fun c -> Option.isNone c.Guard) ->
+                let picked =
+                    cases |> List.tryPick (fun c ->
+                        match c.Pattern with
+                        | IRPatLit l when l = lit -> Some c.Body
+                        | IRPatLit _ -> None
+                        | IRPatWild -> Some c.Body
+                        | IRPatVar bid -> Some (IRLet (bid, IRLit lit, c.Body))
+                        | _ -> None)
+                match picked with Some b -> b | None -> e
+            | IRIf (IRLit (IRLitBool b), t, f) -> if b then t else f
+            | _ -> e
+
         let newBody = mapIRExpr rewrite func.Body
+        let newBody = mapIRExpr foldLitBranch newBody
 
         // Second pass: unroll IRForRange with literal bounds. This handles
         // `for k in 0..arity(args)` after arity is resolved.
@@ -4276,7 +4343,7 @@ let specializeFunction (func: IRFuncDef) (arities: int list) (funcMap: Map<IRId,
                         mapIRExpr (fun e ->
                             match e with
                             | IRPolyIndex (IRVar (pid, _), _) when Map.containsKey pid aliasToSlot ->
-                                packSlot <- Some aliasToSlot.[pid]
+                                packSlot <- Some (fst aliasToSlot.[pid])
                                 e
                             | _ -> e) lam.Body |> ignore
                         match packSlot with
@@ -4883,7 +4950,7 @@ let rec typeOf (expr: IRExpr) : IRType =
     | IRComposeObj _ | IRCompose _
     | IRSlice _ | IRCurry _ | IRSubset _ | IRShift _ | IRReverse _ | IRDiag _
     | IRZip _ | IRAlign _ | IRStack _ | IRJoin _
-    | IRTupleCons _ | IRTupleDecons _ | IRPolyIndex _ | IRReplicate _
+    | IRTupleCons _ | IRTupleDecons _ | IRPolyIndex _ | IRPolyTail _ | IRReplicate _
     | IRVirtualReverse _ | IRBlocked _ | IRZero ->
         IRTUnit
 
@@ -5314,6 +5381,7 @@ let rec liftExpr (builder: IRBuilder) (expr: IRExpr) : IRExpr =
     | IRCompose (a, b) -> IRCompose (liftExpr builder a, liftExpr builder b)
     | IRFunctorMap (fn, c) -> IRFunctorMap (liftExpr builder fn, liftExpr builder c)
     | IRPolyIndex (p, i) -> IRPolyIndex (liftExpr builder p, liftExpr builder i)
+    | IRPolyTail (p, n) -> IRPolyTail (liftExpr builder p, n)
     | IRRaggedLookup l -> IRRaggedLookup (liftExpr builder l)
     | IRCompoundMask mk -> IRCompoundMask (liftExpr builder mk)
     | IRCompoundProject (parent, plen) -> IRCompoundProject (liftExpr builder parent, plen)
@@ -5397,24 +5465,33 @@ let monomorphizeModule (modul: IRModule) (builder: IRBuilder) : IRModule =
     let polyFuncIds = polyFuncs |> List.map (fun f -> f.Id) |> Set.ofList
     let polyFuncMap = polyFuncs |> List.map (fun f -> (f.Id, f)) |> Map.ofList
 
-    // 2. Collect all call sites with concrete arities
-    let callSitesFromFuncs =
-        modul.Functions |> List.collect (fun f -> collectPolyCallSites polyFuncMap f.Body)
-    let callSitesFromBindings =
-        modul.Bindings |> List.collect (fun b -> collectPolyCallSites polyFuncMap b.Value)
-    let uniqueCallSites =
-        (callSitesFromFuncs @ callSitesFromBindings) |> List.distinct
-
-    // 3. Generate specialized functions. The pack-former unroller inside
-    //    specializeFunction inlines lifted kernel lambdas by id, so it needs
-    //    the whole-module function map (lambdas live in modul.Functions).
+    // 2-3. Worklist specialization. Seed from concrete call sites in the
+    //       module's ENTRY points (non-poly functions and bindings), then
+    //       repeatedly specialize and re-scan each fresh spec body for further
+    //       poly calls. A recursive kernel calls itself at arity r-1: after
+    //       specialization its `tail` sub-pack is a concrete tuple, so
+    //       computePolyArity reads that shorter arity and the chain unrolls to
+    //       the base case (which the arity-literal `match` fold selects).
+    //       Dedup by (funcId, arities). The original poly bodies are NOT seeded
+    //       — their pack args are still symbolic there; every real arity enters
+    //       through an entry point and propagates via spec-body discovery.
     let funcMap = modul.Functions |> List.map (fun f -> (f.Id, f)) |> Map.ofList
-    let specializations =
-        uniqueCallSites |> List.map (fun (funcId, arity) ->
-            let origFunc = polyFuncMap.[funcId]
-            let spec = specializeFunction origFunc arity funcMap builder
-            ((funcId, arity), spec))
-    let specMap = specializations |> Map.ofList
+    let seed =
+        (modul.Functions
+         |> List.filter (fun f -> not f.IsArityPoly)
+         |> List.collect (fun f -> collectPolyCallSites polyFuncMap f.Body))
+        @ (modul.Bindings |> List.collect (fun b -> collectPolyCallSites polyFuncMap b.Value))
+    let specs = System.Collections.Generic.Dictionary<IRId * int list, IRFuncDef>(HashIdentity.Structural)
+    let queue = System.Collections.Generic.Queue<IRId * int list>()
+    seed |> List.iter queue.Enqueue
+    while queue.Count > 0 do
+        let key = queue.Dequeue()
+        if not (specs.ContainsKey key) then
+            let (funcId, arity) = key
+            let spec = specializeFunction polyFuncMap.[funcId] arity funcMap builder
+            specs.[key] <- spec
+            collectPolyCallSites polyFuncMap spec.Body |> List.iter queue.Enqueue
+    let specMap = specs |> Seq.map (fun kv -> (kv.Key, kv.Value)) |> Map.ofSeq
 
     // 4. Build rewrite function for call sites. The arity comes from
     //    computePolyArity (shape-aware: variadic vs tuple-as-pack), and the
@@ -5434,7 +5511,9 @@ let monomorphizeModule (modul: IRModule) (builder: IRBuilder) : IRModule =
             | None -> e
         | _ -> e
 
-    // 5. Rewrite all expressions in module
+    // 5. Rewrite all expressions in the module — entry points AND spec bodies,
+    //    so a recursive call INSIDE a spec is redirected to the r-1 spec (the
+    //    original poly function is being removed here).
     let newFunctions =
         modul.Functions
         |> List.filter (fun f -> not f.IsArityPoly)  // Remove original poly funcs
@@ -5442,7 +5521,9 @@ let monomorphizeModule (modul: IRModule) (builder: IRBuilder) : IRModule =
     let newBindings =
         modul.Bindings
         |> List.map (fun b -> { b with Value = mapIRExpr rewriteCallSite b.Value })
-    let specFuncs = specializations |> List.map snd
+    let specFuncs =
+        specs.Values |> Seq.toList
+        |> List.map (fun f -> { f with Body = mapIRExpr rewriteCallSite f.Body })
 
     // Prune lifted kernel lambdas that captured a poly PACK and are now dead.
     // The pack-former unroller inlines such a lambda's body into the specialized
@@ -5730,6 +5811,7 @@ let rec ppIRExprWithNames (names: Map<int, string>) indent (expr: IRExpr) =
     | IRZero -> "zero"
     | IRRank arr -> sprintf "rank(%s)" (pp arr)
     | IRPolyIndex (pack, idx) -> sprintf "%s[%s]" (pp pack) (pp idx)
+    | IRPolyTail (pack, n) -> sprintf "%s[%d..]" (pp pack) n
     | IRChoice (a, b) ->
         sprintf "(%s <|> %s)" (pp a) (pp b)
     | IRFallback (a, b) ->

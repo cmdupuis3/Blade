@@ -1,0 +1,17 @@
+// TEST: Recursive Pack Destructure
+// A poly kernel that recurses over its parameter pack: `let head :: tail = A`
+// splits the pack into its first element and the remaining sub-pack, and the
+// kernel calls itself on `tail` (arity r-1) down to the arity-1 base case.
+// Exercises cons-destructuring of a Poly pack (IRPolyTail) plus the worklist
+// monomorphizer, which specializes packprod at arity 3 -> 2 -> 1 and folds the
+// `match arity(A)` base case at each concrete arity.
+function packprod(A: Poly<T^0>) -> T^0 = {
+    match arity(A) with
+    | 1 -> A[0]
+    | _ -> {
+        let head :: tail = A
+        head * packprod(tail)
+      }
+}
+let result = packprod(2.0, 3.0, 4.0)
+// EXPECT: result = 24.0

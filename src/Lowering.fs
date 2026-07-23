@@ -183,6 +183,13 @@ let subBindingValue (binding: TypedBinding) (isStruct: bool) (isFlat: bool) (i: 
     if isStruct then IRFieldAccess (baseVar, name)
     else
         match binding.Type with
+        | IRTPoly _ ->
+            // Pack destructure `let head :: tail = A`. A leading head reads one
+            // pack element (IRPolyIndex); the rest leaf is the remaining
+            // sub-pack (IRPolyTail), resolved to a concrete tuple when
+            // specializeFunction expands the pack at a known arity.
+            if isRestLeaf then IRPolyTail (baseVar, i)
+            else IRPolyIndex (baseVar, IRLit (IRLitInt (int64 i)))
         | IRTTuple ts when isRestLeaf && ts.Length > i ->
             let rest = [ for j in i .. ts.Length - 1 -> IRTupleProj (baseVar, j, false) ]
             if rest.Length = 1 then rest.Head else IRTuple rest
@@ -294,6 +301,12 @@ let rec lowerTypedExpr (env: TypedLowerEnv) (texpr: TypedExpr) : IRExpr =
         | _ ->
             let idx = lowerTypedExpr env index
             IRPolyIndex (tup, idx)
+
+    | TExprPolyTail (pack, drop) ->
+        // Rest leaf of `let head :: tail = pack` when the scrutinee is a
+        // parameter pack. Stays symbolic until specializeFunction resolves the
+        // pack's arity and rewrites this to the concrete remainder tuple.
+        IRPolyTail (lowerTypedExpr env pack, drop)
     
     | TExprField (obj, field, _) ->
         let o = lowerTypedExpr env obj

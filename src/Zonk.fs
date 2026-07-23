@@ -116,6 +116,7 @@ let rec zonkExpr (subst: Subst) (expr: TypedExpr) : TypedExpr =
         // Indexing
         | TExprApp (f, args) -> TExprApp (z f, zs args)
         | TExprTupleIndex (t, i) -> TExprTupleIndex (z t, z i)
+        | TExprPolyTail (p, n) -> TExprPolyTail (z p, n)
         | TExprIndex (arr, idxs, id) -> TExprIndex (z arr, zs idxs, id)
         | TExprField (obj, fld, idx) -> TExprField (z obj, fld, idx)
         // Collections
