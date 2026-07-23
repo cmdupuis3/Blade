@@ -1,0 +1,11 @@
+// TEST: Lambda Captures Block-Local Let
+// The same capture-forwarding fix must hold for a `lambda` bound in a
+// block: the forwarded capture argument resolves through the emitted
+// name map, so the block-local `base` (renamed to `__v<id>`) is passed
+// by its emitted identifier rather than its source name.
+let result = {
+    let base = 100.0
+    let addBase = lambda(n) -> base + n
+    addBase(3.0)
+}
+// EXPECT: result = 103

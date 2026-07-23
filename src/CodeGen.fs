@@ -1210,6 +1210,20 @@ let genCompoundIndexFromMask (maskName: string) (rank: int) (idxName: string) : 
                   rank idxName rank idxName idxName idxName ]
     (lines, idxName)
 
+/// Resolve a capture to the C++ identifier that names it in the SCOPE
+/// where the forwarding closure is emitted. A capture's `Name` is the
+/// SOURCE name of the captured variable, which is correct for function
+/// parameters and module-level bindings (both keep their source name in
+/// codegen), but a block-local `let` is renamed to `__v<id>` when its
+/// IRLet chain is flattened into statements (genLetChainBinding /
+/// genFuncBody). Forwarding the source name there emits a reference to an
+/// undeclared identifier. The emitted name is recorded per IR-id in the
+/// active name map (`names` / `ctx.VarNames`), so resolve through it and
+/// fall back to the source name when the id isn't mapped (params,
+/// module-level bindings, function-typed captures).
+let captureForwardName (names: Map<IRId, string>) (c: CaptureInfo) : string =
+    Map.tryFind c.Id names |> Option.defaultValue c.Name
+
 /// Wrapper-emission helper. Takes an IRCallable and produces a local
 /// C++ closure that mediates between the lifted function's signature
 /// (regular params + capture params) and the consumer's expected
@@ -1228,7 +1242,10 @@ let genCompoundIndexFromMask (maskName: string) (rank: int) (idxName: string) : 
 /// the lifted function side. As long as the wrapper is emitted in a scope
 /// where the capture-named variables are visible (typically the same
 /// scope where the original `lambda(...)` literal appeared), the chain
-/// closes correctly.
+/// closes correctly. The forwarded capture arguments resolve through the
+/// `names` map (see `captureForwardName`) so a captured block-local `let`
+/// — renamed to `__v<id>` when its IRLet chain is flattened — is passed by
+/// its EMITTED identifier, not its source name.
 ///
 /// Return-type rendering uses `auto`. This avoids two complications: (1)
 /// computing the return type explicitly for callables whose RetType is
@@ -1248,7 +1265,7 @@ let genCompoundIndexFromMask (maskName: string) (rank: int) (idxName: string) : 
 /// Returns (code lines, wrapper name). Callers prepend the code lines to
 /// the enclosing block and use the wrapper name wherever they'd
 /// previously have inlined the lambda body.
-let genCallableWrapper (suffix: string) (callable: IRCallable) : string list * string =
+let genCallableWrapper (names: Map<IRId, string>) (suffix: string) (callable: IRCallable) : string list * string =
     let safeName = sanitizeCppName callable.Name
     let wrapperName =
         if suffix = "" then sprintf "__wrap_%d" callable.Id
@@ -1261,7 +1278,7 @@ let genCallableWrapper (suffix: string) (callable: IRCallable) : string list * s
             | _ -> sprintf "%s %s" (irTypeToCpp p.Type) p.Name)
         |> String.concat ", "
     let regularArgs = callable.Params |> List.map (fun p -> p.Name)
-    let captureArgs = callable.Captures |> List.map (fun c -> c.Name)
+    let captureArgs = callable.Captures |> List.map (captureForwardName names)
     let allArgs = (regularArgs @ captureArgs) |> String.concat ", "
     let code =
         [sprintf "auto %s = [&](%s) { return %s(%s); };" wrapperName paramSig safeName allArgs]
@@ -1324,7 +1341,7 @@ let rec exprToCppCore (subst: SubstMap) (names: Map<IRId, string>) (expr: IRExpr
                 |> String.concat ", "
             let allArgs =
                 (callable.Params |> List.map (fun p -> p.Name))
-                @ (callable.Captures |> List.map (fun c -> c.Name))
+                @ (callable.Captures |> List.map (captureForwardName names))
                 |> String.concat ", "
             sprintf "[&](%s) { return %s(%s); }" paramSig safeName allArgs
         | _ ->
@@ -1428,7 +1445,7 @@ let rec exprToCppCore (subst: SubstMap) (names: Map<IRId, string>) (expr: IRExpr
             match func, resolveCallable func with
             | IRVar (fid, _), Some callable when callable.Id = fid && not (List.isEmpty callable.Captures) ->
                 (sanitizeCppName callable.Name,
-                 callable.Captures |> List.map (fun c -> c.Name))
+                 callable.Captures |> List.map (captureForwardName names))
             | _ -> (exprToCppCore subst names func, [])
         let argStrs =
             args |> List.collect (fun a ->
@@ -2133,7 +2150,7 @@ and renderReduceExpr (subst: SubstMap) (names: Map<IRId, string>) arrExpr kernel
     // the migration is safe.
     match resolveCallable kernelExpr with
     | Some callable when callable.Params.Length = 2 ->
-        let (wrapperCode, wname) = genCallableWrapper "" callable
+        let (wrapperCode, wname) = genCallableWrapper names "" callable
         let wrapperStr = wrapperCode |> String.concat " "
         match initExpr with
         | Some initE ->
@@ -2439,7 +2456,7 @@ and materializeMaskForm (subst: SubstMap) (names: Map<IRId, string>) (varName: s
         // been removed; the contains runs as a linear scan inside the named
         // predicate. Making the semijoin set actually fire is a separate
         // optimization, tracked apart from the probe-machinery excision.)
-        let (wrapperCode, wname) = genCallableWrapper varName callable
+        let (wrapperCode, wname) = genCallableWrapper names varName callable
         let predParamName = sprintf "__%s_x" varName
         // Source element type (elemTypeStr is the RESULT type, i.e. bool).
         let srcElemStr =
@@ -2579,7 +2596,7 @@ and materializeSortForm (subst: SubstMap) (names: Map<IRId, string>) (varName: s
     let (wrapperCode, keyCall) =
         match resolveCallable keyExpr with
         | Some callable when callable.Params.Length = 1 ->
-            let (code, wname) = genCallableWrapper varName callable
+            let (code, wname) = genCallableWrapper names varName callable
             (code, wname)
         | _ -> ([], "[](auto) { return 0; }")  // degenerate fallback
     Some (
@@ -6860,7 +6877,7 @@ let genObjectForApplication (ctx: CodeGenContext) (name: string) (objInfo: Objec
     // eliminating the need for intermediate scalar locals.
     match resolveCallable objInfo.Kernel with
     | Some callable when callable.Params.Length = 1 || callable.Params.Length = 2 ->
-        let (wrapperCode, wname) = genCallableWrapper name callable
+        let (wrapperCode, wname) = genCallableWrapper ctx.VarNames name callable
         // Output element type is the kernel's RETURN type: comparison/logical
         // kernels (`A < B`) consume numeric inputs but PRODUCE bool, and
         // array<->scalar broadcast kernels can PROMOTE (`I * 2.5` is
@@ -9537,7 +9554,7 @@ and genReduceBinding (ctx: CodeGenContext) (binding: IRBinding) (builder: IRBuil
             // from the array's elem type via the inferReduce
             // unification â€” so the call `__r = __wrap(__r, arr[i])`
             // type-checks without narrowing/conversion warnings.
-            let (wrapperCode, wname) = genCallableWrapper name callable
+            let (wrapperCode, wname) = genCallableWrapper ctx.VarNames name callable
             let wrapperLines = wrapperCode |> List.map (fun s -> ind + s)
             // Seed and loop start: without init, seed = arr[0], fold from 1;
             // with init, seed = init, fold over ALL elements from 0.
@@ -9598,7 +9615,7 @@ and genReduceComputeBinding (ctx: CodeGenContext) (binding: IRBinding) (builder:
         else
             match resolveCallable kernelExpr with
             | Some callable when callable.Params.Length = 2 ->
-                let (wrapperCode, wname) = genCallableWrapper name callable
+                let (wrapperCode, wname) = genCallableWrapper ctx.VarNames name callable
                 let wrapperLines = wrapperCode |> List.map (fun s -> ind + s)
                 // Accumulator C++ type: the fold callable's return type (the
                 // checker unified it with every leaf's element type).
@@ -9803,7 +9820,7 @@ and genVarAliasBinding (ctx: CodeGenContext) (binding: IRBinding) (builder: IRBu
                     | _ -> sprintf "%s %s" (irTypeToCpp p.Type) p.Name)
                 |> String.concat ", "
             let regularArgs = callable.Params |> List.map (fun p -> p.Name)
-            let captureArgs = callable.Captures |> List.map (fun c -> c.Name)
+            let captureArgs = callable.Captures |> List.map (captureForwardName ctx.VarNames)
             let allArgs = (regularArgs @ captureArgs) |> String.concat ", "
             // Wrapper type: `std::function<Ret(P1, P2, ...)>`. Explicit
             // type per the codegen convention (auto reserved for thin
