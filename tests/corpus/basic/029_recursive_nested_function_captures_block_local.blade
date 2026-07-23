@@ -1,0 +1,14 @@
+// TEST: Recursive Nested Function Captures Block-Local Let
+// A recursive nested function INSIDE another function's body that also
+// captures a block-local `let`. Exercises both fixes together: the block-local
+// capture forwards its emitted name (`__v<id>`, captureForwardName) and the
+// self-reference forwards its own emitted name. In a function body the binding
+// must use an explicit `std::function<...>` type (routed through
+// genVarAliasBinding) — `auto` cannot type a self-referential closure.
+function outer(seed: Int64) -> Int64 = {
+    let base = seed + 5
+    function countdown(n: Int64) -> Int64 = if n <= 0 then base else countdown(n - 1)
+    countdown(5)
+}
+let result = outer(10)
+// EXPECT: result = 15

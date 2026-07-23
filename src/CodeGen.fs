@@ -9820,7 +9820,16 @@ and genVarAliasBinding (ctx: CodeGenContext) (binding: IRBinding) (builder: IRBu
                     | _ -> sprintf "%s %s" (irTypeToCpp p.Type) p.Name)
                 |> String.concat ", "
             let regularArgs = callable.Params |> List.map (fun p -> p.Name)
-            let captureArgs = callable.Captures |> List.map (captureForwardName ctx.VarNames)
+            // Register THIS binding's emitted name before resolving capture
+            // args: a RECURSIVE nested function captures ITSELF (its self-call
+            // lowers to a function-typed capture whose id IS this binding's id),
+            // so the forwarded arg must be the binding's own emitted name. C++
+            // allows this — the `std::function` variable is in scope within its
+            // own `[&]` initializer, giving the standard self-referential-closure
+            // recursion idiom. For non-recursive captures ctx' adds a mapping the
+            // forwarding doesn't consult, so behavior is unchanged.
+            let ctx' = addVarName binding.Id name ctx
+            let captureArgs = callable.Captures |> List.map (captureForwardName ctx'.VarNames)
             let allArgs = (regularArgs @ captureArgs) |> String.concat ", "
             // Wrapper type: `std::function<Ret(P1, P2, ...)>`. Explicit
             // type per the codegen convention (auto reserved for thin
@@ -9844,7 +9853,6 @@ and genVarAliasBinding (ctx: CodeGenContext) (binding: IRBinding) (builder: IRBu
             let funcTypeStr =
                 sprintf "std::function<%s(%s)>" retTypeStr (String.concat ", " paramTypes)
             let code = [sprintf "%s%s %s = [&](%s) { return %s(%s); };" ind funcTypeStr name paramSig safeName allArgs]
-            let ctx' = addVarName binding.Id name ctx
             (code, ctx')
         | None ->
             // Plain variable alias â€” may be aliasing a tuple, propagate children
@@ -10278,6 +10286,26 @@ let genFuncBody (ctx: CodeGenContext) (builder: IRBuilder) (names: Map<IRId, str
                 let valStr = exprToCpp currentNames value
                 currentNames <- Map.add id varName currentNames
                 [sprintf "%sauto %s = %s;" indent varName valStr]
+        | IRVar _ when (match resolveCallable value with
+                        | Some c -> c.Captures |> List.exists (fun cap -> cap.Id = id)
+                        | None -> false) ->
+            // A RECURSIVE nested function bound in a function body: its lifted
+            // callable captures ITSELF (a capture whose id is this binding's
+            // id). The default `auto __vN = [&]{...}` arm cannot type it — `auto`
+            // can't deduce a closure whose own initializer references it. Route
+            // through genBinding→genVarAliasBinding, which emits an explicit
+            // `std::function<...>` type and pre-registers the name so the
+            // self-capture forwards its own emitted identifier (the standard
+            // self-referential-closure recursion idiom). Non-recursive captures
+            // keep the lighter `auto` path below.
+            let bodyCtx = { ctx with VarNames = currentNames; Indent = bodyIndent }
+            let tempBinding = {
+                Id = id; Name = varName; Type = inferExprType value
+                Value = value; IsConst = true; IsMutable = false
+            }
+            let (code, _) = genBinding bodyCtx tempBinding builder
+            currentNames <- Map.add id varName currentNames
+            code
         | _ ->
             let valStr = exprToCpp currentNames value
             currentNames <- Map.add id varName currentNames
