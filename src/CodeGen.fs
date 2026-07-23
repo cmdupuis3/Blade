@@ -1531,6 +1531,8 @@ let rec exprToCppCore (subst: SubstMap) (names: Map<IRId, string>) (expr: IRExpr
         match idx with
         | IRLit (IRLitInt n) -> sprintf "std::get<%d>(%s)" n (exprToCppCore subst names pack)
         | _ -> sprintf "%s[%s]" (exprToCppCore subst names pack) (exprToCppCore subst names idx)
+    | IRPolyTail _ ->
+        exprError "IRPolyTail should not reach codegen (parameter pack was not monomorphized)"
     | IRParallel (a, b, _) ->
         exprError "parallel combinator in expression position"
     | IRFusion (a, b) ->
@@ -3863,6 +3865,8 @@ let rec canonicalKey (nameMap: Map<int, string>) (expr: IRExpr) : string =
         sprintf "(rank %s)" (canonicalKey nameMap arr)
     | IRPolyIndex (pack, idx) ->
         sprintf "(polyidx %s %s)" (canonicalKey nameMap pack) (canonicalKey nameMap idx)
+    | IRPolyTail (pack, n) ->
+        sprintf "(polytail %s %d)" (canonicalKey nameMap pack) n
     | IRNth -> "nth"
     | IRZero -> "zero"
     | IRSlice (arr, dim, start, stop) ->
@@ -7659,6 +7663,7 @@ let collectDeferredPositionalReads (ctx: CodeGenContext) (root: IRExpr) : IRId l
         | IRCurry (a, i, _) -> walk a; walk i
         | IRSubset (a, _, s, l) -> walk a; walk s; walk l
         | IRPolyIndex (p, i) -> walk p; walk i
+        | IRPolyTail (p, _) -> walk p
         | IRPure x | IRCompute x -> walk x
         | IRMatch (s, cases) ->
             walk s

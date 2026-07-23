@@ -4309,6 +4309,17 @@ let findPolyParamIndices (func: IRFuncDef) : int list =
 /// a required Poly slot).
 let computePolyArity (func: IRFuncDef) (args: IRExpr list) : int list option =
     let polyIndices = findPolyParamIndices func
+    // A call passing a symbolic pack tail (`f(tail)` inside an un-specialized
+    // recursive body, where `tail = IRPolyTail(A, k)`) is NOT a concrete call
+    // site: its true arity is only known once the ENCLOSING function is
+    // specialized, at which point specializeFunction spreads the tail into
+    // `f(A_k, .., A_{n-1})` — that spread form is the real call site the worklist
+    // then picks up. Treating the symbolic call as a concrete one (arity =
+    // arg-count = 1) mints a bogus specialization: harmless only when it happens
+    // to hit the base arm, but for e.g. a `| 2` base it cascades into an invalid
+    // arity-0 spec. Reject it here.
+    if args |> List.exists (function IRPolyTail _ -> true | _ -> false) then None
+    else
     match polyIndices with
     | [] -> None
     | [pidx] when func.Params.Length = 1 ->
@@ -5708,9 +5719,20 @@ let monomorphizeModule (modul: IRModule) (builder: IRBuilder) : IRModule =
     let polyFuncIds = polyFuncs |> List.map (fun f -> f.Id) |> Set.ofList
     let polyFuncMap = polyFuncs |> List.map (fun f -> (f.Id, f)) |> Map.ofList
 
-    // 2. Collect call sites from the original module (functions + bindings).
+    // 2. Collect call sites from the original module. Seed ONLY from concrete
+    //    entry points — NON-poly functions and top-level bindings. A poly
+    //    function's own body reaches other poly functions (and itself) with the
+    //    still-symbolic pack/tail as the argument (`f(rest)`, `comoment_prod(a)`),
+    //    which computePolyArity would mis-read as an arity-1 call and mint a
+    //    bogus spec. Those calls become CONCRETE — the tail/pack spread into
+    //    real per-element args — only once the enclosing function is specialized,
+    //    at which point the spec-body scan below (step 3) picks up the real
+    //    arity. (This is why a `| 2`-base recursion previously cascaded into an
+    //    invalid arity-0 spec.)
     let callSitesFromFuncs =
-        modul.Functions |> List.collect (fun f -> collectPolyCallSites polyFuncMap f.Body)
+        modul.Functions
+        |> List.filter (fun f -> not f.IsArityPoly)
+        |> List.collect (fun f -> collectPolyCallSites polyFuncMap f.Body)
     let callSitesFromBindings =
         modul.Bindings |> List.collect (fun b -> collectPolyCallSites polyFuncMap b.Value)
 

@@ -1,0 +1,16 @@
+// TEST: Multi-Head Pack Destructure
+// `let a :: b :: rest = A` peels TWO leading pack elements and binds `rest` to
+// the remaining sub-pack (arity r-2), so the recursion steps by two. Exercises
+// the drop>1 path: consDestructureLeaves gives both heads the base type and the
+// rest a fresh-arity pack, and the monomorphizer specializes f at arity 4 -> 2
+// (the odd arities in between are never instantiated) down to the base case.
+function f(A: Poly<T^0>) -> T^0 = {
+    match arity(A) with
+    | 2 -> A[0] + A[1]
+    | _ -> {
+        let a :: b :: rest = A
+        a + b + f(rest)
+      }
+}
+let result = f(1.0, 2.0, 3.0, 4.0)
+// EXPECT: result = 10.0

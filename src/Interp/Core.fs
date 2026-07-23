@@ -723,6 +723,8 @@ let rec evalExpr (st: InterpState) (env: Env) (expr: IRExpr) : Value =
         (match packV with
          | VTuple _ | VArray _ -> ArrayOps.polyIndex packV iV
          | _ -> raise (InterpUnsupported "IRPolyIndex on non-pack"))
+    | IRPolyTail _ ->
+        raise (InterpUnsupported "IRPolyTail on non-monomorphized parameter pack")
 
     // ---- M2 extent: read the concrete array's static shape (§0.9).
     //      A rank-1 compound has no `.extents` — its sole axis's runtime extent
