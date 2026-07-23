@@ -160,6 +160,9 @@ module private NcQuery =
 /// Load all metadata from a NetCDF file.
 /// Opens the file read-only, extracts dimensions and variable info, closes.
 let load (path: string) : NcFile =
+    if not (System.IO.File.Exists path) then
+        failwithf "NetCDF file not found: '%s' (resolved against cwd '%s')"
+            path (System.IO.Directory.GetCurrentDirectory())
     let fileId = NcQuery.openFile path 0  // NC_NOWRITE = 0
     try
         let dimIds = NcQuery.getDimIds fileId

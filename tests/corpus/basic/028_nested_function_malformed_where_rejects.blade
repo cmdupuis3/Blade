@@ -1,0 +1,11 @@
+// TEST: Nested Function Malformed Where (rejects)
+// A malformed where-clause on a nested `function` (unterminated `comm(`) must
+// surface a real parse error, not be silently swallowed and re-reported as a
+// misleading error at the `where`/`=`. Regression guard for the
+// parseNestedFunction / parseFunctionDecl where-clause error-propagation fix:
+// the `Error _ -> None` arm used to hide the genuine `Expected ')'` failure.
+let result = {
+    function f(x: Int64) where comm(x -> Int64 = x * 2
+    f(3)
+}
+// EXPECT: parse failure — unterminated `comm(` in the where-clause.

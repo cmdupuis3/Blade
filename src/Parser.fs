@@ -2378,18 +2378,19 @@ and parseNestedFunction (tokens: Token list) : ParseResult<Stmt> =
     // Skip newlines between clauses
     let afterRParen = skipNL afterRParen
     
-    // Optional where clause
-    // NOTE (latent bug, same as the one fixed in parseLambda ~line 1346): the
-    // `Error _ -> None` arm SWALLOWS genuine where-clause parse errors and then
-    // fails later with a misleading message. Not fixed here yet — no test
-    // exercises this `function` where-clause-error path; fix with a test.
-    let whereClause, afterWhere =
+    // Optional where clause. If a `where` keyword is present, a parse error
+    // inside the clause is a GENUINE error and must propagate (mirrors the
+    // parseLambda fix) — previously the `Error _ -> None` arm SWALLOWED it and
+    // then failed later with a misleading "expected =" at the `where` token,
+    // hiding the real cause.
+    let whereResult : ParseResult<WhereClause option> =
         match peek afterRParen with
         | Some (TokKeyword KwWhere) ->
             match parseWhereClause (advance afterRParen) with
-            | Ok (w, rest) -> Some w, skipNL rest
-            | Error _ -> None, afterRParen
-        | _ -> None, afterRParen
+            | Ok (w, rest) -> Ok (Some w, skipNL rest)
+            | Error e -> Error e
+        | _ -> Ok (None, afterRParen)
+    whereResult >>= fun whereClause afterWhere ->
     
     // Optional return type
     let retType, afterRet =
@@ -2580,18 +2581,19 @@ let parseFunctionDecl (tokens: Token list) : ParseResult<Decl> =
     // Skip newlines between parts of function declaration
     let afterRParen = skipNL afterRParen
     
-    // Optional where clause
-    // NOTE (latent bug, same as the one fixed in parseLambda ~line 1346): the
-    // `Error _ -> None` arm SWALLOWS genuine where-clause parse errors and then
-    // fails later with a misleading message. Not fixed here yet — no test
-    // exercises this `function` where-clause-error path; fix with a test.
-    let whereClause, afterWhere =
+    // Optional where clause. If a `where` keyword is present, a parse error
+    // inside the clause is a GENUINE error and must propagate (mirrors the
+    // parseLambda fix) — previously the `Error _ -> None` arm SWALLOWED it and
+    // then failed later with a misleading "expected =" at the `where` token,
+    // hiding the real cause.
+    let whereResult : ParseResult<WhereClause option> =
         match peek afterRParen with
         | Some (TokKeyword KwWhere) ->
             match parseWhereClause (advance afterRParen) with
-            | Ok (w, rest) -> Some w, skipNL rest
-            | Error _ -> None, afterRParen
-        | _ -> None, afterRParen
+            | Ok (w, rest) -> Ok (Some w, skipNL rest)
+            | Error e -> Error e
+        | _ -> Ok (None, afterRParen)
+    whereResult >>= fun whereClause afterWhere ->
     
     // Optional return type (either : Type or -> Type)
     let retType, afterRet =

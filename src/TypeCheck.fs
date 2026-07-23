@@ -1129,12 +1129,6 @@ let buildCaptures (env: TypeEnv) (freeVars: Set<string>) : TypedVarInfo list =
             { Name = name; Type = i.Type; Identity = i.Identity
               IsMutable = (i.Assign <> ReadOnly); VarId = i.VarId }))
 
-/// Validate no array captures in a lambda.
-let validateNoArrayCaptures (captures: TypedVarInfo list) : TypeResult<unit> =
-    match captures |> List.tryFind (fun c -> match c.Type with ArrayElem _ -> true | _ -> false) with
-    | Some c -> Error (InvalidArrayCapture c.Name)
-    | None -> Ok ()
-
 // ============================================================================
 // 6. Commutativity Extraction
 // ============================================================================
@@ -5056,6 +5050,7 @@ and inferApply (env: TypeEnv) (tLeft: TypedExpr) (tRight: TypedExpr) : TypeResul
             CommGroups = if isComm then [[0; 1]] else []
             Captures = []; IsCommutative = isComm
             Parallel = []  // synthesized (operator section): no user clause
+            SelfBinding = None  // anonymous: cannot self-reference
         }
         buildApplyInfo env mfInfo.Arrays mfInfo.Identities mfInfo.ArrayTypes mfInfo.SDimsPerArray mfInfo.SharedIndexTypes lambdaInfo tLeft tRight false false
 
@@ -5098,6 +5093,7 @@ and inferApply (env: TypeEnv) (tLeft: TypedExpr) (tRight: TypedExpr) : TypeResul
             CommGroups = []
             Captures = []; IsCommutative = true
             Parallel = []  // synthesized (zero kernel): no user clause
+            SelfBinding = None  // anonymous: cannot self-reference
         }
         let tZeroKernel = mkTyped (TExprLambda lambdaInfo) (IRTScalar elemType)
         buildApplyInfo env mfInfo.Arrays mfInfo.Identities mfInfo.ArrayTypes mfInfo.SDimsPerArray mfInfo.SharedIndexTypes lambdaInfo tLeft tZeroKernel false false
@@ -5277,6 +5273,7 @@ and inferApply (env: TypeEnv) (tLeft: TypedExpr) (tRight: TypedExpr) : TypeResul
                 CommGroups = []
                 Captures = []; IsCommutative = true
                 Parallel = []  // synthesized (object_for zero kernel): no clause
+                SelfBinding = None  // anonymous: cannot self-reference
             }
             buildApplyInfo env flatArrays identities arrayTypes sDimsPerArray sharedRecords lambdaInfo tLeft (mkTyped (TExprLambda lambdaInfo) (IRTScalar elemType)) false false
         | _ -> Error (ObjectForKernel (resolvedKernel.Kind.GetType().Name))
@@ -5994,6 +5991,9 @@ and inferLambda env parms whereClause body : TypeResult<TypedExpr> =
                 // Propagate the lambda's parallelization strategy (omp/cuda) from
                 // its where-clause so lambda-level omp drives parallelization.
                 Parallel = (match whereClause with Some wc -> wc.Parallel | None -> [])
+                // inferLambda always produces an anonymous lambda; a self-binding
+                // (for a named recursive `let const`) is grafted on by inferBlock.
+                SelfBinding = None
             }
             let funcTy = mkFuncArrow (typedParams |> List.map (fun p -> p.Type)) tBody.Type
             Ok (mkTyped (TExprLambda info) funcTy))
@@ -6719,69 +6719,16 @@ and destructureLetChain (env: TypeEnv) (tValue: TypedExpr)
                 mkTyped (TExprLet (n, leafId, leafValue, acc)) tBody.Type) prepared tBody
         mkTyped (TExprLet (tmpName, tmpId, tValue, withLeaves)) tBody.Type)
 
-/// Detect a recursive nested function and return its (name, fresh varId,
-/// declared function type) to pre-bind BEFORE its value is inferred.
-///
-/// A block-local `function f(p: T, ...) -> R = ...body...` desugars
-/// (parseNestedFunction) to `let f = lambda(...)` with the declared RETURN
-/// type as the binding annotation. For the self-call in the body to
-/// type-check, `f` must be bound to its declared function type before the
-/// value is inferred — mirroring checkFunctionDecl's `envWithFunc` pre-binding,
-/// which is exactly what lets top-level functions recurse. This needs all
-/// params AND the return to be annotated (a self-referential definition cannot
-/// infer its own type). At codegen the self-reference resolves to a
-/// function-typed capture of the lifted lambda (closed via captureForwardName).
-///
-/// Guarded to be purely ADDITIVE: fires only when no outer `f` is in scope and
-/// the body actually references `f` — i.e. exactly the shape that previously
-/// failed with `Unbound variable`. Shared by inferLetBinding (let-as-expression)
-/// and inferBlock (block statements) so the two stay in lockstep.
-and recFuncPreBindOf (env: TypeEnv) (binding: Binding) : (string * IRId * IRType) option =
-    match binding.Pattern.Kind, binding.Value.Kind, binding.Type with
-    | PatternKind.PatVar name, ExprKind.ExprLambda (parms, _, lamBody), Some retAnnot
-            when (lookupVar name env |> Option.isNone)
-                 && not (List.isEmpty parms)
-                 && parms |> List.forall (fun p -> p.Type.IsSome)
-                 && (collectFreeVars (parms |> List.map (fun p -> p.Name) |> Set.ofList) lamBody
-                     |> Set.contains name) ->
-        let retTy = lowerTypeExpr env retAnnot
-        // The nested-function desugar puts the declared RETURN type in
-        // binding.Type. A binding.Type that lowers to a FUNCTION type is instead
-        // a genuine function-type annotation on a plain lambda (`let f: (T)->U =
-        // ...`), which inferLetBindingValue checks structurally — not our case.
-        // Same distinction inferLetBindingValue draws (its FuncElem guard).
-        match retTy with
-        | FuncElem _ -> None
-        | _ ->
-            let paramTys = parms |> List.map (fun p -> lowerTypeExpr env p.Type.Value)
-            Some (name, env.Builder.FreshId(), mkFuncArrow paramTys retTy)
-    | _ -> None
-
 and inferLetBinding env binding body : TypeResult<TypedExpr> =
     // Bidirectional checking pushes annotations into literal/constructor
     // positions — see inferLetBindingValue. Then dispatch on the binding
     // pattern to bind names into the body's environment.
-    //
-    // Recursive nested function (see recFuncPreBindOf): infer the value with
-    // `f` pre-bound to its declared function type so the self-call type-checks.
-    // valueEnv == env for all non-recursive bindings, so nothing else changes.
-    let recFuncPreBind = recFuncPreBindOf env binding
-    let valueEnv =
-        match recFuncPreBind with
-        | Some (name, varId, funcTy) -> bindVarSimple name varId funcTy env
-        | None -> env
-    let valueResult = inferLetBindingValue valueEnv binding
+    let valueResult = inferLetBindingValue env binding
     valueResult |> Result.bind (fun tValue ->
         let assign = assignOfBindingMut binding.Mutability
         match binding.Pattern.Kind with
         | PatternKind.PatVar name ->
-            let (varId, env') =
-                match recFuncPreBind with
-                | Some (_, vid, _) ->
-                    // Reuse the pre-bound varId so the body's calls AND the
-                    // lambda's own self-reference resolve to the same binding.
-                    (vid, bindVarFull name vid tValue.Type (Some (AIDVariable name)) assign (Some tValue) valueEnv)
-                | None -> bindLetPatVar env name (Some (AIDVariable name)) assign tValue
+            let (varId, env') = bindLetPatVar env name (Some (AIDVariable name)) assign tValue
             inferExpr env' body |> Result.map (fun tBody ->
                 mkTyped (TExprLet (name, varId, tValue, tBody)) tBody.Type)
 
@@ -6977,16 +6924,6 @@ and inferBlock env stmts finalExpr : TypeResult<TypedExpr> =
                 // stripped just above. Loud failure beats a skipped statement.
                 failwith "inferBlock: nested StmtSpanned"
             | StmtLet binding ->
-                // Recursive nested function (recFuncPreBindOf): pre-bind `f` to
-                // its declared function type so the self-call in its body
-                // type-checks — the block-statement twin of inferLetBinding's
-                // handling, and the reason a block-local recursive `function`
-                // resolves its own name instead of erroring `Unbound variable`.
-                let recPre = recFuncPreBindOf curEnv binding
-                let valueEnv =
-                    match recPre with
-                    | Some (nm, vid, funcTy) -> bindVarSimple nm vid funcTy curEnv
-                    | None -> curEnv
                 // Shared annotation handler (inferLetBindingValue): block
                 // lets previously called plain inferExpr and IGNORED the
                 // annotation entirely — `let mut vy: Float<velocity> = 19.62`
@@ -6994,12 +6931,55 @@ and inferBlock env stmts finalExpr : TypeResult<TypedExpr> =
                 // shared handler gives blocks the same bidirectional
                 // checking and annotation-as-canonical-type behavior as
                 // top-level and expression-form lets.
-                match inferLetBindingValue valueEnv binding with
-                | Ok tValue ->
+                // Named-recursive-lambda unification (Stage 3a): a `let const name
+                // = lambda(...)` whose body refers to itself is a function. Bind
+                // `name` to a fresh id + type var BEFORE inferring the lambda so a
+                // self-reference in the body resolves — enabling recursion, exactly
+                // as checkFunctionDecl binds a function's name before its body. The
+                // nested-`function` desugar lands here.
+                //
+                // Gate on the body actually referencing `name` (a pure free-var
+                // scan of the surface body). Only then do we allocate the self id +
+                // type var and pre-bind. This keeps the overwhelmingly common
+                // NON-recursive named lambda on the exact original path (no id
+                // allocation, no perturbation) so its lowering stays byte-identical.
+                let selfInfo =
+                    match binding.Mutability, binding.Pattern.Kind, binding.Value.Kind with
+                    | BindConst, PatternKind.PatVar n, ExprKind.ExprLambda (lamParms, _, lamBody)
+                          when Set.contains n
+                                   (collectFreeVars (lamParms |> List.map (fun p -> p.Name) |> Set.ofList) lamBody) ->
+                        let ty = curEnv.Subst.Fresh()
+                        let id = curEnv.Builder.FreshId()
+                        Some (n, ty, id)
+                    | _ -> None
+                let inferEnv =
+                    match selfInfo with
+                    | Some (n, ty, id) -> bindVarSimple n id ty curEnv
+                    | None -> curEnv
+                match inferLetBindingValue inferEnv binding with
+                | Ok tValue0 ->
+                    // Confirm the pre-bound name really surfaced as a self-capture
+                    // (it will, given the free-var gate above). Keep the
+                    // pre-allocated id so the lifted callable's id matches the
+                    // body's self-reference; drop the self-name from captures (it
+                    // is the function, not a captured value); tie the recursive-call
+                    // constraints to the lambda's own type; and record the
+                    // self-binding for Lowering. Non-recursive lets fall through
+                    // unchanged with a fresh binding id.
+                    let (tValue, varId) =
+                        match selfInfo, tValue0.Kind with
+                        | Some (n, ty, id), TExprLambda info
+                              when info.Captures |> List.exists (fun c -> c.Name = n) ->
+                            (match unify curEnv.Subst ty tValue0.Type with
+                             | Error e -> err <- Some e
+                             | Ok () -> ())
+                            let info' =
+                                { info with
+                                    Captures = info.Captures |> List.filter (fun c -> c.Name <> n)
+                                    SelfBinding = Some (n, id) }
+                            ({ tValue0 with Kind = TExprLambda info' }, id)
+                        | _ -> (tValue0, curEnv.Builder.FreshId())
                     let name = match binding.Pattern.Kind with PatternKind.PatVar n -> n | _ -> "_"
-                    // Reuse the pre-bound varId (recursive case) so the body's
-                    // calls and the lambda's own self-reference agree.
-                    let varId = match recPre with Some (_, vid, _) -> vid | None -> curEnv.Builder.FreshId()
                     let identity = match binding.Pattern.Kind with PatternKind.PatVar n -> Some (AIDVariable n) | _ -> None
                     let assign = assignOfBindingMut binding.Mutability
                     curEnv <- bindVarFull name varId tValue.Type identity assign (Some tValue) curEnv

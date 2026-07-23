@@ -1,0 +1,10 @@
+// TEST: Recursive Nested Function
+// A nested `function` that calls itself. The name-binding makes it a real
+// (recursive) function rather than an anonymous lambda: `fac` is bound before
+// its body is checked, so the self-call resolves. Before functions/lambdas were
+// unified at the name-binding site this was an "unbound variable: fac" error.
+let result = {
+    function fac(n: Int64) -> Int64 = if n == 0 then 1 else n * fac(n - 1)
+    fac(5)
+}
+// EXPECT: result = 120

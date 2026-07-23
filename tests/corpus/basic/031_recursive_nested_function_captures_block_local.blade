@@ -1,0 +1,14 @@
+// TEST: Recursive Nested Function Captures Block-Local Let
+// Integration of the named-recursive-lambda unification with the block-local
+// capture-forwarding fix: a recursive nested `function` that ALSO captures a
+// block-local `let`. Recursion lifts `countdown` to a self-calling callable
+// (its own name excluded from captures), while the retained `base` capture must
+// forward its EMITTED name (`__v<id>`, captureForwardName) — not its source
+// name — at both the outer call and the recursive self-call.
+function outer(seed: Int64) -> Int64 = {
+    let base = seed + 5
+    function countdown(n: Int64) -> Int64 = if n <= 0 then base else countdown(n - 1)
+    countdown(5)
+}
+let result = outer(10)
+// EXPECT: result = 15

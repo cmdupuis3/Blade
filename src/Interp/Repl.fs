@@ -59,7 +59,15 @@ let lowerSession (fileName: string option) (useColor: bool) (source: string)
         | Error errors ->
             Error (renderDs (errors |> List.map Blade.TypeEnv.diagnosticOfCompileError))
         | Ok (tp, builder, warnings) ->
-            let ir = Blade.Lowering.lowerTypedProgram tp (Some prog) builder
+            // Lowering can THROW (not just return Error) when a provider load
+            // fails at compile time — e.g. `netcdf.load("missing.nc")` raises
+            // from tryInvokeProvider. Catch it here so the REPL surfaces a
+            // diagnostic instead of an unhandled exception killing the session.
+            match (try Ok (Blade.Lowering.lowerTypedProgram tp (Some prog) builder)
+                   with ex -> Error ex.Message) with
+            | Error msg ->
+                Error (renderDs [ Blade.Diagnostics.mkError "BL6002" Blade.Diagnostics.PhIRValidate Blade.Ast.noSpan msg ])
+            | Ok ir ->
             match Blade.IR.validateIR ir with
             | Error errs ->
                 Error (renderDs (errs |> List.map (fun s ->
