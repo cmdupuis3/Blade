@@ -1,0 +1,23 @@
+// TEST: Covariance matrix — object_for(comoment) over 2D data
+// The full docs pipeline (docs/examples.md §2): a former maps the recursive
+// arity-poly `comoment` kernel over the rows of a 2D array, forming the
+// symmetric outer product `object_for(comoment) <@> (data, data)` — the
+// covariance matrix. Exercises the former peeling a 2D array into rank-1 row
+// fibers for an HM/arity-poly kernel (the kernel input rank is recovered from
+// the callee's Poly<T^1> pack signature), on top of the recursive centered
+// product itself.
+function mean(row: T^1) -> T^0 = reduce(row, (+)) / extents(row)
+function comoment_prod(a: Poly<T^1>) -> T^1 = {
+    match arity(a) with
+    | 1 -> { let head :: tail = a
+             head - mean(head) }
+    | _ -> { let head :: tail = a
+             (head - mean(head)) * comoment_prod(tail) }
+}
+function comoment(a: Poly<T^1>) -> T^0 = mean(comoment_prod(a))
+// x = [1,2,3] (centered [-1,0,1]); y = [2,4,6] (centered [-2,0,2]).
+// cov = [[var(x), cov(x,y)], [cov(y,x), var(y)]]
+//     = [[2/3, 4/3], [4/3, 8/3]]  (symmetric)
+let data = [[1.0, 2.0, 3.0], [2.0, 4.0, 6.0]]
+let result = object_for(lambda(x, y) -> comoment(x, y)) <@> (data, data) |> compute
+// EXPECT: result = [0.6666666666666666, 1.3333333333333333, 1.3333333333333333, 2.6666666666666665]

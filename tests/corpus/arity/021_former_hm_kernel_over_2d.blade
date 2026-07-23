@@ -1,0 +1,11 @@
+// TEST: Former maps an HM function over the rows of a 2D array
+// The minimal shape behind the covariance pipeline: `method_for` over a 2D
+// array whose kernel calls an HM function (`rowsum : Float64^1 -> Float64^0`)
+// on each rank-1 row. The kernel's input rank is recovered from the callee's
+// declared array parameter — a plain application does NOT unify arg against
+// param, so without that recovery the former would peel to scalars and the
+// callee's element type would never resolve.
+function rowsum(x: Float64^1) -> Float64^0 = reduce(x, (+))
+let data = [[1.0, 2.0], [3.0, 4.0]]
+let result = method_for(data) <@> lambda(x) -> rowsum(x) |> compute
+// EXPECT: result = [3.0, 7.0]

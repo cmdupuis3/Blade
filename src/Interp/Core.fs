@@ -494,7 +494,11 @@ let rec evalExpr (st: InterpState) (env: Env) (expr: IRExpr) : Value =
         else VBool (toBoolV (evalExpr st env r))
     | IRBinOp (_, op, l, r) ->
         // Left-to-right operand evaluation, then Numerics' bit-exact dispatch
-        // (promotion / wraparound / complex coercion / string concat).
+        // (promotion / wraparound / complex coercion / string concat). Array
+        // operands never reach here: Lowering's lowerArrayBinOpsModule rewrites
+        // every array-typed binop into the same method_for co-iteration (or
+        // single-array broadcast) combinator that top-level `x + y` / `A + s`
+        // take, so this arm only ever sees scalars.
         let lv = evalExpr st env l
         let rv = evalExpr st env r
         N.evalBinOp op lv rv

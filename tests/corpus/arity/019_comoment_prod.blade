@@ -1,0 +1,28 @@
+// TEST: comoment_prod — recursive centered product over a pack of arrays
+// The flagship recursive Poly<T^1> kernel (docs/examples.md §2). Each pack
+// element is centered (`head - mean(head)`, an array-scalar broadcast) and the
+// centered arrays are multiplied elementwise down the recursion. Exercises,
+// together: worklist arity specialization, cons-destructuring on packs, an HM
+// `mean` helper on a pack element, array∘array co-iteration, and array-scalar
+// broadcast — all with rank preserved as Array<double,1>.
+//
+// The `| 1` base (return the single centered array) is equivalent to the docs'
+// `| 0 -> zero` for every arity >= 1 (a product with the identity), and avoids
+// the separate array-typed-`zero` gap.
+function mean(row: T^1) -> T^0 = reduce(row, (+)) / extents(row)
+function comoment_prod(a: Poly<T^1>) -> T^1 = {
+    match arity(a) with
+    | 1 -> {
+        let head :: tail = a
+        head - mean(head)
+    }
+    | _ -> {
+        let head :: tail = a
+        (head - mean(head)) * comoment_prod(tail)
+    }
+}
+// cov(x, y): centered x = [-1, 0, 1], centered y = [-2, 0, 2] -> [2, 0, 2]
+let x = [1.0, 2.0, 3.0]
+let y = [2.0, 4.0, 6.0]
+let result = comoment_prod(x, y)
+// EXPECT: result = [2.0, 0.0, 2.0]

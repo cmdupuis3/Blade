@@ -1,0 +1,16 @@
+// TEST: Recursive Pack Product (rank-1, generic T)
+// Sibling of the rank-1 sum: elementwise `*` folded by recursion over a
+// Poly<T^1> pack. Confirms the co-iteration lowering is op-agnostic and that a
+// distinct arity chain (2 here) specializes independently.
+function packprod1(A: Poly<T^1>) -> T^1 = {
+    match arity(A) with
+    | 1 -> A[0]
+    | _ -> {
+        let head :: tail = A
+        head * packprod1(tail)
+    }
+}
+let x = [2.0, 3.0]
+let y = [5.0, 7.0]
+let result = packprod1(x, y)
+// EXPECT: result = [10.0, 21.0]

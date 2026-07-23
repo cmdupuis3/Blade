@@ -1900,6 +1900,7 @@ let private typedExprChildren (expr: TypedExpr) : TypedExpr list =
         | TExprBinOp (_, _, l, r) -> [l; r]
         | TExprApp (f, args) -> f :: args
         | TExprTupleIndex (t, i) -> [t; i]
+        | TExprPolyTail (p, _) -> [p]
         | TExprField (e, _, _) -> [e]
         | TExprLambda info -> [info.Body]
         | TExprLet (_, _, v, b) -> [v; b]
@@ -5454,10 +5455,63 @@ and buildApplyInfo (env: TypeEnv)
             | TExprLet (_, _, v, b) -> walk v || walk b
             | _ -> false
         walk body
+    // When the param is passed as an ARGUMENT to a function whose parameter at
+    // that position is an array (or a Poly<_^k> pack of rank-k arrays), that
+    // callee fixes the rank the kernel consumes: `rowsum(x)` with
+    // `rowsum : Array<_,1> -> _` means `x` is a rank-1 fiber. Plain application
+    // does NOT unify arg types against param types (see dispatchAppOrIndex's
+    // FuncElem arm), so such a param stays IRTInfer and its rank is invisible on
+    // its own resolved type — recover it from the callee's signature here, so
+    // the former peels the right number of outer dims (and the perRowType
+    // unification below pins the param to the concrete fiber, letting IR-phase
+    // HM monomorphization specialize the callee against it).
+    let rankOfCalleeParam (pty: IRType) : int option =
+        // A `Poly<T^k>` pack's base is an arity-k inference VAR (from `T^k`), not
+        // a concrete array — read the rank off its arity constraint. `mean(row: T^1)`
+        // is the same: a bare `T^1` param is an arity-1 var, not `Array<..>`.
+        let rankOfTy t =
+            match env.Subst.Resolve t with
+            | ArrayElem arr -> Some arr.IndexTypes.Length
+            | IRTInfer id ->
+                match env.Subst.GetArityConstraint id with
+                | Some k when k > 0 -> Some k
+                | _ -> None
+            | _ -> None
+        match env.Subst.Resolve pty with
+        | IRTPoly (baseTy, _) -> rankOfTy baseTy
+        | other -> rankOfTy other
+    let paramRankFromFuncArg (pname: string) (body: TypedExpr) : int option =
+        let isParamVar (e: TypedExpr) =
+            match e.Kind with TExprVar (n, _, _) -> n = pname | _ -> false
+        let mutable found : int option = None
+        let rec walk (e: TypedExpr) =
+            (match e.Kind with
+             | TExprApp (f, args) ->
+                 match env.Subst.Resolve f.Type with
+                 | FuncElem (paramTys, _) ->
+                     args |> List.iteri (fun i a ->
+                         if found.IsNone && isParamVar a then
+                             // Poly packs are variadic: every arg maps to the
+                             // single pack param's element rank.
+                             let pIdx = if i < paramTys.Length then i else paramTys.Length - 1
+                             if pIdx >= 0 then
+                                 match rankOfCalleeParam paramTys.[pIdx] with
+                                 | Some r -> found <- Some r
+                                 | None -> ())
+                 | _ -> ()
+             | _ -> ())
+            typedExprChildren e |> List.iter walk
+        walk body
+        found
     let kernelInputRanks =
         resolvedParamTypes |> List.mapi (fun i t ->
             match t with
             | ArrayElem arr -> arr.IndexTypes.Length
+            | IRTInfer _ when
+                (let pn = if i < lambdaInfo.Params.Length then lambdaInfo.Params.[i].Name else ""
+                 (paramRankFromFuncArg pn lambdaInfo.Body).IsSome) ->
+                let pn = lambdaInfo.Params.[i].Name
+                (paramRankFromFuncArg pn lambdaInfo.Body).Value
             | IRTInfer _ when i < arrayTypes.Length && i < sDimsPerArray.Length ->
                 let arrTy = arrayTypes.[i]
                 let sDims = sDimsPerArray.[i]
@@ -6548,6 +6602,31 @@ and consDestructureLeaves (env: TypeEnv) (scrutTy: IRType) (h: Pattern) (t: Patt
             | many -> IRTTuple many
         let leafTys = (ts |> List.truncate k) @ [tailTy]
         Ok (List.zip names (leafTys |> List.map (fun ty -> env.Subst.Resolve ty)))
+    | IRTPoly (baseTy, _) when leafNames |> List.forall Option.isSome ->
+        // Cons-destructuring a parameter pack: `head :: tail = A`. Each head
+        // leaf has the pack's element (base) type; the rest leaf is a pack of
+        // the same base with arity `k` less (one per head). Arity is symbolic
+        // until monomorphization, so — unlike the tuple arm — we don't require a
+        // statically-known length > k here; a pack too short for the heads fails
+        // when its concrete arity is fixed (specializeFunction). The tail gets a
+        // fresh arity variable name (its own independent, mono-fixed size).
+        let names = leafNames |> List.map Option.get
+        let k = headPats.Length
+        // Head leaves get FRESH vars, not the pack's base type directly. A pack
+        // element read (`A[i]`, inferTupleIndex) already decouples this way, and
+        // for good reason: `head` typically flows into arithmetic (`head + ..`),
+        // and if `head` WERE the base var, that arithmetic would unify the base
+        // to a scalar — collapsing a `Poly<T^1>` pack's rank (its params would
+        // monomorphize to `double` instead of `Array<double,1>`). The element's
+        // real (post-monomorphization) type is the expanded param's; the fresh
+        // var only needs to be internally consistent for body inference. The tail
+        // keeps the base (so the recursive `f(tail)` sees the same element type)
+        // with a fresh, independent arity variable.
+        let headTys = List.init k (fun _ -> env.Subst.Fresh())
+        let tailArityName = sprintf "r%d" (env.Builder.FreshId())
+        let tailTy = IRTPoly (baseTy, tailArityName)
+        let leafTys = headTys @ [tailTy]
+        Ok (List.zip names leafTys)
     | _ ->
         let patText =
             leafPats
@@ -6745,8 +6824,16 @@ and inferLetBinding env binding body : TypeResult<TypedExpr> =
                 let leaves =
                     leafTys
                     |> List.mapi (fun i (n, ty) ->
+                        let isPoly = match resolvedTy with IRTPoly _ -> true | _ -> false
                         let mkValue (src: TypedExpr) =
                             if i = lastIdx then
+                                if isPoly then
+                                    // REST leaf of a PACK: the symbolic pack tail
+                                    // (dropping `i` heads), NOT a re-tuple — the
+                                    // arity is only known at monomorphization.
+                                    // Matches Lowering.subBindingValue's IRTPoly arm.
+                                    mkTyped (TExprPolyTail (src, i)) ty
+                                else
                                 // REST leaf: the remainder, re-tupled from its
                                 // own index onward — bare when one element
                                 // (Blade has no 1-tuple). Identical rule to

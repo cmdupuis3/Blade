@@ -1,0 +1,15 @@
+// TEST: Recursive Pack Sum (scalar)
+// A poly pack folded by recursion over its cons-destructuring: `head :: tail`
+// splits the pack, the base arm is selected statically once `arity(A)` is a
+// literal, and each recursive `packsum(tail)` monomorphizes to the next-smaller
+// arity (worklist specialization). Scalar elements (Poly<T^0>).
+function packsum(A: Poly<T^0>) -> T^0 = {
+    match arity(A) with
+    | 1 -> A[0]
+    | _ -> {
+        let head :: tail = A
+        head + packsum(tail)
+    }
+}
+let result = packsum(1.0, 2.0, 3.0, 4.0)
+// EXPECT: result = 10.0

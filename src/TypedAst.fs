@@ -155,6 +155,13 @@ and TypedExprKind =
     
     // Poly-tuple indexing: args[k]
     | TExprTupleIndex of tuple: TypedExpr * index: TypedExpr
+
+    // Pack tail from cons-destructuring `let head :: tail = pack`. `drop` is the
+    // number of leading elements peeled (1 for `head :: tail`, k for a k-headed
+    // cons). Lowers to IRPolyTail; arity-monomorphization expands it into the
+    // trailing pack params. Only produced when the destructured scrutinee is a
+    // Poly pack (tuples keep the TExprTuple-of-projections desugaring).
+    | TExprPolyTail of pack: TypedExpr * drop: int
     
     // Field access
     | TExprField of TypedExpr * field: string * fieldIndex: int

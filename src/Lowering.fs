@@ -183,6 +183,13 @@ let subBindingValue (binding: TypedBinding) (isStruct: bool) (isFlat: bool) (i: 
     if isStruct then IRFieldAccess (baseVar, name)
     else
         match binding.Type with
+        | IRTPoly _ ->
+            // Cons-destructuring a parameter pack (`let head :: tail = A`): head
+            // leaves are pack-element reads (IRPolyIndex — the same node `A[i]`
+            // lowers to), the rest leaf is the symbolic pack tail (IRPolyTail).
+            // Arity-monomorphization expands both against the concrete pack.
+            if isRestLeaf then IRPolyTail (baseVar, i)
+            else IRPolyIndex (baseVar, IRLit (IRLitInt (int64 i)))
         | IRTTuple ts when isRestLeaf && ts.Length > i ->
             let rest = [ for j in i .. ts.Length - 1 -> IRTupleProj (baseVar, j, false) ]
             if rest.Length = 1 then rest.Head else IRTuple rest
@@ -295,6 +302,9 @@ let rec lowerTypedExpr (env: TypedLowerEnv) (texpr: TypedExpr) : IRExpr =
             let idx = lowerTypedExpr env index
             IRPolyIndex (tup, idx)
     
+    | TExprPolyTail (pack, drop) ->
+        IRPolyTail (lowerTypedExpr env pack, drop)
+
     | TExprField (obj, field, _) ->
         let o = lowerTypedExpr env obj
         IRFieldAccess (o, field)
@@ -1919,6 +1929,12 @@ let lowerTypedProgram (program: TypedProgram) (rawProgram: Program option) (buil
         // call site. Runs after Poly so per-param/per-arg unification is
         // straightforward — each pack has already been expanded.
         let irModule = IR.monomorphizeHMFunctions irModule env.Builder
+        // Rewrite raw array-typed binops into object_for combinators now that
+        // pack-element operand types are concrete (post Poly+HM). `A[i] + A[j]`
+        // on rank>=1 pack elements couldn't be recognized as an array op at
+        // lowering time (its element type was an unresolved var); here it can,
+        // so it gets the same elementwise-loop lowering top-level `x + y` does.
+        let irModule = IR.lowerArrayBinOpsModule irModule env.Builder
         // Lift inline forms (mask/sort/intersect/union/group_by/group_keys
         // appearing in non-let-RHS positions) into auto-let bindings so
         // codegen sees the canonical "let-bound" pattern uniformly.

@@ -1,0 +1,20 @@
+// TEST: Recursive Pack Sum (rank-1, generic T)
+// The recursive fold over a pack whose ELEMENTS are rank-1 arrays (Poly<T^1>).
+// Two things this pins that the scalar case does not:
+//   - rank preservation: each `f(tail)` specialization keeps `Array<T,1>`
+//     params rather than collapsing the generic element to a scalar; and
+//   - elementwise array `+` inside the recursion, co-iterated per element,
+//     with the recursive-call result materialized as a named array operand.
+function packsum1(A: Poly<T^1>) -> T^1 = {
+    match arity(A) with
+    | 1 -> A[0]
+    | _ -> {
+        let head :: tail = A
+        head + packsum1(tail)
+    }
+}
+let x = [1.0, 2.0]
+let y = [3.0, 4.0]
+let z = [10.0, 20.0]
+let result = packsum1(x, y, z)
+// EXPECT: result = [14.0, 26.0]
