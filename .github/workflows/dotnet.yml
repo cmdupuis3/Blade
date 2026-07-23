@@ -1,0 +1,31 @@
+name: F# .NET CI
+
+on:
+  push:
+    branches: [ "main" ]
+  pull_request:
+    types: [ labeled ]
+    branches:
+      - "main"
+
+jobs:
+  build:
+    if: |
+      github.event_name == 'push' || 
+      (github.event_name == 'pull_request' && github.event.label.name == 'buildMe')
+
+    runs-on: ubuntu-latest
+
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+    - name: Setup .NET
+      uses: actions/setup-dotnet@v4
+      with:
+        dotnet-version: '7.0.x'
+    - name: Restore dependencies
+      run: dotnet restore
+    - name: Build
+      run: dotnet build --configuration Release --no-restore
+    - name: Test
+      run: dotnet test --configuration Release --no-build --verbosity normal
