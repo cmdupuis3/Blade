@@ -1,21 +1,16 @@
 # Blade Proofs
 
-Prose mirror of the machine-checked proof tower **blade-proofs-v16**: 20 files,
+Prose mirror of the machine-checked proof tower in `/proofs/`:
 **241 theorems**, Coq 8.18, stdlib only, verified by both `coqc` and `coqchk`.
-Sources: `proofs/` (`proofs.zip`). Build:
-`coq_makefile -f _CoqProject -o Makefile && make`.
+
+Build: `coq_makefile -f _CoqProject -o Makefile && make`.
 
 Rules of this document:
 
 - The `.v` files are canonical; this document is the map. Every claim here
   names its Coq artifact. Nothing is `Admitted`; there are no axioms.
 - Scope caveats are stated where the files state them (rank-2 only,
-  materialized fragment, do-not-cite, etc.). Where the formalism's prose
-  claims outrun the checked artifact, this document is the arbiter of what is
-  actually proved.
-- Formalism theorem numbers (2.x, 9.x, 12.x, 14.x) refer to the v10 numbering,
-  which the checked comments cite; [formalism.md](formalism.md) sections cite
-  back into this document.
+  materialized fragment, do-not-cite, etc.).
 - Remaining open items live in [future.md](future.md) §4 (from the tower's
   ROADMAP).
 
@@ -90,7 +85,7 @@ BladeSafety.v.
 **Versioning explosion.** `versioning_explosion`: 2^k ≤ c^k for c ≥ 2 —
 specialization count under composition explodes (trichotomy support lemma).
 
-## BladeDMWF.v (20 theorems) — index universe and the double metamorphism
+## BladeDMWF.v — index universe and the double metamorphism
 
 L0: deep embedding of symmetric index records; shapes as products; canonical-
 tuple denotation `canonical r l u t` (r indices, each in [prev, u)). L1: the
@@ -117,14 +112,14 @@ Double Metamorphism With Feedback as a structural unfold whose seed is the
   dependent typing is forced (anchor for Theorem 9.3).
 - `enumShape_length`: shape cardinality is the product over components.
 
-## BladeBinomial.v (7) — storage cardinality closed form
+## BladeBinomial.v — storage cardinality closed form
 
 `mscard_binom`: mscard r l u = C(u−l+r−1, r), by the hockey-stick identity
 (`hockey`) proved by induction over the sum the dmwf_equation produces.
 `enum_length_binom`, and the headline `storage_cardinality`:
 |SymIdx<r, n>| = C(n+r−1, r).
 
-## BladeCounting.v (15) — the general counting theorem
+## BladeCounting.v — the general counting theorem
 
 For d ≥ 2 dimensions of extents nⱼ ≥ 2 and rank r ≥ 2:
 
@@ -147,7 +142,7 @@ deficit of the Cauchy decomposition Sym^r(V⊗W) ≅ ⊕_λ S^λ(V)⊗S^λ(W); p
 storage captures only λ = (r); per-dimension Reynolds is the projection onto
 it; the constructive r = 2 split is BladeCauchy.
 
-## BladeCurrying.v (8) — dependence boundary; two maximal curryings
+## BladeCurrying.v — dependence boundary; two maximal curryings
 
 **Part A — the arrow dependence boundary** (an arrow is the maximal
 dependence-closed unit of iteration):
@@ -169,7 +164,7 @@ dependence-closed unit of iteration):
   all-arrays-no-kernel (method_for) and kernel-only (object_for);
   `method_spec_ok` / `object_spec_ok` witness existence.
 
-## BladeCurryingGeneral.v (10) — the generalized maximal-currying theorem
+## BladeCurryingGeneral.v — the generalized maximal-currying theorem
 
 Two upgrades: (1) detection is **information-theoretic** — S detects a
 property iff some predicate of the data S exposes defines it; the
@@ -184,7 +179,7 @@ support witness; identity/commutativity is the instance
 full binding — full relational support is exactly the class that motivates
 method_for.
 
-## BladeLowering.v (18) — symmetry lowering and raising, corrected
+## BladeLowering.v — symmetry lowering and raising, corrected
 
 The organizing result is Theorem 9.11 in sound general form, over an OPAQUE
 index type: a position permutation is licensed iff it is in H (kernel
@@ -214,7 +209,7 @@ invariance) AND stabilizes the array binding.
   with neg := conjugation; the diagonal-vanishing corollary needs group
   structure on U and is deliberately not claimed.
 
-## BladeArrow.v (14) — the arrow as coalgebra
+## BladeArrow.v — the arrow as coalgebra
 
 An arrow is (state St, heads : St → list nat, step : St → nat → St); the DMWF
 is the induced unfold; the FEEDBACK is the step.
@@ -231,7 +226,7 @@ corollaries + the strict left-justified storage bijection
 `alj_correct`/`aunlj_correct`; **Compound** (masked, rank 2) —
 `compound_arrow_denotes_mask`: the arrow enumerates exactly the true cells.
 
-## BladeAffine.v (8) — the affine feedback descriptor
+## BladeAffine.v — the affine feedback descriptor
 
 `step l i = i + δ` unifies lj (δ = 0) and alj (δ = 1); storage domain
 l + Σa + δ(r−1) < u. Round trips proved once (`dlj_correct`,
@@ -240,7 +235,7 @@ Sym and Antisym transforms exactly (`delta0_recovers_canonical/storageOK`,
 `delta1_recovers_scanonical/astorageOK`). Strided strictness (δ ≥ 2) covered
 for free. (Nonlinear δ(r−1) leaves discharged by nia.)
 
-## BladeCompound.v (7) — the rank-k Compound arrow
+## BladeCompound.v — the rank-k Compound arrow
 
 CompoundIdx over a rank-k mask M : list nat → bool, as the arrow whose state
 is (remaining dims, prefix), whose heads admit SOME true completion, and
@@ -256,14 +251,14 @@ and mask-true; stated for nonempty dims — designed base-case asymmetry);
 at every rank); `rank2_subsumed` (BladeArrow's rank-2 instance is the [n; m]
 case).
 
-## BladeShape.v (3) — shape-level uniqueness
+## BladeShape.v — shape-level uniqueness
 
 `enumShape_NoDup`: shape enumeration emits each tuple exactly once, via
 `canonical_length` (canonical tuples have fixed per-record length) and
 `app_split_length` (unique app-decomposition). Completes the enumShape
 theorem set (membership: BladeTrinity's `trinity_fold_closure`).
 
-## BladeLex.v (12) — iteration order = storage order
+## BladeLex.v — iteration order = storage order
 
 `enumA_lex_sorted`, proved ONCE at the arrow level: any arrow with strictly
 increasing heads enumerates in strictly increasing lexicographic order.
@@ -274,7 +269,7 @@ matches the compiler's dense mask-scan order). Payoff
 since storage offset IS enumeration position, offset order embeds lex order.
 (Converse routine via trichotomy + NoDup; noted as remark, no consumer.)
 
-## BladeTrinity.v (7) — positive constructions
+## BladeTrinity.v — positive constructions
 
 The Trinity theorems (9.1–9.7) claim mutual dependence of loop reification,
 arity polymorphism, dimensional currying. The honest mechanizable content is
@@ -291,7 +286,7 @@ arity polymorphism, dimensional currying. The honest mechanizable content is
   constant — no single non-dependent type hosts all arities (type-level
   anchor for 9.2/9.5, mirroring `residual_not_constant` one level up).
 
-## BladeTrinityAsym.v (14) — the pillars are not co-equal
+## BladeTrinityAsym.v — the pillars are not co-equal
 
 Loop reification and dimensional currying GENERATE; arity polymorphism is the
 closure they force (witness that the first two exist without the third: the
@@ -310,7 +305,7 @@ original unary C++ object_for prototype).
 Formalism action (adopted in v11 §10.2): state 9.7 as generators + closure,
 not co-equality.
 
-## BladeCompleteness.v (11) — H-and-Stab EXACTNESS
+## BladeCompleteness.v — H-and-Stab EXACTNESS
 
 The exactness half of Theorem 9.11 (soundness is BladeLowering). Both
 necessity directions checked:
@@ -332,7 +327,7 @@ can be accidentally symmetric beyond the grant — remark, not hedge; exactness
 is about the uniform grant, the compiler's epistemic situation. Permutations
 carry explicit two-sided inverses on [0, r) (`perm_pair`).
 
-## BladeFusionDuality.v (5) — fusion ⇒ duality
+## BladeFusionDuality.v — fusion ⇒ duality
 
 The method/object duality is DERIVED, not assumed. `fused_form` names the
 fusion equation (Out = loop welded to indexing, kernel and arrays abstract);
@@ -345,7 +340,7 @@ reading. Duality = fusion's two-sorted slot structure + detection pruning
 (9.23/9.24); exactness (BladeCompleteness) is why nothing less suffices.
 Formalism §1 opens with fusion and derives the duality by citation.
 
-## BladeCompute.v (24) — the computation model
+## BladeCompute.v — the computation model
 
 Materialized-list semantics: a plan (equivalently an array — fusion makes
 them the same kind of object) is a shape plus kernel; veval p = map kernel
@@ -381,7 +376,7 @@ Adjunction status: round trip (here), monoidality (BladeTrinityAsym), and
 non-injectivity are checked; morphisms undefined, so the V ⊣ P adjunction
 remains a conjecture.
 
-## BladeCauchy.v (15) — the r = 2 Cauchy storage split
+## BladeCauchy.v — the r = 2 Cauchy storage split
 
 For ANY rank-4 tensor T(i₁,j₁,i₂,j₂) symmetric under exchanging its two
 (i,j) slots — the only symmetry one identity group grants — define (over ℤ,
@@ -410,7 +405,7 @@ amended at r = 2. Honest scope: r = 2 only (r ≥ 3 has mixed Schur components
 cells); each read costs two lookups plus a halving; the bridge to concrete
 lj/alj layouts is mechanical and not done.
 
-## BladeMonad.v (18) — monad and combinator laws
+## BladeMonad.v — monad and combinator laws
 
 Every law asserted in formalism 12.1–12.5 and the MonadPlus table has a
 checked artifact at the materialized-value semantics.
@@ -438,7 +433,7 @@ checked artifact at the materialized-value semantics.
 Out of scope here: array-level zip/stack/transpose laws (behavior layer /
 compiler rewrite); k-slot structure and typed-path laws (surface calculus).
 
-## BladeSafety.v (9) — bounds safety with a failure model
+## BladeSafety.v — bounds safety with a failure model
 
 Written in response to the external audit: a bounds-safety claim has content
 only if the semantics contains a failure mode the typing provably avoids.
@@ -462,6 +457,14 @@ address = the compiler's triangular offset `roff`.
 
 Scope: rank 2 (general-r offset = nested hockey-stick sums — future.md §4);
 surface progress/preservation is the remaining open species (future.md §4.1).
+
+
+## What remains unproved
+
+See [future.md](future.md) §4: surface-calculus progress/preservation (the
+one missing species — deliberately sequenced after the rewrite settles
+surface syntax), general-r verified offsets, r ≥ 3 storage splits, k-slot
+structure, typed-path combinator laws, the adjunction proper.
 
 ---
 
@@ -503,10 +506,3 @@ itself unmechanized · **CORRECTED** = v10 claim refuted/amended by the tower.
 | CompoundIdx denotation | `compoundk_denotation`, `compound_arrow_denotes_mask`, `compoundk_lex_sorted` | FULL (every rank) |
 | Affine/strict storage | `dlj/dunlj_correct` + δ-corollaries | FULL |
 | V ⊣ P adjunction | round trip + monoid hom + non-injectivity | CORE; adjunction proper conjectural |
-
-## What remains unproved
-
-See [future.md](future.md) §4: surface-calculus progress/preservation (the
-one missing species — deliberately sequenced after the rewrite settles
-surface syntax), general-r verified offsets, r ≥ 3 storage splits, k-slot
-structure, typed-path combinator laws, the adjunction proper.
