@@ -1,0 +1,12 @@
+// TEST: Nested Function Captures Block-Local Let
+// A nested function that captures a block-local `let` must forward the
+// capture by the variable's EMITTED C++ name (`base` is flattened to
+// `__v<id>` when the block's IRLet chain is unrolled into statements),
+// not its source name. Regression for the capture-forwarding bug where
+// the wrapper referenced the undeclared source identifier.
+let result = {
+    let base = 100
+    function addBase(n: Int64) -> Int64 = base + n
+    addBase(3)
+}
+// EXPECT: result = 103
