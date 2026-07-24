@@ -1,7 +1,6 @@
-# Blade Proof System (Coq) -- v16
+# Blade Proof System
 
 Machine-checked kernel of the Blade formalism. Coq 8.18.0, stdlib only.
-All files verified by both coqc and coqchk (independent kernel checker).
 
 ## Build
 
@@ -103,9 +102,3 @@ or manually with `coqc -Q . Blade <file>` in _CoqProject order.
   (the FilteredIdx residual, executable); denotation theorem at every
   rank (exactly the in-bounds mask-true tuples, each once); rank-2
   concrete instance subsumed.
-
-## Open items
-
-See ROADMAP.md for the remaining deferred items with designs and
-confidence assessments. The formalism-facing containment caveat on
-Theorem 9.11 is DISCHARGED: exactness is now checked.
