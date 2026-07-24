@@ -7,9 +7,13 @@ The syntax extends the classic ML-style grammar with cutting-edge concepts like 
 
 Spanning the simplest of arithmetic functions to powerful combinators of combinators, Blade guarantees *the **fastest** way is the **only** way*.
 
+## IDE Support
+
+A VS Code extension is available [here](https://github.com/cmdupuis3/Blade-REPL). Blade-REPL provides a REPL, tooltips for most objects, and full in-editor type deduction.
+
 ## Requirements
 
-Building and running the existing Blade compiler requires support for:
+Building and running the Blade compiler requires support for:
 * F# version 7 or higher
 * C++ 20 or later
 
