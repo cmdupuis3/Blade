@@ -1,0 +1,20 @@
+// TEST: Deferred former — bare object_for(named poly kernel), let-bound then applied
+// A bare arity-polymorphic named kernel is a DEFERRED loop-former: its pack
+// arity and element type stay unresolved until the <@> application reveals
+// them. `let comomentLoop = object_for(comoment)` binds it without a lambda
+// wrapper and without immediate application; the arity (2) and element type
+// (double) are pinned only at `comomentLoop <@> (data, data)`. Lowers to the
+// same IR as 022's inline `object_for(lambda(x,y) -> comoment(x,y)) <@> ...`.
+function mean(row: T^1) -> T^0 = reduce(row, (+)) / extents(row)
+function comoment_prod(a: Poly<T^1>) -> T^1 = {
+    match arity(a) with
+    | 1 -> { let head :: tail = a
+             head - mean(head) }
+    | _ -> { let head :: tail = a
+             (head - mean(head)) * comoment_prod(tail) }
+}
+function comoment(a: Poly<T^1>) -> T^0 = mean(comoment_prod(a))
+let data = [[1.0, 2.0, 3.0], [2.0, 4.0, 6.0]]
+let comomentLoop = object_for(comoment)
+let result = comomentLoop <@> (data, data) |> compute
+// EXPECT: result = [0.6666666666666666, 1.3333333333333333, 1.3333333333333333, 2.6666666666666665]

@@ -5295,6 +5295,40 @@ and inferApply (env: TypeEnv) (tLeft: TypedExpr) (tRight: TypedExpr) : TypeResul
                 SelfBinding = None  // anonymous: cannot self-reference
             }
             buildApplyInfo env flatArrays identities arrayTypes sDimsPerArray sharedRecords lambdaInfo tLeft (mkTyped (TExprLambda lambdaInfo) (IRTScalar elemType)) false false
+        | TExprVar (fnName, _, _) when
+            (match env.Subst.Resolve resolvedKernel.Type with
+             | FuncElem (ps, _) ->
+                 ps |> List.exists (fun t -> match env.Subst.Resolve t with IRTPoly _ -> true | _ -> false)
+             | _ -> false) ->
+            // Deferred former: a bare arity-polymorphic named kernel (e.g.
+            // `object_for(comoment_generator)`). The pack arity is revealed HERE
+            // by the argument tuple, so eta-expand now to that width and rebuild
+            // the ordinary inline form `object_for(lambda(__e..) -> fn(__e..))`,
+            // routing it through inferObjectFor + buildApplyInfo so the whole
+            // existing lambda pipeline (arity + HM specialization) applies. Each
+            // <@> use mints a fresh lambda, so multiple uses at different arities
+            // or element types stay independent. The synthesized loop (not the
+            // bare `tLeft` var) becomes the apply's loop provenance, keeping the
+            // node self-contained after the deferred-former binding is emitted
+            // inert (see the DeclLet / block-let binding sites).
+            let span = objInfo.Kernel.Span
+            let n = flatArrays.Length
+            let uid = env.Builder.FreshId()
+            let names = List.init n (fun i -> sprintf "__of%d_%d" uid i)
+            let lamParams = names |> List.map (fun nm -> ({ Name = nm; Type = None } : LambdaParam))
+            let bodyApp =
+                mkExpr span (ExprApp (mkExpr span (ExprVar fnName),
+                                      names |> List.map (fun nm -> mkExpr span (ExprVar nm))))
+            let etaLoopExpr = mkExpr span (ExprLambda (lamParams, None, bodyApp))
+            inferObjectFor env etaLoopExpr |> Result.bind (fun tLoopSynth ->
+                match tLoopSynth.Kind with
+                | TExprObjectFor synInfo ->
+                    match (resolveTypedExpr env synInfo.Kernel).Kind with
+                    | TExprLambda li ->
+                        buildApplyInfo env flatArrays identities arrayTypes sDimsPerArray sharedRecords
+                                       li tLoopSynth synInfo.Kernel false false
+                    | _ -> Error (ObjectForKernel "deferred former eta-expansion did not yield a lambda")
+                | _ -> Error (ObjectForKernel "deferred former eta-expansion did not yield an object_for"))
         | _ -> Error (ObjectForKernel (resolvedKernel.Kind.GetType().Name))
 
     // Composed ObjectLoop: (o1 >>@ o2) <@> A
@@ -7143,9 +7177,17 @@ and inferBlock env stmts finalExpr (expectedFinal: IRType option) : TypeResult<T
                             | Error e -> err <- Some e; []
                         | _ -> []
                     let postChecks = mutualChecks @ structChecks
+                    // Deferred former (Arity = None): emit inert; every <@> use
+                    // rebuilds it inline. Env keeps the real former for <@>.
+                    let isDeferredFormer =
+                        match curEnv.Subst.Resolve tValue.Type with
+                        | IRTLoop { Kind = LKObject; Arity = None } -> true
+                        | _ -> false
                     let tb : TypedBinding = {
-                        Name = name; VarId = varId; Type = tValue.Type
-                        Identity = identity; IsMutable = (assign <> ReadOnly); Value = tValue
+                        Name = name; VarId = varId
+                        Type = (if isDeferredFormer then IRTUnit else tValue.Type)
+                        Identity = identity; IsMutable = (assign <> ReadOnly)
+                        Value = (if isDeferredFormer then mkTyped (TExprLit LitUnit) IRTUnit else tValue)
                         SubBindings = subBindings |> List.map (fun (n, id, ty) -> (n, id, curEnv.Subst.Resolve ty))
                         Destructure = destructure
                         PostChecks = postChecks
@@ -7465,6 +7507,17 @@ and inferObjectFor env kernel : TypeResult<TypedExpr> =
         | Some r -> r
         | None -> inferExpr env kernel
     kernelResult |> Result.bind (fun tKernel ->
+        // A DEFERRED former: a bare named reference to an arity-polymorphic
+        // function. etaExpandFunctionKernel refused to eta-expand it (its Poly
+        // pack param makes the arity unknown), so it is still a TExprVar. Mark
+        // the loop arity-polymorphic (Arity = None) and eta-expand at the <@>
+        // site, where the argument tuple reveals the pack width.
+        let isDeferredPoly =
+            match tKernel.Kind, env.Subst.Resolve tKernel.Type with
+            | TExprVar _, FuncElem (paramTys, _) ->
+                paramTys |> List.exists (fun t ->
+                    match env.Subst.Resolve t with IRTPoly _ -> true | _ -> false)
+            | _ -> false
         let (commGroups, inputRanks, outputRank) =
             match tKernel.Kind with
             | TExprLambda info ->
@@ -7477,7 +7530,8 @@ and inferObjectFor env kernel : TypeResult<TypedExpr> =
             InputRanks = inputRanks; OutputRank = outputRank
         }
         let loopTy = IRTLoop {
-            Kind = LKObject; Arity = Some inputRanks.Length
+            Kind = LKObject
+            Arity = if isDeferredPoly then None else Some inputRanks.Length
             ArrayTypes = []; KernelType = Some tKernel.Type
         }
         Ok (mkTyped (TExprObjectFor info) loopTy))
@@ -8134,9 +8188,29 @@ and checkDecl (env: TypeEnv) (decl: Decl) : TypeResult<TypedDecl * TypeEnv> =
             structChecksR |> Result.map (fun structChecks ->
             let postChecks =
                 mutualChecks @ (structChecks |> List.map (fun c -> (env.Builder.FreshId(), c)))
+            // A DEFERRED former (arity-polymorphic object_for over a bare poly
+            // kernel, Arity = None) has no standalone runtime value — every <@>
+            // use rebuilds it inline (see inferApply). Emit the binding INERT so
+            // it never reaches IR validation carrying the unresolved element
+            // type / a bare kernel reference; the env still holds the real
+            // former (TypedValue) for <@> resolution.
+            // A DEFERRED former is arity-polymorphic (Arity = None): a bare named
+            // poly kernel whose pack width is unknown until <@>. It has no
+            // standalone value and cannot compose (>>@ needs a concrete loop), so
+            // emit it inert. NOTE: concrete-arity formers (Arity = Some n) are
+            // left as real bindings even if their element type is still generic —
+            // codegen's compose path (genComposeApply / ObjectLoopBindings) chases
+            // their IRVar back to the real IRObjectFor, so neutralizing them breaks
+            // `(o1 >>@ o2) <@> A`.
+            let isDeferredFormer =
+                match env.Subst.Resolve tValue.Type with
+                | IRTLoop { Kind = LKObject; Arity = None } -> true
+                | _ -> false
             let tb : TypedBinding = {
-                Name = name; VarId = varId; Type = env.Subst.Resolve(tValue.Type)
-                Identity = identity; IsMutable = (assign <> ReadOnly); Value = tValue
+                Name = name; VarId = varId
+                Type = (if isDeferredFormer then IRTUnit else env.Subst.Resolve(tValue.Type))
+                Identity = identity; IsMutable = (assign <> ReadOnly)
+                Value = (if isDeferredFormer then mkTyped (TExprLit LitUnit) IRTUnit else tValue)
                 SubBindings = subBindings |> List.map (fun (n, id, ty) -> (n, id, env.Subst.Resolve ty))
                 Destructure = destructure
                 PostChecks = postChecks
