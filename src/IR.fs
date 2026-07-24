@@ -3756,6 +3756,43 @@ let collectHMCallSites (hmFuncMap: Map<IRId, IRFuncDef>) (expr: IRExpr) : (IRId 
     mapIRExpr walk expr |> ignore
     results |> Seq.toList
 
+/// Occurrence-id-INDEPENDENT structural key for a type: same element, rank,
+/// extent, and symmetry ⇒ same key, regardless of the per-occurrence index-type
+/// `Id`s. Used BOTH to dedup HM specializations and to NAME them, so the two
+/// stay consistent. Without this, one recursive poly kernel (`comoment_prod`)
+/// specialized at the same arity from two call chains carried two different
+/// index ids for the same `Array<double, Idx<3>>` — distinct dedup keys but an
+/// identical mangled name (the old `mangleType` collapsed every array to "T"),
+/// which g++ rejected as a redefinition. Output is C++-identifier-safe.
+let rec canonTypeKey (ty: IRType) : string =
+    match ty with
+    | IRTScalar ETFloat64 -> "double"
+    | IRTScalar ETFloat32 -> "float"
+    | IRTScalar ETInt64 -> "int64"
+    | IRTScalar ETInt32 -> "int32"
+    | IRTScalar ETBool -> "bool"
+    | IRTScalar ETString -> "string"
+    | IRTScalar ETComplex64 -> "c64"
+    | IRTScalar ETComplex128 -> "c128"
+    | IRTNamed n -> n
+    | IRTUnit -> "unit"
+    | IRTIdxTagged (inner, _) -> canonTypeKey inner
+    | IRTUnitAnnotated (inner, _) -> canonTypeKey inner
+    | IRTPoly (b, _) -> "poly_" + canonTypeKey b
+    | IRTTuple ts -> "tup_" + (ts |> List.map canonTypeKey |> String.concat "_")
+    | ArrayElem arr ->
+        let symTag =
+            function
+            | SymNone -> "0" | SymSymmetric -> "s"
+            | SymAntisymmetric -> "a" | SymHermitian -> "h"
+        let idxKey (idx: IRIndexType) =
+            let ext = match idx.Extent with IRLit (IRLitInt n) -> string n | _ -> "d"
+            sprintf "r%ds%se%s" idx.Rank (symTag idx.Symmetry) ext
+        sprintf "arr_%s__%s" (canonTypeKey arr.ElemType)
+            (arr.IndexTypes |> List.map idxKey |> String.concat "_")
+    | IRTInfer id -> sprintf "v%d" id
+    | _ -> "T"
+
 /// Generate a specialized copy of a function for a given set of type-var
 /// bindings. Substitutes types throughout params, return, and body, and
 /// mangles the name to encode the binding pattern.
@@ -3877,24 +3914,14 @@ let specializeHMFunction (func: IRFuncDef) (bindings: Map<int, IRType>) (builder
                 let funcTy = mkFuncArrow (clone.Params |> List.map (fun p -> p.Type)) clone.RetType
                 IRVar (clone.Id, funcTy)
             | _ -> e) bodyWithTypes
-    // Name-mangle by binding signature: f__T_double__U_int64 etc.
-    let mangleType ty =
-        match ty with
-        | IRTScalar ETFloat64 -> "double"
-        | IRTScalar ETFloat32 -> "float"
-        | IRTScalar ETInt64 -> "int64"
-        | IRTScalar ETInt32 -> "int32"
-        | IRTScalar ETBool -> "bool"
-        | IRTScalar ETString -> "string"
-        | IRTScalar ETComplex64 -> "c64"
-        | IRTScalar ETComplex128 -> "c128"
-        | IRTNamed n -> n
-        | _ -> "T"  // Fallback for compound types — rare in practice
+    // Name-mangle by binding signature, using the occurrence-id-independent
+    // canonTypeKey so the emitted name matches the HM dedup key exactly (arrays
+    // no longer collapse to a colliding "T"; see canonTypeKey).
     let suffix =
         bindings
         |> Map.toList
         |> List.sortBy fst
-        |> List.map (fun (id, ty) -> sprintf "_%d_%s" id (mangleType ty))
+        |> List.map (fun (id, ty) -> sprintf "_%d_%s" id (canonTypeKey ty))
         |> String.concat ""
     let spec =
         { func with
@@ -3939,7 +3966,11 @@ let monomorphizeHMFunctions (modul: IRModule) (builder: IRBuilder) : IRModule =
     //    by inspecting both the original module's expressions AND the bodies
     //    of specs generated in earlier rounds (those bodies may contain HM
     //    calls whose arg types only became concrete after substitution).
-    let mutable specMap : Map<IRId * (int * IRType) list, IRFuncDef> = Map.empty
+    // Keyed by (funcId, canonical (varId, type-key) list). The type-key is
+    // occurrence-id-independent (canonTypeKey), so the same specialization
+    // requested from two call chains with differently-numbered index types
+    // dedups to one spec instead of two identically-named C++ definitions.
+    let mutable specMap : Map<IRId * (int * string) list, IRFuncDef> = Map.empty
     // Stage 3c.3: cloned lambdas accumulated across spec generation.
     // See specializeHMFunction's clone logic.
     let lambdaClones = System.Collections.Generic.List<IRCallable>()
@@ -3964,7 +3995,7 @@ let monomorphizeHMFunctions (modul: IRModule) (builder: IRBuilder) : IRModule =
             (sitesFromFuncs @ sitesFromBindings @ sitesFromSpecs) |> List.distinct
 
         for (funcId, sortedBindings) in uniqueSites do
-            let key = (funcId, sortedBindings)
+            let key = (funcId, sortedBindings |> List.map (fun (id, ty) -> (id, canonTypeKey ty)))
             // Only generate specs whose bindings are entirely concrete.
             // A self-binding like (10001, IRTInfer 10002) means the call
             // site was inside a still-abstract context (e.g. the original
@@ -4018,7 +4049,8 @@ let monomorphizeHMFunctions (modul: IRModule) (builder: IRBuilder) : IRModule =
                         | Some argTy -> unifyParamWithArg p.Type argTy acc
                         | None -> acc) Map.empty
             let sortedBindings = bindings |> Map.toList |> List.sortBy fst
-            match Map.tryFind (funcId, sortedBindings) specMap with
+            let key = (funcId, sortedBindings |> List.map (fun (id, ty) -> (id, canonTypeKey ty)))
+            match Map.tryFind key specMap with
             | Some spec ->
                 IRApp (IRVar (spec.Id, mkFuncArrow (spec.Params |> List.map (fun p -> p.Type)) spec.RetType),
                        args, spec.RetType)

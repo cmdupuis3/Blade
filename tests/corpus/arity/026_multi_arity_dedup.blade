@@ -1,0 +1,23 @@
+// TEST: One recursive poly kernel specialized at multiple arities — no C++ redefinition
+// comoment_prod is needed at arity 2 (from the object_for covariance over 2 rows)
+// AND at arity 3 (the direct 3-array call, which recurses down through arity 2).
+// Before the monomorphizer's canonical dedup key, the two arity-2 requests carried
+// different index-type occurrence ids for the same Array<double,Idx<3>>, minting two
+// identically-named C++ functions (`..._HM_..._T`) → g++ redefinition.
+function mean(row: T^1) -> T^0 = reduce(row, (+)) / extents(row)
+function comoment_prod(a: Poly<T^1>) -> T^1 = {
+    match arity(a) with
+    | 1 -> { let head :: tail = a
+             head - mean(head) }
+    | _ -> { let head :: tail = a
+             (head - mean(head)) * comoment_prod(tail) }
+}
+function comoment(a: Poly<T^1>) -> T^0 = mean(comoment_prod(a))
+let data = [[1.0, 2.0, 3.0], [2.0, 4.0, 6.0]]
+let cov = object_for(comoment) <@> (data, data) |> compute
+let x = [1.0, 2.0, 3.0]
+let y = [2.0, 4.0, 6.0]
+let z = [1.0, 0.0, -1.0]
+let tri = comoment_prod(x, y, z)
+// EXPECT: cov = [0.6666666666666666, 1.3333333333333333, 1.3333333333333333, 2.6666666666666665]
+// EXPECT: tri = [2.0, 0.0, -2.0]

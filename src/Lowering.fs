@@ -397,9 +397,31 @@ let rec lowerTypedExpr (env: TypedLowerEnv) (texpr: TypedExpr) : IRExpr =
 
     | TExprApply info ->
         // Canonical apply. Symmetry info already computed during type checking.
+        // Lift the kernel ONCE and reuse the lifted IRVar for the loop-provenance
+        // IRObjectFor.Kernel, rather than re-lowering info.Loop's embedded kernel.
+        // TypeCheck stores the same eta-lambda in BOTH info.Kernel and (inside)
+        // info.Loop's object_for; lowering both minted two identical __lambda_N
+        // callables, and each anchored its own arity/HM specialization chain
+        // (the HM clone path bypasses spec dedup) — producing duplicate C++
+        // definitions once multiple arities of a recursive poly kernel are
+        // specialized (`redefinition of comoment_prod_arity_2_HM_..._T`). The
+        // Loop kernel is codegen-dead for a canonical apply (genApplyCombinator
+        // reads only info.Kernel), so sharing the single lifted id is safe and
+        // lets the existing (funcId, …) dedup collapse the chains.
+        let loweredKernel = lowerTypedExpr env info.Kernel
+        let loweredLoop =
+            match info.Loop.Kind, loweredKernel with
+            | TExprObjectFor ofInfo, IRVar _ ->
+                IRObjectFor {
+                    Kernel = loweredKernel
+                    CommGroups = ofInfo.CommGroups
+                    InputRanks = ofInfo.InputRanks
+                    OutputRank = ofInfo.OutputRank
+                }
+            | _ -> lowerTypedExpr env info.Loop
         IRApplyCombinator {
-            Loop = lowerTypedExpr env info.Loop
-            Kernel = lowerTypedExpr env info.Kernel
+            Loop = loweredLoop
+            Kernel = loweredKernel
             Arrays = info.Arrays |> List.map (lowerTypedExpr env)
             Identities = info.Identities
             ArrayTypes = info.ArrayTypes
