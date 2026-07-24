@@ -165,6 +165,12 @@ type Subst() =
     let mutable nextId = 10000  // High start avoids collision with IRBuilder IDs
     let mutable typeVarScope : Map<string, IRType * int> = Map.empty
     let mutable arityConstraints : Map<int, int> = Map.empty
+    /// Inference vars minted for value-position literals (`1`, `2.0`, `true`).
+    /// The recorded ElemType is the literal's value class = its *default* type
+    /// when the var is never pinned by context (so `let x = 1` stays Int64,
+    /// not the blanket Float64 default), and its *kind* for the no-narrowing
+    /// bind guard in `unify`. Parallels `arityConstraints`.
+    let mutable literalDefaults : Map<int, ElemType> = Map.empty
     let mutable knownTypeVarNames : Set<string> = Set.empty
     /// IDs of type variables that are HM-polymorphic at a function boundary.
     /// Such IDs are preserved by zonking (not defaulted to Float64) so the
@@ -227,6 +233,31 @@ type Subst() =
     member _.CopyArityConstraint(fromId: int, toId: int) =
         match Map.tryFind fromId arityConstraints with
         | Some k -> arityConstraints <- Map.add toId k arityConstraints
+        | None -> ()
+
+    /// Mint a fresh inference var seeded with a literal's value class (its
+    /// default-when-unpinned type and its numeric/bool kind). See
+    /// `literalDefaults`.
+    member this.FreshLiteral(et: ElemType) : IRType =
+        let tv = this.Fresh()
+        match tv with
+        | IRTInfer id -> literalDefaults <- Map.add id et literalDefaults
+        | _ -> ()
+        tv
+
+    member _.GetLiteralDefault(id: int) : ElemType option =
+        Map.tryFind id literalDefaults
+
+    member _.SetLiteralDefault(id: int, et: ElemType) =
+        literalDefaults <- Map.add id et literalDefaults
+
+    member _.CopyLiteralDefault(fromId: int, toId: int) =
+        match Map.tryFind fromId literalDefaults with
+        | Some et ->
+            // Only carry the seed forward if the target isn't already a
+            // literal var (don't clobber an existing kind).
+            if not (Map.containsKey toId literalDefaults) then
+                literalDefaults <- Map.add toId et literalDefaults
         | None -> ()
 
     member _.RegisterTypeVarName(name: string) =
@@ -400,7 +431,34 @@ let rec unify (subst: Subst) (t1: IRType) (t2: IRType) : TypeResult<unit> =
                 | _ ->
                     Error (Other (sprintf "Type variable with arity %d requires a rank-%d array, got %A" k k ty))
             | _ ->
-                subst.Bind(id, ty); Ok ()
+                match subst.GetLiteralDefault(id) with
+                | Some litE ->
+                    // `id` is a literal var (numeric/bool kind). It may WIDEN to
+                    // a compatible scalar and DEFER to another var, but — like the
+                    // concrete literal it replaces — it does not bind directly to
+                    // an array (that routes through the scalar→array fill coercion
+                    // at `checkExpr`) nor to any non-numeric type, and it never
+                    // narrows (upholds "no silent narrowing", TypeCheck.fs:6016).
+                    match ty with
+                    | IRTInfer id2 ->
+                        match subst.GetLiteralDefault(id2) with
+                        | Some litE2 ->
+                            // Two literal vars: the survivor's kind is the wider.
+                            match promoteElemType litE litE2 with
+                            | Some p -> subst.Bind(id, ty); subst.SetLiteralDefault(id2, p); Ok ()
+                            | None -> Error (TypeMismatch (t1, t2))
+                        | None ->
+                            // Defer to a plain var; carry the seed to the survivor.
+                            subst.Bind(id, ty); subst.CopyLiteralDefault(id, id2); Ok ()
+                    | IRTScalar targetE ->
+                        match promoteElemType litE targetE with
+                        | Some p when p = targetE -> subst.Bind(id, ty); Ok ()  // widen-only
+                        | _ -> Error (TypeMismatch (t1, t2))                    // narrow / incompatible
+                    | _ ->
+                        // arrays (→ fill coercion), tuples, funcs, idx/nat, strings…
+                        Error (TypeMismatch (t1, t2))
+                | None ->
+                    subst.Bind(id, ty); Ok ()
     | IRTScalar e1, IRTScalar e2 when e1 = e2 -> Ok ()
     // Scalar unification.
     //

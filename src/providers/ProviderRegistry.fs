@@ -130,3 +130,26 @@ let tryFind (name: string) : ProviderSpec option =
 /// StaticEval name-set bridge).
 let names () : string list =
     registry.Keys |> List.ofSeq |> List.sort
+
+/// IDE side-channel: the provider IRModule built at each `let store =
+/// alias.load(path)` site during type-checking, keyed by the store binding
+/// name. Lets Ide.fs render dims/vars/index-type hovers by REUSING the module
+/// typecheck already built, instead of re-opening the data file — a second
+/// (possibly native) read of the same store is redundant and can crash.
+/// AsyncLocal for the same reason as Ppl.Elaborate.IdeDists: the test suite
+/// compiles programs in parallel and each flows through one async context.
+module IdeStores =
+    open System.Threading
+
+    let private store = new AsyncLocal<Map<string, IRModule>>()
+    let private modules () = match box store.Value with null -> Map.empty | _ -> store.Value
+
+    /// Fresh compilation: cleared before an IDE check runs typeCheck.
+    let reset () = store.Value <- Map.empty
+
+    /// Record the module built at a provider load site (last write wins).
+    let record (name: string) (pm: IRModule) =
+        store.Value <- Map.add name pm (modules ())
+
+    /// IDE-facing: the module recorded for a store binding, if any.
+    let tryFind (name: string) : IRModule option = Map.tryFind name (modules ())

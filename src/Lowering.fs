@@ -224,7 +224,7 @@ let extractParallelism (strategies: ParallelStrategy list) (paramNames: string l
 let rec lowerTypedExpr (env: TypedLowerEnv) (texpr: TypedExpr) : IRExpr =
     match texpr.Kind with
     | TExprLit lit ->
-        IRLit (lowerLiteralToIRLit lit)
+        IRLit (lowerLiteralValued lit texpr.Type)
 
     | TExprWildcard ->
         // A wildcard `_` is a hole, not a value. It is only meaningful where a
@@ -754,6 +754,24 @@ and lowerLiteralToIRLit lit : IRLit =
     | LitString s -> IRLitString s
     | LitChar c -> IRLitInt (int64 c)
     | LitUnit -> IRLitUnit
+
+/// Lower a value-position literal, reconciling the source value with the
+/// resolved element type (mirrors `TExprZero`). A numeric literal that flexed
+/// to a wider type — e.g. an int literal pinned to Float64 — emits the matching
+/// constructor so it stays consistent with `CarriedType`/CodeGen. An unpinned
+/// (`IRTInfer`) or non-scalar type falls back to the natural constructor: the
+/// literal stays a scalar value and any consuming op broadcasts it.
+and lowerLiteralValued lit (ty: IRType) : IRLit =
+    match lit with
+    | LitInt n ->
+        match ty with
+        | AnyPrimElem (ETFloat32 | ETFloat64) -> IRLitFloat (float n)
+        | _ -> IRLitInt n
+    | LitFloat f ->
+        match ty with
+        | AnyPrimElem (ETInt32 | ETInt64) -> IRLitInt (int64 f)  // defensive; narrowing normally rejected
+        | _ -> IRLitFloat f
+    | _ -> lowerLiteralToIRLit lit
 
 /// Lower a typed pattern
 and lowerTypedPattern (pat: TypedPattern) : IRPattern =

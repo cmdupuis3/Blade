@@ -4694,10 +4694,27 @@ let specializeFunction (func: IRFuncDef) (arities: int list) (funcMap: Map<IRId,
                 | _ -> e) expr
         let newBody = unrollPackFormers newBody
 
-        let newRetType =
+        let declaredRetType =
             match func.RetType with
             | IRTPoly (bt, _) -> bt
             | other -> other
+        // Arity-dependent return rank: when arity reduction collapses this
+        // specialization's body to a SCALAR — an empty-pack base arm returning a
+        // scalar identity, e.g. `| 0 -> 1` / `| 0 -> zero` in an arity-poly
+        // product — the specialization genuinely returns T^0, not the declared
+        // array shape. The enclosing op (the recursion's `*`/`+`) broadcasts that
+        // scalar. Deriving the return from the body here is what lets `| 0 -> 1`
+        // actually run; we only ever narrow a declared array to the body's scalar
+        // (never widen), so array-returning base arms are untouched.
+        let rec finalScalarType e =
+            match e with
+            | IRLet (_, _, body) -> finalScalarType body
+            | CarriedType (IRTScalar _ as ty) -> Some ty
+            | _ -> None
+        let newRetType =
+            match finalScalarType newBody with
+            | Some sTy -> sTy               // arity-collapsed scalar base (see above)
+            | None -> declaredRetType
 
         // Commutativity group expansion: each original index maps to a
         // (newStart, span) in the expanded list. For a Poly slot, span =

@@ -1,0 +1,8 @@
+// TEST: Scalar broadcast-fill into a concretely-shaped array
+// Mechanism 2: a scalar value checked against a concrete, statically-shaped
+// array type broadcasts to a fill — `let a: Array<Float64 like Idx<3>> = s`
+// materializes [s, s, s]. Element types must match (no implicit int->float).
+let s = 2.5
+let a: Array<Float64 like Idx<3>> = s
+let total = reduce(a, (+))
+// EXPECT: total = 7.5

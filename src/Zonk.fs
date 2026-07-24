@@ -17,9 +17,14 @@ let rec zonkType (subst: Subst) (ty: IRType) : IRType =
         // Function-boundary HM type variables survive zonking — IR-phase
         // monomorphization will substitute them at call sites. Genuinely
         // unresolved (non-boundary) inference vars still default to Float64
-        // for backwards compatibility with underconstrained local lets.
+        // for backwards compatibility with underconstrained local lets —
+        // EXCEPT literal vars, which default to their seeded value class so an
+        // unpinned `let x = 1` stays Int64 rather than becoming Float64.
         if subst.IsPolymorphicId(n) then resolved
-        else IRTScalar ETFloat64
+        else
+            match subst.GetLiteralDefault(n) with
+            | Some et -> IRTScalar et
+            | None -> IRTScalar ETFloat64
     | IRTScalar _ | IRTUnit | IRTNat _ | IRTNamed _ -> resolved
     | IRTTuple ts -> IRTTuple (ts |> List.map (zonkType subst))
     | IRTComputation t -> IRTComputation (zonkType subst t)

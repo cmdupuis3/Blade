@@ -1298,6 +1298,20 @@ let inferLiteralType lit =
     | LitChar _ -> IRTScalar ETInt32
     | LitUnit -> IRTUnit
 
+/// Synthesize the type of a *value-position* literal. Numeric/bool literals
+/// get a fresh, kind-seeded inference var (like `zero`) so they flex to
+/// context — lifting into `T`/`T^k` slots and pinning to the width a context
+/// requires — while the seed keeps an unpinned literal at its natural type
+/// (`let x = 1` stays Int64). String/Char/Unit have no such flex and stay
+/// concrete. NOTE: pattern literals keep `inferLiteralType` (they compare by
+/// value), as do the explicit `checkExpr` literal arms.
+let freshLiteralType (subst: Subst) lit =
+    match lit with
+    | LitInt _ -> subst.FreshLiteral ETInt64
+    | LitFloat _ -> subst.FreshLiteral ETFloat64
+    | LitBool _ -> subst.FreshLiteral ETBool
+    | _ -> inferLiteralType lit
+
 // ============================================================================
 // 9. Pattern Type Checking
 // ============================================================================
@@ -2012,6 +2026,11 @@ let rec inferExpr (env: TypeEnv) (expr: Expr) : TypeResult<TypedExpr> =
 and inferExprInner (env: TypeEnv) (expr: Expr) : TypeResult<TypedExpr> =
     match expr.Kind with
     // ---- Literals ----
+    // Literals synthesize CONCRETE (their natural scalar). Flexibility (flexing
+    // a literal into a generic `T`/`T^k` or a wider width) is introduced
+    // BIDIRECTIONALLY in `checkExpr`, only where an expected type demands it —
+    // making a literal a bare inference var at synthesis would spray unresolved
+    // vars through array/arith/index positions that assume concrete scalars.
     | ExprKind.ExprLit lit -> Ok (mkTyped (TExprLit lit) (inferLiteralType lit))
 
     // ---- Wildcard hole ----
@@ -2518,7 +2537,7 @@ and inferExprInner (env: TypeEnv) (expr: Expr) : TypeResult<TypedExpr> =
             Ok (mkTyped (TExprArrayLit (tElems, arrTy)) (mkArrayLike arrTy)))
 
     // ---- Block ----
-    | ExprKind.ExprBlock (stmts, finalExpr) -> inferBlock env stmts finalExpr
+    | ExprKind.ExprBlock (stmts, finalExpr) -> inferBlock env stmts finalExpr None
 
     // ---- Loop constructs ----
     | ExprKind.ExprMethodFor arrays -> inferMethodFor env arrays
@@ -6032,6 +6051,10 @@ and checkExpr (env: TypeEnv) (expected: IRType) (expr: Expr) : TypeResult<TypedE
         | ETInt32 | ETInt64 ->
             Ok (mkTyped (TExprLit lit) (IRTScalar et))
         | _ ->
+            // Blade design rule: NO implicit int->float promotion at literal
+            // construction (`complex(0, 0)` and `let x: Float64 = 1` are
+            // rejected — write `0.0`). Kept strict deliberately; flexing a
+            // literal into a generic `T`/`T^k` is separate (the IRTInfer arm).
             Error (TypeMismatch (resolved, IRTScalar ETInt64))
     | ExprKind.ExprLit (LitInt _ as lit), IRTIdxTagged (IRTScalar (ETInt32 | ETInt64), _) ->
         // §4.18.3: untyped int literal acquires the index tag from annotation
@@ -6060,6 +6083,19 @@ and checkExpr (env: TypeEnv) (expected: IRType) (expr: Expr) : TypeResult<TypedE
         | _ -> Error (TypeMismatch (resolved, IRTScalar ETFloat64))
     | ExprKind.ExprLit (LitBool _ as lit), IRTScalar ETBool ->
         Ok (mkTyped (TExprLit lit) (IRTScalar ETBool))
+
+    // A numeric/bool literal checked against an unpinned inference var — a
+    // generic `T` (arity 0) or an arity-polymorphic `T^k` (e.g. the return of
+    // comoment_prod's `-> T^1`). Introduce flexibility HERE, bidirectionally:
+    // mint a fresh kind-seeded literal var and defer it into the expected var,
+    // exactly as `zero` does. The literal stays a scalar VALUE at lowering and a
+    // consuming pseudo-native op broadcasts it; a concretely-shaped array target
+    // is instead handled by the scalar→array fill coercion (not this arm).
+    | ExprKind.ExprLit (LitInt _ | LitFloat _ | LitBool _ as lit), IRTInfer _ ->
+        let flexTy = freshLiteralType env.Subst lit
+        unify env.Subst flexTy expected
+        |> Result.mapError (fun _ -> TypeMismatch (resolved, inferLiteralType lit))
+        |> Result.map (fun () -> mkTyped (TExprLit lit) flexTy)
 
     // Array literal: extract per-rank shape from the annotation and recurse.
     // Outer index supplies the literal's length; inner index types form the
@@ -6137,13 +6173,28 @@ and checkExpr (env: TypeEnv) (expected: IRType) (expr: Expr) : TypeResult<TypedE
     | ExprKind.ExprTuple [_; _], IRTScalar (ETComplex64 | ETComplex128) ->
         Error (Other "complex values are constructed with complex(re, im); the tuple form `(re, im) : Complex128` is no longer supported")
 
+    // Match in a checking position: push the expected type into each arm so a
+    // literal/scalar arm can flex to it (bidirectional match — see checkMatch).
+    | ExprKind.ExprMatch (scrutinee, cases), _ ->
+        checkMatch env expected scrutinee cases
+
+    // Block in a checking position: push the expected type into the block's
+    // final expression (which may itself be a match/literal that flexes).
+    | ExprKind.ExprBlock (stmts, finalExpr), _ ->
+        inferBlock env stmts finalExpr (Some expected)
+
     // Default: synthesize, then unify. This is the path that handles variables,
     // function calls, complex expressions, and any case the special-cases miss.
     | _ ->
         inferExpr env expr |> Result.bind (fun tE ->
             match unify env.Subst tE.Type expected with
             | Ok () -> Ok tE
-            | Error _ -> Error (TypeMismatch (expected, tE.Type)))
+            | Error _ ->
+                // Mechanism 2: a scalar in a concretely-shaped array position
+                // broadcasts to a fill; otherwise the normal mismatch stands.
+                match tryScalarFill env tE expected with
+                | Some node -> Ok node
+                | None -> Error (TypeMismatch (expected, tE.Type)))
 
 // ---- Shared helpers for both let paths (let-as-expression and top-level DeclLet) ----
 
@@ -6905,7 +6956,66 @@ and inferMatch env scrutinee cases : TypeResult<TypedExpr> =
             let resolvedTy = env.Subst.Resolve resultTy
             mkTyped (TExprMatch (tScrutinee, tCases)) resolvedTy))
 
-and inferBlock env stmts finalExpr : TypeResult<TypedExpr> =
+/// Bidirectional match: push the `expected` type into each arm body via
+/// `checkExpr`, so a literal (or scalar) arm can flex to the expected
+/// `T`/`T^k` instead of pinning the result to its concrete type — this is what
+/// lets `comoment_prod`'s `| 0 -> 1` defer into the `-> T^1` return. Falls back
+/// to plain inference on a body-check failure, preserving `inferMatch`'s lenient
+/// cross-unify (which ignored arm/result mismatches).
+and checkMatch env (expected: IRType) scrutinee cases : TypeResult<TypedExpr> =
+    inferExpr env scrutinee |> Result.bind (fun tScrutinee ->
+        cases |> List.map (fun case ->
+            checkPattern env tScrutinee.Type case.Pattern |> Result.bind (fun tPat ->
+                let mutable caseEnv = env
+                for (name, varId, ty) in tPat.Bindings do
+                    caseEnv <- bindVarSimple name varId ty caseEnv
+                let tGuard =
+                    case.Guard |> Option.map (fun g -> inferExpr caseEnv g |> Result.map Some)
+                    |> Option.defaultValue (Ok None)
+                tGuard |> Result.bind (fun guardOpt ->
+                    let tBodyR =
+                        match checkExpr caseEnv expected case.Body with
+                        | Ok tb -> Ok tb
+                        | Error _ ->
+                            inferExpr caseEnv case.Body |> Result.map (fun tb ->
+                                unify env.Subst tb.Type expected |> ignore
+                                tb)
+                    tBodyR |> Result.map (fun tBody ->
+                        ({ Pattern = tPat; Guard = guardOpt; Body = tBody } : TypedMatchCase)))))
+        |> sequenceResults |> Result.map (fun tCases ->
+            mkTyped (TExprMatch (tScrutinee, tCases)) (env.Subst.Resolve expected)))
+
+/// Mechanism 2 — scalar → concretely-shaped-array broadcast fill. When a scalar
+/// value is checked against a concrete array type whose extents are statically
+/// known (`let a: Array<f64, Idx<3>> = s`), materialize a fill that broadcasts
+/// the scalar across the shape: one `replicate` level per index, innermost
+/// first, so the outermost node carries the full target type. Element types must
+/// match exactly (no implicit int->float). Returns None when not applicable —
+/// including a shapeless rank-k var, whose shape isn't known here — so the
+/// caller's normal mismatch error is preserved.
+and tryScalarFill (env: TypeEnv) (tE: TypedExpr) (expected: IRType) : TypedExpr option =
+    match env.Subst.Resolve tE.Type, env.Subst.Resolve expected with
+    | IRTScalar se, ArrayElem arr
+        when arr.ElemType = IRTScalar se
+             && not arr.IndexTypes.IsEmpty
+             && arr.IndexTypes |> List.forall (fun ix ->
+                    match ix.Extent with IRLit (IRLitInt _) -> true | _ -> false) ->
+        // Build nested array literals: the outer index gives N rows, each row is
+        // the fill over the remaining indices; the innermost row is N copies of
+        // the scalar. Mirrors the array-literal checking arm so it declares a
+        // real array binding (unlike replicate/IRSequence, which defers).
+        let rec build (idxs: IRIndexType list) : TypedExpr =
+            match idxs with
+            | [] -> tE
+            | outer :: rest ->
+                let n = match outer.Extent with IRLit (IRLitInt v) -> int v | _ -> 0
+                let thisArrTy = { arr with IndexTypes = idxs }
+                let rowExpr = if rest.IsEmpty then tE else build rest
+                mkTyped (TExprArrayLit (List.replicate n rowExpr, thisArrTy)) (mkArrayLike thisArrTy)
+        Some (build arr.IndexTypes)
+    | _ -> None
+
+and inferBlock env stmts finalExpr (expectedFinal: IRType option) : TypeResult<TypedExpr> =
     let mutable curEnv = env
     let mutable err : TypeError option = None
     let mutable typedStmts : TypedStmt list = []
@@ -7076,8 +7186,15 @@ and inferBlock env stmts finalExpr : TypeResult<TypedExpr> =
     | Some e -> Error e
     | None ->
         match finalExpr with
-        | Some e -> inferExpr curEnv e |> Result.map (fun tF ->
-            mkTyped (TExprBlock (typedStmts, Some tF)) tF.Type)
+        | Some e ->
+            // Push a checking-position expected type into the final expression
+            // so a block that ends in a literal/match arm flexes (bidirectional).
+            let tFR =
+                match expectedFinal with
+                | Some ty -> checkExpr curEnv ty e
+                | None -> inferExpr curEnv e
+            tFR |> Result.map (fun tF ->
+                mkTyped (TExprBlock (typedStmts, Some tF)) tF.Type)
         | None -> Ok (mkTyped (TExprBlock (typedStmts, None)) IRTUnit)
 
 /// Leaf bindings for a destructuring `let` in STATEMENT position. Returns the
@@ -7881,6 +7998,9 @@ and checkDecl (env: TypeEnv) (decl: Decl) : TypeResult<TypedDecl * TypeEnv> =
                             // resulting struct types so `sample.vars.<v>` resolves.
                             let spec = (Blade.ProviderRegistry.tryFind pname).Value
                             let pm = spec.LoadAsModule env.Builder name path
+                            // Record for the IDE hover path (Ide.collectProviderStores)
+                            // so it never has to re-open the store.
+                            Blade.ProviderRegistry.IdeStores.record name pm
                             let (envM, moduleTy) = registerProviderModule env name pm
                             (envM, { tValue with Type = moduleTy })
                         with _ -> (env, tValue)
@@ -9320,6 +9440,19 @@ let checkProgram (program: Program) : TypedProgram * IRBuilder * CompileError li
 /// appear in declaration-level type expressions. Validation errors abort
 /// compilation early — once an AST passes validation, downstream lowering
 /// can assume index types only appear in their permitted positions.
+/// IDE side-channel: the partial typed program + builder from the most recent
+/// checkProgram. typeCheck discards these when the checker reports errors, but
+/// editor tooling (Ide.fs) still wants bindings/types for the parts that DID
+/// check, so a file with errors keeps its hovers. Reset at the top of typeCheck
+/// and recorded after checkProgram; None means the pre-check pipeline failed
+/// (no typed program produced). AsyncLocal, like ProviderRegistry.IdeStores.
+module IdePartial =
+    let private slot = new System.Threading.AsyncLocal<(TypedProgram * IRBuilder) option>()
+    let reset () = slot.Value <- None
+    let record (tp: TypedProgram) (b: IRBuilder) = slot.Value <- Some (tp, b)
+    let get () : (TypedProgram * IRBuilder) option =
+        match box slot.Value with null -> None | _ -> slot.Value
+
 let typeCheck (program: Program) : Result<TypedProgram * IRBuilder * string list, CompileError list> =
     // AST -> AST expansions, in order: ML-op elaboration first (so grad()
     // sees the generated functions as plain Blade source and can inline
@@ -9330,6 +9463,7 @@ let typeCheck (program: Program) : Result<TypedProgram * IRBuilder * string list
     // ANY resolveStatics pass runs (the ML and PPL elaborations each run
     // their own; all inherit the fold through StaticEval's hook).
     Blade.ProviderStatics.install ()
+    IdePartial.reset ()
     // Staged-former unfold FIRST: `static method_for/object_for/for`
     // argument lists elaborate to plain formers before any other stage
     // (ML/PPL/math/grad and the checker never see ExprStatic).
@@ -9368,5 +9502,6 @@ let typeCheck (program: Program) : Result<TypedProgram * IRBuilder * string list
         Error compileErrors
     else
         let (tp, builder, errors, warnings) = checkProgram program
+        IdePartial.record tp builder
         if errors.IsEmpty then Ok (tp, builder, warnings)
         else Error errors

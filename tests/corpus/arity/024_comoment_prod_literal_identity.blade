@@ -1,0 +1,24 @@
+// TEST: comoment_prod with a scalar-literal identity base (| 0 -> 1)
+// Regression for the flexible-literal + arity-dependent-return work. The
+// recursion terminator returns the SCALAR literal `1` where the declared
+// return is `T^1`: the literal flexes into the arity-polymorphic return at the
+// type level (bidirectional checkExpr/checkMatch), and the arity-0
+// specialization derives a SCALAR return from its body so the enclosing `*`
+// broadcasts it (empty-product identity). Previously this raised BL3001; the
+// docs/quickstart-2 form `| 0 -> zero` hits the same array-typed-identity gap
+// and (separately) resolves `zero` to 0, so the explicit `1` is the correct
+// multiplicative identity. cov(x, y): centered x = [-1,0,1], centered
+// y = [-2,0,2] -> [2,0,2].
+function mean(row: T^1) -> T^0 = reduce(row, (+)) / extents(row)
+function comoment_prod(a: Poly<T^1>) -> T^1 = {
+    match arity(a) with
+    | 0 -> 1
+    | _ -> {
+        let head :: tail = a
+        (head - mean(head)) * comoment_prod(tail)
+    }
+}
+let x = [1.0, 2.0, 3.0]
+let y = [2.0, 4.0, 6.0]
+let result = comoment_prod(x, y)
+// EXPECT: result = [2.0, 0.0, 2.0]

@@ -84,6 +84,41 @@ type private BindingInfo = {
     Params: ParamInfo list   // non-empty only for functions
     Ret: string option       // Some only for functions
     Where: string list       // where-clause conjuncts, functions only
+    /// Provenance for a top-level provider read (`let x = store.vars.v |>
+    /// alias.read`): (store binding name, "vars.v" / "dims.v"). None for
+    /// every non-provider binding. Surfaced as a "from …" line in the hover.
+    ProviderRead: (string * string) option
+}
+
+// A single member of a loaded provider store (a `dims` or `vars` field),
+// with its type rendered in the provider's named index types (Idx<Y>, ...).
+type private ProviderMemberInfo = {
+    MName: string
+    MType: string
+}
+
+// A provided named index type (e.g. `Idx<Y>` from a stored dimension), with
+// its extent when statically known.
+type private ProviderIndexInfo = {
+    IName: string
+    IExtent: int64 option
+}
+
+// One `let store = alias.load("path")` binding and the structure the provider
+// derived from the data file: its index types plus the `dims` / `vars`
+// members. Types are structural only (no file attributes). Emitted under
+// `providers[]` so the editor can hover members, the store handle, and the
+// alias — none of which are ordinary bindings.
+type private ProviderInfo = {
+    Store: string
+    Alias: string
+    Provider: string
+    Path: string
+    PLine: int
+    PCol: int
+    IndexTypes: ProviderIndexInfo list
+    Dims: ProviderMemberInfo list
+    Vars: ProviderMemberInfo list
 }
 
 /// Clamp a span to 1-based sanity; noSpan (all zeros) becomes 1:1-1:1.
@@ -94,7 +129,7 @@ let private clampSpan (s: Span) =
     let endCol = if s.EndCol >= 1 then s.EndCol else col
     (line, col, endLine, endCol)
 
-let private renderJson (diags: Diag list) (bindings: BindingInfo list) =
+let private renderJson (diags: Diag list) (bindings: BindingInfo list) (providers: ProviderInfo list) =
     let sb = StringBuilder()
     sb.Append "{\"version\":1,\"diagnostics\":[" |> ignore
     diags
@@ -115,6 +150,12 @@ let private renderJson (diags: Diag list) (bindings: BindingInfo list) =
             jsonEscape b.Name, jsonEscape b.Kind, b.Line, b.Col, jsonEscape b.TypeStr) |> ignore
         if b.Doc <> "" then
             sb.AppendFormat(",\"doc\":\"{0}\"", jsonEscape b.Doc) |> ignore
+        match b.ProviderRead with
+        | Some (store, memberPath) ->
+            sb.AppendFormat(
+                ",\"providerRead\":{{\"store\":\"{0}\",\"member\":\"{1}\"}}",
+                jsonEscape store, jsonEscape memberPath) |> ignore
+        | None -> ()
         match b.Ret with
         | Some ret ->
             sb.Append ",\"params\":[" |> ignore
@@ -133,6 +174,34 @@ let private renderJson (diags: Diag list) (bindings: BindingInfo list) =
                     sb.AppendFormat("\"{0}\"", jsonEscape w) |> ignore)
                 sb.Append ']' |> ignore
         | None -> ()
+        sb.Append '}' |> ignore)
+    sb.Append "],\"providers\":[" |> ignore
+    let appendMembers (label: string) (ms: ProviderMemberInfo list) =
+        sb.AppendFormat(",\"{0}\":[", label) |> ignore
+        ms
+        |> List.iteri (fun j m ->
+            if j > 0 then sb.Append ',' |> ignore
+            sb.AppendFormat(
+                "{{\"name\":\"{0}\",\"type\":\"{1}\"}}", jsonEscape m.MName, jsonEscape m.MType) |> ignore)
+        sb.Append ']' |> ignore
+    providers
+    |> List.iteri (fun i p ->
+        if i > 0 then sb.Append ',' |> ignore
+        sb.AppendFormat(
+            "{{\"store\":\"{0}\",\"alias\":\"{1}\",\"provider\":\"{2}\",\"path\":\"{3}\",\"line\":{4},\"col\":{5}",
+            jsonEscape p.Store, jsonEscape p.Alias, jsonEscape p.Provider, jsonEscape p.Path, p.PLine, p.PCol) |> ignore
+        sb.Append ",\"indexTypes\":[" |> ignore
+        p.IndexTypes
+        |> List.iteri (fun j ix ->
+            if j > 0 then sb.Append ',' |> ignore
+            sb.AppendFormat("{{\"name\":\"{0}\"", jsonEscape ix.IName) |> ignore
+            match ix.IExtent with
+            | Some e -> sb.AppendFormat(",\"extent\":{0}", e) |> ignore
+            | None -> ()
+            sb.Append '}' |> ignore)
+        sb.Append ']' |> ignore
+        appendMembers "dims" p.Dims
+        appendMembers "vars" p.Vars
         sb.Append '}' |> ignore)
     sb.Append "]}" |> ignore
     sb.ToString()
@@ -492,6 +561,117 @@ let private collectTypedBindings (srcFuncs: Map<string, FunctionDecl>) (tp: Type
             | [] -> ()
     acc
 
+// ----------------------------------------------------------------------------
+// Type-provider structure. Provided members (`store.vars.x`), the store handle,
+// and the provider alias are not ordinary bindings, so the walk above never
+// sees them. This section re-derives, per loaded store, the provider's index
+// types and dims/vars members (structural only — no file attributes), plus the
+// provenance of a top-level provider-read binding.
+// ----------------------------------------------------------------------------
+
+/// alias -> provider module name for every `import <p> as <alias>` (or bare
+/// `import <p>`) whose module is a registered data provider. Scans both the
+/// module-header imports and any DeclImport in the body.
+let private providerAliases (prog: Ast.Program) : Map<string, string> =
+    let acc = Dictionary<string, string>()
+    let consider (qn: string list) (aliasOpt: string option) =
+        match List.tryLast qn with
+        | Some modName when (Blade.ProviderRegistry.tryFind modName).IsSome ->
+            acc.[defaultArg aliasOpt modName] <- modName
+        | _ -> ()
+    for m in prog.Modules do
+        for imp in m.Imports do consider imp.Module imp.Alias
+        for ld in m.Decls do
+            match ld.Value with
+            | DeclImport (qn, ImportQualified aliasOpt) -> consider qn aliasOpt
+            | _ -> ()
+    acc |> Seq.map (fun kv -> kv.Key, kv.Value) |> Map.ofSeq
+
+/// The `store.vars.v` / `store.dims.v` receiver of a `|> alias.read` (or
+/// `.stream`) — recovered from the untyped RHS so a top-level provider-read
+/// binding can show which store member it came from. The pipe desugars to
+/// `alias.read(store.vars.v)` (Parser pipeline lowering).
+let private readOperandProvenance (aliases: Map<string, string>) (v: Expr) : (string * string) option =
+    match v.Kind with
+    | ExprKind.ExprApp ({ Kind = ExprKind.ExprField ({ Kind = ExprKind.ExprVar alias }, meth) }, [operand])
+        when (meth = "read" || meth = "stream") && aliases.ContainsKey alias ->
+        match operand.Kind with
+        | ExprKind.ExprField ({ Kind = ExprKind.ExprField ({ Kind = ExprKind.ExprVar store }, section) }, field)
+            when section = "vars" || section = "dims" ->
+            Some (store, sprintf "%s.%s" section field)
+        | _ -> None
+    | _ -> None
+
+/// bindingName -> (store, "vars.v") for module-level provider reads.
+let private readProvenance (prog: Ast.Program) (aliases: Map<string, string>) : Map<string, string * string> =
+    let acc = Dictionary<string, string * string>()
+    if not aliases.IsEmpty then
+        for m in prog.Modules do
+            for ld in m.Decls do
+                match ld.Value with
+                | DeclLet b | DeclStatic b ->
+                    match b.Pattern.Kind with
+                    | PatternKind.PatVar name ->
+                        match readOperandProvenance aliases b.Value with
+                        | Some pr -> acc.[name] <- pr
+                        | None -> ()
+                    | _ -> ()
+                | _ -> ()
+    acc |> Seq.map (fun kv -> kv.Key, kv.Value) |> Map.ofSeq
+
+/// Provided structure for every `let store = alias.load("path")`, rendered from
+/// the module TypeCheck already built at the load site and stashed in
+/// IdeStores — so this NEVER re-opens the data file (a second, possibly native,
+/// read is redundant and can crash the process, killing the whole JSON output).
+/// A store with no recorded module (its load didn't type-check) is skipped, and
+/// per-store rendering is guarded so one unusual type can't break the output.
+let private collectProviderStores (prog: Ast.Program) : ProviderInfo list =
+    let aliases = providerAliases prog
+    if aliases.IsEmpty then [] else
+    let describe store alias provider path (span: Span) (pm: IRModule) : ProviderInfo option =
+        try
+            let names = indexNameMap pm
+            let ppIn t = ppIRTypeIn names t
+            let membersOf label =
+                pm.Types
+                |> List.tryPick (function
+                    | IRTDStruct (n, fields)
+                        when n = label || n = sprintf "%s__%s" store label -> Some fields
+                    | _ -> None)
+                |> Option.defaultValue []
+                |> List.map (fun (fn, ft) -> { MName = fn; MType = ppIn ft })
+            let idxTypes =
+                pm.Types
+                |> List.choose (function
+                    | IRTDIndexType (n, idx) ->
+                        let ext =
+                            match idx.Extent with
+                            | IRLit (IRLitInt v) -> Some v
+                            | _ -> None
+                        Some { IName = n; IExtent = ext }
+                    | _ -> None)
+            let (line, col, _, _) = clampSpan span
+            Some { Store = store; Alias = alias; Provider = provider; Path = path
+                   PLine = line; PCol = col
+                   IndexTypes = idxTypes; Dims = membersOf "dims"; Vars = membersOf "vars" }
+        with _ -> None
+    [ for m in prog.Modules do
+        for ld in m.Decls do
+            match ld.Value with
+            | DeclLet b ->
+                match b.Pattern.Kind, b.Value.Kind with
+                | PatternKind.PatVar store,
+                  ExprKind.ExprApp ({ Kind = ExprKind.ExprField ({ Kind = ExprKind.ExprVar alias }, "load") },
+                                    [{ Kind = ExprKind.ExprLit (LitString path) }]) ->
+                    match Map.tryFind alias aliases, Blade.ProviderRegistry.IdeStores.tryFind store with
+                    | Some provider, Some pm ->
+                        match describe store alias provider path ld.Span pm with
+                        | Some info -> yield info
+                        | None -> ()
+                    | _ -> ()
+                | _ -> ()
+            | _ -> () ]
+
 /// Join typed bindings to source spans by (scope, name), consuming spans in
 /// declaration order so shadowed/reused names pair up positionally. Typed
 /// decls with no source span (compiler-generated) are dropped. The surface
@@ -527,6 +707,9 @@ let private joinBindings (prog: Ast.Program) (tp: TypedProgram) (sourceLines: st
             let d = docAbove sourceLines line
             docCache.[line] <- d
             d
+    // Provenance for top-level provider reads (`let x = store.vars.v |>
+    // alias.read`), attached to the matching module-level binding.
+    let provRead = readProvenance prog (providerAliases prog)
     [ for e in collectTypedBindings srcFuncs tp do
         let key = e.Scope + " " + e.EName
         match spans.TryGetValue key with
@@ -552,9 +735,10 @@ let private joinBindings (prog: Ast.Program) (tp: TypedProgram) (sourceLines: st
                     |> fun s -> s.Trim()
                 else block
             let ps = e.EParams |> List.map (fun (n, t) -> { PName = n; PType = t; PDoc = paramDocIn block n })
+            let providerRead = if e.Scope = "" then Map.tryFind e.EName provRead else None
             yield { Name = e.EName; Kind = kind; Line = line; Col = col
                     TypeStr = e.ETypeStr; Doc = doc; Params = ps; Ret = e.ERet
-                    Where = e.EWhere }
+                    Where = e.EWhere; ProviderRead = providerRead }
         | _ -> () ]
 
 // ----------------------------------------------------------------------------
@@ -567,6 +751,7 @@ let ideCheck (filePath: string) : int =
     let mutable exitCode = 0
     let diags = ResizeArray<Diag>()
     let mutable bindings = []
+    let mutable providers = []
     if not (File.Exists filePath) then
         diags.Add { Severity = "error"; Line = 1; Col = 1; EndLine = 1; EndCol = 1
                     Message = sprintf "File not found: %s" filePath; Code = "" }
@@ -583,6 +768,9 @@ let ideCheck (filePath: string) : int =
                         Message = e.Message; Code = e.Code }
             exitCode <- 1
         | Ok program ->
+            // Fresh provider-module registry for this check (the load site
+            // records into it during typeCheck; collectProviderStores reads it).
+            Blade.ProviderRegistry.IdeStores.reset ()
             match Blade.TypeCheck.typeCheck program with
             | Error errors ->
                 for e in errors do
@@ -596,11 +784,23 @@ let ideCheck (filePath: string) : int =
                     diags.Add { Severity = "error"; Line = line; Col = col
                                 EndLine = endLine; EndCol = endCol; Message = msg; Code = code }
                 exitCode <- 1
+                // Errors don't have to mean zero hovers: if the checker ran and
+                // produced a PARTIAL typed program (only a pre-check pipeline
+                // failure yields none), surface bindings/types for the parts
+                // that DID check, so a file with errors still gets tooltips.
+                match Blade.TypeCheck.IdePartial.get () with
+                | Some (typedProg, _) ->
+                    let sourceLines = source.Replace("\r\n", "\n").Split('\n')
+                    bindings <- (try joinBindings program typedProg sourceLines with _ -> [])
+                    providers <- (try collectProviderStores program with _ -> [])
+                | None -> ()
             | Ok (typedProg, _, warnings) ->
                 for w in warnings do
                     diags.Add { Severity = "warning"; Line = 1; Col = 1; EndLine = 1; EndCol = 1
                                 Message = w; Code = "" }
                 let sourceLines = source.Replace("\r\n", "\n").Split('\n')
                 bindings <- joinBindings program typedProg sourceLines
-    printfn "%s" (renderJson (List.ofSeq diags) bindings)
+                // Guarded so provider structure can never break the JSON output.
+                providers <- (try collectProviderStores program with _ -> [])
+    printfn "%s" (renderJson (List.ofSeq diags) bindings providers)
     exitCode
