@@ -1,52 +1,33 @@
 # Blade Features Catalog
 
-Exhaustive list of Blade language features. Each entry: what it is, its status,
-and where it is specified and tested. This document is the census; semantics live
+Exhaustive list of Blade language features. This document is the census; semantics live
 in [formalism.md](formalism.md) and the per-module feature docs.
-
-**Status legend**
-
-| Status | Meaning |
-|--------|---------|
-| **Core** | Specified in the formalism AND implemented in the v7 prototype (corpus category cited) |
-| **v7-only** | Implemented and tested in v7 but missing from the v10 formalism — the gaps this catalog fills; now specified here / in feature docs |
-| **Spec-only** | Specified in the v10 formalism, no v7 implementation found |
-| **Near-term** | Designed (spec draft exists), implementation upcoming — notably the ML/equivariant module |
-| **Planned** | Direction settled, design incomplete — details in [future.md](future.md) |
-
-Speculative material (AD, domain decomposition, stencil/halo, symmetric trees,
-triangular file format, non-deterministic iteration) is deliberately excluded here;
-see [future.md](future.md).
-
-Source citations: "v10 §n" = `blade_formalism_v10.md` section; `corpus/<dir>` =
-v7 test category in `tests/corpus/`; `ml-spec §n` =
-`blade_ml_spec_v10.md`; `ext §n` = `blade_extensions_v10.md`.
 
 ---
 
 ## 1. Scalar values and primitive types
 
-| Feature | Status | Notes / sources |
-|---------|--------|-----------------|
-| Base numeric types `Int32/Int64/Float32/Float64/Complex64/Complex128` | Core | v10 §3.4.1; numeric promotion table §3.4.2 (float beats int, wider beats narrower, complex componentwise) |
-| Type variables `A, B, ...` with `cast<A,B>` promotion | Core | v10 §3.4.3; same letter = same type within a signature |
-| Complex literals and `conj(x)` | **v7-only** | `corpus/index-types` 060–065; conjugation on scalars and arrays; real identity `conj(x) = x` for real types. Not in v10 §7 operation tables |
-| Units of measure (`Unit meters`, `Float<velocity>`, unit arithmetic) | Core | v10 §3.4.4; `corpus/units` (8 tests), `corpus/unit-errors`; annotations on primitives, not separate types |
-| Bounded primitives `Float<min=0, max=1>` | Spec-only | v10 §3.4.5; runtime-checked bounds, composable with units |
-| Mutually constrained types (`type V1 ... and V2 ... where <constraint>`) | Spec-only | v10 §3.4.6; joint assignment required; assertion semantics (crash on violation) |
-| Booleans, comparisons, short-circuit `&&`/`||`/`!` | Core | v10 §17.8; no `and/or/not` keywords, no bitwise operators |
+| Feature | Usage | Status | Description / Notes |
+|---------|--------------|-------|-----------------|
+| Base numeric types | `Int32/Int64/Float32/Float64/Complex64/Complex128` | Core | Double-check for exhaustiveness |
+| Type variables | `A -> B -> ...` | Core | Same letter = same type in a signature |
+| Complex conjugates | `conj(x)` | Core |  |
+| Units of measure | `Unit meters`, `Float<velocity>`, unit arithmetic | Core | Annotations on primitive types only |
+| Bounded primitives | `Float<min=0, max=1>` | Planned | Runtime-checked bounds |
+| Mutually constrained types | `type V1 ... and V2 ... where <constraint>` | Core | Joint assignment required |
+| Booleans | short-circuit `&&`/`||`/`!` | Core | |
 
 ## 2. Bindings, mutability, staticness
 
-| Feature | Status | Notes / sources |
-|---------|--------|-----------------|
-| Three binding forms: `let const` / `let` / `let mut` | Core | v10 §3.8; mutable-in-scope by default, `mut` required to pass to `mut` params; `corpus/mutability`, `corpus/mutability-errors` |
-| Parameter borrowing (`x: T` immutable, `x: mut T` mutable, by-reference) | Core | v10 §17.7 |
-| `static` values (compile-time constants) | Core | v10 §17.5; `corpus/static` (12 tests) |
-| `static function` (compile-time evaluable; may capture only const/static) | Core | v10 §6.5; usable in type positions (`Idx<triangle(n)>`); no totality proofs required |
-| `static` parameters (`N : static Nat`) usable in return types | Spec-only | v10 §17.7 |
-| Static type functions (`static type Vec<N> = ...`) | Spec-only | v10 §17.6; type-returning vs value-returning split keeps the type system decidable |
-| Fused assignment `+= -= *= /=`, incl. array elements | Core | v10 §17.9 |
+| Feature | Usage | Status | Description / Notes |
+|---------|--------------|-------|-----------------|
+| Let-binding | `let static`/`let`/`let mut` | Core | `static` denotes "statically evaluable" and is conflated with "const" |
+| Parameter borrowing | `x: T` immutable, `x: mut T` mutable | Core |  |
+| `static` literals | `let static a = 5` | Core |  |
+| `static function` |  | Core | compile-time evaluable; usable in type positions (`Idx<triangle(n)>`) |
+| `static` parameters | `f(N : static Nat)`  | Planned | usable in return types |
+| Static type functions | `static type Vec<N> = ...` | Speculative | type-returning vs value-returning split keeps the type system decidable |
+| Fused assignment | `+=`/`-=`/`*=`/`/=` | Core |  |
 
 ## 3. Arrays and array types
 
