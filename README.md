@@ -11,6 +11,9 @@ Spanning the simplest of arithmetic functions to powerful combinators of combina
 
 A VS Code extension is available [here](https://github.com/cmdupuis3/Blade-REPL). Blade-REPL provides a REPL, tooltips for most objects, and full in-editor type deduction.
 
+
+<img width="639" height="334" alt="blade_fullsc" src="https://github.com/user-attachments/assets/5c64c845-b0a7-4267-8b43-b5b07c51ced6" />
+
 ## Requirements
 
 Building and running the Blade compiler requires support for:
