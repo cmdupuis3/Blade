@@ -1,0 +1,20 @@
+// TEST: Symmetric arity-poly storage — comm pack over identical arrays -> SymIdx
+// End-to-end coverage for the arity-polymorphic SYMMETRIC-STORAGE path, which
+// was previously untested (only arity/001 put `comm` on a Poly pack, and it has
+// no call site). A Poly<T^0> kernel declaring `where comm(a)`, applied to the
+// SAME array twice, must compact to triangular SymIdx<2,3> storage (6 canonical
+// cells i<=j in lex order), NOT dense 3x3 (9 cells). This is the arity-poly
+// analog of symmetry/003, and it exercises specializeFunction's comm-group
+// expansion (the group span is folded into the monomorphized (x,y) params).
+function packprod(a: Poly<T^0>) where comm(a) -> T^0 = {
+    match arity(a) with
+    | 1 -> { let head :: tail = a
+             head }
+    | _ -> { let head :: tail = a
+             head * packprod(tail) }
+}
+let A = [1.0, 2.0, 3.0]
+let result = object_for(packprod) <@> (A, A) |> compute
+// packprod(x, y) = x * y (symmetric). Triangular i<=j over A = [1,2,3]:
+// (0,0)=1, (0,1)=2, (0,2)=3, (1,1)=4, (1,2)=6, (2,2)=9
+// EXPECT: result = [1.0, 2.0, 3.0, 4.0, 6.0, 9.0]

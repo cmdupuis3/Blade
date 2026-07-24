@@ -1,0 +1,14 @@
+// TEST: Antisymmetric triangular storage (1D strict simplex)
+// End-to-end coverage that a same-array antisymmetric Reynolds compacts to
+// AntisymIdx<2, n> — strict pairs i < j, C(n,2) cells, diagonal implicitly
+// zero — NOT dense n*n. The wrapped kernel carries the `comm` iteration
+// license; the Antisymmetric Reynolds makes the OUTPUT antisymmetric (sign
+// flips on the mirror read, diagonal excluded). Complements the 2D joint case
+// (reynolds/023) with the simplest 1D strict-triangle shape, and pairs with
+// symmetry/003 (the inclusive SymIdx twin).
+let A = [1.0, 2.0, 3.0, 4.0]
+let g = lambda(x, y) where comm(x, y) -> 2.0 * x + y
+let result = method_for(A, A) <@> reynolds(g, Antisymmetric) |> compute
+// reynolds(g, Anti)(x, y) = (2x + y) - (2y + x) = x - y. Strict pairs i < j:
+// (0,1)=-1 (0,2)=-2 (0,3)=-3 (1,2)=-1 (1,3)=-2 (2,3)=-1  -> 6 cells, not dense 16
+// EXPECT: result = [-1.0, -2.0, -3.0, -1.0, -2.0, -1.0]

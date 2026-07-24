@@ -1,0 +1,22 @@
+// TEST: Covariance matrix with COMPACTED symmetric storage (arity-poly + comm)
+// The symmetric-storage twin of arity/022. Same recursive comoment pipeline,
+// but the generator declares `where comm(a)` — so `object_for(comoment) <@>
+// (data, data)` over the SAME 2D array must produce a compacted SymIdx<2,2>
+// covariance (3 canonical cells, i<=j), NOT the dense 2x2 (4 cells) that 022
+// gets from its comm-less lambda. This is the end-to-end r! storage payoff of
+// arity polymorphism (the covariance matrix is symmetric, so store the triangle).
+function mean(row: T^1) -> T^0 = reduce(row, (+)) / extents(row)
+function comoment_prod(a: Poly<T^1>) -> T^1 = {
+    match arity(a) with
+    | 1 -> { let head :: tail = a
+             head - mean(head) }
+    | _ -> { let head :: tail = a
+             (head - mean(head)) * comoment_prod(tail) }
+}
+function comoment(a: Poly<T^1>) where comm(a) -> T^0 = mean(comoment_prod(a))
+// x = [1,2,3] (centered [-1,0,1], var 2/3); y = [2,4,6] (centered [-2,0,2], var 8/3).
+// cov(x,y) = mean([2,0,2]) = 4/3. Symmetric matrix -> triangle [var(x), cov, var(y)].
+let data = [[1.0, 2.0, 3.0], [2.0, 4.0, 6.0]]
+let result = object_for(comoment) <@> (data, data) |> compute
+// SymIdx<2,2>, cells (0,0),(0,1),(1,1): [2/3, 4/3, 8/3] — 3 cells, not dense 4.
+// EXPECT: result = [0.6666666666666666, 1.3333333333333333, 2.6666666666666665]

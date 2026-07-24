@@ -177,6 +177,15 @@ type TypeEnv = {
     /// at the return site, so annotated callers don't re-check. Mutable
     /// dictionary shared by reference, like FuncConstraints.
     MutualReturnFuncs: System.Collections.Generic.Dictionary<string, string>
+    /// Named functions' commutativity groups (by parameter index), from their
+    /// `where comm(...)` clause: funcName → int list list. Populated by
+    /// checkFunctionDecl; consulted when a named function is used as a loop
+    /// kernel (etaExpandFunctionKernel / the deferred-former eta-expansion) so
+    /// the comm survives onto the synthesized wrapper lambda and reaches the
+    /// symmetry deduction. Without this, `object_for(f)`/`method_for(..) <@> f`
+    /// for a `where comm` function produced DENSE output — only inline-lambda
+    /// comm was read. Mutable dictionary shared by reference, like FuncConstraints.
+    FuncCommGroups: System.Collections.Generic.Dictionary<string, int list list>
 }
 
 let emptyEnv () = {
@@ -201,6 +210,7 @@ let emptyEnv () = {
     MutualGroups = Map.empty
     MutualMembers = Map.empty
     MutualReturnFuncs = System.Collections.Generic.Dictionary<string, string>()
+    FuncCommGroups = System.Collections.Generic.Dictionary<string, int list list>()
 }
 
 /// Append a non-fatal diagnostic to the env's warnings collector.

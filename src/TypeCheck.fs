@@ -5021,7 +5021,19 @@ and etaExpandFunctionKernel (env: TypeEnv) (kernelExpr: Expr) : TypeResult<Typed
                         // (no param-vs-arg unification), mirroring the prefix
                         // partial-application eta-expansion.
                         unify env.Subst tLam.Type (mkFuncArrow paramTys retTy)
-                        |> Result.map (fun () -> tLam)))
+                        |> Result.map (fun () ->
+                            // Surface the callee's `where comm` onto the wrapper
+                            // lambda: params are 1:1 with the callee's, so the
+                            // comm-group indices carry over unchanged. This is
+                            // what makes `object_for(f)` / `method_for(..) <@> f`
+                            // for a commutative NAMED function compact to SymIdx.
+                            match env.FuncCommGroups.TryGetValue name with
+                            | true, cg when not (List.isEmpty cg) ->
+                                match tLam.Kind with
+                                | TExprLambda li ->
+                                    { tLam with Kind = TExprLambda { li with CommGroups = cg; IsCommutative = true } }
+                                | _ -> tLam
+                            | _ -> tLam)))
             | _ -> None
         | Some _ -> None   // let-bound value (lambda etc.): use the existing path
         | None -> None
@@ -5325,8 +5337,17 @@ and inferApply (env: TypeEnv) (tLeft: TypedExpr) (tRight: TypedExpr) : TypeResul
                 | TExprObjectFor synInfo ->
                     match (resolveTypedExpr env synInfo.Kernel).Kind with
                     | TExprLambda li ->
+                        // Surface a poly kernel's `where comm(pack)` onto the
+                        // eta-lambda. A comm over the whole pack makes all n
+                        // expanded arguments ONE joint comm group; expand the
+                        // pack-level group to the concrete arity revealed here.
+                        let li' =
+                            match env.FuncCommGroups.TryGetValue fnName with
+                            | true, cg when not (List.isEmpty cg) ->
+                                { li with CommGroups = [ [ 0 .. n - 1 ] ]; IsCommutative = true }
+                            | _ -> li
                         buildApplyInfo env flatArrays identities arrayTypes sDimsPerArray sharedRecords
-                                       li tLoopSynth synInfo.Kernel false false
+                                       li' tLoopSynth synInfo.Kernel false false
                     | _ -> Error (ObjectForKernel "deferred former eta-expansion did not yield a lambda")
                 | _ -> Error (ObjectForKernel "deferred former eta-expansion did not yield an object_for"))
         | _ -> Error (ObjectForKernel (resolvedKernel.Kind.GetType().Name))
@@ -8794,6 +8815,12 @@ and checkFunctionDecl (env: TypeEnv) (funcDecl: FunctionDecl) : TypeResult<Typed
                 extractCommGroups
                     (funcDecl.Params |> List.map (fun p -> { Name = p.Name; Type = p.Type } : LambdaParam))
                     funcDecl.WhereClause
+            // Register the function's comm groups so a later kernel-use site
+            // (etaExpandFunctionKernel / deferred-former eta) can surface them
+            // onto the synthesized wrapper lambda — otherwise `where comm` on a
+            // named function is dropped and the loop emits dense storage.
+            if not (List.isEmpty commGroups) then
+                env.FuncCommGroups.[funcDecl.Name] <- commGroups
             let resolvedParams = typedParams |> List.map (fun p ->
                 { p with Type = env.Subst.Resolve(p.Type) } : TypedParam)
             let tf : TypedFunctionDecl = {
