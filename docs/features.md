@@ -8,7 +8,7 @@ in [formalism.md](formalism.md) and the per-module feature docs.
 ## 1. Scalar values and primitive types
 
 | Feature | Usage | Status | Description / Notes |
-|---------|--------------|-------|-----------------|
+|---------|-------|--------|---------------------|
 | Base numeric types | `Int32/Int64/Float32/Float64/`<br>`Complex64/Complex128` | Core | Double-check for exhaustiveness |
 | Type variables | `A -> B -> ...` | Core | Same letter = same type in a signature |
 | Complex conjugates | `conj(x)` | Core |  |
@@ -20,7 +20,7 @@ in [formalism.md](formalism.md) and the per-module feature docs.
 ## 2. Bindings, mutability, staticness
 
 | Feature | Usage | Status | Description / Notes |
-|---------|--------------|-------|-----------------|
+|---------|-------|--------|---------------------|
 | Let-binding | `let static`/`let`/`let mut` | Core | `static` denotes "statically evaluable" and is conflated with "const" |
 | Parameter borrowing | `x: T` immutable, `x: mut T` mutable | Core |  |
 | `static` literals | `let static a = 5` | Core |  |
@@ -32,7 +32,7 @@ in [formalism.md](formalism.md) and the per-module feature docs.
 ## 3. Arrays and array types
 
 | Feature | Usage | Status | Description / Notes |
-|---------|--------------|-------|-----------------|
+|---------|-------|--------|---------------------|
 | Arrays as functions | `A(i, j) ≡ A(i)(j)` | Core | `Array<T, I, J> ≅ I → J → T` |
 | Three-phase type model | abstract `T^r(σ)` =><br> index-typed `T^(I₁,...)` =><br> concrete `Array<V like I₁,...>` | Core |  |
 | Array literals | `[1, 2, 3]` | Core | nested for rank ≥ 2 |
@@ -46,11 +46,8 @@ in [formalism.md](formalism.md) and the per-module feature docs.
 
 ## 4. Array combinators (ArrayExpr layer)
 
-`ArrayExpr` = unevaluated array transformation; implicit `pure` lift, explicit
-`|> compute` materialization (v10 §3.5).
-
 | Feature | Usage | Status | Description / Notes |
-|---------|--------------|-------|-----------------|
+|---------|-------|--------|---------------------|
 | Array type lifting | `pure` | Core | Lifts an `Array` to an `ArrayExpr`. Usually implicit, but available explicitly. |
 | Hard transpose | `transpose` | Core | Symmetric identity and antisym negation. |
 | Zip | `zip(A, B, C)` (n-ary, tuple elements, symmetry intersection) | Core | Turns a tuple of arrays into an array of tuples. Checks symmetry intersection. |
@@ -62,13 +59,11 @@ in [formalism.md](formalism.md) and the per-module feature docs.
 |  | `diag`, `subset`, `split`, `reverse` (array op), `shift` | Speculative | v10 §3.6–3.7 |
 |  | `align` / `stencil` (sugar) with `StencilSpec`, boundary modes | Speculative | v10 §3.6; kernel receives N separate args (vs zip's one tuple) |
 
+
 ## 5. Index types
 
-The heart of the type system: an index type defines domain, cardinality, storage
-bijection, and enumeration order (v10 §4.2).
-
 | Feature | Usage | Status | Description / Notes |
-|---------|--------------|-------|-----------------|
+|---------|-------|--------|---------------------|
 | Simple index type | `Idx<n: Nat>` | Core | Index type of length `n` |
 | Enumerated index type | `EnumIdx<S: Enum>` | Core | enumerated categories; string/sparse key domains. Also drives `group_keys` case 2 |
 | Bounded index type | `BoundedIdx<l: Nat, u: Nat>` | Core | Internal use only. Erases to runtime bounds |
@@ -78,20 +73,29 @@ bijection, and enumeration order (v10 §4.2).
 | Compound index type | `CompoundIdx<mask: bool^r>` | Core | `r`-dimensional sorted sparse index type ideal for relatively dense grids. Inherits dimensions from static `mask` array. |
 | Ragged index type | `RaggedIdx<lengths>` | Core |  |
 | Dependent index type | `DepIdx<I, f: Nat -> Idx<N>>` | Core |  Static function `f` maps each index of `I` to a new `Idx` |
-| Equivariant index type | `EquivIdx<n, G, ρ>` | Planned? | group-representation-annotated indices v10 §4.15.4; foundation for the ML module, see [features/equivariant-nn.md](features/equivariant-nn.md) |
+| Equivariant index type | `EquivIdx<n, G, ρ>` | Planned? | group-representation-annotated indices |
 | Sparse index type | `SparseIdx<entries>` | Planned | explicit valid-entry enumeration with hash-table storage; partly overlaps with `CompoundIdx` in practice |
 | Nested/mixed symmetry | `NestedSymIdx` (elasticity),<br> `RiemannIdx` (curvature) | Speculative | v10 §4.15.2–4.15.3; cardinality formulas specified |
 
 ### 5a. Index type features
 
 | Feature | Usage | Status | Description / Notes |
-|---------|--------------|-------|-----------------|
+|---------|-------|--------|---------------------|
 | Named index types | `type LatIdx = Idx<360>` | Core | Named index types are required for comparison. Unnamed index types are always considered distinct. |
 | Index type tags | `Idx<n: Nat, Tag: String\|Enum>` | Core | String or enum-valued. Tags are for type comparison only. (Maybe redundant?) |
-| Index type composition | `Sym<I,I>`, `Antisym<I,I>` | Speculative | v10 §4.16.2 (three-tier system) |
+| Index type composition | `Sym<I,I>`, `Antisym<I,I>` | Planned | v10 §4.16.2 |
 | Index transforms | `flip`, `rename`, `subset`, `align` | Speculative | v10 §4.8; all explicit, no implicit conversions |
 
-## 6. Functions and kernels
+
+## 6. Virtual Arrays
+
+| Feature | Usage | Status | Description / Notes |
+|---------|-------|--------|---------------------|
+| Range | `range<Idx<n>>` | Core | Emit raw index as an array argument |
+| Reverse | `reverse<Idx<n>>` | Core | Emit indices in reverse order |
+| Halo | `halo<Idx<n>, [-1, 0, 1]>` | Core | Apply a rolling window centered at `0` |
+
+## 7. Functions and kernels
 
 | Feature | Status | Notes / sources |
 |---------|--------|-----------------|
@@ -109,24 +113,33 @@ bijection, and enumeration order (v10 §4.2).
 | Geometric primitives (`norm`, `dot`, `cross`) with equivariance signatures | Spec-only | v10 §7.2; equivariance layer is Near-term |
 | Reductions `sum/mean/min/max` (rank-reducing; min/max invariant-only) | Core (sum via `reduce`) / Spec-only (equivariance rules) | v10 §7.3; v7 exposes `reduce` (see §10 below) |
 
-## 7. Loop objects and iteration
+## 8. Loop objects and iteration
 
-| Feature | Status | Notes / sources |
-|---------|--------|-----------------|
-| `method_for(A₁...Aₙ)` / `object_for(f)` — the dual constructors | Core | v10 §9.1–9.5; `corpus/loops` (59 tests); uniqueness of the two maximal curryings is proved (BladeCurrying 9.26) |
-| S-dimensions vs T-dimensions; `irank`; output rank = S + T | Core | v10 §9.2 |
-| Virtual arrays: `range<I>`, `reverse<I>` | Core | v10 §9.8; erase completely in codegen |
-| `blocked<I, K>` cache-blocked traversal | Spec-only | v10 §9.8; no v7 keyword |
-| Anonymous ranges (zero-based, offset, literal) | **v7-only** | `corpus/anon-ranges` (4 tests); range forms without named index typedefs |
-| `for` combinator forms (method_for `for (A, B) in range<I> <@> ...`; let-bound loop objects; `in` clause takes virtual arrays only) | Core | v10 §9.9; loop-object surface. The imperative `for x in RANGE { body }` statement was removed — sequential recurrences are recursive arrays (`corpus/recursive-arrays`, §7.5) |
-| Arity polymorphism: `Poly<T^k>` kernels; arity determines output rank, nesting depth, symmetry | Core | v10 §10; `corpus/arity` (14 tests); distinct from rank polymorphism and from variadics (fixed output type) |
-| Poly-pack destructuring `let (head, tail) = args`, `args[k]`, `arity`, `nth`; nested tuples; identity groups (neighboring identical arrays only) | Core | v10 §10.4, §10.7 |
-| Kernel signatures live in T-world (kernels see slices, never S-dims) | Core | v10 §10.8 |
-| Type deduction workflow (T-dim match → identity groups → S-dims per group → concatenate) | Core, **corrected** | v10 §10.9 — but the per-dimension `SymIdx` output for multi-dim arrays in one identity group ((r!)^d) is **refuted by the Coq tower**; a single identity group licenses joint symmetry over compound index tuples only. See formalism §12 and [proofs.md](proofs.md). Speedup table: r! per identity group, multiplying across groups |
-| Virtual-array + real-array composition in one loop | Core | v10 §9.8.2 |
-| Index emission into kernels via `range` (index anonymity preserved) | Core | v10 §4.18, quickstart p2 |
+| Feature | Usage | Status | Description / Notes |
+|---------|-------|--------|---------------------|
+| Loop combinators | `method_for(A₁...Aₙ)` <br> `object_for(f)` | Core | Builds a loop nest of deferred depth and type |
+| S-dimensions |  | Core | S-dimensions derived from rank gap at kernel call. Rank gap = arg rank - parameter rank |
+| T-dimensions |  | Core | Derived from kernel output dimensions |
+| Virtual arrays | `range<I>`, `reverse<I>`, etc. | Core | Index type maps to yield or reorder indices. Behaves as an array with no content. |
+| Anonymous ranges | `m..n` | Core | Shorthand equivalent to `range<Idx<n-m>> + m` |
+| Multi-dimensional for-loops | `for (A, B) <@> ...` | Core | Shorthand for `object_for` and `method_for`; allows co-iterations with `in` |
+| Co-iteration | `for (A, B) in range<I> <@> ...` | Core | Iterate elementwise over a shared index space. |
 
-## 9. Combinator algebra
+
+## 9. Polymorphism
+
+| Feature | Usage | Status | Description / Notes |
+|---------|-------|--------|---------------------|
+| Rank polymorphism | `let mean1 = mean(A: T^2)`<br>`let mean2 = mean(B: T^3)` | Core | All kernels are implicitly rank-polymorphic according to S/T dimension classification |
+| Arity polymorphism | `function moment(A: Poly<T^k>)` | Core | Stricter than variadic functions, arity-polymorphism guarantees well-typed functions returning different types depending on arity |
+| Rank | `rank(A: T^r)` | Core | Static function; integer rank of array |
+| Arity | `arity(A: Poly<T^k>)` | Core | Static function; integer arity of poly-pack |
+| Poly-pack destructuring | `let (head, tail) = args` |, `args[k]`, `nth`; nested tuples; identity groups (neighboring identical arrays only) | Core | |
+| Arg pack indexing | `args[k]` | Core | The `k`th element of poly-pack `args`. Also valid for general tuple arg packs. |
+|  | `nth()` | Core |  |
+| Type deduction workflow | T-dim match → identity groups → S-dims per group → concatenate | Core |  |
+
+## 10. Combinator algebra
 
 L aws are stated in the formalism; checked artifacts listed in [proofs.md](proofs.md) (BladeMonad,
 BladeCompute). The MonadPlus laws hold exactly as stated — left zero, both identities,
@@ -148,7 +161,7 @@ the computation monad (BladeMonad).
 | Collections | `sequence`, `replicate` |  |
 | Compute | `\|> compute` | Materialization |
 
-### 9a. Combinator Idioms
+### 10a. Combinator Idioms
 
 Some higher-order combinators are particularly useful for applying complex function iteratively.
 
@@ -159,7 +172,7 @@ Some higher-order combinators are particularly useful for applying complex funct
 | Join all | `object_for(<&>)` | Loop-join an array of computations as much as possible |
 | First choice | `object_for(<\|>)` | Select the first `true` computation |
 
-## 10. Relational (SQL-like) operations — **v7-only, formalism gap now filled**
+## 11. Relational (SQL-like) operations — **v7-only, formalism gap now filled**
 
 Full semantics in [features/sql.md](features/sql.md). All implemented and tested
 (`corpus/sql-*`, 81 tests across 12 categories).
@@ -182,12 +195,12 @@ Full semantics in [features/sql.md](features/sql.md). All implemented and tested
 | Foreign keys | FK joins | Integer / EnumIdx arrays as references; capture-and-index idiom |
 
 
-## 11. Symmetry system
+## 12. Symmetry system
 
 | Feature | Status | Notes / sources |
 |---------|--------|-----------------|
 
-## 12. Data model
+## 13. Data model
 
 | Feature | Status | Notes / sources |
 |---------|--------|-----------------|
@@ -202,7 +215,7 @@ Full semantics in [features/sql.md](features/sql.md). All implemented and tested
 | Struct FK fields (`ETIndexRef`) | Core | `corpus/sql-foreign-keys` 006; [features/sql.md](features/sql.md) §12 |
 | Type providers: `NetCDFProvider<"file.nc">` — file metadata → index types at compile time | Core | v10 §4.9; v7 `providers/`, `tests/NetcdfTests.fs`, `read` keyword; quasi-static file structure assumption |
 
-## 13. Program structure and syntax
+## 14. Program structure and syntax
 
 | Feature | Status | Notes / sources |
 |---------|--------|-----------------|
@@ -213,7 +226,7 @@ Full semantics in [features/sql.md](features/sql.md). All implemented and tested
 | Named infix operators `a :name: b` (uniform lowest precedence) | Spec-only | v10 §17.19 |
 | `print` / expression output | Core | v7 codegen; EXPECT-comment test convention |
 
-## 14. Providers and I/O
+## 15. Providers and I/O
 
 | Feature | Status | Notes / sources |
 |---------|--------|-----------------|
@@ -221,7 +234,7 @@ Full semantics in [features/sql.md](features/sql.md). All implemented and tested
 | HDF5 / Zarr providers | Planned | provider interface slot (audit §4); [future.md](future.md) |
 | Triangular file format (block-aligned symmetric tensor I/O) | Planned | ext §2.7; [future.md](future.md) |
 
-## 15. Backends and performance
+## 16. Backends and performance
 
 | Feature | Status | Notes / sources |
 |---------|--------|-----------------|
@@ -232,7 +245,7 @@ Full semantics in [features/sql.md](features/sql.md). All implemented and tested
 | Lazy computation graph; `compute` semantics | Core | v10 §16.1, §16.4 |
 | Alternative parallel backends (`acc`, ...) | Planned | v10 §6.1 note |
 
-## 16. Equivariance and ML (near-term module)
+## 17. Equivariance and ML (near-term module)
 
 Spec draft: `blade_ml_spec_v10.md`; module doc: [features/equivariant-nn.md](features/equivariant-nn.md).
 The core-language hook (annotation syntax + inference framework, v10 §8) is
@@ -252,7 +265,7 @@ Spec-only; domain rules live in libraries.
 | Reynolds applications: symmetric message passing, CG speedups, higher-order interactions, antisymmetric applications | Near-term | ml-spec §14 |
 | Automatic differentiation (`grad`, reverse mode, v1 subset) | Core (v7) | AST-level source transform; module doc §11 has the ABI + subset; corpus `ad/` + `ml-e2e/`; remaining work in [future.md](future.md) §2.1 |
 
-## 17. Graphs and trees (planned module)
+## 18. Graphs and trees (planned module)
 
 Design drafts in ext §2.3–2.4; module doc: [features/graphs-trees.md](features/graphs-trees.md).
 
