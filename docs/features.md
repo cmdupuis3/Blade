@@ -9,13 +9,13 @@ in [formalism.md](formalism.md) and the per-module feature docs.
 
 | Feature | Usage | Status | Description / Notes |
 |---------|--------------|-------|-----------------|
-| Base numeric types | `Int32/Int64/Float32/Float64/Complex64/Complex128` | Core | Double-check for exhaustiveness |
+| Base numeric types | `Int32/Int64/Float32/Float64/`<br>`Complex64/Complex128` | Core | Double-check for exhaustiveness |
 | Type variables | `A -> B -> ...` | Core | Same letter = same type in a signature |
 | Complex conjugates | `conj(x)` | Core |  |
-| Units of measure | `Unit meters`, `Float<velocity>`, unit arithmetic | Core | Annotations on primitive types only |
+| Units of measure | `Unit meters`, `Float<velocity>`,<br> unit arithmetic | Core | Annotations on primitive types only |
 | Bounded primitives | `Float<min=0, max=1>` | Planned | Runtime-checked bounds |
-| Mutually constrained types | `type V1 ... and V2 ... where <constraint>` | Core | Joint assignment required |
-| Booleans | short-circuit `&&`/`||`/`!` | Core | |
+| Mutually constrained types | `type V1 ... and V2 ...`<br>`where <constraint>` | Core | Joint assignment required |
+| Boolean Operators |  `&&`/`\|\|`/`!` | Core | |
 
 ## 2. Bindings, mutability, staticness
 
@@ -26,52 +26,52 @@ in [formalism.md](formalism.md) and the per-module feature docs.
 | `static` literals | `let static a = 5` | Core |  |
 | `static function` |  | Core | compile-time evaluable; usable in type positions (`Idx<triangle(n)>`) |
 | `static` parameters | `f(N : static Nat)`  | Planned | usable in return types |
-| Static type functions | `static type Vec<N> = ...` | Speculative | type-returning vs value-returning split keeps the type system decidable |
+| Static type functions | `static type Vec<N> = ...` | Planned | type-returning vs value-returning split keeps the type system decidable |
 | Fused assignment | `+=`/`-=`/`*=`/`/=` | Core |  |
 
 ## 3. Arrays and array types
 
-| Feature | Status | Notes / sources |
-|---------|--------|-----------------|
-| Arrays as functions; indexing = application, `A(i, j) ≡ A(i)(j)` | Core | v10 §5.3, §4.2; the foundational isomorphism `Array<T, I, J> ≅ I → J → T` |
-| Three-level type model: abstract `T^r(σ)` / index-typed `T^(I₁,...)` / concrete `Array<V like I₁,...>` | Core | v10 §5.1 |
-| Array type identity (multi-index ≡ nested) | Core | v10 §5.2; symmetric index types are NOT nested-equivalent (curry to `BoundedIdx`) |
-| Array literals `[1, 2, 3]`, nested for rank ≥ 2 | Core | v10 §17.2; `corpus/basic` |
-| Ragged literals | **v7-only** | `corpus/index-types` 076–079; literal rows of uneven length build `RaggedIdx`-typed arrays |
-| Dimensional currying (partial indexing yields lower rank; cache-optimality by construction) | Core | v10 §11; `corpus/loops` |
-| Poly-indexing `A(indices)` with tuple; `all_indices(A)` iteration | Spec-only | v10 §5.4, §17.17; rank-polymorphic trace/sum examples |
-| Computational (lambda) indices: `Dual`, `Symbolic`, thunks | Spec-only | v10 §5.5; structural vs computational index separation |
-| Arrays of functions; intermixed indexing and application `models(lat, lon)(params)(t)` | Core | v10 §5.3; `corpus/func-arrays` (6 tests incl. 2D arrays of funcs, funcs returning arrays) |
-| Tuple views over arrays (flat and structural) | **v7-only** | `corpus/tuple-views` (5 tests); not described in v10 |
-| `extents(A)` — scalar for rank-1, tuple for rank-k; cardinality on compound | **v7-only** | See [features/sql.md](features/sql.md) §11; static-first evaluation; rejects ragged/grouped dims with guidance |
-| Mutation of array elements (`A(i) = v`, `A(i,j) += v`) | Core | v10 §17.9 |
+| Feature | Usage | Status | Description / Notes |
+|---------|--------------|-------|-----------------|
+| Arrays as functions | `A(i, j) ≡ A(i)(j)` | Core | `Array<T, I, J> ≅ I → J → T` |
+| Three-phase type model | abstract `T^r(σ)` =><br> index-typed `T^(I₁,...)` =><br> concrete `Array<V like I₁,...>` | Core |  |
+| Array literals | `[1, 2, 3]` | Core | nested for rank ≥ 2 |
+| Ragged literals | `[[1, 2, 3], [4, 5]]` | Core | Array literal rows of uneven length build `RaggedIdx`-typed arrays |
+| Dimensional currying | `let A: T^3 = ...;`<br>`let B: T^2 = A(i)` | Core | Partial indexing yields lower rank; cache-optimality by construction |
+| Poly-indexing | `A(indices)` with tuple;<br> `all_indices(A)` iteration | Core | Index multiple dimensions at once with a tuple of indices |
+| Computational (lambda) indices | `Dual`, `Symbolic`, thunks | Speculative | v10 §5.5; structural vs computational index separation |
+| Arrays of functions | `models(lat, lon)(params)(t)` | Core | Free mixing of functions and indexing |
+| Extent tuples | `extents(A)` | Core | Static-first evaluation; rejects ragged/grouped dims with guidance |
+| Mutation of array elements | `A(i) = v`, `A(i,j) += v` | Core | Allowed, but unidiomatic |
 
 ## 4. Array combinators (ArrayExpr layer)
 
 `ArrayExpr` = unevaluated array transformation; implicit `pure` lift, explicit
 `|> compute` materialization (v10 §3.5).
 
-| Combinator | Status | Notes / sources |
-|-----------|--------|-----------------|
-| `zip` (n-ary, tuple elements, symmetry intersection) | Core | v10 §3.6; keyword present in v7; used by elementwise operator desugaring |
-| `stack` (new leftmost dimension, fresh symmetry class) | Core | v10 §3.6; `corpus/stack-join` 001–003, 006–008. Rank r → r+1 over same-shaped dense operands; materializes an independent pool (copy, not pointer aliasing) so a later write to a source cannot leak in. Operands must be dense (plain `Idx`) on every axis |
-| `transpose` (hard transpose; permutation composition laws) | Core | v10 §3.6–3.7; `corpus/index-types` 027–033 incl. symmetric identity and antisym negation |
-| `join` (concatenate along dimension d) | Core | v10 §3.6–3.7; `corpus/stack-join` 004–006, 009–010. n-ary `join(A, B, ..., d)`; rank-preserving, extents on d add, every other axis must agree. The `split`/`subset` half of the round-trip is still spec-only, so `split(join(A,B,d), d, i)` is not yet expressible |
-| `diag`, `subset`, `split`, `reverse` (array op), `shift` | Spec-only | v10 §3.6–3.7; no v7 keywords/tests found |
-| `align` / `stencil` (sugar) with `StencilSpec`, boundary modes | Spec-only | v10 §3.6; kernel receives N separate args (vs zip's one tuple) |
-| Array fallback `<\|:>` (nullptr-safe sparse access) | Spec-only | v10 §3.6, §11.7; partial-depth allocation is a C++-level API |
-| `decompact` — expand symmetric/antisymmetric compact storage to dense along an axis | **v7-only** | `corpus/index-types` 034–049: sym and antisym sources, peel first/mid/last, chained to full dense, sign handling for antisym, reject on plain axes. Differential oracle exists (`tests/Oracles.fs`). Not in v10 |
+| Feature | Usage | Status | Description / Notes |
+|---------|--------------|-------|-----------------|
+| Array type lifting | `pure` | Core | Lifts an `Array` to an `ArrayExpr`. Usually implicit, but available explicitly. |
+| Hard transpose | `transpose` | Core | Symmetric identity and antisym negation. |
+| Zip | `zip(A, B, C)` (n-ary, tuple elements, symmetry intersection) | Core | Turns a tuple of arrays into an array of tuples. Checks symmetry intersection. |
+| Outermost stack | `stack(A, B, C)` (new leftmost dimension, fresh symmetry class) | Core | Stack arrays along a new leftmost dimension. |
+| Concatenation | `join(A, B, ..., d)` | Core | Concatenate arrays along dimension `d` |
+| Segmentation | `split(A, d, i)` | Speculative | `A, B == split(join(A,B,d), d, i)` |
+| Array fallback | `<\|:>` (nullptr-safe sparse access) | Planned | Partial-depth allocation in C++ codegen for non-final dims |
+| Dimension decoupling | `decompact(A, n: Nat)` | Core | Expand symmetric/antisymmetric compact storage to dense along an axis |
+|  | `diag`, `subset`, `split`, `reverse` (array op), `shift` | Speculative | v10 §3.6–3.7 |
+|  | `align` / `stencil` (sugar) with `StencilSpec`, boundary modes | Speculative | v10 §3.6; kernel receives N separate args (vs zip's one tuple) |
 
 ## 5. Index types
 
 The heart of the type system: an index type defines domain, cardinality, storage
 bijection, and enumeration order (v10 §4.2).
 
-| Feature | Status | Notes / sources |
-|---------|--------|-----------------|
-| `Idx<n>` (≡ `BoundedIdx<0, n>`) | Core | v10 §4.3, §4.13 |
-| Named index types (`type LatIdx = Idx<360>`) — nominal identity + unit identity | Core | v10 §4.3.2; `corpus/index-types` 095–102 (alias chains, nominal iteration tags, explicit casts) |
-| Tagged index types `Idx<n, Tag>` (enum tags; staggered grids) | Core | v10 §4.3.3 |
+| Feature | Usage | Status | Description / Notes |
+|---------|--------------|-------|-----------------|
+| Simple index types | `Idx<n>` | Core | Index type spanning `0..n-1` |
+| Named index types | `type LatIdx = Idx<360>` | Core | Named index types are required for comparison. Unnamed index types are always considered distinct. |
+| Index type tags | `Idx<n, Tag>` | Core | String or enum-valued. Tags are for type comparison only. (Maybe redundant?) |
 | Index values as unit-tagged naturals (`Nat<LatIdx>`); nominal bounds safety | Core | v10 §4.18; `corpus/index-types` 092–102; arithmetic preserves units; literals need explicit units |
 | `EnumIdx<S>` (enumerated categories; string/sparse key domains) | Core | v10 §4.3; `corpus/sql-foreign-keys` 009–010; also drives `group_keys` Case 2 |
 | `BoundedIdx<l, u>` (dependent, arises from currying symmetric indices) | Core | v10 §4.13; erases to runtime bounds |
@@ -127,39 +127,38 @@ bijection, and enumeration order (v10 §4.2).
 | Virtual-array + real-array composition in one loop | Core | v10 §9.8.2 |
 | Index emission into kernels via `range` (index anonymity preserved) | Core | v10 §4.18, quickstart p2 |
 
-## 8. Dimensional currying
-
-| Feature | Status | Notes / sources |
-|---------|--------|-----------------|
-| Type-level rank tracking (`promote<T, r>`); currying peels exactly one dimension | Core | v10 §11.2 |
-| Cache-optimality by construction (non-optimal order = type error) | Core | v10 §11.3; dimension-alignment errors with `#[allow(unaligned_symmetry)]` escape (v10 §14.6.5) |
-| Currying symmetric indices → dependent `BoundedIdx` / lower-rank `SymIdx` | Core | v10 §4.14.1 |
-| Contiguity guarantee vs slicing views | Core | v10 §11.4 |
-
 ## 9. Combinator algebra
 
-All Core (v10 §12; `corpus/guard-combinators`, `corpus/sequence-combinators`,
-`corpus/replicate`, `corpus/zero-combinators`, `corpus/loops`). Laws are stated in
-the formalism; checked artifacts listed in [proofs.md](proofs.md) (BladeMonad,
-BladeCompute).
+L aws are stated in the formalism; checked artifacts listed in [proofs.md](proofs.md) (BladeMonad,
+BladeCompute). The MonadPlus laws hold exactly as stated — left zero, both identities,
+LEFT distribution (plus right zero), and **right distribution provably fails** for
+the computation monad (BladeMonad).
 
-| Combinator | Role |
-|-----------|------|
-| `<@>` | Apply kernel to loop / arrays to object-loop |
-| `>>=`, `pure`, `<$>` | Computation monad (bind = loop-nest flat_map at the value level) |
-| `<&>` | Parallel composition with automatic prefix fusion (fusion depth = longest common prefix of loop level types) |
-| `<&!>` | Mandatory fusion; same-MethodLoop restriction |
-| `<*>` | Array product = MethodLoop concatenation; identity `method_for()`; fold enables runtime-arity loops; **shape concatenation, proved** (BladeTrinity) |
-| `>>@` | ObjectLoop (kernel) composition |
-| `@>>` | Within-MethodLoop sequential composition; Compose-Apply duality `(o_f >>@ o_g) <@> A ≡ (m <@> f) @>> (m <@> g)` proved (BladeCompute 12.1) |
-| `guard(p, c)` | Conditional computation; false → zeros of c's shape |
-| `<\|>` | Choice; MonadPlus with `zero` |
-| `sequence`, `replicate` | Collection combinators (bootstrap/Monte Carlo) |
-| `\|> compute` | Materialization |
+| Combinator |  | Role |
+|-----------|--|------|
+| Apply | `<@>` | Apply kernel to loop / arrays to object-loop |
+| Pipe | `\|>` | Apply the preceding arg as the last argument of the subsequent arg; `f(a) == a \|> f` |
+| Monadic | `>>=`, `pure`, `<$>` | Monadic bind, pure, functor. Computation monad (bind = loop-nest flat_map at the value level) |
+| Loop join |`<&>` | Parallel composition with automatic prefix fusion |
+| Force join | `<&!>` | Mandatory fusion; same-MethodLoop restriction |
+| Product | `<*>` | Array product = MethodLoop concatenation; identity `method_for()` |
+| Compose-apply | `>>@` | ObjectLoop (kernel) composition |
+| Apply-compose | `@>>` | Within-MethodLoop sequential composition <br>Compose-apply duality `(o_f >>@ o_g) <@> A ≡ (m <@> f) @>> (m <@> g)` |
+| Guard | `guard(p, c)` | Conditional computation; false → zeros of c's shape |
+| Choice | `<\|>` | Choice; MonadPlus with `zero` |
+| Collections | `sequence`, `replicate` |  |
+| Compute | `\|> compute` | Materialization |
 
-**Corrected law note**: the MonadPlus laws hold exactly as stated — left zero, both
-identities, LEFT distribution (plus right zero) — and **right distribution provably
-fails** for the computation monad (BladeMonad). Do not assume it.
+### 9a. Combinator Idioms
+
+Some higher-order combinators are particularly useful for applying complex function iteratively.
+
+| Idiom |  | Description |
+|-----------|--|------|
+| List compose | `object_for(>>)` | Compose each function sequentially |
+| List apply | `object_for(<@>)` | Apply an array of functions to an array of arguments |
+| Join all | `object_for(<&>)` | Loop-join an array of computations as much as possible |
+| First choice | `object_for(<\|>)` | Select the first `true` computation |
 
 ## 10. Relational (SQL-like) operations — **v7-only, formalism gap now filled**
 
@@ -168,7 +167,7 @@ Full semantics in [features/sql.md](features/sql.md). All implemented and tested
 
 | Operation | SQL analogue | One-liner |
 |-----------|--------------|-----------|
-| `mask(A, pred)` | WHERE predicate | Bool presence array over A's own index space; combine with `&&`/`||` |
+| `mask(A, pred)` | WHERE predicate | Bool presence array over A's own index space; combine with `&&`/`\|\|` |
 | `compound(A, m)` | WHERE materialization | Compact CompoundIdx view; coordinate-based reads; cardinality = pass count |
 | `intersect(A, B)` | INTERSECT | Value-based, dedups, first-occurrence order from A |
 | `union(A, B)` | UNION | Dedups both sides, A's occurrences first |
@@ -183,20 +182,11 @@ Full semantics in [features/sql.md](features/sql.md). All implemented and tested
 | `extents(A)` | COUNT(*) | Cardinality on compound = post-WHERE count |
 | Foreign keys | FK joins | Integer / EnumIdx arrays as references; capture-and-index idiom |
 
-Canonical SELECT-WHERE-ORDERBY: `sort(compound(temps, mask(temps, t -> t > 25.0)), t -> -t)`.
 
 ## 11. Symmetry system
 
 | Feature | Status | Notes / sources |
 |---------|--------|-----------------|
-| SymcomState (Neither/Symmetric/Commutative/Both) per (array, dimension) | Core | v10 §13.1–13.2; array **identity** required for the Commutative state — shared index spaces are NOT sufficient (proved: `shared_units_insufficient`, BladeLowering; this **removes** v10 §14.6.2's middle example) |
-| Output symmetry inference = lowering `lower₂₁(H) = H ∩ Stab` | Core, now **exact** | v10 §13.3; exactness (iff) proved — the largest sound grant is exactly H ∩ Stab (BladeCompleteness `license_exactness`) |
-| Input symmetry consumed on read (`lower₁₀` trivial) | Core | v10 §9.13–9.14, §13.4; proved (BladeLowering) |
-| Raising (`raise₀₁`, `raise₁₂`, deduced commutativity) | Core | v10 §9.6.6; proved (BladeLowering 9.16/9.18, BladeCompute 9.19/9.20) |
-| Triangular iteration; left-justified indexing; two-phase fold/left-justify access transform | Core | v10 §14.1–14.3; `corpus/symmetry`; left-justified bijections proved at r=2,3 and generally (BladeCore, BladeDMWF); verified offset arithmetic + bounds safety at r=2 (BladeSafety) |
-| **Product symmetry — corrected** | Core (corrected form; **implemented in v7, arc 1**) | The v10 (r!)^d claim for one identity group over d-dim arrays is refuted: only the **diagonal** (joint) swap is sound (`diagonal_group_law`); no lossless per-dimension product layout exists for r,d ≥ 2 (BladeCounting). Sound statement: r! speedup per identity group over compound index tuples; factors multiply across distinct groups. v7 now lowers this via fused joint levels (`corpus/symmetry` 012–016 value-pin it; shared-index-space licensing removed). At r=2 the **Cauchy split** recovers per-dimension product-canonical storage via sym⊗sym ⊕ antisym⊗antisym with exact cell accounting (BladeCauchy); r ≥ 3 open |
-| Lex-order guarantee: iteration order = storage order = lexicographic | Core | proved once at the arrow level, inherited by enum/affine/compound instances (BladeLex) |
-| Dimension alignment errors (shared dims must be adjacent) | Spec-only | v10 §14.6.5; retained as a diagnostic for the corrected identity-based detection |
 
 ## 12. Data model
 
@@ -204,9 +194,9 @@ Canonical SELECT-WHERE-ORDERBY: `sort(compound(temps, mask(temps, t -> t > 25.0)
 |---------|--------|-----------------|
 | Tuples: literals, exact + wildcard destructuring, `head :: tail`, unit `()`; no positional access | Core | v10 §17.11; singleton collapse `(a) = a` |
 | Structs (named fields, no methods); functional update `{ x = 3.0, ..p }` | Core | v10 §17.13; `corpus/structs` (15), `corpus/struct-aborts` |
-| Dependent records (later fields' bounds depend on earlier fields) | Spec-only | v10 §17.13.1 (CGPath example) |
-| Constrained records (`where` clause on struct) | Spec-only | v10 §17.13.2; checked at construction |
-| Mutually constrained records (`type P1 = ... and P2 = ... where ...`) | Spec-only | v10 §17.13.3 |
+| Dependent records (later fields' bounds depend on earlier fields) | Core | v10 §17.13.1 (CGPath example) |
+| Constrained records (`where` clause on struct) | Core | v10 §17.13.2; checked at construction |
+| Mutually constrained records (`type P1 = ... and P2 = ... where ...`) | Core | v10 §17.13.3 |
 | Sum types / variants with payloads; `Option`, `Result` | Core | v10 §17.12; `corpus/sum-types` (7 tests) |
 | Pattern matching (`match ... with`, guards, tuple patterns, sum-type payloads); `if/then/else` as sugar | Core | v10 §17.10 |
 | Interfaces + `impl` (signatures only, no inheritance; interface composition) | Core | v10 §17.14; `corpus/interfaces` (4 tests) |
@@ -272,27 +262,3 @@ Design drafts in ext §2.3–2.4; module doc: [features/graphs-trees.md](feature
 | Graph types via trace indices | Planned |
 | Symmetric trees (commutative children) | Planned (speculative end; see future.md) |
 
----
-
-## Gap summary (what v10 was missing, now recorded)
-
-Implemented-and-tested v7 features absent from the v10 formalism:
-
-1. The entire relational suite (§10 above; 81 tests) — `mask`, `compound`,
-   `intersect`, `union`, `unique`, `contains`, `group_keys`, `group_by`, `sort`,
-   `reduce`, `extents`, FK idioms
-2. `decompact` (compact → dense expansion with sign handling)
-3. `gram` and `hermitian` (adjoint) operators
-4. Complex literals and `conj`
-5. Ragged literals
-6. Modules; reserved `import`/`from`/`as`
-7. Tuple views (flat/structural)
-8. Anonymous ranges
-9. Residual-compound partial indexing semantics (v10 §4.5 sketched; v7 pinned the
-   full behavior incl. reject cases)
-10. EnumIdx as element type / FK domain
-
-Formalism claims corrected against the Coq tower (details in [proofs.md](proofs.md)):
-product symmetry (joint, not per-dimension), shared-index-space symmetry (refuted;
-identity required), H ∩ Stab exactness, MonadPlus right-distribution failure,
-Trinity as generators + closure.
