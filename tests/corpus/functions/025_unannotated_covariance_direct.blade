@@ -1,0 +1,13 @@
+// TEST: Unannotated Covariance Direct
+// The plan's §5 flagship, direct-call form, with ZERO annotations: mymean's
+// row deduces rank 1 from reduce/extents; covariance's a, b deduce rank 1
+// interprocedurally through mymean's summary; the array-scalar broadcasts
+// and the array-array product materialize as loops inside the function body
+// (stage 2b), with the centered arrays passed onward as call arguments.
+// cov(x, y) = mean([2, 0, 2]) = 4/3.
+function mymean(row) = reduce(row, (+)) / extents(row)
+function covariance(a, b) = mymean((a - mymean(a)) * (b - mymean(b)))
+let x = [1.0, 2.0, 3.0]
+let y = [2.0, 4.0, 6.0]
+let c = covariance(x, y)
+// EXPECT: c = 1.3333333333333333

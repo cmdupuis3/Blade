@@ -567,18 +567,28 @@ cells with a duplicated `1.333` vs the 3-cell triangle).
    type errors today); rank display polish (deduced ranks materialize in the
    resolved signature and flow to the existing type renderers).
 
-2b. **Expression-position loop materialization (NEW — the §5 flagship
-   blocker).** Plain (non-Poly) functions whose bodies produce arrays via
-   synthesized loops (`center(a) = a - mymean(a)`, annotated or not) reach
-   C++ emission as "loop object used as value": expression-context
-   combinator application supports only one inline shape, everything else
-   emits a build-breaking sentinel — a pre-existing, self-documented
-   limitation (src/CodeGen.fs:1614-1626) whose principled fix is sketched in
-   place: wrap `genApplyCombinator`'s statement output in an IIFE. Poly
-   kernels sidestep it (monomorphization inlines pack-element ops into the
-   loop nest), which is why the corpus never hit it. Until 2b lands, the §5
-   worked example runs in its Poly spelling (arity/022/028 pipeline) but not
-   as plain unannotated functions.
+2b. **Expression-position loop materialization — DONE (2026-07-25), scoped.**
+   Plain (non-Poly) functions whose bodies produce arrays via synthesized
+   loops previously reached C++ emission as the "loop object used as value"
+   sentinel (a pre-existing limitation; Poly kernels sidestep it because
+   monomorphization inlines pack-element ops, which is why the corpus never
+   hit it). Landed in `genFuncBody` (src/CodeGen.fs): a bottom-up hoist
+   pulls every `IRApp(IRObjectFor …)` — and any IRLet chain wrapping one,
+   e.g. the stage-2 broadcast's hoisted scalar — into the flat let list in
+   dependency order, and a new dispatch arm routes each through
+   `genBinding`'s existing loop-nest materializer (module-level parity, the
+   same pattern as the IRForRange/IRArrayLit arms). **The §5 flagship now
+   runs fully unannotated in both forms**: `covariance(x, y)` directly
+   (corpus functions/025) and `object_for(covariance) <@> (data, data)`
+   over rank-2 data (functions/026 — dense 2×2, identical values to
+   arity/022, compaction awaiting the stage-3/4 comm pin as designed).
+   Scoped out, kept LOUD: *returning* a loop-materialized array from a
+   plain function is guarded with an emitted `#error` (functions/027,
+   REJECT-AT: codegen) — the companion-extents convention is
+   function-local, so the result's extents don't cross the call boundary
+   yet; that return-extent ABI is the remaining work item here. (This shape
+   never worked at any annotation level; the guard replaces silent
+   corruption that the naive materialization would have introduced.)
 3. **Symmetry-from-primitives** (single late pass, §3.4): the two per-primitive
    tables (3-way swap class; per-operand sign parity) + the §3.2.1 judgment as
    a bottom-up fold over specialized bodies in `Deduce.fs`, invoked from

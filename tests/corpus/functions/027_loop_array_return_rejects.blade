@@ -1,0 +1,11 @@
+// TEST: Loop Array Return (rejects)
+// REJECT-AT: codegen
+// A plain function RETURNING a loop-materialized array: the result's extents
+// don't cross the call boundary yet (the companion-extents convention is
+// function-local), so this is kept a LOUD build failure — the stage-2b guard
+// emits a precise sentinel instead of the silent garbage a bare return would
+// read. Never worked at any annotation level (previously died at IR
+// validation); unblocking it is the recorded return-extent-ABI work item.
+function center(a: T^1) -> T^1 = a - (reduce(a, (+)) / extents(a))
+let x = [1.0, 2.0, 3.0]
+let c = center(x)

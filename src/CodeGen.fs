@@ -10170,7 +10170,55 @@ let genFuncBody (ctx: CodeGenContext) (builder: IRBuilder) (names: Map<IRId, str
             | [] -> ((id, value) :: restLets, restFinal)
             | _ -> (innerLets @ [(id, innerFinal)] @ restLets, restFinal)
         | _ -> ([], expr)
-    let (lets, retExpr) = deepUnroll body
+    let (lets0, retExpr0) = deepUnroll body
+    // Stage 2b: expression-position loop materialization. Synthesized
+    // elementwise/broadcast loops (IRApp over IRObjectFor) are statement-
+    // shaped: at module level genBinding materializes them, but inside a
+    // function body they historically fell through exprToCpp's "loop object
+    // used as value" sentinel whenever they sat in return or argument
+    // position (`center(a) = a - mymean(a)`, `mymean((a-..)*(b-..))`).
+    // Hoist every such application — and any IRLet chain wrapping one, e.g.
+    // the broadcast's hoisted-scalar let — bottom-up into the flat let list,
+    // dependencies first, leaving an IRVar in its place. The let-dispatch
+    // below then routes each through genBinding exactly like the
+    // IRArrayLit/IRForRange arms. Recursion stays within eager value
+    // positions (apps, binops, tuples, unary, index); other shapes keep
+    // their existing behavior.
+    let rec hoistLoopApps (e: IRExpr) : (IRId * IRExpr) list * IRExpr =
+        match e with
+        | IRLet (id, v, b) ->
+            let (lv, v') = hoistLoopApps v
+            let (lb, b') = hoistLoopApps b
+            (lv @ [(id, v')] @ lb, b')
+        | IRApp (IRObjectFor info, args, ty) ->
+            let hs = args |> List.map hoistLoopApps
+            let tmp = builder.FreshId()
+            ((hs |> List.collect fst) @ [(tmp, IRApp (IRObjectFor info, hs |> List.map snd, ty))],
+             IRVar (tmp, ty))
+        | IRApp (f, args, ty) ->
+            let hs = args |> List.map hoistLoopApps
+            (hs |> List.collect fst, IRApp (f, hs |> List.map snd, ty))
+        | IRBinOp (m, op, l, r) ->
+            let (ll, l') = hoistLoopApps l
+            let (lr, r') = hoistLoopApps r
+            (ll @ lr, IRBinOp (m, op, l', r'))
+        | IRUnaryOp (op, i) ->
+            let (li, i') = hoistLoopApps i
+            (li, IRUnaryOp (op, i'))
+        | IRTuple es ->
+            let hs = es |> List.map hoistLoopApps
+            (hs |> List.collect fst, IRTuple (hs |> List.map snd))
+        | IRIndex (a, idxs, ident) ->
+            let (la, a') = hoistLoopApps a
+            let hs = idxs |> List.map hoistLoopApps
+            (la @ (hs |> List.collect fst), IRIndex (a', hs |> List.map snd, ident))
+        | _ -> ([], e)
+    let lets =
+        (lets0 |> List.collect (fun (id, v) ->
+            let (lv, v') = hoistLoopApps v
+            lv @ [(id, v')]))
+    let (retLets, retExpr) = hoistLoopApps retExpr0
+    let lets = lets @ retLets
     let mutable currentNames = names
     // Indentation for genApplyCombinator emissions: the function body lives one
     // level deeper than the function declaration's ctx.Indent.
@@ -10232,6 +10280,21 @@ let genFuncBody (ctx: CodeGenContext) (builder: IRBuilder) (names: Map<IRId, str
             // mirrors what genBinding does at the module level.
             let bodyCtx = { ctx with VarNames = currentNames; Indent = bodyIndent }
             let code = genApplyCombinator bodyCtx varName info builder
+            currentNames <- Map.add id varName currentNames
+            code
+        | IRApp (IRObjectFor _, _, _) ->
+            // Stage 2b: a hoisted (or directly let-bound) synthesized loop
+            // application — route through genBinding, whose
+            // IRApp(IRObjectFor) arm expands the full loop nest, exactly as
+            // at module level. Capture forwarding for the kernel resolves
+            // through currentNames (the hoisted scalar lets precede this
+            // entry in dependency order).
+            let bodyCtx = { ctx with VarNames = currentNames; Indent = bodyIndent }
+            let tempBinding = {
+                Id = id; Name = varName; Type = inferExprType value
+                Value = value; IsConst = false; IsMutable = true
+            }
+            let (code, _) = genBinding bodyCtx tempBinding builder
             currentNames <- Map.add id varName currentNames
             code
         | IRArrayLit _ ->
@@ -10318,6 +10381,24 @@ let genFuncBody (ctx: CodeGenContext) (builder: IRBuilder) (names: Map<IRId, str
             let arrayCode = genArrayLiteral bodyCtx retVarName elements arrType
             stmts @ arrayCode @ [sprintf "%sreturn %s;" indent retVarName]
         | _ ->
+            // Stage 2b guard: RETURNING a loop-materialized array from a
+            // plain function is not yet supported — the result's extents
+            // don't cross the call boundary (the companion-extents
+            // convention is function-local), so the caller would read
+            // garbage past the real elements. This shape never worked (it
+            // previously died at IR validation / g++); keep it a LOUD
+            // build failure, now with a precise message, until the
+            // return-extent ABI lands. Scalar returns and loop-apps in
+            // argument position are fully supported above.
+            let loopAppIds =
+                lets |> List.choose (fun (id, v) ->
+                    match v with
+                    | IRApp (IRObjectFor _, _, _) -> Some id
+                    | _ -> None) |> Set.ofList
+            match retExpr with
+            | IRVar (rid, _) when Set.contains rid loopAppIds ->
+                stmts @ codegenError ctx indent "returning a loop-materialized array from a function is not yet supported - bind the result at module level or use an arity-polymorphic (Poly) kernel"
+            | _ ->
             let retStr = exprToCpp currentNames retExpr
             stmts @ [sprintf "%sreturn %s;" indent retStr]
 
