@@ -69,28 +69,27 @@ bijection, and enumeration order (v10 §4.2).
 
 | Feature | Usage | Status | Description / Notes |
 |---------|--------------|-------|-----------------|
-| Simple index types | `Idx<n>` | Core | Index type spanning `0..n-1` |
+| Simple index type | `Idx<n: Nat>` | Core | Index type of length `n` |
+| Enumerated index type | `EnumIdx<S: Enum>` | Core | enumerated categories; string/sparse key domains. Also drives `group_keys` case 2 |
+| Bounded index type | `BoundedIdx<l: Nat, u: Nat>` | Core | Internal use only. Erases to runtime bounds |
+| Symmetric index type | `SymIdx<r:Nat, n:Nat>` | Core | `r` mutually symmetric dimensions of length `n` |
+| Antisymmetric index type | `AntisymIdx<r, n>` | Core | `r` sign-tracked mutually antisymmetric dimensions |
+| Hermitian index type | `HermitianIdx<n>` | Core | 2-D Hermitian index type. `A(i,j) = conj(A(j,i))` |
+| Compound index type | `CompoundIdx<mask: bool^r>` | Core | `r`-dimensional sorted sparse index type ideal for relatively dense grids. Inherits dimensions from static `mask` array. |
+| Ragged index type | `RaggedIdx<lengths>` | Core |  |
+| Dependent index type | `DepIdx<I, f: Nat -> Idx<N>>` | Core |  Static function `f` maps each index of `I` to a new `Idx` |
+| Equivariant index type | `EquivIdx<n, G, ρ>` | Planned? | group-representation-annotated indices v10 §4.15.4; foundation for the ML module, see [features/equivariant-nn.md](features/equivariant-nn.md) |
+| Sparse index type | `SparseIdx<entries>` | Planned | explicit valid-entry enumeration with hash-table storage; partly overlaps with `CompoundIdx` in practice |
+| Nested/mixed symmetry | `NestedSymIdx` (elasticity),<br> `RiemannIdx` (curvature) | Speculative | v10 §4.15.2–4.15.3; cardinality formulas specified |
+
+### 5a. Index type features
+
+| Feature | Usage | Status | Description / Notes |
+|---------|--------------|-------|-----------------|
 | Named index types | `type LatIdx = Idx<360>` | Core | Named index types are required for comparison. Unnamed index types are always considered distinct. |
-| Index type tags | `Idx<n, Tag>` | Core | String or enum-valued. Tags are for type comparison only. (Maybe redundant?) |
-| Index values as unit-tagged naturals (`Nat<LatIdx>`); nominal bounds safety | Core | v10 §4.18; `corpus/index-types` 092–102; arithmetic preserves units; literals need explicit units |
-| `EnumIdx<S>` (enumerated categories; string/sparse key domains) | Core | v10 §4.3; `corpus/sql-foreign-keys` 009–010; also drives `group_keys` Case 2 |
-| `BoundedIdx<l, u>` (dependent, arises from currying symmetric indices) | Core | v10 §4.13; erases to runtime bounds |
-| `SymIdx<r, n>` — sorted tuples, cardinality C(n+r−1, r) | Core | v10 §4.14.1; `corpus/symmetry`, `corpus/loops`; cardinality closed form is proved (BladeBinomial) |
-| `AntisymIdx<r, n>` — strict tuples, cardinality C(n, r), sign tracking | Core | v10 §4.14.2; `corpus/index-types` 050–058 (iteration, kernels, Reynolds cancellation) |
-| `HermitianIdx<n>` — conjugate symmetry, `A(i,j) = conj(A(j,i))` | Core | v10 §4.14.3; `corpus/index-types` 059, 066–071 incl. rectangular variant |
-| `CompoundIdx<mask>` — mask-derived sparse compound; curryable `N → N → ...` signature | Core | v10 §4.4–4.5; `corpus/index-types` 001–017; whole-mask hash identity; O(1) lookup |
-| `compound(dense, mask)` runtime builder — mask a dense array into a compact CompoundIdx view | **v7-only** | [features/sql.md](features/sql.md) §2; leading-prefix mask over dense dims collapses into one CompoundIdx axis; static `CompoundIdx<mask>` type path reserved but unexercised |
-| Partial compound indexing with wildcards; **residual-compound representation** | **v7-only** (semantics), Core (syntax) | v10 §4.5 sketches; v7 implements fully: interior wildcards, trailing wildcards, chained partials, residual CompoundIdx results, reject cases (`corpus/index-types` 002–014). The residual of fixing coordinates in a mask is itself a compound (executable form: `has_completion`, BladeCompound) |
-| `RaggedIdx<lengths>` — closed and opaque forms | Core | v10 §4.4, §4.7.2; `corpus/index-types` 018–026, 074, 080–088 (opaque reduce/extents/indexing, function params both forms) |
-| `DepIdx<I, f>` — generalized dependent index | Core | v10 §4.7; `corpus/index-types` 072–075, 089–091, 099–100 (lambda + eta forms, triangular literal, per-row reduce) |
-| `SparseIdx<entries>` — explicit valid-entry enumeration (CG triples, graph edges) | Spec-only | v10 §4.6; hash-table storage, wildcard queries; superseded in part by `compound`/CompoundIdx in practice |
-| Nested/mixed symmetry: `NestedSymIdx` (elasticity), `RiemannIdx` (curvature) | Spec-only | v10 §4.15.2–4.15.3; cardinality formulas specified |
-| Compositional index constructors `Sym<I,I>`, `Antisym<I,I>`, products | Spec-only | v10 §4.16.2 (three-tier system) |
-| `unsafe indextype` escape hatch (`canonical` returns `Option`, `transform` on access) | Spec-only | v10 §4.16.3; `None` = implicit zero handles antisym diagonals |
-| Index transforms: `flip`, `rename`, `subset`, `align` | Spec-only | v10 §4.8; all explicit, no implicit conversions |
-| Structural matching (duck typing) across files: extent + tag + hash | Core | v10 §4.3.1; enables cross-file operations on same grid |
-| Type providers: `NetCDFProvider<"file.nc">` — file metadata → index types at compile time | Core | v10 §4.9; v7 `providers/`, `tests/NetcdfTests.fs`, `read` keyword; quasi-static file structure assumption |
-| `EquivIdx<n, G, ρ>` — group-representation-annotated indices | Near-term | v10 §4.15.4; foundation for the ML module, see [features/equivariant-nn.md](features/equivariant-nn.md) |
+| Index type tags | `Idx<n: Nat, Tag: String\|Enum>` | Core | String or enum-valued. Tags are for type comparison only. (Maybe redundant?) |
+| Index type composition | `Sym<I,I>`, `Antisym<I,I>` | Speculative | v10 §4.16.2 (three-tier system) |
+| Index transforms | `flip`, `rename`, `subset`, `align` | Speculative | v10 §4.8; all explicit, no implicit conversions |
 
 ## 6. Functions and kernels
 
@@ -192,15 +191,16 @@ Full semantics in [features/sql.md](features/sql.md). All implemented and tested
 
 | Feature | Status | Notes / sources |
 |---------|--------|-----------------|
-| Tuples: literals, exact + wildcard destructuring, `head :: tail`, unit `()`; no positional access | Core | v10 §17.11; singleton collapse `(a) = a` |
-| Structs (named fields, no methods); functional update `{ x = 3.0, ..p }` | Core | v10 §17.13; `corpus/structs` (15), `corpus/struct-aborts` |
-| Dependent records (later fields' bounds depend on earlier fields) | Core | v10 §17.13.1 (CGPath example) |
-| Constrained records (`where` clause on struct) | Core | v10 §17.13.2; checked at construction |
+| Tuples: literals, exact + wildcard destructuring, `head :: tail`, unit `()`; no positional access | Core | singleton collapse `(a) = a` |
+| Structs (named fields, no methods); functional update `{ x = 3.0, ..p }` | Core |  |
+| Dependent records (later fields' bounds depend on earlier fields) | Core | CGPath example |
+| Constrained records (`where` clause on struct) | Core | checked at construction |
 | Mutually constrained records (`type P1 = ... and P2 = ... where ...`) | Core | v10 §17.13.3 |
 | Sum types / variants with payloads; `Option`, `Result` | Core | v10 §17.12; `corpus/sum-types` (7 tests) |
 | Pattern matching (`match ... with`, guards, tuple patterns, sum-type payloads); `if/then/else` as sugar | Core | v10 §17.10 |
 | Interfaces + `impl` (signatures only, no inheritance; interface composition) | Core | v10 §17.14; `corpus/interfaces` (4 tests) |
 | Struct FK fields (`ETIndexRef`) | Core | `corpus/sql-foreign-keys` 006; [features/sql.md](features/sql.md) §12 |
+| Type providers: `NetCDFProvider<"file.nc">` — file metadata → index types at compile time | Core | v10 §4.9; v7 `providers/`, `tests/NetcdfTests.fs`, `read` keyword; quasi-static file structure assumption |
 
 ## 13. Program structure and syntax
 
