@@ -540,11 +540,45 @@ cells with a duplicated `1.333` vs the 3-cell triangle).
    loops/101-107 (tuple/single/comm-SymIdx/object_for/named-kernel/zip/reject);
    full suite 956 corpus + 1272 total, 0 failed; interp differential clean.
    (`for`/`in` grammar needed no work — already role-agnostic, §2.1.)
-2. **Rank-from-primitives**: consolidate the scattered ≥-rank facts (§3.1) into
-   a declarative per-primitive minimum-rank table; add the lower-bound
-   constraint kind beside `arityConstraints`; max-join solve over kernel
-   bodies; body-only; fixpoint with divergence guard (§6.5); surface the
-   inferred cell rank (REPL/`ide check` display). Baseline for lambdas.
+2. **Rank-from-primitives — CORE DONE (2026-07-25), scoped.** Landed: the
+   `rankLowerBounds` side table on `Subst` (src/Unify.fs) beside the exact
+   `arityConstraints` — max-join on registration, validated/propagated in
+   `unify`'s var arm; rank propagation at the DIRECT-APPLICATION seam
+   (src/TypeCheck.fs `dispatchAppOrIndex`, the third strictness carve-out
+   after irreps and units): a callee parameter's (possibly itself deduced)
+   rank is imposed as a lower bound on still-unresolved argument vars —
+   concrete arguments keep the historical looseness; and decl-close pinning
+   in `checkFunctionDecl`: an unannotated param still unresolved but carrying
+   a bound k pins to a fresh rank-k array with a free element type (body-only
+   by construction — bounds only ever come from the body's own uses).
+   `function total(row) = reduce(row,(+)); function twice(a) = total(a) +
+   total(a)` now deduces, compiles, and runs — previously it typechecked
+   silently and emitted ill-typed C++ (corpus functions/023). Discovered and
+   fixed along the way: the array<->scalar broadcast kernel inlined its fixed
+   operand with no captures, dangling any function-local VarIds (BL6001) and
+   recomputing the scalar per element — computed scalars now hoist into a
+   let and thread in as a proper capture (src/Lowering.fs
+   `lowerTypedPartialAppWith`; corpus functions/024; pre-existing bug,
+   exposed by rank deduction, verified with an annotated repro).
+   Deliberately deferred: the declarative min-rank table (builtins keep
+   their existing enforcement sites — `requireArrayArg` et al. — until ops
+   gain lifted implementations); a dedicated divergence guard (with exact
+   pins retained, the pathological self-recursive demands surface as plain
+   type errors today); rank display polish (deduced ranks materialize in the
+   resolved signature and flow to the existing type renderers).
+
+2b. **Expression-position loop materialization (NEW — the §5 flagship
+   blocker).** Plain (non-Poly) functions whose bodies produce arrays via
+   synthesized loops (`center(a) = a - mymean(a)`, annotated or not) reach
+   C++ emission as "loop object used as value": expression-context
+   combinator application supports only one inline shape, everything else
+   emits a build-breaking sentinel — a pre-existing, self-documented
+   limitation (src/CodeGen.fs:1614-1626) whose principled fix is sketched in
+   place: wrap `genApplyCombinator`'s statement output in an IIFE. Poly
+   kernels sidestep it (monomorphization inlines pack-element ops into the
+   loop nest), which is why the corpus never hit it. Until 2b lands, the §5
+   worked example runs in its Poly spelling (arity/022/028 pipeline) but not
+   as plain unannotated functions.
 3. **Symmetry-from-primitives** (single late pass, §3.4): the two per-primitive
    tables (3-way swap class; per-operand sign parity) + the §3.2.1 judgment as
    a bottom-up fold over specialized bodies in `Deduce.fs`, invoked from

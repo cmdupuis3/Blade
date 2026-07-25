@@ -1,0 +1,11 @@
+// TEST: Broadcast Computed Scalar Capture
+// Array<->scalar broadcast whose fixed operand is a COMPUTED value (not a
+// literal): `A - mymean(A)`. Lowering hoists the scalar into a let (evaluated
+// once, not per element) and threads it into the synthesized kernel as a
+// proper CAPTURE via the block-local forwarding machinery — the historical
+// inline shape left any function-local VarIds inside the fixed operand
+// dangling (BL6001).
+function mymean(row) = reduce(row, (+)) / extents(row)
+let A = [1.0, 2.0, 3.0]
+let centered = A - mymean(A)
+// EXPECT: centered = [-1.0, 0.0, 1.0]

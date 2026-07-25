@@ -1852,6 +1852,27 @@ let rec private dispatchAppOrIndex (env: TypeEnv) (tFunc: TypedExpr) (tArgs: Typ
         | None, Some (i, pu, au) ->
             Error (UnitMismatch (sprintf "argument %d" (i + 1), ppUnitSig pu, ppUnitSig au))
         | None, None ->
+            // Rank propagation at DIRECT APPLICATION (stage-2 rank deduction)
+            // — the third strictness carve-out at this seam, after irreps and
+            // units: since args are not unified against params, an
+            // unannotated CALLER param flowing into this call would never
+            // learn the callee's rank demand — the typechecker stays quiet
+            // and codegen emits ill-typed C++ (a scalar where Array<..,k> is
+            // required). Impose the callee param's rank as a LOWER BOUND on
+            // still-unresolved argument vars only (max-join in Subst);
+            // concrete arguments keep the historical looseness.
+            (let n = min paramTys.Length tArgs.Length
+             List.zip (List.truncate n paramTys) (List.truncate n tArgs)
+             |> List.iter (fun (pTy, arg) ->
+                 let calleeRank =
+                     match env.Subst.Resolve pTy with
+                     | ArrayElem pa -> pa.IndexTypes.Length
+                     | IRTInfer pid -> env.Subst.GetRankLowerBound(pid) |> Option.defaultValue 0
+                     | _ -> 0
+                 if calleeRank > 0 then
+                     match env.Subst.Resolve arg.Type with
+                     | IRTInfer aid -> env.Subst.AddRankLowerBound(aid, calleeRank)
+                     | _ -> ()))
             // A Poly<T^r> pack param makes the arrow variadic — its declared
             // param count says nothing about legal call-site arg counts, so
             // arity accounting stands down (monomorphization owns the call).
@@ -8919,6 +8940,39 @@ and checkFunctionDecl (env: TypeEnv) (funcDecl: FunctionDecl) : TypeResult<Typed
             // named function is dropped and the loop emits dense storage.
             if not (List.isEmpty commGroups) then
                 env.FuncCommGroups.[funcDecl.Name] <- commGroups
+            // Close the body-only rank deduction (stage 2): a param whose
+            // type is still an unresolved inference var but carries a rank
+            // lower bound — accumulated from the body's builtin pins and
+            // direct-call demands, max-joined — is pinned to a fresh rank-k
+            // array with a free element type. The minimum rank the body
+            // forces IS the cell rank (plan §3.1, body-only by construction:
+            // bounds only ever came from this body's own uses). Params with
+            // no bound stay fully generic (scalar-or-array polymorphism,
+            // unchanged); params under a `T^k` annotation are governed by
+            // their exact arity constraint and are skipped here.
+            paramTypes |> List.iter (fun pt ->
+                match env.Subst.Resolve pt with
+                | IRTInfer id when (env.Subst.GetArityConstraint id).IsNone ->
+                    (match env.Subst.GetRankLowerBound(id) with
+                     | Some k when k > 0 ->
+                         let slots = List.init k (fun i ->
+                             { Id = env.Builder.FreshId()
+                               Rank = 1
+                               Extent = IRParam (sprintf "__%s_deduced_n%d" funcDecl.Name i, 0, IRTNat None)
+                               Symmetry = SymNone
+                               Tag = None; IxKind = IxKPlain
+                               Kind = SDimension
+                               Dependencies = [] })
+                         let arr = { ElemType = env.Builder.FreshInferType()
+                                     IndexTypes = slots
+                                     IsVirtual = false
+                                     Identity = None }
+                         // Cannot fail: the var is bound-satisfying by
+                         // construction (fresh rank-k array, no arity pin,
+                         // no occurs possibility, not a literal var).
+                         unify env.Subst pt (mkArrayLike arr) |> ignore
+                     | _ -> ())
+                | _ -> ())
             let resolvedParams = typedParams |> List.map (fun p ->
                 { p with Type = env.Subst.Resolve(p.Type) } : TypedParam)
             let tf : TypedFunctionDecl = {
