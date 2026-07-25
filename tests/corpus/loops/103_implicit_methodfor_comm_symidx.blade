@@ -1,0 +1,9 @@
+// TEST: Implicit Method For Comm SymIdx
+// Stage-1 implicit formers must preserve the H ∩ Stab storage path: the
+// synthesized method_for extracts the same by-name identities the keyword
+// form does, so `(A, A) <@> comm-kernel` still compacts to the triangular
+// SymIdx<2,3> (6 cells, i <= j), NOT dense 3x3. Twin of symmetry/003 with
+// the former erased. No outer-product note (comm kernel + same identity).
+let A = [1.0, 2.0, 3.0]
+let result = (A, A) <@> lambda(x, y) where comm(x, y) -> x * y |> compute
+// EXPECT: result = [1.0, 2.0, 3.0, 4.0, 6.0, 9.0]

@@ -1,0 +1,9 @@
+// TEST: Implicit Method For Named Function Kernel
+// Stage-1 implicit formers composed with the named-kernel eta-expansion: a
+// bare named function on the right is decisive (eta-expanded to a lambda),
+// so the plain array variable on the left gets its method_for synthesized.
+// Twin of loops/098 with the former erased.
+function square(x) = x * x
+let A = [1.0, 2.0, 3.0]
+let result = A <@> square |> compute
+// EXPECT: result = [1.0, 4.0, 9.0]

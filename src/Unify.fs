@@ -71,6 +71,7 @@ type TypeError =
     | ObjectForKernel of got: string
     | ChainOpNeedsMethodFor of leftDesc: string
     | ChainOpBadKernel of rightDesc: string
+    | ChainOpUndecidable of leftDesc: string * rightDesc: string
     | PlaceholderNeedsAllBound of got: int * total: int
     | GroupKeysRank1
     | CumulantOrderPositive of order: int

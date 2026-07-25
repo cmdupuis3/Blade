@@ -4168,6 +4168,40 @@ and inferSequence (env: TypeEnv) exprs : TypeResult<TypedExpr> =
                         mkArrayArrow [seqIdx] (IRTScalar ETFloat64) None
                 Ok (mkTyped (TExprSequence tExprs) resultType)))
 
+/// The numpy-shaped-mistake guard for IMPLICIT method_for (stage-1 formers):
+/// `(A, B) <@> kernel` over operands that COULD co-iterate (same index
+/// structure) is the outer product, not a zip. When the former is implicit
+/// there is no `method_for` on the page to signal that, so surface a one-time
+/// steering warning. Suppressed when the operands are all the same array
+/// (self-outer is the domain's core idiom) or the kernel is comm-annotated
+/// (the user is thinking in symmetric-outer terms) — and never emitted for
+/// the explicit spelling, which states the intent already.
+and warnImplicitOuterProduct (env: TypeEnv) (tLoop: TypedExpr) (rightResult: TypeResult<TypedExpr>) : unit =
+    match tLoop.Kind with
+    | TExprMethodFor info when info.Arrays.Length >= 2 && List.isEmpty info.SharedIndexTypes ->
+        let allSameIdentity =
+            match info.Identities with
+            | [] -> true
+            | first :: rest -> rest |> List.forall (fun i -> i = first)
+        let kernelComm =
+            match rightResult with
+            | Ok tR ->
+                (match (resolveTypedExpr env tR).Kind with
+                 | TExprLambda li -> li.IsCommutative || not (List.isEmpty li.CommGroups)
+                 | TExprSection (OpAdd | OpMul | OpEq | OpNeq | OpAnd | OpOr) -> true
+                 | TExprReynolds _ -> true
+                 | _ -> false)
+            | Error _ -> false
+        let coIterable =
+            match zipSharedRecords info.ArrayTypes with
+            | Ok _ -> true
+            | Error _ -> false
+        if coIterable && not allSameIdentity && not kernelComm then
+            emitWarning env (sprintf
+                "implicit method_for: `(A, B) <@> kernel` iterates the OUTER product of its %d operands (structure-first default), not elementwise pairs. For elementwise co-iteration write `for (A, B) in range<...> <@> kernel` or `zip(A, B) <@> kernel`; write `method_for(...)` explicitly to confirm the outer product and silence this note."
+                info.Arrays.Length)
+    | _ -> ()
+
 and inferBinOp env mode op left right : TypeResult<TypedExpr> =
     match op with
     | OpApply ->
@@ -4178,9 +4212,70 @@ and inferBinOp env mode op left right : TypeResult<TypedExpr> =
             match etaExpandFunctionKernel env right with
             | Some r -> r
             | None -> inferExpr env right
-        inferExpr env left |> Result.bind (fun tL ->
-        rightResult |> Result.bind (fun tR ->
-            inferApply env tL tR))
+        // Implicit formers: when the left side is not already a former, the
+        // RIGHT operand classifies the pair (right-operand-first). A lambda /
+        // section / reynolds / zero (or a named function, eta-expanded above)
+        // is decisively a kernel, so the left side must be the arrays, and the
+        // method_for the keyword would have introduced is synthesized around
+        // it; a kernel-shaped LEFT with a non-kernel right synthesizes
+        // object_for instead. Both directions re-drive the same inferMethodFor
+        // / inferObjectFor the explicit keywords use, so everything downstream
+        // of this seam (Lowering, CodeGen, the interpreter, both differential
+        // gates) sees the identical typed nodes. Undecidable pairs fall
+        // through to inferApply's steering diagnostic (ChainOpUndecidable).
+        let rightKernelShaped =
+            match rightResult with
+            | Ok tR ->
+                (match (resolveTypedExpr env tR).Kind with
+                 | TExprLambda _ | TExprSection _ | TExprReynolds _ | TExprZero -> true
+                 | _ -> false)
+            | Error _ -> false
+        let applyWith (tL: TypedExpr) =
+            rightResult |> Result.bind (fun tR -> inferApply env tL tR)
+        let syntacticFormer =
+            match left.Kind with
+            | ExprKind.ExprMethodFor _ | ExprKind.ExprObjectFor _
+            | ExprKind.ExprFor _
+            | ExprKind.ExprBinOp (_, OpComposeObj, _, _) -> true
+            | _ -> false
+        if syntacticFormer then
+            // Explicit spelling: the unchanged path.
+            inferExpr env left |> Result.bind applyWith
+        else
+            match left.Kind with
+            | ExprKind.ExprTuple elems when rightKernelShaped ->
+                // (A, B) <@> kernel  ≡  method_for(A, B) <@> kernel
+                inferMethodFor env elems |> Result.bind (fun tL ->
+                    warnImplicitOuterProduct env tL rightResult
+                    applyWith tL)
+            | _ ->
+                inferExpr env left |> Result.bind (fun tL ->
+                    match (resolveTypedExpr env tL).Kind with
+                    | TExprMethodFor _ | TExprObjectFor _
+                    | TExprCompose (OpComposeObj, _, _) ->
+                        // Resolves to a former (e.g. a let-bound loop object):
+                        // the unchanged path, with the original typed left.
+                        applyWith tL
+                    | TExprLambda _ | TExprSection _ | TExprReynolds _ | TExprZero ->
+                        if rightKernelShaped then
+                            // Kernel <@> kernel: nothing to iterate over —
+                            // reaches the steering diagnostic below.
+                            applyWith tL
+                        else
+                            // kernel <@> arrays  ≡  object_for(kernel) <@> arrays.
+                            // Re-driving inferObjectFor on the source expr keeps
+                            // the resolve-at-apply behavior for let-bound
+                            // lambdas (compose chains) in the one existing place.
+                            inferObjectFor env left |> Result.bind applyWith
+                    | _ when rightKernelShaped ->
+                        // Arrays-shaped left (variable, call, zip, literal):
+                        // A <@> kernel  ≡  method_for(A) <@> kernel. Re-driving
+                        // inferMethodFor on the source expr keeps zip expansion
+                        // and identity extraction in the one existing place.
+                        inferMethodFor env [left] |> Result.bind applyWith
+                    | _ ->
+                        // Undecidable: steering diagnostic via inferApply.
+                        applyWith tL)
 
     | OpBind ->
         // >>= : Computation α × (α → Computation β) → Computation β
@@ -5385,7 +5480,10 @@ and inferApply (env: TypeEnv) (tLeft: TypedExpr) (tRight: TypedExpr) : TypeResul
         // Name the real culprit. When the LEFT already is a valid
         // method_for/object_for, the unmatched operand is the RIGHT (the
         // kernel) — reporting the left here is what produced the historical
-        // "requires method_for … but got TExprMethodFor" red herring.
+        // "requires method_for … but got TExprMethodFor" red herring. With
+        // implicit formers (inferBinOp's OpApply normalization), reaching
+        // this catch-all with a former-less left means NEITHER side was
+        // decisive — steer instead of demanding a former blind.
         let describeKind (k: TypedExprKind) =
             match k with
             | TExprVar (name, _, _) -> sprintf "variable '%s'" name
@@ -5394,7 +5492,7 @@ and inferApply (env: TypeEnv) (tLeft: TypedExpr) (tRight: TypedExpr) : TypeResul
         | TExprMethodFor _ | TExprObjectFor _ ->
             Error (ChainOpBadKernel (describeKind rR.Kind))
         | _ ->
-            Error (ChainOpNeedsMethodFor (describeKind rL.Kind))
+            Error (ChainOpUndecidable (describeKind rL.Kind, describeKind rR.Kind))
 
 and buildApplyInfo (env: TypeEnv)
     (arrays: TypedExpr list) (identities: ArrayIdentity list)
