@@ -1,5 +1,9 @@
-// TEST: AntisymIdx Kernel
-// Kernel producing antisymmetric output
+// TEST: SymIdx Baseline (AntisymIdx Family)
+// Contrast baseline for the AntisymIdx tests (050/052/053): a genuinely
+// commutative kernel (x * y) over the same array compacts to the INCLUSIVE
+// i <= j SymIdx triangle — 6 cells for n=3, diagonal stored — whereas the
+// reynolds(g, Antisymmetric) producers yield the STRICT i < j AntisymIdx
+// form with the diagonal implicitly zero.
 let A = [1.0, 2.0, 3.0]
 let L = method_for(A, A)
 let f = lambda(x, y) where comm(x, y) -> x * y
