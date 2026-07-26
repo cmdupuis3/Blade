@@ -82,23 +82,56 @@ let printUsage () =
     printfn "  test netcdf                       Run the NetCDF provider block (needs libnetcdf + sample.nc)"
     printfn "  test zarr                         Run the Zarr provider block (hermetic; g++ for the e2e parts)"
     printfn "  test timing                       Run the differential timing block standalone"
+    printfn "  test strict-pins                  Run the --strict-pins CLI gate block standalone"
     printfn "  test diff-oracle [category]       Diff printed values against the pinned ./oracle build"
     printfn "  test interp [category]            Diff the tree-walking interpreter against the compiled binary"
     printfn ""
     printfn "Options:"
     printfn "  -o <path>      Output file path"
     printfn "  --verbose      Show IR and generated C++"
+    printfn "  --strict-pins  Fail the build on unpinned confirm-and-pin deductions"
+    printfn "                 (BL4007, normally warnings). For CI: forces the pin"
+    printfn "                 decision into source. check / compile / emit / run."
     printfn "  --help         Show this help"
     printfn ""
     printfn "Examples:"
     printfn "  blade run myprogram.edgi"
     printfn "  blade emit myprogram.edgi -o myprogram.cpp"
     printfn "  blade compile myprogram.edgi -o myprogram"
+    printfn "  blade check myprogram.edgi --strict-pins"
     printfn "  blade test"
     printfn "  blade test --omp --cuda --timing"
 
+/// §6.1(b) strict mode. The stage-3/4 confirm-and-pin SUGGESTIONS (BL4007) are
+/// warnings by default: the deduction proposes, storage stays DENSE, and
+/// nothing changes until the user pins the annotation in source.
+/// `--strict-pins` promotes every outstanding suggestion to a build ERROR, so
+/// a CI build fails on an unpinned deduction that would change storage and the
+/// pin decision has to be committed in source (the annotation is the durable
+/// artifact — plan §6.1 option (b)).
+///
+/// Reads the `PinSuggestions` side-channel `typeCheck` fills — the structured
+/// (message, kernel span) twin of the plain-string warnings — and renders each
+/// through the ordinary diagnostic renderer, so a strict failure looks exactly
+/// like any other `error[BL4007]:` with its source snippet. Returns None when
+/// strict mode is off or nothing is outstanding. Deduplicated and in
+/// deduction order (§6.6 determinism).
+let private strictPinFailure (strictPins: bool) (useColor: bool)
+                             (sm: Blade.Diagnostics.SourceMap option) : string option =
+    if not strictPins then None
+    else
+        match Blade.TypeCheck.PinSuggestions.get () |> List.distinct with
+        | [] -> None
+        | suggestions ->
+            let ds =
+                suggestions |> List.map (fun (msg, span) ->
+                    Blade.Diagnostics.mkError "BL4007" Blade.Diagnostics.PhConstraints span msg
+                    |> Blade.Diagnostics.withNote
+                        "--strict-pins: an unpinned deduction that would change storage fails the build. Add the pin shown above, or drop --strict-pins for the default dense-until-pinned behavior.")
+            Some (Blade.Diagnostics.Render.renderAll useColor sm ds)
+
 /// Compile a .edgi file to C++ source string
-let compileFile (filePath: string) (verbose: bool) : Result<string * string list, string> =
+let compileFile (filePath: string) (verbose: bool) (strictPins: bool) : Result<string * string list, string> =
     if not (File.Exists filePath) then
         Error (sprintf "File not found: %s" filePath)
     else
@@ -110,6 +143,11 @@ let compileFile (filePath: string) (verbose: bool) : Result<string * string list
         match lowerDiag (Some filePath) source with
         | Error ds, sm -> Error (Blade.Diagnostics.Render.renderAll useColor (Some sm) ds)
         | Ok (ir, tcWarnings), sm ->
+            // Strict mode fails here, before codegen: the pin suggestions
+            // REPLACE their warning twins (which are therefore not printed).
+            match strictPinFailure strictPins useColor (Some sm) with
+            | Some rendered -> Error rendered
+            | None ->
             for w in tcWarnings do
                 eprintfn "[TypeCheck Warning] %s" w
             match IR.validateIR ir with
@@ -126,8 +164,8 @@ let compileFile (filePath: string) (verbose: bool) : Result<string * string list
                 Ok (cppCode, warnings)
 
 /// Compile a .edgi file to an executable
-let compileToExe (filePath: string) (outputPath: string option) (verbose: bool) : Result<string, string> =
-    match compileFile filePath verbose with
+let compileToExe (filePath: string) (outputPath: string option) (verbose: bool) (strictPins: bool) : Result<string, string> =
+    match compileFile filePath verbose strictPins with
     | Error e -> Error e
     | Ok (cppCode, warnings) ->
         let baseName = Path.GetFileNameWithoutExtension(filePath)
@@ -178,10 +216,10 @@ let compileToExe (filePath: string) (outputPath: string option) (verbose: bool) 
 /// printing), links -lmsmpi (via the mpi.h detection in compileCpp), and
 /// launches under `mpiexec -n n`. None = the historical serial path (any
 /// `where mpi` clause stays inert).
-let runFile (filePath: string) (verbose: bool) (mpiRanks: int option) : int =
+let runFile (filePath: string) (verbose: bool) (mpiRanks: int option) (strictPins: bool) : int =
     match mpiRanks with
     | None ->
-        match compileToExe filePath None verbose with
+        match compileToExe filePath None verbose strictPins with
         | Error e ->
             eprintfn "%s" e
             1
@@ -196,7 +234,7 @@ let runFile (filePath: string) (verbose: bool) (mpiRanks: int option) : int =
     | Some ranks ->
         CodeGen.setMpiEmitMode true
         try
-            match compileToExe filePath None verbose with
+            match compileToExe filePath None verbose strictPins with
             | Error e ->
                 eprintfn "%s" e
                 1
@@ -507,7 +545,7 @@ let replLoop () : int =
                     None
             // Historical g++ compile+run for this ONE input (the fallback lane).
             let viaCompiled () =
-                match compileToExe srcPath None false with
+                match compileToExe srcPath None false false with
                 | Error e ->
                     eprintfn "%s" e
                     eprintfn "[snippet not kept]"
@@ -715,7 +753,7 @@ let runCliSmokeTests () : TH.BlockResult =
         try
             let srcFile = Path.Combine(tmpDir, "smoke.edgi")
             File.WriteAllText(srcFile, "let x = 1 + 2 * 3\n")
-            match compileToExe srcFile None false with
+            match compileToExe srcFile None false false with
             | Error e ->
                 record runTest TH.Fail (e.Replace("\n", " | "))
             | Ok exePath ->
@@ -753,7 +791,7 @@ let runCliSmokeTests () : TH.BlockResult =
       FailedNames = failedNames }
 
 /// Type-check a file without generating code
-let checkFile (filePath: string) : int =
+let checkFile (filePath: string) (strictPins: bool) : int =
     if not (File.Exists filePath) then
         eprintfn "File not found: %s" filePath
         1
@@ -773,14 +811,28 @@ let checkFile (filePath: string) : int =
                 eprintfn "%s" (Blade.Diagnostics.Render.renderAll useColor (Some sm) ds)
                 1
             | Ok (_, _, warnings) ->
-                for w in warnings do
-                    printfn "[TypeCheck Warning] %s" w
-                printfn "OK"
-                0
+                match strictPinFailure strictPins useColor (Some sm) with
+                | Some rendered ->
+                    // Strict mode (§6.1(b)): the pin suggestions ARE the
+                    // failure. Their plain-string twins are dropped from the
+                    // warning list (same dedup rule as `blade ide check`), so
+                    // each suggestion is reported exactly once, as an error.
+                    let pinMessages =
+                        Blade.TypeCheck.PinSuggestions.get () |> List.map fst |> Set.ofList
+                    for w in warnings do
+                        if not (Set.contains w pinMessages) then
+                            printfn "[TypeCheck Warning] %s" w
+                    eprintfn "%s" rendered
+                    1
+                | None ->
+                    for w in warnings do
+                        printfn "[TypeCheck Warning] %s" w
+                    printfn "OK"
+                    0
 
 /// Emit C++ source to file or stdout
-let emitFile (filePath: string) (outputPath: string option) (verbose: bool) : int =
-    match compileFile filePath verbose with
+let emitFile (filePath: string) (outputPath: string option) (verbose: bool) (strictPins: bool) : int =
+    match compileFile filePath verbose strictPins with
     | Error e ->
         eprintfn "%s" e
         1
@@ -800,9 +852,113 @@ let emitFile (filePath: string) (outputPath: string option) (verbose: bool) : in
             printf "%s" cppCode
             0
 
-/// Run the full suite, appending the CLI smoke block (which lives in this
-/// file — see runAllTestsFullWith's doc comment for why it's passed in).
-let private runFullSuite opts = runAllTestsFullWith [runCliSmokeTests] opts
+/// `--strict-pins` (§6.1(b)) regression block. The corpus harness runs .blade
+/// files with fixed compiler options, so a FLAG's behavior cannot be expressed
+/// as a corpus entry; this block drives the two CLI surfaces that own the gate
+/// (checkFile, and compileFile — the lane compile/emit/run all funnel through)
+/// against a temp file, in-process. No C++ toolchain involved: the gate fires
+/// at typecheck, before codegen.
+///
+/// The two programs are the corpus twins functions/026 (unpinned → suggestion)
+/// and functions/029 (the suggested pin applied); kept inline so the flag test
+/// stays readable and independent of corpus renumbering. Console output is
+/// captured so a passing run stays quiet — and so the rendered text can be
+/// asserted on (substring "BL4007", which survives ANSI coloring).
+let private runStrictPinTests () : TH.BlockResult =
+    let blockName = "Strict Pins"
+    TH.printHeader "Strict Pin Mode (--strict-pins: unpinned deduction = build failure)"
+    let results = ResizeArray<string * TH.Outcome>()
+    let record name outcome detail =
+        TH.resultLine outcome name detail
+        results.Add((name, outcome))
+    let unpinned =
+        "function mymean(row) = reduce(row, (+)) / extents(row)\n\
+         function covariance(a, b) = mymean((a - mymean(a)) * (b - mymean(b)))\n\
+         let data = [[1.0, 2.0, 3.0], [2.0, 4.0, 6.0]]\n\
+         let result = object_for(covariance) <@> (data, data) |> compute\n"
+    let pinned = unpinned.Replace("function covariance(a, b) =",
+                                  "function covariance(a, b) where comm(a, b) =")
+    let tmpDir = Path.Combine(Path.GetTempPath(), "blade_strict_pins_" + Guid.NewGuid().ToString("N"))
+    Directory.CreateDirectory(tmpDir) |> ignore
+    /// Run `f` with stdout/stderr captured; returns (result, captured text).
+    let quietly (f: unit -> 'a) : 'a * string =
+        let sw = new StringWriter()
+        let (oldOut, oldErr) = (Console.Out, Console.Error)
+        try
+            Console.SetOut sw
+            Console.SetError sw
+            let r = f ()
+            (r, sw.ToString())
+        finally
+            Console.SetOut oldOut
+            Console.SetError oldErr
+    try
+        let unpinnedPath = Path.Combine(tmpDir, "unpinned.edgi")
+        let pinnedPath = Path.Combine(tmpDir, "pinned.edgi")
+        File.WriteAllText(unpinnedPath, unpinned)
+        File.WriteAllText(pinnedPath, pinned)
+
+        // Default behavior is UNCHANGED: the deduction is a warning, exit 0.
+        let (code, out) = quietly (fun () -> checkFile unpinnedPath false)
+        if code = 0 && out.Contains "where comm(a, b)" then
+            record "check: default surfaces the suggestion as a warning (exit 0)" TH.Pass ""
+        else
+            record "check: default surfaces the suggestion as a warning (exit 0)" TH.Fail
+                   (sprintf "exit %d, output: %s" code (out.Trim()))
+
+        // Strict: the same suggestion becomes an error and fails the build.
+        let (code, out) = quietly (fun () -> checkFile unpinnedPath true)
+        if code = 1 && out.Contains "BL4007" && out.Contains "where comm(a, b)" then
+            record "check --strict-pins: unpinned deduction is a BL4007 error (exit 1)" TH.Pass ""
+        else
+            record "check --strict-pins: unpinned deduction is a BL4007 error (exit 1)" TH.Fail
+                   (sprintf "exit %d, output: %s" code (out.Trim()))
+
+        // The suggestion is ACTIONABLE: applying the proposed pin clears it.
+        let (code, out) = quietly (fun () -> checkFile pinnedPath true)
+        if code = 0 then
+            record "check --strict-pins: the pinned twin passes" TH.Pass ""
+        else
+            record "check --strict-pins: the pinned twin passes" TH.Fail
+                   (sprintf "exit %d, output: %s" code (out.Trim()))
+
+        // The compile/emit/run lane (all three funnel through compileFile).
+        let ((result: Result<string * string list, string>), _) =
+            quietly (fun () -> compileFile unpinnedPath false true)
+        match result with
+        | Error e when e.Contains "BL4007" ->
+            record "compile lane --strict-pins: fails before codegen" TH.Pass ""
+        | Error e ->
+            record "compile lane --strict-pins: fails before codegen" TH.Fail
+                   (sprintf "wrong error: %s" (e.Replace("\n", " | ")))
+        | Ok _ ->
+            record "compile lane --strict-pins: fails before codegen" TH.Fail "compiled instead of failing"
+
+        let (result, _) = quietly (fun () -> compileFile unpinnedPath false false)
+        match result with
+        | Ok _ -> record "compile lane default: unaffected (still compiles)" TH.Pass ""
+        | Error e ->
+            record "compile lane default: unaffected (still compiles)" TH.Fail
+                   (e.Replace("\n", " | "))
+    finally
+        try Directory.Delete(tmpDir, true) with _ -> ()
+    let count o = results |> Seq.filter (fun (_, r) -> r = o) |> Seq.length
+    let passed, failed, skipped = count TH.Pass, count TH.Fail, count TH.Skip
+    let failedNames = results |> Seq.filter (fun (_, r) -> r = TH.Fail) |> Seq.map fst |> List.ofSeq
+    let parts =
+        [ sprintf "%d passed" passed; sprintf "%d failed" failed ]
+        @ (if skipped > 0 then [sprintf "%d skipped" skipped] else [])
+    TH.printFooter blockName parts
+    { TH.BlockResult.Block = blockName
+      Passed = passed
+      Failed = failed
+      Skipped = skipped
+      FailedNames = failedNames }
+
+/// Run the full suite, appending the CLI smoke block and the strict-pin block
+/// (which live in this file — see runAllTestsFullWith's doc comment for why
+/// they're passed in).
+let private runFullSuite opts = runAllTestsFullWith [runCliSmokeTests; runStrictPinTests] opts
 
 /// Dispatch the `test` subcommand. `rest` is everything after "test".
 let private dispatchTest (rest: string list) : int =
@@ -824,6 +980,11 @@ let private dispatchTest (rest: string list) : int =
                        IncludeDiffOracle = List.contains "--diff-oracle" flags }
     | [ "--ir-only" ] -> runAllTests ()
     | [ "--gen" ] -> runAllTestsGenOnly ()
+    | [ "strict-pins" ] | [ "strictpins" ] ->
+        // The --strict-pins CLI gate (§6.1(b)) standalone. In-process, no
+        // toolchain; also part of the full suite.
+        let failed = (runStrictPinTests ()).Failed
+        if failed = 0 then 0 else 1
     | [ "normalize" ] ->
         // IR-level F# unit tests for the type normalizer. Runs in-process,
         // no Blade source pipeline involved.
@@ -1016,6 +1177,19 @@ let private dispatchInner (args: string[]) : int =
     // Share the compiler version with the test-harness output helpers so every
     // block header reads "(vX.Y.Z)" consistently, including standalone runs.
     Blade.Tests.TestHarness.version <- compilerVersion
+    // `--strict-pins` (§6.1(b)) is a build MODE, not a positional argument, and
+    // it only means anything for the four verbs that own a typecheck. Strip it
+    // out of the argv the verb patterns match on so every existing arm shape
+    // (`compile f -o out`, `emit f -o out --verbose`, `run f --mpi 4`) accepts
+    // it in any position without a combinatorial explosion of match patterns.
+    // Left in place for every other verb, where it stays an unknown argument.
+    let strictPinVerb =
+        args.Length >= 1 &&
+        (match args.[0] with
+         | "check" | "compile" | "emit" | "run" -> true
+         | _ -> false)
+    let strictPins = strictPinVerb && Array.contains "--strict-pins" args
+    let args = if strictPins then args |> Array.filter (fun a -> a <> "--strict-pins") else args
     match args with
     // ---- User-facing commands ----
     // `run <file> [--verbose] [--mpi N]` — flags in any order after the file.
@@ -1040,23 +1214,23 @@ let private dispatchInner (args: string[]) : int =
         match bad, file with
         | Some msg, _ -> eprintfn "Error: %s" msg; 1
         | None, None -> printUsage (); 1
-        | None, Some f -> runFile f verbose mpiRanks
+        | None, Some f -> runFile f verbose mpiRanks strictPins
 
     | [| "compile"; file |] ->
-        match compileToExe file None false with
+        match compileToExe file None false strictPins with
         | Ok path -> printfn "%s" path; 0
         | Error e -> eprintfn "%s" e; 1
     | [| "compile"; file; "-o"; output |] ->
-        match compileToExe file (Some output) false with
+        match compileToExe file (Some output) false strictPins with
         | Ok path -> printfn "%s" path; 0
         | Error e -> eprintfn "%s" e; 1
 
-    | [| "emit"; file |] -> emitFile file None false
-    | [| "emit"; file; "-o"; output |] -> emitFile file (Some output) false
-    | [| "emit"; file; "--verbose" |] -> emitFile file None true
-    | [| "emit"; file; "-o"; output; "--verbose" |] -> emitFile file (Some output) true
+    | [| "emit"; file |] -> emitFile file None false strictPins
+    | [| "emit"; file; "-o"; output |] -> emitFile file (Some output) false strictPins
+    | [| "emit"; file; "--verbose" |] -> emitFile file None true strictPins
+    | [| "emit"; file; "-o"; output; "--verbose" |] -> emitFile file (Some output) true strictPins
 
-    | [| "check"; file |] -> checkFile file
+    | [| "check"; file |] -> checkFile file strictPins
 
     | [| "repl" |] -> replLoop ()
 
