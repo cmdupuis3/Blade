@@ -264,6 +264,15 @@ and IRCallable = {
     IsStatic: bool
     IsCommutative: bool
     CommGroups: int list list
+    // AntisymGroups: the positions a `where antisymm(...)` clause declared
+    // anti-invariant. These positions ALSO appear in CommGroups (the grouping
+    // and iteration license are identical to comm's — one joint simplex over
+    // the group), so every axis-grouping consumer needs no change; this list
+    // is the extra bit that says the simplex is STRICT: no diagonal, sign flip
+    // on a swapped read. Empty for every kernel that did not declare it, so
+    // the reynolds antisymmetrization path (which carries its flag on the
+    // IRReynolds wrapper instead) is untouched.
+    AntisymGroups: int list list
     // Parallelism: per-(param-index, dim-count) detail from an `omp(...)` clause.
     // IsOmpParallel is the derived "this callable requested OpenMP" flag — the
     // opt-in signal that drives loop parallelization (see buildLoopNestCodeGen).
@@ -1918,6 +1927,10 @@ let mkCallable
         IsStatic = opts.IsStatic
         IsCommutative = isCommutative
         CommGroups = commGroups
+        // Declared antisymmetry is grafted on by the ONE construction site
+        // that has it (Lowering.lowerTypedLambda, from the lambda's
+        // where-clause); every other callable-building site is comm-only.
+        AntisymGroups = []
         Parallelism = parallelism
         IsOmpParallel = isOmpParallel
         IsCudaKernel = isCudaKernel
@@ -1955,7 +1968,11 @@ let mkLambdaCallable
 /// According to formalism section 10.9:
 /// 1. Group arrays by identity (consecutive identical arrays)
 /// 2. For each group: if comm + arity > 1, use SymIdx; else Idx
-///    (AntisymIdx instead of SymIdx when isReynoldsAntisym is set -- Reynolds
+///    (AntisymIdx instead of SymIdx when the group is DECLARED antisymmetric
+///     (`where antisymm(a, b)` — antisymGroups, the pin spelling: the kernel is
+///     used AS-IS, storing f(i,j) for i<j only, with reads of (j,i) negated by
+///     the index type's TfNegateOnSwap; no permutation sum) or when
+///     isReynoldsAntisym is set -- Reynolds
 ///     antisymmetrization over a commutative same-array group produces a
 ///     strictly-triangular antisymmetric output, NOT a symmetric one. The
 ///     antisymmetric output stores C(n,r) strict tuples with no diagonal,
@@ -1969,10 +1986,11 @@ let mkLambdaCallable
 ///    symmetry; the Reynolds flags only apply when a Reynolds clause is present.
 /// 3. Concatenate S-dims from all groups
 /// 4. Add T-dims from kernel output
-let deduceOutputType 
-    (arrayTypes: IRArrayType list) 
-    (identities: ArrayIdentity list) 
+let deduceOutputType
+    (arrayTypes: IRArrayType list)
+    (identities: ArrayIdentity list)
     (commGroups: int list list)
+    (antisymGroups: int list list)
     (sDimsPerArray: int list)
     (kernelTDims: IRIndexType list)
     (elemType: IRType)
@@ -2019,11 +2037,27 @@ let deduceOutputType
                 let recs = sDimRecordsByArray.[lv.ArrayIndex]
                 if lv.LocalDimIndex < recs.Length then Some recs.[lv.LocalDimIndex] else None
             else None
-        let outputSDims = 
+        let outputSDims =
             // Group ids in reordered level order; emit one index per group, in
             // first-appearance order (which matches the loop nest order).
             let levelArr = List.toArray sLevels
             let groupArr = List.toArray sGroups
+            // Is this axis group the one a `where antisymm(...)` clause
+            // declared? The clause names KERNEL PARAMETERS, which are 1:1 with
+            // argument positions, so the test is on the group's member levels'
+            // ArrayIndex values: every one of them must be listed in a single
+            // declared group, and the group must actually span more than one
+            // argument (a within-type symmetric block, whose members all share
+            // one ArrayIndex, is a property of the INPUT type and is never
+            // reclassified by a kernel clause).
+            let groupIsDeclaredAntisym (memberIdxs: int list) : bool =
+                if List.isEmpty antisymGroups then false
+                else
+                    let arrIdxs =
+                        memberIdxs |> List.map (fun k -> levelArr.[k].ArrayIndex) |> List.distinct
+                    List.length arrIdxs > 1
+                    && antisymGroups |> List.exists (fun g ->
+                           arrIdxs |> List.forall (fun a -> List.contains a g))
             let mutable emittedGroups = []
             let mutable result = []
             for gi in 0 .. levelArr.Length - 1 do
@@ -2046,6 +2080,7 @@ let deduceOutputType
                         let groupSymmetry =
                             if isReynolds then
                                 (if isReynoldsAntisym then SymAntisymmetric else SymSymmetric)
+                            elif groupIsDeclaredAntisym memberIdxs then SymAntisymmetric
                             else SymSymmetric
                         let prodExtent =
                             factors |> List.map (fun f -> f.Extent)
@@ -2076,10 +2111,14 @@ let deduceOutputType
                             // not override it. With NO Reynolds, a rank-0 elementwise
                             // kernel preserves the input's compact storage class verbatim
                             // (Sym/Antisym/Hermitian); only a plain (SymNone) multi-level
-                            // group defaults to symmetric.
+                            // group defaults to symmetric — unless the kernel DECLARED
+                            // the group antisymmetric (`where antisymm(a, b)`), which
+                            // pins the strict simplex the same way a comm clause pins
+                            // the inclusive one.
                             let groupSymmetry =
                                 if isReynolds then
                                     (if isReynoldsAntisym then SymAntisymmetric else SymSymmetric)
+                                elif groupIsDeclaredAntisym memberIdxs then SymAntisymmetric
                                 else
                                     (match rep.Symmetry with
                                      | SymSymmetric | SymAntisymmetric | SymHermitian -> rep.Symmetry
@@ -2941,6 +2980,25 @@ let buildLoopNestCodeGen
              rk.Callable.Captures, rk.Reynolds.IsAntisymmetric)
         | None -> ([], IRLit IRLitUnit, [], [], false)
 
+    // Positions the kernel declared antisymmetric (`where antisymm(a, b)`).
+    // These are already inside CommGroups (same grouping + iteration license),
+    // so only the STRICTNESS of the simplex reads this list: an argument
+    // position in a declared antisym group iterates i < j, never i <= j,
+    // because the strict-simplex storage the output type deduced has no
+    // diagonal cell to write. Empty for every kernel without the clause.
+    let declaredAntisymGroups =
+        match resolveKernel info.Kernel with
+        | Some rk -> rk.Callable.AntisymGroups
+        | None -> []
+    // Under a Reynolds wrapper the VARIANT owns the output symmetry (and hence
+    // the strictness) — a declared clause on the wrapped kernel is an
+    // iteration license only, never a storage claim — so the declared list is
+    // consulted only outside reynolds. Keeps `reynolds(k, Symmetric)` with a
+    // stray antisymm clause from iterating off its own storage.
+    let inDeclaredAntisym (arrayIdx: int) =
+        not info.HasReynolds
+        && declaredAntisymGroups |> List.exists (List.contains arrayIdx)
+
     // Opt-in parallelism: the loop nest is parallelized ONLY if the resolved
     // kernel callable requested OpenMP via an `omp(...)` clause. No clause =>
     // serial (the language default, like C/Rust). This replaces the earlier
@@ -3222,6 +3280,13 @@ let buildLoopNestCodeGen
                 //       descriptor). Here the INPUT arrays are plain (SymNone) —
                 //       the triangular iteration comes from the commutative path
                 //       — so IndexSpace.Symmetry alone would miss it.
+                //   (3) the kernel DECLARED this argument position antisymmetric
+                //       (`where antisymm(a, b)`, the pin spelling). Same shape as
+                //       (2) — plain inputs, triangularity from the group — but the
+                //       kernel is used AS-IS with no permutation sum, so the flag
+                //       rides the callable rather than a Reynolds wrapper. Checked
+                //       per LEVEL (by its owning argument position) so a declared
+                //       pair cannot make an unrelated symmetric group strict.
                 // The strict offset is CUMULATIVE across the group: level a (the
                 // a-th index within the strict group, 0-based) must start a slots
                 // past the group base, because each prior index already consumed
@@ -3234,7 +3299,9 @@ let buildLoopNestCodeGen
                 // antisym rank-3 storage-collision bug.)
                 let strictOffset =
                     if isTriangular &&
-                       (levelInfo.IndexSpace.Symmetry = SymAntisymmetric || isAntisymmetric)
+                       (levelInfo.IndexSpace.Symmetry = SymAntisymmetric
+                        || isAntisymmetric
+                        || inDeclaredAntisym arrayPos)
                     then List.length deps
                     else
                         // Compound-inner halo: the interior shrink cannot fold
@@ -4833,20 +4900,25 @@ let specializeFunction (func: IRFuncDef) (arities: int list) (funcMap: Map<IRId,
             acc |> List.rev |> Map.ofList
 
         // Specializing arity groups means rewriting group indices to
-        // account for expanded parameters. If the source had groups,
-        // newCommGroups is the expanded form; otherwise empty.
-        let (newIsComm, newCommGroups) =
-            if func.IsCommutative then
-                let expanded =
-                    func.CommGroups |> List.map (fun group ->
-                        group |> List.collect (fun idx ->
-                            match Map.tryFind idx origToNew with
-                            | Some (start, span) ->
-                                if span = 1 then [start]
-                                else List.init span (fun i -> start + i)
-                            | None -> [idx]))
-                (true, expanded)
-            else (false, [])
+        // account for expanded parameters: a pack slot of span k becomes the
+        // k consecutive expanded positions, everything else maps 1:1.
+        let expandGroups (groups: int list list) =
+            groups |> List.map (fun group ->
+                group |> List.collect (fun idx ->
+                    match Map.tryFind idx origToNew with
+                    | Some (start, span) ->
+                        if span = 1 then [start]
+                        else List.init span (fun i -> start + i)
+                    | None -> [idx]))
+        // Expand whatever groups the source carried. Historically this was
+        // gated on IsCommutative, which was equivalent (the flag and a
+        // non-empty group list were set together); the declared-antisymm
+        // spelling breaks that coupling — an antisym kernel has groups but is
+        // NOT commutative — so the expansion keys off the lists themselves and
+        // the flag is carried through untouched.
+        let newIsComm = func.IsCommutative
+        let newCommGroups = expandGroups func.CommGroups
+        let newAntisymGroups = expandGroups func.AntisymGroups
 
         // Mangled name encodes every slot's arity, so different shapes get
         // distinct specializations. `pairSum_arity_2_3` for arities [2; 3].
@@ -4860,6 +4932,7 @@ let specializeFunction (func: IRFuncDef) (arities: int list) (funcMap: Map<IRId,
           IsStatic = func.IsStatic
           IsCommutative = newIsComm
           CommGroups = newCommGroups
+          AntisymGroups = newAntisymGroups
           Parallelism = func.Parallelism
           IsOmpParallel = func.IsOmpParallel
           IsCudaKernel = func.IsCudaKernel

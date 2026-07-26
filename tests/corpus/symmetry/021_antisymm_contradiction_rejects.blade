@@ -1,0 +1,9 @@
+// TEST: Antisymm Contradiction (rejects)
+// The signed mirror of functions/028: `where antisymm(x, y)` declared on a
+// body the deduction proves COMMUTATIVE under the swap (x * y). Strict-simplex
+// storage would drop a diagonal that is genuinely nonzero (x*x) and hand back
+// the negation for every mirrored read, so this is the same silent-corruption
+// class the comm validator rejects, with the parities exchanged. PBottom
+// bodies stay trusted — only the provable contradiction rejects.
+let A = [1.0, 2.0, 3.0]
+let bad = method_for(A, A) <@> lambda(x, y) where antisymm(x, y) -> x * y |> compute

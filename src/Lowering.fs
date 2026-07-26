@@ -742,10 +742,18 @@ and lowerTypedLambda env (info: TypedLambdaInfo) : IRExpr =
         | Some (selfName, selfId) ->
             { defaultLambdaOptions with NameOverride = Some selfName; IdOverride = Some selfId }
         | None -> defaultLambdaOptions
+    // A `where antisymm(a, b)` group is an axis group exactly like a comm
+    // group — same fusion, same triangular iteration — so it rides CommGroups
+    // for every grouping consumer (buildLoopLevelStructure et al.), with the
+    // separate AntisymGroups list carrying the one extra bit: the simplex is
+    // STRICT (no diagonal, sign flip on swapped reads). IsCommutative stays
+    // the user's comm declaration: an antisym kernel is NOT commutative, and
+    // the flag feeds diagnostics that ask exactly that question.
     let callable =
-        mkCallable env.Builder lamOpts paramInfos bodyWrapped info.ReturnType
-                   captures info.IsCommutative info.CommGroups
-                   lamParallelism lamIsOmp lamIsCuda lamBlock lamIsMpi
+        { mkCallable env.Builder lamOpts paramInfos bodyWrapped info.ReturnType
+                     captures info.IsCommutative (info.CommGroups @ info.AntisymGroups)
+                     lamParallelism lamIsOmp lamIsCuda lamBlock lamIsMpi
+            with AntisymGroups = info.AntisymGroups }
     // Emit IRVar(callable.Id, funcType) — the callable lives in
     // LiftedCallables → module.Functions; the IRVar carries just the
     // function type for type-inference and consumer dispatch.

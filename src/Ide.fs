@@ -459,6 +459,9 @@ let private whereConjuncts (wc: WhereClause option) : string list =
         let comms =
             w.Commutativity
             |> List.map (fun group -> sprintf "comm(%s)" (String.concat ", " group))
+        let antis =
+            w.Antisymmetry
+            |> List.map (fun group -> sprintf "antisymm(%s)" (String.concat ", " group))
         let pars =
             w.Parallel
             |> List.map (function
@@ -470,7 +473,7 @@ let private whereConjuncts (wc: WhereClause option) : string list =
         let customs =
             w.Custom
             |> List.map (fun (name, args) -> sprintf "%s(%s)" name (String.concat ", " args))
-        comms @ pars @ customs
+        comms @ antis @ pars @ customs
 
 type private TypedEntry = {
     Scope: string

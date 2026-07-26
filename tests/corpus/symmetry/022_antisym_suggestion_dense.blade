@@ -1,0 +1,13 @@
+// TEST: Antisym suggestion (dense until pinned)
+// The unpinned twin of symmetry/020: the SAME kernel with no where-clause.
+// Stage 3 deduces PNeg on the adjacent pair and both positions receive the
+// same array, so the compiler proposes the pin (`where antisymm(x, y)`, a
+// warning + a BL4007 entry in `blade ide check --json`) — and stores DENSE,
+// because a deduction only ever proposes. Confirm-and-pin's wrong-guess state
+// is correct-and-dense, never compact-and-corrupt (plan §4).
+let A = [1.0, 2.0, 3.0]
+let result = method_for(A, A) <@> lambda(x, y) -> x - y |> compute
+// Full dense 3x3, printed flat, row-major: A[i] - A[j] for every (i, j),
+// diagonal included. The strict i < j sub-list is (0,1)=-1 (0,2)=-2 (1,2)=-1
+// — the three cells the pinned form would store.
+// EXPECT: result = [0.0, -1.0, -2.0, 1.0, 0.0, -1.0, 2.0, 1.0, 0.0]

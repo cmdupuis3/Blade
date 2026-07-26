@@ -1147,12 +1147,26 @@ let buildCaptures (env: TypeEnv) (freeVars: Set<string>) : TypedVarInfo list =
 // 6. Commutativity Extraction
 // ============================================================================
 
+/// Resolve one where-clause conjunct's parameter NAMES to parameter INDICES.
+/// Names that match no parameter are dropped (the historical comm behavior).
+let private groupsToIndices (parms: LambdaParam list) (groups: Ident list list) : int list list =
+    groups |> List.map (fun names ->
+        names |> List.choose (fun name ->
+            parms |> List.tryFindIndex (fun p -> p.Name = name)))
+
 let extractCommGroups (parms: LambdaParam list) (whereClause: WhereClause option) : int list list =
     match whereClause with
-    | Some wc ->
-        wc.Commutativity |> List.map (fun names ->
-            names |> List.choose (fun name ->
-                parms |> List.tryFindIndex (fun p -> p.Name = name)))
+    | Some wc -> groupsToIndices parms wc.Commutativity
+    | None -> []
+
+/// `where antisymm(...)` groups, by parameter index — the signed twin of
+/// extractCommGroups. Kept as its own extractor (rather than folded into the
+/// comm list) because the two declarations mean different things to the
+/// stage-3 validators and to output storage; the consumers that only need
+/// GROUPING concatenate them.
+let extractAntisymGroups (parms: LambdaParam list) (whereClause: WhereClause option) : int list list =
+    match whereClause with
+    | Some wc -> groupsToIndices parms wc.Antisymmetry
     | None -> []
 
 /// Rewrite a parallel-strategy list so its `omp(var: n)` variable names refer to
@@ -4271,7 +4285,13 @@ and warnImplicitOuterProduct (env: TypeEnv) (tLoop: TypedExpr) (rightResult: Typ
             match rightResult with
             | Ok tR ->
                 (match (resolveTypedExpr env tR).Kind with
-                 | TExprLambda li -> li.IsCommutative || not (List.isEmpty li.CommGroups)
+                 // A declared antisymm counts too: the user who wrote it is
+                 // thinking in symmetric-outer terms just as much as a comm
+                 // author, and the steering note would be noise.
+                 | TExprLambda li ->
+                     li.IsCommutative
+                     || not (List.isEmpty li.CommGroups)
+                     || not (List.isEmpty li.AntisymGroups)
                  | TExprSection (OpAdd | OpMul | OpEq | OpNeq | OpAnd | OpOr) -> true
                  | TExprReynolds _ -> true
                  | _ -> false)
@@ -5265,6 +5285,16 @@ and etaExpandFunctionKernel (env: TypeEnv) (kernelExpr: Expr) : TypeResult<Typed
                                 | true, cg when not (List.isEmpty cg) ->
                                     { li with CommGroups = cg; IsCommutative = true }
                                 | _ -> li
+                            // Same for `where antisymm(...)`: param indices carry
+                            // over 1:1, and without this the clause is dropped by
+                            // the eta wrapper and `object_for(f) <@> (A, A)` for a
+                            // declared-antisymmetric function silently falls back
+                            // to dense storage.
+                            let withAntisym (li: TypedLambdaInfo) =
+                                match env.FuncAntisymGroups.TryGetValue name with
+                                | true, ag when not (List.isEmpty ag) ->
+                                    { li with AntisymGroups = ag }
+                                | _ -> li
                             let withParallel (li: TypedLambdaInfo) =
                                 match env.FuncParallel.TryGetValue name with
                                 | true, (calleeNames, strategies) when not (List.isEmpty strategies) ->
@@ -5272,7 +5302,7 @@ and etaExpandFunctionKernel (env: TypeEnv) (kernelExpr: Expr) : TypeResult<Typed
                                 | _ -> li
                             match tLam.Kind with
                             | TExprLambda li ->
-                                { tLam with Kind = TExprLambda (li |> withComm |> withParallel) }
+                                { tLam with Kind = TExprLambda (li |> withComm |> withAntisym |> withParallel) }
                             | _ -> tLam)))
             | _ -> None
         | Some _ -> None   // let-bound value (lambda etc.): use the existing path
@@ -5319,6 +5349,7 @@ and inferApply (env: TypeEnv) (tLeft: TypedExpr) (tRight: TypedExpr) : TypeResul
                       mkTyped (TExprVar ("b", bId, None)) paramTy)) paramTy
             ReturnType = paramTy
             CommGroups = if isComm then [[0; 1]] else []
+            AntisymGroups = []   // synthesized (operator section): no user clause
             Captures = []; IsCommutative = isComm
             Parallel = []  // synthesized (operator section): no user clause
             SelfBinding = None  // anonymous: cannot self-reference
@@ -5362,6 +5393,7 @@ and inferApply (env: TypeEnv) (tLeft: TypedExpr) (tRight: TypedExpr) : TypeResul
             Body = mkTyped zeroLit paramTy
             ReturnType = paramTy
             CommGroups = []
+            AntisymGroups = []
             Captures = []; IsCommutative = true
             Parallel = []  // synthesized (zero kernel): no user clause
             SelfBinding = None  // anonymous: cannot self-reference
@@ -5542,6 +5574,7 @@ and inferApply (env: TypeEnv) (tLeft: TypedExpr) (tRight: TypedExpr) : TypeResul
                 Body = mkTyped zeroLit paramTy
                 ReturnType = paramTy
                 CommGroups = []
+                AntisymGroups = []
                 Captures = []; IsCommutative = true
                 Parallel = []  // synthesized (object_for zero kernel): no clause
                 SelfBinding = None  // anonymous: cannot self-reference
@@ -5685,6 +5718,16 @@ and buildApplyInfo (env: TypeEnv)
     : TypeResult<TypedExpr> =
 
     let commGroups = lambdaInfo.CommGroups
+    // Declared `where antisymm(...)` positions. Same axis grouping and the
+    // same iteration license as comm (the exchange is licensed either way —
+    // only the SIGN and the diagonal differ), so `iterGroups` is what every
+    // grouping consumer sees. `antisymStorageGroups` is the narrower list that
+    // decides the licensed simplex is the STRICT one (AntisymIdx, no
+    // diagonal): under `reynolds` the wrapper owns the output symmetry, so a
+    // declared clause there degrades to an iteration license exactly as `comm`
+    // does on a reynolds-wrapped kernel (index-types/050, symmetry/019).
+    let iterGroups = commGroups @ lambdaInfo.AntisymGroups
+    let antisymStorageGroups = if isReynolds then [] else lambdaInfo.AntisymGroups
 
     // ---- Stage 3: symmetry deduction (early tier), at the ONE seam every
     // apply arm funnels through. Deduce the kernel's adjacent-pair swap
@@ -5733,35 +5776,54 @@ and buildApplyInfo (env: TypeEnv)
                  Blade.Deduce.deduceAdjacentPairs signResolver lambdaInfo.Params lambdaInfo.Body)
     // Declared comm + provably antisymmetric body = the silent-corruption
     // case: triangular storage would drop the sign flips. Hard error;
-    // PBottom stays trusted (status quo escape hatch).
-    let stage3Err =
-        if List.isEmpty stage3Pairs || List.isEmpty commGroups then None
+    // PBottom stays trusted (status quo escape hatch). The mirror case —
+    // declared antisymm + provably COMMUTATIVE body — is the same error with
+    // the signs exchanged: strict-simplex storage would drop the diagonal and
+    // return the negation for half the reads. (Both stand down under
+    // reynolds, where stage3Pairs is empty by construction.)
+    let contradictsIn (groups: int list list) (wanted: Blade.Deduce.Parity)
+                      (mk: string -> string -> TypeError) =
+        if List.isEmpty stage3Pairs || List.isEmpty groups then None
         else
             List.indexed stage3Pairs
             |> List.tryPick (fun (i, par) ->
-                if par = Blade.Deduce.PNeg
-                   && commGroups |> List.exists (fun g ->
+                if par = wanted
+                   && groups |> List.exists (fun g ->
                           List.contains i g && List.contains (i + 1) g) then
-                    Some (CommContradictsBody (stage3Names.[i], stage3Names.[i + 1]))
+                    Some (mk stage3Names.[i] stage3Names.[i + 1])
                 else None)
+    let stage3Err =
+        match contradictsIn commGroups Blade.Deduce.PNeg
+                            (fun a b -> CommContradictsBody (a, b)) with
+        | Some e -> Some e
+        | None ->
+            contradictsIn lambdaInfo.AntisymGroups Blade.Deduce.PInv
+                          (fun a b -> AntisymmContradictsBody (a, b))
     match stage3Err with
     | Some e -> Error e
     | None ->
-    // Confirm-and-pin suggestion: kernel provably commutative in an adjacent
-    // pair, no comm declared, and the SAME array occupies both positions
-    // (H ∩ Stab would license compaction). Output stays DENSE until the user
-    // pins — the suggestion is the compiler proposing, never deciding.
-    if List.isEmpty commGroups && not (List.isEmpty stage3Pairs) then
+    // Confirm-and-pin suggestion: kernel provably commutative (or provably
+    // ANTI-commutative) in an adjacent pair, nothing declared for that pair,
+    // and the SAME array occupies both positions (H ∩ Stab would license
+    // compaction). Output stays DENSE until the user pins — the suggestion is
+    // the compiler proposing, never deciding. PInv proposes the inclusive
+    // triangle (`comm`), PNeg the strict one (`antisymm`, zero diagonal).
+    if List.isEmpty iterGroups && not (List.isEmpty stage3Pairs) then
         List.indexed stage3Pairs
         |> List.iter (fun (i, par) ->
-            if par = Blade.Deduce.PInv
+            if (par = Blade.Deduce.PInv || par = Blade.Deduce.PNeg)
                && i + 1 < identities.Length
                && identities.[i] = identities.[i + 1] then
                 let (n1, n2) = (stage3Names.[i], stage3Names.[i + 1])
                 let msg =
-                    sprintf
-                        "kernel deduces commutative in (%s, %s) and both positions receive the same array: output storage is DENSE today. Pin `where comm(%s, %s)` on the kernel to opt into compact symmetric (triangular) storage."
-                        n1 n2 n1 n2
+                    if par = Blade.Deduce.PInv then
+                        sprintf
+                            "kernel deduces commutative in (%s, %s) and both positions receive the same array: output storage is DENSE today. Pin `where comm(%s, %s)` on the kernel to opt into compact symmetric (triangular) storage."
+                            n1 n2 n1 n2
+                    else
+                        sprintf
+                            "kernel deduces ANTIsymmetric in (%s, %s) (f(%s, %s) = -f(%s, %s)) and both positions receive the same array: output storage is DENSE today. Pin `where antisymm(%s, %s)` on the kernel to opt into compact antisymmetric (strict-triangular, zero-diagonal) storage."
+                            n1 n2 n2 n1 n1 n2 n1 n2
                 emitWarning env msg
                 // Synthesized kernels (eta wrappers, sections) carry noSpan;
                 // fall back to the former expression's source span so the
@@ -6028,9 +6090,13 @@ and buildApplyInfo (env: TypeEnv)
                         if j >= n - irank then { idx with Kind = TDimension } else idx)
                 { at with IndexTypes = retagged })
 
-    let states = computeAllSymcomStates identities gridArrayTypes commGroups (computeSDimsPerArray gridArrayTypes)
-    let triLevels = computeTriangularLevels gridArrayTypes identities commGroups (computeSDimsPerArray gridArrayTypes)
-    let speedup = computePartialProductSpeedup gridArrayTypes identities commGroups (computeSDimsPerArray gridArrayTypes)
+    // Grouping/iteration reads `iterGroups` (comm ∪ antisymm): a declared
+    // antisymmetric pair fuses its axes and iterates the simplex exactly like
+    // a comm pair — only the strictness (IR's StrictOffset) and the stored
+    // symmetry class differ, and both of those are decided downstream.
+    let states = computeAllSymcomStates identities gridArrayTypes iterGroups (computeSDimsPerArray gridArrayTypes)
+    let triLevels = computeTriangularLevels gridArrayTypes identities iterGroups (computeSDimsPerArray gridArrayTypes)
+    let speedup = computePartialProductSpeedup gridArrayTypes identities iterGroups (computeSDimsPerArray gridArrayTypes)
 
     // Phase 2 (Gap 2.5 fix): unify each kernel parameter with the source
     // array's per-row type. This catches mismatches like a String-typed
@@ -6271,7 +6337,7 @@ and buildApplyInfo (env: TypeEnv)
         // consumed-dim filter in deduceOutputType must NOT drop ragged/dep
         // inner dims — they propagate through the elementwise map.
         let kernelConsumesInner = kernelInputRanks |> List.exists (fun r -> r > 0)
-        let outputType = deduceOutputType gridArrayTypes identities commGroups (computeSDimsPerArray gridArrayTypes) kernelTDims outputElemType isReynolds isReynoldsAntisym kernelConsumesInner env.Builder
+        let outputType = deduceOutputType gridArrayTypes identities iterGroups antisymStorageGroups (computeSDimsPerArray gridArrayTypes) kernelTDims outputElemType isReynolds isReynoldsAntisym kernelConsumesInner env.Builder
 
         let reynoldsSpeedup =
             if isReynolds then
@@ -6420,6 +6486,7 @@ and prescanTypeVarNames (env: TypeEnv) (types: TypeExpr option list) : unit =
 and inferLambda env parms whereClause body : TypeResult<TypedExpr> =
     let scopeEnv = enterScope env
     let commGroups = extractCommGroups parms whereClause
+    let antisymGroups = extractAntisymGroups parms whereClause
 
     // Fresh type variable scope for this lambda's type annotations.
     let savedScope = env.Subst.PushTypeVarScope()
@@ -6453,7 +6520,7 @@ and inferLambda env parms whereClause body : TypeResult<TypedExpr> =
             else
             let info : TypedLambdaInfo = {
                 Params = typedParams; Body = tBody; ReturnType = tBody.Type
-                CommGroups = commGroups; Captures = captures
+                CommGroups = commGroups; AntisymGroups = antisymGroups; Captures = captures
                 IsCommutative = not (List.isEmpty commGroups)
                 // Propagate the lambda's parallelization strategy (omp/cuda) from
                 // its where-clause so lambda-level omp drives parallelization.
@@ -9214,6 +9281,16 @@ and checkFunctionDecl (env: TypeEnv) (funcDecl: FunctionDecl) : TypeResult<Typed
             // named function is dropped and the loop emits dense storage.
             if not (List.isEmpty commGroups) then
                 env.FuncCommGroups.[funcDecl.Name] <- commGroups
+            // Same for `where antisymm(...)` — its own side-channel, since a
+            // where-clause attribute that no surfacing site re-attaches is
+            // dropped by the kernel-position eta wrapper (silently falling
+            // back to dense storage).
+            let antisymGroups =
+                extractAntisymGroups
+                    (funcDecl.Params |> List.map (fun p -> { Name = p.Name; Type = p.Type } : LambdaParam))
+                    funcDecl.WhereClause
+            if not (List.isEmpty antisymGroups) then
+                env.FuncAntisymGroups.[funcDecl.Name] <- antisymGroups
             // Register the function's parallel strategies for the same reason,
             // paired with its param NAMES: an `omp(a: n)` var is resolved by
             // name against the callable's params (Lowering.extractParallelism),
@@ -9284,16 +9361,28 @@ and checkFunctionDecl (env: TypeEnv) (funcDecl: FunctionDecl) : TypeResult<Typed
             // be a reynolds kernel (reynolds requires a lambda), so no
             // iteration license can apply here — hard error. PBottom stays
             // trusted (the escape hatch when the analysis is too weak).
-            let commContradiction =
-                if List.isEmpty commGroups then None
+            // The declared-antisymm twin is the same check with the parities
+            // exchanged: a body provably INVARIANT under a pair declared
+            // antisymmetric would be stored on a strict simplex that has no
+            // diagonal and negates half its reads.
+            let declContradiction (groups: int list list) (wanted: Blade.Deduce.Parity)
+                                  (mk: string -> string -> TypeError) =
+                if List.isEmpty groups then None
                 else
                     List.indexed deducedPairs
                     |> List.tryPick (fun (i, par) ->
-                        if par = Blade.Deduce.PNeg
-                           && commGroups |> List.exists (fun g ->
+                        if par = wanted
+                           && groups |> List.exists (fun g ->
                                   List.contains i g && List.contains (i + 1) g) then
-                            Some (CommContradictsBody (typedParams.[i].Name, typedParams.[i + 1].Name))
+                            Some (mk typedParams.[i].Name typedParams.[i + 1].Name)
                         else None)
+            let commContradiction =
+                match declContradiction commGroups Blade.Deduce.PNeg
+                                        (fun a b -> CommContradictsBody (a, b)) with
+                | Some e -> Some e
+                | None ->
+                    declContradiction antisymGroups Blade.Deduce.PInv
+                                      (fun a b -> AntisymmContradictsBody (a, b))
             match commContradiction with
             | Some e -> Error e
             | None ->

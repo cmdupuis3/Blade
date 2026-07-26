@@ -186,6 +186,14 @@ type TypeEnv = {
     /// for a `where comm` function produced DENSE output — only inline-lambda
     /// comm was read. Mutable dictionary shared by reference, like FuncConstraints.
     FuncCommGroups: System.Collections.Generic.Dictionary<string, int list list>
+    /// Named functions' ANTISYMMETRY groups (by parameter index), from their
+    /// `where antisymm(...)` clause: funcName → int list list. The signed twin
+    /// of FuncCommGroups, and surfaced onto the eta wrapper at the same seams
+    /// for the same reason: a where-clause attribute that is not explicitly
+    /// re-attached to the synthesized kernel lambda is silently dropped, and
+    /// `object_for(f) <@> (A, A)` would fall back to dense storage with no
+    /// diagnostic. Shared by reference, like FuncCommGroups.
+    FuncAntisymGroups: System.Collections.Generic.Dictionary<string, int list list>
     /// Stage-3 symmetry deduction, early tier: per-function parameter NAMES
     /// plus ADJACENT-pair swap parities (n params -> n-1 entries), recorded
     /// at checkFunctionDecl for fixed-arity functions. Consulted by
@@ -258,6 +266,7 @@ let emptyEnv () = {
     MutualMembers = Map.empty
     MutualReturnFuncs = System.Collections.Generic.Dictionary<string, string>()
     FuncCommGroups = System.Collections.Generic.Dictionary<string, int list list>()
+    FuncAntisymGroups = System.Collections.Generic.Dictionary<string, int list list>()
     FuncDeducedPairs = System.Collections.Generic.Dictionary<string, string list * Blade.Deduce.Parity list>()
     FuncSignParities = System.Collections.Generic.Dictionary<IRId, Blade.Deduce.SignParity list>()
     PackDeducedComm = System.Collections.Generic.Dictionary<string, string * Blade.Deduce.Parity>()
@@ -376,6 +385,7 @@ let formatTypeError (err: TypeError) : string =
     | ChainOpBadKernel rightDesc -> sprintf "<@> kernel must be a lambda, operator section, named function, reynolds(...), or zero, but got %s" rightDesc
     | ChainOpUndecidable (leftDesc, rightDesc) -> sprintf "cannot infer the roles of the <@> operands: the left side is %s and the right side is %s, so the arrays/kernel roles are ambiguous. A former is implicit only when one side is decisive: a kernel (lambda, operator section, named function, reynolds(...), zero) or a former. Write it explicitly: method_for(arrays) <@> kernel, or object_for(kernel) <@> (arrays)." leftDesc rightDesc
     | CommContradictsBody (p1, p2) -> sprintf "`where comm(%s, %s)` contradicts the kernel body, which is provably ANTISYMMETRIC under that swap (f(%s, %s) = -f(%s, %s)): triangular storage would silently corrupt half the output. Remove the comm clause, or wrap the kernel in reynolds(...) if a signed iteration license over the permutation sum is what you intend." p1 p2 p2 p1 p1 p2
+    | AntisymmContradictsBody (p1, p2) -> sprintf "`where antisymm(%s, %s)` contradicts the kernel body, which is provably COMMUTATIVE under that swap (f(%s, %s) = f(%s, %s)): strict-triangular antisymmetric storage would drop the diagonal and negate half the output. Remove the antisymm clause (use `where comm(%s, %s)` for the symmetric triangle), or wrap the kernel in reynolds(..., Antisymmetric) if a signed antisymmetrization is what you intend." p1 p2 p2 p1 p1 p2 p1 p2
     | PlaceholderNeedsAllBound (got, total) -> sprintf "the `_` placeholder needs every other parameter bound: this call supplies %d of %d args. Combine with prefix partial application in two steps, or use a lambda." got total
     | GroupKeysRank1 -> "group_keys: all key arrays must be rank-1 and share the same outer index (same length). Compound grouping requires each i-th element of every key array to refer to the same record."
     | FallbackNeedsArrays (leftDesc, rightDesc) -> sprintf "<|:> (allocated-fallback) reads the LEFT array where its storage holds a cell and the right array elsewhere, so both operands must be arrays; got %s and %s. For value-level choice (first nonzero wins) over scalars or computations, use <|>." leftDesc rightDesc
@@ -486,7 +496,7 @@ let diagnosticOfCompileError (e: CompileError) : Blade.Diagnostics.Diagnostic =
             | IntrinsicComplexScalarOnly _ | IntrinsicNeedsComplex _ | ComplexArity _
             | ReduceEmptyArray _ | ProdsumExtentMismatch _ | GramNeedsRank2 _
             | ArrayLitLength _ | ObjectForKernel _ | ChainOpNeedsMethodFor _ | ChainOpBadKernel _
-            | ChainOpUndecidable _ | CommContradictsBody _
+            | ChainOpUndecidable _ | CommContradictsBody _ | AntisymmContradictsBody _
             | PlaceholderNeedsAllBound _ | GroupKeysRank1 | CumulantOrderPositive _
             | CumulantOrderExceeds _ | CumulantNeedsDist _ | DistOrderDisagree _
             | DistNotIndependent _ | DistOpUndefined _ | EnumIdxMixedKinds _

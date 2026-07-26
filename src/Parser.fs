@@ -1059,7 +1059,7 @@ let parseWhereClause (tokens: Token list) : ParseResult<WhereClause> =
     // range). The order table is closed and purely syntactic, so every
     // illegal pair rejects HERE with steering; shape-dependent checks
     // (device eligibility, fold reassociation) stay in codegen.
-    let rec loop comms (par: ParallelStrategy list) custom toks =
+    let rec loop comms (antis: string list list) (par: ParallelStrategy list) custom toks =
         let isOmp = function Omp _ -> true | _ -> false
         let isCuda = function Cuda _ -> true | _ -> false
         let isMpi = function Mpi -> true | _ -> false
@@ -1085,7 +1085,19 @@ let parseWhereClause (tokens: Token list) : ParseResult<WhereClause> =
             advance toks |> expect TokLParen >>= fun _ afterLParen ->
             parseIdentList afterLParen >>= fun names afterNames ->
             expect TokRParen afterNames >>= fun _ remaining ->
-            loop (names :: comms) par custom remaining
+            loop (names :: comms) antis par custom remaining
+        | Some (TokKeyword KwAntisymm) ->
+            // `antisymm(a, b, ...)` — the signed sibling of `comm`. Needs at
+            // least two parameters: an antisymmetry relation is a statement
+            // about an EXCHANGE, so a one-name group names no swap at all.
+            let line, col = currentPos toks
+            advance toks |> expect TokLParen >>= fun _ afterLParen ->
+            parseIdentList afterLParen >>= fun names afterNames ->
+            expect TokRParen afterNames >>= fun _ remaining ->
+            if List.length names < 2 then
+                error "antisymm(...) needs at least two parameters: antisymmetry is a relation between two exchanged arguments (f(b, a) = -f(a, b))" line col
+            else
+                loop comms (names :: antis) par custom remaining
         | Some (TokKeyword KwOmp) ->
             // Legal as: sole strategy, or the INNER of `mpi, omp(...)`.
             if not (par = [] || par = [Mpi]) then
@@ -1095,7 +1107,7 @@ let parseWhereClause (tokens: Token list) : ParseResult<WhereClause> =
                 advance toks |> expect TokLParen >>= fun _ afterLParen ->
                 parseOmpArgs [] afterLParen >>= fun pairs afterArgs ->
                 expect TokRParen afterArgs >>= fun _ remaining ->
-                loop comms (par @ [Omp { Vars = pairs }]) custom remaining
+                loop comms antis (par @ [Omp { Vars = pairs }]) custom remaining
         | Some (TokKeyword KwMpi) ->
             // Legal only as the sole (and hence OUTER) strategy.
             if not (List.isEmpty par) then
@@ -1103,7 +1115,7 @@ let parseWhereClause (tokens: Token list) : ParseResult<WhereClause> =
                 rejectPair line col "mpi"
             else
                 // bare `mpi` — rank count is supplied at launch (mpiexec -n N)
-                loop comms (par @ [Mpi]) custom (advance toks)
+                loop comms antis (par @ [Mpi]) custom (advance toks)
         | Some (TokKeyword KwCuda) ->
             // Legal as: sole strategy, or the INNER of `mpi, cuda(...)`.
             if not (par = [] || par = [Mpi]) then
@@ -1126,12 +1138,12 @@ let parseWhereClause (tokens: Token list) : ParseResult<WhereClause> =
                             match t.Kind with
                             | TokInt n ->
                                 expect TokRParen rest >>= fun _ remaining ->
-                                loop comms (par @ [Cuda { BlockSize = int n }]) custom remaining
+                                loop comms antis (par @ [Cuda { BlockSize = int n }]) custom remaining
                             | _ -> error (sprintf "Expected integer block size but got %s" (describeToken t.Kind)) t.Line t.Col
                         | [] -> errorEof "Expected integer block size but got end of file"
                 | _ ->
                     // bare `cuda` => default block size
-                    loop comms (par @ [Cuda { BlockSize = 256 }]) custom afterCuda
+                    loop comms antis (par @ [Cuda { BlockSize = 256 }]) custom afterCuda
         | Some (TokIdent alias) when (match peek (advance toks) with Some TokDot -> true | _ -> false) ->
             // Module-qualified constraint conjunct: `<alias>.<name>(<idents>)`
             // (e.g. `p.indep(a, b)` with `import ppl as p`). Stored as DATA
@@ -1142,7 +1154,7 @@ let parseWhereClause (tokens: Token list) : ParseResult<WhereClause> =
             expect TokLParen afterName >>= fun _ afterLParen ->
             parseIdentList afterLParen >>= fun args afterArgs ->
             expect TokRParen afterArgs >>= fun _ remaining ->
-            loop comms par (custom @ [(alias + "." + name, args)]) remaining
+            loop comms antis par (custom @ [(alias + "." + name, args)]) remaining
         | Some (TokIdent name) when (match peek (advance toks) with Some TokLParen -> true | _ -> false) ->
             // Open constraint conjunct: `<name>(<idents>)` for any identifier
             // the grammar doesn't own. Parsed as DATA — (name, args) — and
@@ -1153,17 +1165,37 @@ let parseWhereClause (tokens: Token list) : ParseResult<WhereClause> =
             advance toks |> expect TokLParen >>= fun _ afterLParen ->
             parseIdentList afterLParen >>= fun args afterArgs ->
             expect TokRParen afterArgs >>= fun _ remaining ->
-            loop comms par (custom @ [(name, args)]) remaining
+            loop comms antis par (custom @ [(name, args)]) remaining
         | Some TokComma ->
-            loop comms par custom (advance toks)
+            loop comms antis par custom (advance toks)
         | _ ->
+            // A parameter cannot be declared both commutative and
+            // antisymmetric (nor antisymmetric twice): the two clauses would
+            // fuse into ONE axis group whose storage must be simultaneously
+            // inclusive and strict — iteration and layout would disagree.
+            // Checked syntactically, on names, before either list is resolved
+            // to indices. (Overlapping comm groups are a long-standing,
+            // consistent spelling and stay legal.)
+            let antiNames = antis |> List.collect id
+            let commNames = comms |> List.collect id
+            let dupInAnti =
+                antiNames |> List.countBy id |> List.tryPick (fun (n, c) -> if c > 1 then Some n else None)
+            let bothWays = antiNames |> List.tryFind (fun n -> List.contains n commNames)
+            let line, col = currentPos toks
+            match dupInAnti, bothWays with
+            | Some n, _ ->
+                error (sprintf "'%s' appears in two antisymm(...) groups: an argument belongs to at most one antisymmetry relation (the groups would fuse into one axis with two contradictory layouts)" n) line col
+            | _, Some n ->
+                error (sprintf "'%s' is declared both comm(...) and antisymm(...): one exchange cannot be both symmetric (inclusive triangle, diagonal stored) and antisymmetric (strict triangle, diagonal zero)" n) line col
+            | None, None ->
             success {
                 Commutativity = List.rev comms
+                Antisymmetry = List.rev antis
                 Parallel = par
                 TDims = []
                 Custom = custom
             } toks
-    loop [] [] [] tokens
+    loop [] [] [] [] tokens
 
 let rec parseExprImpl (tokens: Token list) : ParseResult<Expr> =
     parseAssignment tokens

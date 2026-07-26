@@ -406,11 +406,13 @@ fully implemented end-to-end — `AntisymmetricBehavior` (src/IR.fs:2647-2656:
 canonical strict sort, implicit-zero diagonal, negate-on-swap reads),
 `AllocAntisymmetric` routing (IR.fs:2707-2745), rank-2 and rank≥3 codegen,
 interpreter mirror (src/Interp/ArrayOps.fs:290-337), `AntisymIdx` corpus
-coverage — but there is no `where antisymm(...)`: `CnAntisymm`
-(src/Ast.fs:233-241) is dead, unparsed code, and antisym output is reachable
-only via already-antisym inputs or `reynolds(kernel, Antisymmetric)`. Stage 3/4
-must revive the spelling, else a deduced-Neg kernel has nothing to pin to. The
-formal side is already in place: kernel anti-invariance ⇒ output antisymmetry
+coverage — but there was no `where antisymm(...)`: `CnAntisymm`
+(src/Ast.fs:233-241) was dead, unparsed code, and antisym output was reachable
+only via already-antisym inputs or `reynolds(kernel, Antisymmetric)`, leaving a
+deduced-Neg kernel with nothing to pin to. **Landed 2026-07-26** (§7 stage 3):
+the clause parses, groups like `comm`, flips the group's stored class to the
+strict simplex, and is validated against the deduction at both seams. The
+formal side was already in place: kernel anti-invariance ⇒ output antisymmetry
 is the sign-tracked variant of the lowering law (formalism.md:949-950).
 
 **IDE affordance — display exists, write-back does not.** There is no LSP; the
@@ -705,10 +707,42 @@ cells with a duplicated `1.333` vs the 3-cell triangle).
    at the decl — antisymmetric THROUGH the helper), functions/032
    (`half(x − y) * half(x − y)` earns PInv by PNeg·PNeg where the mirror
    rule cannot fire, suggestion + dense 9 cells).
-   Still deferred: per-instance checking on specialized IR bodies (only
-   needed for NON-template pack kernels, which today deduce PBottom and
-   stay inert), and the `where antisymm` pin spelling for deduced-PNeg
-   kernels (storage exists; CnAntisymm is still dead code).
+
+   **`where antisymm(...)` pin spelling — DONE (2026-07-26).** The signed
+   half of confirm-and-pin: `antisymm` is now a where-clause keyword
+   (`WhereClause.Antisymmetry`, `TypedLambdaInfo.AntisymGroups`,
+   `IRCallable.AntisymGroups`; the dead `CnAntisymm` case is documented as
+   the superseded design, like `CnEquiv`). A declared group is the SAME
+   axis grouping and the SAME iteration license as a comm group — it rides
+   `CommGroups` for every grouping consumer — and carries exactly one extra
+   bit: the licensed simplex is the STRICT one. That bit lands in the two
+   places storage is decided, `deduceOutputType` (group symmetry
+   SymAntisymmetric → `AntisymIdx<r, n>` → AllocAntisymmetric) and
+   `buildLoopNestCodeGen`'s per-level `StrictOffset` (i < j, no diagonal to
+   write), so `method_for(A, A) <@> lambda(x, y) where antisymm(x, y) ->
+   x - y` reaches the existing antisym storage WITHOUT reynolds: the kernel
+   is used as-is (store f(i,j) for i<j; the mirror read negates via the
+   index type's TfNegateOnSwap), no permutation sum. Named functions pin
+   through their own `FuncAntisymGroups` side-channel at the eta seam (a
+   clause the wrapper does not re-attach is dropped silently). Validation
+   is symmetric with comm's, at both seams: declared antisymm + deduced
+   **PInv** = hard error (`AntisymmContradictsBody`, BL3007); PBottom stays
+   trusted; under reynolds the clause degrades to an iteration license and
+   both the validator and the storage bit stand down, so the reynolds
+   corpus is untouched. Deduced PNeg + no declaration + same array in both
+   positions now suggests `where antisymm(x, y)` beside the existing comm
+   suggestion (same warning + BL4007 pair). Corpus: symmetry/020 (pinned
+   strict triangle, values identical to 019's reynolds twin), 021 (declared
+   antisymm on `x * y` rejects), 022 (unpinned twin — dense 9 cells + the
+   suggestion), 023 (named-function pin through the eta wrapper), 024
+   (`comm` and `antisymm` over the same pair rejects — one axis group cannot
+   be inclusive and strict at once); all pass the interpreter differential.
+
+   Still deferred after both: per-instance checking on specialized IR
+   bodies — only needed for NON-template pack kernels, which today deduce
+   PBottom and stay inert. Antisymmetry has no pack tier by construction —
+   no signed exchange law exists — so `antisymm` is deliberately not
+   surfaced onto Poly-pack eta wrappers.
 
    *(original stage-3 text follows)* **Symmetry-from-primitives** (single late pass, §3.4): the two per-primitive
    tables (3-way swap class; per-operand sign parity) + the §3.2.1 judgment as
