@@ -466,7 +466,21 @@ cells with a duplicated `1.333` vs the 3-cell triangle).
    semantics, and the natural home for the library-author exchange-law check
    (§3.2.2) for Poly kernels with no in-tree call sites (which otherwise get no
    instances, hence no deduction and no suggestions — safe, but silent).
-   **Needs a decision before this is real.**
+   **DECIDED AND LANDED (2026-07-26): (a) default, (b) opt-in as
+   `--strict-pins`.** The flag is accepted by `check` / `compile` / `emit` /
+   `run` (a build MODE, stripped from argv ahead of the verb patterns, so it
+   composes with every existing arm shape); it reads the `PinSuggestions`
+   side-channel `typeCheck` fills and re-emits every outstanding suggestion as
+   an ERROR-severity `BL4007` at the kernel span, exit 1. Two gate sites, one
+   per surface: `checkFile` (which drops the plain-string warning twins, the
+   same dedup `blade ide check` does) and `compileFile`, which fails before
+   codegen and so covers compile/emit/run at once. Deduplicated, in deduction
+   order (§6.6). Without the flag nothing changes — suggestions stay warnings,
+   storage stays dense-until-pinned. `blade ide check` is deliberately NOT
+   wired: an editor wants a ghost annotation, not a failed build. Still open
+   here: the library-author exchange-law check for Poly kernels with no in-tree
+   call sites (no instances ⇒ no deduction ⇒ nothing for strict mode to fail
+   on — safe, but silent).
 2. **Elementwise-vs-outer default never fully disappears — and stage 1 sharpens
    it.** `covariance(B,B)` defaulting to outer is correct for this domain, but
    every elementwise use still needs `zip`/`in`. Today the explicit
@@ -540,6 +554,22 @@ cells with a duplicated `1.333` vs the 3-cell triangle).
    loops/101-107 (tuple/single/comm-SymIdx/object_for/named-kernel/zip/reject);
    full suite 956 corpus + 1272 total, 0 failed; interp differential clean.
    (`for`/`in` grammar needed no work — already role-agnostic, §2.1.)
+   **Left-side bare named kernels closed (2026-07-26).** The residue
+   classification only recognized RESOLVED kernels
+   (`TExprLambda`/`Section`/`Reynolds`/`Zero`), and a top-level `function`
+   binds with `TypedValue = None` — precisely the case `resolveTypedExpr`
+   cannot surface — so `covariance <@> (data, data)` fell through to the
+   `ChainOpUndecidable` steering error even though `object_for(covariance) <@>
+   (data, data)` worked. `inferBinOp`'s `OpApply` arm now classifies a bare
+   named function on the LEFT the same two ways `inferObjectFor` classifies
+   its own kernel — fixed arity (eta-expandable) and Poly pack (eta refused,
+   deferred former with `Arity = None`, expanded at this very seam) — and
+   routes both through `inferObjectFor`, so the implicit spelling IS the
+   explicit one: same typed nodes, same stage-3 suggestions with the callee's
+   real parameter names. Guarded behind the decisive-RIGHT arms, so a bare
+   name meeting a lambda still reads as the arrays operand and two arrays
+   still steer (loops/107). Corpus: loops/108 (fixed arity, the functions/026
+   values) and loops/109 (Poly, the arity/029 values).
 2. **Rank-from-primitives — CORE DONE (2026-07-25), scoped.** Landed: the
    `rankLowerBounds` side table on `Subst` (src/Unify.fs) beside the exact
    `arityConstraints` — max-join on registration, validated/propagated in
@@ -679,9 +709,17 @@ cells with a duplicated `1.333` vs the 3-cell triangle).
    signature ripple); the plain-string warning twin is deduplicated out of
    the JSON; CLI output unchanged; the message text contains the exact
    pin clause to insert. No new lowering — dense-until-pinned is the
-   existing default. Remaining: extension-side one-click apply-edit (out
-   of repo), REPL display of deduced-but-unpinned classes, §6.1's strict
-   mode (CI-fails-on-unpinned + the library-author exchange-law check).
+   existing default. **Strict half DONE (2026-07-26):** §6.1's CI mode
+   shipped as `--strict-pins` on `check`/`compile`/`emit`/`run` — every
+   outstanding suggestion re-emitted as an ERROR-severity BL4007 at the
+   kernel span, exit 1, default behavior untouched (see §6.1 for the
+   gate sites and the deliberate `blade ide check` exclusion). Tested by
+   the in-process "Strict Pins" block (`blade test strict-pins`) over
+   the functions/026 vs 029 twins: a flag's behavior is not expressible
+   as a corpus entry, so the block drives `checkFile` and `compileFile`
+   directly. Remaining: extension-side one-click apply-edit (out of
+   repo), REPL display of deduced-but-unpinned classes, the
+   library-author exchange-law check for call-site-less Poly kernels.
 
 **Shippability property worth preserving:** stages 2–3 are *observationally
 inert* — pure analysis plus diagnostics; storage changes only ever happen via

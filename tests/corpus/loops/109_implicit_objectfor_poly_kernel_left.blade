@@ -1,0 +1,18 @@
+// TEST: Implicit Object For Poly Kernel Left
+// The Poly half of loops/108: an arity-POLYMORPHIC named kernel on the left.
+// etaExpandFunctionKernel deliberately refuses a Poly-pack function (the pack
+// width is unknown until the argument tuple reveals it), so this goes through
+// inferObjectFor's DEFERRED former (Arity = None), expanded at this very <@>
+// seam — exactly what `object_for(packprod) <@> (A, A)` does. Twin of
+// arity/029 with the former erased: same dense 9 products, and the late-tier
+// pack suggestion still names `where comm(a)` on `packprod`.
+function packprod(a: Poly<T^0>) -> T^0 = {
+    match arity(a) with
+    | 1 -> { let head :: tail = a
+             head }
+    | _ -> { let head :: tail = a
+             head * packprod(tail) }
+}
+let A = [1.0, 2.0, 3.0]
+let result = packprod <@> (A, A) |> compute
+// EXPECT: result = [1.0, 2.0, 3.0, 2.0, 4.0, 6.0, 3.0, 6.0, 9.0]

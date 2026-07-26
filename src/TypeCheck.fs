@@ -4316,6 +4316,34 @@ and inferBinOp env mode op left right : TypeResult<TypedExpr> =
             | Error _ -> false
         let applyWith (tL: TypedExpr) =
             rightResult |> Result.bind (fun tR -> inferApply env tL tR)
+        // A bare NAMED function on the LEFT is a kernel too — `covariance <@>
+        // (data, data)`. It can never resolve to a TExprLambda (a top-level
+        // `function` binds with TypedValue = None, exactly the case
+        // resolveTypedExpr cannot surface), so the resolved-kernel arm below
+        // never sees it and the pair used to fall through to the
+        // ChainOpUndecidable steering error. This is the SAME classification
+        // inferObjectFor performs internally, in its two shapes:
+        //   - fixed arity  → etaExpandFunctionKernel accepts it and builds
+        //                    lambda(__k..) -> f(__k..);
+        //   - Poly pack    → etaExpandFunctionKernel deliberately REFUSES (the
+        //                    pack width is unknown until the argument tuple
+        //                    reveals it), and inferObjectFor builds a DEFERRED
+        //                    former (Arity = None) that the <@> seam expands.
+        // Both are routed through inferObjectFor, so `f <@> args` is the
+        // `object_for(f) <@> args` spelling exactly — same typed nodes, same
+        // stage-3 suggestions. Tested by predicate rather than by calling
+        // etaExpandFunctionKernel: that function mints a lambda (fresh ids,
+        // unification) and inferObjectFor would then mint a second one.
+        let namedFunctionKernelLeft =
+            match left.Kind with
+            | ExprKind.ExprVar name ->
+                (match lookupVar name env with
+                 | Some info when Option.isNone info.TypedValue ->
+                     (match env.Subst.Resolve info.Type with
+                      | FuncElem (paramTys, _) -> not paramTys.IsEmpty
+                      | _ -> false)
+                 | _ -> false)
+            | _ -> false
         let syntacticFormer =
             match left.Kind with
             | ExprKind.ExprMethodFor _ | ExprKind.ExprObjectFor _
@@ -4357,6 +4385,25 @@ and inferBinOp env mode op left right : TypeResult<TypedExpr> =
                         // inferMethodFor on the source expr keeps zip expansion
                         // and identity extraction in the one existing place.
                         inferMethodFor env [left] |> Result.bind applyWith
+                    | _ when namedFunctionKernelLeft ->
+                        // Bare named function on the left, nothing decisive on
+                        // the right: named-kernel <@> arrays ≡
+                        // object_for(named-kernel) <@> arrays. (Guarded by the
+                        // arm above, so a decisive RIGHT still wins — a bare
+                        // name meeting a lambda stays the arrays operand.)
+                        //
+                        // The synthesized former is built by calling
+                        // inferObjectFor directly, so it misses the span
+                        // back-fill inferExpr does for the explicit spelling.
+                        // Stamp the source name's span: the stage-3/4
+                        // suggestion falls back to the LOOP's span whenever the
+                        // eta-expanded kernel carries noSpan (which the
+                        // fixed-arity wrapper always does), and without this the
+                        // BL4007 would have no location to anchor on at all.
+                        inferObjectFor env left
+                        |> Result.map (fun tL ->
+                            if tL.Span = noSpan then { tL with Span = left.Span } else tL)
+                        |> Result.bind applyWith
                     | _ ->
                         // Undecidable: steering diagnostic via inferApply.
                         applyWith tL)

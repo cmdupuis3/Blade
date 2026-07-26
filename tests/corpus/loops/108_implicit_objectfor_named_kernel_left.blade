@@ -1,0 +1,13 @@
+// TEST: Implicit Object For Named Kernel Left
+// Stage-1 implicit formers, kernel-first direction with a BARE NAMED function:
+// `covariance <@> (data, data)` ≡ `object_for(covariance) <@> (data, data)`.
+// A top-level `function` binds with TypedValue = None, so it can never resolve
+// to a lambda — the left operand is classified the same two ways inferObjectFor
+// classifies its kernel, and routed through it. Twin of functions/026 with the
+// former erased; identical dense 2x2 values, and the stage-3 confirm-and-pin
+// suggestion still fires with the callee's real parameter names (a, b).
+function mymean(row) = reduce(row, (+)) / extents(row)
+function covariance(a, b) = mymean((a - mymean(a)) * (b - mymean(b)))
+let data = [[1.0, 2.0, 3.0], [2.0, 4.0, 6.0]]
+let result = covariance <@> (data, data) |> compute
+// EXPECT: result = [0.6666666666666666, 1.3333333333333333, 1.3333333333333333, 2.6666666666666665]
