@@ -23,11 +23,18 @@
 // ===== banner lines are filtered out). A doc line of the form
 // `name: description` documents the parameter of that name, Ionide-style.
 //
-// The TypedProgram carries resolved types but no spans (TypedExpr.Span is
-// noSpan until expression-level spans land), so binding positions come from
-// a parallel walk of the UNTYPED AST joined by (scope, name) in declaration
-// order. Compiler-generated declarations (ML/PPL/grad expansion) find no
-// source span and are silently skipped.
+// Binding positions come from a parallel walk of the UNTYPED AST joined by
+// (scope, name) in declaration order (a convention from before TypedExpr
+// spans went live). Compiler-generated declarations (ML/PPL/grad expansion)
+// find no source span and are silently skipped.
+//
+// calls[]: one entry per BUILTIN call site — the concrete (monomorphized)
+// argument/result types the checker resolved there, rendered in the
+// compiler's `Array<Elem like Idx...>` notation. Collected by walking the
+// zonked typed tree directly (TypedExpr.Span is live); synthesized nodes
+// (eta-expanded kernels, checkExpr fast paths) carry noSpan and are
+// skipped. The editor renders these under the abstract builtin signature:
+//   "calls": [ { name, line, col, endLine, endCol, args: [..], ret } ]
 
 module Blade.Ide
 
@@ -121,6 +128,19 @@ type private ProviderInfo = {
     Vars: ProviderMemberInfo list
 }
 
+// One builtin call site with its concrete (monomorphized) instantiation:
+// argument and result types as the checker resolved them there. Types are
+// pre-rendered strings in the compiler's concrete notation.
+type private CallInfo = {
+    CName: string
+    CLine: int
+    CCol: int
+    CEndLine: int
+    CEndCol: int
+    CArgs: string list
+    CRet: string
+}
+
 /// Clamp a span to 1-based sanity; noSpan (all zeros) becomes 1:1-1:1.
 let private clampSpan (s: Span) =
     let line = max 1 s.StartLine
@@ -129,7 +149,7 @@ let private clampSpan (s: Span) =
     let endCol = if s.EndCol >= 1 then s.EndCol else col
     (line, col, endLine, endCol)
 
-let private renderJson (diags: Diag list) (bindings: BindingInfo list) (providers: ProviderInfo list) =
+let private renderJson (diags: Diag list) (bindings: BindingInfo list) (providers: ProviderInfo list) (calls: CallInfo list) =
     let sb = StringBuilder()
     sb.Append "{\"version\":1,\"diagnostics\":[" |> ignore
     diags
@@ -203,6 +223,18 @@ let private renderJson (diags: Diag list) (bindings: BindingInfo list) (provider
         appendMembers "dims" p.Dims
         appendMembers "vars" p.Vars
         sb.Append '}' |> ignore)
+    sb.Append "],\"calls\":[" |> ignore
+    calls
+    |> List.iteri (fun i c ->
+        if i > 0 then sb.Append ',' |> ignore
+        sb.AppendFormat(
+            "{{\"name\":\"{0}\",\"line\":{1},\"col\":{2},\"endLine\":{3},\"endCol\":{4},\"ret\":\"{5}\",\"args\":[",
+            jsonEscape c.CName, c.CLine, c.CCol, c.CEndLine, c.CEndCol, jsonEscape c.CRet) |> ignore
+        c.CArgs
+        |> List.iteri (fun j a ->
+            if j > 0 then sb.Append ',' |> ignore
+            sb.AppendFormat("\"{0}\"", jsonEscape a) |> ignore)
+        sb.Append "]}" |> ignore)
     sb.Append "]}" |> ignore
     sb.ToString()
 
@@ -335,6 +367,329 @@ let abstractRenderer (seed: (int * string) seq) : IRType -> string =
             named.[id] <- n
             n
     fun t -> ppType (if hasInfer t then nameInfers nameOf t else t)
+
+// ----------------------------------------------------------------------------
+// Concrete call-site instantiations (calls[]). The zonked typed tree carries
+// full monomorphized types and live source spans, so builtin applications can
+// be reported by a plain walk — the editor shows the concrete instantiation
+// under the abstract signature from its static builtin table. The abstract
+// and concrete signatures line up positionally (same argument order), but the
+// concrete side uses the compiler's own notation: `Array<Elem like Idx...>`
+// arrays (named index types preserved) and curried arrows for functions.
+// ----------------------------------------------------------------------------
+
+/// Every index slot embedded in a type — the nominal-name walk (indexNamesOf)
+/// only reports slots that carry a source-level name.
+let rec private allIndicesOf (t: IRType) : IRIndexType list =
+    match t with
+    | ArrayElem arr -> arr.IndexTypes @ allIndicesOf arr.ElemType
+    | IRTTuple ts -> ts |> List.collect allIndicesOf
+    | IRTComputation inner | IRTPoly (inner, _) | IRTUnitAnnotated (inner, _) -> allIndicesOf inner
+    | IRTGroupKeys (outer, source, _) -> [outer; source]
+    | IRTDist (_, elem, axes) -> axes @ allIndicesOf elem
+    | IRTArrow (slots, ret, _) ->
+        (slots |> List.collect (function SIdx i | SIdxVirt i -> [i] | SVal v -> allIndicesOf v))
+        @ allIndicesOf ret
+    | _ -> []
+
+/// Index-name map for CONCRETE rendering. A slot keeps its nominal name when
+/// it has one; otherwise its extent is folded to a literal when statically
+/// evaluable, and rendered `_` when it is not. Feeding this to the compiler's
+/// own ppIndexTypeIn (which consults the map before the extent) keeps the
+/// symmetry/irreps spellings while replacing internal extent params
+/// (`__ngroups`, `v12`) and the bare `?` with a wildcard a reader can parse.
+let private concreteNames (ts: IRType list) : Map<IRId, string> =
+    let nominal = ts |> List.collect indexNamesOf |> Map.ofList
+    ts
+    |> List.collect allIndicesOf
+    |> List.fold (fun (acc: Map<IRId, string>) idx ->
+        if Map.containsKey idx.Id acc then acc
+        else
+            let text =
+                match tryEvalIntIR idx.Extent with
+                | Some n -> string n
+                | None -> "_"
+            Map.add idx.Id text acc) nominal
+
+/// Concrete-type rendering: `Array<Elem like Idx...>` for arrays, curried
+/// arrows for function types, structural tuples/Computation. Falls back to
+/// the named-index printer for everything else.
+let rec private ppConcrete (names: Map<IRId, string>) (t: IRType) : string =
+    match t with
+    | ArrayElem arr ->
+        let indices = arr.IndexTypes |> List.map (ppIndexTypeIn names) |> String.concat ", "
+        sprintf "Array<%s like %s>" (ppConcrete names arr.ElemType) indices
+    | FuncElem (paramTys, retTy) ->
+        let piece ty =
+            match ty with
+            | FuncElem _ -> sprintf "(%s)" (ppConcrete names ty)
+            | _ -> ppConcrete names ty
+        String.concat " -> " ((paramTys |> List.map piece) @ [ppConcrete names retTy])
+    | IRTTuple ts -> sprintf "(%s)" (ts |> List.map (ppConcrete names) |> String.concat ", ")
+    | IRTComputation inner -> sprintf "Computation<%s>" (ppConcrete names inner)
+    // GroupKeys/Dist render their axes through the CONTEXT-FREE printer
+    // upstream, which would reintroduce internal extent params; re-render them
+    // here so the whole tooltip obeys the name/literal/`_` rule.
+    | IRTGroupKeys (outer, source, _) ->
+        sprintf "GroupKeys<%s, %s>" (ppIndexTypeIn names outer) (ppIndexTypeIn names source)
+    | IRTDist (order, elem, axes) ->
+        sprintf "Dist<%d, %s like %s>"
+            order (ppConcrete names elem)
+            (axes |> List.map (ppIndexTypeIn names) |> String.concat ", ")
+    | other -> ppIRTypeIn names other
+
+/// The builtin a typed node is an application of, with its argument nodes in
+/// source order — None for everything that is not a builtin call. Operators
+/// are not covered; the import-gated PPL/ML surfaces are collected separately
+/// (collectFormerCalls) since they rewrite away before checking.
+///
+/// `hermitian(A)` is the one builtin the PARSER rewrites into other builtins
+/// (conj of a transpose, both nodes sharing the whole call's span). Reporting
+/// the expansion would both mis-name the call and duplicate it, so the pair is
+/// matched here as a unit and its inner transpose is skipped by the walker.
+let private builtinCallOf (te: TypedExpr) : (string * TypedExpr list) option =
+    match te.Kind with
+    // Array operands conjugate through TExprArrayConjugate (the whole-array
+    // eager form); scalar ones keep the unary op. Match both shapes.
+    | TExprArrayConjugate ({ Kind = TExprTranspose (a, 0, 1) } as inner)
+    | TExprUnaryOp (OpConj, ({ Kind = TExprTranspose (a, 0, 1) } as inner))
+        when inner.Span = te.Span && te.Span.StartLine > 0 -> Some ("hermitian", [a])
+    | TExprArrayConjugate a -> Some ("conj", [a])
+    | TExprMethodFor info -> Some ("method_for", info.Arrays)
+    | TExprObjectFor info -> Some ("object_for", [info.Kernel])
+    | TExprPure e -> Some ("pure", [e])
+    | TExprCompute e -> Some ("compute", [e])
+    | TExprRead e -> Some ("read", [e])
+    | TExprGuard (c, b) -> Some ("guard", [c; b])
+    | TExprReynolds (k, _) -> Some ("reynolds", [k])
+    | TExprZero -> Some ("zero", [])
+    | TExprRank e -> Some ("rank", [e])
+    | TExprArity _ -> Some ("arity", [])
+    | TExprExtents a -> Some ("extents", [a])
+    | TExprReduce (a, k, i) -> Some ("reduce", [a; k] @ Option.toList i)
+    | TExprMask (a, p) -> Some ("mask", [a; p])
+    | TExprCompound (d, m) -> Some ("compound", [d; m])
+    | TExprZip es -> Some ("zip", es)
+    | TExprStack es -> Some ("stack", es)
+    | TExprSort (a, k) -> Some ("sort", [a; k])
+    | TExprUnique a -> Some ("unique", [a])
+    | TExprIntersect (a, b) -> Some ("intersect", [a; b])
+    | TExprUnion (a, b) -> Some ("union", [a; b])
+    | TExprContains (a, v) -> Some ("contains", [a; v])
+    | TExprGroupBy (v, g) -> Some ("group_by", [v; g])
+    | TExprGroupKeys ks -> Some ("group_keys", ks)
+    | TExprTranspose (a, _, _) -> Some ("transpose", [a])
+    | TExprDecompact (a, _) -> Some ("decompact", [a])
+    | TExprGram (l, r, _) -> Some ("gram", [l; r])
+    | TExprSequence es -> Some ("sequence", es)
+    | TExprReplicate (c, b) -> Some ("replicate", [c; b])
+    | TExprComplexLit (re, im) -> Some ("complex", [re; im])
+    | TExprProdSum args -> Some ("prodsum", args)
+    | TExprFillRandom m -> Some ("fill_random", [m])
+    | TExprUnaryOp (OpMath name, a) -> Some (name, [a])
+    | TExprUnaryOp (OpConj, a) -> Some ("conj", [a])
+    | _ -> None
+
+/// One call entry from a name, span and already-typed operands.
+let private mkCall (name: string) (span: Span) (argTys: IRType list) (retTy: IRType) : CallInfo =
+    let (line, col, endLine, endCol) = clampSpan span
+    let names = concreteNames (retTy :: argTys)
+    { CName = name; CLine = line; CCol = col
+      CEndLine = endLine; CEndCol = endCol
+      CArgs = argTys |> List.map (ppConcrete names)
+      CRet = ppConcrete names retTy }
+
+/// Walk the zonked typed program collecting every builtin call site with a
+/// live source span (synthesized nodes carry noSpan and are skipped).
+let private collectCalls (tp: TypedProgram) : CallInfo list =
+    let acc = ResizeArray<CallInfo>()
+    let rec walk (te: TypedExpr) =
+        let hit = builtinCallOf te
+        (match hit with
+         | Some (name, args) when te.Span.StartLine > 0 ->
+             acc.Add (mkCall name te.Span (args |> List.map (fun a -> a.Type)) te.Type)
+         | _ -> ())
+        // `hermitian` consumed its own transpose node above; recursing through
+        // typedExprChildren would report that expansion a second time.
+        match hit, te.Kind with
+        | Some ("hermitian", args), _ -> for a in args do walk a
+        | _ -> for c in Blade.TypeCheck.typedExprChildren te do walk c
+    for m in tp.Modules do
+        for d in m.Decls do
+            match d with
+            | TDeclLet b | TDeclStatic b -> walk b.Value
+            | TDeclFunction f -> walk f.Body
+            | TDeclImpl impl -> for f in impl.Methods do walk f.Body
+            | _ -> ()
+    // An eta-expanded former and the kernel it wraps can land on one span
+    // (both are the same source text); report each name once per position.
+    acc
+    |> Seq.distinctBy (fun c -> (c.CName, c.CLine, c.CCol, c.CEndLine, c.CEndCol))
+    |> List.ofSeq
+
+// ---- Import-gated surfaces (ppl.* / ml.*) ----------------------------------
+// These formers are rewritten by their elaborators BEFORE the checker runs, so
+// no typed node carries their name and the walk above cannot see them. They
+// are recovered from the PRE-elaboration AST (which ideCheck still holds)
+// joined to the checked types: a former is the entire RHS of a `let`, so the
+// call's result type is the type inferred for the name it binds, and its
+// arguments are module-level names whose types are likewise known. Arguments
+// that are static integers show their VALUE (the moment order / degree is what
+// the shape depends on), matching the literal-extent rule above.
+
+/// Binding types by name from the checked program. Module-level bindings win;
+/// function parameters and body lets are added underneath so a former called
+/// inside a function can still type its operands (a shadowed name may pick the
+/// outer type — acceptable for a tooltip, and the common case is distinct).
+let private moduleBindingTypes (tp: TypedProgram) : Map<string, IRType> =
+    let acc = Dictionary<string, IRType>()
+    let addLocal (n: string) (t: IRType) = if not (acc.ContainsKey n) then acc.[n] <- t
+    let rec localsOf (stmts: TypedStmt list) =
+        for s in stmts do
+            match s with
+            | TStmtLet b ->
+                addLocal b.Name b.Type
+                for (n, _, t) in b.SubBindings do addLocal n t
+            | TStmtForIn (v, _, _, _, body) ->
+                addLocal v (IRTScalar ETInt64)
+                localsOf body
+            | _ -> ()
+    let fnLocals (f: TypedFunctionDecl) =
+        for p in f.Params do addLocal p.Name p.Type
+        match f.Body.Kind with
+        | TExprBlock (stmts, _) -> localsOf stmts
+        | _ -> ()
+    // Module level first, so it takes precedence over any same-named local.
+    for m in tp.Modules do
+        for d in m.Decls do
+            match d with
+            | TDeclLet b | TDeclStatic b ->
+                acc.[b.Name] <- b.Type
+                for (n, _, t) in b.SubBindings do acc.[n] <- t
+            | _ -> ()
+    for m in tp.Modules do
+        for d in m.Decls do
+            match d with
+            | TDeclFunction f -> fnLocals f
+            | TDeclImpl impl -> for f in impl.Methods do fnLocals f
+            | _ -> ()
+    acc |> Seq.map (fun kv -> kv.Key, kv.Value) |> Map.ofSeq
+
+/// A dist binding's NOMINAL type, rebuilt from the PPL registry exactly as the
+/// binding hover does (collectTypedBindings): dists erase to a tuple of their
+/// κ components, so the raw binding type would show that tuple where the
+/// abstract signature promises `Dist<r, Elem like axes>`.
+let private distTypeOf (types: Map<string, IRType>) (name: string) : IRType option =
+    match Blade.Ppl.Elaborate.IdeDists.tryFind name with
+    | Some (order, k1 :: _) ->
+        match Map.tryFind k1 types with
+        | Some (ArrayElem arr) -> Some (IRTDist (order, arr.ElemType, arr.IndexTypes))
+        | _ -> None
+    | _ -> None
+
+/// Aliases bound to the import-gated modules whose surfaces `calls[]` covers,
+/// as alias -> module name (`import ppl as p` -> "p" -> "ppl").
+let private surfaceAliases (prog: Ast.Program) : Map<string, string> =
+    let acc = Dictionary<string, string>()
+    let consider (qn: string list) (aliasOpt: string option) =
+        match List.tryLast qn with
+        | Some m when m = "ppl" || m = "ml" -> acc.[defaultArg aliasOpt m] <- m
+        | _ -> ()
+    for m in prog.Modules do
+        for imp in m.Imports do consider imp.Module imp.Alias
+        for ld in m.Decls do
+            match ld.Value with
+            | DeclImport (qn, ImportQualified aliasOpt) -> consider qn aliasOpt
+            | _ -> ()
+    acc |> Seq.map (fun kv -> kv.Key, kv.Value) |> Map.ofSeq
+
+/// Typed argument lists of the specialized functions the ML elaborator
+/// generates, keyed by source span. `ml.linear(SPEC_IN, SPEC_OUT, w, x)`
+/// becomes `__ml_N(w, x)` carrying the ORIGINAL call's span (inheritSpan), so
+/// operands with no binding to look up — inline array literals, most often the
+/// weight vectors — can still be typed from the checked call.
+let private mlGeneratedArgs (tp: TypedProgram) : Map<(int * int * int * int), IRType list> =
+    let acc = Dictionary<(int * int * int * int), IRType list>()
+    let rec walk (te: TypedExpr) =
+        (match te.Kind with
+         | TExprApp ({ Kind = TExprVar (fn, _, _) }, args)
+             when fn.StartsWith "__ml" && te.Span.StartLine > 0 ->
+             acc.[clampSpan te.Span] <- (args |> List.map (fun a -> a.Type))
+         | _ -> ())
+        for c in Blade.TypeCheck.typedExprChildren te do walk c
+    for m in tp.Modules do
+        for d in m.Decls do
+            match d with
+            | TDeclLet b | TDeclStatic b -> walk b.Value
+            | TDeclFunction f -> walk f.Body
+            | TDeclImpl impl -> for f in impl.Methods do walk f.Body
+            | _ -> ()
+    acc |> Seq.map (fun kv -> kv.Key, kv.Value) |> Map.ofSeq
+
+/// A qualified surface call `alias.op(args)` (or the bare `op(args)` an
+/// elaborator pass may already have normalized to), with its operand exprs.
+let private surfaceCallOf (aliases: Map<string, string>) (e: Expr) : (string * Expr list) option =
+    match e.Kind with
+    | ExprKind.ExprApp ({ Kind = ExprKind.ExprField ({ Kind = ExprKind.ExprVar alias }, op) }, args)
+        when aliases.ContainsKey alias -> Some (op, args)
+    | _ -> None
+
+/// Former/op calls in declaration RHS position, typed from the checked
+/// program. Only the `let x = alias.op(...)` shape is reported — that is the
+/// placement the formers require, and it is what makes the result type
+/// recoverable from `x`.
+let private collectFormerCalls (prog: Ast.Program) (tp: TypedProgram) : CallInfo list =
+    let aliases = surfaceAliases prog
+    if aliases.IsEmpty then [] else
+    let types = moduleBindingTypes tp
+    let mlArgs = mlGeneratedArgs tp
+    // A dist name reads as its nominal Dist type, not the κ tuple it erases to.
+    let typeOfName (n: string) : IRType option =
+        match distTypeOf types n with
+        | Some d -> Some d
+        | None -> Map.tryFind n types
+    let render (t: IRType) = ppConcrete (concreteNames [t]) t
+    let argType (a: Expr) : string option =
+        match a.Kind with
+        | ExprKind.ExprVar n -> typeOfName n |> Option.map render
+        | ExprKind.ExprLit (LitInt n) -> Some (string n)
+        | ExprKind.ExprLit (LitFloat _) -> Some "Float64"
+        | _ -> None
+    [ for m in prog.Modules do
+        for ld in m.Decls do
+            match ld.Value with
+            | DeclLet b | DeclStatic b ->
+                match b.Pattern.Kind, surfaceCallOf aliases b.Value with
+                | PatternKind.PatVar outName, Some (op, args) ->
+                    match typeOfName outName with
+                    | Some retTy ->
+                        // An argument whose type we cannot recover (a lambda,
+                        // a compound expression) renders `_` rather than
+                        // dropping the whole call — the other columns still
+                        // tell the reader what was instantiated.
+                        let span = if b.Value.Span.StartLine > 0 then b.Value.Span else ld.Span
+                        let key = clampSpan span
+                        let (line, col, endLine, endCol) = key
+                        // The elaborator consumes the leading STATIC arguments
+                        // (specs, degrees) and keeps the runtime ones, so the
+                        // generated call's args align to the TAIL of the
+                        // surface args. Used only where a name/literal lookup
+                        // came up empty (inline array literals).
+                        let generated = defaultArg (Map.tryFind key mlArgs) []
+                        let offset = args.Length - generated.Length
+                        let argAt i (a: Expr) =
+                            match argType a with
+                            | Some s -> s
+                            | None when offset >= 0 && i >= offset ->
+                                render generated.[i - offset]
+                            | None -> "_"
+                        yield { CName = op; CLine = line; CCol = col
+                                CEndLine = endLine; CEndCol = endCol
+                                CArgs = args |> List.mapi argAt
+                                CRet = ppConcrete (concreteNames [retTy]) retTy }
+                    | None -> ()
+                | _ -> ()
+            | _ -> () ]
 
 // ----------------------------------------------------------------------------
 // Doc comments
@@ -755,6 +1110,7 @@ let ideCheck (filePath: string) : int =
     let diags = ResizeArray<Diag>()
     let mutable bindings = []
     let mutable providers = []
+    let mutable calls = []
     if not (File.Exists filePath) then
         diags.Add { Severity = "error"; Line = 1; Col = 1; EndLine = 1; EndCol = 1
                     Message = sprintf "File not found: %s" filePath; Code = "" }
@@ -796,6 +1152,7 @@ let ideCheck (filePath: string) : int =
                     let sourceLines = source.Replace("\r\n", "\n").Split('\n')
                     bindings <- (try joinBindings program typedProg sourceLines with _ -> [])
                     providers <- (try collectProviderStores program with _ -> [])
+                    calls <- (try collectCalls typedProg @ collectFormerCalls program typedProg with _ -> [])
                 | None -> ()
             | Ok (typedProg, _, warnings) ->
                 // Confirm-and-pin suggestions (stage 3/4) arrive twice: as
@@ -820,5 +1177,6 @@ let ideCheck (filePath: string) : int =
                 bindings <- joinBindings program typedProg sourceLines
                 // Guarded so provider structure can never break the JSON output.
                 providers <- (try collectProviderStores program with _ -> [])
-    printfn "%s" (renderJson (List.ofSeq diags) bindings providers)
+                calls <- (try collectCalls typedProg @ collectFormerCalls program typedProg with _ -> [])
+    printfn "%s" (renderJson (List.ofSeq diags) bindings providers calls)
     exitCode

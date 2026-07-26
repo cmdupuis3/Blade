@@ -474,7 +474,11 @@ let private ensure (st: ElabState) (key: string) (make: string -> Result<Functio
 /// Shared elaboration for linear / linear_rows (nRows = 1 is the
 /// single-vector form; the fingerprint includes nRows so each batch size
 /// gets its own generated function).
-let private elabLinear (st: ElabState) (statics: StaticEnv) (what: string)
+/// `site` is the surface call expression: the generated application inherits
+/// its span (as y_to/tensor_product/scalars already do) so diagnostics — and
+/// editor tooling reading back the checked call — land on what the user wrote
+/// rather than on the ambient per-declaration synthetic span.
+let private elabLinear (st: ElabState) (statics: StaticEnv) (what: string) (site: Expr)
                        (sInE: Expr) (sOutE: Expr) (nRows: int) (wE: Expr) (xE: Expr)
     : Result<Expr, ElabError> =
     staticArg statics (what + " specIn") sInE |> Result.bind (fun svi ->
@@ -493,17 +497,17 @@ let private elabLinear (st: ElabState) (statics: StaticEnv) (what: string)
             Error (err4007 (detail + " — the only equivariant map into that block is zero (Schur's lemma); ml.derive_linear gives the zero-completed complete basis")))
     |> Result.bind (fun rows ->
         ensure st (fingerprint "linear" (box (si, so, nRows))) (fun n -> Ok (linearDecl n si so rows nRows))
-        |> Result.map (fun n -> syn (ExprApp (v n, [ wE; xE ]))))))))
+        |> Result.map (fun n -> inheritSpan site (ExprApp (v n, [ wE; xE ]))))))))
 
-/// Shared elaboration for gated / gated_rows.
-let private elabGated (st: ElabState) (statics: StaticEnv) (what: string)
+/// Shared elaboration for gated / gated_rows. `site`: see elabLinear.
+let private elabGated (st: ElabState) (statics: StaticEnv) (what: string) (site: Expr)
                       (specE: Expr) (nRows: int) (xE: Expr)
     : Result<Expr, ElabError> =
     staticArg statics (what + " spec") specE |> Result.bind (fun sv ->
     specOfStatic what sv |> Result.bind (fun spec ->
         let sig_ = ensureSigmoid st
         ensure st (fingerprint "gated" (box (spec, nRows))) (fun n -> gatedDecl n sig_ spec nRows)
-        |> Result.map (fun n -> syn (ExprApp (v n, [ xE ])))))
+        |> Result.map (fun n -> inheritSpan site (ExprApp (v n, [ xE ])))))
 
 /// Shared elaboration for derive_linear's call and binding forms: resolve
 /// specs, refuse the Schur-zero case (BL4007), synthesize (or reuse) the
@@ -593,23 +597,23 @@ let rec private rewriteExpr (st: ElabState) (statics: StaticEnv) (aliases: Set<s
                         |> Result.map (fun n -> inheritSpan e (ExprApp (v n, [ xE; yE; wE ])))))
             | "tensor_product", _ -> Error (err5000 "tensor_product: expected tensor_product(CFG, x, y, w)")
             | "linear", [ sInE; sOutE; wE; xE ] ->
-                elabLinear st statics "linear" sInE sOutE 1 wE xE
+                elabLinear st statics "linear" e sInE sOutE 1 wE xE
             | "linear", _ -> Error (err5000 "linear: expected linear(SPEC_IN, SPEC_OUT, w, x)")
             | "linear_rows", [ sInE; sOutE; nE; wE; xE ] ->
                 staticArg statics "linear_rows nrows" nE |> Result.bind (fun sv ->
                     match sv with
                     | SVInt n when n >= 1L ->
-                        elabLinear st statics "linear_rows" sInE sOutE (int n) wE xE
+                        elabLinear st statics "linear_rows" e sInE sOutE (int n) wE xE
                     | _ -> Error (err5000 "linear_rows: NROWS must be a static int >= 1"))
             | "linear_rows", _ -> Error (err5000 "linear_rows: expected linear_rows(SPEC_IN, SPEC_OUT, NROWS, w, x)")
             | "gated", [ specE; xE ] ->
-                elabGated st statics "gated" specE 1 xE
+                elabGated st statics "gated" e specE 1 xE
             | "gated", _ -> Error (err5000 "gated: expected gated(SPEC, x)")
             | "gated_rows", [ specE; nE; xE ] ->
                 staticArg statics "gated_rows nrows" nE |> Result.bind (fun sv ->
                     match sv with
                     | SVInt n when n >= 1L ->
-                        elabGated st statics "gated_rows" specE (int n) xE
+                        elabGated st statics "gated_rows" e specE (int n) xE
                     | _ -> Error (err5000 "gated_rows: NROWS must be a static int >= 1"))
             | "gated_rows", _ -> Error (err5000 "gated_rows: expected gated_rows(SPEC, NROWS, x)")
             | "scalars", [ specE; xE ] ->

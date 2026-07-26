@@ -1997,7 +1997,9 @@ let rec private dispatchAppOrIndex (env: TypeEnv) (tFunc: TypedExpr) (tArgs: Typ
 /// Structural child enumerator for a typed expression: the immediate
 /// sub-expressions of a node. Total over TExpr kinds. Shared by the tag-check
 /// revalidation walk and the wildcard-escape scan so the two never drift.
-let private typedExprChildren (expr: TypedExpr) : TypedExpr list =
+// Public: Ide.fs walks the zonked typed tree with this to collect builtin
+// call-site instantiations (calls[] in `ide check --json`).
+let typedExprChildren (expr: TypedExpr) : TypedExpr list =
         match expr.Kind with
         | TExprLit _ | TExprVar _ | TExprQualified _ | TExprSection _
         | TExprWildcard
@@ -2110,6 +2112,15 @@ let providerAliasName (env: TypeEnv) (alias: string) : string option =
          | IRTNamed pn when (Blade.ProviderRegistry.tryFind pn).IsSome -> Some pn
          | _ -> None)
     | None -> None
+
+/// Stamp a source expression's span onto a node built by calling a former
+/// builder (inferObjectFor / inferMethodFor) DIRECTLY — those bypass
+/// inferExpr, so they miss its span back-fill and would return noSpan.
+/// Consumers that need a location: the stage-3/4 BL4010 pin suggestion (which
+/// otherwise has nothing to anchor on) and the editor's call-site walk.
+/// Existing spans are never overwritten.
+let stampSynthSpan (src: Expr) (te: TypedExpr) : TypedExpr =
+    if te.Span.StartLine = 0 && src.Span.StartLine > 0 then { te with Span = src.Span } else te
 
 /// Entry for every expression: stamps the ambient expression span (for
 /// error location, see TypeEnv.locateError) and back-fills the source span
@@ -4377,7 +4388,8 @@ and inferBinOp env mode op left right : TypeResult<TypedExpr> =
             match left.Kind with
             | ExprKind.ExprTuple elems when rightKernelShaped ->
                 // (A, B) <@> kernel  ≡  method_for(A, B) <@> kernel
-                inferMethodFor env elems |> Result.bind (fun tL ->
+                inferMethodFor env elems |> Result.bind (fun tL0 ->
+                    let tL = stampSynthSpan left tL0
                     warnImplicitOuterProduct env tL rightResult
                     applyWith tL)
             | _ ->
@@ -4398,13 +4410,17 @@ and inferBinOp env mode op left right : TypeResult<TypedExpr> =
                             // Re-driving inferObjectFor on the source expr keeps
                             // the resolve-at-apply behavior for let-bound
                             // lambdas (compose chains) in the one existing place.
-                            inferObjectFor env left |> Result.bind applyWith
+                            inferObjectFor env left
+                            |> Result.map (stampSynthSpan left)
+                            |> Result.bind applyWith
                     | _ when rightKernelShaped ->
                         // Arrays-shaped left (variable, call, zip, literal):
                         // A <@> kernel  ≡  method_for(A) <@> kernel. Re-driving
                         // inferMethodFor on the source expr keeps zip expansion
                         // and identity extraction in the one existing place.
-                        inferMethodFor env [left] |> Result.bind applyWith
+                        inferMethodFor env [left]
+                        |> Result.map (stampSynthSpan left)
+                        |> Result.bind applyWith
                     | _ when namedFunctionKernelLeft ->
                         // Bare named function on the left, nothing decisive on
                         // the right: named-kernel <@> arrays ≡
@@ -4414,15 +4430,11 @@ and inferBinOp env mode op left right : TypeResult<TypedExpr> =
                         //
                         // The synthesized former is built by calling
                         // inferObjectFor directly, so it misses the span
-                        // back-fill inferExpr does for the explicit spelling.
-                        // Stamp the source name's span: the stage-3/4
-                        // suggestion falls back to the LOOP's span whenever the
-                        // eta-expanded kernel carries noSpan (which the
-                        // fixed-arity wrapper always does), and without this the
-                        // BL4010 would have no location to anchor on at all.
+                        // back-fill inferExpr does for the explicit spelling —
+                        // hence stampSynthSpan (see its note: the BL4010
+                        // suggestion needs a location to anchor on).
                         inferObjectFor env left
-                        |> Result.map (fun tL ->
-                            if tL.Span = noSpan then { tL with Span = left.Span } else tL)
+                        |> Result.map (stampSynthSpan left)
                         |> Result.bind applyWith
                     | _ ->
                         // Undecidable: steering diagnostic via inferApply.
@@ -6556,7 +6568,18 @@ and inferLambda env parms whereClause body : TypeResult<TypedExpr> =
 //    is checked individually; promotion is not applied across elements
 //  - No 0/false coercion, no float/int silent narrowing
 //
+/// Back-fills the source span onto the checked node, exactly as inferExpr
+/// does for the synthesis direction: the bidirectional fast paths below build
+/// their nodes with `mkTyped` (noSpan), which would leave literals, tuples,
+/// array literals, fill_random and `complex(re, im): Complex64` spanless — and
+/// so invisible to span-based editor tooling (Ide.fs calls[]).
 and checkExpr (env: TypeEnv) (expected: IRType) (expr: Expr) : TypeResult<TypedExpr> =
+    match checkExprInner env expected expr with
+    | Ok te when te.Span.StartLine = 0 && expr.Span.StartLine > 0 ->
+        Ok { te with Span = expr.Span }
+    | r -> r
+
+and checkExprInner (env: TypeEnv) (expected: IRType) (expr: Expr) : TypeResult<TypedExpr> =
     // Stamp the ambient expression span (mirrors inferExpr) so errors raised
     // here — and in recursive checkExpr calls on sub-expressions — anchor to
     // the innermost offending node (e.g. the specific array-literal row whose
