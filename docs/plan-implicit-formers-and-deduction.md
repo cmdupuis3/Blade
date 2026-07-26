@@ -614,13 +614,30 @@ cells with a duplicated `1.333` vs the 3-cell triangle).
    (corpus functions/025) and `object_for(covariance) <@> (data, data)`
    over rank-2 data (functions/026 — dense 2×2, identical values to
    arity/022, compaction awaiting the stage-3/4 comm pin as designed).
-   Scoped out, kept LOUD: *returning* a loop-materialized array from a
-   plain function is guarded with an emitted `#error` (functions/027,
-   REJECT-AT: codegen) — the companion-extents convention is
-   function-local, so the result's extents don't cross the call boundary
-   yet; that return-extent ABI is the remaining work item here. (This shape
-   never worked at any annotation level; the guard replaces silent
-   corruption that the naive materialization would have introduced.)
+   **Return-extent ABI — DONE (2026-07-26).** *Returning* a
+   loop-materialized array from a plain function was the remaining work
+   item, guarded with an emitted `#error`; the guard is now gone and
+   functions/027 is a value-pinned passing test (`center(a) = a - mean(a)`
+   over `[1,2,3]` → `[-1, 0, 1]`). The diagnosis was narrower than
+   "companion extents don't cross the boundary": nothing caller-side needs
+   plumbing at all — the caller binds the returned `Array<T,R>` and reads
+   shape straight off it (`c.extents[0]`), never off a companion
+   `c_extents`. The wrapper holds a *pointer* to its extents table, and
+   `genObjectForApplication` declared that table as a frame-local
+   `size_t[R]`; the data pool (heap, via `allocate<>`) outlived the frame
+   but the shape pointer dangled, so the caller read garbage. The fix is
+   one line per output shape: heap-allocate the extents table
+   (`size_t* R_extents = new size_t[R]`), which is exactly what
+   `genApplyCombinator` already did — and precisely why *its* array
+   returns (`method_for(a) <@> k |> compute` as a function body) had always
+   worked. Reads are unchanged (`R_extents[d]` indexes a pointer the same
+   way it indexed an array), and lifetime matches the data pool's. Verified
+   for the broadcast, two-array elementwise, and outer-product shapes, for
+   rank-2 outputs, and for nested calls (`center(center(x))`); the
+   interpreter gate agrees. Still LOUD and out of scope: returning an
+   *inline form* (`mask`/`sort`/`unique`/…) from a function body, which
+   fails on a different missing lift (unsupported-IR-node sentinel in
+   return position), not on extents.
 3. **Symmetry-from-primitives — EARLY TIER DONE (2026-07-25), scoped.**
    Landed as `src/Deduce.fs` (pure analysis over TypedAst, compiled before
    TypeCheck so `typeCheck` invokes it internally — the Zonk pattern): the

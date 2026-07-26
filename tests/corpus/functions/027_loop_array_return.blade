@@ -1,0 +1,18 @@
+// TEST: Loop Array Return
+// A plain (non-Poly) function RETURNING a loop-materialized array. The body's
+// `a - scalar` broadcast is hoisted into a stage-2b materialization, and that
+// materialized wrapper is the return value.
+//
+// This is the return-extent ABI. `Array<T,R>` stores a POINTER to its extents
+// table, so a frame-local `size_t[R]` table made the wrapper unreturnable: the
+// heap data pool survived the frame but the shape pointer dangled, and the
+// caller's `c.extents[0]` read garbage past the real elements. The
+// materialization now allocates the extents table on the heap — the same
+// convention genApplyCombinator already used, which is why ITS array returns
+// always worked — so the wrapper is self-describing across the call boundary
+// and no caller-side extents plumbing is needed. Previously pinned as a
+// codegen-stage reject-probe.
+function center(a: T^1) -> T^1 = a - (reduce(a, (+)) / extents(a))
+let x = [1.0, 2.0, 3.0]
+let c = center(x)
+// EXPECT: c = [-1, 0, 1]

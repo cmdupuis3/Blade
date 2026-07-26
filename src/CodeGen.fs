@@ -7076,10 +7076,26 @@ let genObjectForApplication (ctx: CodeGenContext) (name: string) (objInfo: Objec
                 |> Option.defaultValue (match callable.Params with p :: _ -> irTypeToCpp p.Type | [] -> "void")
         // Indent wrapper-emission lines to match surrounding scope.
         let wrapperLines = wrapperCode |> List.map (fun s -> ind + s)
+        // Return-extent ABI: the materialized array's shape table is HEAP
+        // allocated (`size_t*`), not a stack `size_t[R]`. `Array<T,R>` stores
+        // only a POINTER to its extents, so a stack table makes the wrapper
+        // non-returnable — the data buffer (allocate<>, `new`) outlives the
+        // frame but the extents pointer dangles, and a caller reading
+        // `c.extents[d]` gets garbage. Heap extents make the wrapper
+        // self-describing across the call boundary, which is exactly the
+        // convention genApplyCombinator already uses for its outputs
+        // (`size_t* R_extents = new size_t[ORANK]`). Reads are unchanged:
+        // `NAME_extents[d]` indexes a pointer the same way it indexed an
+        // array, so every existing companion-extents consumer is unaffected.
+        // Lifetime matches the data pool's (both leak; Blade has no free).
+        let heapExtents (rank: int) (dims: string list) =
+            (sprintf "%ssize_t* %s_extents = new size_t[%d];" ind name rank)
+            :: (dims |> List.mapi (fun d e -> sprintf "%s%s_extents[%d] = %s;" ind name d e))
         match objInfo.InputRanks, arrayNames with
         | [1; 1], [arrA; arrB] ->
             // Outer product: result[i][j] = kernel(A[i], B[j])
-            let extentsDecl = sprintf "%ssize_t %s_extents[2] = {%s.extents[0], %s.extents[0]};" ind name arrA arrB
+            let extentsDecl =
+                heapExtents 2 [sprintf "%s.extents[0]" arrA; sprintf "%s.extents[0]" arrB]
             let allocDecl = sprintf "%sArray<%s, 2> %s = { allocate<promote<%s, 2>::type>(%s_extents), %s_extents };" ind elemTypeStr name elemTypeStr name name
             let loopCode = [
                 sprintf "%sfor (size_t __i0 = 0; __i0 < %s.extents[0]; __i0++) {" ind arrA
@@ -7088,31 +7104,31 @@ let genObjectForApplication (ctx: CodeGenContext) (name: string) (objInfo: Objec
                 sprintf "%s    }" ind
                 sprintf "%s}" ind
             ]
-            [extentsDecl; allocDecl; ""] @ wrapperLines @ loopCode
+            extentsDecl @ [allocDecl; ""] @ wrapperLines @ loopCode
 
         | [0; 0], [arrA; arrB] ->
             // Elementwise: result[i] = kernel(A[i], B[i])
-            let extentsDecl = sprintf "%ssize_t %s_extents[1] = {%s.extents[0]};" ind name arrA
+            let extentsDecl = heapExtents 1 [sprintf "%s.extents[0]" arrA]
             let allocDecl = sprintf "%sArray<%s, 1> %s = { allocate<promote<%s, 1>::type>(%s_extents), %s_extents };" ind elemTypeStr name elemTypeStr name name
             let loopCode = [
                 sprintf "%sfor (size_t __i0 = 0; __i0 < %s.extents[0]; __i0++) {" ind arrA
                 sprintf "%s    %s[__i0] = %s(%s[__i0], %s[__i0]);" ind name wname arrA arrB
                 sprintf "%s}" ind
             ]
-            [extentsDecl; allocDecl; ""] @ wrapperLines @ loopCode
+            extentsDecl @ [allocDecl; ""] @ wrapperLines @ loopCode
 
         | [0], [arrA] ->
             // Single-array elementwise map (array<->scalar broadcast):
             // result[i] = kernel(A[i]). The scalar is baked into the 1-param
             // kernel, so only the array is iterated.
-            let extentsDecl = sprintf "%ssize_t %s_extents[1] = {%s.extents[0]};" ind name arrA
+            let extentsDecl = heapExtents 1 [sprintf "%s.extents[0]" arrA]
             let allocDecl = sprintf "%sArray<%s, 1> %s = { allocate<promote<%s, 1>::type>(%s_extents), %s_extents };" ind elemTypeStr name elemTypeStr name name
             let loopCode = [
                 sprintf "%sfor (size_t __i0 = 0; __i0 < %s.extents[0]; __i0++) {" ind arrA
                 sprintf "%s    %s[__i0] = %s(%s[__i0]);" ind name wname arrA
                 sprintf "%s}" ind
             ]
-            [extentsDecl; allocDecl; ""] @ wrapperLines @ loopCode
+            extentsDecl @ [allocDecl; ""] @ wrapperLines @ loopCode
 
         | _ ->
             // Unsupported configuration
@@ -10560,24 +10576,19 @@ let genFuncBody (ctx: CodeGenContext) (builder: IRBuilder) (names: Map<IRId, str
             let arrayCode = genArrayLiteral bodyCtx retVarName elements arrType
             stmts @ arrayCode @ [sprintf "%sreturn %s;" indent retVarName]
         | _ ->
-            // Stage 2b guard: RETURNING a loop-materialized array from a
-            // plain function is not yet supported — the result's extents
-            // don't cross the call boundary (the companion-extents
-            // convention is function-local), so the caller would read
-            // garbage past the real elements. This shape never worked (it
-            // previously died at IR validation / g++); keep it a LOUD
-            // build failure, now with a precise message, until the
-            // return-extent ABI lands. Scalar returns and loop-apps in
-            // argument position are fully supported above.
-            let loopAppIds =
-                lets |> List.choose (fun (id, v) ->
-                    match v with
-                    | IRApp (IRObjectFor _, _, _) -> Some id
-                    | _ -> None) |> Set.ofList
-            match retExpr with
-            | IRVar (rid, _) when Set.contains rid loopAppIds ->
-                stmts @ codegenError ctx indent "returning a loop-materialized array from a function is not yet supported - bind the result at module level or use an arity-polymorphic (Poly) kernel"
-            | _ ->
+            // Return-extent ABI (supersedes the stage-2b guard): a
+            // loop-materialized array CAN now be returned. The former guard
+            // existed because `Array<T,R>` holds only a POINTER to its
+            // extents table, and the hoisted materialization declared that
+            // table as a frame-local `size_t[R]` — returning the wrapper
+            // handed the caller a dangling shape pointer, so `c.extents[d]`
+            // read garbage even though the data pool (heap) was intact.
+            // genObjectForApplication now heap-allocates the table (matching
+            // genApplyCombinator, whose array returns already worked for
+            // exactly this reason), which makes the wrapper self-describing
+            // across the call boundary. No caller-side change is needed: the
+            // caller already binds the returned wrapper and reads shape off
+            // it (`c.extents[0]`), never off a companion `c_extents`.
             let retStr = exprToCpp currentNames retExpr
             stmts @ [sprintf "%sreturn %s;" indent retStr]
 
