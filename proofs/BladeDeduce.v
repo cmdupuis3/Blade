@@ -56,6 +56,11 @@
 (* output_antisymmetry_soundness (BladeLowering) consume exactly the     *)
 (* invariant_under / antiinvariant_under facts produced here.            *)
 (*                                                                       *)
+(* Tower kin, not duplicates: fold_right_permutation generalizes         *)
+(* BladeCompleteness's lsum_perm (the nat-sum instance) to any comm +    *)
+(* assoc op; BladeJacobian's aceq_add_exchange is the syntactic 4-term   *)
+(* cousin of exchange_law over the d-congruence AC relation.             *)
+(*                                                                       *)
 (* Imports BladeLowering.  Coq 8.18, stdlib only.                        *)
 (* ===================================================================== *)
 
