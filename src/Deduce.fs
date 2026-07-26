@@ -178,3 +178,143 @@ let deduceAdjacentPairs (parms: TypedParam list) (body: TypedExpr) : Parity list
         parms
         |> List.pairwise
         |> List.map (fun (a, b) -> parityOf a.VarId b.VarId body)
+
+// ============================================================================
+// Late tier: arity-polymorphic (Poly-pack) kernels — the ∀-arity exchange law
+// ============================================================================
+//
+// A pack kernel's adjacent pairs only exist per materialized arity, but the
+// canonical head::tail recursion makes a single decl-level check sufficient
+// for EVERY arity: g(x1) ⊛ g(x2) ⊛ … ⊛ g(xn) is fully symmetric whenever ⊛
+// is associative AND commutative and the base case is the same g as the step
+// (the AC-fold induction; the adversarial review verified both directions,
+// including that an antisymmetric ⊛ cannot satisfy the SIGNED exchange law —
+// so packs only ever claim PInv or PBottom, never PNeg, and pack validation
+// can produce no false errors). Wrapper kernels (comoment = mean(prod(a)))
+// inherit the property compositionally: an expression is invariant under
+// pack permutation when every pack-touching part is a whole-pack call to an
+// already-summarized-invariant function.
+
+/// Conservative "does this subtree reference VarId v" — unknown node kinds
+/// answer TRUE (assume it does), which makes every consumer of this helper
+/// fail toward PBottom.
+let rec private usesVar (v: IRId) (e: TypedExpr) : bool =
+    match e.Kind with
+    | TExprLit _ | TExprSection _ | TExprArity _ -> false
+    | TExprVar (_, id, _) -> id = v
+    | TExprBinOp (_, _, l, r) -> usesVar v l || usesVar v r
+    | TExprUnaryOp (_, i) -> usesVar v i
+    | TExprApp (f, args) -> usesVar v f || List.exists (usesVar v) args
+    | TExprReduce (a, k, i) ->
+        usesVar v a || usesVar v k || (match i with Some x -> usesVar v x | None -> false)
+    | TExprExtents a -> usesVar v a
+    | TExprIndex (a, idxs, _) -> usesVar v a || List.exists (usesVar v) idxs
+    | TExprTuple es | TExprSequence es -> List.exists (usesVar v) es
+    | TExprIf (c, t, f) -> usesVar v c || usesVar v t || usesVar v f
+    | TExprField (o, _, _) -> usesVar v o
+    | _ -> true   // unknown: assume it uses v
+
+/// Unwrap a trivial block (`{ e }` with no statements) around an expression.
+let rec private unwrapBlock (e: TypedExpr) : TypedExpr =
+    match e.Kind with
+    | TExprBlock ([], Some inner) -> unwrapBlock inner
+    | _ -> e
+
+/// One arm of the pack-fold template: `{ let head :: tail = pack; EXPR }`.
+/// Returns (headId, tailId, EXPR) when the arm has exactly that shape.
+let private consArm (packId: IRId) (armBody: TypedExpr) : (IRId * IRId * TypedExpr) option =
+    match (unwrapBlock armBody).Kind with
+    | TExprBlock ([TStmtLet b], Some e) ->
+        (match b.Destructure, b.SubBindings, b.Value.Kind with
+         | DSConsRest, [(_, headId, _); (_, tailId, _)], TExprVar (_, vid, _) when vid = packId ->
+             Some (headId, tailId, e)
+         | _ -> None)
+    | _ -> None
+
+/// The ∀-arity pack-fold template check for a Poly-pack function `fname`
+/// with pack parameter `packId`:
+///
+///     match arity(pack) with
+///     | 1 -> { let head :: tail = pack; g(head) }
+///     | _ -> { let head :: tail = pack; g(head) ⊛ fname(tail) }
+///
+/// (self-call on either side of ⊛). Returns PInv when ⊛ is associative AND
+/// commutative (+ * && ||), the two g's are structurally identical (modulo
+/// the two arms' distinct head binders — checked with mirrorEq over that
+/// pair), and no g touches a tail or the pack itself. Anything else is
+/// PBottom. PNeg is deliberately impossible for packs (no signed exchange
+/// law exists — reviewer-verified).
+let deducePackFold (fname: string) (packName: string) (packId: IRId) (body: TypedExpr) : Parity =
+    let isAcOp op = match op with OpAdd | OpMul | OpAnd | OpOr -> true | _ -> false
+    match (unwrapBlock body).Kind with
+    | TExprMatch (scrut, [case1; caseN]) ->
+        let scrutIsArity =
+            match (unwrapBlock scrut).Kind with
+            | TExprArity n -> n = packName
+            | _ -> false
+        let case1Ok =
+            match case1.Pattern.Kind, case1.Guard with
+            | TPatLit (LitInt 1L), None -> true
+            | _ -> false
+        let caseNOk =
+            match caseN.Pattern.Kind, caseN.Guard with
+            | TPatWild, None -> true
+            | _ -> false
+        if not (scrutIsArity && case1Ok && caseNOk) then PBottom
+        else
+            match consArm packId case1.Body, consArm packId caseN.Body with
+            | Some (h1, t1, baseG), Some (h2, t2, stepExpr) ->
+                let selfCallOn (e: TypedExpr) =
+                    match e.Kind with
+                    | TExprApp ({ Kind = TExprVar (n, _, _) }, [{ Kind = TExprVar (_, aid, _) }]) ->
+                        n = fname && aid = t2
+                    | _ -> false
+                let stepG =
+                    match stepExpr.Kind with
+                    | TExprBinOp (_, op, l, r) when isAcOp op ->
+                        if selfCallOn r then Some l
+                        elif selfCallOn l then Some r
+                        else None
+                    | _ -> None
+                match stepG with
+                | Some g when mirrorEq h1 h2 baseG g
+                              && not (usesVar t1 baseG) && not (usesVar packId baseG)
+                              && not (usesVar t2 g) && not (usesVar packId g) ->
+                    PInv
+                | _ -> PBottom
+            | _ -> PBottom
+    | _ -> PBottom
+
+/// Compositional pack parity for WRAPPER functions over a Poly pack: is the
+/// body invariant under any permutation of the pack's elements? Invariance
+/// composes through EVERY operator (no comm/sign table needed — permuting
+/// inputs of invariant subvalues changes nothing), so the only base cases
+/// are: expressions that never touch the pack (invariant), `arity(pack)`
+/// (permutation-invariant by definition), a whole-pack call to a function
+/// the `resolver` already summarizes as invariant, and the bare pack itself
+/// (unknown). Unknown node kinds that touch the pack are unknown.
+let packParityOf (resolver: string -> Parity option) (packId: IRId) (body: TypedExpr) : Parity =
+    let rec go (e: TypedExpr) : Parity =
+        let allInv es = if es |> List.forall (fun x -> go x = PInv) then PInv else PBottom
+        match e.Kind with
+        | _ when not (usesVar packId e) -> PInv
+        | TExprVar _ -> PBottom   // the bare pack (pack-free vars hit the guard above)
+        | TExprApp ({ Kind = TExprVar (fname, _, _) }, args) ->
+            let argOk (a: TypedExpr) =
+                match a.Kind with
+                | TExprVar (_, aid, _) when aid = packId ->
+                    (match resolver fname with Some PInv -> true | _ -> false)
+                | _ -> go a = PInv
+            if args |> List.forall argOk then PInv else PBottom
+        | TExprBinOp (_, _, l, r) -> allInv [l; r]
+        | TExprUnaryOp (_, i) -> go i
+        | TExprReduce (a, k, i) ->
+            allInv ([a; k] @ (match i with Some x -> [x] | None -> []))
+        | TExprExtents a -> go a
+        | TExprIndex (a, idxs, _) -> allInv (a :: idxs)
+        | TExprTuple es | TExprSequence es -> allInv es
+        | TExprIf (c, t, f) -> allInv [c; t; f]
+        | TExprField (o, _, _) -> go o
+        | TExprBlock ([], Some inner) -> go inner
+        | _ -> PBottom
+    go body

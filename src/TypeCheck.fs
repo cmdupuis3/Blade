@@ -1155,6 +1155,55 @@ let extractCommGroups (parms: LambdaParam list) (whereClause: WhereClause option
                 parms |> List.tryFindIndex (fun p -> p.Name = name)))
     | None -> []
 
+/// Rewrite a parallel-strategy list so its `omp(var: n)` variable names refer to
+/// a WRAPPER lambda's parameter names instead of the original callee's.
+///
+/// Needed because a named function used in kernel position is eta-expanded into
+/// `lambda(__k<uid>_0, ..) -> f(__k<uid>_0, ..)`, whose params are positionally
+/// 1:1 with `f`'s but carry synthesized names — while `Lowering.extractParallelism`
+/// resolves an omp var to a param INDEX by NAME. Unmapped names (a var naming no
+/// parameter — see checkOmpVarNames) are passed through unchanged rather than
+/// dropped, so this stays purely a renaming. `cuda`/`mpi` carry no variable
+/// names and pass through untouched.
+let remapParallelVars (calleeNames: string list) (wrapperNames: string list)
+                      (strategies: ParallelStrategy list) : ParallelStrategy list =
+    strategies |> List.map (function
+        | Omp o ->
+            Omp { o with
+                    Vars = o.Vars |> List.map (fun (n, dims) ->
+                        match List.tryFindIndex ((=) n) calleeNames with
+                        | Some i when i < List.length wrapperNames -> (wrapperNames.[i], dims)
+                        | _ -> (n, dims)) }
+        | s -> s)
+
+/// Warn when an `omp(v: n)` clause names a variable that is not a parameter.
+///
+/// Nothing rejects this today: the parser is grammar-only and
+/// `Lowering.extractParallelism` resolves names to param indices with a
+/// `List.choose`, so an unmatched name is simply DROPPED. That left
+/// `IsOmpParallel = true` with an empty depth list — harmless while the depths
+/// were unread, but now that `omp(a: n)` is a licence the difference between
+/// "licensed one level of a" and "licensed nothing, name was a typo" decides
+/// whether the nest is parallelized at all. buildLoopNestCodeGen falls back to
+/// the historical outermost-level licence so a typo cannot silently serialize a
+/// nest; this warning is what makes the typo itself visible.
+let checkOmpVarNames (env: TypeEnv) (paramNames: string list)
+                     (whereClause: WhereClause option) (owner: string) : unit =
+    match whereClause with
+    | Some wc ->
+        wc.Parallel
+        |> List.iter (function
+            | Omp o ->
+                o.Vars |> List.iter (fun (v, _) ->
+                    if not (List.contains v paramNames) then
+                        emitWarning env
+                            (sprintf "omp(%s: ...) on %s names no parameter (parameters: %s). The clause is ignored for that variable; parallelization falls back to the outermost loop level only."
+                                     v owner
+                                     (if List.isEmpty paramNames then "none"
+                                      else String.concat ", " paramNames)))
+            | _ -> ())
+    | None -> ()
+
 // ============================================================================
 // 7. Array Type Utilities
 // ============================================================================
@@ -5152,17 +5201,31 @@ and etaExpandFunctionKernel (env: TypeEnv) (kernelExpr: Expr) : TypeResult<Typed
                         // partial-application eta-expansion.
                         unify env.Subst tLam.Type (mkFuncArrow paramTys retTy)
                         |> Result.map (fun () ->
-                            // Surface the callee's `where comm` onto the wrapper
-                            // lambda: params are 1:1 with the callee's, so the
-                            // comm-group indices carry over unchanged. This is
-                            // what makes `object_for(f)` / `method_for(..) <@> f`
-                            // for a commutative NAMED function compact to SymIdx.
-                            match env.FuncCommGroups.TryGetValue name with
-                            | true, cg when not (List.isEmpty cg) ->
-                                match tLam.Kind with
-                                | TExprLambda li ->
-                                    { tLam with Kind = TExprLambda { li with CommGroups = cg; IsCommutative = true } }
-                                | _ -> tLam
+                            // Surface the callee's `where` clause onto the wrapper
+                            // lambda. Params are 1:1 with the callee's, so:
+                            //   - comm-group INDICES carry over unchanged. This is
+                            //     what makes `object_for(f)` / `method_for(..) <@> f`
+                            //     for a commutative NAMED function compact to SymIdx.
+                            //   - parallel strategies carry over, but an `omp(a: n)`
+                            //     var is resolved by NAME downstream
+                            //     (Lowering.extractParallelism), and `names` above
+                            //     renamed every param to `__k<uid>_<i>` — so remap
+                            //     each var through the callee's param list by
+                            //     position. Without this the whole clause is lost
+                            //     and the loop nest is emitted serial, silently.
+                            let withComm (li: TypedLambdaInfo) =
+                                match env.FuncCommGroups.TryGetValue name with
+                                | true, cg when not (List.isEmpty cg) ->
+                                    { li with CommGroups = cg; IsCommutative = true }
+                                | _ -> li
+                            let withParallel (li: TypedLambdaInfo) =
+                                match env.FuncParallel.TryGetValue name with
+                                | true, (calleeNames, strategies) when not (List.isEmpty strategies) ->
+                                    { li with Parallel = remapParallelVars calleeNames names strategies }
+                                | _ -> li
+                            match tLam.Kind with
+                            | TExprLambda li ->
+                                { tLam with Kind = TExprLambda (li |> withComm |> withParallel) }
                             | _ -> tLam)))
             | _ -> None
         | Some _ -> None   // let-bound value (lambda etc.): use the existing path
@@ -5476,8 +5539,44 @@ and inferApply (env: TypeEnv) (tLeft: TypedExpr) (tRight: TypedExpr) : TypeResul
                             | true, cg when not (List.isEmpty cg) ->
                                 { li with CommGroups = [ [ 0 .. n - 1 ] ]; IsCommutative = true }
                             | _ -> li
+                        // Same for the `where omp(...)` clause, which is otherwise
+                        // dropped by the eta expansion (the wrapper is built with
+                        // no where-clause) and the nest comes out serial. A poly
+                        // kernel's omp var names the PACK, which expanded into the
+                        // n params `__of<uid>_0..n-1`; the pragma gate only reads
+                        // level 0, so map it onto the first expanded param.
+                        let li'' =
+                            match env.FuncParallel.TryGetValue fnName with
+                            | true, (calleeNames, strategies)
+                                    when not (List.isEmpty strategies) && not (List.isEmpty names) ->
+                                let packNames = calleeNames |> List.map (fun _ -> List.head names)
+                                { li' with Parallel = remapParallelVars calleeNames packNames strategies }
+                            | _ -> li'
+                        // Stage-3 LATE TIER confirm-and-pin for PACK kernels:
+                        // no declared comm, the pack deduces invariant at
+                        // every arity (AC-fold template / wrapper walk), and
+                        // the SAME array fills every expanded position —
+                        // H ∩ Stab would license compaction. Dense until the
+                        // user pins `where comm(pack)` on the kernel.
+                        (match env.FuncCommGroups.TryGetValue fnName with
+                         | true, cg when not (List.isEmpty cg) -> ()
+                         | _ ->
+                             match env.PackDeducedComm.TryGetValue fnName with
+                             | true, (packName, Blade.Deduce.PInv) when n >= 2 ->
+                                 let allSame =
+                                     match identities with
+                                     | [] -> false
+                                     | first :: rest -> rest |> List.forall (fun i -> i = first)
+                                 if allSame then
+                                     let msg =
+                                         sprintf
+                                             "kernel `%s` deduces commutative over its argument pack `%s` (at every arity) and all %d positions receive the same array: output storage is DENSE today. Pin `where comm(%s)` on `%s` to opt into compact symmetric (triangular) storage."
+                                             fnName packName n packName fnName
+                                     emitWarning env msg
+                                     PinSuggestions.add msg span
+                             | _ -> ())
                         buildApplyInfo env flatArrays identities arrayTypes sDimsPerArray sharedRecords
-                                       li' tLoopSynth synInfo.Kernel false false
+                                       li'' tLoopSynth synInfo.Kernel false false
                     | _ -> Error (ObjectForKernel "deferred former eta-expansion did not yield a lambda")
                 | _ -> Error (ObjectForKernel "deferred former eta-expansion did not yield an object_for"))
         | _ -> Error (ObjectForKernel (resolvedKernel.Kind.GetType().Name))
@@ -5561,7 +5660,17 @@ and buildApplyInfo (env: TypeEnv)
                     (match env.FuncDeducedPairs.TryGetValue fname with
                      | true, (names, ps) when ps.Length = lambdaInfo.Params.Length - 1 ->
                          Some (names, ps)
-                     | _ -> None)
+                     | _ ->
+                         // Fixed-arity wrapper over a PACK-summarized kernel
+                         // (`lambda(x, y) -> comoment(x, y)`): invariance at
+                         // every arity specializes to full pairwise symmetry
+                         // at this one. Suggestion names the LAMBDA's own
+                         // params — that is where this spelling pins.
+                         (match env.PackDeducedComm.TryGetValue fname with
+                          | true, (_, Blade.Deduce.PInv) ->
+                              Some (lambdaInfo.Params |> List.map (fun p -> p.Name),
+                                    List.replicate (lambdaInfo.Params.Length - 1) Blade.Deduce.PInv)
+                          | _ -> None))
                 | _ -> None
             match etaSummary with
             | Some (names, ps) -> (names, ps)
@@ -5605,6 +5714,35 @@ and buildApplyInfo (env: TypeEnv)
                 // ghost annotation lands on `object_for(f)` / `method_for(..)`.
                 let span = if tKernel.Span = noSpan then tLoop.Span else tKernel.Span
                 PinSuggestions.add msg span)
+
+    // Dropped-parallel-clause guard. This is the apply seam — the ONE place a
+    // loop and a kernel meet — so it is where "the kernel declared `omp(...)`"
+    // and "the lambda reaching the loop carries it" can be compared at all.
+    //
+    // A named function used in kernel position is eta-expanded into a wrapper
+    // lambda built with NO where-clause, so its `Parallel` starts empty and the
+    // callee's clause has to be surfaced explicitly (etaExpandFunctionKernel /
+    // the deferred-former eta). When that surfacing is missing the clause
+    // vanishes with no other trace: `Parallel = []` becomes IsOmpParallel =
+    // false, the nest is emitted serial, and the generated C++ is identical to
+    // a program that never asked. That was a real, long-lived silent bug. This
+    // is its regression guard — it should never fire, and firing means some
+    // apply path grew a wrapper that forgets the clause again.
+    (if List.isEmpty lambdaInfo.Parallel then
+        match lambdaInfo.Body.Kind with
+        | TExprApp ({ Kind = TExprVar (fname, _, _) }, args)
+                when args.Length = lambdaInfo.Params.Length
+                     && List.forall2 (fun (arg: TypedExpr) (p: TypedParam) ->
+                            match arg.Kind with
+                            | TExprVar (_, aid, _) -> aid = p.VarId
+                            | _ -> false) args lambdaInfo.Params ->
+            (match env.FuncParallel.TryGetValue fname with
+             | true, (_, strategies) when not (List.isEmpty strategies) ->
+                 emitWarning env
+                     (sprintf "internal: `where` parallel clause on '%s' was dropped by kernel-position eta-expansion — the loop nest will be emitted serial. This is a compiler bug, not a source error; please report it."
+                              fname)
+             | _ -> ())
+        | _ -> ())
 
     // Co-iteration INDEX-PARAM form: a co-iterated kernel may declare
     // N + R parameters — one value per co-iterated array plus the R shared
@@ -6247,6 +6385,8 @@ and inferLambda env parms whereClause body : TypeResult<TypedExpr> =
     let boundNames = parms |> List.map (fun p -> p.Name) |> Set.ofList
     let freeVars = collectFreeVars boundNames body
     let captures = buildCaptures scopeEnv freeVars
+    // An `omp(v: n)` naming no parameter is silently dropped downstream; say so.
+    checkOmpVarNames env (typedParams |> List.map (fun p -> p.Name)) whereClause "this lambda"
 
     let result =
         inferExpr paramEnv body |> Result.bind (fun tBody ->
@@ -9020,21 +9160,55 @@ and checkFunctionDecl (env: TypeEnv) (funcDecl: FunctionDecl) : TypeResult<Typed
             // named function is dropped and the loop emits dense storage.
             if not (List.isEmpty commGroups) then
                 env.FuncCommGroups.[funcDecl.Name] <- commGroups
+            // Register the function's parallel strategies for the same reason,
+            // paired with its param NAMES: an `omp(a: n)` var is resolved by
+            // name against the callable's params (Lowering.extractParallelism),
+            // and the eta wrapper renames them, so the surfacing site needs the
+            // originals to remap by position.
+            (match funcDecl.WhereClause with
+             | Some wc when not (List.isEmpty wc.Parallel) ->
+                 env.FuncParallel.[funcDecl.Name] <-
+                     (funcDecl.Params |> List.map (fun p -> p.Name), wc.Parallel)
+             | _ -> ())
+            // An `omp(v: n)` naming no parameter is silently dropped downstream.
+            checkOmpVarNames env (funcDecl.Params |> List.map (fun p -> p.Name))
+                             funcDecl.WhereClause (sprintf "function '%s'" funcDecl.Name)
             // Stage 3 (symmetry deduction, early tier): summarize the
             // adjacent-pair swap parity of this fixed-arity function's body
             // and record it for kernel-position uses — buildApplyInfo
             // consults the summary when the kernel is an eta-expanded
             // wrapper around this function. Poly packs are late-tier work
             // (their pairs only exist per materialized arity): skipped.
+            let polyParams =
+                typedParams |> List.filter (fun p ->
+                    match env.Subst.Resolve p.Type with IRTPoly _ -> true | _ -> false)
             let deducedPairs =
-                let hasPoly =
-                    typedParams |> List.exists (fun p ->
-                        match env.Subst.Resolve p.Type with IRTPoly _ -> true | _ -> false)
-                if hasPoly then []
+                if not (List.isEmpty polyParams) then []
                 else Blade.Deduce.deduceAdjacentPairs typedParams tBody
             if not (List.isEmpty deducedPairs) then
                 env.FuncDeducedPairs.[funcDecl.Name] <-
                     (typedParams |> List.map (fun p -> p.Name), deducedPairs)
+            // Stage-3 LATE TIER: pack symmetry for arity-polymorphic kernels.
+            // The ∀-arity AC-fold template first (the head::tail recursion
+            // itself — packprod, comoment_prod); failing that, the
+            // compositional wrapper walk (comoment = mean(prod(a))), which
+            // resolves callees through PackDeducedComm in decl order.
+            // PInv-or-PBottom only: packs never claim PNeg, so this table
+            // fuels suggestions and can produce no false errors.
+            (match polyParams with
+             | [packP] ->
+                 let packSummary =
+                     match Blade.Deduce.deducePackFold funcDecl.Name packP.Name packP.VarId tBody with
+                     | Blade.Deduce.PInv -> Blade.Deduce.PInv
+                     | _ ->
+                         let resolver fname =
+                             match env.PackDeducedComm.TryGetValue fname with
+                             | true, (_, p) -> Some p
+                             | _ -> None
+                         Blade.Deduce.packParityOf resolver packP.VarId tBody
+                 if packSummary = Blade.Deduce.PInv then
+                     env.PackDeducedComm.[funcDecl.Name] <- (packP.Name, packSummary)
+             | _ -> ())
             // Declared comm on a named function whose body is PROVABLY
             // antisymmetric in a declared adjacent pair is the
             // silent-corruption case §4 exists for. A named function cannot

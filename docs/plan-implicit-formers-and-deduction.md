@@ -617,13 +617,40 @@ cells with a duplicated `1.333` vs the 3-cell triangle).
      functions/026 (unpinned, dense 4 cells + suggestion) vs functions/029
      (the suggested one-line pin added → SymIdx<2,2> triangle, 3 cells,
      values identical across both backends).
-   Deferred to the late tier (per the placement decision): Poly-pack
-   instances (deduction returns [] for Poly params; the eta wrapper of a
-   pack kernel is PBottom-inert), per-instance checking on specialized
-   bodies post-monomorphization, interprocedural sign-linearity through
-   calls (a call is PInv only when callee and args all are), and the
-   `where antisymm` pin spelling for deduced-PNeg kernels (storage exists;
-   CnAntisymm is still dead code).
+   **Late tier — PACK KERNELS DONE (2026-07-25), via the ∀-arity exchange
+   law rather than per-instance IR checking.** The corpus's pack kernels
+   are head::tail AC-folds (or wrappers over them), so the decl-level
+   check the plan kept in reserve is both simpler and stronger than
+   per-instance enumeration: `Deduce.deducePackFold` recognizes the
+   canonical template — `match arity(pack) | 1 -> g(head) | _ ->
+   g(head) ⊛ f(tail)` with ⊛ associative AND commutative (+ * && ||),
+   base ≡ step g (mirror equality over the two arms' head binders), no
+   g touching tail or the pack — which is symmetric at EVERY arity by
+   the AC-fold induction. Wrappers (`comoment = mean(comoment_prod(a))`)
+   inherit compositionally via `Deduce.packParityOf`: invariance under
+   pack permutation composes through every operator, with whole-pack
+   calls resolving against the `PackDeducedComm` summary table in decl
+   order. Packs only ever claim PInv or PBottom — the review proved no
+   signed exchange law exists, so pack deduction fuels SUGGESTIONS only
+   and can produce no false errors; declared `where comm(pack)` stays
+   trusted (027/028 unchanged). The suggestion fires at the
+   deferred-former eta seam (no declared comm + pack-PInv + identical
+   identities), spanned to the source kernel, alongside a BL4007 entry.
+   A third link closes the chain: a FIXED-ARITY wrapper over a
+   pack-summarized kernel (`lambda(x, y) -> comoment(x, y)`) specializes
+   pack invariance to full pairwise symmetry at that arity — the early
+   tier's summary lookup falls through to `PackDeducedComm`, replicating
+   PInv across the wrapper's pairs and naming the LAMBDA's params (where
+   that spelling pins). Corpus: arity/029 (the comm-less twin of 027 —
+   dense 9 cells + the suggestion naming `where comm(a)` on `packprod`);
+   arity/022 now earns its suggestion through all three links (template →
+   wrapper walk → fixed-arity specialization).
+   Still deferred: per-instance checking on specialized IR bodies (only
+   needed for NON-template pack kernels, which today deduce PBottom and
+   stay inert), interprocedural sign-linearity through calls (a call is
+   PInv only when callee and args all are), and the `where antisymm` pin
+   spelling for deduced-PNeg kernels (storage exists; CnAntisymm is
+   still dead code).
 
    *(original stage-3 text follows)* **Symmetry-from-primitives** (single late pass, §3.4): the two per-primitive
    tables (3-way swap class; per-operand sign parity) + the §3.2.1 judgment as

@@ -194,6 +194,30 @@ type TypeEnv = {
     /// f's REAL parameter names for the pin suggestion — without
     /// reanalyzing through the call. Shared by reference, like FuncCommGroups.
     FuncDeducedPairs: System.Collections.Generic.Dictionary<string, string list * Blade.Deduce.Parity list>
+    /// Stage-3 late tier: per-function PACK symmetry for arity-polymorphic
+    /// (Poly) kernels — funcName → (packParamName, parity). PInv means
+    /// "invariant under every permutation of the pack, at every arity",
+    /// established either by the ∀-arity AC-fold template
+    /// (Deduce.deducePackFold) or compositionally for wrapper bodies
+    /// (Deduce.packParityOf, resolving callees through this same table in
+    /// decl order). Packs never claim PNeg (no signed exchange law exists),
+    /// so this table can only ever fuel suggestions, not errors.
+    /// Shared by reference, like FuncCommGroups.
+    PackDeducedComm: System.Collections.Generic.Dictionary<string, string * Blade.Deduce.Parity>
+    /// Named functions' parallel strategies (`omp`/`cuda`/`mpi`) from their
+    /// `where` clause, paired with the function's parameter NAMES:
+    /// funcName → (paramNames, strategies). Populated by checkFunctionDecl;
+    /// consulted when a named function is used as a loop kernel
+    /// (etaExpandFunctionKernel / the deferred-former eta-expansion) so the
+    /// clause survives onto the synthesized wrapper lambda. Without this,
+    /// `object_for(f)` / `method_for(..) <@> f` for a `where omp(...)`
+    /// function emitted a SERIAL nest with no diagnostic — the eta wrapper is
+    /// built with no where-clause, so `Parallel = []` reached lowering and
+    /// `IsOmpParallel` was false. The param names are needed because
+    /// `extractParallelism` resolves an `omp(a: n)` var by NAME, and the
+    /// wrapper's params are renamed (`__k<uid>_<i>`); the surfacing site
+    /// remaps by position. Shared by reference, like FuncCommGroups.
+    FuncParallel: System.Collections.Generic.Dictionary<string, string list * ParallelStrategy list>
 }
 
 let emptyEnv () = {
@@ -220,6 +244,8 @@ let emptyEnv () = {
     MutualReturnFuncs = System.Collections.Generic.Dictionary<string, string>()
     FuncCommGroups = System.Collections.Generic.Dictionary<string, int list list>()
     FuncDeducedPairs = System.Collections.Generic.Dictionary<string, string list * Blade.Deduce.Parity list>()
+    PackDeducedComm = System.Collections.Generic.Dictionary<string, string * Blade.Deduce.Parity>()
+    FuncParallel = System.Collections.Generic.Dictionary<string, string list * ParallelStrategy list>()
 }
 
 /// Append a non-fatal diagnostic to the env's warnings collector.
