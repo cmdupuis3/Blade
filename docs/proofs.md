@@ -1,7 +1,7 @@
 # Blade Proofs
 
 Prose mirror of the machine-checked proof tower in `/proofs/`:
-**241 theorems**, Coq 8.18, stdlib only, verified by both `coqc` and `coqchk`.
+**261 theorems**, Coq 8.18, stdlib only, verified by both `coqc` and `coqchk`.
 
 Build: `coq_makefile -f _CoqProject -o Makefile && make`.
 
@@ -20,7 +20,7 @@ Rules of this document:
 |-------|-------|---------|
 | 0–1: index universe + DMWF | BladeDMWF | canonical tuples, enumeration, the general left-justified bijection, kernel-independence |
 | 1.5: arrows | BladeArrow, BladeAffine, BladeCompound, BladeShape, BladeLex | the arrow as coalgebra; Sym/Antisym/affine/Compound instances; uniqueness; lex order |
-| Cardinality | BladeBinomial, BladeCounting | C(n+r−1, r) closed form; the no-lossless-product-layout theorem |
+| Cardinality | BladeBinomial, BladeCounting, BladeMixedRadix | C(n+r−1, r) closed form; the no-lossless-product-layout theorem; the mixed-radix product bijection across distinct groups |
 | 2: currying | BladeCurrying, BladeCurryingGeneral | dependence boundary; the two maximal curryings (information-theoretic form) |
 | 3: symmetry | BladeCore, BladeLowering, BladeCompleteness, BladeFusionDuality | group law both halves, H-and-Stab soundness AND exactness, sign-tracked variant, fusion ⇒ duality |
 | Trinity | BladeTrinity, BladeTrinityAsym | `<*>` = shape concatenation; generators + forced closure |
@@ -141,6 +141,33 @@ Classical context (recorded in-file): the inequality is the leading-term
 deficit of the Cauchy decomposition Sym^r(V⊗W) ≅ ⊕_λ S^λ(V)⊗S^λ(W); product
 storage captures only λ = (r); per-dimension Reynolds is the projection onto
 it; the constructive r = 2 split is BladeCauchy.
+
+## BladeMixedRadix.v — the product-shape rank/unrank bijection
+
+The positive complement to BladeCounting. Within one identity group no
+lossless per-dimension product layout exists (counting_general_C); across
+**distinct** identity groups, per-group ranks composed mixed-radix ARE a
+lossless layout. For a `Shape` (list of index groups, each an arity-rⱼ
+symmetric group over [lⱼ, uⱼ)):
+
+```
+srank   : Shape → tuple → nat        (per-group rank · radix + rest)
+sunrank : Shape → nat → tuple        (div/mod, inverted group by group)
+```
+
+`srank_in_range` (rank < shapeCard), `sunrank_srank` and `srank_sunrank`
+(both round trips), `sunrank_in` (unrank lands in the canonical set),
+`srank_injective`, packaged as `mixed_radix_bijection`; cell count
+`shapeCard_binom`: ∏ⱼ C(uⱼ−lⱼ+rⱼ−1, rⱼ). The per-group rank is abstract
+(position in the enumeration; lex by BladeLex, closed form at r = 2 in
+BladeSafety), so the theorem is independent of any particular offset
+formula.
+
+Context (2026 literature sweep): per-group simplicial ranks are classical
+(combinadics; Knuth TAOCP §7.2.1.3; ADOL-C `tensor_address`; Neidinger 2005
+Eq. 7.4), and the *size* formula ships in CTF's `sy_packed_size` — but the
+composed rank/unrank bijection for the product index set appears nowhere.
+This file is the named artifact.
 
 ## BladeCurrying.v — dependence boundary; two maximal curryings
 

@@ -9,7 +9,7 @@ Machine-checked kernel of the Blade formalism. Coq 8.18.0, stdlib only.
 
 or manually with `coqc -Q . Blade <file>` in _CoqProject order.
 
-## Contents (241 theorems total)
+## Contents (261 theorems total)
 
 - BladeCore.v (16): Group Law both halves (diagonal swap sound; per-dim
   product swap refuted), counting lemma (no lossless product layout),
@@ -102,3 +102,14 @@ or manually with `coqc -Q . Blade <file>` in _CoqProject order.
   (the FilteredIdx residual, executable); denotation theorem at every
   rank (exactly the in-bounds mask-true tuples, each once); rank-2
   concrete instance subsumed.
+- BladeMixedRadix.v (20): NEW -- the product-shape rank/unrank
+  bijection, the POSITIVE complement to BladeCounting: across
+  DISTINCT identity groups, per-group ranks composed mixed-radix
+  form a lossless layout (srank_in_range, sunrank_srank, sunrank_in,
+  srank_sunrank, srank_injective; packaged as
+  mixed_radix_bijection), with cell count
+  prod_j C(u_j - l_j + r_j - 1, r_j) (shapeCard_binom).  Per-group
+  ranks are classical (combinadics; ADOL-C tensor_address;
+  Neidinger 2005) and the SIZE formula ships in CTF's
+  sy_packed_size; the composed bijection itself appears nowhere in
+  the literature (2026 survey) -- this file is the named artifact.
