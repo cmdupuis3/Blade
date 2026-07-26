@@ -300,6 +300,38 @@ let setSplitTimingMode (on: bool) : unit =
 let splitTimingModeEnabled () : bool =
     (splitTimingModeCell ()).Value
 
+/// BLAS lowering gate: when enabled, real-Float64 gram() forms lower to
+/// cblas_dsyrk (same-array, symmetric packed output) / cblas_dgemm (distinct
+/// arrays, dense output) instead of scalar loop nests. Opt-in: BLADE_BLAS=1
+/// (or "on") forces it on, BLADE_BLAS=0 (or "off") forces it off, and with
+/// BLADE_BLAS unset it follows OPENBLAS_DIR — the same variable Build.fs
+/// uses to resolve the OpenBLAS install. The emitted `#include <cblas.h>`
+/// is what triggers Build.fs's -I/link flags, so codegen and build stay in
+/// lockstep through the one include line.
+let blasEmissionEnabled () : bool =
+    match System.Environment.GetEnvironmentVariable("BLADE_BLAS") with
+    | "1" | "on" -> true
+    | "0" | "off" -> false
+    | _ ->
+        match System.Environment.GetEnvironmentVariable("OPENBLAS_DIR") with
+        | null | "" -> false
+        | _ -> true
+
+/// Collector: did THIS program assembly actually lower something to cblas?
+/// Set by materializeGramForm during genModule; the program assemblers
+/// append the cblas include after body generation (the cudaKernelDefsCell
+/// collect-then-assemble pattern). AsyncLocal for the parallel test runner.
+let private blasUsedStorage =
+    System.Threading.AsyncLocal<bool ref>()
+
+let blasUsedCell () : bool ref =
+    let v = blasUsedStorage.Value
+    if isNull (box v) then
+        let fresh = ref false
+        blasUsedStorage.Value <- fresh
+        fresh
+    else v
+
 /// Optional refinement of split-timing: when set to Some name, the compute
 /// clock starts immediately before the binding with that NAME (everything
 /// before it â€” producers, decompact chains, any setup â€” is attributed to the
@@ -3236,6 +3268,20 @@ and materializeGramForm (subst: SubstMap) (names: Map<IRId, string>) (varName: s
         // conj_scalar). Use conj_scalar to keep one spelling for real/complex.
         let mulTerm i j =
             sprintf "%s[%s][__gk] * nested_array_utilities::conj_scalar(%s[%s][__gk])" lName i rName j
+        // BLAS lowering applies to real-double operands only (dsyrk/dgemm);
+        // complex (zherk/zgemm) and float32 are future work — they fall back
+        // to the scalar loops below. Output allocation/layout is IDENTICAL to
+        // the loop path (packed symmetric for same-array, dense otherwise):
+        // BLAS writes a contiguous staging buffer, then a repack copy lands
+        // the values in Blade storage. Staging is O(mn + m^2) against the
+        // O(m^2 n) contraction; nested rows are copied out because Array's
+        // row-pointer layout is not guaranteed BLAS-contiguous.
+        let bothRealDouble =
+            match la.ElemType, ra.ElemType with
+            | IRTScalar ETFloat64, IRTScalar ETFloat64 -> true
+            | _ -> false
+        let useBlas = bothRealDouble && blasEmissionEnabled ()
+        if useBlas then (blasUsedCell ()).Value <- true
         if sameArray then
             // square m x m, symmetric/Hermitian upper-triangle storage
             let extentDecl =
@@ -3248,16 +3294,31 @@ and materializeGramForm (subst: SubstMap) (names: Map<IRId, string>) (varName: s
                 sprintf "Array<%s, 2> %s = { allocate<typename promote<%s, 2>::type, %s>(%s), %s };"
                     outElemStr varName outElemStr symmArg extentsName extentsName
             let loop =
-                [ sprintf "for (size_t __gi = 0; __gi < %s; __gi++) {" mExtent
-                  sprintf "    for (size_t __gjr = 0; __gjr < %s - __gi; __gjr++) {" mExtent
-                  sprintf "        size_t __gj = __gi + __gjr;"
-                  sprintf "        %s __gacc = %s();" outElemStr outElemStr
-                  sprintf "        for (size_t __gk = 0; __gk < %s; __gk++) {" nExtent
-                  sprintf "            __gacc += %s;" (mulTerm "__gi" "__gj")
-                  sprintf "        }"
-                  sprintf "        %s[__gi][__gjr] = __gacc;" varName
-                  sprintf "    }"
-                  sprintf "}" ]
+                if useBlas then
+                    [ sprintf "{ // BLAS lowering: gram(A, A) = A * A^T via cblas_dsyrk (upper triangle), repacked left-justified"
+                      sprintf "    const size_t __gm = %s, __gn = %s;" mExtent nExtent
+                      sprintf "    double* __gA = new double[__gm * __gn];"
+                      sprintf "    for (size_t __gi = 0; __gi < __gm; __gi++)"
+                      sprintf "        for (size_t __gk = 0; __gk < __gn; __gk++)"
+                      sprintf "            __gA[__gi * __gn + __gk] = %s[__gi][__gk];" lName
+                      sprintf "    double* __gC = new double[__gm * __gm]();"
+                      sprintf "    cblas_dsyrk(CblasRowMajor, CblasUpper, CblasNoTrans, (blasint)__gm, (blasint)__gn, 1.0, __gA, (blasint)__gn, 0.0, __gC, (blasint)__gm);"
+                      sprintf "    for (size_t __gi = 0; __gi < __gm; __gi++)"
+                      sprintf "        for (size_t __gjr = 0; __gjr < __gm - __gi; __gjr++)"
+                      sprintf "            %s[__gi][__gjr] = __gC[__gi * __gm + __gi + __gjr];" varName
+                      sprintf "    delete[] __gA; delete[] __gC;"
+                      sprintf "}" ]
+                else
+                    [ sprintf "for (size_t __gi = 0; __gi < %s; __gi++) {" mExtent
+                      sprintf "    for (size_t __gjr = 0; __gjr < %s - __gi; __gjr++) {" mExtent
+                      sprintf "        size_t __gj = __gi + __gjr;"
+                      sprintf "        %s __gacc = %s();" outElemStr outElemStr
+                      sprintf "        for (size_t __gk = 0; __gk < %s; __gk++) {" nExtent
+                      sprintf "            __gacc += %s;" (mulTerm "__gi" "__gj")
+                      sprintf "        }"
+                      sprintf "        %s[__gi][__gjr] = __gacc;" varName
+                      sprintf "    }"
+                      sprintf "}" ]
             Some (extentDecl @ [allocDecl] @ loop)
         else
             // dense m x p
@@ -3269,15 +3330,34 @@ and materializeGramForm (subst: SubstMap) (names: Map<IRId, string>) (varName: s
                 sprintf "Array<%s, 2> %s = { allocate<typename promote<%s, 2>::type, nullptr>(%s), %s };"
                     outElemStr varName outElemStr extentsName extentsName
             let loop =
-                [ sprintf "for (size_t __gi = 0; __gi < %s; __gi++) {" mExtent
-                  sprintf "    for (size_t __gj = 0; __gj < %s; __gj++) {" pExtent
-                  sprintf "        %s __gacc = %s();" outElemStr outElemStr
-                  sprintf "        for (size_t __gk = 0; __gk < %s; __gk++) {" nExtent
-                  sprintf "            __gacc += %s;" (mulTerm "__gi" "__gj")
-                  sprintf "        }"
-                  sprintf "        %s[__gi][__gj] = __gacc;" varName
-                  sprintf "    }"
-                  sprintf "}" ]
+                if useBlas then
+                    [ sprintf "{ // BLAS lowering: gram(A, B) = A * B^T via cblas_dgemm"
+                      sprintf "    const size_t __gm = %s, __gp = %s, __gn = %s;" mExtent pExtent nExtent
+                      sprintf "    double* __gA = new double[__gm * __gn];"
+                      sprintf "    for (size_t __gi = 0; __gi < __gm; __gi++)"
+                      sprintf "        for (size_t __gk = 0; __gk < __gn; __gk++)"
+                      sprintf "            __gA[__gi * __gn + __gk] = %s[__gi][__gk];" lName
+                      sprintf "    double* __gB = new double[__gp * __gn];"
+                      sprintf "    for (size_t __gj = 0; __gj < __gp; __gj++)"
+                      sprintf "        for (size_t __gk = 0; __gk < __gn; __gk++)"
+                      sprintf "            __gB[__gj * __gn + __gk] = %s[__gj][__gk];" rName
+                      sprintf "    double* __gC = new double[__gm * __gp]();"
+                      sprintf "    cblas_dgemm(CblasRowMajor, CblasNoTrans, CblasTrans, (blasint)__gm, (blasint)__gp, (blasint)__gn, 1.0, __gA, (blasint)__gn, __gB, (blasint)__gn, 0.0, __gC, (blasint)__gp);"
+                      sprintf "    for (size_t __gi = 0; __gi < __gm; __gi++)"
+                      sprintf "        for (size_t __gj = 0; __gj < __gp; __gj++)"
+                      sprintf "            %s[__gi][__gj] = __gC[__gi * __gp + __gj];" varName
+                      sprintf "    delete[] __gA; delete[] __gB; delete[] __gC;"
+                      sprintf "}" ]
+                else
+                    [ sprintf "for (size_t __gi = 0; __gi < %s; __gi++) {" mExtent
+                      sprintf "    for (size_t __gj = 0; __gj < %s; __gj++) {" pExtent
+                      sprintf "        %s __gacc = %s();" outElemStr outElemStr
+                      sprintf "        for (size_t __gk = 0; __gk < %s; __gk++) {" nExtent
+                      sprintf "            __gacc += %s;" (mulTerm "__gi" "__gj")
+                      sprintf "        }"
+                      sprintf "        %s[__gi][__gj] = __gacc;" varName
+                      sprintf "    }"
+                      sprintf "}" ]
             Some (extentDecl @ [allocDecl] @ loop)
      | _ -> None)
 
@@ -3652,20 +3732,25 @@ let streamedNestSetup (streamedArrays: Map<string, ProviderReadSpec>) (ind: stri
 ///     on the outer loop only; inner dependent loops stay sequential.
 ///
 /// COLLAPSE-ELIGIBILITY GATE (architectural seam):
-///   OpenMP `collapse(d)` requires the d collapsed loops to be PERFECTLY NESTED
-///   â€” no code of any kind between the loop headers. This is in direct tension
-///   with Blade's iteration model (DMWF), which assumes loop levels are
-///   SEPARABLE: code may be injected between levels (streaming-I/O batch
-///   boundaries, per-level Reynolds folds, etc.). So a level is collapse-eligible
-///   only if (a) it is rectangular AND (b) nothing is injected between it and the
-///   next collapsed level.
+///   OpenMP 4.5 required the d collapsed loops to be PERFECTLY NESTED — no code
+///   of any kind between the loop headers. This is in tension with Blade's
+///   iteration model (DMWF), which assumes loop levels are SEPARABLE: code may
+///   be injected between levels (element peels, streaming-I/O batch boundaries,
+///   per-level Reynolds folds, etc.). So a level is collapse-eligible only if
+///   (a) it is rectangular AND (b) whatever sits between it and the next
+///   collapsed level is legal there.
 ///
-///   Today (b) always holds: production codegen injects nothing between levels.
-///   So collapseEligible == isRectangular for now. When streaming/batching lands,
-///   a level that carries a batch boundary (or any inter-level injection) becomes
-///   collapse-INELIGIBLE even if rectangular, and the collapse prefix must stop
-///   before it. That future constraint has exactly one home: the collapseEligible
-///   predicate below. The rest of the decision logic does not change.
+///   NOTE: (b) does NOT hold vacuously — an earlier version of this comment
+///   claimed "production codegen injects nothing between levels", which is
+///   false. A multi-level nest over one array injects the row peel between the
+///   headers (`Array<double,1> M____i0 = ...;` between the __i0 and __i1
+///   headers). That is legal because OpenMP 5.0 permits INTERVENING CODE in an
+///   imperfectly nested collapse loop nest, and gcc compiles and threads it
+///   correctly (verified: collapse(2) over a 2-D array yields serial-identical
+///   values across repeated 4-thread runs). Intervening code that is NOT
+///   permitted — anything with cross-iteration side effects, an OMP API call, a
+///   batch boundary — would still make the level collapse-INELIGIBLE. That
+///   constraint has exactly one home: the collapseEligible predicate below.
 ///
 /// Returns the pragma string (with trailing newline+indent) for the OUTERMOST
 /// loop, or "" if the nest should not be parallelized. Inner loops never carry
@@ -3690,8 +3775,15 @@ let genNestPragma (bindings: LoopIndexBinding list) (pragmaIndent: string) : str
             // boundary, streaming stage), add that exclusion HERE â€” e.g.
             //   isRectangular b && not b.HasInterLevelInjection
             // and the collapse prefix below will correctly stop before it.
+            // A level must also be LICENSED by the `omp(a: n)` depth to join the
+            // collapse: `n` is a per-argument permission ("up to n dimensions of
+            // this argument may carry threads"), and collapse(d) threads all d
+            // fused levels. Without this the depth was inert — `omp(a: 1)` on a
+            // 2-level nest emitted collapse(2), threading a dimension belonging
+            // to an argument that granted nothing. IsParallel carries the
+            // licence per level (IR.buildLoopNestCodeGen).
             let collapseEligible (b: LoopIndexBinding) =
-                isRectangular b
+                isRectangular b && b.IsParallel
             // Collapse depth = length of the leading prefix that is BOTH
             // rectangular and collapse-eligible. (takeWhile stops at the first
             // level failing either condition â€” that is the gate doing its job.)
@@ -3714,6 +3806,42 @@ let genNestPragma (bindings: LoopIndexBinding list) (pragmaIndent: string) : str
                 // Outer loop parallel, remaining work balanced (rectangular or
                 // none): plain static parallel for.
                 sprintf "#pragma omp parallel for\n%s" pragmaIndent
+
+/// Position (index into `bindings`) of the level that should carry the nest's
+/// pragma: the OUTERMOST LICENSED one, which is not always level 0.
+///
+/// `omp(a: n)` licenses levels of argument `a`, and the argument owning the
+/// outermost level need not be the one carrying the clause — `omp(b: 1)` where
+/// `b` owns level 1 licenses an INNER level and nothing outside it. Emitting at
+/// level 0 there would thread a dimension the user never granted; emitting
+/// nothing would silently ignore a clause they did write. So the pragma moves
+/// inward to the first licensed level. Each outer iteration then opens a team
+/// over that loop — correct, because the licence is a statement about which
+/// dimensions may be threaded, not about where the team is created.
+///
+/// Returns None when no level is licensed (no clause, or a clause covering
+/// nothing), in which case the nest is serial.
+let pragmaLevelOf (bindings: LoopIndexBinding list) : int option =
+    bindings |> List.tryFindIndex (fun b -> b.IsParallel)
+
+/// Explain, IN THE GENERATED C++, why a nest whose kernel asked for OpenMP is
+/// nonetheless emitted serial.
+///
+/// Parallelism is opt-in, so "no pragma" is the correct and expected output for
+/// the vast majority of nests — which is exactly why a DROPPED `omp(...)` clause
+/// is invisible: the emitted code for "never asked" and "asked, couldn't honour"
+/// is byte-identical. Suppression is legitimate in the cases below, but silent
+/// suppression is not: a user who wrote `where omp(...)` and got serial code has
+/// no way to tell which happened. The marker costs one comment line and lands
+/// where someone debugging this actually looks.
+///
+/// Returns [] when the kernel never requested omp (the common case) or when the
+/// pragma was in fact emitted.
+let ompSuppressedMarker (requested: bool) (pragmaEmitted: bool) (reason: string)
+                        (markerIndent: string) : string list =
+    if requested && not pragmaEmitted then
+        [ markerIndent + sprintf "// [omp] requested but emitted serial: %s" reason ]
+    else []
 
 /// Generate a for-loop header (no pragma; pragmas are nest-level, see
 /// genNestPragma, and are prepended only at the outermost level by the caller).
@@ -4156,10 +4284,15 @@ let genLoopNestStreamed (streamed: Map<string, ProviderReadSpec>) (codeGen: Loop
     // the same address. Gated behind ompTestModeEnabled() so user codegen is
     // never polluted.
     let ompInstrument = ompTestModeEnabled ()
-    let outerIsParallel =
-        match codeGen.Bindings with
-        | outer :: _ -> outer.IsParallel
-        | [] -> false
+    // Which level carries the nest's pragma (None = serial). Computed once: the
+    // licence is a property of the nest, not of the level being emitted. Also
+    // gates the coverage instrumentation — which must follow the PRAGMA, not
+    // level 0, since `omp(a: n)` can licence an inner level and leave the
+    // outermost serial. Gating on the head binding would then instrument a nest
+    // whose parallel region lives further in, and report it as never-threaded.
+    let pragmaLevel =
+        if codeGen.FoldWrapper.IsSome then None else pragmaLevelOf codeGen.Bindings
+    let outerIsParallel = pragmaLevel.IsSome
     // Unique region tag derived from the (unique) output name.
     let regionTag = codeGen.OutputName
     if ompInstrument && outerIsParallel then
@@ -4184,9 +4317,26 @@ let genLoopNestStreamed (streamed: Map<string, ProviderReadSpec>) (codeGen: Loop
         // under a parallel-for â€” so the pragma is suppressed entirely
         // (an omp `reduction(...)` clause is the future upgrade path).
         let isOuter = atOuterLevel
+        // The pragma goes on the outermost LICENSED level, which `omp(a: n)`
+        // does not force to be level 0 (see pragmaLevelOf). genNestPragma is
+        // handed the suffix starting there, so its collapse/dynamic reasoning
+        // runs over exactly the levels the pragma governs.
         let pragmaPrefix =
-            if isOuter && codeGen.FoldWrapper.IsNone
-            then genNestPragma codeGen.Bindings (ind depth) else ""
+            if codeGen.FoldWrapper.IsNone && pragmaLevel = Some bidx
+            then genNestPragma (List.skip bidx codeGen.Bindings) (ind depth) else ""
+        // Mark a requested-but-suppressed pragma at the outer level so the
+        // dropped clause is visible rather than silent (see ompSuppressedMarker).
+        let suppressedMarker =
+            if isOuter then
+                let reason =
+                    if codeGen.FoldWrapper.IsSome then
+                        "fold accumulates into a shared scalar, which is not race-safe"
+                    else "the omp(...) depth licenses no level of this nest"
+                // "Emitted" means the nest gets a pragma SOMEWHERE, not
+                // necessarily at this level — an inner-licensed nest is
+                // parallelized and must not be reported as serial.
+                ompSuppressedMarker codeGen.OmpRequested pragmaLevel.IsSome reason (ind depth)
+            else []
         atOuterLevel <- false
         // MPI slab mode: the outermost level iterates this rank's slab
         // [__blade_mpi_lo_<out>, __blade_mpi_hi_<out>) â€” bounds declared by
@@ -4207,7 +4357,7 @@ let genLoopNestStreamed (streamed: Map<string, ProviderReadSpec>) (codeGen: Loop
             | Some (_, warmupLines, _) ->
                 for w in warmupLines do lines <- lines @ [ind depth + w]
             | None -> ()
-        lines <- lines @ [ind depth + pragmaPrefix + header]
+        lines <- lines @ suppressedMarker @ [ind depth + pragmaPrefix + header]
         depth <- depth + 1
         // Thread-coverage marker: record this thread as seen and the team size
         // it observes. Each thread writes ONLY its own slot (race-free). Team
@@ -4445,7 +4595,9 @@ let genIncludes () : string list =
      "#include <numeric>"    // std::iota (used by sort())
      "#include <unordered_map>"  // group_keys Case 3 (dynamic ngroups via hash discovery)
      "#include <unordered_set>"  // unique() dedup, contains() hoist (future)
-     "// Note: OpenMP disabled for portability"
+     // OpenMP is ENABLED (Build.compileCppWithExtra always passes -fopenmp);
+     // `#pragma omp` needs no header, so <omp.h> is included only when the
+     // test-mode instrumentation calls the omp_* API.
      (if ompTestModeEnabled () then "#include <omp.h>  // omp-coverage test-mode instrumentation" else "// #include <omp.h>")
      "#include \"nested_array_utilities.cpp\""
      "#include \"rand_runtime.hpp\""
@@ -6755,11 +6907,35 @@ let genFusedLoopNestStreamed (streamed: Map<string, ProviderReadSpec>) (leafCgs:
         // <&> sibling's omp configures the shared header). The outer binding's
         // IsParallel is forced on so genNestPragma's collapse/schedule logic
         // engages for the non-staggered case; staggered uses outer-only.
+        //
+        // The TAIL bindings keep the primary leaf's own `omp(a: n)` licences, so
+        // the collapse depth is capped by them even though the head is forced.
+        // That is deliberately conservative: a fused nest never threads more
+        // dimensions than its primary leaf licensed, and a leaf that requested
+        // no omp at all contributes no licence, so the shared header stays a
+        // plain outer `parallel for`. Joining licences ACROSS leaves (taking the
+        // most permissive at each shared level) is a possible refinement; it is
+        // not attempted here because the shared header's levels do not
+        // correspond one-to-one to a non-primary leaf's arguments.
         let pragmaPrefix =
             if atOuterLevel && emitOuterOmp then
                 let forced = { pBinding with IsParallel = true } :: List.tail primary.Bindings
                 genFusedNestPragma forced staggered (ind depth)
             else ""
+        // Any leaf's own omp request is enough to make suppression here worth
+        // reporting: a `<&>` soft join adopts a single shared header, so one
+        // leaf's clause can be dropped by the JOINED decision even though that
+        // leaf, standing alone, would have been parallelized.
+        let suppressedMarker =
+            if atOuterLevel then
+                let reason =
+                    if primary.FoldWrapper.IsSome then
+                        "fold accumulates into a shared scalar, which is not race-safe"
+                    else "the fused nest's joined backend decision is not host-parallel"
+                ompSuppressedMarker
+                    (leafCgs |> List.exists (fun cg -> cg.OmpRequested))
+                    (pragmaPrefix <> "") reason (ind depth)
+            else []
         atOuterLevel <- false
         // MPI co-fusion: the outer shared level iterates this rank's row slab.
         let header =
@@ -6768,7 +6944,7 @@ let genFusedLoopNestStreamed (streamed: Map<string, ProviderReadSpec>) (leafCgs:
                 sprintf "for (size_t %s = __blade_mpi_lo_%s; %s < __blade_mpi_hi_%s; %s++) {"
                     pBinding.IndexName sv pBinding.IndexName sv pBinding.IndexName
             | _ -> genForLoopHeader compoundArrays pBinding
-        lines <- lines @ [ind depth + pragmaPrefix + header]
+        lines <- lines @ suppressedMarker @ [ind depth + pragmaPrefix + header]
         depth <- depth + 1
 
         // Element peels for every leaf that iterates this level, from the
@@ -11397,6 +11573,7 @@ let genMainProgram (modul: IRModule) (testName: string) : string =
     (symmDeclsCell ()).Value <- []
     (streamBufDeclsCell ()).Value <- Set.empty
     (forcedDeferredIdsCell ()).Value <- Set.empty
+    (blasUsedCell ()).Value <- false
     let builder = IRBuilder()
     // Codegen-synthesized ids (sequence children, __s1 stages, __ret temps)
     // must not collide with typecheck/lowering ids arriving in the module â€”
@@ -11415,6 +11592,10 @@ let genMainProgram (modul: IRModule) (testName: string) : string =
               "static int __blade_mpi_size = 1;" ]
         else []
     let (funcDefs, bindCode) = genModule modul builder
+    // cblas include only when a gram actually lowered to BLAS this assembly
+    // (collector fills during genModule; Build.fs keys -I/link flags off the
+    // include line). Appended post-body like the CUDA prototypes below.
+    let includes = if (blasUsedCell ()).Value then includes @ ["#include <cblas.h>"] else includes
 
     // extern "C" launch-wrapper prototypes for any CUDA kernels emitted during
     // genModule. Bodies live in the .cu (nvcc); the .cpp needs only the proto to
@@ -11518,6 +11699,7 @@ let genSelfContainedProgram (modul: IRModule) (testName: string) : string =
     // during genModule and genPrintStatements (called AFTER body generation)
     // reads it to auto-print deferred bindings that ended up materialized.
     (forcedDeferredIdsCell ()).Value <- Set.empty
+    (blasUsedCell ()).Value <- false
 
     let includes =
         // Provider reads/writes emit provider-specific runtime calls (nc_*,
@@ -11560,6 +11742,10 @@ let genSelfContainedProgram (modul: IRModule) (testName: string) : string =
             let bodyIndented = bindCode |> List.map (fun s -> "    " + s)
             (funcDefs, genMainWrapper (mpiOn, mpiOn && moduleHybridMpiOmp modul) testName bodyIndented printCode)
     let (funcDefs, mainBody) = mainFunc
+    // cblas include only when a gram actually lowered to BLAS this assembly
+    // (collector fills during genModule*; Build.fs keys -I/link flags off the
+    // include line). Appended post-body like the CUDA prototypes below.
+    let includes = if (blasUsedCell ()).Value then includes @ ["#include <cblas.h>"] else includes
 
     // extern "C" launch-wrapper prototypes for any CUDA kernels emitted: the
     // .cpp calls them across the linkage boundary (bodies live in the .cu).
@@ -11600,7 +11786,12 @@ let genProgramWithExternalRuntime (modul: IRModule) (testName: string) : string 
     // Reset the forced-deferred collector before body generation; the
     // genPrintStatements call below (correctly AFTER genModule) reads it.
     (forcedDeferredIdsCell ()).Value <- Set.empty
+    (blasUsedCell ()).Value <- false
     let (funcDefs, bindCode) = genModule modul builder
+    // cblas include only when a gram actually lowered to BLAS this assembly
+    // (collector fills during genModule; Build.fs keys -I/link flags off the
+    // include line).
+    let includes = if (blasUsedCell ()).Value then includes @ ["#include <cblas.h>"] else includes
 
     let bodyIndented = bindCode |> List.map (fun s -> "    " + s)
     let printCode = genPrintStatements modul

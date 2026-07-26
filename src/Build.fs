@@ -227,8 +227,41 @@ let compileCppWithExtra (extraLinkInputs: string list) (cppFile: string) (output
                               | None -> sprintf " -L\"%s\" -lnetcdf" (Path.Combine(dir, "lib")))
                      incFlag + linkFlag)
 
+        // BLAS-backed programs emit `#include <cblas.h>` and call cblas_*
+        // (dsyrk/dgemm lowering of dense contraction-shaped kernels). Same
+        // resolution scheme as NETCDF_DIR above:
+        //   - OPENBLAS_DIR set: add -I<dir>\include, and link the DLL in
+        //     <dir>\bin DIRECTLY (MinGW links a Windows DLL by reading its
+        //     export table — robust against import-lib format drift). Fall
+        //     back to -L<dir>\lib -lopenblas if no DLL is found there.
+        //   - OPENBLAS_DIR unset: bare -lopenblas (works when OpenBLAS is on
+        //     the default include/lib paths, e.g. an MSYS2 pacman install).
+        let needsOpenblas =
+            try (File.ReadAllText cppFullPath).Contains "#include <cblas.h>" with _ -> false
+        let openblasFlags =
+            if not needsOpenblas then ""
+            else
+                (match System.Environment.GetEnvironmentVariable("OPENBLAS_DIR") with
+                 | null | "" -> " -lopenblas"
+                 | dir ->
+                     let incFlag = sprintf " -I\"%s\"" (Path.Combine(dir, "include"))
+                     let binDir = Path.Combine(dir, "bin")
+                     let dllPath = Path.Combine(binDir, "libopenblas.dll")
+                     let linkFlag =
+                         if File.Exists dllPath then sprintf " \"%s\"" dllPath
+                         else
+                             let glob =
+                                 try
+                                     if Directory.Exists binDir then Directory.GetFiles(binDir, "*openblas*.dll") |> Array.tryHead
+                                     else None
+                                 with _ -> None
+                             (match glob with
+                              | Some p -> sprintf " \"%s\"" p
+                              | None -> sprintf " -L\"%s\" -lopenblas" (Path.Combine(dir, "lib")))
+                     incFlag + linkFlag)
+
         let extraFlags = extraLinkInputs |> List.map (fun p -> sprintf " \"%s\"" (Path.GetFullPath p)) |> String.concat ""
-        let args = sprintf "-std=c++17 -O2 %s %s -o \"%s\" \"%s\"%s%s%s" ompFlag safetyFlags exeFullPath cppFullPath extraFlags netcdfFlags mpiFlags
+        let args = sprintf "-std=c++17 -O2 %s %s -o \"%s\" \"%s\"%s%s%s%s" ompFlag safetyFlags exeFullPath cppFullPath extraFlags netcdfFlags mpiFlags openblasFlags
         
         let psi = ProcessStartInfo("g++", args)
         psi.RedirectStandardOutput <- true

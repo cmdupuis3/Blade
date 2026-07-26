@@ -75,6 +75,7 @@ let printUsage () =
     printfn "                                     --diff-oracle flags combine)"
     printfn "  test --ir-only                    Run IR-only tests (fast, no C++ compilation)"
     printfn "  test alloc                        Run C++ allocation-layout tests (contiguity/cardinality)"
+    printfn "  test omp-pragma                   Run the OpenMP pragma-emission block standalone"
     printfn "  test omp-coverage                 Run the OpenMP thread-coverage block standalone"
     printfn "  test cuda                         Run the CUDA kernel block standalone"
     printfn "  test mpi                          Run the MPI decomposition block standalone"
@@ -907,6 +908,13 @@ let private dispatchTest (rest: string list) : int =
         // shipped headers. Verifies contiguity/cardinality invariants the
         // value-checking Blade tests cannot catch. No Blade source pipeline.
         let failed = (Blade.Tests.AllocTests.runAllocLayoutTests ()).Failed
+        if failed = 0 then 0 else 1
+    | [ "omp-pragma" ] ->
+        // Pure codegen-string checks: a `where omp(...)` clause must reach the
+        // generated C++ as a pragma for every kernel spelling, and for no
+        // unannotated one. No toolchain needed, so this also runs in the
+        // default suite (unlike omp-coverage below).
+        let failed = (Blade.Tests.OmpTests.runOmpPragmaTests ()).Failed
         if failed = 0 then 0 else 1
     | [ "omp-coverage" ] ->
         // OpenMP thread-coverage: generate representative loop programs with

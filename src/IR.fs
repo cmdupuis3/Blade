@@ -2255,6 +2255,14 @@ type LoopNestCodeGen = {
     /// before the nest and the Allgatherv after it. Always false outside
     /// mpiEmitMode.
     MpiSlab: bool
+    /// Whether the resolved kernel callable ASKED for OpenMP (`where omp(...)`),
+    /// independent of whether the nest actually gets a pragma. `IsParallel` on
+    /// the bindings is the CONJUNCTION of this and "level 0", so once a nest is
+    /// emitted serial the request bit is no longer recoverable from it — and
+    /// "no clause" becomes indistinguishable from "clause honoured nowhere".
+    /// Kept separately so the emitters can mark a requested-but-serial nest in
+    /// the generated C++ instead of silently dropping the request.
+    OmpRequested: bool
 }
 
 /// One dimension GROUP of a device buffer. Mirrors a single IRIndexType:
@@ -2943,7 +2951,16 @@ let buildLoopNestCodeGen
         match resolveKernel info.Kernel with
         | Some rk -> rk.Callable.IsOmpParallel
         | None -> false
-    
+    // The `omp(a: n)` DEPTHS, as (paramIndex, n). Until now this list was built
+    // by extractParallelism and then never read: `omp` was effectively a boolean
+    // and the collapse depth came purely from bound structure, so `omp(a: 1)` on
+    // a 2-level nest still emitted `collapse(2)` — threading a dimension of an
+    // argument that was never licensed.
+    let ompDepths =
+        match resolveKernel info.Kernel with
+        | Some rk -> rk.Callable.Parallelism
+        | None -> []
+
     // Map kernel params to (source, slot). A VIRTUAL source (range<...>) consumes
     // one param PER index-type slot; every other source consumes one. This mirrors
     // buildApplyInfo's expandedRows so param indices line up. The flat param index
@@ -2958,7 +2975,41 @@ let buildLoopNestCodeGen
             max 1 (arrayTypes.[pos].IndexTypes |> List.sumBy (fun ix -> ix.Rank))
         else 1
     let paramStart pos = List.init (max 0 pos) paramSpan |> List.sum
-    
+
+    // ---- `omp(a: n)` as a LICENSE ------------------------------------------
+    //
+    // `n` is a permission, not a demand: "up to n dimensions of this argument
+    // may carry OpenMP threads". It CAPS the structural strategy rather than
+    // replacing it — a level is parallelized only where the license and the
+    // bound structure agree, so `omp(a: 2)` on a nest that can only collapse
+    // one level still collapses one, and `omp(a: 1)` on a collapsible 2-level
+    // nest now stops at one instead of silently taking both.
+    //
+    // Depth counts the levels OF THAT ARGUMENT, outermost first (formalism.md
+    // §17.3). A real array owns all its rank components through ONE param, so
+    // the license covers its first n components. A virtual source (range<...>)
+    // spends one param PER slot, so each such param owns exactly one level and
+    // any n >= 1 covers it. Expressed uniformly as "ordinal of this level among
+    // the levels sharing its param".
+    let ompDepthOfParam (pIdx: int) : int option =
+        ompDepths |> List.tryPick (fun (i, n) -> if i = pIdx then Some n else None)
+    // A clause whose variable names no parameter leaves ompDepths EMPTY while
+    // IsOmpParallel stays true (extractParallelism drops unmatched names). That
+    // is a source mistake — TypeCheck warns about it — but it must not silently
+    // turn a requested nest serial, so fall back to the historical "outermost
+    // level only" licence rather than to nothing.
+    let licenseUnresolved = kernelRequestedOmp && List.isEmpty ompDepths
+    let isLevelLicensed (arrayPos: int) (rankIdx: int) (level: int) : bool =
+        if not kernelRequestedOmp then false
+        elif licenseUnresolved then level = 0
+        else
+            let (pIdx, ordinal) =
+                if isVirtualSrc arrayPos then (paramStart arrayPos + rankIdx, 0)
+                else (paramStart arrayPos, rankIdx)
+            match ompDepthOfParam pIdx with
+            | Some n -> ordinal < n
+            | None -> false
+
     // Helper: create an ElementBinding for an array at a given arity component
     let mkElement (arrayPos: int) (rankComponent: int) (dimIndex: int) =
         let arrName = if arrayPos < arrayNames.Length then arrayNames.[arrayPos] else sprintf "arr%d" arrayPos
@@ -3065,13 +3116,24 @@ let buildLoopNestCodeGen
                     let strictOffset =
                         if isTriangular && isAntisymmetric then k
                         else 0
-                    // Outer level is the parallelization candidate, but ONLY if
-                    // the kernel opted into OpenMP via an `omp(...)` clause. No
-                    // clause => serial (the default). Triangularity does not veto
-                    // it: the outermost loop of a triangular nest is independently
-                    // parallelizable (each outer index owns a disjoint sub-slab);
-                    // genNestPragma picks the safe strategy (collapse vs dynamic).
-                    let isParallel = level = 0 && kernelRequestedOmp
+                    // Which levels the `omp(...)` clause LICENSES. No clause =>
+                    // serial (the default). Triangularity does not veto a
+                    // licensed level: the outer loop of a triangular nest is
+                    // independently parallelizable (each outer index owns a
+                    // disjoint sub-slab); genNestPragma picks the safe strategy
+                    // (collapse vs dynamic) from the licensed prefix.
+                    //
+                    // CO-ITERATION: every argument is peeled at EVERY level, so
+                    // each licensed argument's depth licenses that many levels
+                    // from the outside in; the most permissive one wins. (There
+                    // is no per-argument level ownership to distinguish here —
+                    // that only exists on the outer-product path below.)
+                    let coIterLicense =
+                        if not kernelRequestedOmp then 0
+                        elif licenseUnresolved then 1
+                        elif List.isEmpty ompDepths then 0
+                        else ompDepths |> List.map snd |> List.max
+                    let isParallel = level < coIterLicense
                     let state =
                         if isTriangular && k > 0 then SCSymmetric
                         else SCNeither
@@ -3142,10 +3204,13 @@ let buildLoopNestCodeGen
                 let deps = if level < boundDependencies.Length then boundDependencies.[level] else []
                 let isTriangular = level < triangularLevels.Length && triangularLevels.[level]
                 let state = if level < symcomStates.Length then symcomStates.[level] else SCNeither
-                // Outer level is the parallelization candidate, but ONLY if the
-                // kernel opted into OpenMP (see shared-index path note above);
-                // genNestPragma picks collapse vs. dynamic from bound structure.
-                let isParallel = level = 0 && kernelRequestedOmp
+                // Which levels the `omp(...)` clause licenses (see the
+                // shared-index path note above). OUTER PRODUCT: each level is
+                // owned by exactly one source, so the licence is checked against
+                // THAT argument's depth, with RankIndex as the level's ordinal
+                // within its source. genNestPragma then picks collapse vs.
+                // dynamic over the licensed prefix.
+                let isParallel = isLevelLicensed arrayPos levelInfo.RankIndex level
                 // Strict (j > i > ...) bounds are required whenever the OUTPUT
                 // storage is antisymmetric — strict-triangular storage has no
                 // diagonal, so the iteration must not visit it. Two ways the
@@ -3245,6 +3310,7 @@ let buildLoopNestCodeGen
         IsAntisymmetric = isAntisymmetric
         FoldWrapper = None
         MpiSlab = false
+        OmpRequested = kernelRequestedOmp
     }
 
 // ============================================================================
