@@ -1,7 +1,8 @@
 # Blade Proofs
 
 Prose mirror of the machine-checked proof tower in `/proofs/`:
-**261 theorems**, Coq 8.18, stdlib only, verified by both `coqc` and `coqchk`.
+**302 theorems**, Coq 8.18 / Rocq 9.0, stdlib only, verified by both `coqc`
+and `coqchk`.
 
 Build: `coq_makefile -f _CoqProject -o Makefile && make`.
 
@@ -26,6 +27,7 @@ Rules of this document:
 | Trinity | BladeTrinity, BladeTrinityAsym | `<*>` = shape concatenation; generators + forced closure |
 | Computation | BladeCompute, BladeMonad, BladeSafety | materialized semantics, V∘P = id, 12.x laws, MonadPlus, verified offsets + bounds safety + buffer-elimination fusion |
 | Storage split | BladeCauchy | the r = 2 Cauchy split |
+| AD seam | BladeJacobian | symbolic differentiation: renaming equivariance, the Jacobian symmetry transfer, joint-pair-swap tangent symmetry, the accumulation multiplicity rule |
 
 Import structure is a DAG rooted at BladeDMWF (BladeCore and BladeLowering are
 self-contained); build order per `_CoqProject`.
@@ -485,13 +487,85 @@ address = the compiler's triangular offset `roff`.
 Scope: rank 2 (general-r offset = nested hockey-stick sums — future.md §4);
 surface progress/preservation is the remaining open species (future.md §4.1).
 
+## BladeJacobian.v — the Jacobian symmetry transfer and symmetric accumulation
+
+The AD-seam file: the theorems the AD plan leans on
+([plan-forward-mode-ad-and-nn-module.md](plan-forward-mode-ad-and-nn-module.md)
+§3.3 consequence 2, §6.4/§6.5's symmetric bullets, stage C5), closing
+future.md §2.1's "Jacobian symmetry theorem" and "symmetric gradient
+accumulation" items at rank 2. Formalized at the level the compiler
+actually differentiates (Grad.fs is a syntactic transform): SYMBOLIC
+differentiation on a minimal expression language — variables, constants,
++, ×, and opaque unary intrinsics with a FORMAL derivative slot (the
+derivRule model; no real analysis anywhere) — with nat-semiring
+evaluation and the structural ring-law congruence `aceq` (comm/assoc/
+distrib closure). `aceq`-invariance under the swap is the hypothesis
+class the compiler's parity deduction certifies (parities propagate up
+the AST from primitives); it covers the paradigm commutative kernels
+that syntactic invariance misses (`product_kernel_structurally_symmetric`,
+`intrinsic_sum_kernel_structurally_symmetric`).
+
+- `d_ren_equivariant` (equivariance): differentiation commutes with
+  renaming — d i (ren s e) = ren s (d (s′ i) e) for any renaming with an
+  explicit two-sided inverse; `d_swap_equivariant` is the transposition
+  instance. A SYNTACTIC identity by structural induction, prior to any
+  equivalence.
+- `d_respects_aceq`: symbolic differentiation is a congruence for the
+  ring-law equivalence — the comm/assoc/distrib generator cases are the
+  Leibniz computations, closed inside `aceq`.
+- `jacobian_symmetry_transfer` (+ `_rl`): if ren (swap a b) e ~ e, then
+  ren (swap a b) (∂ₐe) ~ ∂ᵦe — the partials are each other's swap
+  images: **Jacobians inherit the output symmetry in the corresponding
+  indices**. Semantic form `jacobian_transfer_semantic`: ∂ₐe at the
+  swapped environment equals ∂ᵦe, i.e. the derivative/cotangent field
+  over a symmetric primal is itself symmetric — so canonical
+  (triangular) derivative storage is lossless, by the same one-step
+  canonical-access argument as any symmetric array (`access_exact`,
+  `raise_1_2`; not re-mechanized).
+- `tangent_joint_swap` (+ `_semantic`): the emitted tangent kernel
+  ∂ₐe·da + ∂ᵦe·db (§6.4's jvp schema) of a structurally symmetric primal
+  is invariant under the JOINT pair swap (a,da) ↔ (b,db) — plan claim
+  dk(a,da,b,db) = dk(b,db,a,da) exactly. Joint swaps only, per the
+  product-symmetry correction; `per_dim_swap_not_symmetry` stands.
+- `symclass_compose`: certified structural symmetries compose — the
+  `aceq` analogue of `invariant_compose` (monoid closure; finite orders
+  supply inverses).
+- `semantic_hypothesis_insufficient` — the refutation half: in the
+  formal-slot model, a SEMANTICALLY symmetric primal (constant-valued
+  intrinsic, arbitrary formal-derivative interpretation) has a tangent
+  that genuinely breaks the joint-swap symmetry. The transfer license
+  must come from the STRUCTURAL judgment (declared/deduced comm — the
+  `aceq` class), never from semantic accident: fixes where Tier-2
+  emission may look, the transfer-theorem analogue of
+  `per_dim_swap_not_symmetry`.
+- `symmetric_accumulation` (the multiplicity rule): stored canonical
+  cells as variables, logical cell (i,j) reading stored `canon2 i j`
+  (BladeCore's canonical access; the decompact read pattern pinned by
+  corpus index-types/034), loss = Σᵢⱼ cot(i,j)·M(i,j): the derivative
+  w.r.t. stored cell (p,q) with p ≤ q is **cot(p,q) + cot(q,p)
+  off-diagonal and cot(p,p) on the diagonal** — the orbit sum of the
+  cell's logical aliases, proved with the same `d` as the transfer
+  theorems. Concrete n = 3 pins: `off_diagonal_x2`, `diagonal_x1`.
+
+Honest scope: rank 2 / one transposition (general-r transfer via
+transposition lists and orbit multiplicities r!/|stab| per canonical
+tuple are roadmap items); kernel-level statements — lifting to whole
+materialized tangent ARRAYS composes with `output_symmetry_soundness`
+(H := the transferred invariance, Stab := identical primal/tangent
+bindings) in prose, not mechanized; nat semiring, so quotient/negation
+kernels (Grad.fs's quotient/power rules) are outside this file; and the
+intrinsic-derivative slot is formal by design — the refutation shows
+that boundary is essential to the statement, not an accident of the
+model.
 
 ## What remains unproved
 
 See [future.md](future.md) §4: surface-calculus progress/preservation (the
 one missing species — deliberately sequenced after the rewrite settles
 surface syntax), general-r verified offsets, r ≥ 3 storage splits, k-slot
-structure, typed-path combinator laws, the adjunction proper.
+structure, typed-path combinator laws, the adjunction proper, and the
+general-r Jacobian transfer / accumulation multiplicities (rank-2 forms:
+BladeJacobian).
 
 ---
 
