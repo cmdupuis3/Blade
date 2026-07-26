@@ -1,0 +1,33 @@
+// TEST: Memfree Mut Whole Array Rebind Clean
+// ============================================================================
+// Free-hazard guard: the ELIGIBLE case for turning a whole-array mut rebind
+// into a copy-into-place (so the staging buffer is allocated once instead of
+// once per step). STG is written only by `STG = t` from inside the step
+// function; it is never aliased, never viewed, never passed anywhere. Under
+// rebind semantics the old STG buffer is dropped each step and t escapes;
+// under copy-into-place t's elements are copied into the single STG buffer
+// and t is freed at the epilogue. The two are OBSERVATIONALLY IDENTICAL here,
+// which is exactly what these pins assert: STG after the loop holds the LAST
+// step's values either way, and the scalars read out of it agree.
+// ============================================================================
+type C = Idx<4>
+type Steps = Idx<5>
+let mut STG = method_for(range<C>) <@> lambda(i) -> 0.0 * i |> compute
+function stepf(n: Int64) -> Float = {
+    let t = method_for(range<C>) <@> lambda(i) -> 1.0 * i + 2.0 * n |> compute
+    STG = t
+    reduce(t, (+)) * 0.5
+}
+let rec acc: Array<Float like Steps> =
+    match acc with
+    | zero -> zero
+    | zero :: s -> zero :: 0.0
+    | prefix :: n -> prefix :: prefix(n - 1) + stepf(n)
+let sfinal = acc(4)
+let sread = STG(2)
+let stotal = reduce(STG, (+))
+// EXPECT: STG = [8, 9, 10, 11]
+// EXPECT: acc = [0, 7, 18, 33, 52]
+// EXPECT: sfinal = 52
+// EXPECT: sread = 10
+// EXPECT: stotal = 38

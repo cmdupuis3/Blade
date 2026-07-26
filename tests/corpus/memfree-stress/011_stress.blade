@@ -1,0 +1,33 @@
+// TEST: Memfree Stress Churn
+// ============================================================================
+// THE memory gate for scope-exit deallocation. Each step materializes a
+// 64 KiB temp (Cell = Idx<8192>, Float64) inside chunk() and reads its first
+// and last cells. Cumulative churn without frees: 799999 x 64 KiB = 48.8 GiB,
+// past the ~43 GiB Windows commit ceiling -> OOMs (BL8005) by construction
+// until scope-exit frees land. With frees the live set is ~one temp.
+// Closed form (exact end-to-end): every cell holds the integer n
+// (1.0*n + 0.0*i), so chunk(n) = (t(0) + t(8191)) / 2 = n exactly, and
+// acc(m) = m(m+1)/2 -> total = 799999*800000/2 = 319999600000 (exact
+// integer < 2^53 throughout).
+// Sizing was measurement-driven: a serial reduce consumption ran at only
+// ~0.3 GiB/s (the fold's un-inlined lambda dominates; block size and page
+// faults were NOT the bottleneck — 2 MiB and 64 KiB temps timed identically
+// per byte), which cannot reach OOM-scale churn inside the 120 s run
+// ceiling. O(1) reads leave the vectorized fill as the only per-byte cost.
+// NOTE: OOMs without scope-exit frees (the point of the test).
+// ============================================================================
+type Cell = Idx<8192>
+type Steps = Idx<800000>
+function chunk(n: Int64) -> Float = {
+    let t = method_for(range<Cell>) <@> lambda(i) -> 1.0 * n + 0.0 * i |> compute
+    (t((0 : Cell)) + t((8191 : Cell))) / 2.0
+}
+let total = {
+    let rec acc: Array<Float like Steps> =
+        match acc with
+        | zero -> zero
+        | zero :: s -> zero :: 0.0
+        | prefix :: n -> prefix :: prefix(n - 1) + chunk(n)
+    acc(799999)
+}
+// EXPECT: total = 319999600000

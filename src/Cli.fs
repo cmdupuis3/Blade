@@ -1164,6 +1164,8 @@ let private dispatchTest (rest: string list) : int =
             | "ml-e2e" | "mle2e" -> Some ("ML E2E", mlE2eTests)
             | "ml-equiv" | "mlequiv" | "equiv" -> Some ("ML Equiv", mlEquivTests)
             | "sqlish" | "sql" -> Some ("SQL-ish", foreignKeyTests @ maskTests @ setOpTests @ groupByTests @ sortTests @ reduceTests @ extentsTests @ extentsMultiRankTests @ regressionTests @ sqlCombinedTests)
+            | "memfree" -> Some ("Mem Free", Blade.Tests.RunAll.memfreeTests)
+            | "memfree-stress" | "memfreestress" -> Some ("Mem Free Stress", Blade.Tests.RunAll.memfreeStressTests)
             | _ -> None
         match categoryTests with
         | Some (name, tests) ->

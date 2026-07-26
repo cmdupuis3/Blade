@@ -1,0 +1,44 @@
+// TEST: Memfree Transpose Stack Join Temps
+// ============================================================================
+// Free-hazard guard: transpose / stack / join are the PoolAlloc materialize
+// forms — each allocates an INDEPENDENT pool (copy, never alias) at extents
+// derived from its operands. Two free sites are exercised together:
+//   tvec  builds M then transposes it to SWAPPED extents (2x3 -> 3x2) and
+//         returns the row-reduce of the transpose. M and MT must both be
+//         freed at tvec's epilogue; the returned pool must NOT be. A free
+//         that walked the SOURCE skeleton instead of the result's would get
+//         the transposed pool wrong here, which is why the source is
+//         non-square.
+//   mixt  consumes tvec's escaped result plus a stack, a join, and the
+//         row-reduce over the stack, collapsing all of them to a scalar —
+//         so every array in the frame, including the one that escaped a
+//         nested call, is freed at mixt's epilogue.
+// Both are called at top level AND per step of a recursion.
+// ============================================================================
+type C = Idx<3>
+type R = Idx<2>
+type Steps = Idx<5>
+function tvec(n: Int64) -> Array<Float like C> = {
+    let M = method_for(range<R, C>) <@> lambda(i, j) -> (1.0 * i + 1.0) * (1.0 * j + 1.0 * n) |> compute
+    let MT = transpose(M, [0, 1])
+    method_for(MT) <@> lambda(row: Array<Float like R>) -> reduce(row, (+)) |> compute
+}
+function mixt(n: Int64) -> Float = {
+    let rs = tvec(n)
+    let st = stack(rs, rs)
+    let srow = method_for(st) <@> lambda(row) -> reduce(row, (+)) |> compute
+    let jn = join(rs, rs, 0)
+    reduce(rs, (+)) + srow(0) * 0.1 + srow(1) * 0.01 + reduce(jn, (+)) * 0.001
+}
+let toprs = tvec(1)
+let topmix = mixt(1)
+let rec acc: Array<Float like Steps> =
+    match acc with
+    | zero -> zero
+    | zero :: s -> zero :: 0.0
+    | prefix :: n -> prefix :: prefix(n - 1) + mixt(n) * 0.001
+let sfinal = acc(4)
+// EXPECT: toprs = [3, 6, 9]
+// EXPECT: topmix = 20.016
+// EXPECT: acc = [0, 0.020016, 0.05004, 0.090072, 0.140112]
+// EXPECT: sfinal = 0.140112

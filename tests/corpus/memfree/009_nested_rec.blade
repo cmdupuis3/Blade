@@ -1,0 +1,32 @@
+// TEST: Memfree Nested Recursion Temps
+// ============================================================================
+// Free-hazard guard: an inner `let rec` inside an outer step block — inner
+// per-iteration temps freed at inner iteration end, the inner recursion
+// buffer never freed while its rows are read, and the inner result escaping
+// into the outer trajectory. Modeled on physics/46's SIGC block.
+// ============================================================================
+type C = Idx<4>
+type Outer = Idx<4>
+type Inner = Idx<4>
+function bump(u: Array<Float like C>, m: Int64) -> Array<Float like C> = {
+    let t = method_for(range<C>) <@> lambda(i) -> 1.0 * i + 1.0 * m |> compute
+    u + 0.1 * t
+}
+let rec otraj: Array<Float like Outer, C> =
+    match otraj with
+    | zero -> zero
+    | zero :: s -> zero :: [1.0, 1.0, 1.0, 1.0]
+    | prefix :: n -> prefix :: {
+        let start = prefix(n - 1)
+        let rec itraj: Array<Float like Inner, C> =
+            match itraj with
+            | zero -> zero
+            | zero :: s2 -> zero :: start
+            | pre2 :: m -> pre2 :: bump(pre2(m - 1), m)
+        itraj(3)
+      }
+let fin = otraj(3)
+let mass = reduce(fin, (+))
+// EXPECT: otraj = [1, 1, 1, 1, 1.6, 1.9, 2.2, 2.5, 2.2, 2.8, 3.4, 4, 2.8, 3.7, 4.6, 5.5]
+// EXPECT: fin = [2.8, 3.7, 4.6, 5.5]
+// EXPECT: mass = 16.6

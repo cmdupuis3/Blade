@@ -1,0 +1,28 @@
+// TEST: Memfree Mut Staging Array Across Steps
+// ============================================================================
+// Free-hazard guard: a module-level `let mut` staging array written from
+// inside the step function (captured by reference). The captured mut's buffer
+// must never be freed, and the per-step temp feeding it must survive to its
+// last element read. STG is pinned after the recursion holding the LAST
+// step's values.
+// ============================================================================
+type C = Idx<4>
+type Steps = Idx<5>
+let mut STG = method_for(range<C>) <@> lambda(i) -> 0.0 * i |> compute
+function stepf(n: Int64) -> Float = {
+    let t = method_for(range<C>) <@> lambda(i) -> 1.0 * i + 2.0 * n |> compute
+    STG(0) = t(0)
+    STG(1) = t(1)
+    STG(2) = t(2)
+    STG(3) = t(3)
+    reduce(t, (+)) * 0.5
+}
+let rec acc: Array<Float like Steps> =
+    match acc with
+    | zero -> zero
+    | zero :: s -> zero :: 0.0
+    | prefix :: n -> prefix :: prefix(n - 1) + stepf(n)
+let sfinal = acc(4)
+// EXPECT: STG = [8, 9, 10, 11]
+// EXPECT: acc = [0, 7, 18, 33, 52]
+// EXPECT: sfinal = 52

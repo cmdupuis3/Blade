@@ -178,7 +178,15 @@ let deferredConcreteSlice = [ "deferred-concrete" ]
 /// materialize{Stack,Join}Form, so every member must agree byte-for-byte.
 let stackJoinSlice = [ "stack-join" ]
 
-let currentSlice = m1Slice @ m2Slice @ m3Slice @ randSlice @ m4aSlice @ fallbackSlice @ m5Slice @ indexTypesSlice @ deferredConcreteSlice @ stackJoinSlice
+/// memfree: scope-exit deallocation hazards. Values must be invariant under
+/// the deterministic-free change, so the interpreter — which has no notion of
+/// frees at all — is the ideal independent witness: any divergence means the
+/// COMPILED side freed something it should not have. memfree-stress (011) is
+/// deliberately EXCLUDED: its ~8e9 element ops would blow the interp timeout
+/// ceiling and, per the runInterpTimed caveat, contaminate later timings.
+let memfreeSlice = [ "memfree" ]
+
+let currentSlice = m1Slice @ m2Slice @ m3Slice @ randSlice @ m4aSlice @ fallbackSlice @ m5Slice @ indexTypesSlice @ deferredConcreteSlice @ stackJoinSlice @ memfreeSlice
 
 /// Output-line normalizer, shared in spirit with DiffOracle.normalize
 /// (DiffOracle.fs:79-85), widened for the split-timing wrapper:

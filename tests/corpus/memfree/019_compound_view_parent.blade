@@ -1,0 +1,43 @@
+// TEST: Memfree Compound View Vs Parent Ordering
+// ============================================================================
+// Free-hazard guard: partial compound reads are VIEWS. `B((0, _))` builds a
+// make_partial_window over the parent's compacted data (a heap extent table
+// plus a borrowed data pointer — it copies nothing), so freeing a view must
+// reclaim only its own extent table and never touch B's data or idx buffers.
+// Both views are taken early and read LATE — r0(1) is read after r1 exists,
+// and the full-tuple parent read `par` comes after both — so a free ordered
+// by binding position rather than by last use would collapse the window out
+// from under the read. B is read once more AFTER the recursion (bpar / brow)
+// to prove five function epilogues left the parent intact.
+// ============================================================================
+type Lat = Idx<2>
+type Lon = Idx<3>
+type Steps = Idx<5>
+let DENSE: Array<Float like Lat, Lon> = [[10.0, 20.0, 30.0], [40.0, 50.0, 60.0]]
+let M: Array<Bool like Lat, Lon> = [[true, false, true], [true, true, false]]
+let B = compound(DENSE, M)
+function vstep(n: Int64) -> Float = {
+    let r0 = B((0, _))
+    let mid = reduce(r0, (+))
+    let r1 = B((1, _))
+    let mid1 = reduce(r1, (+))
+    let late = r0(1) + r1(0)
+    let par = B((1, 1))
+    mid * 0.1 + mid1 * 0.01 + late * 0.001 + par * 0.0001 + 1.0 * n
+}
+let rec acc: Array<Float like Steps> =
+    match acc with
+    | zero -> zero
+    | zero :: s -> zero :: 0.0
+    | prefix :: n -> prefix :: prefix(n - 1) + vstep(n)
+let sfinal = acc(4)
+let bpar = B((0, 2))
+let brow = B((1, _))
+let brsum = reduce(brow, (+))
+// EXPECT: DENSE = [10, 20, 30, 40, 50, 60]
+// EXPECT: M = [true, false, true, true, true, false]
+// EXPECT: acc = [0, 5.975, 12.95, 20.925, 29.9]
+// EXPECT: sfinal = 29.9
+// EXPECT: bpar = 30
+// EXPECT: brow = [40, 50]
+// EXPECT: brsum = 90

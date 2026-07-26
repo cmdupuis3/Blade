@@ -1,0 +1,29 @@
+// TEST: Memfree Ragged Temp
+// ============================================================================
+// Free-hazard guard: an OWNING ragged temp. An elementwise map over a ragged
+// input allocates a fresh flat pool plus its own row-pointer table, while
+// SHARING the parent's lens / offsets / extents metadata. Here two owning
+// ragged temps are chained (d over the param, e2 over d) and both are
+// consumed only into scalars, so both must be reclaimed at the function
+// epilogue — pool AND row table, but never the shared metadata tables, which
+// belong to RS and are still needed by the next call. Called per step of a
+// recursion, so the epilogue runs five times over the same shared tables.
+// ============================================================================
+type Steps = Idx<5>
+let RS = [[1.0, 2.0, 3.0], [4.0, 5.0], [6.0, 7.0, 8.0, 9.0]]
+function rstep(A: Array<Float64 like Idx<3>, RaggedIdx<_>>, n: Int64) -> Float64 = {
+    let d = method_for(A) <@> lambda(e) -> e * 2.0 + 1.0 * n |> compute
+    let e2 = method_for(d) <@> lambda(x) -> x * x |> compute
+    let dsums = method_for(d) <@> lambda(g: Array<Float64 like RaggedIdx<_>>) -> reduce(g, (+)) |> compute
+    let esums = method_for(e2) <@> lambda(g: Array<Float64 like RaggedIdx<_>>) -> reduce(g, (+)) |> compute
+    reduce(dsums, (+)) * 0.01 + reduce(esums, (+)) * 0.0001
+}
+let rec acc: Array<Float like Steps> =
+    match acc with
+    | zero -> zero
+    | zero :: s -> zero :: 0.0
+    | prefix :: n -> prefix :: prefix(n - 1) + rstep(RS, n)
+let sfinal = acc(4)
+// EXPECT: RS = [1, 2, 3, 4, 5, 6, 7, 8, 9]
+// EXPECT: acc = [0, 1.1229, 2.3565, 3.7026, 5.163]
+// EXPECT: sfinal = 5.163
