@@ -27,6 +27,20 @@ open Blade.Unify
 open Blade.TypeEnv
 open Blade.Zonk
 
+/// IDE side-channel for stage-3/4 confirm-and-pin suggestions (BL4007): the
+/// structured twin of the plain-string warning the CLI prints. Each entry is
+/// (message, kernel span) so editor tooling can render a ghost annotation at
+/// the kernel and offer the one-click pin. Reset at the top of typeCheck,
+/// recorded at buildApplyInfo's suggestion site. AsyncLocal, like IdePartial
+/// (defined near typeCheck below); lives at the file head because its writer
+/// (buildApplyInfo) precedes typeCheck in the compilation order.
+module PinSuggestions =
+    let private slot = new System.Threading.AsyncLocal<(string * Span) list>()
+    let reset () = slot.Value <- []
+    let add (msg: string) (span: Span) = slot.Value <- (msg, span) :: slot.Value
+    let get () : (string * Span) list =
+        match box slot.Value with null -> [] | _ -> List.rev slot.Value
+
 let rec evalConstExpr (env: TypeEnv) (expr: Expr) : int64 option =
     match expr.Kind with
     | ExprKind.ExprLit (LitInt n) -> Some n
@@ -5581,9 +5595,16 @@ and buildApplyInfo (env: TypeEnv)
                && i + 1 < identities.Length
                && identities.[i] = identities.[i + 1] then
                 let (n1, n2) = (stage3Names.[i], stage3Names.[i + 1])
-                emitWarning env (sprintf
-                    "kernel deduces commutative in (%s, %s) and both positions receive the same array: output storage is DENSE today. Pin `where comm(%s, %s)` on the kernel to opt into compact symmetric (triangular) storage."
-                    n1 n2 n1 n2))
+                let msg =
+                    sprintf
+                        "kernel deduces commutative in (%s, %s) and both positions receive the same array: output storage is DENSE today. Pin `where comm(%s, %s)` on the kernel to opt into compact symmetric (triangular) storage."
+                        n1 n2 n1 n2
+                emitWarning env msg
+                // Synthesized kernels (eta wrappers, sections) carry noSpan;
+                // fall back to the former expression's source span so the
+                // ghost annotation lands on `object_for(f)` / `method_for(..)`.
+                let span = if tKernel.Span = noSpan then tLoop.Span else tKernel.Span
+                PinSuggestions.add msg span)
 
     // Co-iteration INDEX-PARAM form: a co-iterated kernel may declare
     // N + R parameters — one value per co-iterated array plus the R shared
@@ -9810,6 +9831,7 @@ let typeCheck (program: Program) : Result<TypedProgram * IRBuilder * string list
     // their own; all inherit the fold through StaticEval's hook).
     Blade.ProviderStatics.install ()
     IdePartial.reset ()
+    PinSuggestions.reset ()
     // Staged-former unfold FIRST: `static method_for/object_for/for`
     // argument lists elaborate to plain formers before any other stage
     // (ML/PPL/math/grad and the checker never see ExprStatic).

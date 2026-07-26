@@ -641,11 +641,20 @@ cells with a duplicated `1.333` vs the 3-cell triangle).
    `monomorphizeModule` worklist. Also: close future.md §4b.4 (reynolds
    self-licensing) as a definitional case, and revive the `antisymm` pin
    spelling (dead `CnAntisymm`) so deduced-Neg kernels are pinnable.
-4. **Confirm-and-pin UX**: the suggestion JSON field (annotation text +
-   insertion span) on the existing `ide check` surface; extension-side
-   apply-edit; REPL display of deduced-but-unpinned classes; §6.1's strict
+4. **Confirm-and-pin UX — DISPLAY HALF DONE (2026-07-25).** Landed: stage
+   3's suggestions reach editor tooling as structured diagnostics — `blade
+   ide check --json` emits each as severity `warning`, code **BL4007**
+   ("confirm-and-pin storage suggestion", registered in the BL4xxx
+   constraints family), spanned to the KERNEL (synthesized eta wrappers
+   fall back to the former expression's source span, so the ghost
+   annotation anchors on `object_for(f)`). Plumbed via the
+   `PinSuggestions` AsyncLocal side-channel (the `IdePartial` pattern — no
+   signature ripple); the plain-string warning twin is deduplicated out of
+   the JSON; CLI output unchanged; the message text contains the exact
+   pin clause to insert. No new lowering — dense-until-pinned is the
+   existing default. Remaining: extension-side one-click apply-edit (out
+   of repo), REPL display of deduced-but-unpinned classes, §6.1's strict
    mode (CI-fails-on-unpinned + the library-author exchange-law check).
-   No new lowering — dense-until-pinned is the existing default.
 
 **Shippability property worth preserving:** stages 2–3 are *observationally
 inert* — pure analysis plus diagnostics; storage changes only ever happen via

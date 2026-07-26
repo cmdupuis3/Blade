@@ -139,6 +139,7 @@ module Codes =
             "BL4004", "symmetry violation"
             "BL4005", "immutable assignment"
             "BL4006", "mutual group violation"
+            "BL4007", "confirm-and-pin storage suggestion"
             "BL4007", "no equivariant map exists"
             "BL4008", "equivariance discipline violation"
             // BL5xxx — elaborators
