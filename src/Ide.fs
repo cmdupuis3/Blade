@@ -799,7 +799,7 @@ let ideCheck (filePath: string) : int =
                 // plain strings in `warnings` (what the CLI prints) and as
                 // structured (message, kernel-span) pairs in the
                 // PinSuggestions side-channel. Emit the structured form —
-                // code BL4007 at the kernel's real span, so the editor can
+                // code BL4010 at the kernel's real span, so the editor can
                 // render a ghost annotation and offer the one-click pin —
                 // and skip the string twin to avoid duplicates.
                 let pinSuggestions = Blade.TypeCheck.PinSuggestions.get ()
@@ -808,7 +808,7 @@ let ideCheck (filePath: string) : int =
                     let (line, col, endLine, endCol) = clampSpan span
                     diags.Add { Severity = "warning"; Line = line; Col = col
                                 EndLine = endLine; EndCol = endCol
-                                Message = msg; Code = "BL4007" }
+                                Message = msg; Code = "BL4010" }
                 for w in warnings do
                     if not (Set.contains w pinMessages) then
                         diags.Add { Severity = "warning"; Line = 1; Col = 1; EndLine = 1; EndCol = 1

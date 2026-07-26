@@ -27,7 +27,7 @@ open Blade.Unify
 open Blade.TypeEnv
 open Blade.Zonk
 
-/// IDE side-channel for stage-3/4 confirm-and-pin suggestions (BL4007): the
+/// IDE side-channel for stage-3/4 confirm-and-pin suggestions (BL4010): the
 /// structured twin of the plain-string warning the CLI prints. Each entry is
 /// (message, kernel span) so editor tooling can render a ghost annotation at
 /// the kernel and offer the one-click pin. Reset at the top of typeCheck,

@@ -635,7 +635,7 @@ cells with a duplicated `1.333` vs the 3-cell triangle).
    and can produce no false errors; declared `where comm(pack)` stays
    trusted (027/028 unchanged). The suggestion fires at the
    deferred-former eta seam (no declared comm + pack-PInv + identical
-   identities), spanned to the source kernel, alongside a BL4007 entry.
+   identities), spanned to the source kernel, alongside a BL4010 entry.
    A third link closes the chain: a FIXED-ARITY wrapper over a
    pack-summarized kernel (`lambda(x, y) -> comoment(x, y)`) specializes
    pack invariance to full pairwise symmetry at that arity — the early
@@ -670,7 +670,7 @@ cells with a duplicated `1.333` vs the 3-cell triangle).
    spelling (dead `CnAntisymm`) so deduced-Neg kernels are pinnable.
 4. **Confirm-and-pin UX — DISPLAY HALF DONE (2026-07-25).** Landed: stage
    3's suggestions reach editor tooling as structured diagnostics — `blade
-   ide check --json` emits each as severity `warning`, code **BL4007**
+   ide check --json` emits each as severity `warning`, code **BL4010**
    ("confirm-and-pin storage suggestion", registered in the BL4xxx
    constraints family), spanned to the KERNEL (synthesized eta wrappers
    fall back to the former expression's source span, so the ghost
