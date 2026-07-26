@@ -4419,7 +4419,7 @@ and inferBinOp env mode op left right : TypeResult<TypedExpr> =
                         // suggestion falls back to the LOOP's span whenever the
                         // eta-expanded kernel carries noSpan (which the
                         // fixed-arity wrapper always does), and without this the
-                        // BL4007 would have no location to anchor on at all.
+                        // BL4010 would have no location to anchor on at all.
                         inferObjectFor env left
                         |> Result.map (fun tL ->
                             if tL.Span = noSpan then { tL with Span = left.Span } else tL)
@@ -5813,7 +5813,14 @@ and buildApplyInfo (env: TypeEnv)
         |> List.iter (fun (i, par) ->
             if (par = Blade.Deduce.PInv || par = Blade.Deduce.PNeg)
                && i + 1 < identities.Length
-               && identities.[i] = identities.[i + 1] then
+               && identities.[i] = identities.[i + 1]
+               // Synthesized wrapper params (`__of13_0`, `__k13_0`) are not
+               // names a user can write in a pin — suppress; the pack-level
+               // suggestion at the deferred-former seam names the REAL pack
+               // param for exactly these kernels (and under --strict-pins an
+               // unactionable suggestion would be an unfixable build break).
+               && not (stage3Names.[i].StartsWith "__")
+               && not (stage3Names.[i + 1].StartsWith "__") then
                 let (n1, n2) = (stage3Names.[i], stage3Names.[i + 1])
                 let msg =
                     if par = Blade.Deduce.PInv then

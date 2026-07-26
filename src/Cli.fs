@@ -1,6 +1,6 @@
-// Command-line interface: argument parsing and command dispatch, plus the
+﻿// Command-line interface: argument parsing and command dispatch, plus the
 // user-facing compile/run/check/emit commands. Extracted from Main.fs
-// (audit §2.3) — Main.fs is now the entry point only.
+// (audit Â§2.3) â€” Main.fs is now the entry point only.
 module Blade.Cli
 
 open System
@@ -90,7 +90,7 @@ let printUsage () =
     printfn "  -o <path>      Output file path"
     printfn "  --verbose      Show IR and generated C++"
     printfn "  --strict-pins  Fail the build on unpinned confirm-and-pin deductions"
-    printfn "                 (BL4007, normally warnings). For CI: forces the pin"
+    printfn "                 (BL4010, normally warnings). For CI: forces the pin"
     printfn "                 decision into source. check / compile / emit / run."
     printfn "  --help         Show this help"
     printfn ""
@@ -102,20 +102,20 @@ let printUsage () =
     printfn "  blade test"
     printfn "  blade test --omp --cuda --timing"
 
-/// §6.1(b) strict mode. The stage-3/4 confirm-and-pin SUGGESTIONS (BL4007) are
+/// Â§6.1(b) strict mode. The stage-3/4 confirm-and-pin SUGGESTIONS (BL4010) are
 /// warnings by default: the deduction proposes, storage stays DENSE, and
 /// nothing changes until the user pins the annotation in source.
 /// `--strict-pins` promotes every outstanding suggestion to a build ERROR, so
 /// a CI build fails on an unpinned deduction that would change storage and the
 /// pin decision has to be committed in source (the annotation is the durable
-/// artifact — plan §6.1 option (b)).
+/// artifact â€” plan Â§6.1 option (b)).
 ///
-/// Reads the `PinSuggestions` side-channel `typeCheck` fills — the structured
-/// (message, kernel span) twin of the plain-string warnings — and renders each
+/// Reads the `PinSuggestions` side-channel `typeCheck` fills â€” the structured
+/// (message, kernel span) twin of the plain-string warnings â€” and renders each
 /// through the ordinary diagnostic renderer, so a strict failure looks exactly
-/// like any other `error[BL4007]:` with its source snippet. Returns None when
+/// like any other `error[BL4010]:` with its source snippet. Returns None when
 /// strict mode is off or nothing is outstanding. Deduplicated and in
-/// deduction order (§6.6 determinism).
+/// deduction order (Â§6.6 determinism).
 let private strictPinFailure (strictPins: bool) (useColor: bool)
                              (sm: Blade.Diagnostics.SourceMap option) : string option =
     if not strictPins then None
@@ -125,7 +125,7 @@ let private strictPinFailure (strictPins: bool) (useColor: bool)
         | suggestions ->
             let ds =
                 suggestions |> List.map (fun (msg, span) ->
-                    Blade.Diagnostics.mkError "BL4007" Blade.Diagnostics.PhConstraints span msg
+                    Blade.Diagnostics.mkError "BL4010" Blade.Diagnostics.PhConstraints span msg
                     |> Blade.Diagnostics.withNote
                         "--strict-pins: an unpinned deduction that would change storage fails the build. Add the pin shown above, or drop --strict-pins for the default dense-until-pinned behavior.")
             Some (Blade.Diagnostics.Render.renderAll useColor sm ds)
@@ -171,7 +171,7 @@ let compileToExe (filePath: string) (outputPath: string option) (verbose: bool) 
         let baseName = Path.GetFileNameWithoutExtension(filePath)
         let dir = Path.GetDirectoryName(Path.GetFullPath(filePath))
         let dir = if String.IsNullOrEmpty dir then "." else dir
-        // Infer backend from generated source: device kernels → .cu + nvcc.
+        // Infer backend from generated source: device kernels â†’ .cu + nvcc.
         let backendReq = inferBackendReq cppCode
         let ext = match backendReq with RequiresCuda -> ".cu" | RequiresMpi | CpuOnly -> ".cpp"
         let cppFile = Path.Combine(dir, baseName + ext)
@@ -257,14 +257,14 @@ let runFile (filePath: string) (verbose: bool) (mpiRanks: int option) (strictPin
 // free: every top-level binding prints its value. The REPL accumulates a
 // session program in a temp file; each submitted snippet re-compiles and
 // re-runs the WHOLE session, but echoes ONLY the value of the snippet's LAST
-// top-level binding — its "return value", as in a function body. Earlier
+// top-level binding â€” its "return value", as in a function body. Earlier
 // bindings, and the many synthetic `__`-internal bindings that a single
 // `ppl.dist`/module call expands into, stay hidden. Rebinding a top-level name
 // replaces the earlier definition (duplicate lets are a C++ redeclaration
 // error) so downstream snippets still see it; the echo then shows that
 // snippet's own last value, recomputed.
 //
-// A snippet that is not a declaration is a bare EXPRESSION (`a`, `a + 1`) —
+// A snippet that is not a declaration is a bare EXPRESSION (`a`, `a + 1`) â€”
 // the file-level "return a value by naming it" idiom. Top-level source only
 // admits declarations, so the REPL wraps the expression in a transient
 // binding (`let it = <expr>`), runs, echoes the value, and discards it: the
@@ -274,11 +274,11 @@ let runFile (filePath: string) (verbose: bool) (mpiRanks: int option) (strictPin
 // aren't let-bindable just to print them).
 //
 // Output lines are type-annotated by an in-process parse+typecheck(+lower,
-// for HM-monomorphized value types) of the same source — see ReplTypes.
+// for HM-monomorphized value types) of the same source â€” see ReplTypes.
 //
 // The compiled session runs with the REPL process's own working directory,
 // so relative data paths (NetCDF.load("sample.nc")) resolve where the user
-// launched the REPL — not in the session temp dir.
+// launched the REPL â€” not in the session temp dir.
 
 /// Run a compiled session exe with an explicit working directory, capturing
 /// stdout/stderr separately (runExecutable pins cwd to the exe's dir, which
@@ -353,12 +353,12 @@ module ReplTypes =
         sprintf "(%s) -> %s" (String.concat ", " ps) (pp tf.ReturnType)
 
     /// Build the top-level name -> display info map from an ALREADY-lowered
-    /// session (Blade.Interp.Repl.LoweredSession) — the SAME front-end pass the
+    /// session (Blade.Interp.Repl.LoweredSession) â€” the SAME front-end pass the
     /// interpreter runs on in compileRunEcho, so the candidate path never lowers
     /// twice. Value bindings prefer the LOWERED types: calls to HM-polymorphic
     /// functions monomorphize during lowering, so the typed AST can still carry
     /// T?n inference vars where the IR is concrete (`let r = id(3.5)` is Float64
-    /// only in IR). Pure map assembly — no parse/typecheck/lower here.
+    /// only in IR). Pure map assembly â€” no parse/typecheck/lower here.
     let sessionInfoOf (lowered: Blade.Interp.Repl.LoweredSession) : Map<string, Info> =
         let prog = lowered.Prog
         let tp = lowered.Typed
@@ -393,7 +393,7 @@ module ReplTypes =
         acc
 
     /// Parse + typecheck + lower session source (one pass) and return top-level
-    /// name -> display info. Failures yield an empty map — values still print,
+    /// name -> display info. Failures yield an empty map â€” values still print,
     /// just unannotated (shouldn't happen for source that just compiled
     /// successfully). Used for the bare-identifier "is this a session function?"
     /// probe on the CURRENT session; the candidate path reuses the interpreter's
@@ -416,7 +416,7 @@ module ReplTypes =
     let private eqLineRe = Regex(@"^([A-Za-z_][A-Za-z0-9_]*) = (.*)$", RegexOptions.Compiled)
 
     /// Rewrite one raw output line for display. `transient` is the synthetic
-    /// binding a bare REPL expression was wrapped in — its name is stripped
+    /// binding a bare REPL expression was wrapped in â€” its name is stripped
     /// so the value echoes alone.
     let annotate (info: Map<string, Info>) (transient: string option) (line: string) : string =
         let m = eqLineRe.Match line
@@ -438,7 +438,7 @@ module ReplTypes =
             | None -> if isTransient then value else line
 
 let replLoop () : int =
-    printfn "Blade REPL (v%s) — each submission echoes its last binding's (typed) value." compilerVersion
+    printfn "Blade REPL (v%s) â€” each submission echoes its last binding's (typed) value." compilerVersion
     printfn "A bare expression (e.g. `a`, `a + 1`) evaluates and echoes without joining the session."
     printfn "Commands: :reset (clear session)  :show (print session)  :quit"
     printfn "Multi-line: unbalanced brackets continue on the next line, or use :paste ... :end"
@@ -458,7 +458,7 @@ let replLoop () : int =
         if m.Success then Some m.Groups.[1].Value else None
 
     // The generated main prints a "<name> completed in Xs" timing line whose
-    // value changes every run — exclude it from the output diff.
+    // value changes every run â€” exclude it from the output diff.
     let isTimingLine (l: string) =
         System.Text.RegularExpressions.Regex.IsMatch(l, @"completed in [0-9.eE+~-]+m?s\s*$")
 
@@ -470,12 +470,12 @@ let replLoop () : int =
     let identRe =
         System.Text.RegularExpressions.Regex(@"^[A-Za-z_][A-Za-z0-9_]*$")
 
-    // A reassignment `x = e` (or `x[i] = e`, `x.f = e`, `x += e`, …): an lvalue
+    // A reassignment `x = e` (or `x[i] = e`, `x.f = e`, `x += e`, â€¦): an lvalue
     // followed by an assignment operator. `=(?!=)` matches a single `=` but not
     // `==`; `<=`/`>=`/`!=` never match here because their `<`/`>`/`!` is not part
-    // of the lvalue — so `b == 1`, `b <= 1`, `b != 1` stay bare expressions. The
+    // of the lvalue â€” so `b == 1`, `b <= 1`, `b != 1` stay bare expressions. The
     // leading identifier (group 1) is the ROOT variable to echo. Checked AFTER
-    // declRe so `let …` stays a declaration.
+    // declRe so `let â€¦` stays a declaration.
     let assignRe =
         System.Text.RegularExpressions.Regex(
             @"^\s*([A-Za-z_][A-Za-z0-9_]*)(?:\.[A-Za-z_][A-Za-z0-9_]*|\[[^\]]*\])*\s*(?:\+=|-=|\*=|/=|=(?!=))")
@@ -487,15 +487,15 @@ let replLoop () : int =
             @"^([A-Za-z_][A-Za-z0-9_]*) = ",
             System.Text.RegularExpressions.RegexOptions.Compiled)
 
-    /// Evaluate `candidate` and echo ONLY `targetName`'s value line — the
-    /// submission's "return value" — type-annotated. Every earlier user binding,
+    /// Evaluate `candidate` and echo ONLY `targetName`'s value line â€” the
+    /// submission's "return value" â€” type-annotated. Every earlier user binding,
     /// and every synthetic `__`-internal binding (a single `ppl.dist` expands
     /// into dozens), stays hidden.
     ///
     /// INTERP-FIRST (the payoff of the interpreter arc): the candidate lowers
-    /// ONCE (Repl.lowerSession — shared with the type-annotation map below), then
+    /// ONCE (Repl.lowerSession â€” shared with the type-annotation map below), then
     /// runs under the tree-walking interpreter. On a supported exit (0, or a
-    /// Blade guard panic 1) its output is authoritative and NO g++ is invoked —
+    /// Blade guard panic 1) its output is authoritative and NO g++ is invoked â€”
     /// a typical turn drops from ~1-5 s to <100 ms. If the interpreter cannot yet
     /// evaluate some node (125) or hits its own bug (70) it FALLS BACK to the
     /// historical g++ compile+run for this one input (a single notice on stderr),
@@ -504,8 +504,8 @@ let replLoop () : int =
     ///
     /// `transient` is the synthetic name a bare expression was wrapped in (its
     /// prefix is stripped in display), else None. Returns Some (lines,
-    /// printedCount, info) on a clean exit — info is the SAME LoweredSession's
-    /// annotation map, so the caller reuses it without lowering again — or None
+    /// printedCount, info) on a clean exit â€” info is the SAME LoweredSession's
+    /// annotation map, so the caller reuses it without lowering again â€” or None
     /// (snippet must not be kept).
     let compileRunEcho (candidate: ResizeArray<string>) (targetName: string option) (transient: string option)
         : (string[] * int * Map<string, ReplTypes.Info>) option =
@@ -514,7 +514,7 @@ let replLoop () : int =
         let useColor = not Console.IsErrorRedirected
         match Blade.Interp.Repl.lowerSession (Some srcPath) useColor src with
         | Error rendered ->
-            // Front-end / validate rejection — identical to the old
+            // Front-end / validate rejection â€” identical to the old
             // compileToExe Error arm (both render the same diagnostics).
             eprintfn "%s" rendered
             eprintfn "[snippet not kept]"
@@ -524,7 +524,7 @@ let replLoop () : int =
             let display l = ReplTypes.annotate info transient l
             // Given a process-like (code, stdout, stderr) triple from EITHER the
             // interpreter or the compiled fallback, filter to targetName and
-            // echo — this is the historical tail of compileRunEcho, unchanged.
+            // echo â€” this is the historical tail of compileRunEcho, unchanged.
             let emit (code: int) (stdout: string) (stderr: string) =
                 let lines =
                     stdout.Replace("\r\n", "\n").Split('\n')
@@ -541,7 +541,7 @@ let replLoop () : int =
                 if stderr.Trim() <> "" then eprintfn "%s" (stderr.Trim())
                 if code = 0 then Some (lines, printed, info)
                 else
-                    eprintfn "[exit %d — snippet not kept]" code
+                    eprintfn "[exit %d â€” snippet not kept]" code
                     None
             // Historical g++ compile+run for this ONE input (the fallback lane).
             let viaCompiled () =
@@ -564,9 +564,9 @@ let replLoop () : int =
                 for w in lowered.Warnings do eprintfn "[TypeCheck Warning] %s" w
                 emit r.ExitCode r.Stdout r.Stderr
             | Blade.Interp.Repl.InterpFellShort _ ->
-                // The interpreter can't evaluate this input yet — one-time notice
+                // The interpreter can't evaluate this input yet â€” one-time notice
                 // so the user understands the latency spike, then the g++ path
-                // (whose stdout the SAME targetName filter isolates — no
+                // (whose stdout the SAME targetName filter isolates â€” no
                 // suppression regression). Warnings print via compileFile there.
                 eprintfn "-- falling back to compiled evaluation for this input --"
                 viaCompiled ()
@@ -604,7 +604,7 @@ let replLoop () : int =
             | None -> ()
             | Some (lines, printed, info) ->
                 let mutable printed = printed
-                // A final function/type binding produces no run output — echo
+                // A final function/type binding produces no run output â€” echo
                 // its signature (abstract unless inference bound it concrete).
                 match lastTarget with
                 | Some name when printed = 0 ->
@@ -619,8 +619,8 @@ let replLoop () : int =
                 session.AddRange candidate
                 lastLines <- lines
         elif assignRe.IsMatch (classifyTarget trimmed) then
-            // Reassignment (`b = b + 1`, `b += 1`, …): a bare assignment does not
-            // parse at top level, but wrapping it in a hidden binding does — the
+            // Reassignment (`b = b + 1`, `b += 1`, â€¦): a bare assignment does not
+            // parse at top level, but wrapping it in a hidden binding does â€” the
             // wrapper's value IS the ExprAssign, which mutates the target's
             // existing cell. Unlike the bare-expression path we KEEP the wrapper,
             // so the mutation persists into the re-run session. Successive
@@ -637,7 +637,7 @@ let replLoop () : int =
             candidate.Add (sprintf "let %s = %s" hidden trimmed)
             let root = (assignRe.Match trimmed).Groups.[1].Value
             match compileRunEcho candidate (Some root) None with
-            | None -> ()                                    // static/unknown/etc → not kept
+            | None -> ()                                    // static/unknown/etc â†’ not kept
             | Some (lines, printed, _) ->
                 if printed = 0 then printfn "(ok)"          // e.g. array reassign isn't auto-printed
                 session.Clear()
@@ -646,7 +646,7 @@ let replLoop () : int =
         else
             // Bare expression: `blade run` semantics only print top-level
             // BINDINGS, so wrap the expression in a transient one, run, and
-            // echo its value — WITHOUT keeping it. The session (and diff
+            // echo its value â€” WITHOUT keeping it. The session (and diff
             // baseline) stay untouched, so re-entering the same expression
             // echoes again rather than diffing to silence.
             let curInfo = lazy (ReplTypes.sessionInfo (String.concat "\n\n" session + "\n"))
@@ -714,8 +714,8 @@ let replLoop () : int =
             lastLines <- [||]
             printfn "(session cleared)"
         | line when buffer.Count = 0 && line.Trim() = ":show" ->
-            // Hide the synthetic `let __assign… = <reassignment>` wrappers the
-            // assignment path appends — the user sees only what they typed.
+            // Hide the synthetic `let __assignâ€¦ = <reassignment>` wrappers the
+            // assignment path appends â€” the user sees only what they typed.
             let visible =
                 session
                 |> Seq.filter (fun s -> bindingName s |> Option.forall (fun n -> not (n.StartsWith "__assign")))
@@ -733,7 +733,7 @@ let replLoop () : int =
 /// End-to-end CLI smoke test: compile and run a one-line .edgi from a FRESH
 /// temp directory containing nothing but the source file. The test runners
 /// deploy the C++ runtime headers into their own output dirs before compiling,
-/// so they cannot catch a compileToExe that forgets to — historically
+/// so they cannot catch a compileToExe that forgets to â€” historically
 /// `blade run` failed with "nested_array_utilities.hpp: No such file or
 /// directory" unless the source happened to sit next to the headers. This is
 /// the only block that exercises the user-facing path from a bare directory.
@@ -813,7 +813,7 @@ let checkFile (filePath: string) (strictPins: bool) : int =
             | Ok (_, _, warnings) ->
                 match strictPinFailure strictPins useColor (Some sm) with
                 | Some rendered ->
-                    // Strict mode (§6.1(b)): the pin suggestions ARE the
+                    // Strict mode (Â§6.1(b)): the pin suggestions ARE the
                     // failure. Their plain-string twins are dropped from the
                     // warning list (same dedup rule as `blade ide check`), so
                     // each suggestion is reported exactly once, as an error.
@@ -841,7 +841,7 @@ let emitFile (filePath: string) (outputPath: string option) (verbose: bool) (str
         | Some outPath ->
             File.WriteAllText(outPath, cppCode)
             // Ship the runtime headers next to the emitted .cpp so it compiles
-            // as-is (`g++ file.cpp`, no -I flag) — its `#include`s use plain
+            // as-is (`g++ file.cpp`, no -I flag) â€” its `#include`s use plain
             // quotes and resolve relative to the source.
             let outDir = Path.GetDirectoryName(Path.GetFullPath(outPath))
             CodeGen.deployRuntimeHeaders (if String.IsNullOrEmpty outDir then "." else outDir)
@@ -852,18 +852,18 @@ let emitFile (filePath: string) (outputPath: string option) (verbose: bool) (str
             printf "%s" cppCode
             0
 
-/// `--strict-pins` (§6.1(b)) regression block. The corpus harness runs .blade
+/// `--strict-pins` (Â§6.1(b)) regression block. The corpus harness runs .blade
 /// files with fixed compiler options, so a FLAG's behavior cannot be expressed
 /// as a corpus entry; this block drives the two CLI surfaces that own the gate
-/// (checkFile, and compileFile — the lane compile/emit/run all funnel through)
+/// (checkFile, and compileFile â€” the lane compile/emit/run all funnel through)
 /// against a temp file, in-process. No C++ toolchain involved: the gate fires
 /// at typecheck, before codegen.
 ///
-/// The two programs are the corpus twins functions/026 (unpinned → suggestion)
+/// The two programs are the corpus twins functions/026 (unpinned â†’ suggestion)
 /// and functions/029 (the suggested pin applied); kept inline so the flag test
 /// stays readable and independent of corpus renumbering. Console output is
-/// captured so a passing run stays quiet — and so the rendered text can be
-/// asserted on (substring "BL4007", which survives ANSI coloring).
+/// captured so a passing run stays quiet â€” and so the rendered text can be
+/// asserted on (substring "BL4010", which survives ANSI coloring).
 let private runStrictPinTests () : TH.BlockResult =
     let blockName = "Strict Pins"
     TH.printHeader "Strict Pin Mode (--strict-pins: unpinned deduction = build failure)"
@@ -908,10 +908,10 @@ let private runStrictPinTests () : TH.BlockResult =
 
         // Strict: the same suggestion becomes an error and fails the build.
         let (code, out) = quietly (fun () -> checkFile unpinnedPath true)
-        if code = 1 && out.Contains "BL4007" && out.Contains "where comm(a, b)" then
-            record "check --strict-pins: unpinned deduction is a BL4007 error (exit 1)" TH.Pass ""
+        if code = 1 && out.Contains "BL4010" && out.Contains "where comm(a, b)" then
+            record "check --strict-pins: unpinned deduction is a BL4010 error (exit 1)" TH.Pass ""
         else
-            record "check --strict-pins: unpinned deduction is a BL4007 error (exit 1)" TH.Fail
+            record "check --strict-pins: unpinned deduction is a BL4010 error (exit 1)" TH.Fail
                    (sprintf "exit %d, output: %s" code (out.Trim()))
 
         // The suggestion is ACTIONABLE: applying the proposed pin clears it.
@@ -926,7 +926,7 @@ let private runStrictPinTests () : TH.BlockResult =
         let ((result: Result<string * string list, string>), _) =
             quietly (fun () -> compileFile unpinnedPath false true)
         match result with
-        | Error e when e.Contains "BL4007" ->
+        | Error e when e.Contains "BL4010" ->
             record "compile lane --strict-pins: fails before codegen" TH.Pass ""
         | Error e ->
             record "compile lane --strict-pins: fails before codegen" TH.Fail
@@ -956,7 +956,7 @@ let private runStrictPinTests () : TH.BlockResult =
       FailedNames = failedNames }
 
 /// Run the full suite, appending the CLI smoke block and the strict-pin block
-/// (which live in this file — see runAllTestsFullWith's doc comment for why
+/// (which live in this file â€” see runAllTestsFullWith's doc comment for why
 /// they're passed in).
 let private runFullSuite opts = runAllTestsFullWith [runCliSmokeTests; runStrictPinTests] opts
 
@@ -981,7 +981,7 @@ let private dispatchTest (rest: string list) : int =
     | [ "--ir-only" ] -> runAllTests ()
     | [ "--gen" ] -> runAllTestsGenOnly ()
     | [ "strict-pins" ] | [ "strictpins" ] ->
-        // The --strict-pins CLI gate (§6.1(b)) standalone. In-process, no
+        // The --strict-pins CLI gate (Â§6.1(b)) standalone. In-process, no
         // toolchain; also part of the full suite.
         let failed = (runStrictPinTests ()).Failed
         if failed = 0 then 0 else 1
@@ -991,7 +991,7 @@ let private dispatchTest (rest: string list) : int =
         let failed = (runNormalizeTests ()).Failed
         if failed = 0 then 0 else 1
     | [ "unify" ] ->
-        // TypeCheck-level F# unit tests for the unify §5.3 fast path.
+        // TypeCheck-level F# unit tests for the unify Â§5.3 fast path.
         // Constructs IRType values directly and calls unify; no Blade
         // source pipeline.
         let failed = (runUnifyTests ()).Failed
@@ -1023,14 +1023,14 @@ let private dispatchTest (rest: string list) : int =
         let failed = (runCodeGenSubstTests ()).Failed
         if failed = 0 then 0 else 1
     | [ "shape" ] ->
-        // F# unit tests for the canonical ExprShape traversal (§3.2):
+        // F# unit tests for the canonical ExprShape traversal (Â§3.2):
         // childrenOf/rebuildWith round-trips, mapIRExpr identity, and
         // collectVarRefsIR completeness. No Blade source pipeline.
         let failed = (Blade.Tests.Shape.runShapeTests ()).Failed
         if failed = 0 then 0 else 1
     | [ "diff-oracle" ] ->
         // Phase 4 differential gate: this binary vs the pinned ./oracle build
-        // over the dense corpus slice — identical printed VALUES required.
+        // over the dense corpus slice â€” identical printed VALUES required.
         let failed = (Blade.Tests.DiffOracle.runDiffOracleTests "./oracle/Blade.exe" Blade.Tests.DiffOracle.denseSlice).Failed
         if failed = 0 then 0 else 1
     | [ "diff-oracle"; cat ] ->
@@ -1039,7 +1039,7 @@ let private dispatchTest (rest: string list) : int =
         if failed = 0 then 0 else 1
     | [ "interp" ] ->
         // Interpreter differential gate: the tree-walking IR interpreter vs the
-        // compiled binary over the supported corpus slice — byte-identical
+        // compiled binary over the supported corpus slice â€” byte-identical
         // normalized stdout required. Slice grows per interpreter milestone.
         let failed = (Blade.Tests.InterpDiff.runInterpDiffTests Blade.Tests.InterpDiff.currentSlice).Failed
         if failed = 0 then 0 else 1
@@ -1048,7 +1048,7 @@ let private dispatchTest (rest: string list) : int =
         let failed = (Blade.Tests.InterpDiff.runInterpDiffTests [cat]).Failed
         if failed = 0 then 0 else 1
     | [ "spans" ] ->
-        // Error-location tests (§3.4 / Phase 2 gate): deliberately broken
+        // Error-location tests (Â§3.4 / Phase 2 gate): deliberately broken
         // sources, asserting the reported line. No C++ pipeline.
         let failed = (Blade.Tests.Spans.runSpanTests ()).Failed
         if failed = 0 then 0 else 1
@@ -1177,7 +1177,7 @@ let private dispatchInner (args: string[]) : int =
     // Share the compiler version with the test-harness output helpers so every
     // block header reads "(vX.Y.Z)" consistently, including standalone runs.
     Blade.Tests.TestHarness.version <- compilerVersion
-    // `--strict-pins` (§6.1(b)) is a build MODE, not a positional argument, and
+    // `--strict-pins` (Â§6.1(b)) is a build MODE, not a positional argument, and
     // it only means anything for the four verbs that own a typecheck. Strip it
     // out of the argv the verb patterns match on so every existing arm shape
     // (`compile f -o out`, `emit f -o out --verbose`, `run f --mpi 4`) accepts
@@ -1192,7 +1192,7 @@ let private dispatchInner (args: string[]) : int =
     let args = if strictPins then args |> Array.filter (fun a -> a <> "--strict-pins") else args
     match args with
     // ---- User-facing commands ----
-    // `run <file> [--verbose] [--mpi N]` — flags in any order after the file.
+    // `run <file> [--verbose] [--mpi N]` â€” flags in any order after the file.
     | _ when args.Length >= 2 && args.[0] = "run" ->
         let rest = args.[1..] |> Array.toList
         let mutable verbose = false
@@ -1254,7 +1254,7 @@ let private dispatchInner (args: string[]) : int =
 /// .NET stack trace: a typed BladeDiagnosticException renders as itself, any
 /// other exception becomes a BL9001 internal compiler error (the .NET stack is
 /// shown only under --verbose). Successful and existing eprintfn error paths
-/// inside dispatchInner are untouched — this only catches what used to crash.
+/// inside dispatchInner are untouched â€” this only catches what used to crash.
 let dispatch (args: string[]) : int =
     let verbose = args |> Array.contains "--verbose"
     try
