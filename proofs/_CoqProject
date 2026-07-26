@@ -17,6 +17,7 @@ BladeTrinityAsym.v
 BladeCompleteness.v
 BladeFusionDuality.v
 BladeCompute.v
+BladeDeduce.v
 BladeCauchy.v
 BladeMonad.v
 BladeSafety.v
