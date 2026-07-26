@@ -194,8 +194,12 @@ training-time surprise.
 - **Symmetric message passing**: undirected edges via `reynolds(interaction)` —
   symmetric output from an asymmetric kernel, 2× triangular savings, 4× with
   identical arrays.
-- **CG exchange symmetry**: for L1 = L2, `cg[m1,m2,m] = ±cg[m2,m1,m]` gives
-  2–4× on self-tensor-products (antisymmetric paths vanish).
+- **CG exchange symmetry**: for L1 = L2, `cg[m1,m2,m] = ±cg[m2,m1,m]` compacts
+  self-tensor-product weight spaces. Correction (2026-07-26): "antisymmetric
+  paths vanish" holds only at multiplicity 1 — at mult > 1 the m-antisymmetric
+  coupling pairs with the antisymmetric multiplicity component (the Λ²⊗Λ²
+  Cauchy term) and survives; measured compaction is 30–42%, not 2–4×. Exact
+  rule and worked counts: [plan-transforms-as-types.md](../plan-transforms-as-types.md) §3.2.
 - **Higher-order interactions**: n-body kernels under `reynolds` get n!
   (triangular) × n! (identity collapse) — 36× at n=3, 576× at n=4.
 - **Antisymmetric Reynolds**: determinant-like alternating sums;

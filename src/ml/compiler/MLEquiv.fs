@@ -493,6 +493,23 @@ and private judgeApp (ctx: Ctx) (env: Map<string, RepStatus>) (e: Expr) (f: Expr
                 requireRep "derive_tp input 2" s2 yE |> Result.bind (fun () ->
                 requireInv "derive_tp weight buffer" wE |> Result.map (fun () ->
                     Rep (tpSpec s1 s2))))))
+        // The S₂-compacted self-TPs: one spec (both inputs), same derived
+        // output spec as derive_tp(S, S, ...). The compaction is a
+        // reparameterization of a SUBSPACE of the same hom-space, so the
+        // judgment is derive_tp's — group-agnostic, and the exchange symmetry
+        // is a property of the weights, not of the equivariance claim.
+        | "derive_sym_tp", [ specE; xE; yE; wE ] ->
+            specArg "derive_sym_tp spec" specE |> Result.bind (fun s ->
+                requireRep "derive_sym_tp input 1" s xE |> Result.bind (fun () ->
+                requireRep "derive_sym_tp input 2" s yE |> Result.bind (fun () ->
+                requireInv "derive_sym_tp weight buffer" wE |> Result.map (fun () ->
+                    Rep (tpSpec s s)))))
+        | "derive_alt_tp", [ specE; xE; yE; wE ] ->
+            specArg "derive_alt_tp spec" specE |> Result.bind (fun s ->
+                requireRep "derive_alt_tp input 1" s xE |> Result.bind (fun () ->
+                requireRep "derive_alt_tp input 2" s yE |> Result.bind (fun () ->
+                requireInv "derive_alt_tp weight buffer" wE |> Result.map (fun () ->
+                    Rep (tpSpec s s)))))
         | ("derive_linear" | "derive_tp"), _ ->
             reject (sprintf "%s: inside an equiv-certified body use the full call form — the 2-argument binding form is for uncertified assembly code" op)
         | ("linear_rows" | "gated_rows"), _ ->
@@ -511,7 +528,7 @@ and private judgeApp (ctx: Ctx) (env: Map<string, RepStatus>) (e: Expr) (f: Expr
             reject "irreps_to_sym reads basis-dependent Cartesian components out of a representation — a rep escape, for uncertified assembly code only (e.g. feeding a solver); inside a certified body stay in irreps space"
         | ("tensor_to_irreps" | "sym_to_irreps"), _ ->
             reject (sprintf "%s: unrecognized call shape inside an equiv-certified body" op)
-        | ("tensor_product" | "linear" | "gated" | "scalars" | "norms" | "y_to"), _ ->
+        | ("tensor_product" | "linear" | "gated" | "scalars" | "norms" | "y_to" | "derive_sym_tp" | "derive_alt_tp"), _ ->
             reject (sprintf "%s: unrecognized call shape inside an equiv-certified body" op)
         | _ ->
             // other alias members (sizing etc. — normalized already, so an

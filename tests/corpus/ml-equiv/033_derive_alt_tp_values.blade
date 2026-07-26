@@ -1,0 +1,59 @@
+// TEST: ML Derive Alt TP Values
+import ml as ml
+// ============================================================================
+// derive_alt_tp(SPEC, x, y, w): the S2-ANTISYMMETRIC (Lambda^2) compaction of
+// derive_tp(SPEC, SPEC, ...) — the complement of 032's Sym^2 half in the same
+// exchange-graded hom-space, with the same derived output spec tp_spec(S, S)
+// (docs/plan-transforms-as-types.md §3.2, §7 stage 1a).
+//
+// Pins, in order:
+//
+// 1. VALUES + EMBEDDING. For spec A the dense layout's 10 slots cover the paths
+//    (0,0,0), (0,1,2), (1,0,2), (1,1,0), (1,1,1), (1,1,3) — ranges
+//    0-1 | 2-3 | 4-5 | 6-7 | 8 | 9. The antisymmetric subspace only reaches the
+//    exchange-partner pair (0,1,2)/(1,0,2), with OPPOSITE sign on the partner,
+//    plus the odd-CG (1,1,1) slot which is antisymmetric on its own:
+//      alt [a0, a1, a2] -> dense [0.0, 0.0, a0, a1, -a0, -a1, 0.0, 0.0, a2, 0.0].
+//    sq_diff = 0.0 asserts that embedding reproduces derive_alt_tp to the ULP —
+//    the compaction is the same kernel reparameterized, exactly.
+//    (Note the derived-spec blocks the alt half cannot reach show up as exact
+//    structural zeros in `a`: the l=0 head and the whole l=2 tail.)
+//
+// 2. F(x, x) = 0. An exchange-ANTISYMMETRIC bilinear map annihilates the
+//    diagonal, for EVERY weight setting. zz_sq = 0.0 is that algebraic identity
+//    read back out of the generated kernel, so it also witnesses that the sign
+//    pattern above is really wired in rather than coincidental for one input.
+// ============================================================================
+let static SA = [(0, 0, 1), (1, 1, 1)]
+let static TPS = ml.tp_spec(SA, SA)
+
+// statics echo in program output, so the sizing builtins pin directly
+let static WAA = ml.alt_tp_weight_dim(SA)
+let static WSA = ml.sym_tp_weight_dim(SA)
+let static WDA = ml.tp_full_weight_dim(SA, SA)
+let static SUMA = WSA + WAA
+// EXPECT: WAA = 3
+// EXPECT: WSA = 7
+// EXPECT: WDA = 10
+// EXPECT: SUMA = 10
+
+let x: Array<Float like IrrepsIdx<SA>> = [1.0, 2.0, -0.5, 0.25]
+let y: Array<Float like IrrepsIdx<SA>> = [-0.75, 0.5, 1.5, -2.0]
+let wa = [0.6, -1.4, 0.8]
+let a: Array<Float like IrrepsIdx<TPS>> = ml.derive_alt_tp(SA, x, y, wa)
+// EXPECT: a = [0, 0, 0.353553390593274, 2.33345237791561, 1.83847763108502, 1.2, 0.675, -1.0875, -2.8, -1.575, 2.5375, 0, 0, 0, 0, 0]
+
+// the alt packed buffer hand-embedded into the 10-slot dense layout
+let wdense = [0.0, 0.0, 0.6, -1.4, -0.6, 1.4, 0.0, 0.0, 0.8, 0.0]
+let d: Array<Float like IrrepsIdx<TPS>> = ml.derive_tp(SA, SA, x, y, wdense)
+// EXPECT: d = [0, 0, 0.353553390593274, 2.33345237791561, 1.83847763108502, 1.2, 0.675, -1.0875, -2.8, -1.575, 2.5375, 0, 0, 0, 0, 0]
+
+let diff = a - d
+let sq_diff = reduce(diff * diff, (+))
+// EXPECT: sq_diff = 0.0
+
+// antisymmetry: F(x, x) = 0 for every weight setting
+let zz: Array<Float like IrrepsIdx<TPS>> = ml.derive_alt_tp(SA, x, x, wa)
+// EXPECT: zz = [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]
+let zz_sq = reduce(zz * zz, (+))
+// EXPECT: zz_sq = 0.0

@@ -108,6 +108,23 @@ let install () =
                 specOfStatic "tp_full_weight_dim spec2" s2 |> Result.map (fun b ->
                     SVInt (int64 (tpWeightDim { Spec1 = a; Spec2 = b; SpecOut = tpSpec a b }))))
             | _ -> Error "tp_full_weight_dim: expected (spec1, spec2) static arguments")
+        // S₂-compacted self-TP weight spaces: the exchange-symmetric and
+        // exchange-antisymmetric halves of tp_full_weight_dim(s, s) — the
+        // buffer extents of ml.derive_sym_tp / ml.derive_alt_tp. Their sum IS
+        // the dense dimension (MLSpec.s2TpSplitIsPartition); either can be 0,
+        // and then the corresponding op is a BL4007 at the call site.
+        registerStaticBuiltin (statName "sym_tp_weight_dim") (fun args ->
+            match args with
+            | [ spec ] ->
+                specOfStatic "sym_tp_weight_dim" spec
+                |> Result.map (fun s -> SVInt (int64 (symTpWeightDim s)))
+            | _ -> Error "sym_tp_weight_dim: expected one static spec argument")
+        registerStaticBuiltin (statName "alt_tp_weight_dim") (fun args ->
+            match args with
+            | [ spec ] ->
+                specOfStatic "alt_tp_weight_dim" spec
+                |> Result.map (fun s -> SVInt (int64 (altTpWeightDim s)))
+            | _ -> Error "alt_tp_weight_dim: expected one static spec argument")
         // Block-navigation builtins (IrrepsIdx v3): fully static per-block
         // accessors so users write block-structured loop nests —
         //   x(irreps_offset(spec, b) + mu * irreps_dim(spec, b) + m)

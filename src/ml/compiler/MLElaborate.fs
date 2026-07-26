@@ -139,15 +139,15 @@ let private yToDecl (name: string) (lmax: int) : Result<FunctionDecl, ElabError>
     Ok (mkFunc name [ ("x", f); ("y", f); ("z", f) ] (tyIrrepsArr (shSpec lmax))
             (syn (ExprBlock (stmts, Some (v "sh")))))
 
-/// tensor_product for a fixed config: path/mult loops over baked tables,
-/// real-basis CG entries flattened path-major. Mirrors ml/TensorProduct
-/// loop order (paths -> muO -> mu1 -> mu2 -> entries); the forward w<>0
-/// skip is omitted (adding exact zeros in the same order is the identity).
-let private tpDecl (name: string) (cfg: TPConfig) : FunctionDecl =
-    let d1 = totalDim cfg.Spec1
-    let d2 = totalDim cfg.Spec2
+/// The tensor_product kernel's statement list, parameterized by the name of
+/// the DENSE weight buffer it reads: returns (statements, result expression)
+/// so tpDecl can use the function parameter `w` directly while the
+/// S₂-compacted kernels prepend an expansion into a local dense buffer and
+/// point the same loop at that. Sharing this verbatim is what makes the
+/// compacted ops ulp-identical to derive_tp on the embedded weights — same
+/// loop order, same left-associated product.
+let private tpBodyStmts (cfg: TPConfig) (wName: string) : Stmt list * Expr =
     let dO = totalDim cfg.SpecOut
-    let wDim = tpWeightDim cfg
     let paths = tpPaths cfg
     let s1 = blockStarts cfg.Spec1
     let s2 = blockStarts cfg.Spec2
@@ -177,50 +177,96 @@ let private tpDecl (name: string) (cfg: TPConfig) : FunctionDecl =
     // out(pSO(p) + mo*pDO(p) + c3(t)) += coef(t) * w(woff(p) + (mo*m1 + u1)*m2 + u2)
     //                                     * x(pS1(p) + u1*pD1(p) + c1(t))
     //                                     * y(pS2(p) + u2*pD2(p) + c2(t))
-    let body =
-        syn (ExprBlock (
-            [ sLetMut "out" (zerosLit dO)
-              sLet "__t_m1" (intArrLit pMult1)
-              sLet "__t_m2" (intArrLit pMult2)
-              sLet "__t_mo" (intArrLit pMultO)
-              sLet "__t_d1" (intArrLit pD1)
-              sLet "__t_d2" (intArrLit pD2)
-              sLet "__t_do" (intArrLit pDO)
-              sLet "__t_s1" (intArrLit pS1)
-              sLet "__t_s2" (intArrLit pS2)
-              sLet "__t_so" (intArrLit pSO)
-              sLet "__t_wo" (intArrLit pWOff)
-              sLet "__t_co" (intArrLit cgOff)
-              sLet "__cg_c1" (intArrLit cgC1)
-              sLet "__cg_c2" (intArrLit cgC2)
-              sLet "__cg_c3" (intArrLit cgC3)
-              sLet "__cg_v" (floatArrLit cgCo)
-              sFor "p" 0 nPaths
-                [ StmtForIn ("mo", syn (ExprDotDot (iLit 0, idx "__t_mo" (v "p"))),
-                    [ StmtForIn ("u1", syn (ExprDotDot (iLit 0, idx "__t_m1" (v "p"))),
-                        [ StmtForIn ("u2", syn (ExprDotDot (iLit 0, idx "__t_m2" (v "p"))),
-                            [ sLet "wv" (idx "w" (add (idx "__t_wo" (v "p"))
-                                                      (add (mul (add (mul (v "mo") (idx "__t_m1" (v "p"))) (v "u1"))
-                                                                (idx "__t_m2" (v "p")))
-                                                           (v "u2"))))
-                              StmtForIn ("t", syn (ExprDotDot (idx "__t_co" (v "p"), idx "__t_co" (add (v "p") (iLit 1)))),
-                                // LEFT-associated product (((coef*w)*x)*y):
-                                // exactly the ml/ reference's evaluation
-                                // order, so values agree to the ulp.
-                                [ sAccum (idx "out" (add (idx "__t_so" (v "p"))
-                                                         (add (mul (v "mo") (idx "__t_do" (v "p")))
-                                                              (idx "__cg_c3" (v "t")))))
-                                         (mul (mul (mul (idx "__cg_v" (v "t")) (v "wv"))
-                                                   (idx "x" (add (idx "__t_s1" (v "p"))
-                                                                 (add (mul (v "u1") (idx "__t_d1" (v "p")))
-                                                                      (idx "__cg_c1" (v "t"))))))
-                                              (idx "y" (add (idx "__t_s2" (v "p"))
-                                                            (add (mul (v "u2") (idx "__t_d2" (v "p")))
-                                                                 (idx "__cg_c2" (v "t")))))) ]) ]) ]) ]) ] ],
-            Some (v "out")))
+    let stmts =
+        [ sLetMut "out" (zerosLit dO)
+          sLet "__t_m1" (intArrLit pMult1)
+          sLet "__t_m2" (intArrLit pMult2)
+          sLet "__t_mo" (intArrLit pMultO)
+          sLet "__t_d1" (intArrLit pD1)
+          sLet "__t_d2" (intArrLit pD2)
+          sLet "__t_do" (intArrLit pDO)
+          sLet "__t_s1" (intArrLit pS1)
+          sLet "__t_s2" (intArrLit pS2)
+          sLet "__t_so" (intArrLit pSO)
+          sLet "__t_wo" (intArrLit pWOff)
+          sLet "__t_co" (intArrLit cgOff)
+          sLet "__cg_c1" (intArrLit cgC1)
+          sLet "__cg_c2" (intArrLit cgC2)
+          sLet "__cg_c3" (intArrLit cgC3)
+          sLet "__cg_v" (floatArrLit cgCo)
+          sFor "p" 0 nPaths
+            [ StmtForIn ("mo", syn (ExprDotDot (iLit 0, idx "__t_mo" (v "p"))),
+                [ StmtForIn ("u1", syn (ExprDotDot (iLit 0, idx "__t_m1" (v "p"))),
+                    [ StmtForIn ("u2", syn (ExprDotDot (iLit 0, idx "__t_m2" (v "p"))),
+                        [ sLet "wv" (idx wName (add (idx "__t_wo" (v "p"))
+                                                  (add (mul (add (mul (v "mo") (idx "__t_m1" (v "p"))) (v "u1"))
+                                                            (idx "__t_m2" (v "p")))
+                                                       (v "u2"))))
+                          StmtForIn ("t", syn (ExprDotDot (idx "__t_co" (v "p"), idx "__t_co" (add (v "p") (iLit 1)))),
+                            // LEFT-associated product (((coef*w)*x)*y):
+                            // exactly the ml/ reference's evaluation
+                            // order, so values agree to the ulp.
+                            [ sAccum (idx "out" (add (idx "__t_so" (v "p"))
+                                                     (add (mul (v "mo") (idx "__t_do" (v "p")))
+                                                          (idx "__cg_c3" (v "t")))))
+                                     (mul (mul (mul (idx "__cg_v" (v "t")) (v "wv"))
+                                               (idx "x" (add (idx "__t_s1" (v "p"))
+                                                             (add (mul (v "u1") (idx "__t_d1" (v "p")))
+                                                                  (idx "__cg_c1" (v "t"))))))
+                                          (idx "y" (add (idx "__t_s2" (v "p"))
+                                                        (add (mul (v "u2") (idx "__t_d2" (v "p")))
+                                                             (idx "__cg_c2" (v "t")))))) ]) ]) ]) ]) ] ]
+    (stmts, v "out")
+
+/// tensor_product for a fixed config: path/mult loops over baked tables,
+/// real-basis CG entries flattened path-major. Mirrors ml/TensorProduct
+/// loop order (paths -> muO -> mu1 -> mu2 -> entries); the forward w<>0
+/// skip is omitted (adding exact zeros in the same order is the identity).
+let private tpDecl (name: string) (cfg: TPConfig) : FunctionDecl =
+    let stmts, ret = tpBodyStmts cfg "w"
     mkFunc name
-        [ ("x", tyIrrepsArr cfg.Spec1); ("y", tyIrrepsArr cfg.Spec2); ("w", tyFloatArr wDim) ]
-        (tyIrrepsArr cfg.SpecOut) body
+        [ ("x", tyIrrepsArr cfg.Spec1); ("y", tyIrrepsArr cfg.Spec2); ("w", tyFloatArr (tpWeightDim cfg)) ]
+        (tyIrrepsArr cfg.SpecOut) (syn (ExprBlock (stmts, Some ret)))
+
+/// derive_sym_tp / derive_alt_tp for a fixed spec: the S₂-compacted
+/// parameterization of the self-tensor-product derive_tp(S, S, x, y, w).
+/// The generated ARITHMETIC is tpDecl's verbatim (shared tpBodyStmts) — only
+/// the weight buffer shrinks: the packed free parameters are expanded into a
+/// zeroed dense buffer by the baked embed table
+/// (`wd(dense(t)) = sign(t) * w(packed(t))`, MLSpec.symTpEmbedTable) and the
+/// kernel reads that. The expansion writes each nonzero dense slot exactly
+/// once with a sign of magnitude 1, so every emitted value is bit-identical
+/// to derive_tp's on the embedded dense weights (plan §7 stage 1a's pin).
+/// Forced-zero dense slots (a τ = −1 diagonal path's u1 = u2 cells) get no
+/// table entry and stay exactly 0.
+let private deriveS2TpDecl (name: string) (s: Spec) (comp: S2Component) : Result<FunctionDecl, ElabError> =
+    let cfg = selfTpConfig s
+    let denseDim = tpWeightDim cfg
+    let packedDim, table =
+        match comp with
+        | S2Sym -> symTpWeightDim s, symTpEmbedTable s
+        | S2Alt -> altTpWeightDim s, altTpEmbedTable s
+    // The S₂ split is a partition of the dense parameter space — cheap to
+    // check here, and a violation would mis-size a user's weight buffer.
+    if not (s2TpSplitIsPartition s) then
+        Error (err5000 (sprintf "internal: the S2 split of the self-TP weight space is not a partition (sym %d + alt %d <> dense %d)"
+                            (symTpWeightDim s) (altTpWeightDim s) denseDim))
+    elif packedDim = 0 || table.IsEmpty then
+        Error (err5000 "internal: empty S2 component reached kernel synthesis (the call site must reject it as BL4007)")
+    else
+    let tpStmts, ret = tpBodyStmts cfg "__wd"
+    let stmts =
+        [ yield sLetMut "__wd" (zerosLit denseDim)
+          yield sLet "__e_di" (intArrLit (table |> List.map (fun (d, _, _) -> d)))
+          yield sLet "__e_pi" (intArrLit (table |> List.map (fun (_, p, _) -> p)))
+          yield sLet "__e_sg" (floatArrLit (table |> List.map (fun (_, _, g) -> g)))
+          yield sFor "__ei" 0 table.Length
+              [ sAssign (idx "__wd" (idx "__e_di" (v "__ei")))
+                        (mul (idx "__e_sg" (v "__ei")) (idx "w" (idx "__e_pi" (v "__ei")))) ]
+          yield! tpStmts ]
+    Ok (mkFunc name
+            [ ("x", tyIrrepsArr s); ("y", tyIrrepsArr s); ("w", tyFloatArr packedDim) ]
+            (tyIrrepsArr cfg.SpecOut) (syn (ExprBlock (stmts, Some ret))))
 
 /// linear for fixed (specIn, specOut): block-diagonal multiplicity mixing,
 /// first-match input block, ml/Linear loop order (blocks -> muO -> muI -> c).
@@ -414,6 +460,7 @@ let private bridgeDecl (name: string) (table: float list) (n: int)
 let private opNames =
     Set.ofList [ "y_to"; "tensor_product"; "linear"; "gated"; "linear_rows"; "gated_rows"
                  "scalars"; "norms"; "derive_linear"; "derive_tp"
+                 "derive_sym_tp"; "derive_alt_tp"
                  "tensor_to_irreps"; "sym_to_irreps"; "irreps_to_sym" ]
 
 /// Static sizing builtins that make up the rest of the ML surface (used in
@@ -424,6 +471,7 @@ let private opNames =
 let private sizingNames =
     Set.ofList [ "sh_spec"; "total_dim"; "tp_weight_dim"; "linear_weight_dim"
                  "tp_spec"; "hom_dim"; "tp_full_weight_dim"
+                 "sym_tp_weight_dim"; "alt_tp_weight_dim"
                  "irreps_len"; "irreps_l"; "irreps_parity"; "irreps_mult"
                  "irreps_dim"; "irreps_offset" ]
 
@@ -536,6 +584,31 @@ let private elabDeriveTp (st: ElabState) (statics: StaticEnv) (s1E: Expr) (s2E: 
         let cfg = { Spec1 = s1; Spec2 = s2; SpecOut = tpSpec s1 s2 }
         ensure st (fingerprint "tp" (box cfg)) (fun n -> Ok (tpDecl n cfg))))))
 
+/// Shared elaboration for derive_sym_tp / derive_alt_tp: the S₂-compacted
+/// self-TP, one spec argument (both inputs and the derived output follow from
+/// it). BL4007 when the requested component is EMPTY — then every map of that
+/// exchange symmetry is zero and there is nothing to parameterize, the exact
+/// analogue of derive_linear's Schur-zero refusal. Fingerprints are distinct
+/// from "tp" (different weight arity), so the dense and compacted kernels for
+/// the same spec coexist.
+let private elabDeriveS2Tp (st: ElabState) (statics: StaticEnv) (comp: S2Component) (site: Expr)
+                           (specE: Expr) (xE: Expr) (yE: Expr) (wE: Expr)
+    : Result<Expr, ElabError> =
+    let what, key, thisName, otherName =
+        match comp with
+        | S2Sym -> "derive_sym_tp", "sym_tp", "symmetric", "antisymmetric"
+        | S2Alt -> "derive_alt_tp", "alt_tp", "antisymmetric", "symmetric"
+    staticArg statics (what + " spec") specE |> Result.bind (fun sv ->
+    specOfStatic (what + " spec") sv |> Result.bind (fun s ->
+        let packedDim = match comp with S2Sym -> symTpWeightDim s | S2Alt -> altTpWeightDim s
+        if packedDim = 0 then
+            Error (err4007 (sprintf "%s: no nonzero exchange-%s equivariant bilinear map exists on this spec — every map in the %s component is zero for this spec, so the whole hom-space sits in the %s component (use ml.derive_%s_tp, or ml.derive_tp for the uncompacted parameterization)"
+                                what thisName thisName otherName
+                                (match comp with S2Sym -> "alt" | S2Alt -> "sym")))
+        else
+            ensure st (fingerprint key (box s)) (fun n -> deriveS2TpDecl n s comp)
+            |> Result.map (fun n -> inheritSpan site (ExprApp (v n, [ xE; yE; wE ])))))
+
 /// Rewrite ML-op calls in an expression. Same walker shape as
 /// Grad.rewriteExpr; the two passes stay separate because this one carries
 /// elaboration state and runs first.
@@ -646,6 +719,14 @@ let rec private rewriteExpr (st: ElabState) (statics: StaticEnv) (aliases: Set<s
                 elabDeriveTp st statics s1E s2E
                 |> Result.map (fun n -> inheritSpan e (ExprVar n))
             | "derive_tp", _ -> Error (err5000 "derive_tp: expected derive_tp(SPEC1, SPEC2[, x, y, w])")
+            // S₂-compacted self-TP: same arithmetic as derive_tp(SPEC, SPEC,
+            // x, y, ·) with a smaller weight buffer (sym/alt_tp_weight_dim).
+            | "derive_sym_tp", [ specE; xE; yE; wE ] ->
+                elabDeriveS2Tp st statics S2Sym e specE xE yE wE
+            | "derive_sym_tp", _ -> Error (err5000 "derive_sym_tp: expected derive_sym_tp(SPEC, x, y, w) with w of extent ml.sym_tp_weight_dim(SPEC)")
+            | "derive_alt_tp", [ specE; xE; yE; wE ] ->
+                elabDeriveS2Tp st statics S2Alt e specE xE yE wE
+            | "derive_alt_tp", _ -> Error (err5000 "derive_alt_tp: expected derive_alt_tp(SPEC, x, y, w) with w of extent ml.alt_tp_weight_dim(SPEC)")
             | "tensor_to_irreps", [ gE ] ->
                 ensure st (fingerprint "tensor_to_irreps" (box ())) (fun n ->
                     Ok (bridgeDecl n Blade.ML.CartesianBridge.bridge9Flat 9 "g"
