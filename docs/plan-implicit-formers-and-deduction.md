@@ -589,7 +589,43 @@ cells with a duplicated `1.333` vs the 3-cell triangle).
    yet; that return-extent ABI is the remaining work item here. (This shape
    never worked at any annotation level; the guard replaces silent
    corruption that the naive materialization would have introduced.)
-3. **Symmetry-from-primitives** (single late pass, §3.4): the two per-primitive
+3. **Symmetry-from-primitives — EARLY TIER DONE (2026-07-25), scoped.**
+   Landed as `src/Deduce.fs` (pure analysis over TypedAst, compiled before
+   TypeCheck so `typeCheck` invokes it internally — the Zonk pattern): the
+   {PInv, PNeg, PBottom} judgment with the two per-primitive tables (3-way
+   swap class consulted at sibling-scoped MIRROR nodes; per-operand sign
+   composition with multiplicative PNeg·PNeg = PInv), mirror equality by
+   binder identity (VarId, never surface name), and a closed-world PBottom
+   default for every unlisted node kind. Wired at the ONE seam every apply
+   arm funnels through (`buildApplyInfo`), plus per-function summaries
+   (`FuncDeducedPairs`: param names + adjacent-pair parities, recorded at
+   `checkFunctionDecl`, consulted by eta-expanded wrappers so
+   `object_for(f)` sees f's deduced symmetry). Behavior:
+   - **Validation (retroactive hardening of §4's trusted gap):** declared
+     `where comm` on a body deduced PNeg is a hard error
+     (`CommContradictsBody`, BL3007) — at the decl for named functions
+     (which can never be reynolds kernels), at the apply seam for lambdas.
+     Under `reynolds` the clause is an ITERATION LICENSE and validation
+     stands down. PBottom stays trusted (the escape hatch). Corpus:
+     functions/028 (lambda), functions/030 (named decl); the reynolds
+     corpus, including the rewritten index-types/050, is untouched.
+   - **Confirm-and-pin suggestion:** kernel deduced PInv in an adjacent
+     pair, no comm declared, SAME array in both positions (H ∩ Stab would
+     license) → a warning proposes the exact pin, with the callee's real
+     parameter names through the eta wrapper. Output stays dense until the
+     user pins — observationally inert, as staged. The flagship closes:
+     functions/026 (unpinned, dense 4 cells + suggestion) vs functions/029
+     (the suggested one-line pin added → SymIdx<2,2> triangle, 3 cells,
+     values identical across both backends).
+   Deferred to the late tier (per the placement decision): Poly-pack
+   instances (deduction returns [] for Poly params; the eta wrapper of a
+   pack kernel is PBottom-inert), per-instance checking on specialized
+   bodies post-monomorphization, interprocedural sign-linearity through
+   calls (a call is PInv only when callee and args all are), and the
+   `where antisymm` pin spelling for deduced-PNeg kernels (storage exists;
+   CnAntisymm is still dead code).
+
+   *(original stage-3 text follows)* **Symmetry-from-primitives** (single late pass, §3.4): the two per-primitive
    tables (3-way swap class; per-operand sign parity) + the §3.2.1 judgment as
    a bottom-up fold over specialized bodies in `Deduce.fs`, invoked from
    Lowering's post-monomorphize chokepoint; per-instance summaries over the

@@ -1,0 +1,10 @@
+// TEST: Comm Contradiction Lambda (rejects)
+// Stage-3 symmetry deduction as the missing validator: `where comm(x, y)`
+// declared on a kernel whose body is provably ANTISYMMETRIC under the swap
+// (x - y), applied OUTSIDE reynolds. Historically this silently emitted
+// wrong triangular storage (the old index-types/050 corruption); the
+// deduction now hard-errors with steering (remove the clause, or wrap in
+// reynolds(...) for the signed iteration license). PBottom bodies remain
+// trusted — only the provable contradiction rejects.
+let A = [1.0, 2.0, 3.0]
+let bad = method_for(A, A) <@> lambda(x, y) where comm(x, y) -> x - y |> compute

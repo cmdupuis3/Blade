@@ -1,0 +1,9 @@
+// TEST: Comm Contradiction Decl (rejects)
+// The named-function twin of functions/028: `where comm` on a function
+// declaration whose body deduces antisymmetric rejects AT THE DECL — a
+// named function cannot be a reynolds kernel (reynolds requires a lambda),
+// so no iteration license can ever apply and the contradiction is
+// unconditional.
+function diff(a, b) where comm(a, b) = a - b
+let A = [1.0, 2.0, 3.0]
+let bad = object_for(diff) <@> (A, A) |> compute

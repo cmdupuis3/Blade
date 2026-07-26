@@ -5526,6 +5526,65 @@ and buildApplyInfo (env: TypeEnv)
 
     let commGroups = lambdaInfo.CommGroups
 
+    // ---- Stage 3: symmetry deduction (early tier), at the ONE seam every
+    // apply arm funnels through. Deduce the kernel's adjacent-pair swap
+    // parity; an eta-expanded named-function wrapper (body = f(p0..pn-1) in
+    // order) defers to the function's recorded summary. Under reynolds a
+    // `comm` clause is an ITERATION LICENSE over the signed permutation sum,
+    // not a claim about the bare kernel — validation and suggestions both
+    // stand down (isReynolds).
+    let (stage3Names, stage3Pairs) =
+        if isReynolds || lambdaInfo.Params.Length < 2 then ([], [])
+        else
+            let etaSummary =
+                match lambdaInfo.Body.Kind with
+                | TExprApp ({ Kind = TExprVar (fname, _, _) }, args)
+                        when args.Length = lambdaInfo.Params.Length
+                             && List.forall2 (fun (arg: TypedExpr) (p: TypedParam) ->
+                                    match arg.Kind with
+                                    | TExprVar (_, aid, _) -> aid = p.VarId
+                                    | _ -> false) args lambdaInfo.Params ->
+                    (match env.FuncDeducedPairs.TryGetValue fname with
+                     | true, (names, ps) when ps.Length = lambdaInfo.Params.Length - 1 ->
+                         Some (names, ps)
+                     | _ -> None)
+                | _ -> None
+            match etaSummary with
+            | Some (names, ps) -> (names, ps)
+            | None ->
+                (lambdaInfo.Params |> List.map (fun p -> p.Name),
+                 Blade.Deduce.deduceAdjacentPairs lambdaInfo.Params lambdaInfo.Body)
+    // Declared comm + provably antisymmetric body = the silent-corruption
+    // case: triangular storage would drop the sign flips. Hard error;
+    // PBottom stays trusted (status quo escape hatch).
+    let stage3Err =
+        if List.isEmpty stage3Pairs || List.isEmpty commGroups then None
+        else
+            List.indexed stage3Pairs
+            |> List.tryPick (fun (i, par) ->
+                if par = Blade.Deduce.PNeg
+                   && commGroups |> List.exists (fun g ->
+                          List.contains i g && List.contains (i + 1) g) then
+                    Some (CommContradictsBody (stage3Names.[i], stage3Names.[i + 1]))
+                else None)
+    match stage3Err with
+    | Some e -> Error e
+    | None ->
+    // Confirm-and-pin suggestion: kernel provably commutative in an adjacent
+    // pair, no comm declared, and the SAME array occupies both positions
+    // (H ∩ Stab would license compaction). Output stays DENSE until the user
+    // pins — the suggestion is the compiler proposing, never deciding.
+    if List.isEmpty commGroups && not (List.isEmpty stage3Pairs) then
+        List.indexed stage3Pairs
+        |> List.iter (fun (i, par) ->
+            if par = Blade.Deduce.PInv
+               && i + 1 < identities.Length
+               && identities.[i] = identities.[i + 1] then
+                let (n1, n2) = (stage3Names.[i], stage3Names.[i + 1])
+                emitWarning env (sprintf
+                    "kernel deduces commutative in (%s, %s) and both positions receive the same array: output storage is DENSE today. Pin `where comm(%s, %s)` on the kernel to opt into compact symmetric (triangular) storage."
+                    n1 n2 n1 n2))
+
     // Co-iteration INDEX-PARAM form: a co-iterated kernel may declare
     // N + R parameters — one value per co-iterated array plus the R shared
     // iteration indices — e.g. `for (uq, ph) in range<Y, X> <@>
@@ -8940,6 +8999,40 @@ and checkFunctionDecl (env: TypeEnv) (funcDecl: FunctionDecl) : TypeResult<Typed
             // named function is dropped and the loop emits dense storage.
             if not (List.isEmpty commGroups) then
                 env.FuncCommGroups.[funcDecl.Name] <- commGroups
+            // Stage 3 (symmetry deduction, early tier): summarize the
+            // adjacent-pair swap parity of this fixed-arity function's body
+            // and record it for kernel-position uses — buildApplyInfo
+            // consults the summary when the kernel is an eta-expanded
+            // wrapper around this function. Poly packs are late-tier work
+            // (their pairs only exist per materialized arity): skipped.
+            let deducedPairs =
+                let hasPoly =
+                    typedParams |> List.exists (fun p ->
+                        match env.Subst.Resolve p.Type with IRTPoly _ -> true | _ -> false)
+                if hasPoly then []
+                else Blade.Deduce.deduceAdjacentPairs typedParams tBody
+            if not (List.isEmpty deducedPairs) then
+                env.FuncDeducedPairs.[funcDecl.Name] <-
+                    (typedParams |> List.map (fun p -> p.Name), deducedPairs)
+            // Declared comm on a named function whose body is PROVABLY
+            // antisymmetric in a declared adjacent pair is the
+            // silent-corruption case §4 exists for. A named function cannot
+            // be a reynolds kernel (reynolds requires a lambda), so no
+            // iteration license can apply here — hard error. PBottom stays
+            // trusted (the escape hatch when the analysis is too weak).
+            let commContradiction =
+                if List.isEmpty commGroups then None
+                else
+                    List.indexed deducedPairs
+                    |> List.tryPick (fun (i, par) ->
+                        if par = Blade.Deduce.PNeg
+                           && commGroups |> List.exists (fun g ->
+                                  List.contains i g && List.contains (i + 1) g) then
+                            Some (CommContradictsBody (typedParams.[i].Name, typedParams.[i + 1].Name))
+                        else None)
+            match commContradiction with
+            | Some e -> Error e
+            | None ->
             // Close the body-only rank deduction (stage 2): a param whose
             // type is still an unresolved inference var but carries a rank
             // lower bound — accumulated from the body's builtin pins and

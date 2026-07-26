@@ -72,6 +72,7 @@ type TypeError =
     | ChainOpNeedsMethodFor of leftDesc: string
     | ChainOpBadKernel of rightDesc: string
     | ChainOpUndecidable of leftDesc: string * rightDesc: string
+    | CommContradictsBody of param1: string * param2: string
     | PlaceholderNeedsAllBound of got: int * total: int
     | GroupKeysRank1
     | CumulantOrderPositive of order: int
