@@ -425,7 +425,7 @@ let test_probe_imported_via_callable_table = {
             Id = f_id; Name = "f"
             Params = [arrP; xP]; RetType = boolTy; Body = fBody
             IsStatic = false
-            IsCommutative = false; CommGroups = []
+            IsCommutative = false; CommGroups = []; AntisymGroups = []
             Parallelism = []; IsOmpParallel = false; IsCudaKernel = false; CudaBlockSize = 256; IsMpiParallel = false; IsArityPoly = false; ArityParam = None
             Captures = []
         }

@@ -1,0 +1,13 @@
+// TEST: Pinned Covariance SymIdx
+// The deduction triad closed end-to-end (§1 of the plan): ranks deduced
+// body-only (stage 2), former erased at the seam elsewhere (stage 1), and
+// the ONE remaining annotation is the comm pin that stage 3's suggestion
+// proposes on the unpinned twin (functions/026). Pinning it compacts the
+// covariance to the SymIdx<2,2> triangle [var(x), cov, var(y)] — 3 canonical
+// cells, not dense 4. Same math as arity/028's Poly pipeline, as plain
+// fixed-arity functions.
+function mymean(row) = reduce(row, (+)) / extents(row)
+function covariance(a, b) where comm(a, b) = mymean((a - mymean(a)) * (b - mymean(b)))
+let data = [[1.0, 2.0, 3.0], [2.0, 4.0, 6.0]]
+let result = object_for(covariance) <@> (data, data) |> compute
+// EXPECT: result = [0.6666666666666666, 1.3333333333333333, 2.6666666666666665]

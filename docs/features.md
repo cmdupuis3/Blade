@@ -243,6 +243,7 @@ Full semantics in [features/sql.md](features/sql.md). All implemented and tested
 | CUDA backend via `cuda` clause (incl. simplicial/triangular kernels, split compilation) | Core | v7 `CudaTests.fs`, split-timing machinery; requires x64 Native Tools environment |
 | Loop fusion analysis (fusion depth = common prefix of loop level types incl. parallelism annotations) | Core | v10 §16.2–16.3 |
 | Lazy computation graph; `compute` semantics | Core | v10 §16.1, §16.4 |
+| OpenBLAS lowering for `gram()` (`cblas_dsyrk` same-array / `cblas_dgemm` distinct) | Experimental | Real `Float64` only; opt-in via `BLADE_BLAS=1` (or `OPENBLAS_DIR` set; `BLADE_BLAS=0` forces off). Output layout unchanged (packed symmetric / dense) — BLAS fills a staging buffer, repack lands Blade storage. Emitted `#include <cblas.h>` keys Build.fs's `-I`/link resolution (`OPENBLAS_DIR`, netcdf-style). Measured: gram p=1024×n=16384, 8.6 s loops → 0.55 s 1-thread / 0.15 s 16-thread; values agree to ~1e-14 rel |
 | Alternative parallel backends (`acc`, ...) | Planned | v10 §6.1 note |
 
 ## 17. Equivariance and ML (near-term module)

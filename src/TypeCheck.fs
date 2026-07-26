@@ -27,6 +27,20 @@ open Blade.Unify
 open Blade.TypeEnv
 open Blade.Zonk
 
+/// IDE side-channel for stage-3/4 confirm-and-pin suggestions (BL4010): the
+/// structured twin of the plain-string warning the CLI prints. Each entry is
+/// (message, kernel span) so editor tooling can render a ghost annotation at
+/// the kernel and offer the one-click pin. Reset at the top of typeCheck,
+/// recorded at buildApplyInfo's suggestion site. AsyncLocal, like IdePartial
+/// (defined near typeCheck below); lives at the file head because its writer
+/// (buildApplyInfo) precedes typeCheck in the compilation order.
+module PinSuggestions =
+    let private slot = new System.Threading.AsyncLocal<(string * Span) list>()
+    let reset () = slot.Value <- []
+    let add (msg: string) (span: Span) = slot.Value <- (msg, span) :: slot.Value
+    let get () : (string * Span) list =
+        match box slot.Value with null -> [] | _ -> List.rev slot.Value
+
 let rec evalConstExpr (env: TypeEnv) (expr: Expr) : int64 option =
     match expr.Kind with
     | ExprKind.ExprLit (LitInt n) -> Some n
@@ -1133,13 +1147,76 @@ let buildCaptures (env: TypeEnv) (freeVars: Set<string>) : TypedVarInfo list =
 // 6. Commutativity Extraction
 // ============================================================================
 
+/// Resolve one where-clause conjunct's parameter NAMES to parameter INDICES.
+/// Names that match no parameter are dropped (the historical comm behavior).
+let private groupsToIndices (parms: LambdaParam list) (groups: Ident list list) : int list list =
+    groups |> List.map (fun names ->
+        names |> List.choose (fun name ->
+            parms |> List.tryFindIndex (fun p -> p.Name = name)))
+
 let extractCommGroups (parms: LambdaParam list) (whereClause: WhereClause option) : int list list =
     match whereClause with
-    | Some wc ->
-        wc.Commutativity |> List.map (fun names ->
-            names |> List.choose (fun name ->
-                parms |> List.tryFindIndex (fun p -> p.Name = name)))
+    | Some wc -> groupsToIndices parms wc.Commutativity
     | None -> []
+
+/// `where antisymm(...)` groups, by parameter index — the signed twin of
+/// extractCommGroups. Kept as its own extractor (rather than folded into the
+/// comm list) because the two declarations mean different things to the
+/// stage-3 validators and to output storage; the consumers that only need
+/// GROUPING concatenate them.
+let extractAntisymGroups (parms: LambdaParam list) (whereClause: WhereClause option) : int list list =
+    match whereClause with
+    | Some wc -> groupsToIndices parms wc.Antisymmetry
+    | None -> []
+
+/// Rewrite a parallel-strategy list so its `omp(var: n)` variable names refer to
+/// a WRAPPER lambda's parameter names instead of the original callee's.
+///
+/// Needed because a named function used in kernel position is eta-expanded into
+/// `lambda(__k<uid>_0, ..) -> f(__k<uid>_0, ..)`, whose params are positionally
+/// 1:1 with `f`'s but carry synthesized names — while `Lowering.extractParallelism`
+/// resolves an omp var to a param INDEX by NAME. Unmapped names (a var naming no
+/// parameter — see checkOmpVarNames) are passed through unchanged rather than
+/// dropped, so this stays purely a renaming. `cuda`/`mpi` carry no variable
+/// names and pass through untouched.
+let remapParallelVars (calleeNames: string list) (wrapperNames: string list)
+                      (strategies: ParallelStrategy list) : ParallelStrategy list =
+    strategies |> List.map (function
+        | Omp o ->
+            Omp { o with
+                    Vars = o.Vars |> List.map (fun (n, dims) ->
+                        match List.tryFindIndex ((=) n) calleeNames with
+                        | Some i when i < List.length wrapperNames -> (wrapperNames.[i], dims)
+                        | _ -> (n, dims)) }
+        | s -> s)
+
+/// Warn when an `omp(v: n)` clause names a variable that is not a parameter.
+///
+/// Nothing rejects this today: the parser is grammar-only and
+/// `Lowering.extractParallelism` resolves names to param indices with a
+/// `List.choose`, so an unmatched name is simply DROPPED. That left
+/// `IsOmpParallel = true` with an empty depth list — harmless while the depths
+/// were unread, but now that `omp(a: n)` is a licence the difference between
+/// "licensed one level of a" and "licensed nothing, name was a typo" decides
+/// whether the nest is parallelized at all. buildLoopNestCodeGen falls back to
+/// the historical outermost-level licence so a typo cannot silently serialize a
+/// nest; this warning is what makes the typo itself visible.
+let checkOmpVarNames (env: TypeEnv) (paramNames: string list)
+                     (whereClause: WhereClause option) (owner: string) : unit =
+    match whereClause with
+    | Some wc ->
+        wc.Parallel
+        |> List.iter (function
+            | Omp o ->
+                o.Vars |> List.iter (fun (v, _) ->
+                    if not (List.contains v paramNames) then
+                        emitWarning env
+                            (sprintf "omp(%s: ...) on %s names no parameter (parameters: %s). The clause is ignored for that variable; parallelization falls back to the outermost loop level only."
+                                     v owner
+                                     (if List.isEmpty paramNames then "none"
+                                      else String.concat ", " paramNames)))
+            | _ -> ())
+    | None -> ()
 
 // ============================================================================
 // 7. Array Type Utilities
@@ -1852,6 +1929,27 @@ let rec private dispatchAppOrIndex (env: TypeEnv) (tFunc: TypedExpr) (tArgs: Typ
         | None, Some (i, pu, au) ->
             Error (UnitMismatch (sprintf "argument %d" (i + 1), ppUnitSig pu, ppUnitSig au))
         | None, None ->
+            // Rank propagation at DIRECT APPLICATION (stage-2 rank deduction)
+            // — the third strictness carve-out at this seam, after irreps and
+            // units: since args are not unified against params, an
+            // unannotated CALLER param flowing into this call would never
+            // learn the callee's rank demand — the typechecker stays quiet
+            // and codegen emits ill-typed C++ (a scalar where Array<..,k> is
+            // required). Impose the callee param's rank as a LOWER BOUND on
+            // still-unresolved argument vars only (max-join in Subst);
+            // concrete arguments keep the historical looseness.
+            (let n = min paramTys.Length tArgs.Length
+             List.zip (List.truncate n paramTys) (List.truncate n tArgs)
+             |> List.iter (fun (pTy, arg) ->
+                 let calleeRank =
+                     match env.Subst.Resolve pTy with
+                     | ArrayElem pa -> pa.IndexTypes.Length
+                     | IRTInfer pid -> env.Subst.GetRankLowerBound(pid) |> Option.defaultValue 0
+                     | _ -> 0
+                 if calleeRank > 0 then
+                     match env.Subst.Resolve arg.Type with
+                     | IRTInfer aid -> env.Subst.AddRankLowerBound(aid, calleeRank)
+                     | _ -> ()))
             // A Poly<T^r> pack param makes the arrow variadic — its declared
             // param count says nothing about legal call-site arg counts, so
             // arity accounting stands down (monomorphization owns the call).
@@ -4168,6 +4266,46 @@ and inferSequence (env: TypeEnv) exprs : TypeResult<TypedExpr> =
                         mkArrayArrow [seqIdx] (IRTScalar ETFloat64) None
                 Ok (mkTyped (TExprSequence tExprs) resultType)))
 
+/// The numpy-shaped-mistake guard for IMPLICIT method_for (stage-1 formers):
+/// `(A, B) <@> kernel` over operands that COULD co-iterate (same index
+/// structure) is the outer product, not a zip. When the former is implicit
+/// there is no `method_for` on the page to signal that, so surface a one-time
+/// steering warning. Suppressed when the operands are all the same array
+/// (self-outer is the domain's core idiom) or the kernel is comm-annotated
+/// (the user is thinking in symmetric-outer terms) — and never emitted for
+/// the explicit spelling, which states the intent already.
+and warnImplicitOuterProduct (env: TypeEnv) (tLoop: TypedExpr) (rightResult: TypeResult<TypedExpr>) : unit =
+    match tLoop.Kind with
+    | TExprMethodFor info when info.Arrays.Length >= 2 && List.isEmpty info.SharedIndexTypes ->
+        let allSameIdentity =
+            match info.Identities with
+            | [] -> true
+            | first :: rest -> rest |> List.forall (fun i -> i = first)
+        let kernelComm =
+            match rightResult with
+            | Ok tR ->
+                (match (resolveTypedExpr env tR).Kind with
+                 // A declared antisymm counts too: the user who wrote it is
+                 // thinking in symmetric-outer terms just as much as a comm
+                 // author, and the steering note would be noise.
+                 | TExprLambda li ->
+                     li.IsCommutative
+                     || not (List.isEmpty li.CommGroups)
+                     || not (List.isEmpty li.AntisymGroups)
+                 | TExprSection (OpAdd | OpMul | OpEq | OpNeq | OpAnd | OpOr) -> true
+                 | TExprReynolds _ -> true
+                 | _ -> false)
+            | Error _ -> false
+        let coIterable =
+            match zipSharedRecords info.ArrayTypes with
+            | Ok _ -> true
+            | Error _ -> false
+        if coIterable && not allSameIdentity && not kernelComm then
+            emitWarning env (sprintf
+                "implicit method_for: `(A, B) <@> kernel` iterates the OUTER product of its %d operands (structure-first default), not elementwise pairs. For elementwise co-iteration write `for (A, B) in range<...> <@> kernel` or `zip(A, B) <@> kernel`; write `method_for(...)` explicitly to confirm the outer product and silence this note."
+                info.Arrays.Length)
+    | _ -> ()
+
 and inferBinOp env mode op left right : TypeResult<TypedExpr> =
     match op with
     | OpApply ->
@@ -4178,9 +4316,117 @@ and inferBinOp env mode op left right : TypeResult<TypedExpr> =
             match etaExpandFunctionKernel env right with
             | Some r -> r
             | None -> inferExpr env right
-        inferExpr env left |> Result.bind (fun tL ->
-        rightResult |> Result.bind (fun tR ->
-            inferApply env tL tR))
+        // Implicit formers: when the left side is not already a former, the
+        // RIGHT operand classifies the pair (right-operand-first). A lambda /
+        // section / reynolds / zero (or a named function, eta-expanded above)
+        // is decisively a kernel, so the left side must be the arrays, and the
+        // method_for the keyword would have introduced is synthesized around
+        // it; a kernel-shaped LEFT with a non-kernel right synthesizes
+        // object_for instead. Both directions re-drive the same inferMethodFor
+        // / inferObjectFor the explicit keywords use, so everything downstream
+        // of this seam (Lowering, CodeGen, the interpreter, both differential
+        // gates) sees the identical typed nodes. Undecidable pairs fall
+        // through to inferApply's steering diagnostic (ChainOpUndecidable).
+        let rightKernelShaped =
+            match rightResult with
+            | Ok tR ->
+                (match (resolveTypedExpr env tR).Kind with
+                 | TExprLambda _ | TExprSection _ | TExprReynolds _ | TExprZero -> true
+                 | _ -> false)
+            | Error _ -> false
+        let applyWith (tL: TypedExpr) =
+            rightResult |> Result.bind (fun tR -> inferApply env tL tR)
+        // A bare NAMED function on the LEFT is a kernel too — `covariance <@>
+        // (data, data)`. It can never resolve to a TExprLambda (a top-level
+        // `function` binds with TypedValue = None, exactly the case
+        // resolveTypedExpr cannot surface), so the resolved-kernel arm below
+        // never sees it and the pair used to fall through to the
+        // ChainOpUndecidable steering error. This is the SAME classification
+        // inferObjectFor performs internally, in its two shapes:
+        //   - fixed arity  → etaExpandFunctionKernel accepts it and builds
+        //                    lambda(__k..) -> f(__k..);
+        //   - Poly pack    → etaExpandFunctionKernel deliberately REFUSES (the
+        //                    pack width is unknown until the argument tuple
+        //                    reveals it), and inferObjectFor builds a DEFERRED
+        //                    former (Arity = None) that the <@> seam expands.
+        // Both are routed through inferObjectFor, so `f <@> args` is the
+        // `object_for(f) <@> args` spelling exactly — same typed nodes, same
+        // stage-3 suggestions. Tested by predicate rather than by calling
+        // etaExpandFunctionKernel: that function mints a lambda (fresh ids,
+        // unification) and inferObjectFor would then mint a second one.
+        let namedFunctionKernelLeft =
+            match left.Kind with
+            | ExprKind.ExprVar name ->
+                (match lookupVar name env with
+                 | Some info when Option.isNone info.TypedValue ->
+                     (match env.Subst.Resolve info.Type with
+                      | FuncElem (paramTys, _) -> not paramTys.IsEmpty
+                      | _ -> false)
+                 | _ -> false)
+            | _ -> false
+        let syntacticFormer =
+            match left.Kind with
+            | ExprKind.ExprMethodFor _ | ExprKind.ExprObjectFor _
+            | ExprKind.ExprFor _
+            | ExprKind.ExprBinOp (_, OpComposeObj, _, _) -> true
+            | _ -> false
+        if syntacticFormer then
+            // Explicit spelling: the unchanged path.
+            inferExpr env left |> Result.bind applyWith
+        else
+            match left.Kind with
+            | ExprKind.ExprTuple elems when rightKernelShaped ->
+                // (A, B) <@> kernel  ≡  method_for(A, B) <@> kernel
+                inferMethodFor env elems |> Result.bind (fun tL ->
+                    warnImplicitOuterProduct env tL rightResult
+                    applyWith tL)
+            | _ ->
+                inferExpr env left |> Result.bind (fun tL ->
+                    match (resolveTypedExpr env tL).Kind with
+                    | TExprMethodFor _ | TExprObjectFor _
+                    | TExprCompose (OpComposeObj, _, _) ->
+                        // Resolves to a former (e.g. a let-bound loop object):
+                        // the unchanged path, with the original typed left.
+                        applyWith tL
+                    | TExprLambda _ | TExprSection _ | TExprReynolds _ | TExprZero ->
+                        if rightKernelShaped then
+                            // Kernel <@> kernel: nothing to iterate over —
+                            // reaches the steering diagnostic below.
+                            applyWith tL
+                        else
+                            // kernel <@> arrays  ≡  object_for(kernel) <@> arrays.
+                            // Re-driving inferObjectFor on the source expr keeps
+                            // the resolve-at-apply behavior for let-bound
+                            // lambdas (compose chains) in the one existing place.
+                            inferObjectFor env left |> Result.bind applyWith
+                    | _ when rightKernelShaped ->
+                        // Arrays-shaped left (variable, call, zip, literal):
+                        // A <@> kernel  ≡  method_for(A) <@> kernel. Re-driving
+                        // inferMethodFor on the source expr keeps zip expansion
+                        // and identity extraction in the one existing place.
+                        inferMethodFor env [left] |> Result.bind applyWith
+                    | _ when namedFunctionKernelLeft ->
+                        // Bare named function on the left, nothing decisive on
+                        // the right: named-kernel <@> arrays ≡
+                        // object_for(named-kernel) <@> arrays. (Guarded by the
+                        // arm above, so a decisive RIGHT still wins — a bare
+                        // name meeting a lambda stays the arrays operand.)
+                        //
+                        // The synthesized former is built by calling
+                        // inferObjectFor directly, so it misses the span
+                        // back-fill inferExpr does for the explicit spelling.
+                        // Stamp the source name's span: the stage-3/4
+                        // suggestion falls back to the LOOP's span whenever the
+                        // eta-expanded kernel carries noSpan (which the
+                        // fixed-arity wrapper always does), and without this the
+                        // BL4010 would have no location to anchor on at all.
+                        inferObjectFor env left
+                        |> Result.map (fun tL ->
+                            if tL.Span = noSpan then { tL with Span = left.Span } else tL)
+                        |> Result.bind applyWith
+                    | _ ->
+                        // Undecidable: steering diagnostic via inferApply.
+                        applyWith tL)
 
     | OpBind ->
         // >>= : Computation α × (α → Computation β) → Computation β
@@ -5022,17 +5268,41 @@ and etaExpandFunctionKernel (env: TypeEnv) (kernelExpr: Expr) : TypeResult<Typed
                         // partial-application eta-expansion.
                         unify env.Subst tLam.Type (mkFuncArrow paramTys retTy)
                         |> Result.map (fun () ->
-                            // Surface the callee's `where comm` onto the wrapper
-                            // lambda: params are 1:1 with the callee's, so the
-                            // comm-group indices carry over unchanged. This is
-                            // what makes `object_for(f)` / `method_for(..) <@> f`
-                            // for a commutative NAMED function compact to SymIdx.
-                            match env.FuncCommGroups.TryGetValue name with
-                            | true, cg when not (List.isEmpty cg) ->
-                                match tLam.Kind with
-                                | TExprLambda li ->
-                                    { tLam with Kind = TExprLambda { li with CommGroups = cg; IsCommutative = true } }
-                                | _ -> tLam
+                            // Surface the callee's `where` clause onto the wrapper
+                            // lambda. Params are 1:1 with the callee's, so:
+                            //   - comm-group INDICES carry over unchanged. This is
+                            //     what makes `object_for(f)` / `method_for(..) <@> f`
+                            //     for a commutative NAMED function compact to SymIdx.
+                            //   - parallel strategies carry over, but an `omp(a: n)`
+                            //     var is resolved by NAME downstream
+                            //     (Lowering.extractParallelism), and `names` above
+                            //     renamed every param to `__k<uid>_<i>` — so remap
+                            //     each var through the callee's param list by
+                            //     position. Without this the whole clause is lost
+                            //     and the loop nest is emitted serial, silently.
+                            let withComm (li: TypedLambdaInfo) =
+                                match env.FuncCommGroups.TryGetValue name with
+                                | true, cg when not (List.isEmpty cg) ->
+                                    { li with CommGroups = cg; IsCommutative = true }
+                                | _ -> li
+                            // Same for `where antisymm(...)`: param indices carry
+                            // over 1:1, and without this the clause is dropped by
+                            // the eta wrapper and `object_for(f) <@> (A, A)` for a
+                            // declared-antisymmetric function silently falls back
+                            // to dense storage.
+                            let withAntisym (li: TypedLambdaInfo) =
+                                match env.FuncAntisymGroups.TryGetValue name with
+                                | true, ag when not (List.isEmpty ag) ->
+                                    { li with AntisymGroups = ag }
+                                | _ -> li
+                            let withParallel (li: TypedLambdaInfo) =
+                                match env.FuncParallel.TryGetValue name with
+                                | true, (calleeNames, strategies) when not (List.isEmpty strategies) ->
+                                    { li with Parallel = remapParallelVars calleeNames names strategies }
+                                | _ -> li
+                            match tLam.Kind with
+                            | TExprLambda li ->
+                                { tLam with Kind = TExprLambda (li |> withComm |> withAntisym |> withParallel) }
                             | _ -> tLam)))
             | _ -> None
         | Some _ -> None   // let-bound value (lambda etc.): use the existing path
@@ -5079,6 +5349,7 @@ and inferApply (env: TypeEnv) (tLeft: TypedExpr) (tRight: TypedExpr) : TypeResul
                       mkTyped (TExprVar ("b", bId, None)) paramTy)) paramTy
             ReturnType = paramTy
             CommGroups = if isComm then [[0; 1]] else []
+            AntisymGroups = []   // synthesized (operator section): no user clause
             Captures = []; IsCommutative = isComm
             Parallel = []  // synthesized (operator section): no user clause
             SelfBinding = None  // anonymous: cannot self-reference
@@ -5122,6 +5393,7 @@ and inferApply (env: TypeEnv) (tLeft: TypedExpr) (tRight: TypedExpr) : TypeResul
             Body = mkTyped zeroLit paramTy
             ReturnType = paramTy
             CommGroups = []
+            AntisymGroups = []
             Captures = []; IsCommutative = true
             Parallel = []  // synthesized (zero kernel): no user clause
             SelfBinding = None  // anonymous: cannot self-reference
@@ -5302,6 +5574,7 @@ and inferApply (env: TypeEnv) (tLeft: TypedExpr) (tRight: TypedExpr) : TypeResul
                 Body = mkTyped zeroLit paramTy
                 ReturnType = paramTy
                 CommGroups = []
+                AntisymGroups = []
                 Captures = []; IsCommutative = true
                 Parallel = []  // synthesized (object_for zero kernel): no clause
                 SelfBinding = None  // anonymous: cannot self-reference
@@ -5346,8 +5619,44 @@ and inferApply (env: TypeEnv) (tLeft: TypedExpr) (tRight: TypedExpr) : TypeResul
                             | true, cg when not (List.isEmpty cg) ->
                                 { li with CommGroups = [ [ 0 .. n - 1 ] ]; IsCommutative = true }
                             | _ -> li
+                        // Same for the `where omp(...)` clause, which is otherwise
+                        // dropped by the eta expansion (the wrapper is built with
+                        // no where-clause) and the nest comes out serial. A poly
+                        // kernel's omp var names the PACK, which expanded into the
+                        // n params `__of<uid>_0..n-1`; the pragma gate only reads
+                        // level 0, so map it onto the first expanded param.
+                        let li'' =
+                            match env.FuncParallel.TryGetValue fnName with
+                            | true, (calleeNames, strategies)
+                                    when not (List.isEmpty strategies) && not (List.isEmpty names) ->
+                                let packNames = calleeNames |> List.map (fun _ -> List.head names)
+                                { li' with Parallel = remapParallelVars calleeNames packNames strategies }
+                            | _ -> li'
+                        // Stage-3 LATE TIER confirm-and-pin for PACK kernels:
+                        // no declared comm, the pack deduces invariant at
+                        // every arity (AC-fold template / wrapper walk), and
+                        // the SAME array fills every expanded position —
+                        // H ∩ Stab would license compaction. Dense until the
+                        // user pins `where comm(pack)` on the kernel.
+                        (match env.FuncCommGroups.TryGetValue fnName with
+                         | true, cg when not (List.isEmpty cg) -> ()
+                         | _ ->
+                             match env.PackDeducedComm.TryGetValue fnName with
+                             | true, (packName, Blade.Deduce.PInv) when n >= 2 ->
+                                 let allSame =
+                                     match identities with
+                                     | [] -> false
+                                     | first :: rest -> rest |> List.forall (fun i -> i = first)
+                                 if allSame then
+                                     let msg =
+                                         sprintf
+                                             "kernel `%s` deduces commutative over its argument pack `%s` (at every arity) and all %d positions receive the same array: output storage is DENSE today. Pin `where comm(%s)` on `%s` to opt into compact symmetric (triangular) storage."
+                                             fnName packName n packName fnName
+                                     emitWarning env msg
+                                     PinSuggestions.add msg span
+                             | _ -> ())
                         buildApplyInfo env flatArrays identities arrayTypes sDimsPerArray sharedRecords
-                                       li' tLoopSynth synInfo.Kernel false false
+                                       li'' tLoopSynth synInfo.Kernel false false
                     | _ -> Error (ObjectForKernel "deferred former eta-expansion did not yield a lambda")
                 | _ -> Error (ObjectForKernel "deferred former eta-expansion did not yield an object_for"))
         | _ -> Error (ObjectForKernel (resolvedKernel.Kind.GetType().Name))
@@ -5385,7 +5694,10 @@ and inferApply (env: TypeEnv) (tLeft: TypedExpr) (tRight: TypedExpr) : TypeResul
         // Name the real culprit. When the LEFT already is a valid
         // method_for/object_for, the unmatched operand is the RIGHT (the
         // kernel) — reporting the left here is what produced the historical
-        // "requires method_for … but got TExprMethodFor" red herring.
+        // "requires method_for … but got TExprMethodFor" red herring. With
+        // implicit formers (inferBinOp's OpApply normalization), reaching
+        // this catch-all with a former-less left means NEITHER side was
+        // decisive — steer instead of demanding a former blind.
         let describeKind (k: TypedExprKind) =
             match k with
             | TExprVar (name, _, _) -> sprintf "variable '%s'" name
@@ -5394,7 +5706,7 @@ and inferApply (env: TypeEnv) (tLeft: TypedExpr) (tRight: TypedExpr) : TypeResul
         | TExprMethodFor _ | TExprObjectFor _ ->
             Error (ChainOpBadKernel (describeKind rR.Kind))
         | _ ->
-            Error (ChainOpNeedsMethodFor (describeKind rL.Kind))
+            Error (ChainOpUndecidable (describeKind rL.Kind, describeKind rR.Kind))
 
 and buildApplyInfo (env: TypeEnv)
     (arrays: TypedExpr list) (identities: ArrayIdentity list)
@@ -5406,6 +5718,154 @@ and buildApplyInfo (env: TypeEnv)
     : TypeResult<TypedExpr> =
 
     let commGroups = lambdaInfo.CommGroups
+    // Declared `where antisymm(...)` positions. Same axis grouping and the
+    // same iteration license as comm (the exchange is licensed either way —
+    // only the SIGN and the diagonal differ), so `iterGroups` is what every
+    // grouping consumer sees. `antisymStorageGroups` is the narrower list that
+    // decides the licensed simplex is the STRICT one (AntisymIdx, no
+    // diagonal): under `reynolds` the wrapper owns the output symmetry, so a
+    // declared clause there degrades to an iteration license exactly as `comm`
+    // does on a reynolds-wrapped kernel (index-types/050, symmetry/019).
+    let iterGroups = commGroups @ lambdaInfo.AntisymGroups
+    let antisymStorageGroups = if isReynolds then [] else lambdaInfo.AntisymGroups
+
+    // ---- Stage 3: symmetry deduction (early tier), at the ONE seam every
+    // apply arm funnels through. Deduce the kernel's adjacent-pair swap
+    // parity; an eta-expanded named-function wrapper (body = f(p0..pn-1) in
+    // order) defers to the function's recorded summary. Under reynolds a
+    // `comm` clause is an ITERATION LICENSE over the signed permutation sum,
+    // not a claim about the bare kernel — validation and suggestions both
+    // stand down (isReynolds).
+    let (stage3Names, stage3Pairs) =
+        if isReynolds || lambdaInfo.Params.Length < 2 then ([], [])
+        else
+            let etaSummary =
+                match lambdaInfo.Body.Kind with
+                | TExprApp ({ Kind = TExprVar (fname, _, _) }, args)
+                        when args.Length = lambdaInfo.Params.Length
+                             && List.forall2 (fun (arg: TypedExpr) (p: TypedParam) ->
+                                    match arg.Kind with
+                                    | TExprVar (_, aid, _) -> aid = p.VarId
+                                    | _ -> false) args lambdaInfo.Params ->
+                    (match env.FuncDeducedPairs.TryGetValue fname with
+                     | true, (names, ps) when ps.Length = lambdaInfo.Params.Length - 1 ->
+                         Some (names, ps)
+                     | _ ->
+                         // Fixed-arity wrapper over a PACK-summarized kernel
+                         // (`lambda(x, y) -> comoment(x, y)`): invariance at
+                         // every arity specializes to full pairwise symmetry
+                         // at this one. Suggestion names the LAMBDA's own
+                         // params — that is where this spelling pins.
+                         (match env.PackDeducedComm.TryGetValue fname with
+                          | true, (_, Blade.Deduce.PInv) ->
+                              Some (lambdaInfo.Params |> List.map (fun p -> p.Name),
+                                    List.replicate (lambdaInfo.Params.Length - 1) Blade.Deduce.PInv)
+                          | _ -> None))
+                | _ -> None
+            match etaSummary with
+            | Some (names, ps) -> (names, ps)
+            | None ->
+                // Same sign-linearity resolver as checkFunctionDecl: a lambda
+                // kernel calling an already-summarized helper (`lambda(x, y) ->
+                // mymean(x - y)`) gets the callee's per-parameter sign law.
+                let signResolver (calleeId: IRId) =
+                    match env.FuncSignParities.TryGetValue calleeId with
+                    | true, ps -> Some ps
+                    | _ -> None
+                (lambdaInfo.Params |> List.map (fun p -> p.Name),
+                 Blade.Deduce.deduceAdjacentPairs signResolver lambdaInfo.Params lambdaInfo.Body)
+    // Declared comm + provably antisymmetric body = the silent-corruption
+    // case: triangular storage would drop the sign flips. Hard error;
+    // PBottom stays trusted (status quo escape hatch). The mirror case —
+    // declared antisymm + provably COMMUTATIVE body — is the same error with
+    // the signs exchanged: strict-simplex storage would drop the diagonal and
+    // return the negation for half the reads. (Both stand down under
+    // reynolds, where stage3Pairs is empty by construction.)
+    let contradictsIn (groups: int list list) (wanted: Blade.Deduce.Parity)
+                      (mk: string -> string -> TypeError) =
+        if List.isEmpty stage3Pairs || List.isEmpty groups then None
+        else
+            List.indexed stage3Pairs
+            |> List.tryPick (fun (i, par) ->
+                if par = wanted
+                   && groups |> List.exists (fun g ->
+                          List.contains i g && List.contains (i + 1) g) then
+                    Some (mk stage3Names.[i] stage3Names.[i + 1])
+                else None)
+    let stage3Err =
+        match contradictsIn commGroups Blade.Deduce.PNeg
+                            (fun a b -> CommContradictsBody (a, b)) with
+        | Some e -> Some e
+        | None ->
+            contradictsIn lambdaInfo.AntisymGroups Blade.Deduce.PInv
+                          (fun a b -> AntisymmContradictsBody (a, b))
+    match stage3Err with
+    | Some e -> Error e
+    | None ->
+    // Confirm-and-pin suggestion: kernel provably commutative (or provably
+    // ANTI-commutative) in an adjacent pair, nothing declared for that pair,
+    // and the SAME array occupies both positions (H ∩ Stab would license
+    // compaction). Output stays DENSE until the user pins — the suggestion is
+    // the compiler proposing, never deciding. PInv proposes the inclusive
+    // triangle (`comm`), PNeg the strict one (`antisymm`, zero diagonal).
+    if List.isEmpty iterGroups && not (List.isEmpty stage3Pairs) then
+        List.indexed stage3Pairs
+        |> List.iter (fun (i, par) ->
+            if (par = Blade.Deduce.PInv || par = Blade.Deduce.PNeg)
+               && i + 1 < identities.Length
+               && identities.[i] = identities.[i + 1]
+               // Synthesized wrapper params (`__of13_0`, `__k13_0`) are not
+               // names a user can write in a pin — suppress; the pack-level
+               // suggestion at the deferred-former seam names the REAL pack
+               // param for exactly these kernels (and under --strict-pins an
+               // unactionable suggestion would be an unfixable build break).
+               && not (stage3Names.[i].StartsWith "__")
+               && not (stage3Names.[i + 1].StartsWith "__") then
+                let (n1, n2) = (stage3Names.[i], stage3Names.[i + 1])
+                let msg =
+                    if par = Blade.Deduce.PInv then
+                        sprintf
+                            "kernel deduces commutative in (%s, %s) and both positions receive the same array: output storage is DENSE today. Pin `where comm(%s, %s)` on the kernel to opt into compact symmetric (triangular) storage."
+                            n1 n2 n1 n2
+                    else
+                        sprintf
+                            "kernel deduces ANTIsymmetric in (%s, %s) (f(%s, %s) = -f(%s, %s)) and both positions receive the same array: output storage is DENSE today. Pin `where antisymm(%s, %s)` on the kernel to opt into compact antisymmetric (strict-triangular, zero-diagonal) storage."
+                            n1 n2 n2 n1 n1 n2 n1 n2
+                emitWarning env msg
+                // Synthesized kernels (eta wrappers, sections) carry noSpan;
+                // fall back to the former expression's source span so the
+                // ghost annotation lands on `object_for(f)` / `method_for(..)`.
+                let span = if tKernel.Span = noSpan then tLoop.Span else tKernel.Span
+                PinSuggestions.add msg span)
+
+    // Dropped-parallel-clause guard. This is the apply seam — the ONE place a
+    // loop and a kernel meet — so it is where "the kernel declared `omp(...)`"
+    // and "the lambda reaching the loop carries it" can be compared at all.
+    //
+    // A named function used in kernel position is eta-expanded into a wrapper
+    // lambda built with NO where-clause, so its `Parallel` starts empty and the
+    // callee's clause has to be surfaced explicitly (etaExpandFunctionKernel /
+    // the deferred-former eta). When that surfacing is missing the clause
+    // vanishes with no other trace: `Parallel = []` becomes IsOmpParallel =
+    // false, the nest is emitted serial, and the generated C++ is identical to
+    // a program that never asked. That was a real, long-lived silent bug. This
+    // is its regression guard — it should never fire, and firing means some
+    // apply path grew a wrapper that forgets the clause again.
+    (if List.isEmpty lambdaInfo.Parallel then
+        match lambdaInfo.Body.Kind with
+        | TExprApp ({ Kind = TExprVar (fname, _, _) }, args)
+                when args.Length = lambdaInfo.Params.Length
+                     && List.forall2 (fun (arg: TypedExpr) (p: TypedParam) ->
+                            match arg.Kind with
+                            | TExprVar (_, aid, _) -> aid = p.VarId
+                            | _ -> false) args lambdaInfo.Params ->
+            (match env.FuncParallel.TryGetValue fname with
+             | true, (_, strategies) when not (List.isEmpty strategies) ->
+                 emitWarning env
+                     (sprintf "internal: `where` parallel clause on '%s' was dropped by kernel-position eta-expansion — the loop nest will be emitted serial. This is a compiler bug, not a source error; please report it."
+                              fname)
+             | _ -> ())
+        | _ -> ())
 
     // Co-iteration INDEX-PARAM form: a co-iterated kernel may declare
     // N + R parameters — one value per co-iterated array plus the R shared
@@ -5637,9 +6097,13 @@ and buildApplyInfo (env: TypeEnv)
                         if j >= n - irank then { idx with Kind = TDimension } else idx)
                 { at with IndexTypes = retagged })
 
-    let states = computeAllSymcomStates identities gridArrayTypes commGroups (computeSDimsPerArray gridArrayTypes)
-    let triLevels = computeTriangularLevels gridArrayTypes identities commGroups (computeSDimsPerArray gridArrayTypes)
-    let speedup = computePartialProductSpeedup gridArrayTypes identities commGroups (computeSDimsPerArray gridArrayTypes)
+    // Grouping/iteration reads `iterGroups` (comm ∪ antisymm): a declared
+    // antisymmetric pair fuses its axes and iterates the simplex exactly like
+    // a comm pair — only the strictness (IR's StrictOffset) and the stored
+    // symmetry class differ, and both of those are decided downstream.
+    let states = computeAllSymcomStates identities gridArrayTypes iterGroups (computeSDimsPerArray gridArrayTypes)
+    let triLevels = computeTriangularLevels gridArrayTypes identities iterGroups (computeSDimsPerArray gridArrayTypes)
+    let speedup = computePartialProductSpeedup gridArrayTypes identities iterGroups (computeSDimsPerArray gridArrayTypes)
 
     // Phase 2 (Gap 2.5 fix): unify each kernel parameter with the source
     // array's per-row type. This catches mismatches like a String-typed
@@ -5880,7 +6344,7 @@ and buildApplyInfo (env: TypeEnv)
         // consumed-dim filter in deduceOutputType must NOT drop ragged/dep
         // inner dims — they propagate through the elementwise map.
         let kernelConsumesInner = kernelInputRanks |> List.exists (fun r -> r > 0)
-        let outputType = deduceOutputType gridArrayTypes identities commGroups (computeSDimsPerArray gridArrayTypes) kernelTDims outputElemType isReynolds isReynoldsAntisym kernelConsumesInner env.Builder
+        let outputType = deduceOutputType gridArrayTypes identities iterGroups antisymStorageGroups (computeSDimsPerArray gridArrayTypes) kernelTDims outputElemType isReynolds isReynoldsAntisym kernelConsumesInner env.Builder
 
         let reynoldsSpeedup =
             if isReynolds then
@@ -6029,6 +6493,7 @@ and prescanTypeVarNames (env: TypeEnv) (types: TypeExpr option list) : unit =
 and inferLambda env parms whereClause body : TypeResult<TypedExpr> =
     let scopeEnv = enterScope env
     let commGroups = extractCommGroups parms whereClause
+    let antisymGroups = extractAntisymGroups parms whereClause
 
     // Fresh type variable scope for this lambda's type annotations.
     let savedScope = env.Subst.PushTypeVarScope()
@@ -6048,6 +6513,8 @@ and inferLambda env parms whereClause body : TypeResult<TypedExpr> =
     let boundNames = parms |> List.map (fun p -> p.Name) |> Set.ofList
     let freeVars = collectFreeVars boundNames body
     let captures = buildCaptures scopeEnv freeVars
+    // An `omp(v: n)` naming no parameter is silently dropped downstream; say so.
+    checkOmpVarNames env (typedParams |> List.map (fun p -> p.Name)) whereClause "this lambda"
 
     let result =
         inferExpr paramEnv body |> Result.bind (fun tBody ->
@@ -6060,7 +6527,7 @@ and inferLambda env parms whereClause body : TypeResult<TypedExpr> =
             else
             let info : TypedLambdaInfo = {
                 Params = typedParams; Body = tBody; ReturnType = tBody.Type
-                CommGroups = commGroups; Captures = captures
+                CommGroups = commGroups; AntisymGroups = antisymGroups; Captures = captures
                 IsCommutative = not (List.isEmpty commGroups)
                 // Propagate the lambda's parallelization strategy (omp/cuda) from
                 // its where-clause so lambda-level omp drives parallelization.
@@ -8821,6 +9288,144 @@ and checkFunctionDecl (env: TypeEnv) (funcDecl: FunctionDecl) : TypeResult<Typed
             // named function is dropped and the loop emits dense storage.
             if not (List.isEmpty commGroups) then
                 env.FuncCommGroups.[funcDecl.Name] <- commGroups
+            // Same for `where antisymm(...)` — its own side-channel, since a
+            // where-clause attribute that no surfacing site re-attaches is
+            // dropped by the kernel-position eta wrapper (silently falling
+            // back to dense storage).
+            let antisymGroups =
+                extractAntisymGroups
+                    (funcDecl.Params |> List.map (fun p -> { Name = p.Name; Type = p.Type } : LambdaParam))
+                    funcDecl.WhereClause
+            if not (List.isEmpty antisymGroups) then
+                env.FuncAntisymGroups.[funcDecl.Name] <- antisymGroups
+            // Register the function's parallel strategies for the same reason,
+            // paired with its param NAMES: an `omp(a: n)` var is resolved by
+            // name against the callable's params (Lowering.extractParallelism),
+            // and the eta wrapper renames them, so the surfacing site needs the
+            // originals to remap by position.
+            (match funcDecl.WhereClause with
+             | Some wc when not (List.isEmpty wc.Parallel) ->
+                 env.FuncParallel.[funcDecl.Name] <-
+                     (funcDecl.Params |> List.map (fun p -> p.Name), wc.Parallel)
+             | _ -> ())
+            // An `omp(v: n)` naming no parameter is silently dropped downstream.
+            checkOmpVarNames env (funcDecl.Params |> List.map (fun p -> p.Name))
+                             funcDecl.WhereClause (sprintf "function '%s'" funcDecl.Name)
+            // Stage 3 (symmetry deduction, early tier): summarize the
+            // adjacent-pair swap parity of this fixed-arity function's body
+            // and record it for kernel-position uses — buildApplyInfo
+            // consults the summary when the kernel is an eta-expanded
+            // wrapper around this function. Poly packs are late-tier work
+            // (their pairs only exist per materialized arity): skipped.
+            let polyParams =
+                typedParams |> List.filter (fun p ->
+                    match env.Subst.Resolve p.Type with IRTPoly _ -> true | _ -> false)
+            // Interprocedural SIGN-LINEARITY summary, recorded BEFORE the pair
+            // deduction of this same body so a helper is available to its
+            // callers (decl order) — `mymean(row) = reduce(row,(+))/extents(row)`
+            // is odd in `row`, which is what lets a caller's `mymean(x - y)`
+            // deduce PNeg instead of PBottom. Fixed-arity (non-Poly) only: a
+            // pack has no per-position summary to index by argument. Keyed by
+            // funcVarId — the id every other body's reference to this function
+            // resolves to — so a shadowing parameter cannot borrow the law.
+            let signResolver (calleeId: IRId) =
+                match env.FuncSignParities.TryGetValue calleeId with
+                | true, ps -> Some ps
+                | _ -> None
+            if List.isEmpty polyParams && not (List.isEmpty typedParams) then
+                env.FuncSignParities.[funcVarId] <-
+                    Blade.Deduce.deduceSignParities signResolver typedParams tBody
+            let deducedPairs =
+                if not (List.isEmpty polyParams) then []
+                else Blade.Deduce.deduceAdjacentPairs signResolver typedParams tBody
+            if not (List.isEmpty deducedPairs) then
+                env.FuncDeducedPairs.[funcDecl.Name] <-
+                    (typedParams |> List.map (fun p -> p.Name), deducedPairs)
+            // Stage-3 LATE TIER: pack symmetry for arity-polymorphic kernels.
+            // The ∀-arity AC-fold template first (the head::tail recursion
+            // itself — packprod, comoment_prod); failing that, the
+            // compositional wrapper walk (comoment = mean(prod(a))), which
+            // resolves callees through PackDeducedComm in decl order.
+            // PInv-or-PBottom only: packs never claim PNeg, so this table
+            // fuels suggestions and can produce no false errors.
+            (match polyParams with
+             | [packP] ->
+                 let packSummary =
+                     match Blade.Deduce.deducePackFold funcDecl.Name packP.Name packP.VarId tBody with
+                     | Blade.Deduce.PInv -> Blade.Deduce.PInv
+                     | _ ->
+                         let resolver fname =
+                             match env.PackDeducedComm.TryGetValue fname with
+                             | true, (_, p) -> Some p
+                             | _ -> None
+                         Blade.Deduce.packParityOf resolver packP.VarId tBody
+                 if packSummary = Blade.Deduce.PInv then
+                     env.PackDeducedComm.[funcDecl.Name] <- (packP.Name, packSummary)
+             | _ -> ())
+            // Declared comm on a named function whose body is PROVABLY
+            // antisymmetric in a declared adjacent pair is the
+            // silent-corruption case §4 exists for. A named function cannot
+            // be a reynolds kernel (reynolds requires a lambda), so no
+            // iteration license can apply here — hard error. PBottom stays
+            // trusted (the escape hatch when the analysis is too weak).
+            // The declared-antisymm twin is the same check with the parities
+            // exchanged: a body provably INVARIANT under a pair declared
+            // antisymmetric would be stored on a strict simplex that has no
+            // diagonal and negates half its reads.
+            let declContradiction (groups: int list list) (wanted: Blade.Deduce.Parity)
+                                  (mk: string -> string -> TypeError) =
+                if List.isEmpty groups then None
+                else
+                    List.indexed deducedPairs
+                    |> List.tryPick (fun (i, par) ->
+                        if par = wanted
+                           && groups |> List.exists (fun g ->
+                                  List.contains i g && List.contains (i + 1) g) then
+                            Some (mk typedParams.[i].Name typedParams.[i + 1].Name)
+                        else None)
+            let commContradiction =
+                match declContradiction commGroups Blade.Deduce.PNeg
+                                        (fun a b -> CommContradictsBody (a, b)) with
+                | Some e -> Some e
+                | None ->
+                    declContradiction antisymGroups Blade.Deduce.PInv
+                                      (fun a b -> AntisymmContradictsBody (a, b))
+            match commContradiction with
+            | Some e -> Error e
+            | None ->
+            // Close the body-only rank deduction (stage 2): a param whose
+            // type is still an unresolved inference var but carries a rank
+            // lower bound — accumulated from the body's builtin pins and
+            // direct-call demands, max-joined — is pinned to a fresh rank-k
+            // array with a free element type. The minimum rank the body
+            // forces IS the cell rank (plan §3.1, body-only by construction:
+            // bounds only ever came from this body's own uses). Params with
+            // no bound stay fully generic (scalar-or-array polymorphism,
+            // unchanged); params under a `T^k` annotation are governed by
+            // their exact arity constraint and are skipped here.
+            paramTypes |> List.iter (fun pt ->
+                match env.Subst.Resolve pt with
+                | IRTInfer id when (env.Subst.GetArityConstraint id).IsNone ->
+                    (match env.Subst.GetRankLowerBound(id) with
+                     | Some k when k > 0 ->
+                         let slots = List.init k (fun i ->
+                             { Id = env.Builder.FreshId()
+                               Rank = 1
+                               Extent = IRParam (sprintf "__%s_deduced_n%d" funcDecl.Name i, 0, IRTNat None)
+                               Symmetry = SymNone
+                               Tag = None; IxKind = IxKPlain
+                               Kind = SDimension
+                               Dependencies = [] })
+                         let arr = { ElemType = env.Builder.FreshInferType()
+                                     IndexTypes = slots
+                                     IsVirtual = false
+                                     Identity = None }
+                         // Cannot fail: the var is bound-satisfying by
+                         // construction (fresh rank-k array, no arity pin,
+                         // no occurs possibility, not a literal var).
+                         unify env.Subst pt (mkArrayLike arr) |> ignore
+                     | _ -> ())
+                | _ -> ())
             let resolvedParams = typedParams |> List.map (fun p ->
                 { p with Type = env.Subst.Resolve(p.Type) } : TypedParam)
             let tf : TypedFunctionDecl = {
@@ -9565,6 +10170,7 @@ let typeCheck (program: Program) : Result<TypedProgram * IRBuilder * string list
     // their own; all inherit the fold through StaticEval's hook).
     Blade.ProviderStatics.install ()
     IdePartial.reset ()
+    PinSuggestions.reset ()
     // Staged-former unfold FIRST: `static method_for/object_for/for`
     // argument lists elaborate to plain formers before any other stage
     // (ML/PPL/math/grad and the checker never see ExprStatic).

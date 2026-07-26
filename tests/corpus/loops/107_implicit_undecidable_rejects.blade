@@ -1,0 +1,8 @@
+// TEST: Implicit Former Undecidable (rejects)
+// Stage-1 implicit formers never guess: two array operands give <@> no
+// decisive kernel on either side, so the pair is rejected with the steering
+// diagnostic (ChainOpUndecidable) telling the user to write method_for /
+// object_for explicitly — not silently treated as anything.
+let A = [1.0, 2.0]
+let B = [3.0, 4.0]
+let result = A <@> B |> compute

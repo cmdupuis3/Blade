@@ -681,7 +681,21 @@ and private materializeObjectForApp
         match resolveKernel objInfo.Kernel with
         | Some rk -> rk.Callable
         | None -> raise (InterpUnsupported "object_for application: kernel does not resolve to a callable")
-    let call (vs: Value list) : Value = callCallable st kernel vs
+    // Bind the kernel's declared captures from the SITE env (makeClosure's
+    // snapshot, done here because the kernel arrives as a raw callable, not a
+    // closure value). evalCall chains frames to the module-global scope only,
+    // so a capture bound in an enclosing FUNCTION frame — e.g. the hoisted
+    // scalar of a broadcast (`a - mymean(a)`) inside a function body — is
+    // invisible without this; the compiled backend forwards the same capture
+    // via captureForwardName.
+    let kernelCaptures =
+        kernel.Captures
+        |> List.choose (fun c ->
+            match envTryFind env c.Id with
+            | Some cell -> Some (c.Id, cell)
+            | None -> None)
+        |> Map.ofList
+    let call (vs: Value list) : Value = Core.evalCall st kernel kernelCaptures vs
     // Output element type + dense index slots. genObjectForApplication derives the
     // element type from the KERNEL's return type (a comparison `[<]` / logical
     // `[&&]` consumes numbers but PRODUCES bool) and IGNORES the IRApp's carried

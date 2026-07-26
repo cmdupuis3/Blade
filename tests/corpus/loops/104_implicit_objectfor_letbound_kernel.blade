@@ -1,0 +1,11 @@
+// TEST: Implicit Object For Letbound Kernel
+// Stage-1 implicit formers, kernel-first direction: a let-bound lambda on the
+// LEFT with arrays on the right synthesizes object_for(k) <@> (A, B). By
+// rank-0 convergence this equals method_for(A, B) <@> k — the dense outer
+// sum, result[i][j] = A[i] + B[j]. The synthesis re-drives inferObjectFor on
+// the source expr, so the let-bound kernel keeps its resolve-at-apply path.
+let A = [1.0, 2.0]
+let B = [10.0, 20.0]
+let k = lambda(x, y) -> x + y
+let result = k <@> (A, B) |> compute
+// EXPECT: result = [11.0, 21.0, 12.0, 22.0]

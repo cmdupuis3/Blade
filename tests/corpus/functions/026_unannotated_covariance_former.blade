@@ -1,0 +1,11 @@
+// TEST: Unannotated Covariance Former
+// The plan's §5 flagship through a former: the fully unannotated covariance
+// kernel (cell ranks deduced body-only, stage 2) applied via object_for over
+// rank-2 data (rank gap 1 → one S-dim per arg). Same math as arity/022 with
+// every rank annotation erased. Dense 2x2 output — symmetric COMPACTION
+// stays opt-in until a comm pin (dense-until-pinned; deduction is stage 3).
+function mymean(row) = reduce(row, (+)) / extents(row)
+function covariance(a, b) = mymean((a - mymean(a)) * (b - mymean(b)))
+let data = [[1.0, 2.0, 3.0], [2.0, 4.0, 6.0]]
+let result = object_for(covariance) <@> (data, data) |> compute
+// EXPECT: result = [0.6666666666666666, 1.3333333333333333, 1.3333333333333333, 2.6666666666666665]

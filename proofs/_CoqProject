@@ -3,6 +3,7 @@ BladeCore.v
 BladeDMWF.v
 BladeBinomial.v
 BladeCounting.v
+BladeMixedRadix.v
 BladeCurrying.v
 BladeCurryingGeneral.v
 BladeLowering.v
@@ -19,3 +20,4 @@ BladeCompute.v
 BladeCauchy.v
 BladeMonad.v
 BladeSafety.v
+BladeJacobian.v

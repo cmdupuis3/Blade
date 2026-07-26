@@ -27,14 +27,29 @@ let runDiagnosticsCoreTests () : BlockResult =
         { StartLine = sl; StartCol = sc; EndLine = el; EndCol = ec; File = file }
 
     // -- registry contract ------------------------------------------------
-    let codes = Codes.registry |> Map.toList |> List.map fst
+    // Read the source LIST, not the Map: Map.ofList keeps the last entry for a
+    // repeated key, so a double-booked code is already invisible by the time
+    // it reaches Codes.registry (BL4007 carried two unrelated titles this way).
+    let codes = Codes.registryEntries |> List.map fst
     check "registry codes are well-formed BLxxxx"
         (codes |> List.forall (fun c ->
             c.Length = 6 && c.StartsWith "BL" && c.Substring 2 |> Seq.forall System.Char.IsDigit))
         (sprintf "%d codes" codes.Length)
     check "registry titles are non-empty"
-        (Codes.registry |> Map.toList |> List.forall (fun (_, t) -> t <> ""))
+        (Codes.registryEntries |> List.forall (fun (_, t) -> t <> ""))
         ""
+    let dupCodes =
+        codes
+        |> List.countBy id
+        |> List.filter (fun (_, n) -> n > 1)
+        |> List.map fst
+    check "registry codes are unique (no code claimed twice)"
+        (List.isEmpty dupCodes)
+        (if List.isEmpty dupCodes then sprintf "%d codes" codes.Length
+         else sprintf "duplicated: %s" (String.concat ", " dupCodes))
+    check "every registry entry survives into the lookup Map"
+        (codes.Length = Map.count Codes.registry)
+        (sprintf "%d entries, %d map keys" codes.Length (Map.count Codes.registry))
     check "elaborator codes registered"
         ([ "ml"; "ppl"; "math"; "rand"; "spectra"; "grad" ]
          |> List.forall (fun s -> Codes.isRegistered (Codes.elaboratorCode s)))

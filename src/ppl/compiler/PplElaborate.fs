@@ -52,7 +52,7 @@ let private sLet n value = StmtLet { Pattern = synPat (PatVar n); Type = None; V
 let private meanE arr n = divE (syn (ExprReduce (arr, syn (ExprSection OpAdd), None))) (fLit n)
 let private prodsumE args = syn (ExprApp (v "prodsum", args))
 let private commWhere (names: string list) =
-    Some { Commutativity = [names]; Parallel = []; TDims = []; Custom = [] }
+    Some { Commutativity = [names]; Antisymmetry = []; Parallel = []; TDims = []; Custom = [] }
 // Full-span construction wrappers (stamp the ambient synthSpan the module
 // expansion sets per user decl). Structural combinators only — the scalar
 // helpers above already wrap.
@@ -1175,7 +1175,7 @@ let private elabMixedCumulants (ctx: Ctx) (span: Span) (outName: string) (bindin
                     let commGroups = [ xParams; yParams ] |> List.filter (fun g -> g.Length >= 2)
                     let whereC =
                         if commGroups.IsEmpty then None
-                        else Some { Commutativity = commGroups; Parallel = []; TDims = []; Custom = [] }
+                        else Some { Commutativity = commGroups; Antisymmetry = []; Parallel = []; TDims = []; Custom = [] }
                     let mkDecl name value = { Value = DeclLet { Pattern = pvar name; Type = None; Value = value; Mutability = BindLet }; Span = span }
                     Ok [ mkDecl lName (methodForE ((List.replicate p (v xName)) @ (List.replicate q (v yName))))
                          mkDecl kName (lambdaE ps whereC (cumulantKernelBody r (float nX)))

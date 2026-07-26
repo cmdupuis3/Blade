@@ -742,10 +742,18 @@ and lowerTypedLambda env (info: TypedLambdaInfo) : IRExpr =
         | Some (selfName, selfId) ->
             { defaultLambdaOptions with NameOverride = Some selfName; IdOverride = Some selfId }
         | None -> defaultLambdaOptions
+    // A `where antisymm(a, b)` group is an axis group exactly like a comm
+    // group — same fusion, same triangular iteration — so it rides CommGroups
+    // for every grouping consumer (buildLoopLevelStructure et al.), with the
+    // separate AntisymGroups list carrying the one extra bit: the simplex is
+    // STRICT (no diagonal, sign flip on swapped reads). IsCommutative stays
+    // the user's comm declaration: an antisym kernel is NOT commutative, and
+    // the flag feeds diagnostics that ask exactly that question.
     let callable =
-        mkCallable env.Builder lamOpts paramInfos bodyWrapped info.ReturnType
-                   captures info.IsCommutative info.CommGroups
-                   lamParallelism lamIsOmp lamIsCuda lamBlock lamIsMpi
+        { mkCallable env.Builder lamOpts paramInfos bodyWrapped info.ReturnType
+                     captures info.IsCommutative (info.CommGroups @ info.AntisymGroups)
+                     lamParallelism lamIsOmp lamIsCuda lamBlock lamIsMpi
+            with AntisymGroups = info.AntisymGroups }
     // Emit IRVar(callable.Id, funcType) — the callable lives in
     // LiftedCallables → module.Functions; the IRVar carries just the
     // function type for type-inference and consumer dispatch.
@@ -963,6 +971,15 @@ and lowerTypedSection env (op: BinOp) (funcTy: IRType) : IRExpr =
 
 /// Lower a partial operator application to a lambda
 and lowerTypedPartialApp env (op: BinOp) (argExpr: IRExpr) (isLeft: bool) (funcTy: IRType) : IRExpr =
+    // NOTE: inlines argExpr into the lifted kernel with NO captures — only
+    // safe when argExpr is a literal or references module-level ids. The
+    // array<->scalar broadcast path hoists computed scalars into a let and
+    // threads them as captures instead (lowerTypedBinOp); explicit
+    // partial-app sections (`(s +)`) with function-local operands still
+    // share the inline hazard (pre-existing, narrower surface).
+    lowerTypedPartialAppWith env op argExpr isLeft funcTy []
+
+and lowerTypedPartialAppWith env (op: BinOp) (argExpr: IRExpr) (isLeft: bool) (funcTy: IRType) (captures: CaptureInfo list) : IRExpr =
     let paramId = env.Builder.FreshId()
     let irOp =
         match op with
@@ -1001,7 +1018,7 @@ and lowerTypedPartialApp env (op: BinOp) (argExpr: IRExpr) (isLeft: bool) (funcT
         | IREq | IRNeq | IRLt | IRLe | IRGt | IRGe | IRAnd | IROr ->
             IRTScalar ETBool
         | _ -> retTy
-    let callable = mkLambdaCallable env.Builder parms body retType [] false [] [] false false 256 false
+    let callable = mkLambdaCallable env.Builder parms body retType captures false [] [] false false 256 false
     env.LiftedCallables.Add(callable)
     // Stage 3c.3: emit IRVar reference to the lifted callable.
     let funcType =
@@ -1096,24 +1113,51 @@ and lowerTypedBinOp env mode op l r leftExpr rightExpr resultType =
                 match IR.stripUnits resultType with
                 | ArrayElem a -> a.ElemType
                 | _ -> IRTScalar ETFloat64
-        let (arrayIR, kernelVar) =
+        let (arrayIR, scalarIR, scalarTy, fixedIsLeft, funcTy) =
             if leftIsArray then
                 // A op scalar  ->  lambda(x) -> x op scalar   (fixed arg on right, isLeft = false)
                 let elemTy = (match leftExpr.Type with ArrayElem a -> a.ElemType | _ -> IRTScalar ETFloat64)
-                let funcTy = mkFuncArrow [elemTy] kernelRet
-                (l, lowerTypedPartialApp env op r false funcTy)
+                (l, r, rightExpr.Type, false, mkFuncArrow [elemTy] kernelRet)
             else
                 // scalar op A  ->  lambda(x) -> scalar op x   (fixed arg on left, isLeft = true)
                 let elemTy = (match rightExpr.Type with ArrayElem a -> a.ElemType | _ -> IRTScalar ETFloat64)
-                let funcTy = mkFuncArrow [elemTy] kernelRet
-                (r, lowerTypedPartialApp env op l true funcTy)
-        let objInfo : ObjectForInfo = {
-            Kernel = kernelVar
-            CommGroups = []
-            InputRanks = [0]
-            OutputRank = 0
-        }
-        IRApp(IRObjectFor objInfo, [arrayIR], resultType)
+                (r, l, leftExpr.Type, true, mkFuncArrow [elemTy] kernelRet)
+        match scalarIR with
+        | IRLit _ ->
+            // Literal fixed arg (`A > 2.0`): the historical inline shape — a
+            // literal cannot dangle and needs no hoisting.
+            let kernelVar = lowerTypedPartialApp env op scalarIR fixedIsLeft funcTy
+            let objInfo : ObjectForInfo = {
+                Kernel = kernelVar
+                CommGroups = []
+                InputRanks = [0]
+                OutputRank = 0
+            }
+            IRApp(IRObjectFor objInfo, [arrayIR], resultType)
+        | _ ->
+            // Computed or variable fixed arg (`a - mymean(a)` inside a
+            // function body): inlining it into the lifted kernel leaves any
+            // function-local VarIds inside it DANGLING (BL6001) and would
+            // recompute the scalar per element. Hoist it into a let so it
+            // evaluates once, and thread the let-bound var into the kernel
+            // as a proper CAPTURE — the existing capture-forwarding
+            // machinery (captureForwardName / the wrapper's [&] chain)
+            // closes the scope at every consumer site.
+            let sVar = env.Builder.FreshId()
+            let cap : CaptureInfo = {
+                Id = sVar
+                Name = sprintf "__bc_s%d" sVar
+                Type = scalarTy
+                IsMutable = false
+            }
+            let kernelVar = lowerTypedPartialAppWith env op (IRVar (sVar, scalarTy)) fixedIsLeft funcTy [cap]
+            let objInfo : ObjectForInfo = {
+                Kernel = kernelVar
+                CommGroups = []
+                InputRanks = [0]
+                OutputRank = 0
+            }
+            IRLet (sVar, scalarIR, IRApp(IRObjectFor objInfo, [arrayIR], resultType))
     else
     
     match op with

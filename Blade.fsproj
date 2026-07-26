@@ -25,6 +25,7 @@
     <Compile Include="src/providers/ZarrProvider.fs" />
     <Compile Include="src/providers/CsvProvider.fs" />
     <Compile Include="src/TypedAst.fs" />
+    <Compile Include="src/Deduce.fs" />
     <Compile Include="src/StaticEval.fs" />
     <!-- Provider-backed statics bridge: registers the NetCDF compile-time
          data reader into StaticEval's provider hook (fold + provenance).

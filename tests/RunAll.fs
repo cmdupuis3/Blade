@@ -147,6 +147,12 @@ let runAllTestsFullWith (extraBlocks: (unit -> Blade.Tests.TestHarness.BlockResu
     // Verifies layout invariants the value-checking source tests cannot catch.
     // Skips cleanly if g++ absent.
     let alloc = runAllocLayoutTests ()
+    // OpenMP pragma emission: verifies a `where omp(...)` clause reaches codegen
+    // as a pragma for EVERY kernel spelling (named function via either eta site,
+    // let-bound lambda, inline lambda) and for no unannotated one. Pure codegen
+    // string checks — no toolchain, no threads — so unlike the coverage block
+    // below this runs unconditionally. (Also `blade test omp-pragma`.)
+    let ompPragma = runOmpPragmaTests ()
     // OpenMP thread-coverage: verifies emitted pragmas form genuine parallel
     // regions when cores are available. Opt-in (see FullSuiteOptions).
     let omp =
@@ -218,6 +224,7 @@ let runAllTestsFullWith (extraBlocks: (unit -> Blade.Tests.TestHarness.BlockResu
         [ yield r1; yield r2; yield attrs; yield subst
           yield normalize; yield unify; yield validateArrow
           yield shape; yield oracles; yield wigner; yield cartBridge; yield spans; yield diagCore; yield diagCorpus; yield alloc
+          yield ompPragma
           match omp with Some b -> yield b | None -> ()
           yield bufType
           match cuda with Some b -> yield b | None -> ()

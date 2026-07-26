@@ -422,7 +422,10 @@ f : (T₁^r₁, ..., Tₙ^rₙ) → T_out^r_out
 
 with commutativity vector c (cᵢ = cⱼ iff arguments i, j share a `comm` group;
 non-listed arguments are singletons), parallelism spec (`omp(x: depth)` —
-parallelize `depth` S-dim levels of argument x, outermost first; `cuda` and
+licenses UP TO `depth` S-dim levels of argument x, outermost first, to carry
+threads; a cap on the structural strategy, not a demand, so the emitted pragma
+is the structural choice restricted to licensed levels, and the pragma sits on
+the outermost licensed level even when that is not level 0; `cuda` and
 other backends substitute), and T-dimension spec (`tdim({extent, symm, name})`
 records) when output dims don't derive from inputs.
 

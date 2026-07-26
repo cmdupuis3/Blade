@@ -1,0 +1,11 @@
+// TEST: Unannotated Rank Through Calls
+// Stage-2 rank deduction: `twice`'s param carries NO annotation and its body
+// contains NO builtin that pins it — the rank-1 demand arrives purely
+// interprocedurally, as a lower bound imposed at the direct-application seam
+// from total's (itself deduced) parameter rank, then pinned at decl close.
+// Before stage 2 this typechecked silently and emitted ill-typed C++
+// (double param passed to Array<double,1>).
+function total(row) = reduce(row, (+))
+function twice(a) = total(a) + total(a)
+let t = twice([1.0, 2.0])
+// EXPECT: t = 6.0

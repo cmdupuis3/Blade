@@ -147,10 +147,31 @@ where comm(a, b), omp(a: 1)
 = (a - mean(a)) * (b - mean(b))
 ```
 
-`omp(a: 1)` means: parallelize 1 level of the S-dimension loops that come
-from argument `a`. Arrays are bound in order, so their S-dimension loops nest
-in order — the first argument's loops are outermost and are the natural
-parallelization target. `omp(a: 2)` parallelizes two levels (collapsed).
+`omp(a: 1)` means: **up to** 1 level of the S-dimension loops coming from
+argument `a` may carry OpenMP threads. Arrays are bound in order, so their
+S-dimension loops nest in order — the first argument's loops are outermost and
+are the natural parallelization target.
+
+The depth is a **licence, not a demand**. It caps the compiler's choice rather
+than replacing it: the emitted strategy is still picked from the loop structure
+(collapse for rectangular levels, `schedule(dynamic)` when triangular work sits
+below), and the licence bounds how far that choice may reach. Three consequences
+worth knowing:
+
+- The count is **per argument**. Above, `a` is `T^1` and owns exactly one loop
+  level, so `omp(a: 2)` still licenses only one — there is no second level *of
+  `a`* to license. To thread both loops of the `(a, b)` nest, license both
+  arguments: `omp(a: 1, b: 1)`, which permits `collapse(2)`.
+- Licensing fewer levels than the structure could use is honoured. `omp(a: 1)`
+  on a collapsible two-level nest emits a plain `parallel for` over `a`'s level,
+  never `collapse(2)` — collapsing would thread a dimension of `b`, which
+  granted nothing.
+- Licensing an argument whose loops are **not** outermost moves the pragma
+  inward: `omp(b: 1)` parallelizes `b`'s level and leaves `a`'s outer loop
+  serial, opening a team per outer iteration.
+
+A rank-2 argument does own two levels, so `omp(a: 2)` on `a: T^2` licenses both
+and permits collapsing them.
 
 Two things fall out of the design:
 

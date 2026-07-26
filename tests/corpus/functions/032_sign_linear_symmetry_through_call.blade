@@ -1,0 +1,15 @@
+// TEST: Sign Linear Symmetry Through Call
+// The positive twin of functions/031, at the APPLY seam: `half` is odd in its
+// parameter (v / 2.0 — odd/even), so half(x - y) is antisymmetric under the
+// swap and the SQUARE of it is symmetric by the PNeg·PNeg = PInv rule. The
+// two factors are structurally IDENTICAL, so the mirror rule cannot fire
+// (mirror wants l[σ] ≡ r); the parity comes only from the callee's sign
+// summary, and this kernel deduced PBottom — no claim, no suggestion —
+// before interprocedural sign-linearity existed.
+// Observationally inert as staged: the suggestion proposes `where comm(x, y)`
+// and storage stays DENSE (9 cells) until the user pins it. Values are
+// ((xi - xj)/2)^2, exact in binary floating point for A = [1, 2, 3].
+function half(v) = v / 2.0
+let A = [1.0, 2.0, 3.0]
+let result = method_for(A, A) <@> lambda(x, y) -> half(x - y) * half(x - y) |> compute
+// EXPECT: result = [0.0, 0.25, 1.0, 0.25, 0.0, 0.25, 1.0, 0.25, 0.0]

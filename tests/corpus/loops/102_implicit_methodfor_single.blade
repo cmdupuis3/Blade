@@ -1,0 +1,7 @@
+// TEST: Implicit Method For Single Array
+// Stage-1 implicit formers: `A <@> kernel` over a single array synthesizes
+// method_for(A) — the elementwise map. The left side is a plain variable
+// (arrays-shaped residue), classified by the decisive lambda on the right.
+let A = [1.0, 2.0, 3.0]
+let result = A <@> lambda(x) -> x * 2.0 |> compute
+// EXPECT: result = [2.0, 4.0, 6.0]

@@ -71,6 +71,9 @@ type TypeError =
     | ObjectForKernel of got: string
     | ChainOpNeedsMethodFor of leftDesc: string
     | ChainOpBadKernel of rightDesc: string
+    | ChainOpUndecidable of leftDesc: string * rightDesc: string
+    | CommContradictsBody of param1: string * param2: string
+    | AntisymmContradictsBody of param1: string * param2: string
     | PlaceholderNeedsAllBound of got: int * total: int
     | GroupKeysRank1
     | CumulantOrderPositive of order: int
@@ -178,6 +181,13 @@ type Subst() =
     /// Populated lazily as LookupOrCreateTypeVar produces fresh IDs for
     /// names that prescanTypeVarNames previously registered.
     let mutable polymorphicIds : Set<int> = Set.empty
+    /// Minimum-rank lower bounds on inference vars (stage-2 rank deduction):
+    /// the var must eventually resolve to an array of rank >= k. Populated at
+    /// direct-application seams from callee parameter ranks; max-join on
+    /// repeat registration; propagated on var->var binds and validated when
+    /// the var meets a concrete type (see unify). Parallels arityConstraints,
+    /// which is the EXACT-rank pin that `T^k` annotations use.
+    let mutable rankLowerBounds : Map<int, int> = Map.empty
 
     member _.Fresh() =
         let id = nextId
@@ -226,6 +236,14 @@ type Subst() =
 
     member _.IsPolymorphicId(id: int) : bool =
         Set.contains id polymorphicIds
+
+    member _.AddRankLowerBound(id: int, k: int) =
+        if k > 0 then
+            let cur = Map.tryFind id rankLowerBounds |> Option.defaultValue 0
+            if k > cur then rankLowerBounds <- Map.add id k rankLowerBounds
+
+    member _.GetRankLowerBound(id: int) : int option =
+        Map.tryFind id rankLowerBounds
 
     member _.GetArityConstraint(id: int) : int option =
         Map.tryFind id arityConstraints
@@ -419,6 +437,27 @@ let rec unify (subst: Subst) (t1: IRType) (t2: IRType) : TypeResult<unit> =
     | IRTInfer id, ty | ty, IRTInfer id ->
         if occursIn id ty then Error (Other "Infinite type detected")
         else
+            // Rank lower bound (stage-2 deduction): validate/propagate before
+            // any bind. A too-low-rank array or a scalar violates the bound;
+            // another inference var inherits it (max-join).
+            let rankBoundViolation =
+                match subst.GetRankLowerBound(id) with
+                | Some k when k > 0 ->
+                    (match ty with
+                     | ArrayElem arr ->
+                         if arr.IndexTypes.Length < k then
+                             Some (sprintf "this value flows into a position that requires a rank-%d (or higher) array, but it resolved to a rank-%d array" k arr.IndexTypes.Length)
+                         else None
+                     | IRTInfer id2 ->
+                         subst.AddRankLowerBound(id2, k)
+                         None
+                     | IRTScalar _ ->
+                         Some (sprintf "this value flows into a position that requires a rank-%d (or higher) array, but it resolved to a scalar" k)
+                     | _ -> None)
+                | _ -> None
+            match rankBoundViolation with
+            | Some msg -> Error (Other msg)
+            | None ->
             // Check arity invariant: T^k must unify with rank-k array
             match subst.GetArityConstraint(id) with
             | Some k when k > 0 ->

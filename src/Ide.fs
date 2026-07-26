@@ -459,6 +459,9 @@ let private whereConjuncts (wc: WhereClause option) : string list =
         let comms =
             w.Commutativity
             |> List.map (fun group -> sprintf "comm(%s)" (String.concat ", " group))
+        let antis =
+            w.Antisymmetry
+            |> List.map (fun group -> sprintf "antisymm(%s)" (String.concat ", " group))
         let pars =
             w.Parallel
             |> List.map (function
@@ -470,7 +473,7 @@ let private whereConjuncts (wc: WhereClause option) : string list =
         let customs =
             w.Custom
             |> List.map (fun (name, args) -> sprintf "%s(%s)" name (String.concat ", " args))
-        comms @ pars @ customs
+        comms @ antis @ pars @ customs
 
 type private TypedEntry = {
     Scope: string
@@ -795,9 +798,24 @@ let ideCheck (filePath: string) : int =
                     providers <- (try collectProviderStores program with _ -> [])
                 | None -> ()
             | Ok (typedProg, _, warnings) ->
+                // Confirm-and-pin suggestions (stage 3/4) arrive twice: as
+                // plain strings in `warnings` (what the CLI prints) and as
+                // structured (message, kernel-span) pairs in the
+                // PinSuggestions side-channel. Emit the structured form —
+                // code BL4010 at the kernel's real span, so the editor can
+                // render a ghost annotation and offer the one-click pin —
+                // and skip the string twin to avoid duplicates.
+                let pinSuggestions = Blade.TypeCheck.PinSuggestions.get ()
+                let pinMessages = pinSuggestions |> List.map fst |> Set.ofList
+                for (msg, span) in pinSuggestions do
+                    let (line, col, endLine, endCol) = clampSpan span
+                    diags.Add { Severity = "warning"; Line = line; Col = col
+                                EndLine = endLine; EndCol = endCol
+                                Message = msg; Code = "BL4010" }
                 for w in warnings do
-                    diags.Add { Severity = "warning"; Line = 1; Col = 1; EndLine = 1; EndCol = 1
-                                Message = w; Code = "" }
+                    if not (Set.contains w pinMessages) then
+                        diags.Add { Severity = "warning"; Line = 1; Col = 1; EndLine = 1; EndCol = 1
+                                    Message = w; Code = "" }
                 let sourceLines = source.Replace("\r\n", "\n").Split('\n')
                 bindings <- joinBindings program typedProg sourceLines
                 // Guarded so provider structure can never break the JSON output.

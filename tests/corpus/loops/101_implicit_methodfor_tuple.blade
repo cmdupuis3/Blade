@@ -1,0 +1,11 @@
+// TEST: Implicit Method For Tuple
+// Stage-1 implicit formers: `(A, B) <@> kernel` synthesizes the method_for
+// the keyword would have produced (right-operand-first: the lambda on the
+// right is decisively a kernel). Same outer-product semantics as the explicit
+// spelling — result[i][j] = A[i] * B[j], dense 2x2. (This shape also emits
+// the one-time outer-product steering note on stderr: distinct co-iterable
+// operands, non-comm kernel, implicit former.)
+let A = [1.0, 2.0]
+let B = [3.0, 4.0]
+let result = (A, B) <@> lambda(x, y) -> x * y |> compute
+// EXPECT: result = [3.0, 4.0, 6.0, 8.0]

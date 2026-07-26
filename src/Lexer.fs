@@ -69,6 +69,7 @@ and Keyword =
     | KwWhere
     | KwAnd
     | KwComm
+    | KwAntisymm
     | KwOmp
     | KwCuda
     | KwMpi
@@ -169,6 +170,11 @@ let keywords =
       "where", KwWhere
       "and", KwAnd
       "comm", KwComm
+      // `antisymm` is a where-clause conjunct keyword (the antisymmetry pin,
+      // sibling of `comm`). Spelled with the double-m so it cannot collide
+      // with the `AntisymIdx` type keyword or the `Antisymmetric` reynolds
+      // variant identifier.
+      "antisymm", KwAntisymm
       "omp", KwOmp
       "cuda", KwCuda
       "mpi", KwMpi

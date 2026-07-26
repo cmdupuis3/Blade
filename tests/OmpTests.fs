@@ -16,6 +16,206 @@ open Blade.Build
 open Blade.Tests.TestHarness
 open Blade.Tests.Expect
 
+// ============================================================================
+// Pragma-emission tests (pure codegen; no g++, no threads, always run)
+// ============================================================================
+//
+// The thread-coverage block below answers "does an emitted pragma form a real
+// parallel team". These answer the question BEFORE it: "is a pragma emitted at
+// all for the clause the user wrote". That gap is not academic — `where omp`
+// on a NAMED FUNCTION used as a kernel was silently dropped for a long time,
+// producing serial code with no diagnostic, because every existing omp test
+// wrote the clause on an inline or let-bound LAMBDA. A lambda kernel keeps its
+// where-clause on the TypedLambdaInfo; a named-function kernel is eta-expanded
+// into a wrapper lambda built with no where-clause, so the clause has to be
+// surfaced explicitly onto the wrapper (TypeCheck.etaExpandFunctionKernel).
+// Both spellings are pinned here so the two paths cannot drift again.
+//
+// These assert on the generated C++ STRING rather than on runtime behaviour, so
+// they need no toolchain and run in the default suite.
+
+/// Lower + generate, returning the C++ source. No compiler involved.
+let private cppOf (testName: string) (src: string) : Result<string, string> =
+    try
+        match lower src with
+        | Error e -> Error (sprintf "lower: %s" e)
+        | Ok ir -> Ok (fst (CodeGen.genSelfContainedProgramFromIR ir testName))
+    with ex -> Error (sprintf "codegen raised: %s" ex.Message)
+
+/// A kernel body and the two arrays it folds over, spelled once. Each case
+/// below varies ONLY how the kernel is written and where the clause sits.
+let private ompPragmaCases : (string * string * bool) list =
+    // (name, source, expectPragma)
+    let arrays = "let A = [1.0, 2.0, 3.0]\nlet B = [4.0, 5.0, 6.0]\n"
+    [ // The regression case: clause on a named function, function used as the
+      // object_for kernel. Eta-expanded — the clause must survive the wrapper.
+      ("named_function_object_for",
+       "function cov(a: Float64, b: Float64) where omp(a: 1) = a * b\n" + arrays +
+       "let m = object_for(cov) <@> (A, B) |> compute\n", true)
+      // Same drop, reached through the OTHER eta site: a bare named function as
+      // the RIGHT operand of <@>.
+      ("named_function_method_for_apply",
+       "function cov(a: Float64, b: Float64) where omp(a: 1) = a * b\n" + arrays +
+       "let m = method_for(A, B) <@> cov |> compute\n", true)
+      // Control: the spelling every pre-existing omp test uses. Passed before
+      // the fix and must keep passing.
+      ("let_bound_lambda",
+       "let k = lambda(x, y) where omp(x: 1) -> x * y\n" + arrays +
+       "let m = object_for(k) <@> (A, B) |> compute\n", true)
+      // Control: inline lambda, the third spelling.
+      ("inline_lambda",
+       arrays +
+       "let m = method_for(A, B) <@> lambda(x, y) where omp(x: 1) -> x * y |> compute\n", true)
+      // Negatives — parallelism is OPT-IN. Identical programs minus the clause
+      // must stay serial; without these the fix could degenerate into
+      // "parallelize every named-function kernel".
+      ("named_function_no_clause",
+       "function cov(a: Float64, b: Float64) = a * b\n" + arrays +
+       "let m = object_for(cov) <@> (A, B) |> compute\n", false)
+      ("let_bound_lambda_no_clause",
+       "let k = lambda(x, y) -> x * y\n" + arrays +
+       "let m = object_for(k) <@> (A, B) |> compute\n", false) ]
+
+/// The `omp(a: n)` DEPTH, checked as an exact pragma string rather than mere
+/// presence. `n` is a LICENCE — "up to n dimensions of this argument may carry
+/// threads" — counted per-argument, outermost first. It caps the structural
+/// collapse/dynamic strategy instead of replacing it, so these cases pin the
+/// interaction of the two rather than the licence alone.
+///
+/// Before this was implemented the depth was inert (written by
+/// extractParallelism, read by nothing), so every case below emitted whatever
+/// the bound structure alone dictated — `omp(a: 1)` on a 2-level nest produced
+/// `collapse(2)`, threading a dimension of `b`, which granted nothing.
+let private ompDepthCases : (string * string * string) list =
+    // (name, source, exact expected pragma line)
+    let arrays = "let A = [1.0, 2.0, 3.0]\nlet B = [4.0, 5.0, 6.0]\n"
+    let apply = "let m = object_for(k) <@> (A, B) |> compute\n"
+    let kern clause = sprintf "function k(a: Float64, b: Float64) where %s = a * b\n" clause
+    [ // One dimension licensed of a 2-level collapsible nest: collapse would
+      // thread b's level too, so it must NOT be used.
+      ("depth_1_of_2_no_collapse", kern "omp(a: 1)" + arrays + apply,
+       "#pragma omp parallel for")
+      // Both arguments licensed: collapse(2) is now permitted.
+      ("depth_1_1_collapses_2", kern "omp(a: 1, b: 1)" + arrays + apply,
+       "#pragma omp parallel for collapse(2)")
+      // Per-argument counting: `a` is rank-1 and owns exactly one level, so a
+      // depth of 2 cannot reach into b's level. (Under a whole-nest "budget"
+      // reading this would collapse(2) — that reading is NOT what is
+      // implemented; the depth counts levels OF THE NAMED ARGUMENT.)
+      ("depth_2_on_rank1_arg_caps_at_1", kern "omp(a: 2)" + arrays + apply,
+       "#pragma omp parallel for")
+      // A licence on an argument owning an INNER level parallelizes that level
+      // rather than silently doing nothing or threading the unlicensed outer.
+      ("inner_arg_licence_moves_pragma", kern "omp(b: 1)" + arrays + apply,
+       "#pragma omp parallel for")
+      // The canonical documented case (quickstart-2 "Parallelism"): ONE argument
+      // owning BOTH levels, so the depth alone scales how many are threaded.
+      // This is the pair the old inert-depth behaviour could not distinguish —
+      // it emitted collapse(2) for both.
+      ("one_arg_two_levels_depth_1",
+       "function k(a: Float64) where omp(a: 1) = a * 2.0\n" +
+       "let M = [[1.0, 2.0, 3.0], [4.0, 5.0, 6.0]]\n" +
+       "let m = object_for(k) <@> (M) |> compute\n",
+       "#pragma omp parallel for")
+      ("one_arg_two_levels_depth_2",
+       "function k(a: Float64) where omp(a: 2) = a * 2.0\n" +
+       "let M = [[1.0, 2.0, 3.0], [4.0, 5.0, 6.0]]\n" +
+       "let m = object_for(k) <@> (M) |> compute\n",
+       "#pragma omp parallel for collapse(2)") ]
+
+/// Which loop index the pragma precedes, for the inner-licence case. Presence
+/// alone cannot distinguish "parallelized the licensed inner level" from
+/// "parallelized the unlicensed outer level".
+let private ompPlacementCases : (string * string * string) list =
+    // (name, source, index variable the pragma must immediately precede)
+    let arrays = "let A = [1.0, 2.0, 3.0]\nlet B = [4.0, 5.0, 6.0]\n"
+    let apply = "let m = object_for(k) <@> (A, B) |> compute\n"
+    let kern clause = sprintf "function k(a: Float64, b: Float64) where %s = a * b\n" clause
+    [ ("outer_licence_pragma_on_i0", kern "omp(a: 1)" + arrays + apply, "__i0")
+      ("inner_licence_pragma_on_i1", kern "omp(b: 1)" + arrays + apply, "__i1") ]
+
+/// Assert that `omp` reaches codegen as a pragma for every spelling of a
+/// kernel, and reaches it for NO spelling that omitted the clause.
+let runOmpPragmaTests () : Blade.Tests.TestHarness.BlockResult =
+    printHeader "OpenMP Pragma Emission"
+    let mutable passed = 0
+    let mutable failed = 0
+    let mutable failedNames = []
+    let fail name detail =
+        failed <- failed + 1
+        failedNames <- failedNames @ [name]
+        resultLine Fail name detail
+    for (name, src, expectPragma) in ompPragmaCases do
+        match cppOf name src with
+        | Error e -> fail name e
+        | Ok cpp ->
+            let hasPragma = cpp.Contains "#pragma omp"
+            // A dropped clause is exactly the silent case: no pragma AND no
+            // marker. Assert the marker's absence too, so a future change that
+            // "fixes" a case by suppressing it loudly is still caught here.
+            let hasMarker = cpp.Contains "[omp] requested but emitted serial"
+            if hasPragma <> expectPragma then
+                fail name
+                    (sprintf "expected %s, got %s%s"
+                        (if expectPragma then "a pragma" else "no pragma")
+                        (if hasPragma then "a pragma" else "none")
+                        (if hasMarker then " (nest reports omp requested but suppressed)" else ""))
+            elif hasMarker then
+                fail name "unexpected omp-suppressed marker in generated code"
+            else
+                passed <- passed + 1
+                resultLine Pass name
+                    (if expectPragma then "pragma emitted" else "serial (no clause)")
+    // ---- depth-as-licence: the exact pragma, not just its presence ----
+    for (name, src, expectedPragma) in ompDepthCases do
+        match cppOf name src with
+        | Error e -> fail name e
+        | Ok cpp ->
+            // Compare the whole pragma line: `collapse(2)` vs plain is exactly
+            // the distinction the licence controls, and `Contains` on the plain
+            // form would match the collapse form as a prefix.
+            let pragmaLines =
+                cpp.Split('\n')
+                |> Array.map (fun l -> l.Trim())
+                |> Array.filter (fun l -> l.StartsWith "#pragma omp")
+                |> Array.toList
+            match pragmaLines with
+            | [actual] when actual = expectedPragma ->
+                passed <- passed + 1
+                resultLine Pass name actual
+            | [actual] -> fail name (sprintf "expected `%s`, got `%s`" expectedPragma actual)
+            | [] -> fail name (sprintf "expected `%s`, got no pragma" expectedPragma)
+            | many -> fail name (sprintf "expected one pragma, got %d: %s" many.Length (String.concat " | " many))
+    // ---- placement: WHICH loop the pragma governs ----
+    for (name, src, expectedIdx) in ompPlacementCases do
+        match cppOf name src with
+        | Error e -> fail name e
+        | Ok cpp ->
+            // The emitter writes the pragma and the loop header it governs as
+            // consecutive lines, so the next non-blank line after the pragma is
+            // that header.
+            let lines = cpp.Split('\n') |> Array.map (fun l -> l.Trim())
+            let governed =
+                lines
+                |> Array.tryFindIndex (fun l -> l.StartsWith "#pragma omp")
+                |> Option.bind (fun i ->
+                    lines
+                    |> Array.skip (i + 1)
+                    |> Array.tryFind (fun l -> l <> "")
+                    |> Option.map (fun header ->
+                        // "for (size_t __iN = ..." -> "__iN"
+                        header.Split([|' '; '('; ')'; '='|])
+                        |> Array.tryFind (fun t -> t.StartsWith "__i")
+                        |> Option.defaultValue header))
+            match governed with
+            | Some idx when idx = expectedIdx ->
+                passed <- passed + 1
+                resultLine Pass name (sprintf "pragma governs %s" idx)
+            | Some idx -> fail name (sprintf "pragma governs %s, expected %s" idx expectedIdx)
+            | None -> fail name "no pragma found"
+    printFooter "OpenMP Pragma" [sprintf "%d passed" passed; sprintf "%d failed" failed]
+    { Block = "OpenMP Pragma"; Passed = passed; Failed = failed; Skipped = 0; FailedNames = failedNames }
+
 /// Run OpenMP thread-coverage tests. Generates representative loop-nest
 /// programs with codegen TEST MODE on (which injects per-region thread
 /// observation), compiles with -fopenmp, runs with OMP_NUM_THREADS forced > 1,

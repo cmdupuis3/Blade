@@ -264,6 +264,15 @@ and IRCallable = {
     IsStatic: bool
     IsCommutative: bool
     CommGroups: int list list
+    // AntisymGroups: the positions a `where antisymm(...)` clause declared
+    // anti-invariant. These positions ALSO appear in CommGroups (the grouping
+    // and iteration license are identical to comm's — one joint simplex over
+    // the group), so every axis-grouping consumer needs no change; this list
+    // is the extra bit that says the simplex is STRICT: no diagonal, sign flip
+    // on a swapped read. Empty for every kernel that did not declare it, so
+    // the reynolds antisymmetrization path (which carries its flag on the
+    // IRReynolds wrapper instead) is untouched.
+    AntisymGroups: int list list
     // Parallelism: per-(param-index, dim-count) detail from an `omp(...)` clause.
     // IsOmpParallel is the derived "this callable requested OpenMP" flag — the
     // opt-in signal that drives loop parallelization (see buildLoopNestCodeGen).
@@ -1918,6 +1927,10 @@ let mkCallable
         IsStatic = opts.IsStatic
         IsCommutative = isCommutative
         CommGroups = commGroups
+        // Declared antisymmetry is grafted on by the ONE construction site
+        // that has it (Lowering.lowerTypedLambda, from the lambda's
+        // where-clause); every other callable-building site is comm-only.
+        AntisymGroups = []
         Parallelism = parallelism
         IsOmpParallel = isOmpParallel
         IsCudaKernel = isCudaKernel
@@ -1955,7 +1968,11 @@ let mkLambdaCallable
 /// According to formalism section 10.9:
 /// 1. Group arrays by identity (consecutive identical arrays)
 /// 2. For each group: if comm + arity > 1, use SymIdx; else Idx
-///    (AntisymIdx instead of SymIdx when isReynoldsAntisym is set -- Reynolds
+///    (AntisymIdx instead of SymIdx when the group is DECLARED antisymmetric
+///     (`where antisymm(a, b)` — antisymGroups, the pin spelling: the kernel is
+///     used AS-IS, storing f(i,j) for i<j only, with reads of (j,i) negated by
+///     the index type's TfNegateOnSwap; no permutation sum) or when
+///     isReynoldsAntisym is set -- Reynolds
 ///     antisymmetrization over a commutative same-array group produces a
 ///     strictly-triangular antisymmetric output, NOT a symmetric one. The
 ///     antisymmetric output stores C(n,r) strict tuples with no diagonal,
@@ -1969,10 +1986,11 @@ let mkLambdaCallable
 ///    symmetry; the Reynolds flags only apply when a Reynolds clause is present.
 /// 3. Concatenate S-dims from all groups
 /// 4. Add T-dims from kernel output
-let deduceOutputType 
-    (arrayTypes: IRArrayType list) 
-    (identities: ArrayIdentity list) 
+let deduceOutputType
+    (arrayTypes: IRArrayType list)
+    (identities: ArrayIdentity list)
     (commGroups: int list list)
+    (antisymGroups: int list list)
     (sDimsPerArray: int list)
     (kernelTDims: IRIndexType list)
     (elemType: IRType)
@@ -2019,11 +2037,27 @@ let deduceOutputType
                 let recs = sDimRecordsByArray.[lv.ArrayIndex]
                 if lv.LocalDimIndex < recs.Length then Some recs.[lv.LocalDimIndex] else None
             else None
-        let outputSDims = 
+        let outputSDims =
             // Group ids in reordered level order; emit one index per group, in
             // first-appearance order (which matches the loop nest order).
             let levelArr = List.toArray sLevels
             let groupArr = List.toArray sGroups
+            // Is this axis group the one a `where antisymm(...)` clause
+            // declared? The clause names KERNEL PARAMETERS, which are 1:1 with
+            // argument positions, so the test is on the group's member levels'
+            // ArrayIndex values: every one of them must be listed in a single
+            // declared group, and the group must actually span more than one
+            // argument (a within-type symmetric block, whose members all share
+            // one ArrayIndex, is a property of the INPUT type and is never
+            // reclassified by a kernel clause).
+            let groupIsDeclaredAntisym (memberIdxs: int list) : bool =
+                if List.isEmpty antisymGroups then false
+                else
+                    let arrIdxs =
+                        memberIdxs |> List.map (fun k -> levelArr.[k].ArrayIndex) |> List.distinct
+                    List.length arrIdxs > 1
+                    && antisymGroups |> List.exists (fun g ->
+                           arrIdxs |> List.forall (fun a -> List.contains a g))
             let mutable emittedGroups = []
             let mutable result = []
             for gi in 0 .. levelArr.Length - 1 do
@@ -2046,6 +2080,7 @@ let deduceOutputType
                         let groupSymmetry =
                             if isReynolds then
                                 (if isReynoldsAntisym then SymAntisymmetric else SymSymmetric)
+                            elif groupIsDeclaredAntisym memberIdxs then SymAntisymmetric
                             else SymSymmetric
                         let prodExtent =
                             factors |> List.map (fun f -> f.Extent)
@@ -2076,10 +2111,14 @@ let deduceOutputType
                             // not override it. With NO Reynolds, a rank-0 elementwise
                             // kernel preserves the input's compact storage class verbatim
                             // (Sym/Antisym/Hermitian); only a plain (SymNone) multi-level
-                            // group defaults to symmetric.
+                            // group defaults to symmetric — unless the kernel DECLARED
+                            // the group antisymmetric (`where antisymm(a, b)`), which
+                            // pins the strict simplex the same way a comm clause pins
+                            // the inclusive one.
                             let groupSymmetry =
                                 if isReynolds then
                                     (if isReynoldsAntisym then SymAntisymmetric else SymSymmetric)
+                                elif groupIsDeclaredAntisym memberIdxs then SymAntisymmetric
                                 else
                                     (match rep.Symmetry with
                                      | SymSymmetric | SymAntisymmetric | SymHermitian -> rep.Symmetry
@@ -2255,6 +2294,14 @@ type LoopNestCodeGen = {
     /// before the nest and the Allgatherv after it. Always false outside
     /// mpiEmitMode.
     MpiSlab: bool
+    /// Whether the resolved kernel callable ASKED for OpenMP (`where omp(...)`),
+    /// independent of whether the nest actually gets a pragma. `IsParallel` on
+    /// the bindings is the CONJUNCTION of this and "level 0", so once a nest is
+    /// emitted serial the request bit is no longer recoverable from it — and
+    /// "no clause" becomes indistinguishable from "clause honoured nowhere".
+    /// Kept separately so the emitters can mark a requested-but-serial nest in
+    /// the generated C++ instead of silently dropping the request.
+    OmpRequested: bool
 }
 
 /// One dimension GROUP of a device buffer. Mirrors a single IRIndexType:
@@ -2933,6 +2980,25 @@ let buildLoopNestCodeGen
              rk.Callable.Captures, rk.Reynolds.IsAntisymmetric)
         | None -> ([], IRLit IRLitUnit, [], [], false)
 
+    // Positions the kernel declared antisymmetric (`where antisymm(a, b)`).
+    // These are already inside CommGroups (same grouping + iteration license),
+    // so only the STRICTNESS of the simplex reads this list: an argument
+    // position in a declared antisym group iterates i < j, never i <= j,
+    // because the strict-simplex storage the output type deduced has no
+    // diagonal cell to write. Empty for every kernel without the clause.
+    let declaredAntisymGroups =
+        match resolveKernel info.Kernel with
+        | Some rk -> rk.Callable.AntisymGroups
+        | None -> []
+    // Under a Reynolds wrapper the VARIANT owns the output symmetry (and hence
+    // the strictness) — a declared clause on the wrapped kernel is an
+    // iteration license only, never a storage claim — so the declared list is
+    // consulted only outside reynolds. Keeps `reynolds(k, Symmetric)` with a
+    // stray antisymm clause from iterating off its own storage.
+    let inDeclaredAntisym (arrayIdx: int) =
+        not info.HasReynolds
+        && declaredAntisymGroups |> List.exists (List.contains arrayIdx)
+
     // Opt-in parallelism: the loop nest is parallelized ONLY if the resolved
     // kernel callable requested OpenMP via an `omp(...)` clause. No clause =>
     // serial (the language default, like C/Rust). This replaces the earlier
@@ -2943,7 +3009,16 @@ let buildLoopNestCodeGen
         match resolveKernel info.Kernel with
         | Some rk -> rk.Callable.IsOmpParallel
         | None -> false
-    
+    // The `omp(a: n)` DEPTHS, as (paramIndex, n). Until now this list was built
+    // by extractParallelism and then never read: `omp` was effectively a boolean
+    // and the collapse depth came purely from bound structure, so `omp(a: 1)` on
+    // a 2-level nest still emitted `collapse(2)` — threading a dimension of an
+    // argument that was never licensed.
+    let ompDepths =
+        match resolveKernel info.Kernel with
+        | Some rk -> rk.Callable.Parallelism
+        | None -> []
+
     // Map kernel params to (source, slot). A VIRTUAL source (range<...>) consumes
     // one param PER index-type slot; every other source consumes one. This mirrors
     // buildApplyInfo's expandedRows so param indices line up. The flat param index
@@ -2958,7 +3033,41 @@ let buildLoopNestCodeGen
             max 1 (arrayTypes.[pos].IndexTypes |> List.sumBy (fun ix -> ix.Rank))
         else 1
     let paramStart pos = List.init (max 0 pos) paramSpan |> List.sum
-    
+
+    // ---- `omp(a: n)` as a LICENSE ------------------------------------------
+    //
+    // `n` is a permission, not a demand: "up to n dimensions of this argument
+    // may carry OpenMP threads". It CAPS the structural strategy rather than
+    // replacing it — a level is parallelized only where the license and the
+    // bound structure agree, so `omp(a: 2)` on a nest that can only collapse
+    // one level still collapses one, and `omp(a: 1)` on a collapsible 2-level
+    // nest now stops at one instead of silently taking both.
+    //
+    // Depth counts the levels OF THAT ARGUMENT, outermost first (formalism.md
+    // §17.3). A real array owns all its rank components through ONE param, so
+    // the license covers its first n components. A virtual source (range<...>)
+    // spends one param PER slot, so each such param owns exactly one level and
+    // any n >= 1 covers it. Expressed uniformly as "ordinal of this level among
+    // the levels sharing its param".
+    let ompDepthOfParam (pIdx: int) : int option =
+        ompDepths |> List.tryPick (fun (i, n) -> if i = pIdx then Some n else None)
+    // A clause whose variable names no parameter leaves ompDepths EMPTY while
+    // IsOmpParallel stays true (extractParallelism drops unmatched names). That
+    // is a source mistake — TypeCheck warns about it — but it must not silently
+    // turn a requested nest serial, so fall back to the historical "outermost
+    // level only" licence rather than to nothing.
+    let licenseUnresolved = kernelRequestedOmp && List.isEmpty ompDepths
+    let isLevelLicensed (arrayPos: int) (rankIdx: int) (level: int) : bool =
+        if not kernelRequestedOmp then false
+        elif licenseUnresolved then level = 0
+        else
+            let (pIdx, ordinal) =
+                if isVirtualSrc arrayPos then (paramStart arrayPos + rankIdx, 0)
+                else (paramStart arrayPos, rankIdx)
+            match ompDepthOfParam pIdx with
+            | Some n -> ordinal < n
+            | None -> false
+
     // Helper: create an ElementBinding for an array at a given arity component
     let mkElement (arrayPos: int) (rankComponent: int) (dimIndex: int) =
         let arrName = if arrayPos < arrayNames.Length then arrayNames.[arrayPos] else sprintf "arr%d" arrayPos
@@ -3065,13 +3174,24 @@ let buildLoopNestCodeGen
                     let strictOffset =
                         if isTriangular && isAntisymmetric then k
                         else 0
-                    // Outer level is the parallelization candidate, but ONLY if
-                    // the kernel opted into OpenMP via an `omp(...)` clause. No
-                    // clause => serial (the default). Triangularity does not veto
-                    // it: the outermost loop of a triangular nest is independently
-                    // parallelizable (each outer index owns a disjoint sub-slab);
-                    // genNestPragma picks the safe strategy (collapse vs dynamic).
-                    let isParallel = level = 0 && kernelRequestedOmp
+                    // Which levels the `omp(...)` clause LICENSES. No clause =>
+                    // serial (the default). Triangularity does not veto a
+                    // licensed level: the outer loop of a triangular nest is
+                    // independently parallelizable (each outer index owns a
+                    // disjoint sub-slab); genNestPragma picks the safe strategy
+                    // (collapse vs dynamic) from the licensed prefix.
+                    //
+                    // CO-ITERATION: every argument is peeled at EVERY level, so
+                    // each licensed argument's depth licenses that many levels
+                    // from the outside in; the most permissive one wins. (There
+                    // is no per-argument level ownership to distinguish here —
+                    // that only exists on the outer-product path below.)
+                    let coIterLicense =
+                        if not kernelRequestedOmp then 0
+                        elif licenseUnresolved then 1
+                        elif List.isEmpty ompDepths then 0
+                        else ompDepths |> List.map snd |> List.max
+                    let isParallel = level < coIterLicense
                     let state =
                         if isTriangular && k > 0 then SCSymmetric
                         else SCNeither
@@ -3142,10 +3262,13 @@ let buildLoopNestCodeGen
                 let deps = if level < boundDependencies.Length then boundDependencies.[level] else []
                 let isTriangular = level < triangularLevels.Length && triangularLevels.[level]
                 let state = if level < symcomStates.Length then symcomStates.[level] else SCNeither
-                // Outer level is the parallelization candidate, but ONLY if the
-                // kernel opted into OpenMP (see shared-index path note above);
-                // genNestPragma picks collapse vs. dynamic from bound structure.
-                let isParallel = level = 0 && kernelRequestedOmp
+                // Which levels the `omp(...)` clause licenses (see the
+                // shared-index path note above). OUTER PRODUCT: each level is
+                // owned by exactly one source, so the licence is checked against
+                // THAT argument's depth, with RankIndex as the level's ordinal
+                // within its source. genNestPragma then picks collapse vs.
+                // dynamic over the licensed prefix.
+                let isParallel = isLevelLicensed arrayPos levelInfo.RankIndex level
                 // Strict (j > i > ...) bounds are required whenever the OUTPUT
                 // storage is antisymmetric — strict-triangular storage has no
                 // diagonal, so the iteration must not visit it. Two ways the
@@ -3157,6 +3280,13 @@ let buildLoopNestCodeGen
                 //       descriptor). Here the INPUT arrays are plain (SymNone) —
                 //       the triangular iteration comes from the commutative path
                 //       — so IndexSpace.Symmetry alone would miss it.
+                //   (3) the kernel DECLARED this argument position antisymmetric
+                //       (`where antisymm(a, b)`, the pin spelling). Same shape as
+                //       (2) — plain inputs, triangularity from the group — but the
+                //       kernel is used AS-IS with no permutation sum, so the flag
+                //       rides the callable rather than a Reynolds wrapper. Checked
+                //       per LEVEL (by its owning argument position) so a declared
+                //       pair cannot make an unrelated symmetric group strict.
                 // The strict offset is CUMULATIVE across the group: level a (the
                 // a-th index within the strict group, 0-based) must start a slots
                 // past the group base, because each prior index already consumed
@@ -3169,7 +3299,9 @@ let buildLoopNestCodeGen
                 // antisym rank-3 storage-collision bug.)
                 let strictOffset =
                     if isTriangular &&
-                       (levelInfo.IndexSpace.Symmetry = SymAntisymmetric || isAntisymmetric)
+                       (levelInfo.IndexSpace.Symmetry = SymAntisymmetric
+                        || isAntisymmetric
+                        || inDeclaredAntisym arrayPos)
                     then List.length deps
                     else
                         // Compound-inner halo: the interior shrink cannot fold
@@ -3245,6 +3377,7 @@ let buildLoopNestCodeGen
         IsAntisymmetric = isAntisymmetric
         FoldWrapper = None
         MpiSlab = false
+        OmpRequested = kernelRequestedOmp
     }
 
 // ============================================================================
@@ -4767,20 +4900,25 @@ let specializeFunction (func: IRFuncDef) (arities: int list) (funcMap: Map<IRId,
             acc |> List.rev |> Map.ofList
 
         // Specializing arity groups means rewriting group indices to
-        // account for expanded parameters. If the source had groups,
-        // newCommGroups is the expanded form; otherwise empty.
-        let (newIsComm, newCommGroups) =
-            if func.IsCommutative then
-                let expanded =
-                    func.CommGroups |> List.map (fun group ->
-                        group |> List.collect (fun idx ->
-                            match Map.tryFind idx origToNew with
-                            | Some (start, span) ->
-                                if span = 1 then [start]
-                                else List.init span (fun i -> start + i)
-                            | None -> [idx]))
-                (true, expanded)
-            else (false, [])
+        // account for expanded parameters: a pack slot of span k becomes the
+        // k consecutive expanded positions, everything else maps 1:1.
+        let expandGroups (groups: int list list) =
+            groups |> List.map (fun group ->
+                group |> List.collect (fun idx ->
+                    match Map.tryFind idx origToNew with
+                    | Some (start, span) ->
+                        if span = 1 then [start]
+                        else List.init span (fun i -> start + i)
+                    | None -> [idx]))
+        // Expand whatever groups the source carried. Historically this was
+        // gated on IsCommutative, which was equivalent (the flag and a
+        // non-empty group list were set together); the declared-antisymm
+        // spelling breaks that coupling — an antisym kernel has groups but is
+        // NOT commutative — so the expansion keys off the lists themselves and
+        // the flag is carried through untouched.
+        let newIsComm = func.IsCommutative
+        let newCommGroups = expandGroups func.CommGroups
+        let newAntisymGroups = expandGroups func.AntisymGroups
 
         // Mangled name encodes every slot's arity, so different shapes get
         // distinct specializations. `pairSum_arity_2_3` for arities [2; 3].
@@ -4794,6 +4932,7 @@ let specializeFunction (func: IRFuncDef) (arities: int list) (funcMap: Map<IRId,
           IsStatic = func.IsStatic
           IsCommutative = newIsComm
           CommGroups = newCommGroups
+          AntisymGroups = newAntisymGroups
           Parallelism = func.Parallelism
           IsOmpParallel = func.IsOmpParallel
           IsCudaKernel = func.IsCudaKernel

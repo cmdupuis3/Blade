@@ -1,0 +1,23 @@
+// TEST: Antisymm pin (declared) - strict triangle without reynolds
+// The `where antisymm(x, y)` PIN: the confirm-and-pin artifact for a kernel
+// the stage-3 deduction proves anti-invariant (plan §4). Unlike
+// reynolds(g, Antisymmetric) — which SUMS the signed permutations and needs
+// the comm iteration license on the wrapped kernel (symmetry/019,
+// index-types/050) — the declared pin uses the kernel AS-IS: cell (i, j) with
+// i < j stores f(A[i], A[j]) verbatim, and a read of (j, i) negates through
+// the index type's own negate-on-swap transform. No permutation sum, no
+// reynolds, same C(n,2) strict-simplex storage (diagonal implicitly zero).
+let A = [1.0, 2.0, 3.0, 4.0]
+let L = method_for(A, A)
+let g = lambda(x, y) where antisymm(x, y) -> x - y
+let result = L <@> g |> compute
+// Hand computation, strict pairs i < j over A = [1,2,3,4], value A[i] - A[j]:
+// (0,1)=-1 (0,2)=-2 (0,3)=-3 (1,2)=-1 (1,3)=-2 (2,3)=-1  -> 6 cells, not 16.
+// The dense (unpinned) form of this kernel stores all n*n cells: symmetry/022
+// runs it over a 3-element array and prints the full 9, whose i<j entries are
+// the corresponding sub-list and whose zero diagonal is exactly what the
+// strict simplex drops as implicit.
+// Identical values to symmetry/019, whose reynolds(2x+y, Antisymmetric)
+// antisymmetrizes to this very kernel — the pin reaches the same storage
+// without the permutation sum.
+// EXPECT: result = [-1.0, -2.0, -3.0, -1.0, -2.0, -1.0]

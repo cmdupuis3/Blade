@@ -107,8 +107,12 @@ let withContext (context: string list) (d: Diagnostic) : Diagnostic =
 // ============================================================================
 
 module Codes =
-    let registry : Map<string, string> =
-        Map.ofList [
+    /// Source of truth, as a LIST so duplicate codes stay visible — building
+    /// the Map directly would silently drop all but the last entry for a
+    /// repeated code (that is exactly how BL4007 was double-booked once).
+    /// Test_Diagnostics asserts this list has no duplicate codes.
+    let registryEntries : (string * string) list =
+        [
             // BL0xxx — lexer
             "BL0001", "unknown character"
             "BL0002", "unterminated string"
@@ -141,6 +145,8 @@ module Codes =
             "BL4006", "mutual group violation"
             "BL4007", "no equivariant map exists"
             "BL4008", "equivariance discipline violation"
+            "BL4009", "galilean discipline violation"
+            "BL4010", "confirm-and-pin storage suggestion"
             // BL5xxx — elaborators
             "BL5000", "ml elaboration error"
             "BL5100", "ppl elaboration error"
@@ -167,6 +173,9 @@ module Codes =
             "BL9002", "internal codegen invariant violated"
             "BL9003", "internal lowering invariant violated"
         ]
+
+    /// Lookup view of registryEntries. Keep entries as the thing you edit.
+    let registry : Map<string, string> = Map.ofList registryEntries
 
     let isRegistered (code: string) = Map.containsKey code registry
 
