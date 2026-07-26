@@ -1,0 +1,33 @@
+// TEST: Memfree Sort Mask Unique Function Temps
+// ============================================================================
+// Free-hazard guard: the materialize-form combinators allocate RAW buffers
+// rather than the ordinary pool skeleton — sort emits a permutation array
+// plus a copied payload, unique a dedup payload, mask a Bool presence array.
+// All three are per-call temps here, consumed only into a scalar, so every
+// one must be reclaimed at the function epilogue. Called per step of a
+// recursion. The mask is read back through an if-kernel rather than
+// compound(), because compound() is top-level-only (BL6002).
+// ============================================================================
+type C = Idx<5>
+type Steps = Idx<5>
+let BASE: Array<Float like C> = [3.0, 1.0, 4.0, 1.0, 5.0]
+function score(n: Int64) -> Float = {
+    let t = method_for(BASE) <@> lambda(x) -> x + 0.5 * n |> compute
+    let s = sort(t, lambda(x) -> 0.0 - x)
+    let sv = method_for(s) <@> lambda(x) -> x |> compute
+    let u = unique(t)
+    let uv = method_for(u) <@> lambda(x) -> x |> compute
+    let m = mask(t, lambda(x) -> x > 4.0)
+    let mf = method_for(m) <@> lambda(b) -> (if b then 1.0 else 0.0) |> compute
+    let mcount = reduce(mf, (+))
+    sv(0) - sv(4) + reduce(uv, (+)) * 0.001 + mcount
+}
+let rec acc: Array<Float like Steps> =
+    match acc with
+    | zero -> zero
+    | zero :: s -> zero :: 0.0
+    | prefix :: n -> prefix :: prefix(n - 1) + score(n)
+let sfinal = acc(4)
+// EXPECT: BASE = [3, 1, 4, 1, 5]
+// EXPECT: acc = [0, 6.015, 12.032, 19.051, 26.072]
+// EXPECT: sfinal = 26.072

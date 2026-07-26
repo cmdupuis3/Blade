@@ -396,4 +396,144 @@ namespace nested_array_utilities {
         return Array<T, 2>{ rows, ext };
     }
 
+    // =========================================================================
+    // Wrapper-shaped teardown — ONE routine per PRODUCER shape
+    // =========================================================================
+    //
+    // The dense family (deallocate<> / deallocate_strict<> in
+    // nested_array_utilities.hpp) can be a single pair of entry points because
+    // allocate<> is the single dense producer and its layout is recoverable from
+    // (TYPE, SYMM, DIAGONALS, extents). Ragged and Compound have no such
+    // property: the SAME wrapper type is handed back by producers with three
+    // different ownership stories, and the wrapper stores no ownership bit.
+    //
+    //   OWNS EVERYTHING   compound(dense, mask), a provider's load_compound:
+    //                     fresh compact buffer AND a freshly built index.
+    //   OWNS THE DATA     a shape-preserving map over a ragged/compound input:
+    //                     fresh pool (+ fresh row table) over BORROWED shape
+    //                     metadata — the input's lens/offsets/extents, or the
+    //                     input's compound_index_t.
+    //   OWNS ONLY GLUE    make_partial_compound / make_partial_window /
+    //                     make_partial_window_trail: data is a contiguous SLICE
+    //                     of the parent buffer (that is the whole point of the
+    //                     lex-sorted layout), and the only fresh allocations are
+    //                     the sub-index / extents / row table.
+    //   plus the GATHERS  make_partial_compound_gather / _gather_dense /
+    //                     _gather_dense_trail: scattered pins cannot alias, so
+    //                     these deep-copy and own their buffer as well as glue.
+    //
+    // So the routines below are named for the PRODUCER, not for the type, and
+    // there is exactly one per make_partial_* helper above. Calling the wrong
+    // one is a heap error, which is why none of them tries to be clever: each
+    // frees precisely the allocations its documented producer made.
+    //
+    // Every routine takes a NON-CONST reference and nulls what it freed. That
+    // costs two stores at a scope exit and makes a duplicated free a no-op
+    // (`delete nullptr` / `delete[] nullptr`) instead of heap corruption —
+    // cheap insurance in a compiler whose free sites are emitted, not written.
+    // Members that were BORROWED are deliberately left intact, so a stale read
+    // through them is still a diagnosable use-after-free of the owner rather
+    // than of this wrapper.
+
+    // Owning-ragged wrapper: pool + row table, shape metadata BORROWED. The
+    // pool is passed explicitly for the reason given on
+    // deallocate_ragged_storage (rows[0] is not a reliable pool base).
+    // `extents` / `lens` / `offsets` are left untouched — they belong to the
+    // input this result was shaped from.
+    template<typename T>
+    void deallocate_ragged(Ragged<T>& r, T* pool) {
+        deallocate_ragged_storage<T>(r.data, pool);
+        r.data = nullptr;
+    }
+
+    // Owning-ragged wrapper whose rows are each their OWN block (group_by
+    // layout). `nrows` is normally `r.extents[0]`, but is taken explicitly
+    // because a caller may hold the count when the extents table does not
+    // describe the row table's length.
+    template<typename T>
+    void deallocate_ragged_rows(Ragged<T>& r, size_t nrows) {
+        deallocate_ragged_rows_owned<T>(r.data, nrows);
+        r.data = nullptr;
+    }
+
+    // Compound owning BOTH buffer and index: `compound(dense, mask)` and the
+    // provider compound read. NEVER pass a partial/window view here — its data
+    // is a slice of the parent buffer and `delete[]` on it is an interior free.
+    template<typename T, size_t RANK>
+    void deallocate_compound(Compound<T, RANK>& c) {
+        deallocate_compound_storage(c.data, c.idx);
+        c.data = nullptr;
+        c.idx = nullptr;
+    }
+
+    // Compound owning ONLY its buffer: the elementwise-map output, which shares
+    // the input compound's index (identical mask by construction) and its
+    // trailing_stride. The index outlives this result, so it is left alone.
+    template<typename T, size_t RANK>
+    void deallocate_compound_shared_index(Compound<T, RANK>& c) {
+        deallocate_compound_data_only(c.data);
+        c.data = nullptr;
+    }
+
+    // Compound owning ONLY its index: the make_partial_compound residual. Data
+    // is `parent.data + lo * trailing_stride`, a window into the parent's
+    // buffer — freeing it corrupts the parent. Must run BEFORE the parent's own
+    // teardown only in the sense that it must not run after the parent's buffer
+    // is gone AND still be read; the index itself is independent.
+    template<typename T, size_t RANK>
+    void deallocate_compound_view(Compound<T, RANK>& c) {
+        deallocate_compound_index_only(c.idx);
+        c.idx = nullptr;
+    }
+
+    // make_partial_window residual: Array<T,1> sharing the parent's data, with
+    // a heap `size_t[1]` extent as its only allocation.
+    template<typename T>
+    void deallocate_window_view(Array<T, 1>& a) {
+        delete[] a.extents;
+        a.extents = nullptr;
+    }
+
+    // make_partial_window_trail residual: Array<T,2> whose row table and
+    // 2-entry extents are fresh but whose ELEMENTS are the parent's contiguous
+    // block. `a.data` is the row table (T**), not the pool, so `delete[] a.data`
+    // frees exactly the table.
+    template<typename T>
+    void deallocate_window_trail_view(Array<T, 2>& a) {
+        delete[] a.data;
+        delete[] a.extents;
+        a.data = nullptr;
+        a.extents = nullptr;
+    }
+
+    // make_partial_gather_dense residual: Array<T,1> that OWNS both its copied
+    // buffer (rank 1, so `a.data` IS the buffer) and its extent.
+    template<typename T>
+    void deallocate_gather_dense(Array<T, 1>& a) {
+        delete[] a.data;
+        delete[] a.extents;
+        a.data = nullptr;
+        a.extents = nullptr;
+    }
+
+    // make_partial_gather_dense_trail residual: Array<T,2> owning a fresh pool,
+    // its row table, and its extents. The pool is not returned separately, so it
+    // is recovered as `a.data[0]` — valid because the producer writes
+    // `rows[i] = pool + i * trail` in order, making row 0 the pool base.
+    //
+    // BOUNDED LEAK, cnt == 0: the producer still allocates a 1-slot pool and
+    // table so no pointer is null, but leaves `rows[0]` UNINITIALIZED, so the
+    // pool base is unrecoverable. We free the table and extents and leak that
+    // one block rather than `delete[]` an indeterminate pointer — the same
+    // trade deallocate<> makes for its degenerate total == 0 sentinel. Bound:
+    // one `trail * sizeof(T)` block per empty gather, once.
+    template<typename T>
+    void deallocate_gather_dense_trail(Array<T, 2>& a) {
+        if (a.extents && a.extents[0] > 0) delete[] a.data[0];
+        delete[] a.data;
+        delete[] a.extents;
+        a.data = nullptr;
+        a.extents = nullptr;
+    }
+
 }  // namespace nested_array_utilities

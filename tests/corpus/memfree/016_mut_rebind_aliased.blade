@@ -1,0 +1,39 @@
+// TEST: Memfree Mut Rebind With Live Alias
+// ============================================================================
+// Free-hazard guard: the INELIGIBLE twin of 015. STG is still rebound whole
+// (`STG = t`) from inside the step function, but two other names are bound to
+// it BEFORE the recursion and read AFTER it: `brow`, a row sub-view into
+// STG's pool, and `bwhole`, a plain rename. Under today's REBIND semantics
+// the STG NAME is repointed at each step's fresh t and the pre-loop buffer is
+// left untouched, so both still read the ORIGINAL zeros while STG itself
+// shows the last step's values. If the copy-into-place transform of 015 were
+// allowed to fire here it would scribble the step values through the shared
+// pool and these pins would break — which is the point: the transform must
+// be gated on the mut having no live alias or view.
+// ============================================================================
+type C = Idx<3>
+type R = Idx<2>
+type Steps = Idx<5>
+let mut STG = method_for(range<R, C>) <@> lambda(i, j) -> 0.0 * i + 0.0 * j |> compute
+let brow = STG(0)
+let bwhole = STG
+function stepf(n: Int64) -> Float = {
+    let t = method_for(range<R, C>) <@> lambda(i, j) -> 10.0 * i + 1.0 * j + 100.0 * n |> compute
+    STG = t
+    reduce(t, (+)) * 0.001
+}
+let rec acc: Array<Float like Steps> =
+    match acc with
+    | zero -> zero
+    | zero :: s -> zero :: 0.0
+    | prefix :: n -> prefix :: prefix(n - 1) + stepf(n)
+let sfinal = acc(4)
+let browsum = reduce(brow, (+))
+let bwholesum = reduce(bwhole, (+))
+// EXPECT: STG = [400, 401, 402, 410, 411, 412]
+// EXPECT: brow = [0, 0, 0]
+// EXPECT: bwhole = [0, 0, 0, 0, 0, 0]
+// EXPECT: acc = [0, 0.636, 1.872, 3.708, 6.144]
+// EXPECT: sfinal = 6.144
+// EXPECT: browsum = 0
+// EXPECT: bwholesum = 0

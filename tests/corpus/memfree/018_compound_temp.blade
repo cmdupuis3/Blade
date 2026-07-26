@@ -1,0 +1,41 @@
+// TEST: Memfree Compound Data And Mask Temps
+// ============================================================================
+// Free-hazard guard: compound() owns TWO buffers (the compacted data pool and
+// the coordinate/idx table) and mask() owns a Bool presence array.
+// compound(dense, mask) is top-level-only (BL6002), so the compound POS lives
+// at module scope while the per-call mask temps live inside cstep — which
+// splits the hazard cleanly in two:
+//   - the per-call mask t / m / mf triple must be freed at cstep's epilogue,
+//     five times over;
+//   - POS's data and idx buffers are READ from inside every one of those
+//     frames and must never be dragged into the epilogue's free set — nor
+//     must DBL, the computed dense array POS was compacted from.
+// POS is read again AFTER the recursion (posread / posn), which is what
+// catches a premature free of either compound buffer.
+// ============================================================================
+type C = Idx<6>
+type Steps = Idx<5>
+let SRC: Array<Float like C> = [3.0, -1.0, 4.0, -2.0, 5.0, -3.0]
+let DBL = method_for(SRC) <@> lambda(x) -> x * 2.0 |> compute
+let POS = compound(DBL, mask(DBL, lambda(x) -> x > 0.0))
+function cstep(n: Int64) -> Float = {
+    let t = method_for(DBL) <@> lambda(x) -> x + 1.0 * n |> compute
+    let m = mask(t, lambda(x) -> x > 0.0)
+    let mf = method_for(m) <@> lambda(b) -> (if b then 1.0 else 0.0) |> compute
+    let mcount = reduce(mf, (+))
+    POS(0) + POS(2) + POS(4) + mcount + 1.0 * n * 0.001
+}
+let rec acc: Array<Float like Steps> =
+    match acc with
+    | zero -> zero
+    | zero :: s -> zero :: 0.0
+    | prefix :: n -> prefix :: prefix(n - 1) + cstep(n)
+let sfinal = acc(4)
+let posread = POS(4)
+let posn = extents(POS)
+// EXPECT: SRC = [3, -1, 4, -2, 5, -3]
+// EXPECT: DBL = [6, -2, 8, -4, 10, -6]
+// EXPECT: acc = [0, 27.001, 54.003, 82.006, 110.01]
+// EXPECT: sfinal = 110.01
+// EXPECT: posread = 10
+// EXPECT: posn = 3

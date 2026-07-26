@@ -246,6 +246,46 @@ let private emitAllocRhs
     | AllocUnsupported reason ->
         Error (sprintf "Blade codegen: unsupported antisymmetric output storage â€” %s" reason)
 
+// ----------------------------------------------------------------------------
+// Materializer allocation descriptors (deterministic deallocation, site 7)
+// ----------------------------------------------------------------------------
+//
+/// What a `materialize*Form` builder allocated, described BY the code that chose
+/// the template arguments. The builders pick (spec, SYMM, STRICT) from
+/// form-specific masks that their statement-level consumers never see;
+/// re-deriving that triple at the consumer would risk `deallocate` walking a
+/// different skeleton than `allocate` built — silent heap corruption, not a
+/// compile error. So each builder returns its own descriptors alongside the
+/// emitted lines, and the consumer only decides WHETHER to register them:
+/// statement-position consumers do (their scope's closing brace is a real exit
+/// point), expression / IIFE consumers drop them (unchanged, still leaked).
+///
+/// Declared here, beside `emitAllocRhs` / `EmitCpp.arrayAlloc`, because the
+/// builders live in the `exprToCppCore` rec group far above the allocation
+/// registry; `registerMaterializedAllocs` (below the registry) converts these
+/// into `TrackedAlloc`s.
+type MaterializedAlloc =
+    /// `Array<Elem, Rank> Name = { allocate[_strict]<promote<Elem,Rank>::type,
+    /// Symm[, Strict]>(ext), ext }` — freed by the mirrored deallocate routine.
+    /// Every such form declares its extents table as a STACK `size_t N_ext[R]`
+    /// (or a static constexpr), so no owned-extents `delete[]` accompanies it.
+    | MatPool of Name: string * Elem: string * Rank: int * Symm: string * Strict: string option
+    /// A form that built its allocation through `emitAllocRhs` from an
+    /// AllocSpec (negate / conjugate / array-copy: same storage class as the
+    /// SOURCE, so the spec is data-dependent). The free goes back through
+    /// `deallocArgsFor` with the identical spec / elem / rank / SYMM /
+    /// extents-name, which keeps the antisymmetric three-argument shape
+    /// (`..., mask, false`) derived in exactly one place.
+    | MatPoolSpec of
+        Name: string * Spec: AllocSpec * Elem: string * Rank: int *
+        Symm: string * ExtentsName: string
+    /// `Array<Elem, 1> Name = { new Elem[n], ext }` — the mask / sort / unique /
+    /// union / intersect family's raw backing. Freed with `delete[] Name.data`.
+    | MatRawData of Name: string
+    /// A bare `T* Name = new T[n]` scratch buffer (sort's permutation table).
+    /// Freed with `delete[] Name`.
+    | MatRawBuf of Name: string
+
 /// Module-level OpenMP test-mode flag. When set, parallel loop nests emit
 /// additional thread-coverage instrumentation: each parallel region records
 /// which OpenMP threads actually executed iterations, and prints a parseable
@@ -1161,6 +1201,47 @@ let isCompoundArrayType (arrTy: IRArrayType) : bool =
     arrTy.IndexTypes |> List.exists (fun idx ->
         idx.IxKind = IxKCompound)
 
+/// Array types whose storage is the plain dense pool + pointer skeleton that
+/// `deallocate` walks. Ragged, compound and dep-idx layouts carry side tables
+/// (lens/offsets/row pointers, compound_index_t) with their own ownership rules.
+/// (Declared here rather than in the deallocation registry below because Phase
+/// M's eligibility analysis and the registry both need it.)
+let isFreeableDenseArrayType (at: IRArrayType) : bool =
+    not (isCompoundArrayType at) && not (isRaggedArrayType at) && not (isDepIdxArrayType at)
+
+// ----------------------------------------------------------------------------
+// Phase M cell (analysis lives with the deallocation block further down)
+// ----------------------------------------------------------------------------
+
+let private copyInPlaceMutsStorage =
+    System.Threading.AsyncLocal<Map<IRId, int> ref>()
+
+/// Module-level mut array bindings whose whole-array reassignments compile to a
+/// copy-into-place, mapped to the STATIC element count of the shared pool.
+/// Filled by `computeCopyInPlaceMuts` (below, where the freshness helpers live);
+/// read here so `exprToCppCore`'s IRAssign arm can consult it. AsyncLocal for the
+/// same per-parallel-test-task isolation as exprWarningsCell.
+let copyInPlaceMutsCell () : Map<IRId, int> ref =
+    let v = copyInPlaceMutsStorage.Value
+    if isNull (box v) then
+        let fresh = ref Map.empty
+        copyInPlaceMutsStorage.Value <- fresh
+        fresh
+    else v
+
+/// The single decision point shared by the two IRAssign emission arms and
+/// computeScopeEscapes: does THIS assign compile to a copy-into-place?
+/// Returns (targetId, rhsId, element count). Eligibility already proved that
+/// every whole-array assign to an eligible target has a plain-IRVar RHS of the
+/// same static shape, so matching the two id slots here is sufficient.
+let copyInPlaceAssign (target: IRExpr) (value: IRExpr) : (IRId * IRId * int) option =
+    match target, value with
+    | LVVar tid, IRVar (rid, _) ->
+        match Map.tryFind tid (copyInPlaceMutsCell ()).Value with
+        | Some n -> Some (tid, rid, n)
+        | None -> None
+    | _ -> None
+
 /// Render an array type as its C++ type string. Handles four cases:
 ///   * CompoundIdx<mask>: `Compound<T, RANK>` -- a masked product space whose
 ///     valid tuples are tabulated at runtime; accessed by whole-tuple gather,
@@ -1634,7 +1715,17 @@ let rec exprToCppCore (subst: SubstMap) (names: Map<IRId, string>) (expr: IRExpr
                 sprintf "%s%s" arrStr idxStr
             | LVField (obj, f) -> sprintf "%s.%s" (exprToCppCore subst names obj) f
             | LVOther e -> exprError "invalid assignment target"
-        sprintf "%s = %s" targetStr (exprToCppCore subst names value)
+        // Phase M: a sole-owner mut keeps ONE pool for the whole program. The
+        // wrapper is NOT repointed at the RHS; the RHS's elements are copied
+        // into the pool the mut has always owned, which leaves the RHS temp
+        // iteration-owned (its own scope frees it). `pool_base` is rank-generic
+        // -- at rank 1 the leaf arm just returns `&data[0]`, i.e. `data` itself.
+        match copyInPlaceAssign target value with
+        | Some (_, rid, n) ->
+            let rhsStr = Map.tryFind rid names |> Option.defaultValue (sprintf "__v%d" rid)
+            sprintf "std::copy_n(pool_base(%s.data), %d, pool_base(%s.data))" rhsStr n targetStr
+        | None ->
+            sprintf "%s = %s" targetStr (exprToCppCore subst names value)
     | IRForRange (vid, lo, hi, body) ->
         exprError "for-range loop in expression position"
     | IROpaqueExtent ->
@@ -2245,7 +2336,10 @@ and renderLetExpr (subst: SubstMap) (names: Map<IRId, string>) id value body : s
         let inlineElemTypeStr (form: IRExpr) =
             inferInlineElemTypeStr "IRLet inline form" form
         match materializeInlineForm subst names (sprintf "__v%d" id) (inlineElemTypeStr value) value with
-        | Some preludeStmts ->
+        // Expression position: the materialization is spliced into an IIFE, so
+        // there is no statement scope whose exit could carry a free. Drop the
+        // descriptors (unchanged pre-existing leak).
+        | Some (preludeStmts, _) ->
             let bodyStr =
                 if isUnitExpr body then "((void)0)"
                 else exprToCppCore subst names' body
@@ -2307,7 +2401,9 @@ and renderUnitStmts (subst: SubstMap) (names: Map<IRId, string>) (expr: IRExpr) 
                 renderUnitStmts subst names value
             else
                 match materializeInlineForm subst names (sprintf "__v%d" letId) (inferInlineElemTypeStr "statement-position let" value) value with
-                | Some prelude -> prelude |> String.concat " "
+                // Inline statement TEXT for an enclosing IIFE — same
+                // no-scope-exit situation as renderLetExpr above; drop.
+                | Some (prelude, _) -> prelude |> String.concat " "
                 | None -> sprintf "auto __v%d = %s;" letId (exprToCppCore subst names value)
         [valueStmt; renderUnitStmts subst names' body]
         |> List.filter (fun s -> s <> "")
@@ -2434,7 +2530,13 @@ and exprToCppWithVar (names: Map<IRId, string>) (varId: IRId) (varName: string) 
 ///
 /// Mutually recursive with exprToCpp so it can render nested predicate
 /// and key bodies. Returns None for forms outside this set.
-and materializeInlineForm (subst: SubstMap) (names: Map<IRId, string>) (varName: string) (elemTypeStr: string) (form: IRExpr) : string list option =
+///
+/// Each builder returns its emitted lines PLUS the `MaterializedAlloc`
+/// descriptors for whatever IT allocated (empty where the form allocates
+/// nothing, e.g. the rank-k mask `#error`). Statement-position consumers hand
+/// those to `registerMaterializedAllocs` so the storage is freed at scope exit;
+/// expression / IIFE consumers drop them and keep today's leak.
+and materializeInlineForm (subst: SubstMap) (names: Map<IRId, string>) (varName: string) (elemTypeStr: string) (form: IRExpr) : (string list * MaterializedAlloc list) option =
     match form with
     | IRMask (arrExpr, predExpr) ->
         materializeMaskForm subst names varName elemTypeStr arrExpr predExpr
@@ -2461,7 +2563,7 @@ and materializeInlineForm (subst: SubstMap) (names: Map<IRId, string>) (varName:
     | _ -> None
 
 
-and materializeMaskForm (subst: SubstMap) (names: Map<IRId, string>) (varName: string) (elemTypeStr: string) (arrExpr: IRExpr) (predExpr: IRExpr) : string list option =
+and materializeMaskForm (subst: SubstMap) (names: Map<IRId, string>) (varName: string) (elemTypeStr: string) (arrExpr: IRExpr) (predExpr: IRExpr) : (string list * MaterializedAlloc list) option =
     // mask(A, pred) -> the Bool PRESENCE array over A's own index space,
     // m[i] = pred(A[i]). One pass, no value copying: compaction belongs
     // to compound(A, m); iteration to range<CompoundIdx<m>>. A contains(B, x)
@@ -2480,7 +2582,7 @@ and materializeMaskForm (subst: SubstMap) (names: Map<IRId, string>) (varName: s
         | ArrayElem a when isRaggedRowType a -> sprintf "%s.len" arrName
         | _ -> sprintf "%s.extents[0]" arrName
     if maskRank <> 1 then
-        Some [sprintf "#error \"Blade codegen: mask over a rank-%d array is not yet supported (rank-1 only for now; rank-k masks land with the compound composition round)\"" maskRank]
+        Some ([sprintf "#error \"Blade codegen: mask over a rank-%d array is not yet supported (rank-1 only for now; rank-k masks land with the compound composition round)\"" maskRank], [])
     else
     match resolveCallable predExpr with
     | Some callable when callable.Params.Length = 1 ->
@@ -2506,20 +2608,25 @@ and materializeMaskForm (subst: SubstMap) (names: Map<IRId, string>) (varName: s
                 sprintf "    %s %s = %s[__mi];" srcElemStr predParamName arrName
                 sprintf "    %s[__mi] = %s(%s);" varName wname predParamName
                 "}"
-            ]
+            ],
+            // Raw `new bool[n]` backing; `<varName>_extents` is a stack table.
+            // A downstream compound() copies the bits into a std::vector<bool>
+            // at construction (genCompoundIndexFromMask), so nothing outlives
+            // this scope by pointing INTO the mask.
+            [MatRawData varName]
         )
     | _ ->
         // Degenerate (unresolved predicate): all-true mask; #error would be
         // kinder but this mirrors the prior fallback's shape.
-        Some [
+        Some ([
             sprintf "size_t %s_extents[1] = {%s};" varName srcBound
             sprintf "Array<bool, 1> %s = { new bool[%s], %s_extents };" varName srcBound varName
             sprintf "for (size_t __mi = 0; __mi < %s; __mi++) %s[__mi] = true;" srcBound varName
-        ]
+        ], [MatRawData varName])
 
 
 
-and materializeIntersectForm (subst: SubstMap) (names: Map<IRId, string>) (varName: string) (elemTypeStr: string) (aExpr: IRExpr) (bExpr: IRExpr) : string list option =
+and materializeIntersectForm (subst: SubstMap) (names: Map<IRId, string>) (varName: string) (elemTypeStr: string) (aExpr: IRExpr) (bExpr: IRExpr) : (string list * MaterializedAlloc list) option =
     // SQL INTERSECT: unique values appearing in BOTH arrays, output in
     // first-occurrence order from A. Two-pass with set reuse, mirroring
     // unique() â€” first pass counts unique A-elements that are also in
@@ -2531,7 +2638,7 @@ and materializeIntersectForm (subst: SubstMap) (names: Map<IRId, string>) (varNa
     // (regardless of how often it repeats in A).
     let aName = exprToCppCore subst names aExpr
     let bName = exprToCppCore subst names bExpr
-    Some [
+    Some ([
         sprintf "std::unordered_set<%s> %s__b_set;" elemTypeStr varName
         sprintf "for (size_t __si = 0; __si < %s.extents[0]; __si++) %s__b_set.insert(%s[__si]);" bName varName bName
         sprintf "std::unordered_set<%s> %s__seen;" elemTypeStr varName
@@ -2548,10 +2655,10 @@ and materializeIntersectForm (subst: SubstMap) (names: Map<IRId, string>) (varNa
         sprintf "    %s __x = %s[__si];" elemTypeStr aName
         sprintf "    if (%s__b_set.count(__x) && %s__seen.insert(__x).second) %s[%s__fill++] = __x;" varName varName varName varName
         "}"
-    ]
+    ], [MatRawData varName])
 
 
-and materializeUnionForm (subst: SubstMap) (names: Map<IRId, string>) (varName: string) (elemTypeStr: string) (aExpr: IRExpr) (bExpr: IRExpr) : string list option =
+and materializeUnionForm (subst: SubstMap) (names: Map<IRId, string>) (varName: string) (elemTypeStr: string) (aExpr: IRExpr) (bExpr: IRExpr) : (string list * MaterializedAlloc list) option =
     // SQL UNION: unique values appearing in EITHER array, output in
     // first-occurrence order across the concatenation A ++ B. Two-pass
     // with set reuse. Each pass walks A then B; the shared seen set
@@ -2559,7 +2666,7 @@ and materializeUnionForm (subst: SubstMap) (names: Map<IRId, string>) (varName: 
     // first occurrences survive.
     let aName = exprToCppCore subst names aExpr
     let bName = exprToCppCore subst names bExpr
-    Some [
+    Some ([
         sprintf "std::unordered_set<%s> %s__seen;" elemTypeStr varName
         sprintf "size_t %s__count = 0;" varName
         sprintf "for (size_t __si = 0; __si < %s.extents[0]; __si++) {" aName
@@ -2578,16 +2685,16 @@ and materializeUnionForm (subst: SubstMap) (names: Map<IRId, string>) (varName: 
         sprintf "for (size_t __si = 0; __si < %s.extents[0]; __si++) {" bName
         sprintf "    if (%s__seen.insert(%s[__si]).second) %s[%s__fill++] = %s[__si];" varName bName varName varName bName
         "}"
-    ]
+    ], [MatRawData varName])
 
 
-and materializeUniqueForm (subst: SubstMap) (names: Map<IRId, string>) (varName: string) (elemTypeStr: string) (aExpr: IRExpr) : string list option =
+and materializeUniqueForm (subst: SubstMap) (names: Map<IRId, string>) (varName: string) (elemTypeStr: string) (aExpr: IRExpr) : (string list * MaterializedAlloc list) option =
     // First pass: insert each element into an unordered_set; count
     // first-occurrences. Second pass: clear the set, rescan, emit on
     // first occurrence. Two passes keep allocation exact (no
     // intermediate vector) while preserving first-occurrence order.
     let aName = exprToCppCore subst names aExpr
-    Some [
+    Some ([
         sprintf "std::unordered_set<%s> %s__seen;" elemTypeStr varName
         sprintf "size_t %s__count = 0;" varName
         sprintf "for (size_t __ui = 0; __ui < %s.extents[0]; __ui++) {" aName
@@ -2600,10 +2707,10 @@ and materializeUniqueForm (subst: SubstMap) (names: Map<IRId, string>) (varName:
         sprintf "for (size_t __ui = 0; __ui < %s.extents[0]; __ui++) {" aName
         sprintf "    if (%s__seen.insert(%s[__ui]).second) %s[%s__fill++] = %s[__ui];" varName aName varName varName aName
         "}"
-    ]
+    ], [MatRawData varName])
 
 
-and materializeSortForm (subst: SubstMap) (names: Map<IRId, string>) (varName: string) (elemTypeStr: string) (arrExpr: IRExpr) (keyExpr: IRExpr) : string list option =
+and materializeSortForm (subst: SubstMap) (names: Map<IRId, string>) (varName: string) (elemTypeStr: string) (arrExpr: IRExpr) (keyExpr: IRExpr) : (string list * MaterializedAlloc list) option =
     // Key-callable resolution via `resolveCallable`. The key
     // function emits as a local wrapper closure
     // (`__wrap_<id>_<varName>`) that forwards to the lifted
@@ -2644,11 +2751,14 @@ and materializeSortForm (subst: SubstMap) (names: Map<IRId, string>) (varName: s
             sprintf "size_t %s_extents[1] = {%s};" varName srcBound
             sprintf "Array<%s, 1> %s = { new %s[%s], %s_extents };" elemTypeStr varName elemTypeStr srcBound varName
             sprintf "for (size_t __si = 0; __si < %s; __si++) %s[__si] = %s;" srcBound varName (srcAt (sprintf "%s__perm[__si]" varName))
-        ]
+        ],
+        // Two raw buffers: the permutation scratch (`size_t*`, dead after the
+        // gather) and the output backing behind the Array<T,1> wrapper.
+        [MatRawBuf (varName + "__perm"); MatRawData varName]
     )
 
 
-and materializeTransposeForm (subst: SubstMap) (names: Map<IRId, string>) (varName: string) (elemTypeStr: string) (arrExpr: IRExpr) (d1: int) (d2: int) : string list option =
+and materializeTransposeForm (subst: SubstMap) (names: Map<IRId, string>) (varName: string) (elemTypeStr: string) (arrExpr: IRExpr) (d1: int) (d2: int) : (string list * MaterializedAlloc list) option =
     // Hard transpose: allocate a fresh pool at the SWAPPED extents and copy
     // every element with axes d1/d2 exchanged. The result is an independent
     // array (new pool, new row-pointers) â€” no aliasing back to the source,
@@ -2689,11 +2799,12 @@ and materializeTransposeForm (subst: SubstMap) (names: Map<IRId, string>) (varNa
         let bodyInd = String.replicate rank "    "
         let body = [ sprintf "%s%s%s = %s%s;" bodyInd varName dstIdx arrName srcIdx ]
         let closeLoops = [ for d in rank - 1 .. -1 .. 0 -> sprintf "%s}" (String.replicate d "    ") ]
-        Some (extentDecl @ [allocDecl] @ openLoops @ body @ closeLoops)
+        Some (extentDecl @ [allocDecl] @ openLoops @ body @ closeLoops,
+              [MatPool (varName, elemTypeStr, rank, "nullptr", None)])
      | _ -> None)
 
 
-and materializeStackForm (subst: SubstMap) (names: Map<IRId, string>) (varName: string) (elemTypeStr: string) (arrs: IRExpr list) : string list option =
+and materializeStackForm (subst: SubstMap) (names: Map<IRId, string>) (varName: string) (elemTypeStr: string) (arrs: IRExpr list) : (string list * MaterializedAlloc list) option =
     // stack(A1, ..., An) (formalism 2.6): a FRESH LEADING AXIS of extent n over
     // n same-shaped arrays, so `stack(A,B,C)(k)` selects array k. Rank r -> r+1.
     //
@@ -2739,11 +2850,12 @@ and materializeStackForm (subst: SubstMap) (names: Map<IRId, string>) (varName: 
                 let body = [ sprintf "%s%s[%d]%s = %s%s;" bodyInd varName k srcIdx srcName srcIdx ]
                 let closes = [ for d in srcRank - 1 .. -1 .. 0 -> sprintf "%s}" (String.replicate d "    ") ]
                 opens @ body @ closes
-            Some (extentDecl @ [allocDecl] @ (srcNames |> List.mapi copyNest |> List.concat))
+            Some (extentDecl @ [allocDecl] @ (srcNames |> List.mapi copyNest |> List.concat),
+                  [MatPool (varName, elemTypeStr, outRank, "nullptr", None)])
          | _ -> None)
 
 
-and materializeJoinForm (subst: SubstMap) (names: Map<IRId, string>) (varName: string) (elemTypeStr: string) (arrs: IRExpr list) (dim: int) : string list option =
+and materializeJoinForm (subst: SubstMap) (names: Map<IRId, string>) (varName: string) (elemTypeStr: string) (arrs: IRExpr list) (dim: int) : (string list * MaterializedAlloc list) option =
     // join(A, B, ..., d) (formalism 2.6): concatenate along dimension d. Rank is
     // preserved; extents[d] is the sum of the sources' extents[d] and every
     // other axis agrees. `split(A, d, i)` = two `subset`s, so `join` is the
@@ -2787,11 +2899,12 @@ and materializeJoinForm (subst: SubstMap) (names: Map<IRId, string>) (varName: s
                 let closes = [ for d in rank - 1 .. -1 .. 0 -> sprintf "%s}" (String.replicate d "    ") ]
                 opens @ body @ closes @ [ sprintf "%s += %s.extents[%d];" offName srcName dim ]
             Some (extentDecl @ [allocDecl; sprintf "size_t %s = 0;" offName]
-                  @ (srcNames |> List.collect copyNest))
+                  @ (srcNames |> List.collect copyNest),
+                  [MatPool (varName, elemTypeStr, rank, "nullptr", None)])
          | _ -> None)
 
 
-and materializeDecompactForm (subst: SubstMap) (names: Map<IRId, string>) (varName: string) (elemTypeStr: string) (arrExpr: IRExpr) (dimArg: int) : string list option =
+and materializeDecompactForm (subst: SubstMap) (names: Map<IRId, string>) (varName: string) (elemTypeStr: string) (arrExpr: IRExpr) (dimArg: int) : (string list * MaterializedAlloc list) option =
     // Decompaction = binary group FISSION. decompact(A, d) isolates the
     // logical dimension d of a compact group as a free Idx, cutting on BOTH
     // sides: SymIdx<r,n> -> SymIdx<dPos,n> -> Idx<n> -> SymIdx<r-dPos-1,n>.
@@ -2943,7 +3056,8 @@ and materializeDecompactForm (subst: SubstMap) (names: Map<IRId, string>) (varNa
                   sprintf "%sstd::sort(__dc%s_t, __dc%s_t + %d);" bodyInd varName varName r
                   sprintf "%s%s%s = %s%s;" bodyInd varName outSub arrName srcSubFull ]
             let closes = [ for dd in depth - 1 .. -1 .. 0 -> sprintf "%s}" (String.replicate dd "    ") ]
-            Some (extentDecl @ [allocDecl] @ leadLines @ lLines @ [fLine] @ rLines @ body @ closes)
+            Some (extentDecl @ [allocDecl] @ leadLines @ lLines @ [fLine] @ rLines @ body @ closes,
+                  [MatPool (varName, elemTypeStr, totalRank, symmArg, None)])
          | SymAntisymmetric when r = 2 ->
             // ----- Antisym rank-2: fully dissolves to dense nÃ—n -----
             // Zero-fill (diagonal stays 0). Walk a in [0,n), b in [0,n-a-1);
@@ -2967,7 +3081,8 @@ and materializeDecompactForm (subst: SubstMap) (names: Map<IRId, string>) (varNa
                   sprintf "        %s[__dcj][__dci] = -(%s[%s][%s]);" varName arrName a b
                   "    }"
                   "}" ]
-            Some (extentDecl @ [allocDecl] @ zeroFill @ loops)
+            Some (extentDecl @ [allocDecl] @ zeroFill @ loops,
+                  [MatPool (varName, elemTypeStr, 2, "nullptr", None)])
          | SymHermitian when r = 2 ->
             // ----- Hermitian rank-2: dissolves to dense nÃ—n -----
             // Source is upper-triangle Hermitian storage (from gram). Walk the
@@ -2991,7 +3106,8 @@ and materializeDecompactForm (subst: SubstMap) (names: Map<IRId, string>) (varNa
                   sprintf "        if (__dci != __dcj) %s[__dcj][__dci] = nested_array_utilities::conj_scalar(%s[%s][%s]);" varName arrName a b
                   "    }"
                   "}" ]
-            Some (extentDecl @ [allocDecl] @ loops)
+            Some (extentDecl @ [allocDecl] @ loops,
+                  [MatPool (varName, elemTypeStr, 2, "nullptr", None)])
          | SymAntisymmetric when r >= 3 ->
             // ----- Antisym rank>=3: COMPACT-RESIDUAL fission (general) -----
             // decompact(anti<r>, dPos) severs the group into a chain:
@@ -3115,12 +3231,13 @@ and materializeDecompactForm (subst: SubstMap) (names: Map<IRId, string>) (varNa
                   sprintf "%s%s%s = __dc%s_z ? %s() : nested_array_utilities::canon_transform<%s>(%s%s, __dc%s_p, nested_array_utilities::ReadTransform::NegateOnSwap);"
                       bodyInd varName storeSubs varName elemTypeStr elemTypeStr arrName srcSub varName ]
             let closes = [ for dd in depth - 1 .. -1 .. 0 -> sprintf "%s}" (String.replicate dd "    ") ]
-            Some (extentDecl @ [allocDecl] @ loopLines @ body @ closes)
+            Some (extentDecl @ [allocDecl] @ loopLines @ body @ closes,
+                  [MatPool (varName, elemTypeStr, r, symmArg, Some strictArg)])
          | _ -> None)
      | _ -> None)
 
 
-and materializeNegateConjugateForm (subst: SubstMap) (names: Map<IRId, string>) (varName: string) (elemTypeStr: string) (form: IRExpr) (arrExpr: IRExpr) : string list option =
+and materializeNegateConjugateForm (subst: SubstMap) (names: Map<IRId, string>) (varName: string) (elemTypeStr: string) (form: IRExpr) (arrExpr: IRExpr) : (string list * MaterializedAlloc list) option =
     // Whole-array eager transform (negate for antisym transpose, conjugate
     // for Hermitian transpose). Type-PRESERVING: the result has the same
     // storage shape/SYMM as the source, so we allocate a fresh same-shape
@@ -3181,11 +3298,15 @@ and materializeNegateConjugateForm (subst: SubstMap) (names: Map<IRId, string>) 
         let call =
             [ sprintf "size_t %s = %s;" countName countExpr
               sprintf "%s(pool_base(%s.data), pool_base(%s.data), %s);" routine varName arrName countName ]
-        Some (extentDecl @ [allocDecl] @ call)
+        // The storage class is the SOURCE's, so the free must go back through
+        // deallocArgsFor with the same spec that emitAllocRhs consumed above
+        // (antisym's `mask, false` triple included).
+        Some (extentDecl @ [allocDecl] @ call,
+              [MatPoolSpec (varName, spec, elemTypeStr, rank, symmArg, extentsName)])
      | _ -> None)
 
 
-and materializeArrayCopyForm (subst: SubstMap) (names: Map<IRId, string>) (varName: string) (elemTypeStr: string) (arrExpr: IRExpr) : string list option =
+and materializeArrayCopyForm (subst: SubstMap) (names: Map<IRId, string>) (varName: string) (elemTypeStr: string) (arrExpr: IRExpr) : (string list * MaterializedAlloc list) option =
     // Deep copy of an existing array into a freshly allocated same-shape,
     // same-storage buffer. Backs the COPY semantics of `let mut a = Z`
     // (IRModule.MutableArrayLets): binding the Array<T,N> wrapper by value
@@ -3234,11 +3355,12 @@ and materializeArrayCopyForm (subst: SubstMap) (names: Map<IRId, string>) (varNa
         let call =
             [ sprintf "size_t %s = %s;" countName countExpr
               sprintf "std::copy_n(pool_base(%s.data), %s, pool_base(%s.data));" arrName countName varName ]
-        Some (extentDecl @ [allocDecl] @ call)
+        Some (extentDecl @ [allocDecl] @ call,
+              [MatPoolSpec (varName, spec, elemTypeStr, rank, symmArg, extentsName)])
      | _ -> None)
 
 
-and materializeGramForm (subst: SubstMap) (names: Map<IRId, string>) (varName: string) (elemTypeStr: string) (lExpr: IRExpr) (rExpr: IRExpr) (sameArray: bool) : string list option =
+and materializeGramForm (subst: SubstMap) (names: Map<IRId, string>) (varName: string) (elemTypeStr: string) (lExpr: IRExpr) (rExpr: IRExpr) (sameArray: bool) : (string list * MaterializedAlloc list) option =
     // gram(A, B) = A * B^H:  result[i][j] = sum_k A[i][k] * conj(B[j][k]).
     // A : m x n, B : p x n.  conj() is std::conj on complex, identity on real
     // (we always emit std::conj; for real element types it is a harmless
@@ -3322,7 +3444,12 @@ and materializeGramForm (subst: SubstMap) (names: Map<IRId, string>) (varName: s
                       sprintf "        %s[__gi][__gjr] = __gacc;" varName
                       sprintf "    }"
                       sprintf "}" ]
-            Some (extentDecl @ [allocDecl] @ loop)
+            // NOTE: `outElemStr`, not `elemTypeStr` — gram promotes to complex
+            // when either operand is complex, and the free must name the type
+            // the allocation actually used. (The BLAS staging buffers above are
+            // deleted inline, so they are not tracked.)
+            Some (extentDecl @ [allocDecl] @ loop,
+                  [MatPool (varName, outElemStr, 2, symmArg, None)])
         else
             // dense m x p
             let extentDecl =
@@ -3361,7 +3488,8 @@ and materializeGramForm (subst: SubstMap) (names: Map<IRId, string>) (varName: s
                       sprintf "        %s[__gi][__gj] = __gacc;" varName
                       sprintf "    }"
                       sprintf "}" ]
-            Some (extentDecl @ [allocDecl] @ loop)
+            Some (extentDecl @ [allocDecl] @ loop,
+                  [MatPool (varName, outElemStr, 2, "nullptr", None)])
      | _ -> None)
 
 /// Convert IRExpr to C++ using context
@@ -4818,21 +4946,23 @@ let computeRaggedRowLengths (elements: IRExpr list) : int list =
 //     propagation barriers deliberately NARROW, and the template arguments are
 //     recorded verbatim at the allocation site instead of re-derived at exit.
 //
-// Deliberate v1 exclusions (each a distinct code path, none an oversight):
+// Deliberate exclusions (each a distinct code path, none an oversight):
 // ragged / compound / dep-idx outputs; provider reads and writes; RandomInits;
-// CompoundInits; every CUDA/MPI device path; streamed `_fb_p` fiber buffers (the
-// RawAlloc + StreamBufNames seam exists but is never populated); and the
-// statement-level `materializeInlineForm` consumers (sort / mask / stack / join /
-// transpose / decompact / negate / conjugate / gram). That last group picks its
-// (AllocSpec, SYMM, STRICT) triple INSIDE each per-form builder from
-// form-specific masks, and the consumer only sees (name, elemStr, form);
-// re-deriving the triple there would risk `deallocate` walking a different
-// skeleton than `allocate` built -- silent heap corruption, not a compile error.
-// The clean follow-up is to have materializeInlineForm return
-// `string list * TrackedAlloc option` so the descriptor is produced by the code
-// that CHOSE the template arguments; all ten consumers then register with no
-// duplication, and two of them (sort, and the mask/intersect/union/unique
-// family) additionally need RawAlloc because they emit a raw `new T[n]`.
+// CompoundInits; the CUDA/MPI *device* allocations (cudaMalloc/cudaFree pairs and
+// the MPI counts/displs tables already own themselves); and streamed `_fb_p`
+// fiber buffers registered outside a live frame.
+//
+// The statement-level `materializeInlineForm` consumers (site 7 -- sort / mask /
+// intersect / union / unique / stack / join / transpose / decompact / negate /
+// conjugate / gram / array-copy) WERE excluded and no longer are. Each builder
+// picks its (AllocSpec, SYMM, STRICT) triple from form-specific masks the
+// consumer never sees, so instead of re-deriving that triple at the consumer
+// (which would risk `deallocate` walking a different skeleton than `allocate`
+// built), the builders now return `string list * MaterializedAlloc list` -- the
+// descriptor is produced by the code that CHOSE the template arguments. Consumers
+// in statement position call `registerMaterializedAllocs`; consumers that splice
+// the lines into an IIFE drop the list and keep the old leak, because an
+// expression has no scope exit to hang a free on.
 
 /// Whether a callee's return value is a pool the CALLER owns. `FreshPool` means
 /// every return hands back storage this call allocated; `NotFresh` means it may
@@ -4966,6 +5096,171 @@ let rec isFreshPoolForm (e: IRExpr) : bool =
     | IRApp (f, _, _) -> freshReturnOf f = FreshPool
     | _ -> false
 
+// ----------------------------------------------------------------------------
+// Phase M: whole-array mut reassignment as copy-into-place
+// ----------------------------------------------------------------------------
+//
+// `STG = t` inside a step function currently REBINDS the wrapper: `STG.data` is
+// repointed at t's pool, and STG's original pool is abandoned. That makes a
+// captured mut a per-call allocation sink -- the RHS temp has to be
+// escape-seeded (from the assign on, it IS the mut's storage), so nothing in the
+// step's working set can be freed, and every step leaks a whole array.
+//
+// When the mut is the SOLE OWNER of its pool -- no other binding names its
+// wrapper, no sub-view hangs off it, it is never returned -- rebinding and
+// copying are OBSERVATIONALLY IDENTICAL, and copying t's elements INTO the
+// mut's existing pool keeps ONE buffer for the whole program: the mut's pool is
+// allocated once at main level (never scope-freed, since main has no frame),
+// and the RHS temp stays iteration-owned and dies with its own scope.
+//
+// Sole ownership is the entire safety argument, so the position analysis below
+// is an ALLOWLIST, not a denylist: an occurrence of the mut is acceptable only
+// as (1) the target of a whole-array assign, (2) the base of a FULL (scalar-
+// yielding) index read, (3) the base of an `extents` read, or (4) the array
+// operand of a reduce/prodsum fold. Everything else -- a bare `IRVar` anywhere
+// (alias let, tuple member, return expression, call argument), a PARTIAL index
+// (which yields a sub-view aliasing the pool), and every IR form not named here,
+// including any added later -- disqualifies. A missed disqualification silently
+// changes numbers; a spurious one only leaves today's leak in place.
+//
+// Scope is deliberately module-level `let mut` bindings only. A block-local mut
+// is already scope-freed at its own frame's exit, so it has far less to gain,
+// and admitting it would need the same analysis over a second binding surface.
+
+/// The per-slot literal extents of a plain-dense, statically-shaped array type.
+/// None whenever ANY slot is symmetric, compact, ragged, dep-indexed, virtual,
+/// dependent, rank>1, or has a non-literal extent -- in all of those the pool
+/// cardinality is not the product of the extents, so neither the shape-identity
+/// test nor the `std::copy_n` count would be sound.
+let private staticDenseExtents (at: IRArrayType) : int list option =
+    if not (isFreeableDenseArrayType at) || at.IsVirtual then None
+    else
+        let slots =
+            at.IndexTypes |> List.map (fun ix ->
+                if ix.Rank = 1 && ix.Symmetry = SymNone && ix.IxKind = IxKPlain
+                   && List.isEmpty ix.Dependencies then
+                    match ix.Extent with
+                    | IRLit (IRLitInt n) when n > 0L -> Some (int n)
+                    | _ -> None
+                else None)
+        if List.isEmpty slots || slots |> List.exists Option.isNone then None
+        else Some (slots |> List.map Option.get)
+
+/// Values that emit as a REAL C++ array variable owning a fresh pool under the
+/// binding's own name -- so `pool_base(<name>.data)` is meaningful. Note the
+/// deliberate absence of a bare `IRApplyCombinator` / `IRComposeApply`: those are
+/// DEFERRED (their statement arms emit nothing), so the name does not exist yet.
+let private isMaterializedFreshArray (v: IRExpr) : bool =
+    match v with
+    | IRCompute inner -> isFreshPoolForm inner
+    | IRArrayLit _ -> true
+    | IRMask _ | IRSort _ | IRUnique _ | IRIntersect _ | IRUnion _
+    | IRTranspose _ | IRDecompact _ | IRStack _ | IRJoin _ | IRGram _
+    | IRArrayNegate _ | IRArrayConjugate _ -> true
+    | _ -> false
+
+/// Every `let` value reachable from an expression, at any nesting depth.
+let rec private letValuesIn (e: IRExpr) : (IRId * IRExpr) list =
+    let here = match e with IRLet (id, v, _) -> [(id, v)] | _ -> []
+    match e with
+    | ExprShape (children, _) -> here @ (children |> List.collect letValuesIn)
+
+/// Does `IRVar(mid)` occur anywhere in `e` OUTSIDE the four blessed positions?
+/// See the allowlist rationale above; the trailing generic arm recurses through
+/// ExprShape, and reaching a bare `IRVar(mid)` there IS the disqualification.
+let rec private occursOutsideBlessedPositions (mid: IRId) (e: IRExpr) : bool =
+    let scan (c: IRExpr) = occursOutsideBlessedPositions mid c
+    // A slot in which a BARE `IRVar(mid)` is a transient read: accept it there,
+    // but keep scanning any other expression that occupies the slot.
+    let blessed (c: IRExpr) =
+        match c with
+        | IRVar (id, _) when id = mid -> false
+        | _ -> scan c
+    match e with
+    | IRVar (id, _) -> id = mid
+    | IRAssign (target, value) ->
+        (match target with
+         | LVVar _ -> false                              // the whole-array write itself
+         | LVIndex (b, idxs) -> blessed b || (idxs |> List.exists scan)
+         | _ -> scan target)
+        || scan value
+    | IRIndex (b, idxs, _) ->
+        // A FULL read yields a scalar and copies the cell out; a PARTIAL read
+        // yields a sub-view that ALIASES the pool (memfree/016's `brow = STG(0)`).
+        let isFullRead = match inferExprType e with IRTScalar _ -> true | _ -> false
+        (if isFullRead then blessed b else scan b) || (idxs |> List.exists scan)
+    | IRExtent (b, _) -> blessed b
+    | IRReduce (a, k, i) ->
+        blessed a || scan k || (match i with Some x -> scan x | None -> false)
+    | IRReduceCompute (c, k, i) -> blessed c || scan k || scan i
+    | IRProdSum args -> args |> List.exists blessed
+    | ExprShape (children, _) -> children |> List.exists scan
+
+/// Module-level mut array bindings eligible for copy-into-place, mapped to the
+/// static element count of their pool. Installed alongside computeFreshReturnFacts
+/// (it needs the facts for `isFreshPoolForm`'s IRApp arm, so it must run after).
+let computeCopyInPlaceMuts (modul: IRModule) : Map<IRId, int> =
+    let exprs =
+        (modul.Bindings |> List.map (fun b -> b.Value))
+        @ (modul.Functions |> List.map (fun f -> f.Body))
+    // Both whole-module walks are LAZY: a program with no mut array bindings --
+    // the overwhelming majority -- must not pay a tree traversal for a candidate
+    // set that turns out empty.
+    let allValues =
+        lazy ((modul.Bindings |> List.map (fun b -> (b.Id, b.Value)))
+              @ (exprs |> List.collect letValuesIn))
+    let valueOf (id: IRId) =
+        allValues.Force () |> List.tryPick (fun (i, v) -> if i = id then Some v else None)
+    let subs = lazy (exprs |> List.collect allSubExprs)
+    // (a) array-typed, dense, statically shaped, and owning a pool of its own.
+    let candidates =
+        modul.Bindings
+        |> List.choose (fun b ->
+            if not b.IsMutable then None
+            else
+                match b.Type with
+                | ArrayElem at ->
+                    match staticDenseExtents at with
+                    | Some dims ->
+                        let ownsPool =
+                            Map.containsKey b.Id modul.RandomInits
+                            || (match b.Value with
+                                // `let mut a = Z` deep-copies (site 6), so the
+                                // binding owns the copy, not Z's pool.
+                                | IRVar _ -> true
+                                | v -> isMaterializedFreshArray v)
+                        if ownsPool then Some (b.Id, (at, dims)) else None
+                    | None -> None
+                | _ -> None)
+    // (c) every whole-array assign to it takes a plain IRVar of a MATERIALIZED
+    // array with identical static shape and element type.
+    let assignsOk (mid: IRId) (at: IRArrayType) (dims: int list) =
+        let rhss =
+            subs.Force ()
+            |> List.choose (fun e ->
+                match e with
+                | IRAssign (LVVar tid, value) when tid = mid -> Some value
+                | _ -> None)
+        not (List.isEmpty rhss)
+        && rhss |> List.forall (fun v ->
+            match v with
+            | IRVar (rid, _) ->
+                (match inferExprType v with
+                 | ArrayElem rat ->
+                     staticDenseExtents rat = Some dims && rat.ElemType = at.ElemType
+                 | _ -> false)
+                && (match valueOf rid with
+                    | Some rv -> isMaterializedFreshArray rv
+                    | None -> false)
+            | _ -> false)
+    candidates
+    |> List.choose (fun (mid, (at, dims)) ->
+        // (b) sole ownership: no alias-shaped occurrence anywhere in the module.
+        if exprs |> List.exists (occursOutsideBlessedPositions mid) then None
+        elif not (assignsOk mid at dims) then None
+        else Some (mid, dims |> List.fold (*) 1))
+    |> Map.ofList
+
 /// Which scope a frame is being computed for. A function scope may have a return
 /// expression whose reachable ids must be pinned; a loop body never returns.
 type ScopeKind =
@@ -4988,6 +5283,12 @@ let computeScopeEscapes (ctx: CodeGenContext) (kind: ScopeKind) (scopeLets: (IRI
     let assignSeeds =
         subs |> List.collect (fun e ->
             match e with
+            // Phase M: an assign that will compile to `std::copy_n` into the
+            // target's OWN pool creates no aliasing at all -- that is the whole
+            // point of the transform -- so it seeds NEITHER side. The RHS temp
+            // becomes ordinary scope-owned storage and is freed at scope exit;
+            // the target keeps the single pool it has always had.
+            | IRAssign (target, value) when (copyInPlaceAssign target value).IsSome -> []
             | IRAssign (target, value) ->
                 let targetIds = match target with LVVar tid -> [tid] | _ -> []
                 let valueIds =
@@ -5051,16 +5352,39 @@ type TrackedAlloc =
     /// Streamed `_fb_p` fiber buffers (Phase S): plain `delete[] <name>;`.
     /// Registered by the streamedNestSetup call sites when a frame is live.
     | RawAlloc of Name: string * OwnerBindingId: IRId option
+    /// An `Array<T,1> N = { new T[n], ext }` whose backing is a raw `new[]`
+    /// rather than an allocate<> pool (the mask / sort / unique / union /
+    /// intersect family): `delete[] N.data;`. The tracked NAME is the wrapper
+    /// `N`, not `N.data`, so the return-suppression token test in genFuncBody
+    /// still recognises `return N;`.
+    | RawArrayData of Name: string * OwnerBindingId: IRId option
+    /// Ragged / compound teardown. Unlike PoolAlloc there is no template-argument
+    /// mirror to preserve: the ragged and compound layouts have no per-level span
+    /// formula, so the free is a fixed runtime call whose arguments are all NAMES
+    /// chosen at the emission site. Storing the fully rendered argument list
+    /// (rather than a wrapper name plus a convention) is what keeps a site that
+    /// shares its input's tables from being freed as though it owned them.
+    /// Name is the wrapper (for suppression/token tests); Routine is the
+    /// unqualified nested_array_utilities function; Args the complete call text.
+    | ShapedAlloc of
+        Name: string *
+        Routine: string *
+        Args: string *
+        OwnerBindingId: IRId option
 
 let private trackedAllocName (t: TrackedAlloc) : string =
     match t with
     | PoolAlloc (n, _, _, _, _) -> n
     | RawAlloc (n, _) -> n
+    | RawArrayData (n, _) -> n
+    | ShapedAlloc (n, _, _, _) -> n
 
 let private trackedAllocOwner (t: TrackedAlloc) : IRId option =
     match t with
     | PoolAlloc (_, _, _, _, o) -> o
     | RawAlloc (_, o) -> o
+    | RawArrayData (_, o) -> o
+    | ShapedAlloc (_, _, _, o) -> o
 
 type AllocScopeKind = SFunc | SLoop
 
@@ -5168,6 +5492,8 @@ let registerAlloc (t: TrackedAlloc) : unit =
             match t with
             | PoolAlloc (n, r, a, ex, _) -> PoolAlloc (n, r, a, ex, frame.CurrentOwner)
             | RawAlloc (n, _) -> RawAlloc (n, frame.CurrentOwner)
+            | RawArrayData (n, _) -> RawArrayData (n, frame.CurrentOwner)
+            | ShapedAlloc (n, r, a, _) -> ShapedAlloc (n, r, a, frame.CurrentOwner)
         frame.Allocs <- stamped :: frame.Allocs
 
 /// The one call every allocation site makes. Template arguments are resolved
@@ -5184,6 +5510,65 @@ let registerPoolAlloc
         | Ok (routine, args) -> registerAlloc (PoolAlloc (arrayName, routine, args, ownedExtents, None))
         | Error _ -> ()
 
+/// Register the allocations a `materialize*Form` builder reported (site 7).
+/// The template arguments come STRAIGHT from the descriptor — the builder
+/// already resolved SYMM / STRICT (hoisting the masks it needed), so this is a
+/// character-for-character mirror of `EmitCpp.arrayAlloc` rather than a second
+/// derivation from an AllocSpec. Statement-position consumers call this;
+/// expression / IIFE consumers discard their descriptor list.
+let registerMaterializedAllocs (ms: MaterializedAlloc list) : unit =
+    match currentAllocScope () with
+    | None -> ()   // main top level: nothing is scope-freed
+    | Some _ ->
+        for m in ms do
+            match m with
+            | MatPool (n, elem, rank, symm, strict) ->
+                let (routine, args) =
+                    match strict with
+                    | Some strictArg ->
+                        ("deallocate_strict",
+                         sprintf "typename promote<%s, %d>::type, %s, %s" elem rank symm strictArg)
+                    | None ->
+                        ("deallocate", sprintf "typename promote<%s, %d>::type, %s" elem rank symm)
+                registerAlloc (PoolAlloc (n, routine, args, None, None))
+            | MatPoolSpec (n, spec, elem, rank, symm, extentsName) ->
+                match deallocArgsFor spec elem rank symm extentsName with
+                | Ok (routine, args) -> registerAlloc (PoolAlloc (n, routine, args, None, None))
+                | Error _ -> ()   // the site emitted `#error`; nothing valid to free
+            | MatRawData n -> registerAlloc (RawArrayData (n, None))
+            | MatRawBuf n -> registerAlloc (RawAlloc (n, None))
+
+/// Register a ragged/compound teardown (the W2 runtime routines). No
+/// template-argument derivation: the emission site already knows the exact
+/// call, and the rendered argument text is what keeps a site that SHARES its
+/// input's tables (ragged map metadata, compound map idx) from being freed as
+/// though it owned them. No-op with no live frame, exactly like
+/// registerPoolAlloc (module bindings stay alive for auto-print / EXPECT pins).
+let registerShapedAlloc (wrapperName: string) (routine: string) (args: string) : unit =
+    match currentAllocScope () with
+    | None -> ()
+    | Some _ -> registerAlloc (ShapedAlloc (wrapperName, routine, args, None))
+
+/// Register an allocation whose template arguments were emitted DIRECTLY through
+/// `EmitCpp.arrayAlloc` (the CUDA / MPI host peels: their SYMM and STRICT masks
+/// are hoisted locally, exactly like the materializer forms'). Mirrors arrayAlloc
+/// argument for argument; `ownedExtents` is Some where the site did its own
+/// `new size_t[R]`.
+let registerArrayAlloc
+        (arrayName: string) (elem: string) (rank: int)
+        (symm: string) (strict: string option) (ownedExtents: string option) : unit =
+    match currentAllocScope () with
+    | None -> ()   // main top level: nothing is scope-freed
+    | Some _ ->
+        let (routine, args) =
+            match strict with
+            | Some strictArg ->
+                ("deallocate_strict",
+                 sprintf "typename promote<%s, %d>::type, %s, %s" elem rank symm strictArg)
+            | None ->
+                ("deallocate", sprintf "typename promote<%s, %d>::type, %s" elem rank symm)
+        registerAlloc (PoolAlloc (arrayName, routine, args, ownedExtents, None))
+
 /// Register the fiber destination buffers a streamedNestSetup call NEWLY
 /// declared (Phase S). Under a live frame each gets a scope-exit `delete[]`
 /// (per-iteration recycle when the frame is a loop body) and is remembered for
@@ -5197,12 +5582,6 @@ let registerStreamBufDecls (names: string list) : unit =
         for n in names do
             frame.StreamBufNames <- Set.add n frame.StreamBufNames
             registerAlloc (RawAlloc (n, None))
-
-/// Array types whose storage is the plain dense pool + pointer skeleton that
-/// `deallocate` walks. Ragged, compound and dep-idx layouts carry side tables
-/// (lens/offsets/row pointers, compound_index_t) with their own ownership rules.
-let isFreeableDenseArrayType (at: IRArrayType) : bool =
-    not (isCompoundArrayType at) && not (isRaggedArrayType at) && not (isDepIdxArrayType at)
 
 /// Exempt one emitted C++ name from this scope's frees (used for the lifted
 /// `__retN` return temporaries, whose storage leaves with the return value).
@@ -5265,7 +5644,10 @@ let popAllocScopeFrees (ind: string) : string list =
                     @ (match ownedExtents with
                        | Some ex -> [sprintf "%sdelete[] %s;" ind ex]
                        | None -> [])
-                | RawAlloc (n, _) -> [sprintf "%sdelete[] %s;" ind n])
+                | RawAlloc (n, _) -> [sprintf "%sdelete[] %s;" ind n]
+                | RawArrayData (n, _) -> [sprintf "%sdelete[] %s.data;" ind n]
+                | ShapedAlloc (_, routine, args, _) ->
+                    [ sprintf "%snested_array_utilities::%s(%s);" ind routine args ])
 
 /// Generate code to allocate and initialize an array from literal values
 let genArrayLiteral (ctx: CodeGenContext) (varName: string) (elements: IRExpr list) (arrType: IRArrayType) : string list =
@@ -6074,14 +6456,21 @@ let genCudaKernelSimplicial (mpiRange: bool) (softSplit: bool) (codeGen: LoopNes
     let extentDecls =
         [ sprintf "    size_t* %s = new size_t[%d];" extentsName r ]
         @ [ for d in 0 .. r - 1 -> sprintf "    %s[%d] = %dUL;" extentsName d n ]
+    let strictArgOpt =
+        if strict then Some (hoistSymmDecl (sprintf "%s_strict" name) ones) else None
     let allocLine =
-        if strict then
-            let strictArg = hoistSymmDecl (sprintf "%s_strict" name) ones
-            arrayAlloc { Ind = "    "; Elem = elemCpp; Rank = r; Name = name
-                         Symm = symmArg; Strict = Some strictArg; Extents = extentsName }
-        else
-            arrayAlloc { Ind = "    "; Elem = elemCpp; Rank = r; Name = name
-                         Symm = symmArg; Strict = None; Extents = extentsName }
+        arrayAlloc { Ind = "    "; Elem = elemCpp; Rank = r; Name = name
+                     Symm = symmArg; Strict = strictArgOpt; Extents = extentsName }
+    // dealloc(D): the HOST packed output + its heap extents. The device buffers
+    // (cudaMalloc/cudaFree) are untouched — they are already paired inside the
+    // .cu wrapper. Deferred to the two Some-returning arms below so a `None`
+    // (no MPI datatype) registers nothing, and skipped entirely under
+    // `softSplit`, whose caller (tryGenCudaSoftJoin) abandons every piece when
+    // ANY leaf turns out ineligible — registering there would emit frees for
+    // C++ names that never got declared.
+    let registerHostOutput () =
+        if not softSplit then
+            registerArrayAlloc name elemCpp r symmArg strictArgOpt (Some extentsName)
     if mpiRange then
         // Rank-scoped launch: balanced flat cell-range split (the same
         // q/rem the MPI host path uses), per-rank device launch over
@@ -6121,6 +6510,7 @@ let genCudaKernelSimplicial (mpiRange: bool) (softSplit: bool) (codeGen: LoopNes
                   sprintf "        MPI_Allgatherv(MPI_IN_PLACE, 0, MPI_DATATYPE_NULL, pool_base(%s.data), __blade_mpi_counts, __blade_mpi_displs, %s, MPI_COMM_WORLD);" name dtype
                   "        delete[] __blade_mpi_counts; delete[] __blade_mpi_displs;"
                   "    }" ]
+            registerHostOutput ()
             Some (extentDecls @ [allocLine] @ split @ launch @ gather)
     else
     let inlineLines =
@@ -6130,6 +6520,7 @@ let genCudaKernelSimplicial (mpiRange: bool) (softSplit: bool) (codeGen: LoopNes
         // host output allocation only.
         @ (if softSplit then []
            else [ sprintf "    %s(pool_base(%s.data), pool_base(%s.data));" launchName srcName name ])
+    registerHostOutput ()
     Some inlineLines
 
 /// MPI flat-cell-range decomposition of a single-S-group symmetric or
@@ -6237,14 +6628,11 @@ let genMpiNestSimplicial (innerOmp: bool) (codeGen: LoopNestCodeGen) (name: stri
         let extentDecls =
             [ sprintf "    size_t* %s = new size_t[%d];" extentsName r ]
             @ [ for d in 0 .. r - 1 -> sprintf "    %s[%d] = %dUL;" extentsName d n ]
+        let strictArgOpt =
+            if strict then Some (hoistSymmDecl (sprintf "%s_strict" name) ones) else None
         let allocLine =
-            if strict then
-                let strictArg = hoistSymmDecl (sprintf "%s_strict" name) ones
-                arrayAlloc { Ind = "    "; Elem = elemCpp; Rank = r; Name = name
-                             Symm = symmArg; Strict = Some strictArg; Extents = extentsName }
-            else
-                arrayAlloc { Ind = "    "; Elem = elemCpp; Rank = r; Name = name
-                             Symm = symmArg; Strict = None; Extents = extentsName }
+            arrayAlloc { Ind = "    "; Elem = elemCpp; Rank = r; Name = name
+                         Symm = symmArg; Strict = strictArgOpt; Extents = extentsName }
         // Balanced cell-range split over the packed pool. Cell counts are
         // near-equal by construction (contiguous flat ranges), unlike an
         // outer-row slab of a triangle. Same q/rem formula as the dense slab.
@@ -6279,6 +6667,11 @@ let genMpiNestSimplicial (innerOmp: bool) (codeGen: LoopNestCodeGen) (name: stri
               sprintf "        MPI_Allgatherv(MPI_IN_PLACE, 0, MPI_DATATYPE_NULL, __blade_mpi_out_%s, __blade_mpi_counts, __blade_mpi_displs, %s, MPI_COMM_WORLD);" name mpiDtype
               "        delete[] __blade_mpi_counts; delete[] __blade_mpi_displs;"
               "    }" ]
+        // dealloc(D): the MPI simplicial HOST packed output + its heap extents.
+        // Every rank keeps the full pool after the Allgatherv, so this is an
+        // ordinary scope-owned array; the counts/displs tables above already
+        // delete themselves and are left alone.
+        registerArrayAlloc name elemCpp r symmArg strictArgOpt (Some extentsName)
         Some (extentDecls @ [allocLine] @ split @ loop @ gather)
     | _ -> None
 
@@ -6450,6 +6843,11 @@ let genCudaKernel (softSplit: bool) (codeGen: LoopNestCodeGen) (name: string) (b
                 // bare pointers; the self-contained program uses wrappers.)
                 (codeGen.InputArrayNames |> List.map (fun n -> sprintf "pool_base(%s.data)" n) |> String.concat ", ")
                 name ]
+    // dealloc(D): the rectangular HOST output + its heap extents (dense, so the
+    // SYMM argument is the `nullptr` literal emitted just above). Skipped under
+    // `softSplit` for the same abandon-the-pieces reason as the simplicial peel.
+    if not softSplit then
+        registerArrayAlloc name elemCpp outputRank "nullptr" None (Some extentsName)
     if softSplit then
         // Soft-join caller sequences the begin/end calls itself; return the
         // host output allocation only (everything but the final call line).
@@ -6605,6 +7003,14 @@ let genCudaCoFusion (leafCgs: LoopNestCodeGen list) (leafNames: string list) (na
                 launchName
                 (primary.InputArrayNames |> List.map (fun n -> sprintf "pool_base(%s.data)" n) |> String.concat ", ")
                 (leafNames |> List.map (fun ln -> sprintf "pool_base(%s.data)" ln) |> String.concat ", ") ]
+    // dealloc(D): the per-leaf HOST restore buffers this arm emits itself. The
+    // caller wraps these lines with `wrapDevice`, which DROPS the shared host
+    // `declCode` (hazard H7) — so these, not the fused leafRegs, are the
+    // allocations that actually appear on the all-cuda arm.
+    for k in 0 .. leafCgs.Length - 1 do
+        let et = (outElemOpt leafCgs.[k]).Value |> elemTypeToCpp
+        registerArrayAlloc leafNames.[k] et nDims "nullptr" None
+            (Some (sprintf "%s_extents" leafNames.[k]))
     Some inlineLines
 
 /// Classification of a loop nest for MPI decomposition (`where mpi`).
@@ -6784,6 +7190,11 @@ let genApplyCombinator (ctx: CodeGenContext) (name: string) (info: ApplyInfo) (b
                               sprintf "%s        %s__rows[__g][__k] = %s;" ind name bodyStr
                               sprintf "%s    }" ind
                               sprintf "%s}" ind ]
+                        // Owns pool + row table; extents/lens/offsets belong to
+                        // the INPUT ragged. deallocate_ragged frees exactly the
+                        // two owned pieces (a per-row free would be an interior
+                        // free — rows are pool+offset slices).
+                        registerShapedAlloc name "deallocate_ragged" (sprintf "%s, %s__pool" name name)
                         Some code
                     | Some callable when callable.Params.Length = 1 ->
                         let param = callable.Params.[0]
@@ -6852,6 +7263,12 @@ let genApplyCombinator (ctx: CodeGenContext) (name: string) (info: ApplyInfo) (b
                             @ subDeclLines
                             @ [ sprintf "%s    %s[__g] = %s;" ind name bodyStr
                                 sprintf "%s}" ind ]
+                        // Raw `new T[n]` backing (not allocate<>), stack extents.
+                        // Scalar outputs only: an array-valued kernel body makes
+                        // the row entries ALIASES of storage owned elsewhere.
+                        (match outElem with
+                         | IRTScalar _ -> registerAlloc (RawArrayData (name, None))
+                         | _ -> ())
                         Some code
                     | _ -> None
     
@@ -6923,6 +7340,12 @@ let genApplyCombinator (ctx: CodeGenContext) (name: string) (info: ApplyInfo) (b
                            | Some maskName ->
                                let (idxLines, _) = genCompoundIndexFromMask maskName ix.Rank (sprintf "%s_cidx" rname)
                                preCode <- preCode @ (idxLines |> List.map (fun s -> ind + s))
+                               // Owns the standalone driver index. Registered
+                               // BEFORE any compound map output that shares it:
+                               // newest-first pop then frees the output's data
+                               // before this index dies. Do not move after.
+                               registerShapedAlloc (sprintf "%s_cidx" rname)
+                                   "deallocate_compound_index_only" (sprintf "%s_cidx" rname)
                            | None ->
                                preCode <- preCode @ codegenError ctx ind "range<CompoundIdx>: mask variable not found in scope at codegen")
                       | _ ->
@@ -6951,7 +7374,12 @@ let genApplyCombinator (ctx: CodeGenContext) (name: string) (info: ApplyInfo) (b
                 preCode <- preCode @ autoMaterErr
                 let matStmts =
                     match materializeInlineForm emptySubst tempCtx.VarNames tmpName elemStr arr with
-                    | Some s -> s
+                    // Statement position: the temp is declared in the SAME block
+                    // as the loop nest that reads it, and nothing downstream
+                    // retains a pointer into it (compound() copies the mask bits
+                    // into a std::vector<bool> at construction), so it is
+                    // scope-owned like any other let-level materialization.
+                    | Some (s, allocs) -> registerMaterializedAllocs allocs; s
                     | None -> []
                 let code = matStmts |> List.map (fun s -> ind + s)
                 preCode <- preCode @ code
@@ -7240,6 +7668,12 @@ let genApplyCombinator (ctx: CodeGenContext) (name: string) (info: ApplyInfo) (b
                 let compDecl =
                     sprintf "%snested_array_utilities::Compound<%s, %d> %s = { new %s[%s->cardinality * %s], %s, %s };"
                         ind outputElemType leadRank name outputElemType idxExpr strideExpr idxExpr strideExpr
+                // Owns the data buffer ONLY — the idx is the input compound's
+                // (or the range driver's, freed by its own registration).
+                // deallocate_compound here would free an index the input still
+                // holds: the one compound spot where the wrong routine is
+                // silent corruption.
+                registerShapedAlloc name "deallocate_compound_shared_index" name
                 preCode @ streamPrologue @ [""; compDecl; ""] @ loopCode
             | _ ->
                 // Deterministic deallocation, site ①: the dense HOST output. This
@@ -7247,16 +7681,20 @@ let genApplyCombinator (ctx: CodeGenContext) (name: string) (info: ApplyInfo) (b
                 // free, so its template arguments must mirror allocRhs above
                 // exactly — hence the same (spec, elem, rank, symmArg, extents)
                 // tuple rather than a re-derivation. `extentsName` is heap
-                // (`new size_t[R]`), so the frame owns it too. MPI dense-slab is
-                // excluded (the Allgatherv leaves the array live on every rank and
-                // the device paths allocate their own host restore buffers); CUDA
-                // never reaches here (cudaInline returned above).
-                if not mpiDense then
-                    match codeGen.OutputType with
-                    | ArrayElem at when isFreeableDenseArrayType at ->
-                        registerPoolAlloc (classifyOutputStorage codeGen.OutputType)
-                            outputElemType outputRank symmArg extentsName name (Some extentsName)
-                    | _ -> ()
+                // (`new size_t[R]`), so the frame owns it too. CUDA never reaches
+                // here (cudaInline returned above).
+                //
+                // dealloc(D): the MPI dense-slab arm is no longer excluded. The
+                // Allgatherv restores the FULL pool on every rank, after which the
+                // array is an ordinary scope-owned local — the same allocation
+                // line, emitted unconditionally on this arm. The gather's own
+                // `__blade_mpi_counts` / `__blade_mpi_displs` are already deleted
+                // inline and stay untouched.
+                match codeGen.OutputType with
+                | ArrayElem at when isFreeableDenseArrayType at ->
+                    registerPoolAlloc (classifyOutputStorage codeGen.OutputType)
+                        outputElemType outputRank symmArg extentsName name (Some extentsName)
+                | _ -> ()
                 preCode @ streamPrologue @ [""; extentsDecl] @ extentsFill @ [""; allocDecl; ""]
                 @ mpiSlabPrologue @ loopCode @ mpiGather
 
@@ -7581,7 +8019,10 @@ let genObjectForApplication (ctx: CodeGenContext) (name: string) (objInfo: Objec
         // (`size_t* R_extents = new size_t[ORANK]`). Reads are unchanged:
         // `NAME_extents[d]` indexes a pointer the same way it indexed an
         // array, so every existing companion-extents consumer is unaffected.
-        // Lifetime matches the data pool's (both leak; Blade has no free).
+        // Lifetime is scope-bound: under a live alloc frame (function body or
+        // for-range body) each arm below registers BOTH the pool and this heap
+        // extents table, so the pair is released together at scope exit. At
+        // main's top level there is no frame and both keep program lifetime.
         let heapExtents (rank: int) (dims: string list) =
             (sprintf "%ssize_t* %s_extents = new size_t[%d];" ind name rank)
             :: (dims |> List.mapi (fun d e -> sprintf "%s%s_extents[%d] = %s;" ind name d e))
@@ -7598,6 +8039,12 @@ let genObjectForApplication (ctx: CodeGenContext) (name: string) (objInfo: Objec
                 sprintf "%s    }" ind
                 sprintf "%s}" ind
             ]
+            // Statement-position materializer (sole caller is genBinding's
+            // IRApp(IRObjectFor) arm, directly or via genFuncBody's
+            // hoistLoopApps lift), so the pool AND its heap extents table are
+            // scope-owned. Dense/nullptr mirrors the allocate<> above.
+            registerPoolAlloc AllocDense elemTypeStr 2 "nullptr"
+                (name + "_extents") name (Some (name + "_extents"))
             extentsDecl @ [allocDecl; ""] @ wrapperLines @ loopCode
 
         | [0; 0], [arrA; arrB] ->
@@ -7609,6 +8056,8 @@ let genObjectForApplication (ctx: CodeGenContext) (name: string) (objInfo: Objec
                 sprintf "%s    %s[__i0] = %s(%s[__i0], %s[__i0]);" ind name wname arrA arrB
                 sprintf "%s}" ind
             ]
+            registerPoolAlloc AllocDense elemTypeStr 1 "nullptr"
+                (name + "_extents") name (Some (name + "_extents"))
             extentsDecl @ [allocDecl; ""] @ wrapperLines @ loopCode
 
         | [0], [arrA] ->
@@ -7622,6 +8071,8 @@ let genObjectForApplication (ctx: CodeGenContext) (name: string) (objInfo: Objec
                 sprintf "%s    %s[__i0] = %s(%s[__i0]);" ind name wname arrA
                 sprintf "%s}" ind
             ]
+            registerPoolAlloc AllocDense elemTypeStr 1 "nullptr"
+                (name + "_extents") name (Some (name + "_extents"))
             extentsDecl @ [allocDecl; ""] @ wrapperLines @ loopCode
 
         | _ ->
@@ -7882,13 +8333,15 @@ let tryGenMergedCompute (ctx: CodeGenContext) (name: string) (infos: ApplyInfo l
         let tupleLine = sprintf "%sauto %s = std::make_tuple(%s);" ind name (leafNames |> String.concat ", ")
         let childrenMap = Map.ofList [name, leafNames]
         let wrap body =
-            // declCode is genuinely emitted on this path — see site ② above. The
-            // all-host test is a second gate: the MPI co-fusion arm also uses
-            // `wrap`, but every `where mpi` emission stays out of v1 (the
-            // Allgatherv restores each leaf on all ranks, and the device gates must
-            // be byte-unchanged), so its leaves are left leaked like the CUDA ones.
-            if backends |> List.forall isHostBackend then
-                leafRegs |> Seq.iter (fun f -> f ())
+            // declCode is genuinely emitted on this path — see site ② above.
+            // dealloc(D): the former all-host gate here is gone. `wrap` is reached
+            // by exactly two arms, the merged host nest and the MPI co-fusion, and
+            // BOTH prepend declCode verbatim; the MPI arm's per-leaf Allgatherv
+            // leaves every leaf fully restored on every rank, so its outputs are
+            // ordinary scope-owned locals. The all-cuda arm goes through
+            // `wrapDevice` (which drops declCode) and registers its own host
+            // restore buffers inside genCudaCoFusion instead.
+            leafRegs |> Seq.iter (fun f -> f ())
             (declCode @ [""] @ body @ [""] @ [tupleLine], name, childrenMap)
         // Device paths emit their OWN output allocation inline (host restore
         // buffers), so they must NOT prepend the host declCode.
@@ -9854,7 +10307,11 @@ and genCompoundInitBinding (ctx: CodeGenContext) (binding: IRBinding) (builder: 
         | IRMask _ ->
             let tmpName = sprintf "%s__masksrc" name
             (match materializeInlineForm emptySubst ctx.VarNames tmpName "bool" maskExpr with
-             | Some stmts -> (stmts |> List.map (fun s -> ind + s), tmpName)
+             // Deliberately NOT registered: this temp feeds the COMPOUND index
+             // construction below, and compound storage / ownership is owned by
+             // a separate workstream (the same reason isFreeableDenseArrayType
+             // excludes compound types).
+             | Some (stmts, _) -> (stmts |> List.map (fun s -> ind + s), tmpName)
              | None -> ([], exprToCpp ctx.VarNames maskExpr))
         | _ -> ([], exprToCpp ctx.VarNames maskExpr)
     (match binding.Type with
@@ -9883,6 +10340,12 @@ and genCompoundInitBinding (ctx: CodeGenContext) (binding: IRBinding) (builder: 
                  // scatter present leading cells (row-major prefix-popcount)
                  compactScatter { Ind = ind; Name = name; IdxName = idxName }
                  sprintf "%snested_array_utilities::Compound<%s, %d> %s { %s_compact, %s, %s_trail };" ind elemCpp leadRank name name idxName name ]
+         // Owns BOTH the compact buffer and the freshly built index. (BL6002
+         // restricts compound() to top-level lets today, where the empty
+         // scope stack makes this a no-op — registered anyway so a future
+         // lifting of BL6002 inherits correct frees. The idx's grid/pool
+         // locals alias the mask; only data + idx are owned.)
+         registerShapedAlloc name "deallocate_compound" name
          (lines, addVarName binding.Id name ctx)
      | _ ->
          ([sprintf "%s#error \"compound() binding '%s' is not a CompoundIdx array type\"" ind name], addVarName binding.Id name ctx))
@@ -9972,7 +10435,7 @@ and genMaskBinding (ctx: CodeGenContext) (binding: IRBinding) (builder: IRBuilde
         | _ -> codegenError ctx ind "mask: predicate must resolve to a single-parameter callable; got something else (typechecker or IR bug)"
     let matStmts =
         match materializeInlineForm emptySubst ctx.VarNames name elemStr (IRMask (arrExpr, predExpr)) with
-        | Some s -> s
+        | Some (s, allocs) -> registerMaterializedAllocs allocs; s
         | None -> []  // Unreachable: helper supports IRMask
     let code = forceCode @ elemErrCode @ predErrCode @ [sprintf "%s// mask: count + compact" ind] @ (matStmts |> List.map (fun s -> ind + s))
     let ctx' = addVarName binding.Id name ctx
@@ -9990,7 +10453,7 @@ and genIntersectBinding (ctx: CodeGenContext) (binding: IRBinding) (builder: IRB
     let elemStr = elemTypeToCpp elemET
     let matStmts =
         match materializeInlineForm emptySubst ctx.VarNames name elemStr (IRIntersect (aExpr, bExpr)) with
-        | Some s -> s
+        | Some (s, allocs) -> registerMaterializedAllocs allocs; s
         | None -> []
     let code = forceCodeA @ forceCodeB @ elemErrCode @ [sprintf "%s// intersect: build set from B, scan A" ind] @ (matStmts |> List.map (fun s -> ind + s))
     let ctx' = addVarName binding.Id name ctx
@@ -10008,7 +10471,7 @@ and genUnionBinding (ctx: CodeGenContext) (binding: IRBinding) (builder: IRBuild
     let elemStr = elemTypeToCpp elemET
     let matStmts =
         match materializeInlineForm emptySubst ctx.VarNames name elemStr (IRUnion (aExpr, bExpr)) with
-        | Some s -> s
+        | Some (s, allocs) -> registerMaterializedAllocs allocs; s
         | None -> []
     let code = forceCodeA @ forceCodeB @ elemErrCode @ [sprintf "%s// union: all of A, plus elements from B not in A" ind] @ (matStmts |> List.map (fun s -> ind + s))
     let ctx' = addVarName binding.Id name ctx
@@ -10028,7 +10491,7 @@ and genUniqueBinding (ctx: CodeGenContext) (binding: IRBinding) (builder: IRBuil
     let elemStr = elemTypeToCpp elemET
     let matStmts =
         match materializeInlineForm emptySubst ctx.VarNames name elemStr (IRUnique arrExpr) with
-        | Some s -> s
+        | Some (s, allocs) -> registerMaterializedAllocs allocs; s
         | None -> []
     let code = forceCode @ elemErrCode @ [sprintf "%s// unique: dedup via unordered_set, first-occurrence order" ind] @ (matStmts |> List.map (fun s -> ind + s))
     let ctx' = addVarName binding.Id name ctx
@@ -10073,6 +10536,13 @@ and genGroupByBinding (ctx: CodeGenContext) (binding: IRBinding) (builder: IRBui
         sprintf "%s    }" ind
         sprintf "%s}" ind
     ]
+    // Owns the row table AND every per-group row (each a separate new[]).
+    // The wrapper is Array<T*,1> whose .extents[1] is the ragged placeholder
+    // 0, so the row count comes from the gk__ngroups local — a plain size_t
+    // in the same scope, guaranteed live at the scope-exit free point. The
+    // gk__offsets/__perm side tables are NOT owned here (see group_keys).
+    registerShapedAlloc name "deallocate_ragged_rows_owned"
+        (sprintf "%s.data, %s__ngroups" name gkName)
     let ctx' = addVarName binding.Id name ctx
     let ctx' = { ctx' with GroupedArrays = Map.add name gkName ctx'.GroupedArrays }
     (forceCode @ code, ctx')
@@ -10107,7 +10577,7 @@ and genSortBinding (ctx: CodeGenContext) (binding: IRBinding) (builder: IRBuilde
         | _ -> codegenError ctx ind "sort: key must resolve to a single-parameter callable; got something else (typechecker or IR bug)"
     let matStmts =
         match materializeInlineForm emptySubst ctx.VarNames name elemStr (IRSort (arrExpr, keyExpr)) with
-        | Some s -> s
+        | Some (s, allocs) -> registerMaterializedAllocs allocs; s
         | None -> []
     let code = forceCode @ elemErrCode @ keyErrCode @ [sprintf "%s// sort: stable_sort on permutation, eager materialization" ind] @ (matStmts |> List.map (fun s -> ind + s))
     let ctx' = addVarName binding.Id name ctx
@@ -10128,7 +10598,7 @@ and genTransposeBinding (ctx: CodeGenContext) (binding: IRBinding) (builder: IRB
     let elemStr = elemTypeToCpp elemET
     let matStmts =
         match materializeInlineForm emptySubst ctx.VarNames name elemStr (IRTranspose (arrExpr, d1, d2)) with
-        | Some s -> s
+        | Some (s, allocs) -> registerMaterializedAllocs allocs; s
         | None -> []
     let code = forceCode @ elemErrCode @ [sprintf "%s// transpose: hard (swapped-extent alloc + axis-swapped copy)" ind] @ (matStmts |> List.map (fun s -> ind + s))
     let ctx' = addVarName binding.Id name ctx
@@ -10153,7 +10623,7 @@ and genStackJoinBinding (ctx: CodeGenContext) (binding: IRBinding) (builder: IRB
     let form = match joinDim with Some d -> IRJoin (arrs, d) | None -> IRStack arrs
     let matStmts =
         match materializeInlineForm emptySubst ctx.VarNames name elemStr form with
-        | Some s -> s
+        | Some (s, allocs) -> registerMaterializedAllocs allocs; s
         | None -> []
     let note =
         match joinDim with
@@ -10179,7 +10649,7 @@ and genDecompactBinding (ctx: CodeGenContext) (binding: IRBinding) (builder: IRB
     let elemStr = elemTypeToCpp elemET
     let matStmts =
         match materializeInlineForm emptySubst ctx.VarNames name elemStr (IRDecompact (arrExpr, d)) with
-        | Some s -> s
+        | Some (s, allocs) -> registerMaterializedAllocs allocs; s
         | None -> []
     let code = forceCode @ elemErrCode @ [sprintf "%s// decompact: hard (dense alloc + symmetry-expanding scatter)" ind] @ (matStmts |> List.map (fun s -> ind + s))
     let ctx' = addVarName binding.Id name ctx
@@ -10200,7 +10670,7 @@ and genArrayNegateConjugateBinding (ctx: CodeGenContext) (binding: IRBinding) (b
     let form = if isConj then IRArrayConjugate arrExpr else IRArrayNegate arrExpr
     let matStmts =
         match materializeInlineForm emptySubst ctx.VarNames name elemStr form with
-        | Some s -> s
+        | Some (s, allocs) -> registerMaterializedAllocs allocs; s
         | None -> []
     let code = forceCode @ elemErrCode @ [sprintf "%s// array_%s: whole-array eager transform (same-shape alloc + pool loop)" ind label] @ (matStmts |> List.map (fun s -> ind + s))
     let ctx' = addVarName binding.Id name ctx
@@ -10220,7 +10690,7 @@ and genGramBinding (ctx: CodeGenContext) (binding: IRBinding) (builder: IRBuilde
         | _ -> "double"
     let matStmts =
         match materializeInlineForm emptySubst ctx.VarNames name elemStr binding.Value with
-        | Some s -> s
+        | Some (s, allocs) -> registerMaterializedAllocs allocs; s
         | None -> []
     let code = [sprintf "%s// gram: A * B^H (Gram product)" ind] @ (matStmts |> List.map (fun s -> ind + s))
     let ctx' = addVarName binding.Id name ctx
@@ -10618,28 +11088,17 @@ and genVarAliasBinding (ctx: CodeGenContext) (binding: IRBinding) (builder: IRBu
                     | _ -> None
                 else None
             match mutArrayCopy with
-            | Some copyStmts ->
+            | Some (copyStmts, copyAllocs) ->
                 // Deterministic deallocation, site ⑥: the `let (mut) a = Z` deep
                 // copy. ONE registration covers BOTH mut paths — genFuncBody's mut
-                // arm routes through genBinding to here. materializeArrayCopyForm
-                // derives its (spec, SYMM) from the SOURCE type and its rank with
-                // `max 1 ix.Rank`, so the mirror is taken from there rather than
-                // from binding.Type (which supplies only the element type, exactly
-                // as the call above passes it). Restricted to dense + nullptr: a
-                // symmetric/strict disagreement between the two types would make
-                // deallocate walk a different skeleton than allocate built — heap
-                // corruption, not a compile error. Extents are a STACK array here,
-                // so nothing is owned.
-                let srcTy = inferExprType binding.Value
-                (match binding.Type, srcTy with
-                 | ArrayElem at, ArrayElem srcArr when
-                        isFreeableDenseArrayType at
-                        && classifyOutputStorage srcTy = AllocDense
-                        && not (hasRealSymmetry (buildSymmVec srcTy)) ->
-                     let rank = srcArr.IndexTypes |> List.sumBy (fun ix -> max 1 ix.Rank)
-                     registerPoolAlloc AllocDense (elemTypeToCpp at.ElemType) rank
-                         "nullptr" (name + "_extents") name None
-                 | _ -> ())
+                // arm routes through genBinding to here. Site ⑦ folded the former
+                // hand-rebuilt registration into the builder's OWN descriptor:
+                // materializeArrayCopyForm picks (spec, SYMM) from the SOURCE type
+                // and its rank with `max 1 ix.Rank`, and now reports exactly that,
+                // so the earlier dense-and-unsymmetric restriction (which existed
+                // only because the consumer had to guess) is gone. Extents are a
+                // STACK array here, so nothing is owned.
+                registerMaterializedAllocs copyAllocs
                 let ctx' = addVarName binding.Id name ctx
                 (copyStmts |> List.map (fun s -> ind + s), ctx')
             | None ->
@@ -10989,7 +11448,14 @@ let private genFuncBodyScoped
                 | LVVar tid -> Map.tryFind tid currentNames |> Option.defaultValue (sprintf "__v%d" tid)
                 | _ -> exprToCpp currentNames target
             currentNames <- Map.add id varName currentNames
-            [sprintf "%s%s = %s;" indent targetStr (exprToCpp currentNames v)]
+            // Phase M (see exprToCppCore's IRAssign arm): sole-owner mut keeps
+            // ONE pool; the RHS temp stays iteration-owned and its scope frees it.
+            match copyInPlaceAssign target v with
+            | Some (_, rid, n) ->
+                let rhsStr = Map.tryFind rid currentNames |> Option.defaultValue (sprintf "__v%d" rid)
+                [sprintf "%sstd::copy_n(pool_base(%s.data), %d, pool_base(%s.data));" indent rhsStr n targetStr]
+            | None ->
+                [sprintf "%s%s = %s;" indent targetStr (exprToCpp currentNames v)]
         | IRConstraintCheck (cond, message, span) ->
             currentNames <- Map.add id varName currentNames
             [ sprintf "%sif (!(%s)) {" indent (exprToCpp currentNames cond)
@@ -11075,7 +11541,9 @@ let private genFuncBodyScoped
             // body's indent rather than space-joined inline.
             let elemStr = inferInlineElemTypeStr "lambda-body inline form" value
             match materializeInlineForm emptySubst currentNames varName elemStr value with
-            | Some matStmts ->
+            | Some (matStmts, allocs) ->
+                // Statement position inside a live function frame: register.
+                registerMaterializedAllocs allocs
                 currentNames <- Map.add id varName currentNames
                 matStmts |> List.map (fun s -> indent + s)
             | None ->
@@ -11480,6 +11948,7 @@ let genModule (modul: IRModule) (builder: IRBuilder) : string list * string list
     // is a belt (the four assembly sites reset too): a previous module that raised
     // mid-emission must not leave a frame active for this one's bindings.
     (freshReturnFactsCell ()).Value <- computeFreshReturnFacts modul
+    (copyInPlaceMutsCell ()).Value <- computeCopyInPlaceMuts modul
     resetAllocScopeStack ()
 
     let ctx0 = emptyContext ()
@@ -11576,6 +12045,7 @@ let genModuleSplit (modul: IRModule) (builder: IRBuilder) : string list * string
     // instead, and a missing install here would silently demote every callee to
     // NotFresh (leaks only, but a divergence between the two modes).
     (freshReturnFactsCell ()).Value <- computeFreshReturnFacts modul
+    (copyInPlaceMutsCell ()).Value <- computeCopyInPlaceMuts modul
     resetAllocScopeStack ()
     let ctx0 = emptyContext ()
     let ctx0 = { ctx0 with ProviderReads = modul.ProviderReads; ProviderWrites = modul.ProviderWrites; RandomInits = modul.RandomInits; CompoundInits = modul.CompoundInits; MutableArrayLets = modul.MutableArrayLets }
@@ -12259,6 +12729,7 @@ let genMainProgram (modul: IRModule) (testName: string) : string =
     // Deterministic deallocation: clear both cells for this program. genModule
     // reinstalls the facts immediately (it needs the callables table first).
     (freshReturnFactsCell ()).Value <- Map.empty
+    (copyInPlaceMutsCell ()).Value <- Map.empty
     resetAllocScopeStack ()
     let builder = IRBuilder()
     // Codegen-synthesized ids (sequence children, __s1 stages, __ret temps)
@@ -12389,6 +12860,7 @@ let genSelfContainedProgram (modul: IRModule) (testName: string) : string =
     // Deterministic deallocation: see genMainProgram. genModule / genModuleSplit
     // reinstall the facts (both entry points below install).
     (freshReturnFactsCell ()).Value <- Map.empty
+    (copyInPlaceMutsCell ()).Value <- Map.empty
     resetAllocScopeStack ()
 
     let includes =
@@ -12479,6 +12951,7 @@ let genProgramWithExternalRuntime (modul: IRModule) (testName: string) : string 
     (blasUsedCell ()).Value <- false
     // Deterministic deallocation: see genMainProgram.
     (freshReturnFactsCell ()).Value <- Map.empty
+    (copyInPlaceMutsCell ()).Value <- Map.empty
     resetAllocScopeStack ()
     let (funcDefs, bindCode) = genModule modul builder
     // cblas include only when a gram actually lowered to BLAS this assembly
@@ -12501,6 +12974,7 @@ let genSelfContainedProgramFromIR (program: IRProgram) (testName: string) : stri
     cell.Value <- []
     // Deterministic deallocation: see genMainProgram.
     (freshReturnFactsCell ()).Value <- Map.empty
+    (copyInPlaceMutsCell ()).Value <- Map.empty
     resetAllocScopeStack ()
     let code =
         match program.Modules with

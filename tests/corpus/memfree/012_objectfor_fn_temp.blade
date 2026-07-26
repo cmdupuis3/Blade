@@ -1,0 +1,36 @@
+// TEST: Memfree ObjectFor Function Temps
+// ============================================================================
+// Free-hazard guard: a function whose body is plain elementwise/broadcast
+// ARRAY EXPRESSIONS (`a - mean`, `2.0 * d`, `w - d`, `mix * mix`) — each one
+// lowers to a genObjectForApplication materialization, i.e. a fresh pool with
+// no `|> compute` anywhere in sight. Every such intermediate must be freed at
+// the function epilogue, INCLUDING the ones built inside the return
+// expression (`a * 0.5`, `0.1 * mix`) — but the returned combination itself
+// must NOT be freed, since the caller owns it. Called at top level AND per
+// step of a recursion: the two distinct free sites.
+// ============================================================================
+type C = Idx<4>
+type Steps = Idx<5>
+let SRC = method_for(range<C>) <@> lambda(i) -> 1.0 * i + 1.0 |> compute
+function center(a: Array<Float like C>) -> Array<Float like C> = {
+    let d = a - (reduce(a, (+)) / 4.0)
+    let w = 2.0 * d
+    let mix = w - d
+    let spread = reduce(mix * mix, (+))
+    a * 0.5 + 0.1 * mix
+}
+let topc = center(SRC)
+let topmass = reduce(topc, (+))
+let rec traj: Array<Float like Steps, C> =
+    match traj with
+    | zero -> zero
+    | zero :: s -> zero :: [1.0, 2.0, 3.0, 4.0]
+    | prefix :: n -> prefix :: center(prefix(n - 1))
+let fin = traj(4)
+let mass = reduce(fin, (+))
+// EXPECT: SRC = [1, 2, 3, 4]
+// EXPECT: topc = [0.35, 0.95, 1.55, 2.15]
+// EXPECT: topmass = 5
+// EXPECT: traj = [1, 2, 3, 4, 0.35, 0.95, 1.55, 2.15, 0.085, 0.445, 0.805, 1.165, -0.0115, 0.2045, 0.4205, 0.6365, -0.03815, 0.09145, 0.22105, 0.35065]
+// EXPECT: fin = [-0.03815, 0.09145, 0.22105, 0.35065]
+// EXPECT: mass = 0.625

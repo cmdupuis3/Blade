@@ -531,6 +531,121 @@ namespace nested_array_utilities {
         }
     }
 
+    // =========================================================================
+    // deallocate_ragged* / deallocate_compound* — teardown for the NON-dense
+    // layouts (CSR-ish ragged, masked-product compound)
+    // =========================================================================
+    //
+    // Pointer-level primitives, deliberately NOT one "free this wrapper" entry
+    // point. A Ragged<T> or Compound<T,RANK> VALUE says nothing about which of
+    // its members it owns: the identical wrapper shape is produced by an owning
+    // constructor (fresh pool + fresh row table + fresh side tables), by a
+    // shape-preserving map (fresh pool + fresh rows, BORROWED lens / offsets /
+    // extents), and by a pure view (everything borrowed). Ownership is knowledge
+    // the PRODUCER has and the value does not carry — so the producer names the
+    // routine, and each routine frees exactly what its name says. Nothing is
+    // inferred at runtime, and no routine ever guesses about a side table.
+    //
+    // Same doctrine as deallocate<> above: unproven stays leaked. A leak is a
+    // bug we already have; a double free — or a free of storage another wrapper
+    // still reads — is a crash or, worse, silently changed numbers.
+    //
+    // The wrapper-shaped convenience layer (deallocate_ragged /
+    // deallocate_compound / the six view-and-gather routines, one per
+    // make_partial_* producer) lives in nested_array_types.hpp, which is where
+    // Ragged / Compound / Array are declared; it delegates to these.
+
+    // Owning-ragged storage: one contiguous element pool plus its row-pointer
+    // table, and NOTHING else. This is the shape a shape-preserving ragged
+    // producer emits (`<n>__pool = new T[offsets[nrows]]`, `<n>__rows =
+    // new T*[nrows]`), whose Ragged<T> wrapper then BORROWS the input's
+    // extents / lens / offsets — freeing those here would kill the input's
+    // shape metadata while the input is still live.
+    //
+    // The rows are pool SLICES (`pool + offsets[g]`), so a per-row `delete[]`
+    // would be an interior free and then a double free once the pool goes —
+    // the same hazard destroy_skeleton avoids for dense leaf rows. For the
+    // opposite layout (each row its own block) use deallocate_ragged_rows_owned.
+    //
+    // `pool` is passed EXPLICITLY rather than recovered from `rows[0]`: a
+    // zero-row ragged leaves `rows[0]` uninitialized, and a producer that filled
+    // its rows in some non-DFS order would leave a different slice there. The
+    // emitting site always has the pool's own name, so there is nothing to gain
+    // from guessing.
+    template<typename T>
+    void deallocate_ragged_storage(T** rows, T* pool) {
+        delete[] pool;   // delete[] nullptr is a no-op
+        delete[] rows;
+    }
+
+    // Per-row-owned jagged rows: each row is its OWN `new T[len]` block (the
+    // group_by layout — `out[g] = new T[sz]` under a `new T*[ngroups]` table),
+    // NOT a slice of a shared pool. Exactly the opposite hazard to
+    // deallocate_ragged_storage: here, freeing only the table leaks every row.
+    //
+    // `nrows` must be the count the producer sized the table with — the table
+    // itself carries no length, so a short count leaks the tail and a long one
+    // reads past the end. A null row entry is skipped (`delete[] nullptr`).
+    template<typename T>
+    void deallocate_ragged_rows_owned(T** rows, size_t nrows) {
+        if (!rows) return;
+        for (size_t i = 0; i < nrows; i++) delete[] rows[i];
+        delete[] rows;
+    }
+
+    // Ragged SIDE TABLES, for the producer that heap-allocates them. Opt-in and
+    // separate on purpose: every ragged producer in Blade today either SHARES
+    // its input's tables or emits them as `static constexpr` / stack arrays, and
+    // handing a borrowed or static table to a `delete[]` is a heap abort, not a
+    // diagnosable error. Any argument may be null (skipped). Deleting through a
+    // pointer-to-const is well-formed; the const is about the reader's view of
+    // the table, not about who owns it.
+    inline void deallocate_ragged_tables(const size_t* lens,
+                                         const size_t* offsets,
+                                         const size_t* extents) {
+        delete[] lens;
+        delete[] offsets;
+        delete[] extents;
+    }
+
+    // Compound storage: the flat compact buffer plus the index that gives it
+    // meaning. IDXT is a template parameter so this layer needs no knowledge of
+    // compound_index_t — that type lives in index_types.h, which sits ABOVE this
+    // header; IDXT is deduced at the call site, where it is complete.
+    //
+    // `delete idx` — the SINGLE-object form — is the correct teardown precisely
+    // because abstract_idx_t declares a virtual destructor: the derived
+    // compound_index_t's rank_to_tuple / tuple_to_rank / mask are reclaimed by
+    // the ordinary member-destructor chain even when the static type here is a
+    // base pointer. `delete[] idx` would be undefined behaviour.
+    //
+    // ONLY for a compound that owns BOTH. A partial/window view aliases its
+    // parent's data (see deallocate_compound_index_only); a map output shares
+    // its input's index (see deallocate_compound_data_only).
+    template<typename T, typename IDXT>
+    void deallocate_compound_storage(T* data, IDXT* idx) {
+        delete[] data;
+        delete idx;
+    }
+
+    // Compound data only — the map-output shape: a fresh compact buffer over an
+    // index BORROWED from the input compound (same mask, so the output cannot
+    // own it). Freeing the index here would leave the input holding a dangling
+    // `.idx`.
+    template<typename T>
+    void deallocate_compound_data_only(T* data) {
+        delete[] data;
+    }
+
+    // Compound index only — the view shape: a residual/window whose DATA is a
+    // slice of its parent's buffer (no copy) but whose sub-index was freshly
+    // materialized over the free-axis sub-mask. Freeing the data here would be
+    // an interior free of the parent's buffer.
+    template<typename IDXT>
+    void deallocate_compound_index_only(IDXT* idx) {
+        delete idx;
+    }
+
     template<typename TYPE, const size_t SYMM[] = nullptr, const size_t DEPTH = 0>
     constexpr void fill_random(TYPE array_in, const size_t extents[], int mod_in, size_t lastIndex = 0) {
         typedef typename std::remove_pointer<TYPE>::type DTYPE;
