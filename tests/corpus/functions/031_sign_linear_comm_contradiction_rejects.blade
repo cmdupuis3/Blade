@@ -1,0 +1,14 @@
+// TEST: Sign Linear Comm Contradiction (rejects)
+// INTERPROCEDURAL sign-linearity (stage 3, §3.2.1's table 2 lifted from
+// primitives to whole callees). `mymean` is odd in its parameter —
+// reduce(row,(+)) is odd (Σ(-x) = -Σx) and extents(row) is EVEN even for an
+// odd row (negation does not change a shape), so odd/even = odd — hence
+// mymean(a - b) = -mymean(b - a) and `diffmean` is provably ANTISYMMETRIC
+// *through the call*. Declared `where comm` on it is therefore the
+// silent-corruption case of functions/030, one call-frame deeper: before the
+// callee sign summaries, a call could only ever deduce PInv (callee and all
+// args invariant) and this body sat at PBottom = trusted.
+function mymean(row) = reduce(row, (+)) / extents(row)
+function diffmean(a, b) where comm(a, b) = mymean(a - b)
+let data = [[1.0, 2.0, 3.0], [2.0, 4.0, 6.0]]
+let bad = object_for(diffmean) <@> (data, data) |> compute

@@ -194,6 +194,21 @@ type TypeEnv = {
     /// f's REAL parameter names for the pin suggestion — without
     /// reanalyzing through the call. Shared by reference, like FuncCommGroups.
     FuncDeducedPairs: System.Collections.Generic.Dictionary<string, string list * Blade.Deduce.Parity list>
+    /// Stage-3 symmetry deduction, INTERPROCEDURAL SIGN-LINEARITY: per-function
+    /// per-parameter sign parities in declaration order (one SignParity per
+    /// param), recorded at checkFunctionDecl for fixed-arity (non-Poly)
+    /// functions. SOdd means `f(.., −x, ..) ≡ −f(..)`. The pair deduction's
+    /// call rule consults this so a call can PROPAGATE PNeg — `mymean(x − y)`
+    /// with `mymean` linear is antisymmetric, where the
+    /// callee-and-args-all-invariant rule alone could only ever say PBottom.
+    /// Keyed by the function's BINDER ID (`FuncId`, the varId every other
+    /// body's reference to it resolves to), NOT its name like the tables
+    /// above: a parameter or local shadowing a top-level function's name would
+    /// otherwise borrow that function's sign law, and a wrong sign law is a
+    /// wrong parity — a wrong pin suggestion. Resolved in DECL ORDER (a self-
+    /// or forward-call misses and lands on SUnknown), so no fixpoint is needed
+    /// and no summary proves itself. Shared by reference, like FuncCommGroups.
+    FuncSignParities: System.Collections.Generic.Dictionary<IRId, Blade.Deduce.SignParity list>
     /// Stage-3 late tier: per-function PACK symmetry for arity-polymorphic
     /// (Poly) kernels — funcName → (packParamName, parity). PInv means
     /// "invariant under every permutation of the pack, at every arity",
@@ -244,6 +259,7 @@ let emptyEnv () = {
     MutualReturnFuncs = System.Collections.Generic.Dictionary<string, string>()
     FuncCommGroups = System.Collections.Generic.Dictionary<string, int list list>()
     FuncDeducedPairs = System.Collections.Generic.Dictionary<string, string list * Blade.Deduce.Parity list>()
+    FuncSignParities = System.Collections.Generic.Dictionary<IRId, Blade.Deduce.SignParity list>()
     PackDeducedComm = System.Collections.Generic.Dictionary<string, string * Blade.Deduce.Parity>()
     FuncParallel = System.Collections.Generic.Dictionary<string, string list * ParallelStrategy list>()
 }

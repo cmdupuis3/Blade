@@ -5722,8 +5722,15 @@ and buildApplyInfo (env: TypeEnv)
             match etaSummary with
             | Some (names, ps) -> (names, ps)
             | None ->
+                // Same sign-linearity resolver as checkFunctionDecl: a lambda
+                // kernel calling an already-summarized helper (`lambda(x, y) ->
+                // mymean(x - y)`) gets the callee's per-parameter sign law.
+                let signResolver (calleeId: IRId) =
+                    match env.FuncSignParities.TryGetValue calleeId with
+                    | true, ps -> Some ps
+                    | _ -> None
                 (lambdaInfo.Params |> List.map (fun p -> p.Name),
-                 Blade.Deduce.deduceAdjacentPairs lambdaInfo.Params lambdaInfo.Body)
+                 Blade.Deduce.deduceAdjacentPairs signResolver lambdaInfo.Params lambdaInfo.Body)
     // Declared comm + provably antisymmetric body = the silent-corruption
     // case: triangular storage would drop the sign flips. Hard error;
     // PBottom stays trusted (status quo escape hatch).
@@ -9229,9 +9236,24 @@ and checkFunctionDecl (env: TypeEnv) (funcDecl: FunctionDecl) : TypeResult<Typed
             let polyParams =
                 typedParams |> List.filter (fun p ->
                     match env.Subst.Resolve p.Type with IRTPoly _ -> true | _ -> false)
+            // Interprocedural SIGN-LINEARITY summary, recorded BEFORE the pair
+            // deduction of this same body so a helper is available to its
+            // callers (decl order) — `mymean(row) = reduce(row,(+))/extents(row)`
+            // is odd in `row`, which is what lets a caller's `mymean(x - y)`
+            // deduce PNeg instead of PBottom. Fixed-arity (non-Poly) only: a
+            // pack has no per-position summary to index by argument. Keyed by
+            // funcVarId — the id every other body's reference to this function
+            // resolves to — so a shadowing parameter cannot borrow the law.
+            let signResolver (calleeId: IRId) =
+                match env.FuncSignParities.TryGetValue calleeId with
+                | true, ps -> Some ps
+                | _ -> None
+            if List.isEmpty polyParams && not (List.isEmpty typedParams) then
+                env.FuncSignParities.[funcVarId] <-
+                    Blade.Deduce.deduceSignParities signResolver typedParams tBody
             let deducedPairs =
                 if not (List.isEmpty polyParams) then []
-                else Blade.Deduce.deduceAdjacentPairs typedParams tBody
+                else Blade.Deduce.deduceAdjacentPairs signResolver typedParams tBody
             if not (List.isEmpty deducedPairs) then
                 env.FuncDeducedPairs.[funcDecl.Name] <-
                     (typedParams |> List.map (fun p -> p.Name), deducedPairs)

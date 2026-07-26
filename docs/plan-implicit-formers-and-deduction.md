@@ -675,12 +675,40 @@ cells with a duplicated `1.333` vs the 3-cell triangle).
    dense 9 cells + the suggestion naming `where comm(a)` on `packprod`);
    arity/022 now earns its suggestion through all three links (template →
    wrapper walk → fixed-arity specialization).
+   **INTERPROCEDURAL SIGN-LINEARITY DONE (2026-07-26)** — table 2 lifted
+   from primitives to whole callees, which is what lets a CALL propagate
+   PNeg at all (the old rule could only ever say "PInv when callee and
+   args all are", so `mymean(x − y)` sat at PBottom however linear
+   `mymean` was). `Deduce.deduceSignParities` summarizes each fixed-arity
+   function as one {SOdd, SEven, SUnknown} per parameter — SOdd meaning
+   `f(.., −x, ..) ≡ −f(..)` — bottom-up from the same style of table as
+   the pair parities, with the subtle entries being: `extents(−x) =
+   extents(x)`, so an ODD child yields an EVEN extents (this is exactly
+   what makes `reduce(row,(+)) / extents(row)` odd overall); `reduce`
+   passes the sign only through an UNSEEDED `(+)` (a `(*)` fold scales by
+   (−1)^extent, a seeded fold adds an unnegated accumulator); indexing
+   passes the array's sign only when every index is even; `if` needs an
+   even condition and matching branches; tuples/structs have no negation
+   as a value operation, so only invariance composes; comparisons and
+   logicals are even-only. Summaries live in `TypeEnv.FuncSignParities`,
+   recorded at `checkFunctionDecl` in DECL ORDER — a self- or
+   forward-call resolves to None and lands on SUnknown, so there is no
+   fixpoint and no summary proves itself. Keyed by the function's BINDER
+   ID rather than its name (unlike the sibling tables): a parameter
+   shadowing a function's name must not borrow that function's sign law,
+   since a wrong sign law is a wrong parity is a wrong pin. `parityOf`'s
+   call rule then applies the chain rule: the swap flips argument i
+   exactly where its pair-parity is PNeg, and the flip reaches the result
+   exactly where the callee is SOdd in position i, so the call is (−1)^k
+   times itself.
+   Corpus: functions/031 (`where comm` on `mymean(a − b)` now hard-errors
+   at the decl — antisymmetric THROUGH the helper), functions/032
+   (`half(x − y) * half(x − y)` earns PInv by PNeg·PNeg where the mirror
+   rule cannot fire, suggestion + dense 9 cells).
    Still deferred: per-instance checking on specialized IR bodies (only
    needed for NON-template pack kernels, which today deduce PBottom and
-   stay inert), interprocedural sign-linearity through calls (a call is
-   PInv only when callee and args all are), and the `where antisymm` pin
-   spelling for deduced-PNeg kernels (storage exists; CnAntisymm is
-   still dead code).
+   stay inert), and the `where antisymm` pin spelling for deduced-PNeg
+   kernels (storage exists; CnAntisymm is still dead code).
 
    *(original stage-3 text follows)* **Symmetry-from-primitives** (single late pass, §3.4): the two per-primitive
    tables (3-way swap class; per-operand sign parity) + the §3.2.1 judgment as
