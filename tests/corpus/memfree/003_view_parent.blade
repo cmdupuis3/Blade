@@ -1,0 +1,27 @@
+// TEST: Memfree View Of Temp Parent Ordering
+// ============================================================================
+// Free-hazard guard: a rank-2 per-step temp (T2) with row views bound and
+// consumed LATE (r0/r2 read after mid's reduce). The parent's pool must
+// outlive every view read; frees happen at function epilogue, after all uses.
+// ============================================================================
+type C = Idx<4>
+type R = Idx<3>
+type Steps = Idx<5>
+function vbump(u: Array<Float like C>, n: Int64) -> Array<Float like C> = {
+    let T2 = method_for(range<R, C>) <@> lambda(i, j) -> (1.0 * i + 1.0) * (1.0 * j + 1.0 * n) |> compute
+    let r1 = T2(1)
+    let mid = reduce(r1, (+))
+    let r0 = T2(0)
+    let r2 = T2(2)
+    u + 0.1 * r0 + 0.01 * r2
+}
+let rec traj: Array<Float like Steps, C> =
+    match traj with
+    | zero -> zero
+    | zero :: s -> zero :: [1.0, 2.0, 3.0, 4.0]
+    | prefix :: n -> prefix :: vbump(prefix(n - 1), n)
+let fin = traj(4)
+let mass = reduce(fin, (+))
+// EXPECT: traj = [1, 2, 3, 4, 1.13, 2.26, 3.39, 4.52, 1.39, 2.65, 3.91, 5.17, 1.78, 3.17, 4.56, 5.95, 2.3, 3.82, 5.34, 6.86]
+// EXPECT: fin = [2.3, 3.82, 5.34, 6.86]
+// EXPECT: mass = 18.32

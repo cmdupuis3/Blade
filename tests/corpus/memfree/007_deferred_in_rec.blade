@@ -1,0 +1,30 @@
+// TEST: Memfree Deferred Forced Inside Steps
+// ============================================================================
+// Free-hazard guard: a module-level DEFERRED binding (dn) forced by
+// |> compute inside each step BLOCK of a recursion — each force materializes
+// a fresh per-iteration local that must be freed at iteration end; the
+// deferred producer's module-level materialization (ll, forced at module
+// level by llread) must NOT be freed by any step.
+// ============================================================================
+type C = Idx<4>
+type Steps = Idx<5>
+let ll = method_for(range<C>) <@> lambda(m) -> if m < 2 then 1.0 * m else 1.0 * m - 4.0
+let neg = lambda(x) -> 0.0 - x
+let dn = neg <$> ll
+let llread = ll((0 : C)) + ll((3 : C))
+let rec traj: Array<Float like Steps, C> =
+    match traj with
+    | zero -> zero
+    | zero :: s -> zero :: [1.0, 2.0, 3.0, 4.0]
+    | prefix :: n -> prefix :: {
+        let start = prefix(n - 1)
+        let forced = dn |> compute
+        start + 0.1 * forced
+      }
+let fin = traj(4)
+let mass = reduce(fin, (+))
+// EXPECT: ll = [0, 1, -2, -1]
+// EXPECT: llread = -1
+// EXPECT: traj = [1, 2, 3, 4, 1, 1.9, 3.2, 4.1, 1, 1.8, 3.4, 4.2, 1, 1.7, 3.6, 4.3, 1, 1.6, 3.8, 4.4]
+// EXPECT: fin = [1, 1.6, 3.8, 4.4]
+// EXPECT: mass = 10.8

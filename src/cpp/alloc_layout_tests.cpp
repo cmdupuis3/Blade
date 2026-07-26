@@ -24,12 +24,55 @@
 
 #include <cstdio>
 #include <cstddef>
+#include <new>
 #include <vector>
 #include "nested_array_utilities.hpp"
 #include "nested_array_types.hpp"
 #include "linearized_storage.hpp"
 
 using namespace nested_array_utilities;
+
+// ---------------------------------------------------------------------------
+// Array-allocation accounting (for the deallocate<> balance tests)
+// ---------------------------------------------------------------------------
+//
+// Replacing the global array operators is legal here because this is a
+// standalone binary. It gives the one property the teardown tests need and that
+// values cannot show: that every heap block allocate<> made — the pool AND each
+// interior pointer row, whose count depends on the per-level span formula — is
+// handed back exactly once.
+//
+// Counting is TU-WIDE: any new[]/delete[] anywhere in the program moves these,
+// including test scaffolding. So the assertions never read the counter as an
+// absolute; each snapshots g_live_arrays immediately before its allocate and
+// compares after the paired deallocate. g_total_arrays only ever grows, and is
+// used to prove an allocation really happened (so a "no leak" verdict cannot be
+// vacuously true).
+//
+// We delegate to the SINGLE-object operators (which we do not replace) rather
+// than to malloc/free: that is precisely what the default operator new[] does,
+// so the blocks stay in the heap the default would have used and no cross-
+// library new[]/delete[] pairing can be mismatched. BOTH the sized and unsized
+// operator delete[] must be replaced — for trivially-destructible element types
+// g++ emits the C++14 SIZED form, so replacing only the unsized one would drop
+// decrements and every balance test would report a phantom leak.
+static size_t g_live_arrays = 0;
+static size_t g_total_arrays = 0;
+
+void* operator new[](std::size_t sz) {
+    void* p = ::operator new(sz);   // throws std::bad_alloc on failure
+    g_live_arrays++;
+    g_total_arrays++;
+    return p;
+}
+void operator delete[](void* p) noexcept {
+    if (p) g_live_arrays--;
+    ::operator delete(p);
+}
+void operator delete[](void* p, std::size_t) noexcept {
+    if (p) g_live_arrays--;
+    ::operator delete(p);
+}
 
 static int g_pass = 0;
 static int g_total = 0;
@@ -332,6 +375,202 @@ int main() {
         // also: pool contiguous 1..12 in DFS order
         for (size_t i = 0; i < 12; i++) if (p2[i] != (double)(i + 1)) ok = false;
         check("pool_base_rank2_dfs_contiguous", ok);
+    }
+
+    // =======================================================================
+    // Teardown: deallocate<> / deallocate_strict<> balance
+    // =======================================================================
+    //
+    // (4) BALANCE — every block allocate<> made is freed exactly once.
+    //
+    // This is the property the layout invariants make non-obvious. The interior
+    // pointer rows that exist are decided by the per-level span formula (each
+    // level's bound depends on the seed threaded from its parent), so a teardown
+    // that does not replay the SAME recurrence either misses rows (leak: counter
+    // ends high) or invents them (heap abort). And the leaf T* rows are pool
+    // slices, not blocks — the classic error is to free them, so the round-trips
+    // below also write and read back the elements, then reallocate, which is
+    // where an interior/double free shows up.
+    //
+    // Each block: snapshot -> allocate -> write+verify -> deallocate -> the
+    // counter is back where it started.
+
+    // ----- Dense rank 1: no skeleton at all (data IS the pool) -----
+    {
+        static const size_t ext[1] = {5};
+        using T1 = promote<double, 1>::type;
+        size_t snap = g_live_arrays;
+        T1 a = allocate<T1, nullptr>(ext);
+        bool rt = true;
+        for (size_t i=0;i<5;i++) a[i] = (double)(i+1);
+        for (size_t i=0;i<5;i++) if (a[i] != (double)(i+1)) rt = false;
+        deallocate<T1, nullptr>(a, ext);
+        check("dealloc_rank1_balanced", rt && g_live_arrays == snap);
+    }
+
+    // ----- Dense rank 2 -----
+    {
+        static const size_t ext[2] = {3, 4};
+        using T2 = promote<double, 2>::type;
+        size_t snap = g_live_arrays;
+        T2 a = allocate<T2, nullptr>(ext);
+        double c = 0; bool rt = true;
+        for (size_t i=0;i<3;i++) for(size_t j=0;j<4;j++) a[i][j]=c++;
+        c = 0;
+        for (size_t i=0;i<3;i++) for(size_t j=0;j<4;j++) if(a[i][j]!=c++) rt=false;
+        deallocate<T2, nullptr>(a, ext);
+        check("dealloc_rank2_balanced", rt && g_live_arrays == snap);
+    }
+
+    // ----- Dense rank 3 (non-cube: two interior levels) -----
+    {
+        static const size_t ext[3] = {2, 3, 4};
+        using T3 = promote<double, 3>::type;
+        size_t snap = g_live_arrays;
+        T3 a = allocate<T3, nullptr>(ext);
+        double c = 0; bool rt = true;
+        for (size_t i=0;i<2;i++) for(size_t j=0;j<3;j++) for(size_t k=0;k<4;k++) a[i][j][k]=c++;
+        c = 0;
+        for (size_t i=0;i<2;i++) for(size_t j=0;j<3;j++) for(size_t k=0;k<4;k++) if(a[i][j][k]!=c++) rt=false;
+        deallocate<T3, nullptr>(a, ext);
+        check("dealloc_rank3_balanced", rt && g_live_arrays == snap);
+    }
+
+    // ----- Dense rank 4 (three interior levels) -----
+    {
+        static const size_t ext[4] = {2, 2, 3, 3};
+        using T4 = promote<double, 4>::type;
+        size_t snap = g_live_arrays;
+        T4 a = allocate<T4, nullptr>(ext);
+        double c = 0; bool rt = true;
+        for (size_t i=0;i<2;i++) for(size_t j=0;j<2;j++) for(size_t k=0;k<3;k++) for(size_t l=0;l<3;l++) a[i][j][k][l]=c++;
+        c = 0;
+        for (size_t i=0;i<2;i++) for(size_t j=0;j<2;j++) for(size_t k=0;k<3;k++) for(size_t l=0;l<3;l++) if(a[i][j][k][l]!=c++) rt=false;
+        deallocate<T4, nullptr>(a, ext);
+        check("dealloc_rank4_balanced", rt && g_live_arrays == snap);
+    }
+
+    // ----- Symmetric {1,1} n=4 (shrinking rows, diagonal kept) -----
+    {
+        static const size_t ext[2] = {4, 4};
+        static constexpr const size_t symm[2] = {1, 1};
+        using T2 = promote<double, 2>::type;
+        size_t snap = g_live_arrays;
+        T2 a = allocate<T2, symm>(ext);
+        double c = 0; bool rt = true;
+        for (size_t i=0;i<4;i++) for(size_t j=0;j<4-i;j++) a[i][j]=c++;
+        c = 0;
+        for (size_t i=0;i<4;i++) for(size_t j=0;j<4-i;j++) if(a[i][j]!=c++) rt=false;
+        deallocate<T2, symm>(a, ext);
+        check("dealloc_sym2_balanced", rt && g_live_arrays == snap);
+    }
+
+    // ----- Symmetric {1,1,1} n=3: the interior rows themselves shrink -----
+    {
+        static const size_t ext[3] = {3, 3, 3};
+        static constexpr const size_t symm[3] = {1, 1, 1};
+        using T3 = promote<double, 3>::type;
+        size_t snap = g_live_arrays;
+        T3 a = allocate<T3, symm>(ext);
+        double c = 0; bool rt = true;
+        for (size_t i=0;i<3;i++) for(size_t j=0;j<3-i;j++) for(size_t k=0;k<3-i-j;k++) a[i][j][k]=c++;
+        c = 0;
+        for (size_t i=0;i<3;i++) for(size_t j=0;j<3-i;j++) for(size_t k=0;k<3-i-j;k++) if(a[i][j][k]!=c++) rt=false;
+        deallocate<T3, symm>(a, ext);
+        check("dealloc_sym3_balanced", rt && g_live_arrays == snap);
+    }
+
+    // ----- Antisymmetric rank 2 (DIAGONALS=false: strict seed, shorter rows) --
+    {
+        static const size_t ext[2] = {4, 4};
+        static constexpr const size_t aMask2[2] = {1, 1};
+        using T2 = promote<double, 2>::type;
+        size_t snap = g_live_arrays;
+        T2 a = allocate<T2, aMask2, false>(ext);
+        double v = 0; bool rt = true;
+        for (size_t i=0;i<4;i++){ size_t len=4-(i+1); for(size_t j=0;j<len;j++) a[i][j]=v++; }
+        v = 0;
+        for (size_t i=0;i<4;i++){ size_t len=4-(i+1); for(size_t j=0;j<len;j++) if(a[i][j]!=v++) rt=false; }
+        deallocate<T2, aMask2, false>(a, ext);
+        check("dealloc_antisym2_balanced", rt && g_live_arrays == snap);
+    }
+
+    // ----- Antisymmetric rank 3 n=5: C(5,3)=10, and the interior level ends in
+    // a ZERO-LENGTH row (i=4) — `new DTYPE[0]` is a real block, so the teardown
+    // has to visit it too.
+    {
+        static const size_t ext[3] = {5, 5, 5};
+        static constexpr const size_t aMask3[3] = {1, 1, 1};
+        using T3 = promote<double, 3>::type;
+        size_t snap = g_live_arrays;
+        T3 a = allocate<T3, aMask3, false>(ext);
+        double v = 0; bool rt = true;
+        for (size_t i=0;i<5;i++) for(size_t j=0;j<5-(i+1);j++) for(size_t k=0;k<5-(i+j+2);k++) a[i][j][k]=v++;
+        bool cardOk = (v == 10);
+        v = 0;
+        for (size_t i=0;i<5;i++) for(size_t j=0;j<5-(i+1);j++) for(size_t k=0;k<5-(i+j+2);k++) if(a[i][j][k]!=v++) rt=false;
+        deallocate<T3, aMask3, false>(a, ext);
+        check("dealloc_antisym3_balanced", rt && cardOk && g_live_arrays == snap);
+    }
+
+    // ----- Per-group strict: SYMM={1,2,2} STRICT={0,1,1} (the compact-residual
+    // shape — dense freed axis, strict residual pair). total = 2*(3+2+1+0) = 12.
+    {
+        static const size_t ext[3] = {2, 4, 4};
+        static constexpr const size_t symm[3]   = {1, 2, 2};
+        static constexpr const size_t strict[3] = {0, 1, 1};
+        using T3 = promote<double, 3>::type;
+        size_t snap = g_live_arrays;
+        size_t card = count_leaves_strict<T3, symm, strict>(ext);
+        T3 a = allocate_strict<T3, symm, strict>(ext);
+        double v = 0; bool rt = true;
+        for (size_t i=0;i<2;i++) for(size_t j=0;j<4;j++) for(size_t k=0;k<4-(j+1);k++) a[i][j][k]=v++;
+        bool cardOk = (card == 12 && v == 12);
+        v = 0;
+        for (size_t i=0;i<2;i++) for(size_t j=0;j<4;j++) for(size_t k=0;k<4-(j+1);k++) if(a[i][j][k]!=v++) rt=false;
+        deallocate_strict<T3, symm, strict>(a, ext);
+        check("dealloc_strict_mixed_balanced", rt && cardOk && g_live_arrays == snap);
+    }
+
+    // ----- Degenerate total==0: strict rank 3 with extent < rank (C(2,3)=0).
+    // allocate still makes a 1-element sentinel pool, but with no leaves there is
+    // no [0] spine to walk, so deallocate frees the skeleton rows and leaks that
+    // one element BY DESIGN. Requirement: no crash, and the leak is exactly the
+    // sentinel (not any skeleton row).
+    {
+        static const size_t ext[3] = {2, 2, 2};
+        static constexpr const size_t aMask3[3] = {1, 1, 1};
+        using T3 = promote<double, 3>::type;
+        size_t snap = g_live_arrays;
+        size_t tsnap = g_total_arrays;
+        size_t card = count_leaves<T3, aMask3, false>(ext);
+        T3 a = allocate<T3, aMask3, false>(ext);
+        deallocate<T3, aMask3, false>(a, ext);
+        size_t leaked = g_live_arrays - snap;
+        // g_total_arrays proves blocks were really allocated, so "leaked <= 1"
+        // cannot pass vacuously.
+        check("dealloc_degenerate_zero_total", card == 0 && g_total_arrays > tsnap && leaked <= 1);
+    }
+
+    // ----- Aliasing guard: allocate, free, allocate the SAME shape again. If the
+    // teardown had freed the leaf rows (pool slices), the heap would be corrupt
+    // and the second skeleton would alias live blocks; a full write/read sweep of
+    // the reused array is what catches it.
+    {
+        static const size_t ext[2] = {4, 5};
+        using T2 = promote<double, 2>::type;
+        size_t snap = g_live_arrays;
+        T2 a = allocate<T2, nullptr>(ext);
+        for (size_t i=0;i<4;i++) for(size_t j=0;j<5;j++) a[i][j]=(double)(i*5+j);
+        deallocate<T2, nullptr>(a, ext);
+        T2 b = allocate<T2, nullptr>(ext);
+        bool rt = true;
+        for (size_t i=0;i<4;i++) for(size_t j=0;j<5;j++) b[i][j]=(double)(100+i*5+j);
+        for (size_t i=0;i<4;i++) for(size_t j=0;j<5;j++) if(b[i][j]!=(double)(100+i*5+j)) rt=false;
+        // the reused pool must still be one contiguous span
+        bool contig = (&b[1][0] == &b[0][0] + 5) && (&b[3][0] == &b[0][0] + 15);
+        deallocate<T2, nullptr>(b, ext);
+        check("dealloc_realloc_heap_intact", rt && contig && g_live_arrays == snap);
     }
 
     printf("ALLOC TESTS: %d/%d passed\n", g_pass, g_total);

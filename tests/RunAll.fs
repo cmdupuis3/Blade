@@ -51,6 +51,21 @@ open Blade.Tests.Benchmarks
 // Test Collections
 // ============================================================================
 
+/// memfree — scope-exit deallocation hazards. Each member pins VALUES that
+/// must be invariant under the deterministic-free change: per-iteration
+/// combinator temps, aliases and views of them, captured muts, escaping
+/// results, deferred forces, packed symmetric temps, and nested recursions.
+/// Split from memfree-stress so this half can ride the interpreter
+/// differential gate (InterpDiff.currentSlice). Declared here (not in a
+/// Test_*.fs) so the category lives next to its one consumer.
+let memfreeTests = Blade.Tests.Corpus.category "memfree"
+
+/// memfree-stress — the allocation-churn MEMORY gate (011): ~30k iterations
+/// each materializing a 2 MiB temp. Its own category because the interpreter
+/// must NOT walk it (see InterpDiff.currentSlice) and because it OOMs by
+/// construction until scope-exit frees land.
+let memfreeStressTests = Blade.Tests.Corpus.category "memfree-stress"
+
 /// All tests combined
 let allTests =
     basicTests @ intrinsicsTests @ adTests @ mlE2eTests @ mlOpsTests @ mlEquivTests @ loopTests @ symmetryTests @ reynoldsTests @ arityTests @ functionTests
@@ -59,6 +74,7 @@ let allTests =
     @ foreignKeyTests @ maskTests @ setOpTests @ uniqueContainsTests @ semijoinTests @ groupByTests @ sortTests @ reduceTests @ extentsTests @ extentsMultiRankTests @ regressionTests @ sqlCombinedTests @ v24dProbes
     @ inferenceProbes
     @ funcArrayTests
+    @ memfreeTests @ memfreeStressTests
 
 /// Which optional, toolchain-heavy blocks the full suite should include.
 /// All default to OFF: the CUDA block needs the x64 Native Tools prompt on

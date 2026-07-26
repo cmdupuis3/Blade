@@ -148,10 +148,17 @@ namespace nested_array_utilities {
     // path. The pool-and-skeleton substrate itself is universal (extensions
     // §2.3.6); only this span computation forks.
     //
-    // TEARDOWN CONTRACT (not yet built — see CodeGen scope-tracker TODO): the
+    // TEARDOWN CONTRACT (BUILT — see deallocate / deallocate_strict below): the
     // pool is ONE `delete[]`; the skeleton is the interior pointer rows, freed
-    // bottom-up. This differs from naive recursive per-leaf frees. Generated
-    // programs currently do not free (pre-existing leak, unchanged here).
+    // bottom-up. This differs from naive recursive per-leaf frees, which are a
+    // HEAP-CORRUPTION bug here: a leaf row is `pool + offset`, a slice of alloc
+    // #1 and not a heap block of its own, so `delete[]`-ing it is an interior
+    // free (and a double free once the pool itself is released). The teardown
+    // must therefore know the same per-level span formula the build used — hence
+    // destroy_skeleton mirrors build_skeleton branch for branch.
+    // What remains is the CALLER side: wiring generated code to call deallocate
+    // at scope exit is the open CodeGen scope-tracker step, so generated
+    // programs still do not free (pre-existing leak, unchanged here).
 
     // Phase A — count_leaves: total SCALAR element count under this subtree.
     // Same recursion shape as the skeleton walk, so the count provably matches
@@ -378,6 +385,150 @@ namespace nested_array_utilities {
         SCALAR* pool = new SCALAR[total > 0 ? total : 1];
         size_t offset = 0;
         return build_skeleton_strict<TYPE, SYMM, STRICT, 0>(extents, pool, offset, 0);
+    }
+
+    // =========================================================================
+    // deallocate<> / deallocate_strict<> — the teardown of allocate<>
+    // =========================================================================
+    //
+    // The exact inverse of the two allocation families, and ONLY those two: one
+    // `delete[]` for the contiguous scalar pool (alloc #1), plus a bottom-up
+    // `delete[]` of the interior pointer rows (alloc #2). The leaf `T*` rows are
+    // NOT freed — they are `pool + offset` slices, so freeing them would be an
+    // interior free of the pool and then a double free when the pool goes.
+    //
+    // Because the surviving row set is defined by the per-level span formula
+    // (each level's `n` depends on the seed threaded down from its parent), the
+    // teardown cannot walk "the whole rectangle" — it must replay the SAME
+    // recurrence the build ran. destroy_skeleton is therefore a branch-for-branch
+    // mirror of build_skeleton (and destroy_skeleton_strict of
+    // build_skeleton_strict); any divergence frees rows that do not exist or
+    // leaks rows that do. Keep them edited in lockstep.
+    //
+    // ORDER: children first, then the parent row — the parent still has to be
+    // readable to reach its children. `pool_base` likewise must run BEFORE the
+    // skeleton is destroyed, since it recovers the pool by walking the [0] spine.
+
+    // destroy_skeleton: free the interior pointer rows of one subtree, bottom-up.
+    // Leaf level is a deliberate no-op (pool slice). `lastIndex` is the seed
+    // threaded by the caller, exactly as in build_skeleton — it selects this
+    // level's span, hence which children exist.
+    template<typename TYPE, const size_t SYMM[] = nullptr, bool DIAGONALS = true, const size_t DEPTH = 0>
+    void destroy_skeleton(TYPE skeleton, const size_t extents[], const size_t lastIndex = 0) {
+        typedef typename std::remove_pointer<TYPE>::type DTYPE;
+
+        size_t n;
+        // MSVC portability + strict offset: see count_leaves / build_skeleton.
+        constexpr bool hasSymm = (SYMM != nullptr);
+        constexpr size_t strictOff = DIAGONALS ? 0 : 1;
+        if constexpr (hasSymm && DEPTH > 0 && SYMM[DEPTH-1] == SYMM[DEPTH]) {
+            n = extents[DEPTH] - lastIndex;
+        } else {
+            n = extents[DEPTH];
+        }
+
+        if constexpr (!std::is_pointer<DTYPE>::value) {
+            // Leaf data row: a slice of the pool, never a heap block. Nothing to
+            // free here; the pool is released once, by deallocate.
+            (void)n;
+            return;
+        } else {
+            // Interior pointer row (alloc #2): recurse into the children that the
+            // build created, then free this row.
+            for (size_t i = 0; i < n; i++) {
+                if constexpr (hasSymm && SYMM[DEPTH] == SYMM[DEPTH + 1]) {
+                    if constexpr (hasSymm && DEPTH > 0 && SYMM[DEPTH-1] == SYMM[DEPTH])
+                        destroy_skeleton<DTYPE, SYMM, DIAGONALS, DEPTH + 1>(skeleton[i], extents, i + lastIndex + strictOff);
+                    else
+                        destroy_skeleton<DTYPE, SYMM, DIAGONALS, DEPTH + 1>(skeleton[i], extents, i + strictOff);
+                } else {
+                    destroy_skeleton<DTYPE, SYMM, DIAGONALS, DEPTH + 1>(skeleton[i], extents, 0);
+                }
+            }
+            delete[] skeleton;
+        }
+    }
+
+    // Top-level teardown. Mirror of allocate<>: same TYPE / SYMM / DIAGONALS, and
+    // the same `extents` the allocation was given (the span formula is recomputed
+    // from it, so passing different extents frees the wrong row set).
+    template<typename TYPE, const size_t SYMM[] = nullptr, bool DIAGONALS = true>
+    void deallocate(TYPE data, const size_t extents[]) {
+        typedef typename std::remove_pointer<TYPE>::type DTYPE;
+        using SCALAR = typename strip_ptr<TYPE>::type;
+
+        if constexpr (!std::is_pointer<DTYPE>::value) {
+            // Rank 1: there is no skeleton — build_skeleton returned `pool + 0`,
+            // so `data` IS the pool base. One delete[] and we are done (this also
+            // covers the degenerate extent-0 case, which still owns the sentinel).
+            delete[] data;
+        } else {
+            size_t total = count_leaves<TYPE, SYMM, DIAGONALS, 0>(extents, 0);
+            // Recover the pool BEFORE the skeleton is torn down: pool_base walks
+            // the [0] spine, which requires the rows to still be live. The
+            // leftmost spine carries the smallest seed and therefore the largest
+            // span at every level, so total > 0 guarantees it is walkable and its
+            // leaf sits at pool + 0.
+            SCALAR* pool = (total > 0) ? pool_base(data) : nullptr;
+            destroy_skeleton<TYPE, SYMM, DIAGONALS, 0>(data, extents, 0);
+            delete[] pool;   // delete[] nullptr is a no-op
+            // BOUNDED LEAK, total == 0 (e.g. strict storage with rank > extent):
+            // allocate still made a 1-element sentinel pool so a stray deref is
+            // never on a zero-length buffer, but with no leaves there is no [0]
+            // spine to walk (some level has n == 0, so skeleton[0] is out of
+            // bounds) and the sentinel's address is unrecoverable from the
+            // skeleton alone. We free every skeleton row and intentionally leak
+            // that one element rather than read out of bounds to find it. Bound:
+            // one sizeof(SCALAR) block per empty array, once.
+        }
+    }
+
+    // Per-group-strict teardown: mirror of build_skeleton_strict (strictness read
+    // at the CURRENT depth from STRICT[], so each group is independent).
+    template<typename TYPE, const size_t SYMM[], const size_t STRICT[], const size_t DEPTH = 0>
+    void destroy_skeleton_strict(TYPE skeleton, const size_t extents[], const size_t lastIndex = 0) {
+        typedef typename std::remove_pointer<TYPE>::type DTYPE;
+        constexpr bool hasSymm = (SYMM != nullptr);
+        constexpr size_t strictOff = (STRICT != nullptr && STRICT[DEPTH]) ? 1 : 0;
+        size_t n;
+        if constexpr (hasSymm && DEPTH > 0 && SYMM[DEPTH-1] == SYMM[DEPTH]) {
+            n = extents[DEPTH] - lastIndex;
+        } else {
+            n = extents[DEPTH];
+        }
+        if constexpr (!std::is_pointer<DTYPE>::value) {
+            (void)n;   // leaf row is a pool slice — nothing to free
+            return;
+        } else {
+            for (size_t i = 0; i < n; i++) {
+                if constexpr (hasSymm && SYMM[DEPTH] == SYMM[DEPTH + 1]) {
+                    if constexpr (hasSymm && DEPTH > 0 && SYMM[DEPTH-1] == SYMM[DEPTH])
+                        destroy_skeleton_strict<DTYPE, SYMM, STRICT, DEPTH + 1>(skeleton[i], extents, i + lastIndex + strictOff);
+                    else
+                        destroy_skeleton_strict<DTYPE, SYMM, STRICT, DEPTH + 1>(skeleton[i], extents, i + strictOff);
+                } else {
+                    destroy_skeleton_strict<DTYPE, SYMM, STRICT, DEPTH + 1>(skeleton[i], extents, 0);
+                }
+            }
+            delete[] skeleton;
+        }
+    }
+
+    // Top-level teardown for allocate_strict. Same total == 0 sentinel-leak
+    // semantics as deallocate (see there).
+    template<typename TYPE, const size_t SYMM[], const size_t STRICT[]>
+    void deallocate_strict(TYPE data, const size_t extents[]) {
+        typedef typename std::remove_pointer<TYPE>::type DTYPE;
+        using SCALAR = typename strip_ptr<TYPE>::type;
+
+        if constexpr (!std::is_pointer<DTYPE>::value) {
+            delete[] data;                  // rank 1: data IS the pool
+        } else {
+            size_t total = count_leaves_strict<TYPE, SYMM, STRICT, 0>(extents, 0);
+            SCALAR* pool = (total > 0) ? pool_base(data) : nullptr;
+            destroy_skeleton_strict<TYPE, SYMM, STRICT, 0>(data, extents, 0);
+            delete[] pool;
+        }
     }
 
     template<typename TYPE, const size_t SYMM[] = nullptr, const size_t DEPTH = 0>

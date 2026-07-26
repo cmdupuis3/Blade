@@ -1,0 +1,32 @@
+// TEST: Memfree Function Returning Param
+// ============================================================================
+// Free-hazard guard: functions whose result IS a param (ident) or an alias of
+// it (passthru) are NotFresh — the caller must NOT free their results, and the
+// callee must not free the param on return. SRC is pinned after the recursion
+// to prove the shared buffer survived every step untouched.
+// ============================================================================
+type C = Idx<4>
+type Steps = Idx<5>
+let SRC = method_for(range<C>) <@> lambda(i) -> 1.0 * i + 1.0 |> compute
+function ident(a: Array<Float like C>) -> Array<Float like C> = a
+function passthru(a: Array<Float like C>) -> Array<Float like C> = {
+    let z = a
+    z
+}
+function stepp(u: Array<Float like C>, n: Int64) -> Array<Float like C> = {
+    let t = method_for(range<C>) <@> lambda(i) -> 1.0 * i + 1.0 * n |> compute
+    let p = passthru(SRC)
+    let q = ident(p)
+    u + 0.001 * t + 0.1 * q
+}
+let rec traj: Array<Float like Steps, C> =
+    match traj with
+    | zero -> zero
+    | zero :: s -> zero :: [1.0, 2.0, 3.0, 4.0]
+    | prefix :: n -> prefix :: stepp(prefix(n - 1), n)
+let fin = traj(4)
+let mass = reduce(fin, (+))
+// EXPECT: SRC = [1, 2, 3, 4]
+// EXPECT: traj = [1, 2, 3, 4, 1.101, 2.202, 3.303, 4.404, 1.203, 2.405, 3.607, 4.809, 1.306, 2.609, 3.912, 5.215, 1.41, 2.814, 4.218, 5.622]
+// EXPECT: fin = [1.41, 2.814, 4.218, 5.622]
+// EXPECT: mass = 14.064

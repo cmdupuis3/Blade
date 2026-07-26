@@ -1,0 +1,32 @@
+// TEST: Memfree Function Chained Intermediates
+// ============================================================================
+// Free-hazard guard: a function with four chained array intermediates
+// (k1..k4) returning a fresh combination — all four freed at epilogue, the
+// return excluded. Called BOTH at top level and inside a recursion: the two
+// distinct free sites.
+// ============================================================================
+type C = Idx<4>
+type Steps = Idx<4>
+let SRC = method_for(range<C>) <@> lambda(i) -> 1.0 * i + 1.0 |> compute
+function chain4(u: Array<Float like C>) -> Array<Float like C> = {
+    let k1 = 0.0 - u
+    let k2 = 0.0 - (u + 0.05 * k1)
+    let k3 = 0.0 - (u + 0.05 * k2)
+    let k4 = 0.0 - (u + 0.1 * k3)
+    u + (0.1 / 6.0) * (k1 + 2.0 * k2 + 2.0 * k3 + k4)
+}
+let topcall = chain4(SRC)
+let topmass = reduce(topcall, (+))
+let rec traj: Array<Float like Steps, C> =
+    match traj with
+    | zero -> zero
+    | zero :: s -> zero :: [1.0, 2.0, 3.0, 4.0]
+    | prefix :: n -> prefix :: chain4(prefix(n - 1))
+let fin = traj(3)
+let mass = reduce(fin, (+))
+// EXPECT: SRC = [1, 2, 3, 4]
+// EXPECT: topcall = [0.9048375, 1.809675, 2.7145125, 3.61935]
+// EXPECT: topmass = 9.048375
+// EXPECT: traj = [1, 2, 3, 4, 0.9048375, 1.809675, 2.7145125, 3.61935, 0.81873090140625, 1.6374618028125, 2.45619270421875, 3.274923605625, 0.740818422001178, 1.48163684400236, 2.22245526600353, 2.96327368800471]
+// EXPECT: fin = [0.740818422001178, 1.48163684400236, 2.22245526600353, 2.96327368800471]
+// EXPECT: mass = 7.40818422001178
