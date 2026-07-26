@@ -1587,9 +1587,12 @@ let rec exprToCppCore (subst: SubstMap) (names: Map<IRId, string>) (expr: IRExpr
     | IRFusion (a, b) ->
         exprError "fusion combinator in expression position"
     | IRChoice (a, b) ->
+        // a <|> b: the left operand is bound to a temporary so it is
+        // evaluated exactly once (normative scalar <|> semantics, matching
+        // the interpreter's Loops.fs/Core.fs choice arms).
         let aStr = exprToCppCore subst names a
         let bStr = exprToCppCore subst names b
-        sprintf "(%s != 0 ? %s : %s)" aStr aStr bStr
+        sprintf "([&](){ auto __choice_l = %s; return __choice_l != 0 ? __choice_l : %s; })()" aStr bStr
     | IRFallback _ ->
         exprError "<|:> (allocated-fallback) in expression position — it combines whole arrays; bind it and materialize with |> compute"
     | IRGuard (cond, body) ->

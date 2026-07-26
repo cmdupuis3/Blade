@@ -220,8 +220,8 @@ let private toBoolV (v: Value) : bool =
     | VInt32 n -> n <> 0
     | _ -> false
 
-/// C++ `x != 0` over any scalar — the choice `<|>` pick test (exprToCpp's
-/// `(a != 0 ? a : b)`, CodeGen.fs:1369). Distinct from toBoolV, which is the
+/// C++ `x != 0` over any scalar — the choice `<|>` pick test (exprToCpp binds
+/// the left operand to a temporary first, CodeGen.fs:1589). Distinct from toBoolV, which is the
 /// bool-context projection (floats are never bool contexts, but ARE compared
 /// against zero by choice).
 let private valueNonZero (v: Value) : bool =
@@ -640,8 +640,8 @@ let rec evalExpr (st: InterpState) (env: Env) (expr: IRExpr) : Value =
     // ---- M2 choice / guard in EXPRESSION position. Over a computation operand
     //      they defer exactly like the combinator forms above (the binding-level
     //      classifiers agree). Over scalars they are the EAGER exprToCpp
-    //      ternaries (CodeGen.fs:1369/1373):
-    //        a <|> b            →  (a != 0 ? a : b)     (a evaluated once)
+    //      ternaries (CodeGen.fs:1589/1598):
+    //        a <|> b            →  auto l = a; l != 0 ? l : b   (a evaluated once)
     //        guard(p, body)     →  (p ? body : zero)    (type-appropriate zero;
     //                               body NOT evaluated when p is false)
     //      Without these arms a scalar guard/choice inside arithmetic reached
