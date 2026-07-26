@@ -817,6 +817,31 @@ slot into the existing category harness (`blade test <category>` /
 
 ## 8. New proof obligations
 
+> **DISCHARGED (2026-07-26): `proofs/BladeDeduce.v`** — 20 theorems, no
+> admits, compiled into the tower (_CoqProject after BladeCompute.v).
+> Table-1 mirror rules (`mirror_comm_invariant`,
+> `mirror_antisym_antiinvariant`) and table-2 sign composition
+> (`signprod_neg_neg` — the PNeg·PNeg = PInv crux, `signprod_mixed`,
+> `signsum_joint`) produce exactly the `invariant_under` /
+> `antiinvariant_under` facts that `output_symmetry_soundness` /
+> `output_antisymmetry_soundness` (BladeLowering) consume, closing the
+> deduction→storage chain. The sign chain rule lands as
+> `chain_flip_once`/`chain_flip_twice` ((−1)^k at k = 1, 2). The Sₙ
+> lemma is `adjacent_transpositions_generate` (list form, Permutation
+> induction — no group theory), and the all-arity pack license is
+> `exchange_law` + `packfold_permutation`, proved BY the adjacent
+> theorem, mirroring how `deducePackFold` reduces the whole-Sₙ claim to
+> adjacent checks. The antisym vacuity result is
+> `signed_exchange_impossible` (abstract collapse) +
+> `no_signed_exchange_Zsub` (concrete refutation on ℤ) — the formal
+> reason packs never claim PNeg. The per-primitive base cases over the
+> concrete numeric carriers, and the syntactic-judgment-to-semantic-fact
+> glue (that `Deduce.fs`'s fold only ever ANSWERS by appeal to one of
+> these lemmas), remain informal — the standard gap between the tower
+> and the F# implementation, same as every other proved law.
+
+*(original obligations follow)*
+
 - **Soundness of symmetry deduction:** the composed judgment of Â§3.2.1 implies
   the kernel is genuinely invariant/anti-invariant under the corresponding
   transpositions. Decomposes into: the adjacent-transpositions-generate-Sâ‚™
@@ -838,3 +863,58 @@ slot into the existing category harness (`blade test <category>` /
 - Both compose with the existing exact `H âˆ© Stab` lowering (`license_exactness`,
   BladeCompleteness; formalism.md Â§11.2) at the call site unchanged â€” the
   deductions produce the *inputs* to that law, they do not modify it.
+
+## 9. Sketch: calls as former applications (the eager surface)
+
+> **Status:** design sketch (2026-07-26), not a stage. The porcelain that
+> closes the last gap between §1's goal program and the shipped surface.
+
+A plain call is the EAGER form of a computation. Today the two spellings
+
+    object_for(f) <@> (A, B)              -- a PLAN: staged, fusable,
+                                          -- reynolds-wrappable, composable
+    object_for(f) <@> (A, B) |> compute   -- the plan, materialized
+
+have no call-shaped counterpart: `f(A, B)` with array arguments falls into
+the historical direct-application looseness (checked structurally
+downstream; a rank mismatch survives to g++). The sketch:
+
+**Elaboration.** A call `f(a1, …, an)` where some argument's resolved rank
+EXCEEDS the callee parameter's cell rank (stage 2's deduced-or-pinned rank
+— the rank gap is positive) elaborates to
+
+    f(a1, …, an)  ≜  object_for(f) <@> (a1, …, an) |> compute
+
+Gap zero everywhere: the ordinary call, unchanged (scalar code, recursion,
+Poly monomorphization all untouched). Negative gap anywhere: a TYPE ERROR
+at the seam — which retires the residual concrete-arg looseness hole
+(today's silently-broken C++) as a side effect, since the gap test needs
+exactly the comparison the loose path skips.
+
+**One semantics, two spellings.** The elaboration target is the existing
+former path verbatim: S-dims from the gaps, identities from the argument
+expressions, H ∩ Stab licensing, confirm-and-pin suggestions and
+`--strict-pins` — all apply to the call spelling for free, including the
+outer-product steering note for same-index-space arguments (§6.2 —
+`covariance(B, C)` is the outer comoment matrix, not a zip, exactly as the
+`<@>` spelling is). §1's goal line becomes real:
+
+    let cov = covariance(B, B)   -- B rank-2: the covariance matrix,
+                                 -- dense until `where comm(a, b)` is pinned
+
+**Why keep both spellings.** The formal footing is already in the tower:
+`rank0_convergence` / `compose_apply_duality` say the routes agree where
+they overlap, and `veval_not_injective` (BladeCompute) says evaluation
+FORGETS the plan — which is precisely why the call form cannot replace the
+former form: a materialized call cannot be fused, composed (`>>@`), or
+reynolds-wrapped after the fact. The call is V, the former is P; the
+V-P adjunction folklore becomes the user-facing eager/staged distinction.
+
+**Implementation shape (when picked up).** One elaboration at the
+direct-application seam (`dispatchAppOrIndex`'s FuncElem arm — the same
+seam stage 2 instrumented, where callee cell ranks and argument ranks are
+both resolved), re-driving `inferObjectFor` + `inferApply` exactly like
+the stage-1 normalization re-drives the formers; a corpus twin of
+functions/026 in call spelling; the mixed-gap case (some args gapped, some
+exact) inherits the former path's broadcast rules unchanged. Prerequisites
+are all shipped: stage 2 cell ranks, stage 1 formers, stage 3/4 pins.

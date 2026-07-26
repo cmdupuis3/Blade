@@ -9,7 +9,7 @@ Machine-checked kernel of the Blade formalism. Coq 8.18.0, stdlib only.
 
 or manually with `coqc -Q . Blade <file>` in _CoqProject order.
 
-## Contents (261 theorems total)
+## Contents (281 theorems total)
 
 - BladeCore.v (16): Group Law both halves (diagonal swap sound; per-dim
   product swap refuted), counting lemma (no lossless product layout),
@@ -92,6 +92,18 @@ or manually with `coqc -Q . Blade <file>` in _CoqProject order.
   correspondence); rank-0 convergence + fuse2_pairs (12.2); wrap
   round trips (12.3/12.4); MonadPlus value laws; deduced
   commutativity (9.19/9.20).
+- BladeDeduce.v (20): soundness kernel of the stage-3 signature
+  deduction (src/Deduce.fs): table-1 mirror rules (comm -> invariant,
+  antisym -> anti-invariant); table-2 sign composition
+  (PNeg.PNeg = PInv through sign-multiplicative ops, mixed product,
+  joint-linear sum); the sign chain rule (one odd position flips, two
+  cancel); adjacent transpositions generate Sn (list form, via
+  Permutation induction); the all-arity AC-fold pack license
+  (exchange_law + packfold_permutation, proved BY the adjacent
+  theorem); no signed exchange law (abstract collapse + Z subtraction
+  refutation) -- why packs never claim antisymmetry. Consumers:
+  output_symmetry_soundness / output_antisymmetry_soundness
+  (BladeLowering) take exactly the facts produced here.
 - BladeLex.v (12): lex-sortedness at the arrow level; enum,
   affine, and Compound instances inherit; offset order embeds lex
   order (enum_offset_respects_lex).
