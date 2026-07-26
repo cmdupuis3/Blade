@@ -131,7 +131,7 @@ let runNetcdfTests () =
     // ---------------------------------------------------------------
     printfn "\n--- Struct Structure ---"
 
-    let dimsFields = findStruct "dims" modul
+    let dimsFields = findStruct "sample__dims" modul
     check "dims struct exists"
         (dimsFields.IsSome) ""
     check "dims has 3 fields (lat, lon, time)"
@@ -141,7 +141,7 @@ let runNetcdfTests () =
         (dimsFields.Value |> List.map fst = ["lat"; "lon"; "time"])
         (sprintf "got %A" (dimsFields.Value |> List.map fst))
 
-    let varsFields = findStruct "vars" modul
+    let varsFields = findStruct "sample__vars" modul
     check "vars struct exists"
         (varsFields.IsSome) ""
     check "vars has 1 field (A)"
@@ -185,12 +185,19 @@ let runNetcdfTests () =
             fields |> List.tryPick (fun (n, t) -> if n = fieldName then Some t else None)
         | _ -> None
 
-    check "sample.vars -> vars struct"
-        (fieldOf "sample" "vars" = Some (IRTNamed "vars")) (sprintf "got %A" (fieldOf "sample" "vars"))
-    check "sample.dims -> dims struct"
-        (fieldOf "sample" "dims" = Some (IRTNamed "dims")) (sprintf "got %A" (fieldOf "sample" "dims"))
+    check "sample.vars -> sample__vars struct"
+        (fieldOf "sample" "vars" = Some (IRTNamed "sample__vars")) (sprintf "got %A" (fieldOf "sample" "vars"))
+    check "sample.dims -> sample__dims struct"
+        (fieldOf "sample" "dims" = Some (IRTNamed "sample__dims")) (sprintf "got %A" (fieldOf "sample" "dims"))
 
-    match fieldOf "vars" "A" with
+    // Bare "dims"/"vars" must NOT be registered: they would clobber across
+    // stores exactly the way bare dimension names would (see below).
+    check "bare 'vars' is not registered globally"
+        ((lookupTypeDef "vars" envP).IsNone) "bare name would clobber across stores"
+    check "bare 'dims' is not registered globally"
+        ((lookupTypeDef "dims" envP).IsNone) "bare name would clobber across stores"
+
+    match fieldOf "sample__vars" "A" with
     | Some (ArrayElem arr) ->
         check "sample.vars.A resolves to a rank-3 array"
             (arr.IndexTypes.Length = 3) (sprintf "got %d" arr.IndexTypes.Length)
@@ -198,6 +205,137 @@ let runNetcdfTests () =
             (arr.ElemType = IRTScalar ETFloat64) (sprintf "got %A" arr.ElemType)
     | other ->
         check "sample.vars.A resolves to an array type" false (sprintf "got %A" other)
+
+    // The `.index` surface: the axis types the provider derived from the file
+    // are registered under `<binding>.index.<dim>`, so an annotation can say
+    // `Array<Float64 like sample.index.x>` instead of hand-copying the extent.
+    // Qualified only — a bare `x` would clobber across stores.
+    let axisOf dim =
+        match lookupTypeDef (sprintf "sample.index.%s" dim) envP with
+        | Some (TDIIndexType (_, idx, _)) -> Some idx
+        | _ -> None
+
+    let fileDims =
+        modul.Types |> List.choose (function IRTDIndexType (n, idx) -> Some (n, idx) | _ -> None)
+    check "provider declares at least one named axis"
+        (not fileDims.IsEmpty) (sprintf "got %d" fileDims.Length)
+
+    for (dimName, srcIdx) in fileDims do
+        match axisOf dimName with
+        | Some idx ->
+            check (sprintf "sample.index.%s is registered" dimName) true ""
+            check (sprintf "sample.index.%s keeps the file's extent" dimName)
+                (idx.Extent = srcIdx.Extent) (sprintf "got %A want %A" idx.Extent srcIdx.Extent)
+            // Tag must stay as the provider built it (None): a synthesized tag
+            // here would make annotated arrays fail to unify with the store's.
+            check (sprintf "sample.index.%s keeps the provider's tag" dimName)
+                (idx.Tag = srcIdx.Tag) (sprintf "got %A want %A" idx.Tag srcIdx.Tag)
+        | None ->
+            check (sprintf "sample.index.%s is registered" dimName) false "not found"
+
+    // Bare dimension names must NOT leak into the global type namespace.
+    for (dimName, _) in fileDims do
+        check (sprintf "bare '%s' is not registered globally" dimName)
+            ((lookupTypeDef dimName envP).IsNone) "bare name would clobber across stores"
+
+    // ---------------------------------------------------------------
+    // Test 3b-2: TWO loads in one program (regression — silent miscompile)
+    //
+    // env.TypeDefs is a flat Map and registerTypeDef is a blind Map.add, while
+    // field access re-resolves the struct NAME at every use site
+    // (TypeCheck.structFieldTypesOf). So when both loads emitted structs under
+    // the literal names "dims"/"vars", the second load overwrote the first and
+    // every `first.vars.X` in the program silently type-checked against the
+    // SECOND store's fields — wrong element type / wrong rank where the names
+    // collided, spurious "field not found" where they didn't. No diagnostic.
+    //
+    // The fix is per-binding struct names ("<binding>__dims"/"<binding>__vars",
+    // the convention CsvProvider established). Registering second AFTER first
+    // is the ordering that used to clobber.
+    // ---------------------------------------------------------------
+    printfn "\n--- Two loads in one program (no cross-store clobber) ---"
+
+    let mockFirst : NetcdfProvider.NcFile = {
+        Path = "first.nc"
+        Dims = [
+            { Name = "lat"; Length = 180L }
+            { Name = "lon"; Length = 360L }
+        ]
+        Vars = [
+            // Shares the name "A" with the second store, but Float64 / rank 2.
+            { Name = "A"; Dims = [
+                { Name = "lat"; Length = 180L }
+                { Name = "lon"; Length = 360L }
+              ]; TypeCode = 6 }  // NC_DOUBLE
+            { Name = "only_first"; Dims = [ { Name = "lat"; Length = 180L } ]; TypeCode = 6 }
+        ]
+    }
+    let mockSecond : NetcdfProvider.NcFile = {
+        Path = "second.nc"
+        Dims = [ { Name = "depth"; Length = 40L } ]
+        Vars = [
+            // Same name "A", deliberately different: Float32 / rank 1.
+            { Name = "A"; Dims = [ { Name = "depth"; Length = 40L } ]; TypeCode = 5 }  // NC_FLOAT
+            { Name = "only_second"; Dims = [ { Name = "depth"; Length = 40L } ]; TypeCode = 5 }
+        ]
+    }
+
+    let twoBuilder = IRBuilder()
+    let modFirst = NetcdfProvider.ncFileToModule twoBuilder "first" mockFirst None
+    let modSecond = NetcdfProvider.ncFileToModule twoBuilder "second" mockSecond None
+
+    let (env1, _) = registerProviderModule (emptyEnv ()) "first" modFirst
+    let (env2, _) = registerProviderModule env1 "second" modSecond
+
+    // Walk the same chain TypeCheck does: binding struct -> section field ->
+    // IRTNamed <struct> -> member field. A live lookup at each hop, which is
+    // exactly why a clobbered TypeDefs entry retyped earlier use sites.
+    let memberOf (binding: string) (section: string) (field: string) : IRType option =
+        let fieldsOf structName =
+            match lookupTypeDef structName env2 with
+            | Some (TDIStruct (_, _, fields, _)) -> Some fields
+            | _ -> None
+        fieldsOf binding
+        |> Option.bind (List.tryPick (fun (n, t) -> if n = section then Some t else None))
+        |> Option.bind (function IRTNamed sn -> fieldsOf sn | _ -> None)
+        |> Option.bind (List.tryPick (fun (n, t) -> if n = field then Some t else None))
+
+    check "two loads: struct names are namespaced per binding"
+        ((findStruct "first__vars" modFirst).IsSome && (findStruct "second__vars" modSecond).IsSome
+         && (findStruct "first__dims" modFirst).IsSome && (findStruct "second__dims" modSecond).IsSome)
+        (sprintf "first %A second %A"
+            (modFirst.Types |> List.choose (function IRTDStruct (n, _) -> Some n | _ -> None))
+            (modSecond.Types |> List.choose (function IRTDStruct (n, _) -> Some n | _ -> None)))
+
+    // The core assertion: after the SECOND load registers, the FIRST store's
+    // shared-name member still resolves to the FIRST store's type.
+    check "two loads: first.vars.A keeps first's type (Float64, rank 2)"
+        (match memberOf "first" "vars" "A" with
+         | Some (ArrayElem a) -> a.ElemType = IRTScalar ETFloat64 && a.IndexTypes.Length = 2
+         | _ -> false)
+        (sprintf "got %A" (memberOf "first" "vars" "A"))
+    check "two loads: second.vars.A keeps second's type (Float32, rank 1)"
+        (match memberOf "second" "vars" "A" with
+         | Some (ArrayElem a) -> a.ElemType = IRTScalar ETFloat32 && a.IndexTypes.Length = 1
+         | _ -> false)
+        (sprintf "got %A" (memberOf "second" "vars" "A"))
+
+    // Non-overlapping members: under the clobber these produced a spurious
+    // "field not found" (first) / resolved fine only by luck (second).
+    check "two loads: first.vars.only_first resolves"
+        ((memberOf "first" "vars" "only_first").IsSome) "clobbered vars struct would lose it"
+    check "two loads: second.vars.only_second resolves"
+        ((memberOf "second" "vars" "only_second").IsSome) ""
+    check "two loads: first.vars has no member of the second store"
+        ((memberOf "first" "vars" "only_second").IsNone) "second store's field leaked into first"
+
+    // Same story for dims (the coordinate-array struct).
+    check "two loads: first.dims.lat resolves"
+        ((memberOf "first" "dims" "lat").IsSome) "clobbered dims struct would lose it"
+    check "two loads: second.dims.depth resolves"
+        ((memberOf "second" "dims" "depth").IsSome) ""
+    check "two loads: first.dims has no member of the second store"
+        ((memberOf "first" "dims" "depth").IsNone) "second store's dim leaked into first"
 
     // ---------------------------------------------------------------
     // Test 3c: load_compound view transform (compoundViewType)
@@ -548,7 +686,7 @@ let runNetcdfTests () =
     
     let builder2 = IRBuilder()
     let modul2 = NetcdfProvider.ncFileToModule builder2 "climate" mockFile2 None
-    let vars2 = findStruct "vars" modul2
+    let vars2 = findStruct "climate__vars" modul2
     
     check "vars has 2 fields" (vars2.Value.Length = 2) ""
     
@@ -611,8 +749,8 @@ let runNetcdfTests () =
         (idx3.IsEmpty) (sprintf "got %d" idx3.Length)
     
     // Both modules' vars should reference the shared lat/lon Ids
-    let vars3 = findStruct "vars" modul3
-    let vars4 = findStruct "vars" modul4
+    let vars3 = findStruct "file1__vars" modul3
+    let vars4 = findStruct "file2__vars" modul4
     check "External map: both modules share same lat Id"
         (match vars3, vars4 with
          | Some f3, Some f4 ->
@@ -747,8 +885,8 @@ let runNetcdfTests () =
             let liveBuilder = IRBuilder()
             let liveModule = NetcdfProvider.ncFileToModule liveBuilder "sample" liveFile None
             
-            let liveDimsFields = findStruct "dims" liveModule
-            let liveVarsFields = findStruct "vars" liveModule
+            let liveDimsFields = findStruct "sample__dims" liveModule
+            let liveVarsFields = findStruct "sample__vars" liveModule
             
             check "Live dims struct exists"
                 (liveDimsFields.IsSome) ""
@@ -837,16 +975,17 @@ let sample = NetCDF.load("tests/fixtures/sample.nc")
                 check "Provider produced index types"
                     (idxTypes.Length >= 3) (sprintf "got %A" idxTypes)
 
-                let hasVarsStruct = modul.Types |> List.exists (function IRTDStruct ("vars", _) -> true | _ -> false)
+                // Structs are namespaced by the receiving binding (`let sample = ...`).
+                let hasVarsStruct = modul.Types |> List.exists (function IRTDStruct ("sample__vars", _) -> true | _ -> false)
                 check "Provider produced vars struct" hasVarsStruct ""
 
-                let hasDimsStruct = modul.Types |> List.exists (function IRTDStruct ("dims", _) -> true | _ -> false)
+                let hasDimsStruct = modul.Types |> List.exists (function IRTDStruct ("sample__dims", _) -> true | _ -> false)
                 check "Provider produced dims struct" hasDimsStruct ""
 
                 // Verify vars struct has field A
                 let varAExists =
                     modul.Types |> List.exists (function
-                        | IRTDStruct ("vars", fields) ->
+                        | IRTDStruct ("sample__vars", fields) ->
                             fields |> List.exists (fun (n, _) -> n = "A")
                         | _ -> false)
                 check "vars struct has field A" varAExists ""

@@ -1014,8 +1014,16 @@ let private resolvedDimNames (a: ZarrArrayMeta) : string list =
 /// the same shape ncFileToModule produces:
 ///
 ///   type x = Idx<20>          (named index types, one per dimension)
-///   struct dims = { x: Array<Float64, Idx<x>> }   (coordinate arrays)
-///   struct vars = { A: Array<Float32, Idx<x>, ...> }
+///   struct sample__dims = { x: Array<Float64, Idx<x>> }   (coordinate arrays)
+///   struct sample__vars = { A: Array<Float32, Idx<x>, ...> }
+///
+/// The structs are namespaced by `moduleName` (the receiving binding) rather
+/// than named the bare "dims"/"vars", because registerProviderModule adds them
+/// to a single flat TypeDefs map: with literal names a second load in the same
+/// program silently overwrote the first, and since field access re-resolves the
+/// struct name at every use site, `a.vars.X` after `let b = z.load(..)` then
+/// type-checked against b's fields with no diagnostic. CsvProvider established
+/// the convention; registerProviderModule's `fieldFor` resolves the suffix.
 ///
 /// Coordinate arrays (1-D, named after their dimension) go in dims; unlike
 /// NetCDF (whose dims struct hardcodes Int64 coordinates), a Zarr
@@ -1081,7 +1089,7 @@ let zarrStoreToModule
             let idx = dimMap.[dn]
             let arrType = mkArrayArrow [idx] (IRTScalar (coordElem dn)) (Some (AIDVariable dn))
             (dn, arrType))
-    let dimsStruct = IRTDStruct("dims", dimsFields)
+    let dimsStruct = IRTDStruct(sprintf "%s__dims" moduleName, dimsFields)
 
     // Step 3: vars struct — data arrays (coordinate arrays excluded).
     // A blade-packed array types with its packed group as the LEADING index
@@ -1120,7 +1128,7 @@ let zarrStoreToModule
                 Identity = Some (AIDVariable a.Name)
             }
             (a.Name, mkArrayLike arrType))
-    let varsStruct = IRTDStruct("vars", varsFields)
+    let varsStruct = IRTDStruct(sprintf "%s__vars" moduleName, varsFields)
 
     {
         Name = moduleName

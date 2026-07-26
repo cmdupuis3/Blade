@@ -48,3 +48,4 @@ generated_cpp_tests/
 # ---- OS ----
 Thumbs.db
 .DS_Store
+*.exe

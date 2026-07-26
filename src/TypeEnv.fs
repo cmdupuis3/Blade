@@ -603,11 +603,39 @@ let registerProviderModule (env: TypeEnv) (name: string) (pm: IRModule) : TypeEn
                             | EVString s -> mkExpr noSpan (ExprKind.ExprLit (LitString s))
                             | EVInt n -> mkExpr noSpan (ExprKind.ExprLit (LitInt n)))))
                 registerTypeDef n (TDIEnumIdx (n, idx, values, TyEnumIdx bodyExpr)) e
+            | IRTDIndexType (n, idx) ->
+                // The axis types the provider derived from the file, exposed
+                // to annotations as `<binding>.index.<dim>` so a program can
+                // say `Array<Float64 like store.index.y>` instead of
+                // hand-copying the extent (`type Y = Idx<64>`) and silently
+                // going stale when the store is regenerated.
+                //
+                // QUALIFIED ONLY, deliberately: dimension names like `time`
+                // or `lat` recur across stores, and a bare registration would
+                // clobber last-write-wins in the shared TypeDefs map. A short
+                // local name stays a one-liner the program opts into:
+                // `type Y = store.index.y`.
+                //
+                // The record is registered EXACTLY as the provider built it
+                // (notably Tag = None, which NetcdfTests asserts): a fresh Id
+                // is stamped at each use by lowerIndexType, and slots match on
+                // extent, so an annotation written this way unifies with the
+                // store's own arrays precisely as the hand-written Idx<64>
+                // does today.
+                let extentExpr =
+                    match idx.Extent with
+                    | IRLit (IRLitInt v) -> mkExpr noSpan (ExprKind.ExprLit (LitInt v))
+                    | _ -> mkExpr noSpan (ExprKind.ExprLit (LitInt 0L))
+                let qualified = sprintf "%s.index.%s" name n
+                registerTypeDef qualified (TDIIndexType (qualified, idx, TyIdx extentExpr)) e
             | _ -> e) env
     // Module-struct fields point at the actual dims/vars struct decls the
-    // provider emitted. netcdf/zarr use the literal names "dims"/"vars";
-    // csv emits "<binding>__dims"/"<binding>__vars" so several loads in one
-    // program don't clobber each other in the TypeDefs map.
+    // provider emitted. Every provider namespaces them as
+    // "<binding>__dims"/"<binding>__vars" so several loads in one program
+    // don't clobber each other in this flat TypeDefs map (field access
+    // re-resolves the struct name at each use site, so a clobbered entry
+    // silently retypes earlier uses). The bare `n = label` arm is retained
+    // for any provider that emits unsuffixed structs.
     let structNames = pm.Types |> List.choose (function IRTDStruct (n, _) -> Some n | _ -> None)
     let fieldFor (label: string) =
         structNames

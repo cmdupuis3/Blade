@@ -6818,6 +6818,48 @@ and irTypeBadIrrepsDetail (t: IRType) : string option =
         |> Option.orElseWith (fun () -> irTypeBadIrrepsDetail r)
     | _ -> None
 
+/// Detect an unresolved QUALIFIED index-type path (`store.index.y`). Same
+/// consumption-site pattern as the checks above, and self-marking: a path that
+/// resolves yields the registered record verbatim (the provider builds its
+/// axes with Tag = None), so a dotted Tag can only be lowerIndexType's
+/// fall-through for a name that was never registered. Without this a typo'd or
+/// renamed dimension would silently become a free dependent extent — the
+/// annotation would look bound to the store while constraining nothing.
+and irTypeUnknownAxisPath (t: IRType) : string option =
+    let pathOf (ix: IRIndexType) =
+        match ix.Tag with
+        | Some tag when tag.Contains "." && not (tag.StartsWith irrepsTagPrefix) -> Some tag
+        | _ -> None
+    match t with
+    | ArrayElem at ->
+        (at.IndexTypes |> List.tryPick pathOf)
+        |> Option.orElseWith (fun () -> irTypeUnknownAxisPath at.ElemType)
+    | IRTTuple ts -> ts |> List.tryPick irTypeUnknownAxisPath
+    | FuncElem (ps, r) ->
+        (ps |> List.tryPick irTypeUnknownAxisPath)
+        |> Option.orElseWith (fun () -> irTypeUnknownAxisPath r)
+    | _ -> None
+
+/// Diagnostic for an unresolved `<store>.index.<dim>`, naming the dimensions
+/// the store actually exposes (read back from the module the load site
+/// recorded, so no file is re-opened).
+and unknownAxisPathMessage (path: string) : string =
+    let parts = path.Split('.')
+    if parts.Length >= 3 && parts.[1] = "index" then
+        let storeName = parts.[0]
+        let dim = String.concat "." (parts |> Array.skip 2)
+        let known =
+            match Blade.ProviderRegistry.IdeStores.tryFind storeName with
+            | Some pm -> pm.Types |> List.choose (function IRTDIndexType (n, _) -> Some n | _ -> None)
+            | None -> []
+        if known.IsEmpty then
+            sprintf "unknown index type '%s': '%s' is not a data-provider store binding in scope" path storeName
+        else
+            sprintf "the store '%s' has no dimension '%s'. It exposes: %s"
+                storeName dim (known |> String.concat ", ")
+    else
+        sprintf "unknown qualified index type '%s'" path
+
 // inferLetBinding (let-as-expression in function bodies and blocks) and
 // checkDecl/DeclLet (top-level let declarations) share their annotation handling
 // and PatVar binding logic. Extracting them here keeps the two paths in sync;
@@ -6868,6 +6910,10 @@ and inferLetBindingValue (env: TypeEnv) (binding: Binding) : TypeResult<TypedExp
         let badIrreps = irTypeBadIrrepsDetail annotTy
         if badIrreps.IsSome then
             Error (IrrepsIdxSpec badIrreps.Value)
+        else
+        let badAxis = irTypeUnknownAxisPath annotTy
+        if badAxis.IsSome then
+            Error (Other (unknownAxisPathMessage badAxis.Value))
         else
         // Nested-function desugar (parseNestedFunction): `function f(x) -> T
         // = body` becomes a let of a lambda whose binding annotation is the
@@ -9139,6 +9185,10 @@ and checkFunctionDecl (env: TypeEnv) (funcDecl: FunctionDecl) : TypeResult<Typed
     // parameter's own slots, keeping `f: (Nat<_>) -> Float64` legal).
     elif irTypeHasTagWildcard retType then
         Error (TagWildcardNotParam (sprintf "function '%s' return type" funcDecl.Name))
+    else
+    let badAxis = (paramTypes @ [retType]) |> List.tryPick irTypeUnknownAxisPath
+    if badAxis.IsSome then
+        Error (Other (unknownAxisPathMessage badAxis.Value))
     else
     let badIrreps = (paramTypes @ [retType]) |> List.tryPick irTypeBadIrrepsDetail
     if badIrreps.IsSome then

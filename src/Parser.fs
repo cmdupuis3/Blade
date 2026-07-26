@@ -211,6 +211,22 @@ let isCombinatorOp (kind: TokenKind) : bool =
 /// Peek past newlines, but only if the next non-newline token is a combinator operator.
 /// Returns the peeked token kind and the token list with newlines skipped.
 /// If the next non-newline token is NOT a combinator, returns the original stream unchanged.
+/// Consume `.segment` runs after a leading identifier in TYPE position,
+/// joining them into one dotted name. The only qualified type paths today are
+/// the type-provider axis types (`store.index.y`), which resolve through the
+/// ordinary TypeDefs lookup under that joined key — the same trick StaticEval
+/// uses to key qualified statics ("Module.name"). `..` lexes as its own
+/// TokDotDot, so a range can never be swallowed here, and a dot NOT followed
+/// by an identifier is left for the caller to fail on as before.
+let rec parseDottedTypeName (name: string) (tokens: Token list) : string * Token list =
+    match peek tokens with
+    | Some TokDot ->
+        let afterDot = advance tokens
+        match peek afterDot with
+        | Some (TokIdent seg) -> parseDottedTypeName (name + "." + seg) (advance afterDot)
+        | _ -> (name, tokens)
+    | _ -> (name, tokens)
+
 let peekContinuation (tokens: Token list) : TokenKind option * Token list =
     let skipped = skipNL tokens
     match skipped with
@@ -689,8 +705,10 @@ and parseTypeAtom (tokens: Token list) : ParseResult<TypeExpr> =
              expectGt afterElem >>= fun _ remaining ->
              success (TyDist (orderExpr, elemType, [])) remaining)
 
-    | Some (TokIdent name) ->
-        let afterName = advance tokens
+    | Some (TokIdent name0) ->
+        // A dotted run is a qualified type path (`store.index.y`); a bare name
+        // is unaffected, so `T^2` and `Foo<...>` parse exactly as before.
+        let (name, afterName) = parseDottedTypeName name0 (advance tokens)
         match peek afterName with
         | Some (TokOp "^") ->
             // The caret is the syntactic marker for type variables.
@@ -863,11 +881,12 @@ and parseIndexType (tokens: Token list) : ParseResult<TypeExpr> =
         expectGt afterSpec >>= fun _ remaining ->
         success (TyIrrepsIdx specExpr) remaining
 
-    | Some (TokIdent name) ->
-        // Named index type alias (e.g. type RegionIdx = Idx<3>; ...like RegionIdx).
-        // Resolved at typecheck via lowerIndexType / TyNamed lookup against
-        // TDIIndexType or TDIEnumIdx.
-        let afterName = advance tokens
+    | Some (TokIdent name0) ->
+        // Named index type alias (e.g. type RegionIdx = Idx<3>; ...like RegionIdx),
+        // or a qualified provider axis (`like store.index.y`). Resolved at
+        // typecheck via lowerIndexType / TyNamed lookup against TDIIndexType
+        // or TDIEnumIdx.
+        let (name, afterName) = parseDottedTypeName name0 (advance tokens)
         match peek afterName with
         | Some (TokOp "<") ->
             let afterLt = advance afterName

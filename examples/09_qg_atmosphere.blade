@@ -78,8 +78,8 @@ let ll = method_for(range<Y>) <@> lkm
 let kk = method_for(range<X>) <@> lkm
 let k2i = ll^2 [+] kk^2
 let ainvA = (method_for(k2i) <@> lambda(v) -> if v > 0.0 then -(1.0 / v) else 0.0) |> compute
-let ZERO2 = (method_for(k2i) <@> lambda(v) -> 0.0) |> compute
-let ZC = (method_for(k2i) <@> lambda(v) -> complex(0.0, 0.0)) |> compute
+let ZERO2: Array<Float64 like Y, X> = zero |> compute
+let ZC: Array<Complex128 like Y, X> = zero |> compute
 
 let mag2 = object_for(lambda(z) -> real(z)^2 + imag(z)^2)
 
@@ -126,8 +126,6 @@ function maxall(f: RF) -> Float64 = {
     let rows = method_for(f) <@> lambda(row: RX) -> reduce(row, fmax) |> compute
     reduce(rows, fmax)
 }
-let absv = object_for(lambda(x) -> abs(x))
-let absv_u1 = object_for(lambda(x) -> abs(x + 0.05))
 
 // CFL running-max accumulator (reset before each run).
 let mut cflAcc: Float64 = 0.0
@@ -141,8 +139,8 @@ function H_single(qs: CF, beta: Float64) -> CF = {
     let u = sp.ifft2(uhat(ll, ph))
     let v = sp.ifft2(vhat(kk, ph))
     let qr = sp.ifft2(qs)
-    let mu = maxall(absv <@> (u) |> compute)
-    let mv = maxall(absv <@> (v) |> compute)
+    let mu = maxall(abs <@> u |> compute)
+    let mv = maxall(abs <@> v |> compute)
     cflAcc = fmax(cflAcc, fmax(mu, mv))
     let UQ = sp.fft2(flux(u, 0.0, qr))
     let VQ = sp.fft2(flux(v, 0.0, qr))
@@ -156,9 +154,9 @@ function seed_a(q0: CF) -> SLA = {
 // Step n: read the previous state, take its tendency (= H_{n-1}), fold it with
 // the two stored lags, and re-stack — the new H displaces the oldest lag.
 function astep(n: Int64, st: SLA, beta: Float64, dt: Float64) -> SLA = {
-    let qp = st((0 : FA))
-    let h1 = st((1 : FA))
-    let h2 = st((2 : FA))
+    let qp = st(0: FA)
+    let h1 = st(1: FA)
+    let h2 = st(2: FA)
     let hn = H_single(qp, beta)
     let s = n - 1
     let qn = ab3_fold(FILTR, qp, hn, h1, h2, ab3_d1(s, dt), ab3_d2(s, dt), ab3_d3(s, dt))
@@ -169,11 +167,11 @@ function astep(n: Int64, st: SLA, beta: Float64, dt: Float64) -> SLA = {
 let QH0_A1: CF = sp.fft2(QR0)
 let ea1_0 = {
     let ph = invert(ainvA, QH0_A1, ZERO2, ZC)
-    let m = mag2 <@> (ph) |> compute
+    let m = mag2 <@> ph |> compute
     spec_sum(k2i, m)
 }
 let za1_0 = {
-    let m = mag2 <@> (QH0_A1) |> compute
+    let m = mag2 <@> QH0_A1 |> compute
     half_mean2(m)
 }
 // EXPECT: ea1_0 = 1
@@ -187,33 +185,33 @@ let QHT_A1: CF = {
         | zero :: s -> zero :: seed_a(QH0_A1)
         | prefix :: n -> prefix :: astep(n, prefix(n - 1), 20.0, 0.001)
     let fin = qsA1(1000)
-    fin((0 : FA))
+    fin(0: FA)
 }
 let cfl_a1 = cflAcc * 0.001 / (6.283185307179586 / 64.0)
 // EXPECT: cfl_a1 = 0.0203728431496975
 
 let ea1_T = {
     let ph = invert(ainvA, QHT_A1, ZERO2, ZC)
-    let m = mag2 <@> (ph) |> compute
+    let m = mag2 <@> ph |> compute
     spec_sum(k2i, m)
 }
 let za1_T = {
-    let m = mag2 <@> (QHT_A1) |> compute
+    let m = mag2 <@> QHT_A1 |> compute
     half_mean2(m)
 }
 // EXPECT: ea1_T = 1.00009251739649
 // EXPECT: za1_T = 4.00037006958596
 
 let QF1: RF = sp.ifft2(QHT_A1)
-let qa1_p0 = QF1((0 : Y), (0 : X))
-let qa1_p1 = QF1((0 : Y), (16 : X))
-let qa1_p2 = QF1((32 : Y), (40 : X))
+let qa1_p0 = QF1(0: Y, 0: X)
+let qa1_p1 = QF1(0: Y, 16: X)
+let qa1_p2 = QF1(32: Y, 40: X)
 // EXPECT: qa1_p0 = 3.12697533490403
 // EXPECT: qa1_p1 = -3.12697533490402
 // EXPECT: qa1_p2 = -2.49469547906056
 
-let row0 = QF1((0 : Y))
-let DERR = method_for(zip(row0, QPRED)) <@> (-) |> compute
+let row0 = QF1(0: Y)
+let DERR = row0 - QPRED |> compute
 let rossby_err = prodsum(DERR, DERR) / prodsum(QPRED, QPRED)
 let rossby_ok = if rossby_err < 1.0e-6 then 1.0 else 0.0
 let a1drift = ea1_T / ea1_0 - 1.0
@@ -228,11 +226,11 @@ let a1_energy_ok = if abs(a1drift) < 0.001 then 1.0 else 0.0
 let QH0_A2: CF = sp.fft2(QM0)
 let ea2_0 = {
     let ph = invert(ainvA, QH0_A2, ZERO2, ZC)
-    let m = mag2 <@> (ph) |> compute
+    let m = mag2 <@> ph |> compute
     spec_sum(k2i, m)
 }
 let za2_0 = {
-    let m = mag2 <@> (QH0_A2) |> compute
+    let m = mag2 <@> QH0_A2 |> compute
     half_mean2(m)
 }
 // EXPECT: ea2_0 = 0.999999999999999
@@ -253,19 +251,19 @@ let cfl_a2 = cflAcc * 0.005 / (6.283185307179586 / 64.0)
 
 let ea2_T = {
     let ph = invert(ainvA, QHT_A2, ZERO2, ZC)
-    let m = mag2 <@> (ph) |> compute
+    let m = mag2 <@> ph |> compute
     spec_sum(k2i, m)
 }
 let za2_T = {
-    let m = mag2 <@> (QHT_A2) |> compute
+    let m = mag2 <@> QHT_A2 |> compute
     half_mean2(m)
 }
 // EXPECT: ea2_T = 0.877444565351286
 // EXPECT: za2_T = 6.74008551785885
 
 let QF2: RF = sp.ifft2(QHT_A2)
-let qa2_p0 = QF2((5 : Y), (12 : X))
-let qa2_p1 = QF2((33 : Y), (47 : X))
+let qa2_p0 = QF2(5: Y, 12: X)
+let qa2_p1 = QF2(33: Y, 47: X)
 // EXPECT: qa2_p0 = -1.46346198225956
 // EXPECT: qa2_p1 = -1.58881233623573
 
@@ -300,8 +298,9 @@ function tend1_b(q1: CF, q2: CF) -> CF = {
     let u = sp.ifft2(uhat(llB, ph))
     let v = sp.ifft2(vhat(kkB, ph))
     let qr = sp.ifft2(q1)
+    let absv_u1 = object_for(lambda(x) -> abs(x + 0.05))
     let mu = maxall(absv_u1 <@> (u) |> compute)
-    let mv = maxall(absv <@> (v) |> compute)
+    let mv = maxall(abs <@> (v) |> compute)
     cflAcc = fmax(cflAcc, fmax(mu, mv))
     let UQ = sp.fft2(flux(u, 0.05, qr))
     let VQ = sp.fft2(flux(v, 0.0, qr))
@@ -312,8 +311,8 @@ function tend2_b(q1: CF, q2: CF) -> CF = {
     let u = sp.ifft2(uhat(llB, ph))
     let v = sp.ifft2(vhat(kkB, ph))
     let qr = sp.ifft2(q2)
-    let mu = maxall(absv <@> (u) |> compute)
-    let mv = maxall(absv <@> (v) |> compute)
+    let mu = maxall(abs <@> (u) |> compute)
+    let mv = maxall(abs <@> (v) |> compute)
     cflAcc = fmax(cflAcc, fmax(mu, mv))
     let UQ = sp.fft2(flux(u, 0.0, qr))
     let VQ = sp.fft2(flux(v, 0.0, qr))
@@ -327,12 +326,12 @@ function seed_b(q10: CF) -> SLB = {
 // Step n: both layer tendencies come from the SAME previous joint state, so
 // each layer folds independently and the two ladders rotate together.
 function bstep(n: Int64, st: SLB) -> SLB = {
-    let q1p = st((0 : FB))
-    let q2p = st((1 : FB))
-    let g1 = st((2 : FB))
-    let g2 = st((3 : FB))
-    let j1 = st((4 : FB))
-    let j2 = st((5 : FB))
+    let q1p = st(0: FB)
+    let q2p = st(1: FB)
+    let g1 = st(2: FB)
+    let g2 = st(3: FB)
+    let j1 = st(4: FB)
+    let j2 = st(5: FB)
     let h1n = tend1_b(q1p, q2p)
     let h2n = tend2_b(q1p, q2p)
     let s = n - 1
@@ -356,19 +355,19 @@ let QHT_B: CF = {
         | zero :: s -> zero :: seed_b(QH0_B)
         | prefix :: n -> prefix :: bstep(n, prefix(n - 1))
     let mid = jtB(800)
-    let q1m = mid((0 : FB))
-    let q2m = mid((1 : FB))
+    let q1m = mid(0: FB)
+    let q2m = mid(1: FB)
     let phm = invert(a11B, q1m, a12B, q2m)
-    let mm = mag2 <@> (phm) |> compute
+    let mm = mag2 <@> phm |> compute
     ke1mid_s = spec_sum(k2B, mm)
     let fin = jtB(1600)
-    let q1e = fin((0 : FB))
-    let q2e = fin((1 : FB))
+    let q1e = fin(0: FB)
+    let q2e = fin(1: FB)
     let p1e = invert(a11B, q1e, a12B, q2e)
-    let m1e = mag2 <@> (p1e) |> compute
+    let m1e = mag2 <@> p1e |> compute
     ke1end_s = spec_sum(k2B, m1e)
     let p2e = invert(a21B, q1e, a22B, q2e)
-    let m2e = mag2 <@> (p2e) |> compute
+    let m2e = mag2 <@> p2e |> compute
     ke2end_s = spec_sum(k2B, m2e)
     q1e
 }
@@ -382,8 +381,8 @@ let cfl_b = cflAcc * 7200.0 / (1000000.0 / 64.0)
 // EXPECT: cfl_b = 0.0236600874418345
 
 let QF3: RF = sp.ifft2(QHT_B)
-let qb_p0 = QF3((7 : Y), (9 : X))
-let qb_p1 = QF3((50 : Y), (3 : X))
+let qb_p0 = QF3(7: Y, 9: X)
+let qb_p1 = QF3(50: Y, 3: X)
 // EXPECT: qb_p0 = -1.78279068753764e-07
 // EXPECT: qb_p1 = 8.85921910157939e-08
 

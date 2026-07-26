@@ -170,9 +170,9 @@ let runZarrTests () =
     check "mock module: named index types x, y"
         (indexDefs |> List.map fst |> List.sort = ["x"; "y"]) (sprintf "%A" (List.map fst indexDefs))
     let dimsFields =
-        modul.Types |> List.tryPick (function IRTDStruct ("dims", fs) -> Some fs | _ -> None) |> Option.defaultValue []
+        modul.Types |> List.tryPick (function IRTDStruct ("sample__dims", fs) -> Some fs | _ -> None) |> Option.defaultValue []
     let varsFields =
-        modul.Types |> List.tryPick (function IRTDStruct ("vars", fs) -> Some fs | _ -> None) |> Option.defaultValue []
+        modul.Types |> List.tryPick (function IRTDStruct ("sample__vars", fs) -> Some fs | _ -> None) |> Option.defaultValue []
     check "mock module: dims has x and y" (dimsFields |> List.map fst |> List.sort = ["x"; "y"]) (sprintf "%A" (List.map fst dimsFields))
     check "mock module: vars has A only (x is a coordinate array)"
         (varsFields |> List.map fst = ["A"]) (sprintf "%A" (List.map fst varsFields))
@@ -207,6 +207,108 @@ let runZarrTests () =
             zarrStoreToModule (IRBuilder()) "s" bad None |> ignore
             false
          with ex -> ex.Message.Contains "conflicting extents") ""
+
+    // ---------------------------------------------------------------
+    // 5b. TWO loads in one program (regression — silent miscompile)
+    //
+    // env.TypeDefs is a flat Map and registerTypeDef is a blind Map.add, while
+    // field access re-resolves the struct NAME at every use site
+    // (TypeCheck.structFieldTypesOf). So when both loads emitted structs under
+    // the literal names "dims"/"vars", the second load overwrote the first and
+    // every `first.vars.X` in the program silently type-checked against the
+    // SECOND store's fields — wrong element type / wrong rank where the names
+    // collided, spurious "field not found" where they didn't. No diagnostic.
+    //
+    // The fix is per-binding struct names ("<binding>__dims"/"<binding>__vars",
+    // the convention CsvProvider established). Registering second AFTER first
+    // is the ordering that used to clobber. Mirrors NetcdfTests 3b-2.
+    // ---------------------------------------------------------------
+    printfn "\n--- two loads in one program (no cross-store clobber) ---"
+    let storeFirst = {
+        Path = "/mock/first"; Version = 2
+        Arrays = [
+            // Shares the name "A" with the second store, but f4 / rank 2.
+            { Name = "A"; ArrayDir = "/mock/first/A"; Shape = [4L; 3L]; Chunks = [4L; 3L]
+              Dtype = mockDt "f4" ETFloat32 4 true; DimNames = Some ["x"; "y"]
+              FillValue = FillInt 0L; Codec = CodecIdentity; Blade = None; Version = 2; ChunkKeySep = "."; ChunkKeyPrefix = "" }
+            { Name = "only_first"; ArrayDir = "/mock/first/only_first"; Shape = [4L]; Chunks = [4L]
+              Dtype = mockDt "f4" ETFloat32 4 true; DimNames = Some ["x"]
+              FillValue = FillInt 0L; Codec = CodecIdentity; Blade = None; Version = 2; ChunkKeySep = "."; ChunkKeyPrefix = "" }
+            // Coordinate array for x -> lands in first__dims.
+            { Name = "x"; ArrayDir = "/mock/first/x"; Shape = [4L]; Chunks = [4L]
+              Dtype = mockDt "f8" ETFloat64 8 true; DimNames = Some ["x"]
+              FillValue = FillInt 0L; Codec = CodecIdentity; Blade = None; Version = 2; ChunkKeySep = "."; ChunkKeyPrefix = "" }
+        ]
+    }
+    let storeSecond = {
+        Path = "/mock/second"; Version = 2
+        Arrays = [
+            // Same name "A", deliberately different: f8 / rank 1.
+            { Name = "A"; ArrayDir = "/mock/second/A"; Shape = [7L]; Chunks = [7L]
+              Dtype = mockDt "f8" ETFloat64 8 true; DimNames = Some ["depth"]
+              FillValue = FillInt 0L; Codec = CodecIdentity; Blade = None; Version = 2; ChunkKeySep = "."; ChunkKeyPrefix = "" }
+            { Name = "only_second"; ArrayDir = "/mock/second/only_second"; Shape = [7L]; Chunks = [7L]
+              Dtype = mockDt "f8" ETFloat64 8 true; DimNames = Some ["depth"]
+              FillValue = FillInt 0L; Codec = CodecIdentity; Blade = None; Version = 2; ChunkKeySep = "."; ChunkKeyPrefix = "" }
+            { Name = "depth"; ArrayDir = "/mock/second/depth"; Shape = [7L]; Chunks = [7L]
+              Dtype = mockDt "f8" ETFloat64 8 true; DimNames = Some ["depth"]
+              FillValue = FillInt 0L; Codec = CodecIdentity; Blade = None; Version = 2; ChunkKeySep = "."; ChunkKeyPrefix = "" }
+        ]
+    }
+    let twoBuilder = IRBuilder()
+    let modFirst = zarrStoreToModule twoBuilder "first" storeFirst None
+    let modSecond = zarrStoreToModule twoBuilder "second" storeSecond None
+    let structNamesOf (m: IRModule) =
+        m.Types |> List.choose (function IRTDStruct (n, _) -> Some n | _ -> None) |> List.sort
+    check "two loads: struct names are namespaced per binding"
+        (structNamesOf modFirst = ["first__dims"; "first__vars"]
+         && structNamesOf modSecond = ["second__dims"; "second__vars"])
+        (sprintf "first %A second %A" (structNamesOf modFirst) (structNamesOf modSecond))
+
+    let (envZ1, _) = registerProviderModule (emptyEnv ()) "first" modFirst
+    let (envZ2, _) = registerProviderModule envZ1 "second" modSecond
+
+    // Walk the same chain TypeCheck does: binding struct -> section field ->
+    // IRTNamed <struct> -> member field. A live lookup at each hop, which is
+    // exactly why a clobbered TypeDefs entry retyped earlier use sites.
+    let zMemberOf (binding: string) (section: string) (field: string) : IRType option =
+        let fieldsOf structName =
+            match lookupTypeDef structName envZ2 with
+            | Some (TDIStruct (_, _, fields, _)) -> Some fields
+            | _ -> None
+        fieldsOf binding
+        |> Option.bind (List.tryPick (fun (n, t) -> if n = section then Some t else None))
+        |> Option.bind (function IRTNamed sn -> fieldsOf sn | _ -> None)
+        |> Option.bind (List.tryPick (fun (n, t) -> if n = field then Some t else None))
+
+    // The core assertion: after the SECOND load registers, the FIRST store's
+    // shared-name member still resolves to the FIRST store's type.
+    check "two loads: first.vars.A keeps first's type (Float32, rank 2)"
+        (match zMemberOf "first" "vars" "A" with
+         | Some (ArrayElem a) -> a.ElemType = IRTScalar ETFloat32 && a.IndexTypes.Length = 2
+         | _ -> false)
+        (sprintf "got %A" (zMemberOf "first" "vars" "A"))
+    check "two loads: second.vars.A keeps second's type (Float64, rank 1)"
+        (match zMemberOf "second" "vars" "A" with
+         | Some (ArrayElem a) -> a.ElemType = IRTScalar ETFloat64 && a.IndexTypes.Length = 1
+         | _ -> false)
+        (sprintf "got %A" (zMemberOf "second" "vars" "A"))
+    check "two loads: first.vars.only_first resolves"
+        ((zMemberOf "first" "vars" "only_first").IsSome) "clobbered vars struct would lose it"
+    check "two loads: second.vars.only_second resolves"
+        ((zMemberOf "second" "vars" "only_second").IsSome) ""
+    check "two loads: first.vars has no member of the second store"
+        ((zMemberOf "first" "vars" "only_second").IsNone) "second store's field leaked into first"
+    check "two loads: first.dims.x resolves"
+        ((zMemberOf "first" "dims" "x").IsSome) "clobbered dims struct would lose it"
+    check "two loads: second.dims.depth resolves"
+        ((zMemberOf "second" "dims" "depth").IsSome) ""
+    check "two loads: first.dims has no member of the second store"
+        ((zMemberOf "first" "dims" "depth").IsNone) "second store's dim leaked into first"
+    // Bare "dims"/"vars" must not be registered at all — that was the clobber.
+    check "two loads: bare 'vars'/'dims' are not registered globally"
+        ((lookupTypeDef "vars" envZ2).IsNone && (lookupTypeDef "dims" envZ2).IsNone)
+        "bare names would clobber across stores"
 
     // ---------------------------------------------------------------
     // 6. Live store roundtrips (generated fixtures; F#-only, no g++)
@@ -641,7 +743,7 @@ let data = z.load_compound(sample.vars.A, sample.vars.M) |> z.read
         ] }
      let m = zarrStoreToModule (IRBuilder()) "tri" packedStore None
      let cType =
-         m.Types |> List.tryPick (function IRTDStruct ("vars", fs) -> Some fs | _ -> None)
+         m.Types |> List.tryPick (function IRTDStruct ("tri__vars", fs) -> Some fs | _ -> None)
          |> Option.defaultValue []
          |> List.tryPick (fun (n, t) -> if n = "C" then (match t with ArrayElem at -> Some at | _ -> None) else None)
      check "packed typing: C is Array<f64 like SymIdx<2,4>> (Symmetry/Rank/Extent match source lowering)"

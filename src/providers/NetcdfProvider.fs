@@ -290,13 +290,13 @@ let ncVarToArrayType (dimMap: Map<string, IRIndexType>) (var: NcVar) : IRArrayTy
 ///       type ydim = Idx<30>
 ///       type zdim = Idx<50>
 ///
-///       struct dims = {
+///       struct sample__dims = {
 ///           xdim: Array<Int64, Idx<xdim>>
 ///           ydim: Array<Int64, Idx<ydim>>
 ///           zdim: Array<Int64, Idx<zdim>>
 ///       }
 ///
-///       struct vars = {
+///       struct sample__vars = {
 ///           A: Array<Float32, Idx<zdim>, Idx<ydim>, Idx<xdim>>
 ///       }
 ///
@@ -305,6 +305,15 @@ let ncVarToArrayType (dimMap: Map<string, IRIndexType>) (var: NcVar) : IRArrayTy
 /// Named index types live at module scope.
 ///
 /// Access: sample.dims.xdim (coordinate array), sample.vars.A (data array).
+///
+/// The structs are namespaced by `moduleName` (the receiving binding) rather
+/// than named the bare "dims"/"vars", because registerProviderModule adds them
+/// to a single flat TypeDefs map: with literal names a second load in the same
+/// program silently overwrote the first, and since field access re-resolves the
+/// struct name at every use site, `a.vars.X` after `let b = NetCDF.load(..)`
+/// then type-checked against b's fields with no diagnostic. CsvProvider
+/// established the convention; registerProviderModule's `fieldFor` resolves
+/// the suffix, so the `.dims` / `.vars` surface syntax is unchanged.
 ///
 /// The dimMap parameter allows a schema to supply shared index types
 /// so that multiple files get type-compatible dimensions.
@@ -334,7 +343,7 @@ let ncFileToModule
             let arrType = mkArrayArrow [idx] (IRTScalar ETInt64) (Some (AIDVariable dim.Name))
             (dim.Name, arrType))
 
-    let dimsStruct = IRTDStruct("dims", dimsFields)
+    let dimsStruct = IRTDStruct(sprintf "%s__dims" moduleName, dimsFields)
 
     // Step 3: vars struct — data variables only (exclude coordinate variables)
     let dimNames = file.Dims |> List.map (fun d -> d.Name) |> Set.ofList
@@ -350,7 +359,7 @@ let ncFileToModule
             let arrType = ncVarToArrayType dimMap v
             (v.Name, mkArrayLike arrType))
 
-    let varsStruct = IRTDStruct("vars", varsFields)
+    let varsStruct = IRTDStruct(sprintf "%s__vars" moduleName, varsFields)
 
     {
         Name = moduleName

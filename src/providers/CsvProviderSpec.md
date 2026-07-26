@@ -135,5 +135,7 @@ writes; rank > 2 writes; runtime (non-literal) column-label subscripts.
 CSV is the first provider whose `LoadAsModule` emits an `IRTDEnumIdx` and
 uniquely-named structs (`<binding>__vars`) so several loads coexist in one
 program. `TypeEnv.registerProviderModule` registers both (the enum with a
-synthesized `TyEnumIdx` body); netcdf/zarr's literal `dims`/`vars` naming is
-unchanged.
+synthesized `TyEnumIdx` body). netcdf and zarr now follow the same
+convention (`<binding>__dims` / `<binding>__vars`) — under the former literal
+`dims`/`vars` naming a second load clobbered the first in the flat `TypeDefs`
+map, silently retyping earlier `.vars` / `.dims` accesses.
