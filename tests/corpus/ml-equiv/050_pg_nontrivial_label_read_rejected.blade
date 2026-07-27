@@ -1,0 +1,38 @@
+// TEST: ML Equiv Point Group Non-Trivial Label Read (rejects)
+import ml as ml
+// C4v / C4 REPLAYS THE PSEUDOSCALAR ASYMMETRY (plan-transforms-as-types §3.6).
+//
+// Under equiv(O3) a raw static-offset read is admissible exactly inside an
+// (l = 0, EVEN) block: an l = 0 ODD cell is a pseudoscalar, it flips under
+// improper rotations, and reading it is reading a basis-dependent number even
+// though its block has dimension 1. Under equiv(D4) the same split is table
+// data rather than a parity bit: the admissible cells are those of the TRIVIAL
+// label — the one whose every GENERATOR matrix is the identity — and D4's A2,
+// B1 and B2 are all 1-DIMENSIONAL and all fail that test, because each flips
+// under some generator.
+//
+// So dimension is not the criterion and the label NAME is not the criterion;
+// the frozen generator matrices are. `good` below reads the A1 cell and is
+// certified. `bad` reads the B1 cell one slot over and is BL4008.
+let static SB = [("A1", 1), ("B1", 1)]
+let static WB = ml.pg_hom_dim("D4", SB, SB)
+
+// The admissible read, for contrast: A1's every generator matrix is [1], so
+// offset 0 is a genuine D4 invariant.
+function good(x: Array<Float like PgIrrepsIdx<D4, SB>>, w: Array<Float like Idx<WB>>)
+              where ml.equiv(D4) -> Float = {
+    let y = ml.derive_pg_linear(D4, SB, SB, x, w)
+    y(0)
+}
+
+// B1 sends the mirror s to [+1] but the rotation r to [-1]: its cell changes
+// sign under a symmetry operation of the crystal, so no function that reads it
+// is D4-invariant.
+function bad(x: Array<Float like PgIrrepsIdx<D4, SB>>, w: Array<Float like Idx<WB>>)
+             where ml.equiv(D4) -> Float = {
+    let y = ml.derive_pg_linear(D4, SB, SB, x, w)
+    y(1)
+}
+
+let r_good = good([3.0, 4.0], [2.0, 5.0])
+let r_bad = bad([3.0, 4.0], [2.0, 5.0])

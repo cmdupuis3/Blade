@@ -1,0 +1,21 @@
+// TEST: ML Equiv Point Group Signature Mismatch (rejects)
+import ml as ml
+// A D4-typed parameter inside a C4 certificate. Deciding this one the way
+// corpus 048 is decided would need subgroup-inclusion data — C4 really is a
+// subgroup of D4, so a D4-module really does restrict to one — and the registry
+// carries none: it knows each group's frozen character table and NO map between
+// two of them. So neither a restriction nor an induction of that space to C4 is
+// available here, and the parameter is refused at the signature: the
+// conservative arm, and the same "certificates do not transfer" family as a
+// cross-group certified call (corpus 052). BL4008.
+let static EC = [("E", 1)]
+let static ED = [("E", 1)]
+let static WE = ml.pg_hom_dim("C4", EC, EC)
+
+function bad(x: Array<Float like PgIrrepsIdx<C4, EC>>, w: Array<Float like Idx<WE>>,
+             other: Array<Float like PgIrrepsIdx<D4, ED>>)
+             where ml.equiv(C4) -> Array<Float like PgIrrepsIdx<C4, EC>> = {
+    ml.derive_pg_linear(C4, EC, EC, x, w)
+}
+
+let out = bad([3.0, 4.0], [0.0, 1.0], [1.0, 2.0])

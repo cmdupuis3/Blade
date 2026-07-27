@@ -1,0 +1,29 @@
+// TEST: ML Equiv Point Group Cross Group Call (rejects)
+import ml as ml
+// The certified-call rule at the second block-spec member: a call from a
+// C4-certified body to a D4-certified function. `d4_stage` is a perfectly good
+// theorem — it is just a theorem about a different group, and composing it into
+// a C4 chain would let a D4 hypothesis discharge a C4 obligation.
+//
+// The rule is the one the O(3)/SO(3) pair already had (a call from an equiv(O3)
+// body to an equiv(SO3) function is refused the same way): the certificate
+// carries its group, and the groups must match. Point-vs-Point, Point-vs-O3 and
+// O3-vs-Point are all covered by that one comparison. BL4008.
+let static EC = [("E", 1)]
+let static ED = [("E", 1)]
+let static WE = ml.pg_hom_dim("C4", EC, EC)
+let static WED = ml.pg_hom_dim("D4", ED, ED)
+
+function d4_stage(x: Array<Float like PgIrrepsIdx<D4, ED>>, w: Array<Float like Idx<WED>>)
+                  where ml.equiv(D4) -> Array<Float like PgIrrepsIdx<D4, ED>> = {
+    ml.derive_pg_linear(D4, ED, ED, x, w)
+}
+
+function bad(x: Array<Float like PgIrrepsIdx<C4, EC>>, w: Array<Float like Idx<WE>>,
+             dw: Array<Float like Idx<WED>>)
+             where ml.equiv(C4) -> Array<Float like PgIrrepsIdx<C4, EC>> = {
+    let h = ml.derive_pg_linear(C4, EC, EC, x, w)
+    d4_stage(h, dw)
+}
+
+let out = bad([3.0, 4.0], [0.0, 1.0], [2.0])

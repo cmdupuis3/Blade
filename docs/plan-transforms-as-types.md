@@ -1083,6 +1083,30 @@ go first.
        `Point of id`, Rep payload the two-case union, invariantOffsets
        → trivial-label offsets); gate = byte-identical diagnostics on
        every existing O(3)/SO(3) corpus file + dual-certificate pins.
+       **LANDED 2026-07-27.** The no-fourth-walker bet paid in full:
+       `Rep of RepSpec` took ZERO pattern-site changes (23 op arms: 3
+       new Point-guarded, 14 mechanical payload insertions, 6
+       untouched); byte-differential PASS twice (1088 files, 332116
+       bytes identical). THE ASYMMETRY, verified sound with the sharp
+       criterion: restriction goes along subgroup INCLUSIONS only —
+       IrrepsIdx under Point g REJECTS toward ml.restrict (a real
+       C4-action exists by g ↪ O(3); Inv would be false invariance,
+       decided by the x(1)-readout counterexample); PgIrrepsIdx under
+       O3/SO3 stays Inv (no functor the other way; held-fixed is the
+       only reading — with the honest residual recorded that a
+       physical crystal rotation DOES move the buffer, the certificate
+       staying literally true; future tightening defensible once
+       restrict/induction exists). Pg-vs-pg mismatch rejects
+       conservatively (the registry carries tables, no inclusion
+       maps — C4 ⊂ D4 is real but unrepresented). Trivial label read
+       from the TABLE (every generator = Id), never the name — D4's
+       A2/B1/B2 are 1-dim pseudoscalars and their cell reads reject
+       (corpus 050, the pseudoscalar-asymmetry anchor, admissible A1
+       read beside it). gated/scalars/norms reject by name under
+       Point (scalars' CONTENT is already delivered via trivial-label
+       offsets; the ops are 5b-iii emission work). New pre-existing
+       codegen bug found on the pristine baseline and chipped
+       (let-in-broadcast scoping). ml-equiv 52/0; full suite 1717/0.
      * **5b-iii** — TP with the CG-copy multiplicity index / Sym^k via
        Molien-Newton / user-declared groups (constructor promotion,
        three named problems), ordered by demand.

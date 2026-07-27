@@ -18,6 +18,41 @@
 ///   Inv      — invariant (scalars, plain arrays, weights, norms);
 ///   Opaque   — unclassifiable; rejected wherever it meets a rep-relevant
 ///              position (op argument, return value).
+///
+/// ---------------------------------------------------------------------------
+/// TWO BLOCK-SPEC MEMBERS, ONE LATTICE (stage 5b-ii)
+/// ---------------------------------------------------------------------------
+/// `Group` is O3 | SO3 | Point of <registry name>, and a `Rep`'s payload says
+/// which block-spec family describes the transformation law: an O(3) irreps
+/// spec (l, parity, mult) or a point-group spec (LABEL_NAME, mult) against a
+/// frozen character table. §3.6's "no fourth walker" decision: the polarity
+/// table of the point-group discipline MATCHES this one at every arm (unlike
+/// Sₙ, which is a sibling registry member precisely because it diverges), so
+/// the second member is arms in this file rather than a walker beside it.
+///
+/// THE ASYMMETRY THAT DECIDES THE SIGNATURE RULES. Modules restrict along
+/// subgroup INCLUSIONS, and only in that direction:
+///
+///   * every registered point group IS a subgroup of O(3) (its generators are
+///     orthogonal matrices), so an `IrrepsIdx<spec>` space carries a genuine,
+///     generally NONTRIVIAL action of C4/D4 by restriction. Classifying such a
+///     parameter `Inv` under `equiv(C4)` would assert that a vector is
+///     C4-invariant — a false claim about the only action in the room. The
+///     restriction has to be DECOMPOSED into the group's own labels before the
+///     value can be named here, and that decomposition is `ml.restrict`
+///     (§3.6, named-not-shipped). So: REJECTED at the certified signature.
+///   * a `PgIrrepsIdx<C4, spec>` space carries no O(3) action at all — there is
+///     no functor the other way (induction changes the space; nothing extends a
+///     C4-module to an O(3)-module on the same coordinates). "Held fixed" is
+///     therefore the only available reading, and it is a hypothesis the caller
+///     can genuinely discharge, exactly like a weight buffer. So: `Inv` under
+///     equiv(O3)/equiv(SO3), which is 5b-i's behavior, unchanged here.
+///   * between two point groups the same criterion would need subgroup-
+///     inclusion data (C4 ⊂ D4 is real), and the registry carries none: it
+///     knows each group's table and no map between tables. A pg parameter whose
+///     group differs from the certificate's is therefore REJECTED — the
+///     conservative arm of the criterion, and the same "certificates do not
+///     transfer" family as a cross-group certified call.
 module Blade.ML.Equiv
 
 open Blade.Ast
@@ -31,9 +66,21 @@ open Blade.ML.CertShell
 type Group =
     | O3
     | SO3
+    /// A registered point group, by MLPointSpec registry name (C4, D4).
+    | Point of string
+
+/// The payload of a `Rep` status — WHICH block-spec family describes the
+/// value's transformation law. The two cases never meet: a certificate names
+/// one group, and `statusOfType` admits only that group's index family, so a
+/// judgment is entirely within one member. (Keeping them in one union rather
+/// than parameterizing `RepStatus` is what lets every arm below — add, scale,
+/// if-join, escape — stay one rule instead of two.)
+type RepSpec =
+    | O3Spec of Spec
+    | PgSpec of string * (string * int) list
 
 type RepStatus =
-    | Rep of Spec
+    | Rep of RepSpec
     | Inv
     | Opaque
 
@@ -59,13 +106,31 @@ let private specStr (s: Spec) : string =
     |> String.concat ", "
     |> sprintf "[%s]"
 
+/// A point-group spec as it READS at the surface: [("A", 1), ("E", 2)].
+let private pgSpecStr (s: (string * int) list) : string =
+    s
+    |> List.map (fun (label, m) -> sprintf "(\"%s\", %d)" label m)
+    |> String.concat ", "
+    |> sprintf "[%s]"
+
+/// How a rep payload names itself in a diagnostic — the INDEX TYPE the user
+/// would have to write. The O(3) rendering is byte-frozen: every message below
+/// that used to interpolate `IrrepsIdx<%s>` around `specStr` now interpolates
+/// this, and must come out identical.
+let private repStr (r: RepSpec) : string =
+    match r with
+    | O3Spec s -> sprintf "IrrepsIdx<%s>" (specStr s)
+    | PgSpec (g, s) -> sprintf "PgIrrepsIdx<%s, %s>" g (pgSpecStr s)
+
 let private statusStr (st: RepStatus) : string =
     match st with
-    | Rep s -> sprintf "representation-typed (transforms as IrrepsIdx<%s>)" (specStr s)
+    | Rep s -> sprintf "representation-typed (transforms as %s)" (repStr s)
     | Inv -> "invariant"
     | Opaque -> "unclassifiable"
 
-let private groupStr (g: Group) = match g with O3 -> "O3" | SO3 -> "SO3"
+let private groupStr (g: Group) = match g with O3 -> "O3" | SO3 -> "SO3" | Point n -> n
+
+let private isPointGroup (g: Group) = match g with Point _ -> true | _ -> false
 
 /// Mirror of MLElaborate.staticArg (keep in sync): an ML op's static
 /// argument is a `let static` binding name or an inline int literal.
@@ -82,17 +147,62 @@ let private specOfArg (statics: StaticEnv) (what: string) (e: Expr) : Result<Spe
     staticArgValue statics e
     |> Result.bind (Blade.ML.Statics.specOfStatic what)
 
+/// Mirror of MLElaborate.pgGroupArg (keep in sync): the GROUP argument of a
+/// point-group op is a bare registered name, a string literal, or a `let
+/// static` string binding. Resolution against the registry is the CALLER's —
+/// here the only question is which name was written.
+let private pgGroupArgName (statics: StaticEnv) (e: Expr) : Result<string, string> =
+    match e.Kind with
+    | ExprKind.ExprLit (LitString s) -> Ok s
+    | ExprKind.ExprVar name ->
+        match Map.tryFind name statics.Values with
+        | Some (SVString s) -> Ok s
+        | Some _ -> Error (sprintf "'%s' is a `let static` binding but not a STRING — GROUP names a registered point group, e.g. \"C4\"" name)
+        | None -> Ok name
+    | _ -> Error "GROUP must be a point-group name (a bare C4 / D4, a string literal, or a `let static` string binding)"
+
+/// THE TRIVIAL LABEL, identified from the frozen table and never by name: the
+/// one whose every GENERATOR matrix is the identity (generators suffice —
+/// a product of identities is an identity). Reading the name would get D4
+/// exactly wrong: A2, B1 and B2 are 1-DIMENSIONAL but not invariant, since each
+/// flips under some generator, and a cell of one of them is a pseudoscalar in
+/// every sense that matters here.
+let private isTrivialLabel (grp: Blade.ML.PointSpec.PointGroup) (label: string) : bool =
+    let ir = Blade.ML.PointSpec.pgIrrep grp label
+    ir.DimR = 1
+    && ir.Gens |> List.forall (fun m -> Blade.ML.PointSpec.matEq m (Blade.ML.PointSpec.matId ir.DimR))
+
 /// Static-offset read admissibility: under O3 only (l=0, even) blocks hold
 /// full invariants; under SO3 any l=0 block does (pseudoscalars are
 /// SO(3)-invariant). l=0 blocks have dim 1, so block b spans
 /// [start_b .. start_b + mult_b).
-let private invariantOffsets (g: Group) (s: Spec) : Set<int> =
-    let starts = blockStarts s
-    [ for b in 0 .. s.Length - 1 do
-        let e = s.[b]
-        if e.L = 0 && (g = SO3 || e.Parity = 0) then
-            yield! [ starts.[b] .. starts.[b] + e.Mult - 1 ] ]
-    |> Set.ofList
+///
+/// The point-group reading is the SAME conditional theorem one member over: the
+/// invariant cells are those of a TRIVIAL label (dim 1 with every generator the
+/// identity), and the O3/SO3 parity split replays as the trivial/non-trivial
+/// character split — at D4 the A2, B1, B2 cells are 1-dimensional and still
+/// basis-dependent, which is the pseudoscalar asymmetry as table data.
+let private invariantOffsets (g: Group) (r: RepSpec) : Set<int> =
+    match g, r with
+    | (O3 | SO3), O3Spec s ->
+        let starts = blockStarts s
+        [ for b in 0 .. s.Length - 1 do
+            let e = s.[b]
+            if e.L = 0 && (g = SO3 || e.Parity = 0) then
+                yield! [ starts.[b] .. starts.[b] + e.Mult - 1 ] ]
+        |> Set.ofList
+    | Point gn, PgSpec (gn2, s) when gn = gn2 ->
+        let grp = Blade.ML.PointSpec.pointGroup gn
+        let starts = Blade.ML.PointSpec.pgBlockStarts grp s
+        [ for b in 0 .. s.Length - 1 do
+            let (label, mult) = s.[b]
+            if isTrivialLabel grp label then
+                yield! [ starts.[b] .. starts.[b] + mult - 1 ] ]
+        |> Set.ofList
+    // A payload from the other member cannot arise (statusOfType admits only
+    // the certificate group's index family), and if it ever did, NO offset is
+    // readable.
+    | _ -> Set.empty
 
 // ============================================================================
 // Certified-signature table
@@ -107,39 +217,86 @@ let private aliasMapOf (decls: Located<Decl> list) : Map<string, TypeExpr> =
         | DeclType (TyDeclAlias (n, [], body)) -> Map.add n body m
         | _ -> m) Map.empty
 
+/// The registered point-group names, as they read in an `equiv(...)` conjunct.
+let private pgRoster = String.concat ", " Blade.ML.PointSpec.pointGroupNames
+
 let private parseGroup (funcName: string) (args: string list) : Result<Group, string> =
     match args with
     | [ "O3" ] -> Ok O3
     | [ "SO3" ] -> Ok SO3
-    | [ g ] -> Error (sprintf "function '%s': equiv(%s) — unknown group '%s'; supported: O3, SO3" funcName g g)
-    | _ -> Error (sprintf "function '%s': equiv expects exactly one group argument — equiv(O3) or equiv(SO3)" funcName)
+    | [ g ] when List.contains g Blade.ML.PointSpec.pointGroupNames -> Ok (Point g)
+    | [ g ] -> Error (sprintf "function '%s': equiv(%s) — unknown group '%s'; supported: O3, SO3, %s" funcName g g pgRoster)
+    | _ -> Error (sprintf "function '%s': equiv expects exactly one group argument — equiv(O3), equiv(SO3), or a registered point group (%s)" funcName pgRoster)
+
+/// The two signature-level refusals of the point-group arm, both instances of
+/// the header's restriction argument. Stated once so the annotation position
+/// and the alias-body position cannot drift apart.
+let private restrictDeferral (pg: string) : string =
+    sprintf "an IrrepsIdx parameter under equiv(%s) names an O(3) representation space, and %s ACTS on it — by restriction along the inclusion %s -> O(3), nontrivially on every l > 0 block. Classifying it invariant would claim a vector is %s-invariant, so the judgment refuses instead. Naming the value in %s's own labels means decomposing the restriction of O(3) down to %s, which is `ml.restrict` (plan-transforms-as-types section 3.6, named-not-shipped); until then declare the parameter as Array<_ like PgIrrepsIdx<%s, SPEC>>"
+        pg pg pg pg pg pg pg
+
+let private pgGroupMismatch (declared: string) (pg: string) : string =
+    sprintf "parameter type PgIrrepsIdx<%s, ...> names point group %s, but this function is certified for %s — certificates do not transfer between groups. This checker knows each registered group's frozen table and NO map between two of them, so neither a restriction nor an induction of a %s-module to %s is available; declare the parameter over %s"
+        declared declared pg declared pg pg
 
 /// Classify a signature annotation. Certified functions must be fully
 /// annotated; Rep needs `Array<T like IrrepsIdx<spec>>` (directly or via a
 /// one-level type alias), scalars and plain arrays are Inv.
-let rec private statusOfType (aliases: Map<string, TypeExpr>) (statics: StaticEnv) (t: TypeExpr)
+///
+/// The group SELECTS the live index family: under O3/SO3 that is `IrrepsIdx`
+/// and a `PgIrrepsIdx` annotation is an ordinary invariant buffer (the header's
+/// asymmetry, and 5b-i's behavior verbatim); under `Point g` it is
+/// `PgIrrepsIdx<g, _>` and both an `IrrepsIdx` annotation and another group's
+/// `PgIrrepsIdx` are refusals.
+let rec private statusOfType (g: Group) (aliases: Map<string, TypeExpr>) (statics: StaticEnv) (t: TypeExpr)
     : Result<RepStatus, string> =
     match t with
     | TyArray (_, idxs) ->
         let irreps = idxs |> List.choose (function TyIrrepsIdx s -> Some s | _ -> None)
+        match g with
+        | Point pg ->
+            let pgs = idxs |> List.choose (function TyPgIrrepsIdx (gn, s) -> Some (gn, s) | _ -> None)
+            match irreps, pgs, idxs.Length with
+            | _ :: _, _, _ -> Error (restrictDeferral pg)
+            | [], [ (gn, _) ], _ when gn <> pg -> Error (pgGroupMismatch gn pg)
+            | [], [ (_, specExpr) ], 1 ->
+                evalExpr statics fuel specExpr
+                |> Result.bind (Blade.ML.Statics.pgSpecOfStatic "equiv signature spec" (Blade.ML.PointSpec.pointGroup pg))
+                |> Result.map (fun s -> Rep (PgSpec (pg, s)))
+            | [], [], _ -> Ok Inv
+            | _ ->
+                Error "multi-index arrays mixing PgIrrepsIdx are not supported in equiv-certified signatures"
+        | O3 | SO3 ->
         match irreps, idxs.Length with
         | [], _ -> Ok Inv
         | [ specExpr ], 1 ->
             evalExpr statics fuel specExpr
             |> Result.bind (Blade.ML.Statics.specOfStatic "equiv signature spec")
-            |> Result.map Rep
+            |> Result.map (O3Spec >> Rep)
         | _ ->
             Error "multi-index arrays mixing IrrepsIdx are not supported in equiv-certified signatures"
     | TyNamed (n, []) ->
         match Map.tryFind n aliases with
-        | Some body -> statusOfType aliases statics (TyArray (TyNamed ("Float", []), [ body ]))
+        | Some body -> statusOfType g aliases statics (TyArray (TyNamed ("Float", []), [ body ]))
         | None -> Ok Inv // scalar primitives and non-rep named types are invariant
     | TyNamed (_, _) -> Ok Inv
     | TyIrrepsIdx specExpr ->
         // alias body position (`type X = IrrepsIdx<s>` chased above)
-        evalExpr statics fuel specExpr
-        |> Result.bind (Blade.ML.Statics.specOfStatic "equiv signature spec")
-        |> Result.map Rep
+        match g with
+        | Point pg -> Error (restrictDeferral pg)
+        | _ ->
+            evalExpr statics fuel specExpr
+            |> Result.bind (Blade.ML.Statics.specOfStatic "equiv signature spec")
+            |> Result.map (O3Spec >> Rep)
+    | TyPgIrrepsIdx (gn, specExpr) when isPointGroup g ->
+        // the pg twin of the arm above; under O3/SO3 this annotation falls
+        // through to the default arm exactly as it did before 5b-ii.
+        let pg = groupStr g
+        if gn <> pg then Error (pgGroupMismatch gn pg)
+        else
+            evalExpr statics fuel specExpr
+            |> Result.bind (Blade.ML.Statics.pgSpecOfStatic "equiv signature spec" (Blade.ML.PointSpec.pointGroup pg))
+            |> Result.map (fun s -> Rep (PgSpec (pg, s)))
     | TyInt32 | TyInt64 | TyFloat32 | TyFloat64 | TyBool | TyComplex128 -> Ok Inv
     | _ -> Error "cannot classify this annotation in an equiv-certified signature (supported: scalars, plain arrays, Array<_ like IrrepsIdx<spec>>)"
 
@@ -176,7 +333,7 @@ let buildCertTable (statics: StaticEnv) (decls: Located<Decl> list)
                                 | None ->
                                     Error (sprintf "function '%s': an equiv-certified function must annotate every parameter and its return type ('%s' is unannotated)" fd.Name p.Name)
                                 | Some t ->
-                                    statusOfType aliases statics t
+                                    statusOfType g aliases statics t
                                     |> Result.mapError (sprintf "function '%s', parameter '%s': %s" fd.Name p.Name)
                                     |> Result.map (fun st -> ps @ [ (p.Name, st) ])))
                             (Ok [])
@@ -186,7 +343,7 @@ let buildCertTable (statics: StaticEnv) (decls: Located<Decl> list)
                         match fd.ReturnType with
                         | None -> fail (sprintf "function '%s': an equiv-certified function must annotate its return type" fd.Name)
                         | Some rt ->
-                            match statusOfType aliases statics rt
+                            match statusOfType g aliases statics rt
                                   |> Result.mapError (sprintf "function '%s', return type: %s" fd.Name) with
                             | Error m -> fail m
                             | Ok r ->
@@ -205,6 +362,18 @@ type private Ctx = {
     Statics: StaticEnv
     Certs: Map<string, CertSig>
 }
+
+/// Every `ml.*` operation whose arms below are stated in O(3) irreps specs —
+/// the ops that MAKE, CONSUME or RESHAPE an `IrrepsIdx` value. Under a
+/// point-group certificate they are refused BY NAME (a targeted message beats
+/// the generic default arm's "not an equivariance-preserving operation", which
+/// would fire only when an argument happened to be rep-typed). Under
+/// equiv(O3)/equiv(SO3) this list is never consulted.
+let private o3OpNames =
+    [ "y_to"; "tensor_product"; "linear"; "gated"; "scalars"; "norms"
+      "derive_linear"; "derive_tp"; "derive_sym_tp"; "derive_alt_tp"; "derive_poly"
+      "sym_lift"; "linear_rows"; "gated_rows"
+      "tensor_to_irreps"; "sym_to_irreps"; "irreps_to_sym" ]
 
 /// The scalar builtins a certified body may apply to invariants.
 let private isKnownScalarBuiltin (n: string) =
@@ -242,7 +411,7 @@ let rec private judge (ctx: Ctx) (env: Map<string, RepStatus>) (e: Expr)
             match sl, sr, op with
             | Rep s1, Rep s2, (OpAdd | OpSub) ->
                 if s1 = s2 then Ok (Rep s1)
-                else reject (sprintf "cannot add values of different representations — left transforms as IrrepsIdx<%s>, right as IrrepsIdx<%s>" (specStr s1) (specStr s2))
+                else reject (sprintf "cannot add values of different representations — left transforms as %s, right as %s" (repStr s1) (repStr s2))
             | Rep _, Rep _, OpMul ->
                 reject "elementwise product of representation-typed values is not equivariant — use ml.tensor_product, the Clebsch-Gordan-typed contraction"
             | Rep _, Rep _, _ ->
@@ -357,14 +526,14 @@ and private judgeApp (ctx: Ctx) (env: Map<string, RepStatus>) (e: Expr) (f: Expr
     : Result<RepStatus, Blade.Diagnostics.Diagnostic> =
     let reject msg = Error (bl4008 e.Span (sprintf "function '%s': %s" ctx.FuncName msg))
     let judgeAll args = judgeEach (judge ctx env) args
-    let requireRep (what: string) (expected: Spec) (argE: Expr) =
+    let requireRep (what: string) (expected: RepSpec) (argE: Expr) =
         judge ctx env argE |> Result.bind (fun s ->
             match s with
             | Rep sp when sp = expected -> Ok ()
             | Rep sp ->
-                Error (bl4008 argE.Span (sprintf "function '%s': %s expects a value transforming as IrrepsIdx<%s>, got IrrepsIdx<%s>" ctx.FuncName what (specStr expected) (specStr sp)))
+                Error (bl4008 argE.Span (sprintf "function '%s': %s expects a value transforming as %s, got %s" ctx.FuncName what (repStr expected) (repStr sp)))
             | Inv ->
-                Error (bl4008 argE.Span (sprintf "function '%s': %s expects a representation-typed value (transforming as IrrepsIdx<%s>) — an invariant here would not co-rotate with the inputs" ctx.FuncName what (specStr expected)))
+                Error (bl4008 argE.Span (sprintf "function '%s': %s expects a representation-typed value (transforming as %s) — an invariant here would not co-rotate with the inputs" ctx.FuncName what (repStr expected)))
             | Opaque ->
                 Error (bl4008 argE.Span (sprintf "function '%s': cannot classify the argument to %s" ctx.FuncName what)))
     let requireInv (what: string) (argE: Expr) =
@@ -381,28 +550,69 @@ and private judgeApp (ctx: Ctx) (env: Map<string, RepStatus>) (e: Expr) (f: Expr
         let specArg what e =
             specOfArg ctx.Statics what e
             |> Result.mapError (fun m -> bl4008 e.Span (sprintf "function '%s': %s: %s" ctx.FuncName what m))
+        // A pg spec argument, decoded against the CERTIFICATE's table.
+        // `pgSpecOfStatic` already prefixes `what`, so this does not repeat it.
+        let pgSpecArg (grp: Blade.ML.PointSpec.PointGroup) (what: string) (e: Expr) =
+            match staticArgValue ctx.Statics e with
+            | Error m -> Error (bl4008 e.Span (sprintf "function '%s': %s: %s" ctx.FuncName what m))
+            | Ok sv ->
+                Blade.ML.Statics.pgSpecOfStatic what grp sv
+                |> Result.mapError (fun m -> bl4008 e.Span (sprintf "function '%s': %s" ctx.FuncName m))
         match op, args with
+        // --- the point-group arm (5b-ii) -------------------------------------
+        // Both arms below are GUARDED on a `Point` certificate, so under
+        // equiv(O3)/equiv(SO3) every op falls through to the arms it always
+        // did — including `derive_pg_linear`, which is (and stays) an
+        // all-invariant computation to an O(3) certificate: nothing there
+        // transforms under O(3), so the generic default arm's `Ok Inv` is the
+        // header's asymmetry showing up at the op level.
+        | _, _ when isPointGroup ctx.Group && List.contains op o3OpNames ->
+            let gn = groupStr ctx.Group
+            reject (sprintf "ml.%s is an O(3) operation — it is stated in (l, parity, mult) irreps specs and its rep-typed arguments and results live in O(3) representation spaces, so it carries no %s-equivariance theorem this checker can use. Inside a `where ml.equiv(%s)` body build with the point-group ops (ml.derive_pg_linear) over PgIrrepsIdx<%s, SPEC> values"
+                       op gn gn gn)
+        // ml.derive_pg_linear(GROUP, SIN, SOUT, x, w) — the complete
+        // ℝ-Schur-basis layer, judged exactly as derive_linear is one member
+        // over: SIN on the input, an invariant weight buffer, SOUT out. The
+        // extra premise is the GROUP argument, which must be the certificate's
+        // own — a C4 layer proves nothing about D4-equivariance.
+        | "derive_pg_linear", [ gE; sInE; sOutE; xE; wE ] when isPointGroup ctx.Group ->
+            let gn = groupStr ctx.Group
+            match pgGroupArgName ctx.Statics gE with
+            | Error m ->
+                Error (bl4008 gE.Span (sprintf "function '%s': derive_pg_linear GROUP: %s" ctx.FuncName m))
+            | Ok argGroup when argGroup <> gn ->
+                Error (bl4008 gE.Span (sprintf "function '%s': derive_pg_linear names point group %s, but this function is certified for %s — the layer is %s-equivariant and says nothing about %s. Certificates do not transfer between groups"
+                                           ctx.FuncName argGroup gn argGroup gn))
+            | Ok _ ->
+                let grp = Blade.ML.PointSpec.pointGroup gn
+                pgSpecArg grp "derive_pg_linear SIN" sInE |> Result.bind (fun si ->
+                pgSpecArg grp "derive_pg_linear SOUT" sOutE |> Result.bind (fun so ->
+                    requireRep "derive_pg_linear input" (PgSpec (gn, si)) xE |> Result.bind (fun () ->
+                    requireInv "derive_pg_linear weight buffer" wE |> Result.map (fun () ->
+                        Rep (PgSpec (gn, so))))))
+        | "derive_pg_linear", _ when isPointGroup ctx.Group ->
+            reject (sprintf "%s: unrecognized call shape inside an equiv-certified body" op)
         | "y_to", [ lmaxE; xE; yE; zE ] ->
             requireInv "y_to coordinate x" xE |> Result.bind (fun () ->
             requireInv "y_to coordinate y" yE |> Result.bind (fun () ->
             requireInv "y_to coordinate z" zE |> Result.bind (fun () ->
                 match staticArgValue ctx.Statics lmaxE with
-                | Ok (SVInt lmax) when lmax >= 0L -> Ok (Rep (shSpec (int lmax)))
+                | Ok (SVInt lmax) when lmax >= 0L -> Ok (Rep (O3Spec (shSpec (int lmax))))
                 | _ -> reject "y_to: lmax must be a static int")))
         | "tensor_product", [ cfgE; xE; yE; wE ] ->
             staticArgValue ctx.Statics cfgE
             |> Result.bind (Blade.ML.Statics.cfgOfStatic "tensor_product")
             |> Result.mapError (fun m -> bl4008 cfgE.Span (sprintf "function '%s': tensor_product: %s" ctx.FuncName m))
             |> Result.bind (fun cfg ->
-                requireRep "tensor_product input 1" cfg.Spec1 xE |> Result.bind (fun () ->
-                requireRep "tensor_product input 2" cfg.Spec2 yE |> Result.bind (fun () ->
+                requireRep "tensor_product input 1" (O3Spec cfg.Spec1) xE |> Result.bind (fun () ->
+                requireRep "tensor_product input 2" (O3Spec cfg.Spec2) yE |> Result.bind (fun () ->
                 requireInv "tensor_product weight buffer" wE |> Result.map (fun () ->
-                    Rep cfg.SpecOut))))
+                    Rep (O3Spec cfg.SpecOut)))))
         | "linear", [ sInE; sOutE; wE; xE ] ->
             specArg "linear specIn" sInE |> Result.bind (fun si ->
             specArg "linear specOut" sOutE |> Result.bind (fun so ->
                 requireInv "linear weight buffer" wE |> Result.bind (fun () ->
-                requireRep "linear input" si xE |> Result.map (fun () -> Rep so))))
+                requireRep "linear input" (O3Spec si) xE |> Result.map (fun () -> Rep (O3Spec so)))))
         | "gated", [ specE; xE ] ->
             specArg "gated spec" specE |> Result.bind (fun spec ->
                 if spec.IsEmpty || spec.Head.L <> 0 then
@@ -410,28 +620,28 @@ and private judgeApp (ctx: Ctx) (env: Map<string, RepStatus>) (e: Expr) (f: Expr
                 elif ctx.Group = O3 && spec.Head.Parity <> 0 then
                     reject "gated under equiv(O3): the gate block must be (l=0, even) — pseudoscalar gates flip under improper rotations, breaking O(3) equivariance (SO3 admits them)"
                 else
-                    requireRep "gated input" spec xE |> Result.map (fun () -> Rep spec))
+                    requireRep "gated input" (O3Spec spec) xE |> Result.map (fun () -> Rep (O3Spec spec)))
         | "scalars", [ specE; xE ] ->
             specArg "scalars spec" specE |> Result.bind (fun spec ->
                 if ctx.Group = O3 && spec |> List.exists (fun en -> en.L = 0 && en.Parity = 1) then
                     reject "scalars under equiv(O3): the spec has (l=0, odd) blocks — pseudoscalars flip under improper rotations and are not O(3) invariants (SO3 admits them)"
                 else
-                    requireRep "scalars input" spec xE |> Result.map (fun () -> Inv))
+                    requireRep "scalars input" (O3Spec spec) xE |> Result.map (fun () -> Inv))
         | "norms", [ specE; xE ] ->
             specArg "norms spec" specE |> Result.bind (fun spec ->
-                requireRep "norms input" spec xE |> Result.map (fun () -> Inv))
+                requireRep "norms input" (O3Spec spec) xE |> Result.map (fun () -> Inv))
         | "derive_linear", [ sInE; sOutE; wE; xE ] ->
             specArg "derive_linear specIn" sInE |> Result.bind (fun si ->
             specArg "derive_linear specOut" sOutE |> Result.bind (fun so ->
                 requireInv "derive_linear weight buffer" wE |> Result.bind (fun () ->
-                requireRep "derive_linear input" si xE |> Result.map (fun () -> Rep so))))
+                requireRep "derive_linear input" (O3Spec si) xE |> Result.map (fun () -> Rep (O3Spec so)))))
         | "derive_tp", [ s1E; s2E; xE; yE; wE ] ->
             specArg "derive_tp spec1" s1E |> Result.bind (fun s1 ->
             specArg "derive_tp spec2" s2E |> Result.bind (fun s2 ->
-                requireRep "derive_tp input 1" s1 xE |> Result.bind (fun () ->
-                requireRep "derive_tp input 2" s2 yE |> Result.bind (fun () ->
+                requireRep "derive_tp input 1" (O3Spec s1) xE |> Result.bind (fun () ->
+                requireRep "derive_tp input 2" (O3Spec s2) yE |> Result.bind (fun () ->
                 requireInv "derive_tp weight buffer" wE |> Result.map (fun () ->
-                    Rep (tpSpec s1 s2))))))
+                    Rep (O3Spec (tpSpec s1 s2)))))))
         // The S₂-compacted self-TPs: one spec (both inputs), same derived
         // output spec as derive_tp(S, S, ...). The compaction is a
         // reparameterization of a SUBSPACE of the same hom-space, so the
@@ -439,16 +649,16 @@ and private judgeApp (ctx: Ctx) (env: Map<string, RepStatus>) (e: Expr) (f: Expr
         // is a property of the weights, not of the equivariance claim.
         | "derive_sym_tp", [ specE; xE; yE; wE ] ->
             specArg "derive_sym_tp spec" specE |> Result.bind (fun s ->
-                requireRep "derive_sym_tp input 1" s xE |> Result.bind (fun () ->
-                requireRep "derive_sym_tp input 2" s yE |> Result.bind (fun () ->
+                requireRep "derive_sym_tp input 1" (O3Spec s) xE |> Result.bind (fun () ->
+                requireRep "derive_sym_tp input 2" (O3Spec s) yE |> Result.bind (fun () ->
                 requireInv "derive_sym_tp weight buffer" wE |> Result.map (fun () ->
-                    Rep (tpSpec s s)))))
+                    Rep (O3Spec (tpSpec s s))))))
         | "derive_alt_tp", [ specE; xE; yE; wE ] ->
             specArg "derive_alt_tp spec" specE |> Result.bind (fun s ->
-                requireRep "derive_alt_tp input 1" s xE |> Result.bind (fun () ->
-                requireRep "derive_alt_tp input 2" s yE |> Result.bind (fun () ->
+                requireRep "derive_alt_tp input 1" (O3Spec s) xE |> Result.bind (fun () ->
+                requireRep "derive_alt_tp input 2" (O3Spec s) yE |> Result.bind (fun () ->
                 requireInv "derive_alt_tp weight buffer" wE |> Result.map (fun () ->
-                    Rep (tpSpec s s)))))
+                    Rep (O3Spec (tpSpec s s))))))
         // derive_poly: the degree-K equivariant polynomial layer. Judged like
         // derive_linear one degree up — the input must transform as
         // IrrepsIdx<SPEC>, the weight buffer must be invariant, and the result
@@ -464,8 +674,8 @@ and private judgeApp (ctx: Ctx) (env: Map<string, RepStatus>) (e: Expr) (f: Expr
             specArg "derive_poly SOUT" sOutE |> Result.bind (fun sOut ->
                 match staticArgValue ctx.Statics kE with
                 | Ok (SVInt kk) when kk >= 1L && kk <= 4L ->
-                    requireRep "derive_poly input" s xE |> Result.bind (fun () ->
-                    requireInv "derive_poly weight buffer" wE |> Result.map (fun () -> Rep sOut))
+                    requireRep "derive_poly input" (O3Spec s) xE |> Result.bind (fun () ->
+                    requireInv "derive_poly weight buffer" wE |> Result.map (fun () -> Rep (O3Spec sOut)))
                 | _ -> reject "derive_poly: K must be a static int in 1..4"))
         // The monomial lift is a REP EXIT the lattice cannot name. Its output
         // components are the degree-K monomials of the input's components, so
@@ -481,7 +691,7 @@ and private judgeApp (ctx: Ctx) (env: Map<string, RepStatus>) (e: Expr) (f: Expr
                 match sx with
                 | Inv -> Ok Inv
                 | Rep sp ->
-                    Error (bl4008 xE.Span (sprintf "function '%s': ml.sym_lift's monomial coordinates are not representation-classified in the current checker — the C(n+K-1, K) products of IrrepsIdx<%s> components co-rotate POLYNOMIALLY (as ml.sym_spec of that spec), not through a block-diagonal irreps action, so no {Rep spec, Inv, Opaque} status describes the result. Keep ml.sym_lift in uncertified assembly code for now; inside a certified body contract with ml.derive_sym_tp / ml.derive_tp / ml.tensor_product instead" ctx.FuncName (specStr sp)))
+                    Error (bl4008 xE.Span (sprintf "function '%s': ml.sym_lift's monomial coordinates are not representation-classified in the current checker — the C(n+K-1, K) products of %s components co-rotate POLYNOMIALLY (as ml.sym_spec of that spec), not through a block-diagonal irreps action, so no {Rep spec, Inv, Opaque} status describes the result. Keep ml.sym_lift in uncertified assembly code for now; inside a certified body contract with ml.derive_sym_tp / ml.derive_tp / ml.tensor_product instead" ctx.FuncName (repStr sp)))
                 | Opaque ->
                     Error (bl4008 xE.Span (sprintf "function '%s': cannot classify the argument to sym_lift" ctx.FuncName)))
         | ("derive_linear" | "derive_tp"), _ ->
@@ -494,10 +704,10 @@ and private judgeApp (ctx: Ctx) (env: Map<string, RepStatus>) (e: Expr) (f: Expr
         // physical rank-2 quantity; then the result transforms as declared.
         | "tensor_to_irreps", [ gE ] ->
             requireInv "tensor_to_irreps input (flat row-major 3x3 Cartesian tensor)" gE
-            |> Result.map (fun () -> Rep Blade.ML.CartesianBridge.gradSpec)
+            |> Result.map (fun () -> Rep (O3Spec Blade.ML.CartesianBridge.gradSpec))
         | "sym_to_irreps", [ sE ] ->
             requireInv "sym_to_irreps input (packed symmetric Cartesian tensor)" sE
-            |> Result.map (fun () -> Rep Blade.ML.CartesianBridge.tauSpec)
+            |> Result.map (fun () -> Rep (O3Spec Blade.ML.CartesianBridge.tauSpec))
         | "irreps_to_sym", _ ->
             reject "irreps_to_sym reads basis-dependent Cartesian components out of a representation — a rep escape, for uncertified assembly code only (e.g. feeding a solver); inside a certified body stay in irreps space"
         | ("tensor_to_irreps" | "sym_to_irreps"), _ ->
@@ -538,9 +748,22 @@ and private judgeApp (ctx: Ctx) (env: Map<string, RepStatus>) (e: Expr) (f: Expr
                      (match evalExpr ctx.Statics fuel iE with
                       | Ok (SVInt i) when Set.contains (int i) (invariantOffsets ctx.Group spec) -> Ok Inv
                       | Ok (SVInt _) ->
-                          Error (bl4008 e.Span (sprintf "function '%s': raw indexing into an l>0 (or, under O3, parity-odd) component of '%s' reads a basis-dependent number — extract invariants with ml.scalars/ml.norms or contract with ml.tensor_product" ctx.FuncName fn))
+                          (match ctx.Group with
+                           | Point gn ->
+                               // The pseudoscalar asymmetry as table data: at D4
+                               // the A2/B1/B2 cells are 1-DIMENSIONAL and still
+                               // basis-dependent, because each flips under some
+                               // generator. Dimension is not the test; the
+                               // trivial character is.
+                               Error (bl4008 e.Span (sprintf "function '%s': raw indexing into a cell of '%s' outside a TRIVIAL-label block reads a basis-dependent number — under equiv(%s) only the labels whose every generator matrix is the identity carry invariant cells, and a 1-dimensional label is not enough (%s's non-trivial characters flip under some generator, exactly as an O(3) pseudoscalar does under an improper rotation)" ctx.FuncName fn gn gn))
+                           | _ ->
+                               Error (bl4008 e.Span (sprintf "function '%s': raw indexing into an l>0 (or, under O3, parity-odd) component of '%s' reads a basis-dependent number — extract invariants with ml.scalars/ml.norms or contract with ml.tensor_product" ctx.FuncName fn)))
                       | _ ->
-                          Error (bl4008 e.Span (sprintf "function '%s': indexing into representation-typed '%s' requires a static offset inside an invariant (l=0) block" ctx.FuncName fn)))
+                          (match ctx.Group with
+                           | Point _ ->
+                               Error (bl4008 e.Span (sprintf "function '%s': indexing into representation-typed '%s' requires a static offset inside a trivial-label block" ctx.FuncName fn))
+                           | _ ->
+                               Error (bl4008 e.Span (sprintf "function '%s': indexing into representation-typed '%s' requires a static offset inside an invariant (l=0) block" ctx.FuncName fn))))
                  | _ -> reject (sprintf "unsupported access into representation-typed '%s'" fn))
             | _ ->
                 // uncertified callee (builtin, helper, plain array, lambda):
@@ -588,7 +811,7 @@ let judgeFunction (group: Group) (certs: Map<string, CertSig>) (statics: StaticE
 /// checkFunctionDecl runs), the license scope is unused, and call sites
 /// carry no obligation.
 let private equivHandler : Blade.Constraints.ConstraintHandler = {
-    Describe = "equiv(G) — certifies the function equivariant under G (O3 or SO3); the ML elaborator proves the body composes only equivariance-preserving operations"
+    Describe = "equiv(G) — certifies the function equivariant under G (O3, SO3, or a registered point group such as C4 / D4); the ML elaborator proves the body composes only equivariance-preserving operations"
     Validate = fun funcName _ args ->
         parseGroup funcName args |> Result.map ignore
     EnterBody = fun _ _ -> ()

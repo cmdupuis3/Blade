@@ -1,0 +1,28 @@
+// TEST: ML Equiv Point Group Irreps Param (rejects)
+import ml as ml
+// THE ASYMMETRY, from the side that must refuse. C4 is a SUBGROUP of O(3), so
+// an `IrrepsIdx<spec>` space carries a genuine C4 action by restriction, and on
+// every l > 0 block that action is nontrivial. Classifying such a parameter as
+// an invariant would assert that a vector is C4-invariant — a false claim about
+// the only action in the room — so the judgment refuses it at the signature
+// instead of guessing.
+//
+// (The mirror image is sound and is pinned in corpus 045 section 4: a
+// PgIrrepsIdx buffer under equiv(O3) IS an invariant, because nothing extends a
+// C4-module to an O(3)-module on the same coordinates, so "held fixed" is the
+// only reading available and it is a premise the caller discharges.)
+//
+// Naming this value in C4's own labels means decomposing the restriction
+// O(3) down to C4 — crystal-field splitting — which is `ml.restrict`, named
+// and deferred in plan-transforms-as-types §3.6. BL4008.
+let static SH1 = ml.sh_spec(1)
+let static EC = [("E", 1)]
+let static WE = ml.pg_hom_dim("C4", EC, EC)
+
+function bad(v: Array<Float like IrrepsIdx<SH1>>,
+             x: Array<Float like PgIrrepsIdx<C4, EC>>, w: Array<Float like Idx<WE>>)
+             where ml.equiv(C4) -> Array<Float like PgIrrepsIdx<C4, EC>> = {
+    ml.derive_pg_linear(C4, EC, EC, x, w)
+}
+
+let out = bad([1.0, 2.0, 3.0, 4.0], [3.0, 4.0], [0.0, 1.0])
