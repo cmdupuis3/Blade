@@ -52,6 +52,15 @@
          has to precede MLStatics. NOT part of BladeML.fsproj — the ml/ oracle
          twin of the S_n arc is 5a-ii's exact-rational Reynolds block. -->
     <Compile Include="src/ml/compiler/MLPermSpec.fs" />
+    <!-- Point groups, the second BLOCK-SPEC member (stage 5b-0): the frozen
+         {C4, D4} integer tables + their load-time integrity certificate, the
+         generic e-weighted counting core (MLSpec.homDim's TEST-PINNED TWIN,
+         §3.6 "twin-not-reroute"), and the pgHomDim/pgHomBlocks sizing. Like
+         MLPermSpec it is dependency-free integer code — deliberately NOT
+         referencing MLSpec, since the twin pin lives in the test block — so it
+         sits beside it and only has to precede MLStatics. NOT part of
+         BladeML.fsproj; the ml/ oracle twin is tests/Test_PgOracle.fs. -->
+    <Compile Include="src/ml/compiler/MLPointSpec.fs" />
     <Compile Include="src/ml/compiler/CartesianBridge.fs" />
     <Compile Include="src/ml/compiler/WignerTables.fs" />
     <!-- Sym^j(V_l) occurrence tables (stage 2b-i): needs MLSpec's powerSpec
@@ -178,6 +187,8 @@
     <Compile Include="tests/Test_PolyOracle.fs" />
     <Compile Include="tests/Test_PermSpec.fs" />
     <Compile Include="tests/Test_PermOracle.fs" />
+    <Compile Include="tests/Test_PointSpec.fs" />
+    <Compile Include="tests/Test_PgOracle.fs" />
     <Compile Include="tests/Test_CartesianBridge.fs" />
     <Compile Include="tests/Test_Ppl.fs" />
     <Compile Include="tests/Test_Math.fs" />

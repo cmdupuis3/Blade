@@ -19,7 +19,7 @@ computed pins.  `count-theorems.ps1` is the mechanical implementation --
 run it with `-Check` to verify the numbers below and the headline in
 `docs/proofs.md`, which quotes the same total.
 
-## Contents (430 theorems total)
+## Contents (488 theorems total)
 
 - BladeCore.v (16): Group Law both halves (diagonal swap sound; per-dim
   product swap refuted), counting lemma (no lossless product layout),
@@ -188,3 +188,26 @@ run it with `-Check` to verify the numbers below and the headline in
   independence, no float, no rank decision.  Orientation pinned by
   computed matrices at m = 2, 3.  Spanning (orbit-basis completeness) is
   cited, not proved (6.1(a)).
+- BladePointGroup.v (58): NEW -- the point-group registry
+  (MLPointSpec.fs) checked by computation, stage 5b-0 of
+  plan-transforms-as-types 3.6/7.  Integer matrices over the two
+  3.6-canonical tables C4 and D4 (every entry in {-1,0,1}), the word
+  sets and Cayley tables FIXED as data: the tables are groups
+  (c4/d4_table_is_group), the word set is multiplication-closed in every
+  irrep (c4/d4_word_set_closed), the faithful E enumerations are 4 and 8
+  distinct matrices (c4/d4_element_count), the generator images satisfy
+  the presentations and respect the group law (c4/d4_generator_relations,
+  c4/d4_rep_property).  FS INDICATORS COMPUTED, NOT DECLARED:
+  sum_g tr(rho(g)^2) is 4,4,0 at C4 and 8,8,8,8,8 at D4, exactly |G|
+  times the indicator (c4/d4_fs_exact), matching MLPointSpec's FsType
+  column (c4/d4_fs_computed_eq_declared) -- C4's E is the only C-type
+  label.  e is e_of_fs of that computed indicator, so the 3.6 contrast
+  anchor is a CHAIN: pg_hom_dim_c4_contrast = 9 vs
+  pg_hom_dim_d4_contrast = 5 on one spec shape, with the e == 1 naive
+  control collapsing 9 onto 5.  J identities for the [Id, J] emitted
+  basis (J_square_is_neg_id, J_commutes_with_generator/_C4_E) plus
+  Gram = d*I (c4E_end_gram_is_d_id) and both negative controls
+  (a spurious diag(1,-1) End column dies at R90; J fails at D4's
+  R-type E).  R-Burnside sum d^2/e = |G| with the quotient exhibited
+  (c4/d4_rburnside, _exact).  End-basis completeness (Schur over R) is
+  cited per 6.1's closure and oracle-discharged (Test_PgOracle.fs).

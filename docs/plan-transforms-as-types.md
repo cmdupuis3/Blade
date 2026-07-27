@@ -1031,6 +1031,23 @@ go first.
        column dies at R₉₀); BladePointGroup.v (all computational over
        the witnesses: table closure, FS indicators, J identities, the
        e-weighted sum; End-completeness cited, oracle-discharged).
+       **LANDED 2026-07-27, both halves.** F#: FS indicators COMPUTED
+       from the enumeration (C4 E = 0 → e = 2; D4 E = 1 → e = 1); the
+       9-vs-5 thesis pin with BOTH E's sharing the same R₉₀ generator
+       matrix — e is the only differing input; twin pin over 225
+       ordered pairs, MLSpec byte-untouched; oracle 42/0 incl. the
+       homDim = 0 zero-projector anchor; all three negative controls
+       live-failing then standing. FINDING: over REAL characters the
+       indicator triple is ν = 2 − e (1/0/−2 — ℍ is the
+       complexification's double); both shipped types agree with the
+       old triple, and the Gram-blindness phenomenon recurred (the
+       spurious column is invisible to Gram; only cell size and P_ref
+       see it). RECONCILE at 5b-i: BladePointGroup.v's unreachable
+       ℍ arm vs F#'s ν = 2 − e. Coq: 58 items, the 9 derived as a
+       CHAIN (traces → indicator → e → count, nothing asserted);
+       negative controls as refutations; tower 26 files / 488 items,
+       coqchk axiom-free. Blocks PG Spec 32/0, PG Oracle 42/0; full
+       suite 1701/0.
      * **5b-i** — the pg index-type former (distinct keyword; stage-3
        registerTypeDecl alias fix replayed for the pg tag — checklist
        item), (LABEL_NAME, mult) spec statics, pg_* sizing builtins,

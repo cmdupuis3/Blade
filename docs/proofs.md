@@ -1,7 +1,7 @@
 # Blade Proofs
 
 Prose mirror of the machine-checked proof tower in `/proofs/`:
-**430 theorems**, Coq 8.18 / Rocq 9.0, stdlib only, verified by both `coqc`
+**488 theorems**, Coq 8.18 / Rocq 9.0, stdlib only, verified by both `coqc`
 and `coqchk`.
 
 Build: `coq_makefile -f _CoqProject -o Makefile && make`.
@@ -33,7 +33,7 @@ Rules of this document:
 | Computation | BladeCompute, BladeMonad, BladeSafety | materialized semantics, V∘P = id, 12.x laws, MonadPlus, verified offsets + bounds safety + buffer-elimination fusion |
 | Storage split | BladeCauchy | the r = 2 Cauchy split |
 | AD seam | BladeJacobian | symbolic differentiation: renaming equivariance, the Jacobian symmetry transfer, joint-pair-swap tangent symmetry, the accumulation multiplicity rule |
-| ML seam | BladeSymPower, BladePartition | the S₂ partition of a self-tensor weight space; the Sym^k/Λ^k composition-sector counts (Vandermonde, both flavours); set partitions as restricted growth strings — Bell/Stirling counts, RGS-lex extends refinement, the unitriangular witness certificate |
+| ML seam | BladeSymPower, BladePartition, BladePointGroup | the S₂ partition of a self-tensor weight space; the Sym^k/Λ^k composition-sector counts (Vandermonde, both flavours); set partitions as restricted growth strings — Bell/Stirling counts, RGS-lex extends refinement, the unitriangular witness certificate; the C₄/D₄ point-group registry — table closure, computed Frobenius–Schur indicators, the J identities, the e-weighted Hom count |
 
 Import structure is a DAG rooted at BladeDMWF (BladeCore and BladeLowering are
 self-contained); build order per `_CoqProject`.
@@ -720,6 +720,123 @@ compiler's own check in that direction is the numeric exact-rational
 Reynolds/Gram oracle, not a theorem. Nothing in the file mentions characters,
 irreps or Kronecker coefficients — which is §3.6's claim that the
 permutation-module tier is character-free.
+
+## BladePointGroup.v — the point-group registry, checked by computation
+
+The stage 5b-0 obligations of
+[plan-transforms-as-types.md](plan-transforms-as-types.md) §3.6 (point groups
+as the second block-spec member) and §7's 5b-0 bullet, whose mandate for this
+file is *all computational over the witnesses: table closure, FS indicators, J
+identities, the e-weighted sum; End-completeness cited, oracle-discharged*.
+`MLPointSpec.fs` ships a **frozen integer registry** — FsType / PgIrrep /
+PointGroup over the witness roster {C₄, D₄} — and asserts its integrity on
+load. Every load-time assert has a theorem here, over the same matrices.
+
+The **§3.6-canonical tables**, which the `.v` file and `MLPointSpec.fs` must be
+kept in sync on (frozen table data, never derived at a call site):
+
+| group | label | dim | generator images |
+|-------|-------|-----|------------------|
+| C₄ (order 4, gen r) | A | 1 | r ↦ (1) |
+| | B | 1 | r ↦ (−1) |
+| | E | 2 | r ↦ [[0,−1],[1,0]] = R₉₀; J = R₉₀; ℂ-type |
+| D₄ (order 8, gens r, s) | A1 / A2 / B1 / B2 | 1 | (1,1) / (1,−1) / (−1,1) / (−1,−1) |
+| | E | 2 | r ↦ R₉₀, s ↦ [[1,0],[0,−1]]; ℝ-type |
+
+Every entry lies in {−1, 0, 1}: §3.6 picks the roster by **matrix
+rationality**, not crystallography, so the F# oracle is exact-rational with no
+field extension. Matrices are `list (list Z)`, multiplication/identity/
+transpose/trace are defined outright, and the word sets are **fixed data**
+written as generator-index words — `c4_words = [e; r; r²; r³]`,
+`d4_words = [e; r; r²; r³; s; rs; r²s; r³s]` — so "the matrix of a word" is a
+fold and every claim below is a finite check over an explicit list.
+`mat_eqb_eq`, `mat_closed_sound`, `mat_nodup_b_sound` and `forallb_seq2` carry
+each boolean check to its Prop reading; no theorem is left as a `= true`.
+What has to be kept in sync with `MLPointSpec.fs` is the **table data** — label
+roster, dimensions, FsType column, generator order, generator matrices. The word
+list is this file's own choice of representatives (coset order); MLPointSpec
+derives its own by breadth-first generator closure, so it may name the same
+elements by different words. Both enumerate the same element set, which is
+exactly what closure plus the element count assert on each side.
+
+**Table closure and order.** `c4_table_is_group` / `d4_table_is_group` compute
+that the Cayley tables are in range, associative, unital and closed under
+inverses (512 triples at D₄). `c4_word_set_closed` / `d4_word_set_closed` are
+the multiplication-table-closure obligation per irrep: a product of two
+enumerated matrices lands back in the enumeration. `c4_element_count` /
+`d4_element_count` read the order off a **faithful** irrep — E's matrices are
+pairwise distinct and number 4 and 8 — so the word list is not a redundant
+listing (`pg_orders` pins 4/4, 8/8).
+
+**The rep property.** `c4_generator_relations` / `d4_generator_relations` check
+the presentations (r⁴ = e; s² = e, srs = r³). `c4_rep_property` /
+`d4_rep_property` are the group-law half proper: for every irrep and every pair
+of word indices, ρ(w_i)·ρ(w_j) = ρ(w_{i·j}) against the table entry.
+
+**Frobenius–Schur indicators computed = declared.** χ(g²) is the trace of the
+squared word matrix; `c4_fs_sums` = (4, 4, 0) and `d4_fs_sums` = (8, 8, 8, 8, 8)
+are Σ_g χ(g²) over the fixed word list. `c4_fs_exact` / `d4_fs_exact` show the
+division by |G| is exact (the quotient is exhibited, the BladeSymPower
+discipline), giving `c4_fs_indicators` = (1, 1, 0) and `d4_fs_indicators` =
+(1, 1, 1, 1, 1) — **fs = 1 everywhere except C₄'s E, whose sum is 0: the one
+ℂ-type label on the roster.** `c4_fs_computed_eq_declared` /
+`d4_fs_computed_eq_declared` are the load-time assert: computed indicator =
+MLPointSpec's declared FsType column.
+
+**The chain FS → e → count.** `e_of_fs` maps indicator 1/0/−1 to e = 1/2/4 (the
+ℍ value is *reserved* for double groups per §3.6, never a dead field), `irrep_e`
+is `e_of_fs` of the **computed** indicator, and `pg_ev` is the registry lookup
+over `irrep_e` (`pg_ev_is_fs_derived` names the link). So `c4_e_from_fs` =
+(1, 1, 2) and `d4_e_from_fs` = (1, 1, 1, 1, 1) are consequences of traces, not
+assertions, and the contrast anchor below is a chain rather than three
+coincident asserts.
+
+**The J identities**, which size the [Id, J] emitted basis of a ℂ-type label:
+`J_square_is_neg_id` (J² = −Id₂ as integer matrices), `J_commutes_with_generator`
+(J·ρ(r) = ρ(r)·J) and `J_commutes_with_C4_E` (over every word).
+`c4E_end_gram_is_d_id` computes the Gram matrix of [Id, J] under ⟨A, B⟩ =
+tr(AᵀB) as exactly 2·I₂ = d·I — independence over ℤ **with no rank decision**,
+which is what §3.6 demands. Both of the design's negative controls are
+refutations here: `c4E_diag_not_equivariant` — a spurious diag(1, −1) End column
+dies at R₉₀, so it cannot pad the E block — and `d4E_J_not_equivariant` — J
+fails to commute with D₄'s reflection, which is exactly why D₄'s E has e = 1 and
+emits [Id] alone.
+
+**ℝ-Burnside**, the table-integrity trap: `c4_rburnside` and `d4_rburnside` give
+Σᵢ dᵢ²/eᵢ = 4 and 8, with `c4_rburnside_exact` / `d4_rburnside_exact` exhibiting
+each quotient so a mis-typed e cannot hide behind a truncating division.
+
+**The e-weighted count over enumerated block pairs.** §3.6's FS formula,
+dim_ℝ Hom_G(⊕mᵢUᵢ, ⊕nᵢUᵢ) = Σᵢ mᵢ·nᵢ·eᵢ, is defined over the explicit block-pair
+enumeration `hom_blocks` that `pgHomBlocks` emits — the `s2_cells_spec`
+discipline again — and `hom_blocks_spec` characterizes that list exactly
+(a block (L, m, n) is emitted iff (L, m) is an input entry and (L, n) an output
+entry). `pg_hom_dim_spec_sum` rewrites the count as the pairwise sum it is meant
+to be; `pg_hom_dim_add_l` / `pg_hom_dim_add_r` give biadditivity and
+`pg_hom_dim_single` the one-block case. §3.6's **contrast anchor** is then two
+computed theorems on one spec shape, [A × 1, E × 2] → itself:
+`pg_hom_dim_c4_contrast` = **9** and `pg_hom_dim_d4_contrast` = **5**, with e
+read from the computed indicators. `pg_hom_dim_c4_naive_control` closes the
+argument: with e ≡ 1 the C₄ count collapses to 5, so **the FS correction is the
+entire difference** (`contrast_is_fs_only` states the three together).
+`trivial_label_counts` and `cross_label_blocks_empty` pin the trivial-label arm
+(for 5b-ii's `invariantOffsets`) and the block-diagonality of the enumeration.
+
+Honest scope: **End-basis completeness for general G is not modelled.** That
+End_G(U) for an ℝ-irreducible U is ℝ, ℂ or ℍ and nothing else — the Schur-over-ℝ
+trichotomy, hence that [Id] and [Id, J] *exhaust* the equivariant endomorphisms
+and the e-weighted sum is the full dim_ℝ Hom — is **cited**, under §6.1's closure
+("mathcomp is OUT": everything 5b relies on is either a finite integer
+computation over baked data, which is this file, or a general theorem whose
+shipped-group instance the exact oracle discharges). At the shipped witnesses it
+is discharged numerically by `tests/Test_PgOracle.fs`, which builds the
+exact-rational Hom-space Reynolds projector over ℚ and compares it entrywise to
+the emitted basis — the same cited/computed division, and the same oracle
+naming, as BladePartition.v's `Test_PermOracle`. What *is* proved on the End side
+is the independence half plus both negative controls. Characters as class
+functions, orthogonality, Clebsch–Gordan/fusion multiplicity (the CG-copy index
+is §3.6's 5b-iii deferral) and any group off the roster are likewise absent:
+nothing here is quantified over "all point groups".
 
 ## What remains unproved
 

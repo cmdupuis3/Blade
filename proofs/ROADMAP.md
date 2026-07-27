@@ -60,3 +60,17 @@ published as a standalone artifact where redundancy reads as padding.
    use positional `rewrite H at 1`, then rewrite the other equation to
    catch the survivor, then `nia`
    (BladePartition stir_open_peel_last).
+11. The other end of trap 9: `f_equal` on `lsum (map f l) = lsum (map g
+   l)` may CLOSE the goal outright when `f` and `g` became convertible
+   under an intervening rewrite. The next tactic then fails with "No
+   such goal", which again reads like a tactic bug and is really "you
+   already have it" -- drop the `f_equal; apply map_ext` pair for a bare
+   `reflexivity` (BladePointGroup pg_hom_dim_spec_sum, after
+   `lsum_filter_guard`).
+12. A double quote inside a Coq comment opens a STRING, and a `*)` that
+   falls inside it does not close the comment. The tower's box-comment
+   headers are one `(* ... *)` per line, so a quotation that opens on
+   one line and closes on a later one silently swallows every `*)`
+   between -- Rocq 9 reports it as `comment-terminator-in-string`
+   warnings, one per line, and the header still parses only by luck.
+   Keep quoted phrases inside a single line, or use dashes.

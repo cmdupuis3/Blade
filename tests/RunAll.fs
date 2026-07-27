@@ -173,6 +173,21 @@ let runAllTestsFullWith (extraBlocks: (unit -> Blade.Tests.TestHarness.BlockResu
     // and no tolerance anywhere, which is the half BladePartition.v cites
     // rather than proves (completeness of the orbit basis).
     let permOracle = Blade.Tests.PermOracleReview.runPermOracleTests ()
+    // The point-group counting layer (MLPointSpec.fs, stage 5b-0): the frozen
+    // {C4, D4} tables and their integrity certificate (closure vs declared
+    // order, FS indicators nu = 2 - e, J^2 = -Id and J-generator commutation,
+    // the R-Burnside trap sum d^2/e = |G|), the 9-vs-5 FS contrast, and the
+    // twin pin — the generic e-weighted core instantiated at O(3) labels must
+    // equal MLSpec.homDim/homBlocks on a 15-spec sweep, which is what earns
+    // the abstraction without rerouting O(3) through it. Pure integer.
+    let pointSpec = Blade.Tests.PointSpecReview.runPointSpecTests ()
+    // The point-group Hom-basis COMPLETENESS oracle (stage 5b-0): the emitted
+    // [Id, J] columns vs the exact rational Reynolds projector
+    // (1/|G|)Sum_g rho_W(g) M rho_V(g)^T, entrywise over Q with the closed-form
+    // Gram d*I_e per cell. Three negative controls run live (dropped J column,
+    // the naive e = 1 sizing formula, a spurious diag(1,-1) End column that
+    // dies at R90). BigInteger fractions throughout - no float, no tolerance.
+    let pgOracle = Blade.Tests.PgOracleReview.runPgOracleTests ()
     // Compiler-native Cartesian<->irreps bridge constants (CartesianBridge.fs)
     // vs closed forms + the y_to harmonic constants (sgs closure arc).
     let cartBridge = Blade.Tests.CartesianBridgeReview.runCartesianBridgeTests ()
@@ -262,7 +277,7 @@ let runAllTestsFullWith (extraBlocks: (unit -> Blade.Tests.TestHarness.BlockResu
     let blocks =
         [ yield r1; yield r2; yield attrs; yield subst
           yield normalize; yield unify; yield validateArrow
-          yield shape; yield oracles; yield wigner; yield symPower; yield polyOracle; yield permSpec; yield permOracle; yield cartBridge; yield spans; yield diagCore; yield diagCorpus; yield alloc
+          yield shape; yield oracles; yield wigner; yield symPower; yield polyOracle; yield permSpec; yield permOracle; yield pointSpec; yield pgOracle; yield cartBridge; yield spans; yield diagCore; yield diagCorpus; yield alloc
           yield ompPragma
           match omp with Some b -> yield b | None -> ()
           yield bufType

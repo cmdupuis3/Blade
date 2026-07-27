@@ -1098,6 +1098,29 @@ let private dispatchTest (rest: string list) : int =
         // pipeline.
         let failed = (Blade.Tests.PermOracleReview.runPermOracleTests ()).Failed
         if failed = 0 then 0 else 1
+    | [ "pgspec" ] | [ "pg-spec" ] ->
+        // Stage 5b-0 review block: the point-group counting layer
+        // (MLPointSpec.fs) - the frozen {C4, D4} tables and their integrity
+        // certificate (closure vs declared order, orthogonality, the FS
+        // indicators nu = 2 - e, J^2 = -Id and J-generator commutation, the
+        // R-Burnside trap sum d^2/e = |G|), the 9-vs-5 FS contrast that is
+        // stage 5b's thesis, and the TWIN PIN of the generic e-weighted core
+        // against MLSpec.homDim / homBlocks on a 15-spec sweep. Pure integer,
+        // in-process, no Blade source pipeline.
+        let failed = (Blade.Tests.PointSpecReview.runPointSpecTests ()).Failed
+        if failed = 0 then 0 else 1
+    | [ "pgoracle" ] | [ "pg-oracle" ] ->
+        // Stage 5b-0 oracle block: the emitted point-group Hom basis ([Id] at
+        // FS-real cells, [Id, J] at FS-complex ones) checked for COMPLETENESS
+        // against the exact rational Reynolds projector
+        // (1/|G|)Sum_g rho_W(g) M rho_V(g)^T - B(B^T B)^-1 B^T = P_ref
+        // ENTRYWISE over Q, with the Gram closed form d*I_e per cell. Three
+        // negative controls run live: a dropped J column (trace deficit one per
+        // affected cell), the naive e = 1 sizing formula, and a spurious
+        // diag(1,-1) End column that dies at R90. BigInteger fractions
+        // throughout: no float, no tolerance. In-process, no C++ pipeline.
+        let failed = (Blade.Tests.PgOracleReview.runPgOracleTests ()).Failed
+        if failed = 0 then 0 else 1
     | [ "alloc" ] ->
         // Standalone C++ runtime-layout tests for the contiguous-backing
         // allocate<>. Compiles + runs cpp/alloc_layout_tests.cpp against the
