@@ -540,6 +540,226 @@ let symMultisets (n: int) (k: int) : int list list =
                  for rest in go i (rem - 1) -> i :: rest ]
     go 0 k
 
+// ============================================================================
+// The Sym^k label basis — the integer label layer
+// (plan-transforms-as-types §3.3b, stage 2b-ii)
+// ============================================================================
+//
+// THE LABEL CONVENTION (fixed HERE; stage 2b-iii bakes this exact enumeration
+// into the emitted kernel, so a change is a convention break, not a refactor).
+//
+// A label names one basis vector of the constructive direct sum
+//   Sym^k(V) = ⊕_{sectors} [ ⊗_c Sym^{j_c}(U_c) ] coupled left-to-right,
+// obtained from §3.3b's two moves: copy-splitting (move 1) reduces the
+// plethysm to single-row Sym^j(V_l) factors, and pairwise CG coupling —
+// multiplicity-free at every step — glues the factors together. Every label
+// emits exactly one vector, so the per-(L, P) label count MUST equal the
+// `powerSpec PowSym` multiplicity; that is the constructive-direct-sum
+// theorem (its sector-summation shadow is Coq-checked, proofs/BladeSymPower.v
+// `sym_copy_splitting`) and it is asserted on every `polyLabels` call.
+//
+//  1. COPIES. Spec entry (l, p, m) splits into m copies of (l, p, 1); copy
+//     indices run GLOBALLY over the spec, block-major with the multiplicity
+//     index inner (`polyCopies`).
+//  2. SECTORS. A sector is a nondecreasing size-k multiset of copy indices, in
+//     lex-ascending `symMultisets` order over the COPY count. At k = 2 this
+//     reproduces stage 1's kept-cell enumeration: a two-distinct-copy sector ↔
+//     a kept mirror cell or an off-diagonal (u1 < u2) diagonal-path cell, a
+//     repeated-copy sector ↔ a u1 = u2 diagonal cell (`s2TpCells`).
+//  3. DEGREES. Copy c's degree j_c is its multiplicity in the sector multiset;
+//     only copies with j_c > 0 ("used copies") carry label data, and they are
+//     visited in ascending copy order.
+//  4. OCCURRENCES. A used copy selects one occurrence of V_{L_c} inside
+//     Sym^{j_c}(V_{l_c}) — see `symOccurrences`, whose ORDER (L descending,
+//     RREF copy index ascending) is part of the convention.
+//  5. CHAIN. The chosen L_c are coupled LEFT-COMB in copy order: the running
+//     L starts at the first used copy's L, and each further copy contributes
+//     one intermediate L in |L_acc − L_c| .. L_acc + L_c, ASCENDING. The final
+//     running L is the label's irrep.
+//  6. PARITY. P = Σ_c j_c·p_c mod 2 — O(3) parity acts on Sym^j(V_{l,p}) by
+//     the scalar (−1)^{j·p} and is multiplicative along the chain, so there is
+//     no per-step parity freedom.
+//
+// ENUMERATION ORDER (what `PolyLabel.Index` counts): sectors in `symMultisets`
+// lex order (slowest); then WITHIN a sector the tuple
+//   (occ of used copy 0, .., occ of used copy r−1, chain step 1, .., step r−1)
+// odometer-style with the RIGHTMOST varying FASTEST — every occurrence choice
+// is more significant than every chain choice, occurrence choices run
+// left-to-right by copy (copy 0 slowest), and the chain steps run left-to-right
+// too (the LAST coupling varies fastest). Chain ranges depend on the occurrence
+// choices, so this is a nested enumeration, not a product.
+//
+// §6.9(iv), restated where it can be seen: the copy-split basis is NOT
+// GL(m)-channel-covariant. A label's copy indices name multiplicity SLOTS of
+// the spec, never channel structure.
+
+/// One multiplicity-1 copy of the copy-split spec (§3.3b move 1): entry
+/// (l, p, m) becomes m copies of (l, p, 1).
+type PolyCopy = {
+    /// global copy index = position in `polyCopies s`
+    Copy: int
+    /// the spec block this copy came from, and its multiplicity index in it
+    Block: int
+    MultIdx: int
+    L: int
+    Parity: int
+}
+
+/// The copy splitting of a spec, in copy order (block-major, multiplicity
+/// index inner). Length = Σ mult.
+let polyCopies (s: Spec) : PolyCopy list =
+    let mutable i = -1
+    [ for b in 0 .. s.Length - 1 do
+        let e = s.[b]
+        for u in 0 .. e.Mult - 1 do
+          i <- i + 1
+          yield { Copy = i; Block = b; MultIdx = u; L = e.L; Parity = e.Parity } ]
+
+/// The occurrences of the irreps V_L inside Sym^j(V_(l,p)) as
+/// (L, copy-index-within-the-L-multiplicity-space) pairs, in the CONVENTION
+/// ORDER: L DESCENDING, and within one L the RREF copy index ascending.
+///
+/// That is exactly the order `SymPowerTables.symPowerTable j l` emits its
+/// `Occurrences` in (its weight-peel runs L = j·l down to 0, copies in RREF
+/// row order), so a label's flat occurrence index is a direct index into the
+/// T_{j,l} table stage 2b-iii bakes. MLSpec cannot reference SymPowerTables —
+/// it is shared with the standalone BladeML project and stays dependency-free
+/// — so the two orders are pinned against each other in the tests instead.
+///
+/// COUNTS come from the §3.3 weight-peel, `powerSpec PowSym [(l, p, 1)] j`;
+/// this file never touches the T-table float layer. Parity is not a choice:
+/// Sym^j of a parity-p irrep sits entirely in parity j·p mod 2 (checked).
+let symOccurrences (l: int) (p: int) (j: int) : (int * int) list =
+    if j < 1 then failwithf "internal: symOccurrences with degree %d (must be >= 1)" j
+    let entries = powerSpec PowSym [ { L = l; Parity = p; Mult = 1 } ] j
+    let want = (j * p) % 2
+    for e in entries do
+        if e.Parity <> want then
+            failwithf "internal: Sym^%d(V_%d parity %d) produced an occurrence of parity %d (the copy-power parity rule says %d)"
+                j l p e.Parity want
+    entries
+    |> List.sortByDescending (fun e -> e.L)
+    |> List.collect (fun e -> [ for c in 0 .. e.Mult - 1 -> (e.L, c) ])
+
+/// One used copy of a sector: which copy, at what degree, and which occurrence
+/// of V_(OccL) inside Sym^Degree(V_copy) this label selects.
+type PolyCopyUse = {
+    Copy: int
+    CopyL: int
+    CopyParity: int
+    /// j_c — the copy's multiplicity in the sector multiset
+    Degree: int
+    /// flat index into `symOccurrences CopyL CopyParity Degree`
+    Occ: int
+    /// that occurrence's irrep, and its RREF copy index within the L space
+    OccL: int
+    OccCopy: int
+}
+
+/// One label of the Sym^k basis — see the convention block above.
+type PolyLabel = {
+    /// canonical flat index = position in `polyLabels s k`
+    Index: int
+    /// the sector: a nondecreasing size-k multiset of copy indices
+    Sector: int list
+    /// the used copies, ascending by copy index (empty only at k = 0)
+    Uses: PolyCopyUse list
+    /// the left-comb intermediate couplings: `Chain.[i]` is the running L after
+    /// `Uses.[i+1]` is coupled on. Length = Uses.Length − 1, and the last entry
+    /// (when there is one) is `L`.
+    Chain: int list
+    /// the label's irrep and parity
+    L: int
+    Parity: int
+    /// k!/∏_c j_c! — the integer under §3.3b identity (1)'s sector constant
+    /// √(k!/∏k_c!). Where that constant is baked is 2b-iii's call (§6.9(ii));
+    /// its VALUE is a property of the sector, so it is recorded here.
+    Multinomial: int64
+}
+
+/// The Sym^k label basis of a spec, in canonical enumeration order.
+///
+/// Two counting theorems are asserted on EVERY call (house discipline — they
+/// are integer-cheap and a violation is a compiler bug, not a user error):
+///   1. per (L, P), the label count equals the `powerSpec PowSym s k`
+///      multiplicity — the constructive direct sum at the level of counts;
+///   2. Σ_(L,P) count·(2L+1) = C(total_dim s + k − 1, k) — redundant given (1)
+///      plus powerSpec's own cardinality assert, but it catches grouping bugs
+///      in this file for free.
+let polyLabels (s: Spec) (k: int) : PolyLabel list =
+    if k < 0 then failwithf "internal: polyLabels with negative k (%d)" k
+    let copies = polyCopies s |> List.toArray
+    let n = copies.Length
+    // occ.[c].[j] — the occurrence list of copy c at degree j (index 0 unused).
+    let occ =
+        Array.init n (fun c ->
+            Array.init (k + 1) (fun j ->
+                if j < 1 then [] else symOccurrences copies.[c].L copies.[c].Parity j))
+    let factorial (m: int) = Seq.fold (fun acc i -> acc * int64 i) 1L (seq { 2 .. m })
+    // Occurrence choices: used copies left to right, copy 0 SLOWEST.
+    let rec occChoices (rest: (int * int) list) : PolyCopyUse list list =
+        match rest with
+        | [] -> [ [] ]
+        | (c, j) :: tl ->
+            [ for (oi, (oL, oc)) in List.indexed occ.[c].[j] do
+                for restUses in occChoices tl ->
+                  { Copy = c; CopyL = copies.[c].L; CopyParity = copies.[c].Parity
+                    Degree = j; Occ = oi; OccL = oL; OccCopy = oc } :: restUses ]
+    // Left-comb chain: each step ascending, the LAST step varies fastest.
+    let rec chains (acc: int) (rest: int list) : int list list =
+        match rest with
+        | [] -> [ [] ]
+        | lNext :: tl ->
+            [ for lMid in abs (acc - lNext) .. acc + lNext do
+                for tail in chains lMid tl -> lMid :: tail ]
+    let labels =
+        [ for sector in symMultisets n k do
+            // `countBy` on the sorted sector gives (copy, degree) in ascending
+            // copy order — the used copies, left to right.
+            let uses = sector |> List.countBy id
+            let parity = (uses |> List.sumBy (fun (c, j) -> j * copies.[c].Parity)) % 2
+            let multinomial =
+                uses |> List.fold (fun acc (_, j) -> acc / factorial j) (factorial k)
+            for us in occChoices uses do
+                match us with
+                // k = 0: the empty sector is the trivial label (Sym^0 = ℝ).
+                | [] -> yield (sector, us, [], 0, 0, multinomial)
+                | head :: tl ->
+                    for ch in chains head.OccL (tl |> List.map (fun u -> u.OccL)) do
+                        let finalL = match List.tryLast ch with Some x -> x | None -> head.OccL
+                        yield (sector, us, ch, finalL, parity, multinomial) ]
+        |> List.mapi (fun i (sector, us, ch, l, p, mn) ->
+            { Index = i; Sector = sector; Uses = us; Chain = ch; L = l; Parity = p; Multinomial = mn })
+    // (1) the constructive-direct-sum theorem, at the level of counts
+    let got = labels |> List.countBy (fun lb -> (lb.L, lb.Parity)) |> Map.ofList
+    let want =
+        powerSpec PowSym s k
+        |> List.map (fun e -> ((e.L, e.Parity), e.Mult))
+        |> Map.ofList
+    if got <> want then
+        failwithf "internal: the Sym^%d label basis of %A counts %A per (L, parity) but sym_spec says %A"
+            k s (Map.toList got) (Map.toList want)
+    // (2) dimension closure against the Coq-proved basis cardinality
+    let dimSum = got |> Map.fold (fun acc (l, _) c -> acc + int64 c * int64 (2 * l + 1)) 0L
+    let expected = binomial (totalDim s + k - 1) k
+    if dimSum <> expected then
+        failwithf "internal: the Sym^%d label basis of %A spans %d dimensions but the basis cardinality is %d"
+            k s dimSum expected
+    labels
+
+/// Label multiplicity per (L, parity) — equal to `symPowerSpec s k` block by
+/// block (asserted inside `polyLabels`).
+let polyLabelCounts (s: Spec) (k: int) : Map<int * int, int> =
+    polyLabels s k |> List.countBy (fun lb -> (lb.L, lb.Parity)) |> Map.ofList
+
+/// `polyWeightDim` recomputed label by label: by Schur each label contributes
+/// one free weight per matching W copy. The SAME sum reorganized — the tests
+/// pin the two against each other rather than this file trusting itself.
+let polyWeightDimViaLabels (s: Spec) (k: int) (sOut: Spec) : int =
+    let agg = aggregateByIrrep sOut
+    polyLabels s k
+    |> List.sumBy (fun lb -> defaultArg (Map.tryFind (lb.L, lb.Parity) agg) 0)
+
 /// Per OUTPUT block of `linear`: (input block index, out entry, in entry),
 /// input resolved FIRST-MATCH by irrep (ml/Linear.findBlock semantics —
 /// duplicate input irreps beyond the first are unreachable, finding F3).

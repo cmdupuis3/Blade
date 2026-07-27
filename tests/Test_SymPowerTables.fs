@@ -7,6 +7,13 @@
 // its gapped guard, and bit-pins small tables. The block also carries the
 // §6.9(iii) extension: realCGDense completeness/exchange pins over the
 // k ≤ 4 chain range (l1 ≤ 9, l2 ≤ 3, l3 ≤ 12).
+//
+// Stage 2b-ii appends the LABEL layer (MLSpec.polyLabels): the integer
+// enumeration of the Sym^k basis and its counting theorems. Pinned here: the
+// enumeration-order convention 2b-iii bakes, the shared occurrence order
+// (MLSpec cannot call this module, so the two are pinned against each other),
+// the §6.9(v) label ↔ stage-1 kept-cell alignment at k = 2 (count level), a
+// 15-spec sweep against `sym_spec`, and the degenerate k ∈ {0, 1} cases.
 module Blade.Tests.SymPowerTablesReview
 
 open Blade.Tests.TestHarness
@@ -241,6 +248,198 @@ let runSymPowerTablesTests () : BlockResult =
                         worstEx <- max worstEx (abs (b.[c2].[c1].[c3] - sigma * a.[c1].[c2].[c3]))
     check "realCG exchange identity at (5,2), (7,3), (9,3), all l3 (1e-12)"
           (worstEx < 1e-12) (sprintf "max dev %g" worstEx)
+
+    // ========================================================================
+    // Stage 2b-ii: the Sym^k LABEL layer (MLSpec.polyLabels) — counts only,
+    // no emission. The two counting theorems fire inside every `polyLabels`
+    // call; what is checked here is the CONVENTION (enumeration order, the
+    // occurrence order shared with this module's tables) and the alignment
+    // with stage 1's kept-cell enumeration at k = 2 (§6.9(v), count level).
+    // ========================================================================
+
+    let mkSpec (xs: (int * int * int) list) : MLS.Spec =
+        xs |> List.map (fun (l, p, m) -> ({ L = l; Parity = p; Mult = m } : MLS.SpecEntry))
+
+    // ---- the label layer's occurrence order IS this module's -----------------
+    // MLSpec stays dependency-free (BladeML shares it) so it cannot call
+    // symPowerTable; the shared convention "L descending, RREF copy ascending"
+    // is therefore pinned from outside. A label's flat `Occ` index must be a
+    // direct index into `tbl.Occurrences` — this is what 2b-iii will bake.
+    let mutable occOrderOk = true
+    let mutable occOrderWhere = ""
+    for j in 1 .. 4 do
+        for l in 0 .. 3 do
+            let want = (symPowerTable j l).Occurrences |> List.map (fun o -> (o.L, o.Copy))
+            for p in 0 .. 1 do
+                let got = MLS.symOccurrences l p j
+                if got <> want then
+                    occOrderOk <- false
+                    occOrderWhere <- sprintf "j=%d l=%d p=%d: %A vs %A" j l p got want
+    check "labels: occurrence order = symPowerTable order (j ≤ 4, l ≤ 3, both parities)"
+          occOrderOk occOrderWhere
+
+    // ---- anchor A = [(0,e,1); (1,o,1)], k = 3 -------------------------------
+    let anchorA = mkSpec [ (0, 0, 1); (1, 1, 1) ]
+    let labA3 = MLS.polyLabels anchorA 3
+    let sectorsA3 = labA3 |> List.map (fun lb -> lb.Sector) |> List.distinct
+    check "anchor A k=3: 4 sectors, lex ascending over copies"
+          (sectorsA3 = [ [0;0;0]; [0;0;1]; [0;1;1]; [1;1;1] ]) (sprintf "%A" sectorsA3)
+
+    let perSectorA3 = labA3 |> List.countBy (fun lb -> lb.Sector) |> List.map snd
+    check "anchor A k=3: 6 labels, per-sector 1/1/2/2"
+          (labA3.Length = 6 && perSectorA3 = [ 1; 1; 2; 2 ])
+          (sprintf "%d labels, per sector %A" labA3.Length perSectorA3)
+
+    let cntA3 = MLS.polyLabelCounts anchorA 3
+    check "anchor A k=3: per-(L,P) counts (0,e):2 (1,o):2 (2,e):1 (3,o):1"
+          (cntA3 = Map.ofList [ ((0,0), 2); ((1,1), 2); ((2,0), 1); ((3,1), 1) ])
+          (sprintf "%A" (Map.toList cntA3))
+
+    // The full list, in order — the CONVENTION pin (occurrence choices outer,
+    // copy 0 slowest; chain steps inner, last step fastest).
+    let labA3Shape =
+        labA3 |> List.map (fun lb ->
+            (lb.Sector,
+             lb.Uses |> List.map (fun u -> (u.Copy, u.Degree, u.Occ, u.OccL)),
+             lb.Chain, lb.L, lb.Parity))
+    let labA3Expected =
+        [ ([0;0;0], [ (0, 3, 0, 0) ],                 [],  0, 0)
+          ([0;0;1], [ (0, 2, 0, 0); (1, 1, 0, 1) ],   [1], 1, 1)
+          ([0;1;1], [ (0, 1, 0, 0); (1, 2, 0, 2) ],   [2], 2, 0)
+          ([0;1;1], [ (0, 1, 0, 0); (1, 2, 1, 0) ],   [0], 0, 0)
+          ([1;1;1], [ (1, 3, 0, 3) ],                 [],  3, 1)
+          ([1;1;1], [ (1, 3, 1, 1) ],                 [],  1, 1) ]
+    check "anchor A k=3: full label list (enumeration-order convention pin)"
+          (labA3Shape = labA3Expected) (if labA3Shape = labA3Expected then "" else sprintf "%A" labA3Shape)
+
+    let multA3 = labA3 |> List.map (fun lb -> lb.Multinomial)
+    check "anchor A k=3: sector multinomials k!/∏j_c! = 1,3,3,3,1,1"
+          (multA3 = [ 1L; 3L; 3L; 3L; 1L; 1L ]) (sprintf "%A" multA3)
+
+    // ---- k = 2: the label ↔ stage-1 kept-cell alignment (§6.9(v)) -----------
+    // The correspondence is a BIJECTION labels(s,2) ↔ s2TpCells S2Sym s:
+    //   mirror cell (b1 < b2, u1, u2, bo)      ↔ two-distinct-copy sector,
+    //                                            copies in different blocks;
+    //   diagonal cell (b, u1 < u2, bo)         ↔ two-distinct-copy sector,
+    //                                            both copies in the same block
+    //                                            (all L in 0..2l, i.e. both
+    //                                             τ signs, are reachable);
+    //   diagonal cell (b, u1 = u2, bo)         ↔ repeated-copy sector, whose
+    //                                            occurrences of Sym²(V_l) are
+    //                                            the l+1 even L — exactly the
+    //                                            τ = +1 (σ = +1) diagonal cells.
+    // Asserted at the COUNT level here (the value-level M-pin is 2b-iii).
+    let k2Specs =
+        [ "A [(0,e,1);(1,o,1)]", anchorA
+          "B [(1,o,2)]",         mkSpec [ (1, 1, 2) ]
+          "C [(0,e,2);(1,o,1)]", mkSpec [ (0, 0, 2); (1, 1, 1) ] ]
+    for (nm, s) in k2Specs do
+        let labs = MLS.polyLabels s 2
+        let cells = MLS.s2TpCells MLS.S2Sym s
+        let twoDistinct = labs |> List.filter (fun lb -> lb.Uses.Length = 2) |> List.length
+        let sameCopy = labs |> List.filter (fun lb -> lb.Uses.Length = 1) |> List.length
+        let mirror = cells |> List.filter (fun c -> c.IsMirror) |> List.length
+        let diagOff = cells |> List.filter (fun c -> not c.IsMirror && c.OffA <> c.OffB) |> List.length
+        let diagDiag = cells |> List.filter (fun c -> not c.IsMirror && c.OffA = c.OffB) |> List.length
+        // Per-(L, P) alignment: a cell's output block is located by OutOff.
+        let sOut = MLS.tpSpec s s
+        let outAt =
+            List.zip (MLS.blockStarts sOut |> List.truncate sOut.Length) sOut
+            |> List.map (fun (st, e) -> (st, (e.L, e.Parity)))
+            |> Map.ofList
+        let cellCounts = cells |> List.countBy (fun c -> outAt.[c.OutOff]) |> Map.ofList
+        let labCounts = labs |> List.countBy (fun lb -> (lb.L, lb.Parity)) |> Map.ofList
+        check (sprintf "k=2 alignment %s: distinct-copy sectors = mirror + off-diag cells, repeated = u1=u2 cells" nm)
+              (twoDistinct = mirror + diagOff && sameCopy = diagDiag && cellCounts = labCounts)
+              (sprintf "labels %d+%d, cells %d+%d+%d, per-(L,P) %s"
+                       twoDistinct sameCopy mirror diagOff diagDiag
+                       (if cellCounts = labCounts then "aligned" else sprintf "%A vs %A" (Map.toList labCounts) (Map.toList cellCounts)))
+        // and the stage-1 weight count, re-derived through the label layer
+        let viaLabels = MLS.polyWeightDimViaLabels s 2 sOut
+        let stage1 = MLS.symTpWeightDim s
+        check (sprintf "k=2 weight dim %s: polyWeightDimViaLabels(s,2,tp_spec) = symTpWeightDim" nm)
+              (viaLabels = stage1) (sprintf "%d vs %d" viaLabels stage1)
+
+    // ---- the 15-spec sweep, k ∈ {2,3,4} -------------------------------------
+    let sweep =
+        [ mkSpec [ (0, 0, 1) ]
+          mkSpec [ (1, 1, 1) ]
+          mkSpec [ (2, 0, 1) ]
+          mkSpec [ (3, 1, 1) ]
+          mkSpec [ (0, 0, 2) ]
+          mkSpec [ (1, 1, 2) ]
+          mkSpec [ (2, 0, 3) ]
+          mkSpec [ (1, 1, 4) ]
+          mkSpec [ (0, 0, 1); (1, 1, 1) ]
+          mkSpec [ (0, 0, 2); (1, 1, 1) ]
+          mkSpec [ (0, 0, 1); (1, 1, 2) ]
+          mkSpec [ (1, 1, 1); (2, 0, 1) ]
+          mkSpec [ (1, 0, 1); (1, 1, 1) ]
+          mkSpec [ (0, 0, 1); (1, 1, 1); (2, 0, 1) ]
+          mkSpec [ (0, 0, 1); (1, 1, 1); (2, 0, 1); (3, 1, 1) ] ]
+    let mutable sweepOk = true
+    let mutable sweepBad = ""
+    let mutable sweepLabels = 0
+    for s in sweep do
+        for k in 2 .. 4 do
+            let cnt = MLS.polyLabelCounts s k
+            let want =
+                MLS.symPowerSpec s k |> List.map (fun e -> ((e.L, e.Parity), e.Mult)) |> Map.ofList
+            let dimSum = cnt |> Map.fold (fun acc (l, _) c -> acc + c * (2 * l + 1)) 0
+            let expect = int (MLS.binomial (MLS.totalDim s + k - 1) k)
+            sweepLabels <- sweepLabels + (cnt |> Map.fold (fun a _ c -> a + c) 0)
+            if cnt <> want || dimSum <> expect then
+                sweepOk <- false
+                sweepBad <- sprintf "%A k=%d: %A vs %A (dim %d vs %d)" s k (Map.toList cnt) (Map.toList want) dimSum expect
+    check (sprintf "sweep: label counts = sym_spec and Σ count·(2L+1) = C(n+k−1,k), 15 specs × k ∈ {2,3,4}")
+          sweepOk (if sweepOk then sprintf "%d labels total" sweepLabels else sweepBad)
+
+    let mutable wdOk = true
+    let mutable wdBad = ""
+    for (nm, s) in k2Specs do
+        for k in 2 .. 4 do
+            for (on, sOut) in [ "s", s; "tp_spec(s,s)", MLS.tpSpec s s; "[(0,e,1)]", mkSpec [ (0, 0, 1) ] ] do
+                let a = MLS.polyWeightDimViaLabels s k sOut
+                let b = MLS.polyWeightDim s k sOut
+                if a <> b then
+                    wdOk <- false
+                    wdBad <- sprintf "%s k=%d out=%s: %d vs %d" nm k on a b
+    check "polyWeightDimViaLabels = polyWeightDim (3 anchors × k ∈ {2,3,4} × 3 output specs)"
+          wdOk wdBad
+
+    // ---- degenerate cases ---------------------------------------------------
+    // k = 1: the labels ARE the copies (no chain, no occurrence freedom).
+    let k1Ok =
+        [ anchorA; mkSpec [ (0, 0, 2); (1, 1, 1) ]; mkSpec [ (1, 1, 2) ] ]
+        |> List.forall (fun s ->
+            let labs = MLS.polyLabels s 1
+            let cps = MLS.polyCopies s
+            labs.Length = cps.Length
+            && List.forall2 (fun (lb: MLS.PolyLabel) (c: MLS.PolyCopy) ->
+                   lb.Sector = [ c.Copy ] && lb.L = c.L && lb.Parity = c.Parity && lb.Chain = []
+                   && lb.Uses.Length = 1 && lb.Uses.Head.Degree = 1 && lb.Uses.Head.Occ = 0
+                   && lb.Uses.Head.OccL = c.L && lb.Multinomial = 1L) labs cps)
+    check "k=1: labels = copies (L, parity, no chain), 3 specs" k1Ok ""
+
+    // Single-copy spec: the labels are exactly the Sym⁴(V₂) occurrences.
+    let sV2 = mkSpec [ (2, 0, 1) ]
+    let labV2 = MLS.polyLabels sV2 4
+    let v2Counts = labV2 |> List.map (fun lb -> lb.L) |> List.countBy id |> List.sortByDescending fst
+    check "single-copy [(2,e,1)] k=4: labels = Sym⁴(V₂) occurrences, 8:1 6:1 5:1 4:2 2:2 0:1"
+          (labV2.Length = 8
+           && v2Counts = [ (8, 1); (6, 1); (5, 1); (4, 2); (2, 2); (0, 1) ]
+           && labV2 |> List.forall (fun lb -> lb.Sector = [0;0;0;0] && lb.Chain = [] && lb.Parity = 0
+                                              && lb.Uses.Length = 1 && lb.Uses.Head.Degree = 4))
+          (sprintf "%d labels, L:mult %s" labV2.Length
+                   (v2Counts |> List.map (fun (l, m) -> sprintf "%d:%d" l m) |> String.concat " "))
+    check "single-copy [(2,e,1)] k=4: label order = symOccurrences order"
+          ((labV2 |> List.map (fun lb -> (lb.Uses.Head.OccL, lb.Uses.Head.OccCopy))) = MLS.symOccurrences 2 0 4) ""
+
+    // k = 0: Sym⁰ = ℝ, one label, empty sector, no used copy.
+    let lab0 = MLS.polyLabels anchorA 0
+    check "k=0: the single trivial label (empty sector, L=0, even)"
+          (lab0.Length = 1 && lab0.Head.Sector = [] && lab0.Head.Uses = []
+           && lab0.Head.Chain = [] && lab0.Head.L = 0 && lab0.Head.Parity = 0) ""
 
     printFooter "SymPower Tables" [ sprintf "%d passed" passed; sprintf "%d failed" failed ]
     { Block = "SymPower Tables"; Passed = passed; Failed = failed; Skipped = 0; FailedNames = failedNames }

@@ -325,10 +325,17 @@ integer lowering, diagonal unitarization, real-ization via uMatrix. Floats
 appear only evaluating an exact object — the same status as realCGDense.
 
 **Label** = (sector: nondecreasing copy-multiset, lex order — reproduces
-stage 1's kept-cell enumeration at k = 2; per-copy occurrence in RREF order;
-left-comb intermediate L's ascending; output (L,P) ↦ W-copy per homBlocks
-layout). The emitted basis is globally ORTHONORMAL by construction: T rows
-orthonormal per copy, CG chains unitary, sectors orthogonal.
+stage 1's kept-cell enumeration at k = 2; per-copy occurrence in
+**L-descending, RREF-index-ascending** order — exactly the order
+symPowerTable emits, so a label's occ is a direct T-table index; left-comb
+intermediate L's ascending; output (L,P) ↦ W-copy per homBlocks layout).
+Enumeration significance is **blocked**: the odometer is
+(occ₀…occ_{r−1}, chain₁…chain_{r−1}), rightmost fastest, every occurrence
+choice outranking every chain choice (nested, not product — chain ranges
+depend on the occurrences). k = 0 is the single trivial label. The emitted
+basis is globally ORTHONORMAL by construction: T rows orthonormal per copy,
+CG chains unitary, sectors orthogonal. (Convention details fixed at 2b-ii;
+MLSpec.polyLabels' header comment is the normative record.)
 
 **The evaluation identity** (the §6.6 convention, made precise; ⟨·,·⟩ = the
 inner product with orthonormal {e_i}, s_I = the unit-coefficient sum of the
@@ -359,13 +366,17 @@ gap ~16 orders); parity never enters (O(3) parity acts by (−1)^{j·p} at
 spec level).
 
 **k = 2 correspondence (stage 1 as oracle):** both conventions decompose the
-weight space into the SAME 1-dim lines (kept mirror cell ↔ two-copy sector;
-σ=+1 diagonal cell ↔ even-L T_{2,l} occurrence), so the change of basis M is
-a label-aligned scaled permutation with norm-ratio entries ({1, √2, 2}
-class). Pin M numerically AND against the closed-form ratios; pin
-`derive_poly(s,2,x,w′) ≈ derive_sym_tp(s,x,x,M·w′)` at 1e-13 — the new
-machinery validated end-to-end against the doubly-pinned stage-1 kernels
-before k = 3 has any oracle.
+weight space into the SAME 1-dim lines, via the THREE-row alignment
+(corrected at 2b-ii — the two-row form under-counted at multiplicity > 1):
+kept mirror cell ↔ two-distinct-copy sector across blocks; diagonal-path
+cell with u1 < u2 ↔ two-distinct-copy sector within a block (covers BOTH τ
+signs, all L in 0..2l); σ=+1 diagonal cell with u1 = u2 ↔ same-copy sector
+× even-L T_{2,l} occurrence. Count-level bijection verified on the anchors
+(2b-ii); so the change of basis M is a label-aligned scaled permutation
+with norm-ratio entries ({1, √2, 2} class). Pin M numerically AND against
+the closed-form ratios; pin `derive_poly(s,2,x,w′) ≈ derive_sym_tp(s,x,x,
+M·w′)` at 1e-13 — the new machinery validated end-to-end against the
+doubly-pinned stage-1 kernels before k = 3 has any oracle.
 
 **Prefix-stability, stated honestly (the achievable guarantee, which k = 1
 and k = 2 already exhibit):** extending the spec never changes an old
@@ -710,6 +721,15 @@ go first.
    - **2b-ii**: label enumeration + integer counting asserts in MLSpec (no
      emission): per-(L,P) label count = `powerSpec` mult, total =
      `polyWeightDim`, on every call.
+     **LANDED 2026-07-27**: MLSpec `PolyLabel`/`polyLabels`/`polyLabelCounts`
+     /`polyWeightDimViaLabels` (+ `Multinomial` = k!/∏j_c! as a sector
+     integer; where it bakes stays §6.9(ii)'s call). Anchor A k=3: 6 labels,
+     sectors 1/1/2/2, per-(L,P) 2/2/1/1. k=2 three-row count bijection vs
+     `s2TpCells` verified on A/B/C (7/28/29 re-derived a third way). Sweep:
+     15 specs × k ∈ {2,3,4}, 1993 labels, counts = sym_spec everywhere.
+     Convention gaps found and fixed (occurrence order, blocked odometer,
+     k=0, the three-row alignment) — folded back into §3.3b. Block 107/0;
+     full suite 1471/0.
    - **2b-iii**: emission + the layered oracle — projector-equality pin in
      ml/ (independent route: ordered-tuple chains + explicit symmetrizer +
      SVD, deliberately the rejected construction, fine as a test;
