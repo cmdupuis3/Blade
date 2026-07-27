@@ -919,7 +919,26 @@ go first.
      5a-ii naive emission (`derive_perm_linear`/`derive_perm_bias`,
      one loop nest per partition) + the exact-rational Reynolds/Gram
      oracle block + corpus anchors (DeepSets, matrix invariants, Maron
-     15+2) with integer-data exact-equality equivariance pins; 5a-iii the
+     15+2) with integer-data exact-equality equivariance pins;
+     **5a-ii LANDED 2026-07-27.** Emission: flat row-major (the `_rows`
+     precedent), L=0 = one-cell array, sum/gather/broadcast falls out of
+     which index expression uses each block variable (no classification
+     code); one-hot Maron pins hand-derived (identity/transpose/
+     diag-gather-broadcast; note slot 0 = TRACE under coarsest-first);
+     equivariance pins exact integer equality; ad.grad FD-limited both
+     sides; inside `ml.equiv(O3)` bodies the default arm is already
+     sound (rep args BL4008, invariant args Inv — node axes carry no
+     O(3) action; no reject-list edit until 5a-iii). Oracle (block
+     "Perm Oracle", 45/0, 159 ms): P_basis = P_ref as EXACT RATIONAL
+     ENTRYWISE EQUALITY at seven anchors to dim 256 (no float token in
+     the file); truncation cases (2,3) and (3,4) certified exactly.
+     LOAD-BEARING FINDING: incompleteness is INVISIBLE to the Gram
+     closed form (a dropped column leaves surviving entries exactly
+     n^{b(γ∨π)}) — the projector-equality pin, not the Gram, detects
+     completeness; recorded in the test file. Two orientation traps
+     caught and pinned definitionally (coarsens argument direction —
+     the tuple's pattern is the COARSE side; σ^{⊗m} = relabel-values,
+     not permute-positions). Full suite 1621/0. 5a-iii next: the
      `where ml.perm_equiv(N)` lattice (Pow k; signature-level mixed-axis
      rejection; pointwise-preservation and same-k arithmetic axioms) +
      `perm_matmul`. Proofs: new BladePartition.v — RGS enumeration

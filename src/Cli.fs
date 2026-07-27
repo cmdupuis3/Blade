@@ -1087,6 +1087,17 @@ let private dispatchTest (rest: string list) : int =
         // Pure integer, in-process, no Blade source pipeline.
         let failed = (Blade.Tests.PermSpecReview.runPermSpecTests ()).Failed
         if failed = 0 then 0 else 1
+    | [ "permoracle" ] | [ "perm-oracle" ] ->
+        // Stage 5a-ii oracle block: the coarsening-indicator basis checked for
+        // COMPLETENESS against the exact rational Reynolds projector
+        // (1/N!)Sum_sigma M(sigma)^{tensor m} - B(B^T B)^-1 B^T = P_ref
+        // ENTRYWISE over Q, with the Gram closed form N^b(join) predicted by an
+        // independent union-find join. BigInteger fractions throughout: no
+        // float, no tolerance, no rank decision. This is the half
+        // BladePartition.v cites rather than proves. In-process, no C++
+        // pipeline.
+        let failed = (Blade.Tests.PermOracleReview.runPermOracleTests ()).Failed
+        if failed = 0 then 0 else 1
     | [ "alloc" ] ->
         // Standalone C++ runtime-layout tests for the contiguous-backing
         // allocate<>. Compiles + runs cpp/alloc_layout_tests.cpp against the

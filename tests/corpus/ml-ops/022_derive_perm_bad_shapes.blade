@@ -1,0 +1,36 @@
+// TEST: ML Ops derive_perm Bad Shapes (rejects)
+import ml as ml
+// ============================================================================
+// The two op-side refusals of the S_n index-action surface
+// (docs/plan-transforms-as-types.md §3.6, stage 5a-ii). Elaboration is
+// fail-fast, so the diagnostic this file actually surfaces is the FIRST one;
+// both are written out because they are one design decision seen twice — the
+// surface refuses rather than quietly picking a different construction.
+//
+// (1) K = 0 for ml.derive_perm_linear. With no input axes the map is a
+//     CONSTANT, and its complete basis is a different op with a differently
+//     sized buffer: ml.derive_perm_bias(L, N, b), sized by ml.perm_bias_dim.
+//     Accepting K = 0 here would silently hand back the bias basis out of a
+//     call whose weight buffer the user sized with ml.perm_weight_dim, so it is
+//     refused BY NAME with the pointer.
+//
+// (2) N < K + L, op-side. The v1 surface requires a static N >= K + L so the
+//     weight basis is the FULL partition lattice of the K+L positions,
+//     Bell(K+L) weights; below it the lattice truncates to the partitions with
+//     at most N blocks — sound arithmetic, but a DIFFERENT basis with a
+//     different count, layout and kernel, and §3.6's no-silent-fork rule says
+//     refuse rather than switch. Here K + L = 4 and N = 3: 14 weights, not 15.
+//
+// Both come from Blade.ML.PermSpec.checkPermSizing, the SAME precondition the
+// sizing builtins run (ml-ops/019 is its `let static` half, reported through
+// the BL3999 static-evaluation channel), so the two can never drift. The op
+// side reports as BL5000, the ML-elaboration channel.
+// ============================================================================
+
+// (1) K = 0 for the linear form — use ml.derive_perm_bias(2, 3, b) instead.
+let unit: Array<Float like Idx<1>> = [1.0]
+let bad_k0 = ml.derive_perm_linear(0, 2, 3, unit, [1.0, 0.0])
+
+// (2) N = 3 < K + L = 4 (the Maron layer needs N >= 4).
+let x: Array<Float like Idx<9>> = [1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0, 9.0]
+let bad_n = ml.derive_perm_linear(2, 2, 3, x, [1.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0])

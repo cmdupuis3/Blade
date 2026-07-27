@@ -166,6 +166,13 @@ let runAllTestsFullWith (extraBlocks: (unit -> Blade.Tests.TestHarness.BlockResu
     // Coq keystone's numerical shadow), and the perm_weight_dim /
     // perm_bias_dim sizing arithmetic. Pure integer, no pipeline.
     let permSpec = Blade.Tests.PermSpecReview.runPermSpecTests ()
+    // The coarsening-indicator COMPLETENESS oracle (stage 5a-ii): the exact
+    // rational Reynolds projector (1/N!)Σ_σ M(σ)^⊗m against B(BᵀB)⁻¹Bᵀ over ℚ,
+    // with the closed-form Gram N^{b(γ∨π)} predicted from an independent
+    // union-find join. Entrywise equality of BigInteger fractions — no float
+    // and no tolerance anywhere, which is the half BladePartition.v cites
+    // rather than proves (completeness of the orbit basis).
+    let permOracle = Blade.Tests.PermOracleReview.runPermOracleTests ()
     // Compiler-native Cartesian<->irreps bridge constants (CartesianBridge.fs)
     // vs closed forms + the y_to harmonic constants (sgs closure arc).
     let cartBridge = Blade.Tests.CartesianBridgeReview.runCartesianBridgeTests ()
@@ -255,7 +262,7 @@ let runAllTestsFullWith (extraBlocks: (unit -> Blade.Tests.TestHarness.BlockResu
     let blocks =
         [ yield r1; yield r2; yield attrs; yield subst
           yield normalize; yield unify; yield validateArrow
-          yield shape; yield oracles; yield wigner; yield symPower; yield polyOracle; yield permSpec; yield cartBridge; yield spans; yield diagCore; yield diagCorpus; yield alloc
+          yield shape; yield oracles; yield wigner; yield symPower; yield polyOracle; yield permSpec; yield permOracle; yield cartBridge; yield spans; yield diagCore; yield diagCorpus; yield alloc
           yield ompPragma
           match omp with Some b -> yield b | None -> ()
           yield bufType

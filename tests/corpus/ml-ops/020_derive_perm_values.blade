@@ -1,0 +1,161 @@
+// TEST: ML Ops derive_perm_linear / derive_perm_bias Values
+import ml as ml
+// ============================================================================
+// ml.derive_perm_linear(K, L, N, x, w) and ml.derive_perm_bias(L, N, b): the
+// COMPLETE S_n-equivariant linear layer and the complete space of equivariant
+// constants over node-power spaces (docs/plan-transforms-as-types.md §3.6,
+// §7 stage 5a-ii). The emission half of what ml-ops/018 counts.
+//
+// BUFFERS ARE FLAT ROW-MAJOR. x is one Idx<N^K> axis, the result one Idx<N^L>
+// axis — the `_rows` house convention, no rank-K parameters. L = 0 is the
+// INVARIANT READOUT and its result is a ONE-CELL Idx<1> array read as y(0)
+// (N^0 = 1), the shape every other ml op already gives a scalar result.
+//
+// THE WEIGHT BASIS is the set of COARSENING INDICATORS B_gamma, one per
+// partition gamma of the m = K + L axis POSITIONS —
+//     position 0 .. K-1      the input axes,  in order
+//     position K .. K+L-1    the output axes, in order
+// — in MLPermSpec's canonical order: RGS (restricted growth string) LEX
+// ASCENDING, i.e. COARSEST FIRST. Weight slot g is partition g. The emitted
+// kernel is one b(gamma)-deep loop nest per partition, over the tuples that
+// are constant on every block:
+//     inIdx  = sum_{i<K}      v_{gamma(i)} * N^(K-1-i)
+//     outIdx = sum_{K<=i<K+L} v_{gamma(i)} * N^(K+L-1-i)
+//     out(outIdx) += w(g) * x(inIdx)
+// An input-only block SUMS, a mixed block GATHERS, an output-only block
+// BROADCASTS — that classification is not code anywhere, it is just which of
+// the two indices the block's loop variable appears in.
+//
+// v1 requires a static N >= K + L (ml-ops/019 and /022 are the refusal halves),
+// so the Maron block below runs at N = 4, not N = 3.
+//
+// Every datum here is an INTEGER, so every pin is exact: the twin differences
+// below are 0, not 1e-16.
+// ============================================================================
+
+// --- 1. DeepSets: K = L = 1, Bell(2) = 2 -------------------------------------
+// Partitions of the two positions (i0, o0), coarsest first:
+//   slot 0 = {{i0, o0}}      one MIXED block -> the identity map, x |-> x
+//   slot 1 = {{i0}, {o0}}    input-only + output-only -> sum(x) broadcast
+// so derive_perm_linear(1, 1, N, x, w) = w0 * x + w1 * sum(x) * 1 — the
+// Zaheer et al. layer, derived rather than declared. The twin below is that
+// formula written out in-language.
+let static DS_W = ml.perm_weight_dim(1, 1, 4)
+// EXPECT: DS_W = 2
+let xd: Array<Float like Idx<4>> = [1.0, 2.0, -3.0, 4.0]
+let wd = [2.0, -1.0]
+let yd = ml.derive_perm_linear(1, 1, 4, xd, wd)
+// EXPECT: yd = [-2, 0, -10, 4]
+let sd = reduce(xd, (+))
+// EXPECT: sd = 4
+let twin = [wd(0) * xd(0) + wd(1) * sd, wd(0) * xd(1) + wd(1) * sd,
+            wd(0) * xd(2) + wd(1) * sd, wd(0) * xd(3) + wd(1) * sd]
+// EXPECT: twin = [-2, 0, -10, 4]
+let dd = yd - twin
+let sq_d = reduce(dd * dd, (+))
+// EXPECT: sq_d = 0
+
+// --- 2. Matrix invariants: K = 2, L = 0, Bell(2) = 2 -------------------------
+// With no output positions the two partitions are of (i0, i1) alone, and the
+// COARSEST-FIRST order puts the DIAGONAL indicator first:
+//   slot 0 = {{i0, i1}}      one input-only block -> the tuples (a, a) -> TRACE
+//   slot 1 = {{i0}, {i1}}    two input-only blocks -> all (a, b) -> TOTAL SUM
+// (worth stating explicitly: the trace is the coarser indicator, so it is w0.)
+// The result is Idx<1>, read as inv(0).
+let static MI_W = ml.perm_weight_dim(2, 0, 3)
+// EXPECT: MI_W = 2
+// M = [[1, 2, 3], [4, 5, 6], [7, 8, 9]]: trace 15, total 45.
+let xm: Array<Float like Idx<9>> = [1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0, 9.0]
+let tr = ml.derive_perm_linear(2, 0, 3, xm, [1.0, 0.0])
+let tot = ml.derive_perm_linear(2, 0, 3, xm, [0.0, 1.0])
+// EXPECT: tr = [15]
+// EXPECT: tot = [45]
+// A general weight vector is the corresponding combination: 2*trace - 3*total.
+let mix = ml.derive_perm_linear(2, 0, 3, xm, [2.0, 0.0 - 3.0])
+// EXPECT: mix = [-105]
+let dm = mix(0) - (2.0 * tr(0) - 3.0 * tot(0))
+// EXPECT: dm = 0
+
+// --- 3. Maron et al. k = l = 2: Bell(4) = 15, N = 4 --------------------------
+// The "maximally expressive equivariant graph layer" as a FINITE object: 15
+// basis maps R^{NxN} -> R^{NxN}. The RGS-lex order of the 15 partitions of
+// (i0, i1, o0, o1) is
+//   0: 0000   1: 0001   2: 0010   3: 0011   4: 0012
+//   5: 0100   6: 0101   7: 0102   8: 0110   9: 0111
+//  10: 0112  11: 0120  12: 0121  13: 0122  14: 0123
+// and the three ONE-HOT probes below pin the full 16-cell output of three of
+// them. X = [[1,2,3,4],[5,6,7,8],[9,10,11,12],[13,14,15,16]] has distinct
+// entries, so identity, transpose and diagonal-broadcast cannot be confused.
+let static MARON_W = ml.perm_weight_dim(2, 2, 4)
+// EXPECT: MARON_W = 15
+let x4: Array<Float like Idx<16>> = [1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0,
+                                     9.0, 10.0, 11.0, 12.0, 13.0, 14.0, 15.0, 16.0]
+
+// (a) slot 6, RGS 0101 = {{i0, o0}, {i1, o1}} — both blocks MIXED, so both are
+// gathers and nothing is summed or broadcast. v0 indexes input axis 0 and
+// output axis 0, v1 indexes input axis 1 and output axis 1:
+//     inIdx = 4*v0 + v1,  outIdx = 4*v0 + v1   =>   Y[a][b] = X[a][b]
+// the IDENTITY map. Output = the input buffer verbatim.
+let one6 = [0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0]
+let g_id = ml.derive_perm_linear(2, 2, 4, x4, one6)
+// EXPECT: g_id = [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16]
+
+// (b) slot 8, RGS 0110 = {{i0, o1}, {i1, o0}} — both blocks mixed again, but
+// CROSSED: v0 is input axis 0 and output axis 1, v1 is input axis 1 and output
+// axis 0, so
+//     inIdx = 4*v0 + v1,  outIdx = 4*v1 + v0   =>   Y[b][a] = X[a][b]
+// the TRANSPOSE. Output = X^T, row-major.
+let one8 = [0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0]
+let g_tr = ml.derive_perm_linear(2, 2, 4, x4, one8)
+// EXPECT: g_tr = [1, 5, 9, 13, 2, 6, 10, 14, 3, 7, 11, 15, 4, 8, 12, 16]
+
+// (c) slot 1, RGS 0001 = {{i0, i1, o0}, {o1}} — a MIXED block covering both
+// input axes and output axis 0, plus an OUTPUT-ONLY block on output axis 1:
+//     inIdx = 4*v0 + v0 (the diagonal),  outIdx = 4*v0 + v1
+// so v0 gathers X[a][a] and v1, appearing only on the output side, broadcasts
+// it along the second output axis:  Y[a][b] = X[a][a] for every b.
+// diag(X) = [1, 6, 11, 16], each repeated 4 times.
+let one1 = [0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0]
+let g_db = ml.derive_perm_linear(2, 2, 4, x4, one1)
+// EXPECT: g_db = [1, 1, 1, 1, 6, 6, 6, 6, 11, 11, 11, 11, 16, 16, 16, 16]
+
+// Linearity in w over those three slots: one call with all three weights set
+// must equal the sum of the three one-hot outputs (checked elementwise).
+let one168 = [0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0]
+let g_sum = ml.derive_perm_linear(2, 2, 4, x4, one168)
+let dg = g_sum - (g_id + g_tr + g_db)
+let sq_g = reduce(dg * dg, (+))
+// EXPECT: sq_g = 0
+
+// --- 4. The bias: L = 2, N = 3, Bell(2) = 2 ----------------------------------
+// derive_perm_bias(L, N, b) is derive_perm_linear at K = 0: partitions of the
+// output positions alone, so EVERY block is output-only and every nest is a
+// pure broadcast. Coarsest first again:
+//   slot 0 = {{o0, o1}}      the DIAGONAL indicator (out(a, a) += b0)
+//   slot 1 = {{o0}, {o1}}    the ALL-ONES matrix    (out(a, b) += b1)
+// With b = [5, 2] the result is 2 everywhere plus 5 on the diagonal.
+let static BW = ml.perm_bias_dim(2, 3)
+// EXPECT: BW = 2
+let bias = ml.derive_perm_bias(2, 3, [5.0, 2.0])
+// EXPECT: bias = [7, 2, 2, 2, 7, 2, 2, 2, 7]
+let bdiag = ml.derive_perm_bias(2, 3, [1.0, 0.0])
+let bones = ml.derive_perm_bias(2, 3, [0.0, 1.0])
+// EXPECT: bdiag = [1, 0, 0, 0, 1, 0, 0, 0, 1]
+// EXPECT: bones = [1, 1, 1, 1, 1, 1, 1, 1, 1]
+
+// The L = 0 bias is the constant readout: Bell(0) = 1 weight, one Idx<1> cell.
+let static B0 = ml.perm_bias_dim(0, 3)
+// EXPECT: B0 = 1
+let b0 = ml.derive_perm_bias(0, 3, [-2.5])
+// EXPECT: b0 = [-2.5]
+
+// --- 5. a full affine layer: K = L = 1 with a bias, N = 4 --------------------
+// The composition users actually write. Bias slots at L = 1 are Bell(1) = 1
+// (the constant vector), so the layer is w0*x + w1*sum(x) + b0*1.
+let static AB = ml.perm_bias_dim(1, 4)
+// EXPECT: AB = 1
+let aff_lin = ml.derive_perm_linear(1, 1, 4, xd, wd)
+let aff_bias = ml.derive_perm_bias(1, 4, [10.0])
+let affine = aff_lin + aff_bias
+// EXPECT: aff_bias = [10, 10, 10, 10]
+// EXPECT: affine = [8, 10, 0, 14]

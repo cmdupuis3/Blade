@@ -736,6 +736,158 @@ let private deriveLinearDecl (name: string) (specIn: Spec) (specOut: Spec) : Fun
             Some (v "out")))
     mkFunc name [ ("w", tyFloatArr wDim); ("x", tyIrrepsArr specIn) ] (tyIrrepsArr specOut) body
 
+// ============================================================================
+// The Sₙ INDEX-ACTION surface (plan-transforms-as-types §3.6, §7 stage 5a-ii)
+// ============================================================================
+//
+// `ml.derive_perm_linear(K, L, N, x, w)` is deriveLinearDecl's sibling for a
+// FINITE group acting on INDICES rather than on irrep blocks: the complete
+// basis of Hom_{Sₙ}(ℝ^{N^K}, ℝ^{N^L}), one weight per basis map. There is no
+// spec, no character table and no Clebsch–Gordan anything, because for
+// PERMUTATION modules the layer algebra is orbit combinatorics:
+//
+//     dim Hom_{Sₙ}(ℝ^{N^K}, ℝ^{N^L}) = #orbits of Sₙ on [N]^{K+L}
+//                                    = #partitions of [K+L] into ≤ N blocks
+//
+// and the basis is the set of ORBIT (= coarsening) INDICATORS B_γ, one per
+// partition γ of the m = K + L axis positions — inputs 0..K−1, outputs
+// K..K+L−1, the position convention fixed by MLPermSpec's header and baked
+// into the loop nests below. The count is the theorem BECAUSE the basis is
+// emitted (§3.6's house rule); MLPermSpec.permPartitions supplies the
+// partitions in the canonical weight order and certifies, on every call, that
+// the emitted order is a linear extension of refinement.
+//
+// BUFFERS ARE FLAT ROW-MAJOR — `x` is one `Idx<N^K>` axis, the result one
+// `Idx<N^L>` axis, exactly the `_rows` house precedent (linearDecl). No rank-K
+// parameters, so nothing here needs new index machinery. L = 0 is the
+// INVARIANT READOUT and returns `Array<Float like Idx<1>>`, a ONE-CELL
+// buffer read as `y(0)` — N^0 = 1 keeps the emission uniform, and it is the
+// shape every other ml op already gives a scalar result (derive_poly into a
+// single-(l=0) SOUT, ml.scalars of a one-scalar spec: a 1-cell array, never a
+// bare `Float`).
+
+/// The flat-buffer cell cap of the Sₙ ops. ORTHOGONAL to
+/// `PermSpec.checkPermSizing`: that gate decides which BASIS the surface admits
+/// (§3.6's no-silent-fork rule, shared verbatim with the sizing builtins), this
+/// one is about emitted code size — `out` is materialized as a literal array of
+/// N^L zeros, so the extent appears verbatim in the generated source. Same
+/// number and same reason as symLiftDecl's monomial cap.
+let private permCellCap = 100000
+
+/// N^e, saturating just past `permCellCap`. N is bounded only by the caller's
+/// sanity range, so the honest product can overflow int64 — and the only
+/// question this answers is "is the buffer over the cap?".
+let private permPow (n: int) (e: int) : int64 =
+    let mutable acc = 1L
+    let mutable i = 0
+    while i < e && acc <= int64 permCellCap do
+        acc <- acc * int64 n
+        i <- i + 1
+    acc
+
+/// THE EMITTED KERNEL, shared by derive_perm_linear and derive_perm_bias: ONE
+/// LOOP NEST PER PARTITION, in `permPartitions` order (= the canonical weight
+/// order, so weight slot g is partition g).
+///
+/// For partition γ, one `let`-free block variable per γ-BLOCK, each ranging
+/// over 0..N−1 — b(γ) loops deep — and the two flat indices are read off the
+/// position convention directly:
+///
+///     inIdx  = Σ_{i=0..K−1}    v_{γ(i)} · N^{K−1−i}         (input positions)
+///     outIdx = Σ_{i=K..K+L−1}  v_{γ(i)} · N^{K+L−1−i}       (output positions)
+///     out(outIdx) += w(g) * x(inIdx)         [bias: += b(g), no x factor]
+///
+/// That IS the orbit indicator B_γ contracted with x: the nest visits exactly
+/// the tuples of [N]^m that are constant on every block of γ, which is the
+/// support of B_γ, and adds each one's x-cell into its out-cell.
+///
+/// THE SUM / GATHER / BROADCAST CLASSIFICATION NEEDS NO CODE — it falls out of
+/// which of the two indices a block variable appears in:
+///   * a block of INPUT-only positions is a variable that occurs in inIdx but
+///     not in outIdx, so its loop accumulates many x-cells into one out-cell:
+///     a SUMMATION (K=L=1's `sum(x)`, K=2/L=0's trace and total sum);
+///   * a MIXED block occurs in both, so it selects the same coordinate on each
+///     side: a GATHER (the identity map, the transpose, the diagonal read);
+///   * an OUTPUT-only block occurs only in outIdx, so the same accumulated
+///     value is written across its whole range: a BROADCAST.
+/// Nothing below branches on this. It is one uniform nest and the semantics
+/// are whatever the index expressions say.
+///
+/// Accumulate-only (`+=` into a zero-initialized `out`, never a read-then-
+/// rewrite), so grad() differentiates it through its normal inliner.
+/// Code size is Σ_γ b(γ) loops — 37 at the Maron point (K=L=2), and the cap
+/// K+L ≤ 6 bounds it by Σ_γ b(γ) over Bell(6) = 203 partitions.
+let private permNestStmts (k: int) (l: int) (n: int) (coefName: string) (readsX: bool)
+                          (parts: int[] list) : Stmt list =
+    parts |> List.mapi (fun g rgs ->
+        let nBlocks = Blade.ML.PermSpec.blockCount rgs
+        let bv (j: int) = sprintf "__pv%d_%d" g j
+        // Σ_{i=lo..hi−1} v_{γ(i)} · N^{hi−1−i}: the flat row-major index of one
+        // axis run. The EMPTY run (K = 0 bias inputs, or L = 0 outputs) is the
+        // single cell 0 — N^0 = 1.
+        let flat (lo: int) (hi: int) =
+            if lo >= hi then iLit 0
+            else
+                [ for i in lo .. hi - 1 ->
+                    let coef = pown n (hi - 1 - i)
+                    if coef = 1 then v (bv rgs.[i]) else mul (iLit coef) (v (bv rgs.[i])) ]
+                |> List.reduce add
+        let term =
+            if readsX then mul (idx coefName (iLit g)) (idx "x" (flat 0 k))
+            else idx coefName (iLit g)
+        let body = [ sAccum (idx "out" (flat k (k + l))) term ]
+        // b(γ) block loops, block 0 outermost. b(γ) = 0 only at m = 0, where
+        // the "nest" is the bare body: out(0) += b(0), the constant map.
+        List.foldBack (fun j inner -> [ sFor (bv j) 0 n inner ]) [ 0 .. nBlocks - 1 ] body
+        |> List.exactlyOne)
+
+/// derive_perm_linear for a fixed (K, L, N): the complete Sₙ-equivariant linear
+/// layer ℝ^{N^K} -> ℝ^{N^L}, `ml.perm_weight_dim(K, L, N)` weights, weight slot
+/// g = the g-th partition in `permPartitions (K+L) N` order. See the block
+/// comment above for the kernel and the position convention.
+let private derivePermLinearDecl (name: string) (k: int) (l: int) (n: int)
+    : Result<FunctionDecl, ElabError> =
+    let inCells = permPow n k
+    let outCells = permPow n l
+    if inCells > int64 permCellCap || outCells > int64 permCellCap then
+        Error (err5000 (sprintf "derive_perm_linear: the flat node-power buffers of K = %d, L = %d, N = %d are N^K and N^L cells, and at least one is over the %d-cell limit — the emitted kernel materializes the output as a literal zero array of that extent. Lower N (the node-axis extent), or lower K / L"
+                            k l n permCellCap))
+    else
+    let parts = Blade.ML.PermSpec.permPartitions (k + l) n
+    let wDim = List.length parts
+    // The count is the theorem because the basis is emitted: one nest per
+    // weight slot, checked against the number the user sized their buffer by.
+    if wDim <> Blade.ML.PermSpec.permWeightDim k l n then
+        Error (err5000 (sprintf "internal: derive_perm_linear emitted %d loop nests but perm_weight_dim(%d, %d, %d) says %d"
+                            wDim k l n (Blade.ML.PermSpec.permWeightDim k l n)))
+    else
+        let stmts = sLetMut "out" (zerosLit (int outCells)) :: permNestStmts k l n "w" true parts
+        Ok (mkFunc name [ ("x", tyFloatArr (int inCells)); ("w", tyFloatArr wDim) ]
+                (tyFloatArr (int outCells)) (syn (ExprBlock (stmts, Some (v "out")))))
+
+/// derive_perm_bias for a fixed (L, N): the REP-INTRODUCTION form — the
+/// complete space of Sₙ-invariant constants in ℝ^{N^L}, `ml.perm_bias_dim(L, N)`
+/// of them. It is derive_perm_linear at K = 0 (partitions of the L output
+/// positions alone, every block output-only, hence every nest a pure
+/// broadcast), which is exactly why K = 0 is REFUSED by the linear op with a
+/// pointer here rather than silently accepted.
+let private derivePermBiasDecl (name: string) (l: int) (n: int)
+    : Result<FunctionDecl, ElabError> =
+    let outCells = permPow n l
+    if outCells > int64 permCellCap then
+        Error (err5000 (sprintf "derive_perm_bias: the flat node-power buffer of L = %d, N = %d is N^L cells, over the %d-cell limit — the emitted kernel materializes it as a literal zero array of that extent. Lower N (the node-axis extent), or lower L"
+                            l n permCellCap))
+    else
+    let parts = Blade.ML.PermSpec.permPartitions l n
+    let bDim = List.length parts
+    if bDim <> Blade.ML.PermSpec.permBiasDim l n then
+        Error (err5000 (sprintf "internal: derive_perm_bias emitted %d loop nests but perm_bias_dim(%d, %d) says %d"
+                            bDim l n (Blade.ML.PermSpec.permBiasDim l n)))
+    else
+        let stmts = sLetMut "out" (zerosLit (int outCells)) :: permNestStmts 0 l n "b" false parts
+        Ok (mkFunc name [ ("b", tyFloatArr bDim) ] (tyFloatArr (int outCells))
+                (syn (ExprBlock (stmts, Some (v "out")))))
+
 /// scalars for a fixed spec: the l=0 blocks' entries copied into a plain
 /// Idx array (block order, multiplicity order) — an invariant-exit op, the
 /// compile-time twin of ml/Activations.scalars (pure copies, ulp-trivial).
@@ -812,6 +964,7 @@ let private opNames =
     Set.ofList [ "y_to"; "tensor_product"; "linear"; "gated"; "linear_rows"; "gated_rows"
                  "scalars"; "norms"; "derive_linear"; "derive_tp"
                  "derive_sym_tp"; "derive_alt_tp"; "sym_lift"; "derive_poly"
+                 "derive_perm_linear"; "derive_perm_bias"
                  "tensor_to_irreps"; "sym_to_irreps"; "irreps_to_sym" ]
 
 /// Static sizing builtins that make up the rest of the ML surface (used in
@@ -993,6 +1146,65 @@ let private elabDerivePoly (st: ElabState) (statics: StaticEnv) (site: Expr)
             Error (err5000 (sprintf "derive_poly: K must be a static int in 1..4 (got %d) — the symmetric-power surface is capped at degree 4 (plan-transforms-as-types §6.5)" kk))
         | _ -> Error (err5000 "derive_poly: K must be a static int"))))))
 
+/// The sanity range of the Sₙ ops' static arguments, mirroring the sizing
+/// builtins' guard (MLStatics) so a wild literal is a clean message rather than
+/// an int overflow inside `permPartitions`. The REAL gates — the K+L cap and
+/// N >= K+L — are `PermSpec.checkPermSizing`'s, shared verbatim with
+/// `perm_weight_dim` / `perm_bias_dim` per §3.6's no-silent-fork rule.
+let private permRangeOk (k: int64) (l: int64) (n: int64) = k <= 64L && l <= 64L && n <= 1000000L
+
+/// Shared elaboration for derive_perm_linear: three static ints, then the
+/// shared precondition, then the complete Sₙ layer. K = 0 is refused BY NAME
+/// (it is derive_perm_bias, whose weight buffer is sized by a different
+/// builtin), and that check runs BEFORE the sizing gate so the diagnostic names
+/// the op the user wants rather than an N that is beside the point.
+let private elabDerivePermLinear (st: ElabState) (statics: StaticEnv) (site: Expr)
+                                 (kE: Expr) (lE: Expr) (nE: Expr) (xE: Expr) (wE: Expr)
+    : Result<Expr, ElabError> =
+    staticArg statics "derive_perm_linear K" kE |> Result.bind (fun kv ->
+    staticArg statics "derive_perm_linear L" lE |> Result.bind (fun lv ->
+    staticArg statics "derive_perm_linear N" nE |> Result.bind (fun nv ->
+        match kv, lv, nv with
+        | SVInt kk, SVInt ll, SVInt nn ->
+            if kk < 1L then
+                Error (err5000 (sprintf "derive_perm_linear: K must be a static int >= 1 (got %d) — K = 0 has no input axes, so the map is a CONSTANT and its complete basis is the rep-introduction form ml.derive_perm_bias(L, N, b), whose buffer is sized by ml.perm_bias_dim(L, N) rather than ml.perm_weight_dim(0, L, N)" kk))
+            elif ll < 0L then
+                Error (err5000 (sprintf "derive_perm_linear: L must be a static int >= 0 (got %d) — L = 0 is the invariant readout, a one-cell Idx<1> result" ll))
+            elif not (permRangeOk kk ll nn) then
+                Error (err5000 (sprintf "derive_perm_linear: K, L and N are static ints out of any sane range (got %d, %d, %d)" kk ll nn))
+            else
+                let k, l, n = int kk, int ll, int nn
+                Blade.ML.PermSpec.checkPermSizing "derive_perm_linear" "K + L" (k + l) n
+                |> Result.mapError err5000
+                |> Result.bind (fun () ->
+                    ensure st (fingerprint "perm_linear" (box (k, l, n))) (fun nm ->
+                        derivePermLinearDecl nm k l n)
+                    |> Result.map (fun nm -> inheritSpan site (ExprApp (v nm, [ xE; wE ]))))
+        | _ -> Error (err5000 "derive_perm_linear: K, L and N must be static ints"))))
+
+/// Shared elaboration for derive_perm_bias — derive_perm_linear at K = 0, and
+/// the same shared precondition with `L` spelling m.
+let private elabDerivePermBias (st: ElabState) (statics: StaticEnv) (site: Expr)
+                               (lE: Expr) (nE: Expr) (bE: Expr)
+    : Result<Expr, ElabError> =
+    staticArg statics "derive_perm_bias L" lE |> Result.bind (fun lv ->
+    staticArg statics "derive_perm_bias N" nE |> Result.bind (fun nv ->
+        match lv, nv with
+        | SVInt ll, SVInt nn ->
+            if ll < 0L then
+                Error (err5000 (sprintf "derive_perm_bias: L must be a static int >= 0 (got %d)" ll))
+            elif not (permRangeOk 0L ll nn) then
+                Error (err5000 (sprintf "derive_perm_bias: L and N are static ints out of any sane range (got %d, %d)" ll nn))
+            else
+                let l, n = int ll, int nn
+                Blade.ML.PermSpec.checkPermSizing "derive_perm_bias" "L" l n
+                |> Result.mapError err5000
+                |> Result.bind (fun () ->
+                    ensure st (fingerprint "perm_bias" (box (l, n))) (fun nm ->
+                        derivePermBiasDecl nm l n)
+                    |> Result.map (fun nm -> inheritSpan site (ExprApp (v nm, [ bE ]))))
+        | _ -> Error (err5000 "derive_perm_bias: L and N must be static ints")))
+
 /// Rewrite ML-op calls in an expression. Same walker shape as
 /// Grad.rewriteExpr; the two passes stay separate because this one carries
 /// elaboration state and runs first.
@@ -1118,6 +1330,15 @@ let rec private rewriteExpr (st: ElabState) (statics: StaticEnv) (aliases: Set<s
             | "derive_poly", [ specE; kE; sOutE; xE; wE ] ->
                 elabDerivePoly st statics e specE kE sOutE xE wE
             | "derive_poly", _ -> Error (err5000 "derive_poly: expected derive_poly(SPEC, K, SOUT, x, w) with x of type Array<Float like IrrepsIdx<SPEC>> and w of extent ml.poly_weight_dim(SPEC, K, SOUT)")
+            // The Sₙ index-action layer: the complete Hom_{Sₙ}(ℝ^{N^K}, ℝ^{N^L})
+            // basis over FLAT ROW-MAJOR node-power buffers, one loop nest per
+            // partition of the K+L axis positions (plan §3.6, stage 5a-ii).
+            | "derive_perm_linear", [ kE; lE; nE; xE; wE ] ->
+                elabDerivePermLinear st statics e kE lE nE xE wE
+            | "derive_perm_linear", _ -> Error (err5000 "derive_perm_linear: expected derive_perm_linear(K, L, N, x, w) with K, L, N static ints, x of extent N^K (flat row-major over the K node axes) and w of extent ml.perm_weight_dim(K, L, N); the result has extent N^L (Idx<1> at L = 0, the invariant readout)")
+            | "derive_perm_bias", [ lE; nE; bE ] ->
+                elabDerivePermBias st statics e lE nE bE
+            | "derive_perm_bias", _ -> Error (err5000 "derive_perm_bias: expected derive_perm_bias(L, N, b) with L, N static ints and b of extent ml.perm_bias_dim(L, N); the result has extent N^L")
             // The monomial lift: the value-side half of the symmetric-power
             // bridge. Its type-side twin is ml.sym_spec(SPEC, K), and
             // ml.derive_linear(ml.sym_spec(SPEC, K), SPEC_OUT) composed with
