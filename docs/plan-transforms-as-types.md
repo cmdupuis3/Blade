@@ -299,6 +299,74 @@ Real-vs-complex: this computes the complex decomposition; it is valid over ℝ
 because every O(3) irrep has Frobenius–Schur indicator +1 (real type). **That
 hypothesis is exactly what fails for general finite groups** — §3.6, §6.2.
 
+### 3.3b The Sym^k label basis (stage 2b design, settled 2026-07-26)
+
+The canonical parameterization of `Hom_G(Sym^k V, W)` behind `derive_poly<k>`,
+k ∈ {2, 3, 4} — ONE convention for every k (`derive_sym_tp`/`derive_alt_tp`
+remain the separate binary ops with their kept-path layout). Two moves make
+it exact:
+
+**Move 1 — copy-splitting.** Split every spec entry (l, p, m) into m copies
+of (l, p, 1) and factor over degree-compositions of k across copies:
+`Sym^k(⊕_c U_c) = ⊕_{Σk_c=k} ⊗_c Sym^{k_c}(U_c)`. Only single-row plethysms
+`Sym^j(V_l)`, j ≤ 4, ever appear (no Schur functors, no SSYT layer); cross-
+copy coupling is pairwise CG — multiplicity-free at every step; sectors are
+orthogonal subspaces. The missing-label problem is confined to a universal
+table family `T_{j,l}` (generated-and-cached per (j, l), like CG tables).
+
+**Move 2 — exact rational T-tables.** In the divided-power basis the sl₂
+raising operator E has integer matrix entries on degree-j monomials; the
+V_L-multiplicity space of Sym^j(V_l) is ker E ∩ (weight L), computed over ℚ
+(fraction-free), with **RREF in lex monomial order** as the occurrence
+labeling (unique given column order; pivot monomials are the documented
+artifact). Rational Gram–Schmidt within each multiplicity space (dims ≤ 3
+at k ≤ 4; independence already proved by pivots — no rank decisions),
+integer lowering, diagonal unitarization, real-ization via uMatrix. Floats
+appear only evaluating an exact object — the same status as realCGDense.
+
+**Label** = (sector: nondecreasing copy-multiset, lex order — reproduces
+stage 1's kept-cell enumeration at k = 2; per-copy occurrence in RREF order;
+left-comb intermediate L's ascending; output (L,P) ↦ W-copy per homBlocks
+layout). The emitted basis is globally ORTHONORMAL by construction: T rows
+orthonormal per copy, CG chains unitary, sectors orthogonal.
+
+**The evaluation identity** (the §6.6 convention, made precise; ⟨·,·⟩ = the
+inner product with orthonormal {e_i}, s_I = the unit-coefficient sum of the
+N_I arrangements of cell I):
+
+1. v_label = √(k!/∏_c k_c!) · P_sym(chain-coupled ⊗_c v_{r_c}); the
+   cross-copy multinomial appears here and only here.
+2. feature_label(x) = ⟨v_label, x^⊗k⟩ = Σ_I T[label, I]·∏_j x[i_j] with
+   **T[label, I] = ⟨v_label, s_I⟩** — evaluation carries no N_I factor.
+3. Orthonormality in table terms: Σ_I T[r,I]·T[r′,I]/N_I = δ — the
+   multinomial lives in the Gram identity, not in evaluation.
+4. Cells split uniquely across copies, so feature_label(x) =
+   √(k!/∏k_c!) · [CG-chain of per-copy features] — every global monomial
+   counted exactly once; the runtime never symmetrizes (P_sym is
+   self-adjoint and fixes x^⊗k).
+
+**Phase rule (conjecture, to be derived in 2b-i before any table ships):**
+the complex table for V_L ⊂ Sym^j(V_l) is real iff j·l + L is even; the
+canonical realization multiplies by −i exactly in the odd case. At j = 2
+this is the shipped realCG realness rule; first new case V₃ ⊂ Sym³(V₂).
+Guard: per table, assert min(residual_real, residual_imag) < 1e-10·‖T‖ AND
+the other branch > 0.1·‖T‖ — five orders of magnitude of gap, loud failure
+in between.
+
+**k = 2 correspondence (stage 1 as oracle):** both conventions decompose the
+weight space into the SAME 1-dim lines (kept mirror cell ↔ two-copy sector;
+σ=+1 diagonal cell ↔ even-L T_{2,l} occurrence), so the change of basis M is
+a label-aligned scaled permutation with norm-ratio entries ({1, √2, 2}
+class). Pin M numerically AND against the closed-form ratios; pin
+`derive_poly(s,2,x,w′) ≈ derive_sym_tp(s,x,x,M·w′)` at 1e-13 — the new
+machinery validated end-to-end against the doubly-pinned stage-1 kernels
+before k = 3 has any oracle.
+
+**Prefix-stability, stated honestly (the achievable guarantee, which k = 1
+and k = 2 already exhibit):** extending the spec never changes an old
+label's vector AS A MAP and never re-mixes old vectors with new ones;
+positional offsets shift, as they already do for derive_linear and tpSpec.
+
 ### 3.4 Identity groups ARE symmetric powers
 
 formalism §8.1 already writes the arity-polymorphic moment kernel; for a
@@ -503,24 +571,27 @@ tri <@> (h, h, h)
    shipped `packPairs` agrees with lex). Reuse `SymTensor.enumerate` (lex)
    for reference models; never its `rankOf`. (Its docstring overclaims —
    out of scope here, noted.)
-9. **The Sym^k basis problem (k ≥ 3) — found executing stage 2.** An
-   equivariant-kernel synthesis for `derive_poly<k≥3>` needs ONE of:
-   (a) an explicit orthonormal irreps basis of Sym^k(V) in monomial
-   coordinates (a "symmetric-power CG table") — constructible by
-   symmetrizing iterated-CG bases of V^⊗k and orthonormalizing per
-   (l, p, weight) block, but Gram–Schmidt introduces an arbitrary basis
-   choice, making value pins convention-dependent; or (b) solving the
-   S_k-invariance constraint directly on iterated-CG path-weight space —
-   the constraint matrices are recoupling (6j-class) data, computable
-   numerically by contracting existing CG tables, with the same
-   canonical-basis problem. Either way the missing ingredient is a
-   CANONICALIZATION CONVENTION for the basis (stage 1's kept-path rule was
-   exactly such a convention for k = 2, available only because S₂ does not
-   mix coupling trees). Alternatives that dodge it: ACE/MACE-style nested
-   `derive_sym_tp` chains (spanning but redundant — the parameter count is
-   no longer the theorem), or restricting `derive_poly<k≥3>` to INVARIANT
-   outputs first (Hom_G(Sym^k V, triv) — projector computable without a
-   full basis). Decide before stage 2b.
+9. **The Sym^k basis problem (k ≥ 3) — RESOLVED by design round 2026-07-26**
+   (two-agent adversarial round; construction in §3.3b, staging in §7 3b).
+   The original dilemma — tolerance-GS arbitrariness (route a) vs recoupling
+   nullspaces (route b) — was a false choice: route (b) is rejected outright
+   (the S_k action is 6j-mixed and irrational in path coordinates, so no
+   combinatorial selection rule exists there), and route (a)'s GS objection
+   dissolves once the irrational core is confined to UNIVERSAL per-(j, l)
+   tables where exact rational arithmetic is cheap. Key reframe: the
+   construction is a constructive direct sum (every label emits exactly one
+   basis vector; counts per (L, P) equal the `powerSpec` multiplicity as a
+   theorem), not spanning-then-selection — no float decision exists anywhere
+   in the convention. Residual open items, tracked for stage 2b:
+   (i) the realization phase rule (§3.3b) is conjectured, not derived —
+   2b-i's first work item, test vector V₃ ⊂ Sym³(V₂), gapped discrete
+   assert as the bug-guard either way; (ii) sector-constant placement
+   (explicit baked scalar recommended, decide at 2b-iii); (iii) chains need
+   `realCGSparse` up to L = k·lmax — extend unitarity/orthogonality pins
+   beyond l ≤ 2 before chains consume them; (iv) the copy-split label basis
+   is not GL(m)-channel-covariant — document so label indices are not
+   mistaken for channel structure; (v) the k = 2 cross-pin's label↔kept-cell
+   alignment table must be asserted by the test, not assumed.
 
 ## 7. Implementation staging
 
@@ -598,19 +669,32 @@ go first.
    sym_tp_weight_dim(s)` and `hom_dim(alt_spec(s,2), tp_spec(s,s)) =
    alt_tp_weight_dim(s)` — the stage-1 counts re-derived by a
    Wigner-table-free route.
-3b. **Stage 2b — `derive_poly<k>` kernel synthesis (OPEN — design gap found
-   at execution).** The original one-line staging ("flat multiset loop
-   composed with `derive_linear` on `sym_spec(s,k)`") is UNDERSPECIFIED for
-   k ≥ 3: `sym_lift` produces MONOMIAL coordinates, and the monomial basis
-   of Sym^k(V) is not irreps-organized, so composing with `derive_linear`
-   needs the symmetric-power change of basis, which does not exist yet
-   (§6.9). k = 2 needs no new machinery — `derive_poly(s, 2, x, w)` IS
-   `derive_sym_tp(s, x, x, w)` (stages 1a/1b), where the S₂ constraint was
-   solvable path-by-path precisely because swapping two tensor slots maps
-   the iterated-CG basis to itself (up to the pinned exchange sign). For
-   k ≥ 3 the S_k action MIXES coupling trees (recoupling), so the invariant
-   weight space is no longer axis-aligned in path coordinates. Deferred
-   until §6.9 is decided; do not improvise it inline.
+3b. **Stage 2b — `derive_poly<k>` kernel synthesis (DESIGNED 2026-07-26;
+   construction §3.3b, resolution record §6.9).** Uniform label convention
+   for ALL k ∈ {2, 3, 4} — k = 2 is NOT routed to `derive_sym_tp`; it runs
+   the same machinery and stage 1 becomes its oracle (§3.3b's M-pin). The
+   emitted kernel: per-(copy, degree) monomial lift + T_{j,l} matvec, chain
+   features via pairwise CG contractions SHARED BY PREFIX (labels form a
+   tree; one let per node — code size ~ O(#labels)), sector constant baked
+   as an explicit auditable scalar, then homBlocks-layout weight mixing. No
+   spec-sized change-of-basis matrix is ever materialized. Cap: #labels =
+   C(n+k−1, k) ≤ 100000 (symLiftDecl precedent), diagnostic naming the
+   future channel-shared op. Sub-stages, counts before arithmetic:
+   - **2b-i**: derive the phase rule (§3.3b conjecture; V₃ ⊂ Sym³(V₂) test
+     vector) — gates everything; T_{j,l} generator with exact pins (integer
+     E·v = 0 re-verification, occurrence counts vs `powerSpec [(l,p,1)] j`,
+     rational norm identities, Gram = I to 1e-14, bit-pins for l ≤ 3);
+     extend realCGSparse unitarity pins to L ≤ k·lmax.
+   - **2b-ii**: label enumeration + integer counting asserts in MLSpec (no
+     emission): per-(L,P) label count = `powerSpec` mult, total =
+     `polyWeightDim`, on every call.
+   - **2b-iii**: emission + the layered oracle — projector-equality pin in
+     ml/ (independent route: ordered-tuple chains + explicit symmetrizer +
+     SVD, deliberately the rejected construction, fine as a test;
+     ‖P_ref − Σvvᵀ‖ < 1e-10 on anchors); k = 2 M-pin vs stage 1; k = 1
+     ulp-exact vs `derive_linear`; closed-form invariant anchors
+     ((|x|²)² at [(1,o,1)] k=4, det at [(2,e,1)] k=3, |v|²·v at k=3);
+     rotation/parity pins via Rotations.fs Wigner-D; corpus + full gates.
 4. **Stage 3 — writable `SymIdx<k, IrrepsIdx<spec>>`.** Seams: **S1 + S2.**
    Parser: second argument accepts `parseIndexType | parseSimpleExpr`
    (Parser.fs:756-763); `TySymIdx` grows an index-type payload. TypeCheck:
