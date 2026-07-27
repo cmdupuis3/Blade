@@ -1,0 +1,49 @@
+// TEST: ML Equiv Engine Generator Check (rejects)
+import ml as ml
+// ============================================================================
+// THE NEGATIVE CONTROL: A POLYNOMIAL THE ENGINE REFUSES
+// (docs/plan-transforms-as-types.md §7 stage 6b).
+//
+// `x(0)² − x(1)²` on a C4 E copy is NOT invariant — it is a B-label covariant.
+// ρ(r) sends (a, b) to (−b, a), so the quadratic form goes to b² − a², i.e. it
+// FLIPS SIGN under the generator. Claiming `equiv(C4)` for it is a false
+// theorem, and the engine says so with the element named: the identity
+// f(ρ(g)·x) = ρ(g)·f(x) fails at r, in output component 0, at the term x(0)^2,
+// where the two sides carry −1 and +1.
+//
+// This is the diagnostic that distinguishes the engine from composition.
+// Composition's refusal here would have been "you read a basis-dependent
+// number", which is true of corpus 059's `normsq` as well — it cannot tell the
+// invariant from the covariant. The engine can, and it points at the exact
+// coefficient. tests/corpus/diagnostics/021_equiv_engine_generator_check.blade
+// pins the message text; this file pins the REFUSAL.
+//
+// The second function is the NEAR-MISS trap (§3.5's mandatory diagnostic). Its
+// coefficient is 0.9999999, which is not 1, so the identity genuinely fails —
+// but the residual is ~1e-7, and reporting only "coefficients differ" would
+// send the author hunting for a sign error. The note names the cause (a
+// truncated decimal written where an exact rational was meant) and both escape
+// hatches: write the literal division, or use the synthesized basis, whose
+// Schur certificate is the right one for genuinely irrational coefficients.
+// Message pinned in tests/corpus/diagnostics/022_equiv_engine_near_miss.blade.
+// ============================================================================
+let static EC = [("E", 1)]
+
+// Sound, for contrast — the isotropic combination is the C4 invariant.
+function a_invariant(x: Array<Float like PgIrrepsIdx<C4, EC>>)
+                     where ml.equiv(C4) -> Float =
+    x(0) * x(0) + x(1) * x(1)
+
+// The false claim: dies at R₉₀.
+function b_covariant(x: Array<Float like PgIrrepsIdx<C4, EC>>)
+                     where ml.equiv(C4) -> Float =
+    x(0) * x(0) - x(1) * x(1)
+
+// The near miss: 0.9999999 was meant to be 1.
+function almost(x: Array<Float like PgIrrepsIdx<C4, EC>>)
+                where ml.equiv(C4) -> Float =
+    x(0) * x(0) + 0.9999999 * x(1) * x(1)
+
+let ok = a_invariant([3.0, 4.0])
+let bad = b_covariant([3.0, 4.0])
+let near = almost([3.0, 4.0])

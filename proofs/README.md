@@ -19,7 +19,7 @@ computed pins.  `count-theorems.ps1` is the mechanical implementation --
 run it with `-Check` to verify the numbers below and the headline in
 `docs/proofs.md`, which quotes the same total.
 
-## Contents (488 theorems total)
+## Contents (506 theorems total)
 
 - BladeCore.v (16): Group Law both halves (diagonal swap sound; per-dim
   product swap refuted), counting lemma (no lossless product layout),
@@ -211,3 +211,26 @@ run it with `-Check` to verify the numbers below and the headline in
   R-type E).  R-Burnside sum d^2/e = |G| with the quotient exhibited
   (c4/d4_rburnside, _exact).  End-basis completeness (Schur over R) is
   cited per 6.1's closure and oracle-discharged (Test_PgOracle.fs).
+- BladeWordClosure.v (18): NEW -- word closure for the finite
+  equivariance discharge, stage 6b of plan-transforms-as-types 3.5/7 and
+  the discrete row of 8's BladeGenerator split.  A map intertwining the
+  GENERATORS of a finite group intertwines every element: word_closure
+  by induction on word length over arbitrary carriers and arbitrary
+  generator-indexed actions, generators_suffice_on_word_set as the form
+  the discharge uses (a group presented by its word set), wact_app and
+  wact_triv as the word-action algebra.  The same content over an
+  ABSTRACT MULTIPLICATION TABLE, no words:
+  equivariance_closed_under_product, whose hypotheses are exactly
+  BladePointGroup's c4/d4_rep_property.  Instantiated at the C4/D4 E
+  plane over Z*Z and PINNED to the shipped matrices (rot_is_R90,
+  mir_is_Sref), with the three corpus anchors: hand-written J = R90 is
+  C4-equivariant everywhere from one generator check
+  (J_equivariant_on_c4_words, _at_every_c4_element) and fails at D4's
+  mirror (J_not_d4_equivariant); x^2+y^2 is invariant at both groups
+  (nsq_invariant_on_c4_words, _on_d4_words); x^2-y^2 is not, and it
+  SIGN-FLIPS at the generator r (diffsq_not_c4_invariant,
+  diffsq_flips_under_r).  BELT AND BRACES IN OPPOSITE DIRECTIONS:
+  MLPolyExtract.fs checks all |G| <= 8 elements, this file proves the
+  generators would have sufficed.  The polynomial layer is absent by
+  design -- f is an arbitrary function, so the lemma covers extracted
+  normal forms by being indifferent to them.

@@ -25,3 +25,4 @@ BladeJacobian.v
 BladeSymPower.v
 BladePartition.v
 BladePointGroup.v
+BladeWordClosure.v

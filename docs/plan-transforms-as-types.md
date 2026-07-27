@@ -1224,6 +1224,36 @@ go first.
      extractor bugs from radical bugs. Corpus: the E-plane hand
      polynomial, x²+y² invariant, x²−y² claimed-A1 negative control
      dying at R₉₀. Coq: word-closure lemma (proved).
+     **6b LANDED 2026-07-27.** MLPolyExtract.fs: Poly = Map<Mono, Rat>
+     per output component, Mono over (rep-param, cell) × Inv-atoms;
+     dyadic-exact literals with exact literal division; TWO WIDENINGS
+     documented (unary −; static indexing into any vector BINDING —
+     let makes parameters and bindings indistinguishable in normal
+     form) and ONE NARROWING (no array /); the PInvOpaque conservative
+     arm for annotation-opaque Inv params (faithfulness over
+     convenience — an aliased array is not one scalar atom). Discharge
+     is GROUP-AGNOSTIC (ElementAction — 6c is a second consumer, not a
+     second engine); all |G| elements checked, first failure named by
+     (element word, component, monomial, both coefficients) in a
+     deterministic monomial order. Hook flow exactly as designed:
+     OutsideFragment → original diagnostic untouched; CapBreach →
+     appended note; discharge-fail → replacing BL4008; pass → silence.
+     THE LOAD-BEARING DIFFERENTIAL: 77 pre-existing files byte-
+     identical incl. 047-052 — and the mechanism is the proof (three
+     die in buildCertTable pre-engine; three reach it and extraction
+     correctly refuses; unchanged text proves the OutsideFragment
+     path). 6a inheritance live: the uncertified hand-J gets BL4011
+     with ZERO inference-code changes. Near-miss + π₀/constant
+     diagnostics implemented group-agnostic (6c inherits). Message
+     pins live in the diagnostics corpus (the value corpus has no text
+     channel; refusal and text pinned in cross-referencing files).
+     BladeWordClosure.v: 18 theorems, word_closure by induction on
+     length over abstract carriers, instantiated at the SHIPPED
+     matrices (rot_is_R90 pins the Coq action to MLPointSpec's data);
+     tower 27 files / 506 items, coqchk clean. Corpus ml-equiv/058-062
+     + diagnostics/021-024; full suite 1798/0. (One more member of the
+     array-literal-operand codegen bug family noted, worked around —
+     the chipped family.)
    - **6c — the engine, part ii: the radical-vector Lie discharger.**
      Map<squarefree, Rat> module (mul exists only for the pin layer);
      exact generator tables per l cached like realCGDense, assembled

@@ -76,6 +76,15 @@
          so it depends on nothing but Blade.Ast and must precede all three.
          NOT part of BladeML.fsproj (which compiles only compiler/MLSpec.fs). -->
     <Compile Include="src/ml/compiler/MLCertShell.fs" />
+    <!-- The generator-based certification ENGINE, front half (stage 6b): the
+         exact-rational polynomial extractor over the v1 closed-world fragment
+         and the finite word-set discharge. Group-agnostic on purpose — it
+         consumes integer matrices, never a registry — so 6c's radical-vector
+         Lie discharger is a second CONSUMER of the same normal form. Depends
+         on nothing but Blade.Ast / StaticEval and must precede MLEquiv, which
+         calls it from judgeFunction's rejection path. NOT part of
+         BladeML.fsproj. -->
+    <Compile Include="src/ml/compiler/MLPolyExtract.fs" />
     <Compile Include="src/ml/compiler/MLEquiv.fs" />
     <Compile Include="src/ml/compiler/MLGalilean.fs" />
     <!-- The `where ml.perm_equiv(N)` certification lattice (stage 5a-iii):

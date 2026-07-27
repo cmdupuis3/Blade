@@ -288,6 +288,41 @@ let runPointSpecTests () : BlockResult =
           (pgTotalDim c4 [ ("A", 2); ("B", 1); ("E", 3) ] = 9) ""
     check "pgBlockStarts: offsets scan the spec, last = pgTotalDim"
           (pgBlockStarts c4 [ ("A", 2); ("B", 1); ("E", 3) ] = [ 0; 2; 3; 9 ]) ""
+
+    // pgElementMatrix (stage 6b): rho_spec(g) as a block-diagonal integer
+    // matrix in the EMITTED layout. Its consumer is the finite equivariance
+    // discharge, which substitutes it into a polynomial, so getting the copy
+    // layout wrong would silently certify the wrong theorem.
+    let d4Els = groupElements d4
+    let elAt (grp: PointGroup) (els: PgElement list) (w: string) =
+        els |> List.find (fun el -> wordName grp el.Word = w)
+    let d4AE : PgSpec = [ ("A1", 1); ("E", 2) ]
+    // Corpus 045 states the action in words: rho(r) on [A1 x 1, E x 2] sends
+    // [x0, x1, x2, x3, x4] to [x0, -x2, x1, -x4, x3] — i.e. the two E copies
+    // are CONSECUTIVE 2-blocks (copy-major), each carrying a full R90.
+    let rMat = pgElementMatrix d4 d4AE (elAt d4 d4Els "r")
+    let applyM (m: int[][]) (v: int[]) =
+        Array.init m.Length (fun i -> Array.fold2 (fun a c x -> a + c * x) 0 m.[i] v)
+    check "pgElementMatrix: copy-major layout — rho(r) on [A1 x1, E x2] is the corpus-045 action"
+          (applyM rMat [| 1; 2; 3; 4; 5 |] = [| 1; -3; 2; -5; 4 |])
+          (sprintf "%A" (applyM rMat [| 1; 2; 3; 4; 5 |]))
+    check "pgElementMatrix: the mirror s flips the second coordinate of every E copy"
+          (applyM (pgElementMatrix d4 d4AE (elAt d4 d4Els "s")) [| 1; 2; 3; 4; 5 |] = [| 1; 2; -3; 4; -5 |]) ""
+    check "pgElementMatrix: the identity element gives the identity matrix"
+          (matEq (pgElementMatrix d4 d4AE (elAt d4 d4Els "e")) (matId 5)) ""
+    // Every element matrix is orthogonal and the assignment is multiplicative
+    // on the enumerated set — the two properties the discharge leans on.
+    let c4Els = groupElements c4
+    let c4E : PgSpec = [ ("E", 1) ]
+    let orthOk =
+        c4Els |> List.forall (fun el ->
+            let m = pgElementMatrix c4 c4E el
+            matEq (matMul (matTranspose m) m) (matId 2))
+    check "pgElementMatrix: rho_spec(g) is orthogonal at every element (C4 [E x1])" orthOk ""
+    let r1 = pgElementMatrix c4 c4E (elAt c4 c4Els "r")
+    check "pgElementMatrix: rho(r)^4 = Id, and rho(r)^2 = -Id on the E plane"
+          (matEq (matMul (matMul r1 r1) (matMul r1 r1)) (matId 2)
+           && matEq (matMul r1 r1) (matNeg (matId 2))) ""
     // homBlocks is ALL matching pairs, output-major, duplicates included — the
     // MLSpec.homBlocks contract, verbatim.
     let dupSpec : PgSpec = [ ("E", 1); ("A", 1); ("E", 2) ]

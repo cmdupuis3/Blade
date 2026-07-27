@@ -796,7 +796,140 @@ and private judgeApp (ctx: Ctx) (env: Map<string, RepStatus>) (e: Expr) (f: Expr
                 if sf = Inv && sts |> List.forall ((=) Inv) then Ok Inv
                 else reject "cannot classify this call inside an equiv-certified body"))
 
+// ============================================================================
+// The generator-based ENGINE, hooked on the rejection path (stage 6b)
+// ============================================================================
+//
+// §7's flow, exactly: COMPOSITION RUNS FIRST — it is cheaper and its
+// diagnostics are better, and the engine never sees a body composition
+// accepts. On composition's Error verdict for a POINT-certified function the
+// engine attempts the polynomial route:
+//
+//   extraction FAILS            -> the ORIGINAL composition diagnostic
+//                                  surfaces untouched (silence from here);
+//   extraction hits a CAP       -> the original diagnostic, with a note naming
+//                                  the cap (a body that fell off the engine
+//                                  must not look like one it never saw);
+//   extraction + discharge PASS -> the certificate HOLDS, silently. The pin is
+//                                  discharged; there is nothing to say;
+//   discharge FAILS             -> the engine's own BL4008, naming the group
+//                                  element and the first offending
+//                                  coefficient. It REPLACES the composition
+//                                  diagnostic, because at that point we know
+//                                  something strictly better: the body is a
+//                                  polynomial and it is not equivariant.
+//
+// `Propose ⊆ Check-accept` is untouched: the 6a inference channel calls this
+// same `judgeFunction`, so a body the engine discharges becomes a BL4011
+// proposal automatically and by construction.
+//
+// O3/SO3 certificates take the `_ -> composition` arm — the radical-vector Lie
+// discharger is 6c. The ONLY group-specific code here is `pointActions`, which
+// turns the registry's word set into the group-agnostic `ElementAction` list
+// the engine consumes.
+
+module private Engine =
+    module PX = Blade.ML.PolyExtract
+    module PS = Blade.ML.PointSpec
+
+    /// The scalar annotations whose SHAPE is decidable without a type-alias
+    /// map. Anything else classified `Inv` becomes `PInvOpaque`, which the
+    /// extractor refuses to touch — modelling an aliased array as one scalar
+    /// atom would be unfaithful, and the whole engine rests on faithfulness.
+    let private scalarNames =
+        [ "Float"; "Float32"; "Float64"; "Double"; "Int"; "Int32"; "Int64" ]
+
+    let private invKind (t: TypeExpr option) : PX.ParamKind =
+        match t with
+        | Some (TyArray _) -> PX.PInvArray
+        | Some (TyInt32 | TyInt64 | TyFloat32 | TyFloat64) -> PX.PInvScalar
+        | Some (TyNamed (n, [])) when List.contains n scalarNames -> PX.PInvScalar
+        | _ -> PX.PInvOpaque
+
+    /// The ℝ-dimension of a rep payload, per block-spec member.
+    let private repDim (r: RepSpec) : int option =
+        match r with
+        | PgSpec (g, s) -> Some (PS.pgTotalDim (PS.pointGroup g) s)
+        | O3Spec _ -> None // 6c
+
+    /// The classified signature the extractor needs, or None when a parameter
+    /// or the return is not describable (which is an extraction refusal).
+    let polySig (cert: CertSig) (fd: FunctionDecl) : PX.PolySig option =
+        let byName = fd.Params |> List.map (fun p -> (p.Name, p.Type)) |> Map.ofList
+        let ps =
+            cert.Params
+            |> List.fold (fun acc (n, st) ->
+                acc |> Option.bind (fun out ->
+                    match st with
+                    | Rep r -> repDim r |> Option.map (fun d -> out @ [ (n, PX.PRep d) ])
+                    | Inv -> Some (out @ [ (n, invKind (defaultArg (Map.tryFind n byName) None)) ])
+                    | Opaque -> None)) (Some [])
+        ps |> Option.bind (fun ps ->
+            match cert.Return with
+            | Rep r -> repDim r |> Option.map (fun d -> PX.mkSig ps (Some d))
+            | Inv -> Some (PX.mkSig ps None)
+            | Opaque -> None)
+
+    /// The word set as `ElementAction`s: ALL |G| ≤ 8 elements (word closure
+    /// says the generators would suffice — proofs/BladeWordClosure.v — and at
+    /// this size the redundancy is free).
+    let pointActions (gn: string) (cert: CertSig) : PX.ElementAction list option =
+        let grp = PS.pointGroup gn
+        let pgOf (r: RepSpec) = match r with PgSpec (_, s) -> Some s | O3Spec _ -> None
+        let repParams =
+            cert.Params |> List.choose (fun (n, st) ->
+                match st with Rep r -> Some (n, pgOf r) | _ -> None)
+        if repParams |> List.exists (snd >> Option.isNone) then None
+        else
+            // A scalar (Inv) return is an INVARIANCE claim: the output action
+            // is the 1×1 identity, i.e. the trivial rep.
+            let outSpec = match cert.Return with Rep r -> pgOf r | Inv -> Some [] | Opaque -> None
+            match outSpec with
+            | None -> None
+            | Some outS ->
+                PS.groupElements grp
+                |> List.map (fun el ->
+                    let inMats =
+                        repParams
+                        |> List.map (fun (n, s) -> (n, PS.pgElementMatrix grp (Option.get s) el))
+                        |> Map.ofList
+                    let outMat =
+                        match cert.Return with
+                        | Inv -> [| [| 1 |] |]
+                        | _ -> PS.pgElementMatrix grp outS el
+                    PX.mkAction (PS.wordName grp el.Word) inMats outMat)
+                |> Some
+
+    /// How a coefficient mismatch reads. The near-miss note is §3.5's
+    /// mandatory one and points at BOTH escape hatches; the rep-degree-0 arm is
+    /// the constant obligation (a constant term of an equivariant map must be
+    /// fixed by the whole group — trivial-label supported and π₀-fixed).
+    let failureMessage (funcName: string) (gn: string) (f: PX.DischargeFailure) : string =
+        let where =
+            sprintf "function '%s': the body IS a polynomial, and it is not %s-equivariant. The identity f(rho(g) x) = rho(g) f(x) fails at group element %s, in output component %d, at the term %s: the left side has coefficient %s, the right side %s"
+                funcName gn f.Element f.Component f.Monomial (PX.Rat.render f.Lhs) (PX.Rat.render f.Rhs)
+        let constantNote =
+            if f.RepDegree = 0 then
+                sprintf ". That term is a CONSTANT: a constant summand of an equivariant map must be fixed by the whole group, i.e. supported on trivial-label cells (every generator matrix the identity) and unmoved by the component group. A constant in a non-trivial-label cell breaks equivariance no matter what the rest of the body does"
+            else ""
+        let nearMissNote =
+            if f.NearMiss then
+                sprintf ". NEAR MISS: the residual is %g, negligible against the coefficients — this is the truncated-decimal trap. Coefficients are read EXACTLY AS WRITTEN (a float literal is its exact dyadic value, so 0.3 is not 3/10), while a literal DIVISION is evaluated exactly in the rationals. If you meant an exact rational, write the division (3.0 / 10.0 IS 3/10); if the coefficient is genuinely irrational, no exact checker can certify it — build the layer with the synthesized basis (ml.derive_pg_linear), whose Schur certificate covers precisely that case"
+                    (abs (PX.Rat.toFloat (PX.Rat.sub f.Lhs f.Rhs)))
+            else ""
+        where + constantNote + nearMissNote
+
+    /// The cap note appended to the surfacing composition diagnostic.
+    let capNote (funcName: string) (why: string) : string =
+        sprintf " [the equivariance engine did not run on '%s': %s (plan-transforms-as-types section 7, stage 6b caps: degree <= %d, <= %d expanded terms); the verdict above is composition's]"
+            funcName why PX.maxRepDegree PX.maxTerms
+
 /// Judge one certified function. Empty list = certificate holds.
+///
+/// Two routes, in this order: COMPOSITION (the abstract interpretation above),
+/// then — only on its rejection, and only under a point-group certificate —
+/// the stage-6b polynomial ENGINE. See the `Engine` module's header for the
+/// exact flow and for why the engine's verdict may replace composition's.
 let judgeFunction (group: Group) (certs: Map<string, CertSig>) (statics: StaticEnv)
                   (aliases: Set<string>) (fd: FunctionDecl)
     : Blade.Diagnostics.Diagnostic list =
@@ -805,13 +938,38 @@ let judgeFunction (group: Group) (certs: Map<string, CertSig>) (statics: StaticE
     | Some cert ->
         let ctx = { Group = group; FuncName = fd.Name; Aliases = aliases; Statics = statics; Certs = certs }
         let env = cert.Params |> List.fold (fun m (n, st) -> Map.add n st m) Map.empty
-        match judge ctx env fd.Body with
-        | Error d -> [ d ]
-        | Ok st ->
-            if st = cert.Return then []
-            else
-                [ bl4008 fd.Body.Span
-                      (sprintf "function '%s': the body is %s but the declared return type is %s — the certificate requires them to agree" fd.Name (statusStr st) (statusStr cert.Return)) ]
+        let composition =
+            match judge ctx env fd.Body with
+            | Error d -> [ d ]
+            | Ok st ->
+                if st = cert.Return then []
+                else
+                    [ bl4008 fd.Body.Span
+                          (sprintf "function '%s': the body is %s but the declared return type is %s — the certificate requires them to agree" fd.Name (statusStr st) (statusStr cert.Return)) ]
+        match composition, cert.Group with
+        | [], _ -> []
+        | (d :: _), Point gn ->
+            // Total by construction, in the 6a discipline: a speculative
+            // second opinion may never turn a compiling program into a crash,
+            // so any escape from the registry or the decoders reads as "the
+            // engine has nothing to say" and composition's verdict stands.
+            try
+                match Engine.polySig cert fd, Engine.pointActions gn cert with
+                | Some psig, Some actions ->
+                    match Blade.ML.PolyExtract.extract psig statics fd with
+                    | Error (Blade.ML.PolyExtract.OutsideFragment _) -> [ d ]
+                    | Error (Blade.ML.PolyExtract.CapBreach why) ->
+                        [ { d with Message = d.Message + Engine.capNote fd.Name why } ]
+                    | Ok form ->
+                        match Blade.ML.PolyExtract.discharge form actions with
+                        | Ok () -> []
+                        | Error (Blade.ML.PolyExtract.DischargeCap why) ->
+                            [ { d with Message = d.Message + Engine.capNote fd.Name why } ]
+                        | Error (Blade.ML.PolyExtract.GeneratorCheck f) ->
+                            [ bl4008 fd.Body.Span (Engine.failureMessage fd.Name gn f) ]
+                | _ -> [ d ]
+            with _ -> [ d ]
+        | (d :: _), _ -> [ d ]
 
 // ============================================================================
 // The inference channel (stage 6a) — BL4011

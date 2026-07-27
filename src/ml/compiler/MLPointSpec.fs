@@ -656,3 +656,31 @@ let pgBlockStarts (grp: PointGroup) (spec: PgSpec) : int list =
     checkSpec grp spec
     let alg = pgAlgebra grp
     (0, spec) ||> List.scan (fun acc (k, m) -> acc + m * alg.Dim k)
+
+/// ρ_spec(g) — the BLOCK-DIAGONAL matrix by which an element acts on the
+/// ℝ-module a spec describes, in the emitted layout: block b holds its
+/// `mult` copies CONSECUTIVELY, each a full DimR-sized copy of the label's
+/// matrix at that element. (Copy-major, which is the layout corpus 045 pins
+/// from the value side: at [A1 × 1, E × 2] the rotation sends
+/// [x0, x1, x2, x3, x4] to [x0, −x2, x1, −x4, x3].)
+///
+/// Integer in, integer out — every shipped generator entry lies in {0, ±1}, so
+/// no coefficient ring is needed to consume this. Stage 6b's finite discharge
+/// is its first caller; the 5b-0 oracle builds its own Reynolds sums from
+/// `groupElements` directly and is untouched.
+let pgElementMatrix (grp: PointGroup) (spec: PgSpec) (el: PgElement) : int[][] =
+    checkSpec grp spec
+    let n = pgTotalDim grp spec
+    let out = Array.init n (fun _ -> Array.zeroCreate n)
+    let starts = pgBlockStarts grp spec
+    spec
+    |> List.iteri (fun b (label, mult) ->
+        let ir = pgIrrep grp label
+        let m = List.item (pgIrrepIndex grp label) el.Mats
+        let d = ir.DimR
+        for c in 0 .. mult - 1 do
+            let off = List.item b starts + c * d
+            for i in 0 .. d - 1 do
+                for j in 0 .. d - 1 do
+                    out.[off + i].[off + j] <- m.[i].[j])
+    out

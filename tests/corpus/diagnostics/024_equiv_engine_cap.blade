@@ -1,0 +1,12 @@
+// TEST: Diag Equiv Engine Cap (diag)
+// ERROR: BL4008 @ 10:5
+// ERROR-CONTAINS: raw indexing into a cell of 'x' outside a TRIVIAL-label block
+// ERROR-CONTAINS: the equivariance engine did not run on 'quintic'
+// ERROR-CONTAINS: exceeds the degree-4 cap
+// ERROR-CONTAINS: the verdict above is composition's
+import ml as ml
+let static EC = [("E", 1)]
+function quintic(x: Array<Float like PgIrrepsIdx<C4, EC>>)
+                 where ml.equiv(C4) -> Float =
+    x(0) * x(0) * x(0) * x(0) * x(0)
+let r = quintic([3.0, 4.0])

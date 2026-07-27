@@ -1,0 +1,43 @@
+// TEST: ML Equiv Engine Cap Fallback (rejects)
+import ml as ml
+// ============================================================================
+// THE CAP, AND WHY THE FALLBACK IS STRUCTURED RATHER THAN SILENT
+// (docs/plan-transforms-as-types.md §7 stage 6b: degree ≤ 4, ≤ 100000 terms).
+//
+// The engine's caps are a budget, not a claim: a degree-5 body is not
+// unequivariant, it is unexamined. So a cap breach must not read like the
+// engine's verdict, and it must not read like the engine never looked either.
+// The rule: COMPOSITION'S diagnostic surfaces — it is the only verdict anyone
+// actually has — with a NOTE naming the cap that stopped the second opinion.
+//
+// Contrast the two other exits, both pinned elsewhere. Extraction failure (a
+// call, a loop, an `ml.*` op: anything outside the v1 closed-world fragment)
+// is SILENT, because a body the engine cannot even read says nothing about the
+// engine's reach; that is what keeps corpus 047-052's diagnostics
+// byte-identical to their pre-6b text. Discharge failure REPLACES composition's
+// diagnostic, because at that point we know something strictly better (corpus
+// 060). Only the cap produces a composition verdict PLUS an engine note.
+//
+// The body below is `x(0)^5`, which is degree 5 in the representation
+// components — one over the cap, deliberately, so the file is a boundary pin
+// and not a stress test. Message pinned in
+// tests/corpus/diagnostics/024_equiv_engine_cap.blade.
+// ============================================================================
+let static EC = [("E", 1)]
+
+// Degree 4 is INSIDE the cap, so this one gets a real verdict from the engine
+// (it is not C4-equivariant either, but that is the engine talking). Kept
+// here only as the neighbour of the boundary; the file's assertion is the
+// refusal, and both functions refuse.
+function quartic(x: Array<Float like PgIrrepsIdx<C4, EC>>)
+                 where ml.equiv(C4) -> Float =
+    x(0) * x(0) * x(0) * x(0)
+
+// Degree 5: over the cap. The engine declines and composition's raw-index
+// refusal is what the user sees, plus the note.
+function quintic(x: Array<Float like PgIrrepsIdx<C4, EC>>)
+                 where ml.equiv(C4) -> Float =
+    x(0) * x(0) * x(0) * x(0) * x(0)
+
+let q4 = quartic([3.0, 4.0])
+let q5 = quintic([3.0, 4.0])

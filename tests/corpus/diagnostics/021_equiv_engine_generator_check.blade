@@ -1,0 +1,11 @@
+// TEST: Diag Equiv Engine Generator Check (diag)
+// ERROR: BL4008 @ 9:5
+// ERROR-CONTAINS: the body IS a polynomial, and it is not C4-equivariant
+// ERROR-CONTAINS: fails at group element r, in output component 0, at the term x(0)^2
+// ERROR-CONTAINS: the left side has coefficient -1, the right side 1
+import ml as ml
+let static EC = [("E", 1)]
+function b_covariant(x: Array<Float like PgIrrepsIdx<C4, EC>>)
+                     where ml.equiv(C4) -> Float =
+    x(0) * x(0) - x(1) * x(1)
+let r = b_covariant([3.0, 4.0])

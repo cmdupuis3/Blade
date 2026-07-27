@@ -1,0 +1,12 @@
+// TEST: Diag Equiv Engine Near Miss (diag)
+// ERROR: BL4008 @ 10:5
+// ERROR-CONTAINS: NEAR MISS: the residual is 1e-07
+// ERROR-CONTAINS: a float literal is its exact dyadic value, so 0.3 is not 3/10
+// ERROR-CONTAINS: write the division (3.0 / 10.0 IS 3/10)
+// ERROR-CONTAINS: build the layer with the synthesized basis (ml.derive_pg_linear)
+import ml as ml
+let static EC = [("E", 1)]
+function almost(x: Array<Float like PgIrrepsIdx<C4, EC>>)
+                where ml.equiv(C4) -> Float =
+    x(0) * x(0) + 0.9999999 * x(1) * x(1)
+let r = almost([3.0, 4.0])
