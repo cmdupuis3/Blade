@@ -1,7 +1,7 @@
 # Blade Proofs
 
 Prose mirror of the machine-checked proof tower in `/proofs/`:
-**302 theorems**, Coq 8.18 / Rocq 9.0, stdlib only, verified by both `coqc`
+**322 theorems**, Coq 8.18 / Rocq 9.0, stdlib only, verified by both `coqc`
 and `coqchk`.
 
 Build: `coq_makefile -f _CoqProject -o Makefile && make`.
@@ -14,6 +14,11 @@ Rules of this document:
   materialized fragment, do-not-cite, etc.).
 - Remaining open items live in [future.md](future.md) §4 (from the tower's
   ROADMAP).
+- The count above is mechanical, on the convention documented in
+  [../proofs/README.md](../proofs/README.md): line-initial `Lemma` /
+  `Theorem` / `Corollary` / `Example` in the `_CoqProject` files. Run
+  `proofs/count-theorems.ps1 -Check` to verify it and the per-file numbers
+  in that README.
 
 ## The tower at a glance
 
