@@ -125,6 +125,44 @@ let install () =
                 specOfStatic "alt_tp_weight_dim" spec
                 |> Result.map (fun s -> SVInt (int64 (altTpWeightDim s)))
             | _ -> Error "alt_tp_weight_dim: expected one static spec argument")
+        // Symmetric / exterior powers of a spec (plan-transforms-as-types
+        // §3.3): the O(3) irrep decomposition of Sym^K(V) / Λ^K(V) by the
+        // integer weight-peel, returned as an ordinary SPEC static — so it
+        // composes with total_dim / hom_dim / irreps_* and is writable in an
+        // IrrepsIdx<> annotation, exactly like tp_spec. K is capped at 4
+        // (plan §6.5: multinomial conditioning of the monomial basis degrades
+        // beyond, and body-order expansions live at k <= 4).
+        let kArg (name: string) (k: int64) : Result<int, string> =
+            if k < 1L || k > 4L then
+                Error (sprintf "%s: K must be a static int in 1..4 (got %d) — the symmetric-power surface is capped at degree 4 (plan-transforms-as-types §6.5)" name k)
+            else Ok (int k)
+        let registerPower (name: string) (kind: PowerKind) =
+            registerStaticBuiltin (statName name) (fun args ->
+                match args with
+                | [ spec; SVInt k ] ->
+                    specOfStatic name spec |> Result.bind (fun s ->
+                    kArg name k |> Result.bind (fun k ->
+                        let res = powerSpec kind s k
+                        if res.IsEmpty then
+                            Error (sprintf "%s: the exterior power is ZERO for K > dim V (K = %d, total_dim = %d) — there is no spec to name" name k (totalDim s))
+                        else Ok (specToStatic res)))
+                | _ -> Error (sprintf "%s: expected (SPEC, K) static arguments" name))
+        registerPower "sym_spec" PowSym
+        registerPower "alt_spec" PowAlt
+        // The degree-K parameter-count theorem: the free-weight count of a
+        // degree-K homogeneous equivariant polynomial map V -> W is
+        // dim Hom_G(Sym^K V, W). At K = 2 with SPEC_OUT = tp_spec(S, S) this
+        // IS sym_tp_weight_dim(S) — the stage-1 path count and the stage-2
+        // character count are the same theorem, pinned against each other in
+        // the corpus.
+        registerStaticBuiltin (statName "poly_weight_dim") (fun args ->
+            match args with
+            | [ spec; SVInt k; sOut ] ->
+                specOfStatic "poly_weight_dim SPEC" spec |> Result.bind (fun s ->
+                specOfStatic "poly_weight_dim SPEC_OUT" sOut |> Result.bind (fun so ->
+                kArg "poly_weight_dim" k |> Result.map (fun k ->
+                    SVInt (int64 (polyWeightDim s k so)))))
+            | _ -> Error "poly_weight_dim: expected (SPEC, K, SPEC_OUT) static arguments")
         // Block-navigation builtins (IrrepsIdx v3): fully static per-block
         // accessors so users write block-structured loop nests —
         //   x(irreps_offset(spec, b) + mu * irreps_dim(spec, b) + m)

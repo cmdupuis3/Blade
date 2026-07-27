@@ -397,6 +397,149 @@ let s2TpCells (comp: S2Component) (s: Spec) : S2TpCell list =
                     WStride = sk.CellsPerMo
                     PairSign = (if not isMirror && u1 = u2 then 0.0 else float pair) } ]
 
+// ============================================================================
+// Symmetric and exterior powers of a spec (plan-transforms-as-types §3.3)
+// ============================================================================
+
+/// Exact binomial coefficient C(n, k) as int64, by the multiplicative formula
+/// (every partial product is the integer C(n-k+i, i), so each division is
+/// exact). Local rather than a ppl/Combinatorics call: MLSpec is shared with
+/// the standalone BladeML project and stays dependency-free.
+let binomial (n: int) (k: int) : int64 =
+    if k < 0 || n < 0 || k > n then 0L
+    else
+        let k = min k (n - k)
+        let mutable acc = 1L
+        for i in 1 .. k do
+            acc <- acc * int64 (n - k + i) / int64 i
+        acc
+
+/// Which power of a representation the weight-peel decomposes: the symmetric
+/// power Sym^k(V) — canonical MULTISETS of basis vectors, every item reusable —
+/// or the exterior power Λ^k(V) — SUBSETS, every item at most once.
+type PowerKind =
+    | PowSym
+    | PowAlt
+
+let private powerName (kind: PowerKind) =
+    match kind with PowSym -> "sym_spec" | PowAlt -> "alt_spec"
+
+/// The Z₂-graded weight histogram of a character: `h.[p].[w + off]` = the
+/// number of basis vectors of weight w in parity sector p. O(3) ≅ SO(3) × {±I},
+/// so an irrep is (l, parity) and the parity is an INDEPENDENT Z₂ grading of
+/// the character ring: a basis vector of weight w in sector p contributes the
+/// monomial q^w·z^p, and a product of basis vectors adds weights and adds
+/// parities mod 2. Everything below is integer arithmetic on these histograms
+/// — no Wigner tables, no floating point.
+let private histWidth (off: int) = 2 * off + 1
+
+/// Graded knapsack over the basis "items" of V (one item per basis vector:
+/// each spec entry (l, p, m) contributes m copies of each weight −l..l, all in
+/// sector p). `f.[j]` is the graded histogram of the degree-j part; f.[0] is
+/// the trivial character {weight 0, parity 0: 1}.
+///
+/// The ONLY difference between the two powers is the direction of the inner
+/// j loop, per item:
+///   Sym^k — j ASCENDING: f.[j−1] already contains this item, so it may repeat
+///           without bound (multisets, the complete homogeneous h_k);
+///   Λ^k   — j DESCENDING: f.[j−1] is still the pre-item value, so each item
+///           enters at most once (subsets, the elementary e_k).
+let private gradedPowerHist (kind: PowerKind) (s: Spec) (k: int) (off: int) : int[][] =
+    let width = histWidth off
+    let f = Array.init (k + 1) (fun _ -> Array.init 2 (fun _ -> Array.zeroCreate<int> width))
+    f.[0].[0].[off] <- 1
+    let js = match kind with PowSym -> [ 1 .. k ] | PowAlt -> [ k .. -1 .. 1 ]
+    for e in s do
+        for _ in 1 .. e.Mult do
+            for w in -e.L .. e.L do
+                for j in js do
+                    let src = f.[j - 1]
+                    let dst = f.[j]
+                    for q in 0 .. 1 do
+                        let sq = src.[q]
+                        let dq = dst.[(q + e.Parity) % 2]
+                        for i in 0 .. width - 1 do
+                            if sq.[i] <> 0 then dq.[i + w] <- dq.[i + w] + sq.[i]
+    f.[k]
+
+/// Weight-peel of one parity sector: repeatedly take the highest weight L with
+/// nonzero multiplicity c, emit c copies of the irrep (L, p) and subtract c
+/// copies of its own weight multiset {−L..L}. The internal asserts are
+/// compiler-bug guards, not user errors: a character of a genuine
+/// representation stays nonnegative and w ↔ −w symmetric at every step, and
+/// peels to exactly zero.
+let private peelSector (what: string) (p: int) (off: int) (hist: int[]) : SpecEntry list =
+    let h = Array.copy hist
+    let check (stage: string) =
+        for i in 0 .. histWidth off - 1 do
+            if h.[i] < 0 then
+                failwithf "internal: %s weight histogram went negative (parity %d, weight %d, %s)"
+                    what p (i - off) stage
+            if h.[i] <> h.[histWidth off - 1 - i] then
+                failwithf "internal: %s weight histogram is not w <-> -w symmetric (parity %d, weight %d, %s)"
+                    what p (i - off) stage
+    check "before the peel"
+    let out = ResizeArray<SpecEntry> ()
+    for l in off .. -1 .. 0 do
+        let c = h.[off + l]
+        if c > 0 then
+            out.Add { L = l; Parity = p; Mult = c }
+            for w in -l .. l do
+                h.[off + w] <- h.[off + w] - c
+            check (sprintf "after peeling l=%d" l)
+    if h |> Array.exists (fun x -> x <> 0) then
+        failwithf "internal: %s weight histogram did not peel to zero (parity %d, residue %A)" what p h
+    List.ofSeq out
+
+/// Sym^k(V) / Λ^k(V) as a spec, merged-canonical ascending by (l, parity) —
+/// the same ordering discipline as tpSpec, so the result is stable to write in
+/// an IrrepsIdx<> annotation. Cross-checked against the Coq-proved
+/// cardinalities on EVERY call (cheap, and it is the free check §3.3 asks for):
+/// total_dim(Sym^k) = C(n+k−1, k), total_dim(Λ^k) = C(n, k), n = total_dim s.
+let powerSpec (kind: PowerKind) (s: Spec) (k: int) : Spec =
+    if k < 0 then failwithf "internal: %s with negative k (%d)" (powerName kind) k
+    let n = totalDim s
+    let lMax = s |> List.fold (fun a e -> max a e.L) 0
+    let off = lMax * k
+    let hist = gradedPowerHist kind s k off
+    let res =
+        [ for p in 0 .. 1 do yield! peelSector (powerName kind) p off hist.[p] ]
+        |> List.groupBy (fun e -> (e.L, e.Parity))
+        |> List.sortBy fst
+        |> List.map (fun ((l, p), es) -> { L = l; Parity = p; Mult = es |> List.sumBy (fun e -> e.Mult) })
+    let expected = match kind with PowSym -> binomial (n + k - 1) k | PowAlt -> binomial n k
+    if int64 (totalDim res) <> expected then
+        failwithf "internal: %s(spec, %d) decomposed to total_dim %d but the basis cardinality is %d (spec %A)"
+            (powerName kind) k (totalDim res) expected s
+    res
+
+/// Sym^k(V): the degree-k monomial space, whose basis is the canonical
+/// multisets of V's basis — literally SymIdx<k, IrrepsIdx<spec>> (plan §3.1).
+/// `derive_poly<k>`'s input spec.
+let symPowerSpec (s: Spec) (k: int) : Spec = powerSpec PowSym s k
+
+/// Λ^k(V): the exterior power. Empty (the zero space) exactly when k > dim V.
+let altPowerSpec (s: Spec) (k: int) : Spec = powerSpec PowAlt s k
+
+/// The degree-k parameter-count theorem: the number of free weights of a
+/// degree-k homogeneous equivariant polynomial map V -> W is
+/// dim Hom_G(Sym^k V, W) — §3.1's polarization isomorphism, counted by Schur.
+/// At k = 1 this is homDim; at k = 2 with sOut = tp_spec(s, s) it reproduces
+/// symTpWeightDim (stage 1's independent path count) exactly.
+let polyWeightDim (s: Spec) (k: int) (sOut: Spec) : int = homDim (symPowerSpec s k) sOut
+
+/// The canonical multisets i1 <= ... <= ik over 0 .. n-1 in LEX order
+/// (nondecreasing tuples, ascending lexicographic) — the SymIdx<k, Idx<n>>
+/// cell order the compiler's unrank agrees with, and the order
+/// ppl/SymTensor.enumerate produces (plan §6.8; never SymTensor.rankOf, which
+/// is colex). Length = C(n+k−1, k).
+let symMultisets (n: int) (k: int) : int list list =
+    let rec go (start: int) (rem: int) : int list list =
+        if rem = 0 then [ [] ]
+        else [ for i in start .. n - 1 do
+                 for rest in go i (rem - 1) -> i :: rest ]
+    go 0 k
+
 /// Per OUTPUT block of `linear`: (input block index, out entry, in entry),
 /// input resolved FIRST-MATCH by irrep (ml/Linear.findBlock semantics —
 /// duplicate input irreps beyond the first are unreachable, finding F3).

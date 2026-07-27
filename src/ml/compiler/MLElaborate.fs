@@ -325,6 +325,44 @@ let private deriveS2TpDecl (name: string) (s: Spec) (comp: S2Component) : Result
             [ ("x", tyIrrepsArr s); ("y", tyIrrepsArr s); ("w", tyFloatArr packedDim) ]
             (tyIrrepsArr cfg.SpecOut) (syn (ExprBlock (stmts, Some (v "out")))))
 
+/// The monomial lift x |-> its symmetric K-th power (plan §3.1's storage
+/// identification, §6.6's convention fork): a flat Idx<C(n+K-1, K)> vector of
+/// the UNWEIGHTED monomials ∏_j x(i_j) over the canonical multisets
+/// i1 <= ... <= iK of 0..n-1, n = total_dim(SPEC), in LEX order (nondecreasing
+/// tuples, ascending lexicographic — the SymIdx<K, ·> cell order, §6.8).
+///
+/// NO multiplicity weights: the cell IS the coefficient of the monomial
+/// e_{i1}···e_{iK}, not the symmetrized-tensor component (which differs by
+/// exactly multiplicity(idx) per cell). Stated once in the plan, implemented
+/// once here.
+///
+/// The K tuple-position tables are baked flat, one per position, so the loop
+/// is a single pass over cells with a left-associated K-fold product. The
+/// input is the irreps space; the OUTPUT is a plain Idx<cells> — the monomial
+/// space is not an irreps space in this stage (its O(3) action is
+/// Sym^K(V) = ml.sym_spec(SPEC, K), which stage 3 will type as
+/// SymIdx<K, IrrepsIdx<SPEC>>).
+let private symLiftDecl (name: string) (s: Spec) (k: int) : Result<FunctionDecl, ElabError> =
+    let n = totalDim s
+    let cells = binomial (n + k - 1) k
+    if cells > 100000L then
+        Error (err5000 (sprintf "sym_lift: the degree-%d monomial space of a dim-%d input has C(%d, %d) = %d cells, over the 100000-cell limit — lift a smaller spec (ml.scalars/ml.linear first) or lower K"
+                            k n (n + k - 1) k cells))
+    else
+    let tuples = symMultisets n k
+    let nCells = tuples.Length
+    let stmts =
+        [ yield sLetMut "out" (zerosLit nCells)
+          for j in 0 .. k - 1 do
+            yield sLet (sprintf "__m%d" j) (intArrLit (tuples |> List.map (fun t -> t.[j])))
+          yield StmtForIn ("c", syn (ExprDotDot (iLit 0, iLit nCells)),
+                    [ sAssign (idx "out" (v "c"))
+                              ([ 0 .. k - 1 ]
+                               |> List.map (fun j -> idx "x" (idx (sprintf "__m%d" j) (v "c")))
+                               |> List.reduce mul) ]) ]
+    Ok (mkFunc name [ ("x", tyIrrepsArr s) ] (tyFloatArr nCells)
+            (syn (ExprBlock (stmts, Some (v "out")))))
+
 /// linear for fixed (specIn, specOut): block-diagonal multiplicity mixing,
 /// first-match input block, ml/Linear loop order (blocks -> muO -> muI -> c).
 /// `rows` is MLSpec.linearBlocks output: one (inputBlockIdx, eo, ei) per
@@ -517,7 +555,7 @@ let private bridgeDecl (name: string) (table: float list) (n: int)
 let private opNames =
     Set.ofList [ "y_to"; "tensor_product"; "linear"; "gated"; "linear_rows"; "gated_rows"
                  "scalars"; "norms"; "derive_linear"; "derive_tp"
-                 "derive_sym_tp"; "derive_alt_tp"
+                 "derive_sym_tp"; "derive_alt_tp"; "sym_lift"
                  "tensor_to_irreps"; "sym_to_irreps"; "irreps_to_sym" ]
 
 /// Static sizing builtins that make up the rest of the ML surface (used in
@@ -529,6 +567,7 @@ let private sizingNames =
     Set.ofList [ "sh_spec"; "total_dim"; "tp_weight_dim"; "linear_weight_dim"
                  "tp_spec"; "hom_dim"; "tp_full_weight_dim"
                  "sym_tp_weight_dim"; "alt_tp_weight_dim"
+                 "sym_spec"; "alt_spec"; "poly_weight_dim"
                  "irreps_len"; "irreps_l"; "irreps_parity"; "irreps_mult"
                  "irreps_dim"; "irreps_offset" ]
 
@@ -784,6 +823,22 @@ let rec private rewriteExpr (st: ElabState) (statics: StaticEnv) (aliases: Set<s
             | "derive_alt_tp", [ specE; xE; yE; wE ] ->
                 elabDeriveS2Tp st statics S2Alt e specE xE yE wE
             | "derive_alt_tp", _ -> Error (err5000 "derive_alt_tp: expected derive_alt_tp(SPEC, x, y, w) with w of extent ml.alt_tp_weight_dim(SPEC)")
+            // The monomial lift: the value-side half of the symmetric-power
+            // bridge. Its type-side twin is ml.sym_spec(SPEC, K), and
+            // ml.derive_linear(ml.sym_spec(SPEC, K), SPEC_OUT) composed with
+            // it is degree-K equivariant synthesis (plan §3.1).
+            | "sym_lift", [ specE; kE; xE ] ->
+                staticArg statics "sym_lift spec" specE |> Result.bind (fun sv ->
+                specOfStatic "sym_lift spec" sv |> Result.bind (fun s ->
+                staticArg statics "sym_lift K" kE |> Result.bind (fun kv ->
+                    match kv with
+                    | SVInt k when k >= 1L && k <= 4L ->
+                        ensure st (fingerprint "sym_lift" (box (s, int k))) (fun n -> symLiftDecl n s (int k))
+                        |> Result.map (fun n -> inheritSpan e (ExprApp (v n, [ xE ])))
+                    | SVInt k ->
+                        Error (err5000 (sprintf "sym_lift: K must be a static int in 1..4 (got %d) — the symmetric-power surface is capped at degree 4 (plan-transforms-as-types §6.5)" k))
+                    | _ -> Error (err5000 "sym_lift: K must be a static int"))))
+            | "sym_lift", _ -> Error (err5000 "sym_lift: expected sym_lift(SPEC, K, x) with x of type Array<Float like IrrepsIdx<SPEC>>; the result is a plain Idx<C(total_dim(SPEC)+K-1, K)> monomial vector")
             | "tensor_to_irreps", [ gE ] ->
                 ensure st (fingerprint "tensor_to_irreps" (box ())) (fun n ->
                     Ok (bridgeDecl n Blade.ML.CartesianBridge.bridge9Flat 9 "g"

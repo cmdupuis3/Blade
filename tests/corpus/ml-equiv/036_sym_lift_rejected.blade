@@ -1,0 +1,23 @@
+// TEST: ML Sym Lift Rejected In Certified Body (rejects)
+import ml as ml
+// ============================================================================
+// ml.sym_lift is a REP EXIT the {Rep spec, Inv, Opaque} lattice cannot name.
+// Its output components are the degree-K monomials of the input's components,
+// so under g in O(3) they co-rotate POLYNOMIALLY — as Sym^K(V), i.e. as
+// ml.sym_spec(SPEC, K) — but expressed in the MONOMIAL basis, not the irreps
+// basis, and the change of coordinates between them is exactly what stage 2's
+// derive_poly still has to bake. Calling the result `Rep (sym_spec s k)` would
+// be a lie about the basis; calling it `Inv` would be a lie about the action.
+// So a rep-typed argument is refused with that reason (BL4008 at the argument's
+// span), directing the user to keep the lift in uncertified assembly code.
+//
+// An all-invariant call is NOT refused — the monomials of an invariant are
+// invariant — which is why the judgment inspects the argument rather than the
+// op name.
+// ============================================================================
+let static SA = [(0, 0, 1), (1, 1, 1)]
+
+function bad(x: Array<Float like IrrepsIdx<SA>>) where ml.equiv(O3) -> Array<Float like Idx<10>> =
+  ml.sym_lift(SA, 2, x)
+
+let out: Array<Float like Idx<10>> = bad([1.0, 2.0, -0.5, 0.25])

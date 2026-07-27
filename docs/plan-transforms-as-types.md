@@ -503,6 +503,24 @@ tri <@> (h, h, h)
    shipped `packPairs` agrees with lex). Reuse `SymTensor.enumerate` (lex)
    for reference models; never its `rankOf`. (Its docstring overclaims —
    out of scope here, noted.)
+9. **The Sym^k basis problem (k ≥ 3) — found executing stage 2.** An
+   equivariant-kernel synthesis for `derive_poly<k≥3>` needs ONE of:
+   (a) an explicit orthonormal irreps basis of Sym^k(V) in monomial
+   coordinates (a "symmetric-power CG table") — constructible by
+   symmetrizing iterated-CG bases of V^⊗k and orthonormalizing per
+   (l, p, weight) block, but Gram–Schmidt introduces an arbitrary basis
+   choice, making value pins convention-dependent; or (b) solving the
+   S_k-invariance constraint directly on iterated-CG path-weight space —
+   the constraint matrices are recoupling (6j-class) data, computable
+   numerically by contracting existing CG tables, with the same
+   canonical-basis problem. Either way the missing ingredient is a
+   CANONICALIZATION CONVENTION for the basis (stage 1's kept-path rule was
+   exactly such a convention for k = 2, available only because S₂ does not
+   mix coupling trees). Alternatives that dodge it: ACE/MACE-style nested
+   `derive_sym_tp` chains (spanning but redundant — the parameter count is
+   no longer the theorem), or restricting `derive_poly<k≥3>` to INVARIANT
+   outputs first (Hom_G(Sym^k V, triv) — projector computable without a
+   full basis). Decide before stage 2b.
 
 ## 7. Implementation staging
 
@@ -553,11 +571,46 @@ go first.
    the m = 1 σ = −1 diagonal paths from the emitted loop. **First pin the
    cross-block exchange identity** (§6.2ii) in Tests_Wigner.fs. Pin 1b vs 1a
    at relative 1e-13 (§6.7).
-3. **Stage 2 — `sym_spec` / `derive_poly<k>`.** Seams: none. The §3.3
-   weight-peel as a static builtin; `derive_poly` elaborates to a flat loop
-   over canonical multisets (lex enumeration per §6.8) composed with
-   `derive_linear` on `sym_spec(s,k)`. k = 2 must reproduce stage 1a exactly;
-   `total_dim(sym_spec) = C(n+k−1,k)` asserted at elaboration; scope k ≤ 4.
+3. **Stage 2a — the counting half: `sym_spec` / `alt_spec` /
+   `poly_weight_dim` / `sym_lift`.**
+   **LANDED 2026-07-26** (branch feat/derive-sym-tp): weight-peel in MLSpec
+   (`gradedPowerHist`/`peelSector`/`powerSpec`, histogram nonnegativity +
+   w↔−w symmetry + peels-to-zero guards, cardinality asserts on every call),
+   static builtins in MLStatics (K gated 1..4; bad K reports via the
+   BL3999 static-eval channel; `alt_spec` with K > dim V is a clean error),
+   `symLiftDecl` + MLEquiv arm (Inv→Inv, Rep→targeted BL4008). Anchors all
+   exact incl. Λ⁴(A) = [(0,1,1)] (the odd determinant line); cross-stage
+   identity `poly_weight_dim(s,2,tp_spec(s,s)) = sym_tp_weight_dim(s)` (and
+   the Λ² twin) verified on a 15-spec sweep to mult 4, l ≤ 3 — the stage-1
+   counts re-derived Wigner-free. Corpus ml-ops/013-015, ml-equiv/036; full
+   suite 1364/0. Note: spec-valued statics do not echo in program output —
+   corpus pins go through `irreps_len/l/parity/mult` + `total_dim`, plus the
+   round-trip "sym_spec result feeds IrrepsIdx<> annotations and
+   derive_linear".
+   Seams: none. The §3.3 weight-peel as
+   spec-valued static builtins (Sym^k via ascending-j graded knapsack, Λ^k
+   via descending-j); `poly_weight_dim(s, k, s_out) = hom_dim(sym_spec(s,k),
+   s_out)` — the degree-k parameter-count theorem as a static builtin;
+   `sym_lift(s, k, x)` = the §6.6 unweighted monomial lift over lex canonical
+   multisets (§6.8). `total_dim(sym_spec) = C(n+k−1,k)` and
+   `total_dim(alt_spec) = C(n,k)` asserted on every call; scope k ≤ 4.
+   **Cross-stage pins**: `poly_weight_dim(s, 2, tp_spec(s,s)) =
+   sym_tp_weight_dim(s)` and `hom_dim(alt_spec(s,2), tp_spec(s,s)) =
+   alt_tp_weight_dim(s)` — the stage-1 counts re-derived by a
+   Wigner-table-free route.
+3b. **Stage 2b — `derive_poly<k>` kernel synthesis (OPEN — design gap found
+   at execution).** The original one-line staging ("flat multiset loop
+   composed with `derive_linear` on `sym_spec(s,k)`") is UNDERSPECIFIED for
+   k ≥ 3: `sym_lift` produces MONOMIAL coordinates, and the monomial basis
+   of Sym^k(V) is not irreps-organized, so composing with `derive_linear`
+   needs the symmetric-power change of basis, which does not exist yet
+   (§6.9). k = 2 needs no new machinery — `derive_poly(s, 2, x, w)` IS
+   `derive_sym_tp(s, x, x, w)` (stages 1a/1b), where the S₂ constraint was
+   solvable path-by-path precisely because swapping two tensor slots maps
+   the iterated-CG basis to itself (up to the pinned exchange sign). For
+   k ≥ 3 the S_k action MIXES coupling trees (recoupling), so the invariant
+   weight space is no longer axis-aligned in path coordinates. Deferred
+   until §6.9 is decided; do not improvise it inline.
 4. **Stage 3 — writable `SymIdx<k, IrrepsIdx<spec>>`.** Seams: **S1 + S2.**
    Parser: second argument accepts `parseIndexType | parseSimpleExpr`
    (Parser.fs:756-763); `TySymIdx` grows an index-type payload. TypeCheck:

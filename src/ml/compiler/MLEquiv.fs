@@ -510,6 +510,23 @@ and private judgeApp (ctx: Ctx) (env: Map<string, RepStatus>) (e: Expr) (f: Expr
                 requireRep "derive_alt_tp input 2" s yE |> Result.bind (fun () ->
                 requireInv "derive_alt_tp weight buffer" wE |> Result.map (fun () ->
                     Rep (tpSpec s s)))))
+        // The monomial lift is a REP EXIT the lattice cannot name. Its output
+        // components are the degree-K monomials of the input's components, so
+        // they co-rotate POLYNOMIALLY — as Sym^K(V) = ml.sym_spec(SPEC, K),
+        // whose action is not the block-diagonal one an `IrrepsIdx<spec>`
+        // value carries in this checker (the monomial basis is not the irreps
+        // basis; the change of basis is exactly what stage 2's derive_poly
+        // will bake). So a rep-typed input is rejected with that reason, while
+        // an all-invariant call is fine: the monomials of an invariant are
+        // invariant.
+        | "sym_lift", [ _; _; xE ] ->
+            judge ctx env xE |> Result.bind (fun sx ->
+                match sx with
+                | Inv -> Ok Inv
+                | Rep sp ->
+                    Error (bl4008 xE.Span (sprintf "function '%s': ml.sym_lift's monomial coordinates are not representation-classified in the current checker — the C(n+K-1, K) products of IrrepsIdx<%s> components co-rotate POLYNOMIALLY (as ml.sym_spec of that spec), not through a block-diagonal irreps action, so no {Rep spec, Inv, Opaque} status describes the result. Keep ml.sym_lift in uncertified assembly code for now; inside a certified body contract with ml.derive_sym_tp / ml.derive_tp / ml.tensor_product instead" ctx.FuncName (specStr sp)))
+                | Opaque ->
+                    Error (bl4008 xE.Span (sprintf "function '%s': cannot classify the argument to sym_lift" ctx.FuncName)))
         | ("derive_linear" | "derive_tp"), _ ->
             reject (sprintf "%s: inside an equiv-certified body use the full call form — the 2-argument binding form is for uncertified assembly code" op)
         | ("linear_rows" | "gated_rows"), _ ->
@@ -528,7 +545,7 @@ and private judgeApp (ctx: Ctx) (env: Map<string, RepStatus>) (e: Expr) (f: Expr
             reject "irreps_to_sym reads basis-dependent Cartesian components out of a representation — a rep escape, for uncertified assembly code only (e.g. feeding a solver); inside a certified body stay in irreps space"
         | ("tensor_to_irreps" | "sym_to_irreps"), _ ->
             reject (sprintf "%s: unrecognized call shape inside an equiv-certified body" op)
-        | ("tensor_product" | "linear" | "gated" | "scalars" | "norms" | "y_to" | "derive_sym_tp" | "derive_alt_tp"), _ ->
+        | ("tensor_product" | "linear" | "gated" | "scalars" | "norms" | "y_to" | "derive_sym_tp" | "derive_alt_tp" | "sym_lift"), _ ->
             reject (sprintf "%s: unrecognized call shape inside an equiv-certified body" op)
         | _ ->
             // other alias members (sizing etc. — normalized already, so an
