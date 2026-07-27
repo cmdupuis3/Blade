@@ -1231,8 +1231,11 @@ let (|IxSymmetryLike|IxCompound|IxDep|IxRagged|IxDense|) (ix: IRIndexType) =
          // IxKIrreps is dense BY DESIGN: every cell of the irreps space is
          // stored (extent = total_dim(spec), no compression); the block
          // structure is type identity, not a storage/iteration class.
-         | IxKIrreps
-         | IxKErrorRaggedNoPrior | IxKErrorIrrepsBadSpec -> IxDense)
+         // IxKPgIrreps (the point-group member) is dense for exactly the same
+         // reason — extent = pg_total_dim(spec), every cell stored.
+         | IxKIrreps | IxKPgIrreps
+         | IxKErrorRaggedNoPrior | IxKErrorIrrepsBadSpec
+         | IxKErrorPgIrrepsBadSpec -> IxDense)
 
 type LoopLevelInfo = {
     ArrayIndex: int
@@ -1380,6 +1383,12 @@ let fuseJointSLevels
             // (ragged/dep), or is a synthetic slot — none of which decode as a
             // row-major product. Symmetry must be SymNone independently of the
             // kind: a symmetric record is the wreath-product case, deferred.
+            // IxKPgIrreps (stage 5b-i) satisfies the same "extent IS
+            // cardinality" premise, but is deliberately NOT admitted here yet:
+            // fusion is an OPTIMIZATION, its absence only costs the joint
+            // compound axis, and admitting a second block-spec member to this
+            // path is a separate pin (the stage-4 admission of IxKIrreps came
+            // with its own corpus). Not fusing is the pre-stage-4 behaviour.
             let isDenseFusableKind (k: IxKind) =
                 match k with
                 | IxKPlain | IxKIrreps -> true
@@ -6191,6 +6200,7 @@ and ppIndexType (idx: IRIndexType) =
         | _ -> "?"
     match idx with
     | IrrepsIdxLike rendered -> ppIrrepsPower idx rendered
+    | PgIrrepsIdxLike rendered -> ppIrrepsPower idx rendered
     | _ ->
         match idx.Symmetry with
         | SymNone -> sprintf "Idx<%s>" extentStr
@@ -6203,7 +6213,9 @@ and ppIndexType (idx: IRIndexType) =
 /// stage 3 of plan-transforms-as-types, and what deduceOutputType infers for
 /// a comm group over irreps-typed inputs). A plain rank-1 irreps index prints
 /// as its own base form. Shared by both index printers so a diagnostic never
-/// shows the base while hiding the power.
+/// shows the base while hiding the power — and by both BLOCK-SPEC members
+/// (IrrepsIdxLike and PgIrrepsIdxLike), since the power wrapper is about
+/// Symmetry/Rank and says nothing about which member the base belongs to.
 and ppIrrepsPower (idx: IRIndexType) (renderedBase: string) =
     match idx.Symmetry with
     | SymSymmetric -> sprintf "SymIdx<%d, %s>" idx.Rank renderedBase
@@ -6243,6 +6255,7 @@ and ppIndexTypeIn (names: Map<IRId, string>) (idx: IRIndexType) =
             | _ -> "?"
     match idx with
     | IrrepsIdxLike rendered -> ppIrrepsPower idx rendered
+    | PgIrrepsIdxLike rendered -> ppIrrepsPower idx rendered
     | _ ->
         match idx.Symmetry with
         | SymNone -> sprintf "Idx<%s>" extentStr

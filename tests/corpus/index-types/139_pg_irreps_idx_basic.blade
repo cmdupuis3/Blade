@@ -1,0 +1,74 @@
+// TEST: PgIrrepsIdx Basic
+import ml as ml
+// ============================================================================
+// PgIrrepsIdx<GROUP, spec> — the SECOND block-spec member of the
+// transforms-as-types discipline (docs/plan-transforms-as-types.md §3.6,
+// stage 5b-i). Everything IrrepsIdx<spec> is, over a FINITE point group
+// instead of O(3):
+//
+//   * GROUP is a bare NAME in type position, resolved against the frozen
+//     MLPointSpec registry ({C4, D4}) at lowering time — point groups are
+//     table data, so the slot is a name the way Idx<n>'s slot is a number;
+//   * the spec entries are (LABEL_NAME, mult) TUPLES rather than
+//     (l, parity, mult) triples, because a finite group's irreducibles are
+//     NAMED in its character table (C4: A, B, E — D4: A1, A2, B1, B2, E);
+//   * the extent is pg_total_dim = Σ mult · dim_R(label) and every cell is
+//     stored (flat dense, no compression) — the block structure is type
+//     IDENTITY, not a storage class, exactly as for IrrepsIdx.
+//
+// PS = [("A", 1), ("E", 2)] at C4: one copy of the 1-dimensional trivial
+// label A and two copies of the 2-dimensional E, so total_dim = 1 + 2·2 = 5.
+//
+// This file pins the extent, the dense storage, indexing, kernel iteration
+// over range<alias>, and the ALIAS ROUND TRIP: `type CS = PgIrrepsIdx<C4, PS>`
+// folds the alias name INTO the pg identity tag (the stage-3 registerTypeDecl
+// fix, replayed for the pg tag), so an anonymously-typed array still unifies
+// with the alias-typed annotation and with an anonymous parameter — the
+// name-permissive edge. The strict edges are index-types/141 (unknown label)
+// and /142 (cross-member).
+// ============================================================================
+let static PS = [("A", 1), ("E", 2)]
+let static PD = ml.pg_total_dim("C4", PS)
+// EXPECT: PD = 5
+let static NB = ml.pg_irreps_len("C4", PS)
+// EXPECT: NB = 2
+
+type CS = PgIrrepsIdx<C4, PS>
+
+let x: Array<Float like PgIrrepsIdx<C4, PS>> = [1.0, 2.0, 3.0, 4.0, 5.0]
+// EXPECT: x = [1, 2, 3, 4, 5]
+let first = x(0)
+let last = x(4)
+// EXPECT: first = 1.0
+// EXPECT: last = 5.0
+
+// Anonymous -> alias: compatible (the alias name is nominative but an
+// ANONYMOUS pg identity of the same (group, spec) adopts either alias).
+let y: Array<Float like CS> = x
+// EXPECT: y = [1, 2, 3, 4, 5]
+
+// Kernel iteration over the alias-named index space.
+let r = method_for(range<CS>) <@> lambda(i) -> y(i) * 2.0 |> compute
+// EXPECT: r = [2, 4, 6, 8, 10]
+
+// Alias -> anonymous parameter: the other direction of the same rule.
+function head_plus_tail(v: Array<Float like PgIrrepsIdx<C4, PS>>) -> Float = {
+    v(0) + v(4)
+}
+let s = head_plus_tail(y)
+// EXPECT: s = 6.0
+
+// The block accessors read the frozen table through the spec. Block 1 is E:
+// dim_R 2, multiplicity 2, offset 1 (block 0 is the single A cell), and its
+// Frobenius-Schur weight e = dim_R End_G(E) is 2 — E is of COMPLEX type at
+// C4, which is the whole subject of ml-ops/023.
+let static E_DIM = ml.pg_irreps_dim("C4", PS, 1)
+let static E_MULT = ml.pg_irreps_mult("C4", PS, 1)
+let static E_OFF = ml.pg_irreps_offset("C4", PS, 1)
+let static E_FS = ml.pg_irreps_fs("C4", PS, 1)
+// EXPECT: E_DIM = 2
+// EXPECT: E_MULT = 2
+// EXPECT: E_OFF = 1
+// EXPECT: E_FS = 2
+let static A_FS = ml.pg_irreps_fs("C4", PS, 0)
+// EXPECT: A_FS = 1

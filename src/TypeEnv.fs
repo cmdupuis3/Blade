@@ -444,8 +444,11 @@ let formatTypeError (err: TypeError) : string =
     | ProviderWriteNamedBinding alias -> sprintf "%s.write stores a NAMED array binding (its name becomes the store variable's name): bind the value first (let A = ...; %s.write(\"path\", A))" alias alias
     | ProviderWriteArgs alias -> sprintf "%s.write expects (\"path\", array): a string-literal store path and the array to write" alias
     | IrrepsIdxArgMismatch (pos, expected, actual) -> sprintf "argument %d: IrrepsIdx mismatch: the parameter expects %s but the argument carries %s. IrrepsIdx identity is the spec (plus nominative alias name) — equal total_dim does not make two irreps spaces interchangeable." pos expected actual
+    | BlockSpecArgMismatch (pos, expected, actual) -> sprintf "argument %d: block-spec index mismatch: the parameter expects %s but the argument carries %s. A block-structured index's identity is its GROUP FAMILY plus its spec (plus nominative alias name) — equal total_dim does not make two block spaces interchangeable, and an O(3) irreps space is never a point-group one." pos expected actual
     | IrrepsIdxSpec detail -> sprintf "IrrepsIdx: %s. The spec must be a static array of (l, parity, mult) int triples — a `let static` binding or an inline literal like IrrepsIdx<[(0, 0, 2), (1, 1, 2)]>." detail
     | IrrepsIdxSpecFn (func, detail) -> sprintf "function '%s': IrrepsIdx: %s. The spec must be a static array of (l, parity, mult) int triples — a `let static` binding or an inline literal like IrrepsIdx<[(0, 0, 2), (1, 1, 2)]>." func detail
+    | PgIrrepsIdxSpec detail -> sprintf "PgIrrepsIdx: %s. The form is PgIrrepsIdx<GROUP, SPEC> with GROUP a registered point group and SPEC a static array of (LABEL_NAME, mult) tuples — a `let static` binding or an inline literal like PgIrrepsIdx<C4, [(\"A\", 1), (\"E\", 2)]>." detail
+    | PgIrrepsIdxSpecFn (func, detail) -> sprintf "function '%s': PgIrrepsIdx: %s. The form is PgIrrepsIdx<GROUP, SPEC> with GROUP a registered point group and SPEC a static array of (LABEL_NAME, mult) tuples — a `let static` binding or an inline literal like PgIrrepsIdx<C4, [(\"A\", 1), (\"E\", 2)]>." func detail
     | ComplexArity got -> sprintf "complex expects exactly two float components — complex(re, im) — got %d argument(s)" got
     | CumulantOrderExceeds (order, carried) -> sprintf "cumulant: order %d exceeds the dist's carried order %d — insufficient stochastic order. Construct with a higher order (dist(A, %d)) or project a carried component." order carried order
     | DistOrderDisagree (op, leftOrder, rightOrder) -> sprintf "dist %s: orders disagree (%d vs %d) — carry the same stochastic order on both sides" op leftOrder rightOrder
@@ -513,9 +516,11 @@ let diagnosticOfCompileError (e: CompileError) : Blade.Diagnostics.Diagnostic =
             | DistOrderCompileTime _ -> "BL4002"
             | IndexTagMismatchNamed _ | IndexTagMismatchAnon _ | CrossNominalIndexArith _
             | CrossAnonIndexArith _ | IndexTypeArithForbidden _ | IrrepsIdxArgMismatch _
+            | BlockSpecArgMismatch _
             | CompoundBareWildcard _ | CompoundWildcardArity _ | CompoundAllFree _
             | CompoundOverSupplied _ | CompoundNeedsTuple _ | RaggedIdxNeedsPrior _
-            | IrrepsIdxSpec _ | IrrepsIdxSpecFn _ | TagWildcardNotParam _ -> "BL4003"
+            | IrrepsIdxSpec _ | IrrepsIdxSpecFn _
+            | PgIrrepsIdxSpec _ | PgIrrepsIdxSpecFn _ | TagWildcardNotParam _ -> "BL4003"
             | DecompactDimRange _ | DecompactPlainAxis _ | DecompactLastSlotOnly _
             | TransposeAxisRange _ | TransposeAxesEqual _ | TransposeWithinGroup _
             | StackNeedsArrays _ | StackShapeMismatch _ | JoinNeedsArrays _

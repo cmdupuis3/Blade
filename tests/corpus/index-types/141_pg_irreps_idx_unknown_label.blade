@@ -1,0 +1,15 @@
+// TEST: PgIrrepsIdx Unknown Label (rejects)
+// ============================================================================
+// The spec's LABEL NAMES are checked against the group's own character table,
+// and the diagnostic lives in the DECODER (`pgSpecOfStatic`) — the only place
+// that both knows the text the user wrote and can quote the roster. "T2" is a
+// label of the cubic groups, not of C4, whose three real-irreducible labels
+// are A, B and E; a finite group has three to five of them, so listing the
+// whole roster IS the fix.
+//
+// This is the pg twin of index-types/117 (IrrepsIdx malformed spec): the spec
+// RESOLVES statically and then fails validation, so the message has to carry
+// the validation failure rather than "the annotation was refused".
+// ============================================================================
+let static bad = [("A", 1), ("T2", 1)]
+let x: Array<Float like PgIrrepsIdx<C4, bad>> = [1.0, 2.0, 3.0, 4.0]

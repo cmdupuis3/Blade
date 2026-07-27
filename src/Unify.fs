@@ -28,6 +28,11 @@ type TypeError =
     | CrossAnonIndexArith of left: int * right: int
     | IndexTypeArithForbidden of name: string
     | IrrepsIdxArgMismatch of pos: int * expected: string * actual: string
+    /// The family-level twin of the above (stage 5b-i): a direct-application
+    /// mismatch where at least one side is the POINT-GROUP block-spec member.
+    /// Covers pg-vs-pg AND the cross-member pair (an irreps space is never a
+    /// pg-irreps space, whatever their extents).
+    | BlockSpecArgMismatch of pos: int * expected: string * actual: string
     | CompoundBareWildcard of rank: int
     | CompoundWildcardArity of rank: int * tupleLen: int
     | CompoundAllFree of rank: int
@@ -36,6 +41,12 @@ type TypeError =
     | RaggedIdxNeedsPrior of func: string
     | IrrepsIdxSpec of detail: string
     | IrrepsIdxSpecFn of func: string * detail: string
+    /// The pg-irreps twin of the two above (stage 5b-i). Separate cases
+    /// rather than a widened one: the trailing "what a spec looks like"
+    /// sentence differs per block-spec member, and that sentence is the
+    /// actionable half of the diagnostic.
+    | PgIrrepsIdxSpec of detail: string
+    | PgIrrepsIdxSpecFn of func: string * detail: string
     /// `Base<_>` outside parameter position. `where` names the site.
     | TagWildcardNotParam of where_: string
     // Symmetry / compact-group violations (BL4004)
@@ -388,7 +399,36 @@ let stripTagAnnotation (ty: IRType) : IRType =
 /// What it does NOT yet bridge: the §5.2 uniform-kind array identity
 /// (flat uniform vs nested uniform). That requires `ToFlat` mode,
 /// which is reserved for the B-flat migration.
+
+/// A BLOCK-SPEC tag, generalized over the two members of the family
+/// (docs/plan-transforms-as-types.md §3.6, stage 5b-i): the O(3) irreps tag
+/// `__irreps:<name>:<l,p,m|...>` and the point-group tag
+/// `__pgirreps:<group>:<name>:<LABEL,mult|...>`. Yields
+/// (member-and-spec identity, alias name option) where the identity string
+/// is what makes two tags THE SAME SPACE:
 ///
+///   - within a member, it is the serialized spec payload — so different
+///     specs are distinct even at equal total_dim (the whole point);
+///   - ACROSS members it can never collide, because the member's own frozen
+///     prefix is part of it. An `IrrepsIdx<s>` and a `PgIrrepsIdx<G, s'>` of
+///     equal extent are therefore distinct by the same one comparison, with
+///     no cross-member case to write down and no risk of the two families'
+///     payloads accidentally reading alike.
+///
+/// The alias name rides separately because its rule is DIFFERENT from the
+/// identity's: two named aliases of one spec are distinct (nominative), while
+/// anonymous-vs-named is compatible.
+///
+/// The identity is built by RE-SERIALIZING with the alias name erased, i.e.
+/// the member's own canonical tag writer — injective by construction (it is
+/// the format the tag round-trips through) and free of any %A truncation
+/// hazard on long specs.
+let (|BlockSpecTag|_|) (tag: string) : (string * string option) option =
+    match tag with
+    | IrrepsTag (nameOpt, triples) -> Some (mkIrrepsTag None triples, nameOpt)
+    | PgIrrepsTag (group, nameOpt, entries) -> Some (mkPgIrrepsTag group None entries, nameOpt)
+    | _ -> None
+
 /// Numeric promotion: when two different numeric scalars meet, the
 /// inference variable (if any) is rebound to the promoted type so that
 /// downstream IR and codegen see the correct wider type.
@@ -396,13 +436,19 @@ let stripTagAnnotation (ty: IRType) : IRType =
 /// index types, Dist axes). True = the pair is INCOMPATIBLE. One shared
 /// predicate (previously duplicated inline in the ArrayElem and IRTDist
 /// arms) so the rules cannot drift:
-///   - Irreps tags (both sides): identity is the SPEC plus optional
-///     nominative alias name — different specs are distinct even at equal
-///     total_dim; two ALIASES of the same spec are distinct (nominative);
-///     anonymous-vs-named of the same spec is compatible (mirrors the
-///     Some-tag vs None permissiveness below). This arm must precede the
-///     synthetic-tag exemption: irreps tags are "__"-prefixed but carry
-///     identity, unlike the structural bookkeeping sentinels.
+///   - Block-spec tags (both sides — see `BlockSpecTag`): identity is the
+///     MEMBER plus the SPEC, plus the optional nominative alias name.
+///     Different specs are distinct even at equal total_dim; two ALIASES of
+///     the same spec are distinct (nominative); anonymous-vs-named of the
+///     same spec is compatible (mirrors the Some-tag vs None permissiveness
+///     below); and an irreps space is never a pg-irreps space regardless of
+///     extent. This arm must precede the synthetic-tag exemption: block-spec
+///     tags are "__"-prefixed but carry identity, unlike the structural
+///     bookkeeping sentinels.
+///   - A block-spec tag against Tag = None stays COMPATIBLE and falls through
+///     to the permissive arm below: that is plain adoption — an untagged
+///     buffer flowing into a block-structured slot, the same permissiveness
+///     any anonymous index gets.
 ///   - User-named tags are nominative: lat != lon even if both Idx<180>.
 ///   - Synthetic tags ("__"-prefixed markers like "__raggedidx_inline")
 ///     are structural and never gate unification.
@@ -411,7 +457,7 @@ let stripTagAnnotation (ty: IRType) : IRType =
 let indexPairIncompatible (i1: IRIndexType) (i2: IRIndexType) : bool =
     let isSyntheticTag (t: string) = t.StartsWith("__")
     match i1.Tag, i2.Tag with
-    | Some (IrrepsTag (n1, s1)), Some (IrrepsTag (n2, s2)) ->
+    | Some (BlockSpecTag (s1, n1)), Some (BlockSpecTag (s2, n2)) ->
         s1 <> s2 || (match n1, n2 with
                      | Some a, Some b -> a <> b
                      | _ -> false)

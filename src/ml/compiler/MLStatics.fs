@@ -13,6 +13,7 @@ module Blade.ML.Statics
 open Blade.StaticEval
 open Blade.ML.Spec
 open Blade.ML.PermSpec
+open Blade.ML.PointSpec
 
 /// Convert a static value to an ML irreps spec: array of (l, parity, mult)
 /// int triples, parity 0 = even / 1 = odd.
@@ -41,6 +42,60 @@ let cfgOfStatic (what: string) (v: StaticValue) : Result<TPConfig, string> =
         specOfStatic (what + " specOut") so |> Result.map (fun c ->
             ({ Spec1 = a; Spec2 = b; SpecOut = c } : TPConfig))))
     | _ -> Error (sprintf "%s: expected a static (spec1, spec2, specOut) triple" what)
+
+// ---------------------------------------------------------------------------
+// The POINT-GROUP block-spec member (plan-transforms-as-types §3.6, stage
+// 5b-i). Twins of the two decoders above, deliberately separate: a point-group
+// spec names its blocks by frozen character-table LABEL, not by (l, parity),
+// and every diagnostic wants to say the group and quote its roster.
+// ---------------------------------------------------------------------------
+
+/// Resolve a point-group NAME against the frozen registry. The unknown-group
+/// diagnostic lives HERE (rather than at `PointSpec.pointGroup`, which
+/// failwithf's because reaching it with an unregistered name is a compiler
+/// bug) — this is the user-facing boundary, and it names the roster.
+let pgGroupByName (what: string) (name: string) : Result<PointGroup, string> =
+    if List.contains name pointGroupNames then Ok (pointGroup name)
+    else
+        Error (sprintf "%s: '%s' is not a registered point group — the registry is {%s}. The roster boundary is MATRIX RATIONALITY (every generator entry in {0, +-1}), not crystallography"
+                   what name (String.concat ", " pointGroupNames))
+
+/// The expression-position spelling of the same thing: a static STRING naming
+/// a registered group. (In TYPE position — `PgIrrepsIdx<C4, SPEC>` — the group
+/// is a bare identifier and goes straight to `pgGroupByName`.)
+let pgGroupOfStatic (what: string) (v: StaticValue) : Result<PointGroup, string> =
+    match v with
+    | SVString name -> pgGroupByName what name
+    | _ ->
+        Error (sprintf "%s: GROUP must be a static string naming a registered point group, e.g. \"C4\" — the registry is {%s}"
+                   what (String.concat ", " pointGroupNames))
+
+/// Convert a static value to a point-group spec: an array of
+/// (LABEL_NAME, multiplicity) tuples against `grp`'s frozen character table.
+///
+/// THE UNKNOWN-LABEL DIAGNOSTIC LIVES HERE, not in the counting layer: this is
+/// the only place that knows the text the user wrote, and the useful thing to
+/// say is the group's whole roster (a finite group has three to five labels —
+/// listing them IS the fix).
+let pgSpecOfStatic (what: string) (grp: PointGroup) (v: StaticValue) : Result<PgSpec, string> =
+    let roster = grp.Irreps |> List.map (fun ir -> ir.Name) |> String.concat ", "
+    let entryOf (e: StaticValue) =
+        match e with
+        | SVTuple [ SVString label; SVInt m ] ->
+            if not (grp.Irreps |> List.exists (fun ir -> ir.Name = label)) then
+                Error (sprintf "%s: '%s' is not a label of point group %s — its labels are {%s}" what label grp.Name roster)
+            elif m < 1L then
+                Error (sprintf "%s: multiplicity must be >= 1 (label '%s' carries %d)" what label m)
+            else Ok ((label, int m) : string * int)
+        | _ ->
+            Error (sprintf "%s: spec entries must be (LABEL_NAME, mult) tuples — a STRING label from %s's table {%s} and an int multiplicity" what grp.Name roster)
+    match v with
+    | SVTuple entries when not entries.IsEmpty ->
+        entries |> List.fold (fun acc e ->
+            acc |> Result.bind (fun es -> entryOf e |> Result.map (fun x -> es @ [x])))
+            (Ok [])
+    | _ ->
+        Error (sprintf "%s: expected a static array of (LABEL_NAME, mult) tuples over point group %s {%s}" what grp.Name roster)
 
 let private specToStatic (s: Spec) : StaticValue =
     SVTuple (s |> List.map (fun e ->
@@ -224,3 +279,54 @@ let install () =
         registerBlockAccessor "irreps_mult" (fun s b -> s.[b].Mult)
         registerBlockAccessor "irreps_dim" (fun s b -> dim s.[b])
         registerBlockAccessor "irreps_offset" (fun s b -> (blockStarts s).[b])
+        // ------------------------------------------------------------------
+        // The POINT-GROUP sizing surface (plan-transforms-as-types §3.6,
+        // stage 5b-i). Every one takes GROUP as its first argument — a static
+        // string naming a registered group — and every one returns an INT.
+        // NO pg builtin returns a SPEC: §3.6's post-round check defers the
+        // spec-valued forms (the pg analogue of tp_spec / sym_spec) to the TP
+        // stage, since there is no pg op consuming a derived spec yet.
+        //
+        // The one that carries the thesis is `pg_hom_dim`: the FS formula
+        // Sum_i m_i*n_i*e_i, which on the SAME spec shape [trivial x 1, E x 2]
+        // reads 9 at C4 (E complex, e = 2) and 5 at D4 (E real, e = 1) —
+        // same dimensions, same R90 generator, one differing input.
+        // `pg_irreps_fs` is the e itself, exposed so a user can SEE the factor
+        // rather than infer it from a count.
+        // ------------------------------------------------------------------
+        registerStaticBuiltin (statName "pg_total_dim") (fun args ->
+            match args with
+            | [ grp; spec ] ->
+                pgGroupOfStatic "pg_total_dim GROUP" grp |> Result.bind (fun g ->
+                pgSpecOfStatic "pg_total_dim SPEC" g spec |> Result.map (fun s ->
+                    SVInt (int64 (pgTotalDim g s))))
+            | _ -> Error "pg_total_dim: expected (GROUP, SPEC) static arguments")
+        registerStaticBuiltin (statName "pg_hom_dim") (fun args ->
+            match args with
+            | [ grp; sIn; sOut ] ->
+                pgGroupOfStatic "pg_hom_dim GROUP" grp |> Result.bind (fun g ->
+                pgSpecOfStatic "pg_hom_dim SIN" g sIn |> Result.bind (fun a ->
+                pgSpecOfStatic "pg_hom_dim SOUT" g sOut |> Result.map (fun b ->
+                    SVInt (int64 (pgHomDim g a b)))))
+            | _ -> Error "pg_hom_dim: expected (GROUP, SIN, SOUT) static arguments")
+        registerStaticBuiltin (statName "pg_irreps_len") (fun args ->
+            match args with
+            | [ grp; spec ] ->
+                pgGroupOfStatic "pg_irreps_len GROUP" grp |> Result.bind (fun g ->
+                pgSpecOfStatic "pg_irreps_len SPEC" g spec |> Result.map (fun s ->
+                    SVInt (int64 s.Length)))
+            | _ -> Error "pg_irreps_len: expected (GROUP, SPEC) static arguments")
+        let registerPgBlockAccessor name (f: PointGroup -> PgSpec -> int -> int) =
+            registerStaticBuiltin (statName name) (fun args ->
+                match args with
+                | [ grp; spec; SVInt b ] ->
+                    pgGroupOfStatic (name + " GROUP") grp |> Result.bind (fun g ->
+                    pgSpecOfStatic (name + " SPEC") g spec |> Result.bind (fun s ->
+                        if b < 0L || b >= int64 s.Length then
+                            Error (sprintf "%s: block index %d out of range (spec has %d blocks)" name b s.Length)
+                        else Ok (SVInt (int64 (f g s (int b))))))
+                | _ -> Error (sprintf "%s: expected (GROUP, SPEC, BLOCK) static arguments" name))
+        registerPgBlockAccessor "pg_irreps_dim" (fun g s b -> (pgIrrep g (fst s.[b])).DimR)
+        registerPgBlockAccessor "pg_irreps_mult" (fun _ s b -> snd s.[b])
+        registerPgBlockAccessor "pg_irreps_fs" (fun g s b -> endDim (pgIrrep g (fst s.[b])).Fs)
+        registerPgBlockAccessor "pg_irreps_offset" (fun g s b -> (pgBlockStarts g s).[b])

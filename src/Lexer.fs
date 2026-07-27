@@ -92,6 +92,7 @@ and Keyword =
     | KwDepIdx
     | KwRaggedIdx
     | KwIrrepsIdx
+    | KwPgIrrepsIdx
     | KwMethodFor
     | KwObjectFor
     | KwRange
@@ -199,6 +200,7 @@ let keywords =
       "DepIdx", KwDepIdx
       "RaggedIdx", KwRaggedIdx
       "IrrepsIdx", KwIrrepsIdx
+      "PgIrrepsIdx", KwPgIrrepsIdx
       "method_for", KwMethodFor
       "object_for", KwObjectFor
       "range", KwRange

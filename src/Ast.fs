@@ -222,6 +222,20 @@ type TypeExpr =
     // no compression) — the spec matters for type IDENTITY, not storage.
     // The spec is an expression resolved at typecheck via StaticEval.
     | TyIrrepsIdx of spec: Expr
+    // PgIrrepsIdx<GROUP, spec> — the SECOND block-spec member
+    // (docs/plan-transforms-as-types.md §3.6, stage 5b-i): a block-structured
+    // dense index over a POINT GROUP's labelled irreducible blocks. GROUP is
+    // an identifier resolved against the frozen MLPointSpec registry ({C4,
+    // D4}) at lowering time — a bare name in type position, exactly as the
+    // group reads in the mathematics — and `spec` is a static array of
+    // (LABEL_NAME, mult) tuples: LABEL names rather than (l, parity) integers,
+    // because a finite group's irreps are NAMED in its character table.
+    // Extent is pg_total_dim(spec) = Σ mult*dim_R(label); every cell stored.
+    //
+    // A DISTINCT former from TyIrrepsIdx on purpose (§3.6's twin-not-reroute):
+    // the two carry different payloads, print differently, and must never
+    // unify with each other even at equal extent.
+    | TyPgIrrepsIdx of group: Ident * spec: Expr
     // halo<Inner, [offsets]> in TYPE position — a stencil traversal
     // transformer wrapping an inner index type, legal ONLY as a range<> slot
     // (n-D separable composition: range<halo<Lat,[..]>, halo<Lon,[..]>>).

@@ -99,6 +99,18 @@ let private tyIrrepsArr (s: Spec) : TypeExpr =
             syn (ExprTuple [ iLit e.L; iLit e.Parity; iLit e.Mult ]))))
     TyArray (TyNamed ("Float", []), [ TyIrrepsIdx specLit ])
 
+/// Array<Float like PgIrrepsIdx<GROUP, [(LABEL, mult), ...]>> — the pg twin of
+/// `tyIrrepsArr` (stage 5b-i), the inline spec literal rebuilt from the
+/// RESOLVED PgSpec. Anonymous (no alias name), so a user's alias of the same
+/// (group, spec) unifies by the name-permissive rule while a wrong-spec
+/// annotation, a wrong-GROUP annotation, or an O(3) irreps argument of the
+/// same extent is a type error.
+let private tyPgIrrepsArr (group: string) (s: Blade.ML.PointSpec.PgSpec) : TypeExpr =
+    let specLit =
+        syn (ExprArrayLit (s |> List.map (fun (label, m) ->
+            syn (ExprTuple [ syn (ExprLit (LitString label)); iLit m ]))))
+    TyArray (TyNamed ("Float", []), [ TyPgIrrepsIdx (group, specLit) ])
+
 let private mkFunc name (ps: (string * TypeExpr) list) retTy body : FunctionDecl =
     { Name = name
       TypeParams = []
@@ -741,6 +753,132 @@ let private deriveLinearDecl (name: string) (specIn: Spec) (specOut: Spec) : Fun
     mkFunc name [ ("w", tyFloatArr wDim); ("x", tyIrrepsArr specIn) ] (tyIrrepsArr specOut) body
 
 // ============================================================================
+// The POINT-GROUP block-spec surface (plan-transforms-as-types §3.6, §7 stage
+// 5b-i) — `derive_linear`'s SECOND member, and the first place the
+// Frobenius-Schur correction is visible in emitted code.
+// ============================================================================
+//
+// Over ℝ, Schur's lemma does NOT give one free scalar per (input copy, output
+// copy) pair: it gives one free element of the division algebra
+// End_G(U) ∈ {ℝ, ℂ, ℍ}, so a cell carries e = dim_ℝ End_G(U) scalars and
+//
+//     dim_ℝ Hom_G(⊕ mᵢUᵢ, ⊕ nᵢUᵢ) = Σᵢ mᵢ·nᵢ·eᵢ         (the FS formula)
+//
+// Every O(3) irrep is of real type, which is exactly why `deriveLinearDecl`
+// above can be `Σ mᵢ·nᵢ` and still be right. Point groups break that: C4's E
+// is of COMPLEX type (e = 2) while D4's E — same dimension, same R₉₀ generator
+// — is of REAL type (e = 1). All of the difference is in this file's `basis`.
+//
+// THE EMITTED BASIS OF A CELL is `PointSpec.endBasis`: [Id] at e = 1 and
+// [Id, J] at e = 2, with J the BAKED complex structure from the frozen table
+// (there is no call site at which J could be "derived" — it depends on the
+// chosen real form). So the emitted map of one cell is
+//
+//     e = 1:  out_block += w · x_block                (Id only)
+//     e = 2:  out_block += w_Id · x_block + w_J · (J · x_block)
+//
+// WEIGHT LAYOUT: homBlocks order (pair-major, output-major within), mult_out ×
+// mult_in cells per pair, and the e scalars of a cell CONSECUTIVE — [Id, J]
+// adjacent, so a cell is a contiguous e-slice and the e = 1 layout degenerates
+// to `deriveLinearDecl`'s exactly.
+//
+// THE e = 1 PATH IS `deriveLinearDecl`'s LOOP NEST VERBATIM — same statement
+// order, same index association, same `wv` binding — because an all-real-type
+// point group must agree with a hand-written O(3)-shaped layer to the ULP, and
+// that pin is only meaningful if the arithmetic is literally the same shape.
+
+/// derive_pg_linear for a fixed (group, specIn, specOut): the COMPLETE
+/// ℝ-Schur basis of Hom_G(V_in, V_out) for a point group. See the block
+/// comment above for the FS formula, the emitted cell basis and the layout.
+let private derivePgLinearDecl (name: string) (grp: Blade.ML.PointSpec.PointGroup)
+                               (specIn: Blade.ML.PointSpec.PgSpec)
+                               (specOut: Blade.ML.PointSpec.PgSpec)
+    : Result<FunctionDecl, ElabError> =
+    let dOut = Blade.ML.PointSpec.pgTotalDim grp specOut
+    let sIn = Blade.ML.PointSpec.pgBlockStarts grp specIn |> List.toArray
+    let sOut = Blade.ML.PointSpec.pgBlockStarts grp specOut |> List.toArray
+    let pairs = Blade.ML.PointSpec.pgHomBlocks grp specIn specOut
+    let mutable wOff = 0
+    let pairStmts =
+        pairs |> List.collect (fun (bi, bo, (label, mOut), (_, mIn)) ->
+            let ir = Blade.ML.PointSpec.pgIrrep grp label
+            let d = ir.DimR
+            // THE FsQuat GUARD: `endBasis` is the emission-adjacent path
+            // MLPointSpec reserves the quaternionic value against — counting
+            // reads endDim FsQuat = 4 happily, this raises a loud internal
+            // error. Calling it on EVERY pair (not just the e = 2 ones) is
+            // what makes the guard reachable rather than decorative.
+            let basis = Blade.ML.PointSpec.endBasis ir
+            let e = List.length basis
+            if not (Blade.ML.PointSpec.matEq (List.head basis) (Blade.ML.PointSpec.matId d)) then
+                failwithf "internal: the End-basis of %s::%s does not lead with the identity — the e = 1 emission path assumes it"
+                    grp.Name label
+            let thisOff = wOff
+            wOff <- wOff + mOut * mIn * e
+            // The weight index of scalar `k` of cell (mo, mi): cells in
+            // (mo, mi) row-major order, e scalars consecutive within a cell.
+            let wAt (k: int) =
+                let cell = add (mul (v "mo") (iLit mIn)) (v "mi")
+                let flat = if e = 1 then cell else mul (iLit e) cell
+                idx "w" (add (iLit thisOff) (if k = 0 then flat else add flat (iLit k)))
+            if e = 1 then
+                // VERBATIM `deriveLinearDecl`'s nest (mo -> mi -> c, one `wv`
+                // let, one accumulate) — the ulp pin depends on this shape.
+                [ sFor "mo" 0 mOut
+                    [ sFor "mi" 0 mIn
+                        [ sLet "wv" (wAt 0)
+                          sFor "c" 0 d
+                            [ sAccum (idx "out" (add (iLit sOut.[bo]) (add (mul (v "mo") (iLit d)) (v "c"))))
+                                     (mul (v "wv")
+                                          (idx "x" (add (iLit sIn.[bi]) (add (mul (v "mi") (iLit d)) (v "c"))))) ] ] ] ]
+            else
+                // e = 2: the two-term form, with J's entries BAKED SPARSE.
+                // J is ±1-sparse over the shipped roster (matrix rationality
+                // is what put C4/D4 there), so each output component gets the
+                // Id term plus exactly the nonzero J terms written out — no
+                // inner contraction loop, no zero multiplies. `c` is unrolled
+                // because J's support varies per row; d ≤ 2 here.
+                let j = List.item 1 basis
+                let anyNeg = j |> Array.exists (Array.exists (fun v -> v < 0))
+                [ sFor "mo" 0 mOut
+                    [ sFor "mi" 0 mIn
+                        ([ yield sLet "wid" (wAt 0)
+                           yield sLet "wj" (wAt 1)
+                           // -w bound once per cell rather than folded into
+                           // each term: `0.0 - w` is exact, and reusing one
+                           // binding keeps every negative J entry identical.
+                           if anyNeg then yield sLet "wjn" (sub (fLit 0.0) (v "wj"))
+                           for c in 0 .. d - 1 do
+                             let outAt = idx "out" (add (iLit sOut.[bo]) (add (mul (v "mo") (iLit d)) (iLit c)))
+                             let xAt (k: int) =
+                                 idx "x" (add (iLit sIn.[bi]) (add (mul (v "mi") (iLit d)) (iLit k)))
+                             yield sAccum outAt (mul (v "wid") (xAt c))
+                             for k in 0 .. d - 1 do
+                               let jv = j.[c].[k]
+                               if jv = 1 then yield sAccum outAt (mul (v "wj") (xAt k))
+                               elif jv = -1 then yield sAccum outAt (mul (v "wjn") (xAt k))
+                               elif jv <> 0 then
+                                   failwithf "internal: the baked J of %s::%s has entry %d at (%d, %d) — the emitted two-term form bakes J SPARSE and handles only {0, +-1} (the shipped roster's matrix-rationality boundary)"
+                                       grp.Name label jv c k ]) ] ])
+    let wDim = wOff
+    // The count is the theorem BECAUSE the basis is emitted: the number of
+    // weight slots the kernel actually reads, checked against the number the
+    // user sized their buffer by (`ml.pg_hom_dim`). The derive_perm_linear
+    // precedent, one member over.
+    let declared = Blade.ML.PointSpec.pgHomDim grp specIn specOut
+    if wDim <> declared then
+        Error (err5000 (sprintf "internal: derive_pg_linear emitted %d weight slots but pg_hom_dim(%s, ...) says %d"
+                            wDim grp.Name declared))
+    else
+        let body =
+            syn (ExprBlock (
+                [ yield sLetMut "out" (zerosLit dOut)
+                  yield! pairStmts ],
+                Some (v "out")))
+        Ok (mkFunc name [ ("x", tyPgIrrepsArr grp.Name specIn); ("w", tyFloatArr wDim) ]
+                (tyPgIrrepsArr grp.Name specOut) body)
+
+// ============================================================================
 // The Sₙ INDEX-ACTION surface (plan-transforms-as-types §3.6, §7 stage 5a-ii)
 // ============================================================================
 //
@@ -1004,6 +1142,7 @@ let private opNames =
                  "scalars"; "norms"; "derive_linear"; "derive_tp"
                  "derive_sym_tp"; "derive_alt_tp"; "sym_lift"; "derive_poly"
                  "derive_perm_linear"; "derive_perm_bias"; "perm_matmul"
+                 "derive_pg_linear"
                  "tensor_to_irreps"; "sym_to_irreps"; "irreps_to_sym" ]
 
 /// Static sizing builtins that make up the rest of the ML surface (used in
@@ -1018,7 +1157,12 @@ let private sizingNames =
                  "sym_spec"; "alt_spec"; "poly_weight_dim"
                  "perm_weight_dim"; "perm_bias_dim"
                  "irreps_len"; "irreps_l"; "irreps_parity"; "irreps_mult"
-                 "irreps_dim"; "irreps_offset" ]
+                 "irreps_dim"; "irreps_offset"
+                 // The point-group sizing surface (stage 5b-i). All ints;
+                 // none returns a spec.
+                 "pg_total_dim"; "pg_hom_dim"; "pg_irreps_len"
+                 "pg_irreps_dim"; "pg_irreps_mult"; "pg_irreps_fs"
+                 "pg_irreps_offset" ]
 
 type private ElabState = {
     mutable Counter: int
@@ -1042,6 +1186,36 @@ let private staticArg (statics: StaticEnv) (what: string) (e: Expr) : Result<Sta
         | Some sv -> Ok sv
         | None -> Error (err5000 (sprintf "%s: '%s' is not a `let static` binding (ML op configs must be static)" what name))
     | _ -> Error (err5000 (sprintf "%s: config argument must be a `let static` binding name or literal" what))
+
+/// Resolve the GROUP argument of a point-group op (stage 5b-i). Two accepted
+/// spellings, tried in that order:
+///
+///   1. a `let static` binding holding a STRING — the ordinary static-argument
+///      contract every other op config obeys (and the spelling the pg SIZING
+///      builtins require, since those go through StaticEval, which evaluates
+///      their arguments as expressions);
+///   2. a BARE IDENTIFIER naming a registered group — `ml.derive_pg_linear(C4,
+///      ...)`, which is exactly how the group reads in `PgIrrepsIdx<C4, SPEC>`
+///      and in the mathematics. Legal here and nowhere else because this pass
+///      REWRITES the call before the checker sees it: the group argument is
+///      consumed at elaboration and never reaches name resolution.
+///
+/// Statics win, so an explicit `let static G = "D4"` is never shadowed by the
+/// registry. A string literal also works, via arm 1's fall-through.
+let private pgGroupArg (statics: StaticEnv) (what: string) (e: Expr)
+    : Result<Blade.ML.PointSpec.PointGroup, ElabError> =
+    let byName (n: string) =
+        Blade.ML.Statics.pgGroupByName what n |> Result.mapError err5000
+    match e.Kind with
+    | ExprKind.ExprLit (LitString s) -> byName s
+    | ExprKind.ExprVar name ->
+        match Map.tryFind name statics.Values with
+        | Some (SVString s) -> byName s
+        | Some _ ->
+            Error (err5000 (sprintf "%s: '%s' is a `let static` binding but not a STRING — GROUP names a registered point group, e.g. \"C4\"" what name))
+        | None -> byName name
+    | _ ->
+        Error (err5000 (sprintf "%s: GROUP must be a point-group name (a bare C4 / D4, a string literal, or a `let static` string binding)" what))
 
 let private ensureSigmoid (st: ElabState) : string =
     match st.SigmoidName with
@@ -1184,6 +1358,36 @@ let private elabDerivePoly (st: ElabState) (statics: StaticEnv) (site: Expr)
         | SVInt kk ->
             Error (err5000 (sprintf "derive_poly: K must be a static int in 1..4 (got %d) — the symmetric-power surface is capped at degree 4 (plan-transforms-as-types §6.5)" kk))
         | _ -> Error (err5000 "derive_poly: K must be a static int"))))))
+
+/// Shared elaboration for derive_pg_linear (stage 5b-i): resolve the group,
+/// decode the two label-named specs against ITS table, refuse the Schur-zero
+/// case, then synthesize (or reuse) the complete ℝ-Schur basis.
+///
+/// The zero case is BL4007 in derive_linear's framing — the same code, the
+/// same theorem, one block-spec member over. Its finite-group reading is
+/// sharper: `pg_hom_dim = 0` says the two specs share no LABEL, and by Schur
+/// over ℝ every equivariant map between modules with no common irreducible
+/// constituent is zero. (Registry note: BL4007 "no equivariant map exists" is
+/// a TITLE, and this is another instance of exactly that title — reusing it is
+/// the opposite of the BL4011 double-booking, which was two different meanings
+/// under one code.)
+let private elabDerivePgLinear (st: ElabState) (statics: StaticEnv) (site: Expr)
+                               (groupE: Expr) (sInE: Expr) (sOutE: Expr) (xE: Expr) (wE: Expr)
+    : Result<Expr, ElabError> =
+    pgGroupArg statics "derive_pg_linear GROUP" groupE |> Result.bind (fun grp ->
+    staticArg statics "derive_pg_linear SIN" sInE |> Result.bind (fun svi ->
+    staticArg statics "derive_pg_linear SOUT" sOutE |> Result.bind (fun svo ->
+    (Blade.ML.Statics.pgSpecOfStatic "derive_pg_linear SIN" grp svi |> Result.mapError err5000)
+    |> Result.bind (fun si ->
+    (Blade.ML.Statics.pgSpecOfStatic "derive_pg_linear SOUT" grp svo |> Result.mapError err5000)
+    |> Result.bind (fun so ->
+        if Blade.ML.PointSpec.pgHomDim grp si so = 0 then
+            Error (err4007 (sprintf "derive_pg_linear: no %s-equivariant linear map exists from the input spec to the output spec — by Schur's lemma over R an equivariant linear map can only connect irreducible blocks carrying the SAME label, and these specs share none: every admissible map is zero"
+                                grp.Name))
+        else
+            ensure st (fingerprint "pg_linear" (box (grp.Name, si, so)))
+                (fun n -> derivePgLinearDecl n grp si so)
+            |> Result.map (fun n -> inheritSpan site (ExprApp (v n, [ xE; wE ]))))))))
 
 /// The sanity range of the Sₙ ops' static arguments, mirroring the sizing
 /// builtins' guard (MLStatics) so a wild literal is a clean message rather than
@@ -1408,6 +1612,13 @@ let rec private rewriteExpr (st: ElabState) (statics: StaticEnv) (aliases: Set<s
             | "perm_matmul", [ nE; aE; bE ] ->
                 elabPermMatmul st statics e nE aE bE
             | "perm_matmul", _ -> Error (err5000 "perm_matmul: expected perm_matmul(N, a, b) with N a static int and a, b of extent N^2 (flat row-major N x N matrices); the result has extent N^2")
+            // The point-group layer: the complete R-Schur basis of
+            // Hom_G(V_in, V_out) over a FINITE group's labelled blocks, with
+            // the Frobenius-Schur correction (e scalars per cell, [Id, J] at
+            // complex type) that the O(3) member never needed (§3.6, 5b-i).
+            | "derive_pg_linear", [ gE; sInE; sOutE; xE; wE ] ->
+                elabDerivePgLinear st statics e gE sInE sOutE xE wE
+            | "derive_pg_linear", _ -> Error (err5000 "derive_pg_linear: expected derive_pg_linear(GROUP, SIN, SOUT, x, w) with GROUP a registered point group (C4, D4), SIN/SOUT static arrays of (LABEL_NAME, mult) tuples, x of type Array<Float like PgIrrepsIdx<GROUP, SIN>> and w of extent ml.pg_hom_dim(GROUP, SIN, SOUT)")
             // The monomial lift: the value-side half of the symmetric-power
             // bridge. Its type-side twin is ml.sym_spec(SPEC, K), and
             // ml.derive_linear(ml.sym_spec(SPEC, K), SPEC_OUT) composed with

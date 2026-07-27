@@ -1058,6 +1058,27 @@ go first.
        contrast file (9 vs 5) + the E-plane anchor (f = w₁x + w₂Jx;
        at (0,1) the output IS the 90° rotation, pinned exactly) +
        exact-float equivariance pins under all generators.
+       **LANDED 2026-07-27.** `PgIrrepsIdx<GROUP, SPEC>` with GROUP a
+       bare identifier in type position (frozen registry data, like
+       Idx's number), a string in statics, both in the op. Tag frozen
+       `__pgirreps:<group>:<alias>:<L,m|…>`; Unify's `(|BlockSpecTag|_|)`
+       arm keys on alias-erased re-serialization (injective, no %A
+       hazard); cross-member mismatch renders BOTH identities under
+       BL4003; BL4007 correctly REUSED for pgHomDim = 0 (same meaning —
+       the opposite of the BL4011 double-booking). E-plane pins: (0,1)
+       → the 90° rotation exact; J² = −Id at value level; (2,−1) acts
+       as (2−i); D4's same plane has ONE weight and can only scale.
+       e = 1 ulp pin exact vs an in-language twin. BLOCKING FIX rode
+       along: Lowering's SVString → IRLitString stub (one line,
+       pre-existing IR/CodeGen machinery, no corpus had string statics
+       — gate-confirmed). Deliberate exclusions recorded in-code:
+       IxKPgIrreps NOT admitted to fuseJointSLevels (a second member
+       needs its own stage-4-style pin) and SymIdx<k, PgIrrepsIdx>
+       unparseable until 5b-iii (poor parse error noted). Certification
+       default arms verified sound in all three lattices (a pg space is
+       opaque data to the O(3) certificate — correct, not a false
+       accept). Byte-differential PASS (1080 files, 311915 bytes
+       identical); full suite 1709/0.
      * **5b-ii** — the lattice arm inside MLEquiv (Group grows
        `Point of id`, Rep payload the two-case union, invariantOffsets
        → trivial-label offsets); gate = byte-identical diagnostics on

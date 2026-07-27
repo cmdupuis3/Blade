@@ -512,13 +512,15 @@ let rec lowerTypeExpr (env: TypeEnv) (ty: TypeExpr) : IRType =
             | _ -> false
         if isAllString then IRTScalar ETString else IRTScalar ETInt64
 
-    | TyDepIdx _ | TyRaggedIdx _ | TyRaggedIdxOpaque | TyIrrepsIdx _ ->
-        // DepIdx/RaggedIdx/IrrepsIdx in non-index position. Defensive fallback
-        // matching the shape used for TyCompoundIdx, TyEquivIdx, etc. — wrap
-        // in a single-index Array so the IR shape is consistent. Real
+    | TyDepIdx _ | TyRaggedIdx _ | TyRaggedIdxOpaque | TyIrrepsIdx _ | TyPgIrrepsIdx _ ->
+        // DepIdx/RaggedIdx/IrrepsIdx/PgIrrepsIdx in non-index position — the
+        // pg member takes PARITY with the O(3) one here: same known gap, same
+        // treatment. Defensive fallback matching the shape used for
+        // TyCompoundIdx, TyEquivIdx, etc. — wrap in a single-index Array so
+        // the IR shape is consistent. Real
         // iteration happens via lowerIndexType, which produces the correctly
         // tagged IRIndexType (Dependencies for the dependent forms, the
-        // irreps identity tag for IrrepsIdx).
+        // block-spec identity tag for IrrepsIdx / PgIrrepsIdx).
         let idx = lowerIndexType env 0 ty
         mkArrayArrow [idx] (IRTScalar ETFloat64) None
 
@@ -701,6 +703,40 @@ and lowerIndexType env (_position: int) (ty: TypeExpr) : IRIndexType =
                Extent = IRParam (detail, 0, IRTNat None)
                Symmetry = SymNone; Tag = Some "__error_irreps_bad_spec"
                IxKind = IxKErrorIrrepsBadSpec; Kind = SDimension; Dependencies = [] })
+    | TyPgIrrepsIdx (groupName, specExpr) ->
+        // PgIrrepsIdx<GROUP, spec>: the point-group block-spec member
+        // (docs/plan-transforms-as-types.md §3.6, stage 5b-i). Field for field
+        // the shape of the TyIrrepsIdx arm above — rank 1, extent a folded
+        // literal, dense (SymNone) with the block structure carried as
+        // IDENTITY in the Tag, and the same error-marker channel for a
+        // non-static / malformed spec — over a DIFFERENT frozen tag prefix
+        // and a DIFFERENT decoder. Twin, not reroute: nothing above changes.
+        //
+        // TWO resolutions, in order, because the diagnostics differ: the GROUP
+        // name against the frozen registry, then the spec's LABELS against
+        // THAT group's character table. Getting the group wrong and getting a
+        // label wrong are different mistakes and each names its own roster.
+        (match Blade.ML.Statics.pgGroupByName "PgIrrepsIdx" groupName
+               |> Result.bind (fun grp ->
+                    evalStaticValueExpr env specExpr
+                    |> Result.bind (Blade.ML.Statics.pgSpecOfStatic "PgIrrepsIdx" grp)
+                    |> Result.map (fun spec -> (grp, spec))) with
+         | Ok (grp, spec) ->
+             { Id = id; Rank = 1
+               Extent = IRLit (IRLitInt (int64 (Blade.ML.PointSpec.pgTotalDim grp spec)))
+               Symmetry = SymNone; Tag = Some (mkPgIrrepsTag grp.Name None spec)
+               IxKind = IxKPgIrreps; Kind = SDimension; Dependencies = [] }
+         | Error detail ->
+             // The decoders prefix their own "PgIrrepsIdx: " (their `what`
+             // label); the consumption-site diagnostic adds the same prefix,
+             // so strip it here to avoid "PgIrrepsIdx: PgIrrepsIdx: ...".
+             let detail =
+                 if detail.StartsWith "PgIrrepsIdx: " then detail.Substring "PgIrrepsIdx: ".Length
+                 else detail
+             { Id = id; Rank = 1
+               Extent = IRParam (detail, 0, IRTNat None)
+               Symmetry = SymNone; Tag = Some "__error_pgirreps_bad_spec"
+               IxKind = IxKErrorPgIrrepsBadSpec; Kind = SDimension; Dependencies = [] })
     | TyNamed (name, _) ->
         match lookupTypeDef name env with
         | Some (TDIIndexType (_, idx, _)) -> { idx with Id = id }
@@ -1922,10 +1958,12 @@ let rec private dispatchAppOrIndex (env: TypeEnv) (tFunc: TypedExpr) (tArgs: Typ
         // args are checked structurally downstream), so the irreps identity
         // check — whose whole point is distinguishing SAME-EXTENT arrays —
         // would be skipped at exactly the seam it exists for. Check just the
-        // irreps-vs-irreps index pairs here (both tags parse as IrrepsTag);
-        // every other pairing keeps the historical looseness, so this arm is
-        // dead code for non-irreps programs. Kernel application is covered
-        // separately by buildApplyInfo's real unification.
+        // BLOCK-SPEC-vs-block-spec index pairs here (both tags parse as
+        // BlockSpecTag: the O(3) irreps member OR the point-group one, and a
+        // CROSS-member pair is caught by the same comparison); every other
+        // pairing keeps the historical looseness, so this arm is dead code for
+        // programs using neither. Kernel application is covered separately by
+        // buildApplyInfo's real unification.
         let irrepsClash =
             let n = min paramTys.Length tArgs.Length
             List.zip (List.truncate n paramTys) (List.truncate n tArgs)
@@ -1936,7 +1974,7 @@ let rec private dispatchAppOrIndex (env: TypeEnv) (tFunc: TypedExpr) (tArgs: Typ
                     List.zip pa.IndexTypes aa.IndexTypes
                     |> List.tryPick (fun (pi, ai) ->
                         match pi.Tag, ai.Tag with
-                        | Some (IrrepsTag _), Some (IrrepsTag _) when indexPairIncompatible pi ai ->
+                        | Some (BlockSpecTag _), Some (BlockSpecTag _) when indexPairIncompatible pi ai ->
                             Some (i, pi, ai)
                         | _ -> None)
                 | _ -> None)
@@ -1960,7 +1998,18 @@ let rec private dispatchAppOrIndex (env: TypeEnv) (tFunc: TypedExpr) (tArgs: Typ
                 | _ -> None)
         match irrepsClash, unitClash with
         | Some (i, pi, ai), _ ->
-            Error (IrrepsIdxArgMismatch (i + 1, ppIndexType pi, ppIndexType ai))
+            // Both sides carry a BLOCK-SPEC tag. When both are the O(3)
+            // member, the message is verbatim the one that shipped at stage 3
+            // (the pg member is a twin, and the O(3) diagnostics are
+            // differentially gated); anything touching the point-group member
+            // — pg-vs-pg or a CROSS-MEMBER pair — gets the family-level twin,
+            // which names the discipline instead of one member and lets the
+            // two rendered identities carry the specifics.
+            (match pi.Tag, ai.Tag with
+             | Some (IrrepsTag _), Some (IrrepsTag _) ->
+                 Error (IrrepsIdxArgMismatch (i + 1, ppIndexType pi, ppIndexType ai))
+             | _ ->
+                 Error (BlockSpecArgMismatch (i + 1, ppIndexType pi, ppIndexType ai)))
         | None, Some (i, pu, au) ->
             Error (UnitMismatch (sprintf "argument %d" (i + 1), ppUnitSig pu, ppUnitSig au))
         | None, None ->
@@ -6853,6 +6902,28 @@ and irTypeBadIrrepsDetail (t: IRType) : string option =
         |> Option.orElseWith (fun () -> irTypeBadIrrepsDetail r)
     | _ -> None
 
+/// The pg twin of `irTypeBadIrrepsDetail` (stage 5b-i): the PgIrrepsIdx
+/// bad-spec marker, whose failure detail rides the same IRParam-extent
+/// channel. A separate walker rather than a widened one so the two members'
+/// consumption-site diagnostics stay separate — an unknown point group and an
+/// unknown (l, parity) triple want different follow-up sentences.
+and irTypeBadPgIrrepsDetail (t: IRType) : string option =
+    let detailOf (ix: IRIndexType) =
+        if ix.IxKind = IxKErrorPgIrrepsBadSpec then
+            match ix.Extent with
+            | IRParam (detail, _, _) -> Some detail
+            | _ -> Some "invalid spec"
+        else None
+    match t with
+    | ArrayElem at ->
+        (at.IndexTypes |> List.tryPick detailOf)
+        |> Option.orElseWith (fun () -> irTypeBadPgIrrepsDetail at.ElemType)
+    | IRTTuple ts -> ts |> List.tryPick irTypeBadPgIrrepsDetail
+    | FuncElem (ps, r) ->
+        (ps |> List.tryPick irTypeBadPgIrrepsDetail)
+        |> Option.orElseWith (fun () -> irTypeBadPgIrrepsDetail r)
+    | _ -> None
+
 /// Detect an unresolved QUALIFIED index-type path (`store.index.y`). Same
 /// consumption-site pattern as the checks above, and self-marking: a path that
 /// resolves yields the registered record verbatim (the provider builds its
@@ -6945,6 +7016,10 @@ and inferLetBindingValue (env: TypeEnv) (binding: Binding) : TypeResult<TypedExp
         let badIrreps = irTypeBadIrrepsDetail annotTy
         if badIrreps.IsSome then
             Error (IrrepsIdxSpec badIrreps.Value)
+        else
+        let badPgIrreps = irTypeBadPgIrrepsDetail annotTy
+        if badPgIrreps.IsSome then
+            Error (PgIrrepsIdxSpec badPgIrreps.Value)
         else
         let badAxis = irTypeUnknownAxisPath annotTy
         if badAxis.IsSome then
@@ -9229,6 +9304,10 @@ and checkFunctionDecl (env: TypeEnv) (funcDecl: FunctionDecl) : TypeResult<Typed
     if badIrreps.IsSome then
         Error (IrrepsIdxSpecFn (funcDecl.Name, badIrreps.Value))
     else
+    let badPgIrreps = (paramTypes @ [retType]) |> List.tryPick irTypeBadPgIrrepsDetail
+    if badPgIrreps.IsSome then
+        Error (PgIrrepsIdxSpecFn (funcDecl.Name, badPgIrreps.Value))
+    else
     let funcType = mkFuncArrow paramTypes retType
     // Reuse pre-pass varId if this function was already pre-registered (static functions)
     // This ensures other functions' bodies reference the same varId
@@ -9643,6 +9722,26 @@ and registerTypeDecl (env: TypeEnv) (typeDecl: TypeDecl) : TypeResult<TypeEnv> =
                     match idx.Tag with
                     | Some (IrrepsTag (_, triples)) ->
                         { idx with Tag = Some (mkIrrepsTag (Some name) triples) }
+                    | _ -> idx
+                Ok (TDIIndexType (name, named, chasedBody))
+            | TyPgIrrepsIdx _ ->
+                // THE STAGE-3 ALIAS FIX, REPLAYED for the pg tag (§7's 5b-i
+                // checklist item). Identical reasoning one member over: the
+                // nominative-alias rule folds the alias name INTO the
+                // pg-irreps identity tag (mkPgIrrepsTag group (Some name) ...)
+                // rather than overwriting Tag with the bare name, so two
+                // aliases of the same (group, spec) are DISTINCT types while
+                // anonymous PgIrrepsIdx<G, spec> unifies with either. The
+                // plain-index arm's `Tag = Some name` overwrite would drop the
+                // group and the spec payload AND break the Tag<->IxKind
+                // agreement the IR validator enforces. A bad-spec marker keeps
+                // its error tag so the consumption-site check still fires
+                // through the alias.
+                let idx = lowerIndexType env 0 chasedBody
+                let named =
+                    match idx.Tag with
+                    | Some (PgIrrepsTag (group, _, entries)) ->
+                        { idx with Tag = Some (mkPgIrrepsTag group (Some name) entries) }
                     | _ -> idx
                 Ok (TDIIndexType (name, named, chasedBody))
             | TyEnumIdx valuesExpr ->

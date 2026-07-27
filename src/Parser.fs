@@ -662,6 +662,10 @@ and parseTypeAtom (tokens: Token list) : ParseResult<TypeExpr> =
         // IrrepsIdx in standalone position. Same rationale as KwDepIdx above.
         parseIndexType tokens
 
+    | Some (TokKeyword KwPgIrrepsIdx) ->
+        // PgIrrepsIdx in standalone position. Same rationale as KwDepIdx above.
+        parseIndexType tokens
+
     | Some (TokKeyword KwHalo) ->
         // halo<Inner, [offsets]> in TYPE position — a range<> slot only.
         // Deliberately NOT in parseIndexType: `Array<T like halo<..>>` must
@@ -910,6 +914,28 @@ and parseIndexType (tokens: Token list) : ParseResult<TypeExpr> =
         expectGt afterSpec >>= fun _ remaining ->
         success (TyIrrepsIdx specExpr) remaining
 
+    // PgIrrepsIdx<GROUP, spec> — the point-group block-spec member
+    // (docs/plan-transforms-as-types.md §3.6, stage 5b-i). GROUP is a BARE
+    // IDENTIFIER, not an expression: point-group names are frozen registry
+    // data ({C4, D4}), so the slot is a NAME the way `Idx<n>`'s slot is a
+    // number, and reading it as an expression would only invite an unbound
+    // variable. The registry lookup (with the unknown-group diagnostic) is
+    // lowering's, alongside the spec decode. `spec` is the same static-
+    // expression argument IrrepsIdx takes — a `let static` name or an inline
+    // literal of (LABEL_NAME, mult) tuples.
+    | Some (TokKeyword KwPgIrrepsIdx) ->
+        advance tokens |> expect (TokOp "<") >>= fun _ afterLt ->
+        (match peek afterLt with
+         | Some (TokIdent groupName) ->
+             let afterGroup = advance afterLt
+             expect TokComma afterGroup >>= fun _ afterComma ->
+             parseSimpleExpr afterComma >>= fun specExpr afterSpec ->
+             expectGt afterSpec >>= fun _ remaining ->
+             success (TyPgIrrepsIdx (groupName, specExpr)) remaining
+         | _ ->
+             let line, col = currentPos afterLt
+             error "PgIrrepsIdx: expected a point-group NAME as the first argument — PgIrrepsIdx<C4, SPEC>" line col)
+
     | Some (TokIdent name0) ->
         // Named index type alias (e.g. type RegionIdx = Idx<3>; ...like RegionIdx),
         // or a qualified provider axis (`like store.index.y`). Resolved at
@@ -935,7 +961,7 @@ and parseIndexType (tokens: Token list) : ParseResult<TypeExpr> =
     
     | Some kind ->
         let line, col = currentPos tokens
-        error (sprintf "Expected index type (Idx, SymIdx, AntisymIdx, HermitianIdx, EnumIdx, DepIdx, RaggedIdx, IrrepsIdx, or a named index type alias) but got %s" (describeToken kind)) line col
+        error (sprintf "Expected index type (Idx, SymIdx, AntisymIdx, HermitianIdx, EnumIdx, DepIdx, RaggedIdx, IrrepsIdx, PgIrrepsIdx, or a named index type alias) but got %s" (describeToken kind)) line col
     
     | None ->
         errorEof "Expected index type but got end of file"

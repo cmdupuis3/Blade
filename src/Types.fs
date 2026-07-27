@@ -110,8 +110,14 @@ type IxKind =
                             // index over an equivariant irreps spec; the tag is
                             // PARAMETERIZED (spec payload + optional alias name),
                             // so the kind maps from the prefix, not one sentinel
+    | IxKPgIrreps           // "__pgirreps:<group>:<name>:<payload>": the SECOND
+                            // block-spec member (point groups, stage 5b-i) —
+                            // same parameterized-tag discipline as IxKIrreps
+                            // over a DIFFERENT frozen prefix. Twin, not reroute:
+                            // the O(3) format above is byte-frozen
     | IxKErrorRaggedNoPrior // "__error_ragged_no_prior": typecheck error marker
     | IxKErrorIrrepsBadSpec // "__error_irreps_bad_spec": typecheck error marker
+    | IxKErrorPgIrrepsBadSpec // "__error_pgirreps_bad_spec": typecheck error marker
 
 /// The legacy Tag sentinel for a kind (None for IxKPlain). The single
 /// source of the kind<->sentinel correspondence, used by constructors that
@@ -133,8 +139,10 @@ let ixKindSentinel (k: IxKind) : string option =
     | IxKIrreps -> None     // parameterized tag (mkIrrepsTag), no single sentinel;
                             // an IxKIrreps record whose Tag is missing the prefix
                             // then FAILS the validator agreement check — intended
+    | IxKPgIrreps -> None   // ditto (mkPgIrrepsTag)
     | IxKErrorRaggedNoPrior -> Some "__error_ragged_no_prior"
     | IxKErrorIrrepsBadSpec -> Some "__error_irreps_bad_spec"
+    | IxKErrorPgIrrepsBadSpec -> Some "__error_pgirreps_bad_spec"
 
 // ----------------------------------------------------------------------------
 // IrrepsIdx tag encoding. The spec payload rides IN the Tag string — Tag
@@ -175,6 +183,66 @@ let (|IrrepsTag|_|) (tag: string) : (string option * (int * int * int) list) opt
             if List.forall Option.isSome entries then
                 Some ((if name = "" then None else Some name), List.map Option.get entries)
             else None
+
+// ----------------------------------------------------------------------------
+// PgIrrepsIdx tag encoding — the SECOND block-spec member
+// (docs/plan-transforms-as-types.md §3.6, stage 5b-i). Same discipline as the
+// irreps tag above and a DELIBERATELY SEPARATE format: §3.6's "twin, not
+// reroute" says the O(3) `__irreps:` format is BYTE-FROZEN, so point groups
+// get their own frozen prefix rather than a widened one.
+//
+//   "__pgirreps:<group>:<name>:<payload>"
+//
+// where <group> is the frozen registry name of the point group ("C4", "D4"),
+// <name> is the nominative alias name ("" for anonymous PgIrrepsIdx<G, spec>)
+// and <payload> is "LABEL,mult|LABEL,mult|..." in spec order. The LABEL NAMES
+// ride in the tag on purpose: they are frozen table data and the tag IS the
+// diagnostic identity (§3.6's settled surface encoding). Pure string ops only
+// — core stays ML-free; Blade.ML owns StaticValue->spec decoding, including
+// the unknown-label diagnostic.
+//
+// The two prefixes are disjoint as strings ("__pgirreps:" does not start with
+// "__irreps:" and vice versa), which is what makes tag equality decide
+// CROSS-MEMBER identity for free: an irreps tag and a pgirreps tag never
+// compare equal, so an `IrrepsIdx<s>` and a `PgIrrepsIdx<G, s'>` of the same
+// extent are distinct types by the same mechanism that separates two specs.
+// ----------------------------------------------------------------------------
+
+let pgIrrepsTagPrefix = "__pgirreps:"
+
+/// Serialize a point-group spec (group name + optional alias name +
+/// (LABEL, mult) entries) into its canonical Tag.
+let mkPgIrrepsTag (group: string) (aliasName: string option) (spec: (string * int) list) : string =
+    let payload =
+        spec |> List.map (fun (label, m) -> sprintf "%s,%d" label m) |> String.concat "|"
+    sprintf "%s%s:%s:%s" pgIrrepsTagPrefix group (defaultArg aliasName "") payload
+
+/// Parse a pg-irreps Tag back into (group, alias name option, (LABEL, mult) list).
+/// Total: any string not produced by mkPgIrrepsTag yields None.
+let (|PgIrrepsTag|_|) (tag: string) : (string * string option * (string * int) list) option =
+    if not (tag.StartsWith pgIrrepsTagPrefix) then None
+    else
+        let rest = tag.Substring pgIrrepsTagPrefix.Length
+        match rest.IndexOf ':' with
+        | -1 -> None
+        | sepG ->
+            let group = rest.Substring(0, sepG)
+            let rest2 = rest.Substring(sepG + 1)
+            match rest2.IndexOf ':' with
+            | -1 -> None
+            | sepN ->
+                let name = rest2.Substring(0, sepN)
+                let entryOf (s: string) =
+                    match s.Split ',' with
+                    | [| label; m |] when label <> "" ->
+                        match System.Int32.TryParse m with
+                        | true, mv -> Some (label, mv)
+                        | _ -> None
+                    | _ -> None
+                let entries = rest2.Substring(sepN + 1).Split '|' |> Array.toList |> List.map entryOf
+                if group <> "" && List.forall Option.isSome entries then
+                    Some (group, (if name = "" then None else Some name), List.map Option.get entries)
+                else None
 
 // ----------------------------------------------------------------------------
 // Halo window tag encoding. Like IrrepsIdx above, the halo slot's payload
@@ -241,7 +309,9 @@ let ixKindOfTag (tag: string option) : IxKind =
     | Some "__seq" -> IxKSeq
     | Some "__error_ragged_no_prior" -> IxKErrorRaggedNoPrior
     | Some "__error_irreps_bad_spec" -> IxKErrorIrrepsBadSpec
+    | Some "__error_pgirreps_bad_spec" -> IxKErrorPgIrrepsBadSpec
     | Some t when t.StartsWith irrepsTagPrefix -> IxKIrreps
+    | Some t when t.StartsWith pgIrrepsTagPrefix -> IxKPgIrreps
     // A compound-inner halo slot keeps IxKCompound: the compound machinery
     // (cidx materialization, cardinality bound) must still engage. Dense
     // halo slots fall through to IxKPlain like any other "__" placeholder.
@@ -585,5 +655,29 @@ let (|IrrepsIdxLike|_|) (ix: IRIndexTypeG<'Ext>) : string option =
             // Kind says irreps but the tag is missing/unparseable — a state
             // validateIR rejects; render a placeholder rather than crash.
             Some "IrrepsIdx<?>"
+
+/// The pg sibling of `IrrepsIdxLike`: render an IxKPgIrreps index record's
+/// identity as the round-trippable long form
+/// `PgIrrepsIdx<C4, [("A", 1), ("E", 2)]>`, prefixed with the nominative alias
+/// name when the tag carries one. Same pre-match discipline (None for
+/// non-pg records, so printers use it ahead of their Symmetry dispatch) and
+/// deliberately NOT merged with IrrepsIdxLike: the two members render
+/// differently (the group is part of a pg identity, and the labels are names
+/// rather than (l, parity) integers), and a cross-member diagnostic has to
+/// show BOTH forms side by side for the mismatch to be readable.
+let (|PgIrrepsIdxLike|_|) (ix: IRIndexTypeG<'Ext>) : string option =
+    if ix.IxKind <> IxKPgIrreps then None
+    else
+        match ix.Tag with
+        | Some (PgIrrepsTag (group, nameOpt, entries)) ->
+            let payload =
+                entries
+                |> List.map (fun (label, m) -> sprintf "(\"%s\", %d)" label m)
+                |> String.concat ", "
+            let core = sprintf "PgIrrepsIdx<%s, [%s]>" group payload
+            Some (match nameOpt with
+                  | Some n -> sprintf "%s (= %s)" n core
+                  | None -> core)
+        | _ -> Some "PgIrrepsIdx<?>"
 
 /// Literal values

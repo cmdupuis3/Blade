@@ -1,0 +1,17 @@
+// TEST: PgIrrepsIdx Unknown Group (rejects)
+// ============================================================================
+// The GROUP slot resolves against the FROZEN MLPointSpec registry, and an
+// unregistered name is refused with the roster named. C3v is a perfectly real
+// point group; it is not in the registry because the roster boundary is
+// MATRIX RATIONALITY — {C4, D4} are the pair whose every generator entry lies
+// in {0, ±1}, so the group-average oracle is exact-rational with no field
+// extension and runtime equivariance pins are exact float equality. The
+// Q(sqrt 3) families (trigonal / hexagonal / cubic-E) need a coefficient ring
+// before they need a table (plan-transforms-as-types §3.6).
+//
+// The refusal rides the same bad-spec MARKER channel as IrrepsIdx's
+// (index-types/116, /117): lowerIndexType has no error channel, so the group
+// failure is planted in an error-marker record and surfaces at the
+// let-binding consumption site, carrying WHAT went wrong.
+// ============================================================================
+let x: Array<Float like PgIrrepsIdx<C3v, [("A", 1)]>> = [1.0]

@@ -1,0 +1,31 @@
+// TEST: PgIrrepsIdx Plain Adopt
+// ============================================================================
+// Gradual adoption, the pg twin of index-types/114: a PgIrrepsIdx-annotated
+// array unifies with a plain anonymous Idx<N> parameter of the same extent
+// (a block-spec tag against Tag = None falls through to the symmetry check,
+// like any named-vs-anonymous pair), and an untagged literal flows INTO a
+// PgIrrepsIdx-typed parameter the same way.
+//
+// That permissiveness is what makes the discipline adoptable one annotation
+// at a time — and it is also what lets a corpus write a rotated vector as a
+// plain array literal and feed it straight back to a pg op, which is how
+// ml-ops/023's equivariance pins are written. Strictness engages only between
+// two DIFFERENT block-spec identities (index-types/141, /142).
+// ============================================================================
+let static pspec = [("E", 1)]
+
+function total(v: Array<Float like Idx<2>>) -> Float = {
+    v(0) + v(1)
+}
+
+function pg_head(v: Array<Float like PgIrrepsIdx<C4, pspec>>) -> Float = {
+    v(0)
+}
+
+let p: Array<Float like PgIrrepsIdx<C4, pspec>> = [3.0, 4.0]
+let t = total(p)
+// EXPECT: t = 7.0
+
+let plain: Array<Float like Idx<2>> = [10.0, 20.0]
+let h = pg_head(plain)
+// EXPECT: h = 10.0

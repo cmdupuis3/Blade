@@ -1,0 +1,41 @@
+// TEST: ML Ops derive_pg_linear Bad Shapes (rejects)
+import ml as ml
+// ============================================================================
+// The two op-side refusals of the point-group surface
+// (docs/plan-transforms-as-types.md §3.6, stage 5b-i). Elaboration is
+// fail-fast, so the diagnostic this file actually surfaces is the FIRST one;
+// both are written out because each is a design decision worth reading.
+//
+// (1) THE SCHUR-ZERO CASE, pg_hom_dim = 0. B and E share no label with A1
+//     because they are labels of DIFFERENT groups — but even within one
+//     group, [("A", 1)] -> [("B", 1)] at C4 has no equivariant map at all:
+//     A and B are inequivalent irreducibles, so by Schur every linear map
+//     intertwining them is zero. There is nothing to parameterize, and
+//     handing back a zero-weight layer would be a silent lie about what the
+//     user asked for — so it is refused under BL4007 ("no equivariant map
+//     exists"), the SAME code and the same theorem ml.derive_linear uses for
+//     the O(3) member. Reusing a code for another instance of its own title
+//     is the opposite of the BL4011 double-booking, which was two different
+//     meanings under one code.
+//
+// (2) A MALFORMED SPEC STATIC. A pg spec's entries are (LABEL_NAME, mult)
+//     TUPLES — a STRING label from the group's frozen character table and an
+//     int multiplicity — because a finite group's irreducibles are named, not
+//     numbered. Writing an (l, parity, mult) triple, or an int where the label
+//     belongs, is refused by the DECODER with the group's roster quoted: a
+//     finite group has three to five labels, so listing them is the fix.
+//
+// Both report as BL5000/BL4007 through the ML-elaboration channel, the same
+// way the S_n ops' refusals do (ml-ops/022).
+// ============================================================================
+
+// (1) pg_hom_dim(C4, [("A",1)], [("B",1)]) = 0 — A and B are inequivalent.
+let static SA = [("A", 1)]
+let static SB = [("B", 1)]
+let a1: Array<Float like PgIrrepsIdx<C4, SA>> = [1.0]
+let bad_zero = ml.derive_pg_linear(C4, SA, SB, a1, [1.0])
+
+// (2) an (l, parity, mult) triple where a (LABEL_NAME, mult) tuple belongs.
+let static SBAD = [(0, 0, 1)]
+let x2: Array<Float like PgIrrepsIdx<C4, SA>> = [1.0]
+let bad_spec = ml.derive_pg_linear(C4, SBAD, SBAD, x2, [1.0])
