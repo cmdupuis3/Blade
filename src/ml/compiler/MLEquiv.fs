@@ -300,6 +300,37 @@ let rec private statusOfType (g: Group) (aliases: Map<string, TypeExpr>) (static
     | TyInt32 | TyInt64 | TyFloat32 | TyFloat64 | TyBool | TyComplex128 -> Ok Inv
     | _ -> Error "cannot classify this annotation in an equiv-certified signature (supported: scalars, plain arrays, Array<_ like IrrepsIdx<spec>>)"
 
+/// Classify ONE function's signature under a group. This is the shared core
+/// of the two modes the signature rules serve: CHECKING (buildCertTable, where
+/// the group comes from the written conjunct) and DEDUCTION (stage 6a's
+/// inference channel, where the group is a hypothesis). Both must agree
+/// EXACTLY on what "fully annotated" and "classifies Rep" mean — a proposal
+/// the checker would then refuse at the signature would break Propose ⊆
+/// Check-accept before the body is ever judged — so there is one copy.
+/// Errors are the human-readable strings buildCertTable wraps in BL4008;
+/// inference discards them and stays silent.
+let private certSigOf (g: Group) (aliases: Map<string, TypeExpr>) (statics: StaticEnv) (fd: FunctionDecl)
+    : Result<CertSig, string> =
+    let paramSt =
+        fd.Params
+        |> List.fold (fun acc p ->
+            acc |> Result.bind (fun ps ->
+                match p.Type with
+                | None ->
+                    Error (sprintf "function '%s': an equiv-certified function must annotate every parameter and its return type ('%s' is unannotated)" fd.Name p.Name)
+                | Some t ->
+                    statusOfType g aliases statics t
+                    |> Result.mapError (sprintf "function '%s', parameter '%s': %s" fd.Name p.Name)
+                    |> Result.map (fun st -> ps @ [ (p.Name, st) ])))
+            (Ok [])
+    paramSt |> Result.bind (fun ps ->
+        match fd.ReturnType with
+        | None -> Error (sprintf "function '%s': an equiv-certified function must annotate its return type" fd.Name)
+        | Some rt ->
+            statusOfType g aliases statics rt
+            |> Result.mapError (sprintf "function '%s', return type: %s" fd.Name)
+            |> Result.map (fun r -> { Group = g; Params = ps; Return = r }))
+
 /// Pre-scan: every DeclFunction carrying a normalized ("__ml_equiv", [g])
 /// conjunct gets a certified signature. Errors are BL4008 at the decl.
 let buildCertTable (statics: StaticEnv) (decls: Located<Decl> list)
@@ -325,29 +356,9 @@ let buildCertTable (statics: StaticEnv) (decls: Located<Decl> list)
                 match parseGroup fd.Name gArgs with
                 | Error m -> fail m
                 | Ok g ->
-                    let paramSt =
-                        fd.Params
-                        |> List.fold (fun acc p ->
-                            acc |> Result.bind (fun ps ->
-                                match p.Type with
-                                | None ->
-                                    Error (sprintf "function '%s': an equiv-certified function must annotate every parameter and its return type ('%s' is unannotated)" fd.Name p.Name)
-                                | Some t ->
-                                    statusOfType g aliases statics t
-                                    |> Result.mapError (sprintf "function '%s', parameter '%s': %s" fd.Name p.Name)
-                                    |> Result.map (fun st -> ps @ [ (p.Name, st) ])))
-                            (Ok [])
-                    match paramSt with
+                    match certSigOf g aliases statics fd with
                     | Error m -> fail m
-                    | Ok ps ->
-                        match fd.ReturnType with
-                        | None -> fail (sprintf "function '%s': an equiv-certified function must annotate its return type" fd.Name)
-                        | Some rt ->
-                            match statusOfType g aliases statics rt
-                                  |> Result.mapError (sprintf "function '%s', return type: %s" fd.Name) with
-                            | Error m -> fail m
-                            | Ok r ->
-                                Ok (Map.add fd.Name { Group = g; Params = ps; Return = r } table)
+                    | Ok cs -> Ok (Map.add fd.Name cs table)
             | [] -> Ok table))
         (Ok Map.empty)
 
@@ -801,6 +812,210 @@ let judgeFunction (group: Group) (certs: Map<string, CertSig>) (statics: StaticE
             else
                 [ bl4008 fd.Body.Span
                       (sprintf "function '%s': the body is %s but the declared return type is %s — the certificate requires them to agree" fd.Name (statusStr st) (statusStr cert.Return)) ]
+
+// ============================================================================
+// The inference channel (stage 6a) — BL4011
+// ============================================================================
+//
+// Deduction mode is the CHECKING judgment run speculatively: hypothesize
+// `where ml.equiv(G)` on a function that does not carry it, run `certSigOf` +
+// `judgeFunction` verbatim, and if the certificate holds, PROPOSE the pin as a
+// warning. Nothing here is a new rule — there is no arm, no lattice and no
+// message below that the checker does not already own — so `Propose ⊆
+// Check-accept` holds BY CONSTRUCTION: what is proposed is exactly what
+// passed, under exactly the table the checker would see once the pin is
+// written (§4b: deduction proposes; only source-written `where` clauses
+// export).
+//
+// The one real design decision is DEPENDENCY THREADING, and it is Deduce.fs's
+// resolver discipline transplanted: declarations fold in DECL ORDER against a
+// speculative table that holds (a) every real certificate and (b) every
+// speculative certificate already inferred THIS pass for an EARLIER
+// declaration under the SAME group. No summary proves itself (a self-recursive
+// body is skipped outright), and there is no fixpoint iteration — a forward
+// call to a later uncertified function simply resolves to nothing and the
+// speculative judgment fails, which is silence, which is correct. Because a
+// proposal may then REST on other unwritten pins, every BL4011 names its
+// dependency closure ("also requires pinning: layer1"); without that the
+// channel would be actively misleading on the multi-layer models it exists for.
+//
+// The group is recorded under the STRONGEST passer only. O(3) ⊃ SO(3), but the
+// shipped `judgeApp` refuses a cross-group call in BOTH directions, so a
+// function proposed for O3 must NOT appear in the SO3 speculative table:
+// pinning it O3 is what the user would actually write, and an SO3 caller of an
+// O3-pinned callee is a body the checker rejects. Recording only the proposal
+// keeps the closure honest.
+
+/// The stage-6a suggestion side-channel: the structured twin of the
+/// plain-string warning the CLI prints, mirroring `TypeCheck.PinSuggestions`
+/// (the BL4010 precedent) field for field. Each entry is (message, decl span)
+/// so editor tooling can ghost-render the pin at the function it belongs to.
+/// Reset by `MLElaborate.expand`, filled at its judgment seam, read by
+/// `TypeCheck.typeCheck` (string twins into the warning list) and `Ide.ideCheck`
+/// (structured, as `warning[BL4011]`). AsyncLocal, like PinSuggestions.
+module CertSuggestions =
+    let private slot = new System.Threading.AsyncLocal<(string * Span) list>()
+    let reset () = slot.Value <- []
+    let add (msg: string) (span: Span) = slot.Value <- (msg, span) :: slot.Value
+    let get () : (string * Span) list =
+        match box slot.Value with null -> [] | _ -> List.rev slot.Value
+
+/// Which index families a signature annotation MENTIONS — the syntactic gate
+/// that picks the candidate groups. Deliberately a mirror of `statusOfType`'s
+/// REACH (the same `TyArray` index list, the same one-level alias chase) and
+/// nothing else: a family this scan cannot see is a family the classifier
+/// would not have classified `Rep` either.
+let rec private sigFamilies (aliases: Map<string, TypeExpr>) (t: TypeExpr) : bool * Set<string> =
+    match t with
+    | TyArray (_, idxs) ->
+        idxs
+        |> List.fold (fun (ir, pgs) i ->
+            match i with
+            | TyIrrepsIdx _ -> (true, pgs)
+            | TyPgIrrepsIdx (gn, _) -> (ir, Set.add gn pgs)
+            | _ -> (ir, pgs)) (false, Set.empty)
+    | TyNamed (n, []) ->
+        match Map.tryFind n aliases with
+        | Some body -> sigFamilies aliases (TyArray (TyNamed ("Float", []), [ body ]))
+        | None -> (false, Set.empty)
+    | TyIrrepsIdx _ -> (true, Set.empty)
+    | TyPgIrrepsIdx (gn, _) -> (false, Set.singleton gn)
+    | _ -> (false, Set.empty)
+
+/// Candidate groups for a signature, STRONGEST FIRST.
+///
+///   * any `IrrepsIdx` annotation  -> O3, then SO3. Mixed signatures land here
+///     too: a `PgIrrepsIdx` buffer classifies `Inv` under an O(3) certificate
+///     (the 5b-ii asymmetry), so the O(3) candidates simply subsume it.
+///   * `PgIrrepsIdx<g, ·>` and NO `IrrepsIdx` -> `Point g`, and only when the
+///     signature names ONE registered group: two different groups cannot both
+///     be the certificate's (`statusOfType` refuses the other), and an
+///     unregistered name is not a group this checker knows.
+///
+/// Galilean and Sₙ inference are deliberately absent (§7's named deferrals):
+/// `perm_equiv`'s flat-extent keying is ambiguous at a signature, so guessing
+/// N from an `Array<_ like Idx<n>>` would propose noise.
+let private candidatesFor (aliases: Map<string, TypeExpr>) (fd: FunctionDecl) : Group list =
+    let tys = (fd.Params |> List.choose (fun p -> p.Type)) @ Option.toList fd.ReturnType
+    let (ir, pgs) =
+        tys
+        |> List.fold (fun (a, b) t ->
+            let (x, y) = sigFamilies aliases t
+            (a || x, Set.union b y)) (false, Set.empty)
+    if ir then [ O3; SO3 ]
+    else
+        match Set.toList pgs with
+        | [ gn ] when List.contains gn Blade.ML.PointSpec.pointGroupNames -> [ Point gn ]
+        | _ -> []
+
+/// How a proposed signature READS in the suggestion — the same vocabulary
+/// `statusStr` uses, compressed to one line.
+let private sigSummary (cs: CertSig) : string =
+    let one (n, st) =
+        match st with
+        | Rep r -> sprintf "%s transforms as %s" n (repStr r)
+        | Inv -> sprintf "%s invariant" n
+        | Opaque -> sprintf "%s unclassifiable" n
+    let ps =
+        if cs.Params.IsEmpty then "(no parameters)"
+        else cs.Params |> List.map one |> String.concat ", "
+    let ret =
+        match cs.Return with
+        | Rep r -> repStr r
+        | Inv -> "invariant"
+        | Opaque -> "unclassifiable"
+    sprintf "%s -> %s" ps ret
+
+/// One candidate attempt: hypothesize the group, classify the signature with
+/// the CHECKER's own classifier, and run the CHECKER's own judgment against
+/// `table` (real certificates + this group's speculative ones). `Some cert` =
+/// the certificate holds. Total by construction — a speculative run may never
+/// turn a compiling program into a crash, so a `failwith` from the spec
+/// decoders (an unregistered label, a malformed static) reads as "no proposal".
+let private tryCandidate (g: Group) (typeAliases: Map<string, TypeExpr>) (statics: StaticEnv)
+                         (mlAliases: Set<string>) (table: Map<string, CertSig>) (fd: FunctionDecl)
+    : CertSig option =
+    try
+        match certSigOf g typeAliases statics fd with
+        | Error _ -> None
+        | Ok cs ->
+            // THE NON-VACUITY FILTER: a signature with nothing rep-typed
+            // proposes nothing. `equiv(G)` on a scalar helper is vacuously
+            // true and says nothing about any group action, so proposing it
+            // would be noise with a theorem's face on.
+            let isRep st = match st with Rep _ -> true | _ -> false
+            if not ((cs.Params |> List.exists (snd >> isRep)) || isRep cs.Return) then None
+            else
+                match judgeFunction g (Map.add fd.Name cs table) statics mlAliases fd with
+                | [] -> Some cs
+                | _ :: _ -> None
+    with _ -> None
+
+/// Run the shipped judgment speculatively over a module's declarations and
+/// return the BL4011 suggestions, in decl order. Never fails, never changes a
+/// verdict: the caller records these as warnings and compiles exactly as it
+/// would have.
+let inferCertificates (statics: StaticEnv) (mlAliases: Set<string>)
+                      (certs: Map<string, CertSig>) (decls: Located<Decl> list)
+    : (string * Span) list =
+    let typeAliases = aliasMapOf decls
+    // Speculative certificates, their dependency closures, and the DECL ORDER
+    // in which they were inferred — all keyed by group name.
+    let mutable spec : Map<string, Map<string, CertSig>> = Map.empty
+    let mutable deps : Map<string, Map<string, string list>> = Map.empty
+    let mutable order : Map<string, string list> = Map.empty
+    let mutable out : (string * Span) list = []
+    for d in decls do
+        match d.Value with
+        | DeclFunction fd when (conjunctsOf "__ml_equiv" fd).IsEmpty
+                               && not (Map.containsKey fd.Name certs) ->
+            let bound = Set.ofList (fd.Params |> List.map (fun p -> p.Name))
+            let free = freeVars bound fd.Body
+            // No summary proves itself: a body that names its own function
+            // would be judged against its own hypothesis, which is exactly the
+            // circularity Deduce.fs's resolver refuses. Skip; silence.
+            if not (Set.contains fd.Name free) then
+                let candidates = candidatesFor typeAliases fd
+                // STRONGEST FIRST, and only the strongest passer is proposed.
+                let hit =
+                    candidates
+                    |> List.tryPick (fun g ->
+                        let gs = groupStr g
+                        let specG = defaultArg (Map.tryFind gs spec) Map.empty
+                        let table = specG |> Map.fold (fun m k v -> Map.add k v m) certs
+                        tryCandidate g typeAliases statics mlAliases table fd
+                        |> Option.map (fun cs -> (g, gs, specG, cs)))
+                match hit with
+                | None -> ()
+                | Some (_, gs, specG, cs) ->
+                    // The dependency closure: which speculative pins this
+                    // proposal RESTS on. Direct deps are the earlier
+                    // speculatively-certified names the body reads; the
+                    // closure adds each of those proposals' own deps
+                    // (already computed — decl order guarantees it).
+                    let depsG = defaultArg (Map.tryFind gs deps) Map.empty
+                    let orderG = defaultArg (Map.tryFind gs order) []
+                    let direct = orderG |> List.filter (fun n -> Set.contains n free)
+                    let closure =
+                        direct
+                        |> List.collect (fun n -> n :: defaultArg (Map.tryFind n depsG) [])
+                        |> List.distinct
+                    // Rendered in DECL order, not alphabetically (§6.6
+                    // determinism, and it reads as the order the pins would be
+                    // written in).
+                    let ordered = orderG |> List.filter (fun n -> List.contains n closure)
+                    let closureNote =
+                        if ordered.IsEmpty then ""
+                        else sprintf " (also requires pinning: %s)" (String.concat ", " ordered)
+                    let msg =
+                        sprintf "function '%s' judges equivariant under %s: add 'where ml.equiv(%s)' [signature: %s]%s"
+                            fd.Name gs gs (sigSummary cs) closureNote
+                    out <- (msg, d.Span) :: out
+                    spec <- Map.add gs (Map.add fd.Name cs specG) spec
+                    deps <- Map.add gs (Map.add fd.Name closure depsG) deps
+                    order <- Map.add gs (orderG @ [ fd.Name ]) order
+        | _ -> ()
+    List.rev out
 
 // ============================================================================
 // Constraint-registry handler

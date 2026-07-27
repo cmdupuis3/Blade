@@ -147,12 +147,17 @@ module Codes =
             "BL4008", "equivariance discipline violation"
             "BL4009", "galilean discipline violation"
             "BL4010", "confirm-and-pin storage suggestion"
-            // BL4011 is RESERVED, deliberately unregistered: it is the code
-            // claimed by the certificate-SUGGESTION channel of
+            // BL4011 was RESERVED and deliberately unregistered through five
+            // stages, held for the certificate-SUGGESTION channel of
             // plan-transforms-as-types §4b (deduced-rep "propose, don't
-            // export"), which has not shipped. Stage 5a's Sₙ lattice takes the
-            // next free code rather than double-booking it — the BL4007
-            // lesson, recorded in that plan's stage-5 bullet.
+            // export"); stage 5a's Sₙ lattice took BL4012 rather than
+            // double-booking it — the BL4007 lesson. Stage 6a is that channel:
+            // MLEquiv runs the shipped checking judgment speculatively on
+            // uncertified functions and proposes the pin. A WARNING, always —
+            // an uncertified function is correct, just not proved equivariant,
+            // so nothing here can fail a build (and `--strict-pins`, which owns
+            // BL4010's storage decision, deliberately grows no BL4011 arm).
+            "BL4011", "equivariance certificate suggestion"
             "BL4012", "permutation-equivariance discipline violation"
             // BL5xxx — elaborators
             "BL5000", "ml elaboration error"

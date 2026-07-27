@@ -1163,12 +1163,26 @@ let ideCheck (filePath: string) : int =
                 // render a ghost annotation and offer the one-click pin —
                 // and skip the string twin to avoid duplicates.
                 let pinSuggestions = Blade.TypeCheck.PinSuggestions.get ()
-                let pinMessages = pinSuggestions |> List.map fst |> Set.ofList
+                // Stage-6a equivariance-certificate suggestions arrive the same
+                // way, one code over: BL4011 at the DECL span, so the editor can
+                // ghost-render `where ml.equiv(G)` on the function it belongs
+                // to. Same field shape as BL4010 — no new `ide check --json`
+                // field is needed, the diagnostics array carries both.
+                let certSuggestions = Blade.ML.Equiv.CertSuggestions.get ()
+                let pinMessages =
+                    Set.union
+                        (pinSuggestions |> List.map fst |> Set.ofList)
+                        (certSuggestions |> List.map fst |> Set.ofList)
                 for (msg, span) in pinSuggestions do
                     let (line, col, endLine, endCol) = clampSpan span
                     diags.Add { Severity = "warning"; Line = line; Col = col
                                 EndLine = endLine; EndCol = endCol
                                 Message = msg; Code = "BL4010" }
+                for (msg, span) in certSuggestions do
+                    let (line, col, endLine, endCol) = clampSpan span
+                    diags.Add { Severity = "warning"; Line = line; Col = col
+                                EndLine = endLine; EndCol = endCol
+                                Message = msg; Code = "BL4011" }
                 for w in warnings do
                     if not (Set.contains w pinMessages) then
                         diags.Add { Severity = "warning"; Line = 1; Col = 1; EndLine = 1; EndCol = 1

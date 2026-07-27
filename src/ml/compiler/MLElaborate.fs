@@ -1879,19 +1879,33 @@ let private expandModule (decls: Located<Decl> list) : Result<Located<Decl> list
             let judged =
                 match Blade.ML.Equiv.buildCertTable statics decls1 with
                 | Error d -> Error [ d ]
-                | Ok certs when Map.isEmpty certs -> Ok ()
                 | Ok certs ->
                     let diags =
-                        decls1
-                        |> List.collect (fun d ->
-                            match d.Value with
-                            | DeclFunction fd ->
-                                match Map.tryFind fd.Name certs with
-                                | Some cert ->
-                                    Blade.ML.Equiv.judgeFunction cert.Group certs statics aliases fd
-                                | None -> []
-                            | _ -> [])
-                    if diags.IsEmpty then Ok () else Error diags
+                        if Map.isEmpty certs then []
+                        else
+                            decls1
+                            |> List.collect (fun d ->
+                                match d.Value with
+                                | DeclFunction fd ->
+                                    match Map.tryFind fd.Name certs with
+                                    | Some cert ->
+                                        Blade.ML.Equiv.judgeFunction cert.Group certs statics aliases fd
+                                    | None -> []
+                                | _ -> [])
+                    if not diags.IsEmpty then Error diags
+                    else
+                        // Stage 6a — the CERTIFICATE-INFERENCE channel, run at
+                        // the same seam and off the same tables. It only ever
+                        // ADDS warnings (BL4011): the certified functions have
+                        // just been checked and none of them reached here, so
+                        // an uncertified neighbour that happens to judge
+                        // equivariant costs nothing but a suggestion. Runs even
+                        // when `certs` is empty — a file whose every function is
+                        // uncertified is precisely the file this channel exists
+                        // for.
+                        for (msg, span) in Blade.ML.Equiv.inferCertificates statics aliases certs decls1 do
+                            Blade.ML.Equiv.CertSuggestions.add msg span
+                        Ok ()
             match judged with
             | Error ds -> Error (Choice2Of2 ds)
             | Ok () ->
@@ -1959,6 +1973,10 @@ let private expandModule (decls: Located<Decl> list) : Result<Located<Decl> list
 /// Lowering's Phase 0) without the core evaluator knowing about ML.
 let private expandStr (program: Program) : Result<Program, ExpandFailure> =
     Blade.ML.Statics.install ()
+    // Stage 6a's suggestion side-channel accumulates across the program's
+    // modules, so it is cleared once here — the elaborator is its only
+    // producer (the TypeCheck.PinSuggestions.reset precedent, one phase over).
+    Blade.ML.Equiv.CertSuggestions.reset ()
     Blade.ML.Equiv.register ()
     Blade.ML.Galilean.register ()
     Blade.ML.Perm.register ()

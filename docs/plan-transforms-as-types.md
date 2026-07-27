@@ -1185,6 +1185,28 @@ go first.
      name). HONESTY: 6a's recall is low until 6b/6c land (uncertified
      wild code hand-indexes, which composition rejects) — its standalone
      value is the channel, the harness, and discoverability.
+     **6a LANDED 2026-07-27.** certSigOf extracted so checking and
+     deduction share ONE classification copy byte-for-byte; inference
+     wrapped try/with (a speculative run may never crash a compiling
+     program); self-referencing functions skipped outright ("no summary
+     proves itself" made literal). THREADING REFINEMENT the design
+     missed: proposals are recorded PER-PROPOSED-GROUP ONLY — an
+     O3-passing body must not seed the SO3 speculative table because
+     cross-group calls reject both directions (corpus 055 pins the
+     consequence: a pseudoscalar-gated dep forces the whole chain to
+     SO3). BL4011 registered on the BL4010 double channel (Ide
+     side-channel + typecheck warnings); a new strict-both-directions
+     `// SUGGEST:` block makes SILENCE assertable — corpus 057's
+     mechanism, simultaneously locking the zero-suggestion property of
+     001-052. Propose ⊆ Check-accept enforced in-corpus (every
+     suggested function has a pinned twin passing with identical
+     EXPECTs — a warning changes no value). Existing-corpus
+     differential: SHA256-IDENTICAL sweep, zero new suggestions, spot
+     -checked true-negative. Deviations: forward calls unreachable at
+     surface (BL2001 precedes inference — the no-fixpoint worry is
+     moot); the y_to-introduces-rep shape (all-scalar signature) is
+     correctly silent under non-vacuity, documented. Corpus
+     ml-equiv/053-057; blocks +57; full suite 1779/0.
    - **6b — the engine, part i: extractor + finite discharge (Point
      pathfinder).** The polynomial extractor (v1 fragment, closed-world:
      literals with exact literal-division; static indexing into

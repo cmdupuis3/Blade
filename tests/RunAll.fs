@@ -197,6 +197,10 @@ let runAllTestsFullWith (extraBlocks: (unit -> Blade.Tests.TestHarness.BlockResu
     let diagCore = Blade.Tests.DiagnosticsCore.runDiagnosticsCoreTests ()
     // Diagnostics corpus: broken sources with pinned codes/spans (strict).
     let diagCorpus = Blade.Tests.DiagCorpus.runDiagCorpusTests ()
+    // Stage-6a certificate SUGGESTIONS (BL4011): the ml-equiv corpus's
+    // `// SUGGEST:` pins, strict in both directions so SILENCE is assertable
+    // (a warning changes no value, so the value corpus cannot pin it).
+    let certSuggest = Blade.Tests.DiagCorpus.runCertSuggestTests ()
     // C++ runtime-layout tests for the contiguous-backing allocate<>.
     // Verifies layout invariants the value-checking source tests cannot catch.
     // Skips cleanly if g++ absent.
@@ -277,7 +281,7 @@ let runAllTestsFullWith (extraBlocks: (unit -> Blade.Tests.TestHarness.BlockResu
     let blocks =
         [ yield r1; yield r2; yield attrs; yield subst
           yield normalize; yield unify; yield validateArrow
-          yield shape; yield oracles; yield wigner; yield symPower; yield polyOracle; yield permSpec; yield permOracle; yield pointSpec; yield pgOracle; yield cartBridge; yield spans; yield diagCore; yield diagCorpus; yield alloc
+          yield shape; yield oracles; yield wigner; yield symPower; yield polyOracle; yield permSpec; yield permOracle; yield pointSpec; yield pgOracle; yield cartBridge; yield spans; yield diagCore; yield diagCorpus; yield certSuggest; yield alloc
           yield ompPragma
           match omp with Some b -> yield b | None -> ()
           yield bufType

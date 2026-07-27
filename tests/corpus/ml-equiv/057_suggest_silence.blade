@@ -1,0 +1,50 @@
+// TEST: ML Equiv Suggest Silence
+import ml as ml
+// ============================================================================
+// THE TWO WAYS THE CHANNEL STAYS QUIET — an ACCEPT-status file that must emit
+// ZERO suggestions. (The absence is machine-checked: the BL4011 block of the
+// diagnostics suite matches produced suggestions against this file's
+// `// SUGGEST:` lines in BOTH directions, and this file has none, so any
+// suggestion at all is a failure. That mechanism is also what pins the
+// zero-diagnostics property of corpus 001-052.)
+//
+// 1. NON-VACUITY. `dotscale` and `blend` are honest helpers with fully
+//    annotated signatures and nothing representation-typed in them. Under any
+//    group, `equiv(G)` on them is VACUOUSLY true — the theorem quantifies over
+//    an action that touches none of their arguments — so proposing the pin
+//    would be a theorem's face on a tautology. The filter is on the CLASSIFIED
+//    signature, not on the body: no parameter and no return classifies Rep, so
+//    there is no candidate and no walk.
+//
+// 2. FAILED-JUDGMENT SILENCE. `readout` is signature-eligible (its input is
+//    IrrepsIdx-typed) and genuinely NOT equivariant: it reads x(1), a raw l = 1
+//    component, which is a basis-dependent number — corpus 005's rejection.
+//    Both candidates are tried, both refuse, and the channel says nothing. It
+//    never reports a near miss and never explains a refusal: a rejection
+//    diagnostic is what the CHECKER owes a user who wrote the pin, and manu-
+//    facturing one for a user who did not would turn every ordinary uncertified
+//    helper into a complaint. Recall is low by construction and honestly so
+//    (§7 stage 6a) — the wild-code bodies the engine in 6b/6c will reach are
+//    exactly the hand-indexing ones composition refuses today.
+// ============================================================================
+let static S = [(0, 0, 1), (1, 1, 1)]
+
+// Non-vacuity: scalars in, scalar out. No candidate.
+function dotscale(a: Float, b: Float, s: Float) -> Float = (a * b) * s
+
+// Non-vacuity again, with arrays that are not representation spaces: a plain
+// `Idx<n>` buffer is invariant under every group in the roster, so this is the
+// same tautology one rank up.
+function blend(u: Array<Float like Idx<3>>, v: Array<Float like Idx<3>>, t: Float)
+               -> Array<Float like Idx<3>> =
+    (u * t) + (v * t)
+
+// Failed judgment: signature-eligible, body not equivariant.
+function readout(x: Array<Float like IrrepsIdx<S>>) -> Float = x(1) + x(2)
+
+let d = dotscale(2.0, 3.0, 0.5)
+// EXPECT: d = 3
+let b = blend([1.0, 2.0, 3.0], [4.0, 5.0, 6.0], 2.0)
+// EXPECT: b = [10, 14, 18]
+let r = readout([1.0, 2.0, 3.0, 4.0])
+// EXPECT: r = 5

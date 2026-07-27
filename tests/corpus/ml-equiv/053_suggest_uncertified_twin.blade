@@ -1,0 +1,44 @@
+// TEST: ML Equiv Suggest Uncertified Twin
+import ml as ml
+// ============================================================================
+// STAGE 6a — THE CERTIFICATE-INFERENCE CHANNEL, AND ITS SOUNDNESS PIN.
+//
+// `layer_loose` is 011/018's derived-hom layer with the `where ml.equiv(O3)`
+// conjunct DELETED. It is correct either way — an uncertified function is not
+// a wrong function, only an unproved one (plan-transforms-as-types §4b) — so
+// nothing about the emitted code depends on the pin. What stage 6a adds is
+// that the compiler now NOTICES: it hypothesizes the conjunct, runs the SAME
+// judgment `layer_tight` below is checked with, and proposes the pin as a
+// BL4011 warning.
+//
+// PROPOSE ⊆ CHECK-ACCEPT, pinned in one file: `layer_tight` is the identical
+// body WITH the pin written, and it type-checks. A proposal the checker would
+// then refuse would be worse than no channel at all, so the twin is the
+// contract, not a nicety.
+//
+// The two `EXPECT`s below are the same numbers, which is the other half of the
+// claim: a suggestion is a warning, and a warning changes no value.
+// ============================================================================
+let static SIN = [(0, 0, 2), (1, 1, 1)]
+let static SOUT = [(0, 0, 1), (1, 1, 2)]
+let static WD = ml.hom_dim(SIN, SOUT)
+// EXPECT: WD = 4
+
+// SUGGEST: function 'layer_loose' judges equivariant under O3: add 'where ml.equiv(O3)' [signature: x transforms as IrrepsIdx<[(0, 0, 2), (1, 1, 1)]>, w invariant -> IrrepsIdx<[(0, 0, 1), (1, 1, 2)]>]
+function layer_loose(x: Array<Float like IrrepsIdx<SIN>>, w: Array<Float like Idx<WD>>)
+                     -> Array<Float like IrrepsIdx<SOUT>> =
+    ml.derive_linear(SIN, SOUT, w, x)
+
+// The pinned twin. No SUGGEST line: a function that already carries the
+// conjunct is not a candidate — it is CHECKED, which is the shipped path.
+function layer_tight(x: Array<Float like IrrepsIdx<SIN>>, w: Array<Float like Idx<WD>>)
+                     where ml.equiv(O3) -> Array<Float like IrrepsIdx<SOUT>> =
+    ml.derive_linear(SIN, SOUT, w, x)
+
+let wv = [0.5, 0.0 - 1.0, 2.0, 0.25]
+let xv = [1.0, 2.0, 3.0, 0.0 - 1.0, 0.5]
+
+let loose = layer_loose(xv, wv)
+// EXPECT: loose = [-1.5, 6.0, -2.0, 1.0, 0.75, -0.25, 0.125]
+let tight = layer_tight(xv, wv)
+// EXPECT: tight = [-1.5, 6.0, -2.0, 1.0, 0.75, -0.25, 0.125]

@@ -1057,7 +1057,11 @@ let private dispatchTest (rest: string list) : int =
         // (broken sources with pinned codes/spans). No C++ pipeline.
         let core = (Blade.Tests.DiagnosticsCore.runDiagnosticsCoreTests ()).Failed
         let corpus = (Blade.Tests.DiagCorpus.runDiagCorpusTests ()).Failed
-        if core + corpus = 0 then 0 else 1
+        // Stage-6a BL4011 suggestions: pinned (and pinned-ABSENT) over the
+        // ml-equiv corpus. A warning channel, so it has no home in the value
+        // corpus; it rides here with the other coded-diagnostic assertions.
+        let certSuggest = (Blade.Tests.DiagCorpus.runCertSuggestTests ()).Failed
+        if core + corpus + certSuggest = 0 then 0 else 1
     | [ "oracles" ] ->
         // Phase 0.2 review block: the differential-harness oracles checked
         // against hand-computed / analytic values. No Blade source pipeline.

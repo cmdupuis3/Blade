@@ -66,3 +66,67 @@ let runDiagCorpusTests () : BlockResult =
 
     printFooter "Diagnostics Corpus" [sprintf "%d passed" passed; sprintf "%d failure(s)" failed]
     { Block = "Diagnostics Corpus"; Passed = passed; Failed = failed; Skipped = 0; FailedNames = failedNames }
+
+/// Stage-6a equivariance-certificate suggestions (BL4011), pinned over the
+/// whole `ml-equiv` corpus category, STRICT IN BOTH DIRECTIONS: every
+/// `// SUGGEST: <message>` line must match a produced suggestion exactly, and
+/// every produced suggestion must be claimed by a pin.
+///
+/// The both-directions rule is what makes an ABSENCE assertable, which the
+/// value corpus cannot do (a suggestion is a warning; warnings change no value
+/// and fail no value test). A file with no `// SUGGEST:` lines asserts SILENCE
+/// — that is corpus 057's whole content, and, incidentally, a standing lock on
+/// the zero-suggestion property of every pre-6a file in the category.
+///
+/// Suggestions are read off the `Equiv.CertSuggestions` side-channel rather
+/// than scraped from a warning string, so the message text pinned here is the
+/// same text the editor ghost-renders.
+let runCertSuggestTests () : BlockResult =
+    printHeader "Equiv Certificate Suggestions"
+    let mutable passed = 0
+    let mutable failed = 0
+    let mutable failedNames : string list = []
+    let check name ok detail =
+        if ok then
+            passed <- passed + 1
+            resultLine Pass name detail
+        else
+            failed <- failed + 1
+            failedNames <- failedNames @ [name]
+            resultLine Fail name detail
+
+    let pinsOf (source: string) =
+        source.Replace("\r\n", "\n").Split('\n')
+        |> Array.toList
+        |> List.choose (fun (l: string) ->
+            let t = l.Trim()
+            if t.StartsWith "// SUGGEST: " then Some (t.Substring(12).Trim()) else None)
+
+    for (name, source) in Corpus.category "ml-equiv" do
+        let pins = pinsOf source
+        // The pipeline is run for its side effect on the suggestion channel.
+        // A source the checker REFUSES is fine here: the elaborator resets the
+        // channel per program and only fills it when the equiv judgment found
+        // nothing to report, so a reject-probe legitimately yields zero.
+        let _ = Lowering.lowerDiag None source
+        let produced = Blade.ML.Equiv.CertSuggestions.get () |> List.map fst
+        let mutable remaining = produced
+        let mutable unmatched : string list = []
+        for p in pins do
+            match remaining |> List.tryFindIndex ((=) p) with
+            | Some i ->
+                remaining <- remaining |> List.indexed |> List.filter (fun (j, _) -> j <> i) |> List.map snd
+            | None -> unmatched <- unmatched @ [p]
+        let ok = unmatched.IsEmpty && remaining.IsEmpty
+        let detail =
+            if ok then
+                if pins.IsEmpty then "no suggestions (asserted)"
+                else sprintf "%d suggestion(s) as pinned" pins.Length
+            else
+                [ for p in unmatched -> sprintf "PIN NOT PRODUCED: %s" p
+                  for r in remaining -> sprintf "UNPINNED SUGGESTION: %s" r ]
+                |> String.concat " ; "
+        check name ok detail
+
+    printFooter "Equiv Certificate Suggestions" [sprintf "%d passed" passed; sprintf "%d failure(s)" failed]
+    { Block = "Equiv Certificate Suggestions"; Passed = passed; Failed = failed; Skipped = 0; FailedNames = failedNames }

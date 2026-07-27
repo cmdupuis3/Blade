@@ -1,0 +1,73 @@
+// TEST: ML Equiv Suggest Point Group
+import ml as ml
+// ============================================================================
+// THE SECOND BLOCK-SPEC MEMBER, INFERRED.
+//
+// Candidates are SIGNATURE-DRIVEN. A `PgIrrepsIdx<C4, ·>` parameter with no
+// `IrrepsIdx` anywhere in the signature admits exactly one hypothesis — the
+// group the annotation names — so the channel tries `Point C4` and nothing
+// else. There is no strongest-first ladder here and there cannot be one: the
+// registry knows each group's frozen table and NO map between two of them
+// (MLEquiv's header), so C4 and D4 are not comparable and a "try D4 too" arm
+// would be proposing a theorem nothing in the compiler could check.
+//
+// The asymmetry is visible in `mixed_loose`: a pg buffer under an O(3)
+// hypothesis classifies INVARIANT (5b-ii), so a signature carrying BOTH
+// families is an O3/SO3 candidate with the pg buffer along for the ride —
+// never a C4 candidate. That is the same restriction argument corpus 045 §4
+// pins from the checking side.
+// ============================================================================
+let static EC = [("E", 1)]
+let static WE = ml.pg_hom_dim("C4", EC, EC)
+// EXPECT: WE = 2
+
+// SUGGEST: function 'c4_loose' judges equivariant under C4: add 'where ml.equiv(C4)' [signature: x transforms as PgIrrepsIdx<C4, [("E", 1)]>, w invariant -> PgIrrepsIdx<C4, [("E", 1)]>]
+function c4_loose(x: Array<Float like PgIrrepsIdx<C4, EC>>, w: Array<Float like Idx<WE>>)
+                  -> Array<Float like PgIrrepsIdx<C4, EC>> =
+    ml.derive_pg_linear(C4, EC, EC, x, w)
+
+// The proposed pin, written out.
+function c4_tight(x: Array<Float like PgIrrepsIdx<C4, EC>>, w: Array<Float like Idx<WE>>)
+                  where ml.equiv(C4) -> Array<Float like PgIrrepsIdx<C4, EC>> =
+    ml.derive_pg_linear(C4, EC, EC, x, w)
+
+let wv = [0.0, 1.0]
+// Pure J at (0, 1): (3, 4) -> (-4, 3). Integer generators, exact pins.
+let loose = c4_loose([3.0, 4.0], wv)
+// EXPECT: loose = [-4.0, 3.0]
+let tight = c4_tight([3.0, 4.0], wv)
+// EXPECT: tight = [-4.0, 3.0]
+
+// THE MIXED SIGNATURE: an IrrepsIdx parameter is present, so the candidates
+// are O3 then SO3 and the C4 buffer rides as an INVARIANT — the O(3) theorem
+// is what gets proposed, and it is the one that holds. The pg layer's output
+// cell is a fixed scalar factor on an O(3)-equivariant value, which is exactly
+// the "held fixed" premise the Inv classification records.
+let static SH1 = ml.sh_spec(1)
+
+// Note how the suggestion RENDERS the pg parameter: `p invariant`. The
+// proposed signature is the classification the checker would make once the pin
+// is written, so the asymmetry is visible in the message itself.
+// SUGGEST: function 'mixed_loose' judges equivariant under O3: add 'where ml.equiv(O3)' [signature: v transforms as IrrepsIdx<[(0, 0, 1), (1, 1, 1)]>, p invariant, pw invariant -> invariant]
+function mixed_loose(v: Array<Float like IrrepsIdx<SH1>>,
+                     p: Array<Float like PgIrrepsIdx<C4, EC>>, pw: Array<Float like Idx<WE>>) -> Float = {
+    let q = ml.derive_pg_linear(C4, EC, EC, p, pw)
+    let n = ml.norms(SH1, v)
+    n(1) * q(0)
+}
+
+function mixed_tight(v: Array<Float like IrrepsIdx<SH1>>,
+                     p: Array<Float like PgIrrepsIdx<C4, EC>>, pw: Array<Float like Idx<WE>>)
+                     where ml.equiv(O3) -> Float = {
+    let q = ml.derive_pg_linear(C4, EC, EC, p, pw)
+    let n = ml.norms(SH1, v)
+    n(1) * q(0)
+}
+
+// SH1 is [(0, 0, 1), (1, 1, 1)] — a scalar cell then the l = 1 triple, whose
+// norm here is 5. q = J(3, 4) = (-4, 3), so the pg layer contributes the fixed
+// factor q(0) = -4 and the readout is -20, exactly.
+let m = mixed_loose([1.0, 0.0, 3.0, 4.0], [3.0, 4.0], wv)
+// EXPECT: m = -20
+let mt = mixed_tight([1.0, 0.0, 3.0, 4.0], [3.0, 4.0], wv)
+// EXPECT: mt = -20
