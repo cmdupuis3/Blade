@@ -12,6 +12,7 @@ module Blade.ML.Statics
 
 open Blade.StaticEval
 open Blade.ML.Spec
+open Blade.ML.PermSpec
 
 /// Convert a static value to an ML irreps spec: array of (l, parity, mult)
 /// int triples, parity 0 = even / 1 = odd.
@@ -163,6 +164,41 @@ let install () =
                 kArg "poly_weight_dim" k |> Result.map (fun k ->
                     SVInt (int64 (polyWeightDim s k so)))))
             | _ -> Error "poly_weight_dim: expected (SPEC, K, SPEC_OUT) static arguments")
+        // The Sₙ index-action surface's sizing pair (stage 5a-i,
+        // plan-transforms-as-types §3.6). NO spec argument: a permutation
+        // module is named by its RANK and the node-axis extent alone, which
+        // is the whole reason Sₙ is a sibling registry member rather than a
+        // second block-spec family.
+        //   perm_weight_dim(K, L, N) = dim Hom_{Sₙ}(ℝ^{N^K}, ℝ^{N^L})
+        //                            = #partitions of the K+L axis positions
+        //   perm_bias_dim(L, N)      = the same at K = 0 (partitions of [L])
+        // Both ERROR below N = K+L rather than switching to the truncated
+        // lattice — §3.6's no-silent-fork rule, shared with the ops through
+        // PermSpec.checkPermSizing so the two never drift.
+        registerStaticBuiltin (statName "perm_weight_dim") (fun args ->
+            match args with
+            | [ SVInt k; SVInt l; SVInt n ] ->
+                if k < 0L || l < 0L then
+                    Error (sprintf "perm_weight_dim: K and L must be static ints >= 0 (got %d, %d)" k l)
+                elif k > 64L || l > 64L || n > 1000000L || n < -1L then
+                    Error (sprintf "perm_weight_dim: K, L and N are static ints out of any sane range (got %d, %d, %d)" k l n)
+                else
+                    let k, l, n = int k, int l, int n
+                    checkPermSizing "perm_weight_dim" "K + L" (k + l) n
+                    |> Result.map (fun () -> SVInt (int64 (permWeightDim k l n)))
+            | _ -> Error "perm_weight_dim: expected (K, L, N) static int arguments")
+        registerStaticBuiltin (statName "perm_bias_dim") (fun args ->
+            match args with
+            | [ SVInt l; SVInt n ] ->
+                if l < 0L then
+                    Error (sprintf "perm_bias_dim: L must be a static int >= 0 (got %d)" l)
+                elif l > 64L || n > 1000000L || n < -1L then
+                    Error (sprintf "perm_bias_dim: L and N are static ints out of any sane range (got %d, %d)" l n)
+                else
+                    let l, n = int l, int n
+                    checkPermSizing "perm_bias_dim" "L" l n
+                    |> Result.map (fun () -> SVInt (int64 (permBiasDim l n)))
+            | _ -> Error "perm_bias_dim: expected (L, N) static int arguments")
         // Block-navigation builtins (IrrepsIdx v3): fully static per-block
         // accessors so users write block-structured loop nests —
         //   x(irreps_offset(spec, b) + mu * irreps_dim(spec, b) + m)

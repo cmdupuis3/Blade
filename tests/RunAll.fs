@@ -160,6 +160,12 @@ let runAllTestsFullWith (extraBlocks: (unit -> Blade.Tests.TestHarness.BlockResu
     // Casimir-Lagrange isotypic projectors re-derived exactly and
     // independently, plus the k = 2 value-level M-pin against stage 1.
     let polyOracle = Blade.Tests.PolyOracleReview.runPolyOracleTests ()
+    // The Sn permutation-module counting layer (MLPermSpec.fs, stage 5a-i):
+    // RGS partition enumeration vs the Stirling recurrence vs an independent
+    // block-insertion route, the witness-unitriangularity certificate (the
+    // Coq keystone's numerical shadow), and the perm_weight_dim /
+    // perm_bias_dim sizing arithmetic. Pure integer, no pipeline.
+    let permSpec = Blade.Tests.PermSpecReview.runPermSpecTests ()
     // Compiler-native Cartesian<->irreps bridge constants (CartesianBridge.fs)
     // vs closed forms + the y_to harmonic constants (sgs closure arc).
     let cartBridge = Blade.Tests.CartesianBridgeReview.runCartesianBridgeTests ()
@@ -249,7 +255,7 @@ let runAllTestsFullWith (extraBlocks: (unit -> Blade.Tests.TestHarness.BlockResu
     let blocks =
         [ yield r1; yield r2; yield attrs; yield subst
           yield normalize; yield unify; yield validateArrow
-          yield shape; yield oracles; yield wigner; yield symPower; yield polyOracle; yield cartBridge; yield spans; yield diagCore; yield diagCorpus; yield alloc
+          yield shape; yield oracles; yield wigner; yield symPower; yield polyOracle; yield permSpec; yield cartBridge; yield spans; yield diagCore; yield diagCorpus; yield alloc
           yield ompPragma
           match omp with Some b -> yield b | None -> ()
           yield bufType

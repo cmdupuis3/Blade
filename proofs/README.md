@@ -19,7 +19,7 @@ computed pins.  `count-theorems.ps1` is the mechanical implementation --
 run it with `-Check` to verify the numbers below and the headline in
 `docs/proofs.md`, which quotes the same total.
 
-## Contents (369 theorems total)
+## Contents (430 theorems total)
 
 - BladeCore.v (16): Group Law both halves (diagonal swap sound; per-dim
   product swap refuted), counting lemma (no lossless product layout),
@@ -165,3 +165,26 @@ run it with `-Check` to verify the numbers below and the headline in
   (sym_copy_splitting) and the exterior twin is Vandermonde
   (alt_copy_splitting) -- the cardinalities MLSpec.powerSpec asserts,
   over an explicit enumeration of the compositions.
+- BladePartition.v (61): NEW -- set partitions as restricted growth
+  strings, the stage 5a-i obligations of plan-transforms-as-types 3.6
+  (MLPermSpec).  The RGS enumeration is an ARROW instance
+  (heads b = seq 0 (S b), step b x = max b (S x)), so sound/complete/
+  NoDup/lex-sorted are BladeArrow + BladeLex instantiated.  Counts: the
+  block-count fibre is a Stirling number (rgs_enum_block_fibres, via a
+  first-position recurrence proved equal to Stirling's last-position
+  one), the whole enumeration is Bell (rgs_enum_length; Bell 0..6 =
+  1,1,2,5,15,52,203 computed), and the <= N-block filter the compiler
+  ships is the truncated Stirling sum (rgs_enum_le_count_min);
+  perm_weight_dim/perm_bias_dim = Bell at N >= K+L, with 3.6's DeepSets
+  (2) and Maron (15 + 2) anchors as pins.  THE KEYSTONE,
+  rgs_lex_extends_refinement: coarsening implies lex-<=, so the
+  coarsest-first emission order extends refinement -- PROVED AS STATED,
+  no convention swap.  The 3.6 fallback order is discharged too
+  (coarsens_blocks_le by pigeonhole + P2 as tiebreak).  The witness
+  certificate, over the compiler's list (the s2_cells_spec discipline):
+  B_spec unfolds indicator evaluation to the coarsening relation, and
+  witness_matrix_unitriangular turns P2 + lex-sortedness into
+  unitriangularity of the witness-evaluation matrix -- integer
+  independence, no float, no rank decision.  Orientation pinned by
+  computed matrices at m = 2, 3.  Spanning (orbit-basis completeness) is
+  cited, not proved (6.1(a)).

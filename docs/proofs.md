@@ -1,7 +1,7 @@
 # Blade Proofs
 
 Prose mirror of the machine-checked proof tower in `/proofs/`:
-**369 theorems**, Coq 8.18 / Rocq 9.0, stdlib only, verified by both `coqc`
+**430 theorems**, Coq 8.18 / Rocq 9.0, stdlib only, verified by both `coqc`
 and `coqchk`.
 
 Build: `coq_makefile -f _CoqProject -o Makefile && make`.
@@ -33,7 +33,7 @@ Rules of this document:
 | Computation | BladeCompute, BladeMonad, BladeSafety | materialized semantics, V∘P = id, 12.x laws, MonadPlus, verified offsets + bounds safety + buffer-elimination fusion |
 | Storage split | BladeCauchy | the r = 2 Cauchy split |
 | AD seam | BladeJacobian | symbolic differentiation: renaming equivariance, the Jacobian symmetry transfer, joint-pair-swap tangent symmetry, the accumulation multiplicity rule |
-| ML seam | BladeSymPower | the S₂ partition of a self-tensor weight space; the Sym^k/Λ^k composition-sector counts (Vandermonde, both flavours) |
+| ML seam | BladeSymPower, BladePartition | the S₂ partition of a self-tensor weight space; the Sym^k/Λ^k composition-sector counts (Vandermonde, both flavours); set partitions as restricted growth strings — Bell/Stirling counts, RGS-lex extends refinement, the unitriangular witness certificate |
 
 Import structure is a DAG rooted at BladeDMWF (BladeCore and BladeLowering are
 self-contained); build order per `_CoqProject`.
@@ -627,6 +627,99 @@ subspaces is §3.3b's construction. The cross-stage identity
 `poly_weight_dim(s, 2, tp_spec(s,s)) = sym_tp_weight_dim(s)` is out of reach
 here — it equates two counts computed through Clebsch–Gordan data — and stays
 a compiler-side sweep (stage 2a, 15 specs to multiplicity 4).
+
+## BladePartition.v — set partitions, RGS order, and the witness certificate
+
+The stage 5a-i obligations of
+[plan-transforms-as-types.md](plan-transforms-as-types.md) §3.6 (the Sₙ
+index-action member; staging item 5). `derive_perm_linear(K, L, N, …)` emits
+one loop nest per **partition of the K + L index positions**, with the basis
+element of a partition γ being its **coarsening indicator** B_γ — 1 on an
+index tuple exactly when the tuple is constant on each block of γ.
+MLPermSpec must enumerate the partitions, size them before allocating, and
+certify independence *with integers*. Each of those is a theorem here.
+
+A partition of [0..m) is modelled as its **restricted growth string**:
+γ[0] = 0 and γ[i] ≤ 1 + max of the prefix, so the label set is always an
+initial segment and the string is the partition's canonical name.
+b(γ) = 1 + max, and 0 for the empty string (Bell 0 = 1, the empty partition).
+
+**P1 — the enumeration is an arrow, not a new mechanism.** RGS is exactly
+BladeArrow's coalgebra at `heads b = seq 0 (S b)`, `step b x = max b (S x)`,
+so `rgs_enum_sound` / `_complete` / `_NoDup` / `_lex_sorted` are
+`enumA_sound` / `enumA_complete` / `enumA_NoDup` / `enumA_lex_sorted`
+instantiated (`canonA_rgs` identifies the arrow's canonicity predicate with
+restricted growth). The partition enumerator joins Sym, Antisym, affine and
+Compound in the same family. `rgs_enum_3` computes the five length-3 strings
+in lex order.
+
+Counts (all over the emitted list, not an abstract set):
+
+- `rgs_enum_block_fibres`: the partitions with exactly j blocks number
+  S(m, j). The enumeration recurses on the *first* position and Stirling's
+  recurrence on the *last*; `stir_open_peel_last` proves the two agree, and
+  `stir_open_stirling` closes it.
+- `rgs_enum_length`: the whole enumeration is Bell m, by summing the fibres
+  (`fibre_sum`, with `rgs_blocks_from_bound` supplying the finite range).
+  `bell_pins` computes Bell 0..6 = 1, 1, 2, 5, 15, 52, 203;
+  `rgs_enum_lengths` checks 1, 2, 15, 203 against the live enumeration at
+  m = 0, 2, 4, 6.
+- `rgs_enum_le_count` / `rgs_enum_le_count_min`: the ≤ N-block filter, which
+  is what is realizable over `Idx<N>`, has length Σ_{j ≤ min(N, m)} S(m, j).
+  `perm_weight_dim_is_bell` / `perm_bias_dim_is_bell`: at N ≥ K + L the count
+  collapses to Bell(K + L) — the regime `perm_weight_dim` is defined on, the
+  compiler erroring below it. §3.6's anchors are pins:
+  `perm_weight_dim_deepsets` = 2 (DeepSets, Bell 2),
+  `perm_weight_dim_maron` = 15 and `perm_bias_dim_maron` = 2 (Maron k = l = 2).
+  `rgs_enum_le_truncates` shows the truncation biting: 5 → 4 at m = 3, N = 2.
+
+**P2 — `rgs_lex_extends_refinement`, the triangularity keystone. Proved as
+stated; no convention swap.** If γ′ coarsens γ (both valid RGSs of the same
+length) then γ′ ≤ γ in lex order, so **coarsest-first emission extends
+refinement**. The proof is a two-case analysis at the first position i where
+the strings differ: they share a prefix p, hence the same prefix block count
+b. If γ[i] < b then γ[i] already occurs in p (`rgs_values_cover` — the
+restricted-growth condition is exactly what makes the label set an initial
+segment), so coarsening forces γ′[i] to equal γ′ at that earlier position,
+which is γ[i] — contradicting "differ". Hence γ[i] = b opens a new block,
+while γ′[i] ≤ b by its own growth bound (`rgs_split_head`), so γ′[i] < γ[i]
+and `lexlt_prefix` finishes.
+
+§3.6's **fallback** convention (block count ascending, then lex) is
+discharged as well, and needs no strictness argument:
+`coarsens_blocks_le` shows coarsening never increases the block count (the
+induced map on labels is onto, so `NoDup_incl_length` bounds them), and P2
+settles every tie — `fallback_order_extends_refinement`. Both orders are
+proved extensions of refinement, so the F# side's single order function may
+pick either.
+
+**P3 — the witness certificate, over the compiler's list** (the
+`s2_cells_spec` discipline of BladeSymPower: theorems about the list the
+elaborator emits). γ's witness tuple is its own RGS. `B_spec` unfolds the
+indicator's evaluation semantics — `B γ′ t = true` iff t is constant on γ′'s
+blocks, i.e. iff t coarsens γ′ — so the witness-evaluation matrix *is* the
+refinement matrix (`witness_matrix_entry`). Its diagonal is true
+(`witness_diagonal`), and `witness_matrix_unitriangular` combines P2 with P1's
+lex-sortedness: a true entry at (row a, column b) forces a ≤ b. Unitriangular
+over the emission order ⇒ invertible over ℤ ⇒ the emitted basis is
+independent, with no float and no rank decision, exactly as §3.6 requires.
+`witness_in_range` checks the other half of the certificate's legality: at
+N ≥ m every entry of every witness is a legal `Idx<N>` value — which is why
+the static N ≥ K + L guard is a real precondition, not a convenience.
+
+Orientation is pinned by computation rather than prose: §3.6's
+`B_{γ′}(RGS(γ)) = 1 ⇔ γ′ ≤ γ` reads ≤ as *refinement*, which unfolds here to
+`coarsens γ γ′`; `witness_matrix_2` and `witness_matrix_3` compute the 2×2 and
+5×5 matrices, so the triangle is fixed by a check (rows = witness, columns =
+basis ⇒ upper unitriangular; transposing swaps the triangle and nothing else).
+
+Honest scope: **independence** is proved, **spanning** is not. That the
+coarsening indicators exhaust Hom_{Sₙ}(ℝ^{n^K}, ℝ^{n^L}) is the orbit-counting
+half, cited under §6.1(a) exactly as Schur is cited for the O(3) member; the
+compiler's own check in that direction is the numeric exact-rational
+Reynolds/Gram oracle, not a theorem. Nothing in the file mentions characters,
+irreps or Kronecker coefficients — which is §3.6's claim that the
+permutation-module tier is character-free.
 
 ## What remains unproved
 

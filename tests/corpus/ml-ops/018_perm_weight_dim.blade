@@ -1,0 +1,94 @@
+// TEST: ML Ops perm_weight_dim / perm_bias_dim
+import ml as ml
+// ============================================================================
+// ml.perm_weight_dim(K, L, N) and ml.perm_bias_dim(L, N): the sizing half of
+// the S_n INDEX-ACTION surface (docs/plan-transforms-as-types.md §3.6, stage
+// 5a-i). Unlike every other ml.* sizing builtin these take NO spec — a
+// permutation module is named by its rank and the node-axis extent alone,
+// which is exactly why S_n is a sibling registry member rather than a second
+// block-spec family.
+//
+//   perm_weight_dim(K, L, N) = dim Hom_{S_n}(R^{N^K}, R^{N^L})
+//                            = #orbits of S_n on [N]^{K+L}
+//                            = #partitions of the K+L axis positions
+//                            = Bell(K+L)   whenever N >= K + L
+//   perm_bias_dim(L, N)      = the same at K = 0 (partitions of [L])
+//
+// The count is the theorem BECAUSE the basis is emitted: one weight per
+// partition, the basis map being that partition's COARSENING INDICATOR
+// (input-only blocks sum, mixed blocks gather, output-only blocks broadcast).
+// Stage 5a-ii emits them; this file pins the counts they must agree with.
+//
+// N < K + L is REFUSED, not truncated — ml-ops/019 is that half.
+// ============================================================================
+
+// --- the anchors of §3.6 -----------------------------------------------------
+// DeepSets: the S_n-equivariant maps R^N -> R^N are spanned by x and
+// sum(x)*1 — Bell(2) = 2, the two partitions {{0,1}} and {{0},{1}}.
+let static DEEPSETS = ml.perm_weight_dim(1, 1, 8)
+let deepsets = DEEPSETS
+// EXPECT: deepsets = 2
+
+// Maron et al.'s k = l = 2 layer: 15 weights + 2 biases, the counts that make
+// the "maximally expressive equivariant graph layer" a FINITE object.
+let static MARON_W = ml.perm_weight_dim(2, 2, 5)
+let static MARON_B = ml.perm_bias_dim(2, 5)
+let maron_w = MARON_W
+let maron_b = MARON_B
+// EXPECT: maron_w = 15
+// EXPECT: maron_b = 2
+
+// The invariant readout: L = 0 outputs a scalar, and the S_n-invariant linear
+// functionals on R^N are spanned by sum(x) — one weight, Bell(1) = 1. K = 0
+// with L = 0 is the empty partition, Bell(0) = 1: the constant.
+let static READOUT = ml.perm_weight_dim(1, 0, 4)
+let static BIAS0 = ml.perm_bias_dim(0, 4)
+let readout = READOUT
+let bias0 = BIAS0
+// EXPECT: readout = 1
+// EXPECT: bias0 = 1
+
+// --- Bell(K+L) across the whole capped range, m = K + L = 0 .. 6 -------------
+// 1, 1, 2, 5, 15, 52, 203. Only m matters: perm_weight_dim is symmetric in
+// K and L, and N above K+L changes nothing (the lattice is already full).
+let static M0 = ml.perm_weight_dim(0, 0, 1)
+let static M1 = ml.perm_weight_dim(1, 0, 6)
+let static M2 = ml.perm_weight_dim(1, 1, 6)
+let static M3 = ml.perm_weight_dim(1, 2, 6)
+let static M3B = ml.perm_weight_dim(2, 1, 6)
+let static M4 = ml.perm_weight_dim(2, 2, 4)
+let static M5 = ml.perm_weight_dim(2, 3, 9)
+let static M6 = ml.perm_weight_dim(3, 3, 6)
+let m0 = M0
+let m1 = M1
+let m2 = M2
+let m3 = M3
+let m3b = M3B
+let m4 = M4
+let m5 = M5
+let m6 = M6
+// EXPECT: m0 = 1
+// EXPECT: m1 = 1
+// EXPECT: m2 = 2
+// EXPECT: m3 = 5
+// EXPECT: m3b = 5
+// EXPECT: m4 = 15
+// EXPECT: m5 = 52
+// EXPECT: m6 = 203
+
+// perm_bias_dim(L, N) is perm_weight_dim(0, L, N): Bell(L).
+let static B3 = ml.perm_bias_dim(3, 3)
+let static B4 = ml.perm_bias_dim(4, 7)
+let b3 = B3
+let b4 = B4
+// EXPECT: b3 = 5
+// EXPECT: b4 = 15
+
+// --- the counts compose in `let static` land like every other sizing builtin -
+// A rank-2 layer's parameter budget: weights + biases, and a two-layer stack.
+let static LAYER = ml.perm_weight_dim(2, 2, 5) + ml.perm_bias_dim(2, 5)
+let static TWO_LAYERS = 2 * LAYER
+let layer = LAYER
+let two_layers = TWO_LAYERS
+// EXPECT: layer = 17
+// EXPECT: two_layers = 34

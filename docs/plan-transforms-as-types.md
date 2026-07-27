@@ -899,6 +899,23 @@ go first.
      MLEquiv/MLGalilean): 5a-i counting layer (MLPermSpec: RGS partition
      order, Stirling-vs-odometer count asserts, witness-unitriangularity
      certificate, `perm_weight_dim`/`perm_bias_dim` erroring on N < K+L);
+     **5a-i LANDED 2026-07-27.** MLPermSpec.fs (dependency-free integer;
+     `orderPartitions` is the single swappable order function — and the
+     swap is now moot: **the Coq keystone PROVED AS STATED**,
+     `rgs_lex_extends_refinement` in BladePartition.v, with the fallback
+     extension property also discharged as a bonus). m = 0 convention:
+     Bell(0) = 1 via S summed from j = 0 — `perm_bias_dim(0, N) = 1`, the
+     L = 0 readout is the constant map. F# strict-triangularity shadow:
+     zero violations over all pairs at the cap; third-route
+     block-insertion enumerator agrees as sets, m ≤ 6. BladePartition.v
+     (61 items): the RGS enumeration is an ARROW INSTANCE (canonA_rgs) —
+     partitions join Sym/Antisym/Compound in the tower's proved
+     enumeration family; fibre counts = Stirling rows (peel-first vs
+     peel-last reconciled); witness matrix upper-unitriangular over the
+     emitted list; orientation pinned by computation (no doc error); the
+     m = 4 density double-count 60 = Σ S(4,j)·Bell(j). Tower 25 files,
+     430 items, coqchk axiom-free. Blocks "Perm Spec" 33/0; full suite
+     1573/0.
      5a-ii naive emission (`derive_perm_linear`/`derive_perm_bias`,
      one loop nest per partition) + the exact-rational Reynolds/Gram
      oracle block + corpus anchors (DeepSets, matrix invariants, Maron

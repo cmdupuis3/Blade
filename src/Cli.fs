@@ -1077,6 +1077,16 @@ let private dispatchTest (rest: string list) : int =
         // k = 2 value-level M-pin vs stage 1. In-process, no C++ pipeline.
         let failed = (Blade.Tests.PolyOracleReview.runPolyOracleTests ()).Failed
         if failed = 0 then 0 else 1
+    | [ "permspec" ] | [ "perm-spec" ] ->
+        // Stage 5a-i review block: the Sn permutation-module counting layer
+        // (MLPermSpec.fs) — RGS partition enumeration against the Stirling
+        // recurrence and against an independently coded block-insertion
+        // enumerator, the witness-unitriangularity certificate (strict half
+        // tested explicitly: it is the numerical shadow of the Coq order
+        // keystone), and the perm_weight_dim / perm_bias_dim sizing rules.
+        // Pure integer, in-process, no Blade source pipeline.
+        let failed = (Blade.Tests.PermSpecReview.runPermSpecTests ()).Failed
+        if failed = 0 then 0 else 1
     | [ "alloc" ] ->
         // Standalone C++ runtime-layout tests for the contiguous-backing
         // allocate<>. Compiles + runs cpp/alloc_layout_tests.cpp against the

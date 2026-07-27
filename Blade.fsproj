@@ -45,6 +45,13 @@
          not compile these); core touchpoints are StaticEval's builtin
          registry and the MLElaborate.expand pipeline stage. -->
     <Compile Include="src/ml/compiler/MLSpec.fs" />
+    <!-- The S_n permutation-module counting layer (stage 5a-i): RGS partition
+         enumeration, the witness-unitriangularity certificate, and the
+         perm_weight_dim/perm_bias_dim sizing arithmetic. Dependency-free
+         integer code (not even MLSpec), so it sits beside MLSpec.fs and only
+         has to precede MLStatics. NOT part of BladeML.fsproj — the ml/ oracle
+         twin of the S_n arc is 5a-ii's exact-rational Reynolds block. -->
+    <Compile Include="src/ml/compiler/MLPermSpec.fs" />
     <Compile Include="src/ml/compiler/CartesianBridge.fs" />
     <Compile Include="src/ml/compiler/WignerTables.fs" />
     <!-- Sym^j(V_l) occurrence tables (stage 2b-i): needs MLSpec's powerSpec
@@ -156,6 +163,7 @@
     <Compile Include="tests/Test_WignerTables.fs" />
     <Compile Include="tests/Test_SymPowerTables.fs" />
     <Compile Include="tests/Test_PolyOracle.fs" />
+    <Compile Include="tests/Test_PermSpec.fs" />
     <Compile Include="tests/Test_CartesianBridge.fs" />
     <Compile Include="tests/Test_Ppl.fs" />
     <Compile Include="tests/Test_Math.fs" />

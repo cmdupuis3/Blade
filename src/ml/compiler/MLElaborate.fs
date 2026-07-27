@@ -824,6 +824,7 @@ let private sizingNames =
                  "tp_spec"; "hom_dim"; "tp_full_weight_dim"
                  "sym_tp_weight_dim"; "alt_tp_weight_dim"
                  "sym_spec"; "alt_spec"; "poly_weight_dim"
+                 "perm_weight_dim"; "perm_bias_dim"
                  "irreps_len"; "irreps_l"; "irreps_parity"; "irreps_mult"
                  "irreps_dim"; "irreps_offset" ]
 
