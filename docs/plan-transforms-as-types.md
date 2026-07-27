@@ -469,8 +469,11 @@ tri <@> (h, h, h)
 2. **Real-basis subtleties, three distinct ones.** (i) O(3) real ≡ complex
    decomposition — settled (all FS +1), it is what makes §3.3 sound.
    (ii) The mirror-pair rule of §3.2 relies on the **cross-block** exchange
-   identity `C^{l2l1l3} = σ·(C^{l1l2l3})ᵀ`; only `l1 = l2` is currently
-   pinned (Tests_Wigner.fs:81-93). Pin the cross-block case before stage 1b.
+   identity `C^{l2l1l3} = σ·(C^{l1l2l3})ᵀ` — and stage 1b's fused kernel reads
+   the kept path's table for the dropped one, so it depends on it pointwise.
+   Both the `l1 = l2` case (Tests_Wigner.fs:81-93) and the cross-block case
+   (:95-122) are now pinned bit-exact for every l ≤ 2 triple: precondition
+   discharged.
    (iii) Finite groups: the FS correction (§3.6) — Sₙ safe, point groups not.
 3. **Nominal identity under nesting.** (i) Does Unify's spec-mismatch arm
    handle rank-k irreps records, or assume Rank = 1? (ii)
@@ -521,7 +524,32 @@ go first.
    `embed`; MLEquiv op arms (~5 lines each, group-agnostic). **Pin:
    ulp-exact** against `derive_tp(S,S,x,x,embed(w))`. Corpus: `ml-equiv/03x`.
    Smallest value-pinnable wedge; lands the entire semantic claim.
-2. **Stage 1b — arithmetic compaction.** Seams: none. Drop mirror paths and
+2. **Stage 1b — arithmetic compaction.**
+   **LANDED 2026-07-26** (branch feat/derive-sym-tp): the compacted kernels no
+   longer route through the dense loop at all. MLSpec gained a shared
+   free-cell skeleton (`s2TpSkeleton`) that both the stage-1a embed table and a
+   new fused cell table (`S2TpCell` / `s2TpCells`) are built from, so the
+   packed layout cannot drift between them; `deriveS2TpDecl` emits one term
+   pair per kept cell — the dropped mirror path collapses onto the kept path's
+   own CG table with the single sign στ (+1 Sym² / −1 Λ²), and a diagonal
+   path's (u2, u1) half folds in with sign τ, the u1 = u2 cell being its own
+   partner (single term). `tpBodyStmts` is untouched; `tensor_product` /
+   `derive_tp` still emit the dense loop. Observed vs `derive_tp` on the
+   embedded dense weights, anchors A/B/C: **max 1.5e-16 relative** (per spec,
+   sym/alt: 9.8e-17 / 9.8e-17, 1.5e-16 / 1.1e-16, 1.2e-16 / 1.2e-16) — three
+   orders inside the 1e-13 pin. `alt(x, x) = 0` and the exchange identities
+   `sym(x,y) = sym(y,x)`, `alt(x,y) = −alt(y,x)` stay EXACT (spec B's
+   identities at ~3e-17/8e-17 from the mirror-cell fusion of unequal blocks);
+   the association is `(coef·w)·(x·y)` per term precisely so that a mirror
+   cell's two products are bit-identical at x = y. Emitted size, spec A: the
+   sym kernel's baked tables go 6-path/27-CG-entry (the dense loop stage 1a
+   embedded verbatim, plus a 10-slot dense buffer and a 9-entry expansion
+   table) → 4-cell/18-CG-entry with no dense buffer; the alt kernel →
+   2-cell/9-CG-entry. Corpus 032/033's `sq_diff = 0.0` pins hold unchanged
+   (squared residuals ~1e-31/~1e-30), reworded there as tolerance pins;
+   `ad.grad` through the fused two-term accumulation matches central
+   differences to 4.3e-10 relative (FD-limited).
+   Seams: none. Drop mirror paths and
    the m = 1 σ = −1 diagonal paths from the emitted loop. **First pin the
    cross-block exchange identity** (§6.2ii) in Tests_Wigner.fs. Pin 1b vs 1a
    at relative 1e-13 (§6.7).

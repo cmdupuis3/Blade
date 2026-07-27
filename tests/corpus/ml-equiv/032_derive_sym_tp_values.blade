@@ -5,7 +5,7 @@ import ml as ml
 // derive_tp(SPEC, SPEC, ...). Same derived output spec — tp_spec(S, S) — but
 // the weight buffer parameterizes only the exchange-symmetric subspace of the
 // same hom-space, so it is strictly smaller than the dense one
-// (docs/plan-transforms-as-types.md §3.2, §7 stage 1a).
+// (docs/plan-transforms-as-types.md §3.2, §7 stage 1a/1b).
 //
 // Two things are pinned here.
 //
@@ -21,10 +21,14 @@ import ml as ml
 //    paths (0,0,0), (0,1,2), (1,0,2), (1,1,0), (1,1,1), (1,1,3) — slot ranges
 //    0-1 | 2-3 | 4-5 | 6-7 | 8 | 9 — so
 //      sym [w0..w6] -> dense [w0, w1, w2, w3, w2, w3, w4, w5, 0.0, w6].
-//    Feeding that embedded buffer to derive_tp reproduces derive_sym_tp to the
-//    ULP, which sq_diff = 0.0 asserts exactly (not within tolerance): the
+//    Feeding that embedded buffer to derive_tp reproduces derive_sym_tp: the
 //    compaction is a reparameterization of the SAME kernel, not an
-//    approximation of it.
+//    approximation of it. Since stage 1b the emitted kernel visits only the
+//    KEPT paths and folds each dropped path into its partner's term, so the two
+//    routes now agree to FLOATING-POINT ASSOCIATION rather than to the ulp
+//    (observed ~1e-16 relative; §6.7's pin is 1e-13). sq_diff = 0.0 still holds
+//    — the squared residual is ~1e-31, far inside the value harness's tolerance
+//    — but it reads as a tolerance pin now, not a bit-identity claim.
 // ============================================================================
 let static SA = [(0, 0, 1), (1, 1, 1)]
 let static SB = [(1, 1, 2)]

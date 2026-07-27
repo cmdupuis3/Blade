@@ -170,20 +170,68 @@ let private transposeFactor (comp: S2Component) (sigma: int) : int =
     | S2Sym -> sigma
     | S2Alt -> -sigma
 
-/// Packed layout + dense embedding of one S₂ component, computed together so
-/// the count and the table can never drift.
-///
+/// The free-cell skeleton of one kept path: which multiplicity cells
+/// (u1, u2) of the path's per-`mo` weight block are FREE parameters, and the
+/// packed-slot arithmetic that indexes them. Both consumers of the packed
+/// layout — the dense embed table (stage 1a's oracle) and the fused cell
+/// table the kernel is generated from (stage 1b) — are built on this, so the
+/// layout cannot drift between them.
+type private S2Skel = {
+    Kept: KeptPath
+    /// transposeFactor comp Sigma
+    Tau: int
+    /// packed slot of this path's (mo = 0, first cell)
+    PackedBase: int
+    /// packed slots per output multiplicity = Cells.Length
+    CellsPerMo: int
+    /// the canonical (u1, u2) cells, in packed order
+    Cells: (int * int) list
+}
+
 /// PACKED LAYOUT (fixed surface contract — corpus pins hard-code it): kept
 /// paths in `tpPaths` order; per kept path `mo` in 0..multOut−1; then a
 /// mirror path contributes its full block (u1 outer, u2 inner, row-major) and
 /// a diagonal path contributes u1 outer with u2 from u1 (τ = +1) or u1 + 1
-/// (τ = −1).
+/// (τ = −1). In skeleton terms: the packed slot of (path, mo, cellIdx) is
+/// `PackedBase + mo * CellsPerMo + cellIdx`.
+///
+/// Paths with NO free cell (a τ = −1 diagonal path at multiplicity 1) are
+/// dropped from the skeleton entirely — they contribute no parameter and, in
+/// the fused kernel, no arithmetic.
+let private s2TpSkeleton (comp: S2Component) (s: Spec) : S2Skel list =
+    let sA = List.toArray s
+    let oA = (selfTpConfig s).SpecOut |> List.toArray
+    let out = ResizeArray<S2Skel> ()
+    let mutable packed = 0
+    for kp in symTpKeptPaths s do
+        let tau = transposeFactor comp kp.Sigma
+        let m1 = sA.[kp.B1].Mult
+        let m2 = sA.[kp.B2].Mult
+        let cells =
+            match kp.Mirror with
+            // Mirror pair: the whole m1 x m2 block is free (the dropped
+            // partner path's (u2, u1) slot is what the constraint determines).
+            | Some _ -> [ for u1 in 0 .. m1 - 1 do for u2 in 0 .. m2 - 1 -> (u1, u2) ]
+            // Diagonal: the per-mo m x m block is τ-symmetric, so the free
+            // cells are the triangle — inclusive of the diagonal at τ = +1,
+            // strict at τ = −1 (which FORCES u1 = u2 to zero).
+            | None -> [ for u1 in 0 .. m1 - 1 do for u2 in (if tau = 1 then u1 else u1 + 1) .. m1 - 1 -> (u1, u2) ]
+        if not cells.IsEmpty then
+            out.Add { Kept = kp; Tau = tau; PackedBase = packed; CellsPerMo = cells.Length; Cells = cells }
+        packed <- packed + cells.Length * oA.[kp.BO].Mult
+    List.ofSeq out
+
+/// Packed slot count + dense embedding of one S₂ component, computed together
+/// so the count and the table can never drift.
 ///
 /// EMBED TABLE: `(denseSlot, packedSlot, sign)` with denseSlot in tpDecl's
 /// layout `pWOff(p) + (mo*m1 + u1)*m2 + u2`. The kept slot itself takes +1
 /// and its partner slot τ; every dense slot not forced to zero by the
 /// constraint appears EXACTLY once, so `wd(denseSlot) = sign * w(packedSlot)`
-/// over a zeroed buffer reconstructs the whole dense tensor.
+/// over a zeroed buffer reconstructs the whole dense tensor. This is the
+/// stage-1a oracle: `derive_tp(S, S, x, y, embed(w))` is what the compacted
+/// kernels are value-pinned against, and it is the layout the corpus pins
+/// hand-encode.
 let private s2TpCompaction (comp: S2Component) (s: Spec) : int * (int * int * float) list =
     let cfg = selfTpConfig s
     let paths = tpPaths cfg |> List.toArray
@@ -200,28 +248,19 @@ let private s2TpCompaction (comp: S2Component) (s: Spec) : int * (int * int * fl
     let denseAt p mo u1 u2 = wOff.[p] + (mo * m1s.[p] + u1) * m2s.[p] + u2
     let entries = ResizeArray<int * int * float> ()
     let mutable packed = 0
-    for kp in symTpKeptPaths s do
-        let p = kp.Idx
-        let tau = transposeFactor comp kp.Sigma
-        let tauF = float tau
+    for sk in s2TpSkeleton comp s do
+        let p = sk.Kept.Idx
+        let tauF = float sk.Tau
         for mo in 0 .. multO.[p] - 1 do
-            match kp.Mirror with
-            | Some p' ->
-                // Whole block free; the partner path's slot for (u2, u1) is
-                // determined. m1s/m2s are SWAPPED at p', so denseAt p' mo u2
-                // u1 = pWOff(p') + (mo*m2 + u2)*m1 + u1 as required.
-                for u1 in 0 .. m1s.[p] - 1 do
-                    for u2 in 0 .. m2s.[p] - 1 do
-                        entries.Add (denseAt p mo u1 u2, packed, 1.0)
-                        entries.Add (denseAt p' mo u2 u1, packed, tauF)
-                        packed <- packed + 1
-            | None ->
-                let m = m1s.[p]
-                for u1 in 0 .. m - 1 do
-                    for u2 in (if tau = 1 then u1 else u1 + 1) .. m - 1 do
-                        entries.Add (denseAt p mo u1 u2, packed, 1.0)
-                        if u2 <> u1 then entries.Add (denseAt p mo u2 u1, packed, tauF)
-                        packed <- packed + 1
+            sk.Cells |> List.iteri (fun ci (u1, u2) ->
+                let slot = sk.PackedBase + mo * sk.CellsPerMo + ci
+                entries.Add (denseAt p mo u1 u2, slot, 1.0)
+                match sk.Kept.Mirror with
+                // m1s/m2s are SWAPPED at the partner path p', so denseAt p'
+                // mo u2 u1 = pWOff(p') + (mo*m2 + u2)*m1 + u1 as required.
+                | Some p' -> entries.Add (denseAt p' mo u2 u1, slot, tauF)
+                | None -> if u2 <> u1 then entries.Add (denseAt p mo u2 u1, slot, tauF))
+        packed <- packed + sk.CellsPerMo * multO.[p]
     (packed, List.ofSeq entries)
 
 /// Closed-form dimension of an S₂ component (§3.2's compaction rule): a
@@ -271,12 +310,92 @@ let s2TpSplitIsPartition (s: Spec) : bool =
 
 /// Embedding of the packed symmetric buffer into the dense `derive_tp`
 /// coefficient layout: `(denseSlot, packedSlot, sign)` entries, see
-/// s2TpCompaction.
+/// s2TpCompaction. NOT a codegen input since stage 1b — the emitted kernel
+/// reads `s2TpCells` and never materializes the dense buffer. This is the
+/// injection `embed : W_sym ↪ W_dense` of §4(a): the machine-readable
+/// statement of the storage-correctness claim the corpus value-pins by hand.
 let symTpEmbedTable (s: Spec) : (int * int * float) list = snd (s2TpCompaction S2Sym s)
 
 /// Embedding of the packed antisymmetric buffer — same shape, partner sign
 /// negated relative to symTpEmbedTable.
 let altTpEmbedTable (s: Spec) : (int * int * float) list = snd (s2TpCompaction S2Alt s)
+
+/// One FUSED term pair of the arithmetically compacted self-TP kernel
+/// (plan-transforms-as-types §7 stage 1b): one canonical multiplicity cell
+/// (u1, u2) of one kept path, with the dropped dense contribution it absorbs
+/// folded in as a second product.
+///
+/// The emitted arithmetic per cell, per `mo` in 0..MultO−1, per entry `t` of
+/// the path's OWN CG table (c1, c2, c3, coef):
+///
+///   out[OutOff + mo*OutDim + c3] +=
+///       (coef * w[WBase + mo*WStride])
+///     * ( x[OffA + c1] * y[OffB + c2]  +  PairSign * (y[OffA + e2] * x[OffB + e1]) )
+///
+/// with (e1, e2) = (c2, c1) on a MIRROR cell and (c1, c2) on a DIAGONAL one —
+/// the two ways the same pair swap shows up:
+///
+/// - MIRROR (b1 < b2): the dropped (b2, b1, bo) path's CG table is the kept
+///   one transposed times σ (Wigner cross-block exchange identity, pinned in
+///   ml/Tests_Wigner), and its determined weight slot carries τ, so the whole
+///   dropped path collapses onto the kept path's entries with the single sign
+///   στ — +1 for Sym², −1 for Λ², independent of the path. The CG components
+///   swap between the two products; the multiplicity slots do not.
+/// - DIAGONAL (b1 = b2): the CG table is shared (no transpose), and it is the
+///   MULTIPLICITY indices that swap: the (u2, u1) dense cell is τ times the
+///   (u1, u2) one. PairSign = τ, and 0.0 on the u1 = u2 cell (only reachable
+///   at τ = +1) which is its own partner and so contributes a single term.
+type S2TpCell = {
+    /// index into `tpPaths (selfTpConfig s)` — names the CG table to bake
+    Path: int
+    /// mirror-pair cell (a dropped partner path folds in) vs diagonal cell
+    IsMirror: bool
+    /// offset into x/y of the (b1, u1) multiplicity slot
+    OffA: int
+    /// offset into x/y of the (b2, u2) multiplicity slot
+    OffB: int
+    /// output block start / block dim / output multiplicity (the `mo` bound)
+    OutOff: int
+    OutDim: int
+    MultO: int
+    /// packed weight slot at mo = 0, and the stride per mo
+    WBase: int
+    WStride: int
+    /// coefficient of the folded-in partner term; 0.0 = single-term cell
+    PairSign: float
+}
+
+/// The fused cell table of one S₂ component: the kept paths' free cells in
+/// packed order (so `WBase` runs over exactly the packed buffer). Dropped
+/// relative to the dense path list: every b1 > b2 mirror path, and every
+/// τ = −1 diagonal path at multiplicity 1 — neither contributes arithmetic.
+/// Σ MultO over the cells = the packed dimension (checked at synthesis).
+let s2TpCells (comp: S2Component) (s: Spec) : S2TpCell list =
+    let cfg = selfTpConfig s
+    let sA = List.toArray s
+    let oA = cfg.SpecOut |> List.toArray
+    let sIn = blockStarts s
+    let sOut = blockStarts cfg.SpecOut
+    [ for sk in s2TpSkeleton comp s do
+        let kp = sk.Kept
+        let isMirror = kp.Mirror.IsSome
+        let d1 = dim sA.[kp.B1]
+        let d2 = dim sA.[kp.B2]
+        // στ on a mirror cell (the dropped path's CG sign times its weight
+        // slot's sign), τ on a diagonal one.
+        let pair = if isMirror then kp.Sigma * sk.Tau else sk.Tau
+        for ci in 0 .. sk.CellsPerMo - 1 do
+            let (u1, u2) = sk.Cells.[ci]
+            yield { Path = kp.Idx
+                    IsMirror = isMirror
+                    OffA = sIn.[kp.B1] + u1 * d1
+                    OffB = sIn.[kp.B2] + u2 * d2
+                    OutOff = sOut.[kp.BO]
+                    OutDim = dim oA.[kp.BO]
+                    MultO = oA.[kp.BO].Mult
+                    WBase = sk.PackedBase + ci
+                    WStride = sk.CellsPerMo
+                    PairSign = (if not isMirror && u1 = u2 then 0.0 else float pair) } ]
 
 /// Per OUTPUT block of `linear`: (input block index, out entry, in entry),
 /// input resolved FIRST-MATCH by irrep (ml/Linear.findBlock semantics —

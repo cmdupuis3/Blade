@@ -140,12 +140,12 @@ let private yToDecl (name: string) (lmax: int) : Result<FunctionDecl, ElabError>
             (syn (ExprBlock (stmts, Some (v "sh")))))
 
 /// The tensor_product kernel's statement list, parameterized by the name of
-/// the DENSE weight buffer it reads: returns (statements, result expression)
-/// so tpDecl can use the function parameter `w` directly while the
-/// S₂-compacted kernels prepend an expansion into a local dense buffer and
-/// point the same loop at that. Sharing this verbatim is what makes the
-/// compacted ops ulp-identical to derive_tp on the embedded weights — same
-/// loop order, same left-associated product.
+/// the DENSE weight buffer it reads: returns (statements, result expression).
+/// The loop order and the left-associated product `(((coef*w)*x)*y)` mirror
+/// the ml/TensorProduct reference exactly, which is what makes
+/// tensor_product / derive_tp agree with it to the ulp. The S₂-compacted
+/// kernels do NOT go through here — they emit only the kept paths, with the
+/// dropped contributions fused in (deriveS2TpDecl, plan §7 stage 1b).
 let private tpBodyStmts (cfg: TPConfig) (wName: string) : Stmt list * Expr =
     let dO = totalDim cfg.SpecOut
     let paths = tpPaths cfg
@@ -229,44 +229,101 @@ let private tpDecl (name: string) (cfg: TPConfig) : FunctionDecl =
         (tyIrrepsArr cfg.SpecOut) (syn (ExprBlock (stmts, Some ret)))
 
 /// derive_sym_tp / derive_alt_tp for a fixed spec: the S₂-compacted
-/// parameterization of the self-tensor-product derive_tp(S, S, x, y, w).
-/// The generated ARITHMETIC is tpDecl's verbatim (shared tpBodyStmts) — only
-/// the weight buffer shrinks: the packed free parameters are expanded into a
-/// zeroed dense buffer by the baked embed table
-/// (`wd(dense(t)) = sign(t) * w(packed(t))`, MLSpec.symTpEmbedTable) and the
-/// kernel reads that. The expansion writes each nonzero dense slot exactly
-/// once with a sign of magnitude 1, so every emitted value is bit-identical
-/// to derive_tp's on the embedded dense weights (plan §7 stage 1a's pin).
-/// Forced-zero dense slots (a τ = −1 diagonal path's u1 = u2 cells) get no
-/// table entry and stay exactly 0.
+/// self-tensor-product derive_tp(S, S, x, y, w), compacted in ARITHMETIC as
+/// well as in parameters (plan §7 stage 1b). Only the KEPT paths (b1 ≤ b2,
+/// minus the τ = −1 multiplicity-1 diagonals) are emitted at all; each kept
+/// path's dropped counterpart — the b1 > b2 mirror path, or the (u2, u1) half
+/// of a diagonal path's τ-symmetric weight block — folds into the kept term
+/// as a SECOND product against the same baked CG entry, per MLSpec.S2TpCell:
+///
+///   out[oo + mo*do + c3] += (coef * w[wb + mo*ws])
+///                         * ( x[oA + c1]*y[oB + c2]
+///                           + pairSign * (y[oA + e2]*x[oB + e1]) )
+///
+/// so the dense path table, the dense weight buffer, and stage 1a's expansion
+/// loop all disappear. The license for collapsing the mirror path
+/// onto the kept path's CG table is the cross-block exchange identity
+/// realCG(l2,l1,l3)[m2,m1,m3] = σ·realCG(l1,l2,l3)[m1,m2,m3], pinned
+/// bit-exact in ml/Tests_Wigner.
+///
+/// Association: `(coef*w) * (x*y)` per term rather than tpDecl's
+/// left-associated `((coef*w)*x)*y`, so that in the F(x, x) case the two
+/// products of a mirror cell are bit-identical and Λ²'s `F(x, x) = 0` stays
+/// EXACT (the diagonal cells cancel across the CG entry pairs instead). Values
+/// therefore differ from stage 1a in the last ulps — §6.7's tolerance pin,
+/// relative 1e-13 against derive_tp on the embedded dense weights.
 let private deriveS2TpDecl (name: string) (s: Spec) (comp: S2Component) : Result<FunctionDecl, ElabError> =
     let cfg = selfTpConfig s
-    let denseDim = tpWeightDim cfg
-    let packedDim, table =
-        match comp with
-        | S2Sym -> symTpWeightDim s, symTpEmbedTable s
-        | S2Alt -> altTpWeightDim s, altTpEmbedTable s
+    let packedDim = match comp with S2Sym -> symTpWeightDim s | S2Alt -> altTpWeightDim s
+    let cells = s2TpCells comp s
     // The S₂ split is a partition of the dense parameter space — cheap to
     // check here, and a violation would mis-size a user's weight buffer.
     if not (s2TpSplitIsPartition s) then
         Error (err5000 (sprintf "internal: the S2 split of the self-TP weight space is not a partition (sym %d + alt %d <> dense %d)"
-                            (symTpWeightDim s) (altTpWeightDim s) denseDim))
-    elif packedDim = 0 || table.IsEmpty then
+                            (symTpWeightDim s) (altTpWeightDim s) (tpWeightDim cfg)))
+    elif packedDim = 0 || cells.IsEmpty then
         Error (err5000 "internal: empty S2 component reached kernel synthesis (the call site must reject it as BL4007)")
+    // Every packed slot must be read by exactly one (cell, mo): the cells
+    // cover the buffer the user is asked to supply, or parameters are dead.
+    elif cells |> List.sumBy (fun c -> c.MultO) <> packedDim then
+        Error (err5000 (sprintf "internal: the fused S2 cell table reads %d of the %d packed weight slots"
+                            (cells |> List.sumBy (fun c -> c.MultO)) packedDim))
     else
-    let tpStmts, ret = tpBodyStmts cfg "__wd"
+    let dO = totalDim cfg.SpecOut
+    let paths = tpPaths cfg |> List.toArray
+    // CG tables for the KEPT paths only, flattened in first-use order. `e1`/
+    // `e2` are the partner term's component reads: the CG transpose on a
+    // mirror path, the identity on a diagonal one (S2TpCell).
+    let used = cells |> List.map (fun c -> (c.Path, c.IsMirror)) |> List.distinct
+    let cgOf (p: int, isMirror: bool) =
+        let (b1, b2, bo) = paths.[p]
+        Blade.ML.WignerTables.realCGSparse s.[b1].L s.[b2].L cfg.SpecOut.[bo].L
+        |> Array.toList
+        |> List.map (fun e ->
+            if isMirror then (e.C1, e.C2, e.C3, e.Coef, e.C2, e.C1)
+            else (e.C1, e.C2, e.C3, e.Coef, e.C1, e.C2))
+    let cgPerPath = used |> List.map cgOf
+    let cgOff = (0, cgPerPath) ||> List.scan (fun acc es -> acc + es.Length)
+    let cgRange =
+        used |> List.mapi (fun i (p, _) -> (p, (cgOff.[i], cgOff.[i + 1]))) |> Map.ofList
+    let flat = List.concat cgPerPath
+    let pick f = flat |> List.map f
+    let kI f = intArrLit (cells |> List.map f)
+    let kIdx (t: string) = idx t (v "k")
+    let tIdx (t: string) = idx t (v "t")
     let stmts =
-        [ yield sLetMut "__wd" (zerosLit denseDim)
-          yield sLet "__e_di" (intArrLit (table |> List.map (fun (d, _, _) -> d)))
-          yield sLet "__e_pi" (intArrLit (table |> List.map (fun (_, p, _) -> p)))
-          yield sLet "__e_sg" (floatArrLit (table |> List.map (fun (_, _, g) -> g)))
-          yield sFor "__ei" 0 table.Length
-              [ sAssign (idx "__wd" (idx "__e_di" (v "__ei")))
-                        (mul (idx "__e_sg" (v "__ei")) (idx "w" (idx "__e_pi" (v "__ei")))) ]
-          yield! tpStmts ]
+        [ sLetMut "out" (zerosLit dO)
+          sLet "__k_oa" (kI (fun c -> c.OffA))
+          sLet "__k_ob" (kI (fun c -> c.OffB))
+          sLet "__k_oo" (kI (fun c -> c.OutOff))
+          sLet "__k_do" (kI (fun c -> c.OutDim))
+          sLet "__k_nm" (kI (fun c -> c.MultO))
+          sLet "__k_wb" (kI (fun c -> c.WBase))
+          sLet "__k_ws" (kI (fun c -> c.WStride))
+          sLet "__k_ps" (floatArrLit (cells |> List.map (fun c -> c.PairSign)))
+          sLet "__k_cl" (kI (fun c -> fst (Map.find c.Path cgRange)))
+          sLet "__k_ch" (kI (fun c -> snd (Map.find c.Path cgRange)))
+          sLet "__cg_c1" (intArrLit (pick (fun (a, _, _, _, _, _) -> a)))
+          sLet "__cg_c2" (intArrLit (pick (fun (_, a, _, _, _, _) -> a)))
+          sLet "__cg_c3" (intArrLit (pick (fun (_, _, a, _, _, _) -> a)))
+          sLet "__cg_v" (floatArrLit (pick (fun (_, _, _, a, _, _) -> a)))
+          sLet "__cg_e1" (intArrLit (pick (fun (_, _, _, _, a, _) -> a)))
+          sLet "__cg_e2" (intArrLit (pick (fun (_, _, _, _, _, a) -> a)))
+          sFor "k" 0 cells.Length
+            [ StmtForIn ("mo", syn (ExprDotDot (iLit 0, kIdx "__k_nm")),
+                [ sLet "wv" (idx "w" (add (kIdx "__k_wb") (mul (v "mo") (kIdx "__k_ws"))))
+                  StmtForIn ("t", syn (ExprDotDot (kIdx "__k_cl", kIdx "__k_ch")),
+                    [ sAccum (idx "out" (add (kIdx "__k_oo")
+                                             (add (mul (v "mo") (kIdx "__k_do")) (tIdx "__cg_c3"))))
+                             (mul (mul (tIdx "__cg_v") (v "wv"))
+                                  (add (mul (idx "x" (add (kIdx "__k_oa") (tIdx "__cg_c1")))
+                                            (idx "y" (add (kIdx "__k_ob") (tIdx "__cg_c2"))))
+                                       (mul (kIdx "__k_ps")
+                                            (mul (idx "y" (add (kIdx "__k_oa") (tIdx "__cg_e2")))
+                                                 (idx "x" (add (kIdx "__k_ob") (tIdx "__cg_e1"))))))) ]) ]) ] ]
     Ok (mkFunc name
             [ ("x", tyIrrepsArr s); ("y", tyIrrepsArr s); ("w", tyFloatArr packedDim) ]
-            (tyIrrepsArr cfg.SpecOut) (syn (ExprBlock (stmts, Some ret))))
+            (tyIrrepsArr cfg.SpecOut) (syn (ExprBlock (stmts, Some (v "out")))))
 
 /// linear for fixed (specIn, specOut): block-diagonal multiplicity mixing,
 /// first-match input block, ml/Linear loop order (blocks -> muO -> muI -> c).

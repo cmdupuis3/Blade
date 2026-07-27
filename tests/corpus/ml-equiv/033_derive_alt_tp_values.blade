@@ -4,7 +4,7 @@ import ml as ml
 // derive_alt_tp(SPEC, x, y, w): the S2-ANTISYMMETRIC (Lambda^2) compaction of
 // derive_tp(SPEC, SPEC, ...) — the complement of 032's Sym^2 half in the same
 // exchange-graded hom-space, with the same derived output spec tp_spec(S, S)
-// (docs/plan-transforms-as-types.md §3.2, §7 stage 1a).
+// (docs/plan-transforms-as-types.md §3.2, §7 stage 1a/1b).
 //
 // Pins, in order:
 //
@@ -14,8 +14,14 @@ import ml as ml
 //    exchange-partner pair (0,1,2)/(1,0,2), with OPPOSITE sign on the partner,
 //    plus the odd-CG (1,1,1) slot which is antisymmetric on its own:
 //      alt [a0, a1, a2] -> dense [0.0, 0.0, a0, a1, -a0, -a1, 0.0, 0.0, a2, 0.0].
-//    sq_diff = 0.0 asserts that embedding reproduces derive_alt_tp to the ULP —
-//    the compaction is the same kernel reparameterized, exactly.
+//    sq_diff = 0.0 asserts that embedding reproduces derive_alt_tp — the
+//    compaction is the same kernel reparameterized. Since stage 1b the emitted
+//    kernel visits only the KEPT paths (here: the (0,1,2) mirror cell and the
+//    (1,1,1) diagonal one) with each dropped path folded into its partner's
+//    term, so the agreement is to FLOATING-POINT ASSOCIATION rather than to the
+//    ulp (observed ~1e-16 relative; §6.7's pin is 1e-13). The squared residual
+//    is ~1e-30, far inside the value harness's tolerance, so the 0.0 pin holds
+//    — as a tolerance pin, not a bit-identity claim.
 //    (Note the derived-spec blocks the alt half cannot reach show up as exact
 //    structural zeros in `a`: the l=0 head and the whole l=2 tail.)
 //
@@ -23,6 +29,10 @@ import ml as ml
 //    diagonal, for EVERY weight setting. zz_sq = 0.0 is that algebraic identity
 //    read back out of the generated kernel, so it also witnesses that the sign
 //    pattern above is really wired in rather than coincidental for one input.
+//    This one IS still exact under stage 1b, by construction: a mirror cell's
+//    two fused products are the same two operands multiplied in the same order,
+//    so their difference is bit-zero at x = y, and a diagonal cell's terms
+//    cancel against the CG entry that transposes them.
 // ============================================================================
 let static SA = [(0, 0, 1), (1, 1, 1)]
 let static TPS = ml.tp_spec(SA, SA)
