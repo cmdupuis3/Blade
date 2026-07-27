@@ -1,0 +1,65 @@
+// TEST: ML Derive Poly Certified
+import ml as ml
+// ============================================================================
+// ml.derive_poly inside a `where ml.equiv(O3)` body, feeding its declared
+// output spec straight into a derived-hom ml.linear head — the degree-K
+// analogue of ml-equiv/034.
+//
+// The point is the JUDGMENT. MLEquiv classifies derive_poly exactly as it
+// classifies derive_linear one degree up: the input must transform as
+// IrrepsIdx<SPEC>, the weight buffer must be invariant, and the result
+// transforms as the DECLARED output spec. Nothing about "degree K" weakens
+// that — the map is linear on Sym^K(V), and the Sym^K coordinates never reach
+// the surface, which is why the rep-exit problem that makes ml.sym_lift
+// inadmissible in a certified body (ml-equiv/036) does not arise here: a
+// single op takes x in and hands an irreps space back.
+//
+// Parity is not a side condition either, it rides at spec level: O(3) acts on
+// Sym^j(V_(l,p)) by the scalar (-1)^(j*p), so a degree-3 map out of a spec
+// whose only non-scalar block is (1, odd) lands its l = 1 content in ODD
+// parity and its l = 2 content in EVEN parity — exactly what SMID declares.
+// Getting that wrong is a shrunken hom-space, not a silent miscount:
+// poly_weight_dim would drop the mismatched labels.
+//
+// Every parameter and the return are fully annotated, as an equiv-certified
+// signature must be (docs/features/equivariant-nn.md Part I).
+// ============================================================================
+let static SA = [(0, 0, 1), (1, 1, 1)]
+let static SMID = [(0, 0, 1), (1, 1, 1), (2, 0, 1)]
+let static SOUT = [(0, 0, 1), (1, 1, 1)]
+let static WP = ml.poly_weight_dim(SA, 3, SMID)
+let static WL = ml.linear_weight_dim(SMID, SOUT)
+// EXPECT: WP = 5
+// EXPECT: WL = 2
+
+function head(x: Array<Float like IrrepsIdx<SA>>,
+              w1: Array<Float like Idx<WP>>, w2: Array<Float like Idx<WL>>)
+              where ml.equiv(O3) -> Array<Float like IrrepsIdx<SOUT>> = {
+    let t = ml.derive_poly(SA, 3, SMID, x, w1)
+    ml.linear(SMID, SOUT, w2, t)
+}
+
+let hout: Array<Float like IrrepsIdx<SOUT>> = head([1.0, 2.0, -0.5, 0.25], [0.3, -0.7, 1.1, 0.9, -1.3], [0.5, -0.25])
+// EXPECT: hout = [-1.790625, -1.56507350581842, 0.391268376454606, -0.195634188227303]
+
+// A second point on the same certified layer: the map is homogeneous of
+// degree 3, so scaling the input by 2 scales the output by 8 exactly (the
+// kernel is a sum of degree-3 monomials in x, nothing else).
+let hbig: Array<Float like IrrepsIdx<SOUT>> = head([2.0, 4.0, -1.0, 0.5], [0.3, -0.7, 1.1, 0.9, -1.3], [0.5, -0.25])
+// EXPECT: hbig = [-14.325, -12.5205880465474, 3.13014701163685, -1.56507350581842]
+
+let scaled = [hbig(0) / hout(0), hbig(1) / hout(1), hbig(2) / hout(2), hbig(3) / hout(3)]
+// EXPECT: scaled = [8, 8, 8, 8]
+
+// K = 2 through the same discipline, into the full CG decomposition — the
+// uniform convention covers every degree with one op and one judgment.
+let static TPA = ml.tp_spec(SA, SA)
+let static WQ = ml.poly_weight_dim(SA, 2, TPA)
+// EXPECT: WQ = 7
+
+function quad(x: Array<Float like IrrepsIdx<SA>>, w: Array<Float like Idx<WQ>>)
+              where ml.equiv(O3) -> Array<Float like IrrepsIdx<TPA>> =
+  ml.derive_poly(SA, 2, TPA, x, w)
+
+let qout: Array<Float like IrrepsIdx<TPA>> = quad([1.0, 2.0, -0.5, 0.25], [0.3, -0.7, 1.1, 0.9, -1.3, 0.4, 2.0])
+// EXPECT: qout = [-0.695929214352104, -5.67964607176052, 0, 0, 0, 3.11126983722081, -0.777817459305202, 0.388908729652601, 2.54558441227157, -0.636396103067893, 0.318198051533946, -0.919238815542512, 1.83847763108502, 1.89069989521077, 0.229809703885628, 3.61950283619864]

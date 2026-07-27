@@ -1,0 +1,21 @@
+// TEST: ML Derive Poly Wrong Rep Rejected (rejects)
+import ml as ml
+// derive_poly's x must TRANSFORM as IrrepsIdx<SA>; `xbad` is a plain Float
+// array, i.e. an invariant, so its components do not co-rotate and the
+// degree-3 monomials the kernel forms out of them are not the monomials of a
+// representation. Raising the degree changes nothing about that premise — the
+// judgment is derive_linear's, one degree up. BL4008 (equivariance discipline
+// violation), at the argument's span.
+//
+// (The mirror-image mistake — feeding a REP where an invariant is wanted —
+// is what the weight buffer's requireInv catches; ml-equiv/035 pins that
+// shape for the stage-1 op.)
+let static SA = [(0, 0, 1), (1, 1, 1)]
+let static SOUT = [(0, 0, 1), (1, 1, 1)]
+let static WP = ml.poly_weight_dim(SA, 3, SOUT)
+
+function bad(xbad: Array<Float like Idx<4>>, w: Array<Float like Idx<WP>>)
+             where ml.equiv(O3) -> Array<Float like IrrepsIdx<SOUT>> =
+  ml.derive_poly(SA, 3, SOUT, xbad, w)
+
+let out: Array<Float like IrrepsIdx<SOUT>> = bad([1.0, 2.0, -0.5, 0.25], [0.3, -0.7, 1.1, 0.9])

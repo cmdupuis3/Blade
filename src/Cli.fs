@@ -1070,6 +1070,13 @@ let private dispatchTest (rest: string list) : int =
         // completeness pins. In-process, no Blade source pipeline.
         let failed = (Blade.Tests.SymPowerTablesReview.runSymPowerTablesTests ()).Failed
         if failed = 0 then 0 else 1
+    | [ "polyoracle" ] | [ "poly-oracle" ] ->
+        // Stage 2b-iii oracle block: the Sym^k label basis checked against
+        // isotypic projectors built by an independent Casimir-Lagrange route
+        // (exact integer/rational, no SymPowerTables exact layer), plus the
+        // k = 2 value-level M-pin vs stage 1. In-process, no C++ pipeline.
+        let failed = (Blade.Tests.PolyOracleReview.runPolyOracleTests ()).Failed
+        if failed = 0 then 0 else 1
     | [ "alloc" ] ->
         // Standalone C++ runtime-layout tests for the contiguous-backing
         // allocate<>. Compiles + runs cpp/alloc_layout_tests.cpp against the

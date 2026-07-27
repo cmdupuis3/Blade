@@ -1,0 +1,19 @@
+// TEST: ML Ops derive_poly Bad K (rejects)
+import ml as ml
+// ============================================================================
+// K is capped at 1..4 across the whole symmetric-power surface
+// (docs/plan-transforms-as-types.md §6.5), and ml.derive_poly is no exception:
+// the polarization multinomials K!/prod(j_c!) stay <= 24 there, the T_{j,l}
+// occurrence tables stay tiny and exactly generatable, and the label basis
+// stays well conditioned. K = 5 is refused at compile time — an elaboration
+// failure (BL5000) carrying the same range text ml.sym_lift and the sizing
+// builtins use, not a silently produced garbage kernel.
+//
+// (ml-ops/015 pins the SIZING-BUILTIN half of the same cap, which reports
+// through the BL3999 static-evaluation channel instead.)
+// ============================================================================
+let static A = [(0, 0, 1), (1, 1, 1)]
+let static SOUT = [(0, 0, 1)]
+
+let x: Array<Float like IrrepsIdx<A>> = [1.0, 2.0, -0.5, 0.25]
+let bad: Array<Float like IrrepsIdx<SOUT>> = ml.derive_poly(A, 5, SOUT, x, [1.0])

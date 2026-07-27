@@ -510,6 +510,24 @@ and private judgeApp (ctx: Ctx) (env: Map<string, RepStatus>) (e: Expr) (f: Expr
                 requireRep "derive_alt_tp input 2" s yE |> Result.bind (fun () ->
                 requireInv "derive_alt_tp weight buffer" wE |> Result.map (fun () ->
                     Rep (tpSpec s s)))))
+        // derive_poly: the degree-K equivariant polynomial layer. Judged like
+        // derive_linear one degree up — the input must transform as
+        // IrrepsIdx<SPEC>, the weight buffer must be invariant, and the result
+        // transforms as the DECLARED output spec (the map is linear on
+        // Sym^K(V), and the Sym^K coordinates never appear at the surface:
+        // ml.sym_lift's rep-exit problem does not arise because derive_poly
+        // consumes x and emits an irreps space in one op). Group-agnostic:
+        // parity rides at spec level (O(3) acts on Sym^j(V_{l,p}) by
+        // (−1)^{j·p}), which `sym_spec` already accounts for, so a label whose
+        // parity does not match an output block simply carries no weight.
+        | "derive_poly", [ specE; kE; sOutE; xE; wE ] ->
+            specArg "derive_poly SPEC" specE |> Result.bind (fun s ->
+            specArg "derive_poly SOUT" sOutE |> Result.bind (fun sOut ->
+                match staticArgValue ctx.Statics kE with
+                | Ok (SVInt kk) when kk >= 1L && kk <= 4L ->
+                    requireRep "derive_poly input" s xE |> Result.bind (fun () ->
+                    requireInv "derive_poly weight buffer" wE |> Result.map (fun () -> Rep sOut))
+                | _ -> reject "derive_poly: K must be a static int in 1..4"))
         // The monomial lift is a REP EXIT the lattice cannot name. Its output
         // components are the degree-K monomials of the input's components, so
         // they co-rotate POLYNOMIALLY — as Sym^K(V) = ml.sym_spec(SPEC, K),
@@ -545,7 +563,7 @@ and private judgeApp (ctx: Ctx) (env: Map<string, RepStatus>) (e: Expr) (f: Expr
             reject "irreps_to_sym reads basis-dependent Cartesian components out of a representation — a rep escape, for uncertified assembly code only (e.g. feeding a solver); inside a certified body stay in irreps space"
         | ("tensor_to_irreps" | "sym_to_irreps"), _ ->
             reject (sprintf "%s: unrecognized call shape inside an equiv-certified body" op)
-        | ("tensor_product" | "linear" | "gated" | "scalars" | "norms" | "y_to" | "derive_sym_tp" | "derive_alt_tp" | "sym_lift"), _ ->
+        | ("tensor_product" | "linear" | "gated" | "scalars" | "norms" | "y_to" | "derive_sym_tp" | "derive_alt_tp" | "sym_lift" | "derive_poly"), _ ->
             reject (sprintf "%s: unrecognized call shape inside an equiv-certified body" op)
         | _ ->
             // other alias members (sizing etc. — normalized already, so an

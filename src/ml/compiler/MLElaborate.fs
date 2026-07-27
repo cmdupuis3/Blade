@@ -363,6 +363,251 @@ let private symLiftDecl (name: string) (s: Spec) (k: int) : Result<FunctionDecl,
     Ok (mkFunc name [ ("x", tyIrrepsArr s) ] (tyFloatArr nCells)
             (syn (ExprBlock (stmts, Some (v "out")))))
 
+/// derive_poly(SPEC, K, SOUT, x, w) for a fixed (spec, K, specOut): the
+/// COMPLETE basis of the degree-K homogeneous equivariant maps V -> W, one
+/// weight per basis map, `polyWeightDim SPEC K SOUT` of them
+/// (plan-transforms-as-types §3.3b construction, §7 stage 2b-iii emission).
+/// K = 1 is derive_linear; K = 2 is derive_sym_tp's hom-space seen through the
+/// UNIFORM label convention rather than through the kept-path layout.
+///
+/// THE EMITTED KERNEL, in the order the statements come out (everything is
+/// ordinary Blade — lets, loops, baked tables, accumulate-only, so grad()
+/// differentiates it through its normal inliner):
+///
+///  1. MONOMIALS. Per (copy, degree) actually used by some label — a copy is
+///     one multiplicity slot of the spec (MLSpec.polyCopies, §3.3b move 1) —
+///     the degree-j monomials of that copy's OWN 2l+1 components over the
+///     canonical multisets (lex `symMultisets`, the symLiftDecl convention:
+///     bare products, NO multiplicity weights, §6.6). Baked as j position
+///     tables of ABSOLUTE x indices, one accumulate loop per (copy, degree).
+///  2. OCCURRENCE FEATURES. The T_{j,l} matvec (SymPowerTables.symPowerTable,
+///     rows baked as float literals in sparse (row, cell, coef) form):
+///     f[row] = Σ_I T[occ][row, I]·mono_I — §3.3b identity (2), evaluation
+///     carries NO /N_I factor (that lives in the Gram identity (3)). A label's
+///     flat occurrence index indexes the table's `Occurrences` list directly;
+///     the two orders are re-checked here against the label's own (L, copy).
+///     At j = 1 there is no table: Sym¹(V_l) = V_l and the feature IS the
+///     copy's slice of x, read in place — which is what makes K = 1 reduce to
+///     derive_linear's arithmetic bit for bit.
+///  3. CHAINS, SHARED BY PREFIX. The used copies' features are coupled
+///     left-comb in copy order through baked `realCGSparse` tables at unit
+///     weight. Labels within a sector form a TREE over (occurrence choices,
+///     intermediate L's) and the enumeration is prefix-ordered, so emitting
+///     each distinct prefix node once — on first appearance, which is
+///     automatically a topological order — gives code size ~ O(#labels)
+///     rather than O(#labels · K). Each node is its own `let mut` buffer:
+///     one write, later reads, never a read-then-rewrite of one buffer
+///     (Grad.checkWriteAfterRead would refuse that).
+///  4. SECTOR CONSTANT. √(k!/∏_c j_c!) — §3.3b identity (1)'s cross-copy
+///     multinomial, the ONLY place it appears — baked as an EXPLICIT scalar
+///     multiplication in the weight product (§6.9(ii), resolved here in favour
+///     of auditability: the constant is a literal in the emitted table, not
+///     absorbed into a T row or a CG coefficient). It is 1.0 for every
+///     single-copy sector, hence exactly 1.0 at K = 1.
+///  5. WEIGHT MIXING. The per-label final features land in one flat `__lf`
+///     buffer, label-major, and the accumulation into the SOUT layout is a
+///     single table-driven loop.
+///
+/// WEIGHT LAYOUT (the documented surface contract). LABEL-MAJOR: labels in
+/// `MLSpec.polyLabels` order (slowest), then the matching W copies — SOUT
+/// blocks of the label's (L, parity) in block order, multiplicity index
+/// inner. That is `polyWeightDimViaLabels`'s summation order; it agrees with
+/// `polyWeightDim` = `homDim(sym_spec(SPEC,K), SOUT)` on the COUNT (asserted
+/// here on every synthesis) but not on the ORDER — homBlocks, which
+/// derive_linear follows, is OUTPUT-block-major with the input multiplicity
+/// innermost. The two coincide exactly when no (l, parity) has both input
+/// multiplicity > 1 and output multiplicity > 1 and the matched blocks are in
+/// the same relative order, which covers the K = 1 corpus pin; in general
+/// derive_poly follows the label-major order, because that is the order the
+/// label basis itself is defined in.
+///
+/// §6.9(iv), restated where a reader of the emitted code can see it: the
+/// copy-split label basis is NOT GL(m)-channel-covariant. Label indices name
+/// multiplicity SLOTS, never channel structure.
+let private derivePolyDecl (name: string) (s: Spec) (k: int) (sOut: Spec) : Result<FunctionDecl, ElabError> =
+    let labels = polyLabels s k |> List.toArray
+    let copies = polyCopies s |> List.toArray
+    let inStarts = blockStarts s |> List.toArray
+    let outStarts = blockStarts sOut |> List.toArray
+    let copyOff (c: int) = inStarts.[copies.[c].Block] + copies.[c].MultIdx * (2 * copies.[c].L + 1)
+    // The W copies a label can be mixed into: SOUT blocks of the label's
+    // (L, parity), block order, multiplicity index inner.
+    let matched (lb: PolyLabel) =
+        [ for bo in 0 .. sOut.Length - 1 do
+            if sOut.[bo].L = lb.L && sOut.[bo].Parity = lb.Parity then
+              for mo in 0 .. sOut.[bo].Mult - 1 -> outStarts.[bo] + mo * (2 * lb.L + 1) ]
+    // Labels with no matching W copy carry no parameter and are not emitted
+    // (Schur: their contribution to every admissible map is zero).
+    let used = labels |> Array.filter (fun lb -> not (matched lb).IsEmpty)
+    let mutable lfAcc = 0
+    let lfOff =
+        used
+        |> Array.map (fun lb ->
+            let o = lfAcc
+            lfAcc <- lfAcc + 2 * lb.L + 1
+            (lb.Index, o))
+        |> Map.ofArray
+    let lfDim = lfAcc
+    let slots =
+        [ for lb in used do
+            for oo in matched lb -> (lfOff.[lb.Index], oo, 2 * lb.L + 1, sqrt (float lb.Multinomial)) ]
+    let wDim = slots.Length
+    // The §3.3b convention pin the two files cannot check against each other
+    // (MLSpec stays dependency-free): a label's flat occurrence index must be
+    // a direct index into symPowerTable's `Occurrences`.
+    let occProblem =
+        used |> Array.tryPick (fun lb ->
+            lb.Uses |> List.tryPick (fun u ->
+                if u.Degree < 2 then None
+                else
+                    let occs = (Blade.ML.SymPowerTables.symPowerTable u.Degree u.CopyL).Occurrences |> List.toArray
+                    if u.Occ < 0 || u.Occ >= occs.Length then
+                        Some (sprintf "T_{%d,%d} has %d occurrences but a label selects index %d"
+                                  u.Degree u.CopyL occs.Length u.Occ)
+                    elif occs.[u.Occ].L <> u.OccL || occs.[u.Occ].Copy <> u.OccCopy then
+                        Some (sprintf "T_{%d,%d} occurrence %d is (L=%d, copy=%d) but the label basis says (L=%d, copy=%d)"
+                                  u.Degree u.CopyL u.Occ occs.[u.Occ].L occs.[u.Occ].Copy u.OccL u.OccCopy)
+                    else None))
+    if occProblem.IsSome then
+        Error (err5000 (sprintf "internal: derive_poly occurrence order drift — %s" occProblem.Value))
+    elif wDim <> polyWeightDim s k sOut then
+        Error (err5000 (sprintf "internal: derive_poly enumerated %d weight slots label by label but poly_weight_dim says %d (spec %A, K %d, out %A)"
+                            wDim (polyWeightDim s k sOut) s k sOut))
+    else
+    let stmts = ResizeArray<Stmt> ()
+    let mutable ctr = 0
+    let fresh (p: string) = ctr <- ctr + 1; sprintf "__%s%d" p ctr
+    stmts.Add (sLetMut "out" (zerosLit (totalDim sOut)))
+    stmts.Add (sLetMut "__lf" (zerosLit (max lfDim 1)))
+    // --- 1. monomial buffers, one per used (copy, degree), degree >= 2 -------
+    let monKeys =
+        used
+        |> Array.collect (fun lb -> lb.Uses |> List.filter (fun u -> u.Degree >= 2) |> List.map (fun u -> (u.Copy, u.Degree)) |> List.toArray)
+        |> Array.toList
+        |> List.distinct
+    let mutable monNames : Map<int * int, string> = Map.empty
+    for (c, j) in monKeys do
+        let d = 2 * copies.[c].L + 1
+        let off = copyOff c
+        let tuples = symMultisets d j
+        let nm = fresh "mn"
+        monNames <- Map.add (c, j) nm monNames
+        stmts.Add (sLetMut nm (zerosLit tuples.Length))
+        for a in 0 .. j - 1 do
+            stmts.Add (sLet (sprintf "%s_i%d" nm a) (intArrLit (tuples |> List.map (fun t -> off + t.[a]))))
+        stmts.Add (StmtForIn ("c", syn (ExprDotDot (iLit 0, iLit tuples.Length)),
+                     [ sAccum (idx nm (v "c"))
+                              ([ 0 .. j - 1 ]
+                               |> List.map (fun a -> idx "x" (idx (sprintf "%s_i%d" nm a) (v "c")))
+                               |> List.reduce mul) ]))
+    // --- 2. the T_{j,l} matvec, sparse (row, cell, coef) --------------------
+    let emitMatvec (dstName: string) (dstBase: int) (u: PolyCopyUse) =
+        let tbl = Blade.ML.SymPowerTables.symPowerTable u.Degree u.CopyL
+        let occ = tbl.Occurrences |> List.item u.Occ
+        let monNm = Map.find (u.Copy, u.Degree) monNames
+        let entries =
+            [ for r in 0 .. occ.Rows.Length - 1 do
+                for i in 0 .. tbl.Cells.Length - 1 do
+                  if abs occ.Rows.[r].[i] > 1e-12 then yield (dstBase + r, i, occ.Rows.[r].[i]) ]
+        let nm = fresh "tt"
+        stmts.Add (sLet (nm + "_d") (intArrLit (entries |> List.map (fun (a, _, _) -> a))))
+        stmts.Add (sLet (nm + "_s") (intArrLit (entries |> List.map (fun (_, b, _) -> b))))
+        stmts.Add (sLet (nm + "_v") (floatArrLit (entries |> List.map (fun (_, _, cc) -> cc))))
+        stmts.Add (StmtForIn ("t", syn (ExprDotDot (iLit 0, iLit entries.Length)),
+                     [ sAccum (idx dstName (idx (nm + "_d") (v "t")))
+                              (mul (idx (nm + "_v") (v "t")) (idx monNm (idx (nm + "_s") (v "t")))) ]))
+    // j = 1: the occurrence feature IS the copy's slice, copied verbatim into
+    // the label buffer (0.0 + x is exact, so the K = 1 kernel reads exactly
+    // the components derive_linear reads).
+    let emitCopySlice (dstBase: int) (srcOff: int) (d: int) =
+        stmts.Add (StmtForIn ("c", syn (ExprDotDot (iLit 0, iLit d)),
+                     [ sAccum (idx "__lf" (add (iLit dstBase) (v "c")))
+                              (idx "x" (add (iLit srcOff) (v "c"))) ]))
+    // --- 3. one pairwise CG contraction, unit weight ------------------------
+    let emitCouple (dstName: string) (dstBase: int)
+                   (aName: string, aBase: int, la: int) (bName: string, bBase: int, lb: int) (lMid: int) =
+        let cg = Blade.ML.WignerTables.realCGSparse la lb lMid |> Array.toList
+        let nm = fresh "cg"
+        stmts.Add (sLet (nm + "_1") (intArrLit (cg |> List.map (fun e -> aBase + e.C1))))
+        stmts.Add (sLet (nm + "_2") (intArrLit (cg |> List.map (fun e -> bBase + e.C2))))
+        stmts.Add (sLet (nm + "_3") (intArrLit (cg |> List.map (fun e -> dstBase + e.C3))))
+        stmts.Add (sLet (nm + "_v") (floatArrLit (cg |> List.map (fun e -> e.Coef))))
+        stmts.Add (StmtForIn ("t", syn (ExprDotDot (iLit 0, iLit cg.Length)),
+                     [ sAccum (idx dstName (idx (nm + "_3") (v "t")))
+                              (mul (mul (idx (nm + "_v") (v "t")) (idx aName (idx (nm + "_1") (v "t"))))
+                                   (idx bName (idx (nm + "_2") (v "t")))) ]))
+    // Shared nodes: occurrence features keyed by (copy, degree, occ), chain
+    // prefixes keyed by the whole (uses, chain) prefix. First appearance IS a
+    // topological order — a child key extends its parent's.
+    let mutable nodes : Map<string, string> = Map.empty
+    let useKey (u: PolyCopyUse) = sprintf "%d.%d.%d" u.Copy u.Degree u.Occ
+    let prefixKey (lb: PolyLabel) (m: int) =
+        let us = lb.Uses |> List.truncate m |> List.map useKey |> String.concat ","
+        let ch = lb.Chain |> List.truncate (m - 1) |> List.map string |> String.concat ","
+        us + "|" + ch
+    // Occurrence feature of one use: an x slice at j = 1, else its own buffer.
+    let occFeature (u: PolyCopyUse) : string * int =
+        if u.Degree = 1 then ("x", copyOff u.Copy)
+        else
+            let key = "o" + useKey u
+            match Map.tryFind key nodes with
+            | Some nm -> (nm, 0)
+            | None ->
+                let nm = fresh "of"
+                stmts.Add (sLetMut nm (zerosLit (2 * u.OccL + 1)))
+                emitMatvec nm 0 u
+                nodes <- Map.add key nm nodes
+                (nm, 0)
+    for lb in used do
+        let uses = lb.Uses |> List.toArray
+        let dstBase = lfOff.[lb.Index]
+        if uses.Length = 1 then
+            // A single-copy sector has degree K, so its occurrence feature is
+            // final and unique to this label: emit it straight into __lf.
+            let u = uses.[0]
+            if u.Degree = 1 then emitCopySlice dstBase (copyOff u.Copy) (2 * u.OccL + 1)
+            else emitMatvec "__lf" dstBase u
+        else
+            let mutable accName = ""
+            let mutable accBase = 0
+            let mutable accL = uses.[0].OccL
+            let a0, b0 = occFeature uses.[0]
+            accName <- a0
+            accBase <- b0
+            for i in 1 .. uses.Length - 1 do
+                let bName, bBase = occFeature uses.[i]
+                let lMid = lb.Chain.[i - 1]
+                if i = uses.Length - 1 then
+                    // The last coupling has total degree K, so it is final and
+                    // never a prefix of anything: it writes into __lf.
+                    emitCouple "__lf" dstBase (accName, accBase, accL) (bName, bBase, uses.[i].OccL) lMid
+                else
+                    let key = prefixKey lb (i + 1)
+                    match Map.tryFind key nodes with
+                    | Some nm ->
+                        accName <- nm
+                        accBase <- 0
+                    | None ->
+                        let nm = fresh "ch"
+                        stmts.Add (sLetMut nm (zerosLit (2 * lMid + 1)))
+                        emitCouple nm 0 (accName, accBase, accL) (bName, bBase, uses.[i].OccL) lMid
+                        nodes <- Map.add key nm nodes
+                        accName <- nm
+                        accBase <- 0
+                accL <- lMid
+    // --- 5. weight mixing, one table-driven loop ----------------------------
+    stmts.Add (sLet "__w_fo" (intArrLit (slots |> List.map (fun (a, _, _, _) -> a))))
+    stmts.Add (sLet "__w_oo" (intArrLit (slots |> List.map (fun (_, b, _, _) -> b))))
+    stmts.Add (sLet "__w_d" (intArrLit (slots |> List.map (fun (_, _, c, _) -> c))))
+    stmts.Add (sLet "__w_sc" (floatArrLit (slots |> List.map (fun (_, _, _, d) -> d))))
+    stmts.Add (sFor "kk" 0 wDim
+                 [ sLet "wv" (mul (idx "__w_sc" (v "kk")) (idx "w" (v "kk")))
+                   StmtForIn ("c", syn (ExprDotDot (iLit 0, idx "__w_d" (v "kk"))),
+                     [ sAccum (idx "out" (add (idx "__w_oo" (v "kk")) (v "c")))
+                              (mul (v "wv") (idx "__lf" (add (idx "__w_fo" (v "kk")) (v "c")))) ]) ])
+    Ok (mkFunc name [ ("x", tyIrrepsArr s); ("w", tyFloatArr wDim) ]
+            (tyIrrepsArr sOut) (syn (ExprBlock (List.ofSeq stmts, Some (v "out")))))
+
 /// linear for fixed (specIn, specOut): block-diagonal multiplicity mixing,
 /// first-match input block, ml/Linear loop order (blocks -> muO -> muI -> c).
 /// `rows` is MLSpec.linearBlocks output: one (inputBlockIdx, eo, ei) per
@@ -555,7 +800,7 @@ let private bridgeDecl (name: string) (table: float list) (n: int)
 let private opNames =
     Set.ofList [ "y_to"; "tensor_product"; "linear"; "gated"; "linear_rows"; "gated_rows"
                  "scalars"; "norms"; "derive_linear"; "derive_tp"
-                 "derive_sym_tp"; "derive_alt_tp"; "sym_lift"
+                 "derive_sym_tp"; "derive_alt_tp"; "sym_lift"; "derive_poly"
                  "tensor_to_irreps"; "sym_to_irreps"; "irreps_to_sym" ]
 
 /// Static sizing builtins that make up the rest of the ML surface (used in
@@ -705,6 +950,37 @@ let private elabDeriveS2Tp (st: ElabState) (statics: StaticEnv) (comp: S2Compone
             ensure st (fingerprint key (box s)) (fun n -> deriveS2TpDecl n s comp)
             |> Result.map (fun n -> inheritSpan site (ExprApp (v n, [ xE; yE; wE ])))))
 
+/// Shared elaboration for derive_poly: resolve (SPEC, K, SOUT), gate K to
+/// 1..4 and the label count to the 100000-cell cap (symLiftDecl's precedent —
+/// the label basis is indexed by the same Sym^K cells), refuse the Schur-zero
+/// case with BL4007 in derive_linear's framing, then synthesize the
+/// complete degree-K basis.
+let private elabDerivePoly (st: ElabState) (statics: StaticEnv) (site: Expr)
+                           (specE: Expr) (kE: Expr) (sOutE: Expr) (xE: Expr) (wE: Expr)
+    : Result<Expr, ElabError> =
+    staticArg statics "derive_poly SPEC" specE |> Result.bind (fun sv ->
+    specOfStatic "derive_poly SPEC" sv |> Result.bind (fun s ->
+    staticArg statics "derive_poly K" kE |> Result.bind (fun kv ->
+    staticArg statics "derive_poly SOUT" sOutE |> Result.bind (fun sov ->
+    specOfStatic "derive_poly SOUT" sov |> Result.bind (fun sOut ->
+        match kv with
+        | SVInt kk when kk >= 1L && kk <= 4L ->
+            let k = int kk
+            let n = totalDim s
+            let cells = binomial (n + k - 1) k
+            if cells > 100000L then
+                Error (err5000 (sprintf "derive_poly: the degree-%d symmetric power of a dim-%d input has C(%d, %d) = %d cells, over the 100000-cell limit — the label basis is one vector per cell, so the emitted kernel would be unusable; lower K, or reduce the input spec first (ml.scalars / ml.linear). The channel-shared degree-K op that amortizes one basis over many multiplicity slots is future work"
+                                    k n (n + k - 1) k cells))
+            elif polyWeightDim s k sOut = 0 then
+                Error (err4007 (sprintf "derive_poly: no equivariant degree-%d polynomial map exists from the input spec to the output spec — by Schur's lemma a degree-%d homogeneous equivariant map is a linear map out of Sym^%d of the input (ml.sym_spec(SPEC, %d)), which can only connect irreps of identical (l, parity), and those specs share none: every admissible map is zero"
+                                    k k k k))
+            else
+                ensure st (fingerprint "derive_poly" (box (s, k, sOut))) (fun n2 -> derivePolyDecl n2 s k sOut)
+                |> Result.map (fun n2 -> inheritSpan site (ExprApp (v n2, [ xE; wE ])))
+        | SVInt kk ->
+            Error (err5000 (sprintf "derive_poly: K must be a static int in 1..4 (got %d) — the symmetric-power surface is capped at degree 4 (plan-transforms-as-types §6.5)" kk))
+        | _ -> Error (err5000 "derive_poly: K must be a static int"))))))
+
 /// Rewrite ML-op calls in an expression. Same walker shape as
 /// Grad.rewriteExpr; the two passes stay separate because this one carries
 /// elaboration state and runs first.
@@ -823,6 +1099,13 @@ let rec private rewriteExpr (st: ElabState) (statics: StaticEnv) (aliases: Set<s
             | "derive_alt_tp", [ specE; xE; yE; wE ] ->
                 elabDeriveS2Tp st statics S2Alt e specE xE yE wE
             | "derive_alt_tp", _ -> Error (err5000 "derive_alt_tp: expected derive_alt_tp(SPEC, x, y, w) with w of extent ml.alt_tp_weight_dim(SPEC)")
+            // The degree-K equivariant polynomial layer: the uniform Sym^K
+            // label basis (plan §3.3b), one weight per basis map. K = 1 is
+            // derive_linear; K = 2 is derive_sym_tp's hom-space in the uniform
+            // convention rather than in the kept-path one.
+            | "derive_poly", [ specE; kE; sOutE; xE; wE ] ->
+                elabDerivePoly st statics e specE kE sOutE xE wE
+            | "derive_poly", _ -> Error (err5000 "derive_poly: expected derive_poly(SPEC, K, SOUT, x, w) with x of type Array<Float like IrrepsIdx<SPEC>> and w of extent ml.poly_weight_dim(SPEC, K, SOUT)")
             // The monomial lift: the value-side half of the symmetric-power
             // bridge. Its type-side twin is ml.sym_spec(SPEC, K), and
             // ml.derive_linear(ml.sym_spec(SPEC, K), SPEC_OUT) composed with

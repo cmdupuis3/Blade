@@ -155,6 +155,11 @@ let runAllTestsFullWith (extraBlocks: (unit -> Blade.Tests.TestHarness.BlockResu
     // the derived realization phase rule, bit-pins, and the extended
     // realCG completeness pins for the k ≤ 4 chain range.
     let symPower = Blade.Tests.SymPowerTablesReview.runSymPowerTablesTests ()
+    // The Sym^k label-basis ORACLE (stage 2b-iii): the convention's own
+    // vectors (polyLabels + T_{j,l} + CG chains + the sector constant) vs
+    // Casimir-Lagrange isotypic projectors re-derived exactly and
+    // independently, plus the k = 2 value-level M-pin against stage 1.
+    let polyOracle = Blade.Tests.PolyOracleReview.runPolyOracleTests ()
     // Compiler-native Cartesian<->irreps bridge constants (CartesianBridge.fs)
     // vs closed forms + the y_to harmonic constants (sgs closure arc).
     let cartBridge = Blade.Tests.CartesianBridgeReview.runCartesianBridgeTests ()
@@ -244,7 +249,7 @@ let runAllTestsFullWith (extraBlocks: (unit -> Blade.Tests.TestHarness.BlockResu
     let blocks =
         [ yield r1; yield r2; yield attrs; yield subst
           yield normalize; yield unify; yield validateArrow
-          yield shape; yield oracles; yield wigner; yield symPower; yield cartBridge; yield spans; yield diagCore; yield diagCorpus; yield alloc
+          yield shape; yield oracles; yield wigner; yield symPower; yield polyOracle; yield cartBridge; yield spans; yield diagCore; yield diagCorpus; yield alloc
           yield ompPragma
           match omp with Some b -> yield b | None -> ()
           yield bufType

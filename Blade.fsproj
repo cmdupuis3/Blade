@@ -155,6 +155,7 @@
     <Compile Include="tests/Test_Oracles.fs" />
     <Compile Include="tests/Test_WignerTables.fs" />
     <Compile Include="tests/Test_SymPowerTables.fs" />
+    <Compile Include="tests/Test_PolyOracle.fs" />
     <Compile Include="tests/Test_CartesianBridge.fs" />
     <Compile Include="tests/Test_Ppl.fs" />
     <Compile Include="tests/Test_Math.fs" />

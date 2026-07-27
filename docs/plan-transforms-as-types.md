@@ -34,9 +34,12 @@ The honest target is **not** "the compiler writes your network." It is:
 > basis of everything that respects it — and the parameter count *is* the
 > theorem.**
 
-Today `derive_linear` does this for degree 1. This plan does it for degree
-*k*, and identifies the machine that makes degree *k* possible as one already
-in the tower: **triangular symmetric storage**. The thesis in one line: the
+Today `derive_linear` does this for degree 1 — **and, as of 2026-07-27,
+`ml.derive_poly` does it for degree k ≤ 4** (§7 stages 2b-i/ii/iii; the §1
+sketch above predates the surface decision — the shipped form takes SOUT
+explicitly: `ml.derive_poly(SIN, K, SOUT, x, w)`). The design identified the
+machine that makes degree k possible as one already in the tower:
+**triangular symmetric storage**. The thesis in one line: the
 discrete symmetry system (`SymIdx`, Coq-proved) and the continuous
 equivariance system (irreps, Schur synthesis, F#-only) are the same
 construction — isotypic projection — and their fusion point is the symmetric
@@ -342,11 +345,22 @@ inner product with orthonormal {e_i}, s_I = the unit-coefficient sum of the
 N_I arrangements of cell I):
 
 1. v_label = √(k!/∏_c k_c!) · P_sym(chain-coupled ⊗_c v_{r_c}); the
-   cross-copy multinomial appears here and only here.
+   cross-copy multinomial appears here and only here. The sector constant
+   is NOT a free normalization: it is exactly what makes the emitted basis
+   orthonormal (verified at 2b-iii: dropping it deviates the Gram by
+   0.5–0.83 and collapses the k=2 M-ratios √2→1); it is per-sector.
 2. feature_label(x) = ⟨v_label, x^⊗k⟩ = Σ_I T[label, I]·∏_j x[i_j] with
    **T[label, I] = ⟨v_label, s_I⟩** — evaluation carries no N_I factor.
 3. Orthonormality in table terms: Σ_I T[r,I]·T[r′,I]/N_I = δ — the
-   multinomial lives in the Gram identity, not in evaluation.
+   multinomial lives in the Gram identity, not in evaluation. Equivalently
+   (made explicit at 2b-iii, since every independent consumer re-derived
+   it): the ORTHONORMAL FRAME is ŝ_I = s_I/√N_I, and the coordinate in
+   which the invariant inner product is a plain dot is T[·, I]/√N_I —
+   "real monomial coordinates" means this frame. Two further conventions
+   consumers need, normative in SymPowerTables.fs's doc-comment: the
+   equivariant monomial↔tensor identification is mono_A ↦ (∏αᵢ!)·s_A, and
+   the divided-power basis is w_m = c_m·|l,m⟩ (that direction — the other
+   choice flips E's coefficient to (l+m+1)).
 4. Cells split uniquely across copies, so feature_label(x) =
    √(k!/∏k_c!) · [CG-chain of per-copy features] — every global monomial
    counted exactly once; the runtime never symmetrizes (P_sym is
@@ -372,11 +386,12 @@ kept mirror cell ↔ two-distinct-copy sector across blocks; diagonal-path
 cell with u1 < u2 ↔ two-distinct-copy sector within a block (covers BOTH τ
 signs, all L in 0..2l); σ=+1 diagonal cell with u1 = u2 ↔ same-copy sector
 × even-L T_{2,l} occurrence. Count-level bijection verified on the anchors
-(2b-ii); so the change of basis M is a label-aligned scaled permutation
-with norm-ratio entries ({1, √2, 2} class). Pin M numerically AND against
-the closed-form ratios; pin `derive_poly(s,2,x,w′) ≈ derive_sym_tp(s,x,x,
-M·w′)` at 1e-13 — the new machinery validated end-to-end against the
-doubly-pinned stage-1 kernels before k = 3 has any oracle.
+(2b-ii); value-level bijection + M verified at 2b-iii: M is a label-aligned
+scaled permutation with ratio multiset exactly **{+1, +√2}** (the earlier
+"{1, √2, 2}" overstated — 2 cannot occur: mirror and diagonal-u1<u2 cells
+both give √2, derived not fitted; u1=u2 cells give |1|, and the observed
+sign is uniformly + — |1| is derived, the + sign observed-not-derived on
+every even-L case tested). Cross-pairs orthogonal at ~1e-15.
 
 **Prefix-stability, stated honestly (the achievable guarantee, which k = 1
 and k = 2 already exhibit):** extending the spec never changes an old
@@ -601,15 +616,26 @@ tri <@> (h, h, h)
    in the convention. Residual open items, tracked for stage 2b:
    (i) ~~the realization phase rule~~ DISCHARGED 2026-07-27: derived and
    confirmed (§3.3b; SymPowerTables.fs doc-comment is the record); the
-   gapped assert stays as a compiler-bug guard; (ii) sector-constant
-   placement (explicit baked scalar recommended, decide at 2b-iii);
+   gapped assert stays as a compiler-bug guard; (ii) ~~sector-constant placement~~ DECIDED at 2b-iii: explicit per-sector
+   baked scalar (and 2b-iii's oracle showed it is load-bearing for
+   orthonormality, not a free choice — §3.3b identity 1);
    (iii) ~~chains need `realCGSparse` pins up to L = k·lmax~~ DISCHARGED
    2026-07-27: completeness pinned over l1 ≤ 9, l2 ≤ 3, all l3 ≤ 12
    (worst 9.99e-16); note the extended-range exchange identity is ~1-ulp
    class, not bit-exact; (iv) the copy-split label basis
    is not GL(m)-channel-covariant — document so label indices are not
-   mistaken for channel structure; (v) the k = 2 cross-pin's label↔kept-cell
-   alignment table must be asserted by the test, not assumed.
+   mistaken for channel structure; (v) ~~the k = 2 cross-pin's alignment table~~ DISCHARGED at 2b-iii:
+   emitted computationally from the three-row rule and asserted a
+   bijection; value-level M verified (see §3.3b). (vi) Recorded
+   observation, no action bound: WignerTables' prose "Y^real = U·Y^complex"
+   and realCGDense's conj-on-input placement read as opposite conventions;
+   they differ by conjugating the complex tensor — after the −i phase fix a
+   global sign per odd table — self-consistent and unobservable while all
+   consumers share the tables (the 2b-iii projector oracle is insensitive
+   by construction). Tidy the WignerTables doc-comment at next touch.
+   (vii) Observed-not-derived: T_{2,l}'s realized sign agrees with the CG
+   realization (+) on every even-L case tested; only |ratio| = 1 is
+   derived. Derive or keep pinned.
 
 ## 7. Implementation staging
 
@@ -730,13 +756,35 @@ go first.
      Convention gaps found and fixed (occurrence order, blocked odometer,
      k=0, the three-row alignment) — folded back into §3.3b. Block 107/0;
      full suite 1471/0.
-   - **2b-iii**: emission + the layered oracle — projector-equality pin in
-     ml/ (independent route: ordered-tuple chains + explicit symmetrizer +
-     SVD, deliberately the rejected construction, fine as a test;
-     ‖P_ref − Σvvᵀ‖ < 1e-10 on anchors); k = 2 M-pin vs stage 1; k = 1
-     ulp-exact vs `derive_linear`; closed-form invariant anchors
-     ((|x|²)² at [(1,o,1)] k=4, det at [(2,e,1)] k=3, |v|²·v at k=3);
-     rotation/parity pins via Rotations.fs Wigner-D; corpus + full gates.
+   - **2b-iii**: emission + the layered oracle — projector-equality pin
+     (independent route; ‖P_ref − Σvvᵀ‖ < 1e-10 on anchors); k = 2 M-pin vs
+     stage 1; k = 1 ulp-exact vs `derive_linear`; closed-form invariant
+     anchors; corpus + full gates.
+     **LANDED 2026-07-27**, both halves:
+     *Emission*: `ml.derive_poly(SPEC, K, SOUT, x, w)`, K ∈ 1..4, uniform
+     label convention; per-copy lifts + T matvecs, prefix-shared CG chain
+     nodes (couplings ≈ #labels: e.g. 568 labels → 598 couplings vs 898
+     naive), explicit per-sector constant (`__w_sc`), label-major weight
+     mixing. **Weight layout is LABEL-MAJOR** (polyWeightDimViaLabels
+     order) — agrees with homBlocks on count always, on ORDER exactly when
+     no (l,p) has both multIn > 1 and multOut > 1; the K=1 degeneration to
+     `derive_linear` is **ulp-exact** (sector constant literally 1.0, same
+     accumulation order). Closed-form anchors matched with derived
+     constants (1/√5 for |x|⁴, √(3/5) for |v|²v, √(108/35) for the
+     traceless det). Completeness self-check Σ‖feature‖² = |x|^{2K} at
+     1.5e-15 over 6 specs × K ≤ 4; rotation equivariance 1.3e-15;
+     ad.grad FD-limited. Corpus ml-ops/016-017, ml-equiv/037-038.
+     *Oracle* (block "Poly Oracle", `blade test polyoracle`, 48/0):
+     Casimir–Lagrange isotypic projectors in exact rationals over the
+     divided-power monomial basis (E/F/H re-derived locally; interpolation
+     over the FULL L superset — absent-(L,P) numerators vanish
+     identically), tr(P_ref) = (2L+1)·mult exact pre-float;
+     ‖P_ref − P_conv‖_max ≤ 1.1e-15 across 6 cases; NEGATIVE CONTROLS run
+     (1e-6 T-row rotation → 4e-6 failure; dropped sector constant → 18
+     failures). M-pin: bijection emitted computationally; ratio multiset
+     exactly {+1, +√2}, cross-orthogonality ~1e-15. (The planned SVD
+     reference was superseded by Casimir–Lagrange — stronger: exact,
+     convention-free, no rank decisions.)
 4. **Stage 3 — writable `SymIdx<k, IrrepsIdx<spec>>`.** Seams: **S1 + S2.**
    Parser: second argument accepts `parseIndexType | parseSimpleExpr`
    (Parser.fs:756-763); `TySymIdx` grows an index-type payload. TypeCheck:
