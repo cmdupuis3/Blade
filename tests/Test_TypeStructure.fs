@@ -513,6 +513,142 @@ let private test_sym_irreps_annotation_matches_inference () =
              sprintf "inferred %s vs annotated %s (identity fields differ)"
                  (Blade.IR.ppIndexType inf) (Blade.IR.ppIndexType ann))
 
+// ---- Stage 4: multi-axis irreps under joint fusion -------------------------
+// `fuseJointSLevels` now admits IrrepsIdx S-dims beside plain ones, so a
+// comm-covered identity group over a batch x irreps (or irreps x irreps) array
+// fuses into ONE compound level and the output is SymIdx<r, prod(n_j)>.
+//
+// Two things need pinning at the FIELD level, neither visible through
+// matchesTypePattern (which ignores extent, and treats `__`-prefixed tags as
+// don't-care — the irreps tag is exactly such a tag):
+//   (1) the fused LOOP LEVEL: SourceRank = #factors, FusedFactors = the source
+//       records in order, IndexSpace.Extent = the literal product, Tag = None;
+//   (2) the fused OUTPUT record: Extent = the literal product, Rank = group
+//       size, Symmetry = SymSymmetric, and — the consistency hazard — BOTH
+//       Tag = None AND IxKind = IxKPlain. Inheriting IxKind from the template
+//       factor would produce Tag = None + IxKIrreps, which the IR validator
+//       rejects (ixKindOfTag None = IxKPlain) and which would falsely advertise
+//       a spec the compound axis does not have (§6.3(iii): a batch x irreps
+//       product is NOT an irreps space).
+
+/// A rank-1 dense S-dim record with the given kind/tag and literal extent.
+let private sRec (id: int) (extent: int64) (kind: IxKind) (tag: string option) : IRIndexType =
+    { Id = id; Rank = 1; Extent = IRLit (IRLitInt extent)
+      Symmetry = SymNone; Tag = tag; IxKind = kind; Kind = SDimension; Dependencies = [] }
+
+/// An irreps S-dim record for `spec` (extent = total_dim, tag = mkIrrepsTag).
+let private irrepsRec (id: int) (spec: (int * int * int) list) : IRIndexType =
+    let totalDim = spec |> List.sumBy (fun (l, _, mult) -> int64 (mult * (2 * l + 1)))
+    sRec id totalDim IxKIrreps (Some (mkIrrepsTag None spec))
+
+/// Run `fuseJointSLevels` on TWO copies of one array (identity `A`, one comm
+/// group covering both positions) whose S-block is `recs`.
+let private fuseTwoCopies (recs: IRIndexType list) : LoopLevelInfo list =
+    let arr = { ElemType = f64; IndexTypes = recs; IsVirtual = false
+                Identity = Some (AIDVariable "A") }
+    let arrayTypes = [arr; arr]
+    let identities = [AIDVariable "A"; AIDVariable "A"]
+    let raw = buildRawLoopLevels arrayTypes (computeSDimsPerArray arrayTypes)
+    fuseJointSLevels identities [[0; 1]] arrayTypes raw
+
+/// Shared checker for a fused level pair: two levels (one per copy), each
+/// carrying the whole S-block as FusedFactors over the product extent.
+let private checkFusedLevels (name: string) (recs: IRIndexType list) (wantExtent: int64) =
+    let levels = fuseTwoCopies recs
+    let wantExt = IRLit (IRLitInt wantExtent)
+    let checks =
+        [ (levels.Length = 2), sprintf "expected 2 fused levels (one per copy), got %d" levels.Length
+          (levels |> List.forall (fun l -> l.FusedFactors = Some recs)),
+            sprintf "FusedFactors = %A, want the source records verbatim" (levels |> List.map (fun l -> l.FusedFactors))
+          (levels |> List.forall (fun l -> l.IndexSpace.Extent = wantExt)),
+            sprintf "Extent = %A, want IRLit %d (the literal product)" (levels |> List.map (fun l -> l.IndexSpace.Extent)) wantExtent
+          (levels |> List.forall (fun l -> l.IndexSpace.Tag = None)),
+            sprintf "Tag = %A, want None (the fused axis is anonymous)" (levels |> List.map (fun l -> l.IndexSpace.Tag))
+          (levels |> List.forall (fun l -> l.IndexSpace.SourceRank = recs.Length)),
+            sprintf "SourceRank = %A, want %d" (levels |> List.map (fun l -> l.IndexSpace.SourceRank)) recs.Length
+          (levels |> List.forall (fun l -> l.IndexSpace.Symmetry = SymNone)),
+            sprintf "Symmetry = %A, want SymNone (the level is the ITERATION axis)" (levels |> List.map (fun l -> l.IndexSpace.Symmetry)) ]
+    match checks |> List.tryFind (fst >> not) with
+    | Some (_, why) -> (name, false, why)
+    | None -> (name, true, sprintf "2 levels, SourceRank %d, extent %d" recs.Length wantExtent)
+
+// Stage 4 (a): the fused LEVEL for a mixed plain x irreps S-block. Idx<2> x
+// IrrepsIdx<[(1,1,1)]> (total_dim 3) -> one compound axis of extent 6.
+let private test_fuse_level_plain_x_irreps () =
+    checkFusedLevels
+        "stage4 fuseJointSLevels fuses Idx<2> x IrrepsIdx<3> -> compound 6"
+        [ sRec 1 2L IxKPlain None; irrepsRec 2 [(1, 1, 1)] ]
+        6L
+
+// Stage 4 (b): the fused LEVEL for irreps x irreps — two DIFFERENT irreps
+// spaces (total_dim 2 and 3) -> one compound axis of extent 6. This is the case
+// where the LEADING factor is the irreps record.
+let private test_fuse_level_irreps_x_irreps () =
+    checkFusedLevels
+        "stage4 fuseJointSLevels fuses IrrepsIdx<2> x IrrepsIdx<3> -> compound 6"
+        [ irrepsRec 1 [(0, 0, 2)]; irrepsRec 2 [(1, 1, 1)] ]
+        6L
+
+// Stage 4 negative: a SYMMETRIC factor must still NOT fuse. Only the IxKind
+// predicate was relaxed; SymNone/Rank-1/no-deps are untouched, because a
+// symmetric record stores only canonical cells (extent != cardinality) so the
+// compound index is not a dense row-major product — its sound joint form is the
+// wreath product, deferred (docs/future.md §4b.1). Two levels per copy, no
+// fusion, means four levels total and no FusedFactors anywhere.
+let private test_symidx_factor_still_does_not_fuse () =
+    let name = "stage4 SymIdx factor still excluded from fusion (wreath deferral)"
+    let symFactor = { sRec 2 3L IxKPlain None with Rank = 2; Symmetry = SymSymmetric }
+    let levels = fuseTwoCopies [ sRec 1 2L IxKPlain None; symFactor ]
+    // Rank-2 symmetric record spans 2 levels, so each copy has 3 raw levels.
+    if levels |> List.exists (fun l -> l.FusedFactors.IsSome) then
+        (name, false, "a SymIdx-bearing S-block was fused")
+    elif levels.Length <> 6 then
+        (name, false, sprintf "expected 6 unfused levels (3 per copy), got %d" levels.Length)
+    else (name, true, "6 unfused levels, no FusedFactors")
+
+/// Lower `src` and return the SOLE index record of the fused output binding,
+/// asserting the stage 4 field stamping on it.
+let private checkFusedOutput (name: string) (src: string) (wantExtent: int64) =
+    match soleIndexOf src "result" with
+    | Error e -> (name, false, e)
+    | Ok ix ->
+        let checks =
+            [ (ix.Rank = 2), sprintf "Rank = %d, want 2" ix.Rank
+              (ix.Symmetry = SymSymmetric), sprintf "Symmetry = %A, want SymSymmetric" ix.Symmetry
+              (ix.Extent = IRLit (IRLitInt wantExtent)),
+                sprintf "Extent = %A, want IRLit %d (the literal product)" ix.Extent wantExtent
+              (ix.Tag = None), sprintf "Tag = %A, want None (the compound axis is anonymous)" ix.Tag
+              (ix.IxKind = IxKPlain),
+                sprintf "IxKind = %A, want IxKPlain — a Tag=None/IxKIrreps record violates Tag<->IxKind agreement" ix.IxKind
+              (ix.Dependencies = []), sprintf "Dependencies = %A, want []" ix.Dependencies ]
+        match checks |> List.tryFind (fst >> not) with
+        | Some (_, why) -> (name, false, why)
+        | None -> (name, true, formatBladeIndex ix)
+
+// Stage 4 (c): the OUTPUT record for a mixed plain x irreps array under comm.
+let private test_fused_output_plain_x_irreps () =
+    checkFusedOutput
+        "stage4 batch x IrrepsIdx output = SymIdx<2, 6>, Tag None, IxKPlain"
+        ("let static spec = [(1, 1, 1)]\n" +
+         "let A: Array<Float64 like Idx<2>, IrrepsIdx<spec>> = [[1.0, 2.0, 3.0], [4.0, 5.0, 6.0]]\n" +
+         "let L = method_for(A, A)\n" +
+         "let f = lambda(x, y) where comm(x, y) -> x * y\n" +
+         "let result = L <@> f |> compute\n")
+        6L
+
+// Stage 4 (d): the OUTPUT record for an irreps x irreps array — the case whose
+// leading factor is irreps, i.e. the one that actually trips the hazard.
+let private test_fused_output_irreps_x_irreps () =
+    checkFusedOutput
+        "stage4 IrrepsIdx x IrrepsIdx output = SymIdx<2, 6>, Tag None, IxKPlain"
+        ("let static sA = [(0, 0, 2)]\n" +
+         "let static sB = [(1, 1, 1)]\n" +
+         "let A: Array<Float64 like IrrepsIdx<sA>, IrrepsIdx<sB>> = [[1.0, 2.0, 3.0], [4.0, 5.0, 6.0]]\n" +
+         "let L = method_for(A, A)\n" +
+         "let f = lambda(x, y) where comm(x, y) -> x * y\n" +
+         "let result = L <@> f |> compute\n")
+        6L
+
 // ---- Runner ----------------------------------------------------------------
 
 let runTypeStructureTests () : Blade.Tests.TestHarness.BlockResult =
@@ -537,7 +673,12 @@ let runTypeStructureTests () : Blade.Tests.TestHarness.BlockResult =
           test_decompact_anti5_interior_type
           test_negative_control
           test_comm_over_irreps_infers_sym_irreps
-          test_sym_irreps_annotation_matches_inference ]
+          test_sym_irreps_annotation_matches_inference
+          test_fuse_level_plain_x_irreps
+          test_fuse_level_irreps_x_irreps
+          test_symidx_factor_still_does_not_fuse
+          test_fused_output_plain_x_irreps
+          test_fused_output_irreps_x_irreps ]
     Blade.Tests.TestHarness.printHeader "Type-Structure"
     let mutable passed = 0
     let mutable failed = 0

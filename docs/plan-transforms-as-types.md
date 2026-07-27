@@ -817,6 +817,19 @@ go first.
    compound is an honest product and the wreath-product subtlety deferred for
    SymIdx-typed inputs (future.md §4b.1) does not arise. Decide §6.3(iii)
    tag anonymity here. Unlocks `comm` over per-node/row-stacked irreps arrays.
+   **LANDED 2026-07-27**: `isDenseFusableKind` (IxKPlain | IxKIrreps) is the
+   whole eligibility diff; the SymIdx exclusion is stated as coded (stores
+   only canonical cells ⇒ extent ≠ cardinality ⇒ not a dense product; sound
+   joint form = wreath). The §2.7-predicted Tag/IxKind hazard EXISTED:
+   deduceOutputType's compound path inherited the head factor's IxKind —
+   demonstrated by a hazard build (BL6001 fires exactly when the LEADING
+   factor is irreps); fixed by stamping `IxKind = IxKPlain` beside the
+   existing `Tag = None` (the §6.3(iii) anonymous-product stance, now
+   enforced not just stated). Decode paths 0 lines changed (runtime
+   extents, provenance-agnostic as §2.7 claimed). Corpus symmetry/025-027:
+   compact-vs-dense twins byte-identical, before/after measured (36 dense
+   → 21 compact cells); stage-3 single-axis pins bit-identical. Full suite
+   1538/0.
 6. **Stage 5 — finite groups.** Abstract the irrep label out of `SpecEntry`,
    `mkIrrepsTag`, the `irreps_*` builtins, and Unify's spec arm; add a
    character-table Group case; `homDim` by `⟨χ,χ'⟩` **with the FS

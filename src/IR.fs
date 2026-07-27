@@ -1327,14 +1327,28 @@ let buildRawLoopLevels (arrayTypes: IRArrayType list) (sDimsPerArray: int list) 
 ///   - the argument sits in a comm group together with at least one OTHER
 ///     position holding the SAME array (identity; shared index spaces license
 ///     nothing: shared_units_insufficient),
-///   - it contributes >= 2 S-levels, ALL plain dense rank-1 records (SymNone,
-///     IxKPlain, no dependencies) — symmetric/ragged/dep/compound records do
-///     not fuse (their joint form needs unrank decode; such arguments simply
-///     do not group across positions), and
+///   - it contributes >= 2 S-levels, ALL rank-1 DENSE-STORED records (SymNone,
+///     no dependencies, IxKind ∈ {IxKPlain, IxKIrreps}) — symmetric/ragged/
+///     dep/compound records do not fuse (their joint form needs unrank decode;
+///     such arguments simply do not group across positions), and
 ///   - the source is a real array (not a range/reverse virtual).
 /// Identity partners share an array type, so eligibility is uniform across a
 /// group: every member fuses or none does — a fused level therefore always
 /// finds its partners fused.
+///
+/// IxKIrreps admitted at stage 4 (docs/plan-transforms-as-types.md §7 stage 4),
+/// which unlocks `comm` over multi-axis irreps arrays (per-node feature
+/// matrices, batch × IrrepsIdx). Soundness: an irreps axis is DENSE BY DESIGN —
+/// extent = total_dim(spec) = cardinality, every cell stored, no compaction
+/// bijection (see classifyIndexSpace's IxKIrreps arm) — so the fused axis is an
+/// honest row-major product of its factors' extents and §12.4's corrected joint
+/// doctrine applies verbatim; the block structure of an irreps space is TYPE
+/// IDENTITY, not a storage class, and iteration never consults it. What stays
+/// excluded is exactly what was excluded before: a SYMMETRIC (SymIdx-typed)
+/// factor stores only canonical cells, so extent ≠ cardinality and the compound
+/// index is not a dense row-major product — its sound joint form is the wreath
+/// product, not S_r over a flat compound (docs/future.md §4b.1). Widening the
+/// predicate any further than IxKind is therefore NOT sound.
 let fuseJointSLevels
     (identities: ArrayIdentity list)
     (commGroups: int list list)
@@ -1360,13 +1374,29 @@ let fuseJointSLevels
         |> List.collect (fun (arrIdx, lvls) ->
             let recs = if arrIdx < sRecordsByArray.Length then sRecordsByArray.[arrIdx] else []
             let isVirtual = arrIdx < arrayTypes.Length && arrayTypes.[arrIdx].IsVirtual
+            // Dense rank-1 factors only. IxKPlain and IxKIrreps are the two
+            // kinds whose extent IS their cardinality (stage 4); every other
+            // kind either compacts (Sym/Antisym/compound), varies per row
+            // (ragged/dep), or is a synthetic slot — none of which decode as a
+            // row-major product. Symmetry must be SymNone independently of the
+            // kind: a symmetric record is the wreath-product case, deferred.
+            let isDenseFusableKind (k: IxKind) =
+                match k with
+                | IxKPlain | IxKIrreps -> true
+                | _ -> false
             let allPlainDense =
                 recs.Length = lvls.Length &&
                 recs |> List.forall (fun r ->
-                    r.Rank = 1 && r.Symmetry = SymNone && r.IxKind = IxKPlain &&
+                    r.Rank = 1 && r.Symmetry = SymNone && isDenseFusableKind r.IxKind &&
                     List.isEmpty r.Dependencies)
             if not isVirtual && lvls.Length >= 2 && hasIdentityPartner arrIdx && allPlainDense then
                 let rep = List.head lvls
+                // The fused axis is ANONYMOUS: Tag = None (and, on the output
+                // record deduceOutputType builds from these factors,
+                // IxKind = IxKPlain). A batch × irreps product is NOT an irreps
+                // space — the compound coordinate mixes a representation index
+                // with a non-representation one, so no spec describes it
+                // (plan-transforms-as-types §6.3(iii), decided at stage 4).
                 [ { rep with
                       LocalDimIndex = 0
                       RankIndex = 0
@@ -2088,12 +2118,26 @@ let deduceOutputType
                                         match a, b with
                                         | IRLit (IRLitInt x), IRLit (IRLitInt y) -> IRLit (IRLitInt (x * y))
                                         | _ -> IRBinOp (IRElementwise, IRMul, a, b))
+                        // The compound axis is ANONYMOUS and PLAIN. Tag = None
+                        // AND IxKind = IxKPlain must BOTH be stamped, not just
+                        // inherited from the template factor: since stage 4
+                        // admits IxKIrreps factors, a template-inherited
+                        // IxKIrreps beside Tag = None would break the
+                        // Tag↔IxKind agreement the IR validator enforces
+                        // (ixKindOfTag None = IxKPlain), and would falsely
+                        // advertise a spec the compound axis does not have.
+                        // §6.3(iii), decided at stage 4: a batch × irreps (or
+                        // irreps × irreps) product is NOT an irreps space — the
+                        // joint coordinate ranges over tuples, which carry no
+                        // single-space representation structure. Dependencies
+                        // are empty by fusion eligibility.
                         let template = List.head factors
                         result <- result @ [{ template with
                                                 Extent = prodExtent
                                                 Rank = groupRank
                                                 Symmetry = groupSymmetry
                                                 Tag = None
+                                                IxKind = IxKPlain
                                                 Id = builder.FreshId() }]
                     | Some factors ->
                         // Defensive: a lone fused level cannot occur by

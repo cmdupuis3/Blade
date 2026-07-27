@@ -1,0 +1,70 @@
+// TEST: Joint Product Symmetry: batch x IrrepsIdx
+// ============================================================================
+// Stage 4 of plan-transforms-as-types: joint fusion now admits IrrepsIdx S-dims
+// alongside plain ones, so `comm` works over a per-node FEATURE MATRIX
+// (batch x irreps) — the array shape equivariant ML actually uses. Before this
+// stage the irreps axis failed the fusion predicate, no cross-argument grouping
+// happened, and the output was the full dense 2x3x2x3 (36 cells).
+//
+// Soundness is exactly §12.4's corrected doctrine, unchanged: an irreps axis is
+// DENSE (extent = total_dim(spec) = cardinality, every cell stored — the block
+// structure is type IDENTITY, not a storage class), so the fused axis is an
+// honest row-major product 2 * 3 = 6 and one identity group licenses only the
+// JOINT symmetry over whole (node, feature) tuples. Output: SymIdx<2, 6>,
+// C(6+1, 2) = 21 canonical pairs p1 <= p2 in lex order.
+//
+// The fused axis is ANONYMOUS (§6.3(iii)): a batch x irreps product is NOT an
+// irreps space, so the output record carries Tag = None / IxKPlain, not the
+// spec. Type-Structure pins those fields directly.
+//
+// TWO TWINS pin the values from the outside:
+//   flat_sym   — the same kernel over the FLATTENED Idx<6> array with comm.
+//                Fusing (Idx<2>, IrrepsIdx<3>) must produce literally this.
+//   flat_dense — the same kernel with no comm at all: the full 6x6 rectangle.
+//                Every compact cell is the corresponding dense cell.
+// ============================================================================
+let static spec = [(1, 1, 1)]                       // one l=1 block, total_dim = 3
+let A: Array<Float64 like Idx<2>, IrrepsIdx<spec>> = [[1.0, 2.0, 3.0], [4.0, 5.0, 6.0]]
+let L = method_for(A, A)
+let f = lambda(x, y) where comm(x, y) -> x * y
+let result = L <@> f |> compute
+// Flat compound a = [1,2,3,4,5,6]; products over p1 <= p2:
+// p1=0: 1,2,3,4,5,6 | p1=1: 4,6,8,10,12 | p1=2: 9,12,15,18 | p1=3: 16,20,24 |
+// p1=4: 25,30 | p1=5: 36
+// EXPECT: result = [1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 4.0, 6.0, 8.0, 10.0, 12.0, 9.0, 12.0, 15.0, 18.0, 16.0, 20.0, 24.0, 25.0, 30.0, 36.0]
+
+// Twin 1: the flattened plain-Idx computation, compacted the same way. The
+// fused compound axis IS this index space, so the two pins are the same list.
+let Aflat: Array<Float64 like Idx<6>> = [1.0, 2.0, 3.0, 4.0, 5.0, 6.0]
+let Lflat = method_for(Aflat, Aflat)
+let flat_sym = Lflat <@> f |> compute
+// EXPECT: flat_sym = [1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 4.0, 6.0, 8.0, 10.0, 12.0, 9.0, 12.0, 15.0, 18.0, 16.0, 20.0, 24.0, 25.0, 30.0, 36.0]
+
+// Twin 2: same kernel, no comm — the full rectangular 6x6, row-major.
+let g = lambda(x, y) -> x * y
+let flat_dense = Lflat <@> g |> compute
+// EXPECT: flat_dense = [1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 2.0, 4.0, 6.0, 8.0, 10.0, 12.0, 3.0, 6.0, 9.0, 12.0, 15.0, 18.0, 4.0, 8.0, 12.0, 16.0, 20.0, 24.0, 5.0, 10.0, 15.0, 20.0, 25.0, 30.0, 6.0, 12.0, 18.0, 24.0, 30.0, 36.0]
+
+// Cell-level agreement through the two ACCESS paths, not by eye: the compact
+// joint index over the compound axis vs the dense one. p1 = 1 is (node 0,
+// feature 1); p2 = 4 is (node 1, feature 1).
+let compact_1_4 = result(1, 4)
+let dense_1_4 = flat_dense(1, 4)
+// The mirror folds to the same stored cell — the symmetry is real, not a
+// storage claim; the dense twin holds it as a separate, equal-valued cell.
+let compact_4_1 = result(4, 1)
+let dense_4_1 = flat_dense(4, 1)
+// EXPECT: compact_1_4 = 10.0
+// EXPECT: dense_1_4 = 10.0
+// EXPECT: compact_4_1 = 10.0
+// EXPECT: dense_4_1 = 10.0
+
+// A diagonal cell (kept by the inclusive triangle) and the last cell.
+let compact_diag = result(3, 3)
+let dense_diag = flat_dense(3, 3)
+let compact_last = result(5, 5)
+let dense_last = flat_dense(5, 5)
+// EXPECT: compact_diag = 16.0
+// EXPECT: dense_diag = 16.0
+// EXPECT: compact_last = 36.0
+// EXPECT: dense_last = 36.0
