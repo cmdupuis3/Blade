@@ -574,12 +574,19 @@ tri <@> (h, h, h)
    (:95-122) are now pinned bit-exact for every l ≤ 2 triple: precondition
    discharged.
    (iii) Finite groups: the FS correction (§3.6) — Sₙ safe, point groups not.
-3. **Nominal identity under nesting.** (i) Does Unify's spec-mismatch arm
-   handle rank-k irreps records, or assume Rank = 1? (ii)
-   `SymIdx<2, IrrepsIdx<A>>` vs `SymIdx<2, IrrepsIdx<B>>` at equal total_dim
-   must stay distinct — same argument that motivated IrrepsIdx. (iii) The
-   fused multi-axis compound (IR.fs:2091-2096) sets Tag = None — correct
-   (batch × irreps is not an irreps space), but the diagnostic must say so.
+3. **Nominal identity under nesting — DISCHARGED at stage 3.** (i) Unify's
+   spec-mismatch arm keys on Tag/Symmetry, never Rank — rank-k irreps
+   records handled with ZERO Unify changes (verified by accept/reject
+   corpus, not assumed). (ii) A-vs-B strictness at equal total_dim holds
+   (corpus 136); plain-adoption permissiveness holds (135). One adjacent
+   fix was needed: registerTypeDecl overwrote Tag with the alias name,
+   silently erasing the spec through whole-type aliases — now folds the
+   name into the irreps tag like TyIrrepsIdx's own arm. (iii) The fused
+   multi-axis compound's Tag = None stance is unchanged (stage 4 decides
+   its diagnostic). New hazard found while attempting the sym_lift
+   retyping, chipped for a separate session: the unifier accepts a rank-K
+   symmetric annotation against a rank-1 flat emission (SymNone wildcard,
+   extents uncompared) — only g++ catches it.
 4. **Separate compilation** (mirrors the deduction plan §6.1): resolved here
    by propose-don't-export (§4b) — deduced certificates never cross module
    boundaries unpinned.
@@ -791,6 +798,19 @@ go first.
    the lowering arm (TypeCheck.fs:590-592) carries the inner record's
    Tag/IxKind with `Extent = totalDim(spec)`. Verify §2.7's IR-reachability
    claim (IR.fs:2126) and audit Unify per §6.3. Downstream: nothing.
+   **LANDED 2026-07-27**: `SymIdxBase` payload DU (illegal states
+   unrepresentable); one-token-peek grammar (KwIrrepsIdx/KwIdx → index
+   type; bare names stay the legacy int reading forever — named-alias-as-
+   base out of scope); shared `symPowerIndexRecord` backs both lowering
+   arms; ANTISYMIDX INCLUDED (same seam). Unify needed nothing (§6.3
+   discharged); F10 confirmed — the inferred comm-over-irreps record and
+   the written annotation lower to identity-field-identical records (the
+   round trip is by construction). Index printers now show the power
+   (`SymIdx<2, IrrepsIdx<[…]>>`), not the bare base. sym_lift retyping
+   attempted and REVERTED (rank-1 emission vs rank-K type; g++-level
+   failure exposed a silent-unification hazard, chipped; follow-up in
+   symLiftDecl's doc-comment). Corpus index-types/134-138; full suite
+   1530/0.
 5. **Stage 4 — multi-axis irreps under joint fusion.** Seam: **S3.** Relax
    the `IxKPlain` predicate (IR.fs:1366) to admit `IxKIrreps` — sound
    precisely because IrrepsIdx is dense (extent = cardinality), so the joint

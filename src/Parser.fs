@@ -743,6 +743,35 @@ and parseTypeAtom (tokens: Token list) : ParseResult<TypeExpr> =
     | None ->
         errorEof "Expected type but got end of file"
 
+/// The second argument of `SymIdx<k, _>` / `AntisymIdx<k, _>` (seam S1 of
+/// docs/plan-transforms-as-types.md §2.7). The slot used to be `parseSimpleExpr`
+/// only — an INT expression, so the base space was always an anonymous dense
+/// extent. It now also admits an index TYPE, but only for the two forms that
+/// have a meaning as a symmetric-power base:
+///
+///   - `IrrepsIdx<spec>` — the point of the feature. `SymIdx<k, IrrepsIdx<s>>`
+///     is Sym^k of an irreps space and keeps the SPEC as type identity, so two
+///     different specs of equal total_dim stay distinct (§6.3).
+///   - `Idx<n>` — the trivial base, accepted for uniformity. It lowers to
+///     exactly the record the legacy `SymIdx<k, n>` form produces.
+///
+/// ANYTHING ELSE stays on the EXACT legacy `parseSimpleExpr` path. In
+/// particular a BARE NAME is ALWAYS the legacy int reading: `SymIdx<2, N>`
+/// means "extent N" (a `let static`, a parameter, an arithmetic expression),
+/// never "the index-type alias N". The ambiguity is resolved that way
+/// permanently — existing programs cannot change meaning. The consequence is
+/// that named-alias-as-base (`type S = IrrepsIdx<spec>` then `SymIdx<2, S>`)
+/// is NOT supported: `S` would be read as an int extent and fail downstream
+/// like any other non-numeric name. Write `IrrepsIdx<spec>` inline instead
+/// (or alias the WHOLE thing: `type S = SymIdx<2, IrrepsIdx<spec>>`, which
+/// does work and folds the alias name into the irreps identity tag).
+and parseSymIdxBase (tokens: Token list) : ParseResult<SymIdxBase> =
+    match peek tokens with
+    | Some (TokKeyword KwIrrepsIdx) | Some (TokKeyword KwIdx) ->
+        parseIndexType tokens >>= fun ty afterTy -> success (SymBaseIndex ty) afterTy
+    | _ ->
+        parseSimpleExpr tokens >>= fun extent afterExtent -> success (SymBaseExtent extent) afterExtent
+
 // Parse index types specifically - Idx<extent> or SymIdx<arity, extent>
 // These are self-contained with their own < > brackets
 and parseIndexType (tokens: Token list) : ParseResult<TypeExpr> =
@@ -757,20 +786,20 @@ and parseIndexType (tokens: Token list) : ParseResult<TypeExpr> =
         advance tokens |> expect (TokOp "<") >>= fun _ afterLt ->
         parseLiteral afterLt >>= fun rankLit afterRank ->
         expect TokComma afterRank >>= fun _ afterComma ->
-        parseSimpleExpr afterComma >>= fun extent afterExtent ->
-        expectGt afterExtent >>= fun _ remaining ->
+        parseSymIdxBase afterComma >>= fun baseIdx afterBase ->
+        expectGt afterBase >>= fun _ remaining ->
         let rank = match rankLit with LitInt n -> int n | _ -> 2
-        success (TySymIdx (rank, extent)) remaining
-    
+        success (TySymIdx (rank, baseIdx)) remaining
+
     | Some (TokKeyword KwAntisymIdx) ->
         advance tokens |> expect (TokOp "<") >>= fun _ afterLt ->
         parseLiteral afterLt >>= fun rankLit afterRank ->
         expect TokComma afterRank >>= fun _ afterComma ->
-        parseSimpleExpr afterComma >>= fun extent afterExtent ->
-        expectGt afterExtent >>= fun _ remaining ->
+        parseSymIdxBase afterComma >>= fun baseIdx afterBase ->
+        expectGt afterBase >>= fun _ remaining ->
         let rank = match rankLit with LitInt n -> int n | _ -> 2
-        success (TyAntisymIdx (rank, extent)) remaining
-    
+        success (TyAntisymIdx (rank, baseIdx)) remaining
+
     | Some (TokKeyword KwHermitianIdx) ->
         advance tokens |> expect (TokOp "<") >>= fun _ afterLt ->
         parseSimpleExpr afterLt >>= fun extent afterExtent ->

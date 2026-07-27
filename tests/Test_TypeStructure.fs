@@ -103,6 +103,12 @@ and formatExtent (e: IRExpr) : string =
 ///   Idx<N>, SymIdx<r, N>, AntisymIdx<r, N>, HermitianIdx<N>.
 /// An arity-0 slot is a pattern hole and renders as `_`.
 and formatBladeIndex (ix: IRIndexType) : string =
+    match ix with
+    // An irreps record's identity is its SPEC, not its extent — defer to the
+    // compiler's own printer, which renders `IrrepsIdx<[(l,p,m), ...]>` and
+    // wraps it in `SymIdx<k, ...>` when the record is a symmetric power of it.
+    | IrrepsIdxLike _ -> Blade.IR.ppIndexType ix
+    | _ ->
     let n = formatExtent ix.Extent
     match ix.Rank, ix.Symmetry with
     | 0, _ -> "_"                                            // rank hole in a pattern
@@ -431,6 +437,82 @@ let private test_negative_control () =
                 (testName, false,
                  sprintf "relation wrongly matched a dense rank-3 pattern against %s" (formatBladeType actual))
 
+// ---- F10: §2.7's IR-reachability claim, EXECUTED ---------------------------
+// docs/plan-transforms-as-types.md §2.7 asserted — "read, not yet executed" —
+// that the IR target record for `SymIdx<k, IrrepsIdx<spec>>` is ALREADY what
+// inference produces: deduceOutputType's size-≥2 group path (IR.fs:2126) builds
+// `{ rep with Rank = groupRank; Symmetry = groupSymmetry }`, so the irreps
+// `Tag` and `IxKind` survive verbatim, and the symmetry-vs-kind classification
+// tests Symmetry first. These two tests run that claim.
+//
+// They assert the index record's identity FIELDS directly rather than going
+// through matchesTypePattern, which deliberately treats a `__`-prefixed tag in
+// the pattern as "don't care" (IR.fs:906-910) — and the irreps tag is exactly
+// such a tag. The spec payload IS the identity here, so it has to be compared.
+
+/// Shared prologue: an irreps-typed rank-1 array and a comm kernel over two
+/// copies of it. spec = [(0,0,2), (1,1,1)] -> total_dim = 2*1 + 1*3 = 5.
+let private irrepsCommPrologue =
+    "let static spec = [(0, 0, 2), (1, 1, 1)]\n" +
+    "let x: Array<Float like IrrepsIdx<spec>> = [1.0, 2.0, 3.0, 4.0, 5.0]\n" +
+    "let L = method_for(x, x)\n" +
+    "let f = lambda(a, b) where comm(a, b) -> a * b\n"
+
+/// Lower `src` and return the SOLE index record of `bindingName`'s array type.
+let private soleIndexOf (src: string) (bindingName: string) : Result<IRIndexType, string> =
+    match lower src with
+    | Error e -> Error (sprintf "lower failed: %s" e)
+    | Ok prog ->
+        match bindingTypeByName prog bindingName with
+        | None -> Error (sprintf "no binding named '%s' in lowered program" bindingName)
+        | Some (ArrayElem a) ->
+            match a.IndexTypes with
+            | [ix] -> Ok ix
+            | ixs -> Error (sprintf "expected exactly one index record, got %d" ixs.Length)
+        | Some other -> Error (sprintf "binding '%s' is not an array: %s" bindingName (formatBladeType other))
+
+// F10 (a): the INFERENCE side. `comm` over two identical rank-1 IrrepsIdx-typed
+// arrays must deduce a rank-2 SYMMETRIC index that still carries the spec —
+// Tag = the same mkIrrepsTag payload, IxKind = IxKIrreps, extent = total_dim.
+let private test_comm_over_irreps_infers_sym_irreps () =
+    let name = "F10 comm over IrrepsIdx infers SymIdx<2, IrrepsIdx<spec>>"
+    let src = irrepsCommPrologue + "let result = L <@> f |> compute\n"
+    match soleIndexOf src "result" with
+    | Error e -> (name, false, e)
+    | Ok ix ->
+        let wantTag = Some (mkIrrepsTag None [(0, 0, 2); (1, 1, 1)])
+        let checks =
+            [ (ix.Rank = 2), sprintf "Rank = %d, want 2" ix.Rank
+              (ix.Symmetry = SymSymmetric), sprintf "Symmetry = %A, want SymSymmetric" ix.Symmetry
+              (ix.IxKind = IxKIrreps), sprintf "IxKind = %A, want IxKIrreps" ix.IxKind
+              (ix.Tag = wantTag), sprintf "Tag = %A, want %A (spec payload lost)" ix.Tag wantTag
+              (ix.Extent = IRLit (IRLitInt 5L)), sprintf "Extent = %A, want IRLit 5 (= total_dim)" ix.Extent ]
+        match checks |> List.tryFind (fst >> not) with
+        | Some (_, why) -> (name, false, why)
+        | None -> (name, true, Blade.IR.ppIndexType ix)
+
+// F10 (b): the ROUND TRIP. Writing the (newly writable) annotation on that same
+// output must produce the SAME index record the inference produced — same rank,
+// symmetry, spec tag, kind, and extent. Ids are allocation counters and are
+// never type identity, so they are excluded.
+let private test_sym_irreps_annotation_matches_inference () =
+    let name = "F10 written SymIdx<2, IrrepsIdx<spec>> = inferred record"
+    let inferred = irrepsCommPrologue + "let result = L <@> f |> compute\n"
+    let annotated =
+        irrepsCommPrologue
+        + "let result: Array<Float like SymIdx<2, IrrepsIdx<spec>>> = L <@> f |> compute\n"
+    match soleIndexOf inferred "result", soleIndexOf annotated "result" with
+    | Error e, _ -> (name, false, sprintf "inferred side: %s" e)
+    | _, Error e -> (name, false, sprintf "annotated side: %s" e)
+    | Ok inf, Ok ann ->
+        let identity (ix: IRIndexType) =
+            (ix.Rank, ix.Symmetry, ix.Tag, ix.IxKind, ix.Kind, ix.Extent, ix.Dependencies)
+        if identity inf = identity ann then (name, true, Blade.IR.ppIndexType ann)
+        else
+            (name, false,
+             sprintf "inferred %s vs annotated %s (identity fields differ)"
+                 (Blade.IR.ppIndexType inf) (Blade.IR.ppIndexType ann))
+
 // ---- Runner ----------------------------------------------------------------
 
 let runTypeStructureTests () : Blade.Tests.TestHarness.BlockResult =
@@ -453,7 +535,9 @@ let runTypeStructureTests () : Blade.Tests.TestHarness.BlockResult =
           test_decompact_anti3_peel_first_type
           test_decompact_anti3_peel_last_type
           test_decompact_anti5_interior_type
-          test_negative_control ]
+          test_negative_control
+          test_comm_over_irreps_infers_sym_irreps
+          test_sym_irreps_annotation_matches_inference ]
     Blade.Tests.TestHarness.printHeader "Type-Structure"
     let mutable passed = 0
     let mutable failed = 0

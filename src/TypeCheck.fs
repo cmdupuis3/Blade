@@ -472,16 +472,18 @@ let rec lowerTypeExpr (env: TypeEnv) (ty: TypeExpr) : IRType =
         IRTIdxTagged (IRTScalar ETInt64,
                       IRefAnon (nominalId, lowerExtentExpr env extent))
 
-    | TySymIdx (rank, extent) ->
-        let ext = lowerExtentExpr env extent
-        let idx = { Id = env.Builder.FreshId(); Rank = rank; Extent = ext
-                    Symmetry = SymSymmetric; Tag = None; IxKind = IxKPlain; Kind = SDimension; Dependencies = [] }
+    // Both arms keep the documented KNOWN-GAP shape above (IRTArray-with-
+    // Float64), but build the index record through the SHARED
+    // `symPowerIndexRecord` so the value-position and index-position twins
+    // cannot drift. For the legacy `SymIdx<r, n>` base this is field-for-field
+    // the record that was inlined here before; for a `SymIdx<r, IrrepsIdx<s>>`
+    // base it carries the spec identity (see the helper's doc comment).
+    | TySymIdx (rank, baseIdx) ->
+        let idx = symPowerIndexRecord env (env.Builder.FreshId()) rank SymSymmetric baseIdx
         mkArrayArrow [idx] (IRTScalar ETFloat64) None
 
-    | TyAntisymIdx (rank, extent) ->
-        let ext = lowerExtentExpr env extent
-        let idx = { Id = env.Builder.FreshId(); Rank = rank; Extent = ext
-                    Symmetry = SymAntisymmetric; Tag = None; IxKind = IxKPlain; Kind = SDimension; Dependencies = [] }
+    | TyAntisymIdx (rank, baseIdx) ->
+        let idx = symPowerIndexRecord env (env.Builder.FreshId()) rank SymAntisymmetric baseIdx
         mkArrayArrow [idx] (IRTScalar ETFloat64) None
 
     | TyHermitianIdx extent ->
@@ -581,18 +583,51 @@ and lowerElemType env ty : IRType =
     | _ ->
         lowerTypeExpr env ty
 
+/// The index record for `SymIdx<k, base>` / `AntisymIdx<k, base>` — seam S2 of
+/// docs/plan-transforms-as-types.md §2.7, shared by the index-position
+/// (`lowerIndexType`) and value-position (`lowerTypeExpr`) arms.
+///
+///   - `SymBaseExtent e` (the legacy `SymIdx<k, n>` surface form): an
+///     anonymous rank-k compact record over extent `e`. Byte-for-byte the
+///     record both call sites built inline before stage 3.
+///   - `SymBaseIndex ty` (`SymIdx<k, IrrepsIdx<s>>`, `SymIdx<k, Idx<n>>`):
+///     the BASE index type is lowered first and then re-stamped with the
+///     power's Rank and Symmetry. Everything else rides through verbatim —
+///     `Extent` (= total_dim(spec) for an irreps base), the identity `Tag`
+///     (mkIrrepsTag, the SAME tag `IrrepsIdx<s>` alone would carry), `IxKind`
+///     (IxKIrreps), `Kind`, `Dependencies` — including the bad-spec ERROR
+///     marker, so a non-static/malformed spec still surfaces at the
+///     consumption sites (irTypeBadIrrepsDetail) through the power.
+///
+/// Re-stamping rather than rebuilding is deliberate: the result is
+/// field-for-field the record `deduceOutputType` already produces for an
+/// INFERRED symmetric group over irreps-typed inputs (IR.fs:2126 builds
+/// `{ rep with Rank = groupRank; Symmetry = groupSymmetry }`, Tag and IxKind
+/// surviving), so the newly writable annotation and the inferred type are the
+/// same type by construction — not by two constructions that agree today.
+///
+/// Storage/iteration are unaffected: `IxSymmetryLike` dispatches on Symmetry
+/// BEFORE IxKind, so a rank-k irreps record is compact-simplex over an extent
+/// of total_dim(spec) cells, exactly like `SymIdx<k, total_dim>`.
+and symPowerIndexRecord env (id: IRId) (rank: int) (symmetry: SymmetryClass)
+                          (baseIdx: SymIdxBase) : IRIndexType =
+    match baseIdx with
+    | SymBaseExtent extent ->
+        { Id = id; Rank = rank; Extent = lowerExtentExpr env extent
+          Symmetry = symmetry; Tag = None; IxKind = IxKPlain
+          Kind = SDimension; Dependencies = [] }
+    | SymBaseIndex baseTy ->
+        let baseRec = lowerIndexType env 0 baseTy
+        { baseRec with Id = id; Rank = rank; Symmetry = symmetry }
+
 and lowerIndexType env (_position: int) (ty: TypeExpr) : IRIndexType =
     let id = env.Builder.FreshId()
     match ty with
     | TyIdx extent ->
         { Id = id; Rank = 1; Extent = lowerExtentExpr env extent
           Symmetry = SymNone; Tag = None; IxKind = IxKPlain; Kind = SDimension; Dependencies = [] }
-    | TySymIdx (rank, extent) ->
-        { Id = id; Rank = rank; Extent = lowerExtentExpr env extent
-          Symmetry = SymSymmetric; Tag = None; IxKind = IxKPlain; Kind = SDimension; Dependencies = [] }
-    | TyAntisymIdx (rank, extent) ->
-        { Id = id; Rank = rank; Extent = lowerExtentExpr env extent
-          Symmetry = SymAntisymmetric; Tag = None; IxKind = IxKPlain; Kind = SDimension; Dependencies = [] }
+    | TySymIdx (rank, baseIdx) -> symPowerIndexRecord env id rank SymSymmetric baseIdx
+    | TyAntisymIdx (rank, baseIdx) -> symPowerIndexRecord env id rank SymAntisymmetric baseIdx
     | TyHermitianIdx extent ->
         { Id = id; Rank = 2; Extent = lowerExtentExpr env extent
           Symmetry = SymHermitian; Tag = None; IxKind = IxKPlain; Kind = SDimension; Dependencies = [] }
@@ -9573,7 +9608,24 @@ and registerTypeDecl (env: TypeEnv) (typeDecl: TypeDecl) : TypeResult<TypeEnv> =
             match chasedBody with
             | TyIdx _ | TySymIdx _ | TyAntisymIdx _ | TyHermitianIdx _ | TyBoundedIdx _ ->
                 let idx = lowerIndexType env 0 chasedBody
-                Ok (TDIIndexType (name, { idx with Tag = Some name; IxKind = ixKindOfTag (Some name) }, chasedBody))
+                // Nominative-alias rule: the alias name BECOMES the identity
+                // tag. Two exceptions, both reachable only from stage 3's
+                // `type S = SymIdx<k, IrrepsIdx<spec>>` (no legacy form of
+                // these index types can produce an irreps tag, so this is
+                // behaviour-preserving for everything that shipped before):
+                //   - an irreps identity: fold the name INTO the tag exactly
+                //     as the TyIrrepsIdx arm below does, rather than
+                //     overwriting it — otherwise aliasing silently drops the
+                //     spec payload and breaks Tag<->IxKind agreement;
+                //   - a bad-spec ERROR marker: keep it, so the consumption-site
+                //     diagnostic still fires through the alias.
+                let named =
+                    match idx.Tag with
+                    | Some (IrrepsTag (_, triples)) ->
+                        { idx with Tag = Some (mkIrrepsTag (Some name) triples) }
+                    | _ when idx.IxKind = IxKErrorIrrepsBadSpec -> idx
+                    | _ -> { idx with Tag = Some name; IxKind = ixKindOfTag (Some name) }
+                Ok (TDIIndexType (name, named, chasedBody))
             | TyDepIdx _ | TyRaggedIdx _ | TyRaggedIdxOpaque ->
                 let idx = lowerIndexType env 0 chasedBody
                 Ok (TDIIndexType (name, idx, chasedBody))

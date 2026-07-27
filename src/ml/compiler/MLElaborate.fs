@@ -339,9 +339,20 @@ let private deriveS2TpDecl (name: string) (s: Spec) (comp: S2Component) : Result
 /// The K tuple-position tables are baked flat, one per position, so the loop
 /// is a single pass over cells with a left-associated K-fold product. The
 /// input is the irreps space; the OUTPUT is a plain Idx<cells> — the monomial
-/// space is not an irreps space in this stage (its O(3) action is
-/// Sym^K(V) = ml.sym_spec(SPEC, K), which stage 3 will type as
-/// SymIdx<K, IrrepsIdx<SPEC>>).
+/// space is not an irreps space (its O(3) action is Sym^K(V) =
+/// ml.sym_spec(SPEC, K)).
+///
+/// Stage 3 made `SymIdx<K, IrrepsIdx<SPEC>>` writable, so the result COULD now
+/// be declared as that type — the storage agrees exactly (§6.6 monomial
+/// coordinates in §6.8 lex order = the SymIdx cell order, C(n+K-1, K) cells).
+/// It is deliberately NOT: the declared type would be rank-K, and the emitted
+/// body here is a rank-1 flat pass (`out(c)` over 0..cells). Those are
+/// different C++ shapes — `Array<double, 1>` vs the rank-K compact
+/// `Array<double, K>` with a symmetric allocator — so the retype compiles in
+/// Blade (Unify's SymNone-is-a-wildcard permissiveness accepts one slot
+/// against one slot) but produces C++ that does not build. Retyping the result
+/// therefore requires REWRITING the body to K-ary canonical accesses; tracked
+/// as a follow-up, not a type annotation change.
 let private symLiftDecl (name: string) (s: Spec) (k: int) : Result<FunctionDecl, ElabError> =
     let n = totalDim s
     let cells = binomial (n + k - 1) k

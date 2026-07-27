@@ -174,8 +174,11 @@ type TypeExpr =
     | TyVar of Ident * int option
     // Index types
     | TyIdx of extent: Expr
-    | TySymIdx of rank: int * extent: Expr
-    | TyAntisymIdx of rank: int * extent: Expr
+    // SymIdx<k, base> / AntisymIdx<k, base> — the rank-k symmetric /
+    // antisymmetric power of a BASE index space. See `SymIdxBase` for what
+    // the second argument may be.
+    | TySymIdx of rank: int * baseIdx: SymIdxBase
+    | TyAntisymIdx of rank: int * baseIdx: SymIdxBase
     | TyBoundedIdx of lower: Expr * upper: Expr
     | TyCompoundIdx of mask: Expr
     // Dormant scaffolding for a GENERAL group-parameterized rep index. For
@@ -229,6 +232,23 @@ type TypeExpr =
     | TyConstrained of TypeExpr * Constraint list
     // Poly type for arity polymorphism
     | TyPoly of TypeExpr  // Poly<T^r>
+
+/// The second argument of `SymIdx<k, _>` / `AntisymIdx<k, _>`: the BASE index
+/// space the k-th symmetric (antisymmetric) power is taken over.
+///
+///   - `SymBaseExtent e` — the legacy form `SymIdx<2, n>`: the base is an
+///     anonymous dense space of extent `e`, an ordinary int expression
+///     (literal, `let static` name, parameter, arithmetic). A BARE NAME always
+///     reads this way, never as an index-type alias.
+///   - `SymBaseIndex ty` — the base is written as an index TYPE
+///     (`SymIdx<2, IrrepsIdx<spec>>`, `SymIdx<2, Idx<n>>`). The base's full
+///     identity (extent, nominal tag, index kind) is inherited by the
+///     symmetric-power record; only Rank and Symmetry are re-stamped.
+///     This is what makes `Sym^k` of an irreps space a WRITABLE type
+///     (docs/plan-transforms-as-types.md §7 stage 3, seam S1).
+and SymIdxBase =
+    | SymBaseExtent of Expr
+    | SymBaseIndex of TypeExpr
 
 and Constraint =
     // The live spellings of these two conjuncts are WhereClause.Commutativity

@@ -6146,13 +6146,26 @@ and ppIndexType (idx: IRIndexType) =
         | IRParam (name, _, _) -> name
         | _ -> "?"
     match idx with
-    | IrrepsIdxLike rendered -> rendered
+    | IrrepsIdxLike rendered -> ppIrrepsPower idx rendered
     | _ ->
         match idx.Symmetry with
         | SymNone -> sprintf "Idx<%s>" extentStr
         | SymSymmetric -> sprintf "SymIdx<%d, %s>" idx.Rank extentStr
         | SymAntisymmetric -> sprintf "AntisymIdx<%d, %s>" idx.Rank extentStr
         | SymHermitian -> sprintf "HermitianIdx<%s>" extentStr
+
+/// Render an irreps-identity record whose Symmetry/Rank make it a symmetric
+/// POWER of that irreps space (`SymIdx<k, IrrepsIdx<s>>` — writable since
+/// stage 3 of plan-transforms-as-types, and what deduceOutputType infers for
+/// a comm group over irreps-typed inputs). A plain rank-1 irreps index prints
+/// as its own base form. Shared by both index printers so a diagnostic never
+/// shows the base while hiding the power.
+and ppIrrepsPower (idx: IRIndexType) (renderedBase: string) =
+    match idx.Symmetry with
+    | SymSymmetric -> sprintf "SymIdx<%d, %s>" idx.Rank renderedBase
+    | SymAntisymmetric -> sprintf "AntisymIdx<%d, %s>" idx.Rank renderedBase
+    | SymHermitian -> sprintf "HermitianIdx<%s>" renderedBase
+    | SymNone -> renderedBase
 
 // (ppElemType removed in Phase B6: unused after ppIRType was made recursive
 // over IRType in Phase B2. The primitive-only printer is no longer needed
@@ -6185,7 +6198,7 @@ and ppIndexTypeIn (names: Map<IRId, string>) (idx: IRIndexType) =
             | IRParam (name, _, _) -> name
             | _ -> "?"
     match idx with
-    | IrrepsIdxLike rendered -> rendered
+    | IrrepsIdxLike rendered -> ppIrrepsPower idx rendered
     | _ ->
         match idx.Symmetry with
         | SymNone -> sprintf "Idx<%s>" extentStr

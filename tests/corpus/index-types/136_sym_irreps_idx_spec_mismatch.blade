@@ -1,0 +1,16 @@
+// TEST: SymIdx over IrrepsIdx Spec Mismatch (rejects)
+// ============================================================================
+// The §6.3(ii) strictness pin, lifted to rank 2: two `SymIdx<2, IrrepsIdx<_>>`
+// annotations with DIFFERENT specs must not unify even at EQUAL total_dim.
+// sa = [(0,0,2), (1,1,1)] totals 2*1 + 1*3 = 5; sb = [(0,0,5)] also totals 5,
+// so both symmetric powers have the same 15 stored cells and the same extent.
+// Extent comparison can never separate them; only the irreps spec-identity arm
+// in Unify does — and it is rank-agnostic (it keys on the Tag, never on
+// Rank = 1), which is what makes it fire here.
+// ============================================================================
+let static sa = [(0, 0, 2), (1, 1, 1)]
+let static sb = [(0, 0, 5)]
+let x: Array<Float like IrrepsIdx<sa>> = [1.0, 2.0, 3.0, 4.0, 5.0]
+let L = method_for(x, x)
+let f = lambda(a, b) where comm(a, b) -> a * b
+let bad: Array<Float like SymIdx<2, IrrepsIdx<sb>>> = L <@> f |> compute

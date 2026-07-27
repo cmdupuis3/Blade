@@ -1,0 +1,38 @@
+// TEST: SymIdx over IrrepsIdx Basic
+// ============================================================================
+// `SymIdx<k, IrrepsIdx<spec>>` — the symmetric power of an irreps space, made
+// WRITABLE by stage 3 of plan-transforms-as-types (seams S1 parser + S2
+// lowering). This file is also the inference-meets-annotation ROUND TRIP: the
+// right-hand side is a comm kernel over two copies of one IrrepsIdx-typed
+// array, whose output deduceOutputType already inferred as a rank-2 symmetric
+// record carrying the spec tag (§2.7's F10 claim) — the annotation on the left
+// is now spellable and unifies with it.
+//
+// spec = [(0,0,2), (1,1,1)]: 2x(l=0) + 1x(l=1), total_dim = 2*1 + 1*3 = 5.
+// The symmetric power stores the INCLUSIVE simplex i <= j: C(5+1, 2) = 15
+// cells (the plain-SymIdx cardinality — the irreps structure is IDENTITY, not
+// storage; it never compresses).
+// ============================================================================
+let static spec = [(0, 0, 2), (1, 1, 1)]
+let x: Array<Float like IrrepsIdx<spec>> = [1.0, 2.0, 3.0, 4.0, 5.0]
+let L = method_for(x, x)
+let f = lambda(a, b) where comm(a, b) -> a * b
+let r: Array<Float like SymIdx<2, IrrepsIdx<spec>>> = L <@> f |> compute
+// 15 stored cells in lex order over i <= j, value x[i]*x[j]:
+// EXPECT: r = [1.0, 2.0, 3.0, 4.0, 5.0, 4.0, 6.0, 8.0, 10.0, 9.0, 12.0, 15.0, 16.0, 20.0, 25.0]
+
+// Canonical accesses: a stored cell, and its mirror (which folds to the same
+// cell — the symmetry is real, not just a storage claim).
+let diag = r(2, 2)
+let upper = r(1, 4)
+let mirror = r(4, 1)
+// EXPECT: diag = 9.0
+// EXPECT: upper = 10.0
+// EXPECT: mirror = 10.0
+
+// A whole-type alias folds the alias name INTO the irreps identity tag (the
+// same nominative rule IrrepsIdx aliases use), so it still denotes this space.
+type SymSpec = SymIdx<2, IrrepsIdx<spec>>
+let s: Array<Float like SymSpec> = L <@> f |> compute
+let sCell = s(0, 3)
+// EXPECT: sCell = 4.0
