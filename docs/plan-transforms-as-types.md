@@ -83,6 +83,7 @@ extension point (`Blade.Constraints.registerConstraint`):
 |---|---|---|---|
 | `where ml.equiv(G)` | MLEquiv.fs | `{Rep spec, Inv, Opaque}` | O(3)/SO(3): compact, irrep-based |
 | `where sgs.galilean(u,…)` | MLGalilean.fs | `{BVar, BInv, BOpaque}` | boosts: **non-compact**, cancellation-based |
+| `where ml.perm_equiv(N)` (5a, designed) | MLPerm.fs | `{Pow k (k ∈ ℕ)} ∪ {Opaque}`, Pow 0 = Inv | Sₙ: finite, **permutation-module** (index-action) |
 
 Both run at the same elaboration seam (MLElaborate.fs:901-926), and one
 function may carry both certificates (corpus
@@ -458,30 +459,91 @@ certificate instead of demanding one. Same confirm-and-pin economics, one
 difference (§4b): an unconfirmed rep deduction costs a *guarantee*, not a
 *speedup*.
 
-### 3.6 Finite groups first
+### 3.6 Finite groups — the two-family taxonomy (design round 2026-07-27)
 
-For finite G, `dim Hom_G(V,W) = ⟨χ_V, χ_W⟩` — integer arithmetic over a
-character table; no Wigner machinery. Targets in order:
+The original framing here ("character-table-driven derive_linear; Sₙ
+first") was WRONG for Sₙ, in two ways the design round settled. First,
+`⟨χ_V, χ_W⟩` yields counts with no basis — the house rule is that the count
+is the theorem BECAUSE the basis is emitted, and a character table cannot
+ship an emitting stage. Second, Sₙ's layer algebra never needs the irrep
+picture: for permutation modules, `dim Hom_G(ℝ^X, ℝ^Y) = #orbits on X×Y`,
+basis = orbit indicators — and the family `{ℝ^{n^k}}` is MONOIDALLY CLOSED
+(⊗ and Sym^d stay inside), so the entire graded tower is character-free
+with no Kronecker coefficient ever appearing (the Sₙ tensor-product problem
+is multiplicity-nonfree with no closed form — permanently out of scope at
+this tier, and unneeded).
 
-1. **Sₙ-equivariant layers** (invariant graph networks):
-   `dim Hom_{Sₙ}(ℝ^{n^k}, ℝ^{n^l}) = Bell(k+l)` for `n ≥ k+l`, basis indexed
-   by set partitions — and `setPartitions`/`bell` already exist
-   (src/ppl/Combinatorics.fs:30-54). Sₙ irreps are all real-type: the naive
-   inner product is correct. The `n < k+l` degeneracy (partitions collapse,
-   dimension drops) must be guarded, or the parameter-count theorem is false
-   for small n.
-2. **Point groups** (crystallographic ML) second, because of the
-   **Frobenius–Schur trap**: `C₃, C₄, S₄, …` have complex-type irreps, where
-   `End_G = ℂ` and `dim_ℝ Hom ≠ ⟨χ, χ'⟩` — the naive formula under-counts
-   real parameters by 2× exactly there. The FS indicator correction is
-   mandatory before any point-group release.
+Stage 5 therefore splits into TWO FAMILIES, per §2.3's own lesson that the
+family predates the generalization:
 
-Honest cost note: MLEquiv's group-specific *judgment* is ~12 lines, but the
-representation *model* is O(3)-shaped across modules — `SpecEntry = {L;
-Parity; Mult}` (MLSpec.fs), the `l,p,m|…` payload of `mkIrrepsTag`
-(Types.fs), the `irreps_*` static builtins, TypeCheck's `TyIrrepsIdx`
-lowering, and Unify's spec-mismatch arm. Stage 5 is a multi-module refactor
-(abstract irrep label), not a dozen lines.
+**5a — Sₙ as the first INDEX-ACTION discipline** (a sibling registered like
+MLGalilean; zero refactor of the O(3) member):
+- `ml.derive_perm_linear(K, L, N, x, w)` over plain `Idx<N>`-power axes;
+  weight dim = #partitions of [K+L] with ≤ N blocks (= Bell(K+L) at
+  N ≥ K+L; v1 requires static N ≥ K+L, diagnostic naming the truncated
+  variant as a deferral); basis = COARSENING INDICATORS B_γ, one
+  b(γ)-deep loop nest per partition (input-only blocks sum, mixed blocks
+  gather, output-only blocks broadcast — the deriveLinearDecl idiom, no
+  new index machinery). `derive_perm_bias(L, N, b)` is the
+  rep-introduction form; `perm_matmul` (PPGN's engine) is the one
+  bilinear shipped early, BY NAME, not by synthesis.
+- Canonical order: partitions by RGS (restricted growth string), lex
+  ascending, input positions before output positions. The independence
+  certificate is INTEGER: γ's witness tuple is its own RGS,
+  `B_{γ'}(RGS(γ)) = 1 ⇔ γ' ≤ γ`, and RGS-lex extends refinement — the
+  witness-evaluation matrix is unitriangular under the emission order.
+  No float, no rank decision. (If the Coq order lemma resists, the
+  fallback — block-count ascending, then RGS-lex — has a one-line
+  extension proof; a convention swap, never a design hole.)
+- The certification lattice is NEW and ℕ-graded: `{Pow k} ∪ {Opaque}`,
+  Pow 0 = Inv, and its rules have OPPOSITE POLARITY to MLEquiv's at
+  almost every arm (pointwise nonlinearities LEGAL — permutations commute
+  with every pointwise map; elementwise products of reps LEGAL; component
+  access by bound index LEGAL — the node basis is real). That polarity
+  table is the argument that a parameterized `Rep of GroupSpec` payload
+  would be two judgments wearing one type: sibling lattice, third
+  registry member. v1: Pow k = rank-k, ALL axes node-covariant;
+  mixed-axis arrays (batch × node, node × channel, node × IrrepsIdx) are
+  REJECTED at the certified signature (the MLEquiv.fs:135 precedent),
+  diagnostic naming per-axis status vectors as the v2 shape — the same
+  upgrade that unlocks O(3)×Sₙ dual certificates; the two deferrals
+  cross-reference. v1 keys covariance on the STATIC EXTENT N (a
+  coincidental extent-N axis classifies covariant — the usual
+  conditional-theorem reading; `Nat<Node>` nominal keying is the named
+  upgrade, and the bridge to §2.3's index-units row).
+- Oracle: exact rational Reynolds — `P_ref = (1/n!)Σ_σ σ^{⊗(k+l)}` and
+  `B(BᵀB)⁻¹Bᵀ` over ℚ with the closed-form integer Gram
+  `⟨B_γ, B_π⟩ = n^{b(γ∨π)}`; STRONGER than the O(3) oracle — no tolerance
+  anywhere. Anchors: DeepSets (Bell(2) = 2, pinned vs hand-written
+  a·x + b·sum(x)·1), matrix invariants (sum, trace), the Maron k=l=2
+  15 (+ bias 2); integer data so equivariance pins are exact equality.
+- Sizing builtins (`perm_weight_dim`, `perm_bias_dim`) error on
+  N < K+L exactly as the ops do — no silent convention fork.
+
+**5b — point groups as the second BLOCK-SPEC member**, the only place the
+label abstraction is earned: extract SpecEntry/mkIrrepsTag/irreps_*/Unify's
+arm against {O(3), point groups} as the two witnesses — NEVER against Sₙ
+(all Sₙ irreps are real-type; an abstraction generalized over {O(3), Sₙ}
+would bake FS = +1 a second time and break at C₃). The Frobenius–Schur
+correction enters as a STATED FORMULA on ℝ/ℂ/ℍ-typed labels (the earlier
+"under-counts by 2×" direction claim is retired: with real characters the
+over/under direction depends on which naive formula one writes down —
+state the corrected formula, never a direction word). §6.1's
+mathcomp/cite-vs-prove decision bites here, not at 5a.
+
+**Post-5a cleanup (separate stage, earned at three copies): extract the
+abstract-interpretation WALKER SHELL** (freeVars, stmt/block folds,
+cert-table pre-scan) shared by MLEquiv/MLGalilean/MLPerm. The shell is
+rule-of-three-ripe after 5a; the LABEL abstraction is not until 5b.
+
+What 5a does not deliver, recorded once: Sₙ irrep coordinates in any form
+(Specht bases, Sₙ-Fourier features for rankings ML, named isotypic-pooling
+sugar — the isotypic projectors are expressible as weight settings of
+derive_perm_linear, so nothing is lost in map-space); symbolic/runtime N;
+channels and the factored (sum-pushdown) emission — staged like 1a→1b,
+naive-and-pinnable first; `derive_perm_tp` (whose S₂ self-TP compaction
+replays stage 1's move as an INTEGER orbit quotient) and `derive_perm_poly`
+(Burnside); bipartite/multi-node-set graphs.
 
 ### 3.7 Speculative tier: Kondor–Trivedi
 
@@ -830,11 +892,35 @@ go first.
    compact-vs-dense twins byte-identical, before/after measured (36 dense
    → 21 compact cells); stage-3 single-axis pins bit-identical. Full suite
    1538/0.
-6. **Stage 5 — finite groups.** Abstract the irrep label out of `SpecEntry`,
-   `mkIrrepsTag`, the `irreps_*` builtins, and Unify's spec arm; add a
-   character-table Group case; `homDim` by `⟨χ,χ'⟩` **with the FS
-   correction**. Ship Sₙ (real-type, Bell machinery exists) before point
-   groups. Diagnostics: next free code (BL4011 at time of writing).
+6. **Stage 5 — finite groups (REDESIGNED 2026-07-27; two-agent round;
+   full design §3.6).** The original sentence promised a label refactor
+   that 5a deliberately does not perform.
+   - **5a — the Sₙ index-action member** (additive-only, sibling to
+     MLEquiv/MLGalilean): 5a-i counting layer (MLPermSpec: RGS partition
+     order, Stirling-vs-odometer count asserts, witness-unitriangularity
+     certificate, `perm_weight_dim`/`perm_bias_dim` erroring on N < K+L);
+     5a-ii naive emission (`derive_perm_linear`/`derive_perm_bias`,
+     one loop nest per partition) + the exact-rational Reynolds/Gram
+     oracle block + corpus anchors (DeepSets, matrix invariants, Maron
+     15+2) with integer-data exact-equality equivariance pins; 5a-iii the
+     `where ml.perm_equiv(N)` lattice (Pow k; signature-level mixed-axis
+     rejection; pointwise-preservation and same-k arithmetic axioms) +
+     `perm_matmul`. Proofs: new BladePartition.v — RGS enumeration
+     exhaustive/duplicate-free, `rgs_lex_extends_refinement` (the
+     triangularity keystone; fallback convention has a one-line proof),
+     witness lemma over the compiler's list (the s2_cells_spec
+     discipline); orbit-indicator completeness cited-not-proved (§6.1(a)
+     split). Factored emission is the 1b-twin, staged after, pinned
+     against naive. Diagnostics: next free BL code AT LAND TIME (the
+     "BL4011" here and in §4b were double-booked — §4b's certificate-
+     suggestion channel keeps the earlier claim; stage-5 takes the next
+     free).
+   - **5b — point groups, the second block-spec member**: the
+     SpecEntry/mkIrrepsTag/irreps_*/Unify label abstraction extracted
+     against {O(3), point groups} (never Sₙ), FS as a stated formula,
+     §6.1 decided here.
+   - **5c — walker-shell extraction** (post-5a cleanup; three copies =
+     earned; strictly no behavior change).
 7. **Stage 6 — generator-based deduction.** MLEquiv gains an inference mode
    in the Deduce.fs pattern (pure pre-pass; consumers decide); generator
    check for rational-coefficient polynomial bodies; the −I check for O(3);
