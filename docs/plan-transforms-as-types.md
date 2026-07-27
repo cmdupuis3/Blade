@@ -426,21 +426,42 @@ BladeDeduce.v). The continuous analogue:
 > A polynomial map commuting with the dim 𝔤 Lie-algebra generators is
 > equivariant under the whole **connected** group.
 
-For SO(3): three generators; the condition `Df(x)·(A·x) = A·f(x)` per
-generator is a polynomial identity — finite coefficient comparison. Two
-mandatory caveats:
+**THE UNIFORM RULE (settled at the stage-6 round, 2026-07-27, replacing
+the O(3)-specific framing):** one polynomial-identity check per
+Lie-algebra generator of the identity component, plus one per generator
+of the component group π₀. O(3): 3 + 1 (−I). SO(3): 3 + 0. C4: 0 + 1.
+D4: 0 + 2. The 5b-ii Point arm's finite discharge and the −I caveat are
+the same rule's easy rows — same extractor, same coefficientwise-zero
+discharge; only the coefficient ring differs (pure ℚ for the rational
+point groups, radical vectors below for O(3)/SO(3)).
 
-- **O(3) is not connected.** Generators certify SO(3); the parity component
-  needs one extra check at −I (diagonal `(−1)^{parity_b}` per block). This is
-  not a formality — it is exactly the SO3-vs-O3 distinction MLEquiv already
-  enforces on pseudoscalar gates (MLEquiv.fs:471-477). Without it, generator
-  deduction would *certify* programs the shipped judgment *rejects*.
-- **Exactness.** Real CG coefficients are algebraic irrationals computed
-  numerically (Wigner.fs:121-141). The generator check is exact only over an
-  exact ring. Route chosen: restrict it to **user-written bodies with
-  rational coefficients**; synthesized bases stay certified by Schur (a
-  theorem, not a check). A certified-numeric variant would be a *test*, not a
-  certificate.
+- **Exactness — RESOLVED by the linearity observation** (the round's
+  central result, dissolving the earlier restriction's false trilemma):
+  the defect `Df(x)·(A·x) − A·f(x)` is LINEAR in the generator A, so no
+  product of two irrational entries ever occurs; in Blade's real basis
+  every generator entry has the form q·√n (L_z outright integer), hence
+  every coefficient of the identity is a finite ℚ-linear combination of
+  √(squarefree) — a RADICAL VECTOR (Map<squarefree, Rat>), checked
+  componentwise-zero exactly, at EVERY l, no field extension, no basis
+  transport, no subgroup. Acceptance needs no independence lemma (a sum
+  of zeros is zero); radical ℚ-independence is cited but NON-LOAD-BEARING
+  (its failure mode is a sound false-reject — the PBottom polarity). Three
+  spanning generators + linearity replace any Lie-closure argument
+  (span-linearity is PROVED territory, not cited). Body coefficients are
+  taken EXACTLY AS WRITTEN — every float literal is a dyadic rational;
+  the extractor evaluates literal division exactly (3.0/10.0 IS 3/10),
+  and a mandatory near-miss diagnostic catches the 0.3/0.1-intending-3
+  trap, pointing at both escape hatches. Synthesized bases stay
+  Schur-certified for the CORRECTED reason: their coefficients are float
+  images of irrationals, which an exact check would correctly refuse —
+  the theorem is the right certificate for that side, not the only one
+  available.
+- **Route (iii) (finite-subgroup checking) is CLOSED, permanently, by
+  the L = 4 octahedral counterexample**: the cubic harmonic is
+  octahedrally invariant, degree 4, rotationally non-invariant — and
+  L = 4 is reachable at k = 2, l ≤ 1 inputs with l ≤ 2 outputs, inside
+  the useful envelope. The spherical-design intuition controls the
+  wrong functional (integration, not isotypic decomposition).
 
 Representation then becomes the **fourth deduction lattice**, riding the
 shipped framework:
@@ -1130,10 +1151,85 @@ go first.
      (staticArgValue/aliasMapOf, tied to MLElaborate.staticArg's
      keep-in-sync note). Three independently-written walkers over one
      AST were a natural drift experiment; the catalog is the result.
-7. **Stage 6 — generator-based deduction.** MLEquiv gains an inference mode
-   in the Deduce.fs pattern (pure pre-pass; consumers decide); generator
-   check for rational-coefficient polynomial bodies; the −I check for O(3);
-   propose-don't-export per §4b.
+7. **Stage 6 — generator-based deduction (REDESIGNED 2026-07-27, fourth
+   two-agent round; the §3.5 uniform rule + linearity resolution are the
+   round's normative output).** Three sub-stages; `where ml.equiv(G)`
+   stays the ONLY pin spelling (the pin names the theorem, never the
+   discharge route — the BL4010 precedent); the engine lives in
+   judgeFunction's REJECTION path (composition runs first, cheaper and
+   better-messaged; the engine never runs on bodies composition accepts,
+   except forcibly in tests; on EXTRACTION FAILURE the original
+   composition diagnostic surfaces untouched — the engine's diagnostic
+   appears only on extraction-success-check-fail), so Propose ⊆
+   Check-accept holds BY CONSTRUCTION at every stage. Zero new surface:
+   `where ml.equiv(G)` is method-agnostic and the checker picks its
+   proof — no `equiv_gen` variant exists or ever should. The extractor's
+   file header must state that it deliberately admits array literals of
+   rep components — the exact shape MLEquiv's aggregate rule rejects —
+   as a DOCUMENTED polarity divergence (the 5c drift-catalog lesson: a
+   future three-way diff must read it as intentional).
+   - **6a — the inference channel.** Run the shipped checking judgment
+     speculatively on uncertified fully-annotated functions whose
+     signatures classify (candidates signature-driven, strongest-first:
+     O3 then SO3 on IrrepsIdx params; Point g on PgIrrepsIdx-only;
+     non-vacuity filter — never certify a scalar helper). REGISTER
+     BL4011 "equivariance certificate suggestion" (warning, structured
+     side-channel per the BL4010/Ide precedent). THE ONE REAL DESIGN
+     DECISION: deduced-callee dependency threading — a speculative cert
+     table folded in decl order (the Deduce.fs "no summary proves
+     itself" resolver precedent), every BL4011 naming its dependency
+     closure ("also requires pinning: layer1") — without it 6a is
+     useless on exactly the multi-layer models it exists for.
+     --strict-pins does NOT grow a BL4011 arm (uncertified-and-correct
+     is a safe terminal state; a could-prove-more lint is deferred by
+     name). HONESTY: 6a's recall is low until 6b/6c land (uncertified
+     wild code hand-indexes, which composition rejects) — its standalone
+     value is the channel, the harness, and discoverability.
+   - **6b — the engine, part i: extractor + finite discharge (Point
+     pathfinder).** The polynomial extractor (v1 fragment, closed-world:
+     literals with exact literal-division; static indexing into
+     Rep/Inv params; scalar +−*, / by nonzero static; whole-array +−
+     and invariant·array; let; ARRAY LITERALS OF SCALAR POLYNOMIALS as
+     assembled returns — deliberately admitting what composition's
+     aggregate rule rejects, which is the engine's whole point; Inv
+     params as exact transcendental atoms — ℚ[inv-atoms] coefficients,
+     without which w·cross(u,v) is out of scope; multilinear
+     multi-param bodies free by linearity — the physicist corpus
+     derive_poly never covered; degree ≤ 4, ≤ 100k terms, cap breach →
+     fall back to the composition verdict with a naming diagnostic).
+     Finite discharge per registry generator + word closure over pure ℚ
+     ({0,±1} matrices, no radicals, no connectedness step) — isolates
+     extractor bugs from radical bugs. Corpus: the E-plane hand
+     polynomial, x²+y² invariant, x²−y² claimed-A1 negative control
+     dying at R₉₀. Coq: word-closure lemma (proved).
+   - **6c — the engine, part ii: the radical-vector Lie discharger.**
+     Map<squarefree, Rat> module (mul exists only for the pin layer);
+     exact generator tables per l cached like realCGDense, assembled
+     block-diagonal per spec; 3 Lie identities + the −I identity (O3;
+     integer parity bookkeeping); the near-miss diagnostic; post-accept
+     float-sample guard (compiler-bug assert, SymPowerTables gapped
+     style). ORACLE LAYERS, keystone first: (1) THE EXP-PIN closing the
+     convention loop — float-assemble A per spec, exponentiate, check
+     against the SAME numeric rotation action the shipped certificates
+     use (l ≤ 3, three axes, ~1e-10); without it the checker floats
+     free of the code it certifies — the ONLY unsound failure mode in
+     the stage. (2) Exact table pins: skew-symmetry per radical
+     component, brackets [L_a,L_b] = L_c exact, Casimir = −l(l+1)·I
+     exact. (3) Known answers: dot, cross, THE TRIPLE-PRODUCT TRIPLE
+     (passes SO3 under either parity, passes O3 only as (0,odd) — the
+     −I rule as three corpus lines), |x|²·x on [(2,e,1)] (l = 2
+     radicals live in the check — the anchor proving (iv) beats the
+     l ≤ 1 restriction). (4) Negative controls live-then-standing:
+     perturbed coefficient, the truncated-1/√3 near-miss, wrong parity.
+     (5) Differential: composition-accepted bodies forcibly
+     engine-checked, verdicts must agree.
+   - Deferrals, named: loops/mutation/calls in the fragment;
+     annotated-let subterm seams (function-boundary composition via the
+     cert table suffices in v1); degree > 4; the strict-certs lint; the
+     stronger-group upgrade lint; and NOTE THE INVERSION — ℚ(√3) point
+     groups do not wait on a field-extension investment; 6c's radical
+     vectors cover their generator entries the day they join the
+     roster.
 
 ## 8. New proof obligations
 
@@ -1152,11 +1248,18 @@ go first.
   count at it — the ML module's first connection to the tower. Worked count 2
   is its numerical shadow.
 - **Bell(k+l) for Sₙ, with the n ≥ k+l hypothesis** (stdlib-provable).
-- **Generator soundness**: commutation with a generating set of 𝔤 ⇒
-  equivariance under the identity component, plus the O(3) = SO(3) × Z₂
-  reduction and the finite coefficient-comparison step (the Lie-theoretic
-  core is cite-not-prove under §6.1(a); the reduction and the finite check
-  are provable). BladeDeduce.v is the pattern: the discrete twin of this
-  exact argument is already in the tower.
+- **Generator soundness (REVISED at the stage-6 round — the proved column
+  GREW)**: BladeGenerator.v's split. PROVED: defect linearity in A (hence
+  three checks suffice by SPAN — the earlier "generating set of 𝔤"
+  overstated what's needed; span-linearity replaces generation and moves
+  this from cited to proved); componentwise-vanishing ⇒ identity (the
+  acceptance direction, independence-free); O(3) ≅ SO(3) × {±I} with the
+  −I reduction; finite-group word closure (the Point discharge). CITED:
+  the exp step (infinitesimal ⇒ connected-group — same shelf as Schur
+  completeness); radical ℚ-independence — cited AND MARKED
+  NON-LOAD-BEARING (completeness only; its failure mode is a sound
+  false-reject). The honest asymmetry vs BladeDeduce.v, stated: there the
+  generation claim was the proof's heart and got machine-checked; here
+  the discrete half is proved and the analytic core is the cite.
 - **Composition**: as with the deduction triad, all of the above produce the
   *inputs* to H∩Stab and to `homBlocks`; they modify neither law.
