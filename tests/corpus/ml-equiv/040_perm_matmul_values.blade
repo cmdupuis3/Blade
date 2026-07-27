@@ -1,0 +1,105 @@
+// TEST: ML Perm Matmul Values
+import ml as ml
+// ============================================================================
+// ml.perm_matmul(N, a, b) — the flat N^2 matrix product, PPGN's engine, and
+// "THE ONE BILINEAR SHIPPED EARLY, BY NAME, NOT BY SYNTHESIS"
+// (docs/plan-transforms-as-types.md §3.6). Buffers are the same flat row-major
+// convention as ml.derive_perm_linear at K = L = 2, so the two compose with no
+// reshape:
+//
+//     out(i*N + j) += a(i*N + t) * b(t*N + j)
+//
+// Why it is S_n-equivariant is one identity: conjugating both factors by a
+// permutation matrix conjugates the product,
+//
+//     (P A P^T) (P B P^T) = P (A B) P^T
+//
+// which in the MLPerm lattice reads "both arguments are Pow 2 and so is the
+// result". It is shipped by name because there is no orbit-indicator basis at
+// this arity to synthesize from — the complete equivariant BILINEAR space is
+// derive_perm_tp's Burnside construction, a named deferral of 5a.
+//
+// Integer data throughout, so every pin below is exact equality.
+// ============================================================================
+
+// A = [[1,2,3],[4,5,6],[7,8,9]]   B = [[1,0,2],[0,1,0],[3,0,1]]
+let a3: Array<Float like Idx<9>> = [1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0, 9.0]
+let b3: Array<Float like Idx<9>> = [1.0, 0.0, 2.0, 0.0, 1.0, 0.0, 3.0, 0.0, 1.0]
+
+// A*B = [[10, 2, 5], [22, 5, 14], [34, 8, 23]] -- by hand, row by row.
+let ab = ml.perm_matmul(3, a3, b3)
+// EXPECT: ab = [10, 2, 5, 22, 5, 14, 34, 8, 23]
+
+// Not commutative, and the pin says so: B*A = [[15, 18, 21], [4, 5, 6], [10, 14, 18]]
+let ba = ml.perm_matmul(3, b3, a3)
+// EXPECT: ba = [15, 18, 21, 4, 5, 6, 10, 14, 18]
+
+// The identity matrix is the unit on both sides -- the loop nest's own sanity.
+let id3: Array<Float like Idx<9>> = [1.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0]
+let la = ml.perm_matmul(3, id3, a3)
+let ra = ml.perm_matmul(3, a3, id3)
+let dl = la - a3
+let dr = ra - a3
+let sq_id = reduce(dl * dl, (+)) + reduce(dr * dr, (+))
+// EXPECT: sq_id = 0
+
+// The trace of the product, through the derived S_n layer at K = 2, L = 0:
+// slot 0 of ml.derive_perm_linear(2, 0, N, ., .) is the DIAGONAL indicator
+// (coarsest first), i.e. the trace. tr(A*B) = 10 + 5 + 23 = 38.
+let static TW = ml.perm_weight_dim(2, 0, 3)
+// EXPECT: TW = 2
+let tr = ml.derive_perm_linear(2, 0, 3, ab, [1.0, 0.0])
+// EXPECT: tr = [38]
+
+// ============================================================================
+// INSIDE A CERTIFIED BODY: two Pow 2 in, one Pow 2 out.
+// At N = 3 a 9-cell buffer is 3^2, so `a` and `b` classify Pow 2 by the flat
+// extent rule and the certificate holds by construction. The second line is
+// the PPGN update proper — an ELEMENTWISE PRODUCT of two node-covariant
+// matrices, legal here (pointwise maps commute with relabelling) and BL4008
+// under `ml.equiv(O3)`.
+// ============================================================================
+function ppgn(a: Array<Float like Idx<9>>, b: Array<Float like Idx<9>>)
+              where ml.perm_equiv(3) -> Array<Float like Idx<9>> = {
+    let m = ml.perm_matmul(3, a, b)
+    m * a
+}
+
+// (A*B) elementwise* A = [[10, 4, 15], [88, 25, 84], [238, 64, 207]]
+let p = ppgn(a3, b3)
+// EXPECT: p = [10, 4, 15, 88, 25, 84, 238, 64, 207]
+
+// THE CERTIFICATE, shadowed exactly. Relabel the three nodes by
+// p: 0 -> 1, 1 -> 2, 2 -> 0, i.e. A'[i][j] = A[p(i)][p(j)]:
+//   A' = [[5,6,4],[8,9,7],[2,3,1]]     B' = [[1,0,0],[0,1,3],[0,2,1]]
+// then ppgn(A', B') must be ppgn(A, B) relabelled the same way:
+//   out' = [[25,84,88],[64,207,238],[4,15,10]]
+let a3p: Array<Float like Idx<9>> = [5.0, 6.0, 4.0, 8.0, 9.0, 7.0, 2.0, 3.0, 1.0]
+let b3p: Array<Float like Idx<9>> = [1.0, 0.0, 0.0, 0.0, 1.0, 3.0, 0.0, 2.0, 1.0]
+let pp = ppgn(a3p, b3p)
+// EXPECT: pp = [25, 84, 88, 64, 207, 238, 4, 15, 10]
+let want: Array<Float like Idx<9>> = [25.0, 84.0, 88.0, 64.0, 207.0, 238.0, 4.0, 15.0, 10.0]
+let ppd = pp - want
+let sq_equiv = reduce(ppd * ppd, (+))
+// EXPECT: sq_equiv = 0
+
+// Composing the two node-axis ops inside one certificate: Pow 2 -> Pow 2 ->
+// Pow 0. The readout weight buffer is Bell(2) = 2 slots, not a power of 3, so
+// it is an invariant -- the extent keying doing its job on a weight vector.
+function ppgn_trace(a: Array<Float like Idx<9>>, b: Array<Float like Idx<9>>,
+                    w: Array<Float like Idx<TW>>)
+                    where ml.perm_equiv(3) -> Array<Float like Idx<1>> = {
+    let m = ml.perm_matmul(3, a, b)
+    ml.derive_perm_linear(2, 0, 3, m, w)
+}
+
+// trace slot only: 38, as above. Total-sum slot only: 10+2+5+22+5+14+34+8+23 = 123.
+let t1 = ppgn_trace(a3, b3, [1.0, 0.0])
+let t2 = ppgn_trace(a3, b3, [0.0, 1.0])
+// EXPECT: t1 = [38]
+// EXPECT: t2 = [123]
+// and both are invariant under the relabelling, exactly (integer data).
+let t1p = ppgn_trace(a3p, b3p, [1.0, 0.0])
+let t2p = ppgn_trace(a3p, b3p, [0.0, 1.0])
+let dt = (t1(0) - t1p(0)) * (t1(0) - t1p(0)) + (t2(0) - t2p(0)) * (t2(0) - t2p(0))
+// EXPECT: dt = 0

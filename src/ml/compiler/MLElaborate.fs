@@ -14,7 +14,11 @@
 ///
 /// Functions carrying `where <alias>.equiv(O3|SO3)` are additionally JUDGED
 /// (Blade.ML.Equiv) at the pass-1/pass-2 seam: the body must compose only
-/// equivariance-preserving operations, else BL4008.
+/// equivariance-preserving operations, else BL4008. Two SIBLING judgments run
+/// at the same seam over their own status sets and never interact:
+/// `where <alias>.galilean(u, ...)` (Blade.ML.Galilean, BL4009) and
+/// `where <alias>.perm_equiv(N)` (Blade.ML.Perm, BL4012 — the S_n node-axis
+/// lattice, whose polarity is the OPPOSITE of equiv's at the pointwise arms).
 ///
 /// where a SPEC is a static array of (l, parity, mult) int triples
 /// (parity: 0 = even, 1 = odd), and a CFG is a static triple
@@ -888,6 +892,41 @@ let private derivePermBiasDecl (name: string) (l: int) (n: int)
         Ok (mkFunc name [ ("b", tyFloatArr bDim) ] (tyFloatArr (int outCells))
                 (syn (ExprBlock (stmts, Some (v "out")))))
 
+/// perm_matmul for a fixed N: the flat N²-buffer matrix product
+///
+///     out(i*N + j) += a(i*N + t) * b(t*N + j)
+///
+/// — PPGN's engine (Maron et al.'s provably powerful graph network), and the
+/// ONE BILINEAR SHIPPED EARLY, BY NAME, not by synthesis (§3.6). Naming it is
+/// the point: the S_n-equivariant bilinear maps R^{N^2} x R^{N^2} -> R^{N^2}
+/// are a large space with no analogue of the orbit-indicator basis at this
+/// arity, so 5a ships the one map the literature actually uses and defers the
+/// synthesis (`derive_perm_tp`, the Burnside/orbit-quotient construction) as a
+/// named item rather than pretending to a complete basis.
+///
+/// The equivariance is one line: conjugating both factors by a permutation
+/// matrix P conjugates the product, (P A Pᵀ)(P B Pᵀ) = P (A B) Pᵀ, which is
+/// exactly "both arguments are Pow 2 and so is the result" in the MLPerm
+/// lattice.
+///
+/// Buffers are the same FLAT ROW-MAJOR N² convention as derive_perm_linear at
+/// K = L = 2, so a matmul composes with the derived layers with no reshape.
+/// Accumulate-only into a zero-initialized `out`, so grad() differentiates it
+/// through its normal inliner.
+let private permMatmulDecl (name: string) (n: int) : FunctionDecl =
+    let cells = n * n
+    let flat (r: string) (c: string) = add (mul (iLit n) (v r)) (v c)
+    let body =
+        syn (ExprBlock (
+            [ sLetMut "out" (zerosLit cells)
+              sFor "i" 0 n
+                [ sFor "j" 0 n
+                    [ sFor "t" 0 n
+                        [ sAccum (idx "out" (flat "i" "j"))
+                                 (mul (idx "a" (flat "i" "t")) (idx "b" (flat "t" "j"))) ] ] ] ],
+            Some (v "out")))
+    mkFunc name [ ("a", tyFloatArr cells); ("b", tyFloatArr cells) ] (tyFloatArr cells) body
+
 /// scalars for a fixed spec: the l=0 blocks' entries copied into a plain
 /// Idx array (block order, multiplicity order) — an invariant-exit op, the
 /// compile-time twin of ml/Activations.scalars (pure copies, ulp-trivial).
@@ -964,7 +1003,7 @@ let private opNames =
     Set.ofList [ "y_to"; "tensor_product"; "linear"; "gated"; "linear_rows"; "gated_rows"
                  "scalars"; "norms"; "derive_linear"; "derive_tp"
                  "derive_sym_tp"; "derive_alt_tp"; "sym_lift"; "derive_poly"
-                 "derive_perm_linear"; "derive_perm_bias"
+                 "derive_perm_linear"; "derive_perm_bias"; "perm_matmul"
                  "tensor_to_irreps"; "sym_to_irreps"; "irreps_to_sym" ]
 
 /// Static sizing builtins that make up the rest of the ML surface (used in
@@ -1205,6 +1244,31 @@ let private elabDerivePermBias (st: ElabState) (statics: StaticEnv) (site: Expr)
                     |> Result.map (fun nm -> inheritSpan site (ExprApp (v nm, [ bE ]))))
         | _ -> Error (err5000 "derive_perm_bias: L and N must be static ints")))
 
+/// Shared elaboration for perm_matmul. Its gate is its OWN — a matrix product
+/// has no K + L basis behind it, so `checkPermSizing`'s N >= K + L rule does
+/// not apply and would be a false constraint (perm_matmul at N = 2 is a
+/// perfectly good 2x2 product). What it does share is the flat-buffer cell cap:
+/// `out` is materialized as a literal N² zero array.
+let private elabPermMatmul (st: ElabState) (statics: StaticEnv) (site: Expr)
+                           (nE: Expr) (aE: Expr) (bE: Expr)
+    : Result<Expr, ElabError> =
+    staticArg statics "perm_matmul N" nE |> Result.bind (fun nv ->
+        match nv with
+        | SVInt nn ->
+            if nn < 1L then
+                Error (err5000 (sprintf "perm_matmul: N must be a static int >= 1 (got %d) — it is the node-axis extent, and the buffers are the flat row-major N^2 matrices" nn))
+            elif not (permRangeOk 0L 0L nn) then
+                Error (err5000 (sprintf "perm_matmul: N is a static int out of any sane range (got %d)" nn))
+            else
+                let n = int nn
+                if permPow n 2 > int64 permCellCap then
+                    Error (err5000 (sprintf "perm_matmul: the flat node-power buffers of N = %d are N^2 = %d cells, over the %d-cell limit — the emitted kernel materializes the result as a literal zero array of that extent. Lower N (the node-axis extent)"
+                                        n (n * n) permCellCap))
+                else
+                    ensure st (fingerprint "perm_matmul" (box n)) (fun nm -> Ok (permMatmulDecl nm n))
+                    |> Result.map (fun nm -> inheritSpan site (ExprApp (v nm, [ aE; bE ])))
+        | _ -> Error (err5000 "perm_matmul: N must be a static int"))
+
 /// Rewrite ML-op calls in an expression. Same walker shape as
 /// Grad.rewriteExpr; the two passes stay separate because this one carries
 /// elaboration state and runs first.
@@ -1339,6 +1403,11 @@ let rec private rewriteExpr (st: ElabState) (statics: StaticEnv) (aliases: Set<s
             | "derive_perm_bias", [ lE; nE; bE ] ->
                 elabDerivePermBias st statics e lE nE bE
             | "derive_perm_bias", _ -> Error (err5000 "derive_perm_bias: expected derive_perm_bias(L, N, b) with L, N static ints and b of extent ml.perm_bias_dim(L, N); the result has extent N^L")
+            // The one bilinear shipped BY NAME (§3.6): PPGN's flat N^2 matrix
+            // product, S_n-equivariant because conjugation distributes over it.
+            | "perm_matmul", [ nE; aE; bE ] ->
+                elabPermMatmul st statics e nE aE bE
+            | "perm_matmul", _ -> Error (err5000 "perm_matmul: expected perm_matmul(N, a, b) with N a static int and a, b of extent N^2 (flat row-major N x N matrices); the result has extent N^2")
             // The monomial lift: the value-side half of the symmetric-power
             // bridge. Its type-side twin is ml.sym_spec(SPEC, K), and
             // ml.derive_linear(ml.sym_spec(SPEC, K), SPEC_OUT) composed with
@@ -1545,6 +1614,7 @@ let private expandModule (decls: Located<Decl> list) : Result<Located<Decl> list
             match cname.Split('.') with
             | [| a; "equiv" |] when Set.contains a aliases -> "__ml_equiv"
             | [| a; "galilean" |] when Set.contains a aliases -> "__ml_galilean"
+            | [| a; "perm_equiv" |] when Set.contains a aliases -> "__ml_perm_equiv"
             | _ -> cname
         let declsNoImport =
             declsNoImport |> List.map (fun d ->
@@ -1635,6 +1705,30 @@ let private expandModule (decls: Located<Decl> list) : Result<Located<Decl> list
             match judgedGal with
             | Error ds -> Error (Choice2Of2 ds)
             | Ok () ->
+            // The S_n index-action judgment: the THIRD member, run at the same
+            // seam and for the same reason (surface `ml.*` op calls still
+            // visible, extents resolving through the identical static
+            // machinery). The three lattices do NOT interact: a function may
+            // carry perm_equiv + galilean, or perm_equiv + equiv, and each
+            // conjunct is judged in its own domain over its own status set —
+            // node relabelling, frame velocity and the Wigner action are
+            // orthogonal hypotheses about the same arguments.
+            let judgedPerm =
+                match Blade.ML.Perm.buildCertTable statics decls1 with
+                | Error d -> Error [ d ]
+                | Ok pcerts when Map.isEmpty pcerts -> Ok ()
+                | Ok pcerts ->
+                    let diags =
+                        decls1
+                        |> List.collect (fun d ->
+                            match d.Value with
+                            | DeclFunction fd ->
+                                Blade.ML.Perm.judgeFunction pcerts statics aliases fd
+                            | _ -> [])
+                    if diags.IsEmpty then Ok () else Error diags
+            match judgedPerm with
+            | Error ds -> Error (Choice2Of2 ds)
+            | Ok () ->
             // Pass 2: rewrite qualified ops into generated specialized functions.
             (mapDecls statics true decls1 |> Result.mapError Choice1Of2) |> Result.map (fun decls2 ->
                 if st.Decls.IsEmpty then decls2
@@ -1656,6 +1750,7 @@ let private expandStr (program: Program) : Result<Program, ExpandFailure> =
     Blade.ML.Statics.install ()
     Blade.ML.Equiv.register ()
     Blade.ML.Galilean.register ()
+    Blade.ML.Perm.register ()
     program.Modules
     |> List.fold (fun acc m ->
         acc |> Result.bind (fun ms ->

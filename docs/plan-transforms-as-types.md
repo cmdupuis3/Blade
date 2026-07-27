@@ -938,10 +938,28 @@ go first.
      completeness; recorded in the test file. Two orientation traps
      caught and pinned definitionally (coarsens argument direction —
      the tuple's pattern is the COARSE side; σ^{⊗m} = relabel-values,
-     not permute-positions). Full suite 1621/0. 5a-iii next: the
-     `where ml.perm_equiv(N)` lattice (Pow k; signature-level mixed-axis
-     rejection; pointwise-preservation and same-k arithmetic axioms) +
-     `perm_matmul`. Proofs: new BladePartition.v — RGS enumeration
+     not permute-positions). Full suite 1621/0.
+     **5a-iii LANDED 2026-07-27 — the Sₙ member is complete.** MLPerm.fs
+     (the deliberate THIRD walker copy — 5c's witnesses now exist),
+     conjunct `__ml_perm_equiv`, BL4012 (BL4011 stays reserved,
+     unregistered, for §4b). TWO CONVENTION DELTAS from §3.6's prose,
+     both forced and now normative: (1) v1 keys Pow k on FLAT
+     `Idx<N^k>` buffers — the as-landed op ABI — not rank-k arrays;
+     rank ≥ 2 certified signatures reject with the per-axis-v2 pointer;
+     k uniqueness needs N ≥ 2, rejected at the conjunct. (2) The
+     polarity headline's writable form is whole-array arithmetic
+     (softsign `h/(1.0+h*h)` — BL4008 twice under equiv(O3), accepted
+     here); scalar intrinsics are scalar-only in Blade so `exp(A)` is
+     unwritable at ANY certificate — the pointwise-builtin rule is
+     implemented and commented but corpus-pinned via arithmetic.
+     Sound edge rules: literal aggregates in node-power spaces REJECT
+     (an arbitrary constant is not Sₙ-fixed; Pow 0 means fixed —
+     pointer at derive_perm_bias); indexing/writes/formers/reduce over
+     Pow k ≥ 1 reject with targeted v2/readout messages. perm_matmul
+     emitted (own N ≥ 1 gate — no false K+L constraint). Dual
+     certificate perm_equiv + galilean pinned exact. Parser:
+     open-conjunct args now accept int literals (comm/antisymm
+     unchanged). Corpus ml-equiv/039-044; full suite 1627/0. Proofs: new BladePartition.v — RGS enumeration
      exhaustive/duplicate-free, `rgs_lex_extends_refinement` (the
      triangularity keystone; fallback convention has a one-line proof),
      witness lemma over the compiler's list (the s2_cells_spec

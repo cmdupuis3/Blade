@@ -1,0 +1,72 @@
+// TEST: ML Perm Dual Certificate
+import ml as ml
+// ============================================================================
+// ONE function under TWO of the three lattices — the ml-equiv/026 pattern with
+// the S_n member in the equiv slot:
+//
+//     where ml.perm_equiv(3), ml.galilean(v, w)
+//
+// The judgments do NOT interact. They are independent hypotheses about the
+// SAME arguments, each judged in its own domain over its own status set, and
+// MLElaborate runs them as three separate passes at one seam:
+//
+//   to MLPerm     v and w are Pow 1 (extent 3 = 3^1 at N = 3): per-NODE
+//                 quantities that permute when the three nodes are relabelled;
+//                 `wt` is Pow 0 (extent 1 = 3^0).
+//   to MLGalilean v and w are BVar (the conjunct names them): velocities that
+//                 shift by the same constant U0 when the frame is boosted;
+//                 `wt` is BInv.
+//
+// Their common value is the DIFFERENCE d = v - w, which is Pow 1 to the first
+// (a permutation of both operands permutes the difference) and BInv to the
+// second (the boost cancels) — the two theorems meet on one expression and
+// neither knows about the other. The readout is then the complete S_3-invariant
+// linear form on the node axis, ml.derive_perm_linear(1, 0, 3, d, wt).
+//
+// Certified conclusion: `drift` is unchanged by boosting the frame AND by
+// relabelling the three nodes. Integer data, so both shadows below are EXACT.
+// ============================================================================
+let static WD = ml.perm_weight_dim(1, 0, 3)
+// EXPECT: WD = 1
+
+// v, w: the per-node scalar speeds of three nodes (one cell per node).
+// wt   : the readout weight -- Bell(1) = 1 slot, the total-sum form.
+function drift(v: Array<Float like Idx<3>>, w: Array<Float like Idx<3>>,
+               wt: Array<Float like Idx<WD>>)
+               where ml.perm_equiv(3), ml.galilean(v, w) -> Array<Float like Idx<1>> = {
+    let d = v - w
+    ml.derive_perm_linear(1, 0, 3, d, wt)
+}
+
+// d = (3, 4, 0), sum 7, weight 2 -> 14.
+let r = drift([4.0, 5.0, 1.0], [1.0, 1.0, 1.0], [2.0])
+// EXPECT: r = [14]
+
+// THE GALILEAN SHADOW: boost every node's speed by the same U0 = 10. Both
+// arguments shift, the difference does not, and the readout is bit-identical.
+let rb = drift([14.0, 15.0, 11.0], [11.0, 11.0, 11.0], [2.0])
+let dboost = r(0) - rb(0)
+// EXPECT: dboost = 0
+
+// THE PERMUTATION SHADOW: relabel the three nodes (0 1 2) -> (2 0 1), applied
+// to BOTH arguments as one relabelling of the node set. The readout is an
+// S_3-invariant of the difference, so it does not move.
+let rp = drift([1.0, 4.0, 5.0], [1.0, 1.0, 1.0], [2.0])
+let dperm = r(0) - rp(0)
+// EXPECT: dperm = 0
+
+// BOTH AT ONCE: boost and relabel. Each certificate covers one axis of the
+// change; together they cover the composite, which is the point of stacking
+// conjuncts rather than widening one lattice.
+let rbp = drift([11.0, 14.0, 15.0], [11.0, 11.0, 11.0], [2.0])
+let dboth = r(0) - rbp(0)
+// EXPECT: dboth = 0
+
+// The weight really is free: a different readout weight scales the invariant,
+// and every shadow above holds for it too (the theorem is about the map, not
+// about one parameter setting).
+let r5 = drift([4.0, 5.0, 1.0], [1.0, 1.0, 1.0], [0.0 - 5.0])
+let r5p = drift([1.0, 4.0, 5.0], [1.0, 1.0, 1.0], [0.0 - 5.0])
+// EXPECT: r5 = [-35]
+let d5 = r5(0) - r5p(0)
+// EXPECT: d5 = 0

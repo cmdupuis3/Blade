@@ -1,0 +1,28 @@
+// TEST: ML Perm Escape Rejected (rejects)
+import ml as ml
+// A node-covariant value escaping to a callee that carries no perm certificate
+// leaves the discipline: `shuffle` reads cell 0 and broadcasts it, which is a
+// perfectly good function and NOT S_4-equivariant. Nothing about the escape is
+// visible in `shuffle`'s type, so the judgment refuses the hand-off rather than
+// guessing — the MLEquiv/MLGalilean escape precedent, third copy.
+//
+// Note the polarity while you are here: the refusal is NOT about applying a
+// nonlinearity (pointwise maps commute with relabelling — corpus ml-equiv/039
+// pins one directly on a Pow-1 value). It is about the compiler having no
+// theorem for an arbitrary uncertified body. Certify `shuffle` with
+// `where ml.perm_equiv(4)` and it would be judged on its merits — and rejected
+// there too, for the component read. BL4012.
+let static W = ml.perm_weight_dim(1, 1, 4)
+
+function shuffle(z: Array<Float like Idx<4>>) -> Array<Float like Idx<4>> = {
+    let head = z(0)
+    [head, head, head, head]
+}
+
+function bad(x: Array<Float like Idx<4>>, w: Array<Float like Idx<W>>)
+             where ml.perm_equiv(4) -> Array<Float like Idx<4>> = {
+    let h = ml.derive_perm_linear(1, 1, 4, x, w)
+    shuffle(h)
+}
+
+let out = bad([1.0, 2.0, -3.0, 4.0], [2.0, 0.0 - 1.0])

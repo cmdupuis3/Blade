@@ -62,6 +62,12 @@
     <Compile Include="src/ml/compiler/MLStatics.fs" />
     <Compile Include="src/ml/compiler/MLEquiv.fs" />
     <Compile Include="src/ml/compiler/MLGalilean.fs" />
+    <!-- The `where ml.perm_equiv(N)` certification lattice (stage 5a-iii):
+         the THIRD registry member beside MLEquiv and MLGalilean, and the third
+         copy of the abstract-interpretation walker shell that §7's stage 5c
+         extracts. Needs MLPermSpec (the rank cap) and must precede
+         MLElaborate, which runs the judgment at the equiv/galilean seam. -->
+    <Compile Include="src/ml/compiler/MLPerm.fs" />
     <Compile Include="src/ml/compiler/MLElaborate.fs" />
     <!-- PPL compiler layer (Blade.Ppl.*): moment/comoment formers and
          declared independence, elaborated to plain Blade source. Lives

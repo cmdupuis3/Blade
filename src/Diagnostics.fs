@@ -147,6 +147,13 @@ module Codes =
             "BL4008", "equivariance discipline violation"
             "BL4009", "galilean discipline violation"
             "BL4010", "confirm-and-pin storage suggestion"
+            // BL4011 is RESERVED, deliberately unregistered: it is the code
+            // claimed by the certificate-SUGGESTION channel of
+            // plan-transforms-as-types §4b (deduced-rep "propose, don't
+            // export"), which has not shipped. Stage 5a's Sₙ lattice takes the
+            // next free code rather than double-booking it — the BL4007
+            // lesson, recorded in that plan's stage-5 bullet.
+            "BL4012", "permutation-equivariance discipline violation"
             // BL5xxx — elaborators
             "BL5000", "ml elaboration error"
             "BL5100", "ppl elaboration error"

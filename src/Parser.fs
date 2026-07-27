@@ -1081,6 +1081,39 @@ let parseIdentList (tokens: Token list) : ParseResult<string list> =
                 Ok (List.rev acc, toks)
     loop [] tokens
 
+/// Arguments of an OPEN where-conjunct (`<name>(...)` / `<alias>.<name>(...)`,
+/// the Blade.Constraints registry surface): identifiers — the comm/indep/
+/// galilean shape, where an argument NAMES a parameter — or INT LITERALS,
+/// rendered into the same `string list` the registry carries. The literal form
+/// is what a GROUP-PARAMETER conjunct needs: `where ml.perm_equiv(4)` names the
+/// node-axis extent of the Sₙ certificate, not a parameter (ml/compiler's
+/// MLPerm.fs parses the string back, and also accepts a `let static` name
+/// through the same slot). Registry handlers already validate their own
+/// argument shapes, so widening the token set here cannot loosen any existing
+/// conjunct: comm/antisymm groups keep the ident-only `parseIdentList`.
+let parseConjunctArgList (tokens: Token list) : ParseResult<string list> =
+    let rec loop acc toks =
+        let taken =
+            match toks with
+            | t :: rest ->
+                match t.Kind with
+                | TokIdent n -> Some (n, rest)
+                | TokInt n -> Some (string n, rest)
+                | _ -> None
+            | [] -> None
+        match taken with
+        | Some (text, rest) ->
+            match rest with
+            | t2 :: rest2 when t2.Kind = TokComma -> loop (text :: acc) rest2
+            | _ -> Ok (List.rev (text :: acc), rest)
+        | None ->
+            if List.isEmpty acc then
+                let line, col = currentPos toks
+                errorC "BL1001" "Expected an identifier or an integer literal" line col
+            else
+                Ok (List.rev acc, toks)
+    loop [] tokens
+
 // Where clause parsing (used by both function declarations and lambdas)
 /// Parse the body of omp(...): comma-separated `ident: int` pairs.
 /// e.g. omp(a: 2, b: 1) => [("a",2); ("b",1)]
@@ -1200,7 +1233,7 @@ let parseWhereClause (tokens: Token list) : ParseResult<WhereClause> =
             // dispatches through the Blade.Constraints registry.
             advance (advance toks) |> expectIdent >>= fun name afterName ->
             expect TokLParen afterName >>= fun _ afterLParen ->
-            parseIdentList afterLParen >>= fun args afterArgs ->
+            parseConjunctArgList afterLParen >>= fun args afterArgs ->
             expect TokRParen afterArgs >>= fun _ remaining ->
             loop comms antis par (custom @ [(alias + "." + name, args)]) remaining
         | Some (TokIdent name) when (match peek (advance toks) with Some TokLParen -> true | _ -> false) ->
@@ -1211,7 +1244,7 @@ let parseWhereClause (tokens: Token list) : ParseResult<WhereClause> =
             // registered vocabulary, not here. (Module-owned keywords like
             // PPL's `indep` are qualified — see the dotted arm above.)
             advance toks |> expect TokLParen >>= fun _ afterLParen ->
-            parseIdentList afterLParen >>= fun args afterArgs ->
+            parseConjunctArgList afterLParen >>= fun args afterArgs ->
             expect TokRParen afterArgs >>= fun _ remaining ->
             loop comms antis par (custom @ [(name, args)]) remaining
         | Some TokComma ->
