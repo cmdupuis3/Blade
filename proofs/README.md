@@ -9,7 +9,17 @@ Machine-checked kernel of the Blade formalism. Coq 8.18.0, stdlib only.
 
 or manually with `coqc -Q . Blade <file>` in _CoqProject order.
 
-## Contents (328 theorems total)
+## Counting convention
+
+One item per `Lemma`, `Theorem`, `Corollary`, or `Example` that begins a
+line, in the files listed in `_CoqProject`, comments stripped.
+`Definition` and `Fixpoint` are constructions, not claims, and are not
+counted; `Example` is, because here the Examples are the concrete
+computed pins.  `count-theorems.ps1` is the mechanical implementation --
+run it with `-Check` to verify the numbers below and the headline in
+`docs/proofs.md`, which quotes the same total.
+
+## Contents (369 theorems total)
 
 - BladeCore.v (16): Group Law both halves (diagonal swap sound; per-dim
   product swap refuted), counting lemma (no lossless product layout),
@@ -125,6 +135,24 @@ or manually with `coqc -Q . Blade <file>` in _CoqProject order.
   Neidinger 2005) and the SIZE formula ships in CTF's
   sy_packed_size; the composed bijection itself appears nowhere in
   the literature (2026 survey) -- this file is the named artifact.
+- BladeJacobian.v (41): the AD seam, at the level the compiler actually
+  differentiates: SYMBOLIC differentiation over a small expression
+  language (Grad.fs's derivRule table as a FORMAL derivative slot; no
+  real analysis anywhere).  Differentiation is equivariant under
+  renaming (d_ren_equivariant) and a congruence for the ring-law
+  equivalence aceq (d_respects_aceq); the JACOBIAN SYMMETRY TRANSFER --
+  a structurally symmetric primal has partials that are each other's
+  swap images (jacobian_symmetry_transfer), so canonical derivative
+  storage is lossless -- and the emitted jvp tangent is invariant under
+  the JOINT pair swap (tangent_joint_swap).  Refutation half: SEMANTIC
+  primal symmetry alone does NOT transfer
+  (semantic_hypothesis_insufficient), so the license must come from the
+  structural judgment, never from semantic accident.  The multiplicity
+  rule: d/d(stored canonical cell) of the canonical-access contraction
+  is the orbit sum of cotangents, off-diagonal x2 and diagonal x1
+  (symmetric_accumulation), with n = 3 pins computed.  Rank 2 and one
+  transposition; joint swaps only (per_dim_swap_not_symmetry stands);
+  nat semiring, so quotient/negation kernels are out of scope.
 - BladeSymPower.v (47): NEW -- the ML elaborator's counting
   obligations (plan-transforms-as-types 3.2/3.3b).  The S2 partition:
   a diagonal path's free cells are the tau-triangle (s2_cells_spec),
