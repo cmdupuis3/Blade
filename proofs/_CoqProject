@@ -22,3 +22,4 @@ BladeCauchy.v
 BladeMonad.v
 BladeSafety.v
 BladeJacobian.v
+BladeSymPower.v

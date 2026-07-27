@@ -9,7 +9,7 @@ Machine-checked kernel of the Blade formalism. Coq 8.18.0, stdlib only.
 
 or manually with `coqc -Q . Blade <file>` in _CoqProject order.
 
-## Contents (281 theorems total)
+## Contents (328 theorems total)
 
 - BladeCore.v (16): Group Law both halves (diagonal swap sound; per-dim
   product swap refuted), counting lemma (no lossless product layout),
@@ -125,3 +125,15 @@ or manually with `coqc -Q . Blade <file>` in _CoqProject order.
   Neidinger 2005) and the SIZE formula ships in CTF's
   sy_packed_size; the composed bijection itself appears nowhere in
   the literature (2026 survey) -- this file is the named artifact.
+- BladeSymPower.v (47): NEW -- the ML elaborator's counting
+  obligations (plan-transforms-as-types 3.2/3.3b).  The S2 partition:
+  a diagonal path's free cells are the tau-triangle (s2_cells_spec),
+  the two halves are exhibited division-free as tri_le / tri_lt with
+  2*tri_le m = m(m+1) and 2*tri_lt m = m(m-1), and over any kept-path
+  list sym_total + alt_total = dense_total (s2_split_is_partition =
+  MLSpec.s2TpSplitIsPartition; 3.2's tables 10 = 7+3, 48 = 28+20
+  computed).  The copy-splitting counts: the sum over degree
+  compositions of prod_i C(n_i+k_i-1, k_i) is C(sum n_i + k - 1, k)
+  (sym_copy_splitting) and the exterior twin is Vandermonde
+  (alt_copy_splitting) -- the cardinalities MLSpec.powerSpec asserts,
+  over an explicit enumeration of the compositions.

@@ -1,7 +1,7 @@
 # Blade Proofs
 
 Prose mirror of the machine-checked proof tower in `/proofs/`:
-**302 theorems**, Coq 8.18 / Rocq 9.0, stdlib only, verified by both `coqc`
+**349 theorems**, Coq 8.18 / Rocq 9.0, stdlib only, verified by both `coqc`
 and `coqchk`.
 
 Build: `coq_makefile -f _CoqProject -o Makefile && make`.
@@ -28,6 +28,7 @@ Rules of this document:
 | Computation | BladeCompute, BladeMonad, BladeSafety | materialized semantics, V∘P = id, 12.x laws, MonadPlus, verified offsets + bounds safety + buffer-elimination fusion |
 | Storage split | BladeCauchy | the r = 2 Cauchy split |
 | AD seam | BladeJacobian | symbolic differentiation: renaming equivariance, the Jacobian symmetry transfer, joint-pair-swap tangent symmetry, the accumulation multiplicity rule |
+| ML seam | BladeSymPower | the S₂ partition of a self-tensor weight space; the Sym^k/Λ^k composition-sector counts (Vandermonde, both flavours) |
 
 Import structure is a DAG rooted at BladeDMWF (BladeCore and BladeLowering are
 self-contained); build order per `_CoqProject`.
@@ -557,6 +558,70 @@ kernels (Grad.fs's quotient/power rules) are outside this file; and the
 intrinsic-derivative slot is formal by design — the refutation shows
 that boundary is essential to the statement, not an accident of the
 model.
+
+## BladeSymPower.v — the S₂ partition and the copy-splitting counts
+
+The counting obligations of
+[plan-transforms-as-types.md](plan-transforms-as-types.md) §3.2/§3.3b (listed
+in its §8 as the σ-symmetric weight count and the cardinality half of the
+Sym^k monomial-basis bijection), checked so the elaborator's internal asserts
+have a proof behind them. Division-free throughout; no Clebsch–Gordan
+machinery is modelled — a path is a two-constructor inductive carrying only
+the numbers the compaction rule reads, which is what MLSpec.fs `tpPaths` +
+`symTpKeptPaths` hand it.
+
+**T1 — the S₂ partition** (this is what sizes stage 1's weight buffers):
+
+- `s2_cells` enumerates a diagonal path's free multiplicity cells exactly as
+  MLSpec.fs `s2TpSkeleton` does — the closed triangle u₁ ≤ u₂ at transpose
+  factor τ = +1, the strict one u₁ < u₂ at τ = −1 — `s2_cells_spec`
+  characterizes the enumeration both ways, and `s2_cells_length` identifies
+  the count as `tri_le`/`tri_lt`.
+- `tri_le_closed`, `tri_lt_closed_sub`: 2·tri_le m = m(m+1) and
+  2·tri_lt m = m(m−1) — the two halves EXHIBITED as integers rather than
+  divided (`s2_halves_well_defined`). `s2_halves_partition`:
+  m(m+1) + m(m−1) = 2m², the local statement in the division-free register of
+  BladeCauchy's `cauchy_cell_count`.
+- `s2_cells_partition`, `tri_sign_partition`: at every m and either sign the
+  two components' free cells account for exactly the m² dense cells.
+- `s2_split_is_partition`: over a list of kept paths — a mirror pair giving q
+  to each half of its 2q, a diagonal path giving the two triangles —
+  sym_total + alt_total = dense_total. That is MLSpec.fs
+  `s2TpSplitIsPartition`: the two closed-form component dimensions
+  (`s2TpWeightDimClosed`, itself cross-checked against the packed enumeration
+  on every call) add up to the dense `tpWeightDim`. `s2_worked_count_1`/`_2`
+  compute §3.2's two worked tables: 10 = 7 + 3 and 48 = 28 + 20.
+
+**T2/T3 — the copy-splitting counts** (the counting shadow of §3.3b's Move 1,
+Sym^k(⊕_c U_c) = ⊕_{Σk_c = k} ⊗_c Sym^{k_c}(U_c)):
+
+```
+Σ over k₁+…+k_c = k of ∏ᵢ C(nᵢ+kᵢ−1, kᵢ) = C(Σnᵢ+k−1, k)    (sym_copy_splitting)
+Σ over k₁+…+k_c = k of ∏ᵢ C(nᵢ, kᵢ)      = C(Σnᵢ, k)        (alt_copy_splitting)
+```
+
+`sector_list` enumerates the degree compositions and `sector_weight`
+multiplies the per-copy dimensions along one, so the left sides are literally
+sums over compositions rather than folds that compute them
+(`sector_sum_expand` connects the two forms). The two-copy cores are
+`multiset_vandermonde` and `vandermonde` — Vandermonde's identity, which the
+stdlib does not carry (it has no natural-number binomial at all) — both by
+convolution peeling (`conv_cons`, `conv_add_l`) off Pascal's rule. The right
+sides are what MLSpec.fs `powerSpec` asserts on every call; `sym_sector_enum`
+restates T2 over the tower's own enumeration through `storage_cardinality`.
+
+Reused from BladeBinomial: `C`, `C_zero`, `C_small`, `storage_cardinality`.
+Pascal's rule and C 0 (S k) = 0 are definitional for that C but unnamed there,
+so they are named here (`C_pascal`, `C_zero_pos`) rather than restated.
+
+Honest scope: counting only. T1 says the compaction loses and duplicates
+nothing, not that the kept cells parameterize the equivariant maps — that is
+Schur, cited (§6.1) and pinned numerically against the dense kernel
+(ml-equiv/032–035). T2/T3 count the sectors; that the sectors are orthogonal
+subspaces is §3.3b's construction. The cross-stage identity
+`poly_weight_dim(s, 2, tp_spec(s,s)) = sym_tp_weight_dim(s)` is out of reach
+here — it equates two counts computed through Clebsch–Gordan data — and stays
+a compiler-side sweep (stage 2a, 15 specs to multiplicity 4).
 
 ## What remains unproved
 

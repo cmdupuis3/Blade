@@ -40,3 +40,10 @@ published as a standalone artifact where redundancy reads as padding.
 5. Quartic `nia` can OOM; factor inequalities to quadratic cores.
 6. Rewriting with a lemma whose LHS pattern matches its own RHS
    (swap lemmas) loops under `repeat`.
+7. `simpl` unfolds `seq start (S n)` to a cons, so a membership
+   hypothesis produced by `in_map_iff` no longer matches `in_seq`.
+   Unfold only the fixpoint you meant to: `cbn [f]`
+   (BladeSymPower s2_cells_aux_spec).
+8. `apply` unification does not reduce truncated subtraction: a goal
+   `_ = S m * (S m - 1)` will not unify with a lemma stated at
+   `_ = S m * m`. `replace ... by lia` first.
