@@ -345,13 +345,18 @@ N_I arrangements of cell I):
    counted exactly once; the runtime never symmetrizes (P_sym is
    self-adjoint and fixes x^⊗k).
 
-**Phase rule (conjecture, to be derived in 2b-i before any table ships):**
-the complex table for V_L ⊂ Sym^j(V_l) is real iff j·l + L is even; the
-canonical realization multiplies by −i exactly in the odd case. At j = 2
-this is the shipped realCG realness rule; first new case V₃ ⊂ Sym³(V₂).
-Guard: per table, assert min(residual_real, residual_imag) < 1e-10·‖T‖ AND
-the other branch > 0.1·‖T‖ — five orders of magnitude of gap, loud failure
-in between.
+**Phase rule (DERIVED in 2b-i — conjecture confirmed):** the complex table
+for V_L ⊂ Sym^j(V_l) is real iff j·l + L is even; the canonical realization
+multiplies by −i exactly in the odd case. Derivation against the coded
+conventions lives as SymPowerTables.fs's module doc-comment; the key move:
+coefficient conjugation K in the divided-power basis factors as
+K_S = (−1)^{j·l}·J_S∘R_S with R_S a GROUP element, so conjugation preserves
+each occurrence copy — multiplicity spaces cannot mix, and
+conj(T_real) = (−1)^{jl+L}·T_real follows copy by copy. At j = 2 this
+reduces to the shipped realCG parity rule; V₃ ⊂ Sym³(V₂) realized −i as
+predicted. The gapped guard remains as a compiler-bug assert (observed
+gap ~16 orders); parity never enters (O(3) parity acts by (−1)^{j·p} at
+spec level).
 
 **k = 2 correspondence (stage 1 as oracle):** both conventions decompose the
 weight space into the SAME 1-dim lines (kept mirror cell ↔ two-copy sector;
@@ -583,12 +588,14 @@ tri <@> (h, h, h)
    basis vector; counts per (L, P) equal the `powerSpec` multiplicity as a
    theorem), not spanning-then-selection — no float decision exists anywhere
    in the convention. Residual open items, tracked for stage 2b:
-   (i) the realization phase rule (§3.3b) is conjectured, not derived —
-   2b-i's first work item, test vector V₃ ⊂ Sym³(V₂), gapped discrete
-   assert as the bug-guard either way; (ii) sector-constant placement
-   (explicit baked scalar recommended, decide at 2b-iii); (iii) chains need
-   `realCGSparse` up to L = k·lmax — extend unitarity/orthogonality pins
-   beyond l ≤ 2 before chains consume them; (iv) the copy-split label basis
+   (i) ~~the realization phase rule~~ DISCHARGED 2026-07-27: derived and
+   confirmed (§3.3b; SymPowerTables.fs doc-comment is the record); the
+   gapped assert stays as a compiler-bug guard; (ii) sector-constant
+   placement (explicit baked scalar recommended, decide at 2b-iii);
+   (iii) ~~chains need `realCGSparse` pins up to L = k·lmax~~ DISCHARGED
+   2026-07-27: completeness pinned over l1 ≤ 9, l2 ≤ 3, all l3 ≤ 12
+   (worst 9.99e-16); note the extended-range exchange identity is ~1-ulp
+   class, not bit-exact; (iv) the copy-split label basis
    is not GL(m)-channel-covariant — document so label indices are not
    mistaken for channel structure; (v) the k = 2 cross-pin's label↔kept-cell
    alignment table must be asserted by the test, not assumed.
@@ -685,6 +692,21 @@ go first.
      E·v = 0 re-verification, occurrence counts vs `powerSpec [(l,p,1)] j`,
      rational norm identities, Gram = I to 1e-14, bit-pins for l ≤ 3);
      extend realCGSparse unitarity pins to L ≤ k·lmax.
+     **LANDED 2026-07-27** (branch feat/derive-sym-tp): phase rule
+     CONFIRMED BY DERIVATION (see §3.3b, updated); SymPowerTables.fs — the
+     exact pipeline (BigInteger rationals, RREF labeling, exact rational
+     Gram–Schmidt with the diagonal Gram
+     ⟨mono_A, mono_A⟩ = j!·∏αᵢ!·∏c², derived and stated) with floats only
+     at realization; T_{3,1} L=1 = w₋₁w₊₁² − w₀²w₊₁ exactly (norm² 15, the
+     design round's predicted line); occurrence counts = powerSpec on all
+     j ≤ 4, l ≤ 3 (multiplicity spaces to dim 3, e.g. Sym⁴(V₃) 6:3, 4:3);
+     exact Gram = I before floats, float Gram worst 2.0e-15 global;
+     completeness relation Σ_{l3,c3} T·T = δ⊗δ pinned over l1 ≤ 9, l2 ≤ 3
+     (worst 9.99e-16); higher-l exchange spot checks are ~1-ulp class, NOT
+     bit-exact (the §6.7 association effect — the l ≤ 2 bit-exactness was
+     the special case); uMatrix made public as the single source of truth
+     (drift warning added at the definition). Test block "SymPower Tables"
+     (`blade test sympower`), 89/0; full suite 1453/0.
    - **2b-ii**: label enumeration + integer counting asserts in MLSpec (no
      emission): per-(L,P) label count = `powerSpec` mult, total =
      `polyWeightDim`, on every call.

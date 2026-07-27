@@ -150,6 +150,11 @@ let runAllTestsFullWith (extraBlocks: (unit -> Blade.Tests.TestHarness.BlockResu
     let oracles = Blade.Tests.OracleReview.runOracleTests ()
     // Compiler-native CG tables (WignerTables.fs) vs closed forms (ML arc).
     let wigner = Blade.Tests.WignerTablesReview.runWignerTablesTests ()
+    // Sym^j(V_l) occurrence tables (SymPowerTables.fs, stage 2b-i): exact
+    // rational E-kernel/Gram re-verification, counts vs the weight-peel,
+    // the derived realization phase rule, bit-pins, and the extended
+    // realCG completeness pins for the k ≤ 4 chain range.
+    let symPower = Blade.Tests.SymPowerTablesReview.runSymPowerTablesTests ()
     // Compiler-native Cartesian<->irreps bridge constants (CartesianBridge.fs)
     // vs closed forms + the y_to harmonic constants (sgs closure arc).
     let cartBridge = Blade.Tests.CartesianBridgeReview.runCartesianBridgeTests ()
@@ -239,7 +244,7 @@ let runAllTestsFullWith (extraBlocks: (unit -> Blade.Tests.TestHarness.BlockResu
     let blocks =
         [ yield r1; yield r2; yield attrs; yield subst
           yield normalize; yield unify; yield validateArrow
-          yield shape; yield oracles; yield wigner; yield cartBridge; yield spans; yield diagCore; yield diagCorpus; yield alloc
+          yield shape; yield oracles; yield wigner; yield symPower; yield cartBridge; yield spans; yield diagCore; yield diagCorpus; yield alloc
           yield ompPragma
           match omp with Some b -> yield b | None -> ()
           yield bufType

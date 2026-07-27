@@ -47,6 +47,11 @@
     <Compile Include="src/ml/compiler/MLSpec.fs" />
     <Compile Include="src/ml/compiler/CartesianBridge.fs" />
     <Compile Include="src/ml/compiler/WignerTables.fs" />
+    <!-- Sym^j(V_l) occurrence tables (stage 2b-i): needs MLSpec's powerSpec
+         (count asserts) and WignerTables' uMatrix (realization), and must
+         precede MLElaborate, which will consume the tables at 2b-iii.
+         NOT part of BladeML.fsproj — the ml/ oracle twin is 2b-iii's. -->
+    <Compile Include="src/ml/compiler/SymPowerTables.fs" />
     <Compile Include="src/ml/compiler/MLStatics.fs" />
     <Compile Include="src/ml/compiler/MLEquiv.fs" />
     <Compile Include="src/ml/compiler/MLGalilean.fs" />
@@ -149,6 +154,7 @@
     <Compile Include="tests/Oracles.fs" />
     <Compile Include="tests/Test_Oracles.fs" />
     <Compile Include="tests/Test_WignerTables.fs" />
+    <Compile Include="tests/Test_SymPowerTables.fs" />
     <Compile Include="tests/Test_CartesianBridge.fs" />
     <Compile Include="tests/Test_Ppl.fs" />
     <Compile Include="tests/Test_Math.fs" />

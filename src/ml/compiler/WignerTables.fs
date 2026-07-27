@@ -75,7 +75,13 @@ let clebsch (j1: int) (m1: int) (j2: int) (m2: int) (j3: int) (m3: int) : float 
 /// Y^real = U Y^complex. Rows indexed by real m (0-based c = m + l),
 /// columns by complex mu (0-based mu + l). No Condon-Shortley phase on the
 /// real side, matching the spec's explicit Y formulas.
-let private uMatrix (l: int) : Complex[][] =
+///
+/// Public (not private) since stage 2b-i: SymPowerTables.fs reuses this exact
+/// matrix for the realization of the Sym^j(V_l) occurrence tables, and its
+/// phase-rule derivation is anchored to these coded entries (every row is
+/// fixed by the antiunitary J|l,m> = (-1)^m |l,-m> — see the SymPowerTables
+/// module doc). Changing a phase here invalidates that derivation.
+let uMatrix (l: int) : Complex[][] =
     let d = 2 * l + 1
     let u = Array.init d (fun _ -> Array.zeroCreate<Complex> d)
     let s = 1.0 / sqrt 2.0

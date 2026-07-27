@@ -1063,6 +1063,13 @@ let private dispatchTest (rest: string list) : int =
         // against hand-computed / analytic values. No Blade source pipeline.
         let failed = (Blade.Tests.OracleReview.runOracleTests ()).Failed
         if failed = 0 then 0 else 1
+    | [ "sympower" ] | [ "sympower-tables" ] ->
+        // Stage 2b-i review block: the T_{j,l} Sym-power occurrence tables
+        // (SymPowerTables.fs) — exact rational kernel/Gram pins, the derived
+        // realization phase rule, bit-pins, and the extended realCG
+        // completeness pins. In-process, no Blade source pipeline.
+        let failed = (Blade.Tests.SymPowerTablesReview.runSymPowerTablesTests ()).Failed
+        if failed = 0 then 0 else 1
     | [ "alloc" ] ->
         // Standalone C++ runtime-layout tests for the contiguous-backing
         // allocate<>. Compiles + runs cpp/alloc_layout_tests.cpp against the
