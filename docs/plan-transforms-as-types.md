@@ -520,16 +520,65 @@ MLGalilean; zero refactor of the O(3) member):
 - Sizing builtins (`perm_weight_dim`, `perm_bias_dim`) error on
   N < K+L exactly as the ops do — no silent convention fork.
 
-**5b — point groups as the second BLOCK-SPEC member**, the only place the
-label abstraction is earned: extract SpecEntry/mkIrrepsTag/irreps_*/Unify's
-arm against {O(3), point groups} as the two witnesses — NEVER against Sₙ
-(all Sₙ irreps are real-type; an abstraction generalized over {O(3), Sₙ}
-would bake FS = +1 a second time and break at C₃). The Frobenius–Schur
-correction enters as a STATED FORMULA on ℝ/ℂ/ℍ-typed labels (the earlier
-"under-counts by 2×" direction claim is retired: with real characters the
-over/under direction depends on which naive formula one writes down —
-state the corrected formula, never a direction word). §6.1's
-mathcomp/cite-vs-prove decision bites here, not at 5a.
+**5b — point groups as the second BLOCK-SPEC member (DESIGNED 2026-07-27,
+second two-agent round; staging in §7).** The original mandate (label
+abstraction against {O(3), point groups}, never Sₙ; FS as a stated
+formula; §6.1 decided here) stands; the round settled its shape:
+
+- **THE FS FORMULA (stated once, no direction words):** over ℝ-irreducible
+  labels U_i with e_i = dim_ℝ End_G(U_i) ∈ {1 (ℝ), 2 (ℂ), 4 (ℍ)}:
+  `dim_ℝ Hom_G(⊕mᵢUᵢ, ⊕nᵢUᵢ) = Σᵢ mᵢ·nᵢ·eᵢ` — each multiplicity cell
+  carries e scalars; emitted basis [Id, J] for ℂ-type with J a BAKED
+  per-label matrix (basis-relative data, never derived at a call site).
+  Independence: two integer asserts (J² = −Id, J commutes with the baked
+  generators; Gram = d·I exactly) — no rank decision anywhere.
+- **Twin-not-reroute (5c's discipline again):** the abstraction is the
+  tag grammar (second frozen prefix `__pgirreps:`; the O(3) `__irreps:`
+  format is BYTE-FROZEN — diagnostics are differentially gated), a
+  generalized `(|BlockSpecTag|_|)` Unify arm, and a small generic
+  e-weighted counting core added as a TEST-PINNED TWIN (generic@O3 =
+  MLSpec.homDim on the sweep) — MLSpec stays byte-untouched; rerouting
+  is earned at the third block-spec member.
+- **Witnesses chosen by MATRIX RATIONALITY: C₄ + D₄** — every generator
+  entry in {0,±1}, so the group-average oracle is exact-rational with no
+  field extension (the Test_PermOracle zero-tolerance standard) and
+  runtime equivariance pins are EXACT float equality. Minimal contrast:
+  same E dimension, e = 2 vs 1 — the FS correction is the ONLY sizing
+  difference (pg_hom_dim 9 vs 5 on one spec shape; the thesis as one
+  corpus diff). Table-integrity traps: ℝ-Burnside Σdᵢ²/eᵢ = |G| (4 and 8
+  ✓). Roster boundary = rationality, NOT crystallography: ℚ(√3) families
+  (trigonal/hexagonal/cubic-E) are the named first growth. FS ∈ {ℝ,ℂ}
+  for ALL single point groups; ℍ first appears at double groups —
+  FsType reserves the VALUE (counts uniform, emission a loud internal
+  error), never a dead field.
+- **Fusion multiplicity is real but not where first guessed**: C₄ᵥ's E⊗E
+  is multiplicity-FREE; the forcing instances are C₃'s E⊗E ⊇ 2A over ℝ
+  and chiral T's T⊗T ⊇ 2T — hence the point-group TP path model needs a
+  CG-copy index (5b-iii, deferred; NOT a tpDecl table-swap).
+- **The lattice arm lives IN MLEquiv — no fourth walker**: the polarity
+  table MATCHES at every arm (the one candidate divergence, 1-dim
+  character products B1·B1 = A1, is a sound rule ADDITION deferred for
+  v1 rule-parity, not a reversal). `Group` grows `Point of id`;
+  invariantOffsets generalizes to trivial-label offsets; C₄ᵥ/C₄ replays
+  the O3/SO3 pseudoscalar asymmetry as data.
+- **§6.1 CLOSED: mathcomp is OUT.** Everything 5b relies on is either a
+  finite integer computation over baked data (FS indicators Σχ(g²)/|G|,
+  J identities, table closure, the e-weighted count, ℝ-Burnside) —
+  vm_compute territory — or a general theorem whose shipped-group
+  instance the exact oracle discharges as entrywise projector equality.
+  Same cited/computed division as BladePartition.v. Revisit only for
+  user-declared groups wanting compile-time completeness on unseen
+  groups (honest answer: propose-don't-certify).
+- Surface encoding SETTLED (post-round check): spec entries are
+  (LABEL_NAME, mult) tuples — `SVString` is already first-class in
+  StaticEval (:14, :221), so the name surface costs no new static
+  machinery; a `pgSpecOfStatic` mirroring `specOfStatic` owns the
+  unknown-label diagnostic; the tag payload carries names
+  (`__pgirreps:C4::A1,1|E,2` — names are frozen table data and the tag
+  is the diagnostic identity). No 5b-i static builtin returns a pg spec
+  (ints only) until the TP stage.
+- Named-so-it-can't-sneak-in: `ml.restrict(SPEC, G)` — O(3) ↓ G
+  branching (crystal-field splitting), the hottest adjacent feature.
 
 **Post-5a cleanup (separate stage, earned at three copies): extract the
 abstract-interpretation WALKER SHELL** (freeVars, stmt/block folds,
@@ -969,10 +1018,36 @@ go first.
      "BL4011" here and in §4b were double-booked — §4b's certificate-
      suggestion channel keeps the earlier claim; stage-5 takes the next
      free).
-   - **5b — point groups, the second block-spec member**: the
-     SpecEntry/mkIrrepsTag/irreps_*/Unify label abstraction extracted
-     against {O(3), point groups} (never Sₙ), FS as a stated formula,
-     §6.1 decided here.
+   - **5b — point groups, the second block-spec member (DESIGNED
+     2026-07-27; full design §3.6).** Sub-stages, counts before emission
+     before lattice (the proven cadence):
+     * **5b-0** — MLPointSpec.fs (FsType/PgIrrep/PointGroup registry =
+       {C4, D4}, frozen integer tables; the generic e-weighted counting
+       core as MLSpec's test-pinned twin; pgHomDim/pgHomBlocks); table
+       integrity asserted on load (J² = −Id, generator commutation,
+       ℝ-Burnside Σd²/e = |G|); the exact-rational Hom-space Reynolds
+       oracle with the three negative controls (dropped J → trace
+       deficit; e ≡ 1 naive-formula control; spurious diag(1,−1) End
+       column dies at R₉₀); BladePointGroup.v (all computational over
+       the witnesses: table closure, FS indicators, J identities, the
+       e-weighted sum; End-completeness cited, oracle-discharged).
+     * **5b-i** — the pg index-type former (distinct keyword; stage-3
+       registerTypeDecl alias fix replayed for the pg tag — checklist
+       item), (LABEL_NAME, mult) spec statics, pg_* sizing builtins,
+       `ml.derive_pg_linear(GROUP, SIN, SOUT, x, w)` (e = 1 =
+       deriveLinearDecl idiom verbatim, ulp-pinned; e = 2 = the [Id, J]
+       two-term form); gates = full suite + the 5c byte-differential
+       (Unify/printers are shared paths); corpus = the C4-vs-D4
+       contrast file (9 vs 5) + the E-plane anchor (f = w₁x + w₂Jx;
+       at (0,1) the output IS the 90° rotation, pinned exactly) +
+       exact-float equivariance pins under all generators.
+     * **5b-ii** — the lattice arm inside MLEquiv (Group grows
+       `Point of id`, Rep payload the two-case union, invariantOffsets
+       → trivial-label offsets); gate = byte-identical diagnostics on
+       every existing O(3)/SO(3) corpus file + dual-certificate pins.
+     * **5b-iii** — TP with the CG-copy multiplicity index / Sym^k via
+       Molien-Newton / user-declared groups (constructor promotion,
+       three named problems), ordered by demand.
    - **5c — walker-shell extraction** (post-5a cleanup; three copies =
      earned; strictly no behavior change).
      **LANDED 2026-07-27.** MLCertShell.fs: only the verbatim-shared
