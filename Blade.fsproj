@@ -60,6 +60,13 @@
          NOT part of BladeML.fsproj — the ml/ oracle twin is 2b-iii's. -->
     <Compile Include="src/ml/compiler/SymPowerTables.fs" />
     <Compile Include="src/ml/compiler/MLStatics.fs" />
+    <!-- The abstract-interpretation walker shell (stage 5c): the syntactic
+         walk (freeVars / patternVars / the left-to-right judge fold / the
+         where-conjunct pre-scan) that MLEquiv, MLGalilean and MLPerm had
+         verbatim in common. Rules stay in the three; only the walk is here,
+         so it depends on nothing but Blade.Ast and must precede all three.
+         NOT part of BladeML.fsproj (which compiles only compiler/MLSpec.fs). -->
+    <Compile Include="src/ml/compiler/MLCertShell.fs" />
     <Compile Include="src/ml/compiler/MLEquiv.fs" />
     <Compile Include="src/ml/compiler/MLGalilean.fs" />
     <!-- The `where ml.perm_equiv(N)` certification lattice (stage 5a-iii):

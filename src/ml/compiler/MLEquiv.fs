@@ -23,6 +23,10 @@ module Blade.ML.Equiv
 open Blade.Ast
 open Blade.StaticEval
 open Blade.ML.Spec
+// The walker shell (stage 5c): freeVars / patternVars / bindPatternVars /
+// judgeEach / conjunctsOf — the syntactic walk shared verbatim with
+// MLGalilean and MLPerm. Every RULE below is this discipline's own.
+open Blade.ML.CertShell
 
 type Group =
     | O3
@@ -90,13 +94,6 @@ let private invariantOffsets (g: Group) (s: Spec) : Set<int> =
             yield! [ starts.[b] .. starts.[b] + e.Mult - 1 ] ]
     |> Set.ofList
 
-/// All pattern variables of a pattern (for Inv destructuring).
-let rec private patternVars (p: Pattern) : string list =
-    match p.Kind with
-    | PatternKind.PatVar n -> [ n ]
-    | PatternKind.PatTuple ps -> ps |> List.collect patternVars
-    | _ -> []
-
 // ============================================================================
 // Certified-signature table
 // ============================================================================
@@ -156,11 +153,7 @@ let buildCertTable (statics: StaticEnv) (decls: Located<Decl> list)
         |> List.choose (fun d ->
             match d.Value with
             | DeclFunction fd ->
-                let conjs =
-                    fd.WhereClause
-                    |> Option.map (fun w -> w.Custom)
-                    |> Option.defaultValue []
-                    |> List.filter (fun (n, _) -> n = "__ml_equiv")
+                let conjs = conjunctsOf "__ml_equiv" fd
                 match conjs with
                 | [] -> None
                 | cs -> Some (d.Span, fd, cs)
@@ -212,52 +205,6 @@ type private Ctx = {
     Statics: StaticEnv
     Certs: Map<string, CertSig>
 }
-
-/// Free variables of an expression that are NOT locally bound (used for the
-/// lambda capture rule).
-let rec private freeVars (bound: Set<string>) (e: Expr) : Set<string> =
-    match e.Kind with
-    | ExprKind.ExprVar n -> if Set.contains n bound then Set.empty else Set.singleton n
-    | ExprKind.ExprLit _ -> Set.empty
-    | ExprKind.ExprApp (f, args) ->
-        Set.unionMany (freeVars bound f :: (args |> List.map (freeVars bound)))
-    | ExprKind.ExprBinOp (_, _, l, r) -> Set.union (freeVars bound l) (freeVars bound r)
-    | ExprKind.ExprUnaryOp (_, i) -> freeVars bound i
-    | ExprKind.ExprTyped (i, _) -> freeVars bound i
-    | ExprKind.ExprTuple es | ExprKind.ExprArrayLit es ->
-        es |> List.map (freeVars bound) |> Set.unionMany
-    | ExprKind.ExprDotDot (l, h) -> Set.union (freeVars bound l) (freeVars bound h)
-    | ExprKind.ExprIf (c, t, f) ->
-        Set.unionMany [ freeVars bound c; freeVars bound t; freeVars bound f ]
-    | ExprKind.ExprLet (b, body) ->
-        Set.union (freeVars bound b.Value) (freeVars (Set.union bound (Set.ofList (patternVars b.Pattern))) body)
-    | ExprKind.ExprLambda (ps, _, body) ->
-        freeVars (Set.union bound (Set.ofList (ps |> List.map (fun p -> p.Name)))) body
-    | ExprKind.ExprBlock (stmts, fin) ->
-        let mutable b = bound
-        let mutable acc = Set.empty
-        for s in stmts do
-            match unwrapStmt s with
-            | StmtLet binding ->
-                acc <- Set.union acc (freeVars b binding.Value)
-                b <- Set.union b (Set.ofList (patternVars binding.Pattern))
-            | StmtExpr e2 -> acc <- Set.union acc (freeVars b e2)
-            | StmtAssign (l, _, r) -> acc <- Set.union acc (Set.union (freeVars b l) (freeVars b r))
-            | StmtForIn (v, range, body) ->
-                acc <- Set.union acc (freeVars b range)
-                let b2 = Set.add v b
-                for s2 in body do
-                    match unwrapStmt s2 with
-                    | StmtExpr e2 -> acc <- Set.union acc (freeVars b2 e2)
-                    | StmtLet binding -> acc <- Set.union acc (freeVars b2 binding.Value)
-                    | StmtAssign (l, _, r) -> acc <- Set.union acc (Set.union (freeVars b2 l) (freeVars b2 r))
-                    | _ -> ()
-            | _ -> ()
-        (match fin with Some fe -> Set.union acc (freeVars b fe) | None -> acc)
-    | ExprKind.ExprField (i, _) -> freeVars bound i
-    | ExprKind.ExprMatch (s, cases) ->
-        Set.unionMany (freeVars bound s :: (cases |> List.map (fun c -> freeVars bound c.Body)))
-    | _ -> Set.empty
 
 /// The scalar builtins a certified body may apply to invariants.
 let private isKnownScalarBuiltin (n: string) =
@@ -320,11 +267,7 @@ let rec private judge (ctx: Ctx) (env: Map<string, RepStatus>) (e: Expr)
             match ss with
             | Inv ->
                 cases
-                |> List.fold (fun acc c ->
-                    acc |> Result.bind (fun sts ->
-                        judge ctx (List.fold (fun m v -> Map.add v Inv m) env (patternVars c.Pattern)) c.Body
-                        |> Result.map (fun s -> sts @ [ s ])))
-                    (Ok [])
+                |> judgeEach (fun c -> judge ctx (bindPatternVars Inv env c.Pattern) c.Body)
                 |> Result.bind (fun sts ->
                     match sts with
                     | [] -> Ok Inv
@@ -335,7 +278,7 @@ let rec private judge (ctx: Ctx) (env: Map<string, RepStatus>) (e: Expr)
         j binding.Value |> Result.bind (fun sv ->
             match binding.Pattern.Kind, sv with
             | PatternKind.PatVar n, _ -> judge ctx (Map.add n sv env) body
-            | _, Inv -> judge ctx (List.fold (fun m v -> Map.add v Inv m) env (patternVars binding.Pattern)) body
+            | _, Inv -> judge ctx (bindPatternVars Inv env binding.Pattern) body
             | _, _ -> reject "cannot destructure a representation-typed value — its components are basis-dependent")
     | ExprKind.ExprLambda (ps, _, lamBody) ->
         // v1: a lambda is admissible only when it never touches a rep —
@@ -369,7 +312,7 @@ and private judgeStmts (ctx: Ctx) (env: Map<string, RepStatus>) (stmts: Stmt lis
                 judge ctx env binding.Value |> Result.bind (fun sv ->
                     match binding.Pattern.Kind, sv with
                     | PatternKind.PatVar n, _ -> Ok (Map.add n sv env)
-                    | _, Inv -> Ok (List.fold (fun m v -> Map.add v Inv m) env (patternVars binding.Pattern))
+                    | _, Inv -> Ok (bindPatternVars Inv env binding.Pattern)
                     | _, _ ->
                         Error (bl4008 binding.Value.Span (sprintf "function '%s': cannot destructure a representation-typed value — its components are basis-dependent" ctx.FuncName)))
             | StmtExpr e2 -> judge ctx env e2 |> Result.map (fun _ -> env)
@@ -413,11 +356,7 @@ and private judgeAssign (ctx: Ctx) (env: Map<string, RepStatus>) (span: Span) (l
 and private judgeApp (ctx: Ctx) (env: Map<string, RepStatus>) (e: Expr) (f: Expr) (args: Expr list)
     : Result<RepStatus, Blade.Diagnostics.Diagnostic> =
     let reject msg = Error (bl4008 e.Span (sprintf "function '%s': %s" ctx.FuncName msg))
-    let judgeAll args =
-        args
-        |> List.fold (fun acc a ->
-            acc |> Result.bind (fun sts -> judge ctx env a |> Result.map (fun s -> sts @ [ s ])))
-            (Ok [])
+    let judgeAll args = judgeEach (judge ctx env) args
     let requireRep (what: string) (expected: Spec) (argE: Expr) =
         judge ctx env argE |> Result.bind (fun s ->
             match s with

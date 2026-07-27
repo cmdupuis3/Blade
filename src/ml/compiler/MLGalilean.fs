@@ -44,6 +44,10 @@
 module Blade.ML.Galilean
 
 open Blade.Ast
+// The walker shell (stage 5c): freeVars / patternVars / bindPatternVars /
+// judgeEach / conjunctsOf — the syntactic walk shared verbatim with MLEquiv
+// and MLPerm. Every RULE below is this discipline's own.
+open Blade.ML.CertShell
 
 type BoostStatus =
     | BVar
@@ -68,58 +72,6 @@ let private statusStr (st: BoostStatus) : string =
     | BInv -> "boost-invariant"
     | BOpaque -> "unclassifiable"
 
-let rec private patternVars (p: Pattern) : string list =
-    match p.Kind with
-    | PatternKind.PatVar n -> [ n ]
-    | PatternKind.PatTuple ps -> ps |> List.collect patternVars
-    | _ -> []
-
-/// Free variables of an expression that are NOT locally bound (the lambda
-/// capture rule; mirror of MLEquiv.freeVars).
-let rec private freeVars (bound: Set<string>) (e: Expr) : Set<string> =
-    match e.Kind with
-    | ExprKind.ExprVar n -> if Set.contains n bound then Set.empty else Set.singleton n
-    | ExprKind.ExprLit _ -> Set.empty
-    | ExprKind.ExprApp (f, args) ->
-        Set.unionMany (freeVars bound f :: (args |> List.map (freeVars bound)))
-    | ExprKind.ExprBinOp (_, _, l, r) -> Set.union (freeVars bound l) (freeVars bound r)
-    | ExprKind.ExprUnaryOp (_, i) -> freeVars bound i
-    | ExprKind.ExprTyped (i, _) -> freeVars bound i
-    | ExprKind.ExprTuple es | ExprKind.ExprArrayLit es ->
-        es |> List.map (freeVars bound) |> Set.unionMany
-    | ExprKind.ExprDotDot (l, h) -> Set.union (freeVars bound l) (freeVars bound h)
-    | ExprKind.ExprIf (c, t, f) ->
-        Set.unionMany [ freeVars bound c; freeVars bound t; freeVars bound f ]
-    | ExprKind.ExprLet (b, body) ->
-        Set.union (freeVars bound b.Value) (freeVars (Set.union bound (Set.ofList (patternVars b.Pattern))) body)
-    | ExprKind.ExprLambda (ps, _, body) ->
-        freeVars (Set.union bound (Set.ofList (ps |> List.map (fun p -> p.Name)))) body
-    | ExprKind.ExprBlock (stmts, fin) ->
-        let mutable b = bound
-        let mutable acc = Set.empty
-        for s in stmts do
-            match unwrapStmt s with
-            | StmtLet binding ->
-                acc <- Set.union acc (freeVars b binding.Value)
-                b <- Set.union b (Set.ofList (patternVars binding.Pattern))
-            | StmtExpr e2 -> acc <- Set.union acc (freeVars b e2)
-            | StmtAssign (l, _, r) -> acc <- Set.union acc (Set.union (freeVars b l) (freeVars b r))
-            | StmtForIn (v, range, body) ->
-                acc <- Set.union acc (freeVars b range)
-                let b2 = Set.add v b
-                for s2 in body do
-                    match unwrapStmt s2 with
-                    | StmtExpr e2 -> acc <- Set.union acc (freeVars b2 e2)
-                    | StmtLet binding -> acc <- Set.union acc (freeVars b2 binding.Value)
-                    | StmtAssign (l, _, r) -> acc <- Set.union acc (Set.union (freeVars b2 l) (freeVars b2 r))
-                    | _ -> ()
-            | _ -> ()
-        (match fin with Some fe -> Set.union acc (freeVars b fe) | None -> acc)
-    | ExprKind.ExprField (i, _) -> freeVars bound i
-    | ExprKind.ExprMatch (s, cases) ->
-        Set.unionMany (freeVars bound s :: (cases |> List.map (fun c -> freeVars bound c.Body)))
-    | _ -> Set.empty
-
 // ============================================================================
 // Certified-signature table
 // ============================================================================
@@ -134,11 +86,7 @@ let buildCertTable (decls: Located<Decl> list)
         acc |> Result.bind (fun table ->
             match d.Value with
             | DeclFunction fd ->
-                let conjs =
-                    fd.WhereClause
-                    |> Option.map (fun w -> w.Custom)
-                    |> Option.defaultValue []
-                    |> List.filter (fun (n, _) -> n = "__ml_galilean")
+                let conjs = conjunctsOf "__ml_galilean" fd
                 let fail msg = Error (bl4009 d.Span msg)
                 match conjs with
                 | [] -> Ok table
@@ -192,9 +140,7 @@ let rec private judge (ctx: Ctx) (env: Map<string, BoostStatus>) (e: Expr)
         // a uniformly boost-variant aggregate shifts componentwise and stays
         // BVar; mixing statuses inside one aggregate loses the coefficient.
         es
-        |> List.fold (fun acc x ->
-            acc |> Result.bind (fun sts -> j x |> Result.map (fun s -> sts @ [ s ])))
-            (Ok [])
+        |> judgeEach j
         |> Result.bind (fun sts ->
             match sts with
             | [] -> Ok BInv
@@ -250,11 +196,7 @@ let rec private judge (ctx: Ctx) (env: Map<string, BoostStatus>) (e: Expr)
             match ss with
             | BInv ->
                 cases
-                |> List.fold (fun acc c ->
-                    acc |> Result.bind (fun sts ->
-                        judge ctx (List.fold (fun m v -> Map.add v BInv m) env (patternVars c.Pattern)) c.Body
-                        |> Result.map (fun s -> sts @ [ s ])))
-                    (Ok [])
+                |> judgeEach (fun c -> judge ctx (bindPatternVars BInv env c.Pattern) c.Body)
                 |> Result.bind (fun sts ->
                     match sts with
                     | [] -> Ok BInv
@@ -265,7 +207,7 @@ let rec private judge (ctx: Ctx) (env: Map<string, BoostStatus>) (e: Expr)
         j binding.Value |> Result.bind (fun sv ->
             match binding.Pattern.Kind, sv with
             | PatternKind.PatVar n, _ -> judge ctx (Map.add n sv env) body
-            | _, BInv -> judge ctx (List.fold (fun m v -> Map.add v BInv m) env (patternVars binding.Pattern)) body
+            | _, BInv -> judge ctx (bindPatternVars BInv env binding.Pattern) body
             | _, _ -> reject "cannot destructure a boost-variant value in v1 — bind it whole")
     | ExprKind.ExprLambda (ps, _, lamBody) ->
         let captured = freeVars (Set.ofList (ps |> List.map (fun p -> p.Name))) lamBody
@@ -320,9 +262,7 @@ and private judgeFormerApply (ctx: Ctx) (env: Map<string, BoostStatus>) (e: Expr
     match srcsOf loop, kern.Kind with
     | Some arrays, ExprKind.ExprLambda (ps, _, body) ->
         arrays
-        |> List.fold (fun acc a ->
-            acc |> Result.bind (fun sts -> judge ctx env a |> Result.map (fun s -> sts @ [ s ])))
-            (Ok [])
+        |> judgeEach (judge ctx env)
         |> Result.bind (fun srcSts ->
             let env' =
                 ps |> List.mapi (fun i p -> (i, p.Name))
@@ -342,7 +282,7 @@ and private judgeStmts (ctx: Ctx) (env: Map<string, BoostStatus>) (stmts: Stmt l
                 judge ctx env binding.Value |> Result.bind (fun sv ->
                     match binding.Pattern.Kind, sv with
                     | PatternKind.PatVar n, _ -> Ok (Map.add n sv env)
-                    | _, BInv -> Ok (List.fold (fun m v -> Map.add v BInv m) env (patternVars binding.Pattern))
+                    | _, BInv -> Ok (bindPatternVars BInv env binding.Pattern)
                     | _, _ ->
                         Error (bl4009 binding.Value.Span (sprintf "function '%s': cannot destructure a boost-variant value in v1 — bind it whole" ctx.FuncName)))
             | StmtExpr e2 -> judge ctx env e2 |> Result.map (fun _ -> env)
@@ -394,11 +334,7 @@ and private judgeAssign (ctx: Ctx) (env: Map<string, BoostStatus>) (span: Span) 
 and private judgeApp (ctx: Ctx) (env: Map<string, BoostStatus>) (e: Expr) (f: Expr) (args: Expr list)
     : Result<BoostStatus, Blade.Diagnostics.Diagnostic> =
     let reject msg = Error (bl4009 e.Span (sprintf "function '%s': %s" ctx.FuncName msg))
-    let judgeAll args =
-        args
-        |> List.fold (fun acc a ->
-            acc |> Result.bind (fun sts -> judge ctx env a |> Result.map (fun s -> sts @ [ s ])))
-            (Ok [])
+    let judgeAll args = judgeEach (judge ctx env) args
     match f.Kind with
     // --- sgs formers: the axiomatic rules ---------------------------------
     | ExprKind.ExprField ({ Kind = ExprKind.ExprVar alias }, op) when Set.contains alias ctx.SgsAliases ->

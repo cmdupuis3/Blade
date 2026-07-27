@@ -975,6 +975,24 @@ go first.
      §6.1 decided here.
    - **5c — walker-shell extraction** (post-5a cleanup; three copies =
      earned; strictly no behavior change).
+     **LANDED 2026-07-27.** MLCertShell.fs: only the verbatim-shared
+     surface extracted (freeVars/patternVars byte-identical by diff;
+     judgeEach; conjunctsOf; bindPatternVars — max ONE callback);
+     judgeStmts deliberately left as three copies (six moving parts,
+     past the line); net −78 lines. Bit-neutrality PROVEN
+     differentially: byte-identical `blade check` output over all 1080
+     corpus files vs a sha1-verified HEAD baseline build; full suite
+     exactly 1627/0. THE PAYOFF: the three-way diff cataloged 11
+     divergences — 6 intentional (the polarity table doing its job,
+     incl. unary minus and the two builtin lists), 4 DRIFT (chipped:
+     MLPerm's former-source false-accept — the only unsound path found;
+     unjudged element-write indices in 2 of 3; the shared nested-for
+     freeVars gap, now one-place-fixable; MLEquiv's missing
+     post-imperative arms = false-reject on reduce/range in certified
+     bodies), 1 two-copy duplication left for the rule of three
+     (staticArgValue/aliasMapOf, tied to MLElaborate.staticArg's
+     keep-in-sync note). Three independently-written walkers over one
+     AST were a natural drift experiment; the catalog is the result.
 7. **Stage 6 — generator-based deduction.** MLEquiv gains an inference mode
    in the Deduce.fs pattern (pure pre-pass; consumers decide); generator
    check for rational-coefficient polynomial bodies; the −I check for O(3);

@@ -8,12 +8,16 @@
 /// SAME machinery elaboration uses (plan-transforms-as-types §3.6, §7 stage
 /// 5a-iii).
 ///
-/// THIS IS THE THIRD COPY of the abstract-interpretation WALKER SHELL
+/// THIS WAS THE THIRD COPY of the abstract-interpretation WALKER SHELL
 /// (freeVars / patternVars / the let-block-if-match-assign-for folds /
-/// judgeApp's callee dispatch), after MLEquiv.fs and MLGalilean.fs. That is
-/// deliberate: §7's stage 5c extracts the shell against THREE witnesses, and
-/// the extraction wants the third witness written out rather than guessed at.
-/// Nothing here is abstracted early — the shell is copied, the RULES are not.
+/// judgeApp's callee dispatch), after MLEquiv.fs and MLGalilean.fs — written
+/// out rather than guessed at so that §7's stage 5c could extract the shell
+/// against THREE witnesses. That extraction has happened: the SYNTACTIC walk
+/// (freeVars, patternVars, the left-to-right judge fold, the where-conjunct
+/// pre-scan) now lives in MLCertShell.fs. What stayed here is what the three
+/// disciplines DISAGREE about — the lattice, the signature classifier, the
+/// judgment arms, the op table — including `judgeStmts` / `judgeAssign`,
+/// whose shapes agree but whose every message and guard does not.
 ///
 /// ---------------------------------------------------------------------------
 /// THE LATTICE — ℕ-graded, and of OPPOSITE POLARITY to MLEquiv's at almost
@@ -111,6 +115,10 @@ module Blade.ML.Perm
 
 open Blade.Ast
 open Blade.StaticEval
+// The walker shell (stage 5c): freeVars / patternVars / bindPatternVars /
+// judgeEach / conjunctsOf — the syntactic walk shared verbatim with MLEquiv
+// and MLGalilean. Every RULE below is this discipline's own.
+open Blade.ML.CertShell
 
 type PowStatus =
     /// Pow k = a flat N^k buffer transforming as σ^{⊗k}. Pow 0 = invariant.
@@ -154,59 +162,6 @@ let private powClass (n: int64) (m: int64) : int option =
         elif k >= maxPow || acc > m then None
         else go (k + 1) (acc * n)
     if m < 1L then None else go 0 1L
-
-/// All pattern variables of a pattern (for Pow 0 destructuring).
-let rec private patternVars (p: Pattern) : string list =
-    match p.Kind with
-    | PatternKind.PatVar n -> [ n ]
-    | PatternKind.PatTuple ps -> ps |> List.collect patternVars
-    | _ -> []
-
-/// Free variables of an expression that are NOT locally bound (the lambda
-/// capture rule; third copy of MLEquiv.freeVars / MLGalilean.freeVars).
-let rec private freeVars (bound: Set<string>) (e: Expr) : Set<string> =
-    match e.Kind with
-    | ExprKind.ExprVar n -> if Set.contains n bound then Set.empty else Set.singleton n
-    | ExprKind.ExprLit _ -> Set.empty
-    | ExprKind.ExprApp (f, args) ->
-        Set.unionMany (freeVars bound f :: (args |> List.map (freeVars bound)))
-    | ExprKind.ExprBinOp (_, _, l, r) -> Set.union (freeVars bound l) (freeVars bound r)
-    | ExprKind.ExprUnaryOp (_, i) -> freeVars bound i
-    | ExprKind.ExprTyped (i, _) -> freeVars bound i
-    | ExprKind.ExprTuple es | ExprKind.ExprArrayLit es ->
-        es |> List.map (freeVars bound) |> Set.unionMany
-    | ExprKind.ExprDotDot (l, h) -> Set.union (freeVars bound l) (freeVars bound h)
-    | ExprKind.ExprIf (c, t, f) ->
-        Set.unionMany [ freeVars bound c; freeVars bound t; freeVars bound f ]
-    | ExprKind.ExprLet (b, body) ->
-        Set.union (freeVars bound b.Value) (freeVars (Set.union bound (Set.ofList (patternVars b.Pattern))) body)
-    | ExprKind.ExprLambda (ps, _, body) ->
-        freeVars (Set.union bound (Set.ofList (ps |> List.map (fun p -> p.Name)))) body
-    | ExprKind.ExprBlock (stmts, fin) ->
-        let mutable b = bound
-        let mutable acc = Set.empty
-        for s in stmts do
-            match unwrapStmt s with
-            | StmtLet binding ->
-                acc <- Set.union acc (freeVars b binding.Value)
-                b <- Set.union b (Set.ofList (patternVars binding.Pattern))
-            | StmtExpr e2 -> acc <- Set.union acc (freeVars b e2)
-            | StmtAssign (l, _, r) -> acc <- Set.union acc (Set.union (freeVars b l) (freeVars b r))
-            | StmtForIn (v, range, body) ->
-                acc <- Set.union acc (freeVars b range)
-                let b2 = Set.add v b
-                for s2 in body do
-                    match unwrapStmt s2 with
-                    | StmtExpr e2 -> acc <- Set.union acc (freeVars b2 e2)
-                    | StmtLet binding -> acc <- Set.union acc (freeVars b2 binding.Value)
-                    | StmtAssign (l, _, r) -> acc <- Set.union acc (Set.union (freeVars b2 l) (freeVars b2 r))
-                    | _ -> ()
-            | _ -> ()
-        (match fin with Some fe -> Set.union acc (freeVars b fe) | None -> acc)
-    | ExprKind.ExprField (i, _) -> freeVars bound i
-    | ExprKind.ExprMatch (s, cases) ->
-        Set.unionMany (freeVars bound s :: (cases |> List.map (fun c -> freeVars bound c.Body)))
-    | _ -> Set.empty
 
 /// Mirror of MLElaborate.staticArg / MLEquiv.staticArgValue (keep in sync): an
 /// ML op's static argument is a `let static` binding name or an int literal.
@@ -313,11 +268,7 @@ let buildCertTable (statics: StaticEnv) (decls: Located<Decl> list)
         acc |> Result.bind (fun table ->
             match d.Value with
             | DeclFunction fd ->
-                let conjs =
-                    fd.WhereClause
-                    |> Option.map (fun w -> w.Custom)
-                    |> Option.defaultValue []
-                    |> List.filter (fun (n, _) -> n = "__ml_perm_equiv")
+                let conjs = conjunctsOf "__ml_perm_equiv" fd
                 let fail msg = Error (bl4012 d.Span msg)
                 match conjs with
                 | [] -> Ok table
@@ -411,9 +362,7 @@ let rec private judge (ctx: Ctx) (env: Map<string, PowStatus>) (e: Expr)
         // literal whose extent lands in a node-power space is refused with a
         // pointer at the op whose whole job is equivariant constants.
         es
-        |> List.fold (fun acc x ->
-            acc |> Result.bind (fun sts -> j x |> Result.map (fun s -> sts @ [ s ])))
-            (Ok [])
+        |> judgeEach j
         |> Result.bind (fun sts ->
             match sts |> List.tryFind (fun s -> match s with Pow k -> k > 0 | _ -> false) with
             | Some st ->
@@ -479,11 +428,7 @@ let rec private judge (ctx: Ctx) (env: Map<string, PowStatus>) (e: Expr)
             match ss with
             | Pow 0 ->
                 cases
-                |> List.fold (fun acc c ->
-                    acc |> Result.bind (fun sts ->
-                        judge ctx (List.fold (fun m v -> Map.add v (Pow 0) m) env (patternVars c.Pattern)) c.Body
-                        |> Result.map (fun s -> sts @ [ s ])))
-                    (Ok [])
+                |> judgeEach (fun c -> judge ctx (bindPatternVars (Pow 0) env c.Pattern) c.Body)
                 |> Result.bind (fun sts ->
                     match sts with
                     | [] -> Ok (Pow 0)
@@ -494,7 +439,7 @@ let rec private judge (ctx: Ctx) (env: Map<string, PowStatus>) (e: Expr)
         j binding.Value |> Result.bind (fun sv ->
             match binding.Pattern.Kind, sv with
             | PatternKind.PatVar n, _ -> judge ctx (Map.add n sv env) body
-            | _, Pow 0 -> judge ctx (List.fold (fun m v -> Map.add v (Pow 0) m) env (patternVars binding.Pattern)) body
+            | _, Pow 0 -> judge ctx (bindPatternVars (Pow 0) env binding.Pattern) body
             | _, _ -> reject "cannot destructure a node-covariant value in v1 — bind it whole")
     | ExprKind.ExprLambda (ps, _, lamBody) ->
         let captured = freeVars (Set.ofList (ps |> List.map (fun p -> p.Name))) lamBody
@@ -546,7 +491,7 @@ and private judgeStmts (ctx: Ctx) (env: Map<string, PowStatus>) (stmts: Stmt lis
                 judge ctx env binding.Value |> Result.bind (fun sv ->
                     match binding.Pattern.Kind, sv with
                     | PatternKind.PatVar n, _ -> Ok (Map.add n sv env)
-                    | _, Pow 0 -> Ok (List.fold (fun m v -> Map.add v (Pow 0) m) env (patternVars binding.Pattern))
+                    | _, Pow 0 -> Ok (bindPatternVars (Pow 0) env binding.Pattern)
                     | _, _ ->
                         Error (bl4012 binding.Value.Span (sprintf "function '%s': cannot destructure a node-covariant value in v1 — bind it whole" ctx.FuncName)))
             | StmtExpr e2 -> judge ctx env e2 |> Result.map (fun _ -> env)
@@ -589,11 +534,7 @@ and private judgeAssign (ctx: Ctx) (env: Map<string, PowStatus>) (span: Span) (l
 and private judgeApp (ctx: Ctx) (env: Map<string, PowStatus>) (e: Expr) (f: Expr) (args: Expr list)
     : Result<PowStatus, Blade.Diagnostics.Diagnostic> =
     let reject msg = Error (bl4012 e.Span (sprintf "function '%s': %s" ctx.FuncName msg))
-    let judgeAll args =
-        args
-        |> List.fold (fun acc a ->
-            acc |> Result.bind (fun sts -> judge ctx env a |> Result.map (fun s -> sts @ [ s ])))
-            (Ok [])
+    let judgeAll args = judgeEach (judge ctx env) args
     let requirePow (what: string) (k: int) (argE: Expr) =
         judge ctx env argE |> Result.bind (fun s ->
             if s = Pow k then Ok ()
