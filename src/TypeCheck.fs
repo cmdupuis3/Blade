@@ -1610,15 +1610,32 @@ let rec checkPattern (env: TypeEnv) (expected: IRType) (pat: Pattern)
 /// Returns the resolved IRArrayType. The synthesized index has Tag=None
 /// (matched as "synthetic" by unify, so it doesn't fail nominal checks
 /// against real source-array tags).
-let requireArrayArg (env: TypeEnv) (tArr: TypedExpr) (opName: string) : TypeResult<IRArrayType> =
+/// `requireArrayArg` generalized to a MINIMUM rank: synthesize `minRank`
+/// rank-1 slots instead of exactly one. An op whose contract needs rank >= 2
+/// (gram, transpose) must use this — with the rank-1 synthesis it ALWAYS
+/// failed on an unannotated argument (GramNeedsRank2 (1, _) /
+/// TransposeAxisRange), rejecting a program whose rank the checker can simply
+/// deduce. Extent naming is byte-identical to the old single-slot form at
+/// minRank = 1, so no existing behaviour shifts.
+///
+/// DEFERRED — `decompact` is deliberately NOT switched over. Its demand is
+/// not a rank COUNT but a compact-GROUP slot (Rank >= 2 and a non-SymNone
+/// symmetry class). Synthesizing k plain rank-1 SymNone slots would satisfy
+/// the arity check and then fail the symmetry check with a worse message than
+/// it gives today; it needs a symmetry-carrying synthesis, a separate step.
+let requireArrayArgMinRank (env: TypeEnv) (tArr: TypedExpr) (opName: string) (minRank: int) : TypeResult<IRArrayType> =
     let resolved = env.Subst.Resolve(tArr.Type)
     match resolved with
     | ArrayElem arrTy -> Ok arrTy
     | IRTInfer _ ->
-        let freshIdx = {
+        let k = max 1 minRank
+        let freshIdx i = {
             Id = env.Builder.FreshId()
             Rank = 1
-            Extent = IRParam (sprintf "__%s_inferred_n" opName, 0, IRTNat None)
+            Extent =
+                IRParam ((if k = 1 then sprintf "__%s_inferred_n" opName
+                          else sprintf "__%s_inferred_n%d" opName i),
+                         0, IRTNat None)
             Symmetry = SymNone
             Tag = None; IxKind = IxKPlain
             Kind = SDimension
@@ -1627,7 +1644,7 @@ let requireArrayArg (env: TypeEnv) (tArr: TypedExpr) (opName: string) : TypeResu
         let freshElem = env.Builder.FreshInferType()
         let freshArrType = {
             ElemType = freshElem
-            IndexTypes = [freshIdx]
+            IndexTypes = List.init k freshIdx
             IsVirtual = false
             Identity = None
         }
@@ -1640,6 +1657,9 @@ let requireArrayArg (env: TypeEnv) (tArr: TypedExpr) (opName: string) : TypeResu
             | _ -> Error (IntrinsicBindArrayFailed opName))
     | _ ->
         Error (IntrinsicNeedsArray opName)
+
+let requireArrayArg (env: TypeEnv) (tArr: TypedExpr) (opName: string) : TypeResult<IRArrayType> =
+    requireArrayArgMinRank env tArr opName 1
 
 /// Tag-check helper: validate that each index argument's nominal tag (if any)
 /// agrees with the corresponding array slot's nominal tag. Slot tags starting
@@ -3639,8 +3659,11 @@ and inferGram (env: TypeEnv) leftE rightE : TypeResult<TypedExpr> =
     // general dense m x p array (SymNone).
     inferExpr env leftE |> Result.bind (fun tL ->
     inferExpr env rightE |> Result.bind (fun tR ->
-        requireArrayArg env tL "gram" |> Result.bind (fun lTy ->
-        requireArrayArg env tR "gram" |> Result.bind (fun rTy ->
+        // minRank 2: gram's contract IS rank-2-on-both-sides (the check just
+        // below), so an unannotated operand should deduce rank 2 rather than
+        // be pinned to rank 1 and then rejected by that check.
+        requireArrayArgMinRank env tL "gram" 2 |> Result.bind (fun lTy ->
+        requireArrayArgMinRank env tR "gram" 2 |> Result.bind (fun rTy ->
             let lDims = lTy.IndexTypes |> List.sumBy (fun ix -> max 1 ix.Rank)
             let rDims = rTy.IndexTypes |> List.sumBy (fun ix -> max 1 ix.Rank)
             if lDims <> 2 || rDims <> 2 then
@@ -3834,7 +3857,13 @@ and inferJoin (env: TypeEnv) (arrays: Expr list) (dim: int) : TypeResult<TypedEx
 
 and inferTranspose (env: TypeEnv) array d1 d2 : TypeResult<TypedExpr> =
     inferExpr env array |> Result.bind (fun tArr ->
-        requireArrayArg env tArr "transpose" |> Result.bind (fun arrTy ->
+        // minRank: transpose needs at least 2 dimensions, and specifically
+        // enough of them to contain the requested axes — the axes are already
+        // in scope here, so synthesize exactly the rank they need rather than
+        // a flat 2. Strictly more permissive than today (an unannotated arg
+        // was pinned to rank 1 and then always failed TransposeAxisRange), so
+        // it cannot regress a program that compiles.
+        requireArrayArgMinRank env tArr "transpose" (max 2 (max d1 d2 + 1)) |> Result.bind (fun arrTy ->
             // Map a logical DIMENSION index to its INDEX-TYPE slot. A slot
             // of arity k occupies k consecutive dimensions; we walk the
             // slot list accumulating arities until the target dimension

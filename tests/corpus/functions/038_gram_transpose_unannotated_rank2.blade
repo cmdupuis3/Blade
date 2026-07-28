@@ -1,0 +1,39 @@
+// TEST: Gram Transpose Unannotated Rank2
+// gram and transpose need rank >= 2, but the shared "this argument must be an
+// array" helper synthesized exactly ONE rank-1 slot for an unresolved
+// argument — so an unannotated parameter was pinned to rank 1 and then
+// rejected by the op's own rank check (GramNeedsRank2 (1, 1) /
+// TransposeAxisRange), every time, for a rank the checker can simply deduce.
+// The helper now synthesizes the op's minimum rank.
+//
+// `a[1][2]` is the assertion that the deduction actually happened AND landed
+// on the real dimensions: with the gram / transpose line deleted, `a` gets no
+// rank at all, defaults to a scalar, and the double index does not compile
+// (probed). `extents(z)` pins the gram result's shape — 2x3 contracted with
+// itself is 2x2 — so the synthesized slots are not merely counted but used.
+//
+// The gram / transpose RESULT is deliberately not returned: emitting either
+// op from a function body is broken today independently of rank deduction
+// (unsupported IR node in return position; a block-bound result comes back
+// with a garbage tail). Reproduced with a fully ANNOTATED rank-2 parameter,
+// so it is not this feature's regression — noted here so the next reader
+// doesn't take the indirection for superstition.
+function gram_cell(a) = {
+    let z = gram(a, a)
+    a[1][2]
+}
+function gram_rows(a) = {
+    let z = gram(a, a)
+    extents(z)
+}
+function transpose_cell(a) = {
+    let z = transpose(a, [0, 1])
+    a[1][2]
+}
+let M = [[1.0, 2.0, 3.0], [4.0, 5.0, 6.0]]
+let gc = gram_cell(M)
+let gr = gram_rows(M)
+let tc = transpose_cell(M)
+// EXPECT: gc = 6.0
+// EXPECT: gr = 2
+// EXPECT: tc = 6.0
