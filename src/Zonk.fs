@@ -106,6 +106,11 @@ let rec zonkType (subst: Subst) (ty: IRType) : IRType =
                 // invariant still holds.
                 let arr = mkDeducedRankArray mkId elem (sprintf "zonk%d" n) k
                 subst.Bind(n, arr)
+                // Integration stitch: zonk-closed ranks join the deduced-facts
+                // channel so `ide check --json`'s deduced[] shows them too
+                // (TypeEnv hosts the channel precisely so this compile-order
+                // direction works).
+                Blade.TypeEnv.DeducedFacts.recordZonkClosedRank n k
                 arr
             | _ ->
                 match subst.GetLiteralDefault(n) with
