@@ -1,0 +1,42 @@
+// TEST: Bounded Let Annotation
+// ============================================================================
+// The NON-FIELD half of formalism §2.4's bounded primitives: "Bounded
+// primitives (`Float<min=0, max=1>`) carry RUNTIME-CHECKED bounds". A struct
+// FIELD's bounds are normalized into FieldDecl.Bound at parse time and
+// guarded by synthesizeStructChecks; a LET ANNOTATION has no such channel,
+// because lowerTypeExpr erases bounds and they never reach IRType. The guard
+// is therefore synthesized from the SURFACE annotation
+// (TypeCheck.synthesizeBoundChecks).
+//
+// Bounds are INCLUSIVE on both ends, so every binding below sits exactly ON
+// an endpoint. That is the point of the file: if either comparison were
+// strict, these would abort instead of running, so an accept here IS the
+// inclusivity proof for the annotation path — the same argument structs/046
+// makes for the field path.
+//
+// The violating twin is struct-aborts/012.
+// ============================================================================
+
+// Int, at both closed endpoints.
+let lo: Int<min=0, max=3> = 0
+let hi: Int<min=0, max=3> = 3
+let span = hi - lo
+// EXPECT: span = 3
+
+// Negative range — the shape the whole constrained-index family is built on
+// (m ∈ [-l, l]), and the case where an off-by-one is invisible until you sit
+// on the endpoint.
+let mLo: Int<min=-2, max=2> = -2
+let mHi: Int<min=-2, max=2> = 2
+let width = mHi - mLo
+// EXPECT: width = 4
+
+// Float, the spec's own literal example: the CLOSED unit interval.
+let unitLo: Float<min=0.0, max=1.0> = 0.0
+let unitHi: Float<min=0.0, max=1.0> = 1.0
+let usum = unitLo + unitHi
+// EXPECT: usum = 1.0
+
+// One-sided: only the endpoint that is declared is guarded.
+let atLeast: Int<min=5> = 5
+// EXPECT: atLeast = 5

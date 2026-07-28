@@ -183,6 +183,20 @@ let runAllTestsFullWith (extraBlocks: (unit -> Blade.Tests.TestHarness.BlockResu
     // and no tolerance anywhere, which is the half BladePartition.v cites
     // rather than proves (completeness of the orbit basis).
     let permOracle = Blade.Tests.PermOracleReview.runPermOracleTests ()
+    // The constrained-record COUNTING layer (StructIdxSpec.fs, stage C1 of
+    // plan-constrained-index-types §7): box enumeration over the per-field
+    // inclusive bounds with the flat-filter vs arrow-heads certificate (set
+    // AND order — order agreement is what catches an offset bug), the CGm112
+    // anchor and its 3/7/9 lo-sweep against an independent triple-loop dense
+    // count, the fence and `idx_card(R)` end to end through resolveStatics,
+    // and the negative controls (box cap, non-Int field, unbounded field,
+    // non-`static struct`, and the fuel bomb with its witness cell).
+    let structIdxSpec = Blade.Tests.StructIdxSpecReview.runStructIdxSpecTests ()
+    // The INDEPENDENT third route over the same solution sets: a separately
+    // coded recursive per-field enumerator compared against StructIdxSpec's
+    // entries as SET and as ORDER, plus hand-written lex tables so that two
+    // agreeing programs can still be caught being wrong together.
+    let structIdxOracle = Blade.Tests.StructIdxOracle.runStructIdxOracleTests ()
     // The point-group counting layer (MLPointSpec.fs, stage 5b-0): the frozen
     // {C4, D4} tables and their integrity certificate (closure vs declared
     // order, FS indicators nu = 2 - e, J^2 = -Id and J-generator commutation,
@@ -291,7 +305,7 @@ let runAllTestsFullWith (extraBlocks: (unit -> Blade.Tests.TestHarness.BlockResu
     let blocks =
         [ yield r1; yield r2; yield attrs; yield subst
           yield normalize; yield unify; yield validateArrow
-          yield shape; yield oracles; yield wigner; yield symPower; yield polyOracle; yield lieTables; yield permSpec; yield permOracle; yield pointSpec; yield pgOracle; yield cartBridge; yield spans; yield diagCore; yield diagCorpus; yield certSuggest; yield alloc
+          yield shape; yield oracles; yield wigner; yield symPower; yield polyOracle; yield lieTables; yield permSpec; yield permOracle; yield structIdxSpec; yield structIdxOracle; yield pointSpec; yield pgOracle; yield cartBridge; yield spans; yield diagCore; yield diagCorpus; yield certSuggest; yield alloc
           yield ompPragma
           match omp with Some b -> yield b | None -> ()
           yield bufType

@@ -1,0 +1,37 @@
+// TEST: Static Bound Forward Ref Violated
+// ============================================================================
+// The NEGATIVE half of structs/050. A bound naming a `let static` declared
+// below it must not merely RESOLVE — it must still be ENFORCED, with the
+// resolved value.
+//
+// This is the failure mode a partial fix leaves behind. Once the static
+// dependency edge exists, structs/050 passes; a fix that made `zz_lim` visible
+// but lost the resulting conjunct would ALSO make it pass, and nothing else in
+// the corpus would notice. So the check is pinned on a value that is legal
+// under a wrong reading and illegal under the right one: `m = 3` is outside
+// every interpretation of [-2, 2], and the only way to accept it is to have
+// stopped checking.
+//
+// NAMING IS LOAD-BEARING HERE TOO — see structs/050's header for the full
+// argument. Static resolution drains a Map in KEY order, so `a_bad` is named
+// to sort BEFORE `zz_lim` under any comparer: without the dependency edge it
+// folds first and dies on an undefined variable rather than on the bound. Do
+// not rename either binding to something descriptive.
+//
+// The conjunct index is load-bearing as well. `Plain` declares no
+// where-conjuncts, so its list is the desugared bounds in field-declaration
+// order, Lo before Hi: conjunct 1 is `-zz_lim <= m`, conjunct 2 is
+// `m <= zz_lim`. Naming conjunct 2 pins that the upper bound is what failed,
+// that `max=` is inclusive (3 is the first violation above 2), and that both
+// endpoints survived resolution — a bound that had collapsed to one conjunct
+// would renumber this.
+// ============================================================================
+struct Plain {
+    m: Int<min=-zz_lim, max=zz_lim>
+}
+
+let static a_bad = Plain { m = 3 }
+
+let static zz_lim = 2
+// ERROR: BL3999
+// ERROR-CONTAINS: Constraint violation in Plain (static, conjunct 2)

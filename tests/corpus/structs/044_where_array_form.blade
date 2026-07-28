@@ -1,0 +1,26 @@
+// TEST: Struct Where Array Form
+// ============================================================================
+// R2 of the T4 where-ruling, the other accepted spelling: the owner's "an
+// array of predicates". `where [p1, p2]` arrives as ONE conjunct whose top
+// node is a literal ExprArrayLit and flattens in Ast.structConjuncts exactly
+// as the tuple form does (structs/043).
+//
+// R3 — LITERAL ONLY. There is deliberately NO all-true folding of an
+// array-VALUED expression: only a literal `[...]` written at the top of a
+// conjunct flattens. A non-literal array-valued conjunct stays the
+// StructWhereNotBool error of structs/031. The reason is drift: all-true
+// folding would make `where p` and `where (p,)` equivalent for arbitrary
+// expressions, which is precisely what the single shared conjunct definition
+// (Ast.fs:685, "so the two worlds cannot drift") exists to prevent.
+//
+// Same struct and same solution as structs/016 and structs/043: three
+// spellings, one enumeration.
+// ============================================================================
+struct Ranged {
+    lo: Int,
+    hi: Int,
+    mid: Int
+} where [lo <= mid, mid <= hi]
+let r = Ranged { lo = 1, mid = 5, hi = 9 }
+let m = r.mid
+// EXPECT: m = 5

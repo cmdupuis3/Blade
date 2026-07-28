@@ -1116,6 +1116,27 @@ let private dispatchTest (rest: string list) : int =
         // pipeline.
         let failed = (Blade.Tests.PermOracleReview.runPermOracleTests ()).Failed
         if failed = 0 then 0 else 1
+    | [ "structidx" ] | [ "struct-idx" ] ->
+        // Stage C1 review block: the constrained-record COUNTING layer
+        // (StructIdxSpec.fs) - box enumeration over the per-field INCLUSIVE
+        // bounds with the two-route certificate (flat filter vs arrow-style
+        // heads filter, compared as set AND as order, since order agreement is
+        // what catches an offset bug), the CGm112 anchor and its 3/7/9
+        // lo-sweep against an independent triple-loop dense count, the fence
+        // and idx_card(R) end to end through resolveStatics, and the negative
+        // controls: box cap, non-Int field, unbounded field, non-static
+        // struct, and the fuel bomb with its witness cell. Pure integer,
+        // in-process, no Blade source pipeline.
+        let failed = (Blade.Tests.StructIdxSpecReview.runStructIdxSpecTests ()).Failed
+        if failed = 0 then 0 else 1
+    | [ "structidxoracle" ] | [ "struct-idx-oracle" ] ->
+        // Stage C1 oracle block: an INDEPENDENTLY CODED recursive per-field
+        // enumerator over the same solution sets, compared against
+        // StructIdxSpec.enumerateBox as SET and as ORDER (the two failure
+        // modes reported separately), with hand-written lex tables so two
+        // agreeing programs can still be caught being wrong together.
+        let failed = (Blade.Tests.StructIdxOracle.runStructIdxOracleTests ()).Failed
+        if failed = 0 then 0 else 1
     | [ "pgspec" ] | [ "pg-spec" ] ->
         // Stage 5b-0 review block: the point-group counting layer
         // (MLPointSpec.fs) - the frozen {C4, D4} tables and their integrity

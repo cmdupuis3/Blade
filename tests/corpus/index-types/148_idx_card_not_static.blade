@@ -1,0 +1,44 @@
+// TEST: Idx Card Not Static (rejects)
+// ============================================================================
+// INDEX-ELIGIBILITY IS OPT-IN. A plain `struct` is never index-eligible, no
+// matter how eligible its SHAPE is: `CGm112` below has bounded Int fields and
+// a foldable conjunct — it is structurally perfect — and `idx_card` still
+// refuses it, because it was not declared `static struct`.
+//
+//   struct CGm112 is not declared static — write `static struct CGm112` to
+//   make it index-eligible
+//
+// This is a deliberate design ruling, not an implementation limitation, so it
+// gets a test rather than a comment. Two reasons decided it:
+//
+//   1. THE EMPTINESS WARNING. A derived-empty solution set warns, because a
+//      user who believed their constraints satisfiable has written a no-op
+//      `range<R>`. That warning is only meaningful for a struct the user
+//      INTENDED as an index. Under structural eligibility it would fire at
+//      ordinary constrained records that never asked to be index types —
+//      turning a real signal into noise.
+//   2. NO ACTION AT A DISTANCE. Under structural eligibility, adding a bound
+//      to the last field of an unrelated struct would silently PROMOTE it to
+//      an index type and removing one would silently DEMOTE it. The plan
+//      commits to nominal, deliberate identity for these types (§3, "NOMINAL
+//      identity by struct name"); deriving eligibility implicitly would make
+//      the most nominal thing in the design the least explicit.
+//
+// This does not break the plan's §1 "no new former, no new keyword" promise.
+// The promise is that there is no new TYPE FORMER — you never write
+// `ConstrainedIdx<CGm112>`; the struct name IS the index type name, and that
+// is intact. And `static` is not a new keyword in Blade: it already spells the
+// compile-time world in `let static`, `static function` and `static
+// method_for`. `static struct` uses it to mean exactly what it means
+// everywhere else.
+//
+// The accepting twin is index-types/145, which is this file with one keyword
+// added.
+// ============================================================================
+struct CGm112 {
+    m1:    Int<min=-1, max=1>,
+    m2:    Int<min=-1, max=1>,
+    m_out: Int<min=-1, max=1>
+} where m1 + m2 == m_out
+
+let static CARD = idx_card(CGm112)

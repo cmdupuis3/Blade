@@ -228,6 +228,16 @@ let rec lowerTypeExpr (env: TypeEnv) (ty: TypeExpr) : IRType =
             else lowerTypeExpr env (TyNamed (name, []))
         IRTIdxTagged (inner, IRefAny)
 
+    // Bounded primitive (§2.4): the bounds are a REFINEMENT of the base type,
+    // not a distinct runtime representation, so they erase here — `Float<min=0,
+    // max=1>` lowers exactly as `Float`, and `Float<velocity, min=0, max=1>`
+    // exactly as `Float<velocity>` (the unit lives on the base node). Nothing
+    // downstream — unification, promotion, codegen — needs to know. The bounds
+    // are enforced where the annotation is WRITTEN: struct fields normalize
+    // into the conjunct list at parse time, and other annotation sites carry
+    // the surface TypeExpr (Ast.boundedConjuncts).
+    | TyBounded (baseTy, _, _) -> lowerTypeExpr env baseTy
+
     | TyNamed (name, args) ->
         // Helper: try to resolve a type arg as a unit annotation, then — for
         // integer bases — as a nominal index-type alias. `taggedInner` is the
@@ -6583,6 +6593,7 @@ and prescanTypeVarNames (env: TypeEnv) (types: TypeExpr option list) : unit =
         | TyArray (elemTy, idxTys) -> scan elemTy; idxTys |> List.iter scan
         | TyPoly inner -> scan inner
         | TyConstrained (inner, _) -> scan inner
+        | TyBounded (inner, _, _) -> scan inner
         | _ -> ()
     types |> List.iter (Option.iter scan)
 
@@ -6712,6 +6723,17 @@ and checkExprInner (env: TypeEnv) (expected: IRType) (expr: Expr) : TypeResult<T
         | _ -> Error (TypeMismatch (resolved, IRTScalar ETFloat64))
     | ExprKind.ExprLit (LitBool _ as lit), IRTScalar ETBool ->
         Ok (mkTyped (TExprLit lit) (IRTScalar ETBool))
+
+    // A NEGATED numeric literal is a literal: `-1` retypes to the expected
+    // scalar exactly as `1` does. Without this arm the negation falls through
+    // to inference, which types the operand at the literal default (Int64) and
+    // then reports a spurious mismatch against, say, an Int32 struct field —
+    // so `P { a = -1 }` failed where `P { a = 1 }` succeeded. Deliberately
+    // narrow: only a LITERAL operand, so this is literal retyping and not
+    // general bidirectional propagation through arithmetic.
+    | ExprKind.ExprUnaryOp (OpNeg, ({ Kind = ExprKind.ExprLit (LitInt _ | LitFloat _) } as litExpr)), _ ->
+        checkExpr env expected litExpr
+        |> Result.map (fun tLit -> mkTyped (TExprUnaryOp (OpNeg, tLit)) tLit.Type)
 
     // A numeric/bool literal checked against an unpinned inference var — a
     // generic `T` (arity 0) or an arity-polymorphic `T^k` (e.g. the return of
@@ -7836,10 +7858,19 @@ and inferBlock env stmts finalExpr (expectedFinal: IRType option) : TypeResult<T
                             | Error e -> err <- Some e; []
                         | Error e -> err <- Some e; []
                     // Constrained-struct binding: check at every assignment.
+                    // A bounded-primitive ANNOTATION (§2.4) guards the same
+                    // way, from the surface type — bounds are erased before
+                    // IRType, so tValue.Type cannot carry them.
                     let structChecks =
                         match binding.Pattern.Kind with
                         | PatternKind.PatVar n ->
-                            match synthesizeStructChecks curEnv tValue.Type (mkExpr binding.Pattern.Span (ExprVar n)) with
+                            let subject = mkExpr binding.Pattern.Span (ExprVar n)
+                            let checksR =
+                                synthesizeStructChecks curEnv tValue.Type subject
+                                |> Result.bind (fun sc ->
+                                    synthesizeBoundChecks curEnv binding.Type n subject
+                                    |> Result.map (fun bc -> sc @ bc))
+                            match checksR with
                             | Ok cs -> cs |> List.map (fun c -> (curEnv.Builder.FreshId(), c))
                             | Error e -> err <- Some e; []
                         | _ -> []
@@ -8311,6 +8342,7 @@ and mutualMemberNamesIn (env: TypeEnv) (t: TypeExpr) : string list =
         | TyFunc (args, ret) -> (args |> List.collect walk) @ walk ret
         | TyDepIdx (outer, _, body) -> walk outer @ walk body
         | TyConstrained (inner, _) -> walk inner
+        | TyBounded (inner, _, _) -> walk inner
         | TyPoly inner -> walk inner
         | TyEquivIdx (_, g, r) -> walk g @ walk r
         | _ -> []
@@ -8451,6 +8483,50 @@ and synthesizeStructChecks (env: TypeEnv) (targetTy: IRType) (targetSurface: Exp
             |> sequenceResults
         | _ -> Ok []
     | _ -> Ok []
+
+/// Runtime bound guards for a BOUNDED-PRIMITIVE annotation — formalism §2.4,
+/// "Bounded primitives (`Float<min=0, max=1>`) carry RUNTIME-CHECKED bounds".
+/// Bounds are INCLUSIVE on both ends, so this emits `min <= subj` and/or
+/// `subj <= max` as separate guards, one per declared endpoint, using the
+/// same `TExprConstraintCheck` node the struct guards use.
+///
+/// STRUCT FIELDS DO NOT COME THROUGH HERE. A field's bounds are normalized
+/// into `FieldDecl.Bound` at parse time and desugared by `structConjuncts`,
+/// so they are already guarded by `synthesizeStructChecks` — routing them
+/// here as well would double every field guard. This serves the annotation
+/// sites where the surface type is the only carrier, because bounds are
+/// erased by `lowerTypeExpr` and never reach `IRType`.
+///
+/// v1 SCOPE: `let` binding annotations. Bounded PARAMETERS, bounded RETURN
+/// types, and re-assignment of a bounded mutable are unguarded — each needs
+/// the declared annotation at a site that does not currently carry it
+/// (params/returns at the call boundary, assignment via a name → annotation
+/// map that does not exist). Named deferral, not an oversight.
+and synthesizeBoundChecks (env: TypeEnv) (annot: TypeExpr option) (subjectName: string) (targetSurface: Expr) : TypeResult<TypedExpr list> =
+    match annot with
+    | None -> Ok []
+    | Some ty ->
+        // `Ast.boundedConjuncts` is the ONE definition of what a bounded
+        // annotation asserts; the side labels are recovered in parallel from
+        // the same node so a one-sided annotation still names its endpoint.
+        match boundedConjuncts targetSurface ty with
+        | [] -> Ok []
+        | conjs ->
+            let sides =
+                match ty with
+                | TyBounded (_, lo, hi) ->
+                    (lo |> Option.map (fun _ -> "min") |> Option.toList)
+                    @ (hi |> Option.map (fun _ -> "max") |> Option.toList)
+                | _ -> []
+            let labelled =
+                if List.length sides = List.length conjs then List.zip sides conjs
+                else conjs |> List.map (fun c -> ("bound", c))
+            labelled
+            |> List.map (fun (side, c) ->
+                inferExpr env c |> Result.map (fun tCond ->
+                    let msg = sprintf "Bound violation in '%s' (%s)" subjectName side
+                    mkTypedSpan (TExprConstraintCheck (tCond, msg)) IRTUnit tCond.Span))
+            |> sequenceResults
 
 /// Struct checks for an assignment statement/expression: a field mutation
 /// re-checks the OBJECT's constraints; any other target checks the assigned
@@ -8850,7 +8926,15 @@ and checkDecl (env: TypeEnv) (decl: Decl) : TypeResult<TypedDecl * TypeEnv> =
             // Constrained-struct binding: check at every assignment site.
             let structChecksR =
                 match binding.Pattern.Kind with
-                | PatternKind.PatVar n -> synthesizeStructChecks env' tValue.Type (mkExpr binding.Pattern.Span (ExprVar n))
+                | PatternKind.PatVar n ->
+                    // Plus the bounded-primitive annotation guards (§2.4) —
+                    // see synthesizeBoundChecks: bounds live only on the
+                    // surface type, never on tValue.Type.
+                    let subject = mkExpr binding.Pattern.Span (ExprVar n)
+                    synthesizeStructChecks env' tValue.Type subject
+                    |> Result.bind (fun sc ->
+                        synthesizeBoundChecks env' binding.Type n subject
+                        |> Result.map (fun bc -> sc @ bc))
                 | _ -> Ok []
             structChecksR |> Result.map (fun structChecks ->
             let postChecks =
@@ -9096,7 +9180,7 @@ and checkDecl (env: TypeEnv) (decl: Decl) : TypeResult<TypedDecl * TypeEnv> =
                         Ok (TTDEnumIdx (name, idx, values))
                     | _ ->
                         Ok (TTDAlias (name, typeParams, lowerTypeExpr env' body))
-                | TyDeclStruct (name, typeParams, fields, _constraints) ->
+                | TyDeclStruct (name, typeParams, fields, _constraints, _isStatic) ->
                     // Constraint validation happened in registerTypeDecl;
                     // checks materialize per assignment site (PostChecks /
                     // TExprConstraintCheck), not on the type def.
@@ -9775,7 +9859,7 @@ and registerTypeDecl (env: TypeEnv) (typeDecl: TypeDecl) : TypeResult<TypeEnv> =
             | _ -> Ok (TDIAlias (lowerTypeExpr env body))
         defInfoResult |> Result.map (fun defInfo -> registerTypeDef name defInfo env)
 
-    | TyDeclStruct (name, typeParams, fields, constraints) ->
+    | TyDeclStruct (name, typeParams, fields, constraints, isStatic) ->
         // Mutual member types are forbidden as field types — alias
         // transparency would silently erase the constraint.
         let memberMisuse =
@@ -9791,9 +9875,66 @@ and registerTypeDecl (env: TypeEnv) (typeDecl: TypeDecl) : TypeResult<TypeEnv> =
                 if irTypeHasTagWildcard (lowerTypeExpr env f.Type)
                 then Some (TagWildcardNotParam (sprintf "struct %s, field '%s'" name f.Name))
                 else None)
-        match memberMisuse |> Option.orElse wildcardField with
+        // `static struct` DECLARES the static-eligibility fence instead of
+        // leaving it to be inferred at each use: every field type must be a
+        // shape StaticEval can carry as a StaticValue. Ordinary structs skip
+        // this entirely — nothing about them changes.
+        let staticFieldErr =
+            if not isStatic then None
+            else
+                let rec why (t: TypeExpr) : string option =
+                    match t with
+                    | TyInt32 | TyInt64 | TyFloat32 | TyFloat64
+                    | TyBool | TyString | TyChar | TyUnit -> None
+                    | TyBounded (b, _, _) -> why b
+                    | TyTuple ts -> ts |> List.tryPick why
+                    | TyNamed (n, _) ->
+                        match n with
+                        | "Int" | "Int32" | "Int64" | "Float" | "Float64" | "Double"
+                        | "Float32" | "Bool" | "String" | "Char" | "Nat" | "Void" -> None
+                        | _ when env.StaticStructs.Contains n -> None
+                        | _ when (match lookupTypeDef n env with Some (TDIStruct _) -> true | _ -> false) ->
+                            Some (sprintf "'%s' is a struct declared without `static`" n)
+                        | _ when (match lookupTypeDef n env with Some (TDIVariant _) -> true | _ -> false) ->
+                            Some (sprintf "'%s' is a sum type, which the static world cannot represent" n)
+                        | _ when (match lookupTypeDef n env with Some (TDIAlias _) -> true | _ -> false) ->
+                            // Aliases are transparent in the value world but the
+                            // surface type is all we have here; be explicit.
+                            Some (sprintf "'%s' is a type alias — write the underlying primitive" n)
+                        | _ -> Some (sprintf "type '%s' is not a static shape" n)
+                    | TyArray _ | TyAbstractArray _ -> Some "array types are not statically evaluable"
+                    | TyFunc _ -> Some "function types are not statically evaluable"
+                    | TyPoly _ -> Some "arity-polymorphic packs are not statically evaluable"
+                    | TyVar _ -> Some "type variables are not statically evaluable"
+                    | _ -> Some "index and other structured types are not statically evaluable"
+                fields |> List.tryPick (fun f ->
+                    why f.Type |> Option.map (fun w -> StaticStructField (name, f.Name, w)))
+        // Bounds that CROSS, decided statically: `min=` strictly above
+        // `max=`. Only the INCLUSIVE spelling is checked — `in lo .. hi` is
+        // pre-existing syntax whose empty case (`in 0 .. 0`) has always been
+        // accepted, and an empty solution set is a warning-class event per
+        // the constrained-index plan, not an error. Only fires when both
+        // ends fold; a bound referencing an earlier field is not decidable
+        // here and is left to the conjuncts.
+        let invertedBoundErr =
+            fields |> List.tryPick (fun f ->
+                match f.Bound with
+                | Some { Lo = Some lo; Hi = Some hi; HiInclusive = true } ->
+                    let fold e =
+                        match evalStaticValueExpr env e with
+                        | Ok (StaticEval.SVInt v) -> Some v
+                        | _ -> None
+                    match fold lo, fold hi with
+                    | Some l, Some h when l > h ->
+                        Some (BoundsInverted (sprintf "struct %s, field '%s'" name f.Name, string l, string h))
+                    | _ -> None
+                | _ -> None)
+        match memberMisuse |> Option.orElse wildcardField
+                           |> Option.orElse staticFieldErr
+                           |> Option.orElse invertedBoundErr with
         | Some e -> Error e
         | None ->
+            let env = if isStatic then { env with StaticStructs = Set.add name env.StaticStructs } else env
             let fieldTypes = fields |> List.map (fun f -> (f.Name, lowerTypeExpr env f.Type))
             // Field range refinements: SEQUENTIAL scoping — a bound may
             // reference only EARLIER fields and statics, and call only
@@ -10017,6 +10158,7 @@ let rec private walkTypeExprForMixedEnumIdx (ty: TypeExpr) : Expr list =
         | TyDepIdx (outer, _, body) ->
             walkTypeExprForMixedEnumIdx outer @ walkTypeExprForMixedEnumIdx body
         | TyConstrained (inner, _) -> walkTypeExprForMixedEnumIdx inner
+        | TyBounded (inner, _, _) -> walkTypeExprForMixedEnumIdx inner
         | TyPoly inner -> walkTypeExprForMixedEnumIdx inner
         | TyNamed (_, args) -> args |> List.collect walkTypeExprForMixedEnumIdx
         | TyEquivIdx (_, g, r) ->
@@ -10042,7 +10184,7 @@ let collectMixedEnumIdxInDecl (decl: Decl) : Expr list =
         match body with
         | TyEnumIdx _ -> []  // already handled at the alias site
         | _ -> walkTypeExprForMixedEnumIdx body
-    | DeclType (TyDeclStruct (_, _, fields, _)) ->
+    | DeclType (TyDeclStruct (_, _, fields, _, _)) ->
         fields |> List.collect (fun f -> walkTypeExprForMixedEnumIdx f.Type)
     | DeclType (TyDeclSum (_, _, variants)) ->
         variants |> List.collect (fun v -> walkOpt v.Data)
@@ -10290,7 +10432,7 @@ let checkModule (env: TypeEnv) (modul: ModuleDecl) : TypedModule * TypeEnv * Com
             | DeclFunction f -> sprintf "in function '%s'" f.Name
             | DeclType td ->
                 match td with
-                | TyDeclAlias (n, _, _) | TyDeclStruct (n, _, _, _) | TyDeclSum (n, _, _) -> sprintf "in type '%s'" n
+                | TyDeclAlias (n, _, _) | TyDeclStruct (n, _, _, _, _) | TyDeclSum (n, _, _) -> sprintf "in type '%s'" n
                 | TyDeclMutualGroup (members, _) ->
                     sprintf "in mutual group '%s'" (members |> List.map fst |> String.concat ", ")
             | DeclInterface i -> sprintf "in interface '%s'" i.Name
@@ -10393,6 +10535,11 @@ let typeCheck (program: Program) : Result<TypedProgram * IRBuilder * string list
     // ANY resolveStatics pass runs (the ML and PPL elaborations each run
     // their own; all inherit the fold through StaticEval's hook).
     Blade.ProviderStatics.install ()
+    // The constrained-index counting layer's `idx_card(R)` builtin, on the
+    // same footing and for the same reason: registered before ANY
+    // resolveStatics pass, so every elaboration's own statics can size
+    // against it.
+    Blade.StructIdxSpec.install ()
     IdePartial.reset ()
     PinSuggestions.reset ()
     // Staged-former unfold FIRST: `static method_for/object_for/for`

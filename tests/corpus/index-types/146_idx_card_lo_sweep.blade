@@ -1,0 +1,95 @@
+// TEST: Idx Card Lo Sweep
+// ============================================================================
+// THE 3/7/9 SWEEP — the plan's counting-layer verification story, and a
+// sharper instrument than the single card-7 pin of index-types/145.
+//
+// Fix m1, m2 over {-1, 0, 1} (l1 = l2 = 1, nine dense pairs) and widen the
+// OUTPUT range m_out ∈ [-lo, lo] for lo = 0, 1, 2. Because the conjunct
+// m1 + m2 == m_out DETERMINES m_out from the pair, the solution count is
+// exactly the number of pairs whose sum is representable in the output range:
+//
+//     lo = 0   sums {0}          card 3
+//     lo = 1   sums {-1, 0, +1}  card 7
+//     lo = 2   sums {-2 .. +2}   card 9   <- SATURATION
+//
+// Saturation is the closed-form anchor: once the output range admits every
+// attainable sum the constraint stops excluding anything, so the card must
+// equal the DENSE PAIR COUNT (2*l1+1)(2*l2+1) = 3*3 = 9. A counter that
+// drifted high would break the 9 (it cannot exceed the dense count); one that
+// drifted low breaks the 3 or the 7.
+//
+// THE SUM-CHECK. The per-sum slice sizes are 1, 2, 3, 2, 1 for s = -2..+2,
+// summing to the dense 9. Widening lo by one admits the two slices at ±lo, so
+// the sweep's DIFFERENCES are themselves pinned:
+//     card(1) - card(0) = 2 + 2 = 4        (the s = ±1 slices)
+//     card(2) - card(1) = 1 + 1 = 2        (the s = ±2 slices)
+// The differences catch an error the three absolute counts can miss: a
+// systematic off-by-one in the shifted-box offset cancels out of a single
+// card but not out of the slice structure.
+//
+// Bounds are written half-open (`in -1 .. 2`) for m1/m2 and inclusive
+// (`Int<min=-1, max=1>`) for m_out in ONE of the structs below, deliberately
+// mixing the two spellings within a single declaration to pin that the
+// desugars compose. LO_STATIC also exercises R5: a bound may reference a
+// `let static` name, not just a literal.
+// ============================================================================
+
+// lo = 0: only the zero-sum pairs (-1,1), (0,0), (1,-1).
+static struct CGlo0 {
+    m1:    Int<min=-1, max=1>,
+    m2:    Int<min=-1, max=1>,
+    m_out: Int<min=0, max=0>
+} where m1 + m2 == m_out
+
+let static CARD0 = idx_card(CGlo0)
+// EXPECT: CARD0 = 3
+
+// lo = 1: the anchor family. Mixed spellings in one declaration.
+static struct CGlo1 {
+    m1:    Int in -1 .. 2,
+    m2:    Int in -1 .. 2,
+    m_out: Int<min=-1, max=1>
+} where m1 + m2 == m_out
+
+let static CARD1 = idx_card(CGlo1)
+// EXPECT: CARD1 = 7
+
+// lo = 2: saturation, and the R5 pin — the OUTPUT bound is a `let static`
+// name, not a literal.
+//
+// This is the form the plan's real anchor takes (m ∈ [-l, l] with l a static),
+// and it is the one that exercises the DEPENDENCY EDGE the counting layer has
+// to declare for itself: `idx_card(CGlo2)` mentions no static at all, yet
+// folding it evaluates CGlo2's bounds, which name LO. Naming a struct in a
+// static expression therefore has to pull in the statics that struct's bounds
+// and conjuncts name, or the topological sort is free to fold the call before
+// LO exists and the bound fails with "undefined variable 'LO'" against a
+// perfectly good program. LO is declared BELOW its use on purpose: source
+// order must not be what makes this work.
+static struct CGlo2 {
+    m1:    Int<min=-1, max=1>,
+    m2:    Int<min=-1, max=1>,
+    m_out: Int<min=-LO, max=LO>
+} where m1 + m2 == m_out
+
+let static LO = 2
+
+let static CARD2 = idx_card(CGlo2)
+// EXPECT: CARD2 = 9
+
+// The dense pair count (2*l1+1)(2*l2+1) with l1 = l2 = 1, computed rather than
+// written, so the saturation identity is asserted and not merely asserted-at.
+let static L1 = 1
+let static L2 = 1
+let static DENSE = (2 * L1 + 1) * (2 * L2 + 1)
+// EXPECT: DENSE = 9
+
+// Saturation: the widest output range counts every dense pair.
+let static SATURATES = CARD2 - DENSE
+// EXPECT: SATURATES = 0
+
+// The sum-check on the sweep's differences (the s = ±1 and s = ±2 slices).
+let static D10 = CARD1 - CARD0
+// EXPECT: D10 = 4
+let static D21 = CARD2 - CARD1
+// EXPECT: D21 = 2

@@ -488,7 +488,7 @@ let private unfoldModule (m: ModuleDecl) : ModuleDecl =
             | DeclFunction fd when fd.Name = fname -> false  // self-recursion doesn't count
             | DeclFunction fd -> Set.contains fname (collectAllVars fd.Body)
             | DeclLet b | DeclStatic b -> Set.contains fname (collectAllVars b.Value)
-            | DeclType (TyDeclStruct (_, _, fields, constraints)) ->
+            | DeclType (TyDeclStruct (_, _, fields, constraints, _)) ->
                 // Where-conjuncts, field-bound exprs, and field defaults are
                 // real references: the checker synthesizes runtime guards
                 // that CALL these functions at every assignment site.

@@ -27,10 +27,26 @@
     <Compile Include="src/TypedAst.fs" />
     <Compile Include="src/Deduce.fs" />
     <Compile Include="src/StaticEval.fs" />
+    <!-- Constrained records as index types — the SEMANTIC half: the static
+         and index-eligibility fences, and the ENUMERATION reading of a
+         struct's conjunct list (construction's reading stays in StaticEval /
+         TypeCheck). Needs Ast + StaticEval only; must precede both
+         StructIdxSpec.fs (its consumer) and TypeCheck.fs (which calls the
+         static-struct fence from the struct registration arm). -->
+    <Compile Include="src/StructIdxFence.fs" />
     <!-- Provider-backed statics bridge: registers the NetCDF compile-time
          data reader into StaticEval's provider hook (fold + provenance).
          Must follow both NetcdfProvider.fs and StaticEval.fs. -->
     <Compile Include="src/ProviderStatics.fs" />
+    <!-- Constrained records as index types, stage C1 — the COUNTING half
+         (docs/plan-constrained-index-types.md §7). Box enumeration over the
+         per-field inclusive bounds, the flat-filter vs arrow-heads
+         certificate, and the `idx_card(R)` static builtin. A CORE feature,
+         not an ml/ one: idx_card folds without `import ml`, so it registers
+         into StaticEval's own builtin registry (the syntactic arm — its
+         argument is a struct NAME, not a value). Needs Ast + StaticEval only;
+         must precede TypeCheck.fs, which installs it. -->
+    <Compile Include="src/StructIdxSpec.fs" />
     <!-- Staged-former unfold pass (staged tower Phase 1): eliminates
          `static method_for/object_for/for` before every elaboration stage.
          Needs Ast + StaticEval only; runs first in typeCheck's pipeline. -->
@@ -207,6 +223,12 @@
     <Compile Include="tests/Test_LieTables.fs" />
     <Compile Include="tests/Test_PermSpec.fs" />
     <Compile Include="tests/Test_PermOracle.fs" />
+    <!-- Constrained-record counting (stage C1): the module's own pins, then
+         the INDEPENDENT third-route oracle. Two files on purpose — the oracle
+         shares no helper, no fixture and no arithmetic with the block above
+         it, which is the whole point of a third route. -->
+    <Compile Include="tests/Test_StructIdxSpec.fs" />
+    <Compile Include="tests/Test_StructIdxOracle.fs" />
     <Compile Include="tests/Test_PointSpec.fs" />
     <Compile Include="tests/Test_PgOracle.fs" />
     <Compile Include="tests/Test_CartesianBridge.fs" />

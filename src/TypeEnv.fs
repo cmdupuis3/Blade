@@ -150,6 +150,14 @@ type TypeEnv = {
     /// resolveStatics runs. Best-effort: entries that don't statically
     /// evaluate are simply absent.
     StaticValues: Map<string, StaticEval.StaticValue>
+    /// Names declared with `static struct` — the DECLARED static-eligibility
+    /// fence. Registration checks every field type against the StaticValue
+    /// shapes and records the name here on success, so a later static struct
+    /// may use an earlier one as a field type. Ordinary structs never appear.
+    /// Deliberately a name set rather than a flag on TDIStruct: nothing in
+    /// the value world consults it, only declaration-time checks and the
+    /// constrained-index layers.
+    StaticStructs: Set<string>
     /// Non-fatal diagnostics accumulated during type-checking. The field
     /// is a mutable ResizeArray so functional updates (`{ env with ... }`)
     /// share the same collector — warnings emitted from any scope land
@@ -259,6 +267,7 @@ let emptyEnv () = {
     ModuleExports = Map.empty
     StaticFunctions = Map.empty
     StaticValues = Map.empty
+    StaticStructs = Set.empty
     Warnings = ResizeArray<string>()
     Provenance = System.Collections.Generic.Dictionary<IRId, Set<string>>()
     FuncConstraints = System.Collections.Generic.Dictionary<string, string list * (string * string list) list>()
@@ -455,6 +464,8 @@ let formatTypeError (err: TypeError) : string =
     | DistNotIndependent (op, source1, source2, steering) -> sprintf "dist %s: cumulants combine only for independent distributions — sources '%s' and '%s' are not declared independent; %s" op source1 source2 steering
     | PplConstraintNeedsImport (func, bare) -> sprintf "function '%s': constraint '%s' belongs to the ppl module — add `import ppl as <alias>` and write `where <alias>.%s(...)`" func bare bare
     | StructBoundScope (structName, field, bad) -> sprintf "struct %s, field '%s': bound references '%s' — bounds may reference only earlier fields and statics" structName field bad
+    | StaticStructField (structName, field, why) -> sprintf "static struct %s, field '%s': %s — every field of a `static struct` must have a statically evaluable type (Int, Float, Bool, String, Char, a tuple of those, or another static struct)" structName field why
+    | BoundsInverted (where_, lo, hi) -> sprintf "%s: bounds cross — min=%s is greater than max=%s (bounds are inclusive on both ends, so this type has no values)" where_ lo hi
     | ProviderImportByModule (suggestion, providers) -> sprintf "provider modules are imported by module name — write `import %s as <alias>` (the Providers.* spelling was removed; registered providers: %s)" suggestion providers
     | ProviderNoSelectiveImport pname -> sprintf "provider module '%s' does not support selective import — use `import %s as <alias>` and call <alias>.load/read/write" pname pname
     | IndexTypeArithForbidden name -> sprintf "Arithmetic on index type '%s' is not permitted. Index types are nominal labels — for value-level arithmetic on positions, use virtual array iteration (which produces plain ints); for new index types derived from arithmetic, type-level construction is a separate workstream not yet implemented." name
@@ -509,6 +520,7 @@ let diagnosticOfCompileError (e: CompileError) : Blade.Diagnostics.Diagnostic =
             | FallbackRightNotDense _ | FallbackRankMismatch _ -> "BL3007"
             | StructFieldDuplicate _ | StructNoField _ | StructMissingField _
             | StructFieldType _ | UnknownStructType _ | StructBoundScope _
+            | StaticStructField _
             | StructSpreadBase _ | StructSpreadNotStruct _ | StructSpreadRedundant _ -> "BL3008"
             | StructWhereNotBool _ | StructWhereError _ | WherePredicateUnannotated _
             | PplConstraintNeedsImport _
@@ -520,7 +532,8 @@ let diagnosticOfCompileError (e: CompileError) : Blade.Diagnostics.Diagnostic =
             | CompoundBareWildcard _ | CompoundWildcardArity _ | CompoundAllFree _
             | CompoundOverSupplied _ | CompoundNeedsTuple _ | RaggedIdxNeedsPrior _
             | IrrepsIdxSpec _ | IrrepsIdxSpecFn _
-            | PgIrrepsIdxSpec _ | PgIrrepsIdxSpecFn _ | TagWildcardNotParam _ -> "BL4003"
+            | PgIrrepsIdxSpec _ | PgIrrepsIdxSpecFn _ | TagWildcardNotParam _
+            | BoundsInverted _ -> "BL4003"
             | DecompactDimRange _ | DecompactPlainAxis _ | DecompactLastSlotOnly _
             | TransposeAxisRange _ | TransposeAxesEqual _ | TransposeWithinGroup _
             | StackNeedsArrays _ | StackShapeMismatch _ | JoinNeedsArrays _

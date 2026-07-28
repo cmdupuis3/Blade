@@ -153,6 +153,27 @@ type TypeExpr =
     | TyUnit
     // Named type (possibly generic)
     | TyNamed of Ident * TypeExpr list
+    /// Bounded primitive (formalism §2.4): `Base<Unit, min=e1, max=e2>`.
+    /// The unit/tag POSITIONAL arguments stay on `baseTy` (which is the
+    /// ordinary `TyNamed (name, positionalArgs)` node), so unit resolution
+    /// and tag resolution are untouched — they apply to `baseTy` exactly as
+    /// they did before this case existed. Only the NAMED `min=`/`max=`
+    /// arguments live here.
+    ///
+    /// Bounds are INCLUSIVE on both ends: `min=a, max=b` means
+    /// `a <= x && x <= b`. This is deliberately NOT the convention of the
+    /// field refinement `f: T in lo .. hi`, which is half-open like every
+    /// other `..` in the language; the translation law is
+    /// `in lo .. hi` ≡ `min=lo, max=hi-1` for integer fields.
+    ///
+    /// Invariant: at least one of min/max is `Some` — the parser refuses
+    /// to build the all-None form (it would be an unbounded bounded type).
+    ///
+    /// In STRUCT FIELD position this node never survives parsing: it is
+    /// normalized into `FieldDecl.Bound` (with `HiInclusive = true`) so the
+    /// struct's conjunct list stays the ONE representation both evaluation
+    /// worlds read. It survives only in let / parameter / return annotations.
+    | TyBounded of baseTy: TypeExpr * min: Expr option * max: Expr option
     // Array type: Array<T like I1, I2, ...>
     | TyArray of elemType: TypeExpr * indexTypes: TypeExpr list
     // Typed dist tower (ppl/NOTES.md): Dist<order, Elem like I1, ..., Ik>.
@@ -544,8 +565,12 @@ type TypeDecl =
     | TyDeclAlias of name: Ident * typeParams: Ident list * body: TypeExpr
     // sum type (enum/variant)
     | TyDeclSum of name: Ident * typeParams: Ident list * variants: VariantDecl list
-    // struct (with where-constraint conjuncts; empty = unconstrained)
-    | TyDeclStruct of name: Ident * typeParams: Ident list * fields: FieldDecl list * constraints: Expr list
+    // struct (with where-constraint conjuncts; empty = unconstrained).
+    // `isStatic` is the DECLARED static-eligibility fence: `static struct S`
+    // requires every field type to be statically evaluable (a StaticValue
+    // shape), checked once at declaration instead of inferred at each use.
+    // Ordinary structs are untouched and carry `false`.
+    | TyDeclStruct of name: Ident * typeParams: Ident list * fields: FieldDecl list * constraints: Expr list * isStatic: bool
     // mutually constrained aliases: type P1 = T1 and P2 = T2 where c1, c2, ...
     // Members are transparent aliases; the group's conjuncts are checked
     // jointly wherever the members' types are introduced together.
@@ -561,14 +586,22 @@ and FieldDecl = {
     Type: TypeExpr
     Default: Expr option
     /// Dependent range refinement: `f: T in lo .. hi` — half-open like every
-    /// other `..`, either side optional. Bounds may reference earlier fields
-    /// and statics; they desugar into the struct's constraint conjuncts.
+    /// other `..`, either side optional — OR the bounded-primitive spelling
+    /// `f: T<min=lo, max=hi>` (§2.4), which is INCLUSIVE and normalizes into
+    /// this same slot at parse time so there is exactly ONE bounds channel.
+    /// Bounds may reference earlier fields and statics; they desugar into the
+    /// struct's constraint conjuncts.
     Bound: FieldBound option
 }
 
 and FieldBound = {
     Lo: Expr option
     Hi: Expr option
+    /// Inclusivity of the UPPER endpoint, the one place the two spellings
+    /// differ. `false` = `in lo .. hi` (Hi desugars to `f < hi`);
+    /// `true` = `max=e` (Hi desugars to `f <= hi`). The LOWER endpoint is
+    /// inclusive in both spellings, so there is no `LoInclusive`.
+    HiInclusive: bool
 }
 
 type InterfaceDecl = {
@@ -677,18 +710,73 @@ let mutable synthSpan : Span = noSpan
 let syn (kind: ExprKind) : Expr = { Kind = kind; Span = synthSpan }
 let synPat (kind: PatternKind) : Pattern = { Kind = kind; Span = synthSpan }
 
+/// The comparison a field bound's UPPER endpoint desugars to: `<` for the
+/// half-open `in lo .. hi` spelling, `<=` for the inclusive `max=` spelling.
+/// Total, and half-open is the default arm.
+let boundHiOp (b: FieldBound) : BinOp =
+    if b.HiInclusive then OpLe else OpLt
+
+/// The conjuncts asserted by a BOUNDED-PRIMITIVE annotation (§2.4) about a
+/// subject expression: `[min <= subj; subj <= max]`, INCLUSIVE on both ends.
+/// Any other type yields `[]`, so call sites can apply it unconditionally.
+/// Struct fields do NOT go through here — their bounds are normalized into
+/// `FieldDecl.Bound` at parse time; this serves let / parameter / return
+/// annotations, where the surface type is the only carrier.
+let boundedConjuncts (subject: Expr) (ty: TypeExpr) : Expr list =
+    match ty with
+    | TyBounded (_, lo, hi) ->
+        (lo |> Option.map (fun l -> inheritSpan l (ExprBinOp (Elementwise, OpLe, l, subject))) |> Option.toList)
+        @ (hi |> Option.map (fun h -> inheritSpan h (ExprBinOp (Elementwise, OpLe, subject, h))) |> Option.toList)
+    | _ -> []
+
+/// The half-open box `[lo, hi)` of a field, from EITHER bound spelling:
+/// `in lo .. hi` is already half-open; `max=b` is inclusive, so the
+/// exclusive upper endpoint is `b + 1`. Declared where-conjuncts are NOT
+/// consulted — this is the BOX, not the solution set. Used by the
+/// constrained-index counting layer, which enumerates the box and filters
+/// by the conjuncts.
+let fieldBoxBounds (f: FieldDecl) : Expr option * Expr option =
+    match f.Bound with
+    | None -> (None, None)
+    | Some b ->
+        let hiExclusive =
+            b.Hi |> Option.map (fun hi ->
+                if b.HiInclusive then
+                    inheritSpan hi (ExprBinOp (Elementwise, OpAdd, hi, inheritSpan hi (ExprLit (LitInt 1L))))
+                else hi)
+        (b.Lo, hiExclusive)
+
 /// A struct's FULL constraint-conjunct list: the declared where-conjuncts
 /// plus the desugared field range refinements (`f: T in lo .. hi` — `..`
-/// is half-open, so `lo <= f` and `f < hi`). ONE definition shared by the
+/// is half-open, so `lo <= f` and `f < hi`; `f: T<min=a, max=b>` is
+/// inclusive, so `a <= f` and `f <= b`). ONE definition shared by the
 /// type checker (registration + guard synthesis) and the static evaluator
 /// (fold-time checks) so the two worlds cannot drift.
+///
+/// ORDER IS A PINNED CONTRACT (diagnostics number conjuncts 1-based in this
+/// order): declared conjuncts first in written order, then bound conjuncts
+/// in field-declaration order, Lo before Hi.
+///
+/// A declared conjunct written as a LITERAL tuple or LITERAL array flattens
+/// IN PLACE to its elements, recursively: `where (p1, p2)` and
+/// `where [p1, p2]` are accepted spellings of `where p1, p2`. This is a
+/// strict widening — a tuple/array-valued conjunct cannot fold to a boolean
+/// in either world today, so it is an error case being turned into an
+/// acceptance, never a meaning change. Only LITERALS flatten; a non-literal
+/// expression of array type must still fold to a boolean like any other
+/// conjunct (no all-true semantics is introduced anywhere).
 let structConjuncts (fields: FieldDecl list) (declared: Expr list) : Expr list =
+    let rec flatten (e: Expr) : Expr list =
+        match e.Kind with
+        | ExprTuple elems | ExprArrayLit elems -> elems |> List.collect flatten
+        | _ -> [e]
+    let declared = declared |> List.collect flatten
     let boundConjuncts =
         fields |> List.collect (fun f ->
             match f.Bound with
             | Some b ->
                 (b.Lo |> Option.map (fun lo -> inheritSpan lo (ExprBinOp (Elementwise, OpLe, lo, inheritSpan lo (ExprVar f.Name)))) |> Option.toList)
-                @ (b.Hi |> Option.map (fun hi -> inheritSpan hi (ExprBinOp (Elementwise, OpLt, inheritSpan hi (ExprVar f.Name), hi))) |> Option.toList)
+                @ (b.Hi |> Option.map (fun hi -> inheritSpan hi (ExprBinOp (Elementwise, boundHiOp b, inheritSpan hi (ExprVar f.Name), hi))) |> Option.toList)
             | None -> [])
     declared @ boundConjuncts
 

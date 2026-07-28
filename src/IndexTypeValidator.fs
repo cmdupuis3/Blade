@@ -331,7 +331,7 @@ let validateDecl (env: AliasEnv) (decl: Located<Decl>) : ValidationError list * 
         let newEnv = Map.add name body env
         (errs, newEnv)
 
-    | DeclType (TyDeclStruct (name, _, fields, _invariant)) ->
+    | DeclType (TyDeclStruct (name, _, fields, _invariant, _isStatic)) ->
         let declName = sprintf "in struct '%s'" name
         let errs =
             fields |> List.collect (fun f ->

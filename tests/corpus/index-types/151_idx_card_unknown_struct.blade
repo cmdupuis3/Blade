@@ -1,0 +1,22 @@
+// TEST: Idx Card Unknown Struct (rejects)
+// ============================================================================
+// `idx_card`'s argument is a BARE IDENTIFIER naming a declared struct, not a
+// value — it resolves by declaration-table lookup, the same resolution
+// precedent derive_pg_linear's GROUP argument set. An undeclared name is
+// therefore refused at the lookup, not evaluated:
+//
+//   'NoSuchRecord' is not a declared struct
+//
+// This is the test that keeps the bare-identifier convention honest. Because
+// the argument is not evaluated, the failure mode to guard against is not a
+// type error but a MISREAD: a name that happens to also be a `let static`
+// integer must not quietly fold to that integer's value, and an unknown name
+// must not fall through to "undefined variable" as though `idx_card` took an
+// ordinary expression. The message names the argument and says what kind of
+// thing was expected.
+// ============================================================================
+static struct Real {
+    m: Int<min=0, max=2>
+}
+
+let static CARD = idx_card(NoSuchRecord)

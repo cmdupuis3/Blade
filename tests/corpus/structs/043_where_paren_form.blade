@@ -1,0 +1,30 @@
+// TEST: Struct Where Paren Form
+// ============================================================================
+// R2 of the T4 where-ruling: `where (p1, p2)` is an ACCEPTED spelling of the
+// canonical comma-separated conjunct list (`where p1, p2`, structs/016).
+// It honors the owner's `where(constraints)` parenthesization.
+//
+// It is NOT a new grammar. parseConjuncts (Parser.fs:2862) runs the full
+// expression parser, so `(lo <= mid, mid <= hi)` arrives as ONE conjunct whose
+// top node is a literal ExprTuple; Ast.structConjuncts flattens a literal
+// tuple/array conjunct into its elements. Zero parser change.
+//
+// Why the flattening is a STRICT WIDENING (the ruling's decisive argument,
+// verified rather than assumed): at declaration EVERY conjunct must unify with
+// Bool (TypeCheck.fs:9847, StructWhereNotBool) — structs/031 is that refusal
+// firing. A tuple-typed conjunct is therefore a HARD ERROR at HEAD, so
+// flattening can only turn errors into acceptances; no accepting program
+// changes meaning. R3 keeps it literal-only: a non-literal tuple/array-valued
+// conjunct is still the structs/031 error.
+//
+// This file is the accept twin of structs/016 — same struct, same solution,
+// different spelling, so a divergence between the two is a flattening bug.
+// ============================================================================
+struct Ranged {
+    lo: Int,
+    hi: Int,
+    mid: Int
+} where (lo <= mid, mid <= hi)
+let r = Ranged { lo = 1, mid = 5, hi = 9 }
+let m = r.mid
+// EXPECT: m = 5

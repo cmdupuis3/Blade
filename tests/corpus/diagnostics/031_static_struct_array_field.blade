@@ -1,0 +1,23 @@
+// TEST: Static Struct Array Field
+// ============================================================================
+// `static struct` asserts, once at the declaration, that every field type is a
+// shape the static evaluator can carry as a value. An ARRAY field is not: the
+// static world has no array StaticValue, so the assertion fails at
+// REGISTRATION — before lowering — with the field named and the eligible
+// shapes listed.
+//
+// Checking it at the declaration rather than at each use is the whole point of
+// the marker: eligibility becomes DECLARED instead of re-inferred wherever the
+// type is mentioned, so the error arrives once, at the place the author can
+// actually fix, instead of arriving later at every use site.
+//
+// A plain `struct` with an array field is of course fine and untouched —
+// corpus structs/011 is exactly that. Nothing about ordinary records changes;
+// `static` only adds an obligation to the type that opted into it.
+// ============================================================================
+static struct Bad {
+    a: Int,
+    rows: Array<Float64 like Idx<3>>
+}
+// ERROR: BL3008
+// ERROR-CONTAINS: array types are not statically evaluable

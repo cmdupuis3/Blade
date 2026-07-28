@@ -35,6 +35,23 @@ type StaticFuncDef = {
 type StructStaticInfo = {
     Fields: string list
     Conjuncts: Expr list
+    /// Declaration-order field declarations, retained verbatim: the index
+    /// fence needs field TYPES and the raw bound expressions, neither of
+    /// which survives into the flattened conjunct list.
+    FieldDecls: FieldDecl list
+    /// The DECLARED where-conjuncts alone (no desugared field bounds). The
+    /// enumeration reading runs over a box that already enforces the
+    /// bounds, so folding them again at every cell is pure cost; keeping
+    /// the two halves separate lets the fence hand out the residual list
+    /// without re-deriving it (structConjuncts is `declared @ bounds`, so
+    /// `Conjuncts = structConjuncts FieldDecls Declared` is an invariant,
+    /// not a coincidence — Test_StructIdxFence pins it).
+    Declared: Expr list
+    /// `static struct Name { ... }` — the declared static-eligibility fence.
+    /// Irrelevant to folding (a plain constrained struct still folds and still
+    /// asserts); read by the index-type fence, for which it is the FIRST
+    /// eligibility question.
+    IsStatic: bool
 }
 
 /// Environment for static evaluation
@@ -115,6 +132,56 @@ and collectStmtNames (stmt: Stmt) : Set<string> =
     | StmtForIn (_, range, body) ->
         Set.union (collectFreeNames range) (body |> List.map collectStmtNames |> Set.unionMany)
 
+/// Struct TYPE names occurring as LITERALS (`R { ... }`) anywhere in an
+/// expression.
+///
+/// `collectFreeNames` deliberately does not report these, and must not start:
+/// a struct name is not a variable reference, and surfacing it there would
+/// make the checker's field-bound scope check (TypeCheck's StructBoundScope)
+/// reject a bound that merely mentions a struct. But the static dependency
+/// graph genuinely needs them — CONSTRUCTING `R { ... }` runs R's conjuncts,
+/// and those may name statics that the literal itself never mentions. This is
+/// the construction-reading twin of the mention edge in Phase 2 below: that
+/// one keys off `ExprVar` (`idx_card(R)`), and an `ExprStruct` node's name is
+/// not an `ExprVar`, so neither covers the other.
+///
+/// Conservative by construction: a form this walker misses simply yields no
+/// edge, which is exactly the pre-existing behavior, never a worse one.
+let rec collectStructLitNames (expr: Expr) : Set<string> =
+    let u (xs: Set<string> list) = xs |> List.fold Set.union Set.empty
+    let opt f o = o |> Option.map f |> Option.defaultValue Set.empty
+    match expr.Kind with
+    | ExprKind.ExprStruct (name, fields, spread) ->
+        u [ Set.singleton name
+            fields |> List.map (snd >> collectStructLitNames) |> u
+            opt collectStructLitNames spread ]
+    | ExprKind.ExprBinOp (_, _, l, r) -> Set.union (collectStructLitNames l) (collectStructLitNames r)
+    | ExprKind.ExprUnaryOp (_, e) -> collectStructLitNames e
+    | ExprKind.ExprApp (f, args) -> u (collectStructLitNames f :: (args |> List.map collectStructLitNames))
+    | ExprKind.ExprIf (c, t, e) -> u [collectStructLitNames c; collectStructLitNames t; collectStructLitNames e]
+    | ExprKind.ExprTuple es | ExprKind.ExprArrayLit es -> es |> List.map collectStructLitNames |> u
+    | ExprKind.ExprField (o, _) -> collectStructLitNames o
+    | ExprKind.ExprLet (b, body) -> Set.union (collectStructLitNames b.Value) (collectStructLitNames body)
+    | ExprKind.ExprMatch (s, cases) ->
+        u (collectStructLitNames s
+           :: (cases |> List.collect (fun c ->
+                   [ collectStructLitNames c.Body; opt collectStructLitNames c.Guard ])))
+    | ExprKind.ExprBlock (stmts, fin) ->
+        u ((stmts |> List.map collectStructLitNamesStmt) @ [ opt collectStructLitNames fin ])
+    | ExprKind.ExprTyped (e, _) -> collectStructLitNames e
+    | ExprKind.ExprLambda (_, _, body) -> collectStructLitNames body
+    | _ -> Set.empty
+
+and collectStructLitNamesStmt (stmt: Stmt) : Set<string> =
+    match stmt with
+    | StmtSpanned (inner, _) -> collectStructLitNamesStmt inner
+    | StmtLet b -> collectStructLitNames b.Value
+    | StmtAssign (l, _, r) -> Set.union (collectStructLitNames l) (collectStructLitNames r)
+    | StmtExpr e -> collectStructLitNames e
+    | StmtForIn (_, range, body) ->
+        (collectStructLitNames range :: (body |> List.map collectStructLitNamesStmt))
+        |> List.fold Set.union Set.empty
+
 /// Topological sort: given a map of name → dependencies, return an evaluation order.
 /// Returns Error with cycle members if a cycle exists.
 let topoSort (deps: Map<string, Set<string>>) : Result<string list, string list> =
@@ -153,15 +220,42 @@ let private externalBuiltins =
 let registerStaticBuiltin (name: string) (f: StaticValue list -> Result<StaticValue, string>) =
     externalBuiltins.[name] <- f
 
+/// Extension point: static builtins whose arguments must NOT be evaluated —
+/// the argument NAMES A DECLARATION rather than denoting a value. `idx_card(R)`
+/// is the first: R is a struct type name, so the evaluate-args-first path
+/// above would fold it to "undefined variable" before the builtin ever ran.
+/// The handler receives the environment, the remaining fuel and the raw
+/// argument expressions, and may call `evalExpr` on whichever of them it
+/// actually wants evaluated.
+///
+/// Consulted BEFORE the user's static functions and before the evaluated-args
+/// path, so a registered syntactic name is reserved; registrants are core
+/// layers (StructIdxSpec), not user code.
+let private syntacticBuiltins =
+    System.Collections.Concurrent.ConcurrentDictionary<string, StaticEnv -> int -> Expr list -> Result<StaticValue, string>>()
+
+/// Register (idempotently — last write wins) a static builtin that takes its
+/// arguments UNEVALUATED.
+let registerSyntacticStaticBuiltin (name: string) (f: StaticEnv -> int -> Expr list -> Result<StaticValue, string>) =
+    syntacticBuiltins.[name] <- f
+
+let internal trySyntacticBuiltin (name: string) =
+    match syntacticBuiltins.TryGetValue name with
+    | true, f -> Some f
+    | _ -> None
+
 /// Names the static evaluator can call: the core builtin table (must match
-/// evalBuiltin's arms) plus everything in the external registry. Used by
-/// constraint validation to reject calls that could never fold.
+/// evalBuiltin's arms) plus everything in the external and syntactic
+/// registries. Used by constraint validation to reject calls that could never
+/// fold.
 let knownBuiltinNames () : Set<string> =
     let core =
         [ "exp"; "log"; "sqrt"; "sin"; "cos"; "tan"
           "sinh"; "cosh"; "tanh"; "asin"; "acos"; "atan"
           "floor"; "ceil"; "abs"; "min"; "max"; "length"; "prodsum" ]
-    Set.union (Set.ofList core) (externalBuiltins.Keys |> Set.ofSeq)
+    Set.unionMany [ Set.ofList core
+                    externalBuiltins.Keys |> Set.ofSeq
+                    syntacticBuiltins.Keys |> Set.ofSeq ]
 
 /// Extension point: the provider layer registers its compile-time DATA
 /// reader here ((providerName, storePath, varName) → folded value) — see
@@ -191,6 +285,17 @@ let isProviderModuleName (name: string) : bool =
 // ============================================================================
 
 let maxSteps = 100_000
+
+/// PPL license conjuncts (`__ppl_indep(...)`) are static LICENSES, not value
+/// predicates — they are present only at the pre-elaborator Unfold call site
+/// and never denote a truth about field values. Both readings of a struct's
+/// conjunct list skip them: the CONSTRUCTION reading below, and the
+/// ENUMERATION reading in StructIdxFence. One definition, so a licensed
+/// struct cannot be constructible in one world and empty in the other.
+let isPplLicenseConjunct (c: Expr) : bool =
+    match c.Kind with
+    | ExprKind.ExprApp ({ Kind = ExprKind.ExprVar f }, _) -> f.StartsWith "__ppl_"
+    | _ -> false
 
 /// Fold a provider read's operand (`root.vars.A` / `root.dims.x`) through
 /// the registered compile-time reader. Shared by the qualified-application
@@ -240,6 +345,12 @@ let rec evalExpr (env: StaticEnv) (fuel: int) (expr: Expr) : Result<StaticValue,
             | OpNeg, SVFloat f -> Ok (SVFloat (-f))
             | OpNot, SVBool b -> Ok (SVBool (not b))
             | _ -> Error (sprintf "Static evaluation: cannot apply %A to %A" op v))
+
+    // Syntactic builtins (`idx_card(R)`): the argument names a DECLARATION,
+    // so it is handed over unevaluated. Checked before the static-function
+    // and evaluated-args paths — see registerSyntacticStaticBuiltin.
+    | ExprKind.ExprApp ({ Kind = ExprKind.ExprVar fname }, args) when (trySyntacticBuiltin fname).IsSome ->
+        (trySyntacticBuiltin fname).Value env (fuel - 1) args
 
     | ExprKind.ExprApp ({ Kind = ExprKind.ExprVar fname }, args) ->
         match Map.tryFind fname env.Functions with
@@ -372,14 +483,7 @@ let rec evalExpr (env: StaticEnv) (fuel: int) (expr: Expr) : Result<StaticValue,
                     match cs with
                     | [] -> Ok result
                     | (c: Expr) :: rest ->
-                        // PPL license conjuncts (`__ppl_indep(...)`) are
-                        // static licenses, not value predicates — present
-                        // only at the pre-elaborator Unfold call site; skip.
-                        let isPplLicense =
-                            match c.Kind with
-                            | ExprKind.ExprApp ({ Kind = ExprKind.ExprVar f }, _) -> f.StartsWith "__ppl_"
-                            | _ -> false
-                        if isPplLicense then checkAll (i + 1) rest
+                        if isPplLicenseConjunct c then checkAll (i + 1) rest
                         else
                             match evalExpr bodyEnv (fuel - 1) c with
                             | Ok (SVBool true) -> checkAll (i + 1) rest
@@ -667,13 +771,16 @@ let resolveStatics (decls: Located<Decl> list) : Result<StaticEnv * StaticFailur
                 Params = fd.Params |> List.map (fun p -> p.Name)
                 Body = fd.Body
             } staticFuncs
-        | DeclType (TyDeclStruct (sname, _, sfields, sconstraints)) ->
+        | DeclType (TyDeclStruct (sname, _, sfields, sconstraints, sIsStatic)) ->
             // Full pre-scan (struct/static decl order is irrelevant): the
             // fold-time conjunct list mirrors the checker's via the shared
             // Ast.structConjuncts helper.
             structInfos <- Map.add sname {
                 Fields = sfields |> List.map (fun f -> f.Name)
                 Conjuncts = structConjuncts sfields sconstraints
+                FieldDecls = sfields
+                Declared = sconstraints
+                IsStatic = sIsStatic
             } structInfos
         | DeclStatic binding ->
             // Any pattern that binds at least one name participates; a
@@ -716,13 +823,51 @@ let resolveStatics (decls: Located<Decl> list) : Result<StaticEnv * StaticFailur
     let deps =
         pending
         |> List.collect (fun pd ->
-            let refs = collectFreeNames pd.Expr
+            let direct = collectFreeNames pd.Expr
+            // NAMING A STRUCT PULLS IN THE STRUCT'S OWN STATICS. A static
+            // expression that mentions a struct TYPE by name (`idx_card(R)`)
+            // is going to fold that struct's field bounds and conjuncts, and
+            // those may name statics that the mentioning expression never
+            // does — `static struct R { m: Int<min=-L, max=L> }` with
+            // `let static L = 1` gives `idx_card(R)` a real dependency on L
+            // that no walk of the CALL can see. Without this edge the
+            // topological sort is free to fold the call first, and the bound
+            // fails with "undefined variable 'L'" against a perfectly good
+            // program. The field names themselves are excluded: they are
+            // bound per cell, not statics.
+            // Struct names reach this fold two ways, and neither covers the
+            // other: MENTIONED as a value (`idx_card(R)` — an ExprVar, so it
+            // is already in `direct`), or CONSTRUCTED as a literal
+            // (`R { ... }` — an ExprStruct, whose name is not an ExprVar).
+            // The literal case is the CONSTRUCTION reading and needs the same
+            // edge: folding it runs R's conjuncts. Seeded into the lookup
+            // only, never into `refs`, so a static that happens to share a
+            // struct's name cannot gain a spurious self-edge.
+            let mentioned = Set.union direct (collectStructLitNames pd.Expr)
+            let structRefs =
+                mentioned |> Set.fold (fun acc n ->
+                    match Map.tryFind n structInfos with
+                    | None -> acc
+                    | Some info ->
+                        let fieldNames = Set.ofList info.Fields
+                        let bounds =
+                            info.FieldDecls
+                            |> List.collect (fun f ->
+                                match f.Bound with
+                                | Some b -> [ b.Lo; b.Hi ] |> List.choose id
+                                | None -> [])
+                        let named =
+                            (bounds @ info.Conjuncts)
+                            |> List.fold (fun s e -> Set.union s (collectFreeNames e)) Set.empty
+                        Set.union acc (Set.difference named fieldNames)) Set.empty
+            let refs = Set.union direct structRefs
             // Only dependencies on OTHER static values (not functions, not
             // names bound by this same declaration)
             let declDeps = Set.difference (Set.intersect refs staticNames) (Set.ofList pd.Names)
             pd.Names |> List.map (fun n -> (n, declDeps)))
         |> Map.ofList
 
+    eprintfn "T2DEBUG deps=%A" (deps |> Map.toList |> List.map (fun (k, v) -> (k, Set.toList v)))
     match topoSort deps with
     | Error cycle ->
         Error (sprintf "Static evaluation: circular dependency among: %s"

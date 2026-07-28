@@ -1,0 +1,34 @@
+// TEST: Idx Card Box Cap (rejects)
+// ============================================================================
+// THE CAP IS ON THE BOX, NOT ON THE SOLUTION COUNT — and that is the whole
+// content of this test. The struct below has exactly ONE solution (the
+// conjunct pins all three fields), so a reader who expects the cap to be
+// about the answer would expect it to pass. It does not:
+//
+//   Wide: the index box has 1030301 cells, over the 100000-cell cap —
+//   enumeration visits every cell of the box before the constraints cut it
+//   down, so the CAP IS ON THE BOX, not on the solution count. Box:
+//   a: 0 .. 100 (101), b: 0 .. 100 (101), c: 0 .. 100 (101). Narrow the
+//   field bounds
+//
+// The reason is the counting method. C1 finds a solution set by enumerating
+// the rectangular box the field bounds define and folding the conjuncts at
+// every cell; nothing looks at the conjuncts to narrow the box first (tight
+// heads from same-record dependent bounds are a named efficiency deferral,
+// plan §8 item 5). So the COST is the box volume ∏(hi − lo + 1) whatever the
+// answer turns out to be, and the cap has to be on the thing that costs.
+//
+// 100,000 cells is the symLiftDecl precedent, and it is also what keeps the
+// per-cell fold budget an acceptable worst case rather than an unbounded one.
+//
+// The diagnostic prints the per-field extents rather than only the product:
+// a box is over the cap because of ONE field far more often than because of
+// all of them, and the extent list is what shows which.
+// ============================================================================
+static struct Wide {
+    a: Int<min=0, max=100>,
+    b: Int<min=0, max=100>,
+    c: Int<min=0, max=100>
+} where a == 50, b == 50, c == 50
+
+let static CARD = idx_card(Wide)

@@ -1,0 +1,42 @@
+// TEST: Static Struct Decl
+// ============================================================================
+// `static struct S { ... }` — the opt-in marker that makes a constrained
+// record eligible to be used as an INDEX TYPE. This file pins the half of it
+// that has nothing to do with index types: a `static struct` is still an
+// ORDINARY STRUCT.
+//
+// That is the property most at risk of quietly regressing. The marker is
+// additive: construction, field access, where-conjuncts, field bounds,
+// functional update and the runtime guard all behave exactly as they do on a
+// plain `struct`, and `static` only adds index-eligibility on top. If marking
+// a record `static` ever started restricting how it can be USED — forcing all
+// its constructions into the compile-time world, say — this test is what
+// notices.
+//
+// So: construct one at RUNTIME (no `let static`), read a field, functionally
+// update it, and check the conjunct still fires as an ordinary guard would.
+// index-types/145 covers the other half, where the same declaration is handed
+// to `idx_card`; index-types/148 covers what happens without the marker.
+// ============================================================================
+static struct MTriple {
+    m1:    Int<min=-1, max=1>,
+    m2:    Int<min=-1, max=1>,
+    m_out: Int<min=-2, max=2>
+} where m1 + m2 == m_out
+
+// Ordinary runtime construction — no `let static` anywhere.
+let t = MTriple { m1 = 1, m2 = 0, m_out = 1 }
+let a = t.m_out
+// EXPECT: a = 1
+
+// Functional update, re-checked against the same conjunct.
+let u = MTriple { m2 = 1, m_out = 2, ..t }
+let b = u.m_out
+// EXPECT: b = 2
+let c = u.m1
+// EXPECT: c = 1
+
+// And it folds in the compile-time world too, like any constrained struct.
+let static s = MTriple { m1 = -1, m2 = -1, m_out = -2 }
+let d = s.m_out
+// EXPECT: d = -2

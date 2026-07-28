@@ -2613,8 +2613,8 @@ let private stripDecl (aliases: Set<string>) (d: Located<Decl>) : Located<Decl> 
             DeclFunction { fd with Body = s fd.Body; WhereClause = w' }
         | DeclLet b -> DeclLet { b with Value = s b.Value }
         | DeclStatic b -> DeclStatic { b with Value = s b.Value }
-        | DeclType (TyDeclStruct (sname, tps, fields, conjuncts)) ->
-            DeclType (TyDeclStruct (sname, tps, fields, conjuncts |> List.map s))
+        | DeclType (TyDeclStruct (sname, tps, fields, conjuncts, isStatic)) ->
+            DeclType (TyDeclStruct (sname, tps, fields, conjuncts |> List.map s, isStatic))
         | other -> other
     { d with Value = value }
 
@@ -2648,7 +2648,7 @@ let private expandModuleCore (decls: Located<Decl> list) : Result<Located<Decl> 
         let decls =
             decls |> List.map (fun d ->
                 match d.Value with
-                | DeclType (TyDeclStruct (sname, tps, fields, conjuncts)) when not conjuncts.IsEmpty ->
+                | DeclType (TyDeclStruct (sname, tps, fields, conjuncts, isStatic)) when not conjuncts.IsEmpty ->
                     // Per-conjunct split: an indep(...) conjunct is consumed
                     // as a static license; `&&`-joined forms inside a single
                     // conjunct still split recursively. Residual conjuncts
@@ -2660,7 +2660,7 @@ let private expandModuleCore (decls: Located<Decl> list) : Result<Located<Decl> 
                     if pairs.IsEmpty then d
                     else
                         structIndep <- Map.add sname pairs structIndep
-                        { d with Value = DeclType (TyDeclStruct (sname, tps, fields, residuals)) }
+                        { d with Value = DeclType (TyDeclStruct (sname, tps, fields, residuals, isStatic)) }
                 | _ -> d)
         // Array-typed struct fields and struct-typed instances: each
         // instance contributes alias-named array shapes and, per the
@@ -2668,7 +2668,7 @@ let private expandModuleCore (decls: Located<Decl> list) : Result<Located<Decl> 
         let structFields =
             decls |> List.fold (fun acc d ->
                 match d.Value with
-                | DeclType (TyDeclStruct (sname, _, fields, _)) ->
+                | DeclType (TyDeclStruct (sname, _, fields, _, _)) ->
                     let arrFields =
                         fields |> List.choose (fun f ->
                             match f.Type with

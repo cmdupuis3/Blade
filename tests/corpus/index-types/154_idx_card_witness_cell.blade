@@ -1,0 +1,54 @@
+// TEST: Idx Card Witness Cell (rejects)
+// ============================================================================
+// A CONJUNCT THAT DOES NOT FOLD NAMES THE CELL IT FAILED AT.
+//
+//   conjunct 1 of Witness did not fold: Static evaluation: undefined variable
+//   'not_a_static' at (p = 0, q = 0). Every conjunct is folded once per box
+//   cell under a 100000-deep budget, so a conjunct that recurses without a
+//   static bound fails at the FIRST cell it is reached with
+//
+// Two things are being pinned, and they belong to different layers.
+//
+// THE REASON is the fence's: it folds one cell's conjuncts and reports what
+// went wrong with them. THE CELL is the counting layer's, because the fence
+// evaluates cells one at a time and has no idea which of the box's cells it
+// is on. A per-cell failure without its coordinates is unactionable — the
+// user is told that something in a 25-cell box did not fold and left to find
+// it — so the enumerator appends the assignment it was holding when the fold
+// came back an error.
+//
+// The cell reported is the FIRST FAILING CELL IN LEX ORDER, which is a real
+// commitment and not an accident of iteration: the flat-filter route walks
+// the box in lex order and stops at the first error, so the coordinates are
+// reproducible rather than whichever cell a scheduler happened to reach.
+//
+// WHY THE PROBE IS AN UNDEFINED NAME AND NOT THE PLAN'S FUEL BOMB (§6 risk 3).
+// `StaticEval.maxSteps` is threaded as `fuel - 1` into every CHILD of a node,
+// so it bounds evaluation DEPTH, not step count — and 100,000 nested frames
+// of `evalExpr` overflow the .NET stack long before the counter reaches zero.
+// A static function that recurses without a static bound therefore kills the
+// compiler with an uncatchable StackOverflowException instead of producing
+// this diagnostic, and it does so anywhere `let static` folds — a two-line
+// program with no struct and no `idx_card` reproduces it. That is a
+// pre-existing static-evaluator property that the counting layer neither
+// introduces nor can guard against in-process; pinning a live fuel bomb here
+// would pin a crash. The witness-cell requirement, which is the part C1 owns,
+// is pinned on a conjunct that fails and returns.
+//
+// SCOPE OF THIS FILE, so it is not read as claiming more than it does: the
+// conjunct below fails at EVERY cell, so the reported witness is the origin
+// (p = 0, q = 0) BY CONSTRUCTION. What is pinned here is that the suffix
+// EXISTS and names a cell at all — not that the witness is non-trivially
+// located. The commitment that the witness is the FIRST failing cell in lex
+// order is pinned separately in the F# block (Test_StructIdxSpec.fs), on a
+// conjunct that folds for p < 2 and fails past it, where the witness is
+// (p = 2, q = 0) and the origin would be the wrong answer. The two halves are
+// deliberately split: a single conjunct cannot be both always-failing and
+// first-failing-somewhere-interesting.
+// ============================================================================
+static struct Witness {
+    p: Int<min=0, max=4>,
+    q: Int<min=0, max=4>
+} where p + q == not_a_static
+
+let static CARD = idx_card(Witness)

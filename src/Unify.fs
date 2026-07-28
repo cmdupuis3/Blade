@@ -111,6 +111,12 @@ type TypeError =
     | StructFieldType of structName: string * field: string * expected: string * actual: string
     | UnknownStructType of name: string
     | StructBoundScope of structName: string * field: string * bad: string
+    /// `static struct S` declares that every field is statically evaluable;
+    /// this field's type is not. `why` names the offending shape.
+    | StaticStructField of structName: string * field: string * why: string
+    /// A bounded primitive whose bounds cross: `min=` above `max=`, decided
+    /// statically. `where_` locates it ("struct R, field 'm'", "let x", ...).
+    | BoundsInverted of where_: string * lo: string * hi: string
     // Constraint / where-clause violations (BL4001)
     | StructWhereNotBool of structName: string * got: string
     | StructWhereError of structName: string * inner: string

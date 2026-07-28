@@ -1,0 +1,57 @@
+// TEST: Struct Bounded Both Spellings
+// ============================================================================
+// THE TRANSLATION LAW, pinned:  `f: Int in lo .. hi`  ==  `f: Int<min=lo, max=hi-1>`
+//
+// Both bound spellings ship and they mean DIFFERENT things, which is the
+// point: `in lo .. hi` is HALF-OPEN (unchanged, byte-identical desugar), and
+// `min=/max=` is INCLUSIVE. They therefore denote the SAME field range only
+// under the -1 shift above, and this file is the differential that keeps the
+// desugar honest in both directions.
+//
+// `Half` and `Closed` below are the SAME struct written two ways: the plan's
+// CGm112 anchor, box 27, whose m-fields each range over {-1, 0, 1}. Every
+// construction is performed against BOTH types with identical field values.
+// An inclusivity bug in either desugar breaks exactly one of each pair, so
+// this catches a one-sided error that a single-spelling test cannot see.
+//
+// The extremes are the load-bearing rows: m = 1 must be legal under BOTH
+// (it is `hi - 1` on the half-open side and `max` on the closed side), and
+// that is the single value where the two conventions would disagree if either
+// were implemented with the wrong comparison.
+// ============================================================================
+struct Half {
+    m1:    Int in -1 .. 2,
+    m2:    Int in -1 .. 2,
+    m_out: Int in -2 .. 3
+} where m1 + m2 == m_out
+
+struct Closed {
+    m1:    Int<min=-1, max=1>,
+    m2:    Int<min=-1, max=1>,
+    m_out: Int<min=-2, max=2>
+} where m1 + m2 == m_out
+
+// Top of the range: `hi - 1` half-open, `max` closed. Legal under both.
+let ha = Half   { m1 = 1, m2 = 1, m_out = 2 }
+let ca = Closed { m1 = 1, m2 = 1, m_out = 2 }
+let a1 = ha.m_out
+let a2 = ca.m_out
+// EXPECT: a1 = 2
+// EXPECT: a2 = 2
+
+// Bottom of the range: `lo` under both (lo is inclusive in BOTH spellings,
+// which is why FieldBound needs no LoInclusive flag).
+let hb = Half   { m1 = -1, m2 = -1, m_out = -2 }
+let cb = Closed { m1 = -1, m2 = -1, m_out = -2 }
+let b1 = hb.m_out
+let b2 = cb.m_out
+// EXPECT: b1 = -2
+// EXPECT: b2 = -2
+
+// Interior.
+let hc = Half   { m1 = 0, m2 = 1, m_out = 1 }
+let cc = Closed { m1 = 0, m2 = 1, m_out = 1 }
+let c1 = hc.m_out
+let c2 = cc.m_out
+// EXPECT: c1 = 1
+// EXPECT: c2 = 1
