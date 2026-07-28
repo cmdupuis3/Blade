@@ -141,6 +141,26 @@ type private CallInfo = {
     CRet: string
 }
 
+// One fact the checker DEDUCED rather than read off an annotation. Emitted as
+// a NEW TOP-LEVEL `deduced[]` array rather than folded into
+// `bindings[].params[]`: it keeps the bindings shape byte-stable for editors
+// already parsing it, it can carry kernel-site facts belonging to no named
+// binding (owner "<kernel>"), and it needs no join against joinBindings.
+// Which fields are meaningful depends on DKind — see the renderer.
+type private DeducedInfo = {
+    DKind: string          // "rank" | "comm" | "antisymm" | "packComm"
+    DOwner: string         // function name, or "<kernel>" for an inline kernel
+    DName: string          // param name ("rank") / pack name ("packComm")
+    DLeft: string          // pair members ("comm" / "antisymm")
+    DRight: string
+    DIndex: int            // param index, or adjacent-pair index
+    DRank: int             // "rank" only; 0 otherwise
+    DLine: int
+    DCol: int
+    DEndLine: int
+    DEndCol: int
+}
+
 /// Clamp a span to 1-based sanity; noSpan (all zeros) becomes 1:1-1:1.
 let private clampSpan (s: Span) =
     let line = max 1 s.StartLine
@@ -149,7 +169,8 @@ let private clampSpan (s: Span) =
     let endCol = if s.EndCol >= 1 then s.EndCol else col
     (line, col, endLine, endCol)
 
-let private renderJson (diags: Diag list) (bindings: BindingInfo list) (providers: ProviderInfo list) (calls: CallInfo list) =
+let private renderJson (diags: Diag list) (bindings: BindingInfo list) (providers: ProviderInfo list)
+                       (deduced: DeducedInfo list) (calls: CallInfo list) =
     let sb = StringBuilder()
     sb.Append "{\"version\":1,\"diagnostics\":[" |> ignore
     diags
@@ -223,6 +244,25 @@ let private renderJson (diags: Diag list) (bindings: BindingInfo list) (provider
         appendMembers "dims" p.Dims
         appendMembers "vars" p.Vars
         sb.Append '}' |> ignore)
+    // Deduced facts. Only the fields that MEAN something for the kind are
+    // emitted: "rank"/"packComm" carry `name` (and `rank` for the former),
+    // pair kinds carry `left`/`right`. A consumer keys on `kind` first.
+    sb.Append "],\"deduced\":[" |> ignore
+    deduced
+    |> List.iteri (fun i d ->
+        if i > 0 then sb.Append ',' |> ignore
+        sb.AppendFormat(
+            "{{\"kind\":\"{0}\",\"owner\":\"{1}\"", jsonEscape d.DKind, jsonEscape d.DOwner) |> ignore
+        if d.DKind = "rank" || d.DKind = "packComm" then
+            sb.AppendFormat(",\"name\":\"{0}\"", jsonEscape d.DName) |> ignore
+        else
+            sb.AppendFormat(",\"left\":\"{0}\",\"right\":\"{1}\"",
+                            jsonEscape d.DLeft, jsonEscape d.DRight) |> ignore
+        sb.AppendFormat(",\"index\":{0}", d.DIndex) |> ignore
+        if d.DKind = "rank" then
+            sb.AppendFormat(",\"rank\":{0}", d.DRank) |> ignore
+        sb.AppendFormat(",\"line\":{0},\"col\":{1},\"endLine\":{2},\"endCol\":{3}}}",
+                        d.DLine, d.DCol, d.DEndLine, d.DEndCol) |> ignore)
     sb.Append "],\"calls\":[" |> ignore
     calls
     |> List.iteri (fun i c ->
@@ -1110,6 +1150,7 @@ let ideCheck (filePath: string) : int =
     let diags = ResizeArray<Diag>()
     let mutable bindings = []
     let mutable providers = []
+    let mutable deduced = []
     let mutable calls = []
     if not (File.Exists filePath) then
         diags.Add { Severity = "error"; Line = 1; Col = 1; EndLine = 1; EndCol = 1
@@ -1174,6 +1215,31 @@ let ideCheck (filePath: string) : int =
                         diags.Add { Severity = "warning"; Line = line; Col = col
                                     EndLine = endLine; EndCol = endCol
                                     Message = d.Message; Code = d.Code }
+            // Channel (f): what the checker PROVED, as distinct from what the
+            // source declared. Guarded like `providers` so a malformed fact can
+            // never break the JSON, and drained on both arms for the same
+            // reason the warnings are.
+            let drainDeducedFacts () =
+                deduced <-
+                    try
+                        Blade.TypeCheck.DeducedFacts.get ()
+                        |> List.map (fun (f, span) ->
+                            let (line, col, endLine, endCol) = clampSpan span
+                            let empty =
+                                { DKind = ""; DOwner = ""; DName = ""; DLeft = ""; DRight = ""
+                                  DIndex = 0; DRank = 0
+                                  DLine = line; DCol = col; DEndLine = endLine; DEndCol = endCol }
+                            match f with
+                            | Blade.TypeEnv.DeducedRank (owner, param, index, rank) ->
+                                { empty with DKind = "rank"; DOwner = owner; DName = param
+                                             DIndex = index; DRank = rank }
+                            | Blade.TypeEnv.DeducedPairSym (owner, left, right, index, isAnti) ->
+                                { empty with DKind = (if isAnti then "antisymm" else "comm")
+                                             DOwner = owner; DLeft = left; DRight = right
+                                             DIndex = index }
+                            | Blade.TypeEnv.DeducedPackComm (owner, pack) ->
+                                { empty with DKind = "packComm"; DOwner = owner; DName = pack })
+                    with _ -> []
             match Blade.TypeCheck.typeCheck program with
             | Error errors ->
                 for e in errors do
@@ -1188,6 +1254,7 @@ let ideCheck (filePath: string) : int =
                                 EndLine = endLine; EndCol = endCol; Message = msg; Code = code }
                 exitCode <- 1
                 drainWarningChannels ()
+                drainDeducedFacts ()
                 // Errors don't have to mean zero hovers: if the checker ran and
                 // produced a PARTIAL typed program (only a pre-check pipeline
                 // failure yields none), surface bindings/types for the parts
@@ -1201,10 +1268,11 @@ let ideCheck (filePath: string) : int =
                 | None -> ()
             | Ok (typedProg, _, _) ->
                 drainWarningChannels ()
+                drainDeducedFacts ()
                 let sourceLines = source.Replace("\r\n", "\n").Split('\n')
                 bindings <- joinBindings program typedProg sourceLines
                 // Guarded so provider structure can never break the JSON output.
                 providers <- (try collectProviderStores program with _ -> [])
                 calls <- (try collectCalls typedProg @ collectFormerCalls program typedProg with _ -> [])
-    printfn "%s" (renderJson (List.ofSeq diags) bindings providers calls)
+    printfn "%s" (renderJson (List.ofSeq diags) bindings providers deduced calls)
     exitCode

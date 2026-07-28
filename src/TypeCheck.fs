@@ -50,6 +50,13 @@ module WarningLog =
     let reset () = Blade.TypeEnv.WarningLog.reset ()
     let get () : Blade.Diagnostics.Diagnostic list = Blade.TypeEnv.WarningLog.get ()
 
+/// Fifth family member — storage in `TypeEnv.DeducedFacts` (Zonk writes to it
+/// too, and Zonk cannot reference TypeCheck). Re-exported for the same
+/// one-namespace reason as WarningLog.
+module DeducedFacts =
+    let reset () = Blade.TypeEnv.DeducedFacts.reset ()
+    let get () : (Blade.TypeEnv.DeducedFact * Span) list = Blade.TypeEnv.DeducedFacts.get ()
+
 let rec evalConstExpr (env: TypeEnv) (expr: Expr) : int64 option =
     match expr.Kind with
     | ExprKind.ExprLit (LitInt n) -> Some n
@@ -5933,6 +5940,27 @@ and buildApplyInfo (env: TypeEnv)
                     | _ -> None
                 (lambdaInfo.Params |> List.map (fun p -> p.Name),
                  Blade.Deduce.deduceAdjacentPairs signResolver lambdaInfo.Params lambdaInfo.Body)
+    // RECORDING ONLY (channel (f)): the kernel's proved adjacent-pair
+    // parities, so the editor can distinguish "you declared this" from "the
+    // checker proved it". Deliberately BROADER than the confirm-and-pin
+    // suggestion below, which additionally requires the same array in both
+    // positions — that extra condition is about the STORAGE decision, while
+    // provenance is worth surfacing whether or not compaction is on the table.
+    // Synthesized `__`-prefixed wrapper params are filtered for the same reason
+    // the suggestion filters them: they are not names a user can see.
+    if List.isEmpty iterGroups then
+        List.indexed stage3Pairs
+        |> List.iter (fun (i, par) ->
+            if (par = Blade.Deduce.PInv || par = Blade.Deduce.PNeg)
+               && i + 1 < stage3Names.Length
+               && not (stage3Names.[i].StartsWith "__")
+               && not (stage3Names.[i + 1].StartsWith "__") then
+                Blade.TypeEnv.DeducedFacts.add
+                    (Blade.TypeEnv.DeducedPairSym
+                        ("<kernel>", stage3Names.[i], stage3Names.[i + 1], i,
+                         par = Blade.Deduce.PNeg))
+                    (if tKernel.Span = noSpan then tLoop.Span else tKernel.Span))
+
     // Declared comm + provably antisymmetric body = the silent-corruption
     // case: triangular storage would drop the sign flips. Hard error;
     // PBottom stays trusted (status quo escape hatch). The mirror case —
@@ -9697,7 +9725,44 @@ and checkFunctionDecl (env: TypeEnv) (funcDecl: FunctionDecl) : TypeResult<Typed
                          Blade.Deduce.packParityOf resolver packP.VarId tBody
                  if packSummary = Blade.Deduce.PInv then
                      env.PackDeducedComm.[funcDecl.Name] <- (packP.Name, packSummary)
+                     Blade.TypeEnv.DeducedFacts.add
+                         (Blade.TypeEnv.DeducedPackComm (funcDecl.Name, packP.Name)) tBody.Span
              | _ -> ())
+            // RECORDING ONLY (channel (f)) — everything below this point in the
+            // decl's deduction is unchanged; these two loops only WRITE to the
+            // IDE side-channel. Ranks are read here rather than after the close
+            // 60 lines down because the close resolves the var: once `unify`
+            // has run, `Resolve pt` is an array and the bound is invisible.
+            // FunctionDecl has no Span field and no decl span is in scope, so
+            // tBody.Span is the tightest honest anchor.
+            let pairDeclared i =
+                (commGroups @ antisymGroups)
+                |> List.exists (fun g -> List.contains i g && List.contains (i + 1) g)
+            List.indexed deducedPairs
+            |> List.iter (fun (i, par) ->
+                if (par = Blade.Deduce.PInv || par = Blade.Deduce.PNeg)
+                   && i + 1 < typedParams.Length
+                   && not (pairDeclared i) then
+                    Blade.TypeEnv.DeducedFacts.add
+                        (Blade.TypeEnv.DeducedPairSym
+                            (funcDecl.Name, typedParams.[i].Name, typedParams.[i + 1].Name, i,
+                             par = Blade.Deduce.PNeg))
+                        tBody.Span)
+            // Ranks the body FORCED on unannotated params — read off the very
+            // same bounds the decl-close block below consumes (same Resolve,
+            // same arity guard, same GetRankLowerBound), so what the editor
+            // reports and what the checker closes agree by construction.
+            paramTypes |> List.iteri (fun i pt ->
+                match env.Subst.Resolve pt with
+                | IRTInfer id when (env.Subst.GetArityConstraint id).IsNone ->
+                    (match env.Subst.GetRankLowerBound(id) with
+                     | Some k when k > 0 ->
+                         Blade.TypeEnv.DeducedFacts.add
+                             (Blade.TypeEnv.DeducedRank
+                                 (funcDecl.Name, funcDecl.Params.[i].Name, i, k))
+                             tBody.Span
+                     | _ -> ())
+                | _ -> ())
             // Declared comm on a named function whose body is PROVABLY
             // antisymmetric in a declared adjacent pair is the
             // silent-corruption case §4 exists for. A named function cannot
@@ -10608,6 +10673,7 @@ let typeCheck (program: Program) : Result<TypedProgram * IRBuilder * string list
     IdePartial.reset ()
     PinSuggestions.reset ()
     WarningLog.reset ()
+    DeducedFacts.reset ()
     // Staged-former unfold FIRST: `static method_for/object_for/for`
     // argument lists elaborate to plain formers before any other stage
     // (ML/PPL/math/grad and the checker never see ExprStatic).

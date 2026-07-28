@@ -306,6 +306,41 @@ module WarningLog =
         | null -> []
         | _ -> List.rev slot.Value
 
+/// What the checker DEDUCED, as opposed to what the source ANNOTATED. Fifth
+/// member of the AsyncLocal side-channel family, and the answer to a real
+/// tooling gap: today an editor cannot tell a rank the user WROTE from a rank
+/// the checker PROVED, or a `where comm` from a symmetry the deduction
+/// established and is merely proposing. Both render as the same type.
+///
+/// Recorded at the deduction sites (RECORDING ONLY — nothing here changes a
+/// judgment), drained by `ide check --json` on BOTH arms into a top-level
+/// `deduced[]` array.
+///
+/// Hosted in TypeEnv, like WarningLog and for a sharper reason: Zonk (compile
+/// index 157) also closes deduced ranks, and Zonk cannot reference TypeCheck
+/// (158). From here every producer can write to one channel. IDE-only by
+/// design: ppType/abstractRenderer is type-variable printing with no hook for
+/// provenance, so nothing is threaded into the REPL's renderer.
+type DeducedFact =
+    /// A parameter whose array RANK came from the body-only rank lower bound
+    /// rather than an annotation. `index` is the parameter position.
+    | DeducedRank of owner: string * param: string * index: int * rank: int
+    /// An ADJACENT-PAIR swap parity the deduction proved, with nothing declared
+    /// for that pair. `isAnti` distinguishes antisymm from comm.
+    | DeducedPairSym of owner: string * left: string * right: string * index: int * isAnti: bool
+    /// The late tier: an arity-polymorphic pack proved invariant under every
+    /// permutation at every arity.
+    | DeducedPackComm of owner: string * pack: string
+
+module DeducedFacts =
+    let private slot = new System.Threading.AsyncLocal<(DeducedFact * Span) list>()
+    let reset () = slot.Value <- []
+    let add (f: DeducedFact) (span: Span) = slot.Value <- (f, span) :: slot.Value
+    let get () : (DeducedFact * Span) list =
+        match box slot.Value with
+        | null -> []
+        | _ -> List.rev slot.Value |> List.distinct
+
 /// Append a non-fatal diagnostic to BOTH warning channels: the legacy plain
 /// string list (`typeCheck`'s Ok payload — Repl.fs and the provider tests
 /// consume it by shape, so it keeps its exact type) and the structured
