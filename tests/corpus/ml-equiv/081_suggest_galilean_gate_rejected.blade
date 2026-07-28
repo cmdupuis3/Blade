@@ -1,0 +1,31 @@
+// TEST: ML Galilean Suggest Gate (rejects)
+import ml as ml
+// ============================================================================
+// THE GATE: inference runs only when the DECLARED certificates judge clean.
+//
+// `bad_step` carries `where ml.galilean(u)` and does not hold it — `u * dt`
+// scales the frame velocity — so the galilean judgment reports BL4009 and
+// elaboration stops there. `honest_shear` below it is perfectly deducible
+// (singletons fail, the full set {a, b} passes — corpus 079's shape), and it is
+// NOT proposed, because the channel never runs.
+//
+// That ordering is deliberate, and it is the equiv seam's rule as well: a
+// module the checker is already REJECTING gets one story, not two. Suggesting
+// pins for the neighbours of a broken certificate would bury the error under
+// advice about code the user has not asked about yet, and the speculative table
+// those suggestions thread through would have been built beside a judgment that
+// just failed.
+//
+// So this file is both a reject-probe (BL4009 on `bad_step`) and a SILENCE
+// assertion: it carries zero `// SUGGEST:` lines, and the certificate-
+// suggestion block checks that in both directions.
+// ============================================================================
+
+// The failing certificate: scaling a velocity scales its U0-coefficient.
+function bad_step(u: Float, dt: Float) where ml.galilean(u) -> Float = u * dt
+
+// Deducible in isolation — and silent here, because the gate above is shut.
+function honest_shear(a: Float, b: Float) -> Float = a - b
+
+let x = bad_step(2.0, 3.0)
+let y = honest_shear(5.0, 2.0)

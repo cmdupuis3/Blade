@@ -1,0 +1,49 @@
+// TEST: ML Galilean Suggest Velocity Difference
+import ml as ml
+// ============================================================================
+// THE FULL-SET CANDIDATE — the one non-singleton slice of the hypothesis space
+// v1 searches, and the reason it exists.
+//
+// `slip_energy` is the velocity-DIFFERENCE shape, and every singleton
+// hypothesis necessarily fails on it:
+//
+//   {uc}:  uc - ub  is  BVar - BInv = BVar, and squaring a boost-variant value
+//          scales its U0-coefficient — BL4009, no proposal.
+//   {ub}:  uc - ub  is  BInv - BVar, which carries U0-coefficient -1 — the
+//          judgment refuses it outright (v2's rational coefficients will not).
+//
+// The theorem is nonetheless true, and it is true JOINTLY: boost BOTH cells by
+// the same U0 and the difference is unchanged. So when no singleton passes and
+// at least two parameters occur free, the channel tries the FULL occurring set
+// once — `BVar - BVar -> BInv`, the central rule of this lattice — and proposes
+// `galilean(uc, ub)`. Intermediate subsets are not searched: the combinatorics
+// buy nothing on the bodies this exists for, and every skipped subset is
+// silence, which is always sound.
+//
+// Note the ORDER in the message: parameters are listed in declaration order,
+// not discovery order, so the suggestion reads as the clause the user types.
+//
+// The twin is below, and the numerical shadow is inline: the same call with
+// both cells boosted by U0 = 10 returns the identical value.
+// ============================================================================
+
+// SUGGEST: function 'slip_energy' judges boost-invariant with velocity parameter(s) uc, ub: add 'where ml.galilean(uc, ub)'
+function slip_energy(uc: Float, ub: Float) -> Float = {
+    let d = uc - ub
+    d * d
+}
+
+// The pinned twin: the proposal, written out, and checked.
+function slip_energy_pinned(uc: Float, ub: Float) where ml.galilean(uc, ub) -> Float = {
+    let d = uc - ub
+    d * d
+}
+
+let e = slip_energy(3.0, 1.0)
+// EXPECT: e = 4.0
+let e_boosted = slip_energy(13.0, 11.0)
+// EXPECT: e_boosted = 4.0
+let p = slip_energy_pinned(3.0, 1.0)
+// EXPECT: p = 4.0
+let p_boosted = slip_energy_pinned(13.0, 11.0)
+// EXPECT: p_boosted = 4.0

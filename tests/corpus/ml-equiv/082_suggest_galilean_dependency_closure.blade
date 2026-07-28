@@ -1,0 +1,53 @@
+// TEST: ML Galilean Suggest Dependency Closure
+import ml as ml
+// ============================================================================
+// THE DEPENDENCY-THREADING CASE — the one the channel exists for, in the
+// galilean lattice.
+//
+// `pair_rate` calls `cell_diff`, and neither carries a pin. Judged in
+// isolation, `pair_rate` would fail: an uncertified callee is an ESCAPE (corpus
+// 029), so a channel that folded no state would report only `cell_diff` and go
+// quiet on the stepper the user actually cares about.
+//
+// So declarations fold in DECL ORDER against a speculative certificate table:
+// when `pair_rate` is judged, `cell_diff`'s just-inferred `galilean(u)` is in
+// the table, its boost-variant parameter matches the boost-variant argument,
+// and the call resolves. Because that certificate is a HYPOTHESIS and not a
+// fact, `pair_rate`'s suggestion NAMES it — "also requires pinning: cell_diff"
+// — so the proposal cannot be misread as standalone. Two rules ride along: no
+// summary proves itself, and there is no fixpoint iteration, so a call to a
+// LATER uncertified function simply fails to resolve and is silent.
+//
+// The closure, written out, is the twin pair below: with BOTH conjuncts present
+// the checker accepts the whole chain (corpus 025's composition rule) — which
+// is exactly what the "(also requires pinning: ...)" clause was telling the
+// user to do.
+//
+// Boost-variance is per-component and index-stable, so `u(i) - u(j)` is a
+// BVar - BVar difference and the +10 shadow below returns the same numbers.
+// ============================================================================
+
+// SUGGEST: function 'cell_diff' judges boost-invariant with velocity parameter(s) u: add 'where ml.galilean(u)'
+function cell_diff(u: Array<Float like Idx<8>>, i: Int, j: Int) -> Float = u(i) - u(j)
+
+// SUGGEST: function 'pair_rate' judges boost-invariant with velocity parameter(s) u: add 'where ml.galilean(u)' (also requires pinning: cell_diff)
+function pair_rate(u: Array<Float like Idx<8>>) -> Float = cell_diff(u, 3, 1) * cell_diff(u, 2, 0)
+
+// The closure, written out. Both pins present, both bodies check.
+function cell_diff_pinned(u: Array<Float like Idx<8>>, i: Int, j: Int) where ml.galilean(u) -> Float = u(i) - u(j)
+
+function pair_rate_pinned(u: Array<Float like Idx<8>>) where ml.galilean(u) -> Float =
+  cell_diff_pinned(u, 3, 1) * cell_diff_pinned(u, 2, 0)
+
+let uv = [1.0, 2.0, 4.0, 8.0, 3.0, 5.0, 7.0, 9.0]
+let ub = [11.0, 12.0, 14.0, 18.0, 13.0, 15.0, 17.0, 19.0]
+
+// (u(3) - u(1)) * (u(2) - u(0)) = 6 * 3 = 18
+let r = pair_rate(uv)
+// EXPECT: r = 18.0
+let r_boosted = pair_rate(ub)
+// EXPECT: r_boosted = 18.0
+let rp = pair_rate_pinned(uv)
+// EXPECT: rp = 18.0
+let rp_boosted = pair_rate_pinned(ub)
+// EXPECT: rp_boosted = 18.0

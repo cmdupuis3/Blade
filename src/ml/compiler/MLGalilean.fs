@@ -412,8 +412,21 @@ and private judgeApp (ctx: Ctx) (env: Map<string, BoostStatus>) (e: Expr) (f: Ex
                     match sts |> List.tryFindIndex (fun s -> s <> BInv) with
                     | None -> Ok BInv
                     | Some i ->
-                        Error (bl4009 args.[i].Span
-                                   (sprintf "function '%s': a boost-variant value escapes to '%s', which carries no galilean certificate — certify it with `where ml.galilean(...)` or pass only boost-invariant combinations (differences, sgs.grad, sgs.stress)" ctx.FuncName fn)))
+                        // TWO different failures share this arm, and they are not
+                        // the same news. A BVar argument is a real ESCAPE: the
+                        // judgment knows the value shifts with the frame and the
+                        // callee carries no theorem about it. A BOpaque argument
+                        // is the judgment's OWN blind spot — it classified
+                        // nothing, so calling it "boost-variant" would report a
+                        // fact the walker never established (§E3: an
+                        // unclassifiable value must not be described as variant).
+                        match sts.[i] with
+                        | BVar ->
+                            Error (bl4009 args.[i].Span
+                                       (sprintf "function '%s': a boost-variant value escapes to '%s', which carries no galilean certificate — certify it with `where ml.galilean(...)` or pass only boost-invariant combinations (differences, sgs.grad, sgs.stress)" ctx.FuncName fn))
+                        | _ ->
+                            Error (bl4009 args.[i].Span
+                                       (sprintf "function '%s': an argument to '%s' cannot be classified as boost-invariant or boost-variant — a galilean-certified body admits a call only when every argument is provably boost-invariant, so rewrite this argument in terms the judgment reads (parameters, differences, sgs.grad, sgs.stress)" ctx.FuncName fn)))
             | Some BOpaque -> reject (sprintf "cannot classify the callee '%s'" fn)
     | _ ->
         judgeAll args |> Result.bind (fun sts ->
@@ -438,6 +451,156 @@ let judgeFunction (certs: Map<string, GalSig>) (mlAliases: Set<string>) (sgsAlia
         | Ok st ->
             [ bl4009 fd.Body.Span
                   (sprintf "function '%s': the body is %s — a galilean-certified function must return a boost-invariant value in v1 (velocity-returning steppers are future work)" fd.Name (statusStr st)) ]
+
+// ============================================================================
+// The inference channel (stage 6a, galilean twin) — BL4014
+// ============================================================================
+//
+// The equiv channel's construction, transplanted onto this lattice: hypothesize
+// `where ml.galilean(S)` on a function that does not carry it, run
+// `judgeFunction` verbatim, and PROPOSE the pin as a warning when the
+// certificate holds. Nothing here is a new rule — no arm, no lattice entry, no
+// message below that the checker does not already own — so `Propose ⊆
+// Check-accept` holds BY CONSTRUCTION: checking `ml.galilean(S)` needs only
+// Validate (the named params exist, which a candidate satisfies by
+// construction) plus `judgeFunction`, and `judgeFunction` against exactly this
+// table is what inference ran.
+//
+// WHAT MAKES THIS EASIER THAN EQUIV: a `GalSig` is built from the conjunct and
+// the parameter NAMES alone — no type annotations, no static specs, no group
+// roster — so recall is not gated on a fully annotated signature the way the
+// equiv channel is. What makes it HARDER is that the hypothesis space is the
+// power set of the parameters rather than a two-element group list. v1 searches
+// two slices of it:
+//
+//   * every SINGLETON {p} for p that OCCURS free in the body, in param order,
+//     and EVERY passer is proposed. Unlike equiv's strongest-first pick these
+//     are not competing strengths — `galilean(u)` and `galilean(v)` are
+//     independent true claims about independent hypotheses, and suppressing
+//     either would hide a theorem.
+//   * if NO singleton passed and at least two params occur, the FULL occurring
+//     set once. That is the velocity-DIFFERENCE shape (`u - v`), where every
+//     singleton necessarily fails — `BVar - BInv` is `BVar`, so the body
+//     returns boost-variant — and the joint boost cancels. It is the one
+//     non-singleton subset worth the search: intermediate subsets are
+//     combinatorial and, in the bodies this exists for, empirically empty.
+//
+// OCCURRENCE IS THE VACUITY GUARD (equiv's non-vacuity filter, one level
+// down). A parameter the body never names is `BVar` in an environment nothing
+// reads, so the judgment passes for a reason that has nothing to do with the
+// frame: `galilean(unused)` is vacuously true and would be a theorem's face on
+// a tautology. Restricting candidates to free-occurring params removes exactly
+// that class and no other.
+//
+// DEPENDENCY THREADING is equiv's fold with ONE table (this discipline has no
+// groups to key by): declarations fold in DECL ORDER against a speculative
+// table holding every real certificate plus every speculative one already
+// inferred this pass for an EARLIER declaration, no summary proves itself, no
+// fixpoint iteration, and every proposal that RESTS on unwritten pins names its
+// closure. A function with SEVERAL passing candidates is proposed several times
+// but threaded ZERO times: a later caller's closure note can name the callee
+// but not say WHICH of its pins it used, and a note that cannot be acted on is
+// worse than the silence a failed resolution produces.
+
+/// One candidate attempt: hypothesize `where ml.galilean(velocities)` on `fd`
+/// (the shape `buildCertTable` produces — the named params `BVar`, every other
+/// `BInv`) and run the CHECKER's own `judgeFunction` against `table` plus that
+/// hypothesis. `Some cert` = the certificate holds. Total by construction — a
+/// speculative run may never turn a compiling program into a crash, so any
+/// exception out of the judgment reads as "no proposal".
+let private tryGalCandidate (mlAliases: Set<string>) (sgsAliases: Set<string>)
+                            (table: Map<string, GalSig>) (fd: FunctionDecl)
+                            (velocities: string list)
+    : GalSig option =
+    try
+        let vs = Set.ofList velocities
+        let cert =
+            { Params =
+                fd.Params
+                |> List.map (fun p -> (p.Name, if Set.contains p.Name vs then BVar else BInv)) }
+        match judgeFunction (Map.add fd.Name cert table) mlAliases sgsAliases fd with
+        | [] -> Some cert
+        | _ :: _ -> None
+    with _ -> None
+
+/// Run the shipped galilean judgment speculatively over a module's
+/// declarations and return the BL4014 suggestions, in decl order. Never fails,
+/// never changes a verdict: the caller records these as warnings and compiles
+/// exactly as it would have.
+let inferGalileanCertificates (mlAliases: Set<string>) (sgsAliases: Set<string>)
+                              (gcerts: Map<string, GalSig>) (decls: Located<Decl> list)
+    : (string * Blade.Ast.Span) list =
+    // Speculative certificates, their dependency closures, and the DECL ORDER
+    // in which they were inferred.
+    let mutable spec : Map<string, GalSig> = Map.empty
+    let mutable deps : Map<string, string list> = Map.empty
+    let mutable order : string list = []
+    let mutable out : (string * Blade.Ast.Span) list = []
+    for d in decls do
+        match d.Value with
+        | DeclFunction fd when (conjunctsOf "__ml_galilean" fd).IsEmpty
+                               && not (Map.containsKey fd.Name gcerts) ->
+            let pNames = fd.Params |> List.map (fun p -> p.Name)
+            let bound = Set.ofList pNames
+            let free = freeVars bound fd.Body
+            // No summary proves itself: a body that names its own function
+            // would be judged against its own hypothesis, which is exactly the
+            // circularity Deduce.fs's resolver refuses. Skip; silence.
+            if not (Set.contains fd.Name free) then
+                let table = spec |> Map.fold (fun m k v -> Map.add k v m) gcerts
+                // The candidate params: those the body actually READS. The
+                // walk is run with nothing bound so parameter occurrences are
+                // reported (the self-recursion scan above binds them).
+                let occurring = freeVars Set.empty fd.Body
+                let cands = pNames |> List.filter (fun n -> Set.contains n occurring)
+                let attempt vs = (tryGalCandidate mlAliases sgsAliases table fd vs).IsSome
+                let singles = cands |> List.filter (fun p -> attempt [ p ]) |> List.map (fun p -> [ p ])
+                let hits =
+                    if not singles.IsEmpty then singles
+                    elif List.length cands >= 2 && attempt cands then [ cands ]
+                    else []
+                if not hits.IsEmpty then
+                    // The dependency closure: which speculative pins these
+                    // proposals REST on. Direct deps are the earlier
+                    // speculatively-certified names the body reads; the closure
+                    // adds each of those proposals' own deps (already computed
+                    // — decl order guarantees it), rendered in DECL order.
+                    let direct = order |> List.filter (fun n -> Set.contains n free)
+                    let closure =
+                        direct
+                        |> List.collect (fun n -> n :: defaultArg (Map.tryFind n deps) [])
+                        |> List.distinct
+                    let ordered = order |> List.filter (fun n -> List.contains n closure)
+                    let closureNote =
+                        if ordered.IsEmpty then ""
+                        else sprintf " (also requires pinning: %s)" (String.concat ", " ordered)
+                    for vs in hits do
+                        let ps = String.concat ", " vs
+                        let msg =
+                            sprintf "function '%s' judges boost-invariant with velocity parameter(s) %s: add 'where ml.galilean(%s)'%s"
+                                fd.Name ps ps closureNote
+                        out <- (msg, d.Span) :: out
+                        // The STRUCTURED twin, hosted on MLEquiv's channel so a
+                        // single `deduced[]` array carries both disciplines.
+                        Blade.ML.Equiv.CertFacts.add
+                            { Owner = fd.Name
+                              Discipline = "galilean"
+                              Group = ps
+                              Deps = ordered } d.Span
+                    // Thread ONLY an unambiguous proposal (see the header note).
+                    match hits with
+                    | [ vs ] ->
+                        let cert =
+                            { Params =
+                                fd.Params
+                                |> List.map (fun p ->
+                                    (p.Name, if List.contains p.Name vs then BVar else BInv)) }
+                        spec <- Map.add fd.Name cert spec
+                        deps <- Map.add fd.Name closure deps
+                        order <- order @ [ fd.Name ]
+                    | _ -> ()
+        | _ -> ()
+    List.rev out
 
 // ============================================================================
 // Constraint-registry handler

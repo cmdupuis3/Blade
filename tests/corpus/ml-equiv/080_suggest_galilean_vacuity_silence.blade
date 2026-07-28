@@ -1,0 +1,43 @@
+// TEST: ML Galilean Suggest Vacuity Silence
+import ml as ml
+// ============================================================================
+// THE TWO WAYS THE GALILEAN CHANNEL STAYS QUIET — an ACCEPT-status file that
+// must emit ZERO suggestions. (The absence is machine-checked: the certificate-
+// suggestion block matches produced suggestions against this file's
+// `// SUGGEST:` lines in BOTH directions, and this file has none, so any
+// suggestion at all is a failure.)
+//
+// 1. VACUITY. `drag_stub` takes a velocity it does not yet read. Hypothesize
+//    `galilean(u)` on it and the judgment PASSES — trivially, because nothing
+//    in the body ever looks `u` up, so the frame never enters the walk at all.
+//    That pass is not a theorem about velocities; it is a theorem about an
+//    argument the function ignores, and pinning it would put a theorem's face
+//    on a tautology (and, worse, would freeze a stub's signature under a
+//    certificate the moment someone fills the body in).
+//
+//    OCCURRENCE IS THE FILTER, and it is the exact analogue of the equiv
+//    channel's non-vacuity check one level down: only parameters that occur
+//    FREE in the body are candidates. `u` is not one, so it is never tried;
+//    `cd` is, and refuses (squaring is not a boost-cancelling operation). One
+//    candidate, no passer, silence.
+//
+// 2. FAILED-JUDGMENT SILENCE. `advect_stub` reads both of its parameters and
+//    is genuinely NOT boost-invariant: `u * dt` scales with the frame. Both
+//    singletons refuse, the full set {u, dt} refuses (a product of two
+//    boost-variant values is quadratic in U0), and the channel says nothing. It
+//    never reports a near miss and never explains a refusal — a rejection
+//    diagnostic is what the CHECKER owes a user who WROTE the pin, and
+//    manufacturing one for a user who did not would turn every ordinary
+//    uncertified helper into a complaint.
+// ============================================================================
+
+// Vacuity: the velocity parameter is not read. No candidate, no proposal.
+function drag_stub(u: Float, cd: Float) -> Float = cd * cd
+
+// Failed judgment: both parameters read, no hypothesis survives.
+function advect_stub(u: Float, dt: Float) -> Float = u * dt
+
+let d = drag_stub(4.0, 3.0)
+// EXPECT: d = 9.0
+let a = advect_stub(4.0, 3.0)
+// EXPECT: a = 12.0

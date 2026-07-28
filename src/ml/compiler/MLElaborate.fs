@@ -1917,17 +1917,39 @@ let private expandModule (decls: Located<Decl> list) : Result<Located<Decl> list
             let judgedGal =
                 match Blade.ML.Galilean.buildCertTable decls1 with
                 | Error d -> Error [ d ]
-                | Ok gcerts when Map.isEmpty gcerts -> Ok ()
                 | Ok gcerts ->
+                    // `sgsAliases` is computed OUTSIDE the empty-table
+                    // short-circuit: the inference channel below needs the sgs
+                    // axioms precisely on the files where no function carries a
+                    // conjunct yet, which is exactly the empty-table case.
                     let sgsAliases = Blade.ML.Galilean.sgsAliasesOf decls1
                     let diags =
-                        decls1
-                        |> List.collect (fun d ->
-                            match d.Value with
-                            | DeclFunction fd ->
-                                Blade.ML.Galilean.judgeFunction gcerts aliases sgsAliases fd
-                            | _ -> [])
-                    if diags.IsEmpty then Ok () else Error diags
+                        if Map.isEmpty gcerts then []
+                        else
+                            decls1
+                            |> List.collect (fun d ->
+                                match d.Value with
+                                | DeclFunction fd ->
+                                    Blade.ML.Galilean.judgeFunction gcerts aliases sgsAliases fd
+                                | _ -> [])
+                    if not diags.IsEmpty then Error diags
+                    else
+                        // Stage 6a's GALILEAN twin — the certificate-inference
+                        // channel, run at the same seam and off the same table.
+                        // It only ever ADDS warnings (BL4014): the certified
+                        // functions have just been checked and none of them
+                        // reached here, so an uncertified neighbour that happens
+                        // to judge boost-invariant costs nothing but a
+                        // suggestion. Runs even when `gcerts` is empty — a file
+                        // whose every function is uncertified is precisely the
+                        // file this channel exists for. A file whose DECLARED
+                        // certificate fails never gets here, and that gate is
+                        // deliberate: a module the checker is already rejecting
+                        // gets one story, not two.
+                        for (msg, span) in
+                            Blade.ML.Galilean.inferGalileanCertificates aliases sgsAliases gcerts decls1 do
+                            Blade.ML.Galilean.GalCertSuggestions.add msg span
+                        Ok ()
             match judgedGal with
             | Error ds -> Error (Choice2Of2 ds)
             | Ok () ->

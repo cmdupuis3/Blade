@@ -1,0 +1,66 @@
+// TEST: ML Galilean Suggest Independent Singletons
+import ml as ml
+// ============================================================================
+// EVERY PASSING SINGLETON IS PROPOSED — and the equiv channel's
+// "strongest-first, only one" rule does NOT transfer.
+//
+// There, O(3) and SO(3) are competing STRENGTHS over the same body: proposing
+// both would offer the user a choice where one answer strictly dominates, and
+// recording both would build a speculative table the checker then contradicts.
+// Here the hypotheses are not comparable. `galilean(u)` and `galilean(v)` are
+// independent theorems — boost the u-field alone and the answer is unchanged;
+// boost the v-field alone and the answer is unchanged — and suppressing either
+// would hide a fact. So `flux_pair` gets TWO suggestions, in parameter order.
+//
+// Both twins are below and both compile, which is the Propose ⊆ Check-accept
+// contract discharged twice over.
+//
+// THE PRICE, pinned by `total_flux`: a function with several passing candidates
+// is proposed several times and threaded into the speculative table ZERO times.
+// A caller's closure note can name `flux_pair` but cannot say WHICH of its two
+// pins the caller's judgment used, and a note that cannot be acted on is worse
+// than the silence a failed resolution produces. So `total_flux` — which WOULD
+// deduce against either hypothesis — is silent, and stays silent until the user
+// writes one of the two pins by hand. Conservative, and honest about it.
+//
+// (The joint hypothesis {u, v} also holds here, and is not proposed: the
+// full-set candidate is tried only when NO singleton passed. Corpus 079 is the
+// case that needs it.)
+// ============================================================================
+
+// SUGGEST: function 'flux_pair' judges boost-invariant with velocity parameter(s) u: add 'where ml.galilean(u)'
+// SUGGEST: function 'flux_pair' judges boost-invariant with velocity parameter(s) v: add 'where ml.galilean(v)'
+function flux_pair(u: Array<Float like Idx<4>>, v: Array<Float like Idx<4>>) -> Float =
+  (u(1) - u(0)) + (v(1) - v(0))
+
+// Silent: `flux_pair` was proposed twice, so it is not in the speculative
+// table, so this call resolves to nothing and the judgment fails.
+function total_flux(u: Array<Float like Idx<4>>, v: Array<Float like Idx<4>>) -> Float =
+  flux_pair(u, v) * 2.0
+
+// Both twins, both checked.
+function flux_pair_u(u: Array<Float like Idx<4>>, v: Array<Float like Idx<4>>)
+                     where ml.galilean(u) -> Float =
+  (u(1) - u(0)) + (v(1) - v(0))
+
+function flux_pair_v(u: Array<Float like Idx<4>>, v: Array<Float like Idx<4>>)
+                     where ml.galilean(v) -> Float =
+  (u(1) - u(0)) + (v(1) - v(0))
+
+let uv = [1.0, 2.0, 4.0, 8.0]
+let vv = [10.0, 13.0, 17.0, 22.0]
+
+// (2 - 1) + (13 - 10) = 4
+let f = flux_pair(uv, vv)
+// EXPECT: f = 4.0
+// boosting u alone by 100 and v alone by 7 leaves both differences alone.
+let f_boost_u = flux_pair([101.0, 102.0, 104.0, 108.0], vv)
+// EXPECT: f_boost_u = 4.0
+let f_boost_v = flux_pair(uv, [17.0, 20.0, 24.0, 29.0])
+// EXPECT: f_boost_v = 4.0
+let fu = flux_pair_u(uv, vv)
+// EXPECT: fu = 4.0
+let fv = flux_pair_v(uv, vv)
+// EXPECT: fv = 4.0
+let t = total_flux(uv, vv)
+// EXPECT: t = 8.0
