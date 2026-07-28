@@ -19,9 +19,17 @@ let instantiate (subst: Subst) (scheme: TypeScheme) : IRType =
             scheme.QuantifiedVars
             |> List.map (fun v ->
                 let fresh = subst.Fresh()
-                // Propagate arity constraints to the fresh variable
+                // Propagate arity constraints AND stage-2 rank lower bounds to
+                // the fresh variable. Without the rank copy a generalized
+                // (`static` / `let static`) value loses its deduced bound at
+                // every use site — the fresh var starts unbounded, so nothing
+                // closes it and it defaults to a scalar. Plain `let` lambdas
+                // share one var and never instantiate, so this only reaches the
+                // ReadOnly/generalized case.
                 match fresh with
-                | IRTInfer freshId -> subst.CopyArityConstraint(v, freshId)
+                | IRTInfer freshId ->
+                    subst.CopyArityConstraint(v, freshId)
+                    subst.CopyRankLowerBound(v, freshId)
                 | _ -> ()
                 (v, fresh))
             |> Map.ofList
