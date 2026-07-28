@@ -424,7 +424,21 @@ A suite number from a shared root is not evidence.
 > 3/7/9 with DENSE 9, SATURATES 0, D10 4, D21 2 and was clean. Check for
 > another suite in flight before believing a scattered red set, and prefer a
 > targeted re-run to a second full suite — a competing gate manufactures the
-> very evidence it is trying to evaluate. Private run directories are
+> very evidence it is trying to evaluate.
+>
+> **Stale corpus binaries are the same trap with a nastier signature.** A test
+> run leaves compiled `.exe` files NEXT TO the corpus sources
+> (`tests/corpus/index-types/146_....exe` and friends). They are gitignored,
+> so they never reach a commit and are easy to forget — but a later run reuses
+> them, which means a build you have already reverted can keep executing. This
+> bit hard during a mutation-testing pass: after reverting the mutant and
+> rebuilding, exactly the four adversarial key-order pins failed, and the
+> obvious reading — "the resolveStatics edges are broken under adversarial
+> naming" — was wrong. Stale mutant binaries were being re-run. The signature
+> is worse than the concurrency one because it is NOT scattered: it is a
+> tight, plausible, thematically-related cluster, which is precisely what a
+> real regression looks like. Before believing any post-revert failure, clean
+> the tree and `find tests/corpus -name '*.exe'`. Private run directories are
 > necessary but NOT sufficient: a fully-isolated sweep run concurrently with
 > two others still produced 13 reds purely from resource exhaustion
 > (`cc1plus.exe: out of memory`, `CreateProcess` spawn failures, exit

@@ -867,7 +867,6 @@ let resolveStatics (decls: Located<Decl> list) : Result<StaticEnv * StaticFailur
             pd.Names |> List.map (fun n -> (n, declDeps)))
         |> Map.ofList
 
-    eprintfn "T2DEBUG deps=%A" (deps |> Map.toList |> List.map (fun (k, v) -> (k, Set.toList v)))
     match topoSort deps with
     | Error cycle ->
         Error (sprintf "Static evaluation: circular dependency among: %s"
