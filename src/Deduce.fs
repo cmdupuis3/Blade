@@ -154,6 +154,21 @@ let private combineBinOp (op: BinOp) (a: Parity) (b: Parity) : Parity =
         // cleverness in v1 — ^ lowers to generic pow()).
         (match a, b with PInv, PInv -> PInv | _ -> PBottom)
 
+/// Every EXPRESSION carried inside a pattern. `TPatGuarded` is the only
+/// pattern kind that holds one, but it can sit at any depth of a composite
+/// pattern, so the whole shape is walked. A match rule that judged only
+/// `TypedMatchCase.Guard` would miss these and could report a parity for a
+/// pattern that secretly tests one of the swapped parameters; the walkers
+/// below therefore fold them in alongside the case guard.
+let rec private patGuardExprs (p: TypedPattern) : TypedExpr list =
+    match p.Kind with
+    | TPatGuarded (inner, g) -> g :: patGuardExprs inner
+    | TPatTuple ps -> ps |> List.collect patGuardExprs
+    | TPatCons (h, t) -> patGuardExprs h @ patGuardExprs t
+    | TPatVariant (_, Some payload, _) -> patGuardExprs payload
+    | TPatStruct (_, flds) -> flds |> List.collect (snd >> patGuardExprs)
+    | TPatWild | TPatVar _ | TPatLit _ | TPatVariant (_, None, _) -> []
+
 /// Conservative "does this subtree reference VarId v" — unknown node kinds
 /// answer TRUE (assume it does), which makes every consumer of this helper
 /// fail toward PBottom / SUnknown.
@@ -171,7 +186,327 @@ let rec private usesVar (v: IRId) (e: TypedExpr) : bool =
     | TExprTuple es | TExprSequence es -> List.exists (usesVar v) es
     | TExprIf (c, t, f) -> usesVar v c || usesVar v t || usesVar v f
     | TExprField (o, _, _) -> usesVar v o
+    | TExprMatch (scrut, cases) ->
+        // Pattern BINDERS are fresh ids, so they can never be `v`; only the
+        // scrutinee, the case guards, the in-pattern guards and the arm
+        // bodies can mention it. Answering precisely here (rather than the
+        // blanket TRUE below) is what lets a match that never touches a
+        // parameter be judged even/invariant instead of unknown.
+        usesVar v scrut
+        || cases |> List.exists (fun c ->
+               usesVar v c.Body
+               || (match c.Guard with Some g -> usesVar v g | None -> false)
+               || (patGuardExprs c.Pattern |> List.exists (usesVar v)))
+    | TExprLet (_, _, value, body) -> usesVar v value || usesVar v body
     | _ -> true   // unknown: assume it uses v
+
+// ============================================================================
+// Binding-form normalization (ONE descent, shared by every walker below)
+// ============================================================================
+//
+// Blade has no `let x = v in body` expression: the bind-then-use kernel is the
+// brace block `{ let d = x - y ⏎ d * d }`, i.e. TExprBlock([TStmtLet b], Some
+// final). TExprLet is real too — `wrapMutualReturnBody` wraps every declared-
+// return mutual-group body in a TExprLet chain. Neither is understood by any
+// rule below, so both collapse to PBottom / SUnknown at the walkers' closed-
+// world catch-alls, and the analysis is blind to the single most idiomatic way
+// to write a kernel.
+//
+// Rather than teach four walkers about binding forms (four places to drift —
+// and `mirrorEq` would additionally need a binder-CORRESPONDENCE parameter it
+// does not have), the bindings are eliminated once, up front, by substitution.
+// This is sound because the walkers judge STRUCTURE, never evaluation count,
+// and the flattened tree is a throwaway consumed only by this module — the
+// real body handed to Lowering is untouched. Duplication is in fact exactly
+// what `mirrorEq` needs: `{ let d = x - y ⏎ d * d }` becomes (x−y)*(x−y),
+// whose two children are NOT each other's σ-image, so the mirror rule stands
+// down and `combineBinOp OpMul PNeg PNeg = PInv` does the work.
+//
+// THE NO-REGRESSION INVARIANT every guard below leans on: a binding that is
+// not eliminated leaves its TExprBlock / TExprLet node standing, the walker
+// bottoms out exactly as it does today, and the binder is never exposed as a
+// bare TExprVar (which parityOf would wrongly read as PInv, since it is
+// neither pi nor pj). Every bail-out is therefore a loss of PRECISION, never
+// of soundness.
+
+/// Node count over the kinds the walkers understand. Anything else counts as
+/// "large" so it can never pass the duplication cap.
+let rec private exprSize (e: TypedExpr) : int =
+    let sum = List.sumBy exprSize
+    match e.Kind with
+    | TExprLit _ | TExprSection _ | TExprArity _ | TExprVar _ | TExprWildcard
+    | TExprZero | TExprRange _ | TExprReverse _ | TExprQualified _ -> 1
+    | TExprBinOp (_, _, l, r) -> 1 + exprSize l + exprSize r
+    | TExprUnaryOp (_, i) -> 1 + exprSize i
+    | TExprExtents a | TExprArrayNegate a | TExprArrayConjugate a -> 1 + exprSize a
+    | TExprField (o, _, _) -> 1 + exprSize o
+    | TExprApp (f, args) -> 1 + exprSize f + sum args
+    | TExprTupleIndex (t, i) -> 1 + exprSize t + exprSize i
+    | TExprIndex (a, idxs, _) -> 1 + exprSize a + sum idxs
+    | TExprTuple es | TExprSequence es | TExprStack es | TExprZip es -> 1 + sum es
+    | TExprComplexLit (re, im) -> 1 + exprSize re + exprSize im
+    | TExprIf (c, t, f) -> 1 + exprSize c + exprSize t + exprSize f
+    | TExprReduce (a, k, i) ->
+        1 + exprSize a + exprSize k + (match i with Some x -> exprSize x | None -> 0)
+    | _ -> 1000   // unmodelled: "large"
+
+/// Occurrence count of `v`, conservative UPWARD: node kinds this walker does
+/// not model count as 2 ("many"), so an unknown context can never let a
+/// multi-use binding masquerade as single-use. The unknown tail delegates to
+/// `usesVar`, which is conservative-TRUE, so the count is never an
+/// UNDER-estimate — which is what the `= 0` (drop the binding) and `= 1`
+/// (inline without duplicating) decisions below rely on.
+let rec private countVar (v: IRId) (e: TypedExpr) : int =
+    let c = countVar v
+    let sum = List.sumBy c
+    match e.Kind with
+    | TExprLit _ | TExprSection _ | TExprArity _ | TExprWildcard
+    | TExprZero | TExprRange _ | TExprReverse _ | TExprQualified _ -> 0
+    | TExprVar (_, id, _) -> if id = v then 1 else 0
+    | TExprBinOp (_, _, l, r) -> c l + c r
+    | TExprUnaryOp (_, i) -> c i
+    | TExprExtents a | TExprArrayNegate a | TExprArrayConjugate a -> c a
+    | TExprField (o, _, _) -> c o
+    | TExprConstraintCheck (cond, _) -> c cond
+    | TExprApp (f, args) -> c f + sum args
+    | TExprTupleIndex (t, i) -> c t + c i
+    | TExprIndex (a, idxs, _) -> c a + sum idxs
+    | TExprTuple es | TExprSequence es | TExprStack es | TExprZip es -> sum es
+    | TExprArrayLit (es, _) -> sum es
+    | TExprComplexLit (re, im) -> c re + c im
+    | TExprIf (cond, t, f) -> c cond + c t + c f
+    | TExprReduce (a, k, i) -> c a + c k + (match i with Some x -> c x | None -> 0)
+    | TExprLet (_, _, value, body) -> c value + c body
+    | TExprMatch (scrut, cases) ->
+        c scrut
+        + (cases |> List.sumBy (fun case ->
+               c case.Body
+               + (match case.Guard with Some g -> c g | None -> 0)
+               + (patGuardExprs case.Pattern |> List.sumBy c)))
+    | _ -> if usesVar v e then 2 else 0
+
+/// Capture-free substitution of `repl` for every TExprVar bearing VarId `v`.
+///
+/// Returns None when the tree contains a node kind this pass cannot rewrite —
+/// the caller then LEAVES THE BINDING IN PLACE (a precision loss, never an
+/// unsoundness). That single `| _ ->` line is what makes TExprLambda's
+/// `Captures`, TypedApplyInfo's ten expression-bearing fields, TExprAssign and
+/// every other mutation site safe BY CONSTRUCTION: if the binder appears
+/// anywhere inside a record this pass does not fully model, substitution is
+/// refused rather than performed half-way. No alpha-renaming is needed —
+/// binder IRIds are globally unique, so nothing `repl` mentions can be
+/// captured by a binder it lands under.
+let rec private substVar (v: IRId) (repl: TypedExpr) (e: TypedExpr) : TypedExpr option =
+    let sub = substVar v repl
+    let subs (es: TypedExpr list) =
+        let rs = es |> List.map sub
+        if rs |> List.forall Option.isSome then Some (rs |> List.map Option.get) else None
+    let ok k = Some { e with Kind = k }
+    match e.Kind with
+    | TExprVar (_, id, _) when id = v -> Some repl
+    | TExprLit _ | TExprSection _ | TExprArity _ | TExprVar _ | TExprWildcard
+    | TExprZero | TExprRange _ | TExprReverse _ | TExprQualified _ -> Some e
+    | TExprBinOp (m, op, l, r) ->
+        (match sub l, sub r with
+         | Some a, Some b -> ok (TExprBinOp (m, op, a, b))
+         | _ -> None)
+    | TExprUnaryOp (op, i) -> sub i |> Option.bind (fun a -> ok (TExprUnaryOp (op, a)))
+    | TExprExtents a -> sub a |> Option.bind (fun x -> ok (TExprExtents x))
+    | TExprArrayNegate a -> sub a |> Option.bind (fun x -> ok (TExprArrayNegate x))
+    | TExprArrayConjugate a -> sub a |> Option.bind (fun x -> ok (TExprArrayConjugate x))
+    | TExprField (o, f, i) -> sub o |> Option.bind (fun x -> ok (TExprField (x, f, i)))
+    | TExprConstraintCheck (cond, msg) ->
+        sub cond |> Option.bind (fun x -> ok (TExprConstraintCheck (x, msg)))
+    | TExprApp (f, args) ->
+        (match sub f, subs args with
+         | Some g, Some a -> ok (TExprApp (g, a))
+         | _ -> None)
+    | TExprTupleIndex (t, i) ->
+        (match sub t, sub i with
+         | Some a, Some b -> ok (TExprTupleIndex (a, b))
+         | _ -> None)
+    | TExprIndex (a, idxs, ident) ->
+        (match sub a, subs idxs with
+         | Some x, Some ix -> ok (TExprIndex (x, ix, ident))
+         | _ -> None)
+    | TExprTuple es -> subs es |> Option.bind (fun x -> ok (TExprTuple x))
+    | TExprSequence es -> subs es |> Option.bind (fun x -> ok (TExprSequence x))
+    | TExprStack es -> subs es |> Option.bind (fun x -> ok (TExprStack x))
+    | TExprZip es -> subs es |> Option.bind (fun x -> ok (TExprZip x))
+    | TExprArrayLit (es, aty) -> subs es |> Option.bind (fun x -> ok (TExprArrayLit (x, aty)))
+    | TExprComplexLit (re, im) ->
+        (match sub re, sub im with
+         | Some a, Some b -> ok (TExprComplexLit (a, b))
+         | _ -> None)
+    | TExprIf (cond, t, f) ->
+        (match sub cond, sub t, sub f with
+         | Some a, Some b, Some d -> ok (TExprIf (a, b, d))
+         | _ -> None)
+    | TExprReduce (a, k, i) ->
+        let si = match i with None -> Some None | Some x -> sub x |> Option.map Some
+        (match sub a, sub k, si with
+         | Some x, Some y, Some z -> ok (TExprReduce (x, y, z))
+         | _ -> None)
+    | TExprLet (n, vid, value, body) ->
+        (match sub value, sub body with
+         | Some a, Some b -> ok (TExprLet (n, vid, a, b))
+         | _ -> None)
+    | TExprBlock (stmts, final) ->
+        // Only the two statement forms that compute a value are rewritable;
+        // an assignment or a for-in loop drops out through the None below,
+        // which is precisely the guard against inlining across a mutation.
+        let subStmt (s: TypedStmt) =
+            match s with
+            | TStmtLet b ->
+                (match sub b.Value,
+                       (let ps = b.PostChecks |> List.map (fun (i, x) -> sub x |> Option.map (fun y -> (i, y)))
+                        if ps |> List.forall Option.isSome then Some (ps |> List.map Option.get) else None) with
+                 | Some nv, Some nps -> Some (TStmtLet { b with Value = nv; PostChecks = nps })
+                 | _ -> None)
+            | TStmtExpr x -> sub x |> Option.map TStmtExpr
+            | TStmtAssign _ | TStmtForIn _ -> None
+        let ss = stmts |> List.map subStmt
+        let sf = match final with None -> Some None | Some x -> sub x |> Option.map Some
+        (match ss |> List.forall Option.isSome, sf with
+         | true, Some f -> ok (TExprBlock (ss |> List.map Option.get, f))
+         | _ -> None)
+    | TExprMatch (scrut, cases) ->
+        // Patterns are left alone — their BINDERS are fresh ids and can never
+        // be `v` — except that a `TPatGuarded` carries a real expression. If
+        // one of those mentions `v` the substitution is refused outright:
+        // rewriting the body while leaving a live reference to a binding the
+        // caller is about to delete would leave a FREE variable behind, and
+        // parityOf reads a free var that is neither pi nor pj as PInv — an
+        // outright false claim rather than a lost one.
+        let subCase (c: TypedMatchCase) =
+            if patGuardExprs c.Pattern |> List.exists (usesVar v) then None
+            else
+                let sg = match c.Guard with None -> Some None | Some g -> sub g |> Option.map Some
+                (match sub c.Body, sg with
+                 | Some b, Some g -> Some { c with Body = b; Guard = g }
+                 | _ -> None)
+        let cs = cases |> List.map subCase
+        (match sub scrut, cs |> List.forall Option.isSome with
+         | Some s, true -> ok (TExprMatch (s, cs |> List.map Option.get))
+         | _ -> None)
+    | _ -> if usesVar v e then None else Some e
+
+/// Is this whole tree inside the world `substVar` can rewrite? Asked with an
+/// IRId no binder can hold, so the only thing the walk can discover is an
+/// unmodelled node kind (the unknown arm's `usesVar` is unconditionally true
+/// there). One case list, not two.
+let private isRewritable (e: TypedExpr) : bool =
+    (substVar System.Int32.MinValue e e).IsSome
+
+/// Duplication cap: a leaf, or one operator over leaves (`x - y` is 3 nodes).
+/// SINGLE-use bindings inline unconditionally — no duplication happens at all
+/// — so this governs only the duplicating case. It doubles as the blow-up
+/// bound: a value that has already grown past the cap can only ever be
+/// inlined at one site, so a chain of lets can never expand exponentially.
+let private smallValueSize = 3
+
+/// Reduce one `let name = value; body`, returning the binding-free body when
+/// that is safe and the rebuilt binding otherwise (see the no-regression
+/// invariant above: a rebuilt binding is exactly today's behavior).
+let private reduceLet (name: string) (vid: IRId) (value: TypedExpr) (body: TypedExpr) : TypedExpr =
+    // A let's type is its body's type, so the body node carries the right
+    // Type/Span for the rebuilt node.
+    let keep () = { body with Kind = TExprLet (name, vid, value, body) }
+    if not (isRewritable value) then keep ()
+    else
+        let n = countVar vid body
+        if n = 0 then body            // dead binding: the value is unreachable
+        elif n = 1 || exprSize value <= smallValueSize then
+            match substVar vid value body with
+            | Some flat -> flat
+            | None -> keep ()
+        else keep ()
+
+/// Reduce a brace block. The statement guard is stated POSITIVELY — every
+/// statement must be a plain, non-destructuring `let` — which is strictly
+/// stronger than bailing on a list of known-bad forms: TStmtAssign, TStmtForIn
+/// and TStmtExpr simply are not TStmtLet, so they can never appear in a block
+/// this rewrites, and the pack-fold template's `head :: tail` (DSConsRest,
+/// non-empty SubBindings) and a mutual-group binding's PostChecks are excluded
+/// by the same clause.
+///
+/// NOT guarded on `IsMutable`: that flag is `assign <> ReadOnly`, and
+/// `assignOfBindingMut` maps ORDINARY `let` to `Assignable` (only `static` /
+/// `let const` is ReadOnly), so `IsMutable` is true for every idiomatic block
+/// binding and gating on it would make this whole pass a no-op. The mutation
+/// hazard it was meant to cover is carried instead by the two structural
+/// guards that actually see mutations: no assignment or loop can be a
+/// statement of a block reduced here, and any assignment buried inside a
+/// binding's VALUE makes that value unrewritable, which keeps the binding —
+/// and one kept binding leaves a TExprLet at the root of the fold, so the
+/// walkers bottom out on the whole block exactly as they do today.
+let private reduceBlock (orig: TypedExpr) (stmts: TypedStmt list) (final: TypedExpr option) : TypedExpr =
+    match stmts, final with
+    | [], Some inner -> inner
+    | _, None -> orig     // a statement-only block computes nothing to judge
+    | _, Some fin ->
+        let simpleLet (s: TypedStmt) =
+            match s with
+            | TStmtLet b when List.isEmpty b.SubBindings
+                              && List.isEmpty b.PostChecks
+                              && b.Destructure = DSPositional -> Some b
+            | _ -> None
+        let bs = stmts |> List.map simpleLet
+        if bs |> List.forall Option.isSome then
+            List.foldBack
+                (fun (b: TypedBinding) acc -> reduceLet b.Name b.VarId b.Value acc)
+                (bs |> List.map Option.get)
+                fin
+        else orig
+
+/// Normalize binding forms so every walker below sees a binding-free tree
+/// wherever that is possible at all. Post-order: children first (so a let
+/// VALUE that is itself a block is already flat by the time it is inlined),
+/// then the node. Node kinds outside the rewritable world are returned
+/// UNCHANGED and UNRECURSED — flattening inside a lambda body or an apply-info
+/// record buys nothing (those nodes are ⊥ to every walker) and would force
+/// this pass to understand `Captures` / `ArrayTypes`.
+let rec private flattenBindings (e: TypedExpr) : TypedExpr =
+    let f = flattenBindings
+    let fs = List.map f
+    let k kind = { e with Kind = kind }
+    let rebuilt =
+        match e.Kind with
+        | TExprBinOp (m, op, l, r) -> k (TExprBinOp (m, op, f l, f r))
+        | TExprUnaryOp (op, i) -> k (TExprUnaryOp (op, f i))
+        | TExprExtents a -> k (TExprExtents (f a))
+        | TExprArrayNegate a -> k (TExprArrayNegate (f a))
+        | TExprArrayConjugate a -> k (TExprArrayConjugate (f a))
+        | TExprField (o, fl, i) -> k (TExprField (f o, fl, i))
+        | TExprConstraintCheck (c, msg) -> k (TExprConstraintCheck (f c, msg))
+        | TExprApp (fn, args) -> k (TExprApp (f fn, fs args))
+        | TExprTupleIndex (t, i) -> k (TExprTupleIndex (f t, f i))
+        | TExprIndex (a, idxs, ident) -> k (TExprIndex (f a, fs idxs, ident))
+        | TExprTuple es -> k (TExprTuple (fs es))
+        | TExprSequence es -> k (TExprSequence (fs es))
+        | TExprStack es -> k (TExprStack (fs es))
+        | TExprZip es -> k (TExprZip (fs es))
+        | TExprArrayLit (es, aty) -> k (TExprArrayLit (fs es, aty))
+        | TExprComplexLit (re, im) -> k (TExprComplexLit (f re, f im))
+        | TExprIf (c, t, el) -> k (TExprIf (f c, f t, f el))
+        | TExprReduce (a, kern, i) -> k (TExprReduce (f a, f kern, Option.map f i))
+        | TExprLet (n, vid, value, body) -> k (TExprLet (n, vid, f value, f body))
+        | TExprMatch (scrut, cases) ->
+            k (TExprMatch (f scrut,
+                           cases |> List.map (fun c ->
+                               { c with Body = f c.Body; Guard = Option.map f c.Guard })))
+        | TExprBlock (stmts, final) ->
+            let fStmt (s: TypedStmt) =
+                match s with
+                | TStmtLet b -> TStmtLet { b with Value = f b.Value }
+                | TStmtExpr x -> TStmtExpr (f x)
+                | other -> other
+            k (TExprBlock (stmts |> List.map fStmt, Option.map f final))
+        | _ -> e
+    match rebuilt.Kind with
+    | TExprBlock (stmts, final) -> reduceBlock rebuilt stmts final
+    | TExprLet (n, vid, value, body) -> reduceLet n vid value body
+    | _ -> rebuilt
 
 // ============================================================================
 // Sign-linearity summaries (the interprocedural half of table 2)
@@ -313,6 +648,22 @@ let rec private signParityOf (resolver: IRId -> SignParity list option)
              | SEven, SEven -> SEven
              | SOdd, SOdd -> SOdd
              | _ -> SUnknown)
+    | TExprMatch (scrut, cases) when not (List.isEmpty cases) ->
+        // The sign twin of parityOf's match rule: an EVEN scrutinee selects
+        // the same arm and decomposes identically when p is negated, so every
+        // pattern binder is even (their fresh ids land on the usesVar guard
+        // above), and the arms then compose exactly like `if` branches.
+        let guards =
+            cases |> List.collect (fun c ->
+                (match c.Guard with Some g -> [g] | None -> [])
+                @ patGuardExprs c.Pattern)
+        if sp scrut <> SEven then SUnknown
+        elif guards |> List.exists (fun g -> sp g <> SEven) then SUnknown
+        else
+            let bodies = cases |> List.map (fun c -> sp c.Body)
+            if bodies |> List.forall ((=) SEven) then SEven
+            elif bodies |> List.forall ((=) SOdd) then SOdd
+            else SUnknown
     | TExprTuple es ->
         // Aggregates have no negation as a value operation, so an odd
         // component certifies nothing about the tuple; only invariance
@@ -332,6 +683,9 @@ let rec private signParityOf (resolver: IRId -> SignParity list option)
 /// is needed and no summary is ever assumed to prove itself.
 let deduceSignParities (resolver: IRId -> SignParity list option)
                        (parms: TypedParam list) (body: TypedExpr) : SignParity list =
+    // Binding forms are eliminated ONCE here, not per parameter, and not at
+    // the two producer call sites in TypeCheck.
+    let body = flattenBindings body
     parms |> List.map (fun p -> signParityOf resolver p.VarId body)
 
 /// Parity of one subtree under σ = (pi pj). A bare occurrence of either
@@ -397,7 +751,39 @@ let rec private parityOf (resolver: IRId -> SignParity list option)
     | TExprIndex (arr, idxs, _) ->
         allInv (par arr :: (idxs |> List.map par))
     | TExprTuple es -> allInv (es |> List.map par)
-    | TExprIf (c, t, f) -> allInv ([c; t; f] |> List.map par)
+    | TExprIf (c, t, f) ->
+        // The condition must be INVARIANT — an unknown or sign-flipped
+        // condition can select a different branch under the swap, and there is
+        // no law relating two different branches' values. With the branch
+        // pinned, the chosen value carries its own parity, so branches that
+        // AGREE propagate — including PNeg/PNeg, which the previous
+        // all-invariant rule threw away. Same shape as signParityOf's TExprIf.
+        if par c <> PInv then PBottom
+        else
+            (match par t, par f with
+             | PInv, PInv -> PInv
+             | PNeg, PNeg -> PNeg
+             | _ -> PBottom)
+    | TExprMatch (scrut, cases) when not (List.isEmpty cases) ->
+        // The multi-way TExprIf, and the load-bearing reason no substitution
+        // is needed for PATTERN-BOUND variables: an INVARIANT scrutinee
+        // selects the same arm and decomposes to the same sub-values under
+        // σ, so every binder the pattern introduces really is invariant —
+        // which is exactly what the TExprVar arm above already answers for
+        // their fresh ids (≠ pi, ≠ pj ⇒ PInv). Guards are conditions, so like
+        // the `if` condition they must be invariant rather than merely
+        // agreeing; in-pattern guards (TPatGuarded) count as guards too.
+        let guards =
+            cases |> List.collect (fun c ->
+                (match c.Guard with Some g -> [g] | None -> [])
+                @ patGuardExprs c.Pattern)
+        if par scrut <> PInv then PBottom
+        elif guards |> List.exists (fun g -> par g <> PInv) then PBottom
+        else
+            let bodies = cases |> List.map (fun c -> par c.Body)
+            if bodies |> List.forall ((=) PInv) then PInv
+            elif bodies |> List.forall ((=) PNeg) then PNeg
+            else PBottom
     | TExprField (o, _, _) ->
         (match par o with PInv -> PInv | _ -> PBottom)
     | _ -> PBottom   // closed world: unlisted node kinds certify nothing
@@ -413,6 +799,7 @@ let deduceAdjacentPairs (resolver: IRId -> SignParity list option)
     match parms with
     | [] | [_] -> []
     | _ ->
+        let body = flattenBindings body
         parms
         |> List.pairwise
         |> List.map (fun (a, b) -> parityOf resolver a.VarId b.VarId body)
@@ -534,6 +921,20 @@ let packParityOf (resolver: string -> Parity option) (packId: IRId) (body: Typed
         | TExprTuple es | TExprSequence es -> allInv es
         | TExprIf (c, t, f) -> allInv [c; t; f]
         | TExprField (o, _, _) -> go o
+        | TExprMatch (scrut, cases) ->
+            // Invariance composes through every construct, so the only thing
+            // to check is that each part is invariant. Requiring the
+            // SCRUTINEE to be invariant is also what keeps pattern binders
+            // safe: a binder decomposed from a permutation-invariant value is
+            // itself permutation-invariant, whereas `match pack with h :: t`
+            // has a bare-pack scrutinee, which `go` answers PBottom.
+            allInv (scrut :: (cases |> List.collect (fun c ->
+                c.Body :: (match c.Guard with Some g -> [g] | None -> [])
+                        @ patGuardExprs c.Pattern)))
         | TExprBlock ([], Some inner) -> go inner
         | _ -> PBottom
-    go body
+    // Same normalization the fixed-arity entry points get: `{ let s = prod(a)
+    // ⏎ mean(s) }` flattens to `mean(prod(a))`, which the wrapper walk can
+    // certify. (deducePackFold keeps the RAW body — TypeCheck runs it first,
+    // and its head::tail template is DSConsRest, which flattening skips.)
+    go (flattenBindings body)
