@@ -282,11 +282,44 @@ let emptyEnv () = {
     FuncParallel = System.Collections.Generic.Dictionary<string, string list * ParallelStrategy list>()
 }
 
-/// Append a non-fatal diagnostic to the env's warnings collector.
-/// The collector is shared by reference across all functional updates
-/// of the env, so callsites don't need to thread anything through.
-let emitWarning (env: TypeEnv) (msg: string) : unit =
+/// Structured twin of `TypeEnv.Warnings`: every checker warning as a coded,
+/// spanned `Diagnostic`. Fourth member of the AsyncLocal side-channel family
+/// (TypeCheck.PinSuggestions / TypeCheck.IdePartial / ML.Equiv.CertSuggestions)
+/// — this branch's chosen idiom for getting a fact out of the checker without
+/// widening `typeCheck`'s return type, which Repl.fs and three test files
+/// consume by shape.
+///
+/// The point of the channel: `typeCheck`'s `string list` is Ok-ONLY, so a file
+/// with a hard error dropped every warning it had already earned. This survives
+/// the error path — callers drain it on BOTH arms.
+///
+/// It lives HERE rather than in TypeCheck because its only writer is
+/// `emitWarning`, which TypeEnv owns, and TypeEnv (compile index 156) cannot
+/// reference TypeCheck (158). TypeCheck re-exports it as `TypeCheck.WarningLog`
+/// so every drain site reads one namespace.
+module WarningLog =
+    let private slot = new System.Threading.AsyncLocal<Blade.Diagnostics.Diagnostic list>()
+    let reset () = slot.Value <- []
+    let add (d: Blade.Diagnostics.Diagnostic) = slot.Value <- d :: slot.Value
+    let get () : Blade.Diagnostics.Diagnostic list =
+        match box slot.Value with
+        | null -> []
+        | _ -> List.rev slot.Value
+
+/// Append a non-fatal diagnostic to BOTH warning channels: the legacy plain
+/// string list (`typeCheck`'s Ok payload — Repl.fs and the provider tests
+/// consume it by shape, so it keeps its exact type) and the structured
+/// WarningLog, which carries a BLxxxx code and a span and survives the
+/// checker's ERROR path.
+///
+/// The collector is shared by reference across all functional updates of the
+/// env, so callsites don't need to thread anything through. Callers pass the
+/// code plus the tightest span in scope; `noSpan` is honest and renders as a
+/// header-only warning, exactly what these printed before they had codes.
+let emitWarning (env: TypeEnv) (code: string) (span: Span) (msg: string) : unit =
     env.Warnings.Add(msg)
+    WarningLog.add
+        (Blade.Diagnostics.mkWarning code (Blade.Diagnostics.Codes.phaseOfCode code) span msg)
 
 /// Push a context frame onto the environment
 let pushContext (ctx: string) (env: TypeEnv) : TypeEnv =

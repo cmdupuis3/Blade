@@ -2038,6 +2038,46 @@ let lowerTypedProgram (program: TypedProgram) (rawProgram: Program option) (buil
     { Modules = irModules }
 
 // ============================================================================
+// Typecheck warning surfacing (shared by every CLI lane)
+// ============================================================================
+
+/// Every typecheck warning channel, drained and assembled as coded, spanned
+/// Diagnostics. TWO producers feed it:
+///   - `TypeEnv.WarningLog`: the checker's own `emitWarning`s
+///     (BL4001/BL4003/BL4004/BL4010/BL9001), which now survive the checker's
+///     ERROR path — before this they rode `typeCheck`'s Ok-only string list and
+///     vanished the moment a file also had a hard error;
+///   - `ML.Equiv.CertSuggestions`: stage-6a certificate suggestions (BL4011),
+///     which never went through `emitWarning` at all — the ML elaborator fills
+///     them several phases earlier and `typeCheck` only appended their string
+///     twins to the same Ok payload.
+///
+/// `skipPins` drops BL4010 for `--strict-pins`, which has already re-reported
+/// exactly those as errors. BL4011 is deliberately NOT dropped: strict-pins
+/// owns the storage decision and grows no certificate arm.
+let typeCheckWarningDiagnostics (skipPins: bool) : Blade.Diagnostics.Diagnostic list =
+    let own =
+        Blade.TypeEnv.WarningLog.get ()
+        |> List.filter (fun d -> not (skipPins && d.Code = "BL4010"))
+    let certs =
+        Blade.ML.Equiv.CertSuggestions.get ()
+        |> List.map (fun (msg, span) ->
+            Blade.Diagnostics.mkWarning "BL4011" Blade.Diagnostics.PhConstraints span msg)
+    (own @ certs) |> List.distinct
+
+/// THE surfacing helper: one format, one stream for every CLI lane. Warnings
+/// render exactly like errors (`warning[BL4010]: ...` + snippet) instead of the
+/// old bare `[TypeCheck Warning] <text>` prefix, and they go to STDERR
+/// everywhere. `check` printed its two to stdout before — a deliberate behavior
+/// change: warnings are diagnostics, and diagnostics belong on stderr so
+/// `blade check` / `blade emit` stdout stays pipeable.
+let printTypeCheckWarnings (useColor: bool) (sm: Blade.Diagnostics.SourceMap option)
+                           (skipPins: bool) : unit =
+    match typeCheckWarningDiagnostics skipPins with
+    | [] -> ()
+    | ds -> eprintfn "%s" (Blade.Diagnostics.Render.renderAll useColor sm ds)
+
+// ============================================================================
 // Convenience functions for testing
 // ============================================================================
 
@@ -2046,13 +2086,11 @@ let lower (source: string) : Result<IRProgram, string> =
     match Blade.Parser.parseProgram source with
     | Ok program ->
         match Blade.TypeCheck.typeCheck program with
-        | Ok (typedProgram, builder, warnings) ->
-            // Print TypeCheck warnings to stderr so the pipeline output
-            // (the IR program) stays clean. This is the lower-level entry
-            // point; the Main.fs runners surface warnings to stdout, but
-            // here we don't have a structured channel.
-            for w in warnings do
-                eprintfn "[TypeCheck Warning] %s" w
+        | Ok (typedProgram, builder, _) ->
+            // Warnings go to stderr so the pipeline output (the IR program)
+            // stays clean. No SourceMap and no TTY at this entry point, so the
+            // render degrades to headers + `--> file:line:col` locations.
+            printTypeCheckWarnings false None false
             // Lowering can THROW on a failed compile-time provider load; keep
             // this convenience entry point from surfacing an unhandled exception.
             (try Ok (lowerTypedProgram typedProgram (Some program) builder)
@@ -2092,9 +2130,8 @@ let lowerMultiSource (sources: (string * string) list) : Result<IRProgram, strin
     match Blade.Parser.parseMultiSource sources with
     | Ok program ->
         match Blade.TypeCheck.typeCheck program with
-        | Ok (typedProgram, builder, warnings) ->
-            for w in warnings do
-                eprintfn "[TypeCheck Warning] %s" w
+        | Ok (typedProgram, builder, _) ->
+            printTypeCheckWarnings false None false
             // Lowering can THROW on a failed compile-time provider load.
             (try Ok (lowerTypedProgram typedProgram (Some program) builder)
              with ex -> Error ex.Message)

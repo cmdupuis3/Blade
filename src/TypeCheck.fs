@@ -41,6 +41,15 @@ module PinSuggestions =
     let get () : (string * Span) list =
         match box slot.Value with null -> [] | _ -> List.rev slot.Value
 
+/// Fourth family member — see `TypeEnv.WarningLog` for the storage and why it
+/// has to live down there (its only writer is `emitWarning`, and TypeEnv cannot
+/// reference upward). Re-exported here so that
+/// `Blade.TypeCheck.{PinSuggestions, IdePartial, WarningLog}` is the ONE
+/// namespace a drain site reads.
+module WarningLog =
+    let reset () = Blade.TypeEnv.WarningLog.reset ()
+    let get () : Blade.Diagnostics.Diagnostic list = Blade.TypeEnv.WarningLog.get ()
+
 let rec evalConstExpr (env: TypeEnv) (expr: Expr) : int64 option =
     match expr.Kind with
     | ExprKind.ExprLit (LitInt n) -> Some n
@@ -1291,7 +1300,12 @@ let checkOmpVarNames (env: TypeEnv) (paramNames: string list)
             | Omp o ->
                 o.Vars |> List.iter (fun (v, _) ->
                     if not (List.contains v paramNames) then
-                        emitWarning env
+                        // BL4001 (constraint violation): a `where`-clause
+                        // conjunct that names nothing. `noSpan` is honest here —
+                        // checkOmpVarNames takes no span, and threading one in
+                        // means editing its two callers; the render degrades to
+                        // a header-only line, exactly what it printed before.
+                        emitWarning env "BL4001" noSpan
                             (sprintf "omp(%s: ...) on %s names no parameter (parameters: %s). The clause is ignored for that variable; parallelization falls back to the outermost loop level only."
                                      v owner
                                      (if List.isEmpty paramNames then "none"
@@ -1669,7 +1683,10 @@ let private checkArrayIndexTags (env: TypeEnv) (arrTy: IRArrayType) (tArgs: Type
                 // usable as the documented escape hatch for raveled indices.
                 | IRTIdxTagged (_, IRefAny)
                 | IRTScalar (ETInt32 | ETInt64) ->
-                    emitWarning env (sprintf
+                    // BL4003 (index type violation) — the warning twin of this
+                    // very site: the ERROR branch two cases up raises
+                    // IndexTagMismatchNamed, which is already BL4003.
+                    emitWarning env "BL4003" tArg.Span (sprintf
                         "Array indexed with untagged integer where slot expects tag '%s'. Consider an explicit cast like `(expr : %s)` or iterate via `range<%s>` to flow the tag automatically."
                         tagName tagName tagName)
                     None
@@ -4138,7 +4155,8 @@ and inferTupleIndex (env: TypeEnv) tuple index : TypeResult<TypedExpr> =
                         // step with checkArrayIndexTags above.
                         | IRTIdxTagged (_, IRefAny)
                         | IRTScalar (ETInt32 | ETInt64) ->
-                            emitWarning env (sprintf
+                            // BL4003, same as checkArrayIndexTags' twin.
+                            emitWarning env "BL4003" tI.Span (sprintf
                                 "Array indexed with untagged integer where slot expects tag '%s'. Consider an explicit cast like `(expr : %s)` or iterate via `range<%s>` to flow the tag automatically."
                                 tagName tagName tagName)
                             None
@@ -4434,7 +4452,11 @@ and warnImplicitOuterProduct (env: TypeEnv) (tLoop: TypedExpr) (rightResult: Typ
             | Ok _ -> true
             | Error _ -> false
         if coIterable && not allSameIdentity && not kernelComm then
-            emitWarning env (sprintf
+            // BL4004 (symmetry violation band): the note's own suppression rule
+            // keys on a declared comm/antisymm, so it belongs with the
+            // array-structure/symmetry codes. Minting a dedicated code is a
+            // one-line follow-up once the branch's allocations settle.
+            emitWarning env "BL4004" tLoop.Span (sprintf
                 "implicit method_for: `(A, B) <@> kernel` iterates the OUTER product of its %d operands (structure-first default), not elementwise pairs. For elementwise co-iteration write `for (A, B) in range<...> <@> kernel` or `zip(A, B) <@> kernel`; write `method_for(...)` explicitly to confirm the outer product and silence this note."
                 info.Arrays.Length)
     | _ -> ()
@@ -5786,7 +5808,10 @@ and inferApply (env: TypeEnv) (tLeft: TypedExpr) (tRight: TypedExpr) : TypeResul
                                          sprintf
                                              "kernel `%s` deduces commutative over its argument pack `%s` (at every arity) and all %d positions receive the same array: output storage is DENSE today. Pin `where comm(%s)` on `%s` to opt into compact symmetric (triangular) storage."
                                              fnName packName n packName fnName
-                                     emitWarning env msg
+                                     // BL4010 — the confirm-and-pin storage
+                                     // suggestion, same code and now the same
+                                     // span the IDE channel carries.
+                                     emitWarning env "BL4010" span msg
                                      PinSuggestions.add msg span
                              | _ -> ())
                         buildApplyInfo env flatArrays identities arrayTypes sDimsPerArray sharedRecords
@@ -5965,11 +5990,12 @@ and buildApplyInfo (env: TypeEnv)
                         sprintf
                             "kernel deduces ANTIsymmetric in (%s, %s) (f(%s, %s) = -f(%s, %s)) and both positions receive the same array: output storage is DENSE today. Pin `where antisymm(%s, %s)` on the kernel to opt into compact antisymmetric (strict-triangular, zero-diagonal) storage."
                             n1 n2 n2 n1 n1 n2 n1 n2
-                emitWarning env msg
                 // Synthesized kernels (eta wrappers, sections) carry noSpan;
                 // fall back to the former expression's source span so the
                 // ghost annotation lands on `object_for(f)` / `method_for(..)`.
+                // Hoisted above the warning so BOTH channels carry one span.
                 let span = if tKernel.Span = noSpan then tLoop.Span else tKernel.Span
+                emitWarning env "BL4010" span msg
                 PinSuggestions.add msg span)
 
     // Dropped-parallel-clause guard. This is the apply seam — the ONE place a
@@ -5995,7 +6021,10 @@ and buildApplyInfo (env: TypeEnv)
                             | _ -> false) args lambdaInfo.Params ->
             (match env.FuncParallel.TryGetValue fname with
              | true, (_, strategies) when not (List.isEmpty strategies) ->
-                 emitWarning env
+                 // BL9001 — it says "this is a compiler bug" in so many words,
+                 // so it renders under the internal-compiler-error code.
+                 emitWarning env "BL9001"
+                     (if tKernel.Span = noSpan then tLoop.Span else tKernel.Span)
                      (sprintf "internal: `where` parallel clause on '%s' was dropped by kernel-position eta-expansion — the loop nest will be emitted serial. This is a compiler bug, not a source error; please report it."
                               fname)
              | _ -> ())
@@ -10578,6 +10607,7 @@ let typeCheck (program: Program) : Result<TypedProgram * IRBuilder * string list
     Blade.StructIdxSpec.install ()
     IdePartial.reset ()
     PinSuggestions.reset ()
+    WarningLog.reset ()
     // Staged-former unfold FIRST: `static method_for/object_for/for`
     // argument lists elaborate to plain formers before any other stage
     // (ML/PPL/math/grad and the checker never see ExprStatic).

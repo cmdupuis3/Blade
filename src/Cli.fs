@@ -141,15 +141,19 @@ let compileFile (filePath: string) (verbose: bool) (strictPins: bool) : Result<s
         // here (rustc-style, with source snippets) into the string channel.
         let useColor = not Console.IsErrorRedirected
         match lowerDiag (Some filePath) source with
-        | Error ds, sm -> Error (Blade.Diagnostics.Render.renderAll useColor (Some sm) ds)
-        | Ok (ir, tcWarnings), sm ->
+        | Error ds, sm ->
+            // S1: a file that also has a hard error has still EARNED every
+            // warning the checker produced before it failed. They rode
+            // typeCheck's Ok-only payload before and were dropped here.
+            printTypeCheckWarnings useColor (Some sm) false
+            Error (Blade.Diagnostics.Render.renderAll useColor (Some sm) ds)
+        | Ok (ir, _), sm ->
             // Strict mode fails here, before codegen: the pin suggestions
             // REPLACE their warning twins (which are therefore not printed).
             match strictPinFailure strictPins useColor (Some sm) with
             | Some rendered -> Error rendered
             | None ->
-            for w in tcWarnings do
-                eprintfn "[TypeCheck Warning] %s" w
+            printTypeCheckWarnings useColor (Some sm) false
             match IR.validateIR ir with
             | Error errs ->
                 let ds =
@@ -561,7 +565,7 @@ let replLoop () : int =
             | Blade.Interp.Repl.InterpDone r ->
                 // Interpreter is authoritative (exit 0 or guard panic 1). Surface
                 // the same TypeCheck warnings compileFile prints on the g++ path.
-                for w in lowered.Warnings do eprintfn "[TypeCheck Warning] %s" w
+                printTypeCheckWarnings (not Console.IsErrorRedirected) None false
                 emit r.ExitCode r.Stdout r.Stderr
             | Blade.Interp.Repl.InterpFellShort _ ->
                 // The interpreter can't evaluate this input yet â€” one-time notice
@@ -807,26 +811,27 @@ let checkFile (filePath: string) (strictPins: bool) : int =
         | Ok program ->
             match Blade.TypeCheck.typeCheck program with
             | Error errors ->
+                // S1: warnings earned before the error are printed, not dropped.
+                printTypeCheckWarnings useColor (Some sm) false
                 let ds = errors |> List.map Blade.TypeEnv.diagnosticOfCompileError
                 eprintfn "%s" (Blade.Diagnostics.Render.renderAll useColor (Some sm) ds)
                 1
-            | Ok (_, _, warnings) ->
+            | Ok _ ->
                 match strictPinFailure strictPins useColor (Some sm) with
                 | Some rendered ->
                     // Strict mode (Â§6.1(b)): the pin suggestions ARE the
-                    // failure. Their plain-string twins are dropped from the
-                    // warning list (same dedup rule as `blade ide check`), so
-                    // each suggestion is reported exactly once, as an error.
-                    let pinMessages =
-                        Blade.TypeCheck.PinSuggestions.get () |> List.map fst |> Set.ofList
-                    for w in warnings do
-                        if not (Set.contains w pinMessages) then
-                            printfn "[TypeCheck Warning] %s" w
+                    // failure. Their warning twins are dropped (same dedup rule
+                    // as `blade ide check`), so each suggestion is reported
+                    // exactly once, as an error. The old hand-rolled
+                    // message-text Set is gone: the twins are BL4010 BY
+                    // CONSTRUCTION — same code, same span, same text — so
+                    // filtering on the code is the exact same filter, minus the
+                    // string comparison.
+                    printTypeCheckWarnings useColor (Some sm) true
                     eprintfn "%s" rendered
                     1
                 | None ->
-                    for w in warnings do
-                        printfn "[TypeCheck Warning] %s" w
+                    printTypeCheckWarnings useColor (Some sm) false
                     printfn "OK"
                     0
 

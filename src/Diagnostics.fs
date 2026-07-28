@@ -91,6 +91,12 @@ let mkDiagnostic code severity phase span message : Diagnostic =
 let mkError code phase span message : Diagnostic =
     mkDiagnostic code SevError phase span message
 
+/// Warning mirror of `mkError`. Non-fatal, but coded and spanned like every
+/// other diagnostic, so `Render.render` treats it identically — the checker's
+/// `emitWarning` channel builds these.
+let mkWarning code phase span message : Diagnostic =
+    mkDiagnostic code SevWarning phase span message
+
 let withNote (note: string) (d: Diagnostic) : Diagnostic =
     { d with Notes = d.Notes @ [ (None, note) ] }
 
@@ -294,7 +300,11 @@ module Render =
     /// Snippet block for one located span: gutter, source line, underline.
     /// Renders the span's first line only; a multi-line span underlines to
     /// the end of that line. Returns [] when no source is available.
-    let private snippet useColor (sm: SourceMap option) (span: Span) : string list =
+    /// `sev` is threaded in so the carets match the header's severity color:
+    /// this was hardcoded to SevError, which painted a warning's underline
+    /// bold-RED under a bold-YELLOW `warning[...]` label. Invisible to the
+    /// renderer goldens (all useColor = false), visible to every human.
+    let private snippet useColor (sev: Severity) (sm: SourceMap option) (span: Span) : string list =
         match sm |> Option.bind (fun m -> SourceMap.tryLinesFor m span.File) with
         | None -> []
         | Some lines ->
@@ -320,7 +330,7 @@ module Render =
                   sprintf "%s %s%s"
                       (gut (pad + " |"))
                       (String.replicate (startCol - 1) " ")
-                      (sevColor useColor SevError (String.replicate underlineLen "^")) ]
+                      (sevColor useColor sev (String.replicate underlineLen "^")) ]
 
     /// Full rustc-style rendering:
     ///   error[BL3001]: message
@@ -339,7 +349,7 @@ module Render =
         let locLines =
             if hasLocation d.Span then
                 sprintf "  %s %s" (gutterColor useColor "-->") (location d.Span)
-                :: snippet useColor sm d.Span
+                :: snippet useColor d.Severity sm d.Span
             else []
         let noteLines =
             d.Notes
