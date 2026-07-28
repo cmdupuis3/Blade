@@ -341,6 +341,27 @@ module DeducedFacts =
         | null -> []
         | _ -> List.rev slot.Value |> List.distinct
 
+    /// THE ZONK STITCH — the one-line hook for the zonk rank auto-close in
+    /// `Zonk.zonkType`'s `IRTInfer n` arm. Call it right where that arm decides
+    /// to build a rank-k array from a lower bound instead of defaulting to
+    /// Float64:
+    ///
+    ///     Blade.TypeEnv.DeducedFacts.recordZonkClosedRank n k
+    ///
+    /// It exists as its own named function precisely because `zonkType` has
+    /// NEITHER an owner name, a parameter name, a parameter index, nor a span —
+    /// it has a type variable and nothing else. Without this the close site
+    /// would have to invent placeholder strings at the call, which is how two
+    /// callers end up inventing two different ones. The placeholders live here,
+    /// once: owner `"<zonk>"` marks a fact with no enclosing declaration (the
+    /// let-bound-lambda case zonk exists to close), the param renders as the
+    /// variable it actually is, and the index is -1 because there is no
+    /// parameter list to be the nth member of. `deduced[]` consumers key on
+    /// `kind` and may show `owner`/`name` verbatim; a "<zonk>" fact is still a
+    /// true statement about a rank the checker proved.
+    let recordZonkClosedRank (varId: IRId) (rank: int) =
+        add (DeducedRank ("<zonk>", sprintf "?%d" varId, -1, rank)) noSpan
+
 /// Append a non-fatal diagnostic to BOTH warning channels: the legacy plain
 /// string list (`typeCheck`'s Ok payload — Repl.fs and the provider tests
 /// consume it by shape, so it keeps its exact type) and the structured
