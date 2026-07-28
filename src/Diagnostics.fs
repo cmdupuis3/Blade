@@ -159,6 +159,13 @@ module Codes =
             // BL4010's storage decision, deliberately grows no BL4011 arm).
             "BL4011", "equivariance certificate suggestion"
             "BL4012", "permutation-equivariance discipline violation"
+            // BL4013 — the stage-3 CONTRADICTION errors, split out of BL3007's
+            // ~24-way "invalid builtin argument" bucket (TypeEnv.fs). A declared
+            // `comm` over a provably antisymmetric pair (or `antisymm` over a
+            // provably invariant one) is not a bad builtin argument: it is an
+            // annotation the deduction can prove wrong, and the one error whose
+            // fix is "remove the clause / wrap in reynolds".
+            "BL4013", "symmetry annotation contradicts body"
             // BL5xxx — elaborators
             "BL5000", "ml elaboration error"
             "BL5100", "ppl elaboration error"

@@ -513,7 +513,7 @@ let diagnosticOfCompileError (e: CompileError) : Blade.Diagnostics.Diagnostic =
             | IntrinsicComplexScalarOnly _ | IntrinsicNeedsComplex _ | ComplexArity _
             | ReduceEmptyArray _ | ProdsumExtentMismatch _ | GramNeedsRank2 _
             | ArrayLitLength _ | ObjectForKernel _ | ChainOpNeedsMethodFor _ | ChainOpBadKernel _
-            | ChainOpUndecidable _ | CommContradictsBody _ | AntisymmContradictsBody _
+            | ChainOpUndecidable _
             | PlaceholderNeedsAllBound _ | GroupKeysRank1 | CumulantOrderPositive _
             | CumulantOrderExceeds _ | CumulantNeedsDist _ | DistOrderDisagree _
             | DistNotIndependent _ | DistOpUndefined _ | EnumIdxMixedKinds _
@@ -525,6 +525,11 @@ let diagnosticOfCompileError (e: CompileError) : Blade.Diagnostics.Diagnostic =
             | StructFieldType _ | UnknownStructType _ | StructBoundScope _
             | StaticStructField _
             | StructSpreadBase _ | StructSpreadNotStruct _ | StructSpreadRedundant _ -> "BL3008"
+            // A declared `comm`/`antisymm` the deduction PROVED wrong is not an
+            // "invalid builtin argument" (BL3007's ~24-way bucket): it is an
+            // annotation contradicting its own body, with its own fix — drop the
+            // clause, or wrap in `reynolds` for the signed iteration license.
+            | CommContradictsBody _ | AntisymmContradictsBody _ -> "BL4013"
             | StructWhereNotBool _ | StructWhereError _ | WherePredicateUnannotated _
             | PplConstraintNeedsImport _
             | UnknownWhereConstraint _ -> "BL4001"
