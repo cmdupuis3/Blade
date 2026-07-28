@@ -1,0 +1,10 @@
+// TEST: Diag Antisymm Contradicts Body (diag)
+// ERROR: BL4013
+// ERROR-CONTAINS: antisymm
+// The signed mirror of 040, pinned to the same code on purpose: BL4013 covers
+// BOTH contradiction directions, so a later split of one from the other cannot
+// happen silently. `where antisymm(x, y)` over a body the deduction proves
+// INVARIANT under the swap (x * y) would be stored on a strict simplex with no
+// diagonal — dropping a genuinely nonzero x*x and negating every mirrored read.
+let A = [1.0, 2.0, 3.0]
+let bad = method_for(A, A) <@> lambda(x, y) where antisymm(x, y) -> x * y |> compute
