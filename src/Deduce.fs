@@ -400,10 +400,23 @@ let private isRewritable (e: TypedExpr) : bool =
 
 /// Duplication cap: a leaf, or one operator over leaves (`x - y` is 3 nodes).
 /// SINGLE-use bindings inline unconditionally — no duplication happens at all
-/// — so this governs only the duplicating case. It doubles as the blow-up
-/// bound: a value that has already grown past the cap can only ever be
-/// inlined at one site, so a chain of lets can never expand exponentially.
+/// — so this governs only the duplicating case.
 let private smallValueSize = 3
+
+/// Per-binding DUPLICATION budget, in nodes added.
+///
+/// `smallValueSize` alone does NOT bound growth, which is the trap here. In a
+/// chain like
+///     let a = x - y      let b = a * a      let c = b * b      …
+/// every VALUE is three nodes — the cap is measured BEFORE the enclosing
+/// bindings are substituted into it, so `a * a` never looks big — yet each
+/// link doubles the tree, and N links would expand to 2^N nodes. The quantity
+/// that actually blows up is the occurrence count `n`, counted in the
+/// already-expanded body, so that is what this bounds. Capping the nodes any
+/// ONE binding may add keeps total growth linear in the number of bindings,
+/// and a binding that would exceed it is simply kept (⇒ the enclosing fold
+/// yields a TExprLet at its root ⇒ the walkers bottom out, as they do today).
+let private duplicationBudget = 256
 
 /// Reduce one `let name = value; body`, returning the binding-free body when
 /// that is safe and the rebuilt binding otherwise (see the no-regression
@@ -415,8 +428,14 @@ let private reduceLet (name: string) (vid: IRId) (value: TypedExpr) (body: Typed
     if not (isRewritable value) then keep ()
     else
         let n = countVar vid body
+        // Substitution replaces `n` one-node var references with the value, so
+        // it adds exactly n * (size - 1) nodes.
+        let inlineOk =
+            n = 1                                    // no duplication at all
+            || (exprSize value <= smallValueSize
+                && n * (exprSize value - 1) <= duplicationBudget)
         if n = 0 then body            // dead binding: the value is unreachable
-        elif n = 1 || exprSize value <= smallValueSize then
+        elif inlineOk then
             match substVar vid value body with
             | Some flat -> flat
             | None -> keep ()
