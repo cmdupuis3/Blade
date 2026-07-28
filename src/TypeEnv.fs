@@ -290,11 +290,100 @@ let emptyEnv () = {
     FuncParallel = System.Collections.Generic.Dictionary<string, string list * ParallelStrategy list>()
 }
 
-/// Append a non-fatal diagnostic to the env's warnings collector.
-/// The collector is shared by reference across all functional updates
-/// of the env, so callsites don't need to thread anything through.
-let emitWarning (env: TypeEnv) (msg: string) : unit =
+/// Structured twin of `TypeEnv.Warnings`: every checker warning as a coded,
+/// spanned `Diagnostic`. Fourth member of the AsyncLocal side-channel family
+/// (TypeCheck.PinSuggestions / TypeCheck.IdePartial / ML.Equiv.CertSuggestions)
+/// — this branch's chosen idiom for getting a fact out of the checker without
+/// widening `typeCheck`'s return type, which Repl.fs and three test files
+/// consume by shape.
+///
+/// The point of the channel: `typeCheck`'s `string list` is Ok-ONLY, so a file
+/// with a hard error dropped every warning it had already earned. This survives
+/// the error path — callers drain it on BOTH arms.
+///
+/// It lives HERE rather than in TypeCheck because its only writer is
+/// `emitWarning`, which TypeEnv owns, and TypeEnv (compile index 156) cannot
+/// reference TypeCheck (158). TypeCheck re-exports it as `TypeCheck.WarningLog`
+/// so every drain site reads one namespace.
+module WarningLog =
+    let private slot = new System.Threading.AsyncLocal<Blade.Diagnostics.Diagnostic list>()
+    let reset () = slot.Value <- []
+    let add (d: Blade.Diagnostics.Diagnostic) = slot.Value <- d :: slot.Value
+    let get () : Blade.Diagnostics.Diagnostic list =
+        match box slot.Value with
+        | null -> []
+        | _ -> List.rev slot.Value
+
+/// What the checker DEDUCED, as opposed to what the source ANNOTATED. Fifth
+/// member of the AsyncLocal side-channel family, and the answer to a real
+/// tooling gap: today an editor cannot tell a rank the user WROTE from a rank
+/// the checker PROVED, or a `where comm` from a symmetry the deduction
+/// established and is merely proposing. Both render as the same type.
+///
+/// Recorded at the deduction sites (RECORDING ONLY — nothing here changes a
+/// judgment), drained by `ide check --json` on BOTH arms into a top-level
+/// `deduced[]` array.
+///
+/// Hosted in TypeEnv, like WarningLog and for a sharper reason: Zonk (compile
+/// index 157) also closes deduced ranks, and Zonk cannot reference TypeCheck
+/// (158). From here every producer can write to one channel. IDE-only by
+/// design: ppType/abstractRenderer is type-variable printing with no hook for
+/// provenance, so nothing is threaded into the REPL's renderer.
+type DeducedFact =
+    /// A parameter whose array RANK came from the body-only rank lower bound
+    /// rather than an annotation. `index` is the parameter position.
+    | DeducedRank of owner: string * param: string * index: int * rank: int
+    /// An ADJACENT-PAIR swap parity the deduction proved, with nothing declared
+    /// for that pair. `isAnti` distinguishes antisymm from comm.
+    | DeducedPairSym of owner: string * left: string * right: string * index: int * isAnti: bool
+    /// The late tier: an arity-polymorphic pack proved invariant under every
+    /// permutation at every arity.
+    | DeducedPackComm of owner: string * pack: string
+
+module DeducedFacts =
+    let private slot = new System.Threading.AsyncLocal<(DeducedFact * Span) list>()
+    let reset () = slot.Value <- []
+    let add (f: DeducedFact) (span: Span) = slot.Value <- (f, span) :: slot.Value
+    let get () : (DeducedFact * Span) list =
+        match box slot.Value with
+        | null -> []
+        | _ -> List.rev slot.Value |> List.distinct
+
+    /// THE ZONK STITCH — the one-line hook for the zonk rank auto-close in
+    /// `Zonk.zonkType`'s `IRTInfer n` arm. Call it right where that arm decides
+    /// to build a rank-k array from a lower bound instead of defaulting to
+    /// Float64:
+    ///
+    ///     Blade.TypeEnv.DeducedFacts.recordZonkClosedRank n k
+    ///
+    /// It exists as its own named function precisely because `zonkType` has
+    /// NEITHER an owner name, a parameter name, a parameter index, nor a span —
+    /// it has a type variable and nothing else. Without this the close site
+    /// would have to invent placeholder strings at the call, which is how two
+    /// callers end up inventing two different ones. The placeholders live here,
+    /// once: owner `"<zonk>"` marks a fact with no enclosing declaration (the
+    /// let-bound-lambda case zonk exists to close), the param renders as the
+    /// variable it actually is, and the index is -1 because there is no
+    /// parameter list to be the nth member of. `deduced[]` consumers key on
+    /// `kind` and may show `owner`/`name` verbatim; a "<zonk>" fact is still a
+    /// true statement about a rank the checker proved.
+    let recordZonkClosedRank (varId: IRId) (rank: int) =
+        add (DeducedRank ("<zonk>", sprintf "?%d" varId, -1, rank)) noSpan
+
+/// Append a non-fatal diagnostic to BOTH warning channels: the legacy plain
+/// string list (`typeCheck`'s Ok payload — Repl.fs and the provider tests
+/// consume it by shape, so it keeps its exact type) and the structured
+/// WarningLog, which carries a BLxxxx code and a span and survives the
+/// checker's ERROR path.
+///
+/// The collector is shared by reference across all functional updates of the
+/// env, so callsites don't need to thread anything through. Callers pass the
+/// code plus the tightest span in scope; `noSpan` is honest and renders as a
+/// header-only warning, exactly what these printed before they had codes.
+let emitWarning (env: TypeEnv) (code: string) (span: Span) (msg: string) : unit =
     env.Warnings.Add(msg)
+    WarningLog.add
+        (Blade.Diagnostics.mkWarning code (Blade.Diagnostics.Codes.phaseOfCode code) span msg)
 
 /// Push a context frame onto the environment
 let pushContext (ctx: string) (env: TypeEnv) : TypeEnv =
@@ -525,7 +614,7 @@ let diagnosticOfCompileError (e: CompileError) : Blade.Diagnostics.Diagnostic =
             | IntrinsicComplexScalarOnly _ | IntrinsicNeedsComplex _ | ComplexArity _
             | ReduceEmptyArray _ | ProdsumExtentMismatch _ | GramNeedsRank2 _
             | ArrayLitLength _ | ObjectForKernel _ | ChainOpNeedsMethodFor _ | ChainOpBadKernel _
-            | ChainOpUndecidable _ | CommContradictsBody _ | AntisymmContradictsBody _
+            | ChainOpUndecidable _
             | PlaceholderNeedsAllBound _ | GroupKeysRank1 | CumulantOrderPositive _
             | CumulantOrderExceeds _ | CumulantNeedsDist _ | DistOrderDisagree _
             | DistNotIndependent _ | DistOpUndefined _ | EnumIdxMixedKinds _
@@ -538,6 +627,11 @@ let diagnosticOfCompileError (e: CompileError) : Blade.Diagnostics.Diagnostic =
             | StaticStructField _
             | StructSpreadBase _ | StructSpreadNotStruct _ | StructSpreadRedundant _ -> "BL3008"
             | RankBoundViolation _ -> "BL3009"
+            // A declared `comm`/`antisymm` the deduction PROVED wrong is not an
+            // "invalid builtin argument" (BL3007's ~24-way bucket): it is an
+            // annotation contradicting its own body, with its own fix — drop the
+            // clause, or wrap in `reynolds` for the signed iteration license.
+            | CommContradictsBody _ | AntisymmContradictsBody _ -> "BL4013"
             | StructWhereNotBool _ | StructWhereError _ | WherePredicateUnannotated _
             | PplConstraintNeedsImport _
             | UnknownWhereConstraint _ -> "BL4001"

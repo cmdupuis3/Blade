@@ -91,6 +91,12 @@ let mkDiagnostic code severity phase span message : Diagnostic =
 let mkError code phase span message : Diagnostic =
     mkDiagnostic code SevError phase span message
 
+/// Warning mirror of `mkError`. Non-fatal, but coded and spanned like every
+/// other diagnostic, so `Render.render` treats it identically — the checker's
+/// `emitWarning` channel builds these.
+let mkWarning code phase span message : Diagnostic =
+    mkDiagnostic code SevWarning phase span message
+
 let withNote (note: string) (d: Diagnostic) : Diagnostic =
     { d with Notes = d.Notes @ [ (None, note) ] }
 
@@ -160,6 +166,13 @@ module Codes =
             // BL4010's storage decision, deliberately grows no BL4011 arm).
             "BL4011", "equivariance certificate suggestion"
             "BL4012", "permutation-equivariance discipline violation"
+            // BL4013 — the stage-3 CONTRADICTION errors, split out of BL3007's
+            // ~24-way "invalid builtin argument" bucket (TypeEnv.fs). A declared
+            // `comm` over a provably antisymmetric pair (or `antisymm` over a
+            // provably invariant one) is not a bad builtin argument: it is an
+            // annotation the deduction can prove wrong, and the one error whose
+            // fix is "remove the clause / wrap in reynolds".
+            "BL4013", "symmetry annotation contradicts body"
             // BL5xxx — elaborators
             "BL5000", "ml elaboration error"
             "BL5100", "ppl elaboration error"
@@ -288,7 +301,11 @@ module Render =
     /// Snippet block for one located span: gutter, source line, underline.
     /// Renders the span's first line only; a multi-line span underlines to
     /// the end of that line. Returns [] when no source is available.
-    let private snippet useColor (sm: SourceMap option) (span: Span) : string list =
+    /// `sev` is threaded in so the carets match the header's severity color:
+    /// this was hardcoded to SevError, which painted a warning's underline
+    /// bold-RED under a bold-YELLOW `warning[...]` label. Invisible to the
+    /// renderer goldens (all useColor = false), visible to every human.
+    let private snippet useColor (sev: Severity) (sm: SourceMap option) (span: Span) : string list =
         match sm |> Option.bind (fun m -> SourceMap.tryLinesFor m span.File) with
         | None -> []
         | Some lines ->
@@ -314,7 +331,7 @@ module Render =
                   sprintf "%s %s%s"
                       (gut (pad + " |"))
                       (String.replicate (startCol - 1) " ")
-                      (sevColor useColor SevError (String.replicate underlineLen "^")) ]
+                      (sevColor useColor sev (String.replicate underlineLen "^")) ]
 
     /// Full rustc-style rendering:
     ///   error[BL3001]: message
@@ -333,7 +350,7 @@ module Render =
         let locLines =
             if hasLocation d.Span then
                 sprintf "  %s %s" (gutterColor useColor "-->") (location d.Span)
-                :: snippet useColor sm d.Span
+                :: snippet useColor d.Severity sm d.Span
             else []
         let noteLines =
             d.Notes

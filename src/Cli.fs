@@ -83,6 +83,7 @@ let printUsage () =
     printfn "  test zarr                         Run the Zarr provider block (hermetic; g++ for the e2e parts)"
     printfn "  test timing                       Run the differential timing block standalone"
     printfn "  test strict-pins                  Run the --strict-pins CLI gate block standalone"
+    printfn "  test surfacing                    Run the warning-surfacing block standalone"
     printfn "  test diff-oracle [category]       Diff printed values against the pinned ./oracle build"
     printfn "  test interp [category]            Diff the tree-walking interpreter against the compiled binary"
     printfn ""
@@ -141,15 +142,19 @@ let compileFile (filePath: string) (verbose: bool) (strictPins: bool) : Result<s
         // here (rustc-style, with source snippets) into the string channel.
         let useColor = not Console.IsErrorRedirected
         match lowerDiag (Some filePath) source with
-        | Error ds, sm -> Error (Blade.Diagnostics.Render.renderAll useColor (Some sm) ds)
-        | Ok (ir, tcWarnings), sm ->
+        | Error ds, sm ->
+            // S1: a file that also has a hard error has still EARNED every
+            // warning the checker produced before it failed. They rode
+            // typeCheck's Ok-only payload before and were dropped here.
+            printTypeCheckWarnings useColor (Some sm) false
+            Error (Blade.Diagnostics.Render.renderAll useColor (Some sm) ds)
+        | Ok (ir, _), sm ->
             // Strict mode fails here, before codegen: the pin suggestions
             // REPLACE their warning twins (which are therefore not printed).
             match strictPinFailure strictPins useColor (Some sm) with
             | Some rendered -> Error rendered
             | None ->
-            for w in tcWarnings do
-                eprintfn "[TypeCheck Warning] %s" w
+            printTypeCheckWarnings useColor (Some sm) false
             match IR.validateIR ir with
             | Error errs ->
                 let ds =
@@ -561,7 +566,7 @@ let replLoop () : int =
             | Blade.Interp.Repl.InterpDone r ->
                 // Interpreter is authoritative (exit 0 or guard panic 1). Surface
                 // the same TypeCheck warnings compileFile prints on the g++ path.
-                for w in lowered.Warnings do eprintfn "[TypeCheck Warning] %s" w
+                printTypeCheckWarnings (not Console.IsErrorRedirected) None false
                 emit r.ExitCode r.Stdout r.Stderr
             | Blade.Interp.Repl.InterpFellShort _ ->
                 // The interpreter can't evaluate this input yet â€” one-time notice
@@ -807,26 +812,27 @@ let checkFile (filePath: string) (strictPins: bool) : int =
         | Ok program ->
             match Blade.TypeCheck.typeCheck program with
             | Error errors ->
+                // S1: warnings earned before the error are printed, not dropped.
+                printTypeCheckWarnings useColor (Some sm) false
                 let ds = errors |> List.map Blade.TypeEnv.diagnosticOfCompileError
                 eprintfn "%s" (Blade.Diagnostics.Render.renderAll useColor (Some sm) ds)
                 1
-            | Ok (_, _, warnings) ->
+            | Ok _ ->
                 match strictPinFailure strictPins useColor (Some sm) with
                 | Some rendered ->
                     // Strict mode (Â§6.1(b)): the pin suggestions ARE the
-                    // failure. Their plain-string twins are dropped from the
-                    // warning list (same dedup rule as `blade ide check`), so
-                    // each suggestion is reported exactly once, as an error.
-                    let pinMessages =
-                        Blade.TypeCheck.PinSuggestions.get () |> List.map fst |> Set.ofList
-                    for w in warnings do
-                        if not (Set.contains w pinMessages) then
-                            printfn "[TypeCheck Warning] %s" w
+                    // failure. Their warning twins are dropped (same dedup rule
+                    // as `blade ide check`), so each suggestion is reported
+                    // exactly once, as an error. The old hand-rolled
+                    // message-text Set is gone: the twins are BL4010 BY
+                    // CONSTRUCTION — same code, same span, same text — so
+                    // filtering on the code is the exact same filter, minus the
+                    // string comparison.
+                    printTypeCheckWarnings useColor (Some sm) true
                     eprintfn "%s" rendered
                     1
                 | None ->
-                    for w in warnings do
-                        printfn "[TypeCheck Warning] %s" w
+                    printTypeCheckWarnings useColor (Some sm) false
                     printfn "OK"
                     0
 
@@ -955,10 +961,133 @@ let private runStrictPinTests () : TH.BlockResult =
       Skipped = skipped
       FailedNames = failedNames }
 
+/// Warning/suggestion SURFACING, end to end. Not expressible in the corpus:
+/// the load-bearing assertions drive `ide check --json` and the two console
+/// streams, neither of which any corpus harness touches (the diagnostics corpus
+/// calls `lowerDiag` directly and never renders; the value corpus compares
+/// program OUTPUT, and a warning changes no value).
+///
+/// The regression this locks: warnings and pin suggestions used to ride
+/// `typeCheck`'s Ok-only `string list`, so a file with ANY hard error silently
+/// lost every nudge the checker had already earned — on the CLI (S1) and in the
+/// editor JSON (S2). That is precisely the file an editor is looking at while
+/// you type.
+let private runSurfacingTests () : TH.BlockResult =
+    let blockName = "Surfacing"
+    TH.printHeader "Warning Surfacing (codes, streams, and survival of the error path)"
+    let results = ResizeArray<string * TH.Outcome>()
+    let record name outcome detail =
+        TH.resultLine outcome name detail
+        results.Add((name, outcome))
+    // The strict-pins `unpinned` twin (earns a BL4010 storage suggestion)...
+    let unpinned =
+        "function mymean(row) = reduce(row, (+)) / extents(row)\n\
+         function covariance(a, b) = mymean((a - mymean(a)) * (b - mymean(b)))\n\
+         let data = [[1.0, 2.0, 3.0], [2.0, 4.0, 6.0]]\n\
+         let result = object_for(covariance) <@> (data, data) |> compute\n"
+    // ...plus an unrelated hard type error in a LATER declaration, so the
+    // checker records the suggestion and THEN fails. Order matters: the
+    // suggestion must already be on the channel when the error aborts.
+    let errPlusWarn = unpinned + "let boom = nosuchthing + 1.0\n"
+    let tmpDir = Path.Combine(Path.GetTempPath(), "blade_surfacing_" + Guid.NewGuid().ToString("N"))
+    Directory.CreateDirectory(tmpDir) |> ignore
+    /// Run `f` with stdout and stderr captured SEPARATELY — strict-pins' own
+    /// `quietly` merges them into one writer, which cannot see which stream a
+    /// line went to, and "warnings go to stderr so stdout stays pipeable" is
+    /// exactly a claim about the split.
+    let quietly2 (f: unit -> 'a) : 'a * string * string =
+        let (swOut, swErr) = (new StringWriter(), new StringWriter())
+        let (oldOut, oldErr) = (Console.Out, Console.Error)
+        try
+            Console.SetOut swOut
+            Console.SetError swErr
+            let r = f ()
+            (r, swOut.ToString(), swErr.ToString())
+        finally
+            Console.SetOut oldOut
+            Console.SetError oldErr
+    try
+        let unpinnedPath = Path.Combine(tmpDir, "unpinned.edgi")
+        let errPath = Path.Combine(tmpDir, "err_plus_warn.edgi")
+        let pinnedPath = Path.Combine(tmpDir, "pinned.edgi")
+        File.WriteAllText(unpinnedPath, unpinned)
+        File.WriteAllText(errPath, errPlusWarn)
+        File.WriteAllText(pinnedPath,
+                          unpinned.Replace("function covariance(a, b) =",
+                                           "function covariance(a, b) where comm(a, b) ="))
+
+        // --- 1. ide check --json, ERROR path: the suggestion survives (S2).
+        let (code, out, _) = quietly2 (fun () -> Blade.Ide.ideCheck errPath)
+        let name = "ide check --json: BL4010 survives a file with a hard error"
+        if code = 1 && out.Contains "\"severity\":\"error\"" && out.Contains "\"code\":\"BL4010\"" then
+            record name TH.Pass ""
+        else
+            record name TH.Fail
+                   (sprintf "exit %d, json: %s" code (out.Trim()))
+
+        // --- 2. ...and so do the deduced facts (channel (f)) on that arm.
+        let name = "ide check --json: deduced[] is populated on the error arm"
+        if out.Contains "\"deduced\":[" && out.Contains "\"kind\":\"comm\"" then
+            record name TH.Pass ""
+        else
+            record name TH.Fail (sprintf "json: %s" (out.Trim()))
+
+        // --- 3. Control: the pinned twin is clean and claims nothing.
+        let (code, out, _) = quietly2 (fun () -> Blade.Ide.ideCheck pinnedPath)
+        let name = "ide check --json: the pinned twin yields no BL4010 (exit 0)"
+        if code = 0 && not (out.Contains "BL4010") then
+            record name TH.Pass ""
+        else
+            record name TH.Fail (sprintf "exit %d, json: %s" code (out.Trim()))
+
+        // --- 4. `check`: warnings are rendered diagnostics, and they are on
+        // STDERR. Both halves matter — the code proves the render, the empty
+        // stdout proves `blade check` stays pipeable.
+        let (code, out, err) = quietly2 (fun () -> checkFile unpinnedPath false)
+        let name = "check: the warning renders as warning[BL4010] on stderr, not stdout"
+        if code = 0 && err.Contains "warning[BL4010]" && not (out.Contains "BL4010")
+           && out.Contains "OK" then
+            record name TH.Pass ""
+        else
+            record name TH.Fail
+                   (sprintf "exit %d, stdout: %s, stderr: %s" code (out.Trim()) (err.Trim()))
+
+        // --- 5. `check` on the erroring file still prints the warning (S1).
+        let (code, _, err) = quietly2 (fun () -> checkFile errPath false)
+        let name = "check: warnings print alongside the error instead of vanishing"
+        if code = 1 && err.Contains "warning[BL4010]" && err.Contains "error[BL2001]" then
+            record name TH.Pass ""
+        else
+            record name TH.Fail (sprintf "exit %d, stderr: %s" code (err.Trim()))
+
+        // --- 6. The compile lane agrees (compile/emit/run all funnel here).
+        let ((result: Result<string * string list, string>), _, err) =
+            quietly2 (fun () -> compileFile errPath false false)
+        let name = "compile lane: warnings print on the error arm too"
+        match result with
+        | Error _ when err.Contains "warning[BL4010]" -> record name TH.Pass ""
+        | Error _ -> record name TH.Fail (sprintf "no warning on stderr: %s" (err.Trim()))
+        | Ok _ -> record name TH.Fail "compiled instead of failing"
+    finally
+        try Directory.Delete(tmpDir, true) with _ -> ()
+    let count o = results |> Seq.filter (fun (_, r) -> r = o) |> Seq.length
+    let passed, failed, skipped = count TH.Pass, count TH.Fail, count TH.Skip
+    let failedNames = results |> Seq.filter (fun (_, r) -> r = TH.Fail) |> Seq.map fst |> List.ofSeq
+    let parts =
+        [ sprintf "%d passed" passed; sprintf "%d failed" failed ]
+        @ (if skipped > 0 then [sprintf "%d skipped" skipped] else [])
+    TH.printFooter blockName parts
+    { TH.BlockResult.Block = blockName
+      Passed = passed
+      Failed = failed
+      Skipped = skipped
+      FailedNames = failedNames }
+
 /// Run the full suite, appending the CLI smoke block and the strict-pin block
 /// (which live in this file â€” see runAllTestsFullWith's doc comment for why
 /// they're passed in).
-let private runFullSuite opts = runAllTestsFullWith [runCliSmokeTests; runStrictPinTests] opts
+let private runFullSuite opts =
+    runAllTestsFullWith [runCliSmokeTests; runStrictPinTests; runSurfacingTests] opts
 
 /// Dispatch the `test` subcommand. `rest` is everything after "test".
 let private dispatchTest (rest: string list) : int =
@@ -984,6 +1113,11 @@ let private dispatchTest (rest: string list) : int =
         // The --strict-pins CLI gate (Â§6.1(b)) standalone. In-process, no
         // toolchain; also part of the full suite.
         let failed = (runStrictPinTests ()).Failed
+        if failed = 0 then 0 else 1
+    | [ "surfacing" ] ->
+        // Warning/suggestion surfacing: codes, streams, and survival of the
+        // checker's error path. In-process, no toolchain; also in the full suite.
+        let failed = (runSurfacingTests ()).Failed
         if failed = 0 then 0 else 1
     | [ "normalize" ] ->
         // IR-level F# unit tests for the type normalizer. Runs in-process,
