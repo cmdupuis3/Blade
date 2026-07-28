@@ -741,6 +741,22 @@ tri <@> (h, h, h)
    shipped `packPairs` agrees with lex). Reuse `SymTensor.enumerate` (lex)
    for reference models; never its `rankOf`. (Its docstring overclaims —
    out of scope here, noted.)
+8b. **Post-completion surface decisions (user review, 2026-07-27):**
+   (i) The dependent SymIdx slot stays LIMITED to {Idx, IrrepsIdx} — no
+   generalization to arbitrary dense bases, PgIrrepsIdx deliberately out
+   (the poor parse error at `SymIdx<k, PgIrrepsIdx<…>>` deserves a
+   targeted diagnostic someday; wishlist, not a stage). The
+   `IrrepsSymIdx` dedicated-former alternative was weighed and declined
+   for now (former explosion; the inferred-type identity; the §3.3b
+   storage identification).
+   (ii) IrrepsIdx contiguity confirmed as a non-issue (flat-dense
+   primitive since v7; extent = cardinality, one contiguous axis). The
+   virtual-array instinct is recorded as a ROLE SPLIT: the identity role
+   (spec tag → certification/Unify) must remain a type; the
+   structured-iteration role (the deferred `for (b, mu, m)` sugar) wants
+   a virtual iteration source (`blocks<IrrepsIdx<spec>>`-shaped, erasing
+   to the irreps_offset arithmetic) — a future feature note, not a
+   change to the index type.
 9. **The Sym^k basis problem (k ≥ 3) — RESOLVED by design round 2026-07-26**
    (two-agent adversarial round; construction in §3.3b, staging in §7 3b).
    The original dilemma — tolerance-GS arbitrariness (route a) vs recoupling
