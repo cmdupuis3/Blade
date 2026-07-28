@@ -1,0 +1,31 @@
+// TEST: Let-bound kernel body deduces commutative (dense until pinned)
+// THE flagship shape for stage-3's binding-form descent. Blade has no
+// `let x = v in body` expression — the bind-then-use kernel is the brace block
+// `{ let d = x - y  <newline>  d * d }` — and every parity walker used to
+// bottom out on TExprBlock, so this kernel deduced NOTHING at all. The
+// deduction now normalizes bindings away first: `d` is single-operator-small
+// and used twice, so it inlines to (x - y) * (x - y). The two children are not
+// each other's image under the swap, so the mirror rule stands down and the
+// SIGN chain rule does the work instead — each factor is PNeg, and
+// PNeg * PNeg = PInv.
+//
+// Both positions receive the same array, so the compiler PROPOSES the pin:
+//   kernel deduces commutative in (x, y) and both positions receive the same
+//   array: output storage is DENSE today. Pin `where comm(x, y)` on the kernel
+//   to opt into compact symmetric (triangular) storage.
+// (BL4010; asserted manually via `blade check` until the corpus `// SUGGEST:`
+// block covers PinSuggestions as well as CertSuggestions.)
+//
+// Storage stays DENSE, because a deduction only ever proposes — the pinned
+// twin is symmetry/029, and symmetry/030 is the machine-checked proof that the
+// deduced parity is really PInv. Same relationship as 022 (dense) to 020
+// (pinned).
+let A = [1.0, 2.0, 3.0]
+let result = method_for(A, A) <@> lambda(x, y) -> {
+    let d = x - y
+    d * d
+} |> compute
+// Full dense 3x3, printed flat, row-major: (A[i] - A[j])^2 for every (i, j).
+// Symmetric about the diagonal, which is what the deduction just proved and
+// what the triangular storage of 029 exploits.
+// EXPECT: result = [0.0, 1.0, 4.0, 1.0, 0.0, 1.0, 4.0, 1.0, 0.0]
