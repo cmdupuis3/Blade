@@ -1282,6 +1282,31 @@ go first.
      groups do not wait on a field-extension investment; 6c's radical
      vectors cover their generator entries the day they join the
      roster.
+   **6c LANDED 2026-07-27 — THE PROGRAM'S FINAL IMPLEMENTATION STAGE.**
+   MLLieDischarge.fs: exact dπ_l(L_x/L_y/L_z) tables DERIVED against
+   the coded conventions with three documented forcings (the m=0 √2
+   seam from uMatrix's bare-1 row — radicands reach 2l(l+1); the CS
+   ε_m = (−1)^m is what makes the tables block-structured; L_z's sign
+   is FORCED by the ascending row order — the "nicer" sign would
+   silently certify mirror images). Radical mul fenced to the pin
+   layer, stated at the definition. THE EXP-PIN EARNED ITS KEYSTONE
+   STATUS EMPIRICALLY: in the live-fail runs, a table conjugated by an
+   orthogonal reversal passes skew-symmetry, brackets, AND Casimir —
+   only the exp-pin (~1.5 deviation) catches basis drift. Worst honest
+   deviations ≤ 1.22e-14 at l ≤ 3 incl. the house R composition;
+   brackets/Casimir exact for l ≤ 4. Triple-product triple: all four
+   outcomes (the −I refusal even states "it IS SO(3)-equivariant").
+   Thesis pin: |x|²·x on [(2,e,1)] CERTIFIES — rational body, √3
+   radicals live in the check, non-vacuity pinned. Differential:
+   1106/1110 byte-identical; four changes classified by-design (the
+   engine legitimately REPLACING one raw-index message with a proof of
+   non-equivariance — ml-equiv/005; a one-word cap note). RECORDED
+   FINDING (§3.5's corrected reason made concrete): the l=1⊗l=1→l=2
+   quadratic has coefficient ratio 1/√3 in the shipped basis — no
+   rational hand-written body can certify it; the synthesized op's
+   Schur certificate is the right tool there, pinned in corpus 065.
+   New block "Lie Tables" 63/0; corpus ml-equiv/063-065 +
+   diagnostics/025-027; full suite 1870/0.
 
 ## 8. New proof obligations
 

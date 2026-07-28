@@ -1,0 +1,18 @@
+// TEST: Diag Equiv Engine Inversion (diag)
+// ERROR: BL4008 @ 15:3
+// ERROR-CONTAINS: commutes with every generator of so(3), so it IS SO(3)-equivariant
+// ERROR-CONTAINS: The inversion identity f(-x) = rho(-I) f(x) fails in output component 0
+// ERROR-CONTAINS: that monomial is odd under -I
+// ERROR-CONTAINS: contribute 3 odd parities
+// ERROR-CONTAINS: weaken the certificate to `where ml.equiv(SO3)`
+import ml as ml
+// The pi_0 half of the uniform rule, alone: this body passes all three so(3)
+// generator checks and fails only at -I, because the scalar triple product of
+// three TRUE vectors is a PSEUDOscalar. The message says so, and names both
+// honest repairs (declare (l=0, odd), or weaken to SO3).
+let static V = [(1, 1, 1)]
+function tri(u: Array<Float like IrrepsIdx<V>>, v: Array<Float like IrrepsIdx<V>>, w: Array<Float like IrrepsIdx<V>>)
+             where ml.equiv(O3) -> Float =
+  (u(0) * (v(1) * w(2) - v(2) * w(1))
+   + u(1) * (v(2) * w(0) - v(0) * w(2))
+   + u(2) * (v(0) * w(1) - v(1) * w(0)))

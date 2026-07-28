@@ -1,0 +1,137 @@
+// TEST: ML Equiv Engine O3 Hand Polynomial
+import ml as ml
+// ============================================================================
+// THE GENERATOR-BASED ENGINE, PART II: HAND-WRITTEN O(3) POLYNOMIALS CERTIFIED
+// (docs/plan-transforms-as-types.md §3.5's uniform rule and LINEARITY
+// RESOLUTION, §7 stage 6c).
+//
+// Every body here is one composition refuses, and refuses correctly: raw
+// component reads of an l > 0 block, packed into array literals. Both refusals
+// are sound SYNTACTIC sufficient conditions, and both are wrong about these
+// particular functions — which are the dot product, the cross product, the
+// scalar triple product and a radial cubic, i.e. the four maps a physicist
+// would write first and no shipped former can spell.
+//
+// So when composition says no, the engine asks the SEMANTIC question: normalize
+// the body to an exact polynomial and test
+//
+//     Df(x)·(A·x) = A·f(x)
+//
+// for the three generators A of 𝔰𝔬(3), plus f(−x) = ρ(−I)·f(x) for the one
+// generator of π₀. THE DEFECT IS LINEAR IN A, so every coefficient of the
+// identity is a ℚ-combination of √(squarefree) — a RADICAL VECTOR — checked
+// componentwise zero. No product of two irrationals ever occurs, so there is
+// no field extension, no tolerance and no restriction on l anywhere in this
+// file. `where ml.equiv(O3)` stays the only pin spelling: it names the
+// THEOREM, never the route.
+//
+// PARITY IS THE OTHER HALF, and the specs below are chosen to say so:
+//   V  = [(1, 1, 1)] is a TRUE vector (l = 1, odd);
+//   VE = [(1, 0, 1)] is a PSEUDOvector (l = 1, EVEN) — which is what a cross
+//        product of two true vectors is, and declaring it odd is a false
+//        theorem the −I check catches (corpus 064);
+//   PS = [(0, 1, 1)] is a PSEUDOscalar (l = 0, odd) — the triple product.
+// ============================================================================
+let static V = [(1, 1, 1)]
+let static VE = [(1, 0, 1)]
+let static PS = [(0, 1, 1)]
+let static Q = [(2, 0, 1)]
+
+// --- 1. THE DOT PRODUCT -----------------------------------------------------
+// Composition sees three raw reads of an l = 1 block and stops at the first.
+// The engine sees Σ u_i v_i, whose defect vanishes at every generator, and
+// whose monomials all carry two odd factors — even under −I, matching the
+// invariant return.
+function dot3(u: Array<Float like IrrepsIdx<V>>, v: Array<Float like IrrepsIdx<V>>)
+              where ml.equiv(O3) -> Float =
+    u(0) * v(0) + u(1) * v(1) + u(2) * v(2)
+
+// --- 2. THE CROSS PRODUCT ---------------------------------------------------
+// Bilinear in two rep parameters — free by linearity, and a shape the shipped
+// derive_poly family never covered. The real-basis component order is
+// (m = −1, 0, +1) = (y, z, x), a cyclic relabelling of the Cartesian axes, so
+// the cyclic formula transcribes unchanged.
+function cross3(u: Array<Float like IrrepsIdx<V>>, v: Array<Float like IrrepsIdx<V>>)
+                where ml.equiv(O3) -> Array<Float like IrrepsIdx<VE>> =
+    [u(1) * v(2) - u(2) * v(1), u(2) * v(0) - u(0) * v(2), u(0) * v(1) - u(1) * v(0)]
+
+// THE UNCERTIFIED TWIN. Stage 6a's inference channel runs the same judgment
+// speculatively, so it inherits the 6c discharger for free — no inference code
+// changed for either engine half.
+//
+// SUGGEST: function 'cross_loose' judges equivariant under O3: add 'where ml.equiv(O3)' [signature: u transforms as IrrepsIdx<[(1, 1, 1)]>, v transforms as IrrepsIdx<[(1, 1, 1)]> -> IrrepsIdx<[(1, 0, 1)]>]
+function cross_loose(u: Array<Float like IrrepsIdx<V>>, v: Array<Float like IrrepsIdx<V>>)
+                     -> Array<Float like IrrepsIdx<VE>> =
+    [u(1) * v(2) - u(2) * v(1), u(2) * v(0) - u(0) * v(2), u(0) * v(1) - u(1) * v(0)]
+
+// --- 3. THE SCALAR TRIPLE PRODUCT -------------------------------------------
+// Trilinear, degree 3, and a PSEUDOscalar: three odd factors per monomial, so
+// it flips under −I and only an (l = 0, ODD) return is true. Corpus 064 pins
+// all three verdicts of the same body.
+function triple(u: Array<Float like IrrepsIdx<V>>, v: Array<Float like IrrepsIdx<V>>,
+                w: Array<Float like IrrepsIdx<V>>)
+                where ml.equiv(O3) -> Array<Float like IrrepsIdx<PS>> =
+    [u(0) * (v(1) * w(2) - v(2) * w(1))
+     + u(1) * (v(2) * w(0) - v(0) * w(2))
+     + u(2) * (v(0) * w(1) - v(1) * w(0))]
+
+// --- 4. THE THESIS PIN: |x|²·x ON AN l = 2 REP ------------------------------
+// The body's coefficients are all 1. The GENERATOR entries are not: at l = 2
+// the m = 0 seam of L_x and L_y carries (1/2)√(2·l(l+1)) = √3, so the identity
+// this function passes is checked over ℚ ⊕ ℚ√3 and the acceptance is
+// componentwise zero in that vector. This is the anchor for §3.5's claim that
+// the linearity resolution beats the old l ≤ 1 restriction: nothing here would
+// be checkable if the discharge had to multiply radicals, and it never does.
+function radial(x: Array<Float like IrrepsIdx<Q>>)
+                where ml.equiv(O3) -> Array<Float like IrrepsIdx<Q>> = {
+    let r2 = x(0) * x(0) + x(1) * x(1) + x(2) * x(2) + x(3) * x(3) + x(4) * x(4)
+    [r2 * x(0), r2 * x(1), r2 * x(2), r2 * x(3), r2 * x(4)]
+}
+
+// ============================================================================
+// VALUES, AND THE ROTATION SHADOW — exact, because the shadow is exact.
+//
+// A 90° rotation about z acts on the real l = 1 basis by the signed
+// permutation (a, b, c) ↦ (c, b, −a) and on the real l = 2 basis by
+// (a, b, c, d, e) ↦ (−a, d, c, −b, −e): both are exp(π/2 · L_z) with L_z the
+// INTEGER table this stage derives, so the equivariance conclusion can be
+// pinned with no floating-point tolerance at all.
+// ============================================================================
+let u = [1.0, 2.0, 3.0]
+let v = [4.0, 5.0, 6.0]
+let w = [7.0, 8.0, 10.0]
+// R₉₀ᶻ applied to each input, by the signed permutation above.
+let ru = [3.0, 2.0, 0.0 - 1.0]
+let rv = [6.0, 5.0, 0.0 - 4.0]
+
+let d0 = dot3(u, v)
+// EXPECT: d0 = 32
+let d1 = dot3(ru, rv)
+// EXPECT: d1 = 32
+
+let c0 = cross3(u, v)
+// EXPECT: c0 = [-3, 6, -3]
+// ρ(R)·cross(u, v) = (−3, 6, −3) ↦ (−3, 6, 3), and cross(ρ(R)u, ρ(R)v) is the
+// same vector: the certificate's conclusion, as an exact value.
+let c1 = cross3(ru, rv)
+// EXPECT: c1 = [-3, 6, 3]
+
+// Propose ⊆ Check-accept, as a value: the suggested twin is the same map.
+let cl = cross_loose(u, v)
+// EXPECT: cl = [-3, 6, -3]
+
+let t0 = triple(u, v, w)
+// EXPECT: t0 = [-3]
+// −I: three odd factors, so the pseudoscalar flips. ρ(−I) on an (l=0, odd)
+// block is multiplication by −1, and the value agrees.
+let t1 = triple([0.0 - 1.0, 0.0 - 2.0, 0.0 - 3.0], [0.0 - 4.0, 0.0 - 5.0, 0.0 - 6.0],
+                [0.0 - 7.0, 0.0 - 8.0, 0.0 - 10.0])
+// EXPECT: t1 = [3]
+
+let q = [1.0, 2.0, 3.0, 4.0, 5.0]
+let rq = [0.0 - 1.0, 4.0, 3.0, 0.0 - 2.0, 0.0 - 5.0]
+let g0 = radial(q)
+// EXPECT: g0 = [55, 110, 165, 220, 275]
+// ρ(R)·radial(q) = (−55, 220, 165, −110, −275) = radial(ρ(R)q).
+let g1 = radial(rq)
+// EXPECT: g1 = [-55, 220, 165, -110, -275]

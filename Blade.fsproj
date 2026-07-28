@@ -85,6 +85,16 @@
          calls it from judgeFunction's rejection path. NOT part of
          BladeML.fsproj. -->
     <Compile Include="src/ml/compiler/MLPolyExtract.fs" />
+    <!-- The generator-based certification ENGINE, back half (stage 6c): the
+         radical-vector module (Map<squarefree, Rat>), the exact so(3)
+         generator tables per l derived against the coded uMatrix/harmonic
+         conventions, and the Lie + (-I) discharge over MLPolyExtract's normal
+         form. A SECOND CONSUMER of that normal form, not a second engine:
+         it depends on MLPolyExtract (Rat/Mono/Poly/PolyForm) and MLSpec
+         (block layout, parity) and must precede MLEquiv, which calls it from
+         judgeFunction's rejection path for O3/SO3 certificates. NOT part of
+         BladeML.fsproj; the oracle twin is tests/Test_LieTables.fs. -->
+    <Compile Include="src/ml/compiler/MLLieDischarge.fs" />
     <Compile Include="src/ml/compiler/MLEquiv.fs" />
     <Compile Include="src/ml/compiler/MLGalilean.fs" />
     <!-- The `where ml.perm_equiv(N)` certification lattice (stage 5a-iii):
@@ -194,6 +204,7 @@
     <Compile Include="tests/Test_WignerTables.fs" />
     <Compile Include="tests/Test_SymPowerTables.fs" />
     <Compile Include="tests/Test_PolyOracle.fs" />
+    <Compile Include="tests/Test_LieTables.fs" />
     <Compile Include="tests/Test_PermSpec.fs" />
     <Compile Include="tests/Test_PermOracle.fs" />
     <Compile Include="tests/Test_PointSpec.fs" />

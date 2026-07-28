@@ -1,7 +1,15 @@
 // TEST: Diag Equiv Raw Index (diag)
-// ERROR: BL4008 @ 6:3
+// ERROR: BL4008 @ 14:7
 // ERROR-CONTAINS: raw indexing into an l>0
 import ml as ml
+// Composition's raw-index rule, in the shape where it is still what the user
+// sees at stage 6c. The read is wrapped in a scalar builtin, so the polynomial
+// engine leaves the fragment at the call and stays SILENT — the OutsideFragment
+// path, which is why this text is unchanged from before the engine existed.
+// A BARE `x(2)` body is now answered by the ENGINE instead, with a strictly
+// stronger verdict (not "this read is basis-dependent" but "this map is
+// provably not equivariant, and here is the generator it fails at"); that
+// message is pinned in 025_equiv_engine_lie_generator.blade.
 let static S = [(0, 0, 2), (1, 1, 1)]
 function bad(x: Array<Float like IrrepsIdx<S>>) where ml.equiv(O3) -> Float =
-  x(2)
+  exp(x(2))

@@ -1081,6 +1081,20 @@ let private dispatchTest (rest: string list) : int =
         // k = 2 value-level M-pin vs stage 1. In-process, no C++ pipeline.
         let failed = (Blade.Tests.PolyOracleReview.runPolyOracleTests ()).Failed
         if failed = 0 then 0 else 1
+    | [ "lietables" ] | [ "lie-tables" ] ->
+        // Stage 6c oracle block: the exact so(3) generator tables and the
+        // radical-vector Lie discharger (MLLieDischarge.fs). THE EXP-PIN is
+        // the keystone — float-assemble each table, exponentiate, and compare
+        // against the real Wigner action fit from an INDEPENDENT
+        // transcription of the solid harmonics, which is the only thing that
+        // rules out convention drift between the symbolic tables and the
+        // numeric action the shipped certificates are about. Then the exact
+        // algebra (skew-symmetry per radical component, brackets, Casimir,
+        // l <= 4), the known-answer verdicts (the triple-product triple, the
+        // |x|^2·x thesis pin), three negative controls, and the
+        // composition-vs-engine differential. In-process, no C++ pipeline.
+        let failed = (Blade.Tests.LieTablesReview.runLieTablesTests ()).Failed
+        if failed = 0 then 0 else 1
     | [ "permspec" ] | [ "perm-spec" ] ->
         // Stage 5a-i review block: the Sn permutation-module counting layer
         // (MLPermSpec.fs) — RGS partition enumeration against the Stirling

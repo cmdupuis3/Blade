@@ -823,14 +823,25 @@ and private judgeApp (ctx: Ctx) (env: Map<string, RepStatus>) (e: Expr) (f: Expr
 // same `judgeFunction`, so a body the engine discharges becomes a BL4011
 // proposal automatically and by construction.
 //
-// O3/SO3 certificates take the `_ -> composition` arm — the radical-vector Lie
-// discharger is 6c. The ONLY group-specific code here is `pointActions`, which
-// turns the registry's word set into the group-agnostic `ElementAction` list
-// the engine consumes.
+// TWO DISCHARGERS, ONE EXTRACTOR (stage 6c). The normal form is built once and
+// handed to whichever discharger the certificate's group calls for:
+//
+//   Point g   -> MLPolyExtract's FINITE discharge, the whole word set, pure ℚ
+//                ({0, ±1} matrices, no radicals, no connectedness step);
+//   O3 / SO3  -> MLLieDischarge's RADICAL-VECTOR discharge, three 𝔰𝔬(3)
+//                generators (the defect is linear in A, so a spanning set is
+//                the whole connected obligation) plus, under O3 only, the
+//                integer −I identity of π₀.
+//
+// The flow above is identical in both arms, down to which exit appends and
+// which replaces. The only group-specific code here is `pointActions` /
+// `o3Actions`, which turn a registry word set or a spec's block structure into
+// the shape the corresponding discharger consumes.
 
 module private Engine =
     module PX = Blade.ML.PolyExtract
     module PS = Blade.ML.PointSpec
+    module LD = Blade.ML.LieDischarge
 
     /// The scalar annotations whose SHAPE is decidable without a type-alias
     /// map. Anything else classified `Inv` becomes `PInvOpaque`, which the
@@ -850,7 +861,7 @@ module private Engine =
     let private repDim (r: RepSpec) : int option =
         match r with
         | PgSpec (g, s) -> Some (PS.pgTotalDim (PS.pointGroup g) s)
-        | O3Spec _ -> None // 6c
+        | O3Spec s -> Some (totalDim s)
 
     /// The classified signature the extractor needs, or None when a parameter
     /// or the return is not describable (which is an extraction refusal).
@@ -900,6 +911,49 @@ module private Engine =
                     PX.mkAction (PS.wordName grp el.Word) inMats outMat)
                 |> Some
 
+    /// The 𝔰𝔬(3) generators (and, under O3, the −I parity bookkeeping) as the
+    /// radical-vector discharger consumes them. Same shape as `pointActions`
+    /// one member over: the ONLY group-specific step is turning each rep
+    /// payload's spec into a block-diagonal generator.
+    ///
+    /// A scalar (Inv) return is an INVARIANCE claim, so the output action is
+    /// the trivial rep: a 1×1 ZERO generator (the Lie algebra acts by 0) and
+    /// parity EVEN. That is what makes `-> Float` under equiv(O3) reject a
+    /// pseudoscalar body while the same body certifies under equiv(SO3).
+    let o3Actions (grp: Group) (cert: CertSig) : (LD.LieGenerator list * LD.InversionCheck option) option =
+        let specOf (r: RepSpec) = match r with O3Spec s -> Some s | PgSpec _ -> None
+        let repParams =
+            cert.Params |> List.choose (fun (n, st) ->
+                match st with Rep r -> Some (n, specOf r) | _ -> None)
+        if repParams |> List.exists (snd >> Option.isNone) then None
+        else
+            let reps = repParams |> List.map (fun (n, s) -> (n, Option.get s))
+            // `Some spec` — a rep-typed return; `None` — the trivial rep.
+            let outSpec =
+                match cert.Return with
+                | Rep r -> specOf r |> Option.map Some
+                | Inv -> Some None
+                | Opaque -> None
+            match outSpec with
+            | None -> None
+            | Some outS ->
+                let gens =
+                    LD.axes
+                    |> List.map (fun ax ->
+                        { LD.Name = LD.axisName ax
+                          LD.InMats = reps |> List.map (fun (n, s) -> (n, LD.specGenerator ax s)) |> Map.ofList
+                          LD.OutMat =
+                            match outS with
+                            | Some s -> LD.specGenerator ax s
+                            | None -> [| [| LD.Radical.zero |] |] })
+                let inv =
+                    match grp with
+                    | O3 ->
+                        Some { LD.InPar = reps |> List.map (fun (n, s) -> (n, LD.specParity s)) |> Map.ofList
+                               LD.OutPar = match outS with Some s -> LD.specParity s | None -> [| 0 |] }
+                    | _ -> None
+                Some (gens, inv)
+
     /// How a coefficient mismatch reads. The near-miss note is §3.5's
     /// mandatory one and points at BOTH escape hatches; the rep-degree-0 arm is
     /// the constant obligation (a constant term of an equivariant map must be
@@ -919,17 +973,52 @@ module private Engine =
             else ""
         where + constantNote + nearMissNote
 
+    /// The Lie-generator twin of `failureMessage`. Same family, same near-miss
+    /// note, three differences forced by the group: the failing object is a
+    /// GENERATOR rather than a group element, the coefficients are RADICAL
+    /// VECTORS (rendered componentwise, since componentwise-zero is the
+    /// acceptance test), and the synthesized-basis escape hatch names the
+    /// O(3) formers rather than the point-group one.
+    let lieFailureMessage (funcName: string) (gn: string) (f: LD.LieFailure) : string =
+        let where =
+            sprintf "function '%s': the body IS a polynomial, and it is not %s-equivariant. The identity Df(x)(A x) = A f(x) fails at Lie generator %s, in output component %d, at the term %s: the left side has coefficient %s, the right side %s"
+                funcName gn f.Generator f.Component f.Monomial (LD.Radical.render f.Lhs) (LD.Radical.render f.Rhs)
+        let residualNote =
+            sprintf ". The residual's nonzero radical components: %s (acceptance is componentwise zero over the rationals — every generator entry is q*sqrt(n), and no product of two irrationals ever occurs, so this is exact)"
+                (LD.Radical.render (LD.Radical.sub f.Lhs f.Rhs))
+        let constantNote =
+            if f.RepDegree = 0 then
+                ". That term is a CONSTANT: a constant summand of an equivariant map must be fixed by the whole group, i.e. supported on (l = 0, even) cells. A constant in an l > 0 block breaks equivariance no matter what the rest of the body does"
+            else ""
+        let nearMissNote =
+            if f.NearMiss then
+                sprintf ". NEAR MISS: the residual is %g, negligible against the coefficients - this is the truncated-decimal trap. Coefficients are read EXACTLY AS WRITTEN (a float literal is its exact dyadic value, so 0.3 is not 3/10), while a literal DIVISION is evaluated exactly in the rationals. If you meant an exact rational, write the division (3.0 / 10.0 IS 3/10); if the coefficient is genuinely irrational, no exact checker can certify it - build the layer with the synthesized basis (ml.derive_linear / ml.derive_tp / ml.derive_poly), whose Schur certificate covers precisely that case"
+                    (abs (LD.Radical.toFloat (LD.Radical.sub f.Lhs f.Rhs)))
+            else ""
+        where + residualNote + constantNote + nearMissNote
+
+    /// The π₀ half: the map commutes with every INFINITESIMAL rotation and
+    /// still fails at the inversion. That is not a coefficient slip, it is a
+    /// declared-parity error, and there are exactly two honest repairs — which
+    /// is why this message names both.
+    let inversionFailureMessage (funcName: string) (f: LD.InversionFailure) : string =
+        let par p = if p = 1 then "odd" else "even"
+        sprintf "function '%s': the body commutes with every generator of so(3), so it IS SO(3)-equivariant - but it is not O3-equivariant. The inversion identity f(-x) = rho(-I) f(x) fails in output component %d, at the term %s: that monomial is %s under -I (its rep factors contribute %d odd parities, so it picks up (-1)^%d) while the declared output component is %s. Under equiv(O3) the component group is the whole remaining obligation: either declare the parities that make the map a genuine O(3) map (a product of an odd number of odd factors is a pseudo-quantity - the triple product u.(v x w) of three vectors is an (l = 0, ODD) pseudoscalar, not a scalar), or weaken the certificate to `where ml.equiv(SO3)`, under which this body passes as written"
+            funcName f.Component f.Monomial (par f.MonoParity) f.ParitySum f.ParitySum (par f.OutParity)
+
     /// The cap note appended to the surfacing composition diagnostic.
     let capNote (funcName: string) (why: string) : string =
-        sprintf " [the equivariance engine did not run on '%s': %s (plan-transforms-as-types section 7, stage 6b caps: degree <= %d, <= %d expanded terms); the verdict above is composition's]"
+        sprintf " [the equivariance engine did not run on '%s': %s (plan-transforms-as-types section 7, stage 6 caps: degree <= %d, <= %d expanded terms); the verdict above is composition's]"
             funcName why PX.maxRepDegree PX.maxTerms
 
 /// Judge one certified function. Empty list = certificate holds.
 ///
 /// Two routes, in this order: COMPOSITION (the abstract interpretation above),
-/// then — only on its rejection, and only under a point-group certificate —
-/// the stage-6b polynomial ENGINE. See the `Engine` module's header for the
-/// exact flow and for why the engine's verdict may replace composition's.
+/// then — only on its rejection — the polynomial ENGINE, discharged by the
+/// finite word set under a point-group certificate (6b) or by the
+/// radical-vector 𝔰𝔬(3) generators plus −I under O3/SO3 (6c). See the
+/// `Engine` module's header for the exact flow and for why the engine's
+/// verdict may replace composition's.
 let judgeFunction (group: Group) (certs: Map<string, CertSig>) (statics: StaticEnv)
                   (aliases: Set<string>) (fd: FunctionDecl)
     : Blade.Diagnostics.Diagnostic list =
@@ -969,7 +1058,78 @@ let judgeFunction (group: Group) (certs: Map<string, CertSig>) (statics: StaticE
                             [ bl4008 fd.Body.Span (Engine.failureMessage fd.Name gn f) ]
                 | _ -> [ d ]
             with _ -> [ d ]
-        | (d :: _), _ -> [ d ]
+        | (d :: _), (O3 | SO3) ->
+            // Stage 6c, the SAME flow one discharger over. Totality is kept
+            // for the same reason (a speculative second opinion may never
+            // crash a compiling program) with ONE deliberate hole: the
+            // post-accept float guard's `LieGuardFailure` is a compiler-bug
+            // assert, not an escape from a decoder, so it is re-raised rather
+            // than swallowed into "composition's verdict stands".
+            try
+                match Engine.polySig cert fd, Engine.o3Actions cert.Group cert with
+                | Some psig, Some (gens, inv) ->
+                    match Blade.ML.PolyExtract.extract psig statics fd with
+                    | Error (Blade.ML.PolyExtract.OutsideFragment _) -> [ d ]
+                    | Error (Blade.ML.PolyExtract.CapBreach why) ->
+                        [ { d with Message = d.Message + Engine.capNote fd.Name why } ]
+                    | Ok form ->
+                        match Blade.ML.LieDischarge.discharge form gens inv with
+                        | Ok () -> []
+                        | Error (Blade.ML.LieDischarge.DischargeCap why) ->
+                            [ { d with Message = d.Message + Engine.capNote fd.Name why } ]
+                        | Error (Blade.ML.LieDischarge.GeneratorCheck f) ->
+                            [ bl4008 fd.Body.Span (Engine.lieFailureMessage fd.Name (groupStr cert.Group) f) ]
+                        | Error (Blade.ML.LieDischarge.ParityCheck f) ->
+                            [ bl4008 fd.Body.Span (Engine.inversionFailureMessage fd.Name f) ]
+                | _ -> [ d ]
+            with
+            | Blade.ML.LieDischarge.LieGuardFailure _ -> reraise ()
+            | _ -> [ d ]
+
+/// TEST HOOK — stage 6c's DIFFERENTIAL obligation (§7 stage 6c, oracle layer
+/// 5). Production runs the engine only on composition's rejection path, so a
+/// body composition ACCEPTS is never seen by it; the differential asks whether
+/// the two would agree if it were, and the only way to ask is to run the
+/// engine alone. `None` = the engine has nothing to say (no certificate, an
+/// unclassifiable signature, an extraction refusal or a cap breach); `Some (Ok
+/// ())` = the polynomial discharges; `Some (Error msg)` = it does not, with
+/// the message the user would have seen.
+///
+/// Nothing in the compiler calls this. It is here rather than in the test file
+/// because `Engine` is private and must stay so — the engine has exactly one
+/// production entry point, and that is the point.
+let engineVerdict (certs: Map<string, CertSig>) (statics: StaticEnv) (fd: FunctionDecl)
+    : Result<unit, string> option =
+    match Map.tryFind fd.Name certs with
+    | None -> None
+    | Some cert ->
+        match Engine.polySig cert fd with
+        | None -> None
+        | Some psig ->
+            match Blade.ML.PolyExtract.extract psig statics fd with
+            | Error _ -> None
+            | Ok form ->
+                match cert.Group with
+                | Point gn ->
+                    match Engine.pointActions gn cert with
+                    | None -> None
+                    | Some actions ->
+                        match Blade.ML.PolyExtract.discharge form actions with
+                        | Ok () -> Some (Ok ())
+                        | Error (Blade.ML.PolyExtract.DischargeCap _) -> None
+                        | Error (Blade.ML.PolyExtract.GeneratorCheck f) ->
+                            Some (Error (Engine.failureMessage fd.Name gn f))
+                | O3 | SO3 ->
+                    match Engine.o3Actions cert.Group cert with
+                    | None -> None
+                    | Some (gens, inv) ->
+                        match Blade.ML.LieDischarge.discharge form gens inv with
+                        | Ok () -> Some (Ok ())
+                        | Error (Blade.ML.LieDischarge.DischargeCap _) -> None
+                        | Error (Blade.ML.LieDischarge.GeneratorCheck f) ->
+                            Some (Error (Engine.lieFailureMessage fd.Name (groupStr cert.Group) f))
+                        | Error (Blade.ML.LieDischarge.ParityCheck f) ->
+                            Some (Error (Engine.inversionFailureMessage fd.Name f))
 
 // ============================================================================
 // The inference channel (stage 6a) — BL4011

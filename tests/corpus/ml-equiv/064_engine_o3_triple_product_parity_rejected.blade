@@ -1,0 +1,65 @@
+// TEST: ML Equiv Engine O3 Triple Product Parity (rejects)
+import ml as ml
+// ============================================================================
+// THE TRIPLE-PRODUCT TRIPLE — the −I rule as three corpus outcomes
+// (docs/plan-transforms-as-types.md §3.5's uniform rule, §7 stage 6c).
+//
+// ONE BODY, u·(v×w), written out in components, three declarations:
+//
+//   1. `where ml.equiv(SO3) -> Float`                         CERTIFIES
+//   2. `where ml.equiv(O3)  -> IrrepsIdx<[(0, 1, 1)]>`        CERTIFIES
+//   3. `where ml.equiv(O3)  -> Float`                         REFUSED
+//
+// The three verdicts are the whole content of the uniform rule's second half.
+// SO(3) is connected: π₀ is trivial, there is no fourth check, and the map's
+// behavior under inversion is simply not part of the claim — so BOTH parities
+// certify under SO3 and neither statement is stronger than the other.
+// O(3) ≅ SO(3) × {±I} has one π₀ generator, and it is decisive: three ODD
+// factors per monomial means the value flips under −I, so the true theorem is
+// "pseudoscalar" — (l = 0, ODD) — and the innocent-looking `-> Float`, which
+// classifies invariant, is a FALSE claim about a real symmetry of real space.
+//
+// This is the one obligation that is pure integer arithmetic: no rational, no
+// radical, no tolerance — each rep variable carries its block's parity bit, a
+// monomial's sign is (−1)^{Σ bits}, and the output component's declared parity
+// either matches or it does not. It is also the obligation composition can
+// never reach, because composition never sees the monomials.
+//
+// The refusal's message text is pinned in
+// tests/corpus/diagnostics/027_equiv_engine_inversion.blade; this file pins
+// the three-way BEHAVIOR. The certified pair sits beside the refusal
+// deliberately — a file where only the negative appears could not show that
+// the engine's "no" is about the declaration and not about the body.
+// ============================================================================
+let static V = [(1, 1, 1)]
+let static PS = [(0, 1, 1)]
+
+// 1. SO(3): no component group, so the parity declaration is not part of the
+//    claim and the plain scalar return is honest.
+function tri_so3(u: Array<Float like IrrepsIdx<V>>, v: Array<Float like IrrepsIdx<V>>,
+                 w: Array<Float like IrrepsIdx<V>>)
+                 where ml.equiv(SO3) -> Float =
+    (u(0) * (v(1) * w(2) - v(2) * w(1))
+     + u(1) * (v(2) * w(0) - v(0) * w(2))
+     + u(2) * (v(0) * w(1) - v(1) * w(0)))
+
+// 2. O(3), declared ODD: the true theorem. Certifies.
+function tri_o3_odd(u: Array<Float like IrrepsIdx<V>>, v: Array<Float like IrrepsIdx<V>>,
+                    w: Array<Float like IrrepsIdx<V>>)
+                    where ml.equiv(O3) -> Array<Float like IrrepsIdx<PS>> =
+    [u(0) * (v(1) * w(2) - v(2) * w(1))
+     + u(1) * (v(2) * w(0) - v(0) * w(2))
+     + u(2) * (v(0) * w(1) - v(1) * w(0))]
+
+// 3. O(3), declared EVEN: BL4008. The body commutes with every generator of
+//    so(3) — the engine says so in as many words — and still fails at −I.
+function tri_o3_even(u: Array<Float like IrrepsIdx<V>>, v: Array<Float like IrrepsIdx<V>>,
+                     w: Array<Float like IrrepsIdx<V>>)
+                     where ml.equiv(O3) -> Float =
+    (u(0) * (v(1) * w(2) - v(2) * w(1))
+     + u(1) * (v(2) * w(0) - v(0) * w(2))
+     + u(2) * (v(0) * w(1) - v(1) * w(0)))
+
+let a = tri_so3([1.0, 2.0, 3.0], [4.0, 5.0, 6.0], [7.0, 8.0, 10.0])
+let b = tri_o3_odd([1.0, 2.0, 3.0], [4.0, 5.0, 6.0], [7.0, 8.0, 10.0])
+let c = tri_o3_even([1.0, 2.0, 3.0], [4.0, 5.0, 6.0], [7.0, 8.0, 10.0])

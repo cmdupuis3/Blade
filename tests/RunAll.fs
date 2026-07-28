@@ -160,6 +160,16 @@ let runAllTestsFullWith (extraBlocks: (unit -> Blade.Tests.TestHarness.BlockResu
     // Casimir-Lagrange isotypic projectors re-derived exactly and
     // independently, plus the k = 2 value-level M-pin against stage 1.
     let polyOracle = Blade.Tests.PolyOracleReview.runPolyOracleTests ()
+    // The so(3) GENERATOR TABLES and the radical-vector discharge
+    // (MLLieDischarge.fs, stage 6c). Keystone first: the EXP-PIN closes the
+    // convention loop by exponentiating the exact tables and comparing against
+    // the Wigner action fit from an independent transcription of the real
+    // solid harmonics (the same object Rotations.applyRep performs). Then the
+    // exact algebra (skew-symmetry per radical component, the so(3) brackets
+    // and the Casimir, all l <= 4), the known answers incl. the
+    // triple-product triple and the |x|^2·x thesis pin, the three negative
+    // controls, and the composition-vs-engine differential.
+    let lieTables = Blade.Tests.LieTablesReview.runLieTablesTests ()
     // The Sn permutation-module counting layer (MLPermSpec.fs, stage 5a-i):
     // RGS partition enumeration vs the Stirling recurrence vs an independent
     // block-insertion route, the witness-unitriangularity certificate (the
@@ -281,7 +291,7 @@ let runAllTestsFullWith (extraBlocks: (unit -> Blade.Tests.TestHarness.BlockResu
     let blocks =
         [ yield r1; yield r2; yield attrs; yield subst
           yield normalize; yield unify; yield validateArrow
-          yield shape; yield oracles; yield wigner; yield symPower; yield polyOracle; yield permSpec; yield permOracle; yield pointSpec; yield pgOracle; yield cartBridge; yield spans; yield diagCore; yield diagCorpus; yield certSuggest; yield alloc
+          yield shape; yield oracles; yield wigner; yield symPower; yield polyOracle; yield lieTables; yield permSpec; yield permOracle; yield pointSpec; yield pgOracle; yield cartBridge; yield spans; yield diagCore; yield diagCorpus; yield certSuggest; yield alloc
           yield ompPragma
           match omp with Some b -> yield b | None -> ()
           yield bufType
