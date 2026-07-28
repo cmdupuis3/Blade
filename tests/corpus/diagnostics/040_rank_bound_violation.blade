@@ -1,0 +1,12 @@
+// TEST: Diag Rank Bound Violation (diag)
+// ERROR: BL3009 @ 11:46
+// ERROR-CONTAINS: requires a rank-2 (or higher) array
+// The one place that mechanically PINS the stage-2 rank-deduction code. `z`
+// collects a rank-1 lower bound from `total(z)` and a rank-2 one from
+// `tot2(z)`; `extents(z)` then demands rank 1 and contradicts the max-join.
+// Codes drift silently everywhere else — this file is why BL3009 exists as
+// its own code rather than another BL3999.
+function total(row) = reduce(row, (+))
+function tot2(m: Array<Float64 like Idx<2>, Idx<2>>) -> Float64 = m[0][0]
+function f(z) = total(z) + tot2(z) + extents(z)
+let r = f([[1.0, 2.0], [3.0, 4.0]])

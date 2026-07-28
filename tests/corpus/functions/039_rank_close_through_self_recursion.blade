@@ -1,0 +1,14 @@
+// TEST: Rank Close Through Self Recursion
+// The rank bound has to be collected while the function's own type is still
+// being inferred: `rec_sum` is registered before its body is checked, so the
+// self-call reads a parameter list that is not yet closed. The self-call's
+// own contribution is a no-op (the callee param IS the caller param, so the
+// max-join joins a bound with itself) — `total(a)` is the only real source,
+// and the decl close must still land. Nothing here would fail loudly if it
+// broke: `a` would default to a scalar and the emitted C++ would be
+// ill-typed, exactly as in 023.
+// total = 6, called twice (n = 2, 1) before the base case.
+function total(row) = reduce(row, (+))
+function rec_sum(a, n: Int64) = if n <= 0 then 0.0 else total(a) + rec_sum(a, n - 1)
+let s = rec_sum([1.0, 2.0, 3.0], 2)
+// EXPECT: s = 12.0
