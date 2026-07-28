@@ -1,0 +1,35 @@
+// TEST: Deep let chain terminates (duplication budget)
+// The blow-up guard on the binding-form descent, and a compiler-hang
+// regression test. Inlining a multi-use binding duplicates its value, and the
+// per-binding size cap CANNOT bound that on its own: the cap is measured
+// against the value BEFORE the enclosing bindings are substituted into it, so
+// every `a_k = a_(k-1) + a_(k-1)` below looks like a harmless three-node value
+// forever, while each one DOUBLES the tree. Twelve links is 2^12 nodes, and a
+// thirty-link version of this file wedged the compiler for minutes before the
+// budget existed.
+//
+// The budget caps the nodes any one binding may add, which makes total growth
+// linear in the number of bindings. The outer links exceed it and are simply
+// kept, so the walkers bottom out and the deduction reports PBottom — no
+// suggestion, no claim, dense storage. Giving up is the correct answer for a
+// pathological body; hanging is not. (A future budget increase would only add
+// a warning here, which cannot change the values below.)
+let A = [1.0, 2.0, 3.0]
+let result = method_for(A, A) <@> lambda(x, y) -> {
+    let a0 = x - y
+    let a1 = a0 + a0
+    let a2 = a1 + a1
+    let a3 = a2 + a2
+    let a4 = a3 + a3
+    let a5 = a4 + a4
+    let a6 = a5 + a5
+    let a7 = a6 + a6
+    let a8 = a7 + a7
+    let a9 = a8 + a8
+    let a10 = a9 + a9
+    let a11 = a10 + a10
+    let a12 = a11 + a11
+    a12
+} |> compute
+// a12 = 2^12 * (A[i] - A[j]) = 4096 * (A[i] - A[j]), dense 3x3 row-major.
+// EXPECT: result = [0.0, -4096.0, -8192.0, 4096.0, 0.0, -4096.0, 8192.0, 4096.0, 0.0]

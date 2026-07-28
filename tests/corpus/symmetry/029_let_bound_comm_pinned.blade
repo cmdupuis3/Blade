@@ -1,0 +1,20 @@
+// TEST: Let-bound kernel body, comm pinned (inclusive triangle)
+// The PINNED twin of symmetry/028 — the 020-to-022 relationship, on the
+// let-bound flagship. Confirming the proposal with `where comm(x, y)` moves the
+// same kernel onto compact symmetric storage: C(n+1, 2) cells for n = 3, the
+// inclusive triangle (the diagonal is stored, unlike the antisymm pin's strict
+// simplex).
+//
+// It also asserts the OTHER half of the descent: the deduced PInv must AGREE
+// with a declared `comm`. The contradiction validator only fires on a declared
+// clause the body disproves, so a file that keeps compiling under a pin is a
+// machine-checked "the analysis and the pin say the same thing".
+let A = [1.0, 2.0, 3.0]
+let result = method_for(A, A) <@> lambda(x, y) where comm(x, y) -> {
+    let d = x - y
+    d * d
+} |> compute
+// Inclusive upper triangle i <= j over A = [1, 2, 3], value (A[i] - A[j])^2:
+// (0,0)=0 (0,1)=1 (0,2)=4 (1,1)=0 (1,2)=1 (2,2)=0  -> 6 cells, not 9.
+// Exactly the i <= j sub-list of symmetry/028's dense 3x3.
+// EXPECT: result = [0.0, 1.0, 4.0, 0.0, 1.0, 0.0]

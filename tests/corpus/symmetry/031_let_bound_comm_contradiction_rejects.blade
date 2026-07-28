@@ -1,0 +1,17 @@
+// TEST: Let-bound body contradicts comm (rejects)
+// The anticomm twin of symmetry/030, and the proof that the descent reaches
+// PNeg as well as PInv. The body is symmetry/028's minus the squaring, so the
+// binding is used ONCE and inlines unconditionally (no duplication at all,
+// which is the branch of the policy 028/030 never take): `{ let d = x - y
+// <newline> d }` becomes x - y, whose two children ARE each other's image
+// under the swap, so the mirror rule fires directly and opSwapClass OpSub is
+// PNeg.
+//
+// Declared `comm` over a provably antisymmetric body would put the values on a
+// triangle that silently returns +f for half the reads of -f. Like 030 this
+// file compiled before the descent existed.
+let A = [1.0, 2.0, 3.0]
+let bad = method_for(A, A) <@> lambda(x, y) where comm(x, y) -> {
+    let d = x - y
+    d
+} |> compute

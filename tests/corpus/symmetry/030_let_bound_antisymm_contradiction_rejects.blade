@@ -1,0 +1,18 @@
+// TEST: Let-bound body contradicts antisymm (rejects)
+// The machine-checked proof of symmetry/028's deduction. `where antisymm(x, y)`
+// declared on a body the analysis proves COMMUTATIVE is the silent-corruption
+// case the stage-3 validators exist for: strict-simplex storage drops a
+// diagonal that is genuinely zero here but negates half the mirrored reads.
+//
+// Crucially for the binding-form descent, this file COMPILED before the
+// deduction learned to look inside `{ let d = ... }` — the block bottomed out
+// at PBottom, and PBottom stays trusted. It can only be rejected if the
+// descent actually reached PInv through the inlined (x - y) * (x - y), which
+// makes the reject a positive assertion about the analysis rather than a
+// string match on a warning. Kernel-lambda position, so this exercises the
+// buildApplyInfo entry point; symmetry/032 is the checkFunctionDecl twin.
+let A = [1.0, 2.0, 3.0]
+let bad = method_for(A, A) <@> lambda(x, y) where antisymm(x, y) -> {
+    let d = x - y
+    d * d
+} |> compute
