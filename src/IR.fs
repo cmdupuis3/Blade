@@ -5556,10 +5556,23 @@ let isInlineForm (e: IRExpr) : bool =
 /// before the outer loop consumes it — exactly as writing the intermediate
 /// `let` by hand would. Deliberately narrow: it does NOT list the blessed inline
 /// forms, so their existing auto-materialize path stays untouched.
+///
+/// Array-typed APPLICATION and partial-INDEX operands are included for the same
+/// reason — `f(x) + g(x)` (both operands calls) and `m(0) + m(1)` (both operands
+/// row views) equally leave the nest with no named array to read. A call operand
+/// must also be evaluated exactly once rather than re-invoked per element. This
+/// mirrors the `materialize` helper in `lowerArrayBinOpsModule`, which covers the
+/// raw-`IRBinOp` half of the same problem. Fully-indexed reads are scalar, so
+/// they fail the array-type test and stay inline.
 let private isNestedLoopComputeArg (e: IRExpr) : bool =
+    let isArrayTyped () =
+        match typeOf e with
+        | ArrayElem _ -> true
+        | _ -> false
     match e with
     | IRCompute _ -> true
     | IRApp (IRObjectFor _, _, _) -> true
+    | IRApp _ | IRIndex _ -> isArrayTyped ()
     | _ -> false
 
 /// An INLINE array literal sitting directly in a loop form's `Arrays` list —
