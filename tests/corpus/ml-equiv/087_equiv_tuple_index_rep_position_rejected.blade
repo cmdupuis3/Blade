@@ -1,0 +1,29 @@
+// TEST: ML Equiv Tuple Index Rep Position Rejected (rejects)
+import ml as ml
+// ============================================================================
+// THE FIRST GUARD ON THE NEW ARMS: RECALL IS NOT A FREE PASS.
+//
+// 085 lets a bracket read out of an invariant buffer reach an INVARIANT
+// position. It does not — and must not — let it reach a REPRESENTATION
+// position. `ws[1]` is a row of a plain `Idx<2>, Idx<WD>` weight buffer: an
+// invariant, and an invariant fed to `derive_linear`'s rep input would not
+// co-rotate with anything, so the map it describes is not the equivariant one.
+//
+// This is the arm's whole safety story stated as a test. `Inv` is not a
+// weakened `Rep`; it is the OTHER status, and `requireRep` refuses it in the
+// same words it has always refused an invariant argument. BL4008.
+//
+// Before the arm this file also rejected, but never got as far as the rep
+// position: `ws[0]` in the WEIGHT slot was already Opaque, so `requireInv`
+// refused it first with "cannot classify the argument to derive_linear weight
+// buffer". Same verdict, moved to the real fault and stated as a fact the
+// judgment has actually established.
+// ============================================================================
+let static S = [(0, 0, 1), (1, 1, 1)]
+let static WD = ml.hom_dim(S, S)
+
+function bad(x: Array<Float like IrrepsIdx<S>>, ws: Array<Float like Idx<2>, Idx<WD>>)
+             where ml.equiv(O3) -> Array<Float like IrrepsIdx<S>> =
+    ml.derive_linear(S, S, ws[0], ws[1])
+
+let r = bad([1.0, 4.0, 0.0 - 2.0, 6.0], [[2.0, 0.5], [1.0, 1.0]])

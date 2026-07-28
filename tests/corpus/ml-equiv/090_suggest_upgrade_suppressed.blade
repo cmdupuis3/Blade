@@ -1,0 +1,55 @@
+// TEST: ML Equiv Suggest Upgrade Suppressed
+import ml as ml
+// ============================================================================
+// THE UPGRADE LINT'S GUARD — A FILE THAT MUST STAY SILENT.
+//
+// `layer_weak` here is byte-for-byte 089's `layer_weak`: SO3-pinned, and its
+// O3 hypothesis passes. In 089 it draws the upgrade lint. Here it draws
+// nothing, and the only difference is `chain_weak` — an SO3-certified function
+// that CALLS it.
+//
+// Certificates do not transfer between groups. `judgeApp` refuses a
+// cross-group call in BOTH directions (it is the same refusal corpus 052 pins
+// for two point groups), so following the advice "pin this O3 instead" would
+// break `chain_weak`, which is a body that compiles today. A suggestion whose
+// advice turns a compiling program into a rejected one is worse than silence,
+// so the lint is suppressed the moment the name occurs free in any OTHER
+// declared-certified body — `CertShell.freeVars` with the caller's parameters
+// bound, the same occurrence test the ADD-a-pin channel uses for its
+// dependency closure.
+//
+// The guard is deliberately syntactic and deliberately coarse. It does not ask
+// whether the caller could ALSO be upgraded (it often could — `chain_weak`
+// would judge under O3 too, once its callee did); a lint that proposed a
+// simultaneous multi-function edit would have to prove the whole component
+// upgrades together, and getting that wrong costs a user a broken build for a
+// warning they did not ask for.
+//
+// `chain_weak` itself is the other half of the silence, and for the neighbouring
+// reason: ITS O3 hypothesis is run against the REAL table, in which `layer_weak`
+// is still SO3-pinned, so the O3 attempt hits the cross-group refusal and
+// fails. Both functions are quiet, each for its own honest reason.
+//
+// (ZERO `// SUGGEST:` lines here is the assertion: the harness matches pins
+// against produced suggestions in both directions, so any suggestion at all
+// fails this file.)
+// ============================================================================
+let static S = [(0, 0, 1), (1, 1, 1)]
+let static WD = ml.hom_dim(S, S)
+// EXPECT: WD = 2
+
+function layer_weak(x: Array<Float like IrrepsIdx<S>>, w: Array<Float like Idx<WD>>)
+                    where ml.equiv(SO3) -> Array<Float like IrrepsIdx<S>> =
+    ml.derive_linear(S, S, w, x)
+
+function chain_weak(x: Array<Float like IrrepsIdx<S>>, w: Array<Float like Idx<WD>>)
+                    where ml.equiv(SO3) -> Array<Float like IrrepsIdx<S>> =
+    layer_weak(layer_weak(x, w), w)
+
+let wv = [2.0, 0.5]
+let xv = [1.0, 4.0, 0.0 - 2.0, 6.0]
+
+let one = layer_weak(xv, wv)
+// EXPECT: one = [2.0, 2.0, -1.0, 3.0]
+let two = chain_weak(xv, wv)
+// EXPECT: two = [4.0, 1.0, -0.5, 1.5]

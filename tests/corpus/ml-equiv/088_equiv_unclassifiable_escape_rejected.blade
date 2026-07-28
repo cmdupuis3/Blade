@@ -1,0 +1,32 @@
+// TEST: ML Equiv Unclassifiable Escape Rejected (rejects)
+import ml as ml
+// ============================================================================
+// THE SECOND GUARD, AND THE WORDING SPLIT (E3).
+//
+// A bracket read on a REPRESENTATION base keeps today's `Opaque`: the
+// components of a rep are the basis-dependent numbers this discipline refuses,
+// and the judgment declines to name what `x[1]` is. So the value still cannot
+// escape to an uncertified callee, and this file still rejects — corpus 007's
+// verdict.
+//
+// What changed is the SENTENCE. The uncertified-callee arm finds its offending
+// argument with `List.tryFindIndex (isInv >> not)`, which catches `Rep` and
+// `Opaque` alike, and it used to report both as "representation-typed value
+// escapes to 'helper'". For an `Opaque` argument that names a fact the
+// judgment never established — it does not know the value is rep-typed, it
+// knows it cannot tell — and a checker that overstates its own knowledge
+// teaches the wrong repair. The `Opaque` arm now speaks `requireRep`'s
+// vocabulary for the same status ("cannot classify the argument to ...").
+//
+// 007 is the other half of the split and is unchanged: a genuinely `Rep`
+// argument still reads "representation-typed value escapes to 'helper'". The
+// exact texts of both are pinned in tests/corpus/diagnostics.
+// ============================================================================
+let static S = [(0, 0, 1), (1, 1, 1)]
+
+function helper(a: Float) -> Float = a * 2.0
+
+function bad(x: Array<Float like IrrepsIdx<S>>) where ml.equiv(O3) -> Float =
+    helper(x[1])
+
+let s = bad([2.0, 1.0, 1.0, 1.0])

@@ -1,0 +1,55 @@
+// TEST: ML Equiv Tuple Index Invariant
+import ml as ml
+// ============================================================================
+// WALKER RECALL, ARM 1: A COMPONENT OF AN INVARIANT IS INVARIANT.
+//
+// `e[i]` parses as a tuple-index node whatever `e` turns out to be, and the
+// equiv walker used to answer `Opaque` for every one of them — the catch-all,
+// not a decision. `Opaque` is refused at every rep-relevant position and at the
+// return-agreement check, so a certified body could not read a weight row out
+// of a stacked weight buffer at all. Both functions below were REJECTED before
+// this arm existed, and neither of them touches a representation.
+//
+// The rule is the conditional theorem read one level down: `Inv` means the
+// value is HELD FIXED by the group action, a value that does not move has no
+// part that moves, and the bracket selector is a static offset that does not
+// move either. So `ws[0]` is invariant whenever `ws` is.
+//
+// What the arm deliberately does NOT claim is SHAPE. A component of an
+// invariant array may itself be an array, so the result is "invariant, shape
+// unestablished" — which is exactly the status the scaling guard refuses. 091
+// pins that: this arm can never turn into a false scaling certificate.
+// ============================================================================
+let static S = [(0, 0, 1), (1, 1, 1)]
+let static WD = ml.hom_dim(S, S)
+// EXPECT: WD = 2
+
+// A PARTIAL bracket read: one row of a stacked weight buffer, handed to
+// derive_linear's invariant weight slot. `requireInv` accepts it now; before
+// the arm it read "cannot classify the argument to derive_linear weights".
+function layer_row(x: Array<Float like IrrepsIdx<S>>, ws: Array<Float like Idx<2>, Idx<WD>>)
+                   where ml.equiv(O3) -> Array<Float like IrrepsIdx<S>> =
+    ml.derive_linear(S, S, ws[0], x)
+
+function layer_row2(x: Array<Float like IrrepsIdx<S>>, ws: Array<Float like Idx<2>, Idx<WD>>)
+                    where ml.equiv(O3) -> Array<Float like IrrepsIdx<S>> =
+    ml.derive_linear(S, S, ws[1], x)
+
+// A FULL bracket read, in the invariant arithmetic of the body: x(0) is the
+// (l = 0, even) block, an honest invariant scalar, and the weight cell joins it.
+function score(x: Array<Float like IrrepsIdx<S>>, ws: Array<Float like Idx<2>, Idx<2>>)
+               where ml.equiv(O3) -> Float =
+    x(0) + ws[0][1]
+
+let wss = [[2.0, 0.5], [1.0, 1.0]]
+let xv = [1.0, 4.0, 0.0 - 2.0, 6.0]
+
+// Row 0 scales block 0e by 2 and block 1o by 0.5 (corpus 055's numbers).
+let r0 = layer_row(xv, wss)
+// EXPECT: r0 = [2.0, 2.0, -1.0, 3.0]
+// Row 1 is the identity on both blocks.
+let r1 = layer_row2(xv, wss)
+// EXPECT: r1 = [1.0, 4.0, -2.0, 6.0]
+
+let s = score([2.0, 1.0, 1.0, 1.0], [[1.0, 3.0], [4.0, 5.0]])
+// EXPECT: s = 5

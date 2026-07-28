@@ -1,0 +1,37 @@
+// TEST: ML Equiv Component Scale Rejected (rejects)
+import ml as ml
+// ============================================================================
+// THE SHAPE HALF OF THE NEW ARMS' SOUNDNESS — 072's guard, reached through a
+// field read.
+//
+// The arms answer `Inv` with shape UNESTABLISHED, never `InvScalar`. That is
+// not caution for its own sake: a component of an invariant aggregate may
+// itself be an aggregate, and the one place shape is load-bearing is exactly
+// the place where getting it wrong is a false certificate. Scaling a rep by an
+// invariant SCALAR is equivariant (a scalar commutes with every block of the
+// action); scaling it elementwise by an invariant ARRAY is a diagonal matrix
+// with unequal entries, which does not commute with D^l. So the shape must be
+// PROVEN, and `G.hi` has not proven it. BL4008 — 072's message, reached from
+// the new arm.
+//
+// The contrast that makes it a rule rather than a limitation: 073 pins `w(0)`,
+// a FULL-RANK element read out of an invariant array of KNOWN rank, as a
+// proven scalar, and that one may scale. `G.hi` and `ws[0][1]` may not. Recall
+// went up at the positions where shape does not matter (085, 086) and did not
+// move an inch at the one position where it does.
+// ============================================================================
+let static S = ml.sh_spec(1)
+
+struct Gains {
+    lo: Float64,
+    hi: Float64
+}
+
+let G = Gains { lo = 2.0, hi = 3.0 }
+
+function bad(px: Float, py: Float, pz: Float) where ml.equiv(O3) -> Array<Float like Idx<2>> = {
+    let v = ml.y_to(1, px, py, pz)
+    ml.norms(S, v * G.hi)
+}
+
+let r = bad(1.0, 2.0, 3.0)
