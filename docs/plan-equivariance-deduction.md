@@ -1,7 +1,28 @@
 # Plan: equivariance deduction — deepening stage 6a
 
-Status: IN PROGRESS (this round). Base: branch `w-integrate` (feat/derive-sym-tp
-plus the deduction analysis+surfacing round).
+Status: LANDED 2026-07-28. Base: branch `w-integrate` (feat/derive-sym-tp
+plus the deduction analysis+surfacing round). All three work items merged;
+gates green (full suite + interp differential). Landed-note deviations from
+the spec below, all agent-caught and correct:
+
+- The seam, not the inference function, writes `GalCertSuggestions` (the
+  spec's both-write instruction would have double-emitted and failed the
+  SUGGEST harness); `inferGalileanCertificates` writes `CertFacts` and
+  returns the strings — the exact equiv split.
+- A function with SEVERAL passing galilean candidates is proposed for each
+  but threaded into the speculative table for none (an ambiguous closure
+  note would be unactionable; pinned by ml-equiv/084's `total_flux`).
+- The optional `joinStatus` Opaque-absorption was NOT taken (soundness
+  relaxation on the shared checking path for near-zero recall, and it
+  degrades the branch-disagreement diagnostic).
+- The walker's new component-read arms swallow a base-judgment Error into
+  `Opaque` (the old arms never walked the base, so propagating a new Error
+  would have ADDED rejects), and `ExprTupleIndex` also requires the selector
+  invariant. The `deduced[]` renderer needed a fix for the new kinds — the
+  name field (the group) was silently dropped by the pair-fields branch.
+- Corpus-wide noise sweep (all 1196 files): exactly ONE pre-existing file
+  newly suggests — sgs/015's Smagorinsky closure, a true positive
+  (`ml.galilean(ub)` on `smag_g`).
 
 ## What already exists (do not rebuild)
 
