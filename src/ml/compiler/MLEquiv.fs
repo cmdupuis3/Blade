@@ -640,7 +640,42 @@ let rec private judge (ctx: Ctx) (env: Map<string, RepStatus>) (e: Expr)
             | Some fe -> judge ctx env' fe
             | None -> Ok (Inv InvShapeUnknown))
     | ExprKind.ExprApp (f, args) -> judgeApp ctx env e f args
-    | ExprKind.ExprField (_, _) -> Ok Opaque
+    // --- component reads out of an INVARIANT aggregate (stage 6a, E3) --------
+    // SOUNDNESS. `Inv` in this lattice means the value is HELD FIXED by the
+    // group action — that is the conditional theorem's hypothesis, and it is
+    // what every `Inv` producer above establishes. A value that does not move
+    // has no part that moves: if the aggregate `t` is fixed and the selector is
+    // fixed, then `t[k]` / `t.f` is fixed too, i.e. invariant. So this arm
+    // never manufactures a claim the base did not already carry.
+    //
+    // The result is `InvShapeUnknown`, deliberately NOT `InvScalar`: a
+    // component of an invariant array may itself be an array, and an
+    // unestablished shape is refused by the only arm where shape is
+    // load-bearing (`nonScalarScale` — scaling a rep). So the recall this arm
+    // buys can never become a false SCALING certificate.
+    //
+    // WHAT STAYS `Opaque`, exactly as before this arm existed:
+    //   * a `Rep` base — its components are the basis-dependent numbers this
+    //     whole discipline refuses (the `x(2)` rejection, one syntax over).
+    //     Opaque rejects at every rep-relevant position and at the return
+    //     agreement check; a hard REJECT here is a behavioral tightening the
+    //     plan defers to its own round;
+    //   * an `Opaque` base — nothing is known, so nothing is claimed;
+    //   * a base whose judgment ERRORS — the error is SWALLOWED into `Opaque`,
+    //     which is precisely today's behavior (the old arm never walked the
+    //     base at all). This arm may only add accepts, never new rejects;
+    //   * a selector that is not invariant — the cell it picks would move with
+    //     the frame, the same rule array indexing is held to in `judgeAssign`.
+    | ExprKind.ExprTupleIndex (baseE, idxE) ->
+        (match j baseE, j idxE with
+         | Ok (Inv _), Ok (Inv _) -> Ok (Inv InvShapeUnknown)
+         | _ -> Ok Opaque)
+    // A field name is a STATIC selector (an Ident, not an expression), so there
+    // is no index to judge — the base alone decides.
+    | ExprKind.ExprField (baseE, _) ->
+        (match j baseE with
+         | Ok (Inv _) -> Ok (Inv InvShapeUnknown)
+         | _ -> Ok Opaque)
     // --- functional iteration (the post-imperative surface) ------------------
     // The arms MLGalilean and MLPerm have carried since they were written, and
     // this copy did not (stage 5c catalog, finding 4). Virtual arrays
@@ -1067,9 +1102,21 @@ and private judgeApp (ctx: Ctx) (env: Map<string, RepStatus>) (e: Expr) (f: Expr
                         Ok (Inv sh)
                     | Some i ->
                         let argE = args.[i]
-                        if isKnownScalarBuiltin fn then
+                        // `isInv >> not` catches BOTH failing statuses, and they
+                        // are different facts. `Rep` is an established one — the
+                        // value provably transforms — and keeps the two escape
+                        // messages verbatim. `Opaque` establishes NOTHING, so
+                        // calling it "a representation-typed value" names a fact
+                        // the judgment never proved; it gets the vocabulary
+                        // requireRep/requireInv already use for the same status.
+                        match sts.[i] with
+                        | Opaque when isKnownScalarBuiltin fn ->
+                            Error (bl4008 argE.Span (sprintf "function '%s': cannot classify the argument to '%s' inside an equiv-certified body — v1 cannot rule out that it carries representation structure, and a nonlinearity may be applied only to invariants (ml.gated gates reps; ml.scalars/ml.norms extract invariants)" ctx.FuncName fn))
+                        | Opaque ->
+                            Error (bl4008 argE.Span (sprintf "function '%s': cannot classify the argument to '%s' inside an equiv-certified body — v1 cannot rule out that it carries representation structure, and '%s' carries no equiv certificate that would say what happens to it. Pass a value the judgment can classify, or certify '%s' with `where ml.equiv(%s)`" ctx.FuncName fn fn fn (groupStr ctx.Group)))
+                        | _ when isKnownScalarBuiltin fn ->
                             Error (bl4008 argE.Span (sprintf "function '%s': applying '%s' to a representation-typed value is not equivariant — nonlinearities act only on invariants (ml.gated gates reps; ml.scalars/ml.norms extract invariants)" ctx.FuncName fn))
-                        else
+                        | _ ->
                             Error (bl4008 argE.Span (sprintf "function '%s': representation-typed value escapes to '%s', which carries no equiv certificate — certify it with `where ml.equiv(%s)` or pass only invariants" ctx.FuncName fn (groupStr ctx.Group))))
     | _ ->
         // computed callee over reps: not admissible in v1
@@ -1635,9 +1682,75 @@ let inferCertificates (statics: StaticEnv) (mlAliases: Set<string>)
                         sprintf "function '%s' judges equivariant under %s: add 'where ml.equiv(%s)' [signature: %s]%s"
                             fd.Name gs gs (sigSummary cs) closureNote
                     out <- (msg, d.Span) :: out
+                    // The STRUCTURED twin of the very same proposal (E2): same
+                    // owner, same group, same closure, same span. Emitted here
+                    // rather than rebuilt by a consumer so the string and the
+                    // fact can never disagree about what was proved.
+                    CertFacts.add { Owner = fd.Name; Discipline = "equiv"; Group = gs; Deps = ordered } d.Span
                     spec <- Map.add gs (Map.add fd.Name cs specG) spec
                     deps <- Map.add gs (Map.add fd.Name closure depsG) deps
                     order <- Map.add gs (orderG @ [ fd.Name ]) order
+        | _ -> ()
+    // ========================================================================
+    // THE STRONGER-GROUP UPGRADE LINT (E4)
+    // ========================================================================
+    //
+    // A function pinned `ml.equiv(SO3)` whose body ALSO judges under O3 is
+    // carrying a weaker theorem than it proved. O(3) ⊃ SO(3), so the O3
+    // certificate is strictly stronger: it adds the improper-rotation half
+    // (the −I obligation the engine discharges), and nothing it claims is
+    // weaker than what the SO3 pin already claims.
+    //
+    // This is NOT a proposal to ADD a pin — it proposes EDITING one — so it
+    // emits a string only and NO CertFact: `deduced[]` records certificates the
+    // deduction proved about UNCERTIFIED code, and this function is certified.
+    //
+    // The hypothesis is run exactly as `tryCandidate` runs every other one: the
+    // real certificate table with THIS function's entry replaced by its O3
+    // classification, so callees keep their declared certificates and a
+    // self-call resolves against the hypothesis — precisely the table the
+    // checker would see once the pin is edited. Propose ⊆ Check-accept again by
+    // construction. The non-vacuity filter rides along: an `equiv(SO3)` pin on
+    // a signature with nothing rep-typed is vacuous under both groups, and
+    // "upgrade your tautology" is noise.
+    //
+    // THE GUARD. Certificates do not transfer between groups — `judgeApp`
+    // refuses a cross-group call in BOTH directions (see the design comment
+    // above) — so editing this pin to O3 would break every CERTIFIED caller
+    // that calls it today. A suggestion whose advice breaks the build is worse
+    // than silence, so the lint is suppressed as soon as the name occurs free
+    // in any OTHER declared-certified body. (Uncertified callers are unaffected
+    // by construction: they never consult the certificate table.) The scan is
+    // `CertShell.freeVars` with the callee's own parameters bound, i.e. the
+    // same occurrence test the inference loop uses one screen up.
+    let certifiedFree =
+        decls
+        |> List.choose (fun d ->
+            match d.Value with
+            | DeclFunction fd when Map.containsKey fd.Name certs ->
+                Some (fd.Name, freeVars (Set.ofList (fd.Params |> List.map (fun p -> p.Name))) fd.Body)
+            | _ -> None)
+    for d in decls do
+        match d.Value with
+        | DeclFunction fd ->
+            match Map.tryFind fd.Name certs with
+            | Some cert ->
+                match cert.Group with
+                | SO3 ->
+                    let usedByAnotherCert =
+                        certifiedFree
+                        |> List.exists (fun (n, fv) -> n <> fd.Name && Set.contains fd.Name fv)
+                    if not usedByAnotherCert then
+                        let globals = buildGlobalShapes O3 statics decls
+                        match tryCandidate O3 typeAliases statics globals mlAliases certs fd with
+                        | Some _ ->
+                            let msg =
+                                sprintf "function '%s' is pinned ml.equiv(SO3) but judges under O3: the stronger certificate is available"
+                                    fd.Name
+                            out <- (msg, d.Span) :: out
+                        | None -> ()
+                | _ -> ()
+            | None -> ()
         | _ -> ()
     List.rev out
 

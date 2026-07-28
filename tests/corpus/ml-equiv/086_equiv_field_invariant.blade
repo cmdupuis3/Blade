@@ -1,0 +1,41 @@
+// TEST: ML Equiv Field Invariant
+import ml as ml
+// ============================================================================
+// WALKER RECALL, ARM 2: THE SAME RULE, ONE SYNTAX OVER.
+//
+// `ExprField` answered `Opaque` UNCONDITIONALLY — not a catch-all this time but
+// a written arm, and still not a decision about the base. A struct of tuning
+// constants is invariant by the same conditional-theorem reading every other
+// module-level binding gets (it is held fixed while the group acts), so its
+// fields are invariant too, and a certified body may read them.
+//
+// The base is judged, and only an `Inv` base answers `Inv`. A field of a
+// representation-typed value stays `Opaque` — its components are the
+// basis-dependent numbers this discipline exists to refuse — which is 088's
+// content, and a struct-typed PARAMETER cannot appear in a certified signature
+// at all (`statusOfType` refuses to classify it), so the only bases that reach
+// this arm are the ones the module holds fixed.
+// ============================================================================
+let static S = [(0, 0, 1), (1, 1, 1)]
+
+struct Gains {
+    lo: Float64,
+    hi: Float64
+}
+
+// A module-level binding: invariant, shape unestablished. Both its fields
+// inherit that status.
+let G = Gains { lo = 2.0, hi = 3.0 }
+
+function score(x: Array<Float like IrrepsIdx<S>>) where ml.equiv(O3) -> Float =
+    x(0) + G.lo
+
+// The field also serves in the invariant arithmetic of a longer body, and as
+// an ml op's invariant argument is covered by 085's bracket twin.
+function blend(x: Array<Float like IrrepsIdx<S>>) where ml.equiv(O3) -> Float =
+    (x(0) * G.hi) + (G.lo * G.hi)
+
+let a = score([2.0, 1.0, 1.0, 1.0])
+// EXPECT: a = 4
+let b = blend([2.0, 1.0, 1.0, 1.0])
+// EXPECT: b = 12

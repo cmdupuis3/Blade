@@ -1,0 +1,62 @@
+// TEST: ML Equiv Suggest Upgrade SO3 To O3
+import ml as ml
+// ============================================================================
+// THE STRONGER-GROUP UPGRADE LINT (E4).
+//
+// `layer_weak` is pinned `ml.equiv(SO3)` and the pin is TRUE — it checks, and
+// the file compiles. It is also weaker than what the body proves: the spec is
+// (l = 0, EVEN) plus (l = 1, odd), `derive_linear`'s synthesized basis is a
+// genuine O(3) hom, and nothing in the body flips under an improper rotation.
+// O(3) ⊃ SO(3), so the O3 certificate is strictly stronger — it adds the
+// inversion half of the theorem and weakens nothing — and a user who wrote SO3
+// here almost certainly wrote the weaker of two available claims by accident.
+//
+// The lint is the SAME hypothesis machinery stage 6a already runs, pointed at a
+// function that is already certified: build the O3 signature with the checker's
+// own classifier, put it in the real certificate table IN PLACE OF this
+// function's declared entry (every other declared certificate untouched), and
+// run the checker's own `judgeFunction`. What passes is exactly what would pass
+// once the user edits the pin, so Propose ⊆ Check-accept holds here for the
+// same structural reason it holds for the ADD-a-pin channel.
+//
+// It rides the BL4011 string channel and emits NO CertFact: `deduced[]` records
+// what the deduction proved about UNCERTIFIED code, and this function is
+// certified — the lint proposes EDITING a pin, not adding one.
+//
+// The contrast is the point of `act_weak`: it is SO3-pinned too, and it gates
+// on a PSEUDOSCALAR block, which is corpus 008's O(3) rejection. Its O3
+// hypothesis genuinely fails, so it draws no lint. "Pinned SO3" is not the
+// trigger; "pinned SO3 and the O3 judgment goes through" is.
+// ============================================================================
+let static S = [(0, 0, 1), (1, 1, 1)]
+let static WD = ml.hom_dim(S, S)
+// EXPECT: WD = 2
+
+// SUGGEST: function 'layer_weak' is pinned ml.equiv(SO3) but judges under O3: the stronger certificate is available
+function layer_weak(x: Array<Float like IrrepsIdx<S>>, w: Array<Float like Idx<WD>>)
+                    where ml.equiv(SO3) -> Array<Float like IrrepsIdx<S>> =
+    ml.derive_linear(S, S, w, x)
+
+// The upgrade, written out: it checks. That is the lint's Propose ⊆
+// Check-accept twin, and it is why the message is an instruction and not a
+// guess.
+function layer_strong(x: Array<Float like IrrepsIdx<S>>, w: Array<Float like Idx<WD>>)
+                      where ml.equiv(O3) -> Array<Float like IrrepsIdx<S>> =
+    ml.derive_linear(S, S, w, x)
+
+// SO3-pinned and NOT upgradable: the gate block is (l = 0, odd), so the gates
+// are pseudoscalars and the O3 judgment refuses the body. No lint.
+let static SODD = [(0, 1, 2), (1, 1, 1)]
+function act_weak(x: Array<Float like IrrepsIdx<SODD>>) where ml.equiv(SO3)
+                  -> Array<Float like IrrepsIdx<SODD>> =
+    ml.gated(SODD, x)
+
+let wv = [2.0, 0.5]
+let xv = [1.0, 4.0, 0.0 - 2.0, 6.0]
+
+let weak = layer_weak(xv, wv)
+// EXPECT: weak = [2.0, 2.0, -1.0, 3.0]
+let strong = layer_strong(xv, wv)
+// EXPECT: strong = [2.0, 2.0, -1.0, 3.0]
+let g = act_weak([0.0, 2.0, 1.0, 1.0, 1.0])
+// EXPECT: g = [0.0, 1.7615941559557646, 0.5, 0.5, 0.5]
