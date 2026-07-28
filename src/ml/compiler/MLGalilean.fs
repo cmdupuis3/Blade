@@ -108,6 +108,19 @@ let buildCertTable (decls: Located<Decl> list)
             | _ -> Ok table))
         (Ok Map.empty)
 
+/// The galilean-certificate suggestion side-channel — BL4014's channel,
+/// mirroring `Equiv.CertSuggestions` (BL4011) field for field. Filled by the
+/// galilean inference pass at the MLElaborate seam, reset by
+/// `MLElaborate.expand`, read by `TypeCheck.typeCheck` (string twins),
+/// `Lowering.typeCheckWarningDiagnostics` (rendered warnings) and
+/// `Ide.ideCheck` (structured). AsyncLocal, like the others.
+module GalCertSuggestions =
+    let private slot = new System.Threading.AsyncLocal<(string * Blade.Ast.Span) list>()
+    let reset () = slot.Value <- []
+    let add (msg: string) (span: Blade.Ast.Span) = slot.Value <- (msg, span) :: slot.Value
+    let get () : (string * Blade.Ast.Span) list =
+        match box slot.Value with null -> [] | _ -> List.rev slot.Value
+
 /// Aliases bound to `sgs` (name-only knowledge — no project dependency on
 /// the sgs elaborator; without `import sgs` the axioms are simply absent).
 let sgsAliasesOf (decls: Located<Decl> list) : Set<string> =

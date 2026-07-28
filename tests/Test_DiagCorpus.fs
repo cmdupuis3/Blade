@@ -109,7 +109,12 @@ let runCertSuggestTests () : BlockResult =
         // channel per program and only fills it when the equiv judgment found
         // nothing to report, so a reject-probe legitimately yields zero.
         let _ = Lowering.lowerDiag None source
-        let produced = Blade.ML.Equiv.CertSuggestions.get () |> List.map fst
+        // BOTH certificate-suggestion channels: equiv (BL4011) and galilean
+        // (BL4014). Pins assert the union; a file with no pins asserts
+        // silence on both.
+        let produced =
+            (Blade.ML.Equiv.CertSuggestions.get () @ Blade.ML.Galilean.GalCertSuggestions.get ())
+            |> List.map fst
         let mutable remaining = produced
         let mutable unmatched : string list = []
         for p in pins do

@@ -1977,7 +1977,10 @@ let private expandStr (program: Program) : Result<Program, ExpandFailure> =
     // Stage 6a's suggestion side-channel accumulates across the program's
     // modules, so it is cleared once here — the elaborator is its only
     // producer (the TypeCheck.PinSuggestions.reset precedent, one phase over).
+    // The structured twin and the galilean channel follow the same lifecycle.
     Blade.ML.Equiv.CertSuggestions.reset ()
+    Blade.ML.Equiv.CertFacts.reset ()
+    Blade.ML.Galilean.GalCertSuggestions.reset ()
     Blade.ML.Equiv.register ()
     Blade.ML.Galilean.register ()
     Blade.ML.Perm.register ()

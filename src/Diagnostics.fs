@@ -173,6 +173,12 @@ module Codes =
             // annotation the deduction can prove wrong, and the one error whose
             // fix is "remove the clause / wrap in reynolds".
             "BL4013", "symmetry annotation contradicts body"
+            // BL4014 — BL4011's galilean twin: the inference pass runs the
+            // shipped galilean judgment speculatively (try-each-velocity-
+            // parameter) and proposes `where ml.galilean(u)`. A WARNING,
+            // always, for BL4011's reason — and like BL4011 it grows no
+            // `--strict-pins` arm: certificates own no storage decision.
+            "BL4014", "galilean certificate suggestion"
             // BL5xxx — elaborators
             "BL5000", "ml elaboration error"
             "BL5100", "ppl elaboration error"

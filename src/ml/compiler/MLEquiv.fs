@@ -1460,6 +1460,28 @@ module CertSuggestions =
     let get () : (string * Span) list =
         match box slot.Value with null -> [] | _ -> List.rev slot.Value
 
+/// The STRUCTURED twin of the suggestion strings — what the deduction proved,
+/// as data (the `DeducedFacts` precedent, one phase earlier). `Discipline` is
+/// "equiv" | "galilean"; `Group` is the group name for equiv and the
+/// comma-joined velocity parameters for galilean; `Deps` is the dependency
+/// closure the proposal RESTS on ("also requires pinning"), in decl order.
+/// Hosted here (compile index 114) so MLGalilean (115) can write to it and
+/// Ide (159) can read it. Reset by `MLElaborate.expand` beside
+/// CertSuggestions; surfaced by `ide check --json` as `deduced[]` entries.
+type CertFact = {
+    Owner: string
+    Discipline: string
+    Group: string
+    Deps: string list
+}
+
+module CertFacts =
+    let private slot = new System.Threading.AsyncLocal<(CertFact * Span) list>()
+    let reset () = slot.Value <- []
+    let add (f: CertFact) (span: Span) = slot.Value <- (f, span) :: slot.Value
+    let get () : (CertFact * Span) list =
+        match box slot.Value with null -> [] | _ -> List.rev slot.Value
+
 /// Which index families a signature annotation MENTIONS — the syntactic gate
 /// that picks the candidate groups. Deliberately a mirror of `statusOfType`'s
 /// REACH (the same `TyArray` index list, the same one-level alias chase) and
