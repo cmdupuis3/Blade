@@ -50,6 +50,15 @@ type TypeError =
     /// `Base<_>` outside parameter position. `where` names the site.
     | TagWildcardNotParam of where_: string
     // Symmetry / compact-group violations (BL4004)
+    /// Two index slots agree positionally but occupy a different number of
+    /// index COMPONENTS: a rank-k compact group (SymIdx<k>/AntisymIdx<k>) is
+    /// one slot but k dimensions of the emitted Array<T, k>. Cell counts can
+    /// coincide, so this is not implied by any extent check.
+    ///
+    /// The two sides are deliberately NOT labelled expected/actual: `unify`
+    /// is symmetric and its callers pass (declared, inferred) in both orders,
+    /// so only `where_` can situate the failure.
+    | IndexRankMismatch of where_: string * left: string * leftRank: int * right: string * rightRank: int
     | DecompactDimRange of dim: int * totalDims: int
     | DecompactPlainAxis of dim: int
     | DecompactLastSlotOnly of slots: int * slot: int
@@ -438,10 +447,40 @@ let (|BlockSpecTag|_|) (tag: string) : (string * string option) option =
 /// Numeric promotion: when two different numeric scalars meet, the
 /// inference variable (if any) is rebound to the promoted type so that
 /// downstream IR and codegen see the correct wider type.
+/// Rank disagreement between two positionally-matched index slots. Rank is
+/// the number of index COMPONENTS the slot occupies (1 for Idx, k for
+/// SymIdx<k>/AntisymIdx<k>), so it is what decides the emitted
+/// `Array<T, N>`'s N -- one slot is NOT one dimension.
+///
+/// indexPairIncompatible checks this ahead of, and independently of, every
+/// tag/symmetry rule it documents, because none of them implies it:
+///   - Symmetry alone doesn't: SymIdx<2, 4> and SymIdx<3, 4> are both
+///     SymSymmetric, and SymNone is a symmetry WILDCARD, so a rank-1 plain
+///     Idx passes the symmetry test against any compact group.
+///   - The irreps arm doesn't: it keys on spec identity only and returns
+///     early, so a rank-k group over an irreps space would match the bare
+///     rank-1 irreps space it was built from.
+///   - The ArrayElem slot-count test doesn't: a rank-k group is ONE entry in
+///     IndexTypes, so `Array<T like SymIdx<2,3>>` and `Array<T like Idx<6>>`
+///     both have length 1.
+///   - Extents can't stand in: they are deliberately never compared, and the
+///     cell counts coincide precisely in the cases that matter (SymIdx<2,3>
+///     stores 6 cells, exactly Idx<6>).
+/// Left unchecked, the mismatch survives to codegen and surfaces as a g++
+/// error (`could not convert Array<double,1> to Array<double,2>`).
+///
+/// Rank 0 is not a value any producer builds; it is normalized to 1 so a
+/// default-constructed record can't read as a distinct rank (same `max 1`
+/// convention CodeGen uses when deciding compact storage).
+let indexRankDiffers (i1: IRIndexType) (i2: IRIndexType) : bool =
+    max 1 i1.Rank <> max 1 i2.Rank
+
 /// Per-index compatibility for POSITIONAL index-list matching (ArrayElem
 /// index types, Dist axes). True = the pair is INCOMPATIBLE. One shared
 /// predicate (previously duplicated inline in the ArrayElem and IRTDist
 /// arms) so the rules cannot drift:
+///   - Component RANK must match (indexRankDiffers, checked first and
+///     unconditionally — the arms below can each mask a rank difference).
 ///   - Block-spec tags (both sides — see `BlockSpecTag`): identity is the
 ///     MEMBER plus the SPEC, plus the optional nominative alias name.
 ///     Different specs are distinct even at equal total_dim; two ALIASES of
@@ -462,6 +501,7 @@ let (|BlockSpecTag|_|) (tag: string) : (string * string option) option =
 ///   - Symmetry classes must be compatible (SymNone is a wildcard).
 let indexPairIncompatible (i1: IRIndexType) (i2: IRIndexType) : bool =
     let isSyntheticTag (t: string) = t.StartsWith("__")
+    indexRankDiffers i1 i2 ||
     match i1.Tag, i2.Tag with
     | Some (BlockSpecTag (s1, n1)), Some (BlockSpecTag (s2, n2)) ->
         s1 <> s2 || (match n1, n2 with
@@ -590,13 +630,22 @@ let rec unify (subst: Subst) (t1: IRType) (t2: IRType) : TypeResult<unit> =
             Error (TypeMismatch (t1, t2))
         else
             // Per-index compatibility: the shared indexPairIncompatible
-            // predicate (see its doc above unify) — nominative user tags,
-            // synthetic-tag exemption, irreps spec identity, compatible
-            // symmetry, extents never compared.
+            // predicate (see its doc above unify) — component rank, nominative
+            // user tags, synthetic-tag exemption, irreps spec identity,
+            // compatible symmetry, extents never compared.
             let indexMismatch =
                 List.zip a1.IndexTypes a2.IndexTypes
-                |> List.tryFind (fun (i1, i2) -> indexPairIncompatible i1 i2)
+                |> List.indexed
+                |> List.tryFind (fun (_, (i1, i2)) -> indexPairIncompatible i1 i2)
             match indexMismatch with
+            // A rank disagreement gets its own diagnostic: the bare
+            // "expected X, got Y" reads as a puzzle when the two slots hold
+            // the same number of cells and differ only in how many index
+            // components they span.
+            | Some (slot, (i1, i2)) when indexRankDiffers i1 i2 ->
+                Error (IndexRankMismatch (sprintf "index slot %d" slot,
+                                          ppIndexType i1, max 1 i1.Rank,
+                                          ppIndexType i2, max 1 i2.Rank))
             | Some _ -> Error (TypeMismatch (t1, t2))
             | None ->
                 // Phase B5: recursive elem-type unification.
@@ -683,9 +732,16 @@ let rec unify (subst: Subst) (t1: IRType) (t2: IRType) : TypeResult<unit> =
             Error (TypeMismatch (t1, t2))
         else
             let axisMismatch =
-                List.zip ax1 ax2 |> List.exists (fun (i1, i2) -> indexPairIncompatible i1 i2)
-            if axisMismatch then Error (TypeMismatch (t1, t2))
-            else unify subst e1 e2
+                List.zip ax1 ax2
+                |> List.indexed
+                |> List.tryFind (fun (_, (i1, i2)) -> indexPairIncompatible i1 i2)
+            match axisMismatch with
+            | Some (axis, (i1, i2)) when indexRankDiffers i1 i2 ->
+                Error (IndexRankMismatch (sprintf "Dist axis %d" axis,
+                                          ppIndexType i1, max 1 i1.Rank,
+                                          ppIndexType i2, max 1 i2.Rank))
+            | Some _ -> Error (TypeMismatch (t1, t2))
+            | None -> unify subst e1 e2
     // IRTArrow: slot-by-slot unification. Slot kinds (SIdx/SIdxVirt/SVal)
     // must agree at each position; SIdx/SIdxVirt require matching index
     // identity (id and tag); SVal recurses through unify. The result

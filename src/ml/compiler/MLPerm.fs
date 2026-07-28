@@ -19,6 +19,34 @@
 /// judgment arms, the op table — including `judgeStmts` / `judgeAssign`,
 /// whose shapes agree but whose every message and guard does not.
 ///
+/// THE DRIFT CATALOG THAT DIFF PRODUCED IS NOW CLOSED. Writing the third copy
+/// out longhand was worth more than the shell it justified: comparing three
+/// witnesses found four places where the copies had silently diverged, and
+/// the fix pass after 5c settled all four. Two were false ACCEPTS, i.e.
+/// certificates issued for functions that do not have the property:
+///
+///   1. THIS FILE's former arm cleared a node-covariant array that appeared
+///      only in a former's source list, because it scanned names and the
+///      shared `freeVars` had no arm for `method_for`. It now JUDGES the
+///      sources (MLGalilean's judgeFormerApply shape) and scans for captures
+///      besides — neither check subsumes the other. corpus ml-equiv/045, 046.
+///   2. MLEquiv had the same hole one lattice over, and worse: with no
+///      OpApply arm at all, a former over a rep answered Opaque, and a READ
+///      out of an Opaque binding answered Inv. The catalog had filed that
+///      absence as a capability gap; it was also unsound. corpus ml-equiv/049.
+///
+/// The other two were a missing check and a missing walk: element-write
+/// INDICES went unjudged here and in MLEquiv while MLGalilean folded over
+/// them (corpus ml-equiv/047, 048), and the shared `freeVars` descended only
+/// one level into `for` bodies. Both are fixed at the site that owned them.
+///
+/// THE MORAL, for the next discipline: the copies drift in the GUARDS, not in
+/// the rules. Every divergence the diff found was a place where one walker
+/// checked something the others did not — never a place where two walkers
+/// checked the same thing and disagreed about the answer. The polarity table
+/// below is the intended disagreement; a guard only one copy has is a bug in
+/// the other two until argued otherwise.
+///
 /// ---------------------------------------------------------------------------
 /// THE LATTICE — ℕ-graded, and of OPPOSITE POLARITY to MLEquiv's at almost
 /// every arm
@@ -383,18 +411,44 @@ let rec private judge (ctx: Ctx) (env: Map<string, PowStatus>) (e: Expr)
         j inner
     // Former application must dispatch BEFORE the general binop arithmetic arm
     // (OpApply is a BinOp constructor).
-    | ExprKind.ExprBinOp (_, OpApply, _, _) ->
+    | ExprKind.ExprBinOp (_, OpApply, loop, _) ->
         // The co-iteration formers hand a kernel the ELEMENTS of their sources,
         // and an element of a Pow k is a COMPONENT — exactly the read v1 defers
         // (see the header). So a former application is admissible only when
         // nothing node-covariant is in scope of it.
-        let covariant =
-            freeVars Set.empty e |> Set.toList |> List.tryFind (fun n ->
-                match Map.tryFind n env with Some (Pow k) -> k > 0 | _ -> false)
-        (match covariant with
-         | Some n ->
-             reject (sprintf "the kernel of this former would receive COMPONENTS of node-covariant '%s'; component access inside perm-certified bodies lands in v2 with per-axis tracking. Use the whole-array elementwise operators (pointwise maps commute with relabelling) or ml.derive_perm_linear" n)
-         | None -> Ok (Pow 0))
+        //
+        // TWO CHECKS, because neither subsumes the other (stage 5c catalog,
+        // finding 1 — the one unsound path it found). The SOURCES are JUDGED,
+        // the way MLGalilean's judgeFormerApply judges them: a source need not
+        // be a name, and `method_for(ml.derive_perm_bias(1, N, b)) <@> ...`
+        // builds a Pow 1 out of nothing but invariants, which no scan over
+        // names can see. The free-variable scan then covers what the kernel
+        // CAPTURES, which judging the sources says nothing about. Before the
+        // fix there was only the scan, and `freeVars` had no former arms at
+        // all, so `method_for(x) <@> lambda ...` over a node-covariant `x`
+        // came back Pow 0 — an INVARIANT — and satisfied a requirePow-0 weight
+        // position. corpus ml-equiv/045 is that program.
+        let sources =
+            match loop.Kind with
+            | ExprKind.ExprMethodFor arrays -> arrays
+            | ExprKind.ExprFor (ForArrays (arrays, _), _, _) -> arrays
+            | _ -> []
+        sources
+        |> judgeEach (judge ctx env)
+        |> Result.bind (fun srcSts ->
+            match srcSts |> List.tryFindIndex (fun s -> match s with Pow k -> k > 0 | _ -> false) with
+            | Some i ->
+                Error (bl4012 sources.[i].Span
+                           (sprintf "function '%s': the kernel of this former would receive COMPONENTS of a source that is %s; component access inside perm-certified bodies lands in v2 with per-axis tracking. Use the whole-array elementwise operators (pointwise maps commute with relabelling) or ml.derive_perm_linear"
+                                ctx.FuncName (statusStr srcSts.[i])))
+            | None ->
+                let covariant =
+                    freeVars Set.empty e |> Set.toList |> List.tryFind (fun n ->
+                        match Map.tryFind n env with Some (Pow k) -> k > 0 | _ -> false)
+                match covariant with
+                | Some n ->
+                    reject (sprintf "the kernel of this former would receive COMPONENTS of node-covariant '%s'; component access inside perm-certified bodies lands in v2 with per-axis tracking. Use the whole-array elementwise operators (pointwise maps commute with relabelling) or ml.derive_perm_linear" n)
+                | None -> Ok (Pow 0))
     | ExprKind.ExprBinOp (_, op, l, r) ->
         j l |> Result.bind (fun sl ->
         j r |> Result.bind (fun sr ->
@@ -518,14 +572,38 @@ and private judgeAssign (ctx: Ctx) (env: Map<string, PowStatus>) (span: Span) (l
             | Some st when st = sr -> Ok ()
             | Some st -> fail (sprintf "assignment changes '%s' from %s to %s — a mut binding must keep one status" n (statusStr st) (statusStr sr))
             | None -> Ok ()
-        | ExprKind.ExprApp ({ Kind = ExprKind.ExprVar n }, _) ->
-            match Map.tryFind n env with
-            | Some (Pow k) when k > 0 ->
-                fail (sprintf "element-assignment into node-covariant '%s' writes ONE cell of a node power, which v1 cannot tell from an equivariant reassembly; per-axis tracking lands in v2. Build node powers with ml.derive_perm_linear / ml.derive_perm_bias / ml.perm_matmul, or with whole-array elementwise arithmetic" n)
-            | _ ->
-                match sr with
-                | Pow k when k > 0 -> fail "cannot store a node-covariant value into an array element"
-                | _ -> Ok ()
+        | ExprKind.ExprApp ({ Kind = ExprKind.ExprVar n }, idxArgs) ->
+            // element write: the INDICES are judged first, then the container
+            // and the value. Judging the indices is catalog finding 2 —
+            // MLGalilean's judgeAssign already did it, MLEquiv and this copy
+            // matched the target and walked past the index expressions, so
+            // `a(x(0)) = v` went unchecked on the WRITE path while the
+            // identical read `let z = x(0)` was rejected. A write whose
+            // LOCATION is chosen by node-covariant data is not equivariant:
+            // relabel the nodes and the value lands in a different cell.
+            idxArgs
+            |> List.fold (fun acc a ->
+                acc |> Result.bind (fun () ->
+                    judge ctx env a |> Result.bind (fun si ->
+                        match si with
+                        | Pow 0 -> Ok ()
+                        | Pow _ ->
+                            Error (bl4012 a.Span
+                                       (sprintf "function '%s': an array index must be invariant inside a perm-certified body, but this one is %s — the cell it selects moves with the node labelling"
+                                            ctx.FuncName (statusStr si)))
+                        | POpaque ->
+                            Error (bl4012 a.Span
+                                       (sprintf "function '%s': an array index must be invariant inside a perm-certified body, and this one is unclassifiable — v1 cannot rule out that the cell it selects moves with the node labelling. Index with a static offset or a value the judgment can see"
+                                            ctx.FuncName)))))
+                (Ok ())
+            |> Result.bind (fun () ->
+                match Map.tryFind n env with
+                | Some (Pow k) when k > 0 ->
+                    fail (sprintf "element-assignment into node-covariant '%s' writes ONE cell of a node power, which v1 cannot tell from an equivariant reassembly; per-axis tracking lands in v2. Build node powers with ml.derive_perm_linear / ml.derive_perm_bias / ml.perm_matmul, or with whole-array elementwise arithmetic" n)
+                | _ ->
+                    match sr with
+                    | Pow k when k > 0 -> fail "cannot store a node-covariant value into an array element"
+                    | _ -> Ok ())
         | _ ->
             match sr with
             | Pow k when k > 0 -> fail "unsupported assignment target for a node-covariant value"

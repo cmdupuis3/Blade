@@ -1,0 +1,38 @@
+// TEST: ML Perm Former Synthesized Source Rejected (rejects)
+import ml as ml
+// ============================================================================
+// The SECOND half of the former-source fix, and the half that says why the
+// guard had to change SHAPE rather than just gain the missing AST arms.
+//
+// ml-equiv/045 is a former over a node-covariant PARAMETER: adding the
+// ExprMethodFor arm to CertShell.freeVars is enough to make that one visible,
+// because `x` is a name and the name is in the environment. This program has
+// no such name. `ml.derive_perm_bias(1, 2, b)` is the rep-INTRODUCTION form —
+// it manufactures a Pow 1 (the complete space of S_2-invariant constants in
+// R^(N^1)) out of `b`, which is Pow 0, an ordinary invariant coefficient. So
+// every name in scope of the former is invariant, and every name scan over
+// this expression, however exhaustive its AST coverage, comes back clean.
+//
+// What is node-covariant here is the VALUE of a subexpression, and only
+// JUDGING the sources can see that — which is what MLGalilean's
+// judgeFormerApply has done since the galilean walker was written, and what
+// MLPerm's arm now does too. The two checks are kept side by side because
+// neither subsumes the other: judging the sources catches this program,
+// scanning the free variables catches what the KERNEL captures (a covariant
+// array read inside the lambda body, which is not a source at all).
+//
+// The unsoundness is the same as 045's: `w` moves when the nodes are
+// relabelled, and it is spent in ml.derive_perm_linear's weight slot, which
+// certifies its result only for coefficients that do not move. BL4012, at the
+// source expression.
+// ============================================================================
+let static W = ml.perm_weight_dim(1, 1, 2)
+let static B1 = ml.perm_bias_dim(1, 2)
+
+function bad(x: Array<Float like Idx<2>>, b: Array<Float like Idx<B1>>)
+             where ml.perm_equiv(2) -> Array<Float like Idx<2>> = {
+    let w = method_for(ml.derive_perm_bias(1, 2, b)) <@> lambda(v) -> v * 2.0 |> compute
+    ml.derive_perm_linear(1, 1, 2, x, w)
+}
+
+let out = bad([1.0, 2.0], [3.0])

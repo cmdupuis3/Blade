@@ -362,6 +362,9 @@ let formatTypeError (err: TypeError) : string =
     | CompoundNeedsTuple rank -> sprintf "Compound index must be a single tuple: write B((c0, ..., cj)) with inner parentheses, not the flat form B(c0, ..., cj). A CompoundIdx<mask> axis of rank %d is indexed as one joint tuple, full or partial (formalism 4.5 / poly-indexing 5.4)." rank
     | RaggedIdxNeedsPrior func -> sprintf "function '%s': RaggedIdx requires at least one prior index in the array's index list -- the ragged extent is a per-row function of the OUTER iteration position (formalism 4.4). Add an outer index, e.g. Array<T like Idx<n>, RaggedIdx<lens>>." func
     | TagWildcardNotParam where_ -> sprintf "%s: the tag wildcard `_` is legal in PARAMETER position only. A parameter may decline to constrain its argument's index tag or unit, but this position has to PRODUCE one -- a wildcard here would erase the tag rather than relax it. Write the concrete index type (e.g. Nat<LatIdx>) or the bare base type." where_
+    | IndexRankMismatch (where_, left, leftRank, right, rightRank) ->
+        let components n = if n = 1 then "1 index component" else sprintf "%d index components" n
+        sprintf "%s: %s spans %s but %s spans %s. A rank-k compact group (SymIdx<k, n> / AntisymIdx<k, n>) is ONE index slot covering k dimensions -- indexed A(i0, ..., i(k-1)), not A(j) -- so it is a different type from a flat axis holding the same cells (SymIdx<2, 3> packs 6 cells, exactly Idx<6>). An equal cell count does NOT make the two interchangeable. Convert with decompact (compact group -> dense axes); an annotation cannot reinterpret one form as the other." where_ left (components leftRank) right (components rightRank)
     | DecompactDimRange (dim, totalDims) -> sprintf "decompact: dimension %d is out of range for a rank-%d array (valid dims 0..%d)" dim totalDims (totalDims - 1)
     | DecompactPlainAxis dim -> sprintf "decompact: dimension %d is a plain (rank-1, non-symmetric) axis; there is nothing to decompact. decompact pulls a component out of a compact group (SymIdx/AntisymIdx/HermitianIdx)." dim
     | DecompactLastSlotOnly (slots, slot) -> sprintf "decompact: only a compact group in the LAST index slot, optionally preceded by plain free Idx dimensions, is supported by codegen (the chained to-the-right peel shape). The array here has %d index slots with the compact group at slot %d." slots slot
@@ -534,6 +537,7 @@ let diagnosticOfCompileError (e: CompileError) : Blade.Diagnostics.Diagnostic =
             | IrrepsIdxSpec _ | IrrepsIdxSpecFn _
             | PgIrrepsIdxSpec _ | PgIrrepsIdxSpecFn _ | TagWildcardNotParam _
             | BoundsInverted _ -> "BL4003"
+            | IndexRankMismatch _
             | DecompactDimRange _ | DecompactPlainAxis _ | DecompactLastSlotOnly _
             | TransposeAxisRange _ | TransposeAxesEqual _ | TransposeWithinGroup _
             | StackNeedsArrays _ | StackShapeMismatch _ | JoinNeedsArrays _

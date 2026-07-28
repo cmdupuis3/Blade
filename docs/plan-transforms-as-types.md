@@ -1183,6 +1183,33 @@ go first.
      (staticArgValue/aliasMapOf, tied to MLElaborate.staticArg's
      keep-in-sync note). Three independently-written walkers over one
      AST were a natural drift experiment; the catalog is the result.
+     **THE CATALOG'S 4 DRIFT FINDINGS ARE NOW CLOSED (merged 2026-07-28
+     from the splitoff session the chip opened).** Two were false
+     ACCEPTS — certificates issued for functions lacking the property —
+     and both traced to the SAME hole: the shared `freeVars` had no arm
+     for the co-iteration formers, so a name appearing only in
+     `method_for(x) <@> ...`'s source list was invisible. (1) MLPerm
+     cleared a node-covariant `x` as invariant; (2) MLEquiv was worse —
+     with no `OpApply` arm at all, a former over a rep answered Opaque,
+     and a READ out of an Opaque binding answers Inv, so a component of
+     a rep came back CERTIFIED ROTATION-INVARIANT. The catalog had filed
+     that one as a mere capability gap; it was unsound. Fixes:
+     `freeVars` is now EXHAUSTIVE BY CONSTRUCTION — the `| _ ->
+     Set.empty` catch-all is gone, so a new AST node is a compile error
+     here rather than a silent false accept, and the genuinely-read-
+     nothing nodes say so on the record; both disciplines now JUDGE the
+     former's sources AND scan the kernel's captures, since neither
+     check subsumes the other (a source need not be a name). Element-
+     write INDICES are now judged in all three walkers (`a(f(0)) = v`
+     went unchecked on the write path while the identical read was
+     rejected), and `freeVarsStmts` recurses into nested `for` bodies
+     instead of inlining one level. Corpus ml-equiv/066-071,
+     diagnostics/035-039. THE MORAL, recorded in MLPerm's header for the
+     next discipline: **the copies drift in the GUARDS, not in the
+     rules** — every divergence was a check one walker had and the
+     others lacked, never two walkers disagreeing about an answer, so a
+     guard only one copy has is a bug in the other two until argued
+     otherwise.
 7. **Stage 6 — generator-based deduction (REDESIGNED 2026-07-27, fourth
    two-agent round; the §3.5 uniform rule + linearity resolution are the
    round's normative output).** Three sub-stages; `where ml.equiv(G)`

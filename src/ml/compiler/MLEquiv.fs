@@ -416,6 +416,12 @@ let rec private judge (ctx: Ctx) (env: Map<string, RepStatus>) (e: Expr)
     | ExprKind.ExprDotDot _ -> Ok Inv
     | ExprKind.ExprTyped (inner, _) -> j inner
     | ExprKind.ExprUnaryOp (_, inner) -> j inner
+    // Former application must dispatch BEFORE the general binop arithmetic arm
+    // (OpApply is a BinOp constructor) — the MLGalilean/MLPerm precedent, and
+    // stage 5c catalog finding 4. Its absence was not merely the false REJECT
+    // the catalog recorded: see judgeFormerApply for the false accept it also
+    // left open.
+    | ExprKind.ExprBinOp (_, OpApply, loop, _) -> judgeFormerApply ctx env e loop
     | ExprKind.ExprBinOp (_, op, l, r) ->
         j l |> Result.bind (fun sl ->
         j r |> Result.bind (fun sr ->
@@ -480,7 +486,82 @@ let rec private judge (ctx: Ctx) (env: Map<string, RepStatus>) (e: Expr)
             | None -> Ok Inv)
     | ExprKind.ExprApp (f, args) -> judgeApp ctx env e f args
     | ExprKind.ExprField (_, _) -> Ok Opaque
+    // --- functional iteration (the post-imperative surface) ------------------
+    // The arms MLGalilean and MLPerm have carried since they were written, and
+    // this copy did not (stage 5c catalog, finding 4). Virtual arrays
+    // enumerate INDICES, and an index carries no rep structure: invariant.
+    | ExprKind.ExprRange _ | ExprKind.ExprReverse _ | ExprKind.ExprHalo _ -> Ok Inv
+    // compute is a scheduling boundary, not a value transform.
+    | ExprKind.ExprCompute x -> judge ctx env x
+    // A fold over a rep sums BASIS-DEPENDENT COMPONENTS: the sum of the
+    // components of an l > 0 vector is not a rotational invariant (the norm
+    // is), so this is refused rather than mis-certified — the same verdict, on
+    // the same grounds, as raw component access. NOTE THE POLARITY against
+    // MLPerm, where a reduce over a node power IS invariant whenever the
+    // combiner is commutative, and is deferred only because v1 does not
+    // analyse the combiner.
+    | ExprKind.ExprReduce (src, _, init) ->
+        judge ctx env src |> Result.bind (fun ss ->
+            (match init with
+             | Some i -> judge ctx env i
+             | None -> Ok Inv) |> Result.bind (fun si ->
+                match ss, si with
+                | Inv, Inv -> Ok Inv
+                | Rep _, _ | _, Rep _ ->
+                    Error (bl4008 e.Span (sprintf "function '%s': reduce over a representation-typed value folds basis-dependent components into a number that is not rotation-invariant — extract invariants with ml.scalars/ml.norms, or contract with ml.tensor_product" ctx.FuncName))
+                | _ -> Ok Opaque))
     | _ -> Ok Opaque
+
+/// `loop <@> kernel` under the equiv judgment. A former hands its kernel the
+/// ELEMENTS of its sources, and an element of a rep is a COMPONENT — the
+/// basis-dependent number this whole discipline exists to refuse. It is the
+/// same rejection as `x(2)`, one syntax over.
+///
+/// THIS ARM CLOSED A FALSE ACCEPT, not just the false reject stage 5c
+/// catalogued. Without it `method_for(f) <@> k` fell through to the
+/// arithmetic binop arm, which judged the former source through the
+/// `| _ -> Ok Opaque` catch-all and returned Opaque for the whole
+/// application. Opaque is not a rejection — it only becomes one where it
+/// meets a status-relevant position — and a READ out of an Opaque binding
+/// takes judgeApp's uncertified-callee path, which answers Inv for invariant
+/// arguments. So `let g = method_for(f) <@> lambda(v) -> v * 2.0` followed by
+/// `g(2)` handed back a component of a rep CERTIFIED ROTATION-INVARIANT.
+/// corpus ml-equiv/049 is that program.
+///
+/// NOTE THE POLARITY against MLGalilean's judgeFormerApply, which BINDS its
+/// source statuses to the kernel's leading parameters and lets a BVar flow in:
+/// an element of a boost-variant field is itself boost-variant, because every
+/// component shifts by the same u0, so an element of a BVar IS a BVar. An
+/// element of a rep is NOT a rep — it is one basis-dependent coordinate of one
+/// — so the same move here would be exactly the unsoundness above.
+and private judgeFormerApply (ctx: Ctx) (env: Map<string, RepStatus>) (e: Expr) (loop: Expr)
+    : Result<RepStatus, Blade.Diagnostics.Diagnostic> =
+    let sources =
+        match loop.Kind with
+        | ExprKind.ExprMethodFor arrays -> arrays
+        | ExprKind.ExprFor (ForArrays (arrays, _), _, _) -> arrays
+        | _ -> []
+    sources
+    |> judgeEach (judge ctx env)
+    |> Result.bind (fun srcSts ->
+        match srcSts |> List.tryFindIndex (function Rep _ -> true | _ -> false) with
+        | Some i ->
+            Error (bl4008 sources.[i].Span
+                       (sprintf "function '%s': the kernel of this former would receive COMPONENTS of a representation-typed source, which are basis-dependent numbers — extract invariants with ml.scalars/ml.norms, or contract with ml.tensor_product"
+                            ctx.FuncName))
+        | None ->
+            // What the KERNEL captures, which judging the sources says nothing
+            // about (the lambda arm never runs: this arm consumed the apply).
+            let captured =
+                freeVars Set.empty e |> Set.toList |> List.tryFind (fun n ->
+                    match Map.tryFind n env with Some (Rep _) -> true | _ -> false)
+            match captured with
+            | Some n ->
+                Error (bl4008 e.Span
+                           (sprintf "function '%s': the kernel of this former captures representation-typed '%s' — factor rep work into equiv-certified functions instead"
+                                ctx.FuncName n))
+            | None ->
+                if srcSts |> List.exists ((=) Opaque) then Ok Opaque else Ok Inv)
 
 and private judgeStmts (ctx: Ctx) (env: Map<string, RepStatus>) (stmts: Stmt list)
     : Result<Map<string, RepStatus>, Blade.Diagnostics.Diagnostic> =
@@ -521,13 +602,38 @@ and private judgeAssign (ctx: Ctx) (env: Map<string, RepStatus>) (span: Span) (l
             | Some st when st = sr -> Ok ()
             | Some st -> fail (sprintf "assignment changes '%s' from %s to %s — a mut binding must keep one representation status" n (statusStr st) (statusStr sr))
             | None -> Ok ()
-        | ExprKind.ExprApp ({ Kind = ExprKind.ExprVar n }, _) ->
-            match Map.tryFind n env with
-            | Some (Rep _) -> fail (sprintf "element-assignment into representation-typed '%s' writes a basis-dependent component — build reps only through equivariant ops" n)
-            | _ ->
-                match sr with
-                | Rep _ -> fail "cannot store a representation-typed value into an array element"
-                | _ -> Ok ()
+        | ExprKind.ExprApp ({ Kind = ExprKind.ExprVar n }, idxArgs) ->
+            // element write: the INDICES are judged first, then the container
+            // and the value. Judging the indices is stage 5c catalog finding
+            // 2 — MLGalilean's judgeAssign already did it, this copy and
+            // MLPerm's matched the target and walked past the index
+            // expressions, so `a(f(0)) = v` went unchecked on the WRITE path
+            // while the identical read `let z = f(0)` was rejected as a raw
+            // component read. A write whose LOCATION is chosen by a
+            // basis-dependent number is not equivariant: rotate the frame and
+            // the value lands in a different cell.
+            idxArgs
+            |> List.fold (fun acc a ->
+                acc |> Result.bind (fun () ->
+                    judge ctx env a |> Result.bind (fun si ->
+                        match si with
+                        | Inv -> Ok ()
+                        | Rep _ ->
+                            Error (bl4008 a.Span
+                                       (sprintf "function '%s': an array index must be invariant inside an equiv-certified body, but this one is %s — the cell it selects moves with the frame"
+                                            ctx.FuncName (statusStr si)))
+                        | Opaque ->
+                            Error (bl4008 a.Span
+                                       (sprintf "function '%s': an array index must be invariant inside an equiv-certified body, and this one is unclassifiable — v1 cannot rule out that the cell it selects moves with the frame. Index with a static offset or a value the judgment can see"
+                                            ctx.FuncName)))))
+                (Ok ())
+            |> Result.bind (fun () ->
+                match Map.tryFind n env with
+                | Some (Rep _) -> fail (sprintf "element-assignment into representation-typed '%s' writes a basis-dependent component — build reps only through equivariant ops" n)
+                | _ ->
+                    match sr with
+                    | Rep _ -> fail "cannot store a representation-typed value into an array element"
+                    | _ -> Ok ())
         | _ ->
             match sr with
             | Rep _ -> fail "unsupported assignment target for a representation-typed value"

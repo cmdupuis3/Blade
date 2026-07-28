@@ -1,0 +1,9 @@
+// TEST: Diag Perm Former Source (diag)
+// ERROR: BL4012 @ 6:22
+// ERROR-CONTAINS: would receive COMPONENTS of a source that is node-covariant
+import ml as ml
+let static W = ml.perm_weight_dim(1, 1, 2)
+function bad(x: Array<Float like Idx<2>>) where ml.perm_equiv(2) -> Array<Float like Idx<2>> = {
+  let w = method_for(x) <@> lambda(xi) -> xi * 2.0 |> compute
+  ml.derive_perm_linear(1, 1, 2, x, w)
+}

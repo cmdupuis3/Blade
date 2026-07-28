@@ -1,0 +1,11 @@
+// TEST: Diag Compact Index Rank Mismatch (diag)
+// ERROR: BL4004 @ 8:5
+// ERROR-CONTAINS: spans 1 index component but SymIdx<2, 3> spans 2
+// A rank-2 compact group vs a rank-1 flat axis of the SAME cell count.
+// Pins the code (BL4004, symmetry/compact-group band) and the component
+// counts, which are the part of the message a reader needs.
+function mk() -> Array<Float64 like SymIdx<2, 3>> = {
+    let out = [1.0, 2.0, 3.0, 4.0, 5.0, 6.0]
+    out
+}
+let r = mk()

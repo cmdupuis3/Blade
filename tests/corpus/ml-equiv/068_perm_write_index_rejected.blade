@@ -1,0 +1,42 @@
+// TEST: ML Perm Write Index Rejected (rejects)
+import ml as ml
+// ============================================================================
+// THE WRITE PATH, brought level with the read path (stage 5c catalog, finding
+// 2). MLGalilean's judgeAssign folded over an element write's index arguments
+// and required every one of them boost-invariant. MLEquiv's and MLPerm's
+// matched the write TARGET, checked the value, and walked straight past the
+// index expressions — so the very same expression was rejected when read and
+// unexamined when used to choose a cell to write.
+//
+//     let z = x(0)     // BL4012: component access into node-covariant 'x'
+//     acc(x(0)) = 1.0  // accepted
+//
+// ----------------------------------------------------------------------------
+// WHY THE SECOND LINE IS NOT EQUIVARIANT
+// ----------------------------------------------------------------------------
+// `x` is Pow 1: extent 4 = 4^1 at N = 4. The classifier keys on the FLAT
+// EXTENT of the `Idx<>` axis and says nothing about the element type, so an
+// INTEGER node power is a node power — which is also what makes this program
+// well-typed, since x(0) is then an Int and can index.
+//
+// `acc` has extent 3, not a power of 4, so it is Pow 0 — an invariant scratch
+// buffer, and writing into it is fine in itself. What is not fine is writing
+// into it AT A CELL CHOSEN BY x(0). Relabel the four nodes and x(0) is a
+// different node's number, so the 1.0 lands in a different cell of acc and
+// the readout acc(0) changes. The function claims S_4-equivariance; the
+// location of its only write is a function of the labelling.
+//
+// v1 defers component READS of a node power uniformly (it has no
+// loop-variable tracking, so it cannot tell a bound-index read that
+// reassembles equivariantly from a fixed-offset one that does not — MLPerm.fs
+// says so at length). The point of this test is only that the write path
+// makes the SAME judgment about the SAME expression, and reports it at the
+// index rather than at the assignment. BL4012.
+// ============================================================================
+function bad(x: Array<Int like Idx<4>>) where ml.perm_equiv(4) -> Float = {
+    let mut acc: Array<Float like Idx<3>> = [0.0, 0.0, 0.0]
+    acc(x(0)) = 1.0
+    acc(0)
+}
+
+let out = bad([2, 1, 0, 1])

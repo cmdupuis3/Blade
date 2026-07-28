@@ -1988,6 +1988,27 @@ let rec private dispatchAppOrIndex (env: TypeEnv) (tFunc: TypedExpr) (tArgs: Typ
                             Some (i, pi, ai)
                         | _ -> None)
                 | _ -> None)
+        // Component-RANK strictness at DIRECT APPLICATION, same seam as the
+        // irreps check above and for the same reason: a rank-k compact group
+        // is ONE index slot but k dimensions of the emitted Array<T, N>, so
+        // Array<T like SymIdx<2,4>> and Array<T like Idx<10>> pass every
+        // other test here — equal slot counts, no tags, SymNone is a symmetry
+        // wildcard, extents never compared — and their cell counts coincide.
+        // Unchecked, the mismatch reaches g++ as an Array<double,1> vs
+        // Array<double,2> conversion error. Unlike irrepsClash this is NOT
+        // gated on tags: the blindness is independent of them.
+        let rankClash =
+            let n = min paramTys.Length tArgs.Length
+            List.zip (List.truncate n paramTys) (List.truncate n tArgs)
+            |> List.mapi (fun i pair -> (i, pair))
+            |> List.tryPick (fun (i, (pTy, arg)) ->
+                match env.Subst.Resolve pTy, env.Subst.Resolve arg.Type with
+                | ArrayElem pa, ArrayElem aa when pa.IndexTypes.Length = aa.IndexTypes.Length ->
+                    List.zip pa.IndexTypes aa.IndexTypes
+                    |> List.mapi (fun slot pair -> (slot, pair))
+                    |> List.tryPick (fun (slot, (pi, ai)) ->
+                        if indexRankDiffers pi ai then Some (i, slot, pi, ai) else None)
+                | _ -> None)
         // Unit strictness at DIRECT APPLICATION, same seam as the irreps
         // check above: since args are not unified against params, unit
         // signatures would otherwise never meet at a call site. When BOTH
@@ -2006,8 +2027,8 @@ let rec private dispatchAppOrIndex (env: TypeEnv) (tFunc: TypedExpr) (tArgs: Typ
                 match pu, au with
                 | Some pu, Some au when not (unitCompatible pu au) -> Some (i, pu, au)
                 | _ -> None)
-        match irrepsClash, unitClash with
-        | Some (i, pi, ai), _ ->
+        match irrepsClash, rankClash, unitClash with
+        | Some (i, pi, ai), _, _ ->
             // Both sides carry a BLOCK-SPEC tag. When both are the O(3)
             // member, the message is verbatim the one that shipped at stage 3
             // (the pg member is a twin, and the O(3) diagnostics are
@@ -2020,12 +2041,19 @@ let rec private dispatchAppOrIndex (env: TypeEnv) (tFunc: TypedExpr) (tArgs: Typ
                  Error (IrrepsIdxArgMismatch (i + 1, ppIndexType pi, ppIndexType ai))
              | _ ->
                  Error (BlockSpecArgMismatch (i + 1, ppIndexType pi, ppIndexType ai)))
-        | None, Some (i, pu, au) ->
+        | None, Some (i, slot, pi, ai), _ ->
+            Error (IndexRankMismatch (sprintf "argument %d, index slot %d" (i + 1) slot,
+                                      ppIndexType pi, max 1 pi.Rank,
+                                      ppIndexType ai, max 1 ai.Rank))
+        | None, None, Some (i, pu, au) ->
             Error (UnitMismatch (sprintf "argument %d" (i + 1), ppUnitSig pu, ppUnitSig au))
-        | None, None ->
+        | None, None, None ->
             // Rank propagation at DIRECT APPLICATION (stage-2 rank deduction)
-            // — the third strictness carve-out at this seam, after irreps and
-            // units: since args are not unified against params, an
+            // — the fourth strictness carve-out at this seam, after irreps,
+            // component rank, and units. Note this one counts SLOTS
+            // (IndexTypes.Length) where rankClash above counts COMPONENTS
+            // within a slot; the two bounds are independent.
+            // Since args are not unified against params, an
             // unannotated CALLER param flowing into this call would never
             // learn the callee's rank demand — the typechecker stays quiet
             // and codegen emits ill-typed C++ (a scalar where Array<..,k> is
@@ -6840,12 +6868,20 @@ and checkExprInner (env: TypeEnv) (expected: IRType) (expr: Expr) : TypeResult<T
         inferExpr env expr |> Result.bind (fun tE ->
             match unify env.Subst tE.Type expected with
             | Ok () -> Ok tE
-            | Error _ ->
+            | Error e ->
                 // Mechanism 2: a scalar in a concretely-shaped array position
                 // broadcasts to a fill; otherwise the normal mismatch stands.
                 match tryScalarFill env tE expected with
                 | Some node -> Ok node
-                | None -> Error (TypeMismatch (expected, tE.Type)))
+                // A component-rank clash is flattened to the generic mismatch
+                // by the collapse below, which then renders as two type names
+                // that differ only in a `SymIdx<k, ...>` the reader has no
+                // reason to read as a rank. Keep unify's wording in that one
+                // case; every other error keeps the historical shape.
+                | None ->
+                    match e with
+                    | IndexRankMismatch _ -> Error e
+                    | _ -> Error (TypeMismatch (expected, tE.Type)))
 
 // ---- Shared helpers for both let paths (let-as-expression and top-level DeclLet) ----
 

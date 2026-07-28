@@ -1,0 +1,48 @@
+// TEST: ML Equiv Former Source Rejected (rejects)
+import ml as ml
+// ============================================================================
+// THE O(3) SIBLING OF ml-equiv/045, and a finding the stage-5c catalog filed
+// one category too low. It recorded MLEquiv's missing post-imperative arms as
+// a CAPABILITY gap — a false reject, BL4008 "unclassifiable", on certified
+// bodies that fold or iterate over invariants. Writing the arms turned up a
+// false ACCEPT hiding behind the same absence, and this is it.
+//
+// ----------------------------------------------------------------------------
+// THE LAUNDERING CHAIN
+// ----------------------------------------------------------------------------
+// `f` is a rep: spec S puts two l = 0 scalars at offsets 0..1 and one l = 1
+// vector at offsets 2..4. Reading f(2) directly is BL4008 — "raw indexing
+// into an l>0 component reads a basis-dependent number", the diagnostic
+// corpus pins it at diagnostics/015. The former launders exactly that read:
+//
+//   1. `method_for(f) <@> ...` had no arm of its own, so it fell through to
+//      the general ARITHMETIC binop arm (OpApply is a BinOp constructor).
+//   2. That arm judged the former `method_for(f)` through the catch-all,
+//      which answered Opaque, and Opaque anywhere in a binop makes the whole
+//      expression Opaque. So `g` was bound Opaque.
+//   3. Opaque is NOT a rejection. It is "unclassifiable", and it only becomes
+//      an error where it meets a status-relevant position.
+//   4. `g(2)` is a read out of `g`. judgeApp checks the environment for a Rep
+//      binding to apply the raw-index rule; `g` is Opaque, not Rep, so it
+//      took the uncertified-callee path instead — which answers Inv when the
+//      arguments are invariant, and the argument is the literal 2.
+//
+// So the x-component of a rotating vector came back INVARIANT, out of a
+// function whose signature certifies its result unchanged by every rotation
+// and reflection in O(3). Rotate the frame and `bad`'s result changes; the
+// certificate says it does not.
+//
+// The fix gives the former its own arm ahead of the arithmetic one, and that
+// arm JUDGES THE SOURCES: an element of a rep is a component, so a
+// rep-typed source is refused with the same reason raw indexing is. The
+// kernel's captures are scanned separately, because consuming the apply here
+// means the lambda arm never runs to check them. BL4008, at the source.
+// ============================================================================
+let static S = [(0, 0, 2), (1, 1, 1)]
+
+function bad(f: Array<Float like IrrepsIdx<S>>) where ml.equiv(O3) -> Float = {
+    let g = method_for(f) <@> lambda(v) -> v * 2.0 |> compute
+    g(2)
+}
+
+let out = bad([1.0, 2.0, 3.0, 4.0, 5.0])
