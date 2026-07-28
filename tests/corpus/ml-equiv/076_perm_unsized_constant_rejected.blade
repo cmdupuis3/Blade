@@ -1,0 +1,35 @@
+// TEST: ML Perm Unsized Constant Rejected (rejects)
+import ml as ml
+// ============================================================================
+// The same missing question — "how many cells?" — asked at the other two
+// places a value can enter a perm-certified body without an extent behind it.
+// Both used to answer `Pow 0`, the invariant status, on the strength of the
+// conditional-theorem reading alone ("globals are held fixed", "a function of
+// invariants is invariant"). Held fixed is not the same claim as S_n-FIXED:
+// a 4-cell constant at N = 4 lives in the node-power space, where the only
+// fixed vectors are the all-cells-equal ones.
+//
+// 1. A MODULE-LEVEL CONSTANT. The literal arm inside a body refuses this exact
+//    aggregate (see 075's header for the arithmetic); writing it one scope out
+//    must not launder it. A module binding is classified by its annotation, or
+//    by its literal's cell count when it has none.
+//
+// 2. AN UNCERTIFIED CALLEE'S RESULT. `mk` returns a declared 4-cell buffer at
+//    N = 4 and carries no `where ml.perm_equiv(4)`, so nothing establishes how
+//    its cells move under relabelling. Note the classifier must NOT read that
+//    declared extent as `Pow 1` either — an extent is evidence about the SPACE
+//    a value lives in, and only a certificate is evidence about how it
+//    transforms in that space.
+//
+// Both BL4012, at the combination that would have carried the bad constant
+// into a node power.
+// ============================================================================
+let c = [0.0, 1.0, 2.0, 3.0]
+
+function bad_global(x: Array<Float like Idx<4>>) where ml.perm_equiv(4) -> Array<Float like Idx<4>> =
+    x + c
+
+function mk() -> Array<Float like Idx<4>> = [0.0, 1.0, 2.0, 3.0]
+
+function bad_call(x: Array<Float like Idx<4>>) where ml.perm_equiv(4) -> Array<Float like Idx<4>> =
+    x + mk()

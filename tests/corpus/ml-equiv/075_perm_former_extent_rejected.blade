@@ -1,0 +1,42 @@
+// TEST: ML Perm Former Extent Rejected (rejects)
+import ml as ml
+// ============================================================================
+// THE SECOND FALSE ACCEPT ON THE FORMER ARM — not the one 066 pins.
+//
+// 066 is about a former whose SOURCE is node-covariant; the sources are judged
+// now and that is caught. This one has no covariant source at all, and it was
+// still not a theorem: the arm answered `Pow 0` — THE INVARIANT STATUS —
+// without ever asking how many cells the result has.
+//
+// `Pow 0` is a claim, not a shape: it says the value is FIXED by every node
+// relabelling. For an aggregate that holds only when its cell count stays
+// OUTSIDE the node-power space. Inside it, the S_n-fixed vectors are exactly
+// the ones with every cell equal — which is why the literal arm already
+// refuses `[0.0, 1.0, 2.0, 3.0]` at N = 4 and points at ml.derive_perm_bias,
+// the op whose whole job is the equivariant constants.
+//
+// The former below builds that same 4-cell constant, cell by cell, out of the
+// node index set. It is the literal, laundered through an iteration:
+//
+//     method_for(range<Idx<4>>) <@> lambda(i) -> 1.0 * i    ==   [0, 1, 2, 3]
+//
+// so `x + c` is certified S_4-equivariant while being the literal program the
+// arm one line up refuses. Relabelling the nodes permutes x's cells but leaves
+// c's alone, so the sum does not co-permute:
+//
+//   x = [10, 20, 30, 40]           -> x + c = [10, 21, 32, 43]
+//   x = [20, 10, 30, 40] (0<->1)   -> x + c = [20, 11, 32, 43]
+//
+// S_4-equivariance would require the second to be the first with cells 0 and 1
+// swapped, i.e. [21, 10, 32, 43]. It is not.
+//
+// Two guards now stand between that program and a certificate, and the test
+// exercises both: `range<Idx<4>>` is classified by its EXTENT (4 = 4^1 lands
+// in the node-power space, and the identity index array is fixed by no
+// relabelling but the identity), and a former result inherits `Pow 0` only
+// from a single source that is itself proven fixed. BL4012.
+// ============================================================================
+function bad(x: Array<Float like Idx<4>>) where ml.perm_equiv(4) -> Array<Float like Idx<4>> = {
+    let c = method_for(range<Idx<4>>) <@> lambda(i) -> 1.0 * i |> compute
+    x + c
+}

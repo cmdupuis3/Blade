@@ -1949,7 +1949,7 @@ let private expandModule (decls: Located<Decl> list) : Result<Located<Decl> list
                         |> List.collect (fun d ->
                             match d.Value with
                             | DeclFunction fd ->
-                                Blade.ML.Perm.judgeFunction pcerts statics aliases fd
+                                Blade.ML.Perm.judgeFunction pcerts statics aliases decls1 fd
                             | _ -> [])
                     if diags.IsEmpty then Ok () else Error diags
             match judgedPerm with

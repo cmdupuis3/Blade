@@ -149,8 +149,21 @@ open Blade.StaticEval
 open Blade.ML.CertShell
 
 type PowStatus =
-    /// Pow k = a flat N^k buffer transforming as σ^{⊗k}. Pow 0 = invariant.
+    /// Pow k = a flat N^k buffer transforming as σ^{⊗k}. Pow 0 = invariant,
+    /// and it is a claim the judgment must EARN: see PowUnsized.
     | Pow of int
+    /// Invariant-SHAPED, but the walker never established the extent, so
+    /// `Pow 0` is not available. The two are different claims: Pow 0 says the
+    /// value is fixed by every relabelling, and for an aggregate that holds
+    /// only when its cell count is outside the node-power space — an
+    /// arbitrary buffer in N^k (k > 0) is NOT S_n-fixed, only the
+    /// all-cells-equal ones are, which is exactly what the literal arm
+    /// already refuses. A former result, a module binding with no annotation,
+    /// or an uncertified call whose return type is unannotated could have any
+    /// extent, so it lands here and is refused wherever fixedness is
+    /// load-bearing (weight slots, the return, and combination with a node
+    /// power) rather than being waved through as an invariant.
+    | PowUnsized
     | POpaque
 
 type PermSig = {
@@ -175,6 +188,7 @@ let private statusStr (st: PowStatus) : string =
     match st with
     | Pow 0 -> "invariant (Pow 0 — fixed by every node relabelling)"
     | Pow k -> sprintf "node-covariant of rank %d (Pow %d — a flat N^%d buffer transforming as sigma^(x%d))" k k k k
+    | PowUnsized -> "invariant-shaped but of unestablished extent (it cannot be claimed fixed: if its cell count lands in a node-power space, an arbitrary buffer there is not S_n-fixed)"
     | POpaque -> "unclassifiable"
 
 /// The rank cap: the same K + L bound the ops carry, so a classified rank is
@@ -335,6 +349,66 @@ let buildCertTable (statics: StaticEnv) (decls: Located<Decl> list)
 // The judgment
 // ============================================================================
 
+/// The invariance evidence an UNCERTIFIED value of this annotated type may
+/// claim. A rank that lands in the node-power space is NOT claimable — nothing
+/// certified that the value transforms as sigma^{⊗k}, and an arbitrary buffer
+/// there is not fixed either — so it is unsized rather than `Pow k`. An extent
+/// OUTSIDE every node power is real evidence: relabelling has no action on
+/// that space at all, so the value is genuinely fixed.
+let private invEvidenceOfType (n: int) (aliases: Map<string, TypeExpr>) (statics: StaticEnv) (t: TypeExpr) : PowStatus =
+    match statusOfType aliasDepth n aliases statics t with
+    | Ok (Pow k) when k > 0 -> PowUnsized
+    | Ok _ -> Pow 0
+    | Error _ -> PowUnsized
+
+/// The same judgement made from a known flat cell count (literal aggregates,
+/// `range<Idx<M>>` iteration spaces).
+let private invEvidenceOfCells (n: int) (cells: int64) : PowStatus =
+    match powClass (int64 n) cells with
+    | Some k when k > 0 -> PowUnsized
+    | _ -> Pow 0
+
+/// Module-level bindings: invariant by the conditional-theorem reading (they
+/// are held fixed), but their EXTENT decides whether that can be claimed as
+/// Pow 0. An unannotated `let c = [0.0, 1.0, 2.0, 3.0]` at N = 4 is a constant
+/// in N^1, which is not S_n-fixed — the literal arm refuses that expression
+/// inside a body, and a module binding must not launder it.
+let buildGlobals (n: int) (statics: StaticEnv) (decls: Located<Decl> list) : Map<string, PowStatus> =
+    let aliases = aliasMapOf decls
+    let evidence (b: Binding) =
+        match b.Type with
+        | Some t -> invEvidenceOfType n aliases statics t
+        | None ->
+            match b.Value.Kind with
+            | ExprKind.ExprLit _ -> Pow 0
+            | ExprKind.ExprArrayLit es | ExprKind.ExprTuple es -> invEvidenceOfCells n (int64 es.Length)
+            | _ -> PowUnsized
+    decls
+    |> List.fold (fun m d ->
+        match d.Value with
+        | DeclLet b | DeclStatic b ->
+            let st = evidence b
+            patternVars b.Pattern
+            |> List.fold (fun m2 nm ->
+                match b.Pattern.Kind with
+                | PatternKind.PatVar _ -> Map.add nm st m2
+                | _ -> Map.add nm PowUnsized m2) m
+        | _ -> m) Map.empty
+
+/// Return annotations of every function in the module, so a call to an
+/// uncertified helper is classified by its declared extent instead of being
+/// assumed fixed.
+let buildReturnEvidence (n: int) (statics: StaticEnv) (decls: Located<Decl> list) : Map<string, PowStatus> =
+    let aliases = aliasMapOf decls
+    decls
+    |> List.fold (fun m d ->
+        match d.Value with
+        | DeclFunction fd ->
+            match fd.ReturnType with
+            | Some t -> Map.add fd.Name (invEvidenceOfType n aliases statics t) m
+            | None -> Map.add fd.Name PowUnsized m
+        | _ -> m) Map.empty
+
 type private Ctx = {
     FuncName: string
     /// The node-axis extent of THIS function's certificate.
@@ -343,7 +417,27 @@ type private Ctx = {
     MlAliases: Set<string>
     Statics: StaticEnv
     Certs: Map<string, PermSig>
+    /// Extent evidence for module-level bindings (see buildGlobals).
+    Globals: Map<string, PowStatus>
+    /// Extent evidence for uncertified callees' returns.
+    Returns: Map<string, PowStatus>
 }
+
+/// Flat cell count of a `range<I1, ..., In>` iteration space: the product of
+/// the axis extents. `None` when any axis does not resolve to a static
+/// `Idx<>` — the caller then has no evidence and must stay unsized.
+let private rangeCells (ctx: Ctx) (idxTypes: TypeExpr list) : int64 option =
+    if idxTypes.IsEmpty then None
+    else
+        idxTypes
+        |> List.fold (fun acc ix ->
+            acc |> Option.bind (fun total ->
+                match ix with
+                | TyIdx extentE ->
+                    (match evalExpr ctx.Statics fuel extentE with
+                     | Ok (SVInt m) when m >= 1L -> Some (total * m)
+                     | _ -> None)
+                | _ -> None)) (Some 1L)
 
 /// THE POLARITY DEMO, stated once where the rule lives: a permutation moves
 /// cells without mixing them, so EVERY POINTWISE MAP COMMUTES WITH IT.
@@ -370,8 +464,11 @@ let private combinePointwise (sts: PowStatus list) : Result<PowStatus, string> =
     if sts |> List.exists ((=) POpaque) then Ok POpaque
     else
         let ranks = sts |> List.choose (function Pow k when k > 0 -> Some k | _ -> None) |> List.distinct
+        let unsized = sts |> List.exists ((=) PowUnsized)
         match ranks with
-        | [] -> Ok (Pow 0)
+        | [] -> Ok (if unsized then PowUnsized else Pow 0)
+        | _ when unsized ->
+            Error "this pointwise operation combines a node power with a value whose extent the judgment never established. Broadcasting is sound only against something FIXED by relabelling, and an arbitrary buffer that lands in the node-power space is not (only the all-cells-equal ones are) — annotate the operand's extent, or build the equivariant constants with ml.derive_perm_bias"
         | [ k ] -> Ok (Pow k)
         | _ ->
             Error (sprintf "this pointwise operation mixes node-covariant values of different ranks (%s) — a pointwise map runs cell-by-cell over ONE space; contract the ranks first (ml.derive_perm_linear) or broadcast through an invariant"
@@ -403,8 +500,14 @@ let rec private judge (ctx: Ctx) (env: Map<string, PowStatus>) (e: Expr)
     | ExprKind.ExprVar n ->
         match Map.tryFind n env with
         | Some st -> Ok st
-        | None -> Ok (Pow 0) // globals/constants/builtins: held fixed by the conditional-theorem reading
-    | ExprKind.ExprDotDot _ -> Ok (Pow 0)
+        // globals/constants/builtins: held fixed by the conditional-theorem
+        // reading, but "held fixed" is only claimable as Pow 0 when the extent
+        // says so — see buildGlobals.
+        | None ->
+            match Map.tryFind n ctx.Globals with
+            | Some st -> Ok st
+            | None -> Ok PowUnsized
+    | ExprKind.ExprDotDot _ -> Ok PowUnsized
     | ExprKind.ExprTyped (inner, _) -> j inner
     | ExprKind.ExprUnaryOp (_, inner) ->
         // Pointwise, hence status-preserving — the polarity arm again.
@@ -428,6 +531,13 @@ let rec private judge (ctx: Ctx) (env: Map<string, PowStatus>) (e: Expr)
         // all, so `method_for(x) <@> lambda ...` over a node-covariant `x`
         // came back Pow 0 — an INVARIANT — and satisfied a requirePow-0 weight
         // position. corpus ml-equiv/045 is that program.
+        // A single-source former's RESULT has the extent of its source, so the
+        // source's own evidence carries over: a source proven outside the
+        // node-power space cannot produce a result inside it. A cross-product
+        // former (`method_for(a) <*> method_for(b)`) is a different matter —
+        // its result extent is the PRODUCT, and two non-power extents can
+        // multiply into one (at N = 6, 4 * 9 = 36 = 6^2) — so it does not
+        // inherit, and its `sources` list is empty here besides.
         let sources =
             match loop.Kind with
             | ExprKind.ExprMethodFor arrays -> arrays
@@ -448,7 +558,16 @@ let rec private judge (ctx: Ctx) (env: Map<string, PowStatus>) (e: Expr)
                 match covariant with
                 | Some n ->
                     reject (sprintf "the kernel of this former would receive COMPONENTS of node-covariant '%s'; component access inside perm-certified bodies lands in v2 with per-axis tracking. Use the whole-array elementwise operators (pointwise maps commute with relabelling) or ml.derive_perm_linear" n)
-                | None -> Ok (Pow 0))
+                | None ->
+                    // THE EXTENT CLAIM, which is the one this arm used to make
+                    // for free. `Pow 0` here would assert the result is fixed
+                    // by every relabelling; that is only true when its extent
+                    // stays out of the node-power space. Exactly one source,
+                    // itself proven fixed, transfers that proof; anything else
+                    // is unsized.
+                    match srcSts with
+                    | [ Pow 0 ] -> Ok (Pow 0)
+                    | _ -> Ok PowUnsized)
     | ExprKind.ExprBinOp (_, op, l, r) ->
         j l |> Result.bind (fun sl ->
         j r |> Result.bind (fun sr ->
@@ -493,7 +612,7 @@ let rec private judge (ctx: Ctx) (env: Map<string, PowStatus>) (e: Expr)
         j binding.Value |> Result.bind (fun sv ->
             match binding.Pattern.Kind, sv with
             | PatternKind.PatVar n, _ -> judge ctx (Map.add n sv env) body
-            | _, Pow 0 -> judge ctx (bindPatternVars (Pow 0) env binding.Pattern) body
+            | _, (Pow 0 | PowUnsized) -> judge ctx (bindPatternVars PowUnsized env binding.Pattern) body
             | _, _ -> reject "cannot destructure a node-covariant value in v1 — bind it whole")
     | ExprKind.ExprLambda (ps, _, lamBody) ->
         let captured = freeVars (Set.ofList (ps |> List.map (fun p -> p.Name))) lamBody
@@ -515,7 +634,16 @@ let rec private judge (ctx: Ctx) (env: Map<string, PowStatus>) (e: Expr)
     | ExprKind.ExprField (_, _) -> Ok POpaque
     // --- functional iteration (the post-imperative surface) ------------------
     // Virtual arrays enumerate indices: label-independent by nature.
-    | ExprKind.ExprRange _ | ExprKind.ExprReverse _ | ExprKind.ExprHalo _ -> Ok (Pow 0)
+    // Virtual arrays enumerate INDICES. That is label-independent only when
+    // the index set is not a node axis: `range<Idx<N>>` IS the node index set,
+    // and the identity index array is fixed by no relabelling but the identity.
+    // The extent is right there in the annotation, so it is read rather than
+    // assumed — the same powClass test the literal arm applies.
+    | ExprKind.ExprRange idxTypes ->
+        (match rangeCells ctx idxTypes with
+         | Some cells -> Ok (invEvidenceOfCells ctx.N cells)
+         | None -> Ok PowUnsized)
+    | ExprKind.ExprReverse _ | ExprKind.ExprHalo _ -> Ok PowUnsized
     // compute is a scheduling boundary, not a value transform.
     | ExprKind.ExprCompute x -> judge ctx env x
     // A reduce over a Pow k IS invariant when the combiner is commutative (a
@@ -531,6 +659,8 @@ let rec private judge (ctx: Ctx) (env: Map<string, PowStatus>) (e: Expr)
                 match ss, si with
                 | Pow 0, Pow 0 -> Ok (Pow 0)
                 | POpaque, _ | _, POpaque -> Ok POpaque
+                | (PowUnsized, _ | _, PowUnsized) ->
+                    Error (bl4012 e.Span (sprintf "function '%s': reduce over a value of unestablished extent cannot be called invariant — if the source lands in the node-power space its cells move with the labelling, and v1 does not check that the combiner is commutative. Annotate the source's extent, or use ml.derive_perm_linear(K, 0, %d, x, w), the complete invariant readout" ctx.FuncName ctx.N))
                 | _ ->
                     Error (bl4012 e.Span (sprintf "function '%s': reduce over a node-covariant value is invariant only for a commutative combiner, which v1 does not check — the certified invariant readout is ml.derive_perm_linear(K, 0, %d, x, w), whose basis is COMPLETE (every S_n-invariant linear form on the node power is one weight setting)" ctx.FuncName ctx.N))))
     | _ -> Ok POpaque
@@ -545,7 +675,7 @@ and private judgeStmts (ctx: Ctx) (env: Map<string, PowStatus>) (stmts: Stmt lis
                 judge ctx env binding.Value |> Result.bind (fun sv ->
                     match binding.Pattern.Kind, sv with
                     | PatternKind.PatVar n, _ -> Ok (Map.add n sv env)
-                    | _, Pow 0 -> Ok (bindPatternVars (Pow 0) env binding.Pattern)
+                    | _, (Pow 0 | PowUnsized) -> Ok (bindPatternVars PowUnsized env binding.Pattern)
                     | _, _ ->
                         Error (bl4012 binding.Value.Span (sprintf "function '%s': cannot destructure a node-covariant value in v1 — bind it whole" ctx.FuncName)))
             | StmtExpr e2 -> judge ctx env e2 |> Result.map (fun _ -> env)
@@ -556,7 +686,7 @@ and private judgeStmts (ctx: Ctx) (env: Map<string, PowStatus>) (stmts: Stmt lis
                     | Pow k when k > 0 ->
                         Error (bl4012 range.Span (sprintf "function '%s': cannot iterate a node-covariant value as a range" ctx.FuncName))
                     | _ ->
-                        judgeStmts ctx (Map.add v (Pow 0) env) body |> Result.map (fun _ -> env))
+                        judgeStmts ctx (Map.add v PowUnsized env) body |> Result.map (fun _ -> env))
             | _ -> Ok env))
         (Ok env)
 
@@ -587,6 +717,10 @@ and private judgeAssign (ctx: Ctx) (env: Map<string, PowStatus>) (span: Span) (l
                     judge ctx env a |> Result.bind (fun si ->
                         match si with
                         | Pow 0 -> Ok ()
+                        | PowUnsized ->
+                            Error (bl4012 a.Span
+                                       (sprintf "function '%s': an array index must be invariant inside a perm-certified body, and this one is invariant-shaped but of unestablished extent — v1 cannot rule out that the cell it selects moves with the node labelling"
+                                            ctx.FuncName))
                         | Pow _ ->
                             Error (bl4012 a.Span
                                        (sprintf "function '%s': an array index must be invariant inside a perm-certified body, but this one is %s — the cell it selects moves with the node labelling"
@@ -616,6 +750,10 @@ and private judgeApp (ctx: Ctx) (env: Map<string, PowStatus>) (e: Expr) (f: Expr
     let requirePow (what: string) (k: int) (argE: Expr) =
         judge ctx env argE |> Result.bind (fun s ->
             if s = Pow k then Ok ()
+            elif s = PowUnsized && k = 0 then
+                Error (bl4012 argE.Span
+                           (sprintf "function '%s': %s must be invariant, and this argument is invariant-SHAPED but of unestablished extent — the op's theorem holds only if those cells do not move when the nodes are relabelled, and a buffer that lands in the node-power space does move. Annotate the extent, or build the equivariant constants with ml.derive_perm_bias"
+                                ctx.FuncName what))
             else
                 Error (bl4012 argE.Span
                            (sprintf "function '%s': %s must be %s, but the argument is %s"
@@ -670,6 +808,7 @@ and private judgeApp (ctx: Ctx) (env: Map<string, PowStatus>) (e: Expr) (f: Expr
              // carries a node axis, so invariants in / invariant out.
              judgeAll args |> Result.bind (fun sts ->
                  if sts |> List.forall ((=) (Pow 0)) then Ok (Pow 0)
+                 elif sts |> List.forall (fun st -> st = Pow 0 || st = PowUnsized) then Ok PowUnsized
                  else reject (sprintf "ml.%s carries no S_n rule for node-covariant arguments — the node-axis ops are ml.derive_perm_linear, ml.derive_perm_bias and ml.perm_matmul" op)))
     // --- named callees ------------------------------------------------------
     | ExprKind.ExprVar fn ->
@@ -685,6 +824,10 @@ and private judgeApp (ctx: Ctx) (env: Map<string, PowStatus>) (e: Expr) (f: Expr
                     acc |> Result.bind (fun () ->
                         match pSt with
                         | POpaque -> reject (sprintf "call to '%s': parameter '%s' is unclassifiable" fn pName)
+                        // Unreachable from a signature (statusOfType answers
+                        // Pow or Error), but stated rather than wildcarded so
+                        // a future classifier cannot slip past this arm.
+                        | PowUnsized -> reject (sprintf "call to '%s': parameter '%s' has no established extent" fn pName)
                         | Pow k -> requirePow (sprintf "'%s' parameter '%s'" fn pName) k argE))
                     (Ok ())
                 |> Result.map (fun () -> cert.Return)
@@ -698,8 +841,34 @@ and private judgeApp (ctx: Ctx) (env: Map<string, PowStatus>) (e: Expr) (f: Expr
                 reject (sprintf "component access into node-covariant '%s' inside a perm-certified body lands in v2 with per-axis tracking — v1 cannot tell a bound-index read (which reassembles equivariantly) from a fixed-offset one (which does not). Whole-array elementwise operators are pointwise, hence equivariant, and ml.derive_perm_linear(K, 0, %d, x, w) is the complete invariant readout" fn ctx.N)
             | _ ->
                 judgeAll args |> Result.bind (fun sts ->
-                    match sts |> List.tryFindIndex (fun s -> s <> Pow 0) with
-                    | None -> Ok (Pow 0)
+                    match sts |> List.tryFindIndex (fun s -> s <> Pow 0 && s <> PowUnsized) with
+                    | None ->
+                        // A read out of an invariant array, or a call to a
+                        // helper: invariant by the conditional-theorem reading,
+                        // but fixedness is claimable only with an extent behind
+                        // it. An indexed read of a bound array is one cell, so
+                        // it is a scalar; a helper call is classified by its
+                        // declared return type (buildReturnEvidence).
+                        let unsizedArg = sts |> List.exists ((=) PowUnsized)
+                        (match Map.tryFind fn env with
+                         // An element read is ONE cell, but a cell of a buffer
+                         // that is not itself fixed is not fixed either: if the
+                         // buffer lands in the node-power space its cells move
+                         // with the labelling, so `a(0)` moves with it too.
+                         | Some (Pow 0) -> Ok (Pow 0)
+                         | Some _ -> Ok PowUnsized
+                         | None ->
+                             // Not a local: either a module-level array being
+                             // indexed (its evidence is in Globals) or a call
+                             // to a helper (classified by its declared return).
+                             match Map.tryFind fn ctx.Globals with
+                             | Some (Pow 0) -> Ok (Pow 0)
+                             | Some _ -> Ok PowUnsized
+                             | None ->
+                                 match Map.tryFind fn ctx.Returns with
+                                 | Some st when not unsizedArg -> Ok st
+                                 | Some _ -> Ok PowUnsized
+                                 | None -> Ok PowUnsized)
                     | Some i ->
                         // THE POLARITY ARM. A pointwise scalar builtin applied
                         // to a node power is EQUIVARIANT (see
@@ -715,17 +884,20 @@ and private judgeApp (ctx: Ctx) (env: Map<string, PowStatus>) (e: Expr) (f: Expr
     | _ ->
         judgeAll args |> Result.bind (fun sts ->
             judge ctx env f |> Result.bind (fun sf ->
-                if sf = Pow 0 && sts |> List.forall ((=) (Pow 0)) then Ok (Pow 0)
+                let inv st = st = Pow 0 || st = PowUnsized
+                if inv sf && sts |> List.forall inv then Ok PowUnsized
                 else reject "cannot classify this call inside a perm-certified body"))
 
 /// Judge one certified function. Empty list = certificate holds.
 let judgeFunction (certs: Map<string, PermSig>) (statics: StaticEnv) (mlAliases: Set<string>)
-                  (fd: FunctionDecl)
+                  (decls: Located<Decl> list) (fd: FunctionDecl)
     : Blade.Diagnostics.Diagnostic list =
     match Map.tryFind fd.Name certs with
     | None -> []
     | Some cert ->
-        let ctx = { FuncName = fd.Name; N = cert.N; MlAliases = mlAliases; Statics = statics; Certs = certs }
+        let ctx = { FuncName = fd.Name; N = cert.N; MlAliases = mlAliases; Statics = statics; Certs = certs
+                    Globals = buildGlobals cert.N statics decls
+                    Returns = buildReturnEvidence cert.N statics decls }
         let env = cert.Params |> List.fold (fun m (n, st) -> Map.add n st m) Map.empty
         match judge ctx env fd.Body with
         | Error d -> [ d ]
