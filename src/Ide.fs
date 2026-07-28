@@ -169,6 +169,28 @@ let private clampSpan (s: Span) =
     let endCol = if s.EndCol >= 1 then s.EndCol else col
     (line, col, endLine, endCol)
 
+/// A `deduced[]` record with every field at its empty default, spanned.
+let private emptyDeduced (span: Span) : DeducedInfo =
+    let (line, col, endLine, endCol) = clampSpan span
+    { DKind = ""; DOwner = ""; DName = ""; DLeft = ""; DRight = ""
+      DIndex = 0; DRank = 0
+      DLine = line; DCol = col; DEndLine = endLine; DEndCol = endCol }
+
+/// The stage-6a certificate facts, projected into the flat `deduced[]` record.
+/// Hoisted out of `ideCheck`'s drain so the surfacing test block can exercise
+/// this exact mapping (through the real renderer, via `deducedJsonForTests`)
+/// without needing the ML elaborator to have produced anything — the producers
+/// reset the channel mid-typecheck, so an end-to-end add-then-check would see
+/// its fact wiped. One definition, two callers, no drifting twin.
+let private certFactRecords () : DeducedInfo list =
+    Blade.ML.Equiv.CertFacts.get ()
+    |> List.map (fun (fact, span) ->
+        { emptyDeduced span with
+            DKind = fact.Discipline
+            DOwner = fact.Owner
+            DName = fact.Group
+            DLeft = String.concat "," fact.Deps })
+
 let private renderJson (diags: Diag list) (bindings: BindingInfo list) (providers: ProviderInfo list)
                        (deduced: DeducedInfo list) (calls: CallInfo list) =
     let sb = StringBuilder()
@@ -247,6 +269,13 @@ let private renderJson (diags: Diag list) (bindings: BindingInfo list) (provider
     // Deduced facts. Only the fields that MEAN something for the kind are
     // emitted: "rank"/"packComm" carry `name` (and `rank` for the former),
     // pair kinds carry `left`/`right`. A consumer keys on `kind` first.
+    //
+    // The certificate kinds ("equiv"/"galilean") are the one case needing BOTH:
+    // `name` is the certificate's subject (the group for equiv, the comma-joined
+    // velocity parameters for galilean) and `left` is the dependency closure the
+    // proposal rests on, also comma-joined. Falling through to the pair arm would
+    // have emitted `right` (always empty here) and — the actual loss — dropped
+    // `name` entirely, so the group would never reach the consumer.
     sb.Append "],\"deduced\":[" |> ignore
     deduced
     |> List.iteri (fun i d ->
@@ -255,6 +284,9 @@ let private renderJson (diags: Diag list) (bindings: BindingInfo list) (provider
             "{{\"kind\":\"{0}\",\"owner\":\"{1}\"", jsonEscape d.DKind, jsonEscape d.DOwner) |> ignore
         if d.DKind = "rank" || d.DKind = "packComm" then
             sb.AppendFormat(",\"name\":\"{0}\"", jsonEscape d.DName) |> ignore
+        elif d.DKind = "equiv" || d.DKind = "galilean" then
+            sb.AppendFormat(",\"name\":\"{0}\",\"left\":\"{1}\"",
+                            jsonEscape d.DName, jsonEscape d.DLeft) |> ignore
         else
             sb.AppendFormat(",\"left\":\"{0}\",\"right\":\"{1}\"",
                             jsonEscape d.DLeft, jsonEscape d.DRight) |> ignore
@@ -277,6 +309,17 @@ let private renderJson (diags: Diag list) (bindings: BindingInfo list) (provider
         sb.Append "]}" |> ignore)
     sb.Append "]}" |> ignore
     sb.ToString()
+
+/// Test hook for the surfacing block: the `deduced[]` JSON that the CertFacts
+/// channel ALONE would produce, through the real mapping and the real renderer
+/// (every other channel empty). It exists because the certificate producers run
+/// inside the ML elaborator and RESET their channel on the way in, so a test
+/// cannot stage a fact and then observe it through `ideCheck` end to end — that
+/// path is integration-verified against real sources instead. What this pins is
+/// the half a staged fact CAN reach: kind/owner/name/left placement and the
+/// renderer's field selection for the certificate kinds.
+let deducedJsonForTests () : string =
+    renderJson [] [] [] (certFactRecords ()) []
 
 // ----------------------------------------------------------------------------
 // Type rendering
@@ -1193,6 +1236,14 @@ let ideCheck (filePath: string) : int =
                 // to. Same field shape as BL4010 — no new `ide check --json`
                 // field is needed, the diagnostics array carries both.
                 let certSuggestions = Blade.ML.Equiv.CertSuggestions.get ()
+                // The galilean twin of the same pass: BL4014, also at the DECL
+                // span, ghost-rendering `where ml.galilean(u, ...)`. A separate
+                // channel rather than a Discipline tag on one, because the two
+                // suggestions are produced at two different elaborator seams;
+                // they are re-joined here, equiv-first, matching the order
+                // `TypeCheck`'s string twins and `Lowering`'s rendered
+                // diagnostics both use.
+                let galCertSuggestions = Blade.ML.Galilean.GalCertSuggestions.get ()
                 for (msg, span) in pinSuggestions do
                     let (line, col, endLine, endCol) = clampSpan span
                     diags.Add { Severity = "warning"; Line = line; Col = col
@@ -1203,12 +1254,18 @@ let ideCheck (filePath: string) : int =
                     diags.Add { Severity = "warning"; Line = line; Col = col
                                 EndLine = endLine; EndCol = endCol
                                 Message = msg; Code = "BL4011" }
+                for (msg, span) in galCertSuggestions do
+                    let (line, col, endLine, endCol) = clampSpan span
+                    diags.Add { Severity = "warning"; Line = line; Col = col
+                                EndLine = endLine; EndCol = endCol
+                                Message = msg; Code = "BL4014" }
                 // The checker's own warnings, now coded and spanned instead of
                 // `Code = ""` at 1:1. BL4010 is skipped: PinSuggestions above
                 // already emitted exactly those, at exactly that span, and a
-                // duplicate diagnostic is a duplicate squiggle. (BL4011 never
-                // rides this channel — the ML elaborator writes CertSuggestions
-                // directly, never through emitWarning.)
+                // duplicate diagnostic is a duplicate squiggle. (Neither BL4011
+                // nor BL4014 ever rides this channel — the ML elaborator writes
+                // CertSuggestions/GalCertSuggestions directly, never through
+                // emitWarning, so no such skip is needed for them.)
                 for d in Blade.TypeCheck.WarningLog.get () |> List.distinct do
                     if d.Code <> "BL4010" then
                         let (line, col, endLine, endCol) = clampSpan d.Span
@@ -1219,26 +1276,43 @@ let ideCheck (filePath: string) : int =
             // source declared. Guarded like `providers` so a malformed fact can
             // never break the JSON, and drained on both arms for the same
             // reason the warnings are.
+            //
+            // TWO producers land in this one flat array. `TypeCheck.DeducedFacts`
+            // (kinds rank/comm/antisymm/packComm) is the checker's own symmetry
+            // deduction; `ML.Equiv.CertFacts` (kinds equiv/galilean) is the
+            // stage-6a certificate inference, which runs several phases EARLIER
+            // in the ML elaborator. They share the record because a consumer
+            // wants one "what was proved here" list keyed by `kind`, not two
+            // parallel arrays to zip. DeducedFacts first, CertFacts after — a
+            // stable order, and the phase order reversed only because the
+            // checker's facts are the ones every file has.
+            //
+            // The certificate fields map by MEANING, not by name: DOwner is the
+            // function the certificate is about, DName carries `Group` (the group
+            // name for equiv, the comma-joined velocity parameters for galilean),
+            // and DLeft carries the dependency closure the proposal RESTS on,
+            // comma-joined. A structured Deps array is deferred (recorded in
+            // plan-equivariance-deduction.md) — flattening keeps this a
+            // field-compatible extension of the existing JSON rather than a
+            // schema change every consumer must handle.
             let drainDeducedFacts () =
                 deduced <-
                     try
-                        Blade.TypeCheck.DeducedFacts.get ()
-                        |> List.map (fun (f, span) ->
-                            let (line, col, endLine, endCol) = clampSpan span
-                            let empty =
-                                { DKind = ""; DOwner = ""; DName = ""; DLeft = ""; DRight = ""
-                                  DIndex = 0; DRank = 0
-                                  DLine = line; DCol = col; DEndLine = endLine; DEndCol = endCol }
-                            match f with
-                            | Blade.TypeEnv.DeducedRank (owner, param, index, rank) ->
-                                { empty with DKind = "rank"; DOwner = owner; DName = param
-                                             DIndex = index; DRank = rank }
-                            | Blade.TypeEnv.DeducedPairSym (owner, left, right, index, isAnti) ->
-                                { empty with DKind = (if isAnti then "antisymm" else "comm")
-                                             DOwner = owner; DLeft = left; DRight = right
-                                             DIndex = index }
-                            | Blade.TypeEnv.DeducedPackComm (owner, pack) ->
-                                { empty with DKind = "packComm"; DOwner = owner; DName = pack })
+                        let checkerFacts =
+                            Blade.TypeCheck.DeducedFacts.get ()
+                            |> List.map (fun (f, span) ->
+                                let empty = emptyDeduced span
+                                match f with
+                                | Blade.TypeEnv.DeducedRank (owner, param, index, rank) ->
+                                    { empty with DKind = "rank"; DOwner = owner; DName = param
+                                                 DIndex = index; DRank = rank }
+                                | Blade.TypeEnv.DeducedPairSym (owner, left, right, index, isAnti) ->
+                                    { empty with DKind = (if isAnti then "antisymm" else "comm")
+                                                 DOwner = owner; DLeft = left; DRight = right
+                                                 DIndex = index }
+                                | Blade.TypeEnv.DeducedPackComm (owner, pack) ->
+                                    { empty with DKind = "packComm"; DOwner = owner; DName = pack })
+                        checkerFacts @ certFactRecords ()
                     with _ -> []
             match Blade.TypeCheck.typeCheck program with
             | Error errors ->
