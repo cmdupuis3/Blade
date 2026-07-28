@@ -1130,6 +1130,50 @@ let ideCheck (filePath: string) : int =
             // Fresh provider-module registry for this check (the load site
             // records into it during typeCheck; collectProviderStores reads it).
             Blade.ProviderRegistry.IdeStores.reset ()
+            // Suggestions and warnings are NOT error-exclusive: a file with a
+            // type error has still earned every BL4010/BL4011 nudge, and every
+            // ordinary warning, the checker produced before it hit the error.
+            // Dropping them on the error arm was the S1/S2 surfacing gap — the
+            // arm where an editor needs the nudges MOST, since a half-broken
+            // file is exactly what an editor is looking at while you type. All
+            // three channels are AsyncLocal, so the Error arm reads them
+            // exactly as the Ok arm does; this is that one block, shared.
+            let drainWarningChannels () =
+                // Confirm-and-pin suggestions (stage 3/4) arrive twice: as
+                // plain strings in typeCheck's Ok payload (what the CLI
+                // printed) and as structured (message, kernel-span) pairs in
+                // the PinSuggestions side-channel. Emit the structured form —
+                // code BL4010 at the kernel's real span, so the editor can
+                // render a ghost annotation and offer the one-click pin.
+                let pinSuggestions = Blade.TypeCheck.PinSuggestions.get ()
+                // Stage-6a equivariance-certificate suggestions arrive the same
+                // way, one code over: BL4011 at the DECL span, so the editor can
+                // ghost-render `where ml.equiv(G)` on the function it belongs
+                // to. Same field shape as BL4010 — no new `ide check --json`
+                // field is needed, the diagnostics array carries both.
+                let certSuggestions = Blade.ML.Equiv.CertSuggestions.get ()
+                for (msg, span) in pinSuggestions do
+                    let (line, col, endLine, endCol) = clampSpan span
+                    diags.Add { Severity = "warning"; Line = line; Col = col
+                                EndLine = endLine; EndCol = endCol
+                                Message = msg; Code = "BL4010" }
+                for (msg, span) in certSuggestions do
+                    let (line, col, endLine, endCol) = clampSpan span
+                    diags.Add { Severity = "warning"; Line = line; Col = col
+                                EndLine = endLine; EndCol = endCol
+                                Message = msg; Code = "BL4011" }
+                // The checker's own warnings, now coded and spanned instead of
+                // `Code = ""` at 1:1. BL4010 is skipped: PinSuggestions above
+                // already emitted exactly those, at exactly that span, and a
+                // duplicate diagnostic is a duplicate squiggle. (BL4011 never
+                // rides this channel — the ML elaborator writes CertSuggestions
+                // directly, never through emitWarning.)
+                for d in Blade.TypeCheck.WarningLog.get () |> List.distinct do
+                    if d.Code <> "BL4010" then
+                        let (line, col, endLine, endCol) = clampSpan d.Span
+                        diags.Add { Severity = "warning"; Line = line; Col = col
+                                    EndLine = endLine; EndCol = endCol
+                                    Message = d.Message; Code = d.Code }
             match Blade.TypeCheck.typeCheck program with
             | Error errors ->
                 for e in errors do
@@ -1143,6 +1187,7 @@ let ideCheck (filePath: string) : int =
                     diags.Add { Severity = "error"; Line = line; Col = col
                                 EndLine = endLine; EndCol = endCol; Message = msg; Code = code }
                 exitCode <- 1
+                drainWarningChannels ()
                 // Errors don't have to mean zero hovers: if the checker ran and
                 // produced a PARTIAL typed program (only a pre-check pipeline
                 // failure yields none), surface bindings/types for the parts
@@ -1154,39 +1199,8 @@ let ideCheck (filePath: string) : int =
                     providers <- (try collectProviderStores program with _ -> [])
                     calls <- (try collectCalls typedProg @ collectFormerCalls program typedProg with _ -> [])
                 | None -> ()
-            | Ok (typedProg, _, warnings) ->
-                // Confirm-and-pin suggestions (stage 3/4) arrive twice: as
-                // plain strings in `warnings` (what the CLI prints) and as
-                // structured (message, kernel-span) pairs in the
-                // PinSuggestions side-channel. Emit the structured form —
-                // code BL4010 at the kernel's real span, so the editor can
-                // render a ghost annotation and offer the one-click pin —
-                // and skip the string twin to avoid duplicates.
-                let pinSuggestions = Blade.TypeCheck.PinSuggestions.get ()
-                // Stage-6a equivariance-certificate suggestions arrive the same
-                // way, one code over: BL4011 at the DECL span, so the editor can
-                // ghost-render `where ml.equiv(G)` on the function it belongs
-                // to. Same field shape as BL4010 — no new `ide check --json`
-                // field is needed, the diagnostics array carries both.
-                let certSuggestions = Blade.ML.Equiv.CertSuggestions.get ()
-                let pinMessages =
-                    Set.union
-                        (pinSuggestions |> List.map fst |> Set.ofList)
-                        (certSuggestions |> List.map fst |> Set.ofList)
-                for (msg, span) in pinSuggestions do
-                    let (line, col, endLine, endCol) = clampSpan span
-                    diags.Add { Severity = "warning"; Line = line; Col = col
-                                EndLine = endLine; EndCol = endCol
-                                Message = msg; Code = "BL4010" }
-                for (msg, span) in certSuggestions do
-                    let (line, col, endLine, endCol) = clampSpan span
-                    diags.Add { Severity = "warning"; Line = line; Col = col
-                                EndLine = endLine; EndCol = endCol
-                                Message = msg; Code = "BL4011" }
-                for w in warnings do
-                    if not (Set.contains w pinMessages) then
-                        diags.Add { Severity = "warning"; Line = 1; Col = 1; EndLine = 1; EndCol = 1
-                                    Message = w; Code = "" }
+            | Ok (typedProg, _, _) ->
+                drainWarningChannels ()
                 let sourceLines = source.Replace("\r\n", "\n").Split('\n')
                 bindings <- joinBindings program typedProg sourceLines
                 // Guarded so provider structure can never break the JSON output.
