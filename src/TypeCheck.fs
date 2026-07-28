@@ -10723,12 +10723,19 @@ let typeCheck (program: Program) : Result<TypedProgram * IRBuilder * string list
     else
         let (tp, builder, errors, warnings) = checkProgram program
         IdePartial.record tp builder
-        // Stage-6a equivariance-certificate suggestions (BL4011) ride the
-        // ordinary warning channel, exactly like the BL4010 storage pins:
-        // plain strings here (what the CLI prints), structured
-        // (message, span) pairs in Equiv.CertSuggestions (what the editor
-        // ghost-renders). The ML elaborator filled the side-channel above,
-        // several phases back, so they are appended AFTER the checker's own.
-        let warnings = warnings @ (Blade.ML.Equiv.CertSuggestions.get () |> List.map fst)
+        // Stage-6a certificate suggestions (BL4011 equivariance, BL4014
+        // galilean) ride the ordinary warning channel, exactly like the BL4010
+        // storage pins: plain strings here (what the CLI prints), structured
+        // (message, span) pairs in Equiv.CertSuggestions / Galilean.
+        // GalCertSuggestions (what the editor ghost-renders). The ML elaborator
+        // filled both side-channels above, several phases back, so they are
+        // appended AFTER the checker's own — equiv strings first, then galilean,
+        // each in channel order. That is the SAME sequence
+        // `Lowering.typeCheckWarningDiagnostics` assembles its rendered
+        // Diagnostics in, so the strings and the diagnostics stay parallel.
+        let warnings =
+            warnings
+            @ (Blade.ML.Equiv.CertSuggestions.get () |> List.map fst)
+            @ (Blade.ML.Galilean.GalCertSuggestions.get () |> List.map fst)
         if errors.IsEmpty then Ok (tp, builder, warnings)
         else Error errors

@@ -2042,7 +2042,7 @@ let lowerTypedProgram (program: TypedProgram) (rawProgram: Program option) (buil
 // ============================================================================
 
 /// Every typecheck warning channel, drained and assembled as coded, spanned
-/// Diagnostics. TWO producers feed it:
+/// Diagnostics. THREE producers feed it:
 ///   - `TypeEnv.WarningLog`: the checker's own `emitWarning`s
 ///     (BL4001/BL4003/BL4004/BL4010/BL9001), which now survive the checker's
 ///     ERROR path — before this they rode `typeCheck`'s Ok-only string list and
@@ -2050,11 +2050,19 @@ let lowerTypedProgram (program: TypedProgram) (rawProgram: Program option) (buil
 ///   - `ML.Equiv.CertSuggestions`: stage-6a certificate suggestions (BL4011),
 ///     which never went through `emitWarning` at all — the ML elaborator fills
 ///     them several phases earlier and `typeCheck` only appended their string
-///     twins to the same Ok payload.
+///     twins to the same Ok payload;
+///   - `ML.Galilean.GalCertSuggestions`: the galilean twin of the same pass
+///     (BL4014), filled at the galilean seam of the same elaborator. Drained
+///     AFTER the equiv channel so a file earning both reads equiv-then-galilean,
+///     each channel in its own insertion order — the same ordering discipline
+///     `TypeCheck.typeCheck`'s string twins use, so the CLI's rendered warnings
+///     and the Ok payload's strings never disagree about sequence.
 ///
 /// `skipPins` drops BL4010 for `--strict-pins`, which has already re-reported
-/// exactly those as errors. BL4011 is deliberately NOT dropped: strict-pins
-/// owns the storage decision and grows no certificate arm.
+/// exactly those as errors. BL4011 and BL4014 are deliberately NOT dropped:
+/// strict-pins owns the STORAGE decision, and a certificate owns no storage
+/// decision at all — neither code grows a strict-pins arm, so neither has a
+/// promoted-to-error twin that a filter here would be de-duplicating.
 let typeCheckWarningDiagnostics (skipPins: bool) : Blade.Diagnostics.Diagnostic list =
     let own =
         Blade.TypeEnv.WarningLog.get ()
@@ -2063,7 +2071,11 @@ let typeCheckWarningDiagnostics (skipPins: bool) : Blade.Diagnostics.Diagnostic 
         Blade.ML.Equiv.CertSuggestions.get ()
         |> List.map (fun (msg, span) ->
             Blade.Diagnostics.mkWarning "BL4011" Blade.Diagnostics.PhConstraints span msg)
-    (own @ certs) |> List.distinct
+    let galCerts =
+        Blade.ML.Galilean.GalCertSuggestions.get ()
+        |> List.map (fun (msg, span) ->
+            Blade.Diagnostics.mkWarning "BL4014" Blade.Diagnostics.PhConstraints span msg)
+    (own @ certs @ galCerts) |> List.distinct
 
 /// THE surfacing helper: one format, one stream for every CLI lane. Warnings
 /// render exactly like errors (`warning[BL4010]: ...` + snippet) instead of the

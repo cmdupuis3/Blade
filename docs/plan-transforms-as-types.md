@@ -650,9 +650,12 @@ ml.equiv(G)` is part of the signature and participates in call-site
 discharge, so an imported function's certificate is load-bearing across
 module boundaries in a way an inferred `comm` is not. Rule: **deduction
 proposes; only source-written `where` clauses export.** Suggestions ride the
-structured-diagnostic channel with their own code (BL4011 at time of
-writing — BL4010 is taken by storage pins, and certificates are not
-storage).
+structured-diagnostic channel with their own codes — BL4011 for
+equivariance, BL4014 for its Galilean twin (BL4010 is taken by storage pins,
+and certificates are not storage; that separation is also why neither
+certificate code grows a `--strict-pins` arm). Since 2026-07-28 they are
+accompanied by a structured fact channel, `deduced[]` kinds "equiv" and
+"galilean" in `ide check --json` — see §7's 6a and 6d notes.
 
 ## 5. Worked example
 
@@ -1266,6 +1269,17 @@ go first.
      moot); the y_to-introduces-rep shape (all-scalar signature) is
      correctly silent under non-vacuity, documented. Corpus
      ml-equiv/053-057; blocks +57; full suite 1779/0.
+     **SUPERSEDED IN PART 2026-07-28 (6d):** the channel is no longer
+     string-only and no longer equiv-only. BL4011 gained a galilean twin
+     BL4014 on its own side-channel, and a STRUCTURED channel
+     (`MLEquiv.CertFacts`) now carries what the deduction proved as
+     data — surfaced by `ide check --json` as `deduced[]` entries with
+     `kind` "equiv" | "galilean", `owner` the function, `name` the group
+     (equiv) or the comma-joined velocity parameters (galilean), and
+     `left` the dependency closure the proposal rests on. Consumers key
+     on `kind` and no longer have to parse the English. The
+     no-`--strict-pins`-arm decision above extends verbatim to BL4014,
+     for the same reason: a certificate owns no storage decision.
    - **6b — the engine, part i: extractor + finite discharge (Point
      pathfinder).** The polynomial extractor (v1 fragment, closed-world:
      literals with exact literal-division; static indexing into
@@ -1337,7 +1351,8 @@ go first.
    - Deferrals, named: loops/mutation/calls in the fragment;
      annotated-let subterm seams (function-boundary composition via the
      cert table suffices in v1); degree > 4; the strict-certs lint; the
-     stronger-group upgrade lint; and NOTE THE INVERSION — ℚ(√3) point
+     stronger-group upgrade lint (**LANDED 2026-07-28 — see 6d below**);
+     and NOTE THE INVERSION — ℚ(√3) point
      groups do not wait on a field-extension investment; 6c's radical
      vectors cover their generator entries the day they join the
      roster.
@@ -1366,6 +1381,64 @@ go first.
    Schur certificate is the right tool there, pinned in corpus 065.
    New block "Lie Tables" 63/0; corpus ml-equiv/063-065 +
    diagnostics/025-027; full suite 1870/0.
+
+   - **6d — deduction, deepened: Galilean inference, the upgrade lint,
+     and structured certificate facts. LANDED 2026-07-28.** Three of
+     stage 6's named deferrals discharged; the fourth explicitly kept.
+     Plan of record: `plan-equivariance-deduction.md`.
+     - **Galilean inference** (the axis-sized deferral: no `ml.galilean`
+       deduction existed). The same propose-what-the-checker-would-accept
+       shape as 6a, run at the galilean elaborator seam, emitting BL4014
+       "galilean certificate suggestion" (warning, always). It needs NO
+       type annotations — a GalSig is built from the clause and the
+       parameter names alone — so unlike equiv its recall is not gated on
+       fully-annotated signatures. HONEST CAVEAT ON RECALL: the candidate
+       set is deliberately small. Each SINGLETON `{p}` over the params
+       that occur free in the body is tried, in parameter order, and every
+       passing singleton is proposed (each is an independent true claim);
+       if no singleton passed and there are at least two free params, the
+       FULL free set is tried once — that arm exists for
+       velocity-DIFFERENCE bodies like `u - v`, where no singleton can
+       pass but the joint boost cancels. Nothing between those two.
+       Maximal-set search over intermediate subsets is deferred: the
+       combinatorics buy little on real signatures. Free occurrence IS the
+       vacuity guard here, which is why no separate non-vacuity filter
+       appears — an unmentioned parameter cannot be part of an honest
+       certificate.
+     - **The stronger-group upgrade lint** (deferred by name in 6b/6c's
+       deferrals bullet). A function pinned `ml.equiv(SO3)` that also
+       judges under O3 is now told the stronger certificate is available.
+       HONEST CAVEAT ON SUPPRESSION: the lint is silenced whenever the
+       function's name occurs free in ANY other certified function's body.
+       That is not conservatism about the proof — it is correctness about
+       the ADVICE. Certificates do not transfer between groups and
+       `judgeApp` rejects a cross-group call in both directions, so
+       upgrading a helper that certified callers depend on would break
+       exactly those callers; the suggestion would be a trap. Consequence
+       to expect: helper functions inside a certified chain are the
+       common case, so the lint fires mostly on leaves. Upgrade
+       suggestions are STRINGS ONLY — they propose editing an existing
+       pin, not adding one, so they do not join the structured fact
+       channel.
+     - **Structured certificate facts.** `MLEquiv.CertFacts` is the
+       data twin of the suggestion strings, hosted in MLEquiv so the
+       galilean pass can write to it and `Ide` can read it. It reaches
+       `ide check --json` as `deduced[]` entries alongside the checker's
+       own rank/comm/antisymm/packComm facts — one array keyed by `kind`,
+       not two to zip. Field mapping and the BL4014 surfacing path are
+       described in the 6a note above. A structured `deps` ARRAY is
+       deferred: the closure is comma-joined into `left` today, which
+       keeps this a field-compatible extension of the existing JSON
+       rather than a schema change every consumer must handle.
+     - **STILL DEFERRED — Sₙ/perm inference. Verdict unchanged.** The
+       obstruction is not effort, it is that a permutation certificate is
+       keyed on an extent that a signature does not pin down: flat-extent
+       keying is ambiguous at the proposal site, so inference would have
+       to guess an N. A guessed N is noise, and noise on a warning channel
+       is worse than silence. Also still deferred: partial-annotation
+       equiv proposals (elaboration runs BEFORE typecheck, so deduced
+       ranks and types do not exist yet at the seam — a post-typecheck
+       second inference pass is an architecture change, not a patch).
 
 ## 8. New proof obligations
 

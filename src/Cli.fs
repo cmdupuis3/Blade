@@ -1068,6 +1068,81 @@ let private runSurfacingTests () : TH.BlockResult =
         | Error _ when err.Contains "warning[BL4010]" -> record name TH.Pass ""
         | Error _ -> record name TH.Fail (sprintf "no warning on stderr: %s" (err.Trim()))
         | Ok _ -> record name TH.Fail "compiled instead of failing"
+
+        // --- 7-9. The stage-6a CERTIFICATE channels (BL4011's galilean twin
+        // BL4014, and the structured CertFacts feed behind `deduced[]`).
+        //
+        // These three drive the DRAIN, not the producer: each stages a channel
+        // entry by hand and asserts the surfacing code carries it to the right
+        // place, then resets. The inference passes that fill these channels for
+        // real live in the ML elaborator, which resets them on entry — so an
+        // end-to-end "write a boost-invariant function, check it" assertion
+        // cannot be written here; that direction is covered by the ml-equiv
+        // corpus SUGGEST pins. What is genuinely at risk in THIS file is a
+        // channel that gets filled and then read by nobody, and that is exactly
+        // what these catch.
+        let testSpan : Blade.Ast.Span =
+            { StartLine = 2; StartCol = 1; EndLine = 2; EndCol = 9; File = None }
+
+        // --- 7. The code renders. Channel-independent: the diagnostic is built
+        // directly, so this holds even with both inference passes absent.
+        let galMsg =
+            "function 'drift' judges boost-invariant with velocity parameter(s) u: \
+             add 'where ml.galilean(u)'"
+        let rendered =
+            Blade.Diagnostics.Render.renderAll false None
+                [ Blade.Diagnostics.mkWarning "BL4014" Blade.Diagnostics.PhConstraints
+                                              testSpan galMsg ]
+        let name = "BL4014 renders as a warning with its code"
+        if rendered.Contains "warning[BL4014]" && rendered.Contains "boost-invariant" then
+            record name TH.Pass ""
+        else
+            record name TH.Fail (sprintf "rendered: %s" (rendered.Trim()))
+
+        // --- 8. GalCertSuggestions reaches the shared warning-diagnostic
+        // assembly (the one every CLI lane prints through), and does so under
+        // `skipPins` too: a certificate owns no storage decision, so
+        // --strict-pins must not swallow it the way it swallows BL4010.
+        Blade.ML.Galilean.GalCertSuggestions.reset ()
+        Blade.ML.Galilean.GalCertSuggestions.add galMsg testSpan
+        let drained = Blade.Lowering.typeCheckWarningDiagnostics false
+        let drainedStrict = Blade.Lowering.typeCheckWarningDiagnostics true
+        Blade.ML.Galilean.GalCertSuggestions.reset ()
+        let hasBL4014 (ds: Blade.Diagnostics.Diagnostic list) =
+            ds |> List.exists (fun d -> d.Code = "BL4014" && d.Message.Contains "boost-invariant")
+        let name = "typeCheckWarningDiagnostics: GalCertSuggestions surfaces as BL4014"
+        if hasBL4014 drained then record name TH.Pass ""
+        else
+            record name TH.Fail
+                   (sprintf "codes drained: %s"
+                            (drained |> List.map (fun d -> d.Code) |> String.concat ","))
+        let name = "typeCheckWarningDiagnostics: BL4014 survives --strict-pins"
+        if hasBL4014 drainedStrict then record name TH.Pass ""
+        else
+            record name TH.Fail
+                   (sprintf "codes drained: %s"
+                            (drainedStrict |> List.map (fun d -> d.Code) |> String.concat ","))
+
+        // --- 9. CertFacts reaches `deduced[]` as STRUCTURED data, through the
+        // real mapping and the real renderer. Both disciplines, because they
+        // take the same renderer arm and a typo in either kind string would
+        // silently drop `name` (the group) into the pair-fields branch.
+        Blade.ML.Equiv.CertFacts.reset ()
+        Blade.ML.Equiv.CertFacts.add
+            { Owner = "rotate"; Discipline = "equiv"; Group = "O3"; Deps = ["helper"; "inner"] }
+            testSpan
+        Blade.ML.Equiv.CertFacts.add
+            { Owner = "drift"; Discipline = "galilean"; Group = "u,v"; Deps = [] }
+            testSpan
+        let deducedJson = Blade.Ide.deducedJsonForTests ()
+        Blade.ML.Equiv.CertFacts.reset ()
+        let name = "ide deduced[]: CertFacts surface with kind, owner, group and deps"
+        if deducedJson.Contains "\"kind\":\"equiv\"" && deducedJson.Contains "\"owner\":\"rotate\""
+           && deducedJson.Contains "\"name\":\"O3\"" && deducedJson.Contains "\"left\":\"helper,inner\""
+           && deducedJson.Contains "\"kind\":\"galilean\"" && deducedJson.Contains "\"name\":\"u,v\"" then
+            record name TH.Pass ""
+        else
+            record name TH.Fail (sprintf "deduced json: %s" (deducedJson.Trim()))
     finally
         try Directory.Delete(tmpDir, true) with _ -> ()
     let count o = results |> Seq.filter (fun (_, r) -> r = o) |> Seq.length
