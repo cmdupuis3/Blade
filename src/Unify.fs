@@ -126,6 +126,17 @@ type TypeError =
     /// A bounded primitive whose bounds cross: `min=` above `max=`, decided
     /// statically. `where_` locates it ("struct R, field 'm'", "let x", ...).
     | BoundsInverted of where_: string * lo: string * hi: string
+    // Rank deduction violation (BL3009)
+    /// A value flowed into a position demanding rank >= k (a stage-2 rank
+    /// deduction LOWER BOUND, accumulated and max-joined across the body's
+    /// uses) but resolved to something shallower. Dedicated case rather than
+    /// `Other`/BL3999 so a deduction failure is not lost among the generic
+    /// type errors — and so `needed` is machine-readable (its value proves the
+    /// max-join took the maximum, not the last writer). `got` is the rendered
+    /// actual ("a scalar" / "a rank-N array"). Distinct from the compact-group
+    /// `IndexRankMismatch`/BL4004, which is a component-rank-WITHIN-a-slot
+    /// disagreement — do not conflate the two.
+    | RankBoundViolation of needed: int * got: string
     // Constraint / where-clause violations (BL4001)
     | StructWhereNotBool of structName: string * got: string
     | StructWhereError of structName: string * inner: string
@@ -277,6 +288,17 @@ type Subst() =
     member _.CopyArityConstraint(fromId: int, toId: int) =
         match Map.tryFind fromId arityConstraints with
         | Some k -> arityConstraints <- Map.add toId k arityConstraints
+        | None -> ()
+
+    /// The `rankLowerBounds` twin of CopyArityConstraint, for `instantiate`:
+    /// a generalized (static / let static) value's fresh use-site var must
+    /// inherit the bound its scheme var carried, or the deduction is lost at
+    /// every instantiation. Routed through AddRankLowerBound so the target's
+    /// existing bound (if any) is MAX-JOINED rather than overwritten —
+    /// CopyArityConstraint can overwrite because an arity pin is exact.
+    member this.CopyRankLowerBound(fromId: int, toId: int) =
+        match Map.tryFind fromId rankLowerBounds with
+        | Some k -> this.AddRankLowerBound(toId, k)
         | None -> ()
 
     /// Mint a fresh inference var seeded with a literal's value class (its
@@ -532,23 +554,23 @@ let rec unify (subst: Subst) (t1: IRType) (t2: IRType) : TypeResult<unit> =
             // Rank lower bound (stage-2 deduction): validate/propagate before
             // any bind. A too-low-rank array or a scalar violates the bound;
             // another inference var inherits it (max-join).
-            let rankBoundViolation =
+            let rankBoundViolation : TypeError option =
                 match subst.GetRankLowerBound(id) with
                 | Some k when k > 0 ->
                     (match ty with
                      | ArrayElem arr ->
                          if arr.IndexTypes.Length < k then
-                             Some (sprintf "this value flows into a position that requires a rank-%d (or higher) array, but it resolved to a rank-%d array" k arr.IndexTypes.Length)
+                             Some (RankBoundViolation (k, sprintf "a rank-%d array" arr.IndexTypes.Length))
                          else None
                      | IRTInfer id2 ->
                          subst.AddRankLowerBound(id2, k)
                          None
                      | IRTScalar _ ->
-                         Some (sprintf "this value flows into a position that requires a rank-%d (or higher) array, but it resolved to a scalar" k)
+                         Some (RankBoundViolation (k, "a scalar"))
                      | _ -> None)
                 | _ -> None
             match rankBoundViolation with
-            | Some msg -> Error (Other msg)
+            | Some e -> Error e
             | None ->
             // Check arity invariant: T^k must unify with rank-k array
             match subst.GetArityConstraint(id) with

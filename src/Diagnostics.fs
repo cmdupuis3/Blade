@@ -135,6 +135,7 @@ module Codes =
             "BL3006", "unit mismatch"
             "BL3007", "invalid builtin argument"
             "BL3008", "struct construction error"
+            "BL3009", "rank deduction violation"
             "BL3999", "type error"
             // BL4xxx — constraints / static
             "BL4001", "constraint violation"

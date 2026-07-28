@@ -469,6 +469,10 @@ let formatTypeError (err: TypeError) : string =
     | StructBoundScope (structName, field, bad) -> sprintf "struct %s, field '%s': bound references '%s' — bounds may reference only earlier fields and statics" structName field bad
     | StaticStructField (structName, field, why) -> sprintf "static struct %s, field '%s': %s — every field of a `static struct` must have a statically evaluable type (Int, Float, Bool, String, Char, a tuple of those, or another static struct)" structName field why
     | BoundsInverted (where_, lo, hi) -> sprintf "%s: bounds cross — min=%s is greater than max=%s (bounds are inclusive on both ends, so this type has no values)" where_ lo hi
+    // Text reproduced VERBATIM from the two `Other` strings this case
+    // replaced (Unify.fs rank-bound block) — `got` carries the whole
+    // "a scalar" / "a rank-N array" tail, so the sentence is unchanged.
+    | RankBoundViolation (needed, got) -> sprintf "this value flows into a position that requires a rank-%d (or higher) array, but it resolved to %s" needed got
     | ProviderImportByModule (suggestion, providers) -> sprintf "provider modules are imported by module name — write `import %s as <alias>` (the Providers.* spelling was removed; registered providers: %s)" suggestion providers
     | ProviderNoSelectiveImport pname -> sprintf "provider module '%s' does not support selective import — use `import %s as <alias>` and call <alias>.load/read/write" pname pname
     | IndexTypeArithForbidden name -> sprintf "Arithmetic on index type '%s' is not permitted. Index types are nominal labels — for value-level arithmetic on positions, use virtual array iteration (which produces plain ints); for new index types derived from arithmetic, type-level construction is a separate workstream not yet implemented." name
@@ -525,6 +529,7 @@ let diagnosticOfCompileError (e: CompileError) : Blade.Diagnostics.Diagnostic =
             | StructFieldType _ | UnknownStructType _ | StructBoundScope _
             | StaticStructField _
             | StructSpreadBase _ | StructSpreadNotStruct _ | StructSpreadRedundant _ -> "BL3008"
+            | RankBoundViolation _ -> "BL3009"
             | StructWhereNotBool _ | StructWhereError _ | WherePredicateUnannotated _
             | PplConstraintNeedsImport _
             | UnknownWhereConstraint _ -> "BL4001"
