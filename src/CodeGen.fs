@@ -4310,7 +4310,12 @@ let private planHaloCarousel
                         match e.Virtual with
                         | VirtualRange _ | VirtualReverse -> Some (e.ParamVarId, e.ParamName)
                         | RealArray -> None)
-                let m0 = codeGen.Captures |> List.fold (fun acc c -> Map.add c.Id c.Name acc) outerNames
+                // Captures fill gaps only — see the note at the kernel-body
+                // nameMap below: `c.Name` is the source spelling and loses to
+                // whatever the enclosing scope actually emitted.
+                let m0 =
+                    codeGen.Captures
+                    |> List.fold (fun acc c -> if Map.containsKey c.Id acc then acc else Map.add c.Id c.Name acc) outerNames
                 fromElems |> List.fold (fun acc (k, v) -> Map.add k v acc) m0
             let rec varIdsOf (e: IRExpr) : Set<int> =
                 let self = match e with IRVar (id, _) -> Set.singleton id | _ -> Set.empty
@@ -4561,9 +4566,15 @@ let genLoopNestStreamed (streamed: Map<string, ProviderReadSpec>) (codeGen: Loop
     // Build name map for kernel body from final peeled names
     // Start from outer scope, then overlay kernel params (kernel params take priority)
     let nameMap = paramFinalNames |> Map.fold (fun acc k v -> Map.add k v acc) outerNames
+    // Captures are a FALLBACK, not an override: `c.Name` is the SOURCE-level
+    // identifier, which is wrong whenever the captured binding was renamed on
+    // emission (a block-local `let a = ...` inside a function body flattens to
+    // `auto __v4 = ...`). `outerNames`/`paramFinalNames` already carry the
+    // emitted spelling, so only fill in ids the enclosing scope doesn't know —
+    // same precedence rule as `captureForwardName`.
     let nameMap =
         codeGen.Captures
-        |> List.fold (fun acc c -> Map.add c.Id c.Name acc) nameMap
+        |> List.fold (fun acc c -> if Map.containsKey c.Id acc then acc else Map.add c.Id c.Name acc) nameMap
     
     // Generate kernel assignment (with Reynolds permutation sum if applicable).
     // The shape of the assignment depends on output type:
@@ -7944,7 +7955,12 @@ let genFusedLoopNestStreamed (streamed: Map<string, ProviderReadSpec>) (leafCgs:
             if cg.Bindings.Length = j + 1 then
                 let pfn = Map.find li paramFinalNames
                 let nameMap = pfn |> Map.fold (fun acc k v -> Map.add k v acc) outerNames
-                let nameMap = cg.Captures |> List.fold (fun acc c -> Map.add c.Id c.Name acc) nameMap
+                // Fallback-only, as in genLoopNestStreamed: a captured
+                // block-local emitted as `__v<id>` must not be re-spelled to
+                // its source name here.
+                let nameMap =
+                    cg.Captures
+                    |> List.fold (fun acc c -> if Map.containsKey c.Id acc then acc else Map.add c.Id c.Name acc) nameMap
                 let rr = genKernelExprWithReynolds cg.KernelExpr cg.KernelParams cg.HasReynolds cg.IsAntisymmetric nameMap pfn
                 if cg.HasReynolds && rr.UniqueTerms < rr.TotalPerms then
                     lines <- lines @ [ind depth + sprintf "// Reynolds: %d/%d perms unique (dedup %dx)" rr.UniqueTerms rr.TotalPerms (rr.TotalPerms / max 1 rr.UniqueTerms)]

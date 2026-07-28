@@ -5562,6 +5562,19 @@ let private isNestedLoopComputeArg (e: IRExpr) : bool =
     | IRApp (IRObjectFor _, _, _) -> true
     | _ -> false
 
+/// An INLINE array literal sitting directly in a loop form's `Arrays` list —
+/// e.g. the right operand of `yr - [2.0, -14.0]`. Same gap as
+/// `isNestedLoopComputeArg`: the blessed-position exemption assumes codegen's
+/// auto-materialize covers the slot, but that arm only knows the inline
+/// mask/intersect/union/unique forms. An IRArrayLit falls through to the
+/// `arr<i>` placeholder and the nest peels an identifier that was never
+/// declared. Hoisting it to its own let-RHS routes it through the ordinary
+/// array-literal emission, exactly as let-binding it by hand would.
+let private isInlineArrayLitArg (e: IRExpr) : bool =
+    match e with
+    | IRArrayLit _ -> true
+    | _ -> false
+
 /// Path B / Phase D: peel any IRLet chain that descendant lifts produced.
 /// When a sub-expression's lift wraps it in `IRLet(id, v, IRLet(...,inner))`,
 /// the chain shouldn't be visible to the parent context (e.g., an outer
@@ -5943,7 +5956,7 @@ let rec liftExpr (builder: IRBuilder) (expr: IRExpr) : IRExpr =
         let (binds, arraysFinal) =
             arrays' |> List.fold (fun (accB, accA) a ->
                 let (peeled, inner) = peelLetChain a
-                if isArrayFieldAccess inner || isNestedLoopComputeArg inner then
+                if isArrayFieldAccess inner || isNestedLoopComputeArg inner || isInlineArrayLitArg inner then
                     let id = builder.FreshId()
                     let ty = typeOf inner
                     (accB @ peeled @ [(id, ty, inner)], accA @ [IRVar (id, ty)])
@@ -5959,7 +5972,7 @@ let rec liftExpr (builder: IRBuilder) (expr: IRExpr) : IRExpr =
         let (binds, arraysFinal) =
             arrays' |> List.fold (fun (accB, accA) a ->
                 let (peeled, inner) = peelLetChain a
-                if isArrayFieldAccess inner || isNestedLoopComputeArg inner then
+                if isArrayFieldAccess inner || isNestedLoopComputeArg inner || isInlineArrayLitArg inner then
                     let id = builder.FreshId()
                     let ty = typeOf inner
                     (accB @ peeled @ [(id, ty, inner)], accA @ [IRVar (id, ty)])
@@ -5975,7 +5988,7 @@ let rec liftExpr (builder: IRBuilder) (expr: IRExpr) : IRExpr =
         let (binds, arraysFinal) =
             arrays' |> List.fold (fun (accB, accA) a ->
                 let (peeled, inner) = peelLetChain a
-                if isArrayFieldAccess inner || isNestedLoopComputeArg inner then
+                if isArrayFieldAccess inner || isNestedLoopComputeArg inner || isInlineArrayLitArg inner then
                     let id = builder.FreshId()
                     let ty = typeOf inner
                     (accB @ peeled @ [(id, ty, inner)], accA @ [IRVar (id, ty)])

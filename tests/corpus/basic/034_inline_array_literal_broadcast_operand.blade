@@ -1,0 +1,14 @@
+// TEST: Inline array literal as a loop-form array operand
+// Regression (same symptom class as 033, different cause): a loop form's
+// `Arrays` list is a blessed position for inline forms because codegen
+// auto-materializes them — but that arm only knows mask/intersect/union/
+// unique. A bare array literal fell through to the `arr<i>` placeholder name
+// and the nest peeled `double arr1____i0 = arr1[__i0];` from an identifier
+// that was never declared. The lift pass now hoists it to its own let-RHS.
+// Let-binding the literal by hand always worked; only the inline form failed.
+let yr = [10.0, -4.0]
+let dr = yr - [2.0, -14.0]
+function shift(v: Array<Float like Idx<2>>) -> Array<Float like Idx<2>> = v - [2.0, -14.0]
+let dr2 = shift([10.0, -4.0])
+// EXPECT: dr = [8, 10]
+// EXPECT: dr2 = [8, 10]
