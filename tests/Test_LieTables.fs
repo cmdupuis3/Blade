@@ -321,8 +321,9 @@ let private judgeSource (src: string) (fname: string) : Judged =
                 | None -> failwithf "Test_LieTables: no function '%s' in the source" fname
                 | Some fd ->
                     let grp = (Map.find fname certs).Group
+                    let globals = Blade.ML.Equiv.buildGlobalShapes grp statics decls
                     { Composition =
-                        Blade.ML.Equiv.judgeFunction grp certs statics mlAliases fd
+                        Blade.ML.Equiv.judgeFunction grp certs statics globals mlAliases fd
                         |> List.map (fun d -> d.Message)
                       Engine = Blade.ML.Equiv.engineVerdict certs statics fd }
 

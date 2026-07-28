@@ -1,0 +1,13 @@
+// TEST: ML Equiv Outer Product On Rep Rejected (rejects)
+import ml as ml
+// ============================================================================
+// The same shape blind spot in the other direction: `[*]` and `[+]` cross-
+// iterate, so their result has a HIGHER RANK than either operand and cannot
+// be the representation the operand transforms as. Judging the mode-agnostic
+// operator alone would answer `Rep S` for a rank-2 result. The declared
+// return type would also be a type error, but the certificate must fail on
+// its own terms rather than lean on the type checker. BL4008.
+// ============================================================================
+let static S = [(0, 0, 1), (1, 1, 1)]
+function bad(x: Array<Float like IrrepsIdx<S>>, w: Array<Float like Idx<4>>) where ml.equiv(O3) -> Array<Float like IrrepsIdx<S>> =
+  x [*] w

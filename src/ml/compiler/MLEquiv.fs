@@ -15,7 +15,11 @@
 ///
 /// Abstract value domain:
 ///   Rep spec — transforms as the block-diagonal rep described by spec;
-///   Inv      — invariant (scalars, plain arrays, weights, norms);
+///   Inv shape — invariant (scalars, plain arrays, weights, norms). The
+///              shape refinement is load-bearing in exactly one place: an
+///              invariant may SCALE a rep only when it is provably a
+///              scalar, since an elementwise product with an array is a
+///              diagonal matrix and does not commute with the action;
 ///   Opaque   — unclassifiable; rejected wherever it meets a rep-relevant
 ///              position (op argument, return value).
 ///
@@ -79,10 +83,63 @@ type RepSpec =
     | O3Spec of Spec
     | PgSpec of string * (string * int) list
 
+/// Shape refinement carried by `Inv`. The rep lattice alone cannot decide the
+/// scaling rule: `rep * c` is equivariant when `c` is a SCALAR, because a
+/// scalar commutes with every block of the action; `rep * w` for an invariant
+/// ARRAY of the same extent scales each component independently, and a
+/// diagonal matrix with unequal entries does not commute with D^l. So an
+/// invariant records whether it is provably 0-dimensional. This is the same
+/// distinction MLPolyExtract gets structurally from VScalar-vs-VVec (its
+/// "scaling an array is admitted only by an INVARIANT scalar" arm); the
+/// abstract-interpretation walker has to carry it explicitly.
+type InvShape =
+    /// Provably a scalar (scalar annotation, literal, full-rank element read).
+    | InvScalar
+    /// Provably an aggregate; `Some r` when the rank is known from a type
+    /// annotation, `None` for aggregates whose rank was not established.
+    | InvAgg of rank: int option
+    /// Shape not established — treated as non-scalar wherever scalarity is
+    /// load-bearing.
+    | InvShapeUnknown
+
 type RepStatus =
     | Rep of RepSpec
-    | Inv
+    | Inv of InvShape
     | Opaque
+
+/// Any invariant, whatever its shape.
+let private isInv (st: RepStatus) = match st with Inv _ -> true | _ -> false
+
+/// Shape of an elementwise binary combination (broadcast: scalar op aggregate
+/// is the aggregate). Never claims scalar unless both operands are scalar.
+let private binShape (a: InvShape) (b: InvShape) : InvShape =
+    match a, b with
+    | InvScalar, InvScalar -> InvScalar
+    | InvAgg r, InvScalar | InvScalar, InvAgg r -> InvAgg r
+    | InvAgg r1, InvAgg r2 -> InvAgg (if r1 = r2 then r1 else None)
+    | _ -> InvShapeUnknown
+
+/// Meet of two shapes reached on different control-flow paths.
+let private meetShape (a: InvShape) (b: InvShape) : InvShape =
+    if a = b then a
+    else
+        match a, b with
+        | InvAgg _, InvAgg _ -> InvAgg None
+        | _ -> InvShapeUnknown
+
+/// Merge two statuses reached on different control-flow paths.
+let private joinStatus (a: RepStatus) (b: RepStatus) : RepStatus option =
+    match a, b with
+    | Rep s1, Rep s2 when s1 = s2 -> Some (Rep s1)
+    | Inv x, Inv y -> Some (Inv (meetShape x y))
+    | Opaque, Opaque -> Some Opaque
+    | _ -> None
+
+/// Statuses agree for certification purposes. Invariant SHAPE is deliberately
+/// not part of the comparison — it exists only to decide the scaling rule;
+/// disagreeing shapes are the type checker's to report.
+let private statusAgrees (a: RepStatus) (b: RepStatus) : bool =
+    joinStatus a b |> Option.isSome
 
 type CertSig = {
     Group: Group
@@ -125,8 +182,27 @@ let private repStr (r: RepSpec) : string =
 let private statusStr (st: RepStatus) : string =
     match st with
     | Rep s -> sprintf "representation-typed (transforms as %s)" (repStr s)
-    | Inv -> "invariant"
+    | Inv InvScalar -> "an invariant scalar"
+    | Inv (InvAgg _) -> "an invariant array"
+    | Inv InvShapeUnknown -> "invariant"
     | Opaque -> "unclassifiable"
+
+/// How an invariant operand reads in the scaling diagnostic.
+let private shapeStr (sh: InvShape) : string =
+    match sh with
+    | InvScalar -> "a scalar"
+    | InvAgg _ -> "an array"
+    | InvShapeUnknown -> "of unknown shape"
+
+/// Names TypeCheck treats as builtin scalars (mirror of its isBuiltinScalar,
+/// minus the aggregate constructors). Used only to establish that an
+/// annotation is 0-dimensional.
+let private isBuiltinScalarName (n: string) =
+    List.contains n
+        [ "Int"; "Int32"; "Int64"
+          "Float"; "Float32"; "Float64"; "Double"
+          "Complex64"; "Complex128"
+          "Bool"; "Nat"; "Char" ]
 
 let private groupStr (g: Group) = match g with O3 -> "O3" | SO3 -> "SO3" | Point n -> n
 
@@ -263,12 +339,12 @@ let rec private statusOfType (g: Group) (aliases: Map<string, TypeExpr>) (static
                 evalExpr statics fuel specExpr
                 |> Result.bind (Blade.ML.Statics.pgSpecOfStatic "equiv signature spec" (Blade.ML.PointSpec.pointGroup pg))
                 |> Result.map (fun s -> Rep (PgSpec (pg, s)))
-            | [], [], _ -> Ok Inv
+            | [], [], n -> Ok (Inv (InvAgg (Some n)))
             | _ ->
                 Error "multi-index arrays mixing PgIrrepsIdx are not supported in equiv-certified signatures"
         | O3 | SO3 ->
         match irreps, idxs.Length with
-        | [], _ -> Ok Inv
+        | [], n -> Ok (Inv (InvAgg (Some n)))
         | [ specExpr ], 1 ->
             evalExpr statics fuel specExpr
             |> Result.bind (Blade.ML.Statics.specOfStatic "equiv signature spec")
@@ -278,8 +354,12 @@ let rec private statusOfType (g: Group) (aliases: Map<string, TypeExpr>) (static
     | TyNamed (n, []) ->
         match Map.tryFind n aliases with
         | Some body -> statusOfType g aliases statics (TyArray (TyNamed ("Float", []), [ body ]))
-        | None -> Ok Inv // scalar primitives and non-rep named types are invariant
-    | TyNamed (_, _) -> Ok Inv
+        // A builtin scalar name is provably 0-dimensional; any other named
+        // type is invariant but of unestablished shape (it may well be an
+        // aggregate), so it may not scale a rep.
+        | None when isBuiltinScalarName n -> Ok (Inv InvScalar)
+        | None -> Ok (Inv InvShapeUnknown)
+    | TyNamed (_, _) -> Ok (Inv InvShapeUnknown)
     | TyIrrepsIdx specExpr ->
         // alias body position (`type X = IrrepsIdx<s>` chased above)
         match g with
@@ -297,7 +377,7 @@ let rec private statusOfType (g: Group) (aliases: Map<string, TypeExpr>) (static
             evalExpr statics fuel specExpr
             |> Result.bind (Blade.ML.Statics.pgSpecOfStatic "equiv signature spec" (Blade.ML.PointSpec.pointGroup pg))
             |> Result.map (fun s -> Rep (PgSpec (pg, s)))
-    | TyInt32 | TyInt64 | TyFloat32 | TyFloat64 | TyBool | TyComplex128 -> Ok Inv
+    | TyInt32 | TyInt64 | TyFloat32 | TyFloat64 | TyBool | TyComplex128 -> Ok (Inv InvScalar)
     | _ -> Error "cannot classify this annotation in an equiv-certified signature (supported: scalars, plain arrays, Array<_ like IrrepsIdx<spec>>)"
 
 /// Classify ONE function's signature under a group. This is the shared core
@@ -366,12 +446,51 @@ let buildCertTable (statics: StaticEnv) (decls: Located<Decl> list)
 // The judgment
 // ============================================================================
 
+/// Shape of a module-level binding read syntactically from its value. Only
+/// forms whose shape is manifest answer anything but `InvShapeUnknown`.
+let rec private syntacticShape (e: Expr) : InvShape =
+    match e.Kind with
+    | ExprKind.ExprLit _ -> InvScalar
+    | ExprKind.ExprArrayLit _ | ExprKind.ExprTuple _ | ExprKind.ExprDotDot _ -> InvAgg None
+    | ExprKind.ExprUnaryOp (_, i) | ExprKind.ExprTyped (i, _) -> syntacticShape i
+    | ExprKind.ExprBinOp (Elementwise, _, l, r) -> binShape (syntacticShape l) (syntacticShape r)
+    | _ -> InvShapeUnknown
+
+/// Shapes of module-level `let`/`static` bindings. Globals stay invariant by
+/// the conditional-theorem reading (they are held fixed), but their SHAPE
+/// decides whether they may scale a rep, so a global array is no longer waved
+/// through as if it were a scalar.
+let buildGlobalShapes (g: Group) (statics: StaticEnv) (decls: Located<Decl> list) : Map<string, InvShape> =
+    let aliases = aliasMapOf decls
+    let shapeOf (b: Binding) =
+        match b.Type with
+        | Some t ->
+            match statusOfType g aliases statics t with
+            | Ok (Inv sh) -> sh
+            | Ok (Rep _) -> InvAgg (Some 1) // a rep-annotated global is an array
+            | _ -> InvShapeUnknown
+        | None -> syntacticShape b.Value
+    decls
+    |> List.fold (fun m d ->
+        match d.Value with
+        | DeclLet b | DeclStatic b ->
+            let sh = shapeOf b
+            Blade.ML.CertShell.patternVars b.Pattern
+            |> List.fold (fun m2 n ->
+                // A destructured component's shape is not the aggregate's.
+                match b.Pattern.Kind with
+                | PatternKind.PatVar _ -> Map.add n sh m2
+                | _ -> Map.add n InvShapeUnknown m2) m
+        | _ -> m) Map.empty
+
 type private Ctx = {
     Group: Group
     FuncName: string
     Aliases: Set<string>
     Statics: StaticEnv
     Certs: Map<string, CertSig>
+    /// Shapes of module-level bindings (see buildGlobalShapes).
+    Globals: Map<string, InvShape>
 }
 
 /// Every `ml.*` operation whose arms below are stated in O(3) irreps specs —
@@ -386,6 +505,15 @@ let private o3OpNames =
       "sym_lift"; "linear_rows"; "gated_rows"
       "tensor_to_irreps"; "sym_to_irreps"; "irreps_to_sym" ]
 
+/// Shape of a folded static value. The `__ml_stat_*` sizing builtins are in
+/// the scalar-builtin list but do NOT all return scalars — sh_spec and tp_spec
+/// fold to spec TUPLES — so their shape is read from the fold, not assumed.
+let private shapeOfStatic (sv: StaticValue) : InvShape =
+    match sv with
+    | SVInt _ | SVFloat _ | SVBool _ -> InvScalar
+    | SVTuple _ -> InvAgg None
+    | _ -> InvShapeUnknown
+
 /// The scalar builtins a certified body may apply to invariants.
 let private isKnownScalarBuiltin (n: string) =
     n.StartsWith "__ml_stat_"
@@ -396,7 +524,7 @@ let rec private judge (ctx: Ctx) (env: Map<string, RepStatus>) (e: Expr)
     let reject msg = Error (bl4008 e.Span (sprintf "function '%s': %s" ctx.FuncName msg))
     let j = judge ctx env
     match e.Kind with
-    | ExprKind.ExprLit _ -> Ok Inv
+    | ExprKind.ExprLit _ -> Ok (Inv InvScalar)
     | ExprKind.ExprArrayLit es | ExprKind.ExprTuple es ->
         // constants and invariant aggregates are invariant; anything rep-
         // valued inside an aggregate loses its rep structure -> reject.
@@ -405,15 +533,23 @@ let rec private judge (ctx: Ctx) (env: Map<string, RepStatus>) (e: Expr)
             acc |> Result.bind (fun st ->
                 j x |> Result.bind (fun sx ->
                     match sx with
-                    | Inv -> Ok st
+                    | Inv _ -> Ok st
                     | Rep _ -> reject "a representation-typed value may not be packed into a literal aggregate — the aggregate does not transform as a rep"
                     | Opaque -> Ok Opaque)))
-            (Ok Inv)
+            (Ok (Inv (InvAgg None)))
     | ExprKind.ExprVar n ->
         match Map.tryFind n env with
         | Some st -> Ok st
-        | None -> Ok Inv // globals/constants/builtins: invariant by the conditional-theorem reading
-    | ExprKind.ExprDotDot _ -> Ok Inv
+        // globals/constants/builtins: invariant by the conditional-theorem
+        // reading; shape from the module-level table when it is known there.
+        | None ->
+            match Map.tryFind n ctx.Statics.Values with
+            | Some sv -> Ok (Inv (shapeOfStatic sv))
+            | None ->
+                match Map.tryFind n ctx.Globals with
+                | Some sh -> Ok (Inv sh)
+                | None -> Ok (Inv InvShapeUnknown)
+    | ExprKind.ExprDotDot _ -> Ok (Inv (InvAgg None))
     | ExprKind.ExprTyped (inner, _) -> j inner
     | ExprKind.ExprUnaryOp (_, inner) -> j inner
     // Former application must dispatch BEFORE the general binop arithmetic arm
@@ -422,10 +558,18 @@ let rec private judge (ctx: Ctx) (env: Map<string, RepStatus>) (e: Expr)
     // the catalog recorded: see judgeFormerApply for the false accept it also
     // left open.
     | ExprKind.ExprBinOp (_, OpApply, loop, _) -> judgeFormerApply ctx env e loop
-    | ExprKind.ExprBinOp (_, op, l, r) ->
+    | ExprKind.ExprBinOp (mode, op, l, r) ->
         j l |> Result.bind (fun sl ->
         j r |> Result.bind (fun sr ->
+            // Outer mode ([+], [*]) cross-iterates, so the result has a
+            // higher rank than either operand and cannot be the rep it was
+            // built from, whatever the operator.
+            let outerRep () =
+                reject "the outer-product form of this operator raises the rank of its result, so the result is not the representation its operand transforms as — use the elementwise form"
+            let nonScalarScale sh =
+                reject (sprintf "only an invariant SCALAR may scale a representation-typed value, and this invariant is %s — an elementwise product with an array scales each component of an irrep block independently, which does not commute with the group action (scale whole blocks with the learned block-diagonal map — ml.linear under O3/SO3, ml.derive_pg_linear under a point group — or gate them with ml.gated)" (shapeStr sh))
             match sl, sr, op with
+            | (Rep _, _, _ | _, Rep _, _) when mode <> Elementwise -> outerRep ()
             | Rep s1, Rep s2, (OpAdd | OpSub) ->
                 if s1 = s2 then Ok (Rep s1)
                 else reject (sprintf "cannot add values of different representations — left transforms as %s, right as %s" (repStr s1) (repStr s2))
@@ -433,38 +577,49 @@ let rec private judge (ctx: Ctx) (env: Map<string, RepStatus>) (e: Expr)
                 reject "elementwise product of representation-typed values is not equivariant — use ml.tensor_product, the Clebsch-Gordan-typed contraction"
             | Rep _, Rep _, _ ->
                 reject "this operator is not equivariant on representation-typed values"
-            | Rep s, Inv, OpMul | Inv, Rep s, OpMul -> Ok (Rep s)
-            | Rep s, Inv, OpDiv -> Ok (Rep s)
-            | (Rep _, Inv, _) | (Inv, Rep _, _) ->
-                reject "mixing a representation-typed value with an invariant under this operator breaks equivariance (only scaling — * and / by an invariant — preserves the rep)"
-            | Inv, Inv, _ -> Ok Inv
+            // Scaling by an invariant SCALAR is the only admissible mixed
+            // form: a scalar commutes with every block of the action. An
+            // invariant ARRAY of the same extent scales each component
+            // independently, which does not — that is a false certificate,
+            // not a scaling. Shape must be PROVEN, so an unestablished shape
+            // is rejected too.
+            | Rep s, Inv InvScalar, (OpMul | OpDiv) | Inv InvScalar, Rep s, OpMul -> Ok (Rep s)
+            | Rep _, Inv sh, (OpMul | OpDiv) when sh <> InvScalar -> nonScalarScale sh
+            | Inv sh, Rep _, OpMul when sh <> InvScalar -> nonScalarScale sh
+            | (Rep _, Inv _, _) | (Inv _, Rep _, _) ->
+                reject "mixing a representation-typed value with an invariant under this operator breaks equivariance (only scaling — * and / by an invariant scalar — preserves the rep)"
+            | Inv shl, Inv shr, _ ->
+                Ok (Inv (if mode = Elementwise then binShape shl shr else InvShapeUnknown))
             | Opaque, _, _ | _, Opaque, _ -> Ok Opaque))
     | ExprKind.ExprIf (c, t, f) ->
         j c |> Result.bind (fun sc ->
             match sc with
-            | Inv ->
+            | Inv _ ->
                 j t |> Result.bind (fun st ->
                 j f |> Result.bind (fun sf ->
-                    if st = sf then Ok st
-                    else reject (sprintf "if branches disagree: then-branch is %s, else-branch is %s" (statusStr st) (statusStr sf))))
+                    match joinStatus st sf with
+                    | Some s -> Ok s
+                    | None -> reject (sprintf "if branches disagree: then-branch is %s, else-branch is %s" (statusStr st) (statusStr sf))))
             | _ -> reject "an if condition inside an equiv-certified body must be invariant")
     | ExprKind.ExprMatch (scrut, cases) ->
         j scrut |> Result.bind (fun ss ->
             match ss with
-            | Inv ->
+            | Inv _ ->
                 cases
-                |> judgeEach (fun c -> judge ctx (bindPatternVars Inv env c.Pattern) c.Body)
+                |> judgeEach (fun c -> judge ctx (bindPatternVars (Inv InvShapeUnknown) env c.Pattern) c.Body)
                 |> Result.bind (fun sts ->
                     match sts with
-                    | [] -> Ok Inv
-                    | s :: rest when rest |> List.forall ((=) s) -> Ok s
-                    | _ -> reject "match arms disagree on their representation status")
+                    | [] -> Ok (Inv InvShapeUnknown)
+                    | s :: rest ->
+                        match rest |> List.fold (fun acc s2 -> acc |> Option.bind (fun a -> joinStatus a s2)) (Some s) with
+                        | Some joined -> Ok joined
+                        | None -> reject "match arms disagree on their representation status")
             | _ -> reject "a match scrutinee inside an equiv-certified body must be invariant")
     | ExprKind.ExprLet (binding, body) ->
         j binding.Value |> Result.bind (fun sv ->
             match binding.Pattern.Kind, sv with
             | PatternKind.PatVar n, _ -> judge ctx (Map.add n sv env) body
-            | _, Inv -> judge ctx (bindPatternVars Inv env binding.Pattern) body
+            | _, Inv _ -> judge ctx (bindPatternVars (Inv InvShapeUnknown) env binding.Pattern) body
             | _, _ -> reject "cannot destructure a representation-typed value — its components are basis-dependent")
     | ExprKind.ExprLambda (ps, _, lamBody) ->
         // v1: a lambda is admissible only when it never touches a rep —
@@ -475,22 +630,22 @@ let rec private judge (ctx: Ctx) (env: Map<string, RepStatus>) (e: Expr)
                 match Map.tryFind n env with Some (Rep _) -> true | _ -> false)
         match repCapture with
         | Some n -> reject (sprintf "lambda captures representation-typed '%s' — factor rep work into equiv-certified functions instead" n)
-        | None -> Ok Inv
+        | None -> Ok (Inv InvShapeUnknown)
     | ExprKind.ExprAssign (l, r) ->
-        judgeAssign ctx env e.Span l r |> Result.map (fun () -> Inv)
+        judgeAssign ctx env e.Span l r |> Result.map (fun () -> Inv InvShapeUnknown)
     | ExprKind.ExprBlock (stmts, finalE) ->
         judgeStmts ctx env stmts
         |> Result.bind (fun env' ->
             match finalE with
             | Some fe -> judge ctx env' fe
-            | None -> Ok Inv)
+            | None -> Ok (Inv InvShapeUnknown))
     | ExprKind.ExprApp (f, args) -> judgeApp ctx env e f args
     | ExprKind.ExprField (_, _) -> Ok Opaque
     // --- functional iteration (the post-imperative surface) ------------------
     // The arms MLGalilean and MLPerm have carried since they were written, and
     // this copy did not (stage 5c catalog, finding 4). Virtual arrays
     // enumerate INDICES, and an index carries no rep structure: invariant.
-    | ExprKind.ExprRange _ | ExprKind.ExprReverse _ | ExprKind.ExprHalo _ -> Ok Inv
+    | ExprKind.ExprRange _ | ExprKind.ExprReverse _ | ExprKind.ExprHalo _ -> Ok (Inv (InvAgg None))
     // compute is a scheduling boundary, not a value transform.
     | ExprKind.ExprCompute x -> judge ctx env x
     // A fold over a rep sums BASIS-DEPENDENT COMPONENTS: the sum of the
@@ -504,9 +659,10 @@ let rec private judge (ctx: Ctx) (env: Map<string, RepStatus>) (e: Expr)
         judge ctx env src |> Result.bind (fun ss ->
             (match init with
              | Some i -> judge ctx env i
-             | None -> Ok Inv) |> Result.bind (fun si ->
+             | None -> Ok (Inv InvScalar)) |> Result.bind (fun si ->
                 match ss, si with
-                | Inv, Inv -> Ok Inv
+                // a reduce collapses its source to one value
+                | Inv _, Inv _ -> Ok (Inv InvScalar)
                 | Rep _, _ | _, Rep _ ->
                     Error (bl4008 e.Span (sprintf "function '%s': reduce over a representation-typed value folds basis-dependent components into a number that is not rotation-invariant — extract invariants with ml.scalars/ml.norms, or contract with ml.tensor_product" ctx.FuncName))
                 | _ -> Ok Opaque))
@@ -561,7 +717,8 @@ and private judgeFormerApply (ctx: Ctx) (env: Map<string, RepStatus>) (e: Expr) 
                            (sprintf "function '%s': the kernel of this former captures representation-typed '%s' — factor rep work into equiv-certified functions instead"
                                 ctx.FuncName n))
             | None ->
-                if srcSts |> List.exists ((=) Opaque) then Ok Opaque else Ok Inv)
+                // a former builds an aggregate, whatever its sources were
+                if srcSts |> List.exists ((=) Opaque) then Ok Opaque else Ok (Inv (InvAgg None)))
 
 and private judgeStmts (ctx: Ctx) (env: Map<string, RepStatus>) (stmts: Stmt list)
     : Result<Map<string, RepStatus>, Blade.Diagnostics.Diagnostic> =
@@ -573,7 +730,7 @@ and private judgeStmts (ctx: Ctx) (env: Map<string, RepStatus>) (stmts: Stmt lis
                 judge ctx env binding.Value |> Result.bind (fun sv ->
                     match binding.Pattern.Kind, sv with
                     | PatternKind.PatVar n, _ -> Ok (Map.add n sv env)
-                    | _, Inv -> Ok (bindPatternVars Inv env binding.Pattern)
+                    | _, Inv _ -> Ok (bindPatternVars (Inv InvShapeUnknown) env binding.Pattern)
                     | _, _ ->
                         Error (bl4008 binding.Value.Span (sprintf "function '%s': cannot destructure a representation-typed value — its components are basis-dependent" ctx.FuncName)))
             | StmtExpr e2 -> judge ctx env e2 |> Result.map (fun _ -> env)
@@ -584,7 +741,7 @@ and private judgeStmts (ctx: Ctx) (env: Map<string, RepStatus>) (stmts: Stmt lis
                     | Rep _ ->
                         Error (bl4008 range.Span (sprintf "function '%s': cannot iterate over a representation-typed value's components — they are basis-dependent" ctx.FuncName))
                     | _ ->
-                        judgeStmts ctx (Map.add v Inv env) body |> Result.map (fun _ -> env))
+                        judgeStmts ctx (Map.add v (Inv InvShapeUnknown) env) body |> Result.map (fun _ -> env))
             | _ -> Ok env))
         (Ok env)
 
@@ -617,7 +774,7 @@ and private judgeAssign (ctx: Ctx) (env: Map<string, RepStatus>) (span: Span) (l
                 acc |> Result.bind (fun () ->
                     judge ctx env a |> Result.bind (fun si ->
                         match si with
-                        | Inv -> Ok ()
+                        | Inv _ -> Ok ()
                         | Rep _ ->
                             Error (bl4008 a.Span
                                        (sprintf "function '%s': an array index must be invariant inside an equiv-certified body, but this one is %s — the cell it selects moves with the frame"
@@ -649,14 +806,14 @@ and private judgeApp (ctx: Ctx) (env: Map<string, RepStatus>) (e: Expr) (f: Expr
             | Rep sp when sp = expected -> Ok ()
             | Rep sp ->
                 Error (bl4008 argE.Span (sprintf "function '%s': %s expects a value transforming as %s, got %s" ctx.FuncName what (repStr expected) (repStr sp)))
-            | Inv ->
+            | Inv _ ->
                 Error (bl4008 argE.Span (sprintf "function '%s': %s expects a representation-typed value (transforming as %s) — an invariant here would not co-rotate with the inputs" ctx.FuncName what (repStr expected)))
             | Opaque ->
                 Error (bl4008 argE.Span (sprintf "function '%s': cannot classify the argument to %s" ctx.FuncName what)))
     let requireInv (what: string) (argE: Expr) =
         judge ctx env argE |> Result.bind (fun s ->
             match s with
-            | Inv -> Ok ()
+            | Inv _ -> Ok ()
             | Rep _ ->
                 Error (bl4008 argE.Span (sprintf "function '%s': %s must be invariant, but the argument is representation-typed — extract invariants with ml.scalars/ml.norms or contract with ml.tensor_product" ctx.FuncName what))
             | Opaque ->
@@ -743,10 +900,10 @@ and private judgeApp (ctx: Ctx) (env: Map<string, RepStatus>) (e: Expr) (f: Expr
                 if ctx.Group = O3 && spec |> List.exists (fun en -> en.L = 0 && en.Parity = 1) then
                     reject "scalars under equiv(O3): the spec has (l=0, odd) blocks — pseudoscalars flip under improper rotations and are not O(3) invariants (SO3 admits them)"
                 else
-                    requireRep "scalars input" (O3Spec spec) xE |> Result.map (fun () -> Inv))
+                    requireRep "scalars input" (O3Spec spec) xE |> Result.map (fun () -> Inv (InvAgg (Some 1))))
         | "norms", [ specE; xE ] ->
             specArg "norms spec" specE |> Result.bind (fun spec ->
-                requireRep "norms input" (O3Spec spec) xE |> Result.map (fun () -> Inv))
+                requireRep "norms input" (O3Spec spec) xE |> Result.map (fun () -> Inv (InvAgg (Some 1))))
         | "derive_linear", [ sInE; sOutE; wE; xE ] ->
             specArg "derive_linear specIn" sInE |> Result.bind (fun si ->
             specArg "derive_linear specOut" sOutE |> Result.bind (fun so ->
@@ -806,7 +963,7 @@ and private judgeApp (ctx: Ctx) (env: Map<string, RepStatus>) (e: Expr) (f: Expr
         | "sym_lift", [ _; _; xE ] ->
             judge ctx env xE |> Result.bind (fun sx ->
                 match sx with
-                | Inv -> Ok Inv
+                | Inv _ -> Ok (Inv (InvAgg (Some 1)))
                 | Rep sp ->
                     Error (bl4008 xE.Span (sprintf "function '%s': ml.sym_lift's monomial coordinates are not representation-classified in the current checker — the C(n+K-1, K) products of %s components co-rotate POLYNOMIALLY (as ml.sym_spec of that spec), not through a block-diagonal irreps action, so no {Rep spec, Inv, Opaque} status describes the result. Keep ml.sym_lift in uncertified assembly code for now; inside a certified body contract with ml.derive_sym_tp / ml.derive_tp / ml.tensor_product instead" ctx.FuncName (repStr sp)))
                 | Opaque ->
@@ -835,7 +992,7 @@ and private judgeApp (ctx: Ctx) (env: Map<string, RepStatus>) (e: Expr) (f: Expr
             // other alias members (sizing etc. — normalized already, so an
             // unnormalized leftover is unknown): invariant if args are.
             judgeAll args |> Result.bind (fun sts ->
-                if sts |> List.forall ((=) Inv) then Ok Inv
+                if sts |> List.forall isInv then Ok (Inv InvShapeUnknown)
                 else reject (sprintf "ml.%s is not an equivariance-preserving operation on representation-typed values" op))
     // --- named callees ----------------------------------------------------
     | ExprKind.ExprVar fn ->
@@ -851,7 +1008,7 @@ and private judgeApp (ctx: Ctx) (env: Map<string, RepStatus>) (e: Expr) (f: Expr
                     acc |> Result.bind (fun () ->
                         match pSt with
                         | Rep sp -> requireRep (sprintf "'%s' parameter '%s'" fn pName) sp argE
-                        | Inv -> requireInv (sprintf "'%s' parameter '%s'" fn pName) argE
+                        | Inv _ -> requireInv (sprintf "'%s' parameter '%s'" fn pName) argE
                         | Opaque -> reject (sprintf "call to '%s': parameter '%s' is unclassifiable" fn pName)))
                     (Ok ())
                 |> Result.map (fun () -> cert.Return)
@@ -863,7 +1020,8 @@ and private judgeApp (ctx: Ctx) (env: Map<string, RepStatus>) (e: Expr) (f: Expr
                 (match args with
                  | [ iE ] ->
                      (match evalExpr ctx.Statics fuel iE with
-                      | Ok (SVInt i) when Set.contains (int i) (invariantOffsets ctx.Group spec) -> Ok Inv
+                      // one element of a rank-1 rep buffer: an invariant scalar
+                      | Ok (SVInt i) when Set.contains (int i) (invariantOffsets ctx.Group spec) -> Ok (Inv InvScalar)
                       | Ok (SVInt _) ->
                           (match ctx.Group with
                            | Point gn ->
@@ -887,8 +1045,26 @@ and private judgeApp (ctx: Ctx) (env: Map<string, RepStatus>) (e: Expr) (f: Expr
                 // a function of invariants is invariant — every argument
                 // must be Inv, and reps must not escape.
                 judgeAll args |> Result.bind (fun sts ->
-                    match sts |> List.tryFindIndex (fun s -> s <> Inv) with
-                    | None -> Ok Inv
+                    match sts |> List.tryFindIndex (isInv >> not) with
+                    | None ->
+                        // Shape of the result. A full-rank read out of an
+                        // invariant array of KNOWN rank is a scalar; a scalar
+                        // builtin preserves its arguments' shape; anything
+                        // else (helper call, partial index, unknown rank) has
+                        // no established shape.
+                        let argShapes = sts |> List.map (function Inv sh -> sh | _ -> InvShapeUnknown)
+                        let sh =
+                            match Map.tryFind fn env with
+                            | Some (Inv (InvAgg (Some r))) when r = args.Length -> InvScalar
+                            | Some (Inv _) -> InvShapeUnknown
+                            | _ when fn.StartsWith "__ml_stat_" ->
+                                (match evalExpr ctx.Statics fuel e with
+                                 | Ok sv -> shapeOfStatic sv
+                                 | Error _ -> InvShapeUnknown)
+                            | _ when isKnownScalarBuiltin fn && not argShapes.IsEmpty ->
+                                argShapes |> List.reduce binShape
+                            | _ -> InvShapeUnknown
+                        Ok (Inv sh)
                     | Some i ->
                         let argE = args.[i]
                         if isKnownScalarBuiltin fn then
@@ -899,7 +1075,7 @@ and private judgeApp (ctx: Ctx) (env: Map<string, RepStatus>) (e: Expr) (f: Expr
         // computed callee over reps: not admissible in v1
         judgeAll args |> Result.bind (fun sts ->
             judge ctx env f |> Result.bind (fun sf ->
-                if sf = Inv && sts |> List.forall ((=) Inv) then Ok Inv
+                if isInv sf && sts |> List.forall isInv then Ok (Inv InvShapeUnknown)
                 else reject "cannot classify this call inside an equiv-certified body"))
 
 // ============================================================================
@@ -979,12 +1155,12 @@ module private Engine =
                 acc |> Option.bind (fun out ->
                     match st with
                     | Rep r -> repDim r |> Option.map (fun d -> out @ [ (n, PX.PRep d) ])
-                    | Inv -> Some (out @ [ (n, invKind (defaultArg (Map.tryFind n byName) None)) ])
+                    | Inv _ -> Some (out @ [ (n, invKind (defaultArg (Map.tryFind n byName) None)) ])
                     | Opaque -> None)) (Some [])
         ps |> Option.bind (fun ps ->
             match cert.Return with
             | Rep r -> repDim r |> Option.map (fun d -> PX.mkSig ps (Some d))
-            | Inv -> Some (PX.mkSig ps None)
+            | Inv _ -> Some (PX.mkSig ps None)
             | Opaque -> None)
 
     /// The word set as `ElementAction`s: ALL |G| ≤ 8 elements (word closure
@@ -1000,7 +1176,7 @@ module private Engine =
         else
             // A scalar (Inv) return is an INVARIANCE claim: the output action
             // is the 1×1 identity, i.e. the trivial rep.
-            let outSpec = match cert.Return with Rep r -> pgOf r | Inv -> Some [] | Opaque -> None
+            let outSpec = match cert.Return with Rep r -> pgOf r | Inv _ -> Some [] | Opaque -> None
             match outSpec with
             | None -> None
             | Some outS ->
@@ -1012,7 +1188,7 @@ module private Engine =
                         |> Map.ofList
                     let outMat =
                         match cert.Return with
-                        | Inv -> [| [| 1 |] |]
+                        | Inv _ -> [| [| 1 |] |]
                         | _ -> PS.pgElementMatrix grp outS el
                     PX.mkAction (PS.wordName grp el.Word) inMats outMat)
                 |> Some
@@ -1038,7 +1214,7 @@ module private Engine =
             let outSpec =
                 match cert.Return with
                 | Rep r -> specOf r |> Option.map Some
-                | Inv -> Some None
+                | Inv _ -> Some None
                 | Opaque -> None
             match outSpec with
             | None -> None
@@ -1126,18 +1302,18 @@ module private Engine =
 /// `Engine` module's header for the exact flow and for why the engine's
 /// verdict may replace composition's.
 let judgeFunction (group: Group) (certs: Map<string, CertSig>) (statics: StaticEnv)
-                  (aliases: Set<string>) (fd: FunctionDecl)
+                  (globals: Map<string, InvShape>) (aliases: Set<string>) (fd: FunctionDecl)
     : Blade.Diagnostics.Diagnostic list =
     match Map.tryFind fd.Name certs with
     | None -> []
     | Some cert ->
-        let ctx = { Group = group; FuncName = fd.Name; Aliases = aliases; Statics = statics; Certs = certs }
+        let ctx = { Group = group; FuncName = fd.Name; Aliases = aliases; Statics = statics; Certs = certs; Globals = globals }
         let env = cert.Params |> List.fold (fun m (n, st) -> Map.add n st m) Map.empty
         let composition =
             match judge ctx env fd.Body with
             | Error d -> [ d ]
             | Ok st ->
-                if st = cert.Return then []
+                if statusAgrees st cert.Return then []
                 else
                     [ bl4008 fd.Body.Span
                           (sprintf "function '%s': the body is %s but the declared return type is %s — the certificate requires them to agree" fd.Name (statusStr st) (statusStr cert.Return)) ]
@@ -1338,7 +1514,7 @@ let private sigSummary (cs: CertSig) : string =
     let one (n, st) =
         match st with
         | Rep r -> sprintf "%s transforms as %s" n (repStr r)
-        | Inv -> sprintf "%s invariant" n
+        | Inv _ -> sprintf "%s invariant" n
         | Opaque -> sprintf "%s unclassifiable" n
     let ps =
         if cs.Params.IsEmpty then "(no parameters)"
@@ -1346,7 +1522,7 @@ let private sigSummary (cs: CertSig) : string =
     let ret =
         match cs.Return with
         | Rep r -> repStr r
-        | Inv -> "invariant"
+        | Inv _ -> "invariant"
         | Opaque -> "unclassifiable"
     sprintf "%s -> %s" ps ret
 
@@ -1357,7 +1533,8 @@ let private sigSummary (cs: CertSig) : string =
 /// turn a compiling program into a crash, so a `failwith` from the spec
 /// decoders (an unregistered label, a malformed static) reads as "no proposal".
 let private tryCandidate (g: Group) (typeAliases: Map<string, TypeExpr>) (statics: StaticEnv)
-                         (mlAliases: Set<string>) (table: Map<string, CertSig>) (fd: FunctionDecl)
+                         (globals: Map<string, InvShape>) (mlAliases: Set<string>)
+                         (table: Map<string, CertSig>) (fd: FunctionDecl)
     : CertSig option =
     try
         match certSigOf g typeAliases statics fd with
@@ -1370,7 +1547,7 @@ let private tryCandidate (g: Group) (typeAliases: Map<string, TypeExpr>) (static
             let isRep st = match st with Rep _ -> true | _ -> false
             if not ((cs.Params |> List.exists (snd >> isRep)) || isRep cs.Return) then None
             else
-                match judgeFunction g (Map.add fd.Name cs table) statics mlAliases fd with
+                match judgeFunction g (Map.add fd.Name cs table) statics globals mlAliases fd with
                 | [] -> Some cs
                 | _ :: _ -> None
     with _ -> None
@@ -1407,7 +1584,8 @@ let inferCertificates (statics: StaticEnv) (mlAliases: Set<string>)
                         let gs = groupStr g
                         let specG = defaultArg (Map.tryFind gs spec) Map.empty
                         let table = specG |> Map.fold (fun m k v -> Map.add k v m) certs
-                        tryCandidate g typeAliases statics mlAliases table fd
+                        let globals = buildGlobalShapes g statics decls
+                        tryCandidate g typeAliases statics globals mlAliases table fd
                         |> Option.map (fun cs -> (g, gs, specG, cs)))
                 match hit with
                 | None -> ()

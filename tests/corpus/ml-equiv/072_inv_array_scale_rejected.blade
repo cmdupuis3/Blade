@@ -1,0 +1,36 @@
+// TEST: ML Equiv Invariant Array Scale Rejected (rejects)
+import ml as ml
+// ============================================================================
+// Scaling a representation-typed value by an invariant SCALAR is equivariant
+// (a scalar commutes with every block of the action). Scaling it ELEMENTWISE
+// by an invariant ARRAY is not — and both are merely "invariant" to the rep
+// lattice, so the scaling rule needs the shape as well as the status.
+//
+// Concretely, with spec [(0,0,1), (1,1,1)] the components are (s, v) and
+// w = [1, 1, 2, 3] applies diag(1, 2, 3) to the l=1 block. Take v = (1,0,0)
+// and R the rotation carrying (1,0,0) to (0,1,0): scaling then rotating gives
+// (0,1,0), rotating then scaling gives (0,2,0). The map does not commute with
+// the action, so the certificate must not license it.
+//
+// This is the arm MLPolyExtract already gets structurally right — its
+// "scaling an array is admitted only by an INVARIANT scalar (rep-degree 0)"
+// is the same rule, read over coefficients, and it can state it because
+// VScalar and VVec are different shapes. The abstract-interpretation walker
+// has to carry the distinction explicitly.
+//
+// The rule is stated once for every block-spec member of the lattice, so the
+// point-group twin below must fail on the same grounds. Both are BL4008; the
+// sanctioned per-block scalings are ml.linear / ml.derive_pg_linear (learned,
+// block-diagonal) and ml.gated (one gate per block).
+// ============================================================================
+let static S = [(0, 0, 1), (1, 1, 1)]
+
+function bad_o3(x: Array<Float like IrrepsIdx<S>>, w: Array<Float like Idx<4>>) where ml.equiv(O3) -> Array<Float like IrrepsIdx<S>> =
+  x * w
+
+// The C4 E plane is 2-dimensional and rho(r) is R90, which commutes with no
+// diag(a, b) unless a = b — the same failure, one lattice member over.
+let static EC = [("E", 1)]
+
+function bad_c4(p: Array<Float like PgIrrepsIdx<C4, EC>>, v: Array<Float like Idx<2>>) where ml.equiv(C4) -> Array<Float like PgIrrepsIdx<C4, EC>> =
+  p * v

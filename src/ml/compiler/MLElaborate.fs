@@ -1889,7 +1889,8 @@ let private expandModule (decls: Located<Decl> list) : Result<Located<Decl> list
                                 | DeclFunction fd ->
                                     match Map.tryFind fd.Name certs with
                                     | Some cert ->
-                                        Blade.ML.Equiv.judgeFunction cert.Group certs statics aliases fd
+                                        let globalShapes = Blade.ML.Equiv.buildGlobalShapes cert.Group statics decls1
+                                        Blade.ML.Equiv.judgeFunction cert.Group certs statics globalShapes aliases fd
                                     | None -> []
                                 | _ -> [])
                     if not diags.IsEmpty then Error diags
