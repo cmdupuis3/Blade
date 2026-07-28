@@ -137,6 +137,18 @@ index types + iteration + the emptiness warning. Real demand it serves:
 3. the §3.5 sparse story's derived half, without SparseIdx;
 4. BL4007-as-inhabitation stays NARRATIVE until internals migration
    (demand-ordered) — the core's own signal is the emptiness warning.
+5. (Added post-round, owner Q&A:) **structured irreps iteration.**
+   IrrepsIdx is the rank-1 linearization of a spec-derived
+   dependent-bound compound (μ < mult(b), m < dim(b)) whose lex
+   enumeration COINCIDES with the flat blockStart + μ·dim + m layout —
+   so the long-deferred `for (b, mu, m)` sugar / `blocks<IrrepsIdx>`
+   virtual iteration should be delivered as a C2-instantiation of the
+   derived-compound machinery (zero index translation), NOT as bespoke
+   DepIdx iteration codegen. The spec tag stays load-bearing regardless:
+   parity is invisible to the mask ([(1,e,1)] ≡ [(1,o,1)]
+   combinatorially), so nominal identity cannot be replaced by the
+   mask hash — which is exactly this plan's own
+   nominal-on-top-of-hash rule, rediscovered.
 
 ## 5. Worked anchor (the round's E-plane equivalent)
 

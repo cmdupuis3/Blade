@@ -757,6 +757,22 @@ tri <@> (h, h, h)
    a virtual iteration source (`blocks<IrrepsIdx<spec>>`-shaped, erasing
    to the irreps_offset arithmetic) — a future feature note, not a
    change to the index type.
+   (iii) Follow-up owner question, answered 2026-07-27: **IrrepsIdx IS a
+   CompoundIdx in disguise — precisely, the rank-1 LINEARIZATION of a
+   spec-derived dependent-bound compound ((b, μ, m) with μ < mult(b),
+   m < dim(b)), plus a nominal tag.** The storage bijections COINCIDE
+   (lex over mask-true triples = blockStart + μ·dim + m), which is why
+   the formalism's DepIdx reading and the flat primitive never
+   disagreed; the linearization is what makes it dense and hence
+   stage-4-fusable. The caveat that justifies the disguise: PARITY IS
+   INVISIBLE to the enumeration structure ([(1,e,1)] and [(1,o,1)] have
+   identical masks) — the spec tag carries representation data no
+   combinatorial account supplies, and it is exactly what certification
+   classifies on. The constrained-index round independently rediscovered
+   this recipe (derived mask + nominal-on-hash identity). Payoff: the
+   deferred structured iteration should ride constrained-index C2 (the
+   derived compound; zero index translation) instead of bespoke DepIdx
+   codegen. Same analysis applies to PgIrrepsIdx verbatim.
 9. **The Sym^k basis problem (k ≥ 3) — RESOLVED by design round 2026-07-26**
    (two-agent adversarial round; construction in §3.3b, staging in §7 3b).
    The original dilemma — tolerance-GS arbitrariness (route a) vs recoupling
