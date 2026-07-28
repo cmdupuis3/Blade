@@ -116,6 +116,12 @@ let rec private mirrorEq (pi: IRId) (pj: IRId) (l: TypedExpr) (r: TypedExpr) : b
         mirrorEq pi pj cA cB && mirrorEq pi pj tA tB && mirrorEq pi pj eA eB
     | TExprField (oA, fA, _), TExprField (oB, fB, _) ->
         fA = fB && mirrorEq pi pj oA oB
+    // Deliberately NO TExprMatch arm, even though parityOf/signParityOf both
+    // grew one: two matches can only mirror if their PATTERN BINDERS
+    // correspond, and this function has no binder-correspondence parameter to
+    // decide that with (deducePackFold supplies one by hand for its two arms).
+    // The `false` below is already the sound answer, so an arm would only ever
+    // restate it.
     | _ -> false
 
 /// Reduce kernels inside mirror candidates: only a literal operator section
