@@ -1,0 +1,16 @@
+// TEST: Rank Bound Violation (rejects)
+// The negative half of stage-2 rank deduction. `z` collects a rank-1 lower
+// bound from `total(z)` and then a rank-2 one from `tot2(z)`; `extents(z)`
+// finally demands an array and — because a builtin's requireArrayArg calls
+// unify DIRECTLY — meets the accumulated bound with a synthesized rank-1
+// array. That is a genuine contradiction and is rejected at lower with
+// BL3009, the dedicated rank-deduction code (it used to render as a generic
+// BL3999).
+//
+// The message reports needed = 2 even though the rank-1 demand was registered
+// FIRST: that number is the assertion that the bound is MAX-joined across
+// call sites, not overwritten by the last writer.
+function total(row) = reduce(row, (+))
+function tot2(m: Array<Float64 like Idx<2>, Idx<2>>) -> Float64 = m[0][0]
+function f(z) = total(z) + tot2(z) + extents(z)
+let r = f([[1.0, 2.0], [3.0, 4.0]])

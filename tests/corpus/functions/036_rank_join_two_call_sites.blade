@@ -1,0 +1,25 @@
+// TEST: Rank Join Two Call Sites
+// `z` picks up a rank-2 lower bound from TWO independent call sites that
+// register it through DIFFERENT arms of the seam's calleeRank:
+//   * `tot2(z)`  — the callee's param is a concrete rank-2 array (ArrayElem);
+//   * `g(z)`     — the callee is a let-bound LAMBDA whose own param is still
+//                  an unresolved inference var carrying a bound, so the rank
+//                  is read back out of the substitution
+//                  (IRTInfer -> GetRankLowerBound). That arm had no coverage.
+// `g`'s own param then has no decl-close site and is closed by zonk, so this
+// file also exercises a rank-2 auto-close (033 covers the rank-1 one).
+//
+// Why not a MIXED 1-or-2 join here: closing at 2 hands the rank-1 callee an
+// Array<double,2>, and direct application never unifies args against params,
+// so nothing rescues it — the C++ compiler rejects the emitted call. Probed
+// and confirmed. The max-join over unequal demands is asserted instead by
+// 037, whose BL3009 message reports needed = 2 after a rank-1 demand was
+// registered FIRST (a min or last-writer join would say 1).
+//
+// tot2(M) = M[0][1] + M[1][0] = 2 + 3 = 5; g(M) = 10; r = 15.
+function tot2(m: Array<Float64 like Idx<2>, Idx<2>>) -> Float64 = m[0][1] + m[1][0]
+let g = lambda(y) -> tot2(y) * 2.0
+function f(z) = tot2(z) + g(z)
+let M = [[1.0, 2.0], [3.0, 4.0]]
+let r = f(M)
+// EXPECT: r = 15.0

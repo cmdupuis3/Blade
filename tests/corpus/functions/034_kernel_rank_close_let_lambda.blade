@@ -1,0 +1,13 @@
+// TEST: Kernel Rank Close Let Lambda
+// The BOUNDARY twin of 033: the same let-bound lambda, used as a `<@>` kernel
+// instead of called directly. This path must keep closing `x` through
+// buildApplyInfo's array-side fallback — which sees the source array and can
+// refine the peel — and must NOT be taken over by zonk's auto-close, whose
+// bare integer bound knows nothing about which physical dimension it denotes.
+// Pinning the values here is what makes a regression in that precedence
+// visible: rows sum to 3 and 7, plus 1.0 each.
+function total(row) = reduce(row, (+))
+let f = lambda(x) -> total(x) + 1.0
+let data = [[1.0, 2.0], [3.0, 4.0]]
+let result = method_for(data) <@> f |> compute
+// EXPECT: result = [4.0, 8.0]

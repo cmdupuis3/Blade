@@ -1,0 +1,12 @@
+// TEST: Rank Chain Three Hops
+// One hop further than 023: `thrice`'s rank bound arrives from `twice`, whose
+// own parameter rank was itself DEDUCED (not annotated) one declaration
+// earlier. So the bound has to survive being re-read out of a closed param at
+// the direct-application seam, twice in a row — a transitively deduced rank is
+// not a special second-class kind of rank.
+// total = 6, twice = 12, thrice = 24.
+function total(row) = reduce(row, (+))
+function twice(a) = total(a) + total(a)
+function thrice(b) = twice(b) + twice(b)
+let t = thrice([1.0, 2.0, 3.0])
+// EXPECT: t = 24.0

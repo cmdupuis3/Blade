@@ -9710,29 +9710,10 @@ and checkFunctionDecl (env: TypeEnv) (funcDecl: FunctionDecl) : TypeResult<Typed
             // no bound stay fully generic (scalar-or-array polymorphism,
             // unchanged); params under a `T^k` annotation are governed by
             // their exact arity constraint and are skipped here.
-            paramTypes |> List.iter (fun pt ->
-                match env.Subst.Resolve pt with
-                | IRTInfer id when (env.Subst.GetArityConstraint id).IsNone ->
-                    (match env.Subst.GetRankLowerBound(id) with
-                     | Some k when k > 0 ->
-                         let slots = List.init k (fun i ->
-                             { Id = env.Builder.FreshId()
-                               Rank = 1
-                               Extent = IRParam (sprintf "__%s_deduced_n%d" funcDecl.Name i, 0, IRTNat None)
-                               Symmetry = SymNone
-                               Tag = None; IxKind = IxKPlain
-                               Kind = SDimension
-                               Dependencies = [] })
-                         let arr = { ElemType = env.Builder.FreshInferType()
-                                     IndexTypes = slots
-                                     IsVirtual = false
-                                     Identity = None }
-                         // Cannot fail: the var is bound-satisfying by
-                         // construction (fresh rank-k array, no arity pin,
-                         // no occurs possibility, not a literal var).
-                         unify env.Subst pt (mkArrayLike arr) |> ignore
-                     | _ -> ())
-                | _ -> ())
+            // The close itself lives in Zonk.fs so this DECLARED-param site
+            // and zonk's auto-close (for lambda params, which have no decl
+            // site) build the same array and cannot drift.
+            Blade.Zonk.closeDeducedRanks env.Subst env.Builder funcDecl.Name paramTypes
             let resolvedParams = typedParams |> List.map (fun p ->
                 { p with Type = env.Subst.Resolve(p.Type) } : TypedParam)
             let tf : TypedFunctionDecl = {
