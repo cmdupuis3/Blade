@@ -210,12 +210,21 @@ let structStaticFence (env: StaticEnv) (name: string) : Result<StructBoxSpec, st
 ///   `Ok false` — some conjunct is false: EXCLUDED. This is the enumeration
 ///                reading and it is NOT an error. Construction-false is an
 ///                error and lives elsewhere (see the module header);
-///   `Error _`  — a conjunct did not fold to a boolean under the fuel. The
+///   `Error _`  — a conjunct did not fold to a boolean within its budget. The
 ///                reason is raw; the caller owns the witness-cell suffix,
 ///                since only the caller knows which route reached the cell.
 ///
-/// Fuel is `StaticEval.maxSteps` PER CELL — the plan's accepted cost at the
-/// box cap (§6 risk 3).
+/// The budget is `StaticEval.cellBudget`, spent afresh PER CELL, and it is
+/// deliberately far smaller than the `let static` folding budget: a cell
+/// predicate is a boolean over a handful of already-bound integers, so the
+/// slack is enormous either way, and the small budget is what keeps the worst
+/// case at the box cap from being 100,000 steps x 100,000 cells.
+///
+/// The per-cell cost is also smaller than plan §6 risk 3 assumed, in the
+/// direction that matters: `StructIdxSpec.routeFlat` stops at the FIRST
+/// erroring cell, so a conjunct that cannot fold is paid once, not once per
+/// cell. What risk 3 got wrong was the other end — the budget it was counting
+/// on could not fire at all; see `StaticEval.maxSteps`' own comment.
 let evalConjunctsAtCell
         (env: StaticEnv)
         (spec: StructBoxSpec)
@@ -239,7 +248,7 @@ let evalConjunctsAtCell
                 // Skipped in BOTH readings via the one shared predicate.
                 if isPplLicenseConjunct c then go (i + 1) rest
                 else
-                    match evalExpr cellEnv maxSteps c with
+                    match evalExprWith cellEnv cellBudget c with
                     | Ok (SVBool true) -> go (i + 1) rest
                     | Ok (SVBool false) -> Ok false
                     | Ok _ -> Error (sprintf "conjunct %d of %s is not a boolean at compile time" i spec.Name)

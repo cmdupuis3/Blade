@@ -1125,8 +1125,10 @@ let private dispatchTest (rest: string list) : int =
         // lo-sweep against an independent triple-loop dense count, the fence
         // and idx_card(R) end to end through resolveStatics, and the negative
         // controls: box cap, non-Int field, unbounded field, non-static
-        // struct, and the fuel bomb with its witness cell. Pure integer,
-        // in-process, no Blade source pipeline.
+        // struct, and the fuel bomb with its witness cell. Also pins the
+        // shared StaticEval fold budget (depth vs steps, the wide shallow
+        // fold, the idx_card re-entrancy cycle). Pure integer, in-process,
+        // no Blade source pipeline.
         let failed = (Blade.Tests.StructIdxSpecReview.runStructIdxSpecTests ()).Failed
         if failed = 0 then 0 else 1
     | [ "structidxoracle" ] | [ "struct-idx-oracle" ] ->

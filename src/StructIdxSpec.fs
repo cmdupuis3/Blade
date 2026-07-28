@@ -84,18 +84,31 @@
 ///   iteration: route 1 walks the box in lex order and stops at the first
 ///   error.
 ///
-///   §6 RISK 3 IS WORSE THAN THE PLAN THINKS, and not because of anything
-///   here. The plan expects a recursive static function in a conjunct to burn
-///   the fuel per cell and then diagnose. It does not diagnose:
-///   `StaticEval.maxSteps` is threaded as `fuel - 1` into every CHILD of a
-///   node, so it bounds evaluation DEPTH rather than steps, and 100,000 nested
-///   `evalExpr` frames overflow the .NET stack long before the counter reaches
-///   zero. The process dies with an uncatchable StackOverflowException. This
-///   is a property of the static evaluator, not of the counting layer — a
-///   two-line program with no struct and no `idx_card` reproduces it — so it
-///   is neither introduced nor guardable here, and the fuel-bomb negative
-///   control the plan calls for is not pinnable until StaticEval's budget is
-///   fixed. See tests/corpus/index-types/154 for the full note.
+///   §6 RISK 3 WAS WRONG IN BOTH DIRECTIONS, and neither correction belongs
+///   to this layer. The plan expected a recursive static function in a
+///   conjunct to burn the fuel PER CELL and then diagnose.
+///     - It did not diagnose. `StaticEval.maxSteps` was threaded as `fuel - 1`
+///       into every CHILD of a node, so it bounded evaluation DEPTH rather
+///       than steps, and 100,000 nested `evalExpr` frames overflow the
+///       compiler's stack long before the counter reaches zero: the process
+///       died with an uncatchable StackOverflowException. That was a property
+///       of the static evaluator, not of the counting layer — a two-line
+///       program with no struct and no `idx_card` reproduced it — and it is
+///       FIXED: the budget is now a genuine step count shared by sibling
+///       subexpressions, with a separate `maxDepth` guard sized against the
+///       stack. The fuel-bomb negative control the plan calls for is
+///       accordingly pinnable at last: index-types/156.
+///     - And it does not burn the budget per cell either. Route 1 stops at
+///       the FIRST erroring cell, so an unfoldable conjunct is paid once for
+///       the whole call. What this layer contributes is the smaller per-cell
+///       budget itself (`StaticEval.cellBudget`), which is a cost model — a
+///       cell predicate is a boolean over a few bound integers — rather than
+///       a safety margin.
+///   ONE RUNAWAY IS STILL THIS LAYER'S TO CATCH, and the evaluator cannot
+///   help with it: `idx_card` is a SYNTACTIC builtin, so a conjunct may reach
+///   the count of the struct being counted, and each hop restarts the fold at
+///   depth zero where no depth guard can see it. See the enumeration-in-
+///   progress set below, and index-types/157.
 /// * A conjunct that folds to a NON-boolean is an error, not an exclusion:
 ///   silently excluding an ill-typed conjunct would make a typo look like a
 ///   tight constraint.
@@ -113,9 +126,10 @@ open Blade.StructIdxFence
 // ---------------------------------------------------------------------------
 
 /// The box-volume cap in cells: PI (Hi - Lo + 1) over the INCLUSIVE per-field
-/// bounds. 100,000 is the symLiftDecl precedent, and it is also what makes the
-/// per-cell fuel budget (StaticEval.maxSteps, also 100k) an acceptable worst
-/// case rather than an unbounded one.
+/// bounds. 100,000 is the symLiftDecl precedent, and it is also the other half
+/// of what bounds a fold: the per-cell budget is `StaticEval.cellBudget`
+/// (10,000 steps), so the two together cap one `idx_card` call's static
+/// evaluation rather than leaving it open-ended.
 [<Literal>]
 let maxBoxCells = 100_000
 
@@ -434,8 +448,8 @@ let enumerateBox (label: string) (fields: BoxField list) (pred: CellPredicate) :
 /// The exclusion reading is the fence's (`Ok false` = excluded, never an
 /// error). What this adds is the cell: the fence evaluates one cell at a time
 /// and has no idea which of the box's cells it is on, while a per-cell failure
-/// without its cell is unactionable — §6 risk 3's fuel bomb burns the budget
-/// PER CELL, and "a conjunct did not fold" with no coordinates leaves the user
+/// without its cell is unactionable — a fuel bomb in a conjunct fails at ONE
+/// cell, and "a conjunct did not fold" with no coordinates leaves the user
 /// nothing to look at.
 let cellPredicateOf (env: StaticEnv) (spec: StructBoxSpec) : CellPredicate =
     fun cell ->
@@ -447,17 +461,65 @@ let cellPredicateOf (env: StaticEnv) (spec: StructBoxSpec) : CellPredicate =
             // did-not-fold failure: a conjunct that folded fine but to the
             // wrong KIND of value is a typo, and telling its author about
             // recursion budgets is noise.
+            //
+            // "the first cell it is reached at" is a real claim about cost,
+            // not a hedge: routeFlat stops at the first erroring cell, so the
+            // budget below is spent once for the whole call rather than once
+            // per cell of the box.
             let tail =
                 if why.Contains "did not fold" then
-                    sprintf ". Every conjunct is folded once per box cell under a %d-deep budget, so a conjunct that recurses without a static bound fails at the FIRST cell it is reached with" maxSteps
+                    sprintf ". Every conjunct is folded once per box cell under a budget of %d steps and %d nesting levels, so a conjunct that recurses without a static bound fails at the FIRST cell it is reached at"
+                        cellBudget.Steps cellBudget.Depth
                 else ""
             Error (sprintf "%s at %s%s" why (renderCell cell) tail)
+
+// ---------------------------------------------------------------------------
+// The re-entrancy guard
+// ---------------------------------------------------------------------------
+
+/// Structs whose enumeration is currently on the stack.
+///
+/// `idx_card` is a SYNTACTIC static builtin, which makes it reachable from
+/// anywhere a static expression is, INCLUDING the `where` conjuncts of the
+/// very struct it is counting:
+///
+///     static struct R { p: Int<min=0, max=2> } where p == idx_card(R)
+///
+/// Enumerating R folds that conjunct, which counts R, which enumerates R. The
+/// evaluator's own depth guard cannot see this: `registerSyntacticStaticBuiltin`
+/// hands a builtin a step COUNT, not the live fold, so every hop through
+/// `idx_card` restarts the budget at depth zero and the recursion is invisible
+/// to it. Before this guard existed the cycle killed the compiler with a
+/// StackOverflowException, which is the same failure the fixed budget was
+/// written to end.
+///
+/// Keyed on the struct NAME rather than on self-reference, so an indirect
+/// cycle (R's conjunct counts S, S's conjunct counts R) is caught by the same
+/// check. Thread-local because a fold is synchronous — one program's
+/// enumeration never spans threads — while the corpus harness runs different
+/// programs on different threads concurrently, so a single shared set would
+/// have them reporting each other's cycles.
+let private enumerating =
+    new System.Threading.ThreadLocal<Set<string>>(fun () -> Set.empty)
 
 /// The struct route: name -> solutions + cardinality, fence and certificate
 /// included. This is what `idx_card` calls.
 let structEntries (env: StaticEnv) (name: string) : Result<BoxEntries, string> =
-    structStaticFence env name
-    |> Result.bind (fun spec -> enumerateBox spec.Name spec.Fields (cellPredicateOf env spec))
+    if Set.contains name enumerating.Value then
+        Error (sprintf "idx_card(%s): counting %s requires folding %s's own constraints, which reach idx_card(%s) again — a struct's solution count cannot be one of the things its constraints depend on. Currently being counted: %s"
+                   name name name name
+                   (enumerating.Value |> Set.toList |> String.concat ", "))
+    else
+        enumerating.Value <- Set.add name enumerating.Value
+        try
+            structStaticFence env name
+            |> Result.bind (fun spec -> enumerateBox spec.Name spec.Fields (cellPredicateOf env spec))
+        finally
+            // `finally`, not a trailing statement: `enumerateBox`'s certificate
+            // failures are `failwith`s (a compiler bug, by house rule), and a
+            // leaked name would turn one of those into a bogus cycle report on
+            // every later call from this thread.
+            enumerating.Value <- Set.remove name enumerating.Value
 
 /// The cardinality alone.
 let structCard (env: StaticEnv) (name: string) : Result<int, string> =

@@ -64,7 +64,9 @@ translation law between them.
    wrong identification; the ck satisfiability-filtered arrow is the
    right one. The ⟦Blade conjuncts⟧ = M eval-model bridge is the one
    deferrable new proof — BladeConstrained.v, named below.)
-   Fence-input evidence: StaticEval.fs:193 (maxSteps = 100k),
+   Fence-input evidence: StaticEval's fold budget (maxSteps = 100k steps,
+   maxDepth = 4,096 levels; cellBudget for the per-cell reading — see
+   §7.0(3), which is also where the budget's own repair is recorded),
    StaticEval.fs:10-22 (StaticValue has no closure case — the one-line
    reason route (a) was rejected), CodeGen.fs:7352 (masks are named
    runtime arrays today), Ast.fs:183/548 (TyCompoundIdx's mask is an
@@ -355,12 +357,14 @@ box turns it into a visibly wrong value rather than a reordering.
 3. ~~Fuel-bomb ergonomics: a recursive static function in a conjunct burns
    100k steps PER CELL before diagnosing — acceptable at the box cap;
    revisit if real programs hit it.~~ **FALSIFIED at C1 implementation
-   (2026-07-28) — see §7.0(3) for the finding, the repro and the repair.**
-   The premise is wrong in the direction that matters: the fuel bound does
-   not diagnose, it dies, and the box cap does not bound the damage because
-   a single cell is enough to reach it. This entry is struck rather than
-   deleted because "acceptable at the box cap" was the reasoning that let
-   the risk be accepted, and that reasoning is what failed.
+   (2026-07-28), then REPAIRED — see §7.0(3) for the finding, the repro and
+   the repair.** Both halves of the premise were wrong. It did not burn the
+   fuel and diagnose, it died; and the box cap did not bound the damage,
+   because a single cell was enough to reach it. Nor does it burn the budget
+   per cell now that it diagnoses: the flat-filter route stops at the FIRST
+   erroring cell, so an unfoldable conjunct is paid once per call. This entry
+   is struck rather than deleted because "acceptable at the box cap" was the
+   reasoning that let the risk be accepted, and that reasoning is what failed.
 
 ## 7. Implementation staging (counts before types before ergonomics)
 
@@ -548,28 +552,55 @@ deliberately intact, with a note so the next reader does not walk into it.
    discarded rather than shipped as whole-file churn) and re-verified
    independently.
 
-3. **The fuel-bomb negative control of §6 risk 3 is NOT PINNABLE**, and the
-   reason is pre-existing and unrelated to this feature. `StaticEval.maxSteps`
-   is threaded as `fuel - 1` into each CHILD, so it bounds evaluation DEPTH,
-   not step count — and 100,000 nested `evalExpr` frames overflow the .NET
-   stack long before the counter reaches zero. An unbounded recursive static
-   function therefore kills the compiler with an uncatchable
-   StackOverflowException instead of producing the fuel-exhaustion diagnostic,
-   which is consequently unreachable for exactly the case it was written for.
-   Reproduced with no struct and no `idx_card` involved:
+3. **The fuel-bomb negative control of §6 risk 3 was NOT PINNABLE, and the
+   reason was pre-existing and unrelated to this feature. FIXED 2026-07-28.**
+   `StaticEval.maxSteps` was threaded as `fuel - 1` into each CHILD, so it
+   bounded evaluation DEPTH, not step count — and 100,000 nested `evalExpr`
+   frames overflow the compiler's 64 MB stack (`Runtime.largeStackBytes`)
+   long before the counter reaches zero. An unbounded recursive static
+   function therefore killed the compiler with an uncatchable
+   StackOverflowException instead of producing the fuel-exhaustion
+   diagnostic, which was consequently unreachable for exactly the case it was
+   written for. Reproduced with no struct and no `idx_card` involved:
 
    ```blade
    static function bomb(n: Int) -> Int = bomb(n + 1)
    let static X = bomb(0)
    ```
 
-   Left unfixed as out of scope: the honest repair is an explicit depth
-   counter well under the stack limit, or a genuinely threaded step budget —
-   a StaticEval decision, not a counting-layer one. The half C1 does own, the
-   WITNESS CELL on a conjunct that fails and returns, is pinned instead
-   (`index-types/154`). §6 risk 3 should be re-read with this in mind: the
-   ergonomic concern it raises is real but its premise — that the fuel bound
-   diagnoses — does not hold today.
+   **The repair, and why it is the budget rather than the number.** The two
+   options were an honest depth bound (rename, lower to a few thousand) or a
+   genuinely threaded step budget with a separate depth guard. The second was
+   taken, because a depth bound is not a work bound: `f(n) = g(n-1) + g(n-1)`
+   does 2^depth work inside any depth limit, so lowering the number would
+   have left a second runaway open while narrowing legitimate folds. So:
+   `maxSteps` (100,000) is now a real step count, decremented once per node
+   visit out of a pool SHARED by sibling subexpressions; `maxDepth` (4,096)
+   is a separate nesting ceiling sized against the stack. The public
+   signature is unchanged — `evalExpr env maxSteps e` always meant a step
+   budget — and `evalExprWith` takes an explicit `Budget` for callers with
+   their own cost model. C1 is the first such caller: `cellBudget`
+   (10,000 steps, 512 levels) is spent per cell, since a cell predicate is a
+   boolean over a few bound integers and the full folding budget at the box
+   cap would be four orders of magnitude nobody asked for.
+
+   **A second runaway the depth guard cannot see, closed at the same time.**
+   `idx_card` is a SYNTACTIC static builtin, so it is reachable from the
+   `where` conjuncts of the struct it is counting (`static struct R { ... }
+   where p == idx_card(R)`). Because `registerSyntacticStaticBuiltin` hands a
+   handler a step COUNT rather than the live fold — it must, since a
+   handler's cost model is its own — every hop restarts the budget at depth
+   zero, and the cycle stays invisible to `maxDepth`. This is the counting
+   layer's to catch and it now does, with an enumeration-in-progress set of
+   struct NAMES (so indirect cycles are the same check).
+
+   Pinned: `diagnostics/033` (the bare repro, message and code, strict in
+   both directions), `index-types/156` (the fuel bomb in a conjunct, with its
+   witness cell), `index-types/157` (the `idx_card` cycle), and the (i) block
+   of `Test_StructIdxSpec.fs` — which also pins the WIDE-but-shallow fold the
+   step bound exists for, since no corpus program can assert "returned
+   eventually, but should not have". `index-types/154` keeps the
+   undefined-name probe and says why.
 
 ### 7.1 C1 verification inventory
 
@@ -608,7 +639,10 @@ most — an UNDECIDABLE cell must FAIL the enumeration rather than be treated as
 false. Conflating "cannot decide" with "false" silently shrinks solution sets,
 which is a wrong answer that looks like a right one.
 
-Not pinnable: the fuel bomb, for the pre-existing StaticEval reason in §7.0(3).
+Also negative controls, added with the StaticEval budget repair of §7.0(3):
+the FUEL BOMB in a conjunct, diagnosed at its witness cell rather than killing
+the compiler (`index-types/156`), and the `idx_card` cycle a conjunct can open
+through the syntactic-builtin seam (`index-types/157`).
 
 ## 8. Honest deferrals (by name)
 

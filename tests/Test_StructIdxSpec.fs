@@ -29,11 +29,19 @@
 //     cap, a non-Int field, an unbounded field, a non-`static struct`, a
 //     non-identifier argument to idx_card, and a conjunct that does not fold,
 //     whose diagnostic must name the WITNESS CELL (§6 risk 3: the fold is
-//     per-cell, so a cell-free message is unactionable). See the note at that
-//     pin for why the control is a non-folding conjunct rather than the plan's
-//     literal FUEL BOMB: StaticEval's fuel is a DEPTH bound, so a fuel bomb
-//     overflows the .NET stack before the fuel counter can diagnose it — a
-//     pre-existing StaticEval property that C1 neither introduces nor fixes.
+//     per-cell, so a cell-free message is unactionable).
+//  6. THE FOLD BUDGET (block (i)), which is `StaticEval`'s and is pinned here
+//     because this file is where its defect was recorded and the counting
+//     layer is its second consumer. Family 5 used to say the plan's FUEL BOMB
+//     could not be pinned at all: the budget was threaded as `fuel - 1` into
+//     every CHILD, so it bounded DEPTH while being named and reported as a
+//     step count, and a bomb overflowed the stack before the counter could
+//     diagnose it — taking any test that tried with it. Now pinned in all
+//     four shapes: the bare recursion, the bomb in a conjunct with its
+//     witness cell, the WIDE-but-shallow fold that only a step bound catches
+//     (with a fits-the-budget control beside it, so the pin bounds work
+//     rather than banning branching), and the `idx_card` cycle that no depth
+//     guard can see because a syntactic builtin necessarily restarts the fold.
 //
 // WHAT IS NOT HERE. The independent third-route enumerator lives in
 // tests/Test_StructIdxOracle.fs and shares no code with either this file or
@@ -485,6 +493,96 @@ let runStructIdxSpecTests () : BlockResult =
           (msgOf (foldIdxCard env7 (v "l1")))
     check "idx_card is a CORE builtin: it is in knownBuiltinNames with no ml import anywhere"
           (Set.contains "idx_card" (knownBuiltinNames ())) ""
+
+    // ---- (i) THE FOLD BUDGET ITSELF ----------------------------------------
+    // These pin `StaticEval`, not the counting layer, and they are here
+    // because this file is where the defect they close was recorded: family 5
+    // above used to say that the plan's fuel bomb could not be pinned at all.
+    // The counting layer is also the budget's second consumer, and the only
+    // one with a cost model of its own (`cellBudget`, per cell), so a change
+    // to either number is felt here first.
+    //
+    // BOTH HALVES MATTER AND ONLY ONE OF THEM IS OBVIOUS. The budget used to
+    // be a single number threaded as `fuel - 1` into every CHILD of a node:
+    // both operands of a `+` received the same remainder from their parent,
+    // which makes it a DEPTH bound named and reported as a step count. Two
+    // things follow, and each gets a pin.
+    let bombDecls =
+        [ staticFn "bomb" [ "n" ] (e (ExprApp (v "bomb", [ bin OpAdd (v "n") (lit 1L) ])))
+          structDecl "Bomb" true [ fieldHalfOpen "p" (lit 0L) (lit 2L) ]
+              [ bin OpEq (v "p") (e (ExprApp (v "bomb", [ lit 0L ]))) ] ]
+    let bombEnv = envOf bombDecls
+    // (i.1) DEPTH. An unbounded recursion must come back as an Error. Under
+    // the old threading this did not return at all: 100,000 nested evaluator
+    // frames exhaust the compiler's 64 MB stack (Runtime.largeStackBytes)
+    // long before the counter reaches zero, so the process died with an
+    // uncatchable StackOverflowException. A test could not have caught that —
+    // it would have taken the test runner with it — which is exactly why the
+    // guard went unnoticed being unreachable for as long as it did.
+    let depthBomb = evalExpr bombEnv maxSteps (e (ExprApp (v "bomb", [ lit 0L ])))
+    check "NEGATIVE: an unbounded static recursion is DIAGNOSED, not a stack overflow"
+          (isErr depthBomb && (msgOf depthBomb).Contains "depth limit exceeded") (msgOf depthBomb)
+    // The same runaway inside a CONJUNCT, which is the plan's §6 risk 3 fuel
+    // bomb — pinnable at last, and with the witness cell family 5 requires of
+    // every per-cell failure. Corpus index-types/156 is this test's twin
+    // through the full pipeline.
+    let conjBomb = foldIdxCard bombEnv (v "Bomb")
+    check "NEGATIVE: the fuel bomb IN A CONJUNCT is diagnosed, at its witness cell (§6 risk 3)"
+          (isErr conjBomb
+           && (msgOf conjBomb).Contains "depth limit exceeded"
+           && (msgOf conjBomb).Contains "(p = 0)"
+           && (msgOf conjBomb).Contains "conjunct 1") (msgOf conjBomb)
+    // (i.2) STEPS, the half a depth bound cannot do and the reason the fix
+    // was not simply "lower the depth number". `wide` doubles at every level
+    // and bottoms out at depth 24 — nowhere near `maxDepth` — so a pure depth
+    // bound would let it run 2^24 nodes to completion. It must be refused,
+    // and refused by the STEP guard, because siblings now draw from one pool
+    // instead of each inheriting a copy of the parent's remainder.
+    //
+    // 24 levels is chosen to be decisive in both directions: 2^24 = 16.7M
+    // node visits against a 100,000-step budget is a 167x overrun, while the
+    // work actually done before the guard fires is bounded by the budget, so
+    // this pin costs a fraction of a second rather than the minutes the
+    // unguarded fold would take.
+    let wideDecls =
+        [ for lvl in 0 .. 23 ->
+            staticFn (sprintf "w%d" lvl) [ "n" ]
+                (bin OpAdd (e (ExprApp (v (sprintf "w%d" (lvl + 1)), [ v "n" ])))
+                           (e (ExprApp (v (sprintf "w%d" (lvl + 1)), [ v "n" ]))))
+          yield staticFn "w24" [ "n" ] (v "n") ]
+    let wide = evalExpr (envOf wideDecls) maxSteps (e (ExprApp (v "w0", [ lit 1L ])))
+    check "NEGATIVE: a WIDE shallow fold (2^24 nodes at depth 24) is refused by the STEP budget"
+          (isErr wide && (msgOf wide).Contains "step limit exceeded") (msgOf wide)
+    // ...and the same shape just under the budget still folds, so the pin
+    // above is bounding work rather than banning branching: 2^13 = 8192
+    // leaves is comfortably inside 100,000 steps.
+    let narrowDecls =
+        [ for lvl in 0 .. 12 ->
+            staticFn (sprintf "n%d" lvl) [ "n" ]
+                (bin OpAdd (e (ExprApp (v (sprintf "n%d" (lvl + 1)), [ v "n" ])))
+                           (e (ExprApp (v (sprintf "n%d" (lvl + 1)), [ v "n" ]))))
+          yield staticFn "n13" [ "n" ] (lit 1L) ]
+    let narrow = evalExpr (envOf narrowDecls) maxSteps (e (ExprApp (v "n0", [ lit 0L ])))
+    check "a branching fold that FITS the step budget still folds (2^13 leaves = 8192)"
+          (match narrow with Ok (SVInt n) -> n = 8192L | _ -> false)
+          (match narrow with Ok vv -> ppStaticValue vv | Error m -> m)
+    // (i.3) RE-ENTRANCY. `idx_card` is a syntactic builtin, so it is reachable
+    // from the conjuncts of the struct it is counting — and because a
+    // syntactic builtin receives a step COUNT rather than the live fold, every
+    // hop through it restarts the budget at depth zero. The depth guard cannot
+    // see this cycle; the layer that owns the re-entry owns the guard. Keyed
+    // on the struct NAME, so an indirect cycle is the same check.
+    let cycleDecls =
+        [ structDecl "Cyc" true [ fieldHalfOpen "p" (lit 0L) (lit 3L) ]
+              [ bin OpEq (v "p") (e (ExprApp (v "idx_card", [ v "Cyc" ]))) ] ]
+    let cyc = foldIdxCard (envOf cycleDecls) (v "Cyc")
+    check "NEGATIVE: idx_card reachable from the struct's OWN conjuncts is refused as circular"
+          (isErr cyc && (msgOf cyc).Contains "idx_card(Cyc) again") (msgOf cyc)
+    // The guard must not leak: a refused cycle leaves nothing behind, so the
+    // very next call on this thread counts normally. `finally`, not a trailing
+    // statement — enumerateBox's certificate failures raise.
+    check "the cycle guard is unwound on failure: a later count on the same thread is unaffected"
+          (match structCard (cgEnv 1L) "CGm112" with Ok 7 -> true | _ -> false) ""
 
     // ---- the certificate itself, exercised deliberately --------------------
     // Every call above ran it. This last pin makes the coverage explicit: a

@@ -189,8 +189,11 @@ let runAllTestsFullWith (extraBlocks: (unit -> Blade.Tests.TestHarness.BlockResu
     // AND order — order agreement is what catches an offset bug), the CGm112
     // anchor and its 3/7/9 lo-sweep against an independent triple-loop dense
     // count, the fence and `idx_card(R)` end to end through resolveStatics,
-    // and the negative controls (box cap, non-Int field, unbounded field,
-    // non-`static struct`, and the fuel bomb with its witness cell).
+    // the negative controls (box cap, non-Int field, unbounded field,
+    // non-`static struct`, and the fuel bomb with its witness cell), and the
+    // shared fold budget itself - depth vs steps, the wide-but-shallow fold
+    // only a step bound catches, and the idx_card cycle a syntactic builtin
+    // can open through its own re-entry.
     let structIdxSpec = Blade.Tests.StructIdxSpecReview.runStructIdxSpecTests ()
     // The INDEPENDENT third route over the same solution sets: a separately
     // coded recursive per-field enumerator compared against StructIdxSpec's

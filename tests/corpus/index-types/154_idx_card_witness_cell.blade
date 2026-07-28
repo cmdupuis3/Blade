@@ -23,17 +23,23 @@
 // reproducible rather than whichever cell a scheduler happened to reach.
 //
 // WHY THE PROBE IS AN UNDEFINED NAME AND NOT THE PLAN'S FUEL BOMB (§6 risk 3).
-// `StaticEval.maxSteps` is threaded as `fuel - 1` into every CHILD of a node,
-// so it bounds evaluation DEPTH, not step count — and 100,000 nested frames
-// of `evalExpr` overflow the .NET stack long before the counter reaches zero.
-// A static function that recurses without a static bound therefore kills the
-// compiler with an uncatchable StackOverflowException instead of producing
-// this diagnostic, and it does so anywhere `let static` folds — a two-line
-// program with no struct and no `idx_card` reproduces it. That is a
-// pre-existing static-evaluator property that the counting layer neither
-// introduces nor can guard against in-process; pinning a live fuel bomb here
-// would pin a crash. The witness-cell requirement, which is the part C1 owns,
-// is pinned on a conjunct that fails and returns.
+// This file was written when a fuel bomb could not be pinned ANYWHERE. The
+// budget `StaticEval` spent was threaded as `fuel - 1` into every CHILD of a
+// node, so it bounded evaluation DEPTH while being named and reported as a
+// step count, and 100,000 nested frames of `evalExpr` overflow the compiler's
+// stack long before the counter reaches zero: a static function recursing
+// without a static bound killed the compiler with an uncatchable
+// StackOverflowException instead of producing a diagnostic, anywhere
+// `let static` folds. Pinning one here would have pinned a crash, so the
+// witness-cell requirement — the part C1 actually owns — was pinned on a
+// conjunct that fails and RETURNS instead.
+//
+// The budget is now a genuine step count with a separate depth guard, and the
+// fuel bomb is pinned live in index-types/156. This file keeps the undefined
+// name deliberately: the two probes reach the same witness-cell contract
+// through unrelated failures (a name that does not resolve, versus a fold
+// that does not terminate), and a probe that fails in one step is the cheaper
+// and steadier place to pin the SUFFIX itself.
 //
 // SCOPE OF THIS FILE, so it is not read as claiming more than it does: the
 // conjunct below fails at EVERY cell, so the reported witness is the origin
