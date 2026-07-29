@@ -97,6 +97,13 @@ let pgSpecOfStatic (what: string) (grp: PointGroup) (v: StaticValue) : Result<Pg
     | _ ->
         Error (sprintf "%s: expected a static array of (LABEL_NAME, mult) tuples over point group %s {%s}" what grp.Name roster)
 
+/// The pg twin of `specToStatic`: a point-group spec back out as a static
+/// value, (LABEL_NAME, mult) tuples. `SVString` is first-class in StaticEval,
+/// so the name surface costs no new static machinery — §3.6's reason for
+/// choosing names over indices at the surface, read from the other direction.
+let private pgSpecToStatic (s: PgSpec) : StaticValue =
+    SVTuple (s |> List.map (fun (label, m) -> SVTuple [ SVString label; SVInt (int64 m) ]))
+
 let private specToStatic (s: Spec) : StaticValue =
     SVTuple (s |> List.map (fun e ->
         SVTuple [ SVInt (int64 e.L); SVInt (int64 e.Parity); SVInt (int64 e.Mult) ]))
@@ -326,6 +333,32 @@ let install () =
                             Error (sprintf "%s: block index %d out of range (spec has %d blocks)" name b s.Length)
                         else Ok (SVInt (int64 (f g s (int b))))))
                 | _ -> Error (sprintf "%s: expected (GROUP, SPEC, BLOCK) static arguments" name))
+        // ------------------------------------------------------------------
+        // RESTRICTION (plan-equivariance-in-types stage A3). The FIRST
+        // spec-valued pg builtin, and the note above earned its exception: the
+        // 5b-i round deferred spec-valued pg forms because no pg op consumed a
+        // DERIVED spec, and `ml.derive_pg_linear` now does. `pg_restrict` is
+        // the only way to NAME the point-group module an O(3) space becomes
+        // under the subgroup inclusion, so a form that returned an int would
+        // answer a question nobody asked.
+        //
+        // IT IS A SPEC, NOT A CAST. The result names the decomposition of
+        // D^spec restricted along the group's declared O(3) embedding; it does
+        // NOT say an `IrrepsIdx<SPEC>` buffer may be READ as a
+        // `PgIrrepsIdx<GROUP, pg_restrict(GROUP, SPEC)>` buffer. The two
+        // layouts genuinely differ (the O(3) side orders a block by
+        // m = -l..l, so the invariant m = 0 component sits in the MIDDLE while
+        // a pg block is contiguous) — see MLPointSpec's restriction header.
+        // Parity is FORGOTTEN, because both shipped embeddings are proper
+        // rotation groups: pg_restrict(G, [(0, 1, 1)]) is the trivial label,
+        // i.e. a pseudoscalar becomes a genuine invariant of G.
+        registerStaticBuiltin (statName "pg_restrict") (fun args ->
+            match args with
+            | [ grp; spec ] ->
+                pgGroupOfStatic "pg_restrict GROUP" grp |> Result.bind (fun g ->
+                specOfStatic "pg_restrict SPEC" spec |> Result.map (fun s ->
+                    pgSpecToStatic (restrictSpec g (s |> List.map (fun e -> (e.L, e.Parity, e.Mult))))))
+            | _ -> Error "pg_restrict: expected (GROUP, SPEC) static arguments — GROUP a registered point group, SPEC an O(3) irreps spec of (l, parity, mult) triples")
         registerPgBlockAccessor "pg_irreps_dim" (fun g s b -> (pgIrrep g (fst s.[b])).DimR)
         registerPgBlockAccessor "pg_irreps_mult" (fun _ s b -> snd s.[b])
         registerPgBlockAccessor "pg_irreps_fs" (fun g s b -> endDim (pgIrrep g (fst s.[b])).Fs)

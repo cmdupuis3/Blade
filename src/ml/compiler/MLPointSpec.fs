@@ -684,3 +684,299 @@ let pgElementMatrix (grp: PointGroup) (spec: PgSpec) (el: PgElement) : int[][] =
                 for j in 0 .. d - 1 do
                     out.[off + i].[off + j] <- m.[i].[j])
     out
+
+// ---------------------------------------------------------------------------
+// RESTRICTION FROM O(3) — THE BRANCHING RULES
+// (docs/plan-equivariance-in-types.md stage A3; the "named-not-shipped"
+// promise of plan-transforms-as-types §3.6, now shipped as a TABLE.)
+// ---------------------------------------------------------------------------
+//
+// WHY AN EMBEDDING IS NEW DATA, AND NOT DERIVABLE FROM ANYTHING ABOVE
+// -------------------------------------------------------------------
+// Everything before this line is ABSTRACT: a label is a tuple of matrices in
+// its own basis, and NOTHING in the registry says which orthogonal
+// transformation of ℝ³ the generator `r` IS. A restriction is not a fact about
+// an abstract group — D^l|_G depends on HOW G sits inside O(3), and the choice
+// is real: the same abstract D4 restricts differently as the proper rotation
+// group 422 (second generator a two-fold AXIS) and as C4v (second generator a
+// MIRROR), because those two differ by the inversion, which O(3) irreps see
+// through their parity label. So the embedding is DECLARED here, beside the
+// tables it interprets, and certified as a faithful homomorphism.
+//
+// THE SHIPPED EMBEDDINGS ARE PROPER, AND THAT DECIDES PARITY
+// ----------------------------------------------------------
+//   C4 -> ⟨R_z(90°)⟩ ⊂ SO(3)                (the four-fold axis is z)
+//   D4 -> ⟨R_z(90°), R_x(180°)⟩ ⊂ SO(3)     (the crystallographic 422)
+//
+// Both land in SO(3), so −I ∉ G, so THE O(3) PARITY LABEL DOES NOT ENTER THE
+// CHARACTER COMPUTATION: D^(l, even)|_G and D^(l, odd)|_G are the same
+// point-group module. That is not an omission — it is the content of
+// restricting to a proper subgroup, and it is a STRENGTH LOSS worth stating
+// out loud: an (l = 0, ODD) pseudoscalar restricts to the TRIVIAL label, i.e.
+// becomes a genuine G-invariant, because no element of G is improper and
+// nothing left in the group can detect the sign flip. `o3Character`'s improper
+// branch is written and, on this roster, unreachable; it is the one line that
+// starts firing the moment an improper embedding (C4v, D4h) is registered, and
+// it is where the parity label re-enters.
+//
+// THE FROBENIUS–SCHUR CORRECTION, AGAIN, IN A SECOND PLACE
+// --------------------------------------------------------
+// Over ℝ the multiplicity is NOT the character inner product:
+//
+//     ⟨χ_U, χ_U⟩ = dim_ℝ Hom_G(U, U) = dim_ℝ End_G(U) = e_U
+//     ⟨χ_V, χ_U⟩ = dim_ℝ Hom_G(V, U) = m_U · e_U   ⇒   m_U = ⟨χ_V, χ_U⟩ / e_U
+//
+// so the same e that corrects `genericHomDim` corrects the branching. Dropping
+// it is not a subtle error: at C4 (E of complex type, e = 2) the uncorrected
+// count doubles E, and l = 1 would "decompose" into 5 dimensions of a
+// 3-dimensional space. The dimension-closure assert below catches exactly that.
+//
+// EVERYTHING IS EXACT INTEGER ARITHMETIC — no angles, no floats, no
+// sin((2l+1)θ/2)/sin(θ/2). `chiRot` runs the Clebsch–Gordan recurrence
+// χ_1·χ_l = χ_(l−1) + χ_l + χ_(l+1) on the integer t = tr(R), which is the same
+// statement one algebraic step earlier and never asks what θ is.
+//
+// WHAT THIS IS NOT: A REINTERPRETATION OF A BUFFER
+// ------------------------------------------------
+// `restrictSpec` names the DECOMPOSITION. It does NOT say that an
+// `IrrepsIdx<S>` buffer is a `PgIrrepsIdx<g, restrictSpec S>` buffer, and it is
+// not: the two LAYOUTS disagree. The O(3) layout orders a block's components by
+// m = −l..l, so the G-invariant m = 0 component sits in the MIDDLE (index l)
+// with the m-pairs straddling it at l ± k; a pg spec lays each label's copies
+// out CONSECUTIVELY (`pgBlockStarts`). Already at l = 1 under C4 the invariant
+// direction is at index 1 on the O(3) side and at index 0 on the pg side, and
+// no ORDERING of the restricted spec can fix it, because the E pair is SPLIT by
+// the A component while pg blocks are contiguous by construction. The change of
+// basis is therefore a genuine permutation (with signs, since an m-pair block
+// need not carry the table's chosen orientation of R₉₀), which is why stage A3
+// ships this table and NOT a type-level identity view. A value-level
+// `ml.restrict` would have to emit that permutation.
+
+/// The geometric embedding of a registered point group into O(3): what each
+/// generator IS, as a 3×3 orthogonal integer matrix. `GenMats` is PARALLEL to
+/// the group's `GenNames`, exactly as every label's `Gens` is.
+type PgEmbedding = {
+    Group: string
+    GenMats: int[][] list
+    /// What each generator is, in words. Diagnostics and review only — but it
+    /// is the reviewable half of the convention, so it is not optional.
+    GenWhat: string list
+}
+
+/// R_z(90°) — the four-fold axis of both shipped groups, in the standard
+/// (x, y, z) Cartesian basis.
+let private rotZ90 : int[][] = [| [| 0; -1; 0 |]; [| 1; 0; 0 |]; [| 0; 0; 1 |] |]
+
+/// R_x(180°) = diag(1, −1, −1) — a two-fold AXIS along x, not a mirror. This
+/// single choice is what makes the shipped D4 the proper group 422 rather than
+/// C4v, and it is also what fixes the B1/B2 label assignment (with the two-fold
+/// axis along x, the abstract table's B1 — r ↦ −1, s ↦ +1 — is the x²−y²
+/// direction and B2 is xy; along a face diagonal the two swap). Nothing below
+/// depends on which of the two it is EXCEPT that assignment: the branching
+/// multiset is the same either way.
+let private rotX180 : int[][] = [| [| 1; 0; 0 |]; [| 0; -1; 0 |]; [| 0; 0; -1 |] |]
+
+let private embeddings : PgEmbedding list =
+    [ { Group = "C4"; GenMats = [ rotZ90 ]; GenWhat = [ "R_z(90 deg)" ] }
+      { Group = "D4"; GenMats = [ rotZ90; rotX180 ]; GenWhat = [ "R_z(90 deg)"; "R_x(180 deg)" ] } ]
+
+/// The embedding of a registered group. Unregistered = compiler bug, exactly
+/// like `pointGroup`: a group in the registry with no embedding is a group
+/// whose restriction is undefined, and the two lists are meant to stay the same
+/// length.
+let pgEmbedding (name: string) : PgEmbedding =
+    match embeddings |> List.tryFind (fun e -> e.Group = name) with
+    | Some e -> e
+    | None ->
+        failwithf "internal: point group '%s' has no declared O(3) embedding — every registered group needs one before its restriction is defined (the registry is {%s})"
+            name (String.concat ", " pointGroupNames)
+
+/// det of a 3×3 integer matrix.
+let private det3 (m: int[][]) : int =
+    m.[0].[0] * (m.[1].[1] * m.[2].[2] - m.[1].[2] * m.[2].[1])
+    - m.[0].[1] * (m.[1].[0] * m.[2].[2] - m.[1].[2] * m.[2].[0])
+    + m.[0].[2] * (m.[1].[0] * m.[2].[1] - m.[1].[1] * m.[2].[0])
+
+let private geoCache = Dictionary<string, (PgElement * int[][]) list>()
+
+/// The group's elements paired with the 3×3 matrix each one IS in ℝ³ — the
+/// bridge between the abstract table and O(3), CERTIFIED on first use:
+///
+///   1. every generator matrix is 3×3 and orthogonal (MᵀM = Id);
+///   2. the word map is MULTIPLICATIVE — for every pair of elements the
+///      geometric matrix of their abstract product is the product of their
+///      geometric matrices. This is what makes "evaluate the element's word in
+///      the geometric generators" a well-defined homomorphism rather than a
+///      property of the particular word the BFS happened to hand out;
+///   3. the map is FAITHFUL — |image| = |G|. A non-faithful embedding embeds a
+///      QUOTIENT, and restricting along it would decompose the wrong group
+///      under the right group's labels.
+let embeddedElements (grp: PointGroup) : (PgElement * int[][]) list =
+    match geoCache.TryGetValue grp.Name with
+    | true, v -> v
+    | _ ->
+        let emb = pgEmbedding grp.Name
+        if List.length emb.GenMats <> List.length grp.GenNames then
+            failwithf "internal: the O(3) embedding of %s declares %d generator matrices but the group has %d generators %A"
+                grp.Name (List.length emb.GenMats) (List.length grp.GenNames) grp.GenNames
+        emb.GenMats
+        |> List.iteri (fun gi m ->
+            if not (matIsSquare 3 m) then
+                failwithf "internal: the O(3) embedding of generator %s of %s is not 3 x 3"
+                    (List.item gi grp.GenNames) grp.Name
+            if not (matEq (matMul (matTranspose m) m) (matId 3)) then
+                failwithf "internal: the O(3) embedding of generator %s of %s is not orthogonal — it is not an element of O(3)"
+                    (List.item gi grp.GenNames) grp.Name)
+        let els = groupElements grp
+        let geoOf (w: int list) =
+            w |> List.fold (fun acc gi -> matMul acc (List.item gi emb.GenMats)) (matId 3)
+        let pairs = els |> List.map (fun el -> (el, geoOf el.Word))
+        // (2) MULTIPLICATIVITY
+        let byAbs = Dictionary<string, int[][]>()
+        for (el, g) in pairs do byAbs.[tupleKey el.Mats] <- g
+        for (a, ga) in pairs do
+            for (b, gb) in pairs do
+                let prodKey = tupleKey (List.map2 matMul a.Mats b.Mats)
+                match byAbs.TryGetValue prodKey with
+                | true, gp ->
+                    if not (matEq gp (matMul ga gb)) then
+                        failwithf "internal: the O(3) embedding of %s is not a homomorphism — the geometric matrix of %s * %s is not the product of their geometric matrices"
+                            grp.Name (wordName grp a.Word) (wordName grp b.Word)
+                | _ ->
+                    failwithf "internal: the enumerated elements of %s are not closed under multiplication at the embedding step (%s * %s)"
+                        grp.Name (wordName grp a.Word) (wordName grp b.Word)
+        // (3) FAITHFULNESS
+        let images = pairs |> List.map (fun (_, g) -> tupleKey [ g ]) |> List.distinct
+        if List.length images <> grp.Order then
+            failwithf "internal: the O(3) embedding of %s has image of size %d but |G| = %d — it embeds a QUOTIENT, and restricting along it would decompose the wrong group"
+                grp.Name (List.length images) grp.Order
+        geoCache.[grp.Name] <- pairs
+        pairs
+
+/// χ_l of a PROPER rotation whose 3×3 trace is t, by the Clebsch–Gordan
+/// recurrence χ_1·χ_l = χ_(l−1) + χ_l + χ_(l+1), i.e.
+/// χ_(l+1) = (t − 1)·χ_l − χ_(l−1) with χ_0 = 1 and χ_1 = t = 1 + 2cos θ.
+/// Exact in t; no angle is ever named, so there is no float and no half-angle
+/// convention to get wrong.
+let private chiRot (l: int) (t: int) : int =
+    if l < 0 then failwithf "internal: MLPointSpec.chiRot negative l (%d)" l
+    if l = 0 then 1
+    else
+        let mutable prev = 1
+        let mutable cur = t
+        for _ in 2 .. l do
+            let nxt = (t - 1) * cur - prev
+            prev <- cur
+            cur <- nxt
+        cur
+
+/// χ of the O(3) irrep (l, parity) at an element of O(3) given as a 3×3
+/// orthogonal integer matrix. O(3) ≅ SO(3) × {±I}, so an improper g factors as
+/// (−I)·R with R = −g proper, and ρ_(l,p)(−I) = (−1)^p·Id — which is the whole
+/// of the parity handling, and is DEAD CODE on the shipped (proper) roster.
+let o3Character (l: int) (parity: int) (g: int[][]) : int =
+    if not (matIsSquare 3 g) then
+        failwithf "internal: MLPointSpec.o3Character expects a 3 x 3 matrix"
+    if parity <> 0 && parity <> 1 then
+        failwithf "internal: MLPointSpec.o3Character parity must be 0 (even) or 1 (odd), got %d" parity
+    let d = det3 g
+    if d <> 1 && d <> -1 then
+        failwithf "internal: MLPointSpec.o3Character was handed a matrix of determinant %d — not an element of O(3)" d
+    let chi = chiRot l (matTrace (if d = 1 then g else matNeg g))
+    if d = 1 || parity = 0 then chi else -chi
+
+let private restrictCache = Dictionary<string * int * int, PgSpec>()
+
+/// THE BRANCHING RULE for ONE O(3) irrep: D^(l, parity) restricted along the
+/// declared embedding, as multiplicities over the group's own labels, in TABLE
+/// order and with zero multiplicities dropped.
+///
+///     m_μ = ( (1/|G|)·Σ_g χ_(l,p)(g)·χ_μ(g) ) / e_μ
+///
+/// (real characters, so the conjugation in the textbook formula is the
+/// identity; e_μ is the Frobenius–Schur correction of the header).
+///
+/// THREE ASSERTS, all integer-exact, all compiler-bug guards:
+///   * the inner product is divisible by |G| and then by e_μ — a non-integer
+///     multiplicity means the embedding, the table or the character recurrence
+///     is wrong, and no user input can cause it;
+///   * DIMENSION CLOSURE, Σ m_μ·d_μ = 2l+1 — the trap that catches a dropped FS
+///     correction (it doubles a complex-type label and overshoots) and a
+///     missing label;
+///   * THE CHARACTER CROSS-CHECK, at EVERY element: the trace of
+///     `pgElementMatrix` on the RESULT must equal χ_(l,p) there. This is the
+///     numerical guard against convention drift, and it deliberately routes
+///     through the emitted LAYOUT rather than re-summing multiplicities, so the
+///     block-diagonal assembly the rest of the pipeline consumes is what gets
+///     checked rather than the arithmetic that produced it.
+let restrictIrrep (grp: PointGroup) (l: int) (parity: int) : PgSpec =
+    if l < 0 then failwithf "internal: MLPointSpec.restrictIrrep negative l (%d)" l
+    if parity <> 0 && parity <> 1 then
+        failwithf "internal: MLPointSpec.restrictIrrep parity must be 0 or 1, got %d" parity
+    match restrictCache.TryGetValue ((grp.Name, l, parity)) with
+    | true, v -> v
+    | _ ->
+        let pairs = embeddedElements grp
+        let spec =
+            grp.Irreps
+            |> List.mapi (fun i ir ->
+                let e = endDim ir.Fs
+                let total =
+                    pairs
+                    |> List.sumBy (fun (el, g) ->
+                        o3Character l parity g * matTrace (List.item i el.Mats))
+                if total % grp.Order <> 0 then
+                    failwithf "internal: the character inner product of D^(l=%d, parity=%d) restricted to %s against label %s is %d/%d, not an integer"
+                        l parity grp.Name ir.Name total grp.Order
+                let ip = total / grp.Order
+                if ip % e <> 0 then
+                    failwithf "internal: <chi of (l=%d, parity=%d) restricted to %s, chi_%s> = %d is not divisible by e = %d — over R the multiplicity is the inner product DIVIDED by dim End, so a non-divisible value means the table's FS type is wrong"
+                        l parity grp.Name ir.Name ip e
+                if ip < 0 then
+                    failwithf "internal: D^(l=%d, parity=%d) restricted to %s gives label %s NEGATIVE multiplicity %d"
+                        l parity grp.Name ir.Name (ip / e)
+                (ir.Name, ip / e))
+            |> List.filter (fun (_, m) -> m > 0)
+        let dimSum = spec |> List.sumBy (fun (nm, m) -> m * (pgIrrep grp nm).DimR)
+        if dimSum <> 2 * l + 1 then
+            failwithf "internal: D^(l=%d, parity=%d) restricted to %s decomposed to %d dimensions but the irrep has %d — a dropped Frobenius-Schur correction reads exactly like this"
+                l parity grp.Name dimSum (2 * l + 1)
+        for (el, g) in pairs do
+            let want = o3Character l parity g
+            let got = matTrace (pgElementMatrix grp spec el)
+            if got <> want then
+                failwithf "internal: the restriction of D^(l=%d, parity=%d) to %s reconstructs character %d at element %s, but the O(3) character there is %d — the branching table and the element action disagree"
+                    l parity grp.Name got (wordName grp el.Word) want
+        restrictCache.[(grp.Name, l, parity)] <- spec
+        spec
+
+/// THE BRANCHING RULE for a whole O(3) spec, given as raw (l, parity, mult)
+/// triples. Raw triples rather than `MLSpec.Spec` on purpose: this module is
+/// dependency-free of MLSpec by design (§3.6's twin-not-reroute discipline),
+/// and the caller that has a `Spec` in hand — MLStatics — already opens both.
+///
+/// Multiplicities AGGREGATE across blocks (the `genericAggregate` rule: a spec
+/// is an ordered list of blocks, but the restricted module only knows how many
+/// copies of each label it holds in total), and the result is in the group's
+/// TABLE order — the same canonicalization discipline `tpSpec` and `powerSpec`
+/// use, so the answer is stable to write in an annotation.
+let restrictSpec (grp: PointGroup) (entries: (int * int * int) list) : PgSpec =
+    let acc =
+        (Map.empty, entries)
+        ||> List.fold (fun m (l, parity, mult) ->
+            if mult < 1 then
+                failwithf "internal: MLPointSpec.restrictSpec was handed a block of multiplicity %d" mult
+            restrictIrrep grp l parity
+            |> List.fold (fun m2 (nm, k) ->
+                m2 |> Map.change nm (fun cur -> Some (defaultArg cur 0 + k * mult))) m)
+    let out =
+        grp.Irreps
+        |> List.choose (fun ir ->
+            match Map.tryFind ir.Name acc with
+            | Some m when m > 0 -> Some (ir.Name, m)
+            | _ -> None)
+    let want = entries |> List.sumBy (fun (l, _, mult) -> mult * (2 * l + 1))
+    let got = pgTotalDim grp out
+    if got <> want then
+        failwithf "internal: restricting a spec of dim %d to %s produced a module of dim %d" want grp.Name got
+    out
