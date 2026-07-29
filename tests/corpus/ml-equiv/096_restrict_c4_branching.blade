@@ -44,6 +44,13 @@ import ml as ml
 // the O(3) side and at index 0 on the C4 side, and section 4 below reads index
 // 0 precisely to pin that. Corpus 048 is still a rejection for this reason, and
 // corpus 099 is the trap it sets.
+//
+// SHARPENED (exploration-equivariant-bijections.md): the two layouts differ by
+// an exact SIGNED PERMUTATION — constructed and verified against
+// pgElementMatrix at every l <= 8 for both registered groups — so the reading
+// 048/099 refuse is repairable by a zero-copy view, and the decided surface
+// ships it as an explicit `ml.restrict`. The refusals stand until that view
+// exists; the table below is the branching half, already exact.
 // ============================================================================
 
 // --- 1. THE BRANCHING TABLE, l = 0 .. 4 -------------------------------------

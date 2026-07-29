@@ -26,6 +26,14 @@ import ml as ml
 // an IrrepsIdx parameter under a point-group certificate is still refused
 // (corpus 048).
 //
+// SHARPENED (exploration-equivariant-bijections.md): that permutation has now
+// been constructed and verified against pgElementMatrix at every l <= 8 for
+// both registered groups — the IDENTITY view this file traps is unsound, but
+// the SIGNED-PERMUTATION view is exact, and the decided surface ships it as an
+// explicit `ml.restrict` compiled to a zero-copy view. This rejection stands
+// until that view exists; what it refuses is pretending the permutation is
+// the identity, not the possibility of a view.
+//
 // THE REJECTION BELOW IS THAT PERMUTATION, CAUGHT IN THE ACT. The body reads
 // index 1 of a value declared at the RESTRICTED type and calls it an invariant.
 // Index 1 would be the invariant if the buffer were still in the O(3) layout;

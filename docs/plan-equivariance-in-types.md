@@ -282,7 +282,25 @@ Three channels, one of them new in kind rather than just in volume:
   (e.g. via a dump flag) or reads a suggestion that now reflects the
   stronger evidence.
 
-### 6.3 What restriction adds (stage A3) — two candidate surfaces, undecided
+### 6.3 What restriction adds (stage A3) — DECIDED 2026-07-28
+
+DECISION (user, 2026-07-28, on the strength of
+`exploration-equivariant-bijections.md`): **A+B sequenced.** Explicit
+`ml.restrict` ships as the mechanism, implemented as a ZERO-COPY VIEW
+where the signed-permutation table exists (the aligned axial class —
+measured: both shipped groups, all l ≤ 8, exact) and as a real change of
+basis where it does not (non-axial l ≥ 3, misaligned embeddings). The
+bijection verdict is computed AT GROUP REGISTRATION as a seventh
+integrity family and frozen beside the character table, so §6.4 q4's
+answer is "the verdict is mechanical data", not a principle or a per-pair
+call. The implicit signature-level license (surface (ii) below) is
+deferred as future sugar — a checker-inserted `ml.restrict` under an
+`ml.equiv(O3)` pin — gated on settling the weight-sizing spelling (the
+restricted spec must be nameable at the call site; the exploration's
+§6.3 sizing objection). The original two-surface analysis is kept below
+for the record.
+
+### 6.3-orig The two candidate surfaces, as originally drafted
 
 A3 gives an O(3)/SO(3)-typed value a POINT-GROUP view: given an
 `IrrepsIdx<spec>`-typed value and a registered point group `g`, the
