@@ -1,9 +1,27 @@
 # Plan: equivariance in types — the typecheck-resident deduction
 
-Status: DESIGN (not yet scheduled). Sequel to plan-transforms-as-types.md
-(stages 1-6 landed) and plan-equivariance-deduction.md (landed 2026-07-28).
-Goal: all equivariance disciplines live under one roof, at typecheck time,
-deduced the same way symmetry is — with the exact index types in hand.
+Status: PHASES A+B IN PROGRESS (2026-07-28); pause before C per review.
+Sequel to plan-transforms-as-types.md (stages 1-6 landed) and
+plan-equivariance-deduction.md (landed 2026-07-28). Goal: all equivariance
+disciplines live under one roof, at typecheck time, deduced the same way
+symmetry is — with the exact index types in hand.
+
+REVIEW DECISIONS (2026-07-28):
+1. Claim-as-deduced-attribute CONFIRMED, with a refinement that sharpens
+   §0 rather than bending it: a pin IS type-relevant — as a POLYMORPHISM
+   LICENSE. `comm` on a kernel licenses the compact retyping of one and
+   the same function (`... -> Idx<M> -> Idx<N> -> T` vs
+   `... -> SymIdx<2,M> -> SymIdx<2,N> -> T` are two signatures of a single
+   commutative function; the pin permits the dimension transposition).
+   Post-A3, an `ml.equiv(O3)` claim licenses viewing the function at
+   restricted subgroup types the same way. So: claims live in SIGNATURES
+   as licenses for type transformations — they are part of the type in
+   the broad sense — but they are not solved per-expression by the
+   unifier. The lattice deduces them; the pin exercises the license.
+2. `IrrepsIdx` stays GROUP-LESS (A2 confirmed). An API-shape discussion
+   is owed once A+B land — see §6 (draft surface for that conversation).
+3. Phase C approved in principle; execution PAUSES after A and B for
+   review. B alone delivers both §0 payoffs.
 
 ## 0. The thesis: split the rep DATA from the rep CLAIM
 

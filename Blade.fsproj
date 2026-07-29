@@ -26,6 +26,7 @@
     <Compile Include="src/providers/CsvProvider.fs" />
     <Compile Include="src/TypedAst.fs" />
     <Compile Include="src/Deduce.fs" />
+    <Compile Include="src/DeduceRep.fs" />
     <Compile Include="src/StaticEval.fs" />
     <!-- Constrained records as index types — the SEMANTIC half: the static
          and index-eligibility fences, and the ENUMERATION reading of a
@@ -215,6 +216,7 @@
     <Compile Include="tests/Test_Spans.fs" />
     <Compile Include="tests/Test_Diagnostics.fs" />
     <Compile Include="tests/Test_DiagCorpus.fs" />
+    <Compile Include="tests/Test_RepDifferential.fs" />
     <Compile Include="tests/Oracles.fs" />
     <Compile Include="tests/Test_Oracles.fs" />
     <Compile Include="tests/Test_WignerTables.fs" />
