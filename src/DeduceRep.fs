@@ -100,6 +100,40 @@ type RepStatusT =
     | TOpaque
     | TBottom
 
+/// WHY a walk declined, and where.
+///
+/// `TBottom` itself stays a payload-free lattice element ON PURPOSE. It is
+/// compared by structural equality at a dozen sites, it is the value
+/// `DisciplineKit.StatusOps.Bottom` hands to a walker shared with two other
+/// disciplines, and deduction treats every decline as the same silence — so
+/// putting a cause inside the constructor would ripple through the kit and
+/// through two disciplines that do not want it, to no benefit for the thing
+/// the lattice is FOR.
+///
+/// What was actually missing is narrower: the walker HAS ALREADY DECIDED at
+/// each origination site, and the reason was going in the bin. So the reason
+/// rides beside the lattice, in a first-write-wins slot on `RepCtx` — one slot
+/// per walk, written by the site that ORIGINATES a decline and never by the
+/// arms that merely propagate one upward, so what comes out is the DEEPEST
+/// reason and not the shallowest.
+///
+/// THIS IS ANALYSIS, NOT CHECKING. Nothing reads this slot to decide a
+/// verdict: it refines the abstention census's reason strings and is available
+/// to tooling that wants to say why a function was not proposed. Every
+/// accept/reject in the compiler is byte-for-byte what it was without it.
+type DeclineCause = {
+    /// One sentence, in the walker's own vocabulary. Not the seam's message —
+    /// checking stays at the seam (docs/census-rejection-parity.md §7), and
+    /// pretending otherwise would invite the two to be compared as if they
+    /// were the same text.
+    Why: string
+    /// The offending sub-expression. `None` for the two rule sites the generic
+    /// kit calls without one (`CovAppliedAsCallee`, `FormerConclusion`);
+    /// widening the kit's `StructRules` to carry a span would change a record
+    /// three disciplines share, which is not worth a diagnostic nicety.
+    Where: Span option
+}
+
 /// The group hypothesis. GROUP-LESS index types (plan A2, review decision 2):
 /// the group is NOT in the type, so it is a hypothesis the candidate ladder
 /// supplies and the walker carries.
@@ -262,11 +296,24 @@ let rec private shapeOfType (resolve: IRType -> IRType) (ty: IRType) : InvShapeT
 /// asymmetry, preserved verbatim); under `Point g` it is `PgIrrepsIdx<g, _>`
 /// and both an `IrrepsIdx` slot and another group's `PgIrrepsIdx` are
 /// refusals (TOpaque — the seam's `Error`, which skips the function).
-let rec classifyType (g: GroupT) (resolve: IRType -> IRType) (ty: IRType) : RepStatusT =
+/// THE CLASSIFIER'S CORE, with the TOpaque arms' reasons attached: `Error why`
+/// IS `TOpaque`, and `why` is the sentence the arm's soundness comment already
+/// carried in prose.
+///
+/// The split exists because a `TOpaque` means two different things depending on
+/// where it lands. In an EXPRESSION position it is an absence — "nothing
+/// established" — and propagates harmlessly; `classifyType` below is that
+/// reading and is what every expression-position caller uses. In a SIGNATURE
+/// position it is a REFUSAL: it skips the whole function, at a specific
+/// parameter, for a specific reason the classifier had in hand and threw away
+/// (docs/census-rejection-parity.md §3 family D). `classifySignature` reads the
+/// reason; nothing else does, and no verdict anywhere depends on it.
+let rec classifyTypeR (g: GroupT) (resolve: IRType -> IRType) (ty: IRType)
+    : Result<RepStatusT, string> =
     match resolve ty with
-    | IRTScalar _ -> TInv TInvScalar
-    | IRTUnitAnnotated (inner, _) -> classifyType g resolve inner
-    | IRTIdxTagged (inner, _) -> classifyType g resolve inner
+    | IRTScalar _ -> Ok (TInv TInvScalar)
+    | IRTUnitAnnotated (inner, _) -> classifyTypeR g resolve inner
+    | IRTIdxTagged (inner, _) -> classifyTypeR g resolve inner
     | ArrayElem arr ->
         let idxs = arr.IndexTypes
         let n = List.length idxs
@@ -278,27 +325,38 @@ let rec classifyType (g: GroupT) (resolve: IRType -> IRType) (ty: IRType) : RepS
             // An O(3) irreps axis under a point-group certificate needs
             // `ml.restrict`'s branching rules (plan A3) to say anything:
             // until those land, decline rather than guess.
-            | _ :: _, _ -> TOpaque
-            | [], [ (gn, _) ] when gn <> pg -> TOpaque
-            | [], [ (_, entries) ] when n = 1 -> TRep (TPgSpecT (pg, entries))
-            | [], [] -> TInv (TInvAgg (Some n))
-            | _ -> TOpaque
+            | _ :: _, _ ->
+                Error (sprintf "it carries an O(3) IrrepsIdx axis, but the certificate names the point group %s; reading an O(3) module as a %s-module needs a restriction this checker does not have" pg pg)
+            | [], [ (gn, _) ] when gn <> pg ->
+                Error (sprintf "its PgIrrepsIdx axis names point group %s while the certificate names %s, and certificates do not transfer between groups — this checker knows each registered group's frozen table and no map between two of them" gn pg)
+            | [], [ (_, entries) ] when n = 1 -> Ok (TRep (TPgSpecT (pg, entries)))
+            | [], [] -> Ok (TInv (TInvAgg (Some n)))
+            | _ ->
+                Error (sprintf "it is a multi-index array mixing a PgIrrepsIdx axis with %d other axis/axes, which is outside the v1 fragment" (n - List.length pgs))
         | GO3 | GSO3 ->
             match irreps with
             // No irreps axis: a plain (or pg-tagged) buffer is invariant.
-            | [] -> TInv (TInvAgg (Some n))
-            | [ triples ] when n = 1 -> TRep (TO3Spec triples)
+            | [] -> Ok (TInv (TInvAgg (Some n)))
+            | [ triples ] when n = 1 -> Ok (TRep (TO3Spec triples))
             // Multi-index arrays mixing an irreps axis with others are
             // outside the v1 fragment, exactly as at the seam.
-            | _ -> TOpaque
+            | _ ->
+                Error (sprintf "it is a %d-index array carrying %d IrrepsIdx axis/axes; only a single-axis irreps array is inside the v1 fragment" n (List.length irreps))
     // A named type (struct/sum) is invariant but of unestablished shape, so
     // it may never scale a rep. Mirror of the seam's `TyNamed` arm.
-    | IRTNamed _ -> TInv TInvShapeUnknown
+    | IRTNamed _ -> Ok (TInv TInvShapeUnknown)
     // Everything else — inference vars, arity-polymorphic packs, tuples,
     // function-typed params, loops, dists — is unclassifiable. TOpaque in a
     // SIGNATURE position skips the function (see `classifySignature`); it is
     // never a claim.
-    | _ -> TOpaque
+    | _ -> Error "its type is not one the classifier reads (an inference variable, an arity-polymorphic pack, a tuple, a function type, a loop or a dist)"
+
+/// The expression-position reading: `classifyTypeR` with the reason dropped.
+/// Byte-for-byte the classification it always was.
+let classifyType (g: GroupT) (resolve: IRType -> IRType) (ty: IRType) : RepStatusT =
+    match classifyTypeR g resolve ty with
+    | Ok s -> s
+    | Error _ -> TOpaque
 
 /// Is this type still open at decl close? Used ONLY for the skipped-
 /// polymorphic accounting — the late/monomorphized tier is a named follow-up
@@ -403,7 +461,27 @@ type private RepCtx = {
     /// that a documented divergence can never be reported as a compiler bug.
     /// Deduction's results are untouched by it (it is always false there).
     Checking: bool
+    /// The FIRST decline this walk originated. See `DeclineCause`. Written only
+    /// by `decline` below, read only after the walk, by nothing that decides a
+    /// verdict. One cell per `RepCtx`, and a `RepCtx` is built fresh per
+    /// (function, group hypothesis) attempt, so there is no cross-walk bleed.
+    Decline: DeclineCause option ref
 }
+
+/// Answer `TBottom`, recording WHY if this walk has not already recorded a
+/// deeper reason. FIRST WRITE WINS: the walk is a bottom-up fold, so the first
+/// site to originate a decline is the innermost one, and the arms above it
+/// propagate `TBottom` without calling this.
+let private decline (ctx: RepCtx) (span: Span) (why: string) : RepStatusT =
+    if (ctx.Decline.Value).IsNone then
+        ctx.Decline.Value <- Some { Why = why; Where = Some span }
+    TBottom
+
+/// `decline` for the two rule sites the generic kit invokes without a span.
+let private declineNoSpan (ctx: RepCtx) (why: string) : RepStatusT =
+    if (ctx.Decline.Value).IsNone then
+        ctx.Decline.Value <- Some { Why = why; Where = None }
+    TBottom
 
 // ============================================================================
 // THE TRANSFER TABLE
@@ -495,13 +573,16 @@ let private repOps (ctx: RepCtx) : DisciplineKit.StatusOps<RepStatusT> = {
 
 /// The two questions the kit's structural arms must ask the DISCIPLINE, because
 /// their shape is shared and their verdict is not.
-let private repStructRules : DisciplineKit.StructRules<RepStatusT> = {
+let private repStructRules (ctx: RepCtx) : DisciplineKit.StructRules<RepStatusT> = {
     // Application syntax over a rep-bound variable is a component read, same
     // verdict as TExprIndex: the components of an l>0 block are the
     // basis-dependent numbers this whole discipline exists to refuse. (Galilean
     // answers the opposite here — its elements are per-component boost-variant —
     // which is why this is a rule and not a structural verdict.)
-    CovAppliedAsCallee = (fun _ -> TBottom)
+    CovAppliedAsCallee =
+        (fun _ ->
+            declineNoSpan ctx
+                "a representation-typed value is read at a component offset in application position, and the components of an l > 0 block are basis-dependent numbers")
 
     // The former-application conclusion. Reading a per-element kernel as a
     // whole-array operation is valid exactly when every step is COMPONENTWISE
@@ -525,7 +606,11 @@ let private repStructRules : DisciplineKit.StructRules<RepStatusT> = {
             | TBottom, _ -> TBottom
             | TRep a, TRep b when a = b && elementwise -> TRep a
             | TInv _, TInv sh -> TInv sh
-            | _ -> if anyRepSrc then TBottom else TOpaque)
+            | _ ->
+                if anyRepSrc then
+                    declineNoSpan ctx
+                        "a former reads a representation-typed source, but its kernel is not componentwise-uniform linear arithmetic whose conclusion matches the former's own type"
+                else TOpaque)
 }
 
 /// Project a stored equiv signature into the shape the kit's call rule reads.
@@ -534,7 +619,7 @@ let private toCallSig (sg: RepSigT) : DisciplineKit.CallSig<GroupT, RepStatusT> 
 
 let private repWalkCtx (ctx: RepCtx) : DisciplineKit.WalkCtx<GroupT, RepStatusT> = {
     Ops = repOps ctx
-    Rules = repStructRules
+    Rules = repStructRules ctx
     Hyp = ctx.Group
     HypEq = (=)
     Certified = (fun id -> ctx.Certified id |> Option.map toCallSig)
@@ -580,6 +665,10 @@ let private statusOf (ctx: RepCtx) : Map<IRId, RepStatusT> -> TypedExpr -> RepSt
         /// Shape read off the node's own (resolved) type — the typed win over
         /// the seam's syntactic shape guessing.
         let nodeShape () = shapeOfType ctx.Resolve expr.Type
+        /// Decline HERE, recording why. Used only where this arm ORIGINATES a
+        /// decline; an arm that merely forwards a sub-expression's `TBottom`
+        /// writes plain `TBottom` so the deeper cause survives.
+        let dcl (why: string) = decline ctx expr.Span why
 
         /// An aggregate constructor. SOUNDNESS: packing a rep into a literal
         /// aggregate loses its block structure — the aggregate does not
@@ -589,7 +678,8 @@ let private statusOf (ctx: RepCtx) : Map<IRId, RepStatusT> -> TypedExpr -> RepSt
         let aggOf (es: TypedExpr list) =
             let sts = es |> List.map j
             if sts |> List.exists ((=) TBottom) then TBottom
-            elif sts |> List.exists isRepT then TBottom
+            elif sts |> List.exists isRepT then
+                dcl "a representation-typed value is packed into a literal aggregate, which loses its block structure — the aggregate does not transform as the representation"
             elif sts |> List.exists ((=) TOpaque) then TOpaque
             else TInv (TInvAgg None)
 
@@ -608,18 +698,23 @@ let private statusOf (ctx: RepCtx) : Map<IRId, RepStatusT> -> TypedExpr -> RepSt
              // SOUNDNESS: the outer-product form cross-iterates, so the result
              // has a HIGHER RANK than either operand and cannot be the rep it
              // was built from, whatever the operator.
-             | (TRep _, _, _ | _, TRep _, _) when mode <> Elementwise -> TBottom
+             | (TRep _, _, _ | _, TRep _, _) when mode <> Elementwise ->
+                 dcl "the outer-product form cross-iterates, so its result has a higher rank than either operand and cannot be the representation it was built from"
              // SOUNDNESS (Rep +/- Rep): the action is LINEAR, so D(x+y) = Dx +
              // Dy. Requires IDENTICAL specs — different specs are different D's
              // and the sum transforms under neither. THIS IS THE ARM THAT MAKES
              // THE RULES PER-DISCIPLINE: galilean rejects it outright (adding
              // two boost-variant values doubles the U0 coefficient).
-             | TRep s1, TRep s2, (OpAdd | OpSub) -> if s1 = s2 then TRep s1 else TBottom
+             | TRep s1, TRep s2, (OpAdd | OpSub) ->
+                 if s1 = s2 then TRep s1
+                 else
+                     dcl (sprintf "adding or subtracting two representations with DIFFERENT laws (%s and %s): the sum transforms under neither" (repStrT s1) (repStrT s2))
              // Elementwise product of two reps is the Clebsch-Gordan
              // contraction's job (ml.tensor_product), not a pointwise multiply:
              // decline. (Perm ADMITS this one — a permutation commutes with
              // every pointwise map.)
-             | TRep _, TRep _, _ -> TBottom
+             | TRep _, TRep _, _ ->
+                 dcl "an elementwise product of two representation-typed values is not equivariant — that contraction is the Clebsch-Gordan one, not a pointwise multiply"
              // SOUNDNESS (scalar scaling): a SCALAR commutes with every block of
              // the action, so D(cx) = cD(x). An invariant ARRAY of the same
              // extent scales each component independently — a diagonal matrix
@@ -627,7 +722,8 @@ let private statusOf (ctx: RepCtx) : Map<IRId, RepStatusT> -> TypedExpr -> RepSt
              // must be PROVEN; an unestablished shape declines.
              | TRep s, TInv TInvScalar, (OpMul | OpDiv) -> TRep s
              | TInv TInvScalar, TRep s, OpMul -> TRep s
-             | (TRep _, TInv _, _) | (TInv _, TRep _, _) -> TBottom
+             | (TRep _, TInv _, _) | (TInv _, TRep _, _) ->
+                 dcl "only a provably SCALAR invariant may scale a representation-typed value under * or /, because a scalar is the only invariant that commutes with every block of the action"
              | TInv shl, TInv shr, _ ->
                  TInv (if mode = Elementwise then binShapeT shl shr else TInvShapeUnknown)
              // Nothing established on one side: nothing claimed for the result.
@@ -657,7 +753,8 @@ let private statusOf (ctx: RepCtx) : Map<IRId, RepStatusT> -> TypedExpr -> RepSt
         | TExprUnaryOp (OpNeg, inner) -> j inner
         | TExprUnaryOp (_, inner) ->
             (match j inner with
-             | TRep _ -> TBottom
+             | TRep _ ->
+                 dcl "a NONLINEAR unary operator is applied to a representation-typed value; only a linear map transports a representation (gate it with ml.gated, or extract invariants with ml.scalars / ml.norms)"
              | s -> s)
 
         // SOUNDNESS: whole-array negation is the linear map -I, which commutes
@@ -667,7 +764,11 @@ let private statusOf (ctx: RepCtx) : Map<IRId, RepStatusT> -> TypedExpr -> RepSt
         // Complex conjugation does NOT commute with a complex representation in
         // general (it conjugates the matrix): decline on a rep, pass through
         // otherwise.
-        | TExprArrayConjugate a -> (match j a with TRep _ -> TBottom | s -> s)
+        | TExprArrayConjugate a ->
+            (match j a with
+             | TRep _ ->
+                 dcl "complex conjugation of a representation-typed value conjugates the representation matrix, so it does not commute with the action in general"
+             | s -> s)
 
         // --- reads --------------------------------------------------------
         // SOUNDNESS: `Inv` means the value is HELD FIXED. A value that does not
@@ -702,16 +803,22 @@ let private statusOf (ctx: RepCtx) : Map<IRId, RepStatusT> -> TypedExpr -> RepSt
                       (match DisciplineKit.staticIntOf i with
                        | Some k when Set.contains k (invariantOffsetsT ctx.Group spec) ->
                            TInv TInvScalar
-                       | _ -> TBottom)
-                  | _ -> TBottom)
+                       | Some k ->
+                           dcl (sprintf "raw indexing at offset %d reads a basis-dependent component of an l > 0 block of %s" k (repStrT (TO3Spec spec)))
+                       | None ->
+                           dcl "indexing a representation-typed value needs a LITERAL offset this walker can place inside a trivial block; a computed index could land anywhere")
+                  | _ ->
+                      dcl "only a single-offset read into a representation-typed value is modelled")
              // Point-group reps: see `invariantOffsetsT` — the trivial-LABEL
              // table is out of compile-order reach, so no offset is claimed.
-             | TRep _ -> TBottom
+             | TRep _ ->
+                 dcl "raw indexing into a point-group representation: which labels are trivial is registry data this module cannot reach in compile order, so no offset is claimed invariant"
              | TOpaque -> TOpaque
              | TInv _ ->
                  if idxs |> List.forall (fun i -> isInvT (j i))
                  then TInv (nodeShape ())
-                 else TBottom)
+                 else
+                     dcl "an invariant aggregate is indexed by a selector that is not itself invariant")
 
         // --- reduction ----------------------------------------------------
         // SOUNDNESS (the polarity note): a fold over a rep sums BASIS-DEPENDENT
@@ -723,7 +830,8 @@ let private statusOf (ctx: RepCtx) : Map<IRId, RepStatusT> -> TypedExpr -> RepSt
             let si = match init with Some i -> j i | None -> TInv TInvScalar
             (match ss, si with
              | TBottom, _ | _, TBottom -> TBottom
-             | TRep _, _ | _, TRep _ -> TBottom
+             | TRep _, _ | _, TRep _ ->
+                 dcl "a reduction folds over the BASIS-DEPENDENT components of a representation; the sum of the components of an l > 0 value is not an invariant (the norm is)"
              | TInv _, TInv _ -> TInv TInvScalar
              | _ -> TOpaque)
 
@@ -757,16 +865,41 @@ let private statusOf (ctx: RepCtx) : Map<IRId, RepStatusT> -> TypedExpr -> RepSt
 /// signature), BINDER id (the walker's env key), and ZONKED type.
 type RepParam = { PName: string; PId: IRId; PType: IRType }
 
-/// Classify a whole signature under a group hypothesis. `None` when ANY
+/// WHICH signature position refused, and why. The census's "cheapest close in
+/// the whole survey": `classifySignature` already knew both and collapsed them
+/// to a bare `None`.
+type SigRefusal = {
+    /// "parameter 'x'" or "the return type".
+    Position: string
+    /// `classifyTypeR`'s reason, phrased to follow the position: "…, because
+    /// <Why>".
+    Why: string
+}
+
+/// The rendered one-liner, for an abstain reason or a tooling tooltip.
+let sigRefusalStr (r: SigRefusal) : string = sprintf "%s does not classify: %s" r.Position r.Why
+
+/// Classify a whole signature under a group hypothesis. `Error` when ANY
 /// position is unclassifiable — the seam's `certSigOf -> Error` path, which
 /// keeps Propose ⊆ Check-accept: a proposal the checker would refuse at the
 /// signature is worse than no proposal.
+///
+/// PARAMETERS BEFORE THE RETURN, first failure wins — the same order the
+/// `||` short-circuit gave when this returned an option, so which position is
+/// blamed is not a new decision.
 let classifySignature (g: GroupT) (resolve: IRType -> IRType) (owner: string)
-                      (parms: RepParam list) (retTy: IRType) : RepSigT option =
-    let ps = parms |> List.map (fun p -> (p.PName, classifyType g resolve p.PType))
-    let r = classifyType g resolve retTy
-    if (ps |> List.exists (fun (_, s) -> s = TOpaque)) || r = TOpaque then None
-    else Some { Owner = owner; Group = g; Params = ps; Return = r }
+                      (parms: RepParam list) (retTy: IRType) : Result<RepSigT, SigRefusal> =
+    let ps = parms |> List.map (fun p -> (p.PName, classifyTypeR g resolve p.PType))
+    match ps |> List.tryPick (fun (n, r) -> match r with Error w -> Some (n, w) | Ok _ -> None) with
+    | Some (n, w) -> Error { Position = sprintf "parameter '%s'" n; Why = w }
+    | None ->
+        match classifyTypeR g resolve retTy with
+        | Error w -> Error { Position = "the return type"; Why = w }
+        | Ok r ->
+            Ok { Owner = owner
+                 Group = g
+                 Params = ps |> List.map (fun (n, r) -> (n, (match r with Ok s -> s | Error _ -> TOpaque)))
+                 Return = r }
 
 /// THE NON-VACUITY FILTER (the seam's, verbatim in intent): a signature with
 /// nothing rep-typed proposes nothing. `equiv(G)` on a scalar helper is
@@ -792,8 +925,8 @@ let recordCertified (certified: System.Collections.Generic.Dictionary<IRId, RepS
                     (groupName: string) (parms: RepParam list) (retTy: IRType) : unit =
     let g = groupOfName groupName
     match classifySignature g resolve owner parms retTy with
-    | Some sg -> certified.[funcId] <- sg
-    | None -> ()
+    | Ok sg -> certified.[funcId] <- sg
+    | Error _ -> ()
 
 // ============================================================================
 // PHASE C1 — declared-certificate VALIDATION
@@ -960,8 +1093,9 @@ let checkDeclaredRep (certified: System.Collections.Generic.Dictionary<IRId, Rep
     try
         let g = groupOfName groupName
         match classifySignature g resolve owner parms retTy with
-        | None -> RepAbstain "signature not classifiable by the typed classifier"
-        | Some sg ->
+        | Error e ->
+            RepAbstain (sprintf "signature not classifiable by the typed classifier: %s" (sigRefusalStr e))
+        | Ok sg ->
             let ctx = {
                 Group = g
                 Resolve = resolve
@@ -979,6 +1113,7 @@ let checkDeclaredRep (certified: System.Collections.Generic.Dictionary<IRId, Rep
                 Self = System.Int32.MinValue
                 DepHits = System.Collections.Generic.HashSet<IRId>()
                 Checking = true
+                Decline = ref None
             }
             let bodySt = statusOf ctx (
                 List.zip parms sg.Params
@@ -1001,8 +1136,18 @@ let checkDeclaredRep (certified: System.Collections.Generic.Dictionary<IRId, Rep
                 match EngineDischarge.tryDischarge resolve parms sg body with
                 | Some EngineConfirms -> RepConfirm
                 | Some (EngineRefutes _) | None -> RepAbstain why
+            // The decline's CAUSE, when a rule originated one. Nothing chooses
+            // a verdict from this — the arm below is `engineFallback` either
+            // way — it only makes the abstention census say which rule
+            // declined instead of lumping every decline under one bucket.
+            // Empty when the decline came out of the generic kit, which has no
+            // cause channel (see `DeclineCause`).
+            let declineReason () =
+                match ctx.Decline.Value with
+                | Some c -> sprintf "walker declined: %s" c.Why
+                | None -> "walker declined (outside the composition fragment)"
             match bodySt with
-            | TBottom -> engineFallback "walker declined (outside the composition fragment)"
+            | TBottom -> engineFallback (declineReason ())
             | TOpaque -> engineFallback "nothing established for the body"
             | _ when statusAgreesT bodySt sg.Return -> RepConfirm
             | TRep bs ->
@@ -1049,9 +1194,9 @@ let deduceFunctionRep (certified: System.Collections.Generic.Dictionary<IRId, Re
         /// signature, and walk the body against it.
         let attempt (g: GroupT) : (string * RepSigT * System.Collections.Generic.HashSet<IRId>) option =
             match classifySignature g resolve owner parms retTy with
-            | None -> None
-            | Some sg when isVacuous sg -> None
-            | Some sg ->
+            | Error _ -> None
+            | Ok sg when isVacuous sg -> None
+            | Ok sg ->
                 let gs = groupStrT g
                 let ctx = {
                     Group = g
@@ -1065,6 +1210,7 @@ let deduceFunctionRep (certified: System.Collections.Generic.Dictionary<IRId, Re
                     // Deduction, not validation: the C1 mode flag is off, so
                     // every rule behaves exactly as it did in phase B.
                     Checking = false
+                    Decline = ref None
                 }
                 // Parameters enter the body under their classified statuses —
                 // the hypothesis of the conditional theorem.
