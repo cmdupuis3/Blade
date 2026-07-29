@@ -256,11 +256,19 @@ them all:
     false-positive half.
 
   Two open policy questions the censuses surfaced, neither blocking:
-  whether a certificate can be violated by DEAD code (the seam refuses
-  an offending op by name wherever it appears; the typed walker
-  flattens bindings and judges only what reaches the result — neither
-  is wrong, and nobody has decided), and whether "preserves" should be
-  a cross-cutting claim shape or per-discipline sugar.
+
+  1. **Can DEAD code violate a certificate?** The seam refuses an
+     offending op by name wherever it appears; the typed walker
+     flattens bindings and judges only what reaches the result. Neither
+     is wrong and nobody has decided. Pinned by the rejection census so
+     a second instance goes red.
+  2. **"Preserves" is genuinely cross-cutting** — not galilean-local
+     as C3-b's framing suggests. Equiv has status-preserving ops too;
+     `sgs.box_filter` is merely where the absence first bites. Design
+     guidance if it is ever added: a claim SHAPE that more than one
+     vocabulary can spell — NOT a fourth vocabulary, and NOT a reason
+     to re-merge the three disciplines. The polarity finding is about
+     rules, and "preserves" is not a rule.
 
 **D. Meets and modes (the previous conversation, now cheap)**
 - D1. Collision = subgroup meet via A3's branching rules: O3 ⊓ SO3 = SO3
