@@ -4,49 +4,64 @@ import ml as ml
 // B3 OF plan-equivariance-in-types.md: THE FIRST RECALL WIN THE TYPED WALKER
 // IS SUPPOSED TO HAVE, AND THE SEAM CANNOT.
 //
-// `scale_partial` annotates its rep parameter and NOT its scalar one. That is
-// a legal Blade function — rank/type deduction closes `s` from the call site
-// below, exactly as it closes every unannotated helper in the functions corpus
-// — but it is invisible to stage 6a, and not by oversight: `certSigOf` refuses
-// an unannotated parameter outright, because the elaboration seam runs BEFORE
-// unification and has nothing to classify. So the seam is silent here, and
-// this file carries no `// SUGGEST:` line.
+// `twice_partial` has NO parameter annotation at all. What closes it is the
+// ANNOTATED RETURN TYPE, forcing the parameter through the body: `x + x` has
+// `x`'s type, the declared return unifies with it, and `x` is
+// `Array<Float like IrrepsIdx<S>>` by the time the DECLARATION closes — which
+// is the moment the typed deduction runs. No call site is consulted.
 //
-// The typed walker runs after unification, where `s` is a closed `Float` and
-// therefore an INVARIANT SCALAR. Rep scaled by an invariant scalar is a rep
-// (the transfer table's scalar-multiplication arm), so `scale_partial` judges
-// equivariant under O(3) and the typed channel proposes it. That is
-// plan §0's first named payoff — "partial annotation dies as a limitation" —
-// as a single test.
+// The single parameter is load-bearing, not minimalism. Two things it rules
+// out, and the file is only a test of the first:
+//
+//   * A CALL-SITE-closed parameter is a different and later problem. The
+//     binder is still an open inference variable when the declaration closes,
+//     so the deduction would have to wait for the monomorphized call — the
+//     late tier of plan §2's early/late split, deferred this round.
+//   * A parameter closed only through a SCALAR product does not close either.
+//     Write this as `f(x, s: Float) -> Array<... IrrepsIdx<S>> = x * s` and
+//     the rank does not propagate backwards from the annotated return across
+//     the broadcast, so `x` lands as a scalar. The return annotation closes a
+//     parameter when the body carries the parameter's own shape, and `x + x`
+//     does.
+//
+// Stage 6a sees none of it, and not by oversight: `certSigOf` refuses ANY
+// unannotated parameter outright, because the elaboration seam runs before
+// unification and has nothing to classify. So the seam is silent here and this
+// file carries no `// SUGGEST:` line — the whole of plan §0.1, "partial
+// annotation dies as a limitation", in one function.
+//
+// The typed walker runs after unification, where `x` is a closed rep of spec S
+// and `x + x` is the transfer table's same-spec addition arm, so `twice_partial`
+// judges equivariant under O(3) and the typed channel proposes it.
 //
 // TYPED-SUGGEST is the differential's pin for exactly this: a proposal the
 // typed side makes and the seam does not. It is strict in both directions, so
 // this file also asserts that the typed walker proposes NOTHING ELSE here.
 //
-// PROPOSE ⊆ CHECK-ACCEPT, pinned the way corpus 053 pins it: `scale_tight` is
-// the same body with every parameter annotated and the proposed conjunct
-// written out, and it CHECKS — under the seam checker, which stays the
-// checking authority through all of phase B. The typed proposal is therefore a
+// PROPOSE ⊆ CHECK-ACCEPT, pinned the way corpus 053 pins it: `twice_tight` is
+// the same body with the parameter annotated and the proposed conjunct written
+// out, and it CHECKS — under the seam checker, which stays the checking
+// authority through all of phase B. The typed proposal is therefore a
 // hypothesis the shipped checker accepts, not a new theorem. The two EXPECTs
 // are the same numbers, which is the other half: a proposal changes no value.
 // ============================================================================
 let static S = [(0, 0, 1), (1, 1, 1)]
 
-// TYPED-SUGGEST: scale_partial|O3
-function scale_partial(x: Array<Float like IrrepsIdx<S>>, s) -> Array<Float like IrrepsIdx<S>> =
-    x * s
+// TYPED-SUGGEST: twice_partial|O3
+function twice_partial(x) -> Array<Float like IrrepsIdx<S>> =
+    x + x
 
-// The pinned twin: the same map, fully annotated, carrying the conjunct the
-// typed walker proposes. No SUGGEST line — a certified function is checked,
-// not a candidate — and no TYPED-SUGGEST line either, for the same reason on
-// the other side.
-function scale_tight(x: Array<Float like IrrepsIdx<S>>, s: Float)
+// The pinned twin: the same map, annotated, carrying the conjunct the typed
+// walker proposes. No SUGGEST line — a certified function is checked, not a
+// candidate — and no TYPED-SUGGEST line either, for the same reason on the
+// other side.
+function twice_tight(x: Array<Float like IrrepsIdx<S>>)
                      where ml.equiv(O3) -> Array<Float like IrrepsIdx<S>> =
-    x * s
+    x + x
 
 let xv = [1.0, 4.0, 0.0 - 2.0, 6.0]
 
-let p = scale_partial(xv, 2.0)
+let p = twice_partial(xv)
 // EXPECT: p = [2, 8, -4, 12]
-let t = scale_tight(xv, 2.0)
+let t = twice_tight(xv)
 // EXPECT: t = [2, 8, -4, 12]

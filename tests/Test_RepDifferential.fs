@@ -311,14 +311,26 @@ let runRepDifferentialTests () : BlockResult =
             failedNames <- failedNames @ [ name ]
             resultLine Fail name detail
 
+    // Nothing may be inherited from whatever ran before this block.
+    Blade.DeduceRep.TypedCertProposals.reset ()
+
     // ------------------------------------------------------------------
     // SELF-TEST: the matcher, proven against hand-staged inputs.
     //
-    // Producer-independent by construction. Phase B ships the typed walker
-    // and the differential as separate work items, so this section is what
-    // says the HARNESS is right while the producer is still a stub: every
-    // assertion below passes with an empty typed channel, because every
-    // typed proposal it needs is staged by hand.
+    // Every assertion in this section is producer-INDEPENDENT: the typed
+    // proposals it matches are staged by hand, so it says the same thing
+    // about the harness whether the typed walker is a stub or shipped.
+    //
+    // THE LEAK INVARIANT. Staging is only meaningful on an empty channel:
+    // once the real walker exists, every `lowerDiag` fills the typed
+    // channel, and a staged proposal landing on top of a real one turns a
+    // matcher arm into a surplus-proposal failure that has nothing to do
+    // with the arm being tested. So: NO STAGING WITHOUT A PRECEDING RESET
+    // THAT FOLLOWS THE LAST `lowerDiag`. The arms below stage nothing at
+    // all (they call `diffFile` directly on hand-built lists), the channel
+    // section resets immediately before it stages, and the end-to-end case
+    // stages nothing by design — it is the real walker's output that is
+    // being read there.
     // ------------------------------------------------------------------
     printSubHeader "Self-test: matcher"
 
@@ -463,29 +475,39 @@ let runRepDifferentialTests () : BlockResult =
     check "typed channel: reset clears" (readTyped ()).IsEmpty
         "so a corpus file can never inherit its predecessor's proposals"
 
-    // The seam channel: a real pipeline run over a synthetic program, read and
-    // parsed exactly as the corpus loop does, then driven through the matcher
-    // against a hand-staged typed proposal.
+    // BOTH channels, live, on one synthetic program, with NOTHING staged.
+    //
+    // This is the only producer-DEPENDENT assertion in the block, and it is
+    // deliberately so: it runs the real pipeline over a program neither corpus
+    // sweep owns and asserts that the two walkers reach the same theorem about
+    // it. The earlier version of this case staged a typed proposal by hand to
+    // stand in for the missing producer; once the producer shipped, that stand-
+    // in became a SECOND proposal against one seam proposal and read as a
+    // surplus. Removing the staging is not a weakening — the same assertion now
+    // rests on the real walker, which is what it was always pretending to test.
     Blade.DeduceRep.TypedCertProposals.reset ()
     let _ = Lowering.lowerDiag None selfTestSource
     let selfSeam = readSeam ()
     let selfProposals = selfSeam |> List.choose (function SeamProposal p -> Some p | _ -> None)
+    let selfTyped = readTyped ()
     let seamOk =
         selfProposals |> List.map (fun p -> (p.Owner, p.Group)) = [ ("layer_loose", "O3") ]
     check "seam channel: a live program's proposal parses" seamOk
         (if seamOk then "one O3 proposal for 'layer_loose', off the live BL4011 channel"
          else sprintf "read %d message(s): %s" selfSeam.Length
                   (selfSeam |> List.map (sprintf "%A") |> String.concat " ; "))
-    // Stage the matching typed proposal AFTER lowering: the producer resets the
-    // channel when it runs, so staging first would be erased at integration.
-    Blade.DeduceRep.TypedCertProposals.add
-        { Owner = "layer_loose"; Group = "O3"; Signature = "x transforms as Rep, w invariant -> Rep"
-          Deps = [] } span0
-    let vLive = diffFile noDirs selfProposals (readTyped ())
-    check "end-to-end: live seam proposal matched by a staged typed proposal"
-        (seamOk && vLive.Failures.IsEmpty && vLive.Matched = 1
-         && vLive.Notes |> List.exists (fun n -> n.StartsWith "SIG DRIFT"))
-        "the gate would be GREEN on this program, with the rendering difference noted"
+    let vLive = diffFile noDirs selfProposals selfTyped
+    let renderTyped (ps: Proposal list) =
+        if ps.IsEmpty then "none"
+        else ps |> List.map (fun p -> sprintf "%s|%s" p.Owner p.Group) |> String.concat ", "
+    check "end-to-end: both walkers agree on a live program"
+        (seamOk && vLive.Failures.IsEmpty && vLive.Matched = 1)
+        (if seamOk && vLive.Failures.IsEmpty && vLive.Matched = 1 then
+            sprintf "seam and typed both propose 'layer_loose' under O3%s"
+                (if vLive.Notes.IsEmpty then "" else " (" + String.concat " ; " vLive.Notes + ")")
+         else
+            sprintf "typed proposed: %s ; %s" (renderTyped selfTyped)
+                (String.concat " ; " vLive.Failures))
     Blade.DeduceRep.TypedCertProposals.reset ()
 
     // ------------------------------------------------------------------
