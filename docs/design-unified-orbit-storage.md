@@ -398,9 +398,12 @@ rather than large:
 > K+L positions — that is verbatim `BladeMixedRadix`'s hypothesis ("across
 > DISTINCT identity groups the mixed-radix composition of per-group ranks IS a
 > lossless layout"). **The tie introduces no new cell layout and no new proof
-> obligation.** It is the same type multi-group `comm` already produces, which
-> corpus `arity/027_symmetric_pack_comm.blade` exercises end to end
-> (`object_for(packprod) <@> (A, A)` → `SymIdx<2,3>`, 6 cells not 9).
+> obligation.** It is the same type multi-group `comm` already produces. The
+> shipped tie mechanism for that family is corpus
+> `arity/027_symmetric_pack_comm.blade` — `object_for(packprod) <@> (A, A)` on a
+> `where comm(a)` kernel, whose pinned expectation is `SymIdx<2,3>`, 6 cells not
+> 9. (Cited from the test source, not re-run here; corpus batches are outside
+> this task's remit — see §7.)
 
 `BladeCounting.v`'s negative result does **not** bite here: it forbids a lossless
 *per-dimension product* layout inside ONE identity group across several
@@ -524,6 +527,23 @@ that nobody promises it by accident.
   quotient must be recomputed against the truncated lattice, not the full one.
 * **Hermitian ties.** χ = conj is the third character and `canon_transform`
   already implements it, but nothing here measured a Hermitian tie.
+
+---
+
+---
+
+## 7. What this task did not run, and should be run
+
+No corpus batch was run (outside this task's remit). Two would sharpen the file:
+
+* **`blade test arity`** — confirms the `comm` tie mechanism cited in §4.4
+  (`arity/027_symmetric_pack_comm.blade`) is green on this worktree, which is the
+  premise of the "tier 2 is already shipped" argument.
+* **`blade test ml-equiv`** — confirms the `Types.fs` `PositionGroup` addition
+  (additive, unwired, Release build clean with 0 warnings) has not disturbed the
+  perm layer whose emission §2.4 measured.
+
+Neither is expected to move. They are premise checks, not risk checks.
 
 ---
 
