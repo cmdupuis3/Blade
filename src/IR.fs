@@ -264,7 +264,7 @@ and IRCallable = {
     IsStatic: bool
     IsCommutative: bool
     CommGroups: int list list
-    // AntisymGroups: the positions a `where antisymm(...)` clause declared
+    // AntisymGroups: the positions a `where anticomm(...)` clause declared
     // anti-invariant. These positions ALSO appear in CommGroups (the grouping
     // and iteration license are identical to comm's — one joint simplex over
     // the group), so every axis-grouping consumer needs no change; this list
@@ -2008,7 +2008,7 @@ let mkLambdaCallable
 /// 1. Group arrays by identity (consecutive identical arrays)
 /// 2. For each group: if comm + arity > 1, use SymIdx; else Idx
 ///    (AntisymIdx instead of SymIdx when the group is DECLARED antisymmetric
-///     (`where antisymm(a, b)` — antisymGroups, the pin spelling: the kernel is
+///     (`where anticomm(a, b)` — antisymGroups, the pin spelling: the kernel is
 ///     used AS-IS, storing f(i,j) for i<j only, with reads of (j,i) negated by
 ///     the index type's TfNegateOnSwap; no permutation sum) or when
 ///     isReynoldsAntisym is set -- Reynolds
@@ -2081,7 +2081,7 @@ let deduceOutputType
             // first-appearance order (which matches the loop nest order).
             let levelArr = List.toArray sLevels
             let groupArr = List.toArray sGroups
-            // Is this axis group the one a `where antisymm(...)` clause
+            // Is this axis group the one a `where anticomm(...)` clause
             // declared? The clause names KERNEL PARAMETERS, which are 1:1 with
             // argument positions, so the test is on the group's member levels'
             // ArrayIndex values: every one of them must be listed in a single
@@ -2165,7 +2165,7 @@ let deduceOutputType
                             // kernel preserves the input's compact storage class verbatim
                             // (Sym/Antisym/Hermitian); only a plain (SymNone) multi-level
                             // group defaults to symmetric — unless the kernel DECLARED
-                            // the group antisymmetric (`where antisymm(a, b)`), which
+                            // the group antisymmetric (`where anticomm(a, b)`), which
                             // pins the strict simplex the same way a comm clause pins
                             // the inclusive one.
                             let groupSymmetry =
@@ -3033,7 +3033,7 @@ let buildLoopNestCodeGen
              rk.Callable.Captures, rk.Reynolds.IsAntisymmetric)
         | None -> ([], IRLit IRLitUnit, [], [], false)
 
-    // Positions the kernel declared antisymmetric (`where antisymm(a, b)`).
+    // Positions the kernel declared antisymmetric (`where anticomm(a, b)`).
     // These are already inside CommGroups (same grouping + iteration license),
     // so only the STRICTNESS of the simplex reads this list: an argument
     // position in a declared antisym group iterates i < j, never i <= j,
@@ -3047,7 +3047,7 @@ let buildLoopNestCodeGen
     // the strictness) — a declared clause on the wrapped kernel is an
     // iteration license only, never a storage claim — so the declared list is
     // consulted only outside reynolds. Keeps `reynolds(k, Symmetric)` with a
-    // stray antisymm clause from iterating off its own storage.
+    // stray anticomm clause from iterating off its own storage.
     let inDeclaredAntisym (arrayIdx: int) =
         not info.HasReynolds
         && declaredAntisymGroups |> List.exists (List.contains arrayIdx)
@@ -3334,7 +3334,7 @@ let buildLoopNestCodeGen
                 //       the triangular iteration comes from the commutative path
                 //       — so IndexSpace.Symmetry alone would miss it.
                 //   (3) the kernel DECLARED this argument position antisymmetric
-                //       (`where antisymm(a, b)`, the pin spelling). Same shape as
+                //       (`where anticomm(a, b)`, the pin spelling). Same shape as
                 //       (2) — plain inputs, triangularity from the group — but the
                 //       kernel is used AS-IS with no permutation sum, so the flag
                 //       rides the callable rather than a Reynolds wrapper. Checked
@@ -4965,7 +4965,7 @@ let specializeFunction (func: IRFuncDef) (arities: int list) (funcMap: Map<IRId,
                     | None -> [idx]))
         // Expand whatever groups the source carried. Historically this was
         // gated on IsCommutative, which was equivalent (the flag and a
-        // non-empty group list were set together); the declared-antisymm
+        // non-empty group list were set together); the declared-anticomm
         // spelling breaks that coupling — an antisym kernel has groups but is
         // NOT commutative — so the expansion keys off the lists themselves and
         // the flag is carried through untouched.

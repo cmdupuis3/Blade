@@ -1071,7 +1071,7 @@ go first.
      Pow k ≥ 1 reject with targeted v2/readout messages. perm_matmul
      emitted (own N ≥ 1 gate — no false K+L constraint). Dual
      certificate perm_equiv + galilean pinned exact. Parser:
-     open-conjunct args now accept int literals (comm/antisymm
+     open-conjunct args now accept int literals (comm/anticomm
      unchanged). Corpus ml-equiv/039-044; full suite 1627/0. Proofs: new BladePartition.v — RGS enumeration
      exhaustive/duplicate-free, `rgs_lex_extends_refinement` (the
      triangularity keystone; fallback convention has a one-line proof),
@@ -1432,7 +1432,7 @@ go first.
        data twin of the suggestion strings, hosted in MLEquiv so the
        galilean pass can write to it and `Ide` can read it. It reaches
        `ide check --json` as `deduced[]` entries alongside the checker's
-       own rank/comm/antisymm/packComm facts — one array keyed by `kind`,
+       own rank/comm/anticomm/packComm facts — one array keyed by `kind`,
        not two to zip. Field mapping and the BL4014 surfacing path are
        described in the 6a note above. A structured `deps` ARRAY is
        deferred: the closure is comma-joined into `left` today, which

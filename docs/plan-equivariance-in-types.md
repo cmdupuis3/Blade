@@ -102,13 +102,13 @@ decides between them:
   Unify.fs's BlockSpecTag arm, gradual adoption against plain
   `Idx<total_dim>`). What unification propagates, every call site knows.
 - **The CLAIM** — "this function is equivariant" — is a theorem about a
-  body, NOT a fact about a layout. It belongs where comm/antisymm live: a
+  body, NOT a fact about a layout. It belongs where comm/anticomm live: a
   deduction lattice over TypedAst that proposes, a `where` clause that
   pins, per-primitive transfer tables, interprocedural summaries keyed by
   binder IRId. NOT in the unifier.
 
 This is exactly how symmetry is factored: extents and compact storage are
-types; the comm/antisymm parity is a deduced-then-pinned attribute. Pushing
+types; the comm/anticomm parity is a deduced-then-pinned attribute. Pushing
 the claim into every expression's type (full `equiv(G, ρ)` refinements in
 the unifier, the literal equivariant-nn.md §1-§4 surface) would entangle
 subsumption and variance with the solver and bloat every diagnostic; the
@@ -617,7 +617,7 @@ answered here.
 
 1. **Passive surfacing.** Should a deduced-but-unpinned equivariance fact
    ever appear in hover/tooltips by default, or only on request (`ide
-   check --json`, BL4011/BL4014 warnings)? Unlike a comm/antisymm
+   check --json`, BL4011/BL4014 warnings)? Unlike a comm/anticomm
    deduction, an equivariance deduction changes no storage — surfacing it
    costs nothing at the type level — but passively showing it may read as
    an implicit correctness claim stronger than what generator discharge

@@ -497,6 +497,41 @@ let static v = sample.vars.big |> z.read
       with ex -> check "zarr fold ceiling: runs" false ex.Message))
 
     // ---------------------------------------------------------------
+    // 9b. Provider axes reach the module elaborations (hermetic)
+    // ---------------------------------------------------------------
+    // spectra/math/sgs/ppl specialize their generated code to STATIC extents,
+    // and they run BEFORE the type check that registers `<store>.index.<dim>`
+    // — so they resolve the axis against the store's metadata themselves. The
+    // assertion is code IDENTITY: `type X = sample.index.x` must generate
+    // exactly what the hand-copied `type X = Idx<6>` generates. Reuses the
+    // section-9 fold fixture (dim x, extent 6).
+    printfn "\n--- provider axes: spectra transform over sample.index.x ---"
+    (let axisSource (axis: string) = sprintf """
+import spectra as sp
+import zarr as z
+
+let sample = z.load("tests/fixtures/zarr_stores/zarr_fold_store")
+type X = %s
+type Sig = Array<Float64 like X>
+let A: Sig = sample.vars.A |> z.read
+let S = sp.fft(A)
+"""
+                                        axis
+     (try
+         match lower (axisSource "sample.index.x"), lower (axisSource "Idx<6>") with
+         | Ok irProv, Ok irLit ->
+             check "provider axis: sp.fft over sample.index.x elaborates" true ""
+             let (cppProv, _) = CodeGen.genSelfContainedProgramFromIR irProv "zarr_axis_probe"
+             let (cppLit, _) = CodeGen.genSelfContainedProgramFromIR irLit "zarr_axis_probe"
+             check "provider axis: generates exactly what Idx<6> generates"
+                 (cppProv = cppLit) "generated program differs from the literal-extent twin"
+         | Error e, _ ->
+             check "provider axis: sp.fft over sample.index.x elaborates" false e
+         | _, Error e ->
+             check "provider axis: Idx<6> twin lowers" false e
+      with ex -> check "provider axis: runs" false ex.Message))
+
+    // ---------------------------------------------------------------
     // 10. Runtime dense read e2e (g++; store generated on the fly)
     // ---------------------------------------------------------------
     // Multi-chunk WITH edge chunks and one missing chunk (fill -1), so the

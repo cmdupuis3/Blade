@@ -107,7 +107,13 @@ let rec private resolveExtent (ctx: Ctx) (ty: TypeExpr) : int option =
         | Ok (SVInt n) -> Some (int n)
         | _ -> None
     | TyNamed (name, []) ->
-        Map.tryFind name ctx.Aliases |> Option.bind (resolveExtent ctx)
+        match Map.tryFind name ctx.Aliases with
+        | Some body -> resolveExtent ctx body
+        // Not a source alias: a provider axis path (`type Y = store.index.y`
+        // resolves its body to one of these). TypeEnv registers those types
+        // during type CHECKING, which is after this pass — so the extent comes
+        // from the store's metadata instead. Same answer, one stage earlier.
+        | None -> providerIndexExtent ctx.Statics name
     | _ -> None
 
 /// Element-type classes the ops care about.

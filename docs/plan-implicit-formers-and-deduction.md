@@ -406,7 +406,7 @@ fully implemented end-to-end â€” `AntisymmetricBehavior` (src/IR.fs:2647-26
 canonical strict sort, implicit-zero diagonal, negate-on-swap reads),
 `AllocAntisymmetric` routing (IR.fs:2707-2745), rank-2 and rankâ‰¥3 codegen,
 interpreter mirror (src/Interp/ArrayOps.fs:290-337), `AntisymIdx` corpus
-coverage â€” but there was no `where antisymm(...)`: `CnAntisymm`
+coverage â€” but there was no `where anticomm(...)`: `CnAntisymm`
 (src/Ast.fs:233-241) was dead, unparsed code, and antisym output was reachable
 only via already-antisym inputs or `reynolds(kernel, Antisymmetric)`, leaving a
 deduced-Neg kernel with nothing to pin to. **Landed 2026-07-26** (Â§7 stage 3):
@@ -725,8 +725,8 @@ cells with a duplicated `1.333` vs the 3-cell triangle).
    (`half(x âˆ’ y) * half(x âˆ’ y)` earns PInv by PNegÂ·PNeg where the mirror
    rule cannot fire, suggestion + dense 9 cells).
 
-   **`where antisymm(...)` pin spelling â€” DONE (2026-07-26).** The signed
-   half of confirm-and-pin: `antisymm` is now a where-clause keyword
+   **`where anticomm(...)` pin spelling â€” DONE (2026-07-26).** The signed
+   half of confirm-and-pin: `anticomm` is now a where-clause keyword
    (`WhereClause.Antisymmetry`, `TypedLambdaInfo.AntisymGroups`,
    `IRCallable.AntisymGroups`; the dead `CnAntisymm` case is documented as
    the superseded design, like `CnEquiv`). A declared group is the SAME
@@ -736,29 +736,29 @@ cells with a duplicated `1.333` vs the 3-cell triangle).
    places storage is decided, `deduceOutputType` (group symmetry
    SymAntisymmetric â†’ `AntisymIdx<r, n>` â†’ AllocAntisymmetric) and
    `buildLoopNestCodeGen`'s per-level `StrictOffset` (i < j, no diagonal to
-   write), so `method_for(A, A) <@> lambda(x, y) where antisymm(x, y) ->
+   write), so `method_for(A, A) <@> lambda(x, y) where anticomm(x, y) ->
    x - y` reaches the existing antisym storage WITHOUT reynolds: the kernel
    is used as-is (store f(i,j) for i<j; the mirror read negates via the
    index type's TfNegateOnSwap), no permutation sum. Named functions pin
    through their own `FuncAntisymGroups` side-channel at the eta seam (a
    clause the wrapper does not re-attach is dropped silently). Validation
-   is symmetric with comm's, at both seams: declared antisymm + deduced
+   is symmetric with comm's, at both seams: declared anticomm + deduced
    **PInv** = hard error (`AntisymmContradictsBody`, BL3007); PBottom stays
    trusted; under reynolds the clause degrades to an iteration license and
    both the validator and the storage bit stand down, so the reynolds
    corpus is untouched. Deduced PNeg + no declaration + same array in both
-   positions now suggests `where antisymm(x, y)` beside the existing comm
+   positions now suggests `where anticomm(x, y)` beside the existing comm
    suggestion (same warning + BL4010 pair). Corpus: symmetry/020 (pinned
    strict triangle, values identical to 019's reynolds twin), 021 (declared
-   antisymm on `x * y` rejects), 022 (unpinned twin â€” dense 9 cells + the
+   anticomm on `x * y` rejects), 022 (unpinned twin â€” dense 9 cells + the
    suggestion), 023 (named-function pin through the eta wrapper), 024
-   (`comm` and `antisymm` over the same pair rejects â€” one axis group cannot
+   (`comm` and `anticomm` over the same pair rejects â€” one axis group cannot
    be inclusive and strict at once); all pass the interpreter differential.
 
    Still deferred after both: per-instance checking on specialized IR
    bodies â€” only needed for NON-template pack kernels, which today deduce
    PBottom and stay inert. Antisymmetry has no pack tier by construction â€”
-   no signed exchange law exists â€” so `antisymm` is deliberately not
+   no signed exchange law exists â€” so `anticomm` is deliberately not
    surfaced onto Poly-pack eta wrappers.
 
    *(original stage-3 text follows)* **Symmetry-from-primitives** (single late pass, Â§3.4): the two per-primitive
@@ -775,7 +775,7 @@ cells with a duplicated `1.333` vs the 3-cell triangle).
    analysis), the lattice-summary framing of `computeAllSymcomStates`
    (IR.fs; `SymcomState`, formalism.md:918), riding behind the
    `monomorphizeModule` worklist. Also: close future.md Â§4b.4 (reynolds
-   self-licensing) as a definitional case, and revive the `antisymm` pin
+   self-licensing) as a definitional case, and revive the `anticomm` pin
    spelling (dead `CnAntisymm`) so deduced-Neg kernels are pinnable.
 4. **Confirm-and-pin UX â€” DISPLAY HALF DONE (2026-07-25).** Landed: stage
    3's suggestions reach editor tooling as structured diagnostics â€” `blade

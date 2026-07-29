@@ -1,0 +1,28 @@
+// TEST: Zero At Array Annotation
+// ============================================================================
+// Monadic zero at an ARRAY annotation: the annotation supplies the shape, so
+// `let A: Array<...> = zero` (with or without |> compute) materializes a
+// zero-filled array — the binding-site rewrite to the explicit
+// `for () in range<...> <@> lambda -> <elem zero> |> compute` former. Scalar
+// zero is untouched, and elements follow the annotation (Float64 / Int64 /
+// Complex128 all covered).
+// ============================================================================
+type Y = Idx<3>
+type X = Idx<4>
+type RF = Array<Float64 like Y, X>
+type CF = Array<Complex128 like Y, X>
+type IV = Array<Int64 like X>
+let Za: RF = zero
+let Zb: RF = zero |> compute
+let Zc: CF = zero |> compute
+let Zd: IV = zero
+let s = zero + 7.0
+let pa = Za(1, 2)
+let pb = Zb(2, 3)
+let pd = Zd(0)
+let total = pa + pb + s
+// EXPECT: Zd = [0, 0, 0, 0]
+// EXPECT: pa = 0.0
+// EXPECT: pb = 0.0
+// EXPECT: pd = 0
+// EXPECT: total = 7.0

@@ -272,7 +272,7 @@ the most interesting thing in the file.
 ### 6.1 Perm's flat buffers and Blade's compact storage are the SAME AXIS
 
 `ml.perm_equiv` keys on a flat row-major `Idx<N^k>` buffer. Blade's compact
-symmetric storage — `SymIdx<r, n>`, where `comm`/`antisymm` live — stores the
+symmetric storage — `SymIdx<r, n>`, where `comm`/`anticomm` live — stores the
 same mathematical spaces at their *combinatorial* cardinality. A symmetric N×N
 node-pair matrix is a perfectly good Sₙ-module (conjugation by a permutation
 matrix preserves symmetry), and it is exactly what `SymIdx<2, N>` stores.

@@ -1,7 +1,7 @@
-// TEST: Let-bound named-function body contradicts antisymm (rejects)
+﻿// TEST: Let-bound named-function body contradicts antisymm (rejects)
 // symmetry/030 through the OTHER producer. The pair deduction runs at two
-// independent sites — buildApplyInfo, for a lambda meeting a loop, and
-// checkFunctionDecl, for a named function's declaration summary — and each
+// independent sites â€” buildApplyInfo, for a lambda meeting a loop, and
+// checkFunctionDecl, for a named function's declaration summary â€” and each
 // calls deduceAdjacentPairs itself. Normalizing binding forms inside the
 // deduction rather than at either call site is what makes one change cover
 // both; this file is the guard on that, and would go quiet if the descent were
@@ -9,7 +9,7 @@
 //
 // No loop and no kernel position: the function is called directly, and the
 // contradiction is found while checking the declaration.
-function sqdiff(x, y) where antisymm(x, y) = {
+function sqdiff(x, y) where anticomm(x, y) = {
     let d = x - y
     d * d
 }

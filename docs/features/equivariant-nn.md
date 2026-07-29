@@ -46,7 +46,7 @@ same rep data), the shipped surface is:
   now point groups) and `where ml.galilean(u, ...)` (Galilean boosts) are
   the pin spellings, checked by `MLEquiv.fs` / `MLGalilean.fs` at the
   `MLElaborate` pass-1/pass-2 seam — the same lattice-plus-pins shape as
-  `comm`/`antisymm`, not the full per-expression refinement Part I sketched.
+  `comm`/`anticomm`, not the full per-expression refinement Part I sketched.
   The precise framing is that a pin is a **POLYMORPHISM LICENSE**: `comm` on
   a kernel licenses viewing one function at two signatures (`Idx<M> ->
   Idx<N> -> T` and `SymIdx<2,M> -> SymIdx<2,N> -> T` are the same function;
@@ -103,7 +103,7 @@ each section's own status markers, some of which this pass also updated.
 > shipped as `IrrepsIdx<spec>` / `PgIrrepsIdx<G,spec>`. Rep CLAIM — "this
 > function is equivariant" — did NOT become a per-expression unifier
 > constraint. It is a deduced-then-pinned SIGNATURE ATTRIBUTE, exactly the
-> shape `comm`/`antisymm` already use: a lattice walker proposes it, a
+> shape `comm`/`anticomm` already use: a lattice walker proposes it, a
 > `where ml.equiv(G)` clause pins it. The sharper name for this, settled at
 > review, is a **POLYMORPHISM LICENSE**: a pin licenses a TYPE
 > TRANSFORMATION on one underlying function, the way `comm` on a kernel

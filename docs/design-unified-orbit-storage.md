@@ -1,10 +1,10 @@
-# Unified orbit storage: `comm`/`antisymm` and `ml.perm_equiv` as one theorem
+# Unified orbit storage: `comm`/`anticomm` and `ml.perm_equiv` as one theorem
 
 Status: **measurement + design**. Nothing here is implemented. Every claim is
 tagged **[M]** measured (a number this file produced, reproducibly) or **[A]**
 argued (a derivation, not a run).
 
-The charter question: `comm`/`antisymm` is a symmetry of INDEX POSITIONS and
+The charter question: `comm`/`anticomm` is a symmetry of INDEX POSITIONS and
 becomes a type (`SymIdx<K,N>`); `ml.perm_equiv(N)` is a symmetry of DATA ENTRIES
 and licenses nothing about layout. The user's insight is that TYING arguments —
 passing the same thing twice — moves the symmetry from the value domain back into
@@ -278,7 +278,7 @@ Short version, three points:
 3. **The dividing line that survives contact with the code** is about the DOMAIN
    OF THE ACTION, not about invariance:
    * a group acting on **index positions** (a subgroup of S_rank permuting slots)
-     is static: it is `comm`/`antisymm`, `SymIdx`, and — after a tie — the S_K
+     is static: it is `comm`/`anticomm`, `SymIdx`, and — after a tie — the S_K
      and S_L factors here. It compacts.
    * a group acting on **index values** (a subgroup of S_extent relabelling one
      axis' coordinates) is not a layout at all. What it *does* give you is a
@@ -315,7 +315,7 @@ That is all. Every shipped case is an instance:
 |---|---|---|---|
 | `Idx<N>^R` dense | `[N]^R` | trivial | + |
 | `SymIdx<R,N>` (`comm`) | `[N]^R` | S_R | + |
-| `AntisymIdx<R,N>` (`antisymm`) | `[N]^R` | S_R | sgn |
+| `AntisymIdx<R,N>` (`anticomm`) | `[N]^R` | S_R | sgn |
 | `HermIdx` | `[N]^R` | S_R | conj (the third character) |
 | a multi-group `comm` pin | `[N]^R` | ∏_j S_{R_j} | + per group |
 | **tied perm cells (new)** | `[N]^{K+L}` | S_K × S_L | +/sgn per side |

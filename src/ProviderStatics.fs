@@ -133,11 +133,49 @@ let private readAndFold (provider: string) (path: string) (varName: string) : Re
         | None -> 0L
     foldCache.GetOrAdd((provider, path, varName, stamp), fun _ -> readAndFoldUncached provider path varName)
 
+/// Axis extents of a store: dim name → extent, read from the provider's own
+/// metadata module (the index types it derives from the file). This is the
+/// SAME read TypeCheck performs at the `let store = alias.load(...)` site,
+/// pulled earlier because the module elaborations resolve `store.index.<dim>`
+/// before type checking runs — memoized on the same (…, versionStamp) key as
+/// the payload fold, so the metadata is opened once per compilation and
+/// re-read when the store actually changes. An unreadable store or
+/// unregistered provider yields no axes, and the asking elaborator reports
+/// its own "extent not statically known" steer: type checking re-opens the
+/// store right after and diagnoses the real fault there.
+let private axisCache =
+    System.Collections.Concurrent.ConcurrentDictionary<string * string * string * int64, Map<string, int>>()
+
+let private storeAxesUncached (provider: string) (path: string) (root: string) : Map<string, int> =
+    match Blade.ProviderRegistry.tryFind provider with
+    | None -> Map.empty
+    | Some spec ->
+        try
+            let pm = spec.LoadAsModule (Blade.IR.IRBuilder()) root path
+            pm.Types
+            |> List.choose (function
+                | Blade.IR.IRTDIndexType (n, idx) ->
+                    match idx.Extent with
+                    | Blade.IR.IRLit (Blade.IR.IRLitInt v) -> Some (n, int v)
+                    | _ -> None
+                | _ -> None)
+            |> Map.ofList
+        with _ -> Map.empty
+
+let private axisExtent (provider: string) (path: string) (root: string) (dim: string) : int option =
+    let stamp =
+        match Blade.ProviderRegistry.tryFind provider with
+        | Some spec -> spec.VersionStamp path
+        | None -> 0L
+    axisCache.GetOrAdd((provider, path, root, stamp), fun _ -> storeAxesUncached provider path root)
+    |> Map.tryFind dim
+
 /// Idempotent installation: register every provider spec, then bridge the
-/// compile-time reader and the provider-name set into StaticEval's hooks.
+/// compile-time readers and the provider-name set into StaticEval's hooks.
 let install () =
     Blade.ProviderRegistry.register netcdfSpec
     Blade.ProviderRegistry.register Blade.ZarrProvider.spec
     Blade.ProviderRegistry.register Blade.CsvProvider.spec
     registerProviderReader readAndFold
+    registerProviderIndexReader axisExtent
     registerProviderNames (Blade.ProviderRegistry.names () |> Set.ofList)

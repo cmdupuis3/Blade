@@ -50,7 +50,7 @@ stronger-group upgrade lint (§7 named deferrals), and structured surfacing.
   built from the clause + param names only), so recall is not gated on
   fully-annotated signatures.
 - **E2 — structured deduced-certificate facts.** BL4011 is string-only; the
-  IDE's `deduced[]` array (kinds rank/comm/antisymm/packComm) has no
+  IDE's `deduced[]` array (kinds rank/comm/anticomm/packComm) has no
   equivariance kind, so certificate provenance is invisible as data.
 - **E3 — walker recall + wording.** `ExprField`/catch-all produce `Opaque`,
   which poisons joins and — via `List.tryFindIndex (isInv >> not)` — gets
