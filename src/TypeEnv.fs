@@ -233,6 +233,29 @@ type TypeEnv = {
     /// or forward-call misses and lands on SUnknown), so no fixpoint is needed
     /// and no summary proves itself. Shared by reference, like FuncCommGroups.
     FuncSignParities: System.Collections.Generic.Dictionary<IRId, Blade.Deduce.SignParity list>
+    /// Phase B of docs/plan-equivariance-in-types.md, the CERTIFIED half of the
+    /// typed equivariance lattice: per-function representation signatures for
+    /// the functions that carry an `__ml_equiv` conjunct — a source-written
+    /// `where ml.equiv(G)` pin, or an elaborator stamp on a synthesized
+    /// function (stage A1), which reach here as the same conjunct and so are
+    /// read uniformly. Recorded at checkFunctionDecl from the ZONKED parameter
+    /// and return types.
+    ///
+    /// Keyed by the function's BINDER ID for exactly the FuncSignParities
+    /// reason: a parameter or local shadowing a top-level function's name must
+    /// not borrow that function's transformation law. DeduceRep's call rule
+    /// consults this as an AXIOM (trust, as the seam does today — validating
+    /// pins at typecheck is stage C1, not this one). Shared by reference, like
+    /// FuncCommGroups.
+    FuncRepSigs: System.Collections.Generic.Dictionary<IRId, Blade.DeduceRep.RepSigT>
+    /// The SPECULATIVE half: summaries DEDUCED this pass, their dependency
+    /// closures, and the decl order they were deduced in, per candidate group.
+    /// Analysis only — deduced facts flow to callers inside this compilation
+    /// unit and are never exported; only source-written pins license checking
+    /// (plan §4, unchanged). Single-pass in decl order, no fixpoint: a forward
+    /// or self call resolves to nothing and the walk declines, which is
+    /// silence, which is correct. Shared by reference.
+    FuncRepSpec: Blade.DeduceRep.RepSpecTable
     /// Stage-3 late tier: per-function PACK symmetry for arity-polymorphic
     /// (Poly) kernels — funcName → (packParamName, parity). PInv means
     /// "invariant under every permutation of the pack, at every arity",
@@ -286,6 +309,8 @@ let emptyEnv () = {
     FuncAntisymGroups = System.Collections.Generic.Dictionary<string, int list list>()
     FuncDeducedPairs = System.Collections.Generic.Dictionary<string, string list * Blade.Deduce.Parity list>()
     FuncSignParities = System.Collections.Generic.Dictionary<IRId, Blade.Deduce.SignParity list>()
+    FuncRepSigs = System.Collections.Generic.Dictionary<IRId, Blade.DeduceRep.RepSigT>()
+    FuncRepSpec = Blade.DeduceRep.RepSpecTable()
     PackDeducedComm = System.Collections.Generic.Dictionary<string, string * Blade.Deduce.Parity>()
     FuncParallel = System.Collections.Generic.Dictionary<string, string list * ParallelStrategy list>()
 }
