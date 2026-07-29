@@ -1,0 +1,70 @@
+// TEST: ML Equiv Stamp Point Group
+import ml as ml
+// ============================================================================
+// STAGE A1, the POINT-GROUP member (docs/plan-equivariance-in-types.md §3).
+// `derive_pg_linear(GROUP, SIN, SOUT, x, w)` synthesizes the complete
+// R-Schur basis of Hom_GROUP over a frozen character table, with the
+// Frobenius-Schur correction supplying e = dim_R End_G(U) scalars per cell.
+// The generated kernel is stamped with THE GROUP NAMED IN THE CALL — not O3,
+// not SO3, and not some other point group: certificates do not transfer
+// between groups, and the registry knows each group's table and no map
+// between two of them.
+//
+// Two groups appear below, so two differently-stamped kernels are synthesized
+// into one module. Every generator entry of the shipped roster lies in
+// {0, +-1}, so the pins are exact.
+//
+// PROBE RESULT (2026-07-28), same method as corpus 093 (a build emitting a
+// deliberately bogus group name, which `blade check` reports against the
+// generated function's own name):
+//   error[BL3999]: function '__ml_1': equiv(ZZ9_PROBE) — unknown group
+//                  'ZZ9_PROBE'; supported: O3, SO3, C4, D4
+// With the real emitter restored `blade check` on this file is clean, so
+// MLEquiv's Validate accepts the registered names "C4" and "D4" exactly as it
+// accepts "O3" — which is the property stage B's certified-callee arm needs.
+// ============================================================================
+
+// --- 1. C4: End_{C4}(E) is C, so the E plane carries TWO free weights -------
+// Weight (0, 1) selects the pure-J cell, J = R90 baked in the table:
+// J(3, 4) = (-4, 3).
+let static EC = [("E", 1)]
+let static WE = ml.pg_hom_dim("C4", EC, EC)
+// EXPECT: WE = 2
+let h: Array<Float like PgIrrepsIdx<C4, EC>> = ml.derive_pg_linear(C4, EC, EC, [3.0, 4.0], [0.0, 1.0])
+// EXPECT: h = [-4, 3]
+
+// The C4 SHADOW, exact: rho(r) on an E copy is R90, (a, b) -> (-b, a).
+// Feeding the rotated input rotates the output — R90(-4, 3) = (-3, -4).
+let hr: Array<Float like PgIrrepsIdx<C4, EC>> = ml.derive_pg_linear(C4, EC, EC, [0.0 - 4.0, 3.0], [0.0, 1.0])
+// EXPECT: hr = [-3, -4]
+
+// --- 2. D4: the same plane, one weight, and a stamp naming D4 --------------
+// D4's E has the same dimension and the same R90 generator, but the added
+// mirror kills the complex structure: End is R and the cell can only scale.
+// The stamp is correspondingly a different group name on a different kernel.
+let static ED = [("E", 1)]
+let static WED = ml.pg_hom_dim("D4", ED, ED)
+// EXPECT: WED = 1
+let d: Array<Float like PgIrrepsIdx<D4, ED>> = ml.derive_pg_linear(D4, ED, ED, [3.0, 4.0], [2.0])
+// EXPECT: d = [6, 8]
+
+// Both D4 generators, exactly. rho(r) = R90: (3,4) -> (-4,3), and the output
+// must follow: R90(6,8) = (-8,6). rho(s) = diag(1,-1): (3,4) -> (3,-4), and
+// s(6,8) = (6,-8).
+let dr: Array<Float like PgIrrepsIdx<D4, ED>> = ml.derive_pg_linear(D4, ED, ED, [0.0 - 4.0, 3.0], [2.0])
+// EXPECT: dr = [-8, 6]
+let ds: Array<Float like PgIrrepsIdx<D4, ED>> = ml.derive_pg_linear(D4, ED, ED, [3.0, 0.0 - 4.0], [2.0])
+// EXPECT: ds = [6, -8]
+
+// --- 3. A mixed-label D4 layer, so the stamp covers a real block structure --
+// [A1 x 1, E x 2]: 1 trivial-label cell plus the 2x2 E multiplicity block, so
+// pg_hom_dim is 1 + 4 = 5.
+let static SD = [("A1", 1), ("E", 2)]
+let static WD = ml.pg_hom_dim("D4", SD, SD)
+// EXPECT: WD = 5
+// w = [A1 cell 2.0; E block (mo, mi) row-major 3, -1, 0.5, 4].
+// A1:  2*1 = 2.
+// E copy 0: 3*(2,3) + (-1)*(4,5) = (6-4, 9-5) = (2, 4)
+// E copy 1: 0.5*(2,3) + 4*(4,5)  = (1+16, 1.5+20) = (17, 21.5)
+let m: Array<Float like PgIrrepsIdx<D4, SD>> = ml.derive_pg_linear(D4, SD, SD, [1.0, 2.0, 3.0, 4.0, 5.0], [2.0, 3.0, 0.0 - 1.0, 0.5, 4.0])
+// EXPECT: m = [2, 2, 4, 17, 21.5]

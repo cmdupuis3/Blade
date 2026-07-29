@@ -121,6 +121,102 @@ let private mkFunc name (ps: (string * TypeExpr) list) retTy body : FunctionDecl
       IsStatic = false }
 
 // ============================================================================
+// Equivariance stamping (docs/plan-equivariance-in-types.md, stage A1)
+// ============================================================================
+//
+// The functions this elaborator SYNTHESIZES are equivariant BY CONSTRUCTION:
+// each is a Schur/CG basis expansion whose admissible-map count IS the
+// theorem. `homBlocks` and `linearBlocks` connect only (l, parity)-matched
+// blocks; `tpPaths` guards `eo.Parity = parityMul e1.Parity e2.Parity`;
+// `polyLabels` carries the degree-K monomial parity (-1)^(sum j*p) and
+// `derivePolyDecl.matched` mixes a label only into output blocks of its own
+// (L, parity); the point-group member is the same construction over a frozen
+// character table with the Frobenius-Schur correction. Nothing downstream can
+// re-derive any of that: after pass 2 the `ml.*` vocabulary is gone and the
+// body is a loop nest over baked tables, which is exactly why the seam
+// judgment refuses composition on these bodies. So the elaborator PINS what
+// it knows at the moment it knows it, and later consumers read the pin as an
+// axiom (plan §1 and §3's A1).
+//
+// The conjunct is written in its NORMALIZED spelling `__ml_equiv`. Generated
+// decls are built during PASS 2, long after the `<alias>.equiv -> __ml_equiv`
+// rewrite in expandModule, which only ever touches SOURCE decls.
+//
+// The stamp is inert in every pass but three: TypeCheck dispatches it through
+// the Blade.Constraints registry to MLEquiv's handler (whose Validate
+// re-parses the group name, so an unparseable name is a check error rather
+// than a silent pin), `ide check --json` renders it in bindings[].where, and
+// the typecheck-resident walker of plan stage B consumes it as a certified
+// callee. It never reaches the seam's own `buildCertTable` / `judgeFunction`
+// / `inferCertificates`, all three of which run over `decls1` BEFORE pass 2
+// exists (expandModule's splice is `gen @ decls2` at the very end), and the
+// module fold in `expandStr` keeps that ordering per module — so a stamped
+// body is never asked to survive a composition judgment it would refuse.
+//
+// SOUNDNESS DISCIPLINE. The stamp is a claim about the SIGNATURE the emitter
+// declares, read the way MLEquiv.statusOfType reads it: an
+// `Array<Float like IrrepsIdx<S>>` (resp. `PgIrrepsIdx<G, S>`) slot is a Rep,
+// everything else is an invariant. Stamping is legitimate only when
+//
+//     for all arguments meeting their declared status,
+//     the result meets its own
+//
+// is a theorem OF THE EMITTED BODY. Three families this elaborator also
+// synthesizes fail that test and are deliberately left UNSTAMPED rather than
+// stamped weakly:
+//
+//   * rep-INTRODUCTION forms (y_to, tensor_to_irreps, sym_to_irreps):
+//     invariant scalars in, Rep out. The seam admits them under a documented
+//     conditional premise — "the coordinates really are the components of the
+//     standard vector" — that no signature carries. An axiom of that shape
+//     would let any three invariants manufacture a representation.
+//   * rep-ESCAPE forms (irreps_to_sym, sym_lift): Rep in, invariant out,
+//     which is false for basis-dependent Cartesian components and not even
+//     nameable for monomial coordinates. MLEquiv rejects both by name.
+//   * forms over buffers that are not representation spaces at all: the
+//     row-stacked `linear_rows` / `gated_rows` kernels (which the seam
+//     refuses by name for exactly this reason) and the S_n index-action
+//     layers, whose discipline is `__ml_perm_equiv`, not this one.
+//
+// Under-stamping costs the stage-B walker recall. A wrong stamp would be a
+// false axiom, so the balance is struck on that side every time.
+
+/// Attach the normalized `__ml_equiv(<group>)` conjunct to a synthesized
+/// declaration. Additive: an existing where-clause keeps everything it had.
+let private equivStamp (group: string) (fd: FunctionDecl) : FunctionDecl =
+    let conj = ("__ml_equiv", [ group ])
+    let wc =
+        match fd.WhereClause with
+        | Some w -> { w with Custom = w.Custom @ [ conj ] }
+        | None ->
+            { Commutativity = []; Antisymmetry = []; Parallel = []
+              TDims = []; Custom = [ conj ] }
+    { fd with WhereClause = Some wc }
+
+/// The strongest group admitted by a spec's l = 0 content, for the two
+/// emitters whose bodies treat l = 0 entries as ordinary numbers: `gated`
+/// applies a nonlinear scalar map (silu) to every one of them, and `scalars`
+/// hands them out as declared invariants.
+///
+/// O(3)'s improper elements act on an l = 0 block as (-1)^parity, so a
+/// parity-ODD l = 0 entry is a PSEUDOSCALAR: it is not an invariant (so
+/// `scalars` may not export it as one), and silu does not commute with the
+/// sign flip either (silu(-s) = -s + s*sigmoid(s), while equivariance would
+/// demand -silu(s) = -s*sigmoid(s); they agree only at s = 0). SO(3) has no
+/// improper elements, every l = 0 entry is a genuine invariant under it, and
+/// the emitted arithmetic is unchanged — so the claim WEAKENS to SO3 rather
+/// than disappearing.
+///
+/// NOTE (reported upstream, not patchable from this file): MLEquiv's `gated`
+/// arm tests only `spec.Head.Parity`, so a spec with an even gate block and a
+/// parity-odd l = 0 block ELSEWHERE is accepted under equiv(O3) at the seam
+/// even though the silu applied to that block breaks the O(3) claim. The
+/// predicate here is over the WHOLE spec, which is the sound reading and
+/// strictly more conservative than the seam.
+let private o3UnlessPseudoscalar (s: Spec) : string =
+    if s |> List.exists (fun e -> e.L = 0 && e.Parity <> 0) then "SO3" else "O3"
+
+// ============================================================================
 // Op synthesis
 // ============================================================================
 
@@ -129,6 +225,11 @@ let private sigmoidDecl (name: string) : FunctionDecl =
     mkFunc name [ ("z", TyNamed ("Float", [])) ] (TyNamed ("Float", []))
         (divE (fLit 1.0) (add (fLit 1.0) (syn (ExprApp (v "exp", [ syn (ExprUnaryOp (OpNeg, v "z")) ])))))
 
+/// NOT equiv-stamped (A1): a rep-INTRODUCTION form. Three invariant scalars
+/// in, a Rep out — sound only under the premise that (x, y, z) really are the
+/// components of the standard vector, which the signature cannot state. See
+/// the stamping header above.
+///
 /// y_to (closed forms, lmax <= 2 in v1): mirrors ml/SphericalHarmonics
 /// component order (m ascending per l) and the orthonormalized real solid
 /// harmonics constants pinned by ml/Tests_SphericalHarmonics.
@@ -240,9 +341,17 @@ let private tpBodyStmts (cfg: TPConfig) (wName: string) : Stmt list * Expr =
 /// skip is omitted (adding exact zeros in the same order is the identity).
 let private tpDecl (name: string) (cfg: TPConfig) : FunctionDecl =
     let stmts, ret = tpBodyStmts cfg "w"
+    // A1: O3. Every emitted term is a real-basis Clebsch-Gordan contraction
+    // over a path `tpPaths` admitted, and that filter carries the FULL O(3)
+    // selection rule — triangle inequality on l AND
+    // `eo.Parity = parityMul e1.Parity e2.Parity`. An output block reachable
+    // by no path is never written, and exact zero transforms as anything, so
+    // an explicit `tensor_product` SpecOut wider than the decomposition is
+    // still covered.
     mkFunc name
         [ ("x", tyIrrepsArr cfg.Spec1); ("y", tyIrrepsArr cfg.Spec2); ("w", tyFloatArr (tpWeightDim cfg)) ]
         (tyIrrepsArr cfg.SpecOut) (syn (ExprBlock (stmts, Some ret)))
+    |> equivStamp "O3"
 
 /// derive_sym_tp / derive_alt_tp for a fixed spec: the S₂-compacted
 /// self-tensor-product derive_tp(S, S, x, y, w), compacted in ARITHMETIC as
@@ -337,10 +446,20 @@ let private deriveS2TpDecl (name: string) (s: Spec) (comp: S2Component) : Result
                                        (mul (kIdx "__k_ps")
                                             (mul (idx "y" (add (kIdx "__k_oa") (tIdx "__cg_e2")))
                                                  (idx "x" (add (kIdx "__k_ob") (tIdx "__cg_e1"))))))) ]) ]) ] ]
+    // A1: O3, for tpDecl's reason exactly. The S2 compaction is a
+    // reparameterization of a SUBSPACE of the same hom-space — it drops
+    // weights, never relaxes a selection rule — and the exchange symmetry is
+    // a property of the weights, not of the equivariance claim.
     Ok (mkFunc name
             [ ("x", tyIrrepsArr s); ("y", tyIrrepsArr s); ("w", tyFloatArr packedDim) ]
-            (tyIrrepsArr cfg.SpecOut) (syn (ExprBlock (stmts, Some (v "out")))))
+            (tyIrrepsArr cfg.SpecOut) (syn (ExprBlock (stmts, Some (v "out"))))
+        |> equivStamp "O3")
 
+/// NOT equiv-stamped (A1): a rep EXIT the lattice cannot name. The monomial
+/// coordinates co-rotate POLYNOMIALLY (as Sym^K(V)), so the declared plain-Idx
+/// result is neither a Rep of any spec nor an invariant. See the stamping
+/// header above.
+///
 /// The monomial lift x |-> its symmetric K-th power (plan §3.1's storage
 /// identification, §6.6's convention fork): a flat Idx<C(n+K-1, K)> vector of
 /// the UNWEIGHTED monomials ∏_j x(i_j) over the canonical multisets
@@ -632,8 +751,15 @@ let private derivePolyDecl (name: string) (s: Spec) (k: int) (sOut: Spec) : Resu
                    StmtForIn ("c", syn (ExprDotDot (iLit 0, idx "__w_d" (v "kk"))),
                      [ sAccum (idx "out" (add (idx "__w_oo" (v "kk")) (v "c")))
                               (mul (v "wv") (idx "__lf" (add (idx "__w_fo" (v "kk")) (v "c")))) ]) ])
+    // A1: O3. The label basis is built by CG coupling chains off the input's
+    // copies, so each label transforms as its own (L, parity) — computed as
+    // (-1)^(sum_c j_c * p_c), the honest O(3) parity of a degree-K monomial —
+    // and `matched` above mixes a label ONLY into output blocks carrying that
+    // same (L, parity). Labels with no match carry no weight and are not
+    // emitted, so no unmatched parity can leak into the result.
     Ok (mkFunc name [ ("x", tyIrrepsArr s); ("w", tyFloatArr wDim) ]
-            (tyIrrepsArr sOut) (syn (ExprBlock (List.ofSeq stmts, Some (v "out")))))
+            (tyIrrepsArr sOut) (syn (ExprBlock (List.ofSeq stmts, Some (v "out"))))
+        |> equivStamp "O3")
 
 /// linear for fixed (specIn, specOut): block-diagonal multiplicity mixing,
 /// first-match input block, ml/Linear loop order (blocks -> muO -> muI -> c).
@@ -676,7 +802,19 @@ let private linearDecl (name: string) (specIn: Spec) (specOut: Spec)
     // row-stacked buffers (extent nRows * total_dim) are not irreps spaces.
     let tyIn = if nRows = 1 then tyIrrepsArr specIn else tyFloatArr (nRows * dIn)
     let tyOut = if nRows = 1 then tyIrrepsArr specOut else tyFloatArr (nRows * dOut)
-    mkFunc name [ ("w", tyFloatArr wDim); ("x", tyIn) ] tyOut body
+    let fd = mkFunc name [ ("w", tyFloatArr wDim); ("x", tyIn) ] tyOut body
+    // A1: O3 at nRows = 1 — `linearBlocks` selects the input block by
+    // (l, parity) equality, so this is a SUB-basis of derive_linear's complete
+    // Schur basis (one input block per output block instead of all matches),
+    // and a subspace of the equivariant hom-space is equivariant.
+    //
+    // nRows > 1 is left UNSTAMPED: the row-stacked buffers are declared plain
+    // `Idx<nRows * total_dim>`, so the signature carries no representation for
+    // a claim to be about (the seam refuses `linear_rows` by name for the same
+    // reason). A stamp there would read "invariants in, invariants out" —
+    // vacuously true, and misleading to any consumer treating stamps as
+    // evidence of an equivariant layer.
+    if nRows = 1 then equivStamp "O3" fd else fd
 
 /// gated for a fixed spec: block-0 scalars silu'd AND reused as gates for
 /// higher-L blocks (gate for multiplicity mu is sigmoid(x[mu % numGates])),
@@ -712,11 +850,24 @@ let private gatedDecl (name: string) (sigmoidName: string) (spec: Spec) (nRows: 
                                        (idx "x" (add baseE (add (iLit starts.[b]) (add (mul (v "mu") (iLit d)) (v "c")))))) ] ] ]
     // nRows = 1: x/out ARE the irreps space (same spec in and out) — stamp.
     let tyVec = if nRows = 1 then tyIrrepsArr spec else tyFloatArr (nRows * dTot)
-    Ok (mkFunc name [ ("x", tyVec) ] tyVec
+    let fd =
+        mkFunc name [ ("x", tyVec) ] tyVec
             (syn (ExprBlock (
                 [ sLetMut "out" (zerosLit (nRows * dTot))
                   sFor "rr" 0 nRows rowStmts ],
-                Some (v "out")))))
+                Some (v "out"))))
+    // A1, GROUP-CONDITIONAL at nRows = 1. Two things happen to l = 0 entries
+    // here and both are parity-sensitive: the gate factor is
+    // sigmoid(x[head + mu mod numGates]) — an invariant scalar only if the
+    // head block is parity-even — and EVERY l = 0 block (not just the head) is
+    // silu'd in place, which is not sign-equivariant. `o3UnlessPseudoscalar`
+    // therefore weakens the whole spec to SO3 when any l = 0 block is odd.
+    // Blocks with l > 0 are only scaled by that one factor, which commutes
+    // with D^l, so the output spec is the input spec.
+    //
+    // nRows > 1 is left UNSTAMPED for linearDecl's reason: row-stacked buffers
+    // are not representation spaces.
+    Ok (if nRows = 1 then equivStamp (o3UnlessPseudoscalar spec) fd else fd)
 
 /// derive_linear for fixed (specIn, specOut): the COMPLETE Schur basis of
 /// Hom_G(V_in, V_out) — every (l, parity)-matched (input, output) block
@@ -750,7 +901,12 @@ let private deriveLinearDecl (name: string) (specIn: Spec) (specOut: Spec) : Fun
             [ yield sLetMut "out" (zerosLit dOut)
               yield! pairStmts ],
             Some (v "out")))
+    // A1: O3. `homBlocks` admits a (input, output) block pair only when BOTH
+    // l and parity agree, so the emitted basis is exactly Hom_{O(3)} — the
+    // complete one, which is why zero-filled output blocks (no matching input)
+    // are the unique equivariant completion rather than a gap in the claim.
     mkFunc name [ ("w", tyFloatArr wDim); ("x", tyIrrepsArr specIn) ] (tyIrrepsArr specOut) body
+    |> equivStamp "O3"
 
 // ============================================================================
 // The POINT-GROUP block-spec surface (plan-transforms-as-types §3.6, §7 stage
@@ -875,10 +1031,27 @@ let private derivePgLinearDecl (name: string) (grp: Blade.ML.PointSpec.PointGrou
                 [ yield sLetMut "out" (zerosLit dOut)
                   yield! pairStmts ],
                 Some (v "out")))
+        // A1: the POINT GROUP NAMED IN THE CALL, and nothing weaker or
+        // stronger. This is derive_linear's construction over a finite group's
+        // frozen character table — cells connect equal LABELS only, with the
+        // Frobenius-Schur correction supplying e = dim_R End_G(U) scalars per
+        // cell — so the emitted basis is exactly Hom_{grp}. It says nothing
+        // about any other group: `grp.Name` is a registered point-group name
+        // (MLPointSpec.pointGroupNames), which is what MLEquiv's parseGroup
+        // accepts, and certificates do not transfer between groups.
         Ok (mkFunc name [ ("x", tyPgIrrepsArr grp.Name specIn); ("w", tyFloatArr wDim) ]
-                (tyPgIrrepsArr grp.Name specOut) body)
+                (tyPgIrrepsArr grp.Name specOut) body
+            |> equivStamp grp.Name)
 
 // ============================================================================
+// NOT equiv-stamped (A1): a DIFFERENT DISCIPLINE, not a weaker claim. These
+// kernels are equivariant for the node-relabelling action of Sₙ over flat
+// N^K buffers, whose claim vocabulary is `__ml_perm_equiv` and whose lattice
+// is MLPerm's; `__ml_equiv` names O(3)/SO(3)/point-group representation
+// spaces, and no `IrrepsIdx` slot appears in any signature below. Stamping
+// them here would be a category error, not conservatism. A `__ml_perm_equiv`
+// twin of this stamping pass is a follow-up, not part of A1.
+//
 // The Sₙ INDEX-ACTION surface (plan-transforms-as-types §3.6, §7 stage 5a-ii)
 // ============================================================================
 //
@@ -1082,8 +1255,14 @@ let private scalarsDecl (name: string) (spec: Spec) : Result<FunctionDecl, ElabE
             [ yield sLetMut "out" (zerosLit offs.Length)
               for k in 0 .. offs.Length - 1 do
                 yield sAssign (idx "out" (iLit k)) (idx "x" (iLit offs.[k])) ]
+        // A1, GROUP-CONDITIONAL. The declared return type is a plain Idx
+        // array, i.e. the claim is "these entries are INVARIANTS". True of
+        // every l = 0 entry under SO(3); true under O(3) only when no l = 0
+        // block is parity-odd, since a pseudoscalar flips under improper
+        // rotations. Same predicate the seam's `scalars` arm applies.
         Ok (mkFunc name [ ("x", tyIrrepsArr spec) ] (tyFloatArr offs.Length)
-                (syn (ExprBlock (stmts, Some (v "out")))))
+                (syn (ExprBlock (stmts, Some (v "out"))))
+            |> equivStamp (o3UnlessPseudoscalar spec))
 
 /// norms for a fixed spec: per-(block, multiplicity) 2-norms in (block, mu)
 /// order — mirrors ml/Activations.norms exactly (sum of squares in
@@ -1111,9 +1290,22 @@ let private normsDecl (name: string) (spec: Spec) : FunctionDecl =
                                        (idx "x" (add (iLit off) (v "c")))) ])
           for k in 0 .. slots.Length - 1 do
             yield sAssign (idx "out" (iLit k)) (syn (ExprApp (v "sqrt", [ idx "sq" (iLit k) ]))) ]
+    // A1: O3, unconditionally — the one l = 0 exporter that needs no parity
+    // side-condition. Each slot is the Euclidean norm of one (block,
+    // multiplicity) component vector, and every O(3) irrep in the real basis
+    // acts by an ORTHOGONAL matrix (parity contributes only an overall sign,
+    // which the sum of squares annihilates), so a norm is invariant under the
+    // full group including improper elements.
     mkFunc name [ ("x", tyIrrepsArr spec) ] (tyFloatArr slots.Length)
         (syn (ExprBlock (stmts, Some (v "out"))))
+    |> equivStamp "O3"
 
+/// NOT equiv-stamped (A1), in either direction. `tensor_to_irreps` /
+/// `sym_to_irreps` are rep-INTRODUCTION forms carrying y_to's unstatable
+/// premise; `irreps_to_sym` is a rep ESCAPE whose declared invariant result is
+/// a vector of basis-dependent Cartesian components, and MLEquiv rejects it by
+/// name inside a certified body. See the stamping header above.
+///
 /// Cartesian<->irreps bridge ops (rank-2, 3-D, v1): a dense matvec over the
 /// baked orthonormal closed-form table (Blade.ML.CartesianBridge — the
 /// single source of truth, fit-certified against SphericalHarmonics by the
