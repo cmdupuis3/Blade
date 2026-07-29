@@ -45,6 +45,58 @@ let placementClassOf (sym: SymmetryClass) : PlacementClass =
     | SymNone -> PlaceDense
     | SymSymmetric | SymAntisymmetric | SymHermitian -> PlaceCombinatorial sym
 
+/// ---------------------------------------------------------------------------
+/// ORBIT PLACEMENT (design skeleton -- docs/design-unified-orbit-storage.md).
+/// NOT WIRED IN: nothing constructs or consumes this yet. It is here because it
+/// is the generalization the two cases above are already instances of, and
+/// stating it in the type system is what keeps the tiers of the design honest.
+///
+/// An orbit placement is a TRIPLE: a base tuple space of R index positions, a
+/// POSITION GROUP G <= S_R declaring which slot permutations are interchangeable,
+/// and a linear CHARACTER chi: G -> {+1,-1,conj} giving the value transform on
+/// non-canonical access. `SymmetryClass` above IS chi; `PositionGroup` is the
+/// missing half, which today is implicit ("full S_R over one comm group").
+///
+/// The point of naming G separately is that the CLOSED-FORM RANK depends on G
+/// alone, and only two shapes of G have one:
+///
+///   PgFullSym  -- combinadic / left-justify. C(N+R-1,R) inclusive, C(N,R)
+///                 strict. Discharged by BladeDMWF (lj_correct/unlj_correct)
+///                 and BladeBinomial. This is `comm`/`antisymm` today.
+///   PgProduct  -- per-group ranks composed MIXED RADIX, cell count
+///                 prod_j C(N_j+R_j-1, R_j). Discharged by
+///                 BladeMixedRadix.mixed_radix_bijection / shapeCard_binom.
+///                 This is a multi-group `comm` pin today -- and, per the design
+///                 doc's tier 2, it is ALSO the tied-perm cell layout, which is
+///                 why tying an S_n-equivariant layer's arguments needs no new
+///                 layout and no new proof obligation.
+///   PgOpaque   -- everything else. Orbits under a general finite G have
+///                 stabilizers of varying size, so the cell count is a Burnside
+///                 sum and there is NO reason to expect a closed-form rank
+///                 (BladeCounting.v is the nearest negative result). The honest
+///                 placement is PlaceTabulated. Do not promise a rank here.
+///
+/// The ZERO-SET is a function of BOTH: a tuple whose stabilizer in G contains an
+/// element with chi = -1 must store zero (v = chi(h)*v = -v). That is why
+/// PlaceCombinatorial carries its SymmetryClass, and it is the general form of
+/// the antisymmetric zero-diagonal -- measured to govern the antisym WEIGHT
+/// buffer of a tied equivariant layer verbatim (design doc 2.5, 16/16).
+type PositionGroup =
+    | PgTrivial                       // G = 1                -> dense
+    | PgFullSym of rank: int          // G = S_R              -> closed form
+    | PgProduct of ranks: int list    // G = prod_j S_{R_j}   -> mixed radix
+    | PgOpaque of tag: string         // any other finite G   -> runtime table
+
+/// Placement from the (G, chi) pair. Agrees with `placementClassOf` on every
+/// shipped index type: today's `SymIdx<R,N>` is `PgFullSym R` and today's dense
+/// `Idx<N>` is `PgTrivial`, so this is a strict generalization, not a rewrite.
+let placementOfOrbit (g: PositionGroup) (chi: SymmetryClass) : PlacementClass =
+    match g with
+    | PgTrivial -> PlaceDense
+    | PgFullSym _ -> PlaceCombinatorial chi
+    | PgProduct _ -> PlaceCombinatorial chi
+    | PgOpaque _ -> PlaceTabulated
+
 /// Commutativity/Symmetry state at each loop level (Section 13.1)
 /// Determines whether triangular iteration is valid at this position
 type SymcomState =
