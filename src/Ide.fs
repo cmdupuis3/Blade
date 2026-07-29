@@ -10,8 +10,15 @@
 //     "diagnostics": [ { severity, line, col, endLine, endCol, message } ],
 //     "bindings":    [ { name, kind, line, col, type,
 //                        doc?,                       // comment block above
-//                        params?: [{name,type,doc?}],// functions only
-//                        ret? } ] }                  // functions only
+//                        params?: [{name,type,doc?,  // functions only
+//                                   minRank?}],      // deduced min rank (stage 2)
+//                        ret?,                       // functions only
+//                        where?,                     // declared conjuncts
+//                        deducedComm? } ],           // deduced pin clauses; [] = "None"
+//     "kernels":     [ { line, col, endLine, endCol, // lambda kernels, span-keyed
+//                        params: [name],
+//                        deducedComm: [clause], declaredWhere: [clause],
+//                        minRanks: [{param, rank}] } ] }
 //
 // All positions are 1-based. Diagnostics carry statement-granularity spans
 // (the finest the AST tracks today). Bindings cover top-level lets/statics,
@@ -79,6 +86,9 @@ type private ParamInfo = {
     PName: string
     PType: string
     PDoc: string
+    /// Deduced minimum rank (stage 2 decl-close pin). Some only when the
+    /// rank was DEDUCED — annotated params show their rank in the type.
+    PMinRank: int option
 }
 
 type private BindingInfo = {
@@ -91,6 +101,11 @@ type private BindingInfo = {
     Params: ParamInfo list   // non-empty only for functions
     Ret: string option       // Some only for functions
     Where: string list       // where-clause conjuncts, functions only
+    /// Stage-3 DEDUCED symmetry, as canonical pin-clause strings
+    /// ("comm(a, b)" / "anticomm(a, b)"), declared or not — the editor
+    /// dedupes against Where. Always emitted for functions (empty = the
+    /// deduction ran and proved nothing → the editor renders "None").
+    DeducedComm: string list
     /// Provenance for a top-level provider read (`let x = store.vars.v |>
     /// alias.read`): (store binding name, "vars.v" / "dims.v"). None for
     /// every non-provider binding. Surfaced as a "from …" line in the hover.
@@ -141,6 +156,22 @@ type private CallInfo = {
     CRet: string
 }
 
+// One lambda-kernel site with its deduction snapshot from the apply seam:
+// param names, deduced symmetry (canonical pin-clause strings), declared
+// where-clause conjuncts, and per-param cell ranks (the deduced minimum —
+// rank polymorphism supplies the frame on top at each call site). Span-keyed:
+// hover/completion on the lambda resolves through position, not a name.
+type private KernelIdeInfo = {
+    KLine: int
+    KCol: int
+    KEndLine: int
+    KEndCol: int
+    KParamNames: string list
+    KDeduced: string list
+    KDeclaredW: string list
+    KMinRanks: (string * int) list
+}
+
 /// Clamp a span to 1-based sanity; noSpan (all zeros) becomes 1:1-1:1.
 let private clampSpan (s: Span) =
     let line = max 1 s.StartLine
@@ -149,7 +180,7 @@ let private clampSpan (s: Span) =
     let endCol = if s.EndCol >= 1 then s.EndCol else col
     (line, col, endLine, endCol)
 
-let private renderJson (diags: Diag list) (bindings: BindingInfo list) (providers: ProviderInfo list) (calls: CallInfo list) =
+let private renderJson (diags: Diag list) (bindings: BindingInfo list) (providers: ProviderInfo list) (calls: CallInfo list) (kernels: KernelIdeInfo list) =
     let sb = StringBuilder()
     sb.Append "{\"version\":1,\"diagnostics\":[" |> ignore
     diags
@@ -184,6 +215,9 @@ let private renderJson (diags: Diag list) (bindings: BindingInfo list) (provider
                 if j > 0 then sb.Append ',' |> ignore
                 sb.AppendFormat("{{\"name\":\"{0}\",\"type\":\"{1}\"", jsonEscape p.PName, jsonEscape p.PType) |> ignore
                 if p.PDoc <> "" then sb.AppendFormat(",\"doc\":\"{0}\"", jsonEscape p.PDoc) |> ignore
+                match p.PMinRank with
+                | Some k -> sb.AppendFormat(",\"minRank\":{0}", k) |> ignore
+                | None -> ()
                 sb.Append '}' |> ignore)
             sb.AppendFormat("],\"ret\":\"{0}\"", jsonEscape ret) |> ignore
             if not b.Where.IsEmpty then
@@ -193,6 +227,14 @@ let private renderJson (diags: Diag list) (bindings: BindingInfo list) (provider
                     if j > 0 then sb.Append ',' |> ignore
                     sb.AppendFormat("\"{0}\"", jsonEscape w) |> ignore)
                 sb.Append ']' |> ignore
+            // Always present on functions: [] means "deduction ran, proved
+            // nothing" (editor: "None"); ABSENT means an old compiler.
+            sb.Append ",\"deducedComm\":[" |> ignore
+            b.DeducedComm
+            |> List.iteri (fun j c ->
+                if j > 0 then sb.Append ',' |> ignore
+                sb.AppendFormat("\"{0}\"", jsonEscape c) |> ignore)
+            sb.Append ']' |> ignore
         | None -> ()
         sb.Append '}' |> ignore)
     sb.Append "],\"providers\":[" |> ignore
@@ -234,6 +276,29 @@ let private renderJson (diags: Diag list) (bindings: BindingInfo list) (provider
         |> List.iteri (fun j a ->
             if j > 0 then sb.Append ',' |> ignore
             sb.AppendFormat("\"{0}\"", jsonEscape a) |> ignore)
+        sb.Append "]}" |> ignore)
+    sb.Append "],\"kernels\":[" |> ignore
+    let appendStrings (label: string) (ss: string list) =
+        sb.AppendFormat(",\"{0}\":[", label) |> ignore
+        ss
+        |> List.iteri (fun j s ->
+            if j > 0 then sb.Append ',' |> ignore
+            sb.AppendFormat("\"{0}\"", jsonEscape s) |> ignore)
+        sb.Append ']' |> ignore
+    kernels
+    |> List.iteri (fun i k ->
+        if i > 0 then sb.Append ',' |> ignore
+        sb.AppendFormat(
+            "{{\"line\":{0},\"col\":{1},\"endLine\":{2},\"endCol\":{3}",
+            k.KLine, k.KCol, k.KEndLine, k.KEndCol) |> ignore
+        appendStrings "params" k.KParamNames
+        appendStrings "deducedComm" k.KDeduced
+        appendStrings "declaredWhere" k.KDeclaredW
+        sb.Append ",\"minRanks\":[" |> ignore
+        k.KMinRanks
+        |> List.iteri (fun j (p, r) ->
+            if j > 0 then sb.Append ',' |> ignore
+            sb.AppendFormat("{{\"param\":\"{0}\",\"rank\":{1}}}", jsonEscape p, r) |> ignore)
         sb.Append "]}" |> ignore)
     sb.Append "]}" |> ignore
     sb.ToString()
@@ -816,7 +881,7 @@ let private whereConjuncts (wc: WhereClause option) : string list =
             |> List.map (fun group -> sprintf "comm(%s)" (String.concat ", " group))
         let antis =
             w.Antisymmetry
-            |> List.map (fun group -> sprintf "antisymm(%s)" (String.concat ", " group))
+            |> List.map (fun group -> sprintf "anticomm(%s)" (String.concat ", " group))
         let pars =
             w.Parallel
             |> List.map (function
@@ -830,25 +895,64 @@ let private whereConjuncts (wc: WhereClause option) : string list =
             |> List.map (fun (name, args) -> sprintf "%s(%s)" name (String.concat ", " args))
         comms @ antis @ pars @ customs
 
+/// Collapse adjacent-pair parities into canonical pin-clause strings: a
+/// maximal run of PInv pairs over params i..j+1 becomes one comm(...) group
+/// (adjacent transpositions generate the full symmetric group over the run),
+/// and a PNeg run one anticomm(...) group (the generators fix the sign law).
+/// Runs touching a compiler-synthesized (`__`) name are unpinnable — dropped.
+let private parityClauses (names: string list) (parities: Blade.Deduce.Parity list) : string list =
+    let nameArr = List.toArray names
+    let parArr = List.toArray parities
+    let clauses = ResizeArray<string>()
+    let mutable i = 0
+    while i < parArr.Length do
+        let kw =
+            match parArr.[i] with
+            | Blade.Deduce.PInv -> Some "comm"
+            | Blade.Deduce.PNeg -> Some "anticomm"
+            | Blade.Deduce.PBottom -> None
+        match kw with
+        | None -> i <- i + 1
+        | Some kw ->
+            let mutable j = i
+            while j + 1 < parArr.Length && parArr.[j + 1] = parArr.[i] do j <- j + 1
+            // Pairs i..j span params i..j+1.
+            if j + 1 < nameArr.Length then
+                let group = [ for x in i .. j + 1 -> nameArr.[x] ]
+                if group |> List.forall (fun n -> not (n.StartsWith "__")) then
+                    clauses.Add(sprintf "%s(%s)" kw (String.concat ", " group))
+            i <- j + 1
+    List.ofSeq clauses
+
 type private TypedEntry = {
     Scope: string
     EName: string
     EKind: string
     ETypeStr: string
-    EParams: (string * string) list
+    EParams: (string * string * int option) list   // name, type, deduced min rank
     ERet: string option
     EWhere: string list
+    EDeducedComm: string list
 }
 
 let private collectTypedBindings (srcFuncs: Map<string, FunctionDecl>) (tp: TypedProgram) =
     let acc = ResizeArray<TypedEntry>()
+    // Deduction side-channel snapshots (IdeDeductions, recorded during
+    // typeCheck): per-function adjacent-pair parities and pack parities.
+    // Last write wins on redefinition, like the TypeEnv tables they mirror.
+    let dedPairs =
+        Blade.TypeCheck.IdeDeductions.getPairs ()
+        |> List.fold (fun m (n, v) -> Map.add n v m) Map.empty
+    let dedPacks =
+        Blade.TypeCheck.IdeDeductions.getPacks ()
+        |> List.fold (fun m (n, v) -> Map.add n v m) Map.empty
     // Value bindings: each binding names its own abstract vars (T, U, ...) —
     // schemes don't share ids across bindings, so per-binding namespaces
     // can't collide.
     let ppVal (t: IRType) = abstractRenderer [] t
     let add scope name kind tyStr =
         acc.Add { Scope = scope; EName = name; EKind = kind; ETypeStr = tyStr
-                  EParams = []; ERet = None; EWhere = [] }
+                  EParams = []; ERet = None; EWhere = []; EDeducedComm = [] }
     let rec walkTStmts (scope: string) (stmts: TypedStmt list) =
         for s in stmts do
             match s with
@@ -878,13 +982,41 @@ let private collectTypedBindings (srcFuncs: Map<string, FunctionDecl>) (tp: Type
                   | None -> () ]
             | _ -> []
         let pp = abstractRenderer seed
-        let ps = f.Params |> List.map (fun p -> (p.Name, pp p.Type))
+        // Deduced minimum rank (stage 2): a param the SOURCE left unannotated
+        // whose resolved type is an array got that rank from its body uses
+        // (decl-close pin or direct builtin unification) — the body-forced
+        // minimum IS the cell rank. Annotated params show their rank in the
+        // signature and carry no minRank.
+        let srcAnnotated =
+            match Map.tryFind f.Name srcFuncs with
+            | Some src when src.Params.Length = f.Params.Length ->
+                src.Params |> List.map (fun p -> p.Type.IsSome) |> List.toArray
+            | _ -> f.Params |> List.map (fun _ -> true) |> List.toArray
+        let ps =
+            f.Params
+            |> List.mapi (fun i p ->
+                let minRank =
+                    if srcAnnotated.[i] then None
+                    else
+                        match p.Type with
+                        | ArrayElem arr when not arr.IndexTypes.IsEmpty ->
+                            Some arr.IndexTypes.Length
+                        | _ -> None
+                (p.Name, pp p.Type, minRank))
         let ret = pp f.ReturnType
         let kind = if f.IsStatic then "static function" else "function"
+        let deducedComm =
+            (match Map.tryFind f.Name dedPairs with
+             | Some (names, parities) -> parityClauses names parities
+             | None -> [])
+            @ (match Map.tryFind f.Name dedPacks with
+               | Some (packName, Blade.Deduce.PInv) -> [sprintf "comm(%s)" packName]
+               | _ -> [])
         acc.Add { Scope = ""; EName = f.Name; EKind = kind
-                  ETypeStr = formatFunctionSig ps ret
+                  ETypeStr = formatFunctionSig (ps |> List.map (fun (n, t, _) -> (n, t))) ret
                   EParams = ps; ERet = Some ret
-                  EWhere = whereConjuncts f.WhereClause }
+                  EWhere = whereConjuncts f.WhereClause
+                  EDeducedComm = deducedComm }
         for p in f.Params do add f.Name p.Name "param" (pp p.Type)
         walkFuncBody f.Name f.Body
     // Module-level let types by name, for rebuilding erased dists below.
@@ -1085,19 +1217,41 @@ let private joinBindings (prog: Ast.Program) (tp: TypedProgram) (sourceLines: st
                 elif not e.EParams.IsEmpty && block <> "" then
                     let paramRes =
                         e.EParams
-                        |> List.map (fun (n, _) ->
+                        |> List.map (fun (n, _, _) ->
                             Regex(sprintf @"^[\s\-\*]*%s\s*[:—-]" (Regex.Escape n)))
                     block.Split('\n')
                     |> Array.filter (fun l -> paramRes |> List.forall (fun re -> not (re.IsMatch l)))
                     |> String.concat "\n"
                     |> fun s -> s.Trim()
                 else block
-            let ps = e.EParams |> List.map (fun (n, t) -> { PName = n; PType = t; PDoc = paramDocIn block n })
+            let ps =
+                e.EParams
+                |> List.map (fun (n, t, mr) ->
+                    { PName = n; PType = t; PDoc = paramDocIn block n; PMinRank = mr })
             let providerRead = if e.Scope = "" then Map.tryFind e.EName provRead else None
             yield { Name = e.EName; Kind = kind; Line = line; Col = col
                     TypeStr = e.ETypeStr; Doc = doc; Params = ps; Ret = e.ERet
-                    Where = e.EWhere; ProviderRead = providerRead }
+                    Where = e.EWhere; DeducedComm = e.EDeducedComm
+                    ProviderRead = providerRead }
         | _ -> () ]
+
+// ----------------------------------------------------------------------------
+// Lambda-kernel deduction sites (IdeDeductions side-channel, span-keyed).
+// ----------------------------------------------------------------------------
+
+/// One entry per distinct lambda-kernel span. A let-bound lambda applied at
+/// several sites records once per instantiation with the same definition
+/// span — first wins (the deduction is per-kernel, not per-site).
+let private collectKernels () : KernelIdeInfo list =
+    let seen = HashSet<int * int * int * int>()
+    [ for k in Blade.TypeCheck.IdeDeductions.getKernels () do
+        let (line, col, endLine, endCol) = clampSpan k.KSpan
+        if seen.Add((line, col, endLine, endCol)) then
+            yield { KLine = line; KCol = col; KEndLine = endLine; KEndCol = endCol
+                    KParamNames = k.KParams
+                    KDeduced = parityClauses k.KParams k.KParities
+                    KDeclaredW = k.KDeclared
+                    KMinRanks = k.KRanks } ]
 
 // ----------------------------------------------------------------------------
 // Entry point
@@ -1111,6 +1265,7 @@ let ideCheck (filePath: string) : int =
     let mutable bindings = []
     let mutable providers = []
     let mutable calls = []
+    let mutable kernels = []
     if not (File.Exists filePath) then
         diags.Add { Severity = "error"; Line = 1; Col = 1; EndLine = 1; EndCol = 1
                     Message = sprintf "File not found: %s" filePath; Code = "" }
@@ -1153,6 +1308,7 @@ let ideCheck (filePath: string) : int =
                     bindings <- (try joinBindings program typedProg sourceLines with _ -> [])
                     providers <- (try collectProviderStores program with _ -> [])
                     calls <- (try collectCalls typedProg @ collectFormerCalls program typedProg with _ -> [])
+                    kernels <- (try collectKernels () with _ -> [])
                 | None -> ()
             | Ok (typedProg, _, warnings) ->
                 // Confirm-and-pin suggestions (stage 3/4) arrive twice: as
@@ -1178,5 +1334,6 @@ let ideCheck (filePath: string) : int =
                 // Guarded so provider structure can never break the JSON output.
                 providers <- (try collectProviderStores program with _ -> [])
                 calls <- (try collectCalls typedProg @ collectFormerCalls program typedProg with _ -> [])
-    printfn "%s" (renderJson (List.ofSeq diags) bindings providers calls)
+                kernels <- (try collectKernels () with _ -> [])
+    printfn "%s" (renderJson (List.ofSeq diags) bindings providers calls kernels)
     exitCode

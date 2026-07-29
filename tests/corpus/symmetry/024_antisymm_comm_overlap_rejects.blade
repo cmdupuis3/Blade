@@ -1,5 +1,5 @@
 // TEST: Antisymm and comm on the same pair (rejects)
-// `comm` and `antisymm` over the same exchange fuse into ONE axis group, and
+// `comm` and `anticomm` over the same exchange fuse into ONE axis group, and
 // that group's storage would have to be simultaneously inclusive (diagonal
 // stored) and strict (diagonal implicitly zero) — iteration and layout would
 // disagree, which is exactly the class of silent corruption the stage-3
@@ -7,4 +7,4 @@
 // either clause is resolved to parameter indices. (Overlapping comm groups
 // remain legal: they are consistent with each other.)
 let A = [1.0, 2.0, 3.0]
-let bad = method_for(A, A) <@> lambda(x, y) where comm(x, y), antisymm(x, y) -> x - y |> compute
+let bad = method_for(A, A) <@> lambda(x, y) where comm(x, y), anticomm(x, y) -> x - y |> compute

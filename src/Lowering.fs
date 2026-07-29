@@ -640,6 +640,13 @@ let rec lowerTypedExpr (env: TypedLowerEnv) (texpr: TypedExpr) : IRExpr =
         | IRTScalar ETBool -> IRLit (IRLitBool false)
         | IRTScalar ETFloat32 | IRTScalar ETFloat64 -> IRLit (IRLitFloat 0.0)
         | IRTInfer _ -> IRLit (IRLitFloat 0.0)  // unresolved defaults to float
+        | ArrayElem _ ->
+            // An array-typed zero that reached lowering sits in a position the
+            // binding-site materialization (inferLetBindingValue's zero arm)
+            // does not cover — emitting IRZero here would render as a scalar
+            // `0` under an array type in the generated C++ (a null pointer).
+            // Fail loudly with the working spelling instead.
+            failwith "zero at an array type is only materialized at an annotated let binding (`let A: Array<...> = zero`). In other positions (a function's return expression, a call argument), bind it first: `let z: Array<...> = zero` and use `z`."
         | _ -> IRZero  // fallback
     
     | TExprReynolds (kernel, isAntisym) ->
@@ -742,7 +749,7 @@ and lowerTypedLambda env (info: TypedLambdaInfo) : IRExpr =
         | Some (selfName, selfId) ->
             { defaultLambdaOptions with NameOverride = Some selfName; IdOverride = Some selfId }
         | None -> defaultLambdaOptions
-    // A `where antisymm(a, b)` group is an axis group exactly like a comm
+    // A `where anticomm(a, b)` group is an axis group exactly like a comm
     // group — same fusion, same triangular iteration — so it rides CommGroups
     // for every grouping consumer (buildLoopLevelStructure et al.), with the
     // separate AntisymGroups list carrying the one extra bit: the simplex is

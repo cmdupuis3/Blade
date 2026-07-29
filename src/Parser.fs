@@ -1106,15 +1106,16 @@ let parseWhereClause (tokens: Token list) : ParseResult<WhereClause> =
             expect TokRParen afterNames >>= fun _ remaining ->
             loop (names :: comms) antis par custom remaining
         | Some (TokKeyword KwAntisymm) ->
-            // `antisymm(a, b, ...)` — the signed sibling of `comm`. Needs at
-            // least two parameters: an antisymmetry relation is a statement
-            // about an EXCHANGE, so a one-name group names no swap at all.
+            // `anticomm(a, b, ...)` — the signed sibling of `comm`. Needs at
+            // least two parameters: an anticommutativity relation is a
+            // statement about an EXCHANGE, so a one-name group names no swap
+            // at all.
             let line, col = currentPos toks
             advance toks |> expect TokLParen >>= fun _ afterLParen ->
             parseIdentList afterLParen >>= fun names afterNames ->
             expect TokRParen afterNames >>= fun _ remaining ->
             if List.length names < 2 then
-                error "antisymm(...) needs at least two parameters: antisymmetry is a relation between two exchanged arguments (f(b, a) = -f(a, b))" line col
+                error "anticomm(...) needs at least two parameters: anticommutativity is a relation between two exchanged arguments (f(b, a) = -f(a, b))" line col
             else
                 loop comms (names :: antis) par custom remaining
         | Some (TokKeyword KwOmp) ->
@@ -1203,9 +1204,9 @@ let parseWhereClause (tokens: Token list) : ParseResult<WhereClause> =
             let line, col = currentPos toks
             match dupInAnti, bothWays with
             | Some n, _ ->
-                error (sprintf "'%s' appears in two antisymm(...) groups: an argument belongs to at most one antisymmetry relation (the groups would fuse into one axis with two contradictory layouts)" n) line col
+                error (sprintf "'%s' appears in two anticomm(...) groups: an argument belongs to at most one anticommutativity relation (the groups would fuse into one axis with two contradictory layouts)" n) line col
             | _, Some n ->
-                error (sprintf "'%s' is declared both comm(...) and antisymm(...): one exchange cannot be both symmetric (inclusive triangle, diagonal stored) and antisymmetric (strict triangle, diagonal zero)" n) line col
+                error (sprintf "'%s' is declared both comm(...) and anticomm(...): one exchange cannot be both commutative (inclusive triangle, diagonal stored) and anticommutative (strict triangle, diagonal zero)" n) line col
             | None, None ->
             success {
                 Commutativity = List.rev comms

@@ -186,6 +186,40 @@ let registerProviderNames (names: Set<string>) =
 let isProviderModuleName (name: string) : bool =
     Set.contains name providerModuleNames
 
+/// Extension point: the provider layer registers its compile-time AXIS reader
+/// here ((providerName, storePath, rootBinding, dimName) → static extent) —
+/// see ProviderStatics.install. Same layering rule as the data reader above.
+let mutable private providerIndexReader : (string -> string -> string -> string -> int option) option = None
+
+let registerProviderIndexReader (f: string -> string -> string -> string -> int option) =
+    providerIndexReader <- Some f
+
+/// Resolve a provider axis type (`store.index.y`, which the parser hands over
+/// as ONE name carrying the dotted path) to its extent.
+///
+/// The module elaborations (spectra/math/sgs/ppl) need these extents to
+/// specialize their generated code, and they run BEFORE type checking — which
+/// is where TypeEnv registers the provider's axis types. So they resolve the
+/// path here instead, through the same (root → provider, store) map the
+/// payload fold uses. None when the name is not such a path, its root is not
+/// a provider binding, no reader is installed, or the store has no such dim —
+/// callers then report their ordinary "extent not statically known" steer.
+let providerIndexExtent (env: StaticEnv) (name: string) : int option =
+    match providerIndexReader with
+    | None -> None
+    | Some reader ->
+        let marker = ".index."
+        let i = name.IndexOf marker
+        if i <= 0 then None
+        else
+            let root = name.Substring(0, i)
+            let dim = name.Substring(i + marker.Length)
+            if dim = "" || dim.Contains "." then None
+            else
+                match Map.tryFind root env.ProviderRoots with
+                | Some (provider, path) -> reader provider path root dim
+                | None -> None
+
 // ============================================================================
 // Expression Evaluator
 // ============================================================================

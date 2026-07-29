@@ -234,7 +234,12 @@ let rec private resolveExtent (aliases: Map<string, TypeExpr>) (statics: StaticE
         | Ok (SVInt n) -> Some (int n)
         | _ -> None
     | TyNamed (name, []) ->
-        Map.tryFind name aliases |> Option.bind (resolveExtent aliases statics)
+        match Map.tryFind name aliases with
+        | Some body -> resolveExtent aliases statics body
+        // Not a source alias: a provider axis path (`type Y = store.index.y`),
+        // registered by TypeEnv during type CHECKING — after this pass — so the
+        // extent comes from the store's metadata instead.
+        | None -> providerIndexExtent statics name
     | _ -> None
 
 /// Shape inference for COMPUTED source arrays: an UN-annotated module-level

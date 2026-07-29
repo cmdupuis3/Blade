@@ -1,5 +1,5 @@
 // TEST: Antisymm pin (declared) - strict triangle without reynolds
-// The `where antisymm(x, y)` PIN: the confirm-and-pin artifact for a kernel
+// The `where anticomm(x, y)` PIN: the confirm-and-pin artifact for a kernel
 // the stage-3 deduction proves anti-invariant (plan §4). Unlike
 // reynolds(g, Antisymmetric) — which SUMS the signed permutations and needs
 // the comm iteration license on the wrapped kernel (symmetry/019,
@@ -9,7 +9,7 @@
 // reynolds, same C(n,2) strict-simplex storage (diagonal implicitly zero).
 let A = [1.0, 2.0, 3.0, 4.0]
 let L = method_for(A, A)
-let g = lambda(x, y) where antisymm(x, y) -> x - y
+let g = lambda(x, y) where anticomm(x, y) -> x - y
 let result = L <@> g |> compute
 // Hand computation, strict pairs i < j over A = [1,2,3,4], value A[i] - A[j]:
 // (0,1)=-1 (0,2)=-2 (0,3)=-3 (1,2)=-1 (1,3)=-2 (2,3)=-1  -> 6 cells, not 16.

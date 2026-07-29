@@ -41,6 +41,42 @@ module PinSuggestions =
     let get () : (string * Span) list =
         match box slot.Value with null -> [] | _ -> List.rev slot.Value
 
+/// IDE side-channel for the deduction RESULTS themselves — the structured twin
+/// of PinSuggestions' prose. The per-function tables (FuncDeducedPairs,
+/// PackDeducedComm) and the rank pins live in the TypeEnv/Subst local to
+/// checkProgram and are gone when it returns, so `ide check --json` records
+/// them here as they are computed: named functions by name, lambda kernels by
+/// source span. Reset alongside PinSuggestions; AsyncLocal like IdePartial.
+module IdeDeductions =
+    /// One lambda-kernel instantiation at the apply seam: kernel span, param
+    /// names, adjacent-pair parities (n-1 entries), declared where-clause
+    /// conjuncts (comm/anticomm, rendered), and per-param cell ranks.
+    type KernelInfo = {
+        KSpan: Span
+        KParams: string list
+        KParities: Blade.Deduce.Parity list
+        KDeclared: string list
+        KRanks: (string * int) list
+    }
+    let private pairs = new System.Threading.AsyncLocal<(string * (string list * Blade.Deduce.Parity list)) list>()
+    let private packs = new System.Threading.AsyncLocal<(string * (string * Blade.Deduce.Parity)) list>()
+    let private kernels = new System.Threading.AsyncLocal<KernelInfo list>()
+    let reset () =
+        pairs.Value <- []
+        packs.Value <- []
+        kernels.Value <- []
+    let addPairs (funcName: string) (paramNames: string list) (ps: Blade.Deduce.Parity list) =
+        pairs.Value <- (funcName, (paramNames, ps)) :: pairs.Value
+    let addPack (funcName: string) (packParam: string) (p: Blade.Deduce.Parity) =
+        packs.Value <- (funcName, (packParam, p)) :: packs.Value
+    let addKernel (info: KernelInfo) =
+        kernels.Value <- info :: kernels.Value
+    let private read (slot: System.Threading.AsyncLocal<'a list>) =
+        match box slot.Value with null -> [] | _ -> List.rev slot.Value
+    let getPairs () = read pairs
+    let getPacks () = read packs
+    let getKernels () = read kernels
+
 let rec evalConstExpr (env: TypeEnv) (expr: Expr) : int64 option =
     match expr.Kind with
     | ExprKind.ExprLit (LitInt n) -> Some n
@@ -1159,7 +1195,7 @@ let extractCommGroups (parms: LambdaParam list) (whereClause: WhereClause option
     | Some wc -> groupsToIndices parms wc.Commutativity
     | None -> []
 
-/// `where antisymm(...)` groups, by parameter index — the signed twin of
+/// `where anticomm(...)` groups, by parameter index — the signed twin of
 /// extractCommGroups. Kept as its own extractor (rather than folded into the
 /// comm list) because the two declarations mean different things to the
 /// stage-3 validators and to output storage; the consumers that only need
@@ -2101,6 +2137,15 @@ let isMathIntrinsic (name: string) : bool = Blade.Grad.isMathIntrinsic name
 
 /// Whitelist subset permitted on complex operands (has a std::complex overload).
 let isComplexMathIntrinsic (name: string) : bool = Blade.Grad.isComplexMathIntrinsic name
+
+/// Every intrinsic reachable as a PLAIN CALL: the Grad-listed scalar
+/// intrinsics plus the ones with their own inferExpr arms (abs, which
+/// preserves its operand's numeric type, and the complex accessors
+/// real/imag/arg). All are arity-1 — which is what lets
+/// etaExpandFunctionKernel wrap one in kernel position without a declared
+/// signature to read the arity from.
+let isUnaryIntrinsic (name: string) : bool =
+    isMathIntrinsic name || name = "abs" || name = "real" || name = "imag" || name = "arg"
 
 /// A variable is a provider-module alias when it is bound opaque to a
 /// registered provider's module name (`import netcdf as nc` binds
@@ -4296,7 +4341,7 @@ and warnImplicitOuterProduct (env: TypeEnv) (tLoop: TypedExpr) (rightResult: Typ
             match rightResult with
             | Ok tR ->
                 (match (resolveTypedExpr env tR).Kind with
-                 // A declared antisymm counts too: the user who wrote it is
+                 // A declared anticomm counts too: the user who wrote it is
                  // thinking in symmetric-outer terms just as much as a comm
                  // author, and the steering note would be noise.
                  | TExprLambda li ->
@@ -4392,6 +4437,19 @@ and inferBinOp env mode op left right : TypeResult<TypedExpr> =
                     let tL = stampSynthSpan left tL0
                     warnImplicitOuterProduct env tL rightResult
                     applyWith tL)
+            | ExprKind.ExprVar name when isUnaryIntrinsic name && (lookupVar name env).IsNone ->
+                // Bare unary intrinsic on the left: `abs <@> u` ≡
+                // `object_for(abs) <@> u`, the same shape namedFunctionKernelLeft
+                // gives a named function. It needs its own arm because an
+                // intrinsic has no binding AT ALL: the arms below open by
+                // inferring the left operand, which reports it unbound long
+                // before any classification runs. An intrinsic can never be the
+                // arrays operand, so — unlike a bare name — a kernel-shaped
+                // RIGHT does not take it back; that pairing falls through
+                // applyWith to the kernel <@> kernel steering.
+                inferObjectFor env left
+                |> Result.map (stampSynthSpan left)
+                |> Result.bind applyWith
             | _ ->
                 inferExpr env left |> Result.bind (fun tL ->
                     match (resolveTypedExpr env tL).Kind with
@@ -5252,6 +5310,23 @@ and resolveTypedExpr (env: TypeEnv) (texpr: TypedExpr) : TypedExpr =
 /// kernel positions only, so bare function VALUES elsewhere are unaffected.
 and etaExpandFunctionKernel (env: TypeEnv) (kernelExpr: Expr) : TypeResult<TypedExpr> option =
     match kernelExpr.Kind with
+    // A unary intrinsic in kernel position: `abs <@> u`, `object_for(sqrt)`.
+    // The intrinsics are call-shaped SYNTAX rather than values — nothing binds
+    // the name, so the lookupVar arm below cannot see one and the fall-through
+    // reports it as an unbound variable. Wrapping it as lambda(__k) -> abs(__k)
+    // puts the body back on the plain-call arms, so their typing, unit rules,
+    // complex overloads and derivative rules all apply unchanged. Arity is 1 by
+    // construction (isUnaryIntrinsic), so there is no signature to read it from.
+    // The unbound guard is the same shadowing rule those arms use: a user
+    // `function abs(...)` wins and takes the ordinary named-function path.
+    | ExprKind.ExprVar name when isUnaryIntrinsic name && (lookupVar name env).IsNone ->
+        let uid = env.Builder.FreshId()
+        let pname = sprintf "__k%d_0" uid
+        let lamParams : LambdaParam list = [ { Name = pname; Type = None } ]
+        let bodyApp =
+            inheritSpan kernelExpr
+                (ExprApp (kernelExpr, [ inheritSpan kernelExpr (ExprVar pname) ]))
+        Some (inferLambda env lamParams None bodyApp)
     | ExprKind.ExprVar name ->
         match lookupVar name env with
         // TypedValue = None is exactly the case resolveTypedExpr cannot turn
@@ -5297,7 +5372,7 @@ and etaExpandFunctionKernel (env: TypeEnv) (kernelExpr: Expr) : TypeResult<Typed
                                 | true, cg when not (List.isEmpty cg) ->
                                     { li with CommGroups = cg; IsCommutative = true }
                                 | _ -> li
-                            // Same for `where antisymm(...)`: param indices carry
+                            // Same for `where anticomm(...)`: param indices carry
                             // over 1:1, and without this the clause is dropped by
                             // the eta wrapper and `object_for(f) <@> (A, A)` for a
                             // declared-antisymmetric function silently falls back
@@ -5730,7 +5805,7 @@ and buildApplyInfo (env: TypeEnv)
     : TypeResult<TypedExpr> =
 
     let commGroups = lambdaInfo.CommGroups
-    // Declared `where antisymm(...)` positions. Same axis grouping and the
+    // Declared `where anticomm(...)` positions. Same axis grouping and the
     // same iteration license as comm (the exchange is licensed either way —
     // only the SIGN and the diagonal differ), so `iterGroups` is what every
     // grouping consumer sees. `antisymStorageGroups` is the narrower list that
@@ -5786,10 +5861,36 @@ and buildApplyInfo (env: TypeEnv)
                     | _ -> None
                 (lambdaInfo.Params |> List.map (fun p -> p.Name),
                  Blade.Deduce.deduceAdjacentPairs signResolver lambdaInfo.Params lambdaInfo.Body)
+    // IDE: record this kernel's deduction snapshot, span-keyed (`ide check
+    // --json` kernels[]). Unconditional — declared and reynolds kernels
+    // record too (parities are empty under reynolds by construction). Skip
+    // synthesized eta-wrappers over named functions (`__k...`/`__of...`
+    // params): the named function's own binding entry covers those with
+    // names a user can actually write.
+    (let kParams = lambdaInfo.Params |> List.map (fun p -> p.Name)
+     if not (kParams |> List.exists (fun n -> n.StartsWith "__")) then
+        let renderGroups kw (groups: int list list) =
+            groups |> List.choose (fun g ->
+                let names = g |> List.choose (fun i ->
+                    if i >= 0 && i < kParams.Length then Some kParams.[i] else None)
+                if List.isEmpty names then None
+                else Some (sprintf "%s(%s)" kw (String.concat ", " names)))
+        IdeDeductions.addKernel {
+            KSpan = (if tKernel.Span = noSpan then tLoop.Span else tKernel.Span)
+            KParams = kParams
+            KParities = stage3Pairs
+            KDeclared = renderGroups "comm" lambdaInfo.CommGroups
+                        @ renderGroups "anticomm" lambdaInfo.AntisymGroups
+            KRanks = lambdaInfo.Params |> List.map (fun p ->
+                let rank =
+                    match env.Subst.Resolve p.Type with
+                    | ArrayElem arr -> arr.IndexTypes.Length
+                    | _ -> 0
+                (p.Name, rank)) })
     // Declared comm + provably antisymmetric body = the silent-corruption
     // case: triangular storage would drop the sign flips. Hard error;
     // PBottom stays trusted (status quo escape hatch). The mirror case —
-    // declared antisymm + provably COMMUTATIVE body — is the same error with
+    // declared anticomm + provably COMMUTATIVE body — is the same error with
     // the signs exchanged: strict-simplex storage would drop the diagonal and
     // return the negation for half the reads. (Both stand down under
     // reynolds, where stage3Pairs is empty by construction.)
@@ -5819,7 +5920,7 @@ and buildApplyInfo (env: TypeEnv)
     // and the SAME array occupies both positions (H ∩ Stab would license
     // compaction). Output stays DENSE until the user pins — the suggestion is
     // the compiler proposing, never deciding. PInv proposes the inclusive
-    // triangle (`comm`), PNeg the strict one (`antisymm`, zero diagonal).
+    // triangle (`comm`), PNeg the strict one (`anticomm`, zero diagonal).
     if List.isEmpty iterGroups && not (List.isEmpty stage3Pairs) then
         List.indexed stage3Pairs
         |> List.iter (fun (i, par) ->
@@ -5841,7 +5942,7 @@ and buildApplyInfo (env: TypeEnv)
                             n1 n2 n1 n2
                     else
                         sprintf
-                            "kernel deduces ANTIsymmetric in (%s, %s) (f(%s, %s) = -f(%s, %s)) and both positions receive the same array: output storage is DENSE today. Pin `where antisymm(%s, %s)` on the kernel to opt into compact antisymmetric (strict-triangular, zero-diagonal) storage."
+                            "kernel deduces ANTIcommutative in (%s, %s) (f(%s, %s) = -f(%s, %s)) and both positions receive the same array: output storage is DENSE today. Pin `where anticomm(%s, %s)` on the kernel to opt into compact anticommutative (strict-triangular, zero-diagonal) storage."
                             n1 n2 n2 n1 n1 n2 n1 n2
                 emitWarning env msg
                 // Synthesized kernels (eta wrappers, sections) carry noSpan;
@@ -6109,7 +6210,7 @@ and buildApplyInfo (env: TypeEnv)
                         if j >= n - irank then { idx with Kind = TDimension } else idx)
                 { at with IndexTypes = retagged })
 
-    // Grouping/iteration reads `iterGroups` (comm ∪ antisymm): a declared
+    // Grouping/iteration reads `iterGroups` (comm ∪ anticomm): a declared
     // antisymmetric pair fuses its axes and iterates the simplex exactly like
     // a comm pair — only the strictness (IR's StrictOffset) and the stored
     // symmetry class differ, and both of those are decided downstream.
@@ -6929,6 +7030,52 @@ and inferLetBindingValue (env: TypeEnv) (binding: Binding) : TypeResult<TypedExp
                  | FuncElem (_, ret) -> unify env.Subst ret annotTy |> Result.map (fun () -> tv)
                  | _ -> Ok tv)
                 |> Result.bind rejectEscapedWildcard)
+        // ---- Monadic zero at an array annotation ----
+        // `let A: Array<Float64 like Y, X> = zero [|> compute]`: zero is the
+        // additive-identity CONCEPT and the annotation supplies its shape.
+        // TExprZero's lowering only knows scalar shapes, so an array-typed
+        // zero is rewritten here — the one place the annotation is in hand —
+        // to the explicit spelling of the same idea,
+        //     for () in range<I1, ..., In> <@> lambda(...) -> <elem zero> |> compute
+        // and re-driven through ordinary inference, so it rides the whole
+        // existing former pipeline (loop nests, OMP, dealloc, interpreter).
+        // Each range slot is spelled as the annotation slot's nominal tag
+        // (IxKPlain only — Tag holds sentinels for the exotic kinds) or as
+        // its literal static extent when untagged (the provider-axis case,
+        // where the annotation's own slots are untagged too).
+        | ExprKind.ExprZero | ExprKind.ExprCompute { Kind = ExprKind.ExprZero }
+                when (match annotTy with ArrayElem _ -> true | _ -> false) ->
+            let arrTy = match annotTy with ArrayElem a -> a | _ -> failwith "unreachable"
+            let sp = binding.Value.Span
+            let elemZero =
+                match arrTy.ElemType with
+                | AnyPrimElem (ETInt32 | ETInt64) -> Some (mkExpr sp (ExprKind.ExprLit (LitInt 0L)))
+                | AnyPrimElem ETBool -> Some (mkExpr sp (ExprKind.ExprLit (LitBool false)))
+                | AnyPrimElem (ETFloat32 | ETFloat64) -> Some (mkExpr sp (ExprKind.ExprLit (LitFloat 0.0)))
+                | AnyPrimElem (ETComplex64 | ETComplex128) ->
+                    let z () = mkExpr sp (ExprKind.ExprLit (LitFloat 0.0))
+                    Some (mkExpr sp (ExprKind.ExprApp (mkExpr sp (ExprKind.ExprVar "complex"), [z (); z ()])))
+                | _ -> None
+            let slotSurface (idx: IRIndexType) : TypeExpr option =
+                if idx.Rank <> 1 || idx.IxKind <> IxKPlain then None else
+                match idx.Tag with
+                | Some tag -> Some (TyNamed (tag, []))
+                | None ->
+                    match idx.Extent with
+                    | IRLit (IRLitInt n) -> Some (TyIdx (mkExpr sp (ExprKind.ExprLit (LitInt n))))
+                    | _ -> None
+            let slots = arrTy.IndexTypes |> List.map slotSurface
+            (match elemZero, (if slots |> List.forall Option.isSome then Some (List.map Option.get slots) else None) with
+             | Some zBody, Some idxTys ->
+                 let params_ : LambdaParam list =
+                     idxTys |> List.mapi (fun i _ -> { Name = sprintf "__zero_i%d" i; Type = None })
+                 let former = mkExpr sp (ExprKind.ExprFor (ForArrays ([], Some (mkExpr sp (ExprKind.ExprRange idxTys))), [], None))
+                 let lam = mkExpr sp (ExprKind.ExprLambda (params_, None, zBody))
+                 let synth = mkExpr sp (ExprKind.ExprCompute (mkExpr sp (ExprKind.ExprBinOp (Elementwise, OpApply, former, lam))))
+                 checkExpr env annotTy synth |> Result.bind (fun tv ->
+                     rejectEscapedWildcard { tv with Type = annotTy })
+             | _ ->
+                 Error (Other "zero at this array annotation cannot be materialized: every axis must be a plain rank-1 index with a nominal name or a static extent, and the element type must be numeric, bool, or complex. Spell the fill explicitly (`for () in range<...> <@> lambda(...) -> <zero literal> |> compute`) for packed, ragged, or non-static shapes."))
         | _ ->
         checkExpr env annotTy binding.Value |> Result.bind (fun tv ->
             // Prefer the annotation as the canonical type — it can be more
@@ -9361,7 +9508,7 @@ and checkFunctionDecl (env: TypeEnv) (funcDecl: FunctionDecl) : TypeResult<Typed
             // named function is dropped and the loop emits dense storage.
             if not (List.isEmpty commGroups) then
                 env.FuncCommGroups.[funcDecl.Name] <- commGroups
-            // Same for `where antisymm(...)` — its own side-channel, since a
+            // Same for `where anticomm(...)` — its own side-channel, since a
             // where-clause attribute that no surfacing site re-attaches is
             // dropped by the kernel-position eta wrapper (silently falling
             // back to dense storage).
@@ -9414,6 +9561,8 @@ and checkFunctionDecl (env: TypeEnv) (funcDecl: FunctionDecl) : TypeResult<Typed
             if not (List.isEmpty deducedPairs) then
                 env.FuncDeducedPairs.[funcDecl.Name] <-
                     (typedParams |> List.map (fun p -> p.Name), deducedPairs)
+                IdeDeductions.addPairs funcDecl.Name
+                    (typedParams |> List.map (fun p -> p.Name)) deducedPairs
             // Stage-3 LATE TIER: pack symmetry for arity-polymorphic kernels.
             // The ∀-arity AC-fold template first (the head::tail recursion
             // itself — packprod, comoment_prod); failing that, the
@@ -9434,6 +9583,7 @@ and checkFunctionDecl (env: TypeEnv) (funcDecl: FunctionDecl) : TypeResult<Typed
                          Blade.Deduce.packParityOf resolver packP.VarId tBody
                  if packSummary = Blade.Deduce.PInv then
                      env.PackDeducedComm.[funcDecl.Name] <- (packP.Name, packSummary)
+                     IdeDeductions.addPack funcDecl.Name packP.Name packSummary
              | _ -> ())
             // Declared comm on a named function whose body is PROVABLY
             // antisymmetric in a declared adjacent pair is the
@@ -9441,7 +9591,7 @@ and checkFunctionDecl (env: TypeEnv) (funcDecl: FunctionDecl) : TypeResult<Typed
             // be a reynolds kernel (reynolds requires a lambda), so no
             // iteration license can apply here — hard error. PBottom stays
             // trusted (the escape hatch when the analysis is too weak).
-            // The declared-antisymm twin is the same check with the parities
+            // The declared-anticomm twin is the same check with the parities
             // exchanged: a body provably INVARIANT under a pair declared
             // antisymmetric would be stored on a strict simplex that has no
             // diagonal and negates half its reads.
@@ -10244,6 +10394,7 @@ let typeCheck (program: Program) : Result<TypedProgram * IRBuilder * string list
     Blade.ProviderStatics.install ()
     IdePartial.reset ()
     PinSuggestions.reset ()
+    IdeDeductions.reset ()
     // Staged-former unfold FIRST: `static method_for/object_for/for`
     // argument lists elaborate to plain formers before any other stage
     // (ML/PPL/math/grad and the checker never see ExprStatic).

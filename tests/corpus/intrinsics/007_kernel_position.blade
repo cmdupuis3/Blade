@@ -1,0 +1,20 @@
+// TEST: Intrinsics In Kernel Position
+// ============================================================================
+// An intrinsic names a kernel: `abs <@> A` and `method_for(A) <@> sqrt` are
+// the `object_for(abs) <@> A` spelling exactly. The name is call-shaped syntax
+// with no binding behind it, so the eta-expansion that carries a named
+// function into kernel position is the one that carries these — and the
+// shadowing rule still holds there: a user `ceil` wins over the intrinsic.
+// ============================================================================
+let A = [1.0, 0.0 - 2.0, 3.0]
+let P = [1.0, 4.0, 9.0]
+let mags = abs <@> A |> compute
+let mags2 = object_for(abs) <@> A |> compute
+let roots = method_for(P) <@> sqrt |> compute
+
+function ceil(x: Float) -> Float = x * 10.0
+let scaled = ceil <@> A |> compute
+// EXPECT: mags = [1.0, 2.0, 3.0]
+// EXPECT: mags2 = [1.0, 2.0, 3.0]
+// EXPECT: roots = [1.0, 2.0, 3.0]
+// EXPECT: scaled = [10.0, -20.0, 30.0]

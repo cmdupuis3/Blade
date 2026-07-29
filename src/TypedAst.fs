@@ -51,13 +51,13 @@ type TypedLambdaInfo = {
     Body: TypedExpr
     ReturnType: IRType
     CommGroups: int list list
-    /// `where antisymm(...)` groups, by parameter index — the SIGNED twin of
+    /// `where anticomm(...)` groups, by parameter index — the SIGNED twin of
     /// CommGroups. Same iteration license (one joint simplex over the group's
     /// positions), but the licensed output storage is the STRICT simplex
     /// (AntisymIdx<r, n>: no diagonal, negate on swapped reads) rather than
     /// the inclusive triangle. Kept SEPARATE from CommGroups so the stage-3
     /// validators can tell the two declarations apart (a declared comm on a
-    /// PNeg body and a declared antisymm on a PInv body are different errors);
+    /// PNeg body and a declared anticomm on a PInv body are different errors);
     /// the consumers that only care about GROUPING merge the two lists.
     AntisymGroups: int list list
     Captures: TypedVarInfo list

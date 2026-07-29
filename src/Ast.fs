@@ -236,7 +236,7 @@ and Constraint =
     // as data on the record, not as Constraint values); these cases remain as
     // documentation of the original design. No constructor site exists.
     | CnComm of Ident list              // comm(a, b, c)
-    | CnAntisymm of Ident list          // antisymm(a, b)
+    | CnAntisymm of Ident list          // anticomm(a, b)
     | CnReynolds of Ident list * bool   // reynolds([a,b], antisym?)
     // equiv(G, rho) — superseded by WhereClause.Custom + the Blade.Constraints
     // registry: `where ml.equiv(O3|SO3)` parses as a Custom conjunct and is
@@ -246,14 +246,14 @@ and Constraint =
 
 and WhereClause = {
     Commutativity: Ident list list        // comm(a,b), comm(c,d)
-    // antisymm(a,b) groups — the SIGNED sibling of Commutativity: the kernel
+    // anticomm(a,b) groups — the SIGNED sibling of Commutativity: the kernel
     // is declared ANTI-invariant under exchange of the listed parameters
     // (f(b,a) = -f(a,b), hence a zero diagonal). Same grouping/iteration
     // license as a comm group, but the licensed output storage is the STRICT
     // simplex (AntisymIdx<r,n>, C(n,r) cells, negate-on-swap reads) instead of
     // the inclusive triangle. This is the pin spelling for a deduced-PNeg
     // kernel (docs/plan-implicit-formers-and-deduction.md §4).
-    Antisymmetry: Ident list list         // antisymm(a,b)
+    Antisymmetry: Ident list list         // anticomm(a,b)
     // Parallelization strategy assignments. A LIST of per-backend groupings,
     // each carrying its own dimensions (OmpStrategy.Vars / CudaStrategy). Today
     // the list holds 0 or 1 element: [] => serial, [single] => one strategy.

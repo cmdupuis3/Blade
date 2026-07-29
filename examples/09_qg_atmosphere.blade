@@ -44,9 +44,12 @@
 // ============================================================================
 import spectra as sp
 import zarr as z
+import math as m
 
-type Y = Idx<64>                        // meridional (row) axis
-type X = Idx<64>                        // zonal (column) axis
+let store = z.load("data/qg_init_zarr")
+
+type X = store.index.x                  // zonal (column) axis
+type Y = store.index.y                  // meridional (row) axis
 type RF = Array<Float64 like Y, X>      // real field
 type CF = Array<Complex128 like Y, X>   // spectral (complex) field
 type RY = Array<Float64 like Y>
@@ -62,7 +65,6 @@ type StepsA1 = Idx<1001>                // A1: 1000 steps
 type StepsA2 = Idx<1501>                // A2: 1500 steps
 type StepsB = Idx<1601>                 // B:  1600 steps
 
-let store = z.load("data/qg_init_zarr")
 let QR0: RF = store.vars.q_rossby |> z.read
 let QPRED: RX = store.vars.q_pred_rossby |> z.read
 let QM0: RF = store.vars.q_mcw |> z.read
@@ -311,8 +313,8 @@ function tend2_b(q1: CF, q2: CF) -> CF = {
     let u = sp.ifft2(uhat(llB, ph))
     let v = sp.ifft2(vhat(kkB, ph))
     let qr = sp.ifft2(q2)
-    let mu = maxall(abs <@> (u) |> compute)
-    let mv = maxall(abs <@> (v) |> compute)
+    let mu = maxall(abs <@> u |> compute)
+    let mv = maxall(abs <@> v |> compute)
     cflAcc = fmax(cflAcc, fmax(mu, mv))
     let UQ = sp.fft2(flux(u, 0.0, qr))
     let VQ = sp.fft2(flux(v, 0.0, qr))

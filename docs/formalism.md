@@ -515,7 +515,7 @@ triangularly automatically.
 ### 6.2 Primitive symmetry annotations
 
 `(+)`/`(*)` Symmetric, `(-)` Antisymmetric, `(/)` Asymmetric — the compiler
-infers `comm`/`antisymm` for kernels built from them (`a + b` ⇒ comm(a, b)).
+infers `comm`/`anticomm` for kernels built from them (`a + b` ⇒ comm(a, b)).
 
 ### 6.3 Geometric primitives and reductions
 

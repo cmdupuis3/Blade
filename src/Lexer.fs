@@ -170,11 +170,12 @@ let keywords =
       "where", KwWhere
       "and", KwAnd
       "comm", KwComm
-      // `antisymm` is a where-clause conjunct keyword (the antisymmetry pin,
-      // sibling of `comm`). Spelled with the double-m so it cannot collide
-      // with the `AntisymIdx` type keyword or the `Antisymmetric` reynolds
-      // variant identifier.
-      "antisymm", KwAntisymm
+      // `anticomm` is a where-clause conjunct keyword (the anticommutativity
+      // pin, signed sibling of `comm`). Named after the property it pins —
+      // f(b, a) = -f(a, b) — so it cannot collide with the `AntisymIdx` type
+      // keyword or the `Antisymmetric` reynolds variant identifier, both of
+      // which speak the index-storage sense of "antisymmetric".
+      "anticomm", KwAntisymm
       "omp", KwOmp
       "cuda", KwCuda
       "mpi", KwMpi
