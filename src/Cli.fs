@@ -1306,6 +1306,16 @@ let private dispatchTest (rest: string list) : int =
         // checking behaviour and is deliberately NOT part of the full suite.
         let failed = (Blade.Tests.GalLayerCensus.runGalLayerCensusTests ()).Failed
         if failed = 0 then 0 else 1
+    | [ "perm-layer" ] | [ "permlayer" ] ->
+        // MEASUREMENT ONLY (docs/census-perm-layer.md): the PERM discipline's
+        // layer question, plus the first-ever perm INFERENCE experiment. Perm
+        // has no incumbent inference, so the differential degenerates to its
+        // false-positive half: every proposal is gated by writing the pin back
+        // into the source and running the SHIPPED SEAM CHECKER on it. Builds an
+        // experimental typed judgment inside the test assembly; changes no
+        // checking behaviour and is deliberately NOT part of the full suite.
+        let failed = (Blade.Tests.PermLayerCensus.runPermLayerCensusTests ()).Failed
+        if failed = 0 then 0 else 1
     | [ "oracles" ] ->
         // Phase 0.2 review block: the differential-harness oracles checked
         // against hand-computed / analytic values. No Blade source pipeline.

@@ -58,8 +58,20 @@ halves are shipped and gated (`rep-differential`, `rep-check`,
 measurement rather than settled by argument.
 
 Sequels: `design-discipline-as-data.md` (the three-way survey),
-`census-rejection-parity.md` (the flip's price), and
-`exploration-equivariant-bijections.md` (the §6.3 restriction decision).
+`census-rejection-parity.md` (the flip's price),
+`census-galilean-layer.md` and `census-perm-layer.md` (the other two
+disciplines' layer answers), and `exploration-equivariant-bijections.md`
+(the §6.3 restriction decision).
+
+ALL THREE DISCIPLINES ARE NOW MEASURED, and they give three different
+answers for three unrelated reasons — which is the strongest available
+evidence that per-discipline scoping was right. Equiv checks at the seam
+because its evidence is gone; galilean checks at the seam because its
+refusal value carries no cause or span, and COULD flip later; perm
+checks at the seam because a typed walker cannot confirm a single one of
+its certificates, and its DEDUCTION should be built at the seam too —
+the one discipline for which the layer question was never the obstacle.
+See `census-perm-layer.md` §9.5 for the three-way table.
 
 REVIEW DECISIONS (2026-07-28):
 1. Claim-as-deduced-attribute CONFIRMED, with a refinement that sharpens
@@ -128,6 +140,24 @@ What the move buys, concretely (both are named deferrals today):
    MLPerm's own named fix and is available only at the typed layer. That
    is a TYPE-SYSTEM ADDITION, not a free consequence of moving the
    walker — it is staged and costed accordingly.
+
+   SECOND CORRECTION (2026-07-29, `census-perm-layer.md`, MEASURED):
+   **the conclusion does not survive either.** Three findings, in
+   ascending order of consequence. (i) Monomorphization does not even
+   make the extents LITERAL: an `Idx<W1>` sized by a `let static` arrives
+   at typecheck as `IRParam ("W1", 0, IRTNat None)`, because statics are
+   substituted in Lowering's Phase 0. (ii) The `__nodepow` tag, priced by
+   running the first-ever perm inference with and without N given, buys
+   **nothing** — 5 proposals, recall 5/5, zero noise either way;
+   enumerating N over the integer roots of the signature's extents is
+   sufficient and explores 1–3 candidates per function. (iii) The actual
+   blocker is that the three Sₙ ops are GONE by typecheck, and the seam
+   reads their `(K, L, N)` off the surface call for free. So **perm
+   inference is cheapest AT THE SEAM**, and this bullet has been pointing
+   away from its own answer since it was written. The tag stays on the
+   shelf; its one real prize is elsewhere — the coincidental-extent
+   caveat, which makes 14 legal op configurations unwritable
+   (`census-perm-layer.md` §7.3).
 
 ## 1. Why the current machinery cannot just be moved
 
@@ -290,11 +320,58 @@ them all:
       byte-identical sentence; only the code differs), and the
       `ml.*`-op rejection rule is LIVE BUT UNPINNED — no corpus probe
       exists; promote the inline one.
-  - **C3-c. Perm, on its own terms.** Same shape, plus the
-    `__nodepow` nominal index tag (§0.2's correction), which is a
-    type-system addition to be judged on its own merits. Perm has no
-    incumbent inference at all, so its differential has only the
-    false-positive half.
+  - **C3-c. Perm — MEASURED (2026-07-29, `census-perm-layer.md`). It
+    inherits neither answer, and its answer is the third distinct one.**
+    - Acceptance: 5 certificates / 4 files → **0 confirm / 5 abstain /
+      0 disagree**. Not one. Perm's `Pow k` (k ≥ 1) can only be produced
+      or consumed by `ml.derive_perm_linear` / `ml.derive_perm_bias` /
+      `ml.perm_matmul`, and by typecheck those are anonymous `__ml_<n>`
+      calls carrying no stamp (`MLElaborate.fs:176-180` declines to
+      stamp them BY NAME). Supply one `(K, L, N)` triple per generated
+      decl and it becomes **5 confirm / 0 abstain / 0 disagree**. There
+      is no middle. This is equiv's family C, TOTAL rather than 6 of 30.
+    - Rejection: **0 of 11** would still be refused, worse than
+      galilean's 1/11 and equiv's 14/30 — and there is **no family A**
+      at all, because without the ops the walker never reaches a
+      definite rank and so can never contradict anything.
+    - Inference (the first ever, built in the harness and gated by
+      writing each proposal back as a pin and running the SHIPPED SEAM):
+      **0 proposals** with no op recognition; **5 proposals, recall 5/5,
+      0 beyond the pins, 0 refused by the seam** with it. Zero of the 12
+      pins the seam REFUSES are ever re-derived.
+    - **The `__nodepow` tag buys NOTHING for inference**: the
+      N-given configuration is byte-identical to the N-enumerated one.
+      Enumerating N over the integer roots of the signature's extents
+      explores 1–3 candidates per function and produces no noise.
+    - §0.2's correction is confirmed independently AND deepened: a
+      `let static`-sized extent is not a literal at typecheck at all
+      (`Idx<W1>` is `IRParam ("W1", 0, IRTNat None)`; statics land in
+      Lowering's Phase 0), so the typed walker can only resolve it by
+      being handed the static environment the seam already carries.
+    - **Therefore: checking stays at the seam (a CAPABILITY problem, not
+      a diagnostics one — not flippable), and deduction should be BUILT
+      AT THE SEAM.** The layer was never perm's obstacle: everything
+      inference needs is at the seam already, and the one thing it needs
+      that typecheck lacks is the ops' `(K, L, N)`, which the seam reads
+      off the surface call for free. §0.2's promise ("perm inference
+      becomes feasible at typecheck") was written from equiv's premises
+      and pointed away from the cheap fix.
+    - Storage, which neither other discipline touches: perm's flat
+      `Idx<N^k>` buffers and Blade's compact `SymIdx` are the SAME AXIS.
+      v1 refuses a `SymIdx` axis by SURFACE SYNTAX; at typecheck an
+      extent-only classifier reads `SymIdx<2,4>` as `Pow 1`. The guard
+      must be reconstructed from `Rank`/`Symmetry`/`IxKind`, and perm
+      v2's per-axis vectors are the same bookkeeping `comm`/`SymIdx`
+      already do.
+    - The kit: v1 CAN use `structuralArm` (two recorded mismatches, both
+      costing nothing measurable). **v2 cannot** — `DisciplineKit.fs:576-578`
+      binds a former's kernel parameters to the source statuses
+      VERBATIM, and per-axis vectors need the iterated axes dropped;
+      there is no hook. §5.3's flag is confirmed, with a line number.
+    - Bonus finding, free: perm's conjunct-shape refusals are ALREADY
+      typecheck-resident via `permHandler.Validate`, with byte-identical
+      sentences (BL3999 vs BL4012) — galilean's family D one discipline
+      over. The N < 2 rule is live and UNPINNED by any corpus probe.
 
   Two open policy questions the censuses surfaced, neither blocking:
 
@@ -396,6 +473,12 @@ let out = combine(u, v)   // u, v : Array<Float like IrrepsIdx<S>>
 from call-site evidence rather than requiring the user to write it. This
 is a RECALL change, not a syntax change — nothing a user could write
 before stops working, and nothing new becomes writable.
+
+MEASUREMENT UPDATE (2026-07-29, `census-perm-layer.md`): the reading below
+is now known to be too optimistic in one direction and too pessimistic in
+another. Perm inference is NOT gated on a layer move at all — it is
+cheapest at the seam — and the `__nodepow` tag buys it nothing measurable.
+The original text is kept for the record.
 
 One discipline is explicitly NOT affected by this round: `ml.perm_equiv`
 (Sₙ) certificate recall stays exactly where it is today. §0.2's claim that
