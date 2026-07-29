@@ -138,15 +138,35 @@ them all:
   composition rules are the same shape as the parity exchange lemmas).
 
 **C. Checking migration (only after B3 holds)**
-- C1. Declared-cert validation at typecheck via the same walker
-  (composition fragment). Elaboration checking stays on; disagreement is
-  a compiler bug (the LieGuardFailure posture).
-- C2. Engine port: PolyExtract gets a TypedExpr extractor (discharge —
-  finite elements and the radical-vector Lie identity — is already
-  IR-agnostic; only extraction walks syntax).
+- C1. LANDED (2026-07-28). Declared-cert validation at typecheck via the
+  same walker (composition fragment). Elaboration checking stays on;
+  disagreement is a compiler bug (the LieGuardFailure posture, BL9004,
+  build-stopping). Outcomes are CONFIRM / ABSTAIN / DISAGREE with
+  abstention the default at every boundary the B3 differential showed
+  the walkers legitimately diverge; DISAGREE is deliberately narrow
+  (definite TRep vs TRep with different specs). Census on landing:
+  130 certified decls, 54 confirm / 76 abstain / 0 disagree
+  (`blade test rep-check`). Self-reference is assumed, not refused —
+  validation is an assume-guarantee obligation, inverting deduction's
+  rule.
+- C2. LANDED (2026-07-28). MLPolyExtractTyped ports EXTRACTION to
+  TypedExpr (discharge confirmed IR-agnostic and reused, zero math
+  reimplemented); stitched into DeduceRep's EngineDischarge hook at both
+  the checking site (abstain -> confirm/disagree) and the deduction site
+  (composition-declined attempts, strongest-first preserved). The two
+  `TYPED-EXEMPT: engine` exemptions are GONE — the differential is
+  16/16 matched, 0 exempt. STEADY STATE NOTE: generated `derive_*`
+  bodies (63 of the 76 abstentions) do NOT discharge and are not meant
+  to — they are method_for CG loop nests, not polynomial normal form,
+  and their warrant is the elaborator stamp (axioms by construction,
+  emitter verification + proof tower), not re-derivation. Closing them
+  would be structural CG recognition, a different feature; abstention
+  there is benign and permanent until someone wants that feature.
 - C3. Retire the seam walkers; MLElaborate keeps synthesis + stamping
   only. Galilean and perm land as discipline instances on the generic
   engine (galilean's table is small; perm gains inference per §0.2).
+  NOT STARTED — the checking-authority flip lives here, and with it the
+  diagnostic-parity question (every rejects pin is seam-worded today).
 
 **D. Meets and modes (the previous conversation, now cheap)**
 - D1. Collision = subgroup meet via A3's branching rules: O3 ⊓ SO3 = SO3
