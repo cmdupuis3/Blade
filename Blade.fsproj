@@ -238,6 +238,11 @@
     <Compile Include="tests/Test_RepDifferential.fs" />
     <Compile Include="tests/Test_RepCheckAgreement.fs" />
     <Compile Include="tests/Test_RepRejectCensus.fs" />
+    <!-- MEASUREMENT SCAFFOLDING for docs/census-galilean-layer.md: the
+         experimental typed GALILEAN judgment and its two censuses. Lives in the
+         test assembly deliberately — nothing in src/ may reference it, and it is
+         not part of the full suite (verb `blade test gal-layer`). -->
+    <Compile Include="tests/Test_GalLayerCensus.fs" />
     <Compile Include="tests/Oracles.fs" />
     <Compile Include="tests/Test_Oracles.fs" />
     <Compile Include="tests/Test_WignerTables.fs" />
