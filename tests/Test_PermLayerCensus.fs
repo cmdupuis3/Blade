@@ -980,6 +980,31 @@ let coincidentConfigs (maxN: int) : (int * int * int * int) list =
                     | Some j when j > 0 -> yield (k, l, n, int w)
                     | _ -> () ]
 
+/// PROBE (e): PERM'S CONJUNCT-SHAPE REFUSALS ARE ALREADY TYPECHECK-RESIDENT.
+/// `MLPerm.permHandler.Validate` is invoked at typecheck by
+/// `TypeCheck.checkFunctionDecl` through the `Blade.Constraints` registry, and
+/// it re-checks exactly the two conditions `buildCertTable` errors on. It cannot
+/// normally be observed because the seam wins the race - unless the seam does
+/// not run at all. `MLElaborate.expandModule` short-circuits without an
+/// `import ml` alias while `expandStr` still REGISTERS the handler, so writing
+/// the normalized conjunct name directly in a module that does not import `ml`
+/// reaches the handler and nothing else.
+///
+/// This is the exact shape `census-galilean-layer.md` S4 family D found one
+/// discipline over, and it survives a flip for free, needing only a code
+/// assignment (BL3999 `Other` today rather than BL4012).
+let probeHandlerBadN = """
+function bad(u: Float, v: Float) where __ml_perm_equiv(1) -> Float = u - v
+"""
+
+let probeHandlerBadArity = """
+function bad(u: Float, v: Float) where __ml_perm_equiv(4, 5) -> Float = u - v
+"""
+
+let probeHandlerOk = """
+function ok(u: Float, v: Float) where __ml_perm_equiv(4) -> Float = u - v
+"""
+
 let probeSymIdx = """
 import ml as ml
 function s(x: Array<Float like SymIdx<2, 4>>)
@@ -1369,6 +1394,15 @@ let runPermLayerCensusTests () : BlockResult =
             (coin |> List.truncate 12
                   |> List.map (fun (k, l, n, w) -> sprintf "(K=%d,L=%d,N=%d,W=%d)" k l n w)
                   |> String.concat " "))
+
+    // (e) THE CONJUNCT-SHAPE REFUSALS ARE ALREADY AT TYPECHECK.
+    let hBadN = seamVerdict probeHandlerBadN
+    let hBadAr = seamVerdict probeHandlerBadArity
+    let hOk = seamVerdict probeHandlerOk
+    check "probe (e): perm's conjunct-shape refusals already fire at typecheck, with the seam's own wording"
+        (hBadN.Contains "N must be >= 2" && hBadAr.Contains "expects exactly one argument" && hOk = "OK")
+        (sprintf "N=1 -> %s ||| arity 2 -> %s ||| N=4 -> %s"
+            (clip 90 hBadN) (clip 80 hBadAr) hOk)
 
     // ------------------------------------------------------------------
     // The corpus sweep
