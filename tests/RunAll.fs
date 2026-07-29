@@ -243,6 +243,14 @@ let runAllTestsFullWith (extraBlocks: (unit -> Blade.Tests.TestHarness.BlockResu
     // compiler holds two incompatible proofs of the same statement, so it
     // blocks the suite by design — the LieGuardFailure posture.
     let repCheck = Blade.Tests.RepCheckAgreement.runRepCheckAgreementTests ()
+    // C3 of the same plan: the REJECTION side, which neither block above can
+    // see — both of them only look at programs that compile. This one measures
+    // what the typed walker would say about the programs the seam REFUSES, by
+    // shadowing the `ml.equiv` pin so the seam falls silent. Its assertions are
+    // the harness's own health (the out-of-band re-validation must reproduce
+    // the live C1 census file for file) plus the alarming direction: the typed
+    // side must never CONFIRM a certificate the seam rejects.
+    let repReject = Blade.Tests.RepRejectCensus.runRepRejectCensusTests ()
     // C++ runtime-layout tests for the contiguous-backing allocate<>.
     // Verifies layout invariants the value-checking source tests cannot catch.
     // Skips cleanly if g++ absent.
@@ -323,7 +331,7 @@ let runAllTestsFullWith (extraBlocks: (unit -> Blade.Tests.TestHarness.BlockResu
     let blocks =
         [ yield r1; yield r2; yield attrs; yield subst
           yield normalize; yield unify; yield validateArrow
-          yield shape; yield oracles; yield wigner; yield symPower; yield polyOracle; yield lieTables; yield permSpec; yield permOracle; yield structIdxSpec; yield structIdxOracle; yield pointSpec; yield pgOracle; yield cartBridge; yield spans; yield diagCore; yield diagCorpus; yield certSuggest; yield repDiff; yield repCheck; yield alloc
+          yield shape; yield oracles; yield wigner; yield symPower; yield polyOracle; yield lieTables; yield permSpec; yield permOracle; yield structIdxSpec; yield structIdxOracle; yield pointSpec; yield pgOracle; yield cartBridge; yield spans; yield diagCore; yield diagCorpus; yield certSuggest; yield repDiff; yield repCheck; yield repReject; yield alloc
           yield ompPragma
           match omp with Some b -> yield b | None -> ()
           yield bufType

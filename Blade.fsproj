@@ -224,6 +224,7 @@
     <Compile Include="tests/Test_DiagCorpus.fs" />
     <Compile Include="tests/Test_RepDifferential.fs" />
     <Compile Include="tests/Test_RepCheckAgreement.fs" />
+    <Compile Include="tests/Test_RepRejectCensus.fs" />
     <Compile Include="tests/Oracles.fs" />
     <Compile Include="tests/Test_Oracles.fs" />
     <Compile Include="tests/Test_WignerTables.fs" />

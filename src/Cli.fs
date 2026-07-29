@@ -1287,6 +1287,16 @@ let private dispatchTest (rest: string list) : int =
         // engine-hook slot. In-process, no C++ pipeline.
         let failed = (Blade.Tests.RepCheckAgreement.runRepCheckAgreementTests ()).Failed
         if failed = 0 then 0 else 1
+    | [ "rep-reject" ] | [ "repreject" ] ->
+        // Phase-C3 REJECTION-PARITY census: the third gate, and the only one
+        // that looks at programs the compiler REFUSES. Measures, for every
+        // ml-equiv reject-probe, what the typed walker would say if it were
+        // the checking authority — by shadowing the `ml.equiv` pin so the
+        // elaboration seam falls silent and the program reaches typecheck.
+        // Changes no checking behaviour; the assertions are the harness's own
+        // health plus the two directions that would be alarming.
+        let failed = (Blade.Tests.RepRejectCensus.runRepRejectCensusTests ()).Failed
+        if failed = 0 then 0 else 1
     | [ "oracles" ] ->
         // Phase 0.2 review block: the differential-harness oracles checked
         // against hand-computed / analytic values. No Blade source pipeline.
