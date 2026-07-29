@@ -118,6 +118,13 @@
          judgeFunction's rejection path for O3/SO3 certificates. NOT part of
          BladeML.fsproj; the oracle twin is tests/Test_LieTables.fs. -->
     <Compile Include="src/ml/compiler/MLLieDischarge.fs" />
+    <!-- The engine's user-facing FAILURE TEXT, owned in one place. Pure
+         functions of the two dischargers' failure records (so it must follow
+         both) and consumed by BOTH front halves — MLEquiv's surface extractor
+         and MLPolyExtractTyped's typed one — so it must precede the earlier of
+         those, which is MLPolyExtractTyped. Depends on nothing else; it is
+         string formatting and cap constants. NOT part of BladeML.fsproj. -->
+    <Compile Include="src/ml/compiler/MLEquivMessages.fs" />
     <!-- Stage C2 of docs/plan-equivariance-in-types.md: the TYPED front half of
          the same engine. Needs TypedAst + DeduceRep (both far earlier) and both
          dischargers (immediately above), so this is the earliest point it can
