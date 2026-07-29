@@ -1278,6 +1278,15 @@ let private dispatchTest (rest: string list) : int =
         // also part of the full suite, where a red differential blocks the run.
         let failed = (Blade.Tests.RepDifferential.runRepDifferentialTests ()).Failed
         if failed = 0 then 0 else 1
+    | [ "rep-check" ] | [ "repcheck" ] ->
+        // Phase-C1 declared-certificate agreement gate: the typed walker's
+        // SECOND OPINION on every certificate the elaboration seam already
+        // checked. Asserts zero disagreements over the ml-equiv corpus (a
+        // disagreement is a compiler bug, not a user error), prints the
+        // confirm/abstain split, and self-tests the disagree path and the C2
+        // engine-hook slot. In-process, no C++ pipeline.
+        let failed = (Blade.Tests.RepCheckAgreement.runRepCheckAgreementTests ()).Failed
+        if failed = 0 then 0 else 1
     | [ "oracles" ] ->
         // Phase 0.2 review block: the differential-harness oracles checked
         // against hand-computed / analytic values. No Blade source pipeline.

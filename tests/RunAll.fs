@@ -236,6 +236,13 @@ let runAllTestsFullWith (extraBlocks: (unit -> Blade.Tests.TestHarness.BlockResu
     // carry `// TYPED-SUGGEST:` pins. Red here BLOCKS the suite by design —
     // that is the phase-B ship criterion, not a flaky test.
     let repDiff = Blade.Tests.RepDifferential.runRepDifferentialTests ()
+    // C1 of the same plan: the typed walker's SECOND OPINION on every
+    // certificate the seam already checked. The differential above asks whether
+    // the two agree about what to PROPOSE; this asks whether they ever
+    // CONTRADICT each other about a declared theorem. Red here means the
+    // compiler holds two incompatible proofs of the same statement, so it
+    // blocks the suite by design — the LieGuardFailure posture.
+    let repCheck = Blade.Tests.RepCheckAgreement.runRepCheckAgreementTests ()
     // C++ runtime-layout tests for the contiguous-backing allocate<>.
     // Verifies layout invariants the value-checking source tests cannot catch.
     // Skips cleanly if g++ absent.
@@ -316,7 +323,7 @@ let runAllTestsFullWith (extraBlocks: (unit -> Blade.Tests.TestHarness.BlockResu
     let blocks =
         [ yield r1; yield r2; yield attrs; yield subst
           yield normalize; yield unify; yield validateArrow
-          yield shape; yield oracles; yield wigner; yield symPower; yield polyOracle; yield lieTables; yield permSpec; yield permOracle; yield structIdxSpec; yield structIdxOracle; yield pointSpec; yield pgOracle; yield cartBridge; yield spans; yield diagCore; yield diagCorpus; yield certSuggest; yield repDiff; yield alloc
+          yield shape; yield oracles; yield wigner; yield symPower; yield polyOracle; yield lieTables; yield permSpec; yield permOracle; yield structIdxSpec; yield structIdxOracle; yield pointSpec; yield pgOracle; yield cartBridge; yield spans; yield diagCore; yield diagCorpus; yield certSuggest; yield repDiff; yield repCheck; yield alloc
           yield ompPragma
           match omp with Some b -> yield b | None -> ()
           yield bufType

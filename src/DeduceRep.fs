@@ -396,6 +396,13 @@ type private RepCtx = {
     Self: IRId
     /// Binder ids whose SPECULATIVE summaries this walk actually consumed.
     DepHits: System.Collections.Generic.HashSet<IRId>
+    /// CHECKING MODE (phase C1). False for deduction, true for validating a
+    /// declared certificate. The walk is otherwise IDENTICAL — this flag exists
+    /// only to make the walker refuse to produce a DEFINITE status at the one
+    /// rule where it is knowingly more permissive than the seam checker, so
+    /// that a documented divergence can never be reported as a compiler bug.
+    /// Deduction's results are untouched by it (it is always false there).
+    Checking: bool
 }
 
 // ============================================================================
@@ -837,6 +844,17 @@ let rec private statusOf (ctx: RepCtx) (env: Map<IRId, RepStatusT>) (expr: Typed
                       if applies then
                           if speculative then ctx.DepHits.Add fid |> ignore
                           sg.Return
+                      // THE ONE MODE-SENSITIVE RULE (phase C1). The fall-through
+                      // below is the documented divergence from the seam, whose
+                      // checker refuses a cross-group CERTIFIED call in BOTH
+                      // directions even on invariant arguments. In DEDUCTION
+                      // that extra recall is the point. In CHECKING it must not
+                      // produce a definite status: the whole purpose of that
+                      // mode is to agree with the seam, and a status derived
+                      // through a rule the seam does not have is exactly the
+                      // shape of a FALSE compiler-bug report. TOpaque here means
+                      // the validation abstains, which is always safe.
+                      elif ctx.Checking then TOpaque
                       else allInvRule ()
                   | None ->
                       // Uncertified callee (builtin, plain helper, array read
@@ -992,7 +1010,10 @@ let private isVacuous (sg: RepSigT) : bool =
 /// (plan A1). Both arrive as the same `__ml_equiv` conjunct, so this reads
 /// conjuncts uniformly and gets stamped functions for free.
 ///
-/// Trust, not proof: phase B does not re-check pins at typecheck (that is C1).
+/// Trust, not proof, for the TABLE: the summary a caller borrows is the
+/// DECLARED one, in phase C1 exactly as in phase B. What C1 adds is a SECOND
+/// OPINION on the declaring body (`checkDeclaredRep`), which never changes what
+/// this table hands out — the seam remains the checking authority (plan §4).
 /// A pin whose signature does not classify is simply not recorded, so a caller
 /// falls through to the uncertified-callee rule rather than borrowing a law
 /// this module could not read.
@@ -1003,6 +1024,197 @@ let recordCertified (certified: System.Collections.Generic.Dictionary<IRId, RepS
     match classifySignature g resolve owner parms retTy with
     | Some sg -> certified.[funcId] <- sg
     | None -> ()
+
+// ============================================================================
+// PHASE C1 — declared-certificate VALIDATION
+// ============================================================================
+//
+// The typed walker runs a SECOND, INDEPENDENT judgment of a theorem the seam
+// checker has already accepted. It has no authority: it cannot reject a
+// program the seam accepted, and it cannot accept one the seam rejected. Its
+// only output is an agreement signal, and only DISAGREEMENT is surfaced —
+// as an INTERNAL COMPILER ERROR, the LieGuardFailure posture. When two
+// independent judgments of the same theorem contradict each other, that is a
+// bug in the compiler, not in the user's program.
+//
+// ABSTENTION IS THE DEFAULT AT EVERY UNCERTAIN BOUNDARY. A false DISAGREE on a
+// body the seam legitimately certified is the failure mode that matters here:
+// it would turn a working program into a compiler-bug report. Silence is never
+// disagreement.
+
+/// The outcome of validating one declared certificate.
+type CheckVerdict =
+    /// The walker derived a status consistent with the declaration.
+    | RepConfirm
+    /// The walker declined to judge. NOT a disagreement — this is what keeps
+    /// engine-discharged bodies (and every other modeling gap) safe until the
+    /// C2 extractor lands. Carries a short reason, for the abstain census.
+    | RepAbstain of reason: string
+    /// The walker derived a DEFINITE status that contradicts the declaration.
+    | RepDisagree of detail: string
+
+// ----------------------------------------------------------------------------
+// ENGINE HOOK SLOT (for the C2 agent's TypedExpr PolyExtract port)
+// ----------------------------------------------------------------------------
+
+/// What an external discharger may conclude about a body the composition
+/// fragment could not judge.
+type EngineVerdict =
+    /// The body discharges: the declared certificate holds.
+    | EngineConfirms
+    /// The body provably does NOT satisfy the declared certificate. Since the
+    /// seam already accepted it, this is a compiler-bug signal, and it surfaces
+    /// exactly as a composition-derived disagreement does.
+    | EngineRefutes of detail: string
+
+/// The registered discharger. `None` from the hook means NOT APPLICABLE — the
+/// body is outside the engine's fragment — and leaves the verdict at abstain.
+type EngineHook = GroupT -> RepSigT -> TypedExpr -> EngineVerdict option
+
+/// The slot itself, in the `Blade.Constraints.registerConstraint` shape: a
+/// process-wide mutable holding at most one discharger. Empty until C2 fills
+/// it, and while empty every body the composition fragment cannot judge
+/// abstains — which is precisely the posture C1 ships with.
+module EngineDischarge =
+    let mutable private hook : EngineHook option = None
+    let register (h: EngineHook) : unit = hook <- Some h
+    let clear () : unit = hook <- None
+    let isRegistered () : bool = hook.IsSome
+    /// Total by construction: a second opinion may never crash a compiling
+    /// program, so any escape from the discharger reads as "not applicable".
+    let tryDischarge (g: GroupT) (sg: RepSigT) (body: TypedExpr) : EngineVerdict option =
+        match hook with
+        | None -> None
+        | Some h -> (try h g sg body with _ -> None)
+
+// ----------------------------------------------------------------------------
+// The disagreement channel and the agreement census
+// ----------------------------------------------------------------------------
+
+/// Disagreements found this compilation, as (owner, detail, span). TypeCheck
+/// drains this into the compile-error list so a contradiction stops the build
+/// loudly. AsyncLocal, reset beside the proposal channel.
+module RepCheckDisagreements =
+    let private slot = new System.Threading.AsyncLocal<(string * string * Span) list>()
+    let reset () = slot.Value <- []
+    let add (owner: string) (detail: string) (span: Span) =
+        slot.Value <- (owner, detail, span) :: slot.Value
+    let get () : (string * string * Span) list =
+        match box slot.Value with null -> [] | _ -> List.rev slot.Value
+
+/// Confirm/abstain census for the compilation, so the agreement test block can
+/// report the split. The abstain count is C2's shrinking target.
+module RepCheckCensus =
+    /// Elaborator-synthesized decls carry the generated-name prefix. Splitting
+    /// the census on it is what makes the abstain number ACTIONABLE: a
+    /// generated body is a CG loop nest, which is exactly the shape C2's
+    /// TypedExpr PolyExtract port is built to judge, whereas a source-written
+    /// abstention points at a gap in the composition fragment itself.
+    let private isGenerated (owner: string) = owner.StartsWith "__ml_"
+    let private confirms = new System.Threading.AsyncLocal<int>()
+    let private abstains = new System.Threading.AsyncLocal<int>()
+    let private genConfirms = new System.Threading.AsyncLocal<int>()
+    let private genAbstains = new System.Threading.AsyncLocal<int>()
+    let private reasons = new System.Threading.AsyncLocal<string list>()
+    let reset () =
+        confirms.Value <- 0
+        abstains.Value <- 0
+        genConfirms.Value <- 0
+        genAbstains.Value <- 0
+        reasons.Value <- []
+    let recordConfirm (owner: string) =
+        confirms.Value <- confirms.Value + 1
+        if isGenerated owner then genConfirms.Value <- genConfirms.Value + 1
+    let recordAbstain (owner: string) (reason: string) =
+        abstains.Value <- abstains.Value + 1
+        if isGenerated owner then genAbstains.Value <- genAbstains.Value + 1
+        reasons.Value <- reason :: (match box reasons.Value with null -> [] | _ -> reasons.Value)
+    let confirmed () : int = confirms.Value
+    let abstained () : int = abstains.Value
+    /// Of `confirmed ()` / `abstained ()`, how many were elaborator-generated.
+    let generatedConfirmed () : int = genConfirms.Value
+    let generatedAbstained () : int = genAbstains.Value
+    /// Abstention reasons, most recent first — a histogram source for the
+    /// report, not a stable ordering.
+    let abstainReasons () : string list =
+        match box reasons.Value with null -> [] | _ -> reasons.Value
+
+/// Validate ONE declared certificate against the typed walker.
+///
+/// The declared group comes from the conjunct; the declared SIGNATURE is this
+/// module's own classification of the zonked signature under that group — the
+/// same classification `recordCertified` stores and every caller borrows, so
+/// checking and the interprocedural table cannot drift apart.
+///
+/// SELF-REFERENCE IS ASSUMED, NOT PROVED, and that is correct here where it
+/// would be wrong in deduction: validating a declared certificate is an
+/// assume-guarantee obligation (assume the theorem, verify the body preserves
+/// it), which is exactly what the seam's `judgeFunction` does by putting the
+/// function's own cert in the table it judges against. Deduction must refuse
+/// self-reference because there no theorem has been declared to assume.
+///
+/// DISAGREEMENT IS DELIBERATELY NARROW — see the report. Only a definite
+/// `TRep` on both sides with DIFFERENT specs is reported. Every other mismatch
+/// shape (definite-invariant against declared-rep, or the reverse) is reachable
+/// through a modeling gap C2 is meant to close — component-assembled rep bodies,
+/// engine discharge — so those abstain. A spec contradiction is the one shape no
+/// known divergence can produce: every rule that yields `TRep s` requires a rep
+/// input and preserves the spec exactly, and the former rule additionally
+/// cross-checks its conclusion against the node's own type.
+let checkDeclaredRep (certified: System.Collections.Generic.Dictionary<IRId, RepSigT>)
+                     (resolve: IRType -> IRType)
+                     (owner: string) (funcId: IRId) (groupName: string)
+                     (parms: RepParam list) (retTy: IRType)
+                     (body: TypedExpr) : CheckVerdict =
+    try
+        let g = groupOfName groupName
+        match classifySignature g resolve owner parms retTy with
+        | None -> RepAbstain "signature not classifiable by the typed classifier"
+        | Some sg ->
+            let ctx = {
+                Group = g
+                Resolve = resolve
+                // The declaring function's OWN certificate is visible here
+                // (recordCertified ran first), which is what makes the
+                // assume-guarantee reading work for a recursive body.
+                Certified =
+                    (fun id -> match certified.TryGetValue id with | true, s -> Some s | _ -> None)
+                // Checking consults no speculative summary: a declared
+                // certificate must stand on pins and axioms, never on another
+                // function's unwritten proposal.
+                Speculative = (fun _ -> None)
+                // No binder is "self" for the walk — see the assume-guarantee
+                // note above. IRIds are non-negative, so this never matches.
+                Self = System.Int32.MinValue
+                DepHits = System.Collections.Generic.HashSet<IRId>()
+                Checking = true
+            }
+            let bodySt = statusOf ctx (
+                List.zip parms sg.Params
+                |> List.fold (fun m (p, (_, st)) -> Map.add p.PId st m) Map.empty) body
+            let engineFallback (why: string) =
+                match EngineDischarge.tryDischarge g sg body with
+                | Some EngineConfirms -> RepConfirm
+                | Some (EngineRefutes d) -> RepDisagree d
+                | None -> RepAbstain why
+            match bodySt with
+            | TBottom -> engineFallback "walker declined (outside the composition fragment)"
+            | TOpaque -> engineFallback "nothing established for the body"
+            | _ when statusAgreesT bodySt sg.Return -> RepConfirm
+            | TRep bs ->
+                (match sg.Return with
+                 | TRep ds ->
+                     RepDisagree (
+                         sprintf "the typed walker derives %s for the body of '%s', but the declared certificate's return transforms as %s"
+                             (repStrT bs) owner (repStrT ds))
+                 // Derived rep against a declared invariant: reachable through a
+                 // modeling gap, so abstain rather than accuse.
+                 | _ -> RepAbstain "derived a representation where the declaration is invariant")
+            | _ -> RepAbstain "derived an invariant where the declaration is a representation"
+    with _ ->
+        // Totality, in the seam's discipline: a second opinion may never turn a
+        // compiling program into a crash.
+        RepAbstain "validation raised"
 
 /// The early-tier deduction for ONE function, at decl close, from ZONKED
 /// signature types. Returns the proposal to publish, or None for silence.
@@ -1046,6 +1258,9 @@ let deduceFunctionRep (certified: System.Collections.Generic.Dictionary<IRId, Re
                         (fun id -> match spec.Sigs.TryGetValue ((gs, id)) with | true, s -> Some s | _ -> None)
                     Self = funcId
                     DepHits = System.Collections.Generic.HashSet<IRId>()
+                    // Deduction, not validation: the C1 mode flag is off, so
+                    // every rule behaves exactly as it did in phase B.
+                    Checking = false
                 }
                 // Parameters enter the body under their classified statuses —
                 // the hypothesis of the conditional theorem.
