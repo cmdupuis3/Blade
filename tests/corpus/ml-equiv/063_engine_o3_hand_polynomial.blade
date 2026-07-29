@@ -59,7 +59,6 @@ function cross3(u: Array<Float like IrrepsIdx<V>>, v: Array<Float like IrrepsIdx
 // speculatively, so it inherits the 6c discharger for free — no inference code
 // changed for either engine half.
 //
-// TYPED-EXEMPT: engine
 // SUGGEST: function 'cross_loose' judges equivariant under O3: add 'where ml.equiv(O3)' [signature: u transforms as IrrepsIdx<[(1, 1, 1)]>, v transforms as IrrepsIdx<[(1, 1, 1)]> -> IrrepsIdx<[(1, 0, 1)]>]
 function cross_loose(u: Array<Float like IrrepsIdx<V>>, v: Array<Float like IrrepsIdx<V>>)
                      -> Array<Float like IrrepsIdx<VE>> =

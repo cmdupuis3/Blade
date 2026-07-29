@@ -9873,9 +9873,26 @@ and checkFunctionDecl (env: TypeEnv) (funcDecl: FunctionDecl) : TypeResult<Typed
                  // as an axiom for later callers. Conjuncts are read uniformly,
                  // so a synthesized function stamped by the ML elaborator lands
                  // here by the same path a user's `where ml.equiv(O3)` does.
+                 let declaredGroup = (match gargs with g :: _ -> g | [] -> "")
                  Blade.DeduceRep.recordCertified env.FuncRepSigs repResolve
-                     funcDecl.Name funcVarId (match gargs with g :: _ -> g | [] -> "")
-                     repParams resolvedRet
+                     funcDecl.Name funcVarId declaredGroup repParams resolvedRet
+                 // PHASE C1: the SECOND OPINION. The seam checker has already
+                 // ruled on this body and remains the authority (plan §4); this
+                 // walk changes no verdict and gates no code. Only a DISAGREE
+                 // is recorded, and a disagreement between two independent
+                 // judgments of the same theorem is a compiler bug, not a user
+                 // error — the LieGuardFailure posture. `recordCertified` ran
+                 // FIRST on purpose, so a recursive body can assume its own
+                 // declared certificate (assume-guarantee), exactly as the
+                 // seam's judgeFunction does.
+                 (match Blade.DeduceRep.checkDeclaredRep env.FuncRepSigs repResolve
+                            funcDecl.Name funcVarId declaredGroup repParams resolvedRet tBody with
+                  | Blade.DeduceRep.RepConfirm ->
+                      Blade.DeduceRep.RepCheckCensus.recordConfirm funcDecl.Name
+                  | Blade.DeduceRep.RepAbstain reason ->
+                      Blade.DeduceRep.RepCheckCensus.recordAbstain funcDecl.Name reason
+                  | Blade.DeduceRep.RepDisagree detail ->
+                      Blade.DeduceRep.RepCheckDisagreements.add funcDecl.Name detail tBody.Span)
              | None ->
                  // Unpinned: deduce. Silence is the overwhelmingly common
                  // outcome (no rep family in the signature -> no candidates).
@@ -10735,6 +10752,48 @@ let typeCheck (program: Program) : Result<TypedProgram * IRBuilder * string list
     // otherwise accumulate across compilations in one process (the test host).
     Blade.DeduceRep.TypedCertProposals.reset ()
     Blade.DeduceRep.SkippedPolymorphic.reset ()
+    // Phase C1's two channels, same lifecycle: the disagreement list must not
+    // carry across compilations (it becomes compile errors), and the census
+    // must count THIS program's certified decls, not the test host's history.
+    Blade.DeduceRep.RepCheckDisagreements.reset ()
+    Blade.DeduceRep.RepCheckCensus.reset ()
+    // ========================================================================
+    // THE C2 STITCH: register the typed polynomial engine as DeduceRep's
+    // discharger (plan §3 C2).
+    // ========================================================================
+    //
+    // DeduceRep compiles at index 29 and cannot name Blade.ML.PolyExtractTyped
+    // (index 120), so the dependency is inverted through the hook slot and tied
+    // here, where both are visible. Registration happens at every `typeCheck`
+    // entry rather than once in a module initializer: it is a single mutable
+    // write, it is idempotent, and it means the production adapter is
+    // ALWAYS the one installed for a real compilation even if a test cleared or
+    // stubbed the slot beforehand. `EngineDischarge.clear ()` therefore stays
+    // usable for test isolation without leaving the compiler permanently
+    // engine-less.
+    //
+    // LIEGUARDFAILURE IS CONVERTED, NOT SWALLOWED. `PolyExtractTyped.engineVerdict`
+    // is total for every ordinary escape but deliberately RE-RAISES
+    // `LieDischarge.LieGuardFailure` — the post-accept float guard, which is a
+    // compiler-bug assert rather than a decoder refusal, and which
+    // `MLEquiv.judgeFunction` also re-raises. Left alone it would be eaten
+    // twice over (by `tryDischarge`'s wrapper, then by `deduceFunctionRep`'s
+    // own try/with) and the assert would be silently lost. Catching it HERE and
+    // returning a refutation preserves its meaning at both consumers: in
+    // CHECKING a refutation surfaces as a disagreement, which is exactly right
+    // for an internal guard trip; in DEDUCTION it is simply a decline. No other
+    // exception gets this treatment — they stay swallowed to "not applicable".
+    Blade.DeduceRep.EngineDischarge.register (fun resolve parms sg body ->
+        try
+            match Blade.ML.PolyExtractTyped.engineVerdict resolve parms sg body with
+            | Some Blade.ML.PolyExtractTyped.EngineHolds ->
+                Some Blade.DeduceRep.EngineConfirms
+            | Some (Blade.ML.PolyExtractTyped.EngineRefutes msg) ->
+                Some (Blade.DeduceRep.EngineRefutes msg)
+            | None -> None
+        with Blade.ML.LieDischarge.LieGuardFailure msg ->
+            Some (Blade.DeduceRep.EngineRefutes
+                    (sprintf "the Lie-discharge post-accept guard tripped while validating this body: %s" msg)))
     // Staged-former unfold FIRST: `static method_for/object_for/for`
     // argument lists elaborate to plain formers before any other stage
     // (ML/PPL/math/grad and the checker never see ExprStatic).
@@ -10788,5 +10847,23 @@ let typeCheck (program: Program) : Result<TypedProgram * IRBuilder * string list
             warnings
             @ (Blade.ML.Equiv.CertSuggestions.get () |> List.map fst)
             @ (Blade.ML.Galilean.GalCertSuggestions.get () |> List.map fst)
+        // PHASE C1: drain the declared-certificate agreement channel. An entry
+        // here means the typed walker and the seam checker reached CONTRADICTORY
+        // definite judgments about the same certified body — which cannot be the
+        // user's fault, because the seam already accepted the program. It
+        // surfaces as an INTERNAL COMPILER ERROR (BL9004, this disagreement's
+        // own registered code) and stops the build, the LieGuardFailure
+        // posture: a compiler
+        // that knows two of its own judgments disagree must not quietly emit
+        // code. Abstentions are silent by construction and never reach here.
+        let repIce =
+            Blade.DeduceRep.RepCheckDisagreements.get ()
+            |> List.map (fun (owner, detail, span) ->
+                { Error =
+                    Other (sprintf "internal compiler error: equivariance certificate validation disagrees with the elaboration checker for '%s': %s. This is a bug in the Blade compiler, not in your program — please report it (the certificate itself was accepted by the checking authority; only the typed second opinion dissents)" owner detail)
+                  Span = span
+                  Context = [ "equiv certificate validation" ]
+                  Code = Some "BL9004" })
+        let errors = errors @ repIce
         if errors.IsEmpty then Ok (tp, builder, warnings)
         else Error errors
