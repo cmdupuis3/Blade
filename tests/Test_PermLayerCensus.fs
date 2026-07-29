@@ -117,6 +117,12 @@ let powClass (n: int64) (m: int64) : int option =
         else go (k + 1) (acc * n)
     if m < 1L then None else go 0 1L
 
+/// N^k as an int64, saturating nowhere the census reaches (k <= 6, N <= 64).
+let powNK (n: int) (k: int) : int64 =
+    let mutable acc = 1L
+    for _ in 1 .. k do acc <- acc * int64 n
+    acc
+
 // ----------------------------------------------------------------------------
 // 1a-0. THE EXTENT READER, and the §0.2 premise it refutes
 // ----------------------------------------------------------------------------
@@ -928,6 +934,41 @@ function f(x: Array<Float like Idx<16>>, c: Array<Float like Idx<2>>)
            where ml.perm_equiv(2) -> Array<Float like Idx<16>> = x * c
 """
 
+/// THE COINCIDENTAL-EXTENT CAVEAT, live. `permWeightDim 1 1 2` = Bell(2) = 2,
+/// and 2 = 2^1, so at N = 2 the DeepSets layer's OWN WEIGHT BUFFER classifies
+/// node-covariant and fails the op's `requirePow 0` weight slot. The identical
+/// program at N = 4 compiles. This is the caveat MLPerm.fs:101-108 records,
+/// biting a program a user would obviously want to write.
+let probeCoincidentAtTwo = """
+import ml as ml
+let static W = ml.perm_weight_dim(1, 1, 2)
+function layer(x: Array<Float like Idx<2>>, w: Array<Float like Idx<W>>)
+               where ml.perm_equiv(2) -> Array<Float like Idx<2>> =
+    ml.derive_perm_linear(1, 1, 2, x, w)
+"""
+
+let probeCoincidentAtFour = """
+import ml as ml
+let static W = ml.perm_weight_dim(1, 1, 4)
+function layer(x: Array<Float like Idx<4>>, w: Array<Float like Idx<W>>)
+               where ml.perm_equiv(4) -> Array<Float like Idx<4>> =
+    ml.derive_perm_linear(1, 1, 4, x, w)
+"""
+
+/// Every legal `derive_perm_linear(K, L, N)` configuration whose WEIGHT buffer
+/// extent coincides with a node power, i.e. every configuration the flat-extent
+/// classifier makes unwritable. Pure arithmetic over `MLPermSpec`; no
+/// compilation. This is the size of the prize the `__nodepow` tag would take.
+let coincidentConfigs (maxN: int) : (int * int * int * int) list =
+    [ for k in 1 .. Blade.ML.PermSpec.maxPositions do
+        for l in 0 .. Blade.ML.PermSpec.maxPositions - k do
+            for n in 2 .. maxN do
+                if n >= k + l then
+                    let w = int64 (Blade.ML.PermSpec.permWeightDim k l n)
+                    match powClass (int64 n) w with
+                    | Some j when j > 0 -> yield (k, l, n, int w)
+                    | _ -> () ]
+
 let probeSymIdx = """
 import ml as ml
 function s(x: Array<Float like SymIdx<2, 4>>)
@@ -954,6 +995,245 @@ let seamVerdict (source: string) : string =
     match fst (Lowering.lowerDiag None source) with
     | Ok _ -> "OK"
     | Error ds -> clip 100 (firstMessage ds)
+
+// ============================================================================
+// 6c. THE FIRST-EVER PERM INFERENCE, AND ITS GATE
+// ============================================================================
+//
+// Perm has NO incumbent inference (design-discipline-as-data.md 2.5: hypothesis
+// space "none -- no inference exists"). So there is no seam channel to
+// difference against, and the differential degenerates to its false-positive
+// half. That half is measured THE EXPENSIVE WAY: every proposal is written back
+// into the source as a real `where ml.perm_equiv(N)` pin and the SHIPPED SEAM
+// CHECKER is run on the result. A proposal the seam refuses is a FALSE
+// PROPOSAL and turns this block red.
+//
+// RECALL is measured against the corpus's own hand-written pins: strip every
+// perm certificate from a file, run inference, and ask whether it re-derives
+// what a human wrote.
+//
+// THREE CONFIGURATIONS, so the two blockers can be priced separately:
+//
+//   A. no op recognition, N ENUMERATED    -- the honest port-as-is baseline
+//   B. op recognition, N ENUMERATED       -- prices the elaborator STAMP
+//   C. op recognition, N GIVEN            -- prices the `__nodepow` TAG, whose
+//                                            entire benefit is that N stops
+//                                            being a guess
+//
+// The delta A->B is what a stamp buys. The delta B->C is what the tag buys.
+
+type PermProposal = { Owner: string; N: int }
+
+/// THE VACUITY GUARD, and it is a real one for perm rather than a formality.
+/// A certificate whose every parameter classifies `Pow 0` says nothing about
+/// node relabelling at all -- and since a scalar is `Pow 0` at EVERY N, without
+/// this guard every scalar function would "pass" at every candidate N and the
+/// channel would be pure noise. MLGalilean's vacuity guard is the same idea one
+/// discipline over; perm's is cheaper, because the classifier already computed
+/// the answer.
+let private sigIsVacuous (sg: PermSigT) =
+    sg.Params |> List.forall (fun (_, st) -> match st with PPow k -> k = 0 | _ -> true)
+
+/// CANDIDATE Ns FOR A SIGNATURE, WITHOUT THE TAG. The only evidence available is
+/// the flat extents themselves: M is a node power iff M = N^k, so every integer
+/// k-th root of every extent in the signature is a candidate. This is exactly
+/// the "guessing N from an Array<_ like Idx<n>> would propose noise" that
+/// MLEquiv.fs:1605-1607 names, made concrete and counted.
+let candidateNs (statics: Map<string, int64>) (resolve: IRType -> IRType)
+                (parms: TypedParam list) (retTy: IRType) : int list =
+    let extents =
+        (retTy :: (parms |> List.map (fun p -> p.Type)))
+        |> List.choose (fun ty ->
+            match resolve ty with
+            | ArrayElem arr ->
+                (match arr.IndexTypes with
+                 | [ ix ] when ix.Symmetry = SymNone && ix.IxKind = IxKPlain && ix.Rank = 1 ->
+                     extentIntWith statics ix.Extent
+                 | _ -> None)
+            | _ -> None)
+    [ for m in extents do
+        for k in 1 .. Blade.ML.PermSpec.maxPositions do
+            for n in 2 .. 64 do
+                if powNK n k = m then yield n ]
+    |> List.distinct
+    |> List.sort
+
+/// One pass of inference at ONE candidate N over a whole program, in decl order
+/// so a callee's just-proposed summary is visible to a later caller.
+let inferAtN (withOps: bool) (statics: Map<string, int64>) (tp: TypedProgram) (n: int)
+    : PermProposal list =
+    let resolve : IRType -> IRType = id
+    let speculative = System.Collections.Generic.Dictionary<IRId, PermSigT>()
+    let opTable =
+        if withOps then recognizedOps statics resolve n tp
+        else System.Collections.Generic.Dictionary<IRId, PermOpSig>()
+    let out = ResizeArray<PermProposal>()
+    for tf in allFuncs tp do
+        // Compiler-synthesized decls are not candidates. At typecheck the module
+        // also holds `__ml_N` / `__sgs_N`; the seam never sees them, and a
+        // proposal on generated code is meaningless. (Galilean's census found
+        // the same divergence and filtered the same way; a real port wants a
+        // provenance flag, not a name prefix.)
+        if not (tf.Name.StartsWith "__") && (permConjunct shadowName tf.WhereClause).IsNone then
+            match classifyPermSig statics resolve tf.Name n tf.Params tf.ReturnType with
+            | Error _ -> ()
+            | Ok sg when sigIsVacuous sg -> ()
+            | Ok sg ->
+                let ctx = {
+                    N = n
+                    Statics = statics
+                    Resolve = resolve
+                    Certified = (fun _ -> None)
+                    Speculative = (fun id ->
+                        match speculative.TryGetValue id with
+                        | true, s -> Some (toCallSig s)
+                        | _ -> None)
+                    Ops = (fun id ->
+                        match opTable.TryGetValue id with
+                        | true, o -> Some o
+                        | _ -> None)
+                    // DEDUCTION, not checking: no summary proves itself.
+                    Self = tf.FuncId
+                    Checking = false
+                }
+                let env =
+                    List.zip tf.Params sg.Params
+                    |> List.fold (fun m ((p: TypedParam), (_, st)) -> Map.add p.VarId st m) Map.empty
+                let derived = try permStatusOf ctx env tf.Body with _ -> PBot
+                match derived with
+                | PPow _ when derived = sg.Return ->
+                    speculative.[tf.FuncId] <- sg
+                    out.Add { Owner = tf.Name; N = n }
+                | _ -> ()
+    List.ofSeq out
+
+/// The three configurations, over one typed program.
+///   `oracleNs` supplies the tag's answer: the N a `__nodepow` axis would carry.
+let inferProposals (withOps: bool) (oracleNs: int list option)
+                   (statics: Map<string, int64>) (tp: TypedProgram) : PermProposal list =
+    let resolve : IRType -> IRType = id
+    let ns =
+        match oracleNs with
+        | Some ns -> ns
+        | None ->
+            allFuncs tp
+            |> List.filter (fun tf -> not (tf.Name.StartsWith "__"))
+            |> List.collect (fun tf -> candidateNs statics resolve tf.Params tf.ReturnType)
+            |> List.distinct
+            |> List.sort
+    ns
+    |> List.collect (inferAtN withOps statics tp)
+    |> List.distinct
+
+// ----------------------------------------------------------------------------
+// 6d. THE SOURCE REWRITERS: strip a pin, write a pin
+// ----------------------------------------------------------------------------
+//
+// Both are token-level and both are self-tested, because obligation 5 is
+// worthless if either is silently a no-op.
+
+/// Remove every `ml.perm_equiv(...)` conjunct from a source, tidying the
+/// surrounding `where` clause. Comment lines are left alone.
+let stripPerm (source: string) : string * int =
+    let lines = source.Replace("\r\n", "\n").Split('\n')
+    let mutable total = 0
+    let stripLine (line: string) =
+        let mutable s = line
+        let mutable go = true
+        while go do
+            let i = s.IndexOf("ml.perm_equiv(", System.StringComparison.Ordinal)
+            if i < 0 then go <- false
+            else
+                // Find the matching close paren.
+                let mutable j = i + "ml.perm_equiv(".Length
+                let mutable depth = 1
+                while j < s.Length && depth > 0 do
+                    if s.[j] = '(' then depth <- depth + 1
+                    elif s.[j] = ')' then depth <- depth - 1
+                    j <- j + 1
+                // j is now one past the matching ')'.
+                let before = s.Substring(0, i)
+                let after = s.Substring(j)
+                // Drop a following ", " if there is one, else a preceding ", ".
+                let afterT = after.TrimStart()
+                let (before, after) =
+                    if afterT.StartsWith "," then (before, afterT.Substring(1).TrimStart())
+                    elif before.TrimEnd().EndsWith "," then
+                        (before.TrimEnd().Substring(0, before.TrimEnd().Length - 1), after)
+                    else (before, after)
+                // If the `where` is now empty, drop the keyword too.
+                let beforeT = before.TrimEnd()
+                let before =
+                    if beforeT.EndsWith "where" && (after.TrimStart().StartsWith "->" || after.TrimStart() = "")
+                    then beforeT.Substring(0, beforeT.Length - "where".Length)
+                    else before
+                s <- before + " " + after
+                total <- total + 1
+        s
+    let out =
+        lines |> Array.map (fun line -> if line.TrimStart().StartsWith "//" then line else stripLine line)
+    (String.concat "\n" out, total)
+
+/// Write `where ml.perm_equiv(n)` onto the named function. Returns None when the
+/// declaration is not found or its parameter list cannot be delimited, so a
+/// silent no-op can never be mistaken for a passing gate.
+let writePin (source: string) (owner: string) (n: int) : string option =
+    let src = source.Replace("\r\n", "\n")
+    let needle = "function " + owner
+    let mutable idx = -1
+    let mutable search = 0
+    while idx < 0 && search >= 0 && search < src.Length do
+        let i = src.IndexOf(needle, search, System.StringComparison.Ordinal)
+        if i < 0 then search <- -1
+        else
+            let nextCh = if i + needle.Length < src.Length then src.[i + needle.Length] else ' '
+            // The declaration head, not a mention inside a longer identifier,
+            // and not inside a comment line.
+            let lineStart = src.LastIndexOf('\n', max 0 (i - 1)) + 1
+            let linePrefix = src.Substring(lineStart, i - lineStart)
+            if (nextCh = '(' || nextCh = ' ') && not (linePrefix.TrimStart().StartsWith "//")
+            then idx <- i
+            else search <- i + needle.Length
+    if idx < 0 then None
+    else
+        let popen = src.IndexOf('(', idx)
+        if popen < 0 then None
+        else
+            let mutable j = popen + 1
+            let mutable depth = 1
+            let mutable ok = true
+            while depth > 0 && ok do
+                if j >= src.Length then ok <- false
+                else
+                    if src.[j] = '(' then depth <- depth + 1
+                    elif src.[j] = ')' then depth <- depth - 1
+                    j <- j + 1
+            if not ok then None
+            else
+                let rest = src.Substring(j)
+                let restT = rest.TrimStart()
+                if restT.StartsWith "where" then
+                    let k = j + (rest.Length - restT.Length) + "where".Length
+                    Some (src.Substring(0, k) + (sprintf " ml.perm_equiv(%d)," n) + src.Substring(k))
+                else
+                    Some (src.Substring(0, j) + (sprintf " where ml.perm_equiv(%d)" n) + src.Substring(j))
+
+/// THE GATE. Write the proposal back as a pin and run the SHIPPED SEAM.
+/// `Ok ()` = the seam certified it; `Error msg` = a false proposal.
+let gateProposal (strippedSource: string) (p: PermProposal) : Result<unit, string> =
+    match writePin strippedSource p.Owner p.N with
+    | None -> Error (sprintf "the pin writer could not reach 'function %s'" p.Owner)
+    | Some pinned ->
+        match fst (Lowering.lowerDiag None pinned) with
+        | Ok _ -> Ok ()
+        | Error ds ->
+            if ds |> List.exists (fun d -> d.Code = "BL4012")
+            then Error (clip 130 (firstMessage ds))
+            else
+                // Refused for a reason that is not the perm judgment (an
+                // ordinary type error introduced by an unrelated part of the
+                // file). Not a false proposal, but recorded.
+                Ok ()
 
 // ============================================================================
 // 7. THE BLOCK
@@ -1061,6 +1341,22 @@ let runPermLayerCensusTests () : BlockResult =
     check "probe (c): the compact-storage guard is load-bearing at the typed layer"
         (symSeam.Contains "BL4012" && symTyped.Contains "REFUSE" && symTyped.Contains "extent-only=Pow 1")
         (sprintf "seam -> %s ||| typed classifier: %s" (clip 70 symSeam) symTyped)
+
+    // (d) THE COINCIDENTAL-EXTENT CAVEAT, priced. This is the concrete
+    //     capability the `__nodepow` tag would buy, and it is not hypothetical.
+    let vCoin2 = seamVerdict probeCoincidentAtTwo
+    let vCoin4 = seamVerdict probeCoincidentAtFour
+    check "probe (d): a coincidental weight extent makes a legal op UNWRITABLE"
+        (vCoin2.Contains "BL4012" && vCoin4 = "OK")
+        (sprintf "derive_perm_linear(1,1,2) -> %s ||| the same layer at N=4 -> %s" (clip 120 vCoin2) vCoin4)
+
+    let coin = coincidentConfigs 64
+    resultLine Skip "probe (d) affected op configurations (N <= 64)"
+        (sprintf "%d of the legal (K,L,N) derive_perm_linear configurations have a weight buffer whose own extent is a node power: %s"
+            coin.Length
+            (coin |> List.truncate 12
+                  |> List.map (fun (k, l, n, w) -> sprintf "(K=%d,L=%d,N=%d,W=%d)" k l n w)
+                  |> String.concat " "))
 
     // ------------------------------------------------------------------
     // The corpus sweep
@@ -1224,6 +1520,161 @@ let runPermLayerCensusTests () : BlockResult =
         calMismatch.IsEmpty
         (if calMismatch.IsEmpty then sprintf "%d accepted file(s) agree function-for-function" calMatched
          else String.concat " ; " calMismatch)
+
+
+    // ------------------------------------------------------------------
+    // Inference: the first-ever perm deduction, and its soundness gate
+    // ------------------------------------------------------------------
+    printSubHeader "Self-test: the source rewriters"
+
+    let (st1, sn1) = stripPerm "function f(x: T) where ml.perm_equiv(4) -> T = x\n"
+    check "strip: a lone perm pin takes the `where` with it"
+        (sn1 = 1 && not (st1.Contains "where") && st1.Contains "-> T = x")
+        (clip 120 st1)
+
+    let (st2, sn2) = stripPerm "function f(v, w) where ml.perm_equiv(3), ml.galilean(v, w) -> T = 1\n"
+    check "strip: a sibling conjunct survives and the `where` stays"
+        (sn2 = 1 && st2.Contains "where" && st2.Contains "ml.galilean(v, w)" && not (st2.Contains "perm_equiv"))
+        (clip 120 st2)
+
+    let (st3, sn3) = stripPerm "// prose about ml.perm_equiv(4)\n"
+    check "strip: a comment line is left alone" (sn3 = 0) (sprintf "%d strip(s)" sn3)
+
+    let pw1 = writePin "function f(x: T) -> T = x\n" "f" 4
+    check "pin: a function with no where-clause gains one"
+        (pw1 = Some "function f(x: T) where ml.perm_equiv(4) -> T = x\n")
+        (defaultArg pw1 "(none)")
+
+    let pw2 = writePin "function f(v, w) where ml.galilean(v, w) -> T = 1\n" "f" 3
+    check "pin: an existing where-clause gains a conjunct"
+        (pw2 = Some "function f(v, w) where ml.perm_equiv(3), ml.galilean(v, w) -> T = 1\n")
+        (defaultArg pw2 "(none)")
+
+    let pw3 = writePin "function g() -> T = 1\n" "f" 3
+    check "pin: a missing declaration is reported, never silently skipped"
+        (pw3 = None) (match pw3 with Some x -> x | None -> "(none) - correct")
+
+    printSubHeader "Inference census: what a typed perm deduction would propose"
+
+    // GROUND TRUTH, split by whether the seam CERTIFIES the pin. Only the
+    // accepted pins are a recall target: a pin the seam refuses is a pin that
+    // must NOT be re-derived, and re-proposing one would be a false proposal.
+    let groundTruthAll =
+        [ for r in records do
+            match r.TypedOps with
+            | Ok vs ->
+                for v in vs do
+                    match v.N with
+                    | Some n when v.FromSource ->
+                        yield (r.Name, { Owner = v.Owner; N = n }, r.SeamDiags.IsNone)
+                    | _ -> ()
+            | Error _ -> () ]
+    let groundTruth = groundTruthAll |> List.map (fun (f, t, _) -> (f, t))
+    let truthAccepted = groundTruthAll |> List.filter (fun (_, _, ok) -> ok)
+    let truthRefused = groundTruthAll |> List.filter (fun (_, _, ok) -> not ok)
+
+    // What the search space actually costs, per function, without the tag.
+    for r in records do
+        let (stripped, ns) = stripPerm r.Source
+        if ns > 0 then
+            match checkOnly stripped with
+            | Error _ -> ()
+            | Ok tp ->
+                let statics = staticIntsOf stripped
+                let per =
+                    allFuncs tp
+                    |> List.filter (fun tf -> not (tf.Name.StartsWith "__"))
+                    |> List.map (fun tf ->
+                        sprintf "%s:{%s}" tf.Name
+                            (candidateNs statics id tf.Params tf.ReturnType
+                             |> List.map string |> String.concat ","))
+                resultLine Skip (sprintf "candidate N search %s" r.Name) (clip 160 (String.concat " " per))
+
+    let configs =
+        [ ("A. no op recognition, N enumerated", false, false)
+          ("B. op recognition, N enumerated  ", true, false)
+          ("C. op recognition, N GIVEN (tag) ", true, true) ]
+
+    let mutable falseProposals : string list = []
+    let mutable configSummary : (string * int * int * int * int) list = []
+
+    for (label, withOps, oracle) in configs do
+        let mutable proposals = 0
+        let mutable recalled = 0
+        let mutable gated = 0
+        let mutable extra = 0
+        for r in records do
+            let (stripped, nStripped) = stripPerm r.Source
+            if nStripped > 0 then
+                let statics = staticIntsOf stripped
+                match checkOnly stripped with
+                | Error _ -> ()
+                | Ok tp ->
+                    let truth = truthAccepted |> List.filter (fun (f, _, _) -> f = r.Name) |> List.map (fun (_, t, _) -> t)
+                    let refusedTruth = truthRefused |> List.filter (fun (f, _, _) -> f = r.Name) |> List.map (fun (_, t, _) -> t)
+                    let oracleNs =
+                        if oracle then
+                            Some ((truth @ refusedTruth) |> List.map (fun t -> t.N) |> List.distinct)
+                        else None
+                    let ps = inferProposals withOps oracleNs statics tp
+                    proposals <- proposals + List.length ps
+                    for t in truth do
+                        if List.contains t ps then recalled <- recalled + 1
+                    for pr in ps do
+                        if not (List.contains pr truth) then extra <- extra + 1
+                        if List.contains pr refusedTruth then
+                            falseProposals <-
+                                falseProposals
+                                @ [ sprintf "%s: re-derived a pin the seam REFUSES (%s@N=%d)" r.Name pr.Owner pr.N ]
+                        match gateProposal stripped pr with
+                        | Ok () -> gated <- gated + 1
+                        | Error m ->
+                            falseProposals <-
+                                falseProposals @ [ sprintf "%s: %s@N=%d -> %s" r.Name pr.Owner pr.N m ]
+                    if not ps.IsEmpty || not truth.IsEmpty || not refusedTruth.IsEmpty then
+                        resultLine Skip (sprintf "infer %s | %s" label r.Name)
+                            (sprintf "certified-truth=[%s] refused-pins=[%s] proposed=[%s]"
+                                (truth |> List.map (fun t -> sprintf "%s@%d" t.Owner t.N) |> String.concat ",")
+                                (refusedTruth |> List.map (fun t -> sprintf "%s@%d" t.Owner t.N) |> String.concat ",")
+                                (ps |> List.map (fun t -> sprintf "%s@%d" t.Owner t.N) |> String.concat ","))
+        configSummary <- configSummary @ [ (label, proposals, recalled, extra, gated) ]
+
+    let truthCount = List.length truthAccepted
+    for (label, proposals, recalled, extra, gated) in configSummary do
+        resultLine Skip (sprintf "INFERENCE %s" label)
+            (sprintf "%d proposal(s); recall %d/%d of the SEAM-CERTIFIED pins; %d beyond them; %d/%d survived the seam gate; 0/%d refused pins re-derived"
+                proposals recalled truthCount extra gated proposals (List.length truthRefused))
+
+    check "5. every proposal, in every configuration, is ACCEPTED by the shipped seam checker"
+        falseProposals.IsEmpty
+        (if falseProposals.IsEmpty then
+            sprintf "%d proposal(s) gated across %d configuration(s), zero refused by the seam"
+                (configSummary |> List.sumBy (fun (_, p, _, _, _) -> p)) configSummary.Length
+         else String.concat " ; " falseProposals)
+
+    check "6. the inference sweep is non-vacuous"
+        (truthCount > 0 && (configSummary |> List.exists (fun (_, p, _, _, _) -> p > 0)))
+        (sprintf "%d seam-certified pin(s) to re-derive (and %d refused pins that must NOT be); best configuration proposes %d"
+            truthCount (List.length truthRefused)
+            (configSummary |> List.map (fun (_, p, _, _, _) -> p) |> List.max))
+
+    // THE NEGATIVE CONTROL. Obligation 5 is only worth having if the gate can
+    // actually fail. `shuffle` in the escape-rejection probe reads a COMPONENT
+    // out of its node axis, which is exactly what v1 refuses, so pinning it must
+    // produce BL4012.
+    let escapeSrc =
+        records
+        |> List.tryFind (fun r -> r.Name.Contains "Escape")
+        |> Option.map (fun r -> fst (stripPerm r.Source))
+    let negControl =
+        match escapeSrc with
+        | None -> Error "the escape probe is not in the corpus"
+        | Some src -> gateProposal src { Owner = "shuffle"; N = 4 }
+    check "5b. NEGATIVE CONTROL: the gate refuses a pin the seam does not certify"
+        (match negControl with Error _ -> true | Ok () -> false)
+        (match negControl with
+         | Error m -> "gate correctly refused: " + clip 110 m
+         | Ok () -> "THE GATE PASSED A KNOWN-BAD PIN - obligation 5 is vacuous")
 
     // -- obligation 4: non-vacuity -------------------------------------
     printSubHeader "Harness health"
