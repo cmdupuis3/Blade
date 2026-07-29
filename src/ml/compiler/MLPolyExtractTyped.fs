@@ -71,6 +71,7 @@ module PX = Blade.ML.PolyExtract
 module LD = Blade.ML.LieDischarge
 module MLS = Blade.ML.Spec
 module PS = Blade.ML.PointSpec
+module EM = Blade.ML.EquivMessages
 
 // ---------------------------------------------------------------------------
 // The abstract value — the typed twin of MLPolyExtract's private `Val`
@@ -522,24 +523,22 @@ type TypedEngineVerdict =
     /// distinguished because a CHECKING consumer (stage C1) wants to say so.
     | EngineRefutes of string
 
-/// Render a finite-discharge failure. Deliberately SHORTER than
-/// `MLEquiv.Engine.failureMessage`, which is the user-facing text and stays the
-/// seam's: this string is for a compiler-internal disagreement report, and
-/// duplicating the long form here would guarantee the two drift.
-let private renderFinite (owner: string) (gn: string) (f: PX.DischargeFailure) : string =
-    sprintf "function '%s': the body IS a polynomial and it is not %s-equivariant — f(rho(g) x) = rho(g) f(x) fails at element %s, output component %d, term %s: lhs %s, rhs %s%s"
-        owner gn f.Element f.Component f.Monomial (PX.Rat.render f.Lhs) (PX.Rat.render f.Rhs)
-        (if f.NearMiss then " (NEAR MISS: the truncated-decimal trap)" else "")
-
-let private renderLie (owner: string) (gn: string) (f: LD.LieFailure) : string =
-    sprintf "function '%s': the body IS a polynomial and it is not %s-equivariant — Df(x)(A x) = A f(x) fails at generator %s, output component %d, term %s: lhs %s, rhs %s%s"
-        owner gn f.Generator f.Component f.Monomial (LD.Radical.render f.Lhs) (LD.Radical.render f.Rhs)
-        (if f.NearMiss then " (NEAR MISS: the truncated-decimal trap)" else "")
-
-let private renderInversion (owner: string) (f: LD.InversionFailure) : string =
-    let par p = if p = 1 then "odd" else "even"
-    sprintf "function '%s': the body is SO(3)-equivariant but not O3-equivariant — f(-x) = rho(-I) f(x) fails in output component %d at term %s: that monomial is %s under -I (%d odd rep factors) while the declared output component is %s"
-        owner f.Component f.Monomial (par f.MonoParity) f.ParitySum (par f.OutParity)
+// A refutation is rendered by `Blade.ML.EquivMessages` — the SAME four
+// constructors the seam calls, not a shorter twin of them.
+//
+// This module used to carry its own abbreviated `renderFinite` / `renderLie` /
+// `renderInversion`, on the reasoning that the long form was the seam's
+// user-facing text and hand-copying it here would guarantee drift. The
+// diagnosis was right and the remedy was not: two copies of different lengths
+// drift exactly as readily as two copies of the same length, and the shorter
+// one silently became a second, worse answer to the same question. The text now
+// lives in one module that both front halves consume, so there is no paired
+// maintenance obligation left to honour — a change to the wording is a change
+// to `MLEquivMessages.fs`, and both sides get it.
+//
+// The three failure records reach here in exactly the shape those constructors
+// take (`PX.DischargeFailure`, `LD.LieFailure`, `LD.InversionFailure`), which
+// is why the sharing is a call and not an adapter.
 
 /// Extract a typed body to the shared normal form under a DeduceRep signature.
 /// Public so a future consumer (a checking-side C1 diagnostic, a test) can see
@@ -611,7 +610,7 @@ let engineVerdict (resolve: IRType -> IRType) (parms: RepParam list) (sg: RepSig
                     match PX.discharge form actions with
                     | Ok () -> Some EngineHolds
                     | Error (PX.DischargeCap _) -> None
-                    | Error (PX.GeneratorCheck f) -> Some (EngineRefutes (renderFinite sg.Owner gn f))
+                    | Error (PX.GeneratorCheck f) -> Some (EngineRefutes (EM.failureMessage sg.Owner gn f))
             | GO3 | GSO3 ->
                 match o3Actions sg.Group sg with
                 | None -> None
@@ -620,8 +619,8 @@ let engineVerdict (resolve: IRType -> IRType) (parms: RepParam list) (sg: RepSig
                     | Ok () -> Some EngineHolds
                     | Error (LD.DischargeCap _) -> None
                     | Error (LD.GeneratorCheck f) ->
-                        Some (EngineRefutes (renderLie sg.Owner (groupStrT sg.Group) f))
-                    | Error (LD.ParityCheck f) -> Some (EngineRefutes (renderInversion sg.Owner f))
+                        Some (EngineRefutes (EM.lieFailureMessage sg.Owner (groupStrT sg.Group) f))
+                    | Error (LD.ParityCheck f) -> Some (EngineRefutes (EM.inversionFailureMessage sg.Owner f))
     with
     | LD.LieGuardFailure _ -> reraise ()
     | _ -> None
