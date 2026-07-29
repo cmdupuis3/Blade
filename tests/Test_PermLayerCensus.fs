@@ -284,7 +284,7 @@ let invEvidenceTy (n: int) (statics: Map<string, int64>) (resolve: IRType -> IRT
 // `IsFix` is set to the STRICT reading (`PPow 0` only), which is the
 // conservative direction: it can cost recall, never soundness. The measured
 // cost is reported by the census as the `unsized-arg` line.
-let private pOps (n: int) (statics: Map<string, int64>) (resolve: IRType -> IRType) : DisciplineKit.StatusOps<PStatus> = {
+let private pOps (strictFix: bool) (n: int) (statics: Map<string, int64>) (resolve: IRType -> IRType) : DisciplineKit.StatusOps<PStatus> = {
     Bottom = PBot
     Opaque = POpq
     // MLPerm binds pattern variables at PowUnsized (fs:615, 678), not at Pow 0.
@@ -292,7 +292,11 @@ let private pOps (n: int) (statics: Map<string, int64>) (resolve: IRType -> IRTy
     // A loop counter is an integer, and an integer is a 0-cell scalar: Pow 0.
     FixScalar = PPow 0
     IsCov = (fun s -> match s with PPow k -> k > 0 | _ -> false)
-    IsFix = (fun s -> s = PPow 0)
+    // strictFix = true  : `Pow 0` only, the polarity the if/match arms need.
+    // strictFix = false : `Pow 0` or `PowUnsized`, the polarity the call arm
+    //                     needs. The kit offers ONE predicate for both; the
+    //                     census reports the delta.
+    IsFix = (fun s -> if strictFix then s = PPow 0 else (s = PPow 0 || s = PUnsized))
     IsBottom = (fun s -> s = PBot)
     IsOpaque = (fun s -> s = POpq)
     // MLPerm's if/match arms: `if st = sf then Ok st else reject`.
@@ -372,6 +376,9 @@ type PermOpSig = { OpName: string; Params: PStatus list; Return: PStatus }
 
 type PermCtx = {
     N: int
+    /// See `pOps`. True reproduces the seam's if/match polarity; false its
+    /// uncertified-call polarity. The kit cannot have both.
+    StrictFix: bool
     Statics: Map<string, int64>
     Resolve: IRType -> IRType
     Certified: IRId -> DisciplineKit.CallSig<int, PStatus> option
@@ -398,7 +405,7 @@ let private combinePointwise (sts: PStatus list) : PStatus =
         | _ -> PBot
 
 let permStatusOf (ctx: PermCtx) : Map<IRId, PStatus> -> TypedExpr -> PStatus =
-    let ops = pOps ctx.N ctx.Statics ctx.Resolve
+    let ops = pOps ctx.StrictFix ctx.N ctx.Statics ctx.Resolve
     let wctx : DisciplineKit.WalkCtx<int, PStatus> = {
         Ops = ops
         Rules = pRules
@@ -810,7 +817,7 @@ let private nOfRaw (raw: string) : int option =
 
 /// Re-run the experimental validation over a checked program, in DECL ORDER so a
 /// callee's certificate is in the table before a later caller borrows it.
-let revalidateWith (withOps: bool) (statics: Map<string, int64>) (tp: TypedProgram) : FnVerdict list =
+let revalidateStrict (strictFix: bool) (withOps: bool) (statics: Map<string, int64>) (tp: TypedProgram) : FnVerdict list =
     let resolve : IRType -> IRType = id
     let certified = System.Collections.Generic.Dictionary<IRId, PermSigT>()
     // The op table is N-dependent, so it is built per certificate.
@@ -838,6 +845,7 @@ let revalidateWith (withOps: bool) (statics: Map<string, int64>) (tp: TypedProgr
                         else System.Collections.Generic.Dictionary<IRId, PermOpSig>()
                     let ctx = {
                         N = n
+                        StrictFix = strictFix
                         Statics = statics
                         Resolve = resolve
                         Certified = (fun id ->
@@ -862,6 +870,9 @@ let revalidateWith (withOps: bool) (statics: Map<string, int64>) (tp: TypedProgr
             | TDeclImpl impl -> for mth in impl.Methods do visit mth
             | _ -> ()
     List.ofSeq out
+
+let revalidateWith (withOps: bool) (statics: Map<string, int64>) (tp: TypedProgram) : FnVerdict list =
+    revalidateStrict true withOps statics tp
 
 let tally (vs: FnVerdict list) : int * int * int =
     let c = vs |> List.filter (fun v -> v.Verdict = PConfirm) |> List.length
@@ -1081,6 +1092,7 @@ let inferAtN (withOps: bool) (statics: Map<string, int64>) (tp: TypedProgram) (n
             | Ok sg ->
                 let ctx = {
                     N = n
+                    StrictFix = true
                     Statics = statics
                     Resolve = resolve
                     Certified = (fun _ -> None)
@@ -1675,6 +1687,80 @@ let runPermLayerCensusTests () : BlockResult =
         (match negControl with
          | Error m -> "gate correctly refused: " + clip 110 m
          | Ok () -> "THE GATE PASSED A KNOWN-BAD PIN - obligation 5 is vacuous")
+
+    // ------------------------------------------------------------------
+    // The kit's single `IsFix` polarity, priced
+    // ------------------------------------------------------------------
+    printSubHeader "Kit fit: what one `IsFix` predicate costs"
+
+    let mutable polarityDeltas : string list = []
+    for r in records do
+        let (shadowSrc, _) = shadowPerm r.Source
+        let statics = staticIntsOf shadowSrc
+        match checkOnly shadowSrc with
+        | Error _ -> ()
+        | Ok tp ->
+            let strict = revalidateStrict true true statics tp
+            let loose = revalidateStrict false true statics tp
+            for (a, b) in List.zip strict loose do
+                if verdictName a.Verdict <> verdictName b.Verdict then
+                    polarityDeltas <-
+                        polarityDeltas
+                        @ [ sprintf "%s/%s: strict=%s loose=%s" r.Name a.Owner
+                                (verdictName a.Verdict) (verdictName b.Verdict) ]
+    resultLine Skip "kit fit: strict vs permissive IsFix"
+        (if polarityDeltas.IsEmpty then
+            "no certificate in the corpus changes verdict between the two polarities, so the kit's single predicate costs NOTHING MEASURABLE here - the mismatch is real in the rules and latent in the corpus"
+         else String.concat " ; " polarityDeltas)
+
+    // ------------------------------------------------------------------
+    // Message parity: the diagnostics corpus, pin by pin
+    // ------------------------------------------------------------------
+    printSubHeader "Message parity: tests/corpus/diagnostics BL4012 pins"
+
+    let mutable pinsTotal = 0
+    let mutable pinsSurvive = 0
+    let mutable spanTotal = 0
+    let mutable spanSurvive = 0
+    let mutable diagFiles = 0
+    for (name, source) in Corpus.category "diagnostics" do
+        let (pins, contains) = Blade.Tests.Expect.parseDiagPins source
+        if pins |> List.exists (fun pin -> pin.PinCode = "BL4012") then
+            diagFiles <- diagFiles + 1
+            let (shadowSrc, _) = shadowPerm source
+            let statics = staticIntsOf shadowSrc
+            let typed =
+                match checkOnly shadowSrc with
+                | Error _ -> []
+                | Ok tp -> revalidateWith true statics tp
+            let texts = typed |> List.map (fun v -> verdictDetail v.Verdict)
+            let survived = contains |> List.filter (fun c -> texts |> List.exists (fun t -> t.Contains c))
+            let died = contains |> List.filter (fun c -> not (texts |> List.exists (fun t -> t.Contains c)))
+            pinsTotal <- pinsTotal + contains.Length
+            pinsSurvive <- pinsSurvive + survived.Length
+            let spanPins = pins |> List.filter (fun pin -> pin.PinCode = "BL4012" && pin.PinStart.IsSome)
+            spanTotal <- spanTotal + spanPins.Length
+            // The typed side threads no span at all: `PBot` is nullary.
+            resultLine Skip (sprintf "pins %s" name)
+                (sprintf "%d/%d ERROR-CONTAINS survive, 0/%d span pin(s) survive%s; typed says: %s"
+                    survived.Length contains.Length spanPins.Length
+                    (if died.IsEmpty then "" else " | DIES: " + (died |> List.map (clip 50) |> String.concat " / "))
+                    (if texts.IsEmpty then "(nothing)"
+                     else texts |> List.filter (fun t -> t <> "") |> List.map (clip 55) |> String.concat " ; "))
+    resultLine Skip "message parity roll-up"
+        (sprintf "%d BL4012-pinned diagnostics file(s): %d/%d ERROR-CONTAINS substrings and %d/%d span pins would survive a flip"
+            diagFiles pinsSurvive pinsTotal spanSurvive spanTotal)
+
+    // How many BL4012 messages the seam can produce at all - the size of the
+    // writing job a flip would create on the typed side.
+    // MEASURED by counting message-producing sites in MLPerm.fs: 20 direct
+    // `bl4012` applications minus the 4 that are the `reject`/`fail` helper
+    // DEFINITIONS (fs:314, 479, 697, 748), plus 19 `reject` and 6 `fail`
+    // applications = 41, of which 38 are inside the judgment proper and 3 are
+    // signature / conjunct-shape refusals in `buildCertTable`.
+    resultLine Skip "the seam's BL4012 vocabulary"
+        (sprintf "MLPerm.fs constructs %d distinct BL4012 messages, %d of them inside the judgment; the typed lattice's refusal value is `PBot`, a nullary constructor carrying neither a cause nor a span"
+            41 38)
 
     // -- obligation 4: non-vacuity -------------------------------------
     printSubHeader "Harness health"
