@@ -1,12 +1,12 @@
 ﻿// TEST: Match-bodied function contradicts antisymm (rejects)
 // The TExprMatch rule, asserted the same way the binding-form descent is: a
 // declared clause the body now disproves. Every part of this match is
-// invariant under the (x, y) swap â€”
+// invariant under the (x, y) swap —
 //   * scrutinee `x + y`: the two children ARE each other's image, and
 //     opSwapClass OpAdd is PInv;
 //   * guard `s > 0.0`: `s` is bound BY the pattern, and an invariant scrutinee
 //     selects the same arm and decomposes to the same value under the swap, so
-//     a pattern binder is invariant with no substitution needed â€” that is the
+//     a pattern binder is invariant with no substitution needed — that is the
 //     load-bearing argument for the whole rule;
 //   * both arms: `x * y` mirrors under OpMul (PInv), and `x * y + 1.0` is
 //     PInv + PInv.

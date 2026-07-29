@@ -5,6 +5,6 @@
 // BOTH contradiction directions, so a later split of one from the other cannot
 // happen silently. `where anticomm(x, y)` over a body the deduction proves
 // INVARIANT under the swap (x * y) would be stored on a strict simplex with no
-// diagonal â€” dropping a genuinely nonzero x*x and negating every mirrored read.
+// diagonal — dropping a genuinely nonzero x*x and negating every mirrored read.
 let A = [1.0, 2.0, 3.0]
 let bad = method_for(A, A) <@> lambda(x, y) where anticomm(x, y) -> x * y |> compute

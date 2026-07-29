@@ -41,7 +41,7 @@ module PinSuggestions =
     let get () : (string * Span) list =
         match box slot.Value with null -> [] | _ -> List.rev slot.Value
 
-/// Fourth family member â€” see `TypeEnv.WarningLog` for the storage and why it
+/// Fourth family member — see `TypeEnv.WarningLog` for the storage and why it
 /// has to live down there (its only writer is `emitWarning`, and TypeEnv cannot
 /// reference upward). Re-exported here so that
 /// `Blade.TypeCheck.{PinSuggestions, IdePartial, WarningLog}` is the ONE
@@ -50,13 +50,13 @@ module WarningLog =
     let reset () = Blade.TypeEnv.WarningLog.reset ()
     let get () : Blade.Diagnostics.Diagnostic list = Blade.TypeEnv.WarningLog.get ()
 
-/// Fifth family member â€” storage in `TypeEnv.DeducedFacts` (Zonk writes to it
+/// Fifth family member — storage in `TypeEnv.DeducedFacts` (Zonk writes to it
 /// too, and Zonk cannot reference TypeCheck). Re-exported for the same
 /// one-namespace reason as WarningLog.
 module DeducedFacts =
     let reset () = Blade.TypeEnv.DeducedFacts.reset ()
     let get () : (Blade.TypeEnv.DeducedFact * Span) list = Blade.TypeEnv.DeducedFacts.get ()
-/// IDE side-channel for the deduction RESULTS themselves â€” the structured twin
+/// IDE side-channel for the deduction RESULTS themselves — the structured twin
 /// of PinSuggestions' prose. The per-function tables (FuncDeducedPairs,
 /// PackDeducedComm) and the rank pins live in the TypeEnv/Subst local to
 /// checkProgram and are gone when it returns, so `ide check --json` records
@@ -152,7 +152,7 @@ let evalStaticValueExpr (env: TypeEnv) (expr: Expr) : Result<StaticEval.StaticVa
     StaticEval.evalExpr (staticEnvOf env) StaticEval.maxSteps expr
 
 /// Dist provenance of a surface expression: the union of the provenance
-/// sets of every variable reachable in it (conservative â€” an
+/// sets of every variable reachable in it (conservative — an
 /// over-approximated source set can only make independence HARDER to
 /// prove, never easier, so union is sound). Empty means "unknown", which
 /// consumers treat as un-provable rather than vacuously independent.
@@ -257,7 +257,7 @@ let rec lowerTypeExpr (env: TypeEnv) (ty: TypeExpr) : IRType =
     | TyString -> IRTScalar ETString
     | TyChar -> IRTScalar ETInt32
 
-    // A BARE wildcard is unreachable from the surface grammar â€” the parser
+    // A BARE wildcard is unreachable from the surface grammar — the parser
     // only builds TyWildcard as the sole argument of `Base<_>`, handled just
     // below. Kept total (and equal to `Nat<_>`) so the match stays exhaustive
     // and FS0025 keeps auditing future TypeExpr growth.
@@ -266,32 +266,32 @@ let rec lowerTypeExpr (env: TypeEnv) (ty: TypeExpr) : IRType =
     // Tag wildcard `Base<_>`: lower the base bare and wrap it in the
     // any-tag marker. Handled uniformly ahead of the name dispatch so no
     // base can silently DROP the wildcard the way a non-unit argument used
-    // to be dropped â€” `Nat<_>` and `Float64<_>` are the useful spellings,
+    // to be dropped — `Nat<_>` and `Float64<_>` are the useful spellings,
     // but `MyStruct<_>` lowering to "any MyStruct" is harmless and honest
     // rather than a no-op. Position legality is enforced separately by
     // irTypeHasTagWildcard; this function has no error channel.
     | TyNamed (name, [TyWildcard]) ->
         // Nat's bare form is IRTNat (a type-level natural, not a value type),
-        // so the wildcard's inner follows elemTypeForIterationIndex instead â€”
+        // so the wildcard's inner follows elemTypeForIterationIndex instead —
         // int64, exactly what a tagged index VALUE carries.
         let inner =
             if name = "Nat" then IRTScalar ETInt64
             else lowerTypeExpr env (TyNamed (name, []))
         IRTIdxTagged (inner, IRefAny)
 
-    // Bounded primitive (Â§2.4): the bounds are a REFINEMENT of the base type,
-    // not a distinct runtime representation, so they erase here â€” `Float<min=0,
+    // Bounded primitive (§2.4): the bounds are a REFINEMENT of the base type,
+    // not a distinct runtime representation, so they erase here — `Float<min=0,
     // max=1>` lowers exactly as `Float`, and `Float<velocity, min=0, max=1>`
     // exactly as `Float<velocity>` (the unit lives on the base node). Nothing
-    // downstream â€” unification, promotion, codegen â€” needs to know. The bounds
+    // downstream — unification, promotion, codegen — needs to know. The bounds
     // are enforced where the annotation is WRITTEN: struct fields normalize
     // into the conjunct list at parse time, and other annotation sites carry
     // the surface TypeExpr (Ast.boundedConjuncts).
     | TyBounded (baseTy, _, _) -> lowerTypeExpr env baseTy
 
     | TyNamed (name, args) ->
-        // Helper: try to resolve a type arg as a unit annotation, then â€” for
-        // integer bases â€” as a nominal index-type alias. `taggedInner` is the
+        // Helper: try to resolve a type arg as a unit annotation, then — for
+        // integer bases — as a nominal index-type alias. `taggedInner` is the
         // type that sits UNDER an index tag, which differs from `baseType`
         // for Nat (whose bare form is the type-level IRTNat).
         //
@@ -307,7 +307,7 @@ let rec lowerTypeExpr (env: TypeEnv) (ty: TypeExpr) : IRType =
                 match Map.tryFind argName env.Units with
                 | Some unitSig -> IRTUnitAnnotated (baseType, unitSig)
                 | None when isIntBase ->
-                    // `Nat<LatIdx>` â€” the explicit spelling of what
+                    // `Nat<LatIdx>` — the explicit spelling of what
                     // elemTypeForIterationIndex produces for `range<LatIdx>`.
                     // Before this arm existed the argument was silently
                     // ignored and the tag vanished.
@@ -355,14 +355,14 @@ let rec lowerTypeExpr (env: TypeEnv) (ty: TypeExpr) : IRType =
             | Some (TDIIndexType _) ->
                 // Aliased index type in value position (function param,
                 // struct field, let-binding annotation, etc.). Under Option C
-                // this lowers to IRTIdxTagged (int64, IRefNamed name) â€” an
+                // this lowers to IRTIdxTagged (int64, IRefNamed name) — an
                 // int64 tagged by the index type's nominal name. The codegen
                 // emits `using <name> = int64_t;` so the C++ type carries
                 // the alias for documentation; runtime backing is still int.
                 IRTIdxTagged (IRTScalar ETInt64, IRefNamed name)
             | Some (TDIEnumIdx (_, _, values, _)) ->
                 // Same shape, but the underlying type follows the values
-                // list (all-string â†’ ETString, else ETInt64). The C++
+                // list (all-string → ETString, else ETInt64). The C++
                 // typedef emitted alongside resolves the alias to the
                 // matching primitive.
                 let underlying = EnumValue.underlyingElemType values
@@ -380,7 +380,7 @@ let rec lowerTypeExpr (env: TypeEnv) (ty: TypeExpr) : IRType =
         // RaggedIdx requires at least one prior index in the index list to
         // iterate over. A 1-D Array<T like RaggedIdx<lens>> is malformed:
         // there's no prior position to provide the iteration that drives the
-        // lengths-array lookup. The check is structural â€” first index can't
+        // lengths-array lookup. The check is structural — first index can't
         // be a closed RaggedIdx.
         //
         // The opaque variant `RaggedIdx<_>` is exempted: it's specifically
@@ -443,14 +443,14 @@ let rec lowerTypeExpr (env: TypeEnv) (ty: TypeExpr) : IRType =
 
     | TyDist (orderExpr, elemTy, axesTys) ->
         // Typed dist tower: Dist<order, Elem like I1, ..., Ik>.
-        // The order must be a compile-time integer >= 1 â€” a literal, a
+        // The order must be a compile-time integer >= 1 — a literal, a
         // `let static`, or a static-function call (the replicate-count
         // contract; same two-tier resolution as inferReplicate: cheap
         // evalConstExpr first, then the full StaticEval against the
         // checkModule pre-pass's StaticValues/StaticFunctions). Failure
         // lowers to the -1 SENTINEL, reported at the annotation-consumption
         // sites (inferLetBindingValue / checkFunctionDecl) alongside the
-        // ragged no-prior check â€” lowerTypeExpr itself has no error channel.
+        // ragged no-prior check — lowerTypeExpr itself has no error channel.
         let order = evalStaticIntExpr env orderExpr
         let elem = lowerElemType env elemTy
         let axes = axesTys |> List.mapi (fun i ity -> lowerIndexTypeList env i ity) |> List.concat
@@ -484,7 +484,7 @@ let rec lowerTypeExpr (env: TypeEnv) (ty: TypeExpr) : IRType =
             // Non-constant rank (e.g., T^r where r is a variable)
             match elemTy with
             | TyVar (name, _) ->
-                // Can't resolve arity statically â€” create unconstrained type var
+                // Can't resolve arity statically — create unconstrained type var
                 env.Subst.LookupOrCreateTypeVar(name)
             | _ ->
                 // Phase B2: lowerElemType returns IRType; return directly.
@@ -507,7 +507,7 @@ let rec lowerTypeExpr (env: TypeEnv) (ty: TypeExpr) : IRType =
     // tuple element) represents an integer in [0, n) that compiles to a loop
     // bound at codegen time; it is not a Float-array indexed by Idx<n>.
     //
-    // Lowered to IRTIdxTagged (IRTScalar ETInt64, IRefAnon (...)) â€” an int64
+    // Lowered to IRTIdxTagged (IRTScalar ETInt64, IRefAnon (...)) — an int64
     // wrapped with a nominal anonymous tag (parallel to how Float<meters>
     // becomes IRTUnitAnnotated). The tag preserves "this is an anonymous
     // index" identity through the IR so inferArithType rejects arithmetic
@@ -515,9 +515,9 @@ let rec lowerTypeExpr (env: TypeEnv) (ty: TypeExpr) : IRType =
     // At codegen, the IRTIdxTagged wrapper erases to int64_t (the runtime
     // backing). Named aliases (`type RegionIdx = Idx<n>`; `i: RegionIdx`)
     // route through the TyNamed branch above and lower to IRTIdxTagged
-    // with IRefNamed â€” same shape, named tag.
+    // with IRefNamed — same shape, named tag.
     //
-    // KNOWN GAP â€” higher-arity / dependent cases below (TySymIdx, TyAntisymIdx,
+    // KNOWN GAP — higher-arity / dependent cases below (TySymIdx, TyAntisymIdx,
     // TyHermitianIdx, TyCompoundIdx, TyDepIdx | TyRaggedIdx | TyRaggedIdxOpaque,
     // TyEquivIdx) preserve the legacy IRTArray-with-Float64 shape pending a
     // formalism design pass. A SymIdx<r, n> as a value-level type could be
@@ -563,7 +563,7 @@ let rec lowerTypeExpr (env: TypeEnv) (ty: TypeExpr) : IRType =
     | TyEnumIdx valuesExpr ->
         // Determine underlying element type from values. All-string lowers to
         // ETString; otherwise (all-int, empty, or mixed-but-recoverable) ETInt64.
-        // Mixed lists won't reach here in practice â€” the same extraction is
+        // Mixed lists won't reach here in practice — the same extraction is
         // run by registerTypeDecl and surfaces a clean error when aliased; an
         // unaliased mixed-list slips through silently with ETInt64.
         let isAllString =
@@ -574,10 +574,10 @@ let rec lowerTypeExpr (env: TypeEnv) (ty: TypeExpr) : IRType =
         if isAllString then IRTScalar ETString else IRTScalar ETInt64
 
     | TyDepIdx _ | TyRaggedIdx _ | TyRaggedIdxOpaque | TyIrrepsIdx _ | TyPgIrrepsIdx _ ->
-        // DepIdx/RaggedIdx/IrrepsIdx/PgIrrepsIdx in non-index position â€” the
+        // DepIdx/RaggedIdx/IrrepsIdx/PgIrrepsIdx in non-index position — the
         // pg member takes PARITY with the O(3) one here: same known gap, same
         // treatment. Defensive fallback matching the shape used for
-        // TyCompoundIdx, TyEquivIdx, etc. â€” wrap in a single-index Array so
+        // TyCompoundIdx, TyEquivIdx, etc. — wrap in a single-index Array so
         // the IR shape is consistent. Real
         // iteration happens via lowerIndexType, which produces the correctly
         // tagged IRIndexType (Dependencies for the dependent forms, the
@@ -588,7 +588,7 @@ let rec lowerTypeExpr (env: TypeEnv) (ty: TypeExpr) : IRType =
     | TyHalo _ ->
         // halo<Inner, [offs]> is legal only as a range<> slot (handled in the
         // ExprRange arm via haloSlotOf). In any other type position there is
-        // no value meaning; degrade to the iteration value (int64) â€” the slot
+        // no value meaning; degrade to the iteration value (int64) — the slot
         // path never routes here.
         IRTScalar ETInt64
 
@@ -616,7 +616,7 @@ and lowerElemType env ty : IRType =
     // non-primitive element types is future Phase D work.)
     //
     // Option C migration: previously the named-index cases produced
-    // IRTScalar (ETIndexRef name) â€” now they produce IRTIdxTagged
+    // IRTScalar (ETIndexRef name) — now they produce IRTIdxTagged
     // wrapping the underlying primitive. This unifies element-position
     // and value-position encodings; ETIndexRef has been retired.
     match ty with
@@ -631,12 +631,12 @@ and lowerElemType env ty : IRType =
     | TyIdx _ | TySymIdx _ | TyAntisymIdx _ | TyHermitianIdx _ ->
         // Raw index type syntax in element position (e.g., Array<Idx<3> like ...>)
         // Note: anonymous-tag preservation here is a separate (deferred)
-        // refinement â€” currently collapses to bare int64 like before, losing
+        // refinement — currently collapses to bare int64 like before, losing
         // the index identity. The Option C migration scope was named tags.
         IRTScalar ETInt64
     | TyEnumIdx valuesExpr ->
-        // Mirror of the value-position handling: all-string values â†’ ETString,
-        // otherwise â†’ ETInt64. Same anonymous-tag-loss caveat as above.
+        // Mirror of the value-position handling: all-string values → ETString,
+        // otherwise → ETInt64. Same anonymous-tag-loss caveat as above.
         let isAllString =
             match valuesExpr.Kind with
             | ExprKind.ExprArrayLit elems when not elems.IsEmpty ->
@@ -646,8 +646,8 @@ and lowerElemType env ty : IRType =
     | _ ->
         lowerTypeExpr env ty
 
-/// The index record for `SymIdx<k, base>` / `AntisymIdx<k, base>` â€” seam S2 of
-/// docs/plan-transforms-as-types.md Â§2.7, shared by the index-position
+/// The index record for `SymIdx<k, base>` / `AntisymIdx<k, base>` — seam S2 of
+/// docs/plan-transforms-as-types.md §2.7, shared by the index-position
 /// (`lowerIndexType`) and value-position (`lowerTypeExpr`) arms.
 ///
 ///   - `SymBaseExtent e` (the legacy `SymIdx<k, n>` surface form): an
@@ -655,10 +655,10 @@ and lowerElemType env ty : IRType =
 ///     record both call sites built inline before stage 3.
 ///   - `SymBaseIndex ty` (`SymIdx<k, IrrepsIdx<s>>`, `SymIdx<k, Idx<n>>`):
 ///     the BASE index type is lowered first and then re-stamped with the
-///     power's Rank and Symmetry. Everything else rides through verbatim â€”
+///     power's Rank and Symmetry. Everything else rides through verbatim —
 ///     `Extent` (= total_dim(spec) for an irreps base), the identity `Tag`
 ///     (mkIrrepsTag, the SAME tag `IrrepsIdx<s>` alone would carry), `IxKind`
-///     (IxKIrreps), `Kind`, `Dependencies` â€” including the bad-spec ERROR
+///     (IxKIrreps), `Kind`, `Dependencies` — including the bad-spec ERROR
 ///     marker, so a non-static/malformed spec still surfaces at the
 ///     consumption sites (irTypeBadIrrepsDetail) through the power.
 ///
@@ -667,7 +667,7 @@ and lowerElemType env ty : IRType =
 /// INFERRED symmetric group over irreps-typed inputs (IR.fs:2126 builds
 /// `{ rep with Rank = groupRank; Symmetry = groupSymmetry }`, Tag and IxKind
 /// surviving), so the newly writable annotation and the inferred type are the
-/// same type by construction â€” not by two constructions that agree today.
+/// same type by construction — not by two constructions that agree today.
 ///
 /// Storage/iteration are unaffected: `IxSymmetryLike` dispatches on Symmetry
 /// BEFORE IxKind, so a rank-k irreps record is compact-simplex over an extent
@@ -705,7 +705,7 @@ and lowerIndexType env (_position: int) (ty: TypeExpr) : IRIndexType =
         // Single-slot context (e.g., type alias, range): return a placeholder
         // inner-only record. Two-record expansion happens at the array-index-
         // list construction site (lowerIndexTypeList). Single-slot use of
-        // DepIdx is suspect â€” code paths that need the full DepIdx structure
+        // DepIdx is suspect — code paths that need the full DepIdx structure
         // (iteration, etc.) should route through lowerIndexTypeList instead.
         let outerIdx = lowerIndexType env _position outerTy
         { Id = id; Rank = 2; Extent = IRParam ("__depidx_inner", 0, IRTNat None)
@@ -736,8 +736,8 @@ and lowerIndexType env (_position: int) (ty: TypeExpr) : IRIndexType =
     | TyIrrepsIdx specExpr ->
         // IrrepsIdx<spec>: block-structured dense index over an irreps spec.
         // The spec resolves under the full static contract (like Dist's
-        // order); extent = total_dim(spec) and EVERY cell is stored â€” flat
-        // dense, no compression â€” so the record rides the ordinary dense
+        // order); extent = total_dim(spec) and EVERY cell is stored — flat
+        // dense, no compression — so the record rides the ordinary dense
         // paths (SymNone). The block structure matters for IDENTITY, carried
         // in the Tag (mkIrrepsTag: spec equality = index-space identity;
         // Unify adds the spec-mismatch strictness arm). lowerIndexType has
@@ -766,11 +766,11 @@ and lowerIndexType env (_position: int) (ty: TypeExpr) : IRIndexType =
                IxKind = IxKErrorIrrepsBadSpec; Kind = SDimension; Dependencies = [] })
     | TyPgIrrepsIdx (groupName, specExpr) ->
         // PgIrrepsIdx<GROUP, spec>: the point-group block-spec member
-        // (docs/plan-transforms-as-types.md Â§3.6, stage 5b-i). Field for field
-        // the shape of the TyIrrepsIdx arm above â€” rank 1, extent a folded
+        // (docs/plan-transforms-as-types.md §3.6, stage 5b-i). Field for field
+        // the shape of the TyIrrepsIdx arm above — rank 1, extent a folded
         // literal, dense (SymNone) with the block structure carried as
         // IDENTITY in the Tag, and the same error-marker channel for a
-        // non-static / malformed spec â€” over a DIFFERENT frozen tag prefix
+        // non-static / malformed spec — over a DIFFERENT frozen tag prefix
         // and a DIFFERENT decoder. Twin, not reroute: nothing above changes.
         //
         // TWO resolutions, in order, because the diagnostics differ: the GROUP
@@ -846,7 +846,7 @@ and lowerIndexType env (_position: int) (ty: TypeExpr) : IRIndexType =
 
 /// Lower an index type to a list of IRIndexType records. Most types produce a
 /// single-element list; dependent forms (DepIdx, RaggedIdx) produce two records
-/// â€” outer + inner with Dependencies linking them.
+/// — outer + inner with Dependencies linking them.
 ///
 /// Used at array-index-list construction sites where a multi-record expansion
 /// is meaningful. Single-slot contexts (range, type alias) use lowerIndexType
@@ -876,7 +876,7 @@ and lowerIndexTypeList (env: TypeEnv) (position: int) (ty: TypeExpr) : IRIndexTy
                 | Some funcDecl when funcDecl.Params.Length = 1 ->
                     // Substitute the function's formal param with the outer
                     // iteration var. The function's body becomes the inner
-                    // extent expression â€” its structure is fixed at compile
+                    // extent expression — its structure is fixed at compile
                     // time, but it evaluates per-iteration as outer walks.
                     //
                     // Peel a trivial block wrapper so `function f(x) = { e }`
@@ -911,7 +911,7 @@ and lowerIndexTypeList (env: TypeEnv) (position: int) (ty: TypeExpr) : IRIndexTy
         // lens is internally M*N elements); the codegen handles the
         // flat-position computation so the user-facing type stays clean.
         //
-        // RaggedIdx is "open" â€” it does NOT declare its own outer position;
+        // RaggedIdx is "open" — it does NOT declare its own outer position;
         // it references the iteration over the prior index types in the
         // enclosing Array's index list. A 1-D `Array<T like RaggedIdx<lens>>`
         // is malformed (no prior index to iterate); RaggedIdx requires at
@@ -929,7 +929,7 @@ and lowerIndexTypeList (env: TypeEnv) (position: int) (ty: TypeExpr) : IRIndexTy
             Dependencies = []  // populated by the codegen iteration as needed
         }]
     | TyRaggedIdxOpaque ->
-        // Opaque-extent variant â€” used in kernel-parameter types where the
+        // Opaque-extent variant — used in kernel-parameter types where the
         // extent is supplied by the surrounding peel context, not declared
         // up front. Single-record like the closed form, but the Extent is
         // IROpaqueExtent (a marker, no payload) and the Tag distinguishes it
@@ -958,7 +958,7 @@ and lowerIndexTypeList (env: TypeEnv) (position: int) (ty: TypeExpr) : IRIndexTy
         // keys via ETIndexRef); re-walking would lose that.
         //
         // Chained aliases like `type B = A` where `type A = DepIdx<...>`
-        // are not handled here â€” B's body in env is TyNamed("A"), and
+        // are not handled here — B's body in env is TyNamed("A"), and
         // registerTypeDecl currently routes that to TDIAlias, not
         // TDIIndexType. No test pressure yet.
         match lookupTypeDef n env with
@@ -974,10 +974,10 @@ and lowerIndexTypeList (env: TypeEnv) (position: int) (ty: TypeExpr) : IRIndexTy
 /// it has a user-named identity. For anonymous and synthetic-tagged
 /// indices, fall back to plain int64.
 ///
-/// This is the hook for iteration-tagging (Â§4.18 indirect): a kernel
+/// This is the hook for iteration-tagging (§4.18 indirect): a kernel
 /// like `range<LatIdx> <@> lambda(i) -> A(i)` (where A's index is
 /// LatIdx) typechecks under step 5's tag rule because i inherits
-/// `Nat<LatIdx>` from this element type â€” no manual annotation needed.
+/// `Nat<LatIdx>` from this element type — no manual annotation needed.
 let elemTypeForIterationIndex (idx: IRIndexType) : IRType =
     match idx.Tag with
     | Some name when name.StartsWith("__halowin|") ->
@@ -994,14 +994,14 @@ let elemTypeForIterationIndex (idx: IRIndexType) : IRType =
 // Co-iteration shape agreement (multi-axis co-iteration arc)
 // ============================================================================
 
-/// A plain dense rank-1 index record â€” the kind that can share a co-iteration
+/// A plain dense rank-1 index record — the kind that can share a co-iteration
 /// product axis. Mirrors the isPlainDense predicate used by the fallback
 /// operator's operand checks.
 let isPlainDenseIx (ix: IRIndexType) : bool =
     ix.IxKind = IxKPlain && ix.Symmetry = SymNone && ix.Rank <= 1
 
 /// Structural agreement of two index records for co-iteration purposes.
-/// Compares shape-bearing fields only â€” the nominal Id is EXCLUDED because
+/// Compares shape-bearing fields only — the nominal Id is EXCLUDED because
 /// every occurrence of an index type gets a fresh Id; two Array<F64 like
 /// Lat, Lon> annotations must agree.
 let indexRecordsAgree (a: IRIndexType) (b: IRIndexType) : bool =
@@ -1013,17 +1013,17 @@ let indexShapesAgree (xs: IRIndexType list) (ys: IRIndexType list) : bool =
     xs.Length = ys.Length && List.forall2 indexRecordsAgree xs ys
 
 /// A record list co-iteration can span: exactly one record (dense rank-1 OR
-/// packed symmetric of any logical rank â€” walked as flat canonical cells), or
+/// packed symmetric of any logical rank — walked as flat canonical cells), or
 /// several records ALL plain dense (the product space). Mixed dense+packed
-/// multi-record shapes are rejected â€” the packed record's triangular walk
+/// multi-record shapes are rejected — the packed record's triangular walk
 /// cannot interleave a foreign dense axis.
 let coIterableRecords (recs: IRIndexType list) : bool =
     recs.Length = 1 || recs |> List.forall isPlainDenseIx
 
 /// Shared iteration records for a zip co-iteration, from the operands' array
 /// types. Single-record operands (dense rank-1, packed symmetric) keep the
-/// HISTORICAL first-record rule with no agreement check â€” byte-compatible
-/// with every pre-existing zip. Multi-record operands (dense rank â‰¥ 2) span
+/// HISTORICAL first-record rule with no agreement check — byte-compatible
+/// with every pre-existing zip. Multi-record operands (dense rank ≥ 2) span
 /// the FULL product of records and require structural agreement + all-plain-
 /// dense records (mixed dense/packed multi-axis rejects).
 let zipSharedRecords (arrayTypes: IRArrayType list) : Result<IRIndexType list, TypeError> =
@@ -1042,7 +1042,7 @@ let zipSharedRecords (arrayTypes: IRArrayType list) : Result<IRIndexType list, T
         else
             Ok shape0
 
-/// halo<Inner, offsets> slot construction â€” shared by the expression form
+/// halo<Inner, offsets> slot construction — shared by the expression form
 /// (`method_for(halo<..>)`) and the range<> slot form (`range<halo<..>, ..>`).
 /// The offsets payload is either
 ///   - a FLAT int array `[-1, 0, 1]`  -> ONE slot (a 1-D halo), or
@@ -1052,8 +1052,8 @@ let zipSharedRecords (arrayTypes: IRArrayType list) : Result<IRIndexType list, T
 /// Each slot is the inner index SHRUNK to its interior (BndShrink: every
 /// declared neighbor of every iterated center is in-bounds, so window reads
 /// need no guards) and tagged "__halowin|<d|c>:<innerName>|<o1,o2,..>". The
-/// center's start offset (max(0, -min offsetsâˆª{0})) is re-derived from the
-/// tag at loop-building time (IR mkElement via Types.haloStartOffsetOfTag) â€”
+/// center's start offset (max(0, -min offsets∪{0})) is re-derived from the
+/// tag at loop-building time (IR mkElement via Types.haloStartOffsetOfTag) —
 /// per-slot, which the single shared IRRange offset cannot express for
 /// multi-slot ranges.
 let haloSlotsOf (env: TypeEnv) (innerTy: TypeExpr) (offsetsExpr: Expr) : TypeResult<IRIndexType list> =
@@ -1069,7 +1069,7 @@ let haloSlotsOf (env: TypeEnv) (innerTy: TypeExpr) (offsetsExpr: Expr) : TypeRes
         | IRCompoundMask _ ->
             // Compound inner: ordinals walk the PRESENT cells, so "next"
             // is the next present cell (the hashed-index generalization).
-            // The mask cardinality is runtime â€” the interior shrink can't
+            // The mask cardinality is runtime — the interior shrink can't
             // fold into the extent here; it rides the tag and is applied
             // at the loop bound (buildLoopNestCodeGen StrictOffset).
             // IxKCompound is KEPT so the cidx materialization and
@@ -1291,7 +1291,7 @@ let extractCommGroups (parms: LambdaParam list) (whereClause: WhereClause option
     | Some wc -> groupsToIndices parms wc.Commutativity
     | None -> []
 
-/// `where anticomm(...)` groups, by parameter index â€” the signed twin of
+/// `where anticomm(...)` groups, by parameter index — the signed twin of
 /// extractCommGroups. Kept as its own extractor (rather than folded into the
 /// comm list) because the two declarations mean different things to the
 /// stage-3 validators and to output storage; the consumers that only need
@@ -1306,9 +1306,9 @@ let extractAntisymGroups (parms: LambdaParam list) (whereClause: WhereClause opt
 ///
 /// Needed because a named function used in kernel position is eta-expanded into
 /// `lambda(__k<uid>_0, ..) -> f(__k<uid>_0, ..)`, whose params are positionally
-/// 1:1 with `f`'s but carry synthesized names â€” while `Lowering.extractParallelism`
+/// 1:1 with `f`'s but carry synthesized names — while `Lowering.extractParallelism`
 /// resolves an omp var to a param INDEX by NAME. Unmapped names (a var naming no
-/// parameter â€” see checkOmpVarNames) are passed through unchanged rather than
+/// parameter — see checkOmpVarNames) are passed through unchanged rather than
 /// dropped, so this stays purely a renaming. `cuda`/`mpi` carry no variable
 /// names and pass through untouched.
 let remapParallelVars (calleeNames: string list) (wrapperNames: string list)
@@ -1327,7 +1327,7 @@ let remapParallelVars (calleeNames: string list) (wrapperNames: string list)
 /// Nothing rejects this today: the parser is grammar-only and
 /// `Lowering.extractParallelism` resolves names to param indices with a
 /// `List.choose`, so an unmatched name is simply DROPPED. That left
-/// `IsOmpParallel = true` with an empty depth list â€” harmless while the depths
+/// `IsOmpParallel = true` with an empty depth list — harmless while the depths
 /// were unread, but now that `omp(a: n)` is a licence the difference between
 /// "licensed one level of a" and "licensed nothing, name was a typo" decides
 /// whether the nest is parallelized at all. buildLoopNestCodeGen falls back to
@@ -1343,7 +1343,7 @@ let checkOmpVarNames (env: TypeEnv) (paramNames: string list)
                 o.Vars |> List.iter (fun (v, _) ->
                     if not (List.contains v paramNames) then
                         // BL4001 (constraint violation): a `where`-clause
-                        // conjunct that names nothing. `noSpan` is honest here â€”
+                        // conjunct that names nothing. `noSpan` is honest here —
                         // checkOmpVarNames takes no span, and threading one in
                         // means editing its two callers; the render degrades to
                         // a header-only line, exactly what it printed before.
@@ -1360,7 +1360,7 @@ let checkOmpVarNames (env: TypeEnv) (paramNames: string list)
 // ============================================================================
 
 let inferElemType (exprs: TypedExpr list) : IRType =
-    // S3 tag: relic for empty literal â€” defaults to Float64. Acceptable
+    // S3 tag: relic for empty literal — defaults to Float64. Acceptable
     // because empty literals are rank-0 placeholders with no useful elem
     // type to infer. For non-empty: extract from the first expr's type.
     if List.isEmpty exprs then IRTScalar ETFloat64
@@ -1368,7 +1368,7 @@ let inferElemType (exprs: TypedExpr list) : IRType =
         match exprs.[0].Type with
         | ArrayElem arr -> arr.ElemType  // Already IRType
         | IRTScalar _ as t -> t          // Pass through
-        | t -> t                          // Other types (Named, Tuple, etc.) â€” propagate
+        | t -> t                          // Other types (Named, Tuple, etc.) — propagate
 
 let inferArrayLitType (builder: IRBuilder) (exprs: TypedExpr list) : IRArrayType =
     let elemType = inferElemType exprs
@@ -1400,7 +1400,7 @@ let inferArrayLitType (builder: IRBuilder) (exprs: TypedExpr list) : IRArrayType
     // Array-valued element expressions: when the outer literal's entries are
     // not bracket sub-literals but expressions whose TYPE is already an array
     // (computed rows bound to names, e.g. `method_for(..) |> compute`
-    // results), the bracket contributes only the outer dimension â€” the inner
+    // results), the bracket contributes only the outer dimension — the inner
     // index structure comes from the elements' own array type. Without this,
     // getShape below (which walks TExprArrayLit nesting only) inferred a
     // rank-1 array of scalars, and codegen assigned Array wrappers into
@@ -1442,7 +1442,7 @@ let inferArrayLitType (builder: IRBuilder) (exprs: TypedExpr list) : IRArrayType
             Id = builder.FreshId(); Rank = 1; Extent = IRLit (IRLitInt (int64 n))
             Symmetry = SymNone; Tag = None; IxKind = IxKPlain; Kind = SDimension; Dependencies = []
         }
-        // The lengths reference is a synthetic IRParam â€” codegen recognizes
+        // The lengths reference is a synthetic IRParam — codegen recognizes
         // this and emits the lengths array inline from the literal structure.
         // The "__inline_lens" name is a sentinel that the codegen detects.
         let innerIdx = {
@@ -1453,7 +1453,7 @@ let inferArrayLitType (builder: IRBuilder) (exprs: TypedExpr list) : IRArrayType
         }
         { ElemType = elemType; IndexTypes = [outerIdx; innerIdx]; IsVirtual = false; Identity = None }
     else
-        // Rectangular: existing behavior â€” first sub-array's length defines all rows.
+        // Rectangular: existing behavior — first sub-array's length defines all rows.
         let rec getShape (es: TypedExpr list) : int list =
             match es with
             | [] -> [0]
@@ -1514,8 +1514,8 @@ let inferLiteralType lit =
 
 /// Synthesize the type of a *value-position* literal. Numeric/bool literals
 /// get a fresh, kind-seeded inference var (like `zero`) so they flex to
-/// context â€” lifting into `T`/`T^k` slots and pinning to the width a context
-/// requires â€” while the seed keeps an unpinned literal at its natural type
+/// context — lifting into `T`/`T^k` slots and pinning to the width a context
+/// requires — while the seed keeps an unpinned literal at its natural type
 /// (`let x = 1` stays Int64). String/Char/Unit have no such flex and stay
 /// concrete. NOTE: pattern literals keep `inferLiteralType` (they compare by
 /// value), as do the explicit `checkExpr` literal arms.
@@ -1544,10 +1544,10 @@ let rec checkPattern (env: TypeEnv) (expected: IRType) (pat: Pattern)
         // because it doesn't have type information. We resolve the ambiguity here.
         match Map.tryFind name env.VariantTags with
         | Some (parentName, None) ->
-            // This is a no-payload variant constructor â€” treat as PatVariant
+            // This is a no-payload variant constructor — treat as PatVariant
             checkPattern env expected (inheritPatSpan pat (PatVariant (name, None)))
         | Some (parentName, Some _) ->
-            // Variant with payload but used without â€” treat as variable (may shadow)
+            // Variant with payload but used without — treat as variable (may shadow)
             let varId = env.Builder.FreshId()
             Ok { Kind = TPatVar (name, varId); Type = expected
                  Bindings = [(name, varId, expected)] }
@@ -1649,7 +1649,7 @@ let rec checkPattern (env: TypeEnv) (expected: IRType) (pat: Pattern)
 ///
 /// The pre-Phase-C pattern was "inspect resolved type, reject if not an
 /// IRTArray." That fails with `requires array` when the argument is an
-/// unbound IRTInfer â€” even though the special form could provide the
+/// unbound IRTInfer — even though the special form could provide the
 /// constraint that determines what the inference variable should be.
 ///
 /// This helper inverts the pattern: if the argument is unresolved,
@@ -1660,7 +1660,7 @@ let rec checkPattern (env: TypeEnv) (expected: IRType) (pat: Pattern)
 ///
 /// Centralizing this logic here (rather than duplicating across each
 /// special form) keeps the inference machinery aggregated high in the IR
-/// stream â€” useful for IDE/language-server tools that want to expose
+/// stream — useful for IDE/language-server tools that want to expose
 /// statically evaluable types without triggering deep code paths.
 ///
 /// Returns the resolved IRArrayType. The synthesized index has Tag=None
@@ -1668,13 +1668,13 @@ let rec checkPattern (env: TypeEnv) (expected: IRType) (pat: Pattern)
 /// against real source-array tags).
 /// `requireArrayArg` generalized to a MINIMUM rank: synthesize `minRank`
 /// rank-1 slots instead of exactly one. An op whose contract needs rank >= 2
-/// (gram, transpose) must use this â€” with the rank-1 synthesis it ALWAYS
+/// (gram, transpose) must use this — with the rank-1 synthesis it ALWAYS
 /// failed on an unannotated argument (GramNeedsRank2 (1, _) /
 /// TransposeAxisRange), rejecting a program whose rank the checker can simply
 /// deduce. Extent naming is byte-identical to the old single-slot form at
 /// minRank = 1, so no existing behaviour shifts.
 ///
-/// DEFERRED â€” `decompact` is deliberately NOT switched over. Its demand is
+/// DEFERRED — `decompact` is deliberately NOT switched over. Its demand is
 /// not a rank COUNT but a compact-GROUP slot (Rank >= 2 and a non-SymNone
 /// symmetry class). Synthesizing k plain rank-1 SymNone slots would satisfy
 /// the arity check and then fail the symmetry check with a worse message than
@@ -1720,7 +1720,7 @@ let requireArrayArg (env: TypeEnv) (tArr: TypedExpr) (opName: string) : TypeResu
 /// Tag-check helper: validate that each index argument's nominal tag (if any)
 /// agrees with the corresponding array slot's nominal tag. Slot tags starting
 /// with "__" are internal synthetic markers and skipped. Untagged ints into
-/// named slots are permissive (warning emitted, no error) â€” iteration-tagging
+/// named slots are permissive (warning emitted, no error) — iteration-tagging
 /// typically resolves these later.
 ///
 /// Pulled out as a separate helper so the same logic can run BOTH at the
@@ -1740,12 +1740,12 @@ let private checkArrayIndexTags (env: TypeEnv) (arrTy: IRArrayType) (tArgs: Type
                 | IRTIdxTagged (_, IRefAnon _) ->
                     Some (IndexTagMismatchAnon tagName)
                 // A `Base<_>` parameter declined to constrain the tag, so it
-                // carries no more guarantee than an untagged int â€” warn with
+                // carries no more guarantee than an untagged int — warn with
                 // the same text rather than erroring, keeping the wildcard
                 // usable as the documented escape hatch for raveled indices.
                 | IRTIdxTagged (_, IRefAny)
                 | IRTScalar (ETInt32 | ETInt64) ->
-                    // BL4003 (index type violation) â€” the warning twin of this
+                    // BL4003 (index type violation) — the warning twin of this
                     // very site: the ERROR branch two cases up raises
                     // IndexTagMismatchNamed, which is already BL4003.
                     emitWarning env "BL4003" tArg.Span (sprintf
@@ -1761,7 +1761,7 @@ let private checkArrayIndexTags (env: TypeEnv) (arrTy: IRArrayType) (tArgs: Type
 /// Dispatch a typed function/array expression with typed args into either
 /// EnumIdx label subscript: a STRING LITERAL index into an axis whose index
 /// type is a registered EnumIdx folds to its ordinal HERE, so lowering,
-/// codegen, and the interpreter all see a plain constant subscript â€” the
+/// codegen, and the interpreter all see a plain constant subscript — the
 /// CSV headered-column access idiom `obs.vars.data[i, "temp"]`. The folded
 /// literal is retyped IRTIdxTagged so the nominal tag check accepts it.
 /// Deliberately restricted to STRING literals: int-valued EnumIdx keys are
@@ -2045,7 +2045,7 @@ let rec private dispatchAppOrIndex (env: TypeEnv) (tFunc: TypedExpr) (tArgs: Typ
         // IrrepsIdx strictness at DIRECT APPLICATION: plain function calls do
         // not unify parameter types against argument types (historically the
         // args are checked structurally downstream), so the irreps identity
-        // check â€” whose whole point is distinguishing SAME-EXTENT arrays â€”
+        // check — whose whole point is distinguishing SAME-EXTENT arrays —
         // would be skipped at exactly the seam it exists for. Check just the
         // BLOCK-SPEC-vs-block-spec index pairs here (both tags parse as
         // BlockSpecTag: the O(3) irreps member OR the point-group one, and a
@@ -2071,8 +2071,8 @@ let rec private dispatchAppOrIndex (env: TypeEnv) (tFunc: TypedExpr) (tArgs: Typ
         // irreps check above and for the same reason: a rank-k compact group
         // is ONE index slot but k dimensions of the emitted Array<T, N>, so
         // Array<T like SymIdx<2,4>> and Array<T like Idx<10>> pass every
-        // other test here â€” equal slot counts, no tags, SymNone is a symmetry
-        // wildcard, extents never compared â€” and their cell counts coincide.
+        // other test here — equal slot counts, no tags, SymNone is a symmetry
+        // wildcard, extents never compared — and their cell counts coincide.
         // Unchecked, the mismatch reaches g++ as an Array<double,1> vs
         // Array<double,2> conversion error. Unlike irrepsClash this is NOT
         // gated on tags: the blindness is independent of them.
@@ -2092,7 +2092,7 @@ let rec private dispatchAppOrIndex (env: TypeEnv) (tFunc: TypedExpr) (tArgs: Typ
         // check above: since args are not unified against params, unit
         // signatures would otherwise never meet at a call site. When BOTH
         // sides carry a signature (scalar position or array-element
-        // position) they must agree; bare<->annotated stays permissive â€”
+        // position) they must agree; bare<->annotated stays permissive —
         // that is how unitful values are introduced from literals.
         let unitClash =
             let n = min paramTys.Length tArgs.Length
@@ -2112,7 +2112,7 @@ let rec private dispatchAppOrIndex (env: TypeEnv) (tFunc: TypedExpr) (tArgs: Typ
             // member, the message is verbatim the one that shipped at stage 3
             // (the pg member is a twin, and the O(3) diagnostics are
             // differentially gated); anything touching the point-group member
-            // â€” pg-vs-pg or a CROSS-MEMBER pair â€” gets the family-level twin,
+            // — pg-vs-pg or a CROSS-MEMBER pair — gets the family-level twin,
             // which names the discipline instead of one member and lets the
             // two rendered identities carry the specifics.
             (match pi.Tag, ai.Tag with
@@ -2128,13 +2128,13 @@ let rec private dispatchAppOrIndex (env: TypeEnv) (tFunc: TypedExpr) (tArgs: Typ
             Error (UnitMismatch (sprintf "argument %d" (i + 1), ppUnitSig pu, ppUnitSig au))
         | None, None, None ->
             // Rank propagation at DIRECT APPLICATION (stage-2 rank deduction)
-            // â€” the fourth strictness carve-out at this seam, after irreps,
+            // — the fourth strictness carve-out at this seam, after irreps,
             // component rank, and units. Note this one counts SLOTS
             // (IndexTypes.Length) where rankClash above counts COMPONENTS
             // within a slot; the two bounds are independent.
             // Since args are not unified against params, an
             // unannotated CALLER param flowing into this call would never
-            // learn the callee's rank demand â€” the typechecker stays quiet
+            // learn the callee's rank demand — the typechecker stays quiet
             // and codegen emits ill-typed C++ (a scalar where Array<..,k> is
             // required). Impose the callee param's rank as a LOWER BOUND on
             // still-unresolved argument vars only (max-join in Subst);
@@ -2151,7 +2151,7 @@ let rec private dispatchAppOrIndex (env: TypeEnv) (tFunc: TypedExpr) (tArgs: Typ
                      match env.Subst.Resolve arg.Type with
                      | IRTInfer aid -> env.Subst.AddRankLowerBound(aid, calleeRank)
                      | _ -> ()))
-            // A Poly<T^r> pack param makes the arrow variadic â€” its declared
+            // A Poly<T^r> pack param makes the arrow variadic — its declared
             // param count says nothing about legal call-site arg counts, so
             // arity accounting stands down (monomorphization owns the call).
             let isVariadic =
@@ -2162,7 +2162,7 @@ let rec private dispatchAppOrIndex (env: TypeEnv) (tFunc: TypedExpr) (tArgs: Typ
             elif tArgs.Length > paramTys.Length then
                 // Curried over-application: this arrow consumes its declared
                 // params; the remainder re-dispatches against the result
-                // type â€” a function result curries on, an array result falls
+                // type — a function result curries on, an array result falls
                 // into dimensional indexing. A scalar result makes the
                 // surplus a plain arity error.
                 let now, rest = List.splitAt paramTys.Length tArgs
@@ -2175,7 +2175,7 @@ let rec private dispatchAppOrIndex (env: TypeEnv) (tFunc: TypedExpr) (tArgs: Typ
                 // application: the ExprApp arm eta-expands 0 < k < n before
                 // dispatching, so this is either a zero-arg call `f()` of an
                 // n-ary function or an under-applied function-typed struct
-                // field (deferred feature) â€” both genuine arity errors.
+                // field (deferred feature) — both genuine arity errors.
                 Error (ArityMismatch (paramTys.Length, tArgs.Length))
             else
                 Ok (mkTyped (TExprApp (tFunc, tArgs)) retTy)
@@ -2190,9 +2190,9 @@ let rec private dispatchAppOrIndex (env: TypeEnv) (tFunc: TypedExpr) (tArgs: Typ
 /// dispatchAppOrIndex) saw those variables as IRTInfer and let them
 /// through; this post-pass catches the now-resolved mismatches.
 ///
-/// Without this, indexing through an iteration-tagged kernel parameter â€”
+/// Without this, indexing through an iteration-tagged kernel parameter —
 /// e.g., `lambda(r) -> by_country(r)` where `r` is iterated from
-/// `Array<RegionIdx like StationIdx>` but `by_country` expects CountryIdx â€”
+/// `Array<RegionIdx like StationIdx>` but `by_country` expects CountryIdx —
 /// would silently typecheck.
 ///
 /// Structural child enumerator for a typed expression: the immediate
@@ -2295,7 +2295,7 @@ let rec private revalidateBodyTagChecks (env: TypeEnv) (expr: TypedExpr) : TypeR
             | _ -> Ok ()
         | _ -> Ok ())
 
-/// Scalar math intrinsics â€” the canonical list lives in Grad.fs (which also
+/// Scalar math intrinsics — the canonical list lives in Grad.fs (which also
 /// carries the derivative rules); StaticEval.evalBuiltin mirrors the same
 /// names for static contexts.
 let isMathIntrinsic (name: string) : bool = Blade.Grad.isMathIntrinsic name
@@ -2306,7 +2306,7 @@ let isComplexMathIntrinsic (name: string) : bool = Blade.Grad.isComplexMathIntri
 /// Every intrinsic reachable as a PLAIN CALL: the Grad-listed scalar
 /// intrinsics plus the ones with their own inferExpr arms (abs, which
 /// preserves its operand's numeric type, and the complex accessors
-/// real/imag/arg). All are arity-1 â€” which is what lets
+/// real/imag/arg). All are arity-1 — which is what lets
 /// etaExpandFunctionKernel wrap one in kernel position without a declared
 /// signature to read the arity from.
 let isUnaryIntrinsic (name: string) : bool =
@@ -2324,7 +2324,7 @@ let providerAliasName (env: TypeEnv) (alias: string) : string option =
     | None -> None
 
 /// Stamp a source expression's span onto a node built by calling a former
-/// builder (inferObjectFor / inferMethodFor) DIRECTLY â€” those bypass
+/// builder (inferObjectFor / inferMethodFor) DIRECTLY — those bypass
 /// inferExpr, so they miss its span back-fill and would return noSpan.
 /// Consumers that need a location: the stage-3/4 BL4010 pin suggestion (which
 /// otherwise has nothing to anchor on) and the editor's call-site walk.
@@ -2347,7 +2347,7 @@ and inferExprInner (env: TypeEnv) (expr: Expr) : TypeResult<TypedExpr> =
     // ---- Literals ----
     // Literals synthesize CONCRETE (their natural scalar). Flexibility (flexing
     // a literal into a generic `T`/`T^k` or a wider width) is introduced
-    // BIDIRECTIONALLY in `checkExpr`, only where an expected type demands it â€”
+    // BIDIRECTIONALLY in `checkExpr`, only where an expected type demands it —
     // making a literal a bare inference var at synthesis would spray unresolved
     // vars through array/arith/index positions that assume concrete scalars.
     | ExprKind.ExprLit lit -> Ok (mkTyped (TExprLit lit) (inferLiteralType lit))
@@ -2395,7 +2395,7 @@ and inferExprInner (env: TypeEnv) (expr: Expr) : TypeResult<TypedExpr> =
             | None -> Error (UnboundVariable name)
 
     | ExprKind.ExprQualified names ->
-        // Qualified name resolution â€” limited for now
+        // Qualified name resolution — limited for now
         Ok (mkTyped (TExprQualified names) IRTUnit)
 
     // ---- Binary operations (dispatch to helper) ----
@@ -2483,7 +2483,7 @@ and inferExprInner (env: TypeEnv) (expr: Expr) : TypeResult<TypedExpr> =
     // The source must be a named array binding (the store variable takes
     // its name); the path must be a string literal (the store is created
     // at a compile-time-known location, mirroring alias.load). Types as
-    // unit; the generic application node is kept â€” lowering's
+    // unit; the generic application node is kept — lowering's
     // tryProviderWrite intercepts the shape into a ProviderWriteSpec.
     | ExprKind.ExprApp ({ Kind = ExprKind.ExprField ({ Kind = ExprKind.ExprVar alias }, "write") }, args)
         when (providerAliasName env alias).IsSome ->
@@ -2519,7 +2519,7 @@ and inferExprInner (env: TypeEnv) (expr: Expr) : TypeResult<TypedExpr> =
                 | _ -> env.Subst.Fresh()
             Ok (mkTyped (TExprApp (tFunc, tArgs)) retTy))
 
-    // ---- Method call: obj.method(args) â†’ impl resolution ----
+    // ---- Method call: obj.method(args) → impl resolution ----
     | ExprKind.ExprApp ({ Kind = ExprKind.ExprField (obj, method) }, args) ->
         inferMethodCall env obj method args
     // ---- Scalar math intrinsics: exp(x), sqrt(x), ... ----
@@ -2546,7 +2546,7 @@ and inferExprInner (env: TypeEnv) (expr: Expr) : TypeResult<TypedExpr> =
                 Error (IntrinsicNeedsNumeric name)
             | IRTInfer _ when isComplexMathIntrinsic name ->
                 // Unresolved operand (e.g. an unannotated kernel/lambda
-                // parameter): DEFER â€” the apply-site unification may later
+                // parameter): DEFER — the apply-site unification may later
                 // bind it to a COMPLEX element type (exp/log/sqrt/trig
                 // preserve complex), so pinning Float64 here would reject
                 // complex kernels. The node carries the operand's type
@@ -2555,7 +2555,7 @@ and inferExprInner (env: TypeEnv) (expr: Expr) : TypeResult<TypedExpr> =
                 // Float64).
                 Ok (mkTyped (TExprUnaryOp (OpMath name, tArg)) tArg.Type)
             | IRTInfer _ ->
-                // floor/ceil have no complex overload â€” the operand really is
+                // floor/ceil have no complex overload — the operand really is
                 // real; pin it to Float64, the intrinsic's natural domain.
                 unify env.Subst tArg.Type (IRTScalar ETFloat64) |> Result.bind (fun () ->
                 Ok (mkTyped (TExprUnaryOp (OpMath name, tArg)) (IRTScalar ETFloat64)))
@@ -2590,7 +2590,7 @@ and inferExprInner (env: TypeEnv) (expr: Expr) : TypeResult<TypedExpr> =
                 Ok (mkTyped (TExprUnaryOp (OpMath "abs", tArg)) tArg.Type)
             | IRTUnitAnnotated (IRTScalar (ETInt32 | ETInt64 | ETFloat32 | ETFloat64), _) as t ->
                 // abs preserves the operand's unit annotation (it previously
-                // fell through to the error arm â€” a unitful scalar is a
+                // fell through to the error arm — a unitful scalar is a
                 // perfectly good abs operand).
                 Ok (mkTyped (TExprUnaryOp (OpMath "abs", tArg)) t)
             | other ->
@@ -2598,7 +2598,7 @@ and inferExprInner (env: TypeEnv) (expr: Expr) : TypeResult<TypedExpr> =
 
     // ---- real(z) / imag(z) / arg(z): complex component/phase accessors ----
     // Plain-call intrinsics (shadowable by a user binding, like abs). Require a
-    // complex scalar operand â€” real/imag on a real value is trivially the
+    // complex scalar operand — real/imag on a real value is trivially the
     // identity/zero and a likely mistake, so we steer instead. real/imag yield
     // the component width (Complex128 -> Float64, Complex64 -> Float32); arg is
     // a Float64 angle. Emit std::real/std::imag/std::arg via the generic unary
@@ -2617,7 +2617,7 @@ and inferExprInner (env: TypeEnv) (expr: Expr) : TypeResult<TypedExpr> =
                 Ok (mkTyped (TExprUnaryOp (op, tArg)) (IRTScalar ETFloat64))
             | IRTInfer _ ->
                 // Unresolved operand (unannotated kernel/lambda parameter):
-                // DEFER the complex requirement â€” the apply-site unification
+                // DEFER the complex requirement — the apply-site unification
                 // binds the param to the iterated element type. Result is
                 // provisionally Float64 (the Complex128-operand answer); the
                 // kernel re-stamp corrects the Complex64 width (-> Float32
@@ -2630,7 +2630,7 @@ and inferExprInner (env: TypeEnv) (expr: Expr) : TypeResult<TypedExpr> =
 
     // ---- complex(re, im): complex literal constructor ----
     // The one way to construct a complex value (the earlier 2-tuple cast
-    // form `(re, im) : Complex128` is retired â€” as a plain call this
+    // form `(re, im) : Complex128` is retired — as a plain call this
     // composes under any operator without the precedence trap where
     // `a * (re, im) : T` bound the cast outside the multiply). Plain-call
     // intrinsic, shadowable like abs/real. Components must be float-typed
@@ -2645,7 +2645,7 @@ and inferExprInner (env: TypeEnv) (expr: Expr) : TypeResult<TypedExpr> =
         Error (ComplexArity args.Length)
 
     // ---- prodsum(x1, ..., xk): fused fiber product-sum ----
-    // Î£_t Î _â„“ xâ„“(t) over rank-1 arrays of equal extent â€” the k-fold
+    // Σ_t Π_ℓ xℓ(t) over rank-1 arrays of equal extent — the k-fold
     // generalization of a dot product, and the comoment primitive the PPL
     // moment formers elaborate to. Surface form is a plain call,
     // shadowable like the math intrinsics. Empty extent folds to 0 (sum
@@ -2653,11 +2653,11 @@ and inferExprInner (env: TypeEnv) (expr: Expr) : TypeResult<TypedExpr> =
     | ExprKind.ExprApp ({ Kind = ExprKind.ExprVar "prodsum" }, args) when not args.IsEmpty && (lookupVar "prodsum" env).IsNone ->
         inferProdSum env args
 
-    // ---- __dist_pack(Îº1, ..., Îºr): typed-dist construction intrinsic ----
+    // ---- __dist_pack(κ1, ..., κr): typed-dist construction intrinsic ----
     // Compiler-internal (double-underscore reserved): emitted by the PPL
     // elaboration stage after it builds the fused cumulant tower, never
     // written by users. Packs the component arrays into a value of nominal
-    // type Dist<r, Ï„ like axes>; the typed node is a plain TExprTuple (the
+    // type Dist<r, τ like axes>; the typed node is a plain TExprTuple (the
     // representation a Dist erases to at zonk), only the TYPE is nominal.
     | ExprKind.ExprApp ({ Kind = ExprKind.ExprVar "__dist_pack" }, args) when not args.IsEmpty ->
         inferDistPack env args
@@ -2666,7 +2666,7 @@ and inferExprInner (env: TypeEnv) (expr: Expr) : TypeResult<TypedExpr> =
     // Compiler-internal (double-underscore reserved): emitted by the `rand`
     // elaboration stage from `alias.uniform/normal(key, shape)`. `key` is an
     // Int64 stream key; the trailing args are the (elaborator-resolved) static
-    // extents. Self-typed as a dense Float64 array of that shape â€” no annotation
+    // extents. Self-typed as a dense Float64 array of that shape — no annotation
     // needed. Lowering records (kind, key) in RandomInits; codegen emits
     // allocate<> + the runtime blade_rand fill.
     | ExprKind.ExprApp ({ Kind = ExprKind.ExprVar (("__rand_uniform" | "__rand_normal") as fn) }, (keyE :: dimArgs)) when not dimArgs.IsEmpty ->
@@ -2692,7 +2692,7 @@ and inferExprInner (env: TypeEnv) (expr: Expr) : TypeResult<TypedExpr> =
     // ---- cumulant(d, k): dist component projection, order-guarded ----
     // The order guard as a TYPE error (ppl/NOTES.md typed-Dist arc): k must
     // be a static int in 1..r where r is the dist's carried order. Works in
-    // any expression position on any Dist-typed value â€” including function
+    // any expression position on any Dist-typed value — including function
     // parameters, which the elaboration-level registry could never see.
     // `cumulant` is part of the `ppl` module surface: the ppl elaborator
     // rewrites a qualified `p.cumulant(d, k)` to this internal marker, so a
@@ -2704,14 +2704,14 @@ and inferExprInner (env: TypeEnv) (expr: Expr) : TypeResult<TypedExpr> =
         inferExpr env func |> Result.bind (fun tFunc ->
         // Prefix partial application (formalism 6.2.3): applying an n-ary
         // FUNCTION to 0 < k < n args eta-expands to a lambda over the
-        // residual params â€” lambda(__pa..) -> f(a1..ak, __pa..) â€” so the
+        // residual params — lambda(__pa..) -> f(a1..ak, __pa..) — so the
         // residual value rides the entire existing lambda pipeline
         // (inferLambda captures, lowerTypedLambda lifting, std::function
         // value emission, resolveCallable kernel wrappers). The FuncElem
         // guard keeps arrays on their own dimensional-currying path below.
         // Bound args are inlined into the lambda body (each appears exactly
         // once), so they re-evaluate per call of the residual and their
-        // free locals become ordinary lambda captures â€” the same semantics
+        // free locals become ordinary lambda captures — the same semantics
         // as a user-written lambda. `func` is inferred a second time inside
         // the body; inference of an application head is pure, so the
         // discarded detection pass above costs nothing.
@@ -2725,7 +2725,7 @@ and inferExprInner (env: TypeEnv) (expr: Expr) : TypeResult<TypedExpr> =
         match env.Subst.Resolve tFunc.Type with
         // Single `_` placeholder (formalism 6.2.3): one hole in an
         // otherwise-full application binds every other parameter and
-        // leaves the hole's parameter free â€” f(_, b) â‰¡ lambda(x) -> f(x, b).
+        // leaves the hole's parameter free — f(_, b) ≡ lambda(x) -> f(x, b).
         // FuncElem-gated: array wildcard-indexing (the 4.5 currying table,
         // where MULTIPLE holes are legal) stays on the ArrayElem path.
         | FuncElem (paramTys, retTy) when not (hasPolyParam paramTys) && args |> List.exists (fun a -> match a.Kind with ExprKind.ExprWildcard -> true | _ -> false) ->
@@ -2733,7 +2733,7 @@ and inferExprInner (env: TypeEnv) (expr: Expr) : TypeResult<TypedExpr> =
                 args |> List.mapi (fun i a -> (i, a))
                      |> List.choose (fun (i, a) -> match a.Kind with ExprKind.ExprWildcard -> Some i | _ -> None)
             if wildPositions.Length > 1 then
-                Error (Other "function partial application takes a single `_` placeholder only (formalism 6.2.3) â€” bind the rest with prefix partial application or a lambda")
+                Error (Other "function partial application takes a single `_` placeholder only (formalism 6.2.3) — bind the rest with prefix partial application or a lambda")
             elif args.Length <> paramTys.Length then
                 Error (PlaceholderNeedsAllBound (args.Length, paramTys.Length))
             else
@@ -2763,7 +2763,7 @@ and inferExprInner (env: TypeEnv) (expr: Expr) : TypeResult<TypedExpr> =
             args |> List.map (inferExpr env) |> sequenceResults |> Result.bind (fun tArgs ->
                 // Call-site constraint DISCHARGE: if the callee declared custom
                 // where-clause conjuncts (e.g. PPL's `indep(a, b)`), the caller
-                // must prove them for the actual arguments â€” each registered
+                // must prove them for the actual arguments — each registered
                 // handler gets the callee's conjunct args plus a provenance
                 // oracle mapping callee param names to the actuals' provenance.
                 let dischargeErr =
@@ -2866,7 +2866,7 @@ and inferExprInner (env: TypeEnv) (expr: Expr) : TypeResult<TypedExpr> =
     // Iteration-tagging: when the source index type carries a user-named tag
     // (e.g., `range<LatIdx>`), the element type is wrapped as Nat<LatIdx>
     // rather than bare int64. Iterating the virtual array via method_for
-    // then yields tagged values to the kernel â€” so `range<LatIdx> <@>
+    // then yields tagged values to the kernel — so `range<LatIdx> <@>
     // lambda(i) -> A(i)` (where A is `Array<T like LatIdx>`) typechecks
     // cleanly under step 5's tag rule without an annotation on i.
     // Anonymous index types (`Idx<5>`, etc., Tag=None) and synthetic tags
@@ -2876,7 +2876,7 @@ and inferExprInner (env: TypeEnv) (expr: Expr) : TypeResult<TypedExpr> =
         // A TyHalo slot builds through haloSlotsOf (static-offset validation +
         // interior shrink + "__halowin|" tag) and may SPLICE several slots
         // (nested per-axis offsets); every other slot lowers as before. n-D
-        // separable stencils are ranges of halo slots â€” one window per slot.
+        // separable stencils are ranges of halo slots — one window per slot.
         (idxTys
          |> List.map (fun ty ->
              match ty with
@@ -2914,7 +2914,7 @@ and inferExprInner (env: TypeEnv) (expr: Expr) : TypeResult<TypedExpr> =
                 match tLo.Kind, tHi.Kind with
                 | TExprLit (LitInt 0L), TExprLit (LitInt n) -> IRLit (IRLitInt n)
                 | TExprLit (LitInt a), TExprLit (LitInt b) -> IRLit (IRLitInt (b - a))
-                | _ -> IRLit (IRLitInt 0L)  // placeholder â€” Lowering computes actual extent
+                | _ -> IRLit (IRLitInt 0L)  // placeholder — Lowering computes actual extent
             let idx = {
                 Id = env.Builder.FreshId()
                 Rank = 1
@@ -2938,7 +2938,7 @@ and inferExprInner (env: TypeEnv) (expr: Expr) : TypeResult<TypedExpr> =
             Ok (mkTyped (TExprBlocked (idx, tBS)) (mkVirtualArrayArrow [idx] elemType)))
 
     | ExprKind.ExprHalo (innerTy, offsetsExpr) ->
-        // halo<Inner, offsets> in expression position â€” a range over the halo
+        // halo<Inner, offsets> in expression position — a range over the halo
         // slot(s): one slot for a flat offset array, k slots for the nested
         // per-axis form [[..],[..],..] (arity = sub-array count). All halo
         // semantics live in the slots (haloSlotsOf); per-slot center offsets
@@ -2973,7 +2973,7 @@ and inferExprInner (env: TypeEnv) (expr: Expr) : TypeResult<TypedExpr> =
         inferExpr env body |> Result.bind (fun tB ->
             Ok (mkTyped (TExprGuard (tC, tB)) tB.Type)))
     
-    // mask(array, pred) â€” construct the Bool PRESENCE array over the source's
+    // mask(array, pred) — construct the Bool PRESENCE array over the source's
     // own index space: m(i) = pred(A(i)). mask is the predicate-driven mask
     // CONSTRUCTOR; compaction is compound(A, m) (formalism 4.5), iteration of
     // the filtered space is range<CompoundIdx<m>>, and positional composition
@@ -2983,7 +2983,7 @@ and inferExprInner (env: TypeEnv) (expr: Expr) : TypeResult<TypedExpr> =
     // non-reusable across companion columns).
     //
     // The result type reuses the source's IRIndexType records VERBATIM (same
-    // Ids/Tags) â€” index-space identity is what compoundViewType checks, so a
+    // Ids/Tags) — index-space identity is what compoundViewType checks, so a
     // freshly-derived mask must provably live over A's space even when A's
     // indices are anonymous.
     | ExprKind.ExprMask (array, pred) ->
@@ -2999,14 +2999,14 @@ and inferExprInner (env: TypeEnv) (expr: Expr) : TypeResult<TypedExpr> =
                  | Error msg -> Error (Other msg))
             | _ -> Error (Other "compound(dense, mask) expects two array arguments: a dense array and a bool mask covering its leading dimensions")))
 
-    // intersect(A, B) / union(A, B) â€” set operations on arrays
+    // intersect(A, B) / union(A, B) — set operations on arrays
     | ExprKind.ExprIntersect (a, b) | ExprKind.ExprUnion (a, b) ->
         let isIntersect = match expr.Kind with ExprKind.ExprIntersect _ -> true | _ -> false
         let opName = if isIntersect then "intersect" else "union"
         inferExpr env a |> Result.bind (fun tA ->
         inferExpr env b |> Result.bind (fun tB ->
             requireArrayArg env tA opName |> Result.bind (fun arrTy ->
-                // Drive inference for the second array too â€” both should be
+                // Drive inference for the second array too — both should be
                 // arrays of compatible elem type.
                 requireArrayArg env tB opName |> Result.bind (fun _arrTyB ->
                     let resultIdx = {
@@ -3019,8 +3019,8 @@ and inferExprInner (env: TypeEnv) (expr: Expr) : TypeResult<TypedExpr> =
                     let texpr = if isIntersect then TExprIntersect (tA, tB) else TExprUnion (tA, tB)
                     Ok (mkTyped texpr resultType)))))
 
-    // unique(A) â€” deduplicate, preserving first-occurrence order. Same
-    // element type as input, dynamic extent (â‰¤ input extent).
+    // unique(A) — deduplicate, preserving first-occurrence order. Same
+    // element type as input, dynamic extent (≤ input extent).
     | ExprKind.ExprUnique a ->
         inferExpr env a |> Result.bind (fun tA ->
             requireArrayArg env tA "unique" |> Result.bind (fun arrTy ->
@@ -3033,7 +3033,7 @@ and inferExprInner (env: TypeEnv) (expr: Expr) : TypeResult<TypedExpr> =
                 let resultType = mkArrayArrow [resultIdx] arrTy.ElemType None
                 Ok (mkTyped (TExprUnique tA) resultType)))
 
-    // contains(A, x) â€” membership test. Returns Bool. The value's type
+    // contains(A, x) — membership test. Returns Bool. The value's type
     // must unify with the array's element type; mismatch (e.g., looking
     // for a Float64 in an Int64 array) is a hard error.
     | ExprKind.ExprContains (a, value) ->
@@ -3044,12 +3044,12 @@ and inferExprInner (env: TypeEnv) (expr: Expr) : TypeResult<TypedExpr> =
                 |> Result.bind (fun () ->
                     Ok (mkTyped (TExprContains (tA, tValue)) (IRTScalar ETBool))))))
 
-    // group_keys(keys1, keys2, ...) â€” build CSR grouping structure.
+    // group_keys(keys1, keys2, ...) — build CSR grouping structure.
     // Single key: existing single-keyed grouping (positional / EnumIdx /
     // dynamic-discovery cases).
-    // Multi-key (â‰¥2): compound grouping. Each (k1, k2, ...) tuple becomes
+    // Multi-key (≥2): compound grouping. Each (k1, k2, ...) tuple becomes
     // its own bucket. Discovery is dynamic regardless of any single key's
-    // staticness â€” even if all components were Idx<N>, the compound shape
+    // staticness — even if all components were Idx<N>, the compound shape
     // is determined by which tuples actually appear in the data.
     // Precondition: all key arrays share the same outer index (same length;
     // i-th element of each represents the same record).
@@ -3112,7 +3112,7 @@ and inferExprInner (env: TypeEnv) (expr: Expr) : TypeResult<TypedExpr> =
     | ExprKind.ExprArity paramName -> Ok (mkTyped (TExprArity paramName) (IRTScalar ETInt64))
     | ExprKind.ExprNth -> Ok (mkTyped (TExprLit (LitInt 0L)) (IRTScalar ETInt64))
     | ExprKind.ExprZero ->
-        // zero gets a fresh type variable â€” unifies with int, float, bool context
+        // zero gets a fresh type variable — unifies with int, float, bool context
         let ty = env.Subst.Fresh()
         Ok (mkTyped TExprZero ty)
     | ExprKind.ExprRank e ->
@@ -3146,7 +3146,7 @@ and inferExprInner (env: TypeEnv) (expr: Expr) : TypeResult<TypedExpr> =
                     | Some info when info.Assign = ReadOnly ->
                         Some (ImmutableStaticAssign name)
                     | _ -> None
-                | _ -> None  // array element assignment etc. â€” allowed
+                | _ -> None  // array element assignment etc. — allowed
             match assignErr with
             | Some e -> Error e
             | None ->
@@ -3182,7 +3182,7 @@ and inferExprInner (env: TypeEnv) (expr: Expr) : TypeResult<TypedExpr> =
 /// (one let-hop each, the <@> resolution rule), so lowering and codegen
 /// never chase variable bindings. Result type: elem for a single apply,
 /// left-nested scalar pairs for a tree (mirroring `|> compute`'s tuple
-/// convention â€” nested pair TYPE, flat make_tuple VALUE, flat projections).
+/// convention — nested pair TYPE, flat make_tuple VALUE, flat projections).
 and tryInferReduceCompute (env: TypeEnv) (tArr: TypedExpr) (tKernel: TypedExpr) (tInitOpt: TypedExpr option) : TypeResult<TypedExpr> option =
     // Collect fusion leaves left-to-right, resolving each through bindings.
     // None = the root is not a deferred computation at all (fall through);
@@ -3198,7 +3198,7 @@ and tryInferReduceCompute (env: TypeEnv) (tArr: TypedExpr) (tKernel: TypedExpr) 
                 Some (Error (Other "reduce() over a fused tree requires every <&!> leaf to be an unforced `method_for/object_for <@> kernel` application")))
         | TExprApply info when not info.IsComposeApply -> Some (Ok [r])
         | TExprApply _ ->
-            Some (Error (Other "reduce() over a composed (>>@/@>>) application is not supported yet â€” force it with `|> compute` and reduce the resulting array"))
+            Some (Error (Other "reduce() over a composed (>>@/@>>) application is not supported yet — force it with `|> compute` and reduce the resulting array"))
         | _ -> None
     match collect tArr with
     | None -> None
@@ -3221,7 +3221,7 @@ and tryInferReduceCompute (env: TypeEnv) (tArr: TypedExpr) (tKernel: TypedExpr) 
                         else Ok arr.ElemType
                      | IRTScalar _ as s -> Ok s
                      | _ -> Error (Other "reduce() over a deferred computation needs an array-producing kernel application"))
-                | _ -> Error (Other "reduce(): internal â€” fusion leaf is not an apply")
+                | _ -> Error (Other "reduce(): internal — fusion leaf is not an apply")
             leaves |> List.map leafElem |> sequenceResults |> Result.bind (fun elems ->
             let elem0 = elems.Head
             elems.Tail
@@ -3255,9 +3255,9 @@ and tryInferReduceCompute (env: TypeEnv) (tArr: TypedExpr) (tKernel: TypedExpr) 
                         let lit = match et with ETInt32 | ETInt64 -> TExprLit (LitInt 1L) | _ -> TExprLit (LitFloat 1.0)
                         Ok (mkTyped lit elem0)
                      | TExprSection _ ->
-                        Error (Other "reduce() over a deferred computation requires an explicit init for this kernel (3-arg form `reduce(c, op, init)`) â€” only (+) and (*) carry implicit identities")
+                        Error (Other "reduce() over a deferred computation requires an explicit init for this kernel (3-arg form `reduce(c, op, init)`) — only (+) and (*) carry implicit identities")
                      | _ ->
-                        Error (Other "reduce() over a deferred computation requires an explicit init for a lambda kernel (3-arg form `reduce(c, op, init)`) â€” a fused fold cannot seed from its first element"))
+                        Error (Other "reduce() over a deferred computation requires an explicit init for a lambda kernel (3-arg form `reduce(c, op, init)`) — a fused fold cannot seed from its first element"))
             seed |> Result.map (fun tSeed ->
             let rebuilt =
                 match leaves with
@@ -3276,7 +3276,7 @@ and tryInferReduceCompute (env: TypeEnv) (tArr: TypedExpr) (tKernel: TypedExpr) 
 and inferReduce (env: TypeEnv) array kernel (init: Expr option) : TypeResult<TypedExpr> =
     // ---- Rank-k dense fold (k >= 2): desugar to the internal loop nest ----
     // Folds every element in DECLARED (row-major) order through the kernel
-    // with one scalar accumulator â€” byte-identical to the imperative
+    // with one scalar accumulator — byte-identical to the imperative
     // accumulation nest it replaces (the hosvd/math-corpus port shape and
     // the structured-binning route). v1 bounds: static extents, dense
     // non-symmetric axes, scalar elements. Seed = the 3-arg init, or the
@@ -3361,8 +3361,8 @@ and inferReduce (env: TypeEnv) array kernel (init: Expr option) : TypeResult<Typ
         // one loop nest, one scalar accumulator per fusion leaf (a tree
         // yields a tuple of scalars, mirroring `|> compute`'s tuple shape).
         // Semantically this is the fold stage of the loop-object composition
-        // algebra â€” a binary-kernel object (object_for((+))) composed after
-        // the map stages â€” typed here at the forcing site. (+)/(*) sections
+        // algebra — a binary-kernel object (object_for((+))) composed after
+        // the map stages — typed here at the forcing site. (+)/(*) sections
         // seed with their identity; any other kernel REQUIRES the 3-arg
         // init: a fused nest cannot seed-with-first like the array fold.
         match tryInferReduceCompute env tArr tKernel tInitOpt with
@@ -3383,7 +3383,7 @@ and inferReduce (env: TypeEnv) array kernel (init: Expr option) : TypeResult<Typ
         //      concrete elem type via literals or other constraints.
         //   2. Otherwise default to Float64. Operator sections like
         //      `(+)` always have fresh type variables for args, so
-        //      they hit this path â€” which matches what
+        //      they hit this path — which matches what
         //      lowerTypedSection emits in the IR (sections are
         //      hardcoded to Float64). Untyped lambdas with
         //      uninferable bodies also fall through here.
@@ -3398,7 +3398,7 @@ and inferReduce (env: TypeEnv) array kernel (init: Expr option) : TypeResult<Typ
         // resolution point.
         //
         // Phase 2 (post-Gap-2.5): with strict scalar unify, we cannot
-        // pin elem type to whatever the kernel's declared param type is â€”
+        // pin elem type to whatever the kernel's declared param type is —
         // operator sections like `(+)` have hardcoded Float64 in their
         // lowering, which would make `reduce(int_array, (+))` fail.
         // So when the kernel is a section default (or when its first
@@ -3414,7 +3414,7 @@ and inferReduce (env: TypeEnv) array kernel (init: Expr option) : TypeResult<Typ
         // genuine type error worth surfacing.
         let deduceElemFromKernel () : IRType =
             // Heuristic: if the kernel's first param is unresolved
-            // (still an IRTInfer), the user didn't annotate it â€” so
+            // (still an IRTInfer), the user didn't annotate it — so
             // we return that same inference variable (not a fresh one)
             // so subsequent inference flows through it: when
             // buildApplyInfo unifies the reduce's per-row type with
@@ -3453,7 +3453,7 @@ and inferReduce (env: TypeEnv) array kernel (init: Expr option) : TypeResult<Typ
                                    | SymSymmetric | SymAntisymmetric | SymHermitian -> true
                                    | SymNone -> false) ->
             // Arc 3 hardening: a single SYMMETRY-CLASS record passes the
-            // one-record check but is NOT a rank-1 axis â€” reduce would walk
+            // one-record check but is NOT a rank-1 axis — reduce would walk
             // extents[0] handing out row pointers (discovered via the
             // fill_random probe: compiled garbage). Also semantically
             // ambiguous (fold canonical cells vs logical cells). Reject with
@@ -3469,8 +3469,8 @@ and inferReduce (env: TypeEnv) array kernel (init: Expr option) : TypeResult<Typ
             | _ ->
                 // Stage 3c.2 follow-on: unify the kernel's param types
                 // with the array's element type. The kernel arrives as
-                // an arrow `(Î±, Î²) â†’ Î³` where Î±, Î² are typically still
-                // unresolved inference variables â€” operator sections
+                // an arrow `(α, β) → γ` where α, β are typically still
+                // unresolved inference variables — operator sections
                 // lower polymorphically per `inferExpr ExprSection`,
                 // and unannotated 2-arg lambdas don't get their param
                 // types pinned by the body alone for `+`/`-`/etc.
@@ -3550,14 +3550,14 @@ and inferProdSum (env: TypeEnv) (args: Expr list) : TypeResult<TypedExpr> =
         go None None tArgs |> Result.map (fun elemTy ->
             mkTyped (TExprProdSum tArgs) elemTy))
 
-/// __dist_pack(Îº1, ..., Îºr): construct a Dist<r, Ï„ like axes> value from
-/// its cumulant component arrays. Compiler-internal â€” the PPL elaboration
-/// stage emits it after building the fused tower. Îº_1 (the mean tensor over
-/// the variable axes as-declared) fixes Ï„ and the axes; the component count
-/// fixes r. The typed node is a plain TExprTuple â€” the exact representation
-/// the type erases to at zonk â€” so no new lowering or codegen path exists;
+/// __dist_pack(κ1, ..., κr): construct a Dist<r, τ like axes> value from
+/// its cumulant component arrays. Compiler-internal — the PPL elaboration
+/// stage emits it after building the fused tower. κ_1 (the mean tensor over
+/// the variable axes as-declared) fixes τ and the axes; the component count
+/// fixes r. The typed node is a plain TExprTuple — the exact representation
+/// the type erases to at zonk — so no new lowering or codegen path exists;
 /// only the TYPE is nominal. Unification stays strict (Unify has no
-/// tupleâ†”Dist coercion), so this intrinsic and Dist-typed operators are the
+/// tuple↔Dist coercion), so this intrinsic and Dist-typed operators are the
 /// only producers of Dist values.
 and inferDistPack (env: TypeEnv) (args: Expr list) : TypeResult<TypedExpr> =
     args |> List.map (inferExpr env) |> sequenceResults |> Result.bind (fun tArgs ->
@@ -3566,13 +3566,13 @@ and inferDistPack (env: TypeEnv) (args: Expr list) : TypeResult<TypedExpr> =
             let order = tArgs.Length
             Ok (mkTyped (TExprTuple tArgs) (IRTDist (order, a1.ElemType, a1.IndexTypes)))
         | t ->
-            Error (Other (sprintf "__dist_pack: components must be arrays (Îº_1 lowered to %s) â€” this intrinsic is emitted by the PPL elaboration stage, not written by hand" (ppIRType t))))
+            Error (Other (sprintf "__dist_pack: components must be arrays (κ_1 lowered to %s) — this intrinsic is emitted by the PPL elaboration stage, not written by hand" (ppIRType t))))
 
 /// cumulant(d, k): the order-k component of a Dist value, as an ordinary
 /// array. THE ORDER GUARD AS A TYPE ERROR: k must be a static int (the
 /// replicate-count contract) in 1..r. Result type comes from
 /// distComponentType, so the projection is fully typed at any expression
-/// position â€” including on Dist-typed function parameters, where the old
+/// position — including on Dist-typed function parameters, where the old
 /// elaboration-level registry could never reach.
 and inferCumulantProj (env: TypeEnv) (dExpr: Expr) (kExpr: Expr) : TypeResult<TypedExpr> =
     inferExpr env dExpr |> Result.bind (fun tD ->
@@ -3592,9 +3592,9 @@ and inferCumulantProj (env: TypeEnv) (dExpr: Expr) (kExpr: Expr) : TypeResult<Ty
         | t ->
             Error (CumulantNeedsDist (ppIRType t)))
 
-// extents(array) â€” extent(s) along each dimension as Int64.
-// Rank-1 â†’ scalar Int64 (the single dim's extent).
-// Rank-N â†’ tuple (Int64, Int64, ..., Int64) of length N (one per dim,
+// extents(array) — extent(s) along each dimension as Int64.
+// Rank-1 → scalar Int64 (the single dim's extent).
+// Rank-N → tuple (Int64, Int64, ..., Int64) of length N (one per dim,
 //          outermost first).
 // The codegen prefers a static literal when the index type's extent
 // expression is statically evaluable (extends to literal arithmetic via
@@ -3613,7 +3613,7 @@ and inferDecompact (env: TypeEnv) array d : TypeResult<TypedExpr> =
             // Resolve the logical dimension d to (slotIndex, slotArity,
             // posInSlot). A compact slot of arity r spans r consecutive
             // dimensions; posInSlot in [0, r) says which component within
-            // the group d targets â€” that position decides peel-first /
+            // the group d targets — that position decides peel-first /
             // peel-last / peel-middle.
             let totalDims = arrTy.IndexTypes |> List.sumBy (fun ix -> max 1 ix.Rank)
             let dimToSlot (dd: int) : Result<int * int * int, TypeError> =
@@ -3659,15 +3659,15 @@ and inferDecompact (env: TypeEnv) array d : TypeResult<TypedExpr> =
                     Error (Other "decompact: surrounding free dimensions are currently supported only for symmetric groups; antisymmetric/Hermitian groups with preceding free dimensions are not yet wired.")
                 elif ix.Symmetry = SymHermitian && r >= 3 then
                     // Rank-2 Hermitian (the only Hermitian arrays a producer
-                    // makes today, via gram) dissolves to a dense nÃ—n with the
-                    // lower triangle conjugated â€” handled below. Rank >= 3
+                    // makes today, via gram) dissolves to a dense n×n with the
+                    // lower triangle conjugated — handled below. Rank >= 3
                     // Hermitian has no producer yet and its compact-residual
                     // conjugate semantics aren't worked out, so reject.
                     Error (Other "decompact: rank >= 3 SymHermitian is not yet supported (no producer exists for rank >= 3 Hermitian arrays; gram produces rank-2 Hermitian, which decompacts to a dense conjugate-mirrored matrix).")
                 else
                     // SYMMETRIC decompact: general fission, any rank, any cut
                     // (peel-first/last/middle), via the gather materializer.
-                    // ANTISYMMETRIC decompact: rank 2 dissolves to dense nÃ—n;
+                    // ANTISYMMETRIC decompact: rank 2 dissolves to dense n×n;
                     // rank >= 3 BOUNDARY cuts leave one residual antisym group,
                     // now allocatable via the per-group-strict mask
                     // (allocate_strict) with the sign applied lazily on read
@@ -3698,15 +3698,15 @@ and inferDecompact (env: TypeEnv) array d : TypeResult<TypedExpr> =
                     let resultType = mkArrayArrow newIndexTypes arrTy.ElemType None
                     Ok (mkTyped (TExprDecompact (tArr, d)) resultType))))
 
-// reduce(array, kernel) â€” T/S reduction primitive.
+// reduce(array, kernel) — T/S reduction primitive.
 // Consumes the innermost dimension via a binary kernel. For rank-1 input,
 // produces a scalar of the element type. Multi-rank reduction is deferred.
 //
 // Empty-array policy (post-extents integration):
-//   - If extent is statically known to be 0  â†’ typecheck error (caller bug)
-//   - If extent is statically known to be > 0 â†’ typecheck OK; codegen emits
+//   - If extent is statically known to be 0  → typecheck error (caller bug)
+//   - If extent is statically known to be > 0 → typecheck OK; codegen emits
 //                                              standard loop without guard
-//   - If extent is dynamic                   â†’ typecheck OK; codegen adds
+//   - If extent is dynamic                   → typecheck OK; codegen adds
 //                                              a runtime guard that aborts
 //                                              cleanly on empty
 //
@@ -3785,7 +3785,7 @@ and inferGram (env: TypeEnv) leftE rightE : TypeResult<TypedExpr> =
 
 
 // ----------------------------------------------------------------------------
-// stack / join â€” the two rank-changing assembly combinators (formalism 2.6)
+// stack / join — the two rank-changing assembly combinators (formalism 2.6)
 // ----------------------------------------------------------------------------
 //
 // Both materialize a fresh DENSE rectangular pool by copying their operands
@@ -3793,7 +3793,7 @@ and inferGram (env: TypeEnv) leftE rightE : TypeResult<TypedExpr> =
 // share the same admissibility fence: every operand must be an array whose
 // index slots are plain arity-1 SymNone dimensions. A compact / ragged /
 // compound slot has no rectangular address space to copy into, and silently
-// densifying one would be a storage-class change behind the user's back â€” so
+// densifying one would be a storage-class change behind the user's back — so
 // it is rejected with a decompact steer instead.
 
 /// A slot that can take part in a stack/join copy: one dense dimension, no
@@ -3836,7 +3836,7 @@ and inferStack (env: TypeEnv) (exprs: Expr list) : TypeResult<TypedExpr> =
         stackJoinOperandTypes env "stack" tExprs (fun i g -> StackNeedsArrays (i, g))
         |> Result.bind (fun arrTys ->
             let first = List.head arrTys
-            // Every operand must have the SAME shape â€” the fresh leading axis
+            // Every operand must have the SAME shape — the fresh leading axis
             // selects among them, so a ragged selection has no rank-(r+1) type.
             let shapeCheck =
                 arrTys |> List.tail |> List.mapi (fun i at -> (i + 2, at))
@@ -3926,7 +3926,7 @@ and inferJoin (env: TypeEnv) (arrays: Expr list) (dim: int) : TypeResult<TypedEx
 and inferTranspose (env: TypeEnv) array d1 d2 : TypeResult<TypedExpr> =
     inferExpr env array |> Result.bind (fun tArr ->
         // minRank: transpose needs at least 2 dimensions, and specifically
-        // enough of them to contain the requested axes â€” the axes are already
+        // enough of them to contain the requested axes — the axes are already
         // in scope here, so synthesize exactly the rank they need rather than
         // a flat 2. Strictly more permissive than today (an unannotated arg
         // was pinned to rank 1 and then always failed TransposeAxisRange), so
@@ -3937,7 +3937,7 @@ and inferTranspose (env: TypeEnv) array d1 d2 : TypeResult<TypedExpr> =
             // slot list accumulating arities until the target dimension
             // falls inside a slot. Returns (slotIndex, slotArity, dimWithinSlot).
             // For the first cut every reachable slot is arity-1, so this is
-            // identity â€” but writing it properly keeps the gate correct in
+            // identity — but writing it properly keeps the gate correct in
             // the presence of compound groups elsewhere in the array.
             let totalDims = arrTy.IndexTypes |> List.sumBy (fun ix -> max 1 ix.Rank)
             let dimToSlot (d: int) : Result<int * int * int, TypeError> =
@@ -3960,7 +3960,7 @@ and inferTranspose (env: TypeEnv) array d1 d2 : TypeResult<TypedExpr> =
                     let ix1 = arrTy.IndexTypes.[slot1]
                     let ix2 = arrTy.IndexTypes.[slot2]
                     if slot1 = slot2 then
-                        // Both dimensions lie INSIDE one index type â€” an intra-
+                        // Both dimensions lie INSIDE one index type — an intra-
                         // group swap. The index-type class decides the behavior
                         // (storage-preserving): symmetric -> identity, antisym ->
                         // whole-array negation, hermitian -> whole-array
@@ -4040,15 +4040,15 @@ and inferGroupBy (env: TypeEnv) values grouping : TypeResult<TypedExpr> =
             let resultType = mkArrayArrow [outerIdx; memberIdx] arrTy.ElemType None
             Ok (mkTyped (TExprGroupBy (tVals, tGrouping)) resultType))))
 
-// sort(array, key) â€” stable sort by ascending key.
+// sort(array, key) — stable sort by ascending key.
 // Phase 1 (current): eager materialization. Result is a new physical array
 // with the same element type and extent as the input, indexed by a fresh
 // anonymous index (mask-style). The order property is NOT tracked in the
-// type system yet â€” that's deferred to a future "key map chain" subsystem.
+// type system yet — that's deferred to a future "key map chain" subsystem.
 //
 // The eventual direction is lazy: sort produces a chain handle recording
 // (key_fn, permutation), with materialization deferred to first access.
-// Rationale: deferring evaluation preserves optimization headroom â€” the
+// Rationale: deferring evaluation preserves optimization headroom — the
 // compiler can analyze chains of operations before any layout is committed,
 // enabling sort-skip, merge-style joins, and other rearrangements.
 // Caching strategies are downstream of those analyses, not a substitute.
@@ -4108,7 +4108,7 @@ and inferGroupKeys (env: TypeEnv) keys : TypeResult<TypedExpr> =
         inferAll |> Result.bind (fun pairs ->
             // Precondition check: all key arrays must be rank-1 and
             // share an outer index. We compare extent expressions
-            // structurally â€” Blade's typechecker is structural enough
+            // structurally — Blade's typechecker is structural enough
             // that the same Idx<N> annotation produces equal Extent
             // values across multiple bindings.
             let firstSource =
@@ -4125,7 +4125,7 @@ and inferGroupKeys (env: TypeEnv) keys : TypeResult<TypedExpr> =
                 // tuple unordered_map". The tag name reserves
                 // `__compoundidx_static` for the future mask-derived
                 // path (TyCompoundIdx) which is statically evaluable
-                // â€” that case would have Extent = IRLit (cardinality)
+                // — that case would have Extent = IRLit (cardinality)
                 // and a different codegen story. Component types are
                 // not carried in IRTGroupKeys today; codegen recovers
                 // them from the IRGroupKeys node's keys list at emit
@@ -4141,8 +4141,8 @@ and inferGroupKeys (env: TypeEnv) keys : TypeResult<TypedExpr> =
                 let tKeys = pairs |> List.map fst
                 Ok (mkTyped (TExprGroupKeys tKeys) gkType))
 
-// group_by(values, grouping) â€” apply GroupKeys to a values array
-// Result: rank-2 array (groups Ã— members), with GroupIdx
+// group_by(values, grouping) — apply GroupKeys to a values array
+// Result: rank-2 array (groups × members), with GroupIdx
 // Tags ("__group_outer", "__group_member") signal to codegen to use ragged peel.
 
 
@@ -4180,7 +4180,7 @@ and inferReplicate (env: TypeEnv) count body : TypeResult<TypedExpr> =
         | None ->
             Error (Other "replicate count must be a compile-time integer (a literal, `let static`, or static-function call)")
         | Some 1 ->
-            // replicate(1, c) â‰¡ c
+            // replicate(1, c) ≡ c
             Ok tB
         | Some n when n >= 2 ->
             let resolved = env.Subst.Resolve(tB.Type)
@@ -4231,7 +4231,7 @@ and inferTupleIndex (env: TypeEnv) tuple index : TypeResult<TypedExpr> =
                             Some (IndexTagMismatchNamed (tagName, argName))
                         | IRTIdxTagged (_, IRefAnon _) ->
                             Some (IndexTagMismatchAnon tagName)
-                        // Wildcard-typed index: warn, don't error â€” kept in
+                        // Wildcard-typed index: warn, don't error — kept in
                         // step with checkArrayIndexTags above.
                         | IRTIdxTagged (_, IRefAny)
                         | IRTScalar (ETInt32 | ETInt64) ->
@@ -4254,7 +4254,7 @@ and inferTupleIndex (env: TypeEnv) tuple index : TypeResult<TypedExpr> =
                 else
                     Error (Other "array indexing: too many indices for array rank")
         | _ ->
-            // Poly-pack / tuple indexing: result type is fresh â€” codegen
+            // Poly-pack / tuple indexing: result type is fresh — codegen
             // resolves via std::get based on flat-leaf paths.
             Ok (mkTyped (TExprTupleIndex (tT, tI)) (env.Subst.Fresh()))))
 
@@ -4265,11 +4265,11 @@ and inferUnaryOp (env: TypeEnv) op operand : TypeResult<TypedExpr> =
     inferExpr env operand |> Result.bind (fun tOp ->
         // OpConj (conj): result type equals operand type. Conjugate of a
         // complex is complex; of a real, the identity (real). Permissive,
-        // mirroring OpNeg â€” no type guard. Codegen emits std::conj only for
+        // mirroring OpNeg — no type guard. Codegen emits std::conj only for
         // complex element types; reals pass through unchanged.
         //
         // WHOLE-ARRAY conj: when the operand is an array (not a scalar), the
-        // scalar IRUnaryOp(IRConj, _) path is wrong â€” it would emit a scalar
+        // scalar IRUnaryOp(IRConj, _) path is wrong — it would emit a scalar
         // std::conj against an array value and fall through to a bare
         // passthrough (losing the Array<> wrapper and applying no conjugation).
         // Route it to TExprArrayConjugate, the whole-array eager conjugate
@@ -4295,7 +4295,7 @@ and inferUnaryOp (env: TypeEnv) op operand : TypeResult<TypedExpr> =
                              | other -> other)
                         | OpArg -> IRTScalar ETFloat64
                         // OpMath is synthesized by the ExprApp intrinsic
-                        // intercept, never parsed as ExprUnaryOp â€” this arm
+                        // intercept, never parsed as ExprUnaryOp — this arm
                         // is exhaustiveness only.
                         | OpMath _ -> IRTScalar ETFloat64
             Ok (mkTyped (TExprUnaryOp (op, tOp)) resTy))
@@ -4331,7 +4331,7 @@ and inferMethodCall (env: TypeEnv) obj method args : TypeResult<TypedExpr> =
                 let tFunc = mkTyped (TExprVar (mangledName, funcVarId, None)) funcType
                 Ok (mkTyped (TExprApp (tFunc, tObj :: tArgs)) retTy)
             | None ->
-                // Not an impl method â€” treat as struct field access + application
+                // Not an impl method — treat as struct field access + application
                 let (fieldTy, fieldIdx) =
                     match lookupTypeDef typeName env with
                     | Some (TDIStruct (_, _, fields, _)) ->
@@ -4348,7 +4348,7 @@ and inferMethodCall (env: TypeEnv) obj method args : TypeResult<TypedExpr> =
                 // Array<T,N> wrapper, which has no operator().
                 dispatchAppOrIndex env tField tArgs
         | _ ->
-            // Non-named type â€” regular field access + application
+            // Non-named type — regular field access + application
             let tField = mkTyped (TExprField (tObj, method, 0)) (env.Subst.Fresh())
             let retTy = env.Subst.Fresh()
             Ok (mkTyped (TExprApp (tField, tArgs)) retTy)))
@@ -4360,11 +4360,11 @@ and inferMask (env: TypeEnv) array pred : TypeResult<TypedExpr> =
     inferExpr env array |> Result.bind (fun tArr ->
     inferExpr env pred |> Result.bind (fun tPred ->
         requireArrayArg env tArr "mask" |> Result.bind (fun arrTy ->
-            // The predicate is `Element â†’ Bool`. inferExpr typed it
+            // The predicate is `Element → Bool`. inferExpr typed it
             // without knowing the element type, so its param starts as
             // a fresh IRTInfer. Without explicit unification here, the
             // var stays unbound and zonkType's default (Float64) kicks
-            // in â€” which then breaks bodies that use integer ops on
+            // in — which then breaks bodies that use integer ops on
             // int arrays (`x % 2`) or struct field access on struct
             // arrays (`p.a`). Unify the predicate's param with the
             // array's element type so zonking propagates the right
@@ -4402,7 +4402,7 @@ and inferZip (env: TypeEnv) exprs : TypeResult<TypedExpr> =
                 | ArrayElem at -> Some at
                 | _ -> None)
         if arrayTypes.Length = tExprs.Length && arrayTypes.Length >= 2 then
-            // All inputs are arrays â€” build proper zip type
+            // All inputs are arrays — build proper zip type
             let minRank = arrayTypes |> List.map (fun at -> at.IndexTypes.Length) |> List.min
             let sharedIndices = arrayTypes.[0].IndexTypes |> List.take minRank
             // Element types: for rank-equal arrays, the elem itself; for higher-rank, remaining slice
@@ -4421,7 +4421,7 @@ and inferZip (env: TypeEnv) exprs : TypeResult<TypedExpr> =
                 mkArrayArrow sharedIndices (IRTScalar ETFloat64) None  // placeholder; real elem is the tuple
             Ok (mkTyped (TExprZip tExprs) zipArrayType)
         else
-            // Fallback: not all arrays, or fewer than 2 â€” return tuple type
+            // Fallback: not all arrays, or fewer than 2 — return tuple type
             Ok (mkTyped (TExprZip tExprs) (IRTTuple (tExprs |> List.map (fun e -> e.Type)))))
 
 
@@ -4461,9 +4461,9 @@ and inferSequence (env: TypeEnv) exprs : TypeResult<TypedExpr> =
     exprs |> List.map (inferExpr env) |> sequenceResults |> Result.bind (fun tExprs ->
         match tExprs with
         | [] -> Ok (mkTyped (TExprSequence []) IRTUnit)
-        | [single] -> Ok single  // sequence(c) â‰¡ c
+        | [single] -> Ok single  // sequence(c) ≡ c
         | _ ->
-            // Unify all element types â€” sequence is homogeneous
+            // Unify all element types — sequence is homogeneous
             let elemType = (List.head tExprs).Type
             let unifyResults =
                 tExprs |> List.tail |> List.fold (fun acc e ->
@@ -4485,14 +4485,14 @@ and inferSequence (env: TypeEnv) exprs : TypeResult<TypedExpr> =
                 let resultType =
                     match resolved with
                     | ArrayElem arrTy ->
-                        // Array elements: Idx<N> Ã— inner index types
+                        // Array elements: Idx<N> × inner index types
                         mkArrayLike { arrTy with IndexTypes = seqIdx :: arrTy.IndexTypes }
                     | IRTScalar et ->
-                        // Scalar elements: simple array Idx<N> â†’ scalar
+                        // Scalar elements: simple array Idx<N> → scalar
                         mkArrayArrow [seqIdx] (IRTScalar et) None
                     | _ ->
                         // S3 tag: relic. Fallback to Float64 array for non-array,
-                        // non-scalar resolved types â€” should arguably be a typecheck
+                        // non-scalar resolved types — should arguably be a typecheck
                         // error, but preserving prior behavior.
                         mkArrayArrow [seqIdx] (IRTScalar ETFloat64) None
                 Ok (mkTyped (TExprSequence tExprs) resultType)))
@@ -4503,7 +4503,7 @@ and inferSequence (env: TypeEnv) exprs : TypeResult<TypedExpr> =
 /// there is no `method_for` on the page to signal that, so surface a one-time
 /// steering warning. Suppressed when the operands are all the same array
 /// (self-outer is the domain's core idiom) or the kernel is comm-annotated
-/// (the user is thinking in symmetric-outer terms) â€” and never emitted for
+/// (the user is thinking in symmetric-outer terms) — and never emitted for
 /// the explicit spelling, which states the intent already.
 and warnImplicitOuterProduct (env: TypeEnv) (tLoop: TypedExpr) (rightResult: TypeResult<TypedExpr>) : unit =
     match tLoop.Kind with
@@ -4571,21 +4571,21 @@ and inferBinOp env mode op left right : TypeResult<TypedExpr> =
             | Error _ -> false
         let applyWith (tL: TypedExpr) =
             rightResult |> Result.bind (fun tR -> inferApply env tL tR)
-        // A bare NAMED function on the LEFT is a kernel too â€” `covariance <@>
+        // A bare NAMED function on the LEFT is a kernel too — `covariance <@>
         // (data, data)`. It can never resolve to a TExprLambda (a top-level
         // `function` binds with TypedValue = None, exactly the case
         // resolveTypedExpr cannot surface), so the resolved-kernel arm below
         // never sees it and the pair used to fall through to the
         // ChainOpUndecidable steering error. This is the SAME classification
         // inferObjectFor performs internally, in its two shapes:
-        //   - fixed arity  â†’ etaExpandFunctionKernel accepts it and builds
+        //   - fixed arity  → etaExpandFunctionKernel accepts it and builds
         //                    lambda(__k..) -> f(__k..);
-        //   - Poly pack    â†’ etaExpandFunctionKernel deliberately REFUSES (the
+        //   - Poly pack    → etaExpandFunctionKernel deliberately REFUSES (the
         //                    pack width is unknown until the argument tuple
         //                    reveals it), and inferObjectFor builds a DEFERRED
         //                    former (Arity = None) that the <@> seam expands.
         // Both are routed through inferObjectFor, so `f <@> args` is the
-        // `object_for(f) <@> args` spelling exactly â€” same typed nodes, same
+        // `object_for(f) <@> args` spelling exactly — same typed nodes, same
         // stage-3 suggestions. Tested by predicate rather than by calling
         // etaExpandFunctionKernel: that function mints a lambda (fresh ids,
         // unification) and inferObjectFor would then mint a second one.
@@ -4611,19 +4611,19 @@ and inferBinOp env mode op left right : TypeResult<TypedExpr> =
         else
             match left.Kind with
             | ExprKind.ExprTuple elems when rightKernelShaped ->
-                // (A, B) <@> kernel  â‰¡  method_for(A, B) <@> kernel
+                // (A, B) <@> kernel  ≡  method_for(A, B) <@> kernel
                 inferMethodFor env elems |> Result.bind (fun tL0 ->
                     let tL = stampSynthSpan left tL0
                     warnImplicitOuterProduct env tL rightResult
                     applyWith tL)
             | ExprKind.ExprVar name when isUnaryIntrinsic name && (lookupVar name env).IsNone ->
-                // Bare unary intrinsic on the left: `abs <@> u` â‰¡
+                // Bare unary intrinsic on the left: `abs <@> u` ≡
                 // `object_for(abs) <@> u`, the same shape namedFunctionKernelLeft
                 // gives a named function. It needs its own arm because an
                 // intrinsic has no binding AT ALL: the arms below open by
                 // inferring the left operand, which reports it unbound long
                 // before any classification runs. An intrinsic can never be the
-                // arrays operand, so â€” unlike a bare name â€” a kernel-shaped
+                // arrays operand, so — unlike a bare name — a kernel-shaped
                 // RIGHT does not take it back; that pairing falls through
                 // applyWith to the kernel <@> kernel steering.
                 inferObjectFor env left
@@ -4639,11 +4639,11 @@ and inferBinOp env mode op left right : TypeResult<TypedExpr> =
                         applyWith tL
                     | TExprLambda _ | TExprSection _ | TExprReynolds _ | TExprZero ->
                         if rightKernelShaped then
-                            // Kernel <@> kernel: nothing to iterate over â€”
+                            // Kernel <@> kernel: nothing to iterate over —
                             // reaches the steering diagnostic below.
                             applyWith tL
                         else
-                            // kernel <@> arrays  â‰¡  object_for(kernel) <@> arrays.
+                            // kernel <@> arrays  ≡  object_for(kernel) <@> arrays.
                             // Re-driving inferObjectFor on the source expr keeps
                             // the resolve-at-apply behavior for let-bound
                             // lambdas (compose chains) in the one existing place.
@@ -4652,7 +4652,7 @@ and inferBinOp env mode op left right : TypeResult<TypedExpr> =
                             |> Result.bind applyWith
                     | _ when rightKernelShaped ->
                         // Arrays-shaped left (variable, call, zip, literal):
-                        // A <@> kernel  â‰¡  method_for(A) <@> kernel. Re-driving
+                        // A <@> kernel  ≡  method_for(A) <@> kernel. Re-driving
                         // inferMethodFor on the source expr keeps zip expansion
                         // and identity extraction in the one existing place.
                         inferMethodFor env [left]
@@ -4660,14 +4660,14 @@ and inferBinOp env mode op left right : TypeResult<TypedExpr> =
                         |> Result.bind applyWith
                     | _ when namedFunctionKernelLeft ->
                         // Bare named function on the left, nothing decisive on
-                        // the right: named-kernel <@> arrays â‰¡
+                        // the right: named-kernel <@> arrays ≡
                         // object_for(named-kernel) <@> arrays. (Guarded by the
-                        // arm above, so a decisive RIGHT still wins â€” a bare
+                        // arm above, so a decisive RIGHT still wins — a bare
                         // name meeting a lambda stays the arrays operand.)
                         //
                         // The synthesized former is built by calling
                         // inferObjectFor directly, so it misses the span
-                        // back-fill inferExpr does for the explicit spelling â€”
+                        // back-fill inferExpr does for the explicit spelling —
                         // hence stampSynthSpan (see its note: the BL4010
                         // suggestion needs a location to anchor on).
                         inferObjectFor env left
@@ -4678,7 +4678,7 @@ and inferBinOp env mode op left right : TypeResult<TypedExpr> =
                         applyWith tL)
 
     | OpBind ->
-        // >>= : Computation Î± Ã— (Î± â†’ Computation Î²) â†’ Computation Î²
+        // >>= : Computation α × (α → Computation β) → Computation β
         // Result type is the return type of the continuation
         inferExpr env left |> Result.bind (fun tL ->
         inferExpr env right |> Result.bind (fun tR ->
@@ -4687,9 +4687,9 @@ and inferBinOp env mode op left right : TypeResult<TypedExpr> =
             // `lambda(arr) -> method_for(arr) <@> ...` has arr left as
             // IRTInfer (because the body's `method_for(arr)` doesn't
             // pin it), and codegen subsequently emits arr's type as
-            // a default scalar â€” which doesn't match the array-typed
+            // a default scalar — which doesn't match the array-typed
             // computation flowing in. Unify the continuation's first
-            // param with Î± (the computation's element type, unwrapping
+            // param with α (the computation's element type, unwrapping
             // an explicit IRTComputation if present).
             let alpha =
                 match tL.Type with
@@ -4703,7 +4703,7 @@ and inferBinOp env mode op left right : TypeResult<TypedExpr> =
             unifyResult |> Result.bind (fun () ->
                 let resultType =
                     match tR.Type with
-                    | FuncElem (_, retType) -> retType  // k : Î± â†’ Î², result is Î²
+                    | FuncElem (_, retType) -> retType  // k : α → β, result is β
                     | _ -> tR.Type  // If not a function, use right's type directly
                 Ok (mkTyped (TExprBind (tL, tR)) resultType))))
 
@@ -4718,7 +4718,7 @@ and inferBinOp env mode op left right : TypeResult<TypedExpr> =
             Ok (mkTyped (TExprFusion (tL, tR)) (IRTTuple [tL.Type; tR.Type]))))
 
     | OpFunctor ->
-        // <$> : (Î± â†’ Î²) Ã— Computation Î± â†’ Computation Î²
+        // <$> : (α → β) × Computation α → Computation β
         // f <$> c  transforms the result of computation c by applying f
         inferExpr env left |> Result.bind (fun tF ->
         inferExpr env right |> Result.bind (fun tC ->
@@ -4734,7 +4734,7 @@ and inferBinOp env mode op left right : TypeResult<TypedExpr> =
             Ok (mkTyped (TExprFunctorMap (tF, tC)) outputType)))
 
     | OpArrayProd ->
-        // <*> : MethodLoop Ã— MethodLoop â†’ MethodLoop (concatenate array lists)
+        // <*> : MethodLoop × MethodLoop → MethodLoop (concatenate array lists)
         inferExpr env left |> Result.bind (fun tL ->
         inferExpr env right |> Result.bind (fun tR ->
             // Resolve both sides to find TExprMethodFor
@@ -4780,7 +4780,7 @@ and inferBinOp env mode op left right : TypeResult<TypedExpr> =
             Ok (mkTyped (TExprChoice (tL, tR)) tL.Type)))
 
     // <|:> allocated-fallback (formalism 2.6): read A where its STORAGE holds
-    // the cell, else B. Storage-keyed, unlike <|>'s value-keyed zero test â€”
+    // the cell, else B. Storage-keyed, unlike <|>'s value-keyed zero test —
     // an allocated zero survives fallback but not choice.
     //   * compound-left: the CompoundIdx mask IS the allocation record (absent
     //     cells have no storage). Result = the dense expansion: B's type, with
@@ -4789,10 +4789,10 @@ and inferBinOp env mode op left right : TypeResult<TypedExpr> =
     //     mask is guarded in generated code.
     //   * dense-left: allocation = the nested-pointer chain, checked per curry
     //     level in codegen (nullptr-robust reads; compiler-built arrays are
-    //     fully allocated â€” partially-allocated arrays arrive via the
+    //     fully allocated — partially-allocated arrays arrive via the
     //     C++-level partial-depth allocation API). Result = A's type.
     // Scalars/computations/loop objects reject (steer to <|>); symmetric left
-    // rejects (symmetric allocation is not verifiable â€” v1).
+    // rejects (symmetric allocation is not verifiable — v1).
     | OpFallback ->
         inferExpr env left |> Result.bind (fun tL ->
         inferExpr env right |> Result.bind (fun tR ->
@@ -4838,14 +4838,14 @@ and inferBinOp env mode op left right : TypeResult<TypedExpr> =
                 Error (FallbackNeedsArrays (describe tL.Type, describe tR.Type))))
 
     | OpComposeMeth ->
-        // @>> : Computation Î± Ã— Computation Î² â†’ Computation Î²
+        // @>> : Computation α × Computation β → Computation β
         // Result type is the right side's type
         inferExpr env left |> Result.bind (fun tL ->
         inferExpr env right |> Result.bind (fun tR ->
             Ok (mkTyped (TExprCompose (op, tL, tR)) tR.Type)))
 
     | OpComposeObj ->
-        // >>@ : ObjectLoop Ã— ObjectLoop â†’ ObjectLoop
+        // >>@ : ObjectLoop × ObjectLoop → ObjectLoop
         // Preserve as loop type so inferApply can handle application
         inferExpr env left |> Result.bind (fun tL ->
         inferExpr env right |> Result.bind (fun tR ->
@@ -4859,7 +4859,7 @@ and inferBinOp env mode op left right : TypeResult<TypedExpr> =
     | OpCompose ->
         inferExpr env left |> Result.bind (fun tL ->
         inferExpr env right |> Result.bind (fun tR ->
-            // f >> g : (A â†’ B) >> (B â†’ C) = (A â†’ C)
+            // f >> g : (A → B) >> (B → C) = (A → C)
             match env.Subst.Resolve(tL.Type), env.Subst.Resolve(tR.Type) with
             | FuncElem (fArgs, fRet), FuncElem (gArgs, gRet) ->
                 // Unify f's return type with g's parameter type(s)
@@ -4875,10 +4875,10 @@ and inferBinOp env mode op left right : TypeResult<TypedExpr> =
                 eprintfn "Warning: right side of >> should be a function"
                 Ok (mkTyped (TExprCompose (op, tL, tR)) tR.Type)
             | _, FuncElem (gArgs, gRet) ->
-                // f might be a fresh/unresolved type â€” permissive
+                // f might be a fresh/unresolved type — permissive
                 Ok (mkTyped (TExprCompose (op, tL, tR)) (mkFuncArrow gArgs gRet))
             | _ ->
-                // Both unresolved â€” permissive, return fresh
+                // Both unresolved — permissive, return fresh
                 Ok (mkTyped (TExprCompose (op, tL, tR)) (env.Subst.Fresh()))))
 
     | OpCons ->
@@ -4899,16 +4899,16 @@ and inferBinOp env mode op left right : TypeResult<TypedExpr> =
             if isDist lRes || isDist rRes then
                 // Typed-Dist operator dispatch (checker-level; the surface
                 // operand exprs are re-synthesized into the expansion, so
-                // this works in any expression position â€” see inferDistBinOp).
+                // this works in any expression position — see inferDistBinOp).
                 inferDistBinOp env op left right lRes rRes
             else
             // Elementwise op on TWO ARRAYS: re-synthesize as the zip
-            // co-iteration pipeline â€” method_for(zip(l, r)) <@>
-            // lambda(u, w) -> u op w |> compute â€” and re-infer
+            // co-iteration pipeline — method_for(zip(l, r)) <@>
+            // lambda(u, w) -> u op w |> compute — and re-infer
             // (synthesize-and-infer, the inferDistBinOp pattern). The
             // direct TExprBinOp lowering hand-rolled a flat rank-1
             // object_for loop, which mis-iterates symmetry-PACKED storage
-            // (row pointers into a scalar kernel â€” silent miscompile) and
+            // (row pointers into a scalar kernel — silent miscompile) and
             // any rank > 1 operand; the co-iteration builder handles
             // packed, dense, and multi-rank uniformly. Outer mode ([+])
             // keeps its cross-iteration path.
@@ -4927,16 +4927,16 @@ and inferBinOp env mode op left right : TypeResult<TypedExpr> =
             // binop is inferred (they only unify with the element types
             // later, in buildApplyInfo), so inferArithType's unit rules
             // see no units there. The operand ELEMENT units are visible
-            // here â€” unitRulesForOp checks/composes them and the result
+            // here — unitRulesForOp checks/composes them and the result
             // element type is stamped over the inferred pipeline type.
             let elemUnits t =
                 match t with ArrayElem at -> IR.getUnits at.ElemType | _ -> None
             if mode = Elementwise && bothArrays && isZipOp then
                 // Zip-able operand shapes: one index record per operand (dense
-                // rank-1, or packed symmetry-class storage of any logical rank â€”
+                // rank-1, or packed symmetry-class storage of any logical rank —
                 // the co-iteration walks its flat canonical cells), or BOTH
                 // operands multi-record all-plain-dense with structurally
-                // matching shapes (dense rank â‰¥ 2 â€” the co-iteration spans the
+                // matching shapes (dense rank ≥ 2 — the co-iteration spans the
                 // full product of the shared records). Mismatched or mixed
                 // dense/packed multi-axis shapes reject clearly rather than
                 // letting codegen emit a loop-object error.
@@ -4963,8 +4963,8 @@ and inferBinOp env mode op left right : TypeResult<TypedExpr> =
             else
             // Elementwise op on ARRAY <-> SCALAR (`A + a`, `2.0 / A`,
             // `A > t`): re-synthesize as a 1-param kernel map over the array
-            // operand â€” method_for(A) <@> lambda(__bx) -> __bx op s |>
-            // compute â€” the same synthesize-and-infer route as the both-array
+            // operand — method_for(A) <@> lambda(__bx) -> __bx op s |>
+            // compute — the same synthesize-and-infer route as the both-array
             // zip above. Embedding the scalar operand's SURFACE expr in the
             // lambda body lets capture analysis see its variable references,
             // so the lifted kernel receives them as explicit capture params
@@ -4972,7 +4972,7 @@ and inferBinOp env mode op left right : TypeResult<TypedExpr> =
             // lowering-side partial-application kernel embedded the lowered
             // scalar IR directly; a variable reference there was a free var,
             // which forced a main-local std::function emitted AFTER its use
-            // site â€” invalid C++ (use before declaration).
+            // site — invalid C++ (use before declaration).
             let scalarish t =
                 match t with IRTScalar _ -> true | _ -> false
             let arrayScalar =
@@ -4984,7 +4984,7 @@ and inferBinOp env mode op left right : TypeResult<TypedExpr> =
             | Some arrayOnLeft when mode = Elementwise && isZipOp ->
                 // Same synthesis-site unit judgment as the zip path above:
                 // the kernel param annotation deliberately strips units
-                // (elemAnn below), so the body's binop checks nothing â€”
+                // (elemAnn below), so the body's binop checks nothing —
                 // judge the array's ELEMENT units against the scalar
                 // operand's units here, in operand order.
                 let arrU = elemUnits (if arrayOnLeft then lRes else rRes)
@@ -5029,15 +5029,15 @@ and inferBinOp env mode op left right : TypeResult<TypedExpr> =
                 mkTyped (TExprBinOp (mode, op, tL, tR)) resTy)))
 
 /// Checker-level Dist operator dispatch (typed-Dist arc phase 4).
-/// Scalar * Dist (either side) is Îº_k(cÂ·X) = c^k Îº_k(X) â€” pure
-/// multilinearity, exact with NO independence requirement â€” so it
+/// Scalar * Dist (either side) is κ_k(c·X) = c^k κ_k(X) — pure
+/// multilinearity, exact with NO independence requirement — so it
 /// dispatches in ANY expression position, including on Dist-typed function
 /// parameters: the surface operand exprs are packed into the expansion
 /// DistSynth.scaleExpr builds, and the whole block is re-inferred
-/// (synthesize-and-infer). Dist Â± Dist is exact ONLY for independent
+/// (synthesize-and-infer). Dist ± Dist is exact ONLY for independent
 /// operands; until function-boundary independence licenses land
 /// (`where indep(...)`, the next phase), provenance is invisible in
-/// checker positions, so +/âˆ’ here steers to the module-level elaboration
+/// checker positions, so +/− here steers to the module-level elaboration
 /// path (which checks declared independence). dist * dist steers to the
 /// Wick machinery message.
 and inferDistBinOp (env: TypeEnv) (op: BinOp) (left: Expr) (right: Expr) (lTy: IRType) (rTy: IRType) : TypeResult<TypedExpr> =
@@ -5047,14 +5047,14 @@ and inferDistBinOp (env: TypeEnv) (op: BinOp) (left: Expr) (right: Expr) (lTy: I
         | _ -> false
     match op, lTy, rTy with
     | OpMul, IRTDist _, IRTDist _ ->
-        Error (Other "dist * dist is not defined: cumulants are additive under independent sums and multilinear under scalar scaling; products of random variables need the moment (Wick/FaÃ  di Bruno) machinery")
+        Error (Other "dist * dist is not defined: cumulants are additive under independent sums and multilinear under scalar scaling; products of random variables need the moment (Wick/Faà di Bruno) machinery")
     | OpMul, IRTDist (order, _, _), c when isScalarish c ->
         inferExpr env (Blade.Ppl.Elaborate.DistSynth.scaleExpr (env.Builder.FreshId()) right left order)
     | OpMul, c, IRTDist (order, _, _) when isScalarish c ->
         inferExpr env (Blade.Ppl.Elaborate.DistSynth.scaleExpr (env.Builder.FreshId()) left right order)
     | (OpAdd | OpSub), IRTDist (lo, _, _), IRTDist (ro, _, _) ->
         // Exact ONLY for independent operands: every cross pair of the two
-        // provenance sets must be related under the declared relation âˆª the
+        // provenance sets must be related under the declared relation ∪ the
         // active `where indep` licenses (PPL-owned state). Empty provenance
         // is un-provable, not vacuously independent.
         if lo <> ro then
@@ -5063,7 +5063,7 @@ and inferDistBinOp (env: TypeEnv) (op: BinOp) (left: Expr) (right: Expr) (lTy: I
         let provL = provenanceOfSurface env left
         let provR = provenanceOfSurface env right
         if Set.isEmpty provL || Set.isEmpty provR then
-            Error (Other "dist + / -: cannot establish the operands' provenance â€” combine dist bindings (or expressions built from them) so independence of their sources can be verified")
+            Error (Other "dist + / -: cannot establish the operands' provenance — combine dist bindings (or expressions built from them) so independence of their sources can be verified")
         else
             let missing =
                 [ for s1 in provL do
@@ -5072,7 +5072,7 @@ and inferDistBinOp (env: TypeEnv) (op: BinOp) (left: Expr) (right: Expr) (lTy: I
             match missing with
             | (s1, s2) :: _ ->
                 // Token-shaped sources ("func.param") mean unlicensed
-                // parameters â€” steer to the signature license, not to a
+                // parameters — steer to the signature license, not to a
                 // module-level declaration over internal token names.
                 let steering =
                     if s1.Contains "." || s2.Contains "." then
@@ -5089,11 +5089,11 @@ and inferDistBinOp (env: TypeEnv) (op: BinOp) (left: Expr) (right: Expr) (lTy: I
 /// Unit rules for one binary op, shared by scalar arithmetic
 /// (inferArithType) and the array kernel-synthesis paths in inferBinOp
 /// (both-array zip, array<->scalar broadcast). The synthesized kernels
-/// infer their bodies against unresolved parameter types â€” the params
-/// only unify with the element types later, in buildApplyInfo â€” so the
+/// infer their bodies against unresolved parameter types — the params
+/// only unify with the element types later, in buildApplyInfo — so the
 /// unit judgment must happen at the synthesis site, where the operand
 /// units are still visible. Returns the RESULT unit signature (None =
-/// no annotation): +/âˆ’/comparison require agreement, * and / compose
+/// no annotation): +/−/comparison require agreement, * and / compose
 /// signatures, everything else (^, &&, ||, ...) drops units.
 and unitRulesForOp (op: BinOp) (lUnits: UnitSig option) (rUnits: UnitSig option) : TypeResult<UnitSig option> =
     match op with
@@ -5125,7 +5125,7 @@ and unitRulesForOp (op: BinOp) (lUnits: UnitSig option) (rUnits: UnitSig option)
 /// Overwrite the ELEMENT unit annotation of an array-typed result from a
 /// synthesized kernel pipeline with the signature the unit rules computed.
 /// Without this the kernel return type leaks the LEFT operand's unit
-/// through * and / (meters * meters would stay meters). None strips â€”
+/// through * and / (meters * meters would stay meters). None strips —
 /// comparisons produce Bool elements and ^ drops units like the scalar
 /// path.
 and stampElemUnits env (resUnits: UnitSig option) (t: TypedExpr) : TypedExpr =
@@ -5143,7 +5143,7 @@ and stampElemUnits env (resUnits: UnitSig option) (t: TypedExpr) : TypedExpr =
 /// scalar-position intrinsic inference (the ExprApp intrinsic arms) and
 /// the kernel-body walk below: negation, abs/floor/ceil and the complex
 /// component projections preserve the signature; sqrt halves the
-/// exponents when they are all even (sqrt(meters^2) = meters â€” an odd
+/// exponents when they are all even (sqrt(meters^2) = meters — an odd
 /// exponent has no integer-signature representation, so the claim is
 /// dropped); everything else (transcendentals, logical not, phase angle)
 /// is dimensionless-out.
@@ -5166,13 +5166,13 @@ and unitRulesForUnaryOp (op: UnaryOp) (u: UnitSig option) : UnitSig option =
 /// parameter unification has bound the parameter types. The body was
 /// type-inferred while its params were still unresolved inference
 /// variables, so the cached node types carry no unit information (or a
-/// leaked left-operand annotation) â€” this walk recomputes the signature
+/// leaked left-operand annotation) — this walk recomputes the signature
 /// bottom-up with the same per-op table the scalar path uses
 /// (unitRulesForOp), so `t * t` over meters elements comes out meters^2
 /// and a mismatched `a + b` over a hand-written zip REJECTS. `bound`
 /// carries walk-computed signatures for kernel-local lets (their cached
 /// var types are as stale as the intermediate nodes). Constructs the walk
-/// doesn't model return None (no claim) â€” only op rules error.
+/// doesn't model return None (no claim) — only op rules error.
 and kernelBodyUnits (env: TypeEnv) (bound: Map<IRId, UnitSig option>) (e: TypedExpr) : TypeResult<UnitSig option> =
     let combineBranches context (a: UnitSig option) (b: UnitSig option) =
         match a, b with
@@ -5249,7 +5249,7 @@ and inferArithType (builder: IRBuilder) mode op leftTy rightTy : TypeResult<IRTy
     //     builds through `mkArrayArrow ... None`) and the same answer the nested-
     //     array flattener gives when it absorbs an inner array's identity.
     //
-    //   - IsVirtual. A virtual array (range/reverse) has NO storage â€” its
+    //   - IsVirtual. A virtual array (range/reverse) has NO storage — its
     //     elements are computed from the index. An outer product is materialized:
     //     codegen's `genObjectForApplication` allocates an `Array<T,2>` and fills
     //     it from the kernel. So the result is stored even when the left operand
@@ -5263,7 +5263,7 @@ and inferArithType (builder: IRBuilder) mode op leftTy rightTy : TypeResult<IRTy
     //     compare equal by id (the `d.Id = m.Id` shortcut in IR's compound/mask
     //     prefix check is one consumer; the provider-write dim-name lookup in
     //     Lowering is another). `deduceOutputType` refreshes ids on every record
-    //     it emits â€” verbatim copies included â€” for exactly this reason, and this
+    //     it emits — verbatim copies included — for exactly this reason, and this
     //     is the same synthesis step, so it follows the same rule.
     //
     // Like `deduceOutputType`, the refresh does NOT remap intra-record
@@ -5288,7 +5288,7 @@ and inferArithType (builder: IRBuilder) mode op leftTy rightTy : TypeResult<IRTy
     // kernel (lowerTypedBinOp maps these ops and sets kernelRetType = ETBool),
     // so only the RESULT TYPE needs to become the array here.
     //
-    // Outer mode is the CROSS product of the two operands' index spaces â€”
+    // Outer mode is the CROSS product of the two operands' index spaces —
     // `A [<] B` with |A| = 5, |B| = 3 is a 5x3 Bool array, exactly the shape
     // codegen's deduceOutputType builds (`{A.extents[0], B.extents[0]}`), and
     // the same concatenation rule the ARITHMETIC Outer branch below already
@@ -5296,7 +5296,7 @@ and inferArithType (builder: IRBuilder) mode op leftTy rightTy : TypeResult<IRTy
     // which was a silent miscompile rather than a missing feature: the loop
     // nest and the Array<bool,2> allocation were emitted correctly, but the
     // binding's IR type said "scalar Bool", so genPrintStatements took the
-    // scalar `cout << x` path â€” and Array's implicit `operator
+    // scalar `cout << x` path — and Array's implicit `operator
     // promote<T,N>::type()` (cpp/nested_array_types.hpp) silently converted the
     // wrapper to a pointer, printing an ADDRESS. Nothing downstream ever saw
     // the real values, so the corpus tests passed while emitting garbage.
@@ -5307,7 +5307,7 @@ and inferArithType (builder: IRBuilder) mode op leftTy rightTy : TypeResult<IRTy
     // A FUNCTION, not a value: the Outer-over-two-arrays arm mints fresh index
     // ids, and an eagerly-bound `let` would burn a pair of them on every
     // ARITHMETIC binop too (which never reads this), needlessly shifting every
-    // later id â€” and thus every generated C++ name derived from one.
+    // later id — and thus every generated C++ name derived from one.
     let boolResultTy () =
         match mode, IR.stripUnits leftTy, IR.stripUnits rightTy with
         | Elementwise, ArrayElem arrL, ArrayElem _ ->
@@ -5338,9 +5338,9 @@ and inferArithType (builder: IRBuilder) mode op leftTy rightTy : TypeResult<IRTy
         let rUnits = IR.getUnits rightTy
         // A WILDCARD-tagged operand is arithmetic-transparent. The ban below
         // exists because an index type is a nominal label for a particular
-        // space, and the escape hatch it points at â€” "value-level position
+        // space, and the escape hatch it points at — "value-level position
         // arithmetic is reachable via virtual array iteration, which produces
-        // plain ints" â€” is exactly what a `Base<_>` parameter is consuming.
+        // plain ints" — is exactly what a `Base<_>` parameter is consuming.
         // Declining to name the space is declining the label, so there is no
         // space to mis-mix and nothing to preserve: strip the wildcard here
         // and the operand promotes, unit-checks and shapes like its bare
@@ -5348,7 +5348,7 @@ and inferArithType (builder: IRBuilder) mode op leftTy rightTy : TypeResult<IRTy
         //
         // Concrete tags are untouched: `Nat<Lat> * 2.0` still errors. Note
         // this also makes the annotated form agree with the UNANNOTATED one,
-        // which has always allowed the arithmetic by accident of ordering â€”
+        // which has always allowed the arithmetic by accident of ordering —
         // an unannotated kernel param is still an inference variable when its
         // body is typed, and only unifies with Nat<Lat> afterwards.
         let stripAnyTag t =
@@ -5359,7 +5359,7 @@ and inferArithType (builder: IRBuilder) mode op leftTy rightTy : TypeResult<IRTy
         let rBare = IR.stripUnits rightTy |> stripAnyTag
         // No arithmetic on index types (named OR anonymous). Per the
         // formalism's nominal-type discipline, index types are nominal
-        // labels â€” arithmetic on them serves no useful purpose:
+        // labels — arithmetic on them serves no useful purpose:
         // (1) value-level position arithmetic is reachable via virtual
         // array iteration, which produces plain ints; (2) type-level
         // construction of new index types from arithmetic is a separate
@@ -5367,7 +5367,7 @@ and inferArithType (builder: IRBuilder) mode op leftTy rightTy : TypeResult<IRTy
         // index references (named or anonymous, value or element position)
         // are represented uniformly as IRTIdxTagged.
         // Floats: by the same principle, index types are completely
-        // incompatible with floating point â€” no `Idx + Float` either.
+        // incompatible with floating point — no `Idx + Float` either.
         let isIndexType t =
             match t with
             | IRTIdxTagged _ -> true
@@ -5391,12 +5391,12 @@ and inferArithType (builder: IRBuilder) mode op leftTy rightTy : TypeResult<IRTy
         | Some err -> Error err
         | None ->
         // Dist operands: checker-level operator dispatch (per-order cumulant
-        // combination â€” + adds, âˆ’ flips odd orders, scalar * is c^k
+        // combination — + adds, − flips odd orders, scalar * is c^k
         // multilinearity, all independence-gated) is the typed-Dist arc's
         // phase 4. Until it lands, module-level dist operators still go
         // through the elaboration rewrites (which never reach here); any
-        // OTHER position â€” notably operators on Dist-typed function
-        // parameters â€” must error with steering rather than fall through
+        // OTHER position — notably operators on Dist-typed function
+        // parameters — must error with steering rather than fall through
         // to scalar promotion and silently type nonsense.
         match lBare, rBare with
         | IRTDist _, _ | _, IRTDist _ ->
@@ -5411,7 +5411,7 @@ and inferArithType (builder: IRBuilder) mode op leftTy rightTy : TypeResult<IRTy
         let promoteElem (elemTy: IRType) (scalarTy: IRType) =
             match IR.stripUnits elemTy, IR.stripUnits scalarTy with
             // Complex mixed with real (or mixed-width complex) widens to the
-            // appropriate complex type â€” otherwise the element type would fall
+            // appropriate complex type — otherwise the element type would fall
             // back to the real side and the array would be typed real.
             | IRTScalar le, IRTScalar re
                 when (match IR.promoteElemType le re with Some (ETComplex64 | ETComplex128) -> true | _ -> false) ->
@@ -5429,7 +5429,7 @@ and inferArithType (builder: IRBuilder) mode op leftTy rightTy : TypeResult<IRTy
                     // Element type stays the LEFT operand's (the historical
                     // arithmetic-Outer convention, matched by lowering's
                     // kernelRetType = IRTScalar elemTypeL); everything else about
-                    // the result is synthesized fresh â€” see mkOuterResult.
+                    // the result is synthesized fresh — see mkOuterResult.
                     mkOuterResult arrL arrR arrL.ElemType
                 | _ -> lBare
             | Elementwise ->
@@ -5478,19 +5478,19 @@ and resolveTypedExpr (env: TypeEnv) (texpr: TypedExpr) : TypedExpr =
 /// Eta-expand a bare named-function reference used in KERNEL position:
 ///   lkm  ==>  lambda(__k0..__kn) -> lkm(__k0..__kn)
 /// A top-level `function` is bound with TypedValue = None (bindVarSimple),
-/// so resolveTypedExpr can never surface it as a TExprLambda â€” hence
+/// so resolveTypedExpr can never surface it as a TExprLambda — hence
 /// `method_for(...) <@> lkm` and `object_for(lkm)` never match a kernel arm.
 /// This mirrors the prefix partial-application eta-expansion (the FuncElem
 /// arm of the ExprApp case) but for the 0-args case that path deliberately
 /// excludes, so the synthesized lambda rides the entire existing lambda
 /// pipeline (captures, lifting, std::function emission, kernel wrappers).
-/// Returns None when `kernelExpr` is not a bare function reference â€” callers
+/// Returns None when `kernelExpr` is not a bare function reference — callers
 /// then fall back to their ordinary `inferExpr env kernelExpr`. Gated to
 /// kernel positions only, so bare function VALUES elsewhere are unaffected.
 and etaExpandFunctionKernel (env: TypeEnv) (kernelExpr: Expr) : TypeResult<TypedExpr> option =
     match kernelExpr.Kind with
     // A unary intrinsic in kernel position: `abs <@> u`, `object_for(sqrt)`.
-    // The intrinsics are call-shaped SYNTAX rather than values â€” nothing binds
+    // The intrinsics are call-shaped SYNTAX rather than values — nothing binds
     // the name, so the lookupVar arm below cannot see one and the fall-through
     // reports it as an unbound variable. Wrapping it as lambda(__k) -> abs(__k)
     // puts the body back on the plain-call arms, so their typing, unit rules,
@@ -5542,7 +5542,7 @@ and etaExpandFunctionKernel (env: TypeEnv) (kernelExpr: Expr) : TypeResult<Typed
                             //   - parallel strategies carry over, but an `omp(a: n)`
                             //     var is resolved by NAME downstream
                             //     (Lowering.extractParallelism), and `names` above
-                            //     renamed every param to `__k<uid>_<i>` â€” so remap
+                            //     renamed every param to `__k<uid>_<i>` — so remap
                             //     each var through the callee's param list by
                             //     position. Without this the whole clause is lost
                             //     and the loop nest is emitted serial, silently.
@@ -5580,7 +5580,7 @@ and etaExpandFunctionKernel (env: TypeEnv) (kernelExpr: Expr) : TypeResult<Typed
 /// empty string is the natural zero for std::string), an int-valued EnumIdx
 /// uses LitInt 0L. ETString itself uses LitString "". Other types follow the
 /// obvious pattern. This is consulted by every site that synthesizes a "zero
-/// kernel" for a method_for / object_for with `<@> zero` â€” the runtime value
+/// kernel" for a method_for / object_for with `<@> zero` — the runtime value
 /// is rarely meaningful semantically (no obvious string identity for fold),
 /// but the literal kind must match the element type or codegen produces
 /// invalid C++.
@@ -5633,7 +5633,7 @@ and inferApply (env: TypeEnv) (tLeft: TypedExpr) (tRight: TypedExpr) : TypeResul
         // Infer element type from first array, default to Float64.
         // Phase B2: at.ElemType is IRType. We extract the primitive scalar
         // for the literal-choice match below; non-primitive elem types
-        // (struct/named) fall through to Float64 â€” S3 tag: relic, this
+        // (struct/named) fall through to Float64 — S3 tag: relic, this
         // path semantically requires a primitive-typed array anyway since
         // `zero` produces literal 0/false values.
         let elemTypeIR =
@@ -5667,7 +5667,7 @@ and inferApply (env: TypeEnv) (tLeft: TypedExpr) (tRight: TypedExpr) : TypeResul
         let tZeroKernel = mkTyped (TExprLambda lambdaInfo) (IRTScalar elemType)
         buildApplyInfo env mfInfo.Arrays mfInfo.Identities mfInfo.ArrayTypes mfInfo.SDimsPerArray mfInfo.SharedIndexTypes lambdaInfo tLeft tZeroKernel false false
 
-    // object_for(<combinator>) <@> (c1, c2, ...) â†’ left-fold or map+combine
+    // object_for(<combinator>) <@> (c1, c2, ...) → left-fold or map+combine
     | TExprObjectFor objInfo, _ when
         (match objInfo.Kernel.Kind with TExprSection _ -> true | _ -> false) ->
         let op = match objInfo.Kernel.Kind with TExprSection op -> op | _ -> OpAdd
@@ -5708,15 +5708,15 @@ and inferApply (env: TypeEnv) (tLeft: TypedExpr) (tRight: TypedExpr) : TypeResul
                 let result : TypedExpr = funcs |> List.rev |> List.fold applyFmap comp
                 Ok result
             | OpChoice ->
-                // object_for(<|>) <@> (c1, c2, ...) â†’ left-fold producing TExprChoice
+                // object_for(<|>) <@> (c1, c2, ...) → left-fold producing TExprChoice
                 let folder (acc: TypedExpr) (elem: TypedExpr) : TypedExpr =
                     mkTyped (TExprChoice (acc, elem)) acc.Type
                 Ok (elems |> List.tail |> List.fold folder (List.head elems))
             | OpFallback ->
-                // object_for(<|:>) <@> (A1, A2, ...) â†’ left-fold of allocated-
+                // object_for(<|:>) <@> (A1, A2, ...) → left-fold of allocated-
                 // fallback. Each intermediate is a fully-allocated dense array,
                 // so only the FIRST operand's allocation (compound mask /
-                // pointer chain) can defer to later ones â€” later dense results
+                // pointer chain) can defer to later ones — later dense results
                 // never fall through. That is the correct left-fold semantics.
                 let folder (acc: TypedExpr) (elem: TypedExpr) : TypedExpr =
                     mkTyped (TExprFallback (acc, elem)) elem.Type
@@ -5747,7 +5747,7 @@ and inferApply (env: TypeEnv) (tLeft: TypedExpr) (tRight: TypedExpr) : TypeResul
         // Resolve variables to detect indirect zip (let Z = zip(A,B); ... <@> Z)
         let resolvedExprs = rawExprs |> List.map (resolveTypedExpr env)
 
-        // Check if ANY argument is a zip â€” flatten zip children into co-iteration groups
+        // Check if ANY argument is a zip — flatten zip children into co-iteration groups
         let hasZip = resolvedExprs |> List.exists (fun e ->
             match e.Kind with TExprZip _ -> true | _ -> false)
 
@@ -5797,7 +5797,7 @@ and inferApply (env: TypeEnv) (tLeft: TypedExpr) (tRight: TypedExpr) : TypeResul
         // Real per-array S-dim counts in BOTH modes: the co-iteration case needs
         // them so buildApplyInfo's IRTInfer fallback computes the kernel slice
         // rank against the true array rank (a scalar kernel over rank-2 zips
-        // must yield kR = 0 â†’ full-product co-iteration, not a mis-trim).
+        // must yield kR = 0 → full-product co-iteration, not a mis-trim).
         let sDimsPerArray = computeSDimsPerArray arrayTypes
 
         // Resolve kernel and build ApplyInfo with object_for as provenance
@@ -5901,8 +5901,8 @@ and inferApply (env: TypeEnv) (tLeft: TypedExpr) (tRight: TypedExpr) : TypeResul
                         // Stage-3 LATE TIER confirm-and-pin for PACK kernels:
                         // no declared comm, the pack deduces invariant at
                         // every arity (AC-fold template / wrapper walk), and
-                        // the SAME array fills every expanded position â€”
-                        // H âˆ© Stab would license compaction. Dense until the
+                        // the SAME array fills every expanded position —
+                        // H ∩ Stab would license compaction. Dense until the
                         // user pins `where comm(pack)` on the kernel.
                         (match env.FuncCommGroups.TryGetValue fnName with
                          | true, cg when not (List.isEmpty cg) -> ()
@@ -5918,7 +5918,7 @@ and inferApply (env: TypeEnv) (tLeft: TypedExpr) (tRight: TypedExpr) : TypeResul
                                          sprintf
                                              "kernel `%s` deduces commutative over its argument pack `%s` (at every arity) and all %d positions receive the same array: output storage is DENSE today. Pin `where comm(%s)` on `%s` to opt into compact symmetric (triangular) storage."
                                              fnName packName n packName fnName
-                                     // BL4010 â€” the confirm-and-pin storage
+                                     // BL4010 — the confirm-and-pin storage
                                      // suggestion, same code and now the same
                                      // span the IDE channel carries.
                                      emitWarning env "BL4010" span msg
@@ -5962,11 +5962,11 @@ and inferApply (env: TypeEnv) (tLeft: TypedExpr) (tRight: TypedExpr) : TypeResul
     | _ ->
         // Name the real culprit. When the LEFT already is a valid
         // method_for/object_for, the unmatched operand is the RIGHT (the
-        // kernel) â€” reporting the left here is what produced the historical
-        // "requires method_for â€¦ but got TExprMethodFor" red herring. With
+        // kernel) — reporting the left here is what produced the historical
+        // "requires method_for … but got TExprMethodFor" red herring. With
         // implicit formers (inferBinOp's OpApply normalization), reaching
         // this catch-all with a former-less left means NEITHER side was
-        // decisive â€” steer instead of demanding a former blind.
+        // decisive — steer instead of demanding a former blind.
         let describeKind (k: TypedExprKind) =
             match k with
             | TExprVar (name, _, _) -> sprintf "variable '%s'" name
@@ -5988,7 +5988,7 @@ and buildApplyInfo (env: TypeEnv)
 
     let commGroups = lambdaInfo.CommGroups
     // Declared `where anticomm(...)` positions. Same axis grouping and the
-    // same iteration license as comm (the exchange is licensed either way â€”
+    // same iteration license as comm (the exchange is licensed either way —
     // only the SIGN and the diagonal differ), so `iterGroups` is what every
     // grouping consumer sees. `antisymStorageGroups` is the narrower list that
     // decides the licensed simplex is the STRICT one (AntisymIdx, no
@@ -6003,7 +6003,7 @@ and buildApplyInfo (env: TypeEnv)
     // parity; an eta-expanded named-function wrapper (body = f(p0..pn-1) in
     // order) defers to the function's recorded summary. Under reynolds a
     // `comm` clause is an ITERATION LICENSE over the signed permutation sum,
-    // not a claim about the bare kernel â€” validation and suggestions both
+    // not a claim about the bare kernel — validation and suggestions both
     // stand down (isReynolds).
     let (stage3Names, stage3Pairs) =
         if isReynolds || lambdaInfo.Params.Length < 2 then ([], [])
@@ -6024,7 +6024,7 @@ and buildApplyInfo (env: TypeEnv)
                          // (`lambda(x, y) -> comoment(x, y)`): invariance at
                          // every arity specializes to full pairwise symmetry
                          // at this one. Suggestion names the LAMBDA's own
-                         // params â€” that is where this spelling pins.
+                         // params — that is where this spelling pins.
                          (match env.PackDeducedComm.TryGetValue fname with
                           | true, (_, Blade.Deduce.PInv) ->
                               Some (lambdaInfo.Params |> List.map (fun p -> p.Name),
@@ -6047,7 +6047,7 @@ and buildApplyInfo (env: TypeEnv)
     // parities, so the editor can distinguish "you declared this" from "the
     // checker proved it". Deliberately BROADER than the confirm-and-pin
     // suggestion below, which additionally requires the same array in both
-    // positions â€” that extra condition is about the STORAGE decision, while
+    // positions — that extra condition is about the STORAGE decision, while
     // provenance is worth surfacing whether or not compaction is on the table.
     // Synthesized `__`-prefixed wrapper params are filtered for the same reason
     // the suggestion filters them: they are not names a user can see.
@@ -6065,7 +6065,7 @@ and buildApplyInfo (env: TypeEnv)
                     (if tKernel.Span = noSpan then tLoop.Span else tKernel.Span))
 
     // IDE: record this kernel's deduction snapshot, span-keyed (`ide check
-    // --json` kernels[]). Unconditional â€” declared and reynolds kernels
+    // --json` kernels[]). Unconditional — declared and reynolds kernels
     // record too (parities are empty under reynolds by construction). Skip
     // synthesized eta-wrappers over named functions (`__k...`/`__of...`
     // params): the named function's own binding entry covers those with
@@ -6092,8 +6092,8 @@ and buildApplyInfo (env: TypeEnv)
                 (p.Name, rank)) })
     // Declared comm + provably antisymmetric body = the silent-corruption
     // case: triangular storage would drop the sign flips. Hard error;
-    // PBottom stays trusted (status quo escape hatch). The mirror case â€”
-    // declared anticomm + provably COMMUTATIVE body â€” is the same error with
+    // PBottom stays trusted (status quo escape hatch). The mirror case —
+    // declared anticomm + provably COMMUTATIVE body — is the same error with
     // the signs exchanged: strict-simplex storage would drop the diagonal and
     // return the negation for half the reads. (Both stand down under
     // reynolds, where stage3Pairs is empty by construction.)
@@ -6120,8 +6120,8 @@ and buildApplyInfo (env: TypeEnv)
     | None ->
     // Confirm-and-pin suggestion: kernel provably commutative (or provably
     // ANTI-commutative) in an adjacent pair, nothing declared for that pair,
-    // and the SAME array occupies both positions (H âˆ© Stab would license
-    // compaction). Output stays DENSE until the user pins â€” the suggestion is
+    // and the SAME array occupies both positions (H ∩ Stab would license
+    // compaction). Output stays DENSE until the user pins — the suggestion is
     // the compiler proposing, never deciding. PInv proposes the inclusive
     // triangle (`comm`), PNeg the strict one (`anticomm`, zero diagonal).
     if List.isEmpty iterGroups && not (List.isEmpty stage3Pairs) then
@@ -6131,7 +6131,7 @@ and buildApplyInfo (env: TypeEnv)
                && i + 1 < identities.Length
                && identities.[i] = identities.[i + 1]
                // Synthesized wrapper params (`__of13_0`, `__k13_0`) are not
-               // names a user can write in a pin â€” suppress; the pack-level
+               // names a user can write in a pin — suppress; the pack-level
                // suggestion at the deferred-former seam names the REAL pack
                // param for exactly these kernels (and under --strict-pins an
                // unactionable suggestion would be an unfixable build break).
@@ -6155,8 +6155,8 @@ and buildApplyInfo (env: TypeEnv)
                 emitWarning env "BL4010" span msg
                 PinSuggestions.add msg span)
 
-    // Dropped-parallel-clause guard. This is the apply seam â€” the ONE place a
-    // loop and a kernel meet â€” so it is where "the kernel declared `omp(...)`"
+    // Dropped-parallel-clause guard. This is the apply seam — the ONE place a
+    // loop and a kernel meet — so it is where "the kernel declared `omp(...)`"
     // and "the lambda reaching the loop carries it" can be compared at all.
     //
     // A named function used in kernel position is eta-expanded into a wrapper
@@ -6166,7 +6166,7 @@ and buildApplyInfo (env: TypeEnv)
     // vanishes with no other trace: `Parallel = []` becomes IsOmpParallel =
     // false, the nest is emitted serial, and the generated C++ is identical to
     // a program that never asked. That was a real, long-lived silent bug. This
-    // is its regression guard â€” it should never fire, and firing means some
+    // is its regression guard — it should never fire, and firing means some
     // apply path grew a wrapper that forgets the clause again.
     (if List.isEmpty lambdaInfo.Parallel then
         match lambdaInfo.Body.Kind with
@@ -6178,18 +6178,18 @@ and buildApplyInfo (env: TypeEnv)
                             | _ -> false) args lambdaInfo.Params ->
             (match env.FuncParallel.TryGetValue fname with
              | true, (_, strategies) when not (List.isEmpty strategies) ->
-                 // BL9001 â€” it says "this is a compiler bug" in so many words,
+                 // BL9001 — it says "this is a compiler bug" in so many words,
                  // so it renders under the internal-compiler-error code.
                  emitWarning env "BL9001"
                      (if tKernel.Span = noSpan then tLoop.Span else tKernel.Span)
-                     (sprintf "internal: `where` parallel clause on '%s' was dropped by kernel-position eta-expansion â€” the loop nest will be emitted serial. This is a compiler bug, not a source error; please report it."
+                     (sprintf "internal: `where` parallel clause on '%s' was dropped by kernel-position eta-expansion — the loop nest will be emitted serial. This is a compiler bug, not a source error; please report it."
                               fname)
              | _ -> ())
         | _ -> ())
 
     // Co-iteration INDEX-PARAM form: a co-iterated kernel may declare
-    // N + R parameters â€” one value per co-iterated array plus the R shared
-    // iteration indices â€” e.g. `for (uq, ph) in range<Y, X> <@>
+    // N + R parameters — one value per co-iterated array plus the R shared
+    // iteration indices — e.g. `for (uq, ph) in range<Y, X> <@>
     // lambda(zu, zp, i, j) -> ...`. The indices ride as a TRAILING synthetic
     // range<...> operand over the shared records: expandedRows then expands
     // it to one tagged Nat<...> param per slot (unifying + tag-checking the
@@ -6226,15 +6226,15 @@ and buildApplyInfo (env: TypeEnv)
     // reduce's kernel-arg deduction synthesizes a rank-1 IRTArray binding).
     // If we read p.Type directly here, we'd see the stale IRTInfer and
     // compute kRank = 0, which makes perRowType think the kernel takes a
-    // scalar â€” leading to a shape mismatch when we later unify against
+    // scalar — leading to a shape mismatch when we later unify against
     // the real rank-N source per-row type.
     //
     // Path 1 fix (Stage 3c follow-on): when the param's resolved type is
-    // STILL IRTInfer after body typechecking â€” i.e., the body didn't
+    // STILL IRTInfer after body typechecking — i.e., the body didn't
     // structurally constrain the param's shape (e.g. `lambda(g) -> g(0)`,
     // where g(0) is ambiguous between array indexing and function
-    // application) â€” fall back to the array-side rank: the kernel sees
-    // a slice of rank (array rank âˆ’ iterated S-dimensions). For a
+    // application) — fall back to the array-side rank: the kernel sees
+    // a slice of rank (array rank − iterated S-dimensions). For a
     // typical `method_for(arr)` with one iterated outer dim, kRank
     // becomes (arrTy.rank - 1). This recovers the array shape
     // information that the body alone couldn't supply, and lets the
@@ -6243,16 +6243,16 @@ and buildApplyInfo (env: TypeEnv)
     let resolvedParamTypes =
         lambdaInfo.Params |> List.map (fun p -> env.Subst.Resolve p.Type)
     // Param rank: if the param's resolved type is an array, read its
-    // rank directly. If the param is still IRTInfer â€” meaning the body
+    // rank directly. If the param is still IRTInfer — meaning the body
     // didn't structurally constrain the param's shape (e.g.
     // `lambda(g) -> g(0)`, where the application is ambiguous between
-    // array indexing and function application) â€” fall back to the
+    // array indexing and function application) — fall back to the
     // array-side rank.
     //
-    // The array-side rank isn't naively `(array rank âˆ’ iterated
+    // The array-side rank isn't naively `(array rank − iterated
     // S-dimensions)`. For ragged-inner-dim arrays (group_by results,
     // ragged literals, depidx-inner shapes), `computeSDimsPerArray`
-    // counts every SDimension equally â€” the inner ragged dim included.
+    // counts every SDimension equally — the inner ragged dim included.
     // But codegen's ragged-peel pass treats those inner dims as
     // KERNEL-SIDE (peeled into a per-row binding), not iterated. To
     // match codegen semantics here, we adjust: every index with a
@@ -6268,7 +6268,7 @@ and buildApplyInfo (env: TypeEnv)
     // from an ELEMENTWISE kernel (e.g. `lambda(e) -> e * 2.0`), whose param is a
     // scalar. We cannot rely on the param's resolved scalar type, because mixed
     // int/float arithmetic legitimately leaves an untyped scalar param flexible
-    // (e.g. a range index `i` in `i * 2.0` stays Int64, promoted â€” NOT unifiable
+    // (e.g. a range index `i` in `i * 2.0` stays Int64, promoted — NOT unifiable
     // to Float64). The structural use is the reliable signal.
     let paramUsedAsArray (pname: string) (body: TypedExpr) : bool =
         let isParamVar (e: TypedExpr) =
@@ -6312,13 +6312,13 @@ and buildApplyInfo (env: TypeEnv)
     // `rowsum : Array<_,1> -> _` means `x` is a rank-1 fiber. Plain application
     // does NOT unify arg types against param types (see dispatchAppOrIndex's
     // FuncElem arm), so such a param stays IRTInfer and its rank is invisible on
-    // its own resolved type â€” recover it from the callee's signature here, so
+    // its own resolved type — recover it from the callee's signature here, so
     // the former peels the right number of outer dims (and the perRowType
     // unification below pins the param to the concrete fiber, letting IR-phase
     // HM monomorphization specialize the callee against it).
     let rankOfCalleeParam (pty: IRType) : int option =
         // A `Poly<T^k>` pack's base is an arity-k inference VAR (from `T^k`), not
-        // a concrete array â€” read the rank off its arity constraint. `mean(row: T^1)`
+        // a concrete array — read the rank off its arity constraint. `mean(row: T^1)`
         // is the same: a bare `T^1` param is an arity-1 var, not `Array<..>`.
         let rankOfTy t =
             match env.Subst.Resolve t with
@@ -6384,7 +6384,7 @@ and buildApplyInfo (env: TypeEnv)
                     max 0 (arrTy.IndexTypes.Length - trueIteratedDims)
             | _ -> 0)
 
-    // Infer T-dimensions from the kernel's resolved return type (Â§9.2).
+    // Infer T-dimensions from the kernel's resolved return type (§9.2).
     // If the kernel returns an array, its index types become T-dimensions
     // in the output. If it returns a scalar, there are no T-dimensions.
     let (kernelTDims, kernelOutputRank) =
@@ -6395,11 +6395,11 @@ and buildApplyInfo (env: TypeEnv)
             (tDims, tDims.Length)
         | _ -> ([], 0)
 
-    // Mark each array's consumed fiber dimensions as T-dimensions (Â§9.2). The
+    // Mark each array's consumed fiber dimensions as T-dimensions (§9.2). The
     // kernel consumes its innermost irank(f,i) = kernelInputRanks.[i] dims as a
     // fiber argument (e.g. a TimeIdx fiber reduced inside the kernel). Those
     // dims are NOT part of the symmetric iteration grid: re-tagging them
-    // Kind = TDimension makes every downstream consumer consistent at once â€”
+    // Kind = TDimension makes every downstream consumer consistent at once —
     // computeSDimsPerArray (counts only SDimension) yields the grid count,
     // buildLoopLevelStructure (builds levels only for SDimension) emits grid-
     // depth loops and leaves the fiber as the kernel's array slice, and
@@ -6417,9 +6417,9 @@ and buildApplyInfo (env: TypeEnv)
                         if j >= n - irank then { idx with Kind = TDimension } else idx)
                 { at with IndexTypes = retagged })
 
-    // Grouping/iteration reads `iterGroups` (comm âˆª anticomm): a declared
+    // Grouping/iteration reads `iterGroups` (comm ∪ anticomm): a declared
     // antisymmetric pair fuses its axes and iterates the simplex exactly like
-    // a comm pair â€” only the strictness (IR's StrictOffset) and the stored
+    // a comm pair — only the strictness (IR's StrictOffset) and the stored
     // symmetry class differ, and both of those are decided downstream.
     let states = computeAllSymcomStates identities gridArrayTypes iterGroups (computeSDimsPerArray gridArrayTypes)
     let triLevels = computeTriangularLevels gridArrayTypes identities iterGroups (computeSDimsPerArray gridArrayTypes)
@@ -6492,7 +6492,7 @@ and buildApplyInfo (env: TypeEnv)
         //
         // (1) Complex accessor on a ROW param: `real(z)`/`imag(z)`/`arg(z)`
         //     whose operand unified to an ARRAY (e.g. a zip row). Such an
-        //     accessor was DEFERRED at body-inference time â€” the operand was
+        //     accessor was DEFERRED at body-inference time — the operand was
         //     still an unresolved infer var, so it typed as a scalar Float64
         //     without constraining the operand (see the IRTInfer arm of the
         //     accessor intrinsics). Lowering then synthesized an array<->scalar
@@ -6503,7 +6503,7 @@ and buildApplyInfo (env: TypeEnv)
         // (2) Array-valued ELEMENTWISE kernel body: `ra * rb` between two row
         //     params re-synthesizes (inferBinOp both-array arm) into a nested
         //     compute(method_for(zip ...)) with output rank >= 1. In expression
-        //     position codegen collapses it to (sum ra)(sum rb) â€” a silent
+        //     position codegen collapses it to (sum ra)(sum rb) — a silent
         //     miscompile. A bare array-param passthrough (`lambda(row) -> row`,
         //     Kind = TExprVar) is fine and untouched. Reject and steer to a
         //     scalar row reduction (prodsum/reduce).
@@ -6554,7 +6554,7 @@ and buildApplyInfo (env: TypeEnv)
         // yet unified with Complex128. Now that the params ARE unified, redo
         // the promotion bottom-up with resolved operand types. Conservative
         // by construction: a node is re-stamped ONLY when the recomputed
-        // element type is complex and the stamped one is a real scalar â€”
+        // element type is complex and the stamped one is a real scalar —
         // every non-complex kernel re-stamps to itself unchanged.
         let restampedBody =
             let elemOfType (ty: IRType) : ElemType option =
@@ -6662,7 +6662,7 @@ and buildApplyInfo (env: TypeEnv)
         // parameter of rank > 0 (e.g. reduce over a ragged row). A purely
         // elementwise kernel (all scalar params) consumes nothing, so the
         // consumed-dim filter in deduceOutputType must NOT drop ragged/dep
-        // inner dims â€” they propagate through the elementwise map.
+        // inner dims — they propagate through the elementwise map.
         let kernelConsumesInner = kernelInputRanks |> List.exists (fun r -> r > 0)
         let outputType = deduceOutputType gridArrayTypes identities iterGroups antisymStorageGroups (computeSDimsPerArray gridArrayTypes) kernelTDims outputElemType isReynolds isReynoldsAntisym kernelConsumesInner env.Builder
 
@@ -6674,7 +6674,7 @@ and buildApplyInfo (env: TypeEnv)
 
         // After unification, the substitution holds the refined param
         // types but `lambdaInfo.Params[i].Type` still holds the original
-        // (often IRTInfer) values â€” F# records are immutable. Downstream
+        // (often IRTInfer) values — F# records are immutable. Downstream
         // zonking should resolve those through the substitution, but a
         // diagnostic from the Stage 3c filter-removal work showed lifted
         // lambdas getting `(double)` parameters where the substitution
@@ -6707,15 +6707,15 @@ and buildApplyInfo (env: TypeEnv)
             if isReynolds then mkTyped (TExprReynolds (lambdaExpr, isReynoldsAntisym)) tKernel.Type
             else lambdaExpr
 
-        // Co-iterated records = the leading (nRecords âˆ’ kernelSliceRank) shared
+        // Co-iterated records = the leading (nRecords − kernelSliceRank) shared
         // records; the kernel consumes the trailing kernelSliceRank records as a
         // per-iteration slice. This one trim serves all three shapes uniformly:
-        //   - scalar kernel (A op B, for (A,B) in range<I,J>): kR = 0 â†’ the FULL
+        //   - scalar kernel (A op B, for (A,B) in range<I,J>): kR = 0 → the FULL
         //     product of records is co-iterated (multi-axis, the new case);
         //   - row-mode kernel (loops/085: lambda(ra: Array<X>, rb: Array<X>)):
-        //     kR = 1 â†’ only the outer record(s) co-iterate, the inner record
+        //     kR = 1 → only the outer record(s) co-iterate, the inner record
         //     rides into the kernel as a rank-1 slice (historical behavior);
-        //   - single packed record (SymIdx co-iteration): kR = 0 â†’ that record,
+        //   - single packed record (SymIdx co-iteration): kR = 0 → that record,
         //     walked as its Rank flat canonical levels (historical behavior).
         // Operand shape agreement is enforced where the records are collected
         // (zip arms / for-in), so kernelInputRanks.[0] is representative.
@@ -6757,14 +6757,14 @@ and buildApplyInfo (env: TypeEnv)
 
 /// Pre-scan type annotations to collect type variable NAMES before lowering.
 /// Two sources of type-variable names:
-///   1. Explicit `T^N` syntax (TyVar nodes from the parser) â€” always
+///   1. Explicit `T^N` syntax (TyVar nodes from the parser) — always
 ///      a type variable, registered unconditionally.
-///   2. Implicit bare `T` in type position (TyNamed without args) â€” treated
+///   2. Implicit bare `T` in type position (TyNamed without args) — treated
 ///      as a type variable IF the name isn't a registered type or builtin
 ///      scalar. This implements F#/OCaml-style implicit polymorphism:
 ///      `function f(x: T) -> T = x` introduces `T` as a fresh type var
 ///      without requiring `T^0` annotation, and the bare form composes
-///      with explicit `T^N` (so `Poly<T^0>, T` works â€” both refer to
+///      with explicit `T^N` (so `Poly<T^0>, T` works — both refer to
 ///      the same `T`).
 ///
 /// The recursion walks all TypeExpr variants so type-var names are
@@ -6793,12 +6793,12 @@ and prescanTypeVarNames (env: TypeEnv) (types: TypeExpr option list) : unit =
             // env, so types declared earlier in the same module are
             // correctly recognized as concrete (and not registered as vars).
             // Forward references to types declared later remain unsupported
-            // in Blade â€” same convention as F#/OCaml.
+            // in Blade — same convention as F#/OCaml.
             if args.IsEmpty
                && not (isBuiltinScalar name)
                && (lookupTypeDef name env).IsNone then
                 env.Subst.RegisterTypeVarName(name)
-            // Recurse into args regardless â€” `Array<T like Idx<n>>` has
+            // Recurse into args regardless — `Array<T like Idx<n>>` has
             // `T` in a nested position.
             args |> List.iter scan
         | TyAbstractArray (elemTy, _, _) -> scan elemTy
@@ -6880,7 +6880,7 @@ and inferLambda env parms whereClause body : TypeResult<TypedExpr> =
 /// Back-fills the source span onto the checked node, exactly as inferExpr
 /// does for the synthesis direction: the bidirectional fast paths below build
 /// their nodes with `mkTyped` (noSpan), which would leave literals, tuples,
-/// array literals, fill_random and `complex(re, im): Complex64` spanless â€” and
+/// array literals, fill_random and `complex(re, im): Complex64` spanless — and
 /// so invisible to span-based editor tooling (Ide.fs calls[]).
 and checkExpr (env: TypeEnv) (expected: IRType) (expr: Expr) : TypeResult<TypedExpr> =
     match checkExprInner env expected expr with
@@ -6890,7 +6890,7 @@ and checkExpr (env: TypeEnv) (expected: IRType) (expr: Expr) : TypeResult<TypedE
 
 and checkExprInner (env: TypeEnv) (expected: IRType) (expr: Expr) : TypeResult<TypedExpr> =
     // Stamp the ambient expression span (mirrors inferExpr) so errors raised
-    // here â€” and in recursive checkExpr calls on sub-expressions â€” anchor to
+    // here — and in recursive checkExpr calls on sub-expressions — anchor to
     // the innermost offending node (e.g. the specific array-literal row whose
     // length is wrong) instead of the enclosing declaration's whole span.
     if expr.Span.StartLine > 0 then setCurrentExprSpan expr.Span
@@ -6898,7 +6898,7 @@ and checkExprInner (env: TypeEnv) (expected: IRType) (expr: Expr) : TypeResult<T
     match expr.Kind, resolved with
 
     // Numeric/scalar literals retype to the expected scalar (numbers stay numbers,
-    // bools stay bools â€” no implicit 0<->false). The literal carries its source-
+    // bools stay bools — no implicit 0<->false). The literal carries its source-
     // level value but its IRType matches the annotation.
     | ExprKind.ExprLit (LitInt _ as lit), IRTScalar et ->
         match et with
@@ -6907,14 +6907,14 @@ and checkExprInner (env: TypeEnv) (expected: IRType) (expr: Expr) : TypeResult<T
         | _ ->
             // Blade design rule: NO implicit int->float promotion at literal
             // construction (`complex(0, 0)` and `let x: Float64 = 1` are
-            // rejected â€” write `0.0`). Kept strict deliberately; flexing a
+            // rejected — write `0.0`). Kept strict deliberately; flexing a
             // literal into a generic `T`/`T^k` is separate (the IRTInfer arm).
             Error (TypeMismatch (resolved, IRTScalar ETInt64))
     | ExprKind.ExprLit (LitInt _ as lit), IRTIdxTagged (IRTScalar (ETInt32 | ETInt64), _) ->
-        // Â§4.18.3: untyped int literal acquires the index tag from annotation
+        // §4.18.3: untyped int literal acquires the index tag from annotation
         // context. `let i: Idx<3> = 0` works; the 0 becomes Nat<Idx<3>>.
         // Strict in the OTHER direction: a bare `Nat` value cannot flow to
-        // Nat<I> position without explicit cast â€” but a LITERAL has no
+        // Nat<I> position without explicit cast — but a LITERAL has no
         // pre-committed type, so context-driven typing applies here.
         Ok (mkTyped (TExprLit lit) resolved)
     | ExprKind.ExprLit (LitInt _ as lit), (IRTNat _ | IRTUnitAnnotated (IRTNat _, _)) ->
@@ -6928,7 +6928,7 @@ and checkExprInner (env: TypeEnv) (expected: IRType) (expr: Expr) : TypeResult<T
         | _ ->
             Error (TypeMismatch (resolved, IRTScalar ETString))
     | ExprKind.ExprLit (LitString _ as lit), IRTIdxTagged (IRTScalar ETString, _) ->
-        // Â§4.18.3 parallel for string-valued index tags (EnumIdx with
+        // §4.18.3 parallel for string-valued index tags (EnumIdx with
         // string values). Same context-driven coercion as the int case.
         Ok (mkTyped (TExprLit lit) resolved)
     | ExprKind.ExprLit (LitFloat _ as lit), IRTScalar et ->
@@ -6941,7 +6941,7 @@ and checkExprInner (env: TypeEnv) (expected: IRType) (expr: Expr) : TypeResult<T
     // A NEGATED numeric literal is a literal: `-1` retypes to the expected
     // scalar exactly as `1` does. Without this arm the negation falls through
     // to inference, which types the operand at the literal default (Int64) and
-    // then reports a spurious mismatch against, say, an Int32 struct field â€”
+    // then reports a spurious mismatch against, say, an Int32 struct field —
     // so `P { a = -1 }` failed where `P { a = 1 }` succeeded. Deliberately
     // narrow: only a LITERAL operand, so this is literal retyping and not
     // general bidirectional propagation through arithmetic.
@@ -6949,13 +6949,13 @@ and checkExprInner (env: TypeEnv) (expected: IRType) (expr: Expr) : TypeResult<T
         checkExpr env expected litExpr
         |> Result.map (fun tLit -> mkTyped (TExprUnaryOp (OpNeg, tLit)) tLit.Type)
 
-    // A numeric/bool literal checked against an unpinned inference var â€” a
+    // A numeric/bool literal checked against an unpinned inference var — a
     // generic `T` (arity 0) or an arity-polymorphic `T^k` (e.g. the return of
     // comoment_prod's `-> T^1`). Introduce flexibility HERE, bidirectionally:
     // mint a fresh kind-seeded literal var and defer it into the expected var,
     // exactly as `zero` does. The literal stays a scalar VALUE at lowering and a
     // consuming pseudo-native op broadcasts it; a concretely-shaped array target
-    // is instead handled by the scalarâ†’array fill coercion (not this arm).
+    // is instead handled by the scalar→array fill coercion (not this arm).
     | ExprKind.ExprLit (LitInt _ | LitFloat _ | LitBool _ as lit), IRTInfer _ ->
         let flexTy = freshLiteralType env.Subst lit
         unify env.Subst flexTy expected
@@ -7015,11 +7015,11 @@ and checkExprInner (env: TypeEnv) (expected: IRType) (expr: Expr) : TypeResult<T
     // Float32, Complex128 components Float64), so
     // `let z: Complex64 = complex(a, b)` works without a distinct
     // narrow-width constructor. Produces TExprComplexLit (NOT TExprTuple)
-    // â€” the tuple form would lower to IRTuple and lose the scalar nature,
+    // — the tuple form would lower to IRTuple and lose the scalar nature,
     // flattening an N-element Complex array into N x 2 doubles.
     // TExprComplexLit lowers to IRComplex, a scalar IR node rendered as
     // std::complex<double>(re, im). Both components must be float-typed
-    // (no implicit int â†’ float promotion at literal construction time).
+    // (no implicit int → float promotion at literal construction time).
     | ExprKind.ExprApp ({ Kind = ExprKind.ExprVar "complex" }, [reExpr; imExpr]), IRTScalar (ETComplex64 | ETComplex128 as cet) when (lookupVar "complex" env).IsNone ->
         let componentTy =
             match cet with
@@ -7039,7 +7039,7 @@ and checkExprInner (env: TypeEnv) (expected: IRType) (expr: Expr) : TypeResult<T
         Error (Other "complex values are constructed with complex(re, im); the tuple form `(re, im) : Complex128` is no longer supported")
 
     // Match in a checking position: push the expected type into each arm so a
-    // literal/scalar arm can flex to it (bidirectional match â€” see checkMatch).
+    // literal/scalar arm can flex to it (bidirectional match — see checkMatch).
     | ExprKind.ExprMatch (scrutinee, cases), _ ->
         checkMatch env expected scrutinee cases
 
@@ -7100,13 +7100,13 @@ and irTypeHasBadDistOrder (t: IRType) : bool =
     | _ -> false
 
 /// Detect the `Base<_>` tag wildcard (IRefAny). Same consumption-site pattern
-/// as irTypeHasRaggedNoPrior â€” lowerTypeExpr has no error channel, so the
+/// as irTypeHasRaggedNoPrior — lowerTypeExpr has no error channel, so the
 /// positions where a wildcard is ILLEGAL call this and surface the rejection.
 ///
 /// A wildcard is only meaningful where a value FLOWS IN and the callee
 /// declines to constrain its tag: function parameters and lambda parameter
-/// annotations. Everywhere else â€” a function's return type, a let annotation,
-/// a struct field, an array index slot â€” the type must PRODUCE a tag, and a
+/// annotations. Everywhere else — a function's return type, a let annotation,
+/// a struct field, an array index slot — the type must PRODUCE a tag, and a
 /// wildcard there has nothing to produce, so it would silently erase the tag
 /// discipline instead of relaxing it. Rejected as BL4003.
 ///
@@ -7149,7 +7149,7 @@ and irTypeBadIrrepsDetail (t: IRType) : string option =
 /// The pg twin of `irTypeBadIrrepsDetail` (stage 5b-i): the PgIrrepsIdx
 /// bad-spec marker, whose failure detail rides the same IRParam-extent
 /// channel. A separate walker rather than a widened one so the two members'
-/// consumption-site diagnostics stay separate â€” an unknown point group and an
+/// consumption-site diagnostics stay separate — an unknown point group and an
 /// unknown (l, parity) triple want different follow-up sentences.
 and irTypeBadPgIrrepsDetail (t: IRType) : string option =
     let detailOf (ix: IRIndexType) =
@@ -7173,7 +7173,7 @@ and irTypeBadPgIrrepsDetail (t: IRType) : string option =
 /// resolves yields the registered record verbatim (the provider builds its
 /// axes with Tag = None), so a dotted Tag can only be lowerIndexType's
 /// fall-through for a name that was never registered. Without this a typo'd or
-/// renamed dimension would silently become a free dependent extent â€” the
+/// renamed dimension would silently become a free dependent extent — the
 /// annotation would look bound to the store while constraining nothing.
 and irTypeUnknownAxisPath (t: IRType) : string option =
     let pathOf (ix: IRIndexType) =
@@ -7216,9 +7216,9 @@ and unknownAxisPathMessage (path: string) : string =
 // we previously had a bug where one path was updated for bidirectional checking
 // and the other wasn't, silently regressing every top-level annotated let.
 //
-// The two paths still diverge afterward â€” the expression-form recurses into a
+// The two paths still diverge afterward — the expression-form recurses into a
 // body, the top-level builds a TypedBinding record and surfaces destructured
-// sub-vars to Lowering â€” so we don't try to unify them entirely.
+// sub-vars to Lowering — so we don't try to unify them entirely.
 
 /// Resolve the value of a let binding: with annotation, drive the value via
 /// bidirectional checking and store the annotation as the canonical type;
@@ -7227,7 +7227,7 @@ and inferLetBindingValue (env: TypeEnv) (binding: Binding) : TypeResult<TypedExp
     // A let binding is a value-forming boundary. A wildcard `_` is a hole, not a
     // value: it is only meaningful as a compound-index coordinate (consumed by
     // dispatchAppOrIndex before it reaches here). If one survives into the bound
-    // value, it has escaped and is an error â€” reject cleanly at typecheck rather
+    // value, it has escaped and is an error — reject cleanly at typecheck rather
     // than let it reach lowering.
     let rejectEscapedWildcard (tv: TypedExpr) : TypeResult<TypedExpr> =
         if exprContainsWildcard tv then
@@ -7241,7 +7241,7 @@ and inferLetBindingValue (env: TypeEnv) (binding: Binding) : TypeResult<TypedExp
         // Route to the dedicated desugar BEFORE the generic annotated-value
         // machinery: the structured arms become the internal sequential
         // scheme (mut buffer + for-in over the leading axis) and ordinary
-        // inference runs on the result â€” the recursion is the semantics,
+        // inference runs on the result — the recursion is the semantics,
         // the loop is the compilation.
         match binding.Value.Kind with
         | ExprKind.ExprRecArray def ->
@@ -7271,7 +7271,7 @@ and inferLetBindingValue (env: TypeEnv) (binding: Binding) : TypeResult<TypedExp
         else
         // Nested-function desugar (parseNestedFunction): `function f(x) -> T
         // = body` becomes a let of a lambda whose binding annotation is the
-        // declared RETURN type â€” there is no surface TypeExpr spelling for
+        // declared RETURN type — there is no surface TypeExpr spelling for
         // "function of unannotated params". Read it accordingly: infer the
         // lambda, then unify its return type with the annotation (a genuine
         // function-type annotation on a lambda still checks structurally
@@ -7287,13 +7287,13 @@ and inferLetBindingValue (env: TypeEnv) (binding: Binding) : TypeResult<TypedExp
         // `let A: Array<Float64 like Y, X> = zero [|> compute]`: zero is the
         // additive-identity CONCEPT and the annotation supplies its shape.
         // TExprZero's lowering only knows scalar shapes, so an array-typed
-        // zero is rewritten here â€” the one place the annotation is in hand â€”
+        // zero is rewritten here — the one place the annotation is in hand —
         // to the explicit spelling of the same idea,
         //     for () in range<I1, ..., In> <@> lambda(...) -> <elem zero> |> compute
         // and re-driven through ordinary inference, so it rides the whole
         // existing former pipeline (loop nests, OMP, dealloc, interpreter).
         // Each range slot is spelled as the annotation slot's nominal tag
-        // (IxKPlain only â€” Tag holds sentinels for the exotic kinds) or as
+        // (IxKPlain only — Tag holds sentinels for the exotic kinds) or as
         // its literal static extent when untagged (the provider-axis case,
         // where the annotation's own slots are untagged too).
         | ExprKind.ExprZero | ExprKind.ExprCompute { Kind = ExprKind.ExprZero }
@@ -7331,22 +7331,22 @@ and inferLetBindingValue (env: TypeEnv) (binding: Binding) : TypeResult<TypedExp
                  Error (Other "zero at this array annotation cannot be materialized: every axis must be a plain rank-1 index with a nominal name or a static extent, and the element type must be numeric, bool, or complex. Spell the fill explicitly (`for () in range<...> <@> lambda(...) -> <zero literal> |> compute`) for packed, ragged, or non-static shapes."))
         | _ ->
         checkExpr env annotTy binding.Value |> Result.bind (fun tv ->
-            // Prefer the annotation as the canonical type â€” it can be more
+            // Prefer the annotation as the canonical type — it can be more
             // specific than what the value synthesized to.
             rejectEscapedWildcard { tv with Type = annotTy })
     | None -> inferExpr env binding.Value |> Result.bind rejectEscapedWildcard
 
-/// Recursive array definition â€” the v1 desugar. The parser has already
+/// Recursive array definition — the v1 desugar. The parser has already
 /// enforced the structural form (base arm `zero -> zero`, optional seed arm
 /// `zero :: s -> zero :: SEED`, inductive arm `prefix :: n -> prefix ::
 /// SLICE`), which gives termination by construction: the recursion walks
 /// the extent down to the empty array. Here the scheme is rewritten to the
-/// INTERNAL sequential form (a mut buffer + for-in over the leading axis â€”
+/// INTERNAL sequential form (a mut buffer + for-in over the leading axis —
 /// the same nodes the compiler's own generators emit) and checked by the
 /// ordinary machinery, so prefix reads become plain buffer reads and no
 /// self-referential typing is needed.
 ///
-/// v1 bounds (deliberate â€” they box out the halting problem):
+/// v1 bounds (deliberate — they box out the halting problem):
 ///   - the leading (recursion) axis extent must be STATIC;
 ///   - rank-1 arrays with Float/Int elements (whole-slice writes for
 ///     rank >= 2 land with the sequential-evolution port);
@@ -7364,7 +7364,7 @@ and inferRecArray (env: TypeEnv) (annot: TypeExpr) (annotTy: IRType) (def: RecAr
             | _ -> None
         match extentOf at.IndexTypes.Head with
         | None ->
-            Error (Other (sprintf "recursive array '%s': the leading (recursion) axis must have a static extent in v1 â€” dynamic-extent recurrences are not yet supported" def.Name))
+            Error (Other (sprintf "recursive array '%s': the leading (recursion) axis must have a static extent in v1 — dynamic-extent recurrences are not yet supported" def.Name))
         | Some n when n < 1L ->
             Error (Other (sprintf "recursive array '%s': the recursion axis extent must be >= 1 (got %d)" def.Name n))
         | Some n ->
@@ -7379,7 +7379,7 @@ and inferRecArray (env: TypeEnv) (annot: TypeExpr) (annotTy: IRType) (def: RecAr
                 Ok (synAt (ExprApp (synAt (ExprVar "complex"),
                                     [synAt (ExprLit (LitFloat 0.0)); synAt (ExprLit (LitFloat 0.0))])))
             | _ -> Error (Other (sprintf "recursive array '%s': v1 supports Float/Int/Complex element types (record/tuple slices land with the IR-level alloc)" def.Name))
-        // Trailing (slice) axes must be static too in v1 â€” they drive the
+        // Trailing (slice) axes must be static too in v1 — they drive the
         // desugared copy nest and the zero-fill literal.
         let trailingOpt = at.IndexTypes.Tail |> List.map extentOf
         if trailingOpt |> List.exists Option.isNone then
@@ -7395,8 +7395,8 @@ and inferRecArray (env: TypeEnv) (annot: TypeExpr) (annotTy: IRType) (def: RecAr
         // nested zero literal; large ones (QG-scale trajectories) would
         // explode the AST as literals (millions of nodes), so they
         // materialize through a zero FORMER over the annotation's own
-        // slots â€” method_for(range<slots...>) <@> lambda(...) -> 0.
-        // Zero fill over a list of axes â€” the whole buffer (leading :: trailing)
+        // slots — method_for(range<slots...>) <@> lambda(...) -> 0.
+        // Zero fill over a list of axes — the whole buffer (leading :: trailing)
         // or, for the zero-history slices below, the trailing axes alone.
         let annotSlots = match annot with TyArray (_, slotTys) -> Some slotTys | _ -> None
         let zerosOver (tag: string) (slotsOpt: TypeExpr list option) (exts: int64 list) =
@@ -7416,7 +7416,7 @@ and inferRecArray (env: TypeEnv) (annot: TypeExpr) (annotTy: IRType) (def: RecAr
         // Write one slice into the buffer at step position `stepIdxE`.
         // Rank-1: direct scalar assign. Rank >= 2: materialize the slice
         // once (`let __slice = e`), then a nested elementwise copy over the
-        // trailing axes â€” the same shape the imperative double-buffer
+        // trailing axes — the same shape the imperative double-buffer
         // corpus used, so the whole machinery downstream is proven.
         let sliceCopyStmts (stepIdxE: Expr) (srcName: string) (srcExpr: Expr) : Stmt list =
             match trailing with
@@ -7498,7 +7498,7 @@ and inferRecArray (env: TypeEnv) (annot: TypeExpr) (annotTy: IRType) (def: RecAr
             synAt (ExprVar name)
         // Rank >= 2: PARTIAL prefix reads (lag rows, e.g. prefix(n-1) on a
         // rank-2 family) must flow through a BINDING so CodeGen's dense
-        // row-view wrap (densePartialSubview) fires â€” a bare partial read in
+        // row-view wrap (densePartialSubview) fires — a bare partial read in
         // argument position renders as a raw row pointer. Hoist each
         // distinct partial application into a loop-body let; scalar reads
         // (full applications) stay in place.
@@ -7522,7 +7522,7 @@ and inferRecArray (env: TypeEnv) (annot: TypeExpr) (annotTy: IRType) (def: RecAr
                         let isPartial = args.Length <= trailing.Length
                         let key = sprintf "%A" (args |> List.map (fun a -> a.Kind))
                         if not (needsLo || needsHi) then
-                            // Provably inside the prefix â€” unchanged.
+                            // Provably inside the prefix — unchanged.
                             if isPartial then Some (synAt (ExprVar (emit key (fun () -> synAt (ExprApp (bufVar, args))))))
                             else None
                         else
@@ -7575,7 +7575,7 @@ and inferRecArray (env: TypeEnv) (annot: TypeExpr) (annotTy: IRType) (def: RecAr
         Error (Other (sprintf "recursive array '%s': the annotation must be an Array type (`let rec %s: Array<T like Step, ...> = ...`)" def.Name def.Name))
 
 /// Bind the primary name of a let binding (single name or placeholder) with
-/// let-generalization. Only ReadOnly bindings are generalized â€” assignable
+/// let-generalization. Only ReadOnly bindings are generalized — assignable
 /// bindings could be reassigned, making the original scheme unsound.
 /// For destructuring patterns (tuple/cons/struct), the caller passes name="_"
 /// and identity=None; the returned env then needs further extension with the
@@ -7596,10 +7596,10 @@ and bindLetPatVar (env: TypeEnv) (name: string) (identity: ArrayIdentity option)
 
 /// Leaf (name, type) list for a `head :: tail` destructure of `scrutTy`.
 ///
-/// SINGLE SOURCE OF TRUTH for cons-pattern typing. Four call sites need it â€”
+/// SINGLE SOURCE OF TRUTH for cons-pattern typing. Four call sites need it —
 /// top-level `let` (checkDecl/DeclLet), block-scoped `let` (inferBlock's
 /// TStmtLet), `let static` (checkDecl/DeclStatic) and let-as-expression
-/// (inferLetBinding) â€” and the rules below MUST NOT drift between them: the
+/// (inferLetBinding) — and the rules below MUST NOT drift between them: the
 /// original defect was that only one site knew them, so the other three handed
 /// every leaf a fresh, unconstrained type variable (which then zonked to the
 /// default Float64) and let Lowering project positionally (so `tail` bound
@@ -7648,7 +7648,7 @@ and consDestructureLeaves (env: TypeEnv) (scrutTy: IRType) (h: Pattern) (t: Patt
         // Cons-destructuring a parameter pack: `head :: tail = A`. Each head
         // leaf has the pack's element (base) type; the rest leaf is a pack of
         // the same base with arity `k` less (one per head). Arity is symbolic
-        // until monomorphization, so â€” unlike the tuple arm â€” we don't require a
+        // until monomorphization, so — unlike the tuple arm — we don't require a
         // statically-known length > k here; a pack too short for the heads fails
         // when its concrete arity is fixed (specializeFunction). The tail gets a
         // fresh arity variable name (its own independent, mono-fixed size).
@@ -7658,7 +7658,7 @@ and consDestructureLeaves (env: TypeEnv) (scrutTy: IRType) (h: Pattern) (t: Patt
         // element read (`A[i]`, inferTupleIndex) already decouples this way, and
         // for good reason: `head` typically flows into arithmetic (`head + ..`),
         // and if `head` WERE the base var, that arithmetic would unify the base
-        // to a scalar â€” collapsing a `Poly<T^1>` pack's rank (its params would
+        // to a scalar — collapsing a `Poly<T^1>` pack's rank (its params would
         // monomorphize to `double` instead of `Array<double,1>`). The element's
         // real (post-monomorphization) type is the expanded param's; the fresh
         // var only needs to be internally consistent for body inference. The tail
@@ -7693,15 +7693,15 @@ and structFieldTypesOf (env: TypeEnv) (scrutTy: IRType) : (string * IRType) list
 
 /// Flat leaves of a (possibly nested) tuple type, as (path, leafType) pairs in
 /// flat left-to-right order. `path` is the list of STRUCTURAL indices from the
-/// root down to that leaf, OUTERMOST FIRST: for ((Î±, Î²), Î³) the leaves are
-/// ([0; 0], Î±), ([0; 1], Î²), ([1], Î³) â€” i.e. get<0>(get<0>(x)), get<1>(get<0>(x)),
+/// root down to that leaf, OUTERMOST FIRST: for ((α, β), γ) the leaves are
+/// ([0; 0], α), ([0; 1], β), ([1], γ) — i.e. get<0>(get<0>(x)), get<1>(get<0>(x)),
 /// get<1>(x). A non-tuple is one leaf reached by the empty path (the value
 /// itself).
 ///
 /// WHY paths instead of a flat index: a flat projection IS the composition of
 /// the structural projections along that path. Expressing it that way lets
 /// expression position destructure a flat pattern with ordinary chained
-/// TExprTupleIndex nodes â€” TypedAst's node has no `isFlat` flag (only
+/// TExprTupleIndex nodes — TypedAst's node has no `isFlat` flag (only
 /// Lowering's IRTupleProj does), and adding one would ripple through TypedAst,
 /// Lowering, Zonk and five sites in this file. CodeGen's flat IRTupleProj arm
 /// already computes exactly this path at emit time and folds std::get over it
@@ -7711,7 +7711,7 @@ and structFieldTypesOf (env: TypeEnv) (scrutTy: IRType) : (string * IRType) list
 /// flat leaf TYPES from that function (checkDecl's PatTuple arm) while
 /// expression position takes its leaf PATHS from this one; if the orders
 /// disagreed, the same source text would destructure differently at top level
-/// and inside an expression â€” worse than the missing binding this exists to
+/// and inside an expression — worse than the missing binding this exists to
 /// fix. The recursion below is deliberately the same shape (left-to-right
 /// collect over the elements, non-tuple = exactly one leaf), so
 ///     flatTupleLeafPaths ty |> List.map snd = IR.flattenTupleLeaves ty
@@ -7730,8 +7730,8 @@ and flatTupleLeafPaths (ty: IRType) : (int list * IRType) list =
 /// leaf bound to its projection out of that temp, innermost-out.
 ///
 /// WHY a chain instead of the SubBindings mechanism the declaration and
-/// statement forms use: `TExprLet` is `name * varId * value * body` â€” one
-/// name, no sub-binding slot â€” and widening it would ripple through ~13 use
+/// statement forms use: `TExprLet` is `name * varId * value * body` — one
+/// name, no sub-binding slot — and widening it would ripple through ~13 use
 /// sites across TypeCheck, Lowering and Zonk. wrapMutualReturnBody already
 /// binds its return-tuple leaves with exactly this nested-let shape, so the
 /// desugar needs no DU change, no Zonk change and no Lowering change.
@@ -7763,7 +7763,7 @@ and destructureLetChain (env: TypeEnv) (tValue: TypedExpr)
 
 and inferLetBinding env binding body : TypeResult<TypedExpr> =
     // Bidirectional checking pushes annotations into literal/constructor
-    // positions â€” see inferLetBindingValue. Then dispatch on the binding
+    // positions — see inferLetBindingValue. Then dispatch on the binding
     // pattern to bind names into the body's environment.
     let valueResult = inferLetBindingValue env binding
     valueResult |> Result.bind (fun tValue ->
@@ -7779,9 +7779,9 @@ and inferLetBinding env binding body : TypeResult<TypedExpr> =
             // let chain (see destructureLetChain). TWO pattern shapes are
             // desugared, tried in the same priority order the declaration
             // position uses (checkDecl's PatTuple arm):
-            //   STRUCTURAL â€” (w, z) against ((Î±, Î²), Î³): one leaf per top-level
+            //   STRUCTURAL — (w, z) against ((α, β), γ): one leaf per top-level
             //     slot, each reached by ONE projection.
-            //   FLAT â€” (x, y, z) against ((Î±, Î²), Î³): one leaf per FLATTENED
+            //   FLAT — (x, y, z) against ((α, β), γ): one leaf per FLATTENED
             //     leaf, each reached by a PATH of projections. This shape used
             //     to fall through to letValueOnlyChain and bind NOTHING, so
             //     every name in it resurfaced later as UnboundVariable.
@@ -7791,7 +7791,7 @@ and inferLetBinding env binding body : TypeResult<TypedExpr> =
             // WHY a path rather than a flat projection node: TypedAst's
             // TExprTupleIndex has no flat flag (only Lowering's IRTupleProj
             // does, and that node is reachable from the SubBindings path, not
-            // from expression position) â€” but a flat projection IS the
+            // from expression position) — but a flat projection IS the
             // composition of the structural projections along the path from the
             // root to the leaf, so chaining ordinary TExprTupleIndex nodes says
             // exactly the same thing with no DU change, no Lowering change and
@@ -7806,7 +7806,7 @@ and inferLetBinding env binding body : TypeResult<TypedExpr> =
             // TExprTupleIndex arm only emits a static IRTupleProj when the
             // OPERAND's type is an IRTTuple, so an intermediate typed wrongly
             // would silently divert the rest of the chain onto the poly-pack
-            // path (IRPolyIndex) â€” a fresh miscompile rather than a fix.
+            // path (IRPolyIndex) — a fresh miscompile rather than a fix.
             let projectPath (path: int list) (src: TypedExpr) : TypedExpr =
                 path |> List.fold (fun (acc: TypedExpr) idx ->
                     let elemTy =
@@ -7825,7 +7825,7 @@ and inferLetBinding env binding body : TypeResult<TypedExpr> =
                 | _ -> None
             // Flat leaves are only consulted when the structural arity does NOT
             // match, and only when the pattern supplies exactly one leaf per
-            // flat leaf â€” the same test checkDecl's PatTuple arm applies before
+            // flat leaf — the same test checkDecl's PatTuple arm applies before
             // it switches to IR.flattenTupleLeaves.
             let flat =
                 match structural, resolvedTy with
@@ -7854,7 +7854,7 @@ and inferLetBinding env binding body : TypeResult<TypedExpr> =
         | PatternKind.PatCons (headPat, tailPat) ->
             // `let head :: tail = t` in expression position. Same leaf rules as
             // every other cons site (consDestructureLeaves), and the same hard
-            // error when the scrutinee cannot be split â€” binding fresh type
+            // error when the scrutinee cannot be split — binding fresh type
             // vars instead is exactly the miscompile the shared helper exists
             // to prevent.
             consDestructureLeaves env tValue.Type headPat tailPat
@@ -7871,13 +7871,13 @@ and inferLetBinding env binding body : TypeResult<TypedExpr> =
                             if i = lastIdx then
                                 if isPoly then
                                     // REST leaf of a PACK: the symbolic pack tail
-                                    // (dropping `i` heads), NOT a re-tuple â€” the
+                                    // (dropping `i` heads), NOT a re-tuple — the
                                     // arity is only known at monomorphization.
                                     // Matches Lowering.subBindingValue's IRTPoly arm.
                                     mkTyped (TExprPolyTail (src, i)) ty
                                 else
                                 // REST leaf: the remainder, re-tupled from its
-                                // own index onward â€” bare when one element
+                                // own index onward — bare when one element
                                 // (Blade has no 1-tuple). Identical rule to
                                 // Lowering.subBindingValue, so the leaf's
                                 // declared type and its value always agree.
@@ -7949,7 +7949,7 @@ and inferMatch env scrutinee cases : TypeResult<TypedExpr> =
 
 /// Bidirectional match: push the `expected` type into each arm body via
 /// `checkExpr`, so a literal (or scalar) arm can flex to the expected
-/// `T`/`T^k` instead of pinning the result to its concrete type â€” this is what
+/// `T`/`T^k` instead of pinning the result to its concrete type — this is what
 /// lets `comoment_prod`'s `| 0 -> 1` defer into the `-> T^1` return. Falls back
 /// to plain inference on a body-check failure, preserving `inferMatch`'s lenient
 /// cross-unify (which ignored arm/result mismatches).
@@ -7976,13 +7976,13 @@ and checkMatch env (expected: IRType) scrutinee cases : TypeResult<TypedExpr> =
         |> sequenceResults |> Result.map (fun tCases ->
             mkTyped (TExprMatch (tScrutinee, tCases)) (env.Subst.Resolve expected)))
 
-/// Mechanism 2 â€” scalar â†’ concretely-shaped-array broadcast fill. When a scalar
+/// Mechanism 2 — scalar → concretely-shaped-array broadcast fill. When a scalar
 /// value is checked against a concrete array type whose extents are statically
 /// known (`let a: Array<f64, Idx<3>> = s`), materialize a fill that broadcasts
 /// the scalar across the shape: one `replicate` level per index, innermost
 /// first, so the outermost node carries the full target type. Element types must
-/// match exactly (no implicit int->float). Returns None when not applicable â€”
-/// including a shapeless rank-k var, whose shape isn't known here â€” so the
+/// match exactly (no implicit int->float). Returns None when not applicable —
+/// including a shapeless rank-k var, whose shape isn't known here — so the
 /// caller's normal mismatch error is preserved.
 and tryScalarFill (env: TypeEnv) (tE: TypedExpr) (expected: IRType) : TypedExpr option =
     match env.Subst.Resolve tE.Type, env.Subst.Resolve expected with
@@ -8027,7 +8027,7 @@ and inferBlock env stmts finalExpr (expectedFinal: IRType option) : TypeResult<T
             | StmtLet binding ->
                 // Shared annotation handler (inferLetBindingValue): block
                 // lets previously called plain inferExpr and IGNORED the
-                // annotation entirely â€” `let mut vy: Float<velocity> = 19.62`
+                // annotation entirely — `let mut vy: Float<velocity> = 19.62`
                 // bound vy at the bare synthesized type. Routing through the
                 // shared handler gives blocks the same bidirectional
                 // checking and annotation-as-canonical-type behavior as
@@ -8035,7 +8035,7 @@ and inferBlock env stmts finalExpr (expectedFinal: IRType option) : TypeResult<T
                 // Named-recursive-lambda unification (Stage 3a): a `let const name
                 // = lambda(...)` whose body refers to itself is a function. Bind
                 // `name` to a fresh id + type var BEFORE inferring the lambda so a
-                // self-reference in the body resolves â€” enabling recursion, exactly
+                // self-reference in the body resolves — enabling recursion, exactly
                 // as checkFunctionDecl binds a function's name before its body. The
                 // nested-`function` desugar lands here.
                 //
@@ -8095,7 +8095,7 @@ and inferBlock env stmts finalExpr (expectedFinal: IRType option) : TypeResult<T
                     // as SubBindings so Lowering emits their projection lets
                     // (mirrors checkDecl's DeclLet path). Previously SubBindings
                     // was left empty here, so the leaf VarIds referenced by the
-                    // rest of the block were never introduced in the IR â€”
+                    // rest of the block were never introduced in the IR —
                     // dangling VarId at validation for any in-body
                     // `let (x, y) = p`; and even after the tuple and cons arms
                     // landed, a STRUCT pattern (`let Point { x, y } = p`) still
@@ -8126,8 +8126,8 @@ and inferBlock env stmts finalExpr (expectedFinal: IRType option) : TypeResult<T
                             | Error e -> err <- Some e; []
                         | Error e -> err <- Some e; []
                     // Constrained-struct binding: check at every assignment.
-                    // A bounded-primitive ANNOTATION (Â§2.4) guards the same
-                    // way, from the surface type â€” bounds are erased before
+                    // A bounded-primitive ANNOTATION (§2.4) guards the same
+                    // way, from the surface type — bounds are erased before
                     // IRType, so tValue.Type cannot carry them.
                     let structChecks =
                         match binding.Pattern.Kind with
@@ -8212,9 +8212,9 @@ and inferBlock env stmts finalExpr (expectedFinal: IRType option) : TypeResult<T
 ///
 /// WHY it is shared: a for-in body is a block scope, so inferBlock's TStmtLet
 /// and inferForIn's StmtLet must answer identically about what a pattern binds
-/// and at what types. They previously did not â€” inferBlock handled tuple and
+/// and at what types. They previously did not — inferBlock handled tuple and
 /// cons but not struct, and inferForIn hardcoded `SubBindings = []` for every
-/// shape â€” and the failure mode of a missing arm is silent: the primary binding
+/// shape — and the failure mode of a missing arm is silent: the primary binding
 /// takes the synthetic "_", no leaf id is ever introduced, and each leaf name
 /// resurfaces far away as UnboundVariable (or, if something else happens to
 /// bind the name, as an IRId that nothing declares).
@@ -8247,7 +8247,7 @@ and stmtDestructureBindings (env: TypeEnv) (pat: Pattern) (valueTy: IRType)
             | IRTTuple ts ->
                 if pats.Length = ts.Length then ts
                 else
-                    // Flat match: (x, y, z) against ((Î±,Î²), Î³)
+                    // Flat match: (x, y, z) against ((α,β), γ)
                     let flat = IR.flattenTupleLeaves resolvedTy
                     if pats.Length = flat.Length then flat else ts
             | _ -> []
@@ -8275,7 +8275,7 @@ and stmtDestructureBindings (env: TypeEnv) (pat: Pattern) (valueTy: IRType)
         // `let Point { x, y } = p`. Leaves are matched BY NAME, never by
         // position: Lowering.subBindingValue projects a struct sub-binding with
         // IRFieldAccess on the leaf's OWN name, so a missing or extra field
-        // pattern must not shift the field any other leaf reads â€” and the
+        // pattern must not shift the field any other leaf reads — and the
         // declared type has to be looked up the same way for the two to agree.
         // structFieldTypesOf returns [] for a scrutinee that is not a registered
         // struct, so every leaf then falls back to a fresh var rather than
@@ -8326,8 +8326,8 @@ and inferForIn (env: TypeEnv) (varName: string) (rangeExpr: Expr) (bodyStmts: St
                             bodyEnv <- bindVarFull bName bId tValue.Type None assign (Some tValue) bodyEnv
                             // Destructuring inside a loop body. This path used
                             // to hardcode `SubBindings = []` / DSPositional, so
-                            // EVERY destructuring shape â€” tuple, cons and
-                            // struct alike â€” bound nothing: the primary took
+                            // EVERY destructuring shape — tuple, cons and
+                            // struct alike — bound nothing: the primary took
                             // the synthetic "_" and each leaf name resurfaced
                             // later in the loop as UnboundVariable. Routed
                             // through the same stmtDestructureBindings
@@ -8374,7 +8374,7 @@ and inferForIn (env: TypeEnv) (varName: string) (rangeExpr: Expr) (bodyStmts: St
     | _ -> Error (Other "for-in range must use a..b syntax")
 
 and inferMethodFor env arrays : TypeResult<TypedExpr> =
-    // Detect method_for(zip(A, B, ...)) â€” expand zip into co-iteration
+    // Detect method_for(zip(A, B, ...)) — expand zip into co-iteration
     match arrays with
     | [{ Kind = ExprKind.ExprZip zipExprs }] ->
         zipExprs |> List.map (inferExpr env) |> sequenceResults |> Result.bind (fun tZipArrays ->
@@ -8386,8 +8386,8 @@ and inferMethodFor env arrays : TypeResult<TypedExpr> =
                 | _ -> getArrayType env zipExprs.[i])
             // Shared iteration records. Single-record operands (dense rank-1 or
             // packed symmetric) keep the historical first-record rule unchecked.
-            // MULTI-record operands (dense rank â‰¥ 2) co-iterate the FULL product
-            // of records â€” all operands must agree structurally and every record
+            // MULTI-record operands (dense rank ≥ 2) co-iterate the FULL product
+            // of records — all operands must agree structurally and every record
             // must be plain dense. buildApplyInfo trims the co-iterated prefix
             // by the kernel's slice rank, so row-mode kernels (loops/085) keep
             // receiving their inner-record slice.
@@ -8395,7 +8395,7 @@ and inferMethodFor env arrays : TypeResult<TypedExpr> =
             | Error e -> Error e
             | Ok sharedRecords ->
             // Real per-array S-dim counts: buildApplyInfo's IRTInfer fallback
-            // computes the kernel slice rank as (records âˆ’ sDims); a scalar
+            // computes the kernel slice rank as (records − sDims); a scalar
             // kernel over rank-2 operands must see kR = 0 (full product), which
             // the historical per-array 1 would mis-trim to row mode.
             let sDimsPerArray = computeSDimsPerArray arrayTypes
@@ -8509,12 +8509,12 @@ and inferStructConstruction env name fields (spread: Expr option) : TypeResult<T
         // Functional update: `S { f = v, ..base }` desugars the MISSING
         // fields to `base.f` reads and falls into the ordinary construction
         // path (dup/unknown/missing checks, per-field bidirectional check,
-        // decl-order emission, assignment-site guards â€” all unchanged).
+        // decl-order emission, assignment-site guards — all unchanged).
         let desugared =
             match spread with
             | None -> Ok fields
             | Some baseExpr ->
-                // v1 base restriction: a variable / field path / typed wrap â€”
+                // v1 base restriction: a variable / field path / typed wrap —
                 // pure, so re-evaluating it once per copied field is safe and
                 // no temp binding (with its IRId-ordering interactions) is
                 // needed. Anything else: bind it with let first.
@@ -8594,7 +8594,7 @@ and inferStructConstruction env name fields (spread: Expr option) : TypeResult<T
 // The joint check attaches exactly where a group's type-tuple is INTRODUCED:
 // a function's declared `(P1, P2)` return (checked at the return site) or an
 // annotated joint let (checked after the destructure). Detection runs on the
-// SURFACE TypeExpr â€” members are transparent aliases, erased by lowerTypeExpr.
+// SURFACE TypeExpr — members are transparent aliases, erased by lowerTypeExpr.
 
 /// Deep-collect mutual-group member names appearing anywhere in a type
 /// annotation (one entry per occurrence).
@@ -8616,8 +8616,8 @@ and mutualMemberNamesIn (env: TypeEnv) (t: TypeExpr) : string list =
         | _ -> []
     walk t
 
-/// Annotation side of the check-point rule. Ok None â€” no member names
-/// anywhere. Ok (Some group) â€” a top-level tuple listing exactly one group's
+/// Annotation side of the check-point rule. Ok None — no member names
+/// anywhere. Ok (Some group) — a top-level tuple listing exactly one group's
 /// full member set, each as a DIRECT element, exactly once (non-member
 /// elements alongside are fine). Anything else is a compile error.
 and tryMutualAnnotation (env: TypeEnv) (annot: TypeExpr) : TypeResult<MutualGroupInfo option> =
@@ -8667,7 +8667,7 @@ and renameMutualRefs (mapping: Map<string, string>) (e: Expr) : Expr =
 
 /// Synthesize the joint runtime checks at a binding site. `env` must already
 /// have the leaf variables bound; the check IRIds are allocated HERE, after
-/// the leaves' ids â€” module emission is id-ordered, so later ids run later.
+/// the leaves' ids — module emission is id-ordered, so later ids run later.
 and synthesizeMutualChecks (env: TypeEnv) (group: MutualGroupInfo) (memberToLeaf: Map<string, string>) : TypeResult<(IRId * TypedExpr) list> =
     group.Constraints |> List.map (fun conjunct ->
         let renamed = renameMutualRefs memberToLeaf conjunct
@@ -8677,10 +8677,10 @@ and synthesizeMutualChecks (env: TypeEnv) (group: MutualGroupInfo) (memberToLeaf
             (checkId, mkTypedSpan (TExprConstraintCheck (tCond, msg)) IRTUnit tCond.Span)))
     |> sequenceResults
 
-/// Binding side of the check-point rule for an annotated let. Ok None â€” no
+/// Binding side of the check-point rule for an annotated let. Ok None — no
 /// obligation here (no group named, or the RHS is a call to a function whose
-/// declared return already carries the check). Ok (Some (group, memberâ†’leaf))
-/// â€” synthesize checks after the destructure. Error â€” annotation/pattern
+/// declared return already carries the check). Ok (Some (group, member→leaf))
+/// — synthesize checks after the destructure. Error — annotation/pattern
 /// misuse (lone member, non-tuple pattern, arity mismatch).
 and mutualBindingObligation (env: TypeEnv) (binding: Binding) : TypeResult<(MutualGroupInfo * Map<string, string>) option> =
     match binding.Type with
@@ -8702,7 +8702,7 @@ and mutualBindingObligation (env: TypeEnv) (binding: Binding) : TypeResult<(Mutu
                             | _ -> None)
                         |> Map.ofList
                     // A call to a declared-return function was already checked
-                    // at its return site â€” the single verification point.
+                    // at its return site — the single verification point.
                     let rec stripT (e: Expr) = match e.Kind with ExprKind.ExprTyped (i, _) -> stripT i | _ -> e
                     let alreadyChecked =
                         match (stripT binding.Value).Kind with
@@ -8720,7 +8720,7 @@ and mutualBindingObligation (env: TypeEnv) (binding: Binding) : TypeResult<(Mutu
 /// Struct where-constraint checks for an assignment target: substitute each
 /// field name with `<target>.<field>`, infer, and wrap as inlined guards.
 /// Returns [] when the target's type is not a constrained struct. Fires at
-/// every assignment of a constrained struct value â€” construction bindings,
+/// every assignment of a constrained struct value — construction bindings,
 /// whole-struct reassignment, and field mutation alike (the math runs only
 /// in the generated C++).
 and synthesizeStructChecks (env: TypeEnv) (targetTy: IRType) (targetSurface: Expr) : TypeResult<TypedExpr list> =
@@ -8752,7 +8752,7 @@ and synthesizeStructChecks (env: TypeEnv) (targetTy: IRType) (targetSurface: Exp
         | _ -> Ok []
     | _ -> Ok []
 
-/// Runtime bound guards for a BOUNDED-PRIMITIVE annotation â€” formalism Â§2.4,
+/// Runtime bound guards for a BOUNDED-PRIMITIVE annotation — formalism §2.4,
 /// "Bounded primitives (`Float<min=0, max=1>`) carry RUNTIME-CHECKED bounds".
 /// Bounds are INCLUSIVE on both ends, so this emits `min <= subj` and/or
 /// `subj <= max` as separate guards, one per declared endpoint, using the
@@ -8760,15 +8760,15 @@ and synthesizeStructChecks (env: TypeEnv) (targetTy: IRType) (targetSurface: Exp
 ///
 /// STRUCT FIELDS DO NOT COME THROUGH HERE. A field's bounds are normalized
 /// into `FieldDecl.Bound` at parse time and desugared by `structConjuncts`,
-/// so they are already guarded by `synthesizeStructChecks` â€” routing them
+/// so they are already guarded by `synthesizeStructChecks` — routing them
 /// here as well would double every field guard. This serves the annotation
 /// sites where the surface type is the only carrier, because bounds are
 /// erased by `lowerTypeExpr` and never reach `IRType`.
 ///
 /// v1 SCOPE: `let` binding annotations. Bounded PARAMETERS, bounded RETURN
-/// types, and re-assignment of a bounded mutable are unguarded â€” each needs
+/// types, and re-assignment of a bounded mutable are unguarded — each needs
 /// the declared annotation at a site that does not currently carry it
-/// (params/returns at the call boundary, assignment via a name â†’ annotation
+/// (params/returns at the call boundary, assignment via a name → annotation
 /// map that does not exist). Named deferral, not an oversight.
 and synthesizeBoundChecks (env: TypeEnv) (annot: TypeExpr option) (subjectName: string) (targetSurface: Expr) : TypeResult<TypedExpr list> =
     match annot with
@@ -8807,7 +8807,7 @@ and structChecksForAssign (env: TypeEnv) (lhsSurface: Expr) (tL: TypedExpr) : Ty
         synthesizeStructChecks env tL.Type lhsSurface
 
 /// Wrap a declared-return function body so the joint check runs at the
-/// return â€” the group's single verification point. The body becomes:
+/// return — the group's single verification point. The body becomes:
 ///   let __mg_ret = <body>
 ///   let __mg<i> = __mg_ret.<i>   (one per member, at its annotation slot)
 ///   <conjunct checks>
@@ -8855,23 +8855,23 @@ and inferForExpr env source kernelOpt : TypeResult<TypedExpr> =
         arrays |> List.map (inferExpr env) |> sequenceResults |> Result.bind (fun tArrays ->
         inferExpr env inClause |> Result.bind (fun tVirtual ->
             // The `in` clause supplies the shared iteration index, so it must
-            // be a VIRTUAL array (range<...>, reverse<...>, blocked<...>) â€”
+            // be a VIRTUAL array (range<...>, reverse<...>, blocked<...>) —
             // its type is an all-SIdxVirt arrow (ArrayElem's IsVirtual). A
             // stored array, zip, or loop object is rejected here: co-iterating
-            // stored arrays is `for (A, B)` with no `in` clause (â‰¡
+            // stored arrays is `for (A, B)` with no `in` clause (≡
             // method_for(A, B)); zipping them is method_for(zip(A, B)).
             let sharedRecordsRes =
                 match env.Subst.Resolve(tVirtual.Type) with
                 | ArrayElem at when at.IsVirtual && at.IndexTypes.Length > 0 ->
                     // ALL of the in-clause's slots become shared iteration
-                    // records â€” `for (A, B) in range<Lat, Lon>` co-iterates the
-                    // full LatÃ—Lon product space. Multi-slot spaces require
+                    // records — `for (A, B) in range<Lat, Lon>` co-iterates the
+                    // full Lat×Lon product space. Multi-slot spaces require
                     // every slot plain dense (a sole packed/compound slot is
-                    // fine â€” its Rank levels walk the flat canonical cells).
+                    // fine — its Rank levels walk the flat canonical cells).
                     if coIterableRecords at.IndexTypes then Ok at.IndexTypes
                     else Error (Other "for (...) in range<...>: a multi-slot iteration space must consist of plain dense index types (a packed or compound slot cannot share the product with other slots)")
                 | resolved ->
-                    Error (Other (sprintf "the `in` clause of `for (...) in <source>` must be a virtual array (range<...>, reverse<...>, or blocked<...>) â€” it supplies the shared iteration index; got %s. Drop the `in` clause to co-iterate stored arrays (for (A, B) â‰¡ method_for(A, B)), or use method_for(zip(A, B)) to zip them." (ppIRType resolved)))
+                    Error (Other (sprintf "the `in` clause of `for (...) in <source>` must be a virtual array (range<...>, reverse<...>, or blocked<...>) — it supplies the shared iteration index; got %s. Drop the `in` clause to co-iterate stored arrays (for (A, B) ≡ method_for(A, B)), or use method_for(zip(A, B)) to zip them." (ppIRType resolved)))
             sharedRecordsRes |> Result.bind (fun sharedRecords ->
 
             let identities = arrays |> List.map (fun arr ->
@@ -8908,7 +8908,7 @@ and inferForExpr env source kernelOpt : TypeResult<TypedExpr> =
                         // Kernel arity: N (one value param per co-iterated array)
                         // or N + R (values plus the R shared iteration indices).
                         // In the N + R form the in-clause virtual source rides
-                        // along as a TRAILING operand â€” its per-slot params bind
+                        // along as a TRAILING operand — its per-slot params bind
                         // to the loop indices through the same VirtualRange
                         // element machinery the outer-product path uses for
                         // range<...> slots, so `for (uq, ph) in range<Y, X> <@>
@@ -8927,7 +8927,7 @@ and inferForExpr env source kernelOpt : TypeResult<TypedExpr> =
                         // the tagged Nat<...> slot types. The body was inferred
                         // against unresolved vars, so deferred intrinsics (e.g.
                         // imag(zp) on a complex operand) only resolve correctly
-                        // once the params are unified here â€” the same post-body
+                        // once the params are unified here — the same post-body
                         // unification buildApplyInfo performs for <@> applies.
                         let paramUnifyResult =
                             let valueTypes = arrayTypes |> List.map (fun at -> at.ElemType)
@@ -8961,7 +8961,7 @@ and inferForExpr env source kernelOpt : TypeResult<TypedExpr> =
                                 SDimsPerArray = exSDims; TotalSDims = exTotalSDims
                         }
                         // Carry the resolved param types into the stored kernel
-                        // (records are immutable â€” the substitution refinements
+                        // (records are immutable — the substitution refinements
                         // above don't rewrite lambdaInfo.Params in place).
                         let resolvedLambdaInfo =
                             { lambdaInfo with
@@ -8990,7 +8990,7 @@ and inferForExpr env source kernelOpt : TypeResult<TypedExpr> =
                         let outputIndexTypes = sharedRecords @ (kernelTDims |> List.map (fun idx -> { idx with Id = env.Builder.FreshId() }))
                         let outputType = mkArrayArrow outputIndexTypes elemType None
                         // Note: SymcomStates/TriangularLevels/SpeedupFactor are unused
-                        // by the co-iteration codegen path â€” it derives loop structure
+                        // by the co-iteration codegen path — it derives loop structure
                         // directly from SharedIndexTypes
                         let info : TypedApplyInfo = {
                             Loop = mkTyped (TExprMethodFor exMfInfo) loopTy
@@ -9032,7 +9032,7 @@ and inferForExpr env source kernelOpt : TypeResult<TypedExpr> =
 
 and checkDecl (env: TypeEnv) (decl: Decl) : TypeResult<TypedDecl * TypeEnv> =
     // Fresh declaration: clear any statement span left over from the previous
-    // decl's body so errors here can't inherit a stale location (Â§3.4).
+    // decl's body so errors here can't inherit a stale location (§3.4).
     resetCurrentStmtSpan ()
     match decl with
     | DeclLet binding ->
@@ -9075,7 +9075,7 @@ and checkDecl (env: TypeEnv) (decl: Decl) : TypeResult<TypedDecl * TypeEnv> =
             let (varId, env') = bindLetPatVar env name identity assign tValue
 
             // Dist provenance seeding: a module-level dist binding gets its
-            // source-array set from the PPL elaboration state (by name â€”
+            // source-array set from the PPL elaboration state (by name —
             // covers `let d = dist(A, r)` and the call-form combinators);
             // any other Dist-typed value derives conservatively from its
             // RHS (covers operator results: `let s = combine(dx, dy)` etc.).
@@ -9088,7 +9088,7 @@ and checkDecl (env: TypeEnv) (decl: Decl) : TypeResult<TypedDecl * TypeEnv> =
                  if not (Set.isEmpty prov) then env.Provenance.[varId] <- prov
              | _ -> ())
 
-            // Handle destructuring at top level â€” collect sub-bindings for Lowering
+            // Handle destructuring at top level — collect sub-bindings for Lowering
             let mutable subBindings : (string * IRId * IRType) list = []
             // Shape tag handed to Lowering (see TypedAst.DestructureShape). Only
             // the PatCons arm below moves it off DSPositional.
@@ -9108,10 +9108,10 @@ and checkDecl (env: TypeEnv) (decl: Decl) : TypeResult<TypedDecl * TypeEnv> =
                         match resolvedTy with
                         | IRTTuple ts ->
                             if pats.Length = ts.Length then
-                                // Structural match: (w, z) against ((Î±,Î²), Î³) â†’ w:(Î±,Î²), z:Î³
+                                // Structural match: (w, z) against ((α,β), γ) → w:(α,β), z:γ
                                 ts
                             else
-                                // Try flat match: (x, y, z) against ((Î±,Î²), Î³) â†’ x:Î±, y:Î², z:Î³
+                                // Try flat match: (x, y, z) against ((α,β), γ) → x:α, y:β, z:γ
                                 let flat = IR.flattenTupleLeaves resolvedTy
                                 if pats.Length = flat.Length then flat
                                 else ts  // Fall back to structural, let fresh vars handle overflow
@@ -9133,7 +9133,7 @@ and checkDecl (env: TypeEnv) (decl: Decl) : TypeResult<TypedDecl * TypeEnv> =
                             bindVarSimple n subId eTy e2) e) env'
                 | PatternKind.PatCons (h, t) ->
                     // `let head :: tail = tup` splits an n-tuple into element 0
-                    // and the REMAINDER â€” `tail` is the (n-1)-tuple (2, 3), not
+                    // and the REMAINDER — `tail` is the (n-1)-tuple (2, 3), not
                     // the single element 2. This arm used to hand every name a
                     // fresh type variable and let Lowering project positionally,
                     // which produced both defects at once: `tail` bound element
@@ -9177,7 +9177,7 @@ and checkDecl (env: TypeEnv) (decl: Decl) : TypeResult<TypedDecl * TypeEnv> =
                 | _ -> env'
 
             // Surface a destructuring pattern that the scrutinee's type cannot
-            // satisfy (see patternError above) before anything else is built â€”
+            // satisfy (see patternError above) before anything else is built —
             // the sub-binding ids are already allocated at this point, but a
             // failed decl never reaches Lowering so they simply go unused.
             if patternError.IsSome then Error patternError.Value else
@@ -9195,7 +9195,7 @@ and checkDecl (env: TypeEnv) (decl: Decl) : TypeResult<TypedDecl * TypeEnv> =
             let structChecksR =
                 match binding.Pattern.Kind with
                 | PatternKind.PatVar n ->
-                    // Plus the bounded-primitive annotation guards (Â§2.4) â€”
+                    // Plus the bounded-primitive annotation guards (§2.4) —
                     // see synthesizeBoundChecks: bounds live only on the
                     // surface type, never on tValue.Type.
                     let subject = mkExpr binding.Pattern.Span (ExprVar n)
@@ -9208,7 +9208,7 @@ and checkDecl (env: TypeEnv) (decl: Decl) : TypeResult<TypedDecl * TypeEnv> =
             let postChecks =
                 mutualChecks @ (structChecks |> List.map (fun c -> (env.Builder.FreshId(), c)))
             // A DEFERRED former (arity-polymorphic object_for over a bare poly
-            // kernel, Arity = None) has no standalone runtime value â€” every <@>
+            // kernel, Arity = None) has no standalone runtime value — every <@>
             // use rebuilds it inline (see inferApply). Emit the binding INERT so
             // it never reaches IR validation carrying the unresolved element
             // type / a bare kernel reference; the env still holds the real
@@ -9217,7 +9217,7 @@ and checkDecl (env: TypeEnv) (decl: Decl) : TypeResult<TypedDecl * TypeEnv> =
             // poly kernel whose pack width is unknown until <@>. It has no
             // standalone value and cannot compose (>>@ needs a concrete loop), so
             // emit it inert. NOTE: concrete-arity formers (Arity = Some n) are
-            // left as real bindings even if their element type is still generic â€”
+            // left as real bindings even if their element type is still generic —
             // codegen's compose path (genComposeApply / ObjectLoopBindings) chases
             // their IRVar back to the real IRObjectFor, so neutralizing them breaks
             // `(o1 >>@ o2) <@> A`.
@@ -9240,7 +9240,7 @@ and checkDecl (env: TypeEnv) (decl: Decl) : TypeResult<TypedDecl * TypeEnv> =
         // Use the shared annotation handler so `let static` bindings enforce
         // their type annotations the same way regular lets do. Without this,
         // an annotation like `let static x: Float<meters> = 100.0` was
-        // silently dropped â€” the binding would carry the synthesized type
+        // silently dropped — the binding would carry the synthesized type
         // instead.
         //
         // RESOLVED-VALUE SHORTCUT: when StaticEval already reduced this
@@ -9281,7 +9281,7 @@ and checkDecl (env: TypeEnv) (decl: Decl) : TypeResult<TypedDecl * TypeEnv> =
         inferred |> Result.bind (fun tValue ->
             let name = match binding.Pattern.Kind with PatternKind.PatVar n -> n | _ -> "_"
             // Reuse the pre-pass varId if this static was already pre-registered
-            // â€” but ONLY for a plain `let static x = ...`.
+            // — but ONLY for a plain `let static x = ...`.
             //
             // checkModule's pre-pass (the fold that "registers static functions
             // and static values with placeholder types") exists so a FORWARD
@@ -9289,7 +9289,7 @@ and checkDecl (env: TypeEnv) (decl: Decl) : TypeResult<TypedDecl * TypeEnv> =
             // `let static b = 2` needs `b` bound at a placeholder type whose
             // varId the real decl then adopts, which is what the unify below
             // accomplishes. The pre-pass derives its key from the binding's
-            // pattern exactly as this arm does â€” PatVar gives the real name,
+            // pattern exactly as this arm does — PatVar gives the real name,
             // every other pattern gives the synthetic "_".
             //
             // For a DESTRUCTURING static that pre-registration is both useless
@@ -9328,7 +9328,7 @@ and checkDecl (env: TypeEnv) (decl: Decl) : TypeResult<TypedDecl * TypeEnv> =
             // Tuple, cons and struct destructuring for `let static (a, b) =
             // expr` / `let static head :: tail = expr` / `let static
             // Point { x, y } = expr`. Mirrors the corresponding branches of
-            // DeclLet â€” sub-bindings become individually resolvable names
+            // DeclLet — sub-bindings become individually resolvable names
             // downstream.
             //
             // Note the division of labour with StaticEval: its bindPattern
@@ -9336,7 +9336,7 @@ and checkDecl (env: TypeEnv) (decl: Decl) : TypeResult<TypedDecl * TypeEnv> =
             // those leaves lower to compile-time constants. It has no PatCons
             // case, so cons leaves get no static value and Lowering's
             // TDeclStatic path falls back to projecting them out of the primary
-            // binding (subBindingValue) â€” which is exactly what DSConsRest
+            // binding (subBindingValue) — which is exactly what DSConsRest
             // below tells it to do.
             let mutable subBindings : (string * IRId * IRType) list = []
             let mutable destructure = DSPositional
@@ -9388,7 +9388,7 @@ and checkDecl (env: TypeEnv) (decl: Decl) : TypeResult<TypedDecl * TypeEnv> =
                     // `let static Point { x, y } = Point { x = 3, y = 4 }`.
                     // This arm did not exist, so a struct pattern under
                     // `let static` recorded no sub-bindings at all and both
-                    // field names surfaced as UnboundVariable â€” even though
+                    // field names surfaced as UnboundVariable — even though
                     // StaticEval.bindPattern had already folded each leaf to a
                     // compile-time value. That fold is what Lowering's
                     // TDeclStatic path prefers (a direct constant per leaf);
@@ -9396,8 +9396,8 @@ and checkDecl (env: TypeEnv) (decl: Decl) : TypeResult<TypedDecl * TypeEnv> =
                     // its name, IRId and type, so without it the value existed
                     // with nothing to attach it to.
                     //
-                    // Field types come from structFieldTypesOf â€” the same
-                    // declared-field list DeclLet reads â€” and leaves are matched
+                    // Field types come from structFieldTypesOf — the same
+                    // declared-field list DeclLet reads — and leaves are matched
                     // BY NAME, so a missing or extra field pattern cannot shift
                     // the field any other leaf projects (Lowering's struct
                     // sub-binding emits IRFieldAccess on the leaf's own name).
@@ -9547,7 +9547,7 @@ and checkDecl (env: TypeEnv) (decl: Decl) : TypeResult<TypedDecl * TypeEnv> =
                     }
                     Ok (TDeclImpl timpl, env'))
         | None ->
-            // Can't resolve type name â€” pass through with empty methods
+            // Can't resolve type name — pass through with empty methods
             let timpl : TypedImplDecl = {
                 ForType = implDecl.ForType
                 TypeName = "_"
@@ -9613,7 +9613,7 @@ and checkDecl (env: TypeEnv) (decl: Decl) : TypeResult<TypedDecl * TypeEnv> =
                         | None -> ()
                     e
             | None ->
-                // Provider or unknown module â€” bind alias as opaque so references type-check
+                // Provider or unknown module — bind alias as opaque so references type-check
                 // (actual types resolved during lowering when provider runs)
                 match style with
                 | ImportQualified aliasOpt ->
@@ -9673,7 +9673,7 @@ and checkFunctionDecl (env: TypeEnv) (funcDecl: FunctionDecl) : TypeResult<Typed
     // `x: mut T` params bind MutPassable so the body may assign into them
     // (gradient out-buffers). Array-typed only: the C++ ABI passes the
     // Array<> wrapper by value, which aliases the caller's DATA (shallow
-    // pointer copy) â€” element writes land in the caller â€” but a scalar
+    // pointer copy) — element writes land in the caller — but a scalar
     // passed by value would silently drop its writes.
     let mutParamErr =
         funcDecl.Params |> List.tryPick (fun p ->
@@ -9692,7 +9692,7 @@ and checkFunctionDecl (env: TypeEnv) (funcDecl: FunctionDecl) : TypeResult<Typed
     // Mutual-group scans. Member types are forbidden in parameter positions
     // (alias transparency would silently erase the constraint); a declared
     // return tuple naming a full group makes this function the group's
-    // introduce-site â€” checks emit at the return, annotated callers exempt.
+    // introduce-site — checks emit at the return, annotated callers exempt.
     let mutualParamErr =
         funcDecl.Params |> List.tryPick (fun p ->
             match p.Type with
@@ -9763,7 +9763,7 @@ and checkFunctionDecl (env: TypeEnv) (funcDecl: FunctionDecl) : TypeResult<Typed
                      | Mutable -> MutPassable
                      | _ -> ReadOnly
         bodyEnv <- bindVarFull p.Name varId paramTypes.[i] None assign None bodyEnv
-        // Dist-typed parameters carry their license token as provenance â€”
+        // Dist-typed parameters carry their license token as provenance —
         // the `where indep` handler licenses exactly these tokens for the
         // body, and call-site discharge maps them back to actuals.
         (match env.Subst.Resolve paramTypes.[i] with
@@ -9784,7 +9784,7 @@ and checkFunctionDecl (env: TypeEnv) (funcDecl: FunctionDecl) : TypeResult<Typed
         // elements against `(StationIdx, Idx<3>)` (giving the literals
         // their named-index types directly) rather than synthesizing
         // `(Int64, Int64)` and then failing to unify against the named
-        // tuple. Without an annotation, fall back to plain inference â€”
+        // tuple. Without an annotation, fall back to plain inference —
         // there's no expectation to push.
         let bodyResult =
             match funcDecl.ReturnType with
@@ -9803,7 +9803,7 @@ and checkFunctionDecl (env: TypeEnv) (funcDecl: FunctionDecl) : TypeResult<Typed
             // through case (line ~3082) is `inferExpr + unify` already,
             // and the special-cased shapes (literals, tuples) build a
             // TypedExpr whose .Type matches the expected type by
-            // construction â€” so this unify is mostly a no-op when
+            // construction — so this unify is mostly a no-op when
             // checkExpr was used. When the bodyResult came from inferExpr
             // (no annotation), retType is itself a fresh inference var
             // and the unify just binds it. Either way we propagate the
@@ -9823,11 +9823,11 @@ and checkFunctionDecl (env: TypeEnv) (funcDecl: FunctionDecl) : TypeResult<Typed
                     funcDecl.WhereClause
             // Register the function's comm groups so a later kernel-use site
             // (etaExpandFunctionKernel / deferred-former eta) can surface them
-            // onto the synthesized wrapper lambda â€” otherwise `where comm` on a
+            // onto the synthesized wrapper lambda — otherwise `where comm` on a
             // named function is dropped and the loop emits dense storage.
             if not (List.isEmpty commGroups) then
                 env.FuncCommGroups.[funcDecl.Name] <- commGroups
-            // Same for `where anticomm(...)` â€” its own side-channel, since a
+            // Same for `where anticomm(...)` — its own side-channel, since a
             // where-clause attribute that no surfacing site re-attaches is
             // dropped by the kernel-position eta wrapper (silently falling
             // back to dense storage).
@@ -9852,7 +9852,7 @@ and checkFunctionDecl (env: TypeEnv) (funcDecl: FunctionDecl) : TypeResult<Typed
                              funcDecl.WhereClause (sprintf "function '%s'" funcDecl.Name)
             // Stage 3 (symmetry deduction, early tier): summarize the
             // adjacent-pair swap parity of this fixed-arity function's body
-            // and record it for kernel-position uses â€” buildApplyInfo
+            // and record it for kernel-position uses — buildApplyInfo
             // consults the summary when the kernel is an eta-expanded
             // wrapper around this function. Poly packs are late-tier work
             // (their pairs only exist per materialized arity): skipped.
@@ -9861,12 +9861,12 @@ and checkFunctionDecl (env: TypeEnv) (funcDecl: FunctionDecl) : TypeResult<Typed
                     match env.Subst.Resolve p.Type with IRTPoly _ -> true | _ -> false)
             // Interprocedural SIGN-LINEARITY summary, recorded BEFORE the pair
             // deduction of this same body so a helper is available to its
-            // callers (decl order) â€” `mymean(row) = reduce(row,(+))/extents(row)`
+            // callers (decl order) — `mymean(row) = reduce(row,(+))/extents(row)`
             // is odd in `row`, which is what lets a caller's `mymean(x - y)`
             // deduce PNeg instead of PBottom. Fixed-arity (non-Poly) only: a
             // pack has no per-position summary to index by argument. Keyed by
-            // funcVarId â€” the id every other body's reference to this function
-            // resolves to â€” so a shadowing parameter cannot borrow the law.
+            // funcVarId — the id every other body's reference to this function
+            // resolves to — so a shadowing parameter cannot borrow the law.
             let signResolver (calleeId: IRId) =
                 match env.FuncSignParities.TryGetValue calleeId with
                 | true, ps -> Some ps
@@ -9883,8 +9883,8 @@ and checkFunctionDecl (env: TypeEnv) (funcDecl: FunctionDecl) : TypeResult<Typed
                 IdeDeductions.addPairs funcDecl.Name
                     (typedParams |> List.map (fun p -> p.Name)) deducedPairs
             // Stage-3 LATE TIER: pack symmetry for arity-polymorphic kernels.
-            // The âˆ€-arity AC-fold template first (the head::tail recursion
-            // itself â€” packprod, comoment_prod); failing that, the
+            // The ∀-arity AC-fold template first (the head::tail recursion
+            // itself — packprod, comoment_prod); failing that, the
             // compositional wrapper walk (comoment = mean(prod(a))), which
             // resolves callees through PackDeducedComm in decl order.
             // PInv-or-PBottom only: packs never claim PNeg, so this table
@@ -9906,7 +9906,7 @@ and checkFunctionDecl (env: TypeEnv) (funcDecl: FunctionDecl) : TypeResult<Typed
                          (Blade.TypeEnv.DeducedPackComm (funcDecl.Name, packP.Name)) tBody.Span
                      IdeDeductions.addPack funcDecl.Name packP.Name packSummary
              | _ -> ())
-            // RECORDING ONLY (channel (f)) â€” everything below this point in the
+            // RECORDING ONLY (channel (f)) — everything below this point in the
             // decl's deduction is unchanged; these two loops only WRITE to the
             // IDE side-channel. Ranks are read here rather than after the close
             // 60 lines down because the close resolves the var: once `unify`
@@ -9926,7 +9926,7 @@ and checkFunctionDecl (env: TypeEnv) (funcDecl: FunctionDecl) : TypeResult<Typed
                             (funcDecl.Name, typedParams.[i].Name, typedParams.[i + 1].Name, i,
                              par = Blade.Deduce.PNeg))
                         tBody.Span)
-            // Ranks the body FORCED on unannotated params â€” read off the very
+            // Ranks the body FORCED on unannotated params — read off the very
             // same bounds the decl-close block below consumes (same Resolve,
             // same arity guard, same GetRankLowerBound), so what the editor
             // reports and what the checker closes agree by construction.
@@ -9943,9 +9943,9 @@ and checkFunctionDecl (env: TypeEnv) (funcDecl: FunctionDecl) : TypeResult<Typed
                 | _ -> ())
             // Declared comm on a named function whose body is PROVABLY
             // antisymmetric in a declared adjacent pair is the
-            // silent-corruption case Â§4 exists for. A named function cannot
+            // silent-corruption case §4 exists for. A named function cannot
             // be a reynolds kernel (reynolds requires a lambda), so no
-            // iteration license can apply here â€” hard error. PBottom stays
+            // iteration license can apply here — hard error. PBottom stays
             // trusted (the escape hatch when the analysis is too weak).
             // The declared-anticomm twin is the same check with the parities
             // exchanged: a body provably INVARIANT under a pair declared
@@ -9974,10 +9974,10 @@ and checkFunctionDecl (env: TypeEnv) (funcDecl: FunctionDecl) : TypeResult<Typed
             | None ->
             // Close the body-only rank deduction (stage 2): a param whose
             // type is still an unresolved inference var but carries a rank
-            // lower bound â€” accumulated from the body's builtin pins and
-            // direct-call demands, max-joined â€” is pinned to a fresh rank-k
+            // lower bound — accumulated from the body's builtin pins and
+            // direct-call demands, max-joined — is pinned to a fresh rank-k
             // array with a free element type. The minimum rank the body
-            // forces IS the cell rank (plan Â§3.1, body-only by construction:
+            // forces IS the cell rank (plan §3.1, body-only by construction:
             // bounds only ever came from this body's own uses). Params with
             // no bound stay fully generic (scalar-or-array polymorphism,
             // unchanged); params under a `T^k` annotation are governed by
@@ -9991,19 +9991,19 @@ and checkFunctionDecl (env: TypeEnv) (funcDecl: FunctionDecl) : TypeResult<Typed
             let resolvedRet = env.Subst.Resolve(retType)
             // ================================================================
             // PHASE B (docs/plan-equivariance-in-types.md, B1+B2): the typed
-            // REPRESENTATION-STATUS deduction â€” the fourth lattice, beside the
+            // REPRESENTATION-STATUS deduction — the fourth lattice, beside the
             // parity deduction above.
             //
             // It sits HERE rather than beside deduceSignParities on purpose:
-            // the whole Â§0 payoff is deducing from CLOSED types, and the rank
+            // the whole §0 payoff is deducing from CLOSED types, and the rank
             // deduction only closes at `closeDeducedRanks` two lines up. Above
             // this point an unannotated parameter is still an IRTInfer and
-            // would classify unclassifiable â€” the exact limitation the move to
+            // would classify unclassifiable — the exact limitation the move to
             // typecheck exists to remove.
             //
             // `Subst.Resolve`, deliberately NOT `Zonk.zonkType`: zonk DEFAULTS
             // an unsolved variable to Float64, which would present a still-open
-            // parameter as a provable invariant SCALAR â€” a false shape, and
+            // parameter as a provable invariant SCALAR — a false shape, and
             // shape is load-bearing in the scaling rule. Resolve leaves it
             // IRTInfer, which classifies unclassifiable and skips the function.
             //
@@ -10026,11 +10026,11 @@ and checkFunctionDecl (env: TypeEnv) (funcDecl: FunctionDecl) : TypeResult<Typed
                  Blade.DeduceRep.recordCertified env.FuncRepSigs repResolve
                      funcDecl.Name funcVarId declaredGroup repParams resolvedRet
                  // PHASE C1: the SECOND OPINION. The seam checker has already
-                 // ruled on this body and remains the authority (plan Â§4); this
+                 // ruled on this body and remains the authority (plan §4); this
                  // walk changes no verdict and gates no code. Only a DISAGREE
                  // is recorded, and a disagreement between two independent
                  // judgments of the same theorem is a compiler bug, not a user
-                 // error â€” the LieGuardFailure posture. `recordCertified` ran
+                 // error — the LieGuardFailure posture. `recordCertified` ran
                  // FIRST on purpose, so a recursive body can assume its own
                  // declared certificate (assume-guarantee), exactly as the
                  // seam's judgeFunction does.
@@ -10058,7 +10058,7 @@ and checkFunctionDecl (env: TypeEnv) (funcDecl: FunctionDecl) : TypeResult<Typed
             }
             Ok (TDeclFunction tf, envWithFunc))))
 
-    // Close the license scope (error paths included â€” `result` has
+    // Close the license scope (error paths included — `result` has
     // materialized either way by this point).
     for (cname, cargs) in customConjuncts do
         Blade.Constraints.lookupConstraint cname |> Option.iter (fun h -> h.ExitBody funcDecl.Name cargs)
@@ -10070,7 +10070,7 @@ and checkFunctionDecl (env: TypeEnv) (funcDecl: FunctionDecl) : TypeResult<Typed
 /// struct/mutual where-conjunct must have fully annotated params + return.
 /// Its pre-pass type is created ONCE (shared tyvars across every call
 /// site), so an unannotated predicate unified against one owner's field
-/// types would silently over-constrain the next â€” annotations pin the
+/// types would silently over-constrain the next — annotations pin the
 /// contract instead.
 and private wherePredicateAnnotationCheck (env: TypeEnv) (owner: string) (conjuncts: Expr list) : TypeResult<unit> =
     let rec heads (e: Expr) : string list =
@@ -10106,7 +10106,7 @@ and registerTypeDecl (env: TypeEnv) (typeDecl: TypeDecl) : TypeResult<TypeEnv> =
         //
         // Without this, `type B = A` (where A is an index or enum alias)
         // falls to the generic `_ -> TDIAlias` branch and B is never
-        // recognized as an index/enum alias â€” using B in array index lists
+        // recognized as an index/enum alias — using B in array index lists
         // or foreign-key element positions then fails with placeholder
         // records.
         let chasedBody =
@@ -10128,7 +10128,7 @@ and registerTypeDecl (env: TypeEnv) (typeDecl: TypeDecl) : TypeResult<TypeEnv> =
                 // behaviour-preserving for everything that shipped before):
                 //   - an irreps identity: fold the name INTO the tag exactly
                 //     as the TyIrrepsIdx arm below does, rather than
-                //     overwriting it â€” otherwise aliasing silently drops the
+                //     overwriting it — otherwise aliasing silently drops the
                 //     spec payload and breaks Tag<->IxKind agreement;
                 //   - a bad-spec ERROR marker: keep it, so the consumption-site
                 //     diagnostic still fires through the alias.
@@ -10159,7 +10159,7 @@ and registerTypeDecl (env: TypeEnv) (typeDecl: TypeDecl) : TypeResult<TypeEnv> =
                     | _ -> idx
                 Ok (TDIIndexType (name, named, chasedBody))
             | TyPgIrrepsIdx _ ->
-                // THE STAGE-3 ALIAS FIX, REPLAYED for the pg tag (Â§7's 5b-i
+                // THE STAGE-3 ALIAS FIX, REPLAYED for the pg tag (§7's 5b-i
                 // checklist item). Identical reasoning one member over: the
                 // nominative-alias rule folds the alias name INTO the
                 // pg-irreps identity tag (mkPgIrrepsTag group (Some name) ...)
@@ -10181,7 +10181,7 @@ and registerTypeDecl (env: TypeEnv) (typeDecl: TypeDecl) : TypeResult<TypeEnv> =
             | TyEnumIdx valuesExpr ->
                 // Static-evaluate the array literal to extract values. Each
                 // element must be either an int literal (with optional negation)
-                // or a string literal. Mixed kinds are a type error â€” the two
+                // or a string literal. Mixed kinds are a type error — the two
                 // backings (int64_t vs std::string) cannot share one EnumIdx.
                 let raw =
                     match valuesExpr.Kind with
@@ -10210,7 +10210,7 @@ and registerTypeDecl (env: TypeEnv) (typeDecl: TypeDecl) : TypeResult<TypeEnv> =
         defInfoResult |> Result.map (fun defInfo -> registerTypeDef name defInfo env)
 
     | TyDeclStruct (name, typeParams, fields, constraints, isStatic) ->
-        // Mutual member types are forbidden as field types â€” alias
+        // Mutual member types are forbidden as field types — alias
         // transparency would silently erase the constraint.
         let memberMisuse =
             fields |> List.tryPick (fun f ->
@@ -10228,7 +10228,7 @@ and registerTypeDecl (env: TypeEnv) (typeDecl: TypeDecl) : TypeResult<TypeEnv> =
         // `static struct` DECLARES the static-eligibility fence instead of
         // leaving it to be inferred at each use: every field type must be a
         // shape StaticEval can carry as a StaticValue. Ordinary structs skip
-        // this entirely â€” nothing about them changes.
+        // this entirely — nothing about them changes.
         let staticFieldErr =
             if not isStatic then None
             else
@@ -10250,7 +10250,7 @@ and registerTypeDecl (env: TypeEnv) (typeDecl: TypeDecl) : TypeResult<TypeEnv> =
                         | _ when (match lookupTypeDef n env with Some (TDIAlias _) -> true | _ -> false) ->
                             // Aliases are transparent in the value world but the
                             // surface type is all we have here; be explicit.
-                            Some (sprintf "'%s' is a type alias â€” write the underlying primitive" n)
+                            Some (sprintf "'%s' is a type alias — write the underlying primitive" n)
                         | _ -> Some (sprintf "type '%s' is not a static shape" n)
                     | TyArray _ | TyAbstractArray _ -> Some "array types are not statically evaluable"
                     | TyFunc _ -> Some "function types are not statically evaluable"
@@ -10260,7 +10260,7 @@ and registerTypeDecl (env: TypeEnv) (typeDecl: TypeDecl) : TypeResult<TypeEnv> =
                 fields |> List.tryPick (fun f ->
                     why f.Type |> Option.map (fun w -> StaticStructField (name, f.Name, w)))
         // Bounds that CROSS, decided statically: `min=` strictly above
-        // `max=`. Only the INCLUSIVE spelling is checked â€” `in lo .. hi` is
+        // `max=`. Only the INCLUSIVE spelling is checked — `in lo .. hi` is
         // pre-existing syntax whose empty case (`in 0 .. 0`) has always been
         // accepted, and an empty solution set is a warning-class event per
         // the constrained-index plan, not an error. Only fires when both
@@ -10286,7 +10286,7 @@ and registerTypeDecl (env: TypeEnv) (typeDecl: TypeDecl) : TypeResult<TypeEnv> =
         | None ->
             let env = if isStatic then { env with StaticStructs = Set.add name env.StaticStructs } else env
             let fieldTypes = fields |> List.map (fun f -> (f.Name, lowerTypeExpr env f.Type))
-            // Field range refinements: SEQUENTIAL scoping â€” a bound may
+            // Field range refinements: SEQUENTIAL scoping — a bound may
             // reference only EARLIER fields and statics, and call only
             // statically-evaluable functions (the closed forms that lower
             // into type positions).
@@ -10320,11 +10320,11 @@ and registerTypeDecl (env: TypeEnv) (typeDecl: TypeDecl) : TypeResult<TypeEnv> =
             | Some e -> Error e
             | None ->
             // Full conjunct list (declared where + desugared field bounds)
-            // via the SHARED helper â€” StaticEval uses the same one for
+            // via the SHARED helper — StaticEval uses the same one for
             // fold-time checks, so the two worlds cannot drift.
             let allConstraints = structConjuncts fields constraints
             // Validate all conjuncts at declaration: fields bound, each
-            // conjunct must typecheck to Bool. Hard errors â€” a malformed
+            // conjunct must typecheck to Bool. Hard errors — a malformed
             // constraint is a compile error, not a silently dropped check.
             let mutable conjEnv = env
             for (fn, ft) in fieldTypes do
@@ -10354,7 +10354,7 @@ and registerTypeDecl (env: TypeEnv) (typeDecl: TypeDecl) : TypeResult<TypeEnv> =
             registerVariantTag v.Name name (v.Data |> Option.map (lowerTypeExpr env)) e) env')
 
     | TyDeclMutualGroup (members, constraints) ->
-        // Members register as ordinary transparent aliases â€” unannotated use
+        // Members register as ordinary transparent aliases — unannotated use
         // of the underlying types stays completely unconstrained. The group
         // itself is a side registration consumed at binding sites.
         let groupId = members |> List.head |> fst
@@ -10385,7 +10385,7 @@ and registerTypeDecl (env: TypeEnv) (typeDecl: TypeDecl) : TypeResult<TypeEnv> =
                     | Some (TDIStruct (_, _, fields, _)) -> fields |> List.map fst |> Set.ofList
                     | _ -> Set.empty
                 // Position-sensitive reference validation: member field paths,
-                // bare scalar members, folded statics. Call HEADS are open â€”
+                // bare scalar members, folded statics. Call HEADS are open —
                 // guards are inlined runtime code on the backend, so any
                 // Bool-typed callable is legal (the conjunct typecheck below
                 // rejects unknown/ill-typed callees); args still classify.
@@ -10457,7 +10457,7 @@ and registerTypeDecl (env: TypeEnv) (typeDecl: TypeDecl) : TypeResult<TypeEnv> =
                                     Map.add mname groupId m) env1.MutualMembers }))))
 
 // ============================================================================
-// 11b. Zonking â€” Final Type Resolution
+// 11b. Zonking — Final Type Resolution
 // ============================================================================
 // After type checking, some IRTInfer nodes may remain in the typed AST.
 // These are either (a) solved but unresolved (the substitution knows the answer
@@ -10699,9 +10699,9 @@ let private importedStaticSeed (env: TypeEnv) (decls: Located<Decl> list) : Map<
 let checkModule (env: TypeEnv) (modul: ModuleDecl) : TypedModule * TypeEnv * CompileError list =
     // Resolve compile-time-known static VALUES up front (the same
     // StaticEval.resolveStatics the lowering phase runs as its Phase 0), so
-    // type-checking can consult them â€” e.g. a `replicate` count written as a
+    // type-checking can consult them — e.g. a `replicate` count written as a
     // `let static`/static-function call rather than a bare literal.
-    // `let static` is an assertion â€” fold or fail loudly â€” so a decl that
+    // `let static` is an assertion — fold or fail loudly — so a decl that
     // doesn't statically evaluate is a compile error here, not a silent
     // demotion to a runtime binding (lambda statics excepted: they declare
     // functions). A circular dependency, previously swallowed, also lands
@@ -10726,7 +10726,7 @@ let checkModule (env: TypeEnv) (modul: ModuleDecl) : TypedModule * TypeEnv * Com
             let errs =
                 failures |> List.map (fun (f: StaticEval.StaticFailure) ->
                     let msg =
-                        sprintf "`let static %s` does not evaluate at compile time: %s. `let static` asserts a compile-time value â€” use plain `let` for values computed at runtime."
+                        sprintf "`let static %s` does not evaluate at compile time: %s. `let static` asserts a compile-time value — use plain `let` for values computed at runtime."
                             (f.Names |> String.concat ", ") f.Reason
                     locateError f.Span env' (Other msg))
             env', errs
@@ -10806,7 +10806,7 @@ let checkModule (env: TypeEnv) (modul: ModuleDecl) : TypedModule * TypeEnv * Com
             // buries the real root cause. A fresh (unsolved) var unifies with
             // anything, so it silences the cascade without manufacturing a
             // second layer of false errors the way binding the *annotation*
-            // type would. (Value bindings only â€” type/interface/impl/import/
+            // type would. (Value bindings only — type/interface/impl/import/
             // unit decls don't produce value-scope names that cascade here.)
             let recoveryNames =
                 match d.Value with
@@ -10860,7 +10860,7 @@ let checkProgram (program: Program) : TypedProgram * IRBuilder * CompileError li
 ///
 /// Pre-pass: IndexTypeValidator enforces the rules for where index types may
 /// appear in declaration-level type expressions. Validation errors abort
-/// compilation early â€” once an AST passes validation, downstream lowering
+/// compilation early — once an AST passes validation, downstream lowering
 /// can assume index types only appear in their permitted positions.
 /// IDE side-channel: the partial typed program + builder from the most recent
 /// checkProgram. typeCheck discards these when the checker reports errors, but
@@ -10895,8 +10895,8 @@ let typeCheck (program: Program) : Result<TypedProgram * IRBuilder * string list
     WarningLog.reset ()
     DeducedFacts.reset ()
     // Phase B typed rep-deduction channel: same lifecycle as the facts channel
-    // beside it. The per-module SUMMARY tables need no reset â€” they hang off
-    // the TypeEnv that `emptyEnv ()` builds fresh below â€” but the proposal
+    // beside it. The per-module SUMMARY tables need no reset — they hang off
+    // the TypeEnv that `emptyEnv ()` builds fresh below — but the proposal
     // channel and the skipped-polymorphic tally are AsyncLocal and would
     // otherwise accumulate across compilations in one process (the test host).
     Blade.DeduceRep.TypedCertProposals.reset ()
@@ -10908,7 +10908,7 @@ let typeCheck (program: Program) : Result<TypedProgram * IRBuilder * string list
     Blade.DeduceRep.RepCheckCensus.reset ()
     // ========================================================================
     // THE C2 STITCH: register the typed polynomial engine as DeduceRep's
-    // discharger (plan Â§3 C2).
+    // discharger (plan §3 C2).
     // ========================================================================
     //
     // DeduceRep compiles at index 29 and cannot name Blade.ML.PolyExtractTyped
@@ -10923,7 +10923,7 @@ let typeCheck (program: Program) : Result<TypedProgram * IRBuilder * string list
     //
     // LIEGUARDFAILURE IS CONVERTED, NOT SWALLOWED. `PolyExtractTyped.engineVerdict`
     // is total for every ordinary escape but deliberately RE-RAISES
-    // `LieDischarge.LieGuardFailure` â€” the post-accept float guard, which is a
+    // `LieDischarge.LieGuardFailure` — the post-accept float guard, which is a
     // compiler-bug assert rather than a decoder refusal, and which
     // `MLEquiv.judgeFunction` also re-raises. Left alone it would be eaten
     // twice over (by `tryDischarge`'s wrapper, then by `deduceFunctionRep`'s
@@ -10931,7 +10931,7 @@ let typeCheck (program: Program) : Result<TypedProgram * IRBuilder * string list
     // returning a refutation preserves its meaning at both consumers: in
     // CHECKING a refutation surfaces as a disagreement, which is exactly right
     // for an internal guard trip; in DEDUCTION it is simply a decline. No other
-    // exception gets this treatment â€” they stay swallowed to "not applicable".
+    // exception gets this treatment — they stay swallowed to "not applicable".
     Blade.DeduceRep.EngineDischarge.register (fun resolve parms sg body ->
         try
             match Blade.ML.PolyExtractTyped.engineVerdict resolve parms sg body with
@@ -10989,7 +10989,7 @@ let typeCheck (program: Program) : Result<TypedProgram * IRBuilder * string list
         // (message, span) pairs in Equiv.CertSuggestions / Galilean.
         // GalCertSuggestions (what the editor ghost-renders). The ML elaborator
         // filled both side-channels above, several phases back, so they are
-        // appended AFTER the checker's own â€” equiv strings first, then galilean,
+        // appended AFTER the checker's own — equiv strings first, then galilean,
         // each in channel order. That is the SAME sequence
         // `Lowering.typeCheckWarningDiagnostics` assembles its rendered
         // Diagnostics in, so the strings and the diagnostics stay parallel.
@@ -10999,7 +10999,7 @@ let typeCheck (program: Program) : Result<TypedProgram * IRBuilder * string list
             @ (Blade.ML.Galilean.GalCertSuggestions.get () |> List.map fst)
         // PHASE C1: drain the declared-certificate agreement channel. An entry
         // here means the typed walker and the seam checker reached CONTRADICTORY
-        // definite judgments about the same certified body â€” which cannot be the
+        // definite judgments about the same certified body — which cannot be the
         // user's fault, because the seam already accepted the program. It
         // surfaces as an INTERNAL COMPILER ERROR (BL9004, this disagreement's
         // own registered code) and stops the build, the LieGuardFailure
@@ -11010,7 +11010,7 @@ let typeCheck (program: Program) : Result<TypedProgram * IRBuilder * string list
             Blade.DeduceRep.RepCheckDisagreements.get ()
             |> List.map (fun (owner, detail, span) ->
                 { Error =
-                    Other (sprintf "internal compiler error: equivariance certificate validation disagrees with the elaboration checker for '%s': %s. This is a bug in the Blade compiler, not in your program â€” please report it (the certificate itself was accepted by the checking authority; only the typed second opinion dissents)" owner detail)
+                    Other (sprintf "internal compiler error: equivariance certificate validation disagrees with the elaboration checker for '%s': %s. This is a bug in the Blade compiler, not in your program — please report it (the certificate itself was accepted by the checking authority; only the typed second opinion dissents)" owner detail)
                   Span = span
                   Context = [ "equiv certificate validation" ]
                   Code = Some "BL9004" })

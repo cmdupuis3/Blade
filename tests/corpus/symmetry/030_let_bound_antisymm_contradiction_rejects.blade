@@ -5,7 +5,7 @@
 // diagonal that is genuinely zero here but negates half the mirrored reads.
 //
 // Crucially for the binding-form descent, this file COMPILED before the
-// deduction learned to look inside `{ let d = ... }` â€” the block bottomed out
+// deduction learned to look inside `{ let d = ... }` — the block bottomed out
 // at PBottom, and PBottom stays trusted. It can only be rejected if the
 // descent actually reached PInv through the inlined (x - y) * (x - y), which
 // makes the reject a positive assertion about the analysis rather than a

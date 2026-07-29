@@ -1,7 +1,7 @@
 ﻿// TEST: Let-bound named-function body contradicts antisymm (rejects)
 // symmetry/030 through the OTHER producer. The pair deduction runs at two
-// independent sites â€” buildApplyInfo, for a lambda meeting a loop, and
-// checkFunctionDecl, for a named function's declaration summary â€” and each
+// independent sites — buildApplyInfo, for a lambda meeting a loop, and
+// checkFunctionDecl, for a named function's declaration summary — and each
 // calls deduceAdjacentPairs itself. Normalizing binding forms inside the
 // deduction rather than at either call site is what makes one change cover
 // both; this file is the guard on that, and would go quiet if the descent were
