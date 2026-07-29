@@ -10757,6 +10757,43 @@ let typeCheck (program: Program) : Result<TypedProgram * IRBuilder * string list
     // must count THIS program's certified decls, not the test host's history.
     Blade.DeduceRep.RepCheckDisagreements.reset ()
     Blade.DeduceRep.RepCheckCensus.reset ()
+    // ========================================================================
+    // THE C2 STITCH: register the typed polynomial engine as DeduceRep's
+    // discharger (plan §3 C2).
+    // ========================================================================
+    //
+    // DeduceRep compiles at index 29 and cannot name Blade.ML.PolyExtractTyped
+    // (index 120), so the dependency is inverted through the hook slot and tied
+    // here, where both are visible. Registration happens at every `typeCheck`
+    // entry rather than once in a module initializer: it is a single mutable
+    // write, it is idempotent, and it means the production adapter is
+    // ALWAYS the one installed for a real compilation even if a test cleared or
+    // stubbed the slot beforehand. `EngineDischarge.clear ()` therefore stays
+    // usable for test isolation without leaving the compiler permanently
+    // engine-less.
+    //
+    // LIEGUARDFAILURE IS CONVERTED, NOT SWALLOWED. `PolyExtractTyped.engineVerdict`
+    // is total for every ordinary escape but deliberately RE-RAISES
+    // `LieDischarge.LieGuardFailure` — the post-accept float guard, which is a
+    // compiler-bug assert rather than a decoder refusal, and which
+    // `MLEquiv.judgeFunction` also re-raises. Left alone it would be eaten
+    // twice over (by `tryDischarge`'s wrapper, then by `deduceFunctionRep`'s
+    // own try/with) and the assert would be silently lost. Catching it HERE and
+    // returning a refutation preserves its meaning at both consumers: in
+    // CHECKING a refutation surfaces as a disagreement, which is exactly right
+    // for an internal guard trip; in DEDUCTION it is simply a decline. No other
+    // exception gets this treatment — they stay swallowed to "not applicable".
+    Blade.DeduceRep.EngineDischarge.register (fun resolve parms sg body ->
+        try
+            match Blade.ML.PolyExtractTyped.engineVerdict resolve parms sg body with
+            | Some Blade.ML.PolyExtractTyped.EngineHolds ->
+                Some Blade.DeduceRep.EngineConfirms
+            | Some (Blade.ML.PolyExtractTyped.EngineRefutes msg) ->
+                Some (Blade.DeduceRep.EngineRefutes msg)
+            | None -> None
+        with Blade.ML.LieDischarge.LieGuardFailure msg ->
+            Some (Blade.DeduceRep.EngineRefutes
+                    (sprintf "the Lie-discharge post-accept guard tripped while validating this body: %s" msg)))
     // Staged-former unfold FIRST: `static method_for/object_for/for`
     // argument lists elaborate to plain formers before any other stage
     // (ML/PPL/math/grad and the checker never see ExprStatic).
@@ -10814,8 +10851,9 @@ let typeCheck (program: Program) : Result<TypedProgram * IRBuilder * string list
         // here means the typed walker and the seam checker reached CONTRADICTORY
         // definite judgments about the same certified body — which cannot be the
         // user's fault, because the seam already accepted the program. It
-        // surfaces as an INTERNAL COMPILER ERROR (BL9001, the registered ICE
-        // code) and stops the build, the LieGuardFailure posture: a compiler
+        // surfaces as an INTERNAL COMPILER ERROR (BL9004, this disagreement's
+        // own registered code) and stops the build, the LieGuardFailure
+        // posture: a compiler
         // that knows two of its own judgments disagree must not quietly emit
         // code. Abstentions are silent by construction and never reach here.
         let repIce =
@@ -10825,7 +10863,7 @@ let typeCheck (program: Program) : Result<TypedProgram * IRBuilder * string list
                     Other (sprintf "internal compiler error: equivariance certificate validation disagrees with the elaboration checker for '%s': %s. This is a bug in the Blade compiler, not in your program — please report it (the certificate itself was accepted by the checking authority; only the typed second opinion dissents)" owner detail)
                   Span = span
                   Context = [ "equiv certificate validation" ]
-                  Code = Some "BL9001" })
+                  Code = Some "BL9004" })
         let errors = errors @ repIce
         if errors.IsEmpty then Ok (tp, builder, warnings)
         else Error errors

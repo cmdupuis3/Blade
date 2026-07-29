@@ -1069,7 +1069,20 @@ type EngineVerdict =
 
 /// The registered discharger. `None` from the hook means NOT APPLICABLE — the
 /// body is outside the engine's fragment — and leaves the verdict at abstain.
-type EngineHook = GroupT -> RepSigT -> TypedExpr -> EngineVerdict option
+///
+/// The slot carries `resolve` and the PARAMETER LIST alongside the signature
+/// because an extractor needs both and neither is recoverable from `RepSigT`:
+/// `sg.Params` holds (name, status) pairs, but binding a rep parameter to a
+/// polynomial's variable vector needs the parameter's BINDER ID and its type,
+/// which only `RepParam` carries — and every type reaching the extractor has to
+/// go through the same `resolve` the walker used, or the two disagree about
+/// what a parameter is. `parms` is in `sg.Params` order, positionally.
+///
+/// The group is deliberately NOT a separate argument: it already rides in
+/// `sg.Group`, and passing it twice would let a caller desynchronize the
+/// hypothesis from the signature it is judging.
+type EngineHook =
+    (IRType -> IRType) -> RepParam list -> RepSigT -> TypedExpr -> EngineVerdict option
 
 /// The slot itself, in the `Blade.Constraints.registerConstraint` shape: a
 /// process-wide mutable holding at most one discharger. Empty until C2 fills
@@ -1082,10 +1095,18 @@ module EngineDischarge =
     let isRegistered () : bool = hook.IsSome
     /// Total by construction: a second opinion may never crash a compiling
     /// program, so any escape from the discharger reads as "not applicable".
-    let tryDischarge (g: GroupT) (sg: RepSigT) (body: TypedExpr) : EngineVerdict option =
+    ///
+    /// ONE ESCAPE IS DELIBERATELY NOT SWALLOWED HERE, because it is converted
+    /// before it ever reaches this wrapper: `LieDischarge.LieGuardFailure` is a
+    /// compiler-bug assert, not a decoder escape, and the registered adapter
+    /// catches it specifically and returns `EngineRefutes`. See the adapter in
+    /// TypeCheck. Everything else — registry misses, spec-decoder throws — is a
+    /// legitimate "the engine has nothing to say".
+    let tryDischarge (resolve: IRType -> IRType) (parms: RepParam list)
+                     (sg: RepSigT) (body: TypedExpr) : EngineVerdict option =
         match hook with
         | None -> None
-        | Some h -> (try h g sg body with _ -> None)
+        | Some h -> (try h resolve parms sg body with _ -> None)
 
 // ----------------------------------------------------------------------------
 // The disagreement channel and the agreement census
@@ -1193,10 +1214,23 @@ let checkDeclaredRep (certified: System.Collections.Generic.Dictionary<IRId, Rep
                 List.zip parms sg.Params
                 |> List.fold (fun m (p, (_, st)) -> Map.add p.PId st m) Map.empty) body
             let engineFallback (why: string) =
-                match EngineDischarge.tryDischarge g sg body with
+                match EngineDischarge.tryDischarge resolve parms sg body with
                 | Some EngineConfirms -> RepConfirm
                 | Some (EngineRefutes d) -> RepDisagree d
                 | None -> RepAbstain why
+            // A DEFINITE-BUT-MISMATCHED composition status is the shape this
+            // module has always declared untrustworthy — "reachable through a
+            // modeling gap C2 is meant to close". C2 has now landed, so those
+            // arms consult it too, but they honour ONLY a discharge: an
+            // `EngineRefutes` there stacks a distrusted composition verdict on
+            // top of a refutation, which is not the clean single-source signal a
+            // compiler-bug report needs. Where composition has NO opinion
+            // (TBottom/TOpaque) the engine is the sole judge and its refutation
+            // does stand alone — that is `engineFallback`.
+            let engineUpgradeOnly (why: string) =
+                match EngineDischarge.tryDischarge resolve parms sg body with
+                | Some EngineConfirms -> RepConfirm
+                | Some (EngineRefutes _) | None -> RepAbstain why
             match bodySt with
             | TBottom -> engineFallback "walker declined (outside the composition fragment)"
             | TOpaque -> engineFallback "nothing established for the body"
@@ -1209,8 +1243,8 @@ let checkDeclaredRep (certified: System.Collections.Generic.Dictionary<IRId, Rep
                              (repStrT bs) owner (repStrT ds))
                  // Derived rep against a declared invariant: reachable through a
                  // modeling gap, so abstain rather than accuse.
-                 | _ -> RepAbstain "derived a representation where the declaration is invariant")
-            | _ -> RepAbstain "derived an invariant where the declaration is a representation"
+                 | _ -> engineUpgradeOnly "derived a representation where the declaration is invariant")
+            | _ -> engineUpgradeOnly "derived an invariant where the declaration is a representation"
     with _ ->
         // Totality, in the seam's discipline: a second opinion may never turn a
         // compiling program into a crash.
@@ -1271,7 +1305,24 @@ let deduceFunctionRep (certified: System.Collections.Generic.Dictionary<IRId, Re
                 // The certificate holds iff the body's law AGREES with the
                 // return position's. TBottom never agrees (joinStatusT refuses
                 // it), so a declined walk is silence.
-                if statusAgreesT bodySt sg.Return then Some (gs, sg, ctx.DepHits) else None
+                if statusAgreesT bodySt sg.Return then Some (gs, sg, ctx.DepHits)
+                else
+                    // COMPOSITION FIRST, ENGINE SECOND — the seam's flow (§7),
+                    // preserved exactly: the engine is consulted only where the
+                    // composition walk DECLINED, never to overturn a verdict
+                    // composition already reached. It sits INSIDE `attempt`, so
+                    // the strongest-first ladder still governs: an O3 engine
+                    // discharge is found and proposed before SO3 is ever tried.
+                    //
+                    // A REFUTATION IS JUST A DECLINE HERE. Deduction proposes;
+                    // it never rejects, so "the body is a polynomial and it is
+                    // not equivariant" and "the engine has nothing to say" are
+                    // the same silence. Only the CHECKING path, where a
+                    // certificate has actually been declared, treats a
+                    // refutation as the compiler-bug signal it is.
+                    match EngineDischarge.tryDischarge resolve parms sg body with
+                    | Some EngineConfirms -> Some (gs, sg, ctx.DepHits)
+                    | Some (EngineRefutes _) | None -> None
 
         // TOTAL BY CONSTRUCTION, in the seam's discipline: a speculative second
         // opinion may never turn a compiling program into a crash, so any

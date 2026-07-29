@@ -195,11 +195,16 @@ let runRepCheckAgreementTests () : BlockResult =
     // 4. The engine hook slot (the C2 stitch point)
     // ========================================================================
     printSubHeader "self-test: engine hook slot"
-    check "hook: empty by default" (not (Blade.DeduceRep.EngineDischarge.isRegistered ())) ""
+    // The corpus sweep above ran real compilations, and `typeCheck` installs
+    // the production adapter (PolyExtractTyped) at every entry. So the live
+    // invariant to assert is not "empty" but "STITCHED": if this goes red, the
+    // C2 engine has been disconnected from the walker.
+    check "hook: the production engine adapter is registered after a compilation"
+        (Blade.DeduceRep.EngineDischarge.isRegistered ()) ""
 
     // A discharger that CONFIRMS turns an abstention into a confirmation —
-    // which is exactly how C2 will shrink the abstain count.
-    Blade.DeduceRep.EngineDischarge.register (fun _g _sg _body -> Some Blade.DeduceRep.EngineConfirms)
+    // which is exactly how the engine shrinks the abstain count.
+    Blade.DeduceRep.EngineDischarge.register (fun _r _p _sg _body -> Some Blade.DeduceRep.EngineConfirms)
     let vHookOk = validateSynthetic tyA tyA bodyOpaque
     check "hook: EngineConfirms upgrades an abstention to confirm"
         (vHookOk = Blade.DeduceRep.RepConfirm)
@@ -207,36 +212,51 @@ let runRepCheckAgreementTests () : BlockResult =
 
     // A discharger that REFUTES a body the seam certified is itself a
     // compiler-bug signal, and surfaces as a disagreement.
-    Blade.DeduceRep.EngineDischarge.register (fun _g _sg _body -> Some (Blade.DeduceRep.EngineRefutes "synthetic refutation"))
+    Blade.DeduceRep.EngineDischarge.register (fun _r _p _sg _body -> Some (Blade.DeduceRep.EngineRefutes "synthetic refutation"))
     let vHookNo = validateSynthetic tyA tyA bodyOpaque
     check "hook: EngineRefutes surfaces as a disagreement"
         (match vHookNo with Blade.DeduceRep.RepDisagree d -> d.Contains "synthetic refutation" | _ -> false)
         (verdictName vHookNo)
 
     // `None` means NOT APPLICABLE and must leave the verdict at abstain.
-    Blade.DeduceRep.EngineDischarge.register (fun _g _sg _body -> None)
+    Blade.DeduceRep.EngineDischarge.register (fun _r _p _sg _body -> None)
     let vHookNa = validateSynthetic tyA tyA bodyOpaque
     check "hook: None leaves the verdict at abstain"
         (match vHookNa with Blade.DeduceRep.RepAbstain _ -> true | _ -> false)
         (verdictName vHookNa)
 
     // A discharger that throws may not crash the compilation.
-    Blade.DeduceRep.EngineDischarge.register (fun _g _sg _body -> failwith "boom")
+    Blade.DeduceRep.EngineDischarge.register (fun _r _p _sg _body -> failwith "boom")
     let vHookBoom = validateSynthetic tyA tyA bodyOpaque
     check "hook: a throwing discharger degrades to abstain"
         (match vHookBoom with Blade.DeduceRep.RepAbstain _ -> true | _ -> false)
         (verdictName vHookBoom)
 
+    // The hook receives the PARAMETER LIST alongside the signature — the widened
+    // slot C2 needs, since a rep parameter's binder id and type are not
+    // recoverable from `RepSigT.Params`. Asserting it here keeps the contract
+    // from silently narrowing again.
+    Blade.DeduceRep.EngineDischarge.register (fun _r parms sg _body ->
+        if List.length parms = List.length sg.Params
+           && (List.map (fun (p: Blade.DeduceRep.RepParam) -> p.PName) parms) = (List.map fst sg.Params)
+        then Some Blade.DeduceRep.EngineConfirms else None)
+    let vHookParms = validateSynthetic tyA tyA bodyOpaque
+    check "hook: receives RepParams positionally aligned with sg.Params"
+        (vHookParms = Blade.DeduceRep.RepConfirm)
+        (verdictName vHookParms)
+
     // The hook must NOT be able to override a composition verdict: it is
     // consulted only where composition declined.
-    Blade.DeduceRep.EngineDischarge.register (fun _g _sg _body -> Some Blade.DeduceRep.EngineConfirms)
+    Blade.DeduceRep.EngineDischarge.register (fun _r _p _sg _body -> Some Blade.DeduceRep.EngineConfirms)
     let vHookNoOverride = validateSynthetic tyA tyB bodyIdent
     check "hook: cannot override a composition disagreement"
         (match vHookNoOverride with Blade.DeduceRep.RepDisagree _ -> true | _ -> false)
         (verdictName vHookNoOverride)
 
+    // Clearing is how a test isolates itself; the next real compilation
+    // re-registers the production adapter, so this leaves no lasting hole.
     Blade.DeduceRep.EngineDischarge.clear ()
-    check "hook: cleared after the self-test"
+    check "hook: clear() empties the slot for test isolation"
         (not (Blade.DeduceRep.EngineDischarge.isRegistered ())) ""
 
     // Leave no residue for the blocks that run after this one.

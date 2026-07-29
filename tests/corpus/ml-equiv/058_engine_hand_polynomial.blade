@@ -40,7 +40,6 @@ function rot(x: Array<Float like PgIrrepsIdx<C4, EC>>)
 // `where` clause, composition refuses it, the engine discharges it, and the
 // proposal appears. That inheritance is why 6b needed no new inference code.
 //
-// TYPED-EXEMPT: engine
 // SUGGEST: function 'rot_loose' judges equivariant under C4: add 'where ml.equiv(C4)' [signature: x transforms as PgIrrepsIdx<C4, [("E", 1)]> -> PgIrrepsIdx<C4, [("E", 1)]>]
 function rot_loose(x: Array<Float like PgIrrepsIdx<C4, EC>>)
                    -> Array<Float like PgIrrepsIdx<C4, EC>> =

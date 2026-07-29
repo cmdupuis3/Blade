@@ -204,6 +204,12 @@ module Codes =
             "BL9001", "internal compiler error"
             "BL9002", "internal codegen invariant violated"
             "BL9003", "internal lowering invariant violated"
+            // Two independent judgments of the same equivariance theorem — the
+            // elaboration-seam checker and the typecheck-resident walker —
+            // reached contradictory verdicts (plan-equivariance-in-types.md C1).
+            // The seam has already ACCEPTED the program, so this can never be
+            // the user's fault.
+            "BL9004", "internal deduction disagreement"
         ]
 
     /// Lookup view of registryEntries. Keep entries as the thing you edit.
