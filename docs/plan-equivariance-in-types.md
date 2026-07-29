@@ -62,6 +62,18 @@ What the move buys, concretely (both are named deferrals today):
    extents make N concrete. The strongest argument for the user's thesis:
    the exact type literally unblocks the deferral.
 
+   CORRECTION (2026-07-29, `design-discipline-as-data.md` §5.3, MEASURED):
+   **the stated mechanism is wrong.** The seam ALREADY resolves extents
+   statically, and monomorphization does not disambiguate the actual
+   blocker, which is that a flat extent factors many ways (16 = 2^4 = 4^2
+   — the arity/rank pair is not recoverable from the product). The
+   conclusion survives but on a different mechanism: a parameterized
+   `__nodepow:<N>:<k>` index tag propagated NOMINALLY by the unifier
+   (Unify.fs's "lat != lon even if both Idx<180>" discipline), which is
+   MLPerm's own named fix and is available only at the typed layer. That
+   is a TYPE-SYSTEM ADDITION, not a free consequence of moving the
+   walker — it is staged and costed accordingly.
+
 ## 1. Why the current machinery cannot just be moved
 
 The equivariance walkers run at the MLElaborate pass-1/pass-2 seam because
@@ -87,6 +99,16 @@ them all:
   `ArrayElem.IndexTypes` (the accessors exist in Types.fs). The typed twin
   of `statusOfType`, shared verbatim between checking and deduction so
   Propose ⊆ Check-accept survives the move.
+
+  CORRECTION (2026-07-29, `design-discipline-as-data.md` §4.2, MEASURED):
+  **`IRType -> status` is the equiv-shaped special case and does not
+  generalize.** Galilean's boost-variance is DELIBERATELY not a type
+  property — a velocity and a velocity difference have the same type, and
+  MLGalilean's header records why units cannot be the seed. The
+  classifier must therefore be lifted to SIGNATURE level (whole-signature
+  -> per-parameter statuses), which admits all three disciplines where
+  the per-type shape admits two. Equiv's per-type classifier survives as
+  an instance of the lifted one.
 - **Walker**: bottom-up over TypedExpr, `flattenBindings` first (the
   binding-descent problem is ALREADY SOLVED at this level — the seam
   walkers each re-solved it with env threading), match/if arms-agree
