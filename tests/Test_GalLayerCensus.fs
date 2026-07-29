@@ -825,6 +825,71 @@ let runGalLayerCensusTests () : BlockResult =
     check "shadow: only a call-shaped `ml.galilean(` matches" (n4 = 0) (sprintf "%d rewrite(s)" n4)
 
     // ------------------------------------------------------------------
+    printSubHeader "Inline probes: the two claims about galilean's classifier"
+
+    /// Compile a hand-written source and report the typed verdict per
+    /// certificate. Used for the two structural claims the corpus does not
+    /// isolate.
+    let probe (label: string) (src: string) =
+        let (seamR, _) = Lowering.lowerDiag None src
+        let seamStr = match seamR with Ok _ -> "seam: OK" | Error ds -> sprintf "seam: %s" (clip 70 (firstMessage ds))
+        // Always report the SHADOWED typed verdict: on a source the seam
+        // refuses, the unshadowed run never reaches typecheck at all (that is
+        // the structural fact obligation 1 asserts), so the shadowed run is the
+        // only way to see what the typed side would say.
+        let (shadowSrc, _) = shadowGalilean src
+        let typedStr =
+            match checkOnly shadowSrc with
+            | Error ds -> sprintf "typed: (not typechecked) %s" (clip 60 (firstMessage ds))
+            | Ok tp ->
+                let vs = revalidate tp
+                if vs.IsEmpty then "typed: (no certificate reached typecheck)"
+                else
+                    "typed: "
+                    + (vs |> List.map (fun v -> sprintf "%s=%s" v.Owner (verdictName v.Verdict)) |> String.concat "; ")
+        resultLine Skip label (sprintf "%s || %s" seamStr typedStr)
+
+    // (a) THE ANNOTATION GATE. `MLEquiv.certSigOf` refuses an unannotated
+    //     parameter outright (BL4008, MLEquiv.fs:430-431). Galilean has no such
+    //     gate: it reads names. The question this probe answers is whether the
+    //     gatelessness SURVIVES a move to typecheck — it does, because binder
+    //     ids and parameter names exist whether or not a type was written.
+    probe "(a) galilean certifies a FULLY UNANNOTATED signature"
+        "import ml as ml\nfunction shear(u, v) where ml.galilean(u, v) -> Float = u - v\nlet s = shear(3.0, 1.0)\n"
+
+    // (b) BOOST-VARIANCE IS NOT A TYPE PROPERTY. Two functions with the SAME
+    //     signature and the SAME body, differing only in the certificate: one
+    //     holds, one does not. No function `IRType -> status` can produce both
+    //     answers, so galilean's classifier must be SIGNATURE-level — the
+    //     §4.2 correction, isolated.
+    probe "(b) same signature + same body, galilean(a,b) HOLDS"
+        "import ml as ml\nfunction j(a: Float, b: Float) where ml.galilean(a, b) -> Float = a - b\nlet x = j(3.0, 1.0)\n"
+    probe "(b) same signature + same body, galilean(a) does NOT"
+        "import ml as ml\nfunction j(a: Float, b: Float) where ml.galilean(a) -> Float = a - b\nlet x = j(3.0, 1.0)\n"
+
+    // (c) ONE REJECTION FAMILY IS ALREADY TYPECHECK-RESIDENT, and the census
+    //     above cannot see it because the shadow conjunct's Validate is a
+    //     no-op. `MLGalilean.galileanHandler.Validate` is invoked by
+    //     `TypeCheck.checkFunctionDecl` through the Blade.Constraints registry,
+    //     and it re-checks the two conditions `buildCertTable` errors on
+    //     (empty argument list; an argument that is not a parameter). It cannot
+    //     normally be observed because the seam always wins the race — unless
+    //     the seam does not run at all. `MLElaborate.expandModule` short-
+    //     circuits with no `import ml`, while `expandStr` still registers the
+    //     conjunct, so writing the NORMALIZED name directly in a module that
+    //     does not import ml reaches the handler and nothing else.
+    let handlerProbe (label: string) (src: string) =
+        let (r, _) = Lowering.lowerDiag None src
+        resultLine Skip label
+            (match r with
+             | Ok _ -> "accepted"
+             | Error ds -> clip 120 (firstMessage ds))
+    handlerProbe "(c) seam silent, registry handler alone: galilean(zz)"
+        "function bad(u: Float, v: Float) where __ml_galilean(zz) -> Float = u - v\nlet b = bad(3.0, 1.0)\n"
+    handlerProbe "(c) seam silent, registry handler alone: galilean(u)"
+        "function ok(u: Float, v: Float) where __ml_galilean(u) -> Float = u - v\nlet b = ok(3.0, 1.0)\n"
+
+    // ------------------------------------------------------------------
     printSubHeader "Census: corpus sweep"
 
     let records =
