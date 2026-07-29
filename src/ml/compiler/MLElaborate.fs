@@ -1350,11 +1350,12 @@ let private sizingNames =
                  "perm_weight_dim"; "perm_bias_dim"
                  "irreps_len"; "irreps_l"; "irreps_parity"; "irreps_mult"
                  "irreps_dim"; "irreps_offset"
-                 // The point-group sizing surface (stage 5b-i). All ints;
-                 // none returns a spec.
+                 // The point-group sizing surface (stage 5b-i). All ints
+                 // except `pg_restrict`, the restriction table of stage A3
+                 // (plan-equivariance-in-types), which returns a pg SPEC.
                  "pg_total_dim"; "pg_hom_dim"; "pg_irreps_len"
                  "pg_irreps_dim"; "pg_irreps_mult"; "pg_irreps_fs"
-                 "pg_irreps_offset" ]
+                 "pg_irreps_offset"; "pg_restrict" ]
 
 type private ElabState = {
     mutable Counter: int

@@ -12,10 +12,28 @@ import ml as ml
 // C4-module to an O(3)-module on the same coordinates, so "held fixed" is the
 // only reading available and it is a premise the caller discharges.)
 //
-// Naming this value in C4's own labels means decomposing the restriction
-// O(3) down to C4 — crystal-field splitting — which is `ml.restrict`, named
-// and deferred in plan-transforms-as-types §3.6. BL4008.
+// WHAT CHANGED AT STAGE A3, AND WHAT DID NOT (plan-equivariance-in-types).
+// The decomposition itself is no longer deferred: `ml.pg_restrict("C4", SH1)`
+// IS the crystal-field splitting, it is exact integer character theory over the
+// group's declared O(3) embedding, and corpus 096 / 097 pin the whole l <= 4
+// table for both registered groups. The BL4008 below now quotes it — the
+// message names `PgIrrepsIdx<C4, [("A", 2), ("E", 1)]>` as the point-group
+// module this parameter's space becomes.
+//
+// The VERDICT is unchanged, and the reason moved rather than evaporated: a
+// decomposition is not a reinterpretation. The O(3) layout orders each block by
+// m = -l..l, so the C4-invariant m = 0 component sits in the MIDDLE of the
+// block (index l) while a point-group block is contiguous, and already at l = 1
+// the invariant is at index 1 on one side and index 0 on the other. No ordering
+// of the restricted spec repairs it — the E pair is split by the A component.
+// So viewing the buffer at the restricted type is a genuine change of basis (a
+// permutation with signs), which is a VALUE-level op, not a classification;
+// until one ships, this signature stays refused. Corpus 099 is the trap that
+// pins the consequence.
 let static SH1 = ml.sh_spec(1)
+// The restriction the diagnostic now names, computed here so the file shows
+// the table exists: sh_spec(1) = l 0 (+) l 1 restricts to A + (A + E) = 2A + E.
+let static RSH1 = ml.pg_restrict("C4", SH1)
 let static EC = [("E", 1)]
 let static WE = ml.pg_hom_dim("C4", EC, EC)
 

@@ -304,12 +304,43 @@ let private parseGroup (funcName: string) (args: string list) : Result<Group, st
     | [ g ] -> Error (sprintf "function '%s': equiv(%s) — unknown group '%s'; supported: O3, SO3, %s" funcName g g pgRoster)
     | _ -> Error (sprintf "function '%s': equiv expects exactly one group argument — equiv(O3), equiv(SO3), or a registered point group (%s)" funcName pgRoster)
 
+/// The restricted spec as it would READ in an annotation, or "" when the spec
+/// argument does not resolve. A diagnostic ENRICHMENT and nothing else — it is
+/// wrapped in a try/with because a speculative inference run may never crash on
+/// a malformed static, and its absence costs the message one sentence and no
+/// verdict.
+let private restrictHint (pg: string) (statics: StaticEnv) (specExpr: Expr) : string =
+    try
+        match evalExpr statics fuel specExpr
+              |> Result.bind (Blade.ML.Statics.specOfStatic "equiv signature spec") with
+        | Ok s ->
+            let grp = Blade.ML.PointSpec.pointGroup pg
+            let r = Blade.ML.PointSpec.restrictSpec grp (s |> List.map (fun e -> (e.L, e.Parity, e.Mult)))
+            sprintf " That space restricts to PgIrrepsIdx<%s, %s>, which `ml.pg_restrict(\"%s\", SPEC)` names."
+                pg (pgSpecStr r) pg
+        | Error _ -> ""
+    with _ -> ""
+
 /// The two signature-level refusals of the point-group arm, both instances of
 /// the header's restriction argument. Stated once so the annotation position
 /// and the alias-body position cannot drift apart.
-let private restrictDeferral (pg: string) : string =
-    sprintf "an IrrepsIdx parameter under equiv(%s) names an O(3) representation space, and %s ACTS on it — by restriction along the inclusion %s -> O(3), nontrivially on every l > 0 block. Classifying it invariant would claim a vector is %s-invariant, so the judgment refuses instead. Naming the value in %s's own labels means decomposing the restriction of O(3) down to %s, which is `ml.restrict` (plan-transforms-as-types section 3.6, named-not-shipped); until then declare the parameter as Array<_ like PgIrrepsIdx<%s, SPEC>>"
-        pg pg pg pg pg pg pg
+///
+/// STAGE A3 CHANGED WHAT IS MISSING, NOT THE VERDICT. The branching rule is
+/// shipped (MLPointSpec.restrictSpec, surfaced as `ml.pg_restrict`), so the
+/// message can now NAME the point-group module this parameter's space becomes.
+/// What it still may not do is classify the parameter `Rep (PgSpec ...)` on the
+/// strength of that name, because the two block-spec members lay the SAME
+/// module out differently: O(3) orders a block by m = −l..l, so its
+/// G-invariant m = 0 component sits in the MIDDLE with the m-pairs straddling
+/// it, while a point-group block is contiguous (`pgBlockStarts`). The
+/// disagreement is not asymptotic — it is already total at l = 1 under C4
+/// (invariant at index 1 vs index 0) and no ORDERING of the restricted spec
+/// repairs it, since the E pair is split by the A component. So the view is a
+/// genuine change of basis, a permutation with signs, and until a value-level
+/// op emits it the refusal stands.
+let private restrictDeferral (pg: string) (hint: string) : string =
+    sprintf "an IrrepsIdx parameter under equiv(%s) names an O(3) representation space, and %s ACTS on it — by restriction along the inclusion %s -> O(3), nontrivially on every l > 0 block. Classifying it invariant would claim a vector is %s-invariant, so the judgment refuses instead.%s A decomposition is NOT a reinterpretation, though: the O(3) layout orders every block by m = -l..l, so the invariant m = 0 component sits in the MIDDLE of the block while a point-group block is contiguous, and the two layouts already disagree at l = 1. Reading this buffer at the restricted type needs a genuine change of basis — a permutation with signs — which is a value-level op this round does not ship. Declare the parameter as Array<_ like PgIrrepsIdx<%s, SPEC>> over data that is already in %s's layout"
+        pg pg pg pg hint pg pg
 
 let private pgGroupMismatch (declared: string) (pg: string) : string =
     sprintf "parameter type PgIrrepsIdx<%s, ...> names point group %s, but this function is certified for %s — certificates do not transfer between groups. This checker knows each registered group's frozen table and NO map between two of them, so neither a restriction nor an induction of a %s-module to %s is available; declare the parameter over %s"
@@ -333,7 +364,7 @@ let rec private statusOfType (g: Group) (aliases: Map<string, TypeExpr>) (static
         | Point pg ->
             let pgs = idxs |> List.choose (function TyPgIrrepsIdx (gn, s) -> Some (gn, s) | _ -> None)
             match irreps, pgs, idxs.Length with
-            | _ :: _, _, _ -> Error (restrictDeferral pg)
+            | specExpr :: _, _, _ -> Error (restrictDeferral pg (restrictHint pg statics specExpr))
             | [], [ (gn, _) ], _ when gn <> pg -> Error (pgGroupMismatch gn pg)
             | [], [ (_, specExpr) ], 1 ->
                 evalExpr statics fuel specExpr
@@ -363,7 +394,7 @@ let rec private statusOfType (g: Group) (aliases: Map<string, TypeExpr>) (static
     | TyIrrepsIdx specExpr ->
         // alias body position (`type X = IrrepsIdx<s>` chased above)
         match g with
-        | Point pg -> Error (restrictDeferral pg)
+        | Point pg -> Error (restrictDeferral pg (restrictHint pg statics specExpr))
         | _ ->
             evalExpr statics fuel specExpr
             |> Result.bind (Blade.ML.Statics.specOfStatic "equiv signature spec")

@@ -1,0 +1,166 @@
+// TEST: ML Equiv Restrict D4 Branching
+import ml as ml
+// ============================================================================
+// THE SAME SWEEP ONE GROUP OVER — AND THE FROBENIUS-SCHUR CONTRAST
+// (docs/plan-equivariance-in-types.md stage A3; corpus 096 is the C4 twin.)
+//
+// D4 is embedded as the crystallographic PROPER rotation group 422:
+//   r = R_z(90 deg)   — the same four-fold axis C4 uses;
+//   s = R_x(180 deg)  — a two-fold AXIS, NOT a mirror.
+//
+// That second generator is the whole difference from 096, and it is a genuine
+// convention rather than a derivation: the same abstract D4 embedded with a
+// MIRROR (C4v) restricts O(3) differently, because a mirror is improper and
+// improper elements read the O(3) parity label. Choosing the axis is what makes
+// the shipped restriction parity-blind, exactly as at C4. The choice of WHICH
+// two-fold axis (x rather than a face diagonal) does not change the branching
+// multiset — it only fixes which of the two B labels is x^2-y^2 and which is
+// xy, since B1 is the label with r -> -1, s -> +1.
+//
+// EVERY D4 LABEL IS OF REAL TYPE, including E — the added mirror-free two-fold
+// axis kills the complex structure C4's E carries (nothing commutes with both
+// R90 and diag(1, -1) except the scalars). So e = 1 everywhere here and the
+// single-label hom probes read the multiplicity DIRECTLY, where 096's E probe
+// read 2m. Section 4 turns that into one number: the same 5-dimensional l = 2
+// space has a 7-dimensional equivariant endomorphism algebra under C4 and a
+// 4-dimensional one under D4. More symmetry, fewer free parameters — and the
+// FS factor is one of the two inputs that make the counts differ.
+//
+// NO MAP BETWEEN TWO POINT GROUPS EXISTS HERE. C4 is a subgroup of D4, but the
+// registry knows each group's frozen table and NOTHING between two of them, so
+// there is no "restrict D4 to C4" in this round — every restriction below goes
+// from O(3), the one group every registered table has a declared inclusion
+// into. Cross-group meets are phase D of the plan.
+// ============================================================================
+
+let static L0 = [(0, 0, 1)]
+let static L1 = [(1, 1, 1)]
+let static L2 = [(2, 0, 1)]
+let static L3 = [(3, 1, 1)]
+let static L4 = [(4, 0, 1)]
+
+let static R0 = ml.pg_restrict("D4", L0)
+let static R1 = ml.pg_restrict("D4", L1)
+let static R2 = ml.pg_restrict("D4", L2)
+let static R3 = ml.pg_restrict("D4", L3)
+let static R4 = ml.pg_restrict("D4", L4)
+
+let static P1 = [("A1", 1)]
+let static P2 = [("A2", 1)]
+let static Q1 = [("B1", 1)]
+let static Q2 = [("B2", 1)]
+let static PE = [("E", 1)]
+
+// --- 1. l = 0 AND l = 1 -----------------------------------------------------
+// The scalar is A1. The vector is A2 + E: z is invariant under the four-fold
+// axis but FLIPS under the two-fold one, which is exactly the A2 character
+// (r -> +1, s -> -1), while (x, y) is E. This is the standard 422 result, and
+// it is also the first place D4 and C4 disagree — at C4 the z direction was
+// simply A, because there was no second generator to flip it.
+let static A10 = ml.pg_hom_dim("D4", R0, P1)
+let static D0 = ml.pg_total_dim("D4", R0)
+// EXPECT: A10 = 1
+// EXPECT: D0 = 1
+
+let static A11 = ml.pg_hom_dim("D4", R1, P1)
+let static A21 = ml.pg_hom_dim("D4", R1, P2)
+let static B11 = ml.pg_hom_dim("D4", R1, Q1)
+let static B21 = ml.pg_hom_dim("D4", R1, Q2)
+let static E11 = ml.pg_hom_dim("D4", R1, PE)
+let static D1 = ml.pg_total_dim("D4", R1)
+// EXPECT: A11 = 0
+// EXPECT: A21 = 1
+// EXPECT: B11 = 0
+// EXPECT: B21 = 0
+// EXPECT: E11 = 1
+// EXPECT: D1 = 3
+
+// --- 2. l = 2: THE d SHELL, ONE COPY OF FOUR LABELS -------------------------
+// A1 + B1 + B2 + E, the textbook crystal-field splitting of a d shell in a
+// four-fold field: z^2 -> A1, x^2-y^2 -> B1, xy -> B2, (xz, yz) -> E. Note the
+// E multiplicity is 1 and the probe reads 1, where C4's E probe read 2 for a
+// multiplicity of 1 (096 section 1) — same dimension, different division
+// algebra.
+let static A12 = ml.pg_hom_dim("D4", R2, P1)
+let static A22 = ml.pg_hom_dim("D4", R2, P2)
+let static B12 = ml.pg_hom_dim("D4", R2, Q1)
+let static B22 = ml.pg_hom_dim("D4", R2, Q2)
+let static E12 = ml.pg_hom_dim("D4", R2, PE)
+let static D2 = ml.pg_total_dim("D4", R2)
+let static N2 = ml.pg_irreps_len("D4", R2)
+// EXPECT: A12 = 1
+// EXPECT: A22 = 0
+// EXPECT: B12 = 1
+// EXPECT: B22 = 1
+// EXPECT: E12 = 1
+// EXPECT: D2 = 5
+// EXPECT: N2 = 4
+
+// --- 3. l = 3 AND l = 4 -----------------------------------------------------
+// l = 3: A2 + B1 + B2 + 2E. l = 4: 2A1 + A2 + B1 + B2 + 2E — the m = +-4
+// components rotate by a full turn about the four-fold axis and land on the
+// trivial label, which is the first place A1 appears twice.
+let static A23 = ml.pg_hom_dim("D4", R3, P2)
+let static B13 = ml.pg_hom_dim("D4", R3, Q1)
+let static B23 = ml.pg_hom_dim("D4", R3, Q2)
+let static E13 = ml.pg_hom_dim("D4", R3, PE)
+let static D3 = ml.pg_total_dim("D4", R3)
+// EXPECT: A23 = 1
+// EXPECT: B13 = 1
+// EXPECT: B23 = 1
+// EXPECT: E13 = 2
+// EXPECT: D3 = 7
+
+let static A14 = ml.pg_hom_dim("D4", R4, P1)
+let static A24 = ml.pg_hom_dim("D4", R4, P2)
+let static B14 = ml.pg_hom_dim("D4", R4, Q1)
+let static B24 = ml.pg_hom_dim("D4", R4, Q2)
+let static E14 = ml.pg_hom_dim("D4", R4, PE)
+let static D4D = ml.pg_total_dim("D4", R4)
+// EXPECT: A14 = 2
+// EXPECT: A24 = 1
+// EXPECT: B14 = 1
+// EXPECT: B24 = 1
+// EXPECT: E14 = 2
+// EXPECT: D4D = 9
+
+// --- 4. THE CONTRAST, IN ONE PAIR OF NUMBERS --------------------------------
+// The SAME O(3) irrep (l = 2, 5 dimensions) restricted to the two groups, and
+// the dimension of the equivariant endomorphism algebra of each restriction.
+// C4: [A x 1, B x 2, E x 1] gives 1*1*1 + 2*2*1 + 1*1*2 = 7 (the last term
+// carries E's e = 2). D4: [A1, B1, B2, E] each once gives 1 + 1 + 1 + 1 = 4.
+// A D4-equivariant layer on a d shell therefore has 4 free weights where the
+// C4 one has 7, and BOTH numbers come out of `pg_restrict` composed with
+// `pg_hom_dim` with no new machinery.
+let static R2C = ml.pg_restrict("C4", L2)
+let static WC = ml.pg_hom_dim("C4", R2C, R2C)
+let static WD = ml.pg_hom_dim("D4", R2, R2)
+// EXPECT: WC = 7
+// EXPECT: WD = 4
+
+// --- 5. A CERTIFIED D4 LAYER OVER A RESTRICTED SPEC -------------------------
+// R1 = [A2 x 1, E x 1] is the D4 decomposition of the l = 1 vector space, and
+// it is an ordinary pg spec: `ml.derive_pg_linear` takes it, and the
+// certificate is checked exactly as corpus 045's hand-written specs are. Two
+// weights — one per label, since every label is of real type and appears once.
+let static WL = ml.pg_hom_dim("D4", R1, R1)
+// EXPECT: WL = 2
+
+function d4_layer(x: Array<Float like PgIrrepsIdx<D4, R1>>, w: Array<Float like Idx<WL>>)
+                  where ml.equiv(D4) -> Array<Float like PgIrrepsIdx<D4, R1>> =
+    ml.derive_pg_linear(D4, R1, R1, x, w)
+
+// The restricted layout puts the A2 cell at index 0 and the E pair at 1 and 2 —
+// NOT the O(3) order (m = -1, 0, +1), which would put the axis component in the
+// middle. Weights [A2, E]: each label scales.
+let y = d4_layer([1.0, 3.0, 4.0], [2.0, 3.0])
+// EXPECT: y = [2, 9, 12]
+
+// BOTH SHADOWS, exact. rho(r) = [+1] (+) R90 sends [x0, x1, x2] to
+// [x0, -x2, x1]; rho(s) = [-1] (+) diag(1, -1) sends it to [-x0, x1, -x2]. A
+// D4 certificate answers to both generators, which is what makes it strictly
+// stronger than the C4 one on the same plane.
+let yr = d4_layer([1.0, 0.0 - 4.0, 3.0], [2.0, 3.0])
+// EXPECT: yr = [2, -12, 9]
+let ys = d4_layer([0.0 - 1.0, 3.0, 0.0 - 4.0], [2.0, 3.0])
+// EXPECT: ys = [-2, 9, -12]
