@@ -9839,10 +9839,54 @@ and checkFunctionDecl (env: TypeEnv) (funcDecl: FunctionDecl) : TypeResult<Typed
             Blade.Zonk.closeDeducedRanks env.Subst env.Builder funcDecl.Name paramTypes
             let resolvedParams = typedParams |> List.map (fun p ->
                 { p with Type = env.Subst.Resolve(p.Type) } : TypedParam)
+            let resolvedRet = env.Subst.Resolve(retType)
+            // ================================================================
+            // PHASE B (docs/plan-equivariance-in-types.md, B1+B2): the typed
+            // REPRESENTATION-STATUS deduction — the fourth lattice, beside the
+            // parity deduction above.
+            //
+            // It sits HERE rather than beside deduceSignParities on purpose:
+            // the whole §0 payoff is deducing from CLOSED types, and the rank
+            // deduction only closes at `closeDeducedRanks` two lines up. Above
+            // this point an unannotated parameter is still an IRTInfer and
+            // would classify unclassifiable — the exact limitation the move to
+            // typecheck exists to remove.
+            //
+            // `Subst.Resolve`, deliberately NOT `Zonk.zonkType`: zonk DEFAULTS
+            // an unsolved variable to Float64, which would present a still-open
+            // parameter as a provable invariant SCALAR — a false shape, and
+            // shape is load-bearing in the scaling rule. Resolve leaves it
+            // IRTInfer, which classifies unclassifiable and skips the function.
+            //
+            // PROPOSALS ONLY. In phase B this channel is read by the
+            // differential harness alone: no BL4011, no warning, no
+            // CertSuggestion. The MLElaborate seam remains the user-facing
+            // emitter and the checking authority until the B3 parity gate.
+            let repResolve (t: IRType) = env.Subst.Resolve t
+            let repParams =
+                resolvedParams
+                |> List.map (fun p ->
+                    ({ PName = p.Name; PId = p.VarId; PType = p.Type } : Blade.DeduceRep.RepParam))
+            (match customConjuncts |> List.tryFind (fun (n, _) -> n = "__ml_equiv") with
+             | Some (_, gargs) ->
+                 // Pinned or elaborator-stamped: record the declared signature
+                 // as an axiom for later callers. Conjuncts are read uniformly,
+                 // so a synthesized function stamped by the ML elaborator lands
+                 // here by the same path a user's `where ml.equiv(O3)` does.
+                 Blade.DeduceRep.recordCertified env.FuncRepSigs repResolve
+                     funcDecl.Name funcVarId (match gargs with g :: _ -> g | [] -> "")
+                     repParams resolvedRet
+             | None ->
+                 // Unpinned: deduce. Silence is the overwhelmingly common
+                 // outcome (no rep family in the signature -> no candidates).
+                 match Blade.DeduceRep.deduceFunctionRep env.FuncRepSigs env.FuncRepSpec
+                           repResolve funcDecl.Name funcVarId repParams resolvedRet tBody with
+                 | Some prop -> Blade.DeduceRep.TypedCertProposals.add prop tBody.Span
+                 | None -> ())
             let tf : TypedFunctionDecl = {
                 Name = funcDecl.Name; FuncId = funcVarId
                 TypeParams = funcDecl.TypeParams
-                Params = resolvedParams; ReturnType = env.Subst.Resolve(retType)
+                Params = resolvedParams; ReturnType = resolvedRet
                 WhereClause = funcDecl.WhereClause; Body = tBody
                 CommGroups = commGroups; IsStatic = funcDecl.IsStatic
             }
@@ -10684,6 +10728,13 @@ let typeCheck (program: Program) : Result<TypedProgram * IRBuilder * string list
     PinSuggestions.reset ()
     WarningLog.reset ()
     DeducedFacts.reset ()
+    // Phase B typed rep-deduction channel: same lifecycle as the facts channel
+    // beside it. The per-module SUMMARY tables need no reset — they hang off
+    // the TypeEnv that `emptyEnv ()` builds fresh below — but the proposal
+    // channel and the skipped-polymorphic tally are AsyncLocal and would
+    // otherwise accumulate across compilations in one process (the test host).
+    Blade.DeduceRep.TypedCertProposals.reset ()
+    Blade.DeduceRep.SkippedPolymorphic.reset ()
     // Staged-former unfold FIRST: `static method_for/object_for/for`
     // argument lists elaborate to plain formers before any other stage
     // (ML/PPL/math/grad and the checker never see ExprStatic).
