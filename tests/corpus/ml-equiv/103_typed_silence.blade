@@ -1,0 +1,55 @@
+// TEST: ML Equiv Typed Silence
+import ml as ml
+// ============================================================================
+// THE VACUITY FILE FOR THE DIFFERENTIAL: ZERO DIRECTIVES, WHICH IS AN
+// ASSERTION AND NOT AN OMISSION.
+//
+// Corpus 057 pins the seam's two silences. This file pins that the TYPED
+// walker inherits both of them, and it does so with an empty directive block:
+// no `// SUGGEST:` (the seam proposes nothing), no `// TYPED-SUGGEST:` (the
+// typed walker may propose nothing either), and no `// TYPED-EXEMPT:` (there
+// is nothing to exempt). Any proposal from either side, about any of the three
+// functions, fails this file — the differential's pins are strict in both
+// directions, so silence is the only passing state.
+//
+// The three silences, one per function, and they are different arguments:
+//
+// 1. NON-VACUITY, at scalar rank. `halve` touches nothing any group acts on.
+//    `equiv(G)` on it is true for every G and says nothing about any of them,
+//    so a proposal would be a tautology wearing a theorem's face. The filter
+//    is on the CLASSIFIED SIGNATURE, and it is the one rule the typed walker
+//    must NOT relax when it gains the closed types: an unannotated scalar
+//    helper is still a scalar helper.
+//
+// 2. NON-VACUITY, at array rank. `shift`'s buffer is a plain `Idx<3>` — a
+//    layout, not a representation space — so it is invariant under every group
+//    in the roster and the same tautology applies one rank up. This is the
+//    case the typed walker is most at risk of getting wrong, because after
+//    unification EVERY array has a closed index type and it would be easy to
+//    read "closed" as "classifiable".
+//
+// 3. FAILED JUDGMENT. `peek` is signature-eligible — its input is a genuine
+//    O(3) representation — and its body squares one raw component of the l = 1
+//    block. A single component is basis-dependent, x(2)² is not invariant
+//    under any rotation, and the polynomial engine agrees with composition
+//    here rather than rescuing it: the defect is nonzero at the generators.
+//    Both candidates refuse and neither channel says anything. Low recall,
+//    honestly so.
+// ============================================================================
+let static S = [(0, 0, 1), (1, 1, 1)]
+
+// Scalars in, scalar out. No candidate under any group.
+function halve(a: Float, b: Float) -> Float = (a + b) * 0.5
+
+// A plain buffer is not a representation space.
+function shift(u: Array<Float like Idx<3>>, k: Float) -> Array<Float like Idx<3>> = u + k
+
+// Signature-eligible and genuinely not equivariant.
+function peek(x: Array<Float like IrrepsIdx<S>>) -> Float = x(2) * x(2)
+
+let h = halve(3.0, 5.0)
+// EXPECT: h = 4
+let s = shift([1.0, 2.0, 3.0], 10.0)
+// EXPECT: s = [11, 12, 13]
+let p = peek([1.0, 2.0, 3.0, 4.0])
+// EXPECT: p = 9

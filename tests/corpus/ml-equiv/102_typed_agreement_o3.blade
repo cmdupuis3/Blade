@@ -1,0 +1,51 @@
+// TEST: ML Equiv Typed Agreement O3
+import ml as ml
+// ============================================================================
+// THE AGREEMENT CASE — the differential's baseline, and the one file shape it
+// needs most of.
+//
+// Nothing here is partial, nothing here is exotic: a fully annotated
+// uncertified function whose body is a derived hom followed by a residual add.
+// Stage 6a proposes it (the `// SUGGEST:` pin below is that proposal, verbatim
+// off the BL4011 channel), and the typed walker must propose THE SAME THEOREM
+// — same owner, same group. There is no `// TYPED-SUGGEST:` line, because
+// this is not a win: it is the recall assertion, and the recall assertion is
+// what the phase-B ship criterion actually is (typed recall ⊇ seam recall).
+//
+// The body is chosen to make the two sides meet on a transfer rule rather than
+// on a single primitive: `derive_linear` gives a Rep, `x` is a Rep of the SAME
+// spec, and Rep ± Rep at one spec is a Rep. On the seam that is the shipped
+// composition arm; in the typed table it is B1's "Rep s ± Rep s" line. Same
+// theorem, two IRs, and the differential is what says so.
+//
+// The rendered signatures need NOT agree — the harness reports a rendering
+// difference and passes — because the two walkers read different IRs. Only the
+// theorem is gated.
+//
+// PROPOSE ⊆ CHECK-ACCEPT as always: `residual_tight` carries the pin and
+// checks, and the values are identical.
+// ============================================================================
+let static S = [(0, 0, 1), (1, 1, 1)]
+let static WD = ml.hom_dim(S, S)
+// EXPECT: WD = 2
+
+// SUGGEST: function 'residual_loose' judges equivariant under O3: add 'where ml.equiv(O3)' [signature: x transforms as IrrepsIdx<[(0, 0, 1), (1, 1, 1)]>, w invariant -> IrrepsIdx<[(0, 0, 1), (1, 1, 1)]>]
+function residual_loose(x: Array<Float like IrrepsIdx<S>>, w: Array<Float like Idx<WD>>)
+                        -> Array<Float like IrrepsIdx<S>> =
+    ml.derive_linear(S, S, w, x) + x
+
+function residual_tight(x: Array<Float like IrrepsIdx<S>>, w: Array<Float like Idx<WD>>)
+                        where ml.equiv(O3) -> Array<Float like IrrepsIdx<S>> =
+    ml.derive_linear(S, S, w, x) + x
+
+// One weight per irreducible block: 2.0 on the l = 0 cell, 0.5 on the l = 1
+// triple. The hom output is (2, 2, -1, 3) and the residual add returns it to
+// (3, 6, -3, 9) — the same arithmetic under either pin, since a warning
+// changes no value.
+let wv = [2.0, 0.5]
+let xv = [1.0, 4.0, 0.0 - 2.0, 6.0]
+
+let rl = residual_loose(xv, wv)
+// EXPECT: rl = [3, 6, -3, 9]
+let rt = residual_tight(xv, wv)
+// EXPECT: rt = [3, 6, -3, 9]

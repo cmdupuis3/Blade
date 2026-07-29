@@ -1,0 +1,75 @@
+// TEST: ML Equiv Typed Agreement Pg Chain
+// TYPED-NOTE: this file was scoped as the STAMPED-GENERATED-CALLEE win and is
+// deliberately not one. A1 of plan-equivariance-in-types.md — the elaborator
+// attaching `where ml.equiv(G)` to the functions it synthesizes — has not
+// landed, so a user function calling a `derive_*` output is exactly corpus
+// 053's situation: the seam already proposes it, and there is no typed-only
+// win to pin. Manufacturing one here would pin a theorem no producer can
+// currently prove. It is a SECOND AGREEMENT CASE instead, chosen to cover the
+// two things the O3-only agreement file does not.
+import ml as ml
+// ============================================================================
+// AGREEMENT AT A POINT GROUP, THROUGH A DEPENDENCY CLOSURE.
+//
+// Two coordinates the differential otherwise never exercises together:
+//
+// 1. THE GROUP VOCABULARY. Both channels key a proposal by (owner, GROUP), and
+//    a point group's name is not "O3" or "SO3" — it is the registered label
+//    itself, `C4`. If the typed walker's group rendering drifts from the
+//    seam's `groupStr`, every point-group proposal misses its counterpart and
+//    shows up as a recall miss AND a false positive at once. Corpus 056 pins
+//    the seam's spelling; this file is what pins that the two sides SHARE it.
+//    There is no candidate ladder here and there must not be one: a
+//    `PgIrrepsIdx<C4, ·>` signature admits exactly the group it names.
+//
+// 2. THE CLOSURE. `spin_twice_loose` rests on `spin_loose`, which is itself
+//    only speculatively certified, so the seam's proposal carries the
+//    "also requires pinning" tail naming its dependency. The typed walker
+//    computes the same closure through B2's summary table. Deps are compared
+//    LENIENTLY by the differential — a disagreement is reported, not failed —
+//    because the two sides build the list from different structures; what is
+//    gated is the pair of theorems.
+//
+// Both proposals are seam proposals, so both carry `// SUGGEST:` pins and
+// NEITHER carries a `// TYPED-SUGGEST:` line. The recall assertion is the
+// whole content on the typed side.
+//
+// PROPOSE ⊆ CHECK-ACCEPT: the two tight twins are the same bodies with both
+// conjuncts written, a certified caller calling a certified callee (corpus
+// 003's shape, at a point group), and they return the same numbers.
+// ============================================================================
+let static EC = [("E", 1)]
+let static WE = ml.pg_hom_dim("C4", EC, EC)
+// EXPECT: WE = 2
+
+// SUGGEST: function 'spin_loose' judges equivariant under C4: add 'where ml.equiv(C4)' [signature: x transforms as PgIrrepsIdx<C4, [("E", 1)]>, w invariant -> PgIrrepsIdx<C4, [("E", 1)]>]
+function spin_loose(x: Array<Float like PgIrrepsIdx<C4, EC>>, w: Array<Float like Idx<WE>>)
+                    -> Array<Float like PgIrrepsIdx<C4, EC>> =
+    ml.derive_pg_linear(C4, EC, EC, x, w)
+
+// SUGGEST: function 'spin_twice_loose' judges equivariant under C4: add 'where ml.equiv(C4)' [signature: x transforms as PgIrrepsIdx<C4, [("E", 1)]>, w invariant -> PgIrrepsIdx<C4, [("E", 1)]>] (also requires pinning: spin_loose)
+function spin_twice_loose(x: Array<Float like PgIrrepsIdx<C4, EC>>, w: Array<Float like Idx<WE>>)
+                          -> Array<Float like PgIrrepsIdx<C4, EC>> =
+    spin_loose(spin_loose(x, w), w)
+
+// The pinned twins.
+function spin_tight(x: Array<Float like PgIrrepsIdx<C4, EC>>, w: Array<Float like Idx<WE>>)
+                    where ml.equiv(C4) -> Array<Float like PgIrrepsIdx<C4, EC>> =
+    ml.derive_pg_linear(C4, EC, EC, x, w)
+
+function spin_twice_tight(x: Array<Float like PgIrrepsIdx<C4, EC>>, w: Array<Float like Idx<WE>>)
+                          where ml.equiv(C4) -> Array<Float like PgIrrepsIdx<C4, EC>> =
+    spin_tight(spin_tight(x, w), w)
+
+// (0, 1) is pure J: (a, b) -> (-b, a), and J^2 = -Id. Integer generators, so
+// every pin below is exact.
+let wv = [0.0, 1.0]
+
+let s1 = spin_loose([3.0, 4.0], wv)
+// EXPECT: s1 = [-4, 3]
+let s2 = spin_twice_loose([3.0, 4.0], wv)
+// EXPECT: s2 = [-3, -4]
+let t1 = spin_tight([3.0, 4.0], wv)
+// EXPECT: t1 = [-4, 3]
+let t2 = spin_twice_tight([3.0, 4.0], wv)
+// EXPECT: t2 = [-3, -4]
