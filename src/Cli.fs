@@ -1297,6 +1297,15 @@ let private dispatchTest (rest: string list) : int =
         // health plus the two directions that would be alarming.
         let failed = (Blade.Tests.RepRejectCensus.runRepRejectCensusTests ()).Failed
         if failed = 0 then 0 else 1
+    | [ "gal-layer" ] | [ "gallayer" ] ->
+        // MEASUREMENT ONLY (docs/census-galilean-layer.md): the GALILEAN
+        // discipline's layer question — what would a typecheck-resident walker
+        // conclude about every galilean certificate in the corpus, on the
+        // programs the seam accepts AND on the programs it refuses. Builds an
+        // experimental typed judgment inside the test assembly; changes no
+        // checking behaviour and is deliberately NOT part of the full suite.
+        let failed = (Blade.Tests.GalLayerCensus.runGalLayerCensusTests ()).Failed
+        if failed = 0 then 0 else 1
     | [ "oracles" ] ->
         // Phase 0.2 review block: the differential-harness oracles checked
         // against hand-computed / analytic values. No Blade source pipeline.
