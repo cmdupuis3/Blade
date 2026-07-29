@@ -243,6 +243,12 @@
          test assembly deliberately — nothing in src/ may reference it, and it is
          not part of the full suite (verb `blade test gal-layer`). -->
     <Compile Include="tests/Test_GalLayerCensus.fs" />
+    <!-- MEASUREMENT SCAFFOLDING for docs/census-perm-layer.md: the experimental
+         typed PERM judgment, its three censuses and the first-ever perm
+         inference experiment. Test assembly only - nothing in src/ may
+         reference it, and it is not part of the full suite
+         (verb `blade test perm-layer`). -->
+    <Compile Include="tests/Test_PermLayerCensus.fs" />
     <Compile Include="tests/Oracles.fs" />
     <Compile Include="tests/Test_Oracles.fs" />
     <Compile Include="tests/Test_WignerTables.fs" />
