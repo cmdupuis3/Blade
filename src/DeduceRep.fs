@@ -414,13 +414,93 @@ type private RepCtx = {
 /// The COMPONENTWISE-UNIFORM LINEAR fragment: literals, variable reads, and
 /// arithmetic on them. See the `TExprApply` rule for why a kernel body must be
 /// inside this fragment before a per-element walk may conclude `TRep`.
-let rec private isElementwiseArith (e: TypedExpr) : bool =
+/// Offsets of an O(3) spec whose cells hold FULL invariants under `g` — the
+/// typed twin of MLEquiv.invariantOffsets restricted to the O3 member.
+///
+/// Under O3 only (l = 0, parity EVEN) blocks qualify; under SO3 any l = 0 block
+/// does, because a pseudoscalar is an SO(3) invariant (it flips only under an
+/// improper rotation). An l = 0 block has dim 1 per copy, so block `b` spans
+/// `[start_b .. start_b + mult_b)`.
+///
+/// Block arithmetic is reimplemented here rather than shared: MLSpec compiles
+/// AFTER this module. It is three lines and byte-checked against MLSpec's
+/// `dim`/`blockDim`/`blockStarts` — block dim is `mult * (2l + 1)`, accumulated
+/// in spec order.
+///
+/// POINT GROUPS ARE A NAMED DEFERRAL. The pg reading is the same conditional
+/// theorem one member over — the invariant cells are those of a TRIVIAL label —
+/// but which labels are trivial is registry data in MLPointSpec, which is also
+/// out of compile-order reach. Hardcoding a label table here would drift from
+/// the registry, and a drifted trivial-label table is a false invariant, so a
+/// pg spec declines instead.
+let private invariantOffsetsT (g: GroupT) (spec: (int * int * int) list) : Set<int> =
+    match g with
+    | GPoint _ -> Set.empty
+    | GO3 | GSO3 ->
+        let mutable start = 0
+        let acc = System.Collections.Generic.List<int>()
+        for (l, p, m) in spec do
+            if l = 0 && (g = GSO3 || p = 0) then
+                for k in 0 .. m - 1 do acc.Add (start + k)
+            start <- start + m * (2 * l + 1)
+        Set.ofSeq acc
+
+/// A provably compile-time integer index, or None. `compute` is a scheduling
+/// boundary and is peeled; anything else — a variable, an arithmetic
+/// expression, a folded static this walker cannot see — is NOT a literal, and
+/// the caller declines.
+let rec private staticIntOf (e: TypedExpr) : int option =
     match e.Kind with
-    | TExprLit _ | TExprVar _ -> true
-    | TExprBinOp (_, _, l, r) -> isElementwiseArith l && isElementwiseArith r
-    | TExprUnaryOp (_, i) -> isElementwiseArith i
-    | TExprCompute i -> isElementwiseArith i
-    | _ -> false
+    | TExprLit (LitInt n) -> Some (int n)
+    | TExprCompute inner -> staticIntOf inner
+    | _ -> None
+
+/// Does this subtree read any of `ids`? CONSERVATIVE BY DESIGN, in the
+/// `Deduce.usesVar` discipline: a node kind not enumerated here answers TRUE.
+/// The only consumer treats "mentions nothing" as a licence, so guessing FALSE
+/// would be the unsound direction; guessing TRUE merely forfeits recall.
+let rec private mentionsAnyId (ids: Set<IRId>) (e: TypedExpr) : bool =
+    let any = List.exists (mentionsAnyId ids)
+    match e.Kind with
+    | TExprLit _ | TExprWildcard | TExprZero -> false
+    | TExprVar (_, vid, _) -> Set.contains vid ids
+    | TExprBinOp (_, _, l, r) -> any [ l; r ]
+    | TExprUnaryOp (_, i) -> mentionsAnyId ids i
+    | TExprCompute i | TExprPure i | TExprRead i -> mentionsAnyId ids i
+    | TExprIndex (a, idxs, _) -> any (a :: idxs)
+    | TExprField (b, _, _) -> mentionsAnyId ids b
+    | TExprTupleIndex (t, i) -> any [ t; i ]
+    | TExprApp (f, args) -> any (f :: args)
+    | TExprTuple es | TExprSequence es | TExprStack es | TExprZip es -> any es
+    | TExprArrayLit (es, _) -> any es
+    | TExprArrayNegate a | TExprArrayConjugate a -> mentionsAnyId ids a
+    | TExprIf (c, t, f) -> any [ c; t; f ]
+    // Everything else — lambdas, formers, reduces, blocks, matches — is
+    // deliberately unenumerated: answering TRUE costs only recall.
+    | _ -> true
+
+/// The COMPONENTWISE-UNIFORM LINEAR fragment, relative to a kernel's parameter
+/// ids: literals, variable reads, and arithmetic on them — PLUS any subtree
+/// that mentions no kernel parameter at all.
+///
+/// That second clause is what admits a captured scalar read like `q(0)` beside
+/// the element being scaled. SOUNDNESS: a subtree that reads no kernel
+/// parameter has the same value at every iteration position, so it is a genuine
+/// loop CONSTANT; if its type is scalar it is one number for the whole array,
+/// which is exactly the premise the scaling rule needs. A subtree that DOES
+/// read a kernel parameter — `q(a)` — varies per position, and is admitted only
+/// through the arithmetic cases, which is what stops a position-varying value
+/// from passing itself off as a scalar multiplier (the `x * w` false
+/// certificate, one level deeper).
+let rec private isElementwiseArith (ps: Set<IRId>) (e: TypedExpr) : bool =
+    if not (mentionsAnyId ps e) then true
+    else
+        match e.Kind with
+        | TExprLit _ | TExprVar _ -> true
+        | TExprBinOp (_, _, l, r) -> isElementwiseArith ps l && isElementwiseArith ps r
+        | TExprUnaryOp (_, i) -> isElementwiseArith ps i
+        | TExprCompute i -> isElementwiseArith ps i
+        | _ -> false
 
 let rec private statusOf (ctx: RepCtx) (env: Map<IRId, RepStatusT>) (expr: TypedExpr) : RepStatusT =
     let j = statusOf ctx env
@@ -617,14 +697,33 @@ let rec private statusOf (ctx: RepCtx) (env: Map<IRId, RepStatusT>) (expr: Typed
     // move has no part that moves, so a component of an invariant aggregate
     // picked by an invariant selector is invariant.
     //
-    // A REP base declines: its components are the basis-dependent numbers this
-    // whole discipline exists to refuse (reading component k of an l>0 block
-    // gives a number that changes with the frame). Static invariant-offset
-    // reads — the l=0 / trivial-label blocks the seam admits — are a named
-    // later refinement, NOT claimed here.
+    // A REP base declines IN GENERAL: its components are the basis-dependent
+    // numbers this whole discipline exists to refuse — reading component k of
+    // an l>0 block gives a number that changes with the frame.
+    //
+    // THE ONE EXCEPTION is a STATIC offset landing inside a trivial block.
+    // SOUNDNESS: an (l = 0, even) block under O3 — or any l = 0 block under
+    // SO3, since a pseudoscalar is fixed by every proper rotation — is acted on
+    // by the identity, so the cell at that offset holds the SAME number in
+    // every frame. That is precisely what `TInv` asserts, and the result is a
+    // single cell, hence `TInvScalar`.
+    //
+    // The offset must be a LITERAL this walker can see. A computed index would
+    // have to be proven to land in a trivial block, and an index this walker
+    // cannot evaluate could land anywhere: decline.
     | TExprIndex (arr, idxs, _) ->
         (match j arr with
          | TBottom -> TBottom
+         | TRep (TO3Spec spec) ->
+             (match idxs with
+              | [ i ] ->
+                  (match staticIntOf i with
+                   | Some k when Set.contains k (invariantOffsetsT ctx.Group spec) ->
+                       TInv TInvScalar
+                   | _ -> TBottom)
+              | _ -> TBottom)
+         // Point-group reps: see `invariantOffsetsT` — the trivial-LABEL table
+         // is out of compile-order reach, so no offset is claimed.
          | TRep _ -> TBottom
          | TOpaque -> TOpaque
          | TInv _ ->
@@ -669,12 +768,42 @@ let rec private statusOf (ctx: RepCtx) (env: Map<IRId, RepStatusT>) (expr: Typed
     //   2. this pass's SPECULATIVE table under the same group: consumed at
     //      suggestion strength, and RECORDED as a dependency so the proposal
     //      can name the pins it rests on.
-    // A group mismatch, an arity mismatch, or an argument whose status does
-    // not match the stored parameter status declines. Certificates do not
-    // transfer between groups: the seam refuses a cross-group call in BOTH
-    // directions, and a proposal that rested on one would not check.
+    // When the stored signature does NOT apply — a group mismatch, an arity
+    // mismatch, or an argument whose status does not match the stored parameter
+    // status — the call FALLS THROUGH to the all-invariant rule rather than
+    // declining outright.
+    //
+    // SOUNDNESS of the fall-through: a certificate is a statement about what
+    // happens to values that TRANSFORM. When every argument is provably
+    // invariant, nothing flowing in transforms, and the callee is a
+    // deterministic map: the same inputs in every frame give the same output in
+    // every frame, so the result is invariant no matter which group (if any)
+    // the callee is certified for. The certificate is simply irrelevant to that
+    // conclusion. Any `TRep` or `TOpaque` argument still declines, exactly as
+    // before — that is the case where the certificate WOULD have been doing
+    // work, and where a mismatch is a real loss of information.
+    //
+    // This is what recovers `ml.derive_pg_linear` under an O3 hypothesis: post-
+    // elaboration it is a C4-STAMPED generated callee, and under O3 both its
+    // arguments (the pg buffer, the weights) classify invariant.
+    //
+    // KNOWN DIVERGENCE, accepted and documented rather than special-cased: the
+    // seam's checker refuses a cross-group CERTIFIED call in BOTH directions,
+    // even when every argument is invariant — a coarser rule than this one. So
+    // an O3-certified body calling a C4-certified USER function on invariants
+    // is now a typed-only proposal whose pinned twin the seam checker would
+    // reject: a false positive by B3's letter. No corpus file has that shape
+    // (052 is a whole-file reject, so inference never runs there), and the
+    // differential's false-positive assertion is the standing guard. Gating
+    // this on generated-callee NAMES was rejected as the worse fix.
     | TExprApp (f, args) ->
         let argSts = args |> List.map j
+        /// The all-invariant rule, shared by the uncertified-callee arm and by
+        /// the certified arm's fall-through. Shape comes from the node's own
+        /// type, i.e. the callee's return type read under the CURRENT
+        /// hypothesis.
+        let allInvRule () =
+            if argSts |> List.forall isInvT then TInv (nodeShape ()) else TBottom
         (match f.Kind with
          | TExprVar (_, fid, _) when fid = ctx.Self -> TBottom
          | TExprVar (_, fid, _) ->
@@ -696,20 +825,19 @@ let rec private statusOf (ctx: RepCtx) (env: Map<IRId, RepStatusT>) (expr: Typed
                       | None -> ctx.Speculative fid |> Option.map (fun s -> (s, true))
                   match resolved with
                   | Some (sg, speculative) ->
-                      if sg.Group <> ctx.Group then TBottom
-                      elif List.length sg.Params <> List.length args then TBottom
-                      else
-                          let argsOk =
-                              List.zip (sg.Params |> List.map snd) argSts
+                      let applies =
+                          sg.Group = ctx.Group
+                          && List.length sg.Params = List.length args
+                          && (List.zip (sg.Params |> List.map snd) argSts
                               |> List.forall (fun (pSt, aSt) ->
                                   match pSt, aSt with
                                   | TRep sp, TRep sa -> sp = sa
                                   | TInv _, TInv _ -> true
-                                  | _ -> false)
-                          if not argsOk then TBottom
-                          else
-                              if speculative then ctx.DepHits.Add fid |> ignore
-                              sg.Return
+                                  | _ -> false))
+                      if applies then
+                          if speculative then ctx.DepHits.Add fid |> ignore
+                          sg.Return
+                      else allInvRule ()
                   | None ->
                       // Uncertified callee (builtin, plain helper, array read
                       // through application syntax). SOUNDNESS: a function of
@@ -718,9 +846,7 @@ let rec private statusOf (ctx: RepCtx) (env: Map<IRId, RepStatusT>) (expr: Typed
                       // argument would ESCAPE into a body that carries no
                       // certificate saying what happens to it: decline. An
                       // unclassifiable argument proves nothing either.
-                      if argSts |> List.forall isInvT
-                      then TInv (nodeShape ())
-                      else TBottom)
+                      allInvRule ())
          | _ ->
              // Computed callee: admissible only when nothing rep-typed is in
              // play at all.
@@ -789,7 +915,11 @@ let rec private statusOf (ctx: RepCtx) (env: Map<IRId, RepStatusT>) (expr: Typed
                  let outSt = classifyType ctx.Group ctx.Resolve expr.Type
                  (match kSt, outSt with
                   | TBottom, _ -> TBottom
-                  | TRep a, TRep b when a = b && isElementwiseArith lam.Body -> TRep a
+                  | TRep a, TRep b when
+                        a = b
+                        && isElementwiseArith
+                             (lam.Params |> List.map (fun p -> p.VarId) |> Set.ofList)
+                             lam.Body -> TRep a
                   | TInv _, TInv sh -> TInv sh
                   | _ -> if anyRepSrc then TBottom else TOpaque)
              | _ -> if anyRepSrc then TBottom else TOpaque)
