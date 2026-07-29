@@ -1,10 +1,51 @@
 # Plan: equivariance in types — the typecheck-resident deduction
 
-Status: PHASES A+B IN PROGRESS (2026-07-28); pause before C per review.
-Sequel to plan-transforms-as-types.md (stages 1-6 landed) and
-plan-equivariance-deduction.md (landed 2026-07-28). Goal: all equivariance
-disciplines live under one roof, at typecheck time, deduced the same way
-symmetry is — with the exact index types in hand.
+Status: A+B+C1+C2 LANDED (2026-07-28/29). EQUIV IS DONE — see the layer
+decision below. C3 as originally written (one engine, seam retired) is
+WITHDRAWN; galilean and perm proceed independently, each measured on its
+own terms. Sequel to plan-transforms-as-types.md (stages 1-6 landed) and
+plan-equivariance-deduction.md (landed 2026-07-28).
+
+THE GOAL LINE ABOVE WAS WRONG, and the correction is the main thing a
+reader should take from this document. It read: "all equivariance
+disciplines live under one roof, at typecheck time." Two words of that
+did not survive measurement.
+
+**"One roof" — withdrawn (user decision, 2026-07-29).** The three
+disciplines keep their own claim vocabularies and their own rules. The
+survey (`design-discipline-as-data.md`) measured why: equiv's action is
+a linear block-diagonal rep, galilean's an affine shift, perm's a
+permutation matrix, and they have OPPOSITE POLARITY at nearly every
+arithmetic arm (`Cov + Cov` is legal / reject / legal). No parameterized
+payload recovers that — they are different functions of the same type.
+`MLCertShell.fs` reached this same conclusion at the seam long ago and
+wrote it in its header; the unified engine was this plan's assumption,
+never something the code asked for. What DOES abstract is the walk and
+the guards (~250 lines, shipped as `src/DisciplineKit.fs`), which is a
+LIBRARY disciplines may call, not a framework they must instantiate.
+Consequence: no cross-cutting blocker stage, and each discipline picks
+its own layer independently.
+
+**"At typecheck time" — true for deduction, FALSE for checking, at
+least for equiv.** The rejection census (`census-rejection-parity.md`)
+measured the flip and found it would let 16 of 30 refused programs
+COMPILE — a soundness regression, not a diagnostics one. Six of those
+fail because the `ml` vocabulary is genuinely gone by typecheck: not a
+gap to close but a fact about the pipeline. It COULD be closed by
+stamping surface provenance forward, but then the typed checker judges a
+reconstruction of the surface program, which dissolves the architectural
+case for moving it.
+
+**EQUIV'S SETTLED END STATE: checking at the seam, deduction and
+validation at typecheck.** Each half sits where its evidence lives — the
+seam has the `ml` vocabulary, typecheck has the exact index types. Both
+halves are shipped and gated (`rep-differential`, `rep-check`,
+`rep-reject`). This is the plan's §5.3 "B-forever" option, chosen on
+measurement rather than settled by argument.
+
+Sequels: `design-discipline-as-data.md` (the three-way survey),
+`census-rejection-parity.md` (the flip's price), and
+`exploration-equivariant-bijections.md` (the §6.3 restriction decision).
 
 REVIEW DECISIONS (2026-07-28):
 1. Claim-as-deduced-attribute CONFIRMED, with a refinement that sharpens
@@ -184,11 +225,42 @@ them all:
   emitter verification + proof tower), not re-derivation. Closing them
   would be structural CG recognition, a different feature; abstention
   there is benign and permanent until someone wants that feature.
-- C3. Retire the seam walkers; MLElaborate keeps synthesis + stamping
-  only. Galilean and perm land as discipline instances on the generic
-  engine (galilean's table is small; perm gains inference per §0.2).
-  NOT STARTED — the checking-authority flip lives here, and with it the
-  diagnostic-parity question (every rejects pin is seam-worded today).
+- C3. **WITHDRAWN AS WRITTEN (2026-07-29).** It bundled three things
+  that measurement pulled apart: retiring the seam, unifying the
+  disciplines on one engine, and porting galilean/perm. The first is
+  refused for equiv (the census: 16 of 30 refused programs would
+  compile), the second is refused outright (the polarity finding), and
+  only the third survives — as two independent efforts, each choosing
+  its own layer on its own evidence.
+
+  What replaces it:
+  - **C3-a. Equiv close-out.** Share the engine failure-message
+    constructors between `MLEquiv` and `MLPolyExtractTyped` — C2
+    declined to duplicate them precisely to avoid drift and left a
+    standing paired-maintenance note, which is a latent bug of the kind
+    that has already bitten this codebase once. Give the typed decline
+    a CAUSE (`TBottom` currently discards a reason the walker has
+    already computed, at 25 sites) and widen `classifySignature` to
+    report position and cause. Analysis-only: no accept/reject status
+    may change, and all three gates keep their exact counts.
+  - **C3-b. Galilean, on its own terms.** Its own acceptance and
+    rejection censuses before any layer choice; it does NOT inherit
+    equiv's answer. Known blocker to price: `sgs.box_filter` is
+    deliberately unstamped because its rule is status-PRESERVING and
+    the vocabulary has no spelling for "preserves" — now a
+    galilean-local addition rather than a cross-discipline change.
+  - **C3-c. Perm, on its own terms.** Same shape, plus the
+    `__nodepow` nominal index tag (§0.2's correction), which is a
+    type-system addition to be judged on its own merits. Perm has no
+    incumbent inference at all, so its differential has only the
+    false-positive half.
+
+  Two open policy questions the censuses surfaced, neither blocking:
+  whether a certificate can be violated by DEAD code (the seam refuses
+  an offending op by name wherever it appears; the typed walker
+  flattens bindings and judges only what reaches the result — neither
+  is wrong, and nobody has decided), and whether "preserves" should be
+  a cross-cutting claim shape or per-discipline sugar.
 
 **D. Meets and modes (the previous conversation, now cheap)**
 - D1. Collision = subgroup meet via A3's branching rules: O3 ⊓ SO3 = SO3
