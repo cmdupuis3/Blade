@@ -26,6 +26,20 @@ LIBRARY disciplines may call, not a framework they must instantiate.
 Consequence: no cross-cutting blocker stage, and each discipline picks
 its own layer independently.
 
+REFINEMENT from the first second-caller (galilean census, 2026-07-29):
+**a shared guard's CONSERVATIVE DIRECTION is consumer-relative.**
+`mentionsAnyId` answers TRUE for unenumerated node kinds — deliberately,
+because equiv's consumer treats "mentions nothing" as a licence, so
+guessing TRUE costs only recall. Galilean's vacuity guard asks the same
+question with the opposite safe answer, and the kit's version reads
+every block-bodied function as self-referential, losing 3 of 7
+proposals. Both versions are sound; neither is shareable as written.
+So the library boundary is finer than "walk and guards are common":
+a guard's SHAPE is shareable, its POLARITY is the caller's. Sharing one
+without parameterizing the other silently costs the second caller
+recall — which is exactly the drift the library was meant to prevent,
+arriving through the door marked safe.
+
 **"At typecheck time" — true for deduction, FALSE for checking, at
 least for equiv.** The rejection census (`census-rejection-parity.md`)
 measured the flip and found it would let 16 of 30 refused programs
@@ -243,12 +257,39 @@ them all:
     already computed, at 25 sites) and widen `classifySignature` to
     report position and cause. Analysis-only: no accept/reject status
     may change, and all three gates keep their exact counts.
-  - **C3-b. Galilean, on its own terms.** Its own acceptance and
-    rejection censuses before any layer choice; it does NOT inherit
-    equiv's answer. Known blocker to price: `sgs.box_filter` is
-    deliberately unstamped because its rule is status-PRESERVING and
-    the vocabulary has no spelling for "preserves" — now a
-    galilean-local addition rather than a cross-discipline change.
+  - **C3-b. Galilean — MEASURED (2026-07-29,
+    `census-galilean-layer.md`). It does not inherit equiv's answer,
+    and the answer is different.**
+    - Acceptance: 23 certificates / 14 files → 19 confirm, 4 abstain,
+      **0 disagree**. The generated `sgs.grad` body CONFIRMS — at
+      typecheck that axiom is re-proved, not merely trusted.
+    - Deduction: **7 matched / 0 seam-only / 0 typed-only** — exact
+      reproduction in both directions, including all three pinned
+      SILENCES and the dependency closure. Equiv's differential has
+      never reached that.
+    - Rejection: only 1 of 11 would still be refused today. But the
+      cause is NOT equiv's — galilean's evidence SURVIVES to typecheck
+      (zero disagreements anywhere); what it loses is DIAGNOSTICS, 33
+      BL4009 messages with sub-expression spans collapsing into a
+      decline that carries neither.
+    - **Therefore: deduction moves to typecheck now (cheap, exact,
+      warnings-only); checking CAN flip wholesale later — three items
+      (cause, span, provenance on one family) against equiv's six.**
+      This is the notable positive result of the whole survey: the two
+      disciplines' layer answers differ, and for principled reasons,
+      which is exactly what per-discipline scoping was for.
+    - `box_filter`: the "preserves" prototype is **nine engine lines
+      and one integer of data**, and recovers BOTH the accepted use and
+      the rejection that had also degraded to abstain. Small because
+      galilean owns its vocabulary — the seam already implements the
+      rule. Worth doing regardless of layer. Note the kit CANNOT host
+      it: a preserving claim is a DEPENDENT signature, and the shared
+      call signature's return is a fixed status.
+    - Two bonus findings: corpus 031's rejection is ALREADY
+      typecheck-resident (the constraint handler refuses it with a
+      byte-identical sentence; only the code differs), and the
+      `ml.*`-op rejection rule is LIVE BUT UNPINNED — no corpus probe
+      exists; promote the inline one.
   - **C3-c. Perm, on its own terms.** Same shape, plus the
     `__nodepow` nominal index tag (§0.2's correction), which is a
     type-system addition to be judged on its own merits. Perm has no
