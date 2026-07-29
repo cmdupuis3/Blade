@@ -228,6 +228,14 @@ let runAllTestsFullWith (extraBlocks: (unit -> Blade.Tests.TestHarness.BlockResu
     // `// SUGGEST:` pins, strict in both directions so SILENCE is assertable
     // (a warning changes no value, so the value corpus cannot pin it).
     let certSuggest = Blade.Tests.DiagCorpus.runCertSuggestTests ()
+    // B3 of plan-equivariance-in-types.md: the DIFFERENTIAL between the typed
+    // rep-status deduction (DeduceRep/TypedCertProposals) and the same
+    // stage-6a seam inference the block above pins, run over the same corpus.
+    // Recall in one direction, zero false proposals in the other; engine-only
+    // files carry `// TYPED-EXEMPT: engine` until the C2 port, typed-only wins
+    // carry `// TYPED-SUGGEST:` pins. Red here BLOCKS the suite by design —
+    // that is the phase-B ship criterion, not a flaky test.
+    let repDiff = Blade.Tests.RepDifferential.runRepDifferentialTests ()
     // C++ runtime-layout tests for the contiguous-backing allocate<>.
     // Verifies layout invariants the value-checking source tests cannot catch.
     // Skips cleanly if g++ absent.
@@ -308,7 +316,7 @@ let runAllTestsFullWith (extraBlocks: (unit -> Blade.Tests.TestHarness.BlockResu
     let blocks =
         [ yield r1; yield r2; yield attrs; yield subst
           yield normalize; yield unify; yield validateArrow
-          yield shape; yield oracles; yield wigner; yield symPower; yield polyOracle; yield lieTables; yield permSpec; yield permOracle; yield structIdxSpec; yield structIdxOracle; yield pointSpec; yield pgOracle; yield cartBridge; yield spans; yield diagCore; yield diagCorpus; yield certSuggest; yield alloc
+          yield shape; yield oracles; yield wigner; yield symPower; yield polyOracle; yield lieTables; yield permSpec; yield permOracle; yield structIdxSpec; yield structIdxOracle; yield pointSpec; yield pgOracle; yield cartBridge; yield spans; yield diagCore; yield diagCorpus; yield certSuggest; yield repDiff; yield alloc
           yield ompPragma
           match omp with Some b -> yield b | None -> ()
           yield bufType
