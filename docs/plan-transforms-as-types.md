@@ -157,6 +157,14 @@ deduction, and stage-3 symmetry deduction. The parts this plan builds on:
 This changes the status of §3.5 below from "mirror a sibling plan" to
 "add a fourth lattice to a shipped framework with a checked proof pattern."
 
+**Successor plan (2026-07-28):** this fourth lattice's socket is exactly
+what [plan-equivariance-in-types.md](plan-equivariance-in-types.md) moves —
+from the elaboration seam (where MLEquiv/MLGalilean run today, per §3.5/§7
+stage 6 below) to typecheck-time, riding this same Deduce.fs machinery
+alongside rank/symmetry/arity. Phases A+B are IN PROGRESS as of this date;
+see that plan's §0 for the polymorphism-license refinement to the claim
+model and its §6 for the post-A+B API sketch.
+
 ### 2.7 The three seams (verified at HEAD)
 
 | # | Seam | Current state |
@@ -1439,6 +1447,16 @@ go first.
        equiv proposals (elaboration runs BEFORE typecheck, so deduced
        ranks and types do not exist yet at the seam — a post-typecheck
        second inference pass is an architecture change, not a patch).
+
+   **Successor plan (2026-07-28):** stage 6's remaining named deferrals —
+   partial-annotation proposals and Sₙ/perm inference, both above — are
+   exactly the architecture change [plan-equivariance-in-types.md
+   ](plan-equivariance-in-types.md) schedules: a typecheck-resident
+   deduction lattice, where types are closed post-unification instead of
+   pre-typecheck at the elaboration seam. That plan's §0 explains why the
+   seam position is the actual blocker (not effort) for both deferrals;
+   its stages A-D (phases A+B in progress as of this date) are the
+   scheduled continuation of this stage.
 
 ## 8. New proof obligations
 
