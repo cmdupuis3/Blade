@@ -338,6 +338,12 @@ let formatTypeError (err: TypeError) : string =
     | UnboundVariable name -> sprintf "Unbound variable: %s" name
     | TypeMismatch (exp, act) -> sprintf "Type mismatch: expected %s, got %s" (ppIRType exp) (ppIRType act)
     | ArityMismatch (exp, act) -> sprintf "Arity mismatch: expected %d args, got %d" exp act
+    | ArgRankMismatch (pos, expRank, actRank, expTy, actTy) ->
+        let describe rank ty =
+            if rank = 0 then sprintf "a scalar (%s)" ty
+            else sprintf "a rank-%d array (%s)" rank ty
+        sprintf "argument %d: rank mismatch: the parameter expects %s but the argument is %s. A call site neither broadcasts nor reduces rank -- pass a value of the declared rank, or change the parameter's declared type."
+                pos (describe expRank expTy) (describe actRank actTy)
     | InvalidArrayCapture name -> sprintf "Lambda cannot capture array '%s'" name
     | InvalidApplication funcTy -> sprintf "Cannot apply non-function type: %A" funcTy
     | PatternTypeMismatch (pat, ty) -> sprintf "Pattern '%s' incompatible with type %A" pat ty
@@ -484,7 +490,7 @@ let diagnosticOfCompileError (e: CompileError) : Blade.Diagnostics.Diagnostic =
         | None ->
             match e.Error with
             | UnboundVariable _ -> "BL2001"
-            | TypeMismatch _ -> "BL3001"
+            | TypeMismatch _ | ArgRankMismatch _ -> "BL3001"
             | ArityMismatch _ -> "BL3002"
             | InvalidApplication _ -> "BL3003"
             | PatternTypeMismatch _ -> "BL3004"

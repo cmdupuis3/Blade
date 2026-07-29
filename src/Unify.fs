@@ -16,6 +16,11 @@ type TypeError =
     | UnboundVariable of string
     | TypeMismatch of expected: IRType * actual: IRType
     | ArityMismatch of expected: int * actual: int
+    /// Rank disagreement between a declared parameter and the argument
+    /// supplied at a DIRECT application. Raised by dispatchAppOrIndex's
+    /// FuncElem arm, which does not unify args against params (see the
+    /// comment there); `pos` is 1-based.
+    | ArgRankMismatch of pos: int * expected: int * actual: int * expectedTy: string * actualTy: string
     | InvalidArrayCapture of varName: string
     | InvalidApplication of funcType: IRType
     | PatternTypeMismatch of pattern: string * expected: IRType

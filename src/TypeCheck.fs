@@ -1752,6 +1752,58 @@ let private compoundResidualType (headSlot: IRIndexType) (parentIR: IRExpr) (j: 
             Symmetry = SymNone; Tag = Some "__compoundidx"; IxKind = IxKCompound
             Kind = SDimension; Dependencies = [] } ]
 
+/// Rank as CODEGEN will see it — the `k` in the emitted `Array<elem, k>`,
+/// and 0 for a scalar — when the type is concrete enough to know.
+///
+/// `None` means "unknown, stand down": inference variables, arity-polymorphic
+/// packs, functions/kernels, structs, tuples, loops, dists. Callers compare
+/// two `Some` ranks and nothing else, so an unresolved type never manufactures
+/// a mismatch.
+///
+/// SINGLE SOURCE OF TRUTH for the direct-application rank check. Two sites
+/// use it — the eager check in `dispatchAppOrIndex`'s FuncElem arm and the
+/// post-unification sweep `collectAppRankErrors` — and the whole point of the
+/// second is that the first cannot see through an open variable, so the two
+/// MUST agree on what a rank is or the sweep would start contradicting the
+/// seam it exists to back up.
+let concreteRankOf (subst: Subst) (ty: IRType) : int option =
+    let rec go t =
+        match subst.Resolve t with
+        | ArrayElem a -> Some (a.IndexTypes |> List.sumBy (fun i -> max 1 i.Rank))
+        | IRTScalar _ -> Some 0
+        | IRTUnitAnnotated (inner, _) -> go inner
+        | IRTIdxTagged (inner, _) -> go inner
+        | _ -> None
+    go ty
+
+/// The rank comparison itself, over a parameter list and an argument list:
+/// the first position whose two ranks are both known and disagree, as
+/// (0-based position, param rank, arg rank, param type, arg type).
+///
+/// Two arms stand down entirely rather than compete with a better
+/// diagnostic:
+///   * A `Poly<T^r>` pack param makes the arrow variadic — positional
+///     pairing is meaningless there (monomorphization owns the call).
+///   * UNDER-application. Fewer args than params is an arity error, and the
+///     arity message names the real defect; a rank complaint about the args
+///     that ARE present would bury it. (OVER-application still checks the
+///     prefix this arrow consumes — the surplus re-dispatches against the
+///     result type and gets its own pass.)
+let firstArgRankClash (subst: Subst) (paramTys: IRType list) (argTys: IRType list)
+                      : (int * int * int * IRType * IRType) option =
+    let isVariadic =
+        paramTys |> List.exists (fun t ->
+            match subst.Resolve t with IRTPoly _ -> true | _ -> false)
+    if isVariadic || argTys.Length < paramTys.Length then None
+    else
+        let n = min paramTys.Length argTys.Length
+        List.zip (List.truncate n paramTys) (List.truncate n argTys)
+        |> List.mapi (fun i (pTy, aTy) -> (i, pTy, aTy))
+        |> List.tryPick (fun (i, pTy, aTy) ->
+            match concreteRankOf subst pTy, concreteRankOf subst aTy with
+            | Some pr, Some ar when pr <> ar -> Some (i, pr, ar, pTy, aTy)
+            | _ -> None)
+
 let rec private dispatchAppOrIndex (env: TypeEnv) (tFunc: TypedExpr) (tArgs: TypedExpr list) : TypeResult<TypedExpr> =
     match tFunc.Type with
     | ArrayElem arrTy when tArgs.Length <= arrTy.IndexTypes.Length ->
@@ -1923,15 +1975,46 @@ let rec private dispatchAppOrIndex (env: TypeEnv) (tFunc: TypedExpr) (tArgs: Typ
                 match pu, au with
                 | Some pu, Some au when not (unitCompatible pu au) -> Some (i, pu, au)
                 | _ -> None)
-        match irrepsClash, unitClash with
-        | Some (i, pi, ai), _ ->
+        // A Poly<T^r> pack param makes the arrow variadic — its declared
+        // param count says nothing about legal call-site arg counts, so
+        // arity accounting stands down (monomorphization owns the call).
+        let isVariadic =
+            paramTys |> List.exists (fun t ->
+                match env.Subst.Resolve t with IRTPoly _ -> true | _ -> false)
+        // Rank strictness at DIRECT APPLICATION, the third carve-out at this
+        // seam after irreps and units, and the CHECKING half of the rank
+        // story whose INFERENCE half is the LOWER-BOUND propagation below.
+        // That propagation only ever teaches an UNRESOLVED argument var the
+        // callee's rank demand; when BOTH sides are already concrete it
+        // stands down, and until now nothing else here compared them — so
+        // `h(a: Float) = ...` applied to an `Array<Float
+        // like Idx<4>>` typechecked clean and codegen then emitted
+        // `double h(double)` called with `Array<double,1>`, which only g++
+        // ever refused. Ranks are what codegen puts in the C++ type
+        // (`Array<elem, rank>`), so disagreement here is exactly the
+        // conversion g++ cannot perform, in either direction: an array into
+        // a scalar param, a scalar into an array param, or rank k into
+        // rank j.
+        //
+        // This eager copy only sees CLOSED types. An unannotated parameter
+        // is still an open variable here (Blade arithmetic is rank-
+        // polymorphic, so `x * s` closes nothing), and `collectAppRankErrors`
+        // re-runs the identical comparison on the zonked module for exactly
+        // those.
+        let rankClash = firstArgRankClash env.Subst paramTys (tArgs |> List.map (fun a -> a.Type))
+        match irrepsClash, unitClash, rankClash with
+        | Some (i, pi, ai), _, _ ->
             Error (IrrepsIdxArgMismatch (i + 1, ppIndexType pi, ppIndexType ai))
-        | None, Some (i, pu, au) ->
+        | None, Some (i, pu, au), _ ->
             Error (UnitMismatch (sprintf "argument %d" (i + 1), ppUnitSig pu, ppUnitSig au))
-        | None, None ->
+        | None, None, Some (i, pr, ar, pTy, aTy) ->
+            Error (ArgRankMismatch (i + 1, pr, ar,
+                                    ppIRType (env.Subst.Resolve pTy),
+                                    ppIRType (env.Subst.Resolve aTy)))
+        | None, None, None ->
             // Rank propagation at DIRECT APPLICATION (stage-2 rank deduction)
-            // — the third strictness carve-out at this seam, after irreps and
-            // units: since args are not unified against params, an
+            // — the INFERENCE half of the rank carve-out whose CHECKING half
+            // is `rankClash` above: since args are not unified against params, an
             // unannotated CALLER param flowing into this call would never
             // learn the callee's rank demand — the typechecker stays quiet
             // and codegen emits ill-typed C++ (a scalar where Array<..,k> is
@@ -1950,12 +2033,6 @@ let rec private dispatchAppOrIndex (env: TypeEnv) (tFunc: TypedExpr) (tArgs: Typ
                      match env.Subst.Resolve arg.Type with
                      | IRTInfer aid -> env.Subst.AddRankLowerBound(aid, calleeRank)
                      | _ -> ()))
-            // A Poly<T^r> pack param makes the arrow variadic — its declared
-            // param count says nothing about legal call-site arg counts, so
-            // arity accounting stands down (monomorphization owns the call).
-            let isVariadic =
-                paramTys |> List.exists (fun t ->
-                    match env.Subst.Resolve t with IRTPoly _ -> true | _ -> false)
             if isVariadic then
                 Ok (mkTyped (TExprApp (tFunc, tArgs)) retTy)
             elif tArgs.Length > paramTys.Length then
@@ -10053,6 +10130,59 @@ let private importedStaticSeed (env: TypeEnv) (decls: Located<Decl> list) : Map<
             | None -> acc
         | _ -> acc) Map.empty
 
+/// Post-unification sweep for direct-application RANK disagreements — the
+/// late half of the check whose eager half lives in `dispatchAppOrIndex`'s
+/// FuncElem arm (see the comment there; both call `firstArgRankClash`, so
+/// the rule itself exists once).
+///
+/// The eager half can only compare two CLOSED types, and an unannotated
+/// parameter is not closed at its call site: Blade arithmetic is rank-
+/// polymorphic, so a body like `x * s` leaves `x`'s variable open, the
+/// checker stands down, and zonking then defaults the variable to a SCALAR
+/// — which is precisely the signature codegen emits. That is how
+///
+///     function f(x, s: Float) -> Array<Float like IrrepsIdx<S>> = x * s
+///     let r = f(xv, 2.0)          // xv : Array<Float64 like Idx<4>>
+///
+/// passed `blade check` and was then refused by g++, which saw
+/// `double f(double, double)` handed an `Array<double,1>`. The declared
+/// ARRAY return does not close `x`: filling an array return from a scalar
+/// body is a real and separately-tested feature (`f(3.0, 2.0)` broadcasts
+/// to [6,6,6,6]), so the parameter legitimately stays a scalar and the
+/// CALL SITE is what is wrong.
+///
+/// Running on the ZONKED module is what makes this total: every parameter
+/// and every argument now carries the exact type codegen will emit, so
+/// there is no third reading left for the two to disagree about.
+let rec private collectAppRankErrors (subst: Subst) (expr: TypedExpr) : CompileError list =
+    let here =
+        match expr.Kind with
+        | TExprApp (tFunc, tArgs) ->
+            match subst.Resolve tFunc.Type with
+            | FuncElem (paramTys, _) ->
+                match firstArgRankClash subst paramTys (tArgs |> List.map (fun a -> a.Type)) with
+                | Some (i, pr, ar, pTy, aTy) ->
+                    let arg = List.item i tArgs
+                    [ { Error = ArgRankMismatch (i + 1, pr, ar,
+                                                 ppIRType (subst.Resolve pTy),
+                                                 ppIRType (subst.Resolve aTy))
+                        Span = arg.Span
+                        Context = []
+                        Code = None } ]
+                | None -> []
+            | _ -> []
+        | _ -> []
+    here @ (typedExprChildren expr |> List.collect (collectAppRankErrors subst))
+
+/// Every expression a zonked declaration carries, for the sweep above.
+let private declExprs (decl: TypedDecl) : TypedExpr list =
+    let ofFunc (f: TypedFunctionDecl) = [f.Body]
+    match decl with
+    | TDeclLet b | TDeclStatic b -> [b.Value]
+    | TDeclFunction f -> ofFunc f
+    | TDeclImpl impl -> impl.Methods |> List.collect ofFunc
+    | TDeclType _ | TDeclInterface _ | TDeclUnit _ | TDeclImport _ -> []
+
 let checkModule (env: TypeEnv) (modul: ModuleDecl) : TypedModule * TypeEnv * CompileError list =
     // Resolve compile-time-known static VALUES up front (the same
     // StaticEval.resolveStatics the lowering phase runs as its Phase 0), so
@@ -10177,7 +10307,17 @@ let checkModule (env: TypeEnv) (modul: ModuleDecl) : TypedModule * TypeEnv * Com
     let typedModule = { Name = Some modul.Name; Decls = List.rev decls }
     // Zonk: resolve all IRTInfer through the substitution, default unsolved to Float64
     let zonked = zonkModule currentEnv.Subst typedModule
-    (zonked, currentEnv, staticAssertErrors @ List.rev errors)
+    // Late direct-application rank check, on the zonked tree — see
+    // collectAppRankErrors. Suppressed when the module already has errors:
+    // a failed decl binds its name to a fresh var (the cascade guard above),
+    // and calls through that var would report rank noise on top of the real
+    // root cause.
+    let rankErrors =
+        if List.isEmpty errors && List.isEmpty staticAssertErrors then
+            zonked.Decls |> List.collect declExprs
+                         |> List.collect (collectAppRankErrors currentEnv.Subst)
+        else []
+    (zonked, currentEnv, staticAssertErrors @ List.rev errors @ rankErrors)
 
 let checkProgram (program: Program) : TypedProgram * IRBuilder * CompileError list * string list =
     let env = emptyEnv ()

@@ -1,0 +1,48 @@
+// TEST: Unannotated Scalar Param Array Arg (rejects)
+// REJECT-AT: lower
+// ============================================================================
+// The other half of the stage-2 rank deduction pinned by
+// 023_unannotated_rank_through_calls. There the rank-1 demand ARRIVES —
+// `reduce` pins `total`'s param, the lower bound carries it to
+// `twice`'s — and the call site then agrees. Here NOTHING pins `x`:
+//
+//   * the parameter is unannotated,
+//   * `x * s` closes nothing, because Blade arithmetic is rank-polymorphic:
+//     `s` is a scalar either way, and `x` reads equally well as a scalar or
+//     as an array broadcast against it, and
+//   * the declared ARRAY return does not close it either — filling an array
+//     return from a scalar body is a real feature, pinned by 034: with a
+//     scalar argument this same `f` broadcasts to [6, 6, 6, 6].
+//
+// So `x`'s variable is still open when the declaration closes, zonking
+// defaults it to a SCALAR, and that is the signature codegen emits:
+// `double f(double, double)`. The array argument below is then simply wrong,
+// and this file asserts the CHECKER says so.
+//
+// It did not, until the sweep this file pins. Both the irreps and the unit
+// carve-outs at the direct-application seam exist because that seam does NOT
+// unify arguments against parameters; rank had only the lower-bound half of
+// the story (callee demand -> open caller var), so a CLOSED disagreement in
+// either direction fell through: `blade check` printed OK and only g++
+// refused `Array<double,1>` -> `double`. The rank rule now lives in one
+// place (firstArgRankClash) and runs twice — eagerly at the seam for types
+// already closed there, and over the zonked module for the ones that, like
+// this `x`, only close at the very end.
+//
+// Rejected at LOWER, not codegen: the disagreement is between two Blade
+// types, so the Blade checker owns it. Reaching a `#error` guard — let alone
+// g++ — would mean the seam is still open.
+//
+// The road not taken: the call site could instead have TAUGHT `x` its rank,
+// the mirror of the existing lower-bound propagation, and this program would
+// compile to [2, 8, -4, 12]. That is a real design option, but it is a
+// feature and not an alignment — it makes a declaration's signature depend
+// on the order its call sites are visited, and it needs its own answer for a
+// parameter used at two ranks. Written as it is meant to be read, the
+// annotation goes on the parameter (035).
+// ============================================================================
+function f(x, s: Float) -> Array<Float like Idx<4>> =
+    x * s
+
+let xv = [1.0, 4.0, 0.0 - 2.0, 6.0]
+let r = f(xv, 2.0)
