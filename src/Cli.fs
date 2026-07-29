@@ -1271,6 +1271,13 @@ let private dispatchTest (rest: string list) : int =
         // corpus; it rides here with the other coded-diagnostic assertions.
         let certSuggest = (Blade.Tests.DiagCorpus.runCertSuggestTests ()).Failed
         if core + corpus + certSuggest = 0 then 0 else 1
+    | [ "rep-differential" ] | [ "repdifferential" ] ->
+        // Phase-B3 deduction parity gate (plan-equivariance-in-types.md): the
+        // typed rep-status deduction vs the stage-6a seam inference, proposal
+        // by proposal over the ml-equiv corpus. In-process, no C++ pipeline;
+        // also part of the full suite, where a red differential blocks the run.
+        let failed = (Blade.Tests.RepDifferential.runRepDifferentialTests ()).Failed
+        if failed = 0 then 0 else 1
     | [ "oracles" ] ->
         // Phase 0.2 review block: the differential-harness oracles checked
         // against hand-computed / analytic values. No Blade source pipeline.
