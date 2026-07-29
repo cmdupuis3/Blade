@@ -142,8 +142,29 @@ let private gRules : DisciplineKit.StructRules<GStatus> = {
     FormerConclusion = (fun kSt _ _ _ -> kSt)
 }
 
+/// A PROTOTYPE OF THE CLAIM VOCABULARY GALILEAN DOES NOT HAVE.
+///
+/// `sgs.box_filter` is the one sgs former whose seam rule is status-PRESERVING
+/// rather than invariant-producing (weights sum to 1, so filter(u + U0) =
+/// filter(u) + U0). `SgsElaborate.fs:219-225` deliberately does NOT stamp it,
+/// because `__ml_galilean` asserts a boost-INVARIANT result and stamping it
+/// would be a false axiom. This record is what a "preserves" claim would have
+/// to say, and it is deliberately the SMALLEST thing that says it: which
+/// parameter's boost status the RESULT inherits.
+///
+/// It is off by default. The census runs with and without it, and the delta is
+/// the measured cost of not having it.
+type PreserveSig = {
+    /// Index of the parameter whose status the result carries. Every OTHER
+    /// argument must be boost-invariant, exactly as the seam's box_filter arm
+    /// requires the tile width to be.
+    CarrierIndex: int
+}
+
 type GalCtx = {
     Certified: IRId -> GalSigT option
+    /// EXPERIMENTAL, off unless the census asks for it. See `PreserveSig`.
+    Preserving: IRId -> PreserveSig option
     Self: IRId
     Checking: bool
 }
@@ -176,9 +197,33 @@ let galStatusOf (ctx: GalCtx) : Map<IRId, GStatus> -> TypedExpr -> GStatus =
         Checking = ctx.Checking
     }
     let rec go (env: Map<IRId, GStatus>) (expr: TypedExpr) : GStatus =
-        match DisciplineKit.structuralArm wctx go env expr with
+        match preserveArm env expr with
         | Some s -> s
-        | None -> ruleArm env expr
+        | None ->
+            match DisciplineKit.structuralArm wctx go env expr with
+            | Some s -> s
+            | None -> ruleArm env expr
+
+    /// THE PROTOTYPE "PRESERVES" RULE, in nine lines. It must run BEFORE the
+    /// kit's call arm, because the kit's uncertified-callee rule would decline
+    /// on a moving argument first. Note what it needs from the kit: nothing.
+    /// The kit's `Certified` hook types a callee as `CallSig`, whose `CReturn`
+    /// is a FIXED status — there is no shape in that record for "the return's
+    /// status is a function of the arguments' statuses", so a preserving claim
+    /// cannot be expressed through the existing hook and needs an arm of its
+    /// own. That is the whole size of the engine-side change.
+    and preserveArm (env: Map<IRId, GStatus>) (expr: TypedExpr) : GStatus option =
+        match expr.Kind with
+        | TExprApp ({ Kind = TExprVar (_, fid, _) }, args) ->
+            match ctx.Preserving fid with
+            | None -> None
+            | Some ps ->
+                let sts = args |> List.map (go env)
+                let others = sts |> List.mapi (fun i s -> (i, s)) |> List.filter (fun (i, _) -> i <> ps.CarrierIndex)
+                if others |> List.exists (fun (_, s) -> s <> GInv) then Some GBottom
+                elif ps.CarrierIndex >= List.length sts then Some GBottom
+                else Some sts.[ps.CarrierIndex]
+        | _ -> None
 
     /// Galilean's OWN rules — the arms whose soundness argument names the
     /// action (an AFFINE SHIFT u -> u + U0). Every one of them differs from
@@ -326,6 +371,7 @@ let verdictDetail (v: GalVerdict) =
 /// by construction (it judges against a table containing the function's own
 /// certificate).
 let checkDeclaredGal (certified: System.Collections.Generic.Dictionary<IRId, GalSigT>)
+                     (preserving: System.Collections.Generic.Dictionary<IRId, PreserveSig>)
                      (owner: string) (parms: TypedParam list) (vs: string list)
                      (body: TypedExpr) : GalVerdict =
     try
@@ -337,6 +383,7 @@ let checkDeclaredGal (certified: System.Collections.Generic.Dictionary<IRId, Gal
             let sg = classifyGalSig owner parms vs
             let ctx = {
                 Certified = (fun id -> match certified.TryGetValue id with | true, s -> Some s | _ -> None)
+                Preserving = (fun id -> match preserving.TryGetValue id with | true, s -> Some s | _ -> None)
                 // No binder is "self": IRIds are non-negative.
                 Self = System.Int32.MinValue
                 Checking = true
@@ -446,17 +493,38 @@ let checkOnly (source: string) : Result<TypedProgram, Blade.Diagnostics.Diagnost
         | Error errs -> Error (errs |> List.map Blade.TypeEnv.diagnosticOfCompileError)
         | Ok (tp, _, _) -> Ok tp
 
+/// Every compiler-generated sgs former that carries NO galilean stamp. By
+/// construction this set is exactly `box_filter`: `SgsElaborate.elabOp` emits
+/// three ops as `__sgs_N` decls and stamps two of them (fs:262, 281), leaving
+/// box_filter as the only unstamped one (fs:268). The census ASSERTS the arity
+/// (one parameter, `u`) rather than assuming it, so if a fourth former is ever
+/// added this identification stops being silently wrong.
+let unstampedSgsFormers (tp: TypedProgram) : TypedFunctionDecl list =
+    [ for m in tp.Modules do
+        for d in m.Decls do
+            match d with
+            | TDeclFunction tf when tf.Name.StartsWith "__sgs_"
+                                    && (galConjunct shadowName tf.WhereClause).IsNone -> yield tf
+            | _ -> () ]
+
 /// Re-run the experimental validation over a checked program, in DECL ORDER so
 /// a callee's certificate is in the table before a later caller borrows it.
-let revalidate (tp: TypedProgram) : FnVerdict list =
+/// `withPreserves` turns on the prototype "preserves" claim of `PreserveSig`,
+/// simulating an SgsElaborate that could stamp box_filter.
+let revalidateWith (withPreserves: bool) (tp: TypedProgram) : FnVerdict list =
     let certified = System.Collections.Generic.Dictionary<IRId, GalSigT>()
+    let preserving = System.Collections.Generic.Dictionary<IRId, PreserveSig>()
+    if withPreserves then
+        for tf in unstampedSgsFormers tp do
+            if List.length tf.Params = 1 then
+                preserving.[tf.FuncId] <- { CarrierIndex = 0 }
     let out = ResizeArray<FnVerdict>()
     let visit (tf: TypedFunctionDecl) =
         match galConjunct shadowName tf.WhereClause with
         | None -> ()
         | Some (fromSource, vs) ->
             recordCertifiedGal certified tf.Name tf.FuncId tf.Params vs
-            let v = checkDeclaredGal certified tf.Name tf.Params vs tf.Body
+            let v = checkDeclaredGal certified preserving tf.Name tf.Params vs tf.Body
             out.Add { Owner = tf.Name
                       FromSource = fromSource
                       Generated = tf.Name.StartsWith "__"
@@ -470,11 +538,187 @@ let revalidate (tp: TypedProgram) : FnVerdict list =
             | _ -> ()
     List.ofSeq out
 
+let revalidate (tp: TypedProgram) : FnVerdict list = revalidateWith false tp
+
 let tally (vs: FnVerdict list) : int * int * int =
     let c = vs |> List.filter (fun v -> v.Verdict = GConfirm) |> List.length
     let a = vs |> List.filter (fun v -> match v.Verdict with GAbstain _ -> true | _ -> false) |> List.length
     let d = vs |> List.filter (fun v -> match v.Verdict with GDisagree _ -> true | _ -> false) |> List.length
     (c, a, d)
+
+// ============================================================================
+// 4b. THE TYPED DEDUCTION TWIN — the other half of the layer question
+// ============================================================================
+//
+// `MLGalilean.inferGalileanCertificates` transplanted onto the typed AST:
+// decl order, one speculative table, every passing SINGLETON proposed, and the
+// FULL occurring set tried once when no singleton passed.
+//
+// THE ONE PIECE THAT DOES NOT TRANSPLANT CLEANLY, and it is a measured cost of
+// moving deduction typed. The seam's vacuity guard is
+// `MLCertShell.freeVars` — an EXHAUSTIVE free-variable scan over the surface
+// AST. The typed AST has no such function. `DisciplineKit.mentionsAnyId` is
+// the nearest thing and is CONSERVATIVE IN THE WRONG DIRECTION for this use:
+// its header says an unenumerated node kind answers TRUE, which is safe for
+// its own consumer (a licence check) and unsafe here, because over-reporting
+// occurrence under-reports vacuity and a vacuous proposal is exactly what the
+// guard exists to suppress. This block uses it anyway and PINS the outcome
+// against the corpus's vacuity probe, so the gap is measured rather than
+// assumed.
+
+type GalProposal = { Owner: string; Velocities: string list }
+
+let private allFuncs (tp: TypedProgram) : TypedFunctionDecl list =
+    [ for m in tp.Modules do
+        for d in m.Decls do
+            match d with
+            | TDeclFunction tf -> yield tf
+            | TDeclImpl impl -> yield! impl.Methods
+            | _ -> () ]
+
+/// Does the body read this binder? `DisciplineKit.mentionsAnyId` — the only
+/// helper on offer — answers TRUE for every unenumerated node kind, and
+/// `TExprBlock` is unenumerated, so it answers TRUE for the parameters (and the
+/// SELF reference) of every function with a block body. MEASURED CONSEQUENCE:
+/// with this as the guard the typed deduction proposes nothing at all on any
+/// block-bodied function, losing 3 of the corpus's 7 seam proposals. Kept as a
+/// named function so the census can report both guards.
+let private readsApprox (vid: IRId) (body: TypedExpr) =
+    DisciplineKit.mentionsAnyId (Set.singleton vid) body
+
+/// THE GUARD THAT ACTUALLY WORKS, and it needs no free-variable scan.
+///
+/// POISON THE BINDING. Bind the candidate parameter to GBottom and every other
+/// parameter to GInv, then walk. GBottom is absorbing in every arm of the kit
+/// and of the rules — a `let` whose value bottoms bottoms, an `if` whose
+/// condition is not fixed bottoms, arithmetic on a bottom bottoms — so a body
+/// that READS the parameter cannot come back with anything else, and a body
+/// that never names it is unaffected.
+///
+/// NAMED FAILURE MODE, and why it is harmless here: a body that bottoms for an
+/// UNRELATED reason reads as "occurs" for every parameter, which would admit a
+/// vacuous candidate. But the candidate's own attempt walks the same body and
+/// bottoms for the same unrelated reason, so no proposal is emitted. The error
+/// costs a wasted attempt, never a wrong proposal.
+///
+/// SOUNDNESS DIRECTION of the other error: a parameter read ONLY inside a
+/// lambda the kit does not walk reads as "does not occur", which SKIPS a
+/// candidate. Fewer proposals is always the safe direction.
+let private readsByPoison (certified: System.Collections.Generic.Dictionary<IRId, GalSigT>)
+                          (parms: TypedParam list) (body: TypedExpr) (p: TypedParam) : bool =
+    try
+        let ctx = {
+            Certified = (fun id -> match certified.TryGetValue id with | true, s -> Some s | _ -> None)
+            Preserving = (fun _ -> None)
+            // A sentinel: this probe is about the PARAMETER, and letting a
+            // self-reference bottom the walk would report every parameter of a
+            // recursive body as read.
+            Self = System.Int32.MinValue
+            Checking = false
+        }
+        let env =
+            parms
+            |> List.fold (fun m (q: TypedParam) ->
+                Map.add q.VarId (if q.VarId = p.VarId then GBottom else GInv) m) Map.empty
+        galStatusOf ctx env body = GBottom
+    with _ -> true
+
+/// `useApprox = true` runs the vacuity guard on `DisciplineKit.mentionsAnyId`;
+/// `false` runs it on the poison probe. The census reports both.
+let deduceGalWith (useApprox: bool) (tp: TypedProgram) : GalProposal list =
+    let certified = System.Collections.Generic.Dictionary<IRId, GalSigT>()
+    let spec = System.Collections.Generic.Dictionary<IRId, GalSigT>()
+    let funcs = allFuncs tp
+    // Every real certificate — source pins AND SgsElaborate stamps — is an
+    // axiom for the deduction, exactly as at the seam.
+    for tf in funcs do
+        match galConjunct shadowName tf.WhereClause with
+        | Some (_, vs) -> certified.[tf.FuncId] <- classifyGalSig tf.Name tf.Params vs
+        | None -> ()
+    let out = ResizeArray<GalProposal>()
+    for tf in funcs do
+        // A DIVERGENCE THE MOVE CREATES: by typecheck the module also holds the
+        // compiler's own synthesized decls (`__sgs_N`, `__ml_N`), which the seam
+        // never sees because it runs before they exist. Proposing a pin on
+        // generated code would be noise, so they are filtered by name — a filter
+        // the seam does not need and a typed deduction would have to carry.
+        if (galConjunct shadowName tf.WhereClause).IsNone && not (tf.Name.StartsWith "__") then
+            // NO SUMMARY PROVES ITSELF. The seam spells this as a free-variable
+            // check on the function's own name; the typed side gets it from the
+            // kit's `Self` guard, which bottoms every self-reference inside
+            // `attempt` below. The approximate guard needs the explicit check
+            // because that is what it is being compared on.
+            let selfOk = if useApprox then not (readsApprox tf.FuncId tf.Body) else true
+            if selfOk then
+                let occurring =
+                    tf.Params
+                    |> List.filter (fun p ->
+                        if useApprox then readsApprox p.VarId tf.Body
+                        else readsByPoison certified tf.Params tf.Body p)
+                let attempt (vs: TypedParam list) =
+                    try
+                        let names = vs |> List.map (fun p -> p.Name)
+                        let sg = classifyGalSig tf.Name tf.Params names
+                        // Real certificates and this pass's speculative ones are
+                        // consulted through ONE lookup, which is faithful to the
+                        // seam: `inferGalileanCertificates` judges against
+                        // `spec |> Map.fold ... gcerts`, a single merged table.
+                        let ctx = {
+                            Certified =
+                                (fun id ->
+                                    match certified.TryGetValue id with
+                                    | true, s -> Some s
+                                    | _ ->
+                                        match spec.TryGetValue id with
+                                        | true, s -> Some s
+                                        | _ -> None)
+                            Preserving = (fun _ -> None)
+                            // No summary proves itself: the kit's Self guard is
+                            // the typed twin of the seam's self-occurrence skip.
+                            Self = tf.FuncId
+                            // DEDUCTION, not validation.
+                            Checking = false
+                        }
+                        let env =
+                            List.zip tf.Params sg.Params
+                            |> List.fold (fun m ((p: TypedParam), (_, st)) -> Map.add p.VarId st m) Map.empty
+                        galStatusOf ctx env tf.Body = GInv
+                    with _ -> false
+                let singles = occurring |> List.filter (fun p -> attempt [ p ])
+                let hits =
+                    if not singles.IsEmpty then singles |> List.map (fun p -> [ p ])
+                    elif List.length occurring >= 2 && attempt occurring then [ occurring ]
+                    else []
+                for vs in hits do
+                    out.Add { Owner = tf.Name; Velocities = vs |> List.map (fun p -> p.Name) }
+                match hits with
+                | [ vs ] ->
+                    spec.[tf.FuncId] <- classifyGalSig tf.Name tf.Params (vs |> List.map (fun p -> p.Name))
+                | _ -> ()
+    List.ofSeq out
+
+let deduceGal (tp: TypedProgram) : GalProposal list = deduceGalWith false tp
+
+/// Parse the seam's BL4014 suggestion string back into (owner, velocities).
+/// The format is fixed by `MLGalilean.inferGalileanCertificates`:
+///   function '<owner>' judges boost-invariant with velocity parameter(s) <ps>: add ...
+let parseSeamSuggestion (msg: string) : GalProposal option =
+    let openq = "function '"
+    let mid = "' judges boost-invariant with velocity parameter(s) "
+    let tail = ": add "
+    let i = msg.IndexOf(openq, System.StringComparison.Ordinal)
+    if i < 0 then None
+    else
+        let j = msg.IndexOf(mid, i, System.StringComparison.Ordinal)
+        if j < 0 then None
+        else
+            let owner = msg.Substring(i + openq.Length, j - (i + openq.Length))
+            let rest = msg.Substring(j + mid.Length)
+            let k = rest.IndexOf(tail, System.StringComparison.Ordinal)
+            if k < 0 then None
+            else
+                let ps = rest.Substring(0, k).Split(',') |> Array.map (fun s -> s.Trim()) |> Array.toList
+                Some { Owner = owner; Velocities = ps }
 
 /// Which seam discipline refused a program, read off the diagnostic codes.
 let channelOf (ds: Blade.Diagnostics.Diagnostic list) : string =
@@ -526,7 +770,23 @@ type FileRecord =
       /// typecheck).
       PlainVerdicts: Result<FnVerdict list, Blade.Diagnostics.Diagnostic list>
       /// Typed verdicts from the SHADOWED source.
-      ShadowVerdicts: Result<FnVerdict list, Blade.Diagnostics.Diagnostic list> }
+      ShadowVerdicts: Result<FnVerdict list, Blade.Diagnostics.Diagnostic list>
+      /// The same two runs with the prototype "preserves" claim enabled.
+      PlainPreserve: Result<FnVerdict list, Blade.Diagnostics.Diagnostic list>
+      ShadowPreserve: Result<FnVerdict list, Blade.Diagnostics.Diagnostic list>
+      /// (name, arity) of every generated sgs former carrying no galilean
+      /// stamp — the box_filter identification, asserted rather than assumed.
+      UnstampedFormers: (string * int) list
+      /// The seam's BL4014 proposals on the UNSHADOWED run.
+      SeamProposals: GalProposal list
+      /// The typed deduction twin's proposals on the same program, with the
+      /// poison-probe vacuity guard.
+      TypedProposals: GalProposal list
+      /// The same, with `DisciplineKit.mentionsAnyId` as the vacuity guard.
+      TypedProposalsApprox: GalProposal list
+      /// True when the source imports ml, i.e. the seam's inference channel
+      /// could run at all.
+      ImportsMl: bool }
 
 let private categories = [ "ml-equiv"; "sgs"; "diagnostics" ]
 
@@ -571,26 +831,45 @@ let runGalLayerCensusTests () : BlockResult =
         [ for cat in categories do
             for (name, source) in Corpus.category cat do
                 if mentionsGalileanPin source || source.Contains "sgs." then
+                    Blade.ML.Galilean.GalCertSuggestions.reset ()
                     let (seamResult, _) = Lowering.lowerDiag None source
+                    let seamSugg =
+                        Blade.ML.Galilean.GalCertSuggestions.get ()
+                        |> List.choose (fst >> parseSeamSuggestion)
                     let seamDiags =
                         match seamResult with
                         | Ok _ -> None
                         | Error ds -> Some ds
-                    let plain =
-                        match checkOnly source with
-                        | Error ds -> Error ds
-                        | Ok tp -> Ok (revalidate tp)
+                    let plainTp = checkOnly source
                     let (shadowSrc, nShadow) = shadowGalilean source
-                    let shadowed =
-                        match checkOnly shadowSrc with
+                    let shadowTp = checkOnly shadowSrc
+                    let run withP (r: Result<TypedProgram, _>) =
+                        match r with
                         | Error ds -> Error ds
-                        | Ok tp -> Ok (revalidate tp)
+                        | Ok tp -> Ok (revalidateWith withP tp)
+                    let formers =
+                        match plainTp with
+                        | Ok tp -> unstampedSgsFormers tp |> List.map (fun tf -> (tf.Name, List.length tf.Params))
+                        | Error _ -> []
                     yield { Category = cat
                             Name = name
                             SeamDiags = seamDiags
                             Shadowed = nShadow
-                            PlainVerdicts = plain
-                            ShadowVerdicts = shadowed } ]
+                            PlainVerdicts = run false plainTp
+                            ShadowVerdicts = run false shadowTp
+                            PlainPreserve = run true plainTp
+                            ShadowPreserve = run true shadowTp
+                            UnstampedFormers = formers
+                            SeamProposals = seamSugg
+                            TypedProposals =
+                                (match plainTp with
+                                 | Ok tp -> (try deduceGalWith false tp with _ -> [])
+                                 | Error _ -> [])
+                            TypedProposalsApprox =
+                                (match plainTp with
+                                 | Ok tp -> (try deduceGalWith true tp with _ -> [])
+                                 | Error _ -> [])
+                            ImportsMl = source.Contains "import ml" } ]
 
     let accepted = records |> List.filter (fun r -> r.SeamDiags.IsNone)
     let rejected = records |> List.filter (fun r -> r.SeamDiags.IsSome)
@@ -692,7 +971,94 @@ let runGalLayerCensusTests () : BlockResult =
             (List.length galRejected) (List.length offenderVerdicts) (List.length stillRefused))
 
     // ------------------------------------------------------------------
+    printSubHeader "DEDUCTION differential — typed twin vs the seam's BL4014 channel"
+
+    // Only files the seam ACCEPTS and that import ml: the seam's inference
+    // channel is gated behind both (a module whose declared certificate fails
+    // gets one story, not two).
+    let dedRecords = accepted |> List.filter (fun r -> r.ImportsMl)
+    let mutable dedMatched = 0
+    let mutable dedMissed : (string * GalProposal) list = []
+    let mutable dedExtra : (string * GalProposal) list = []
+    for r in dedRecords do
+        let key (p: GalProposal) = (p.Owner, String.concat "," p.Velocities)
+        let seamK = r.SeamProposals |> List.map key |> Set.ofList
+        let typedK = r.TypedProposals |> List.map key |> Set.ofList
+        dedMatched <- dedMatched + (Set.intersect seamK typedK |> Set.count)
+        for p in r.SeamProposals do
+            if not (Set.contains (key p) typedK) then dedMissed <- dedMissed @ [ (r.Name, p) ]
+        for p in r.TypedProposals do
+            if not (Set.contains (key p) seamK) then dedExtra <- dedExtra @ [ (r.Name, p) ]
+        if not (r.SeamProposals.IsEmpty && r.TypedProposals.IsEmpty) then
+            let render ps = ps |> List.map (fun (p: GalProposal) -> sprintf "%s(%s)" p.Owner (String.concat ", " p.Velocities)) |> String.concat "; "
+            resultLine Skip (sprintf "  %s" r.Name)
+                (sprintf "seam: [%s] || typed: [%s]" (render r.SeamProposals) (render r.TypedProposals))
+    resultLine Skip "DEDUCTION TOTAL (poison-probe vacuity guard)"
+        (sprintf "%d matched, %d seam-only (typed recall loss), %d typed-only (new proposals)"
+            dedMatched (List.length dedMissed) (List.length dedExtra))
+    for (f, p) in dedMissed do
+        resultLine Skip "  seam-only" (sprintf "%s :: %s(%s)" f p.Owner (String.concat ", " p.Velocities))
+    for (f, p) in dedExtra do
+        resultLine Skip "  typed-only" (sprintf "%s :: %s(%s)" f p.Owner (String.concat ", " p.Velocities))
+
+    // The same differential with DisciplineKit.mentionsAnyId as the vacuity
+    // guard — the only helper the kit ships, and the measurement of why it
+    // cannot serve here.
+    let mutable apxMatched = 0
+    let mutable apxMissed = 0
+    for r in dedRecords do
+        let key (p: GalProposal) = (p.Owner, String.concat "," p.Velocities)
+        let seamK = r.SeamProposals |> List.map key |> Set.ofList
+        let apxK = r.TypedProposalsApprox |> List.map key |> Set.ofList
+        apxMatched <- apxMatched + (Set.intersect seamK apxK |> Set.count)
+        apxMissed <- apxMissed + (Set.difference seamK apxK |> Set.count)
+    resultLine Skip "DEDUCTION TOTAL (DisciplineKit.mentionsAnyId guard)"
+        (sprintf "%d matched, %d seam-only — every loss is a BLOCK-bodied function, which mentionsAnyId reports as self-referential"
+            apxMatched apxMissed)
+
+    // ------------------------------------------------------------------
+    printSubHeader "The box_filter blocker, and the cost of a 'preserves' claim"
+
+    let allFormers = records |> List.collect (fun r -> r.UnstampedFormers) |> List.distinct
+    resultLine Skip "unstamped generated sgs formers"
+        (if allFormers.IsEmpty then "(none)"
+         else allFormers |> List.map (fun (n, a) -> sprintf "%s/%d" n a) |> String.concat ", ")
+
+    // Which certificates change verdict when the prototype "preserves" claim
+    // is switched on? Both censuses, both directions.
+    let deltas =
+        [ for r in records do
+            let pair (a: Result<FnVerdict list, _>) (b: Result<FnVerdict list, _>) tag =
+                match a, b with
+                | Ok av, Ok bv ->
+                    [ for x in av do
+                        match bv |> List.tryFind (fun y -> y.Owner = x.Owner) with
+                        | Some y when verdictName y.Verdict <> verdictName x.Verdict ->
+                            yield (r.Name, tag, x.Owner, verdictName x.Verdict, verdictName y.Verdict)
+                        | _ -> () ]
+                | _ -> []
+            yield! pair r.PlainVerdicts r.PlainPreserve "accept"
+            yield! pair r.ShadowVerdicts r.ShadowPreserve "reject" ]
+    for (f, tag, owner, before, after) in deltas do
+        resultLine Skip "  preserves delta" (sprintf "[%s] %s :: %s -- %s -> %s" tag f owner before after)
+
+    let acceptedPreserve =
+        accepted |> List.collect (fun r -> match r.PlainPreserve with Ok vs -> vs | Error _ -> [])
+    let (pC, pA, pD) = tally acceptedPreserve
+    resultLine Skip "ACCEPTANCE with 'preserves'"
+        (sprintf "%d certs: %d confirm / %d abstain / %d disagree (baseline %d/%d/%d)"
+            (List.length acceptedPreserve) pC pA pD accC accA accD)
+
+    // ------------------------------------------------------------------
     printSubHeader "Obligations"
+
+    // 0. The box_filter identification: every unstamped generated sgs former
+    //    takes exactly one parameter (the field). If a fourth former appears
+    //    with a different shape, the simulation above stops being box_filter.
+    check "0. every unstamped generated sgs former has arity 1 (the box_filter shape)"
+        (allFormers |> List.forall (fun (_, a) -> a = 1))
+        (sprintf "%d former(s): %s" (List.length allFormers)
+            (allFormers |> List.map (fun (n, a) -> sprintf "%s/%d" n a) |> String.concat ", "))
 
     // 1. The structural fact: a galilean-channel rejection never reaches the
     //    typed walker.
@@ -727,6 +1093,19 @@ let runGalLayerCensusTests () : BlockResult =
         (if calibrationMismatches.IsEmpty then sprintf "%d accepted files agree" (List.length accepted)
          else calibrationMismatches |> List.map (fun (n, _, _) -> n) |> String.concat ", ")
 
+    // 5/6. The deduction differential, in the shape a real `gal-differential`
+    //      gate would take: typed recall must be at least the seam's, and the
+    //      typed side must propose nothing the seam does not (every proposal's
+    //      pinned twin would otherwise need its own check).
+    check "5. typed deduction loses no seam proposal"
+        dedMissed.IsEmpty
+        (if dedMissed.IsEmpty then sprintf "%d proposal(s) reproduced" dedMatched
+         else dedMissed |> List.map (fun (f, p) -> sprintf "%s::%s" f p.Owner) |> String.concat ", ")
+    check "6. typed deduction proposes nothing the seam does not"
+        dedExtra.IsEmpty
+        (if dedExtra.IsEmpty then "none"
+         else dedExtra |> List.map (fun (f, p) -> sprintf "%s::%s" f p.Owner) |> String.concat ", ")
+
     // 4. Non-vacuity.
     let totalShadowed = records |> List.sumBy (fun r -> r.Shadowed)
     check "4. non-vacuity: the rewrite fires, rejections exist, something confirms"
@@ -740,7 +1119,10 @@ let runGalLayerCensusTests () : BlockResult =
           sprintf "acceptance: %d certs, %d confirm / %d abstain / %d disagree"
               (List.length acceptedVerdicts) accC accA accD
           sprintf "rejection: %d galilean-channel file(s), %d offender verdict(s), %d still refused"
-              (List.length galRejected) (List.length offenderVerdicts) (List.length stillRefused) ]
+              (List.length galRejected) (List.length offenderVerdicts) (List.length stillRefused)
+          sprintf "deduction: %d matched, %d seam-only, %d typed-only"
+              dedMatched (List.length dedMissed) (List.length dedExtra)
+          sprintf "with a 'preserves' claim: acceptance %d confirm / %d abstain" pC pA ]
     { Block = "Galilean Layer Census"
       Passed = passed
       Failed = failed
