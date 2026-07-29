@@ -19,7 +19,7 @@ computed pins.  `count-theorems.ps1` is the mechanical implementation --
 run it with `-Check` to verify the numbers below and the headline in
 `docs/proofs.md`, which quotes the same total.
 
-## Contents (506 theorems total)
+## Contents (524 theorems total)
 
 - BladeCore.v (16): Group Law both halves (diagonal swap sound; per-dim
   product swap refuted), counting lemma (no lossless product layout),
@@ -234,3 +234,26 @@ run it with `-Check` to verify the numbers below and the headline in
   generators would have sufficed.  The polynomial layer is absent by
   design -- f is an arbitrary function, so the lemma covers extracted
   normal forms by being indifferent to them.
+- BladeRepStatus.v (18): NEW -- soundness of the typed representation-status
+  transfer table, plan-equivariance-in-types.md stage B4 (src/ml/compiler/
+  MLEquiv.fs's `judge`).  Modeled abstractly (no concrete group, no
+  concrete representation): a function of a G-set input is INVARIANT if it
+  cannot see the action, and TRANSFORMS AS a representation rho if moving
+  the input by g is the same as applying rho g to the output -- exactly
+  MLEquiv's Inv / Rep spec conditional-theorem reading.  One theorem per
+  transfer-table row that ever answers Rep or Inv: neg_covariant /
+  sum_covariant / diff_covariant (unary pass-through and Rep +/- Rep, same
+  spec -- diff derived from sum through negation via three bookkeeping
+  lemmas, rho_zero/rho_neg/group_idempotent_is_zero, that get from "rho is
+  additive" to "rho commutes with 0 and -"); scalar_scale_covariant
+  (Inv-scalar * Rep -> Rep); inv_closure_binop (Inv op Inv -> Inv, any
+  operator); const_invariant (literals); certified_call_sound and
+  certified_call_inv_arg_sound (the pinned-callee arm -- an equivariant F
+  composed with a covariant f stays covariant, with and without an extra
+  invariant argument); inv_call_inv (the uncertified-callee arm, modeled
+  over a list of arguments so one theorem covers every arity);
+  branch_agree_sound (ExprIf under joinStatus: invariant condition, arms
+  agreeing on the same rho); equivariance_downward + the
+  subgroup_action_and_representation corollary (the A3/D1 subgroup-meet
+  direction's soundness anchor -- not yet a MLEquiv table row).  Opaque
+  needs no theorem: it asserts nothing (closing remark in the file).
