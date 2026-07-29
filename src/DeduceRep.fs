@@ -452,532 +452,302 @@ let private invariantOffsetsT (g: GroupT) (spec: (int * int * int) list) : Set<i
             start <- start + m * (2 * l + 1)
         Set.ofSeq acc
 
-/// A provably compile-time integer index, or None. `compute` is a scheduling
-/// boundary and is peeled; anything else — a variable, an arithmetic
-/// expression, a folded static this walker cannot see — is NOT a literal, and
-/// the caller declines.
-let rec private staticIntOf (e: TypedExpr) : int option =
-    match e.Kind with
-    | TExprLit (LitInt n) -> Some (int n)
-    | TExprCompute inner -> staticIntOf inner
-    | _ -> None
+// ----------------------------------------------------------------------------
+// The kit instantiation: equiv's answers to the generic walker's questions
+// ----------------------------------------------------------------------------
+//
+// `DisciplineKit.structuralArm` owns every arm whose soundness argument
+// quantifies over ANY action (variables, control flow, binding forms, static
+// selectors, closures, the interprocedural call rule, the former walk). It asks
+// this module three kinds of question, and the three records below are the
+// answers. Everything the kit does NOT own is `ruleArm`, further down — and
+// those are exactly the arms whose justification names the action, which for
+// this discipline is "the action is a block-diagonal LINEAR rep".
 
-/// Does this subtree read any of `ids`? CONSERVATIVE BY DESIGN, in the
-/// `Deduce.usesVar` discipline: a node kind not enumerated here answers TRUE.
-/// The only consumer treats "mentions nothing" as a licence, so guessing FALSE
-/// would be the unsound direction; guessing TRUE merely forfeits recall.
-let rec private mentionsAnyId (ids: Set<IRId>) (e: TypedExpr) : bool =
-    let any = List.exists (mentionsAnyId ids)
-    match e.Kind with
-    | TExprLit _ | TExprWildcard | TExprZero -> false
-    | TExprVar (_, vid, _) -> Set.contains vid ids
-    | TExprBinOp (_, _, l, r) -> any [ l; r ]
-    | TExprUnaryOp (_, i) -> mentionsAnyId ids i
-    | TExprCompute i | TExprPure i | TExprRead i -> mentionsAnyId ids i
-    | TExprIndex (a, idxs, _) -> any (a :: idxs)
-    | TExprField (b, _, _) -> mentionsAnyId ids b
-    | TExprTupleIndex (t, i) -> any [ t; i ]
-    | TExprApp (f, args) -> any (f :: args)
-    | TExprTuple es | TExprSequence es | TExprStack es | TExprZip es -> any es
-    | TExprArrayLit (es, _) -> any es
-    | TExprArrayNegate a | TExprArrayConjugate a -> mentionsAnyId ids a
-    | TExprIf (c, t, f) -> any [ c; t; f ]
-    // Everything else — lambdas, formers, reduces, blocks, matches — is
-    // deliberately unenumerated: answering TRUE costs only recall.
-    | _ -> true
+/// What the generic walker must be able to do to a `RepStatusT` without knowing
+/// what one is. Built ONCE per walk (it closes over `ctx.Resolve` and
+/// `ctx.Group`), not once per node.
+let private repOps (ctx: RepCtx) : DisciplineKit.StatusOps<RepStatusT> = {
+    Bottom = TBottom
+    Opaque = TOpaque
+    FixTop = TInv TInvShapeUnknown
+    FixScalar = TInv TInvScalar
+    IsCov = isRepT
+    IsFix = isInvT
+    IsBottom = (fun s -> s = TBottom)
+    IsOpaque = (fun s -> s = TOpaque)
+    Join = joinStatusT
+    // NOT `joinStatusT >> Option.isSome`: that accepts TOpaque against TOpaque,
+    // which is right for a control-flow merge and WRONG for a call argument —
+    // an unclassifiable argument proves nothing and must not satisfy a
+    // parameter. This is the seam's `applies` predicate, verbatim.
+    ParamMatches =
+        (fun pSt aSt ->
+            match pSt, aSt with
+            | TRep sp, TRep sa -> sp = sa
+            | TInv _, TInv _ -> true
+            | _ -> false)
+    // The `nodeShape ()` of the pre-kit walker: invariant, with the shape read
+    // off the node's own resolved type.
+    FixOfType = (fun ty -> TInv (shapeOfType ctx.Resolve ty))
+    ClassifyTy = (fun ty -> classifyType ctx.Group ctx.Resolve ty)
+}
 
-/// The COMPONENTWISE-UNIFORM LINEAR fragment, relative to a kernel's parameter
-/// ids: literals, variable reads, and arithmetic on them — PLUS any subtree
-/// that mentions no kernel parameter at all.
-///
-/// That second clause is what admits a captured scalar read like `q(0)` beside
-/// the element being scaled. SOUNDNESS: a subtree that reads no kernel
-/// parameter has the same value at every iteration position, so it is a genuine
-/// loop CONSTANT; if its type is scalar it is one number for the whole array,
-/// which is exactly the premise the scaling rule needs. A subtree that DOES
-/// read a kernel parameter — `q(a)` — varies per position, and is admitted only
-/// through the arithmetic cases, which is what stops a position-varying value
-/// from passing itself off as a scalar multiplier (the `x * w` false
-/// certificate, one level deeper).
-let rec private isElementwiseArith (ps: Set<IRId>) (e: TypedExpr) : bool =
-    if not (mentionsAnyId ps e) then true
-    else
-        match e.Kind with
-        | TExprLit _ | TExprVar _ -> true
-        | TExprBinOp (_, _, l, r) -> isElementwiseArith ps l && isElementwiseArith ps r
-        | TExprUnaryOp (_, i) -> isElementwiseArith ps i
-        | TExprCompute i -> isElementwiseArith ps i
-        | _ -> false
+/// The two questions the kit's structural arms must ask the DISCIPLINE, because
+/// their shape is shared and their verdict is not.
+let private repStructRules : DisciplineKit.StructRules<RepStatusT> = {
+    // Application syntax over a rep-bound variable is a component read, same
+    // verdict as TExprIndex: the components of an l>0 block are the
+    // basis-dependent numbers this whole discipline exists to refuse. (Galilean
+    // answers the opposite here — its elements are per-component boost-variant —
+    // which is why this is a rule and not a structural verdict.)
+    CovAppliedAsCallee = (fun _ -> TBottom)
 
-let rec private statusOf (ctx: RepCtx) (env: Map<IRId, RepStatusT>) (expr: TypedExpr) : RepStatusT =
-    let j = statusOf ctx env
-    /// Shape read off the node's own (resolved) type — the typed win over the
-    /// seam's syntactic shape guessing.
-    let nodeShape () = shapeOfType ctx.Resolve expr.Type
-
-    /// An aggregate constructor. SOUNDNESS: packing a rep into a literal
-    /// aggregate loses its block structure — the aggregate does not transform
-    /// as the rep — so a rep element declines. All-invariant elements make an
-    /// invariant aggregate.
-    let aggOf (es: TypedExpr list) =
-        let sts = es |> List.map j
-        if sts |> List.exists ((=) TBottom) then TBottom
-        elif sts |> List.exists isRepT then TBottom
-        elif sts |> List.exists ((=) TOpaque) then TOpaque
-        else TInv (TInvAgg None)
-
-    /// An assignment, as statement or expression. SOUNDNESS: writing an
-    /// invariant value into an invariant destination cannot move anything the
-    /// action fixes. Any rep on either side needs the seam's judgeAssign
-    /// analysis, which v1 does not port: decline.
-    let assignOk (lhs: TypedExpr) (rhs: TypedExpr) =
-        isInvT (j lhs) && isInvT (j rhs)
-
-    match expr.Kind with
-
-    // --- literals ---------------------------------------------------------
-    // SOUNDNESS: a constant does not move under any group action.
-    | TExprLit _ -> TInv TInvScalar
-
-    // --- variables --------------------------------------------------------
-    // A parameter carries its classified status. A FREE variable (module
-    // global, builtin, constant) is invariant by the conditional-theorem
-    // reading — the theorem quantifies over the action on the PARAMETERS, and
-    // a module-level constant is the same value in every frame — with its
-    // shape read off its type. NOTE this is deliberately Inv even when the
-    // global's own TYPE carries an irreps tag: a fixed buffer does not
-    // transform, and calling it Rep would be the unsound direction.
-    | TExprVar (_, vid, _) when vid = ctx.Self -> TBottom
-    | TExprVar (_, vid, _) ->
-        (match Map.tryFind vid env with
-         | Some st -> st
-         | None -> TInv (nodeShape ()))
-
-    // --- arithmetic -------------------------------------------------------
-    | TExprBinOp (mode, op, l, r) ->
-        let sl = j l
-        let sr = j r
-        (match sl, sr, op with
-         | TBottom, _, _ | _, TBottom, _ -> TBottom
-         // SOUNDNESS: the outer-product form cross-iterates, so the result has
-         // a HIGHER RANK than either operand and cannot be the rep it was
-         // built from, whatever the operator.
-         | (TRep _, _, _ | _, TRep _, _) when mode <> Elementwise -> TBottom
-         // SOUNDNESS (Rep ± Rep): the action is LINEAR, so D(x+y) = Dx + Dy.
-         // Requires IDENTICAL specs — different specs are different D's and
-         // the sum transforms under neither.
-         | TRep s1, TRep s2, (OpAdd | OpSub) -> if s1 = s2 then TRep s1 else TBottom
-         // Elementwise product of two reps is the Clebsch-Gordan contraction's
-         // job (ml.tensor_product), not a pointwise multiply: decline.
-         | TRep _, TRep _, _ -> TBottom
-         // SOUNDNESS (scalar scaling): a SCALAR commutes with every block of
-         // the action, so D(cx) = cD(x). An invariant ARRAY of the same extent
-         // scales each component independently — a diagonal matrix with
-         // unequal entries does not commute with D^l — so scalarity must be
-         // PROVEN; an unestablished shape declines.
-         | TRep s, TInv TInvScalar, (OpMul | OpDiv) -> TRep s
-         | TInv TInvScalar, TRep s, OpMul -> TRep s
-         | (TRep _, TInv _, _) | (TInv _, TRep _, _) -> TBottom
-         | TInv shl, TInv shr, _ ->
-             TInv (if mode = Elementwise then binShapeT shl shr else TInvShapeUnknown)
-         // Nothing established on one side: nothing claimed for the result.
-         | TOpaque, _, _ | _, TOpaque, _ -> TOpaque)
-
-    // SOUNDNESS: only a LINEAR unary op transports a rep. Negation is the
-    // linear map -I, which commutes with every D, so `-x` transforms exactly
-    // as `x`. Everything else applied to a rep is refused.
-    //
-    // `OpMath` IS THE TRAP HERE, and it is a post-elaboration trap the seam
-    // never faces: at the surface `exp(x)` is an `ExprApp` of a named builtin,
-    // which MLEquiv routes through its nonlinearity rejection. TypeCheck
-    // rewrites whitelisted math names into `TExprUnaryOp (OpMath "exp", _)`,
-    // so a blanket "a unary op passes its operand's status through" — which
-    // reads correct against the seam's unary arm — silently CERTIFIES a
-    // nonlinearity applied to rep components. (Probe: `method_for(x) <@>
-    // lambda(v) -> exp(v)` proposed equivariant before this arm was split.)
-    // A nonlinearity acts only on invariants; gate reps with ml.gated or
-    // extract invariants with ml.scalars/ml.norms.
-    | TExprUnaryOp (OpNeg, inner) -> j inner
-    | TExprUnaryOp (_, inner) ->
-        (match j inner with
-         | TRep _ -> TBottom
-         | s -> s)
-
-    // SOUNDNESS: whole-array negation is the linear map -I, which commutes
-    // with every D.
-    | TExprArrayNegate a -> j a
-
-    // Complex conjugation does NOT commute with a complex representation in
-    // general (it conjugates the matrix): decline on a rep, pass through
-    // otherwise.
-    | TExprArrayConjugate a -> (match j a with TRep _ -> TBottom | s -> s)
-
-    // --- control flow -----------------------------------------------------
-    // SOUNDNESS: if the condition is invariant, the SAME branch is taken in
-    // every frame, so the result's law is the branches' common law. A
-    // condition that moves with the frame selects different branches in
-    // different frames and proves nothing.
-    | TExprIf (c, t, f) ->
-        (match j c with
-         | TInv _ ->
-             (match joinStatusT (j t) (j f) with
-              | Some s -> s
-              | None -> TBottom)
-         | _ -> TBottom)
-
-    // Same rule, n-ary. Pattern-bound variables enter as invariants of
-    // unestablished shape (destructuring a rep is refused: its components are
-    // basis-dependent).
-    | TExprMatch (scrut, cases) ->
-        (match j scrut with
-         | TInv _ ->
-             let armSts =
-                 cases
-                 |> List.map (fun c ->
-                     let env' =
-                         c.Pattern.Bindings |> List.fold (fun m (_, vid, _) -> Map.add vid (TInv TInvShapeUnknown) m) env
-                     statusOf ctx env' c.Body)
-             (match armSts with
-              | [] -> TInv TInvShapeUnknown
-              | s :: rest ->
-                  match rest |> List.fold (fun acc s2 -> acc |> Option.bind (fun a -> joinStatusT a s2)) (Some s) with
-                  | Some joined -> joined
-                  | None -> TBottom)
-         | _ -> TBottom)
-
-    // --- binding forms ----------------------------------------------------
-    // The binding-descent problem, solved by ENVIRONMENT THREADING rather than
-    // by Deduce.flattenBindings: this walker carries an env (the seam's
-    // design), so inlining bindings first would be a no-op preprocessing pass
-    // — and it is strictly more general, since flatten declines to inline a
-    // non-rewritable or over-budget value and leaves a residual `let` that a
-    // binding-free walker then bottoms out on.
-    | TExprLet (_, vid, value, body) ->
-        (match j value with
-         | TBottom -> TBottom
-         | sv -> statusOf ctx (Map.add vid sv env) body)
-
-    | TExprBlock (stmts, final) ->
-        let rec go (envAcc: Map<IRId, RepStatusT>) (ss: TypedStmt list) : Map<IRId, RepStatusT> option =
-            match ss with
-            | [] -> Some envAcc
-            | TStmtLet b :: rest ->
-                (match statusOf ctx envAcc b.Value with
-                 | TBottom -> None
-                 // Destructuring a rep exposes basis-dependent components.
-                 | TRep _ when not b.SubBindings.IsEmpty -> None
-                 | sv ->
-                     let e1 = Map.add b.VarId sv envAcc
-                     let e2 =
-                         b.SubBindings
-                         |> List.fold (fun m (_, vid, _) -> Map.add vid (TInv TInvShapeUnknown) m) e1
-                     go e2 rest)
-            | TStmtExpr x :: rest ->
-                if statusOf ctx envAcc x = TBottom then None else go envAcc rest
-            | TStmtAssign (l, r) :: rest ->
-                if isInvT (statusOf ctx envAcc l) && isInvT (statusOf ctx envAcc r)
-                then go envAcc rest else None
-            | TStmtForIn (_, vid, lo, hi, body) :: rest ->
-                // A loop counter is an integer: invariant scalar. The body is
-                // checked in a scope that does not escape.
-                if not (isInvT (statusOf ctx envAcc lo)) || not (isInvT (statusOf ctx envAcc hi)) then None
-                else
-                    match go (Map.add vid (TInv TInvScalar) envAcc) body with
-                    | None -> None
-                    | Some _ -> go envAcc rest
-        (match go env stmts with
-         | None -> TBottom
-         | Some env' ->
-             match final with
-             | Some fe -> statusOf ctx env' fe
-             | None -> TInv TInvShapeUnknown)
-
-    | TExprSequence es ->
-        let sts = es |> List.map j
-        if sts |> List.exists ((=) TBottom) then TBottom
-        else (match List.tryLast sts with Some s -> s | None -> TInv TInvShapeUnknown)
-
-    | TExprAssign (l, r) -> if assignOk l r then TInv TInvShapeUnknown else TBottom
-
-    // --- reads ------------------------------------------------------------
-    // SOUNDNESS: `Inv` means the value is HELD FIXED. A value that does not
-    // move has no part that moves, so a component of an invariant aggregate
-    // picked by an invariant selector is invariant.
-    //
-    // A REP base declines IN GENERAL: its components are the basis-dependent
-    // numbers this whole discipline exists to refuse — reading component k of
-    // an l>0 block gives a number that changes with the frame.
-    //
-    // THE ONE EXCEPTION is a STATIC offset landing inside a trivial block.
-    // SOUNDNESS: an (l = 0, even) block under O3 — or any l = 0 block under
-    // SO3, since a pseudoscalar is fixed by every proper rotation — is acted on
-    // by the identity, so the cell at that offset holds the SAME number in
-    // every frame. That is precisely what `TInv` asserts, and the result is a
-    // single cell, hence `TInvScalar`.
-    //
-    // The offset must be a LITERAL this walker can see. A computed index would
-    // have to be proven to land in a trivial block, and an index this walker
-    // cannot evaluate could land anywhere: decline.
-    | TExprIndex (arr, idxs, _) ->
-        (match j arr with
-         | TBottom -> TBottom
-         | TRep (TO3Spec spec) ->
-             (match idxs with
-              | [ i ] ->
-                  (match staticIntOf i with
-                   | Some k when Set.contains k (invariantOffsetsT ctx.Group spec) ->
-                       TInv TInvScalar
-                   | _ -> TBottom)
-              | _ -> TBottom)
-         // Point-group reps: see `invariantOffsetsT` — the trivial-LABEL table
-         // is out of compile-order reach, so no offset is claimed.
-         | TRep _ -> TBottom
-         | TOpaque -> TOpaque
-         | TInv _ ->
-             if idxs |> List.forall (fun i -> isInvT (j i))
-             then TInv (nodeShape ())
-             else TBottom)
-
-    | TExprTupleIndex (baseE, idxE) ->
-        (match j baseE, j idxE with
-         | TInv _, TInv _ -> TInv TInvShapeUnknown
-         | TBottom, _ | _, TBottom -> TBottom
-         | _ -> TOpaque)
-
-    // A field name is a STATIC selector, so the base alone decides.
-    | TExprField (baseE, _, _) ->
-        (match j baseE with
-         | TInv _ -> TInv TInvShapeUnknown
-         | TBottom -> TBottom
-         | _ -> TOpaque)
-
-    // --- reduction --------------------------------------------------------
-    // SOUNDNESS (the polarity note): a fold over a rep sums BASIS-DEPENDENT
-    // COMPONENTS. The sum of the components of an l>0 vector is not a
-    // rotational invariant (the norm is), so a rep source declines rather than
-    // being mis-certified invariant.
-    | TExprReduce (src, _, init) ->
-        let ss = j src
-        let si = match init with Some i -> j i | None -> TInv TInvScalar
-        (match ss, si with
-         | TBottom, _ | _, TBottom -> TBottom
-         | TRep _, _ | _, TRep _ -> TBottom
-         | TInv _, TInv _ -> TInv TInvScalar
-         | _ -> TOpaque)
-
-    // --- calls ------------------------------------------------------------
-    // The interprocedural rule (B2). A call resolves by the callee's BINDER
-    // IRId — the id every reference to a top-level function carries in its
-    // `TExprVar` payload — against, in order:
-    //   1. the CERTIFIED table (a source-written `where ml.equiv(G)` pin, or
-    //      an elaborator stamp on a synthesized function, which is provable by
-    //      construction): trusted as an axiom, exactly as the seam trusts it;
-    //   2. this pass's SPECULATIVE table under the same group: consumed at
-    //      suggestion strength, and RECORDED as a dependency so the proposal
-    //      can name the pins it rests on.
-    // When the stored signature does NOT apply — a group mismatch, an arity
-    // mismatch, or an argument whose status does not match the stored parameter
-    // status — the call FALLS THROUGH to the all-invariant rule rather than
-    // declining outright.
-    //
-    // SOUNDNESS of the fall-through: a certificate is a statement about what
-    // happens to values that TRANSFORM. When every argument is provably
-    // invariant, nothing flowing in transforms, and the callee is a
-    // deterministic map: the same inputs in every frame give the same output in
-    // every frame, so the result is invariant no matter which group (if any)
-    // the callee is certified for. The certificate is simply irrelevant to that
-    // conclusion. Any `TRep` or `TOpaque` argument still declines, exactly as
-    // before — that is the case where the certificate WOULD have been doing
-    // work, and where a mismatch is a real loss of information.
-    //
-    // This is what recovers `ml.derive_pg_linear` under an O3 hypothesis: post-
-    // elaboration it is a C4-STAMPED generated callee, and under O3 both its
-    // arguments (the pg buffer, the weights) classify invariant.
-    //
-    // KNOWN DIVERGENCE, accepted and documented rather than special-cased: the
-    // seam's checker refuses a cross-group CERTIFIED call in BOTH directions,
-    // even when every argument is invariant — a coarser rule than this one. So
-    // an O3-certified body calling a C4-certified USER function on invariants
-    // is now a typed-only proposal whose pinned twin the seam checker would
-    // reject: a false positive by B3's letter. No corpus file has that shape
-    // (052 is a whole-file reject, so inference never runs there), and the
-    // differential's false-positive assertion is the standing guard. Gating
-    // this on generated-callee NAMES was rejected as the worse fix.
-    | TExprApp (f, args) ->
-        let argSts = args |> List.map j
-        /// The all-invariant rule, shared by the uncertified-callee arm and by
-        /// the certified arm's fall-through. Shape comes from the node's own
-        /// type, i.e. the callee's return type read under the CURRENT
-        /// hypothesis.
-        let allInvRule () =
-            if argSts |> List.forall isInvT then TInv (nodeShape ()) else TBottom
-        (match f.Kind with
-         | TExprVar (_, fid, _) when fid = ctx.Self -> TBottom
-         | TExprVar (_, fid, _) ->
-             (match Map.tryFind fid env with
-              // Application syntax over a rep-bound variable is a component
-              // read, same verdict as TExprIndex.
-              | Some (TRep _) -> TBottom
-              // A callee whose own status is unknown or declined cannot be
-              // taken for an invariant function. THIS GUARD IS LOAD-BEARING:
-              // without it a value produced by a node this table does not model
-              // (TOpaque) would take the uncertified-callee path below and hand
-              // back an INVARIANT — the shape of the false accept MLEquiv
-              // documents at its `judgeFormerApply` (corpus ml-equiv/049).
-              | Some TOpaque | Some TBottom -> TBottom
-              | Some (TInv _) | None ->
-                  let resolved =
-                      match ctx.Certified fid with
-                      | Some s -> Some (s, false)
-                      | None -> ctx.Speculative fid |> Option.map (fun s -> (s, true))
-                  match resolved with
-                  | Some (sg, speculative) ->
-                      let applies =
-                          sg.Group = ctx.Group
-                          && List.length sg.Params = List.length args
-                          && (List.zip (sg.Params |> List.map snd) argSts
-                              |> List.forall (fun (pSt, aSt) ->
-                                  match pSt, aSt with
-                                  | TRep sp, TRep sa -> sp = sa
-                                  | TInv _, TInv _ -> true
-                                  | _ -> false))
-                      if applies then
-                          if speculative then ctx.DepHits.Add fid |> ignore
-                          sg.Return
-                      // THE ONE MODE-SENSITIVE RULE (phase C1). The fall-through
-                      // below is the documented divergence from the seam, whose
-                      // checker refuses a cross-group CERTIFIED call in BOTH
-                      // directions even on invariant arguments. In DEDUCTION
-                      // that extra recall is the point. In CHECKING it must not
-                      // produce a definite status: the whole purpose of that
-                      // mode is to agree with the seam, and a status derived
-                      // through a rule the seam does not have is exactly the
-                      // shape of a FALSE compiler-bug report. TOpaque here means
-                      // the validation abstains, which is always safe.
-                      elif ctx.Checking then TOpaque
-                      else allInvRule ()
-                  | None ->
-                      // Uncertified callee (builtin, plain helper, array read
-                      // through application syntax). SOUNDNESS: a function of
-                      // invariants is invariant — the same inputs in every
-                      // frame give the same output in every frame. A rep
-                      // argument would ESCAPE into a body that carries no
-                      // certificate saying what happens to it: decline. An
-                      // unclassifiable argument proves nothing either.
-                      allInvRule ())
-         | _ ->
-             // Computed callee: admissible only when nothing rep-typed is in
-             // play at all.
-             if isInvT (j f) && argSts |> List.forall isInvT
-             then TInv TInvShapeUnknown
-             else TBottom)
-
-    // --- former application: THE post-elaboration arithmetic rule ----------
-    //
-    // THIS IS THE ARM THE MOVE TO TYPECHECK MAKES NECESSARY. At the seam,
-    // `x + y` on two arrays is an `ExprBinOp` and the Rep ± Rep rule fires
-    // directly. By typecheck it has ALREADY been desugared into a former
-    // application — `method_for(x, y) <@> lambda(a, b) -> a + b` — so without
-    // this arm the entire arithmetic fragment of the discipline is invisible
-    // and the typed lattice deduces essentially nothing on arrays.
-    //
-    // The rule: bind the kernel's parameters to the statuses of the SOURCE
-    // ARRAYS (not to "component" statuses) and walk the kernel body. That
-    // abstraction — reading a per-element kernel as a whole-array operation —
-    // is valid exactly when every step is COMPONENTWISE UNIFORM AND LINEAR,
-    // which is why a `TRep` conclusion additionally requires the kernel body
-    // to be inside `isElementwiseArith`. Within that fragment the only rules
-    // that can produce TRep are Rep ± Rep (componentwise addition commutes
-    // with a block-diagonal D) and scalar·Rep (a scalar commutes with every
-    // block), both of which hold elementwise iff they hold on the whole array.
+    // The former-application conclusion. Reading a per-element kernel as a
+    // whole-array operation is valid exactly when every step is COMPONENTWISE
+    // UNIFORM AND LINEAR, which is why a `TRep` conclusion additionally requires
+    // the kernel body to be inside `isElementwiseArith`. Within that fragment the
+    // only rules that can produce TRep are Rep +/- Rep (componentwise addition
+    // commutes with a block-diagonal D) and scalar*Rep (a scalar commutes with
+    // every block), both of which hold elementwise iff they hold on the whole
+    // array.
     //
     // SECOND GUARD, and the one only a TYPED walker can apply: the conclusion
-    // must AGREE WITH THE NODE'S OWN TYPE. This settles for free two questions
-    // the abstraction cannot answer on its own — whether the former zips or
-    // CROSS-ITERATES (an outer product raises the rank, and a multi-index
-    // array carrying an irreps axis classifies unclassifiable, so the guard
-    // rejects it — the seam's `outerRep` rule, obtained from the type), and
-    // whether the spec that comes out is the spec that went in.
-    //
-    // NOTE a deliberate divergence from the seam, reported to the coordinator:
-    // MLEquiv's judgeFormerApply REJECTS every `loop <@> kernel` over a rep,
-    // on the grounds that a former hands its kernel basis-dependent COMPONENTS.
-    // That rejection is sound at the SURFACE, where an explicitly written
-    // former is the only thing that shape can be; it is not available here,
-    // because desugared `x + y` is byte-identical to a hand-written former by
-    // the time this walker runs. The rule above is the mathematically correct
-    // reading of both.
-    | TExprApply info ->
-        let srcSts = info.Arrays |> List.map j
-        let anyRepSrc = srcSts |> List.exists isRepT
-        if srcSts |> List.exists ((=) TBottom) then TBottom
-        else
-            (match info.Kernel.Kind with
-             | TExprLambda lam when List.length lam.Params = List.length srcSts ->
-                 // A kernel parameter inherits its SOURCE's status VERBATIM —
-                 // emphatically NOT the shape of its own (element) type. The
-                 // whole point of the whole-array reading is that a kernel
-                 // parameter drawn from an invariant ARRAY is a different
-                 // number at every position, so it may not scale a rep even
-                 // though each individual element is 0-dimensional. Refining
-                 // the bound shape to `TInvScalar` off the element type
-                 // resurrects exactly the false certificate the seam's
-                 // `nonScalarScale` arm exists to refuse (probe: `x * w` for an
-                 // invariant `w` of the same extent scales each component of an
-                 // irrep block independently, and a diagonal matrix with
-                 // unequal entries does not commute with D^l).
-                 let kEnv =
-                     List.zip lam.Params srcSts
-                     |> List.fold (fun m ((p: TypedParam), st) -> Map.add p.VarId st m) env
-                 let kSt = statusOf ctx kEnv lam.Body
-                 let outSt = classifyType ctx.Group ctx.Resolve expr.Type
-                 (match kSt, outSt with
-                  | TBottom, _ -> TBottom
-                  | TRep a, TRep b when
-                        a = b
-                        && isElementwiseArith
-                             (lam.Params |> List.map (fun p -> p.VarId) |> Set.ofList)
-                             lam.Body -> TRep a
-                  | TInv _, TInv sh -> TInv sh
-                  | _ -> if anyRepSrc then TBottom else TOpaque)
-             | _ -> if anyRepSrc then TBottom else TOpaque)
+    // must AGREE WITH THE NODE'S OWN TYPE (`outSt`). That settles for free two
+    // questions the abstraction cannot answer on its own — whether the former
+    // zips or CROSS-ITERATES (an outer product raises the rank, and a
+    // multi-index array carrying an irreps axis classifies unclassifiable, so
+    // the guard rejects it — the seam's `outerRep` rule, obtained from the
+    // type), and whether the spec that comes out is the spec that went in.
+    FormerConclusion =
+        (fun kSt outSt elementwise anyRepSrc ->
+            match kSt, outSt with
+            | TBottom, _ -> TBottom
+            | TRep a, TRep b when a = b && elementwise -> TRep a
+            | TInv _, TInv sh -> TInv sh
+            | _ -> if anyRepSrc then TBottom else TOpaque)
+}
 
-    // --- aggregates and virtual arrays ------------------------------------
-    | TExprTuple es | TExprStack es | TExprZip es -> aggOf es
-    | TExprArrayLit (es, _) -> aggOf es
-    | TExprJoin (es, _) -> aggOf es
+/// Project a stored equiv signature into the shape the kit's call rule reads.
+let private toCallSig (sg: RepSigT) : DisciplineKit.CallSig<GroupT, RepStatusT> =
+    { CHyp = sg.Group; CParams = sg.Params |> List.map snd; CReturn = sg.Return }
 
-    // SOUNDNESS: virtual arrays ENUMERATE INDICES, and an index carries no rep
-    // structure.
-    | TExprRange _ | TExprReverse _ | TExprBlocked _ -> TInv (TInvAgg None)
-    | TExprDotDot _ -> TInv (TInvAgg None)
+let private repWalkCtx (ctx: RepCtx) : DisciplineKit.WalkCtx<GroupT, RepStatusT> = {
+    Ops = repOps ctx
+    Rules = repStructRules
+    Hyp = ctx.Group
+    HypEq = (=)
+    Certified = (fun id -> ctx.Certified id |> Option.map toCallSig)
+    Speculative = (fun id -> ctx.Speculative id |> Option.map toCallSig)
+    Self = ctx.Self
+    DepHits = ctx.DepHits
+    // Carried through UNCHANGED. The kit's call rule is the sole consumer, and
+    // it is the sole reason this flag exists: in CHECKING mode the certified
+    // callee's all-invariant fall-through must answer TOpaque (abstain) rather
+    // than a definite status, because that fall-through is a rule the SEAM
+    // checker does not have and a status derived through it would be a false
+    // compiler-bug report in a mode whose entire purpose is agreeing with the
+    // seam. In DEDUCTION the extra recall is the point.
+    Checking = ctx.Checking
+}
 
-    // `compute` is a scheduling boundary, not a value transform.
-    | TExprCompute x -> j x
+/// The walker: the kit's structural arms first, this discipline's rules second.
+///
+/// CURRIED ON PURPOSE — `repWalkCtx ctx` is built once per walk and closed over
+/// by the recursive knot, rather than rebuilt at every node. Every call site
+/// still reads `statusOf ctx env expr`.
+///
+/// THE PARTITION IS EXACT AND DISJOINT. `structuralArm` answers `Some` for
+/// exactly: TExprVar (both arms), TExprIf, TExprMatch, TExprLet, TExprBlock,
+/// TExprSequence, TExprAssign, TExprTupleIndex, TExprField, TExprCompute,
+/// TExprLambda, TExprApp, TExprApply. `ruleArm` answers for exactly the rest:
+/// literals, binary and unary arithmetic, whole-array negate/conjugate,
+/// indexing, reduction, aggregate construction, virtual arrays, and the
+/// catch-all. No node kind is handled by both, so first-match-wins semantics
+/// are preserved from the single-match version this replaces.
+let private statusOf (ctx: RepCtx) : Map<IRId, RepStatusT> -> TypedExpr -> RepStatusT =
+    let wctx = repWalkCtx ctx
+    let rec go (env: Map<IRId, RepStatusT>) (expr: TypedExpr) : RepStatusT =
+        match DisciplineKit.structuralArm wctx go env expr with
+        | Some s -> s
+        | None -> ruleArm env expr
 
-    // --- lambdas ----------------------------------------------------------
-    // v1, and deliberately weaker than the seam's arm: a lambda body is not
-    // walked (its parameters have no classified status, and `Captures` is the
-    // only handle on what it closes over). With no rep in scope the closure is
-    // an ordinary invariant helper; with a rep in scope it is TOpaque unless
-    // it demonstrably captures one, in which case it declines. TOpaque here is
-    // safe because the callee guard above refuses to call an TOpaque value.
-    | TExprLambda info ->
-        let envHasRep = env |> Map.exists (fun _ st -> isRepT st)
-        if not envHasRep then TInv TInvShapeUnknown
-        else
-            let capturesRep =
-                info.Captures
-                |> List.exists (fun c -> match Map.tryFind c.VarId env with Some (TRep _) -> true | _ -> false)
-            if capturesRep then TBottom else TOpaque
+    /// Equiv's OWN rules — the arms whose soundness argument names the action.
+    /// Every one of them would be wrong for at least one of the other two
+    /// disciplines (docs/design-discipline-as-data.md §3.2's polarity table).
+    and ruleArm (env: Map<IRId, RepStatusT>) (expr: TypedExpr) : RepStatusT =
+        let j = go env
+        /// Shape read off the node's own (resolved) type — the typed win over
+        /// the seam's syntactic shape guessing.
+        let nodeShape () = shapeOfType ctx.Resolve expr.Type
 
-    // --- everything else --------------------------------------------------
-    // Nothing established. TOpaque propagates and can never manufacture a Rep
-    // claim: every rule above that PRODUCES a rep requires a rep INPUT, and
-    // every rule that produces an invariant requires invariant inputs. The one
-    // path by which an unmodelled node could have become a claim — flowing
-    // into a call as the callee — is closed by the callee guard.
-    | _ -> TOpaque
+        /// An aggregate constructor. SOUNDNESS: packing a rep into a literal
+        /// aggregate loses its block structure — the aggregate does not
+        /// transform as the rep — so a rep element declines. All-invariant
+        /// elements make an invariant aggregate. (Galilean's aggregate rule is
+        /// the OPPOSITE: a uniformly boost-variant aggregate stays variant.)
+        let aggOf (es: TypedExpr list) =
+            let sts = es |> List.map j
+            if sts |> List.exists ((=) TBottom) then TBottom
+            elif sts |> List.exists isRepT then TBottom
+            elif sts |> List.exists ((=) TOpaque) then TOpaque
+            else TInv (TInvAgg None)
+
+        match expr.Kind with
+
+        // --- literals -----------------------------------------------------
+        // SOUNDNESS: a constant does not move under any group action.
+        | TExprLit _ -> TInv TInvScalar
+
+        // --- arithmetic ---------------------------------------------------
+        | TExprBinOp (mode, op, l, r) ->
+            let sl = j l
+            let sr = j r
+            (match sl, sr, op with
+             | TBottom, _, _ | _, TBottom, _ -> TBottom
+             // SOUNDNESS: the outer-product form cross-iterates, so the result
+             // has a HIGHER RANK than either operand and cannot be the rep it
+             // was built from, whatever the operator.
+             | (TRep _, _, _ | _, TRep _, _) when mode <> Elementwise -> TBottom
+             // SOUNDNESS (Rep +/- Rep): the action is LINEAR, so D(x+y) = Dx +
+             // Dy. Requires IDENTICAL specs — different specs are different D's
+             // and the sum transforms under neither. THIS IS THE ARM THAT MAKES
+             // THE RULES PER-DISCIPLINE: galilean rejects it outright (adding
+             // two boost-variant values doubles the U0 coefficient).
+             | TRep s1, TRep s2, (OpAdd | OpSub) -> if s1 = s2 then TRep s1 else TBottom
+             // Elementwise product of two reps is the Clebsch-Gordan
+             // contraction's job (ml.tensor_product), not a pointwise multiply:
+             // decline. (Perm ADMITS this one — a permutation commutes with
+             // every pointwise map.)
+             | TRep _, TRep _, _ -> TBottom
+             // SOUNDNESS (scalar scaling): a SCALAR commutes with every block of
+             // the action, so D(cx) = cD(x). An invariant ARRAY of the same
+             // extent scales each component independently — a diagonal matrix
+             // with unequal entries does not commute with D^l — so scalarity
+             // must be PROVEN; an unestablished shape declines.
+             | TRep s, TInv TInvScalar, (OpMul | OpDiv) -> TRep s
+             | TInv TInvScalar, TRep s, OpMul -> TRep s
+             | (TRep _, TInv _, _) | (TInv _, TRep _, _) -> TBottom
+             | TInv shl, TInv shr, _ ->
+                 TInv (if mode = Elementwise then binShapeT shl shr else TInvShapeUnknown)
+             // Nothing established on one side: nothing claimed for the result.
+             | TOpaque, _, _ | _, TOpaque, _ -> TOpaque)
+
+        // SOUNDNESS: only a LINEAR unary op transports a rep. Negation is the
+        // linear map -I, which commutes with every D, so `-x` transforms exactly
+        // as `x`. Everything else applied to a rep is refused.
+        //
+        // `OpMath` IS THE TRAP HERE, and it is a post-elaboration trap the seam
+        // never faces: at the surface `exp(x)` is an `ExprApp` of a named
+        // builtin, which MLEquiv routes through its nonlinearity rejection.
+        // TypeCheck rewrites whitelisted math names into
+        // `TExprUnaryOp (OpMath "exp", _)`, so a blanket "a unary op passes its
+        // operand's status through" — which reads correct against the seam's
+        // unary arm — silently CERTIFIES a nonlinearity applied to rep
+        // components. (Probe: `method_for(x) <@> lambda(v) -> exp(v)` proposed
+        // equivariant before this arm was split.) A nonlinearity acts only on
+        // invariants; gate reps with ml.gated or extract invariants with
+        // ml.scalars/ml.norms.
+        //
+        // THE SPLIT IS LOAD-BEARING AND MUST NOT BE COLLAPSED. Perm passes ALL
+        // unary ops through (pointwise maps commute with relabelling) and
+        // galilean rejects even negation (it flips the U0 coefficient to -1), so
+        // this pair of arms is three different functions across the three
+        // disciplines and belongs here rather than in the kit.
+        | TExprUnaryOp (OpNeg, inner) -> j inner
+        | TExprUnaryOp (_, inner) ->
+            (match j inner with
+             | TRep _ -> TBottom
+             | s -> s)
+
+        // SOUNDNESS: whole-array negation is the linear map -I, which commutes
+        // with every D.
+        | TExprArrayNegate a -> j a
+
+        // Complex conjugation does NOT commute with a complex representation in
+        // general (it conjugates the matrix): decline on a rep, pass through
+        // otherwise.
+        | TExprArrayConjugate a -> (match j a with TRep _ -> TBottom | s -> s)
+
+        // --- reads --------------------------------------------------------
+        // SOUNDNESS: `Inv` means the value is HELD FIXED. A value that does not
+        // move has no part that moves, so a component of an invariant aggregate
+        // picked by an invariant selector is invariant.
+        //
+        // A REP base declines IN GENERAL: its components are the basis-dependent
+        // numbers this whole discipline exists to refuse — reading component k of
+        // an l>0 block gives a number that changes with the frame.
+        //
+        // THE ONE EXCEPTION is a STATIC offset landing inside a trivial block.
+        // SOUNDNESS: an (l = 0, even) block under O3 — or any l = 0 block under
+        // SO3, since a pseudoscalar is fixed by every proper rotation — is acted
+        // on by the identity, so the cell at that offset holds the SAME number in
+        // every frame. That is precisely what `TInv` asserts, and the result is a
+        // single cell, hence `TInvScalar`.
+        //
+        // The offset must be a LITERAL this walker can see. A computed index
+        // would have to be proven to land in a trivial block, and an index this
+        // walker cannot evaluate could land anywhere: decline.
+        //
+        // TO3Spec ONLY, with the point-group deferral intact — see
+        // `invariantOffsetsT`: which pg labels are trivial is registry data in
+        // MLPointSpec, which is out of compile-order reach, and a drifted
+        // trivial-label table is a FALSE INVARIANT.
+        | TExprIndex (arr, idxs, _) ->
+            (match j arr with
+             | TBottom -> TBottom
+             | TRep (TO3Spec spec) ->
+                 (match idxs with
+                  | [ i ] ->
+                      (match DisciplineKit.staticIntOf i with
+                       | Some k when Set.contains k (invariantOffsetsT ctx.Group spec) ->
+                           TInv TInvScalar
+                       | _ -> TBottom)
+                  | _ -> TBottom)
+             // Point-group reps: see `invariantOffsetsT` — the trivial-LABEL
+             // table is out of compile-order reach, so no offset is claimed.
+             | TRep _ -> TBottom
+             | TOpaque -> TOpaque
+             | TInv _ ->
+                 if idxs |> List.forall (fun i -> isInvT (j i))
+                 then TInv (nodeShape ())
+                 else TBottom)
+
+        // --- reduction ----------------------------------------------------
+        // SOUNDNESS (the polarity note): a fold over a rep sums BASIS-DEPENDENT
+        // COMPONENTS. The sum of the components of an l>0 vector is not a
+        // rotational invariant (the norm is), so a rep source declines rather
+        // than being mis-certified invariant.
+        | TExprReduce (src, _, init) ->
+            let ss = j src
+            let si = match init with Some i -> j i | None -> TInv TInvScalar
+            (match ss, si with
+             | TBottom, _ | _, TBottom -> TBottom
+             | TRep _, _ | _, TRep _ -> TBottom
+             | TInv _, TInv _ -> TInv TInvScalar
+             | _ -> TOpaque)
+
+        // --- aggregates and virtual arrays --------------------------------
+        | TExprTuple es | TExprStack es | TExprZip es -> aggOf es
+        | TExprArrayLit (es, _) -> aggOf es
+        | TExprJoin (es, _) -> aggOf es
+
+        // SOUNDNESS: virtual arrays ENUMERATE INDICES, and an index carries no
+        // rep structure. (Perm cannot say this unconditionally — `range<Idx<N>>`
+        // IS its node index set — which is why virtual arrays are a rule.)
+        | TExprRange _ | TExprReverse _ | TExprBlocked _ -> TInv (TInvAgg None)
+        | TExprDotDot _ -> TInv (TInvAgg None)
+
+        // --- everything else ----------------------------------------------
+        // Nothing established. TOpaque propagates and can never manufacture a
+        // Rep claim: every rule above that PRODUCES a rep requires a rep INPUT,
+        // and every rule that produces an invariant requires invariant inputs.
+        // The one path by which an unmodelled node could have become a claim —
+        // flowing into a call as the callee — is closed by the kit's callee
+        // guard.
+        | _ -> TOpaque
+
+    go
 
 // ============================================================================
 // Signature classification and the deduction driver
