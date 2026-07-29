@@ -1,0 +1,16 @@
+// TEST: Unannotated Scalar Param Broadcast Return
+// The positive half of 040's pair, and the reason 040 is a rejection of the
+// CALL and not of the declaration.
+//
+// `f` is character-for-character the function 040 rejects a call to. Its
+// parameter `x` is unannotated and nothing closes it, so it defaults to a
+// scalar; the declared array return is then filled by BROADCASTING the
+// scalar body into every slot. That is well-defined, it is what codegen
+// emits, and it is what a scalar argument gets. A rank rule at the
+// application seam has to leave this alone — which is exactly why the
+// declared array return must not be read as forcing `x` to be an array.
+function f(x, s: Float) -> Array<Float like Idx<4>> =
+    x * s
+
+let r = f(3.0, 2.0)
+// EXPECT: r = [6, 6, 6, 6]
