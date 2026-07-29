@@ -71,99 +71,38 @@ module PX = Blade.ML.PolyExtract
 module LD = Blade.ML.LieDischarge
 module MLS = Blade.ML.Spec
 module PS = Blade.ML.PointSpec
+module EM = Blade.ML.EquivMessages
 
 // ---------------------------------------------------------------------------
-// The abstract value — the typed twin of MLPolyExtract's private `Val`
+// THE ABSTRACT VALUE AND THE BINARY ALGEBRA - MLPolyExtract'S, NOT A TWIN
 // ---------------------------------------------------------------------------
+//
+// `PX.Val`, `PX.Budget`, `PX.charge`, `PX.chargeVec` and `PX.binOp` are the
+// part of the extractor that does not walk syntax, and this module now CALLS
+// them. It used to restate `binOp` arm for arm, with a note explaining that the
+// two walkers carried different value types so sharing was impossible. They did
+// not: both are `VScalar of Poly | VVec of Poly[] | VInvArr of string | VOpaque
+// of string`, cell for cell, and the only thing that genuinely differed was the
+// surrounding CONTEXT - the surface walker carries a `StaticEnv` to fold
+// `let static` reads, this one has no statics left to fold by typecheck. So the
+// shared surface is keyed on a bare budget cell, which is all the algebra ever
+// touched, and both contexts stay their own.
+//
+// That note also said a divergence between the two copies would be a SOUNDNESS
+// bug rather than a recall difference - a wrong extraction makes the discharge
+// certify a polynomial that is not the body. It was right, which is why there
+// is now one copy and not two.
 
-/// Deliberately NOT a status lattice: every case carries actual polynomial
-/// data, because the verdict comes from coefficients and not from a type.
-type private TVal =
-    | VScalar of PX.Poly
-    /// An assembled vector of scalar polynomials: a rep parameter, an array
-    /// literal, or anything the array arms built from those.
-    | VVec of PX.Poly []
-    /// An invariant ARRAY parameter: no polynomial of its own, only its
-    /// statically-indexed cells, each an opaque atom.
-    | VInvArr of string
-    /// An invariant whose SHAPE the classifier could not decide. Every use
-    /// leaves the fragment — modelling an array as a scalar atom would be
-    /// unfaithful, and faithfulness is what the whole engine rests on.
-    | VOpaque of string
-
-type private Ctx = {
-    /// Remaining term budget, shared across the whole extraction so a body
-    /// cannot dodge the cap by spreading a blow-up over many components.
-    mutable Budget: int
-}
+/// The budget cell, under this module's old name so the walk below reads
+/// unchanged. One per extraction, so a body cannot dodge the term cap by
+/// spreading a blow-up over many components.
+type private Ctx = PX.Budget
 
 let private outside (msg: string) (span: Span) : Result<'a, PX.ExtractError> =
     Error (PX.OutsideFragment (msg, span))
 
-/// Charge a freshly built polynomial against MLPolyExtract's caps — the SAME
-/// two constants, read from that module rather than restated.
-let private charge (ctx: Ctx) (p: PX.Poly) : Result<PX.Poly, PX.ExtractError> =
-    let n = PX.Poly.terms p
-    if n > PX.maxTerms then
-        Error (PX.CapBreach (sprintf "the expanded form exceeded the %d-term cap" PX.maxTerms))
-    elif PX.Poly.repDegree p > PX.maxRepDegree then
-        Error (PX.CapBreach (sprintf "the body's degree in the representation components exceeds the degree-%d cap" PX.maxRepDegree))
-    else
-        ctx.Budget <- ctx.Budget - n
-        if ctx.Budget < 0 then
-            Error (PX.CapBreach (sprintf "the expanded form exceeded the %d-term cap" PX.maxTerms))
-        else Ok p
-
-let private constPoly (ctx: Ctx) (c: PX.Rat) = charge ctx (PX.Poly.ofRat c) |> Result.map VScalar
-
-let private chargeVec (ctx: Ctx) (ps: PX.Poly []) : Result<TVal, PX.ExtractError> =
-    ps
-    |> Array.fold (fun acc p -> acc |> Result.bind (fun out -> charge ctx p |> Result.map (fun q -> out @ [ q ])))
-        (Ok [])
-    |> Result.map (List.toArray >> VVec)
-
-/// The binary algebra, arm for arm the same as MLPolyExtract's `extractBinOp`.
-/// It is restated rather than shared because that function is `private` there
-/// and the two walkers carry different value types; the RULES are identical and
-/// any change must be made in both (the divergence would be a soundness bug,
-/// not a recall difference).
-let private binOp (ctx: Ctx) (span: Span) (op: BinOp) (vl: TVal) (vr: TVal)
-    : Result<TVal, PX.ExtractError> =
-    let bad msg = outside msg span
-    match vl, vr with
-    | VOpaque n, _ | _, VOpaque n ->
-        bad (sprintf "the shape of invariant '%s' is not decidable from its type" n)
-    | VInvArr _, _ | _, VInvArr _ ->
-        bad "an invariant array has no polynomial form — read its cells at static indices"
-    | VScalar a, VScalar b ->
-        match op with
-        | OpAdd -> charge ctx (PX.Poly.add a b) |> Result.map VScalar
-        | OpSub -> charge ctx (PX.Poly.sub a b) |> Result.map VScalar
-        | OpMul -> charge ctx (PX.Poly.mul a b) |> Result.map VScalar
-        | OpDiv ->
-            // ℚ[atoms] has no inverses: the divisor must be a nonzero constant.
-            match PX.Poly.asConstant b with
-            | Some c when not (PX.Rat.isZero c) ->
-                charge ctx (a |> Map.map (fun _ x -> PX.Rat.div x c)) |> Result.map VScalar
-            | Some _ -> bad "division by zero"
-            | None -> bad "division is admitted only by a nonzero constant — an invariant atom has no inverse in the coefficient ring"
-        | _ -> bad "this operator is outside the polynomial fragment"
-    | VVec a, VVec b ->
-        if a.Length <> b.Length then
-            bad (sprintf "whole-array arithmetic needs equal shapes (%d vs %d components)" a.Length b.Length)
-        else
-            match op with
-            | OpAdd -> Array.map2 PX.Poly.add a b |> chargeVec ctx
-            | OpSub -> Array.map2 PX.Poly.sub a b |> chargeVec ctx
-            | _ -> bad "only + and - are admitted between two arrays"
-    | VScalar s, VVec v | VVec v, VScalar s ->
-        // The scalar factor must be INVARIANT in the polynomial sense —
-        // rep-degree 0 — which is the composition rule's `Rep s, Inv, OpMul`
-        // arm read over coefficients.
-        match op with
-        | OpMul when PX.Poly.repDegree s = 0 -> v |> Array.map (PX.Poly.mul s) |> chargeVec ctx
-        | OpMul -> bad "scaling an array is admitted only by an INVARIANT scalar (rep-degree 0)"
-        | _ -> bad "only invariant scaling is admitted between a scalar and an array"
+let private constPoly (ctx: Ctx) (c: PX.Rat) =
+    PX.charge ctx (PX.Poly.ofRat c) |> Result.map PX.VScalar
 
 /// A provably compile-time integer offset. `TExprCompute` is a scheduling
 /// boundary and is peeled; ANYTHING ELSE — a variable, an arithmetic
@@ -194,8 +133,8 @@ let private totalCells (resolve: IRType -> IRType) (ty: IRType) : int option =
 // The walk
 // ---------------------------------------------------------------------------
 
-let rec private extractVal (ctx: Ctx) (resolve: IRType -> IRType) (env: Map<IRId, TVal>) (e: TypedExpr)
-    : Result<TVal, PX.ExtractError> =
+let rec private extractVal (ctx: Ctx) (resolve: IRType -> IRType) (env: Map<IRId, PX.Val>) (e: TypedExpr)
+    : Result<PX.Val, PX.ExtractError> =
     let go = extractVal ctx resolve env
     match e.Kind with
 
@@ -219,7 +158,7 @@ let rec private extractVal (ctx: Ctx) (resolve: IRType -> IRType) (env: Map<IRId
 
     // --- arithmetic -------------------------------------------------------
     | TExprBinOp (Elementwise, op, l, r) ->
-        go l |> Result.bind (fun vl -> go r |> Result.bind (fun vr -> binOp ctx e.Span op vl vr))
+        go l |> Result.bind (fun vl -> go r |> Result.bind (fun vr -> PX.binOp ctx e.Span op vl vr))
     | TExprBinOp _ ->
         outside "outer-product operators are outside the polynomial fragment" e.Span
 
@@ -227,10 +166,10 @@ let rec private extractVal (ctx: Ctx) (resolve: IRType -> IRType) (env: Map<IRId
     | TExprUnaryOp (OpNeg, inner) ->
         go inner |> Result.bind (fun v ->
             match v with
-            | VScalar p -> Ok (VScalar (PX.Poly.neg p))
-            | VVec ps -> Ok (VVec (ps |> Array.map PX.Poly.neg))
-            | VInvArr _ -> outside "an invariant array has no polynomial form — read its cells at static indices" e.Span
-            | VOpaque n -> outside (sprintf "the shape of invariant '%s' is not decidable from its type" n) e.Span)
+            | PX.VScalar p -> Ok (PX.VScalar (PX.Poly.neg p))
+            | PX.VVec ps -> Ok (PX.VVec (ps |> Array.map PX.Poly.neg))
+            | PX.VInvArr _ -> outside "an invariant array has no polynomial form — read its cells at static indices" e.Span
+            | PX.VOpaque n -> outside (sprintf "the shape of invariant '%s' is not decidable from its type" n) e.Span)
     // `OpMath` lands here. A transcendental has no polynomial normal form, and
     // by typecheck it is a UNARY OP rather than the named call MLEquiv sees —
     // so this refusal has to be explicit or a nonlinearity would ride through
@@ -240,8 +179,8 @@ let rec private extractVal (ctx: Ctx) (resolve: IRType -> IRType) (env: Map<IRId
     | TExprArrayNegate a ->
         go a |> Result.bind (fun v ->
             match v with
-            | VVec ps -> Ok (VVec (ps |> Array.map PX.Poly.neg))
-            | VScalar p -> Ok (VScalar (PX.Poly.neg p))
+            | PX.VVec ps -> Ok (PX.VVec (ps |> Array.map PX.Poly.neg))
+            | PX.VScalar p -> Ok (PX.VScalar (PX.Poly.neg p))
             | _ -> outside "whole-array negation needs an extracted vector" e.Span)
 
     // --- assembled returns ------------------------------------------------
@@ -253,10 +192,10 @@ let rec private extractVal (ctx: Ctx) (resolve: IRType -> IRType) (env: Map<IRId
             acc |> Result.bind (fun ps ->
                 go x |> Result.bind (fun v ->
                     match v with
-                    | VScalar p -> Ok (ps @ [ p ])
+                    | PX.VScalar p -> Ok (ps @ [ p ])
                     | _ -> outside "an array literal must be built from SCALAR polynomials — nested aggregates are outside the fragment" x.Span)))
             (Ok [])
-        |> Result.map (List.toArray >> VVec)
+        |> Result.map (List.toArray >> PX.VVec)
 
     // --- reads ------------------------------------------------------------
     | TExprIndex (arr, idxs, _) -> extractIndex ctx resolve env e arr idxs
@@ -296,24 +235,24 @@ let rec private extractVal (ctx: Ctx) (resolve: IRType -> IRType) (env: Map<IRId
 /// A static read of a bound vector or of an invariant array's cell. Shared by
 /// the `TExprIndex` and application-syntax arms, which are the same operation
 /// spelled two ways by the checker.
-and private extractIndex (ctx: Ctx) (resolve: IRType -> IRType) (env: Map<IRId, TVal>)
+and private extractIndex (ctx: Ctx) (resolve: IRType -> IRType) (env: Map<IRId, PX.Val>)
                          (e: TypedExpr) (arr: TypedExpr) (idxs: TypedExpr list)
-    : Result<TVal, PX.ExtractError> =
+    : Result<PX.Val, PX.ExtractError> =
     match idxs with
     | [ idxE ] ->
         extractVal ctx resolve env arr |> Result.bind (fun v ->
             match v with
-            | VVec ps ->
+            | PX.VVec ps ->
                 (match staticOffset idxE with
-                 | Some i when i >= 0 && i < ps.Length -> Ok (VScalar ps.[i])
+                 | Some i when i >= 0 && i < ps.Length -> Ok (PX.VScalar ps.[i])
                  | Some i -> outside (sprintf "index %d is outside a %d-component value" i ps.Length) e.Span
                  | None -> outside "indexing a representation-typed value needs a static offset" e.Span)
-            | VInvArr name ->
+            | PX.VInvArr name ->
                 (match staticOffset idxE with
-                 | Some i -> charge ctx (PX.Poly.ofMono (PX.Mono.invAtom { Name = name; Index = Some i })) |> Result.map VScalar
+                 | Some i -> PX.charge ctx (PX.Poly.ofMono (PX.Mono.invAtom { Name = name; Index = Some i })) |> Result.map PX.VScalar
                  | None -> outside (sprintf "indexing the invariant '%s' needs a static offset" name) e.Span)
-            | VScalar _ -> outside "a scalar cannot be indexed" e.Span
-            | VOpaque name ->
+            | PX.VScalar _ -> outside "a scalar cannot be indexed" e.Span
+            | PX.VOpaque name ->
                 outside (sprintf "the shape of invariant '%s' is not decidable from its type" name) e.Span)
     | _ -> outside "only single-offset reads are admitted in the v1 polynomial fragment" e.Span
 
@@ -353,9 +292,9 @@ and private extractIndex (ctx: Ctx) (resolve: IRType -> IRType) (env: Map<IRId, 
 /// Nothing here weakens the discharge: an extracted body still has to pass the
 /// coefficientwise identity, which is a strictly stronger obligation than any
 /// composition rule.
-and private extractApply (ctx: Ctx) (resolve: IRType -> IRType) (env: Map<IRId, TVal>)
+and private extractApply (ctx: Ctx) (resolve: IRType -> IRType) (env: Map<IRId, PX.Val>)
                          (e: TypedExpr) (info: TypedApplyInfo)
-    : Result<TVal, PX.ExtractError> =
+    : Result<PX.Val, PX.ExtractError> =
     if info.IsComposeApply
        || info.KernelOutputRank <> 0
        || (info.KernelInputRanks |> List.exists ((<>) 0)) then
@@ -369,7 +308,7 @@ and private extractApply (ctx: Ctx) (resolve: IRType -> IRType) (env: Map<IRId, 
                 acc |> Result.bind (fun out ->
                     extractVal ctx resolve env a |> Result.bind (fun v ->
                         match v with
-                        | VVec ps -> Ok (out @ [ ps ])
+                        | PX.VVec ps -> Ok (out @ [ ps ])
                         | _ -> outside "a former source outside the vector fragment is not extractable" a.Span)))
                 (Ok [])
         srcs |> Result.bind (fun srcs ->
@@ -387,13 +326,13 @@ and private extractApply (ctx: Ctx) (resolve: IRType -> IRType) (env: Map<IRId, 
                         let kEnv =
                             List.zip lam.Params srcs
                             |> List.fold (fun m ((p: TypedParam), (s: PX.Poly [])) ->
-                                Map.add p.VarId (VScalar s.[i]) m) env
+                                Map.add p.VarId (PX.VScalar s.[i]) m) env
                         extractVal ctx resolve kEnv lam.Body |> Result.bind (fun v ->
                             match v with
-                            | VScalar p -> Ok (out @ [ p ])
+                            | PX.VScalar p -> Ok (out @ [ p ])
                             | _ -> outside "a kernel must produce a SCALAR polynomial per position" lam.Body.Span)))
                     (Ok [])
-                |> Result.map (List.toArray >> VVec))
+                |> Result.map (List.toArray >> PX.VVec))
     | _ -> outside "only a lambda kernel is admitted in the v1 polynomial fragment" e.Span
 
 // ---------------------------------------------------------------------------
@@ -522,24 +461,22 @@ type TypedEngineVerdict =
     /// distinguished because a CHECKING consumer (stage C1) wants to say so.
     | EngineRefutes of string
 
-/// Render a finite-discharge failure. Deliberately SHORTER than
-/// `MLEquiv.Engine.failureMessage`, which is the user-facing text and stays the
-/// seam's: this string is for a compiler-internal disagreement report, and
-/// duplicating the long form here would guarantee the two drift.
-let private renderFinite (owner: string) (gn: string) (f: PX.DischargeFailure) : string =
-    sprintf "function '%s': the body IS a polynomial and it is not %s-equivariant — f(rho(g) x) = rho(g) f(x) fails at element %s, output component %d, term %s: lhs %s, rhs %s%s"
-        owner gn f.Element f.Component f.Monomial (PX.Rat.render f.Lhs) (PX.Rat.render f.Rhs)
-        (if f.NearMiss then " (NEAR MISS: the truncated-decimal trap)" else "")
-
-let private renderLie (owner: string) (gn: string) (f: LD.LieFailure) : string =
-    sprintf "function '%s': the body IS a polynomial and it is not %s-equivariant — Df(x)(A x) = A f(x) fails at generator %s, output component %d, term %s: lhs %s, rhs %s%s"
-        owner gn f.Generator f.Component f.Monomial (LD.Radical.render f.Lhs) (LD.Radical.render f.Rhs)
-        (if f.NearMiss then " (NEAR MISS: the truncated-decimal trap)" else "")
-
-let private renderInversion (owner: string) (f: LD.InversionFailure) : string =
-    let par p = if p = 1 then "odd" else "even"
-    sprintf "function '%s': the body is SO(3)-equivariant but not O3-equivariant — f(-x) = rho(-I) f(x) fails in output component %d at term %s: that monomial is %s under -I (%d odd rep factors) while the declared output component is %s"
-        owner f.Component f.Monomial (par f.MonoParity) f.ParitySum (par f.OutParity)
+// A refutation is rendered by `Blade.ML.EquivMessages` — the SAME four
+// constructors the seam calls, not a shorter twin of them.
+//
+// This module used to carry its own abbreviated `renderFinite` / `renderLie` /
+// `renderInversion`, on the reasoning that the long form was the seam's
+// user-facing text and hand-copying it here would guarantee drift. The
+// diagnosis was right and the remedy was not: two copies of different lengths
+// drift exactly as readily as two copies of the same length, and the shorter
+// one silently became a second, worse answer to the same question. The text now
+// lives in one module that both front halves consume, so there is no paired
+// maintenance obligation left to honour — a change to the wording is a change
+// to `MLEquivMessages.fs`, and both sides get it.
+//
+// The three failure records reach here in exactly the shape those constructors
+// take (`PX.DischargeFailure`, `LD.LieFailure`, `LD.InversionFailure`), which
+// is why the sharing is a call and not an adapter.
 
 /// Extract a typed body to the shared normal form under a DeduceRep signature.
 /// Public so a future consumer (a checking-side C1 diagnostic, a test) can see
@@ -555,26 +492,26 @@ let extractTyped (resolve: IRType -> IRType) (parms: RepParam list) (sg: RepSigT
     | Some psig when List.length psig.Params <> List.length parms ->
         Error (PX.OutsideFragment ("internal: parameter list and classified signature disagree in length", body.Span))
     | Some psig ->
-        let ctx = { Budget = PX.maxTerms }
+        let ctx = PX.mkBudget ()
         let env =
             List.zip parms psig.Params
             |> List.fold (fun acc ((p: RepParam), (name, kind)) ->
                 match kind with
-                | PX.PRep n -> Map.add p.PId (VVec (Array.init n (fun i -> PX.Poly.ofMono (PX.Mono.repVar name i)))) acc
-                | PX.PInvArray -> Map.add p.PId (VInvArr name) acc
-                | PX.PInvScalar -> Map.add p.PId (VScalar (PX.Poly.ofMono (PX.Mono.invAtom { Name = name; Index = None }))) acc
-                | PX.PInvOpaque -> Map.add p.PId (VOpaque name) acc)
+                | PX.PRep n -> Map.add p.PId (PX.VVec (Array.init n (fun i -> PX.Poly.ofMono (PX.Mono.repVar name i)))) acc
+                | PX.PInvArray -> Map.add p.PId (PX.VInvArr name) acc
+                | PX.PInvScalar -> Map.add p.PId (PX.VScalar (PX.Poly.ofMono (PX.Mono.invAtom { Name = name; Index = None }))) acc
+                | PX.PInvOpaque -> Map.add p.PId (PX.VOpaque name) acc)
                 Map.empty
         extractVal ctx resolve env body
         |> Result.bind (fun v ->
             match v, psig.ReturnDim with
-            | VScalar p, None -> Ok ({ PX.Components = [| p |] } : PX.PolyForm)
-            | VVec ps, Some n when ps.Length = n -> Ok ({ PX.Components = ps } : PX.PolyForm)
-            | VVec ps, Some n ->
+            | PX.VScalar p, None -> Ok ({ PX.Components = [| p |] } : PX.PolyForm)
+            | PX.VVec ps, Some n when ps.Length = n -> Ok ({ PX.Components = ps } : PX.PolyForm)
+            | PX.VVec ps, Some n ->
                 outside (sprintf "the body assembles %d components but the return has %d" ps.Length n) body.Span
-            | VVec _, None -> outside "the body is an array but the return is a scalar" body.Span
-            | VScalar _, Some _ -> outside "the body is a scalar but the return is a representation-typed array" body.Span
-            | (VInvArr _ | VOpaque _), _ -> outside "the body is an invariant with no polynomial form" body.Span)
+            | PX.VVec _, None -> outside "the body is an array but the return is a scalar" body.Span
+            | PX.VScalar _, Some _ -> outside "the body is a scalar but the return is a representation-typed array" body.Span
+            | (PX.VInvArr _ | PX.VOpaque _), _ -> outside "the body is an invariant with no polynomial form" body.Span)
 
 /// THE STITCH POINT (stage C2). Run the polynomial engine on a TYPED body
 /// under a candidate DeduceRep signature, and return what it has to say.
@@ -611,7 +548,7 @@ let engineVerdict (resolve: IRType -> IRType) (parms: RepParam list) (sg: RepSig
                     match PX.discharge form actions with
                     | Ok () -> Some EngineHolds
                     | Error (PX.DischargeCap _) -> None
-                    | Error (PX.GeneratorCheck f) -> Some (EngineRefutes (renderFinite sg.Owner gn f))
+                    | Error (PX.GeneratorCheck f) -> Some (EngineRefutes (EM.failureMessage sg.Owner gn f))
             | GO3 | GSO3 ->
                 match o3Actions sg.Group sg with
                 | None -> None
@@ -620,8 +557,8 @@ let engineVerdict (resolve: IRType -> IRType) (parms: RepParam list) (sg: RepSig
                     | Ok () -> Some EngineHolds
                     | Error (LD.DischargeCap _) -> None
                     | Error (LD.GeneratorCheck f) ->
-                        Some (EngineRefutes (renderLie sg.Owner (groupStrT sg.Group) f))
-                    | Error (LD.ParityCheck f) -> Some (EngineRefutes (renderInversion sg.Owner f))
+                        Some (EngineRefutes (EM.lieFailureMessage sg.Owner (groupStrT sg.Group) f))
+                    | Error (LD.ParityCheck f) -> Some (EngineRefutes (EM.inversionFailureMessage sg.Owner f))
     with
     | LD.LieGuardFailure _ -> reraise ()
     | _ -> None

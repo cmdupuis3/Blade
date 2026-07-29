@@ -67,6 +67,12 @@ open Blade.ML.Spec
 // MLGalilean and MLPerm. Every RULE below is this discipline's own.
 open Blade.ML.CertShell
 
+/// The engine's failure text, which this file no longer owns alone: the same
+/// four constructors are called by `MLPolyExtractTyped`, which reaches the same
+/// `DischargeFailure` / `LieFailure` / `InversionFailure` records from the
+/// typed front half. See that module's header for why one copy and not two.
+module EM = Blade.ML.EquivMessages
+
 type Group =
     | O3
     | SO3
@@ -1324,62 +1330,6 @@ module private Engine =
                     | _ -> None
                 Some (gens, inv)
 
-    /// How a coefficient mismatch reads. The near-miss note is §3.5's
-    /// mandatory one and points at BOTH escape hatches; the rep-degree-0 arm is
-    /// the constant obligation (a constant term of an equivariant map must be
-    /// fixed by the whole group — trivial-label supported and π₀-fixed).
-    let failureMessage (funcName: string) (gn: string) (f: PX.DischargeFailure) : string =
-        let where =
-            sprintf "function '%s': the body IS a polynomial, and it is not %s-equivariant. The identity f(rho(g) x) = rho(g) f(x) fails at group element %s, in output component %d, at the term %s: the left side has coefficient %s, the right side %s"
-                funcName gn f.Element f.Component f.Monomial (PX.Rat.render f.Lhs) (PX.Rat.render f.Rhs)
-        let constantNote =
-            if f.RepDegree = 0 then
-                sprintf ". That term is a CONSTANT: a constant summand of an equivariant map must be fixed by the whole group, i.e. supported on trivial-label cells (every generator matrix the identity) and unmoved by the component group. A constant in a non-trivial-label cell breaks equivariance no matter what the rest of the body does"
-            else ""
-        let nearMissNote =
-            if f.NearMiss then
-                sprintf ". NEAR MISS: the residual is %g, negligible against the coefficients — this is the truncated-decimal trap. Coefficients are read EXACTLY AS WRITTEN (a float literal is its exact dyadic value, so 0.3 is not 3/10), while a literal DIVISION is evaluated exactly in the rationals. If you meant an exact rational, write the division (3.0 / 10.0 IS 3/10); if the coefficient is genuinely irrational, no exact checker can certify it — build the layer with the synthesized basis (ml.derive_pg_linear), whose Schur certificate covers precisely that case"
-                    (abs (PX.Rat.toFloat (PX.Rat.sub f.Lhs f.Rhs)))
-            else ""
-        where + constantNote + nearMissNote
-
-    /// The Lie-generator twin of `failureMessage`. Same family, same near-miss
-    /// note, three differences forced by the group: the failing object is a
-    /// GENERATOR rather than a group element, the coefficients are RADICAL
-    /// VECTORS (rendered componentwise, since componentwise-zero is the
-    /// acceptance test), and the synthesized-basis escape hatch names the
-    /// O(3) formers rather than the point-group one.
-    let lieFailureMessage (funcName: string) (gn: string) (f: LD.LieFailure) : string =
-        let where =
-            sprintf "function '%s': the body IS a polynomial, and it is not %s-equivariant. The identity Df(x)(A x) = A f(x) fails at Lie generator %s, in output component %d, at the term %s: the left side has coefficient %s, the right side %s"
-                funcName gn f.Generator f.Component f.Monomial (LD.Radical.render f.Lhs) (LD.Radical.render f.Rhs)
-        let residualNote =
-            sprintf ". The residual's nonzero radical components: %s (acceptance is componentwise zero over the rationals — every generator entry is q*sqrt(n), and no product of two irrationals ever occurs, so this is exact)"
-                (LD.Radical.render (LD.Radical.sub f.Lhs f.Rhs))
-        let constantNote =
-            if f.RepDegree = 0 then
-                ". That term is a CONSTANT: a constant summand of an equivariant map must be fixed by the whole group, i.e. supported on (l = 0, even) cells. A constant in an l > 0 block breaks equivariance no matter what the rest of the body does"
-            else ""
-        let nearMissNote =
-            if f.NearMiss then
-                sprintf ". NEAR MISS: the residual is %g, negligible against the coefficients - this is the truncated-decimal trap. Coefficients are read EXACTLY AS WRITTEN (a float literal is its exact dyadic value, so 0.3 is not 3/10), while a literal DIVISION is evaluated exactly in the rationals. If you meant an exact rational, write the division (3.0 / 10.0 IS 3/10); if the coefficient is genuinely irrational, no exact checker can certify it - build the layer with the synthesized basis (ml.derive_linear / ml.derive_tp / ml.derive_poly), whose Schur certificate covers precisely that case"
-                    (abs (LD.Radical.toFloat (LD.Radical.sub f.Lhs f.Rhs)))
-            else ""
-        where + residualNote + constantNote + nearMissNote
-
-    /// The π₀ half: the map commutes with every INFINITESIMAL rotation and
-    /// still fails at the inversion. That is not a coefficient slip, it is a
-    /// declared-parity error, and there are exactly two honest repairs — which
-    /// is why this message names both.
-    let inversionFailureMessage (funcName: string) (f: LD.InversionFailure) : string =
-        let par p = if p = 1 then "odd" else "even"
-        sprintf "function '%s': the body commutes with every generator of so(3), so it IS SO(3)-equivariant - but it is not O3-equivariant. The inversion identity f(-x) = rho(-I) f(x) fails in output component %d, at the term %s: that monomial is %s under -I (its rep factors contribute %d odd parities, so it picks up (-1)^%d) while the declared output component is %s. Under equiv(O3) the component group is the whole remaining obligation: either declare the parities that make the map a genuine O(3) map (a product of an odd number of odd factors is a pseudo-quantity - the triple product u.(v x w) of three vectors is an (l = 0, ODD) pseudoscalar, not a scalar), or weaken the certificate to `where ml.equiv(SO3)`, under which this body passes as written"
-            funcName f.Component f.Monomial (par f.MonoParity) f.ParitySum f.ParitySum (par f.OutParity)
-
-    /// The cap note appended to the surfacing composition diagnostic.
-    let capNote (funcName: string) (why: string) : string =
-        sprintf " [the equivariance engine did not run on '%s': %s (plan-transforms-as-types section 7, stage 6 caps: degree <= %d, <= %d expanded terms); the verdict above is composition's]"
-            funcName why PX.maxRepDegree PX.maxTerms
 
 /// Judge one certified function. Empty list = certificate holds.
 ///
@@ -1418,14 +1368,14 @@ let judgeFunction (group: Group) (certs: Map<string, CertSig>) (statics: StaticE
                     match Blade.ML.PolyExtract.extract psig statics fd with
                     | Error (Blade.ML.PolyExtract.OutsideFragment _) -> [ d ]
                     | Error (Blade.ML.PolyExtract.CapBreach why) ->
-                        [ { d with Message = d.Message + Engine.capNote fd.Name why } ]
+                        [ { d with Message = d.Message + EM.capNote fd.Name why } ]
                     | Ok form ->
                         match Blade.ML.PolyExtract.discharge form actions with
                         | Ok () -> []
                         | Error (Blade.ML.PolyExtract.DischargeCap why) ->
-                            [ { d with Message = d.Message + Engine.capNote fd.Name why } ]
+                            [ { d with Message = d.Message + EM.capNote fd.Name why } ]
                         | Error (Blade.ML.PolyExtract.GeneratorCheck f) ->
-                            [ bl4008 fd.Body.Span (Engine.failureMessage fd.Name gn f) ]
+                            [ bl4008 fd.Body.Span (EM.failureMessage fd.Name gn f) ]
                 | _ -> [ d ]
             with _ -> [ d ]
         | (d :: _), (O3 | SO3) ->
@@ -1441,16 +1391,16 @@ let judgeFunction (group: Group) (certs: Map<string, CertSig>) (statics: StaticE
                     match Blade.ML.PolyExtract.extract psig statics fd with
                     | Error (Blade.ML.PolyExtract.OutsideFragment _) -> [ d ]
                     | Error (Blade.ML.PolyExtract.CapBreach why) ->
-                        [ { d with Message = d.Message + Engine.capNote fd.Name why } ]
+                        [ { d with Message = d.Message + EM.capNote fd.Name why } ]
                     | Ok form ->
                         match Blade.ML.LieDischarge.discharge form gens inv with
                         | Ok () -> []
                         | Error (Blade.ML.LieDischarge.DischargeCap why) ->
-                            [ { d with Message = d.Message + Engine.capNote fd.Name why } ]
+                            [ { d with Message = d.Message + EM.capNote fd.Name why } ]
                         | Error (Blade.ML.LieDischarge.GeneratorCheck f) ->
-                            [ bl4008 fd.Body.Span (Engine.lieFailureMessage fd.Name (groupStr cert.Group) f) ]
+                            [ bl4008 fd.Body.Span (EM.lieFailureMessage fd.Name (groupStr cert.Group) f) ]
                         | Error (Blade.ML.LieDischarge.ParityCheck f) ->
-                            [ bl4008 fd.Body.Span (Engine.inversionFailureMessage fd.Name f) ]
+                            [ bl4008 fd.Body.Span (EM.inversionFailureMessage fd.Name f) ]
                 | _ -> [ d ]
             with
             | Blade.ML.LieDischarge.LieGuardFailure _ -> reraise ()
@@ -1488,7 +1438,7 @@ let engineVerdict (certs: Map<string, CertSig>) (statics: StaticEnv) (fd: Functi
                         | Ok () -> Some (Ok ())
                         | Error (Blade.ML.PolyExtract.DischargeCap _) -> None
                         | Error (Blade.ML.PolyExtract.GeneratorCheck f) ->
-                            Some (Error (Engine.failureMessage fd.Name gn f))
+                            Some (Error (EM.failureMessage fd.Name gn f))
                 | O3 | SO3 ->
                     match Engine.o3Actions cert.Group cert with
                     | None -> None
@@ -1497,9 +1447,9 @@ let engineVerdict (certs: Map<string, CertSig>) (statics: StaticEnv) (fd: Functi
                         | Ok () -> Some (Ok ())
                         | Error (Blade.ML.LieDischarge.DischargeCap _) -> None
                         | Error (Blade.ML.LieDischarge.GeneratorCheck f) ->
-                            Some (Error (Engine.lieFailureMessage fd.Name (groupStr cert.Group) f))
+                            Some (Error (EM.lieFailureMessage fd.Name (groupStr cert.Group) f))
                         | Error (Blade.ML.LieDischarge.ParityCheck f) ->
-                            Some (Error (Engine.inversionFailureMessage fd.Name f))
+                            Some (Error (EM.inversionFailureMessage fd.Name f))
 
 // ============================================================================
 // The inference channel (stage 6a) — BL4011

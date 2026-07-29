@@ -43,6 +43,30 @@ permanently. See §7.
 
 ---
 
+## 0b. What has since been done (branch `e2-equivclose`)
+
+Everything below is the measurement as taken on 2026-07-29 and is left
+unedited. Two of §7's recommendations have since landed, and they move two
+numbers in the tables above:
+
+| Recommendation | Status | Effect on this document |
+|---|---|---|
+| C3-1 step 1 — share the engine's failure text | **done** | §0's "BL4008 `ERROR-CONTAINS` pins surviving" is now **26 of 37**, not 2; §5's per-file table is superseded for files 021, 022, 023, 025, 026, 027, which are now 3/3, 4/4, 3/3, 5/5, 6/6, 5/5. 024 stays 0/4 (its four substrings are the CAP NOTE, which is composition's verdict being surfaced and has no typed counterpart). §5's "Why the numbers are what they are" paragraph on engine pins no longer applies: `MLEquiv.Engine`'s four constructors moved to `src/ml/compiler/MLEquivMessages.fs` and `MLPolyExtractTyped` calls them, so the abbreviated internal forms are gone. |
+| C3-1 step 2 — widen `classifySignature` | **done** | Family D's abstain reason now names the failing PARAMETER and the classifier's reason. The verdict is unchanged (still ABSTAIN); `classifySignature` returns `Result<RepSigT, SigRefusal>`. |
+| C3-1 step 3 — give `TBottom` a cause | **partly** | A cause, yes; a SPAN through `statusOf`, no. The cause rides on a first-write-wins slot on `RepCtx` rather than inside the constructor, because `TBottom` is `DisciplineKit.StatusOps.Bottom` for three disciplines. Family B's 10 declines are now 7 specific causes + 3 generic (those 3 originate inside the kit, which has no cause channel). This is ANALYSIS only — no verdict moved, and the 13 composition substrings are still dead, because the causes are the walker's own vocabulary and not the seam's. |
+
+Not done, and unchanged: the span build-out (§5's 7/13 is still coincidental),
+C3-2 provenance, C3-3 the family-E decision.
+
+**Scope note.** Since this document was written the layer question has been
+SETTLED the other way: checking stays at the seam permanently, deduction and
+validation stay typed (see `docs/design-discipline-as-data.md`). §7's staged
+path is therefore no longer a route to a flip — steps 1 and 2 were done for
+their own sake (one copy of the engine's text; a specific abstain census), not
+as flip preparation.
+
+---
+
 ## 1. The structural fact that had to be established first
 
 `Blade.ML.Elaborate.expand` runs **before** `checkProgram` inside
