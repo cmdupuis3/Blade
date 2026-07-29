@@ -957,8 +957,18 @@ and private judgeApp (ctx: Ctx) (env: Map<string, RepStatus>) (e: Expr) (f: Expr
             specArg "gated spec" specE |> Result.bind (fun spec ->
                 if spec.IsEmpty || spec.Head.L <> 0 then
                     reject "gated: the first block must be scalars (L=0) — the gates are read from it"
-                elif ctx.Group = O3 && spec.Head.Parity <> 0 then
-                    reject "gated under equiv(O3): the gate block must be (l=0, even) — pseudoscalar gates flip under improper rotations, breaking O(3) equivariance (SO3 admits them)"
+                // EVERY l=0 block, not just the head: gatedDecl silus every
+                // (l=0) block in place, and silu is not sign-equivariant
+                // (silu(-s) <> -silu(s)), so ANY pseudoscalar l=0 block —
+                // gate block or not — flips under improper rotations while
+                // its gated value does not. The head-only check this
+                // replaces was a live false accept for specs with an even
+                // gate block and an odd l=0 block elsewhere; the whole-spec
+                // sweep matches the emitter's own stamp predicate
+                // (MLElaborate.o3UnlessPseudoscalar) and the sibling
+                // `scalars` arm.
+                elif ctx.Group = O3 && spec |> List.exists (fun en -> en.L = 0 && en.Parity <> 0) then
+                    reject "gated under equiv(O3): every (l=0) block is gated in place, and this spec has an (l=0, odd) block — pseudoscalar cells flip under improper rotations while silu does not, breaking O(3) equivariance (SO3 admits them)"
                 else
                     requireRep "gated input" (O3Spec spec) xE |> Result.map (fun () -> Rep (O3Spec spec)))
         | "scalars", [ specE; xE ] ->
