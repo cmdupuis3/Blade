@@ -337,10 +337,28 @@ let mkSig (ps: (string * ParamKind) list) (ret: int option) : PolySig =
 // The extractor
 // ---------------------------------------------------------------------------
 
+// ---------------------------------------------------------------------------
+// THE VALUE ALGEBRA — public, because there are two front halves
+// ---------------------------------------------------------------------------
+//
+// `Val`, `Budget`, `charge`, `chargeVec` and `binOp` below are the part of the
+// extractor that does NOT walk syntax: given two abstract values and an
+// operator, what polynomial comes out, and does it fit under the caps. Both
+// front halves need exactly this and nothing else of each other —
+// `MLPolyExtractTyped` used to restate `binOp` arm for arm, with a note saying
+// a divergence there would be a SOUNDNESS bug rather than a recall difference
+// (a wrong extraction makes the discharge certify a polynomial that is not the
+// body). It is public here so that there is one copy and the note is moot.
+//
+// The two walkers' *contexts* stay separate and different — this module's
+// carries a `StaticEnv` it needs to fold `let static` reads, the typed one has
+// no statics left to fold by typecheck — so the shared surface is keyed on a
+// bare `Budget` cell, which is the only piece of context the algebra touches.
+
 /// The extractor's abstract value. Deliberately NOT a status lattice: every
 /// case carries the actual polynomial data, because the whole point is that
 /// the verdict comes from the coefficients and not from a type.
-type private Val =
+type Val =
     | VScalar of Poly
     /// An assembled vector of scalar polynomials: a rep parameter, an array
     /// literal, or anything built from those by the array arms.
@@ -351,33 +369,100 @@ type private Val =
     /// An invariant of undecided shape: every use leaves the fragment.
     | VOpaque of string
 
-let private fuel = 100_000
+/// The term budget, shared across a whole extraction so a body cannot dodge
+/// the cap by spreading the blow-up over many components. A mutable CELL and
+/// not a field, so both front halves can hand the same budget to the shared
+/// algebra without agreeing on a context type.
+type Budget = { mutable Remaining: int }
 
-type private Ctx = {
-    Statics: StaticEnv
-    /// Remaining term budget, shared across the whole extraction (so a body
-    /// cannot dodge the cap by spreading the blow-up over many components).
-    mutable Budget: int
-}
+let mkBudget () : Budget = { Remaining = maxTerms }
+
+let private fuel = 100_000
 
 let private outside (msg: string) (span: Span) = Error (OutsideFragment (msg, span))
 
 /// Charge a freshly built polynomial against the caps. Both caps are checked
 /// here and nowhere else, so every polynomial in the normal form is known to
 /// satisfy them.
-let private charge (ctx: Ctx) (p: Poly) : Result<Poly, ExtractError> =
+///
+/// The `CapBreach` strings ARE user-visible — `MLEquiv.judgeFunction` appends
+/// them through `EquivMessages.capNote` — so they are pinned by
+/// tests/corpus/diagnostics/024.
+let charge (bud: Budget) (p: Poly) : Result<Poly, ExtractError> =
     let n = Poly.terms p
     if n > maxTerms then
         Error (CapBreach (sprintf "the expanded form exceeded the %d-term cap" maxTerms))
     elif Poly.repDegree p > maxRepDegree then
         Error (CapBreach (sprintf "the body's degree in the representation components exceeds the degree-%d cap" maxRepDegree))
     else
-        ctx.Budget <- ctx.Budget - n
-        if ctx.Budget < 0 then
+        bud.Remaining <- bud.Remaining - n
+        if bud.Remaining < 0 then
             Error (CapBreach (sprintf "the expanded form exceeded the %d-term cap" maxTerms))
         else Ok p
 
-let private constPoly (ctx: Ctx) (c: Rat) = charge ctx (Poly.ofRat c) |> Result.map VScalar
+let chargeVec (bud: Budget) (ps: Poly []) : Result<Val, ExtractError> =
+    ps
+    |> Array.fold (fun acc p -> acc |> Result.bind (fun out -> charge bud p |> Result.map (fun q -> out @ [ q ])))
+        (Ok [])
+    |> Result.map (List.toArray >> VVec)
+
+/// The binary algebra: THE rules, in one place, for both front halves.
+///
+/// Its refusal strings are `OutsideFragment`, which neither consumer ever
+/// renders (the seam falls back to composition's verdict, the typed side
+/// answers `None`), so they are phrased for whichever walker is reading a
+/// backtrace — "a nonzero constant" covers the surface's literal-or-static
+/// case and the typed side's literal-only one alike.
+let binOp (bud: Budget) (span: Span) (op: BinOp) (vl: Val) (vr: Val)
+    : Result<Val, ExtractError> =
+    let bad msg = outside msg span
+    match vl, vr with
+    | VOpaque n, _ | _, VOpaque n ->
+        bad (sprintf "the shape of invariant '%s' is not decidable from its declared type" n)
+    | VInvArr _, _ | _, VInvArr _ ->
+        bad "an invariant array has no polynomial form — read its cells at static indices"
+    | VScalar a, VScalar b ->
+        match op with
+        | OpAdd -> charge bud (Poly.add a b) |> Result.map VScalar
+        | OpSub -> charge bud (Poly.sub a b) |> Result.map VScalar
+        | OpMul -> charge bud (Poly.mul a b) |> Result.map VScalar
+        | OpDiv ->
+            // ℚ[atoms] has no inverses: the divisor must be a nonzero constant
+            // — §7's "/ by nonzero literal/static" — and THIS is where
+            // `3.0 / 10.0` becomes 3/10 exactly.
+            match Poly.asConstant b with
+            | Some c when not (Rat.isZero c) ->
+                charge bud (a |> Map.map (fun _ x -> Rat.div x c)) |> Result.map VScalar
+            | Some _ -> bad "division by zero"
+            | None -> bad "division is admitted only by a nonzero constant — an invariant atom has no inverse in the coefficient ring"
+        | _ -> bad "this operator is outside the polynomial fragment"
+    | VVec a, VVec b ->
+        if a.Length <> b.Length then
+            bad (sprintf "whole-array arithmetic needs equal shapes (%d vs %d components)" a.Length b.Length)
+        else
+            match op with
+            | OpAdd -> Array.map2 Poly.add a b |> chargeVec bud
+            | OpSub -> Array.map2 Poly.sub a b |> chargeVec bud
+            | _ -> bad "only + and - are admitted between two arrays"
+    | VScalar s, VVec v | VVec v, VScalar s ->
+        // §7's `invariant · array`: the scalar factor must be INVARIANT in the
+        // polynomial sense — rep-degree 0 — which is exactly the composition
+        // rule's `Rep s, Inv, OpMul` arm read over coefficients.
+        match op with
+        | OpMul when Poly.repDegree s = 0 -> v |> Array.map (Poly.mul s) |> chargeVec bud
+        | OpMul -> bad "scaling an array is admitted only by an INVARIANT scalar (rep-degree 0)"
+        | _ -> bad "only invariant scaling is admitted between a scalar and an array"
+
+// ---------------------------------------------------------------------------
+// The surface walk
+// ---------------------------------------------------------------------------
+
+type private Ctx = {
+    Statics: StaticEnv
+    Bud: Budget
+}
+
+let private constPoly (ctx: Ctx) (c: Rat) = charge ctx.Bud (Poly.ofRat c) |> Result.map VScalar
 
 /// A static index expression: an int literal or anything the SHIPPED static
 /// evaluator folds to an int (the `let static` machinery MLEquiv reads with).
@@ -414,12 +499,12 @@ let rec private extractVal (ctx: Ctx) (env: Map<string, Val>) (e: Expr) : Result
             | VScalar p -> Ok (VScalar (Poly.neg p))
             | VVec ps -> Ok (VVec (ps |> Array.map Poly.neg))
             | VInvArr _ -> outside "an invariant array has no polynomial form — read its cells at static indices" e.Span
-            | VOpaque n -> outside (sprintf "the shape of invariant '%s' is not decidable from its annotation" n) e.Span)
+            | VOpaque n -> outside (sprintf "the shape of invariant '%s' is not decidable from its declared type" n) e.Span)
     | ExprKind.ExprUnaryOp _ -> outside "this unary operator is outside the polynomial fragment" e.Span
     | ExprKind.ExprBinOp (Elementwise, op, l, r) ->
         extractVal ctx env l |> Result.bind (fun vl ->
         extractVal ctx env r |> Result.bind (fun vr ->
-            extractBinOp ctx e.Span op vl vr))
+            binOp ctx.Bud e.Span op vl vr))
     | ExprKind.ExprBinOp _ -> outside "outer-product operators are outside the polynomial fragment" e.Span
     | ExprKind.ExprArrayLit es ->
         // THE ARM MLEquiv REFUSES (see the header): an array literal of scalar
@@ -467,60 +552,14 @@ let rec private extractVal (ctx: Ctx) (env: Map<string, Val>) (e: Expr) : Result
                 | None -> outside (sprintf "indexing '%s' needs a static offset" n) e.Span
             | Some (VInvArr name) ->
                 match staticIndex ctx idxE with
-                | Some i -> charge ctx (Poly.ofMono (Mono.invAtom { Name = name; Index = Some i })) |> Result.map VScalar
+                | Some i -> charge ctx.Bud (Poly.ofMono (Mono.invAtom { Name = name; Index = Some i })) |> Result.map VScalar
                 | None -> outside (sprintf "indexing the invariant '%s' needs a static offset" name) e.Span
             | Some (VScalar _) -> outside (sprintf "'%s' is a scalar, not an array" n) e.Span
             | Some (VOpaque name) ->
-                outside (sprintf "the shape of invariant '%s' is not decidable from its annotation" name) e.Span
+                outside (sprintf "the shape of invariant '%s' is not decidable from its declared type" name) e.Span
             | None -> outside (sprintf "call to '%s': calls are outside the v1 polynomial fragment" n) e.Span
         | _ -> outside "calls are outside the v1 polynomial fragment" e.Span
     | _ -> outside "this expression is outside the v1 polynomial fragment" e.Span
-
-and private extractBinOp (ctx: Ctx) (span: Span) (op: BinOp) (vl: Val) (vr: Val)
-    : Result<Val, ExtractError> =
-    let bad msg = outside msg span
-    match vl, vr with
-    | VOpaque n, _ | _, VOpaque n ->
-        bad (sprintf "the shape of invariant '%s' is not decidable from its annotation" n)
-    | VInvArr _, _ | _, VInvArr _ ->
-        bad "an invariant array has no polynomial form — read its cells at static indices"
-    | VScalar a, VScalar b ->
-        match op with
-        | OpAdd -> charge ctx (Poly.add a b) |> Result.map VScalar
-        | OpSub -> charge ctx (Poly.sub a b) |> Result.map VScalar
-        | OpMul -> charge ctx (Poly.mul a b) |> Result.map VScalar
-        | OpDiv ->
-            // ℚ[atoms] has no inverses: the divisor must be a nonzero constant
-            // — §7's "/ by nonzero literal/static" — and THIS is where
-            // `3.0 / 10.0` becomes 3/10 exactly.
-            match Poly.asConstant b with
-            | Some c when not (Rat.isZero c) ->
-                charge ctx (a |> Map.map (fun _ x -> Rat.div x c)) |> Result.map VScalar
-            | Some _ -> bad "division by zero"
-            | None -> bad "division is admitted only by a nonzero literal or static constant — an invariant atom has no inverse in the coefficient ring"
-        | _ -> bad "this operator is outside the polynomial fragment"
-    | VVec a, VVec b ->
-        if a.Length <> b.Length then
-            bad (sprintf "whole-array arithmetic needs equal shapes (%d vs %d components)" a.Length b.Length)
-        else
-            match op with
-            | OpAdd -> Array.map2 Poly.add a b |> chargeVec ctx
-            | OpSub -> Array.map2 Poly.sub a b |> chargeVec ctx
-            | _ -> bad "only + and - are admitted between two arrays"
-    | VScalar s, VVec v | VVec v, VScalar s ->
-        // §7's `invariant · array`: the scalar factor must be INVARIANT in the
-        // polynomial sense — rep-degree 0 — which is exactly the composition
-        // rule's `Rep s, Inv, OpMul` arm read over coefficients.
-        match op with
-        | OpMul when Poly.repDegree s = 0 -> v |> Array.map (Poly.mul s) |> chargeVec ctx
-        | OpMul -> bad "scaling an array is admitted only by an INVARIANT scalar (rep-degree 0)"
-        | _ -> bad "only invariant scaling is admitted between a scalar and an array"
-
-and private chargeVec (ctx: Ctx) (ps: Poly []) : Result<Val, ExtractError> =
-    ps
-    |> Array.fold (fun acc p -> acc |> Result.bind (fun out -> charge ctx p |> Result.map (fun q -> out @ [ q ])))
-        (Ok [])
-    |> Result.map (List.toArray >> VVec)
 
 /// The extracted normal form: one polynomial per output component.
 type PolyForm = { Components: Poly [] }
@@ -528,7 +567,7 @@ type PolyForm = { Components: Poly [] }
 /// Extract a function body to its polynomial normal form under a classified
 /// signature. Total: every refusal is an `ExtractError`, never an exception.
 let extract (psig: PolySig) (statics: StaticEnv) (fd: FunctionDecl) : Result<PolyForm, ExtractError> =
-    let ctx = { Statics = statics; Budget = maxTerms }
+    let ctx = { Statics = statics; Bud = mkBudget () }
     let env =
         psig.Params
         |> List.fold (fun acc (name, kind) ->
