@@ -1,10 +1,35 @@
-/// The DISCIPLINE KIT — the generic half of an equivariance-family judgment.
+/// The DISCIPLINE KIT — a LIBRARY for equivariance-family judgments.
 ///
 /// Stage 0 of docs/design-discipline-as-data.md. That document's finding, in
 /// one line: the WALKER abstracts across equiv / galilean / perm and the RULES
 /// do not, because the three actions are different algebraic structures (a
 /// linear rep, an affine shift, a permutation matrix) whose arithmetic rules
 /// have opposite polarity at nearly every arm.
+///
+/// ----------------------------------------------------------------------------
+/// THIS IS A LIBRARY, NOT A FRAMEWORK
+/// ----------------------------------------------------------------------------
+/// Blade has THREE equivariance disciplines and THREE claim vocabularies
+/// (`ml.equiv(G)`, `ml.galilean(u, ..)`, `ml.perm_equiv(N)`), and by decision
+/// of 2026-07-29 it is not trying to house them under one abstraction. Nothing
+/// here is mandatory. A discipline MAY call `structuralArm` for the generic
+/// walk; a discipline whose walk genuinely differs — perm v2's per-axis status
+/// vectors are the live example, since they change the walk's SHAPE and not
+/// just its verdicts — should write its own and call only the helpers it wants.
+/// Bending this file to accommodate such a discipline would recreate the
+/// framework that decision removed.
+///
+/// WHAT IS ACTUALLY WORTH CALLING is the anti-drift core, because the three
+/// SEAM walkers drifted in exactly these places and every divergence the
+/// stage-5c three-way diff found was a false ACCEPT (see MLPerm.fs's catalog):
+///   * the callee guard in `TExprApp` (an Opaque/Bottom callee declines) —
+///     corpus ml-equiv/049;
+///   * JUDGING a former's sources rather than scanning names — 045, 046;
+///   * `ParamMatches` being distinct from `Join` (see its comment);
+///   * `mentionsAnyId` answering TRUE for unenumerated nodes;
+///   * the self-reference guard;
+///   * judging element-write indices in the block fold — 047, 048.
+/// A discipline that reimplements one of those is re-opening a closed bug.
 ///
 /// ----------------------------------------------------------------------------
 /// THE CRITERION FOR WHAT MAY LIVE HERE
