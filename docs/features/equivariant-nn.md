@@ -1,12 +1,15 @@
 # Blade Feature Module: Equivariance and Equivariant Neural Networks
 
-Status: **near-term** — design specification complete (`blade_ml_spec_v10.md`,
-Draft 0.3), implementation upcoming. This module doc is the canonical home for
-(a) the **core-language equivariance hook** (formerly formalism v10 §8 and
-§4.15.4 — moved out of the core formalism because it is annotation-layer, not
-core semantics), and (b) the **equivariant ML library** built on it. Detailed
-construct listings remain in `blade_ml_spec_v10.md`; this doc states the
-semantics and the contract.
+Status: **mixed, and the mix matters** — Part II (the equivariant ML
+library) is substantially LANDED, well past "implementation upcoming"; Part
+I's original core-language hook (§1-4) is SUPERSEDED by a later design
+decision and is kept only for the historical record. Read the status note
+just below before anything else in this doc. This module doc
+remains the canonical home for (a) the **core-language equivariance hook**
+(formerly formalism v10 §8 and §4.15.4 — moved out of the core formalism
+because it is annotation-layer, not core semantics), and (b) the
+**equivariant ML library** built on it. Detailed construct listings remain
+in `blade_ml_spec_v10.md`; this doc states the semantics and the contract.
 
 Blade has two orthogonal symmetry systems:
 
@@ -15,13 +18,114 @@ Blade has two orthogonal symmetry systems:
 | Index types (`SymIdx`, `AntisymIdx`, ...) | Discrete permutations (Sₙ) | Storage layout + iteration | Real speedups |
 | Equivariance annotations (this module) | Continuous groups (SO(3), SE(3), O(3), ...) | Type checking only | Zero runtime cost |
 
-They compose: a stress tensor is `Array<Float like SymIdx<2, 3>> with
-equiv(SO<3>, L2_even)` — triangular storage from the index type, `σ' = RσRᵀ`
-transformation checking from the annotation.
+They compose: a stress tensor is stored as `Array<Float like SymIdx<2,
+IrrepsIdx<spec>>>` — triangular storage from the index type — and a function
+producing or consuming it under `σ' = RσRᵀ` is checked against that claim by
+a `where ml.equiv(SO3)` pin on its SIGNATURE, not a value-level annotation on
+the tensor itself. (This updates the original design's
+`with equiv(SO<3>, L2_even)` sketch below to the shipped spelling — see the
+status note.)
+
+---
+
+## Status note (2026-07-28) — read this first
+
+This doc predates most of what actually shipped. In place of Part I's §1-4
+design (a value-level `with equiv(G, rep)` annotation checked per-expression
+by the unifier, with `EquivIdx<n, G, ρ>` as the index-level carrier of the
+same rep data), the shipped surface is:
+
+- **Rep DATA lives in index types, not value-level annotations, and unifies
+  like any other type.** `IrrepsIdx<spec>` (§6 below, landed) carries an
+  O(3) irrep spec GROUP-LESSLY; `PgIrrepsIdx<GROUP, spec>` is the finite
+  point-group sibling (`C4`, `D4` shipped as the first roster members). This
+  much of §4's original thesis held up — it is the CLAIM that moved.
+- **The CLAIM — "this function is equivariant" — is a deduced-then-pinned
+  SIGNATURE ATTRIBUTE, checked by elaboration-seam walkers, not a
+  per-expression unifier judgment.** `where ml.equiv(G)` (O(3), SO(3), and
+  now point groups) and `where ml.galilean(u, ...)` (Galilean boosts) are
+  the pin spellings, checked by `MLEquiv.fs` / `MLGalilean.fs` at the
+  `MLElaborate` pass-1/pass-2 seam — the same lattice-plus-pins shape as
+  `comm`/`antisymm`, not the full per-expression refinement Part I sketched.
+  The precise framing is that a pin is a **POLYMORPHISM LICENSE**: `comm` on
+  a kernel licenses viewing one function at two signatures (`Idx<M> ->
+  Idx<N> -> T` and `SymIdx<2,M> -> SymIdx<2,N> -> T` are the same function;
+  the pin permits the compact retyping), and `where ml.equiv(G)` licenses
+  the analogous thing for representation-typed signatures. See
+  [plan-equivariance-in-types.md](../plan-equivariance-in-types.md) §0 for
+  the refinement in full.
+- **Deduction proposes what the checker would accept.** Uncertified
+  functions get speculative `where ml.equiv(G)` / `where ml.galilean(...)`
+  suggestions on the BL4011 / BL4014 warning channels, plus structured
+  `deduced[]` entries in `ide check --json` (`kind` "equiv" | "galilean").
+  Generator-based (Lie-algebra) discharge now backs hand-written bodies
+  that composition-only checking used to reject; synthesized `ml.derive_*`
+  functions carry their equivariance certificate BY CONSTRUCTION (Schur
+  bases), so they satisfy a pin with no proof search at all.
+- **Synthesis, not hand-derivation, is the primary user surface for §2's
+  inference table.** `ml.derive_linear` (degree 1), the compacted
+  `ml.derive_sym_tp` / `ml.derive_alt_tp` (bilinear self-products), and
+  `ml.derive_poly<k>` (degree-k homogeneous polynomials, k ≤ 4, with k = 1
+  degenerating exactly to `derive_linear`) each emit the complete Schur
+  basis of the admissible hypothesis space as ordinary Blade source — the
+  parameter count is a theorem, not a guess. `ml.derive_perm_linear` is the
+  Sₙ (index-action, not representation-action) sibling; `ml.derive_pg_linear`
+  is the point-group sibling.
+- Two plan documents carry the authoritative detail this note summarizes:
+  [plan-transforms-as-types.md](../plan-transforms-as-types.md) (the
+  synthesis/certification mechanism — landed through its stage 6c,
+  generator-based deduction, as of 2026-07-27) and
+  [plan-equivariance-in-types.md](../plan-equivariance-in-types.md) (the
+  follow-on round moving the *deduction* lattice itself from the
+  elaboration seam to typecheck-time, without changing what a user writes;
+  phases A+B IN PROGRESS as of 2026-07-28 — see its §6 for the post-A+B API
+  sketch).
+
+Read Part I §1-4 below as **archival**: it records the design that was
+superseded, not the shipped surface. Part II (§5 onward) mixes landed
+material (§5-§8, §11, §11b — each dated inline) with open items (§12); read
+each section's own status markers, some of which this pass also updated.
 
 ---
 
 ## Part I — Core-language hook (annotation + inference framework)
+
+> **SUPERSEDED (2026-07-28).** Everything in §1-4 below — the value-level
+> `with equiv(G, rep)` annotation, checked per-expression by the unifier,
+> with `EquivIdx<n, G, ρ>` as the index-level carrier of the same rep data —
+> was never built, and a 2026-07-28 review decision explicitly closed the
+> door on building it as written. Kept for the record; nothing here is
+> current surface.
+>
+> **The adopted factoring, in one paragraph.** Rep DATA — which group acts
+> on an axis, in which representation — belongs in the type and is unified
+> and propagated by the type checker; this much §4 got right, and it
+> shipped as `IrrepsIdx<spec>` / `PgIrrepsIdx<G,spec>`. Rep CLAIM — "this
+> function is equivariant" — did NOT become a per-expression unifier
+> constraint. It is a deduced-then-pinned SIGNATURE ATTRIBUTE, exactly the
+> shape `comm`/`antisymm` already use: a lattice walker proposes it, a
+> `where ml.equiv(G)` clause pins it. The sharper name for this, settled at
+> review, is a **POLYMORPHISM LICENSE**: a pin licenses a TYPE
+> TRANSFORMATION on one underlying function, the way `comm` on a kernel
+> licenses viewing `... -> Idx<M> -> Idx<N> -> T` and
+> `... -> SymIdx<2,M> -> SymIdx<2,N> -> T` as two signatures of the SAME
+> function rather than two functions. Post-restriction (see
+> plan-equivariance-in-types.md stage A3), an `ml.equiv(O3)` claim is meant
+> to license viewing the function at restricted subgroup types the same
+> way. So the claim lives in the signature — it gates call-site discharge
+> and is part of the type in the broad sense — but it is not solved
+> per-expression by the unifier the way `EquivIdx` propagation through
+> `+`/`cross`/`⊗` would have required. Folding the claim into every
+> expression's type, as §1-§4 do, would have entangled subsumption and
+> variance with the solver and bloated every diagnostic; the
+> lattice-plus-pins pattern had already shipped three times (rank,
+> symmetry, arity) before equivariance became its fourth instance instead
+> of a bespoke fifth mechanism.
+>
+> Full detail: [plan-transforms-as-types.md](../plan-transforms-as-types.md)
+> §3.5 (the deduction lattice as the continuous twin of `Deduce.fs`) and
+> [plan-equivariance-in-types.md](../plan-equivariance-in-types.md) §0 (the
+> polymorphism-license refinement, review-confirmed 2026-07-28).
 
 The core language provides the annotation mechanism and inference framework
 only; group-specific rules (which representations exist, what `cross` returns)
@@ -330,6 +434,11 @@ From ml-spec §13 plus module-level gaps:
 3. GPU fused-kernel codegen for tensor products
 4. Sparse tensor products (compile-time path pruning from weight structure)
 5. Memory layout choice: block-contiguous vs m-contiguous per operation
-6. `poly(...)` × equivariance (arity-polymorphic equivariant kernels)
+6. ~~`poly(...)` × equivariance (arity-polymorphic equivariant kernels)~~ —
+   **CLOSED for the multilinear fragment** (plan-transforms-as-types.md
+   §3.4): `poly(...) + comm + identity group over IrrepsIdx-typed arrays =
+   derive_poly<k>` — the arity-polymorphic surface and the symmetric power
+   are the same object seen from the value side and the type side. No claim
+   is made for a non-multilinear comm kernel (e.g. `max(a,b)`).
 7. User-defined representations beyond built-in L0..Ln
 8. Automatic CG path enumeration
