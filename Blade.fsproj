@@ -27,6 +27,10 @@
     <Compile Include="src/TypedAst.fs" />
     <Compile Include="src/Deduce.fs" />
     <Compile Include="src/DeduceRep.fs" />
+    <!-- DESIGN SKELETON ONLY (docs/design-discipline-as-data.md). Types and one
+         generic walker fragment; nothing calls it, no behaviour is wired in.
+         Same dependency set as DeduceRep, so it sits immediately after it. -->
+    <Compile Include="src/DisciplineKit.fs" />
     <Compile Include="src/StaticEval.fs" />
     <!-- Constrained records as index types — the SEMANTIC half: the static
          and index-eligibility fences, and the ENUMERATION reading of a
