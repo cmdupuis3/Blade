@@ -889,6 +889,21 @@ let runGalLayerCensusTests () : BlockResult =
     handlerProbe "(c) seam silent, registry handler alone: galilean(u)"
         "function ok(u: Float, v: Float) where __ml_galilean(u) -> Float = u - v\nlet b = ok(3.0, 1.0)\n"
 
+    // (d) THE ONE REJECTION FAMILY THE CORPUS DOES NOT EXERCISE — equiv's
+    //     family C, "the ml vocabulary is gone by typecheck", in galilean's
+    //     lattice. `MLGalilean.judgeApp:377-380` refuses a boost-variant
+    //     argument to any surface `ml.*` op; by typecheck that call has been
+    //     rewritten into a generated `__ml_N` function. No corpus reject-probe
+    //     covers this, so the census would otherwise be blind to it. Written
+    //     out here so the layer decision is not taken on an unmeasured family.
+    probe "(d) a boost-variant value into an ml.* op"
+        ("import ml as ml\nlet static SH1 = ml.sh_spec(1)\n"
+         + "function bad(u: Array<Float like Idx<3>>) where ml.galilean(u) -> Float = {\n"
+         + "    let sh = ml.y_to(1, u(0), u(1), u(2))\n"
+         + "    let n = ml.norms(SH1, sh)\n"
+         + "    n(1)\n}\n"
+         + "let b = bad([1.0, 2.0, 3.0])\n")
+
     // ------------------------------------------------------------------
     printSubHeader "Census: corpus sweep"
 
