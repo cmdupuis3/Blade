@@ -50,6 +50,56 @@ let runDiagnosticsCoreTests () : BlockResult =
     check "every registry entry survives into the lookup Map"
         (codes.Length = Map.count Codes.registry)
         (sprintf "%d entries, %d map keys" codes.Length (Map.count Codes.registry))
+
+    // -- banding ------------------------------------------------------------
+    // The band digit IS the phase: BL0xxx lex, BL1xxx parse, ... BL9xxx
+    // internal. The expected mapping is written out HERE rather than read back
+    // from Diagnostics.fs, so this is a real cross-check of phaseOfCode (and
+    // of every code's placement) rather than a restatement of the source.
+    let expectedPhase (code: string) : Phase option =
+        match code.[2] with
+        | '0' -> Some PhLex
+        | '1' -> Some PhParse
+        | '2' -> Some PhResolve
+        | '3' -> Some PhTypes
+        | '4' -> Some PhConstraints
+        | '5' ->
+            // The elaborator band carries a per-code stage name.
+            match code with
+            | "BL5000" -> Some (PhElaborate "ml")
+            | "BL5100" -> Some (PhElaborate "ppl")
+            | "BL5200" -> Some (PhElaborate "math")
+            | "BL5300" -> Some (PhElaborate "rand")
+            | "BL5400" -> Some (PhElaborate "spectra")
+            | "BL5500" -> Some (PhElaborate "grad")
+            | "BL5600" -> Some (PhElaborate "sgs")
+            | _ -> None      // an unlisted BL5xxx is a banding gap, not a pass
+        | '6' -> Some PhIRValidate
+        | '7' -> Some PhBackend
+        | '8' -> Some PhRuntime
+        | '9' -> Some PhInternal
+        | _ -> None
+    let bandMisfits =
+        codes |> List.filter (fun c ->
+            match expectedPhase c with
+            | Some want -> Codes.phaseOfCode c <> want
+            | None -> true)
+    check "registry codes are banded (phaseOfCode agrees with the band digit for every code)"
+        (List.isEmpty bandMisfits)
+        (if List.isEmpty bandMisfits then sprintf "%d codes across 10 bands" codes.Length
+         else bandMisfits
+              |> List.map (fun c -> sprintf "%s -> %A" c (Codes.phaseOfCode c))
+              |> String.concat ", ")
+    // Bands stay CONTIGUOUS in the source list: all codes are 6 chars, so
+    // ascending string order is ascending numeric order. A new code appended at
+    // the end of the file instead of inside its band breaks this.
+    check "registry entries are listed in ascending code order (bands contiguous)"
+        (codes = List.sort codes)
+        (let firstBreak =
+            codes |> List.pairwise |> List.tryFind (fun (a, b) -> a >= b)
+         match firstBreak with
+         | Some (a, b) -> sprintf "out of order at %s -> %s" a b
+         | None -> "ascending")
     check "elaborator codes registered"
         ([ "ml"; "ppl"; "math"; "rand"; "spectra"; "grad" ]
          |> List.forall (fun s -> Codes.isRegistered (Codes.elaboratorCode s)))
@@ -122,10 +172,16 @@ let runDiagnosticsCoreTests () : BlockResult =
         ((Render.render false (Some sm) d7).Contains "let b")
         ""
     // Multi-line span underlines from start col to end of the first line.
+    // Line 2 is `let b = zz + 1` (14 cols) and the span starts at col 9, so the
+    // underline is cols 9..14 = EXACTLY 6 carets. The anchored form (8 leading
+    // spaces, matching the col-9 start, then the carets) is what pins that:
+    // a bare `.Contains "^^^^^^"` passes for any run of 6 or more, i.e. for an
+    // off-by-one or an unclamped span that ran past the line.
     let d8 = mkError "BL2001" PhResolve (span (Some "a.blade") 2 9 3 4) "multi"
-    check "render: multi-line span underlines to end of first line"
-        ((Render.render false (Some sm) d8).Contains "^^^^^^")
-        (sprintf "got:\n%s" (Render.render false (Some sm) d8))
+    let rendered8 = Render.render false (Some sm) d8
+    check "render: multi-line span underlines to end of first line (exactly 6 carets at col 9)"
+        (rendered8.Split '\n' |> Array.exists (fun l -> l.EndsWith "        ^^^^^^"))
+        (sprintf "got:\n%s" rendered8)
 
     // -- severities --------------------------------------------------------
     let dw = { d4 with Severity = SevWarning }

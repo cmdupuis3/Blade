@@ -406,42 +406,71 @@ let test_probe_in_let_value = {
         (actual, expected)
 }
 
+/// The callee shared by the two cross-procedural tests below:
+///
+///   f(arr, x) = contains(arr, x) + g_55
+///
+/// The `+ IRVar(55)` matters. VarId 55 is NOT one of f's parameters, so the
+/// substitution map (arr→actual, x→actual) leaves it alone and it reaches the
+/// caller's FreeVars *only* if the walker actually descended into the body.
+/// A body made purely of parameter references cannot distinguish "walked and
+/// substituted" from "never walked": both yield exactly the args' own free
+/// vars, which the IRApp arm's baseAttrs already contributes. (That was the
+/// old shape of this test — it asserted the walker's output to be identical
+/// to no-walker-at-all.)
+let private crossProcCallee : IRCallable =
+    let arrP : IRParam = { Name = "arr"; Type = intTy; Index = 0; VarId = 77 }
+    let xP   : IRParam = { Name = "x";   Type = intTy; Index = 1; VarId = 78 }
+    let fBody =
+        IRBinOp (IRElementwise, IRAdd,
+            IRContains (IRVar (77, intTy), IRVar (78, intTy)),
+            IRVar (55, intTy))
+    { Id = 99; Name = "f"
+      Params = [arrP; xP]; RetType = boolTy; Body = fBody
+      IsStatic = false
+      IsCommutative = false; CommGroups = []; AntisymGroups = []
+      Parallelism = []; IsOmpParallel = false; IsCudaKernel = false; CudaBlockSize = 256; IsMpiParallel = false; IsArityPoly = false; ArityParam = None
+      Captures = [] }
+
+/// The call site both tests evaluate: `f(B_1, x_2)`.
+let private crossProcCallSite : IRExpr =
+    IRApp (IRVar (99, intTy), [IRVar (1, intTy); IRVar (2, intTy)], intTy)
+
 let test_probe_imported_via_callable_table = {
     Name = "Probe: cross-procedural propagation via unified callable walker"
     Run = fun () ->
-        // Simulate a callable `f(arr, x) = contains(arr, x)` registered
-        // in the CallablesTable. The caller expression is `f(B_1, x_2)`.
-        // The walker should descend into f's body with arr→B_1, x→x_2
-        // substitution applied, see the IRContains, and surface a probe
-        // whose BuildOn is IRVar(B_1).
-        let f_id = 99
-        let arrP : IRParam = { Name = "arr"; Type = intTy; Index = 0; VarId = 77 }
-        let xP   : IRParam = { Name = "x";   Type = intTy; Index = 1; VarId = 78 }
-        // f's body: contains(arr, x)
-        let fBody = IRContains (IRVar (77, intTy), IRVar (78, intTy))
-        // Register f in the callables table as a full IRCallable
-        // (the table now stores full callables, not just (params, body)).
-        let fCallable : IRCallable = {
-            Id = f_id; Name = "f"
-            Params = [arrP; xP]; RetType = boolTy; Body = fBody
-            IsStatic = false
-            IsCommutative = false; CommGroups = []; AntisymGroups = []
-            Parallelism = []; IsOmpParallel = false; IsCudaKernel = false; CudaBlockSize = 256; IsMpiParallel = false; IsArityPoly = false; ArityParam = None
-            Captures = []
-        }
-        let callables : CallablesTable =
-            Map.ofList [(f_id, fCallable)]
+        // A callable `f(arr, x) = contains(arr, x) + g_55` registered in the
+        // CallablesTable; the caller expression is `f(B_1, x_2)`. The walker
+        // descends into f's body with arr→B_1, x→x_2 applied, sees the
+        // IRContains, and surfaces a probe whose BuildOn is IRVar(B_1).
+        let callables : CallablesTable = Map.ofList [(99, crossProcCallee)]
         let prev = setCallablesContext callables
         try
-            // Call site: f(B_1, x_2)
-            let arrB = IRVar (1, intTy)
-            let e = IRApp (IRVar (f_id, intTy), [arrB; IRVar (2, intTy)], intTy)
-            let actual = exprAttrs e
-            // FreeVars at the IRApp arm: {99 (the function ref), 1, 2}.
-            // Plus, after walking f's body with substitution: the IRVar(77)
-            // becomes IRVar(1), so still {1}. IRVar(78) becomes IRVar(2),
-            // so still {2}. Net: {99, 1, 2}.
+            let actual = exprAttrs crossProcCallSite
+            // FreeVars at the IRApp arm (baseAttrs): {99 (the function ref),
+            // 1, 2}. From the walked body: IRVar(77) is substituted to
+            // IRVar(1) and IRVar(78) to IRVar(2) (contributing nothing new,
+            // which is the substitution working), and the NON-parameter
+            // IRVar(55) survives — so the walk adds exactly {55}.
             // Probes: one probe with BuildOn = IRVar(1) (after substitution).
+            let expected = mkAttrs [99; 1; 2; 55] [] true
+            (actual, expected)
+        finally
+            restoreAnalysisContext prev
+}
+
+let test_no_probe_import_without_callable_table = {
+    Name = "Probe: same call site under an EMPTY callables table does NOT import the body"
+    Run = fun () ->
+        // The paired negative of the test above, over the identical IRApp.
+        // With nothing resolvable in the table the IRApp arm returns
+        // baseAttrs alone, so the callee's non-parameter free var 55 must be
+        // ABSENT. Together the pair pins both halves of the walker: that it
+        // walks (55 appears above) and that it substitutes (77/78 never
+        // appear, in either direction).
+        let prev = setCallablesContext Map.empty
+        try
+            let actual = exprAttrs crossProcCallSite
             let expected = mkAttrs [99; 1; 2] [] true
             (actual, expected)
         finally
@@ -477,8 +506,10 @@ let allAttrsTests : AttrsTest list = [
     test_probe_in_if
     test_multiple_probes_in_one_predicate
     test_probe_in_let_value
-    // Phase C unified walker: cross-procedural propagation via CallablesTable
+    // Phase C unified walker: cross-procedural propagation via CallablesTable.
+    // The pair is load-bearing — see crossProcCallee's comment.
     test_probe_imported_via_callable_table
+    test_no_probe_import_without_callable_table
 ]
 
 /// Pretty-print an ExprAttrs for diffing. The sets are printed sorted so

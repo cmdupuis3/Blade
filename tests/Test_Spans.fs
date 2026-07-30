@@ -107,41 +107,85 @@ let runSpanTests () : BlockResult =
     // -- `let static` assertion: fold or fail loudly ----------------------
     // A static whose RHS needs a runtime value is a compile error at the
     // static decl's own line, with the assertion wording.
-    let firstErr (src: string) : (int * string) option =
+    //
+    // A PARSE failure is reported as an error in its own right, NOT as None:
+    // mapping it to None makes it indistinguishable from "type-checked
+    // clean", which is what the two `= None` assertions below assert. With
+    // the old mapping, a source that stopped parsing passed them silently.
+    let allErrs (src: string) : (int * int * string) list =
         match Parser.parseProgram src with
-        | Error _ -> None
+        | Error e -> [ (e.Line, e.Col, "PARSE ERROR: " + e.Message) ]
         | Ok program ->
             match TypeCheck.typeCheck program with
-            | Error (e :: _) -> Some (e.Span.StartLine, TypeEnv.formatTypeError e.Error)
-            | _ -> None
+            | Error es ->
+                es |> List.map (fun e ->
+                    (e.Span.StartLine, e.Span.StartCol, TypeEnv.formatTypeError e.Error))
+            | Ok _ -> []
     let assertSrc =
         "let runtime_v = 41\n" +
         "\n" +
         "let static bad = runtime_v + 1\n" +
         "let r = bad\n"
-    check "static assertion: unfoldable `let static` errors at its line"
-        (match firstErr assertSrc with
-         | Some (3, msg) -> msg.Contains "does not evaluate at compile time"
+    // Evaluate ONCE. Two in-process evaluations of the same source disagree on
+    // the reported line (3 then 4), so calling it twice — once in the
+    // assertion, once in the printed detail — made the failure detail
+    // contradict the assertion it was explaining.
+    //
+    // The COLUMN is deliberately not asserted, and that is a bug being worked
+    // around, not a gap in the test. The correct span for this error is the
+    // static decl's own span, 3:1-3:31 (`f.Span`, threaded from
+    // StaticEval.StaticFailure through checkModule's `locateError f.Span`); a
+    // fresh process reports exactly that, underlining all 30 columns of the
+    // decl. In-process the reported column is instead whatever the PREVIOUS
+    // typeCheck call in this process left in TypeEnv's AsyncLocal expression-
+    // span side-channel, because `locateError` prefers that span over the
+    // caller's (TypeEnv.fs:457-464) and the only reset — `resetCurrentStmtSpan`
+    // at `checkDecl` entry (TypeCheck.fs:9117) — has not run yet: the `let
+    // static` fold assertion is raised at the TOP of `checkModule`
+    // (TypeCheck.fs:10856-10866), before any declaration is checked, and
+    // neither `typeCheck` nor `checkModule` clears the side-channel on entry.
+    //
+    // Here that stale span is 3:13 — column 13 is where `no_such_name` starts
+    // on line 3 of `stmtSrc` above, the last source type-checked before this
+    // one (in `assertSrc` line 3, column 13 is the middle of `bad`, no token at
+    // all). The same mechanism explains the 3-then-4 divergence: the second
+    // evaluation inherits the FIRST evaluation's own last-stamped expression
+    // span, `bad` in `let r = bad` on line 4.
+    //
+    // So: line and message are asserted (the message comes from f.Names /
+    // f.Reason and is leak-immune, which is what actually identifies the
+    // failing decl), the column is not assertable through this API until the
+    // side-channel is reset at typeCheck entry. Filed separately; do NOT
+    // "fix" this by pinning 13, which is a position in a different source.
+    let assertErrs = allErrs assertSrc
+    check "static assertion: unfoldable `let static` errors on line 3, once, naming the decl"
+        (match assertErrs with
+         | [ (3, _, msg) ] ->
+             msg.Contains "does not evaluate at compile time"
+             && msg.Contains "let static bad"
+             && msg.Contains "undefined variable 'runtime_v'"
          | _ -> false)
-        (sprintf "got %A" (firstErr assertSrc))
+        (sprintf "got %A" assertErrs)
 
     // A lambda-valued static declares a function, not a foldable value —
     // exempt from the assertion.
     let lambdaSrc =
         "let static twice = lambda(x) -> x * 2.0\n" +
         "let y = twice(2.0)\n"
+    let lambdaErrs = allErrs lambdaSrc
     check "static assertion: lambda static stays legal"
-        (firstErr lambdaSrc = None)
-        (sprintf "got %A" (firstErr lambdaSrc))
+        (List.isEmpty lambdaErrs)
+        (sprintf "got %A" lambdaErrs)
 
     // A destructured static folds (leaves bound by bindPattern) — no error.
     let tupleSrc =
         "static function pr() -> (Int64, Int64) = (4, 1)\n" +
         "let static (a, b) = pr()\n" +
         "let r = a + b\n"
+    let tupleErrs = allErrs tupleSrc
     check "static assertion: destructured static folds without error"
-        (firstErr tupleSrc = None)
-        (sprintf "got %A" (firstErr tupleSrc))
+        (List.isEmpty tupleErrs)
+        (sprintf "got %A" tupleErrs)
 
     // ====================================================================
     // Stage 2: token end positions, real statement/decl span ranges,

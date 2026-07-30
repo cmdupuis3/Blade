@@ -42,6 +42,23 @@ let private describeResult = function
     | Ok _ -> "Ok"
     | Error e -> sprintf "Error: %A" e
 
+// ---- Negative-case discipline ---------------------------------------------
+// `not (isOk result)` is not an assertion about unify: TypeError has ~60
+// constructors, so ANY failure satisfies it — including one raised by a
+// completely unrelated arm (an occurs-check `Other`, a rank-bound violation, a
+// unit mismatch) or by a shape the test didn't intend to build. Each negative
+// test therefore names the constructor it expects, derived from the arm in
+// src/Unify.fs that should fire.
+
+/// True when `result` is an Error whose constructor satisfies `pred`.
+let private isErrOf (pred: TypeError -> bool) (result: TypeResult<unit>) : bool =
+    match result with
+    | Error e -> pred e
+    | Ok _ -> false
+
+let private isTypeMismatch = isErrOf (function TypeMismatch _ -> true | _ -> false)
+let private isIndexRankMismatch = isErrOf (function IndexRankMismatch _ -> true | _ -> false)
+
 // ---- Test cases -----------------------------------------------------------
 
 let private test_identical_concrete () =
@@ -100,10 +117,14 @@ let private test_differing_element_types_still_fail () =
             IRTArrow ([SVal f64], i64, None),
             Some (mkId 1))
     let result = unify subst flatF64 nestedI64
-    let pass = not (isOk result)
-    ("flat F64 result vs split I64 result fails (negative)",
+    // Both sides normalize to [SIdx] -> [SVal Float64] -> R, so the ArrayElem
+    // arm's index check passes and the failure lands in the recursive elem
+    // unification: Float64 vs Int64 with neither side an inference leaf, i.e.
+    // the concrete-scalar refusal -> TypeMismatch.
+    let pass = isTypeMismatch result
+    ("flat F64 result vs split I64 result fails with TypeMismatch (negative)",
      pass,
-     if pass then "correctly rejected" else "incorrectly accepted")
+     if pass then "correctly rejected as TypeMismatch" else describeResult result)
 
 let private test_uniform_flat_vs_nested_still_fails () =
     // Documents the §5.2 limitation: uniform-kind flat vs nested arrays
@@ -122,11 +143,15 @@ let private test_uniform_flat_vs_nested_still_fails () =
     // Today, this should fail (uniform-kind §5.2 collapse not implemented).
     // If a future B-flat lands and this starts passing, the test will fail
     // as a signal to update both this test and the unify docstring.
-    let pass = not (isOk result)
-    ("uniform flat-vs-nested still fails under ToNested (documents §5.2 gap)",
+    // Normalization leaves the uniform arrow flat, so both sides are
+    // ArrayElem with slot counts 2 and 1 -> the rank test in that arm ->
+    // TypeMismatch (NOT IndexRankMismatch, which is about a slot's COMPONENT
+    // rank, not the slot count).
+    let pass = isTypeMismatch result
+    ("uniform flat-vs-nested still fails with TypeMismatch under ToNested (documents §5.2 gap)",
      pass,
-     if pass then "rejected as expected; flip this test when B-flat lands"
-     else "unexpectedly accepted — B-flat may have landed; update docs")
+     if pass then "rejected as TypeMismatch; flip this test when B-flat lands"
+     else sprintf "expected TypeMismatch: %s — B-flat may have landed; update docs" (describeResult result))
 
 let private test_three_kind_split_arrow () =
     // [SIdx; SVal; SIdxVirt] (three groups) vs nested form
@@ -199,10 +224,13 @@ let private test_kind_mismatch_after_normalize_rejects () =
         IRTArrow ([SVal f64; SIdx (idxN 3)], f64, Some (mkId 1))
     let subst = Subst()
     let result = unify subst t1 t2
-    let pass = not (isOk result)
-    ("kind-swapped mixed-slot arrows ([SIdx,SVal] vs [SVal,SIdx]) reject after normalize",
+    // Normalized, t1's outer slot is SIdx and t2's is SVal, so neither the
+    // ArrayElem nor the FuncElem arm matches both sides; the generic IRTArrow
+    // arm (equal slot counts) hits its slot-kind mismatch case -> TypeMismatch.
+    let pass = isTypeMismatch result
+    ("kind-swapped mixed-slot arrows ([SIdx,SVal] vs [SVal,SIdx]) reject with TypeMismatch after normalize",
      pass,
-     if pass then "rejected as expected"
+     if pass then "rejected as TypeMismatch"
      else describeResult result)
 
 let private test_uniform_shape_with_infer_elem_binds () =
@@ -238,10 +266,11 @@ let private test_unrelated_types_fail () =
     // Sanity: completely unrelated types still fail.
     let subst = Subst()
     let result = unify subst f64 (IRTNamed "Trace")
-    let pass = not (isOk result)
-    ("scalar vs named type rejected (sanity)",
+    // No arm pairs a scalar with a named type -> the catch-all TypeMismatch.
+    let pass = isTypeMismatch result
+    ("scalar vs named type rejected with TypeMismatch (sanity)",
      pass,
-     if pass then "correctly rejected" else describeResult result)
+     if pass then "correctly rejected as TypeMismatch" else describeResult result)
 
 // ---- Dist<r, τ> unification (typed-Dist arc, phase 1) ----------------------
 
@@ -264,10 +293,11 @@ let private test_dist_order_mismatch_rejects () =
     let d1 = IRTDist (2, f64, [idxTagged 3 "I3"])
     let d2 = IRTDist (4, f64, [idxTagged 3 "I3"])
     let result = unify subst d1 d2
-    let pass = not (isOk result)
-    ("Dist<2> vs Dist<4> rejected (order is nominal)",
+    // The IRTDist arm's order guard (o1 <> o2) -> TypeMismatch.
+    let pass = isTypeMismatch result
+    ("Dist<2> vs Dist<4> rejected with TypeMismatch (order is nominal)",
      pass,
-     if pass then "correctly rejected" else describeResult result)
+     if pass then "correctly rejected as TypeMismatch" else describeResult result)
 
 let private test_dist_elem_infer_binds () =
     // An inference variable in elem position binds through the Dist wrapper
@@ -291,29 +321,38 @@ let private test_dist_vs_tuple_rejects () =
     // Strictness (the IRTIdxTagged discipline): a bare tuple of arrays never
     // implicitly becomes a Dist — only the construction intrinsic and
     // dist-typed operators produce one.
-    let subst = Subst()
+    //
+    // A FRESH Subst per call. `Subst` is mutable and unify binds into it as it
+    // descends, so a partial binding left behind by the first (failed) call can
+    // change what the second call resolves — one direction of a "both
+    // directions" claim silently conditioned on the other having run first.
     let d = IRTDist (2, f64, [idxTagged 3 "I3"])
     let tup = IRTTuple [ IRTArrow ([SIdx (idxTagged 3 "I3")], f64, None)
                          IRTArrow ([SIdx (idxTagged 3 "I3")], f64, None) ]
-    let r1 = unify subst d tup
-    let r2 = unify subst tup d
-    let pass = not (isOk r1) && not (isOk r2)
-    ("Dist vs bare tuple rejected in both directions (strict, no coercion)",
+    // No arm pairs IRTDist with IRTTuple -> the catch-all TypeMismatch, in
+    // both directions (there are no asymmetric Dist arms, which is the point).
+    let r1 = unify (Subst()) d tup
+    let r2 = unify (Subst()) tup d
+    let pass = isTypeMismatch r1 && isTypeMismatch r2
+    ("Dist vs bare tuple rejected with TypeMismatch in both directions (strict, no coercion)",
      pass,
      if pass then "correctly rejected" else sprintf "%s / %s" (describeResult r1) (describeResult r2))
 
 let private test_dist_axis_tag_mismatch_rejects () =
     // Axes are nominative like ArrayElem index types: lat-Dist ≠ lon-Dist
     // even at equal extents; synthetic (__) tags stay structural.
-    let subst = Subst()
+    // Fresh Subst per call — see test_dist_vs_tuple_rejects.
     let dLat = IRTDist (2, f64, [idxTagged 180 "lat"])
     let dLon = IRTDist (2, f64, [idxTagged 180 "lon"])
-    let rNamed = unify subst dLat dLon
+    // Equal order and axis count, so the failure is the axis-compatibility
+    // scan; the two ranks agree (both 1), so it is NOT IndexRankMismatch but
+    // the plain TypeMismatch arm.
+    let rNamed = unify (Subst()) dLat dLon
     let dSyn1 = IRTDist (2, f64, [idxTagged 180 "__compoundidx"])
     let dSyn2 = IRTDist (2, f64, [idxTagged 180 "__seq"])
-    let rSyn = unify subst dSyn1 dSyn2
-    let pass = not (isOk rNamed) && isOk rSyn
-    ("Dist axis tags are nominative (user names gate, synthetic tags don't)",
+    let rSyn = unify (Subst()) dSyn1 dSyn2
+    let pass = isTypeMismatch rNamed && isOk rSyn
+    ("Dist axis tags are nominative (user names gate with TypeMismatch, synthetic tags don't)",
      pass,
      sprintf "named: %s / synthetic: %s" (describeResult rNamed) (describeResult rSyn))
 
@@ -330,21 +369,26 @@ let private test_index_component_rank_gates_unification () =
     //     separate them either.
     // Codegen ranks an array by SUMMING component ranks, so accepting these
     // emits Array<double,1> where Array<double,2> is expected.
-    let subst = Subst()
+    //
+    // Fresh Subst per call (four independent unifications), and the expected
+    // error is pinned to IndexRankMismatch specifically: a plain TypeMismatch
+    // here would mean the dedicated rank diagnostic did NOT fire and the pair
+    // was rejected for some other reason, which is exactly the confusion the
+    // separate constructor exists to prevent.
     let flat6 = mkArrayArrow [idxN 6] f64 None
     let sym2x3 = mkArrayArrow [symIdxN 6 2 3] f64 None
-    let rWildcard = unify subst flat6 sym2x3
-    let rWildcardRev = unify subst sym2x3 flat6
+    let rWildcard = unify (Subst()) flat6 sym2x3
+    let rWildcardRev = unify (Subst()) sym2x3 flat6
     let sym2x4 = mkArrayArrow [symIdxN 7 2 4] f64 None
     let sym3x4 = mkArrayArrow [symIdxN 7 3 4] f64 None
-    let rSameClass = unify subst sym2x4 sym3x4
+    let rSameClass = unify (Subst()) sym2x4 sym3x4
     // The control: same rank on both sides still unifies, so the rule
     // rejects rank disagreement rather than compact groups generally.
-    let rControl = unify subst sym2x4 (mkArrayArrow [symIdxN 7 2 4] f64 None)
+    let rControl = unify (Subst()) sym2x4 (mkArrayArrow [symIdxN 7 2 4] f64 None)
     let pass =
-        not (isOk rWildcard) && not (isOk rWildcardRev)
-        && not (isOk rSameClass) && isOk rControl
-    ("index component rank gates unification (SymNone wildcard and equal symmetry class do not)",
+        isIndexRankMismatch rWildcard && isIndexRankMismatch rWildcardRev
+        && isIndexRankMismatch rSameClass && isOk rControl
+    ("index component rank gates unification with IndexRankMismatch (SymNone wildcard and equal symmetry class do not)",
      pass,
      sprintf "Idx<6> vs SymIdx<2,3>: %s / reversed: %s / SymIdx<2,4> vs SymIdx<3,4>: %s / control same-rank: %s"
              (describeResult rWildcard) (describeResult rWildcardRev)
