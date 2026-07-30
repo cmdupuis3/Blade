@@ -1,0 +1,29 @@
+// TEST: Idx Card Unbounded Field (rejects)
+// ============================================================================
+// The second v1 fence condition, and the one that separates a constrained
+// RECORD from an index TYPE. `n` is an honest `Int` field — perfectly legal on
+// an ordinary struct, and the conjunct even constrains it — but an unbounded
+// field has no box, so there is nothing to enumerate:
+//
+//   struct Unbounded, field 'n': unbounded field — an index-eligible struct
+//   needs a static min and max
+//
+// Note what is NOT accepted as a substitute for a bound: the where-conjunct
+// `n < 10` below bounds `n` from above in every sense a reader cares about,
+// and the fence still refuses. That is deliberate. Conjuncts are the FILTER
+// over the box; they are not consulted to DISCOVER the box, because doing so
+// would mean solving the constraints to find the iteration range — the exact
+// solve-don't-assert inversion the design refuses. The box comes from the
+// field bounds and only from the field bounds; the conjuncts then exclude.
+//
+// The plan does leave a door open here, as an efficiency deferral rather than
+// a semantics gap: same-record dependent bounds (`l_out: min=abs(l1-l2)`) are
+// out of the box GRAMMAR but desugar to conjuncts given absolute bounds, and
+// tightening the heads from them is deferral §8.5. index-types/152 is the
+// negative control for that boundary as it stands today.
+// ============================================================================
+static struct Unbounded {
+    n: Int
+} where n < 10
+
+let static CARD = idx_card(Unbounded)

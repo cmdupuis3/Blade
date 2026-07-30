@@ -1,0 +1,43 @@
+// TEST: ML Derive Sym TP Certified
+import ml as ml
+// ============================================================================
+// derive_sym_tp inside a `where ml.equiv(O3)` body, feeding its derived output
+// spec straight into a derived-hom ml.linear head.
+//
+// The point is the JUDGMENT, not just the numbers. MLEquiv classifies
+// derive_sym_tp exactly as it classifies derive_tp(S, S, ...): both inputs must
+// transform as IrrepsIdx<SA>, the weight buffer must be invariant, and the
+// result transforms as tp_spec(SA, SA). The S2 compaction is a property of the
+// WEIGHTS — a choice of subspace inside the same equivariant hom-space — so it
+// cannot weaken the equivariance claim, and the compiler needs no separate rule
+// for it. TPS is that derived spec bound as a `let static`, which is what lets
+// ml.linear's input spec be written down and checked against it; a mismatch
+// there would be BL4008, not a silent reshape.
+//
+// Every parameter and the return are fully annotated, as an equiv-certified
+// signature must be (docs/features/equivariant-nn.md Part I).
+//
+// hself calls the same certified function with y = x: the SYMMETRIC compaction
+// does NOT annihilate the diagonal (contrast 033's zz), so this pin is the
+// live-kernel counterpart to that vanishing one.
+// ============================================================================
+let static SA = [(0, 0, 1), (1, 1, 1)]
+let static TPS = ml.tp_spec(SA, SA)
+let static SOUT = [(0, 0, 1), (1, 1, 1)]
+let static WS = ml.sym_tp_weight_dim(SA)
+let static WL = ml.linear_weight_dim(TPS, SOUT)
+// EXPECT: WS = 7
+// EXPECT: WL = 4
+
+function head(x: Array<Float like IrrepsIdx<SA>>, y: Array<Float like IrrepsIdx<SA>>,
+              w1: Array<Float like Idx<WS>>, w2: Array<Float like Idx<WL>>)
+              where ml.equiv(O3) -> Array<Float like IrrepsIdx<SOUT>> = {
+    let t = ml.derive_sym_tp(SA, x, y, w1)
+    ml.linear(TPS, SOUT, w2, t)
+}
+
+let hout: Array<Float like IrrepsIdx<SOUT>> = head([1.0, 2.0, -0.5, 0.25], [-0.75, 0.5, 1.5, -2.0], [0.3, -0.7, 1.1, 0.9, -1.3, 0.4, 2.0], [0.5, -0.25, 1.5, 0.75])
+// EXPECT: hout = [-0.352003175473055, -2.325, 4.359375, -5.0859375]
+
+let hself: Array<Float like IrrepsIdx<SOUT>> = head([1.0, 2.0, -0.5, 0.25], [1.0, 2.0, -0.5, 0.25], [0.3, -0.7, 1.1, 0.9, -1.3, 0.4, 2.0], [0.5, -0.25, 1.5, 0.75])
+// EXPECT: hself = [2.1923672769102, 9.3, -2.325, 1.1625]

@@ -1,0 +1,54 @@
+// TEST: ML Perm Sized Invariants
+import ml as ml
+// ============================================================================
+// The accept side of the extent guard added for 075/076. Refusing everything
+// of unestablished extent would be sound and useless — the point is that an
+// extent OUTSIDE every node power is real evidence of fixedness (relabelling
+// has no action on that space at all), and the walker must still see it
+// through the same constructs 075/076 refuse.
+//
+// Each line below is one of those constructs, carrying an extent this time:
+//
+//   * a FORMER over a weight buffer — W = perm_weight_dim(1, 1, 4) = 2, and 2
+//     is not a power of 4, so the result cannot land in the node-power space
+//     either. This is the shape the "just return POpaque" fix would have
+//     broken, and it is why the guard reasons about extents rather than
+//     refusing formers.
+//   * an UNCERTIFIED CALLEE with an annotated non-power return.
+//   * a MODULE-LEVEL array, read at an offset.
+//   * a REDUCE over an invariant parameter.
+//
+// All four feed a certified DeepSets readout, so the certificate depends on
+// every one of them being accepted as invariant.
+// ============================================================================
+let static W1 = ml.perm_weight_dim(1, 1, 4)
+let static W2 = ml.perm_weight_dim(1, 0, 4)
+// EXPECT: W1 = 2
+// EXPECT: W2 = 1
+
+let g: Array<Float like Idx<3>> = [1.0, 0.5, 0.25]
+
+function third() -> Array<Float like Idx<3>> = [3.0, 2.0, 1.0]
+
+function readout(x: Array<Float like Idx<4>>, w1: Array<Float like Idx<W1>>,
+                 w2: Array<Float like Idx<W2>>)
+                 where ml.perm_equiv(4) -> Array<Float like Idx<1>> = {
+    let w1s = method_for(w1) <@> lambda(a) -> a * 2.0 |> compute
+    let t = third()
+    let s = reduce(g, (+), 0.0)
+    let h = ml.derive_perm_linear(1, 1, 4, x, w1s)
+    let hs = h * (s + t(0) + g(0))
+    ml.derive_perm_linear(1, 0, 4, hs, w2)
+}
+
+// w1s = 2*w1 = [4, -2], so h = 4*x - 2*sum(x) = 4*x - 20 = [-16, -12, -8, -4].
+// s = 1.75, t(0) = 3, g(0) = 1  ->  scale = 5.75, hs = [-92, -69, -46, -23].
+// out = w2(0) * sum(hs) = 1.5 * -230.
+let out = readout([1.0, 2.0, 3.0, 4.0], [2.0, 0.0 - 1.0], [1.5])
+// EXPECT: out = [-345]
+
+// THE CERTIFICATE, shadowed: relabel the four nodes and the invariant readout
+// does not move.
+let out_r = readout([3.0, 1.0, 4.0, 2.0], [2.0, 0.0 - 1.0], [1.5])
+let d = out(0) - out_r(0)
+// EXPECT: d = 0

@@ -1,0 +1,18 @@
+// TEST: ML Ops sym_spec Bad K (rejects)
+import ml as ml
+// ============================================================================
+// K is capped at 1..4 across the whole symmetric-power surface
+// (docs/plan-transforms-as-types.md §6.5): the polarization multinomials
+// K!/prod(m_j!) stay <= 24 there and the monomial basis stays well conditioned;
+// beyond it the degree-K parameterization is numerically meaningless, and body-
+// order expansions do not live there anyway. So the cap is refused at compile
+// time rather than silently produced.
+//
+// This file pins the SIZING-BUILTIN side (ml.sym_spec / ml.alt_spec /
+// ml.poly_weight_dim), which reports through the static-evaluation channel —
+// `let static` cannot fold, and the message names the range. The OP side
+// (ml.sym_lift(SPEC, 5, x)) carries the identical range text as an elaboration
+// failure, BL5000.
+// ============================================================================
+let static A = [(0, 0, 1), (1, 1, 1)]
+let static BAD = ml.sym_spec(A, 5)

@@ -5,6 +5,18 @@ import ml as ml
 // rotation that component mixes with its siblings. Offsets 0..1 are the
 // (l=0, even) scalars (admissible); offset 2 is the first l=1 component.
 // BL4008.
+//
+// STAGE 6c NOTE — the refusal is unchanged; the MESSAGE moved. This body is
+// inside the polynomial fragment (a bare component read IS a polynomial), so
+// since the radical-vector Lie discharger landed, the engine gets the last
+// word and proves the stronger statement: `x(2)` is not merely a
+// basis-dependent read, it is a map that provably fails Df(x)(A x) = A f(x)
+// at the very first generator. That is the designed exit — a discharge
+// failure REPLACES composition's diagnostic — and it is the only place in the
+// pre-6c corpus where the text moved (everything else reaches the engine and
+// leaves the fragment, which is silence). Composition's own raw-index wording
+// is still pinned, in the shape where the engine declines, at
+// diagnostics/015.
 // ============================================================================
 let static S = [(0, 0, 2), (1, 1, 1)]
 function bad(x: Array<Float like IrrepsIdx<S>>) where ml.equiv(O3) -> Float =

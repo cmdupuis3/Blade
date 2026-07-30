@@ -1,0 +1,167 @@
+// TEST: ML Ops derive_poly Values
+import ml as ml
+// ============================================================================
+// ml.derive_poly(SPEC, K, SOUT, x, w): the COMPLETE basis of the degree-K
+// homogeneous equivariant polynomial maps IrrepsIdx<SPEC> -> IrrepsIdx<SOUT>,
+// one weight per basis map, ml.poly_weight_dim(SPEC, K, SOUT) of them
+// (docs/plan-transforms-as-types.md §3.3b, §7 stage 2b-iii).
+//
+// ONE convention for every K in 1..4 — the Sym^K LABEL BASIS. A label is
+// (sector: which multiplicity copies of SPEC the degree is spread over; one
+// T_{j,l} occurrence per used copy; the left-comb intermediate couplings), and
+// it emits exactly one ORTHONORMAL basis vector of Sym^K(V). K = 2 is NOT
+// routed to derive_sym_tp: it runs the same machinery, which is what makes
+// stage 1 an independent oracle for it (last block below).
+//
+// WEIGHT LAYOUT (the surface contract): LABEL-MAJOR — labels in MLSpec's
+// canonical enumeration order (slowest), then the matching W copies (SOUT
+// blocks of the label's (l, parity) in block order, multiplicity inner).
+// That is poly_weight_dim's count reorganized label by label; it is NOT
+// homBlocks order (which derive_linear follows, output-block-major with the
+// input multiplicity innermost). The two coincide whenever no (l, parity) has
+// input multiplicity > 1 AND output multiplicity > 1 — which is exactly the
+// situation the K = 1 pin below exploits.
+// ============================================================================
+
+// --- 1. K = 1 IS derive_linear, to the ulp -----------------------------------
+// Sym^1(V) = V, so the degree-1 label basis is the input's own multiplicity
+// copies and the T_{1,l} table is the identity (the emitted kernel skips the
+// matvec entirely and reads the copy's slice of x in place). The sector
+// constant sqrt(1!/1!) is exactly 1.0. With this spec pair the two weight
+// layouts agree slot for slot, so the SAME buffer drives both ops and the
+// difference is bit-zero, not merely small.
+let static A1 = [(0, 0, 1), (1, 1, 2)]
+let static O1 = [(0, 0, 1), (1, 1, 1)]
+let static WP1 = ml.poly_weight_dim(A1, 1, O1)
+let static WL1 = ml.linear_weight_dim(A1, O1)
+// EXPECT: WP1 = 3
+// EXPECT: WL1 = 3
+
+let x1: Array<Float like IrrepsIdx<A1>> = [1.0, 2.0, -0.5, 0.25, -1.5, 0.75, 0.125]
+let w1 = [0.3, -0.7, 1.1]
+let p1: Array<Float like IrrepsIdx<O1>> = ml.derive_poly(A1, 1, O1, x1, w1)
+let q1: Array<Float like IrrepsIdx<O1>> = ml.derive_linear(A1, O1, w1, x1)
+// EXPECT: p1 = [0.3, -3.05, 1.175, -0.0375]
+// EXPECT: q1 = [0.3, -3.05, 1.175, -0.0375]
+let d1 = p1 - q1
+let sq1 = reduce(d1 * d1, (+))
+// EXPECT: sq1 = 0.0
+
+// --- 2. closed-form invariant/covariant anchors ------------------------------
+// The label basis is orthonormal in Sym^K(V) with the inner product induced
+// from an orthonormal component basis, and feature(x) = <v_label, x^(x)K>
+// (§3.3b identity (2) — evaluation carries no multiplicity weight). That fixes
+// every constant below with no freedom beyond an overall sign, which the
+// RREF/Gram-Schmidt/lowering pipeline pins.
+let static V3 = [(1, 1, 1)]
+let static S0 = [(0, 0, 1)]
+let y: Array<Float like IrrepsIdx<V3>> = [0.3, -0.7, 1.1]
+let r2 = 0.3 * 0.3 + 0.7 * 0.7 + 1.1 * 1.1
+// EXPECT: r2 = 1.79
+
+// (a) K = 4 into a scalar: Sym^4(V1) = V4 (+) V2 (+) V0, so the invariant line
+// is one-dimensional and every degree-4 O(3) invariant of a vector is a
+// multiple of |x|^4. The unit vector is the symmetrization
+// S = (1/3)(d(x)d + d(x)d + d(x)d) of the two Kronecker deltas, with
+// <S, S> = 5, so <S/sqrt5, x^(x)4> = |x|^4/sqrt5 and the constant is
+// 1/sqrt(5) = 0.4472135954999579 exactly. Sector constant sqrt(4!/4!) = 1.
+let static W40 = ml.poly_weight_dim(V3, 4, S0)
+// EXPECT: W40 = 1
+let a4: Array<Float like IrrepsIdx<S0>> = ml.derive_poly(V3, 4, S0, y, [1.0])
+let c4 = a4(0) / (r2 * r2)
+// EXPECT: a4 = [1.43291708134142]
+// EXPECT: c4 = 0.447213595499958
+
+// The single weight scales linearly, so a second weight is a second pin on the
+// SAME basis map rather than on a new one.
+let a4b: Array<Float like IrrepsIdx<S0>> = ml.derive_poly(V3, 4, S0, y, [-2.5])
+// EXPECT: a4b = [-3.58229270335354]
+
+// (b) K = 3 into a vector: Sym^3(V1) = V3 (+) V1, so the equivariant line is
+// x |-> |x|^2 x. The unit vector is B_m = Sym(delta (x) e_m) normalized,
+// <B_m, B_m> = 5/3, so the constant is -sqrt(3/5) = -0.7745966692414834 (the
+// sign is the pipeline's, the magnitude is forced). Componentwise in the real
+// l = 1 basis (y, z, x) the map is a pure rescale of the input, so all three
+// ratios must be the SAME number.
+let static W31 = ml.poly_weight_dim(V3, 3, V3)
+// EXPECT: W31 = 1
+let a3: Array<Float like IrrepsIdx<V3>> = ml.derive_poly(V3, 3, V3, y, [1.0])
+let c3 = [a3(0) / (r2 * 0.3), a3(1) / (r2 * (0.0 - 0.7)), a3(2) / (r2 * 1.1)]
+// EXPECT: a3 = [-0.415958411382676, 0.970569626559578, -1.52518084173648]
+// EXPECT: c3 = [-0.774596669241483, -0.774596669241483, -0.774596669241483]
+
+// (c) K = 3 on an l = 2 input into a scalar: Sym^3(V2) = V6+V4+V3+V2+V0, one
+// invariant line, and the cubic invariant of a traceless symmetric 3x3 tensor
+// is its DETERMINANT. ml.irreps_to_sym reconstructs that tensor from the same
+// l = 2 components (a rep escape — legal here, refused inside a certified
+// body), so the ratio is checkable in-language. It is -sqrt(108/35) =
+// -1.7566201313073608, and being a ratio of two cubic forms it must be the
+// SAME at a second, unrelated point.
+let static V5 = [(2, 0, 1)]
+let static TAU = [(0, 0, 1), (2, 0, 1)]
+let static W30 = ml.poly_weight_dim(V5, 3, S0)
+// EXPECT: W30 = 1
+let z: Array<Float like IrrepsIdx<V5>> = [0.5, -0.25, 1.5, 0.75, -1.0]
+let a30: Array<Float like IrrepsIdx<S0>> = ml.derive_poly(V5, 3, S0, z, [1.0])
+// EXPECT: a30 = [0.628672892668261]
+let tz: Array<Float like IrrepsIdx<TAU>> = [0.0, 0.5, -0.25, 1.5, 0.75, -1.0]
+let mz = ml.irreps_to_sym(tz)
+let detz = mz(0) * (mz(3) * mz(5) - mz(4) * mz(4)) - mz(1) * (mz(1) * mz(5) - mz(4) * mz(2)) + mz(2) * (mz(1) * mz(4) - mz(3) * mz(2))
+let ratz = a30(0) / detz
+// EXPECT: ratz = -1.75662013130736
+
+let z2: Array<Float like IrrepsIdx<V5>> = [-0.2, 1.3, 0.4, -0.9, 0.6]
+let a30b: Array<Float like IrrepsIdx<S0>> = ml.derive_poly(V5, 3, S0, z2, [1.0])
+// EXPECT: a30b = [-0.22186202229921]
+let tz2: Array<Float like IrrepsIdx<TAU>> = [0.0, -0.2, 1.3, 0.4, -0.9, 0.6]
+let mz2 = ml.irreps_to_sym(tz2)
+let detz2 = mz2(0) * (mz2(3) * mz2(5) - mz2(4) * mz2(4)) - mz2(1) * (mz2(1) * mz2(5) - mz2(4) * mz2(2)) + mz2(2) * (mz2(1) * mz2(4) - mz2(3) * mz2(2))
+let ratz2 = a30b(0) / detz2
+// EXPECT: ratz2 = -1.75662013130736
+
+// --- 3. K = 2 against stage 1 (derive_sym_tp as the oracle) ------------------
+// Both parameterize the SAME hom-space Hom(Sym^2 V, tp_spec(V,V)) — the counts
+// already agree (poly_weight_dim(A,2,tp_spec(A,A)) = sym_tp_weight_dim(A), the
+// stage-2a cross-stage identity) — so the change of basis M is a label-aligned
+// SCALED PERMUTATION. For A = [(0,e,1), (1,o,1)] the four labels are, in
+// enumeration order, sector [0,0] (L=0), sector [0,1] (L=1), sector [1,1] via
+// the L=2 occurrence of Sym^2(V1), sector [1,1] via its L=0 occurrence; the
+// derive_sym_tp packed order visits the kept paths instead, which permutes the
+// last three blocks. Reading M off the two bases:
+//     M . w' = [w'0, w'1, w'2/sqrt2, w'3/sqrt2, w'5, w'6, w'4]
+// The 1/sqrt2 entries are the ONLY scale: a two-distinct-copy sector carries
+// the sector constant sqrt(2!/1!1!) = sqrt2, while derive_sym_tp's mirror cell
+// folds two products and so carries 2 at y = x. So poly = (1/sqrt2) * sym on
+// exactly those labels — the {1, sqrt2, 2} norm-ratio class §3.3b predicts.
+// Association differs between the two kernels, so this is a tolerance pin
+// (observed ~9e-16 absolute, sq_diff ~2e-30), not a bit-identity claim.
+let static A2 = [(0, 0, 1), (1, 1, 1)]
+let static TPA = ml.tp_spec(A2, A2)
+let static WP2 = ml.poly_weight_dim(A2, 2, TPA)
+let static WS2 = ml.sym_tp_weight_dim(A2)
+// EXPECT: WP2 = 7
+// EXPECT: WS2 = 7
+
+let x2: Array<Float like IrrepsIdx<A2>> = [1.0, 2.0, -0.5, 0.25]
+let wp2 = [0.3, -0.7, 1.1, 0.9, -1.3, 0.4, 2.0]
+// M . wp2, with 1.1/sqrt2 and 0.9/sqrt2 written out
+let ws2 = [0.3, -0.7, 0.7778174593052023, 0.6363961030678928, 0.4, 2.0, -1.3]
+let p2: Array<Float like IrrepsIdx<TPA>> = ml.derive_poly(A2, 2, TPA, x2, wp2)
+let q2: Array<Float like IrrepsIdx<TPA>> = ml.derive_sym_tp(A2, x2, x2, ws2)
+// EXPECT: p2 = [-0.695929214352104, -5.67964607176052, 0, 0, 0, 3.11126983722081, -0.777817459305202, 0.388908729652601, 2.54558441227157, -0.636396103067893, 0.318198051533946, -0.919238815542512, 1.83847763108502, 1.89069989521077, 0.229809703885628, 3.61950283619864]
+// EXPECT: q2 = [-0.695929214352104, -5.67964607176052, 0, 0, 0, 3.11126983722081, -0.777817459305202, 0.388908729652601, 2.54558441227157, -0.636396103067893, 0.318198051533946, -0.919238815542511, 1.83847763108502, 1.89069989521076, 0.229809703885628, 3.61950283619864]
+let d2 = p2 - q2
+let sq2 = reduce(d2 * d2, (+))
+// EXPECT: sq2 = 2.33345672061957e-30
+
+// --- 4. a multi-copy, multi-degree sanity value ------------------------------
+// K = 3 over a two-block spec: labels here really do use the shared-prefix
+// chain machinery (sector [0,1,1] couples copy 0's degree-1 feature with the
+// two occurrences of Sym^2(V1), sector [1,1,1] uses T_{3,1} directly).
+let static A3 = [(0, 0, 1), (1, 1, 1)]
+let static O3S = [(0, 0, 1), (1, 1, 1), (2, 0, 1)]
+let static WP3 = ml.poly_weight_dim(A3, 3, O3S)
+// EXPECT: WP3 = 5
+let x3: Array<Float like IrrepsIdx<A3>> = [1.0, 2.0, -0.5, 0.25]
+let p3: Array<Float like IrrepsIdx<O3S>> = ml.derive_poly(A3, 3, O3S, x3, [0.3, -0.7, 1.1, 0.9, -1.3])
+// EXPECT: p3 = [-3.58125, 6.2602940232737, -1.56507350581843, 0.782536752909212, 1.34721935853075, -2.6944387170615, -2.77097469877478, -0.336804839632687, -5.30467622421482]

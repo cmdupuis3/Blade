@@ -40,3 +40,37 @@ published as a standalone artifact where redundancy reads as padding.
 5. Quartic `nia` can OOM; factor inequalities to quadratic cores.
 6. Rewriting with a lemma whose LHS pattern matches its own RHS
    (swap lemmas) loops under `repeat`.
+7. `simpl` unfolds `seq start (S n)` to a cons, so a membership
+   hypothesis produced by `in_map_iff` no longer matches `in_seq`.
+   Unfold only the fixpoint you meant to: `cbn [f]`
+   (BladeSymPower s2_cells_aux_spec).
+8. `apply` unification does not reduce truncated subtraction: a goal
+   `_ = S m * (S m - 1)` will not unify with a lemma stated at
+   `_ = S m * m`. `replace ... by lia` first.
+9. `map_ext` is a rewrite, not a closer: on `lsum (map f l) =
+   lsum (map g l)` you must `f_equal` first, or `apply map_ext` fails
+   against the `lsum` head. And after a `cbn` has already reduced the
+   body, `rewrite (map_ext (fun j => 0) (fun _ => 0))` is a no-op --
+   Coq reports "generated a subgoal identical to the original goal",
+   which reads like a tactic bug and is really "you already have it"
+   (BladePartition fibre_sum / filter_le_fibres).
+10. Two recurrences for one function (peel-first vs peel-last) meet in
+   a goal where the SAME term must expand differently on each side.
+   Plain `rewrite H` hits both occurrences and destroys the identity;
+   use positional `rewrite H at 1`, then rewrite the other equation to
+   catch the survivor, then `nia`
+   (BladePartition stir_open_peel_last).
+11. The other end of trap 9: `f_equal` on `lsum (map f l) = lsum (map g
+   l)` may CLOSE the goal outright when `f` and `g` became convertible
+   under an intervening rewrite. The next tactic then fails with "No
+   such goal", which again reads like a tactic bug and is really "you
+   already have it" -- drop the `f_equal; apply map_ext` pair for a bare
+   `reflexivity` (BladePointGroup pg_hom_dim_spec_sum, after
+   `lsum_filter_guard`).
+12. A double quote inside a Coq comment opens a STRING, and a `*)` that
+   falls inside it does not close the comment. The tower's box-comment
+   headers are one `(* ... *)` per line, so a quotation that opens on
+   one line and closes on a later one silently swallows every `*)`
+   between -- Rocq 9 reports it as `comment-terminator-in-string`
+   warnings, one per line, and the header still parses only by luck.
+   Keep quoted phrases inside a single line, or use dashes.

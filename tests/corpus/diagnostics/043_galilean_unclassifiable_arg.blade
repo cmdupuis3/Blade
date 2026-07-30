@@ -1,0 +1,10 @@
+// TEST: Diag Galilean Unclassifiable Argument (diag)
+// ERROR: BL4009
+// ERROR-CONTAINS: cannot be classified as boost-invariant or boost-variant
+// The CODE+TEXT pin for the BOpaque half of the galilean wording split
+// (ml-equiv/083 asserts the behavior but that category carries no ERROR
+// pins). The BVar half keeps its original sentence, pinned by 020.
+import ml as ml
+function widen(k: Int) -> Float = 1.0
+function bad(u: Array<Float like Idx<4>>) where ml.galilean(u) -> Float =
+  widen(rank(u))

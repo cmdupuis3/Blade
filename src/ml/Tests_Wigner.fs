@@ -92,6 +92,35 @@ module Tests_Wigner =
                 check (sprintf "real CG exchange symmetry l=%d l3=%d (sign %+.0f), dev %.2g" l l3 sign worst)
                     (worst < 1e-10)
 
+        // Cross-block exchange symmetry (the l1 <> l2 case of the same
+        // identity, relied on by the compacted weight space of
+        // docs/plan-transforms-as-types.md 3.2 / 6.2(ii)): the coupling tensor
+        // of the swapped-degree pair is the transpose of the original times
+        // the exchange sign,
+        //   realCG(l2,l1,l3)[m2,m1,m3] = (-1)^(l1+l2-l3) realCG(l1,l2,l3)[m1,m2,m3].
+        // This is the property that licenses dropping one path of a mirror
+        // pair. The global (-i) phase fix in realCGDense keys off the parity of
+        // l1+l2+l3, which is symmetric in l1,l2, so it applies identically to
+        // both triples and leaves the identity intact.
+        for l1 in 0 .. 2 do
+            for l2 in 0 .. 2 do
+                if l1 <> l2 then
+                    for l3 in abs (l1 - l2) .. l1 + l2 do
+                        let c = Wigner.realCGDense l1 l2 l3
+                        let cSwap = Wigner.realCGDense l2 l1 l3
+                        let sign = paritySign (l1 + l2 - l3)
+                        let mutable worst = 0.0
+                        for c1 in 0 .. 2 * l1 do
+                            for c2 in 0 .. 2 * l2 do
+                                for c3 in 0 .. 2 * l3 do
+                                    worst <-
+                                        max worst
+                                            (abs (cSwap.[c2].[c1].[c3]
+                                                  - sign * c.[c1].[c2].[c3]))
+                        check (sprintf "real CG cross-block exchange (%d,%d,%d) = %+.0f * transpose (%d,%d,%d), dev %.2g"
+                                   l2 l1 l3 sign l1 l2 l3 worst)
+                            (worst < 1e-12)
+
         // Real-basis sparsity: every nonzero satisfies
         // |m3| in { ||m1|-|m2||, |m1|+|m2| }.
         for (l1, l2, l3) in [ (1, 1, 2); (1, 2, 3); (2, 2, 2); (1, 2, 2) ] do

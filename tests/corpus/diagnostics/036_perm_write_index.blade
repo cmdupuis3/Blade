@@ -1,0 +1,9 @@
+// TEST: Diag Perm Write Index (diag)
+// ERROR: BL4012 @ 6:7
+// ERROR-CONTAINS: component access into node-covariant 'x'
+import ml as ml
+function bad(x: Array<Int like Idx<4>>) where ml.perm_equiv(4) -> Float = {
+  let mut acc: Array<Float like Idx<3>> = [0.0, 0.0, 0.0]
+  acc(x(0)) = 1.0
+  acc(0)
+}

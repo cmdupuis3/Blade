@@ -1,0 +1,39 @@
+// TEST: Idx Card Dependent Bound (rejects)
+// ============================================================================
+// THE SAME-RECORD DEPENDENT-BOUNDS BOUNDARY, pinned as it actually stands.
+//
+// `l_out`'s bound references an EARLIER FIELD (`l1`) — the shape of the
+// triangle inequality, and the single most natural thing to want to write
+// about a coupling. On an ordinary constrained struct this is SHIPPED and
+// legal:
+// corpus structs/019 constructs exactly this record, because at CONSTRUCTION
+// the earlier fields have values and the bound is just another conjunct.
+//
+// As an INDEX TYPE it is refused, and for a reason worth being precise about.
+// The box must be known BEFORE enumeration begins; a bound that names another
+// field has no value until a cell is chosen, so the fence's static evaluation
+// of the bound fails on the free name:
+//
+//   struct Triangle, field 'l_out': min bound is not static —
+//   Static evaluation: undefined variable 'l1'
+//
+// This is deferral §8.5 of the plan, and the plan is explicit that it is an
+// EFFICIENCY deferral rather than a semantics gap: given ABSOLUTE bounds on
+// `l_out`, a dependent bound desugars into an ordinary conjunct and the
+// solution set is enumerated correctly — just over a larger box, filtered,
+// instead of over tight per-cell heads. So the capability is reachable today
+// by writing the absolute bound and letting the conjunct do the work, and what
+// remains deferred is only the tight-heads optimization (and, in Coq, a
+// dependent-heads variant of the ck arrow — deferral §8.8).
+//
+// The test exists so that if dependent bounds ever DO become box grammar, this
+// file fails and forces the deferral to be closed deliberately rather than
+// discovered.
+// ============================================================================
+static struct Triangle {
+    l1:    Int<min=0, max=2>,
+    l2:    Int<min=0, max=2>,
+    l_out: Int<min=l1, max=4>
+}
+
+let static CARD = idx_card(Triangle)

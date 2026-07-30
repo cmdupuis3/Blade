@@ -1,0 +1,101 @@
+// TEST: ML Equiv Engine Hand Polynomial
+import ml as ml
+// ============================================================================
+// THE GENERATOR-BASED ENGINE, PART I: A HAND-WRITTEN POLYNOMIAL CERTIFIED
+// (docs/plan-transforms-as-types.md §3.5's uniform rule, §7 stage 6b).
+//
+// Everything below is a body the COMPOSITION judgment refuses, and refuses
+// correctly: raw indexing into a non-trivial-label cell reads a
+// basis-dependent number, and packing rep components into an array literal
+// throws away the transformation law. Both refusals are sound SYNTACTIC
+// sufficient conditions — and both are wrong about these particular functions,
+// which are equivariant.
+//
+// So when composition says no, the engine asks the SEMANTIC question instead:
+// it normalizes the body to an exact polynomial over ℚ[invariant atoms] and
+// tests f(ρ(g)·x) = ρ(g)·f(x) COEFFICIENTWISE at every element of the group.
+// C4's generator matrices are integer, so the whole check is exact rational
+// arithmetic with no tolerance anywhere — and the runtime shadows below are
+// exact float equality for the same reason.
+//
+// `where ml.equiv(C4)` is the ONLY pin spelling. It names the THEOREM, never
+// the proof route: the checker picks composition or the engine, and a reader
+// of the source cannot tell which discharged it. That is deliberate (the
+// BL4010 precedent) — there is no `equiv_gen` variant and there never will be.
+// ============================================================================
+let static EC = [("E", 1)]
+
+// --- 1. J, WRITTEN OUT BY HAND ---------------------------------------------
+// R₉₀ = [[0, −1], [1, 0]] is the C4 generator on an E copy, and it is also the
+// baked complex structure J of that label (End_{C4}(E) = ℂ). The synthesized
+// route to this map is `ml.derive_pg_linear(C4, EC, EC, x, [0.0, 1.0])`, which
+// composition certifies. Written out in components it is the same map — and
+// composition rejects it at the first `x(1)`. The engine discharges it.
+function rot(x: Array<Float like PgIrrepsIdx<C4, EC>>)
+             where ml.equiv(C4) -> Array<Float like PgIrrepsIdx<C4, EC>> =
+    [0.0 - x(1), x(0)]
+
+// THE UNCERTIFIED TWIN. Stage 6a's inference channel runs the SAME judgment
+// speculatively, so it inherits the engine for free: this function carries no
+// `where` clause, composition refuses it, the engine discharges it, and the
+// proposal appears. That inheritance is why 6b needed no new inference code.
+//
+// SUGGEST: function 'rot_loose' judges equivariant under C4: add 'where ml.equiv(C4)' [signature: x transforms as PgIrrepsIdx<C4, [("E", 1)]> -> PgIrrepsIdx<C4, [("E", 1)]>]
+function rot_loose(x: Array<Float like PgIrrepsIdx<C4, EC>>)
+                   -> Array<Float like PgIrrepsIdx<C4, EC>> =
+    [0.0 - x(1), x(0)]
+
+let y = rot([3.0, 4.0])
+// EXPECT: y = [-4, 3]
+
+// PROPOSE ⊆ CHECK-ACCEPT, as a value pin: the suggested function and its
+// pinned twin are the same map, so the warning changes nothing.
+let yl = rot_loose([3.0, 4.0])
+// EXPECT: yl = [-4, 3]
+
+// THE C4 SHADOW. ρ(r) on an E copy is (a, b) ↦ (−b, a), so the rotated input
+// is (−4, 3) and the rotated output is ρ(r)(−4, 3) = (−3, −4). Exact, because
+// every generator entry lies in {0, ±1}.
+let yr = rot([0.0 - 4.0, 3.0])
+// EXPECT: yr = [-3, -4]
+
+// --- 2. A CUBIC, WHICH NO LINEAR LAYER CAN SPELL ----------------------------
+// (x, y) ↦ (x² + y²)·(x, y): an invariant radial factor times the vector. The
+// invariant is degree 2 and the map is degree 3, so this is outside every
+// shipped linear/bilinear former — and it is exactly what the degree ≤ 4 cap
+// exists to cover. Composition has no arm for it at all; the engine reads it
+// as six monomials per component and checks all four group elements.
+function radial3(x: Array<Float like PgIrrepsIdx<C4, EC>>)
+                 where ml.equiv(C4) -> Array<Float like PgIrrepsIdx<C4, EC>> = {
+    let r2 = x(0) * x(0) + x(1) * x(1)
+    [r2 * x(0), r2 * x(1)]
+}
+
+// |(3, 4)|² = 25, so the output is (75, 100).
+let c = radial3([3.0, 4.0])
+// EXPECT: c = [75, 100]
+// ρ(r)(3, 4) = (−4, 3), whose radial cube is 25·(−4, 3) = (−100, 75) —
+// which is ρ(r)(75, 100). The certificate's conclusion, pinned as a value.
+let cr = radial3([0.0 - 4.0, 3.0])
+// EXPECT: cr = [-100, 75]
+
+// --- 3. A LINEAR COMBINATION, TO PIN THE ARRAY ARMS -------------------------
+// Whole-array + and invariant·array are in the fragment, so a hand-written
+// `s·x + J(x)` needs no component spelling at all — and it is still a body
+// composition would accept for the `s·x` half and refuse for the `J(x)` half,
+// which is the point: the engine judges the WHOLE body, not a seam.
+function twist(x: Array<Float like PgIrrepsIdx<C4, EC>>, s: Float)
+               where ml.equiv(C4) -> Array<Float like PgIrrepsIdx<C4, EC>> = {
+    let j = [0.0 - x(1), x(0)]
+    x * s + j
+}
+
+// 2·(3, 4) + J(3, 4) = (6, 8) + (−4, 3) = (2, 11).
+let t = twist([3.0, 4.0], 2.0)
+// EXPECT: t = [2, 11]
+// ρ(r)(3, 4) = (−4, 3): 2·(−4, 3) + J(−4, 3) = (−8, 6) + (−3, −4) = (−11, 2),
+// which is ρ(r)(2, 11). The invariant `s` is held fixed throughout — that is
+// the hypothesis the Inv classification records, and the atom the engine
+// carries through its coefficients untouched.
+let tr = twist([0.0 - 4.0, 3.0], 2.0)
+// EXPECT: tr = [-11, 2]

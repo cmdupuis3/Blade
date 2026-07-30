@@ -1,0 +1,23 @@
+// TEST: Diag Equiv Engine Lie Near Miss (diag)
+// ERROR: BL4008 @ 18:3
+// ERROR-CONTAINS: *sqrt(3)
+// ERROR-CONTAINS: The residual's nonzero radical components
+// ERROR-CONTAINS: NEAR MISS: the residual is 5.992e-08
+// ERROR-CONTAINS: a float literal is its exact dyadic value, so 0.3 is not 3/10
+// ERROR-CONTAINS: write the division (3.0 / 10.0 IS 3/10)
+// ERROR-CONTAINS: the synthesized basis (ml.derive_linear / ml.derive_tp / ml.derive_poly)
+import ml as ml
+// 0.5773502 written where 1/sqrt(3) was meant. The l = 1 x l = 1 -> l = 2
+// quadratic has an IRRATIONAL coefficient ratio in the shipped real basis, so
+// no exact spelling exists and the refusal is permanent — which is exactly the
+// case the near-miss note hands to the synthesized (Schur-certified) basis.
+// The residual itself is a RADICAL VECTOR: a rational part and a sqrt(3) part,
+// rendered componentwise, because componentwise zero is the acceptance test.
+let static V = [(1, 1, 1)]
+let static Q = [(2, 0, 1)]
+function quad(x: Array<Float like IrrepsIdx<V>>) where ml.equiv(O3) -> Array<Float like IrrepsIdx<Q>> =
+  [x(0) * x(2),
+   x(0) * x(1),
+   0.5773502 * (x(1) * x(1) - 0.5 * x(0) * x(0) - 0.5 * x(2) * x(2)),
+   x(1) * x(2),
+   0.5 * (x(2) * x(2) - x(0) * x(0))]

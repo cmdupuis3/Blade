@@ -1,0 +1,44 @@
+// TEST: Struct Bounded Type Inclusive
+// ============================================================================
+// The bounded-primitive field spelling, per formalism §2.4 ("Bounded
+// primitives (`Float<min=0, max=1>`) carry runtime-checked bounds and compose
+// with units" — the spec ruled on this spelling before the constrained-record
+// round; this implements it rather than inventing it).
+//
+// `Int<min=A, max=B>` is INCLUSIVE ON BOTH ENDS: `A <= f && f <= B`.
+// That is the ruling, and this file is what makes it OBSERVABLE: every field
+// below is constructed AT ITS MAXIMUM. If `max=` were half-open these
+// constructions would be violations, so an accept here IS the inclusivity
+// proof — not merely a parse check.
+//
+// Why inclusive, when `..` is half-open everywhere else in Blade: `..` is
+// punctuation for a RANGE and reads half-open language-wide (ranges, subset,
+// BoundedIdx); `min=`/`max=` are named BOUNDS and read closed. A `max` that
+// excludes its own value is a lie in the identifier. The domain object that
+// motivates all of this is m ∈ [-l, l] with card 2l+1 — writing that as
+// `max=l+1` manufactures exactly the off-by-one the offset-hazard work exists
+// to catch.
+//
+// The two spellings coexist; structs/047 pins the translation law between
+// them, and structs/019-020 keep the half-open `in lo .. hi` form unchanged.
+// ============================================================================
+struct MTriple {
+    m1:    Int<min=-1, max=1>,
+    m2:    Int<min=-1, max=1>,
+    m_out: Int<min=-2, max=2>
+} where m1 + m2 == m_out
+
+// Every field at its declared MAXIMUM: legal only because `max=` is attained.
+let top = MTriple { m1 = 1, m2 = 1, m_out = 2 }
+let t = top.m_out
+// EXPECT: t = 2
+
+// Every field at its declared MINIMUM: the other closed end.
+let bot = MTriple { m1 = -1, m2 = -1, m_out = -2 }
+let b = bot.m_out
+// EXPECT: b = -2
+
+// Interior, for completeness.
+let mid = MTriple { m1 = -1, m2 = 1, m_out = 0 }
+let z = mid.m_out
+// EXPECT: z = 0

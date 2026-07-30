@@ -1,0 +1,22 @@
+// TEST: ML Equiv Scalar Scale Certified
+import ml as ml
+// ============================================================================
+// The accept side of the shape guard added for 072: scaling a rep by an
+// invariant SCALAR still certifies. Two of the sources of a PROVEN scalar the
+// guard depends on are pinned here — a scalar-annotated parameter, and a
+// full-rank element read `w(0)` out of an invariant array parameter, which is
+// one cell and therefore 0-dimensional. (The other two are a static read of a
+// trivially-acting slot of a rep, pinned by 045, and a module-level `let`
+// scalar, which certifies but does not survive lowering into a lifted loop
+// body — pinning that one would test codegen rather than the judgment.)
+// ============================================================================
+let static S = ml.sh_spec(1)
+
+function scaled(px: Float, py: Float, pz: Float, c: Float, w: Array<Float like Idx<2>>) where ml.equiv(O3) -> Array<Float like Idx<2>> = {
+    let byParam = c * ml.y_to(1, px, py, pz)
+    let byElement = byParam * w(0)
+    ml.norms(S, byElement)
+}
+
+let res = scaled(1.0, 2.0, 3.0, 0.5, [3.0, 7.0])
+// EXPECT: res = [0.423142187660817, 2.74227479678679]

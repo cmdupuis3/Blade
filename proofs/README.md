@@ -9,7 +9,17 @@ Machine-checked kernel of the Blade formalism. Coq 8.18.0, stdlib only.
 
 or manually with `coqc -Q . Blade <file>` in _CoqProject order.
 
-## Contents (281 theorems total)
+## Counting convention
+
+One item per `Lemma`, `Theorem`, `Corollary`, or `Example` that begins a
+line, in the files listed in `_CoqProject`, comments stripped.
+`Definition` and `Fixpoint` are constructions, not claims, and are not
+counted; `Example` is, because here the Examples are the concrete
+computed pins.  `count-theorems.ps1` is the mechanical implementation --
+run it with `-Check` to verify the numbers below and the headline in
+`docs/proofs.md`, which quotes the same total.
+
+## Contents (524 theorems total)
 
 - BladeCore.v (16): Group Law both halves (diagonal swap sound; per-dim
   product swap refuted), counting lemma (no lossless product layout),
@@ -125,3 +135,125 @@ or manually with `coqc -Q . Blade <file>` in _CoqProject order.
   Neidinger 2005) and the SIZE formula ships in CTF's
   sy_packed_size; the composed bijection itself appears nowhere in
   the literature (2026 survey) -- this file is the named artifact.
+- BladeJacobian.v (41): the AD seam, at the level the compiler actually
+  differentiates: SYMBOLIC differentiation over a small expression
+  language (Grad.fs's derivRule table as a FORMAL derivative slot; no
+  real analysis anywhere).  Differentiation is equivariant under
+  renaming (d_ren_equivariant) and a congruence for the ring-law
+  equivalence aceq (d_respects_aceq); the JACOBIAN SYMMETRY TRANSFER --
+  a structurally symmetric primal has partials that are each other's
+  swap images (jacobian_symmetry_transfer), so canonical derivative
+  storage is lossless -- and the emitted jvp tangent is invariant under
+  the JOINT pair swap (tangent_joint_swap).  Refutation half: SEMANTIC
+  primal symmetry alone does NOT transfer
+  (semantic_hypothesis_insufficient), so the license must come from the
+  structural judgment, never from semantic accident.  The multiplicity
+  rule: d/d(stored canonical cell) of the canonical-access contraction
+  is the orbit sum of cotangents, off-diagonal x2 and diagonal x1
+  (symmetric_accumulation), with n = 3 pins computed.  Rank 2 and one
+  transposition; joint swaps only (per_dim_swap_not_symmetry stands);
+  nat semiring, so quotient/negation kernels are out of scope.
+- BladeSymPower.v (47): NEW -- the ML elaborator's counting
+  obligations (plan-transforms-as-types 3.2/3.3b).  The S2 partition:
+  a diagonal path's free cells are the tau-triangle (s2_cells_spec),
+  the two halves are exhibited division-free as tri_le / tri_lt with
+  2*tri_le m = m(m+1) and 2*tri_lt m = m(m-1), and over any kept-path
+  list sym_total + alt_total = dense_total (s2_split_is_partition =
+  MLSpec.s2TpSplitIsPartition; 3.2's tables 10 = 7+3, 48 = 28+20
+  computed).  The copy-splitting counts: the sum over degree
+  compositions of prod_i C(n_i+k_i-1, k_i) is C(sum n_i + k - 1, k)
+  (sym_copy_splitting) and the exterior twin is Vandermonde
+  (alt_copy_splitting) -- the cardinalities MLSpec.powerSpec asserts,
+  over an explicit enumeration of the compositions.
+- BladePartition.v (61): NEW -- set partitions as restricted growth
+  strings, the stage 5a-i obligations of plan-transforms-as-types 3.6
+  (MLPermSpec).  The RGS enumeration is an ARROW instance
+  (heads b = seq 0 (S b), step b x = max b (S x)), so sound/complete/
+  NoDup/lex-sorted are BladeArrow + BladeLex instantiated.  Counts: the
+  block-count fibre is a Stirling number (rgs_enum_block_fibres, via a
+  first-position recurrence proved equal to Stirling's last-position
+  one), the whole enumeration is Bell (rgs_enum_length; Bell 0..6 =
+  1,1,2,5,15,52,203 computed), and the <= N-block filter the compiler
+  ships is the truncated Stirling sum (rgs_enum_le_count_min);
+  perm_weight_dim/perm_bias_dim = Bell at N >= K+L, with 3.6's DeepSets
+  (2) and Maron (15 + 2) anchors as pins.  THE KEYSTONE,
+  rgs_lex_extends_refinement: coarsening implies lex-<=, so the
+  coarsest-first emission order extends refinement -- PROVED AS STATED,
+  no convention swap.  The 3.6 fallback order is discharged too
+  (coarsens_blocks_le by pigeonhole + P2 as tiebreak).  The witness
+  certificate, over the compiler's list (the s2_cells_spec discipline):
+  B_spec unfolds indicator evaluation to the coarsening relation, and
+  witness_matrix_unitriangular turns P2 + lex-sortedness into
+  unitriangularity of the witness-evaluation matrix -- integer
+  independence, no float, no rank decision.  Orientation pinned by
+  computed matrices at m = 2, 3.  Spanning (orbit-basis completeness) is
+  cited, not proved (6.1(a)).
+- BladePointGroup.v (58): NEW -- the point-group registry
+  (MLPointSpec.fs) checked by computation, stage 5b-0 of
+  plan-transforms-as-types 3.6/7.  Integer matrices over the two
+  3.6-canonical tables C4 and D4 (every entry in {-1,0,1}), the word
+  sets and Cayley tables FIXED as data: the tables are groups
+  (c4/d4_table_is_group), the word set is multiplication-closed in every
+  irrep (c4/d4_word_set_closed), the faithful E enumerations are 4 and 8
+  distinct matrices (c4/d4_element_count), the generator images satisfy
+  the presentations and respect the group law (c4/d4_generator_relations,
+  c4/d4_rep_property).  FS INDICATORS COMPUTED, NOT DECLARED:
+  sum_g tr(rho(g)^2) is 4,4,0 at C4 and 8,8,8,8,8 at D4, exactly |G|
+  times the indicator (c4/d4_fs_exact), matching MLPointSpec's FsType
+  column (c4/d4_fs_computed_eq_declared) -- C4's E is the only C-type
+  label.  e is e_of_fs of that computed indicator, so the 3.6 contrast
+  anchor is a CHAIN: pg_hom_dim_c4_contrast = 9 vs
+  pg_hom_dim_d4_contrast = 5 on one spec shape, with the e == 1 naive
+  control collapsing 9 onto 5.  J identities for the [Id, J] emitted
+  basis (J_square_is_neg_id, J_commutes_with_generator/_C4_E) plus
+  Gram = d*I (c4E_end_gram_is_d_id) and both negative controls
+  (a spurious diag(1,-1) End column dies at R90; J fails at D4's
+  R-type E).  R-Burnside sum d^2/e = |G| with the quotient exhibited
+  (c4/d4_rburnside, _exact).  End-basis completeness (Schur over R) is
+  cited per 6.1's closure and oracle-discharged (Test_PgOracle.fs).
+- BladeWordClosure.v (18): NEW -- word closure for the finite
+  equivariance discharge, stage 6b of plan-transforms-as-types 3.5/7 and
+  the discrete row of 8's BladeGenerator split.  A map intertwining the
+  GENERATORS of a finite group intertwines every element: word_closure
+  by induction on word length over arbitrary carriers and arbitrary
+  generator-indexed actions, generators_suffice_on_word_set as the form
+  the discharge uses (a group presented by its word set), wact_app and
+  wact_triv as the word-action algebra.  The same content over an
+  ABSTRACT MULTIPLICATION TABLE, no words:
+  equivariance_closed_under_product, whose hypotheses are exactly
+  BladePointGroup's c4/d4_rep_property.  Instantiated at the C4/D4 E
+  plane over Z*Z and PINNED to the shipped matrices (rot_is_R90,
+  mir_is_Sref), with the three corpus anchors: hand-written J = R90 is
+  C4-equivariant everywhere from one generator check
+  (J_equivariant_on_c4_words, _at_every_c4_element) and fails at D4's
+  mirror (J_not_d4_equivariant); x^2+y^2 is invariant at both groups
+  (nsq_invariant_on_c4_words, _on_d4_words); x^2-y^2 is not, and it
+  SIGN-FLIPS at the generator r (diffsq_not_c4_invariant,
+  diffsq_flips_under_r).  BELT AND BRACES IN OPPOSITE DIRECTIONS:
+  MLPolyExtract.fs checks all |G| <= 8 elements, this file proves the
+  generators would have sufficed.  The polynomial layer is absent by
+  design -- f is an arbitrary function, so the lemma covers extracted
+  normal forms by being indifferent to them.
+- BladeRepStatus.v (18): NEW -- soundness of the typed representation-status
+  transfer table, plan-equivariance-in-types.md stage B4 (src/ml/compiler/
+  MLEquiv.fs's `judge`).  Modeled abstractly (no concrete group, no
+  concrete representation): a function of a G-set input is INVARIANT if it
+  cannot see the action, and TRANSFORMS AS a representation rho if moving
+  the input by g is the same as applying rho g to the output -- exactly
+  MLEquiv's Inv / Rep spec conditional-theorem reading.  One theorem per
+  transfer-table row that ever answers Rep or Inv: neg_covariant /
+  sum_covariant / diff_covariant (unary pass-through and Rep +/- Rep, same
+  spec -- diff derived from sum through negation via three bookkeeping
+  lemmas, rho_zero/rho_neg/group_idempotent_is_zero, that get from "rho is
+  additive" to "rho commutes with 0 and -"); scalar_scale_covariant
+  (Inv-scalar * Rep -> Rep); inv_closure_binop (Inv op Inv -> Inv, any
+  operator); const_invariant (literals); certified_call_sound and
+  certified_call_inv_arg_sound (the pinned-callee arm -- an equivariant F
+  composed with a covariant f stays covariant, with and without an extra
+  invariant argument); inv_call_inv (the uncertified-callee arm, modeled
+  over a list of arguments so one theorem covers every arity);
+  branch_agree_sound (ExprIf under joinStatus: invariant condition, arms
+  agreeing on the same rho); equivariance_downward + the
+  subgroup_action_and_representation corollary (the A3/D1 subgroup-meet
+  direction's soundness anchor -- not yet a MLEquiv table row).  Opaque
+  needs no theorem: it asserts nothing (closing remark in the file).

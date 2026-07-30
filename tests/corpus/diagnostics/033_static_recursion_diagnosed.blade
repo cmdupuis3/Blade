@@ -1,0 +1,55 @@
+// TEST: Static Recursion Diagnosed
+// ============================================================================
+// AN UNBOUNDED STATIC RECURSION IS REFUSED WITH A MESSAGE, NOT WITH A CORPSE.
+//
+//   `let static X` does not evaluate at compile time: Static evaluation:
+//   nesting depth limit exceeded (4096 levels - possible infinite recursion)
+//
+// What this file pins is REACHABILITY of a guard, which is an unusual thing
+// to need a test for, so the history is worth stating.
+//
+// `StaticEval` has always had a budget named `maxSteps`, always reported
+// "step limit exceeded (possible infinite recursion)" on exhausting it, and
+// always documented itself as counting steps. It did not count steps: the
+// number was threaded as `fuel - 1` into every CHILD of a node, so both
+// operands of a `+` received the same remainder from their parent, which
+// makes it a bound on evaluation DEPTH wearing a step bound's name. 100,000
+// nested evaluator frames exhaust even the 64 MB stack the compiler runs on
+// (Runtime.largeStackBytes, installed at Main.fs's runOnLargeStack), so the
+// diagnostic was unreachable for precisely the input it was written for. The
+// three lines below did not produce it. They produced `Stack overflow.` and
+// exit -1 — a StackOverflowException, which .NET does not let anyone catch,
+// so no wrapper anywhere in the compiler could have turned it back into a
+// diagnostic.
+//
+// THAT IS WHY THE PIN IS ON THE MESSAGE AND NOT MERELY ON REJECTION. A probe
+// that only asserted "this program is refused" would have passed in the
+// crashing regime too, for a sufficiently generous definition of refused:
+// the process does not accept the program, it simply also does not survive
+// it. The `// ERROR:` line below is what distinguishes the two, and the
+// diagnostics corpus is strict in both directions (Test_DiagCorpus), so it
+// also asserts that nothing ELSE is reported — the program is otherwise
+// well-formed, and `bomb` is a perfectly legal declaration.
+//
+// The budget is now two numbers, because there are two ways to run away and
+// neither bound implies the other: STEPS (`maxSteps`, shared across sibling
+// subexpressions — the work bound) and DEPTH (`maxDepth`, the evaluator's
+// own nesting — the survival bound). It is the depth guard that fires here,
+// correctly: `bomb` recurses without widening, so it runs out of stack
+// budget long before it runs out of work budget. The step bound is what
+// catches the other shape, `f(n) = g(n-1) + g(n-1)`, which does 2^depth work
+// inside any depth limit and which a depth bound alone would wave through;
+// Test_Static pins that half, since no corpus program can express "returned
+// eventually, but should not have".
+//
+// The counting layer's twin is index-types/156, where the same runaway sits
+// in a `where` conjunct and is caught per cell under the much smaller
+// `cellBudget`.
+// ============================================================================
+static function bomb(n: Int) -> Int = bomb(n + 1)
+
+let static X = bomb(0)
+
+function main() -> Int = X
+// ERROR: BL3999
+// ERROR-CONTAINS: nesting depth limit exceeded (4096 levels

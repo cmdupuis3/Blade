@@ -1,0 +1,23 @@
+// TEST: Body-local `let` scalar consumed by a broadcast in return position
+// Regression: the broadcast lowered to a loop nest whose body referenced the
+// binding by its SOURCE name (`a`), while the flattened IRLet chain had
+// emitted it as `__v<id>`. The scalar became a kernel CAPTURE, and the loop
+// nest's name map let `CaptureInfo.Name` OVERRIDE the emitted spelling, so
+// g++ saw `__ret[__i0] = (y____i0 * a);` with `a` never declared. Captures
+// are now a fallback: the enclosing scope's emitted name wins.
+// A function PARAMETER in the same slot always worked (params are not
+// captures), which is why this shape hid for so long.
+function scale_by_head(y: Array<Float like Idx<3>>) -> Array<Float like Idx<3>> = {
+    let a = y(0)
+    y * a
+}
+// Two-hop: the captured local is itself derived from another body-local.
+function scale_by_norm(y: Array<Float like Idx<3>>) -> Array<Float like Idx<3>> = {
+    let a = y(0)
+    let s = sqrt(a * a)
+    y * s
+}
+let out = scale_by_head([2.0, 3.0, 4.0])
+let out2 = scale_by_norm([2.0, 3.0, 4.0])
+// EXPECT: out = [4, 6, 8]
+// EXPECT: out2 = [4, 6, 8]

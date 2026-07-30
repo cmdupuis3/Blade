@@ -91,6 +91,12 @@ let mkDiagnostic code severity phase span message : Diagnostic =
 let mkError code phase span message : Diagnostic =
     mkDiagnostic code SevError phase span message
 
+/// Warning mirror of `mkError`. Non-fatal, but coded and spanned like every
+/// other diagnostic, so `Render.render` treats it identically — the checker's
+/// `emitWarning` channel builds these.
+let mkWarning code phase span message : Diagnostic =
+    mkDiagnostic code SevWarning phase span message
+
 let withNote (note: string) (d: Diagnostic) : Diagnostic =
     { d with Notes = d.Notes @ [ (None, note) ] }
 
@@ -135,6 +141,7 @@ module Codes =
             "BL3006", "unit mismatch"
             "BL3007", "invalid builtin argument"
             "BL3008", "struct construction error"
+            "BL3009", "rank deduction violation"
             "BL3999", "type error"
             // BL4xxx — constraints / static
             "BL4001", "constraint violation"
@@ -147,6 +154,31 @@ module Codes =
             "BL4008", "equivariance discipline violation"
             "BL4009", "galilean discipline violation"
             "BL4010", "confirm-and-pin storage suggestion"
+            // BL4011 was RESERVED and deliberately unregistered through five
+            // stages, held for the certificate-SUGGESTION channel of
+            // plan-transforms-as-types §4b (deduced-rep "propose, don't
+            // export"); stage 5a's Sₙ lattice took BL4012 rather than
+            // double-booking it — the BL4007 lesson. Stage 6a is that channel:
+            // MLEquiv runs the shipped checking judgment speculatively on
+            // uncertified functions and proposes the pin. A WARNING, always —
+            // an uncertified function is correct, just not proved equivariant,
+            // so nothing here can fail a build (and `--strict-pins`, which owns
+            // BL4010's storage decision, deliberately grows no BL4011 arm).
+            "BL4011", "equivariance certificate suggestion"
+            "BL4012", "permutation-equivariance discipline violation"
+            // BL4013 — the stage-3 CONTRADICTION errors, split out of BL3007's
+            // ~24-way "invalid builtin argument" bucket (TypeEnv.fs). A declared
+            // `comm` over a provably antisymmetric pair (or `antisymm` over a
+            // provably invariant one) is not a bad builtin argument: it is an
+            // annotation the deduction can prove wrong, and the one error whose
+            // fix is "remove the clause / wrap in reynolds".
+            "BL4013", "symmetry annotation contradicts body"
+            // BL4014 — BL4011's galilean twin: the inference pass runs the
+            // shipped galilean judgment speculatively (try-each-velocity-
+            // parameter) and proposes `where ml.galilean(u)`. A WARNING,
+            // always, for BL4011's reason — and like BL4011 it grows no
+            // `--strict-pins` arm: certificates own no storage decision.
+            "BL4014", "galilean certificate suggestion"
             // BL5xxx — elaborators
             "BL5000", "ml elaboration error"
             "BL5100", "ppl elaboration error"
@@ -172,6 +204,12 @@ module Codes =
             "BL9001", "internal compiler error"
             "BL9002", "internal codegen invariant violated"
             "BL9003", "internal lowering invariant violated"
+            // Two independent judgments of the same equivariance theorem — the
+            // elaboration-seam checker and the typecheck-resident walker —
+            // reached contradictory verdicts (plan-equivariance-in-types.md C1).
+            // The seam has already ACCEPTED the program, so this can never be
+            // the user's fault.
+            "BL9004", "internal deduction disagreement"
         ]
 
     /// Lookup view of registryEntries. Keep entries as the thing you edit.
@@ -275,7 +313,11 @@ module Render =
     /// Snippet block for one located span: gutter, source line, underline.
     /// Renders the span's first line only; a multi-line span underlines to
     /// the end of that line. Returns [] when no source is available.
-    let private snippet useColor (sm: SourceMap option) (span: Span) : string list =
+    /// `sev` is threaded in so the carets match the header's severity color:
+    /// this was hardcoded to SevError, which painted a warning's underline
+    /// bold-RED under a bold-YELLOW `warning[...]` label. Invisible to the
+    /// renderer goldens (all useColor = false), visible to every human.
+    let private snippet useColor (sev: Severity) (sm: SourceMap option) (span: Span) : string list =
         match sm |> Option.bind (fun m -> SourceMap.tryLinesFor m span.File) with
         | None -> []
         | Some lines ->
@@ -301,7 +343,7 @@ module Render =
                   sprintf "%s %s%s"
                       (gut (pad + " |"))
                       (String.replicate (startCol - 1) " ")
-                      (sevColor useColor SevError (String.replicate underlineLen "^")) ]
+                      (sevColor useColor sev (String.replicate underlineLen "^")) ]
 
     /// Full rustc-style rendering:
     ///   error[BL3001]: message
@@ -320,7 +362,7 @@ module Render =
         let locLines =
             if hasLocation d.Span then
                 sprintf "  %s %s" (gutterColor useColor "-->") (location d.Span)
-                :: snippet useColor sm d.Span
+                :: snippet useColor d.Severity sm d.Span
             else []
         let noteLines =
             d.Notes

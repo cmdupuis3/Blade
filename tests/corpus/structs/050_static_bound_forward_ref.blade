@@ -1,0 +1,63 @@
+// TEST: Struct Static Bound Forward Ref
+// ============================================================================
+// THE CONSTRUCTION-PATH TWIN of index-types/146, pinning that a field bound
+// naming a `let static` creates a STATIC DEPENDENCY that the resolver honors.
+//
+// `Plain { m = 2 }` mentions `Plain` and `m` and NO static, so the dependency
+// graph cannot see that `zz_lim` must be resolved first by reading the folding
+// expression alone. The edge has to be learned from the TYPE, by pulling in
+// the statics that its field bounds and declared conjuncts name. That edge was
+// missing once; this file is what says so if it goes missing again. It is also
+// a SEPARATE SEED from the consumption path (`idx_card`), so the two can
+// regress independently and both need pinning.
+//
+// THE NAMES ARE THE TEST. Read this before renaming anything below.
+//
+// Static resolution drains a Map in KEY order. A missing dependency edge is
+// therefore INVISIBLE whenever the depended-on static happens to sort before
+// the binding that consumes it — key order alone gets it right, and the file
+// passes with the edge logic deleted. Source order does not save you either:
+// the resolver does not read top-to-bottom, so declaring the static last is
+// necessary and nowhere near sufficient.
+//
+// So the consumers are named `a_*` and the static `zz_lim`: the consumers sort
+// FIRST under any comparer (ordinal, ordinal-ignore-case, culture-aware), so
+// without the edge they fold before `zz_lim` exists and fail with "undefined
+// variable 'zz_lim'". An earlier draft of this file used `LO` with consumers
+// `top`/`bot` — under ordinal comparison uppercase precedes lowercase, so `LO`
+// drained first and the file proved nothing about the mechanism it was
+// written for. It passed for the wrong reason, which is the failure mode this
+// header exists to prevent recurring.
+//
+// DO NOT rename these bindings to anything descriptive, and do not tidy the
+// `zz_lim` declaration upward. Both are load-bearing and both are invisible.
+//
+// The negative half is pinned separately (diagnostics/032, same naming
+// discipline): resolving the bound is not the same as ENFORCING it, and a fix
+// that restored visibility while dropping the conjunct would pass this file.
+// ============================================================================
+struct Plain {
+    m: Int<min=-zz_lim, max=zz_lim>
+}
+
+// Folds in the compile-time world, at the top of the range. Sorts before
+// `zz_lim` in key order, so only a real dependency edge can order this right.
+let static a_top = Plain { m = 2 }
+let a = a_top.m
+// EXPECT: a = 2
+
+// And at the bottom — `min=-zz_lim` needs the same edge through a unary minus.
+let static a_bot = Plain { m = -2 }
+let b = a_bot.m
+// EXPECT: b = -2
+
+// The static everything above depends on: declared last, and named to sort
+// last. Neither property is cosmetic.
+let static zz_lim = 2
+
+// The ordinary runtime path over the same declaration, for contrast: this one
+// never enters the compile-time world, so it exercises the synthesized guard
+// against a bound whose value still had to be resolved statically.
+let mid = Plain { m = 1 }
+let c = mid.m
+// EXPECT: c = 1

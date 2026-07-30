@@ -1,0 +1,140 @@
+// TEST: ML Equiv Point Group Certified
+import ml as ml
+// ============================================================================
+// THE SECOND BLOCK-SPEC MEMBER INSIDE THE CERTIFICATION LATTICE
+// (docs/plan-transforms-as-types.md §3.6's 5b subsection, §7 stage 5b-ii).
+//
+// `where ml.equiv(C4)` is the same conditional theorem `where ml.equiv(O3)` is,
+// one block-spec member over: IF every representation-typed argument really
+// transforms as its declared PgIrrepsIdx spec and the invariant arguments are
+// held fixed, THEN the result transforms as its declared spec. It is checked by
+// the SAME walker — §3.6's "no fourth walker" decision — because the polarity
+// table of the point-group discipline matches O(3)'s at every arm: sums of
+// equal reps are reps, scaling by an invariant is a rep, elementwise products
+// of two reps are not, raw component reads are not, and an uncertified callee
+// is an escape. (S_n diverges at almost every one of those, which is why it is
+// a sibling registry member with a walker of its own.)
+//
+// Every generator entry of the shipped registry lies in {0, +-1}, so every
+// equivariance shadow below is EXACT float equality, not a tolerance.
+// ============================================================================
+
+// --- 1. THE E PLANE AT C4: TWO WEIGHTS, AND THE SECOND ONE ROTATES ----------
+// End_{C4}(E) is C rather than R, so a certified layer on one E copy has two
+// free weights: f = w1*x + w2*(J x) with J = R90 baked in the table. Chaining
+// two of them, adding the two stages and scaling by an invariant is a
+// composition of admissible arms and nothing else.
+let static EC = [("E", 1)]
+let static WE = ml.pg_hom_dim("C4", EC, EC)
+// EXPECT: WE = 2
+
+function c4_chain(x: Array<Float like PgIrrepsIdx<C4, EC>>,
+                  w1: Array<Float like Idx<WE>>, w2: Array<Float like Idx<WE>>, s: Float)
+                  where ml.equiv(C4) -> Array<Float like PgIrrepsIdx<C4, EC>> = {
+    let h = ml.derive_pg_linear(C4, EC, EC, x, w1)
+    let g = ml.derive_pg_linear(C4, EC, EC, h, w2)
+    (h + g) * s
+}
+
+// Both stages are pure J at (0, 1): h = J(3,4) = (-4,3), g = J h = (-3,-4),
+// h + g = (-7,-1), doubled = (-14,-2).
+let y = c4_chain([3.0, 4.0], [0.0, 1.0], [0.0, 1.0], 2.0)
+// EXPECT: y = [-14, -2]
+
+// THE C4 SHADOW: rho(r) on an E copy is R90, i.e. (a, b) -> (-b, a). Feeding
+// the rotated input must rotate the output, and with integer generators the
+// pin is exact: R90(-14, -2) = (2, -14).
+let yr = c4_chain([0.0 - 4.0, 3.0], [0.0, 1.0], [0.0, 1.0], 2.0)
+// EXPECT: yr = [2, -14]
+
+// --- 2. THE SAME PLANE AT D4: ONE WEIGHT, TWO GENERATORS TO ANSWER TO -------
+// D4's E has the same dimension and the same R90 generator, but the added
+// mirror kills the complex structure, so End is R and the layer can only
+// scale. The certificate is correspondingly stronger: it holds under BOTH
+// generators.
+let static ED = [("E", 1)]
+let static WED = ml.pg_hom_dim("D4", ED, ED)
+// EXPECT: WED = 1
+
+function d4_chain(x: Array<Float like PgIrrepsIdx<D4, ED>>,
+                  w1: Array<Float like Idx<WED>>, w2: Array<Float like Idx<WED>>, s: Float)
+                  where ml.equiv(D4) -> Array<Float like PgIrrepsIdx<D4, ED>> = {
+    let h = ml.derive_pg_linear(D4, ED, ED, x, w1)
+    let g = ml.derive_pg_linear(D4, ED, ED, h, w2)
+    (h + g) * s
+}
+
+// h = 2(3,4) = (6,8), g = -3h = (-18,-24), sum = (-12,-16), halved = (-6,-8).
+let z = d4_chain([3.0, 4.0], [2.0], [0.0 - 3.0], 0.5)
+// EXPECT: z = [-6, -8]
+
+// rho(r) = R90: (3,4) -> (-4,3), and R90(-6,-8) = (8,-6).
+let zr = d4_chain([0.0 - 4.0, 3.0], [2.0], [0.0 - 3.0], 0.5)
+// EXPECT: zr = [8, -6]
+// rho(s) = diag(1,-1): (3,4) -> (3,-4), and s(-6,-8) = (-6,8).
+let zs = d4_chain([3.0, 0.0 - 4.0], [2.0], [0.0 - 3.0], 0.5)
+// EXPECT: zs = [-6, 8]
+
+// --- 3. THE TRIVIAL-LABEL READ IS THE l = 0 READ -----------------------------
+// A static offset inside a block whose label acts trivially is an INVARIANT,
+// exactly as an (l = 0, even) offset is under equiv(O3) — and the trivial label
+// is identified from the frozen table (every generator matrix the identity),
+// never from its name. Here that is A1 at offset 0, so `y(0)` is a scalar the
+// judgment lets a nonlinearity touch.
+let static SD = [("A1", 1), ("E", 2)]
+let static WD = ml.pg_hom_dim("D4", SD, SD)
+// EXPECT: WD = 5
+
+function d4_readout(x: Array<Float like PgIrrepsIdx<D4, SD>>, w: Array<Float like Idx<WD>>)
+                    where ml.equiv(D4) -> Float = {
+    let y = ml.derive_pg_linear(D4, SD, SD, x, w)
+    let a = y(0)
+    sqrt(a * a) + a
+}
+
+// The A1 cell of the layer output is w(0)*x(0) = 2*1 = 2, so the readout is 4.
+let wd = [2.0, 3.0, 0.0 - 1.0, 0.5, 4.0]
+let inv0 = d4_readout([1.0, 2.0, 3.0, 4.0, 5.0], wd)
+// EXPECT: inv0 = 4
+
+// The certified conclusion, as two exact shadows. rho(r) on [A1 x 1, E x 2] is
+// [x0, x1, x2, x3, x4] -> [x0, -x2, x1, -x4, x3]; rho(s) is
+// [x0, x1, -x2, x3, -x4]. A D4-invariant readout does not move under either.
+let inv_r = d4_readout([1.0, 0.0 - 3.0, 2.0, 0.0 - 5.0, 4.0], wd)
+let inv_s = d4_readout([1.0, 2.0, 0.0 - 3.0, 4.0, 0.0 - 5.0], wd)
+let d_r = inv0 - inv_r
+let d_s = inv0 - inv_s
+// EXPECT: d_r = 0
+// EXPECT: d_s = 0
+
+// --- 4. THE ASYMMETRY, PINNED FROM THE OTHER SIDE ---------------------------
+// A PgIrrepsIdx buffer under equiv(O3) is an INVARIANT, and that is sound for
+// the reason the reverse is not: modules restrict along subgroup INCLUSIONS
+// and only in that direction. C4 is a subgroup of O(3), so an IrrepsIdx space
+// carries a genuine C4 action by restriction (which is why an IrrepsIdx
+// parameter under equiv(C4) is refused — corpus 048); nothing extends a
+// C4-module to an O(3)-module on the same coordinates, so "held fixed" is the
+// only reading available here and it is a premise the caller discharges, like
+// any weight buffer. Below, the C4 layer's output is a scalar factor on an
+// O(3)-equivariant one, and the O(3) theorem is untouched by it.
+let static SH1 = ml.sh_spec(1)
+
+function o3_with_pg(vx: Float, vy: Float, vz: Float,
+                    p: Array<Float like PgIrrepsIdx<C4, EC>>, pw: Array<Float like Idx<WE>>)
+                    where ml.equiv(O3) -> Float = {
+    let q = ml.derive_pg_linear(C4, EC, EC, p, pw)
+    let sh = ml.y_to(1, vx, vy, vz)
+    let n = ml.norms(SH1, sh)
+    n(1) * q(0)
+}
+
+// The O(3) premise is y_to's: (vx, vy, vz) are the components of the standard
+// vector, so the l = 1 norm is a rotation invariant. q = J(3,4) = (-4,3), so
+// the pg layer contributes the fixed factor q(0) = -4. Rotating the vector by
+// 90 degrees about z — (3,4,0) -> (-4,3,0) — leaves the readout bit-identical,
+// while the C4 buffer is held fixed throughout, which is precisely the
+// hypothesis the Inv classification records.
+let mixed = o3_with_pg(3.0, 4.0, 0.0, [3.0, 4.0], [0.0, 1.0])
+let mixed_rot = o3_with_pg(0.0 - 4.0, 3.0, 0.0, [3.0, 4.0], [0.0, 1.0])
+let d_mixed = mixed - mixed_rot
+// EXPECT: d_mixed = 0

@@ -1231,8 +1231,11 @@ let (|IxSymmetryLike|IxCompound|IxDep|IxRagged|IxDense|) (ix: IRIndexType) =
          // IxKIrreps is dense BY DESIGN: every cell of the irreps space is
          // stored (extent = total_dim(spec), no compression); the block
          // structure is type identity, not a storage/iteration class.
-         | IxKIrreps
-         | IxKErrorRaggedNoPrior | IxKErrorIrrepsBadSpec -> IxDense)
+         // IxKPgIrreps (the point-group member) is dense for exactly the same
+         // reason — extent = pg_total_dim(spec), every cell stored.
+         | IxKIrreps | IxKPgIrreps
+         | IxKErrorRaggedNoPrior | IxKErrorIrrepsBadSpec
+         | IxKErrorPgIrrepsBadSpec -> IxDense)
 
 type LoopLevelInfo = {
     ArrayIndex: int
@@ -1327,14 +1330,28 @@ let buildRawLoopLevels (arrayTypes: IRArrayType list) (sDimsPerArray: int list) 
 ///   - the argument sits in a comm group together with at least one OTHER
 ///     position holding the SAME array (identity; shared index spaces license
 ///     nothing: shared_units_insufficient),
-///   - it contributes >= 2 S-levels, ALL plain dense rank-1 records (SymNone,
-///     IxKPlain, no dependencies) — symmetric/ragged/dep/compound records do
-///     not fuse (their joint form needs unrank decode; such arguments simply
-///     do not group across positions), and
+///   - it contributes >= 2 S-levels, ALL rank-1 DENSE-STORED records (SymNone,
+///     no dependencies, IxKind ∈ {IxKPlain, IxKIrreps}) — symmetric/ragged/
+///     dep/compound records do not fuse (their joint form needs unrank decode;
+///     such arguments simply do not group across positions), and
 ///   - the source is a real array (not a range/reverse virtual).
 /// Identity partners share an array type, so eligibility is uniform across a
 /// group: every member fuses or none does — a fused level therefore always
 /// finds its partners fused.
+///
+/// IxKIrreps admitted at stage 4 (docs/plan-transforms-as-types.md §7 stage 4),
+/// which unlocks `comm` over multi-axis irreps arrays (per-node feature
+/// matrices, batch × IrrepsIdx). Soundness: an irreps axis is DENSE BY DESIGN —
+/// extent = total_dim(spec) = cardinality, every cell stored, no compaction
+/// bijection (see classifyIndexSpace's IxKIrreps arm) — so the fused axis is an
+/// honest row-major product of its factors' extents and §12.4's corrected joint
+/// doctrine applies verbatim; the block structure of an irreps space is TYPE
+/// IDENTITY, not a storage class, and iteration never consults it. What stays
+/// excluded is exactly what was excluded before: a SYMMETRIC (SymIdx-typed)
+/// factor stores only canonical cells, so extent ≠ cardinality and the compound
+/// index is not a dense row-major product — its sound joint form is the wreath
+/// product, not S_r over a flat compound (docs/future.md §4b.1). Widening the
+/// predicate any further than IxKind is therefore NOT sound.
 let fuseJointSLevels
     (identities: ArrayIdentity list)
     (commGroups: int list list)
@@ -1360,13 +1377,35 @@ let fuseJointSLevels
         |> List.collect (fun (arrIdx, lvls) ->
             let recs = if arrIdx < sRecordsByArray.Length then sRecordsByArray.[arrIdx] else []
             let isVirtual = arrIdx < arrayTypes.Length && arrayTypes.[arrIdx].IsVirtual
+            // Dense rank-1 factors only. IxKPlain and IxKIrreps are the two
+            // kinds whose extent IS their cardinality (stage 4); every other
+            // kind either compacts (Sym/Antisym/compound), varies per row
+            // (ragged/dep), or is a synthetic slot — none of which decode as a
+            // row-major product. Symmetry must be SymNone independently of the
+            // kind: a symmetric record is the wreath-product case, deferred.
+            // IxKPgIrreps (stage 5b-i) satisfies the same "extent IS
+            // cardinality" premise, but is deliberately NOT admitted here yet:
+            // fusion is an OPTIMIZATION, its absence only costs the joint
+            // compound axis, and admitting a second block-spec member to this
+            // path is a separate pin (the stage-4 admission of IxKIrreps came
+            // with its own corpus). Not fusing is the pre-stage-4 behaviour.
+            let isDenseFusableKind (k: IxKind) =
+                match k with
+                | IxKPlain | IxKIrreps -> true
+                | _ -> false
             let allPlainDense =
                 recs.Length = lvls.Length &&
                 recs |> List.forall (fun r ->
-                    r.Rank = 1 && r.Symmetry = SymNone && r.IxKind = IxKPlain &&
+                    r.Rank = 1 && r.Symmetry = SymNone && isDenseFusableKind r.IxKind &&
                     List.isEmpty r.Dependencies)
             if not isVirtual && lvls.Length >= 2 && hasIdentityPartner arrIdx && allPlainDense then
                 let rep = List.head lvls
+                // The fused axis is ANONYMOUS: Tag = None (and, on the output
+                // record deduceOutputType builds from these factors,
+                // IxKind = IxKPlain). A batch × irreps product is NOT an irreps
+                // space — the compound coordinate mixes a representation index
+                // with a non-representation one, so no spec describes it
+                // (plan-transforms-as-types §6.3(iii), decided at stage 4).
                 [ { rep with
                       LocalDimIndex = 0
                       RankIndex = 0
@@ -2088,12 +2127,26 @@ let deduceOutputType
                                         match a, b with
                                         | IRLit (IRLitInt x), IRLit (IRLitInt y) -> IRLit (IRLitInt (x * y))
                                         | _ -> IRBinOp (IRElementwise, IRMul, a, b))
+                        // The compound axis is ANONYMOUS and PLAIN. Tag = None
+                        // AND IxKind = IxKPlain must BOTH be stamped, not just
+                        // inherited from the template factor: since stage 4
+                        // admits IxKIrreps factors, a template-inherited
+                        // IxKIrreps beside Tag = None would break the
+                        // Tag↔IxKind agreement the IR validator enforces
+                        // (ixKindOfTag None = IxKPlain), and would falsely
+                        // advertise a spec the compound axis does not have.
+                        // §6.3(iii), decided at stage 4: a batch × irreps (or
+                        // irreps × irreps) product is NOT an irreps space — the
+                        // joint coordinate ranges over tuples, which carry no
+                        // single-space representation structure. Dependencies
+                        // are empty by fusion eligibility.
                         let template = List.head factors
                         result <- result @ [{ template with
                                                 Extent = prodExtent
                                                 Rank = groupRank
                                                 Symmetry = groupSymmetry
                                                 Tag = None
+                                                IxKind = IxKPlain
                                                 Id = builder.FreshId() }]
                     | Some factors ->
                         // Defensive: a lone fused level cannot occur by
@@ -5503,10 +5556,36 @@ let isInlineForm (e: IRExpr) : bool =
 /// before the outer loop consumes it — exactly as writing the intermediate
 /// `let` by hand would. Deliberately narrow: it does NOT list the blessed inline
 /// forms, so their existing auto-materialize path stays untouched.
+///
+/// Array-typed APPLICATION and partial-INDEX operands are included for the same
+/// reason — `f(x) + g(x)` (both operands calls) and `m(0) + m(1)` (both operands
+/// row views) equally leave the nest with no named array to read. A call operand
+/// must also be evaluated exactly once rather than re-invoked per element. This
+/// mirrors the `materialize` helper in `lowerArrayBinOpsModule`, which covers the
+/// raw-`IRBinOp` half of the same problem. Fully-indexed reads are scalar, so
+/// they fail the array-type test and stay inline.
 let private isNestedLoopComputeArg (e: IRExpr) : bool =
+    let isArrayTyped () =
+        match typeOf e with
+        | ArrayElem _ -> true
+        | _ -> false
     match e with
     | IRCompute _ -> true
     | IRApp (IRObjectFor _, _, _) -> true
+    | IRApp _ | IRIndex _ -> isArrayTyped ()
+    | _ -> false
+
+/// An INLINE array literal sitting directly in a loop form's `Arrays` list —
+/// e.g. the right operand of `yr - [2.0, -14.0]`. Same gap as
+/// `isNestedLoopComputeArg`: the blessed-position exemption assumes codegen's
+/// auto-materialize covers the slot, but that arm only knows the inline
+/// mask/intersect/union/unique forms. An IRArrayLit falls through to the
+/// `arr<i>` placeholder and the nest peels an identifier that was never
+/// declared. Hoisting it to its own let-RHS routes it through the ordinary
+/// array-literal emission, exactly as let-binding it by hand would.
+let private isInlineArrayLitArg (e: IRExpr) : bool =
+    match e with
+    | IRArrayLit _ -> true
     | _ -> false
 
 /// Path B / Phase D: peel any IRLet chain that descendant lifts produced.
@@ -5890,7 +5969,7 @@ let rec liftExpr (builder: IRBuilder) (expr: IRExpr) : IRExpr =
         let (binds, arraysFinal) =
             arrays' |> List.fold (fun (accB, accA) a ->
                 let (peeled, inner) = peelLetChain a
-                if isArrayFieldAccess inner || isNestedLoopComputeArg inner then
+                if isArrayFieldAccess inner || isNestedLoopComputeArg inner || isInlineArrayLitArg inner then
                     let id = builder.FreshId()
                     let ty = typeOf inner
                     (accB @ peeled @ [(id, ty, inner)], accA @ [IRVar (id, ty)])
@@ -5906,7 +5985,7 @@ let rec liftExpr (builder: IRBuilder) (expr: IRExpr) : IRExpr =
         let (binds, arraysFinal) =
             arrays' |> List.fold (fun (accB, accA) a ->
                 let (peeled, inner) = peelLetChain a
-                if isArrayFieldAccess inner || isNestedLoopComputeArg inner then
+                if isArrayFieldAccess inner || isNestedLoopComputeArg inner || isInlineArrayLitArg inner then
                     let id = builder.FreshId()
                     let ty = typeOf inner
                     (accB @ peeled @ [(id, ty, inner)], accA @ [IRVar (id, ty)])
@@ -5922,7 +6001,7 @@ let rec liftExpr (builder: IRBuilder) (expr: IRExpr) : IRExpr =
         let (binds, arraysFinal) =
             arrays' |> List.fold (fun (accB, accA) a ->
                 let (peeled, inner) = peelLetChain a
-                if isArrayFieldAccess inner || isNestedLoopComputeArg inner then
+                if isArrayFieldAccess inner || isNestedLoopComputeArg inner || isInlineArrayLitArg inner then
                     let id = builder.FreshId()
                     let ty = typeOf inner
                     (accB @ peeled @ [(id, ty, inner)], accA @ [IRVar (id, ty)])
@@ -6146,13 +6225,29 @@ and ppIndexType (idx: IRIndexType) =
         | IRParam (name, _, _) -> name
         | _ -> "?"
     match idx with
-    | IrrepsIdxLike rendered -> rendered
+    | IrrepsIdxLike rendered -> ppIrrepsPower idx rendered
+    | PgIrrepsIdxLike rendered -> ppIrrepsPower idx rendered
     | _ ->
         match idx.Symmetry with
         | SymNone -> sprintf "Idx<%s>" extentStr
         | SymSymmetric -> sprintf "SymIdx<%d, %s>" idx.Rank extentStr
         | SymAntisymmetric -> sprintf "AntisymIdx<%d, %s>" idx.Rank extentStr
         | SymHermitian -> sprintf "HermitianIdx<%s>" extentStr
+
+/// Render an irreps-identity record whose Symmetry/Rank make it a symmetric
+/// POWER of that irreps space (`SymIdx<k, IrrepsIdx<s>>` — writable since
+/// stage 3 of plan-transforms-as-types, and what deduceOutputType infers for
+/// a comm group over irreps-typed inputs). A plain rank-1 irreps index prints
+/// as its own base form. Shared by both index printers so a diagnostic never
+/// shows the base while hiding the power — and by both BLOCK-SPEC members
+/// (IrrepsIdxLike and PgIrrepsIdxLike), since the power wrapper is about
+/// Symmetry/Rank and says nothing about which member the base belongs to.
+and ppIrrepsPower (idx: IRIndexType) (renderedBase: string) =
+    match idx.Symmetry with
+    | SymSymmetric -> sprintf "SymIdx<%d, %s>" idx.Rank renderedBase
+    | SymAntisymmetric -> sprintf "AntisymIdx<%d, %s>" idx.Rank renderedBase
+    | SymHermitian -> sprintf "HermitianIdx<%s>" renderedBase
+    | SymNone -> renderedBase
 
 // (ppElemType removed in Phase B6: unused after ppIRType was made recursive
 // over IRType in Phase B2. The primitive-only printer is no longer needed
@@ -6185,7 +6280,8 @@ and ppIndexTypeIn (names: Map<IRId, string>) (idx: IRIndexType) =
             | IRParam (name, _, _) -> name
             | _ -> "?"
     match idx with
-    | IrrepsIdxLike rendered -> rendered
+    | IrrepsIdxLike rendered -> ppIrrepsPower idx rendered
+    | PgIrrepsIdxLike rendered -> ppIrrepsPower idx rendered
     | _ ->
         match idx.Symmetry with
         | SymNone -> sprintf "Idx<%s>" extentStr

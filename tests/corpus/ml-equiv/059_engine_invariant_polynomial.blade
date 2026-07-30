@@ -1,0 +1,106 @@
+// TEST: ML Equiv Engine Invariant Polynomial
+import ml as ml
+// ============================================================================
+// THE ENGINE'S INVARIANCE ARM, AND THE ℚ[atoms] COEFFICIENT RING
+// (docs/plan-transforms-as-types.md §7 stage 6b).
+//
+// A certified function returning `Float` claims INVARIANCE: the output action
+// is the one-dimensional trivial representation, so the discharge compares
+// f(ρ(g)·x) with f(x) itself. `x(0)² + x(1)²` on a C4 E copy is the textbook
+// case — every group element is orthogonal, so the squared norm does not move
+// — and composition cannot see it, because reading `x(0)` at all is reading a
+// basis-dependent number (corpus 050's rule, correct and unhelpful here).
+//
+// THE SECOND HALF is the coefficient ring. Invariant parameters are HELD FIXED
+// by the certificate's own hypothesis, so the extractor enters them as opaque
+// ATOMS and the coefficients live in ℚ[atoms] rather than ℚ. The identity is
+// then required for ALL atom values, which is stronger than requiring it at
+// the caller's actual weights — and it is the right strength, because "held
+// fixed but arbitrary" is exactly what the conditional theorem promises.
+// Without atoms every weighted hand-written layer would be out of scope.
+// ============================================================================
+let static EC = [("E", 1)]
+let static AC = [("A", 1)]
+
+// --- 1. THE SQUARED NORM ----------------------------------------------------
+function normsq(x: Array<Float like PgIrrepsIdx<C4, EC>>)
+                where ml.equiv(C4) -> Float =
+    x(0) * x(0) + x(1) * x(1)
+
+let n0 = normsq([3.0, 4.0])
+// EXPECT: n0 = 25
+// The four C4 elements applied to (3, 4): e, r, r², r³ give (3,4), (−4,3),
+// (−3,−4), (4,−3). A C4 invariant is bit-identical on all four.
+let n1 = normsq([0.0 - 4.0, 3.0])
+let n2 = normsq([0.0 - 3.0, 0.0 - 4.0])
+let n3 = normsq([4.0, 0.0 - 3.0])
+let d1 = n0 - n1
+let d2 = n0 - n2
+let d3 = n0 - n3
+// EXPECT: d1 = 0
+// EXPECT: d2 = 0
+// EXPECT: d3 = 0
+
+// --- 2. THE SAME MAP, LANDING IN A TRIVIAL LABEL ----------------------------
+// A's every generator matrix is the identity, so an A-labelled cell IS an
+// invariant slot: returning the squared norm as `PgIrrepsIdx<C4, [("A", 1)]>`
+// is the same theorem with a 1×1 identity output action, written as a rep.
+function normsq_a(x: Array<Float like PgIrrepsIdx<C4, EC>>)
+                  where ml.equiv(C4) -> Array<Float like PgIrrepsIdx<C4, AC>> =
+    [x(0) * x(0) + x(1) * x(1)]
+
+let a0 = normsq_a([3.0, 4.0])
+// EXPECT: a0 = [25]
+let a1 = normsq_a([0.0 - 4.0, 3.0])
+// EXPECT: a1 = [25]
+
+// --- 3. ℚ[atoms]: A SCALAR WEIGHT ------------------------------------------
+// `w` is invariant, so it enters the normal form as an atom and rides through
+// every coefficient untouched. The discharge never evaluates it: the identity
+// holds as a polynomial in w, which is what "the caller holds it fixed" means.
+function weighted(x: Array<Float like PgIrrepsIdx<C4, EC>>, w: Float)
+                  where ml.equiv(C4) -> Float =
+    w * (x(0) * x(0) + x(1) * x(1))
+
+let w0 = weighted([3.0, 4.0], 2.0)
+// EXPECT: w0 = 50
+let w1 = weighted([0.0 - 4.0, 3.0], 2.0)
+let dw = w0 - w1
+// EXPECT: dw = 0
+
+// --- 4. ℚ[atoms]: CELLS OF AN INVARIANT ARRAY -------------------------------
+// A statically-indexed cell of an invariant buffer is its own atom, so a
+// hand-written weighted quadratic reads as w(0)·x(0)² + w(0)·x(1)² + w(1)·x(0)·x(1)
+// … except that the LAST term is not invariant, so the certified body may only
+// carry the isotropic combination. Here both cells appear, in the two places
+// where they are legitimate: a scale on the invariant, and a scale on the
+// second invariant. (What the weights CANNOT do is break the isotropy — that
+// is corpus 060.)
+function weighted_arr(x: Array<Float like PgIrrepsIdx<C4, EC>>, w: Array<Float like Idx<2>>)
+                      where ml.equiv(C4) -> Float = {
+    let r2 = x(0) * x(0) + x(1) * x(1)
+    w(0) * r2 + w(1) * (r2 * r2)
+}
+
+// r² = 25, so 2·25 + 3·625 = 50 + 1875 = 1925.
+let v0 = weighted_arr([3.0, 4.0], [2.0, 3.0])
+// EXPECT: v0 = 1925
+let v1 = weighted_arr([0.0 - 4.0, 3.0], [2.0, 3.0])
+let dv = v0 - v1
+// EXPECT: dv = 0
+
+// --- 5. EXACT LITERAL DIVISION ----------------------------------------------
+// §3.5: coefficients are taken EXACTLY AS WRITTEN, and a literal DIVISION is
+// evaluated exactly in ℚ — `3.0 / 10.0` IS 3/10, not the double nearest 0.3.
+// Nothing here depends on the distinction (the identity holds for any
+// coefficient on an invariant), but the arithmetic path is the one the
+// near-miss diagnostic guards, so it is exercised.
+function scaled(x: Array<Float like PgIrrepsIdx<C4, EC>>)
+                where ml.equiv(C4) -> Float =
+    (3.0 / 10.0) * (x(0) * x(0) + x(1) * x(1))
+
+let s0 = scaled([3.0, 4.0])
+// EXPECT: s0 = 7.5
+let s1 = scaled([0.0 - 4.0, 3.0])
+let ds = s0 - s1
+// EXPECT: ds = 0

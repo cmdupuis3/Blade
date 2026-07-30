@@ -1,0 +1,26 @@
+// TEST: Idx Card Non Enumerable Field (rejects)
+// ============================================================================
+// The v1 fence: every field must be `Int` with static bounds. A `Float` field
+// has no enumeration — the solution set would not be finite, let alone
+// countable by box iteration — so the struct is refused rather than silently
+// enumerated over some invented discretization:
+//
+//   struct Mixed, field 'w': non-enumerable field type Float — an
+//   index-eligible struct needs every field Int with static bounds
+//
+// The refusal names the FIELD, not just the struct, because a record with
+// several fields gives no clue otherwise which one is the problem.
+//
+// Worth stating explicitly since it looks like an omission: this is a v1
+// eligibility boundary, not a claim that non-Int index types are impossible.
+// Sum-type fields (a `Parity` variant, the natural companion to these m-values)
+// are a NAMED deferral of the plan (§8.2) blocked on StaticValue having no
+// variant case; int parity is the shipped ops' own convention meanwhile, and
+// index-types/147 uses it that way.
+// ============================================================================
+static struct Mixed {
+    m: Int<min=-1, max=1>,
+    w: Float
+} where m + m == 0
+
+let static CARD = idx_card(Mixed)

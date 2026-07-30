@@ -1,0 +1,18 @@
+// TEST: Bounded Type Violated (aborts)
+// The RUNTIME world's half of bound enforcement, and the twin of
+// diagnostics/028: the same struct and the same violating value, refused by
+// the synthesized guard (TypeCheck.fs synthesizeStructChecks) instead of by
+// the static fold. The binding is a plain `let`, so the compile-time world is
+// never entered and the check lands in the generated C++ as a guard.
+//
+// Conjunct numbering matches the static world exactly — `declared @ bounds`,
+// 1-based, so `n <= 3` is conjunct 2 in BOTH worlds. That agreement is the
+// property worth pinning; the two messages differ only by the "(static, ...)"
+// marker.
+//
+// `max=3` is inclusive, so 4 is the first violating value.
+// ABORT: Constraint violation in Small (conjunct 2)
+struct Small {
+    n: Int<min=0, max=3>
+}
+let bad = Small { n = 4 }

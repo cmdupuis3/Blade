@@ -1,0 +1,11 @@
+// TEST: SymIdx over IrrepsIdx Nonstatic Spec (rejects)
+// ============================================================================
+// The base's spec argument must resolve under the same static contract it
+// obeys standalone (index-types/116). Building the symmetric-power record
+// re-stamps the LOWERED base, so the bad-spec marker planted by the
+// TyIrrepsIdx arm rides through the power untouched and the consumption-site
+// check still surfaces the rejection — the power does not launder a bad spec
+// into a plain rank-2 index.
+// ============================================================================
+let n = 4
+let bad: Array<Float like SymIdx<2, IrrepsIdx<n>>> = fill_random(3)

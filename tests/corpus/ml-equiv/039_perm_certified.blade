@@ -1,0 +1,94 @@
+// TEST: ML Perm Certified
+import ml as ml
+// ============================================================================
+// `where ml.perm_equiv(N)` — the THIRD certification lattice (MLPerm.fs,
+// docs/plan-transforms-as-types.md §3.6, §7 stage 5a-iii). A function carrying
+// it is PROVED equivariant under S_N relabelling a node axis of extent N.
+//
+// The abstract domain is N-GRADED: `Pow k` is a flat N^k buffer transforming
+// as sigma^(xk), and `Pow 0` is the invariant status. v1 reads a parameter's
+// status off its FLAT EXTENT — `Array<Float like Idx<M>>` is Pow k iff
+// M = N^k — which is why the weight buffers below (2 slots and 1 slot at
+// N = 4) are invariants while `x` (4 = 4^1) is node-covariant, and why the
+// L = 0 readout's one-cell `Idx<1>` result is Pow 0 (N^0 = 1).
+//
+// ----------------------------------------------------------------------------
+// THE POLARITY HEADLINE — the line this test exists for:
+//
+//     let s = h / (1.0 + h * h)
+//
+// applied DIRECTLY to the Pow-1 output of a derived layer, and ACCEPTED.
+// Under `where ml.equiv(O3)` that exact line is BL4008 twice over: `h * h` is
+// "elementwise product of representation-typed values is not equivariant — use
+// ml.tensor_product", and dividing one rep by another is "this operator is not
+// equivariant on representation-typed values" (corpus ml-equiv/006 is the
+// nonlinearity half of the same refusal).
+//
+// The reason for the opposite verdict is one sentence: A PERMUTATION MOVES
+// CELLS WITHOUT MIXING THEM, so every map applied cell-by-cell commutes with
+// it — sigma . f(x) = f(sigma . x) for pointwise f. The Wigner action of O(3)
+// mixes cells inside a block, so the same syntax is exactly what MLEquiv must
+// forbid. That is the polarity table of §3.6 as code, and it is the argument
+// for a SIBLING lattice rather than a group-parameterized payload on MLEquiv's:
+// two judgments wearing one type would have to disagree with themselves here.
+//
+// (Blade's scalar intrinsics are scalar-only — `exp(A)` on a whole array is a
+// type error, corpus intrinsics/006 — so the writable form of the pointwise
+// axiom is the whole-array elementwise operators used here. The softsign
+// x / (1 + x^2) is a genuine bounded pointwise nonlinearity, built out of them.)
+// ============================================================================
+let static W1 = ml.perm_weight_dim(1, 1, 4)
+let static W2 = ml.perm_weight_dim(1, 0, 4)
+let static B0 = ml.perm_bias_dim(0, 4)
+// EXPECT: W1 = 2
+// EXPECT: W2 = 1
+// EXPECT: B0 = 1
+
+// x : Pow 1 (extent 4 = 4^1) -- the node features
+// w1 : Pow 0 (extent 2, not a power of 4)  -- DeepSets weights
+// w2 : Pow 0 (extent 1 = 4^0)              -- the readout weight
+// b  : Pow 0 (extent 1 = 4^0)              -- the invariant constant
+// result : Pow 0 (extent 1 = 4^0)          -- the S_4-invariant readout
+function readout(x: Array<Float like Idx<4>>, w1: Array<Float like Idx<W1>>,
+                 w2: Array<Float like Idx<W2>>, b: Array<Float like Idx<B0>>)
+                 where ml.perm_equiv(4) -> Array<Float like Idx<1>> = {
+    let h = ml.derive_perm_linear(1, 1, 4, x, w1)
+    let s = h / (1.0 + h * h)
+    let y = ml.derive_perm_linear(1, 0, 4, s, w2)
+    let c = ml.derive_perm_bias(0, 4, b)
+    y + c
+}
+
+// h = w1(0)*x + w1(1)*sum(x) = 2*x - 4 = [-2, 0, -10, 4]  (the DeepSets layer)
+// s = h / (1 + h*h)          = [-0.4, 0, -10/101, 4/17]
+// y = w2(0)*sum(s)           = 2 * (-0.4 - 10/101 + 4/17)
+// out = y + b(0)
+let out = readout([1.0, 2.0, -3.0, 4.0], [2.0, 0.0 - 1.0], [2.0], [1.0])
+// EXPECT: out = [0.47256843331392]
+
+// The uncertified twin, written out longhand: same arithmetic, no theorem.
+let xt: Array<Float like Idx<4>> = [1.0, 2.0, -3.0, 4.0]
+let st = reduce(xt, (+))
+let ht = 2.0 * xt - st
+// EXPECT: ht = [-2, 0, -10, 4]
+let sf = ht / (1.0 + ht * ht)
+let twin = 2.0 * reduce(sf, (+)) + 1.0
+let dtwin = out(0) - twin
+// EXPECT: dtwin = 0
+
+// THE CERTIFICATE, shadowed: relabel the four nodes and the readout does not
+// move. The pin is a squared difference rather than exact equality only because
+// float addition is not associative and the accumulation visits the same four
+// summands in a different order.
+let perm = readout([4.0, 1.0, -3.0, 2.0], [2.0, 0.0 - 1.0], [2.0], [1.0])
+let dperm = out(0) - perm(0)
+let perm_ok = if dperm * dperm < 0.000000000000000000000001 then 1.0 else 0.0
+// EXPECT: perm_ok = 1.0
+
+// A second relabelling, and the bias arm exercised on its own: the constant
+// map is the whole of ml.perm_bias_dim(0, N) = 1 slot, so shifting b shifts the
+// readout by exactly that amount, under every relabelling.
+let perm2 = readout([0.0 - 3.0, 4.0, 2.0, 1.0], [2.0, 0.0 - 1.0], [2.0], [4.0])
+let dshift = perm2(0) - out(0) - 3.0
+let shift_ok = if dshift * dshift < 0.000000000000000000000001 then 1.0 else 0.0
+// EXPECT: shift_ok = 1.0

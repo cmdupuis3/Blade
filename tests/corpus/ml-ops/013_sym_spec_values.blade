@@ -1,0 +1,174 @@
+// TEST: ML Ops sym_spec / alt_spec Decomposition
+import ml as ml
+// ============================================================================
+// ml.sym_spec(SPEC, K) / ml.alt_spec(SPEC, K): the O(3) irrep decomposition of
+// Sym^K(V) / Lambda^K(V), by the integer WEIGHT-PEEL of
+// docs/plan-transforms-as-types.md §3.3 — a graded knapsack over the basis
+// weights (ascending in K for multisets, descending for subsets) followed by
+// highest-weight peeling per parity sector. No Wigner tables, no floating
+// point: this is character arithmetic over (weight, parity) histograms.
+//
+// The results are ordinary SPEC statics — merged-canonical, ascending by
+// (l, parity), exactly tp_spec's discipline — so they feed total_dim/hom_dim,
+// the irreps_* block accessors, and IrrepsIdx<> annotations. Spec-valued
+// statics do NOT echo in program output (only scalars do), so the exact
+// decomposition is pinned block by block through the accessors.
+//
+// THREE families of pin here.
+//
+// 1. THE DECOMPOSITION. Sym^2(A) = 2*(0,even) + (1,odd) + (2,even) and
+//    Lambda^2(A) = (1,even) + (1,odd) for A = one even scalar + one odd
+//    vector, hand-derived from Sym^2(V0 + V1) = Sym^2 V0 + V0 (x) V1 + Sym^2 V1
+//    with Sym^2(V_l) = sum_j V_{2j} and Lambda^2(V_l) = sum_j V_{2j-1}.
+//
+// 2. THE CARDINALITY CROSS-CHECK. total_dim(sym_spec(s,K)) = C(n+K-1, K) and
+//    total_dim(alt_spec(s,K)) = C(n, K), n = total_dim(s) — the Coq-proved
+//    `storage_cardinality` of SymIdx<K, IrrepsIdx<s>>. The compiler asserts
+//    this internally on every call; these pins make it visible.
+//
+// 3. THE CROSS-STAGE THEOREM. poly_weight_dim(S, 2, tp_spec(S,S)) counts the
+//    degree-2 equivariant hypothesis space by CHARACTERS (dim Hom_G(Sym^2 V, W),
+//    stage 2); sym_tp_weight_dim(S) counts it by CG PATHS with the S2
+//    compaction rule (stage 1). They are the same theorem reached two ways and
+//    must agree exactly — 7 / 28 / 29 on the three anchor specs, with the
+//    Lambda^2 halves at 3 / 20 / 14.
+// ============================================================================
+let static A = [(0, 0, 1), (1, 1, 1)]
+let static B = [(1, 1, 2)]
+let static C = [(0, 0, 2), (1, 1, 1)]
+
+// --- 1. the Sym^2 / Lambda^2 decomposition of A, block by block --------------
+let static SYMA2 = ml.sym_spec(A, 2)
+let static NSYMA2 = ml.irreps_len(SYMA2)
+let static SL0 = ml.irreps_l(SYMA2, 0)
+let static SP0 = ml.irreps_parity(SYMA2, 0)
+let static SM0 = ml.irreps_mult(SYMA2, 0)
+let static SL1 = ml.irreps_l(SYMA2, 1)
+let static SP1 = ml.irreps_parity(SYMA2, 1)
+let static SM1 = ml.irreps_mult(SYMA2, 1)
+let static SL2 = ml.irreps_l(SYMA2, 2)
+let static SP2 = ml.irreps_parity(SYMA2, 2)
+let static SM2 = ml.irreps_mult(SYMA2, 2)
+// sym_spec(A, 2) = [(0, 0, 2), (1, 1, 1), (2, 0, 1)]
+// EXPECT: NSYMA2 = 3
+// EXPECT: SL0 = 0
+// EXPECT: SP0 = 0
+// EXPECT: SM0 = 2
+// EXPECT: SL1 = 1
+// EXPECT: SP1 = 1
+// EXPECT: SM1 = 1
+// EXPECT: SL2 = 2
+// EXPECT: SP2 = 0
+// EXPECT: SM2 = 1
+
+let static ALTA2 = ml.alt_spec(A, 2)
+let static NALTA2 = ml.irreps_len(ALTA2)
+let static AL0 = ml.irreps_l(ALTA2, 0)
+let static AP0 = ml.irreps_parity(ALTA2, 0)
+let static AM0 = ml.irreps_mult(ALTA2, 0)
+let static AL1 = ml.irreps_l(ALTA2, 1)
+let static AP1 = ml.irreps_parity(ALTA2, 1)
+let static AM1 = ml.irreps_mult(ALTA2, 1)
+// alt_spec(A, 2) = [(1, 0, 1), (1, 1, 1)] — the even copy is the CROSS PRODUCT
+// (V1 (x) V1 antisymmetric part, parity odd*odd = even), the odd copy is
+// V0 (x) V1.
+// EXPECT: NALTA2 = 2
+// EXPECT: AL0 = 1
+// EXPECT: AP0 = 0
+// EXPECT: AM0 = 1
+// EXPECT: AL1 = 1
+// EXPECT: AP1 = 1
+// EXPECT: AM1 = 1
+
+// K = 1 must reproduce the spec itself (Sym^1 V = V).
+let static SYMA1 = ml.sym_spec(A, 1)
+let static N1 = ml.irreps_len(SYMA1)
+let static K1L0 = ml.irreps_l(SYMA1, 0)
+let static K1P0 = ml.irreps_parity(SYMA1, 0)
+let static K1M0 = ml.irreps_mult(SYMA1, 0)
+let static K1L1 = ml.irreps_l(SYMA1, 1)
+let static K1P1 = ml.irreps_parity(SYMA1, 1)
+let static K1M1 = ml.irreps_mult(SYMA1, 1)
+// EXPECT: N1 = 2
+// EXPECT: K1L0 = 0
+// EXPECT: K1P0 = 0
+// EXPECT: K1M0 = 1
+// EXPECT: K1L1 = 1
+// EXPECT: K1P1 = 1
+// EXPECT: K1M1 = 1
+
+// --- 2. cardinality: total_dim = C(n+K-1, K) / C(n, K), n = 4 ----------------
+let static TDS2 = ml.total_dim(SYMA2)
+let static TDA2 = ml.total_dim(ALTA2)
+let static TDS3 = ml.total_dim(ml.sym_spec(A, 3))
+let static TDS4 = ml.total_dim(ml.sym_spec(A, 4))
+let static TDA3 = ml.total_dim(ml.alt_spec(A, 3))
+let static TDA4 = ml.total_dim(ml.alt_spec(A, 4))
+// C(5,2)=10, C(4,2)=6, C(6,3)=20, C(7,4)=35, C(4,3)=4, C(4,4)=1
+// EXPECT: TDS2 = 10
+// EXPECT: TDA2 = 6
+// EXPECT: TDS3 = 20
+// EXPECT: TDS4 = 35
+// EXPECT: TDA3 = 4
+// EXPECT: TDA4 = 1
+
+// The top exterior power of a 4-dimensional V is the DETERMINANT LINE: one
+// copy of l=0, with parity = the sum of all four basis parities = 0 + 1+1+1 = 1
+// (mod 2). A pseudoscalar, not a scalar — Lambda^4(A) = [(0, 1, 1)].
+let static ALTA4 = ml.alt_spec(A, 4)
+let static NDET = ml.irreps_len(ALTA4)
+let static DETL = ml.irreps_l(ALTA4, 0)
+let static DETP = ml.irreps_parity(ALTA4, 0)
+let static DETM = ml.irreps_mult(ALTA4, 0)
+// EXPECT: NDET = 1
+// EXPECT: DETL = 0
+// EXPECT: DETP = 1
+// EXPECT: DETM = 1
+
+// --- 3. the cross-stage theorem: characters (stage 2) vs paths (stage 1) -----
+let static TPA = ml.tp_spec(A, A)
+let static PWA = ml.poly_weight_dim(A, 2, TPA)
+let static SWA = ml.sym_tp_weight_dim(A)
+let static HAA = ml.hom_dim(ALTA2, TPA)
+let static AWA = ml.alt_tp_weight_dim(A)
+// EXPECT: PWA = 7
+// EXPECT: SWA = 7
+// EXPECT: HAA = 3
+// EXPECT: AWA = 3
+
+let static TPB = ml.tp_spec(B, B)
+let static PWB = ml.poly_weight_dim(B, 2, TPB)
+let static SWB = ml.sym_tp_weight_dim(B)
+let static HAB = ml.hom_dim(ml.alt_spec(B, 2), TPB)
+let static AWB = ml.alt_tp_weight_dim(B)
+let static TDSB = ml.total_dim(ml.sym_spec(B, 2))
+// n = 6, C(7,2) = 21; the Cauchy split Sym^2(A (x) U) = Sym^2 A (x) Sym^2 U +
+// Lambda^2 A (x) Lambda^2 U is what makes the multiplicity-2 counts come out.
+// EXPECT: PWB = 28
+// EXPECT: SWB = 28
+// EXPECT: HAB = 20
+// EXPECT: AWB = 20
+// EXPECT: TDSB = 21
+
+let static TPC = ml.tp_spec(C, C)
+let static PWC = ml.poly_weight_dim(C, 2, TPC)
+let static SWC = ml.sym_tp_weight_dim(C)
+let static HAC = ml.hom_dim(ml.alt_spec(C, 2), TPC)
+let static AWC = ml.alt_tp_weight_dim(C)
+let static TDSC = ml.total_dim(ml.sym_spec(C, 2))
+// n = 5, C(6,2) = 15
+// EXPECT: PWC = 29
+// EXPECT: SWC = 29
+// EXPECT: HAC = 14
+// EXPECT: AWC = 14
+// EXPECT: TDSC = 15
+
+// --- the spec static is writable in an IrrepsIdx<> annotation ----------------
+// and derive_linear over it IS the degree-2 synthesis: PWA = 7 weights, the
+// complete Schur basis of Hom_G(Sym^2 V_A, tp_spec(A,A)). (The vector below is
+// an arbitrary Sym^2-typed value, not a lifted one — the monomial-basis change
+// of coordinates is stage 3's job.)
+let u: Array<Float like IrrepsIdx<SYMA2>> = [1.0, 2.0, -0.5, 0.25, 4.0, -1.0, 0.5, 0.25, -0.125, 0.0625]
+let wl = [0.3, -0.7, 1.1, 0.9, -1.3, 0.4, 2.0]
+let z: Array<Float like IrrepsIdx<TPA>> = ml.derive_linear(SYMA2, TPA, wl, u)
+// EXPECT: z = [-1.1, 2.9, 0, 0, 0, 0.65, -0.325, -5.2, -0.2, 0.1, 1.6, -2, 1, 0.5, -0.25, 0.125]

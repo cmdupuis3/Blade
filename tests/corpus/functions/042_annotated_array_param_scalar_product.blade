@@ -1,0 +1,14 @@
+// TEST: Annotated Array Param Scalar Product
+// The way 040's program is meant to be written: the rank the caller wants is
+// stated on the PARAMETER, where it closes the declaration outright instead
+// of waiting on a broadcast that never propagates it backwards. Same body,
+// same call, and it computes.
+//
+// Kept next to 040/041 so the pair is a real fork and not a dead end: the
+// rejection there costs the user one annotation, and this is the annotation.
+function f(x: Array<Float like Idx<4>>, s: Float) -> Array<Float like Idx<4>> =
+    x * s
+
+let xv = [1.0, 4.0, 0.0 - 2.0, 6.0]
+let r = f(xv, 2.0)
+// EXPECT: r = [2, 8, -4, 12]

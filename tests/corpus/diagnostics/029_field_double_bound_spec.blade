@@ -1,0 +1,16 @@
+// TEST: Field Double Bound Spec
+// ============================================================================
+// The two bound spellings coexist but may not be combined ON ONE FIELD. This
+// is a parse-time refusal with the caret on the `in`.
+//
+// It is worth an error rather than a precedence rule because the two
+// spellings differ in INCLUSIVITY — `in 0 .. 3` is half-open and `min=0` is
+// inclusive — so any silent winner would be a silent off-by-one for whichever
+// spelling the reader was thinking in. There is no defensible default, so the
+// language declines to pick one and says so.
+// ============================================================================
+struct Bad3 {
+    m: Int<min=0> in 0 .. 3
+}
+// ERROR: BL1999
+// ERROR-CONTAINS: has two bound specifications

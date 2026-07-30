@@ -1,0 +1,13 @@
+// TEST: Diag Equiv Unclassifiable Escape (diag)
+// ERROR: BL4008
+// ERROR-CONTAINS: cannot classify the argument to 'helper' inside an equiv-certified body
+// The CODE+TEXT pin for the Opaque half of the equiv wording split
+// (ml-equiv/088 asserts the behavior but that category carries no ERROR
+// pins). The Rep half keeps "representation-typed value escapes", pinned
+// by 016.
+import ml as ml
+let static S = [(0, 0, 1), (1, 1, 1)]
+function helper(a: Float) -> Float = a * 2.0
+function bad(x: Array<Float like IrrepsIdx<S>>) where ml.equiv(O3) -> Float =
+    helper(x[1])
+let s = bad([2.0, 1.0, 1.0, 1.0])

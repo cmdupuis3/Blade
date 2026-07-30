@@ -1,0 +1,34 @@
+// TEST: Static Struct Bound Violation
+// ============================================================================
+// The STATIC world's half of bound enforcement. A constrained struct folding
+// in the compile-time world runs its conjuncts with the field values bound by
+// name and FAILS THE FOLD on violation (let-static assertion semantics,
+// StaticEval.fs:353-390) rather than deferring to a runtime guard. The
+// string-errored internal failure surfaces at the `let static` binding that
+// demanded the fold, as BL3999 — the compile-time-evaluation wrapper — with
+// the fold's own reason carried inside it. The CODE belongs to the binding
+// ("this `let static` did not evaluate"); the MESSAGE is the constraint
+// system's, and it is the message that carries the contract pinned below.
+//
+// The runtime world's twin is struct-aborts/011: same struct, same violating
+// value, guard instead of fold. Between them they pin BOTH readings of the
+// ONE conjunct list (Ast.fs:685 structConjuncts) — which is what stops the
+// two worlds drifting.
+//
+// CONJUNCT NUMBERING IS THE CONTRACT BEING PINNED HERE, not just the refusal.
+// structConjuncts is `declared @ boundConjuncts`: declared where-conjuncts
+// first in written order, then the desugared bounds in field-DECLARATION
+// order, Lo before Hi, 1-based in both worlds. `Small` declares no where-
+// conjuncts, so its list is [0 <= n; n <= 3] and the violated one is #2.
+// A flattening bug (R2) or a reordered desugar moves this index.
+//
+// `max=3` is INCLUSIVE, so n = 3 would be legal and n = 4 is the first
+// violation — the message below is therefore also an inclusivity pin.
+// ============================================================================
+struct Small {
+    n: Int<min=0, max=3>
+}
+
+let static bad = Small { n = 4 }
+// ERROR: BL3999
+// ERROR-CONTAINS: Constraint violation in Small (static, conjunct 2)

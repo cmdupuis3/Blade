@@ -1,0 +1,23 @@
+// TEST: AntisymIdx over IrrepsIdx Basic
+// ============================================================================
+// The antisymmetric twin of 134: `AntisymIdx<k, IrrepsIdx<spec>>` is writable
+// through the same parser arm and the same lowering helper (the two surface
+// forms differ only in the SymmetryClass stamped onto the base record).
+// Storage is the STRICT simplex i < j: C(5, 2) = 10 cells, against the
+// symmetric power's inclusive C(5+1, 2) = 15.
+//
+// Producer is the same-array antisym Reynolds (the only antisym-storage
+// constructor today, cf. index-types/050): with g = a - b already
+// antisymmetric, reynolds(g, Antisymmetric) = 2*(a - b).
+// ============================================================================
+let static spec = [(0, 0, 2), (1, 1, 1)]
+let x: Array<Float like IrrepsIdx<spec>> = [1.0, 2.0, 3.0, 4.0, 5.0]
+let L = method_for(x, x)
+let g = lambda(a, b) where comm(a, b) -> a - b
+let q: Array<Float like AntisymIdx<2, IrrepsIdx<spec>>> = L <@> reynolds(g, Antisymmetric) |> compute
+// 10 stored cells in lex order over i < j, value 2*(x[i] - x[j]):
+// EXPECT: q = [-2.0, -4.0, -6.0, -8.0, -2.0, -4.0, -6.0, -2.0, -4.0, -2.0]
+let stored = q(0, 1)
+let mirrored = q(1, 0)
+// EXPECT: stored = -2.0
+// EXPECT: mirrored = 2.0

@@ -1,0 +1,61 @@
+// TEST: ML Equiv Restrict Wrong Block (rejects)
+import ml as ml
+// ============================================================================
+// THE DECOMPOSITION IS NOT A REINTERPRETATION — THE LAYOUT TRAP
+// (docs/plan-equivariance-in-types.md stage A3.)
+//
+// `ml.pg_restrict("C4", [(1, 1, 1)])` is [("A", 1), ("E", 1)]: the l = 1 vector
+// space, decomposed into the C4-invariant axis direction and the rotating
+// plane. Having that table in hand, the obvious next move is to point a
+// `PgIrrepsIdx<C4, ...>` annotation at an O(3) buffer and carry on. THE TWO
+// LAYOUTS ARE NOT THE SAME BYTES, and this file is the trap that pins it.
+//
+//   O(3) layout — a block is ordered by m = -l..l, so the INVARIANT m = 0
+//                 component sits in the MIDDLE of the block, at index l, with
+//                 the m-pairs straddling it at l +- k. At l = 1 the order is
+//                 (y, z, x) and the C4-invariant z is at INDEX 1.
+//   pg layout   — a block is a label's copies laid out CONSECUTIVELY
+//                 (`pgBlockStarts`). At [A x 1, E x 1] the A cell is at INDEX 0
+//                 and the E pair occupies 1 and 2.
+//
+// No ORDERING of the restricted spec repairs this: the E pair is SPLIT by the A
+// component on the O(3) side, and a point-group block is contiguous by
+// construction. So the change of basis is a genuine permutation (with signs,
+// since an m-pair need not carry the table's chosen orientation of R90), which
+// is why stage A3 ships the table and NOT a type-level identity view, and why
+// an IrrepsIdx parameter under a point-group certificate is still refused
+// (corpus 048).
+//
+// SHARPENED (exploration-equivariant-bijections.md): that permutation has now
+// been constructed and verified against pgElementMatrix at every l <= 8 for
+// both registered groups — the IDENTITY view this file traps is unsound, but
+// the SIGNED-PERMUTATION view is exact, and the decided surface ships it as an
+// explicit `ml.restrict` compiled to a zero-copy view. This rejection stands
+// until that view exists; what it refuses is pretending the permutation is
+// the identity, not the possibility of a view.
+//
+// THE REJECTION BELOW IS THAT PERMUTATION, CAUGHT IN THE ACT. The body reads
+// index 1 of a value declared at the RESTRICTED type and calls it an invariant.
+// Index 1 would be the invariant if the buffer were still in the O(3) layout;
+// under the restricted layout it is the first cell of the E block, whose label
+// is not trivial — its generator matrix is R90, not the identity — so the read
+// is a basis-dependent number and the certificate is false.
+//
+// Reading index 0 instead is the correct spelling and is CERTIFIED — corpus 096
+// section 4/5 does exactly that. The one-cell difference between an accepted
+// program and this one is the whole argument for not shipping the lift.
+// ============================================================================
+let static V = [(1, 1, 1)]
+let static RV = ml.pg_restrict("C4", V)
+// RV = [("A", 1), ("E", 1)] — pinned in corpus 096 section 1.
+
+// Composition refuses the read (a cell outside a trivial-label block), and the
+// FINITE engine then confirms it semantically rather than syntactically: the
+// body is the polynomial x1, the declared output is the trivial rep, and the
+// identity f(rho(g) x) = f(x) fails at the generator r, which sends x1 to -x2.
+// BL4008 either way.
+function axis_readout(x: Array<Float like PgIrrepsIdx<C4, RV>>)
+                      where ml.equiv(C4) -> Float =
+    x(1)
+
+let out = axis_readout([1.0, 3.0, 4.0])

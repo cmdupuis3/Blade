@@ -1,0 +1,82 @@
+// TEST: ML Equiv Stamp Gated Conditional
+import ml as ml
+// ============================================================================
+// STAGE A1, the GROUP-CONDITIONAL stamps (docs/plan-equivariance-in-types.md
+// §3). Not every synthesized kernel is a full-O(3) construction: `gated` and
+// `scalars` both treat l = 0 entries as ordinary numbers, and O(3)'s improper
+// elements act on an l = 0 block as (-1)^parity. So the elaborator COMPUTES
+// the strongest group from the spec it was handed rather than pinning a
+// constant:
+//
+//   * `scalars` declares its result a plain Idx array — i.e. claims those
+//     entries are INVARIANTS. A parity-odd l = 0 entry is a pseudoscalar and
+//     flips under improper rotations, so the claim weakens to SO3.
+//   * `gated` silu's EVERY l = 0 block in place and uses the head block as
+//     the gate source. silu does not commute with a sign flip
+//     (silu(-s) = -s + s*sigmoid(s), while equivariance demands
+//     -silu(s) = -s*sigmoid(s); they agree only at s = 0), so any parity-odd
+//     l = 0 block anywhere in the spec weakens the claim to SO3.
+//   * `norms` needs no side condition at all: every O(3) irrep acts by an
+//     orthogonal matrix in the real basis and parity contributes only an
+//     overall sign, which the sum of squares annihilates. Always O3.
+//
+// NOTE ON THE gated PREDICATE. MLEquiv's seam arm for `gated` tests only
+// `spec.Head.Parity`, so a spec with an EVEN gate block and a parity-odd
+// l = 0 block elsewhere is accepted at the seam under equiv(O3) even though
+// the silu applied to that block breaks the claim. The stamp's predicate runs
+// over the whole spec, which is the sound reading and strictly more
+// conservative. Reported as an integration stitch; not patched from the
+// elaborator.
+//
+// As in 093/094 the stamps change no value, so this file pins values and the
+// stamps were probed by hand with a bogus-group build (PROBE 2026-07-28):
+// `blade check` reports `function '__ml_N': equiv(...) — unknown group` on
+// the GENERATED function, and with the real emitters restored the file checks
+// clean, i.e. Validate accepts both "O3" and "SO3" off the same emitter.
+//
+// Gate inputs are 0.0 throughout so sigmoid(0) = 0.5 exactly and every pin is
+// an exact binary fraction — no tolerance is doing any work here.
+// ============================================================================
+
+// --- 1. gated with an EVEN gate block: stamped O3 ---------------------------
+// SE head is (l=0, even, mult 2); the l=1 block is scaled by
+// sigmoid(x(0)) = 0.5 and the two scalars are silu'd to 0*0.5 = 0.
+let static SE = [(0, 0, 2), (1, 1, 1)]
+let xe: Array<Float like IrrepsIdx<SE>> = [0.0, 0.0, 0.0, 6.0, 8.0]
+let ge: Array<Float like IrrepsIdx<SE>> = ml.gated(SE, xe)
+// EXPECT: ge = [0.0, 0.0, 0.0, 3.0, 4.0]
+
+// --- 2. gated with a PSEUDOSCALAR gate block: stamped SO3 -------------------
+// Identical arithmetic, different spec: the head is (l=0, ODD, mult 2), so
+// the gates are pseudoscalars and only the SO(3) claim survives. The VALUES
+// are unchanged, which is the point — the stamp is a claim about the body,
+// not a change to it.
+let static SO = [(0, 1, 2), (1, 1, 1)]
+let xo: Array<Float like IrrepsIdx<SO>> = [0.0, 0.0, 0.0, 6.0, 8.0]
+let go: Array<Float like IrrepsIdx<SO>> = ml.gated(SO, xo)
+// EXPECT: go = [0.0, 0.0, 0.0, 3.0, 4.0]
+
+// --- 3. norms: stamped O3 under either spec --------------------------------
+// Per (block, multiplicity) 2-norms in (block, mu) order. The l=1 slot is a
+// 3-4-5 triangle, so the pin is exact.
+let ne = ml.norms(SE, ge)
+// EXPECT: ne = [0.0, 0.0, 5.0]
+let no = ml.norms(SO, go)
+// EXPECT: no = [0.0, 0.0, 5.0]
+
+// --- 4. scalars, both sides of the predicate -------------------------------
+// SQ has only parity-EVEN l = 0 blocks, so its exported entries really are
+// O(3) invariants: stamped O3.
+let static SQ = [(0, 0, 2), (1, 1, 1)]
+let xq: Array<Float like IrrepsIdx<SQ>> = [1.5, 0.0 - 2.5, 3.0, 4.0, 5.0]
+let sq = ml.scalars(SQ, xq)
+// EXPECT: sq = [1.5, -2.5]
+
+// SP carries a parity-ODD l = 0 block in third position — a pseudoscalar
+// among the exported "invariants" — so the same emitter stamps SO3. Note the
+// emitted offsets are block order then multiplicity order, which puts the
+// trailing (0, odd) block's single entry last: offsets [0; 4].
+let static SP = [(0, 0, 1), (1, 1, 1), (0, 1, 1)]
+let xp: Array<Float like IrrepsIdx<SP>> = [1.5, 2.0, 3.0, 4.0, 0.0 - 2.5]
+let sp = ml.scalars(SP, xp)
+// EXPECT: sp = [1.5, -2.5]

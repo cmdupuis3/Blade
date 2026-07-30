@@ -1,0 +1,26 @@
+// TEST: PgIrrepsIdx Alias Nominative (rejects)
+// ============================================================================
+// The pg replay of index-types/119, and the pin on the stage-3
+// registerTypeDecl alias fix carried over to the pg tag (§7's 5b-i checklist
+// item). Two `type` aliases of the SAME (group, spec) are DISTINCT types: the
+// alias name is folded INTO the pg identity tag rather than overwriting it,
+// so `Feat` and `Hidden` disagree even though the group, the labels, the
+// multiplicities and the extent all match exactly.
+//
+// Folding rather than overwriting is what keeps the payload alive: the plain-
+// index arm's `Tag = Some name` would drop the group AND the spec, leaving an
+// alias whose extent is an unresolved parameter and whose Tag/IxKind no longer
+// agree (a state the IR validator rejects). index-types/139 pins the other
+// half — an ANONYMOUS PgIrrepsIdx of the same (group, spec) stays compatible
+// with either alias, which is the name-permissive edge.
+// ============================================================================
+let static PS = [("A", 1), ("E", 2)]
+type Feat = PgIrrepsIdx<C4, PS>
+type Hidden = PgIrrepsIdx<C4, PS>
+
+function h(v: Array<Float like Hidden>) -> Float = {
+    v(0)
+}
+
+let a: Array<Float like Feat> = [1.0, 2.0, 3.0, 4.0, 5.0]
+let bad = h(a)

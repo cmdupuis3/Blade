@@ -89,7 +89,7 @@ let rec isIndexType (env: AliasEnv) (ty: TypeExpr) : bool =
     | TyIdx _ | TySymIdx _ | TyAntisymIdx _ | TyHermitianIdx _
     | TyBoundedIdx _ | TyEnumIdx _ | TyCompoundIdx _
     | TyDepIdx _ | TyRaggedIdx _ | TyRaggedIdxOpaque
-    | TyIrrepsIdx _
+    | TyIrrepsIdx _ | TyPgIrrepsIdx _
     | TyEquivIdx _ -> true
     | TyNamed (n, _) ->
         match Map.tryFind n env with
@@ -113,7 +113,7 @@ let isAnonymousIndexType (ty: TypeExpr) : bool =
     | TyIdx _ | TySymIdx _ | TyAntisymIdx _ | TyHermitianIdx _
     | TyBoundedIdx _ | TyEnumIdx _ | TyCompoundIdx _
     | TyDepIdx _ | TyRaggedIdx _ | TyRaggedIdxOpaque
-    | TyIrrepsIdx _
+    | TyIrrepsIdx _ | TyPgIrrepsIdx _
     | TyEquivIdx _ -> true
     | _ -> false
 
@@ -133,7 +133,7 @@ let rec isKnownStatic (env: AliasEnv) (ty: TypeExpr) : bool =
     match ty with
     | TyIdx _ | TySymIdx _ | TyAntisymIdx _ | TyHermitianIdx _
     | TyBoundedIdx _ | TyEnumIdx _ | TyEquivIdx _ -> true
-    | TyIrrepsIdx _ -> true  // spec is static by definition; extent folds to a literal
+    | TyIrrepsIdx _ | TyPgIrrepsIdx _ -> true  // spec is static by definition; extent folds to a literal
     | TyRaggedIdx _ | TyRaggedIdxOpaque | TyCompoundIdx _ -> false
     | TyDepIdx (outer, _, body) ->
         isKnownStatic env outer && isKnownStatic env body
@@ -331,7 +331,7 @@ let validateDecl (env: AliasEnv) (decl: Located<Decl>) : ValidationError list * 
         let newEnv = Map.add name body env
         (errs, newEnv)
 
-    | DeclType (TyDeclStruct (name, _, fields, _invariant)) ->
+    | DeclType (TyDeclStruct (name, _, fields, _invariant, _isStatic)) ->
         let declName = sprintf "in struct '%s'" name
         let errs =
             fields |> List.collect (fun f ->

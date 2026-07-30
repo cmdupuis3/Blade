@@ -1,0 +1,18 @@
+// TEST: ML Equiv Point Group Op Mismatch (rejects)
+import ml as ml
+// A C4-certified body building with a D4 layer. The synthesized kernel really
+// is D4-equivariant — that is not the problem; the problem is that a D4
+// theorem is not a C4 theorem, and the two groups' actions on the SAME
+// coordinates are different actions (C4's E is one R90 orbit, D4's is R90 plus
+// a mirror). Certificates do not transfer between groups, and the GROUP
+// argument is where that shows up at an op. BL4008.
+let static ED = [("E", 1)]
+let static WED = ml.pg_hom_dim("D4", ED, ED)
+let static EC = [("E", 1)]
+
+function bad(x: Array<Float like PgIrrepsIdx<C4, EC>>, w: Array<Float like Idx<WED>>)
+             where ml.equiv(C4) -> Array<Float like PgIrrepsIdx<C4, EC>> = {
+    ml.derive_pg_linear(D4, ED, ED, x, w)
+}
+
+let out = bad([3.0, 4.0], [2.0])

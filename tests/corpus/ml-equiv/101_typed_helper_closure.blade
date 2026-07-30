@@ -1,0 +1,60 @@
+// TEST: ML Equiv Typed Helper Closure
+import ml as ml
+// ============================================================================
+// THE SAME WIN ONE LEVEL DEEPER: AN UNANNOTATED HELPER, AND THE CALLER THAT
+// INHERITS ITS PROPOSAL.
+//
+// `bump` is 100's shape used as a helper — no parameter annotation, the
+// declared return type forcing the parameter through the body. It closes at
+// the DECLARATION, which is where the typed deduction runs; nothing here waits
+// on a call site, and nothing here needs the deferred late tier.
+//
+// The seam is silent TWICE over, and the two silences have different causes,
+// which is why both functions are worth one file:
+//
+//   * `bump` itself: `certSigOf` refuses an unannotated parameter, so there is
+//     no candidate signature to hypothesize and no walk happens. The return
+//     annotation that closes `v` for the unifier is not something the seam can
+//     use, because the seam runs before there is a unifier to close it.
+//   * `jitter_loose`: fully annotated and signature-eligible, but its body
+//     calls an UNCERTIFIED function, and a call to an uncertified callee is
+//     the escape corpus 007 rejects. The speculative judgment fails, and the
+//     channel stays quiet rather than explain a near miss.
+//
+// At typecheck neither obstacle exists. `bump` classifies as same-spec
+// addition and judges under O(3); B2's interprocedural arm then lets
+// `jitter_loose` consume that DEDUCED summary at suggestion strength — twice
+// over, since it applies the helper to the helper's own output — so it judges
+// too. Both are typed-only proposals, and both are pinned below. Strict in
+// both directions: if the typed walker proposes only the helper, or proposes a
+// third thing, this file goes red.
+//
+// PROPOSE ⊆ CHECK-ACCEPT: `bump_tight` and `jitter_tight` are the same two
+// bodies with the proposed conjuncts written out — a certified caller calling
+// a certified callee, corpus 003's shipped shape — and they check under the
+// seam checker with the same values.
+// ============================================================================
+let static S = [(0, 0, 1), (1, 1, 1)]
+
+// TYPED-SUGGEST: bump|O3
+function bump(v) -> Array<Float like IrrepsIdx<S>> = v + v
+
+// TYPED-SUGGEST: jitter_loose|O3
+function jitter_loose(x: Array<Float like IrrepsIdx<S>>) -> Array<Float like IrrepsIdx<S>> =
+    bump(bump(x))
+
+// The pinned twins.
+function bump_tight(v: Array<Float like IrrepsIdx<S>>)
+                    where ml.equiv(O3) -> Array<Float like IrrepsIdx<S>> =
+    v + v
+
+function jitter_tight(x: Array<Float like IrrepsIdx<S>>)
+                      where ml.equiv(O3) -> Array<Float like IrrepsIdx<S>> =
+    bump_tight(bump_tight(x))
+
+let xv = [2.0, 1.0, 0.0 - 3.0, 5.0]
+
+let jl = jitter_loose(xv)
+// EXPECT: jl = [8, 4, -12, 20]
+let jt = jitter_tight(xv)
+// EXPECT: jt = [8, 4, -12, 20]

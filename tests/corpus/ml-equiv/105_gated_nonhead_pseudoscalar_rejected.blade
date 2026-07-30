@@ -1,0 +1,22 @@
+// TEST: ML Equiv Gated Nonhead Pseudoscalar Rejected (rejects)
+import ml as ml
+// ============================================================================
+// THE CLOSED FALSE ACCEPT (found by the A1 stamping round): the gated arm
+// used to test only the HEAD block's parity, but gatedDecl silus EVERY
+// (l=0) block in place — and silu is not sign-equivariant. So this spec,
+// with an EVEN gate block up front and an (l=0, odd) pseudoscalar block at
+// the tail, was accepted under equiv(O3) while the generated code was not
+// O(3)-equivariant: an improper rotation flips the pseudoscalar cell, but
+// silu of the flipped cell is not the flip of silu.
+//
+// The whole-spec sweep now rejects it, matching both the emitter's own
+// stamp predicate (o3UnlessPseudoscalar, which always ran over the whole
+// spec) and the sibling `scalars` arm. The same body under SO3 — where
+// there are no improper rotations — remains certifiable; that side is the
+// existing corpus 010 shape and is not re-pinned here.
+// ============================================================================
+let static STRAP = [(0, 0, 1), (1, 1, 1), (0, 1, 1)]
+
+function bad(x: Array<Float like IrrepsIdx<STRAP>>) where ml.equiv(O3)
+    -> Array<Float like IrrepsIdx<STRAP>> =
+  ml.gated(STRAP, x)

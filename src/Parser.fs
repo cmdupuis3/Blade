@@ -599,6 +599,23 @@ let isTagWildcardArg (tokens: Token list) : bool =
         (t2.Kind = TokOp ">" || t2.Kind = TokOp ">>") -> true
     | _ -> false
 
+/// One argument of a type application `Base<...>`: an ordinary POSITIONAL
+/// type argument (a unit name, an index-type name, a type), or a NAMED bound
+/// argument `min=e` / `max=e` (formalism §2.4's bounded primitives).
+type TypeArg =
+    | TAPositional of TypeExpr
+    | TANamed of name: string * value: Expr
+
+/// Two-token lookahead for a named type argument: an identifier immediately
+/// followed by `=`. At HEAD this shape is a hard parse error (the identifier
+/// parses as a type name and the `=` then fails the `,`-or-`>` expectation),
+/// so recognizing it is a strict widening of the grammar.
+let isNamedTypeArg (tokens: Token list) : bool =
+    match tokens with
+    | t1 :: t2 :: _ ->
+        (match t1.Kind with TokIdent _ -> true | _ -> false) && t2.Kind = TokOp "="
+    | _ -> false
+
 let rec parseTypeExpr (tokens: Token list) : ParseResult<TypeExpr> =
     parseTypeAtom tokens >>= fun first rest ->
     match peek rest with
@@ -660,6 +677,10 @@ and parseTypeAtom (tokens: Token list) : ParseResult<TypeExpr> =
 
     | Some (TokKeyword KwIrrepsIdx) ->
         // IrrepsIdx in standalone position. Same rationale as KwDepIdx above.
+        parseIndexType tokens
+
+    | Some (TokKeyword KwPgIrrepsIdx) ->
+        // PgIrrepsIdx in standalone position. Same rationale as KwDepIdx above.
         parseIndexType tokens
 
     | Some (TokKeyword KwHalo) ->
@@ -728,10 +749,14 @@ and parseTypeAtom (tokens: Token list) : ParseResult<TypeExpr> =
                 expectGt (advance afterLt) >>= fun _ remaining ->
                 success (TyNamed (name, [TyWildcard])) remaining
             else
-            // Parameterized type: Array<T>, MyStruct<Int>, etc.
-            afterLt |> sepBy parseTypeExpr TokComma >>= fun args afterArgs ->
+            // Parameterized type: Array<T>, MyStruct<Int>, Float<velocity>,
+            // and (new) the bounded primitives Float<min=0, max=1> /
+            // Float<velocity, min=0, max=1>. A list with no named arguments
+            // takes exactly the legacy path.
+            afterLt |> sepBy parseTypeArg TokComma >>= fun args afterArgs ->
             expectGt afterArgs >>= fun _ remaining ->
-            success (TyNamed (name, args)) remaining
+            let line, col = currentPos afterLt
+            buildTypeApp name args line col remaining
         | _ ->
             // Bare name without caret: always a named type / type constructor
             success (TyNamed (name, [])) afterName
@@ -742,6 +767,84 @@ and parseTypeAtom (tokens: Token list) : ParseResult<TypeExpr> =
     
     | None ->
         errorEof "Expected type but got end of file"
+
+/// One argument of a type application. A NAMED argument (`min=e`) is
+/// recognized by two-token lookahead and its value parses with the
+/// static-payload grammar `parseSimpleExpr` — the same one `Idx<n>` uses, so
+/// literals (including NEGATIVE ones, via its unary-minus arm), `let static`
+/// names and + - * / arithmetic are all admissible, and the expression stops
+/// cleanly before `,` and `>`. Anything else is an ordinary positional type.
+and parseTypeArg (tokens: Token list) : ParseResult<TypeArg> =
+    if isNamedTypeArg tokens then
+        let argName = match (List.head tokens).Kind with TokIdent n -> n | _ -> ""
+        parseSimpleExpr (advance (advance tokens)) >>= fun value remaining ->
+        success (TANamed (argName, value)) remaining
+    else
+        parseTypeExpr tokens >>= fun ty remaining ->
+        success (TAPositional ty) remaining
+
+/// Assemble a parsed type application. With NO named arguments this is
+/// exactly the legacy `TyNamed (name, args)` and nothing else can happen.
+/// Named `min=`/`max=` arguments (formalism §2.4) wrap that node in
+/// TyBounded; they must follow every positional argument, may not repeat,
+/// and no other argument name exists.
+and buildTypeApp (name: string) (args: TypeArg list) (line: int) (col: int) (remaining: Token list) : ParseResult<TypeExpr> =
+    let positionals = args |> List.choose (function TAPositional t -> Some t | _ -> None)
+    let named = args |> List.choose (function TANamed (n, v) -> Some (n, v) | _ -> None)
+    if named.IsEmpty then
+        success (TyNamed (name, positionals)) remaining
+    else
+        // Positional-after-named is rejected: the unit/tag argument is what
+        // the base type is ABOUT, so it leads.
+        let orderOk =
+            args
+            |> List.fold (fun (sawNamed, ok) a ->
+                match a with
+                | TANamed _ -> (true, ok)
+                | TAPositional _ -> (sawNamed, ok && not sawNamed)) (false, true)
+            |> snd
+        let badName = named |> List.tryPick (fun (n, _) -> if n = "min" || n = "max" then None else Some n)
+        let dup =
+            named |> List.map fst |> List.countBy id
+            |> List.tryPick (fun (n, c) -> if c > 1 then Some n else None)
+        if not orderOk then
+            error (sprintf "In `%s<...>`: a positional type argument may not follow a named bound. Write the unit or tag first: `%s<Unit, min=..., max=...>`" name name) line col
+        elif badName.IsSome then
+            error (sprintf "Unknown named type argument '%s=' in `%s<...>`: only `min=` and `max=` exist" badName.Value name) line col
+        elif dup.IsSome then
+            error (sprintf "In `%s<...>`: `%s=` given more than once" name dup.Value) line col
+        else
+            let pick k = named |> List.tryPick (fun (n, v) -> if n = k then Some v else None)
+            success (TyBounded (TyNamed (name, positionals), pick "min", pick "max")) remaining
+
+/// The second argument of `SymIdx<k, _>` / `AntisymIdx<k, _>` (seam S1 of
+/// docs/plan-transforms-as-types.md §2.7). The slot used to be `parseSimpleExpr`
+/// only — an INT expression, so the base space was always an anonymous dense
+/// extent. It now also admits an index TYPE, but only for the two forms that
+/// have a meaning as a symmetric-power base:
+///
+///   - `IrrepsIdx<spec>` — the point of the feature. `SymIdx<k, IrrepsIdx<s>>`
+///     is Sym^k of an irreps space and keeps the SPEC as type identity, so two
+///     different specs of equal total_dim stay distinct (§6.3).
+///   - `Idx<n>` — the trivial base, accepted for uniformity. It lowers to
+///     exactly the record the legacy `SymIdx<k, n>` form produces.
+///
+/// ANYTHING ELSE stays on the EXACT legacy `parseSimpleExpr` path. In
+/// particular a BARE NAME is ALWAYS the legacy int reading: `SymIdx<2, N>`
+/// means "extent N" (a `let static`, a parameter, an arithmetic expression),
+/// never "the index-type alias N". The ambiguity is resolved that way
+/// permanently — existing programs cannot change meaning. The consequence is
+/// that named-alias-as-base (`type S = IrrepsIdx<spec>` then `SymIdx<2, S>`)
+/// is NOT supported: `S` would be read as an int extent and fail downstream
+/// like any other non-numeric name. Write `IrrepsIdx<spec>` inline instead
+/// (or alias the WHOLE thing: `type S = SymIdx<2, IrrepsIdx<spec>>`, which
+/// does work and folds the alias name into the irreps identity tag).
+and parseSymIdxBase (tokens: Token list) : ParseResult<SymIdxBase> =
+    match peek tokens with
+    | Some (TokKeyword KwIrrepsIdx) | Some (TokKeyword KwIdx) ->
+        parseIndexType tokens >>= fun ty afterTy -> success (SymBaseIndex ty) afterTy
+    | _ ->
+        parseSimpleExpr tokens >>= fun extent afterExtent -> success (SymBaseExtent extent) afterExtent
 
 // Parse index types specifically - Idx<extent> or SymIdx<arity, extent>
 // These are self-contained with their own < > brackets
@@ -757,20 +860,20 @@ and parseIndexType (tokens: Token list) : ParseResult<TypeExpr> =
         advance tokens |> expect (TokOp "<") >>= fun _ afterLt ->
         parseLiteral afterLt >>= fun rankLit afterRank ->
         expect TokComma afterRank >>= fun _ afterComma ->
-        parseSimpleExpr afterComma >>= fun extent afterExtent ->
-        expectGt afterExtent >>= fun _ remaining ->
+        parseSymIdxBase afterComma >>= fun baseIdx afterBase ->
+        expectGt afterBase >>= fun _ remaining ->
         let rank = match rankLit with LitInt n -> int n | _ -> 2
-        success (TySymIdx (rank, extent)) remaining
-    
+        success (TySymIdx (rank, baseIdx)) remaining
+
     | Some (TokKeyword KwAntisymIdx) ->
         advance tokens |> expect (TokOp "<") >>= fun _ afterLt ->
         parseLiteral afterLt >>= fun rankLit afterRank ->
         expect TokComma afterRank >>= fun _ afterComma ->
-        parseSimpleExpr afterComma >>= fun extent afterExtent ->
-        expectGt afterExtent >>= fun _ remaining ->
+        parseSymIdxBase afterComma >>= fun baseIdx afterBase ->
+        expectGt afterBase >>= fun _ remaining ->
         let rank = match rankLit with LitInt n -> int n | _ -> 2
-        success (TyAntisymIdx (rank, extent)) remaining
-    
+        success (TyAntisymIdx (rank, baseIdx)) remaining
+
     | Some (TokKeyword KwHermitianIdx) ->
         advance tokens |> expect (TokOp "<") >>= fun _ afterLt ->
         parseSimpleExpr afterLt >>= fun extent afterExtent ->
@@ -881,6 +984,28 @@ and parseIndexType (tokens: Token list) : ParseResult<TypeExpr> =
         expectGt afterSpec >>= fun _ remaining ->
         success (TyIrrepsIdx specExpr) remaining
 
+    // PgIrrepsIdx<GROUP, spec> — the point-group block-spec member
+    // (docs/plan-transforms-as-types.md §3.6, stage 5b-i). GROUP is a BARE
+    // IDENTIFIER, not an expression: point-group names are frozen registry
+    // data ({C4, D4}), so the slot is a NAME the way `Idx<n>`'s slot is a
+    // number, and reading it as an expression would only invite an unbound
+    // variable. The registry lookup (with the unknown-group diagnostic) is
+    // lowering's, alongside the spec decode. `spec` is the same static-
+    // expression argument IrrepsIdx takes — a `let static` name or an inline
+    // literal of (LABEL_NAME, mult) tuples.
+    | Some (TokKeyword KwPgIrrepsIdx) ->
+        advance tokens |> expect (TokOp "<") >>= fun _ afterLt ->
+        (match peek afterLt with
+         | Some (TokIdent groupName) ->
+             let afterGroup = advance afterLt
+             expect TokComma afterGroup >>= fun _ afterComma ->
+             parseSimpleExpr afterComma >>= fun specExpr afterSpec ->
+             expectGt afterSpec >>= fun _ remaining ->
+             success (TyPgIrrepsIdx (groupName, specExpr)) remaining
+         | _ ->
+             let line, col = currentPos afterLt
+             error "PgIrrepsIdx: expected a point-group NAME as the first argument — PgIrrepsIdx<C4, SPEC>" line col)
+
     | Some (TokIdent name0) ->
         // Named index type alias (e.g. type RegionIdx = Idx<3>; ...like RegionIdx),
         // or a qualified provider axis (`like store.index.y`). Resolved at
@@ -906,7 +1031,7 @@ and parseIndexType (tokens: Token list) : ParseResult<TypeExpr> =
     
     | Some kind ->
         let line, col = currentPos tokens
-        error (sprintf "Expected index type (Idx, SymIdx, AntisymIdx, HermitianIdx, EnumIdx, DepIdx, RaggedIdx, IrrepsIdx, or a named index type alias) but got %s" (describeToken kind)) line col
+        error (sprintf "Expected index type (Idx, SymIdx, AntisymIdx, HermitianIdx, EnumIdx, DepIdx, RaggedIdx, IrrepsIdx, PgIrrepsIdx, or a named index type alias) but got %s" (describeToken kind)) line col
     
     | None ->
         errorEof "Expected index type but got end of file"
@@ -1052,6 +1177,39 @@ let parseIdentList (tokens: Token list) : ParseResult<string list> =
                 Ok (List.rev acc, toks)
     loop [] tokens
 
+/// Arguments of an OPEN where-conjunct (`<name>(...)` / `<alias>.<name>(...)`,
+/// the Blade.Constraints registry surface): identifiers — the comm/indep/
+/// galilean shape, where an argument NAMES a parameter — or INT LITERALS,
+/// rendered into the same `string list` the registry carries. The literal form
+/// is what a GROUP-PARAMETER conjunct needs: `where ml.perm_equiv(4)` names the
+/// node-axis extent of the Sₙ certificate, not a parameter (ml/compiler's
+/// MLPerm.fs parses the string back, and also accepts a `let static` name
+/// through the same slot). Registry handlers already validate their own
+/// argument shapes, so widening the token set here cannot loosen any existing
+/// conjunct: comm/antisymm groups keep the ident-only `parseIdentList`.
+let parseConjunctArgList (tokens: Token list) : ParseResult<string list> =
+    let rec loop acc toks =
+        let taken =
+            match toks with
+            | t :: rest ->
+                match t.Kind with
+                | TokIdent n -> Some (n, rest)
+                | TokInt n -> Some (string n, rest)
+                | _ -> None
+            | [] -> None
+        match taken with
+        | Some (text, rest) ->
+            match rest with
+            | t2 :: rest2 when t2.Kind = TokComma -> loop (text :: acc) rest2
+            | _ -> Ok (List.rev (text :: acc), rest)
+        | None ->
+            if List.isEmpty acc then
+                let line, col = currentPos toks
+                errorC "BL1001" "Expected an identifier or an integer literal" line col
+            else
+                Ok (List.rev acc, toks)
+    loop [] tokens
+
 // Where clause parsing (used by both function declarations and lambdas)
 /// Parse the body of omp(...): comma-separated `ident: int` pairs.
 /// e.g. omp(a: 2, b: 1) => [("a",2); ("b",1)]
@@ -1172,7 +1330,7 @@ let parseWhereClause (tokens: Token list) : ParseResult<WhereClause> =
             // dispatches through the Blade.Constraints registry.
             advance (advance toks) |> expectIdent >>= fun name afterName ->
             expect TokLParen afterName >>= fun _ afterLParen ->
-            parseIdentList afterLParen >>= fun args afterArgs ->
+            parseConjunctArgList afterLParen >>= fun args afterArgs ->
             expect TokRParen afterArgs >>= fun _ remaining ->
             loop comms antis par (custom @ [(alias + "." + name, args)]) remaining
         | Some (TokIdent name) when (match peek (advance toks) with Some TokLParen -> true | _ -> false) ->
@@ -1183,7 +1341,7 @@ let parseWhereClause (tokens: Token list) : ParseResult<WhereClause> =
             // registered vocabulary, not here. (Module-owned keywords like
             // PPL's `indep` are qualified — see the dotted arm above.)
             advance toks |> expect TokLParen >>= fun _ afterLParen ->
-            parseIdentList afterLParen >>= fun args afterArgs ->
+            parseConjunctArgList afterLParen >>= fun args afterArgs ->
             expect TokRParen afterArgs >>= fun _ remaining ->
             loop comms antis par (custom @ [(name, args)]) remaining
         | Some TokComma ->
@@ -2853,12 +3011,26 @@ let parseFieldDecl (tokens: Token list) : ParseResult<FieldDecl> =
     | Some (TokIdent name) ->
         let afterName = advance tokens
         expect TokColon afterName >>= fun _ afterColon ->
-        parseTypeExpr afterColon >>= fun ty remaining ->
+        parseTypeExpr afterColon >>= fun tyRaw remaining ->
+        // A bounded-primitive field type (`f: Int<min=a, max=b>`) NORMALIZES
+        // into the field-bound channel: the wrapper is stripped and the
+        // bounds become a FieldBound with HiInclusive = true. That keeps the
+        // struct's conjunct list the ONE representation both evaluation
+        // worlds read — no second bounds channel can drift from it — and
+        // leaves every consumer's test on the field's declared type
+        // (Int-ness, unit resolution) working verbatim on both spellings.
+        let ty, typeBound =
+            match tyRaw with
+            | TyBounded (baseTy, lo, hi) -> baseTy, Some { Lo = lo; Hi = hi; HiInclusive = true }
+            | _ -> tyRaw, None
         // Optional dependent range refinement: `in lo .. hi`. Bounds parse at
         // the additive level (parseDotDot's own operand level) so they stop
         // cleanly at `..`, ',' and '}'. `in` never otherwise follows a field
         // type inside a struct body, so the postfix is unambiguous.
         match peek remaining with
+        | Some (TokKeyword KwIn) when typeBound.IsSome ->
+            let line, col = currentPos remaining
+            error (sprintf "Field '%s' has two bound specifications: `min=`/`max=` on its type and `in lo .. hi`. Use one." name) line col
         | Some (TokKeyword KwIn) ->
             let afterIn = advance remaining
             let loR =
@@ -2876,15 +3048,18 @@ let parseFieldDecl (tokens: Token list) : ParseResult<FieldDecl> =
                 let line, col = currentPos afterIn
                 error "Field bound needs at least one endpoint: `in lo .. hi`, `in lo ..`, or `in .. hi`" line col
             else
-                success { Name = name; Type = ty; Default = None; Bound = Some { Lo = lo; Hi = hi } } afterHi
+                success { Name = name; Type = ty; Default = None; Bound = Some { Lo = lo; Hi = hi; HiInclusive = false } } afterHi
         | _ ->
-            success { Name = name; Type = ty; Default = None; Bound = None } remaining
+            success { Name = name; Type = ty; Default = None; Bound = typeBound } remaining
     | _ ->
         let line, col = currentPos tokens
         error "Expected field name" line col
 
-/// Parse struct declaration: struct Name<T> { field1: T1, field2: T2 }
-let parseStructDecl (tokens: Token list) : ParseResult<Decl> =
+/// Parse struct declaration: struct Name<T> { field1: T1, field2: T2 }.
+/// `isStatic` is set by the `static struct` spelling — the DECLARED
+/// static-eligibility fence, checked at registration (every field type must
+/// be statically evaluable). It is otherwise the same declaration form.
+let parseStructDeclWith (isStatic: bool) (tokens: Token list) : ParseResult<Decl> =
     match peek tokens with
     | Some (TokIdent name) ->
         let afterName = advance tokens
@@ -2912,12 +3087,14 @@ let parseStructDecl (tokens: Token list) : ParseResult<Decl> =
         match peek remaining with
         | Some (TokKeyword KwWhere) ->
             parseConjuncts (advance remaining) >>= fun conjuncts afterConstraint ->
-            success (DeclType (TyDeclStruct (name, typeParams, fields, conjuncts))) afterConstraint
+            success (DeclType (TyDeclStruct (name, typeParams, fields, conjuncts, isStatic))) afterConstraint
         | _ ->
-            success (DeclType (TyDeclStruct (name, typeParams, fields, []))) remaining
+            success (DeclType (TyDeclStruct (name, typeParams, fields, [], isStatic))) remaining
     | _ ->
         let line, col = currentPos tokens
         error "Expected struct name" line col
+
+let parseStructDecl (tokens: Token list) : ParseResult<Decl> = parseStructDeclWith false tokens
 
 /// Parse function signature: function name(parameters) -> RetType
 let parseFunctionSig (tokens: Token list) : ParseResult<FunctionSig> =
@@ -3129,9 +3306,12 @@ let parseDecl (tokens: Token list) : ParseResult<Decl> =
             | DeclFunction f ->
                 success (DeclFunction { f with IsStatic = true }) remaining
             | other -> success other remaining
+        | Some (TokKeyword KwStruct) ->
+            // static struct S { ... } → the declared static-eligibility fence
+            parseStructDeclWith true (advance afterStatic)
         | _ ->
             let (line, col) = currentPos afterStatic
-            error "Expected 'function' after 'static'. For static values, use 'let static x = ...'" line col
+            error "Expected 'function' or 'struct' after 'static'. For static values, use 'let static x = ...'" line col
     | Some (TokKeyword KwType) ->
         parseTypeDecl (advance tokens)
     | Some (TokKeyword KwStruct) ->

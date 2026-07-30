@@ -1,0 +1,218 @@
+// TEST: ML Equiv Restrict C4 Branching
+import ml as ml
+// ============================================================================
+// RESTRICTION FROM O(3) TO A REGISTERED POINT GROUP — THE BRANCHING TABLE
+// (docs/plan-equivariance-in-types.md stage A3; the "named-not-shipped"
+// promise of plan-transforms-as-types §3.6, now shipped as a TABLE.)
+//
+// `ml.pg_restrict(GROUP, SPEC)` is the crystal-field decomposition: it takes an
+// O(3) irreps spec and answers with the GROUP's own labels, computed by the
+// character inner product
+//
+//     m_mu = ( (1/|G|) * sum_g chi_(l,p)(g) * chi_mu(g) ) / e_mu
+//
+// against the group's frozen character table and its declared O(3) EMBEDDING.
+// Two things in that formula are easy to get wrong and are pinned below:
+//
+//  1. THE EMBEDDING IS DATA, not a derivation. The frozen tables say what the
+//     generator `r` does to a label; nothing in them says which rotation of R^3
+//     it IS. C4 is embedded as <R_z(90 deg)>, so the four-fold axis is z, and
+//     that choice is what makes l = 1 split as A + E (z invariant, (x, y) a
+//     rotating plane) rather than any other way.
+//
+//  2. THE FROBENIUS-SCHUR CORRECTION applies here too: over R the multiplicity
+//     is the inner product DIVIDED by e = dim End. C4's E is of COMPLEX type
+//     (e = 2), so the uncorrected count doubles it — and `pg_hom_dim` against a
+//     single-E probe reads 2*m rather than m for exactly the same reason,
+//     which is why the E pins below are even numbers. Corpus 097 is the same
+//     sweep at D4, where E is of REAL type and the same probe reads m.
+//
+// PARITY IS FORGOTTEN, AND THAT IS THE CONTENT. C4 is embedded as a PROPER
+// rotation group, so -I is not in it and no element can detect an O(3) parity
+// flip: D^(l, even) and D^(l, odd) restrict to the SAME C4 module. Section 3
+// pins the extreme case — an (l = 0, ODD) PSEUDOscalar restricts to the trivial
+// label, i.e. becomes a genuine C4 invariant. That is a real loss of strength,
+// and corpus 098 is the other side of it: the restriction must never license an
+// O(3) claim.
+//
+// WHAT THIS IS NOT: A REINTERPRETATION OF A BUFFER. The table names the
+// decomposition; it does not say an `IrrepsIdx<S>` buffer may be READ as a
+// `PgIrrepsIdx<C4, pg_restrict(C4, S)>` buffer. The two layouts genuinely
+// differ — the O(3) side orders a block by m = -l..l, so the invariant m = 0
+// component sits in the MIDDLE (index l) with the m-pairs straddling it, while
+// a point-group block is contiguous. At l = 1 the invariant is at index 1 on
+// the O(3) side and at index 0 on the C4 side, and section 4 below reads index
+// 0 precisely to pin that. Corpus 048 is still a rejection for this reason, and
+// corpus 099 is the trap it sets.
+//
+// SHARPENED (exploration-equivariant-bijections.md): the two layouts differ by
+// an exact SIGNED PERMUTATION — constructed and verified against
+// pgElementMatrix at every l <= 8 for both registered groups — so the reading
+// 048/099 refuse is repairable by a zero-copy view, and the decided surface
+// ships it as an explicit `ml.restrict`. The refusals stand until that view
+// exists; the table below is the branching half, already exact.
+// ============================================================================
+
+// --- 1. THE BRANCHING TABLE, l = 0 .. 4 -------------------------------------
+// Read the multiplicity of a label off the restricted module by probing the
+// hom-space against a single copy of that label: dim Hom(V, U_mu) = m_mu * e_mu
+// by Schur, so the A and B probes read m directly (e = 1) and the E probe reads
+// 2m (e = 2). `pg_total_dim` closes the sweep against 2l+1 — the dimension
+// identity that catches a dropped FS correction on the spot.
+let static L0 = [(0, 0, 1)]
+let static L1 = [(1, 1, 1)]
+let static L2 = [(2, 0, 1)]
+let static L3 = [(3, 1, 1)]
+let static L4 = [(4, 0, 1)]
+
+let static R0 = ml.pg_restrict("C4", L0)
+let static R1 = ml.pg_restrict("C4", L1)
+let static R2 = ml.pg_restrict("C4", L2)
+let static R3 = ml.pg_restrict("C4", L3)
+let static R4 = ml.pg_restrict("C4", L4)
+
+let static PA = [("A", 1)]
+let static PB = [("B", 1)]
+let static PE = [("E", 1)]
+
+// l = 0: the trivial label, alone.
+let static A0 = ml.pg_hom_dim("C4", R0, PA)
+let static B0 = ml.pg_hom_dim("C4", R0, PB)
+let static E0 = ml.pg_hom_dim("C4", R0, PE)
+let static D0 = ml.pg_total_dim("C4", R0)
+// EXPECT: A0 = 1
+// EXPECT: B0 = 0
+// EXPECT: E0 = 0
+// EXPECT: D0 = 1
+
+// l = 1: A + E — z is invariant under the four-fold axis, (x, y) rotate.
+let static A1 = ml.pg_hom_dim("C4", R1, PA)
+let static B1 = ml.pg_hom_dim("C4", R1, PB)
+let static E1 = ml.pg_hom_dim("C4", R1, PE)
+let static D1 = ml.pg_total_dim("C4", R1)
+// EXPECT: A1 = 1
+// EXPECT: B1 = 0
+// EXPECT: E1 = 2
+// EXPECT: D1 = 3
+
+// l = 2: A + 2B + E — the d shell. m = 0 gives A, m = +-1 give E, and the two
+// m = +-2 components each pick up exp(2i * 90 deg) = -1, i.e. TWO copies of B.
+let static A2 = ml.pg_hom_dim("C4", R2, PA)
+let static B2 = ml.pg_hom_dim("C4", R2, PB)
+let static E2 = ml.pg_hom_dim("C4", R2, PE)
+let static D2 = ml.pg_total_dim("C4", R2)
+// EXPECT: A2 = 1
+// EXPECT: B2 = 2
+// EXPECT: E2 = 2
+// EXPECT: D2 = 5
+
+// l = 3: A + 2B + 2E — m = +-3 rotate by 270 deg and rejoin E.
+let static A3 = ml.pg_hom_dim("C4", R3, PA)
+let static B3 = ml.pg_hom_dim("C4", R3, PB)
+let static E3 = ml.pg_hom_dim("C4", R3, PE)
+let static D3 = ml.pg_total_dim("C4", R3)
+// EXPECT: A3 = 1
+// EXPECT: B3 = 2
+// EXPECT: E3 = 4
+// EXPECT: D3 = 7
+
+// l = 4: 3A + 2B + 2E — m = +-4 rotate by a full turn and become INVARIANT,
+// which is the first place the four-fold axis folds back on itself and the
+// trivial multiplicity exceeds 1.
+let static A4 = ml.pg_hom_dim("C4", R4, PA)
+let static B4 = ml.pg_hom_dim("C4", R4, PB)
+let static E4 = ml.pg_hom_dim("C4", R4, PE)
+let static D4D = ml.pg_total_dim("C4", R4)
+// EXPECT: A4 = 3
+// EXPECT: B4 = 2
+// EXPECT: E4 = 4
+// EXPECT: D4D = 9
+
+// --- 2. AGGREGATION OVER A MULTI-BLOCK SPEC ---------------------------------
+// A spec restricts blockwise and the label multiplicities ADD, exactly as
+// `aggregateByIrrep` adds duplicate O(3) blocks: sh_spec(2) = l = 0, 1, 2 gives
+// A: 1 + 1 + 1 = 3, B: 0 + 0 + 2 = 2, E: 0 + 1 + 1 = 2, and the module has
+// 1 + 3 + 5 = 9 dimensions.
+let static SH2 = ml.sh_spec(2)
+let static RS = ml.pg_restrict("C4", SH2)
+let static AS = ml.pg_hom_dim("C4", RS, PA)
+let static BS = ml.pg_hom_dim("C4", RS, PB)
+let static ES = ml.pg_hom_dim("C4", RS, PE)
+let static DS = ml.pg_total_dim("C4", RS)
+let static NS = ml.pg_irreps_len("C4", RS)
+// EXPECT: AS = 3
+// EXPECT: BS = 2
+// EXPECT: ES = 4
+// EXPECT: DS = 9
+// EXPECT: NS = 3
+
+// --- 3. PARITY IS FORGOTTEN BY A PROPER SUBGROUP ----------------------------
+// (l = 0, ODD) is a PSEUDOscalar: it flips under the inversion, which is why
+// `ml.scalars` refuses it under equiv(O3) and admits it under equiv(SO3). C4
+// contains no improper element at all, so the restriction cannot see the flip
+// and the pseudoscalar lands on the TRIVIAL label — a genuine C4 invariant.
+// Restriction is a strictly weakening move, and this is the sharpest form of
+// it: a claim that was false under O(3) becomes true under C4.
+let static PS0 = [(0, 1, 1)]
+let static RPS = ml.pg_restrict("C4", PS0)
+let static APS = ml.pg_hom_dim("C4", RPS, PA)
+let static DPS = ml.pg_total_dim("C4", RPS)
+// EXPECT: APS = 1
+// EXPECT: DPS = 1
+
+// The same statement one l up: the vector (l = 1, odd) and the pseudovector
+// (l = 1, even) restrict to the SAME C4 module, so their restrictions have the
+// same hom-space with each other as with themselves.
+let static L1E = [(1, 0, 1)]
+let static R1E = ml.pg_restrict("C4", L1E)
+let static HXX = ml.pg_hom_dim("C4", R1, R1)
+let static HXY = ml.pg_hom_dim("C4", R1, R1E)
+// EXPECT: HXX = 3
+// EXPECT: HXY = 3
+
+// --- 4. THE RESTRICTED SPEC IS A FIRST-CLASS pg SPEC ------------------------
+// `pg_restrict` returns an ordinary point-group spec, so every shipped pg op
+// consumes it: the layer below is `ml.derive_pg_linear` over R1 = [A x 1,
+// E x 1], the C4 decomposition of the l = 1 vector space. Its weight buffer has
+// dim Hom = 1 (the A cell) + 2 (the E cell, e = 2) = 3.
+let static WL = ml.pg_hom_dim("C4", R1, R1)
+// EXPECT: WL = 3
+
+function c4_layer(x: Array<Float like PgIrrepsIdx<C4, R1>>, w: Array<Float like Idx<WL>>)
+                  where ml.equiv(C4) -> Array<Float like PgIrrepsIdx<C4, R1>> =
+    ml.derive_pg_linear(C4, R1, R1, x, w)
+
+// LAYOUT, and this is the whole point of section 4: the restricted spec puts
+// the A cell at index 0 and the E pair at indices 1 and 2. The O(3) buffer this
+// module DECOMPOSES has the invariant at index 1 instead (the real basis is
+// ordered m = -1, 0, +1), so the two are not the same bytes — see corpus 099.
+//
+// Weights are [A, E_id, E_J]: the A cell scales, and the E cell carries the
+// two-dimensional End_C4(E) = C with J = R90, (a, b) -> (-b, a). At
+// w = [2, 0, 1] the E half is pure J.
+let y = c4_layer([1.0, 3.0, 4.0], [2.0, 0.0, 1.0])
+// EXPECT: y = [2, -4, 3]
+
+// THE C4 SHADOW, exact because every generator entry lies in {0, +-1}:
+// rho(r) = [1] (+) R90 sends [x0, x1, x2] to [x0, -x2, x1]. Feeding the rotated
+// input must rotate the output.
+let yr = c4_layer([1.0, 0.0 - 4.0, 3.0], [2.0, 0.0, 1.0])
+// EXPECT: yr = [2, -3, -4]
+
+// --- 5. THE INVARIANT CELL OF THE RESTRICTED MODULE -------------------------
+// Scaling only the trivial-label cell is C4-equivariant, and it is the map
+// corpus 098 writes in the O(3) layout to show it is NOT O(3)-equivariant.
+// Composition refuses this body (three raw component reads packed into an array
+// literal); the polynomial ENGINE discharges it against all four group elements
+// exactly. Same theorem name, different route — the pin says `equiv(C4)` and
+// never which one ran.
+function scale_invariant(x: Array<Float like PgIrrepsIdx<C4, R1>>)
+                         where ml.equiv(C4) -> Array<Float like PgIrrepsIdx<C4, R1>> =
+    [2.0 * x(0), x(1), x(2)]
+
+let s = scale_invariant([1.0, 3.0, 4.0])
+// EXPECT: s = [2, 3, 4]
+
+// rho(r)[1, 3, 4] = [1, -4, 3], and the output rotates with it.
+let sr = scale_invariant([1.0, 0.0 - 4.0, 3.0])
+// EXPECT: sr = [2, -4, 3]

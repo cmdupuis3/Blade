@@ -1,0 +1,35 @@
+// TEST: ML Galilean Ml Op Rejected (rejects)
+import ml as ml
+// ============================================================================
+// A BOOST-VARIANT VALUE ENTERING AN `ml.*` OP — the rule at
+// MLGalilean.judgeApp's ml-alias arm, which was LIVE AND UNPINNED until this
+// file (found by the galilean layer census, docs/census-galilean-layer.md §5).
+//
+// The ml ops are representation machinery: they take a vector to spherical
+// harmonics, contract irreps, apply Schur-basis layers. All of that is defined
+// on the VALUE it is handed, so handing it a velocity means the answer depends
+// on the observer's frame — `y_to(1, u)` in one frame and `y_to(1, u + v)` in
+// another are different harmonics, and no equivariance in the world relates
+// them, because the boost is not a rotation. So the whole ml vocabulary is
+// closed to boost-variant arguments and open to invariant ones: velocities
+// enter a model only through boost-INVARIANT combinations — differences,
+// sgs.grad, sgs.stress — which is what corpus 024/025 and sgs/013 pin from the
+// accepting side.
+//
+// WHY IT WAS WORTH PINNING. This rule is galilean's "family C": its premise is
+// the surface `ml.` alias, which is GONE after MLElaborate's pass 2, so a
+// typed second opinion cannot see it at all (the census measures: abstain).
+// That makes it exactly the rule most likely to be silently lost by a future
+// refactor, and it had no corpus defence. The accepting twin below is the
+// other half — the same op, the same certificate, an invariant argument.
+// ============================================================================
+
+// The rejection: `u` is the declared boost-variant parameter, and its
+// components flow straight into an ml op. BL4009.
+function bad(u: Array<Float like Idx<3>>) where ml.galilean(u) -> Float = {
+    let sh = ml.y_to(1, u(0), u(1), u(2))
+    sh(0)
+}
+
+let uv = [1.0, 2.0, 3.0]
+let out = bad(uv)

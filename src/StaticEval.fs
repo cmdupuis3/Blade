@@ -35,6 +35,23 @@ type StaticFuncDef = {
 type StructStaticInfo = {
     Fields: string list
     Conjuncts: Expr list
+    /// Declaration-order field declarations, retained verbatim: the index
+    /// fence needs field TYPES and the raw bound expressions, neither of
+    /// which survives into the flattened conjunct list.
+    FieldDecls: FieldDecl list
+    /// The DECLARED where-conjuncts alone (no desugared field bounds). The
+    /// enumeration reading runs over a box that already enforces the
+    /// bounds, so folding them again at every cell is pure cost; keeping
+    /// the two halves separate lets the fence hand out the residual list
+    /// without re-deriving it (structConjuncts is `declared @ bounds`, so
+    /// `Conjuncts = structConjuncts FieldDecls Declared` is an invariant,
+    /// not a coincidence — Test_StructIdxFence pins it).
+    Declared: Expr list
+    /// `static struct Name { ... }` — the declared static-eligibility fence.
+    /// Irrelevant to folding (a plain constrained struct still folds and still
+    /// asserts); read by the index-type fence, for which it is the FIRST
+    /// eligibility question.
+    IsStatic: bool
 }
 
 /// Environment for static evaluation
@@ -115,6 +132,56 @@ and collectStmtNames (stmt: Stmt) : Set<string> =
     | StmtForIn (_, range, body) ->
         Set.union (collectFreeNames range) (body |> List.map collectStmtNames |> Set.unionMany)
 
+/// Struct TYPE names occurring as LITERALS (`R { ... }`) anywhere in an
+/// expression.
+///
+/// `collectFreeNames` deliberately does not report these, and must not start:
+/// a struct name is not a variable reference, and surfacing it there would
+/// make the checker's field-bound scope check (TypeCheck's StructBoundScope)
+/// reject a bound that merely mentions a struct. But the static dependency
+/// graph genuinely needs them — CONSTRUCTING `R { ... }` runs R's conjuncts,
+/// and those may name statics that the literal itself never mentions. This is
+/// the construction-reading twin of the mention edge in Phase 2 below: that
+/// one keys off `ExprVar` (`idx_card(R)`), and an `ExprStruct` node's name is
+/// not an `ExprVar`, so neither covers the other.
+///
+/// Conservative by construction: a form this walker misses simply yields no
+/// edge, which is exactly the pre-existing behavior, never a worse one.
+let rec collectStructLitNames (expr: Expr) : Set<string> =
+    let u (xs: Set<string> list) = xs |> List.fold Set.union Set.empty
+    let opt f o = o |> Option.map f |> Option.defaultValue Set.empty
+    match expr.Kind with
+    | ExprKind.ExprStruct (name, fields, spread) ->
+        u [ Set.singleton name
+            fields |> List.map (snd >> collectStructLitNames) |> u
+            opt collectStructLitNames spread ]
+    | ExprKind.ExprBinOp (_, _, l, r) -> Set.union (collectStructLitNames l) (collectStructLitNames r)
+    | ExprKind.ExprUnaryOp (_, e) -> collectStructLitNames e
+    | ExprKind.ExprApp (f, args) -> u (collectStructLitNames f :: (args |> List.map collectStructLitNames))
+    | ExprKind.ExprIf (c, t, e) -> u [collectStructLitNames c; collectStructLitNames t; collectStructLitNames e]
+    | ExprKind.ExprTuple es | ExprKind.ExprArrayLit es -> es |> List.map collectStructLitNames |> u
+    | ExprKind.ExprField (o, _) -> collectStructLitNames o
+    | ExprKind.ExprLet (b, body) -> Set.union (collectStructLitNames b.Value) (collectStructLitNames body)
+    | ExprKind.ExprMatch (s, cases) ->
+        u (collectStructLitNames s
+           :: (cases |> List.collect (fun c ->
+                   [ collectStructLitNames c.Body; opt collectStructLitNames c.Guard ])))
+    | ExprKind.ExprBlock (stmts, fin) ->
+        u ((stmts |> List.map collectStructLitNamesStmt) @ [ opt collectStructLitNames fin ])
+    | ExprKind.ExprTyped (e, _) -> collectStructLitNames e
+    | ExprKind.ExprLambda (_, _, body) -> collectStructLitNames body
+    | _ -> Set.empty
+
+and collectStructLitNamesStmt (stmt: Stmt) : Set<string> =
+    match stmt with
+    | StmtSpanned (inner, _) -> collectStructLitNamesStmt inner
+    | StmtLet b -> collectStructLitNames b.Value
+    | StmtAssign (l, _, r) -> Set.union (collectStructLitNames l) (collectStructLitNames r)
+    | StmtExpr e -> collectStructLitNames e
+    | StmtForIn (_, range, body) ->
+        (collectStructLitNames range :: (body |> List.map collectStructLitNamesStmt))
+        |> List.fold Set.union Set.empty
+
 /// Topological sort: given a map of name → dependencies, return an evaluation order.
 /// Returns Error with cycle members if a cycle exists.
 let topoSort (deps: Map<string, Set<string>>) : Result<string list, string list> =
@@ -153,15 +220,53 @@ let private externalBuiltins =
 let registerStaticBuiltin (name: string) (f: StaticValue list -> Result<StaticValue, string>) =
     externalBuiltins.[name] <- f
 
+/// Extension point: static builtins whose arguments must NOT be evaluated —
+/// the argument NAMES A DECLARATION rather than denoting a value. `idx_card(R)`
+/// is the first: R is a struct type name, so the evaluate-args-first path
+/// above would fold it to "undefined variable" before the builtin ever ran.
+/// The handler receives the environment, the REMAINING STEP COUNT of the fold
+/// that reached it, and the raw argument expressions, and may call `evalExpr`
+/// on whichever of them it actually wants evaluated.
+///
+/// A handler that re-enters `evalExpr` starts a FRESH budget: the step count
+/// is passed by value, so nothing the handler does draws down the caller's
+/// pool and nothing it does inherits the caller's depth. That is a deliberate
+/// seam — a syntactic builtin is a compiler subroutine with its own cost model
+/// (`idx_card` folds one conjunct per box cell, which has no sensible
+/// expression in the caller's remaining steps) — and it is also a LOADED GUN:
+/// a builtin reachable from the declaration it is reading can recur forever
+/// with the depth counter reset at every hop, and neither guard below will see
+/// it. Such a builtin owns its own cycle detection (StructIdxSpec's
+/// enumeration-in-progress set is the worked example).
+///
+/// Consulted BEFORE the user's static functions and before the evaluated-args
+/// path, so a registered syntactic name is reserved; registrants are core
+/// layers (StructIdxSpec), not user code.
+let private syntacticBuiltins =
+    System.Collections.Concurrent.ConcurrentDictionary<string, StaticEnv -> int -> Expr list -> Result<StaticValue, string>>()
+
+/// Register (idempotently — last write wins) a static builtin that takes its
+/// arguments UNEVALUATED.
+let registerSyntacticStaticBuiltin (name: string) (f: StaticEnv -> int -> Expr list -> Result<StaticValue, string>) =
+    syntacticBuiltins.[name] <- f
+
+let internal trySyntacticBuiltin (name: string) =
+    match syntacticBuiltins.TryGetValue name with
+    | true, f -> Some f
+    | _ -> None
+
 /// Names the static evaluator can call: the core builtin table (must match
-/// evalBuiltin's arms) plus everything in the external registry. Used by
-/// constraint validation to reject calls that could never fold.
+/// evalBuiltin's arms) plus everything in the external and syntactic
+/// registries. Used by constraint validation to reject calls that could never
+/// fold.
 let knownBuiltinNames () : Set<string> =
     let core =
         [ "exp"; "log"; "sqrt"; "sin"; "cos"; "tan"
           "sinh"; "cosh"; "tanh"; "asin"; "acos"; "atan"
           "floor"; "ceil"; "abs"; "min"; "max"; "length"; "prodsum" ]
-    Set.union (Set.ofList core) (externalBuiltins.Keys |> Set.ofSeq)
+    Set.unionMany [ Set.ofList core
+                    externalBuiltins.Keys |> Set.ofSeq
+                    syntacticBuiltins.Keys |> Set.ofSeq ]
 
 /// Extension point: the provider layer registers its compile-time DATA
 /// reader here ((providerName, storePath, varName) → folded value) — see
@@ -224,7 +329,88 @@ let providerIndexExtent (env: StaticEnv) (name: string) : int option =
 // Expression Evaluator
 // ============================================================================
 
+/// A fold budget: TWO numbers, because a fold has two ways to run away and
+/// neither bound implies the other.
+///
+///   Steps — total node visits in one top-level fold, SHARED by sibling
+///           subexpressions. This is the WORK bound. A depth bound alone does
+///           not give you one: `f(n) = g(n-1) + g(n-1)` does 2^depth work
+///           inside any depth limit you care to name.
+///   Depth — maximum nesting of the evaluator's own recursion. This is the
+///           SURVIVAL bound. A step bound alone does not give you one either:
+///           the counter cannot fire before the .NET stack does unless
+///           something separately bounds nesting.
+type Budget = {
+    Steps: int
+    Depth: int
+}
+
+/// Live state of ONE top-level fold. `Left` is mutable so that sibling
+/// subexpressions draw from a single pool rather than each inheriting a copy
+/// of the parent's remainder — which is the whole difference between a step
+/// budget and a depth budget wearing its name.
+type private Fuel = {
+    mutable Left: int
+    MaxDepth: int
+}
+
+/// Total node visits one ordinary `let static` fold may take.
+///
+/// THE NAME USED TO LIE, and the history is worth keeping because the failure
+/// it produced was not a wrong answer. This number was threaded as `fuel - 1`
+/// into every CHILD of a node, so both operands of a `+` received the same
+/// `fuel - 1` from their parent: it bounded evaluation DEPTH while being named,
+/// documented and reported as a step count. 100,000 nested `evalExpr` frames
+/// exhaust even the 64 MB stack every compiler entry point runs on
+/// (`Runtime.largeStackBytes`, installed at Main.fs's `runOnLargeStack`), so
+/// the "step limit exceeded" error below was unreachable for exactly the input
+/// it was written for: `static function bomb(n: Int) -> Int = bomb(n + 1)` did
+/// not burn 100,000 steps and then diagnose, it killed the compiler process
+/// with an uncatchable StackOverflowException. It is now a genuine step count,
+/// charged once per node visit, and `maxDepth` is what keeps the process alive
+/// long enough for it to matter.
 let maxSteps = 100_000
+
+/// Maximum nesting of the evaluator's recursion.
+///
+/// SIZED AGAINST THE STACK, not against any language rule: one evaluation
+/// level costs well under 2 KB across its `Result.bind` closures, so 4,096
+/// levels is a few MB against `Runtime.largeStackBytes`' 64 MB — two orders of
+/// magnitude of headroom. Lowering that thread's stack size without lowering
+/// this re-arms the crash described above, which is why the coupling is named
+/// here rather than left to be rediscovered.
+///
+/// This is a ceiling on NESTING, not on how many times a static function may
+/// recurse in total: a static call costs one level, so it admits ~4,000 nested
+/// static calls — far past anything a compile-time constant needs, and far
+/// short of what the stack can take.
+let maxDepth = 4_096
+
+/// Ordinary `let static` folding: the whole budget, for one declaration.
+let defaultBudget = { Steps = maxSteps; Depth = maxDepth }
+
+/// The constrained-index counting layer's PER-CELL budget, spent afresh on
+/// every conjunct at every box cell (StructIdxFence.evalConjunctsAtCell).
+///
+/// Much smaller than the default ON PURPOSE, and the reason is the cost model,
+/// not caution. A cell predicate is a boolean over a handful of already-bound
+/// integer fields — a few dozen nodes at the outside — so 10,000 steps is
+/// already three orders of magnitude of slack, while the default budget would
+/// let one pathological conjunct do 100,000 steps' work at each of up to
+/// `StructIdxSpec.maxBoxCells` cells. Depth 512 is likewise far past any real
+/// conjunct and well under the stack.
+let cellBudget = { Steps = 10_000; Depth = 512 }
+
+/// PPL license conjuncts (`__ppl_indep(...)`) are static LICENSES, not value
+/// predicates — they are present only at the pre-elaborator Unfold call site
+/// and never denote a truth about field values. Both readings of a struct's
+/// conjunct list skip them: the CONSTRUCTION reading below, and the
+/// ENUMERATION reading in StructIdxFence. One definition, so a licensed
+/// struct cannot be constructible in one world and empty in the other.
+let isPplLicenseConjunct (c: Expr) : bool =
+    match c.Kind with
+    | ExprKind.ExprApp ({ Kind = ExprKind.ExprVar f }, _) -> f.StartsWith "__ppl_"
+    | _ -> false
 
 /// Fold a provider read's operand (`root.vars.A` / `root.dims.x`) through
 /// the registered compile-time reader. Shared by the qualified-application
@@ -244,10 +430,17 @@ let private foldProviderRead (env: StaticEnv) (inner: Expr) : Result<StaticValue
     | None, _ ->
         Error "Static evaluation: `alias.read(...)` folds only over a provider-backed variable (root.vars.<name> where root = alias.load(\"store\"))"
 
-let rec evalExpr (env: StaticEnv) (fuel: int) (expr: Expr) : Result<StaticValue, string> =
-    if fuel <= 0 then
+/// The evaluator proper. `depth` is the nesting level of THIS node; every
+/// child is visited at `depth + 1`, and every visit costs one step out of the
+/// shared pool. Both guards are checked before the node is looked at, so a
+/// runaway is refused rather than half-evaluated.
+let rec private evalCore (env: StaticEnv) (fuel: Fuel) (depth: int) (expr: Expr) : Result<StaticValue, string> =
+    if depth > fuel.MaxDepth then
+        Error (sprintf "Static evaluation: nesting depth limit exceeded (%d levels — possible infinite recursion)" fuel.MaxDepth)
+    elif fuel.Left <= 0 then
         Error "Static evaluation: step limit exceeded (possible infinite recursion)"
     else
+    fuel.Left <- fuel.Left - 1
     match expr.Kind with
     | ExprKind.ExprLit (LitInt n) -> Ok (SVInt n)
     | ExprKind.ExprLit (LitFloat f) -> Ok (SVFloat f)
@@ -263,23 +456,33 @@ let rec evalExpr (env: StaticEnv) (fuel: int) (expr: Expr) : Result<StaticValue,
             Error (sprintf "Static evaluation: undefined variable '%s'" name)
 
     | ExprKind.ExprBinOp (_, op, l, r) ->
-        evalExpr env (fuel - 1) l |> Result.bind (fun lv ->
-        evalExpr env (fuel - 1) r |> Result.bind (fun rv ->
+        // Both operands are visited at depth + 1 and BOTH draw from the same
+        // step pool. Under the old `fuel - 1`-per-child threading they each
+        // received a private copy of the parent's remainder, which is what
+        // made the budget a depth bound with a step bound's name.
+        evalCore env fuel (depth + 1) l |> Result.bind (fun lv ->
+        evalCore env fuel (depth + 1) r |> Result.bind (fun rv ->
             evalBinOp op lv rv))
 
     | ExprKind.ExprUnaryOp (op, e) ->
-        evalExpr env (fuel - 1) e |> Result.bind (fun v ->
+        evalCore env fuel (depth + 1) e |> Result.bind (fun v ->
             match op, v with
             | OpNeg, SVInt n -> Ok (SVInt (-n))
             | OpNeg, SVFloat f -> Ok (SVFloat (-f))
             | OpNot, SVBool b -> Ok (SVBool (not b))
             | _ -> Error (sprintf "Static evaluation: cannot apply %A to %A" op v))
 
+    // Syntactic builtins (`idx_card(R)`): the argument names a DECLARATION,
+    // so it is handed over unevaluated. Checked before the static-function
+    // and evaluated-args paths — see registerSyntacticStaticBuiltin.
+    | ExprKind.ExprApp ({ Kind = ExprKind.ExprVar fname }, args) when (trySyntacticBuiltin fname).IsSome ->
+        (trySyntacticBuiltin fname).Value env fuel.Left args
+
     | ExprKind.ExprApp ({ Kind = ExprKind.ExprVar fname }, args) ->
         match Map.tryFind fname env.Functions with
         | Some funcDef ->
             env.CalledFunctions.Value <- Set.add fname env.CalledFunctions.Value
-            evalArgs env (fuel - 1) args |> Result.bind (fun argVals ->
+            evalArgs env fuel depth args |> Result.bind (fun argVals ->
                 if argVals.Length <> funcDef.Params.Length then
                     Error (sprintf "Static function '%s' expects %d args, got %d"
                                fname funcDef.Params.Length argVals.Length)
@@ -288,10 +491,15 @@ let rec evalExpr (env: StaticEnv) (fuel: int) (expr: Expr) : Result<StaticValue,
                         (funcDef.Params, argVals) ||> List.zip
                         |> List.fold (fun e (p, v) ->
                             { e with Values = Map.add p v e.Values }) env
-                    evalExpr bodyEnv (fuel - 1) funcDef.Body)
+                    // A CALLEE'S BODY IS A CHILD FOR DEPTH PURPOSES even
+                    // though it is not one syntactically: it is entered from
+                    // this frame and returns to it, so the stack grows exactly
+                    // as it does for a real subexpression. Charging it is what
+                    // makes an unbounded static recursion hit `maxDepth`.
+                    evalCore bodyEnv fuel (depth + 1) funcDef.Body)
         | None ->
             // Try as a built-in static function
-            evalBuiltin env fuel fname args
+            evalBuiltin env fuel depth fname args
 
     // Provider payload fold: `alias.read(root.vars.A)` (equivalently
     // `root.vars.A |> alias.read`) where root is a provider-backed binding
@@ -309,29 +517,29 @@ let rec evalExpr (env: StaticEnv) (fuel: int) (expr: Expr) : Result<StaticValue,
         Error (sprintf "Static evaluation: unsupported function form in call")
 
     | ExprKind.ExprIf (cond, thenBr, elseBr) ->
-        evalExpr env (fuel - 1) cond |> Result.bind (fun cv ->
+        evalCore env fuel (depth + 1) cond |> Result.bind (fun cv ->
             match cv with
-            | SVBool true -> evalExpr env (fuel - 1) thenBr
-            | SVBool false -> evalExpr env (fuel - 1) elseBr
+            | SVBool true -> evalCore env fuel (depth + 1) thenBr
+            | SVBool false -> evalCore env fuel (depth + 1) elseBr
             | _ -> Error "Static evaluation: if condition must be Bool")
 
     | ExprKind.ExprTuple es ->
-        evalArgs env (fuel - 1) es |> Result.map SVTuple
+        evalArgs env fuel depth es |> Result.map SVTuple
 
     | ExprKind.ExprArrayLit es ->
-        evalArgs env (fuel - 1) es |> Result.map SVTuple  // static arrays as tuples
+        evalArgs env fuel depth es |> Result.map SVTuple  // static arrays as tuples
 
     | ExprKind.ExprLet (binding, body) ->
-        evalExpr env (fuel - 1) binding.Value |> Result.bind (fun v ->
+        evalCore env fuel (depth + 1) binding.Value |> Result.bind (fun v ->
             let env' = bindPattern env binding.Pattern v
-            evalExpr env' (fuel - 1) body)
+            evalCore env' fuel (depth + 1) body)
 
     | ExprKind.ExprMatch (scrutinee, cases) ->
-        evalExpr env (fuel - 1) scrutinee |> Result.bind (fun sv ->
-            evalMatch env (fuel - 1) sv cases)
+        evalCore env fuel (depth + 1) scrutinee |> Result.bind (fun sv ->
+            evalMatch env fuel depth sv cases)
 
     | ExprKind.ExprBlock (stmts, finalExpr) ->
-        evalBlock env (fuel - 1) stmts finalExpr
+        evalBlock env fuel depth stmts finalExpr
 
     // Module-qualified static access (`M.k`): imported statics are seeded
     // into Values under their qualified name by checkModule's pre-pass
@@ -341,7 +549,7 @@ let rec evalExpr (env: StaticEnv) (fuel: int) (expr: Expr) : Result<StaticValue,
         Ok env.Values.[sprintf "%s.%s" objName field]
 
     | ExprKind.ExprField (obj, field) ->
-        evalExpr env (fuel - 1) obj |> Result.bind (fun ov ->
+        evalCore env fuel (depth + 1) obj |> Result.bind (fun ov ->
             match ov with
             | SVStruct (sname, sfields) ->
                 match sfields |> List.tryFind (fun (fn, _) -> fn = field) with
@@ -359,7 +567,7 @@ let rec evalExpr (env: StaticEnv) (fuel: int) (expr: Expr) : Result<StaticValue,
         // by name, and fail the fold on violation (let-static assertion
         // semantics) instead of waiting for a runtime guard.
         let providedR =
-            fields |> List.map (fun (fn, e) -> evalExpr env (fuel - 1) e |> Result.map (fun v -> (fn, v)))
+            fields |> List.map (fun (fn, e) -> evalCore env fuel (depth + 1) e |> Result.map (fun v -> (fn, v)))
             |> List.fold (fun acc r ->
                 acc |> Result.bind (fun xs -> r |> Result.map (fun x -> xs @ [x]))) (Ok [])
         let fieldValsR =
@@ -370,7 +578,7 @@ let rec evalExpr (env: StaticEnv) (fuel: int) (expr: Expr) : Result<StaticValue,
                     match Map.tryFind name env.Structs with
                     | None -> Error (sprintf "Static evaluation: cannot fold '..' spread for struct %s (unknown field layout)" name)
                     | Some info ->
-                        evalExpr env (fuel - 1) baseExpr |> Result.bind (fun bv ->
+                        evalCore env fuel (depth + 1) baseExpr |> Result.bind (fun bv ->
                             match bv with
                             | SVStruct (_, bfields) when bfields.Length = info.Fields.Length ->
                                 let providedNames = provided |> List.map fst
@@ -406,16 +614,9 @@ let rec evalExpr (env: StaticEnv) (fuel: int) (expr: Expr) : Result<StaticValue,
                     match cs with
                     | [] -> Ok result
                     | (c: Expr) :: rest ->
-                        // PPL license conjuncts (`__ppl_indep(...)`) are
-                        // static licenses, not value predicates — present
-                        // only at the pre-elaborator Unfold call site; skip.
-                        let isPplLicense =
-                            match c.Kind with
-                            | ExprKind.ExprApp ({ Kind = ExprKind.ExprVar f }, _) -> f.StartsWith "__ppl_"
-                            | _ -> false
-                        if isPplLicense then checkAll (i + 1) rest
+                        if isPplLicenseConjunct c then checkAll (i + 1) rest
                         else
-                            match evalExpr bodyEnv (fuel - 1) c with
+                            match evalCore bodyEnv fuel (depth + 1) c with
                             | Ok (SVBool true) -> checkAll (i + 1) rest
                             | Ok (SVBool false) ->
                                 if total = 1 then Error (sprintf "Constraint violation in %s (static)" name)
@@ -433,10 +634,12 @@ let rec evalExpr (env: StaticEnv) (fuel: int) (expr: Expr) : Result<StaticValue,
     | _ ->
         Error (sprintf "Static evaluation: unsupported expression form")
 
-and evalArgs env fuel (args: Expr list) : Result<StaticValue list, string> =
-    args |> List.map (evalExpr env fuel) |> seqResults
+/// `depth` here (and in evalMatch/evalBlock/evalBuiltin below) is the depth of
+/// the PARENT node; the arguments themselves are its children, hence + 1.
+and private evalArgs env fuel depth (args: Expr list) : Result<StaticValue list, string> =
+    args |> List.map (evalCore env fuel (depth + 1)) |> seqResults
 
-and seqResults (results: Result<StaticValue, string> list) : Result<StaticValue list, string> =
+and private seqResults (results: Result<StaticValue, string> list) : Result<StaticValue list, string> =
     results |> List.fold (fun acc r ->
         match acc, r with
         | Ok xs, Ok x -> Ok (xs @ [x])
@@ -467,7 +670,7 @@ and bindPattern (env: StaticEnv) (pat: Pattern) (value: StaticValue) : StaticEnv
     | PatternKind.PatWildcard -> env
     | _ -> env  // other patterns: no binding in static context
 
-and evalMatch env fuel (scrutinee: StaticValue) (cases: MatchCase list) : Result<StaticValue, string> =
+and private evalMatch env fuel depth (scrutinee: StaticValue) (cases: MatchCase list) : Result<StaticValue, string> =
     match cases with
     | [] -> Error "Static evaluation: no matching case in match expression"
     | case :: rest ->
@@ -477,15 +680,15 @@ and evalMatch env fuel (scrutinee: StaticValue) (cases: MatchCase list) : Result
             // Check guard if present
             match case.Guard with
             | Some guard ->
-                evalExpr env' fuel guard |> Result.bind (fun gv ->
+                evalCore env' fuel (depth + 1) guard |> Result.bind (fun gv ->
                     match gv with
-                    | SVBool true -> evalExpr env' fuel case.Body
-                    | SVBool false -> evalMatch env fuel scrutinee rest
+                    | SVBool true -> evalCore env' fuel (depth + 1) case.Body
+                    | SVBool false -> evalMatch env fuel depth scrutinee rest
                     | _ -> Error "Static evaluation: match guard must be Bool")
             | None ->
-                evalExpr env' fuel case.Body
+                evalCore env' fuel (depth + 1) case.Body
         | None ->
-            evalMatch env fuel scrutinee rest
+            evalMatch env fuel depth scrutinee rest
 
 and tryMatchPattern (value: StaticValue) (pat: Pattern) : (string * StaticValue) list option =
     match pat.Kind with
@@ -532,30 +735,32 @@ and tryMatchPattern (value: StaticValue) (pat: Pattern) : (string * StaticValue)
         None
     | _ -> None
 
-and evalBlock env fuel (stmts: Stmt list) (finalExpr: Expr option) : Result<StaticValue, string> =
+and private evalBlock env fuel depth (stmts: Stmt list) (finalExpr: Expr option) : Result<StaticValue, string> =
+    // Statements are SIBLINGS, so the depth passed on is the block's own — a
+    // long block is wide, not deep, and only the step pool should feel it.
     match stmts with
     | [] ->
         match finalExpr with
-        | Some e -> evalExpr env fuel e
+        | Some e -> evalCore env fuel (depth + 1) e
         | None -> Ok SVUnit
     | StmtSpanned (inner, _) :: rest ->
         // Span annotations are transparent to static evaluation.
-        evalBlock env fuel (inner :: rest) finalExpr
+        evalBlock env fuel depth (inner :: rest) finalExpr
     | StmtLet binding :: rest ->
-        evalExpr env fuel binding.Value |> Result.bind (fun v ->
+        evalCore env fuel (depth + 1) binding.Value |> Result.bind (fun v ->
             let env' = bindPattern env binding.Pattern v
-            evalBlock env' fuel rest finalExpr)
+            evalBlock env' fuel depth rest finalExpr)
     | StmtExpr e :: rest ->
-        evalExpr env fuel e |> Result.bind (fun _ ->
-            evalBlock env fuel rest finalExpr)
+        evalCore env fuel (depth + 1) e |> Result.bind (fun _ ->
+            evalBlock env fuel depth rest finalExpr)
     | StmtAssign _ :: rest ->
-        evalBlock env fuel rest finalExpr
+        evalBlock env fuel depth rest finalExpr
     | StmtForIn _ :: rest ->
-        evalBlock env fuel rest finalExpr  // Skip for-in loops in static eval
+        evalBlock env fuel depth rest finalExpr  // Skip for-in loops in static eval
 
 /// Built-in static functions (abs, min, max, length, etc.)
-and evalBuiltin env fuel (name: string) (args: Expr list) : Result<StaticValue, string> =
-    evalArgs env fuel args |> Result.bind (fun argVals ->
+and private evalBuiltin env fuel depth (name: string) (args: Expr list) : Result<StaticValue, string> =
+    evalArgs env fuel depth args |> Result.bind (fun argVals ->
         // Scalar math intrinsics: same whitelist as TypeCheck.mathIntrinsics
         // (runtime form renders std::<name>); int operands promote to float.
         let asFloat = function SVInt n -> Some (float n) | SVFloat f -> Some f | _ -> None
@@ -644,6 +849,20 @@ and evalBinOp (op: BinOp) (lv: StaticValue) (rv: StaticValue) : Result<StaticVal
     | OpNeq, SVString a, SVString b -> Ok (SVBool (a <> b))
     | _ -> Error (sprintf "Static evaluation: cannot apply %A to %A and %A" op lv rv)
 
+/// Fold an expression under an explicit budget. Each call starts a FRESH pool
+/// at depth zero — the budget bounds one top-level fold, not the compiler.
+let evalExprWith (env: StaticEnv) (budget: Budget) (expr: Expr) : Result<StaticValue, string> =
+    evalCore env { Left = budget.Steps; MaxDepth = budget.Depth } 0 expr
+
+/// Fold an expression under a STEP budget of `fuel`, at the default depth
+/// ceiling. This is the historical signature and every existing call site
+/// passes `maxSteps` — which is what they all meant by it, so none of them
+/// changed when the threading was fixed. Reach for `evalExprWith` when the
+/// caller's cost model differs from `let static` folding's (the counting
+/// layer's per-cell budget is the one such caller today).
+let evalExpr (env: StaticEnv) (fuel: int) (expr: Expr) : Result<StaticValue, string> =
+    evalExprWith env { defaultBudget with Steps = fuel } expr
+
 // ============================================================================
 // Static Resolution — Main Entry Point
 // ============================================================================
@@ -701,13 +920,16 @@ let resolveStatics (decls: Located<Decl> list) : Result<StaticEnv * StaticFailur
                 Params = fd.Params |> List.map (fun p -> p.Name)
                 Body = fd.Body
             } staticFuncs
-        | DeclType (TyDeclStruct (sname, _, sfields, sconstraints)) ->
+        | DeclType (TyDeclStruct (sname, _, sfields, sconstraints, sIsStatic)) ->
             // Full pre-scan (struct/static decl order is irrelevant): the
             // fold-time conjunct list mirrors the checker's via the shared
             // Ast.structConjuncts helper.
             structInfos <- Map.add sname {
                 Fields = sfields |> List.map (fun f -> f.Name)
                 Conjuncts = structConjuncts sfields sconstraints
+                FieldDecls = sfields
+                Declared = sconstraints
+                IsStatic = sIsStatic
             } structInfos
         | DeclStatic binding ->
             // Any pattern that binds at least one name participates; a
@@ -750,7 +972,44 @@ let resolveStatics (decls: Located<Decl> list) : Result<StaticEnv * StaticFailur
     let deps =
         pending
         |> List.collect (fun pd ->
-            let refs = collectFreeNames pd.Expr
+            let direct = collectFreeNames pd.Expr
+            // NAMING A STRUCT PULLS IN THE STRUCT'S OWN STATICS. A static
+            // expression that mentions a struct TYPE by name (`idx_card(R)`)
+            // is going to fold that struct's field bounds and conjuncts, and
+            // those may name statics that the mentioning expression never
+            // does — `static struct R { m: Int<min=-L, max=L> }` with
+            // `let static L = 1` gives `idx_card(R)` a real dependency on L
+            // that no walk of the CALL can see. Without this edge the
+            // topological sort is free to fold the call first, and the bound
+            // fails with "undefined variable 'L'" against a perfectly good
+            // program. The field names themselves are excluded: they are
+            // bound per cell, not statics.
+            // Struct names reach this fold two ways, and neither covers the
+            // other: MENTIONED as a value (`idx_card(R)` — an ExprVar, so it
+            // is already in `direct`), or CONSTRUCTED as a literal
+            // (`R { ... }` — an ExprStruct, whose name is not an ExprVar).
+            // The literal case is the CONSTRUCTION reading and needs the same
+            // edge: folding it runs R's conjuncts. Seeded into the lookup
+            // only, never into `refs`, so a static that happens to share a
+            // struct's name cannot gain a spurious self-edge.
+            let mentioned = Set.union direct (collectStructLitNames pd.Expr)
+            let structRefs =
+                mentioned |> Set.fold (fun acc n ->
+                    match Map.tryFind n structInfos with
+                    | None -> acc
+                    | Some info ->
+                        let fieldNames = Set.ofList info.Fields
+                        let bounds =
+                            info.FieldDecls
+                            |> List.collect (fun f ->
+                                match f.Bound with
+                                | Some b -> [ b.Lo; b.Hi ] |> List.choose id
+                                | None -> [])
+                        let named =
+                            (bounds @ info.Conjuncts)
+                            |> List.fold (fun s e -> Set.union s (collectFreeNames e)) Set.empty
+                        Set.union acc (Set.difference named fieldNames)) Set.empty
+            let refs = Set.union direct structRefs
             // Only dependencies on OTHER static values (not functions, not
             // names bound by this same declaration)
             let declDeps = Set.difference (Set.intersect refs staticNames) (Set.ofList pd.Names)

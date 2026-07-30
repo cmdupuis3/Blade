@@ -1,0 +1,100 @@
+// TEST: ML Ops derive_perm_linear Equivariance
+import ml as ml
+// ============================================================================
+// THE THEOREM, checked by EXACT EQUALITY. ml.derive_perm_linear(K, L, N, ., w)
+// is S_n-equivariant BY CONSTRUCTION for every weight vector w — each basis map
+// is an orbit indicator of the S_n action on [N]^{K+L}, so relabelling the
+// nodes permutes the loop nest's tuples within their orbits and nothing else.
+// There is no training-time equivariance test to run; this file is the pin that
+// the emitted kernel really is the map the construction promises.
+//
+// The data are INTEGERS and every basis map is a sum of input cells with
+// coefficient 1, so f(sigma.x) - sigma.f(x) is EXACTLY 0 in IEEE doubles — no
+// tolerance appears anywhere in this file (contrast the O(3) certificates,
+// which pin rotation invariance to ~1e-13).
+//
+// THE PERMUTATION, fixed once. sigma is the 3-cycle of [3]
+//     sigma:  0 -> 1,  1 -> 2,  2 -> 0        (sigma^-1: 0 -> 2, 1 -> 0, 2 -> 1)
+// acting on a K-tensor by relabelling every axis:
+//     (sigma.x)[i1, .., iK] = x[sigma^-1(i1), .., sigma^-1(iK)]
+// The permuted inputs are written out as INLINE LITERALS (no permutation
+// machinery in the test), and the permuted outputs are rebuilt by hand from the
+// unpermuted result — so the pin compares two independently constructed values.
+// ============================================================================
+
+// --- 1. K = L = 1, N = 3: the DeepSets layer ---------------------------------
+// w = [2, -1] -> f(x) = 2*x - sum(x)*1.
+// x  = [1, 2, 3],  sum 6  ->  f(x)  = [2-6, 4-6, 6-6]   = [-4, -2, 0]
+// sigma.x = [x(2), x(0), x(1)] = [3, 1, 2],  sum 6
+//                          ->  f(sigma.x) = [6-6, 2-6, 4-6] = [0, -4, -2]
+// sigma.f(x) = [f(x)(2), f(x)(0), f(x)(1)] = [0, -4, -2].   Equal.
+let w11 = [2.0, -1.0]
+let x: Array<Float like Idx<3>> = [1.0, 2.0, 3.0]
+let x_s: Array<Float like Idx<3>> = [3.0, 1.0, 2.0]
+let y = ml.derive_perm_linear(1, 1, 3, x, w11)
+let y_of_xs = ml.derive_perm_linear(1, 1, 3, x_s, w11)
+// EXPECT: y = [-4, -2, 0]
+// EXPECT: y_of_xs = [0, -4, -2]
+let sigma_y = [y(2), y(0), y(1)]
+// EXPECT: sigma_y = [0, -4, -2]
+let d1 = y_of_xs - sigma_y
+let sq1 = reduce(d1 * d1, (+))
+// EXPECT: sq1 = 0
+
+// --- 2. K = 2, L = 1, N = 3: the five-map graph layer ------------------------
+// Bell(3) = 5 basis maps R^{3x3} -> R^3, in RGS-lex (coarsest-first) order over
+// the positions (i0, i1, o0):
+//   slot 0  000  {{i0,i1,o0}}          out(a) = M[a][a]            (diagonal)
+//   slot 1  001  {{i0,i1},{o0}}        out(b) = trace(M)           (sum+bcast)
+//   slot 2  010  {{i0,o0},{i1}}        out(a) = sum_b M[a][b]      (row sums)
+//   slot 3  011  {{i0},{i1,o0}}        out(b) = sum_a M[a][b]      (col sums)
+//   slot 4  012  {{i0},{i1},{o0}}      out(c) = sum_ab M[a][b]     (total)
+// w = [1, -1, 2, -2, 3].
+//
+// M = [[1,2,3],[4,5,6],[7,8,9]]:
+//   diag [1,5,9]; trace 15; row sums [6,15,24]; col sums [12,15,18]; total 45
+//   f(M) = [1,5,9] - 15 + 2*[6,15,24] - 2*[12,15,18] + 3*45
+//        = [1-15+12-24+135, 5-15+30-30+135, 9-15+48-36+135] = [109, 125, 141]
+//
+// (sigma.M)[i][j] = M[sigma^-1(i)][sigma^-1(j)], i.e. rows AND columns are
+// reordered by [2, 0, 1]:
+//   sigma.M = [[9,7,8],[3,1,2],[6,4,5]]
+//   diag [9,1,5]; trace 15; row sums [24,6,15]; col sums [18,12,15]; total 45
+//   f(sigma.M) = [9-15+48-36+135, 1-15+12-24+135, 5-15+30-30+135]
+//              = [141, 109, 125]
+// sigma.f(M) = [f(M)(2), f(M)(0), f(M)(1)] = [141, 109, 125].   Equal.
+let w21 = [1.0, 0.0 - 1.0, 2.0, 0.0 - 2.0, 3.0]
+let m: Array<Float like Idx<9>> = [1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0, 9.0]
+let m_s: Array<Float like Idx<9>> = [9.0, 7.0, 8.0, 3.0, 1.0, 2.0, 6.0, 4.0, 5.0]
+let z = ml.derive_perm_linear(2, 1, 3, m, w21)
+let z_of_ms = ml.derive_perm_linear(2, 1, 3, m_s, w21)
+// EXPECT: z = [109, 125, 141]
+// EXPECT: z_of_ms = [141, 109, 125]
+let sigma_z = [z(2), z(0), z(1)]
+// EXPECT: sigma_z = [141, 109, 125]
+let d2 = z_of_ms - sigma_z
+let sq2 = reduce(d2 * d2, (+))
+// EXPECT: sq2 = 0
+
+// --- 3. L = 0 is INVARIANCE, the degenerate case of the same statement -------
+// With no output axes sigma acts trivially on the result, so equivariance reads
+// f(sigma.M) = f(M): trace and total sum are unchanged by relabelling.
+let inv = ml.derive_perm_linear(2, 0, 3, m, [2.0, 0.0 - 3.0])
+let inv_s = ml.derive_perm_linear(2, 0, 3, m_s, [2.0, 0.0 - 3.0])
+// EXPECT: inv = [-105]
+// EXPECT: inv_s = [-105]
+let d3 = inv(0) - inv_s(0)
+// EXPECT: d3 = 0
+
+// --- 4. the bias is an EQUIVARIANT CONSTANT ----------------------------------
+// derive_perm_bias(L, N, b) has no input to permute, so equivariance says the
+// constant is FIXED by the whole action: sigma.b = b. At L = 2 that is exactly
+// "diagonal indicator and all-ones are the only S_3-fixed 3x3 matrices", and
+// permuting rows and columns of the emitted buffer must reproduce it.
+let cb = ml.derive_perm_bias(2, 3, [5.0, 2.0])
+// EXPECT: cb = [7, 2, 2, 2, 7, 2, 2, 2, 7]
+// sigma.cb: cell (i, j) <- cb(sigma^-1(i), sigma^-1(j)), row-major over [2,0,1]
+let sigma_cb = [cb(8), cb(6), cb(7), cb(2), cb(0), cb(1), cb(5), cb(3), cb(4)]
+let d4 = cb - sigma_cb
+let sq4 = reduce(d4 * d4, (+))
+// EXPECT: sq4 = 0

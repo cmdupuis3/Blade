@@ -1,0 +1,83 @@
+// TEST: ML Equiv Suggest Dependency Closure
+import ml as ml
+// ============================================================================
+// THE DEPENDENCY-THREADING CASE — the one stage 6a exists for.
+//
+// `layer2` calls `layer1`, and neither carries a pin. Judged in isolation,
+// `layer2` would fail: an uncertified callee is an ESCAPE (corpus 007), so a
+// channel that folded no state would report only `layer1` and go quiet on the
+// function the user actually cares about — useless on exactly the multi-layer
+// models this exists for.
+//
+// So declarations fold in DECL ORDER against a speculative certificate table,
+// the way Deduce.fs's summary resolver folds sign parities: when `layer2` is
+// judged, `layer1`'s just-inferred certificate is in the table. Because that
+// certificate is a hypothesis and not a fact, `layer2`'s suggestion NAMES it —
+// "also requires pinning: layer1" — so the proposal cannot be read as
+// standalone. Two Deduce.fs rules ride along: no summary proves itself, and
+// there is no fixpoint iteration, so a call to a LATER uncertified function
+// simply fails and is silent.
+//
+// The chained twin below pins the closure: with BOTH conjuncts written, the
+// checker accepts the whole chain (corpus 003's composition rule).
+// ============================================================================
+let static S = [(0, 0, 1), (1, 1, 1)]
+let static WD = ml.hom_dim(S, S)
+// EXPECT: WD = 2
+
+// SUGGEST: function 'layer1' judges equivariant under O3: add 'where ml.equiv(O3)' [signature: x transforms as IrrepsIdx<[(0, 0, 1), (1, 1, 1)]>, w invariant -> IrrepsIdx<[(0, 0, 1), (1, 1, 1)]>]
+function layer1(x: Array<Float like IrrepsIdx<S>>, w: Array<Float like Idx<WD>>)
+                -> Array<Float like IrrepsIdx<S>> =
+    ml.derive_linear(S, S, w, x)
+
+// SUGGEST: function 'layer2' judges equivariant under O3: add 'where ml.equiv(O3)' [signature: x transforms as IrrepsIdx<[(0, 0, 1), (1, 1, 1)]>, w invariant -> IrrepsIdx<[(0, 0, 1), (1, 1, 1)]>] (also requires pinning: layer1)
+function layer2(x: Array<Float like IrrepsIdx<S>>, w: Array<Float like Idx<WD>>)
+                -> Array<Float like IrrepsIdx<S>> =
+    layer1(layer1(x, w), w)
+
+// The closure, written out. Both pins present, both bodies check — which is
+// what the "(also requires pinning: ...)" clause was telling the user to do.
+function layer1_pinned(x: Array<Float like IrrepsIdx<S>>, w: Array<Float like Idx<WD>>)
+                       where ml.equiv(O3) -> Array<Float like IrrepsIdx<S>> =
+    ml.derive_linear(S, S, w, x)
+
+function layer2_pinned(x: Array<Float like IrrepsIdx<S>>, w: Array<Float like Idx<WD>>)
+                       where ml.equiv(O3) -> Array<Float like IrrepsIdx<S>> =
+    layer1_pinned(layer1_pinned(x, w), w)
+
+// THE TABLE IS KEYED BY GROUP, and that matters as soon as two proposals
+// disagree about which group they proved. `act_odd` gates on pseudoscalars, so
+// it is proposed for SO3 and recorded ONLY there — the strongest passer is what
+// a user would pin, and the shipped checker refuses a cross-group call in both
+// directions, so parking it in the O3 table too would propose a chain the
+// checker then rejects. `chain_odd` therefore fails its O3 attempt (the callee
+// is an uncertified escape under that hypothesis) and passes its SO3 one,
+// naming the dependency it actually used.
+let static SODD = [(0, 1, 2), (1, 1, 1)]
+
+// SUGGEST: function 'act_odd' judges equivariant under SO3: add 'where ml.equiv(SO3)' [signature: x transforms as IrrepsIdx<[(0, 1, 2), (1, 1, 1)]> -> IrrepsIdx<[(0, 1, 2), (1, 1, 1)]>]
+function act_odd(x: Array<Float like IrrepsIdx<SODD>>) -> Array<Float like IrrepsIdx<SODD>> =
+    ml.gated(SODD, x)
+
+// SUGGEST: function 'chain_odd' judges equivariant under SO3: add 'where ml.equiv(SO3)' [signature: x transforms as IrrepsIdx<[(0, 1, 2), (1, 1, 1)]> -> IrrepsIdx<[(0, 1, 2), (1, 1, 1)]>] (also requires pinning: act_odd)
+function chain_odd(x: Array<Float like IrrepsIdx<SODD>>) -> Array<Float like IrrepsIdx<SODD>> =
+    act_odd(act_odd(x))
+
+let wv = [2.0, 0.5]
+let xv = [1.0, 4.0, 0.0 - 2.0, 6.0]
+
+// layer1: block 0e scaled by 2, block 1o scaled by 0.5.
+let one = layer1(xv, wv)
+// EXPECT: one = [2.0, 2.0, -1.0, 3.0]
+let two = layer2(xv, wv)
+// EXPECT: two = [4.0, 1.0, -0.5, 1.5]
+let two_p = layer2_pinned(xv, wv)
+// EXPECT: two_p = [4.0, 1.0, -0.5, 1.5]
+
+// gated twice on [0, 2, 1, 1, 1]. Corpus 010 pins one application:
+// [0, silu(2), 0.5, 0.5, 0.5] with silu(2) = 1.7615941559557646 and the l = 1
+// gate = sigmoid(x(0)) = sigmoid(0) = 0.5. Applying it again: the first gate
+// cell is still 0, so the l = 1 block halves once more (0.25), and the second
+// gate cell is silu(silu(2)).
+let odd2 = chain_odd([0.0, 2.0, 1.0, 1.0, 1.0])
+// EXPECT: odd2 = [0.0, 1.50336066741096, 0.25, 0.25, 0.25]

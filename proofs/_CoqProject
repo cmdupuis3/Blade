@@ -22,3 +22,8 @@ BladeCauchy.v
 BladeMonad.v
 BladeSafety.v
 BladeJacobian.v
+BladeSymPower.v
+BladePartition.v
+BladePointGroup.v
+BladeWordClosure.v
+BladeRepStatus.v

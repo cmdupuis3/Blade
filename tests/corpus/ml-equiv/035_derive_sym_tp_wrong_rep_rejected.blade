@@ -1,0 +1,17 @@
+// TEST: ML Derive Sym TP Wrong Rep Rejected (rejects)
+import ml as ml
+// derive_sym_tp's first input must TRANSFORM as IrrepsIdx<SA>; `xbad` is a
+// plain Float array, i.e. an invariant, so it does not co-rotate with the
+// second input and the contraction is not equivariant. The compaction changes
+// nothing about that premise — it is derive_tp's judgment on both inputs.
+// BL4008 (equivariance discipline violation), at the argument's span.
+let static SA = [(0, 0, 1), (1, 1, 1)]
+let static TPS = ml.tp_spec(SA, SA)
+let static WS = ml.sym_tp_weight_dim(SA)
+
+function bad(xbad: Array<Float like Idx<4>>, y: Array<Float like IrrepsIdx<SA>>,
+             w: Array<Float like Idx<WS>>)
+             where ml.equiv(O3) -> Array<Float like IrrepsIdx<TPS>> =
+  ml.derive_sym_tp(SA, xbad, y, w)
+
+let out: Array<Float like IrrepsIdx<TPS>> = bad([1.0, 2.0, -0.5, 0.25], [-0.75, 0.5, 1.5, -2.0], [0.3, -0.7, 1.1, 0.9, -1.3, 0.4, 2.0])

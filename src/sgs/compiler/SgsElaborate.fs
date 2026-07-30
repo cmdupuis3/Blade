@@ -195,6 +195,49 @@ let private ensure (st: ElabState) (key: string) (make: string -> FunctionDecl) 
 // Op elaboration
 // ============================================================================
 
+// ============================================================================
+// Galilean stamping (docs/plan-equivariance-in-types.md, stage A1)
+// ============================================================================
+//
+// The ML twin of this pass (MLElaborate's `equivStamp`) pins `__ml_equiv` on
+// the kernels it synthesizes. The sgs formers carry the SAME kind of
+// by-construction theorem, in MLGalilean's discipline instead: a constant
+// boost u -> u + U0 is annihilated by every one of the two bodies stamped
+// below, so the elaborator pins what it knows rather than leaving a loop nest
+// over baked stencil weights for a later pass to re-derive.
+//
+// The conjunct is the NORMALIZED `__ml_galilean`, whose args NAME the
+// boost-variant parameters (every other parameter is boost-invariant, and the
+// certified result must be boost-invariant — MLGalilean's v1 rule). It is
+// registered by `Blade.ML.Elaborate.expandStr`, which runs unconditionally as
+// the first pipeline stage, so the name resolves even in a program that
+// imports only sgs.
+//
+// ORDERING, the property that makes this safe: the galilean judgment runs
+// INSIDE MLElaborate.expandModule over that pass's `decls1`, and sgs
+// elaborates strictly AFTER ML (TypeCheck's stage list says so by name). The
+// decls stamped here therefore cannot exist when `buildCertTable` /
+// `judgeFunction` / `inferGalileanCertificates` run, which is what keeps their
+// bodies — flat work arrays and index arithmetic the composition walker would
+// refuse — out of a judgment they were never meant to face.
+//
+// WHY box_filter IS NOT STAMPED. It is the one former whose seam rule is
+// STATUS-PRESERVING rather than invariant-producing: `sgs.box_filter(U, W)`
+// maps a boost-variant field to a boost-variant field (the weights sum to 1,
+// so filter(u + U0) = filter(u) + U0). A `__ml_galilean` certificate asserts a
+// boost-INVARIANT result, so stamping it would be a false axiom, not a weaker
+// one. The v1 claim vocabulary has no spelling for "preserves"; giving it one
+// is a discipline change, not a stamping change.
+let private galileanStamp (boostParams: string list) (fd: FunctionDecl) : FunctionDecl =
+    let conj = ("__ml_galilean", boostParams)
+    let wc =
+        match fd.WhereClause with
+        | Some w -> { w with Custom = w.Custom @ [ conj ] }
+        | None ->
+            { Commutativity = []; Antisymmetry = []; Parallel = []
+              TDims = []; Custom = [ conj ] }
+    { fd with WhereClause = Some wc }
+
 let private opList = "grad, box_filter, stress"
 
 /// The (3, n, n, n) cubic-field shape every sgs former reads.
@@ -215,7 +258,13 @@ let private elabOp (st: ElabState) (ctx: Ctx) (scope: Scope) (op: string) (args:
     match op, args with
     | "grad", [ uE; dxE ] ->
         fieldShape ctx scope "grad" uE |> Result.map (fun n ->
-            let nm = ensure st (fingerprint "grad" (box n)) (fun nm -> gradDecl nm n)
+            // A1: boost-variant in `u`. Every emitted cell is
+            // (u(..+1..) - u(..-1..)) / (2 dx) — a difference of two reads of
+            // the SAME field, so the central-difference weights sum to zero
+            // and the constant U0 cancels identically, componentwise and at
+            // every grid point. `dx` is a held-fixed scalar. This is exactly
+            // MLGalilean's axiom `sgs.grad(U, DX) : U any -> BInv`.
+            let nm = ensure st (fingerprint "grad" (box n)) (fun nm -> galileanStamp [ "u" ] (gradDecl nm n))
             syn (ExprApp (syn (ExprVar nm), [ uE; dxE ])))
     | "grad", _ -> Error "grad: expected grad(U, DX) with DX the grid spacing"
     | "box_filter", [ uE; wE ] ->
@@ -227,7 +276,14 @@ let private elabOp (st: ElabState) (ctx: Ctx) (scope: Scope) (op: string) (args:
     | "stress", [ uE; wE ] ->
         fieldShape ctx scope "stress" uE |> Result.bind (fun n ->
         tileArg ctx "stress" n wE |> Result.map (fun w ->
-            let nm = ensure st (fingerprint "stress" (box (n, w))) (fun nm -> stressDecl nm n w)
+            // A1: boost-variant in `u`. Each packed slot is the SECOND CENTRAL
+            // comoment over the filter cell, prodsum(u_a, u_b)/T - mu_a*mu_b.
+            // Under u -> u + U0 the raw moment picks up
+            // U0_a*mu_b + U0_b*mu_a + U0_a*U0_b and the product of means picks
+            // up precisely the same, so the difference is unchanged: a central
+            // moment of any order >= 2 is boost-invariant. MLGalilean's axiom
+            // `sgs.stress(U, W) : U any -> BInv` states the same thing.
+            let nm = ensure st (fingerprint "stress" (box (n, w))) (fun nm -> galileanStamp [ "u" ] (stressDecl nm n w))
             syn (ExprApp (syn (ExprVar nm), [ uE ]))))
     | "stress", _ -> Error "stress: expected stress(U, W)"
     | _ -> Error (sprintf "sgs: unknown op '%s' (available: %s)" op opList)

@@ -1,0 +1,24 @@
+// TEST: ML Perm Signature Rank Rejected (rejects)
+import ml as ml
+// A MULTI-AXIS parameter in a perm-certified signature is refused AT THE
+// SIGNATURE, before any body is walked. v1 carries one status per VALUE and
+// keys it on the flat extent of a single `Idx<>` axis — the S_n ops consume
+// flat row-major N^k buffers (ml.derive_perm_linear's x is one Idx<N^K> axis,
+// the `_rows` house convention) — so `Array<Float like Idx<4>, Idx<4>>` has no
+// classification: is the first axis the node axis, the second, or both?
+// Answering that needs one status PER AXIS, which is the named v2 shape, and
+// the same upgrade is what unlocks O(3) x S_n dual certificates (the two
+// cross-referencing deferrals of plan-transforms-as-types §3.6).
+//
+// The refusal is the MLEquiv precedent verbatim (MLEquiv rejects arrays mixing
+// IrrepsIdx with other axes at the same point). Flatten the buffer to
+// Idx<16> — which the ops want anyway — or leave the function uncertified.
+// BL4012, at the declaration's span.
+let static W = ml.perm_weight_dim(2, 2, 4)
+
+function bad(x: Array<Float like Idx<4>, Idx<4>>, w: Array<Float like Idx<W>>)
+             where ml.perm_equiv(4) -> Array<Float like Idx<4>, Idx<4>> = x
+
+let xin: Array<Float like Idx<4>, Idx<4>> = [[1.0, 2.0, 3.0, 4.0], [5.0, 6.0, 7.0, 8.0],
+                                             [9.0, 10.0, 11.0, 12.0], [13.0, 14.0, 15.0, 16.0]]
+let out = bad(xin, [1.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0])

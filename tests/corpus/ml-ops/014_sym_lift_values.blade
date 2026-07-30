@@ -1,0 +1,66 @@
+// TEST: ML Ops sym_lift Monomial Lift
+import ml as ml
+// ============================================================================
+// ml.sym_lift(SPEC, K, x): the value-side half of the symmetric-power bridge —
+// x (dim n = total_dim(SPEC)) mapped to the flat C(n+K-1, K)-vector of degree-K
+// monomials prod_j x(i_j) over the canonical multisets i1 <= ... <= iK.
+//
+// TWO CONVENTIONS ARE PINNED HERE, both decided once in
+// docs/plan-transforms-as-types.md and never again.
+//
+// - §6.6, the convention fork: the cell IS the coefficient of the MONOMIAL
+//   e_{i1}...e_{iK}, so the lift emits the bare product with NO multiplicity
+//   weight. The symmetrized-tensor alternative differs by exactly
+//   multiplicity(idx) = K!/prod(m_j!) per cell — same space, different numbers.
+//   Here: the (0,1) cell of a K=2 lift is x0*x1, NOT 2*x0*x1.
+// - §6.8, the ranking discipline: LEX order on the nondecreasing tuples
+//   (the compiler's SymIdx bijection and ppl/SymTensor.enumerate; never
+//   SymTensor.rankOf, which is colex). For n = 3, K = 2 that is
+//   (0,0) (0,1) (0,2) (1,1) (1,2) (2,2) — the strictly ascending-lexicographic
+//   reading, so the (0,2) cell precedes (1,1).
+//
+// The result is a PLAIN Idx<cells> array, not an irreps space: the monomial
+// coordinates co-rotate as ml.sym_spec(SPEC, K), which the current checker has
+// no typing for (stage 3 gives it SymIdx<K, IrrepsIdx<SPEC>>). ml-equiv/036
+// pins the matching BL4008 refusal inside a certified body.
+// ============================================================================
+let static V3 = [(1, 1, 1)]
+let x3: Array<Float like IrrepsIdx<V3>> = [2.0, 3.0, 5.0]
+
+// K = 2 over n = 3: 6 = C(4,2) cells, lex multisets as above.
+//   (0,0)=4  (0,1)=6  (0,2)=10  (1,1)=9  (1,2)=15  (2,2)=25
+let m2 = ml.sym_lift(V3, 2, x3)
+// EXPECT: m2 = [4, 6, 10, 9, 15, 25]
+
+// K = 3 over n = 3: 10 = C(5,3) cells —
+//   (0,0,0) (0,0,1) (0,0,2) (0,1,1) (0,1,2) (0,2,2) (1,1,1) (1,1,2) (1,2,2) (2,2,2)
+let m3 = ml.sym_lift(V3, 3, x3)
+// EXPECT: m3 = [8, 12, 20, 18, 30, 50, 27, 45, 75, 125]
+
+// K = 1 is the identity: Sym^1 V = V, C(3,1) = 3 singleton multisets.
+let m1 = ml.sym_lift(V3, 1, x3)
+// EXPECT: m1 = [2, 3, 5]
+
+// K = 4 over n = 3: C(6,4) = 15 cells; the first is x0^4 and the last x2^4.
+let m4 = ml.sym_lift(V3, 4, x3)
+// EXPECT: m4 = [16, 24, 40, 36, 60, 100, 54, 90, 150, 250, 81, 135, 225, 375, 625]
+
+// --- the convention against real data ----------------------------------------
+// Same anchor spec and same x as ml-equiv/032's derive_sym_tp pin, so the two
+// halves of the degree-2 bridge are readable side by side: sym_lift is the
+// Sym^2 coordinate (10 = C(5,2) = total_dim(sym_spec(A,2)) cells), and
+// derive_sym_tp is a degree-2 homogeneous equivariant map evaluated at that
+// same point (7 = poly_weight_dim(A, 2, tp_spec(A,A)) free weights).
+let static A = [(0, 0, 1), (1, 1, 1)]
+let static NCELLS = ml.total_dim(ml.sym_spec(A, 2))
+// EXPECT: NCELLS = 10
+let xa: Array<Float like IrrepsIdx<A>> = [1.0, 2.0, -0.5, 0.25]
+// lex multisets over 0..3:
+//   (0,0) (0,1) (0,2) (0,3) (1,1) (1,2) (1,3) (2,2) (2,3) (3,3)
+let ma = ml.sym_lift(A, 2, xa)
+// EXPECT: ma = [1, 2, -0.5, 0.25, 4, -1, 0.5, 0.25, -0.125, 0.0625]
+
+let static TPA = ml.tp_spec(A, A)
+let ws = [0.3, -0.7, 1.1, 0.9, -1.3, 0.4, 2.0]
+let q: Array<Float like IrrepsIdx<TPA>> = ml.derive_sym_tp(A, xa, xa, ws)
+// EXPECT: q = [3.53676994664434, -1.6959292143521, 0, 0, 0, 4.4, -1.1, 0.55, 3.6, -0.9, 0.45, 1.41421356237309, -2.82842712474619, -2.90876906955502, -0.353553390593274, -5.56846590184406]

@@ -1,0 +1,20 @@
+// TEST: Field Bounds Crossed
+// ============================================================================
+// `min=3, max=1` describes a type with NO VALUES. Because `min=`/`max=` are
+// inclusive on both ends, there is no reading under which this is a deliberate
+// empty range — it can only be a transposition or a sign slip, so it is an
+// error rather than a warning.
+//
+// NOTE THE DELIBERATE ASYMMETRY with the half-open spelling: `in 0 .. 0` is an
+// empty range and stays ACCEPTED, exactly as it is at HEAD. That is not an
+// oversight. A half-open range whose ends coincide is the ordinary way to
+// write "empty" in every `..` context in the language, and empty solution sets
+// are a warning-class event in this design, not a failure — Schur-zero
+// emptiness is legitimate. `min > max` is different in kind: it is not a way
+// of writing empty, it is a way of writing nothing coherent at all.
+// ============================================================================
+struct Bad2 {
+    m: Int<min=3, max=1>
+}
+// ERROR: BL4003
+// ERROR-CONTAINS: bounds cross

@@ -1,0 +1,25 @@
+// TEST: ML Ops perm_weight_dim Bad N (rejects)
+import ml as ml
+// ============================================================================
+// The v1 S_n surface requires a STATIC N >= K + L
+// (docs/plan-transforms-as-types.md §3.6, stage 5a). At N >= K + L the weight
+// basis is the FULL partition lattice of the K+L axis positions, Bell(K+L)
+// weights. Below it the lattice truncates to the partitions with at most N
+// blocks — the partitions with more blocks than N have no witness tuple in
+// [N]^{K+L} at all, so their coarsening indicators are identically zero and
+// are not basis elements. Here K + L = 4 and N = 3: 14 weights, not 15.
+//
+// That truncated basis is perfectly sound arithmetic (the compiler's counting
+// layer computes it, and the Perm Spec test block pins it), but it is a
+// DIFFERENT convention: different count, different weight layout, different
+// emitted kernel. §3.6's no-silent-fork rule says the surface must refuse
+// rather than quietly switch, so the truncated-basis variant is a NAMED
+// DEFERRAL and this is a compile-time error carrying both counts.
+//
+// The refusal reports through the BL3999 static-evaluation channel — a
+// `let static` that cannot fold — exactly like ml-ops/015's K-cap probe. The
+// ops (ml.derive_perm_linear / ml.derive_perm_bias, stage 5a-ii) will carry
+// the identical text through the elaboration channel, from the same shared
+// precondition, so the two can never drift.
+// ============================================================================
+let static BAD = ml.perm_weight_dim(2, 2, 3)

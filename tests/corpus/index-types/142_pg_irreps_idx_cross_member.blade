@@ -1,0 +1,32 @@
+// TEST: PgIrrepsIdx Cross Member (rejects)
+// ============================================================================
+// THE CROSS-MEMBER EDGE, and the reason the two block-spec members get two
+// FROZEN TAG PREFIXES rather than one widened format
+// (docs/plan-transforms-as-types.md §3.6, "twin, not reroute"):
+//
+//   ospec = [(0, 0, 2), (1, 1, 1)]      an O(3) irreps space, total_dim 5
+//   pspec = [("A", 1), ("E", 2)]        a C4 pg-irreps space, total_dim 5
+//
+// Same extent, same 5 stored cells, and NOTHING about their transformation
+// behaviour in common — one carries an O(3) action by (l, parity) blocks, the
+// other a C4 action by named character-table blocks. Extent comparison can
+// never separate them; the block-spec identity arm in Unify does, and it does
+// so ACROSS members for free, because the member's own frozen prefix is part
+// of the identity string.
+//
+// The refusal is the direct-application strictness seam (index-types/119's
+// shape, one member up): plain function calls do not unify parameters against
+// arguments, so the check exists exactly here, and the diagnostic renders
+// BOTH identities in full — IrrepsIdx<[(0, 0, 2), (1, 1, 1)]> against
+// PgIrrepsIdx<C4, [("A", 1), ("E", 2)]> — since "these two do not match" is
+// useless without saying what each one is.
+// ============================================================================
+let static ospec = [(0, 0, 2), (1, 1, 1)]
+let static pspec = [("A", 1), ("E", 2)]
+
+function o3_only(v: Array<Float like IrrepsIdx<ospec>>) -> Float = {
+    v(0)
+}
+
+let p: Array<Float like PgIrrepsIdx<C4, pspec>> = [1.0, 2.0, 3.0, 4.0, 5.0]
+let bad = o3_only(p)

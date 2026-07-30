@@ -1,0 +1,50 @@
+// TEST: Joint Product Symmetry: IrrepsIdx x IrrepsIdx
+// ============================================================================
+// Both S-dims are irreps spaces, and they are DIFFERENT spaces (sA total_dim 2,
+// sB total_dim 3). Stage 4 fuses them into one compound axis of extent 6 —
+// which is exactly the case where the Tag/IxKind stamping matters: the LEADING
+// factor is the irreps record, so an output built as `{ template with Tag =
+// None }` alone would inherit IxKIrreps beside a None tag and trip the IR
+// validator's Tag/IxKind agreement check (ixKindOfTag None = IxKPlain). The
+// fused output is stamped Tag = None AND IxKind = IxKPlain explicitly.
+//
+// §6.3(iii), decided at stage 4: sA x sB is NOT an irreps space. The compound
+// coordinate ranges over PAIRS of representation indices from two different
+// spaces; no single spec describes that, so the joint axis is anonymous and
+// plain. (It is not the tensor-product rep either — that would need the
+// Clebsch-Gordan decomposition, which is derive_tp's business, not storage's.)
+//
+// Output: SymIdx<2, 6>, C(6+1, 2) = 21 canonical pairs, lex order.
+// ============================================================================
+let static sA = [(0, 0, 2)]                        // total_dim = 2
+let static sB = [(1, 1, 1)]                        // total_dim = 3
+let A: Array<Float64 like IrrepsIdx<sA>, IrrepsIdx<sB>> = [[1.0, 2.0, 3.0], [4.0, 5.0, 6.0]]
+let L = method_for(A, A)
+let f = lambda(x, y) where comm(x, y) -> x * y
+let result = L <@> f |> compute
+// EXPECT: result = [1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 4.0, 6.0, 8.0, 10.0, 12.0, 9.0, 12.0, 15.0, 18.0, 16.0, 20.0, 24.0, 25.0, 30.0, 36.0]
+
+// The two twins, as in 025: the flattened compact computation (must be the same
+// list) and the full dense rectangle (whose canonical cells the compact holds).
+let Aflat: Array<Float64 like Idx<6>> = [1.0, 2.0, 3.0, 4.0, 5.0, 6.0]
+let Lflat = method_for(Aflat, Aflat)
+let flat_sym = Lflat <@> f |> compute
+let g = lambda(x, y) -> x * y
+let flat_dense = Lflat <@> g |> compute
+// EXPECT: flat_sym = [1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 4.0, 6.0, 8.0, 10.0, 12.0, 9.0, 12.0, 15.0, 18.0, 16.0, 20.0, 24.0, 25.0, 30.0, 36.0]
+// EXPECT: flat_dense = [1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 2.0, 4.0, 6.0, 8.0, 10.0, 12.0, 3.0, 6.0, 9.0, 12.0, 15.0, 18.0, 4.0, 8.0, 12.0, 16.0, 20.0, 24.0, 5.0, 10.0, 15.0, 20.0, 25.0, 30.0, 6.0, 12.0, 18.0, 24.0, 30.0, 36.0]
+
+// Cell-level agreement, compact access vs dense access. p = 2 decodes to
+// (sA-index 0, sB-index 2); p = 5 to (sA-index 1, sB-index 2).
+let compact_2_5 = result(2, 5)
+let dense_2_5 = flat_dense(2, 5)
+let compact_5_2 = result(5, 2)
+let dense_5_2 = flat_dense(5, 2)
+let compact_diag = result(4, 4)
+let dense_diag = flat_dense(4, 4)
+// EXPECT: compact_2_5 = 18.0
+// EXPECT: dense_2_5 = 18.0
+// EXPECT: compact_5_2 = 18.0
+// EXPECT: dense_5_2 = 18.0
+// EXPECT: compact_diag = 25.0
+// EXPECT: dense_diag = 25.0

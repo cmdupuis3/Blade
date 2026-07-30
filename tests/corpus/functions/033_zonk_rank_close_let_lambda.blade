@@ -1,0 +1,15 @@
+// TEST: Zonk Rank Close Let Lambda
+// The stage-2 rank close for a LAMBDA parameter. `total(x)` imposes a rank-1
+// lower bound on `x` at the direct-application seam, exactly as it does for a
+// named function's param — but a lambda has no decl-close site, and
+// inferLambda deliberately does not close (it cannot know whether the lambda
+// will be used in kernel position). A let-bound lambda called as a PLAIN
+// function never reaches buildApplyInfo's array-side fallback either, so
+// before the zonk auto-close `x` fell through to the scalar default: this
+// file typechecked green and emitted ill-typed C++ (a double passed where
+// Array<double,1> was required). Zonk is the leftover close site.
+function total(row) = reduce(row, (+))
+let f = lambda(x) -> total(x) + 1.0
+let a = [1.0, 2.0, 3.0]
+let r = f(a)
+// EXPECT: r = 7.0

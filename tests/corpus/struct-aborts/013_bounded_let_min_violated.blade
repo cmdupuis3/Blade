@@ -1,0 +1,56 @@
+// TEST: Bounded Let Min Violated (aborts)
+// ============================================================================
+// The MIN-SIDE witness for bounded `let` annotations: the only test that
+// violates a lower bound, and the only one that pins the `(min)` label.
+//
+// `Ast.boundedConjuncts` builds the two endpoint checks in SEPARATE branches
+// with the operands in OPPOSITE positions:
+//   min  ->  OpLe (lo, subject)      -- lo <= x
+//   max  ->  OpLe (subject, hi)      -- x <= hi
+// so the branches can fail independently, and a min branch built backwards as
+// `OpLe (subject, lo)` is a live check that can never fire on its own terms.
+//
+// WHAT THIS FILE ADDS, stated accurately — an earlier draft of this header
+// got it wrong, and the correction is worth keeping visible.
+//
+// The wrong claim was that basic/035 and struct-aborts/012 are BLIND to a
+// reversed min, because every binding in 035 sits exactly on an endpoint and
+// `lo <= lo` holds either way. That reasoning covers only the bindings at the
+// MIN endpoint. Both files also bind ABOVE the minimum, and there the
+// reversal is plainly visible. Mutation testing (min branch reversed, rebuilt,
+// run, reverted) kills the mutant THREE times over:
+//   * basic/035 aborts where it should run — `let hi: Int<min=0, max=3> = 3`
+//     makes the reversed min read `3 <= 0`. Same for `mHi = 2`, `unitHi = 1.0`.
+//   * struct-aborts/012 fails its own pin: with `x = 4` the reversed min reads
+//     `4 <= 0` and fires FIRST, so the abort reports `(min)` and the `(max)`
+//     ABORT pin no longer matches.
+//   * this file exits 0 where an abort was expected.
+//
+// So 035 and 012 do carry real coverage here — INCIDENTALLY, through bindings
+// that happen to sit above the minimum. That coverage is genuine and must not
+// be traded away: DO NOT "simplify" basic/035 by dropping its max-endpoint
+// bindings, and do not relax 012's `(max)` pin to a bare substring. Both are
+// load-bearing for a reason that is not local to them, which is exactly how
+// coverage gets deleted by someone tidying in good faith.
+//
+// This file is the DIRECT witness rather than an incidental one. It is the
+// only test whose value lies strictly BELOW the minimum — `-1`, where
+// `-1 <= 0` and `0 <= -1` finally disagree — so it exercises the min branch
+// as such, rather than catching its reversal as a side effect of some other
+// assertion. A contract should not rest on incidental coverage.
+//
+// The `(min)` label is the second, independent thing pinned.
+// `synthesizeBoundChecks` recovers side labels by a POSITIONAL ZIP against a
+// second traversal of the same type node. Its length-mismatch fallback (label
+// "bound") catches a DROPPED endpoint, but a SWAPPED pair keeps both lengths
+// equal and slips through — reported as the wrong endpoint, which is worse
+// than no label, since it sends the reader to the wrong end of their own
+// declaration. `(min)` here and `(max)` in 012 is what makes the pair
+// unswappable, and that part of the argument is unaffected by the correction
+// above.
+//
+// `max=3` is satisfied and untouched; only the lower bound is violated, so the
+// abort can come from nowhere else.
+// ABORT: Bound violation in 'x' (min)
+let x: Int<min=0, max=3> = -1
+let y = x + 1

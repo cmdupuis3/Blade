@@ -1,0 +1,55 @@
+// TEST: Idx Card Fuel Bomb (rejects)
+// ============================================================================
+// THE NEGATIVE CONTROL §7 C1 ASKED FOR, AND 154 COULD NOT PIN.
+//
+//   conjunct 1 of Boom did not fold: Static evaluation: nesting depth limit
+//   exceeded (512 levels - possible infinite recursion) at (p = 0, q = 0).
+//   Every conjunct is folded once per box cell under a budget of 10000 steps
+//   and 512 nesting levels, so a conjunct that recurses without a static
+//   bound fails at the FIRST cell it is reached at
+//
+// A conjunct that cannot terminate is a fence FAILURE, not an exclusion. The
+// distinction is the whole point: silently treating an unfoldable conjunct as
+// "this cell is not a solution" would report a cardinality — a plausible,
+// wrong, silent one — for a struct whose solution set nobody has computed.
+//
+// WHY THIS FILE COULD NOT EXIST UNTIL NOW. 154 documents the finding at
+// length: the budget `StaticEval` spent per cell bounded evaluation DEPTH
+// while being named and reported as a step count, and 100,000 nested
+// evaluator frames overflow the compiler's stack long before the counter
+// reaches zero. A fuel bomb in a conjunct therefore killed the compiler with
+// an uncatchable StackOverflowException rather than producing the message
+// above, so pinning one here would have pinned a crash. 154 substituted an
+// undefined-name conjunct — which fails and RETURNS — and pinned the
+// witness-cell half of the requirement on that instead. Both halves are now
+// pinned, on the two files, and 154 keeps its own contract.
+//
+// THE BUDGET IS THE PER-CELL ONE (`StaticEval.cellBudget`: 10,000 steps, 512
+// levels), not the `let static` folding budget, and the difference is a cost
+// model rather than caution. A cell predicate is a boolean over a handful of
+// already-bound integers; a few dozen nodes is a generous reading of a real
+// one. Spending the full 100,000-step folding budget at each of up to
+// `maxBoxCells` cells would be four orders of magnitude of headroom nobody
+// asked for, paid for at the box cap.
+//
+// ONE CELL, NOT EVERY CELL. §6 risk 3 assumed the bomb burns the budget PER
+// CELL. It does not: the flat-filter route stops at the first erroring cell,
+// so the cost of this program is one exhausted budget, and the coordinates in
+// the message are the first failing cell in LEX order — the same commitment
+// 154 pins, reached here by a different failure.
+//
+// `bomb` itself is legal and is not what is refused. It is a well-formed
+// static function; nothing in the language promises that every static
+// function terminates, and the fence's job is to say so when one does not,
+// at a cell the user can look at.
+// ============================================================================
+static function bomb(n: Int) -> Int = bomb(n + 1)
+
+static struct Boom {
+    p: Int<min=0, max=3>,
+    q: Int<min=0, max=3>
+} where p + q == bomb(0)
+
+let static CARD = idx_card(Boom)
+
+function main() -> Int = CARD

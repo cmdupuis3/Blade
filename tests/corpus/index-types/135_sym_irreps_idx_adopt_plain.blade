@@ -1,0 +1,30 @@
+// TEST: SymIdx over IrrepsIdx Adopts Plain
+// ============================================================================
+// Gradual adoption, the rank-2 mirror of index-types/114: a
+// `SymIdx<2, IrrepsIdx<spec>>` array unifies with a plain
+// `SymIdx<2, n>` parameter at n = total_dim(spec). Unify's per-index
+// predicate compares the irreps tag against a None tag by falling through to
+// the SYMMETRY check, so an annotated array still flows into every existing
+// plain-SymIdx signature. Strictness engages only between two DIFFERENT
+// irreps identities (136).
+//
+// Also pins the trivial base `SymIdx<2, Idx<n>>`, which lowers to exactly the
+// legacy `SymIdx<2, n>` record (same extent, Tag = None, plain kind).
+// ============================================================================
+let static spec = [(0, 0, 2), (1, 1, 1)]
+let x: Array<Float like IrrepsIdx<spec>> = [1.0, 2.0, 3.0, 4.0, 5.0]
+let L = method_for(x, x)
+let f = lambda(a, b) where comm(a, b) -> a * b
+let r: Array<Float like SymIdx<2, IrrepsIdx<spec>>> = L <@> f |> compute
+
+function corners(m: Array<Float like SymIdx<2, 5>>) -> Float = {
+    m(0, 0) + m(1, 4) + m(4, 4)
+}
+let viaPlain = corners(r)
+// EXPECT: viaPlain = 36.0
+
+function cornersIdx(m: Array<Float like SymIdx<2, Idx<5>>>) -> Float = {
+    m(2, 3)
+}
+let viaIdxBase = cornersIdx(r)
+// EXPECT: viaIdxBase = 12.0

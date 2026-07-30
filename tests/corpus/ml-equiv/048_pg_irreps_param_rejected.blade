@@ -1,0 +1,58 @@
+// TEST: ML Equiv Point Group Irreps Param (rejects)
+import ml as ml
+// THE ASYMMETRY, from the side that must refuse. C4 is a SUBGROUP of O(3), so
+// an `IrrepsIdx<spec>` space carries a genuine C4 action by restriction, and on
+// every l > 0 block that action is nontrivial. Classifying such a parameter as
+// an invariant would assert that a vector is C4-invariant — a false claim about
+// the only action in the room — so the judgment refuses it at the signature
+// instead of guessing.
+//
+// (The mirror image is sound and is pinned in corpus 045 section 4: a
+// PgIrrepsIdx buffer under equiv(O3) IS an invariant, because nothing extends a
+// C4-module to an O(3)-module on the same coordinates, so "held fixed" is the
+// only reading available and it is a premise the caller discharges.)
+//
+// WHAT CHANGED AT STAGE A3, AND WHAT DID NOT (plan-equivariance-in-types).
+// The decomposition itself is no longer deferred: `ml.pg_restrict("C4", SH1)`
+// IS the crystal-field splitting, it is exact integer character theory over the
+// group's declared O(3) embedding, and corpus 096 / 097 pin the whole l <= 4
+// table for both registered groups. The BL4008 below now quotes it — the
+// message names `PgIrrepsIdx<C4, [("A", 2), ("E", 1)]>` as the point-group
+// module this parameter's space becomes.
+//
+// The VERDICT is unchanged, and the reason moved rather than evaporated: a
+// decomposition is not a reinterpretation. The O(3) layout orders each block by
+// m = -l..l, so the C4-invariant m = 0 component sits in the MIDDLE of the
+// block (index l) while a point-group block is contiguous, and already at l = 1
+// the invariant is at index 1 on one side and index 0 on the other. No ordering
+// of the restricted spec repairs it — the E pair is split by the A component.
+// So viewing the buffer at the restricted type is a genuine change of basis (a
+// permutation with signs), which is a VALUE-level op, not a classification;
+// until one ships, this signature stays refused. Corpus 099 is the trap that
+// pins the consequence.
+//
+// SHARPENED (exploration-equivariant-bijections.md): the repair EXISTS and is
+// measured — for both registered groups the signed permutation P satisfying
+// P·D^l(g)·P^T = pgElementMatrix(...) was constructed and verified at every
+// element for every l <= 8 (residual ~1e-16; at l = 1 it is pg[0] <- +O3[1],
+// pg[1] <- -O3[0], pg[2] <- +O3[2]). That holds for the whole aligned axial
+// class and provably FAILS outside it (non-axial groups mix at l = 3;
+// misaligned embeddings at the first split m-pair). So this rejection stands
+// because the view has not shipped — the decided surface is an explicit
+// `ml.restrict` compiled to a zero-copy signed-permutation view where the
+// registry's table exists — not because no exact view can exist. A rejection
+// that names its own discharge is a stronger rejection.
+let static SH1 = ml.sh_spec(1)
+// The restriction the diagnostic now names, computed here so the file shows
+// the table exists: sh_spec(1) = l 0 (+) l 1 restricts to A + (A + E) = 2A + E.
+let static RSH1 = ml.pg_restrict("C4", SH1)
+let static EC = [("E", 1)]
+let static WE = ml.pg_hom_dim("C4", EC, EC)
+
+function bad(v: Array<Float like IrrepsIdx<SH1>>,
+             x: Array<Float like PgIrrepsIdx<C4, EC>>, w: Array<Float like Idx<WE>>)
+             where ml.equiv(C4) -> Array<Float like PgIrrepsIdx<C4, EC>> = {
+    ml.derive_pg_linear(C4, EC, EC, x, w)
+}
+
+let out = bad([1.0, 2.0, 3.0, 4.0], [3.0, 4.0], [0.0, 1.0])

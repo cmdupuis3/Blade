@@ -1,0 +1,67 @@
+// TEST: ML Perm Former Source Rejected (rejects)
+import ml as ml
+// ============================================================================
+// THE FALSE ACCEPT, written out as the program that used to compile.
+//
+// This is the one UNSOUND path the stage-5c three-way walker diff turned up
+// (the catalog in that commit, finding 1): not a missing diagnostic, but a
+// certificate issued for a function that does not have the property. It is
+// pinned here as a reject-probe so it stays fixed.
+//
+// ----------------------------------------------------------------------------
+// WHAT THE PROGRAM DOES
+// ----------------------------------------------------------------------------
+// `x` is Pow 1: extent 2 = 2^1 at N = 2, the node features. `w` is built
+// CELL BY CELL OUT OF x by a former, so relabelling the nodes permutes w's
+// cells exactly as it permutes x's — w is Pow 1 too. It is then handed to
+// ml.derive_perm_linear in the WEIGHT slot, which requires Pow 0: the weight
+// buffer is a coefficient list over the equivariant basis, and the op's
+// theorem ("the result transforms as a node power of rank L") holds only if
+// those coefficients DO NOT MOVE when the nodes are relabelled.
+//
+// (The weight extent W = ml.perm_weight_dim(1, 1, 2) is 2, which at N = 2 is
+// coincidentally 2^1. That coincidence is a separate, documented reading of
+// the SIGNATURE classifier — MLPerm.fs's extent-keying caveat — and it is not
+// what this test is about: `w` is a LOCAL, so its status comes from the
+// walker judging the expression, not from an extent lookup.)
+//
+// ----------------------------------------------------------------------------
+// WHY IT IS NOT A THEOREM — the arithmetic, since a reject-probe cannot run
+// ----------------------------------------------------------------------------
+// derive_perm_linear(1, 1, N, x, w) is w(0)*x + w(1)*sum(x), and here w = 2x:
+//
+//   x = [1, 2]  ->  w = [2, 4], sum x = 3  ->  [2*1 + 4*3, 2*2 + 4*3] = [14, 16]
+//   x = [2, 1]  ->  w = [4, 2], sum x = 3  ->  [4*2 + 2*3, 4*1 + 2*3] = [14, 10]
+//
+// The second call is the first with its two nodes SWAPPED, so S_2-equivariance
+// would require its result to be [14, 16] swapped, i.e. [16, 14]. It is
+// [14, 10]. The certificate `where ml.perm_equiv(2)` asserted otherwise.
+//
+// ----------------------------------------------------------------------------
+// HOW IT SLIPPED THROUGH, AND WHAT NOW CATCHES IT
+// ----------------------------------------------------------------------------
+// The former arm guarded by scanning CertShell.freeVars for a node-covariant
+// NAME in scope of the application. Two things were wrong with that:
+//
+//   1. freeVars had no arm for ExprMethodFor/ExprFor — former sources fell
+//      into a `| _ -> Set.empty` catch-all. `x` is named ONLY in the source
+//      list, so the scan came back empty and the arm returned Pow 0, THE
+//      INVARIANT STATUS, which is precisely what the weight slot asks for.
+//   2. A name scan cannot see a source that is not a name: a former over
+//      ml.derive_perm_bias(1, N, b) builds a Pow 1 out of nothing but
+//      invariants, so fixing freeVars alone would not have caught it.
+//      Corpus ml-equiv/046 is that second shape.
+//
+// So the sources are now JUDGED, the way MLGalilean's judgeFormerApply has
+// always judged them, and freeVars is exhaustive over ExprKind so a future
+// AST node is a compile error in the shell rather than another silent hole.
+// BL4012, at the source expression.
+// ============================================================================
+let static W = ml.perm_weight_dim(1, 1, 2)
+
+function bad(x: Array<Float like Idx<2>>) where ml.perm_equiv(2) -> Array<Float like Idx<2>> = {
+    let w = method_for(x) <@> lambda(xi) -> xi * 2.0 |> compute
+    ml.derive_perm_linear(1, 1, 2, x, w)
+}
+
+let out = bad([1.0, 2.0])

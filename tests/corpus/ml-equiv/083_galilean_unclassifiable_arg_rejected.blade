@@ -1,0 +1,38 @@
+// TEST: ML Galilean Unclassifiable Argument Rejected (rejects)
+import ml as ml
+// ============================================================================
+// THE WORDING SPLIT AT THE UNCERTIFIED-CALLEE ARM.
+//
+// A call into a function carrying no galilean certificate is admitted only when
+// every argument is provably boost-INVARIANT, and the arm that enforces it
+// finds the first argument that is not. Two very different failures land there:
+//
+//   * the argument is BVar — a genuine ESCAPE. The judgment KNOWS the value
+//     shifts with the frame and the callee owns no theorem about it. That is
+//     corpus 029's rejection, and it keeps its wording.
+//
+//   * the argument is BOpaque — the judgment's OWN blind spot. `rank(u)` is a
+//     structural query the walker has no rule for, so it classifies nothing.
+//     Calling that "a boost-variant value" would report a fact the walker never
+//     established: it is not that the argument shifts with the frame, it is
+//     that nobody knows. The message says so, and points at the forms the
+//     judgment does read.
+//
+// Both arms are BL4009 at the offending ARGUMENT's span; only the sentence
+// differs. Expected message for this file:
+//
+//   function 'bad': an argument to 'widen' cannot be classified as
+//   boost-invariant or boost-variant — a galilean-certified body admits a call
+//   only when every argument is provably boost-invariant, so rewrite this
+//   argument in terms the judgment reads (parameters, differences, sgs.grad,
+//   sgs.stress)
+// ============================================================================
+
+// An ordinary uncertified helper — the callee is not the problem.
+function widen(k: Int) -> Float = 1.0
+
+// `rank(u)` is unclassifiable, not boost-variant. BL4009 with the second
+// wording, at the argument's span.
+function bad(u: Array<Float like Idx<4>>) where ml.galilean(u) -> Float = widen(rank(u))
+
+let b = bad([1.0, 2.0, 3.0, 4.0])

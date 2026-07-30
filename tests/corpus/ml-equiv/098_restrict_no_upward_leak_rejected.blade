@@ -1,0 +1,52 @@
+// TEST: ML Equiv Restrict No Upward Leak (rejects)
+import ml as ml
+// ============================================================================
+// RESTRICTION IS A ONE-WAY STREET, AND THIS IS THE DIRECTION THAT MUST FAIL
+// (docs/plan-equivariance-in-types.md stage A3.)
+//
+// Stage A3 ships the branching rule: an O(3) representation space HAS a
+// point-group decomposition, and `ml.pg_restrict` names it (corpus 096, 097).
+// The temptation the table creates is to read that as a two-way bridge — if
+// the C4 module is right there inside the O(3) one, surely a C4 theorem says
+// something about the O(3) one? It does not, and it must not, because
+// restriction along C4 -> O(3) THROWS INFORMATION AWAY:
+//
+//   * it forgets PARITY entirely (C4 is embedded as a proper rotation group,
+//     so no element is improper and a pseudoscalar restricts to the trivial
+//     label — corpus 096 section 3);
+//   * it forgets every rotation that is not one of the four.
+//
+// So a C4-equivariance proof is a strictly weaker statement, and a checker that
+// let it discharge an `ml.equiv(O3)` pin would be certifying a theorem nobody
+// proved. The body below is the cleanest witness: it scales ONE axis.
+// ============================================================================
+let static V = [(1, 1, 1)]
+
+// --- THE MAP THAT SEPARATES THE TWO GROUPS ----------------------------------
+// The real basis of an l = 1 block is ordered m = -1, 0, +1 = (y, z, x), so
+// index 1 IS the z component — the axis of the C4 embedding. Doubling it and
+// leaving the (x, y) plane alone is:
+//
+//   * equivariant under EVERY rotation about z, hence in particular under all
+//     four elements of C4 — the same map, written in the restricted layout
+//     where the invariant cell moves to index 0, is `scale_invariant` in
+//     corpus 096 section 5, and the engine discharges it there;
+//   * NOT equivariant under O(3), nor even SO(3): rotating z into x turns the
+//     doubled axis into an undoubled one.
+//
+// Composition refuses the body for its raw component reads, and the refusal is
+// sound but uninformative. The 𝔰𝔬(3) engine then answers the SEMANTIC question
+// and replaces it: the body IS a polynomial, and the identity
+// Df(x)(A x) = A f(x) fails at a generator that mixes z with the plane. BL4008.
+//
+// The failing generator is the whole content of the rejection. There is no
+// weaker pin that saves this function either: `where ml.equiv(SO3)` fails at
+// the same generator (the defect is infinitesimal, not a parity slip), and
+// `where ml.equiv(C4)` is refused one step earlier, at the SIGNATURE, because
+// an IrrepsIdx parameter under a point-group certificate is corpus 048 — the
+// branching table names the restricted space but does not relabel the buffer.
+function stretch_z(v: Array<Float like IrrepsIdx<V>>)
+                   where ml.equiv(O3) -> Array<Float like IrrepsIdx<V>> =
+    [v(0), 2.0 * v(1), v(2)]
+
+let out = stretch_z([1.0, 2.0, 3.0])

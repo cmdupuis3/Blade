@@ -1,0 +1,15 @@
+// TEST: Diag Equiv Engine Lie Generator (diag)
+// ERROR: BL4008 @ 14:3
+// ERROR-CONTAINS: the body IS a polynomial, and it is not O3-equivariant
+// ERROR-CONTAINS: fails at Lie generator L
+// ERROR-CONTAINS: in output component 0, at the term x(3)
+// ERROR-CONTAINS: the left side has coefficient -1, the right side 0
+// ERROR-CONTAINS: acceptance is componentwise zero over the rationals
+import ml as ml
+// A bare read of an l = 1 component IS a polynomial, so the engine gets the
+// last word and proves the stronger statement: not "this read is
+// basis-dependent" but "this map provably fails Df(x)(A x) = A f(x)", at a
+// named generator, in a named component, at a named monomial.
+let static S = [(0, 0, 2), (1, 1, 1)]
+function bad(x: Array<Float like IrrepsIdx<S>>) where ml.equiv(O3) -> Float =
+  x(2)

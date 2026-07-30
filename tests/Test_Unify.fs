@@ -317,6 +317,39 @@ let private test_dist_axis_tag_mismatch_rejects () =
      pass,
      sprintf "named: %s / synthetic: %s" (describeResult rNamed) (describeResult rSyn))
 
+let private symIdxN (id: int) (rank: int) (extent: int) : IRIndexType =
+    { idxN extent with Id = id; Rank = rank; Symmetry = SymSymmetric }
+
+let private test_index_component_rank_gates_unification () =
+    // Component rank is type identity, and NOTHING else in the predicate
+    // stands in for it:
+    //   - Idx<6> vs SymIdx<2,3>: slot counts are both 1, both tags are None,
+    //     and SymNone is a symmetry WILDCARD, so every other rule passes.
+    //     The cell counts even agree (SymIdx<2,3> packs binom(4,2) = 6).
+    //   - SymIdx<2,4> vs SymIdx<3,4>: both SymSymmetric, so symmetry cannot
+    //     separate them either.
+    // Codegen ranks an array by SUMMING component ranks, so accepting these
+    // emits Array<double,1> where Array<double,2> is expected.
+    let subst = Subst()
+    let flat6 = mkArrayArrow [idxN 6] f64 None
+    let sym2x3 = mkArrayArrow [symIdxN 6 2 3] f64 None
+    let rWildcard = unify subst flat6 sym2x3
+    let rWildcardRev = unify subst sym2x3 flat6
+    let sym2x4 = mkArrayArrow [symIdxN 7 2 4] f64 None
+    let sym3x4 = mkArrayArrow [symIdxN 7 3 4] f64 None
+    let rSameClass = unify subst sym2x4 sym3x4
+    // The control: same rank on both sides still unifies, so the rule
+    // rejects rank disagreement rather than compact groups generally.
+    let rControl = unify subst sym2x4 (mkArrayArrow [symIdxN 7 2 4] f64 None)
+    let pass =
+        not (isOk rWildcard) && not (isOk rWildcardRev)
+        && not (isOk rSameClass) && isOk rControl
+    ("index component rank gates unification (SymNone wildcard and equal symmetry class do not)",
+     pass,
+     sprintf "Idx<6> vs SymIdx<2,3>: %s / reversed: %s / SymIdx<2,4> vs SymIdx<3,4>: %s / control same-rank: %s"
+             (describeResult rWildcard) (describeResult rWildcardRev)
+             (describeResult rSameClass) (describeResult rControl))
+
 let private test_dist_zonk_erases_to_component_tuple () =
     // Zonking is the ERASURE point: a Dist<2, τ like D> leaves the checker
     // as the tuple (κ_1 : Array<τ like D>, κ_2 : Array<τ like SymIdx<2, D>>),
@@ -354,6 +387,7 @@ let runUnifyTests () : Blade.Tests.TestHarness.BlockResult =
         test_dist_vs_tuple_rejects
         test_dist_axis_tag_mismatch_rejects
         test_dist_zonk_erases_to_component_tuple
+        test_index_component_rank_gates_unification
     ]
     Blade.Tests.TestHarness.printHeader "Unify Integration"
     let mutable passed = 0

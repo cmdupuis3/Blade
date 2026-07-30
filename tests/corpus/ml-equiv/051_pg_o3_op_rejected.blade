@@ -1,0 +1,25 @@
+// TEST: ML Equiv Point Group O3 Op (rejects)
+import ml as ml
+// `ml.y_to` is the O(3) rep-INTRODUCTION form: it turns three coordinate
+// scalars into the spherical harmonics of degree <= lmax, whose transformation
+// law is the block-diagonal Wigner action on IrrepsIdx<sh_spec(lmax)>. Under a
+// point-group certificate there is no such value: the whole O(3) op family is
+// stated in (l, parity, mult) irreps specs, and a C4 certificate has no theorem
+// about those spaces (naming them in C4's labels would mean decomposing the
+// restriction O(3) down to C4 — `ml.restrict`, deferred).
+//
+// The refusal is BY NAME rather than by the generic "not an
+// equivariance-preserving operation" default arm, so the message can say which
+// ops DO apply. BL4008.
+let static EC = [("E", 1)]
+let static WE = ml.pg_hom_dim("C4", EC, EC)
+let static SH1 = ml.sh_spec(1)
+
+function bad(x: Array<Float like PgIrrepsIdx<C4, EC>>, w: Array<Float like Idx<WE>>,
+             a: Float, b: Float, c: Float)
+             where ml.equiv(C4) -> Array<Float like PgIrrepsIdx<C4, EC>> = {
+    let sh = ml.y_to(1, a, b, c)
+    ml.derive_pg_linear(C4, EC, EC, x, w)
+}
+
+let out = bad([3.0, 4.0], [0.0, 1.0], 1.0, 2.0, 3.0)

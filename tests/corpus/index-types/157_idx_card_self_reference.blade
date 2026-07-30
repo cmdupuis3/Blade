@@ -1,0 +1,46 @@
+// TEST: Idx Card Self Reference (rejects)
+// ============================================================================
+// A STRUCT'S SOLUTION COUNT CANNOT BE ONE OF THE THINGS ITS CONSTRAINTS
+// DEPEND ON.
+//
+//   conjunct 1 of R did not fold: idx_card(R): counting R requires folding
+//   R's own constraints, which reach idx_card(R) again - a struct's solution
+//   count cannot be one of the things its constraints depend on. Currently
+//   being counted: R at (p = 0)
+//
+// The circularity is real rather than merely awkward: `idx_card(R)` is
+// defined as the number of box cells whose conjuncts hold, so a conjunct
+// that reads it is a fixed-point equation the counting layer has no way to
+// solve and never claimed to. §2.4's assert-not-solve ruling settles what to
+// do about it — refuse, and say why.
+//
+// WHY THIS NEEDS ITS OWN GUARD, when 156 next door is caught by the
+// evaluator's depth budget. `idx_card` is a SYNTACTIC static builtin, and
+// `registerSyntacticStaticBuiltin` hands a handler a step COUNT rather than
+// the live fold — the handler is a compiler subroutine with its own cost
+// model (this one folds a conjunct per box cell, which has no expression in
+// the caller's remaining steps), so it necessarily starts a fresh budget.
+// Fresh budget means depth zero, so every hop through `idx_card` resets the
+// counter and the recursion is invisible to the guard that catches 156. The
+// evaluator cannot see this cycle and it would be dishonest to make it look
+// as though it could; the layer that owns the re-entry owns the guard, which
+// is `StructIdxSpec`'s enumeration-in-progress set.
+//
+// THE GUARD IS KEYED ON THE STRUCT NAME, NOT ON SELF-REFERENCE, so an
+// indirect cycle — R's conjunct counts S, S's conjunct counts R — is caught
+// by the same check and reported the same way. Self-reference is just the
+// shortest instance, and it is the one written here because a two-struct
+// version would pin the same mechanism at twice the length.
+//
+// This program crashed the compiler before the guard existed, and it did so
+// for the same reason the fuel bomb in 156 did: an unbounded recursion that
+// no budget was watching. That the two needed separate fixes is the finding
+// worth keeping — the depth guard is necessary and is not sufficient.
+// ============================================================================
+static struct R {
+    p: Int<min=0, max=2>
+} where p == idx_card(R)
+
+let static CARD = idx_card(R)
+
+function main() -> Int = CARD

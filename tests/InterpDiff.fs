@@ -136,8 +136,11 @@ let indexTypesSlice = [ "index-types" ]
 ///   spectra  22/0/0  (14 bit-exact complex FFT/ifft/power/polyspec + 8 reject)
 ///   math     40/0/0  (34 svd/eigh/eig/hosvd/unfold + 6 reject; the 2-D matrix
 ///                     prints render byte-exact through the existing ArrayOps path)
-///   ml-ops   11/0/0  (5 IrrepsIdx/tp_spec/hom_dim ops + 6 reject)
-///   ml-equiv 21/0/0  (13 derive_linear/derive_tp/certificate/derive-train + 8 reject)
+///   ml-ops   20/0/0  (snapshot 2026-07-27, corpus 001-019 incl. sym_spec/
+///                     sym_lift/derive_poly/perm sizing + the provider-reads
+///                     entry; the earlier "11/0/0" predated ml-ops/013-019)
+///   ml-equiv 39/0/0  (snapshot 2026-07-27, corpus 001-038 incl.
+///                     derive_sym_tp/derive_poly certificates + provider-reads)
 ///   ml-e2e    2/0/0  (2 full E(3) message-passing grad-training loops)
 ///   ppl      68/0/1  (53 pool/dist/jet/map value + 15 reject; ONE
 ///                     SKIP-UNSUPPORTED = ppl/007 "Moments Multiaxis", whose

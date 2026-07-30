@@ -83,6 +83,7 @@ let printUsage () =
     printfn "  test zarr                         Run the Zarr provider block (hermetic; g++ for the e2e parts)"
     printfn "  test timing                       Run the differential timing block standalone"
     printfn "  test strict-pins                  Run the --strict-pins CLI gate block standalone"
+    printfn "  test surfacing                    Run the warning-surfacing block standalone"
     printfn "  test diff-oracle [category]       Diff printed values against the pinned ./oracle build"
     printfn "  test interp [category]            Diff the tree-walking interpreter against the compiled binary"
     printfn ""
@@ -141,15 +142,19 @@ let compileFile (filePath: string) (verbose: bool) (strictPins: bool) : Result<s
         // here (rustc-style, with source snippets) into the string channel.
         let useColor = not Console.IsErrorRedirected
         match lowerDiag (Some filePath) source with
-        | Error ds, sm -> Error (Blade.Diagnostics.Render.renderAll useColor (Some sm) ds)
-        | Ok (ir, tcWarnings), sm ->
+        | Error ds, sm ->
+            // S1: a file that also has a hard error has still EARNED every
+            // warning the checker produced before it failed. They rode
+            // typeCheck's Ok-only payload before and were dropped here.
+            printTypeCheckWarnings useColor (Some sm) false
+            Error (Blade.Diagnostics.Render.renderAll useColor (Some sm) ds)
+        | Ok (ir, _), sm ->
             // Strict mode fails here, before codegen: the pin suggestions
             // REPLACE their warning twins (which are therefore not printed).
             match strictPinFailure strictPins useColor (Some sm) with
             | Some rendered -> Error rendered
             | None ->
-            for w in tcWarnings do
-                eprintfn "[TypeCheck Warning] %s" w
+            printTypeCheckWarnings useColor (Some sm) false
             match IR.validateIR ir with
             | Error errs ->
                 let ds =
@@ -561,7 +566,7 @@ let replLoop () : int =
             | Blade.Interp.Repl.InterpDone r ->
                 // Interpreter is authoritative (exit 0 or guard panic 1). Surface
                 // the same TypeCheck warnings compileFile prints on the g++ path.
-                for w in lowered.Warnings do eprintfn "[TypeCheck Warning] %s" w
+                printTypeCheckWarnings (not Console.IsErrorRedirected) None false
                 emit r.ExitCode r.Stdout r.Stderr
             | Blade.Interp.Repl.InterpFellShort _ ->
                 // The interpreter can't evaluate this input yet â€” one-time notice
@@ -807,26 +812,27 @@ let checkFile (filePath: string) (strictPins: bool) : int =
         | Ok program ->
             match Blade.TypeCheck.typeCheck program with
             | Error errors ->
+                // S1: warnings earned before the error are printed, not dropped.
+                printTypeCheckWarnings useColor (Some sm) false
                 let ds = errors |> List.map Blade.TypeEnv.diagnosticOfCompileError
                 eprintfn "%s" (Blade.Diagnostics.Render.renderAll useColor (Some sm) ds)
                 1
-            | Ok (_, _, warnings) ->
+            | Ok _ ->
                 match strictPinFailure strictPins useColor (Some sm) with
                 | Some rendered ->
                     // Strict mode (Â§6.1(b)): the pin suggestions ARE the
-                    // failure. Their plain-string twins are dropped from the
-                    // warning list (same dedup rule as `blade ide check`), so
-                    // each suggestion is reported exactly once, as an error.
-                    let pinMessages =
-                        Blade.TypeCheck.PinSuggestions.get () |> List.map fst |> Set.ofList
-                    for w in warnings do
-                        if not (Set.contains w pinMessages) then
-                            printfn "[TypeCheck Warning] %s" w
+                    // failure. Their warning twins are dropped (same dedup rule
+                    // as `blade ide check`), so each suggestion is reported
+                    // exactly once, as an error. The old hand-rolled
+                    // message-text Set is gone: the twins are BL4010 BY
+                    // CONSTRUCTION — same code, same span, same text — so
+                    // filtering on the code is the exact same filter, minus the
+                    // string comparison.
+                    printTypeCheckWarnings useColor (Some sm) true
                     eprintfn "%s" rendered
                     1
                 | None ->
-                    for w in warnings do
-                        printfn "[TypeCheck Warning] %s" w
+                    printTypeCheckWarnings useColor (Some sm) false
                     printfn "OK"
                     0
 
@@ -955,10 +961,208 @@ let private runStrictPinTests () : TH.BlockResult =
       Skipped = skipped
       FailedNames = failedNames }
 
+/// Warning/suggestion SURFACING, end to end. Not expressible in the corpus:
+/// the load-bearing assertions drive `ide check --json` and the two console
+/// streams, neither of which any corpus harness touches (the diagnostics corpus
+/// calls `lowerDiag` directly and never renders; the value corpus compares
+/// program OUTPUT, and a warning changes no value).
+///
+/// The regression this locks: warnings and pin suggestions used to ride
+/// `typeCheck`'s Ok-only `string list`, so a file with ANY hard error silently
+/// lost every nudge the checker had already earned — on the CLI (S1) and in the
+/// editor JSON (S2). That is precisely the file an editor is looking at while
+/// you type.
+let private runSurfacingTests () : TH.BlockResult =
+    let blockName = "Surfacing"
+    TH.printHeader "Warning Surfacing (codes, streams, and survival of the error path)"
+    let results = ResizeArray<string * TH.Outcome>()
+    let record name outcome detail =
+        TH.resultLine outcome name detail
+        results.Add((name, outcome))
+    // The strict-pins `unpinned` twin (earns a BL4010 storage suggestion)...
+    let unpinned =
+        "function mymean(row) = reduce(row, (+)) / extents(row)\n\
+         function covariance(a, b) = mymean((a - mymean(a)) * (b - mymean(b)))\n\
+         let data = [[1.0, 2.0, 3.0], [2.0, 4.0, 6.0]]\n\
+         let result = object_for(covariance) <@> (data, data) |> compute\n"
+    // ...plus an unrelated hard type error in a LATER declaration, so the
+    // checker records the suggestion and THEN fails. Order matters: the
+    // suggestion must already be on the channel when the error aborts.
+    let errPlusWarn = unpinned + "let boom = nosuchthing + 1.0\n"
+    let tmpDir = Path.Combine(Path.GetTempPath(), "blade_surfacing_" + Guid.NewGuid().ToString("N"))
+    Directory.CreateDirectory(tmpDir) |> ignore
+    /// Run `f` with stdout and stderr captured SEPARATELY — strict-pins' own
+    /// `quietly` merges them into one writer, which cannot see which stream a
+    /// line went to, and "warnings go to stderr so stdout stays pipeable" is
+    /// exactly a claim about the split.
+    let quietly2 (f: unit -> 'a) : 'a * string * string =
+        let (swOut, swErr) = (new StringWriter(), new StringWriter())
+        let (oldOut, oldErr) = (Console.Out, Console.Error)
+        try
+            Console.SetOut swOut
+            Console.SetError swErr
+            let r = f ()
+            (r, swOut.ToString(), swErr.ToString())
+        finally
+            Console.SetOut oldOut
+            Console.SetError oldErr
+    try
+        let unpinnedPath = Path.Combine(tmpDir, "unpinned.edgi")
+        let errPath = Path.Combine(tmpDir, "err_plus_warn.edgi")
+        let pinnedPath = Path.Combine(tmpDir, "pinned.edgi")
+        File.WriteAllText(unpinnedPath, unpinned)
+        File.WriteAllText(errPath, errPlusWarn)
+        File.WriteAllText(pinnedPath,
+                          unpinned.Replace("function covariance(a, b) =",
+                                           "function covariance(a, b) where comm(a, b) ="))
+
+        // --- 1. ide check --json, ERROR path: the suggestion survives (S2).
+        let (code, out, _) = quietly2 (fun () -> Blade.Ide.ideCheck errPath)
+        let name = "ide check --json: BL4010 survives a file with a hard error"
+        if code = 1 && out.Contains "\"severity\":\"error\"" && out.Contains "\"code\":\"BL4010\"" then
+            record name TH.Pass ""
+        else
+            record name TH.Fail
+                   (sprintf "exit %d, json: %s" code (out.Trim()))
+
+        // --- 2. ...and so do the deduced facts (channel (f)) on that arm.
+        let name = "ide check --json: deduced[] is populated on the error arm"
+        if out.Contains "\"deduced\":[" && out.Contains "\"kind\":\"comm\"" then
+            record name TH.Pass ""
+        else
+            record name TH.Fail (sprintf "json: %s" (out.Trim()))
+
+        // --- 3. Control: the pinned twin is clean and claims nothing.
+        let (code, out, _) = quietly2 (fun () -> Blade.Ide.ideCheck pinnedPath)
+        let name = "ide check --json: the pinned twin yields no BL4010 (exit 0)"
+        if code = 0 && not (out.Contains "BL4010") then
+            record name TH.Pass ""
+        else
+            record name TH.Fail (sprintf "exit %d, json: %s" code (out.Trim()))
+
+        // --- 4. `check`: warnings are rendered diagnostics, and they are on
+        // STDERR. Both halves matter — the code proves the render, the empty
+        // stdout proves `blade check` stays pipeable.
+        let (code, out, err) = quietly2 (fun () -> checkFile unpinnedPath false)
+        let name = "check: the warning renders as warning[BL4010] on stderr, not stdout"
+        if code = 0 && err.Contains "warning[BL4010]" && not (out.Contains "BL4010")
+           && out.Contains "OK" then
+            record name TH.Pass ""
+        else
+            record name TH.Fail
+                   (sprintf "exit %d, stdout: %s, stderr: %s" code (out.Trim()) (err.Trim()))
+
+        // --- 5. `check` on the erroring file still prints the warning (S1).
+        let (code, _, err) = quietly2 (fun () -> checkFile errPath false)
+        let name = "check: warnings print alongside the error instead of vanishing"
+        if code = 1 && err.Contains "warning[BL4010]" && err.Contains "error[BL2001]" then
+            record name TH.Pass ""
+        else
+            record name TH.Fail (sprintf "exit %d, stderr: %s" code (err.Trim()))
+
+        // --- 6. The compile lane agrees (compile/emit/run all funnel here).
+        let ((result: Result<string * string list, string>), _, err) =
+            quietly2 (fun () -> compileFile errPath false false)
+        let name = "compile lane: warnings print on the error arm too"
+        match result with
+        | Error _ when err.Contains "warning[BL4010]" -> record name TH.Pass ""
+        | Error _ -> record name TH.Fail (sprintf "no warning on stderr: %s" (err.Trim()))
+        | Ok _ -> record name TH.Fail "compiled instead of failing"
+
+        // --- 7-9. The stage-6a CERTIFICATE channels (BL4011's galilean twin
+        // BL4014, and the structured CertFacts feed behind `deduced[]`).
+        //
+        // These three drive the DRAIN, not the producer: each stages a channel
+        // entry by hand and asserts the surfacing code carries it to the right
+        // place, then resets. The inference passes that fill these channels for
+        // real live in the ML elaborator, which resets them on entry — so an
+        // end-to-end "write a boost-invariant function, check it" assertion
+        // cannot be written here; that direction is covered by the ml-equiv
+        // corpus SUGGEST pins. What is genuinely at risk in THIS file is a
+        // channel that gets filled and then read by nobody, and that is exactly
+        // what these catch.
+        let testSpan : Blade.Ast.Span =
+            { StartLine = 2; StartCol = 1; EndLine = 2; EndCol = 9; File = None }
+
+        // --- 7. The code renders. Channel-independent: the diagnostic is built
+        // directly, so this holds even with both inference passes absent.
+        let galMsg =
+            "function 'drift' judges boost-invariant with velocity parameter(s) u: \
+             add 'where ml.galilean(u)'"
+        let rendered =
+            Blade.Diagnostics.Render.renderAll false None
+                [ Blade.Diagnostics.mkWarning "BL4014" Blade.Diagnostics.PhConstraints
+                                              testSpan galMsg ]
+        let name = "BL4014 renders as a warning with its code"
+        if rendered.Contains "warning[BL4014]" && rendered.Contains "boost-invariant" then
+            record name TH.Pass ""
+        else
+            record name TH.Fail (sprintf "rendered: %s" (rendered.Trim()))
+
+        // --- 8. GalCertSuggestions reaches the shared warning-diagnostic
+        // assembly (the one every CLI lane prints through), and does so under
+        // `skipPins` too: a certificate owns no storage decision, so
+        // --strict-pins must not swallow it the way it swallows BL4010.
+        Blade.ML.Galilean.GalCertSuggestions.reset ()
+        Blade.ML.Galilean.GalCertSuggestions.add galMsg testSpan
+        let drained = Blade.Lowering.typeCheckWarningDiagnostics false
+        let drainedStrict = Blade.Lowering.typeCheckWarningDiagnostics true
+        Blade.ML.Galilean.GalCertSuggestions.reset ()
+        let hasBL4014 (ds: Blade.Diagnostics.Diagnostic list) =
+            ds |> List.exists (fun d -> d.Code = "BL4014" && d.Message.Contains "boost-invariant")
+        let name = "typeCheckWarningDiagnostics: GalCertSuggestions surfaces as BL4014"
+        if hasBL4014 drained then record name TH.Pass ""
+        else
+            record name TH.Fail
+                   (sprintf "codes drained: %s"
+                            (drained |> List.map (fun d -> d.Code) |> String.concat ","))
+        let name = "typeCheckWarningDiagnostics: BL4014 survives --strict-pins"
+        if hasBL4014 drainedStrict then record name TH.Pass ""
+        else
+            record name TH.Fail
+                   (sprintf "codes drained: %s"
+                            (drainedStrict |> List.map (fun d -> d.Code) |> String.concat ","))
+
+        // --- 9. CertFacts reaches `deduced[]` as STRUCTURED data, through the
+        // real mapping and the real renderer. Both disciplines, because they
+        // take the same renderer arm and a typo in either kind string would
+        // silently drop `name` (the group) into the pair-fields branch.
+        Blade.ML.Equiv.CertFacts.reset ()
+        Blade.ML.Equiv.CertFacts.add
+            { Owner = "rotate"; Discipline = "equiv"; Group = "O3"; Deps = ["helper"; "inner"] }
+            testSpan
+        Blade.ML.Equiv.CertFacts.add
+            { Owner = "drift"; Discipline = "galilean"; Group = "u,v"; Deps = [] }
+            testSpan
+        let deducedJson = Blade.Ide.deducedJsonForTests ()
+        Blade.ML.Equiv.CertFacts.reset ()
+        let name = "ide deduced[]: CertFacts surface with kind, owner, group and deps"
+        if deducedJson.Contains "\"kind\":\"equiv\"" && deducedJson.Contains "\"owner\":\"rotate\""
+           && deducedJson.Contains "\"name\":\"O3\"" && deducedJson.Contains "\"left\":\"helper,inner\""
+           && deducedJson.Contains "\"kind\":\"galilean\"" && deducedJson.Contains "\"name\":\"u,v\"" then
+            record name TH.Pass ""
+        else
+            record name TH.Fail (sprintf "deduced json: %s" (deducedJson.Trim()))
+    finally
+        try Directory.Delete(tmpDir, true) with _ -> ()
+    let count o = results |> Seq.filter (fun (_, r) -> r = o) |> Seq.length
+    let passed, failed, skipped = count TH.Pass, count TH.Fail, count TH.Skip
+    let failedNames = results |> Seq.filter (fun (_, r) -> r = TH.Fail) |> Seq.map fst |> List.ofSeq
+    let parts =
+        [ sprintf "%d passed" passed; sprintf "%d failed" failed ]
+        @ (if skipped > 0 then [sprintf "%d skipped" skipped] else [])
+    TH.printFooter blockName parts
+    { TH.BlockResult.Block = blockName
+      Passed = passed
+      Failed = failed
+      Skipped = skipped
+      FailedNames = failedNames }
+
 /// Run the full suite, appending the CLI smoke block and the strict-pin block
 /// (which live in this file â€” see runAllTestsFullWith's doc comment for why
 /// they're passed in).
-let private runFullSuite opts = runAllTestsFullWith [runCliSmokeTests; runStrictPinTests] opts
+let private runFullSuite opts =
+    runAllTestsFullWith [runCliSmokeTests; runStrictPinTests; runSurfacingTests] opts
 
 /// Dispatch the `test` subcommand. `rest` is everything after "test".
 let private dispatchTest (rest: string list) : int =
@@ -984,6 +1188,11 @@ let private dispatchTest (rest: string list) : int =
         // The --strict-pins CLI gate (Â§6.1(b)) standalone. In-process, no
         // toolchain; also part of the full suite.
         let failed = (runStrictPinTests ()).Failed
+        if failed = 0 then 0 else 1
+    | [ "surfacing" ] ->
+        // Warning/suggestion surfacing: codes, streams, and survival of the
+        // checker's error path. In-process, no toolchain; also in the full suite.
+        let failed = (runSurfacingTests ()).Failed
         if failed = 0 then 0 else 1
     | [ "normalize" ] ->
         // IR-level F# unit tests for the type normalizer. Runs in-process,
@@ -1057,11 +1266,155 @@ let private dispatchTest (rest: string list) : int =
         // (broken sources with pinned codes/spans). No C++ pipeline.
         let core = (Blade.Tests.DiagnosticsCore.runDiagnosticsCoreTests ()).Failed
         let corpus = (Blade.Tests.DiagCorpus.runDiagCorpusTests ()).Failed
-        if core + corpus = 0 then 0 else 1
+        // Stage-6a BL4011 suggestions: pinned (and pinned-ABSENT) over the
+        // ml-equiv corpus. A warning channel, so it has no home in the value
+        // corpus; it rides here with the other coded-diagnostic assertions.
+        let certSuggest = (Blade.Tests.DiagCorpus.runCertSuggestTests ()).Failed
+        if core + corpus + certSuggest = 0 then 0 else 1
+    | [ "rep-differential" ] | [ "repdifferential" ] ->
+        // Phase-B3 deduction parity gate (plan-equivariance-in-types.md): the
+        // typed rep-status deduction vs the stage-6a seam inference, proposal
+        // by proposal over the ml-equiv corpus. In-process, no C++ pipeline;
+        // also part of the full suite, where a red differential blocks the run.
+        let failed = (Blade.Tests.RepDifferential.runRepDifferentialTests ()).Failed
+        if failed = 0 then 0 else 1
+    | [ "rep-check" ] | [ "repcheck" ] ->
+        // Phase-C1 declared-certificate agreement gate: the typed walker's
+        // SECOND OPINION on every certificate the elaboration seam already
+        // checked. Asserts zero disagreements over the ml-equiv corpus (a
+        // disagreement is a compiler bug, not a user error), prints the
+        // confirm/abstain split, and self-tests the disagree path and the C2
+        // engine-hook slot. In-process, no C++ pipeline.
+        let failed = (Blade.Tests.RepCheckAgreement.runRepCheckAgreementTests ()).Failed
+        if failed = 0 then 0 else 1
+    | [ "rep-reject" ] | [ "repreject" ] ->
+        // Phase-C3 REJECTION-PARITY census: the third gate, and the only one
+        // that looks at programs the compiler REFUSES. Measures, for every
+        // ml-equiv reject-probe, what the typed walker would say if it were
+        // the checking authority — by shadowing the `ml.equiv` pin so the
+        // elaboration seam falls silent and the program reaches typecheck.
+        // Changes no checking behaviour; the assertions are the harness's own
+        // health plus the two directions that would be alarming.
+        let failed = (Blade.Tests.RepRejectCensus.runRepRejectCensusTests ()).Failed
+        if failed = 0 then 0 else 1
+    | [ "gal-layer" ] | [ "gallayer" ] ->
+        // MEASUREMENT ONLY (docs/census-galilean-layer.md): the GALILEAN
+        // discipline's layer question — what would a typecheck-resident walker
+        // conclude about every galilean certificate in the corpus, on the
+        // programs the seam accepts AND on the programs it refuses. Builds an
+        // experimental typed judgment inside the test assembly; changes no
+        // checking behaviour and is deliberately NOT part of the full suite.
+        let failed = (Blade.Tests.GalLayerCensus.runGalLayerCensusTests ()).Failed
+        if failed = 0 then 0 else 1
+    | [ "perm-layer" ] | [ "permlayer" ] ->
+        // MEASUREMENT ONLY (docs/census-perm-layer.md): the PERM discipline's
+        // layer question, plus the first-ever perm INFERENCE experiment. Perm
+        // has no incumbent inference, so the differential degenerates to its
+        // false-positive half: every proposal is gated by writing the pin back
+        // into the source and running the SHIPPED SEAM CHECKER on it. Builds an
+        // experimental typed judgment inside the test assembly; changes no
+        // checking behaviour and is deliberately NOT part of the full suite.
+        let failed = (Blade.Tests.PermLayerCensus.runPermLayerCensusTests ()).Failed
+        if failed = 0 then 0 else 1
     | [ "oracles" ] ->
         // Phase 0.2 review block: the differential-harness oracles checked
         // against hand-computed / analytic values. No Blade source pipeline.
         let failed = (Blade.Tests.OracleReview.runOracleTests ()).Failed
+        if failed = 0 then 0 else 1
+    | [ "sympower" ] | [ "sympower-tables" ] ->
+        // Stage 2b-i review block: the T_{j,l} Sym-power occurrence tables
+        // (SymPowerTables.fs) — exact rational kernel/Gram pins, the derived
+        // realization phase rule, bit-pins, and the extended realCG
+        // completeness pins. In-process, no Blade source pipeline.
+        let failed = (Blade.Tests.SymPowerTablesReview.runSymPowerTablesTests ()).Failed
+        if failed = 0 then 0 else 1
+    | [ "polyoracle" ] | [ "poly-oracle" ] ->
+        // Stage 2b-iii oracle block: the Sym^k label basis checked against
+        // isotypic projectors built by an independent Casimir-Lagrange route
+        // (exact integer/rational, no SymPowerTables exact layer), plus the
+        // k = 2 value-level M-pin vs stage 1. In-process, no C++ pipeline.
+        let failed = (Blade.Tests.PolyOracleReview.runPolyOracleTests ()).Failed
+        if failed = 0 then 0 else 1
+    | [ "lietables" ] | [ "lie-tables" ] ->
+        // Stage 6c oracle block: the exact so(3) generator tables and the
+        // radical-vector Lie discharger (MLLieDischarge.fs). THE EXP-PIN is
+        // the keystone — float-assemble each table, exponentiate, and compare
+        // against the real Wigner action fit from an INDEPENDENT
+        // transcription of the solid harmonics, which is the only thing that
+        // rules out convention drift between the symbolic tables and the
+        // numeric action the shipped certificates are about. Then the exact
+        // algebra (skew-symmetry per radical component, brackets, Casimir,
+        // l <= 4), the known-answer verdicts (the triple-product triple, the
+        // |x|^2·x thesis pin), three negative controls, and the
+        // composition-vs-engine differential. In-process, no C++ pipeline.
+        let failed = (Blade.Tests.LieTablesReview.runLieTablesTests ()).Failed
+        if failed = 0 then 0 else 1
+    | [ "permspec" ] | [ "perm-spec" ] ->
+        // Stage 5a-i review block: the Sn permutation-module counting layer
+        // (MLPermSpec.fs) — RGS partition enumeration against the Stirling
+        // recurrence and against an independently coded block-insertion
+        // enumerator, the witness-unitriangularity certificate (strict half
+        // tested explicitly: it is the numerical shadow of the Coq order
+        // keystone), and the perm_weight_dim / perm_bias_dim sizing rules.
+        // Pure integer, in-process, no Blade source pipeline.
+        let failed = (Blade.Tests.PermSpecReview.runPermSpecTests ()).Failed
+        if failed = 0 then 0 else 1
+    | [ "permoracle" ] | [ "perm-oracle" ] ->
+        // Stage 5a-ii oracle block: the coarsening-indicator basis checked for
+        // COMPLETENESS against the exact rational Reynolds projector
+        // (1/N!)Sum_sigma M(sigma)^{tensor m} - B(B^T B)^-1 B^T = P_ref
+        // ENTRYWISE over Q, with the Gram closed form N^b(join) predicted by an
+        // independent union-find join. BigInteger fractions throughout: no
+        // float, no tolerance, no rank decision. This is the half
+        // BladePartition.v cites rather than proves. In-process, no C++
+        // pipeline.
+        let failed = (Blade.Tests.PermOracleReview.runPermOracleTests ()).Failed
+        if failed = 0 then 0 else 1
+    | [ "structidx" ] | [ "struct-idx" ] ->
+        // Stage C1 review block: the constrained-record COUNTING layer
+        // (StructIdxSpec.fs) - box enumeration over the per-field INCLUSIVE
+        // bounds with the two-route certificate (flat filter vs arrow-style
+        // heads filter, compared as set AND as order, since order agreement is
+        // what catches an offset bug), the CGm112 anchor and its 3/7/9
+        // lo-sweep against an independent triple-loop dense count, the fence
+        // and idx_card(R) end to end through resolveStatics, and the negative
+        // controls: box cap, non-Int field, unbounded field, non-static
+        // struct, and the fuel bomb with its witness cell. Also pins the
+        // shared StaticEval fold budget (depth vs steps, the wide shallow
+        // fold, the idx_card re-entrancy cycle). Pure integer, in-process,
+        // no Blade source pipeline.
+        let failed = (Blade.Tests.StructIdxSpecReview.runStructIdxSpecTests ()).Failed
+        if failed = 0 then 0 else 1
+    | [ "structidxoracle" ] | [ "struct-idx-oracle" ] ->
+        // Stage C1 oracle block: an INDEPENDENTLY CODED recursive per-field
+        // enumerator over the same solution sets, compared against
+        // StructIdxSpec.enumerateBox as SET and as ORDER (the two failure
+        // modes reported separately), with hand-written lex tables so two
+        // agreeing programs can still be caught being wrong together.
+        let failed = (Blade.Tests.StructIdxOracle.runStructIdxOracleTests ()).Failed
+        if failed = 0 then 0 else 1
+    | [ "pgspec" ] | [ "pg-spec" ] ->
+        // Stage 5b-0 review block: the point-group counting layer
+        // (MLPointSpec.fs) - the frozen {C4, D4} tables and their integrity
+        // certificate (closure vs declared order, orthogonality, the FS
+        // indicators nu = 2 - e, J^2 = -Id and J-generator commutation, the
+        // R-Burnside trap sum d^2/e = |G|), the 9-vs-5 FS contrast that is
+        // stage 5b's thesis, and the TWIN PIN of the generic e-weighted core
+        // against MLSpec.homDim / homBlocks on a 15-spec sweep. Pure integer,
+        // in-process, no Blade source pipeline.
+        let failed = (Blade.Tests.PointSpecReview.runPointSpecTests ()).Failed
+        if failed = 0 then 0 else 1
+    | [ "pgoracle" ] | [ "pg-oracle" ] ->
+        // Stage 5b-0 oracle block: the emitted point-group Hom basis ([Id] at
+        // FS-real cells, [Id, J] at FS-complex ones) checked for COMPLETENESS
+        // against the exact rational Reynolds projector
+        // (1/|G|)Sum_g rho_W(g) M rho_V(g)^T - B(B^T B)^-1 B^T = P_ref
+        // ENTRYWISE over Q, with the Gram closed form d*I_e per cell. Three
+        // negative controls run live: a dropped J column (trace deficit one per
+        // affected cell), the naive e = 1 sizing formula, and a spurious
+        // diag(1,-1) End column that dies at R90. BigInteger fractions
+        // throughout: no float, no tolerance. In-process, no C++ pipeline.
+        let failed = (Blade.Tests.PgOracleReview.runPgOracleTests ()).Failed
         if failed = 0 then 0 else 1
     | [ "alloc" ] ->
         // Standalone C++ runtime-layout tests for the contiguous-backing

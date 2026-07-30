@@ -1,0 +1,17 @@
+// TEST: Compact Rank vs Flat Return (rejects)
+// A declared rank-K compact return type must not accept a rank-1 flat body.
+// SymIdx<2,3> is ONE index slot (IndexTypes.Length = 1, same as Idx<6>) but
+// TWO index components, and codegen ranks an array by summing component
+// ranks — so this pair is Array<double,2> vs Array<double,1>. Every other
+// test in the unifier passes it: slot counts are equal, neither side carries
+// a tag, SymNone is a symmetry WILDCARD, and extents are never compared.
+// The cell counts even agree exactly (SymIdx<2,3> packs 6, so does Idx<6>),
+// which is what makes the two look interchangeable.
+// Before the component-rank check this reached g++ as
+//   error: could not convert 'Array<[...],1>' to 'Array<[...],2>'
+function mk() -> Array<Float64 like SymIdx<2, 3>> = {
+    let out = [1.0, 2.0, 3.0, 4.0, 5.0, 6.0]
+    out
+}
+let r = mk()
+// EXPECT: typecheck failure — a rank-2 compact group is not a rank-1 axis.

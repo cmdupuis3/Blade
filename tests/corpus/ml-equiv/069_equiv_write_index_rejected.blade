@@ -1,0 +1,37 @@
+// TEST: ML Equiv Write Index Rejected (rejects)
+import ml as ml
+// ============================================================================
+// The O(3) twin of ml-equiv/047: the same write-path hole, the same fix, one
+// lattice over (stage 5c catalog, finding 2). MLEquiv's judgeAssign matched
+// the write target and never judged the index expressions, so a cell chosen
+// by a BASIS-DEPENDENT number was written without comment, while reading that
+// number anywhere else in the body was BL4008.
+//
+//     let z = k(2)     // BL4008: raw indexing into an l>0 component
+//     acc(k(2)) = 1.0  // accepted
+//
+// The spec S = [(0, 0, 2), (1, 1, 1)] lays out two l = 0 scalars at offsets
+// 0..1 and one l = 1 vector at offsets 2..4. Offsets 0 and 1 are the
+// invariant block, and reading them is admissible. Offset 2 is a COMPONENT of
+// the vector: rotate the frame and k(2) is a different number, so the 1.0
+// lands in a different cell of `acc` and the readout acc(0) changes. That is
+// exactly the raw component access the discipline exists to forbid, and the
+// fact that the number is spent as an index rather than as an arithmetic
+// operand does not make it frame-independent.
+//
+// The element type of the rep is deliberate and is what makes the program
+// well-typed rather than exotic for its own sake: MLEquiv classifies on the
+// `IrrepsIdx<spec>` annotation and ignores the element type, so `k` is a rep,
+// and because its cells are Ints, k(2) can be used as an index at all. A
+// Float-element rep — the ordinary case — cannot reach this arm, since its
+// components are not index-typed. BL4008, at the index expression.
+// ============================================================================
+let static S = [(0, 0, 2), (1, 1, 1)]
+
+function bad(k: Array<Int like IrrepsIdx<S>>) where ml.equiv(O3) -> Float = {
+    let mut acc: Array<Float like Idx<3>> = [0.0, 0.0, 0.0]
+    acc(k(2)) = 1.0
+    acc(0)
+}
+
+let out = bad([0, 1, 2, 0, 1])

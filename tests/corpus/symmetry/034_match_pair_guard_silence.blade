@@ -1,0 +1,21 @@
+﻿// TEST: Match whose guard tests the swapped pair stays silent
+// The negative control for symmetry/033, differing in exactly one token: the
+// guard is `x > y` instead of `s > 0.0`. Now the guard's two children are each
+// other's image under the swap, and opSwapClass OpGt is PBottom — comparisons
+// have no exchange law, and a guard that can select a DIFFERENT arm after the
+// swap destroys the argument that pattern binders are invariant. So the whole
+// match is PBottom, the declared clause stays trusted (PBottom is the analysis
+// saying "no claim", never "no"), and this file COMPILES.
+//
+// That makes the silence machine-checked rather than assumed: if the match
+// rule were over-eager about guards, this file would start failing with the
+// same contradiction error 033 asserts.
+function pick(x, y) where anticomm(x, y) = match x + y with
+    | s if x > y -> x * y
+    | _ -> x * y + 1.0
+// (5, 2): guard holds, first arm -> 5 * 2.
+// (2, 5): guard fails, second arm -> 2 * 5 + 1.
+let hi = pick(5.0, 2.0)
+let lo = pick(2.0, 5.0)
+// EXPECT: hi = 10.0
+// EXPECT: lo = 11.0

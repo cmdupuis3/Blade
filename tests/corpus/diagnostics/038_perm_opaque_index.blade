@@ -1,0 +1,10 @@
+// TEST: Diag Perm Opaque Index (diag)
+// ERROR: BL4012 @ 7:7
+// ERROR-CONTAINS: this one is unclassifiable
+import ml as ml
+struct Sel { i: Int }
+function bad(s: Sel) where ml.perm_equiv(4) -> Float = {
+  let mut acc: Array<Float like Idx<3>> = [0.0, 0.0, 0.0]
+  acc(s.i) = 1.0
+  acc(0)
+}

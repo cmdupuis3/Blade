@@ -1,0 +1,52 @@
+// TEST: ML Equiv Suggest Strongest First
+import ml as ml
+// ============================================================================
+// STRONGEST-FIRST, DEMONSTRATED BY THE ONE CASE THAT SEPARATES THE TWO GROUPS.
+//
+// `ml.gated` reads its gates out of the FIRST block, so a spec whose first
+// block is (l = 0, ODD) gates on PSEUDOSCALARS. Those are SO(3) invariants and
+// not O(3) invariants — they flip under improper rotations — which is exactly
+// corpus 008's rejection and corpus 010's acceptance, one group apart.
+//
+// The inference channel tries O3 first because it is the STRONGER theorem, and
+// proposes SO3 only because O3's judgment refused this body. So the suggestion
+// is never "some group works": it is the strongest group that does. There is
+// no `ml.equiv(O3)` twin here for the same reason there is no such twin in
+// 008 — the checker would refuse it, and Propose ⊆ Check-accept forbids
+// proposing it.
+// ============================================================================
+let static SODD = [(0, 1, 2), (1, 1, 1)]
+
+// SUGGEST: function 'act_loose' judges equivariant under SO3: add 'where ml.equiv(SO3)' [signature: x transforms as IrrepsIdx<[(0, 1, 2), (1, 1, 1)]> -> IrrepsIdx<[(0, 1, 2), (1, 1, 1)]>]
+function act_loose(x: Array<Float like IrrepsIdx<SODD>>) -> Array<Float like IrrepsIdx<SODD>> =
+    ml.gated(SODD, x)
+
+// The pin the channel proposed, written out: it checks.
+function act_tight(x: Array<Float like IrrepsIdx<SODD>>) where ml.equiv(SO3)
+                   -> Array<Float like IrrepsIdx<SODD>> =
+    ml.gated(SODD, x)
+
+let xv = [0.0, 2.0, 1.0, 1.0, 1.0]
+let loose = act_loose(xv)
+// EXPECT: loose = [0.0, 1.7615941559557646, 0.5, 0.5, 0.5]
+let tight = act_tight(xv)
+// EXPECT: tight = [0.0, 1.7615941559557646, 0.5, 0.5, 0.5]
+
+// The EVEN twin, same body shape: with an (l = 0, even) gate block the O(3)
+// judgment goes through, and the channel proposes the stronger group. Same
+// walk, different verdict — which is what "signature-driven, strongest-first"
+// buys over guessing one group.
+let static SEVEN = [(0, 0, 2), (1, 1, 1)]
+
+// SUGGEST: function 'act_even_loose' judges equivariant under O3: add 'where ml.equiv(O3)' [signature: x transforms as IrrepsIdx<[(0, 0, 2), (1, 1, 1)]> -> IrrepsIdx<[(0, 0, 2), (1, 1, 1)]>]
+function act_even_loose(x: Array<Float like IrrepsIdx<SEVEN>>) -> Array<Float like IrrepsIdx<SEVEN>> =
+    ml.gated(SEVEN, x)
+
+function act_even_tight(x: Array<Float like IrrepsIdx<SEVEN>>) where ml.equiv(O3)
+                        -> Array<Float like IrrepsIdx<SEVEN>> =
+    ml.gated(SEVEN, x)
+
+let even_loose = act_even_loose(xv)
+// EXPECT: even_loose = [0.0, 1.7615941559557646, 0.5, 0.5, 0.5]
+let even_tight = act_even_tight(xv)
+// EXPECT: even_tight = [0.0, 1.7615941559557646, 0.5, 0.5, 0.5]

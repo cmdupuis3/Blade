@@ -1,0 +1,17 @@
+// TEST: Bounded Let Violated (aborts)
+// The runtime half of the bounded LET ANNOTATION, and the violating twin of
+// basic/035. Filed here with the other constraint-guard abort probes: it is
+// not a struct, but it is the same TExprConstraintCheck node reaching the
+// same generated-C++ guard, so it belongs with its kin rather than alone.
+//
+// `x` is a plain `let`, so no static fold applies and the check lands in the
+// emitted C++. `max=3` is INCLUSIVE, so 4 is the first violating value —
+// the same off-by-one witness struct-aborts/011 uses on the field path.
+//
+// The message names the BINDING and the offending ENDPOINT, which is the
+// most a let annotation can say: unlike a struct there is no type name to
+// report, and unlike a where-clause there is no conjunct index that would
+// mean anything to the reader.
+// ABORT: Bound violation in 'x' (max)
+let x: Int<min=0, max=3> = 4
+let y = x + 1

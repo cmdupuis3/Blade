@@ -1,0 +1,64 @@
+// TEST: ML Equiv Suggest Walker Recall
+import ml as ml
+// ============================================================================
+// WHERE THE TWO HALVES OF THIS ROUND MEET: A WALKER ARM IS A DEDUCTION ARM.
+//
+// Deduction mode is the CHECKING judgment run speculatively, and it is the
+// SAME `judge` — so every position the walker used to answer `Opaque` was
+// simultaneously a rejected certificate and a missed proposal. These two
+// functions are not new programs; they are programs stage 6a already looked at
+// and had nothing to say about, because a bracket read and a field read poured
+// `Opaque` into the return-agreement check.
+//
+// With the arms in place both bodies judge clean, so the channel proposes the
+// pins it could not see before. Recall on the CHECKING side and recall on the
+// DEDUCTION side are one change, made once.
+//
+// PROPOSE ⊆ CHECK-ACCEPT, pinned as always: each loose function has a twin
+// carrying the proposed conjunct, and both twins check and return the same
+// numbers. A suggestion is a warning; a warning changes no value.
+// ============================================================================
+let static S = [(0, 0, 1), (1, 1, 1)]
+let static WD = ml.hom_dim(S, S)
+// EXPECT: WD = 2
+
+struct Gains {
+    lo: Float64,
+    hi: Float64
+}
+
+let G = Gains { lo = 2.0, hi = 3.0 }
+
+// Bracket read of a stacked weight buffer. Before the arm: the weight
+// argument classified `Opaque`, `requireInv` refused it, the speculative
+// judgment failed, and the channel was silent.
+// SUGGEST: function 'layer_loose' judges equivariant under O3: add 'where ml.equiv(O3)' [signature: x transforms as IrrepsIdx<[(0, 0, 1), (1, 1, 1)]>, ws invariant -> IrrepsIdx<[(0, 0, 1), (1, 1, 1)]>]
+function layer_loose(x: Array<Float like IrrepsIdx<S>>, ws: Array<Float like Idx<2>, Idx<WD>>)
+                     -> Array<Float like IrrepsIdx<S>> =
+    ml.derive_linear(S, S, ws[0], x)
+
+function layer_pinned(x: Array<Float like IrrepsIdx<S>>, ws: Array<Float like Idx<2>, Idx<WD>>)
+                      where ml.equiv(O3) -> Array<Float like IrrepsIdx<S>> =
+    ml.derive_linear(S, S, ws[0], x)
+
+// Field read of an invariant global. Before the arm: the body classified
+// `Opaque` and disagreed with the declared `Float` return.
+// SUGGEST: function 'score_loose' judges equivariant under O3: add 'where ml.equiv(O3)' [signature: x transforms as IrrepsIdx<[(0, 0, 1), (1, 1, 1)]> -> invariant]
+function score_loose(x: Array<Float like IrrepsIdx<S>>) -> Float =
+    x(0) + G.lo
+
+function score_pinned(x: Array<Float like IrrepsIdx<S>>) where ml.equiv(O3) -> Float =
+    x(0) + G.lo
+
+let wss = [[2.0, 0.5], [1.0, 1.0]]
+let xv = [1.0, 4.0, 0.0 - 2.0, 6.0]
+
+let loose = layer_loose(xv, wss)
+// EXPECT: loose = [2.0, 2.0, -1.0, 3.0]
+let pinned = layer_pinned(xv, wss)
+// EXPECT: pinned = [2.0, 2.0, -1.0, 3.0]
+
+let sl = score_loose([2.0, 1.0, 1.0, 1.0])
+// EXPECT: sl = 4
+let sp = score_pinned([2.0, 1.0, 1.0, 1.0])
+// EXPECT: sp = 4

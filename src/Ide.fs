@@ -156,6 +156,26 @@ type private CallInfo = {
     CRet: string
 }
 
+// One fact the checker DEDUCED rather than read off an annotation. Emitted as
+// a NEW TOP-LEVEL `deduced[]` array rather than folded into
+// `bindings[].params[]`: it keeps the bindings shape byte-stable for editors
+// already parsing it, it can carry kernel-site facts belonging to no named
+// binding (owner "<kernel>"), and it needs no join against joinBindings.
+// Which fields are meaningful depends on DKind — see the renderer.
+type private DeducedInfo = {
+    DKind: string          // "rank" | "comm" | "anticomm" | "packComm"
+    DOwner: string         // function name, or "<kernel>" for an inline kernel
+    DName: string          // param name ("rank") / pack name ("packComm")
+    DLeft: string          // pair members ("comm" / "anticomm")
+    DRight: string
+    DIndex: int            // param index, or adjacent-pair index
+    DRank: int             // "rank" only; 0 otherwise
+    DLine: int
+    DCol: int
+    DEndLine: int
+    DEndCol: int
+}
+
 // One lambda-kernel site with its deduction snapshot from the apply seam:
 // param names, deduced symmetry (canonical pin-clause strings), declared
 // where-clause conjuncts, and per-param cell ranks (the deduced minimum —
@@ -180,7 +200,31 @@ let private clampSpan (s: Span) =
     let endCol = if s.EndCol >= 1 then s.EndCol else col
     (line, col, endLine, endCol)
 
-let private renderJson (diags: Diag list) (bindings: BindingInfo list) (providers: ProviderInfo list) (calls: CallInfo list) (kernels: KernelIdeInfo list) =
+/// A `deduced[]` record with every field at its empty default, spanned.
+let private emptyDeduced (span: Span) : DeducedInfo =
+    let (line, col, endLine, endCol) = clampSpan span
+    { DKind = ""; DOwner = ""; DName = ""; DLeft = ""; DRight = ""
+      DIndex = 0; DRank = 0
+      DLine = line; DCol = col; DEndLine = endLine; DEndCol = endCol }
+
+/// The stage-6a certificate facts, projected into the flat `deduced[]` record.
+/// Hoisted out of `ideCheck`'s drain so the surfacing test block can exercise
+/// this exact mapping (through the real renderer, via `deducedJsonForTests`)
+/// without needing the ML elaborator to have produced anything — the producers
+/// reset the channel mid-typecheck, so an end-to-end add-then-check would see
+/// its fact wiped. One definition, two callers, no drifting twin.
+let private certFactRecords () : DeducedInfo list =
+    Blade.ML.Equiv.CertFacts.get ()
+    |> List.map (fun (fact, span) ->
+        { emptyDeduced span with
+            DKind = fact.Discipline
+            DOwner = fact.Owner
+            DName = fact.Group
+            DLeft = String.concat "," fact.Deps })
+
+let private renderJson (diags: Diag list) (bindings: BindingInfo list) (providers: ProviderInfo list)
+                       (deduced: DeducedInfo list) (calls: CallInfo list)
+                       (kernels: KernelIdeInfo list) =
     let sb = StringBuilder()
     sb.Append "{\"version\":1,\"diagnostics\":[" |> ignore
     diags
@@ -265,6 +309,35 @@ let private renderJson (diags: Diag list) (bindings: BindingInfo list) (provider
         appendMembers "dims" p.Dims
         appendMembers "vars" p.Vars
         sb.Append '}' |> ignore)
+    // Deduced facts. Only the fields that MEAN something for the kind are
+    // emitted: "rank"/"packComm" carry `name` (and `rank` for the former),
+    // pair kinds carry `left`/`right`. A consumer keys on `kind` first.
+    //
+    // The certificate kinds ("equiv"/"galilean") are the one case needing BOTH:
+    // `name` is the certificate's subject (the group for equiv, the comma-joined
+    // velocity parameters for galilean) and `left` is the dependency closure the
+    // proposal rests on, also comma-joined. Falling through to the pair arm would
+    // have emitted `right` (always empty here) and — the actual loss — dropped
+    // `name` entirely, so the group would never reach the consumer.
+    sb.Append "],\"deduced\":[" |> ignore
+    deduced
+    |> List.iteri (fun i d ->
+        if i > 0 then sb.Append ',' |> ignore
+        sb.AppendFormat(
+            "{{\"kind\":\"{0}\",\"owner\":\"{1}\"", jsonEscape d.DKind, jsonEscape d.DOwner) |> ignore
+        if d.DKind = "rank" || d.DKind = "packComm" then
+            sb.AppendFormat(",\"name\":\"{0}\"", jsonEscape d.DName) |> ignore
+        elif d.DKind = "equiv" || d.DKind = "galilean" then
+            sb.AppendFormat(",\"name\":\"{0}\",\"left\":\"{1}\"",
+                            jsonEscape d.DName, jsonEscape d.DLeft) |> ignore
+        else
+            sb.AppendFormat(",\"left\":\"{0}\",\"right\":\"{1}\"",
+                            jsonEscape d.DLeft, jsonEscape d.DRight) |> ignore
+        sb.AppendFormat(",\"index\":{0}", d.DIndex) |> ignore
+        if d.DKind = "rank" then
+            sb.AppendFormat(",\"rank\":{0}", d.DRank) |> ignore
+        sb.AppendFormat(",\"line\":{0},\"col\":{1},\"endLine\":{2},\"endCol\":{3}}}",
+                        d.DLine, d.DCol, d.DEndLine, d.DEndCol) |> ignore)
     sb.Append "],\"calls\":[" |> ignore
     calls
     |> List.iteri (fun i c ->
@@ -302,6 +375,17 @@ let private renderJson (diags: Diag list) (bindings: BindingInfo list) (provider
         sb.Append "]}" |> ignore)
     sb.Append "]}" |> ignore
     sb.ToString()
+
+/// Test hook for the surfacing block: the `deduced[]` JSON that the CertFacts
+/// channel ALONE would produce, through the real mapping and the real renderer
+/// (every other channel empty). It exists because the certificate producers run
+/// inside the ML elaborator and RESET their channel on the way in, so a test
+/// cannot stage a fact and then observe it through `ideCheck` end to end — that
+/// path is integration-verified against real sources instead. What this pins is
+/// the half a staged fact CAN reach: kind/owner/name/left placement and the
+/// renderer's field selection for the certificate kinds.
+let deducedJsonForTests () : string =
+    renderJson [] [] [] (certFactRecords ()) [] []
 
 // ----------------------------------------------------------------------------
 // Type rendering
@@ -1264,6 +1348,7 @@ let ideCheck (filePath: string) : int =
     let diags = ResizeArray<Diag>()
     let mutable bindings = []
     let mutable providers = []
+    let mutable deduced = []
     let mutable calls = []
     let mutable kernels = []
     if not (File.Exists filePath) then
@@ -1285,6 +1370,106 @@ let ideCheck (filePath: string) : int =
             // Fresh provider-module registry for this check (the load site
             // records into it during typeCheck; collectProviderStores reads it).
             Blade.ProviderRegistry.IdeStores.reset ()
+            // Suggestions and warnings are NOT error-exclusive: a file with a
+            // type error has still earned every BL4010/BL4011 nudge, and every
+            // ordinary warning, the checker produced before it hit the error.
+            // Dropping them on the error arm was the S1/S2 surfacing gap — the
+            // arm where an editor needs the nudges MOST, since a half-broken
+            // file is exactly what an editor is looking at while you type. All
+            // three channels are AsyncLocal, so the Error arm reads them
+            // exactly as the Ok arm does; this is that one block, shared.
+            let drainWarningChannels () =
+                // Confirm-and-pin suggestions (stage 3/4) arrive twice: as
+                // plain strings in typeCheck's Ok payload (what the CLI
+                // printed) and as structured (message, kernel-span) pairs in
+                // the PinSuggestions side-channel. Emit the structured form —
+                // code BL4010 at the kernel's real span, so the editor can
+                // render a ghost annotation and offer the one-click pin.
+                let pinSuggestions = Blade.TypeCheck.PinSuggestions.get ()
+                // Stage-6a equivariance-certificate suggestions arrive the same
+                // way, one code over: BL4011 at the DECL span, so the editor can
+                // ghost-render `where ml.equiv(G)` on the function it belongs
+                // to. Same field shape as BL4010 — no new `ide check --json`
+                // field is needed, the diagnostics array carries both.
+                let certSuggestions = Blade.ML.Equiv.CertSuggestions.get ()
+                // The galilean twin of the same pass: BL4014, also at the DECL
+                // span, ghost-rendering `where ml.galilean(u, ...)`. A separate
+                // channel rather than a Discipline tag on one, because the two
+                // suggestions are produced at two different elaborator seams;
+                // they are re-joined here, equiv-first, matching the order
+                // `TypeCheck`'s string twins and `Lowering`'s rendered
+                // diagnostics both use.
+                let galCertSuggestions = Blade.ML.Galilean.GalCertSuggestions.get ()
+                for (msg, span) in pinSuggestions do
+                    let (line, col, endLine, endCol) = clampSpan span
+                    diags.Add { Severity = "warning"; Line = line; Col = col
+                                EndLine = endLine; EndCol = endCol
+                                Message = msg; Code = "BL4010" }
+                for (msg, span) in certSuggestions do
+                    let (line, col, endLine, endCol) = clampSpan span
+                    diags.Add { Severity = "warning"; Line = line; Col = col
+                                EndLine = endLine; EndCol = endCol
+                                Message = msg; Code = "BL4011" }
+                for (msg, span) in galCertSuggestions do
+                    let (line, col, endLine, endCol) = clampSpan span
+                    diags.Add { Severity = "warning"; Line = line; Col = col
+                                EndLine = endLine; EndCol = endCol
+                                Message = msg; Code = "BL4014" }
+                // The checker's own warnings, now coded and spanned instead of
+                // `Code = ""` at 1:1. BL4010 is skipped: PinSuggestions above
+                // already emitted exactly those, at exactly that span, and a
+                // duplicate diagnostic is a duplicate squiggle. (Neither BL4011
+                // nor BL4014 ever rides this channel — the ML elaborator writes
+                // CertSuggestions/GalCertSuggestions directly, never through
+                // emitWarning, so no such skip is needed for them.)
+                for d in Blade.TypeCheck.WarningLog.get () |> List.distinct do
+                    if d.Code <> "BL4010" then
+                        let (line, col, endLine, endCol) = clampSpan d.Span
+                        diags.Add { Severity = "warning"; Line = line; Col = col
+                                    EndLine = endLine; EndCol = endCol
+                                    Message = d.Message; Code = d.Code }
+            // Channel (f): what the checker PROVED, as distinct from what the
+            // source declared. Guarded like `providers` so a malformed fact can
+            // never break the JSON, and drained on both arms for the same
+            // reason the warnings are.
+            //
+            // TWO producers land in this one flat array. `TypeCheck.DeducedFacts`
+            // (kinds rank/comm/anticomm/packComm) is the checker's own symmetry
+            // deduction; `ML.Equiv.CertFacts` (kinds equiv/galilean) is the
+            // stage-6a certificate inference, which runs several phases EARLIER
+            // in the ML elaborator. They share the record because a consumer
+            // wants one "what was proved here" list keyed by `kind`, not two
+            // parallel arrays to zip. DeducedFacts first, CertFacts after — a
+            // stable order, and the phase order reversed only because the
+            // checker's facts are the ones every file has.
+            //
+            // The certificate fields map by MEANING, not by name: DOwner is the
+            // function the certificate is about, DName carries `Group` (the group
+            // name for equiv, the comma-joined velocity parameters for galilean),
+            // and DLeft carries the dependency closure the proposal RESTS on,
+            // comma-joined. A structured Deps array is deferred (recorded in
+            // plan-equivariance-deduction.md) — flattening keeps this a
+            // field-compatible extension of the existing JSON rather than a
+            // schema change every consumer must handle.
+            let drainDeducedFacts () =
+                deduced <-
+                    try
+                        let checkerFacts =
+                            Blade.TypeCheck.DeducedFacts.get ()
+                            |> List.map (fun (f, span) ->
+                                let empty = emptyDeduced span
+                                match f with
+                                | Blade.TypeEnv.DeducedRank (owner, param, index, rank) ->
+                                    { empty with DKind = "rank"; DOwner = owner; DName = param
+                                                 DIndex = index; DRank = rank }
+                                | Blade.TypeEnv.DeducedPairSym (owner, left, right, index, isAnti) ->
+                                    { empty with DKind = (if isAnti then "anticomm" else "comm")
+                                                 DOwner = owner; DLeft = left; DRight = right
+                                                 DIndex = index }
+                                | Blade.TypeEnv.DeducedPackComm (owner, pack) ->
+                                    { empty with DKind = "packComm"; DOwner = owner; DName = pack })
+                        checkerFacts @ certFactRecords ()
+                    with _ -> []
             match Blade.TypeCheck.typeCheck program with
             | Error errors ->
                 for e in errors do
@@ -1298,6 +1483,8 @@ let ideCheck (filePath: string) : int =
                     diags.Add { Severity = "error"; Line = line; Col = col
                                 EndLine = endLine; EndCol = endCol; Message = msg; Code = code }
                 exitCode <- 1
+                drainWarningChannels ()
+                drainDeducedFacts ()
                 // Errors don't have to mean zero hovers: if the checker ran and
                 // produced a PARTIAL typed program (only a pre-check pipeline
                 // failure yields none), surface bindings/types for the parts
@@ -1310,30 +1497,14 @@ let ideCheck (filePath: string) : int =
                     calls <- (try collectCalls typedProg @ collectFormerCalls program typedProg with _ -> [])
                     kernels <- (try collectKernels () with _ -> [])
                 | None -> ()
-            | Ok (typedProg, _, warnings) ->
-                // Confirm-and-pin suggestions (stage 3/4) arrive twice: as
-                // plain strings in `warnings` (what the CLI prints) and as
-                // structured (message, kernel-span) pairs in the
-                // PinSuggestions side-channel. Emit the structured form —
-                // code BL4010 at the kernel's real span, so the editor can
-                // render a ghost annotation and offer the one-click pin —
-                // and skip the string twin to avoid duplicates.
-                let pinSuggestions = Blade.TypeCheck.PinSuggestions.get ()
-                let pinMessages = pinSuggestions |> List.map fst |> Set.ofList
-                for (msg, span) in pinSuggestions do
-                    let (line, col, endLine, endCol) = clampSpan span
-                    diags.Add { Severity = "warning"; Line = line; Col = col
-                                EndLine = endLine; EndCol = endCol
-                                Message = msg; Code = "BL4010" }
-                for w in warnings do
-                    if not (Set.contains w pinMessages) then
-                        diags.Add { Severity = "warning"; Line = 1; Col = 1; EndLine = 1; EndCol = 1
-                                    Message = w; Code = "" }
+            | Ok (typedProg, _, _) ->
+                drainWarningChannels ()
+                drainDeducedFacts ()
                 let sourceLines = source.Replace("\r\n", "\n").Split('\n')
                 bindings <- joinBindings program typedProg sourceLines
                 // Guarded so provider structure can never break the JSON output.
                 providers <- (try collectProviderStores program with _ -> [])
                 calls <- (try collectCalls typedProg @ collectFormerCalls program typedProg with _ -> [])
                 kernels <- (try collectKernels () with _ -> [])
-    printfn "%s" (renderJson (List.ofSeq diags) bindings providers calls kernels)
+    printfn "%s" (renderJson (List.ofSeq diags) bindings providers deduced calls kernels)
     exitCode

@@ -1,0 +1,60 @@
+// TEST: Idx Card CGm112
+// ============================================================================
+// `idx_card(R)` — the C1 sizing surface for a constrained record used as an
+// index type. A CORE static builtin (no `import ml`, no `ml.` prefix), one
+// argument, a BARE IDENTIFIER naming a declared struct. The argument is a TYPE
+// NAME rather than a value, so it resolves by declaration-table lookup — the
+// same resolution precedent as derive_pg_linear's GROUP argument.
+//
+// THE ANCHOR. CGm112 is the plan's worked example: three m-fields each over
+// {-1, 0, 1} (box 27) constrained by m1 + m2 == m_out. The solutions are
+// exactly the pairs (m1, m2) whose sum is representable, and m_out is then
+// determined, so the count is the number of (m1, m2) pairs with |m1+m2| <= 1:
+// all 9 pairs minus the two saturating corners (1,1) and (-1,-1) — CARD 7.
+// Enumerated: m_out = -1 from {(-1,0), (0,-1)}, m_out = 0 from {(-1,1), (0,0),
+// (1,-1)}, m_out = +1 from {(0,1), (1,0)} — the 2/3/2 split the plan names.
+//
+// C1 IS THE COUNTING HALF ONLY. This file asserts CARDINALITY, not iteration:
+// `range<CGm112>` lowering, field values, offsets and the per-field units are
+// C2. What is verified here is that the compiler counts the solution set, and
+// counts it the same way through two independently-coded enumerators (the
+// StructIdxSpec module's own flat-filter-vs-arrow-heads certificate) plus a
+// third route in tests/Test_StructIdxOracle.fs.
+//
+// THE BOTH-SPELLINGS DIFFERENTIAL. CGm112 and CGm112c are the SAME index set
+// written with the two bound spellings — half-open `in -1 .. 2` and inclusive
+// `Int<min=-1, max=1>`, related by the translation law `in lo .. hi` ==
+// `min=lo, max=hi-1`. Equal cardinality is a free check on the desugar that
+// needs no new oracle: an off-by-one in either direction breaks exactly one of
+// the two, and the box volumes (27) would diverge before the counts do.
+// ============================================================================
+static struct CGm112 {
+    m1:    Int in -1 .. 2,
+    m2:    Int in -1 .. 2,
+    m_out: Int in -1 .. 2
+} where m1 + m2 == m_out
+
+let static CARD = idx_card(CGm112)
+// EXPECT: CARD = 7
+
+static struct CGm112c {
+    m1:    Int<min=-1, max=1>,
+    m2:    Int<min=-1, max=1>,
+    m_out: Int<min=-1, max=1>
+} where m1 + m2 == m_out
+
+let static CARDC = idx_card(CGm112c)
+// EXPECT: CARDC = 7
+
+// The unconstrained control: same box, no where-clause, so the solution set is
+// the whole box and the card is the box VOLUME 3*3*3 = 27. This is the closed-
+// form pin the plan asks for, and it also proves the 7 above is the constraint
+// doing work rather than the enumerator quietly dropping cells.
+static struct Box27 {
+    m1:    Int<min=-1, max=1>,
+    m2:    Int<min=-1, max=1>,
+    m_out: Int<min=-1, max=1>
+}
+
+let static VOL = idx_card(Box27)
+// EXPECT: VOL = 27

@@ -1,0 +1,65 @@
+// TEST: ML Equiv Stamp Derive O3
+import ml as ml
+// ============================================================================
+// STAGE A1 (docs/plan-equivariance-in-types.md §3): the functions the ML
+// elaborator SYNTHESIZES carry the normalized `__ml_equiv` where-conjunct
+// naming the strongest group they are equivariant under. After pass 2 the
+// `ml.*` vocabulary is gone and the bodies are loop nests over baked tables,
+// so nothing downstream could re-derive the claim — the elaborator pins it at
+// the moment it holds the Schur/CG construction in hand.
+//
+// derive_linear and derive_tp are FULL-O(3) constructions: `homBlocks` admits
+// a block pair only when l AND parity agree, and `tpPaths` guards
+// `eo.Parity = parityMul e1.Parity e2.Parity`. Both generated kernels are
+// therefore stamped O3, not the weaker SO3.
+//
+// The stamp is INERT: it changes no value, no storage and no generated C++
+// (equivariance claims never do — plan §4). This file pins the VALUES, so a
+// stamp that perturbed synthesis or kernel dedup shows up as a red here.
+//
+// THE STAMP ITSELF IS NOT OBSERVABLE FROM THE CORPUS, and not from
+// `ide check --json` either: `Ide.joinBindings` yields only entries that
+// match a SOURCE binding span, and the generated kernels are spliced with a
+// zero span, so they never reach bindings[]. (Recorded as an integration
+// stitch for stage B — a `--json` view of synthesized decls would be the
+// natural home for these pins.) It was therefore probed by hand, with a
+// build that emitted a deliberately bogus group name from `deriveLinearDecl`:
+//
+//   $ blade check tests/corpus/ml-equiv/093_stamp_derive_o3.blade
+//   error[BL3999]: function '__ml_1': equiv(ZZ9_PROBE) — unknown group
+//                  'ZZ9_PROBE'; supported: O3, SO3, C4, D4
+//
+// PROBE RESULT (2026-07-28). That single line establishes all three links:
+// the `__ml_equiv` conjunct really is attached to the generated `__ml_1`
+// FunctionDecl; TypeCheck dispatches it through the Blade.Constraints
+// registry to MLEquiv's handler; and the handler's Validate (= parseGroup)
+// runs on the args. With the real emitter restored, `blade check` on this
+// file is clean — i.e. Validate ACCEPTS "O3" on both generated kernels.
+// ============================================================================
+
+// --- 1. derive_linear: the complete Schur basis (values from corpus 011) ----
+// Pair-major weights over all (l, parity)-matched block pairs; the weights are
+// exact binary fractions so the pins are exact.
+//   out block 0e:        w(0)*x0 + w(1)*x1 = 0.5*1 + (-1)*2 = -1.5
+//   out block 1o copy 0: 2.0  * (3, -1, 0.5)
+//   out block 1o copy 1: 0.25 * (3, -1, 0.5)
+let static SIN = [(0, 0, 2), (1, 1, 1)]
+let static SOUT = [(0, 0, 1), (1, 1, 2)]
+let static WD = ml.hom_dim(SIN, SOUT)
+let wd = WD
+// EXPECT: wd = 4
+let out: Array<Float like IrrepsIdx<SOUT>> = ml.derive_linear(SIN, SOUT, [0.5, -1.0, 2.0, 0.25], [1.0, 2.0, 3.0, -1.0, 0.5])
+// EXPECT: out = [-1.5, 6.0, -2.0, 1.0, 0.75, -0.25, 0.125]
+
+// --- 2. derive_tp: the full CG decomposition (values from corpus 013) -------
+// The output spec is DERIVED as tp_spec(S1, S1), so every block arises from
+// some parity-admitted path by construction.
+let static S1O = [(1, 1, 1)]
+let static SFULL = ml.tp_spec(S1O, S1O)
+let static FWD = ml.tp_full_weight_dim(S1O, S1O)
+let fwd = FWD
+// EXPECT: fwd = 3
+let x: Array<Float like IrrepsIdx<S1O>> = [1.0, 2.0, 3.0]
+let y: Array<Float like IrrepsIdx<S1O>> = [0.5, -1.0, 2.0]
+let tp: Array<Float like IrrepsIdx<SFULL>> = ml.derive_tp(S1O, S1O, x, y, [1.0, 1.0, 1.0])
+// EXPECT: tp = [-2.598076211353315, 4.949747468305832, -0.35355339059327373, -1.4142135623730947, 2.4748737341529154, 0.0, -4.286607049870561, 0.7071067811865475, 3.8890872965260104]

@@ -1,0 +1,12 @@
+// TEST: Compact Rank At Direct Application (rejects)
+// Direct application is its own seam: plain function calls do NOT unify
+// parameter types against argument types (args are checked structurally
+// downstream), so a fix confined to unify would miss this call site. The
+// irreps and unit checks already live here as hand-added carve-outs; the
+// component-rank check is the third.
+// SymIdx<2,4> packs binom(5,2) = 10 cells — exactly Idx<10> — so the cell
+// counts coincide and nothing else at this seam separates them.
+let A: Array<Float64 like SymIdx<2, 4>> = fill_random(10)
+function total(x: Array<Float64 like Idx<10>>) = reduce(x, (+))
+let r = total(A)
+// EXPECT: typecheck failure — argument 1 supplies a rank-2 group for a rank-1 axis.

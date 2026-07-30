@@ -150,6 +150,71 @@ let runAllTestsFullWith (extraBlocks: (unit -> Blade.Tests.TestHarness.BlockResu
     let oracles = Blade.Tests.OracleReview.runOracleTests ()
     // Compiler-native CG tables (WignerTables.fs) vs closed forms (ML arc).
     let wigner = Blade.Tests.WignerTablesReview.runWignerTablesTests ()
+    // Sym^j(V_l) occurrence tables (SymPowerTables.fs, stage 2b-i): exact
+    // rational E-kernel/Gram re-verification, counts vs the weight-peel,
+    // the derived realization phase rule, bit-pins, and the extended
+    // realCG completeness pins for the k ≤ 4 chain range.
+    let symPower = Blade.Tests.SymPowerTablesReview.runSymPowerTablesTests ()
+    // The Sym^k label-basis ORACLE (stage 2b-iii): the convention's own
+    // vectors (polyLabels + T_{j,l} + CG chains + the sector constant) vs
+    // Casimir-Lagrange isotypic projectors re-derived exactly and
+    // independently, plus the k = 2 value-level M-pin against stage 1.
+    let polyOracle = Blade.Tests.PolyOracleReview.runPolyOracleTests ()
+    // The so(3) GENERATOR TABLES and the radical-vector discharge
+    // (MLLieDischarge.fs, stage 6c). Keystone first: the EXP-PIN closes the
+    // convention loop by exponentiating the exact tables and comparing against
+    // the Wigner action fit from an independent transcription of the real
+    // solid harmonics (the same object Rotations.applyRep performs). Then the
+    // exact algebra (skew-symmetry per radical component, the so(3) brackets
+    // and the Casimir, all l <= 4), the known answers incl. the
+    // triple-product triple and the |x|^2·x thesis pin, the three negative
+    // controls, and the composition-vs-engine differential.
+    let lieTables = Blade.Tests.LieTablesReview.runLieTablesTests ()
+    // The Sn permutation-module counting layer (MLPermSpec.fs, stage 5a-i):
+    // RGS partition enumeration vs the Stirling recurrence vs an independent
+    // block-insertion route, the witness-unitriangularity certificate (the
+    // Coq keystone's numerical shadow), and the perm_weight_dim /
+    // perm_bias_dim sizing arithmetic. Pure integer, no pipeline.
+    let permSpec = Blade.Tests.PermSpecReview.runPermSpecTests ()
+    // The coarsening-indicator COMPLETENESS oracle (stage 5a-ii): the exact
+    // rational Reynolds projector (1/N!)Σ_σ M(σ)^⊗m against B(BᵀB)⁻¹Bᵀ over ℚ,
+    // with the closed-form Gram N^{b(γ∨π)} predicted from an independent
+    // union-find join. Entrywise equality of BigInteger fractions — no float
+    // and no tolerance anywhere, which is the half BladePartition.v cites
+    // rather than proves (completeness of the orbit basis).
+    let permOracle = Blade.Tests.PermOracleReview.runPermOracleTests ()
+    // The constrained-record COUNTING layer (StructIdxSpec.fs, stage C1 of
+    // plan-constrained-index-types §7): box enumeration over the per-field
+    // inclusive bounds with the flat-filter vs arrow-heads certificate (set
+    // AND order — order agreement is what catches an offset bug), the CGm112
+    // anchor and its 3/7/9 lo-sweep against an independent triple-loop dense
+    // count, the fence and `idx_card(R)` end to end through resolveStatics,
+    // the negative controls (box cap, non-Int field, unbounded field,
+    // non-`static struct`, and the fuel bomb with its witness cell), and the
+    // shared fold budget itself - depth vs steps, the wide-but-shallow fold
+    // only a step bound catches, and the idx_card cycle a syntactic builtin
+    // can open through its own re-entry.
+    let structIdxSpec = Blade.Tests.StructIdxSpecReview.runStructIdxSpecTests ()
+    // The INDEPENDENT third route over the same solution sets: a separately
+    // coded recursive per-field enumerator compared against StructIdxSpec's
+    // entries as SET and as ORDER, plus hand-written lex tables so that two
+    // agreeing programs can still be caught being wrong together.
+    let structIdxOracle = Blade.Tests.StructIdxOracle.runStructIdxOracleTests ()
+    // The point-group counting layer (MLPointSpec.fs, stage 5b-0): the frozen
+    // {C4, D4} tables and their integrity certificate (closure vs declared
+    // order, FS indicators nu = 2 - e, J^2 = -Id and J-generator commutation,
+    // the R-Burnside trap sum d^2/e = |G|), the 9-vs-5 FS contrast, and the
+    // twin pin — the generic e-weighted core instantiated at O(3) labels must
+    // equal MLSpec.homDim/homBlocks on a 15-spec sweep, which is what earns
+    // the abstraction without rerouting O(3) through it. Pure integer.
+    let pointSpec = Blade.Tests.PointSpecReview.runPointSpecTests ()
+    // The point-group Hom-basis COMPLETENESS oracle (stage 5b-0): the emitted
+    // [Id, J] columns vs the exact rational Reynolds projector
+    // (1/|G|)Sum_g rho_W(g) M rho_V(g)^T, entrywise over Q with the closed-form
+    // Gram d*I_e per cell. Three negative controls run live (dropped J column,
+    // the naive e = 1 sizing formula, a spurious diag(1,-1) End column that
+    // dies at R90). BigInteger fractions throughout - no float, no tolerance.
+    let pgOracle = Blade.Tests.PgOracleReview.runPgOracleTests ()
     // Compiler-native Cartesian<->irreps bridge constants (CartesianBridge.fs)
     // vs closed forms + the y_to harmonic constants (sgs closure arc).
     let cartBridge = Blade.Tests.CartesianBridgeReview.runCartesianBridgeTests ()
@@ -159,6 +224,33 @@ let runAllTestsFullWith (extraBlocks: (unit -> Blade.Tests.TestHarness.BlockResu
     let diagCore = Blade.Tests.DiagnosticsCore.runDiagnosticsCoreTests ()
     // Diagnostics corpus: broken sources with pinned codes/spans (strict).
     let diagCorpus = Blade.Tests.DiagCorpus.runDiagCorpusTests ()
+    // Stage-6a certificate SUGGESTIONS (BL4011): the ml-equiv corpus's
+    // `// SUGGEST:` pins, strict in both directions so SILENCE is assertable
+    // (a warning changes no value, so the value corpus cannot pin it).
+    let certSuggest = Blade.Tests.DiagCorpus.runCertSuggestTests ()
+    // B3 of plan-equivariance-in-types.md: the DIFFERENTIAL between the typed
+    // rep-status deduction (DeduceRep/TypedCertProposals) and the same
+    // stage-6a seam inference the block above pins, run over the same corpus.
+    // Recall in one direction, zero false proposals in the other; engine-only
+    // files carry `// TYPED-EXEMPT: engine` until the C2 port, typed-only wins
+    // carry `// TYPED-SUGGEST:` pins. Red here BLOCKS the suite by design —
+    // that is the phase-B ship criterion, not a flaky test.
+    let repDiff = Blade.Tests.RepDifferential.runRepDifferentialTests ()
+    // C1 of the same plan: the typed walker's SECOND OPINION on every
+    // certificate the seam already checked. The differential above asks whether
+    // the two agree about what to PROPOSE; this asks whether they ever
+    // CONTRADICT each other about a declared theorem. Red here means the
+    // compiler holds two incompatible proofs of the same statement, so it
+    // blocks the suite by design — the LieGuardFailure posture.
+    let repCheck = Blade.Tests.RepCheckAgreement.runRepCheckAgreementTests ()
+    // C3 of the same plan: the REJECTION side, which neither block above can
+    // see — both of them only look at programs that compile. This one measures
+    // what the typed walker would say about the programs the seam REFUSES, by
+    // shadowing the `ml.equiv` pin so the seam falls silent. Its assertions are
+    // the harness's own health (the out-of-band re-validation must reproduce
+    // the live C1 census file for file) plus the alarming direction: the typed
+    // side must never CONFIRM a certificate the seam rejects.
+    let repReject = Blade.Tests.RepRejectCensus.runRepRejectCensusTests ()
     // C++ runtime-layout tests for the contiguous-backing allocate<>.
     // Verifies layout invariants the value-checking source tests cannot catch.
     // Skips cleanly if g++ absent.
@@ -239,7 +331,7 @@ let runAllTestsFullWith (extraBlocks: (unit -> Blade.Tests.TestHarness.BlockResu
     let blocks =
         [ yield r1; yield r2; yield attrs; yield subst
           yield normalize; yield unify; yield validateArrow
-          yield shape; yield oracles; yield wigner; yield cartBridge; yield spans; yield diagCore; yield diagCorpus; yield alloc
+          yield shape; yield oracles; yield wigner; yield symPower; yield polyOracle; yield lieTables; yield permSpec; yield permOracle; yield structIdxSpec; yield structIdxOracle; yield pointSpec; yield pgOracle; yield cartBridge; yield spans; yield diagCore; yield diagCorpus; yield certSuggest; yield repDiff; yield repCheck; yield repReject; yield alloc
           yield ompPragma
           match omp with Some b -> yield b | None -> ()
           yield bufType

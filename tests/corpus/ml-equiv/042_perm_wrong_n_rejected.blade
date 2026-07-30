@@ -1,0 +1,16 @@
+// TEST: ML Perm Wrong N Rejected (rejects)
+import ml as ml
+// A certificate names ONE node axis. `bad` claims S_4-equivariance, but its
+// body calls the derived layer at N = 3: an S_3-equivariant map over a
+// 3-element node set proves nothing about relabelling four nodes, and the
+// composition is not the theorem the signature advertises. The check is the
+// MLEquiv group-mismatch precedent one lattice down (certificates do not
+// transfer between groups; here, between node-axis extents). BL4012, at the
+// offending N argument's span.
+let static W = ml.perm_weight_dim(1, 1, 4)
+
+function bad(x: Array<Float like Idx<4>>, w: Array<Float like Idx<W>>)
+             where ml.perm_equiv(4) -> Array<Float like Idx<4>> =
+  ml.derive_perm_linear(1, 1, 3, x, w)
+
+let out = bad([1.0, 2.0, -3.0, 4.0], [2.0, 0.0 - 1.0])

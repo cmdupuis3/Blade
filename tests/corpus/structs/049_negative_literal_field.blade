@@ -1,0 +1,44 @@
+// TEST: Struct Negative Literal Field
+// ============================================================================
+// REGRESSION PROBE, and deliberately the MINIMAL one: a plain struct — no
+// bounds, no where-clause, nothing to do with index types — constructed with a
+// NEGATIVE integer literal in a field.
+//
+// This failed at HEAD. `P { a = 1 }` succeeded while `P { a = -1 }` was
+// refused with "expected Int32, got Int64": a bare int literal was retyped to
+// the expected scalar during checking, but a NEGATED literal fell through to
+// inference instead, which types it Int64. The negation was the whole
+// difference.
+//
+// It surfaced through the constrained-record work because every m-value family
+// in that domain is symmetric about zero — m ∈ [-l, l] — so essentially every
+// anchor example hits it. But the bug was never about bounds or about static
+// structs, and a probe written in terms of either would document it wrongly
+// and would stop protecting it the moment those features moved. Hence this
+// file: the smallest program that would have caught it, in the category where
+// a reader looking for struct-construction behavior will actually find it.
+//
+// Both signs and both float/int are covered, since the fix is per-literal-kind
+// and a one-sided probe would not notice half of it regressing.
+// ============================================================================
+struct P {
+    a: Int,
+    b: Int,
+    x: Float
+}
+
+let neg = P { a = -1, b = 2, x = -0.5 }
+let a = neg.a
+// EXPECT: a = -1
+let b = neg.b
+// EXPECT: b = 2
+let x = neg.x
+// EXPECT: x = -0.5
+
+// The positive control — the case that always worked, so a failure here
+// separates "the fix regressed" from "the fix broke something else".
+let pos = P { a = 1, b = -2, x = 0.5 }
+let c = pos.a
+// EXPECT: c = 1
+let d = pos.b
+// EXPECT: d = -2

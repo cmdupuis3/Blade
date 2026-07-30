@@ -1,0 +1,45 @@
+// TEST: Idx Card Static Bound Key Order
+// ============================================================================
+// THE CONSUMPTION-PATH twin of structs/050, under ADVERSARIAL KEY ORDER.
+//
+// `let static a_card = idx_card(Ranged)` names `idx_card` and `Ranged` and no
+// static at all, yet folding it requires `zz_hi` — the bound of a field of the
+// type it names. The dependency edge is learned from the TYPE, by pulling in
+// the statics its field bounds and declared conjuncts name. Missing that edge
+// is the bug this family exists to catch.
+//
+// WHY THIS FILE EXISTS ALONGSIDE index-types/146. Two reasons, both about the
+// pin being real rather than lucky:
+//
+//  1. KEY ORDER, NOT SOURCE ORDER, IS WHAT EXERCISES THE EDGE. Static
+//     resolution drains a Map in KEY order, so a missing edge is invisible
+//     whenever the depended-on static sorts before its consumer — the
+//     resolver stumbles into the right order and the test passes with the
+//     edge logic deleted. index-types/146 happens to be adversarial (its
+//     consumer `CARD2` sorts before `LO`), but only by accident of naming,
+//     and any future rename would silently gut it. Here it is deliberate and
+//     documented: `a_card` sorts before `zz_hi` under every comparer, so
+//     without the edge the fold is attempted first and dies on "undefined
+//     variable 'zz_hi'".
+//  2. THE TWO SEEDS ARE INDEPENDENT. The struct-LITERAL path (structs/050)
+//     and this CONSUMPTION path are separate collection sites, so one can
+//     regress while the other stays green. Pinning only one leaves half the
+//     fix unguarded — which is exactly how this bug reached the tree the
+//     first time, having been fixed on the path where it was noticed.
+//
+// DO NOT rename these bindings and do not move `zz_hi` upward. Both properties
+// are invisible and both are the test.
+//
+// The count is deliberately trivial — `m` over the inclusive [0, 3] is 4 cells
+// with no conjunct to filter them — because this file is about ORDERING, not
+// counting. If the edge works, the number is uninteresting; if it does not,
+// there is no number at all.
+// ============================================================================
+static struct Ranged {
+    m: Int<min=0, max=zz_hi>
+}
+
+let static a_card = idx_card(Ranged)
+// EXPECT: a_card = 4
+
+let static zz_hi = 3

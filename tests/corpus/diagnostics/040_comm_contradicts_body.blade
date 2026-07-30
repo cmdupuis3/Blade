@@ -1,0 +1,12 @@
+// TEST: Diag Comm Contradicts Body (diag)
+// ERROR: BL4013
+// ERROR-CONTAINS: comm
+// The CODE pin, which functions/028 (the same program as a value-corpus
+// reject) cannot make: this is the assertion that the stage-3 contradiction
+// owns BL4013 and not BL3007's ~24-way "invalid builtin argument" bucket.
+// The split is not cosmetic — a declared `comm` over a provably antisymmetric
+// body is not a bad argument, it is an annotation the deduction proved wrong,
+// and it is the one error in that bucket whose fix is "drop the clause, or
+// wrap in reynolds for the signed iteration license".
+let A = [1.0, 2.0, 3.0]
+let bad = method_for(A, A) <@> lambda(x, y) where comm(x, y) -> x - y |> compute

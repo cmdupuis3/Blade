@@ -1,0 +1,41 @@
+// TEST: Struct Where Predicate List
+// ============================================================================
+// R4 of the T4 where-ruling — the whole answer to the owner's worry that
+// reusable member predicates "might imply a structure like a limited class".
+// They do not. A reusable predicate is a plain `static function` over the
+// members, CALLED in the conjunct list:
+//
+//     where triangle(l1, l2, l_out), parity_ok(p1, p2, p_out)
+//
+// Zero class-like structure: no attached methods, no self, no nominal entity
+// beyond each static function's own name. structs/038 exercises ONE such
+// predicate; this file pins the LIST of two, which is the form the owner's
+// directive actually asked about.
+//
+// R5 is also live here: `parity_ok`'s third argument is the member `p_out`
+// while `LMAX` is a `let static` global, and BOTH are legal in a conjunct.
+// Members-only is deliberately NOT enforced — the plan's own anchor family
+// needs statics in its bounds, and TypeCheck.fs:9799-9827 already permits
+// statics, static callables and known builtins, so a members-only rule would
+// be a regression against shipped behavior rather than a new check.
+// ============================================================================
+let static LMAX = 4
+
+static function triangle(a: Int, b: Int, c: Int) -> Bool =
+    c >= abs(a - b) && c <= a + b
+
+static function parity_ok(p1: Int, p2: Int, po: Int) -> Bool =
+    po == (p1 + p2) % 2
+
+struct CGPath {
+    l1: Int,
+    p1: Int,
+    l2: Int,
+    p2: Int,
+    l_out: Int,
+    p_out: Int
+} where triangle(l1, l2, l_out), parity_ok(p1, p2, p_out), l_out <= LMAX
+
+let path = CGPath { l1 = 1, p1 = 1, l2 = 2, p2 = 1, l_out = 3, p_out = 0 }
+let v = path.l_out
+// EXPECT: v = 3

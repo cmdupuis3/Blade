@@ -26,11 +26,34 @@
     <Compile Include="src/providers/CsvProvider.fs" />
     <Compile Include="src/TypedAst.fs" />
     <Compile Include="src/Deduce.fs" />
+    <!-- The generic half of an equivariance-family judgment (C3 stage 0,
+         docs/design-discipline-as-data.md): the structural walker arms whose
+         soundness arguments quantify over ANY action. Must PRECEDE DeduceRep,
+         which is its first instance. Same dependency set (Ast/Types/IR/
+         TypedAst), nothing upward. -->
+    <Compile Include="src/DisciplineKit.fs" />
+    <Compile Include="src/DeduceRep.fs" />
     <Compile Include="src/StaticEval.fs" />
+    <!-- Constrained records as index types — the SEMANTIC half: the static
+         and index-eligibility fences, and the ENUMERATION reading of a
+         struct's conjunct list (construction's reading stays in StaticEval /
+         TypeCheck). Needs Ast + StaticEval only; must precede both
+         StructIdxSpec.fs (its consumer) and TypeCheck.fs (which calls the
+         static-struct fence from the struct registration arm). -->
+    <Compile Include="src/StructIdxFence.fs" />
     <!-- Provider-backed statics bridge: registers the NetCDF compile-time
          data reader into StaticEval's provider hook (fold + provenance).
          Must follow both NetcdfProvider.fs and StaticEval.fs. -->
     <Compile Include="src/ProviderStatics.fs" />
+    <!-- Constrained records as index types, stage C1 — the COUNTING half
+         (docs/plan-constrained-index-types.md §7). Box enumeration over the
+         per-field inclusive bounds, the flat-filter vs arrow-heads
+         certificate, and the `idx_card(R)` static builtin. A CORE feature,
+         not an ml/ one: idx_card folds without `import ml`, so it registers
+         into StaticEval's own builtin registry (the syntactic arm — its
+         argument is a struct NAME, not a value). Needs Ast + StaticEval only;
+         must precede TypeCheck.fs, which installs it. -->
+    <Compile Include="src/StructIdxSpec.fs" />
     <!-- Staged-former unfold pass (staged tower Phase 1): eliminates
          `static method_for/object_for/for` before every elaboration stage.
          Needs Ast + StaticEval only; runs first in typeCheck's pipeline. -->
@@ -45,11 +68,77 @@
          not compile these); core touchpoints are StaticEval's builtin
          registry and the MLElaborate.expand pipeline stage. -->
     <Compile Include="src/ml/compiler/MLSpec.fs" />
+    <!-- The S_n permutation-module counting layer (stage 5a-i): RGS partition
+         enumeration, the witness-unitriangularity certificate, and the
+         perm_weight_dim/perm_bias_dim sizing arithmetic. Dependency-free
+         integer code (not even MLSpec), so it sits beside MLSpec.fs and only
+         has to precede MLStatics. NOT part of BladeML.fsproj — the ml/ oracle
+         twin of the S_n arc is 5a-ii's exact-rational Reynolds block. -->
+    <Compile Include="src/ml/compiler/MLPermSpec.fs" />
+    <!-- Point groups, the second BLOCK-SPEC member (stage 5b-0): the frozen
+         {C4, D4} integer tables + their load-time integrity certificate, the
+         generic e-weighted counting core (MLSpec.homDim's TEST-PINNED TWIN,
+         §3.6 "twin-not-reroute"), and the pgHomDim/pgHomBlocks sizing. Like
+         MLPermSpec it is dependency-free integer code — deliberately NOT
+         referencing MLSpec, since the twin pin lives in the test block — so it
+         sits beside it and only has to precede MLStatics. NOT part of
+         BladeML.fsproj; the ml/ oracle twin is tests/Test_PgOracle.fs. -->
+    <Compile Include="src/ml/compiler/MLPointSpec.fs" />
     <Compile Include="src/ml/compiler/CartesianBridge.fs" />
     <Compile Include="src/ml/compiler/WignerTables.fs" />
+    <!-- Sym^j(V_l) occurrence tables (stage 2b-i): needs MLSpec's powerSpec
+         (count asserts) and WignerTables' uMatrix (realization), and must
+         precede MLElaborate, which will consume the tables at 2b-iii.
+         NOT part of BladeML.fsproj — the ml/ oracle twin is 2b-iii's. -->
+    <Compile Include="src/ml/compiler/SymPowerTables.fs" />
     <Compile Include="src/ml/compiler/MLStatics.fs" />
+    <!-- The abstract-interpretation walker shell (stage 5c): the syntactic
+         walk (freeVars / patternVars / the left-to-right judge fold / the
+         where-conjunct pre-scan) that MLEquiv, MLGalilean and MLPerm had
+         verbatim in common. Rules stay in the three; only the walk is here,
+         so it depends on nothing but Blade.Ast and must precede all three.
+         NOT part of BladeML.fsproj (which compiles only compiler/MLSpec.fs). -->
+    <Compile Include="src/ml/compiler/MLCertShell.fs" />
+    <!-- The generator-based certification ENGINE, front half (stage 6b): the
+         exact-rational polynomial extractor over the v1 closed-world fragment
+         and the finite word-set discharge. Group-agnostic on purpose — it
+         consumes integer matrices, never a registry — so 6c's radical-vector
+         Lie discharger is a second CONSUMER of the same normal form. Depends
+         on nothing but Blade.Ast / StaticEval and must precede MLEquiv, which
+         calls it from judgeFunction's rejection path. NOT part of
+         BladeML.fsproj. -->
+    <Compile Include="src/ml/compiler/MLPolyExtract.fs" />
+    <!-- The generator-based certification ENGINE, back half (stage 6c): the
+         radical-vector module (Map<squarefree, Rat>), the exact so(3)
+         generator tables per l derived against the coded uMatrix/harmonic
+         conventions, and the Lie + (-I) discharge over MLPolyExtract's normal
+         form. A SECOND CONSUMER of that normal form, not a second engine:
+         it depends on MLPolyExtract (Rat/Mono/Poly/PolyForm) and MLSpec
+         (block layout, parity) and must precede MLEquiv, which calls it from
+         judgeFunction's rejection path for O3/SO3 certificates. NOT part of
+         BladeML.fsproj; the oracle twin is tests/Test_LieTables.fs. -->
+    <Compile Include="src/ml/compiler/MLLieDischarge.fs" />
+    <!-- The engine's user-facing FAILURE TEXT, owned in one place. Pure
+         functions of the two dischargers' failure records (so it must follow
+         both) and consumed by BOTH front halves — MLEquiv's surface extractor
+         and MLPolyExtractTyped's typed one — so it must precede the earlier of
+         those, which is MLPolyExtractTyped. Depends on nothing else; it is
+         string formatting and cap constants. NOT part of BladeML.fsproj. -->
+    <Compile Include="src/ml/compiler/MLEquivMessages.fs" />
+    <!-- Stage C2 of docs/plan-equivariance-in-types.md: the TYPED front half of
+         the same engine. Needs TypedAst + DeduceRep (both far earlier) and both
+         dischargers (immediately above), so this is the earliest point it can
+         sit; TypeCheck, which consumes it through DeduceRep's hook, is later
+         still. -->
+    <Compile Include="src/ml/compiler/MLPolyExtractTyped.fs" />
     <Compile Include="src/ml/compiler/MLEquiv.fs" />
     <Compile Include="src/ml/compiler/MLGalilean.fs" />
+    <!-- The `where ml.perm_equiv(N)` certification lattice (stage 5a-iii):
+         the THIRD registry member beside MLEquiv and MLGalilean, and the third
+         copy of the abstract-interpretation walker shell that §7's stage 5c
+         extracts. Needs MLPermSpec (the rank cap) and must precede
+         MLElaborate, which runs the judgment at the equiv/galilean seam. -->
+    <Compile Include="src/ml/compiler/MLPerm.fs" />
     <Compile Include="src/ml/compiler/MLElaborate.fs" />
     <!-- PPL compiler layer (Blade.Ppl.*): moment/comoment formers and
          declared independence, elaborated to plain Blade source. Lives
@@ -146,9 +235,36 @@
     <Compile Include="tests/Test_Spans.fs" />
     <Compile Include="tests/Test_Diagnostics.fs" />
     <Compile Include="tests/Test_DiagCorpus.fs" />
+    <Compile Include="tests/Test_RepDifferential.fs" />
+    <Compile Include="tests/Test_RepCheckAgreement.fs" />
+    <Compile Include="tests/Test_RepRejectCensus.fs" />
+    <!-- MEASUREMENT SCAFFOLDING for docs/census-galilean-layer.md: the
+         experimental typed GALILEAN judgment and its two censuses. Lives in the
+         test assembly deliberately — nothing in src/ may reference it, and it is
+         not part of the full suite (verb `blade test gal-layer`). -->
+    <Compile Include="tests/Test_GalLayerCensus.fs" />
+    <!-- MEASUREMENT SCAFFOLDING for docs/census-perm-layer.md: the experimental
+         typed PERM judgment, its three censuses and the first-ever perm
+         inference experiment. Test assembly only - nothing in src/ may
+         reference it, and it is not part of the full suite
+         (verb `blade test perm-layer`). -->
+    <Compile Include="tests/Test_PermLayerCensus.fs" />
     <Compile Include="tests/Oracles.fs" />
     <Compile Include="tests/Test_Oracles.fs" />
     <Compile Include="tests/Test_WignerTables.fs" />
+    <Compile Include="tests/Test_SymPowerTables.fs" />
+    <Compile Include="tests/Test_PolyOracle.fs" />
+    <Compile Include="tests/Test_LieTables.fs" />
+    <Compile Include="tests/Test_PermSpec.fs" />
+    <Compile Include="tests/Test_PermOracle.fs" />
+    <!-- Constrained-record counting (stage C1): the module's own pins, then
+         the INDEPENDENT third-route oracle. Two files on purpose — the oracle
+         shares no helper, no fixture and no arithmetic with the block above
+         it, which is the whole point of a third route. -->
+    <Compile Include="tests/Test_StructIdxSpec.fs" />
+    <Compile Include="tests/Test_StructIdxOracle.fs" />
+    <Compile Include="tests/Test_PointSpec.fs" />
+    <Compile Include="tests/Test_PgOracle.fs" />
     <Compile Include="tests/Test_CartesianBridge.fs" />
     <Compile Include="tests/Test_Ppl.fs" />
     <Compile Include="tests/Test_Math.fs" />

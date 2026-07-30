@@ -44,6 +44,10 @@
 module Blade.ML.Galilean
 
 open Blade.Ast
+// The walker shell (stage 5c): freeVars / patternVars / bindPatternVars /
+// judgeEach / conjunctsOf — the syntactic walk shared verbatim with MLEquiv
+// and MLPerm. Every RULE below is this discipline's own.
+open Blade.ML.CertShell
 
 type BoostStatus =
     | BVar
@@ -68,58 +72,6 @@ let private statusStr (st: BoostStatus) : string =
     | BInv -> "boost-invariant"
     | BOpaque -> "unclassifiable"
 
-let rec private patternVars (p: Pattern) : string list =
-    match p.Kind with
-    | PatternKind.PatVar n -> [ n ]
-    | PatternKind.PatTuple ps -> ps |> List.collect patternVars
-    | _ -> []
-
-/// Free variables of an expression that are NOT locally bound (the lambda
-/// capture rule; mirror of MLEquiv.freeVars).
-let rec private freeVars (bound: Set<string>) (e: Expr) : Set<string> =
-    match e.Kind with
-    | ExprKind.ExprVar n -> if Set.contains n bound then Set.empty else Set.singleton n
-    | ExprKind.ExprLit _ -> Set.empty
-    | ExprKind.ExprApp (f, args) ->
-        Set.unionMany (freeVars bound f :: (args |> List.map (freeVars bound)))
-    | ExprKind.ExprBinOp (_, _, l, r) -> Set.union (freeVars bound l) (freeVars bound r)
-    | ExprKind.ExprUnaryOp (_, i) -> freeVars bound i
-    | ExprKind.ExprTyped (i, _) -> freeVars bound i
-    | ExprKind.ExprTuple es | ExprKind.ExprArrayLit es ->
-        es |> List.map (freeVars bound) |> Set.unionMany
-    | ExprKind.ExprDotDot (l, h) -> Set.union (freeVars bound l) (freeVars bound h)
-    | ExprKind.ExprIf (c, t, f) ->
-        Set.unionMany [ freeVars bound c; freeVars bound t; freeVars bound f ]
-    | ExprKind.ExprLet (b, body) ->
-        Set.union (freeVars bound b.Value) (freeVars (Set.union bound (Set.ofList (patternVars b.Pattern))) body)
-    | ExprKind.ExprLambda (ps, _, body) ->
-        freeVars (Set.union bound (Set.ofList (ps |> List.map (fun p -> p.Name)))) body
-    | ExprKind.ExprBlock (stmts, fin) ->
-        let mutable b = bound
-        let mutable acc = Set.empty
-        for s in stmts do
-            match unwrapStmt s with
-            | StmtLet binding ->
-                acc <- Set.union acc (freeVars b binding.Value)
-                b <- Set.union b (Set.ofList (patternVars binding.Pattern))
-            | StmtExpr e2 -> acc <- Set.union acc (freeVars b e2)
-            | StmtAssign (l, _, r) -> acc <- Set.union acc (Set.union (freeVars b l) (freeVars b r))
-            | StmtForIn (v, range, body) ->
-                acc <- Set.union acc (freeVars b range)
-                let b2 = Set.add v b
-                for s2 in body do
-                    match unwrapStmt s2 with
-                    | StmtExpr e2 -> acc <- Set.union acc (freeVars b2 e2)
-                    | StmtLet binding -> acc <- Set.union acc (freeVars b2 binding.Value)
-                    | StmtAssign (l, _, r) -> acc <- Set.union acc (Set.union (freeVars b2 l) (freeVars b2 r))
-                    | _ -> ()
-            | _ -> ()
-        (match fin with Some fe -> Set.union acc (freeVars b fe) | None -> acc)
-    | ExprKind.ExprField (i, _) -> freeVars bound i
-    | ExprKind.ExprMatch (s, cases) ->
-        Set.unionMany (freeVars bound s :: (cases |> List.map (fun c -> freeVars bound c.Body)))
-    | _ -> Set.empty
-
 // ============================================================================
 // Certified-signature table
 // ============================================================================
@@ -134,11 +86,7 @@ let buildCertTable (decls: Located<Decl> list)
         acc |> Result.bind (fun table ->
             match d.Value with
             | DeclFunction fd ->
-                let conjs =
-                    fd.WhereClause
-                    |> Option.map (fun w -> w.Custom)
-                    |> Option.defaultValue []
-                    |> List.filter (fun (n, _) -> n = "__ml_galilean")
+                let conjs = conjunctsOf "__ml_galilean" fd
                 let fail msg = Error (bl4009 d.Span msg)
                 match conjs with
                 | [] -> Ok table
@@ -159,6 +107,19 @@ let buildCertTable (decls: Located<Decl> list)
                             Ok (Map.add fd.Name { Params = ps } table)
             | _ -> Ok table))
         (Ok Map.empty)
+
+/// The galilean-certificate suggestion side-channel — BL4014's channel,
+/// mirroring `Equiv.CertSuggestions` (BL4011) field for field. Filled by the
+/// galilean inference pass at the MLElaborate seam, reset by
+/// `MLElaborate.expand`, read by `TypeCheck.typeCheck` (string twins),
+/// `Lowering.typeCheckWarningDiagnostics` (rendered warnings) and
+/// `Ide.ideCheck` (structured). AsyncLocal, like the others.
+module GalCertSuggestions =
+    let private slot = new System.Threading.AsyncLocal<(string * Blade.Ast.Span) list>()
+    let reset () = slot.Value <- []
+    let add (msg: string) (span: Blade.Ast.Span) = slot.Value <- (msg, span) :: slot.Value
+    let get () : (string * Blade.Ast.Span) list =
+        match box slot.Value with null -> [] | _ -> List.rev slot.Value
 
 /// Aliases bound to `sgs` (name-only knowledge — no project dependency on
 /// the sgs elaborator; without `import sgs` the axioms are simply absent).
@@ -192,9 +153,7 @@ let rec private judge (ctx: Ctx) (env: Map<string, BoostStatus>) (e: Expr)
         // a uniformly boost-variant aggregate shifts componentwise and stays
         // BVar; mixing statuses inside one aggregate loses the coefficient.
         es
-        |> List.fold (fun acc x ->
-            acc |> Result.bind (fun sts -> j x |> Result.map (fun s -> sts @ [ s ])))
-            (Ok [])
+        |> judgeEach j
         |> Result.bind (fun sts ->
             match sts with
             | [] -> Ok BInv
@@ -250,11 +209,7 @@ let rec private judge (ctx: Ctx) (env: Map<string, BoostStatus>) (e: Expr)
             match ss with
             | BInv ->
                 cases
-                |> List.fold (fun acc c ->
-                    acc |> Result.bind (fun sts ->
-                        judge ctx (List.fold (fun m v -> Map.add v BInv m) env (patternVars c.Pattern)) c.Body
-                        |> Result.map (fun s -> sts @ [ s ])))
-                    (Ok [])
+                |> judgeEach (fun c -> judge ctx (bindPatternVars BInv env c.Pattern) c.Body)
                 |> Result.bind (fun sts ->
                     match sts with
                     | [] -> Ok BInv
@@ -265,7 +220,7 @@ let rec private judge (ctx: Ctx) (env: Map<string, BoostStatus>) (e: Expr)
         j binding.Value |> Result.bind (fun sv ->
             match binding.Pattern.Kind, sv with
             | PatternKind.PatVar n, _ -> judge ctx (Map.add n sv env) body
-            | _, BInv -> judge ctx (List.fold (fun m v -> Map.add v BInv m) env (patternVars binding.Pattern)) body
+            | _, BInv -> judge ctx (bindPatternVars BInv env binding.Pattern) body
             | _, _ -> reject "cannot destructure a boost-variant value in v1 — bind it whole")
     | ExprKind.ExprLambda (ps, _, lamBody) ->
         let captured = freeVars (Set.ofList (ps |> List.map (fun p -> p.Name))) lamBody
@@ -320,9 +275,7 @@ and private judgeFormerApply (ctx: Ctx) (env: Map<string, BoostStatus>) (e: Expr
     match srcsOf loop, kern.Kind with
     | Some arrays, ExprKind.ExprLambda (ps, _, body) ->
         arrays
-        |> List.fold (fun acc a ->
-            acc |> Result.bind (fun sts -> judge ctx env a |> Result.map (fun s -> sts @ [ s ])))
-            (Ok [])
+        |> judgeEach (judge ctx env)
         |> Result.bind (fun srcSts ->
             let env' =
                 ps |> List.mapi (fun i p -> (i, p.Name))
@@ -342,7 +295,7 @@ and private judgeStmts (ctx: Ctx) (env: Map<string, BoostStatus>) (stmts: Stmt l
                 judge ctx env binding.Value |> Result.bind (fun sv ->
                     match binding.Pattern.Kind, sv with
                     | PatternKind.PatVar n, _ -> Ok (Map.add n sv env)
-                    | _, BInv -> Ok (List.fold (fun m v -> Map.add v BInv m) env (patternVars binding.Pattern))
+                    | _, BInv -> Ok (bindPatternVars BInv env binding.Pattern)
                     | _, _ ->
                         Error (bl4009 binding.Value.Span (sprintf "function '%s': cannot destructure a boost-variant value in v1 — bind it whole" ctx.FuncName)))
             | StmtExpr e2 -> judge ctx env e2 |> Result.map (fun _ -> env)
@@ -394,11 +347,7 @@ and private judgeAssign (ctx: Ctx) (env: Map<string, BoostStatus>) (span: Span) 
 and private judgeApp (ctx: Ctx) (env: Map<string, BoostStatus>) (e: Expr) (f: Expr) (args: Expr list)
     : Result<BoostStatus, Blade.Diagnostics.Diagnostic> =
     let reject msg = Error (bl4009 e.Span (sprintf "function '%s': %s" ctx.FuncName msg))
-    let judgeAll args =
-        args
-        |> List.fold (fun acc a ->
-            acc |> Result.bind (fun sts -> judge ctx env a |> Result.map (fun s -> sts @ [ s ])))
-            (Ok [])
+    let judgeAll args = judgeEach (judge ctx env) args
     match f.Kind with
     // --- sgs formers: the axiomatic rules ---------------------------------
     | ExprKind.ExprField ({ Kind = ExprKind.ExprVar alias }, op) when Set.contains alias ctx.SgsAliases ->
@@ -463,8 +412,21 @@ and private judgeApp (ctx: Ctx) (env: Map<string, BoostStatus>) (e: Expr) (f: Ex
                     match sts |> List.tryFindIndex (fun s -> s <> BInv) with
                     | None -> Ok BInv
                     | Some i ->
-                        Error (bl4009 args.[i].Span
-                                   (sprintf "function '%s': a boost-variant value escapes to '%s', which carries no galilean certificate — certify it with `where ml.galilean(...)` or pass only boost-invariant combinations (differences, sgs.grad, sgs.stress)" ctx.FuncName fn)))
+                        // TWO different failures share this arm, and they are not
+                        // the same news. A BVar argument is a real ESCAPE: the
+                        // judgment knows the value shifts with the frame and the
+                        // callee carries no theorem about it. A BOpaque argument
+                        // is the judgment's OWN blind spot — it classified
+                        // nothing, so calling it "boost-variant" would report a
+                        // fact the walker never established (§E3: an
+                        // unclassifiable value must not be described as variant).
+                        match sts.[i] with
+                        | BVar ->
+                            Error (bl4009 args.[i].Span
+                                       (sprintf "function '%s': a boost-variant value escapes to '%s', which carries no galilean certificate — certify it with `where ml.galilean(...)` or pass only boost-invariant combinations (differences, sgs.grad, sgs.stress)" ctx.FuncName fn))
+                        | _ ->
+                            Error (bl4009 args.[i].Span
+                                       (sprintf "function '%s': an argument to '%s' cannot be classified as boost-invariant or boost-variant — a galilean-certified body admits a call only when every argument is provably boost-invariant, so rewrite this argument in terms the judgment reads (parameters, differences, sgs.grad, sgs.stress)" ctx.FuncName fn)))
             | Some BOpaque -> reject (sprintf "cannot classify the callee '%s'" fn)
     | _ ->
         judgeAll args |> Result.bind (fun sts ->
@@ -489,6 +451,156 @@ let judgeFunction (certs: Map<string, GalSig>) (mlAliases: Set<string>) (sgsAlia
         | Ok st ->
             [ bl4009 fd.Body.Span
                   (sprintf "function '%s': the body is %s — a galilean-certified function must return a boost-invariant value in v1 (velocity-returning steppers are future work)" fd.Name (statusStr st)) ]
+
+// ============================================================================
+// The inference channel (stage 6a, galilean twin) — BL4014
+// ============================================================================
+//
+// The equiv channel's construction, transplanted onto this lattice: hypothesize
+// `where ml.galilean(S)` on a function that does not carry it, run
+// `judgeFunction` verbatim, and PROPOSE the pin as a warning when the
+// certificate holds. Nothing here is a new rule — no arm, no lattice entry, no
+// message below that the checker does not already own — so `Propose ⊆
+// Check-accept` holds BY CONSTRUCTION: checking `ml.galilean(S)` needs only
+// Validate (the named params exist, which a candidate satisfies by
+// construction) plus `judgeFunction`, and `judgeFunction` against exactly this
+// table is what inference ran.
+//
+// WHAT MAKES THIS EASIER THAN EQUIV: a `GalSig` is built from the conjunct and
+// the parameter NAMES alone — no type annotations, no static specs, no group
+// roster — so recall is not gated on a fully annotated signature the way the
+// equiv channel is. What makes it HARDER is that the hypothesis space is the
+// power set of the parameters rather than a two-element group list. v1 searches
+// two slices of it:
+//
+//   * every SINGLETON {p} for p that OCCURS free in the body, in param order,
+//     and EVERY passer is proposed. Unlike equiv's strongest-first pick these
+//     are not competing strengths — `galilean(u)` and `galilean(v)` are
+//     independent true claims about independent hypotheses, and suppressing
+//     either would hide a theorem.
+//   * if NO singleton passed and at least two params occur, the FULL occurring
+//     set once. That is the velocity-DIFFERENCE shape (`u - v`), where every
+//     singleton necessarily fails — `BVar - BInv` is `BVar`, so the body
+//     returns boost-variant — and the joint boost cancels. It is the one
+//     non-singleton subset worth the search: intermediate subsets are
+//     combinatorial and, in the bodies this exists for, empirically empty.
+//
+// OCCURRENCE IS THE VACUITY GUARD (equiv's non-vacuity filter, one level
+// down). A parameter the body never names is `BVar` in an environment nothing
+// reads, so the judgment passes for a reason that has nothing to do with the
+// frame: `galilean(unused)` is vacuously true and would be a theorem's face on
+// a tautology. Restricting candidates to free-occurring params removes exactly
+// that class and no other.
+//
+// DEPENDENCY THREADING is equiv's fold with ONE table (this discipline has no
+// groups to key by): declarations fold in DECL ORDER against a speculative
+// table holding every real certificate plus every speculative one already
+// inferred this pass for an EARLIER declaration, no summary proves itself, no
+// fixpoint iteration, and every proposal that RESTS on unwritten pins names its
+// closure. A function with SEVERAL passing candidates is proposed several times
+// but threaded ZERO times: a later caller's closure note can name the callee
+// but not say WHICH of its pins it used, and a note that cannot be acted on is
+// worse than the silence a failed resolution produces.
+
+/// One candidate attempt: hypothesize `where ml.galilean(velocities)` on `fd`
+/// (the shape `buildCertTable` produces — the named params `BVar`, every other
+/// `BInv`) and run the CHECKER's own `judgeFunction` against `table` plus that
+/// hypothesis. `Some cert` = the certificate holds. Total by construction — a
+/// speculative run may never turn a compiling program into a crash, so any
+/// exception out of the judgment reads as "no proposal".
+let private tryGalCandidate (mlAliases: Set<string>) (sgsAliases: Set<string>)
+                            (table: Map<string, GalSig>) (fd: FunctionDecl)
+                            (velocities: string list)
+    : GalSig option =
+    try
+        let vs = Set.ofList velocities
+        let cert =
+            { Params =
+                fd.Params
+                |> List.map (fun p -> (p.Name, if Set.contains p.Name vs then BVar else BInv)) }
+        match judgeFunction (Map.add fd.Name cert table) mlAliases sgsAliases fd with
+        | [] -> Some cert
+        | _ :: _ -> None
+    with _ -> None
+
+/// Run the shipped galilean judgment speculatively over a module's
+/// declarations and return the BL4014 suggestions, in decl order. Never fails,
+/// never changes a verdict: the caller records these as warnings and compiles
+/// exactly as it would have.
+let inferGalileanCertificates (mlAliases: Set<string>) (sgsAliases: Set<string>)
+                              (gcerts: Map<string, GalSig>) (decls: Located<Decl> list)
+    : (string * Blade.Ast.Span) list =
+    // Speculative certificates, their dependency closures, and the DECL ORDER
+    // in which they were inferred.
+    let mutable spec : Map<string, GalSig> = Map.empty
+    let mutable deps : Map<string, string list> = Map.empty
+    let mutable order : string list = []
+    let mutable out : (string * Blade.Ast.Span) list = []
+    for d in decls do
+        match d.Value with
+        | DeclFunction fd when (conjunctsOf "__ml_galilean" fd).IsEmpty
+                               && not (Map.containsKey fd.Name gcerts) ->
+            let pNames = fd.Params |> List.map (fun p -> p.Name)
+            let bound = Set.ofList pNames
+            let free = freeVars bound fd.Body
+            // No summary proves itself: a body that names its own function
+            // would be judged against its own hypothesis, which is exactly the
+            // circularity Deduce.fs's resolver refuses. Skip; silence.
+            if not (Set.contains fd.Name free) then
+                let table = spec |> Map.fold (fun m k v -> Map.add k v m) gcerts
+                // The candidate params: those the body actually READS. The
+                // walk is run with nothing bound so parameter occurrences are
+                // reported (the self-recursion scan above binds them).
+                let occurring = freeVars Set.empty fd.Body
+                let cands = pNames |> List.filter (fun n -> Set.contains n occurring)
+                let attempt vs = (tryGalCandidate mlAliases sgsAliases table fd vs).IsSome
+                let singles = cands |> List.filter (fun p -> attempt [ p ]) |> List.map (fun p -> [ p ])
+                let hits =
+                    if not singles.IsEmpty then singles
+                    elif List.length cands >= 2 && attempt cands then [ cands ]
+                    else []
+                if not hits.IsEmpty then
+                    // The dependency closure: which speculative pins these
+                    // proposals REST on. Direct deps are the earlier
+                    // speculatively-certified names the body reads; the closure
+                    // adds each of those proposals' own deps (already computed
+                    // — decl order guarantees it), rendered in DECL order.
+                    let direct = order |> List.filter (fun n -> Set.contains n free)
+                    let closure =
+                        direct
+                        |> List.collect (fun n -> n :: defaultArg (Map.tryFind n deps) [])
+                        |> List.distinct
+                    let ordered = order |> List.filter (fun n -> List.contains n closure)
+                    let closureNote =
+                        if ordered.IsEmpty then ""
+                        else sprintf " (also requires pinning: %s)" (String.concat ", " ordered)
+                    for vs in hits do
+                        let ps = String.concat ", " vs
+                        let msg =
+                            sprintf "function '%s' judges boost-invariant with velocity parameter(s) %s: add 'where ml.galilean(%s)'%s"
+                                fd.Name ps ps closureNote
+                        out <- (msg, d.Span) :: out
+                        // The STRUCTURED twin, hosted on MLEquiv's channel so a
+                        // single `deduced[]` array carries both disciplines.
+                        Blade.ML.Equiv.CertFacts.add
+                            { Owner = fd.Name
+                              Discipline = "galilean"
+                              Group = ps
+                              Deps = ordered } d.Span
+                    // Thread ONLY an unambiguous proposal (see the header note).
+                    match hits with
+                    | [ vs ] ->
+                        let cert =
+                            { Params =
+                                fd.Params
+                                |> List.map (fun p ->
+                                    (p.Name, if List.contains p.Name vs then BVar else BInv)) }
+                        spec <- Map.add fd.Name cert spec
+                        deps <- Map.add fd.Name closure deps
+                        order <- order @ [ fd.Name ]
+                    | _ -> ()
+        | _ -> ()
+    List.rev out
 
 // ============================================================================
 // Constraint-registry handler

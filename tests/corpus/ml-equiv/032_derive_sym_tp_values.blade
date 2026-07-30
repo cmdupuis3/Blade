@@ -1,0 +1,83 @@
+// TEST: ML Derive Sym TP Values
+import ml as ml
+// ============================================================================
+// derive_sym_tp(SPEC, x, y, w): the S2-SYMMETRIC (Sym^2) compaction of
+// derive_tp(SPEC, SPEC, ...). Same derived output spec — tp_spec(S, S) — but
+// the weight buffer parameterizes only the exchange-symmetric subspace of the
+// same hom-space, so it is strictly smaller than the dense one
+// (docs/plan-transforms-as-types.md §3.2, §7 stage 1a/1b).
+//
+// Two things are pinned here.
+//
+// 1. SIZING. For each anchor spec, sym_tp_weight_dim + alt_tp_weight_dim must
+//    equal tp_full_weight_dim(S, S): Sym^2 (+) Lambda^2 IS the whole
+//    exchange-graded hom-space, so the two compactions are a DIRECT SUM
+//    decomposition of the dense parameterization, not two lossy projections.
+//    The SUM* pins are that identity, checked by the static evaluator.
+//
+// 2. VALUES, and the EMBEDDING. The sym weights embed into the dense layout by
+//    duplicating the (0,1,2)/(1,0,2) exchange-partner slot pair and zeroing the
+//    antisymmetric-only slot. For spec A the dense layout has 10 slots over the
+//    paths (0,0,0), (0,1,2), (1,0,2), (1,1,0), (1,1,1), (1,1,3) — slot ranges
+//    0-1 | 2-3 | 4-5 | 6-7 | 8 | 9 — so
+//      sym [w0..w6] -> dense [w0, w1, w2, w3, w2, w3, w4, w5, 0.0, w6].
+//    Feeding that embedded buffer to derive_tp reproduces derive_sym_tp: the
+//    compaction is a reparameterization of the SAME kernel, not an
+//    approximation of it. Since stage 1b the emitted kernel visits only the
+//    KEPT paths and folds each dropped path into its partner's term, so the two
+//    routes now agree to FLOATING-POINT ASSOCIATION rather than to the ulp
+//    (observed ~1e-16 relative; §6.7's pin is 1e-13). sq_diff = 0.0 still holds
+//    — the squared residual is ~1e-31, far inside the value harness's tolerance
+//    — but it reads as a tolerance pin now, not a bit-identity claim.
+// ============================================================================
+let static SA = [(0, 0, 1), (1, 1, 1)]
+let static SB = [(1, 1, 2)]
+let static SC = [(0, 0, 2), (1, 1, 1)]
+
+// statics echo in program output, so the sizing builtins pin directly
+let static WSA = ml.sym_tp_weight_dim(SA)
+let static WAA = ml.alt_tp_weight_dim(SA)
+let static WDA = ml.tp_full_weight_dim(SA, SA)
+let static SUMA = WSA + WAA
+// EXPECT: WSA = 7
+// EXPECT: WAA = 3
+// EXPECT: WDA = 10
+// EXPECT: SUMA = 10
+
+let static WSB = ml.sym_tp_weight_dim(SB)
+let static WAB = ml.alt_tp_weight_dim(SB)
+let static WDB = ml.tp_full_weight_dim(SB, SB)
+let static SUMB = WSB + WAB
+// EXPECT: WSB = 28
+// EXPECT: WAB = 20
+// EXPECT: WDB = 48
+// EXPECT: SUMB = 48
+
+let static WSC = ml.sym_tp_weight_dim(SC)
+let static WAC = ml.alt_tp_weight_dim(SC)
+let static WDC = ml.tp_full_weight_dim(SC, SC)
+let static SUMC = WSC + WAC
+// EXPECT: WSC = 29
+// EXPECT: WAC = 14
+// EXPECT: WDC = 43
+// EXPECT: SUMC = 43
+
+// --- values on spec A, plus the dense-embedding cross-check ------------------
+let static TPS = ml.tp_spec(SA, SA)
+let static NTP = ml.total_dim(TPS)
+// EXPECT: NTP = 16
+
+let x: Array<Float like IrrepsIdx<SA>> = [1.0, 2.0, -0.5, 0.25]
+let y: Array<Float like IrrepsIdx<SA>> = [-0.75, 0.5, 1.5, -2.0]
+let ws = [0.3, -0.7, 1.1, 0.9, -1.3, 0.4, 2.0]
+let s: Array<Float like IrrepsIdx<TPS>> = ml.derive_sym_tp(SA, x, y, ws)
+// EXPECT: s = [-0.412638837486628, 0.582735026918963, 0, 0, 0, -1.1, 2.0625, -2.40625, -0.9, 1.6875, -1.96875, -5.48007755419574, 3.88908729652601, -1.63299316185545, 1.94454364826301, -2.12132034355964]
+
+// the sym packed buffer hand-embedded into the 10-slot dense layout
+let wdense = [0.3, -0.7, 1.1, 0.9, 1.1, 0.9, -1.3, 0.4, 0.0, 2.0]
+let d: Array<Float like IrrepsIdx<TPS>> = ml.derive_tp(SA, SA, x, y, wdense)
+// EXPECT: d = [-0.412638837486628, 0.582735026918963, 0, 0, 0, -1.1, 2.0625, -2.40625, -0.9, 1.6875, -1.96875, -5.48007755419574, 3.88908729652601, -1.63299316185545, 1.94454364826301, -2.12132034355964]
+
+let diff = s - d
+let sq_diff = reduce(diff * diff, (+))
+// EXPECT: sq_diff = 0.0

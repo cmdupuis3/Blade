@@ -1,0 +1,48 @@
+// TEST: ML Equiv Invariant Iteration
+import ml as ml
+// ============================================================================
+// The CAPABILITY half of stage 5c catalog finding 4: what an equiv-certified
+// body may now say, and could not before.
+//
+// MLGalilean and MLPerm have carried arms for the post-imperative surface
+// since they were written — ExprRange/ExprReverse/ExprHalo are invariant
+// (a virtual array enumerates INDICES, which carry no group structure),
+// ExprCompute passes its inner status through (scheduling boundary, not a
+// value transform), and ExprReduce folds. MLEquiv had none of them, so every
+// such node answered Opaque through the catch-all, Opaque propagated to the
+// body, and judgeFunction refused it against the declared return type with
+// "the body is unclassifiable". A fold over a PLAIN ARRAY has nothing to do
+// with O(3), and it was rejected anyway.
+//
+// Both halves of the arc appear below and neither touches the rep: `total` is
+// a reduce over a plain Array<Float like Idx<3>>, `doubled` is a former over
+// the same. The rep enters only where it always could — through ml.y_to and
+// out through ml.norms, the invariant exit.
+//
+// THE CERTIFICATE, SHADOWED: `a` and `b` differ by a 90-degree rotation about
+// z, (x, y, z) -> (-y, x, z), applied to both velocity arguments. It carries
+// d = v - w = (3, 4, 0) to (-4, 3, 0) — a different vector, the same length —
+// so an O(3)-invariant readout must return the same number. The inputs are
+// exact integers and the rotation is a coordinate swap with a sign, so the
+// two calls agree to the ulp and the pin can be an equality on the
+// difference rather than a tolerance.
+// ============================================================================
+let static SH1 = ml.sh_spec(1)
+
+function scaled_speed(v: Array<Float like Idx<3>>, w: Array<Float like Idx<3>>,
+                      c: Array<Float like Idx<3>>) where ml.equiv(O3) -> Float = {
+    let d = v - w
+    let sh = ml.y_to(1, d(0), d(1), d(2))
+    let n = ml.norms(SH1, sh)
+    // Iteration over INVARIANTS — the lines this test exists for. Every one of
+    // them was BL4008 "unclassifiable" before the arms landed.
+    let total = reduce(c, (+), 0.0)
+    let doubled = method_for(c) <@> lambda(t) -> t * 2.0 |> compute
+    n(1) * total + doubled(0)
+}
+
+let a = scaled_speed([4.0, 5.0, 1.0], [1.0, 1.0, 1.0], [1.0, 2.0, 3.0])
+let b = scaled_speed([0.0 - 5.0, 4.0, 1.0], [0.0 - 1.0, 1.0, 1.0], [1.0, 2.0, 3.0])
+let drot = a - b
+let rot_ok = if drot * drot < 0.000000000000000000000001 then 1.0 else 0.0
+// EXPECT: rot_ok = 1.0

@@ -1,0 +1,71 @@
+// TEST: ML Equiv Point Group Dual Certificate
+import ml as ml
+// ============================================================================
+// ONE function under TWO lattices, with the point-group member in the equiv
+// slot — the ml-equiv/026 and ml-equiv/041 pattern, third instance:
+//
+//     where ml.equiv(C4), ml.galilean(v, u)
+//
+// The judgments do not interact. They are independent hypotheses about the
+// SAME arguments, each judged in its own domain over its own status set, and
+// MLElaborate runs them as separate passes at one seam:
+//
+//   to MLEquiv     x is representation-typed (it transforms as
+//                  PgIrrepsIdx<C4, SC>, the block-diagonal C4 action), while
+//                  v, u and the weights are invariants held fixed;
+//   to MLGalilean  v and u are BVar (the conjunct names them): velocities that
+//                  shift by the same constant U0 when the frame is boosted,
+//                  while x and the weights are BInv.
+//
+// They meet on one expression and neither knows about the other: the readout
+// multiplies the difference d = v - u (Inv to the first, BInv to the second)
+// by the TRIVIAL-label cell of a C4 layer applied to x (a C4 invariant to the
+// first, an ordinary ml.* result to the second).
+//
+// Certified conclusion: `drift` is unchanged by boosting the frame AND by
+// applying any C4 rotation to the crystal features. Integer data, so both
+// shadows below are EXACT.
+// ============================================================================
+let static SC = [("A", 1), ("E", 2)]
+let static WC = ml.pg_hom_dim("C4", SC, SC)
+// EXPECT: WC = 9
+
+function drift(x: Array<Float like PgIrrepsIdx<C4, SC>>, pw: Array<Float like Idx<WC>>,
+               v: Array<Float like Idx<2>>, u: Array<Float like Idx<2>>)
+               where ml.equiv(C4), ml.galilean(v, u) -> Float = {
+    let d = v - u
+    let y = ml.derive_pg_linear(C4, SC, SC, x, pw)
+    y(0) * (d(0) * d(0) + d(1) * d(1))
+}
+
+// The A cell of the layer is pw(0) * x(0) = 2 * 1 = 2; d = (3, 4), so the
+// squared speed is 25 and the readout is 50.
+let pw = [2.0,
+          3.0, 0.0 - 1.0,
+          0.5, 4.0,
+          0.0 - 2.0, 1.5,
+          0.25, 0.0 - 3.0]
+let xs = [1.0, 2.0, 3.0, 4.0, 5.0]
+let r = drift(xs, pw, [4.0, 5.0], [1.0, 1.0])
+// EXPECT: r = 50
+
+// THE GALILEAN SHADOW: boost both velocities by the same U0 = (10, 10). The
+// difference does not move, and the readout is bit-identical.
+let rb = drift(xs, pw, [14.0, 15.0], [11.0, 11.0])
+let d_boost = r - rb
+// EXPECT: d_boost = 0
+
+// THE POINT-GROUP SHADOW: apply rho(r) to the crystal features. On
+// [A x 1, E x 2] that is [x0, x1, x2, x3, x4] -> [x0, -x2, x1, -x4, x3]. The
+// readout reads a trivial-label cell of an equivariant layer, so it does not
+// move either.
+let rp = drift([1.0, 0.0 - 3.0, 2.0, 0.0 - 5.0, 4.0], pw, [4.0, 5.0], [1.0, 1.0])
+let d_rot = r - rp
+// EXPECT: d_rot = 0
+
+// BOTH AT ONCE: boost and rotate. Each certificate covers one axis of the
+// change; together they cover the composite, which is the point of stacking
+// conjuncts rather than widening one lattice.
+let rbp = drift([1.0, 0.0 - 3.0, 2.0, 0.0 - 5.0, 4.0], pw, [14.0, 15.0], [11.0, 11.0])
+let d_both = r - rbp
+// EXPECT: d_both = 0
