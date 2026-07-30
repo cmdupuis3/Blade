@@ -235,8 +235,11 @@ let runOmpCoverageTests () : Blade.Tests.TestHarness.BlockResult =
     let caps = capabilities.Value
     printHeader "OpenMP Thread-Coverage Tests"
     if not caps.HasGpp then
-        printfn "Skipped: g++ not found."
-        { Block = "OpenMP Coverage"; Passed = 0; Failed = 0; Skipped = 0; FailedNames = [] }
+        printfn "Skipped: g++ not found (cannot compile the -fopenmp coverage programs)."
+        // Skipped = 1, not 0: a Skipped = 0 return made a toolchain-less box
+        // print "0 passed, 0 failed" for this block with no skip note. Same
+        // convention as DiffOracle/InterpDiff.
+        { Block = "OpenMP Coverage"; Passed = 0; Failed = 0; Skipped = 1; FailedNames = [] }
     else
         // Representative programs exercising each parallelization strategy.
         // Source strings are defined as separate bindings (not inline in the
@@ -291,14 +294,18 @@ let runOmpCoverageTests () : Blade.Tests.TestHarness.BlockResult =
                     match lower src with
                     | Error e -> Error (sprintf "lower failed: %s" e)
                     | Ok ir0 ->
-                        let ir =
-                            match IR.validateIR ir0 with
-                            | Ok v -> v
-                            | Error _ -> ir0   // validation errors don't block this probe
-                        let (cppCode, _warnings) = CodeGen.genSelfContainedProgramFromIR ir name
-                        let srcFile = Path.Combine(outputDir, safeName + ".cpp")
-                        File.WriteAllText(srcFile, cppCode)
-                        Ok srcFile
+                        // A validation error is a hard failure. The old
+                        // `| Error _ -> ir0` ("validation errors don't block this
+                        // probe") generated C++ from invalid IR, so a validator
+                        // regression on these programs was invisible here.
+                        match IR.validateIR ir0 with
+                        | Error validationErrors ->
+                            Error (sprintf "IR validation failed: %s" (String.concat "; " validationErrors))
+                        | Ok ir ->
+                            let (cppCode, _warnings) = CodeGen.genSelfContainedProgramFromIR ir name
+                            let srcFile = Path.Combine(outputDir, safeName + ".cpp")
+                            File.WriteAllText(srcFile, cppCode)
+                            Ok srcFile
                 with ex -> Error (sprintf "codegen failed: %s" ex.Message)
             setOmpTestMode false
             match outcome with
@@ -316,8 +323,15 @@ let runOmpCoverageTests () : Blade.Tests.TestHarness.BlockResult =
                 cpsi.UseShellExecute <- false
                 use cproc = Process.Start(cpsi)
                 let cerr = cproc.StandardError.ReadToEndAsync()
-                cproc.WaitForExit(60000) |> ignore
-                if cproc.ExitCode <> 0 then
+                // WaitForExit(ms) returns false on TIMEOUT; ExitCode is
+                // meaningless then, so a hung g++ used to be read as success.
+                let cExited = cproc.WaitForExit(60000)
+                if not cExited then
+                    (try cproc.Kill(true) with _ -> ())
+                    Blade.Tests.TestHarness.resultLine Blade.Tests.TestHarness.Fail name "compile timed out (60s)"
+                    errors <- errors + 1
+                    failedNames <- failedNames @ [name]
+                elif cproc.ExitCode <> 0 then
                     Blade.Tests.TestHarness.resultLine Blade.Tests.TestHarness.Fail name (sprintf "compile: %s" cerr.Result)
                     errors <- errors + 1
                     failedNames <- failedNames @ [name]
@@ -331,20 +345,56 @@ let runOmpCoverageTests () : Blade.Tests.TestHarness.BlockResult =
                     rpsi.Environment.["OMP_NUM_THREADS"] <- forcedThreads
                     use rproc = Process.Start(rpsi)
                     let rout = rproc.StandardOutput.ReadToEndAsync()
-                    rproc.WaitForExit(30000) |> ignore
+                    let rerr = rproc.StandardError.ReadToEndAsync()
+                    let rExited = rproc.WaitForExit(30000)
+                    if not rExited then (try rproc.Kill(true) with _ -> ())
                     let lines = rout.Result.Split('\n') |> Array.filter (fun l -> l.Contains("[omp-coverage]"))
-                    if lines.Length = 0 then
-                        Blade.Tests.TestHarness.resultLine Blade.Tests.TestHarness.Skip name "no coverage lines emitted (no parallel region?)"
-                        // Not an error per se — the program may have no parallel loop.
+                    if not rExited then
+                        Blade.Tests.TestHarness.resultLine Blade.Tests.TestHarness.Fail name "run timed out (30s)"
+                        errors <- errors + 1
+                        failedNames <- failedNames @ [name]
+                    elif lines.Length = 0 then
+                        // Every program in `programs` carries an explicit
+                        // `omp(x: 1)` clause, and CodeGen emits the
+                        // [omp-coverage] instrumentation exactly when
+                        // ompInstrument && outerIsParallel. So zero coverage
+                        // lines means the pragma was NOT emitted for an
+                        // annotated kernel -- the very condition this block
+                        // exists to detect. It used to print a Skip line and
+                        // increment nothing at all: not passed, not failed, not
+                        // skipped, so the block silently shrank to nothing.
+                        Blade.Tests.TestHarness.resultLine Blade.Tests.TestHarness.Fail name
+                            (sprintf "no [omp-coverage] line emitted for an omp()-annotated kernel (exit %d)%s"
+                                rproc.ExitCode
+                                (if String.IsNullOrWhiteSpace rerr.Result then "" else " stderr: " + rerr.Result.Trim()))
+                        errors <- errors + 1
+                        failedNames <- failedNames @ [name]
                     for line in lines do
                         // parse "region=R teamsz=K distinct=D maxth=M"
+                        // None (not -1) on a regex miss: a sentinel -1 flowed
+                        // into `maxth <= 1`, which is the UNCONDITIONAL-PASS
+                        // arm below, so an unparseable coverage line scored a
+                        // "single-core, cannot test parallelism" pass.
                         let getField (k: string) =
                             let m = System.Text.RegularExpressions.Regex.Match(line, k + "=(\\d+)")
-                            if m.Success then int m.Groups.[1].Value else -1
-                        let teamsz = getField "teamsz"
-                        let distinct = getField "distinct"
-                        let maxth = getField "maxth"
-                        if maxth <= 1 then
+                            if m.Success then Some (int m.Groups.[1].Value) else None
+                        let teamszO = getField "teamsz"
+                        let distinctO = getField "distinct"
+                        let maxthO = getField "maxth"
+                        let missing =
+                            [ if teamszO.IsNone then "teamsz"
+                              if distinctO.IsNone then "distinct"
+                              if maxthO.IsNone then "maxth" ]
+                        let teamsz = defaultArg teamszO 0
+                        let distinct = defaultArg distinctO 0
+                        let maxth = defaultArg maxthO 0
+                        if not missing.IsEmpty then
+                            Blade.Tests.TestHarness.resultLine Blade.Tests.TestHarness.Fail name
+                                (sprintf "unparseable coverage line (missing %s): %s"
+                                    (String.concat ", " missing) (line.Trim()))
+                            errors <- errors + 1
+                            failedNames <- failedNames @ [name]
+                        elif maxth <= 1 then
                             Blade.Tests.TestHarness.resultLine Blade.Tests.TestHarness.Pass name (sprintf "single-core: maxth=%d, cannot test parallelism" maxth)
                             passed <- passed + 1
                         elif teamsz <= 1 then
@@ -400,11 +450,15 @@ let runOmpCoverageTests () : Blade.Tests.TestHarness.BlockResult =
                 match lower valSrc with
                 | Error e -> Error (sprintf "lower failed: %s" e)
                 | Ok ir0 ->
-                    let ir = match IR.validateIR ir0 with Ok v -> v | Error _ -> ir0
-                    let (cppCode, _w) = CodeGen.genSelfContainedProgramFromIR ir "omp_value_check"
-                    let sf = Path.Combine(outputDir, "omp_value_check.cpp")
-                    File.WriteAllText(sf, cppCode)
-                    Ok (Path.GetFullPath sf)
+                    // Hard-fail on validation errors (was `| Error _ -> ir0`).
+                    match IR.validateIR ir0 with
+                    | Error validationErrors ->
+                        Error (sprintf "IR validation failed: %s" (String.concat "; " validationErrors))
+                    | Ok ir ->
+                        let (cppCode, _w) = CodeGen.genSelfContainedProgramFromIR ir "omp_value_check"
+                        let sf = Path.Combine(outputDir, "omp_value_check.cpp")
+                        File.WriteAllText(sf, cppCode)
+                        Ok (Path.GetFullPath sf)
             with ex -> Error (sprintf "codegen failed: %s" ex.Message)
         match valOutcome with
         | Error e -> Blade.Tests.TestHarness.resultLine Blade.Tests.TestHarness.Fail "omp_value_check" (sprintf "generation: %s" e); errors <- errors + 1; failedNames <- failedNames @ ["omp_value_check"]
@@ -416,30 +470,60 @@ let runOmpCoverageTests () : Blade.Tests.TestHarness.BlockResult =
             cpsi.UseShellExecute <- false
             use cproc = Process.Start(cpsi)
             let cerr = cproc.StandardError.ReadToEndAsync()
-            cproc.WaitForExit(60000) |> ignore
-            if cproc.ExitCode <> 0 then
+            let cExited = cproc.WaitForExit(60000)
+            if not cExited then
+                (try cproc.Kill(true) with _ -> ())
+                Blade.Tests.TestHarness.resultLine Blade.Tests.TestHarness.Fail "omp_value_check" "compile timed out (60s)"
+                errors <- errors + 1
+                failedNames <- failedNames @ ["omp_value_check"]
+            elif cproc.ExitCode <> 0 then
                 Blade.Tests.TestHarness.resultLine Blade.Tests.TestHarness.Fail "omp_value_check" (sprintf "compile: %s" cerr.Result)
                 errors <- errors + 1
                 failedNames <- failedNames @ ["omp_value_check"]
             else
+                // Malformed-pin gate, same rule as Runner.fs: a `// EXPECT:`
+                // line that does not parse is a DROPPED assertion, and
+                // checkExpectedValues over an empty pin list returns Ok (),
+                // so without this the whole race check could pass vacuously.
+                let malformed = parseMalformedExpectLines valSrc
                 let expected = parseExpectedValues valSrc
                 let mutable allRunsOk = true
-                // Repeat: a race may pass on some runs and fail on others.
-                for run in 1 .. 5 do
-                    let rpsi = ProcessStartInfo(exeAbs)
-                    rpsi.RedirectStandardOutput <- true
-                    rpsi.RedirectStandardError <- true
-                    rpsi.UseShellExecute <- false
-                    rpsi.WorkingDirectory <- Path.GetDirectoryName(exeAbs)
-                    rpsi.Environment.["OMP_NUM_THREADS"] <- forcedThreads
-                    use rproc = Process.Start(rpsi)
-                    let rout = rproc.StandardOutput.ReadToEndAsync()
-                    rproc.WaitForExit(30000) |> ignore
-                    match checkExpectedValues expected rout.Result with
-                    | Ok () -> ()
-                    | Error errs ->
-                        allRunsOk <- false
-                        printfn "    run %d: VALUE MISMATCH (possible race): %s" run (String.concat "; " errs)
+                if not malformed.IsEmpty then
+                    allRunsOk <- false
+                    printfn "    unparseable EXPECT pin(s): %s" (String.concat " | " malformed)
+                elif expected.IsEmpty then
+                    allRunsOk <- false
+                    printfn "    no EXPECT pin parsed -- the value check would be vacuous"
+                else
+                    // Repeat: a race may pass on some runs and fail on others.
+                    for run in 1 .. 5 do
+                        let rpsi = ProcessStartInfo(exeAbs)
+                        rpsi.RedirectStandardOutput <- true
+                        rpsi.RedirectStandardError <- true
+                        rpsi.UseShellExecute <- false
+                        rpsi.WorkingDirectory <- Path.GetDirectoryName(exeAbs)
+                        rpsi.Environment.["OMP_NUM_THREADS"] <- forcedThreads
+                        use rproc = Process.Start(rpsi)
+                        let rout = rproc.StandardOutput.ReadToEndAsync()
+                        let rerrV = rproc.StandardError.ReadToEndAsync()
+                        let rExited = rproc.WaitForExit(30000)
+                        if not rExited then
+                            (try rproc.Kill(true) with _ -> ())
+                            rproc.WaitForExit(5000) |> ignore
+                            allRunsOk <- false
+                            printfn "    run %d: TIMED OUT (30s)" run
+                        elif rproc.ExitCode <> 0 then
+                            // A crashed run prints little or nothing; with no
+                            // exit-code gate the value check over the truncated
+                            // stdout was the only verdict.
+                            allRunsOk <- false
+                            printfn "    run %d: exit %d %s" run rproc.ExitCode (rerrV.Result.Trim())
+                        else
+                            match checkExpectedValues expected rout.Result with
+                            | Ok () -> ()
+                            | Error errs ->
+                                allRunsOk <- false
+                                printfn "    run %d: VALUE MISMATCH (possible race): %s" run (String.concat "; " errs)
                 if allRunsOk then
                     Blade.Tests.TestHarness.resultLine Blade.Tests.TestHarness.Pass "omp_value_check" (sprintf "correct values across 5 runs under OMP_NUM_THREADS=%s" forcedThreads)
                     passed <- passed + 1

@@ -257,8 +257,11 @@ let static V = m.vars.data |> c.read
 """
                           (fixFile "lw_grid.csv")
      match lower foldSource with
-     | Ok _ -> check "fold: static csv read folds (2x3 payload)" true ""
-     | Error e -> check "fold: static csv read folds" false e)
+     // Name trimmed to what is actually asserted: this arm only observes that
+     // lowering succeeded, so claiming "(2x3 payload)" overstated it -- the
+     // payload itself is pinned by the read/round-trip blocks further down.
+     | Ok _ -> check "fold: static csv read lowers (fold did not reject)" true ""
+     | Error e -> check "fold: static csv read lowers (fold did not reject)" false e)
     (let bigName = "lw_big.csv"
      // 65537 single-column rows: one over the fold ceiling.
      CsvWrite.writeRaw (fixFile bigName) [ for i in 0 .. 65536 -> sprintf "%d.0" i ]
@@ -452,8 +455,18 @@ let out = method_for(V) <@> lambda(x) -> x + 0.0 |> compute
              check "reject: .stream on csv fails loudly"
                  (ex.Message.Contains "does not support streamed reads") ex.Message)
      | Error e ->
-         // Also acceptable: rejected before codegen.
-         check "reject: .stream on csv fails loudly" (e.Contains "stream") e)
+         // Also acceptable: rejected before codegen -- but the message has to
+         // name the refusal, not merely echo the source. The old needle was
+         // `e.Contains "stream"`, and "stream" is a substring of the very source
+         // text being compiled (`c.stream`), so essentially any error that
+         // quoted the offending line satisfied it -- including errors about
+         // something else entirely. Pin the real refusal wording, verified
+         // against `blade compile` on this exact source:
+         //   error[BL7001]: provider 'csv' does not support streamed reads
+         //                  (variable 'data' - bind with .read)
+         // A front-end rejection must be at least as specific.
+         check "reject: .stream on csv fails loudly"
+             (e.Contains "does not support streamed reads" || e.Contains "BL7001") e)
 
     (try Directory.Delete(tmp, true) with _ -> ())
 

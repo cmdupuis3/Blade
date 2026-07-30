@@ -107,7 +107,11 @@ let runBufferTypeTests () : Blade.Tests.TestHarness.BlockResult =
 /// (no div/mod recovery).
 let runCudaTests () : Blade.Tests.TestHarness.BlockResult =
     printHeader "CUDA Kernel Tests"
-    let skipResult = { Block = "CUDA Kernel"; Passed = 0; Failed = 0; Skipped = 0; FailedNames = [] }
+    // Skipped = 1, not 0: with Skipped = 0 a GPU-less box printed
+    // "0 passed, 0 failed" for this block, which reads as "nothing to do"
+    // rather than "the environment cannot run this". Same convention as
+    // DiffOracle/InterpDiff. The reason is printed by each branch below.
+    let skipResult = { Block = "CUDA Kernel"; Passed = 0; Failed = 0; Skipped = 1; FailedNames = [] }
     let caps = capabilities.Value
     let onWindows = RuntimeInformation.IsOSPlatform(OSPlatform.Windows)
     if not caps.HasNvcc || not caps.HasGpu then
@@ -152,7 +156,14 @@ let runCudaTests () : Blade.Tests.TestHarness.BlockResult =
                 match lower src with
                 | Error e -> Error (sprintf "lower failed: %s" e)
                 | Ok ir0 ->
-                    let ir = match IR.validateIR ir0 with Ok v -> v | Error _ -> ir0
+                    // Hard-fail on validation errors instead of generating from
+                    // invalid IR (was `| Error _ -> ir0`). The host/device
+                    // differential compares two variants; if BOTH were generated
+                    // from invalid IR they could still agree and pass.
+                    match IR.validateIR ir0 with
+                    | Error validationErrors ->
+                        Error (sprintf "IR validation failed: %s" (String.concat "; " validationErrors))
+                    | Ok ir ->
                     let (cppCode, _w) = CodeGen.genSelfContainedProgramFromIR ir name
                     let cuOpt = CodeGen.getCudaFileContent ()
                     let safe = sanitizeFileName name
@@ -165,6 +176,20 @@ let runCudaTests () : Blade.Tests.TestHarness.BlockResult =
                             cuFile)
                     Ok (cppFile, cuFileOpt)
             with ex -> Error (sprintf "codegen failed: %s" ex.Message)
+
+        // runExecutable returns (exitCode, output). The three call sites below
+        // used `|> Result.map snd`, which DISCARDED the exit code: a process
+        // that crashed before printing anything yielded Ok "" — so the
+        // host-vs-device differential compared "" with "" and PASSED, and the
+        // host-only case's `.Contains expectSubstr` was the only gate on a
+        // program that may never have run. Require exit 0 explicitly. (The
+        // thrust/complex case at the bottom of this file already does this;
+        // this makes every call site agree.)
+        let runExeChecked (what: string) (exe: string) : Result<string, string> =
+            match runExecutable exe with
+            | Error e -> Error (sprintf "%s run: %s" what e)
+            | Ok (0, out) -> Ok out
+            | Ok (code, out) -> Error (sprintf "%s exited %d:\n%s" what code out)
 
         let resultLines (s: string) =
             (s.Replace("\r\n", "\n").Trim()).Split('\n')
@@ -195,7 +220,7 @@ let runCudaTests () : Blade.Tests.TestHarness.BlockResult =
                     else
                         match compileHost cppFile with
                         | Error e -> Error (sprintf "host compile: %s" e)
-                        | Ok exe -> runExecutable exe |> Result.map snd
+                        | Ok exe -> runExeChecked "host" exe
             let cudaOut =
                 // CUDA variant: emission ON -> kernel + launch emitted into .cu/.cpp.
                 CodeGen.setCudaEmitMode true
@@ -206,7 +231,7 @@ let runCudaTests () : Blade.Tests.TestHarness.BlockResult =
                     | Ok (cppFile, Some cuFile) ->
                         match compileCudaSplit cuFile cppFile outputDir with
                         | Error e -> Error (sprintf "cuda split-compile: %s" e)
-                        | Ok exe -> runExecutable exe |> Result.map snd
+                        | Ok exe -> runExeChecked "cuda" exe
                 CodeGen.setCudaEmitMode false
                 r
             match hostOut, cudaOut with
@@ -214,7 +239,13 @@ let runCudaTests () : Blade.Tests.TestHarness.BlockResult =
             | _, Error e -> Blade.Tests.TestHarness.resultLine Blade.Tests.TestHarness.Fail label (sprintf "cuda: %s" e); 1
             | Ok hOut, Ok cOut ->
                 let h, c = resultLines hOut, resultLines cOut
-                if h = c then
+                // Both variants print a result line; "" = "" would otherwise be
+                // a vacuous agreement (e.g. if both programs became silent).
+                if String.IsNullOrWhiteSpace h || String.IsNullOrWhiteSpace c then
+                    Blade.Tests.TestHarness.resultLine Blade.Tests.TestHarness.Fail label
+                        (sprintf "empty output -- nothing to compare (host=%d chars, cuda=%d chars)" h.Length c.Length)
+                    1
+                elif h = c then
                     Blade.Tests.TestHarness.resultLine Blade.Tests.TestHarness.Pass label "cuda matches host-loop oracle"
                     0
                 else
@@ -240,7 +271,7 @@ let runCudaTests () : Blade.Tests.TestHarness.BlockResult =
                 | Ok (cppFile, _) ->
                     match compileHost cppFile with
                     | Error e -> Error (sprintf "host compile: %s" e)
-                    | Ok exe -> runExecutable exe |> Result.map snd
+                    | Ok exe -> runExeChecked "host" exe
             match outcome with
             | Error e -> Blade.Tests.TestHarness.resultLine Blade.Tests.TestHarness.Fail label e; 1
             | Ok out ->

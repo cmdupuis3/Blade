@@ -46,6 +46,10 @@ let runHybridTests () =
             let f = Path.Combine(outDir, testName + ".cpp")
             File.WriteAllText(f, cpp)
             match compileCpp f outDir with
+            // Preserve the "Skipped: ..." marker verbatim so callers can tell a
+            // toolchain skip from a genuine compile failure with isSkipError.
+            // Wrapping it in "compile: ..." destroyed that distinction.
+            | Error e when isSkipError e -> Error e
             | Error e -> Error (sprintf "compile: %s" e)
             | Ok exe ->
                 match runExecutable exe with
@@ -156,12 +160,35 @@ let A: Array<Float64 like RIdx, CIdx> = [
 let (u, v) = (method_for(A) <@> lambda(x) where %s -> x * 2.0 + 1.0) <&!> (method_for(A) <@> lambda(x) where %s -> x + 100.0) |> compute
 """
                                          clause clause
-    if Blade.Build.mpiexecPath.Value.IsNone then
+    // Probe the ENVIRONMENT here, up front, so that below this point a failure
+    // of the serial oracle can be treated as a genuine failure rather than as
+    // an ambiguous "maybe the toolchain is missing" skip.
+    let hybCaps = Blade.Build.capabilities.Value
+    if not hybCaps.HasGpp then
+        printfn "  SKIP hybrid differentials: g++ not found"
+    elif not Blade.Build.hasMpiLink.Value then
+        printfn "  SKIP hybrid differentials: g++ cannot link MS-MPI (-lmsmpi)"
+    elif Blade.Build.mpiexecPath.Value.IsNone then
         printfn "  SKIP hybrid differentials: mpiexec not found"
     else
         let hybridDifferential (label: string) (src: string) (expectMarkers: (string * string) list) =
             match compileRunSerial (sprintf "hyb_%s_ref" label) src with
-            | Error e -> printfn "  SKIP hybrid %s: serial reference failed (%s)" label e
+            // A missing toolchain is a SKIP; a lowering error, a compile failure,
+            // or a nonzero exit of the ORACLE side is a FAILURE. Previously every
+            // oracle error printed SKIP, which silently DELETED the differential:
+            // the whole set of hybrid-vs-serial assertions for this case just
+            // stopped running, and the block still reported all-green. The
+            // hybrid side already used isSkipError for exactly this distinction;
+            // this applies the same rule to the oracle side.
+            | Error e when isSkipError e ->
+                printfn "  SKIP hybrid %s: serial reference unavailable (%s)" label e
+            | Error e ->
+                check (sprintf "hybrid %s: serial reference builds and runs" label) false e
+            | Ok refOut when String.IsNullOrWhiteSpace (normalize refOut) ->
+                // An empty oracle makes every `normalize out = normalize refOut`
+                // comparison below a vacuous "" = "".
+                check (sprintf "hybrid %s: serial reference produced output" label) false
+                    "serial reference printed nothing -- nothing to differentiate against"
             | Ok refOut ->
                 try
                     try
@@ -269,11 +296,23 @@ let m2 = method_for(A, A) <@> lambda(x, y) where comm(x, y), %s -> x * y |> comp
                                           clause
      if not (caps.HasNvcc && caps.HasGpu && caps.HasCl) then
          printfn "  SKIP mpi+cuda: requires nvcc + GPU + cl.exe (nvcc=%b, gpu=%b, cl=%b)" caps.HasNvcc caps.HasGpu caps.HasCl
+     elif not caps.HasGpp then
+         // The host half of the hybrid build (and the serial oracle) is g++.
+         printfn "  SKIP mpi+cuda: g++ not found (host half of the hybrid build)"
+     elif not Blade.Build.hasMpiLink.Value then
+         printfn "  SKIP mpi+cuda: g++ cannot link MS-MPI (-lmsmpi)"
      elif Blade.Build.mpiexecPath.Value.IsNone then
          printfn "  SKIP mpi+cuda: mpiexec not found"
      else
          match compileRunSerial "hyb_mpicuda_ref" (mpicudaSrc "mpi, cuda(block: 64)") with
-         | Error e -> printfn "  SKIP mpi+cuda: serial reference failed (%s)" e
+         // Toolchain absence is already ruled out by the gates above, so a
+         // failing oracle here is a real failure, not a skip. (It used to print
+         // SKIP, which deleted every mpi+cuda assertion below it.)
+         | Error e when isSkipError e -> printfn "  SKIP mpi+cuda: serial reference unavailable (%s)" e
+         | Error e -> check "mpi+cuda: serial reference builds and runs" false e
+         | Ok refOut when String.IsNullOrWhiteSpace (normalize refOut) ->
+             check "mpi+cuda: serial reference produced output" false
+                 "serial reference printed nothing -- nothing to differentiate against"
          | Ok refOut ->
              try
                  try
