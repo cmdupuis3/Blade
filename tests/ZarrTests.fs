@@ -866,13 +866,17 @@ let w = z.write("%s", C)
                         s.Provider = "zarr" && s.VarType.IndexTypes |> List.exists (fun ix -> ix.Symmetry = sym && ix.Rank = 2)))
                     ""
                 let (cppCode, _) = CodeGen.genSelfContainedProgramFromIR ir (sprintf "zarr_tri_%s_e2e" kind)
-                check (sprintf "packed %s: codegen materializes the packed pool" kind)
-                    (if strict then
-                        // Antisym: dead-diagonal host pool -> unrank + relative subscripts.
-                        cppCode.Contains "antisymmetric::unlinearize" && cppCode.Contains "_anti"
-                     else
-                        // Sym: compact pool -> linear pool_base copy under a hoisted SYMM.
-                        cppCode.Contains "_symm" && cppCode.Contains "pool_base") ""
+                // BOTH classes materialize by a linear pool_base copy under a
+                // hoisted SYMM: allocate<>'s DFS pool order IS ascending-lex
+                // for strict (antisym) storage exactly as for inclusive (sym)
+                // storage, and the strict pool is compact (C(n,r) cells, no
+                // dead diagonal). The antisym arm used to unrank each cell and
+                // index the skeleton with `ix[k] - ix[k-1]`, which shifted the
+                // whole pool by one; per-cell unranking here is now a defect.
+                check (sprintf "packed %s: codegen materializes the packed pool by linear copy" kind)
+                    (cppCode.Contains "pool_base"
+                     && cppCode.Contains (if strict then "_anti" else "_symm")
+                     && not (cppCode.Contains "antisymmetric::unlinearize")) ""
                 check (sprintf "packed %s: linearized_storage header included" kind)
                     (cppCode.Contains "linearized_storage.hpp") ""
                 CodeGen.deployRuntimeHeaders e2eDir
@@ -884,10 +888,14 @@ let w = z.write("%s", C)
                      (match runExecutable exePath with
                       | Ok (0, runOut) ->
                           check (sprintf "packed %s: runs (exit 0)" kind) true ""
-                          // The doubled kernel output must cover exactly the
-                          // doubled pool VALUES (set equality — print order of
-                          // a packed array is a codegen concern, the exact
-                          // POOL order is pinned by the write roundtrip below).
+                          // The doubled kernel output must be the doubled pool
+                          // IN ORDER, cell for cell. A set comparison (or one
+                          // that whitelists spurious 0.0) cannot see a pool
+                          // rotated by one, which is precisely how the antisym
+                          // strict-subscript defects presented — so this is a
+                          // strict ordered comparison, and the print order of a
+                          // packed array is part of the contract: it walks the
+                          // canonical pool.
                           let outLine =
                               runOut.Split('\n')
                               |> Array.tryPick (fun l ->
@@ -896,7 +904,8 @@ let w = z.write("%s", C)
                           (match outLine with
                            | Some line ->
                                let inner = line.Substring("out = [".Length, line.Length - "out = [".Length - 1)
-                               // MULTISET equality (sorted), not the old
+                               // EXACT elementwise equality in pool order, not
+                               // the old
                                //   Set.isSubset expected got
                                //   && Set.isSubset (Set.remove 0.0 got) expected
                                // which was vacuous in two ways: Set.ofArray
@@ -905,17 +914,21 @@ let w = z.write("%s", C)
                                // wrong number of them), and `Set.remove 0.0 got`
                                // whitelisted an UNBOUNDED number of spurious
                                // zeros -- precisely the signature of a packed
-                               // read that emitted unwritten padding cells.
-                               // Sorting keeps the comparison order-insensitive
-                               // (print order of a packed array is a codegen
-                               // concern) while pinning the element count and
-                               // every value, zeros included.
+                               // read that emitted unwritten padding cells. That
+                               // whitelist was in fact absorbing a real defect:
+                               // the antisym strict-storage off-by-one fixed on
+                               // this branch, which shifted the pool and
+                               // appended a 0.0. With the shift fixed, pool
+                               // order is deterministic, so this pins ORDER too
+                               // rather than sorting both sides -- a sorted
+                               // compare would hide a future re-ordering
+                               // regression in exactly the storage path the
+                               // off-by-one lived in.
                                let got =
                                    inner.Split(',')
                                    |> Array.map (fun s -> Double.Parse(s.Trim(), Globalization.CultureInfo.InvariantCulture))
-                                   |> Array.sort
-                               let expected = pool |> Array.map (fun x -> x + x) |> Array.sort
-                               check (sprintf "packed %s: kernel values = 2x oracle pool (multiset)" kind)
+                               let expected = pool |> Array.map (fun x -> x + x)
+                               check (sprintf "packed %s: kernel values = 2x oracle pool (exact, in pool order)" kind)
                                    (got = expected)
                                    (sprintf "got %A expected %A" got expected)
                            | None -> check (sprintf "packed %s: kernel values" kind) false "no out = [...] line")
@@ -941,6 +954,119 @@ let w = z.write("%s", C)
                      else check (sprintf "packed %s: compiles" kind) false e)
             | Error e -> check (sprintf "packed %s: lowers" kind) false e
         with ex -> check (sprintf "packed %s e2e" kind) false ex.Message
+
+    // ---------------------------------------------------------------
+    // 17b. KERNEL-PRODUCED packed pool -> write (write side, unmasked)
+    // ---------------------------------------------------------------
+    // The read -> write roundtrip above CANNOT see a write-side pool shift:
+    // the read materialization and the write flatten share one offset
+    // formula, so a rotation applied on the way in is undone on the way out
+    // and the store still matches byte for byte. The write path is only
+    // pinned when the pool it flattens was built by a KERNEL (canonical
+    // storage, no provider read in the chain) and is compared against an
+    // independent oracle. That is this block. It is what the antisym
+    // strict-subscript defect escaped through: `blade run` printed the right
+    // six cells while the chunk on disk held the pool shifted left by one
+    // with a fill 0.0 appended.
+    printfn "\n--- blade packed e2e: kernel-produced pool -> write (independent oracle) ---"
+    let sign (p: int list) =
+        let a = List.toArray p
+        let mutable s = 0
+        for i in 0 .. a.Length - 1 do
+            for j in i + 1 .. a.Length - 1 do
+                if a.[i] > a.[j] then s <- s + 1
+        if s % 2 = 0 then 1.0 else -1.0
+    let rec perms (xs: int list) =
+        match xs with
+        | [] -> [ [] ]
+        | _ -> xs |> List.collect (fun x -> perms (List.filter ((<>) x) xs) |> List.map (fun r -> x :: r))
+    // (label, extent, rank, kernel body over params p0..p{rank-1}, scalar oracle
+    //  on one ordered cell's A-values, symmetry keyword, SymmetryClass)
+    // The oracle Reynolds-folds the SAME scalar function over every parameter
+    // permutation with the group's sign — an enumeration written here, not
+    // shared with any compiler code.
+    let kernelWrites =
+        [ "sym2",     4, 2, "p0 * 10.0 + p1",  (fun (v: float list) -> v.[0] * 10.0 + v.[1]),  "Symmetric",     SymSymmetric
+          "antisym2", 4, 2, "p0 * 10.0 + p1",  (fun (v: float list) -> v.[0] * 10.0 + v.[1]),  "Antisymmetric", SymAntisymmetric
+          // Rank 3 compounds the per-level strict shift: the retired formula
+          // was wrong at every level beyond the first, not just the last.
+          "antisym3", 5, 3, "p0 * p0 * p1",    (fun (v: float list) -> v.[0] * v.[0] * v.[1]), "Antisymmetric", SymAntisymmetric ]
+    for (label, n, rank, body, scalarF, symKw, sym) in kernelWrites do
+        let strict = (sym = SymAntisymmetric)
+        let avals = [ for i in 0 .. n - 1 -> float (i + 1) ]
+        // Canonical cells in ascending-lex order (i0 <= i1 <= .. for sym,
+        // strictly increasing for antisym) — enumerated directly here.
+        let rec cells (lo: int) (k: int) : int list list =
+            if k = 0 then [ [] ]
+            else [ for i in lo .. n - 1 do
+                     for rest in cells (if strict then i + 1 else i) (k - 1) -> i :: rest ]
+        let oracle =
+            [| for c in cells 0 rank ->
+                 perms [ 0 .. rank - 1 ]
+                 |> List.sumBy (fun p ->
+                     let vs = p |> List.map (fun q -> avals.[c.[q]])
+                     (if strict then sign p else 1.0) * scalarF vs) |]
+        let ps = [ 0 .. rank - 1 ] |> List.map (sprintf "p%d") |> String.concat ", "
+        let outStore = fixStore (sprintf "zarr_kw_%s_out" label)
+        (try Directory.Delete(Path.Combine(e2eDir, outStore), true) with _ -> ())
+        let src =
+            sprintf """
+import zarr as z
+
+let A = [%s]
+let g = lambda(%s) where comm(%s) -> %s
+let C = method_for(%s) <@> reynolds(g, %s) |> compute
+let w = z.write("%s", C)
+"""
+                (avals |> List.map (sprintf "%.1f") |> String.concat ", ")
+                ps ps body
+                (List.replicate rank "A" |> String.concat ", ")
+                symKw outStore
+        try
+            match lower src with
+            | Ok ir ->
+                let (cppCode, _) = CodeGen.genSelfContainedProgramFromIR ir (sprintf "zarr_kw_%s_e2e" label)
+                check (sprintf "kernel-write %s: pool flatten is a linear pool_base copy" label)
+                    (cppCode.Contains "pool_base" && not (cppCode.Contains "antisymmetric::unlinearize")) ""
+                CodeGen.deployRuntimeHeaders e2eDir
+                let cppFile = Path.Combine(e2eDir, sprintf "zarr_kw_%s_e2e.cpp" label)
+                File.WriteAllText(cppFile, cppCode)
+                (match compileCpp cppFile e2eDir with
+                 | Ok exePath ->
+                     (match runExecutable exePath with
+                      | Ok (0, runOut) ->
+                          // The chunk on disk must equal the oracle pool cell
+                          // for cell — no rotation, no trailing fill.
+                          (match readVarData (Path.Combine(e2eDir, outStore)) "C" with
+                           | Ok { DimLengths = dl; Payload = ZFloats got } ->
+                               check (sprintf "kernel-write %s: written pool = independent oracle (exact, in order)" label)
+                                   (dl = [oracle.Length] && got = oracle)
+                                   (sprintf "shape %A got %A expected %A" dl got oracle)
+                           | Ok _ -> check (sprintf "kernel-write %s: written pool" label) false "not floats"
+                           | Error e -> check (sprintf "kernel-write %s: written pool" label) false e)
+                          // ... and the in-process print must agree with it, so
+                          // a shift cannot hide by moving between the two.
+                          let printed =
+                              runOut.Split('\n')
+                              |> Array.tryPick (fun l ->
+                                  let l = l.Trim()
+                                  if l.StartsWith "C = [" && l.EndsWith "]" then Some l else None)
+                          (match printed with
+                           | Some line ->
+                               let inner = line.Substring("C = [".Length, line.Length - "C = [".Length - 1)
+                               let got =
+                                   inner.Split(',')
+                                   |> Array.map (fun s -> Double.Parse(s.Trim(), Globalization.CultureInfo.InvariantCulture))
+                               check (sprintf "kernel-write %s: printed pool = written pool = oracle" label)
+                                   (got = oracle) (sprintf "got %A expected %A" got oracle)
+                           | None -> check (sprintf "kernel-write %s: printed pool" label) false "no C = [...] line")
+                      | Ok (code, runOut) -> check (sprintf "kernel-write %s: runs (exit 0)" label) false (sprintf "exit %d: %s" code runOut)
+                      | Error e -> check (sprintf "kernel-write %s: runs (exit 0)" label) false e)
+                 | Error e ->
+                     if isSkipError e then printfn "  SKIP kernel-write %s e2e (compile skipped): %s" label e
+                     else check (sprintf "kernel-write %s: compiles" label) false e)
+            | Error e -> check (sprintf "kernel-write %s: lowers" label) false e
+        with ex -> check (sprintf "kernel-write %s e2e" label) false ex.Message
 
     // ---------------------------------------------------------------
     // 18. Mixed sym x dense packed read -> write roundtrip

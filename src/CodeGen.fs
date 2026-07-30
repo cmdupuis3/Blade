@@ -3672,13 +3672,26 @@ let genElementBindingNew (level: LoopIndexBinding) (elem: ElementBinding) (curre
         //      out of bounds. (This is the compact-symmetric elementwise-read
         //      bug: sym____i0[__i1 + __i0] should be sym____i0[__i1]. Verified
         //      against a dense reference: local-only yields the correct
-        //      canonical order.) The StrictOffset (antisym diagonal shift) is a
-        //      within-row concept and still applies.
+        //      canonical order.)
+        //
+        //      The StrictOffset is dropped here for the SAME reason as the
+        //      dependency vars: both are properties of the ABSOLUTE coordinate,
+        //      and only the flat (case 1) read needs them. A peeled row of a
+        //      strict-packed array is ALREADY diagonal-free — build_skeleton
+        //      seeds each antisym child at `i + lastIndex + 1` and shortens the
+        //      row to match (nested_array_utilities.hpp count_leaves/
+        //      build_skeleton), so slot s of the row is absolute coordinate
+        //      prev + 1 + s and the 0-based loop var IS the slot. Adding the
+        //      strict offset here walks one cell past the row's canonical span
+        //      — off the end of the pool entirely on the last row. (Storage
+        //      truth: canon_left_justify, cpp:863, uses p[k] - p[k-1] - 1 for
+        //      strict; the loop-nest slot is that expression with the loop var
+        //      already left-justified.)
         let isSliced = currentName <> elem.ArrayName
         let arrayIndex =
-            let depParts =
-                if isSliced then []   // outer indices already consumed by the slice
-                else level.BoundDependencies |> List.map (sprintf "__i%d")
+            if isSliced then level.IndexName   // outer index + strictness baked into the row
+            else
+            let depParts = level.BoundDependencies |> List.map (sprintf "__i%d")
             let offsetParts = if level.StrictOffset > 0 then [string level.StrictOffset] else []
             match depParts @ offsetParts with
             | [] -> level.IndexName
@@ -8730,15 +8743,23 @@ let guardProviderWrite (ind: string) (lines: string list) : string list =
 /// toFlat=false fills the array from the buffer (read materialization);
 /// toFlat=true fills the buffer from the array (write flatten).
 ///
-/// SYMMETRIC groups: the allocator's flat pool holds exactly the canonical
-/// cells in ascending-lex order (each row stores its diagonal-anchored
-/// tail), so the copy is a linear pool_base walk — differentially pinned
-/// against linearized_storage's order.
-/// ANTISYMMETRIC groups: the unified strict allocator keeps a dead
-/// diagonal slot per level (subscript s at level k addresses absolute
-/// coordinate ix[k-1] + s), so the host pool is NOT compact — the copy
-/// unranks each cell via linearized_storage::antisymmetric::unlinearize
-/// and uses diagonal-anchored relative subscripts.
+/// BOTH symmetry classes copy linearly over `pool_base`. allocate<> places
+/// every scalar in ONE contiguous pool in DFS order, and at each level the
+/// child's absolute coordinate (lastIndex + strictOff + i) is monotone in i,
+/// so the DFS leaf order IS ascending-lex over canonical cells — for strict
+/// (antisym) storage exactly as for inclusive (symmetric) storage. The pool
+/// therefore holds precisely `cardinality` cells with no padding and no dead
+/// diagonal: C(n,r) strict cells for antisym, C(n+r-1,r) for sym. This is the
+/// same invariant genMpiNestSimplicial writes through (pool_base[cell]) and
+/// the one ZarrTriangularSpec.md pins as "a Blade runtime read is a straight
+/// pool copy".
+///
+/// A previous version unranked each antisym cell and indexed the skeleton with
+/// DIAGONAL-ANCHORED subscripts (`ix[k] - ix[k-1]`), on the belief that the
+/// strict allocator keeps a dead diagonal slot per level. It does not — strict
+/// rows are SHORTENED, so the correct subscript is `ix[k] - ix[k-1] - 1`
+/// (canon_left_justify, cpp:863). The stale form shifted the whole pool by one
+/// cell in both directions and ran one cell past the end of the last row.
 let genPackedPoolCopy (arrTy: IRArrayType) (arrayCpp: string) (flatBase: string) (varName: string) (toFlat: bool) : string list =
     let (lead, trailing) =
         match arrTy.IndexTypes with
@@ -8768,47 +8789,16 @@ let genPackedPoolCopy (arrTy: IRArrayType) (arrayCpp: string) (flatBase: string)
         | s -> raise (Blade.Diagnostics.BladeDiagnosticException (Blade.Diagnostics.Codes.backendLimit Blade.Ast.noSpan (sprintf "packed pool copy of '%s': %A groups are not supported" varName s)))
     let trailExts = trailing |> List.map (fun ix -> litOf ix.Extent)
     let trail = trailExts |> List.fold (*) 1L
-    match lead.Symmetry with
-    | SymSymmetric ->
-        // Linear pool copy (canonical cells x trailing, contiguous).
-        let total = card * trail
-        if toFlat then
-            [ sprintf "{ auto* __pc_pool = nested_array_utilities::pool_base(%s.data);" arrayCpp
-              sprintf "  for (size_t __pc_i = 0; __pc_i < %d; __pc_i++) { %s_flat[__pc_i] = __pc_pool[__pc_i]; } }" total flatBase ]
-        else
-            [ sprintf "{ auto* __pc_pool = nested_array_utilities::pool_base(%s.data);" arrayCpp
-              sprintf "  for (size_t __pc_i = 0; __pc_i < %d; __pc_i++) { __pc_pool[__pc_i] = %s_flat[__pc_i]; } }" total flatBase ]
-    | _ ->
-        // Antisymmetric: unrank + relative subscripts.
-        let groupSubs =
-            [ for k in 0 .. r - 1 ->
-                if k = 0 then sprintf "[__pc_ix[0]]"
-                else sprintf "[__pc_ix[%d] - __pc_ix[%d]]" k (k - 1) ]
-            |> String.concat ""
-        let trailVars = trailExts |> List.mapi (fun i _ -> sprintf "__pc_t%d" i)
-        let trailSubs = trailVars |> List.map (sprintf "[%s]") |> String.concat ""
-        let trailIdx =
-            if trailVars.IsEmpty then "0"
-            else
-                let mutable acc = trailVars.[0]
-                for i in 1 .. trailVars.Length - 1 do
-                    acc <- sprintf "(%s) * %d + %s" acc trailExts.[i] trailVars.[i]
-                acc
-        let flatIdx = sprintf "__pc_f * %d + %s" trail trailIdx
-        let assign =
-            if toFlat then sprintf "%s_flat[%s] = %s%s%s;" flatBase flatIdx arrayCpp groupSubs trailSubs
-            else sprintf "%s%s%s = %s_flat[%s];" arrayCpp groupSubs trailSubs flatBase flatIdx
-        let trailOpen =
-            trailVars |> List.mapi (fun i v ->
-                sprintf "%sfor (size_t %s = 0; %s < %d; %s++) {" (String.replicate (i + 1) "    ") v v trailExts.[i] v)
-        let trailClose =
-            [ for i in trailVars.Length - 1 .. -1 .. 0 -> String.replicate (i + 1) "    " + "}" ]
-        [ sprintf "for (size_t __pc_f = 0; __pc_f < %d; __pc_f++) {" card
-          sprintf "    auto __pc_ix = linearized_storage::antisymmetric::unlinearize<%d>(__pc_f, %dUL);" r n ]
-        @ trailOpen
-        @ [ String.replicate (trailVars.Length + 1) "    " + assign ]
-        @ trailClose
-        @ [ "}" ]
+    // Linear pool copy (canonical cells x trailing block, contiguous) — one
+    // shape for sym and antisym alike; see the header comment for why the
+    // strict pool is compact.
+    let total = card * trail
+    if toFlat then
+        [ sprintf "{ auto* __pc_pool = nested_array_utilities::pool_base(%s.data);" arrayCpp
+          sprintf "  for (size_t __pc_i = 0; __pc_i < %d; __pc_i++) { %s_flat[__pc_i] = __pc_pool[__pc_i]; } }" total flatBase ]
+    else
+        [ sprintf "{ auto* __pc_pool = nested_array_utilities::pool_base(%s.data);" arrayCpp
+          sprintf "  for (size_t __pc_i = 0; __pc_i < %d; __pc_i++) { __pc_pool[__pc_i] = %s_flat[__pc_i]; } }" total flatBase ]
 
 /// Collect the DISTINCT ids of deferred-computation bindings that `root` reads
 /// POSITIONALLY — as the base array of an IRIndex / IRExtent / IRContains —

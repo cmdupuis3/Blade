@@ -1,0 +1,21 @@
+// TEST: AntisymIdx Consumed By Kernel
+// The 050/052/053 family PRODUCES antisym storage from dense inputs. This one
+// CONSUMES it: a second method_for whose source is already an AntisymIdx<2,4>
+// array, so the nest peels a strict-packed row and reads within it.
+//
+// That within-row read is where a strict-storage off-by-one hides. The loop
+// bound at a strict level is `extent - deps - k` (the row IS shortened by the
+// allocator), so the 0-based loop var is exactly the row slot; adding the
+// strict offset again — as the read path used to — reads slot s+1, which
+// skips the row's first cell, walks one cell past its last, and on the FINAL
+// row runs off the end of the pool. The visible symptom is a result rotated
+// left by one with a garbage/zero cell at the end, which a set-equality check
+// cannot see. Hence the exact ordered pin below.
+let A = [1.0, 2.0, 3.0, 4.0]
+let g = lambda(x, y) where comm(x, y) -> x - y
+let C = method_for(A, A) <@> reynolds(g, Antisymmetric) |> compute
+let out = method_for(C) <@> lambda(v) -> v * 10.0 |> compute
+// reynolds(g, Anti)(x, y) = (x - y) - (y - x) = 2*(x - y); strict pairs i < j
+// over A = [1,2,3,4]: (0,1)=-2 (0,2)=-4 (0,3)=-6 (1,2)=-2 (1,3)=-4 (2,3)=-2.
+// EXPECT: C = [-2.0, -4.0, -6.0, -2.0, -4.0, -2.0]
+// EXPECT: out = [-20.0, -40.0, -60.0, -20.0, -40.0, -20.0]
