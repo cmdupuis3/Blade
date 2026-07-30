@@ -422,7 +422,10 @@ let pushContext (ctx: string) (env: TypeEnv) : TypeEnv =
 /// STATEMENT rather than the declaration header. inferBlock skips the
 /// remaining statements after the first error, so at error-location time
 /// the last-stamped span belongs to the statement that failed. Reset at
-/// every checkDecl entry so a span cannot leak across declarations.
+/// every checkDecl entry so a span cannot leak across declarations, and at
+/// typeCheck / checkModule entry so it cannot leak across compilations or
+/// modules — these storages are AsyncLocal and outlive a single compilation
+/// in a long-lived process (`blade ide check`, the test host).
 let private currentStmtSpanStorage = System.Threading.AsyncLocal<Span>()
 
 /// Expression-level span, stamped by inferExpr on entry to every node

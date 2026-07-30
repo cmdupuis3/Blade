@@ -36,9 +36,16 @@ let runSpanTests () : BlockResult =
     // (An UNCLOSED construct — e.g. `(1 + 2` — reports at EOF, the point of
     // detection; that is correct, if not maximally helpful. This case uses a
     // token that is wrong ON its own line.)
+    // Every `parseErrLine`/`typeErrLine` case below is evaluated ONCE, into a
+    // binding shared by the assertion and its printed detail. Two evaluations
+    // of the same source used to be able to disagree (see the span-leak note
+    // further down), which made a failure detail contradict the assertion it
+    // was explaining; the leak is fixed, but one evaluation is still the
+    // honest way to report what was actually asserted.
+    let badTokLine3 = parseErrLine "let a = 1\n\nlet b = ]\n"
     check "parse error: bad token on line 3"
-        (parseErrLine "let a = 1\n\nlet b = ]\n" = Some 3)
-        (sprintf "got %A" (parseErrLine "let a = 1\n\nlet b = ]\n"))
+        (badTokLine3 = Some 3)
+        (sprintf "got %A" badTokLine3)
     check "parse error: bad token on line 1"
         (match parseErrLine "let x = )\n" with Some 1 -> true | _ -> false) ""
 
@@ -53,9 +60,10 @@ let runSpanTests () : BlockResult =
             | Ok _ -> None
 
     // Decl-level: the unbound reference is in the decl starting on line 3.
+    let declLevelLine = typeErrLine "let a = 1\n\nlet b = no_such_name\n"
     check "type error: decl-level location"
-        (typeErrLine "let a = 1\n\nlet b = no_such_name\n" = Some 3)
-        (sprintf "got %A" (typeErrLine "let a = 1\n\nlet b = no_such_name\n"))
+        (declLevelLine = Some 3)
+        (sprintf "got %A" declLevelLine)
 
     // Statement-level (§3.4): the failing statement is on line 3, inside a
     // function declared on line 1 — the error must NOT point at line 1.
@@ -65,9 +73,10 @@ let runSpanTests () : BlockResult =
         "    let b = no_such_name + a\n" +
         "    b\n" +
         "}\n"
+    let stmtLine = typeErrLine stmtSrc
     check "type error: statement-level location inside a block"
-        (typeErrLine stmtSrc = Some 3)
-        (sprintf "got %A" (typeErrLine stmtSrc))
+        (stmtLine = Some 3)
+        (sprintf "got %A" stmtLine)
 
     // A later statement failing reports ITS line, not the first statement's.
     let stmtSrc2 =
@@ -77,9 +86,10 @@ let runSpanTests () : BlockResult =
         "    let c = b + missing_here\n" +
         "    c\n" +
         "}\n"
+    let stmtLine2 = typeErrLine stmtSrc2
     check "type error: later statement reports its own line"
-        (typeErrLine stmtSrc2 = Some 4)
-        (sprintf "got %A" (typeErrLine stmtSrc2))
+        (stmtLine2 = Some 4)
+        (sprintf "got %A" stmtLine2)
 
     // The span must not leak: an error in a later DECL (no block involved)
     // still reports the decl's own line even after a block was checked.
@@ -89,9 +99,10 @@ let runSpanTests () : BlockResult =
         "    a\n" +
         "}\n" +
         "let broken = also_missing\n"
+    let leakLine = typeErrLine leakSrc
     check "type error: statement span does not leak into later decls"
-        (typeErrLine leakSrc = Some 5)
-        (sprintf "got %A" (typeErrLine leakSrc))
+        (leakLine = Some 5)
+        (sprintf "got %A" leakLine)
 
     // formatCompileError renders the location as line:col.
     let formatted =
@@ -126,46 +137,44 @@ let runSpanTests () : BlockResult =
         "\n" +
         "let static bad = runtime_v + 1\n" +
         "let r = bad\n"
-    // Evaluate ONCE. Two in-process evaluations of the same source disagree on
-    // the reported line (3 then 4), so calling it twice — once in the
-    // assertion, once in the printed detail — made the failure detail
-    // contradict the assertion it was explaining.
+    // ORDER IS LOAD-BEARING — this doubles as the regression test for a
+    // cross-call span leak. The correct span here is the static decl's own,
+    // 3:1 (`f.Span`, threaded from StaticEval.StaticFailure through
+    // checkModule's `locateError f.Span`). But `locateError` prefers TypeEnv's
+    // AsyncLocal expression/statement span side-channel over the caller's
+    // span, and that side-channel used to be cleared only at `checkDecl`
+    // entry — which has not run yet when the `let static` fold assertion is
+    // raised at the TOP of `checkModule`, before the decl loop. AsyncLocal
+    // outlives a compilation, so the error inherited the PREVIOUS typeCheck
+    // call's last-stamped span: type-check `stmtSrc` (error at 3:13, where
+    // `no_such_name` starts) and then this source, and the assertion was
+    // reported at 3:13 — a column mid-`bad`, in another file's coordinates.
+    // The same mechanism made two evaluations of THIS source disagree on the
+    // line (3 then 4, inheriting `bad` in `let r = bad`).
     //
-    // The COLUMN is deliberately not asserted, and that is a bug being worked
-    // around, not a gap in the test. The correct span for this error is the
-    // static decl's own span, 3:1-3:31 (`f.Span`, threaded from
-    // StaticEval.StaticFailure through checkModule's `locateError f.Span`); a
-    // fresh process reports exactly that, underlining all 30 columns of the
-    // decl. In-process the reported column is instead whatever the PREVIOUS
-    // typeCheck call in this process left in TypeEnv's AsyncLocal expression-
-    // span side-channel, because `locateError` prefers that span over the
-    // caller's (TypeEnv.fs:457-464) and the only reset — `resetCurrentStmtSpan`
-    // at `checkDecl` entry (TypeCheck.fs:9117) — has not run yet: the `let
-    // static` fold assertion is raised at the TOP of `checkModule`
-    // (TypeCheck.fs:10856-10866), before any declaration is checked, and
-    // neither `typeCheck` nor `checkModule` clears the side-channel on entry.
-    //
-    // Here that stale span is 3:13 — column 13 is where `no_such_name` starts
-    // on line 3 of `stmtSrc` above, the last source type-checked before this
-    // one (in `assertSrc` line 3, column 13 is the middle of `bad`, no token at
-    // all). The same mechanism explains the 3-then-4 divergence: the second
-    // evaluation inherits the FIRST evaluation's own last-stamped expression
-    // span, `bad` in `let r = bad` on line 4.
-    //
-    // So: line and message are asserted (the message comes from f.Names /
-    // f.Reason and is leak-immune, which is what actually identifies the
-    // failing decl), the column is not assertable through this API until the
-    // side-channel is reset at typeCheck entry. Filed separately; do NOT
-    // "fix" this by pinning 13, which is a position in a different source.
+    // Fixed by resetting the side-channel at `typeCheck` and `checkModule`
+    // entry. Priming with the 3:13 source below and pinning the column to 1
+    // is what keeps it fixed; if the reset regresses, the column reverts to
+    // 13 and this fails. Do not relax the column back to a wildcard.
+    let primedLine = typeErrLine stmtSrc   // leaves 3:13 in the side-channel
+    check "span leak: priming source reports its own location first"
+        (primedLine = Some 3)
+        (sprintf "got %A" primedLine)
     let assertErrs = allErrs assertSrc
-    check "static assertion: unfoldable `let static` errors on line 3, once, naming the decl"
+    check "static assertion: unfoldable `let static` errors at 3:1, once, naming the decl"
         (match assertErrs with
-         | [ (3, _, msg) ] ->
+         | [ (3, 1, msg) ] ->
              msg.Contains "does not evaluate at compile time"
              && msg.Contains "let static bad"
              && msg.Contains "undefined variable 'runtime_v'"
          | _ -> false)
         (sprintf "got %A" assertErrs)
+    // Idempotence, stated directly: a second compilation of the same source in
+    // the same process reports the same location as the first.
+    let assertErrs2 = allErrs assertSrc
+    check "span leak: re-compiling the same source reports the same location"
+        (assertErrs2 |> List.map (fun (l, c, _) -> l, c) = [ (3, 1) ])
+        (sprintf "got %A" assertErrs2)
 
     // A lambda-valued static declares a function, not a foldable value —
     // exempt from the assertion.
@@ -250,12 +259,14 @@ let runSpanTests () : BlockResult =
         ""
 
     // (c) An EOF parse error reports the END of input (last line), not 0:0.
+    let eofLine = parseErrLine "let x = (1 + 2"
     check "parse error at EOF reports a real line, not 0"
-        (match parseErrLine "let x = (1 + 2" with Some n -> n > 0 | None -> false)
-        (sprintf "got %A" (parseErrLine "let x = (1 + 2"))
+        (match eofLine with Some n -> n > 0 | None -> false)
+        (sprintf "got %A" eofLine)
+    let eofLineMulti = parseErrLine "let a = 1\nfunction f(x"
     check "parse error at EOF reports the LAST line (multi-line source)"
-        (parseErrLine "let a = 1\nfunction f(x" = Some 2)
-        (sprintf "got %A" (parseErrLine "let a = 1\nfunction f(x"))
+        (eofLineMulti = Some 2)
+        (sprintf "got %A" eofLineMulti)
 
     // (d) Expected-token errors read like prose — no raw DU noise (TokLParen…).
     let parseErrMsg (src: string) : string =

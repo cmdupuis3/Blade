@@ -10831,6 +10831,13 @@ let private declExprs (decl: TypedDecl) : TypedExpr list =
     | TDeclType _ | TDeclInterface _ | TDeclUnit _ | TDeclImport _ -> []
 
 let checkModule (env: TypeEnv) (modul: ModuleDecl) : TypedModule * TypeEnv * CompileError list =
+    // Fresh module: drop any span the PREVIOUS module's decl loop left in the
+    // side-channel. The static-assertion errors below are raised before this
+    // module's first `checkDecl` (which is where the per-decl reset lives), so
+    // without this they would be located in the previous module's coordinates.
+    // `typeCheck` resets on entry too; this covers module-to-module inside one
+    // compilation, and callers that reach checkProgram by another route.
+    resetCurrentStmtSpan ()
     // Resolve compile-time-known static VALUES up front (the same
     // StaticEval.resolveStatics the lowering phase runs as its Phase 0), so
     // type-checking can consult them — e.g. a `replicate` count written as a
@@ -11038,6 +11045,14 @@ let typeCheck (program: Program) : Result<TypedProgram * IRBuilder * string list
     PinSuggestions.reset ()
     WarningLog.reset ()
     DeducedFacts.reset ()
+    // Error-location side-channel: AsyncLocal, so without this a second
+    // compilation in one process inherits the FIRST one's last-stamped span.
+    // `checkDecl` resets it per declaration, but errors raised before any
+    // declaration is checked — the elaborations below, and `checkModule`'s
+    // `let static` fold assertion — run before that and would otherwise be
+    // located in the previous source's coordinates. The real exposure is the
+    // long-lived `blade ide check` path, not just the test host.
+    resetCurrentStmtSpan ()
     // Phase B typed rep-deduction channel: same lifecycle as the facts channel
     // beside it. The per-module SUMMARY tables need no reset — they hang off
     // the TypeEnv that `emptyEnv ()` builds fresh below — but the proposal

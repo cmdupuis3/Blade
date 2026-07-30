@@ -1,0 +1,18 @@
+// TEST: AntisymIdx Rank-3 Consumed By Kernel
+// Rank-3 twin of 055. Rank 2 has a single strict level, so a within-row
+// off-by-one there is a uniform shift of one; at rank 3 the strict shift is
+// cumulative (level a subtracts a), so a read that re-applies it compounds
+// per level and the damage is no longer a clean rotation. Pinning rank 3
+// separately keeps the two levels honest.
+//
+// g = x*x*y is not itself antisymmetric, so the signed sum over the six
+// permutations survives: reynolds(g, Anti)(x,y,w) = the Vandermonde-shaped
+// alternating sum, nonzero on every strict triple.
+let A = [1.0, 2.0, 3.0, 4.0, 5.0]
+let g = lambda(x, y, w) where comm(x, y, w) -> x * x * y
+let C = method_for(A, A, A) <@> reynolds(g, Antisymmetric) |> compute
+let out = method_for(C) <@> lambda(v) -> v * 10.0 |> compute
+// C(5,3) = 10 strict triples in ascending-lex order:
+// (0,1,2)(0,1,3)(0,1,4)(0,2,3)(0,2,4)(0,3,4)(1,2,3)(1,2,4)(1,3,4)(2,3,4)
+// EXPECT: C = [-2.0, -6.0, -12.0, -6.0, -16.0, -12.0, -2.0, -6.0, -6.0, -2.0]
+// EXPECT: out = [-20.0, -60.0, -120.0, -60.0, -160.0, -120.0, -20.0, -60.0, -60.0, -20.0]

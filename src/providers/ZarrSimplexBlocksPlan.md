@@ -198,10 +198,13 @@ complete — the staging-contract streaming story from ppl/NOTES.md).
 3. Whether `block_order: "path"` earns its complexity before Phase 4
    (subtree contiguity only pays with adaptive depth or range scans) —
    default to ascending-lex until then.
-4. Antisym: same block grid, strict per-tile factors; the dead-diagonal
-   host-pool gotcha (see blade-zarr-provider memory / genPackedPoolCopy)
-   lives entirely on the materialization side and is untouched by this
-   format — but Phase-2 scatter tests must cover antisym explicitly.
+4. Antisym: same block grid, strict per-tile factors. There is NO
+   dead-diagonal host pool — an earlier note here claimed one, and
+   `genPackedPoolCopy` was written to match it. The strict allocator
+   SHORTENS each row instead of padding it, so the host pool is compact
+   and in ascending-lex order, identical in shape to the symmetric case;
+   materialization is a linear `pool_base` copy for both. Phase-2 scatter
+   tests must still cover antisym explicitly.
 5. Hermitian: still reserved (constraint-coupled cells); revisit only with
    a canonical-half storage story.
 
