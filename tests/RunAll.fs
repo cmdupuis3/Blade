@@ -60,6 +60,13 @@ open Blade.Tests.Benchmarks
 /// Test_*.fs) so the category lives next to its one consumer.
 let memfreeTests = Blade.Tests.Corpus.category "memfree"
 
+/// deferred-concrete — `<$>` / `<|>` / sequence / guard applied to CONCRETE
+/// (already-materialized) arrays rather than to deferred computations. Its
+/// one consumer so far is the interpreter differential gate
+/// (InterpDiff.deferredConcreteSlice); declared here, next to memfree, so the
+/// category is nameable from a standalone `blade test` verb too.
+let deferredConcreteTests = Blade.Tests.Corpus.category "deferred-concrete"
+
 /// memfree-stress — the allocation-churn MEMORY gate (011): ~30k iterations
 /// each materializing a 2 MiB temp. Its own category because the interpreter
 /// must NOT walk it (see InterpDiff.currentSlice) and because it OOMs by

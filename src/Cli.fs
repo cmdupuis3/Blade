@@ -1485,9 +1485,21 @@ let private dispatchTest (rest: string list) : int =
         Blade.Tests.HybridTests.runHybridTests ()
     | [ cat ] ->
         // Test a specific category: blade test basic, blade test loops, etc.
+        //
+        // The two "-errors" corpora are ENTIRELY negative — every source is
+        // meant to be refused by the front end — yet their `// TEST:` names
+        // carry no "(rejects)" marker for the runner to classify on, so run
+        // as-is each member would be reported as a failure. Mark them here.
+        // (InterpDiff.rejectOnlyCategories makes the same observation and
+        // hard-codes the same reading for the interpreter gate.)
+        let asRejectProbes (tests: (string * string) list) =
+            tests
+            |> List.map (fun (name, source) ->
+                (if name.EndsWith "(rejects)" then name else name + " (rejects)"), source)
         let categoryTests =
             match cat.ToLower().TrimStart('-') with
             | "basic" -> Some ("Basic", basicTests)
+            | "ad" -> Some ("AD", adTests)
             | "loops" -> Some ("Loops", loopTests)
             | "symmetry" -> Some ("Symmetry", symmetryTests)
             | "reynolds" -> Some ("Reynolds", reynoldsTests)
@@ -1504,7 +1516,9 @@ let private dispatchTest (rest: string list) : int =
             | "indextypes" -> Some ("Index Types", indexTypeTests)
             | "static" -> Some ("Static", staticTests)
             | "units" -> Some ("Units", unitTests)
+            | "unit-errors" | "uniterrors" -> Some ("Unit Errors", asRejectProbes unitErrorTests)
             | "mutability" -> Some ("Mutability", mutabilityTests)
+            | "mutability-errors" | "mutabilityerrors" -> Some ("Mutability Errors", asRejectProbes mutabilityErrorTests)
             | "funcarrays" | "fa" -> Some ("Func Arrays", funcArrayTests)
             | "ppl" -> Some ("PPL", pplTests)
             | "math" -> Some ("Math", mathTests)
@@ -1517,6 +1531,7 @@ let private dispatchTest (rest: string list) : int =
             | "ml-e2e" | "mle2e" -> Some ("ML E2E", mlE2eTests)
             | "ml-equiv" | "mlequiv" | "equiv" -> Some ("ML Equiv", mlEquivTests)
             | "sqlish" | "sql" -> Some ("SQL-ish", foreignKeyTests @ maskTests @ setOpTests @ groupByTests @ sortTests @ reduceTests @ extentsTests @ extentsMultiRankTests @ regressionTests @ sqlCombinedTests)
+            | "deferred-concrete" | "deferredconcrete" -> Some ("Deferred Concrete", Blade.Tests.RunAll.deferredConcreteTests)
             | "memfree" -> Some ("Mem Free", Blade.Tests.RunAll.memfreeTests)
             | "memfree-stress" | "memfreestress" -> Some ("Mem Free Stress", Blade.Tests.RunAll.memfreeStressTests)
             | _ -> None

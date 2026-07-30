@@ -8,6 +8,7 @@ open Blade.Tests.Corpus
 /// Tests that should pass
 let mutabilityTests = category "mutability"
 
-/// Tests that should fail with a type error. Currently unreferenced;
-/// preserved as corpus assets for a future expected-error runner.
+/// Tests that should fail with a type error. Not part of the main-suite
+/// `allTests`; reachable via `blade test mutability-errors`, which marks every
+/// member as a reject-probe (their names carry no "(rejects)" of their own).
 let mutabilityErrorTests = category "mutability-errors"
