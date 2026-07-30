@@ -1,4 +1,5 @@
 // TEST: Unit Accumulator Update Mismatch (rejects)
+// ERROR: BL3006
 // x += v with x in meters and v in velocity rejects: the desugared
 // x = x + v hits the addition unit rule against the accumulator's
 // (now-enforced) block annotation. This is the "forgot the * dt in an

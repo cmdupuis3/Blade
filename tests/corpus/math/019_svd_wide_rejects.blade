@@ -1,4 +1,5 @@
 // TEST: Math svd: m < n rejects with transpose steering (rejects)
+// ERROR: BL5200
 // One-sided Jacobi orthogonalizes columns; v1 requires m >= n and steers
 // wide matrices through transpose + U/V swap.
 import math as m

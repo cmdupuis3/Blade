@@ -1,4 +1,5 @@
 // TEST: Nominal: Contains Type Mismatch (rejects)
+// ERROR: BL3001
 // `contains(A, x)` requires x's type to unify with A's element type.
 // Passing a Float64 to an Int64-array contains should reject in typecheck,
 // not silently coerce or pick a default. The unify in the ExprContains

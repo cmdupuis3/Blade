@@ -1,4 +1,5 @@
 // TEST: Wildcard Escape In Let (rejects)
+// ERROR: BL3999
 // A wildcard `_` is a hole, not a value: it is only meaningful as a compound-
 // index coordinate (B((a, _, c))), where the index dispatch consumes it. Bound
 // into a let as part of a tuple value, it has escaped and must be rejected at

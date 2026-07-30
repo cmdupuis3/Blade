@@ -1,4 +1,5 @@
 // TEST: Compact Rank At Direct Application (rejects)
+// ERROR: BL4004
 // Direct application is its own seam: plain function calls do NOT unify
 // parameter types against argument types (args are checked structurally
 // downstream), so a fix confined to unify would miss this call site. The

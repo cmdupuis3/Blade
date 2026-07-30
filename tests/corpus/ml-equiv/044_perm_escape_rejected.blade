@@ -1,4 +1,5 @@
 // TEST: ML Perm Escape Rejected (rejects)
+// ERROR: BL4012
 import ml as ml
 // A node-covariant value escaping to a callee that carries no perm certificate
 // leaves the discipline: `shuffle` reads cell 0 and broadcasts it, which is a

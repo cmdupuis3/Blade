@@ -1,4 +1,5 @@
 // TEST: Nested Function Malformed Where (rejects)
+// ERROR: BL1001
 // A malformed where-clause on a nested `function` (unterminated `comm(`) must
 // surface a real parse error, not be silently swallowed and re-reported as a
 // misleading error at the `where`/`=`. Regression guard for the

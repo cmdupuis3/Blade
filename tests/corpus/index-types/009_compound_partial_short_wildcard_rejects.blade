@@ -1,4 +1,5 @@
 // TEST: Compound Partial Short Wildcard (rejects)
+// ERROR: BL4003
 // A wildcard tuple must be FULL arity: on a rank-3 compound, a 2-tuple with a
 // wildcard is ambiguous (which axes?) and rejected; short tuples pin a
 // leading prefix only in their wildcard-free form.

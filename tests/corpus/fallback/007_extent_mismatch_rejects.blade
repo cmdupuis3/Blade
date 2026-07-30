@@ -1,4 +1,5 @@
 // TEST: Fallback Extent Mismatch (rejects)
+// ERROR: BL3001
 // Dense-dense fallback requires the SAME index space: the operands' array
 // types unify outright, so an extent mismatch is a BL3001 type error.
 type AIdx = Idx<4>

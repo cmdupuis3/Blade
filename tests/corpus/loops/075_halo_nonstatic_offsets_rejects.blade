@@ -1,4 +1,5 @@
 // TEST: Halo Non-Static Offsets (rejects)
+// ERROR: BL3999
 // The halo offset set is a compile-time stencil: it must fold via StaticEval.
 // A plain (runtime) let binding is not a static value, so halo<Idx<5>, offs>
 // is rejected — the offsets cannot be resolved to a constant array.
