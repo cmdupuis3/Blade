@@ -12,4 +12,6 @@ let unitTests = category "units"
 /// the PASSING outcome (Runner's isRejectProbe), which lets these ride in
 /// `allTests` next to `unitTests` instead of waiting on a dedicated
 /// expected-error runner. Each file pins the code it expects via `// ERROR:`.
+/// Also addressable on its own as `blade test unit-errors` (Cli.fs re-marks
+/// names defensively, which is a no-op now that the suffixes are in the files).
 let unitErrorTests = category "unit-errors"

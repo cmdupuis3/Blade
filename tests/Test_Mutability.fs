@@ -13,5 +13,7 @@ let mutabilityTests = category "mutability"
 /// isRejectProbe / classifyWithDetail), so this rides in `allTests` next to
 /// `mutabilityTests` rather than needing an expected-error runner of its own.
 /// Every file also carries an `// ERROR: BLxxxx` pin recording which code the
-/// refusal is supposed to be.
+/// refusal is supposed to be. Also addressable on its own as
+/// `blade test mutability-errors` (Cli.fs re-marks names defensively, which is
+/// a no-op now that the suffixes are in the files).
 let mutabilityErrorTests = category "mutability-errors"
