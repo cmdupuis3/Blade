@@ -176,6 +176,52 @@ let runSpanTests () : BlockResult =
         (assertErrs2 |> List.map (fun (l, c, _) -> l, c) = [ (3, 1) ])
         (sprintf "got %A" assertErrs2)
 
+    // The per-MODULE half of the same fix, and its only guard. `checkProgram`
+    // folds `checkModule` over the modules of ONE program, and each
+    // `checkModule` raises the `let static` fold assertion at its TOP, before
+    // its decl loop — so the per-decl reset has not run, and the
+    // typeCheck-entry reset ran once, ahead of the FIRST module only. An
+    // earlier module that type-checks CLEANLY still leaves a stamp behind
+    // (`inferExpr` stamps `currentExprSpan` on entry to every node, whether or
+    // not inference then succeeds), so without the reset at `checkModule`
+    // entry a later module's assertion is reported in the EARLIER module's
+    // coordinates: with that one reset removed, the fixture below reports
+    // mod_a.blade:2:13 — the `40` literal in module 1's last binding — instead
+    // of mod_b.blade:3:1. Unlike the cross-call case above this needs no priming
+    // compilation: it misfires on a FIRST compile in a fresh process, which is
+    // what makes it a user-visible bug rather than a test-host artifact.
+    //
+    // `parseMultiSource` yields one ModuleDecl per file and stamps that file
+    // name onto every span it builds (not just decl spans — see Parser's span
+    // constructors), so File discriminates the leak by itself: mod_a.blade
+    // means leaked, mod_b.blade means correctly located. Line and column are
+    // pinned too; all three must stay pinned for this to keep its teeth.
+    let multiModuleErrs (srcs: (string * string) list) : (string option * int * int * string * string) list =
+        match Parser.parseMultiSource srcs with
+        | Error e -> [ (None, e.Line, e.Col, "PARSE ERROR", e.Message) ]
+        | Ok program ->
+            match TypeCheck.typeCheck program with
+            | Error es ->
+                es |> List.map (fun e ->
+                    (e.Span.File, e.Span.StartLine, e.Span.StartCol,
+                     (TypeEnv.diagnosticOfCompileError e).Code,
+                     TypeEnv.formatTypeError e.Error))
+            | Ok _ -> []
+    // Module 1 type-checks clean; its only job is to leave a stamp whose file,
+    // line and column all differ from module 2's static decl (3:1).
+    let modASrc =
+        "let a = 1 + 2\n" +
+        "let b = a + 40\n"
+    let crossModErrs = multiModuleErrs [("mod_a.blade", modASrc); ("mod_b.blade", assertSrc)]
+    check "span leak: a later module's static assertion is located in its OWN module"
+        (match crossModErrs with
+         | [ (Some "mod_b.blade", 3, 1, code, msg) ] ->
+             code = "BL3999"
+             && msg.Contains "does not evaluate at compile time"
+             && msg.Contains "let static bad"
+         | _ -> false)
+        (sprintf "got %A" crossModErrs)
+
     // A lambda-valued static declares a function, not a foldable value —
     // exempt from the assertion.
     let lambdaSrc =
