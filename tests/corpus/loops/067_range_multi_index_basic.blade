@@ -5,7 +5,9 @@
 // (single index type) and the rank rule, where a single MULTI-RANK index type
 // (SymIdx<2,N>) also yields two params -- a different generalization.
 //
-// EXPECT is FLAT: a rank-2 result prints flattened, and tests/Expect.fs skips
-// [[..]] 2-D expectations outright, so a nested form would check nothing.
+// EXPECT is FLAT because the printer emits this rank-2 result as one flat
+// run, not because tests/Expect.fs can't check nested [[..]] 2-D pins -- it
+// does (row counts, per-row lengths, elements) -- there's just no nested
+// output here to compare a nested pin against.
 let R = method_for(range<Idx<2>, Idx<3>>) <@> lambda(i, j) -> i * 10 + j |> compute
 // EXPECT: R = [0, 1, 2, 10, 11, 12]

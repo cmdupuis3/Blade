@@ -15,6 +15,7 @@ let A = [1.0, 2.0, 3.0]
 let B = [4.0, 5.0, 6.0]
 function cov(a: Float64, b: Float64) where omp(a: 1) = a * b
 let m = object_for(cov) <@> (A, B) |> compute
-// Outer product, printed flat (2-D EXPECT parses but asserts nothing):
+// Outer product, printed flat (tests/Expect.fs DOES check 2-D EXPECT pins,
+// but this output prints as one flat run, so it's pinned as flat too):
 // row i is A[i] * B[j] for j in 0..2.
 // EXPECT: m = [4.0, 5.0, 6.0, 8.0, 10.0, 12.0, 12.0, 15.0, 18.0]

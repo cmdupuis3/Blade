@@ -36,9 +36,13 @@ generated_cpp_tests/
 /tests/corpus/**/*.h
 /tests/corpus/**/*.hpp
 /tests/corpus/**/*.cpp
+/tests/corpus/**/*.exe
+/tests/corpus/**/*.out
 /examples/**/*.h
 /examples/**/*.hpp
 /examples/**/*.cpp
+/examples/**/*.exe
+/examples/**/*.out
 *.obj
 *.ilk
 *.pdb
