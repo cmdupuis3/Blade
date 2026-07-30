@@ -40,8 +40,16 @@ let runCartesianBridgeTests () : BlockResult =
                            { MLS.L = 1; MLS.Parity = 0; MLS.Mult = 1 }
                            { MLS.L = 2; MLS.Parity = 0; MLS.Mult = 1 } ]
            && MLS.totalDim CB.gradSpec = 9) ""
+    // The full list, not just the dimension: totalDim = 6 is satisfied by any
+    // number of wrong specs ([(0,e,1);(1,e,1);(1,o,1)] and [(0,e,6)] both sum
+    // to 6), so on its own it pins nothing about WHICH irreps a symmetric
+    // rank-2 tensor decomposes into. l = 1 must be ABSENT (that is the whole
+    // difference from gradSpec: the antisymmetric/vorticity part is what the
+    // symmetric restriction drops), and both blocks are parity-EVEN.
     check "tauSpec = [(0,e,1);(2,e,1)], dim 6"
-          (MLS.totalDim CB.tauSpec = 6) ""
+          (CB.tauSpec = [ { MLS.L = 0; MLS.Parity = 0; MLS.Mult = 1 }
+                          { MLS.L = 2; MLS.Parity = 0; MLS.Mult = 1 } ]
+           && MLS.totalDim CB.tauSpec = 6) ""
 
     // ---- bridge9 is orthogonal (rows orthonormal over R^9 Frobenius) ----
     let mutable orthoOk = true

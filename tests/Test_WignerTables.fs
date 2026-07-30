@@ -51,10 +51,44 @@ let runWignerTablesTests () : BlockResult =
     // Real (1,1,2) couples (m1,m2,m3) = (-1,+1,-2) — the y·x → xy entry —
     // where m1+m2 = 0 ≠ -2: the complex selection rule does NOT describe
     // the real support. 0-based components: (0, 2, 0).
+    //
+    // The coefficient is pinned EXACTLY at 1/sqrt(2), derived from the closed
+    // form in the same 3j normalization the sparse checks below establish
+    // (`sparse (1,1,0)` = -1/sqrt(3) on the diagonal is that same convention:
+    // U(l=1) row m=0 is the single complex mu=0 column, so that entry IS
+    // <1 0; 1 0 | 0 0> = 3j(1 1 0; 0 0 0) = -1/sqrt(3), no extra factor).
+    //
+    // Derivation. T[c1][c2][c3] = Σ_{mu1,mu2} conj(U1[c1][mu1]) conj(U2[c2][mu2])
+    // <l1 mu1; l2 mu2 | l3 mu3> U3[c3][mu3], mu3 = mu1 + mu2. With s = 1/sqrt 2
+    // the (phase-free real-SH) U rows in play are
+    //   U(1) row m=-1 : mu=-1 -> i·s,  mu=+1 -> i·s        (the "y" harmonic)
+    //   U(1) row m=+1 : mu=-1 ->   s,  mu=+1 ->  -s        (the "x" harmonic)
+    //   U(2) row m=-2 : mu=-2 -> i·s,  mu=+2 -> -i·s       (the "xy" harmonic)
+    // c1=0 (m1=-1), c2=2 (m2=+1), c3=0 (m3=-2). U3's row is supported only at
+    // mu3 = ±2, so of the four (mu1,mu2) pairs only (-1,-1) and (+1,+1) survive
+    // (the two with mu3 = 0 meet a zero column — that is the real support
+    // living OUTSIDE m1+m2 = m3):
+    //   (-1,-1): (-i·s)(  s)·<1,-1;1,-1|2,-2>·( i·s) = (-i·i)s^3 = s^3
+    //   (+1,+1): (-i·s)( -s)·<1,+1;1,+1|2,+2>·(-i·s) = ( i·-i)s^3 = s^3
+    // Both CGs are the highest/lowest-weight couplings and equal 1 exactly
+    // (Racah: 3j(1 1 2; 1 1 -2) = 1/sqrt 5, times the sqrt(2j3+1) = sqrt 5 in
+    // `clebsch`, times parity +1). Total = 2·s^3 = 2/(2·sqrt 2) = 1/sqrt(2).
+    // l1+l2+l3 = 4 is even, so the tensor is real and the -i phase fix does not
+    // fire; the value is positive as computed.
+    //
+    // SECOND, INDEPENDENT ROUTE (no 3j/U algebra at all), via the Cartesian
+    // bridge conventions: 1 (x) 1 -> 2 is the symmetric-traceless part of the
+    // outer product G_ij = u_i v_j, whose xy row is (G_01 + G_10)/sqrt 2
+    // (CartesianBridge.bridge9Rows, l=2 xy). Y1 component order is (y, z, x)
+    // so c1 = 0 is u_y and c2 = 2 is v_x; Y2 order is
+    // (xy, yz, 3z^2-r^2, xz, x^2-y^2) so c3 = 0 is xy. The coefficient of
+    // u_y·v_x in (u_x v_y + u_y v_x)/sqrt 2 is 1/sqrt(2). Same number, and it
+    // is also a cross-check that the two compiler-native tables share one
+    // convention.
     let t112 = realCGDense 1 1 2
-    check "real (1,1,2) has the (-1,+1,-2) entry (F1 witness)"
-          (abs t112.[0].[2].[0] > 0.1)
-          (sprintf "coef %g" t112.[0].[2].[0])
+    check "real (1,1,2) (-1,+1,-2) entry = 1/sqrt(2) (F1 witness)"
+          (close t112.[0].[2].[0] (1.0 / sqrt 2.0))
+          (sprintf "coef %.17g, want %.17g" t112.[0].[2].[0] (1.0 / sqrt 2.0))
 
     // ---- exchange antisymmetry of 1x1->1 (cross product) ----------------
     let t111 = realCGDense 1 1 1
