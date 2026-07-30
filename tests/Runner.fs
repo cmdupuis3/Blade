@@ -41,6 +41,21 @@ type FullTestResult = {
     /// so a codegen-stage reject-probe can be verified without re-reading the
     /// file later, when it may have been overwritten by a re-run.
     EmittedErrorGuard: bool
+    /// `// ERROR: BLxxxx [@ span]` pins from the source (Expect.parseDiagPins).
+    /// A reject-probe carrying these asserts WHY it is refused, not merely that
+    /// it is; see classifyWithDetailAs.
+    DiagPins: DiagPin list
+    /// `// ERROR-CONTAINS: <substring>` pins from the source. Each must be found
+    /// in some produced diagnostic message (or in the raw refusal text).
+    DiagContains: string list
+    /// The CODED diagnostics the front end produced, when the program was
+    /// refused AND the source carries pins. `lower` formats its error as a bare
+    /// string with the BLxxxx code stripped out, so the codes have to come from
+    /// a `lowerDiag` pass; that pass is paid only where a verdict depends on it
+    /// (see runFsharpPipelineLocked's wantDiags). Empty otherwise — which is
+    /// indistinguishable from "no pins to check", and that is fine: the pin
+    /// checker returns "satisfied" for an unpinned source either way.
+    ProducedDiags: Blade.Diagnostics.Diagnostic list
 }
 
 let testLower source =
@@ -90,7 +105,10 @@ let private fsharpPipelineLock = obj()
 /// Encapsulates the result of the F# pipeline phase (parse → IR → C++
 /// source generation), so the caller can run compile/run outside the lock.
 type private FsPipelineOutcome =
-    | FpIRError of string
+    /// The formatted refusal text, plus the CODED diagnostics behind it when the
+    /// caller asked for them (wantDiags). The two are the same rejection seen
+    /// through two renderers, never two different rejections.
+    | FpIRError of string * Blade.Diagnostics.Diagnostic list
     | FpIRValidationError of string list
     | FpIROnly of IRProgram          // compileAndRun = false, no .cpp generated
     /// ir, srcFile, warnings, backend, emitted-#error-guard. The guard flag is
@@ -99,11 +117,30 @@ type private FsPipelineOutcome =
     | FpCppGenerated of IRProgram * string * string list * BackendReq * bool
     | FpGenError of IRProgram * string  // ir was valid but codegen threw
 
-let private runFsharpPipelineLocked (source: string) (testName: string) (outputDir: string) (compileAndRun: bool) : FsPipelineOutcome =
+/// `wantDiags`: also recover the CODED diagnostics for a refused program.
+/// `lower` returns a formatted string with the BLxxxx code discarded
+/// (TypeEnv.formatCompileError renders location + message only), so a test that
+/// pins `// ERROR: BLxxxx` needs a second front-end pass through `lowerDiag`.
+/// That pass runs HERE — inside the same lock, on the same large stack, so it
+/// shares the serialization the module-level codegen caches require — and only
+/// for a source that actually carries pins, so the unpinned majority of the
+/// corpus pays nothing for it.
+let private runFsharpPipelineLocked (source: string) (testName: string) (outputDir: string) (compileAndRun: bool) (wantDiags: bool) : FsPipelineOutcome =
     lock fsharpPipelineLock (fun () ->
         let irResult = lower source
         match irResult with
-        | Error e -> FpIRError e
+        | Error e ->
+            let diags =
+                if not wantDiags then []
+                else
+                    // Same front end, same source, structured renderer. Both
+                    // entry points refuse on the same three grounds (parse,
+                    // typecheck, a throwing provider load), so this cannot
+                    // report a rejection that `lower` did not also see.
+                    match fst (lowerDiag None source) with
+                    | Error ds -> ds
+                    | Ok _ -> []
+            FpIRError (e, diags)
         | Ok ir ->
             match IR.validateIR ir with
             | Error validationErrors -> FpIRValidationError validationErrors
@@ -139,6 +176,14 @@ let runFullTest (testName: string) (source: string) (outputDir: string) (compile
     let abortExpectation = parseAbortExpectations source
     let rejectStage = parseRejectStage source
 
+    // Reject-REASON pins. Present on a "(rejects)" probe, they turn "the
+    // compiler refused this" into "the compiler refused this FOR THIS REASON",
+    // which is the difference between a probe that guards a checker and a probe
+    // that a stray parse error can keep green. Parsed for every test (the parse
+    // is a line scan) so the summary can count which probes still lack them.
+    let (diagPins, diagContains) = parseDiagPins source
+    let wantDiags = not (diagPins.IsEmpty && diagContains.IsEmpty)
+
     // Malformed-pin policy. Expect.parseMalformedExpectLines reports EVERY
     // `// EXPECT:` line it could not turn into a pin, including lines with no
     // `=` at all — it has no way to know which tests are allowed to write
@@ -166,7 +211,7 @@ let runFullTest (testName: string) (source: string) (outputDir: string) (compile
     // so at most one such thread does the deep work at a time. See Runtime.fs.
     let pipelineOutcome =
         Blade.Runtime.runOnLargeStack (fun () ->
-            runFsharpPipelineLocked source testName outputDir compileAndRun)
+            runFsharpPipelineLocked source testName outputDir compileAndRun wantDiags)
 
     // Hoisted so every result-record branch below can record it uniformly:
     // only the generated-source branch can have seen a `#error` guard, and
@@ -176,33 +221,44 @@ let runFullTest (testName: string) (source: string) (outputDir: string) (compile
         | FpCppGenerated (_, _, _, _, guard) -> guard
         | _ -> false
 
+    // Likewise hoisted: only the front-end-rejection branch can carry coded
+    // diagnostics, and every other branch must read as "none produced".
+    let producedDiags =
+        match pipelineOutcome with
+        | FpIRError (_, ds) -> ds
+        | _ -> []
+
     match pipelineOutcome with
-    | FpIRError e ->
+    | FpIRError (e, _) ->
         { TestName = testName; IRResult = Error e; CppGenerated = false;
           CppFile = None; CompileResult = Error "IR failed"; RunResult = Error "IR failed";
           ValueCheckResult = Error ["IR failed"]; HasExpectedValues = not expectedValues.IsEmpty; AbortExpectation = abortExpectation
           RejectStage = rejectStage; MalformedExpectLines = malformedExpectLines
-          EmittedErrorGuard = emittedErrorGuard }
+          EmittedErrorGuard = emittedErrorGuard
+          DiagPins = diagPins; DiagContains = diagContains; ProducedDiags = producedDiags }
     | FpIRValidationError validationErrors ->
         for e in validationErrors do printfn "  %s" e
         { TestName = testName; IRResult = Error (validationErrors |> String.concat "; "); CppGenerated = false;
           CppFile = None; CompileResult = Error "IR validation failed"; RunResult = Error "IR validation failed";
           ValueCheckResult = Error ["IR validation failed"]; HasExpectedValues = not expectedValues.IsEmpty; AbortExpectation = abortExpectation
           RejectStage = rejectStage; MalformedExpectLines = malformedExpectLines
-          EmittedErrorGuard = emittedErrorGuard }
+          EmittedErrorGuard = emittedErrorGuard
+          DiagPins = diagPins; DiagContains = diagContains; ProducedDiags = producedDiags }
     | FpIROnly ir ->
         { TestName = testName; IRResult = Ok ir; CppGenerated = false;
           CppFile = None; CompileResult = Error "Skipped"; RunResult = Error "Skipped";
           ValueCheckResult = Error ["Skipped"]; HasExpectedValues = not expectedValues.IsEmpty; AbortExpectation = abortExpectation
           RejectStage = rejectStage; MalformedExpectLines = malformedExpectLines
-          EmittedErrorGuard = emittedErrorGuard }
+          EmittedErrorGuard = emittedErrorGuard
+          DiagPins = diagPins; DiagContains = diagContains; ProducedDiags = producedDiags }
     | FpGenError (ir, msg) ->
         { TestName = testName; IRResult = Ok ir; CppGenerated = false;
           CppFile = None; CompileResult = Error msg;
           RunResult = Error "Generation failed"; ValueCheckResult = Error ["Generation failed"];
           HasExpectedValues = not expectedValues.IsEmpty; AbortExpectation = abortExpectation
           RejectStage = rejectStage; MalformedExpectLines = malformedExpectLines
-          EmittedErrorGuard = emittedErrorGuard }
+          EmittedErrorGuard = emittedErrorGuard
+          DiagPins = diagPins; DiagContains = diagContains; ProducedDiags = producedDiags }
     | FpCppGenerated (ir, srcFile, codegenWarnings, backendReq, _) ->
         for w in codegenWarnings do
             printfn "  [CodeGen Warning] %s" w
@@ -224,7 +280,8 @@ let runFullTest (testName: string) (source: string) (outputDir: string) (compile
               CppFile = Some srcFile; CompileResult = Error e; RunResult = Error runErr;
               ValueCheckResult = Error [runErr]; HasExpectedValues = not expectedValues.IsEmpty; AbortExpectation = abortExpectation
               RejectStage = rejectStage; MalformedExpectLines = malformedExpectLines
-              EmittedErrorGuard = emittedErrorGuard }
+              EmittedErrorGuard = emittedErrorGuard
+              DiagPins = diagPins; DiagContains = diagContains; ProducedDiags = producedDiags }
         | Ok exeFile ->
             // Step 4: Run — but a CUDA-requiring test on a GPU-less box can
             // compile yet not execute. Validate the compile, skip the run.
@@ -235,7 +292,8 @@ let runFullTest (testName: string) (source: string) (outputDir: string) (compile
                   ValueCheckResult = Error ["Skipped: no GPU"];
                   HasExpectedValues = not expectedValues.IsEmpty; AbortExpectation = abortExpectation
                   RejectStage = rejectStage; MalformedExpectLines = malformedExpectLines
-                  EmittedErrorGuard = emittedErrorGuard }
+                  EmittedErrorGuard = emittedErrorGuard
+                  DiagPins = diagPins; DiagContains = diagContains; ProducedDiags = producedDiags }
             else
                 let runResult = runExecutable exeFile
 
@@ -252,7 +310,8 @@ let runFullTest (testName: string) (source: string) (outputDir: string) (compile
                   CppFile = Some srcFile; CompileResult = Ok exeFile; RunResult = runResult;
                   ValueCheckResult = valueCheckResult; HasExpectedValues = not expectedValues.IsEmpty; AbortExpectation = abortExpectation
                   RejectStage = rejectStage; MalformedExpectLines = malformedExpectLines
-                  EmittedErrorGuard = emittedErrorGuard }
+                  EmittedErrorGuard = emittedErrorGuard
+                  DiagPins = diagPins; DiagContains = diagContains; ProducedDiags = producedDiags }
 
 /// A test whose name ends in "(aborts)" is a runtime-abort probe: the CORRECT
 /// outcome is that it compiles cleanly and then exits nonzero at runtime (a
@@ -289,6 +348,97 @@ let isIRPass (result: FullTestResult) =
 /// keeps the grand-total "failed tests" list honest.
 let isRejectProbe (result: FullTestResult) =
     result.TestName.EndsWith "(rejects)"
+
+/// Does this reject-probe pin the REASON it must be refused for?
+let hasRejectReasonPins (result: FullTestResult) =
+    not (result.DiagPins.IsEmpty && result.DiagContains.IsEmpty)
+
+/// Same pin/diagnostic relation Test_DiagCorpus uses: code must be equal, and a
+/// pinned start/end position must be equal too when the pin gives one.
+let private matchesDiagPin (p: DiagPin) (d: Blade.Diagnostics.Diagnostic) =
+    d.Code = p.PinCode
+    && (match p.PinStart with
+        | Some (l, c) -> d.Span.StartLine = l && d.Span.StartCol = c
+        | None -> true)
+    && (match p.PinEnd with
+        | Some (l, c) -> d.Span.EndLine = l && d.Span.EndCol = c
+        | None -> true)
+
+let private renderPin (p: DiagPin) =
+    sprintf "%s%s" p.PinCode
+        (match p.PinStart with Some (l, c) -> sprintf " @ %d:%d" l c | None -> "")
+
+let private renderDiag (d: Blade.Diagnostics.Diagnostic) =
+    sprintf "%s @ %d:%d" d.Code d.Span.StartLine d.Span.StartCol
+
+let private clip (n: int) (s: string) =
+    let one = s.Replace("\r\n", " ").Replace("\n", " ").Trim()
+    if one.Length <= n then one else one.Substring(0, n) + "..."
+
+/// The refusal EVIDENCE behind a reject-probe's verdict: the coded diagnostics
+/// the front end produced (empty unless it was the front end that refused, and
+/// unless the source carries pins) plus the raw text of whatever stage did the
+/// refusing. The compile output is part of the text because that is where a
+/// REJECT-AT: codegen probe's evidence lives — g++ echoes the emitted
+/// `#error "Blade codegen: ..."` message, and that message IS the deliberate
+/// refusal the probe pins. Skip messages are excluded: "no toolchain" is not a
+/// rejection reason, and letting it match a pin would be the same vacuity in a
+/// new place.
+let private rejectEvidence (result: FullTestResult) : Blade.Diagnostics.Diagnostic list * string =
+    let text =
+        [ (match result.IRResult with Error e -> e | Ok _ -> "")
+          (match result.CompileResult with Error e when not (isSkipError e) -> e | _ -> "") ]
+        |> List.filter (fun s -> s <> "")
+        |> String.concat "\n"
+    (result.ProducedDiags, text)
+
+/// Which of the source's reject-REASON pins the actual rejection does NOT
+/// satisfy, each rendered as expected-vs-actual. Empty means satisfied — which
+/// is also what an UNPINNED source returns, so every probe that carries no pins
+/// keeps exactly its previous verdict.
+///
+/// One-directional on purpose. Test_DiagCorpus is strict in BOTH directions
+/// (every produced diagnostic must be claimed by a pin) because the diagnostics
+/// corpus exists to pin the diagnostic SET exactly. A value-corpus reject-probe
+/// makes a narrower claim — this program is refused, and for this reason — so an
+/// extra cascade diagnostic alongside the pinned one is not a failure here.
+/// Pins are matched greedily 1:1 against the diagnostics, so two pins of the
+/// same code require two such diagnostics.
+///
+/// Evidence channels, in order of strength:
+///   * coded diagnostics (parse / typecheck / provider-load) — the only channel
+///     carrying BLxxxx codes and spans, so this is where a code pin is really
+///     checked;
+///   * the raw refusal text — IR-validation messages and the emitted codegen
+///     `#error` guard, neither of which carries a code today. A code pin can
+///     only be satisfied from text if the code literally appears there; when it
+///     does not, the pin is reported as unmatched rather than waved through,
+///     because "the pinned code is unverifiable on this path" is exactly the
+///     kind of silence this whole change exists to remove.
+let private rejectReasonMisses (result: FullTestResult) : string list =
+    if not (hasRejectReasonPins result) then []
+    else
+        let (diags, text) = rejectEvidence result
+        let actual =
+            if diags.IsEmpty then
+                sprintf "no coded diagnostics were produced; refusal text: %s" (clip 200 text)
+            else sprintf "produced %s" (diags |> List.map renderDiag |> String.concat ", ")
+        let mutable remaining = diags
+        let codeMisses = ResizeArray<string>()
+        for p in result.DiagPins do
+            match remaining |> List.tryFindIndex (matchesDiagPin p) with
+            | Some i ->
+                remaining <- remaining |> List.indexed |> List.filter (fun (j, _) -> j <> i) |> List.map snd
+            | None ->
+                if not (text.Contains p.PinCode) then
+                    codeMisses.Add (sprintf "expected // ERROR: %s but %s" (renderPin p) actual)
+        let containsMisses =
+            result.DiagContains
+            |> List.filter (fun s ->
+                not (diags |> List.exists (fun d -> d.Message.Contains s)) && not (text.Contains s))
+            |> List.map (fun s ->
+                sprintf "expected the rejection to mention '%s' but %s" s actual)
+        (List.ofSeq codeMisses) @ containsMisses
 
 /// Per-stage status strings, in pipeline order. "OK" / "FAIL" / "SKIP", plus
 /// "EXIT(n)" for a nonzero run. The value stage is present only when the test
@@ -343,29 +493,55 @@ let private stageStatuses (result: FullTestResult) : (string * string) list =
 ///     is the whole point, since it is what distinguishes "our deliberate
 ///     refusal fired" from "we emitted garbage C++" and from "g++ is broken".
 ///
+///  3b. ...and, when its source pins the REASON via `// ERROR: BLxxxx` /
+///     `// ERROR-CONTAINS:`, the rejection that happened must be THAT rejection.
+///     Pinning only the STAGE left a hole: ANY lowering `Error` credited a
+///     RejectAtLower probe, so a typo that turned the probe into a parse error —
+///     or a renamed intrinsic, or an unrelated checker tightening upstream of
+///     the rule under test — kept the probe green while the checker it was
+///     written to guard went completely untested. That is not hypothetical; it
+///     was reproduced. A pinned probe now asserts a SPECIFIC diagnostic, and a
+///     mismatch reports expected vs actual. Probes with no pins keep exactly
+///     their old verdict, and the summary counts how many those are.
+///
 ///  4. An abort-probe must compile, run, and exit nonzero with its pinned
 ///     `// ABORT:` message (isExpectedAbort).
 ///
 ///  5. A normal test must be a full pass and, when it carries pins, must pass
 ///     the value check. Compiles-clean-but-prints-the-wrong-numbers is a
 ///     failure; that class is the entire reason EXPECT checks exist.
-let classifyWithDetail (result: FullTestResult) : Blade.Tests.TestHarness.Outcome * string =
+///
+///  `forceRejectProbe` applies rule 3 to a test whose NAME carries no
+///  "(rejects)" marker, for the benefit of a corpus that is entirely negative
+///  (InterpDiff.rejectOnlyCategories). It exists so that gate can reuse THIS
+///  classifier instead of writing its own weaker rule, which is precisely how
+///  the interp gate came to credit a reject-probe on any non-full-pass.
+let classifyWithDetailAs (forceRejectProbe: bool) (result: FullTestResult) : Blade.Tests.TestHarness.Outcome * string =
     let stages = stageStatuses result
     let anyFail = stages |> List.exists (fun (_, s) -> s = "FAIL" || s.StartsWith "EXIT")
     let anySkip = stages |> List.exists (fun (_, s) -> s = "SKIP")
     let compileSkipped =
         match result.CompileResult with Error e when isSkipError e -> true | _ -> false
+    let pinNote = if hasRejectReasonPins result then " (pinned reason matched)" else ""
 
     if not result.MalformedExpectLines.IsEmpty then
         Blade.Tests.TestHarness.Fail,
         sprintf "unparseable EXPECT pin(s): %s"
             (result.MalformedExpectLines |> String.concat " | ")
 
-    elif isRejectProbe result then
+    elif isRejectProbe result || forceRejectProbe then
         match result.RejectStage with
         | RejectAtLower ->
             match result.IRResult with
-            | Error _ -> Blade.Tests.TestHarness.Pass, "correctly rejected during lowering"
+            | Error _ ->
+                match rejectReasonMisses result with
+                | [] ->
+                    Blade.Tests.TestHarness.Pass,
+                    sprintf "correctly rejected during lowering%s" pinNote
+                | misses ->
+                    Blade.Tests.TestHarness.Fail,
+                    sprintf "rejected during lowering, but NOT for the pinned reason: %s"
+                        (String.concat " ; " misses)
             | Ok _ ->
                 Blade.Tests.TestHarness.Fail,
                 "expected rejection during lowering, but the program lowered"
@@ -395,13 +571,38 @@ let classifyWithDetail (result: FullTestResult) : Blade.Tests.TestHarness.Outcom
                     | Error e when isSkipError e ->
                         Blade.Tests.TestHarness.Skip, "#error guard emitted but not compiled (toolchain unavailable)"
                     | Error _ ->
-                        Blade.Tests.TestHarness.Pass, "correctly rejected by the emitted #error guard"
+                        // The guard-emitted + compile-failed logic above is
+                        // untouched; the pins are an ADDITIONAL requirement,
+                        // checked against the compile output (where g++ echoes
+                        // the `#error "Blade codegen: ..."` text). Only
+                        // // ERROR-CONTAINS: is really checkable on this path —
+                        // codegen guards carry no BLxxxx code — and a code pin
+                        // that cannot be found says so rather than passing.
+                        match rejectReasonMisses result with
+                        | [] ->
+                            Blade.Tests.TestHarness.Pass,
+                            sprintf "correctly rejected by the emitted #error guard%s" pinNote
+                        | misses ->
+                            Blade.Tests.TestHarness.Fail,
+                            sprintf "the #error guard fired, but NOT for the pinned reason: %s"
+                                (String.concat " ; " misses)
                     | Ok _ ->
                         Blade.Tests.TestHarness.Fail,
                         "#error guard emitted but the C++ compiled anyway"
 
     elif isAbortProbe result then
-        if isExpectedAbort result then
+        // An abort-probe with no `// ABORT:` pin is the abort-side twin of an
+        // unpinned reject-probe: `isExpectedAbort`'s `List.forall` over an empty
+        // pin list is vacuously TRUE, so ANY nonzero exit satisfies it — a
+        // segfault in unrelated generated code, a missing runtime DLL, an
+        // uncaught C++ exception. The probe exists to assert that a SPECIFIC
+        // guard fired, and without a pin it cannot. Every abort-probe in the
+        // corpus carries one today, so this is a standing lock on that, not a
+        // verdict change.
+        if result.AbortExpectation.IsEmpty then
+            Blade.Tests.TestHarness.Fail,
+            "abort-probe has no // ABORT: pin -- any nonzero exit would satisfy it, so it asserts nothing"
+        elif isExpectedAbort result then
             let code = match result.RunResult with Ok (c, _) -> c | _ -> 0
             Blade.Tests.TestHarness.Pass, sprintf "aborted as expected (exit %d)" code
         else
@@ -431,6 +632,11 @@ let classifyWithDetail (result: FullTestResult) : Blade.Tests.TestHarness.Outcom
         // One-liner for passes (#3): the stages that ran, as the detail.
         Blade.Tests.TestHarness.Pass,
         sprintf "(%s)" (stages |> List.map fst |> String.concat ",")
+
+/// THE verdict for a test classified by its own name (see classifyWithDetailAs
+/// for the forced-reject-probe variant the interp gate needs).
+let classifyWithDetail (result: FullTestResult) : Blade.Tests.TestHarness.Outcome * string =
+    classifyWithDetailAs false result
 
 /// The verdict alone. Everything that needs to bucket a result — the roll-up,
 /// the summary counters — goes through here, never through an ad-hoc predicate.
@@ -769,6 +975,16 @@ let runTestCategoryFull (name: string) (tests: (string * string) list) (outputDi
         rejectAtLower |> List.filter (fun r -> not (isIRPass r)) |> List.length
     let unexpectedIrFailures = irFailed - expectedIrRejections
 
+    // Reject-probes that pin only the STAGE, not the REASON. Such a probe passes
+    // on "the compiler refused this", a condition an UNRELATED refusal satisfies
+    // just as well as the rule the probe was written to guard — so it can sit
+    // green over a checker that no longer runs. That is a real, reproduced
+    // failure mode, not a theoretical one, and it is invisible in a pass/fail
+    // tally, so the remaining exposure is stated as a number until every probe
+    // carries a `// ERROR:` pin.
+    let unpinnedRejectProbes =
+        rejectProbes |> List.filter (fun r -> not (hasRejectReasonPins r)) |> List.length
+
     // Tests carrying an EXPECT line the harness could not parse. Reported so
     // a corpus authoring error is visible as such rather than as a mysterious
     // failure in an unrelated stage.
@@ -798,6 +1014,9 @@ let runTestCategoryFull (name: string) (tests: (string * string) list) (outputDi
     if not rejectProbes.IsEmpty || not abortProbes.IsEmpty then
         printfn "Probes:       %d reject (%d lower, %d codegen), %d abort"
             rejectProbes.Length rejectAtLower.Length rejectAtCodegen.Length abortProbes.Length
+    if unpinnedRejectProbes > 0 then
+        printfn "Unpinned:     %d reject-probe(s) lack // ERROR: pins -- they assert THAT the compiler refused them, not WHY"
+            unpinnedRejectProbes
     printfn "C++ Generated: %d / %d  (CUDA backend: %d)" generated results.Length cudaTests
     if gppAvailable then
         printfn "Compiled:     %d / %d" compiled results.Length
