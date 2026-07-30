@@ -19,12 +19,15 @@ them as assets: edit deliberately, never regenerate mechanically.
   the compiler refuses it. Renaming a test changes its semantics; see the
   guard-combinators/007 header for a cautionary tale about duplicate names.
 - `// EXPECT: <var> = <value>` lines are parsed by tests/Expect.fs and checked
-  against the program's printed output. Scalars, 1-D arrays, complex pairs
-  `(re, im)`, and quoted strings are checked.
-- **2-D `[[..]]` expectations parse but are NOT checked** — Expect.fs matches
-  `ExpectedArray2D` and returns "no failure" unconditionally, so a nested EXPECT
-  silently asserts nothing. Multi-dimensional results print FLAT anyway, so pin
-  them as a flat 1-D list, which is really checked.
+  against the program's printed output. Scalars, 1-D arrays, 2-D `[[..]]`
+  arrays, complex pairs `(re, im)`, and quoted strings are all checked.
+- **2-D `[[..]]` expectations** are compared against nested actual output
+  (`[[0, 1], [20, 21]]`) row count first, then per-row length, then elements.
+  If the printer instead emits a flat run — `genPrintArrayFlat` /
+  `genPrintArraySymAware` do this for rank-2+ arrays, since the nested loops
+  they walk produce one comma-separated run with no row boundaries — the pin
+  is compared against its own row-major flattening instead; every element and
+  the total count are still checked, only the row split is unobservable.
 - Files run in ordinal filename order — keep the `NNN_` prefix.
 
 ## Categories
@@ -33,8 +36,11 @@ Loaded by tests/Corpus.fs; named in the Test_*.fs modules (e.g. Test_Basic.fs
 maps `basicTests` to `basic/`). `multifile/` holds one subdirectory per test,
 one `.blade` per module file (with `// MODULE:`), compiled together.
 
-`mutability-errors/`, `struct-aborts/`, and `unit-errors/` are preserved
-assets whose runners were removed as dead code; they are not currently run.
+`mutability-errors/` and `unit-errors/` are preserved assets for a future
+expected-error runner; they are not currently run. `struct-aborts/` IS run
+(via `structAbortTests` in tests/RunAll.fs's `allTests`, also reachable as
+`blade test struct-aborts`) — its tests expect compile success followed by a
+nonzero runtime exit, pinned by `// ABORT:`.
 
 To add a test: create `<category>/NNN_<slug>.blade` with the next free number.
 No recompilation is needed — the suite reads these files at run time. When run
