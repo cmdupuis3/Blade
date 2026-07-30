@@ -66,14 +66,26 @@ let memfreeTests = Blade.Tests.Corpus.category "memfree"
 /// construction until scope-exit frees land.
 let memfreeStressTests = Blade.Tests.Corpus.category "memfree-stress"
 
+/// deferred-concrete — `<$>` / `<|>` / sequence / guard applied to CONCRETE
+/// arrays, i.e. the combinators forced through the value pipeline rather than
+/// left deferred. The category existed only inside InterpDiff.currentSlice, so
+/// its seven files ran ONLY under the opt-in interpreter gate and never in a
+/// default `blade test` — the compiled half of the differential was never
+/// exercised on its own. Declared here (not in a Test_*.fs) for the same reason
+/// memfree is: the category's consumers are `allTests` below and the interp
+/// slice, so it lives next to the former. Reachable from Cli.fs as
+/// `Blade.Tests.RunAll.deferredConcreteTests`, like memfree.
+let deferredConcreteTests = Blade.Tests.Corpus.category "deferred-concrete"
+
 /// All tests combined
 let allTests =
     basicTests @ intrinsicsTests @ adTests @ mlE2eTests @ mlOpsTests @ mlEquivTests @ loopTests @ symmetryTests @ reynoldsTests @ arityTests @ functionTests
     @ structTests @ structAbortTests @ structMutualTests @ sumTypeTests @ interfaceTests @ moduleTests @ guardTests @ guardCombinatorTests @ zeroCombinatorTests @ sequenceCombinatorTests @ tupleViewTests @ replicateTests @ anonRangeTests @ recursiveArrayTests @ bracketedTests
-    @ indexTypeTests @ mutabilityTests @ staticTests @ pplTests @ mathTests @ randTests @ spectraTests @ fallbackTests @ stackJoinTests @ sgsTests @ unitTests
+    @ indexTypeTests @ mutabilityTests @ mutabilityErrorTests @ staticTests @ pplTests @ mathTests @ randTests @ spectraTests @ fallbackTests @ stackJoinTests @ sgsTests @ unitTests @ unitErrorTests
     @ foreignKeyTests @ maskTests @ setOpTests @ uniqueContainsTests @ semijoinTests @ groupByTests @ sortTests @ reduceTests @ extentsTests @ extentsMultiRankTests @ regressionTests @ sqlCombinedTests @ v24dProbes
     @ inferenceProbes
     @ funcArrayTests
+    @ deferredConcreteTests
     @ memfreeTests @ memfreeStressTests
 
 /// Which optional, toolchain-heavy blocks the full suite should include.

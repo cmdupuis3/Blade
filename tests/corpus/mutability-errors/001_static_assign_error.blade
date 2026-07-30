@@ -1,9 +1,9 @@
-// TEST: Static assign error
+// TEST: Static assign error (rejects)
+// ERROR: BL4005
 // ============================================================================
-// Negative tests: should FAIL type checking
-// ============================================================================
-// ============================================================================
-// Negative tests: should FAIL type checking
+// Negative test: plain assignment to a `let static` binding must FAIL type
+// checking. BL4005 is the immutable-binding band ("static bindings are
+// immutable"), which is exactly this test's stated intent.
 // ============================================================================
 let static x = 1
 let result = {

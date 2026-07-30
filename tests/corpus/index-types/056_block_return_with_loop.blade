@@ -1,6 +1,27 @@
 // TEST: Block Return With Loop
-// Block with method_for should still return final expression
+// Block with method_for should still return final expression — and the final
+// expression DEPENDS on the loop, so "returned the block tail" is assertable.
+// (A literal `0.0` tail with `L` discarded passed even if the loop binding had
+// been dropped on the floor.)
+//
+// The kernel is deliberately NOT commutative, for two reasons: reading the two
+// MIRRORED cells then pins index ORDER (a symmetric kernel like `x * y` makes
+// P(1,2) and P(2,1) equal, so a transposed emission would still pass), and it
+// keeps the commutative-storage advisory (BL4010) out of the suite's output.
+//
+// HAND DERIVATION (a = [1, 2, 3]):
+//   method_for(A, A) is the Cartesian outer product, so P(i, j) = a(i)*10 + a(j).
+//   P(1, 2) = 2*10 + 3 = 23
+//   P(2, 1) = 3*10 + 2 = 32
+//   s = 23 + 32 = 55
+// The application is let-bound before the reads because consuming a deferred
+// computation in an arbitrary expression position is not supported (codegen
+// emits a REDUCE_OVER_A_DEFERRED_COMPUTATION guard).
 function g(A: Array<Float64 like Idx<n>>) -> Float64 = {
     let L = method_for(A, A)
-    0.0
+    let P = L <@> lambda(x: Float64, y: Float64) -> x * 10.0 + y |> compute
+    P(1, 2) + P(2, 1)
 }
+let a = [1.0, 2.0, 3.0]
+let s = g(a)
+// EXPECT: s = 55

@@ -1,4 +1,7 @@
-// TEST: Static function reassign error
+// TEST: Static function reassign error (rejects)
+// ERROR: BL4005
+// A static binding whose value is a LAMBDA is immutable like any other: the
+// immutability check is on the binding, not on the bound value's kind.
 let static f = lambda(x) -> x + 1
 let result = {
     f = lambda(x) -> x + 2

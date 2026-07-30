@@ -1,5 +1,7 @@
-// TEST: Unit Mismatch Add
-// Adding incompatible units is a type error
+// TEST: Unit Mismatch Add (rejects)
+// ERROR: BL3006
+// Adding incompatible units is a type error. BL3006 is the unit-algebra band
+// ("Unit mismatch in addition: meters vs seconds"), matching the intent.
 Unit meters
 Unit seconds
 let dist: Float<meters> = 10.0
