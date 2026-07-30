@@ -1,4 +1,5 @@
 // TEST: Struct Missing Field (rejects)
+// ERROR: BL3008
 // Omitting a declared field at construction must be a compile error —
 // constraints and downstream field reads assume every field is populated.
 struct Point {

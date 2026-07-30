@@ -1,4 +1,5 @@
 // TEST: Unit Array Elementwise Mismatch (rejects)
+// ERROR: BL3006
 // Elementwise + of a meters-array and a seconds-array is a unit error —
 // the same rule as the scalar dist + time. The check happens at the zip
 // kernel-synthesis site in inferBinOp (the synthesized lambda's body is

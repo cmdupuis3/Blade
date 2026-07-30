@@ -1,4 +1,5 @@
 // TEST: Static Method For Runtime Count (rejects)
+// ERROR: BL4002
 // The count driving a staged rep must be compile-time: a runtime n makes
 // the inlined if-condition unfoldable — located "does not evaluate at
 // compile time" error from the unfold pass.

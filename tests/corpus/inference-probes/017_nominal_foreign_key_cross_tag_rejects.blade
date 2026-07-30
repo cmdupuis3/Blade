@@ -1,4 +1,5 @@
 // TEST: Nominal: Foreign Key Cross-Tag (rejects)
+// ERROR: BL4003
 // Foreign-key dereference variant of probe_v10. A foreign-key array
 // produces tagged values via co-iteration in a kernel; using one of those
 // values to index a sibling array with a DIFFERENT nominal tag must be

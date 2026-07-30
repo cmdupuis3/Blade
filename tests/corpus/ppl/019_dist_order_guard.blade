@@ -1,4 +1,5 @@
 // TEST: Dist Order Guard (rejects)
+// ERROR: BL3007
 import ppl as ppl
 // "Insufficient stochastic order" is a TYPE error: cumulant(d, 3) on a
 // Dist<2, ...> parameter fails at check time (TypeCheck.inferCumulantProj),

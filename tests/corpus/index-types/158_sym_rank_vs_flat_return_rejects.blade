@@ -1,4 +1,5 @@
 // TEST: Compact Rank vs Flat Return (rejects)
+// ERROR: BL4004
 // A declared rank-K compact return type must not accept a rank-1 flat body.
 // SymIdx<2,3> is ONE index slot (IndexTypes.Length = 1, same as Idx<6>) but
 // TWO index components, and codegen ranks an array by summing component

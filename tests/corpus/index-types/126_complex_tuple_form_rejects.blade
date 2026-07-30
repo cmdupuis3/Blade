@@ -1,4 +1,5 @@
 // TEST: Complex Tuple Form Retired (rejects)
+// ERROR: BL3999
 // The historical 2-tuple complex-literal cast `(re, im) : Complex128` is
 // retired in favor of the complex(re, im) constructor call (the cast form
 // had a precedence trap: `a * (re, im) : T` bound the cast OUTSIDE the

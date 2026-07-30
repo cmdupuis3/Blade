@@ -1,4 +1,5 @@
 // TEST: Antisymm and comm on the same pair (rejects)
+// ERROR: BL1999
 // `comm` and `anticomm` over the same exchange fuse into ONE axis group, and
 // that group's storage would have to be simultaneously inclusive (diagonal
 // stored) and strict (diagonal implicitly zero) — iteration and layout would

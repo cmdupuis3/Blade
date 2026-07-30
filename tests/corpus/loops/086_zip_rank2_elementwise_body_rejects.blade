@@ -1,4 +1,5 @@
 // TEST: Zip Rank-2 Elementwise Kernel Body (rejects)
+// ERROR: BL3999
 // `ra * rb` between two rank-1 ROW params is an elementwise array-valued kernel
 // body. The both-array binop arm re-synthesizes it into a nested
 // compute(method_for(zip(ra, rb)) <@> lambda(zl, zr) -> zl * zr), whose output

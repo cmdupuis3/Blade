@@ -1,4 +1,5 @@
 // TEST: Spectra fft2 unwitnessed argument (rejects)
+// ERROR: BL5400
 // The widened gate accepts four kinds of DECLARED shape, and nothing else: a
 // bare arithmetic expression still carries no compile-time shape, so it is
 // rejected with the steer listing the four. (`sp.fft2((f * 2.0 : RF4))` is the

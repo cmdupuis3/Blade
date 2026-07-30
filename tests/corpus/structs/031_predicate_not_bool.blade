@@ -1,4 +1,5 @@
 // TEST: Struct Predicate Not Bool (rejects)
+// ERROR: BL4001
 // A where-conjunct calling an Int-returning function is a type error.
 static function total_of(a: Int, b: Int) -> Int = a + b
 struct Bad {

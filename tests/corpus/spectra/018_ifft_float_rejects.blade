@@ -1,4 +1,5 @@
 // TEST: Spectra ifft: real argument steers to the complex spectrum (rejects)
+// ERROR: BL5400
 // ifft takes the complex spectrum (Array<Complex128 like Idx<n>>); a real
 // signal is rejected with steering toward the annotated-rebind idiom.
 import spectra as sp

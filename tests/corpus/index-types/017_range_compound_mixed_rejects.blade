@@ -1,4 +1,5 @@
 // TEST: Range Compound Mixed (rejects)
+// ERROR: BL3999
 // A CompoundIdx slot IS the whole (masked product) iteration space, so it
 // cannot share a range<> with other index types -- unlike ordinary index
 // types, which DO combine freely (see loops/067). The gate is a TYPECHECK

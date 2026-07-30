@@ -1,4 +1,5 @@
 // TEST: Validator: EnumIdx Mixed Values Inline (rejects)
+// ERROR: BL3999
 // Same kind of mixed-values rejection, but inline (no `type X = ...`).
 // Uses `Array<T like EnumIdx<[...]>>` — index domain position, which the
 // IndexTypeValidator permits. The mixed-values pre-pass then catches the

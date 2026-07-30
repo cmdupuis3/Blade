@@ -1,4 +1,5 @@
 // TEST: Join Dimension Out Of Range (rejects)
+// ERROR: BL4004
 // The joined dimension selects an index slot, so it is compile-time data and is
 // range-checked against the operands' rank (BL4004), exactly like transpose's
 // axis pair. Rank-1 operands admit only d = 0.
