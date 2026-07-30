@@ -1199,11 +1199,14 @@ and private interpretNest
             let baseArr = realAt pos
             let currentArr = Map.tryFind pos curArrays |> Option.defaultValue baseArr
             let isSliced = Set.contains pos sliced
-            // Absolute flat coordinate: local loop var + (bound-deps + strict) if
-            // reading the ORIGINAL array; local var + strict only if already
-            // peeled at an outer level (deps already consumed by the slice).
+            // Absolute flat coordinate: local loop var + bound-deps + strict if
+            // reading the ORIGINAL array. Once the array has been peeled at an
+            // outer level, the slice IS the storage row: allocCompact already
+            // shortened it and seeded it past the diagonal, so the 0-based loop
+            // var is the slot and BOTH shifts drop (mirrors CodeGen's
+            // genElementBindingNew RealArray arm).
             let index =
-                if isSliced then i + int64 b.StrictOffset
+                if isSliced then i
                 else (b.BoundDependencies |> List.sumBy (fun d -> idxVals.[d])) + int64 b.StrictOffset + i
             let peeled = A.peelDim currentArr index
             paramCells.[elem.ParamVarId].V <- peeled

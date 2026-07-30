@@ -3350,6 +3350,14 @@ let buildLoopNestCodeGen
                 // >= 3 a flat 1 under-shifts, making the loop visit non-canonical
                 // tuples with repeated indices that alias storage cells — the
                 // antisym rank-3 storage-collision bug.)
+                //
+                // SCOPE: this offset belongs to the loop BOUND and to the
+                // ABSOLUTE coordinate of a flat (dense, not-yet-peeled) read.
+                // It is NOT a storage subscript. A peeled row of a strict-packed
+                // array is already diagonal-free and already shortened by the
+                // allocator, so the 0-based loop var IS the slot; re-adding this
+                // offset there walks one cell past the row (CodeGen's
+                // genElementBindingNew isSliced arm, Interp's peelElement).
                 let strictOffset =
                     if isTriangular &&
                        (levelInfo.IndexSpace.Symmetry = SymAntisymmetric
