@@ -18,7 +18,11 @@ open Blade.Tests.TestHarness
 
 let runMpiTests () : Blade.Tests.TestHarness.BlockResult =
     printHeader "MPI Decomposition Tests"
-    let skipResult = { Block = "MPI Decomposition"; Passed = 0; Failed = 0; Skipped = 0; FailedNames = [] }
+    // Skipped = 1, not 0: with Skipped = 0 a box without MS-MPI printed
+    // "0 passed, 0 failed" for this block, indistinguishable from a block that
+    // genuinely had nothing to do. Each branch below prints the reason. Same
+    // convention as DiffOracle/InterpDiff.
+    let skipResult = { Block = "MPI Decomposition"; Passed = 0; Failed = 0; Skipped = 1; FailedNames = [] }
     let caps = capabilities.Value
     if not caps.HasGpp then
         printfn "Skipped: requires g++, not found."
@@ -42,7 +46,14 @@ let runMpiTests () : Blade.Tests.TestHarness.BlockResult =
                 match lower src with
                 | Error e -> Error (sprintf "lower failed: %s" e)
                 | Ok ir0 ->
-                    let ir = match IR.validateIR ir0 with Ok v -> v | Error _ -> ir0
+                    // Hard-fail on validation errors rather than generating from
+                    // invalid IR (was `| Error _ -> ir0`). The serial/mpi
+                    // differential compares two variants of the SAME source, so
+                    // both would be equally wrong and would still agree.
+                    match IR.validateIR ir0 with
+                    | Error validationErrors ->
+                        Error (sprintf "IR validation failed: %s" (String.concat "; " validationErrors))
+                    | Ok ir ->
                     let (cppCode, _w) = CodeGen.genSelfContainedProgramFromIR ir name
                     let safe = sanitizeFileName name
                     let cppFile = Path.Combine(outputDir, safe + ".cpp")
@@ -123,7 +134,11 @@ let runMpiTests () : Blade.Tests.TestHarness.BlockResult =
                 let oracle = resultLines sOut
                 let mismatches =
                     runs |> List.filter (fun (_, out) -> resultLines out <> oracle)
-                if mismatches.IsEmpty then
+                // Both sides print result lines; an empty oracle makes every
+                // comparison "" = "" and the case would pass vacuously.
+                if System.String.IsNullOrWhiteSpace oracle then
+                    fail label "serial oracle produced no output -- nothing to compare"
+                elif mismatches.IsEmpty then
                     pass label "mpi -n 1/2/4 all match serial oracle"
                 else
                     let (n, out) = List.head mismatches

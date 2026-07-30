@@ -52,10 +52,14 @@ open Blade.Tests.Oracles
 // finer codegen split. We still take the MEDIAN of several runs after a warmup
 // (timing is noisy) and use large extents so compute dominates.
 //
-// POLICY: this block never FAILS on a slow ratio (timing is machine- and
-// scheduler-dependent). It WARNS when the measured ratio falls below a
-// fraction of the theoretical ceiling, and otherwise reports PASS with the
-// observed numbers. A genuine error (compile/run/parse failure) is a failure.
+// POLICY: a genuine error (compile/run/parse failure) is a failure. So is a
+// measured ratio BELOW lowerFrac x the cell-count prediction: that is not
+// timing noise, it is the symmetry not being exploited — the one thing this
+// block exists to detect. (Every arm used to be a PASS, WARN included, which
+// made the whole block unfalsifiable: no measurement could ever turn it red.)
+// An implausibly HIGH ratio stays a WARN, since overshoot is a benign
+// cache-locality effect and the upper bound is only an artifact heuristic.
+// The bands are deliberately loose so scheduler noise does not fail the block.
 
 /// Compile an .edgi snippet, run it `runs` times after one warmup, and return
 /// the MEDIAN wall time (seconds) parsed from the "<name> completed in <t>s"
@@ -65,7 +69,12 @@ let private timeEdgiProgramOnly (outputDir: string) (caseName: string) (edgiSrc:
         match lower edgiSrc with
         | Error e -> Error (sprintf "lower failed: %s" e)
         | Ok ir0 ->
-            let ir = match IR.validateIR ir0 with Ok v -> v | Error _ -> ir0
+        // Hard-fail on validation errors rather than timing invalid IR
+        // (was `| Error _ -> ir0`).
+        match IR.validateIR ir0 with
+        | Error validationErrors ->
+            Error (sprintf "IR validation failed: %s" (String.concat "; " validationErrors))
+        | Ok ir ->
             let safeName = "timing_" + caseName.Replace(" ", "_").Replace("=", "")
             // Split-timing codegen: the emitted program reports input-allocation
             // and compute as separate clocks; the "completed in" line we parse
@@ -109,12 +118,20 @@ let private timeEdgiProgramOnly (outputDir: string) (caseName: string) (edgiSrc:
                     rpsi.WorkingDirectory <- Path.GetDirectoryName(exeAbs)
                     use rproc = Process.Start(rpsi)
                     let rout = rproc.StandardOutput.ReadToEndAsync()
-                    // Kill a runaway run on timeout so rout.Result returns (a
-                    // graceful "no completed in" Error) instead of blocking
-                    // indefinitely on a process that may never exit.
-                    if not (rproc.WaitForExit(180000)) then (try rproc.Kill() with _ -> ())
+                    // Kill a runaway run on timeout so rout.Result returns
+                    // instead of blocking indefinitely on a process that may
+                    // never exit. A timed-out or nonzero-exit run is an ERROR,
+                    // not a sample: relying on "no completed in" alone would
+                    // silently accept a bogus time from a run that printed the
+                    // line and then aborted.
+                    let rExited = rproc.WaitForExit(180000)
+                    if not rExited then
+                        (try rproc.Kill() with _ -> ())
+                        rproc.WaitForExit(5000) |> ignore
                     let m = System.Text.RegularExpressions.Regex.Match(rout.Result, @"completed in\s+([0-9.eE+-]+)s")
-                    if m.Success then
+                    if not rExited then Error "run timed out (>180s)"
+                    elif rproc.ExitCode <> 0 then Error (sprintf "run exited %d" rproc.ExitCode)
+                    elif m.Success then
                         (match System.Double.TryParse(m.Groups.[1].Value, System.Globalization.NumberStyles.Float, System.Globalization.CultureInfo.InvariantCulture) with
                          | true, v -> Ok v
                          | _ -> Error (sprintf "could not parse elapsed '%s'" m.Groups.[1].Value))
@@ -157,7 +174,10 @@ let runDifferentialTimingTests () : Blade.Tests.TestHarness.BlockResult =
     let caps = capabilities.Value
     if not caps.HasGpp then
         printfn "Skipped: g++ not found (cannot compile timing cases)."
-        { Block = "Differential Timing"; Passed = 0; Failed = 0; Skipped = 0; FailedNames = [] }
+        // Skipped = 1, not 0: a Skipped = 0 return made a toolchain-less box
+        // print "0 passed, 0 failed" with no skip note. Same convention as
+        // DiffOracle/InterpDiff.
+        { Block = "Differential Timing"; Passed = 0; Failed = 0; Skipped = 1; FailedNames = [] }
     else
         Directory.CreateDirectory(outputDir) |> ignore
         let runs = 5
@@ -213,20 +233,28 @@ let runDifferentialTimingTests () : Blade.Tests.TestHarness.BlockResult =
                 // ABOVE the cell-count prediction (a real, benign effect, e.g.
                 // r=2 measured 4.43x vs cell-count 3.75x). So this is a tolerance
                 // BAND, not a one-sided floor:
-                //   - below lowerFrac·prediction  -> WARN (genuine shortfall: the
-                //     symmetry is not being exploited — the failure signal);
+                //   - below lowerFrac·prediction  -> FAIL (genuine shortfall: the
+                //     symmetry is not being exploited — the failure signal, and
+                //     the reason this block exists. This arm used to report PASS
+                //     with a "WARN:" prefix in the detail string, so the one
+                //     outcome the block is meant to catch could never turn it
+                //     red. lowerFrac is loose (0.70) precisely so that scheduler
+                //     noise stays inside the band and only a real regression —
+                //     triangular iteration silently reverting to full-hypercube —
+                //     crosses it.)
                 //   - within [lowerFrac·pred, upperMult·pred] -> clean pass
                 //     (the expected zone, including a cache-bonus overshoot);
                 //   - above upperMult·prediction   -> WARN (implausibly fast —
                 //     likely a measurement artifact, e.g. a degenerate dense arm
-                //     doing near-zero work, NOT a real speedup).
+                //     doing near-zero work, NOT a real speedup). Stays a PASS:
+                //     overshoot is benign and the bound is a heuristic.
                 let lowerFrac = 0.70
                 let upperMult = 5.0
                 if ratio < lowerFrac * expectedRatio then
-                    Blade.Tests.TestHarness.resultLine Blade.Tests.TestHarness.Pass label
-                        (sprintf "%s -- WARN: below %.0f%% of cell-count prediction (symmetry under-exploited?)" detail (lowerFrac * 100.0))
-                    warned <- warned + 1
-                    passed <- passed + 1
+                    Blade.Tests.TestHarness.resultLine Blade.Tests.TestHarness.Fail label
+                        (sprintf "%s -- below %.0f%% of cell-count prediction (symmetry under-exploited)" detail (lowerFrac * 100.0))
+                    failed <- failed + 1
+                    failedNames <- failedNames @ [label]
                 elif ratio > upperMult * expectedRatio then
                     Blade.Tests.TestHarness.resultLine Blade.Tests.TestHarness.Pass label
                         (sprintf "%s -- WARN: %.1fx the cell-count prediction (implausible; check for measurement artifact)" detail (ratio / expectedRatio))
@@ -608,14 +636,20 @@ let runDifferentialTimingTests () : Blade.Tests.TestHarness.BlockResult =
                 // (dec/dense near 1). A shortfall (dec/dense well below 1) means
                 // the chain did not fully densify — e.g. a residual symmetric
                 // tail still iterated triangularly.
+                // dec/dense < 0.6 is a FAILURE, not a warning: the probe's own
+                // conclusion in that case is "the chain did not fully densify",
+                // i.e. decompact is broken. It used to report PASS (with "WARN:"
+                // only in the detail text), so the probe could not fail on the
+                // exact defect it measures. The 0.6 floor leaves ~40% headroom
+                // for timing noise below the ideal ratio of 1.0.
                 if dOverF >= 0.6 then
                     Blade.Tests.TestHarness.resultLine Blade.Tests.TestHarness.Pass label detail
                     passed <- passed + 1
                 else
-                    Blade.Tests.TestHarness.resultLine Blade.Tests.TestHarness.Pass label
-                        (sprintf "%s -- WARN: chained decompact runs well under the dense ceiling (dec/dense < 0.6) -> not fully densified" detail)
-                    warned <- warned + 1
-                    passed <- passed + 1
+                    Blade.Tests.TestHarness.resultLine Blade.Tests.TestHarness.Fail label
+                        (sprintf "%s -- chained decompact runs well under the dense ceiling (dec/dense < 0.6) -> not fully densified" detail)
+                    failed <- failed + 1
+                    failedNames <- failedNames @ [label]
         // n values are smaller than the (r!)^d families because the decompact
         // arm now CHAINS r-1 decompacts, each materializing a full dense n^r
         // intermediate; several coexist plus the dense-reference array. Sized so
