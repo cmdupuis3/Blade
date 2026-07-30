@@ -38,6 +38,22 @@ let runZarrTests () =
         | Error e -> e.Contains needle
         | Ok _ -> false
 
+    // "Check the environment FIRST." Probe once, here, so every e2e section
+    // below can treat a failing baseline as a genuine failure instead of an
+    // ambiguous "maybe the toolchain is missing" skip.
+    let zCaps = Blade.Build.capabilities.Value
+
+    /// Verdict for a failing BASELINE/ORACLE build (the `.read` reference, the
+    /// serial reference, ...). Policy: a genuine missing-toolchain condition is
+    /// a SKIP; a lowering error, a compile failure, or a nonzero exit of the
+    /// baseline is a FAILURE. Every one of these arms used to print SKIP
+    /// unconditionally, which silently DELETED the differential assertions that
+    /// depend on the baseline -- the block stayed green with nothing tested.
+    let baselineFailed (what: string) (e: string) =
+        if not zCaps.HasGpp then printfn "  SKIP %s: g++ not found (%s)" what e
+        elif isSkipError e then printfn "  SKIP %s: %s" what e
+        else check (sprintf "%s: baseline builds and runs" what) false e
+
     // Fixture stores live under tests/fixtures/zarr_stores/ (not the repo root).
     // The SAME relative string resolves at the compiler cwd (compile-time
     // metadata loads) and, mirrored under generated_cpp_tests, at the exe
@@ -880,13 +896,27 @@ let w = z.write("%s", C)
                           (match outLine with
                            | Some line ->
                                let inner = line.Substring("out = [".Length, line.Length - "out = [".Length - 1)
+                               // MULTISET equality (sorted), not the old
+                               //   Set.isSubset expected got
+                               //   && Set.isSubset (Set.remove 0.0 got) expected
+                               // which was vacuous in two ways: Set.ofArray
+                               // discarded MULTIPLICITY (a pool with repeated
+                               // values passed even if the kernel emitted the
+                               // wrong number of them), and `Set.remove 0.0 got`
+                               // whitelisted an UNBOUNDED number of spurious
+                               // zeros -- precisely the signature of a packed
+                               // read that emitted unwritten padding cells.
+                               // Sorting keeps the comparison order-insensitive
+                               // (print order of a packed array is a codegen
+                               // concern) while pinning the element count and
+                               // every value, zeros included.
                                let got =
                                    inner.Split(',')
                                    |> Array.map (fun s -> Double.Parse(s.Trim(), Globalization.CultureInfo.InvariantCulture))
-                                   |> Set.ofArray
-                               let expected = pool |> Array.map (fun x -> x + x) |> Set.ofArray
-                               check (sprintf "packed %s: kernel values = 2x oracle pool (set)" kind)
-                                   (Set.isSubset expected got && Set.isSubset (Set.remove 0.0 got) expected)
+                                   |> Array.sort
+                               let expected = pool |> Array.map (fun x -> x + x) |> Array.sort
+                               check (sprintf "packed %s: kernel values = 2x oracle pool (multiset)" kind)
+                                   (got = expected)
                                    (sprintf "got %A expected %A" got expected)
                            | None -> check (sprintf "packed %s: kernel values" kind) false "no out = [...] line")
                           // Write roundtrip: exact pool order + blade metadata.
@@ -1299,31 +1329,44 @@ let R = method_for(A) <@> lambda(x) where mpi -> x * 2.0 |> compute
 let w = z.write("%s", C)
 """
                    inStore outStore
-     if Blade.Build.mpiexecPath.Value.IsNone then
+     // Environment first: g++ + a linkable MS-MPI + mpiexec. With these ruled
+     // out up front, a failing serial reference below is a real failure.
+     if not zCaps.HasGpp then
+         printfn "  SKIP zarr mpi differential: g++ not found"
+     elif not Blade.Build.hasMpiLink.Value then
+         printfn "  SKIP zarr mpi differential: g++ cannot link MS-MPI (-lmsmpi)"
+     elif Blade.Build.mpiexecPath.Value.IsNone then
          printfn "  SKIP zarr mpi differential: mpiexec not found"
      else
      try
         try
             // Serial reference (emit gate OFF: the mpi clause is inert).
             CodeGen.setMpiEmitMode false
-            let serialOut =
+            // Keep the REASON the serial reference failed. This used to collapse
+            // every error to `None` and print one SKIP line, so a lowering
+            // error, a compile failure and a crashing oracle were
+            // indistinguishable -- and all three silently deleted every zarr-mpi
+            // assertion below while the block still reported green.
+            let serialOut : Result<string, string> =
                 match lower src with
+                | Error e -> Error (sprintf "lower: %s" e)
                 | Ok ir ->
                     let (cpp, _) = CodeGen.genSelfContainedProgramFromIR ir "zarr_mpi_ref"
                     CodeGen.deployRuntimeHeaders e2eDir
                     let f = Path.Combine(e2eDir, "zarr_mpi_ref.cpp")
                     File.WriteAllText(f, cpp)
                     (match compileCpp f e2eDir with
+                     | Error e when isSkipError e -> Error e
+                     | Error e -> Error (sprintf "compile: %s" e)
                      | Ok exe ->
                          (try Directory.Delete(outFull, true) with _ -> ())
                          (match runExecutable exe with
-                          | Ok (0, out) -> Some out
-                          | _ -> None)
-                     | Error _ -> None)
-                | Error _ -> None
+                          | Ok (0, out) -> Ok out
+                          | Ok (code, out) -> Error (sprintf "exit %d: %s" code (out.Substring(0, min 300 out.Length)))
+                          | Error e -> Error e))
             match serialOut with
-            | None -> printfn "  SKIP zarr mpi differential: serial reference build failed"
-            | Some refOut ->
+            | Error e -> baselineFailed "zarr mpi differential" e
+            | Ok refOut ->
                 (match readVarData outFull "C" with
                  | Ok { Payload = ZFloats got } ->
                      check "zarr mpi: serial reference writes the oracle pool" (got = mpiPool) ""
@@ -1355,9 +1398,14 @@ let w = z.write("%s", C)
                                       |> Array.map (fun l -> l.TrimEnd())
                                       |> String.concat "\n"
                                       |> fun x -> x.Trim()
+                                  // An empty serial reference would make this
+                                  // "" = "", a pass with no evidence.
                                   check (sprintf "zarr mpi -n %d: stdout identical to serial" ranks)
-                                      (normalize out = normalize refOut)
-                                      (sprintf "mpi: %s" (out.Substring(0, min 200 out.Length)))
+                                      (not (String.IsNullOrWhiteSpace (normalize refOut))
+                                       && normalize out = normalize refOut)
+                                      (sprintf "mpi: %s | serial: %s"
+                                          (out.Substring(0, min 200 out.Length))
+                                          (let r = normalize refOut in if r = "" then "<EMPTY -- nothing to compare>" else r.Substring(0, min 120 r.Length)))
                                   (match readVarData outFull "C" with
                                    | Ok { Payload = ZFloats got } ->
                                        check (sprintf "zarr mpi -n %d: gathered pool == oracle (write from rank 0)" ranks)
@@ -1413,6 +1461,32 @@ let w = z.write("%s", C)
          |> Array.map (fun l -> l.TrimEnd())
          |> String.concat "\n"
          |> fun x -> x.Trim()
+     /// Compare the two builds' COMPUTE output, and refuse to call an empty
+     /// comparison a match.
+     ///
+     /// `normalize` deliberately drops the data-bearing `A = [`/`B = [` lines,
+     /// because the `.read` build materializes and prints the source array while
+     /// the streamed build has nothing there to print -- that is the one
+     /// difference the builds are allowed to have. But nothing checked that
+     /// ANYTHING survived the filter: if both sides normalized to "", the
+     /// assertion `normalize out = normalize refOut` was `"" = ""`, a pass with
+     /// zero evidence. This returns false in that case, and additionally
+     /// requires the `.read` baseline to have actually PRINTED the source array
+     /// it is supposed to materialize -- so the filter is only ever removing
+     /// content that was really there.
+     let sameCompute (out: string) (refOut: string) : bool * string =
+         let a, b = normalize out, normalize refOut
+         let refPrintedSource =
+             refOut.Split('\n')
+             |> Array.exists (fun l ->
+                 let t = l.TrimStart()
+                 t.StartsWith "A = [" || t.StartsWith "B = [")
+         if a = "" || b = "" then
+             (false, sprintf "nothing left to compare after normalization (stream=%d chars, read=%d chars); the comparison would be vacuous" a.Length b.Length)
+         elif not refPrintedSource then
+             (false, ".read baseline never printed the materialized source array (A/B = [...]) -- it did not materialize, so this is not a read-vs-stream differential")
+         elif a <> b then (false, sprintf "stream: %s / read: %s" a b)
+         else (true, "")
      let compileRun (testName: string) (src: string) : Result<string * string, string> =
          match lower src with
          | Error e -> Error (sprintf "lower: %s" e)
@@ -1422,6 +1496,9 @@ let w = z.write("%s", C)
              let f = Path.Combine(e2eDir, testName + ".cpp")
              File.WriteAllText(f, cpp)
              match compileCpp f e2eDir with
+             // Preserve the skip marker so baselineFailed can tell a toolchain
+             // skip from a genuine compile failure.
+             | Error e when isSkipError e -> Error e
              | Error e -> Error (sprintf "compile: %s" e)
              | Ok exe ->
                  match runExecutable exe with
@@ -1431,14 +1508,13 @@ let w = z.write("%s", C)
      let differential (label: string) (mkSrc: string -> string) =
          match compileRun (sprintf "strm_%s_read" label) (mkSrc "read") with
          | Error e ->
-             printfn "  SKIP stream differential %s: .read baseline failed (%s)" label e
+             baselineFailed (sprintf "stream differential %s (.read baseline)" label) e
          | Ok (refOut, _) ->
              (match compileRun (sprintf "strm_%s_stream" label) (mkSrc "stream") with
               | Error e -> check (sprintf "stream %s: streamed build runs" label) false e
               | Ok (out, cpp) ->
-                  check (sprintf "stream %s: stdout identical to .read" label)
-                      (normalize out = normalize refOut)
-                      (sprintf "stream: %s / read: %s" (normalize out) (normalize refOut))
+                  let (ok, why) = sameCompute out refOut
+                  check (sprintf "stream %s: stdout identical to .read" label) ok why
                   check (sprintf "stream %s: fiber buffers + stream prologue emitted" label)
                       (cpp.Contains "_fb_p" && cpp.Contains "// Stream ") "")
 
@@ -1499,14 +1575,13 @@ let (mu, m2) = (method_for(A) <@> lambda(x: Array<Float64 like TimeIdx>) -> prod
 """
                                        verb
      (match compileRun "strm_fused_read" (fusedTower "read") with
-      | Error e -> printfn "  SKIP fused stream differential: .read baseline failed (%s)" e
+      | Error e -> baselineFailed "fused stream differential (.read baseline)" e
       | Ok (refOut, _) ->
           (match compileRun "strm_fused_stream" (fusedTower "stream") with
            | Error e -> check "stream fused <&!>: streamed build runs" false e
            | Ok (out, cpp) ->
-               check "stream fused <&!>: stdout identical to .read"
-                   (normalize out = normalize refOut)
-                   (sprintf "stream: %s / read: %s" (normalize out) (normalize refOut))
+               let (ok, why) = sameCompute out refOut
+               check "stream fused <&!>: stdout identical to .read" ok why
                let wrapperBinds =
                    cpp.Split('\n')
                    |> Array.filter (fun l -> l.Contains "= { A_fb_p0, A_fiber_ext }")
@@ -1523,13 +1598,13 @@ let (m2a, m2b) = (method_for(A, A) <@> lambda(x: Array<Float64 like TimeIdx>, y:
 """
                                       verb
      (match compileRun "strm_soft_read" (fusedSoft "read") with
-      | Error e -> printfn "  SKIP soft-fused stream differential: .read baseline failed (%s)" e
+      | Error e -> baselineFailed "soft-fused stream differential (.read baseline)" e
       | Ok (refOut, _) ->
           (match compileRun "strm_soft_stream" (fusedSoft "stream") with
            | Error e -> check "stream fused <&>: streamed build runs" false e
            | Ok (out, _) ->
-               check "stream fused <&>: stdout identical to .read"
-                   (normalize out = normalize refOut) ""))
+               let (ok, why) = sameCompute out refOut
+               check "stream fused <&>: stdout identical to .read" ok why))
 
      // (f) elementwise consumption of a streamed source: loud reject.
      (let src = """
@@ -1555,13 +1630,19 @@ let out = method_for(A) <@> lambda(x) -> x + x |> compute
              File.Copy("tests/fixtures/sample.nc", Path.Combine(e2eDir, "tests", "fixtures", "sample.nc"), true)
              let ncDiff (label: string) (mkSrc: string -> string) =
                  match compileRun (sprintf "strm_%s_read" label) (mkSrc "read") with
-                 | Error e -> printfn "  SKIP nc stream differential: .read baseline failed (%s)" e
+                 // A missing libnetcdf shows up as a link failure, which is a
+                 // genuine environment condition -- recognize it as a skip;
+                 // everything else is a failure. Previously every error printed
+                 // SKIP and deleted the differential.
+                 | Error e when e.Contains "-lnetcdf" || e.Contains "netcdf.h" ->
+                     printfn "  SKIP nc stream differential: libnetcdf not available for g++ (%s)" e
+                 | Error e -> baselineFailed "nc stream differential (.read baseline)" e
                  | Ok (refOut, _) ->
                      (match compileRun (sprintf "strm_%s_stream" label) (mkSrc "stream") with
                       | Error e -> check (sprintf "stream %s: streamed build runs" label) false e
                       | Ok (out, cpp) ->
-                          check (sprintf "stream %s: stdout identical to .read" label)
-                              (normalize out = normalize refOut) ""
+                          let (ok, why) = sameCompute out refOut
+                          check (sprintf "stream %s: stdout identical to .read" label) ok why
                           check (sprintf "stream %s: nc_get_vara fiber reads inlined" label)
                               (cpp.Contains "nc_get_vara") "")
              ncDiff "nc_cov" (fun verb -> sprintf """
@@ -1572,7 +1653,10 @@ let A = sample.vars.A |> nc.%s
 let m2 = method_for(A, A) <@> lambda(x: Array<Float32 like xdim>, y: Array<Float32 like xdim>) where comm(x, y) -> prodsum(x, y) |> compute
 """
                                               verb)
-          with ex -> printfn "  SKIP nc stream differential: %s" ex.Message)
+          // The missing-fixture case is already handled by the File.Exists gate
+          // below, so an exception in here is a genuine failure (a throwing
+          // codegen, a bad copy, ...) -- not something to swallow as a SKIP.
+          with ex -> check "nc stream differential" false ex.Message)
      else
          printfn "  SKIP nc stream differential: sample.nc not found")
 

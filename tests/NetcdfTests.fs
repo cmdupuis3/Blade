@@ -41,6 +41,32 @@ let runNetcdfTests () =
             printfn "  FAIL: %s â€” %s" name detail
             failed <- failed + 1
 
+    // ------------------------------------------------------------------
+    // SKIP-vs-FAIL policy for the live-load blocks below.
+    //
+    // The rule (already stated in prose further down, next to the compound
+    // map): a genuine MISSING-LIBRARY or MISSING-FIXTURE condition is a SKIP,
+    // because the environment cannot run the test at all. Everything else -- a
+    // lowering error, a codegen exception, a compile failure, a nonzero exit --
+    // is a FAILURE.
+    //
+    // The code did not match that rule. Every live block ended in a bare
+    // `| ex -> printfn "  SKIP ...: %s" ex.Message` catch-all, and several
+    // routed lowering errors to a printfn as well. Because `failed` is only
+    // incremented by `check`, none of those paths could ever fail the block:
+    // the assertions downstream of the error simply stopped running and the
+    // block still reported all-green. `unexpected` is the honest catch-all.
+    // ------------------------------------------------------------------
+    let unexpected (what: string) (ex: exn) =
+        match ex with
+        | :? System.DllNotFoundException ->
+            printfn "  SKIP %s: libnetcdf not available" what
+        | :? System.IO.FileNotFoundException ->
+            printfn "  SKIP %s: sample.nc not found" what
+        | _ ->
+            check (sprintf "%s: no unexpected exception" what) false
+                (sprintf "%s: %s" (ex.GetType().Name) ex.Message)
+
     // ---------------------------------------------------------------
     // Test 1: ncTypeToElemType mapping
     // ---------------------------------------------------------------
@@ -606,7 +632,7 @@ let runNetcdfTests () =
                  if isSkipError e then printfn "  SKIP range<I> map compile: %s" e
                  else check "range<I> map: compiles" false e)
         | Error e -> check "range<I> map: lowers" false e
-     with ex -> printfn "  SKIP range<I> map: %s" ex.Message)
+     with ex -> unexpected "range<I> map" ex)
 
     // Stage 1b: multi-index range<I1, I2> as a driver. The kernel receives one
     // param per index-type slot (i, j) via per-slot param binding; the two slots
@@ -633,14 +659,19 @@ let runNetcdfTests () =
                  if isSkipError e then printfn "  SKIP range2 compile: %s" e
                  else check "range<I1,I2> map: compiles" false e)
         | Error e -> check "range<I1,I2> map: lowers (per-slot params bind)" false e
-     with ex -> printfn "  SKIP range<I1,I2> map: %s" ex.Message)
+     with ex -> unexpected "range<I1,I2> map" ex)
 
     // Stage 2 probe (multi-rank, no compound/unhash): range<SymIdx<2,N>> is one
     // index type of RANK 2, so by the rank rule the kernel gets two params (i, j)
     // -- the two triangular positions, which are loop vars (no unhash needed).
     // This exercises the rank-slot param binding for a multi-rank index type.
-    // Skip-tolerant: a symmetric range output may have separate codegen gaps; a
-    // green run confirms the multi-rank binding, a skip is informative.
+    //
+    // Skip-tolerant ONLY for the not-yet-built parts: a lowering or codegen gap
+    // for a symmetric range output is a known frontier, so those stay SKIPs. But
+    // a program that COMPILED and then exited nonzero is not a gap -- it is a
+    // wrong program, and it used to be reported as `SKIP ... run (exit %d)`,
+    // which is the one outcome this probe should never absorb. Likewise a
+    // failure to launch the binary at all.
     printfn "\n--- range<SymIdx<2,N>> driver (stage 2: multi-rank slots) ---"
     (try
         match lower "let s = method_for(range<SymIdx<2, 5>>) <@> lambda(i, j) -> i + j |> compute\n" with
@@ -655,11 +686,18 @@ let runNetcdfTests () =
              | Ok exe ->
                  (match runExecutable exe with
                   | Ok (0, _) -> check "range<SymIdx<2,N>> map: runs (multi-rank params bind)" true ""
-                  | Ok (c, o) -> printfn "  SKIP range<SymIdx> run (exit %d): %s" c o
-                  | Error e -> printfn "  SKIP range<SymIdx> run: %s" e)
-             | Error e -> printfn "  SKIP range<SymIdx> compile: %s" e)
-        | Error e -> printfn "  SKIP range<SymIdx> lower: %s" e
-     with ex -> printfn "  SKIP range<SymIdx>: %s" ex.Message)
+                  | Ok (c, o) ->
+                      check "range<SymIdx<2,N>> map: runs (multi-rank params bind)" false
+                          (sprintf "compiled, then exited %d: %s" c o)
+                  | Error e ->
+                      check "range<SymIdx<2,N>> map: runs (multi-rank params bind)" false
+                          (sprintf "compiled, but could not be run: %s" e))
+             | Error e when isSkipError e -> printfn "  SKIP range<SymIdx> compile: %s" e
+             // A codegen gap for a symmetric range output is a known frontier;
+             // keep it a SKIP, but say so explicitly rather than by omission.
+             | Error e -> printfn "  SKIP range<SymIdx> compile (known codegen frontier): %s" e)
+        | Error e -> printfn "  SKIP range<SymIdx> lower (known lowering frontier): %s" e
+     with ex -> unexpected "range<SymIdx<2,N>>" ex)
 
     // ---------------------------------------------------------------
     // Test 4: Index type sharing within a module
@@ -909,13 +947,7 @@ let runNetcdfTests () =
                         printfn "        %s: %s" fname (ppIRTypeIn names ftype)
                     printfn "      }"
                 | _ -> ()
-    with
-    | :? System.DllNotFoundException ->
-        printfn "  SKIP: libnetcdf not available"
-    | :? System.IO.FileNotFoundException ->
-        printfn "  SKIP: sample.nc not found"
-    | ex ->
-        printfn "  SKIP: %s" ex.Message
+    with ex -> unexpected "live load" ex
 
     // ---------------------------------------------------------------
     // Test 8: Blade program with import and provider load
@@ -993,13 +1025,7 @@ let sample = NetCDF.load("tests/fixtures/sample.nc")
             | Error e ->
                 printfn "  Lower error: %s" e
                 check "Lower succeeds" false e
-        with
-        | :? System.DllNotFoundException ->
-            printfn "  SKIP lower: libnetcdf not available"
-        | :? System.IO.FileNotFoundException ->
-            printfn "  SKIP lower: sample.nc not found"
-        | ex ->
-            printfn "  SKIP lower: %s" ex.Message
+        with ex -> unexpected "lower" ex
 
     | Error e ->
         check "Parse succeeds" false (sprintf "%d:%d %s" e.Line e.Col e.Message)
@@ -1066,11 +1092,13 @@ let data = NetCDF.load_compound(sample.vars.B, sample.vars.B_mask) |> NetCDF.rea
                  if isSkipError e then printfn "  SKIP load_compound e2e (compile skipped): %s" e
                  else check "load_compound e2e: compiles and links libnetcdf" false e)
         | Error e ->
-            printfn "  SKIP load_compound|>read (lower error; a fixture gap if sample.nc lacks B/B_mask): %s" e
-    with
-    | :? System.DllNotFoundException -> printfn "  SKIP load_compound|>read: libnetcdf not available"
-    | :? System.IO.FileNotFoundException -> printfn "  SKIP load_compound|>read: sample.nc not found"
-    | ex -> printfn "  SKIP load_compound|>read: %s" ex.Message
+            // A lowering error is a FAILURE, not a skip. The fixture-gap excuse
+            // in the old message is not a lowering condition: a missing sample.nc
+            // raises FileNotFoundException (handled below), and a sample.nc
+            // lacking B/B_mask is a broken fixture the block must report, since
+            // every assertion above depends on it.
+            check "load_compound|>read: lowers" false (sprintf "lower error: %s" e)
+    with ex -> unexpected "load_compound|>read" ex
 
     // ---------------------------------------------------------------
     // Unary map over a compound: method_for(data) <@> (x -> x+x) |> compute.
@@ -1078,10 +1106,12 @@ let data = NetCDF.load_compound(sample.vars.B, sample.vars.B_mask) |> NetCDF.rea
     // present cells (cardinality) x trailing dims, reads the compact buffer, and
     // writes a fresh compact buffer that SHARES data's idx + trailing_stride.
     // Float-safe kernel (x+x, not x*2.0) since B is Float32 (-Werror=float-conversion).
-    // A lowering failure routes to the SKIP arm, so this is a SEPARATE block and
-    // cannot regress the read-only e2e above. Value correctness is covered by the
-    // sandbox; here we confirm the path lowers, the compound-map codegen fires,
-    // and the program compiles + runs.
+    // This is a SEPARATE block so it cannot regress the read-only e2e above.
+    // Value correctness is covered by the sandbox; here we confirm the path
+    // lowers, the compound-map codegen fires, and the program compiles + runs.
+    // A lowering failure is a FAILURE of this block (it used to "route to the
+    // SKIP arm", which is exactly the accounting hole: the separate-block
+    // isolation is what makes it safe to fail here, not a reason to hide it).
     printfn "\n--- compound map: method_for(data) <@> (x -> x+x) (sample.nc) ---"
     let lcMapSource = """
 import netcdf as NetCDF
@@ -1116,11 +1146,9 @@ let out = method_for(data) <@> lambda(x) -> x + x |> compute
                  if isSkipError e then printfn "  SKIP compound map e2e (compile skipped): %s" e
                  else check "compound map e2e: compiles and links libnetcdf" false e)
         | Error e ->
-            printfn "  SKIP compound map (lower error -- lowering of method_for over a compound not yet wired?): %s" e
-    with
-    | :? System.DllNotFoundException -> printfn "  SKIP compound map: libnetcdf not available"
-    | :? System.IO.FileNotFoundException -> printfn "  SKIP compound map: sample.nc not found"
-    | ex -> printfn "  SKIP compound map: %s" ex.Message
+            check "compound map: lowers (method_for over a compound)" false
+                (sprintf "lower error: %s" e)
+    with ex -> unexpected "compound map" ex
 
     // ---------------------------------------------------------------
     // Dense provider read: method_for(sample.vars.A |> NetCDF.read) <@> (x -> x+x).
@@ -1237,11 +1265,8 @@ let out = method_for(A) <@> lambda(x) -> x + x |> compute
                  if isSkipError e then printfn "  SKIP dense read e2e (compile skipped): %s" e
                  else check "dense read e2e: compiles and links libnetcdf" false e)
         | Error e ->
-            printfn "  SKIP dense read (lower error -- plain provider var read not wired?): %s" e
-    with
-    | :? System.DllNotFoundException -> printfn "  SKIP dense read: libnetcdf not available"
-    | :? System.IO.FileNotFoundException -> printfn "  SKIP dense read: sample.nc not found"
-    | ex -> printfn "  SKIP dense read: %s" ex.Message
+            check "dense read: lowers (plain provider var read)" false (sprintf "lower error: %s" e)
+    with ex -> unexpected "dense read" ex
 
     // ---------------------------------------------------------------
     // fill_random builtin (general codegen, hermetic -- no NetCDF): a random-fill
@@ -1286,8 +1311,11 @@ let out = method_for(A) <@> lambda(x) -> x + x |> compute
                  else check "fill_random e2e: compiles" false e)
         | Error e ->
             check "fill_random: lowers" false (sprintf "lower error: %s" e)
-    with
-    | ex -> printfn "  SKIP fill_random: %s" ex.Message
+    // Hermetic block (no libnetcdf, no sample.nc), so there is no skip condition
+    // here at all: any exception is a failure.
+    with ex ->
+        check "fill_random: no unexpected exception" false
+            (sprintf "%s: %s" (ex.GetType().Name) ex.Message)
 
     // ---------------------------------------------------------------
     // Relational pipeline over a provider read: the SQL builtins consume an
@@ -1322,9 +1350,24 @@ let top = ranked(0)
             // docs/features/sql-coverage.md (provider->relational seam).
             // When the seam is fixed the placeholder disappears and the full e2e
             // below (compile + run + value checks) activates automatically.
-            if cppCode.Contains "/* dynamic */" then
-                check "relational pipeline: KNOWN GAP pinned (mask extent over provider read unresolved; e2e dormant)" true ""
-            else
+            //
+            // The pin is now an ASSERTION rather than a literal `true`. The old
+            //   if cppCode.Contains "/* dynamic */" then
+            //       check "...KNOWN GAP pinned..." true ""
+            // sat INSIDE its own guard, so it restated the condition it had
+            // already tested and could not fail for any reason -- while
+            // short-circuiting past the compile, the run, and the three value
+            // pins (n_high / total_high / top) below. Asserting the marker's
+            // PRESENCE makes the pin falsifiable in the direction that matters:
+            // the day the provider->relational extent seam is fixed, the
+            // placeholder disappears, THIS check goes red, and whoever fixed it
+            // deletes the branch so the dormant e2e starts running for real.
+            let gapMarker = "/* dynamic */"
+            let gapStillOpen = cppCode.Contains gapMarker
+            check "relational pipeline: KNOWN GAP still open (mask extent over a provider read is an unresolved-extent placeholder; e2e below is dormant)"
+                gapStillOpen
+                (sprintf "no '%s' placeholder in the generated C++ -- the provider->relational extent seam looks FIXED. Delete this pin and the `if gapStillOpen` guard so the e2e (compile + run + n_high/total_high/top) runs." gapMarker)
+            if gapStillOpen then () else
             let relOutDir = "./generated_cpp_tests"
             if not (Directory.Exists relOutDir) then Directory.CreateDirectory relOutDir |> ignore
             CodeGen.deployRuntimeHeaders relOutDir
@@ -1353,10 +1396,7 @@ let top = ranked(0)
                  else check "relational pipeline e2e: compiles and links libnetcdf" false e)
         | Error e ->
             check "relational pipeline: lowers" false (sprintf "lower error: %s" e)
-    with
-    | :? System.DllNotFoundException -> printfn "  SKIP relational pipeline: libnetcdf not available"
-    | :? System.IO.FileNotFoundException -> printfn "  SKIP relational pipeline: sample.nc not found"
-    | ex -> printfn "  SKIP relational pipeline: %s" ex.Message
+    with ex -> unexpected "relational pipeline" ex
 
     // ---------------------------------------------------------------
     // Provider-backed statics: the compile-time fold (ProviderStatics)
@@ -1406,8 +1446,7 @@ let b = ps
                         (Map.tryFind "ps" se.Values = Some (Blade.StaticEval.SVFloat 2870.0))
                         (sprintf "got %A" (Map.tryFind "ps" se.Values))
                 | Error e -> check "static fold: resolveStatics" false e
-     with
-     | ex -> printfn "  SKIP provider static fold: %s" ex.Message)
+     with ex -> unexpected "provider static fold" ex)
 
     // ---------------------------------------------------------------
     // Missing file at COMPILE time: `NetCDF.load("<absent>")` must fail

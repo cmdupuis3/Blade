@@ -1,4 +1,5 @@
 // TEST: Math gating: selective import steers to qualified (rejects)
+// ERROR: BL5200
 // `from math import ...` would reintroduce the global names the module
 // system removes; the elaborator rejects it with steering toward
 // `import math [as <alias>]`.

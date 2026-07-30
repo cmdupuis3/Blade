@@ -1,4 +1,5 @@
 // TEST: Reduce Over Symmetric Storage (rejects)
+// ERROR: BL3999
 // reduce() over a compact symmetric record must be a TYPE ERROR, not silent
 // garbage: SymIdx<2,3> is one index RECORD but not a rank-1 axis (the old
 // one-record check let it through to codegen, which walked extents[0] handing

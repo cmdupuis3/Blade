@@ -1,4 +1,5 @@
 // TEST: Mut Scalar Parameter (rejects)
+// ERROR: BL4005
 // ============================================================================
 // `mut` is array-only: a scalar passes by value in the C++ ABI, so callee
 // writes would silently vanish. Reject with steering.

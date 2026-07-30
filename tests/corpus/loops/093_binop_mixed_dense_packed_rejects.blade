@@ -1,4 +1,5 @@
 // TEST: Binop Mixed Dense Packed (rejects)
+// ERROR: BL3999
 // Elementwise binop on arrays whose shape mixes a dense record with a
 // packed-symmetric record ([Y; SymIdx<2,3>]) must reject: the packed
 // record's triangular walk cannot interleave a foreign dense axis in one

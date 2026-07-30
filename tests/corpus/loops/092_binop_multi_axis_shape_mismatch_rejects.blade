@@ -1,4 +1,5 @@
 // TEST: Binop Multi Axis Shape Mismatch (rejects)
+// ERROR: BL3999
 // Elementwise binop on rank-2 arrays with DIFFERENT index shapes (Lat,Lon
 // vs Lon,Lat — swapped axis tags) must reject at typecheck with the
 // matching-shapes steer, not miscompile an off-shape loop.

@@ -1,11 +1,25 @@
 // TEST: Reynolds AntiSym Cancellation
 // Antisymmetric of symmetric kernel: x*y → complete cancellation → 0
 // Both perms give same value but opposite signs: +xy - xy = 0
-// Antisymmetric of symmetric kernel: x*y → complete cancellation → 0
-// Both perms give same value but opposite signs: +xy - xy = 0
 let A = [1.0, 2.0]
 let B = [3.0, 4.0]
 let L = method_for(A, B)
 let g = lambda(x, y) -> x * y
 let result = L <@> reynolds(g, Antisymmetric) |> compute
 // EXPECT: result = [0.0, 0.0, 0.0, 0.0]
+
+// Companion non-cancelling pin: an operator that emits nothing (or always 0)
+// for reynolds(_, Antisymmetric) would still satisfy the all-zero pin above,
+// so also pin a genuinely antisymmetric (non-cancelling) kernel here.
+// reynolds(h, Anti)(x, y) = h(x, y) - h(y, x) = (3x+y) - (3y+x) = 2x - 2y
+// C = [1.0, 5.0], D = [2.0, 3.0]:
+//   [0][0]: x=1, y=2 -> 2*1 - 2*2 = -2
+//   [0][1]: x=1, y=3 -> 2*1 - 2*3 = -4
+//   [1][0]: x=5, y=2 -> 2*5 - 2*2 =  6
+//   [1][1]: x=5, y=3 -> 2*5 - 2*3 =  4
+let C = [1.0, 5.0]
+let D = [2.0, 3.0]
+let M = method_for(C, D)
+let h = lambda(x, y) -> 3.0 * x + y
+let result2 = M <@> reynolds(h, Antisymmetric) |> compute
+// EXPECT: result2 = [-2.0, -4.0, 6.0, 4.0]

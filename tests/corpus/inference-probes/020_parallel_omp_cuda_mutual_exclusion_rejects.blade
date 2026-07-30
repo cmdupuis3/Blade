@@ -1,4 +1,5 @@
 // TEST: Parallel: omp+cuda Mutual Exclusion (rejects)
+// ERROR: BL1999
 // Mixed parallelism allows `mpi, omp(...)` and `mpi, cuda(...)` (outer,
 // inner). A single kernel cannot be BOTH OpenMP-host and CUDA-device —
 // one iteration space, two owners — so omp-then-cuda still rejects at

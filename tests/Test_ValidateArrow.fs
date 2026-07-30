@@ -15,13 +15,20 @@ open Blade.Tests.TestHarness
 // to construct invalid shapes, while still permitting valid ones.
 //
 // What we're verifying:
-//   1. Valid virtual array (rank-1, scalar elem) constructs without raising.
-//   2. Valid virtual array (rank-N, scalar elem) constructs without raising.
+//   1. Valid virtual array (rank-1, scalar elem) constructs the EXACT arrow.
+//   2. Valid virtual array (rank-N, scalar elem) constructs the EXACT arrow.
 //   3. Invalid virtual array (arrow-typed elem) raises with a descriptive
 //      error message naming the constraint.
 //   4. The other smart constructors (mkArrayArrow, mkFuncArrow), which are
-//      structurally constraint-safe, still work without raising — these
+//      structurally constraint-safe, still produce their exact arrows — these
 //      are regression checks confirming the gate is scoped correctly.
+//   5. validateArrowShape's own verdicts, message for message: constraint 2
+//      (arrow result), both arms of constraint 1 (stored/value after the first
+//      virtual slot), and the silent-on-well-formed control.
+//
+// The positive cases assert CONSTRUCTED VALUES, not just "did not raise": a
+// constructor that emits the wrong slot kind, drops the identity, or reorders
+// slots raises nothing at all.
 //
 // Note: these are compiler-invariant checks, not user-facing diagnostics.
 // User-facing rejection of weird source-level inputs (e.g., reverse of
@@ -48,14 +55,19 @@ let private idxN (n: int) : IRIndexType =
 
 let private mkId (handle: int) : ArrayIdentity = AIDLiteral handle
 
-/// Run a thunk that should not raise. Returns (true, "") on success,
-/// (false, error message) if it raised.
-let private expectNoRaise (action: unit -> 'a) : bool * string =
+/// Run a thunk that should produce exactly `expected`. Subsumes "did not
+/// raise": a raise fails the check with its message, and a successful call is
+/// compared against the constructed value rather than merely being counted.
+/// (Every positive test here used to assert only the absence of an exception,
+/// which is satisfied by a constructor that builds the WRONG arrow — e.g. one
+/// emitting SIdx slots where SIdxVirt is required, or dropping the identity.)
+let private expectValue (expected: 'a) (action: unit -> 'a) : bool * string =
     try
-        let _ = action ()
-        (true, "")
+        let actual = action ()
+        if actual = expected then (true, sprintf "= %A" actual)
+        else (false, sprintf "expected %A, got %A" expected actual)
     with ex ->
-        (false, ex.Message)
+        (false, sprintf "raised: %s" ex.Message)
 
 /// Run a thunk that should raise. Returns (true, "") on raise,
 /// (false, "did not raise") if it didn't.
@@ -70,21 +82,20 @@ let private expectRaise (action: unit -> 'a) : bool * string =
 
 let private test_valid_virtual_array_scalar_elem () =
     // Standard virtual array: range<Idx<5>> with Int64 elements.
-    // No constraint violations expected.
-    let (ok, detail) = expectNoRaise (fun () ->
+    // No constraint violations expected; identity is forced to None.
+    let (ok, detail) = expectValue (IRTArrow ([SIdxVirt (idxN 5)], i64, None)) (fun () ->
         mkVirtualArrayArrow [idxN 5] i64)
-    ("valid rank-1 virtual array (Int64 elem) constructs without raising",
-     ok,
-     if ok then "constructed" else sprintf "raised: %s" detail)
+    ("valid rank-1 virtual array (Int64 elem) = IRTArrow ([SIdxVirt], Int64, None)",
+     ok, detail)
 
 let private test_valid_virtual_array_rank_2 () =
-    // Two virtual index slots, scalar elem. Both slots SIdxVirt, no
-    // violations.
-    let (ok, detail) = expectNoRaise (fun () ->
-        mkVirtualArrayArrow [idxN 3; idxN 4] f64)
-    ("valid rank-2 virtual array (Float64 elem) constructs without raising",
-     ok,
-     if ok then "constructed" else sprintf "raised: %s" detail)
+    // Two virtual index slots, scalar elem. Both slots SIdxVirt (in order),
+    // no violations.
+    let (ok, detail) =
+        expectValue (IRTArrow ([SIdxVirt (idxN 3); SIdxVirt (idxN 4)], f64, None)) (fun () ->
+            mkVirtualArrayArrow [idxN 3; idxN 4] f64)
+    ("valid rank-2 virtual array (Float64 elem) = IRTArrow ([SIdxVirt; SIdxVirt], Float64, None)",
+     ok, detail)
 
 let private test_invalid_virtual_array_arrow_elem () =
     // The constraint-2 violation: virtual array with an arrow as
@@ -102,55 +113,94 @@ let private test_invalid_virtual_array_arrow_elem () =
 
 let private test_valid_stored_array_constructs () =
     // mkArrayArrow with all-SIdx slots. Structurally constraint-safe;
-    // no gate, should always work.
-    let (ok, detail) = expectNoRaise (fun () ->
-        mkArrayArrow [idxN 3; idxN 4] f64 (Some (mkId 1)))
-    ("stored array (all-SIdx) constructs without raising",
-     ok,
-     if ok then "constructed" else sprintf "raised: %s" detail)
+    // no gate, should always work — and must carry the identity through.
+    let (ok, detail) =
+        expectValue (IRTArrow ([SIdx (idxN 3); SIdx (idxN 4)], f64, Some (mkId 1))) (fun () ->
+            mkArrayArrow [idxN 3; idxN 4] f64 (Some (mkId 1)))
+    ("stored array (all-SIdx) = IRTArrow ([SIdx; SIdx], Float64, Some id)",
+     ok, detail)
 
 let private test_valid_stored_array_with_arrow_elem () =
     // mkArrayArrow CAN take an arrow as elemType — that's a stored
     // array of functions, which is a valid §5.3 use case. Confirm
-    // the gate is scoped only to virtual arrays.
+    // the gate is scoped only to virtual arrays (and that the arrow elem
+    // lands in the RESULT position verbatim, not spliced into the slots).
     let arrowElem = IRTArrow ([SVal f64], i64, None)
-    let (ok, detail) = expectNoRaise (fun () ->
-        mkArrayArrow [idxN 3] arrowElem (Some (mkId 1)))
-    ("stored array of functions (arrow elem) constructs — stored has no constraint-2",
-     ok,
-     if ok then "constructed (correctly: §5.3 array-of-functions case)"
-     else sprintf "raised: %s — stored array should not be gated" detail)
+    let (ok, detail) =
+        expectValue (IRTArrow ([SIdx (idxN 3)], arrowElem, Some (mkId 1))) (fun () ->
+            mkArrayArrow [idxN 3] arrowElem (Some (mkId 1)))
+    ("stored array of functions (arrow elem) = IRTArrow ([SIdx], arrow, Some id) — no constraint-2",
+     ok, detail)
 
 let private test_valid_func_arrow_constructs () =
     // mkFuncArrow with all-SVal slots. Structurally constraint-safe;
     // no gate, should always work.
-    let (ok, detail) = expectNoRaise (fun () ->
+    let (ok, detail) = expectValue (IRTArrow ([SVal i64; SVal f64], f64, None)) (fun () ->
         mkFuncArrow [i64; f64] f64)
-    ("function arrow (all-SVal) constructs without raising",
-     ok,
-     if ok then "constructed" else sprintf "raised: %s" detail)
+    ("function arrow (all-SVal) = IRTArrow ([SVal Int64; SVal Float64], Float64, None)",
+     ok, detail)
 
 let private test_nullary_func_arrow_constructs () =
     // mkFuncArrow [] is the canonical nullary-function form. Must
-    // remain valid (the empty-slot form is explicitly reserved).
-    let (ok, detail) = expectNoRaise (fun () ->
+    // remain valid AND stay the empty-slot shape (ArrayElem deliberately
+    // refuses to match it — that reservation is the whole point).
+    let (ok, detail) = expectValue (IRTArrow ([], f64, None)) (fun () ->
         mkFuncArrow [] f64)
-    ("nullary function (empty SVal slots) constructs",
-     ok,
-     if ok then "constructed" else sprintf "raised: %s" detail)
+    ("nullary function = IRTArrow ([], Float64, None)",
+     ok, detail)
 
 let private test_validate_arrow_shape_directly () =
-    // Sanity check on validateArrowShape itself: it should return a
-    // non-empty error list for the constraint-2 case. Tests the
-    // underlying validator function independent of the gate.
+    // validateArrowShape itself on the constraint-2 case, independent of the
+    // gate. The exact message is pinned: `not errs.IsEmpty` is satisfied by
+    // ANY error, including a constraint-1 message misfiring on a shape whose
+    // only defect is the arrow result.
     let virtSlots = [SIdxVirt (idxN 3)]
     let arrowResult = IRTArrow ([SIdx (idxN 4)], f64, Some (mkId 1))
     let errs = validateArrowShape virtSlots arrowResult
-    let pass = not errs.IsEmpty
-    ("validateArrowShape directly flags virtual-with-arrow-result",
+    let expected =
+        [ "Virtual arrow has IRTArrow result (virtual arrays cannot contain arrays/functions)" ]
+    let pass = (errs = expected)
+    ("validateArrowShape: virtual-with-arrow-result reports exactly the constraint-2 message",
      pass,
-     if pass then sprintf "got %d error(s): %s" errs.Length (List.head errs)
-     else "validateArrowShape returned empty list for invalid shape — bug in validator itself")
+     if pass then sprintf "got %d error(s)" errs.Length else sprintf "expected %A, got %A" expected errs)
+
+// ---- Constraint 1: no stored/value slot after the first SIdxVirt ----------
+// Constraint 1 had ZERO tests: every case above and below exercises constraint
+// 2 (arrow result) or a shape with a single virtual slot, where "all slots
+// after k" is empty and the arm cannot fire. Both of its arms are covered here.
+
+let private test_validate_arrow_shape_stored_after_virtual () =
+    // [SIdxVirt; SIdx] violates constraint 1: stored cannot follow virtual.
+    // The result is a scalar, so constraint 2 stays silent — this isolates
+    // constraint 1.
+    let errs = validateArrowShape [SIdxVirt (idxN 3); SIdx (idxN 4)] f64
+    let expected =
+        [ "Slot 1 is SIdx but appears after first SIdxVirt at 0 (stored cannot follow virtual)" ]
+    let pass = (errs = expected)
+    ("validateArrowShape: SIdx after SIdxVirt reports the constraint-1 stored-after-virtual message",
+     pass,
+     if pass then sprintf "got %d error(s)" errs.Length else sprintf "expected %A, got %A" expected errs)
+
+let private test_validate_arrow_shape_value_after_virtual () =
+    // [SIdxVirt; SVal] is constraint 1's other arm, with its own wording.
+    let errs = validateArrowShape [SIdxVirt (idxN 3); SVal f64] f64
+    let expected =
+        [ "Slot 1 is SVal but appears after first SIdxVirt at 0 (virtual arrays cannot contain functions)" ]
+    let pass = (errs = expected)
+    ("validateArrowShape: SVal after SIdxVirt reports the constraint-1 value-after-virtual message",
+     pass,
+     if pass then sprintf "got %d error(s)" errs.Length else sprintf "expected %A, got %A" expected errs)
+
+let private test_validate_arrow_shape_accepts_wellformed () =
+    // The control: an all-virtual arrow with a scalar result violates neither
+    // constraint, so the validator must stay silent. Without this, the three
+    // message pins above are all satisfiable by a validator that reports
+    // errors indiscriminately.
+    let errs = validateArrowShape [SIdxVirt (idxN 3); SIdxVirt (idxN 4)] f64
+    let pass = List.isEmpty errs
+    ("validateArrowShape: well-formed all-virtual arrow reports no errors (control)",
+     pass,
+     if pass then "no errors" else sprintf "got %A" errs)
 
 // ---- Runner ---------------------------------------------------------------
 
@@ -164,6 +214,9 @@ let runValidateArrowTests () : Blade.Tests.TestHarness.BlockResult =
         test_valid_func_arrow_constructs
         test_nullary_func_arrow_constructs
         test_validate_arrow_shape_directly
+        test_validate_arrow_shape_stored_after_virtual
+        test_validate_arrow_shape_value_after_virtual
+        test_validate_arrow_shape_accepts_wellformed
     ]
     Blade.Tests.TestHarness.printHeader "Validate Arrow Gate"
     let mutable passed = 0

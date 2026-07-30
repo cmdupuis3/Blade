@@ -1,4 +1,5 @@
 // TEST: Cons Non-Tuple Scrutinee (rejects)
+// ERROR: BL3004
 // `head :: tail` splits a TUPLE into leading elements plus a non-empty
 // remainder. A scalar scrutinee has nothing to split, so the checker reports
 // PatternTypeMismatch (BL3004) instead of binding both names to fresh,

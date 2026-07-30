@@ -1,4 +1,5 @@
 // TEST: Unit Broadcast Scalar Mismatch (rejects)
+// ERROR: BL3006
 // Array + mismatched unitful scalar broadcast is a unit error — the
 // array-scalar kernel-map path judges the array's ELEMENT units against
 // the scalar operand at synthesis time.

@@ -8,6 +8,8 @@ open Blade.Tests.Corpus
 /// Unit of measure tests
 let unitTests = category "units"
 
-/// Negative tests: should fail type checking. Currently unreferenced;
-/// preserved as corpus assets for a future expected-error runner.
+/// Negative tests: should fail type checking. Named "(rejects)" so refusal is
+/// the PASSING outcome (Runner's isRejectProbe), which lets these ride in
+/// `allTests` next to `unitTests` instead of waiting on a dedicated
+/// expected-error runner. Each file pins the code it expects via `// ERROR:`.
 let unitErrorTests = category "unit-errors"

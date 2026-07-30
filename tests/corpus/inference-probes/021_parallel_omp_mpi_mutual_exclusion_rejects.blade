@@ -1,4 +1,5 @@
 // TEST: Parallel: omp+mpi Mutual Exclusion (rejects)
+// ERROR: BL1999
 // Mixed parallelism is ORDERED (outer, inner): `mpi, omp(...)` is the
 // supported hybrid (ranks outer, threads within each rank). The reverse —
 // OpenMP-outer / MPI-inner — is impossible (MPI ranks are processes fixed

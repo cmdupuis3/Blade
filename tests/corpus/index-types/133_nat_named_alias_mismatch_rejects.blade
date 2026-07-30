@@ -1,4 +1,5 @@
 // TEST: Nat Named Alias Mismatch (rejects)
+// ERROR: BL3001
 // The negative half of 132: now that `Nat<Alias>` genuinely carries its tag,
 // it must also genuinely REJECT a differently-tagged argument. Without this
 // pin the 132 fix could regress to "annotation accepted, tag still dropped"

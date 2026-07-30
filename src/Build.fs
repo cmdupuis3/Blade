@@ -12,11 +12,6 @@ open System.Runtime.InteropServices
 type Process = System.Diagnostics.Process
 type ProcessStartInfo = System.Diagnostics.ProcessStartInfo
 
-/// Check if g++ is available and working properly
-let checkGppAvailable () =
-    // Just assume g++ is available - actual errors will be caught during compilation
-    true
-
 // ============================================================================
 // Backend capability detection + toolchain resolution
 //
@@ -121,6 +116,18 @@ let detectCapabilities () : Capabilities =
 
 /// Capabilities are environment-global; detect once, lazily.
 let capabilities = lazy (detectCapabilities ())
+
+/// Whether g++ is actually present and runnable on PATH.
+///
+/// This used to be a hardcoded `true` ("actual errors will be caught during
+/// compilation"), which is exactly backwards for the harness: a box without
+/// g++ then reported every compile-and-run test as a genuine FAILURE instead
+/// of a skip, and the "requires g++" skip branches guarding on it were dead
+/// code. Delegates to the same `probeTool "g++" "--version"` capability probe
+/// that resolveCompile/DiffOracle/InterpDiff already consult, so every
+/// consumer agrees on one answer. Defined here (rather than at the top of the
+/// module) because it needs `capabilities`.
+let checkGppAvailable () = capabilities.Value.HasGpp
 
 /// Infer the backend requirement from generated source. CUDA codegen emits
 /// `__global__`-qualified kernels; CPU codegen never does. This keeps the

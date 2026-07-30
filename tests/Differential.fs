@@ -42,39 +42,81 @@ let private runDiffCase (outputDir: string) (caseName: string) (edgiSrc: string)
         match lower edgiSrc with
         | Error e -> printfn "    [diff:%s] LOWER FAILED: %s" caseName e; false
         | Ok ir0 ->
-            let ir = match IR.validateIR ir0 with Ok v -> v | Error _ -> ir0
-            let safeName = "diff_" + caseName.Replace(" ", "_").Replace("=", "")
-            let (cppCode, _w) = CodeGen.genSelfContainedProgramFromIR ir safeName
-            let srcPath = Path.Combine(outputDir, safeName + ".cpp")
-            File.WriteAllText(srcPath, cppCode)
-            let srcAbs = Path.GetFullPath srcPath
-            let exeExt = if RuntimeInformation.IsOSPlatform(OSPlatform.Windows) then ".exe" else ".out"
-            let exeAbs = Path.ChangeExtension(srcAbs, exeExt)
-            let cpsi = ProcessStartInfo("g++", sprintf "-std=c++17 -O2 -fopenmp -o \"%s\" \"%s\"" exeAbs srcAbs)
-            cpsi.RedirectStandardError <- true
-            cpsi.UseShellExecute <- false
-            cpsi.WorkingDirectory <- Path.GetDirectoryName(srcAbs)
-            use cproc = Process.Start(cpsi)
-            let cerr = cproc.StandardError.ReadToEndAsync()
-            cproc.WaitForExit(60000) |> ignore
-            if cproc.ExitCode <> 0 then
-                printfn "    [diff:%s] COMPILE FAILED:\n%s" caseName cerr.Result
+            // A validation error is a hard failure, exactly as in Runner.fs's
+            // FpIRValidationError arm. The old `| Error _ -> ir0` fell through
+            // to codegen on invalid IR, so a validator regression could only
+            // surface as an unrelated downstream symptom -- or not at all.
+            match IR.validateIR ir0 with
+            | Error validationErrors ->
+                printfn "    [diff:%s] IR VALIDATION FAILED: %s" caseName (String.concat "; " validationErrors)
                 false
-            else
-                let rpsi = ProcessStartInfo(exeAbs)
-                rpsi.RedirectStandardOutput <- true
-                rpsi.RedirectStandardError <- true
-                rpsi.UseShellExecute <- false
-                rpsi.WorkingDirectory <- Path.GetDirectoryName(exeAbs)
-                use rproc = Process.Start(rpsi)
-                let rout = rproc.StandardOutput.ReadToEndAsync()
-                rproc.WaitForExit(30000) |> ignore
-                let expected = parseExpectedValues edgiSrc
-                match checkExpectedValues expected rout.Result with
-                | Ok () -> true
-                | Error errs ->
-                    printfn "    [diff:%s] VALUE MISMATCH: %s" caseName (String.concat "; " errs)
+            | Ok ir ->
+                let safeName = "diff_" + caseName.Replace(" ", "_").Replace("=", "")
+                let (cppCode, _w) = CodeGen.genSelfContainedProgramFromIR ir safeName
+                let srcPath = Path.Combine(outputDir, safeName + ".cpp")
+                File.WriteAllText(srcPath, cppCode)
+                let srcAbs = Path.GetFullPath srcPath
+                let exeExt = if RuntimeInformation.IsOSPlatform(OSPlatform.Windows) then ".exe" else ".out"
+                let exeAbs = Path.ChangeExtension(srcAbs, exeExt)
+                let cpsi = ProcessStartInfo("g++", sprintf "-std=c++17 -O2 -fopenmp -o \"%s\" \"%s\"" exeAbs srcAbs)
+                cpsi.RedirectStandardError <- true
+                cpsi.UseShellExecute <- false
+                cpsi.WorkingDirectory <- Path.GetDirectoryName(srcAbs)
+                use cproc = Process.Start(cpsi)
+                let cerr = cproc.StandardError.ReadToEndAsync()
+                // WaitForExit(ms) returns false on TIMEOUT, in which case
+                // ExitCode throws / is meaningless. Honor the boolean.
+                let cExited = cproc.WaitForExit(60000)
+                if not cExited then
+                    (try cproc.Kill(true) with _ -> ())
+                    printfn "    [diff:%s] COMPILE TIMED OUT (60s)" caseName
                     false
+                elif cproc.ExitCode <> 0 then
+                    printfn "    [diff:%s] COMPILE FAILED:\n%s" caseName cerr.Result
+                    false
+                else
+                    let rpsi = ProcessStartInfo(exeAbs)
+                    rpsi.RedirectStandardOutput <- true
+                    rpsi.RedirectStandardError <- true
+                    rpsi.UseShellExecute <- false
+                    rpsi.WorkingDirectory <- Path.GetDirectoryName(exeAbs)
+                    use rproc = Process.Start(rpsi)
+                    let rout = rproc.StandardOutput.ReadToEndAsync()
+                    // stderr was redirected but never drained: a program that
+                    // fills the stderr pipe would deadlock instead of failing.
+                    let rerr = rproc.StandardError.ReadToEndAsync()
+                    let rExited = rproc.WaitForExit(30000)
+                    if not rExited then
+                        (try rproc.Kill(true) with _ -> ())
+                        printfn "    [diff:%s] RUN TIMED OUT (30s)" caseName
+                        false
+                    elif rproc.ExitCode <> 0 then
+                        // A crashed/aborting program prints nothing (or partial
+                        // output); with no exit-code gate, checkExpectedValues
+                        // over the truncated stdout used to be the only verdict,
+                        // and an EMPTY pin list makes that vacuously Ok.
+                        printfn "    [diff:%s] RUN FAILED: exit %d\n%s" caseName rproc.ExitCode (rerr.Result.Trim())
+                        false
+                    else
+                        // A pin that does not parse is a dropped assertion, not
+                        // an absent one. These sources are generated with exactly
+                        // one `// EXPECT:` line, so both an unparseable pin and an
+                        // empty pin list mean the value check would be vacuous
+                        // (checkExpectedValues [] returns Ok ()).
+                        let malformed = parseMalformedExpectLines edgiSrc
+                        let expected = parseExpectedValues edgiSrc
+                        if not malformed.IsEmpty then
+                            printfn "    [diff:%s] UNPARSEABLE EXPECT pin(s): %s" caseName (String.concat " | " malformed)
+                            false
+                        elif expected.IsEmpty then
+                            printfn "    [diff:%s] NO EXPECT pin -- value check would be vacuous" caseName
+                            false
+                        else
+                            match checkExpectedValues expected rout.Result with
+                            | Ok () -> true
+                            | Error errs ->
+                                printfn "    [diff:%s] VALUE MISMATCH: %s" caseName (String.concat "; " errs)
+                                false
     with ex ->
         printfn "    [diff:%s] EXCEPTION: %s" caseName ex.Message
         false
@@ -220,15 +262,16 @@ let private diffCaseDecompact (outputDir: string) : bool =
     ok
 
 /// The single differential test: true iff every case agrees with its oracle.
-/// Skips cleanly (returns true) if g++ is unavailable, mirroring the other
-/// C++-dependent harness phases.
+/// Skips (Skipped = 1, with a printed reason) if g++ is unavailable, mirroring
+/// DiffOracle/InterpDiff — a toolchain-less box must report a SKIP, not the
+/// "0 passed, 0 failed" that a Skipped = 0 return produced.
 let runDifferentialSymmetryTest () : Blade.Tests.TestHarness.BlockResult =
     let outputDir = "./generated_cpp_tests"
     printHeader "Differential Symmetry"
     let caps = capabilities.Value
     if not caps.HasGpp then
         printfn "Skipped: g++ not found (cannot compile differential cases)."
-        { Block = "Differential Symmetry"; Passed = 0; Failed = 0; Skipped = 0; FailedNames = [] }
+        { Block = "Differential Symmetry"; Passed = 0; Failed = 0; Skipped = 1; FailedNames = [] }
     else
         Directory.CreateDirectory(outputDir) |> ignore
         let cases : (string * (string -> bool)) list =

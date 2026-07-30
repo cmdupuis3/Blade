@@ -1,4 +1,5 @@
 // TEST: Struct Bound References Later Field (rejects)
+// ERROR: BL3008
 // Field order matters: a bound may reference only EARLIER fields.
 struct Bad {
     a: Int in 0 .. b,

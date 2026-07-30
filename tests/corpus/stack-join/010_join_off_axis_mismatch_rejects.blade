@@ -1,4 +1,5 @@
 // TEST: Join Off-Axis Extent Mismatch (rejects)
+// ERROR: BL4004
 // Only the JOINED axis may differ. Concatenating rows (d = 0) of arrays whose
 // row LENGTHS disagree would produce a ragged result, so it is a BL4004 shape
 // error naming the offending dimension.

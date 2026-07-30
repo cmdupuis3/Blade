@@ -1,4 +1,5 @@
 // TEST: Ragged Extents Rank2 (rejects)
+// ERROR: BL3999
 // extents() on a MULTI-RANK ragged array is statically ill-posed: the
 // ragged dimension's extent varies per row, so there is no scalar answer
 // for the tuple form to contain. extents answers from the argument type

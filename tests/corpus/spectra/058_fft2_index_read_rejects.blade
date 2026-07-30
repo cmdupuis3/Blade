@@ -1,4 +1,5 @@
 // TEST: Spectra fft2 partial index read (rejects)
+// ERROR: BL5400
 // Guards the index-vs-call discrimination in the widened gate. In Blade arrays
 // ARE functions, so `A3(0)` (a partial read yielding a rank-2 row) and
 // `flux(...)` (a call) are the SAME AST node. The function-return-type arm must

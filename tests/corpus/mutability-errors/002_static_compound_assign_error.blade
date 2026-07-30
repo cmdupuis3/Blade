@@ -1,4 +1,7 @@
-// TEST: Static compound assign error
+// TEST: Static compound assign error (rejects)
+// ERROR: BL4005
+// The COMPOUND form must be refused for the same reason as the plain one:
+// `x += 1` desugars to an assignment, so a static target is still immutable.
 let static x = 10
 let result = {
     x += 1

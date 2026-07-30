@@ -1,4 +1,5 @@
 // TEST: Unit Kernel Zip Mismatch (rejects)
+// ERROR: BL3006
 // A HAND-WRITTEN zip kernel adding meters to seconds rejects, the same
 // as the operator spelling A + B (units/011). The kernel-body unit walk
 // sees the params' post-unification element types, so the a + b inside

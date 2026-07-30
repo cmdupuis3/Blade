@@ -272,13 +272,54 @@ let private test_elementwise_over_hermitian_type () =
     assertBindingType "elementwise over hermitian" src "result"
         (arrOf anyElem [herm])
 
-// Elementwise propagation, DEPENDENT index (DepIdx). A DepIdx array contributes
-// TWO index records (outer Idx + dependent inner). An elementwise (rank-0) map
-// should PRESERVE both — the per-element kernel doesn't consume the inner dim.
-// NOTE: this asserts the DESIRED behavior. deduceOutputType currently filters
-// out `__depidx_inner`-tagged dims unconditionally (correct for a CONSUMING
-// kernel like reduce, wrong for elementwise), so this test characterizes whether
-// the elementwise-vs-consuming distinction is yet made for dependent dims.
+// ---- Elementwise over a NON-DENSE inner dim: assert the IxKind ------------
+// A depidx / ragged array contributes TWO index records (outer + a dependent or
+// ragged inner). An elementwise (rank-0) kernel consumes nothing, so BOTH must
+// survive AS THEMSELVES: deduceOutputType's consumed-dim filter (IR.fs) drops
+// `IxKDepInner`/ragged-family dims only `when kernelConsumesInner`, and its
+// size-1-group path copies the source record verbatim (Id refreshed only), so
+// Tag and IxKind reach the output unchanged.
+//
+// These two DELIBERATELY bypass matchesTypePattern. That relation compares
+// Rank, Symmetry, DimensionKind (S/T) and the Tag — but NOT `IxKind`, and a
+// `__`-prefixed Tag in the pattern is treated as don't-care anyway (IR.fs
+// matchesIndexPattern). So the pattern `[idx; idx]` these tests used to assert
+// is satisfied *identically* by a densified output: the exact bug the tests
+// exist to catch would pass. IxKind is the discriminator, so assert it.
+
+/// Lower `src` and return the index records of `bindingName`'s array type.
+let private indexRecordsOf (src: string) (bindingName: string) : Result<IRIndexType list, string> =
+    match lower src with
+    | Error e -> Error (sprintf "lower failed: %s" e)
+    | Ok prog ->
+        match bindingTypeByName prog bindingName with
+        | None -> Error (sprintf "no binding named '%s' in lowered program" bindingName)
+        | Some (ArrayElem a) -> Ok a.IndexTypes
+        | Some other -> Error (sprintf "binding '%s' is not an array: %s" bindingName (formatBladeType other))
+
+/// Assert the per-slot (IxKind, Tag) of `bindingName`'s index records — the
+/// two fields matchesTypePattern cannot see.
+let private assertIndexKinds (testName: string) (src: string) (bindingName: string)
+                             (expected: (IxKind * string option) list) : string * bool * string =
+    match indexRecordsOf src bindingName with
+    | Error e -> (testName, false, e)
+    | Ok ixs ->
+        let actual = ixs |> List.map (fun ix -> (ix.IxKind, ix.Tag))
+        let shapeOk =
+            ixs |> List.forall (fun ix ->
+                ix.Rank = 1 && ix.Symmetry = SymNone && ix.Kind = SDimension)
+        if actual = expected && shapeOk then
+            (testName, true, sprintf "%A" actual)
+        elif actual = expected then
+            (testName, false, sprintf "kinds/tags match %A but a slot is not rank-1/SymNone/S-dim: %A"
+                                      actual (ixs |> List.map (fun ix -> ix.Rank, ix.Symmetry, ix.Kind)))
+        else
+            (testName, false, sprintf "expected %A, got %A" expected actual)
+
+// Elementwise propagation, DEPENDENT index (DepIdx). `Array<_ like Tri3>` lowers
+// to [outer tagged __depidx_outer / IxKDepOuter; inner tagged __depidx_inner /
+// IxKDepInner] (TypeCheck.fs lowerIndexTypeList's TyDepIdx arm, reached through
+// the TyNamed alias recursion). A rank-0 kernel must hand both back unchanged.
 let private test_elementwise_over_depidx_type () =
     let src =
         "type Tri3 = DepIdx<Idx<3>, lambda(i) -> Idx<3 - i>>\n" +
@@ -289,36 +330,59 @@ let private test_elementwise_over_depidx_type () =
         "]\n" +
         "let h = lambda(e) -> e * 2.0\n" +
         "let result = method_for(r) <@> h |> compute\n"
-    // Desired: two records preserved (outer + dependent inner).
-    assertBindingType "elementwise over depidx" src "result"
-        (arrOf anyElem [idx; idx])
+    assertIndexKinds "elementwise over depidx preserves IxKDepInner" src "result"
+        [ (IxKDepOuter, Some "__depidx_outer"); (IxKDepInner, Some "__depidx_inner") ]
 
-// Elementwise propagation, RAGGED index (RaggedIdx). A ragged dim should
-// propagate through an elementwise map (the kernel maps each scalar; the row
-// structure is unchanged). NOTE: deduceOutputType currently drops `__raggedidx`
-// tags unconditionally; this characterizes whether elementwise preserves the
-// ragged dim as #6 expects.
+// Elementwise propagation, RAGGED index. A jagged literal lowers to [plain outer
+// (extent = row count); inner tagged __raggedidx_inline / IxKRaggedInline]
+// (TypeCheck.fs's isRaggedAtSecondLevel branch). The elementwise map maps each
+// scalar, so the row structure — and therefore the ragged kind — is unchanged.
 let private test_elementwise_over_ragged_type () =
     let src =
         "let r = [[1.0, 2.0, 3.0], [4.0, 5.0], [6.0, 7.0, 8.0, 9.0]]\n" +
         "let h = lambda(e) -> e * 2.0\n" +
         "let result = method_for(r) <@> h |> compute\n"
-    // Desired: outer Idx + ragged inner both present (2 records).
-    assertBindingType "elementwise over ragged" src "result"
-        (arrOf anyElem [idx; idx])
+    assertIndexKinds "elementwise over ragged preserves IxKRaggedInline" src "result"
+        [ (IxKPlain, None); (IxKRaggedInline, Some "__raggedidx_inline") ]
 
 // Elementwise propagation, ENUM index (EnumIdx). An EnumIdx alias stands alone
 // (the array axis is a plain Idx; the ENUM is the element type). An elementwise
-// map should preserve the plain Idx axis. Expected to PASS (enum is an element-
-// type concern, not a filtered inner dim).
+// map preserves the plain Idx axis AND the nominal enum tag on the element.
+//
+// The element-type half needs its own assertion: with `anyElem` in the pattern
+// the claim "enum is an element-type concern" is exactly what goes unchecked —
+// `arrOf anyElem [idx]` is satisfied by a plain `Array<Float64 like Idx<3>>`,
+// so a dropped alias would pass. matchesTypePattern can't express "an
+// IRTIdxTagged with THIS name but any inner" either (IRTIdxTagged falls to its
+// exact-equality fallback, where a hole in the inner position is not a hole),
+// so the element type is destructured directly. The inner scalar is asserted
+// only to be an integer: Int32-vs-Int64 for enum backing is a literal-typing
+// decision, not part of the alias-survival claim.
 let private test_elementwise_over_enumidx_type () =
+    let name = "elementwise over enumidx (axis stays Idx, elem keeps Nat<LandType>)"
     let src =
         "type LandType = EnumIdx<[101, 205, 307]>\n" +
         "let codes: Array<LandType like Idx<3>> = [101, 205, 307]\n" +
         "let h = lambda(e) -> e\n" +
         "let result = method_for(codes) <@> h |> compute\n"
-    assertBindingType "elementwise over enumidx" src "result"
-        (arrOf anyElem [idx])
+    match lower src with
+    | Error e -> (name, false, sprintf "lower failed: %s" e)
+    | Ok prog ->
+        match bindingTypeByName prog "result" with
+        | None -> (name, false, "no 'result' binding")
+        | Some actual ->
+            if not (matchesTypePattern (arrOf anyElem [idx]) actual) then
+                (name, false, sprintf "axis shape: expected Array<_ like Idx<_>>, got %s" (formatBladeType actual))
+            else
+                match actual with
+                | ArrayElem a ->
+                    match a.ElemType with
+                    | IRTIdxTagged (IRTScalar (ETInt64 | ETInt32), IRefNamed "LandType") ->
+                        (name, true, formatBladeType actual)
+                    | other ->
+                        (name, false,
+                         sprintf "element type lost the enum alias: expected Nat<LandType>, got %A" other)
+                | _ -> (name, false, "not an array after the pattern matched (unreachable)")
 
 // JOINT PRODUCT SYMMETRY (d=2) type deduction — CORRECTED (arc 1). One
 // identity group over a multi-dim array licenses only the JOINT (diagonal)

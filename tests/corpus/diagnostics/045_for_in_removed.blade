@@ -1,0 +1,18 @@
+// TEST: Diag Imperative For In Removed (diag)
+// ERROR: BL1003 @ 13:5
+// ERROR-CONTAINS: The imperative `for x in a..b { ... }` statement has been removed
+// The imperative `for IDENT in a..b { ... }` statement was removed from the
+// surface language (recursive-arrays arc): iteration is loop objects for
+// parallel structure and recursive arrays for sequential structure. The parser
+// keeps the `for`-disambiguation shell (Parser.fs parseBlockStmts, KwFor arm)
+// so this shape gets a STEERING diagnostic instead of a confusing misparse at
+// `in` — that steer is what this file pins. BLOCK position is the one that
+// reaches the shell; at top level the same text dies earlier as BL1999
+// "Expected declaration but got keyword 'for'", so it cannot pin BL1003.
+function f() -> Int64 = {
+    let mut s = 0
+    for k in 0..3 {
+        s += k
+    }
+    s
+}
