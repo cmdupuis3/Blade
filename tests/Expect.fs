@@ -4,10 +4,35 @@
 module Blade.Tests.Expect
 
 open System
+open System.Globalization
 
 // ============================================================================
 // Value Checking Infrastructure
 // ============================================================================
+
+/// THE float parser for this module — pins AND program output.
+///
+/// `Double.TryParse s` (the one-argument overload) parses in the CURRENT
+/// culture. On any comma-decimal locale (de-DE, fr-FR, pt-BR, ...) that reads
+/// `3.5` as 35 and rejects nothing, while the C++ side always prints
+/// period-decimals: every differential value gate would then compare the wrong
+/// numbers, or fail to parse at all and report "could not parse" for correct
+/// output. A test harness's verdicts must not depend on the machine's regional
+/// settings, so every parse in this file goes through here.
+///
+/// `NumberStyles.Float` (leading/trailing white, sign, decimal point, exponent)
+/// deliberately EXCLUDES AllowThousands, which the one-argument overload
+/// includes: no printed value or hand-written pin uses digit grouping, and
+/// admitting it would let `[1,000]` parse as one element instead of failing as
+/// the malformed two-element pin it is. Matches Benchmarks.fs's elapsed-time
+/// parse, which is the pattern this file was supposed to follow.
+/// The explicit Trim is redundant with AllowLeadingWhite/AllowTrailingWhite but
+/// kept so every former call site (each of which trimmed first) is visibly
+/// unchanged rather than relying on the NumberStyles flags to be equivalent.
+let internal tryParseInvariant (s: string) : float option =
+    match Double.TryParse(s.Trim(), NumberStyles.Float, CultureInfo.InvariantCulture) with
+    | true, v -> Some v
+    | false, _ -> None
 
 /// Where a "(rejects)" probe is required to be rejected.
 ///
@@ -121,12 +146,7 @@ let private tryParseFloatList (s: string) : float list option =
         let inner = t.Substring(1, t.Length - 2).Trim()
         if String.IsNullOrWhiteSpace(inner) then Some []
         else
-            let parsed =
-                splitTopLevelCommas inner
-                |> List.map (fun x ->
-                    match Double.TryParse(x.Trim()) with
-                    | true, v -> Some v
-                    | false, _ -> None)
+            let parsed = splitTopLevelCommas inner |> List.map tryParseInvariant
             if parsed |> List.forall Option.isSome then Some (parsed |> List.map Option.get)
             else None
 
@@ -146,15 +166,15 @@ let internal tryParse2DList (s: string) : float list list option =
 
 /// Parse a single complex pair `(re, im)` returning (re, im) on success.
 /// Tolerates surrounding whitespace and accepts both `1` and `1.0` for
-/// each component (matching the existing Double.TryParse convention).
+/// each component (see tryParseInvariant for the parse convention).
 let private parseComplexPair (s: string) : (float * float) option =
     let t = s.Trim()
     if t.StartsWith("(") && t.EndsWith(")") then
         let inner = t.Substring(1, t.Length - 2)
         match inner.Split([|','|], 2) with
         | [| reStr; imStr |] ->
-            match Double.TryParse(reStr.Trim()), Double.TryParse(imStr.Trim()) with
-            | (true, re), (true, im) -> Some (re, im)
+            match tryParseInvariant reStr, tryParseInvariant imStr with
+            | Some re, Some im -> Some (re, im)
             | _ -> None
         | _ -> None
     else None
@@ -355,14 +375,14 @@ let private tryParseExpectPin (payload: string) : ExpectedValue option =
             match tryParseQuotedString value with
             | Some s -> Some (ExpectedString (name, s))
             | None -> None
-        elif value.ToLower() = "true" then
+        elif value.ToLowerInvariant() = "true" then
             Some (ExpectedBool (name, true))
-        elif value.ToLower() = "false" then
+        elif value.ToLowerInvariant() = "false" then
             Some (ExpectedBool (name, false))
         else
-            match Double.TryParse(value) with
-            | true, v -> Some (ExpectedScalar (name, v))
-            | false, _ -> None
+            match tryParseInvariant value with
+            | Some v -> Some (ExpectedScalar (name, v))
+            | None -> None
     | _ -> None
 
 /// Parse expected values from test source comments
@@ -452,11 +472,11 @@ let parseDiagPins (source: string) : DiagPin list * string list =
             pins.Add pin
     (List.ofSeq pins, List.ofSeq contains)
 
-/// Parse actual values from program output
-/// Looks for lines like "varname = value" or "varname = [...]"
-let parseActualValues (output: string) : Map<string, string> =
-    let lines = output.Split([|'\n'; '\r'|], StringSplitOptions.RemoveEmptyEntries)
-    lines
+/// Every `name = value` pair of a program's output, IN ORDER and WITH
+/// REPETITIONS. `parseActualValues` folds this into a Map (last wins), which is
+/// lossy; the value gate needs the unfolded list to notice that it happened.
+let private actualValuePairs (output: string) : (string * string) list =
+    output.Split([|'\n'; '\r'|], StringSplitOptions.RemoveEmptyEntries)
     |> Array.choose (fun line ->
         let trimmed = line.Trim()
         if trimmed.Contains(" = ") && not (trimmed.Contains("completed in")) then
@@ -464,7 +484,36 @@ let parseActualValues (output: string) : Map<string, string> =
             | [| name; value |] -> Some (name.Trim(), value.Trim())
             | _ -> None
         else None)
-    |> Map.ofArray
+    |> Array.toList
+
+/// Parse actual values from program output
+/// Looks for lines like "varname = value" or "varname = [...]"
+///
+/// `Map.ofList` keeps the LAST binding for a repeated name, which is why
+/// `collapsedActualNames` exists: a pin compared against a name the program
+/// printed twice with DIFFERENT values was silently checking one arbitrary
+/// printed value and ignoring the other.
+let parseActualValues (output: string) : Map<string, string> =
+    actualValuePairs output |> Map.ofList
+
+/// Names the output printed MORE THAN ONCE with more than one distinct value
+/// text, as (name, distinct values). These are the names for which
+/// `parseActualValues`'s last-wins fold destroyed evidence: one of the printed
+/// values is invisible to every pin, so a pin on that name asserts nothing about
+/// it. `checkExpectedValues` turns this into a mismatch for any name it has a
+/// pin for.
+///
+/// Deliberately NOT fired by a name repeated with the IDENTICAL value text: the
+/// fold discards nothing observable there (whichever line wins carries the same
+/// value), so failing on it would be pure noise rather than a defect. The
+/// ambiguity that matters is a name whose value DEPENDS on which line the parser
+/// happened to keep.
+let collapsedActualNames (output: string) : (string * string list) list =
+    actualValuePairs output
+    |> List.groupBy fst
+    |> List.choose (fun (name, pairs) ->
+        let distinct = pairs |> List.map snd |> List.distinct
+        if List.length distinct > 1 then Some (name, distinct) else None)
 
 /// Compare a float with combined absolute + relative tolerance
 let floatEquals (expected: float) (actual: float) (tolerance: float) : bool =
@@ -478,22 +527,33 @@ let floatEquals (expected: float) (actual: float) (tolerance: float) : bool =
         else diff / scale <= tolerance
 
 /// Parse a float from string
-let tryParseFloat (s: string) : float option =
-    match Double.TryParse(s.Trim()) with
-    | true, v -> Some v
-    | false, _ -> None
+let tryParseFloat (s: string) : float option = tryParseInvariant s
 
-/// Parse a 1D array from string like "[1.0, 2.0, 3.0]"
+/// Parse a 1D array from PROGRAM OUTPUT, e.g. "[1.0, 2.0, 3.0]".
+///
+/// The brackets are REQUIRED, and that is the whole point. The previous version
+/// used `TrimStart('[') |> TrimEnd(']')`, which trims nothing when there is
+/// nothing to trim: an actual `x = 5` therefore satisfied the pin
+/// `// EXPECT: x = [5]`, so a rank-1 array that had collapsed to a scalar —
+/// exactly the codegen regression a rank-1 pin exists to catch — read as a pass.
+/// The PIN side (tryParseFloatList) has always required the brackets; this is
+/// the actual side agreeing with it.
+///
+/// Splitting is bracket-aware (splitTopLevelCommas) rather than a bare
+/// `Split(',')`, so a NESTED actual like `[[1,2],[3,4]]` fails here as a
+/// non-flat array instead of being shredded into unparseable fragments — same
+/// verdict, an honest reason. One unparseable element fails the whole parse;
+/// there is no element-level fallback (see tryParseFloatList).
 let tryParse1DArray (s: string) : float list option =
-    try
-        let inner = s.Trim().TrimStart('[').TrimEnd(']')
+    let t = s.Trim()
+    if not (t.Length >= 2 && t.StartsWith("[") && t.EndsWith("]")) then None
+    else
+        let inner = t.Substring(1, t.Length - 2).Trim()
         if String.IsNullOrWhiteSpace(inner) then Some []
         else
-            inner.Split(',')
-            |> Array.map (fun x -> Double.Parse(x.Trim()))
-            |> Array.toList
-            |> Some
-    with _ -> None
+            let parsed = splitTopLevelCommas inner |> List.map tryParseInvariant
+            if parsed |> List.forall Option.isSome then Some (parsed |> List.map Option.get)
+            else None
 
 /// Parse a 1D bool array out of PROGRAM OUTPUT, e.g. "[true, false, true]".
 ///
@@ -529,13 +589,34 @@ let rec tryParse1DBoolArray (s: string) : bool list option =
             if parsed |> List.forall Option.isSome then Some (parsed |> List.collect Option.get)
             else None
 
+/// The name a pin asserts on, for the collapsed-output cross-check below.
+let private pinName (e: ExpectedValue) : string =
+    match e with
+    | ExpectedScalar (n, _) | ExpectedBool (n, _) | ExpectedArray1D (n, _)
+    | ExpectedArray1DBool (n, _) | ExpectedArray2D (n, _) | ExpectedComplex (n, _, _)
+    | ExpectedArray1DComplex (n, _) | ExpectedString (n, _) | ExpectedArray1DString (n, _) -> n
+
 /// Check if expected values match actual output
 let checkExpectedValues (expected: ExpectedValue list) (output: string) : Result<unit, string list> =
     if expected.IsEmpty then Ok ()
     else
         let actual = parseActualValues output
         let tolerance = 1e-9
-        
+
+        // A pin whose name the program printed more than once, with more than one
+        // distinct value, is not a check at all: parseActualValues' fold kept one
+        // of the printed values and the pin was compared against whichever one
+        // that was. Report it as its own mismatch, alongside (not instead of) the
+        // value comparison — the comparison result is meaningless either way, and
+        // the reason it is meaningless is the thing worth printing.
+        let pinnedNames = expected |> List.map pinName |> Set.ofList
+        let collapseErrors =
+            collapsedActualNames output
+            |> List.filter (fun (n, _) -> pinnedNames.Contains n)
+            |> List.map (fun (n, vals) ->
+                sprintf "%s: output prints '%s' %d times with differing values (%s) -- the pin can only see one of them"
+                        n n (List.length vals) (vals |> List.map (sprintf "'%s'") |> String.concat ", "))
+
         let errors = 
             expected |> List.choose (fun exp ->
                 match exp with
@@ -547,7 +628,7 @@ let checkExpectedValues (expected: ExpectedValue list) (output: string) : Result
                         | Some actualVal -> Some (sprintf "%s: expected %.17g, got %.17g (diff=%.3e)" name expectedVal actualVal (abs(expectedVal - actualVal)))
                         | None ->
                             // boolalpha: true→1, false→0
-                            match actualStr.Trim().ToLower() with
+                            match actualStr.Trim().ToLowerInvariant() with
                             | "true" when floatEquals expectedVal 1.0 tolerance -> None
                             | "false" when floatEquals expectedVal 0.0 tolerance -> None
                             | "true" -> Some (sprintf "%s: expected %.17g, got true (1)" name expectedVal)
@@ -558,7 +639,7 @@ let checkExpectedValues (expected: ExpectedValue list) (output: string) : Result
                 | ExpectedBool (name, expectedVal) ->
                     match actual.TryFind name with
                     | Some actualStr ->
-                        let lower = actualStr.Trim().ToLower()
+                        let lower = actualStr.Trim().ToLowerInvariant()
                         let matches =
                             match lower with
                             | "true" -> expectedVal = true
@@ -669,11 +750,11 @@ let checkExpectedValues (expected: ExpectedValue list) (output: string) : Result
                             let inner = t.Substring(1, t.Length - 2)
                             match inner.Split([|','|], 2) with
                             | [| reStr; imStr |] ->
-                                match Double.TryParse(reStr.Trim()), Double.TryParse(imStr.Trim()) with
-                                | (true, re), (true, im)
+                                match tryParseInvariant reStr, tryParseInvariant imStr with
+                                | Some re, Some im
                                     when floatEquals expectedRe re tolerance &&
                                          floatEquals expectedIm im tolerance -> None
-                                | (true, re), (true, im) ->
+                                | Some re, Some im ->
                                     Some (sprintf "%s: expected (%g, %g), got (%g, %g)" name expectedRe expectedIm re im)
                                 | _ -> Some (sprintf "%s: could not parse complex components from '%s'" name actualStr)
                             | _ -> Some (sprintf "%s: malformed complex output '%s'" name actualStr)
@@ -703,8 +784,8 @@ let checkExpectedValues (expected: ExpectedValue list) (output: string) : Result
                                             let pinner = pt.Substring(1, pt.Length - 2)
                                             match pinner.Split([|','|], 2) with
                                             | [| reStr; imStr |] ->
-                                                match Double.TryParse(reStr.Trim()), Double.TryParse(imStr.Trim()) with
-                                                | (true, re), (true, im) -> Some (re, im)
+                                                match tryParseInvariant reStr, tryParseInvariant imStr with
+                                                | Some re, Some im -> Some (re, im)
                                                 | _ -> None
                                             | _ -> None
                                         else None)
@@ -767,6 +848,7 @@ let checkExpectedValues (expected: ExpectedValue list) (output: string) : Result
                                 | Some (e, a) -> Some (sprintf "%s: expected element \"%s\", got \"%s\"" name e a)
                         else Some (sprintf "%s: expected string array but output '%s' isn't in [a, b, ...] form" name actualStr)
                     | None -> Some (sprintf "%s: not found in output" name))
-        
-        if errors.IsEmpty then Ok ()
-        else Error errors
+
+        let allErrors = collapseErrors @ errors
+        if allErrors.IsEmpty then Ok ()
+        else Error allErrors

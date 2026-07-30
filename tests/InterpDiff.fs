@@ -281,9 +281,15 @@ let private runInterpTimed (program: IRProgram) (name: string) : Result<Run.Inte
 let private rejectOnlyCategories = Set.ofList [ "mutability-errors"; "unit-errors" ]
 
 /// Differential gate over the given corpus categories. Verdicts:
-///   * reject-probe ("(rejects)", OR any test in a rejectOnlyCategory): correct
-///     iff the compiled pipeline refuses it; the interpreter has nothing to run
-///     and trivially agrees.
+///   * reject-probe ("(rejects)", OR any test in a rejectOnlyCategory): judged by
+///     Runner.classifyWithDetailAs — THE main-suite classifier, not a local rule.
+///     It used to be a local rule ("correct iff NOT a full pass"), which is
+///     verbatim the vacuity Runner.classifyWithDetail's own header documents as
+///     closed: it credited a probe for failing at ANY stage, so a dead toolchain
+///     or a broken codegen made every probe green. Deferring to the classifier
+///     means the stage discipline (REJECT-AT:), the reason pins (// ERROR:), and
+///     the never-credit-a-SKIP rule all apply here by construction, and the two
+///     gates cannot drift apart again.
 ///   * abort-probe ("(aborts)"): both sides must exit nonzero AND the
 ///     interpreter's stderr must contain every pinned // ABORT: substring. Each
 ///     // ABORT: pin is an INDEPENDENT substring matched over the whole (multi-
@@ -293,14 +299,16 @@ let private rejectOnlyCategories = Set.ofList [ "mutability-errors"; "unit-error
 ///   * normal test: byte-equal NORMALIZED stdout + matching exit-code class,
 ///     then a second gate — Expect.checkExpectedValues over the interp output.
 ///   * interp reports ExitUnsupported (125): [SKIP-UNSUPPORTED], counted apart.
-///   * compiled FRONT-END rejected a non-reject value test (IRResult = Error):
-///     no compiled reference exists to diff against, so this is NOT an interp
-///     parity failure — [SKIP-COMPILED-REJECTED], surfaced distinctly (neither a
-///     failure nor a silent pass). This is the faithful landing for a
-///     "known-failing"/forward-looking spec that the compiler cannot yet build.
-///     (In the current tree functions/017,018 — the documented Poly+HM
-///     known-failing pair — actually COMPILE AND RUN, so they take the normal
-///     path; this branch is the defensive net if such a spec regresses.)
+///   * compiled FRONT-END rejected a test that is NOT marked "(rejects)" and is
+///     not in a rejectOnlyCategory: FAIL, exactly as the main suite scores it.
+///     This branch used to PASS such a test ("compile-reject (unmarked, no
+///     EXPECT): interp trivially agrees") whenever it carried no EXPECT pins,
+///     which made "the compiler refuses this program" a way to earn a green tick
+///     in a gate whose entire purpose is comparing two evaluators' OUTPUT — a
+///     regression that broke a whole category's front end would show up as more
+///     passes. An unmarked reject is either a test that regressed or a negative
+///     test missing its name marker; both are for a human to resolve, and
+///     neither is something a differential gate can verify.
 let runInterpDiffTests (categories: string list) : BlockResult =
     printHeader "Interpreter Differential (M0)"
     let blockName = "Interp Diff"
@@ -319,8 +327,13 @@ let runInterpDiffTests (categories: string list) : BlockResult =
         let mutable failed = 0
         let mutable skipped = 0
         let mutable unsupported = 0
-        let mutable compiledRejected = 0
         let mutable failedNames : string list = []
+        // Reject-probes judged on stage alone because their source pins no
+        // `// ERROR:` reason. Reported for the same purpose as the main suite's
+        // "Unpinned:" line: a probe that passes on "the compiler refused it" can
+        // be refused for a reason unrelated to the rule it guards, and that
+        // exposure is invisible in a pass/fail tally.
+        let mutable unpinnedRejects = 0
 
         // Per-test interpreter wall-time. Only tests that ACTUALLY run the
         // interpreter are timed (reject-probes short-circuit before it). M2's
@@ -358,12 +371,6 @@ let runInterpDiffTests (categories: string list) : BlockResult =
         let skipUnsupported name feature =
             unsupported <- unsupported + 1
             resultLine Skip name (sprintf "SKIP-UNSUPPORTED: %s" feature)
-        // Compiled front-end refused this (supposed-to-pass) test, so there is
-        // no compiled reference to diff the interpreter against. Not an interp
-        // parity failure; surfaced distinctly so it can never pass silently.
-        let skipCompiledRejected name detail =
-            compiledRejected <- compiledRejected + 1
-            resultLine Skip name (sprintf "SKIP-COMPILED-REJECTED: %s" (firstLine detail))
 
         for cat in categories do
             printSubHeader (sprintf "category: %s" cat)
@@ -375,9 +382,23 @@ let runInterpDiffTests (categories: string list) : BlockResult =
                 let result = runFullTest name source tmpRoot true
 
                 if isRejectProbe result || catRejectOnly then
-                    // Compile-reject probe: correct iff the pipeline refuses it.
-                    if not (isFullPass result) then pass name "compile-reject: interp trivially agrees"
-                    else fail name "expected rejection but pipeline accepted"
+                    // Compile-reject probe. The verdict is the MAIN SUITE's, via
+                    // Runner.classifyWithDetailAs, so this gate cannot be more
+                    // permissive than the suite that owns the rule: the probe has
+                    // to be refused at the stage it pins (// REJECT-AT:), for the
+                    // reason it pins (// ERROR:), and a SKIP is not a pass.
+                    // `catRejectOnly` forces the reject arm on for the two
+                    // negative corpora whose names carry no "(rejects)" marker.
+                    // The interpreter genuinely has nothing to run on a refused
+                    // program, so agreement is trivial and there is nothing else
+                    // for this branch to check — but "was it refused, and why"
+                    // still has to be checked, and by one definition only.
+                    if not (hasRejectReasonPins result) then
+                        unpinnedRejects <- unpinnedRejects + 1
+                    match classifyWithDetailAs catRejectOnly result with
+                    | (Pass, detail) -> pass name detail
+                    | (Skip, detail) -> skip name detail
+                    | (Fail, detail) -> fail name detail
 
                 elif isAbortProbe result then
                     match result.IRResult with
@@ -406,43 +427,40 @@ let runInterpDiffTests (categories: string list) : BlockResult =
                     match result.RunResult with
                     | Error e when isSkipError e -> skip name e            // toolchain/GPU unavailable
                     | Error e ->
-                        // No compiled reference. If the FRONT-END refused the
-                        // program (IRResult = Error), the interpreter never even
-                        // got its input — a known-failing/forward-looking spec or
-                        // an unmarked negative test, NOT an interp parity failure;
-                        // record a distinct skip. If the front-end accepted but a
-                        // later stage failed (codegen/compile emitted bad C++),
-                        // that IS a genuine break worth flagging as a failure.
+                        // No compiled reference, so nothing can be diffed. Both
+                        // reasons are FAILURES, and for the same reason the main
+                        // suite fails them: this test is not marked "(rejects)"
+                        // and is not in a rejectOnlyCategory, so the compiler
+                        // accepting it is part of what it asserts.
                         match result.IRResult with
                         | Error _ ->
                             // Per-TEST unmarked reject. The compiled FRONT-END
-                            // refused this test, yet its name carries no
-                            // "(rejects)" marker and it is not in a
-                            // rejectOnlyCategory (the M4 audit flagged ~13
-                            // such index-types/sql negatives; most have since
-                            // been re-marked "(rejects)" and are caught above).
-                            // Faithful landing keyed on whether the test asserts
-                            // any values:
-                            //   * NO EXPECT values -> an unmarked negative /
-                            //     forward-looking smoke spec the compiler
-                            //     CORRECTLY rejects. The interpreter never
-                            //     received input, so it trivially AGREES with the
-                            //     rejection: PASS-REJECT — mirroring the
-                            //     "(rejects)"-probe branch at the top of this loop
-                            //     and the rejectOnlyCategories precedent for whole
-                            //     negative corpora (a name-less reject is the
-                            //     per-test analogue). The main Runner has no
-                            //     compiled reference to diff either (isFullPass is
-                            //     false), so no parity signal is lost.
-                            //   * HAS EXPECT values -> a value spec the compiler
-                            //     cannot yet BUILD, so there is no compiled output
-                            //     to diff the interpreter's values against. Keep
-                            //     the distinct SKIP-COMPILED-REJECTED so a value
-                            //     test can NEVER pass silently on a rejection.
-                            if not result.HasExpectedValues then
-                                pass name "compile-reject (unmarked, no EXPECT): interp trivially agrees"
-                            else
-                                skipCompiledRejected name e
+                            // refused a test whose name carries no "(rejects)"
+                            // marker (the M4 audit flagged ~13 such index-types/
+                            // sql negatives; they have since been re-marked and
+                            // are caught by the branch above).
+                            //
+                            // This used to be scored PASS whenever the test
+                            // carried no EXPECT pins — "the interpreter never got
+                            // input, so it trivially agrees with the rejection".
+                            // The premise is true and the conclusion is still
+                            // wrong: a differential gate that awards a pass for a
+                            // program neither side ran is reporting agreement it
+                            // never observed, and it turns a front-end regression
+                            // into a HIGHER pass count. (The variant with EXPECT
+                            // pins was a distinct skip, which had the strictness
+                            // backwards: the test asserting MORE got the softer
+                            // verdict.) Both are failures now, matching
+                            // Runner.classifyWithDetail, whose non-probe path
+                            // fails any test with IRResult = Error.
+                            //
+                            // The two legitimate resolutions are both a human's
+                            // to make: mark the test "(rejects)" (and pin the
+                            // reason) if the refusal is correct, or fix whatever
+                            // regressed. Neither is something this gate can infer.
+                            fail name
+                                (sprintf "compiled front-end rejected an UNMARKED test -- mark it '(rejects)' or fix it: %s"
+                                         (firstLine e))
                         | Ok _ -> fail name (sprintf "compiled side failed: %s" e)
                     | Ok (compiledExit, compiledOut) ->
                         match result.IRResult with
@@ -551,8 +569,9 @@ let runInterpDiffTests (categories: string list) : BlockResult =
         if unsupported > 0 then
             printfn ""
             printfn "  SKIP-UNSUPPORTED: %d test(s) not yet evaluated/printed by the interpreter" unsupported
-        if compiledRejected > 0 then
-            printfn "  SKIP-COMPILED-REJECTED: %d test(s) the compiled front-end refused (no differential)" compiledRejected
+        if unpinnedRejects > 0 then
+            printfn "  UNPINNED REJECTS: %d reject-probe(s) lack // ERROR: pins -- refused, but the REASON is unverified"
+                unpinnedRejects
 
         // Interp-cost visibility: report any test whose interpreter walk took
         // over 5s (count + the worst 5), so a slow M2/M5 category is surfaced
@@ -574,13 +593,11 @@ let runInterpDiffTests (categories: string list) : BlockResult =
             [ sprintf "%d passed" passed
               sprintf "%d failed" failed
               sprintf "%d skip-unsupported" unsupported
-              sprintf "%d skip-compiled-rejected" compiledRejected
               sprintf "%d skipped" skipped ]
-        // SKIP-UNSUPPORTED and SKIP-COMPILED-REJECTED both fold into the
-        // roll-up's Skipped bucket (neither is a failure), but each is surfaced
-        // distinctly in the footer/summary lines above.
+        // SKIP-UNSUPPORTED folds into the roll-up's Skipped bucket (it is not a
+        // failure) but is surfaced distinctly in the footer/summary lines above.
         { Block = blockName
           Passed = passed
           Failed = failed
-          Skipped = skipped + unsupported + compiledRejected
+          Skipped = skipped + unsupported
           FailedNames = failedNames }

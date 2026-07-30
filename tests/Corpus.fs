@@ -40,6 +40,11 @@ let private parseBladeFile (path: string) : string * string option * string =
     if nl < 0 || not (text.StartsWith("// TEST: ")) then
         failwithf "corpus file %s: first line must be '// TEST: <name>'" path
     let name = text.Substring(9, nl - 9).TrimEnd('\r')
+    // The name is load-bearing, not decoration: "(rejects)" / "(aborts)"
+    // suffixes decide which classification arm the runner takes, so a blank name
+    // would silently demote a probe to an ordinary test.
+    if String.IsNullOrWhiteSpace name then
+        failwithf "corpus file %s: '// TEST:' has an empty name (the name carries the (rejects)/(aborts) probe markers)" path
     let rest = text.Substring(nl + 1)
     if rest.StartsWith("// MODULE: ") then
         let nl2 = rest.IndexOf('\n')
@@ -49,10 +54,25 @@ let private parseBladeFile (path: string) : string * string option * string =
         (name, None, rest)
 
 /// The .blade files of a directory in deterministic (ordinal filename) order.
+///
+/// BOTH "no such directory" and "directory with no .blade files" are hard
+/// failures, and for the same reason. A MISSING directory already failed loudly;
+/// an EXISTING but EMPTY one silently produced zero tests, and a category that
+/// contributes zero tests reports "0 passed, 0 failed" — a green line that
+/// asserts nothing. That is the shape a mistyped corpus path, an interrupted
+/// `git mv`, or a stale deployed copy takes, and it is indistinguishable from a
+/// healthy run at the summary level. So the empty case says so instead.
+///
+/// Note this is safe for the multi-file corpus: `multiFileCategory` calls this
+/// per TEST subdirectory (each of which does hold .blade files) and never on the
+/// category directory itself, which legitimately holds only subdirectories.
 let private bladeFiles (dir: string) : string[] =
     if not (Directory.Exists dir) then
         failwithf "corpus category directory missing: %s" (Path.GetFullPath dir)
     let files = Directory.GetFiles(dir, "*.blade")
+    if Array.isEmpty files then
+        failwithf "corpus category directory has no .blade files: %s (an empty category would report '0 passed, 0 failed' and assert nothing)"
+            (Path.GetFullPath dir)
     Array.sortInPlaceWith (fun (a: string) (b: string) -> String.CompareOrdinal(Path.GetFileName a, Path.GetFileName b)) files
     files
 
@@ -73,6 +93,11 @@ let multiFileCategory (dirName: string) : (string * (string * string) list) list
     if not (Directory.Exists catDir) then
         failwithf "corpus category directory missing: %s" (Path.GetFullPath catDir)
     let dirs = Directory.GetDirectories(catDir)
+    // Same rule as bladeFiles: a multi-file category with no test subdirectories
+    // yields zero tests and a vacuous green "0 passed, 0 failed".
+    if Array.isEmpty dirs then
+        failwithf "multi-file corpus category %s has no test subdirectories (an empty category would report '0 passed, 0 failed' and assert nothing)"
+            (Path.GetFullPath catDir)
     Array.sortInPlaceWith (fun (a: string) (b: string) -> String.CompareOrdinal(Path.GetFileName a, Path.GetFileName b)) dirs
     dirs
     |> Array.map (fun testDir ->
