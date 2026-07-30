@@ -1,8 +1,17 @@
 // TEST: RaggedIdx Func Param Opaque Smoke
 // Function decl with opaque RaggedIdx<_> param. Same as above but with the
 // opaque form, which is the recommended spelling for ragged function params
-// until named-form enforcement lands.
-function h(A: Array<Float64 like Idx<3>, RaggedIdx<_>>) -> Float64 = 0.0
+// until named-form enforcement lands. Body consumes A the same way, so the
+// two forms are pinned to the SAME value -- which is the file pair's actual
+// claim ("both produce identical C++ at the call site"), and a claim a pair of
+// constant bodies could not make.
+//
+// HAND DERIVATION: identical inputs to 084, so identical arithmetic --
+//   per-row sums 6, 9, 30 -> result = 45.
+function h(A: Array<Float64 like Idx<3>, RaggedIdx<_>>) -> Float64 = {
+    let sums = method_for(A) <@> lambda(g: Array<Float64 like RaggedIdx<_>>) -> reduce(g, (+)) |> compute
+    reduce(sums, (+))
+}
 let r = [[1.0, 2.0, 3.0], [4.0, 5.0], [6.0, 7.0, 8.0, 9.0]]
 let result = h(r)
-// EXPECT: result = 0
+// EXPECT: result = 45

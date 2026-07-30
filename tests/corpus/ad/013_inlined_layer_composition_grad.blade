@@ -1,0 +1,76 @@
+// TEST: AD Inlined Layer Composition Rec Array
+import ad as ad
+// ============================================================================
+// The ad/006 layer-composition gradient, re-homed off the imperative `for-in`
+// that commit 3c363cf removed. The capability under test is the e2e SHAPE:
+// an array-RETURNING layer function -> an elementwise nonlinearity (a user
+// sigmoid, itself inlined) -> a readout sum, with grad() inlining the whole
+// call chain and differentiating through it.
+//   old:  layer/gate each built their output with `for i`/`for j` element
+//         writes; loss summed with `for i`.
+//   new:  each array-returning function builds its output as a recursive
+//         array; the inner matvec sum is an additive `reduce` over an inline
+//         literal; the readout is `reduce([z(0), z(1)], (+))`.
+// The readout is an inline literal rather than `reduce(z, (+))` because `z` is
+// bound from a CALL result, which grad refuses (BL5500: "reduce source has no
+// statically-known extent in differentiated code"). Reducing an inline literal
+// of its reads is the supported spelling and is what ad/007 already uses.
+//
+// HAND DERIVATION.
+//   silu(t)  = t * sig(t),            sig(t) = 1/(1+exp(-t))
+//   silu'(t) = sig(t) + t*sig(t)*(1 - sig(t))
+//   y(i) = sum_j w(3i+j) * x(j)   with x = [1, 2, 0.5]
+//     y0 = 0.1*1 + 0.2*2 + 0.3*0.5 = 0.1 + 0.4 + 0.15 = 0.65   (exact)
+//     y1 = 0.4*1 + 0.5*2 + 0.6*0.5 = 0.4 + 1.0  + 0.3  = 1.7    (exact)
+//   lv = silu(y0) + silu(y1)
+//   dlv/dw(3i+j) = silu'(y(i)) * x(j)          (chain rule through the matvec)
+// Transcendental parts, evaluated independently in IEEE-754 double (NOT read
+// off a Blade run):
+//     sig(0.65) = 0.6570104626734988   silu(0.65) = 0.42705680073777424
+//     sig(1.7)  = 0.8455347349164652   silu(1.7)  = 1.437409049357991
+//     lv = 0.42705680073777424 + 1.437409049357991 = 1.8644658500957652
+//     silu'(0.65) = 0.8034864771706838
+//     silu'(1.7)  = 1.067564504759019
+//   so, with x = [1, 2, 0.5]:
+//     dw(0..2) = silu'(0.65) * [1, 2, 0.5]
+//     dw(3..5) = silu'(1.7)  * [1, 2, 0.5]
+// These agree with the pre-deletion ad/006 pins to ~1e-14 relative (the last
+// two digits move with summation order); the harness compares at 1e-9.
+// ============================================================================
+function sigmoid(z: Float) -> Float = 1.0 / (1.0 + exp(0.0 - z))
+
+let data_x = [1.0, 2.0, 0.5]
+
+// the inner `for j` matvec accumulation
+function yslot(w: Array<Float like Idx<6>>, x: Array<Float like Idx<3>>, i: Int) -> Float =
+    reduce([w(i * 3 + 0) * x(0), w(i * 3 + 1) * x(1), w(i * 3 + 2) * x(2)], (+))
+
+// array-returning layer: the old `for i` construction loop
+function layer(w: Array<Float like Idx<6>>, x: Array<Float like Idx<3>>) -> Array<Float like Idx<2>> = {
+    let rec y: Array<Float like Idx<2>> =
+        match y with
+        | zero -> zero
+        | prefix :: i -> prefix :: yslot(w, x, i)
+    y
+}
+
+// elementwise nonlinearity over the layer output (silu, sigmoid inlined)
+function gate(y: Array<Float like Idx<2>>) -> Array<Float like Idx<2>> = {
+    let rec z: Array<Float like Idx<2>> =
+        match z with
+        | zero -> zero
+        | prefix :: i -> prefix :: y(i) * sigmoid(y(i))
+    z
+}
+
+function loss(w: Array<Float like Idx<6>>) -> Float = {
+    let y = layer(w, data_x)
+    let z = gate(y)
+    reduce([z(0), z(1)], (+))
+}
+
+let w0 = [0.1, 0.2, 0.3, 0.4, 0.5, 0.6]
+let mut dw = [0.0, 0.0, 0.0, 0.0, 0.0, 0.0]
+let lv = ad.grad(loss)(w0, dw)
+// EXPECT: lv = 1.8644658500957652
+// EXPECT: dw = [0.8034864771706838, 1.6069729543413676, 0.4017432385853419, 1.067564504759019, 2.135129009518038, 0.5337822523795095]

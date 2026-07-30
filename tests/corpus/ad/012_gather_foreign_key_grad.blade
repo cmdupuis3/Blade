@@ -1,0 +1,38 @@
+// TEST: AD Gather Via Foreign Key Rec Array
+import ad as ad
+// ============================================================================
+// The ad/005 gather gradient, re-homed off the imperative `for-in` that commit
+// 3c363cf removed:
+//   old:  for e in 0..4 { s += w(srcs(e)) * 2.0 }
+//   new:  a recursive array whose slice is the gathered term, folded with
+//         `reduce(g, (+))`.
+// The capability under test is unchanged: READS AT DATA-DEPENDENT INDICES (the
+// foreign-key / gather pattern, `w(srcs(e))`). Its adjoint is a SCATTER into
+// the same indices, so a weight referenced with multiplicity m accumulates m
+// times -- which is the whole point of the pin on `dr` below. (This is the
+// same gather-adjoint-is-scatter property ml-e2e/001 leans on when it replaces
+// message-passing scatter with its gather dual.)
+//
+// HAND DERIVATION (srcs = [0, 1, 1, 2], w = [10, 20, 30]):
+//   primal terms: w(0)*2 = 20, w(1)*2 = 40, w(1)*2 = 40, w(2)*2 = 60
+//   rv = 20 + 40 + 40 + 60 = 160
+//   dr(i) = 2 * (number of e with srcs(e) = i)
+//     index 0 appears once  -> 2
+//     index 1 appears twice -> 4
+//     index 2 appears once  -> 2
+// Exact in binary floating point, so the pins are the derivation verbatim --
+// and they are the pre-deletion ad/005 pins.
+// ============================================================================
+let srcs = [0, 1, 1, 2]
+function r(w: Array<Float like Idx<3>>) -> Float = {
+    let rec g: Array<Float like Idx<4>> =
+        match g with
+        | zero -> zero
+        | prefix :: e -> prefix :: w(srcs(e)) * 2.0
+    reduce(g, (+))
+}
+let wr_ = [10.0, 20.0, 30.0]
+let mut dr = [0.0, 0.0, 0.0]
+let rv = ad.grad(r)(wr_, dr)
+// EXPECT: rv = 160.0
+// EXPECT: dr = [2.0, 4.0, 2.0]

@@ -5,3 +5,12 @@ struct Point {
     y: Float64
 }
 let p = Point { x = 1.0, y = 2.0 }
+// The constructed value is READ BACK, so the literal's field-to-slot mapping
+// is asserted, not just its acceptance. Pinning the fields separately (rather
+// than a sum) is what catches an x/y swap.
+// HAND DERIVATION: the literal binds x = 1.0 and y = 2.0 by NAME, so
+//   px = p.x = 1.0 and py = p.y = 2.0.
+let px = p.x
+let py = p.y
+// EXPECT: px = 1
+// EXPECT: py = 2

@@ -1,0 +1,49 @@
+// TEST: AD Nested Loops Construction Via Rec Array
+import ad as ad
+// ============================================================================
+// The ad/004 nested-loop gradient, re-homed off the imperative `for-in` that
+// commit 3c363cf removed. Same program, Blade-native spelling:
+//   old:  for i in 0..3 { for j in 0..2 { y(i) += mat_x(i*2+j) * w(j) } }
+//         for i in 0..3 { s += y(i) * y(i) }
+//   new:  the OUTER construction loop is a recursive array (`y`), the INNER
+//         accumulation is an additive `reduce` over the per-term products
+//         (`yrow`), and the READING loop is a second recursive array (`sq`)
+//         terminated by `reduce(sq, (+))`.
+// This keeps every capability the old file exercised: element construction,
+// element reads, a two-level loop nest, and a two-phase forward pass whose
+// reading-loop adjoint must run BEFORE the construction-loop adjoint.
+//
+// HAND DERIVATION (mat_x = [1,2,3,4,5,6], w = [1, 0.5]):
+//   y(i) = mat_x(2i)*w0 + mat_x(2i+1)*w1
+//     y0 = 1*1 + 2*0.5 = 2
+//     y1 = 3*1 + 4*0.5 = 5
+//     y2 = 5*1 + 6*0.5 = 8
+//   s  = y0^2 + y1^2 + y2^2 = 4 + 25 + 64 = 93
+//   ds/dw(j) = sum_i 2*y(i)*mat_x(2i+j)
+//     dq0 = 2*(2*1 + 5*3 + 8*5) = 2*(2+15+40) = 2*57 = 114
+//     dq1 = 2*(2*2 + 5*4 + 8*6) = 2*(4+20+48) = 2*72 = 144
+// Exact in binary floating point (all inputs are dyadic), so the pins below
+// are the derivation verbatim -- and they are the pre-deletion ad/004 pins.
+// ============================================================================
+let mat_x = [1.0, 2.0, 3.0, 4.0, 5.0, 6.0]
+// the inner `for j` accumulation: additive reduce over an inline literal
+function yrow(w: Array<Float like Idx<2>>, i: Int) -> Float =
+    reduce([mat_x(i * 2 + 0) * w(0), mat_x(i * 2 + 1) * w(1)], (+))
+function q(w: Array<Float like Idx<2>>) -> Float = {
+    // the outer `for i` CONSTRUCTION loop
+    let rec y: Array<Float like Idx<3>> =
+        match y with
+        | zero -> zero
+        | prefix :: i -> prefix :: yrow(w, i)
+    // the READING loop: ||y||^2, built then folded
+    let rec sq: Array<Float like Idx<3>> =
+        match sq with
+        | zero -> zero
+        | prefix :: i -> prefix :: y(i) * y(i)
+    reduce(sq, (+))
+}
+let wq = [1.0, 0.5]
+let mut dq = [0.0, 0.0]
+let qv = ad.grad(q)(wq, dq)
+// EXPECT: qv = 93.0
+// EXPECT: dq = [114.0, 144.0]
