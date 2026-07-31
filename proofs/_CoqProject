@@ -27,3 +27,5 @@ BladePartition.v
 BladePointGroup.v
 BladeWordClosure.v
 BladeRepStatus.v
+BladeWreath.v
+BladeLayout.v
